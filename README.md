@@ -14,10 +14,16 @@ For now, most of the documentation will reside at the original page, until someo
 
 Changes
 =======
+2024.03.06
++ refactor copy_snap()
++ add error handling functions
++ add -z option to compress zfs send using zstd -3 when using -O option
++ add -Z option to specify the full zstd compress command when using -O option
+---
 
 + Implement new -D parameter, allows you to put a progress indicator app between the zfs send and zfs receive. Provides macros %%size%% and %%title%%.
-	Example usage: 
-	
+	Example usage:
+
 		-D 'bar -s %%size%% -bl 1m -bs 256m'
 + Ignore new read-only properties added in FreeBSD 9.1: 'written' and 'refcompressratio'
 + Ignore new read-only properties added in FreeBSD 9.2/8.4: 'logicalused' and 'logicalreferenced'
@@ -89,7 +95,7 @@ d) Delete the old catman page, if you are updating.
 	# rm /usr/share/man/cat1m/zxfer.1m
 
 e) Set the MANPATH variable correctly.
-	
+
 	# MANPATH=$MANPATH:/usr/sfw/share/man
 
 **Note that this will not set the paths permanently.**

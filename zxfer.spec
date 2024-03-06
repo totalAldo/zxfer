@@ -1,5 +1,5 @@
 Name:        zxfer
-Version:     1.1.6
+Version:     1.2.0
 Release:     2%{?dist}
 License:     see COPYING
 Group:       External packages
@@ -48,10 +48,10 @@ rm -rf ${RPM_BUILD_ROOT}
 mkdir -p \
 ${RPM_BUILD_ROOT}%{_bindir} \
 ${RPM_BUILD_ROOT}%{_mandir}/man8 \
-${RPM_BUILD_ROOT}%{_docdir}/%{name}-%{version} 
+${RPM_BUILD_ROOT}%{_docdir}/%{name}-%{version}
 
 install -m0644 zxfer.8 \
-   ${RPM_BUILD_ROOT}%{_mandir}/man8 
+   ${RPM_BUILD_ROOT}%{_mandir}/man8
 install -m0644 CHANGELOG.txt COPYING README.md README.txt \
    ${RPM_BUILD_ROOT}%{_docdir}/%{name}-%{version}
 install -m0755 zxfer ${RPM_BUILD_ROOT}%{_bindir}

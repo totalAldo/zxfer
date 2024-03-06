@@ -1,5 +1,11 @@
 CHANGELOG
 =========
+20240306 ver 1.2.0
+		-refactor copy_snap()
+		-add error functions
+		-add support for -z option which works with -O and pipes the
+		 ssh send command through zstd -3
+
 20110513 ver 0.9.9
            -Fixed a small but showstopping bug in Solaris that wasn't showing
 	     up in FreeBSD. Thanks predrag....@googlemail.com. Because this
@@ -50,12 +56,12 @@ CHANGELOG
 	   -Updated the man page.
 20110328   -Implemented the -O and -T remote transfer options. Tested on
              FreeBSD somewhat.
-20110327 ver 0.9.2  
+20110327 ver 0.9.2
            -Added "Compatibility" section to man page.
            -Added to the man page a warning not to tack switches with arguments
              on the end of a list of switches without arguments.
 	   -Alphabetized the options in the man page, and in the script.
-20110323   -Started fixing a bug so that zxfer can work with remote hosts via 
+20110323   -Started fixing a bug so that zxfer can work with remote hosts via
              ssh.
 	   -Added "vscan,nbmand" to the list of properties not supported
 	     by FreeBSD.
@@ -91,13 +97,13 @@ CHANGELOG
 	     for rsync (option "u").
 	   -Changed the default rsync options (see man page).
 20101013 ver 0.8.0 First "near final" draft sent to Constantin.
-           In the intervening time, many changes have taken place. 
+           In the intervening time, many changes have taken place.
 	   zxfer is chosen as the new name. Some of the additional features:
 	   -recursive transfers
-	   -property and property source transfer of ZFS filesystems - 
+	   -property and property source transfer of ZFS filesystems -
 	     creation and setting
 	   -property overrides (e.g. for compression, dedup, copies etc.)
-	   -an rsync mode, for copying arbitrary files and directories 
+	   -an rsync mode, for copying arbitrary files and directories
 	     from within a pool atomically
 	   -property backup mode, to allow the future restore of properties
 	     while retaining the ability to back them up with different
@@ -107,9 +113,9 @@ CHANGELOG
 	   -much bug testing
 20100504 Dreckman worked on a bug fix and some additions to
            zfs-replicate; these are submitted to CG. At this stage
-	   the additions are already fairly extensive, so Contantin kindly 
-	   suggested that the new version become a new utility in its 
-	   own right. Collaboration commenced between the two with 
+	   the additions are already fairly extensive, so Contantin kindly
+	   suggested that the new version become a new utility in its
+	   own right. Collaboration commenced between the two with
 	   Constantin offering helpful guidance throughout as Dreckman coded
 	   new features and squashed bugs.
 20080813 zfs-replicate 0.7 is released by Constantin Gonzalez as the
