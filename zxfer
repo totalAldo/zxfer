@@ -97,8 +97,8 @@
 zxfer_version="1.2.0-20240306"
 
 # Default values
-option_b_eep_always=0     # -b
-option_B_eep_on_success=0 # -B
+option_b_eep_always=0
+option_B_eep_on_success=0
 option_d=0
 option_D=""
 option_e_restore_property_mode=0
@@ -112,7 +112,7 @@ option_k_backup_property_mode=0
 option_l=0
 option_L=""
 option_o=""
-option_O=""
+option_O_rigin=""
 option_p=0
 option_P=0
 option_R=""
@@ -121,10 +121,11 @@ option_n_dryrun=0
 option_N=""
 option_S=0
 option_s=0
-option_T=""
+option_T_arget=""
 option_u=0
 option_U=0
 option_v=0
+option_z_compress=0
 exit_status=1 # defaults to failure
 
 services=""
@@ -146,6 +147,14 @@ trailing_slash=0
 
 LZFS=$(which zfs)
 RZFS=$LZFS
+# used by the copy_snap() functions
+cmd=""
+# default compression commands
+option_z_compress_cmd="zstd -3"
+option_z_decompress_cmd="zstd -d"
+
+# specific to zfs mode
+zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
 LCAT=""
 AWK=$(which awk) # location of awk or gawk on home OS
@@ -211,7 +220,7 @@ beep() {
 
 #
 # Gets a $(uname), i.e. the operating system, for origin or target, if remote.
-# Takes: $1=either $option_O or $option_T
+# Takes: $1=either $option_O_rigin or $option_T_arget
 #
 get_os() {
   input_optionts=$1
@@ -229,14 +238,20 @@ get_os() {
 # Initializes OS and local/remote specific variables
 #
 init_variables() {
-  get_os "$option_T"
+  get_os "$option_T_arget"
   dest_os="$output_os"
 
-  get_os "$option_O"
+  # prepend ssh to option_O_rigin if not already there
+  if [ "$option_O_rigin" != "" ]; then
+    get_os "ssh $option_O_rigin"
+  else
+    get_os ""
+  fi
+  #get_os "$option_O_rigin"
   source_os="$output_os"
 
   if [ $option_e_restore_property_mode -eq 1 ]; then
-    LCAT=$(${option_O} which cat)
+    LCAT=$(ssh ${option_O_rigin} which cat)
   fi
 
   if [ $option_S -eq 1 ]; then
@@ -255,7 +270,8 @@ usage() {
   cat <<EOT
 usage:
      zxfer [-dFnPsUv] [-k | -e] [-b | -B] {-N path/to/src | -R path/to/src}
-           [-m [c FMRI|pattern[ FMRI|pattern]...]]] [-O user@host]
+           [-m [c FMRI|pattern[ FMRI|pattern]...]]]
+           [[-z] [-Z "zstd compress command"] -O user@host]
            [-D 'progress dialog options'] [-I properties,to,ignore]
            [-T user@host] [-o option1=value1,option2=value2...] [-g days]
            destination
@@ -353,14 +369,13 @@ consistency_check() {
       throw_usage_error "-s option cannot be used with -S (rsync mode)"
     fi
 
-    if [ "$option_O" != "" -o "$option_T" != "" ]; then
+    if [ "$option_O_rigin" != "" -o "$option_T_arget" != "" ]; then
       throw_usage_error "-O or -T option cannot be used with -S (rsync mode)"
     fi
 
     if [ $option_m -eq 1 ]; then
       throw_usage_error "-m option cannot be used with -S (rsync mode)"
     fi
-
   else
     #zfs send mode
 
@@ -373,8 +388,12 @@ consistency_check() {
       throw_usage_error "-L option can only be used with -S (rsync mode)"
     fi
 
+    if [ $option_z_compress -eq 1 -a "$option_O_rigin" = "" ]; then
+      throw_usage_error "-z option can only be used with -O option"
+    fi
+
     # disallow migration related options and remote transfers at same time
-    if [ "$option_T" != "" -o "$option_O" != "" ]; then
+    if [ "$option_T_arget" != "" -o "$option_O_rigin" != "" ]; then
       if [ $option_m -eq 1 -o "$services" != "" ]; then
         throw_usage_error "You cannot migrate to or from a remote host."
       fi
@@ -393,6 +412,10 @@ consistency_check() {
 #
 # Function to calculate size estimate
 calc_size_estimate() {
+  if [ "$option_O_rigin" != "" ]; then
+    LZFS="ssh $option_O_rigin $LZFS"
+  fi
+
   SIZE_DATASET=$($LZFS send -nPv "$1" 2>&1) || throw_error "Error calculating estimate: $SIZE_DATASET"
   SIZE_EST=$(echo "$SIZE_DATASET" | grep ^size | tail -n 1 | cut -f 2)
   echo "Estimated size is: ${SIZE_EST}"
@@ -410,14 +433,23 @@ handle_zfs_send_receive_with_progress() {
   local snapshot=$1
   local dest=$2
   local prevsnap=$3
+  local send_cmd=""
+  local recv_cmd=""
+
   if [ -z "$prevsnap" ]; then
-    cmd="$LZFS send $snapshot | dd obs=1048576 | dd bs=1048576 | $PROGRESS_DIALOG | $RZFS receive $option_F $dest"
+    send_cmd="$LZFS send $snapshot"
   else
-    cmd="$LZFS send -i $prevsnap $snapshot | dd obs=1048576 | dd bs=1048576 | $PROGRESS_DIALOG | $RZFS receive $option_F $dest"
+    send_cmd="$LZFS send -i $prevsnap $snapshot"
+  fi
+  send_cmd="$send_cmd | dd obs=1048576 | dd bs=1048576"
+  recv_cmd="$PROGRESS_DIALOG | $RZFS receive $option_F $dest"
+
+  # wrap the send command in double quotes so that it can be passed to ssh
+  if [ "$option_O_rigin" != "" ]; then
+    send_cmd="ssh $option_O_rigin \"$send_cmd\" "
   fi
 
-  #echo $cmd
-  eval $cmd || throw_error "Error when zfs send/receiving."
+  cmd="$send_cmd | $recv_cmd"
 }
 
 # Function to handle zfs send/receive
@@ -425,14 +457,26 @@ handle_zfs_send_receive() {
   local snapshot=$1
   local dest=$2
   local prevsnap=$3
+  local send_cmd=""
+  local recv_cmd=""
+
   if [ -z "$prevsnap" ]; then
-    cmd="$LZFS send $snapshot | $RZFS receive $option_F $dest"
+    send_cmd="/sbin/zfs send $snapshot"
   else
-    cmd="$LZFS send -i $prevsnap $snapshot | $RZFS receive $option_F $dest"
+    send_cmd="/sbin/zfs send -i $prevsnap $snapshot "
+  fi
+  recv_cmd="$RZFS receive $option_F $dest"
+
+  # wrap the send command in double quotes so that it can be passed to ssh
+  if [ "$option_O_rigin" != "" ]; then
+    if [ $option_z_compress -eq 0 ]; then
+      send_cmd="ssh $option_O_rigin \"$send_cmd\" "
+    else
+      send_cmd="ssh $option_O_rigin \"$send_cmd | $option_z_compress_cmd\" | $option_z_decompress_cmd "
+    fi
   fi
 
-  #echo $cmd
-  eval $cmd || throw_error "Error when zfs send/receiving."
+  cmd="$send_cmd | $recv_cmd"
 }
 
 copy_snap() {
@@ -458,6 +502,13 @@ copy_snap() {
     handle_zfs_send_receive_with_progress "$copysrc" "$copydest" "$copyprev"
   else
     handle_zfs_send_receive "$copysrc" "$copydest" "$copyprev"
+  fi
+
+  # cmd is now set
+  if [ "$option_n_dryrun" -eq 1 ]; then
+    echo $cmd
+  else
+    eval $cmd || throw_error "Error when zfs send/receiving."
   fi
 }
 ## END copy_snap() and related functions
@@ -507,32 +558,20 @@ copy_fs() {
 # Create a new recursive snapshot.
 #
 newsnap() {
-  snap=zxfer_$$_$(date +%Y%m%d%H%M%S)
+  snap=$zxfer_new_snapshot_name
 
   if [ "$option_R" != "" ]; then
     echov "Creating recursive snapshot $sourcefs@$snap."
     cmd="$LZFS snapshot -r $sourcefs@$snap"
-    if [ $option_n_dryrun -eq 0 ]; then
-      eval $cmd ||
-        {
-          echo "Error when snapshotting."
-          exit 1
-        }
-    else
-      echo $cmd
-    fi
   else
     echov "Creating snapshot $sourcefs@$snap."
     cmd="$LZFS snapshot $sourcefs@$snap"
-    if [ $option_n_dryrun -eq 0 ]; then
-      eval $cmd ||
-        {
-          echo "Error when snapshotting."
-          exit 1
-        }
-    else
-      echo $cmd
-    fi
+  fi
+
+  if [ $option_n_dryrun -eq 0 ]; then
+    eval $cmd || throw_error "Error when snapshotting."
+  else
+    echo $cmd
   fi
 }
 
@@ -1788,8 +1827,8 @@ get_backup_properties() {
   while [ $found_backup_file -eq 0 ]; do
     backup_file_dir=$($LZFS get -H -o value mountpoint $suspect_fs)
     #if [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then  # before remote transfer
-    if $option_O [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then
-      restored_backup_file_contents=$($option_O $LCAT $backup_file_dir/$backup_file_extension.$suspect_fs_tail)
+    if $option_O_rigin [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then
+      restored_backup_file_contents=$($option_O_rigin $LCAT $backup_file_dir/$backup_file_extension.$suspect_fs_tail)
       found_backup_file=1
     else
       suspect_fs_parent=$(echo "$suspect_fs" | sed -e 's%/[^/]*$%%g')
@@ -1828,7 +1867,7 @@ $backup_file_extension.$is_tail"
   # "Permission denied" errors, and ALSO works with local or remote.
   if [ $option_n_dryrun -eq 0 ]; then
     echo "echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
-$backup_file_dir/$backup_file_extension.$is_tail" | $option_T sh ||
+$backup_file_dir/$backup_file_extension.$is_tail" | $option_T_arget sh ||
       {
         echo "Error writing backup file. Is filesystem mounted?"
         beep
@@ -1836,7 +1875,7 @@ $backup_file_dir/$backup_file_extension.$is_tail" | $option_T sh ||
       }
   else
     echo "echo \"echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
-$backup_file_dir/$backup_file_extension.$is_tail\" | $option_T sh"
+$backup_file_dir/$backup_file_extension.$is_tail\" | $option_T_arget sh"
   fi
 }
 
@@ -1849,7 +1888,7 @@ $backup_file_dir/$backup_file_extension.$is_tail\" | $option_T sh"
 #
 
 # Read command line switches
-while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D: i; do
+while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D:zZ: i; do
   case $i in
   b)
     option_b_eep_always=1
@@ -1922,7 +1961,7 @@ while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D: i; do
     ;;
   O)
     LZFS="ssh $OPTARG /sbin/zfs"
-    option_O="ssh $OPTARG "
+    option_O_rigin="$OPTARG"
     ;;
   p)
     option_p=1
@@ -1941,7 +1980,7 @@ while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D: i; do
     ;;
   T)
     RZFS="ssh $OPTARG /sbin/zfs"
-    option_T="ssh $OPTARG "
+    option_T_arget="ssh $OPTARG "
     ;;
   u)
     option_u=1
@@ -1952,6 +1991,14 @@ while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D: i; do
     ;;
   v)
     option_v=1
+    ;;
+  z)
+    # Only works when -O option is specified.
+    # Pipes the send and receive commands through zstd and optionally accepts a compression level
+    option_z_compress=1
+    ;;
+  Z)
+    option_z_compress_cmd="$OPTARG"
     ;;
   \?)
     usage
