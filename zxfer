@@ -101,8 +101,8 @@
 zxfer_version="1.2.0-20240306"
 
 # Default values
-option_b=0
-option_B=0
+option_b_eep_always=0     # -b
+option_B_eep_on_success=0 # -B
 option_d=0
 option_D=""
 option_e=0
@@ -195,7 +195,7 @@ solexp_readonly_properties="jailed,aclmode,shareiscsi"
 # Takes: $exit_status (0 if success, 1 if failure)
 #
 beep() {
-  if [ $option_b -eq 1 -o $option_B -eq 1 ]; then
+  if [ $option_b_eep_always -eq 1 -o $option_B_eep_on_success -eq 1 ]; then
     # load the speaker kernel module if not loaded already
     speaker_km_loaded=$(kldstat | grep -c speaker.ko)
     if [ "$speaker_km_loaded" = "0" ]; then
@@ -204,7 +204,7 @@ beep() {
 
     # play the appropriate beep
     if [ $exit_status -eq 0 ]; then
-      if [ $option_B -eq 1 ]; then
+      if [ $option_B_eep_on_success -eq 1 ]; then
         echo "T255CCMLEG~EG..." >/dev/speaker # success sound
       fi
     else
@@ -327,7 +327,7 @@ consistency_check() {
   fi
 
   # disallow both beep modes, enforce using one or the other.
-  if [ $option_b -eq 1 -a $option_B -eq 1 ]; then
+  if [ $option_b_eep_always -eq 1 -a $option_B_eep_on_success -eq 1 ]; then
     echo "Error: You cannot use both beep modes at the same time."
     usage
     exit 1
@@ -388,6 +388,8 @@ consistency_check() {
   fi
 }
 
+###
+## BEGIN copy_snap() and related functions
 #
 # Copy a snapshot using zfs send/receive. If a third argument is used, then use
 # send -i and the third argument is the base to create the increment from.
@@ -395,114 +397,96 @@ consistency_check() {
 # nothing if the snapshot already exists.
 # Takes $snapshot, $dest, $lastsnap
 #
-copy_snap() {
-  # Test if the snapshot exists already.
-  copysrc=$snapshot
-  copydest=$dest
-  copyprev=$lastsnap
-  copysrctail=$(echo "$copysrc" | cut -d/ -f2-)
+# Function to calculate size estimate
+calc_size_estimate() {
+  SIZE_DATASET=$($LZFS send -nPv "$1" 2>&1) ||
+    {
+      echo "Error calculating estimate: $SIZE_DATASET"
+      beep
+      exit 1
+    }
+  SIZE_EST=$(echo "$SIZE_DATASET" | grep ^size | tail -n 1 | cut -f 2)
+  echo "Estimated size is: ${SIZE_EST}"
+}
 
-  if [ -z "$(echo "$rzfs_list_ho_s" | grep "^$dest/$copysrctail")" ]; then
-    echov "Sending $copysrc to $copydest."
-    if [ "$copyprev" = "" ]; then
-      if [ "$option_D" != "" ]; then
-        if [ $option_n -eq 0 ]; then
-          SIZE_DATASET=$($LZFS send -nPv "$copysrc" 2>&1) ||
-            {
-              echo "Error calculating estimate: $SIZE_DATASET"
-              beep
-              exit 1
-            }
-          SIZE_EST=$(echo "$SIZE_DATASET" | grep ^size | tail -n 1 | cut -f 2)
-          echo "Estimated size is: ${SIZE_EST}"
-          PROGRESS_DIALOG=$(echo "$option_D" | sed "s#%%size%%#$SIZE_EST#g" |
-            sed "s#%%title%%#$copysrc#g")
-          $LZFS send "$copysrc" | dd obs=1048576 | dd bs=1048576 | $PROGRESS_DIALOG |
-            $RZFS receive $option_F "$copydest" ||
-            {
-              echo "Error when zfs send/receiving."
-              beep
-              exit 1
-            }
-        else
-          SIZE_DATASET=$($LZFS send -nPv "$copysrc" 2>&1) ||
-            {
-              echo "Error calculating estimate: $SIZE_DATASET"
-              beep
-              exit 1
-            }
-          SIZE_EST=$(echo "$SIZE_DATASET" | grep ^size | tail -n 1 | cut -f 2)
-          echo "Estimated size is: ${SIZE_EST}"
-          PROGRESS_DIALOG=$(echo $option_D | sed "s#%%size%%#$SIZE_EST#g" |
-            sed "s#%%title%%#$copysrc#g")
-          $LZFS send -nv "$copysrc"
-          echo "$LZFS send $copysrc | dd obs=1048576 | dd bs=1048576 | $PROGRESS_DIALOG |
-            $RZFS receive $option_F $copydest"
-        fi
-      else
-        if [ $option_n -eq 0 ]; then
-          $LZFS send "$copysrc" | $RZFS receive $option_F "$copydest" ||
-            {
-              echo "Error when zfs send/receiving."
-              beep
-              exit 1
-            }
-        else
-          echo "$LZFS send $copysrc | $RZFS receive $option_F $copydest"
-        fi
-      fi
+# Function to handle progress dialog
+handle_progress_dialog() {
+  PROGRESS_DIALOG=$(echo "$option_D" | sed "s#%%size%%#$SIZE_EST#g" |
+    sed "s#%%title%%#$copysrc#g")
+  echo "$PROGRESS_DIALOG"
+}
+
+# Function to handle errors
+handle_error() {
+  echo "Error when zfs send/receiving."
+  beep
+  exit 1
+}
+
+# Function to handle zfs send/receive with progress dialog
+handle_zfs_send_receive_with_progress() {
+  local snapshot=$1
+  local dest=$2
+  local prevsnap=$3
+  if [ -z "$prevsnap" ]; then
+    cmd="$LZFS send $snapshot | dd obs=1048576 | dd bs=1048576 | $PROGRESS_DIALOG | $RZFS receive $option_F $dest"
+  else
+    cmd="$LZFS send -i $prevsnap $snapshot | dd obs=1048576 | dd bs=1048576 | $PROGRESS_DIALOG | $RZFS receive $option_F $dest"
+  fi
+
+  echo $cmd
+  eval $cmd || handle_error
+}
+
+# Function to handle zfs send/receive
+handle_zfs_send_receive() {
+  local snapshot=$1
+  local dest=$2
+  local prevsnap=$3
+  if [ -z "$prevsnap" ]; then
+    cmd="$LZFS send $snapshot | $RZFS receive $option_F $dest"
+  else
+    cmd="$LZFS send -i $prevsnap $snapshot | $RZFS receive $option_F $dest"
+  fi
+
+  echo $cmd
+  eval $cmd || handle_error
+}
+
+copy_snap() {
+  local copysrc=$snapshot
+  local copydest=$dest
+  local copyprev=$lastsnap
+  local copysrctail=$(echo "$copysrc" | cut -d/ -f2-)
+
+  # Check if the snapshot already exists
+  if [ -n "$(echo "$rzfs_list_ho_s" | grep "^$dest/$copysrctail")" ]; then
+    echo "Snapshot $copysrc already exists at destination $copydest. Exiting function."
+    return
+  fi
+
+  echov "Sending $copysrc to $copydest."
+  if [ "$copyprev" = "" ]; then
+    if [ "$option_D" != "" ]; then
+      calc_size_estimate "$copysrc"
+      handle_progress_dialog "$copysrc"
+      handle_zfs_send_receive_with_progress "$copysrc" "$copydest"
     else
-      echov "  (incremental to $copyprev.)"
-      if [ "$option_D" != "" ]; then
-        if [ $option_n -eq 0 ]; then
-          SIZE_DATASET=$($LZFS send -nPv -i "$copyprev" "$copysrc" 2>&1) ||
-            {
-              echo "Error calculating estimate: $SIZE_DATASET"
-              beep
-              exit 1
-            }
-          SIZE_EST=$(echo "$SIZE_DATASET" | grep ^size | tail -n 1 | cut -f 2)
-          echo "Estimated size is: ${SIZE_EST}"
-          PROGRESS_DIALOG=$(echo $option_D | sed "s#%%size%%#$SIZE_EST#g" |
-            sed "s#%%title%%#$copysrc#g")
-          $LZFS send -i "$copyprev" "$copysrc" | dd obs=1048576 | dd bs=1048576 |
-            $PROGRESS_DIALOG | $RZFS receive $option_F "$copydest" ||
-            {
-              echo "Error when zfs send/receiving."
-              beep
-              exit 1
-            }
-        else
-          SIZE_DATASET=$($LZFS send -nPv -i "$copyprev" "$copysrc" 2>&1) ||
-            {
-              echo "Error calculating estimate: $SIZE_DATASET"
-              beep
-              exit 1
-            }
-          SIZE_EST=$(echo "$SIZE_DATASET" | grep ^size | tail -n 1 | cut -f 2)
-          echo "Estimated size is: ${SIZE_EST}"
-          PROGRESS_DIALOG=$(echo $option_D | sed "s#%%size%%#$SIZE_EST#g" |
-            sed "s#%%title%%#$copysrc#g")
-          $LZFS send -nv -i "$copyprev" "$copysrc"
-          echo "$LZFS send -i $copyprev $copysrc | dd obs=1048576 | dd bs=1048576 | \
-            $PROGRESS_DIALOG | $RZFS receive $option_F $copydest"
-        fi
-      else
-        if [ $option_n -eq 0 ]; then
-          $LZFS send -i "$copyprev" "$copysrc" | $RZFS receive $option_F "$copydest" ||
-            {
-              echo "Error when zfs send/receiving."
-              beep
-              exit 1
-            }
-        else
-          echo "$LZFS send -i $copyprev $copysrc | $RZFS receive $option_F
-            $copydest"
-        fi
-      fi
+      handle_zfs_send_receive "$copysrc" "$copydest"
+    fi
+  else
+    echov "  (incremental to $copyprev.)"
+    if [ "$option_D" != "" ]; then
+      calc_size_estimate "$copysrc"
+      handle_progress_dialog "$copysrc"
+      handle_zfs_send_receive_with_progress "$copysrc" "$copydest" "$copyprev"
+    else
+      handle_zfs_send_receive "$copysrc" "$copydest" "$copyprev"
     fi
   fi
 }
+## END copy_snap() and related functions
+###
 
 #
 # Copy the list of snapshots given in stdin to the destination in $1.
@@ -1923,10 +1907,10 @@ $backup_file_dir/$backup_file_extension.$is_tail\" | $option_T sh"
 while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D: i; do
   case $i in
   b)
-    option_b=1
+    option_b_eep_always=1
     ;;
   B)
-    option_B=1
+    option_B_eep_on_success=1
     ;;
   c)
     services="$OPTARG"
