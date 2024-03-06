@@ -34,10 +34,6 @@
 # Transfer a source zfs filesystem, directory or files to a destination, using
 # either zfs send/receive or rsync to do the heavy lifting.
 
-# Refactor by Aldo Gonzalez, 2024
-#
-#
-
 # Comments, suggestions, bug reports please to:
 # Allan Jude  <allanjude a-t freebsd d-o-t org>
 #
@@ -105,14 +101,14 @@ option_b_eep_always=0     # -b
 option_B_eep_on_success=0 # -B
 option_d=0
 option_D=""
-option_e=0
+option_e_restore_property_mode=0
 option_E=""
 option_f=""
 option_g=""
 option_i=0
 option_I=""
 option_F=""
-option_k=0
+option_k_backup_property_mode=0
 option_l=0
 option_L=""
 option_o=""
@@ -121,7 +117,7 @@ option_p=0
 option_P=0
 option_R=""
 option_m=0
-option_n=0
+option_n_dryrun=0
 option_N=""
 option_S=0
 option_s=0
@@ -239,7 +235,7 @@ init_variables() {
   get_os "$option_O"
   source_os="$output_os"
 
-  if [ $option_e -eq 1 ]; then
+  if [ $option_e_restore_property_mode -eq 1 ]; then
     LCAT=$(${option_O} which cat)
   fi
 
@@ -276,6 +272,22 @@ usage examples. To access the man page, type:
 $ man zxfer
 
 EOT
+}
+
+# Function to handle errors
+throw_error() {
+  local msg=$1
+  echo $msg
+  beep
+  exit 1
+}
+
+throw_usage_error() {
+  local msg=$1
+  echo "Error: $msg"
+  usage
+  beep
+  exit 1
 }
 
 #
@@ -320,17 +332,13 @@ relaunch() {
 #
 consistency_check() {
   # disallow backup and restore of properties at same time
-  if [ $option_k -eq 1 -a $option_e -eq 1 ]; then
-    echo "Error: You cannot bac(k)up and r(e)store properties at the same time."
-    usage
-    exit 1
+  if [ $option_k_backup_property_mode -eq 1 -a $option_e_restore_property_mode -eq 1 ]; then
+    throw_usage_error "You cannot bac(k)up and r(e)store properties at the same time."
   fi
 
   # disallow both beep modes, enforce using one or the other.
   if [ $option_b_eep_always -eq 1 -a $option_B_eep_on_success -eq 1 ]; then
-    echo "Error: You cannot use both beep modes at the same time."
-    usage
-    exit 1
+    throw_usage_error "You cannot use both beep modes at the same time."
   fi
 
   if [ $option_S -eq 1 ]; then
@@ -338,27 +346,19 @@ consistency_check() {
 
     # check for incompatible options
     if [ "$option_F" = "-F" ]; then
-      echo "Error: -F option cannot be used with -S (rsync mode)"
-      usage
-      exit 1
+      throw_usage_error "-F option cannot be used with -S (rsync mode)"
     fi
 
     if [ $option_s -eq 1 ]; then
-      echo "Error: -s option cannot be used with -S (rsync mode)"
-      usage
-      exit 1
+      throw_usage_error "-s option cannot be used with -S (rsync mode)"
     fi
 
     if [ "$option_O" != "" -o "$option_T" != "" ]; then
-      echo "Error: -O or -T option cannot be used with -S (rsync mode)"
-      usage
-      exit 1
+      throw_usage_error "-O or -T option cannot be used with -S (rsync mode)"
     fi
 
     if [ $option_m -eq 1 ]; then
-      echo "Error: -m option cannot be used with -S (rsync mode)"
-      usage
-      exit 1
+      throw_usage_error "-m option cannot be used with -S (rsync mode)"
     fi
 
   else
@@ -366,23 +366,17 @@ consistency_check() {
 
     # check for incompatible options
     if [ "$option_f" != "" ]; then
-      echo "Error: -f option can only be used with -S (rsync mode)"
-      usage
-      exit 1
+      throw_usage_error "-f option can only be used with -S (rsync mode)"
     fi
 
     if [ "$option_L" != "" ]; then
-      echo "Error: -L option can only be used with -S (rsync mode)"
-      usage
-      exit 1
+      throw_usage_error "-L option can only be used with -S (rsync mode)"
     fi
 
     # disallow migration related options and remote transfers at same time
     if [ "$option_T" != "" -o "$option_O" != "" ]; then
       if [ $option_m -eq 1 -o "$services" != "" ]; then
-        echo "Error: You cannot migrate to or from a remote host."
-        usage
-        exit 1
+        throw_usage_error "You cannot migrate to or from a remote host."
       fi
     fi
   fi
@@ -399,12 +393,7 @@ consistency_check() {
 #
 # Function to calculate size estimate
 calc_size_estimate() {
-  SIZE_DATASET=$($LZFS send -nPv "$1" 2>&1) ||
-    {
-      echo "Error calculating estimate: $SIZE_DATASET"
-      beep
-      exit 1
-    }
+  SIZE_DATASET=$($LZFS send -nPv "$1" 2>&1) || throw_error "Error calculating estimate: $SIZE_DATASET"
   SIZE_EST=$(echo "$SIZE_DATASET" | grep ^size | tail -n 1 | cut -f 2)
   echo "Estimated size is: ${SIZE_EST}"
 }
@@ -414,13 +403,6 @@ handle_progress_dialog() {
   PROGRESS_DIALOG=$(echo "$option_D" | sed "s#%%size%%#$SIZE_EST#g" |
     sed "s#%%title%%#$copysrc#g")
   echo "$PROGRESS_DIALOG"
-}
-
-# Function to handle errors
-handle_error() {
-  echo "Error when zfs send/receiving."
-  beep
-  exit 1
 }
 
 # Function to handle zfs send/receive with progress dialog
@@ -434,8 +416,8 @@ handle_zfs_send_receive_with_progress() {
     cmd="$LZFS send -i $prevsnap $snapshot | dd obs=1048576 | dd bs=1048576 | $PROGRESS_DIALOG | $RZFS receive $option_F $dest"
   fi
 
-  echo $cmd
-  eval $cmd || handle_error
+  #echo $cmd
+  eval $cmd || throw_error "Error when zfs send/receiving."
 }
 
 # Function to handle zfs send/receive
@@ -449,8 +431,8 @@ handle_zfs_send_receive() {
     cmd="$LZFS send -i $prevsnap $snapshot | $RZFS receive $option_F $dest"
   fi
 
-  echo $cmd
-  eval $cmd || handle_error
+  #echo $cmd
+  eval $cmd || throw_error "Error when zfs send/receiving."
 }
 
 copy_snap() {
@@ -466,23 +448,16 @@ copy_snap() {
   fi
 
   echov "Sending $copysrc to $copydest."
-  if [ "$copyprev" = "" ]; then
-    if [ "$option_D" != "" ]; then
-      calc_size_estimate "$copysrc"
-      handle_progress_dialog "$copysrc"
-      handle_zfs_send_receive_with_progress "$copysrc" "$copydest"
-    else
-      handle_zfs_send_receive "$copysrc" "$copydest"
-    fi
-  else
+  if [ "$copyprev" != "" ]; then
     echov "  (incremental to $copyprev.)"
-    if [ "$option_D" != "" ]; then
-      calc_size_estimate "$copysrc"
-      handle_progress_dialog "$copysrc"
-      handle_zfs_send_receive_with_progress "$copysrc" "$copydest" "$copyprev"
-    else
-      handle_zfs_send_receive "$copysrc" "$copydest" "$copyprev"
-    fi
+  fi
+
+  if [ "$option_D" != "" ]; then
+    calc_size_estimate "$copysrc"
+    handle_progress_dialog "$copysrc"
+    handle_zfs_send_receive_with_progress "$copysrc" "$copydest" "$copyprev"
+  else
+    handle_zfs_send_receive "$copysrc" "$copydest" "$copyprev"
   fi
 }
 ## END copy_snap() and related functions
@@ -536,25 +511,27 @@ newsnap() {
 
   if [ "$option_R" != "" ]; then
     echov "Creating recursive snapshot $sourcefs@$snap."
-    if [ $option_n -eq 0 ]; then
-      $LZFS snapshot -r "${sourcefs}@${snap}" ||
+    cmd="$LZFS snapshot -r $sourcefs@$snap"
+    if [ $option_n_dryrun -eq 0 ]; then
+      eval $cmd ||
         {
           echo "Error when snapshotting."
           exit 1
         }
     else
-      echo "$LZFS snapshot -r $sourcefs@$snap"
+      echo $cmd
     fi
   else
     echov "Creating snapshot $sourcefs@$snap."
-    if [ $option_n -eq 0 ]; then
-      $LZFS snapshot "${sourcefs}@${snap}" ||
+    cmd="$LZFS snapshot $sourcefs@$snap"
+    if [ $option_n_dryrun -eq 0 ]; then
+      eval $cmd ||
         {
           echo "Error when snapshotting."
           exit 1
         }
     else
-      echo "$LZFS snapshot $sourcefs@$snap"
+      echo $cmd
     fi
   fi
 }
@@ -650,7 +627,7 @@ inspect_delete_snap() {
 
     if [ $mark_snap_for_deletion = 1 -a $option_d -eq 1 ]; then
       echov "Destroying destination snapshot $dest_snap."
-      if [ $option_n -eq 0 ]; then
+      if [ $option_n_dryrun -eq 0 ]; then
         # A failed destroy is not a critical error, it is likely caused by
         # a hold or a clone. Continue with the replication
         $RZFS destroy "$dest_snap" ||
@@ -731,16 +708,12 @@ get_zfs_list() {
 
   # Exit if source not sound
   if [ "$recursive_source_list" = "" ]; then
-    echo "Error: Source does not exist."
-    usage
-    exit 1
+    throw_usage_error "Source does not exist."
   fi
 
   #  Exit if destination not sound
   if [ "$recursive_dest_list" = "" ]; then
-    echo "Error: Destination filesystem does not exist. Create it first."
-    usage
-    exit 1
+    throw_usage_error "Destination filesystem does not exist. Create it first."
   fi
 }
 
@@ -753,9 +726,7 @@ get_zfs_list_rsync_mode() {
 
   #  Exit if destination not sound
   if [ "$recursive_dest_list" = "" ]; then
-    echo "Error: Destination filesystem does not exist. Create it first."
-    usage
-    exit 1
+    throw_usage_error "Destination filesystem does not exist. Create it first."
   fi
 
   OLD_IFS=$IFS
@@ -774,9 +745,7 @@ get_zfs_list_rsync_mode() {
 
   if [ "$option_L" != "" ]; then
     if [ $option_L -lt "1" ]; then
-      echo "Error: Option L, if specified, should be 1 or greater."
-      usage
-      exit 1
+      throw_usage_error "Option L, if specified, should be 1 or greater."
     fi
     inc_option_L=$(expr $option_L + 1)
   fi
@@ -785,11 +754,8 @@ get_zfs_list_rsync_mode() {
     source_RN_trailing_slash=$(echo "$source_RN" | grep -c '..*/$')
 
     if [ $source_RN_trailing_slash -eq 1 ]; then
-      echo "Error: Do not specify trailing slashes in sources."
-      echo "There is no\
- meaning in the context of this program and so this has been disabled."
-      usage
-      exit 1
+      throw_usage_error "Do not specify trailing slashes in sources. \
+\nThere is no meaning in the context of this program and so this has been disabled."
     fi
 
     temp_fs_list=$($LZFS list -t filesystem,volume -Hr -o name $source_RN)
@@ -803,31 +769,25 @@ get_zfs_list_rsync_mode() {
         # count the "/" in the line, should be equal or greater to option_L
         slash_no=$(echo "$fs" | $AWK '$0= NF-1' FS=/)
         if [ "$slash_no" -lt "$option_L" ]; then
-          echo "Error: If using option L, ensure that all source files and\
- directories are contained in filesystems with as many \"/\" as L."
-          usage
-          exit 1
+          throw_usage_error "If using option L, ensure that all source files and\
+directories are contained in filesystems with as many \"/\" as L."
         fi
         old_root_fs=$root_fs
         root_fs=$(echo "$fs" | $AWK '{for (i=1; i <= '$inc_option_L'; i++) printf("%s%c", $i, (i=='$inc_option_L')?ORS:OFS)}' FS=/ OFS=/ ORS=)
         if [ "$root_fs" != "$old_root_fs" -a "$old_root_fs" != "" ]; then
-          echo "Error: No common root filesystem. If using option L, ensure \
+          throw_usage_error "No common root filesystem. If using option L, ensure \
 that each source file/directory comes from a common filesystem, and that the
 the level specified is not after this common filesystem. e.g. if your pool
 has been backed up to storage/backups/root_pool then the level you should
 specify is \"2\"."
-          usage
-          exit 1
         fi
       done
     fi
 
     # exit if source is bogus
     if [ "$temp_fs_list" = "" ]; then
-      echo "Error: Source in -N or -R option does not exist, or is stored"
-      echo "on a filesystem that is not ZFS."
-      usage
-      exit 1
+      throw_usage_error "Source in -N or -R option does not exist, or is stored \
+on a filesystem that is not ZFS."
     fi
 
     # used printf in order to print the newlines
@@ -848,12 +808,9 @@ specify is \"2\"."
   source_pool_list=$(echo "$source_fs_list" | cut -f1 -d/ | sort -u)
   source_pool_number=$(echo "$source_pool_list" | wc -l | sed -e 's/ //g')
   if [ $source_pool_number -ne 1 ]; then
-    echo "Error: The sources you list are stored on a total of\
- "$source_pool_number" pools."
-    echo "Amend your list of sources until there is only one\
+    throw_usage_error "The sources you list are stored on a total of $source_pool_number pools.\
+\nAmend your list of sources until there is only one\
  pool relating to them all."
-    usage
-    exit 1
   fi
 
   # prepares the variables we will end up using later
@@ -960,11 +917,8 @@ rsync_transfer() {
 
     if [ "$opt_src_fs_mountpoint" = "legacy" ]; then
       if [ $option_l -eq 0 ]; then
-        echo "Error: legacy mountpoint encountered. Enable -l to assume"
-        echo "that the legacy mountpoint is \"/\"."
-        usage
-        beep
-        exit 1
+        throw_usage_error "Legacy mountpoint encountered. Enable -l to assume \
+that the legacy mountpoint is \"/\"."
       fi
 
       opt_src_fs_mountpoint="/"
@@ -1010,11 +964,8 @@ rsync_transfer() {
     dest_root_mountpoint=$($RZFS get -Ho value mountpoint "$dest_root")
     if [ "$dest_root_mountpoint" = "legacy" ]; then
       if [ $option_l -eq 0 ]; then
-        echo "Error: legacy mountpoint encountered. Enable -l to assume"
-        echo "that the legacy mountpoint is \"/\"."
-        usage
-        beep
-        exit 1
+        throw_usage_error "Legacy mountpoint encountered. Enable -l to assume \
+that the legacy mountpoint is \"/\"."
       fi
       rs_dest=$(echo "$rs_dest" | sed -e "s%^/[^/]*%%g")
     fi
@@ -1051,7 +1002,7 @@ rsync_transfer() {
 options $full_rs_options"
 
     # Now that we have something to feed rsync, we will call it.
-    if [ $option_n -eq 0 ]; then
+    if [ $option_n_dryrun -eq 0 ]; then
       if [ $option_p -eq 1 ]; then
         $RSYNC $full_rs_options $rs_source $rs_dest # persist in face of error
       else
@@ -1354,20 +1305,17 @@ transfer_properties() {
   # add to the details to allow backup of properties
   # unless $dont_write_backup non-zero, as with first rsync transfer
   # of properties
-  if [ $option_k -eq 1 -a $dont_write_backup -eq 0 ]; then
+  if [ $option_k_backup_property_mode -eq 1 -a $dont_write_backup -eq 0 ]; then
     backup_file_contents="$backup_file_contents;\
 $source,$actual_dest,$source_pvs"
   fi
 
   # If we are restoring properties, then get source_pvs from the backup file
-  if [ $option_e -eq 1 ]; then
+  if [ $option_e_restore_property_mode -eq 1 ]; then
     source_pvs=$(echo "$restored_backup_file_contents" | grep "^[^,]*,$source," |
       sed -e 's/^[^,]*,[^,]*,//g')
     if [ "$source_pvs" = "" ]; then
-      echo "Error: can't find the properties for the filesystem $source"
-      usage
-      beep
-      exit 1
+      throw_usage_error "Can't find the properties for the filesystem $source"
     fi
   fi
 
@@ -1401,10 +1349,7 @@ $source,$actual_dest,$source_pvs"
         fi
       done
       if [ $valid_option_property -eq 0 ]; then
-        echo "Error: Invalid option property - check -o list for syntax errors."
-        usage
-        beep
-        exit 1
+        throw_usage_error "Invalid option property - check -o list for syntax errors."
       else
         valid_option_property=0
       fi
@@ -1511,7 +1456,7 @@ with specified properties."
       # (This and reversion back is so that $RZFS command works with -r)
       IFS=$OLDIFS
 
-      if [ $option_n -eq 0 ]; then
+      if [ $option_n_dryrun -eq 0 ]; then
         eval "$RZFS create $override_option_list $actual_dest" ||
           {
             echo "Error when creating destination filesystem."
@@ -1552,7 +1497,7 @@ with specified properties."
 
       echov "Creating destination filesystem \"$actual_dest\" \
 with specified properties."
-      if [ $option_n -eq 0 ]; then
+      if [ $option_n_dryrun -eq 0 ]; then
         eval "$RZFS create -p $creation_option_list $actual_dest" ||
           {
             echo "Error when creating destination filesystem."
@@ -1752,7 +1697,7 @@ with specified properties."
       # (This and reversion back is so that $RZFS command works with -r)
       IFS=$OLDIFS
 
-      if [ $option_n -eq 0 ]; then
+      if [ $option_n_dryrun -eq 0 ]; then
         $RZFS set "${ov_property}=${ov_value}" "$actual_dest" ||
           {
             echo "Error when setting properties on destination filesystem."
@@ -1780,7 +1725,7 @@ with specified properties."
         # (This and reversion back is so that $RZFS command works with -r)
         IFS=$OLDIFS
 
-        if [ $option_n -eq 0 ]; then
+        if [ $option_n_dryrun -eq 0 ]; then
           $RZFS inherit "$ov_property" "$actual_dest" ||
             {
               echo "Error when inheriting properties on destination \
@@ -1881,7 +1826,7 @@ $backup_file_extension.$is_tail"
 
   # Write the backup file; doing it this way prevents S11E from throwing
   # "Permission denied" errors, and ALSO works with local or remote.
-  if [ $option_n -eq 0 ]; then
+  if [ $option_n_dryrun -eq 0 ]; then
     echo "echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
 $backup_file_dir/$backup_file_extension.$is_tail" | $option_T sh ||
       {
@@ -1922,7 +1867,7 @@ while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D: i; do
     option_D="$OPTARG"
     ;;
   e)
-    option_e=1
+    option_e_restore_property_mode=1
     # Need to transfer properties, just the backed up properties
     # are substituted
     option_P=1
@@ -1950,7 +1895,7 @@ while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D: i; do
     option_I="$OPTARG"
     ;;
   k)
-    option_k=1
+    option_k_backup_property_mode=1
     # In order to back up the properties of the source, the
     # properties of the source must be transferred as well.
     option_P=1
@@ -1967,7 +1912,7 @@ while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D: i; do
     option_P=1
     ;;
   n)
-    option_n=1
+    option_n_dryrun=1
     ;;
   N)
     option_N="$OPTARG"
@@ -2021,9 +1966,7 @@ destination=$1
 
 # Basic consistency checking
 if [ $# -lt 1 ]; then
-  echo "Error: Need a destination."
-  usage
-  exit 1
+  throw_usage_error "Need a destination."
 fi
 
 init_variables
@@ -2068,7 +2011,7 @@ if [ $option_S -eq 1 ]; then
   get_zfs_list_rsync_mode
 
   # If we are restoring properties get the backup properties
-  if [ $option_e -eq 1 ]; then
+  if [ $option_e_restore_property_mode -eq 1 ]; then
     get_backup_properties
   fi
 
@@ -2079,9 +2022,7 @@ if [ $option_S -eq 1 ]; then
     if [ -r "$option_f" ]; then
       rsync_options=$(cat "$option_f")
     else
-      echo "Error reading contents of $option_f."
-      usage
-      exit 1
+      throw_usage_error "Reading contents of $option_f."
     fi
   fi
 
@@ -2140,12 +2081,9 @@ if [ $option_S -eq 1 ]; then
       : # if a directory, do nothing
     else
       # if not a directory, fail with error
-      echo "Error: Only directories are allowed when using recursive "
-      echo "rsync transfer mode (i.e. -R). If you are trying to transfer"
-      echo "a single file, use -N."
-      usage
-      beep
-      exit 1
+      throw_usage_error "Only directories are allowed when using recursive \
+rsync transfer mode (i.e. -R). If you are trying to transfer \
+a single file, use -N."
     fi
 
     source_type="r"
@@ -2192,27 +2130,21 @@ if [ $option_S -eq 1 ]; then
 else
   # zfs send/receive mode, aka zfs-replicate mode, aka normal mode
   if [ "$option_R" != "" -a "$option_N" != "" ]; then
-    echo "Error: If using normal mode (i.e. no -S), you must choose either -N to transfer"
-    echo "a single filesystem or -R to transfer a single filesystem and its children"
-    echo "recursively, but not both -N and -R at the same time."
-    usage
-    exit 1
+    throw_usage_error "If using normal mode (i.e. no -S), you must choose either -N to transfer \
+a single filesystem or -R to transfer a single filesystem and its children \
+recursively, but not both -N and -R at the same time."
   elif [ "$option_R" != "" ]; then
     initial_source="$option_R"
   elif [ "$option_N" != "" ]; then
     initial_source="$option_N"
   else
-    echo "Error: You must specify a source with either -N or -R."
-    usage
-    exit 1
+    throw_usage_error "You must specify a source with either -N or -R."
   fi
 
   # Source and destination can't start with "/", but it's an easy mistake to make
   if [ $(echo $initial_source | grep -c ^/) -eq "1" -o \
     $(echo $destination | grep -c ^/) -eq "1" ]; then
-    echo "Error:Source and destination must not begin with \"/\". Note the example."
-    usage
-    exit 1
+    throw_usage_error "Source and destination must not begin with \"/\". Note the example."
   fi
 
   # Checks options to see if appropriate for a source snapshot
@@ -2231,7 +2163,7 @@ else
   get_zfs_list
 
   # If we are restoring properties get the backup properties
-  if [ $option_e -eq 1 ]; then
+  if [ $option_e_restore_property_mode -eq 1 ]; then
     get_backup_properties
   fi
 
@@ -2374,7 +2306,7 @@ else
 fi
 
 # writes property backup info to file
-if [ $option_k -eq 1 ]; then
+if [ $option_k_backup_property_mode -eq 1 ]; then
   write_backup_properties
 fi
 
