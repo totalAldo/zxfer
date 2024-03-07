@@ -410,24 +410,6 @@ consistency_check() {
 # nothing if the snapshot already exists.
 # Takes $snapshot, $dest, $lastsnap
 #
-# Function to calculate size estimate
-calc_size_estimate() {
-  if [ "$option_O_rigin" != "" ]; then
-    LZFS="ssh $option_O_rigin $LZFS"
-  fi
-
-  SIZE_DATASET=$($LZFS send -nPv "$1" 2>&1) || throw_error "Error calculating estimate: $SIZE_DATASET"
-  SIZE_EST=$(echo "$SIZE_DATASET" | grep ^size | tail -n 1 | cut -f 2)
-  echo "Estimated size is: ${SIZE_EST}"
-}
-
-# Function to handle progress dialog
-handle_progress_dialog() {
-  PROGRESS_DIALOG=$(echo "$option_D" | sed "s#%%size%%#$SIZE_EST#g" |
-    sed "s#%%title%%#$copysrc#g")
-  echo "$PROGRESS_DIALOG"
-}
-
 # Function to handle zfs send/receive with progress dialog
 handle_zfs_send_receive_with_progress() {
   local snapshot=$1
@@ -435,6 +417,20 @@ handle_zfs_send_receive_with_progress() {
   local prevsnap=$3
   local send_cmd=""
   local recv_cmd=""
+
+  # calc size estimate
+  if [ "$option_O_rigin" != "" ]; then
+    LZFS="ssh $option_O_rigin $LZFS"
+  fi
+
+  SIZE_DATASET=$($LZFS send -nPv "$1" 2>&1) || throw_error "Error calculating estimate: $SIZE_DATASET"
+  SIZE_EST=$(echo "$SIZE_DATASET" | grep ^size | tail -n 1 | cut -f 2)
+  echo "Estimated size is: ${SIZE_EST}"
+
+  # handle progress dialog
+  PROGRESS_DIALOG=$(echo "$option_D" | sed "s#%%size%%#$SIZE_EST#g" |
+    sed "s#%%title%%#$copysrc#g")
+  echo "$PROGRESS_DIALOG"
 
   if [ -z "$prevsnap" ]; then
     send_cmd="$LZFS send $snapshot"
@@ -496,9 +492,8 @@ copy_snap() {
     echov "  (incremental to $copyprev.)"
   fi
 
+  # these functions will set the value of $cmd
   if [ "$option_D" != "" ]; then
-    calc_size_estimate "$copysrc"
-    handle_progress_dialog "$copysrc"
     handle_zfs_send_receive_with_progress "$copysrc" "$copydest" "$copyprev"
   else
     handle_zfs_send_receive "$copysrc" "$copydest" "$copyprev"
