@@ -411,7 +411,7 @@ consistency_check() {
 # Takes $snapshot, $dest, $lastsnap
 #
 # Function to handle zfs send/receive with progress dialog
-handle_zfs_send_receive_with_progress() {
+set_zfs_send_receive_with_progress_cmd() {
   local snapshot=$1
   local dest=$2
   local prevsnap=$3
@@ -449,7 +449,7 @@ handle_zfs_send_receive_with_progress() {
 }
 
 # Function to handle zfs send/receive
-handle_zfs_send_receive() {
+set_zfs_send_receive_cmd() {
   local snapshot=$1
   local dest=$2
   local prevsnap=$3
@@ -494,9 +494,9 @@ copy_snap() {
 
   # these functions will set the value of $cmd
   if [ "$option_D" != "" ]; then
-    handle_zfs_send_receive_with_progress "$copysrc" "$copydest" "$copyprev"
+    set_zfs_send_receive_with_progress_cmd "$copysrc" "$copydest" "$copyprev"
   else
-    handle_zfs_send_receive "$copysrc" "$copydest" "$copyprev"
+    set_zfs_send_receive_cmd "$copysrc" "$copydest" "$copyprev"
   fi
 
   # cmd is now set
@@ -661,13 +661,14 @@ inspect_delete_snap() {
 
     if [ $mark_snap_for_deletion = 1 -a $option_d -eq 1 ]; then
       echov "Destroying destination snapshot $dest_snap."
+      cmd="$RZFS destroy $dest_snap"
       if [ $option_n_dryrun -eq 0 ]; then
         # A failed destroy is not a critical error, it is likely caused by
         # a hold or a clone. Continue with the replication
-        $RZFS destroy "$dest_snap" ||
+        eval $cmd ||
           { echo "Error when zfs destroying."; }
       else
-        echo "$RZFS destroy $dest_snap"
+        echo $cmd
       fi
     fi
   done
