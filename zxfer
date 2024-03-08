@@ -94,8 +94,8 @@
 # are not inheritable. See definition for $fbsd_readonly_properties.
 #
 #     zxfer [-dFnPsUv] [-k | -e] [-b | -B] {-N path/to/src | -R path/to/src}
-#           [-m [c FMRI|pattern[ FMRI|pattern]...]]]
-#           [[-z] [-Z "full zstd compression command"] -O user@host]
+#           [-z] [-Z "full zstd compression command"]
+#           [-m [c FMRI|pattern[ FMRI|pattern]...]]] [-O user@host]
 #           [-D 'progress dialog options'] [-I properties,to,ignore]
 #           [-T user@host] [-o option1=value1,option2=value2...] [-g days]
 #           destination
@@ -254,17 +254,21 @@ get_os() {
 # Initializes OS and local/remote specific variables
 #
 init_variables() {
-  get_os "$option_T_target"
-  dest_os="$output_os"
-
-  # prepend ssh to option_O_origin if not already there
+  # determine the source_os
   if [ "$option_O_origin" != "" ]; then
     get_os "$ssh_cmd $option_O_origin"
   else
     get_os ""
   fi
-  #get_os "$option_O_origin"
   source_os="$output_os"
+
+  # determine the dest_os
+  if [ "$option_T_target" != "" ]; then
+    get_os "$ssh_cmd $option_T_target"
+  else
+    get_os ""
+  fi
+  dest_os="$output_os"
 
   if [ $option_e_restore_property_mode -eq 1 ]; then
     LCAT=$(${ssh_cmd} ${option_O_origin} which cat)
@@ -286,8 +290,8 @@ usage() {
   cat <<EOT
 usage:
      zxfer [-dFnPsUv] [-k | -e] [-b | -B] {-N path/to/src | -R path/to/src}
-           [-m [c FMRI|pattern[ FMRI|pattern]...]]]
-           [[-z] [-Z "full zstd compression command"] -O user@host]
+           [-z] [-Z "full zstd compression command"]
+           [-m [c FMRI|pattern[ FMRI|pattern]...]]] [-O user@host]
            [-D 'progress dialog options'] [-I properties,to,ignore]
            [-T user@host] [-o option1=value1,option2=value2...] [-g days]
            destination
@@ -426,8 +430,11 @@ consistency_check() {
       throw_usage_error "-L option can only be used with -S (rsync mode)"
     fi
 
-    if [ $option_z_compress -eq 1 -a "$option_O_origin" = "" ]; then
-      throw_usage_error "-z option can only be used with -O option"
+    if [ $option_z_compress -eq 1 -a \
+        "$option_O_origin" = "" -a \
+        "$option_T_target" = "" \
+    ]; then
+      throw_usage_error "-z option can only be used with -O or -T option"
     fi
 
     # disallow migration related options and remote transfers at same time
@@ -491,19 +498,29 @@ zfs_send_receive() {
   local send_cmd=""
   local recv_cmd=""
 
+  # set the default send cmd
   if [ -z "$prevsnap" ]; then
     send_cmd="$zfs_cmd send $snapshot"
   else
     send_cmd="$zfs_cmd send -i $prevsnap $snapshot"
   fi
-  recv_cmd="$RZFS receive $option_F_force_rollback $dest"
 
-  # wrap the send command in double quotes so that it can be passed to ssh
+  # set the default receive command
+  recv_cmd="$zfs_cmd receive $option_F_force_rollback $dest"
+
   if [ "$option_O_origin" != "" ]; then
+    # wrap the send command in double quotes so that it can be passed to ssh
     if [ $option_z_compress -eq 0 ]; then
       send_cmd="$ssh_cmd $option_O_origin \"$send_cmd\""
     else
       send_cmd="$ssh_cmd $option_O_origin \"$send_cmd | $option_z_compress_cmd\" | $option_z_decompress_cmd"
+    fi
+  elif [ "$option_T_target" != "" ]; then
+    # wrap the receive command in double quotes so that it can be passed to ssh
+    if [ $option_z_compress -eq 0 ]; then
+      recv_cmd="$ssh_cmd $option_T_target \"$recv_cmd\""
+    else
+      recv_cmd="$option_z_compress_cmd | $ssh_cmd $option_T_target \"$option_z_decompress_cmd | $recv_cmd\""
     fi
   fi
 
@@ -1869,7 +1886,7 @@ $backup_file_extension.$is_tail"
   # "Permission denied" errors, and ALSO works with local or remote.
   if [ $option_n_dryrun -eq 0 ]; then
     echo "echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
-$backup_file_dir/$backup_file_extension.$is_tail" | $option_T_target sh ||
+$backup_file_dir/$backup_file_extension.$is_tail" | "$ssh_cmd $option_T_target" sh ||
       {
         echo "Error writing backup file. Is filesystem mounted?"
         beep
@@ -1877,7 +1894,7 @@ $backup_file_dir/$backup_file_extension.$is_tail" | $option_T_target sh ||
       }
   else
     echo "echo \"echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
-$backup_file_dir/$backup_file_extension.$is_tail\" | $option_T_target sh"
+$backup_file_dir/$backup_file_extension.$is_tail\" | "$ssh_cmd $option_T_target" sh"
   fi
 }
 
@@ -2310,7 +2327,7 @@ read_command_line_switches() {
       ;;
     T)
       RZFS="$ssh_cmd $OPTARG $zfs_cmd"
-      option_T_target="$ssh_cmd $OPTARG "
+      option_T_target="$OPTARG"
       ;;
     u)
       option_u_rsync_use_existing_snapshot=1
@@ -2323,12 +2340,12 @@ read_command_line_switches() {
       option_v_verbose=1
       ;;
     z)
-      # Only works when -O option is specified.
-      # Pipes the send and receive commands through zstd and optionally accepts a compression level
+      # Pipes the send and receive commands through zstd
       option_z_compress=1
       ;;
     Z)
-
+      # specify the zstd compression command, like "zstd -T0 -6"
+      option_z_compress=1
       option_z_compress_cmd="$OPTARG"
       ;;
     \?)

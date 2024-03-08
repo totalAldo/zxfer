@@ -588,8 +588,8 @@ destination and any properties not on that list are removed from the list of
 properties to be replicated.
 This allows replicating from newer versions of OpenZFS to older versions.
 .It Fl z
-Pipe the send stream through zstd -3 compression when using the -O option
-and then decode it at the target using zstd -d.
+Pipe the send stream through zstd -3 compression and then decode it at the
+target using zstd -d.
 This converts:
 .Pp
 ssh user@host "/sbin/zfs send dataset@snap1 | /sbin/zfs receive
@@ -598,7 +598,7 @@ to
 .Pp
 ssh user@host "/sbin/zfs send dataset@snap1 | zstd -3" | zstd -d | /sbin/zfs receive
 .It Fl Z
-Pass your own zstd command to customize options.
+Pass the zstd command to use during compression.
 .Pp
 e.g.
 .Pp
