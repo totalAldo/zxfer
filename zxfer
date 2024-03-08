@@ -43,6 +43,7 @@
 #   . add throw_error functions
 #   . refactor copy_snap()
 #   . rename some option variables for readability
+#
 
 # Comments, suggestions, bug reports please to:
 # Allan Jude  <allanjude a-t freebsd d-o-t org>
@@ -91,7 +92,8 @@
 # are not inheritable. See definition for $fbsd_readonly_properties.
 #
 #     zxfer [-dFnPsUv] [-k | -e] [-b | -B] {-N path/to/src | -R path/to/src}
-#           [-m [c FMRI|pattern[ FMRI|pattern]...]]] [-O user@host]
+#           [-m [c FMRI|pattern[ FMRI|pattern]...]]]
+#           [[-z] [-Z "full zstd compression command"] -O user@host]
 #           [-D 'progress dialog options'] [-I properties,to,ignore]
 #           [-T user@host] [-o option1=value1,option2=value2...] [-g days]
 #           destination
@@ -104,7 +106,7 @@
 #           Where destination is a ZFS filesystem e.g.  poolname/fsname
 
 # zxfer version
-zxfer_version="1.2.0-20240307"
+zxfer_version="1.2.0-20240308"
 
 # Default values
 option_b_eep_always=0
@@ -282,7 +284,7 @@ usage() {
 usage:
      zxfer [-dFnPsUv] [-k | -e] [-b | -B] {-N path/to/src | -R path/to/src}
            [-m [c FMRI|pattern[ FMRI|pattern]...]]]
-           [[-z] [-Z "zstd compress command"] -O user@host]
+           [[-z] [-Z "full zstd compression command"] -O user@host]
            [-D 'progress dialog options'] [-I properties,to,ignore]
            [-T user@host] [-o option1=value1,option2=value2...] [-g days]
            destination
@@ -312,10 +314,11 @@ throw_error() {
 
 throw_usage_error() {
   local msg=$1
+  exit_status=${2:-1}
   echo "Error: $msg"
   usage
   beep
-  exit 1
+  exit $exit_status
 }
 
 # sample usage:
@@ -433,16 +436,10 @@ consistency_check() {
   fi
 }
 
-###
-## BEGIN copy_snap() and related functions
 #
-# Copy a snapshot using zfs send/receive. If a third argument is used, then use
-# send -i and the third argument is the base to create the increment from.
-# Arguments should be compatible with zfs send and receive commands. Does
-# nothing if the snapshot already exists.
-# Takes $snapshot, $dest, $lastsnap
+# Called by copy_snap()
+# Handle zfs send/receive with progress dialog
 #
-# Function to handle zfs send/receive with progress dialog
 zfs_send_receive_with_progress() {
   local snapshot=$1
   local dest=$2
@@ -480,7 +477,10 @@ zfs_send_receive_with_progress() {
   execute_command "$send_cmd | $recv_cmd"
 }
 
-# Function to handle zfs send/receive
+#
+# Called by copy_snap()
+# Handle zfs send/receive
+#
 zfs_send_receive() {
   local snapshot=$1
   local dest=$2
@@ -507,10 +507,18 @@ zfs_send_receive() {
   execute_command "$send_cmd | $recv_cmd"
 }
 
+#
+# Copy a snapshot using zfs send/receive. If a third argument is used, then use
+# send -i and the third argument is the base to create the increment from.
+# Arguments should be compatible with zfs send and receive commands. Does
+# nothing if the snapshot already exists.
+# Takes $dest, rzfs_list_ho_s
+#
 copy_snap() {
-  local copysrc=$snapshot
+  local copysrc=$1
+  local copyprev=$2
+
   local copydest=$dest
-  local copyprev=$lastsnap
   local copysrctail=$(echo "$copysrc" | cut -d/ -f2-)
 
   # Check if the snapshot already exists
@@ -525,21 +533,17 @@ copy_snap() {
     zfs_send_receive "$copysrc" "$copydest" "$copyprev"
   fi
 }
-## END copy_snap() and related functions
-###
 
 #
 # Copy the list of snapshots given in stdin to the destination in $1.
 # Use incremental snapshots where possible. Assumes that the list of snapshots
 # is given in creation order. copy_snap is responsible for skipping already
 # existing snapshots on the destination side.
-# Takes: $dest, $copy_fs_snapshot_list
+# Takes: $found_last_common_snap, $source, $copy_fs_snapshot_list
 #
 copy_snap_multiple() {
-  snapshot=""
-  destsnap=""
-  desttest=""
-  lastsnap=""
+  local snapshot=""
+  local lastsnap=""
 
   # if there is a snapshot common to both src and dest, set that to be $lastsnap
   if [ $found_last_common_snap -eq 1 ]; then
@@ -550,14 +554,14 @@ copy_snap_multiple() {
   # previous snapshot. Consider adding a time check and refreshing the list of
   # snapshots if it has been too long since we got the list
   for snapshot in $copy_fs_snapshot_list; do
-    copy_snap
+    copy_snap "$snapshot" "$lastsnap"
     lastsnap=$snapshot
   done
 }
 
 #
 # Copy all snapshots of a given filesystem.
-# This takes $src_snapshot_transfer_list and $actual_dest.
+# This takes $src_snapshot_transfer_list, $actual_dest.
 #
 copy_fs() {
   dest=$actual_dest
@@ -703,7 +707,6 @@ inspect_delete_snap() {
 # Caches zfs list commands to cut execution time
 #
 get_zfs_list() {
-
   # 0 if not a trailing slash;  regex is one character of any sort followed by
   # zero or more of any character until "/" followed by the end of the
   # string.
@@ -869,6 +872,7 @@ on a filesystem that is not ZFS."
 # on the destination, and also optionally to exclude fs mountpoints on dest.
 # Takes $opt_srs_all_inc_fs, $opt_src_fs_modif
 # Outputs $exclude_options, exclude options to be added to other rsync options
+#
 get_exclude_list() {
   exclude_options=""
 
@@ -909,6 +913,7 @@ $dest_exclude_dir_list"
 # n = non-recursive
 # r = recursive
 # Takes $opt_source, which is a source directly from the -N or -R option
+#
 rsync_transfer() {
   # Note that the source is actually in the snapshot. This gets the
   # ZFS filesystem corresponding to the source in the original -R or -N list.
@@ -1084,10 +1089,12 @@ check_snapshot() {
     }
 }
 
+#
 # Prepare the actual destination (actual_dest) as used in zfs receive.
 # Uses $trailing_slash, $source, $part_of_source_to_delete, $destination,
 # $initial_source, $trailing_slash_dest_tail
 # Output is $actual_dest
+#
 get_actual_dest() {
   # A trailing slash means that the root filesystem is transferred straight
   # into the dest fs, no trailing slash means that this fs is created
@@ -1297,7 +1304,6 @@ select_mc() {
 # Needs: $source, $initial_source, $actual_dest, $recursive_dest_list
 # $dont_write_backup
 # $ensure_writable
-#
 #
 transfer_properties() {
   # We have chosen to set all source properties in the case of -P
@@ -1873,175 +1879,35 @@ $backup_file_dir/$backup_file_extension.$is_tail\" | $option_T_arget sh"
 }
 
 #
-# THIS IS THE START OF THE "MAIN" section, i.e. code that is not a function
+# rsync mode
 #
+# From here, the basic algorithm is:
+# 1. Delete anything that could have been left over from previous transfers.
+# This could include: snapshots of original fs.
+# 2. Get the pools relating to any filesystem relating to any directories that
+#     will be transferred.
+# 3. Take a recursive snapshot of each of those pools.
+# 4. Create the destination filesystems or set appropriately. (If elected to
+#     restore the properties, restore them from the backup file or fail. If
+#     elected to backup the properties, back them up to the file
+#     .zxfer_backup_info.$poolname at the filesystem
+#     that $poolname will sit in.)
+#  (see transfer_properties() )
+# 5. Ensure that if any property is readonly, it is set to writable before transfer.
+# 6. rsync the directories and files across, using the snapshots.
+# 7. Set any previously readonly destination filesystems to be writable.
+# 9. Delete the remnants, probably very similar process to 1.
 
+# optimization summary: recursive snapshots take 8 seconds - unavoidable.
+#                     : cloning filesystems takes a long time, clone as few as possible
+#                     : deleting clones takes even longer, clone as few as possible
+
+# Note that using clones was far easier to implement the rsync version of the script.
+# We have however opted to use just snapshots as the time taken to create and delete
+# clones is prohibitive in comparison. It also stops automatic snapshotting taking
+# snapshots of the clones and creating further havoc.
 #
-# Check command line parameters.
-#
-
-# Read command line switches
-while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D:zZ: i; do
-  case $i in
-  b)
-    option_b_eep_always=1
-    ;;
-  B)
-    option_B_eep_on_success=1
-    ;;
-  c)
-    services="$OPTARG"
-    ;;
-  d)
-    option_d=1
-    ;;
-  D)
-    option_D="$OPTARG"
-    ;;
-  e)
-    option_e_restore_property_mode=1
-    # Need to transfer properties, just the backed up properties
-    # are substituted
-    option_P=1
-    ;;
-  E)
-    option_E="--exclude=$OPTARG $option_E"
-    ;;
-  f)
-    option_f="$OPTARG"
-    ;;
-  F)
-    option_F="-F"
-    ;;
-  g)
-    option_g="$OPTARG"
-    ;;
-  h)
-    usage
-    exit 2
-    ;;
-  i)
-    option_i=1
-    ;;
-  I)
-    option_I="$OPTARG"
-    ;;
-  k)
-    option_k_backup_property_mode=1
-    # In order to back up the properties of the source, the
-    # properties of the source must be transferred as well.
-    option_P=1
-    ;;
-  l)
-    option_l=1
-    ;;
-  L)
-    option_L="$OPTARG"
-    ;;
-  m)
-    option_m=1
-    option_s=1
-    option_P=1
-    ;;
-  n)
-    option_n_dryrun=1
-    ;;
-  N)
-    option_N="$OPTARG"
-    ;;
-  o)
-    option_o="$OPTARG"
-    ;;
-  O)
-    LZFS="$ssh_cmd $OPTARG $zfs_cmd"
-    option_O_rigin="$OPTARG"
-    ;;
-  p)
-    option_p=1
-    ;;
-  P)
-    option_P=1
-    ;;
-  R)
-    option_R="$OPTARG"
-    ;;
-  s)
-    option_s=1
-    ;;
-  S)
-    option_S=1
-    ;;
-  T)
-    RZFS="$ssh_cmd $OPTARG $zfs_cmd"
-    option_T_arget="$ssh_cmd $OPTARG "
-    ;;
-  u)
-    option_u=1
-    snapshot_name="$OPTARG"
-    ;;
-  U)
-    option_U=1
-    ;;
-  v)
-    option_v=1
-    ;;
-  z)
-    # Only works when -O option is specified.
-    # Pipes the send and receive commands through zstd and optionally accepts a compression level
-    option_z_compress=1
-    ;;
-  Z)
-    option_z_compress_cmd="$OPTARG"
-    ;;
-  \?)
-    usage
-    exit 2
-    ;;
-  esac
-done
-
-# Read out source and dest values
-shift $(expr $OPTIND - 1)
-destination=$1
-
-# Basic consistency checking
-if [ $# -lt 1 ]; then
-  throw_usage_error "Need a destination."
-fi
-
-init_variables
-
-consistency_check
-
-if [ $option_S -eq 1 ]; then
-  # rsync mode
-
-  # From here, the basic algorithm is:
-  # 1. Delete anything that could have been left over from previous transfers.
-  # This could include: snapshots of original fs.
-  # 2. Get the pools relating to any filesystem relating to any directories that
-  #     will be transferred.
-  # 3. Take a recursive snapshot of each of those pools.
-  # 4. Create the destination filesystems or set appropriately. (If elected to
-  #     restore the properties, restore them from the backup file or fail. If
-  #     elected to backup the properties, back them up to the file
-  #     .zxfer_backup_info.$poolname at the filesystem
-  #     that $poolname will sit in.)
-  #  (see transfer_properties() )
-  # 5. Ensure that if any property is readonly, it is set to writable before transfer.
-  # 6. rsync the directories and files across, using the snapshots.
-  # 7. Set any previously readonly destination filesystems to be writable.
-  # 9. Delete the remnants, probably very similar process to 1.
-
-  # optimization summary: recursive snapshots take 8 seconds - unavoidable.
-  #                     : cloning filesystems takes a long time, clone as few as possible
-  #                     : deleting clones takes even longer, clone as few as possible
-
-  # Note that using clones was far easier to implement the rsync version of the script.
-  # We have however opted to use just snapshots as the time taken to create and delete
-  # clones is prohibitive in comparison. It also stops automatic snapshotting taking
-  # snapshots of the clones and creating further havoc.
-
+run_rsync_mode() {
   # destroys old snapshots used in any previous (incomplete) use of
   # the script's functionality, if not using a custom snapshot
   if [ $option_u -eq 0 ]; then
@@ -2164,11 +2030,12 @@ a single file, use -N."
   if [ $option_u -eq 0 ]; then
     clean_up
   fi
+}
 
-  # end of rsync mode
-
-else
-  # zfs send/receive mode, aka zfs-replicate mode, aka normal mode
+#
+# zfs send/receive mode, aka zfs-replicate mode, aka normal mode
+#
+run_zfs_mode() {
   if [ "$option_R" != "" -a "$option_N" != "" ]; then
     throw_usage_error "If using normal mode (i.e. no -S), you must choose either -N to transfer \
 a single filesystem or -R to transfer a single filesystem and its children \
@@ -2342,7 +2209,153 @@ recursively, but not both -N and -R at the same time."
     # Re-launch any stopped services.
     relaunch
   fi
+}
 
+#
+# Check command line parameters.
+#
+read_command_line_switches() {
+  while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D:zZ: i; do
+    case $i in
+    b)
+      option_b_eep_always=1
+      ;;
+    B)
+      option_B_eep_on_success=1
+      ;;
+    c)
+      services="$OPTARG"
+      ;;
+    d)
+      option_d=1
+      ;;
+    D)
+      option_D="$OPTARG"
+      ;;
+    e)
+      option_e_restore_property_mode=1
+      # Need to transfer properties, just the backed up properties
+      # are substituted
+      option_P=1
+      ;;
+    E)
+      option_E="--exclude=$OPTARG $option_E"
+      ;;
+    f)
+      option_f="$OPTARG"
+      ;;
+    F)
+      option_F="-F"
+      ;;
+    g)
+      option_g="$OPTARG"
+      ;;
+    h)
+      usage
+      exit 2
+      ;;
+    i)
+      option_i=1
+      ;;
+    I)
+      option_I="$OPTARG"
+      ;;
+    k)
+      option_k_backup_property_mode=1
+      # In order to back up the properties of the source, the
+      # properties of the source must be transferred as well.
+      option_P=1
+      ;;
+    l)
+      option_l=1
+      ;;
+    L)
+      option_L="$OPTARG"
+      ;;
+    m)
+      option_m=1
+      option_s=1
+      option_P=1
+      ;;
+    n)
+      option_n_dryrun=1
+      ;;
+    N)
+      option_N="$OPTARG"
+      ;;
+    o)
+      option_o="$OPTARG"
+      ;;
+    O)
+      LZFS="$ssh_cmd $OPTARG $zfs_cmd"
+      option_O_rigin="$OPTARG"
+      ;;
+    p)
+      option_p=1
+      ;;
+    P)
+      option_P=1
+      ;;
+    R)
+      option_R="$OPTARG"
+      ;;
+    s)
+      option_s=1
+      ;;
+    S)
+      option_S=1
+      ;;
+    T)
+      RZFS="$ssh_cmd $OPTARG $zfs_cmd"
+      option_T_arget="$ssh_cmd $OPTARG "
+      ;;
+    u)
+      option_u=1
+      snapshot_name="$OPTARG"
+      ;;
+    U)
+      option_U=1
+      ;;
+    v)
+      option_v=1
+      ;;
+    z)
+      # Only works when -O option is specified.
+      # Pipes the send and receive commands through zstd and optionally accepts a compression level
+      option_z_compress=1
+      ;;
+    Z)
+      option_z_compress_cmd="$OPTARG"
+      ;;
+    \?)
+      throw_usage_error "Invalid option provided." 2
+      ;;
+    esac
+  done
+}
+
+#
+# THIS IS THE START OF THE "MAIN" section, i.e. code that is not a function
+#
+read_command_line_switches "$@"
+
+# Read out source and dest values
+shift $(expr $OPTIND - 1)
+destination=$1
+
+# Basic consistency checking
+if [ $# -lt 1 ]; then
+  throw_usage_error "Need a destination."
+fi
+
+init_variables
+
+consistency_check
+
+if [ $option_S -eq 1 ]; then
+  run_rsync_mode
+else
+  run_zfs_mode
 fi
 
 # writes property backup info to file
