@@ -675,7 +675,7 @@ inspect_delete_snap() {
     fi
 
     if [ $mark_snap_for_deletion = 1 -a $option_d -eq 1 ]; then
-      echov "Destroying destination snapshot $dest_snap."
+      #echov "Destroying destination snapshot $dest_snap."
       cmd="$RZFS destroy $dest_snap"
       # pass 1 to continue command if it fails
       execute_command "$cmd" 1
