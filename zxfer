@@ -487,41 +487,56 @@ zfs_send_receive_with_progress() {
   execute_command "$send_cmd | $recv_cmd"
 }
 
+set_send_command() {
+  local snapshot=$1
+  local prevsnap=$2
+
+  if [ -z "$prevsnap" ]; then
+    echo "$zfs_cmd send $snapshot"
+  else
+    echo "$zfs_cmd send -i $prevsnap $snapshot"
+  fi
+}
+
+set_receive_command() {
+  local dest=$1
+  echo "$zfs_cmd receive $option_F_force_rollback $dest"
+}
+
+wrap_command_with_ssh() {
+  local cmd=$1
+  local option=$2
+  local compress=$3
+  local direction=$4
+
+  if [ $compress -eq 0 ]; then
+    echo "$ssh_cmd $option \"$cmd\""
+  else
+    if [ "$direction" = "send" ]; then
+      echo "$ssh_cmd $option \"$cmd | $option_z_compress_cmd\" | $option_z_decompress_cmd"
+    else
+      echo "$option_z_compress_cmd | $ssh_cmd $option \"$option_z_decompress_cmd | $cmd\""
+    fi
+  fi
+}
+
 #
-# Called by copy_snap()
 # Handle zfs send/receive
+# Takes $option_z_compress, $option_O_origin, $option_T_target
 #
 zfs_send_receive() {
   local snapshot=$1
   local dest=$2
   local prevsnap=$3
-  local send_cmd=""
-  local recv_cmd=""
 
-  # set the default send cmd
-  if [ -z "$prevsnap" ]; then
-    send_cmd="$zfs_cmd send $snapshot"
-  else
-    send_cmd="$zfs_cmd send -i $prevsnap $snapshot"
-  fi
-
-  # set the default receive command
-  recv_cmd="$zfs_cmd receive $option_F_force_rollback $dest"
+  local send_cmd=$(set_send_command $snapshot $prevsnap)
+  local recv_cmd=$(set_receive_command $dest)
 
   if [ "$option_O_origin" != "" ]; then
-    # wrap the send command in double quotes so that it can be passed to ssh
-    if [ $option_z_compress -eq 0 ]; then
-      send_cmd="$ssh_cmd $option_O_origin \"$send_cmd\""
-    else
-      send_cmd="$ssh_cmd $option_O_origin \"$send_cmd | $option_z_compress_cmd\" | $option_z_decompress_cmd"
-    fi
-  elif [ "$option_T_target" != "" ]; then
-    # wrap the receive command in double quotes so that it can be passed to ssh
-    if [ $option_z_compress -eq 0 ]; then
-      recv_cmd="$ssh_cmd $option_T_target \"$recv_cmd\""
-    else
-      recv_cmd="$option_z_compress_cmd | $ssh_cmd $option_T_target \"$option_z_decompress_cmd | $recv_cmd\""
-    fi
+    send_cmd=$(wrap_command_with_ssh "$send_cmd" $option_O_origin $option_z_compress "send")
+  fi
+  if [ "$option_T_target" != "" ]; then
+    recv_cmd=$(wrap_command_with_ssh "$recv_cmd" $option_T_target $option_z_compress "receive")
   fi
 
   execute_command "$send_cmd | $recv_cmd"
