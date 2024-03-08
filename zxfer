@@ -542,6 +542,13 @@ zfs_send_receive() {
   execute_command "$send_cmd | $recv_cmd"
 }
 
+# Check if the snapshot already exists
+snapshot_exists() {
+  local snapshot=$1
+  local snapshot_list=$2
+  echo "$snapshot_list" | grep -q "^$snapshot"
+}
+
 #
 # Copy a snapshot using zfs send/receive. If a third argument is used, then use
 # send -i and the third argument is the base to create the increment from.
@@ -557,7 +564,7 @@ copy_snap() {
   local copysrctail=$(echo "$copysrc" | cut -d/ -f2-)
 
   # Check if the snapshot already exists
-  if [ -n "$(echo "$rzfs_list_ho_s" | grep "^$dest/$copysrctail")" ]; then
+  if snapshot_exists "$dest/$copysrctail" "$rzfs_list_ho_s"; then
     echov "Snapshot $copysrc already exists at destination $copydest. Exiting function."
     return
   fi
