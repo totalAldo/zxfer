@@ -34,6 +34,16 @@
 # Transfer a source zfs filesystem, directory or files to a destination, using
 # either zfs send/receive or rsync to do the heavy lifting.
 
+# changes by Aldo Gonzalez
+# 2024.03.07
+# - add -z option to use zstd compression
+# - add -Z option to specify the zstd compression command
+# - refactor of the code
+#   . add execute_command() function
+#   . add throw_error functions
+#   . refactor copy_snap()
+#   . rename some option variables for readability
+
 # Comments, suggestions, bug reports please to:
 # Allan Jude  <allanjude a-t freebsd d-o-t org>
 #
@@ -94,7 +104,7 @@
 #           Where destination is a ZFS filesystem e.g.  poolname/fsname
 
 # zxfer version
-zxfer_version="1.2.0-20240306"
+zxfer_version="1.2.0-20240307"
 
 # Default values
 option_b_eep_always=0
@@ -145,7 +155,8 @@ home_os=$(uname)
 # as in the "cp" man page
 trailing_slash=0
 
-LZFS=$(which zfs)
+zfs_cmd=$(which zfs)
+LZFS=$zfs_cmd
 RZFS=$LZFS
 ssh_cmd="ssh"
 
@@ -293,7 +304,7 @@ EOT
 # Function to handle errors
 throw_error() {
   local msg=$1
-  exit_status=$2 || 1
+  exit_status=${2:-1}
   echo $msg
   beep
   exit $exit_status
@@ -307,9 +318,11 @@ throw_usage_error() {
   exit 1
 }
 
+# sample usage:
+# execute_command "ls -l" 1
 execute_command() {
-  cmd=$1
-  is_continue_on_fail=$2
+  local cmd=$1
+  local is_continue_on_fail=${2:-0}
 
   if [ $option_n_dryrun -eq 1 ]; then
     echov "Dry run: $cmd"
@@ -337,7 +350,6 @@ echov() {
 # Stop a list of SMF services. The services are read in from stdin.
 #
 stopsvcs() {
-
   while read service; do
     echov "Disabling service $service."
     svcadm disable -st "$service" ||
@@ -477,9 +489,9 @@ zfs_send_receive() {
   local recv_cmd=""
 
   if [ -z "$prevsnap" ]; then
-    send_cmd="/sbin/zfs send $snapshot"
+    send_cmd="$zfs_cmd send $snapshot"
   else
-    send_cmd="/sbin/zfs send -i $prevsnap $snapshot"
+    send_cmd="$zfs_cmd send -i $prevsnap $snapshot"
   fi
   recv_cmd="$RZFS receive $option_F $dest"
 
@@ -570,7 +582,7 @@ newsnap() {
     cmd="$LZFS snapshot $sourcefs@$snap"
   fi
 
-  execute_command $cmd
+  execute_command "$cmd"
 }
 
 #
@@ -666,7 +678,7 @@ inspect_delete_snap() {
       echov "Destroying destination snapshot $dest_snap."
       cmd="$RZFS destroy $dest_snap"
       # pass 1 to continue command if it fails
-      execute_command $cmd 1
+      execute_command "$cmd" 1
     fi
   done
 
@@ -1941,7 +1953,7 @@ while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D:zZ: i; do
     option_o="$OPTARG"
     ;;
   O)
-    LZFS="$ssh_cmd $OPTARG /sbin/zfs"
+    LZFS="$ssh_cmd $OPTARG $zfs_cmd"
     option_O_rigin="$OPTARG"
     ;;
   p)
@@ -1960,7 +1972,7 @@ while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D:zZ: i; do
     option_S=1
     ;;
   T)
-    RZFS="$ssh_cmd $OPTARG /sbin/zfs"
+    RZFS="$ssh_cmd $OPTARG $zfs_cmd"
     option_T_arget="$ssh_cmd $OPTARG "
     ;;
   u)
