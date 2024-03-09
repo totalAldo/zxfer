@@ -131,7 +131,7 @@ option_k_backup_property_mode=0
 option_l_rsync_legacy_mountpoint=0
 option_L_rsync_levels_deep=""
 option_o_override_property=""
-option_O_origin=""
+option_O_origin_user_host=""
 option_p_rsync_persist=0
 option_P_transfer_property=0
 option_R_recursive=""
@@ -140,7 +140,7 @@ option_n_dryrun=0
 option_N_nonrecursive=""
 option_S_rsync_mode=0
 option_s_make_snapshot=0
-option_T_target=""
+option_T_target_user_host=""
 option_u_rsync_use_existing_snapshot=0
 option_U_skip_unsupported_properties=0
 option_v_verbose=0
@@ -176,8 +176,9 @@ zfs_cmd=$(which zfs)
 ssh_cmd=$(which ssh)
 rsync_cmd=""
 
+# default zfs commands, can be overridden by -O or -T
 LZFS=$zfs_cmd
-RZFS=$LZFS
+RZFS=$zfs_cmd
 
 # specific to zfs mode
 zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
@@ -325,8 +326,11 @@ read_command_line_switches() {
       option_o_override_property="$OPTARG"
       ;;
     O)
+      # since we are using the -O option, we are pulling a remote transfer
+      # so we need to use the ssh command to execute the zfs commands
+      # $OPTARG is the user@host
       LZFS="$ssh_cmd $OPTARG $zfs_cmd"
-      option_O_origin="$OPTARG"
+      option_O_origin_user_host="$OPTARG"
       ;;
     p)
       option_p_rsync_persist=1
@@ -344,8 +348,11 @@ read_command_line_switches() {
       option_S_rsync_mode=1
       ;;
     T)
+      # since we are using the -T option, we are pushing a remote transfer
+      # so we need to use the ssh command to execute the zfs commands
+      # $OPTARG is the user@host
       RZFS="$ssh_cmd $OPTARG $zfs_cmd"
-      option_T_target="$OPTARG"
+      option_T_target_user_host="$OPTARG"
       ;;
     u)
       option_u_rsync_use_existing_snapshot=1
@@ -398,7 +405,7 @@ beep() {
 
 #
 # Gets a $(uname), i.e. the operating system, for origin or target, if remote.
-# Takes: $1=either $option_O_origin or $option_T_target
+# Takes: $1=either $option_O_origin_user_host or $option_T_target_user_host
 #
 get_os() {
   local input_options=$1
@@ -424,23 +431,23 @@ init_variables() {
   echov "Home OS: $home_os"
 
   # determine the source_os
-  if [ "$option_O_origin" != "" ]; then
-    source_os=$(get_os "$ssh_cmd $option_O_origin")
+  if [ "$option_O_origin_user_host" != "" ]; then
+    source_os=$(get_os "$ssh_cmd $option_O_origin_user_host")
   else
     source_os=$(get_os "")
   fi
   echov "Source OS: $source_os"
 
   # determine the dest_os
-  if [ "$option_T_target" != "" ]; then
-    dest_os=$(get_os "$ssh_cmd $option_T_target")
+  if [ "$option_T_target_user_host" != "" ]; then
+    dest_os=$(get_os "$ssh_cmd $option_T_target_user_host")
   else
     dest_os=$(get_os "")
   fi
   echov "Destination OS: $dest_os"
 
   if [ $option_e_restore_property_mode -eq 1 ]; then
-    lcat_cmd=$(${ssh_cmd} ${option_O_origin} which cat)
+    lcat_cmd=$(${ssh_cmd} ${option_O_origin_user_host} which cat)
     echov "cat command: $lcat_cmd"
   fi
 
@@ -481,7 +488,7 @@ consistency_check() {
       throw_usage_error "-s option cannot be used with -S (rsync mode)"
     fi
 
-    if [ "$option_O_origin" != "" -o "$option_T_target" != "" ]; then
+    if [ "$option_O_origin_user_host" != "" -o "$option_T_target_user_host" != "" ]; then
       throw_usage_error "-O or -T option cannot be used with -S (rsync mode)"
     fi
 
@@ -501,14 +508,14 @@ consistency_check() {
     fi
 
     if [ $option_z_compress -eq 1 -a \
-      "$option_O_origin" = "" -a \
-      "$option_T_target" = "" \
+      "$option_O_origin_user_host" = "" -a \
+      "$option_T_target_user_host" = "" \
       ]; then
       throw_usage_error "-z option can only be used with -O or -T option"
     fi
 
     # disallow migration related options and remote transfers at same time
-    if [ "$option_T_target" != "" -o "$option_O_origin" != "" ]; then
+    if [ "$option_T_target_user_host" != "" -o "$option_O_origin_user_host" != "" ]; then
       if [ $option_m_migrate -eq 1 -o "$services" != "" ]; then
         throw_usage_error "You cannot migrate to or from a remote host."
       fi
@@ -579,8 +586,8 @@ get_backup_properties() {
   while [ $found_backup_file -eq 0 ]; do
     local backup_file_dir=$($LZFS get -H -o value mountpoint $suspect_fs)
     #if [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then  # before remote transfer
-    if $option_O_origin [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then
-      restored_backup_file_contents=$($option_O_origin $lcat_cmd $backup_file_dir/$backup_file_extension.$suspect_fs_tail)
+    if $option_O_origin_user_host [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then
+      restored_backup_file_contents=$($option_O_origin_user_host $lcat_cmd $backup_file_dir/$backup_file_extension.$suspect_fs_tail)
       found_backup_file=1
     else
       suspect_fs_parent=$(echo "$suspect_fs" | sed -e 's%/[^/]*$%%g')
@@ -619,7 +626,7 @@ $backup_file_extension.$is_tail"
   # "Permission denied" errors, and ALSO works with local or remote.
   if [ $option_n_dryrun -eq 0 ]; then
     echo "echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
-$backup_file_dir/$backup_file_extension.$is_tail" | "$ssh_cmd $option_T_target" sh ||
+$backup_file_dir/$backup_file_extension.$is_tail" | "$ssh_cmd $option_T_target_user_host" sh ||
       {
         echo "Error writing backup file. Is filesystem mounted?"
         beep
@@ -627,7 +634,7 @@ $backup_file_dir/$backup_file_extension.$is_tail" | "$ssh_cmd $option_T_target" 
       }
   else
     echo "echo \"echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
-$backup_file_dir/$backup_file_extension.$is_tail\" | "$ssh_cmd $option_T_target" sh"
+$backup_file_dir/$backup_file_extension.$is_tail\" | "$ssh_cmd $option_T_target_user_host" sh"
   fi
 }
 
@@ -1384,7 +1391,7 @@ wrap_command_with_ssh() {
 
 #
 # Handle zfs send/receive
-# Takes $option_D_display_progress_bar $option_z_compress, $option_O_origin, $option_T_target
+# Takes $option_D_display_progress_bar $option_z_compress, $option_O_origin_user_host, $option_T_target_user_host
 #
 zfs_send_receive() {
   local snapshot=$1
@@ -1395,11 +1402,11 @@ zfs_send_receive() {
   local send_cmd=$(set_send_command $snapshot $prevsnap)
   local recv_cmd=$(set_receive_command $dest)
 
-  if [ "$option_O_origin" != "" ]; then
-    send_cmd=$(wrap_command_with_ssh "$send_cmd" $option_O_origin $option_z_compress "send")
+  if [ "$option_O_origin_user_host" != "" ]; then
+    send_cmd=$(wrap_command_with_ssh "$send_cmd" $option_O_origin_user_host $option_z_compress "send")
   fi
-  if [ "$option_T_target" != "" ]; then
-    recv_cmd=$(wrap_command_with_ssh "$recv_cmd" $option_T_target $option_z_compress "receive")
+  if [ "$option_T_target_user_host" != "" ]; then
+    recv_cmd=$(wrap_command_with_ssh "$recv_cmd" $option_T_target_user_host $option_z_compress "receive")
   fi
 
   # Perform this after ssh wrapping occurs
