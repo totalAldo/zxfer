@@ -149,8 +149,6 @@ option_U_skip_unsupported_properties=0
 option_v_verbose=0
 option_z_compress=0
 
-exit_status=1 # defaults to failure
-
 services=""
 torestart=""
 
@@ -385,9 +383,10 @@ read_command_line_switches() {
 
 #
 # Beeps a success sound if -B enabled, and a failure sound if -b or -B enabled.
-# Takes: $exit_status (0 if success, 1 if failure)
 #
 beep() {
+  local exit_status=${1:-1} # default to 1 (failure)
+
   if [ $option_b_beep_always -eq 1 -o $option_B_beep_on_success -eq 1 ]; then
     # load the speaker kernel module if not loaded already
     speaker_km_loaded=$(kldstat | grep -c speaker.ko)
@@ -529,18 +528,18 @@ consistency_check() {
 # Function to handle errors
 throw_error() {
   local msg=$1
-  local exit_status=${2:-1}
+  local exit_status=${2:-1} # global used by beep
   echo $msg
-  beep
+  beep $exit_status
   exit $exit_status
 }
 
 throw_usage_error() {
   local msg=$1
-  local exit_status=${2:-1}
+  local exit_status=${2:-1} # global used by beep
   echo "Error: $msg"
   usage
-  beep
+  beep $exit_status
   exit $exit_status
 }
 
@@ -630,11 +629,7 @@ $backup_file_extension.$is_tail"
   if [ $option_n_dryrun -eq 0 ]; then
     echo "echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
 $backup_file_dir/$backup_file_extension.$is_tail" | "$ssh_cmd $option_T_target_user_host" sh ||
-      {
-        echo "Error writing backup file. Is filesystem mounted?"
-        beep
-        exit 1
-      }
+      throw_error "Error writing backup file. Is filesystem mounted?"
   else
     echo "echo \"echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
 $backup_file_dir/$backup_file_extension.$is_tail\" | "$ssh_cmd $option_T_target_user_host" sh"
@@ -1020,11 +1015,7 @@ with specified properties."
 
       if [ $option_n_dryrun -eq 0 ]; then
         eval "$RZFS create $override_option_list $actual_dest" ||
-          {
-            echo "Error when creating destination filesystem."
-            beep
-            exit 1
-          }
+          throw_error "Error when creating destination filesystem."
       else
         echo "$RZFS create $override_option_list $actual_dest"
       fi
@@ -1061,11 +1052,7 @@ with specified properties."
 with specified properties."
       if [ $option_n_dryrun -eq 0 ]; then
         eval "$RZFS create -p $creation_option_list $actual_dest" ||
-          {
-            echo "Error when creating destination filesystem."
-            beep
-            exit 1
-          }
+          throw_error "Error when creating destination filesystem."
       else
         echo "$RZFS create -p $creation_option_list $actual_dest"
       fi
@@ -1257,11 +1244,7 @@ with specified properties."
 
       if [ $option_n_dryrun -eq 0 ]; then
         $RZFS set "${ov_property}=${ov_value}" "$actual_dest" ||
-          {
-            echo "Error when setting properties on destination filesystem."
-            beep
-            exit 1
-          }
+          trhow_error "Error when setting properties on destination filesystem."
       else
         echo "$RZFS set $ov_property=$ov_value $actual_dest"
       fi
@@ -1285,12 +1268,7 @@ with specified properties."
 
         if [ $option_n_dryrun -eq 0 ]; then
           $RZFS inherit "$ov_property" "$actual_dest" ||
-            {
-              echo "Error when inheriting properties on destination \
-filesystem."
-              beep
-              exit 1
-            }
+            throw_error "Error when inheriting properties on destination filesystem."
         else
           echo "$RZFS inherit $ov_property $actual_dest"
         fi
@@ -2254,11 +2232,7 @@ options $full_rs_options"
         $rsync_cmd $full_rs_options $rs_source $rs_dest # persist in face of error
       else
         $rsync_cmd $full_rs_options $rs_source $rs_dest ||
-          {
-            echo "Error when executing rsync."
-            beep
-            exit 1
-          }
+          throw_error "Error when executing rsync."
       fi
     else
       echo "$rsync_cmd $full_rs_options $rs_source $rs_dest"
@@ -2422,7 +2396,7 @@ a single file, use -N."
 }
 
 ###############################################################################
-# MAIN section, i.e. code that is not a function
+# MAIN
 ###############################################################################
 read_command_line_switches "$@"
 
@@ -2450,6 +2424,5 @@ if [ $option_k_backup_property_mode -eq 1 ]; then
   write_backup_properties
 fi
 
-exit_status=0
-beep # plays success or failure sound
+beep 0
 exit 0
