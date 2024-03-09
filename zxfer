@@ -385,9 +385,9 @@ read_command_line_switches() {
 # Beeps a success sound if -B enabled, and a failure sound if -b or -B enabled.
 #
 beep() {
-  local exit_status=${1:-1} # default to 1 (failure)
+  _exit_status=${1:-1} # default to 1 (failure)
 
-  if [ $option_b_beep_always -eq 1 -o $option_B_beep_on_success -eq 1 ]; then
+  if [ $option_b_beep_always -eq 1 ] || [ $option_B_beep_on_success -eq 1 ]; then
     # load the speaker kernel module if not loaded already
     speaker_km_loaded=$(kldstat | grep -c speaker.ko)
     if [ "$speaker_km_loaded" = "0" ]; then
@@ -395,7 +395,7 @@ beep() {
     fi
 
     # play the appropriate beep
-    if [ $exit_status -eq 0 ]; then
+    if [ "$_exit_status" -eq 0 ]; then
       if [ $option_B_beep_on_success -eq 1 ]; then
         echo "T255CCMLEG~EG..." >/dev/speaker # success sound
       fi
@@ -410,17 +410,17 @@ beep() {
 # Takes: $1=either $option_O_origin_user_host or $option_T_target_user_host
 #
 get_os() {
-  local input_options=$1
-  local output_os=""
+  _input_options=$1
+  _output_os=""
 
   # Get uname of the destination (target) machine, local or remote
-  if [ "$input_options" = "" ]; then
-    output_os=$(uname)
+  if [ "$_input_options" = "" ]; then
+    _output_os=$(uname)
   else
-    output_os=$($input_options uname)
+    _output_os=$($_input_options uname)
   fi
 
-  echo $output_os
+  echo "$_output_os"
 }
 
 #
@@ -444,7 +444,7 @@ init_variables() {
   fi
 
   if [ $option_e_restore_property_mode -eq 1 ]; then
-    lcat_cmd=$(${ssh_cmd} ${option_O_origin_user_host} which cat)
+    lcat_cmd=$("$ssh_cmd" "$option_O_origin_user_host" which cat)
   fi
 
   if [ $option_S_rsync_mode -eq 1 ]; then
@@ -461,12 +461,12 @@ init_variables() {
 #
 consistency_check() {
   # disallow backup and restore of properties at same time
-  if [ $option_k_backup_property_mode -eq 1 -a $option_e_restore_property_mode -eq 1 ]; then
+  if [ $option_k_backup_property_mode -eq 1 ] && [ $option_e_restore_property_mode -eq 1 ]; then
     throw_usage_error "You cannot bac(k)up and r(e)store properties at the same time."
   fi
 
   # disallow both beep modes, enforce using one or the other.
-  if [ $option_b_beep_always -eq 1 -a $option_B_beep_on_success -eq 1 ]; then
+  if [ $option_b_beep_always -eq 1 ] && [ $option_B_beep_on_success -eq 1 ]; then
     throw_usage_error "You cannot use both beep modes at the same time."
   fi
 
@@ -482,7 +482,7 @@ consistency_check() {
       throw_usage_error "-s option cannot be used with -S (rsync mode)"
     fi
 
-    if [ "$option_O_origin_user_host" != "" -o "$option_T_target_user_host" != "" ]; then
+    if [ "$option_O_origin_user_host" != "" ] || [ "$option_T_target_user_host" != "" ]; then
       throw_usage_error "-O or -T option cannot be used with -S (rsync mode)"
     fi
 
@@ -501,16 +501,15 @@ consistency_check() {
       throw_usage_error "-L option can only be used with -S (rsync mode)"
     fi
 
-    if [ $option_z_compress -eq 1 -a \
-      "$option_O_origin_user_host" = "" -a \
-      "$option_T_target_user_host" = "" \
-      ]; then
+    if [ $option_z_compress -eq 1 ] &&
+      [ "$option_O_origin_user_host" = "" ] &&
+      [ "$option_T_target_user_host" = "" ]; then
       throw_usage_error "-z option can only be used with -O or -T option"
     fi
 
     # disallow migration related options and remote transfers at same time
-    if [ "$option_T_target_user_host" != "" -o "$option_O_origin_user_host" != "" ]; then
-      if [ $option_m_migrate -eq 1 -o "$services" != "" ]; then
+    if [ "$option_T_target_user_host" != "" ] || [ "$option_O_origin_user_host" != "" ]; then
+      if [ $option_m_migrate -eq 1 ] || [ "$services" != "" ]; then
         throw_usage_error "You cannot migrate to or from a remote host."
       fi
     fi
@@ -519,40 +518,40 @@ consistency_check() {
 
 # Function to handle errors
 throw_error() {
-  local msg=$1
-  local exit_status=${2:-1} # global used by beep
-  echo $msg
-  beep $exit_status
-  exit $exit_status
+  _msg=$1
+  _exit_status=${2:-1} # global used by beep
+  echo "$_msg"
+  beep "$_exit_status"
+  exit "$_exit_status"
 }
 
 throw_usage_error() {
-  local msg=$1
-  local exit_status=${2:-1} # global used by beep
-  echo "Error: $msg"
+  _msg=$1
+  _exit_status=${2:-1} # global used by beep
+  echo "Error: $_msg"
   usage
-  beep $exit_status
-  exit $exit_status
+  beep "$_exit_status"
+  exit "$_exit_status"
 }
 
 # sample usage:
 # execute_command "ls -l" 1
 execute_command() {
-  local cmd=$1
-  local is_continue_on_fail=${2:-0}
+  _cmd=$1
+  _is_continue_on_fail=${2:-0}
 
   if [ $option_n_dryrun -eq 1 ]; then
-    echov "Dry run: $cmd"
+    echov "Dry run: $_cmd"
     return
   fi
 
-  echov $cmd
-  if [ $is_continue_on_fail -eq 1 ]; then
-    eval $cmd || {
+  echov "$_cmd"
+  if [ "$_is_continue_on_fail" -eq 1 ]; then
+    eval "$_cmd" || {
       echo "Non-critical error when executing command. Continuing."
     }
   else
-    eval $cmd || throw_error "Error when executing command."
+    eval "$_cmd" || throw_error "Error when executing command."
   fi
 }
 
@@ -574,27 +573,26 @@ get_backup_properties() {
   # We will step back through the filesystem hierarchy from $initial_source
   # until the pool level, looking for the backup file, stopping when we find
   # it or terminating with an error.
-  local suspect_fs=$initial_source
-  local suspect_fs_tail=""
-  local found_backup_file=0
-  while [ $found_backup_file -eq 0 ]; do
-    local backup_file_dir=$($LZFS get -H -o value mountpoint $suspect_fs)
+  _suspect_fs=$initial_source
+  _suspect_fs_tail=""
+  _found_backup_file=0
+  while [ $_found_backup_file -eq 0 ]; do
+    _backup_file_dir=$($LZFS get -H -o value mountpoint "$_suspect_fs")
 
-    if $option_O_origin_user_host [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then
-      restored_backup_file_contents=$($option_O_origin_user_host $lcat_cmd $backup_file_dir/$backup_file_extension.$suspect_fs_tail)
-      found_backup_file=1
+    if $option_O_origin_user_host [ -r "$_backup_file_dir/$backup_file_extension.$_suspect_fs_tail" ]; then
+      restored_backup_file_contents=$($option_O_origin_user_host "$lcat_cmd" "$_backup_file_dir/$backup_file_extension.$_suspect_fs_tail")
+      _found_backup_file=1
     else
-      suspect_fs_parent=$(echo "$suspect_fs" | sed -e 's%/[^/]*$%%g')
-      if [ $suspect_fs_parent = $suspect_fs ]; then
+      _suspect_fs_parent=$(echo "$_suspect_fs" | sed -e 's%/[^/]*$%%g')
+      if [ "$_suspect_fs_parent" = "$_suspect_fs" ]; then
         echo "Error: Cannot find backup property file. Ensure that it"
         echo "exists and that it is in a directory corresponding to the"
         echo "mountpoints of one of the ancestor filesystems of the source."
-        echo "The filename should be $backup_filename"
         usage
         exit 1
       else
-        suspect_fs_tail=$(echo "$suspect_fs" | sed -e 's/.*\///g')
-        suspect_fs=$suspect_fs_parent
+        _suspect_fs_tail=$(echo "$_suspect_fs" | sed -e 's/.*\///g')
+        _suspect_fs=$_suspect_fs_parent
       fi
     fi
   done
@@ -608,23 +606,22 @@ get_backup_properties() {
 # corresponding to the destination filesystem
 #
 write_backup_properties() {
-  local is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
-  local backup_file_dir=$($RZFS get -H -o value mountpoint $destination)
-  echov "Writing backup info to location $backup_file_dir/\
-$backup_file_extension.$is_tail"
-  local backup_file_header="#zxfer property backup file;#version:$zxfer_version;#R options:$option_R_recursive;#N options:$option_N_nonrecursive;#destination:$destination;#initial_source:$is_tail;#option_S_rsync_mode:$option_S_rsync_mode;"
-  local backup_date=$(date)
-  backup_file_contents="$backup_file_header#backup_date:$backup_date$backup_file_contents"
+  _is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
+  _backup_file_dir=$($RZFS get -H -o value mountpoint "$destination")
+  echov "Writing backup info to location $_backup_file_dir/$backup_file_extension.$_is_tail"
+  _backup_file_header="#zxfer property backup file;#version:$zxfer_version;#R options:$option_R_recursive;#N options:$option_N_nonrecursive;#destination:$destination;#initial_source:$_is_tail;#option_S_rsync_mode:$option_S_rsync_mode;"
+  _backup_date=$(date)
+  backup_file_contents="$_backup_file_header#backup_date:$_backup_date$backup_file_contents"
 
   # Write the backup file; doing it this way prevents S11E from throwing
   # "Permission denied" errors, and ALSO works with local or remote.
   if [ $option_n_dryrun -eq 0 ]; then
     echo "echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
-$backup_file_dir/$backup_file_extension.$is_tail" | "$ssh_cmd $option_T_target_user_host" sh ||
+$_backup_file_dir/$backup_file_extension.$_is_tail" | "$ssh_cmd $option_T_target_user_host" sh ||
       throw_error "Error writing backup file. Is filesystem mounted?"
   else
     echo "echo \"echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
-$backup_file_dir/$backup_file_extension.$is_tail\" | "$ssh_cmd $option_T_target_user_host" sh"
+$_backup_file_dir/$backup_file_extension.$_is_tail\" | "$ssh_cmd $option_T_target_user_host" sh"
   fi
 }
 
@@ -636,9 +633,9 @@ $backup_file_dir/$backup_file_extension.$is_tail\" | "$ssh_cmd $option_T_target_
 remove_sources() {
   new_rmvs_pv="" # global
 
-  local rmvs_list=$1
+  _rmvs_list=$1
 
-  for rmvs_line in $rmvs_list; do
+  for rmvs_line in $_rmvs_list; do
     rmvs_property=$(echo "$rmvs_line" | cut -f1 -d=)
     rmvs_value=$(echo "$rmvs_line" | cut -f2 -d=)
     new_rmvs_pv="$new_rmvs_pv$rmvs_property=$rmvs_value,"
@@ -656,21 +653,21 @@ remove_sources() {
 select_mc() {
   new_mc_pvs="" # global
 
-  local mc_list=$1          # target list of properties, values
-  local mc_property_list=$2 # list of properties to select
+  _mc_list=$1          # target list of properties, values
+  _mc_property_list=$2 # list of properties to select
 
   # remove readonly properties from the override list
-  for mc_line in $mc_list; do
+  for mc_line in $_mc_list; do
     found_mc=0
     mc_property=$(echo "$mc_line" | cut -f1 -d=)
     mc_value=$(echo "$mc_line" | cut -f2 -d=)
     mc_source=$(echo "$mc_line" | cut -f3 -d=)
     # test for readonly properties
-    for property in $mc_property_list; do
+    for property in $_mc_property_list; do
       if [ "$property" = "$mc_property" ]; then
         found_mc=1
         #since the property was matched let's not waste time looking for it again
-        mc_property_list=$(echo "$mc_property_list" | tr -s "," "\n" |
+        _mc_property_list=$(echo "$_mc_property_list" | tr -s "," "\n" |
           grep -v ^"$property"$ | tr -s "\n" ",")
         break
       fi
@@ -691,16 +688,16 @@ select_mc() {
 remove_properties() {
   new_rmv_pvs="" # global
 
-  local rmv_list=$1    # the list of properties=values=sources,...
-  local remove_list=$2 # list of properties to remove
+  _rmv_list=$1    # the list of properties=values=sources,...
+  _remove_list=$2 # list of properties to remove
 
-  for rmv_line in $rmv_list; do
+  for rmv_line in $_rmv_list; do
     found_readonly=0
     rmv_property=$(echo "$rmv_line" | cut -f1 -d=)
     rmv_value=$(echo "$rmv_line" | cut -f2 -d=)
     rmv_source=$(echo "$rmv_line" | cut -f3 -d=)
     # test for readonly properties
-    for property in $remove_list; do
+    for property in $_remove_list; do
       if [ "$property" = "$rmv_property" ]; then
         if [ "$rmv_source" = "override" ]; then
           # The user has specifically required we set this property
@@ -708,8 +705,8 @@ remove_properties() {
         fi
         found_readonly=1
         #since the property was matched let's not waste time looking for it again
-        remove_list=$(echo "$remove_list" | tr -s "," "\n" | grep -v ^"$property"$)
-        remove_list=$(echo "$remove_list" | tr -s "\n" ",")
+        _remove_list=$(echo "$_remove_list" | tr -s "," "\n" | grep -v ^"$property"$)
+        _remove_list=$(echo "$_remove_list" | tr -s "\n" ",")
         break
       fi
     done
@@ -727,12 +724,12 @@ remove_properties() {
 # output is in new_rmv_pvs
 #
 remove_unsupported_properties() {
-  local orig_set_list=$1 # the list of properties=values=sources,...
-  local FUNCIFS=$IFS
+  _orig_set_list=$1 # the list of properties=values=sources,...
+  _FUNCIFS=$IFS
   IFS=","
 
   only_supported_properties=""
-  for orig_line in $orig_set_list; do
+  for orig_line in $_orig_set_list; do
     found_unsup=0
     orig_set_property=$(echo "$orig_line" | cut -f1 -d=)
     orig_set_value=$(echo "$orig_line" | cut -f2 -d=)
@@ -750,7 +747,7 @@ remove_unsupported_properties() {
     fi
   done
   only_supported_properties=${only_supported_properties%,}
-  IFS=$FUNCIFS
+  IFS=$_FUNCIFS
 }
 
 #
@@ -758,15 +755,15 @@ remove_unsupported_properties() {
 # machine-readable values
 #
 resolve_human_vars() {
-  local machine_vars=$1
-  local human_vars=$2
-  local FUNCIFS=$IFS
+  _machine_vars=$1
+  _human_vars=$2
+  _FUNCIFS=$IFS
   IFS=","
 
   human_results=
-  for h_var in $human_vars; do
+  for h_var in $_human_vars; do
     h_prop=${h_var%%=*}
-    for m_var in $machine_vars; do
+    for m_var in $_machine_vars; do
       m_prop=${m_var%%=*}
       if [ "$h_prop" = "$m_prop" ]; then
         machine_property=$(echo "$m_var" | cut -f1 -d=)
@@ -781,7 +778,7 @@ resolve_human_vars() {
     done
   done
   human_results=${human_results%,}
-  IFS=$FUNCIFS
+  IFS=$_FUNCIFS
 }
 
 #
@@ -794,7 +791,7 @@ get_actual_dest() {
   # A trailing slash means that the root filesystem is transferred straight
   # into the dest fs, no trailing slash means that this fs is created
   # inside the destination.
-  if [ $trailing_slash -eq 0 ]; then
+  if [ "$trailing_slash" -eq 0 ]; then
     # If the original source was backup/test/zroot and we are transferring
     # backup/test/zroot/tmp/foo, $dest_tail is zroot/tmp/foo
     dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
@@ -850,7 +847,7 @@ transfer_properties() {
   # add to the details to allow backup of properties
   # unless $dont_write_backup non-zero, as with first rsync transfer
   # of properties
-  if [ $option_k_backup_property_mode -eq 1 -a $dont_write_backup -eq 0 ]; then
+  if [ $option_k_backup_property_mode -eq 1 ] && [ $dont_write_backup -eq 0 ]; then
     backup_file_contents="$backup_file_contents;\
 $source,$actual_dest,$source_pvs"
   fi
@@ -943,9 +940,9 @@ $override_value=$override_source,"
         fi
       done
       override_pvs="$override_pvs$override_property=$override_value=$override_source,"
-      if [ "$creation_property" != "NULL" -a "$creation_source" = "local" ]; then
+      if [ "$creation_property" != "NULL" ] && [ "$creation_source" = "local" ]; then
         creation_pvs="$creation_pvs$creation_property=$creation_value=$creation_source,"
-      elif [ "$source_dstype" = "volume" -a "$creation_property" = "refreservation" ]; then
+      elif [ "$source_dstype" = "volume" ] && [ "$creation_property" = "refreservation" ]; then
         creation_pvs="$creation_pvs$creation_property=$creation_value=$creation_source,"
       fi
     done
@@ -957,7 +954,7 @@ $override_value=$override_source,"
   fi
 
   # Remove several properties not supported on Solaris Express.
-  if [ "$dest_os" = "SunOS" -a "$source_os" = "FreeBSD" ]; then
+  if [ "$dest_os" = "SunOS" ] && [ "$source_os" = "FreeBSD" ]; then
     readonly_properties="$readonly_properties,$solexp_readonly_properties"
   fi
 
@@ -1110,8 +1107,7 @@ with specified properties."
         dest_property=$(echo "$dest_line" | cut -f1 -d=)
         dest_value=$(echo "$dest_line" | cut -f2 -d=)
         for mc_property in $must_create_properties; do
-          if [ "$mc_property" = "$dest_property" \
-            -a "$mc_property" = "$ov_property" ]; then
+          if [ "$mc_property" = "$dest_property" ] && [ "$mc_property" = "$ov_property" ]; then
             if [ "$ov_value" != "$dest_value" ]; then
               echo "Error: The property \"$dest_property\" may only be set"
               echo "       at filesystem creation time. To modify this property"
@@ -1170,7 +1166,7 @@ with specified properties."
         dest_value=$(echo "$dest_line" | cut -f2 -d=)
         dest_source=$(echo "$dest_line" | cut -f3 -d=)
         if [ "$ov_property" = "$dest_property" ]; then
-          if [ "$dest_value" != "$ov_value" -o "$dest_source" != "local" ]; then
+          if [ "$dest_value" != "$ov_value" ] || [ "$dest_source" != "local" ]; then
             ov_initsrc_set_list="$ov_initsrc_set_list$ov_property=$ov_value,"
           fi
           # Now we decide whether to leave, set, or inherit on the destination
@@ -1185,10 +1181,10 @@ with specified properties."
             fi
           # at this stage, the src and dest values are the same, just need
           # to figure out whether to set or inherit
-          elif [ "$ov_source" = "local" -a "$dest_source" != "local" ]; then
+          elif [ "$ov_source" = "local" ] && [ "$dest_source" != "local" ]; then
             # value needs to be set
             ov_set_list="$ov_set_list$ov_property=$ov_value,"
-          elif [ "$ov_source" != "local" -a "$dest_source" = "local" ]; then
+          elif [ "$ov_source" != "local" ] && [ "$dest_source" = "local" ]; then
             # need to force inherit
             ov_inherit_list="$ov_inherit_list$ov_property=$ov_value,"
           fi
@@ -1209,10 +1205,10 @@ with specified properties."
     # Let's make the changes.
 
     # First notify the user
-    if [ "$ov_set_list" != "" -o "$ov_inherit_list" != "" -o \
-      "$ov_initsrc_set_list" != "" ]; then
-      echov "Setting properties/sources on destination\
- filesystem \"$actual_dest\"."
+    if [ "$ov_set_list" != "" ] ||
+      [ "$ov_inherit_list" != "" ] ||
+      [ "$ov_initsrc_set_list" != "" ]; then
+      echov "Setting properties/sources on destination filesystem \"$actual_dest\"."
     fi
 
     if [ "$initial_source" = "$source" ]; then
@@ -1283,25 +1279,24 @@ with specified properties."
 # Takes $LZFS (which may contain the ssh commmand if -O is used)
 #
 calculate_size_estimate() {
-  local snapshot=$1
-  local lzfs=$2
+  _snapshot=$1
 
-  local size_dataset=$($LZFS send -nPv "$snapshot" 2>&1) ||
-    throw_error "Error calculating estimate: $size_dataset"
-  local size_est=$(echo "$size_dataset" | grep ^size | tail -n 1 | cut -f 2)
+  _size_dataset=$($LZFS send -nPv "$_snapshot" 2>&1) ||
+    throw_error "Error calculating estimate: $_size_dataset"
+  _size_est=$(echo "$_size_dataset" | grep ^size | tail -n 1 | cut -f 2)
 
-  echo $size_est
+  echo "$_size_est"
 }
 
 setup_progress_dialog() {
-  local size_est=$1
-  local snapshot=$2
+  _size_est=$1
+  _snapshot=$2
 
-  local progress_dialog=$(echo "$option_D_display_progress_bar" |
-    sed "s#%%size%%#$size_est#g" |
-    sed "s#%%title%%#$snapshot#g")
+  _progress_dialog=$(echo "$option_D_display_progress_bar" |
+    sed "s#%%size%%#$_size_est#g" |
+    sed "s#%%title%%#$_snapshot#g")
 
-  echo $progress_dialog
+  echo "$_progress_dialog"
 }
 
 #
@@ -1310,48 +1305,48 @@ setup_progress_dialog() {
 # Error when executing command.
 #
 handle_progress_bar_option() {
-  local snapshot=$1
-  local progress_bar_cmd=""
+  _snapshot=$1
+  _progress_bar_cmd=""
 
   # Calculate the size estimate and set up the progress dialog
-  local size_est=$(calculate_size_estimate "$snapshot")
-  local progress_dialog=$(setup_progress_dialog "$size_est" "$snapshot")
+  _size_est=$(calculate_size_estimate "$_snapshot")
+  _progress_dialog=$(setup_progress_dialog "$_size_est" "$_snapshot")
 
   # Modify the send command to include the progress dialog
-  progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | $progress_dialog"
+  _progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | $_progress_dialog"
 
-  echo $progress_bar_cmd
+  echo "$_progress_bar_cmd"
 }
 
 set_send_command() {
-  local snapshot=$1
-  local prevsnap=$2
+  _snapshot=$1
+  _prevsnap=$2
 
-  if [ -z "$prevsnap" ]; then
-    echo "$zfs_cmd send $snapshot"
+  if [ -z "$_prevsnap" ]; then
+    echo "$zfs_cmd send $_snapshot"
   else
-    echo "$zfs_cmd send -i $prevsnap $snapshot"
+    echo "$zfs_cmd send -i $_prevsnap $_snapshot"
   fi
 }
 
 set_receive_command() {
-  local dest=$1
-  echo "$zfs_cmd receive $option_F_force_rollback $dest"
+  _dest=$1
+  echo "$zfs_cmd receive $option_F_force_rollback $_dest"
 }
 
 wrap_command_with_ssh() {
-  local cmd=$1
-  local option=$2
-  local compress=$3
-  local direction=$4
+  _cmd=$1
+  _option=$2
+  _compress=$3
+  _direction=$4
 
-  if [ $compress -eq 0 ]; then
-    echo "$ssh_cmd $option \"$cmd\""
+  if [ "$_compress" -eq 0 ]; then
+    echo "$ssh_cmd $_option \"$_cmd\""
   else
-    if [ "$direction" = "send" ]; then
-      echo "$ssh_cmd $option \"$cmd | $compress_cmd\" | $decompress_cmd"
+    if [ "$_direction" = "send" ]; then
+      echo "$ssh_cmd $_option \"$_cmd | $compress_cmd\" | $decompress_cmd"
     else
-      echo "$compress_cmd | $ssh_cmd $option \"$decompress_cmd | $cmd\""
+      echo "$compress_cmd | $ssh_cmd $_option \"$decompress_cmd | $_cmd\""
     fi
   fi
 }
@@ -1361,35 +1356,35 @@ wrap_command_with_ssh() {
 # Takes $option_D_display_progress_bar $option_z_compress, $option_O_origin_user_host, $option_T_target_user_host
 #
 zfs_send_receive() {
-  local snapshot=$1
-  local dest=$2
-  local prevsnap=$3
+  _snapshot=$1
+  _dest=$2
+  _prevsnap=$3
 
   # Set up the send and receive commands
-  local send_cmd=$(set_send_command $snapshot $prevsnap)
-  local recv_cmd=$(set_receive_command $dest)
+  _send_cmd=$(set_send_command "$_snapshot" "$_prevsnap")
+  _recv_cmd=$(set_receive_command "$_dest")
 
   if [ "$option_O_origin_user_host" != "" ]; then
-    send_cmd=$(wrap_command_with_ssh "$send_cmd" $option_O_origin_user_host $option_z_compress "send")
+    _send_cmd=$(wrap_command_with_ssh "$_send_cmd" "$option_O_origin_user_host" $option_z_compress "send")
   fi
   if [ "$option_T_target_user_host" != "" ]; then
-    recv_cmd=$(wrap_command_with_ssh "$recv_cmd" $option_T_target_user_host $option_z_compress "receive")
+    _recv_cmd=$(wrap_command_with_ssh "$_recv_cmd" "$option_T_target_user_host" $option_z_compress "receive")
   fi
 
   # Perform this after ssh wrapping occurs
   if [ "$option_D_display_progress_bar" != "" ]; then
-    local progress_bar_cmd=$(handle_progress_bar_option "$snapshot")
-    send_cmd="$send_cmd $progress_bar_cmd"
+    _progress_bar_cmd=$(handle_progress_bar_option "$_snapshot")
+    _send_cmd="$_send_cmd $_progress_bar_cmd"
   fi
 
-  execute_command "$send_cmd | $recv_cmd"
+  execute_command "$_send_cmd | $_recv_cmd"
 }
 
 # Check if the snapshot already exists
 snapshot_exists() {
-  local snapshot=$1
-  local snapshot_list=$2
-  echo "$snapshot_list" | grep -q "^$snapshot"
+  _snapshot=$1
+  _snapshot_list=$2
+  echo "$_snapshot_list" | grep -q "^$_snapshot"
 }
 
 #
@@ -1400,19 +1395,19 @@ snapshot_exists() {
 # Takes $dest, rzfs_list_ho_s
 #
 copy_snap() {
-  local copysrc=$1
-  local copyprev=$2
+  _copysrc=$1
+  _copyprev=$2
 
-  local copydest=$dest
-  local copysrctail=$(echo "$copysrc" | cut -d/ -f2-)
+  _copydest=$dest
+  _copysrctail=$(echo "$_copysrc" | cut -d/ -f2-)
 
   # Check if the snapshot already exists
-  if snapshot_exists "$dest/$copysrctail" "$rzfs_list_ho_s"; then
-    echov "Snapshot $copysrc already exists at destination $copydest. Exiting function."
+  if snapshot_exists "$dest/$_copysrctail" "$rzfs_list_ho_s"; then
+    echov "Snapshot $_copysrc already exists at destination $_copydest. Exiting function."
     return
   fi
 
-  zfs_send_receive "$copysrc" "$copydest" "$copyprev"
+  zfs_send_receive "$_copysrc" "$_copydest" "$_copyprev"
 }
 
 #
@@ -1423,20 +1418,19 @@ copy_snap() {
 # Takes: $found_last_common_snap, $source, $copy_fs_snapshot_list
 #
 copy_snap_multiple() {
-  local snapshot=""
-  local lastsnap=""
+  _lastsnap=""
 
   # if there is a snapshot common to both src and dest, set that to be $lastsnap
   if [ $found_last_common_snap -eq 1 ]; then
-    lastsnap="$source@$last_common_snap"
+    _lastsnap="$source@$last_common_snap"
   fi
 
   # XXX: This can get stale, especially if it has taken hours to copy the
   # previous snapshot. Consider adding a time check and refreshing the list of
   # snapshots if it has been too long since we got the list
-  for snapshot in $copy_fs_snapshot_list; do
-    copy_snap "$snapshot" "$lastsnap"
-    lastsnap=$snapshot
+  for _snapshot in $copy_fs_snapshot_list; do
+    copy_snap "$_snapshot" "$_lastsnap"
+    _lastsnap=$_snapshot
   done
 }
 
@@ -1449,7 +1443,7 @@ copy_fs() {
 
   # Instead of transferring all the source snapshots, this just transfers
   # the ones starting from the latest common snapshot on src and dest
-  copy_fs_snapshot_list=$(echo $src_snapshot_transfer_list | grep ".")
+  copy_fs_snapshot_list=$(echo "$src_snapshot_transfer_list" | grep ".")
   copy_snap_multiple
 }
 
@@ -1457,7 +1451,7 @@ copy_fs() {
 # Stop a list of SMF services. The services are read in from stdin.
 #
 stopsvcs() {
-  while read service; do
+  while read -r service; do
     echov "Disabling service $service."
     svcadm disable -st "$service" ||
       {
@@ -1465,7 +1459,7 @@ stopsvcs() {
         relaunch
         exit 1
       }
-    torestart=$(echo $torestart $service)
+    torestart="$torestart $service"
   done
 }
 
@@ -1503,10 +1497,10 @@ newsnap() {
 # Tests to see if they are trying to sync a snapshots; exit if so
 #
 check_snapshot() {
-  initial_sourcesnap=$(echo $initial_source | grep @ | cut -d@ -f2)
+  _initial_sourcesnap=$(echo "$initial_source" | grep @ | cut -d@ -f2)
 
   # When using -s or -m, we don't want the source to be a snapshot.
-  [ -n "$initial_sourcesnap" ] && throw_error "Snapshots are not allowed as a source."
+  [ -n "$_initial_sourcesnap" ] && throw_error "Snapshots are not allowed as a source."
 }
 
 #
@@ -1603,8 +1597,8 @@ inspect_delete_snap() {
     mark_snap_for_deletion=1
     for src_snap in $zfs_source_snaps; do
       # if the snaps are identical
-      if [ $(echo $dest_snap | grep @ | cut -d@ -f2) = $(echo $src_snap |
-        grep @ | cut -d@ -f2) ]; then
+      if [ "$(echo "$dest_snap" | grep @ | cut -d@ -f2)" = "$(echo "$src_snap" |
+        grep @ | cut -d@ -f2)" ]; then
 
         # mark snap not to be deleted
         mark_snap_for_deletion=0
@@ -1625,15 +1619,15 @@ inspect_delete_snap() {
       fi
     done
 
-    if [ $mark_snap_for_deletion = 1 -a "$option_g_grandfather_protection" != "" ]; then
+    if [ $mark_snap_for_deletion = 1 ] && [ "$option_g_grandfather_protection" != "" ]; then
       grandfather_test "$dest_snap"
     fi
 
-    if [ $mark_snap_for_deletion = 1 -a $option_d_delete_destination_snapshots -eq 1 ]; then
+    if [ $mark_snap_for_deletion = 1 ] && [ $option_d_delete_destination_snapshots -eq 1 ]; then
       #echov "Destroying destination snapshot $dest_snap."
-      cmd="$RZFS destroy $dest_snap"
+      _cmd="$RZFS destroy $dest_snap"
       # pass 1 to continue command if it fails
-      execute_command "$cmd" 1
+      execute_command "$_cmd" 1
     fi
   done
 
@@ -1702,7 +1696,7 @@ get_zfs_list() {
 # zfs send/receive mode, aka zfs-replicate mode, aka normal mode
 #
 run_zfs_mode() {
-  if [ "$option_R_recursive" != "" -a "$option_N_nonrecursive" != "" ]; then
+  if [ "$option_R_recursive" != "" ] && [ "$option_N_nonrecursive" != "" ]; then
     throw_usage_error "If using normal mode (i.e. no -S), you must choose either -N to transfer \
 a single filesystem or -R to transfer a single filesystem and its children \
 recursively, but not both -N and -R at the same time."
@@ -1715,8 +1709,8 @@ recursively, but not both -N and -R at the same time."
   fi
 
   # Source and destination can't start with "/", but it's an easy mistake to make
-  if [ $(echo $initial_source | grep -c ^/) -eq "1" -o \
-    $(echo $destination | grep -c ^/) -eq "1" ]; then
+  if [ "$(echo "$initial_source" | grep -c '^/')" -eq "1" ] ||
+    [ "$(echo "$destination" | grep -c '^/')" -eq "1" ]; then
     throw_usage_error "Source and destination must not begin with \"/\". Note the example."
   fi
 
@@ -1725,11 +1719,8 @@ recursively, but not both -N and -R at the same time."
 
   # Enforce the when using -c you must use -m as well rule. This forces the user
   # To think twice if they really mean to do the migration.
-  [ -n "$services" -a $option_m_migrate -eq 0 ] &&
-    {
-      echo "When using -c, -m needs to be specified as well."
-      exit 1
-    }
+  [ -n "$services" ] && [ $option_m_migrate -eq 0 ] &&
+    throw_error "When using -c, -m needs to be specified as well."
 
   # Caches all the zfs list calls, gets the recursive list, and gives
   # an opportunity to exit if the source is not present
@@ -1760,7 +1751,7 @@ recursively, but not both -N and -R at the same time."
   #
   # If using -s, do a new recursive snapshot, then copy all new snapshots too.
   #
-  if [ $option_s_make_snapshot -eq 1 -a $option_m_migrate -eq 0 ]; then
+  if [ $option_s_make_snapshot -eq 1 ] && [ $option_m_migrate -eq 0 ]; then
     # We snapshot from the base of the initial source
     sourcefs=$(echo $initial_source | cut -d@ -f1)
     # Create the new snapshot with a unique name.
@@ -1825,7 +1816,8 @@ recursively, but not both -N and -R at the same time."
   for source in $recursive_source_list; do
     # Split up source into source fs, last component
     sourcefs=$(echo $source | cut -d@ -f1)
-    sourcefslast=$(echo $sourcefs | sed -e "s%.*/%%")
+    # unused variable
+    #sourcefslast=$(echo $sourcefs | sed -e "s%.*/%%")
 
     get_actual_dest
 
@@ -1849,7 +1841,7 @@ recursively, but not both -N and -R at the same time."
 
     # Transfer source properties to destination if required.
     # in the function.
-    if [ $option_P_transfer_property -eq 1 -o "$option_o_override_property" != "" ]; then
+    if [ $option_P_transfer_property -eq 1 ] || [ "$option_o_override_property" != "" ]; then
       transfer_properties
     fi
 
@@ -1962,8 +1954,7 @@ $dest_exclude_dir_list"
 # Caches zfs list commands to cut execution time, for option -S
 #
 get_zfs_list_rsync_mode() {
-
-  recursive_dest_list=$($RZFS list -t filesystem,volume -Hr -o name $destination)
+  recursive_dest_list=$($RZFS list -t filesystem,volume -Hr -o name "$destination")
 
   #  Exit if destination not sound
   if [ "$recursive_dest_list" = "" ]; then
@@ -2011,7 +2002,7 @@ directories are contained in filesystems with as many \"/\" as L."
         fi
         old_root_fs=$root_fs
         root_fs=$(echo "$fs" | $awk_cmd '{for (i=1; i <= '$inc_option_L_rsync_levels_deep'; i++) printf("%s%c", $i, (i=='$inc_option_L_rsync_levels_deep')?ORS:OFS)}' FS=/ OFS=/ ORS=)
-        if [ "$root_fs" != "$old_root_fs" -a "$old_root_fs" != "" ]; then
+        if [ "$root_fs" != "$old_root_fs" ] && [ "$old_root_fs" != "" ]; then
           throw_usage_error "No common root filesystem. If using option L, ensure \
 that each source file/directory comes from a common filesystem, and that the
 the level specified is not after this common filesystem. e.g. if your pool
@@ -2035,16 +2026,18 @@ on a filesystem that is not ZFS."
   # This line strips out the last bit, e.g. tank/back/zroot becomes tank/back
   # The regex is a slash, followed by zero or more non-slash characters,
   # until the end of the line.
-  root_fs_parent=$(echo "$root_fs" | sed -e 's%/[^/]*$%%g')
+  # unused variable
+  #root_fs_parent=$(echo "$root_fs" | sed -e 's%/[^/]*$%%g')
 
   # Remove redundant entries and sort properly
   source_fs_list=$(echo "$source_fs_list" | sort -u)
-  source_fs_list_rev=$(echo "$source_fs_list" | sort -r)
+  # unused variable
+  #source_fs_list_rev=$(echo "$source_fs_list" | sort -r)
 
   # Gets the pools for the fs (e.g. in storage/tmp/foo, this would be "storage")
   source_pool_list=$(echo "$source_fs_list" | cut -f1 -d/ | sort -u)
   source_pool_number=$(echo "$source_pool_list" | wc -l | sed -e 's/ //g')
-  if [ $source_pool_number -ne 1 ]; then
+  if [ "$source_pool_number" -ne 1 ]; then
     throw_usage_error "The sources you list are stored on a total of $source_pool_number pools.\
 \nAmend your list of sources until there is only one\
  pool relating to them all."
@@ -2053,11 +2046,13 @@ on a filesystem that is not ZFS."
   # prepares the variables we will end up using later
   if [ "$option_L_rsync_levels_deep" = "" ]; then
     root_fs="$source_pool_list"
-    root_fs_parent=""
+    # unused variable
+    #root_fs_parent=""
   fi
 
   # for recursive option
-  zfs_list_Ho_name=$($LZFS list -t filesystem,volume -H -o name)
+  # unused variable
+  #zfs_list_Ho_name=$($LZFS list -t filesystem,volume -H -o name)
   lzfs_list_Ho_mountpoint=$($LZFS list -t filesystem,volume -Ho mountpoint)
   rzfs_list_Ho_mountpoint=$($RZFS list -t filesystem,volume -Ho mountpoint)
 
@@ -2078,7 +2073,7 @@ on a filesystem that is not ZFS."
 rsync_transfer() {
   # Note that the source is actually in the snapshot. This gets the
   # ZFS filesystem corresponding to the source in the original -R or -N list.
-  opt_src_fs=$($LZFS list -t filesystem,volume -H -o name $opt_source)
+  opt_src_fs=$($LZFS list -t filesystem,volume -H -o name "$opt_source")
 
   # We need to get all the filesystems at or below the level of the source.
   # This is a bit tricky; if opt_source is /tmp/foo/bar, and the filesystem
@@ -2093,19 +2088,19 @@ rsync_transfer() {
   # long as we aren't trying to recursively transfer "/", we should be fine.
 
   # is the source (directory) a filesystem?
-  is_fs=$(echo $lzfs_list_Ho_mountpoint | tr " " "\n" | grep -c ^$opt_source$)
+  is_fs=$(echo "$lzfs_list_Ho_mountpoint" | tr " " "\n" | grep -c "^$opt_source$")
 
-  if [ $source_type = "r" -a $is_fs -eq "1" ]; then
+  if [ $source_type = "r" ] && [ "$is_fs" -eq "1" ]; then
     # the directory is a filesystem - need to include all fs under source fs
-    opt_srs_all_inc_fs=$($LZFS list -t filesystem,volume -H -o name | grep ^$opt_src_fs)
+    opt_srs_all_inc_fs=$($LZFS list -t filesystem,volume -H -o name | grep "^$opt_src_fs")
   else
     opt_srs_all_inc_fs=$opt_src_fs # we will only loop through once
   fi
 
   for opt_src_fs in $opt_srs_all_inc_fs; do
-    if [ $source_type = "r" -a $is_fs -eq "1" ]; then
+    if [ $source_type = "r" ] && [ "$is_fs" -eq "1" ]; then
       # We need to get the mountpoints of each sub filesystem
-      sub_opt_source=$($LZFS get -H -o value mountpoint $opt_src_fs)
+      sub_opt_source=$($LZFS get -H -o value mountpoint "$opt_src_fs")
     else
       sub_opt_source=$opt_source
     fi
@@ -2202,9 +2197,9 @@ options $full_rs_options"
     # Now that we have something to feed rsync, we will call it.
     if [ $option_n_dryrun -eq 0 ]; then
       if [ $option_p_rsync_persist -eq 1 ]; then
-        $rsync_cmd $full_rs_options $rs_source $rs_dest # persist in face of error
+        $rsync_cmd "$full_rs_options" "$rs_source" "$rs_dest" # persist in face of error
       else
-        $rsync_cmd $full_rs_options $rs_source $rs_dest ||
+        $rsync_cmd "$full_rs_options" "$rs_source" "$rs_dest" ||
           throw_error "Error when executing rsync."
       fi
     else
@@ -2281,7 +2276,7 @@ run_rsync_mode() {
   old_option_o_override_property=$option_o_override_property
   option_o_override_property=$(echo "$option_o_override_property" | sed -e 's/readonly=on/readonly=off/g')
   ro_exist=$(echo "$option_o_override_property" | grep -c "readonly")
-  if [ $ro_exist -eq 0 ]; then
+  if [ "$ro_exist" -eq 0 ]; then
     if [ "$option_o_override_property" = "" ]; then
       option_o_override_property="readonly=off"
     else
@@ -2293,7 +2288,7 @@ run_rsync_mode() {
   dont_write_backup=1
 
   # Transfer source properties to destination if required, or create the fs.
-  if [ $option_P_transfer_property -eq 1 -o "$option_o_override_property" != "" ]; then
+  if [ $option_P_transfer_property -eq 1 ] || [ "$option_o_override_property" != "" ]; then
     # loop that sets the filesystem properties
     for source in $recursive_source_list; do
       # prepares some variables for property_transfer
@@ -2351,7 +2346,7 @@ a single file, use -N."
   get_zfs_list_rsync_mode
 
   # Transfer source properties to destination if required.
-  if [ $option_P_transfer_property -eq 1 -o "$option_o_override_property" != "" ]; then
+  if [ $option_P_transfer_property -eq 1 ] || [ "$option_o_override_property" != "" ]; then
     # loop that sets the filesystem properties
     for source in $recursive_source_list; do
 
@@ -2374,7 +2369,7 @@ a single file, use -N."
 read_command_line_switches "$@"
 
 # Read out source and dest values
-shift $(expr $OPTIND - 1)
+shift "$((OPTIND - 1))"
 destination=$1
 
 # Basic consistency checking
