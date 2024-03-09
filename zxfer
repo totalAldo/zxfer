@@ -551,13 +551,11 @@ zfs_send_receive() {
     recv_cmd=$(wrap_command_with_ssh "$recv_cmd" $option_T_target $option_z_compress "receive")
   fi
 
-  # Check if the progress bar option is set, after wrapping occurs
-  if [ "$option_D_display_progress_bar" != "" ]; then
-    local progress_bar_cmd=$(handle_progress_bar_option "$snapshot")
-    send_cmd="$send_cmd $progress_bar_cmd"
-  fi
+  # Perform this after ssh wrapping occurs
+  local progress_bar_cmd=$(handle_progress_bar_option "$snapshot")
+  send_cmd="$send_cmd $progress_bar_cmd"
 
-  execute_command "$send_cmd | $recv_cmd"
+  execute_command "$send_cmd| $recv_cmd"
 }
 
 # Check if the snapshot already exists
