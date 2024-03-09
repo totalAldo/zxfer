@@ -579,7 +579,7 @@ get_backup_properties() {
   local found_backup_file=0
   while [ $found_backup_file -eq 0 ]; do
     local backup_file_dir=$($LZFS get -H -o value mountpoint $suspect_fs)
-    #if [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then  # before remote transfer
+
     if $option_O_origin_user_host [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then
       restored_backup_file_contents=$($option_O_origin_user_host $lcat_cmd $backup_file_dir/$backup_file_extension.$suspect_fs_tail)
       found_backup_file=1
@@ -643,8 +643,8 @@ remove_sources() {
     rmvs_value=$(echo "$rmvs_line" | cut -f2 -d=)
     new_rmvs_pv="$new_rmvs_pv$rmvs_property=$rmvs_value,"
   done
-  ##new_rmvs_pv=$(echo "$new_rmvs_pv" | sed -e 's/,$//g')
-  # Replace above with shell expansion
+
+  # remove trailing comma
   new_rmvs_pv=${new_rmvs_pv%,}
 }
 
@@ -679,8 +679,7 @@ select_mc() {
       new_mc_pvs="$new_mc_pvs$mc_property=$mc_value=$mc_source,"
     fi
   done
-  ##new_mc_pvs=$(echo "$new_mc_pvs" | sed -e 's/,$//g')
-  # Replace above with shell expansion
+
   new_mc_pvs=${new_mc_pvs%,}
 }
 
@@ -718,8 +717,7 @@ remove_properties() {
       new_rmv_pvs="$new_rmv_pvs$rmv_property=$rmv_value=$rmv_source,"
     fi
   done
-  ##new_rmv_pvs=$(echo "$new_rmv_pvs" | sed -e 's/,$//g')
-  # Replace above with shell expansion
+
   new_rmv_pvs=${new_rmv_pvs%,}
 }
 
@@ -829,8 +827,6 @@ transfer_properties() {
   # Use -p to remove units, since localization can make these incompatible
   source_pvs=$($LZFS get -Hpo property,value,source all "$source" |
     tr "\t" "=" | tr "\n" ",")
-  ##source_pvs=$(echo "$source_pvs" | sed -e 's/,$//g')
-  # Replace above with shell expansion
   source_pvs=${source_pvs%,}
   source_human_pvs=$($LZFS get -Ho property,value,source all "$source" |
     tr "\t" "=" | tr "\n" ",")
@@ -1080,8 +1076,6 @@ with specified properties."
     IFS=","
 
     dest_pvs=$(echo "$dest_pvs" | tr -s "\t" "=" | tr -s "\n" ",")
-    ##dest_pvs=$(echo "$dest_pvs" | sed -e 's/,$//g')
-    # Replace above with shell expansion
     dest_pvs=${dest_pvs%,}
     dest_human_pvs=${dest_human_pvs%,}
     resolve_human_vars "$dest_pvs" "$dest_human_pvs"
@@ -1671,11 +1665,6 @@ get_zfs_list() {
 
   # Now that we know whether there was a trailing slash on the source, no
   # need to confuse things by keeping it on there. Get rid of it.
-  # The regex gets of every instance of a slash at the end of the line
-  # provided that it is preceded by 1 character.
-  ## initial_source=$(echo "$initial_source" | sed -e 's%\(.\)/$%\1%')
-
-  # Above replaced by shell expansion to avoid forking
   initial_source=${initial_source%/}
 
   rzfs_list_ho_s=$($RZFS list -t filesystem,volume -Ho name -s creation) ||
@@ -1763,13 +1752,9 @@ recursively, but not both -N and -R at the same time."
 
   # This gets the root filesystem transferred - e.g.
   # the string after the very last "/" e.g. backup/test/zroot -> zroot
-  ##base_fs=$(echo "$initial_source" | sed -e 's/.*\///g')
-  # Replace the above with shell expansion
   base_fs=${initial_source##*/}
   # This gets everything but the base_fs, so that we can later delete it from
   # $source
-  ##part_of_source_to_delete=$(echo "$initial_source" | sed -e "s/$base_fs$//g")
-  # Replace the above with shell expansion
   part_of_source_to_delete=${initial_source%$base_fs}
 
   #
@@ -1994,8 +1979,6 @@ get_zfs_list_rsync_mode() {
   # We want to get a list of every ZFS filesystem that holds data that will be
   # transferred. Note that trailing slashes don't seem to matter.
   option_RN="$option_R_recursive,$option_N_nonrecursive"
-  ##option_RN=$(echo "$option_RN" | sed -e 's/^,//g' | sed -e 's/,$//g')
-  # Replace the above with shell expansion
   option_RN=${option_RN#,}
   option_RN=${option_RN%,}
 
@@ -2016,8 +1999,6 @@ get_zfs_list_rsync_mode() {
 
     temp_fs_list=$($LZFS list -t filesystem,volume -Hr -o name $source_RN)
     temp_fs_list_comma=$(echo "$temp_fs_list" | tr -s "\n" ",")
-    ##temp_fs_list_comma=$(echo "$temp_fs_list_comma" | sed -e 's/,$//g')
-    # Replace above with shell expansion
     temp_fs_list_comma=${temp_fs_list_comma%,}
 
     if [ "$option_L_rsync_levels_deep" != "" ]; then
