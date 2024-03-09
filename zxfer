@@ -1543,7 +1543,7 @@ grandfather_test() {
   snap_date=$($RZFS get -H -o value -p creation "$ds")
   diff_sec=$((current_date - snap_date))
   diff_day=$((diff_sec / 86400))
-  if [ $diff_day -ge $option_g_grandfather_protection ]; then
+  if [ $diff_day -ge "$option_g_grandfather_protection" ]; then
     snap_date_english=$($RZFS get -H -o value creation "$ds")
     current_date_english=$(date)
     echo "Error: On the destination there is a snapshot marked for destruction"
@@ -1580,14 +1580,14 @@ inspect_delete_snap() {
 
   # Get the list of source snapshots
   zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" |
-    grep ^$source@) >/dev/null 2>&1
+    grep "^$source@") >/dev/null 2>&1
 
   # save a copy for when we need to make a new list
   zfs_source_snaps_orig=$zfs_source_snaps
 
   # Get the list of destination snapshots
   zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" |
-    grep ^$actual_dest@) >/dev/null 2>&1
+    grep "^$actual_dest@") >/dev/null 2>&1
 
   found_last_common_snap=0
 
@@ -1606,7 +1606,7 @@ inspect_delete_snap() {
         # snap is the most recent common snap
         if [ $found_last_common_snap -eq 0 ]; then
           found_last_common_snap=1
-          last_common_snap=$(echo $dest_snap | grep @ | cut -d@ -f2)
+          last_common_snap=$(echo "$dest_snap" | grep @ | cut -d@ -f2)
         fi
 
         # since the snap was matched, let's not waste our time searching for
@@ -1664,7 +1664,7 @@ get_zfs_list() {
   rzfs_list_ho_s=$($RZFS list -t filesystem,volume -Ho name -s creation) ||
     throw_error "Failed to retrieve datasets from the destination" 3
 
-  lzfs_list_hr_s_snap=$($LZFS list -Hr -o name -s creation -t snapshot $initial_source) ||
+  lzfs_list_hr_s_snap=$($LZFS list -Hr -o name -s creation -t snapshot "$initial_source") ||
     throw_error "Failed to retrieve snapshots from the source" 3
 
   # Note that for OpenSolaris compatibility, instead of using gtac
@@ -1672,7 +1672,7 @@ get_zfs_list() {
   # gtac line
   lzfs_list_hr_S_snap=$(echo "$lzfs_list_hr_s_snap" | cat -n)
   lzfs_list_hr_S_snap=$(echo "$lzfs_list_hr_S_snap" | sort -nr | cut -c 8-)
-  rzfs_list_hr_S_snap=$($RZFS list -Hr -o name -S creation -t snapshot $destination) ||
+  rzfs_list_hr_S_snap=$($RZFS list -Hr -o name -S creation -t snapshot "$destination") ||
     throw_error "Failed to retrieve snapshots from the destination" 3
 
   recursive_source_list=$($LZFS list -t filesystem,volume -Hr -o name "$initial_source") ||
@@ -1753,7 +1753,7 @@ recursively, but not both -N and -R at the same time."
   #
   if [ $option_s_make_snapshot -eq 1 ] && [ $option_m_migrate -eq 0 ]; then
     # We snapshot from the base of the initial source
-    sourcefs=$(echo $initial_source | cut -d@ -f1)
+    sourcefs=$(echo "$initial_source" | cut -d@ -f1)
     # Create the new snapshot with a unique name.
     newsnap
     # Because there are new snapshots, need to get_zfs_list again
@@ -1770,7 +1770,7 @@ recursively, but not both -N and -R at the same time."
   if [ $option_m_migrate -eq 1 ]; then
     # Check if any services need to be disabled before doing a migration.
     if [ -n "$services" ]; then
-      echo $services | stopsvcs
+      echo "$services" | stopsvcs
     fi
 
     for source in $recursive_source_list; do
@@ -1785,7 +1785,7 @@ recursively, but not both -N and -R at the same time."
     done
 
     # We snapshot from the base of the initial source
-    sourcefs=$(echo $initial_source | cut -d@ -f1)
+    sourcefs=$(echo "$initial_source" | cut -d@ -f1)
 
     # Create the last snapshot with a unique name.
     newsnap
@@ -1815,7 +1815,7 @@ recursively, but not both -N and -R at the same time."
   # main loop that copies the filesystems
   for source in $recursive_source_list; do
     # Split up source into source fs, last component
-    sourcefs=$(echo $source | cut -d@ -f1)
+    sourcefs=$(echo "$source" | cut -d@ -f1)
     # unused variable
     #sourcefslast=$(echo $sourcefs | sed -e "s%.*/%%")
 
@@ -1882,7 +1882,7 @@ clean_up() {
 
   # delete the snapshots - about 14 seconds max
   for source_snap in $snap_delete_list; do
-    $LZFS destroy $source_snap
+    $LZFS destroy "$source_snap"
   done
 }
 
@@ -1922,7 +1922,7 @@ get_exclude_list() {
   # First, exclude known source-side filesystem mountpoints
   # They will be empty, and if not excluded --del will delete those folders
   # which will hold valid data on the destination
-  exclude_dir_list=$(echo "$opt_srs_all_inc_fs" | grep ^$opt_src_fs_modif |
+  exclude_dir_list=$(echo "$opt_srs_all_inc_fs" | grep "^$opt_src_fs_modif" |
     grep -v "^$opt_src_fs_modif$")
   exclude_dir_list=$(echo "$exclude_dir_list" | sed -e "s%^$opt_src_fs_modif%%g")
 
@@ -1930,7 +1930,7 @@ get_exclude_list() {
   # destination, as they will have their own rsync transfer or be
   # left for an independent restore procedure.
   if [ $option_i_rsync_include_zfs_mountpoints -eq 0 ]; then
-    dest_exclude_dir_list=$(echo "$rzfs_list_Ho_mountpoint" | grep ^$rs_dest | grep -v "^$rs_dest$")
+    dest_exclude_dir_list=$(echo "$rzfs_list_Ho_mountpoint" | grep "^$rs_dest" | grep -v "^$rs_dest$")
     dest_exclude_dir_list=$(echo "$dest_exclude_dir_list" |
       sed -e "s%^$rs_dest%%g")
     if [ "$rs_dest" = "/" ]; then
@@ -1974,7 +1974,7 @@ get_zfs_list_rsync_mode() {
   option_RN=${option_RN%,}
 
   if [ "$option_L_rsync_levels_deep" != "" ]; then
-    if [ $option_L_rsync_levels_deep -lt "1" ]; then
+    if [ "$option_L_rsync_levels_deep" -lt "1" ]; then
       throw_usage_error "Option L, if specified, should be 1 or greater."
     fi
     inc_option_L_rsync_levels_deep=$(expr $option_L_rsync_levels_deep + 1)
@@ -1983,19 +1983,19 @@ get_zfs_list_rsync_mode() {
   for source_RN in $option_RN; do
     source_RN_trailing_slash=$(echo "$source_RN" | grep -c '..*/$')
 
-    if [ $source_RN_trailing_slash -eq 1 ]; then
+    if [ "$source_RN_trailing_slash" -eq 1 ]; then
       throw_usage_error "Do not specify trailing slashes in sources. \
 \nThere is no meaning in the context of this program and so this has been disabled."
     fi
 
-    temp_fs_list=$($LZFS list -t filesystem,volume -Hr -o name $source_RN)
+    temp_fs_list=$($LZFS list -t filesystem,volume -Hr -o name "$source_RN")
     temp_fs_list_comma=$(echo "$temp_fs_list" | tr -s "\n" ",")
     temp_fs_list_comma=${temp_fs_list_comma%,}
 
     if [ "$option_L_rsync_levels_deep" != "" ]; then
       for fs in $temp_fs_list_comma; do
         # count the "/" in the line, should be equal or greater to option_L_rsync_levels_deep
-        slash_no=$(echo "$fs" | $awk_cmd '$0= NF-1' FS=/)
+        slash_no=$(echo "$fs" | $awk_cmd "$0= NF-1" FS=/)
         if [ "$slash_no" -lt "$option_L_rsync_levels_deep" ]; then
           throw_usage_error "If using option L, ensure that all source files and\
 directories are contained in filesystems with as many \"/\" as L."
@@ -2019,7 +2019,7 @@ on a filesystem that is not ZFS."
     fi
 
     # used printf in order to print the newlines
-    source_fs_list=$(printf "$temp_fs_list\n$source_fs_list")
+    source_fs_list=$(printf "%s\n%s" "$temp_fs_list" "$source_fs_list")
   done
   # We will use primarily the root_fs_parent, but got root_fs because
   # we wanted to check that root_fs is unique.
@@ -2058,7 +2058,7 @@ on a filesystem that is not ZFS."
 
   initial_source=$root_fs
   recursive_source_list=$($LZFS list -t filesystem,volume -Hr -o name "$root_fs" |
-    grep -v ^$destination)
+    grep -v "^$destination")
 
   IFS="$OLD_IFS"
 }
