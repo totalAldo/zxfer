@@ -427,10 +427,7 @@ get_os() {
 # Initializes OS and local/remote specific variables
 #
 init_variables() {
-  echov "zxfer version: $zxfer_version"
-
   home_os=$(get_os "")
-  echov "Home OS: $home_os"
 
   # determine the source_os
   if [ "$option_O_origin_user_host" != "" ]; then
@@ -438,7 +435,6 @@ init_variables() {
   else
     source_os=$(get_os "")
   fi
-  echov "Source OS: $source_os"
 
   # determine the dest_os
   if [ "$option_T_target_user_host" != "" ]; then
@@ -446,21 +442,17 @@ init_variables() {
   else
     dest_os=$(get_os "")
   fi
-  echov "Destination OS: $dest_os"
 
   if [ $option_e_restore_property_mode -eq 1 ]; then
     lcat_cmd=$(${ssh_cmd} ${option_O_origin_user_host} which cat)
-    echov "cat command: $lcat_cmd"
   fi
 
   if [ $option_S_rsync_mode -eq 1 ]; then
     rsync_cmd=$(which rsync)
-    echov "rsync command: $rsync_cmd"
   fi
 
   if [ "$home_os" = "SunOS" ]; then
     awk_cmd=$(which gawk)
-    echov "awk command: $awk_cmd"
   fi
 }
 
