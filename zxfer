@@ -158,9 +158,9 @@ backup_file_extension=".zxfer_backup_info"
 backup_file_contents=""
 
 # operating systems
+home_os=""
 source_os=""
 dest_os=""
-home_os=$(uname)
 
 # as in the "cp" man page
 trailing_slash=0
@@ -174,6 +174,7 @@ awk_cmd=$(which awk) # location of awk or gawk on home OS
 
 zfs_cmd=$(which zfs)
 ssh_cmd=$(which ssh)
+rsync_cmd=""
 
 LZFS=$zfs_cmd
 RZFS=$LZFS
@@ -400,47 +401,57 @@ beep() {
 # Takes: $1=either $option_O_origin or $option_T_target
 #
 get_os() {
-  input_optionts=$1
-  output_os=""
+  local input_options=$1
+  local output_os=""
 
   # Get uname of the destination (target) machine, local or remote
-  if [ "$input_optionts" = "" ]; then
+  if [ "$input_options" = "" ]; then
     output_os=$(uname)
   else
-    output_os=$($input_optionts uname)
+    output_os=$($input_options uname)
   fi
+
+  echo $output_os
 }
 
 #
 # Initializes OS and local/remote specific variables
 #
 init_variables() {
+  echov "zxfer version: $zxfer_version"
+
+  home_os=$(get_os "")
+  echov "Home OS: $home_os"
+
   # determine the source_os
   if [ "$option_O_origin" != "" ]; then
-    get_os "$ssh_cmd $option_O_origin"
+    source_os=$(get_os "$ssh_cmd $option_O_origin")
   else
-    get_os ""
+    source_os=$(get_os "")
   fi
-  source_os="$output_os"
+  echov "Source OS: $source_os"
 
   # determine the dest_os
   if [ "$option_T_target" != "" ]; then
-    get_os "$ssh_cmd $option_T_target"
+    dest_os=$(get_os "$ssh_cmd $option_T_target")
   else
-    get_os ""
+    dest_os=$(get_os "")
   fi
-  dest_os="$output_os"
+  echov "Destination OS: $dest_os"
 
   if [ $option_e_restore_property_mode -eq 1 ]; then
     lcat_cmd=$(${ssh_cmd} ${option_O_origin} which cat)
+    echov "cat command: $lcat_cmd"
   fi
 
   if [ $option_S_rsync_mode -eq 1 ]; then
-    RSYNC=$(which rsync)
+    rsync_cmd=$(which rsync)
+    echov "rsync command: $rsync_cmd"
   fi
 
   if [ "$home_os" = "SunOS" ]; then
     awk_cmd=$(which gawk)
+    echov "awk command: $awk_cmd"
   fi
 }
 
@@ -508,7 +519,7 @@ consistency_check() {
 # Function to handle errors
 throw_error() {
   local msg=$1
-  exit_status=${2:-1}
+  local exit_status=${2:-1}
   echo $msg
   beep
   exit $exit_status
@@ -516,7 +527,7 @@ throw_error() {
 
 throw_usage_error() {
   local msg=$1
-  exit_status=${2:-1}
+  local exit_status=${2:-1}
   echo "Error: $msg"
   usage
   beep
@@ -548,7 +559,9 @@ execute_command() {
 # Print out information if in verbose mode
 #
 echov() {
-  if [ $option_v_verbose -eq 1 ]; then echo "$@"; fi
+  if [ $option_v_verbose -eq 1 ]; then
+    echo "$@"
+  fi
 }
 
 #
@@ -560,11 +573,11 @@ get_backup_properties() {
   # We will step back through the filesystem hierarchy from $initial_source
   # until the pool level, looking for the backup file, stopping when we find
   # it or terminating with an error.
-  suspect_fs=$initial_source
-  suspect_fs_tail=""
-  found_backup_file=0
+  local suspect_fs=$initial_source
+  local suspect_fs_tail=""
+  local found_backup_file=0
   while [ $found_backup_file -eq 0 ]; do
-    backup_file_dir=$($LZFS get -H -o value mountpoint $suspect_fs)
+    local backup_file_dir=$($LZFS get -H -o value mountpoint $suspect_fs)
     #if [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then  # before remote transfer
     if $option_O_origin [ -r $backup_file_dir/$backup_file_extension.$suspect_fs_tail ]; then
       restored_backup_file_contents=$($option_O_origin $lcat_cmd $backup_file_dir/$backup_file_extension.$suspect_fs_tail)
@@ -594,12 +607,12 @@ get_backup_properties() {
 # corresponding to the destination filesystem
 #
 write_backup_properties() {
-  is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
-  backup_file_dir=$($RZFS get -H -o value mountpoint $destination)
+  local is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
+  local backup_file_dir=$($RZFS get -H -o value mountpoint $destination)
   echov "Writing backup info to location $backup_file_dir/\
 $backup_file_extension.$is_tail"
-  backup_file_header="#zxfer property backup file;#version:$zxfer_version;#R options:$option_R_recursive;#N options:$option_N_nonrecursive;#destination:$destination;#initial_source:$is_tail;#option_S_rsync_mode:$option_S_rsync_mode;"
-  backup_date=$(date)
+  local backup_file_header="#zxfer property backup file;#version:$zxfer_version;#R options:$option_R_recursive;#N options:$option_N_nonrecursive;#destination:$destination;#initial_source:$is_tail;#option_S_rsync_mode:$option_S_rsync_mode;"
+  local backup_date=$(date)
   backup_file_contents="$backup_file_header#backup_date:$backup_date$backup_file_contents"
 
   # Write the backup file; doing it this way prevents S11E from throwing
@@ -624,9 +637,10 @@ $backup_file_dir/$backup_file_extension.$is_tail\" | "$ssh_cmd $option_T_target"
 # output is in $new_rmvs_pv
 #
 remove_sources() {
-  rmvs_list=$1
+  new_rmvs_pv="" # global
 
-  new_rmvs_pv=""
+  local rmvs_list=$1
+
   for rmvs_line in $rmvs_list; do
     rmvs_property=$(echo "$rmvs_line" | cut -f1 -d=)
     rmvs_value=$(echo "$rmvs_line" | cut -f2 -d=)
@@ -643,11 +657,12 @@ remove_sources() {
 # Used to select the "must create" properties
 #
 select_mc() {
-  mc_list=$1          # target list of properties, values
-  mc_property_list=$2 # list of properties to select
+  new_mc_pvs="" # global
+
+  local mc_list=$1          # target list of properties, values
+  local mc_property_list=$2 # list of properties to select
 
   # remove readonly properties from the override list
-  new_mc_pvs=""
   for mc_line in $mc_list; do
     found_mc=0
     mc_property=$(echo "$mc_line" | cut -f1 -d=)
@@ -678,10 +693,11 @@ select_mc() {
 # output is in new_rmv_pvs
 #
 remove_properties() {
-  rmv_list=$1    # the list of properties=values=sources,...
-  remove_list=$2 # list of properties to remove
+  new_rmv_pvs="" # global
 
-  new_rmv_pvs=""
+  local rmv_list=$1    # the list of properties=values=sources,...
+  local remove_list=$2 # list of properties to remove
+
   for rmv_line in $rmv_list; do
     found_readonly=0
     rmv_property=$(echo "$rmv_line" | cut -f1 -d=)
@@ -716,8 +732,8 @@ remove_properties() {
 # output is in new_rmv_pvs
 #
 remove_unsupported_properties() {
-  orig_set_list=$1 # the list of properties=values=sources,...
-  FUNCIFS=$IFS
+  local orig_set_list=$1 # the list of properties=values=sources,...
+  local FUNCIFS=$IFS
   IFS=","
 
   only_supported_properties=""
@@ -747,9 +763,9 @@ remove_unsupported_properties() {
 # machine-readable values
 #
 resolve_human_vars() {
-  machine_vars=$1
-  human_vars=$2
-  FUNCIFS=$IFS
+  local machine_vars=$1
+  local human_vars=$2
+  local FUNCIFS=$IFS
   IFS=","
 
   human_results=
@@ -2225,9 +2241,9 @@ options $full_rs_options"
     # Now that we have something to feed rsync, we will call it.
     if [ $option_n_dryrun -eq 0 ]; then
       if [ $option_p_rsync_persist -eq 1 ]; then
-        $RSYNC $full_rs_options $rs_source $rs_dest # persist in face of error
+        $rsync_cmd $full_rs_options $rs_source $rs_dest # persist in face of error
       else
-        $RSYNC $full_rs_options $rs_source $rs_dest ||
+        $rsync_cmd $full_rs_options $rs_source $rs_dest ||
           {
             echo "Error when executing rsync."
             beep
@@ -2235,7 +2251,7 @@ options $full_rs_options"
           }
       fi
     else
-      echo "$RSYNC $full_rs_options $rs_source $rs_dest"
+      echo "$rsync_cmd $full_rs_options $rs_source $rs_dest"
     fi
 
   done # End of sub-filesystem loop
