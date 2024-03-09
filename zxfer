@@ -163,7 +163,7 @@ trailing_slash=0
 zfs_cmd=$(which zfs)
 LZFS=$zfs_cmd
 RZFS=$LZFS
-ssh_cmd="ssh"
+ssh_cmd=$(which ssh)
 
 # default compression commands
 option_z_compress_cmd="zstd -3"
@@ -457,7 +457,7 @@ calculate_size_estimate() {
   local snapshot=$1
   local lzfs=$2
 
-  local size_dataset=$($LZFS send -nPv "$snapshot" 2>&1) || \
+  local size_dataset=$($LZFS send -nPv "$snapshot" 2>&1) ||
     throw_error "Error calculating estimate: $size_dataset"
   local size_est=$(echo "$size_dataset" | grep ^size | tail -n 1 | cut -f 2)
 
@@ -468,8 +468,8 @@ setup_progress_dialog() {
   local size_est=$1
   local snapshot=$2
 
-  local progress_dialog=$(echo "$option_D_display_progress_bar" | \
-    sed "s#%%size%%#$size_est#g" | \
+  local progress_dialog=$(echo "$option_D_display_progress_bar" |
+    sed "s#%%size%%#$size_est#g" |
     sed "s#%%title%%#$snapshot#g")
 
   echo $progress_dialog
@@ -484,16 +484,12 @@ handle_progress_bar_option() {
   local snapshot=$1
   local progress_bar_cmd=""
 
-  # Check if the progress bar option is set
-  if [ "$option_D_display_progress_bar" != "" ]; then
-    # Calculate the size estimate and set up the progress dialog
-    local size_est=$(calculate_size_estimate "$snapshot")
-    local size_est_KB=$(echo "scale=2; $size_est / 1024" | bc)
-    local progress_dialog=$(setup_progress_dialog "$size_est" "$snapshot")
+  # Calculate the size estimate and set up the progress dialog
+  local size_est=$(calculate_size_estimate "$snapshot")
+  local progress_dialog=$(setup_progress_dialog "$size_est" "$snapshot")
 
-    # Modify the send command to include the progress dialog
-    progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | $progress_dialog"
-  fi
+  # Modify the send command to include the progress dialog
+  progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | $progress_dialog"
 
   echo $progress_bar_cmd
 }
@@ -552,10 +548,12 @@ zfs_send_receive() {
   fi
 
   # Perform this after ssh wrapping occurs
-  local progress_bar_cmd=$(handle_progress_bar_option "$snapshot")
-  send_cmd="$send_cmd $progress_bar_cmd"
+  if [ "$option_D_display_progress_bar" != "" ]; then
+    local progress_bar_cmd=$(handle_progress_bar_option "$snapshot")
+    send_cmd="$send_cmd $progress_bar_cmd"
+  fi
 
-  execute_command "$send_cmd| $recv_cmd"
+  execute_command "$send_cmd | $recv_cmd"
 }
 
 # Check if the snapshot already exists
@@ -1758,10 +1756,6 @@ with specified properties."
     done
 
     # remove commas from end of line
-    ##ov_initsrc_set_list=$(echo "$ov_initsrc_set_list" | sed -e 's/,$//g')
-    ##ov_set_list=$(echo "$ov_set_list" | sed -e 's/,$//g')
-    ##ov_inherit_list=$(echo "$ov_inherit_list" | sed -e 's/,$//g')
-    # Replace above with shell expansion
     ov_initsrc_set_list=${ov_initsrc_set_list%,}
     ov_set_list=${ov_set_list%,}
     ov_inherit_list=${ov_inherit_list%,}
