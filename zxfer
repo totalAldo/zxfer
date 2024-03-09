@@ -431,9 +431,9 @@ consistency_check() {
     fi
 
     if [ $option_z_compress -eq 1 -a \
-        "$option_O_origin" = "" -a \
-        "$option_T_target" = "" \
-    ]; then
+      "$option_O_origin" = "" -a \
+      "$option_T_target" = "" \
+      ]; then
       throw_usage_error "-z option can only be used with -O or -T option"
     fi
 
@@ -447,44 +447,55 @@ consistency_check() {
 }
 
 #
-# Called by copy_snap()
-# Handle zfs send/receive with progress dialog
+# The snapshot size is estimated. The estimate does not take into consideration
+# the compression ratio of the data. The estimate is based on the size of the
+# dataset. When compression is used, the bar will terminate sooner,
+# ending at the compression ratio.
+# Takes $LZFS (which may contain the ssh commmand if -O is used)
 #
-zfs_send_receive_with_progress() {
+calculate_size_estimate() {
   local snapshot=$1
-  local dest=$2
-  local prevsnap=$3
-  local send_cmd=""
-  local recv_cmd=""
+  local lzfs=$2
 
-  # calc size estimate
-  if [ "$option_O_origin" != "" ]; then
-    LZFS="$ssh_cmd $option_O_origin $LZFS"
+  local size_dataset=$($LZFS send -nPv "$snapshot" 2>&1) || \
+    throw_error "Error calculating estimate: $size_dataset"
+  local size_est=$(echo "$size_dataset" | grep ^size | tail -n 1 | cut -f 2)
+
+  echo $size_est
+}
+
+setup_progress_dialog() {
+  local size_est=$1
+  local snapshot=$2
+
+  local progress_dialog=$(echo "$option_D_display_progress_bar" | \
+    sed "s#%%size%%#$size_est#g" | \
+    sed "s#%%title%%#$snapshot#g")
+
+  echo $progress_dialog
+}
+
+#
+# 2024.03.08 - generates error when creating a new dataset in target with:
+# cannot receive new filesystem stream: incomplete stream
+# Error when executing command.
+#
+handle_progress_bar_option() {
+  local snapshot=$1
+  local progress_bar_cmd=""
+
+  # Check if the progress bar option is set
+  if [ "$option_D_display_progress_bar" != "" ]; then
+    # Calculate the size estimate and set up the progress dialog
+    local size_est=$(calculate_size_estimate "$snapshot")
+    local size_est_KB=$(echo "scale=2; $size_est / 1024" | bc)
+    local progress_dialog=$(setup_progress_dialog "$size_est" "$snapshot")
+
+    # Modify the send command to include the progress dialog
+    progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | $progress_dialog"
   fi
 
-  SIZE_DATASET=$($LZFS send -nPv "$1" 2>&1) || throw_error "Error calculating estimate: $SIZE_DATASET"
-  SIZE_EST=$(echo "$SIZE_DATASET" | grep ^size | tail -n 1 | cut -f 2)
-  echo "Estimated size is: ${SIZE_EST}"
-
-  # handle progress dialog
-  PROGRESS_DIALOG=$(echo "$option_D_display_progress_bar" | sed "s#%%size%%#$SIZE_EST#g" |
-    sed "s#%%title%%#$copysrc#g")
-  echo "$PROGRESS_DIALOG"
-
-  if [ -z "$prevsnap" ]; then
-    send_cmd="$LZFS send $snapshot"
-  else
-    send_cmd="$LZFS send -i $prevsnap $snapshot"
-  fi
-  send_cmd="$send_cmd | dd obs=1048576 | dd bs=1048576"
-  recv_cmd="$PROGRESS_DIALOG | $RZFS receive $option_F_force_rollback $dest"
-
-  # wrap the send command in double quotes so that it can be passed to ssh
-  if [ "$option_O_origin" != "" ]; then
-    send_cmd="$ssh_cmd $option_O_origin \"$send_cmd\" "
-  fi
-
-  execute_command "$send_cmd | $recv_cmd"
+  echo $progress_bar_cmd
 }
 
 set_send_command() {
@@ -522,13 +533,14 @@ wrap_command_with_ssh() {
 
 #
 # Handle zfs send/receive
-# Takes $option_z_compress, $option_O_origin, $option_T_target
+# Takes $option_D_display_progress_bar $option_z_compress, $option_O_origin, $option_T_target
 #
 zfs_send_receive() {
   local snapshot=$1
   local dest=$2
   local prevsnap=$3
 
+  # Set up the send and receive commands
   local send_cmd=$(set_send_command $snapshot $prevsnap)
   local recv_cmd=$(set_receive_command $dest)
 
@@ -537,6 +549,12 @@ zfs_send_receive() {
   fi
   if [ "$option_T_target" != "" ]; then
     recv_cmd=$(wrap_command_with_ssh "$recv_cmd" $option_T_target $option_z_compress "receive")
+  fi
+
+  # Check if the progress bar option is set, after wrapping occurs
+  if [ "$option_D_display_progress_bar" != "" ]; then
+    local progress_bar_cmd=$(handle_progress_bar_option "$snapshot")
+    send_cmd="$send_cmd $progress_bar_cmd"
   fi
 
   execute_command "$send_cmd | $recv_cmd"
@@ -569,11 +587,7 @@ copy_snap() {
     return
   fi
 
-  if [ "$option_D_display_progress_bar" != "" ]; then
-    zfs_send_receive_with_progress "$copysrc" "$copydest" "$copyprev"
-  else
-    zfs_send_receive "$copysrc" "$copydest" "$copyprev"
-  fi
+  zfs_send_receive "$copysrc" "$copydest" "$copyprev"
 }
 
 #
