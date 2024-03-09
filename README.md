@@ -14,11 +14,12 @@ For now, most of the documentation will reside at the original page, until someo
 
 Changes
 =======
-2024.03.06
-+ refactor copy_snap()
+2024.03.08
++ refactor code for readability and maintanability
 + add error handling functions
-+ add -z option to compress zfs send using zstd -3 when using -O option
-+ add -Z option to specify the full zstd compress command when using -O option
++ rename variables for clarity
++ add -z option to compress zfs send using zstd -3
++ add -Z option to specify the full zstd compress command
 ---
 
 + Implement new -D parameter, allows you to put a progress indicator app between the zfs send and zfs receive. Provides macros %%size%% and %%title%%.
