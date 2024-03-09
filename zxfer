@@ -609,19 +609,21 @@ write_backup_properties() {
   _is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
   _backup_file_dir=$($RZFS get -H -o value mountpoint "$destination")
   echov "Writing backup info to location $_backup_file_dir/$backup_file_extension.$_is_tail"
+
+  # Construct the backup file contents
   _backup_file_header="#zxfer property backup file;#version:$zxfer_version;#R options:$option_R_recursive;#N options:$option_N_nonrecursive;#destination:$destination;#initial_source:$_is_tail;#option_S_rsync_mode:$option_S_rsync_mode;"
   _backup_date=$(date)
   backup_file_contents="$_backup_file_header#backup_date:$_backup_date$backup_file_contents"
 
-  # Write the backup file; doing it this way prevents S11E from throwing
-  # "Permission denied" errors, and ALSO works with local or remote.
+  # Construct the command to write the backup file
+  backup_file_cmd="echo \"$backup_file_contents\" | tr \";\" \"\n\" > $_backup_file_dir/$backup_file_extension.$_is_tail"
+
+  # Execute the command
   if [ $option_n_dryrun -eq 0 ]; then
-    echo "echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
-$_backup_file_dir/$backup_file_extension.$_is_tail" | "$ssh_cmd $option_T_target_user_host" sh ||
+    echo "$backup_file_cmd" | "$ssh_cmd $option_T_target_user_host" sh ||
       throw_error "Error writing backup file. Is filesystem mounted?"
   else
-    echo "echo \"echo \"$backup_file_contents\" | tr \";\" \"\n\" > \
-$_backup_file_dir/$backup_file_extension.$_is_tail\" | "$ssh_cmd $option_T_target_user_host" sh"
+    echo "echo \"$backup_file_cmd\" | \"$ssh_cmd $option_T_target_user_host\" sh"
   fi
 }
 
