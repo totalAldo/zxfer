@@ -88,6 +88,9 @@
 # increased. I hope you find it useful.
 
 # Known bugs/gotchas:
+# 2024.03.09
+# - The -D option does not work as expected when creating a dataset on the target
+#
 # (This is a bug of ZFS on FreeBSD and not this script.)
 # There are several properties in FreeBSD that when set via "zfs create"
 # or "zfs set" will have the source stay as default while others are
