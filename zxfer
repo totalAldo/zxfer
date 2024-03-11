@@ -115,97 +115,98 @@
 # GLOBALS
 ###############################################################################
 
-# zxfer version
-zxfer_version="1.2.0-20240309"
+init_globals() {
+  # zxfer version
+  zxfer_version="1.2.0-20240309"
 
-# Default values
-option_b_beep_always=0
-option_B_beep_on_success=0
-option_d_delete_destination_snapshots=0
-option_D_display_progress_bar=""
-option_e_restore_property_mode=0
-option_E_rsync_exclude_patterns=""
-option_f_rsync_file_options=""
-option_g_grandfather_protection=""
-option_i_rsync_include_zfs_mountpoints=0
-option_I_ignore_properties=""
-option_F_force_rollback=""
-option_k_backup_property_mode=0
-option_l_rsync_legacy_mountpoint=0
-option_L_rsync_levels_deep=""
-option_o_override_property=""
-option_O_origin_user_host=""
-option_p_rsync_persist=0
-option_P_transfer_property=0
-option_R_recursive=""
-option_m_migrate=0
-option_n_dryrun=0
-option_N_nonrecursive=""
-option_S_rsync_mode=0
-option_s_make_snapshot=0
-option_T_target_user_host=""
-option_u_rsync_use_existing_snapshot=0
-option_U_skip_unsupported_properties=0
-option_v_verbose=0
-option_z_compress=0
+  # Default values
+  option_b_beep_always=0
+  option_B_beep_on_success=0
+  option_d_delete_destination_snapshots=0
+  option_D_display_progress_bar=""
+  option_e_restore_property_mode=0
+  option_E_rsync_exclude_patterns=""
+  option_f_rsync_file_options=""
+  option_g_grandfather_protection=""
+  option_i_rsync_include_zfs_mountpoints=0
+  option_I_ignore_properties=""
+  option_F_force_rollback=""
+  option_k_backup_property_mode=0
+  option_l_rsync_legacy_mountpoint=0
+  option_L_rsync_levels_deep=""
+  option_o_override_property=""
+  option_O_origin_user_host=""
+  option_p_rsync_persist=0
+  option_P_transfer_property=0
+  option_R_recursive=""
+  option_m_migrate=0
+  option_n_dryrun=0
+  option_N_nonrecursive=""
+  option_S_rsync_mode=0
+  option_s_make_snapshot=0
+  option_T_target_user_host=""
+  option_u_rsync_use_existing_snapshot=0
+  option_U_skip_unsupported_properties=0
+  option_v_verbose=0
+  option_z_compress=0
 
-services=""
-torestart=""
+  services=""
+  torestart=""
 
-source=""
-sourcefs=""
-destination=""
-backup_file_extension=".zxfer_backup_info"
-backup_file_contents=""
+  source=""
+  sourcefs=""
+  destination=""
+  backup_file_extension=".zxfer_backup_info"
+  backup_file_contents=""
 
-# operating systems
-home_os=""
-source_os=""
-dest_os=""
+  # operating systems
+  home_os=""
+  source_os=""
+  dest_os=""
 
-# as in the "cp" man page
-trailing_slash=0
+  # as in the "cp" man page
+  trailing_slash=0
 
-# default compression commands
-compress_cmd="zstd -3"
-decompress_cmd="zstd -d"
+  # default compression commands
+  compress_cmd="zstd -3"
+  decompress_cmd="zstd -d"
 
-lcat_cmd=""
-awk_cmd=$(which awk) # location of awk or gawk on home OS
+  lcat_cmd=""
+  awk_cmd=$(which awk) # location of awk or gawk on home OS
 
-zfs_cmd=$(which zfs)
-ssh_cmd=$(which ssh)
-rsync_cmd=""
+  zfs_cmd=$(which zfs)
+  ssh_cmd=$(which ssh)
+  rsync_cmd=""
 
-# default zfs commands, can be overridden by -O or -T
-LZFS=$zfs_cmd
-RZFS=$zfs_cmd
+  # default zfs commands, can be overridden by -O or -T
+  LZFS=$zfs_cmd
+  RZFS=$zfs_cmd
 
-# specific to zfs mode
-zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
+  # specific to zfs mode
+  zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
-current_date=$(date +%s) # current date in seconds from 1970
+  current_date=$(date +%s) # current date in seconds from 1970
 
-# specific to rsync mode
-snapshot_name="zxfertempsnap"
+  # specific to rsync mode
+  snapshot_name="zxfertempsnap"
 
-# used in rsync transfers, to turn off the backup file writing
-# the first time
-dont_write_backup=0
+  # used in rsync transfers, to turn off the backup file writing
+  # the first time
+  dont_write_backup=0
 
-ensure_writable=0 # when creating/setting properties, ensures readonly=off
+  ensure_writable=0 # when creating/setting properties, ensures readonly=off
 
-# default rsync options - see http://www.daemonforums.org/showthread.php?t=3948
-default_rsync_options="-clptgoD --inplace --relative -H --numeric-ids"
+  # default rsync options - see http://www.daemonforums.org/showthread.php?t=3948
+  default_rsync_options="-clptgoD --inplace --relative -H --numeric-ids"
 
-# note that I am including in the "readonly properties list
-# 3 properties that are technically not readonly but we will
-# remove them from the override list as it does not make
-# sense to try and transfer them - version, volsize and mountpoint
-# Others have been added since. This is a potential refactor point
-# to split into two lists, $readonly_properties and $zxfer_unsupported_properties
+  # note that I am including in the "readonly properties list
+  # 3 properties that are technically not readonly but we will
+  # remove them from the override list as it does not make
+  # sense to try and transfer them - version, volsize and mountpoint
+  # Others have been added since. This is a potential refactor point
+  # to split into two lists, $readonly_properties and $zxfer_unsupported_properties
 
-readonly_properties="type,creation,used,available,referenced,\
+  readonly_properties="type,creation,used,available,referenced,\
 compressratio,mounted,version,primarycache,secondarycache,\
 usedbysnapshots,usedbydataset,usedbychildren,usedbyrefreservation,\
 version,volsize,mountpoint,mlslabel,keysource,keystatus,rekeydate,encryption,\
@@ -213,16 +214,28 @@ refcompressratio,written,logicalused,logicalreferenced,createtxg,guid,origin,\
 filesystem_count,snapshot_count,clones,defer_destroy,receive_resume_token,\
 userrefs,objsetid"
 
-# Properties not supported on FreeBSD
-fbsd_readonly_properties="aclmode,aclinherit,devices,nbmand,shareiscsi,vscan,\
+  # Properties not supported on FreeBSD
+  fbsd_readonly_properties="aclmode,aclinherit,devices,nbmand,shareiscsi,vscan,\
 xattr,dnodesize"
 
-# Properties not supported on Solaris Express 11
-solexp_readonly_properties="jailed,aclmode,shareiscsi"
+  # Properties not supported on Solaris Express 11
+  solexp_readonly_properties="jailed,aclmode,shareiscsi"
+}
 
 ###############################################################################
 # COMMON FUNCTIONS
 ###############################################################################
+
+#
+# Add the debug_start() and debug_end() functions to enable/disable debugging
+# between code blocks.
+debug_start() {
+  set -x
+}
+
+debug_end() {
+  set +x
+}
 
 #
 # Print out usage information
@@ -1417,7 +1430,7 @@ copy_snap() {
 # Use incremental snapshots where possible. Assumes that the list of snapshots
 # is given in creation order. copy_snap is responsible for skipping already
 # existing snapshots on the destination side.
-# Takes: $found_last_common_snap, $source, $copy_fs_snapshot_list
+# Takes: $found_last_common_snap, $last_common_snap, $source, $copy_fs_snapshot_list
 #
 copy_snap_multiple() {
   _lastsnap=""
@@ -1499,7 +1512,9 @@ newsnap() {
 # Tests to see if they are trying to sync a snapshots; exit if so
 #
 check_snapshot() {
-  _initial_sourcesnap=$(echo "$initial_source" | grep @ | cut -d@ -f2)
+  _initial_source=$1
+
+  _initial_sourcesnap=$(extract_snapshot_name "$_initial_source")
 
   # When using -s or -m, we don't want the source to be a snapshot.
   [ -n "$_initial_sourcesnap" ] && throw_error "Snapshots are not allowed as a source."
@@ -1571,63 +1586,83 @@ grandfather_test() {
   fi
 }
 
-#
-# Find the most recent common snapshot on source and destination.
-# Then, create a list of snapshots on source, starting from the
-# one after the most recent common snapshot.
-# If the -d option is present, delete the snapshots on destination
-# that are no longer present on the source.
-#
+# Function to extract snapshot name
+extract_snapshot_name() {
+  echo "$1" | grep @ | cut -d@ -f2
+}
+
+get_lines_in_dest_not_in_source() {
+  _src=$1
+  _dest=$2
+
+  # extract only the snapshot portion (after the @) from the source and destination
+  _src_snaps=$(echo "$_src" | tr ' ' '\n' | grep "@" | cut -d@ -f2 | sort)
+  _dest_snaps=$(echo "$_dest" | tr ' ' '\n' | grep "@" | cut -d@ -f2 | sort)
+
+  # use comm to find lines in $_dest_snaps that don't have a match in $_src_snaps
+  # sort the input strings and convert them to files that comm can read
+  # Write sorted lists to temporary files
+  src_sorted_file=$(mktemp)
+  dest_sorted_file=$(mktemp)
+
+  echo "$_src_snaps" | sort >"$src_sorted_file"
+  echo "$_dest_snaps" | sort >"$dest_sorted_file"
+
+  # Use grep -Fxf to find lines in dest_sorted.txt that don't have a match in src_sorted.txt
+  _lines_in_dest_not_in_src=$(grep -Fvxf "$src_sorted_file" "$dest_sorted_file")
+
+  # remove the temporary files
+  rm -f "$src_sorted_file" "$dest_sorted_file"
+
+  # find the lines in _dest that have a match in _lines_in_dest_not_in_src
+  # and add the prefix back to them
+  echo "$_dest" | grep -F "$_lines_in_dest_not_in_src"
+}
+
 inspect_delete_snap() {
+  echov "Begin inspecting and deleting snapshots."
 
   # Get the list of source snapshots
-  zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" |
+  _zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" |
     grep "^$source@") >/dev/null 2>&1
 
   # save a copy for when we need to make a new list
-  zfs_source_snaps_orig=$zfs_source_snaps
+  _zfs_source_snaps_orig=$_zfs_source_snaps
 
   # Get the list of destination snapshots
-  zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" |
+  _zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" |
     grep "^$actual_dest@") >/dev/null 2>&1
+
+  # using sh, find snapshots in the destination that don't exist in the source
+  # and add them to a delete list that will be checked for grandfather protection
+  # before being deleted
+
+  # find lines in the destination that don't have a match in the source
+  # what is the
+  echo "Lines not in source:"
+  _dest_snaps_not_in_source=$(get_lines_in_dest_not_in_source "$_zfs_source_snaps" "$_zfs_dest_snaps")
 
   found_last_common_snap=0
 
+#  # snap is the most recent common snap
+#  if [ $found_last_common_snap -eq 0 ]; then
+##    found_last_common_snap=1
+ #   last_common_snap="$(extract_snapshot_name "$_dest_snap")"
+ # fi
+
+
   # This gets the last common snap, and deletes non-common snaps on destination
   # if asked to.
-  for dest_snap in $zfs_dest_snaps; do
-    mark_snap_for_deletion=1
-    for src_snap in $zfs_source_snaps; do
-      # if the snaps are identical
-      if [ "$(echo "$dest_snap" | grep @ | cut -d@ -f2)" = "$(echo "$src_snap" |
-        grep @ | cut -d@ -f2)" ]; then
+  for _dest_snap in $_dest_snaps_not_in_source; do
+    echov "Checking destination snapshot $_dest_snap."
 
-        # mark snap not to be deleted
-        mark_snap_for_deletion=0
-
-        # snap is the most recent common snap
-        if [ $found_last_common_snap -eq 0 ]; then
-          found_last_common_snap=1
-          last_common_snap=$(echo "$dest_snap" | grep @ | cut -d@ -f2)
-        fi
-
-        # since the snap was matched, let's not waste our time searching for
-        # it again
-        zfs_source_snaps=$(echo "$zfs_source_snaps" | grep -v "$src_snap")
-
-        # let's also break out of the loop, since we've already found what we
-        # are looking for
-        break
-      fi
-    done
-
-    if [ $mark_snap_for_deletion = 1 ] && [ "$option_g_grandfather_protection" != "" ]; then
-      grandfather_test "$dest_snap"
+    if [ "$option_g_grandfather_protection" != "" ]; then
+      grandfather_test "$_dest_snap"
     fi
 
-    if [ $mark_snap_for_deletion = 1 ] && [ $option_d_delete_destination_snapshots -eq 1 ]; then
-      #echov "Destroying destination snapshot $dest_snap."
-      _cmd="$RZFS destroy $dest_snap"
+    if [ $option_d_delete_destination_snapshots -eq 1 ]; then
+      #echov "Destroying destination snapshot $_dest_snap."
+      _cmd="$RZFS destroy $_dest_snap"
       # pass 1 to continue command if it fails
       execute_command "$_cmd" 1
     fi
@@ -1638,7 +1673,7 @@ inspect_delete_snap() {
 
   # This prepares a list of source snapshots to transfer, beginning with
   # the first snapshot after the last common one.
-  for test_snap in $zfs_source_snaps_orig; do
+  for test_snap in $_zfs_source_snaps_orig; do
     if [ "$test_snap" != "$source@$last_common_snap" ]; then
       if [ $found_common = 0 ]; then
         src_snapshot_transfer_list="$test_snap,$src_snapshot_transfer_list"
@@ -1648,12 +1683,100 @@ inspect_delete_snap() {
     fi
   done
   src_snapshot_transfer_list=$(echo "$src_snapshot_transfer_list" | tr -s "," "\n")
+
+  echov "End inspecting and deleting snapshots."
+}
+
+#
+# Find the most recent common snapshot on source and destination.
+# Then, create a list of snapshots on source, starting from the
+# one after the most recent common snapshot.
+# If the -d option is present, delete the snapshots on destination
+# that are no longer present on the source.
+#
+# 2024.03.11 - when there are many snapshots, this function takes a long time
+# to execute. Consider using comm to optimize the comparison of the two lists.
+#
+OLDinspect_delete_snap() {
+  echov "Begin inspecting and deleting snapshots."
+
+  # Get the list of source snapshots
+  _zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" |
+    grep "^$source@") >/dev/null 2>&1
+
+  # save a copy for when we need to make a new list
+  _zfs_source_snaps_orig=$_zfs_source_snaps
+
+  # Get the list of destination snapshots
+  _zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" |
+    grep "^$actual_dest@") >/dev/null 2>&1
+
+  found_last_common_snap=0
+
+  # This gets the last common snap, and deletes non-common snaps on destination
+  # if asked to.
+  for _dest_snap in $_zfs_dest_snaps; do
+    echov "Checking destination snapshot $_dest_snap."
+    _mark_snap_for_deletion=1
+    for _src_snap in $_zfs_source_snaps; do
+      # if the snaps are identical
+      if [ "$(extract_snapshot_name "$_dest_snap")" = "$(extract_snapshot_name "$_src_snap")" ]; then
+        # mark snap not to be deleted
+        _mark_snap_for_deletion=0
+
+        # snap is the most recent common snap
+        if [ $found_last_common_snap -eq 0 ]; then
+          found_last_common_snap=1
+          last_common_snap="$(extract_snapshot_name "$_dest_snap")"
+        fi
+
+        # since the snap was matched, let's not waste our time searching for
+        # it again
+        _zfs_source_snaps=$(echo "$_zfs_source_snaps" | grep -v "$_src_snap")
+
+        # let's also break out of the loop, since we've already found what we
+        # are looking for
+        break
+      fi
+    done
+
+    if [ $_mark_snap_for_deletion = 1 ] && [ "$option_g_grandfather_protection" != "" ]; then
+      grandfather_test "$_dest_snap"
+    fi
+
+    if [ $_mark_snap_for_deletion = 1 ] && [ $option_d_delete_destination_snapshots -eq 1 ]; then
+      #echov "Destroying destination snapshot $_dest_snap."
+      _cmd="$RZFS destroy $_dest_snap"
+      # pass 1 to continue command if it fails
+      execute_command "$_cmd" 1
+    fi
+  done
+
+  src_snapshot_transfer_list=""
+  found_common=0
+
+  # This prepares a list of source snapshots to transfer, beginning with
+  # the first snapshot after the last common one.
+  for test_snap in $_zfs_source_snaps_orig; do
+    if [ "$test_snap" != "$source@$last_common_snap" ]; then
+      if [ $found_common = 0 ]; then
+        src_snapshot_transfer_list="$test_snap,$src_snapshot_transfer_list"
+      fi
+    else
+      found_common=1
+    fi
+  done
+  src_snapshot_transfer_list=$(echo "$src_snapshot_transfer_list" | tr -s "," "\n")
+
+  echov "End inspecting and deleting snapshots."
 }
 
 #
 # Caches zfs list commands to cut execution time
 #
 get_zfs_list() {
+  echov "Begin caching zfs list results."
+
   # 0 if not a trailing slash;  regex is one character of any sort followed by
   # zero or more of any character until "/" followed by the end of the
   # string.
@@ -1692,12 +1815,67 @@ get_zfs_list() {
   if [ "$recursive_dest_list" = "" ]; then
     throw_usage_error "Destination filesystem does not exist. Create it first."
   fi
+
+  echov "End of caching zfs list results."
+}
+
+#
+# main loop that copies the filesystems
+#
+copy_filesystems() {
+  for source in $recursive_source_list; do
+    # Split up source into source fs, last component
+    sourcefs=$(echo "$source" | cut -d@ -f1)
+    # unused variable
+    #sourcefslast=$(echo $sourcefs | sed -e "s%.*/%%")
+
+    get_actual_dest
+
+    # If using the -m feature, check if the source is mounted,
+    # otherwise there's no point in us doing the remounting.
+    if [ $option_m_migrate -eq 1 ]; then
+      source_to_migrate_mounted=$($LZFS get -Ho value mounted "$source")
+      if [ "$source_to_migrate_mounted" = "yes" ]; then
+        echo "The source filesystem is not mounted, why use -m?"
+        exit 1
+      fi
+      mountpoint=$($LZFS get -Ho value mountpoint "$source")
+      propsource=$($LZFS get -Ho source mountpoint "$source")
+      echov "Mountpoint is: $mountpoint. Source: $propsource."
+    fi
+
+    # Inspect the source and destination snapshots so that we are in position to
+    # transfer using the latest common snapshot as a base, and transferring the
+    # newer snapshots on source, in order.
+    inspect_delete_snap
+
+    # Transfer source properties to destination if required.
+    # in the function.
+    if [ $option_P_transfer_property -eq 1 ] || [ "$option_o_override_property" != "" ]; then
+      transfer_properties
+    fi
+
+    # Since we'll mostly wrap around zfs send/receive, we'll leave further
+    # error-checking to them.
+
+    #
+    # We now have a valid source filesystem, volume or snapshot to copy from and an
+    # assumed valid destination filesystem to copy to with a possible snapshot name
+    # to give to the destination snapshot.
+    #
+    copy_fs
+    #
+    # Now we have replicated all existing snapshots.
+    #
+  done
 }
 
 #
 # zfs send/receive mode, aka zfs-replicate mode, aka normal mode
 #
 run_zfs_mode() {
+  echov "Running in zfs send/receive mode."
+
   if [ "$option_R_recursive" != "" ] && [ "$option_N_nonrecursive" != "" ]; then
     throw_usage_error "If using normal mode (i.e. no -S), you must choose either -N to transfer \
 a single filesystem or -R to transfer a single filesystem and its children \
@@ -1717,9 +1895,10 @@ recursively, but not both -N and -R at the same time."
   fi
 
   # Checks options to see if appropriate for a source snapshot
-  check_snapshot
+  echov "Checking source snapshot."
+  check_snapshot "$initial_source"
 
-  # Enforce the when using -c you must use -m as well rule. This forces the user
+  # When using -c you must use -m as well rule. This forces the user
   # To think twice if they really mean to do the migration.
   [ -n "$services" ] && [ $option_m_migrate -eq 0 ] &&
     throw_error "When using -c, -m needs to be specified as well."
@@ -1748,7 +1927,7 @@ recursively, but not both -N and -R at the same time."
   base_fs=${initial_source##*/}
   # This gets everything but the base_fs, so that we can later delete it from
   # $source
-  part_of_source_to_delete=${initial_source%$base_fs}
+  part_of_source_to_delete=${initial_source%"$base_fs"}
 
   #
   # If using -s, do a new recursive snapshot, then copy all new snapshots too.
@@ -1814,52 +1993,7 @@ recursively, but not both -N and -R at the same time."
     echov "Grandfather check passed."
   fi
 
-  # main loop that copies the filesystems
-  for source in $recursive_source_list; do
-    # Split up source into source fs, last component
-    sourcefs=$(echo "$source" | cut -d@ -f1)
-    # unused variable
-    #sourcefslast=$(echo $sourcefs | sed -e "s%.*/%%")
-
-    get_actual_dest
-
-    # If using the -m feature, check if the source is mounted,
-    # otherwise there's no point in us doing the remounting.
-    if [ $option_m_migrate -eq 1 ]; then
-      source_to_migrate_mounted=$($LZFS get -Ho value mounted "$source")
-      if [ "$source_to_migrate_mounted" = "yes" ]; then
-        echo "The source filesystem is not mounted, why use -m?"
-        exit 1
-      fi
-      mountpoint=$($LZFS get -Ho value mountpoint "$source")
-      propsource=$($LZFS get -Ho source mountpoint "$source")
-      echov "Mountpoint is: $mountpoint. Source: $propsource."
-    fi
-
-    # Inspect the source and destination snapshots so that we are in position to
-    # transfer using the latest common snapshot as a base, and transferring the
-    # newer snapshots on source, in order.
-    inspect_delete_snap
-
-    # Transfer source properties to destination if required.
-    # in the function.
-    if [ $option_P_transfer_property -eq 1 ] || [ "$option_o_override_property" != "" ]; then
-      transfer_properties
-    fi
-
-    # Since we'll mostly wrap around zfs send/receive, we'll leave further
-    # error-checking to them.
-
-    #
-    # We now have a valid source filesystem, volume or snapshot to copy from and an
-    # assumed valid destination filesystem to copy to with a possible snapshot name
-    # to give to the destination snapshot.
-    #
-    copy_fs
-    #
-    # Now we have replicated all existing snapshots.
-    #
-  done
+  copy_filesystems
 
   if [ $option_m_migrate -eq 1 ]; then
     # Re-launch any stopped services.
@@ -2004,6 +2138,7 @@ directories are contained in filesystems with as many \"/\" as L."
         fi
         old_root_fs=$root_fs
         root_fs=$(echo "$fs" | $awk_cmd '{for (i=1; i <= '$inc_option_L_rsync_levels_deep'; i++) printf("%s%c", $i, (i=='$inc_option_L_rsync_levels_deep')?ORS:OFS)}' FS=/ OFS=/ ORS=)
+
         if [ "$root_fs" != "$old_root_fs" ] && [ "$old_root_fs" != "" ]; then
           throw_usage_error "No common root filesystem. If using option L, ensure \
 that each source file/directory comes from a common filesystem, and that the
@@ -2144,6 +2279,7 @@ that the legacy mountpoint is \"/\"."
       # This will trim ($option_L_rsync_levels_deep + 1) folders off the beginning of the fs, e.g.
       # "tank/foo/bar/zroot/tmp/yum" becomes (with option_L_rsync_levels_deep = 3) "tmp/yum"
       inc_option_L_rsync_levels_deep=$(expr $option_L_rsync_levels_deep + 1)
+
       n=1
       while [ ${n} -le ${inc_option_L_rsync_levels_deep} ]; do
         opt_src_fs_modif=$(echo "$opt_src_fs_modif" | sed -e 's%^[^/]*%%' | sed -e 's%^/%%')
@@ -2368,6 +2504,8 @@ a single file, use -N."
 ###############################################################################
 # MAIN
 ###############################################################################
+init_globals
+
 read_command_line_switches "$@"
 
 # Read out source and dest values
