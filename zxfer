@@ -1816,7 +1816,7 @@ copy_filesystems() {
 # zfs send/receive mode, aka zfs-replicate mode, aka normal mode
 #
 run_zfs_mode() {
-  echov "Running in zfs send/receive mode."
+  #echov "Running in zfs send/receive mode."
 
   if [ "$option_R_recursive" != "" ] && [ "$option_N_nonrecursive" != "" ]; then
     throw_usage_error "If using normal mode (i.e. no -S), you must choose either -N to transfer \
