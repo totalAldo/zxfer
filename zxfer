@@ -1592,16 +1592,124 @@ extract_snapshot_name() {
 }
 
 #
+# find the most recent common snapshot (since the lists or sorted in descending
+# order by by creation date, the first common snapshot is the most recent common)
+#
+set_last_common_snapshot() {
+  _zfs_source_snaps=$1
+  _zfs_dest_snaps=$2
+
+  found_last_common_snap=0
+
+  for _dest_snap in $_zfs_dest_snaps; do
+    for _src_snap in $_zfs_source_snaps; do
+      if [ "$(extract_snapshot_name "$_dest_snap")" = "$(extract_snapshot_name "$_src_snap")" ]; then
+        found_last_common_snap=1
+        last_common_snap="$(extract_snapshot_name "$_dest_snap")"
+        echov "Found last common snapshot: $last_common_snap."
+        # once found, exit the function
+        return
+      fi
+    done
+  done
+}
+
+#
+# Returns a list of destination snapshots that don't exist in the source.
+# These will be tested for deletion.
+#
+# 2024.03.11 - when there are many snapshots, this function takes a long time
+# to execute. Consider using comm to optimize the comparison of the two lists.
+#
+get_dest_snapshots_to_delete() {
+  _zfs_source_snaps=$1
+  _zfs_dest_snaps=$2
+
+  _snaps_to_delete=""
+
+  # deletes non-common snaps on destination if asked to.
+  for _dest_snap in $_zfs_dest_snaps; do
+
+    _mark_snap_for_deletion=1
+
+    for _src_snap in $_zfs_source_snaps; do
+      # if the snaps are identical
+      if [ "$(extract_snapshot_name "$_dest_snap")" = "$(extract_snapshot_name "$_src_snap")" ]; then
+        # mark snap not to be deleted
+        _mark_snap_for_deletion=0
+
+        # since the snap was matched, let's not waste our time searching for
+        # it again
+        _zfs_source_snaps=$(echo "$_zfs_source_snaps" | grep -v "$_src_snap")
+
+        # let's also break out of the loop, since we've already found what we
+        # are looking for
+        break
+      fi
+    done
+
+    # build the list of snapshots to delete
+    if [ $_mark_snap_for_deletion = 1 ]; then
+      _snaps_to_delete="$_snaps_to_delete\n$_dest_snap"
+    fi
+
+  done
+
+  echo "$_snaps_to_delete"
+}
+
+delete_snaps() {
+  _zfs_source_snaps=$1
+  _zfs_dest_snaps=$2
+
+  echov "Deleting non-common snapshots on destination."
+
+  _snaps_to_delete=$(get_dest_snapshots_to_delete "$_zfs_source_snaps" "$_zfs_dest_snaps")
+
+  # deletes non-common snaps on destination if asked to.
+  for _snap_to_delete in $_snaps_to_delete; do
+    if [ "$option_g_grandfather_protection" != "" ]; then
+      grandfather_test "$_snap_to_delete"
+    fi
+
+    #echov "Destroying destination snapshot $_dest_snap."
+    _cmd="$RZFS destroy $_dest_snap"
+    # pass 1 to continue command if it fails
+    execute_command "$_cmd" 1
+  done
+}
+
+set_src_snapshot_transfer_list() {
+  _zfs_source_snaps=$1
+
+  _found_common=0
+
+  src_snapshot_transfer_list=""
+
+  # This prepares a list of source snapshots to transfer, beginning with
+  # the first snapshot after the last common one.
+  for test_snap in $_zfs_source_snaps; do
+    if [ "$test_snap" != "$source@$last_common_snap" ]; then
+      if [ $_found_common = 0 ]; then
+        src_snapshot_transfer_list="$test_snap,$src_snapshot_transfer_list"
+      fi
+    else
+      _found_common=1
+    fi
+  done
+
+  src_snapshot_transfer_list=$(echo "$src_snapshot_transfer_list" | tr -s "," "\n")
+}
+
+#
 # Find the most recent common snapshot on source and destination.
 # Then, create a list of snapshots on source, starting from the
 # one after the most recent common snapshot.
 # If the -d option is present, delete the snapshots on destination
 # that are no longer present on the source.
 #
-# 2024.03.11 - when there are many snapshots, this function takes a long time
-# to execute. Consider using comm to optimize the comparison of the two lists.
 #
-inspect_delete_snap() {
+OLDinspect_delete_snap() {
   echov "Begin inspecting and deleting snapshots."
 
   # Get the list of source snapshots
@@ -1751,7 +1859,24 @@ copy_filesystems() {
     # Inspect the source and destination snapshots so that we are in position to
     # transfer using the latest common snapshot as a base, and transferring the
     # newer snapshots on source, in order.
-    inspect_delete_snap
+
+    # Get the list of source snapshots in descending order by creation date
+    _zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
+
+    # Get the list of destination snapshots in descending order by creation date
+    _zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" | grep "^$actual_dest@") >/dev/null 2>&1
+
+    # Find the most recent common snapshot on source and destination.
+    set_last_common_snapshot "$_zfs_source_snaps" "$_zfs_dest_snaps"
+
+    # Deletes non-common snaps on destination if asked to.
+    if [ $option_d_delete_destination_snapshots -eq 1 ]; then
+      delete_snaps "$_zfs_source_snaps" "$_zfs_dest_snaps"
+    fi
+
+    # Create a list of source snapshots to transfer, beginning with the
+    # first snapshot after the last common one.
+    set_src_snapshot_transfer_list "$_zfs_source_snaps"
 
     # Transfer source properties to destination if required.
     # in the function.
