@@ -1700,7 +1700,7 @@ set_src_snapshot_transfer_list() {
 # Caches zfs list commands to cut execution time
 #
 get_zfs_list() {
-  echov "Begin get_zfs_list()"
+  #echov "Begin get_zfs_list()"
 
   # 0 if not a trailing slash;  regex is one character of any sort followed by
   # zero or more of any character until "/" followed by the end of the
@@ -1741,7 +1741,7 @@ get_zfs_list() {
     throw_usage_error "Destination filesystem does not exist. Create it first."
   fi
 
-  echov "End get_zfs_list()"
+  #echov "End get_zfs_list()"
 }
 
 #
