@@ -1696,6 +1696,26 @@ set_src_snapshot_transfer_list() {
   src_snapshot_transfer_list=$(echo "$src_snapshot_transfer_list" | tr -s "," "\n")
 }
 
+inspect_delete_snap() {
+    # Get the list of source snapshots in descending order by creation date
+    _zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
+
+    # Get the list of destination snapshots in descending order by creation date
+    _zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" | grep "^$actual_dest@") >/dev/null 2>&1
+
+    # Find the most recent common snapshot on source and destination.
+    set_last_common_snapshot "$_zfs_source_snaps" "$_zfs_dest_snaps"
+
+    # Deletes non-common snaps on destination if asked to.
+    if [ $option_d_delete_destination_snapshots -eq 1 ]; then
+      delete_snaps "$_zfs_source_snaps" "$_zfs_dest_snaps"
+    fi
+
+    # Create a list of source snapshots to transfer, beginning with the
+    # first snapshot after the last common one.
+    set_src_snapshot_transfer_list "$_zfs_source_snaps"
+}
+
 #
 # Caches zfs list commands to cut execution time
 #
@@ -1772,24 +1792,7 @@ copy_filesystems() {
     # Inspect the source and destination snapshots so that we are in position to
     # transfer using the latest common snapshot as a base, and transferring the
     # newer snapshots on source, in order.
-
-    # Get the list of source snapshots in descending order by creation date
-    _zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
-
-    # Get the list of destination snapshots in descending order by creation date
-    _zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" | grep "^$actual_dest@") >/dev/null 2>&1
-
-    # Find the most recent common snapshot on source and destination.
-    set_last_common_snapshot "$_zfs_source_snaps" "$_zfs_dest_snaps"
-
-    # Deletes non-common snaps on destination if asked to.
-    if [ $option_d_delete_destination_snapshots -eq 1 ]; then
-      delete_snaps "$_zfs_source_snaps" "$_zfs_dest_snaps"
-    fi
-
-    # Create a list of source snapshots to transfer, beginning with the
-    # first snapshot after the last common one.
-    set_src_snapshot_transfer_list "$_zfs_source_snaps"
+    inspect_delete_snap
 
     # Transfer source properties to destination if required.
     # in the function.
