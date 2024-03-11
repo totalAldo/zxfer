@@ -1611,7 +1611,7 @@ set_last_common_snapshot() {
       if [ "$(extract_snapshot_name "$_dest_snap")" = "$(extract_snapshot_name "$_src_snap")" ]; then
         found_last_common_snap=1
         last_common_snap="$(extract_snapshot_name "$_dest_snap")"
-        echov "Found last common snapshot: $last_common_snap."
+        #echov "Found last common snapshot: $last_common_snap."
         # once found, exit the function
         return
       fi
@@ -1655,7 +1655,7 @@ delete_snaps() {
   _zfs_source_snaps=$1
   _zfs_dest_snaps=$2
 
-  echov "Begin delete_snaps()"
+  #echov "Begin delete_snaps()"
 
   _snaps_to_delete=$(get_dest_snapshots_to_delete "$_zfs_source_snaps" "$_zfs_dest_snaps")
 
@@ -1671,7 +1671,7 @@ delete_snaps() {
     execute_command "$_cmd" 1
   done
 
-  echov "End delete_snaps()"
+  #echov "End delete_snaps()"
 }
 
 set_src_snapshot_transfer_list() {
