@@ -1591,102 +1591,6 @@ extract_snapshot_name() {
   echo "$1" | grep @ | cut -d@ -f2
 }
 
-get_lines_in_dest_not_in_source() {
-  _src=$1
-  _dest=$2
-
-  # extract only the snapshot portion (after the @) from the source and destination
-  _src_snaps=$(echo "$_src" | tr ' ' '\n' | grep "@" | cut -d@ -f2 | sort)
-  _dest_snaps=$(echo "$_dest" | tr ' ' '\n' | grep "@" | cut -d@ -f2 | sort)
-
-  # use comm to find lines in $_dest_snaps that don't have a match in $_src_snaps
-  # sort the input strings and convert them to files that comm can read
-  # Write sorted lists to temporary files
-  src_sorted_file=$(mktemp)
-  dest_sorted_file=$(mktemp)
-
-  echo "$_src_snaps" | sort >"$src_sorted_file"
-  echo "$_dest_snaps" | sort >"$dest_sorted_file"
-
-  # Use grep -Fxf to find lines in dest_sorted.txt that don't have a match in src_sorted.txt
-  _lines_in_dest_not_in_src=$(grep -Fvxf "$src_sorted_file" "$dest_sorted_file")
-
-  # remove the temporary files
-  rm -f "$src_sorted_file" "$dest_sorted_file"
-
-  # find the lines in _dest that have a match in _lines_in_dest_not_in_src
-  # and add the prefix back to them
-  echo "$_dest" | grep -F "$_lines_in_dest_not_in_src"
-}
-
-inspect_delete_snap() {
-  echov "Begin inspecting and deleting snapshots."
-
-  # Get the list of source snapshots
-  _zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" |
-    grep "^$source@") >/dev/null 2>&1
-
-  # save a copy for when we need to make a new list
-  _zfs_source_snaps_orig=$_zfs_source_snaps
-
-  # Get the list of destination snapshots
-  _zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" |
-    grep "^$actual_dest@") >/dev/null 2>&1
-
-  # using sh, find snapshots in the destination that don't exist in the source
-  # and add them to a delete list that will be checked for grandfather protection
-  # before being deleted
-
-  # find lines in the destination that don't have a match in the source
-  # what is the
-  echo "Lines not in source:"
-  _dest_snaps_not_in_source=$(get_lines_in_dest_not_in_source "$_zfs_source_snaps" "$_zfs_dest_snaps")
-
-  found_last_common_snap=0
-
-#  # snap is the most recent common snap
-#  if [ $found_last_common_snap -eq 0 ]; then
-##    found_last_common_snap=1
- #   last_common_snap="$(extract_snapshot_name "$_dest_snap")"
- # fi
-
-
-  # This gets the last common snap, and deletes non-common snaps on destination
-  # if asked to.
-  for _dest_snap in $_dest_snaps_not_in_source; do
-    echov "Checking destination snapshot $_dest_snap."
-
-    if [ "$option_g_grandfather_protection" != "" ]; then
-      grandfather_test "$_dest_snap"
-    fi
-
-    if [ $option_d_delete_destination_snapshots -eq 1 ]; then
-      #echov "Destroying destination snapshot $_dest_snap."
-      _cmd="$RZFS destroy $_dest_snap"
-      # pass 1 to continue command if it fails
-      execute_command "$_cmd" 1
-    fi
-  done
-
-  src_snapshot_transfer_list=""
-  found_common=0
-
-  # This prepares a list of source snapshots to transfer, beginning with
-  # the first snapshot after the last common one.
-  for test_snap in $_zfs_source_snaps_orig; do
-    if [ "$test_snap" != "$source@$last_common_snap" ]; then
-      if [ $found_common = 0 ]; then
-        src_snapshot_transfer_list="$test_snap,$src_snapshot_transfer_list"
-      fi
-    else
-      found_common=1
-    fi
-  done
-  src_snapshot_transfer_list=$(echo "$src_snapshot_transfer_list" | tr -s "," "\n")
-
-  echov "End inspecting and deleting snapshots."
-}
-
 #
 # Find the most recent common snapshot on source and destination.
 # Then, create a list of snapshots on source, starting from the
@@ -1697,7 +1601,7 @@ inspect_delete_snap() {
 # 2024.03.11 - when there are many snapshots, this function takes a long time
 # to execute. Consider using comm to optimize the comparison of the two lists.
 #
-OLDinspect_delete_snap() {
+inspect_delete_snap() {
   echov "Begin inspecting and deleting snapshots."
 
   # Get the list of source snapshots
@@ -1716,7 +1620,7 @@ OLDinspect_delete_snap() {
   # This gets the last common snap, and deletes non-common snaps on destination
   # if asked to.
   for _dest_snap in $_zfs_dest_snaps; do
-    echov "Checking destination snapshot $_dest_snap."
+    #echov "Checking destination snapshot $_dest_snap."
     _mark_snap_for_deletion=1
     for _src_snap in $_zfs_source_snaps; do
       # if the snaps are identical
