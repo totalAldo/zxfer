@@ -1796,7 +1796,7 @@ get_zfs_list() {
 
   exec_background_cmd \
     "$LZFS list -t filesystem,volume -Hr -o name $initial_source" \
-    "$_recursive_source_list_tmp_file" &
+    "$_recursive_source_list_tmp_file"
 
   # run the command in the foreground, as it's the last one
   _cmd="$RZFS list -t filesystem,volume -Hr -o name $destination"
@@ -1809,25 +1809,27 @@ get_zfs_list() {
   echoV "Wait finished."
 
   lzfs_list_hr_s_snap=$(cat "$_lzfs_list_hr_s_snap_tmp_file")
-  rm "$_lzfs_list_hr_s_snap_tmp_file"
+  rzfs_list_ho_s=$(cat "$_rzfs_list_ho_s_tmp_file")
+  rzfs_list_hr_S_snap=$(cat "$_rzfs_list_hr_S_snap_tmp_file")
+  recursive_source_list=$(cat "$_recursive_source_list_tmp_file")
+
+  rm "$_lzfs_list_hr_s_snap_tmp_file" \
+     "$_rzfs_list_ho_s_tmp_file" \
+     "$_rzfs_list_hr_S_snap_tmp_file" \
+     "$_recursive_source_list_tmp_file"
+
   if [ "$lzfs_list_hr_s_snap" = "" ]; then
     throw_error "Failed to retrieve snapshots from the source" 3
   fi
 
-  rzfs_list_ho_s=$(cat "$_rzfs_list_ho_s_tmp_file")
-  rm "$_rzfs_list_ho_s_tmp_file"
   if [ "$rzfs_list_ho_s" = "" ]; then
     throw_error "Failed to retrieve datasets from the destination" 3
   fi
 
-  rzfs_list_hr_S_snap=$(cat "$_rzfs_list_hr_S_snap_tmp_file")
-  rm "$_rzfs_list_hr_S_snap_tmp_file"
   if [ "$rzfs_list_hr_S_snap" = "" ]; then
     throw_error "Failed to retrieve snapshots from the destination" 3
   fi
 
-  recursive_source_list=$(cat "$_recursive_source_list_tmp_file")
-  rm "$_recursive_source_list_tmp_file"
   if [ "$recursive_source_list" = "" ]; then
     throw_error "Failed to retrieve list of datasets from the source" 3
   fi
