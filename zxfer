@@ -35,6 +35,11 @@
 # either zfs send/receive or rsync to do the heavy lifting.
 
 # changes by Aldo Gonzalez
+# 2024.03.12
+# - add -V option for (V)ery verbose mode using echoV()
+# - optimize set_last_common_snapshot() by using grep instead of nested loops
+# - add echoV statements for debugging
+#
 # 2024.03.11
 # refactor inspect_delete_snap() into multiple functions with the primary goal
 # of optimizing the snapshot deletion logic. Convert that from nested loops
@@ -153,6 +158,7 @@ init_globals() {
   option_u_rsync_use_existing_snapshot=0
   option_U_skip_unsupported_properties=0
   option_v_verbose=0
+  option_V_very_verbose=0
   option_z_compress=0
 
   services=""
@@ -248,7 +254,7 @@ debug_end() {
 usage() {
   cat <<EOT
 usage:
-     zxfer [-dFnPsUv] [-k | -e] [-b | -B] {-N path/to/src | -R path/to/src}
+     zxfer [-dFnPsUvV] [-k | -e] [-b | -B] {-N path/to/src | -R path/to/src}
            [-z] [-Z "full zstd compression command"]
            [-m [c FMRI|pattern[ FMRI|pattern]...]]] [-O user@host]
            [-D 'progress dialog options'] [-I properties,to,ignore]
@@ -273,7 +279,7 @@ EOT
 # Check command line parameters.
 #
 read_command_line_switches() {
-  while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:Uv?:D:zZ: i; do
+  while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:UvV?:D:zZ: i; do
     case $i in
     b)
       option_b_beep_always=1
@@ -382,6 +388,10 @@ read_command_line_switches() {
       ;;
     v)
       option_v_verbose=1
+      ;;
+    V)
+      option_v_verbose=1
+      option_V_very_verbose=1
       ;;
     z)
       # Pipes the send and receive commands through zstd
@@ -579,6 +589,15 @@ execute_command() {
 echov() {
   if [ $option_v_verbose -eq 1 ]; then
     echo "$@"
+  fi
+}
+
+#
+# Very verbose mode - print mesage to standard error
+#
+echoV() {
+  if [ $option_V_very_verbose -eq 1 ]; then
+    echo "$@" >&2
   fi
 }
 
@@ -1601,22 +1620,31 @@ extract_snapshot_name() {
 # order by by creation date, the first common snapshot is the most recent common)
 #
 set_last_common_snapshot() {
+  echoV "Begin set_last_common_snapshot()"
   _zfs_source_snaps=$1
   _zfs_dest_snaps=$2
 
   found_last_common_snap=0
 
+  # Convert the source snapshots into a list with newlines
+  _src_snap_list=$(echo "$_zfs_source_snaps" | tr ' ' '\n')
+
+  # loop through the destination snapshots sorted in descending creation order
+  # to find the most recent common snapshot
   for _dest_snap in $_zfs_dest_snaps; do
-    for _src_snap in $_zfs_source_snaps; do
-      if [ "$(extract_snapshot_name "$_dest_snap")" = "$(extract_snapshot_name "$_src_snap")" ]; then
-        found_last_common_snap=1
-        last_common_snap="$(extract_snapshot_name "$_dest_snap")"
-        #echov "Found last common snapshot: $last_common_snap."
-        # once found, exit the function
-        return
-      fi
-    done
+    _dest_snap_name=$(extract_snapshot_name "$_dest_snap")
+
+    # Use grep to check if the destination snapshot is in the source snapshots
+    _is_match_found=$(echo "$_src_snap_list" | grep "$_dest_snap_name$")
+    if [ "$_is_match_found" != "" ]; then
+      found_last_common_snap=1
+      last_common_snap="$_dest_snap_name"
+      echoV "Found last common snapshot: $last_common_snap."
+      # once found, exit the function
+      return
+    fi
   done
+  echoV "End set_last_common_snapshot()"
 }
 
 #
@@ -1639,9 +1667,9 @@ get_dest_snapshots_to_delete() {
 
   # Use comm to find snapshots in _dest_tmp that don't have a match in _src_tmp
   # write the snapshots to delete to a temporary file for use by grep
-  comm -13 "$_src_tmp" "$_dest_tmp" > "$_snaps_to_delete_tmp"
+  comm -13 "$_src_tmp" "$_dest_tmp" >"$_snaps_to_delete_tmp"
 
-  # Use grep to find the matching lines in _dest_tmp
+  # Use grep to find the matching lines in _original_zfs_dest_snaps
   _dest_snaps_to_delete=$(grep -F -f "$_snaps_to_delete_tmp" "$_original_zfs_dest_snaps")
 
   # Clean up temporary files
@@ -1652,10 +1680,9 @@ get_dest_snapshots_to_delete() {
 }
 
 delete_snaps() {
+  echoV "Begin delete_snaps()"
   _zfs_source_snaps=$1
   _zfs_dest_snaps=$2
-
-  #echov "Begin delete_snaps()"
 
   _snaps_to_delete=$(get_dest_snapshots_to_delete "$_zfs_source_snaps" "$_zfs_dest_snaps")
 
@@ -1665,13 +1692,13 @@ delete_snaps() {
       grandfather_test "$_snap_to_delete"
     fi
 
-    #echov "Destroying destination snapshot $_snap_to_delete."
+    #echoV "Destroying destination snapshot $_snap_to_delete."
     _cmd="$RZFS destroy $_snap_to_delete"
     # pass 1 to continue command if it fails
     execute_command "$_cmd" 1
   done
 
-  #echov "End delete_snaps()"
+  echoV "End delete_snaps()"
 }
 
 set_src_snapshot_transfer_list() {
@@ -1697,30 +1724,30 @@ set_src_snapshot_transfer_list() {
 }
 
 inspect_delete_snap() {
-    # Get the list of source snapshots in descending order by creation date
-    _zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
+  # Get the list of source snapshots in descending order by creation date
+  _zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
 
-    # Get the list of destination snapshots in descending order by creation date
-    _zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" | grep "^$actual_dest@") >/dev/null 2>&1
+  # Get the list of destination snapshots in descending order by creation date
+  _zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" | grep "^$actual_dest@") >/dev/null 2>&1
 
-    # Find the most recent common snapshot on source and destination.
-    set_last_common_snapshot "$_zfs_source_snaps" "$_zfs_dest_snaps"
+  # Deletes non-common snaps on destination if asked to.
+  if [ $option_d_delete_destination_snapshots -eq 1 ]; then
+    delete_snaps "$_zfs_source_snaps" "$_zfs_dest_snaps"
+  fi
 
-    # Deletes non-common snaps on destination if asked to.
-    if [ $option_d_delete_destination_snapshots -eq 1 ]; then
-      delete_snaps "$_zfs_source_snaps" "$_zfs_dest_snaps"
-    fi
+  # Find the most recent common snapshot on source and destination.
+  set_last_common_snapshot "$_zfs_source_snaps" "$_zfs_dest_snaps"
 
-    # Create a list of source snapshots to transfer, beginning with the
-    # first snapshot after the last common one.
-    set_src_snapshot_transfer_list "$_zfs_source_snaps"
+  # Create a list of source snapshots to transfer, beginning with the
+  # first snapshot after the last common one.
+  set_src_snapshot_transfer_list "$_zfs_source_snaps"
 }
 
 #
 # Caches zfs list commands to cut execution time
 #
 get_zfs_list() {
-  #echov "Begin get_zfs_list()"
+  echoV "Begin get_zfs_list()"
 
   # 0 if not a trailing slash;  regex is one character of any sort followed by
   # zero or more of any character until "/" followed by the end of the
@@ -1731,11 +1758,14 @@ get_zfs_list() {
   # need to confuse things by keeping it on there. Get rid of it.
   initial_source=${initial_source%/}
 
-  rzfs_list_ho_s=$($RZFS list -t filesystem,volume -Ho name -s creation) ||
-    throw_error "Failed to retrieve datasets from the destination" 3
+  # run this in the background to speed up the process
+  _cmd="$LZFS list -Hr -o name -s creation -t snapshot $initial_source"
+  echoV "$_cmd"
+  lzfs_list_hr_s_snap=$($_cmd) || throw_error "Failed to retrieve snapshots from the source" 3
 
-  lzfs_list_hr_s_snap=$($LZFS list -Hr -o name -s creation -t snapshot "$initial_source") ||
-    throw_error "Failed to retrieve snapshots from the source" 3
+  _cmd="$RZFS list -t filesystem,volume -Ho name -s creation"
+  echoV "$_cmd"
+  rzfs_list_ho_s=$($_cmd) || throw_error "Failed to retrieve datasets from the destination" 3
 
   # Note that for OpenSolaris compatibility, instead of using gtac
   # we will use ...| cat -n | sort -nr | cut -c 8-
@@ -1761,7 +1791,7 @@ get_zfs_list() {
     throw_usage_error "Destination filesystem does not exist. Create it first."
   fi
 
-  #echov "End get_zfs_list()"
+  echoV "End get_zfs_list()"
 }
 
 #
@@ -1819,7 +1849,7 @@ copy_filesystems() {
 # zfs send/receive mode, aka zfs-replicate mode, aka normal mode
 #
 run_zfs_mode() {
-  #echov "Running in zfs send/receive mode."
+  echoV "Running in zfs send/receive mode."
 
   if [ "$option_R_recursive" != "" ] && [ "$option_N_nonrecursive" != "" ]; then
     throw_usage_error "If using normal mode (i.e. no -S), you must choose either -N to transfer \
@@ -1840,7 +1870,7 @@ recursively, but not both -N and -R at the same time."
   fi
 
   # Checks options to see if appropriate for a source snapshot
-  # echov "Checking source snapshot."
+  echoV "Checking source snapshot."
   check_snapshot "$initial_source"
 
   # When using -c you must use -m as well rule. This forces the user
