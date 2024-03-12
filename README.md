@@ -1,6 +1,10 @@
 zxfer
 =====
 
+2024.03.12 - This fork aims at optimizing zfs replication by refactoring the code for readability and maintainability, adding error handling functions, and adding new options for very verbose mode and
+zstd compression.
+=====
+
 A continuation of development on zxfer, a popular script for managing ZFS snapshot replication
 
 The Original author seems to have abandoned the project, there have been no updates since May 2011 and the script fails to work correctly in FreeBSD versions after 8.2 and 9.0 due to new ZFS properties.
@@ -14,6 +18,16 @@ For now, most of the documentation will reside at the original page, until someo
 
 Changes
 =======
+2024.03.12
++ add -V option for (V)ery verbose mode using echoV()
++ optimize set_last_common_snapshot() by using grep instead of nested loops
++ add echoV statements for debugging
+
+2024.03.11
++ refactor inspect_delete_snap() into multiple functions with the primary goal
+  of optimizing the snapshot deletion logic. Convert that from nested loops
+  to using temp files and comm for a more efficient comparison.
+
 2024.03.08
 + refactor code for readability and maintanability
 + add error handling functions
