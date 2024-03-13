@@ -1780,8 +1780,8 @@ get_zfs_list() {
   initial_source=${initial_source%/}
 
   _lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
-  _rzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
   _rzfs_list_ho_s_tmp_file=$(get_temp_file)
+  _rzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
   _recursive_source_list_tmp_file=$(get_temp_file)
 
   # run this in the background to speed up the process
@@ -1829,7 +1829,6 @@ get_zfs_list() {
   rm "$_lzfs_list_hr_s_snap_tmp_file" \
     "$_rzfs_list_ho_s_tmp_file" \
     "$_rzfs_list_hr_S_snap_tmp_file" \
-    "$_rzfs_list_ho_s_tmp_file" \
     "$_recursive_source_list_tmp_file"
 
   if [ "$lzfs_list_hr_s_snap" = "" ]; then
