@@ -1780,7 +1780,6 @@ get_zfs_list() {
   initial_source=${initial_source%/}
 
   _lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
-  _rzfs_list_ho_s_tmp_file=$(get_temp_file)
   _rzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
   _rzfs_list_ho_s_tmp_file=$(get_temp_file)
   _recursive_source_list_tmp_file=$(get_temp_file)
