@@ -35,6 +35,9 @@
 # either zfs send/receive or rsync to do the heavy lifting.
 
 # changes by Aldo Gonzalez
+# 2024.03.13
+# remove unused variables in get_zfs_list() and clean it up
+#
 # 2024.03.12
 # - refactor get_zfs_list() to run zfs list commands in the background to reduce
 #   the time it takes to get the list of filesystems
@@ -1776,29 +1779,35 @@ get_zfs_list() {
   # need to confuse things by keeping it on there. Get rid of it.
   initial_source=${initial_source%/}
 
-  _lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
-  _rzfs_list_ho_s_tmp_file=$(get_temp_file)
+  _lzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
   _rzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
+  _rzfs_list_ho_s_tmp_file=$(get_temp_file)
   _recursive_source_list_tmp_file=$(get_temp_file)
 
-  # run this in the background to speed up the process
-  exec_background_cmd \
-    "$LZFS list -Hr -o name -s creation -t snapshot $initial_source" \
-    "$_lzfs_list_hr_s_snap_tmp_file"
+  # run these commands in the background to speed up the process.
 
+  # get a list of source snapshots in descending order by creation date
   exec_background_cmd \
-    "$RZFS list -t filesystem,volume -Ho name -s creation" \
-    "$_rzfs_list_ho_s_tmp_file"
+    "$LZFS list -Hr -o name -S creation -t snapshot $initial_source" \
+    "$_lzfs_list_hr_S_snap_tmp_file"
 
+  # get a list of destination snapshots in descending order by creation date
   exec_background_cmd \
     "$RZFS list -Hr -o name -S creation -t snapshot $destination" \
     "$_rzfs_list_hr_S_snap_tmp_file"
 
+  # get a list of destination datasets in ascending order by creation date
+  exec_background_cmd \
+    "$RZFS list -t filesystem,volume -Ho name -s creation" \
+    "$_rzfs_list_ho_s_tmp_file"
+
+  # get a list of source datasets
   exec_background_cmd \
     "$LZFS list -t filesystem,volume -Hr -o name $initial_source" \
     "$_recursive_source_list_tmp_file"
 
   # run the command in the foreground, as it's the last one
+  # get a list of destination datasets
   _cmd="$RZFS list -t filesystem,volume -Hr -o name $destination"
   echoV "Running in the foreground: $_cmd"
   recursive_dest_list=$($_cmd) ||
@@ -1808,88 +1817,32 @@ get_zfs_list() {
   wait
   echoV "Wait finished."
 
-  lzfs_list_hr_s_snap=$(cat "$_lzfs_list_hr_s_snap_tmp_file")
-  rzfs_list_ho_s=$(cat "$_rzfs_list_ho_s_tmp_file")
+  lzfs_list_hr_S_snap=$(cat "$_lzfs_list_hr_S_snap_tmp_file")
   rzfs_list_hr_S_snap=$(cat "$_rzfs_list_hr_S_snap_tmp_file")
+  rzfs_list_ho_s=$(cat "$_rzfs_list_ho_s_tmp_file")
   recursive_source_list=$(cat "$_recursive_source_list_tmp_file")
 
-  rm "$_lzfs_list_hr_s_snap_tmp_file" \
-     "$_rzfs_list_ho_s_tmp_file" \
+  # remove temporary files
+  rm "$_lzfs_list_hr_S_snap_tmp_file" \
      "$_rzfs_list_hr_S_snap_tmp_file" \
+     "$_rzfs_list_ho_s_tmp_file" \
      "$_recursive_source_list_tmp_file"
 
-  if [ "$lzfs_list_hr_s_snap" = "" ]; then
+  if [ "$lzfs_list_hr_S_snap" = "" ]; then
     throw_error "Failed to retrieve snapshots from the source" 3
-  fi
-
-  if [ "$rzfs_list_ho_s" = "" ]; then
-    throw_error "Failed to retrieve datasets from the destination" 3
   fi
 
   if [ "$rzfs_list_hr_S_snap" = "" ]; then
     throw_error "Failed to retrieve snapshots from the destination" 3
   fi
 
+  if [ "$rzfs_list_ho_s" = "" ]; then
+    throw_error "Failed to retrieve datasets from the destination" 3
+  fi
+
   if [ "$recursive_source_list" = "" ]; then
     throw_error "Failed to retrieve list of datasets from the source" 3
   fi
-
-  # Note that for OpenSolaris compatibility, instead of using gtac
-  # we will use ...| cat -n | sort -nr | cut -c 8-
-  # gtac line
-  lzfs_list_hr_S_snap=$(echo "$lzfs_list_hr_s_snap" | cat -n)
-  lzfs_list_hr_S_snap=$(echo "$lzfs_list_hr_S_snap" | sort -nr | cut -c 8-)
-
-  # Exit if source not sound
-  if [ "$recursive_source_list" = "" ]; then
-    throw_usage_error "Source does not exist."
-  fi
-
-  #  Exit if destination not sound
-  if [ "$recursive_dest_list" = "" ]; then
-    throw_usage_error "Destination filesystem does not exist. Create it first."
-  fi
-
-  echoV "End get_zfs_list()"
-}
-
-#
-# @Deprecated - original implementation
-#
-serial_get_zfs_list() {
-  echoV "Begin get_zfs_list()"
-
-  # 0 if not a trailing slash;  regex is one character of any sort followed by
-  # zero or more of any character until "/" followed by the end of the
-  # string.
-  trailing_slash=$(echo "$initial_source" | grep -c '..*/$')
-
-  # Now that we know whether there was a trailing slash on the source, no
-  # need to confuse things by keeping it on there. Get rid of it.
-  initial_source=${initial_source%/}
-
-  # run this in the background to speed up the process
-  _cmd="$LZFS list -Hr -o name -s creation -t snapshot $initial_source"
-  echoV "$_cmd"
-  lzfs_list_hr_s_snap=$($_cmd) || throw_error "Failed to retrieve snapshots from the source" 3
-
-  _cmd="$RZFS list -t filesystem,volume -Ho name -s creation"
-  echoV "$_cmd"
-  rzfs_list_ho_s=$($_cmd) || throw_error "Failed to retrieve datasets from the destination" 3
-
-  # Note that for OpenSolaris compatibility, instead of using gtac
-  # we will use ...| cat -n | sort -nr | cut -c 8-
-  # gtac line
-  lzfs_list_hr_S_snap=$(echo "$lzfs_list_hr_s_snap" | cat -n)
-  lzfs_list_hr_S_snap=$(echo "$lzfs_list_hr_S_snap" | sort -nr | cut -c 8-)
-  rzfs_list_hr_S_snap=$($RZFS list -Hr -o name -S creation -t snapshot "$destination") ||
-    throw_error "Failed to retrieve snapshots from the destination" 3
-
-  recursive_source_list=$($LZFS list -t filesystem,volume -Hr -o name "$initial_source") ||
-    throw_error "Failed to retrieve list of datasets from the source" 3
-
-  recursive_dest_list=$($RZFS list -t filesystem,volume -Hr -o name "$destination") ||
-    throw_error "Failed to retrieve list of datasets from the destination" 3
 
   # Exit if source not sound
   if [ "$recursive_source_list" = "" ]; then
