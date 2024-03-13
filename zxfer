@@ -1793,7 +1793,7 @@ get_zfs_list() {
     "$LZFS list -Hr -o name -s creation -t snapshot $initial_source" \
     "$_lzfs_list_hr_s_snap_tmp_file"
 
-  # get a list of source snapshots in descending order by creation date
+  # get a list of source snapshots in ascending order by creation date
   exec_background_cmd \
     "$RZFS list -t filesystem,volume -Ho name -s creation" \
     "$_rzfs_list_ho_s_tmp_file"
@@ -1802,11 +1802,6 @@ get_zfs_list() {
   exec_background_cmd \
     "$RZFS list -Hr -o name -S creation -t snapshot $destination" \
     "$_rzfs_list_hr_S_snap_tmp_file"
-
-  # get a list of destination datasets in ascending order by creation date
-  exec_background_cmd \
-    "$RZFS list -t filesystem,volume -Ho name -s creation" \
-    "$_rzfs_list_ho_s_tmp_file"
 
   # get a list of source datasets
   exec_background_cmd \
