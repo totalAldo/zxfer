@@ -1843,6 +1843,17 @@ get_zfs_list() {
 
   l_initial_source=$1
 
+  # TODO: review having g_trailing_slash set in this function
+  # 0 if not a trailing slash; regex is one character of any sort followed by
+  # zero or more of any character until "/" followed by the end of the
+  # string.
+  # used by get_actual_dest()
+  g_trailing_slash=$(echo "$l_initial_source" | grep -c '..*/$')
+
+  # Now that we know whether there was a trailing slash on the source, no
+  # need to confuse things by keeping it on there. Get rid of it.
+  l_initial_source=${l_initial_source%/}
+
   # create temporary files used by the background processes
   l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
   l_rzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
@@ -1984,16 +1995,6 @@ recursively, but not both -N and -R at the same time."
   else
     throw_usage_error "You must specify a source with either -N or -R."
   fi
-
-  # 0 if not a trailing slash; regex is one character of any sort followed by
-  # zero or more of any character until "/" followed by the end of the
-  # string.
-  # used by get_actual_dest()
-  g_trailing_slash=$(echo "$l_initial_source" | grep -c '..*/$')
-
-  # Now that we know whether there was a trailing slash on the source, no
-  # need to confuse things by keeping it on there. Get rid of it.
-  l_initial_source=${l_initial_source%/}
 
   # Source and destination can't start with "/", but it's an easy mistake to make
   if [ "$(echo "$l_initial_source" | grep -c '^/')" -eq "1" ] ||
