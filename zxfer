@@ -1593,7 +1593,7 @@ check_snapshot() {
 #
 calculate_unsupported_properties() {
   # Get a list of the supported properties from the destination
-  dest_pool_name=${destination%%/*}
+  dest_pool_name=${g_destination%%/*}
   dest_supported_properties=$($g_RZFS get -Ho property all "$dest_pool_name")
 
   # Get a list of the supported properties from the source
