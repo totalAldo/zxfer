@@ -1,7 +1,7 @@
 zxfer
 =====
 
-2024.03.12 - This fork aims at optimizing zfs replication by refactoring the code for readability and maintainability, adding error handling functions, and adding new options for very verbose mode and
+2024 - This fork of zxfer aims at optimizing zfs replication by refactoring the code for readability and maintainability, adding error handling functions, and adding new options for very verbose mode and
 zstd compression.
 
 A continuation of development on zxfer, a popular script for managing ZFS snapshot replication
@@ -12,6 +12,10 @@ The Original author seems to have abandoned the project, there have been no upda
 
 Changes
 =======
+
+2024.03.14
++ refactor script into multiple files, grouping files by function usage
++ bump to version 2.0.0
 
 2024.03.12
 + add -V option for (V)ery verbose mode using echoV()
