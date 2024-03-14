@@ -202,6 +202,10 @@ init_globals() {
   g_LZFS=$g_cmd_zfs
   g_RZFS=$g_cmd_zfs
 
+  # dataset and snapshot lists
+  g_rzfs_list_ho_s=""
+
+
   # specific to zfs mode
   g_zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
@@ -1469,7 +1473,7 @@ copy_snap() {
   _copysrctail=$(echo "$_copysrc" | cut -d/ -f2-)
 
   # Check if the snapshot already exists
-  if snapshot_exists "$dest/$_copysrctail" "$rzfs_list_ho_s"; then
+  if snapshot_exists "$dest/$_copysrctail" "$g_rzfs_list_ho_s"; then
     echov "Snapshot $_copysrc already exists at destination $_copydest. Exiting function."
     return
   fi
@@ -1780,96 +1784,102 @@ exec_background_cmd() {
 
 #
 # Caches zfs list commands to cut execution time
-# USes background processes to speed up the results
-#
+# Uses background processes to speed up the results.
+# Often, the source and destination datasets reside on different pools
+# and running the zfs list commands in parallel can speed up the process.
+# 2024.03.14 - listing the snapshots can take a long time, listing the
+# datasets is much faster so those commands don't need to be run in the
+# background.
 get_zfs_list() {
   echoV "Begin get_zfs_list()"
 
-  # 0 if not a trailing slash;  regex is one character of any sort followed by
+  l_initial_source=$1
+
+  # 0 if not a trailing slash; regex is one character of any sort followed by
   # zero or more of any character until "/" followed by the end of the
   # string.
-  g_trailing_slash=$(echo "$initial_source" | grep -c '..*/$')
+  g_trailing_slash=$(echo "$l_initial_source" | grep -c '..*/$')
 
   # Now that we know whether there was a trailing slash on the source, no
   # need to confuse things by keeping it on there. Get rid of it.
-  initial_source=${initial_source%/}
+  l_initial_source=${l_initial_source%/}
 
-  _lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
-  _rzfs_list_ho_s_tmp_file=$(get_temp_file)
-  _rzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
-  _recursive_source_list_tmp_file=$(get_temp_file)
+  # create temporary files used by the background processes
+  l_rzfs_list_ho_s_tmp_file=$(get_temp_file)
+  l_recursive_source_list_tmp_file=$(get_temp_file)
+  l_recursive_dest_list_tmp_file=$(get_temp_file)
+  l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
+  l_rzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
 
-  # run this in the background to speed up the process
-  # it's important to get this in ascending order because when getting
-  # in descending order, the datasets names are not in ordered as we want
-  # don't use -S creation for this command, instead, reverse the sort below
-  exec_background_cmd \
-    "$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source" \
-    "$_lzfs_list_hr_s_snap_tmp_file"
+  # start the commands most likely to finish first, first so that zfs
+  # can focus on listing the snapshots whic may take longer
 
-  # get a list of source snapshots in ascending order by creation date
+  # get a list of datasets in the target ascending order by creation date
   exec_background_cmd \
     "$g_RZFS list -t filesystem,volume -Ho name -s creation" \
-    "$_rzfs_list_ho_s_tmp_file"
+    "$l_rzfs_list_ho_s_tmp_file"
+
+  # get a list of source datasets
+  exec_background_cmd \
+    "$g_LZFS list -t filesystem,volume -Hr -o name $l_initial_source" \
+    "$l_recursive_source_list_tmp_file"
+
+  # get a list of desintation datasets
+  exec_background_cmd \
+    "$g_RZFS list -t filesystem,volume -Hr -o name $destination" \
+    "$l_recursive_dest_list_tmp_file"
+
+  # it is important to get this in ascending order because when getting
+  # in descending order, the datasets names are not ordered as we want.
+  # don't use -S creation for this command, instead, reverse the sort below
+  #
+  # get a list of source snapshots in ascending order by creation date
+  exec_background_cmd \
+    "$g_LZFS list -Hr -o name -s creation -t snapshot $l_initial_source" \
+    "$l_lzfs_list_hr_s_snap_tmp_file"
 
   # get a list of destination snapshots in descending order by creation date
   exec_background_cmd \
     "$g_RZFS list -Hr -o name -S creation -t snapshot $destination" \
-    "$_rzfs_list_hr_S_snap_tmp_file"
+    "$l_rzfs_list_hr_S_snap_tmp_file"
 
-  # get a list of source datasets
-  exec_background_cmd \
-    "$g_LZFS list -t filesystem,volume -Hr -o name $initial_source" \
-    "$_recursive_source_list_tmp_file"
-
-  # run the command in the foreground, as it's the last one
-  # get a list of destination datasets
-  _cmd="$g_RZFS list -t filesystem,volume -Hr -o name $destination"
-  echoV "Running in the foreground: $_cmd"
-  recursive_dest_list=$($_cmd) ||
-    throw_error "Failed to retrieve list of datasets from the destination" 3
-
-  echoV "Waiting for background command to finish."
+  echoV "Waiting for background processes to finish."
   wait
   echoV "Wait finished."
 
-  lzfs_list_hr_s_snap=$(cat "$_lzfs_list_hr_s_snap_tmp_file")
-  rzfs_list_ho_s=$(cat "$_rzfs_list_ho_s_tmp_file")
-  rzfs_list_hr_S_snap=$(cat "$_rzfs_list_hr_S_snap_tmp_file")
-  recursive_source_list=$(cat "$_recursive_source_list_tmp_file")
+  g_rzfs_list_ho_s=$(cat "$l_rzfs_list_ho_s_tmp_file")
+  recursive_source_list=$(cat "$l_recursive_source_list_tmp_file")
+  recursive_dest_list=$(cat "$l_recursive_dest_list_tmp_file")
+  lzfs_list_hr_s_snap=$(cat "$l_lzfs_list_hr_s_snap_tmp_file")
+  rzfs_list_hr_S_snap=$(cat "$l_rzfs_list_hr_S_snap_tmp_file")
 
   # get the reversed order
   lzfs_list_hr_S_snap=$(echo "$lzfs_list_hr_s_snap" | cat -n | sort -nr | cut -c 8-)
 
-  rm "$_lzfs_list_hr_s_snap_tmp_file" \
-    "$_rzfs_list_ho_s_tmp_file" \
-    "$_rzfs_list_hr_S_snap_tmp_file" \
-    "$_recursive_source_list_tmp_file"
+  rm "$l_rzfs_list_ho_s_tmp_file" \
+    "$l_recursive_source_list_tmp_file" \
+    "$l_recursive_dest_list_tmp_file" \
+    "$l_lzfs_list_hr_s_snap_tmp_file" \
+    "$l_rzfs_list_hr_S_snap_tmp_file"
 
-  if [ "$lzfs_list_hr_s_snap" = "" ]; then
-    throw_error "Failed to retrieve snapshots from the source" 3
-  fi
-
-  if [ "$rzfs_list_ho_s" = "" ]; then
+  if [ "$g_rzfs_list_ho_s" = "" ]; then
     throw_error "Failed to retrieve datasets from the destination" 3
-  fi
-
-  if [ "$rzfs_list_hr_S_snap" = "" ]; then
-    throw_error "Failed to retrieve snapshots from the destination" 3
   fi
 
   if [ "$recursive_source_list" = "" ]; then
     throw_error "Failed to retrieve list of datasets from the source" 3
   fi
 
-  # Exit if source not sound
-  if [ "$recursive_source_list" = "" ]; then
-    throw_usage_error "Source does not exist."
+  if [ "$recursive_dest_list" = "" ]; then
+    throw_usage_error "Failed to retrieve list of datasets from the destination" 3
   fi
 
-  #  Exit if destination not sound
-  if [ "$recursive_dest_list" = "" ]; then
-    throw_usage_error "Destination filesystem does not exist. Create it first."
+  if [ "$lzfs_list_hr_s_snap" = "" ]; then
+    throw_error "Failed to retrieve snapshots from the source" 3
+  fi
+
+  if [ "$rzfs_list_hr_S_snap" = "" ]; then
+    throw_error "Failed to retrieve snapshots from the destination" 3
   fi
 
   echoV "End get_zfs_list()"
@@ -1935,22 +1945,22 @@ run_zfs_mode() {
 a single filesystem or -R to transfer a single filesystem and its children \
 recursively, but not both -N and -R at the same time."
   elif [ "$g_option_R_recursive" != "" ]; then
-    initial_source="$g_option_R_recursive"
+    l_initial_source="$g_option_R_recursive"
   elif [ "$g_option_N_nonrecursive" != "" ]; then
-    initial_source="$g_option_N_nonrecursive"
+    l_initial_source="$g_option_N_nonrecursive"
   else
     throw_usage_error "You must specify a source with either -N or -R."
   fi
 
   # Source and destination can't start with "/", but it's an easy mistake to make
-  if [ "$(echo "$initial_source" | grep -c '^/')" -eq "1" ] ||
+  if [ "$(echo "$l_initial_source" | grep -c '^/')" -eq "1" ] ||
     [ "$(echo "$destination" | grep -c '^/')" -eq "1" ]; then
     throw_usage_error "Source and destination must not begin with \"/\". Note the example."
   fi
 
   # Checks options to see if appropriate for a source snapshot
   echoV "Checking source snapshot."
-  check_snapshot "$initial_source"
+  check_snapshot "$l_initial_source"
 
   # When using -c you must use -m as well rule. This forces the user
   # To think twice if they really mean to do the migration.
@@ -1959,7 +1969,7 @@ recursively, but not both -N and -R at the same time."
 
   # Caches all the zfs list calls, gets the recursive list, and gives
   # an opportunity to exit if the source is not present
-  get_zfs_list
+  get_zfs_list "$l_initial_source"
 
   # If we are restoring properties get the backup properties
   if [ $g_option_e_restore_property_mode -eq 1 ]; then
@@ -1973,26 +1983,26 @@ recursively, but not both -N and -R at the same time."
   # If recursive option is not selected, then we only iterate once through
   # the initial source as source
   if [ "$g_option_R_recursive" = "" ]; then
-    recursive_source_list=$initial_source
+    recursive_source_list=$l_initial_source
   fi
 
   # This gets the root filesystem transferred - e.g.
   # the string after the very last "/" e.g. backup/test/zroot -> zroot
-  base_fs=${initial_source##*/}
+  base_fs=${l_initial_source##*/}
   # This gets everything but the base_fs, so that we can later delete it from
   # $source
-  part_of_source_to_delete=${initial_source%"$base_fs"}
+  part_of_source_to_delete=${l_initial_source%"$base_fs"}
 
   #
   # If using -s, do a new recursive snapshot, then copy all new snapshots too.
   #
   if [ $g_option_s_make_snapshot -eq 1 ] && [ $g_option_m_migrate -eq 0 ]; then
     # We snapshot from the base of the initial source
-    sourcefs=$(echo "$initial_source" | cut -d@ -f1)
+    sourcefs=$(echo "$l_initial_source" | cut -d@ -f1)
     # Create the new snapshot with a unique name.
     newsnap
     # Because there are new snapshots, need to get_zfs_list again
-    get_zfs_list
+    get_zfs_list "$l_initial_source"
   fi
 
   #
@@ -2020,7 +2030,7 @@ recursively, but not both -N and -R at the same time."
     done
 
     # We snapshot from the base of the initial source
-    sourcefs=$(echo "$initial_source" | cut -d@ -f1)
+    sourcefs=$(echo "$l_initial_source" | cut -d@ -f1)
 
     # Create the last snapshot with a unique name.
     newsnap
@@ -2032,7 +2042,7 @@ recursively, but not both -N and -R at the same time."
 
     # Now we must make the script aware of the new snapshots in existence so
     # we can copy them over.
-    get_zfs_list
+    get_zfs_list "$l_initial_source"
   fi
 
   if [ "$g_option_g_grandfather_protection" != "" ]; then
