@@ -2305,12 +2305,14 @@ on a filesystem that is not ZFS."
 
 #
 # Transfers a source via rsync
-# Takes $source_type, where:
+# Takes $1 (source_type), where:
 # n = non-recursive
 # r = recursive
 # Takes $opt_source, which is a source directly from the -N or -R option
 #
 rsync_transfer() {
+  l_source_type=$1
+
   # Note that the source is actually in the snapshot. This gets the
   # ZFS filesystem corresponding to the source in the original -R or -N list.
   opt_src_fs=$($g_LZFS list -t filesystem,volume -H -o name "$opt_source")
@@ -2330,7 +2332,7 @@ rsync_transfer() {
   # is the source (directory) a filesystem?
   is_fs=$(echo "$lzfs_list_Ho_mountpoint" | tr " " "\n" | grep -c "^$opt_source$")
 
-  if [ $source_type = "r" ] && [ "$is_fs" -eq "1" ]; then
+  if [ "$l_source_type" = "r" ] && [ "$is_fs" -eq "1" ]; then
     # the directory is a filesystem - need to include all fs under source fs
     opt_srs_all_inc_fs=$($g_LZFS list -t filesystem,volume -H -o name | grep "^$opt_src_fs")
   else
@@ -2338,7 +2340,7 @@ rsync_transfer() {
   fi
 
   for opt_src_fs in $opt_srs_all_inc_fs; do
-    if [ $source_type = "r" ] && [ "$is_fs" -eq "1" ]; then
+    if [ "$l_source_type" = "r" ] && [ "$is_fs" -eq "1" ]; then
       # We need to get the mountpoints of each sub filesystem
       sub_opt_source=$($g_LZFS get -H -o value mountpoint "$opt_src_fs")
     else
@@ -2408,7 +2410,7 @@ that the legacy mountpoint is \"/\"."
 
     get_exclude_list
 
-    if [ "$source_type" = "r" ]; then
+    if [ "$l_source_type" = "r" ]; then
       # Appends a slash and the "-r" option, to suit rsync
       rs_source="$rs_source/"
       full_rs_options="$full_rs_options $exclude_options -r"
@@ -2547,8 +2549,7 @@ run_rsync_mode() {
 
   # Loop for the non-recursive
   for opt_source in $g_option_N_nonrecursive_space; do
-    source_type="n"
-    rsync_transfer
+    rsync_transfer "n"
   done
 
   # Loop for the recursive directories
@@ -2564,8 +2565,7 @@ rsync transfer mode (i.e. -R). If you are trying to transfer \
 a single file, use -N."
     fi
 
-    source_type="r"
-    rsync_transfer
+    rsync_transfer "r"
   done # End of recursive directory loop
 
   # reset backup file contents as they are built up in transfer_properties
