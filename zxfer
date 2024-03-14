@@ -2308,10 +2308,13 @@ on a filesystem that is not ZFS."
 # Takes $1 (source_type), where:
 # n = non-recursive
 # r = recursive
+#
+# full_rs_options are the rsync options to be used
 # Takes $opt_source, which is a source directly from the -N or -R option
 #
 rsync_transfer() {
   l_source_type=$1
+  full_rs_options=$2
 
   # Note that the source is actually in the snapshot. This gets the
   # ZFS filesystem corresponding to the source in the original -R or -N list.
@@ -2406,8 +2409,6 @@ that the legacy mountpoint is \"/\"."
       rs_dest=$(echo "$rs_dest" | sed -e "s%^/[^/]*%%g")
     fi
 
-    full_rs_options="$rsync_options"
-
     get_exclude_list
 
     if [ "$l_source_type" = "r" ]; then
@@ -2496,11 +2497,11 @@ run_rsync_mode() {
   fi
 
   # get the correct options to feed to rsync (excluding recursive)
-  rsync_options="$g_default_rsync_options"
+  l_rsync_options="$g_default_rsync_options"
   if [ "$g_option_f_rsync_file_options" != "" ]; then
     # gets the options to be passed to rsync, if able to be read.
     if [ -r "$g_option_f_rsync_file_options" ]; then
-      rsync_options=$(cat "$g_option_f_rsync_file_options")
+      l_rsync_options=$(cat "$g_option_f_rsync_file_options")
     else
       throw_usage_error "Reading contents of $g_option_f_rsync_file_options."
     fi
@@ -2549,12 +2550,11 @@ run_rsync_mode() {
 
   # Loop for the non-recursive
   for opt_source in $g_option_N_nonrecursive_space; do
-    rsync_transfer "n"
+    rsync_transfer "n" "$l_rsync_options"
   done
 
   # Loop for the recursive directories
   for opt_source in $g_option_R_recursive_space; do
-
     # We want to ensure that the source is a directory, and to fail if not
     if [ -d "$opt_source" ]; then
       : # if a directory, do nothing
@@ -2565,7 +2565,7 @@ rsync transfer mode (i.e. -R). If you are trying to transfer \
 a single file, use -N."
     fi
 
-    rsync_transfer "r"
+    rsync_transfer "r" "$l_rsync_options"
   done # End of recursive directory loop
 
   # reset backup file contents as they are built up in transfer_properties
