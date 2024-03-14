@@ -175,7 +175,7 @@ init_globals() {
 
   source=""
   sourcefs=""
-  destination=""
+  g_destination=""
   g_backup_file_extension=".zxfer_backup_info"
   g_backup_file_contents=""
 
@@ -683,11 +683,11 @@ get_backup_properties() {
 #
 write_backup_properties() {
   _is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
-  l_backup_file_dir=$($g_RZFS get -H -o value mountpoint "$destination")
+  l_backup_file_dir=$($g_RZFS get -H -o value mountpoint "$g_destination")
   echov "Writing backup info to location $l_backup_file_dir/$g_backup_file_extension.$_is_tail"
 
   # Construct the backup file contents
-  _backup_file_header="#zxfer property backup file;#version:$g_zxfer_version;#R options:$g_option_R_recursive;#N options:$g_option_N_nonrecursive;#destination:$destination;#initial_source:$_is_tail;#g_option_S_rsync_mode:$g_option_S_rsync_mode;"
+  _backup_file_header="#zxfer property backup file;#version:$g_zxfer_version;#R options:$g_option_R_recursive;#N options:$g_option_N_nonrecursive;#destination:$g_destination;#initial_source:$_is_tail;#g_option_S_rsync_mode:$g_option_S_rsync_mode;"
   _backup_date=$(date)
   g_backup_file_contents="$_backup_file_header#backup_date:$_backup_date$g_backup_file_contents"
 
@@ -864,7 +864,7 @@ resolve_human_vars() {
 
 #
 # Prepare the actual destination (actual_dest) as used in zfs receive.
-# Uses $g_trailing_slash, $source, $part_of_source_to_delete, $destination,
+# Uses $g_trailing_slash, $source, $part_of_source_to_delete, $g_destination,
 # $initial_source
 # Output is $actual_dest
 #
@@ -876,10 +876,10 @@ get_actual_dest() {
     # If the original source was backup/test/zroot and we are transferring
     # backup/test/zroot/tmp/foo, $dest_tail is zroot/tmp/foo
     dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
-    actual_dest="$destination"/"$dest_tail"
+    actual_dest="$g_destination"/"$dest_tail"
   else
     l_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
-    actual_dest="$destination$l_trailing_slash_dest_tail"
+    actual_dest="$g_destination$l_trailing_slash_dest_tail"
   fi
 }
 
@@ -1858,7 +1858,7 @@ get_zfs_list() {
 
   # get a list of destination snapshots in descending order by creation date
   execute_background_cmd \
-    "$g_RZFS list -Hr -o name -S creation -t snapshot $destination" \
+    "$g_RZFS list -Hr -o name -S creation -t snapshot $g_destination" \
     "$l_rzfs_list_hr_S_snap_tmp_file"
 
   # these commands can be run serially because listing snapshots take the longest
@@ -1874,7 +1874,7 @@ get_zfs_list() {
   g_recursive_source_list=$($l_cmd)
 
   # get a list of desintation datasets
-  l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $destination"
+  l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $g_destination"
   echoV "Running command: $l_cmd"
   g_recursive_dest_list=$($l_cmd)
 
@@ -1895,24 +1895,24 @@ get_zfs_list() {
   rm "$l_lzfs_list_hr_s_snap_tmp_file" \
     "$l_rzfs_list_hr_S_snap_tmp_file"
 
-  if [ "$g_rzfs_list_ho_s" = "" ]; then
-    throw_error "Failed to retrieve datasets from the destination" 3
-  fi
-
-  if [ "$g_recursive_source_list" = "" ]; then
-    throw_error "Failed to retrieve list of datasets from the source" 3
-  fi
-
-  if [ "$g_recursive_dest_list" = "" ]; then
-    throw_error "Failed to retrieve list of datasets from the destination" 3
-  fi
-
   if [ "$l_lzfs_list_hr_s_snap" = "" ]; then
     throw_error "Failed to retrieve snapshots from the source" 3
   fi
 
   if [ "$g_rzfs_list_hr_S_snap" = "" ]; then
     throw_error "Failed to retrieve snapshots from the destination" 3
+  fi
+
+  if [ "$g_rzfs_list_ho_s" = "" ]; then
+    throw_error "Failed to retrieve datasets from the destination" 3
+  fi
+
+  if [ "$g_recursive_source_list" = "" ]; then
+    throw_usage_error "Failed to retrieve list of datasets from the source"
+  fi
+
+  if [ "$g_recursive_dest_list" = "" ]; then
+    throw_usage_error "Failed to retrieve list of datasets from the destination"
   fi
 
   echoV "End get_zfs_list()"
@@ -1997,7 +1997,7 @@ recursively, but not both -N and -R at the same time."
 
   # Source and destination can't start with "/", but it's an easy mistake to make
   if [ "$(echo "$l_initial_source" | grep -c '^/')" -eq "1" ] ||
-    [ "$(echo "$destination" | grep -c '^/')" -eq "1" ]; then
+    [ "$(echo "$g_destination" | grep -c '^/')" -eq "1" ]; then
     throw_usage_error "Source and destination must not begin with \"/\". Note the example."
   fi
 
@@ -2132,7 +2132,7 @@ clean_up() {
 #
 # Prepares variables for rsync based transfer of properties
 # using transfer_properties()
-# This takes  $source, $part_of_source_to_delete, $destination, $initial_source
+# This takes  $source, $part_of_source_to_delete, $g_destination, $initial_source
 #
 prepare_rs_property_transfer() {
   # Prepare the actual destination (actual_dest) for property transfer.
@@ -2145,10 +2145,10 @@ prepare_rs_property_transfer() {
     # If the original source was backup/test/zroot and we are transferring
     # backup/test/zroot/tmp/foo, $dest_tail is zroot/tmp/foo
     dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
-    actual_dest="$destination"/"$dest_tail"
+    actual_dest="$g_destination"/"$dest_tail"
   else
     l_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
-    actual_dest="$destination$l_trailing_slash_dest_tail"
+    actual_dest="$g_destination$l_trailing_slash_dest_tail"
   fi
 }
 
@@ -2197,7 +2197,7 @@ $dest_exclude_dir_list"
 # Caches zfs list commands to cut execution time, for option -S
 #
 get_zfs_list_rsync_mode() {
-  g_recursive_dest_list=$($g_RZFS list -t filesystem,volume -Hr -o name "$destination")
+  g_recursive_dest_list=$($g_RZFS list -t filesystem,volume -Hr -o name "$g_destination")
 
   #  Exit if destination not sound
   if [ "$g_recursive_dest_list" = "" ]; then
@@ -2302,7 +2302,7 @@ on a filesystem that is not ZFS."
 
   initial_source=$root_fs
   g_recursive_source_list=$($g_LZFS list -t filesystem,volume -Hr -o name "$root_fs" |
-    grep -v "^$destination")
+    grep -v "^$g_destination")
 
   IFS="$OLD_IFS"
 }
@@ -2393,11 +2393,11 @@ that the legacy mountpoint is \"/\"."
         n=$((n + 1))
       done
     fi
-    #rs_dest="/$destination/$opt_src_fs_modif$opt_src_tail"
-    rs_dest="/$destination/$opt_src_fs_modif"
+    #rs_dest="/$g_destination/$opt_src_fs_modif$opt_src_tail"
+    rs_dest="/$g_destination/$opt_src_fs_modif"
 
-    # if $destination is "zroot/foo/bar", this regex gets "zroot"
-    dest_root=$(echo "$destination" | sed -e 's%/.*$%%')
+    # if $g_destination is "zroot/foo/bar", this regex gets "zroot"
+    dest_root=$(echo "$g_destination" | sed -e 's%/.*$%%')
 
     dest_root_mountpoint=$($g_RZFS get -Ho value mountpoint "$dest_root")
     if [ "$dest_root_mountpoint" = "legacy" ]; then
@@ -2617,7 +2617,7 @@ read_command_line_switches "$@"
 
 # Read out source and dest values
 shift "$((OPTIND - 1))"
-destination=$1
+g_destination=$1
 
 # Basic consistency checking
 if [ $# -lt 1 ]; then
