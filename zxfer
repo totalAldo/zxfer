@@ -203,6 +203,9 @@ init_globals() {
   g_RZFS=$g_cmd_zfs
 
   # dataset and snapshot lists
+  g_recursive_source_list=""
+  g_lzfs_list_hr_S_snap=""
+  g_rzfs_list_hr_S_snap=""
   g_rzfs_list_ho_s=""
 
   # specific to zfs mode
@@ -877,7 +880,7 @@ get_actual_dest() {
 # Either creates the filesystem if it doesn't exist,
 # or sets it after the fact.
 # Also, checks to see if the override properties given as options are valid.
-# Needs: $source, $initial_source, $actual_dest, $recursive_dest_list
+# Needs: $source, $initial_source, $actual_dest, $g_recursive_dest_list
 # $g_dont_write_backup
 # $g_ensure_writable
 #
@@ -1042,7 +1045,7 @@ $override_value=$override_source,"
     override_pvs="$only_supported_properties"
   fi
 
-  dest_exist=$(echo "$recursive_dest_list" | grep -c "^$actual_dest$")
+  dest_exist=$(echo "$g_recursive_dest_list" | grep -c "^$actual_dest$")
 
   # This is where we actually create or modify the destination filesystem.
   # Is the destination absent? If so, just create with correct option list.
@@ -1704,7 +1707,10 @@ get_dest_snapshots_to_delete() {
   _dest_snaps_to_delete=$(grep -F -f "$_snaps_to_delete_tmp" "$_original_zfs_dest_snaps")
 
   # Clean up temporary files
-  rm "$_original_zfs_dest_snaps" "$_src_tmp" "$_dest_tmp" "$_snaps_to_delete_tmp"
+  rm "$_original_zfs_dest_snaps" \
+    "$_src_tmp" \
+    "$_dest_tmp" \
+    "$_snaps_to_delete_tmp"
 
   # Print the matching lines
   echo "$_dest_snaps_to_delete"
@@ -1756,10 +1762,10 @@ set_src_snapshot_transfer_list() {
 
 inspect_delete_snap() {
   # Get the list of source snapshots in descending order by creation date
-  _zfs_source_snaps=$(echo "$lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
+  _zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
 
   # Get the list of destination snapshots in descending order by creation date
-  _zfs_dest_snaps=$(echo "$rzfs_list_hr_S_snap" | grep "^$actual_dest@") >/dev/null 2>&1
+  _zfs_dest_snaps=$(echo "$g_rzfs_list_hr_S_snap" | grep "^$actual_dest@") >/dev/null 2>&1
 
   # Deletes non-common snaps on destination if asked to.
   if [ $g_option_d_delete_destination_snapshots -eq 1 ]; then
@@ -1786,6 +1792,44 @@ execute_background_cmd() {
 # Uses background processes when listing snapshots to speed up the results.
 # Often, the source and destination datasets reside on different pools
 # and running the zfs list commands in parallel can speed up the process.
+#
+# zfs list options used in this function include:
+# -H  Used for scripting mode.  Do not print headers and separate fields by
+#     a single tab instead of arbitrary white space.
+# -r  Recursively display any children of the dataset on the command line.
+# -o property
+#    A comma-separated list of properties to display.  The property must
+#    be:
+#    •   One of the properties described in the Native Properties section
+#        of zfsprops(7)
+#    •   A user property
+#    •   The value name to display the dataset name
+#    •   The value space to display space usage properties on file systems
+#        and volumes.  This is a shortcut for specifying
+#        -o name,avail,used,usedsnap,usedds,usedrefreserv,usedchild -t
+#        filesystem,volume.
+# -s property
+#    A property for sorting the output by column in ascending order based
+#    on the value of the property.  The property must be one of the
+#    properties described in the Properties section of zfsprops(7) or the
+#    value name to sort by the dataset name.  Multiple properties can be
+#    specified at one time using multiple -s property options.  Multiple
+#    -s options are evaluated from left to right in decreasing order of
+#    importance.  The following is a list of sorting criteria:
+#    •   Numeric types sort in numeric order.
+#    •   String types sort in alphabetical order.
+#    •   Types inappropriate for a row sort that row to the literal
+#        bottom, regardless of the specified ordering.
+#
+#    If no sorting options are specified the existing behavior of zfs list
+#    is preserved.
+# -S property
+#    Same as -s, but sorts by property in descending order.
+#  -t type
+#    A comma-separated list of types to display, where type is one of
+#    filesystem, snapshot, volume, bookmark, or all.  For example,
+#    specifying -t snapshot displays only snapshots.
+#
 get_zfs_list() {
   echoV "Begin get_zfs_list()"
 
@@ -1828,22 +1872,22 @@ get_zfs_list() {
   # get a list of source datasets
   l_cmd="$g_LZFS list -t filesystem,volume -Hr -o name $l_initial_source"
   echoV "Running command: $l_cmd"
-  recursive_source_list=$($l_cmd)
+  g_recursive_source_list=$($l_cmd)
 
   # get a list of desintation datasets
   l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $destination"
   echoV "Running command: $l_cmd"
-  recursive_dest_list=$($l_cmd)
+  g_recursive_dest_list=$($l_cmd)
 
   echoV "Waiting for background processes to finish."
   wait
   echoV "Wait finished."
 
-  lzfs_list_hr_s_snap=$(cat "$l_lzfs_list_hr_s_snap_tmp_file")
-  rzfs_list_hr_S_snap=$(cat "$l_rzfs_list_hr_S_snap_tmp_file")
+  l_lzfs_list_hr_s_snap=$(cat "$l_lzfs_list_hr_s_snap_tmp_file")
+  g_rzfs_list_hr_S_snap=$(cat "$l_rzfs_list_hr_S_snap_tmp_file")
 
   # get the reversed order
-  lzfs_list_hr_S_snap=$(echo "$lzfs_list_hr_s_snap" | cat -n | sort -nr | cut -c 8-)
+  g_lzfs_list_hr_S_snap=$(echo "$l_lzfs_list_hr_s_snap" | cat -n | sort -nr | cut -c 8-)
 
   # remove temporary files
   rm "$l_lzfs_list_hr_s_snap_tmp_file" \
@@ -1853,19 +1897,19 @@ get_zfs_list() {
     throw_error "Failed to retrieve datasets from the destination" 3
   fi
 
-  if [ "$recursive_source_list" = "" ]; then
+  if [ "$g_recursive_source_list" = "" ]; then
     throw_error "Failed to retrieve list of datasets from the source" 3
   fi
 
-  if [ "$recursive_dest_list" = "" ]; then
+  if [ "$g_recursive_dest_list" = "" ]; then
     throw_usage_error "Failed to retrieve list of datasets from the destination" 3
   fi
 
-  if [ "$lzfs_list_hr_s_snap" = "" ]; then
+  if [ "$l_lzfs_list_hr_s_snap" = "" ]; then
     throw_error "Failed to retrieve snapshots from the source" 3
   fi
 
-  if [ "$rzfs_list_hr_S_snap" = "" ]; then
+  if [ "$g_rzfs_list_hr_S_snap" = "" ]; then
     throw_error "Failed to retrieve snapshots from the destination" 3
   fi
 
@@ -1876,7 +1920,7 @@ get_zfs_list() {
 # main loop that copies the filesystems
 #
 copy_filesystems() {
-  for source in $recursive_source_list; do
+  for source in $g_recursive_source_list; do
     # Split up source into source fs, last component
     sourcefs=$(echo "$source" | cut -d@ -f1)
 
@@ -1970,7 +2014,7 @@ recursively, but not both -N and -R at the same time."
   # If recursive option is not selected, then we only iterate once through
   # the initial source as source
   if [ "$g_option_R_recursive" = "" ]; then
-    recursive_source_list=$l_initial_source
+    g_recursive_source_list=$l_initial_source
   fi
 
   # This gets the root filesystem transferred - e.g.
@@ -2005,7 +2049,7 @@ recursively, but not both -N and -R at the same time."
       echo "$g_services" | stopsvcs
     fi
 
-    for source in $recursive_source_list; do
+    for source in $g_recursive_source_list; do
       # unmount the source filesystem before doing the last snapshot.
       echov "Unmounting $source."
       $g_LZFS unmount "$source" ||
@@ -2036,7 +2080,7 @@ recursively, but not both -N and -R at the same time."
     echov "Checking grandfather status of all snapshots marked for deletion..."
     old_g_option_d_delete_destination_snapshots=$g_option_d_delete_destination_snapshots
     g_option_d_delete_destination_snapshots=0 # turn off delete so that we are only checking snapshots
-    for source in $recursive_source_list; do
+    for source in $g_recursive_source_list; do
       get_actual_dest
       inspect_delete_snap
     done
@@ -2141,10 +2185,10 @@ $dest_exclude_dir_list"
 # Caches zfs list commands to cut execution time, for option -S
 #
 get_zfs_list_rsync_mode() {
-  recursive_dest_list=$($g_RZFS list -t filesystem,volume -Hr -o name "$destination")
+  g_recursive_dest_list=$($g_RZFS list -t filesystem,volume -Hr -o name "$destination")
 
   #  Exit if destination not sound
-  if [ "$recursive_dest_list" = "" ]; then
+  if [ "$g_recursive_dest_list" = "" ]; then
     throw_usage_error "Destination filesystem does not exist. Create it first."
   fi
 
@@ -2245,7 +2289,7 @@ on a filesystem that is not ZFS."
   rzfs_list_Ho_mountpoint=$($g_RZFS list -t filesystem,volume -Ho mountpoint)
 
   initial_source=$root_fs
-  recursive_source_list=$($g_LZFS list -t filesystem,volume -Hr -o name "$root_fs" |
+  g_recursive_source_list=$($g_LZFS list -t filesystem,volume -Hr -o name "$root_fs" |
     grep -v "^$destination")
 
   IFS="$OLD_IFS"
@@ -2479,11 +2523,11 @@ run_rsync_mode() {
   # Transfer source properties to destination if required, or create the fs.
   if [ $g_option_P_transfer_property -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
     # loop that sets the filesystem properties
-    for source in $recursive_source_list; do
+    for source in $g_recursive_source_list; do
       # prepares some variables for property_transfer
       prepare_rs_property_transfer
 
-      # Needs: $source, $initial_source, $actual_dest, $recursive_dest_list
+      # Needs: $source, $initial_source, $actual_dest, $g_recursive_dest_list
       transfer_properties
     done
   fi
@@ -2537,11 +2581,11 @@ a single file, use -N."
   # Transfer source properties to destination if required.
   if [ $g_option_P_transfer_property -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
     # loop that sets the filesystem properties
-    for source in $recursive_source_list; do
+    for source in $g_recursive_source_list; do
 
       prepare_rs_property_transfer
 
-      # Needs: $source, $initial_source, $actual_dest, $recursive_dest_list
+      # Needs: $source, $initial_source, $actual_dest, $g_recursive_dest_list
       transfer_properties
     done
   fi
