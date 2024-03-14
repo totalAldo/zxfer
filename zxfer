@@ -332,8 +332,7 @@ read_command_line_switches() {
       g_option_g_grandfather_protection="$OPTARG"
       ;;
     h)
-      usage
-      exit 2
+      throw_usage_error
       ;;
     i)
       g_option_i_rsync_include_zfs_mountpoints=1
@@ -574,7 +573,14 @@ consistency_check() {
   fi
 }
 
+#
 # Function to handle errors
+#
+# ext status
+# 0 - success
+# 1 - general error
+# 2 - usage error
+# 3 - error that prevents the script from continuing
 throw_error() {
   l_msg=$1
   l_exit_status=${2:-1} # global used by beep
@@ -585,8 +591,10 @@ throw_error() {
 
 throw_usage_error() {
   l_msg=$1
-  l_exit_status=${2:-1} # global used by beep
-  echo "Error: $l_msg"
+  l_exit_status=${2:-2} # global used by beep
+  if [ "$l_msg" != "" ]; then
+    echo "Error: $l_msg"
+  fi
   usage
   beep "$l_exit_status"
   exit "$l_exit_status"
@@ -857,7 +865,7 @@ resolve_human_vars() {
 #
 # Prepare the actual destination (actual_dest) as used in zfs receive.
 # Uses $g_trailing_slash, $source, $part_of_source_to_delete, $destination,
-# $initial_source, $g_trailing_slash_dest_tail
+# $initial_source
 # Output is $actual_dest
 #
 get_actual_dest() {
@@ -870,8 +878,8 @@ get_actual_dest() {
     dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
     actual_dest="$destination"/"$dest_tail"
   else
-    g_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
-    actual_dest="$destination$g_trailing_slash_dest_tail"
+    l_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
+    actual_dest="$destination$l_trailing_slash_dest_tail"
   fi
 }
 
@@ -1781,10 +1789,10 @@ inspect_delete_snap() {
 }
 
 execute_background_cmd() {
-  _cmd=$1
-  _output_file=$2
-  echoV "Executing command in the background: $_cmd"
-  $_cmd >"$_output_file" &
+  l_cmd=$1
+  l_output_file=$2
+  echoV "Executing command in the background: $l_cmd"
+  $l_cmd >"$l_output_file" &
 }
 
 #
@@ -1835,15 +1843,6 @@ get_zfs_list() {
 
   l_initial_source=$1
 
-  # 0 if not a trailing slash; regex is one character of any sort followed by
-  # zero or more of any character until "/" followed by the end of the
-  # string.
-  g_trailing_slash=$(echo "$l_initial_source" | grep -c '..*/$')
-
-  # Now that we know whether there was a trailing slash on the source, no
-  # need to confuse things by keeping it on there. Get rid of it.
-  l_initial_source=${l_initial_source%/}
-
   # create temporary files used by the background processes
   l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
   l_rzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
@@ -1886,7 +1885,10 @@ get_zfs_list() {
   l_lzfs_list_hr_s_snap=$(cat "$l_lzfs_list_hr_s_snap_tmp_file")
   g_rzfs_list_hr_S_snap=$(cat "$l_rzfs_list_hr_S_snap_tmp_file")
 
-  # get the reversed order
+  # get the reversed order.
+  # in openzfs 2.2.0, using zfs list -s creation and zfs list -S creation
+  # do not return the same results in reverse. This is a workaround which
+  # favors the order returned by zfs list -s creation and reverses it
   g_lzfs_list_hr_S_snap=$(echo "$l_lzfs_list_hr_s_snap" | cat -n | sort -nr | cut -c 8-)
 
   # remove temporary files
@@ -1902,7 +1904,7 @@ get_zfs_list() {
   fi
 
   if [ "$g_recursive_dest_list" = "" ]; then
-    throw_usage_error "Failed to retrieve list of datasets from the destination" 3
+    throw_error "Failed to retrieve list of datasets from the destination" 3
   fi
 
   if [ "$l_lzfs_list_hr_s_snap" = "" ]; then
@@ -1982,6 +1984,16 @@ recursively, but not both -N and -R at the same time."
   else
     throw_usage_error "You must specify a source with either -N or -R."
   fi
+
+  # 0 if not a trailing slash; regex is one character of any sort followed by
+  # zero or more of any character until "/" followed by the end of the
+  # string.
+  # used by get_actual_dest()
+  g_trailing_slash=$(echo "$l_initial_source" | grep -c '..*/$')
+
+  # Now that we know whether there was a trailing slash on the source, no
+  # need to confuse things by keeping it on there. Get rid of it.
+  l_initial_source=${l_initial_source%/}
 
   # Source and destination can't start with "/", but it's an easy mistake to make
   if [ "$(echo "$l_initial_source" | grep -c '^/')" -eq "1" ] ||
@@ -2135,8 +2147,8 @@ prepare_rs_property_transfer() {
     dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
     actual_dest="$destination"/"$dest_tail"
   else
-    g_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
-    actual_dest="$destination$g_trailing_slash_dest_tail"
+    l_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
+    actual_dest="$destination$l_trailing_slash_dest_tail"
   fi
 }
 
@@ -2212,9 +2224,9 @@ get_zfs_list_rsync_mode() {
   fi
 
   for source_RN in $option_RN; do
-    source_RN_g_trailing_slash=$(echo "$source_RN" | grep -c '..*/$')
+    source_RN_trailing_slash=$(echo "$source_RN" | grep -c '..*/$')
 
-    if [ "$source_RN_g_trailing_slash" -eq 1 ]; then
+    if [ "$source_RN_trailing_slash" -eq 1 ]; then
       throw_usage_error "Do not specify trailing slashes in sources. \
 \nThere is no meaning in the context of this program and so this has been disabled."
     fi
