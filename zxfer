@@ -216,9 +216,7 @@ init_globals() {
   # specific to zfs mode
   g_zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
-  current_date=$(date +%s) # current date in seconds from 1970
-
-  # specific to rsync mode
+    # specific to rsync mode
   snapshot_name="zxfertempsnap"
 
   g_new_rmvs_pv=""
@@ -1468,9 +1466,9 @@ zfs_send_receive() {
 
 # Check if the snapshot already exists
 snapshot_exists() {
-  _snapshot=$1
-  _snapshot_list=$2
-  echo "$_snapshot_list" | grep -q "^$_snapshot"
+  l_snapshot=$1
+  l_snapshot_list=$2
+  echo "$l_snapshot_list" | grep -q "^$l_snapshot"
 }
 
 #
@@ -1615,22 +1613,25 @@ calculate_unsupported_properties() {
 
 #
 # Tests a snapshot to see if it is older than the grandfather option allows for.
-# Takes $ds, (a destination shapshot)
 #
 grandfather_test() {
-  ds=$1
-  snap_date=$($g_RZFS get -H -o value -p creation "$ds")
-  diff_sec=$((current_date - snap_date))
+  l_destination_snapshot=$1
+
+  l_current_date=$(date +%s) # current date in seconds from 1970
+  l_snap_date=$($g_RZFS get -H -o value -p creation "$l_destination_snapshot")
+
+  diff_sec=$((l_current_date - l_snap_date))
   diff_day=$((diff_sec / 86400))
+
   if [ $diff_day -ge "$g_option_g_grandfather_protection" ]; then
-    snap_date_english=$($g_RZFS get -H -o value creation "$ds")
+    snap_date_english=$($g_RZFS get -H -o value creation "$l_destination_snapshot")
     current_date_english=$(date)
     echo "Error: On the destination there is a snapshot marked for destruction"
     echo "by zxfer that is protected by the use of the \"grandfather"
     echo "protection\" option, -g."
     echo
     echo "You have set grandfather protection at $g_option_g_grandfather_protection days."
-    echo "Snapshot name: $ds"
+    echo "Snapshot name: $l_destination_snapshot"
     echo "Snapshot age : $diff_day days old"
     echo "Snapshot date: $snap_date_english."
     echo "Your current system date: $current_date_english."
