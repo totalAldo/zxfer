@@ -208,6 +208,11 @@ init_globals() {
   g_rzfs_list_hr_S_snap=""
   g_rzfs_list_ho_s=""
 
+  g_found_last_common_snap=0
+  g_last_common_snap=""
+  g_actual_dest=""
+  g_src_snapshot_transfer_list=""
+
   # specific to zfs mode
   g_zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
@@ -674,7 +679,7 @@ get_backup_properties() {
   done
 
   # at this point the $g_backup_file_contents will be a list of lines with
-  # $source,$actual_dest,$source_pvs
+  # $source,$g_actual_dest,$source_pvs
 }
 
 #
@@ -863,10 +868,10 @@ resolve_human_vars() {
 }
 
 #
-# Prepare the actual destination (actual_dest) as used in zfs receive.
+# Prepare the actual destination (g_actual_dest) as used in zfs receive.
 # Uses $g_trailing_slash, $source, $part_of_source_to_delete, $g_destination,
 # $initial_source
-# Output is $actual_dest
+# Output is $g_actual_dest
 #
 get_actual_dest() {
   # A trailing slash means that the root filesystem is transferred straight
@@ -874,12 +879,12 @@ get_actual_dest() {
   # inside the destination.
   if [ "$g_trailing_slash" -eq 0 ]; then
     # If the original source was backup/test/zroot and we are transferring
-    # backup/test/zroot/tmp/foo, $dest_tail is zroot/tmp/foo
-    dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
-    actual_dest="$g_destination"/"$dest_tail"
+    # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
+    l_dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
+    g_actual_dest="$g_destination"/"$l_dest_tail"
   else
     l_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
-    actual_dest="$g_destination$l_trailing_slash_dest_tail"
+    g_actual_dest="$g_destination$l_trailing_slash_dest_tail"
   fi
 }
 
@@ -888,7 +893,7 @@ get_actual_dest() {
 # Either creates the filesystem if it doesn't exist,
 # or sets it after the fact.
 # Also, checks to see if the override properties given as options are valid.
-# Needs: $source, $initial_source, $actual_dest, $g_recursive_dest_list
+# Needs: $source, $initial_source, $g_actual_dest, $g_recursive_dest_list
 # $g_dont_write_backup
 # $g_ensure_writable
 #
@@ -930,7 +935,7 @@ transfer_properties() {
   # of properties
   if [ $g_option_k_backup_property_mode -eq 1 ] && [ $g_dont_write_backup -eq 0 ]; then
     g_backup_file_contents="$g_backup_file_contents;\
-$source,$actual_dest,$source_pvs"
+$source,$g_actual_dest,$source_pvs"
   fi
 
   # If we are restoring properties, then get source_pvs from the backup file
@@ -1053,7 +1058,7 @@ $override_value=$override_source,"
     override_pvs="$only_supported_properties"
   fi
 
-  dest_exist=$(echo "$g_recursive_dest_list" | grep -c "^$actual_dest$")
+  dest_exist=$(echo "$g_recursive_dest_list" | grep -c "^$g_actual_dest$")
 
   # This is where we actually create or modify the destination filesystem.
   # Is the destination absent? If so, just create with correct option list.
@@ -1072,7 +1077,7 @@ $override_value=$override_source,"
 
       # If not, create it with the override list and be done with it -
       # we have now transferred all properties
-      echov "Creating destination filesystem \"$actual_dest\" \
+      echov "Creating destination filesystem \"$g_actual_dest\" \
 with specified properties."
 
       # revert to old field separator
@@ -1080,10 +1085,10 @@ with specified properties."
       IFS=$OLDIFS
 
       if [ $g_option_n_dryrun -eq 0 ]; then
-        eval "$g_RZFS create $override_option_list $actual_dest" ||
+        eval "$g_RZFS create $override_option_list $g_actual_dest" ||
           throw_error "Error when creating destination filesystem."
       else
-        echo "$g_RZFS create $override_option_list $actual_dest"
+        echo "$g_RZFS create $override_option_list $g_actual_dest"
       fi
 
       #change the field separator to a ","
@@ -1114,13 +1119,13 @@ with specified properties."
       # (This and reversion back is so that $g_RZFS command works with -r)
       IFS=$OLDIFS
 
-      echov "Creating destination filesystem \"$actual_dest\" \
+      echov "Creating destination filesystem \"$g_actual_dest\" \
 with specified properties."
       if [ $g_option_n_dryrun -eq 0 ]; then
-        eval "$g_RZFS create -p $creation_option_list $actual_dest" ||
+        eval "$g_RZFS create -p $creation_option_list $g_actual_dest" ||
           throw_error "Error when creating destination filesystem."
       else
-        echo "$g_RZFS create -p $creation_option_list $actual_dest"
+        echo "$g_RZFS create -p $creation_option_list $g_actual_dest"
       fi
 
       #change the field separator to a ","
@@ -1146,8 +1151,8 @@ with specified properties."
     # (This and reversion back is so that $g_RZFS command works with -r)
     IFS=$OLDIFS
 
-    dest_pvs=$($g_RZFS get -Hpo property,value,source all "$actual_dest")
-    dest_human_pvs=$($g_RZFS get -Ho property,value,source all "$actual_dest")
+    dest_pvs=$($g_RZFS get -Hpo property,value,source all "$g_actual_dest")
+    dest_human_pvs=$($g_RZFS get -Ho property,value,source all "$g_actual_dest")
 
     #change the field separator to a ","
     OLDIFS=$IFS
@@ -1289,7 +1294,7 @@ with specified properties."
     if [ "$ov_set_list" != "" ] ||
       [ "$ov_inherit_list" != "" ] ||
       [ "$ov_initsrc_set_list" != "" ]; then
-      echov "Setting properties/sources on destination filesystem \"$actual_dest\"."
+      echov "Setting properties/sources on destination filesystem \"$g_actual_dest\"."
     fi
 
     if [ "$initial_source" = "$source" ]; then
@@ -1306,10 +1311,10 @@ with specified properties."
       IFS=$OLDIFS
 
       if [ $g_option_n_dryrun -eq 0 ]; then
-        $g_RZFS set "${ov_property}=${ov_value}" "$actual_dest" ||
+        $g_RZFS set "${ov_property}=${ov_value}" "$g_actual_dest" ||
           trhow_error "Error when setting properties on destination filesystem."
       else
-        echo "$g_RZFS set $ov_property=$ov_value $actual_dest"
+        echo "$g_RZFS set $ov_property=$ov_value $g_actual_dest"
       fi
 
       #change the field separator to a ","
@@ -1330,10 +1335,10 @@ with specified properties."
         IFS=$OLDIFS
 
         if [ $g_option_n_dryrun -eq 0 ]; then
-          $g_RZFS inherit "$ov_property" "$actual_dest" ||
+          $g_RZFS inherit "$ov_property" "$g_actual_dest" ||
             throw_error "Error when inheriting properties on destination filesystem."
         else
-          echo "$g_RZFS inherit $ov_property $actual_dest"
+          echo "$g_RZFS inherit $ov_property $g_actual_dest"
         fi
 
         #change the field separator to a ","
@@ -1400,19 +1405,19 @@ handle_progress_bar_option() {
 }
 
 set_send_command() {
-  _snapshot=$1
-  _prevsnap=$2
+  l_snapshot=$1
+  l_prevsnap=$2
 
-  if [ -z "$_prevsnap" ]; then
-    echo "$g_cmd_zfs send $_snapshot"
+  if [ -z "$l_prevsnap" ]; then
+    echo "$g_cmd_zfs send $l_snapshot"
   else
-    echo "$g_cmd_zfs send -i $_prevsnap $_snapshot"
+    echo "$g_cmd_zfs send -i $l_prevsnap $l_snapshot"
   fi
 }
 
 set_receive_command() {
-  _dest=$1
-  echo "$g_cmd_zfs receive $g_option_F_force_rollback $_dest"
+  l_dest=$1
+  echo "$g_cmd_zfs receive $g_option_F_force_rollback $l_dest"
 }
 
 wrap_command_with_ssh() {
@@ -1437,28 +1442,28 @@ wrap_command_with_ssh() {
 # Takes $g_option_D_display_progress_bar $g_option_z_compress, $g_option_O_origin_host, $g_option_T_target_host
 #
 zfs_send_receive() {
-  _snapshot=$1
-  _dest=$2
-  _prevsnap=$3
+  l_snapshot=$1
+  l_dest=$2
+  l_prevsnap=$3
 
   # Set up the send and receive commands
-  _send_cmd=$(set_send_command "$_snapshot" "$_prevsnap")
-  _recv_cmd=$(set_receive_command "$_dest")
+  l_send_cmd=$(set_send_command "$l_snapshot" "$l_prevsnap")
+  l_recv_cmd=$(set_receive_command "$l_dest")
 
   if [ "$g_option_O_origin_host" != "" ]; then
-    _send_cmd=$(wrap_command_with_ssh "$_send_cmd" "$g_option_O_origin_host" $g_option_z_compress "send")
+    l_send_cmd=$(wrap_command_with_ssh "$l_send_cmd" "$g_option_O_origin_host" $g_option_z_compress "send")
   fi
   if [ "$g_option_T_target_host" != "" ]; then
-    _recv_cmd=$(wrap_command_with_ssh "$_recv_cmd" "$g_option_T_target_host" $g_option_z_compress "receive")
+    l_recv_cmd=$(wrap_command_with_ssh "$l_recv_cmd" "$g_option_T_target_host" $g_option_z_compress "receive")
   fi
 
   # Perform this after ssh wrapping occurs
   if [ "$g_option_D_display_progress_bar" != "" ]; then
-    _progress_bar_cmd=$(handle_progress_bar_option "$_snapshot")
-    _send_cmd="$_send_cmd $_progress_bar_cmd"
+    _progress_bar_cmd=$(handle_progress_bar_option "$l_snapshot")
+    l_send_cmd="$l_send_cmd $_progress_bar_cmd"
   fi
 
-  execute_command "$_send_cmd | $_recv_cmd"
+  execute_command "$l_send_cmd | $l_recv_cmd"
 }
 
 # Check if the snapshot already exists
@@ -1476,56 +1481,47 @@ snapshot_exists() {
 # Takes $dest, rzfs_list_ho_s
 #
 copy_snap() {
-  _copysrc=$1
-  _copyprev=$2
+  l_copysrc=$1
+  l_copyprev=$2
+  l_copydest=$g_actual_dest
 
-  _copydest=$dest
-  _copysrctail=$(echo "$_copysrc" | cut -d/ -f2-)
+  l_copysrctail=$(echo "$l_copysrc" | cut -d/ -f2-)
 
   # Check if the snapshot already exists
-  if snapshot_exists "$dest/$_copysrctail" "$g_rzfs_list_ho_s"; then
-    echov "Snapshot $_copysrc already exists at destination $_copydest. Exiting function."
+  if snapshot_exists "$l_copydest/$l_copysrctail" "$g_rzfs_list_ho_s"; then
+    echov "Snapshot $l_copysrc already exists at destination $l_copydest. Exiting function."
     return
   fi
 
-  zfs_send_receive "$_copysrc" "$_copydest" "$_copyprev"
+  zfs_send_receive "$l_copysrc" "$l_copydest" "$l_copyprev"
 }
 
 #
-# Copy the list of snapshots given in stdin to the destination in $1.
+# Copy the list of snapshots given in stdin to the destination
 # Use incremental snapshots where possible. Assumes that the list of snapshots
 # is given in creation order. copy_snap is responsible for skipping already
 # existing snapshots on the destination side.
-# Takes: $found_last_common_snap, $last_common_snap, $source, $copy_fs_snapshot_list
+# Takes: $g_found_last_common_snap, $g_last_common_snap, $source, $g_src_snapshot_transfer_list
 #
 copy_snap_multiple() {
-  _lastsnap=""
+  # Instead of transferring all the source snapshots, this just transfers
+  # the ones starting from the latest common snapshot on src and dest
+  l_copy_fs_snapshot_list=$(echo "$g_src_snapshot_transfer_list" | grep ".")
+
+  l_lastsnap=""
 
   # if there is a snapshot common to both src and dest, set that to be $lastsnap
-  if [ $found_last_common_snap -eq 1 ]; then
-    _lastsnap="$source@$last_common_snap"
+  if [ $g_found_last_common_snap -eq 1 ]; then
+    l_lastsnap="$source@$g_last_common_snap"
   fi
 
   # XXX: This can get stale, especially if it has taken hours to copy the
   # previous snapshot. Consider adding a time check and refreshing the list of
   # snapshots if it has been too long since we got the list
-  for _snapshot in $copy_fs_snapshot_list; do
-    copy_snap "$_snapshot" "$_lastsnap"
-    _lastsnap=$_snapshot
+  for l_snapshot in $l_copy_fs_snapshot_list; do
+    copy_snap "$l_snapshot" "$l_lastsnap"
+    l_lastsnap=$l_snapshot
   done
-}
-
-#
-# Copy all snapshots of a given filesystem.
-# This takes $src_snapshot_transfer_list, $actual_dest.
-#
-copy_fs() {
-  dest=$actual_dest
-
-  # Instead of transferring all the source snapshots, this just transfers
-  # the ones starting from the latest common snapshot on src and dest
-  copy_fs_snapshot_list=$(echo "$src_snapshot_transfer_list" | grep ".")
-  copy_snap_multiple
 }
 
 #
@@ -1666,7 +1662,7 @@ set_last_common_snapshot() {
   _zfs_source_snaps=$1
   _zfs_dest_snaps=$2
 
-  found_last_common_snap=0
+  g_found_last_common_snap=0
 
   # Convert the source snapshots into a list with newlines
   _src_snap_list=$(echo "$_zfs_source_snaps" | tr ' ' '\n')
@@ -1679,9 +1675,9 @@ set_last_common_snapshot() {
     # Use grep to check if the destination snapshot is in the source snapshots
     _is_match_found=$(echo "$_src_snap_list" | grep "$_dest_snap_name$")
     if [ "$_is_match_found" != "" ]; then
-      found_last_common_snap=1
-      last_common_snap="$_dest_snap_name"
-      echoV "Found last common snapshot: $last_common_snap."
+      g_found_last_common_snap=1
+      g_last_common_snap="$_dest_snap_name"
+      echoV "Found last common snapshot: $g_last_common_snap."
       # once found, exit the function
       return
     fi
@@ -1751,21 +1747,21 @@ set_src_snapshot_transfer_list() {
 
   _found_common=0
 
-  src_snapshot_transfer_list=""
+  g_src_snapshot_transfer_list=""
 
   # This prepares a list of source snapshots to transfer, beginning with
   # the first snapshot after the last common one.
   for test_snap in $_zfs_source_snaps; do
-    if [ "$test_snap" != "$source@$last_common_snap" ]; then
+    if [ "$test_snap" != "$source@$g_last_common_snap" ]; then
       if [ $_found_common = 0 ]; then
-        src_snapshot_transfer_list="$test_snap,$src_snapshot_transfer_list"
+        g_src_snapshot_transfer_list="$test_snap,$g_src_snapshot_transfer_list"
       fi
     else
       _found_common=1
     fi
   done
 
-  src_snapshot_transfer_list=$(echo "$src_snapshot_transfer_list" | tr -s "," "\n")
+  g_src_snapshot_transfer_list=$(echo "$g_src_snapshot_transfer_list" | tr -s "," "\n")
 }
 
 inspect_delete_snap() {
@@ -1773,7 +1769,7 @@ inspect_delete_snap() {
   _zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
 
   # Get the list of destination snapshots in descending order by creation date
-  _zfs_dest_snaps=$(echo "$g_rzfs_list_hr_S_snap" | grep "^$actual_dest@") >/dev/null 2>&1
+  _zfs_dest_snaps=$(echo "$g_rzfs_list_hr_S_snap" | grep "^$g_actual_dest@") >/dev/null 2>&1
 
   # Deletes non-common snaps on destination if asked to.
   if [ $g_option_d_delete_destination_snapshots -eq 1 ]; then
@@ -1842,17 +1838,6 @@ get_zfs_list() {
   echoV "Begin get_zfs_list()"
 
   l_initial_source=$1
-
-  # TODO: review having g_trailing_slash set in this function
-  # 0 if not a trailing slash; regex is one character of any sort followed by
-  # zero or more of any character until "/" followed by the end of the
-  # string.
-  # used by get_actual_dest()
-  g_trailing_slash=$(echo "$l_initial_source" | grep -c '..*/$')
-
-  # Now that we know whether there was a trailing slash on the source, no
-  # need to confuse things by keeping it on there. Get rid of it.
-  l_initial_source=${l_initial_source%/}
 
   # create temporary files used by the background processes
   l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
@@ -1971,7 +1956,8 @@ copy_filesystems() {
     # assumed valid destination filesystem to copy to with a possible snapshot name
     # to give to the destination snapshot.
     #
-    copy_fs
+    copy_snap_multiple
+
     #
     # Now we have replicated all existing snapshots.
     #
@@ -1995,6 +1981,16 @@ recursively, but not both -N and -R at the same time."
   else
     throw_usage_error "You must specify a source with either -N or -R."
   fi
+
+  # 0 if not a trailing slash; regex is one character of any sort followed by
+  # zero or more of any character until "/" followed by the end of the
+  # string.
+  # used by get_actual_dest()
+  g_trailing_slash=$(echo "$l_initial_source" | grep -c '..*/$')
+
+  # Now that we know whether there was a trailing slash on the source, no
+  # need to confuse things by keeping it on there. Get rid of it.
+  l_initial_source=${l_initial_source%/}
 
   # Source and destination can't start with "/", but it's an easy mistake to make
   if [ "$(echo "$l_initial_source" | grep -c '^/')" -eq "1" ] ||
@@ -2136,7 +2132,7 @@ clean_up() {
 # This takes  $source, $part_of_source_to_delete, $g_destination, $initial_source
 #
 prepare_rs_property_transfer() {
-  # Prepare the actual destination (actual_dest) for property transfer.
+  # Prepare the actual destination (g_actual_dest) for property transfer.
   # A trailing slash means that the root filesystem is transferred straight
   # into the dest fs, no trailing slash means that this fs is created
   # inside the destination.
@@ -2144,12 +2140,12 @@ prepare_rs_property_transfer() {
   # L is not specified, we use non-trailing slash mode.
   if [ "$g_option_L_rsync_levels_deep" = "" ]; then
     # If the original source was backup/test/zroot and we are transferring
-    # backup/test/zroot/tmp/foo, $dest_tail is zroot/tmp/foo
-    dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
-    actual_dest="$g_destination"/"$dest_tail"
+    # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
+    l_dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
+    g_actual_dest="$g_destination"/"$l_dest_tail"
   else
     l_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
-    actual_dest="$g_destination$l_trailing_slash_dest_tail"
+    g_actual_dest="$g_destination$l_trailing_slash_dest_tail"
   fi
 }
 
@@ -2540,7 +2536,7 @@ run_rsync_mode() {
       # prepares some variables for property_transfer
       prepare_rs_property_transfer
 
-      # Needs: $source, $initial_source, $actual_dest, $g_recursive_dest_list
+      # Needs: $source, $initial_source, $g_actual_dest, $g_recursive_dest_list
       transfer_properties
     done
   fi
@@ -2598,7 +2594,7 @@ a single file, use -N."
 
       prepare_rs_property_transfer
 
-      # Needs: $source, $initial_source, $actual_dest, $g_recursive_dest_list
+      # Needs: $source, $initial_source, $g_actual_dest, $g_recursive_dest_list
       transfer_properties
     done
   fi
