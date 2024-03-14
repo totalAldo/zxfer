@@ -205,7 +205,6 @@ init_globals() {
   # dataset and snapshot lists
   g_rzfs_list_ho_s=""
 
-
   # specific to zfs mode
   g_zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
@@ -1775,7 +1774,7 @@ inspect_delete_snap() {
   set_src_snapshot_transfer_list "$_zfs_source_snaps"
 }
 
-exec_background_cmd() {
+execute_background_cmd() {
   _cmd=$1
   _output_file=$2
   echoV "Executing command in the background: $_cmd"
@@ -1784,12 +1783,9 @@ exec_background_cmd() {
 
 #
 # Caches zfs list commands to cut execution time
-# Uses background processes to speed up the results.
+# Uses background processes when listing snapshots to speed up the results.
 # Often, the source and destination datasets reside on different pools
 # and running the zfs list commands in parallel can speed up the process.
-# 2024.03.14 - listing the snapshots can take a long time, listing the
-# datasets is much faster so those commands don't need to be run in the
-# background.
 get_zfs_list() {
   echoV "Begin get_zfs_list()"
 
@@ -1805,61 +1801,52 @@ get_zfs_list() {
   l_initial_source=${l_initial_source%/}
 
   # create temporary files used by the background processes
-  l_rzfs_list_ho_s_tmp_file=$(get_temp_file)
-  l_recursive_source_list_tmp_file=$(get_temp_file)
-  l_recursive_dest_list_tmp_file=$(get_temp_file)
   l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
   l_rzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
-
-  # start the commands most likely to finish first, first so that zfs
-  # can focus on listing the snapshots whic may take longer
-
-  # get a list of datasets in the target ascending order by creation date
-  exec_background_cmd \
-    "$g_RZFS list -t filesystem,volume -Ho name -s creation" \
-    "$l_rzfs_list_ho_s_tmp_file"
-
-  # get a list of source datasets
-  exec_background_cmd \
-    "$g_LZFS list -t filesystem,volume -Hr -o name $l_initial_source" \
-    "$l_recursive_source_list_tmp_file"
-
-  # get a list of desintation datasets
-  exec_background_cmd \
-    "$g_RZFS list -t filesystem,volume -Hr -o name $destination" \
-    "$l_recursive_dest_list_tmp_file"
 
   # it is important to get this in ascending order because when getting
   # in descending order, the datasets names are not ordered as we want.
   # don't use -S creation for this command, instead, reverse the sort below
   #
   # get a list of source snapshots in ascending order by creation date
-  exec_background_cmd \
+  execute_background_cmd \
     "$g_LZFS list -Hr -o name -s creation -t snapshot $l_initial_source" \
     "$l_lzfs_list_hr_s_snap_tmp_file"
 
   # get a list of destination snapshots in descending order by creation date
-  exec_background_cmd \
+  execute_background_cmd \
     "$g_RZFS list -Hr -o name -S creation -t snapshot $destination" \
     "$l_rzfs_list_hr_S_snap_tmp_file"
+
+  # these commands can be run serially because listing snapshots take the longest
+
+  # get a list of datasets in the target ascending order by creation date
+  l_cmd="$g_RZFS list -t filesystem,volume -H -o name -s creation"
+  echoV "Running command: $l_cmd"
+  g_rzfs_list_ho_s=$($l_cmd)
+
+  # get a list of source datasets
+  l_cmd="$g_LZFS list -t filesystem,volume -Hr -o name $l_initial_source"
+  echoV "Running command: $l_cmd"
+  recursive_source_list=$($l_cmd)
+
+  # get a list of desintation datasets
+  l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $destination"
+  echoV "Running command: $l_cmd"
+  recursive_dest_list=$($l_cmd)
 
   echoV "Waiting for background processes to finish."
   wait
   echoV "Wait finished."
 
-  g_rzfs_list_ho_s=$(cat "$l_rzfs_list_ho_s_tmp_file")
-  recursive_source_list=$(cat "$l_recursive_source_list_tmp_file")
-  recursive_dest_list=$(cat "$l_recursive_dest_list_tmp_file")
   lzfs_list_hr_s_snap=$(cat "$l_lzfs_list_hr_s_snap_tmp_file")
   rzfs_list_hr_S_snap=$(cat "$l_rzfs_list_hr_S_snap_tmp_file")
 
   # get the reversed order
   lzfs_list_hr_S_snap=$(echo "$lzfs_list_hr_s_snap" | cat -n | sort -nr | cut -c 8-)
 
-  rm "$l_rzfs_list_ho_s_tmp_file" \
-    "$l_recursive_source_list_tmp_file" \
-    "$l_recursive_dest_list_tmp_file" \
-    "$l_lzfs_list_hr_s_snap_tmp_file" \
+  # remove temporary files
+  rm "$l_lzfs_list_hr_s_snap_tmp_file" \
     "$l_rzfs_list_hr_S_snap_tmp_file"
 
   if [ "$g_rzfs_list_ho_s" = "" ]; then
