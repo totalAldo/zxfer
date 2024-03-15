@@ -1,4 +1,5 @@
 .\"
+.\" Copyright (c) 2024 Aldo Gonzalez
 .\" Copyright (c) 2013-2016 Allan Jude <allanjude@freebsd.org>
 .\" Copyright (c) 2010, 2011 Ivan Nash Dreckman
 .\" Copyright (c) 2007, 2008 Constantin Gonzalez
@@ -25,7 +26,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd Mar 8, 2024
+.Dd Mar 14, 2024
 .Dt ZXFER 8
 .Os
 .Sh NAME
@@ -33,7 +34,7 @@
 .Nd "transfer ZFS filesystems, snapshots, properties, files and directories"
 .Sh SYNOPSIS
 .Nm
-.Op Fl dFnPsUv
+.Op Fl dFnPsUvV
 .Op Fl k | e
 .Op Fl b | B
 .Brq -N path/to/src | -R path/to/src
@@ -798,6 +799,9 @@ the most recent common snapshot on both, so it's easier to just enable it.)
 .It
 .Op Fl v
 seeing lots of output (verbose)
+.It
+.Op Fl V
+(V)ery verbose output sent to stderr
 .It
 .Op Fl R
 copying the source filesystem recursively
