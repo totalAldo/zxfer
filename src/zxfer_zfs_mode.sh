@@ -34,6 +34,27 @@
 # ZFS MODE FUNCTIONS
 ################################################################################
 
+#
+# Prepare the actual destination (g_actual_dest) as used in zfs receive.
+# Uses $g_trailing_slash, $source, $part_of_source_to_delete, $g_destination,
+# $initial_source
+# Output is $g_actual_dest
+#
+set_actual_dest() {
+    # A trailing slash means that the root filesystem is transferred straight
+    # into the dest fs, no trailing slash means that this fs is created
+    # inside the destination.
+    if [ "$g_trailing_slash" -eq 0 ]; then
+        # If the original source was backup/test/zroot and we are transferring
+        # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
+        l_dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
+        g_actual_dest="$g_destination"/"$l_dest_tail"
+    else
+        l_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
+        g_actual_dest="$g_destination$l_trailing_slash_dest_tail"
+    fi
+}
+
 # Check if the snapshot already exists
 snapshot_exists() {
     l_snapshot=$1

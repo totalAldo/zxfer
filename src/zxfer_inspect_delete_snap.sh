@@ -135,6 +135,9 @@ grandfather_test() {
     fi
 }
 
+#
+# Delete snapshots in destination that aren't in source
+#
 delete_snaps() {
     echoV "Begin delete_snaps()"
     _zfs_source_snaps=$1
