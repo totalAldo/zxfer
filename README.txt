@@ -12,18 +12,20 @@ can also transfer selected files and directories on a ZFS pool from a single
 atomic snapshot. For more info consult the man page, which has extensive
 usage examples.
 
-You MUST read and understand the disclaimer before use. 
+You MUST read and understand the disclaimer before use.
 Refer to the man page, and the file COPYING.
 
 2. FILES
 ========
-zxfer-X.Y.Z.bz2
+zxfer
 a) README.txt   - this file
 b) COPYING      - BSD license
 c) zxfer        - zxfer
-d) zxfer.8.gz   - man page, gzipped - FreeBSD version
+d) zxfer.8      - man page, gzipped - FreeBSD version
 e) zxfer.1m     - man page, (Open)Solaris version
-f) CHANGELOG.txt- list of what has changed and when
+f) zxfer.spec   - rpm specification file
+g) CHANGELOG.txt- list of what has changed and when
+h) src/*        - src directory with modularized sh files referenced by zxfer
 
 3. INSTALLATION
 ===============
@@ -31,6 +33,12 @@ You will need to be root before starting.
 $ su
 
 FreeBSD:
+For the most recent version of this script
+git clone https://github.com/totalAldo/zxfer ./zxfer
+chmod +x ./zxfer/zxfer
+Add zxfer to your path or invoke with relative file path
+
+Older versions may be installed from FreeBSD ports
 The best way is to simply install via ports. Recommended.
 a) Go to ports directory.
 # cd /usr/ports/sysutils/zxfer
@@ -56,7 +64,6 @@ e) Set the MANPATH variable correctly.
 # MANPATH=$MANPATH:/usr/sfw/share/man
 
 Note that this will not set the paths permanently.
-(I don't know how. If you know how, please inform me.)
 
 4. READING THE FEATURED MANUAL
 ==============================
