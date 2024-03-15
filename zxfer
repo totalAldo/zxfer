@@ -153,7 +153,8 @@ EOT
 dir=$(dirname "$0")
 . "$dir"/src/zxfer_common.sh
 . "$dir"/src/zxfer_globals.sh
-. "$dir"/src/zxfer_mode_functions.sh
+. "$dir"/src/zxfer_functions.sh
+. "$dir"/src/zxfer_transfer_properties.sh
 
 . "$dir"/src/zxfer_zfs_mode.sh
 . "$dir"/src/zxfer_get_zfs_list.sh
