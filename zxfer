@@ -36,38 +36,7 @@
 # Transfer a source zfs filesystem, directory or files to a destination, using
 # either zfs send/receive or rsync to do the heavy lifting.
 
-# changes by Aldo Gonzalez
-# 2024.03.14
-# - refactor script into multiple files, grouping files by function usage
-#
-# 2024.03.13
-# remove unused variables in get_zfs_list() and clean it up
-# prefix global variables with g_ and local variables with l_
-#
-# 2024.03.12
-# - refactor get_zfs_list() to run zfs list commands in the background to reduce
-#   the time it takes to get the list of filesystems
-# - add -V option for (V)ery verbose mode using echoV()
-# - optimize set_last_common_snapshot() by using grep instead of nested loops
-# - add echoV statements for debugging
-#
-# 2024.03.11
-# refactor inspect_delete_snap() into multiple functions with the primary goal
-# of optimizing the snapshot deletion logic. Convert that from nested loops
-# to using temp files and comm for a more efficient comparison.
-#
-# 2024.03.09
-# - add -z option to use zstd compression
-# - add -Z option to specify the zstd compression command
-# - refactor of the code
-#   . add execute_command() function
-#   . add throw_error functions
-#   . refactor copy_snap()
-#   . rename option variables for readability
-#   . wrap long blocks in functions to improve readability
-#   . update verbose messages to display the command being executed
-#   . group functions by mode
-#
+# 2024.03 refactoring by Aldo Gonzalez
 
 # Comments, suggestions, bug reports please to:
 # Allan Jude  <allanjude a-t freebsd d-o-t org>
