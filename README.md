@@ -2,7 +2,7 @@ zxfer
 =====
 
 2024 - This fork of zxfer aims at optimizing zfs replication by refactoring the code for readability and maintainability, adding error handling functions, and adding new options for very verbose mode and
-zstd compression.
+4zstd compression.
 
 A continuation of development on zxfer, a popular script for managing ZFS snapshot replication
 
@@ -13,26 +13,8 @@ The Original author seems to have abandoned the project, there have been no upda
 Changes
 =======
 
-2024.03.14
-+ refactor script into multiple files, grouping files by function usage
-+ bump to version 2.0.0
+See CHANGELOG for most recent changes post 2024.03
 
-2024.03.12
-+ add -V option for (V)ery verbose mode using echoV()
-+ optimize set_last_common_snapshot() by using grep instead of nested loops
-+ add echoV statements for debugging
-
-2024.03.11
-+ refactor inspect_delete_snap() into multiple functions with the primary goal
-  of optimizing the snapshot deletion logic. Convert that from nested loops
-  to using temp files and comm for a more efficient comparison.
-
-2024.03.08
-+ refactor code for readability and maintanability
-+ add error handling functions
-+ rename variables for clarity
-+ add -z option to compress zfs send using zstd -3
-+ add -Z option to specify the full zstd compress command
 ---
 
 + Implement new -D parameter, allows you to put a progress indicator app between the zfs send and zfs receive. Provides macros %%size%% and %%title%%.
