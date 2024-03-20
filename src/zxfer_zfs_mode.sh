@@ -101,12 +101,42 @@ copy_snap_multiple() {
 
     # if there is a snapshot common to both src and dest, set that to be $lastsnap
     if [ $g_found_last_common_snap -eq 1 ]; then
+        l_lastsnap=$g_last_common_snap
+    fi
+
+    # XXX: This can get stale, especially if it has taken hours to copy the
+    # previous snapshot. Consider adding a time check and refreshing the list of
+    # snapshots if it has been too long since we got the list
+    l_final_snap=""
+    for l_snapshot in $l_copy_fs_snapshot_list; do
+        l_final_snap=$l_snapshot
+    done
+
+    if [ "$l_final_snap" != "" ]; then
+        copy_snap "$l_final_snap" "$l_lastsnap"
+    fi
+}
+
+#
+# this version is intended to work with zfs send -i
+# deprecated
+#
+copy_snap_multipleOld() {
+    # Instead of transferring all the source snapshots, this just transfers
+    # the ones starting from the latest common snapshot on src and dest
+    l_copy_fs_snapshot_list=$(echo "$g_src_snapshot_transfer_list" | grep ".")
+
+    l_lastsnap=""
+
+    # if there is a snapshot common to both src and dest, set that to be $lastsnap
+    if [ $g_found_last_common_snap -eq 1 ]; then
         l_lastsnap="$source@$g_last_common_snap"
     fi
 
     # XXX: This can get stale, especially if it has taken hours to copy the
     # previous snapshot. Consider adding a time check and refreshing the list of
     # snapshots if it has been too long since we got the list
+    l_final_snap=""
     for l_snapshot in $l_copy_fs_snapshot_list; do
         copy_snap "$l_snapshot" "$l_lastsnap"
         l_lastsnap=$l_snapshot

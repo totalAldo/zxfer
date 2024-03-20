@@ -1,5 +1,9 @@
 CHANGELOG
 =========
+2024.03.19
+-copy_snap_mulitple now sends one snapshot range and set_send_command
+ switched from zfs send -i to zfs send -I
+
 2024.03.14
 -refactor script into multiple files, grouping files by function usage
 

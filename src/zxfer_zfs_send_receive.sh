@@ -88,7 +88,12 @@ set_send_command() {
     if [ -z "$l_prevsnap" ]; then
         echo "$g_cmd_zfs send $l_snapshot"
     else
-        echo "$g_cmd_zfs send -i $l_prevsnap $l_snapshot"
+        #echo "$g_cmd_zfs send -i $l_prevsnap $l_snapshot"
+        l_v=""
+        if [ "$g_option_v_verbose" != "" ]; then
+            l_v="-v"
+        fi
+        echo "$g_cmd_zfs send $l_v -I $l_prevsnap $l_snapshot"
     fi
 }
 
