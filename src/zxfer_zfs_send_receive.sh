@@ -88,9 +88,12 @@ set_send_command() {
     if [ -z "$l_prevsnap" ]; then
         echo "$g_cmd_zfs send $l_snapshot"
     else
+        # previous version
         #echo "$g_cmd_zfs send -i $l_prevsnap $l_snapshot"
+
+        # 2024.03.19 new version - send all incremental snapshots in one stream
         l_v=""
-        if [ "$g_option_v_verbose" != "" ]; then
+        if [ "$g_option_V_verbose" != "" ]; then
             l_v="-v"
         fi
         echo "$g_cmd_zfs send $l_v -I $l_prevsnap $l_snapshot"
