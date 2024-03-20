@@ -147,7 +147,7 @@ execute_background_cmd() {
 # Print out information if in verbose mode
 #
 echov() {
-    if [ $g_option_v_verbose -eq 1 ]; then
+    if [ "$g_option_v_verbose" -eq 1 ]; then
         echo "$@"
     fi
 }
@@ -156,7 +156,7 @@ echov() {
 # Very verbose mode - print mesage to standard error
 #
 echoV() {
-    if [ $g_option_V_very_verbose -eq 1 ]; then
+    if [ "$g_option_V_very_verbose" -eq 1 ]; then
         echo "$@" >&2
     fi
 }

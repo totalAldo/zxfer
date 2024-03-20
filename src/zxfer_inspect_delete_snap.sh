@@ -112,26 +112,24 @@ grandfather_test() {
     if [ $diff_day -ge "$g_option_g_grandfather_protection" ]; then
         snap_date_english=$($g_RZFS get -H -o value creation "$l_destination_snapshot")
         current_date_english=$(date)
-        echo "Error: On the destination there is a snapshot marked for destruction"
-        echo "by zxfer that is protected by the use of the \"grandfather"
-        echo "protection\" option, -g."
-        echo
-        echo "You have set grandfather protection at $g_option_g_grandfather_protection days."
-        echo "Snapshot name: $l_destination_snapshot"
-        echo "Snapshot age : $diff_day days old"
-        echo "Snapshot date: $snap_date_english."
-        echo "Your current system date: $current_date_english."
-        echo
-        echo "Either amend/remove option g, fix your system date, or manually"
-        echo "destroy the offending snapshot. Also double check that your"
-        echo "snapshot management tool isn't erroneously deleting source snapshots."
-        echo "Note that for option g to work correctly, you should set it just"
-        echo "above a number of days that will preclude \"father\" snapshots from"
-        echo "being encountered."
-        echo
-        usage
-        beep
-        exit 1
+        error_msg="On the destination there is a snapshot marked for destruction
+            by zxfer that is protected by the use of the \"grandfather
+            protection\" option, -g.
+
+            You have set grandfather protection at $g_option_g_grandfather_protection days.
+            Snapshot name: $l_destination_snapshot
+            Snapshot age : $diff_day days old
+            Snapshot date: $snap_date_english.
+            Your current system date: $current_date_english.
+
+            Either amend/remove option g, fix your system date, or manually
+            destroy the offending snapshot. Also double check that your
+            snapshot management tool isn't erroneously deleting source snapshots.
+            Note that for option g to work correctly, you should set it just
+            above a number of days that will preclude \"father\" snapshots from
+            being encountered."
+
+        throw_usage_error "$error_msg"
     fi
 }
 
