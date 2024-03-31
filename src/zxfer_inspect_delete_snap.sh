@@ -30,6 +30,9 @@
 
 # BSD HEADER END
 
+# for shellcheck linting, uncomment this line
+#. ./zxfer_globals.sh; . ./zxfer_inspect_delete_snap.sh; . ./zxfer_zfs_mode.sh;
+
 #
 # Returns a list of destination snapshots that don't exist in the source.
 #
@@ -188,7 +191,7 @@ inspect_delete_snap() {
     _zfs_dest_snaps=$(echo "$g_rzfs_list_hr_S_snap" | grep "^$g_actual_dest@") >/dev/null 2>&1
 
     # Deletes non-common snaps on destination if asked to.
-    if [ $g_option_d_delete_destination_snapshots -eq 1 ]; then
+    if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then
         delete_snaps "$_zfs_source_snaps" "$_zfs_dest_snaps"
     fi
 

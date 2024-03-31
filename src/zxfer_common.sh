@@ -41,6 +41,9 @@
 #  g_option_B_beep_on_success
 ################################################################################
 
+# for shellcheck linting, uncomment this line
+#. ./zxfer_globals.sh;
+
 #
 # Add the debug_start() and debug_end() functions to enable/disable debugging
 # between code blocks.
