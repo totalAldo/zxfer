@@ -30,6 +30,9 @@
 
 # BSD HEADER END
 
+# for shellcheck linting, uncomment this line
+#. ./zxfer_globals.sh;
+
 ################################################################################
 # ZFS MODE FUNCTIONS RELATED TO zfs_send_receive
 ################################################################################
@@ -93,7 +96,7 @@ set_send_command() {
 
         # 2024.03.19 new version - send all incremental snapshots in one stream
         l_v=""
-        if [ "$g_option_V_verbose" != "" ]; then
+        if [ "$g_option_V_very_verbose" != "" ]; then
             l_v="-v"
         fi
 
@@ -143,10 +146,10 @@ zfs_send_receive() {
     l_recv_cmd=$(set_receive_command "$l_dest")
 
     if [ "$g_option_O_origin_host" != "" ]; then
-        l_send_cmd=$(wrap_command_with_ssh "$l_send_cmd" "$g_option_O_origin_host" $g_option_z_compress "send")
+        l_send_cmd=$(wrap_command_with_ssh "$l_send_cmd" "$g_option_O_origin_host" "$g_option_z_compress" "send")
     fi
     if [ "$g_option_T_target_host" != "" ]; then
-        l_recv_cmd=$(wrap_command_with_ssh "$l_recv_cmd" "$g_option_T_target_host" $g_option_z_compress "receive")
+        l_recv_cmd=$(wrap_command_with_ssh "$l_recv_cmd" "$g_option_T_target_host" "$g_option_z_compress" "receive")
     fi
 
     # Perform this after ssh wrapping occurs

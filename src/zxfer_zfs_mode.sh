@@ -30,6 +30,10 @@
 
 # BSD HEADER END
 
+
+# for shellcheck linting, uncomment this line
+#. ./zxfer_globals.sh;
+
 ################################################################################
 # ZFS MODE FUNCTIONS
 ################################################################################
@@ -100,7 +104,7 @@ copy_snap_multiple() {
     l_lastsnap=""
 
     # if there is a snapshot common to both src and dest, set that to be $lastsnap
-    if [ $g_found_last_common_snap -eq 1 ]; then
+    if [ "$g_found_last_common_snap" -eq 1 ]; then
         l_lastsnap=$g_last_common_snap
     fi
 
@@ -129,7 +133,7 @@ copy_snap_multipleOld() {
     l_lastsnap=""
 
     # if there is a snapshot common to both src and dest, set that to be $lastsnap
-    if [ $g_found_last_common_snap -eq 1 ]; then
+    if [ "$g_found_last_common_snap" -eq 1 ]; then
         l_lastsnap="$source@$g_last_common_snap"
     fi
 
@@ -244,7 +248,7 @@ copy_filesystems() {
 
         # If using the -m feature, check if the source is mounted,
         # otherwise there's no point in us doing the remounting.
-        if [ $g_option_m_migrate -eq 1 ]; then
+        if [ "$g_option_m_migrate" -eq 1 ]; then
             source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$source")
             if [ "$source_to_migrate_mounted" = "yes" ]; then
                 echo "The source filesystem is not mounted, why use -m?"
@@ -262,7 +266,7 @@ copy_filesystems() {
 
         # Transfer source properties to destination if required.
         # in the function.
-        if [ $g_option_P_transfer_property -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
+        if [ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
             transfer_properties
         fi
 
@@ -322,7 +326,7 @@ recursively, but not both -N and -R at the same time."
 
     # When using -c you must use -m as well rule. This forces the user
     # To think twice if they really mean to do the migration.
-    [ -n "$g_services" ] && [ $g_option_m_migrate -eq 0 ] &&
+    [ -n "$g_services" ] && [ "$g_option_m_migrate" -eq 0 ] &&
         throw_error "When using -c, -m needs to be specified as well."
 
     # Caches all the zfs list calls, gets the recursive list, and gives
@@ -330,11 +334,11 @@ recursively, but not both -N and -R at the same time."
     get_zfs_list
 
     # If we are restoring properties get the backup properties
-    if [ $g_option_e_restore_property_mode -eq 1 ]; then
+    if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
         get_backup_properties
     fi
 
-    if [ $g_option_U_skip_unsupported_properties -eq 1 ]; then
+    if [ "$g_option_U_skip_unsupported_properties" -eq 1 ]; then
         calculate_unsupported_properties
     fi
 
@@ -354,7 +358,7 @@ recursively, but not both -N and -R at the same time."
     #
     # If using -s, do a new recursive snapshot, then copy all new snapshots too.
     #
-    if [ $g_option_s_make_snapshot -eq 1 ] && [ $g_option_m_migrate -eq 0 ]; then
+    if [ "$g_option_s_make_snapshot" -eq 1 ] && [ "$g_option_m_migrate" -eq 0 ]; then
         # We snapshot from the base of the initial source
         sourcefs=$(echo "$initial_source" | cut -d@ -f1)
         # Create the new snapshot with a unique name.
@@ -370,7 +374,7 @@ recursively, but not both -N and -R at the same time."
     # Note that the replication and transfer of the mountpoint property is done
     # by the main loop.
     # The restarting of the services is done after the main loop is finished.
-    if [ $g_option_m_migrate -eq 1 ]; then
+    if [ "$g_option_m_migrate" -eq 1 ]; then
         # Check if any services need to be disabled before doing a migration.
         if [ -n "$g_services" ]; then
             echo "$g_services" | stopsvcs
@@ -417,7 +421,7 @@ recursively, but not both -N and -R at the same time."
 
     copy_filesystems
 
-    if [ $g_option_m_migrate -eq 1 ]; then
+    if [ "$g_option_m_migrate" -eq 1 ]; then
         # Re-launch any stopped services.
         relaunch
     fi

@@ -30,6 +30,9 @@
 
 # BSD HEADER END
 
+# for shellcheck linting, uncomment this line
+#. ./zxfer_globals.sh;  . ./zxfer_get_zfs_list.sh; . ./zxfer_inspect_delete_snap.sh;
+
 #
 # Caches zfs list commands to cut execution time
 # Uses background processes when listing snapshots to speed up the results.

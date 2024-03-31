@@ -30,6 +30,9 @@
 
 # BSD HEADER END
 
+# for shellcheck linting, uncomment this line
+#. ./zxfer_globals.sh; . ./zxfer_get_zfs_list.sh; . ./zxfer_get_zfs_list.sh; . ./zxfer_rsync_mode.sh;
+
 #
 # Strips the sources from a list of properties=values=sources,
 # e.g. output is properties=values,
@@ -234,13 +237,13 @@ transfer_properties() {
     # add to the details to allow backup of properties
     # unless $g_dont_write_backup non-zero, as with first rsync transfer
     # of properties
-    if [ $g_option_k_backup_property_mode -eq 1 ] && [ $g_dont_write_backup -eq 0 ]; then
+    if [ "$g_option_k_backup_property_mode" -eq 1 ] && [ "$g_dont_write_backup" -eq 0 ]; then
         g_backup_file_contents="$g_backup_file_contents;\
 $source,$g_actual_dest,$source_pvs"
     fi
 
     # If we are restoring properties, then get source_pvs from the backup file
-    if [ $g_option_e_restore_property_mode -eq 1 ]; then
+    if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
         source_pvs=$(echo "$g_restored_backup_file_contents" | grep "^[^,]*,$source," |
             sed -e 's/^[^,]*,[^,]*,//g')
         if [ "$source_pvs" = "" ]; then
@@ -252,7 +255,7 @@ $source,$g_actual_dest,$source_pvs"
     g_option_o_override_property_pv=$g_option_o_override_property
 
     # Now to ensure writable, if that is set.
-    if [ $g_ensure_writable -eq 1 ]; then
+    if [ "$g_ensure_writable" -eq 1 ]; then
         # make sure that the g_option_o_override_property_pv includes only readonly=off
         g_option_o_override_property_pv=$(echo "$g_option_o_override_property_pv" | sed -e 's/readonly=on/readonly=off/g')
 
@@ -293,7 +296,7 @@ $source,$g_actual_dest,$source_pvs"
     creation_pvs=""
     # note that if this function is executed, either option P or o must
     # have been invoked
-    if [ $g_option_P_transfer_property -eq 0 ]; then # i.e. option o contains something
+    if [ "$g_option_P_transfer_property" -eq 0 ]; then # i.e. option o contains something
         for op_line in $g_option_o_override_property_pv; do
             op_property=$(echo "$op_line" | cut -f1 -d=)
             op_value=$(echo "$op_line" | cut -f2 -d=)
@@ -385,7 +388,7 @@ with specified properties."
             # (This and reversion back is so that $g_RZFS command works with -r)
             IFS=$OLDIFS
 
-            if [ $g_option_n_dryrun -eq 0 ]; then
+            if [ "$g_option_n_dryrun" -eq 0 ]; then
                 eval "$g_RZFS create $override_option_list $g_actual_dest" ||
                     throw_error "Error when creating destination filesystem."
             else
@@ -422,7 +425,7 @@ with specified properties."
 
             echov "Creating destination filesystem \"$g_actual_dest\" \
 with specified properties."
-            if [ $g_option_n_dryrun -eq 0 ]; then
+            if [ "$g_option_n_dryrun" -eq 0 ]; then
                 eval "$g_RZFS create -p $creation_option_list $g_actual_dest" ||
                     throw_error "Error when creating destination filesystem."
             else
@@ -611,7 +614,7 @@ with specified properties."
             # (This and reversion back is so that $g_RZFS command works with -r)
             IFS=$OLDIFS
 
-            if [ $g_option_n_dryrun -eq 0 ]; then
+            if [ "$g_option_n_dryrun" -eq 0 ]; then
                 $g_RZFS set "${ov_property}=${ov_value}" "$g_actual_dest" ||
                     trhow_error "Error when setting properties on destination filesystem."
             else
@@ -635,7 +638,7 @@ with specified properties."
                 # (This and reversion back is so that $g_RZFS command works with -r)
                 IFS=$OLDIFS
 
-                if [ $g_option_n_dryrun -eq 0 ]; then
+                if [ "$g_option_n_dryrun" -eq 0 ]; then
                     $g_RZFS inherit "$ov_property" "$g_actual_dest" ||
                         throw_error "Error when inheriting properties on destination filesystem."
                 else
