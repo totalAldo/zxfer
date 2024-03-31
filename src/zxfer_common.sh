@@ -115,7 +115,7 @@ execute_command() {
     l_cmd=$1
     l_is_continue_on_fail=${2:-0}
 
-    if [ $g_option_n_dryrun -eq 1 ]; then
+    if [ "$g_option_n_dryrun" -eq 1 ]; then
         echov "Dry run: $l_cmd"
         return
     fi
@@ -167,7 +167,7 @@ echoV() {
 beep() {
     l_exit_status=${1:-1} # default to 1 (failure)
 
-    if [ $g_option_b_beep_always -eq 1 ] || [ $g_option_B_beep_on_success -eq 1 ]; then
+    if [ "$g_option_b_beep_always" -eq 1 ] || [ "$g_option_B_beep_on_success" -eq 1 ]; then
         # load the speaker kernel module if not loaded already
         l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
         if [ "$l_speaker_km_loaded" = "0" ]; then
@@ -176,7 +176,7 @@ beep() {
 
         # play the appropriate beep
         if [ "$l_exit_status" -eq 0 ]; then
-            if [ $g_option_B_beep_on_success -eq 1 ]; then
+            if [ "$g_option_B_beep_on_success" -eq 1 ]; then
                 echo "T255CCMLEG~EG..." >/dev/speaker # success sound
             fi
         else
