@@ -40,10 +40,12 @@
 
 # module variables
 m_services_to_restart=""
+# as in the "cp" man page
+m_trailing_slash=0
 
 #
 # Prepare the actual destination (g_actual_dest) as used in zfs receive.
-# Uses $g_trailing_slash, $source, $part_of_source_to_delete, $g_destination,
+# Uses $m_trailing_slash, $source, $part_of_source_to_delete, $g_destination,
 # $initial_source
 # Output is $g_actual_dest
 #
@@ -51,7 +53,7 @@ set_actual_dest() {
     # A trailing slash means that the root filesystem is transferred straight
     # into the dest fs, no trailing slash means that this fs is created
     # inside the destination.
-    if [ "$g_trailing_slash" -eq 0 ]; then
+    if [ "$m_trailing_slash" -eq 0 ]; then
         # If the original source was backup/test/zroot and we are transferring
         # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
         l_dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
@@ -311,7 +313,7 @@ recursively, but not both -N and -R at the same time."
     # zero or more of any character until "/" followed by the end of the
     # string.
     # used by set_actual_dest()
-    g_trailing_slash=$(echo "$initial_source" | grep -c '..*/$')
+    m_trailing_slash=$(echo "$initial_source" | grep -c '..*/$')
 
     # Now that we know whether there was a trailing slash on the source, no
     # need to confuse things by keeping it on there. Get rid of it.

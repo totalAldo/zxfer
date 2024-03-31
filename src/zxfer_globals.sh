@@ -89,9 +89,6 @@ init_globals() {
     g_source_operating_system=""
     g_destination_operating_system=""
 
-    # as in the "cp" man page
-    g_trailing_slash=0
-
     # default compression commands
     g_cmd_compress="zstd -3"
     g_cmd_decompress="zstd -d"
