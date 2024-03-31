@@ -85,7 +85,6 @@ init_globals() {
     g_backup_file_contents=""
 
     # operating systems
-    g_home_operating_system=""
     g_source_operating_system=""
     g_destination_operating_system=""
 
@@ -119,7 +118,7 @@ init_globals() {
     g_zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
     # specific to rsync mode
-    snapshot_name="zxfertempsnap"
+    _sname="zxfertempsnap"
 
     g_new_rmvs_pv=""
     g_new_rmv_pvs=""
@@ -262,7 +261,7 @@ read_command_line_switches() {
             ;;
         u)
             g_option_u_rsync_use_existing_snapshot=1
-            snapshot_name="$OPTARG"
+            g_snapshot_name="$OPTARG"
             ;;
         U)
             g_option_U_skip_unsupported_properties=1
@@ -302,8 +301,6 @@ extract_snapshot_name() {
 # Initializes OS and local/remote specific variables
 #
 init_variables() {
-    g_home_operating_system=$(get_os "")
-
     # determine the source operating system
     if [ "$g_option_O_origin_host" != "" ]; then
         g_source_operating_system=$(get_os "$g_cmd_ssh $g_option_O_origin_host")
@@ -326,7 +323,8 @@ init_variables() {
         g_cmd_rsync=$(which rsync)
     fi
 
-    if [ "$g_home_operating_system" = "SunOS" ]; then
+    l_home_operating_system=$(get_os "")
+    if [ "$l_home_operating_system" = "SunOS" ]; then
         g_cmd_awk=$(which gawk)
     fi
 }
