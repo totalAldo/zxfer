@@ -47,6 +47,7 @@ init_globals() {
     # Default values
     g_option_b_beep_always=0
     g_option_B_beep_on_success=0
+    g_option_c_services=""
     g_option_d_delete_destination_snapshots=0
     g_option_D_display_progress_bar=""
     g_option_e_restore_property_mode=0
@@ -76,9 +77,6 @@ init_globals() {
     g_option_V_very_verbose=0
     g_option_w_raw_send=0
     g_option_z_compress=0
-
-    g_services=""
-    g_services_to_restart=""
 
     source=""
     sourcefs=""
@@ -175,7 +173,7 @@ read_command_line_switches() {
             g_option_B_beep_on_success=1
             ;;
         c)
-            g_services="$OPTARG"
+            g_option_c_services="$OPTARG"
             ;;
         d)
             g_option_d_delete_destination_snapshots=1
@@ -392,7 +390,7 @@ consistency_check() {
 
         # disallow migration related options and remote transfers at same time
         if [ "$g_option_T_target_host" != "" ] || [ "$g_option_O_origin_host" != "" ]; then
-            if [ "$g_option_m_migrate" -eq 1 ] || [ "$g_services" != "" ]; then
+            if [ "$g_option_m_migrate" -eq 1 ] || [ "$g_option_c_services" != "" ]; then
                 throw_usage_error "You cannot migrate to or from a remote host."
             fi
         fi
