@@ -79,7 +79,7 @@ init_globals() {
     g_option_z_compress=0
 
     source=""
-    sourcefs=""
+
     g_destination=""
     g_backup_file_extension=".zxfer_backup_info"
     g_backup_file_contents=""

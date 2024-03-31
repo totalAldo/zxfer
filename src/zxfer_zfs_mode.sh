@@ -43,6 +43,8 @@ m_services_to_restart=""
 # as in the "cp" man page
 m_trailing_slash=0
 
+m_sourcefs=""
+
 #
 # Prepare the actual destination (g_actual_dest) as used in zfs receive.
 # Uses $m_trailing_slash, $source, $part_of_source_to_delete, $g_destination,
@@ -188,11 +190,11 @@ newsnap() {
     snap=$g_zxfer_new_snapshot_name
 
     if [ "$g_option_R_recursive" != "" ]; then
-        echov "Creating recursive snapshot $sourcefs@$snap."
-        cmd="$g_LZFS snapshot -r $sourcefs@$snap"
+        echov "Creating recursive snapshot $m_sourcefs@$snap."
+        cmd="$g_LZFS snapshot -r $m_sourcefs@$snap"
     else
-        echov "Creating snapshot $sourcefs@$snap."
-        cmd="$g_LZFS snapshot $sourcefs@$snap"
+        echov "Creating snapshot $m_sourcefs@$snap."
+        cmd="$g_LZFS snapshot $m_sourcefs@$snap"
     fi
 
     execute_command "$cmd"
