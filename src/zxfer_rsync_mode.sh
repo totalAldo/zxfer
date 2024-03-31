@@ -41,7 +41,7 @@
 clean_up() {
 
     # A list of snapshots to delete
-    snap_delete_list=$($g_LZFS list -Hr -t snapshot -o name | grep "$snapshot_name")
+    snap_delete_list=$($g_LZFS list -Hr -t snapshot -o name | grep "$g_snapshot_name")
     snap_delete_list=$(echo "$snap_delete_list" | cat -n | sort -nr)
     snap_delete_list=$(echo "$snap_delete_list" | cut -c 8-)
 
@@ -287,7 +287,7 @@ that the legacy mountpoint is \"/\"."
 
             opt_src_fs_mountpoint="/"
             opt_src_tail=$opt_source
-            rs_source="$opt_src_fs_mountpoint.zfs/snapshot/$snapshot_name/.$opt_src_tail"
+            rs_source="$opt_src_fs_mountpoint.zfs/snapshot/$g_snapshot_name/.$opt_src_tail"
         else
             # the part of the original source less the mountpoint part
             opt_src_tail=$(echo "$sub_opt_source" |
@@ -296,7 +296,7 @@ that the legacy mountpoint is \"/\"."
             # This is the source (from the atomic snapshot), nearly suitable for
             # rsync usage. What it is will depend on whether it is filesystem
             # or directory.
-            rs_source="$opt_src_fs_mountpoint/.zfs/snapshot/$snapshot_name/.$opt_src_tail"
+            rs_source="$opt_src_fs_mountpoint/.zfs/snapshot/$g_snapshot_name/.$opt_src_tail"
         fi
 
         # We can think of using L option as restoring, and without L option as
@@ -435,7 +435,7 @@ run_rsync_mode() {
 
     # recursively snapshot the source (if not using custom snapshot)
     if [ $g_option_u_rsync_use_existing_snapshot -eq 0 ]; then
-        $g_LZFS snapshot -r "${initial_source}@${snapshot_name}"
+        $g_LZFS snapshot -r "${initial_source}@${g_snapshot_name}"
     fi
 
     # for the first iteration of property transfer, we need to override the
