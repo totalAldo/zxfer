@@ -30,6 +30,9 @@
 
 # BSD HEADER END
 
+# for shellcheck linting, uncomment this line
+#. ./zxfer_common.sh; . ./zxfer_get_zfs_list.sh; . ./zxfer_inspect_delete_snap.sh; . ./zxfer_rsync_mode.sh; . ./zxfer_transfer_properties.sh; . ./zxfer_zfs_mode.sh; . ./zxfer_zfs_send_receive.sh
+
 ################################################################################
 # DEFINE GLOBALS used by zxfer
 ################################################################################
@@ -126,6 +129,8 @@ init_globals() {
     g_new_rmvs_pv=""
     g_new_rmv_pvs=""
     g_new_mc_pvs=""
+
+    g_restored_backup_file_contents=""
 
     # used in rsync transfers, to turn off the backup file writing
     # the first time
@@ -293,7 +298,6 @@ read_command_line_switches() {
     done
 }
 
-
 # Function to extract snapshot name
 extract_snapshot_name() {
     echo "$1" | grep @ | cut -d@ -f2
@@ -319,11 +323,11 @@ init_variables() {
         g_destination_operating_system=$(get_os "")
     fi
 
-    if [ $g_option_e_restore_property_mode -eq 1 ]; then
+    if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
         g_cmd_cat=$("$g_cmd_ssh" "$g_option_O_origin_host" which cat)
     fi
 
-    if [ $g_option_S_rsync_mode -eq 1 ]; then
+    if [ "$g_option_S_rsync_mode" -eq 1 ]; then
         g_cmd_rsync=$(which rsync)
     fi
 
@@ -337,18 +341,18 @@ init_variables() {
 #
 consistency_check() {
     # disallow backup and restore of properties at same time
-    if [ $g_option_k_backup_property_mode -eq 1 ] &&
-        [ $g_option_e_restore_property_mode -eq 1 ]; then
+    if [ "$g_option_k_backup_property_mode" -eq 1 ] &&
+        [ "$g_option_e_restore_property_mode" -eq 1 ]; then
         throw_usage_error "You cannot bac(k)up and r(e)store properties at the same time."
     fi
 
     # disallow both beep modes, enforce using one or the other.
-    if [ $g_option_b_beep_always -eq 1 ] &&
-        [ $g_option_B_beep_on_success -eq 1 ]; then
+    if [ "$g_option_b_beep_always" -eq 1 ] &&
+        [ "$g_option_B_beep_on_success" -eq 1 ]; then
         throw_usage_error "You cannot use both beep modes at the same time."
     fi
 
-    if [ $g_option_S_rsync_mode -eq 1 ]; then
+    if [ "$g_option_S_rsync_mode" -eq 1 ]; then
         # rsync mode
 
         # check for incompatible options
@@ -356,7 +360,7 @@ consistency_check() {
             throw_usage_error "-F option cannot be used with -S (rsync mode)"
         fi
 
-        if [ $g_option_s_make_snapshot -eq 1 ]; then
+        if [ "$g_option_s_make_snapshot" -eq 1 ]; then
             throw_usage_error "-s option cannot be used with -S (rsync mode)"
         fi
 
@@ -365,7 +369,7 @@ consistency_check() {
             throw_usage_error "-O or -T option cannot be used with -S (rsync mode)"
         fi
 
-        if [ $g_option_m_migrate -eq 1 ]; then
+        if [ "$g_option_m_migrate" -eq 1 ]; then
             throw_usage_error "-m option cannot be used with -S (rsync mode)"
         fi
     else
@@ -380,7 +384,7 @@ consistency_check() {
             throw_usage_error "-L option can only be used with -S (rsync mode)"
         fi
 
-        if [ $g_option_z_compress -eq 1 ] &&
+        if [ "$g_option_z_compress" -eq 1 ] &&
             [ "$g_option_O_origin_host" = "" ] &&
             [ "$g_option_T_target_host" = "" ]; then
             throw_usage_error "-z option can only be used with -O or -T option"
@@ -388,7 +392,7 @@ consistency_check() {
 
         # disallow migration related options and remote transfers at same time
         if [ "$g_option_T_target_host" != "" ] || [ "$g_option_O_origin_host" != "" ]; then
-            if [ $g_option_m_migrate -eq 1 ] || [ "$g_services" != "" ]; then
+            if [ "$g_option_m_migrate" -eq 1 ] || [ "$g_services" != "" ]; then
                 throw_usage_error "You cannot migrate to or from a remote host."
             fi
         fi
@@ -412,7 +416,7 @@ get_backup_properties() {
         l_backup_file_dir=$($g_LZFS get -H -o value mountpoint "$l_suspect_fs")
 
         if $g_option_O_origin_host [ -r "$l_backup_file_dir/$g_backup_file_extension.$l_suspect_fs_tail" ]; then
-            restored_backup_file_contents=$($g_option_O_origin_host "$g_cmd_cat" "$l_backup_file_dir/$g_backup_file_extension.$l_suspect_fs_tail")
+            g_restored_backup_file_contents=$($g_option_O_origin_host "$g_cmd_cat" "$l_backup_file_dir/$g_backup_file_extension.$l_suspect_fs_tail")
             l_found_backup_file=1
         else
             l_suspect_fs_parent=$(echo "$l_suspect_fs" | sed -e 's%/[^/]*$%%g')
@@ -451,7 +455,7 @@ write_backup_properties() {
     backup_file_cmd="echo \"$g_backup_file_contents\" | tr \";\" \"\n\" > $l_backup_file_dir/$g_backup_file_extension.$_is_tail"
 
     # Execute the command
-    if [ $g_option_n_dryrun -eq 0 ]; then
+    if [ "$g_option_n_dryrun" -eq 0 ]; then
         echo "$backup_file_cmd" | "$g_cmd_ssh $g_option_T_target_host" sh ||
             throw_error "Error writing backup file. Is filesystem mounted?"
     else

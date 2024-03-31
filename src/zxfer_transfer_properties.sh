@@ -241,7 +241,7 @@ $source,$g_actual_dest,$source_pvs"
 
     # If we are restoring properties, then get source_pvs from the backup file
     if [ $g_option_e_restore_property_mode -eq 1 ]; then
-        source_pvs=$(echo "$restored_backup_file_contents" | grep "^[^,]*,$source," |
+        source_pvs=$(echo "$g_restored_backup_file_contents" | grep "^[^,]*,$source," |
             sed -e 's/^[^,]*,[^,]*,//g')
         if [ "$source_pvs" = "" ]; then
             throw_usage_error "Can't find the properties for the filesystem $source"
