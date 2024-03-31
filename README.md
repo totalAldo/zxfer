@@ -1,8 +1,8 @@
 zxfer
 =====
 
-2024 - This fork of zxfer aims at optimizing zfs replication by refactoring the code for readability and maintainability, adding error handling functions, and adding new options for very verbose mode and
-4zstd compression.
+2024 - This fork of zxfer aims at optimizing zfs replication by refactoring the code for readability and maintainability, adding error handling functions, and adding new options for very verbose mode, raw send, and
+zstd compression.
 
 A continuation of development on zxfer, a popular script for managing ZFS snapshot replication
 

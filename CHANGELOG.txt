@@ -1,5 +1,8 @@
 CHANGELOG
 =========
+2024.03.31
+-add option -w for zfs raw send
+
 2024.03.19
 -copy_snap_mulitple now sends one snapshot range and set_send_command
  switched from zfs send -i to zfs send -I
