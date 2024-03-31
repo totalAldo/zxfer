@@ -38,6 +38,9 @@
 # ZFS MODE FUNCTIONS
 ################################################################################
 
+# module variables
+m_services_to_restart=""
+
 #
 # Prepare the actual destination (g_actual_dest) as used in zfs receive.
 # Uses $g_trailing_slash, $source, $part_of_source_to_delete, $g_destination,
@@ -159,7 +162,7 @@ stopsvcs() {
                 relaunch
                 exit 1
             }
-        g_services_to_restart="$g_services_to_restart $service"
+        m_services_to_restart="$m_services_to_restart $service"
     done
 }
 
@@ -167,7 +170,7 @@ stopsvcs() {
 # Relaunch a list of stopped services
 #
 relaunch() {
-    for i in $g_services_to_restart; do
+    for i in $m_services_to_restart; do
         echov "Restarting service $i"
         svcadm enable "$i" || {
             echo "Couldn't re-enable service $i."
@@ -326,7 +329,7 @@ recursively, but not both -N and -R at the same time."
 
     # When using -c you must use -m as well rule. This forces the user
     # To think twice if they really mean to do the migration.
-    [ -n "$g_services" ] && [ "$g_option_m_migrate" -eq 0 ] &&
+    [ -n "$g_option_c_services" ] && [ "$g_option_m_migrate" -eq 0 ] &&
         throw_error "When using -c, -m needs to be specified as well."
 
     # Caches all the zfs list calls, gets the recursive list, and gives
@@ -376,8 +379,8 @@ recursively, but not both -N and -R at the same time."
     # The restarting of the services is done after the main loop is finished.
     if [ "$g_option_m_migrate" -eq 1 ]; then
         # Check if any services need to be disabled before doing a migration.
-        if [ -n "$g_services" ]; then
-            echo "$g_services" | stopsvcs
+        if [ -n "$g_option_c_services" ]; then
+            echo "$g_option_c_services" | stopsvcs
         fi
 
         for source in $g_recursive_source_list; do
