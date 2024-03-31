@@ -39,7 +39,7 @@
 #
 init_globals() {
     # zxfer version
-    g_zxfer_version="2.0.0-20240314"
+    g_zxfer_version="2.0.0-20240331"
 
     # Default values
     g_option_b_beep_always=0
@@ -71,6 +71,7 @@ init_globals() {
     g_option_U_skip_unsupported_properties=0
     g_option_v_verbose=0
     g_option_V_very_verbose=0
+    g_option_w_raw_send=0
     g_option_z_compress=0
 
     g_services=""
@@ -160,7 +161,7 @@ xattr,dnodesize"
 # Check command line parameters.
 #
 read_command_line_switches() {
-    while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:UvV?:D:zZ: l_i; do
+    while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:UvVw?:D:zZ: l_i; do
         case $l_i in
         b)
             g_option_b_beep_always=1
@@ -272,6 +273,9 @@ read_command_line_switches() {
         V)
             g_option_v_verbose=1
             g_option_V_very_verbose=1
+            ;;
+        w)
+            g_option_w_raw_send=1
             ;;
         z)
             # Pipes the send and receive commands through zstd

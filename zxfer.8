@@ -34,7 +34,7 @@
 .Nd "transfer ZFS filesystems, snapshots, properties, files and directories"
 .Sh SYNOPSIS
 .Nm
-.Op Fl dFnPsUvV
+.Op Fl dFnPsUvVw
 .Op Fl k | e
 .Op Fl b | B
 .Brq -N path/to/src | -R path/to/src
@@ -588,6 +588,12 @@ Before replication begins, a list of supported properties is fetched from the
 destination and any properties not on that list are removed from the list of
 properties to be replicated.
 This allows replicating from newer versions of OpenZFS to older versions.
+.It Fl v
+(v) verbose mode
+.It Fl V
+(V)ery verbose mode, prints debugging messages to stderr
+.It Fl w
+uses zfs raw send mode
 .It Fl z
 Pipe the send stream through zstd -3 compression and then decode it at the
 target using zstd -d.
@@ -608,6 +614,7 @@ e.g.
 This will modify the default -z option to
 .Pp
 ssh user@host "/sbin/zfs send dataset@snap1 | zstd -T0 -9" | zstd -d | /sbin/zfs receive
+
 .El
 .Ss Rsync mode
 (i.e. -S is specified)

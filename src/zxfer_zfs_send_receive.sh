@@ -96,7 +96,14 @@ set_send_command() {
         if [ "$g_option_V_verbose" != "" ]; then
             l_v="-v"
         fi
-        echo "$g_cmd_zfs send $l_v -I $l_prevsnap $l_snapshot"
+
+        # 2024.03.31 - add support for -w option (raw send)
+        l_w=""
+        if [ "$g_option_w_raw_send" != "" ]; then
+            l_w="-w"
+        fi
+
+        echo "$g_cmd_zfs send $l_v$l_w -I $l_prevsnap $l_snapshot"
     fi
 }
 
