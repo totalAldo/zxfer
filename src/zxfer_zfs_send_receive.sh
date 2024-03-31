@@ -96,17 +96,17 @@ set_send_command() {
 
         # 2024.03.19 new version - send all incremental snapshots in one stream
         l_v=""
-        if [ "$g_option_V_very_verbose" != "" ]; then
+        if [ "$g_option_V_very_verbose" -eq 1 ]; then
             l_v="-v"
         fi
 
         # 2024.03.31 - add support for -w option (raw send)
         l_w=""
-        if [ "$g_option_w_raw_send" != "" ]; then
+        if [ "$g_option_w_raw_send" -eq 1 ]; then
             l_w="-w"
         fi
 
-        echo "$g_cmd_zfs send $l_v$l_w -I $l_prevsnap $l_snapshot"
+        echo "$g_cmd_zfs send $l_v $l_w -I $l_prevsnap $l_snapshot"
     fi
 }
 
