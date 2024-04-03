@@ -249,7 +249,7 @@ calculate_unsupported_properties() {
 copy_filesystems() {
     for source in $g_recursive_source_list; do
         # Split up source into source fs, last component
-        sourcefs=$(echo "$source" | cut -d@ -f1)
+        m_sourcefs=$(echo "$source" | cut -d@ -f1)
 
         set_actual_dest
 
@@ -367,7 +367,7 @@ recursively, but not both -N and -R at the same time."
     #
     if [ "$g_option_s_make_snapshot" -eq 1 ] && [ "$g_option_m_migrate" -eq 0 ]; then
         # We snapshot from the base of the initial source
-        sourcefs=$(echo "$initial_source" | cut -d@ -f1)
+        m_sourcefs=$(echo "$initial_source" | cut -d@ -f1)
         # Create the new snapshot with a unique name.
         newsnap
         # Because there are new snapshots, need to get_zfs_list again
@@ -399,7 +399,7 @@ recursively, but not both -N and -R at the same time."
         done
 
         # We snapshot from the base of the initial source
-        sourcefs=$(echo "$initial_source" | cut -d@ -f1)
+        m_sourcefs=$(echo "$initial_source" | cut -d@ -f1)
 
         # Create the last snapshot with a unique name.
         newsnap
