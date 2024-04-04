@@ -155,9 +155,9 @@ delete_snaps() {
         #echoV "Destroying destination snapshot $l_snap_to_delete."
         l_cmd="$g_RZFS destroy $l_snap_to_delete"
         # pass 1 to continue command if it fails
-        #execute_command "$l_cmd" 1
-        echov "$l_cmd"
-        execute_background_cmd "$l_cmd" /dev/null
+        # running this as a background process doesn't speed up the send
+        # due to order of execution by zfs - 2024.04.03
+        execute_command "$l_cmd" 1
     done
 
     echoV "End delete_snaps()"

@@ -1,7 +1,6 @@
 CHANGELOG
 =========
 2024.04.03
--run zfs destroy as a background process
 -fix unset variable name
 
 2024.03.31
