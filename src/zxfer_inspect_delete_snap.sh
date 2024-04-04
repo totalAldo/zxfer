@@ -37,35 +37,35 @@
 # Returns a list of destination snapshots that don't exist in the source.
 #
 get_dest_snapshots_to_delete() {
-    _zfs_source_snaps=$1
-    _zfs_dest_snaps=$2
+    l_zfs_source_snaps=$1
+    l_zfs_dest_snaps=$2
 
     # Create temporary files
-    _original_zfs_dest_snaps=$(get_temp_file)
-    _src_tmp=$(get_temp_file)
-    _dest_tmp=$(get_temp_file)
-    _snaps_to_delete_tmp=$(get_temp_file)
+    l_original_zfs_dest_snaps=$(get_temp_file)
+    l_src_tmp=$(get_temp_file)
+    l_dest_tmp=$(get_temp_file)
+    l_snaps_to_delete_tmp=$(get_temp_file)
 
     # Write the snapshot names to the temporary files
-    echo "$_zfs_dest_snaps" >"$_original_zfs_dest_snaps"
-    echo "$_zfs_source_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" >"$_src_tmp"
-    echo "$_zfs_dest_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" >"$_dest_tmp"
+    echo "$l_zfs_dest_snaps" >"$l_original_zfs_dest_snaps"
+    echo "$l_zfs_source_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" >"$l_src_tmp"
+    echo "$l_zfs_dest_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" >"$l_dest_tmp"
 
-    # Use comm to find snapshots in _dest_tmp that don't have a match in _src_tmp
+    # Use comm to find snapshots in l_dest_tmp that don't have a match in l_src_tmp
     # write the snapshots to delete to a temporary file for use by grep
-    comm -13 "$_src_tmp" "$_dest_tmp" >"$_snaps_to_delete_tmp"
+    comm -13 "$l_src_tmp" "$l_dest_tmp" >"$l_snaps_to_delete_tmp"
 
-    # Use grep to find the matching lines in _original_zfs_dest_snaps
-    _dest_snaps_to_delete=$(grep -F -f "$_snaps_to_delete_tmp" "$_original_zfs_dest_snaps")
+    # Use grep to find the matching lines in l_original_zfs_dest_snaps
+    l_dest_snaps_to_delete=$(grep -F -f "$l_snaps_to_delete_tmp" "$l_original_zfs_dest_snaps")
 
     # Clean up temporary files
-    rm "$_original_zfs_dest_snaps" \
-        "$_src_tmp" \
-        "$_dest_tmp" \
-        "$_snaps_to_delete_tmp"
+    rm "$l_original_zfs_dest_snaps" \
+        "$l_src_tmp" \
+        "$l_dest_tmp" \
+        "$l_snaps_to_delete_tmp"
 
     # Print the matching lines
-    echo "$_dest_snaps_to_delete"
+    echo "$l_dest_snaps_to_delete"
 }
 
 #
@@ -74,24 +74,24 @@ get_dest_snapshots_to_delete() {
 #
 set_last_common_snapshot() {
     echoV "Begin set_last_common_snapshot()"
-    _zfs_source_snaps=$1
-    _zfs_dest_snaps=$2
+    l_zfs_source_snaps=$1
+    l_zfs_dest_snaps=$2
 
     g_found_last_common_snap=0
 
     # Convert the source snapshots into a list with newlines
-    _src_snap_list=$(echo "$_zfs_source_snaps" | tr ' ' '\n')
+    l_src_snap_list=$(echo "$l_zfs_source_snaps" | tr ' ' '\n')
 
     # loop through the destination snapshots sorted in descending creation order
     # to find the most recent common snapshot
-    for _dest_snap in $_zfs_dest_snaps; do
-        _dest_snap_name=$(extract_snapshot_name "$_dest_snap")
+    for l_dest_snap in $l_zfs_dest_snaps; do
+        l_dest_snap_name=$(extract_snapshot_name "$l_dest_snap")
 
         # Use grep to check if the destination snapshot is in the source snapshots
-        _is_match_found=$(echo "$_src_snap_list" | grep "$_dest_snap_name$")
+        _is_match_found=$(echo "$l_src_snap_list" | grep "$l_dest_snap_name$")
         if [ "$_is_match_found" != "" ]; then
             g_found_last_common_snap=1
-            g_last_common_snap="$_dest_snap_name"
+            g_last_common_snap="$l_dest_snap_name"
             echoV "Found last common snapshot: $g_last_common_snap."
             # once found, exit the function
             return
@@ -109,21 +109,21 @@ grandfather_test() {
     l_current_date=$(date +%s) # current date in seconds from 1970
     l_snap_date=$($g_RZFS get -H -o value -p creation "$l_destination_snapshot")
 
-    diff_sec=$((l_current_date - l_snap_date))
-    diff_day=$((diff_sec / 86400))
+    l_diff_sec=$((l_current_date - l_snap_date))
+    l_diff_day=$((l_diff_sec / 86400))
 
-    if [ $diff_day -ge "$g_option_g_grandfather_protection" ]; then
-        snap_date_english=$($g_RZFS get -H -o value creation "$l_destination_snapshot")
-        current_date_english=$(date)
-        error_msg="On the destination there is a snapshot marked for destruction
+    if [ $l_diff_day -ge "$g_option_g_grandfather_protection" ]; then
+        l_snap_date_english=$($g_RZFS get -H -o value creation "$l_destination_snapshot")
+        l_current_date_english=$(date)
+        l_error_msg="On the destination there is a snapshot marked for destruction
             by zxfer that is protected by the use of the \"grandfather
             protection\" option, -g.
 
             You have set grandfather protection at $g_option_g_grandfather_protection days.
             Snapshot name: $l_destination_snapshot
-            Snapshot age : $diff_day days old
-            Snapshot date: $snap_date_english.
-            Your current system date: $current_date_english.
+            Snapshot age : $l_diff_day days old
+            Snapshot date: $l_snap_date_english.
+            Your current system date: $l_current_date_english.
 
             Either amend/remove option g, fix your system date, or manually
             destroy the offending snapshot. Also double check that your
@@ -132,7 +132,7 @@ grandfather_test() {
             above a number of days that will preclude \"father\" snapshots from
             being encountered."
 
-        throw_usage_error "$error_msg"
+        throw_usage_error "$l_error_msg"
     fi
 }
 
@@ -141,42 +141,42 @@ grandfather_test() {
 #
 delete_snaps() {
     echoV "Begin delete_snaps()"
-    _zfs_source_snaps=$1
-    _zfs_dest_snaps=$2
+    l_zfs_source_snaps=$1
+    l_zfs_dest_snaps=$2
 
-    _snaps_to_delete=$(get_dest_snapshots_to_delete "$_zfs_source_snaps" "$_zfs_dest_snaps")
+    l_snaps_to_delete=$(get_dest_snapshots_to_delete "$l_zfs_source_snaps" "$l_zfs_dest_snaps")
 
     # deletes non-common snaps on destination if asked to.
-    for _snap_to_delete in $_snaps_to_delete; do
+    for l_snap_to_delete in $l_snaps_to_delete; do
         if [ "$g_option_g_grandfather_protection" != "" ]; then
-            grandfather_test "$_snap_to_delete"
+            grandfather_test "$l_snap_to_delete"
         fi
 
-        #echoV "Destroying destination snapshot $_snap_to_delete."
-        _cmd="$g_RZFS destroy $_snap_to_delete"
+        #echoV "Destroying destination snapshot $l_snap_to_delete."
+        l_cmd="$g_RZFS destroy $l_snap_to_delete"
         # pass 1 to continue command if it fails
-        execute_command "$_cmd" 1
+        execute_command "$l_cmd" 1
     done
 
     echoV "End delete_snaps()"
 }
 
 set_src_snapshot_transfer_list() {
-    _zfs_source_snaps=$1
+    l_zfs_source_snaps=$1
 
-    _found_common=0
+    l_found_common=0
 
     g_src_snapshot_transfer_list=""
 
     # This prepares a list of source snapshots to transfer, beginning with
     # the first snapshot after the last common one.
-    for test_snap in $_zfs_source_snaps; do
-        if [ "$test_snap" != "$source@$g_last_common_snap" ]; then
-            if [ $_found_common = 0 ]; then
-                g_src_snapshot_transfer_list="$test_snap,$g_src_snapshot_transfer_list"
+    for l_test_snap in $l_zfs_source_snaps; do
+        if [ "$l_test_snap" != "$source@$g_last_common_snap" ]; then
+            if [ $l_found_common = 0 ]; then
+                g_src_snapshot_transfer_list="$l_test_snap,$g_src_snapshot_transfer_list"
             fi
         else
-            _found_common=1
+            l_found_common=1
         fi
     done
 
@@ -185,20 +185,20 @@ set_src_snapshot_transfer_list() {
 
 inspect_delete_snap() {
     # Get the list of source snapshots in descending order by creation date
-    _zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
+    l_zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
 
     # Get the list of destination snapshots in descending order by creation date
-    _zfs_dest_snaps=$(echo "$g_rzfs_list_hr_S_snap" | grep "^$g_actual_dest@") >/dev/null 2>&1
+    l_zfs_dest_snaps=$(echo "$g_rzfs_list_hr_S_snap" | grep "^$g_actual_dest@") >/dev/null 2>&1
 
     # Deletes non-common snaps on destination if asked to.
     if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then
-        delete_snaps "$_zfs_source_snaps" "$_zfs_dest_snaps"
+        delete_snaps "$l_zfs_source_snaps" "$l_zfs_dest_snaps"
     fi
 
     # Find the most recent common snapshot on source and destination.
-    set_last_common_snapshot "$_zfs_source_snaps" "$_zfs_dest_snaps"
+    set_last_common_snapshot "$l_zfs_source_snaps" "$l_zfs_dest_snaps"
 
     # Create a list of source snapshots to transfer, beginning with the
     # first snapshot after the last common one.
-    set_src_snapshot_transfer_list "$_zfs_source_snaps"
+    set_src_snapshot_transfer_list "$l_zfs_source_snaps"
 }
