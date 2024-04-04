@@ -142,7 +142,7 @@ execute_command() {
 execute_background_cmd() {
     l_cmd=$1
     l_output_file=$2
-    echoV "Executing command in the background: $l_cmd"
+    echov "Executing command in the background: $l_cmd"
     $l_cmd >"$l_output_file" &
 }
 
