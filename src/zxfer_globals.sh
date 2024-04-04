@@ -117,10 +117,6 @@ init_globals() {
     # specific to zfs mode
     g_zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
-    g_new_rmvs_pv=""
-    g_new_rmv_pvs=""
-    g_new_mc_pvs=""
-
     g_restored_backup_file_contents=""
 
     # used in rsync transfers, to turn off the backup file writing
