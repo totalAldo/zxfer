@@ -117,9 +117,6 @@ init_globals() {
     # specific to zfs mode
     g_zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
-    # specific to rsync mode
-    _sname="zxfertempsnap"
-
     g_new_rmvs_pv=""
     g_new_rmv_pvs=""
     g_new_mc_pvs=""
