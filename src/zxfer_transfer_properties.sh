@@ -33,24 +33,29 @@
 # for shellcheck linting, uncomment this line
 #. ./zxfer_globals.sh; . ./zxfer_get_zfs_list.sh; . ./zxfer_get_zfs_list.sh; . ./zxfer_rsync_mode.sh;
 
+# module variables
+m_new_rmvs_pv=""
+m_new_rmv_pvs=""
+m_new_mc_pvs=""
+
 #
 # Strips the sources from a list of properties=values=sources,
 # e.g. output is properties=values,
-# output is in $g_new_rmvs_pv
+# output is in $m_new_rmvs_pv
 #
 remove_sources() {
-    g_new_rmvs_pv=""
+    m_new_rmvs_pv=""
 
     l_rmvs_list=$1
 
     for l_rmvs_line in $l_rmvs_list; do
         l_rmvs_property=$(echo "$l_rmvs_line" | cut -f1 -d=)
         l_rmvs_value=$(echo "$l_rmvs_line" | cut -f2 -d=)
-        g_new_rmvs_pv="$g_new_rmvs_pv$l_rmvs_property=$l_rmvs_value,"
+        m_new_rmvs_pv="$m_new_rmvs_pv$l_rmvs_property=$l_rmvs_value,"
     done
 
     # remove trailing comma
-    g_new_rmvs_pv=${g_new_rmvs_pv%,}
+    m_new_rmvs_pv=${m_new_rmvs_pv%,}
 }
 
 #
@@ -59,7 +64,7 @@ remove_sources() {
 # Used to select the "must create" properties
 #
 select_mc() {
-    g_new_mc_pvs=""
+    m_new_mc_pvs=""
 
     l_mc_list=$1          # target list of properties, values
     l_mc_property_list=$2 # list of properties to select
@@ -84,20 +89,20 @@ select_mc() {
         done
 
         if [ $l_found_mc -eq 1 ]; then
-            g_new_mc_pvs="$g_new_mc_pvs$l_mc_property=$l_mc_value=$l_mc_source,"
+            m_new_mc_pvs="$m_new_mc_pvs$l_mc_property=$l_mc_value=$l_mc_source,"
         fi
     done
 
-    g_new_mc_pvs=${g_new_mc_pvs%,}
+    m_new_mc_pvs=${m_new_mc_pvs%,}
 }
 
 #
 # Removes the readonly properties and values from a list of properties
 # values and sources in the format property1=value1=source1,...
-# output is in g_new_rmv_pvs
+# output is in m_new_rmv_pvs
 #
 remove_properties() {
-    g_new_rmv_pvs="" # global
+    m_new_rmv_pvs="" # global
 
     _rmv_list=$1    # the list of properties=values=sources,...
     _remove_list=$2 # list of properties to remove
@@ -122,17 +127,17 @@ remove_properties() {
             fi
         done
         if [ $found_readonly -eq 0 ]; then
-            g_new_rmv_pvs="$g_new_rmv_pvs$rmv_property=$rmv_value=$rmv_source,"
+            m_new_rmv_pvs="$m_new_rmv_pvs$rmv_property=$rmv_value=$rmv_source,"
         fi
     done
 
-    g_new_rmv_pvs=${g_new_rmv_pvs%,}
+    m_new_rmv_pvs=${m_new_rmv_pvs%,}
 }
 
 #
 # Removes the readonly properties and values from a list of properties
 # values and sources in the format property1=value1=source1,...
-# output is in g_new_rmv_pvs
+# output is in m_new_rmv_pvs
 #
 remove_unsupported_properties() {
     _orig_set_list=$1 # the list of properties=values=sources,...
@@ -352,9 +357,9 @@ $override_value=$override_source,"
     remove_properties "$override_pvs" "$g_readonly_properties"
     # Remove the properties the user has asked us to ignore
     if [ -n "$g_option_I_ignore_properties" ]; then
-        remove_properties "$g_new_rmv_pvs" "$g_option_I_ignore_properties"
+        remove_properties "$m_new_rmv_pvs" "$g_option_I_ignore_properties"
     fi
-    override_pvs="$g_new_rmv_pvs"
+    override_pvs="$m_new_rmv_pvs"
 
     # Remove any properties that are not supported by the destination
     if [ -n "$unsupported_properties" ]; then
@@ -371,7 +376,7 @@ $override_value=$override_source,"
             # as this is the initial source, we want to transfer all properties from
             # the source, overridden with g_option_o_override_property values as necessary
             remove_sources "$override_pvs"
-            override_option_list=$(echo "$g_new_rmvs_pv" | tr "," "\n" | sed "s/\(.*\)=\(.*\)/\1=\'\2\'/g" | tr "\n" "," | sed 's/,$//' | sed -e 's/,/ -o /g')
+            override_option_list=$(echo "$m_new_rmvs_pv" | tr "," "\n" | sed "s/\(.*\)=\(.*\)/\1=\'\2\'/g" | tr "\n" "," | sed 's/,$//' | sed -e 's/,/ -o /g')
             if [ "$override_option_list" != "" ]; then
                 override_option_list=" -o $override_option_list"
             fi
@@ -405,12 +410,12 @@ with specified properties."
             remove_properties "$creation_pvs" "$g_readonly_properties"
             # Remove the properties the user has asked us to ignore
             if [ -n "$g_option_I_ignore_properties" ]; then
-                remove_properties "$g_new_rmv_pvs" "$g_option_I_ignore_properties"
+                remove_properties "$m_new_rmv_pvs" "$g_option_I_ignore_properties"
             fi
-            creation_pvs="$g_new_rmv_pvs"
+            creation_pvs="$m_new_rmv_pvs"
 
             remove_sources "$creation_pvs"
-            creation_option_list=$(echo "$g_new_rmvs_pv" | tr "," "\n" | sed "s/\(.*\)=\(.*\)/\1=\'\2\'/" | tr "\n" "," | sed 's/,$//' | sed -e 's/,/ -o /g')
+            creation_option_list=$(echo "$m_new_rmvs_pv" | tr "," "\n" | sed "s/\(.*\)=\(.*\)/\1=\'\2\'/" | tr "\n" "," | sed 's/,$//' | sed -e 's/,/ -o /g')
 
             if [ "$creation_option_list" != "" ]; then
                 creation_option_list=" -o $creation_option_list"
@@ -472,9 +477,9 @@ with specified properties."
         remove_properties "$dest_pv" "$g_readonly_properties"
         # Remove the properties the user has asked us to ignore
         if [ -n "$g_option_I_ignore_properties" ]; then
-            remove_properties "$g_new_rmv_pvs" "$g_option_I_ignore_properties"
+            remove_properties "$m_new_rmv_pvs" "$g_option_I_ignore_properties"
         fi
-        dest_pv="$g_new_rmv_pvs"
+        dest_pv="$m_new_rmv_pvs"
 
         # Test to see if any of the four properties that must be specified at
         # creation time differ from destination to the overrides, if so
@@ -483,10 +488,10 @@ with specified properties."
         must_create_properties="casesensitivity,normalization,jailed,utf8only"
 
         select_mc "$override_pvs" "$must_create_properties"
-        mc_override_pvs="$g_new_mc_pvs"
+        mc_override_pvs="$m_new_mc_pvs"
 
         select_mc "$dest_pvs" "$must_create_properties"
-        mc_dest_pvs="$g_new_mc_pvs"
+        mc_dest_pvs="$m_new_mc_pvs"
 
         # this for loop tests for a "must create" property that we can't set
         for ov_line in $mc_override_pvs; do
@@ -529,15 +534,15 @@ with specified properties."
         # remove the "must create" properties from the $override_pvs list
         must_create_properties="casesensitivity,normalization,jailed,utf8only"
         remove_properties "$override_pvs" "$must_create_properties"
-        override_pvs="$g_new_rmv_pvs"
+        override_pvs="$m_new_rmv_pvs"
 
         remove_properties "$dest_pvs" "$must_create_properties,$g_readonly_properties"
         # Remove the properties the user has asked us to ignore
         if [ -n "$g_option_I_ignore_properties" ]; then
-            remove_properties "$g_new_rmv_pvs" "$g_option_I_ignore_properties"
+            remove_properties "$m_new_rmv_pvs" "$g_option_I_ignore_properties"
         fi
 
-        dest_pvs="$g_new_rmv_pvs"
+        dest_pvs="$m_new_rmv_pvs"
 
         # zfs set takes a long time; let's only set the properties we need to set
         # or inherit the properties we need to inherit
