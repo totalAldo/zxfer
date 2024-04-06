@@ -81,6 +81,83 @@ get_zfs_list() {
 
     # create temporary files used by the background processes
     l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
+    l_rzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
+
+    # it is important to get this in ascending order because when getting
+    # in descending order, the datasets names are not ordered as we want.
+    # don't use -S creation for this command, instead, reverse the results below
+    #
+    # get a list of source snapshots in ascending order by creation date
+    execute_background_cmd \
+        "$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source" \
+        "$l_lzfs_list_hr_s_snap_tmp_file"
+
+    # get a list of destination snapshots in ascending order by creation date
+    execute_background_cmd \
+        "$g_RZFS list -Hr -o name -s creation -t snapshot $g_destination" \
+        "$l_rzfs_list_hr_s_snap_tmp_file"
+
+    # these commands can be run serially because listing snapshots take the longest
+
+    # get a list of datasets in the target ascending order by creation date
+    l_cmd="$g_RZFS list -t filesystem,volume -H -o name -s creation"
+    echoV "Running command: $l_cmd"
+    g_rzfs_list_ho_s=$($l_cmd)
+
+    # get a list of source datasets
+    l_cmd="$g_LZFS list -t filesystem,volume -Hr -o name $initial_source"
+    echoV "Running command: $l_cmd"
+    g_recursive_source_list=$($l_cmd)
+
+    # get a list of desintation datasets
+    l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $g_destination"
+    echoV "Running command: $l_cmd"
+    g_recursive_dest_list=$($l_cmd)
+
+    echoV "Waiting for background processes to finish."
+    wait
+    echoV "Wait finished."
+
+    l_lzfs_list_hr_s_snap=$(cat "$l_lzfs_list_hr_s_snap_tmp_file")
+    l_rzfs_list_hr_s_snap=$(cat "$l_rzfs_list_hr_s_snap_tmp_file")
+
+    # get the reversed order.
+    g_lzfs_list_hr_S_snap=$(echo "$l_lzfs_list_hr_s_snap" | cat -n | sort -nr | cut -c 8-)
+    g_rzfs_list_hr_S_snap=$(echo "$l_rzfs_list_hr_s_snap" | cat -n | sort -nr | cut -c 8-)
+
+    # remove temporary files
+    rm "$l_lzfs_list_hr_s_snap_tmp_file" \
+       "$l_rzfs_list_hr_s_snap_tmp_file"
+
+    if [ "$l_lzfs_list_hr_s_snap" = "" ]; then
+        throw_error "Failed to retrieve snapshots from the source" 3
+    fi
+
+    if [ "$l_rzfs_list_hr_s_snap" = "" ]; then
+        throw_error "Failed to retrieve snapshots from the destination" 3
+    fi
+
+    if [ "$g_rzfs_list_ho_s" = "" ]; then
+        throw_error "Failed to retrieve datasets from the destination" 3
+    fi
+
+    if [ "$g_recursive_source_list" = "" ]; then
+        throw_usage_error "Failed to retrieve list of datasets from the source"
+    fi
+
+    if [ "$g_recursive_dest_list" = "" ]; then
+        throw_usage_error "Failed to retrieve list of datasets from the destination"
+    fi
+
+    echoV "End get_zfs_list()"
+}
+
+# deprecated: get_zfs_listOLD()
+get_zfs_listOLD() {
+    echoV "Begin get_zfs_list()"
+
+    # create temporary files used by the background processes
+    l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
     l_rzfs_list_hr_S_snap_tmp_file=$(get_temp_file)
 
     # it is important to get this in ascending order because when getting
@@ -125,6 +202,8 @@ get_zfs_list() {
     # in openzfs 2.2.0, using zfs list -s creation and zfs list -S creation
     # do not return the same results in reverse. This is a workaround which
     # favors the order returned by zfs list -s creation and reverses it
+    # TODO: 2024.04.06 - there is a known issue when snapshots are made at the same time,
+    # such as what sanoid does, frequently and hourly may be returned out of order
     g_lzfs_list_hr_S_snap=$(echo "$l_lzfs_list_hr_s_snap" | cat -n | sort -nr | cut -c 8-)
 
     # remove temporary files
