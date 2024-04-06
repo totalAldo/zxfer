@@ -1,7 +1,10 @@
 CHANGELOG
 =========
+2024.04.06
+-optimize grep usage in set_last_common_snapshot
+
 2024.04.03
--fix unset variable name
+-run zfs destroy as a background process
 
 2024.03.31
 -add option -w for zfs raw send
