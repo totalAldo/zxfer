@@ -62,6 +62,8 @@ get_temp_file() {
     l_timestamp=$(date +%s)
     l_file=$(mktemp -t "zxfer.$l_timestamp") || throw_error "Error creating temporary file."
     echoV "New temporary file: $l_file"
+
+    # return the temp file name
     echo "$l_file"
 }
 

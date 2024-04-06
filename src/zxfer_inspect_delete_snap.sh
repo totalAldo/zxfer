@@ -189,10 +189,10 @@ set_src_snapshot_transfer_list() {
 
 inspect_delete_snap() {
     # Get the list of source snapshots in descending order by creation date
-    l_zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$source@") >/dev/null 2>&1
+    l_zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$source@")
 
     # Get the list of destination snapshots in descending order by creation date
-    l_zfs_dest_snaps=$(echo "$g_rzfs_list_hr_S_snap" | grep "^$g_actual_dest@") >/dev/null 2>&1
+    l_zfs_dest_snaps=$(echo "$g_rzfs_list_hr_S_snap" | grep "^$g_actual_dest@")
 
     # Deletes non-common snaps on destination if asked to.
     if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then
