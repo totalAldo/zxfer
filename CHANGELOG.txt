@@ -1,6 +1,7 @@
 CHANGELOG
 =========
 2024.04.06
+-fix bug in get_zfs_list() when 2 snapshots are taken at the same time
 -optimize grep usage in set_last_common_snapshot
 
 2024.04.03
