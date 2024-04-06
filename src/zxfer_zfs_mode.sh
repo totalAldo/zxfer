@@ -204,12 +204,12 @@ newsnap() {
 # Tests to see if they are trying to sync a snapshots; exit if so
 #
 check_snapshot() {
-    _initial_source=$1
+    l_initial_source=$1
 
-    _initial_sourcesnap=$(extract_snapshot_name "$_initial_source")
+    l_initial_sourcesnap=$(extract_snapshot_name "$l_initial_source")
 
     # When using -s or -m, we don't want the source to be a snapshot.
-    [ -n "$_initial_sourcesnap" ] && throw_error "Snapshots are not allowed as a source."
+    [ -n "$l_initial_sourcesnap" ] && throw_error "Snapshots are not allowed as a source."
 }
 
 #
@@ -219,24 +219,24 @@ check_snapshot() {
 #
 calculate_unsupported_properties() {
     # Get a list of the supported properties from the destination
-    dest_pool_name=${g_destination%%/*}
-    dest_supported_properties=$($g_RZFS get -Ho property all "$dest_pool_name")
+    l_dest_pool_name=${g_destination%%/*}
+    l_dest_supported_properties=$($g_RZFS get -Ho property all "$l_dest_pool_name")
 
     # Get a list of the supported properties from the source
-    source_pool_name=${initial_source%%/*}
-    source_supported_properties=$($g_LZFS get -Ho property all "$source_pool_name")
+    l_source_pool_name=${initial_source%%/*}
+    l_source_supported_properties=$($g_LZFS get -Ho property all "$l_source_pool_name")
 
     unsupported_properties=
 
-    for s_p in $source_supported_properties; do
-        found_supported_prop=0
-        for d_p in $dest_supported_properties; do
+    for s_p in $l_source_supported_properties; do
+        l_found_supported_prop=0
+        for d_p in $l_dest_supported_properties; do
             if [ "$s_p" = "$d_p" ]; then
-                found_supported_prop=1
+                l_found_supported_prop=1
                 break
             fi
         done
-        if [ $found_supported_prop -eq 0 ]; then
+        if [ $l_found_supported_prop -eq 0 ]; then
             unsupported_properties="${unsupported_properties}${s_p},"
         fi
     done
@@ -256,8 +256,8 @@ copy_filesystems() {
         # If using the -m feature, check if the source is mounted,
         # otherwise there's no point in us doing the remounting.
         if [ "$g_option_m_migrate" -eq 1 ]; then
-            source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$source")
-            if [ "$source_to_migrate_mounted" = "yes" ]; then
+            l_source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$source")
+            if [ "$l_source_to_migrate_mounted" = "yes" ]; then
                 echo "The source filesystem is not mounted, why use -m?"
                 exit 1
             fi
@@ -416,13 +416,13 @@ recursively, but not both -N and -R at the same time."
 
     if [ "$g_option_g_grandfather_protection" != "" ]; then
         echov "Checking grandfather status of all snapshots marked for deletion..."
-        old_g_option_d_delete_destination_snapshots=$g_option_d_delete_destination_snapshots
+        l_old_g_option_d_delete_destination_snapshots=$g_option_d_delete_destination_snapshots
         g_option_d_delete_destination_snapshots=0 # turn off delete so that we are only checking snapshots
         for source in $g_recursive_source_list; do
             set_actual_dest
             inspect_delete_snap
         done
-        g_option_d_delete_destination_snapshots=$old_g_option_d_delete_destination_snapshots
+        g_option_d_delete_destination_snapshots=$l_old_g_option_d_delete_destination_snapshots
         echov "Grandfather check passed."
     fi
 
