@@ -42,7 +42,7 @@
 #
 init_globals() {
     # zxfer version
-    g_zxfer_version="2.0.0-20240403"
+    g_zxfer_version="2.0.0-20240406"
 
     # Default values
     g_option_b_beep_always=0

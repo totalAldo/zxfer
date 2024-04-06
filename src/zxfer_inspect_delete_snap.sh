@@ -69,7 +69,7 @@ get_dest_snapshots_to_delete() {
 }
 
 #
-# find the most recent common snapshot (since the lists or sorted in descending
+# find the most recent common snapshot (since the lists are sorted in descending
 # order by by creation date, the first common snapshot is the most recent common)
 #
 set_last_common_snapshot() {
@@ -88,8 +88,8 @@ set_last_common_snapshot() {
         l_dest_snap_name=$(extract_snapshot_name "$l_dest_snap")
 
         # Use grep to check if the destination snapshot is in the source snapshots
-        _is_match_found=$(echo "$l_src_snap_list" | grep "$l_dest_snap_name$")
-        if [ "$_is_match_found" != "" ]; then
+        # optimize grep by using q for first match, F since we are searching for a fixed string
+        if echo "$l_src_snap_list" | grep -qF "$l_dest_snap_name"; then
             g_found_last_common_snap=1
             g_last_common_snap="$l_dest_snap_name"
             echoV "Found last common snapshot: $g_last_common_snap."
