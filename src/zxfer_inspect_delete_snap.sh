@@ -153,10 +153,11 @@ delete_snaps() {
         fi
 
         #echoV "Destroying destination snapshot $l_snap_to_delete."
+        g_is_perform_send_destroy=1
         l_cmd="$g_RZFS destroy $l_snap_to_delete"
-        # pass 1 to continue command if it fails
 
         # could combine multiple snapshots into one comma delimited destroy command
+        # pass 1 to continue command if it fails
         #execute_command "$l_cmd" 1
         echov "$l_cmd"
         execute_background_cmd "$l_cmd" /dev/null

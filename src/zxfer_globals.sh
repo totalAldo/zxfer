@@ -44,6 +44,10 @@ init_globals() {
     # zxfer version
     g_zxfer_version="2.0.0-20240406"
 
+    # max number of iterations to run iterate through run_zfs_mode
+    # if changes are made to the filesystems
+    g_MAX_YIELD_ITERATIONS=8
+
     # Default values
     g_option_b_beep_always=0
     g_option_B_beep_on_success=0
@@ -75,8 +79,11 @@ init_globals() {
     g_option_U_skip_unsupported_properties=0
     g_option_v_verbose=0
     g_option_V_very_verbose=0
+    g_option_Y_Yield=0
     g_option_w_raw_send=0
     g_option_z_compress=0
+
+    g_num_yield_iterations=0
 
     source=""
 
@@ -153,7 +160,7 @@ xattr,dnodesize"
 # Check command line parameters.
 #
 read_command_line_switches() {
-    while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:UvVw?:D:zZ: l_i; do
+    while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:UvVwY?:D:zZ: l_i; do
         case $l_i in
         b)
             g_option_b_beep_always=1
@@ -268,6 +275,9 @@ read_command_line_switches() {
             ;;
         w)
             g_option_w_raw_send=1
+            ;;
+        Y)
+            g_option_Y_yield=1
             ;;
         z)
             # Pipes the send and receive commands through zstd
