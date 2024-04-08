@@ -297,7 +297,8 @@ copy_filesystems() {
 # zfs send/receive mode, aka zfs-replicate mode, aka normal mode
 #
 run_zfs_mode() {
-    echoV "Running in zfs send/receive mode."
+    g_num_yield_iterations=$((g_num_yield_iterations + 1))
+    echov "Running in zfs send/receive mode. Iteration[$g_num_yield_iterations]."
 
     if [ "$g_option_R_recursive" != "" ] && [ "$g_option_N_nonrecursive" != "" ]; then
         throw_usage_error "If using normal mode (i.e. no -S), you must choose either -N to transfer \
@@ -432,4 +433,6 @@ recursively, but not both -N and -R at the same time."
         # Re-launch any stopped services.
         relaunch
     fi
+
+    echov "End Iteration[$g_num_yield_iterations]."
 }

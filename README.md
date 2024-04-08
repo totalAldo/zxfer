@@ -1,9 +1,13 @@
 zxfer
 =====
 
-2024 - This fork of zxfer aims at optimizing zfs replication by refactoring the code for readability and maintainability, adding error handling functions, and adding new options for very verbose mode, raw send, and
-zstd compression.
+2024 - This fork of zxfer aims at optimizing zfs replication by refactoring the code for readability and maintainability, adding error handling functions, and adding new options for
+-V (V)ery verbose mode,
+-w ra(w) send, and
+-z & -Z zstd compression.
+-Y (Y)ield when there are no more snapshots to send or destroy
 
+=====
 A continuation of development on zxfer, a popular script for managing ZFS snapshot replication
 
 The Original author seems to have abandoned the project, there have been no updates since May 2011 and the script fails to work correctly in FreeBSD versions after 8.2 and 9.0 due to new ZFS properties.

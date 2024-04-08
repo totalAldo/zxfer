@@ -158,5 +158,7 @@ zfs_send_receive() {
         l_send_cmd="$l_send_cmd $_progress_bar_cmd"
     fi
 
+    g_is_perform_send_destroy=1
+
     execute_command "$l_send_cmd | $l_recv_cmd"
 }
