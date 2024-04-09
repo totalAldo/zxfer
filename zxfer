@@ -161,11 +161,15 @@ else
         g_is_performed_send_destroy=0
 
         l_num_iterations=$((l_num_iterations + 1))
-        echoV "Begin Iteration[$l_num_iterations of $g_option_Y_yield_iterations]. Running in zfs send/receive mode."
+        if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
+            echov "Begin Iteration[$l_num_iterations of $g_option_Y_yield_iterations]. Running in zfs send/receive mode."
+        fi
 
         run_zfs_mode
 
-        echoV "End Iteration[$l_num_iterations of $g_option_Y_yield_iterations]."
+        if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
+            echov "End Iteration[$l_num_iterations of $g_option_Y_yield_iterations]."
+        fi
 
         # check if we need to perform another iteration
         if [ "$g_is_performed_send_destroy" -eq 0 ]; then
