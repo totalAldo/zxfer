@@ -169,12 +169,12 @@ else
 
         # check if we need to perform another iteration
         if [ "$g_is_performed_send_destroy" -eq 0 ]; then
-            echov "Exiting loop. No send or destroy commands were performed during last iteration."
+            echoV "Exiting loop. No send or destroy commands were performed during last iteration."
             break
         fi
         if [ "$l_num_iterations" -ge "$g_option_Y_yield_iterations" ]; then
             if [ "$g_option_Y_yield_iterations" -ge "$g_MAX_YIELD_ITERATIONS" ]; then
-                echov "Exiting loop. Reached maximum number of iterations.
+                echoV "Exiting loop. Reached maximum number of iterations.
 If consistently not completing replication in allotted iterations,
 consider using compression, increasing bandwidth, increasing I/O or reducing snapshot frequency."
             fi
