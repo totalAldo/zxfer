@@ -173,9 +173,11 @@ else
             break
         fi
         if [ "$l_num_iterations" -ge "$g_option_Y_yield_iterations" ]; then
-            echov "Exiting loop. Reached maximum number of iterations.
-                  If consistently not completing replication in allotted iterations,
-                  consider using compression, increasing bandwidth, increasing I/O or reducing snapshot frequency."
+            if [ "$g_option_Y_yield_iterations" -ge "$g_MAX_YIELD_ITERATIONS" ]; then
+                echov "Exiting loop. Reached maximum number of iterations.
+If consistently not completing replication in allotted iterations,
+consider using compression, increasing bandwidth, increasing I/O or reducing snapshot frequency."
+            fi
             break
         fi
     done
