@@ -79,11 +79,9 @@ init_globals() {
     g_option_U_skip_unsupported_properties=0
     g_option_v_verbose=0
     g_option_V_very_verbose=0
-    g_option_Y_Yield=0
+    g_option_Y_yield_iterations=1
     g_option_w_raw_send=0
     g_option_z_compress=0
-
-    g_num_yield_iterations=0
 
     source=""
 
@@ -277,7 +275,8 @@ read_command_line_switches() {
             g_option_w_raw_send=1
             ;;
         Y)
-            g_option_Y_yield=1
+            # set the number of iterations to run through the zfs mode
+            g_option_Y_yield_iterations=$g_MAX_YIELD_ITERATIONS
             ;;
         z)
             # Pipes the send and receive commands through zstd
