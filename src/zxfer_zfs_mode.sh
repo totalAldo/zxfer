@@ -30,7 +30,6 @@
 
 # BSD HEADER END
 
-
 # for shellcheck linting, uncomment this line
 #. ./zxfer_globals.sh;
 
@@ -430,4 +429,46 @@ recursively, but not both -N and -R at the same time."
         # Re-launch any stopped services.
         relaunch
     fi
+}
+
+#
+# if -Y is set, run the zfs mode in a loop until no more changes are made
+# or until the maximum number of iterations is reached.
+# Otherwise, run the zfs mode once
+#
+run_zfs_mode_loop() {
+    l_num_iterations=0
+
+    # run this in a loop until there are no more zfs send or zfs destroy commands
+    # that are issued
+    while true; do
+        # if a send or destroy command is performed, set this to 1 indicating
+        # that a change was made during run_zfs_mode
+        g_is_performed_send_destroy=0
+
+        l_num_iterations=$((l_num_iterations + 1))
+        if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
+            echov "Begin Iteration[$l_num_iterations of $g_option_Y_yield_iterations]. Running in zfs send/receive mode."
+        fi
+
+        run_zfs_mode
+
+        if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
+            echov "End Iteration[$l_num_iterations of $g_option_Y_yield_iterations]."
+        fi
+
+        # check if we need to perform another iteration
+        if [ "$g_is_performed_send_destroy" -eq 0 ]; then
+            echoV "Exiting loop. No send or destroy commands were performed during last iteration."
+            break
+        fi
+        if [ "$l_num_iterations" -ge "$g_option_Y_yield_iterations" ]; then
+            if [ "$g_option_Y_yield_iterations" -ge "$g_MAX_YIELD_ITERATIONS" ]; then
+                echoV "Exiting loop. Reached maximum number of iterations.
+If consistently not completing replication in allotted iterations,
+consider using compression, increasing bandwidth, increasing I/O or reducing snapshot frequency."
+            fi
+            break
+        fi
+    done
 }
