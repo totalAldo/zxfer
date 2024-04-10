@@ -17,6 +17,8 @@ In addition, wherever the code path lends itself to parallelization, it is imple
 as background processes. This includes:
 + Executing `zfs list` commands concurrently.
 + Running `zfs destroy` commands as background processes.
++ Use `zfs send -I` instead of `zfs send -i` for incremental replication to send the entire snapshot chain in one go.
++ The `inspect_delete_snap()` function has been refactored to use the `comm` command instead of nested loops. Previously, the function used nested loops to identify which destination snapshots should be deleted. This process was executed even when the `-d` option was not in use. For instance, if both the source and destination contained 1,000 snapshots, the loop would iterate 1,000,000 times. Each iteration would spawn at least two `grep` and two `cut` commands to compare snapshot names. The new implementation with comm is more efficient and readable.
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:
