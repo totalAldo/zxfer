@@ -9,7 +9,7 @@ These changes were motivated by the lengthy replication times experienced when t
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
 + `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
-+ `-z`: zstd default compression
++ `-z`: pipe ssh transfers through zstd default compression
 + `-Z`: custom zstd compression supporting higher compression levels or multiple threads when using `-T0`
 
 ## Performance Improvements

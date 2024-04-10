@@ -42,7 +42,7 @@
 #
 init_globals() {
     # zxfer version
-    g_zxfer_version="2.0.0-20240406"
+    g_zxfer_version="2.0.0-20240409"
 
     # max number of iterations to run iterate through run_zfs_mode
     # if changes are made to the filesystems
@@ -366,6 +366,10 @@ consistency_check() {
 
         if [ "$g_option_m_migrate" -eq 1 ]; then
             throw_usage_error "-m option cannot be used with -S (rsync mode)"
+        fi
+
+        if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
+            throw_usage_error "-Y option cannot be used with -S (rsync mode)"
         fi
     else
         #zfs send mode
