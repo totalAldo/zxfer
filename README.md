@@ -3,14 +3,14 @@ zxfer
 
 2024 - This is a refactored version of zxfer, with the goal of optimizing ZFS replication. Enhancements include improved code readability and performance, additional error handling functions, and new options.
 
-These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots, primarily composed of log entries, without any compression. As a result, the modifications have significantly decreased the time required for both ssh and local replication.
+These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots, primarily composed of log entries. As a result, the modifications have significantly decreased the time required for both ssh and local replication.
 
 ## New Options
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
 + `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
 + `-z`: pipe ssh transfers through zstd default compression
-+ `-Z`: custom zstd compression supporting higher compression levels or multiple threads when using `-T0`
++ `-Z`: custom zstd compression supporting higher compression levels or multiple threads
 
 ## Performance Improvements
 In addition, wherever the code path lends itself to parallelization, it is implemented

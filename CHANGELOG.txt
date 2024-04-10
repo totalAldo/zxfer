@@ -1,5 +1,8 @@
 CHANGELOG
 =========
+2024.04.09
+-add consistency check for -Y option
+
 2024.04.08
 -add initial support for a -Y (Y)ield command that runs run_zfs_mode
  up to a maximum of 8 times while there are zfs send or zfs destroy commands
