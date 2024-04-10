@@ -46,11 +46,6 @@ The Original author seems to have abandoned the project, there have been no upda
 
 Changes
 =======
-
-See CHANGELOG for most recent changes post 2024.03
-
----
-
 + Implement new -D parameter, allows you to put a progress indicator app between the zfs send and zfs receive. Provides macros %%size%% and %%title%%.
 	Example usage:
 
