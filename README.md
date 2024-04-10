@@ -1,19 +1,48 @@
 zxfer
 =====
 
-2024 - This fork of zxfer aims at optimizing zfs replication by refactoring the code for readability and maintainability, adding error handling functions, and adding new options for
--V (V)ery verbose mode,
--w ra(w) send, and
--z & -Z zstd compression.
--Y (Y)ield when there are no more snapshots to send or destroy
+2024 - This is a refactored version of zxfer, with the goal of optimizing ZFS replication. Enhancements include improved code readability and performance, additional error handling functions, and new options.
 
-=====
+These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots, primarily composed of log entries, without any compression. As a result, the modifications have significantly decreased the time required for both ssh and local replication.
 
+## New Options
++ `-V`: Enables very verbose mode.
++ `-w`: Activates raw send.
++ `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
++ `-z`: zstd default compression
++ `-Z`: custom zstd compression supporting higher compression levels or multiple threads when using `-T0`
+
+## Performance Improvements
+In addition, wherever the code path lends itself to parallelization, it is implemented
+as background processes. This includes:
++ Executing `zfs list` commands concurrently.
++ Running `zfs destroy` commands as background processes.
+
+## Code Refactoring
+The code has been refactored for better readability and maintainability, which includes:
++ Dividing the code into smaller, more manageable functions.
++ Incorporating error handling and debugging functions.
++ Segmenting the code into smaller files, grouped by functionality.
++ Renaming variables to indicate whether they are global, modular, or local references.
+
+## Feedback Welcome
+If you use this script and have any suggestions or feedback, please open an issue or a pull request. I hope this script will be beneficial to others and that useful features can be incorporated into the main project.
+
+## Testing
+This fork has only been tested against FreeBSD 14.0.
+
+## Acknowledgements
+A big thank you to everyone who contributed to this script over the past 16+ years, and to all its users.
+
+Best Wishes, Aldo
+
+---
+## Original README Contents:
 A continuation of development on zxfer, a popular script for managing ZFS snapshot replication
 
 The Original author seems to have abandoned the project, there have been no updates since May 2011 and the script fails to work correctly in FreeBSD versions after 8.2 and 9.0 due to new ZFS properties.
 
-[Original Project Home](http://code.google.com/p/zxfer/)
+[Original Project Home](http://code.google.com/p/zxfer)
 
 Changes
 =======
