@@ -92,12 +92,20 @@ get_zfs_list() {
         "$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source" \
         "$l_lzfs_list_hr_s_snap_tmp_file"
 
-    # get a list of destination snapshots in ascending order by creation date
+    # determine the last dataset in $initial_source. This will be the last
+    # dataset after a forward slash "/" or if no forward slash exists, then
+    # is is the name of the dataset itself.
+    l_source_dataset=$(echo "$initial_source" | awk -F'/' '{print $NF}')
+
+    # 2024.07.09
+    # we only need the snapshots of the intended destination dataset, not
+    # all the snapshots of the parent $g_destination
     execute_background_cmd \
-        "$g_RZFS list -Hr -o name -s creation -t snapshot $g_destination" \
+        "$g_RZFS list -Hr -o name -s creation -t snapshot $g_destination/$l_source_dataset" \
         "$l_rzfs_list_hr_s_snap_tmp_file"
 
-    # these commands can be run serially because listing snapshots take the longest
+    # these commands can be run serially because listing snapshots in the
+    # background take the longest
 
     # get a list of datasets in the target ascending order by creation date
     l_cmd="$g_RZFS list -t filesystem,volume -H -o name -s creation"
