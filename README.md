@@ -1,6 +1,13 @@
 zxfer
 =====
 
+2024.07.12
++ further optimize get_zfs_list() by only checking the snapshots of the intended
+  destination dataset if it exists. Previous snapshot lists used the parent dataset
+  which potentially doubled the number of snapshots to check and may have included
+  destination datasets that did not need to be checked
++ add a tests folder with a test script to test the new functionality
+
 2024 - This is a refactored version of zxfer, with the goal of optimizing ZFS replication. Enhancements include improved code readability and performance, additional error handling functions, and new options.
 
 These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots, primarily composed of log entries. As a result, the modifications have significantly decreased the time required for both ssh and local replication.
