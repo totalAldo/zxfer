@@ -97,12 +97,22 @@ get_zfs_list() {
     # is is the name of the dataset itself.
     l_source_dataset=$(echo "$initial_source" | awk -F'/' '{print $NF}')
 
+    l_destination_dataset="$g_destination/$l_source_dataset"
+
     # 2024.07.09
     # we only need the snapshots of the intended destination dataset, not
     # all the snapshots of the parent $g_destination
-    execute_background_cmd \
-        "$g_RZFS list -Hr -o name -s creation -t snapshot $g_destination/$l_source_dataset" \
-        "$l_rzfs_list_hr_s_snap_tmp_file"
+
+    # check if the destination zfs dataset exists before listing snapshots
+    if  "$g_RZFS" list "$l_destination_dataset" >/dev/null 2>&1; then
+        # dataset exists
+        execute_background_cmd \
+            "$g_RZFS list -Hr -o name -s creation -t snapshot $l_destination_dataset" \
+            "$l_rzfs_list_hr_s_snap_tmp_file"
+    else
+        # dataset does not exist
+        echo "" > "$l_rzfs_list_hr_s_snap_tmp_file"
+    fi
 
     # these commands can be run serially because listing snapshots in the
     # background take the longest
@@ -141,9 +151,10 @@ get_zfs_list() {
         throw_error "Failed to retrieve snapshots from the source" 3
     fi
 
-    if [ "$l_rzfs_list_hr_s_snap" = "" ]; then
-        throw_error "Failed to retrieve snapshots from the destination" 3
-    fi
+    # the destination may not have any snapshots if it was just created
+    #if [ "$l_rzfs_list_hr_s_snap" = "" ]; then
+    #    throw_error "Failed to retrieve snapshots from the destination" 3
+    #fi
 
     if [ "$g_rzfs_list_ho_s" = "" ]; then
         throw_error "Failed to retrieve datasets from the destination" 3
