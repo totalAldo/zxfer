@@ -69,30 +69,39 @@ get_dest_snapshots_to_delete() {
 }
 
 #
-# find the most recent common snapshot (since the lists are sorted in descending
-# order by by creation date, the first common snapshot is the most recent common)
+# find the most recent common snapshot. The source list is in descending order
+# by creation date. The destination list is in any order
 #
 set_last_common_snapshot() {
     echoV "Begin set_last_common_snapshot()"
+
+    # sorted list of source datasets and snapshots
     l_zfs_source_snaps=$1
+    # unordered list of destination datasets and snapshots
     l_zfs_dest_snaps=$2
 
     g_found_last_common_snap=0
 
-    # Convert the source snapshots into a list with newlines
-    l_src_snap_list=$(echo "$l_zfs_source_snaps" | tr ' ' '\n')
+    # Convert the destination snapshots into a list with newlines so that we
+    # can use grep to search for the source snapshot
+    l_dest_snap_list=$(echo "$l_zfs_dest_snaps" | tr ' ' '\n')
 
-    # loop through the destination snapshots sorted in descending creation order
-    # to find the most recent common snapshot
-    for l_dest_snap in $l_zfs_dest_snaps; do
-        l_dest_snap_name=$(extract_snapshot_name "$l_dest_snap")
+    # loop through the source snapshots sorted in descending creation order
+    # (newest first) to find the most recent common snapshot
+    for l_source_snap in $l_zfs_source_snaps; do
+        l_snap_name=$(extract_snapshot_name "$l_source_snap")
 
-        # Use grep to check if the destination snapshot is in the source snapshots
-        # optimize grep by using q for first match, F since we are searching for a fixed string
-        if echo "$l_src_snap_list" | grep -qF "$l_dest_snap_name"; then
+        # Use grep to check if the source snapshot is in the destination snapshots
+        # F is used to match the string exactly
+        l_dest_snap=$(echo "$l_dest_snap_list" | grep -F "$l_snap_name")
+
+        if [ "$l_dest_snap" != "" ]; then
             g_found_last_common_snap=1
-            g_last_common_snap="$l_dest_snap_name"
+
+            g_last_common_snap=$(extract_snapshot_name "$l_dest_snap")
+
             echoV "Found last common snapshot: $g_last_common_snap."
+
             # once found, exit the function
             return
         fi
@@ -227,7 +236,9 @@ inspect_delete_snap() {
     l_zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$source@")
 
     # Get the list of destination snapshots in descending order by creation date
-    l_zfs_dest_snaps=$(echo "$g_rzfs_list_hr_S_snap" | grep "^$g_actual_dest@")
+
+    # get the list of destinations snapshots that match the destination dataset
+    l_zfs_dest_snaps=$(echo "$g_rzfs_list_hr_snap" | grep "^$g_actual_dest@")
 
     # Deletes non-common snaps on destination if asked to.
     if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then

@@ -76,12 +76,16 @@
 #    filesystem, snapshot, volume, bookmark, or all.  For example,
 #    specifying -t snapshot displays only snapshots.
 #
+# 2024.07.13 - comment about performance. If the list commands only needed
+#  to retrieve the name and not sort by creation time, this would significantly
+#  reduce the time to get the list of datasets because the metadata is not
+#  needed. This would be a good enhancement to add in the future.
 get_zfs_list() {
     echoV "Begin get_zfs_list()"
 
     # create temporary files used by the background processes
     l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
-    l_rzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
+    l_rzfs_list_hr_snap_tmp_file=$(get_temp_file)
 
     # it is important to get this in ascending order because when getting
     # in descending order, the datasets names are not ordered as we want.
@@ -106,12 +110,14 @@ get_zfs_list() {
     # check if the destination zfs dataset exists before listing snapshots
     if  "$g_RZFS" list "$l_destination_dataset" >/dev/null 2>&1; then
         # dataset exists
+
+        # we only need the names of the snapshots, they don't need to be sorted
         execute_background_cmd \
-            "$g_RZFS list -Hr -o name -s creation -t snapshot $l_destination_dataset" \
-            "$l_rzfs_list_hr_s_snap_tmp_file"
+            "$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset" \
+            "$l_rzfs_list_hr_snap_tmp_file"
     else
         # dataset does not exist
-        echo "" > "$l_rzfs_list_hr_s_snap_tmp_file"
+        echo "" > "$l_rzfs_list_hr_snap_tmp_file"
     fi
 
     # these commands can be run serially because listing snapshots in the
@@ -137,25 +143,23 @@ get_zfs_list() {
     echoV "Wait finished."
 
     l_lzfs_list_hr_s_snap=$(cat "$l_lzfs_list_hr_s_snap_tmp_file")
-    l_rzfs_list_hr_s_snap=$(cat "$l_rzfs_list_hr_s_snap_tmp_file")
+    g_rzfs_list_hr_snap=$(cat "$l_rzfs_list_hr_snap_tmp_file")
 
     # get the reversed order (not using tac due to solaris compatibility)
     g_lzfs_list_hr_S_snap=$(echo "$l_lzfs_list_hr_s_snap" | cat -n | sort -nr | cut -c 8-)
-    g_rzfs_list_hr_S_snap=$(echo "$l_rzfs_list_hr_s_snap" | cat -n | sort -nr | cut -c 8-)
 
     # remove temporary files
     rm "$l_lzfs_list_hr_s_snap_tmp_file" \
-       "$l_rzfs_list_hr_s_snap_tmp_file"
+       "$l_rzfs_list_hr_snap_tmp_file"
 
     if [ "$l_lzfs_list_hr_s_snap" = "" ]; then
         throw_error "Failed to retrieve snapshots from the source" 3
     fi
 
-    # the destination may not have any snapshots if it was just created
-    #if [ "$l_rzfs_list_hr_s_snap" = "" ]; then
-    #    throw_error "Failed to retrieve snapshots from the destination" 3
-    #fi
+    # the destination may not have any snapshots if it was just created so
+    # there is no need to check it
 
+    # perform other checks
     if [ "$g_rzfs_list_ho_s" = "" ]; then
         throw_error "Failed to retrieve datasets from the destination" 3
     fi

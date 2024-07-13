@@ -111,7 +111,7 @@ init_globals() {
     # dataset and snapshot lists
     g_recursive_source_list=""
     g_lzfs_list_hr_S_snap=""
-    g_rzfs_list_hr_S_snap=""
+    g_rzfs_list_hr_snap=""
     g_rzfs_list_ho_s=""
 
     g_found_last_common_snap=0
