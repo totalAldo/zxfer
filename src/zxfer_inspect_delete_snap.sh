@@ -146,7 +146,15 @@ delete_snaps() {
 
     l_snaps_to_delete=$(get_dest_snapshots_to_delete "$l_zfs_source_snaps" "$l_zfs_dest_snaps")
 
-    # deletes non-common snaps on destination if asked to.
+    # if l_snaps_to_delete is empty, there is nothing to do
+    if [ "$l_snaps_to_delete" = "" ]; then
+        echoV "No snapshots to delete."
+        return
+    fi
+
+    l_unprotected_snaps_to_delete=""
+
+    # checks if any of the snapshots to delete are protected by the grandfather option
     for l_snap_to_delete in $l_snaps_to_delete; do
         if [ "$g_option_g_grandfather_protection" != "" ]; then
             grandfather_test "$l_snap_to_delete"
@@ -154,14 +162,40 @@ delete_snaps() {
 
         #echoV "Destroying destination snapshot $l_snap_to_delete."
         g_is_performed_send_destroy=1
-        l_cmd="$g_RZFS destroy $l_snap_to_delete"
+#       l_cmd="$g_RZFS destroy $l_snap_to_delete"
 
-        # could combine multiple snapshots into one comma delimited destroy command
-        # pass 1 to continue command if it fails
-        #execute_command "$l_cmd" 1
-        echov "$l_cmd"
-        execute_background_cmd "$l_cmd" /dev/null
+        l_snapshot=$(extract_snapshot_name "$l_snap_to_delete")
+
+        # append this snapshots to the list of snapshots to delete in a comma
+        # delimited list. It is ok for the list to have a trailing comma.
+        l_unprotected_snaps_to_delete="$l_snapshot,$l_unprotected_snaps_to_delete"
     done
+
+    # if there are no snapshots because they are all protected by the grandfather
+    # option, then there is nothing to do
+    if [ "$l_unprotected_snaps_to_delete" = "" ]; then
+        echoV "No unprotected snapshots to delete."
+        return
+    fi
+
+    # get the dataset name from the first snapshot in the list
+    #
+    # - get the first element of the list
+    l_first_snapshot=$(echo "$l_snaps_to_delete" | head -n 1)
+    # - get the portion of the string prior to the @ symbol
+    l_zfs_dest_dataset=$(echo "$l_first_snapshot" | $g_cmd_awk -F'@' '{print $1}')
+
+    # build the destroy command
+    l_cmd="$g_RZFS destroy"
+    for l_snap_to_delete in $l_unprotected_snaps_to_delete; do
+        l_cmd="$l_cmd $l_zfs_dest_dataset@$l_snap_to_delete"
+    done
+
+    # could combine multiple snapshots into one comma delimited destroy command
+    # pass 1 to continue command if it fails
+    #execute_command "$l_cmd" 1
+    echov "$l_cmd"
+    execute_background_cmd "$l_cmd" /dev/null
 
     echoV "End delete_snaps()"
 }

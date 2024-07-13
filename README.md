@@ -1,6 +1,10 @@
 zxfer
 =====
 
+2024.07.13
++ combine multiple zfs destroy commands into a single command to reduce the number of
+  processes spawned
+
 2024.07.12
 + further optimize get_zfs_list() by only checking the snapshots of the intended
   destination dataset if it exists. Previous snapshot lists used the parent dataset
