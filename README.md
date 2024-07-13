@@ -2,6 +2,9 @@ zxfer
 =====
 
 2024.07.13
++ Reduce I/O load by listing only the names of the destination snapshots.
+  Previously, the destination snapshots were listed by creation time which
+  caused the snapshot metadata to be fetched.
 + combine multiple zfs destroy commands into a single command to reduce the number of
   processes spawned
 
