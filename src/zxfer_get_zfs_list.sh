@@ -76,10 +76,6 @@
 #    filesystem, snapshot, volume, bookmark, or all.  For example,
 #    specifying -t snapshot displays only snapshots.
 #
-# 2024.07.13 - comment about performance. If the list commands only needed
-#  to retrieve the name and not sort by creation time, this would significantly
-#  reduce the time to get the list of datasets because the metadata is not
-#  needed. This would be a good enhancement to add in the future.
 get_zfs_list() {
     echoV "Begin get_zfs_list()"
 
@@ -89,7 +85,7 @@ get_zfs_list() {
 
     # it is important to get this in ascending order because when getting
     # in descending order, the datasets names are not ordered as we want.
-    # don't use -S creation for this command, instead, reverse the results below
+    # Don't use -S creation for this command, instead, reverse the results below
     #
     # get a list of source snapshots in ascending order by creation date
     execute_background_cmd \
@@ -105,7 +101,11 @@ get_zfs_list() {
 
     # 2024.07.09
     # we only need the snapshots of the intended destination dataset, not
-    # all the snapshots of the parent $g_destination
+    # all the snapshots of the parent $g_destination.
+    # In addition, the sorting by creation time has been removed in the
+    # destination since it is not needed. We only need the names of the
+    # snapshots. This significantly improves performance as the metadata
+    # doesn't need to be searched for the creation time of each snapshot.
 
     # check if the destination zfs dataset exists before listing snapshots
     if  "$g_RZFS" list "$l_destination_dataset" >/dev/null 2>&1; then
@@ -157,7 +157,7 @@ get_zfs_list() {
     fi
 
     # the destination may not have any snapshots if it was just created so
-    # there is no need to check it
+    # there is no need to check if it is empty as that is a valid state
 
     # perform other checks
     if [ "$g_rzfs_list_ho_s" = "" ]; then

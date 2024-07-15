@@ -70,7 +70,7 @@ get_dest_snapshots_to_delete() {
 
 #
 # find the most recent common snapshot. The source list is in descending order
-# by creation date. The destination list is in any order
+# by creation date. The destination list is unordered.
 #
 set_last_common_snapshot() {
     echoV "Begin set_last_common_snapshot()"
@@ -92,13 +92,11 @@ set_last_common_snapshot() {
         l_snap_name=$(extract_snapshot_name "$l_source_snap")
 
         # Use grep to check if the source snapshot is in the destination snapshots
-        # F is used to match the string exactly
-        l_dest_snap=$(echo "$l_dest_snap_list" | grep -F "$l_snap_name")
-
-        if [ "$l_dest_snap" != "" ]; then
+        # -F is used to match the string exactly, -q is used to suppress output
+        if echo "$l_dest_snap_list" | grep -qF "$l_snap_name"; then
             g_found_last_common_snap=1
 
-            g_last_common_snap=$(extract_snapshot_name "$l_dest_snap")
+            g_last_common_snap=$l_snap_name
 
             echoV "Found last common snapshot: $g_last_common_snap."
 
@@ -171,11 +169,13 @@ delete_snaps() {
 
         #echoV "Destroying destination snapshot $l_snap_to_delete."
         g_is_performed_send_destroy=1
-#       l_cmd="$g_RZFS destroy $l_snap_to_delete"
+        # the command to serially delete snapshots, which has been replaced
+        # by a comma delimited list of snapshots to delete
+        #l_cmd="$g_RZFS destroy $l_snap_to_delete"
 
         l_snapshot=$(extract_snapshot_name "$l_snap_to_delete")
 
-        # append this snapshots to the list of snapshots to delete in a comma
+        # append this snapshot to the list of snapshots to delete in a comma
         # delimited list. It is ok for the list to have a trailing comma.
         l_unprotected_snaps_to_delete="$l_snapshot,$l_unprotected_snaps_to_delete"
     done
@@ -200,9 +200,6 @@ delete_snaps() {
         l_cmd="$l_cmd $l_zfs_dest_dataset@$l_snap_to_delete"
     done
 
-    # could combine multiple snapshots into one comma delimited destroy command
-    # pass 1 to continue command if it fails
-    #execute_command "$l_cmd" 1
     echov "$l_cmd"
     execute_background_cmd "$l_cmd" /dev/null
 
@@ -234,8 +231,6 @@ set_src_snapshot_transfer_list() {
 inspect_delete_snap() {
     # Get the list of source snapshots in descending order by creation date
     l_zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$source@")
-
-    # Get the list of destination snapshots in descending order by creation date
 
     # get the list of destinations snapshots that match the destination dataset
     l_zfs_dest_snaps=$(echo "$g_rzfs_list_hr_snap" | grep "^$g_actual_dest@")
