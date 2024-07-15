@@ -1,23 +1,6 @@
 zxfer
 =====
 
-2024.07.15
-+ Add a new option `-x` to specify the number of parallel zfs list snapshot commands to run via xargs. This can improve performance when listing local snapshots.
-
-2024.07.13
-+ Reduce I/O load by listing only the names of the destination snapshots.
-  Previously, the destination snapshots were listed by creation time which
-  caused the snapshot metadata to be fetched.
-+ combine multiple zfs destroy commands into a single command to reduce the number of
-  processes spawned
-
-2024.07.12
-+ further optimize get_zfs_list() by only checking the snapshots of the intended
-  destination dataset if it exists. Previous snapshot lists used the parent dataset
-  which potentially doubled the number of snapshots to check and may have included
-  destination datasets that did not need to be checked
-+ add a tests folder with a test script to test the new functionality
-
 2024 - This is a refactored version of zxfer, with the goal of optimizing ZFS replication. Enhancements include improved code readability and performance, additional error handling functions, and new options.
 
 These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots, primarily composed of log entries. As a result, the modifications have significantly decreased the time required for both ssh and local replication.
@@ -25,7 +8,7 @@ These changes were motivated by the lengthy replication times experienced when t
 ## New Options
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
-+ `-x`: allows specifying the number of parallel zfs list snaphot commands to run via xargs (this can improve the performance when listing local snapshots)
++ `-x`: allows specifying the number of parallel zfs list snaphot commands to run via xargs (this can improve the performance when listing local snapshots that are cpu-bound)
 + `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
 + `-z`: pipe ssh transfers through zstd default compression
 + `-Z`: custom zstd compression supporting higher compression levels or multiple threads
@@ -37,6 +20,15 @@ as background processes. This includes:
 + Running `zfs destroy` commands as background processes.
 + Use `zfs send -I` instead of `zfs send -i` for incremental replication to send the entire snapshot chain in one go.
 + The `inspect_delete_snap()` function has been refactored to use the `comm` command instead of nested loops. Previously, the function used nested loops to identify which destination snapshots should be deleted. This process was executed even when the `-d` option was not in use. For instance, if both the source and destination contained 1,000 snapshots, the loop would iterate 1,000,000 times. Each iteration would spawn at least two `grep` and two `cut` commands to compare snapshot names. The new implementation with `comm` is more efficient and readable.
++ Reduce I/O load by listing only the names of the destination snapshots.
+  Previously, the destination snapshots were listed by creation time which
+  caused the snapshot metadata to be fetched.
++ combine multiple zfs destroy commands into a single command to reduce the number of
+  processes spawned
++ optimize `get_zfs_list()` by only checking the snapshots of the intended
+  destination dataset if it exists. Previous snapshot lists used the parent dataset
+  which potentially doubled the number of snapshots to check and may have included
+  destination datasets that did not need to be checked
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:
