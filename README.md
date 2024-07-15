@@ -1,6 +1,9 @@
 zxfer
 =====
 
+2024.07.15
++ Add a new option `-x` to specify the number of parallel zfs list snapshot commands to run via xargs. This can improve performance when listing local snapshots.
+
 2024.07.13
 + Reduce I/O load by listing only the names of the destination snapshots.
   Previously, the destination snapshots were listed by creation time which
@@ -22,6 +25,7 @@ These changes were motivated by the lengthy replication times experienced when t
 ## New Options
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
++ `-x`: allows specifying the number of parallel zfs list snaphot commands to run via xargs (this can improve the performance when listing local snapshots)
 + `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
 + `-z`: pipe ssh transfers through zstd default compression
 + `-Z`: custom zstd compression supporting higher compression levels or multiple threads
