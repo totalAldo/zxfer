@@ -1,4 +1,4 @@
-zxfer
+zxfer (turbo)
 =====
 
 2024 - This is a refactored version of zxfer, with the goal of optimizing ZFS replication. Enhancements include improved code readability and performance, additional error handling functions, and new options.
@@ -8,7 +8,7 @@ These changes were motivated by the lengthy replication times experienced when t
 ## New Options
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
-+ `-x`: allows specifying the number of parallel zfs list snaphot commands to run via xargs (this can improve the performance when listing local snapshots that are cpu-bound)
++ `-x`: specify the number of parallel zfs list snaphot commands to run via xargs (this can improve the performance when listing local snapshots that are cpu-bound)
 + `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
 + `-z`: pipe ssh transfers through zstd default compression
 + `-Z`: custom zstd compression supporting higher compression levels or multiple threads
@@ -23,7 +23,7 @@ as background processes. This includes:
 + Reduce I/O load by listing only the names of the destination snapshots.
   Previously, the destination snapshots were listed by creation time which
   caused the snapshot metadata to be fetched.
-+ combine multiple zfs destroy commands into a single command to reduce the number of
++ combine multiple `zfs destroy` commands into a single command to reduce the number of
   processes spawned
 + optimize `get_zfs_list()` by only checking the snapshots of the intended
   destination dataset if it exists. Previous snapshot lists used the parent dataset
