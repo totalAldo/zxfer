@@ -42,7 +42,7 @@
 #
 init_globals() {
     # zxfer version
-    g_zxfer_version="2.0.0-20240409"
+    g_zxfer_version="2.0.0-20240715"
 
     # max number of iterations to run iterate through run_zfs_mode
     # if changes are made to the filesystems
@@ -79,6 +79,10 @@ init_globals() {
     g_option_U_skip_unsupported_properties=0
     g_option_v_verbose=0
     g_option_V_very_verbose=0
+    # number of parallel xargs processes to run when listing zfs snapshots
+    # in the source (default 1 does not use xargs)
+    # this method only proves useful when the source is local
+    g_option_x_args_parallel=1
     g_option_Y_yield_iterations=1
     g_option_w_raw_send=0
     g_option_z_compress=0
@@ -158,7 +162,7 @@ xattr,dnodesize"
 # Check command line parameters.
 #
 read_command_line_switches() {
-    while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:UvVwY?:D:zZ: l_i; do
+    while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:UvVwY?:x:D:zZ: l_i; do
         case $l_i in
         b)
             g_option_b_beep_always=1
@@ -273,6 +277,9 @@ read_command_line_switches() {
             ;;
         w)
             g_option_w_raw_send=1
+            ;;
+        x)
+            g_option_x_args_parallel="$OPTARG"
             ;;
         Y)
             # set the number of iterations to run through the zfs mode
