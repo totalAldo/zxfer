@@ -93,7 +93,7 @@
 usage() {
     cat <<EOT
 usage:
-     zxfer [-dFnPsUvVwY] [-x #xargs_rocesses] [-k | -e] [-b | -B] {-N path/to/src | -R path/to/src}
+     zxfer [-dFnPsUvVwY] [-x #xargs_processes] [-k | -e] [-b | -B] {-N path/to/src | -R path/to/src}
            [-z] [-Z "full zstd compression command"]
            [-m [c FMRI|pattern[ FMRI|pattern]...]]] [-O user@host]
            [-D 'progress dialog options'] [-I properties,to,ignore]
