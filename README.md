@@ -29,6 +29,9 @@ as background processes. This includes:
   destination dataset if it exists. Previous snapshot lists used the parent dataset
   which potentially doubled the number of snapshots to check and may have included
   destination datasets that did not need to be checked
++ compress the output of the source snapshot list when using `ssh` via `zstd -9`.
+  When there are many snapshots, the output of the `zfs list` command can be several
+  megabytes and it is highly compressible.
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:

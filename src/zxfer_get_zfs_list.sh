@@ -114,7 +114,12 @@ get_zfs_list() {
         if [ ! "$g_option_O_origin_host" = "" ]; then
             #l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
             # use parallel to prevent mangling of output
-            l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | parallel -j $g_option_x_args_parallel --line-buffer '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
+            # when there are a lot of snapshtos, the output can be several megabytes and benefit
+            # from compression. We use zstd -9 due to the small size and time that it takes
+            # to generate the output. zstd -9 has shown better compression than zstd -12
+            # and significantly better compression than gzip.
+            # zstd -19 takes too long
+            l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | parallel -j $g_option_x_args_parallel --line-buffer '$g_cmd_zfs list -H -o name -s creation -t snapshot {}' | zstd -9 \" | zstd -d"
         else
             #l_cmd="$g_LZFS list -Hr -o name "$initial_source" | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_LZFS list -H -o name -s creation -t snapshot {}'"
             l_cmd="$g_LZFS list -Hr -o name "$initial_source" | parallel -j $g_option_x_args_parallel --line-buffer '$g_LZFS list -H -o name -s creation -t snapshot {}'"
