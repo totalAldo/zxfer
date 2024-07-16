@@ -42,28 +42,22 @@ get_dest_snapshots_to_delete() {
     l_zfs_dest_snaps=$2
 
     # Create temporary files
-    l_original_zfs_dest_snaps=$(get_temp_file)
     l_src_tmp=$(get_temp_file)
     l_dest_tmp=$(get_temp_file)
     l_snaps_to_delete_tmp=$(get_temp_file)
 
     # Write the snapshot names to the temporary files
-    echo "$l_zfs_dest_snaps" >"$l_original_zfs_dest_snaps"
-    echo "$l_zfs_source_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" >"$l_src_tmp"
-    echo "$l_zfs_dest_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" >"$l_dest_tmp"
+    echo "$l_zfs_source_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" > "$l_src_tmp"
+    echo "$l_zfs_dest_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" > "$l_dest_tmp"
 
     # Use comm to find snapshots in l_dest_tmp that don't have a match in l_src_tmp
-    # write the snapshots to delete to a temporary file for use by grep
-    comm -13 "$l_src_tmp" "$l_dest_tmp" >"$l_snaps_to_delete_tmp"
+    comm -13 "$l_src_tmp" "$l_dest_tmp" > "$l_snaps_to_delete_tmp"
 
-    # Use grep to find the matching lines in l_original_zfs_dest_snaps
-    l_dest_snaps_to_delete=$(grep -F -f "$l_snaps_to_delete_tmp" "$l_original_zfs_dest_snaps")
+    # Use grep to find the matching lines in l_zfs_dest_snaps
+    l_dest_snaps_to_delete=$(echo "$l_zfs_dest_snaps" | grep -F -f "$l_snaps_to_delete_tmp")
 
     # Clean up temporary files
-    rm "$l_original_zfs_dest_snaps" \
-        "$l_src_tmp" \
-        "$l_dest_tmp" \
-        "$l_snaps_to_delete_tmp"
+    rm "$l_src_tmp" "$l_dest_tmp" "$l_snaps_to_delete_tmp"
 
     # Print the matching lines
     echo "$l_dest_snaps_to_delete"
@@ -232,6 +226,7 @@ set_src_snapshot_transfer_list() {
 }
 
 inspect_delete_snap() {
+    #echoV "Begin inspect_delete_snap()"
     l_is_delete_snap=$1
     l_source=$2
 
@@ -252,4 +247,5 @@ inspect_delete_snap() {
     # Create a list of source snapshots to transfer, beginning with the
     # first snapshot after the last common one.
     set_src_snapshot_transfer_list "$l_zfs_source_snaps" "$l_source"
+    #echoV "End inspect_delete_snap()"
 }
