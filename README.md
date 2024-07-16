@@ -8,7 +8,7 @@ These changes were motivated by the lengthy replication times experienced when t
 ## New Options
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
-+ `-x`: specify the number of parallel zfs list snaphot commands to run via xargs (this can improve the performance when listing local snapshots that are cpu-bound)
++ `-x`: specify the number of parallel zfs list snaphot commands to run via xargs (this can improve the performance when listing source snapshots that are cpu-bound)
 + `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
 + `-z`: pipe ssh transfers through zstd default compression
 + `-Z`: custom zstd compression supporting higher compression levels or multiple threads

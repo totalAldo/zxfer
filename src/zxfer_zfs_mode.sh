@@ -201,7 +201,7 @@ calculate_unsupported_properties() {
     l_source_pool_name=${initial_source%%/*}
     l_source_supported_properties=$($g_LZFS get -Ho property all "$l_source_pool_name")
 
-    unsupported_properties=
+    unsupported_properties=""
 
     for s_p in $l_source_supported_properties; do
         l_found_supported_prop=0
