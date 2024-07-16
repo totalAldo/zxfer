@@ -37,6 +37,7 @@
 # Returns a list of destination snapshots that don't exist in the source.
 #
 get_dest_snapshots_to_delete() {
+    echoV "Begin get_dest_snapshots_to_delete()"
     l_zfs_source_snaps=$1
     l_zfs_dest_snaps=$2
 
@@ -66,6 +67,7 @@ get_dest_snapshots_to_delete() {
 
     # Print the matching lines
     echo "$l_dest_snaps_to_delete"
+    echoV "End get_dest_snapshots_to_delete()"
 }
 
 #
@@ -208,6 +210,7 @@ delete_snaps() {
 
 set_src_snapshot_transfer_list() {
     l_zfs_source_snaps=$1
+    l_source=$2
 
     l_found_common=0
 
@@ -216,7 +219,7 @@ set_src_snapshot_transfer_list() {
     # This prepares a list of source snapshots to transfer, beginning with
     # the first snapshot after the last common one.
     for l_test_snap in $l_zfs_source_snaps; do
-        if [ "$l_test_snap" != "$source@$g_last_common_snap" ]; then
+        if [ "$l_test_snap" != "$l_source@$g_last_common_snap" ]; then
             if [ $l_found_common = 0 ]; then
                 g_src_snapshot_transfer_list="$l_test_snap,$g_src_snapshot_transfer_list"
             fi
@@ -229,14 +232,17 @@ set_src_snapshot_transfer_list() {
 }
 
 inspect_delete_snap() {
+    l_is_delete_snap=$1
+    l_source=$2
+
     # Get the list of source snapshots in descending order by creation date
-    l_zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$source@")
+    l_zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$l_source@")
 
     # get the list of destinations snapshots that match the destination dataset
     l_zfs_dest_snaps=$(echo "$g_rzfs_list_hr_snap" | grep "^$g_actual_dest@")
 
     # Deletes non-common snaps on destination if asked to.
-    if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then
+    if [ "$l_is_delete_snap" -eq 1 ]; then
         delete_snaps "$l_zfs_source_snaps" "$l_zfs_dest_snaps"
     fi
 
@@ -245,5 +251,5 @@ inspect_delete_snap() {
 
     # Create a list of source snapshots to transfer, beginning with the
     # first snapshot after the last common one.
-    set_src_snapshot_transfer_list "$l_zfs_source_snaps"
+    set_src_snapshot_transfer_list "$l_zfs_source_snaps" "$l_source"
 }

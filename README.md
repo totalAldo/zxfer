@@ -5,6 +5,18 @@ zxfer (turbo)
 
 These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots, primarily composed of log entries. As a result, the modifications have significantly decreased the time required for both ssh and local replication.
 
+## Ideas for further improvements
++ if the delete option is specified, list the source snapshots without
+  creation time, and begin deleting the destination snapshots as soon as
+  they are listed. This will reduce the time required to delete snapshots
+  after the full snapshot list has been generated. While the deletions are
+  in progress, list the source snapshots with creation time which takes longer.
+  Generating the source snapshot list with creation time can take several seconds
+  depednding on the number of snapshots and this time can be used effectively
+  to perform delete operations on the destination.
++ explore using parallel sends which may help maximize network bandwidth
+  utilization and reduce overall replication time
+
 ## New Options
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
@@ -31,7 +43,9 @@ as background processes. This includes:
   destination datasets that did not need to be checked
 + compress the output of the source snapshot list when using `ssh` via `zstd -9`.
   When there are many snapshots, the output of the `zfs list` command can be several
-  megabytes and it is highly compressible.
+  megabytes and it is highly compressible. While `ssh` offers compression options
+  including the use of `zstd`, compressesion is now explicity set by piping the
+  `zfs list` output through `zstd -9`
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:
