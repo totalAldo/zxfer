@@ -45,9 +45,9 @@ clean_up() {
     snap_delete_list=$(echo "$snap_delete_list" | cat -n | sort -nr)
     snap_delete_list=$(echo "$snap_delete_list" | cut -c 8-)
 
-    # delete the snapshots - about 14 seconds max
-    for source_snap in $snap_delete_list; do
-        $g_LZFS destroy "$source_snap"
+    # delete the snapshots
+    for l_source_snap in $snap_delete_list; do
+        $g_LZFS destroy "$l_source_snap"
     done
 }
 

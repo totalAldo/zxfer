@@ -51,16 +51,18 @@ m_sourcefs=""
 # Output is $g_actual_dest
 #
 set_actual_dest() {
+    l_source=$1
+
     # A trailing slash means that the root filesystem is transferred straight
     # into the dest fs, no trailing slash means that this fs is created
     # inside the destination.
     if [ "$m_trailing_slash" -eq 0 ]; then
         # If the original source was backup/test/zroot and we are transferring
         # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
-        l_dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
+        l_dest_tail=$(echo "$l_source" | sed -e "s%^$part_of_source_to_delete%%g")
         g_actual_dest="$g_destination"/"$l_dest_tail"
     else
-        l_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
+        l_trailing_slash_dest_tail=$(echo "$l_source" | sed -e "s%^$initial_source%%g")
         g_actual_dest="$g_destination$l_trailing_slash_dest_tail"
     fi
 }
@@ -226,7 +228,7 @@ copy_filesystems() {
         # Split up source into source fs, last component
         m_sourcefs=$(echo "$source" | cut -d@ -f1)
 
-        set_actual_dest
+        set_actual_dest "$source"
 
         # If using the -m feature, check if the source is mounted,
         # otherwise there's no point in us doing the remounting.
@@ -244,7 +246,7 @@ copy_filesystems() {
         # Inspect the source and destination snapshots so that we are in position to
         # transfer using the latest common snapshot as a base, and transferring the
         # newer snapshots on source, in order.
-        inspect_delete_snap
+        inspect_delete_snap "$g_option_d_delete_destination_snapshots" "$source"
 
         # Transfer source properties to destination if required.
         # in the function.
@@ -389,13 +391,11 @@ recursively, but not both -N and -R at the same time."
 
     if [ "$g_option_g_grandfather_protection" != "" ]; then
         echov "Checking grandfather status of all snapshots marked for deletion..."
-        l_old_g_option_d_delete_destination_snapshots=$g_option_d_delete_destination_snapshots
-        g_option_d_delete_destination_snapshots=0 # turn off delete so that we are only checking snapshots
         for source in $g_recursive_source_list; do
             set_actual_dest
-            inspect_delete_snap
+            # turn off delete so that we are only checking snapshots, pass 0
+            inspect_delete_snap 0 "$source"
         done
-        g_option_d_delete_destination_snapshots=$l_old_g_option_d_delete_destination_snapshots
         echov "Grandfather check passed."
     fi
 

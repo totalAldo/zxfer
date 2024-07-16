@@ -137,6 +137,7 @@ execute_command() {
 
 #
 # Execute a command in the background and write the output to a file.
+# Background commands do not honor the dry run option
 #
 # l_cmd: command to execute
 # l_output_file: file to write the output to
@@ -144,6 +145,7 @@ execute_command() {
 execute_background_cmd() {
     l_cmd=$1
     l_output_file=$2
+
     echoV "Executing command in the background: $l_cmd"
     $l_cmd >"$l_output_file" &
 }
