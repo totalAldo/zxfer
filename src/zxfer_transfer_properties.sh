@@ -37,6 +37,7 @@
 m_new_rmvs_pv=""
 m_new_rmv_pvs=""
 m_new_mc_pvs=""
+m_only_supported_properties=""
 
 #
 # Strips the sources from a list of properties=values=sources,
@@ -140,30 +141,30 @@ remove_properties() {
 # output is in m_new_rmv_pvs
 #
 remove_unsupported_properties() {
-    _orig_set_list=$1 # the list of properties=values=sources,...
-    _FUNCIFS=$IFS
+    l_orig_set_list=$1 # the list of properties=values=sources,...
+    l_FUNCIFS=$IFS
     IFS=","
 
-    only_supported_properties=""
-    for orig_line in $_orig_set_list; do
-        found_unsup=0
-        orig_set_property=$(echo "$orig_line" | cut -f1 -d=)
-        orig_set_value=$(echo "$orig_line" | cut -f2 -d=)
-        orig_set_source=$(echo "$orig_line" | cut -f3 -d=)
-        for property in $unsupported_properties; do
-            if [ "$property" = "$orig_set_property" ]; then
-                found_unsup=1
+    m_only_supported_properties=""
+    for l_orig_line in $l_orig_set_list; do
+        l_found_unsup=0
+        l_orig_set_property=$(echo "$l_orig_line" | cut -f1 -d=)
+        l_orig_set_value=$(echo "$l_orig_line" | cut -f2 -d=)
+        l_orig_set_source=$(echo "$l_orig_line" | cut -f3 -d=)
+        for l_property in $unsupported_properties; do
+            if [ "$l_property" = "$l_orig_set_property" ]; then
+                l_found_unsup=1
                 break
             fi
         done
-        if [ $found_unsup -eq 0 ]; then
-            only_supported_properties="$only_supported_properties$orig_set_property=$orig_set_value=$orig_set_source,"
+        if [ $l_found_unsup -eq 0 ]; then
+            m_only_supported_properties="$m_only_supported_properties$l_orig_set_property=$l_orig_set_value=$l_orig_set_source,"
         else
-            echov "Destination does not support property ${orig_set_property}=${orig_set_value}"
+            echov "Destination does not support property ${l_orig_set_property}=${l_orig_set_value}"
         fi
     done
-    only_supported_properties=${only_supported_properties%,}
-    IFS=$_FUNCIFS
+    m_only_supported_properties=${m_only_supported_properties%,}
+    IFS=$l_FUNCIFS
 }
 
 #
@@ -364,7 +365,7 @@ $override_value=$override_source,"
     # Remove any properties that are not supported by the destination
     if [ -n "$unsupported_properties" ]; then
         remove_unsupported_properties "$override_pvs"
-        override_pvs="$only_supported_properties"
+        override_pvs="$m_only_supported_properties"
     fi
 
     dest_exist=$(echo "$g_recursive_dest_list" | grep -c "^$g_actual_dest$")

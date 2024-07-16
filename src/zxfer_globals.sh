@@ -448,23 +448,23 @@ get_backup_properties() {
 # corresponding to the destination filesystem
 #
 write_backup_properties() {
-    _is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
+    l_is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
     l_backup_file_dir=$($g_RZFS get -H -o value mountpoint "$g_destination")
-    echov "Writing backup info to location $l_backup_file_dir/$g_backup_file_extension.$_is_tail"
+    echov "Writing backup info to location $l_backup_file_dir/$g_backup_file_extension.$l_is_tail"
 
     # Construct the backup file contents
-    _backup_file_header="#zxfer property backup file;#version:$g_zxfer_version;#R options:$g_option_R_recursive;#N options:$g_option_N_nonrecursive;#destination:$g_destination;#initial_source:$_is_tail;#g_option_S_rsync_mode:$g_option_S_rsync_mode;"
-    _backup_date=$(date)
-    g_backup_file_contents="$_backup_file_header#backup_date:$_backup_date$g_backup_file_contents"
+    l_backup_file_header="#zxfer property backup file;#version:$g_zxfer_version;#R options:$g_option_R_recursive;#N options:$g_option_N_nonrecursive;#destination:$g_destination;#initial_source:$l_is_tail;#g_option_S_rsync_mode:$g_option_S_rsync_mode;"
+    l_backup_date=$(date)
+    g_backup_file_contents="$l_backup_file_header#backup_date:$l_backup_date$g_backup_file_contents"
 
     # Construct the command to write the backup file
-    backup_file_cmd="echo \"$g_backup_file_contents\" | tr \";\" \"\n\" > $l_backup_file_dir/$g_backup_file_extension.$_is_tail"
+    l_backup_file_cmd="echo \"$g_backup_file_contents\" | tr \";\" \"\n\" > $l_backup_file_dir/$g_backup_file_extension.$l_is_tail"
 
     # Execute the command
     if [ "$g_option_n_dryrun" -eq 0 ]; then
-        echo "$backup_file_cmd" | "$g_cmd_ssh $g_option_T_target_host" sh ||
+        echo "$l_backup_file_cmd" | "$g_cmd_ssh $g_option_T_target_host" sh ||
             throw_error "Error writing backup file. Is filesystem mounted?"
     else
-        echo "echo \"$backup_file_cmd\" | \"$g_cmd_ssh $g_option_T_target_host\" sh"
+        echo "echo \"$l_backup_file_cmd\" | \"$g_cmd_ssh $g_option_T_target_host\" sh"
     fi
 }

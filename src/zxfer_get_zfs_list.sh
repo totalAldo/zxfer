@@ -94,31 +94,38 @@ get_zfs_list() {
         # zfs list -Hr -o name pool/dataset | xargs -n 1 -P 2 -I {} sh -c 'zfs list -H -o name -s creation -t snapshot {}'
         # use xargs to parallelize the listing of snapshots which speeds up the process
         #xargs -n 1 -P 2 -I {} sh -c 'zfs list -H -o name -s creation -t snapshot creation {}':
-	    #•	xargs: A command to build and execute command lines from standard input.
-	    #•	-n 1: Tells xargs to use one argument per command line, meaning it will run the command once for each dataset name.
-	    #•	-P 2: Specifies the number of commands to run in parallel. In this case, 2 parallel processes.
-	    #•	-I {}: Replaces {} with the argument from the input (each dataset name).
-	    #•	sh -c 'zfs list -H -o name -s creation -t snapshot creation {}': The command that xargs will run for each dataset name.
-	    #•	sh -c: Executes the specified command string using the shell.
+        #•	xargs: A command to build and execute command lines from standard input.
+        #•	-n 1: Tells xargs to use one argument per command line, meaning it will run the command once for each dataset name.
+        #•	-P 2: Specifies the number of commands to run in parallel. In this case, 2 parallel processes.
+        #•	-I {}: Replaces {} with the argument from the input (each dataset name).
+        #•	sh -c 'zfs list -H -o name -s creation -t snapshot creation {}': The command that xargs will run for each dataset name.
+        #•	sh -c: Executes the specified command string using the shell.
 
         # eventhough the snapshots are not ordered in creation time globally,
         # they are ordered by dataset which is what is needed.
 
-        # this command is executed inline because there are issues escaping it
-        # as a string to execute_background_cmd
-        echoV "Executing command in the background $g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_LZFS list -H -o name -s creation -t snapshot {}'"
-        $g_LZFS list -Hr -o name "$initial_source" | \
-            xargs -n 1 -P "$g_option_x_args_parallel" -I {} sh -c \
-                "$g_LZFS list -H -o name -s creation -t snapshot {}" > "$l_lzfs_list_hr_s_snap_tmp_file" &
+        # if the g_LZFS command is remote, then escape the command to execute
+        # it wrapped around an ssh command
+        if [ ! "$g_option_O_origin_host" = "" ]; then
+            l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
+            echoV "Executing command in the background $l_cmd"
+            eval "$l_cmd" > "$l_lzfs_list_hr_s_snap_tmp_file" &
+
+        else
+            # this command is executed inline because there are issues escaping it
+            # as a string to execute_background_cmd
+            echoV "Executing command in the background $g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_LZFS list -H -o name -s creation -t snapshot {}'"
+            $g_LZFS list -Hr -o name "$initial_source" |
+                xargs -n 1 -P "$g_option_x_args_parallel" -I {} sh -c \
+                    "$g_LZFS list -H -o name -s creation -t snapshot {}" >"$l_lzfs_list_hr_s_snap_tmp_file" &
+        fi
     else
         l_cmd="$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source"
 
+        execute_background_cmd \
+            "$l_cmd" \
+            "$l_lzfs_list_hr_s_snap_tmp_file"
     fi
-
-    execute_background_cmd \
-        "$l_cmd" \
-        "$l_lzfs_list_hr_s_snap_tmp_file"
-
 
     # determine the last dataset in $initial_source. This will be the last
     # dataset after a forward slash "/" or if no forward slash exists, then
@@ -136,7 +143,7 @@ get_zfs_list() {
     # doesn't need to be searched for the creation time of each snapshot.
 
     # check if the destination zfs dataset exists before listing snapshots
-    if  "$g_RZFS" list "$l_destination_dataset" >/dev/null 2>&1; then
+    if "$g_RZFS" list "$l_destination_dataset" >/dev/null 2>&1; then
         # dataset exists
 
         # we only need the names of the snapshots, they don't need to be sorted
@@ -145,7 +152,7 @@ get_zfs_list() {
             "$l_rzfs_list_hr_snap_tmp_file"
     else
         # dataset does not exist
-        echo "" > "$l_rzfs_list_hr_snap_tmp_file"
+        echo "" >"$l_rzfs_list_hr_snap_tmp_file"
     fi
 
     # these commands can be run serially because listing snapshots in the
@@ -178,7 +185,7 @@ get_zfs_list() {
 
     # remove temporary files
     rm "$l_lzfs_list_hr_s_snap_tmp_file" \
-       "$l_rzfs_list_hr_snap_tmp_file"
+        "$l_rzfs_list_hr_snap_tmp_file"
 
     if [ "$l_lzfs_list_hr_s_snap" = "" ]; then
         throw_error "Failed to retrieve snapshots from the source" 3

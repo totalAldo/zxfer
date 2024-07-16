@@ -45,24 +45,24 @@
 # Takes $g_LZFS (which may contain the ssh commmand if -O is used)
 #
 calculate_size_estimate() {
-    _snapshot=$1
+    l_snapshot=$1
 
-    _size_dataset=$($g_LZFS send -nPv "$_snapshot" 2>&1) ||
-        throw_error "Error calculating estimate: $_size_dataset"
-    _size_est=$(echo "$_size_dataset" | grep ^size | tail -n 1 | cut -f 2)
+    l_size_dataset=$($g_LZFS send -nPv "$l_snapshot" 2>&1) ||
+        throw_error "Error calculating estimate: $l_size_dataset"
+    l_size_est=$(echo "$l_size_dataset" | grep ^size | tail -n 1 | cut -f 2)
 
-    echo "$_size_est"
+    echo "$l_size_est"
 }
 
 setup_progress_dialog() {
-    _size_est=$1
-    _snapshot=$2
+    l_size_est=$1
+    l_snapshot=$2
 
-    _progress_dialog=$(echo "$g_option_D_display_progress_bar" |
-        sed "s#%%size%%#$_size_est#g" |
-        sed "s#%%title%%#$_snapshot#g")
+    l_progress_dialog=$(echo "$g_option_D_display_progress_bar" |
+        sed "s#%%size%%#$l_size_est#g" |
+        sed "s#%%title%%#$l_snapshot#g")
 
-    echo "$_progress_dialog"
+    echo "$l_progress_dialog"
 }
 
 #
@@ -71,17 +71,17 @@ setup_progress_dialog() {
 # Error when executing command.
 #
 handle_progress_bar_option() {
-    _snapshot=$1
-    _progress_bar_cmd=""
+    l_snapshot=$1
+    l_progress_bar_cmd=""
 
     # Calculate the size estimate and set up the progress dialog
-    _size_est=$(calculate_size_estimate "$_snapshot")
-    _progress_dialog=$(setup_progress_dialog "$_size_est" "$_snapshot")
+    l_size_est=$(calculate_size_estimate "$l_snapshot")
+    l_progress_dialog=$(setup_progress_dialog "$l_size_est" "$l_snapshot")
 
     # Modify the send command to include the progress dialog
-    _progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | $_progress_dialog"
+    l_progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | $l_progress_dialog"
 
-    echo "$_progress_bar_cmd"
+    echo "$l_progress_bar_cmd"
 }
 
 set_send_command() {
@@ -116,18 +116,18 @@ set_receive_command() {
 }
 
 wrap_command_with_ssh() {
-    _cmd=$1
-    _option=$2
-    _compress=$3
-    _direction=$4
+    l_cmd=$1
+    l_option=$2
+    l_compress=$3
+    l_direction=$4
 
-    if [ "$_compress" -eq 0 ]; then
-        echo "$g_cmd_ssh $_option \"$_cmd\""
+    if [ "$l_compress" -eq 0 ]; then
+        echo "$g_cmd_ssh $l_option \"$l_cmd\""
     else
-        if [ "$_direction" = "send" ]; then
-            echo "$g_cmd_ssh $_option \"$_cmd | $g_cmd_compress\" | $g_cmd_decompress"
+        if [ "$l_direction" = "send" ]; then
+            echo "$g_cmd_ssh $l_option \"$l_cmd | $g_cmd_compress\" | $g_cmd_decompress"
         else
-            echo "$g_cmd_compress | $g_cmd_ssh $_option \"$g_cmd_decompress | $_cmd\""
+            echo "$g_cmd_compress | $g_cmd_ssh $l_option \"$g_cmd_decompress | $l_cmd\""
         fi
     fi
 }
