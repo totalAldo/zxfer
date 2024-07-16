@@ -83,13 +83,18 @@ get_zfs_list() {
     l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
     l_rzfs_list_hr_snap_tmp_file=$(get_temp_file)
 
-    # This method proved to be slower when using ssh for remote source
+    # This method proved to be slower when using ssh for remote source.
+    #
     # it is important to get this in ascending order because when getting
     # in descending order, the datasets names are not ordered as we want.
     # Don't use -S creation for this command, instead, reverse the results below
     #
-    # get a list of source snapshots in ascending order by creation date
+    # Get a list of source snapshots in ascending order by creation date
     if [ $g_option_x_args_parallel -gt 1 ]; then
+        # 2024.07.15
+        # xargs mangles the output of the snapshots and is not reliable.
+        # parallel is used instead which much be installed on source systems
+        #
         # example;
         # zfs list -Hr -o name pool/dataset | xargs -n 1 -P 2 -I {} sh -c 'zfs list -H -o name -s creation -t snapshot {}'
         # use xargs to parallelize the listing of snapshots which speeds up the process
@@ -103,22 +108,21 @@ get_zfs_list() {
 
         # eventhough the snapshots are not ordered in creation time globally,
         # they are ordered by dataset which is what is needed.
-
+        #
         # if the g_LZFS command is remote, then escape the command to execute
         # it wrapped around an ssh command
         if [ ! "$g_option_O_origin_host" = "" ]; then
-            l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
-            echoV "Executing command in the background $l_cmd"
-            eval "$l_cmd" > "$l_lzfs_list_hr_s_snap_tmp_file" &
-
+            #l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
+            # use parallel to prevent mangling of output
+            l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | parallel -j $g_option_x_args_parallel --line-buffer '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
         else
-            # this command is executed inline because there are issues escaping it
-            # as a string to execute_background_cmd
-            echoV "Executing command in the background $g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_LZFS list -H -o name -s creation -t snapshot {}'"
-            $g_LZFS list -Hr -o name "$initial_source" |
-                xargs -n 1 -P "$g_option_x_args_parallel" -I {} sh -c \
-                    "$g_LZFS list -H -o name -s creation -t snapshot {}" >"$l_lzfs_list_hr_s_snap_tmp_file" &
+            #l_cmd="$g_LZFS list -Hr -o name "$initial_source" | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_LZFS list -H -o name -s creation -t snapshot {}'"
+            l_cmd="$g_LZFS list -Hr -o name "$initial_source" | parallel -j $g_option_x_args_parallel --line-buffer '$g_LZFS list -H -o name -s creation -t snapshot {}'"
         fi
+
+        echoV "Executing command in the background: $l_cmd"
+        eval "$l_cmd" > "$l_lzfs_list_hr_s_snap_tmp_file" &
+
     else
         l_cmd="$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source"
 
