@@ -7,7 +7,7 @@ These changes were motivated by the lengthy replication times experienced when t
 
 ## Example usage with new options
 Replicate two remote pools from the same host over ssh. The remote host uses SSDs and
-has 8 cpu cores. User `-x8` to run 8 parallel `zfs list` commands in the source host.
+has 8 cpu cores. Use `-x8` to run 8 parallel `zfs list` commands in the source host.
 Begin replication of the first pool in the background so that both host pools are
 replicated in parallel.
 + `/bin/sh ./zxfer/zxfer -vdz -x8  -F -O user@host -R zroot tank/backups/ &`
