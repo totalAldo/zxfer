@@ -10,7 +10,7 @@ Replicate two remote pools from the same host over ssh. The remote host uses SSD
 has 8 cpu cores. Use `-x8` to run 8 parallel `zfs list` commands in the source host.
 Begin replication of the first pool in the background so that both host pools are
 replicated in parallel.
-+ `/bin/sh ./zxfer/zxfer -vdz -x8  -F -O user@host -R zroot tank/backups/ &`
++ `/bin/sh ./zxfer/zxfer -vdz -x8 -F -O user@host -R zroot tank/backups/ &`
 
 From the same host, use `zstd -9 -T0` compression on the source, and `-Y` repeat
 replication until there are no changes in the destination
