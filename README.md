@@ -14,7 +14,7 @@ replicated in parallel.
 
 From the same host, use `zstd -9 -T0` compression on the source, and `-Y` repeat
 replication until there are no changes in the destination
-+ `/bin/sh ./zxfer/zxfer -vd -Z 'zstd -9 -T0' -Y -x8  -F -O user@host -R tank tank/backups/`
++ `/bin/sh ./zxfer/zxfer -vd -Z 'zstd -9 -T0' -Y -x8 -F -O user@host -R tank tank/backups/`
 
 ## Ideas for further improvements
 + if the delete option is specified, list the source snapshots without
