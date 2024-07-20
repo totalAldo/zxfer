@@ -5,6 +5,17 @@ zxfer (turbo)
 
 These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots, primarily composed of log entries. As a result, the modifications have significantly decreased the time required for both ssh and local replication.
 
+## Example usage with new options
+Replicate two remote pools from the same host over ssh. The remote host uses SSDs and
+has 8 cpu cores. User `-x8` to run 8 parallel `zfs list` commands in the source host.
+Begin replication of the first pool in the background so that both host pools are
+replicated in parallel.
+`/bin/sh ./zxfer/zxfer -vdz -x8  -F -O user@host -R zroot tank/backups/ &`
+
+From the same host, use `zstd -9 -T0` compression on the source, and `-Y` repeat
+replication until there are no changes in the destination
+`/bin/sh ./zxfer/zxfer -vd -Z 'zstd -9 -T0' -Y -x8  -F -O user@host -R tank tank/backups/`
+
 ## Ideas for further improvements
 + if the delete option is specified, list the source snapshots without
   creation time, and begin deleting the destination snapshots as soon as
