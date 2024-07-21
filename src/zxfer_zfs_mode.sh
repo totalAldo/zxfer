@@ -71,7 +71,9 @@ set_actual_dest() {
 snapshot_exists() {
     l_snapshot=$1
     l_snapshot_list=$2
-    echo "$l_snapshot_list" | grep -q "^$l_snapshot"
+
+    # -m 1 stops reading the file asfter the first match
+    echo "$l_snapshot_list" | grep -m 1 -q "^$l_snapshot"
 }
 
 #
@@ -89,7 +91,7 @@ copy_snap() {
     l_copysrctail=$(echo "$l_copysrc" | cut -d/ -f2-)
 
     # Check if the snapshot already exists
-    if snapshot_exists "$l_copydest/$l_copysrctail" "$g_rzfs_list_ho_s"; then
+    if snapshot_exists "$l_copydest/$l_copysrctail" "$g_rzfs_list_ho"; then
         echov "Snapshot $l_copysrc already exists at destination $l_copydest. Exiting function."
         return
     fi

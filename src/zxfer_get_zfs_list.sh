@@ -93,19 +93,8 @@ get_zfs_list() {
     if [ $g_option_x_args_parallel -gt 1 ]; then
         # 2024.07.15
         # xargs mangles the output of the snapshots and is not reliable.
-        # parallel is used instead which much be installed on source systems
+        # parallel is used instead which must be installed on source systems
         #
-        # example;
-        # zfs list -Hr -o name pool/dataset | xargs -n 1 -P 2 -I {} sh -c 'zfs list -H -o name -s creation -t snapshot {}'
-        # use xargs to parallelize the listing of snapshots which speeds up the process
-        #xargs -n 1 -P 2 -I {} sh -c 'zfs list -H -o name -s creation -t snapshot creation {}':
-        #•	xargs: A command to build and execute command lines from standard input.
-        #•	-n 1: Tells xargs to use one argument per command line, meaning it will run the command once for each dataset name.
-        #•	-P 2: Specifies the number of commands to run in parallel. In this case, 2 parallel processes.
-        #•	-I {}: Replaces {} with the argument from the input (each dataset name).
-        #•	sh -c 'zfs list -H -o name -s creation -t snapshot creation {}': The command that xargs will run for each dataset name.
-        #•	sh -c: Executes the specified command string using the shell.
-
         # eventhough the snapshots are not ordered in creation time globally,
         # they are ordered by dataset which is what is needed.
         #
@@ -121,8 +110,8 @@ get_zfs_list() {
             # zstd -19 takes too long
             l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | parallel -j $g_option_x_args_parallel --line-buffer '$g_cmd_zfs list -H -o name -s creation -t snapshot {}' | zstd -9 \" | zstd -d"
         else
-            #l_cmd="$g_LZFS list -Hr -o name "$initial_source" | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_LZFS list -H -o name -s creation -t snapshot {}'"
-            l_cmd="$g_LZFS list -Hr -o name "$initial_source" | parallel -j $g_option_x_args_parallel --line-buffer '$g_LZFS list -H -o name -s creation -t snapshot {}'"
+            #l_cmd="$g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_x_args_parallel -I {} sh -c '$g_LZFS list -H -o name -s creation -t snapshot {}'"
+            l_cmd="$g_LZFS list -Hr -o name $initial_source | parallel -j $g_option_x_args_parallel --line-buffer '$g_LZFS list -H -o name -s creation -t snapshot {}'"
         fi
 
         echoV "Executing command in the background: $l_cmd"
@@ -167,10 +156,10 @@ get_zfs_list() {
     # these commands can be run serially because listing snapshots in the
     # background take the longest
 
-    # get a list of datasets in the target ascending order by creation date
-    l_cmd="$g_RZFS list -t filesystem,volume -H -o name -s creation"
+    # get a list of datasets in the target
+    l_cmd="$g_RZFS list -t filesystem,volume -H -o name"
     echoV "Running command: $l_cmd"
-    g_rzfs_list_ho_s=$($l_cmd)
+    g_rzfs_list_ho=$($l_cmd)
 
     # get a list of source datasets
     l_cmd="$g_LZFS list -t filesystem,volume -Hr -o name $initial_source"
@@ -204,7 +193,7 @@ get_zfs_list() {
     # there is no need to check if it is empty as that is a valid state
 
     # perform other checks
-    if [ "$g_rzfs_list_ho_s" = "" ]; then
+    if [ "$g_rzfs_list_ho" = "" ]; then
         throw_error "Failed to retrieve datasets from the destination" 3
     fi
 
