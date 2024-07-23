@@ -39,24 +39,26 @@
 
 # module variables
 m_services_to_restart=""
-# as in the "cp" man page
-m_trailing_slash=0
-
 m_sourcefs=""
 
 #
 # Prepare the actual destination (g_actual_dest) as used in zfs receive.
-# Uses $m_trailing_slash, $source, $part_of_source_to_delete, $g_destination,
-# $initial_source
+# Uses $part_of_source_to_delete, $g_destination, $initial_source
 # Output is $g_actual_dest
 #
 set_actual_dest() {
     l_source=$1
 
+    # 0 if not a trailing slash; regex is one character of any sort followed by
+    # zero or more of any character until "/" followed by the end of the
+    # string.
+    # as in the "cp" man page
+    l_trailing_slash=$(echo "$initial_source" | grep -c '..*/$')
+
     # A trailing slash means that the root filesystem is transferred straight
     # into the dest fs, no trailing slash means that this fs is created
     # inside the destination.
-    if [ "$m_trailing_slash" -eq 0 ]; then
+    if [ "$l_trailing_slash" -eq 0 ]; then
         # If the original source was backup/test/zroot and we are transferring
         # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
         l_dest_tail=$(echo "$l_source" | sed -e "s%^$part_of_source_to_delete%%g")
@@ -153,10 +155,10 @@ stopsvcs() {
 # Relaunch a list of stopped services
 #
 relaunch() {
-    for i in $m_services_to_restart; do
-        echov "Restarting service $i"
-        svcadm enable "$i" || {
-            echo "Couldn't re-enable service $i."
+    for l_i in $m_services_to_restart; do
+        echov "Restarting service $l_i"
+        svcadm enable "$l_i" || {
+            echo "Couldn't re-enable service $l_i."
             exit
         }
     done
@@ -166,14 +168,14 @@ relaunch() {
 # Create a new recursive snapshot.
 #
 newsnap() {
-    snap=$g_zxfer_new_snapshot_name
+    l_snap=$g_zxfer_new_snapshot_name
 
     if [ "$g_option_R_recursive" != "" ]; then
-        echov "Creating recursive snapshot $m_sourcefs@$snap."
-        cmd="$g_LZFS snapshot -r $m_sourcefs@$snap"
+        echov "Creating recursive snapshot $m_sourcefs@$l_snap."
+        cmd="$g_LZFS snapshot -r $m_sourcefs@$l_snap"
     else
-        echov "Creating snapshot $m_sourcefs@$snap."
-        cmd="$g_LZFS snapshot $m_sourcefs@$snap"
+        echov "Creating snapshot $m_sourcefs@$l_snap."
+        cmd="$g_LZFS snapshot $m_sourcefs@$l_snap"
     fi
 
     execute_command "$cmd"
@@ -288,12 +290,6 @@ recursively, but not both -N and -R at the same time."
         throw_usage_error "You must specify a source with either -N or -R."
     fi
 
-    # 0 if not a trailing slash; regex is one character of any sort followed by
-    # zero or more of any character until "/" followed by the end of the
-    # string.
-    # used by set_actual_dest()
-    m_trailing_slash=$(echo "$initial_source" | grep -c '..*/$')
-
     # Now that we know whether there was a trailing slash on the source, no
     # need to confuse things by keeping it on there. Get rid of it.
     initial_source=${initial_source%/}
@@ -364,12 +360,12 @@ recursively, but not both -N and -R at the same time."
             echo "$g_option_c_services" | stopsvcs
         fi
 
-        for source in $g_recursive_source_list; do
+        for l_source in $g_recursive_source_list; do
             # unmount the source filesystem before doing the last snapshot.
-            echov "Unmounting $source."
-            $g_LZFS unmount "$source" ||
+            echov "Unmounting $l_source."
+            $g_LZFS unmount "$l_source" ||
                 {
-                    echo "Couldn't unmount source $source."
+                    echo "Couldn't unmount source $l_source."
                     relaunch
                     exit 1
                 }
@@ -393,10 +389,10 @@ recursively, but not both -N and -R at the same time."
 
     if [ "$g_option_g_grandfather_protection" != "" ]; then
         echov "Checking grandfather status of all snapshots marked for deletion..."
-        for source in $g_recursive_source_list; do
-            set_actual_dest
+        for l_source in $g_recursive_source_list; do
+            set_actual_dest "$l_source"
             # turn off delete so that we are only checking snapshots, pass 0
-            inspect_delete_snap 0 "$source"
+            inspect_delete_snap 0 "$l_source"
         done
         echov "Grandfather check passed."
     fi
