@@ -80,8 +80,8 @@ init_globals() {
     g_option_v_verbose=0
     g_option_V_very_verbose=0
     # number of parallel xargs processes to run when listing zfs snapshots
-    # in the source (default 1 does not use xargs)
-    # this method only proves useful when the source is local
+    # in the source (default 1 does not use xargs).
+    # When greater than 1, also causes ALL zfs sends to run in parallel
     g_option_x_args_parallel=1
     g_option_Y_yield_iterations=1
     g_option_w_raw_send=0
