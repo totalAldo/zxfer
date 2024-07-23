@@ -113,7 +113,7 @@ get_zfs_list() {
             l_cmd="$g_LZFS list -Hr -o name $initial_source | parallel -j $g_option_x_args_parallel --line-buffer '$g_LZFS list -H -o name -s creation -t snapshot {}'"
         fi
 
-        echov "Running command in the background: $l_cmd"
+        echoV "Running command in the background: $l_cmd"
         eval "$l_cmd" > "$l_lzfs_list_hr_s_snap_tmp_file" &
 
     else
@@ -159,12 +159,12 @@ get_zfs_list() {
 
     # get a list of datasets in the target
     l_cmd="$g_RZFS list -t filesystem,volume -H -o name"
-    echov "Running command: $l_cmd"
+    echoV "Running command: $l_cmd"
     g_rzfs_list_ho=$($l_cmd)
 
     # get a list of desintation datasets
     l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $g_destination"
-    echov "Running command: $l_cmd"
+    echoV "Running command: $l_cmd"
     g_recursive_dest_list=$($l_cmd)
 
     # create temporary files while waiting for background processes to finish
@@ -177,9 +177,9 @@ get_zfs_list() {
     l_cmd="sed -e 's|$l_destination_dataset|$initial_source|g' $l_rzfs_list_hr_snap_tmp_file | sort > $l_dest_snaps_stripped_sorted"
     execute_command "$l_cmd"
 
-    echov "Waiting for background processes to finish."
+    echoV "Waiting for background processes to finish."
     wait
-    echov "Background processes finished."
+    echoV "Background processes finished."
 
     # wait until background processes are finished before attempting to sort
     l_cmd="sort $l_lzfs_list_hr_s_snap_tmp_file > $l_source_snaps_sorted"
@@ -194,7 +194,7 @@ get_zfs_list() {
         "$l_source_snaps_sorted" "$l_dest_snaps_stripped_sorted" | \
         "$g_cmd_awk" -F@ '{print $1}' | uniq)
 
-    echov "Source dataset count: $(echo "$g_recursive_source_list" | wc -l)"
+    echoV "Source dataset count: $(echo "$g_recursive_source_list" | wc -l)"
     #echo $g_recursive_source_list
 
     l_lzfs_list_hr_s_snap=$(cat "$l_lzfs_list_hr_s_snap_tmp_file")
