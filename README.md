@@ -27,6 +27,9 @@ replication until there are no changes in the destination
   to perform delete operations on the destination.
 + explore using parallel sends which may help maximize network bandwidth
   utilization and reduce overall replication time
++ reduce the number of datasets that are iterated through for send/receive
+  by first performing a diff of source and destination datasets and only
+  iterate through the source datasets that have snapshots not in the destination.
 
 ## New Options
 + `-V`: Enables very verbose mode.
