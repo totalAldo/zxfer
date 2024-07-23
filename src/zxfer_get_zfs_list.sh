@@ -147,7 +147,8 @@ get_zfs_list() {
         # do not perform in the background so we can sort the results
         # before the longest operation is complete
         l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset > $l_rzfs_list_hr_snap_tmp_file"
-        execute_command "$l_cmd"
+        echoV "Running command: $l_cmd"
+        eval "$l_cmd"
 
     else
         # dataset does not exist
@@ -175,7 +176,8 @@ get_zfs_list() {
     # sort the destination snapshots and replace the destination dataset with the prefix
     # of the source for comparison
     l_cmd="sed -e 's|$l_destination_dataset|$initial_source|g' $l_rzfs_list_hr_snap_tmp_file | sort > $l_dest_snaps_stripped_sorted"
-    execute_command "$l_cmd"
+    echoV "Running command: $l_cmd"
+    eval "$l_cmd"
 
     echoV "Waiting for background processes to finish."
     wait
@@ -183,7 +185,8 @@ get_zfs_list() {
 
     # wait until background processes are finished before attempting to sort
     l_cmd="sort $l_lzfs_list_hr_s_snap_tmp_file > $l_source_snaps_sorted"
-    execute_command "$l_cmd"
+    echoV "Running command: $l_cmd"
+    eval "$l_cmd"
 
     # compare the source and destination snapshots and identify source datasets
     # that are not in the destination. Set g_recursive_source_list to the
