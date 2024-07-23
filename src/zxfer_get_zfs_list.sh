@@ -81,7 +81,6 @@ get_zfs_list() {
 
     # create temporary files used by the background processes
     l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
-    l_rzfs_list_hr_snap_tmp_file=$(get_temp_file)
 
     # This method proved to be slower when using ssh for remote source.
     #
@@ -141,39 +140,62 @@ get_zfs_list() {
     # doesn't need to be searched for the creation time of each snapshot.
 
     # check if the destination zfs dataset exists before listing snapshots
+    l_rzfs_list_hr_snap_tmp_file=$(get_temp_file)
     if "$g_RZFS" list "$l_destination_dataset" >/dev/null 2>&1; then
         # dataset exists
 
-        # we only need the names of the snapshots, they don't need to be sorted
-        execute_background_cmd \
-            "$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset" \
-            "$l_rzfs_list_hr_snap_tmp_file"
+        # do not perform in the background so we can sort the results
+        # before the longest operation is complete
+        l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset > $l_rzfs_list_hr_snap_tmp_file"
+        execute_command "$l_cmd"
+
     else
         # dataset does not exist
         echo "" >"$l_rzfs_list_hr_snap_tmp_file"
     fi
 
-    # these commands can be run serially because listing snapshots in the
-    # background take the longest
+    # these commands can be run serially because listing snapshots by creation
+    # time in the background take the longest
 
     # get a list of datasets in the target
     l_cmd="$g_RZFS list -t filesystem,volume -H -o name"
     echoV "Running command: $l_cmd"
     g_rzfs_list_ho=$($l_cmd)
 
-    # get a list of source datasets
-    l_cmd="$g_LZFS list -t filesystem,volume -Hr -o name $initial_source"
-    echoV "Running command: $l_cmd"
-    g_recursive_source_list=$($l_cmd)
-
     # get a list of desintation datasets
     l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $g_destination"
     echoV "Running command: $l_cmd"
     g_recursive_dest_list=$($l_cmd)
 
+    # create temporary files while waiting for background processes to finish
+    # setup comparison that happens below
+    l_source_snaps_sorted=$(get_temp_file)
+    l_dest_snaps_stripped_sorted=$(get_temp_file)
+
+    # sort the destination snapshots and replace the destination dataset with the prefix
+    # of the source for comparison
+    l_cmd="sed -e 's|$l_destination_dataset|$initial_source|g' $l_rzfs_list_hr_snap_tmp_file | sort > $l_dest_snaps_stripped_sorted"
+    execute_command "$l_cmd"
+
     echoV "Waiting for background processes to finish."
     wait
-    echoV "Wait finished."
+    echoV "Background processes finished."
+
+    # wait until background processes are finished before attempting to sort
+    l_cmd="sort $l_lzfs_list_hr_s_snap_tmp_file > $l_source_snaps_sorted"
+    execute_command "$l_cmd"
+
+    # compare the source and destination snapshots and identify source datasets
+    # that are not in the destination. Set g_recursive_source_list to the
+    # datasets that contain snapshots that are not in the destination.
+    # Afterwards, g_recursive_source_list only contains the names of
+    # the datasets that need to be transferred.
+    g_recursive_source_list=$(comm -23 \
+        "$l_source_snaps_sorted" "$l_dest_snaps_stripped_sorted" | \
+        "$g_cmd_awk" -F@ '{print $1}' | uniq)
+
+    echov "Source dataset count: $(echo "$g_recursive_source_list" | wc -l)"
+    #echo $g_recursive_source_list
 
     l_lzfs_list_hr_s_snap=$(cat "$l_lzfs_list_hr_s_snap_tmp_file")
     g_rzfs_list_hr_snap=$(cat "$l_rzfs_list_hr_snap_tmp_file")
@@ -183,7 +205,9 @@ get_zfs_list() {
 
     # remove temporary files
     rm "$l_lzfs_list_hr_s_snap_tmp_file" \
-        "$l_rzfs_list_hr_snap_tmp_file"
+        "$l_rzfs_list_hr_snap_tmp_file" \
+        "$l_source_snaps_sorted" \
+        "$l_dest_snaps_stripped_sorted"
 
     if [ "$l_lzfs_list_hr_s_snap" = "" ]; then
         throw_error "Failed to retrieve snapshots from the source" 3
