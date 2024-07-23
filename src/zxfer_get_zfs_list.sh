@@ -124,6 +124,11 @@ get_zfs_list() {
             "$l_lzfs_list_hr_s_snap_tmp_file"
     fi
 
+    #
+    # The following commands are run in parallel until the wait command is reached.
+    # Place as many commands prior to the wait command as possible.
+    #
+
     # determine the last dataset in $initial_source. This will be the last
     # dataset after a forward slash "/" or if no forward slash exists, then
     # is is the name of the dataset itself.
@@ -131,12 +136,12 @@ get_zfs_list() {
 
     l_destination_dataset="$g_destination/$l_source_dataset"
 
-    # 2024.07.09
-    # we only need the snapshots of the intended destination dataset, not
+    # 2024.07.09 - Optimize
+    # We only need the snapshots of the intended destination dataset, not
     # all the snapshots of the parent $g_destination.
-    # In addition, the sorting by creation time has been removed in the
-    # destination since it is not needed. We only need the names of the
-    # snapshots. This significantly improves performance as the metadata
+    # In addition, sorting by creation time has been removed in the
+    # destination since it is not needed.
+    # This significantly improves performance as the metadata
     # doesn't need to be searched for the creation time of each snapshot.
 
     # check if the destination zfs dataset exists before listing snapshots
@@ -212,21 +217,23 @@ get_zfs_list() {
         "$l_source_snaps_sorted" \
         "$l_dest_snaps_stripped_sorted"
 
+
+    if [ "$g_recursive_source_list" = "" ]; then
+        echov "No snapshots to transfer."
+    fi
+
+    #
+    # Errors
+    #
+
     if [ "$l_lzfs_list_hr_s_snap" = "" ]; then
         throw_error "Failed to retrieve snapshots from the source" 3
     fi
-
-    # the destination may not have any snapshots if it was just created so
-    # there is no need to check if it is empty as that is a valid state
 
     # perform other checks
     if [ "$g_rzfs_list_ho" = "" ]; then
         throw_error "Failed to retrieve datasets from the destination" 3
     fi
-
-    #if [ "$g_recursive_source_list" = "" ]; then
-    #    throw_usage_error "Failed to retrieve list of datasets from the source"
-    #fi
 
     if [ "$g_recursive_dest_list" = "" ]; then
         throw_usage_error "Failed to retrieve list of datasets from the destination"
