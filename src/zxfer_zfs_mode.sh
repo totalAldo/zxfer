@@ -272,6 +272,9 @@ copy_filesystems() {
         # Now we have replicated all existing snapshots.
         #
     done
+
+    # wait for background zfs_send_receive processes before proceeding
+    wait
 }
 
 #
