@@ -160,5 +160,9 @@ zfs_send_receive() {
 
     g_is_performed_send_destroy=1
 
-    execute_command "$l_send_cmd | $l_recv_cmd"
+    # 2024.07.22 - experiment with running this as a background process
+    # if there are too many datasets to send, it may be better to limit
+    # the number of concurrent processes to avoid overloading the system
+    execute_command "$l_send_cmd | $l_recv_cmd" &
+    #execute_command "$l_send_cmd | $l_recv_cmd"
 }
