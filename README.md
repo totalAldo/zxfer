@@ -25,13 +25,12 @@ replication until there are no changes in the destination
   Generating the source snapshot list with creation time can take several seconds
   depednding on the number of snapshots and this time can be used effectively
   to perform delete operations on the destination.
-+ explore using parallel sends which may help maximize network bandwidth
-  utilization and reduce overall replication time
 
 ## New Options
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
-+ `-x`: specify the number of parallel zfs list snaphot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound)
++ `-x`: specify the number of parallel zfs list snaphot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound). When x > 1,
+  ALL zfs sends are run as background processes.
 + `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
 + `-z`: pipe ssh transfers through zstd default compression
 + `-Z`: custom zstd compression supporting higher compression levels or multiple threads
@@ -58,6 +57,8 @@ as background processes. This includes:
   including the use of `zstd`, compressesion is now explicity set by piping the
   `zfs list` output through `zstd -9`
 + To enhance efficiency in send/receive operations, initially execute a `comm` command to compare source and destination datasets. This allows for the identification and subsequent iteration over only those source datasets containing snapshots absent in the destination.
++ When `-x` > 1, run all `zfs send` commands in parallel. Care should be taken
+  to no overload a system with too many parallel `zfs send` commands.
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:
