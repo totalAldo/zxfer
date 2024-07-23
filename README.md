@@ -27,9 +27,6 @@ replication until there are no changes in the destination
   to perform delete operations on the destination.
 + explore using parallel sends which may help maximize network bandwidth
   utilization and reduce overall replication time
-+ reduce the number of datasets that are iterated through for send/receive
-  by first performing a diff of source and destination datasets and only
-  iterate through the source datasets that have snapshots not in the destination.
 
 ## New Options
 + `-V`: Enables very verbose mode.
@@ -60,6 +57,7 @@ as background processes. This includes:
   megabytes and it is highly compressible. While `ssh` offers compression options
   including the use of `zstd`, compressesion is now explicity set by piping the
   `zfs list` output through `zstd -9`
++ To enhance efficiency in send/receive operations, initially execute a `comm` command to compare source and destination datasets. This allows for the identification and subsequent iteration over only those source datasets containing snapshots absent in the destination.
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:
