@@ -228,9 +228,6 @@ calculate_unsupported_properties() {
 # main loop that copies the filesystems
 #
 copy_filesystems() {
-    # TODO: reduce the number of datasets in $g_recursive_source_list
-    # by only listing those datasets that don't have common snapshots
-    # (either for deletion or transfer)
     for source in $g_recursive_source_list; do
         # Split up source into source fs, last component
         m_sourcefs=$(echo "$source" | cut -d@ -f1)

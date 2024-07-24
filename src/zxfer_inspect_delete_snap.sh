@@ -35,9 +35,10 @@
 
 #
 # Returns a list of destination snapshots that don't exist in the source.
+# The source and destination snapshtos should correspond to 1 dataset.
 #
-get_dest_snapshots_to_delete() {
-    echoV "Begin get_dest_snapshots_to_delete()"
+get_dest_snapshots_to_delete_per_dataset() {
+    echoV "Begin get_dest_snapshots_to_delete_per_dataset()"
     l_zfs_source_snaps=$1
     l_zfs_dest_snaps=$2
 
@@ -48,7 +49,7 @@ get_dest_snapshots_to_delete() {
 
     # Write the snapshot names to the temporary files
     echo "$l_zfs_source_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" > "$l_src_tmp"
-    echo "$l_zfs_dest_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" > "$l_dest_tmp"
+    echo "$l_zfs_dest_snaps"   | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" > "$l_dest_tmp"
 
     # Use comm to find snapshots in l_dest_tmp that don't have a match in l_src_tmp
     comm -13 "$l_src_tmp" "$l_dest_tmp" > "$l_snaps_to_delete_tmp"
@@ -61,7 +62,7 @@ get_dest_snapshots_to_delete() {
 
     # Print the matching lines
     echo "$l_dest_snaps_to_delete"
-    echoV "End get_dest_snapshots_to_delete()"
+    echoV "End get_dest_snapshots_to_delete_per_dataset()"
 }
 
 #
@@ -148,7 +149,7 @@ delete_snaps() {
     l_zfs_source_snaps=$1
     l_zfs_dest_snaps=$2
 
-    l_snaps_to_delete=$(get_dest_snapshots_to_delete "$l_zfs_source_snaps" "$l_zfs_dest_snaps")
+    l_snaps_to_delete=$(get_dest_snapshots_to_delete_per_dataset "$l_zfs_source_snaps" "$l_zfs_dest_snaps")
 
     # if l_snaps_to_delete is empty, there is nothing to do
     if [ "$l_snaps_to_delete" = "" ]; then
@@ -164,15 +165,9 @@ delete_snaps() {
             grandfather_test "$l_snap_to_delete"
         fi
 
-        #echoV "Destroying destination snapshot $l_snap_to_delete."
-        g_is_performed_send_destroy=1
-        # the command to serially delete snapshots, which has been replaced
-        # by a comma delimited list of snapshots to delete
-        #l_cmd="$g_RZFS destroy $l_snap_to_delete"
-
         l_snapshot=$(extract_snapshot_name "$l_snap_to_delete")
 
-        # append this snapshot to the list of snapshots to delete in a comma
+        # prepend this snapshot to the list of snapshots to delete in a comma
         # delimited list. It is ok for the list to have a trailing comma.
         l_unprotected_snaps_to_delete="$l_snapshot,$l_unprotected_snaps_to_delete"
     done
@@ -187,18 +182,16 @@ delete_snaps() {
     # get the dataset name from the first snapshot in the list
     #
     # - get the first element of the list
-    l_first_snapshot=$(echo "$l_snaps_to_delete" | head -n 1)
     # - get the portion of the string prior to the @ symbol
-    l_zfs_dest_dataset=$(echo "$l_first_snapshot" | $g_cmd_awk -F'@' '{print $1}')
+    l_zfs_dest_dataset=$(echo "$l_snaps_to_delete" | head -n 1 | $g_cmd_awk -F'@' '{print $1}')
 
     # build the destroy command
-    l_cmd="$g_RZFS destroy"
-    for l_snap_to_delete in $l_unprotected_snaps_to_delete; do
-        l_cmd="$l_cmd $l_zfs_dest_dataset@$l_snap_to_delete"
-    done
-
+    l_cmd="$g_RZFS destroy $l_zfs_dest_dataset@$l_unprotected_snaps_to_delete"
     echov "$l_cmd"
     execute_background_cmd "$l_cmd" /dev/null
+
+    # set the flag to indicate that a destroy command was sent
+    g_is_performed_send_destroy=1
 
     echoV "End delete_snaps()"
 }
