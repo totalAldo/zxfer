@@ -57,10 +57,15 @@ init_globals() {
     g_option_e_restore_property_mode=0
     g_option_E_rsync_exclude_patterns=""
     g_option_f_rsync_file_options=""
+    g_option_F_force_rollback=""
     g_option_g_grandfather_protection=""
     g_option_i_rsync_include_zfs_mountpoints=0
     g_option_I_ignore_properties=""
-    g_option_F_force_rollback=""
+    # number of parallel job processes to run when listing zfs snapshots
+    # in the source (default 1 does not use parallel).
+    # This also sets the maximum number of background zfs send processes
+    # that can run at the same time.
+    g_option_j_jobs=1
     g_option_k_backup_property_mode=0
     g_option_l_rsync_legacy_mountpoint=0
     g_option_L_rsync_levels_deep=""
@@ -79,15 +84,14 @@ init_globals() {
     g_option_U_skip_unsupported_properties=0
     g_option_v_verbose=0
     g_option_V_very_verbose=0
-    # number of parallel xargs processes to run when listing zfs snapshots
-    # in the source (default 1 does not use xargs).
-    # When greater than 1, also causes ALL zfs sends to run in parallel
-    g_option_x_args_parallel=1
     g_option_Y_yield_iterations=1
     g_option_w_raw_send=0
     g_option_z_compress=0
 
     source=""
+
+    # keep track of the number of background zfs send jobs
+    g_count_zfs_send_jobs=0
 
     g_destination=""
     g_backup_file_extension=".zxfer_backup_info"
@@ -164,7 +168,7 @@ xattr,dnodesize"
 # Check command line parameters.
 #
 read_command_line_switches() {
-    while getopts bBc:deE:f:Fg:hiI:klL:lmnN:o:O:pPPR:sST:u:UvVwY?:x:D:zZ: l_i; do
+    while getopts bBc:deE:f:Fg:hiI:j:klL:lmnN:o:O:pPPR:sST:u:UvVwY?:D:zZ: l_i; do
         case $l_i in
         b)
             g_option_b_beep_always=1
@@ -207,6 +211,10 @@ read_command_line_switches() {
             ;;
         I)
             g_option_I_ignore_properties="$OPTARG"
+            ;;
+        j)
+            # number of parallel jobs and background sends
+            g_option_j_jobs="$OPTARG"
             ;;
         k)
             g_option_k_backup_property_mode=1
@@ -279,9 +287,6 @@ read_command_line_switches() {
             ;;
         w)
             g_option_w_raw_send=1
-            ;;
-        x)
-            g_option_x_args_parallel="$OPTARG"
             ;;
         Y)
             # set the number of iterations to run through the zfs mode
