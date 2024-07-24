@@ -25,6 +25,9 @@ replication until there are no changes in the destination.
   Generating the source snapshot list with creation time can take several seconds
   depednding on the number of snapshots and this time can be used effectively
   to perform delete operations on the destination.
++ create an ssh tunnel and use one connection for all ssh commands
++ migrate to bash for a cleaner implementation with better job control and
+  process substitution
 
 ## New Options
 + `-j`: specify the number of parallel zfs list snaphot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound). When x > 1,
