@@ -188,6 +188,10 @@ delete_snaps() {
     # build the destroy command
     l_cmd="$g_RZFS destroy $l_zfs_dest_dataset@$l_unprotected_snaps_to_delete"
     echov "$l_cmd"
+    if [ "$g_option_n_dryrun" -eq 1 ]; then
+        echov "Dry run, skipping delete."
+        return
+    fi
     execute_background_cmd "$l_cmd" /dev/null
 
     # set the flag to indicate that a destroy command was sent
