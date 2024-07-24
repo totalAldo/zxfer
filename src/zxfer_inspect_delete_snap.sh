@@ -47,7 +47,7 @@ get_dest_snapshots_to_delete_per_dataset() {
     l_dest_tmp=$(get_temp_file)
     l_snaps_to_delete_tmp=$(get_temp_file)
 
-    # Write the snapshot names to the temporary files
+    # Write the snapshot names to the temporary files so that we can pass them to comm
     echo "$l_zfs_source_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" > "$l_src_tmp"
     echo "$l_zfs_dest_snaps"   | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" > "$l_dest_tmp"
 
