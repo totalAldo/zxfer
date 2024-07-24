@@ -25,6 +25,8 @@ replication until there are no changes in the destination.
   Generating the source snapshot list with creation time can take several seconds
   depednding on the number of snapshots and this time can be used effectively
   to perform delete operations on the destination.
+  (This idea was explored on 2024.07.24 but found to be less efficient due to
+  the delay in processing the source snapshot list twice.)
 + create an ssh tunnel and use one connection for all ssh commands
 + migrate to bash for a cleaner implementation with better job control and
   process substitution
