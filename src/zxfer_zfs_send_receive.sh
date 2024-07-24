@@ -160,10 +160,22 @@ zfs_send_receive() {
 
     g_is_performed_send_destroy=1
 
-    if [ "$g_option_x_args_parallel" -gt 1 ]; then
+    if [ "$g_option_j_jobs" -gt 1 ]; then
         # 2024.07.22 - experiment with running this as a background process
         # if there are too many datasets to send, it may be better to limit
         # the number of concurrent processes to avoid overloading the system
+
+        # implement naive job control.
+        # if there are more than this many jobs, wait until they are all
+        # completed before spawning new ones
+        if [ "$g_count_zfs_send_jobs" -ge "$g_option_j_jobs" ]; then
+            echov "Max jobs reached [$g_count_zfs_send_jobs]. Waiting for jobs to complete."
+            wait
+            g_count_zfs_send_jobs=0
+        fi
+
+        # increment the job count
+        g_count_zfs_send_jobs=$((g_count_zfs_send_jobs + 1))
         execute_command "$l_send_cmd | $l_recv_cmd" &
     else
         execute_command "$l_send_cmd | $l_recv_cmd"

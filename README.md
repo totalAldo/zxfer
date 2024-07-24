@@ -10,11 +10,11 @@ Replicate two remote pools from the same host over ssh. The remote host uses SSD
 has 8 cpu cores. Use `-x8` to run 8 parallel `zfs list` commands in the source host.
 Begin replication of the first pool in the background so that both host pools are
 replicated in parallel.
-+ `/bin/sh ./zxfer/zxfer -vdz -x8 -F -O user@host -R zroot tank/backups/ &`
++ `/bin/sh ./zxfer/zxfer -vdz -j8 -F -O user@host -R zroot tank/backups/ &`
 
-From the same host, use `zstd -9 -T0` compression on the source, and `-Y` repeat
-replication until there are no changes in the destination
-+ `/bin/sh ./zxfer/zxfer -vd -Z 'zstd -9 -T0' -Y -x8 -F -O user@host -R tank tank/backups/`
+From the same host, use `zstd -9 -T0` compression on the source, and `-Y` to repeat
+replication until there are no changes in the destination.
++ `/bin/sh ./zxfer/zxfer -vd -Z 'zstd -9 -T0' -Y -j8 -F -O user@host -R tank tank/backups/`
 
 ## Ideas for further improvements
 + if the delete option is specified, list the source snapshots without
@@ -29,8 +29,8 @@ replication until there are no changes in the destination
 ## New Options
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
-+ `-x`: specify the number of parallel zfs list snaphot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound). When x > 1,
-  ALL zfs sends are run as background processes.
++ `-j`: specify the number of parallel zfs list snaphot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound). When x > 1,
+  This number also controls the number of concurrent `zfs send` commands that are run in parallel.
 + `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
 + `-z`: pipe ssh transfers through zstd default compression
 + `-Z`: custom zstd compression supporting higher compression levels or multiple threads
