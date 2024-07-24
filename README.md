@@ -7,7 +7,7 @@ These changes were motivated by the lengthy replication times experienced when t
 
 ## Example usage with new options
 Replicate two remote pools from the same host over ssh. The remote host uses SSDs and
-has 8 cpu cores. Use `-x8` to run 8 parallel `zfs list` commands in the source host.
+has 8 cpu cores. Use `-j8` to run 8 parallel `zfs list` commands in the source host.
 Begin replication of the first pool in the background so that both host pools are
 replicated in parallel.
 + `/bin/sh ./zxfer/zxfer -vdz -j8 -F -O user@host -R zroot tank/backups/ &`
@@ -27,10 +27,10 @@ replication until there are no changes in the destination.
   to perform delete operations on the destination.
 
 ## New Options
-+ `-V`: Enables very verbose mode.
-+ `-w`: Activates raw send.
 + `-j`: specify the number of parallel zfs list snaphot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound). When x > 1,
   This number also controls the number of concurrent `zfs send` commands that are run in parallel.
++ `-V`: Enables very verbose mode.
++ `-w`: Activates raw send.
 + `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
 + `-z`: pipe ssh transfers through zstd default compression
 + `-Z`: custom zstd compression supporting higher compression levels or multiple threads
@@ -57,7 +57,7 @@ as background processes. This includes:
   including the use of `zstd`, compressesion is now explicity set by piping the
   `zfs list` output through `zstd -9`
 + To enhance efficiency in send/receive operations, initially execute a `comm` command to compare source and destination datasets. This allows for the identification and subsequent iteration over only those source datasets containing snapshots absent in the destination.
-+ When `-x` > 1, run all `zfs send` commands in parallel. Care should be taken
++ When `-j` > 1, run all `zfs send` commands in parallel. Care should be taken
   to no overload a system with too many parallel `zfs send` commands.
 
 ## Code Refactoring
