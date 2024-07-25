@@ -74,8 +74,8 @@ snapshot_exists() {
     l_snapshot=$1
     l_snapshot_list=$2
 
-    # -m 1 stops reading the file asfter the first match
-    echo "$l_snapshot_list" | grep -m 1 -q "^$l_snapshot"
+    # -m 1 stops reading the file asfter the first match, removed for Illumos
+    echo "$l_snapshot_list" | grep -q "^$l_snapshot"
 }
 
 #

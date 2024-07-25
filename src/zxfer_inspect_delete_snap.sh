@@ -90,8 +90,8 @@ set_last_common_snapshot() {
 
         # Use grep to check if the source snapshot is in the destination snapshots
         # -F is used to match the string exactly, -q is used to suppress output
-        # -m 1 is used to stop searching after the first match
-        if echo "$l_dest_snap_list" | grep -m 1 -qF "$l_snap_name"; then
+        # -m 1 is used to stop searching after the first match, removed due to lack of support in Illumos
+        if echo "$l_dest_snap_list" | grep -qF "$l_snap_name"; then
             g_found_last_common_snap=1
 
             g_last_common_snap=$l_snap_name
