@@ -42,7 +42,7 @@
 #
 init_globals() {
     # zxfer version
-    g_zxfer_version="2.0.0-20240725"
+    g_zxfer_version="2.0.0-20240726"
 
     # max number of iterations to run iterate through run_zfs_mode
     # if changes are made to the filesystems
@@ -112,6 +112,11 @@ init_globals() {
     # enable compression in ssh options so that remote snapshot lists that
     # contain thousands of snapshots are compressed
     g_cmd_ssh=$(which ssh)
+    # when using ssh, setup the control socket to use one connection
+    # for all commands
+    g_ssh_control_socket=""
+    g_ssh_user_host=""
+
     g_cmd_rsync=""
 
     # default zfs commands, can be overridden by -O or -T
@@ -163,6 +168,38 @@ xattr,dnodesize"
     # Properties not supported on Solaris Express 11
     g_solexp_readonly_properties="jailed,aclmode,shareiscsi"
 }
+
+# a function to setup the ssh control socket
+# needs $g_ssh_user_host
+setup_ssh_control_socket() {
+    l_timestamp=$(date +%s)
+    g_ssh_control_socket=$(mktemp -u -t zxfer_ssh_control_socket.$l_timestamp)
+    # establish the control socket
+    eval "$g_cmd_ssh -M -S $g_ssh_control_socket $g_ssh_user_host -fN"
+
+    g_cmd_ssh="$g_cmd_ssh -S $g_ssh_control_socket"
+}
+
+# close the ssh control socket
+# needs $g_ssh_user_host
+close_ssh_control_socket() {
+    if [ "$g_ssh_control_socket" != "" ]; then
+        l_cmd="$g_cmd_ssh -O exit $g_ssh_user_host"
+        echoV "Closing ssh control socket: $l_cmd"
+        eval "$l_cmd"
+    fi
+}
+
+#
+# function that always executes if the script is terminated by a signal
+#
+trap_exit() {
+    close_ssh_control_socket
+}
+
+# catch any signals to terminate the script
+trap trap_exit INT TERM HUP QUIT EXIT
+
 
 #
 # Check command line parameters.
@@ -246,6 +283,8 @@ read_command_line_switches() {
             # since we are using the -O option, we are pulling a remote transfer
             # so we need to use the ssh command to execute the zfs commands
             # $OPTARG is the user@host
+            g_ssh_user_host="$OPTARG"
+            setup_ssh_control_socket
             g_LZFS="$g_cmd_ssh $OPTARG $g_cmd_zfs"
             g_option_O_origin_host="$OPTARG"
             ;;
@@ -268,6 +307,8 @@ read_command_line_switches() {
             # since we are using the -T option, we are pushing a remote transfer
             # so we need to use the ssh command to execute the zfs commands
             # $OPTARG is the user@host
+            g_ssh_user_host="$OPTARG"
+            setup_ssh_control_socket
             g_RZFS="$g_cmd_ssh $OPTARG $g_cmd_zfs"
             g_option_T_target_host="$OPTARG"
             ;;

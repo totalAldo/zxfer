@@ -96,6 +96,7 @@ get_os() {
 throw_error() {
     l_msg=$1
     l_exit_status=${2:-1} # global used by beep
+
     echo "$l_msg"
     beep "$l_exit_status"
     exit "$l_exit_status"
