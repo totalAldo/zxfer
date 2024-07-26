@@ -16,20 +16,6 @@ From the same host, use `zstd -9 -T0` compression on the source, and `-Y` to rep
 replication until there are no changes in the destination.
 + `/bin/sh ./zxfer/zxfer -vd -Z 'zstd -9 -T0' -Y -j8 -F -O user@host -R tank tank/backups/`
 
-## Ideas for further improvements
-+ if the delete option is specified, list the source snapshots without
-  creation time, and begin deleting the destination snapshots as soon as
-  they are listed. This will reduce the time required to delete snapshots
-  after the full snapshot list has been generated. While the deletions are
-  in progress, list the source snapshots with creation time which takes longer.
-  Generating the source snapshot list with creation time can take several seconds
-  depednding on the number of snapshots and this time can be used effectively
-  to perform delete operations on the destination.
-  (This idea was explored on 2024.07.24 but found to be less efficient due to
-  the delay in processing the source snapshot list twice.)
-+ migrate to bash for a cleaner implementation with better job control and
-  process substitution
-
 ## New Options
 + `-j`: specify the number of parallel zfs list snaphot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound). When j > 1, this number also controls the number of concurrent `zfs send` commands that are run in parallel.
 + `-V`: Enables very verbose mode.
