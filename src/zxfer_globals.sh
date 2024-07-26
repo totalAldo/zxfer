@@ -186,7 +186,8 @@ close_ssh_control_socket() {
     if [ "$g_ssh_control_socket" != "" ]; then
         l_cmd="$g_cmd_ssh -O exit $g_ssh_user_host"
         echoV "Closing ssh control socket: $l_cmd"
-        eval "$l_cmd"
+        # supress the "Exit request sent." message
+        eval "$l_cmd" 2>/dev/null
     fi
 }
 
