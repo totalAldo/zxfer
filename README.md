@@ -63,6 +63,7 @@ as background processes. This includes:
 + To enhance efficiency in send/receive operations, initially execute a `comm` command to compare source and destination datasets. This allows for the identification and subsequent iteration over only those source datasets containing snapshots absent in the destination.
 + When `-j` > 1, run all `zfs send` commands in parallel. Care should be taken
   to no overload a system with too many parallel `zfs send` commands.
++ use an ssh control socket to reduce the number of ssh connections
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:
