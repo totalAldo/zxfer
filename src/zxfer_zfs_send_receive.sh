@@ -154,8 +154,8 @@ zfs_send_receive() {
 
     # Perform this after ssh wrapping occurs
     if [ "$g_option_D_display_progress_bar" != "" ]; then
-        _progress_bar_cmd=$(handle_progress_bar_option "$l_snapshot")
-        l_send_cmd="$l_send_cmd $_progress_bar_cmd"
+        l_progress_bar_cmd=$(handle_progress_bar_option "$l_snapshot")
+        l_send_cmd="$l_send_cmd $l_progress_bar_cmd"
     fi
 
     g_is_performed_send_destroy=1
@@ -172,6 +172,7 @@ zfs_send_receive() {
 
         # increment the job count
         g_count_zfs_send_jobs=$((g_count_zfs_send_jobs + 1))
+
         execute_command "$l_send_cmd | $l_recv_cmd" &
     else
         execute_command "$l_send_cmd | $l_recv_cmd"
