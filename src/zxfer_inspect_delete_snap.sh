@@ -77,7 +77,8 @@ set_last_common_snapshot() {
     # unordered list of destination datasets and snapshots
     l_zfs_dest_snaps=$2
 
-    g_found_last_common_snap=0
+    #initialize the last copy snapshot to empty
+    g_last_common_snap=""
 
     # Convert the destination snapshots into a list with newlines so that we
     # can use grep to search for the source snapshot
@@ -92,7 +93,6 @@ set_last_common_snapshot() {
         # -F is used to match the string exactly, -q is used to suppress output
         # -m 1 is used to stop searching after the first match, removed due to lack of support in Illumos
         if echo "$l_dest_snap_list" | grep -qF "$l_snap_name"; then
-            g_found_last_common_snap=1
 
             g_last_common_snap=$l_snap_name
 

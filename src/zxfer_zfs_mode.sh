@@ -70,23 +70,12 @@ set_actual_dest() {
 }
 
 #
-# Copy the list of snapshots given in stdin to the destination
+# Copy from the last common snapshot to the most recent snapshot.
 # Use incremental snapshots where possible. Assumes that the list of snapshots
-# is given in creation order. copy_snap is responsible for skipping already
-# existing snapshots on the destination side.
-# Takes: $g_found_last_common_snap, $g_last_common_snap, $g_src_snapshot_transfer_list
+# is given in creation order.
+# Takes: $g_last_common_snap, $g_src_snapshot_transfer_list
 #
 copy_snap_multiple() {
-    # Instead of transferring all the source snapshots, this just transfers
-    # the ones starting from the latest common snapshot on src and dest
-
-    l_lastsnap=""
-
-    # if there is a snapshot common to both src and dest, set that to be $lastsnap
-    if [ "$g_found_last_common_snap" -eq 1 ]; then
-        l_lastsnap=$g_last_common_snap
-    fi
-
     # This can get stale, especially if it has taken hours to copy the
     # previous snapshot. Consider adding a time check and refreshing the list of
     # snapshots if it has been too long since we got the list.
@@ -94,14 +83,14 @@ copy_snap_multiple() {
     # until there are no further differences
     l_final_snap=""
 
-    l_copy_fs_snapshot_list=$(echo "$g_src_snapshot_transfer_list")
-    for l_snapshot in $l_copy_fs_snapshot_list; do
+    # find the final snapshot for this dataset on the source
+    for l_snapshot in $g_src_snapshot_transfer_list; do
         l_final_snap=$l_snapshot
     done
 
-    # begin copying snapshots from the last common snapshot
+    # begin copying snapshots to the final snap from the last common snapshot
     if [ "$l_final_snap" != "" ]; then
-        zfs_send_receive "$l_final_snap" "$g_actual_dest" "$l_lastsnap"
+        zfs_send_receive "$g_last_common_snap" "$l_final_snap" "$g_actual_dest"
     fi
 }
 

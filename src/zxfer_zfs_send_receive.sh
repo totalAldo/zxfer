@@ -137,9 +137,9 @@ wrap_command_with_ssh() {
 # Takes $g_option_D_display_progress_bar $g_option_z_compress, $g_option_O_origin_host, $g_option_T_target_host
 #
 zfs_send_receive() {
-    l_snapshot=$1
-    l_dest=$2
-    l_prevsnap=$3
+    l_prevsnap=$1
+    l_snapshot=$2
+    l_dest=$3
 
     # Set up the send and receive commands
     l_send_cmd=$(set_send_command "$l_snapshot" "$l_prevsnap")

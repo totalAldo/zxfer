@@ -128,7 +128,6 @@ init_globals() {
     g_lzfs_list_hr_S_snap=""
     g_rzfs_list_hr_snap=""
 
-    g_found_last_common_snap=0
     g_last_common_snap=""
     g_actual_dest=""
     g_src_snapshot_transfer_list=""
