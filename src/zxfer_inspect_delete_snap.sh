@@ -35,7 +35,7 @@
 
 #
 # Returns a list of destination snapshots that don't exist in the source.
-# The source and destination snapshtos should correspond to 1 dataset.
+# The source and destination snapshots should correspond to 1 dataset.
 #
 get_dest_snapshots_to_delete_per_dataset() {
     echoV "Begin get_dest_snapshots_to_delete_per_dataset()"
@@ -44,12 +44,19 @@ get_dest_snapshots_to_delete_per_dataset() {
 
     # Create temporary files
     l_src_tmp=$(get_temp_file)
+
+    # Write the snapshot names to the temporary files so that we can pass them to comm
+    # run the first process in the background
+    echo "$l_zfs_source_snaps" | tr ' ' '\n' | $g_cmd_awk -F'@' "{print \$2}" | sort > "$l_src_tmp" &
+    PID=$!
+
     l_dest_tmp=$(get_temp_file)
     l_snaps_to_delete_tmp=$(get_temp_file)
 
-    # Write the snapshot names to the temporary files so that we can pass them to comm
-    echo "$l_zfs_source_snaps" | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" > "$l_src_tmp"
-    echo "$l_zfs_dest_snaps"   | tr ' ' '\n' | sort | $g_cmd_awk -F'@' "{print \$2}" > "$l_dest_tmp"
+    echo "$l_zfs_dest_snaps"   | tr ' ' '\n' | $g_cmd_awk -F'@' "{print \$2}" | sort > "$l_dest_tmp"
+
+    # wait for the background process to finish
+    wait $PID
 
     # Use comm to find snapshots in l_dest_tmp that don't have a match in l_src_tmp
     comm -13 "$l_src_tmp" "$l_dest_tmp" > "$l_snaps_to_delete_tmp"
@@ -57,8 +64,8 @@ get_dest_snapshots_to_delete_per_dataset() {
     # Use grep to find the matching lines in l_zfs_dest_snaps
     l_dest_snaps_to_delete=$(echo "$l_zfs_dest_snaps" | grep -F -f "$l_snaps_to_delete_tmp")
 
-    # Clean up temporary files
-    rm "$l_src_tmp" "$l_dest_tmp" "$l_snaps_to_delete_tmp"
+    # Clean up temporary files in the background
+    rm "$l_src_tmp" "$l_dest_tmp" "$l_snaps_to_delete_tmp" &
 
     # Print the matching lines
     echo "$l_dest_snaps_to_delete"
