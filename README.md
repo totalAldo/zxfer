@@ -3,11 +3,11 @@ zxfer (turbo)
 
 2024 - This is a refactored version of zxfer, with the goal of optimizing ZFS replication. Enhancements include improved code readability and performance, additional error handling functions, and new options.
 
-These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots, primarily composed of log entries. As a result, the modifications have significantly decreased the time required for both ssh and local replication.
+These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots. These modifications have significantly decreased the time required for both `ssh` and local replication.
 
 ## Example usage with new options
-Replicate two remote pools from the same host over ssh. The remote host uses SSDs and
-has 8 cpu cores. Use `-j8` to run 8 parallel `zfs list` commands in the source host.
+Replicate two remote pools from the same host over `ssh`.
+Use `-j8` to run 8 parallel `zfs list` commands on the source host.
 Begin replication of the first pool in the background so that both host pools are
 replicated in parallel.
 + `/bin/sh ./zxfer/zxfer -vdz -j8 -F -O user@host -R zroot tank/backups/ &`
@@ -25,32 +25,31 @@ replication until there are no changes in the destination.
 + `-Z`: custom zstd compression supporting higher compression levels or multiple threads
 
 ## Performance Improvements
-In addition, wherever the code path lends itself to parallelization, it is implemented
-as background processes. This includes:
-+ Executing `zfs list` commands concurrently.
-+ Running `zfs destroy` commands as background processes.
-+ Use `zfs send -I` instead of `zfs send -i` for incremental replication to send the entire snapshot chain in one go.
-+ The `inspect_delete_snap()` function has been refactored to use the `comm` command instead of nested loops. Previously, the function used nested loops to identify which destination snapshots should be deleted. This process was executed even when the `-d` option was not in use. For instance, if both the source and destination contained 1,000 snapshots, the loop would iterate 1,000,000 times. Each iteration would spawn at least two `grep` and two `cut` commands to compare snapshot names. The new implementation with `comm` is more efficient and readable.
++ Code has been reviewed and modified for parallel execution where possible.
++ Execute `zfs list` commands concurrently.
++ Run `zfs destroy` commands as background processes.
++ Use `zfs send -I` instead of `zfs send -i` for incremental replication to send the entire snapshot chain.
++ The `inspect_delete_snap()` function has been refactored to use the `comm` command instead of nested loops. Previously, the function used nested loops to identify which destination snapshots should be deleted. This process was executed even when the `-d` option was not in use leading to O(n^2) performance. For instance, if both the source and destination contained 1,000 snapshots, the loop would iterate 1,000,000 times. Each iteration would spawn at least two `grep` and two `cut` commands to compare snapshot names. The new implementation with `comm` is more efficient and readable.
 + Reduce I/O load by listing only the names of the destination snapshots.
-  Previously, the destination snapshots were listed by creation time which
+  Previously, the destination snapshots were sorted by creation time which
   caused the snapshot metadata to be fetched.
-+ combine multiple `zfs destroy` commands into a single command to reduce the number of
-  processes spawned
-+ optimize `get_zfs_list()` by only checking the snapshots of the intended
-  destination dataset if it exists. Previous snapshot lists used the parent dataset
-  which potentially doubled the number of snapshots to check and may have included
++ Batch multiple `zfs destroy` commands into a single command to reduce the number of spawned
+  processes.
++ Optimize `get_zfs_list()` by only checking the snapshots of the intended
+  destination dataset if it exists. Previouslly the parent dataset listed all snapshots
+  which potentially increased the number of snapshots to check and may have included
   destination datasets that did not need to be checked
-+ compress the output of the source snapshot list when using `ssh` via `zstd -9`.
++ Compress the output of the source snapshot list when using `ssh` via `zstd -9`.
   When there are many snapshots, the output of the `zfs list` command can be several
   megabytes and it is highly compressible. While `ssh` offers compression options
   including the use of `zstd`, compressesion is now explicity set by piping the
   `zfs list` output through `zstd -9`
 + To enhance efficiency in send/receive operations, initially execute a `comm` command to compare source and destination datasets. This allows for the identification and subsequent iteration over only those source datasets containing snapshots absent in the destination.
-+ When `-j` > 1, run all `zfs send` commands in parallel. Care should be taken
++ When `-j` > 1, run all `zfs send` commands using gnu `parallel`. Care should be taken
   to no overload a system with too many parallel `zfs send` commands.
-+ use an ssh control socket to reduce the number of ssh connections
-+ run get_dest_snapshots_to_delete_per_dataset() process in the background
-+ create global temproary files for deletions to reduce the number of mktemp calls
++ Use an `ssh` control socket to reduce the number of `ssh` connections
++ Parallelize `get_dest_snapshots_to_delete_per_dataset()`
++ Create global temproary files used when checking for snapshtos to delete to reduce the number of `mktemp` calls
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:
