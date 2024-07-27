@@ -36,36 +36,31 @@
 #
 # Returns a list of destination snapshots that don't exist in the source.
 # The source and destination snapshots should correspond to 1 dataset.
+# Uses global temporary files to reduce mktemp operations per call
+# g_delete_source_tmp_file
+# g_delete_dest_tmp_file
+# g_delete_snapshots_to_delete_tmp_file
 #
 get_dest_snapshots_to_delete_per_dataset() {
     echoV "Begin get_dest_snapshots_to_delete_per_dataset()"
     l_zfs_source_snaps=$1
     l_zfs_dest_snaps=$2
 
-    # Create temporary files
-    l_src_tmp=$(get_temp_file)
-
     # Write the snapshot names to the temporary files so that we can pass them to comm
     # run the first process in the background
-    echo "$l_zfs_source_snaps" | tr ' ' '\n' | $g_cmd_awk -F'@' "{print \$2}" | sort > "$l_src_tmp" &
+    echo "$l_zfs_source_snaps" | tr ' ' '\n' | $g_cmd_awk -F'@' "{print \$2}" | sort > "$g_delete_source_tmp_file" &
     PID=$!
 
-    l_dest_tmp=$(get_temp_file)
-    l_snaps_to_delete_tmp=$(get_temp_file)
-
-    echo "$l_zfs_dest_snaps"   | tr ' ' '\n' | $g_cmd_awk -F'@' "{print \$2}" | sort > "$l_dest_tmp"
+    echo "$l_zfs_dest_snaps"   | tr ' ' '\n' | $g_cmd_awk -F'@' "{print \$2}" | sort > "$g_delete_dest_tmp_file"
 
     # wait for the background process to finish
     wait $PID
 
-    # Use comm to find snapshots in l_dest_tmp that don't have a match in l_src_tmp
-    comm -13 "$l_src_tmp" "$l_dest_tmp" > "$l_snaps_to_delete_tmp"
+    # Use comm to find snapshots in g_delete_dest_tmp_file that don't have a match in g_delete_source_tmp_file
+    comm -13 "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" > "$g_delete_snapshots_to_delete_tmp_file"
 
     # Use grep to find the matching lines in l_zfs_dest_snaps
-    l_dest_snaps_to_delete=$(echo "$l_zfs_dest_snaps" | grep -F -f "$l_snaps_to_delete_tmp")
-
-    # Clean up temporary files in the background
-    rm "$l_src_tmp" "$l_dest_tmp" "$l_snaps_to_delete_tmp" &
+    l_dest_snaps_to_delete=$(echo "$l_zfs_dest_snaps" | grep -F -f "$g_delete_snapshots_to_delete_tmp_file")
 
     # Print the matching lines
     echo "$l_dest_snaps_to_delete"

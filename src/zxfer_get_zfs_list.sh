@@ -85,7 +85,6 @@ write_source_snapshot_list_to_file() {
     fi
 }
 
-
 # We only need the snapshots of the intended destination dataset, not
 # all the snapshots of the parent $g_destination.
 # In addition, sorting by creation time has been removed in the

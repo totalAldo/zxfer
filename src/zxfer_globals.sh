@@ -132,6 +132,11 @@ init_globals() {
     g_actual_dest=""
     g_src_snapshot_transfer_list=""
 
+    # temporary files used by get_dest_snapshots_to_delete_per_dataset()
+    g_delete_source_tmp_file=$(get_temp_file)
+    g_delete_dest_tmp_file=$(get_temp_file)
+    g_delete_snapshots_to_delete_tmp_file=$(get_temp_file)
+
     # specific to zfs mode
     g_zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
@@ -194,6 +199,11 @@ close_ssh_control_socket() {
 #
 trap_exit() {
     close_ssh_control_socket
+
+    # remove temporary files
+    rm "$g_delete_source_tmp_file" \
+        "$g_delete_dest_tmp_file" \
+        "$g_delete_snapshots_to_delete_tmp_file"
 }
 
 # catch any signals to terminate the script
