@@ -69,8 +69,8 @@ get_dest_snapshots_to_delete_per_dataset() {
 # find the most recent common snapshot. The source list is in descending order
 # by creation date. The destination list is unordered.
 #
-set_last_common_snapshot() {
-    echoV "Begin set_last_common_snapshot()"
+get_last_common_snapshot() {
+    echoV "Begin get_last_common_snapshot()"
 
     # sorted list of source datasets and snapshots
     l_zfs_source_snaps=$1
@@ -78,7 +78,7 @@ set_last_common_snapshot() {
     l_zfs_dest_snaps=$2
 
     #initialize the last copy snapshot to empty
-    g_last_common_snap=""
+    l_last_common_snap=""
 
     # Convert the destination snapshots into a list with newlines so that we
     # can use grep to search for the source snapshot
@@ -94,15 +94,20 @@ set_last_common_snapshot() {
         # -m 1 is used to stop searching after the first match, removed due to lack of support in Illumos
         if echo "$l_dest_snap_list" | grep -qF "$l_snap_name"; then
 
-            g_last_common_snap=$l_snap_name
+            l_last_common_snap=$l_snap_name
 
             echoV "Found last common snapshot: $g_last_common_snap."
 
             # once found, exit the function
+            echo "$l_last_common_snap"
             return
         fi
     done
-    echoV "End set_last_common_snapshot()"
+
+    # this will be blank because if it is found, the function will return
+    echo "$l_last_common_snap"
+
+    echoV "End get_last_common_snapshot()"
 }
 
 #
@@ -231,7 +236,7 @@ inspect_delete_snap() {
     # Get the list of source snapshots in descending order by creation date
     l_zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$l_source@")
 
-    # get the list of destinations snapshots for the given destination dataset
+    # get the list of destinations snapshots for the destination dataset
     l_zfs_dest_snaps=$(echo "$g_rzfs_list_hr_snap" | grep "^$g_actual_dest@")
 
     # Deletes non-common snaps on destination if asked to.
@@ -240,7 +245,7 @@ inspect_delete_snap() {
     fi
 
     # Find the most recent common snapshot on source and destination.
-    set_last_common_snapshot "$l_zfs_source_snaps" "$l_zfs_dest_snaps"
+    g_last_common_snap=$(get_last_common_snapshot "$l_zfs_source_snaps" "$l_zfs_dest_snaps")
 
     # Create a list of source snapshots to transfer, beginning with the
     # first snapshot after the last common one.
