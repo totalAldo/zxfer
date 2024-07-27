@@ -1,12 +1,44 @@
 CHANGELOG
 =========
+2024.07.27
+-parallelize the comparison of snapshots to deleted
+-use global temporary files for snapshot deletion
+-refactor zfs_get_list()
+-code cleanup
+
+2024.07.26
+-use ssh control socket for all ssh connections
+
+2024.07.24
+-rename -x option to -j for number of parallel jobs
+
+2024.07.23
+-run zfs send operations as background processes (later limited to -j #jobs)
+
+2024.07.21
+-optimize grep calls by passing -m 1 (later removed for Illumos compatibility)
+
+2024.07.16
+-add use of gnu parallel to list source snapshots ordered by creation
+-remove creation of one temporary file
+
+2024.07.15
+-add -x option to sepcify number of parallel jobs for zfs list
+
+2024.07.12
+-batch zfs destroy commands
+-optimize zfs list on destination snapshots by removing sorting
+
+2024.07.10
+-optimize get_zfs_list() by only listing snapshots of the intended destination
+ dataset instead of listing all the snapshots of the parent destination dataset
+
 2024.04.09
 -add consistency check for -Y option
 
 2024.04.08
--add initial support for a -Y (Y)ield command that runs run_zfs_mode
- up to a maximum of 8 times while there are zfs send or zfs destroy commands
- that are executed
+-add -Y (Y)ield command that runs run_zfs_mode up to a maximum of 8 times
+ while there are zfs send or zfs destroy commands that are executed
 
 2024.04.06
 -fix bug in get_zfs_list() when 2 snapshots are taken at the same time
