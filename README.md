@@ -49,6 +49,8 @@ as background processes. This includes:
 + When `-j` > 1, run all `zfs send` commands in parallel. Care should be taken
   to no overload a system with too many parallel `zfs send` commands.
 + use an ssh control socket to reduce the number of ssh connections
++ run get_dest_snapshots_to_delete_per_dataset() process in the background
++ create global temproary files for deletions to reduce the number of mktemp calls
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:
