@@ -69,49 +69,16 @@ set_actual_dest() {
     fi
 }
 
-# Check if the snapshot already exists
-snapshot_exists() {
-    l_snapshot=$1
-    l_snapshot_list=$2
-
-    # -m 1 stops reading the file asfter the first match, removed for Illumos
-    echo "$l_snapshot_list" | grep -q "^$l_snapshot"
-}
-
-#
-# Copy a snapshot using zfs send/receive. If a third argument is used, then use
-# send -i and the third argument is the base to create the increment from.
-# Arguments should be compatible with zfs send and receive commands. Does
-# nothing if the snapshot already exists.
-# Takes $dest, rzfs_list_ho_s
-#
-copy_snap() {
-    l_copysrc=$1
-    l_copyprev=$2
-    l_copydest=$g_actual_dest
-
-    l_copysrctail=$(echo "$l_copysrc" | cut -d/ -f2-)
-
-    # Check if the snapshot already exists
-    if snapshot_exists "$l_copydest/$l_copysrctail" "$g_rzfs_list_ho"; then
-        echov "Snapshot $l_copysrc already exists at destination $l_copydest. Exiting function."
-        return
-    fi
-
-    zfs_send_receive "$l_copysrc" "$l_copydest" "$l_copyprev"
-}
-
 #
 # Copy the list of snapshots given in stdin to the destination
 # Use incremental snapshots where possible. Assumes that the list of snapshots
 # is given in creation order. copy_snap is responsible for skipping already
 # existing snapshots on the destination side.
-# Takes: $g_found_last_common_snap, $g_last_common_snap, $source, $g_src_snapshot_transfer_list
+# Takes: $g_found_last_common_snap, $g_last_common_snap, $g_src_snapshot_transfer_list
 #
 copy_snap_multiple() {
     # Instead of transferring all the source snapshots, this just transfers
     # the ones starting from the latest common snapshot on src and dest
-    l_copy_fs_snapshot_list=$(echo "$g_src_snapshot_transfer_list" | grep ".")
 
     l_lastsnap=""
 
@@ -122,16 +89,19 @@ copy_snap_multiple() {
 
     # This can get stale, especially if it has taken hours to copy the
     # previous snapshot. Consider adding a time check and refreshing the list of
-    # snapshots if it has been too long since we got the list
+    # snapshots if it has been too long since we got the list.
     # 2024.07.15 - the recommended solution is to use -Y to repeat the process
     # until there are no further differences
     l_final_snap=""
+
+    l_copy_fs_snapshot_list=$(echo "$g_src_snapshot_transfer_list")
     for l_snapshot in $l_copy_fs_snapshot_list; do
         l_final_snap=$l_snapshot
     done
 
+    # begin copying snapshots from the last common snapshot
     if [ "$l_final_snap" != "" ]; then
-        copy_snap "$l_final_snap" "$l_lastsnap"
+        zfs_send_receive "$l_final_snap" "$g_actual_dest" "$l_lastsnap"
     fi
 }
 
