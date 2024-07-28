@@ -1,5 +1,9 @@
 CHANGELOG
 =========
+
+2024.07.28
+-add g_cmd_parallel variable to use which to locate path to parallel
+
 2024.07.27
 -parallelize the comparison of snapshots to deleted
 -use global temporary files for snapshot deletion
