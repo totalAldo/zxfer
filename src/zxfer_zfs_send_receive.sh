@@ -118,12 +118,13 @@ set_receive_command() {
 wrap_command_with_ssh() {
     l_cmd=$1
     l_option=$2
-    l_compress=$3
+    l_is_compress=$3
     l_direction=$4
 
-    if [ "$l_compress" -eq 0 ]; then
+    if [ "$l_is_compress" -eq 0 ]; then
         echo "$g_cmd_ssh $l_option \"$l_cmd\""
     else
+        # when compression is enabled, send and recieve are wrapped differently
         if [ "$l_direction" = "send" ]; then
             echo "$g_cmd_ssh $l_option \"$l_cmd | $g_cmd_compress\" | $g_cmd_decompress"
         else
@@ -137,6 +138,7 @@ wrap_command_with_ssh() {
 # Takes $g_option_D_display_progress_bar $g_option_z_compress, $g_option_O_origin_host, $g_option_T_target_host
 #
 zfs_send_receive() {
+    echoV "Begin zfs_send_receive()"
     l_prevsnap=$1
     l_snapshot=$2
     l_dest=$3
@@ -158,8 +160,6 @@ zfs_send_receive() {
         l_send_cmd="$l_send_cmd $l_progress_bar_cmd"
     fi
 
-    g_is_performed_send_destroy=1
-
     if [ "$g_option_j_jobs" -gt 1 ]; then
         # implement naive job control.
         # if there are more than this many jobs, wait until they are all
@@ -177,4 +177,8 @@ zfs_send_receive() {
     else
         execute_command "$l_send_cmd | $l_recv_cmd"
     fi
+
+    g_is_performed_send_destroy=1
+
+    echoV "End zfs_send_receive()"
 }

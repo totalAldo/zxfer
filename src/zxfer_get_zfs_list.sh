@@ -144,7 +144,7 @@ set_g_recursive_source_list() {
 
     g_recursive_source_list=$(comm -23 \
         "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
-        "$g_cmd_awk" -F@ '{print $1}' | uniq)
+        "$g_cmd_awk" -F@ '{print $1}' | sort | uniq)
 
     echoV "Source dataset count: $(echo "$g_recursive_source_list" | wc -l)"
 
