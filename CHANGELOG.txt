@@ -7,6 +7,7 @@ CHANGELOG
 -fix bug where if destination dataset does not exist, only the last snapshot
  is sent. Now, the first snapshot is sent and then the full snapshot range
  is sent.
+-fix listing destination snapshots when pushing via ssh
 
 2024.07.27
 -parallelize the comparison of snapshots to deleted

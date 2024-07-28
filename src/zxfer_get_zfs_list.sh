@@ -40,7 +40,6 @@
 # multiple datasets concurrently.
 #
 write_source_snapshot_list_to_file() {
-
     l_outfile=$1
 
     #
@@ -92,7 +91,6 @@ write_source_snapshot_list_to_file() {
 # This significantly improves performance as the metadata
 # doesn't need to be searched for the creation time of each snapshot.
 write_destination_snapshot_list_to_files() {
-
     l_rzfs_list_hr_snap_tmp_file=$1
     l_dest_snaps_stripped_sorted_tmp_file=$2
 
@@ -103,8 +101,11 @@ write_destination_snapshot_list_to_files() {
 
     l_destination_dataset="$g_destination/$l_source_dataset"
 
+    # Assuming g_RZFS contains something like "ssh user@remote_host zfs"
+    l_cmd="$g_RZFS list $l_destination_dataset"
+
     # check if the destination zfs dataset exists before listing snapshots
-    if "$g_RZFS" list "$l_destination_dataset" >/dev/null 2>&1; then
+    if eval "$l_cmd" >/dev/null 2>&1; then
         # dataset exists
 
         # do not perform in the background so we can sort the results
@@ -115,6 +116,7 @@ write_destination_snapshot_list_to_files() {
 
     else
         # dataset does not exist
+        echoV "Destination dataset does not exist: $l_destination_dataset"
         echo "" >"$l_rzfs_list_hr_snap_tmp_file"
     fi
 

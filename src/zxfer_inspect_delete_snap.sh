@@ -98,7 +98,7 @@ get_last_common_snapshot() {
 
             l_last_common_snap=$l_snap_name
 
-            echoV "Found last common snapshot: $g_last_common_snap."
+            echoV "Found last common snapshot: $l_last_common_snap."
 
             # once found, exit the function
             echo "$l_last_common_snap"

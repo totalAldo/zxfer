@@ -83,16 +83,17 @@ copy_snapshots() {
     l_first_snapshot=""
     l_final_snapshot=""
 
-    # find the final snapshot for this dataset on the source
+    # find the first and final snapshot for this dataset on the source
     for l_snapshot in $g_src_snapshot_transfer_list; do
         # set the first snapshot
         [ -z "$l_first_snapshot" ] && l_first_snapshot=$l_snapshot
 
+        # keep looping until the end of the list
         l_final_snapshot=$l_snapshot
     done
 
     if [ -z "$l_final_snapshot" ]; then
-        echoV "No snapshots to copy, skipping dataset: $g_actual_dest."
+        echoV "No snapshots to copy, skipping destination dataset: $g_actual_dest."
         return
     fi
 
@@ -100,7 +101,7 @@ copy_snapshots() {
     # snapshot
     if ! $g_RZFS list "$g_actual_dest" >/dev/null 2>&1; then
         # get the first snapshot name with full path
-        echov "Destination dataset does not exist. Sending first snapshot: $l_first_snapshot to $g_actual_dest"
+        echov "Destination dataset does not exist [$g_actual_dest]. Sending first snapshot [$l_first_snapshot]"
         # do not allow this to be run in the background
         zfs_send_receive "" "$l_first_snapshot" "$g_actual_dest" "0"
 
