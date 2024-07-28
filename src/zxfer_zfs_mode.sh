@@ -92,7 +92,7 @@ copy_snapshots() {
     done
 
     if [ -z "$l_final_snapshot" ]; then
-        echov "No snapshots to copy, skipping daaset {$g_actual_dest}."
+        echoV "No snapshots to copy, skipping dataset: $g_actual_dest."
         return
     fi
 
