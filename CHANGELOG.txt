@@ -3,6 +3,7 @@ CHANGELOG
 
 2024.07.28
 -add g_cmd_parallel variable to use which to locate path to parallel
+-sort g_recursive_source_list to properly create datasets
 
 2024.07.27
 -parallelize the comparison of snapshots to deleted
