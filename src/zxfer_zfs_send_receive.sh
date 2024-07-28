@@ -84,33 +84,41 @@ handle_progress_bar_option() {
     echo "$l_progress_bar_cmd"
 }
 
-set_send_command() {
-    l_snapshot=$1
-    l_prevsnap=$2
+#
+# Returns the send command. If no previous snapshot is provided,
+# a full snapshot is sent starting from the first snapshot which is set
+# in get_last_common_snapshot()
+# Takes g_option_V_very_verbose, g_option_w_raw_send, g_first_source_snap
+#
+get_send_command() {
+    l_previous_snapshot=$1
+    l_current_snapshot=$2
 
-    if [ -z "$l_prevsnap" ]; then
-        echo "$g_cmd_zfs send $l_snapshot"
-    else
-        # previous version
-        #echo "$g_cmd_zfs send -i $l_prevsnap $l_snapshot"
-
-        # 2024.03.19 new version - send all incremental snapshots in one stream
-        l_v=""
-        if [ "$g_option_V_very_verbose" -eq 1 ]; then
-            l_v="-v"
-        fi
-
-        # 2024.03.31 - add support for -w option (raw send)
-        l_w=""
-        if [ "$g_option_w_raw_send" -eq 1 ]; then
-            l_w="-w"
-        fi
-
-        echo "$g_cmd_zfs send $l_v $l_w -I $l_prevsnap $l_snapshot"
+    l_v=""
+    if [ "$g_option_V_very_verbose" -eq 1 ]; then
+        l_v="-v"
     fi
+
+    # 2024.03.31 - add support for -w option (raw send)
+    l_w=""
+    if [ "$g_option_w_raw_send" -eq 1 ]; then
+        l_w="-w"
+    fi
+
+    # if there is no previous snapshot, send the current snapshot which creates the dataset on the target
+    if [ -z "$l_previous_snapshot" ]; then
+        echo $g_cmd_zfs send $l_v $l_w "$l_current_snapshot"
+        return # exit the function
+    fi
+
+    # previous version
+    #echo "$g_cmd_zfs send -i $l_previous_snapshot $l_current_snapshot"
+
+    # 2024.03.19 new version - send all incremental snapshots in one stream
+    echo "$g_cmd_zfs send $l_v $l_w -I $l_previous_snapshot $l_current_snapshot"
 }
 
-set_receive_command() {
+get_receive_command() {
     l_dest=$1
     echo "$g_cmd_zfs receive $g_option_F_force_rollback $l_dest"
 }
@@ -139,13 +147,15 @@ wrap_command_with_ssh() {
 #
 zfs_send_receive() {
     echoV "Begin zfs_send_receive()"
-    l_prevsnap=$1
-    l_snapshot=$2
+    l_previous_snapshot=$1
+    l_current_snapshot=$2
     l_dest=$3
+    # 4th optional parameter specifies if background process is allowed, with a default to 1
+    l_is_allow_background=${4:-1}
 
     # Set up the send and receive commands
-    l_send_cmd=$(set_send_command "$l_snapshot" "$l_prevsnap")
-    l_recv_cmd=$(set_receive_command "$l_dest")
+    l_send_cmd=$(get_send_command "$l_previous_snapshot" "$l_current_snapshot")
+    l_recv_cmd=$(get_receive_command "$l_dest")
 
     if [ "$g_option_O_origin_host" != "" ]; then
         l_send_cmd=$(wrap_command_with_ssh "$l_send_cmd" "$g_option_O_origin_host" "$g_option_z_compress" "send")
@@ -156,11 +166,11 @@ zfs_send_receive() {
 
     # Perform this after ssh wrapping occurs
     if [ "$g_option_D_display_progress_bar" != "" ]; then
-        l_progress_bar_cmd=$(handle_progress_bar_option "$l_snapshot")
+        l_progress_bar_cmd=$(handle_progress_bar_option "$l_current_snapshot")
         l_send_cmd="$l_send_cmd $l_progress_bar_cmd"
     fi
 
-    if [ "$g_option_j_jobs" -gt 1 ]; then
+    if [ "$l_is_allow_background" -eq 1 ] && [ "$g_option_j_jobs" -gt 1 ]; then
         # implement naive job control.
         # if there are more than this many jobs, wait until they are all
         # completed before spawning new ones

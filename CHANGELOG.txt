@@ -4,6 +4,9 @@ CHANGELOG
 2024.07.28
 -add g_cmd_parallel variable to use which to locate path to parallel
 -sort g_recursive_source_list to properly create datasets
+-fix bug where if destination dataset does not exist, only the last snapshot
+ is sent. Now, the first snapshot is sent and then the full snapshot range
+ is sent.
 
 2024.07.27
 -parallelize the comparison of snapshots to deleted
