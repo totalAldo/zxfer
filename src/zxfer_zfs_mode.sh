@@ -187,6 +187,8 @@ calculate_unsupported_properties() {
 # main loop that copies the filesystems
 #
 copy_filesystems() {
+    echoV "Begin copy_filesystems()"
+
     for source in $g_recursive_source_list; do
         # Split up source into source fs, last component
         m_sourcefs=$(echo "$source" | cut -d@ -f1)
@@ -233,7 +235,10 @@ copy_filesystems() {
     done
 
     # wait for background zfs_send_receive processes before proceeding
+    echoV "Waiting for all zfs send/receive processes to finish."
     wait
+
+    echoV "End copy_filesystems()"
 }
 
 #
