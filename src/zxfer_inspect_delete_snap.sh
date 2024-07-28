@@ -79,12 +79,12 @@ get_last_common_snapshot() {
     # unordered list of destination datasets and snapshots
     l_zfs_dest_snaps=$2
 
-    #initialize the last copy snapshot to empty
-    l_last_common_snap=""
-
     # Convert the destination snapshots into a list with newlines so that we
     # can use grep to search for the source snapshot
     l_dest_snap_list=$(echo "$l_zfs_dest_snaps" | tr ' ' '\n')
+
+    # the last common snapshot
+    l_snap_name=""
 
     # loop through the source snapshots sorted in descending creation order
     # (newest first) to find the most recent common snapshot
@@ -106,8 +106,12 @@ get_last_common_snapshot() {
         fi
     done
 
+    # no common snapshot was found, and the last snapshot is the first one
+    # since the source snapshots are sorted in descending order by creation date
+    echoV "No common snapshot found, using the first source snapshot: $l_snap_name."
+
     # this will be blank because if it is found, the function will return
-    echo "$l_last_common_snap"
+    echo "$l_snap_name"
 
     echoV "End get_last_common_snapshot()"
 }

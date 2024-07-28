@@ -71,27 +71,49 @@ set_actual_dest() {
 
 #
 # Copy from the last common snapshot to the most recent snapshot.
-# Use incremental snapshots where possible. Assumes that the list of snapshots
-# is given in creation order.
+# Assumes that the list of snapshots is given in creation order ascending.
 # Takes: $g_last_common_snap, $g_src_snapshot_transfer_list
 #
-copy_snap_multiple() {
+copy_snapshots() {
     # This can get stale, especially if it has taken hours to copy the
     # previous snapshot. Consider adding a time check and refreshing the list of
     # snapshots if it has been too long since we got the list.
     # 2024.07.15 - the recommended solution is to use -Y to repeat the process
     # until there are no further differences
-    l_final_snap=""
+    l_first_snapshot=""
+    l_final_snapshot=""
 
     # find the final snapshot for this dataset on the source
     for l_snapshot in $g_src_snapshot_transfer_list; do
-        l_final_snap=$l_snapshot
+        # set the first snapshot
+        [ -z "$l_first_snapshot" ] && l_first_snapshot=$l_snapshot
+
+        l_final_snapshot=$l_snapshot
     done
 
-    # begin copying snapshots to the final snap from the last common snapshot
-    if [ "$l_final_snap" != "" ]; then
-        zfs_send_receive "$g_last_common_snap" "$l_final_snap" "$g_actual_dest"
+    if [ -z "$l_final_snapshot" ]; then
+        echov "No snapshots to copy, skipping daaset {$g_actual_dest}."
+        return
     fi
+
+    # check if the destination exists and if not create it by sending the first
+    # snapshot
+    if ! $g_RZFS list "$g_actual_dest" >/dev/null 2>&1; then
+        # get the first snapshot name with full path
+        echov "Destination dataset does not exist. Sending first snapshot: $l_first_snapshot to $g_actual_dest"
+        # do not allow this to be run in the background
+        zfs_send_receive "" "$l_first_snapshot" "$g_actual_dest" "0"
+
+        # set the last common snapshot to the first snapshot so that all snapshots
+        # are copied below
+        g_last_common_snap=$l_first_snapshot
+    fi
+
+    # get the final snapshot name
+    echoV "Final snapshot: $l_final_snapshot"
+
+    # begin copying snapshots to the final snap from the last common snapshot
+    zfs_send_receive "$g_last_common_snap" "$l_final_snapshot" "$g_actual_dest" "1"
 }
 
 #
@@ -227,7 +249,7 @@ copy_filesystems() {
         # assumed valid destination filesystem to copy to with a possible snapshot name
         # to give to the destination snapshot.
         #
-        copy_snap_multiple
+        copy_snapshots
 
         #
         # Now we have replicated all existing snapshots.
