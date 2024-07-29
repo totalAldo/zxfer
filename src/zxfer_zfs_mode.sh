@@ -434,5 +434,4 @@ consider using compression, increasing bandwidth, increasing I/O or reducing sna
             fi
             break
         fi
-    done
-}
+    don

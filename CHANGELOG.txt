@@ -213,8 +213,4 @@ CHANGELOG
 	   the additions are already fairly extensive, so Contantin kindly
 	   suggested that the new version become a new utility in its
 	   own right. Collaboration commenced between the two with
-	   Constantin offering helpful guidance throughout as Dreckman coded
-	   new features and squashed bugs.
-20080813 zfs-replicate 0.7 is released by Constantin Gonzalez as the
-           last update in his zfs-replicate utility. This may be found at
-         http://blogs.sun.com/constantin/entry/zfs_replicator_script_new_edition
+	   Constantin offering helpful guidance throu
