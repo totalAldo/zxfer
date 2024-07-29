@@ -101,11 +101,8 @@ write_destination_snapshot_list_to_files() {
 
     l_destination_dataset="$g_destination/$l_source_dataset"
 
-    # Assuming g_RZFS contains something like "ssh user@remote_host zfs"
-    l_cmd="$g_RZFS list $l_destination_dataset"
-
     # check if the destination zfs dataset exists before listing snapshots
-    if eval "$l_cmd" >/dev/null 2>&1; then
+    if [ $(exists_destination "$l_destination_dataset") -eq 1 ]; then
         # dataset exists
 
         # do not perform in the background so we can sort the results

@@ -42,7 +42,7 @@
 #
 init_globals() {
     # zxfer version
-    g_zxfer_version="2.0.0-20240728"
+    g_zxfer_version="2.0.0-20240729"
 
     # max number of iterations to run iterate through run_zfs_mode
     # if changes are made to the filesystems
@@ -199,17 +199,36 @@ close_ssh_control_socket() {
 # function that always executes if the script is terminated by a signal
 #
 trap_exit() {
+    # get the exit status of the last command
+    l_exit_status=$?
+
+    # kill all background jobs
+    kill $(jobs -p) 2>/dev/null
+
     close_ssh_control_socket
 
-    # remove temporary files
-    rm "$g_delete_source_tmp_file" \
+    # Remove temporary files if they exist
+    for l_temp_file in "$g_delete_source_tmp_file" \
         "$g_delete_dest_tmp_file" \
-        "$g_delete_snapshots_to_delete_tmp_file"
+        "$g_delete_snapshots_to_delete_tmp_file"; do
+        if [ -f "$l_temp_file" ]; then
+            rm "$l_temp_file"
+        fi
+    done
+
+    echov "zxfer exiting with status $l_exit_status"
+
+    # exit this script
+    exit $l_exit_status
 }
 
 # catch any signals to terminate the script
+# INT (Interrupt) 2 (Ctrl-C)
+# TERM (Terminate) 15 (kill)
+# HUP (Hangup) 1 (kill -HUP)
+# QUIT (Quit) 3 (Ctrl-\)
+# EXIT (Exit) 0 (exit)
 trap trap_exit INT TERM HUP QUIT EXIT
-
 
 #
 # Check command line parameters.

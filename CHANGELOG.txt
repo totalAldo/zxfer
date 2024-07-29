@@ -1,6 +1,10 @@
 CHANGELOG
 =========
 
+2024.07.29
+-add exists_destination() to check if destination dataset exists
+-update trap_exit() to quit child processes and exit with proper exit code
+
 2024.07.28
 -add g_cmd_parallel variable to use which to locate path to parallel
 -sort g_recursive_source_list to properly create datasets
