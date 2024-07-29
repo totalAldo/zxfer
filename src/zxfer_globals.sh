@@ -216,7 +216,7 @@ trap_exit() {
         fi
     done
 
-    echov "zxfer exiting with status $l_exit_status"
+    echoV "zxfer exiting with status $l_exit_status"
 
     # exit this script
     exit $l_exit_status
