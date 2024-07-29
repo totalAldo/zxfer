@@ -2,6 +2,7 @@ CHANGELOG
 =========
 
 2024.07.29
+-update zfs list for IllumOS to use '-d 1' when listing snapshots
 -only pipe parallel output through zstd if compression is enabled
 -add exists_destination() to check if destination dataset exists
 -update trap_exit() to quit child processes and exit with proper exit code
