@@ -68,7 +68,7 @@ write_source_snapshot_list_to_file() {
             # zstd -19 takes too long
 
             # check if compression is enabled
-            if [ $g_option_z_zstd -eq 1 ]; then
+            if [ "$g_option_z_zstd" -eq 1 ]; then
                 l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -t snapshot {}' | zstd -9 \" | zstd -d"
             else
                 l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
