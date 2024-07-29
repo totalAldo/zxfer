@@ -195,18 +195,4 @@ beep() {
 
     if [ "$g_option_b_beep_always" -eq 1 ] || [ "$g_option_B_beep_on_success" -eq 1 ]; then
         # load the speaker kernel module if not loaded already
-        l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
-        if [ "$l_speaker_km_loaded" = "0" ]; then
-            kldload "speaker"
-        fi
-
-        # play the appropriate beep
-        if [ "$l_exit_status" -eq 0 ]; then
-            if [ "$g_option_B_beep_on_success" -eq 1 ]; then
-                echo "T255CCMLEG~EG..." >/dev/speaker # success sound
-            fi
-        else
-            echo "T150A<C.." >/dev/speaker # failure sound
-        fi
-    fi
-}
+        l_speaker_km_loaded=$(kldstat | grep -c 
