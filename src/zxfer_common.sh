@@ -152,6 +152,24 @@ execute_background_cmd() {
 }
 
 #
+# Checks if the destination dataset exists, returns 1 if it does, 0 if it does not.
+#
+exists_destination() {
+    l_dest=$1
+
+    # Check if the destination dataset exists
+    # quote the command in case it is being run within an ssh command
+    l_cmd="$g_RZFS list -H $l_dest"
+    echoV "Checking if destination exists: $l_cmd"
+
+    if eval "$l_cmd" >/dev/null 2>&1; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+#
 # Print out information if in verbose mode
 #
 echov() {

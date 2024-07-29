@@ -97,9 +97,9 @@ copy_snapshots() {
         return
     fi
 
-    # check if the destination exists and if not create it by sending the first
-    # snapshot
-    if ! $g_RZFS list "$g_actual_dest" >/dev/null 2>&1; then
+    # check if the destination exists and if not,
+    # create it by sending the first snapshot
+    if [ "$(exists_destination "$g_actual_dest")" -eq 0 ]; then
         # get the first snapshot name with full path
         echov "Destination dataset does not exist [$g_actual_dest]. Sending first snapshot [$l_first_snapshot]"
         # do not allow this to be run in the background
