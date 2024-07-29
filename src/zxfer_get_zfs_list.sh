@@ -66,7 +66,13 @@ write_source_snapshot_list_to_file() {
             # to generate the output. zstd -9 has shown better compression than zstd -12
             # and significantly better compression than gzip.
             # zstd -19 takes too long
-            l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -t snapshot {}' | zstd -9 \" | zstd -d"
+
+            # check if compression is enabled
+            if [ $g_option_z_zstd -eq 1 ]; then
+                l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -t snapshot {}' | zstd -9 \" | zstd -d"
+            else
+                l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
+            fi
         else
             #l_cmd="$g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_LZFS list -H -o name -s creation -t snapshot {}'"
             l_cmd="$g_LZFS list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_LZFS list -H -o name -s creation -t snapshot {}'"
@@ -107,9 +113,11 @@ write_destination_snapshot_list_to_files() {
 
         # do not perform in the background so we can sort the results
         # before the longest operation is complete
-        l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset > $l_rzfs_list_hr_snap_tmp_file"
+        l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
         echoV "Running command: $l_cmd"
-        eval "$l_cmd"
+        # make sure to eval and then pipe the contents to the file in case
+        # the command uses ssh
+        eval "$l_cmd" > "$l_rzfs_list_hr_snap_tmp_file"
 
     else
         # dataset does not exist
