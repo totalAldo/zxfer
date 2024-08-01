@@ -1,6 +1,9 @@
 CHANGELOG
 =========
 
+2024.08.01
+-add parallel support when listing destination snapshots
+
 2024.07.29
 -update zfs list for IllumOS to use '-d 1' when listing snapshots
 -only pipe parallel output through zstd if compression is enabled
