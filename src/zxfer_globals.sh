@@ -534,4 +534,14 @@ write_backup_properties() {
     l_backup_date=$(date)
     g_backup_file_contents="$l_backup_file_header#backup_date:$l_backup_date$g_backup_file_contents"
 
-    # Construct the comma
+    # Construct the command to write the backup file
+    l_backup_file_cmd="echo \"$g_backup_file_contents\" | tr \";\" \"\n\" > $l_backup_file_dir/$g_backup_file_extension.$l_is_tail"
+
+    # Execute the command
+    if [ "$g_option_n_dryrun" -eq 0 ]; then
+        echo "$l_backup_file_cmd" | "$g_cmd_ssh $g_option_T_target_host" sh ||
+            throw_error "Error writing backup file. Is filesystem mounted?"
+    else
+        echo "echo \"$l_backup_file_cmd\" | \"$g_cmd_ssh $g_option_T_target_host\" sh"
+    fi
+}

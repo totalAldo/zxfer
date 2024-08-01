@@ -246,4 +246,22 @@ get_zfs_list() {
     # get the reversed order (not using tac due to solaris compatibility)
     g_lzfs_list_hr_S_snap=$(cat -n "$l_lzfs_list_hr_s_snap_tmp_file" | sort -nr | cut -c 8-)
 
-    # remove temporary 
+    # remove temporary files
+    rm "$l_lzfs_list_hr_s_snap_tmp_file" \
+        "$l_rzfs_list_hr_snap_tmp_file" \
+        "$l_dest_snaps_stripped_sorted_tmp_file"
+
+    #
+    # Errors
+    #
+
+    if [ "$g_lzfs_list_hr_S_snap" = "" ]; then
+        throw_error "Failed to retrieve snapshots from the source" 3
+    fi
+
+    if [ "$g_recursive_dest_list" = "" ]; then
+        throw_usage_error "Failed to retrieve list of datasets from the destination"
+    fi
+
+    echoV "End get_zfs_list()"
+}
