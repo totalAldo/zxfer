@@ -114,22 +114,25 @@ write_destination_snapshot_list_to_files() {
     if [ $(exists_destination "$l_destination_dataset") -eq 1 ]; then
         # dataset exists
 
-        if [ $g_option_j_jobs -gt 1 ]; then
-            # if the g_RZFS command is remote, then escape the command to execute
-            if [ ! "$g_option_T_origin_host" = "" ]; then
-                if [ "$g_option_z_compress" -eq 1 ]; then
-                    l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
-                else
-                    l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}'\""
-                fi
-            else
-                l_cmd="$g_RZFS list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_RZFS list -H -o name -d 1 -t snapshot {}'"
-            fi
-        else
-            # do not perform in the background so we can sort the results
-            # before the longest operation is complete
-            l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
-        fi
+        # using parallel when metadata cached is slower - disabling
+        #if [ $g_option_j_jobs -gt 1 ]; then
+        #    # if the g_RZFS command is remote, then escape the command to execute
+        #    if [ ! "$g_option_T_origin_host" = "" ]; then
+        #        if [ "$g_option_z_compress" -eq 1 ]; then
+        #            l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
+        #        else
+        #            l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}'\""
+        #        fi
+        #    else
+        #        l_cmd="$g_RZFS list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_RZFS list -H -o name -d 1 -t snapshot {}'"
+        #    fi
+        #else
+        #    # do not perform in the background so we can sort the results
+        #    # before the longest operation is complete
+        #    l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
+        #fi
+
+        l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
         echoV "Running command: $l_cmd"
         # make sure to eval and then pipe the contents to the file in case
         # the command uses ssh

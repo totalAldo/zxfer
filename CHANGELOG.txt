@@ -2,6 +2,8 @@ CHANGELOG
 =========
 
 2024.08.01
+-commented out parallel use for listing destination due to poorer performance
+ when metadata cached
 -add parallel support when listing destination snapshots
 
 2024.07.29
