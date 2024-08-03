@@ -212,38 +212,32 @@ calculate_unsupported_properties() {
 copy_filesystems() {
     echoV "Begin copy_filesystems()"
 
-    for source in $g_recursive_source_list; do
-        # Split up source into source fs, last component
-        m_sourcefs=$(echo "$source" | cut -d@ -f1)
+    for l_source in $g_recursive_source_list; do
 
-        set_actual_dest "$source"
+        set_actual_dest "$l_source"
 
         # If using the -m feature, check if the source is mounted,
         # otherwise there's no point in us doing the remounting.
         if [ "$g_option_m_migrate" -eq 1 ]; then
-            l_source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$source")
+            l_source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$l_source")
             if [ "$l_source_to_migrate_mounted" = "yes" ]; then
                 echo "The source filesystem is not mounted, why use -m?"
                 exit 1
             fi
-            mountpoint=$($g_LZFS get -Ho value mountpoint "$source")
-            propsource=$($g_LZFS get -Ho source mountpoint "$source")
+            mountpoint=$($g_LZFS get -Ho value mountpoint "$l_source")
+            propsource=$($g_LZFS get -Ho source mountpoint "$l_source")
             echov "Mountpoint is: $mountpoint. Source: $propsource."
         fi
 
         # Inspect the source and destination snapshots so that we are in position to
         # transfer using the latest common snapshot as a base, and transferring the
         # newer snapshots on source, in order.
-        inspect_delete_snap "$g_option_d_delete_destination_snapshots" "$source"
+        inspect_delete_snap "$g_option_d_delete_destination_snapshots" "$l_source"
 
         # Transfer source properties to destination if required.
-        # in the function.
         if [ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
             transfer_properties
         fi
-
-        # Since we'll mostly wrap around zfs send/receive, we'll leave further
-        # error-checking to them.
 
         #
         # We now have a valid source filesystem, volume or snapshot to copy from and an
