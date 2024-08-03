@@ -39,7 +39,6 @@
 
 # module variables
 m_services_to_restart=""
-m_sourcefs=""
 
 #
 # Prepare the actual destination (g_actual_dest) as used in zfs receive.
@@ -150,14 +149,20 @@ relaunch() {
 # Create a new recursive snapshot.
 #
 newsnap() {
+    l_initial_source=$1
+
+    # We snapshot from the base of the initial source
+    # Extract the filesystem name from the initial source snapshot by removing the '@' and everything after it
+    l_sourcefs="${initial_source%@*}"
+
     l_snap=$g_zxfer_new_snapshot_name
 
     if [ "$g_option_R_recursive" != "" ]; then
-        echov "Creating recursive snapshot $m_sourcefs@$l_snap."
-        cmd="$g_LZFS snapshot -r $m_sourcefs@$l_snap"
+        echov "Creating recursive snapshot $l_sourcefs@$l_snap."
+        cmd="$g_LZFS snapshot -r $l_sourcefs@$l_snap"
     else
-        echov "Creating snapshot $m_sourcefs@$l_snap."
-        cmd="$g_LZFS snapshot $m_sourcefs@$l_snap"
+        echov "Creating snapshot $l_sourcefs@$l_snap."
+        cmd="$g_LZFS snapshot $l_sourcefs@$l_snap"
     fi
 
     execute_command "$cmd"
@@ -323,10 +328,9 @@ recursively, but not both -N and -R at the same time."
     # If using -s, do a new recursive snapshot, then copy all new snapshots too.
     #
     if [ "$g_option_s_make_snapshot" -eq 1 ] && [ "$g_option_m_migrate" -eq 0 ]; then
-        # We snapshot from the base of the initial source
-        m_sourcefs=$(echo "$initial_source" | cut -d@ -f1)
         # Create the new snapshot with a unique name.
-        newsnap
+        newsnap "$initial_source"
+
         # Because there are new snapshots, need to get_zfs_list again
         get_zfs_list
     fi
@@ -355,11 +359,8 @@ recursively, but not both -N and -R at the same time."
                 }
         done
 
-        # We snapshot from the base of the initial source
-        m_sourcefs=$(echo "$initial_source" | cut -d@ -f1)
-
-        # Create the last snapshot with a unique name.
-        newsnap
+        # Create the new snapshot with a unique name.
+        newsnap "$initial_source"
 
         # We include the mountpoint as a property that should be transferred.
         # Note that $g_option_P_transfer_property is automatically set to 1, to transfer the property.
