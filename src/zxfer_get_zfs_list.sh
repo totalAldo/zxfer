@@ -170,25 +170,29 @@ set_g_recursive_source_list() {
 
     g_recursive_source_list=$(comm -23 \
         "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
-        "$g_cmd_awk" -F@ '{print $1}' | sort | uniq)
+        "$g_cmd_awk" -F@ '{print $1}' | sort -u)
 
     # debugging
     if [ "$g_option_V_very_verbose" -eq 1 ]; then
-        echo "==== Snapshots in source but not in destination ===="
+        echo "====================================================================="
+        echo "====== Snapshots present in source but missing in destination ======"
         comm -23 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
-        echo "===================================================="
-        echo "g_recursive_source_list: (Source datasets that differ from destination)"
+        echo "====== Source datasets that differ from destination ======"
+        echo "g_recursive_source_list:"
         echo "$g_recursive_source_list"
-        echo "===================================================="
+        echo "Source dataset count: $(echo "$g_recursive_source_list" | wc -l)"
+        echo "====== Destination datasets missing snapshots from source ======"
+        echo "$g_recursive_source_list" | "$g_cmd_awk" -v dest="$g_destination/" '{print dest $1}' | sort -u
+        echo "====== Destination datasets with extra snapshots not in source ======"
+        comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" | "$g_cmd_awk" -v dest="$g_destination/" -F@ '{print dest $1}' | sort -u
+        echo "====================================================================="
     fi
-
-    echoV "Source dataset count: $(echo "$g_recursive_source_list" | wc -l)"
 
     if [ "$g_recursive_source_list" = "" ]; then
-        echov "No snapshots to transfer."
+        echov "No new snapshots to transfer."
     fi
 
-    rm "$l_source_snaps_sorted_tmp_file"
+    rm "$l_source_snaps_sorted_tmp_file" &
 }
 
 #
