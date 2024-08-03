@@ -42,11 +42,18 @@ m_services_to_restart=""
 
 #
 # Prepare the actual destination (g_actual_dest) as used in zfs receive.
-# Uses $part_of_source_to_delete, $g_destination, $initial_source
+# Uses $g_destination, $initial_source
 # Output is $g_actual_dest
 #
 set_actual_dest() {
     l_source=$1
+
+    # This gets the root filesystem transferred - e.g.
+    # the string after the very last "/" e.g. backup/test/zroot -> zroot
+    l_base_fs=${initial_source##*/}
+    # This gets everything but the base_fs, so that we can later delete it from
+    # $source
+    l_part_of_source_to_delete=${initial_source%"$l_base_fs"}
 
     # 0 if not a trailing slash; regex is one character of any sort followed by
     # zero or more of any character until "/" followed by the end of the
@@ -60,7 +67,7 @@ set_actual_dest() {
     if [ "$l_trailing_slash" -eq 0 ]; then
         # If the original source was backup/test/zroot and we are transferring
         # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
-        l_dest_tail=$(echo "$l_source" | sed -e "s%^$part_of_source_to_delete%%g")
+        l_dest_tail=$(echo "$l_source" | sed -e "s%^$l_part_of_source_to_delete%%g")
         g_actual_dest="$g_destination"/"$l_dest_tail"
     else
         l_trailing_slash_dest_tail=$(echo "$l_source" | sed -e "s%^$initial_source%%g")
@@ -317,13 +324,6 @@ recursively, but not both -N and -R at the same time."
         g_recursive_source_list=$initial_source
     fi
 
-    # This gets the root filesystem transferred - e.g.
-    # the string after the very last "/" e.g. backup/test/zroot -> zroot
-    base_fs=${initial_source##*/}
-    # This gets everything but the base_fs, so that we can later delete it from
-    # $source
-    part_of_source_to_delete=${initial_source%"$base_fs"}
-
     #
     # If using -s, do a new recursive snapshot, then copy all new snapshots too.
     #
@@ -374,6 +374,7 @@ recursively, but not both -N and -R at the same time."
 
     if [ "$g_option_g_grandfather_protection" != "" ]; then
         echov "Checking grandfather status of all snapshots marked for deletion..."
+
         for l_source in $g_recursive_source_list; do
             set_actual_dest "$l_source"
             # turn off delete so that we are only checking snapshots, pass 0
