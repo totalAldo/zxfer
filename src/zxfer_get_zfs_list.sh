@@ -180,7 +180,7 @@ set_g_recursive_source_list() {
         echo "====== Source datasets that differ from destination ======"
         echo "g_recursive_source_list:"
         echo "$g_recursive_source_list"
-        echo "Source dataset count: $(echo "$g_recursive_source_list" | wc -l)"
+        echo "Source dataset count: $(echo "$g_recursive_source_list" | grep -cve '^\s*$')"
         echo "====== Destination datasets missing snapshots from source ======"
         echo "$g_recursive_source_list" | "$g_cmd_awk" -v dest="$g_destination/" '{print dest $1}' | sort -u
         echo "====== Destination datasets with extra snapshots not in source ======"
