@@ -172,6 +172,16 @@ set_g_recursive_source_list() {
         "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
         "$g_cmd_awk" -F@ '{print $1}' | sort | uniq)
 
+    # debugging
+    if [ "$g_option_V_very_verbose" -eq 1 ]; then
+        echo "==== Snapshots in source but not in destination ===="
+        comm -23 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+        echo "===================================================="
+        echo "g_recursive_source_list: (Source datasets that differ from destination)"
+        echo "$g_recursive_source_list"
+        echo "===================================================="
+    fi
+
     echoV "Source dataset count: $(echo "$g_recursive_source_list" | wc -l)"
 
     if [ "$g_recursive_source_list" = "" ]; then
