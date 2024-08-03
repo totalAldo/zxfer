@@ -182,12 +182,12 @@ set_g_recursive_source_list() {
         echo "$g_recursive_source_list"
         echo "Source dataset count: $(echo "$g_recursive_source_list" | grep -cve '^\s*$')"
         echo "====== Destination datasets missing snapshots from source ======"
-        echo "$g_recursive_source_list" | "$g_cmd_awk" -v dest="$g_destination/" '{print dest $1}' | sort -u
+        echo "$g_recursive_source_list" | "$g_cmd_awk" -F@ '{print $1}' | sort -u
         echo "====================================================================="
         echo "====== Extra Destination snapshots not in source ======"
-        comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" | "$g_cmd_awk" -v dest="$g_destination/" '{print dest $1}'
+        comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
         echo "====== Destination datasets with extra snapshots not in source ======"
-        comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" | "$g_cmd_awk" -v dest="$g_destination/" -F@ '{print dest $1}' | sort -u
+        comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" | "$g_cmd_awk" -F@ '{print $1}' | sort -u
         echo "====================================================================="
     fi
 
