@@ -2,7 +2,8 @@ CHANGELOG
 =========
 
 2024.08.3
--add very verbose output to display snapshot deltas in zfs_get_list()
+-add very verbose output to display snapshot deltas in set_g_recursive_source_list()
+-clean up copy_snapshots()
 
 2024.08.01
 -commented out parallel use for listing destination due to poorer performance
