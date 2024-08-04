@@ -106,14 +106,12 @@ get_last_common_snapshot() {
         fi
     done
 
-    # no common snapshot was found, and the last snapshot is the first one
-    # since the source snapshots are sorted in descending order by creation date
-    echoV "No common snapshot found, using the first source snapshot: $l_snap_name."
+    echoV "No common snapshot found."
 
-    # this will be blank because if it is found, the function will return
-    echo "$l_snap_name"
+    # return blank because no common snapshots has been found
+    echo ""
 
-    #echoV "End get_last_common_snapshot()"
+    echoV "End get_last_common_snapshot()"
 }
 
 #
@@ -211,6 +209,7 @@ delete_snaps() {
     echoV "End delete_snaps()"
 }
 
+# g_lat_common_snap is set even when a common snapshots is not found
 set_src_snapshot_transfer_list() {
     l_zfs_source_snaps=$1
     l_source=$2

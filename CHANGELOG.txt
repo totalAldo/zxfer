@@ -1,7 +1,11 @@
 CHANGELOG
 =========
 
-2024.08.3
+2024.08.04
+-fix an issue with copying the first snapshot when a destination dataset doesn't
+ exist
+
+2024.08.03
 -add very verbose output to display snapshot deltas in set_g_recursive_source_list()
 -clean up copy_snapshots()
 
