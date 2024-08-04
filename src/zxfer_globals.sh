@@ -380,7 +380,20 @@ read_command_line_switches() {
 
 # Function to extract snapshot name
 extract_snapshot_name() {
-    echo "$1" | grep @ | cut -d@ -f2
+    # use the method below to not spawn grep and cut
+    #echo "$1" | grep @ | cut -d@ -f2
+
+    # Check if the input contains an '@' symbol
+    case "$1" in
+        *@*)
+            # Extract the part after the '@' symbol using parameter expansion
+            echo "${1#*@}"
+            ;;
+        *)
+            # If no '@' symbol is found, return an empty string or handle as needed
+            echo ""
+            ;;
+    esac
 }
 
 #

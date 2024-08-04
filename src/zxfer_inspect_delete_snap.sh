@@ -64,7 +64,7 @@ get_dest_snapshots_to_delete_per_dataset() {
 
     # Print the matching lines
     echo "$l_dest_snaps_to_delete"
-    echoV "End get_dest_snapshots_to_delete_per_dataset()"
+    #echoV "End get_dest_snapshots_to_delete_per_dataset()"
 }
 
 #
@@ -113,7 +113,7 @@ get_last_common_snapshot() {
     # this will be blank because if it is found, the function will return
     echo "$l_snap_name"
 
-    echoV "End get_last_common_snapshot()"
+    #echoV "End get_last_common_snapshot()"
 }
 
 #
