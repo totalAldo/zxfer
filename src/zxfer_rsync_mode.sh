@@ -57,6 +57,14 @@ clean_up() {
 # This takes  $source, $part_of_source_to_delete, $g_destination, $initial_source
 #
 prepare_rs_property_transfer() {
+
+    # This gets the root filesystem transferred - e.g.
+    # the string after the very last "/" e.g. backup/test/zroot -> zroot
+    l_base_fs=${initial_source##*/}
+    # This gets everything but the base_fs, so that we can later delete it from
+    # $source
+    l_part_of_source_to_delete=${initial_source%"$l_base_fs"}
+
     # Prepare the actual destination (g_actual_dest) for property transfer.
     # A trailing slash means that the root filesystem is transferred straight
     # into the dest fs, no trailing slash means that this fs is created
@@ -66,7 +74,7 @@ prepare_rs_property_transfer() {
     if [ "$g_option_L_rsync_levels_deep" = "" ]; then
         # If the original source was backup/test/zroot and we are transferring
         # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
-        l_dest_tail=$(echo "$source" | sed -e "s%^$part_of_source_to_delete%%g")
+        l_dest_tail=$(echo "$source" | sed -e "s%^$l_part_of_source_to_delete%%g")
         g_actual_dest="$g_destination"/"$l_dest_tail"
     else
         l_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")

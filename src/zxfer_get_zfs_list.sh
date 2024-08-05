@@ -70,7 +70,7 @@ write_source_snapshot_list_to_file() {
             # check if compression is enabled
             if [ "$g_option_z_compress" -eq 1 ]; then
                 # IllumOS requires -d 1 when listing snapshots for one dataset
-                l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}' | zstd -9 \" | zstd -d"
+                l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
             else
                 l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}'\""
             fi
@@ -97,6 +97,8 @@ write_source_snapshot_list_to_file() {
 # destination since it is not needed.
 # This significantly improves performance as the metadata
 # doesn't need to be searched for the creation time of each snapshot.
+# Parallelization support has been added and is useful in situations when
+# the ARC is not populated such as when a removable disk us mounted.
 write_destination_snapshot_list_to_files() {
     l_rzfs_list_hr_snap_tmp_file=$1
     l_dest_snaps_stripped_sorted_tmp_file=$2
@@ -112,8 +114,24 @@ write_destination_snapshot_list_to_files() {
     if [ $(exists_destination "$l_destination_dataset") -eq 1 ]; then
         # dataset exists
 
-        # do not perform in the background so we can sort the results
-        # before the longest operation is complete
+        # using parallel when metadata cached is slower - disabling
+        #if [ $g_option_j_jobs -gt 1 ]; then
+        #    # if the g_RZFS command is remote, then escape the command to execute
+        #    if [ ! "$g_option_T_origin_host" = "" ]; then
+        #        if [ "$g_option_z_compress" -eq 1 ]; then
+        #            l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
+        #        else
+        #            l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}'\""
+        #        fi
+        #    else
+        #        l_cmd="$g_RZFS list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_RZFS list -H -o name -d 1 -t snapshot {}'"
+        #    fi
+        #else
+        #    # do not perform in the background so we can sort the results
+        #    # before the longest operation is complete
+        #    l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
+        #fi
+
         l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
         echoV "Running command: $l_cmd"
         # make sure to eval and then pipe the contents to the file in case
@@ -152,15 +170,30 @@ set_g_recursive_source_list() {
 
     g_recursive_source_list=$(comm -23 \
         "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
-        "$g_cmd_awk" -F@ '{print $1}' | sort | uniq)
+        "$g_cmd_awk" -F@ '{print $1}' | sort -u)
 
-    echoV "Source dataset count: $(echo "$g_recursive_source_list" | wc -l)"
-
-    if [ "$g_recursive_source_list" = "" ]; then
-        echov "No snapshots to transfer."
+    # debugging
+    if [ "$g_option_V_very_verbose" -eq 1 ]; then
+        echo "====================================================================="
+        echo "====== Snapshots present in source but missing in destination ======"
+        comm -23 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+        echo "====== Source datasets that differ from destination ======"
+        echo "g_recursive_source_list:"
+        echo "$g_recursive_source_list"
+        echo "Source dataset count: $(echo "$g_recursive_source_list" | grep -cve '^\s*$')"
+        echo "====================================================================="
+        echo "====== Extra Destination snapshots not in source ======"
+        comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+        echo "====== Destination datasets with extra snapshots not in source ======"
+        comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" | "$g_cmd_awk" -F@ '{print $1}' | sort -u
+        echo "====================================================================="
     fi
 
-    rm "$l_source_snaps_sorted_tmp_file"
+    if [ "$g_recursive_source_list" = "" ]; then
+        echov "No new snapshots to transfer."
+    fi
+
+    rm "$l_source_snaps_sorted_tmp_file" &
 }
 
 #
