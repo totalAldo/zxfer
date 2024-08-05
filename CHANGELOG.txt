@@ -1,6 +1,19 @@
 CHANGELOG
 =========
 
+2024.08.04
+-fix an issue with copying the first snapshot when a destination dataset doesn't
+ exist
+
+2024.08.03
+-add very verbose output to display snapshot deltas in set_g_recursive_source_list()
+-clean up copy_snapshots()
+
+2024.08.01
+-commented out parallel use for listing destination due to poorer performance
+ when metadata cached
+-add parallel support when listing destination snapshots
+
 2024.07.29
 -update zfs list for IllumOS to use '-d 1' when listing snapshots
 -only pipe parallel output through zstd if compression is enabled

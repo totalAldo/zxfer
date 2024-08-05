@@ -39,15 +39,21 @@
 
 # module variables
 m_services_to_restart=""
-m_sourcefs=""
 
 #
 # Prepare the actual destination (g_actual_dest) as used in zfs receive.
-# Uses $part_of_source_to_delete, $g_destination, $initial_source
+# Uses $g_destination, $initial_source
 # Output is $g_actual_dest
 #
 set_actual_dest() {
     l_source=$1
+
+    # This gets the root filesystem transferred - e.g.
+    # the string after the very last "/" e.g. backup/test/zroot -> zroot
+    l_base_fs=${initial_source##*/}
+    # This gets everything but the base_fs, so that we can later delete it from
+    # $source
+    l_part_of_source_to_delete=${initial_source%"$l_base_fs"}
 
     # 0 if not a trailing slash; regex is one character of any sort followed by
     # zero or more of any character until "/" followed by the end of the
@@ -61,7 +67,7 @@ set_actual_dest() {
     if [ "$l_trailing_slash" -eq 0 ]; then
         # If the original source was backup/test/zroot and we are transferring
         # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
-        l_dest_tail=$(echo "$l_source" | sed -e "s%^$part_of_source_to_delete%%g")
+        l_dest_tail=$(echo "$l_source" | sed -e "s%^$l_part_of_source_to_delete%%g")
         g_actual_dest="$g_destination"/"$l_dest_tail"
     else
         l_trailing_slash_dest_tail=$(echo "$l_source" | sed -e "s%^$initial_source%%g")
@@ -150,14 +156,20 @@ relaunch() {
 # Create a new recursive snapshot.
 #
 newsnap() {
+    l_initial_source=$1
+
+    # We snapshot from the base of the initial source
+    # Extract the filesystem name from the initial source snapshot by removing the '@' and everything after it
+    l_sourcefs="${initial_source%@*}"
+
     l_snap=$g_zxfer_new_snapshot_name
 
     if [ "$g_option_R_recursive" != "" ]; then
-        echov "Creating recursive snapshot $m_sourcefs@$l_snap."
-        cmd="$g_LZFS snapshot -r $m_sourcefs@$l_snap"
+        echov "Creating recursive snapshot $l_sourcefs@$l_snap."
+        cmd="$g_LZFS snapshot -r $l_sourcefs@$l_snap"
     else
-        echov "Creating snapshot $m_sourcefs@$l_snap."
-        cmd="$g_LZFS snapshot $m_sourcefs@$l_snap"
+        echov "Creating snapshot $l_sourcefs@$l_snap."
+        cmd="$g_LZFS snapshot $l_sourcefs@$l_snap"
     fi
 
     execute_command "$cmd"
@@ -212,38 +224,32 @@ calculate_unsupported_properties() {
 copy_filesystems() {
     echoV "Begin copy_filesystems()"
 
-    for source in $g_recursive_source_list; do
-        # Split up source into source fs, last component
-        m_sourcefs=$(echo "$source" | cut -d@ -f1)
+    for l_source in $g_recursive_source_list; do
 
-        set_actual_dest "$source"
+        set_actual_dest "$l_source"
 
         # If using the -m feature, check if the source is mounted,
         # otherwise there's no point in us doing the remounting.
         if [ "$g_option_m_migrate" -eq 1 ]; then
-            l_source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$source")
+            l_source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$l_source")
             if [ "$l_source_to_migrate_mounted" = "yes" ]; then
                 echo "The source filesystem is not mounted, why use -m?"
                 exit 1
             fi
-            mountpoint=$($g_LZFS get -Ho value mountpoint "$source")
-            propsource=$($g_LZFS get -Ho source mountpoint "$source")
+            mountpoint=$($g_LZFS get -Ho value mountpoint "$l_source")
+            propsource=$($g_LZFS get -Ho source mountpoint "$l_source")
             echov "Mountpoint is: $mountpoint. Source: $propsource."
         fi
 
         # Inspect the source and destination snapshots so that we are in position to
         # transfer using the latest common snapshot as a base, and transferring the
         # newer snapshots on source, in order.
-        inspect_delete_snap "$g_option_d_delete_destination_snapshots" "$source"
+        inspect_delete_snap "$g_option_d_delete_destination_snapshots" "$l_source"
 
         # Transfer source properties to destination if required.
-        # in the function.
         if [ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
             transfer_properties
         fi
-
-        # Since we'll mostly wrap around zfs send/receive, we'll leave further
-        # error-checking to them.
 
         #
         # We now have a valid source filesystem, volume or snapshot to copy from and an
@@ -318,21 +324,13 @@ recursively, but not both -N and -R at the same time."
         g_recursive_source_list=$initial_source
     fi
 
-    # This gets the root filesystem transferred - e.g.
-    # the string after the very last "/" e.g. backup/test/zroot -> zroot
-    base_fs=${initial_source##*/}
-    # This gets everything but the base_fs, so that we can later delete it from
-    # $source
-    part_of_source_to_delete=${initial_source%"$base_fs"}
-
     #
     # If using -s, do a new recursive snapshot, then copy all new snapshots too.
     #
     if [ "$g_option_s_make_snapshot" -eq 1 ] && [ "$g_option_m_migrate" -eq 0 ]; then
-        # We snapshot from the base of the initial source
-        m_sourcefs=$(echo "$initial_source" | cut -d@ -f1)
         # Create the new snapshot with a unique name.
-        newsnap
+        newsnap "$initial_source"
+
         # Because there are new snapshots, need to get_zfs_list again
         get_zfs_list
     fi
@@ -361,11 +359,8 @@ recursively, but not both -N and -R at the same time."
                 }
         done
 
-        # We snapshot from the base of the initial source
-        m_sourcefs=$(echo "$initial_source" | cut -d@ -f1)
-
-        # Create the last snapshot with a unique name.
-        newsnap
+        # Create the new snapshot with a unique name.
+        newsnap "$initial_source"
 
         # We include the mountpoint as a property that should be transferred.
         # Note that $g_option_P_transfer_property is automatically set to 1, to transfer the property.
@@ -379,6 +374,7 @@ recursively, but not both -N and -R at the same time."
 
     if [ "$g_option_g_grandfather_protection" != "" ]; then
         echov "Checking grandfather status of all snapshots marked for deletion..."
+
         for l_source in $g_recursive_source_list; do
             set_actual_dest "$l_source"
             # turn off delete so that we are only checking snapshots, pass 0

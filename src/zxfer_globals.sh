@@ -42,7 +42,7 @@
 #
 init_globals() {
     # zxfer version
-    g_zxfer_version="2.0.0-20240801"
+    g_zxfer_version="2.0.0-20240804"
 
     # max number of iterations to run iterate through run_zfs_mode
     # if changes are made to the filesystems
@@ -380,7 +380,20 @@ read_command_line_switches() {
 
 # Function to extract snapshot name
 extract_snapshot_name() {
-    echo "$1" | grep @ | cut -d@ -f2
+    # use the method below to not spawn grep and cut
+    #echo "$1" | grep @ | cut -d@ -f2
+
+    # Check if the input contains an '@' symbol
+    case "$1" in
+        *@*)
+            # Extract the part after the '@' symbol using parameter expansion
+            echo "${1#*@}"
+            ;;
+        *)
+            # If no '@' symbol is found, return an empty string or handle as needed
+            echo ""
+            ;;
+    esac
 }
 
 #
