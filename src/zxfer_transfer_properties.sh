@@ -203,11 +203,16 @@ resolve_human_vars() {
 # Either creates the filesystem if it doesn't exist,
 # or sets it after the fact.
 # Also, checks to see if the override properties given as options are valid.
-# Needs: $source, $initial_source, $g_actual_dest, $g_recursive_dest_list
+# Needs: $initial_source, $g_actual_dest, $g_recursive_dest_list
 # $g_dont_write_backup
 # $g_ensure_writable
 #
 transfer_properties() {
+    echoV "transfer_properties: $1"
+    echoV "initial_source: $initial_source"
+
+    l_source=$1
+
     # We have chosen to set all source properties in the case of -P
     # Any -o values will be set too, and will override any values from -P.
     # Where the destination does not exist, it will be created.
@@ -218,16 +223,16 @@ transfer_properties() {
     # get source properties,values,sources in form
     # property1=value1=source1,property2=value2=source2,...
     # Use -p to remove units, since localization can make these incompatible
-    source_pvs=$($g_LZFS get -Hpo property,value,source all "$source" |
+    l_source_pvs=$($g_LZFS get -Hpo property,value,source all "$l_source" |
         tr "\t" "=" | tr "\n" ",")
-    source_pvs=${source_pvs%,}
-    source_human_pvs=$($g_LZFS get -Ho property,value,source all "$source" |
+    l_source_pvs=${l_source_pvs%,}
+    l_source_human_pvs=$($g_LZFS get -Ho property,value,source all "$l_source" |
         tr "\t" "=" | tr "\n" ",")
-    source_human_pvs=${source_human_pvs%,}
+    l_source_human_pvs=${l_source_human_pvs%,}
 
     # Check if the source is a zvol, which requires some special handling
-    source_dstype=$($g_LZFS get -Hpo value type "$source")
-    source_volsize=$($g_LZFS get -Hpo value volsize "$source")
+    l_source_dstype=$($g_LZFS get -Hpo value type "$l_source")
+    l_source_volsize=$($g_LZFS get -Hpo value volsize "$l_source")
 
     # Some localizations (German, French) use a comma as a decimal separator which
     # changes the interpretation of the value on machines with a different
@@ -237,23 +242,23 @@ transfer_properties() {
     # However, some properties have a value of 'none', that in -p ends up having
     # a different value (filesystem_count=18446744073709551615)
     # clean these up by comparing the two outputs and making the right decision
-    resolve_human_vars "$source_pvs" "$source_human_pvs"
-    source_pvs="$human_results"
+    resolve_human_vars "$l_source_pvs" "$l_source_human_pvs"
+    l_source_pvs="$human_results"
 
     # add to the details to allow backup of properties
     # unless $g_dont_write_backup non-zero, as with first rsync transfer
     # of properties
     if [ "$g_option_k_backup_property_mode" -eq 1 ] && [ "$g_dont_write_backup" -eq 0 ]; then
         g_backup_file_contents="$g_backup_file_contents;\
-$source,$g_actual_dest,$source_pvs"
+$l_source,$g_actual_dest,$l_source_pvs"
     fi
 
-    # If we are restoring properties, then get source_pvs from the backup file
+    # If we are restoring properties, then get l_source_pvs from the backup file
     if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
-        source_pvs=$(echo "$g_restored_backup_file_contents" | grep "^[^,]*,$source," |
+        l_source_pvs=$(echo "$g_restored_backup_file_contents" | grep "^[^,]*,$l_source," |
             sed -e 's/^[^,]*,[^,]*,//g')
-        if [ "$source_pvs" = "" ]; then
-            throw_usage_error "Can't find the properties for the filesystem $source"
+        if [ "$l_source_pvs" = "" ]; then
+            throw_usage_error "Can't find the properties for the filesystem $l_source"
         fi
     fi
 
@@ -265,8 +270,8 @@ $source,$g_actual_dest,$source_pvs"
         # make sure that the g_option_o_override_property_pv includes only readonly=off
         g_option_o_override_property_pv=$(echo "$g_option_o_override_property_pv" | sed -e 's/readonly=on/readonly=off/g')
 
-        # make sure that the source_pvs includes only readonly=off
-        source_pvs=$(echo "$source_pvs" | sed -e 's/readonly=on/readonly=off/g')
+        # make sure that the l_source_pvs includes only readonly=off
+        l_source_pvs=$(echo "$l_source_pvs" | sed -e 's/readonly=on/readonly=off/g')
     fi
 
     valid_option_property=0
@@ -276,10 +281,10 @@ $source,$g_actual_dest,$source_pvs"
 
     # Test to see if each -o property is valid; leave value testing to zfs.
     # Note that this only needs to be done once and this is a good place.
-    if [ "$initial_source" = "$source" ]; then
+    if [ "$initial_source" = "$l_source" ]; then
         for op_line in $g_option_o_override_property_pv; do
             op_property=$(echo "$op_line" | cut -f1 -d=)
-            for sp_line in $source_pvs; do
+            for sp_line in $l_source_pvs; do
                 sp_property=$(echo "$sp_line" | cut -f1 -d=)
                 if [ "$op_property" = "$sp_property" ]; then
                     valid_option_property=1
@@ -317,7 +322,7 @@ $override_value=$override_source,"
         # only "local" options need to be specified in the creation list, as
         # all others will be auto-inherited.
         #
-        for sp_line in $source_pvs; do
+        for sp_line in $l_source_pvs; do
             override_property=$(echo "$sp_line" | cut -f1 -d=)
             override_value=$(echo "$sp_line" | cut -f2 -d=)
             override_source=$(echo "$sp_line" | cut -f3 -d=)
@@ -338,7 +343,7 @@ $override_value=$override_source,"
             override_pvs="$override_pvs$override_property=$override_value=$override_source,"
             if [ "$creation_property" != "NULL" ] && [ "$creation_source" = "local" ]; then
                 creation_pvs="$creation_pvs$creation_property=$creation_value=$creation_source,"
-            elif [ "$source_dstype" = "volume" ] && [ "$creation_property" = "refreservation" ]; then
+            elif [ "$l_source_dstype" = "volume" ] && [ "$creation_property" = "refreservation" ]; then
                 creation_pvs="$creation_pvs$creation_property=$creation_value=$creation_source,"
             fi
         done
@@ -373,7 +378,7 @@ $override_value=$override_source,"
     # This is where we actually create or modify the destination filesystem.
     # Is the destination absent? If so, just create with correct option list.
     if [ "$dest_exist" = "0" ]; then
-        if [ "$initial_source" = "$source" ]; then
+        if [ "$initial_source" = "$l_source" ]; then
             # as this is the initial source, we want to transfer all properties from
             # the source, overridden with g_option_o_override_property values as necessary
             remove_sources "$override_pvs"
@@ -381,8 +386,8 @@ $override_value=$override_source,"
             if [ "$override_option_list" != "" ]; then
                 override_option_list=" -o $override_option_list"
             fi
-            if [ "$source_dstype" = "volume" ]; then
-                override_option_list=" -V $source_volsize $override_option_list"
+            if [ "$l_source_dstype" = "volume" ]; then
+                override_option_list=" -V $l_source_volsize $override_option_list"
             fi
 
             # If not, create it with the override list and be done with it -
@@ -421,8 +426,8 @@ with specified properties."
             if [ "$creation_option_list" != "" ]; then
                 creation_option_list=" -o $creation_option_list"
             fi
-            if [ "$source_dstype" = "volume" ]; then
-                creation_option_list=" -V $source_volsize $creation_option_list"
+            if [ "$l_source_dstype" = "volume" ]; then
+                creation_option_list=" -V $l_source_volsize $creation_option_list"
             fi
 
             # revert to old field separator
@@ -607,7 +612,7 @@ with specified properties."
             echov "Setting properties/sources on destination filesystem \"$g_actual_dest\"."
         fi
 
-        if [ "$initial_source" = "$source" ]; then
+        if [ "$initial_source" = "$l_source" ]; then
             ov_set_list="$ov_initsrc_set_list"
         fi
 
@@ -633,7 +638,7 @@ with specified properties."
 
         done
 
-        if [ "$initial_source" != "$source" ]; then
+        if [ "$initial_source" != "$l_source" ]; then
             # Now we have a list of only changes to make using zfs inherit.
             # Let's make the changes.
             for ov_line in $ov_inherit_list; do
