@@ -20,6 +20,7 @@ replication until there are no changes in the destination.
 + `-j`: specify the number of parallel zfs list snaphot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound). When j > 1, this number also controls the number of concurrent `zfs send` commands that are run in parallel.
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
++ `-x`: exclude grep pattern for datasets
 + `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
 + `-z`: pipe ssh transfers through zstd default compression
 + `-Z`: custom zstd compression supporting higher compression levels or multiple threads

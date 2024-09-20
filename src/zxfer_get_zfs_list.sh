@@ -172,6 +172,11 @@ set_g_recursive_source_list() {
         "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
         "$g_cmd_awk" -F@ '{print $1}' | sort -u)
 
+    # if excluding datasets, remove them from the list
+    if [ "$g_option_x_exclude_datasets" != "" ]; then
+        g_recursive_source_list=$(echo "$g_recursive_source_list" | grep -v "$g_option_x_exclude_datasets")
+    fi
+
     # debugging
     if [ "$g_option_V_very_verbose" -eq 1 ]; then
         echo "====================================================================="
