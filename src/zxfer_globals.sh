@@ -42,7 +42,7 @@
 #
 init_globals() {
     # zxfer version
-    g_zxfer_version="2.0.0-20240804"
+    g_zxfer_version="2.0.0-20240919"
 
     # max number of iterations to run iterate through run_zfs_mode
     # if changes are made to the filesystems
@@ -84,6 +84,7 @@ init_globals() {
     g_option_U_skip_unsupported_properties=0
     g_option_v_verbose=0
     g_option_V_very_verbose=0
+    g_option_x_exclude_datasets=""
     g_option_Y_yield_iterations=1
     g_option_w_raw_send=0
     g_option_z_compress=0
@@ -234,7 +235,7 @@ trap trap_exit INT TERM HUP QUIT EXIT
 # Check command line parameters.
 #
 read_command_line_switches() {
-    while getopts bBc:deE:f:Fg:hiI:j:klL:lmnN:o:O:pPPR:sST:u:UvVwY?:D:zZ: l_i; do
+    while getopts bBc:deE:f:Fg:hiI:j:klL:lmnN:o:O:pPPR:sST:u:UvVwY?:D:zZ:x: l_i; do
         case $l_i in
         b)
             g_option_b_beep_always=1
@@ -357,6 +358,9 @@ read_command_line_switches() {
             ;;
         w)
             g_option_w_raw_send=1
+            ;;
+        x)
+            g_option_x_exclude_datasets="$OPTARG"
             ;;
         Y)
             # set the number of iterations to run through the zfs mode
