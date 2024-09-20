@@ -52,7 +52,7 @@ set_actual_dest() {
     # the string after the very last "/" e.g. backup/test/zroot -> zroot
     l_base_fs=${initial_source##*/}
     # This gets everything but the base_fs, so that we can later delete it from
-    # $source
+    # $l_source
     l_part_of_source_to_delete=${initial_source%"$l_base_fs"}
 
     # 0 if not a trailing slash; regex is one character of any sort followed by
@@ -248,7 +248,7 @@ copy_filesystems() {
 
         # Transfer source properties to destination if required.
         if [ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
-            transfer_properties
+            transfer_properties "$l_source"
         fi
 
         #
