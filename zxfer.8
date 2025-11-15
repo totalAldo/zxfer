@@ -1,8 +1,8 @@
 .\"
 .\" Copyright (c) 2024-2025 Aldo Gonzalez
 .\" Copyright (c) 2013-2016 Allan Jude <allanjude@freebsd.org>
-.\" Copyright (c) 2010, 2011 Ivan Nash Dreckman
-.\" Copyright (c) 2007, 2008 Constantin Gonzalez
+.\" Copyright (c) 2010,2011 Ivan Nash Dreckman
+.\" Copyright (c) 2007,2008 Constantin Gonzalez
 .\" All rights reserved.
 .\"
 .\" Redistribution and use in source and binary forms, with or without
@@ -26,7 +26,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd Mar 14, 2024
+.Dd Nov 14, 2025
 .Dt ZXFER 8
 .Os
 .Sh NAME
@@ -34,17 +34,33 @@
 .Nd "transfer ZFS filesystems, snapshots, properties, files and directories"
 .Sh SYNOPSIS
 .Nm
-.Op Fl dFnPsUvVwY
-.Op Fl k | e
-.Op Fl b | B
-.Brq -N path/to/src | -R path/to/src
-.Op Fl m Op Ar c "FMRI|pattern[ FMRI|pattern]...]"
+.Op Fl b
+.Op Fl B
+.Op Fl c Ar "FMRI|pattern[ FMRI|pattern]..."
+.Op Fl d
 .Op Fl D Ar 'progress dialog options'
-.Op Fl I Ar properties,to,ignore
-.Op [-z] [-Z 'zstd compression command'] Fl O Ar user@host
-.Op Fl T Ar user@host
-.Op Fl o Ar option1=value1,option2=value2...
+.Op Fl e
+.Op Fl F
 .Op Fl g Ar days
+.Op Fl I Ar properties,to,ignore
+.Op Fl j Ar jobs
+.Op Fl k
+.Op Fl m
+.Op Fl n
+.Brq -N path/to/src | -R path/to/src
+.Op Fl o Ar option1=value1,option2=value2...
+.Op Fl O Ar user@host
+.Op Fl P
+.Op Fl s
+.Op Fl T Ar user@host
+.Op Fl U
+.Op Fl v
+.Op Fl V
+.Op Fl w
+.Op Fl x Ar pattern
+.Op Fl Y
+.Op Fl z
+.Op Fl Z Ar "zstd compression command"
 .Ar destination
 .Nm
 .Brq -S
@@ -364,6 +380,18 @@ mode is in effect. Several options have different effects depending
 on whether -S is present or not. Consult the relevant option section before
 using.
 .Pp
+When
+.Fl S
+is enabled the utility rejects
+.Fl F ,
+.Fl m ,
+.Fl O ,
+.Fl s ,
+.Fl T
+and any attempt to raise
+.Fl Y
+above its default of 1.
+.Pp
 It is also possible to transfer to readonly destination filesystems, but
 this is only supported if either
 .Op Fl o
@@ -401,7 +429,6 @@ Example:
 .Pp
 .Nm
 .Fl O Ar user@host Fl D Ar 'bar -s %%size%%' Fl R Ar source destination
-.Op Fl F .
 This will occur if you are using
 .Nm
 for routine backups and in the interim, culling snapshots on the source.
@@ -410,6 +437,23 @@ often gets deleted on the source. Any snapshots on the destination more
 recent than the most recent common snapshot must be deleted for
 .Cm zfs send
 to work.
+.It Fl F
+Pass (F) to
+.Xr zfs 8
+.Cm receive
+so the destination side will roll back to the most recent snapshot that
+matches the stream. This forcibly destroys any newer snapshots or data that
+only exist on the destination and allows incremental sends to proceed when
+the target has diverged.
+This switch is only valid in normal (non
+.Fl S )
+mode.
+.Pp
+Attempts to combine
+.Fl F
+with
+.Fl S
+result in an error.
 .It Fl g
 (g)randfather protection. Specify a number of days old (relative to the system
 date) at and above which snapshots on the destination won't be deleted. For use
@@ -445,6 +489,14 @@ less than 375 days old are not protected.
 Do not copy this comma separated list of properties when performing replication.
 Useful for skipping properties like quotas that can interfere with replication,
 or properties that are not supported on the destination.
+.It Fl j Ar jobs
+Run up to this many zfs send/receive jobs concurrently and parallelize listing
+snapshots when determining the work queue. The default is 1, which disables
+background sends. Raising this value can hide WAN latency or speed up large
+replications, but will also increase memory, CPU and I/O load. Only applies in
+normal (non
+.Fl S )
+mode.
 .It Fl m
 After sending all snapshots, (m)igrate the source to the destination filesystem by
 unmounting the source filesystem and changing the new filesystem's
@@ -460,6 +512,11 @@ Note also that
 and
 .Op Fl T
 (i.e. remote transfers) are not supported with this option enabled.
+Likewise,
+.Fl m
+cannot be combined with
+.Fl S
+mode.
 .It Fl N
 Replicate the listed filesystem. Note the provisos listed above in
 .Op Fl R .
@@ -468,6 +525,13 @@ e.g.  specifying -N
 .Pa tank/tmp
 will transfer only
 .Pa tank/tmp .
+.It Fl x Ar pattern
+Exclude any datasets whose names match the supplied regular expression from
+the recursive replication list. The pattern is passed to
+.Xr grep 1
+.Fl v ,
+so be sure to escape shell metacharacters or provide quotes where appropriate.
+Useful when a recursive send should omit scratch datasets or other prefixes.
 .It Fl O
 Specify an (O)rigin user@host. This allows transfers FROM a remote host via ssh.
 e.g. Whatever filesystems you specify as the source are taken to exist on that
@@ -532,6 +596,10 @@ ssh root@192.168.0.1 command ...
 So with Solaris, specifying the pfexec at the end results in:
 .Pp
 ssh user1@192.168.0.1 pfexec command ...
+.Pp
+This option may only be used when
+.Fl S
+is not specified.
 .It Fl R
 (R)ecursively replicate all filesystems under the specified source. If not
 specifying
@@ -565,6 +633,10 @@ at the end, and ensure that a current snapshot is taken before or during the
 second execution. e.g. use this option to ensure that a relatively current
 snapshot exists, create it manually, or wait until your own snapshotting
 regime does the job for you (if you have one).
+.Pp
+This switch is ignored in
+.Fl S
+mode and will cause the program to exit with an error if specified there.
 .It Fl T
 Specify a (T)arget user@host. This allows transfers TO a remote host via ssh.
 e.g. Whatever filesystem you specify as the destination will be where the
@@ -582,6 +654,12 @@ Again, please note that if you are using Solaris, you will most likely need to u
 quotes and spacing exactly:
 .Pp
 e.g. -T "user1@192.168.0.1 pfexec"
+.Pp
+Like
+.Op Fl O ,
+this option is only available in normal (non
+.Fl S )
+mode.
 .It Fl U
 Skip replicating any properties that are not supported by the destination.
 Before replication begins, a list of supported properties is fetched from the
@@ -597,18 +675,30 @@ uses zfs ra(w) send mode
 .It Fl Y
 (Y)ield after no zfs send or zfs destroy commands are executed or 8 iterations
 have been performed, whichever comes first.
+When
+.Fl S
+is in effect the yield counter must remain at its default of 1; raising it
+causes the program to exit.
 .It Fl z
 Pipe the send stream through zstd -3 compression and then decode it at the
-target using zstd -d.
+remote side using zstd -d. This option requires either
+.Op Fl O
+or
+.Op Fl T
+because compression only occurs when traffic flows over ssh.
 This converts:
 .Pp
-ssh user@host "/sbin/zfs send dataset@snap1 | /sbin/zfs receive
+.Dl zfs send dataset@snap1 | ssh user@host "/sbin/zfs receive destination"
 .Pp
 to
 .Pp
-ssh user@host "/sbin/zfs send dataset@snap1 | zstd -3" | zstd -d | /sbin/zfs receive
+.Dl zfs send dataset@snap1 | zstd -3 | ssh user@host "zstd -d | /sbin/zfs receive destination"
 .It Fl Z
 Pass the zstd command to use during compression.
+.Op Fl O
+or
+.Op Fl T
+must also be provided.
 .Pp
 e.g.
 .Pp
@@ -616,7 +706,7 @@ e.g.
 .Pp
 This will modify the default -z option to
 .Pp
-ssh user@host "/sbin/zfs send dataset@snap1 | zstd -T0 -9" | zstd -d | /sbin/zfs receive
+.Dl zfs send dataset@snap1 | zstd -T0 -9 | ssh user@host "zstd -d | /sbin/zfs receive"
 
 .El
 .Ss Rsync mode
