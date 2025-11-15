@@ -369,19 +369,22 @@ that the legacy mountpoint is \"/\"."
             full_rs_options="$full_rs_options $g_option_E_rsync_exclude_patterns"
         fi
 
+        rs_source_safe=$(escape_for_double_quotes "$rs_source")
+        rs_dest_safe=$(escape_for_double_quotes "$rs_dest")
+
         echov "Using rsync to recursively transfer $rs_source to $rs_dest with \
 options $full_rs_options"
 
         # Now that we have something to feed rsync, we will call it.
         if [ $g_option_n_dryrun -eq 0 ]; then
             if [ $g_option_p_rsync_persist -eq 1 ]; then
-                $g_cmd_rsync "$full_rs_options" "$rs_source" "$rs_dest" # persist in face of error
+                $g_cmd_rsync "$full_rs_options" "$rs_source_safe" "$rs_dest_safe" # persist in face of error
             else
-                $g_cmd_rsync "$full_rs_options" "$rs_source" "$rs_dest" ||
+                $g_cmd_rsync "$full_rs_options" "$rs_source_safe" "$rs_dest_safe" ||
                     throw_error "Error when executing rsync."
             fi
         else
-            echo "$g_cmd_rsync $full_rs_options $rs_source $rs_dest"
+            echo "$g_cmd_rsync $full_rs_options $rs_source_safe $rs_dest_safe"
         fi
 
     done # End of sub-filesystem loop

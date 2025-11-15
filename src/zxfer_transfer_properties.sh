@@ -621,16 +621,18 @@ with specified properties."
         for ov_line in $ov_set_list; do
             ov_property=$(echo "$ov_line" | cut -f1 -d=)
             ov_value=$(echo "$ov_line" | cut -f2 -d=)
+            ov_property_safe=$(escape_for_double_quotes "$ov_property")
+            ov_value_safe=$(escape_for_double_quotes "$ov_value")
 
             # revert to old field separator
             # (This and reversion back is so that $g_RZFS command works with -r)
             IFS=$OLDIFS
 
             if [ "$g_option_n_dryrun" -eq 0 ]; then
-                $g_RZFS set "${ov_property}=${ov_value}" "$g_actual_dest" ||
+                $g_RZFS set "${ov_property_safe}=${ov_value_safe}" "$g_actual_dest" ||
                     throw_error "Error when setting properties on destination filesystem."
             else
-                echo "$g_RZFS set $ov_property=$ov_value $g_actual_dest"
+                echo "$g_RZFS set ${ov_property_safe}=${ov_value_safe} $g_actual_dest"
             fi
 
             #change the field separator to a ","
@@ -645,16 +647,17 @@ with specified properties."
             for ov_line in $ov_inherit_list; do
                 ov_property=$(echo "$ov_line" | cut -f1 -d=)
                 ov_value=$(echo "$ov_line" | cut -f2 -d=)
+                ov_property_safe=$(escape_for_double_quotes "$ov_property")
 
                 # revert to old field separator
                 # (This and reversion back is so that $g_RZFS command works with -r)
                 IFS=$OLDIFS
 
                 if [ "$g_option_n_dryrun" -eq 0 ]; then
-                    $g_RZFS inherit "$ov_property" "$g_actual_dest" ||
+                    $g_RZFS inherit "$ov_property_safe" "$g_actual_dest" ||
                         throw_error "Error when inheriting properties on destination filesystem."
                 else
-                    echo "$g_RZFS inherit $ov_property $g_actual_dest"
+                    echo "$g_RZFS inherit $ov_property_safe $g_actual_dest"
                 fi
 
                 #change the field separator to a ","
