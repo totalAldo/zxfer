@@ -481,7 +481,7 @@ with specified properties."
         dest_pvs="$human_results"
 
         # remove the readonly properties and values as we are not comparing to them
-        remove_properties "$dest_pv" "$g_readonly_properties"
+        remove_properties "$dest_pvs" "$g_readonly_properties"
         # Remove the properties the user has asked us to ignore
         if [ -n "$g_option_I_ignore_properties" ]; then
             remove_properties "$m_new_rmv_pvs" "$g_option_I_ignore_properties"
