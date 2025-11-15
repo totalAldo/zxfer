@@ -7,6 +7,7 @@ CHANGELOG
 -document how to run the new shunit2 tests
 -add GitHub Actions workflow to run shunit2 tests on pushes and PRs
 -fix get_temp_file mktemp template to work on GNU/Linux CI runners
+-exclude vendored tests/shunit2 from codespell checks
 -add shfmt formatting gate to lint workflow
 -multiple lint fixes
 -Add lint workflow for codespell & ShellCheck
