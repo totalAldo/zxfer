@@ -14,6 +14,7 @@ CHANGELOG
 -Manage ssh control sockets per host
 -Fix property/rsync command injection
 -update zxfer.spec file
+-document zxfer.8 option restrictions and compression requirements
 
 2024.08.04
 -fix an issue with copying the first snapshot when a destination dataset doesn't
