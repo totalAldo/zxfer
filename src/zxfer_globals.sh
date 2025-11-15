@@ -524,11 +524,21 @@ get_backup_properties() {
 
     while [ $l_found_backup_file -eq 0 ]; do
         l_backup_file_dir=$($g_LZFS get -H -o value mountpoint "$l_suspect_fs")
+        l_backup_file="$l_backup_file_dir/$g_backup_file_extension.$l_suspect_fs_tail"
 
-        if $g_option_O_origin_host [ -r "$l_backup_file_dir/$g_backup_file_extension.$l_suspect_fs_tail" ]; then
-            g_restored_backup_file_contents=$($g_option_O_origin_host "$g_cmd_cat" "$l_backup_file_dir/$g_backup_file_extension.$l_suspect_fs_tail")
-            l_found_backup_file=1
+        if [ "$g_option_O_origin_host" = "" ]; then
+            if [ -r "$l_backup_file" ]; then
+                g_restored_backup_file_contents=$(cat "$l_backup_file")
+                l_found_backup_file=1
+            fi
         else
+            if $g_cmd_ssh "$g_option_O_origin_host" "[ -r '$l_backup_file' ]"; then
+                g_restored_backup_file_contents=$($g_cmd_ssh "$g_option_O_origin_host" "$g_cmd_cat '$l_backup_file'")
+                l_found_backup_file=1
+            fi
+        fi
+
+        if [ $l_found_backup_file -eq 0 ]; then
             l_suspect_fs_parent=$(echo "$l_suspect_fs" | sed -e 's%/[^/]*$%%g')
             if [ "$l_suspect_fs_parent" = "$l_suspect_fs" ]; then
                 echo "Error: Cannot find backup property file. Ensure that it"
