@@ -29,6 +29,8 @@ jobs:
           sudo apt-get install -y shellcheck
       - name: Run ShellCheck
         shell: bash
+        env:
+          SHELLCHECK_OPTS: --external-sources --source-path=.:src
         run: |
           set -euo pipefail
           shellcheck zxfer $(git ls-files '*.sh')

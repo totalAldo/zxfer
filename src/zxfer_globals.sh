@@ -30,16 +30,8 @@
 
 # BSD HEADER END
 
-# for ShellCheck
-if false; then
-    . ./zxfer_common.sh
-    . ./zxfer_get_zfs_list.sh
-    . ./zxfer_inspect_delete_snap.sh
-    . ./zxfer_rsync_mode.sh
-    . ./zxfer_transfer_properties.sh
-    . ./zxfer_zfs_mode.sh
-    . ./zxfer_zfs_send_receive.sh
-fi
+# shellcheck disable=SC2034
+# Global variables defined here are used across multiple zxfer modules.
 
 ################################################################################
 # DEFINE GLOBALS used by zxfer
@@ -594,6 +586,7 @@ get_backup_properties() {
     # We will step back through the filesystem hierarchy from $initial_source
     # until the pool level, looking for the backup file, stopping when we find
     # it or terminating with an error.
+    # shellcheck disable=SC2154
     l_suspect_fs=$initial_source
     l_suspect_fs_tail=""
     l_found_backup_file=0

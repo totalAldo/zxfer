@@ -32,6 +32,7 @@
 
 # for ShellCheck
 if false; then
+    # shellcheck source=src/zxfer_globals.sh
     . ./zxfer_globals.sh
 fi
 
@@ -194,7 +195,8 @@ delete_snaps() {
     #
     # - get the first element of the list
     # - get the portion of the string prior to the @ symbol
-    l_zfs_dest_dataset=$(echo "$l_snaps_to_delete" | head -n 1 | $g_cmd_awk -F'@' '{print $1}')
+    # shellcheck disable=SC2016
+    l_zfs_dest_dataset=$(echo "$l_snaps_to_delete" | head -n 1 | "$g_cmd_awk" -F'@' '{print $1}')
 
     # build the destroy command
     l_cmd="$g_RZFS destroy $l_zfs_dest_dataset@$l_unprotected_snaps_to_delete"
@@ -206,6 +208,7 @@ delete_snaps() {
     execute_background_cmd "$l_cmd" /dev/null
 
     # set the flag to indicate that a destroy command was sent
+    # shellcheck disable=SC2034
     g_is_performed_send_destroy=1
 
     echoV "End delete_snaps()"
