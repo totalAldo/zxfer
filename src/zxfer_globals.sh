@@ -117,6 +117,7 @@ init_globals() {
     # when using ssh, setup the control socket to use one connection
     # for all commands
     g_ssh_control_socket=""
+    g_ssh_control_socket_dir=""
     g_ssh_user_host=""
 
     g_cmd_rsync=""
@@ -178,7 +179,10 @@ xattr,dnodesize"
 # needs $g_ssh_user_host
 setup_ssh_control_socket() {
     l_timestamp=$(date +%s)
-    g_ssh_control_socket=$(mktemp -u -t zxfer_ssh_control_socket.$l_timestamp)
+    if ! g_ssh_control_socket_dir=$(mktemp -d -t zxfer_ssh_control_socket.$l_timestamp); then
+        throw_error "Error creating temporary directory for ssh control socket."
+    fi
+    g_ssh_control_socket="$g_ssh_control_socket_dir/socket"
     # establish the control socket
     eval "$g_cmd_ssh -M -S $g_ssh_control_socket $g_ssh_user_host -fN"
 
@@ -193,6 +197,12 @@ close_ssh_control_socket() {
         echoV "Closing ssh control socket: $l_cmd"
         # suppress the "Exit request sent." message
         eval "$l_cmd" 2>/dev/null
+    fi
+
+    if [ "$g_ssh_control_socket_dir" != "" ] && [ -d "$g_ssh_control_socket_dir" ]; then
+        rm -rf "$g_ssh_control_socket_dir"
+        g_ssh_control_socket_dir=""
+        g_ssh_control_socket=""
     fi
 }
 
