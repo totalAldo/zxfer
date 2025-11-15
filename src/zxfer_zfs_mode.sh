@@ -233,12 +233,12 @@ copy_filesystems() {
 
 		# If using the -m feature, check if the source is mounted,
 		# otherwise there's no point in us doing the remounting.
-	if [ "$g_option_m_migrate" -eq 1 ]; then
-		l_source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$l_source")
-		if [ "$l_source_to_migrate_mounted" != "yes" ]; then
-			echo "The source filesystem is not mounted, cannot use -m."
-			exit 1
-		fi
+		if [ "$g_option_m_migrate" -eq 1 ]; then
+			l_source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$l_source")
+			if [ "$l_source_to_migrate_mounted" != "yes" ]; then
+				echo "The source filesystem is not mounted, cannot use -m."
+				exit 1
+			fi
 			mountpoint=$($g_LZFS get -Ho value mountpoint "$l_source")
 			propsource=$($g_LZFS get -Ho source mountpoint "$l_source")
 			echov "Mountpoint is: $mountpoint. Source: $propsource."
