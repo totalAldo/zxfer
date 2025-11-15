@@ -2,6 +2,7 @@ CHANGELOG
 =========
 
 2025.11.15
+-Literalize snapshot prefix matching
 -Fix integration multi-dataset replication
 -remove the legacy rsync (-S) mode and delete unused options and helpers
 -drop the rsync dependency from zxfer.spec and refresh the man pages/README
