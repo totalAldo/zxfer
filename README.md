@@ -1,7 +1,7 @@
 zxfer (turbo)
 =====
 
-2024 - This is a refactored version of zxfer, with the goal of optimizing ZFS replication. Enhancements include improved code readability and performance, additional error handling functions, and new options.
+2024-2025 - This is a refactored version of zxfer, with the goal of optimizing ZFS replication. Enhancements include improved code readability and performance, additional error handling functions, and new options.
 
 These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots. These modifications have significantly decreased the time required for both `ssh` and local replication.
 
@@ -43,7 +43,7 @@ replication until there are no changes in the destination.
 + Compress the output of the source snapshot list when using `ssh` via `zstd -9`.
   When there are many snapshots, the output of the `zfs list` command can be several
   megabytes and it is highly compressible. While `ssh` offers compression options
-  including the use of `zstd`, compressesion is now explicity set by piping the
+  including the use of `zstd`, compression is now explicitly set by piping the
   `zfs list` output through `zstd -9`
 + To enhance efficiency in send/receive operations, initially execute a `comm` command to compare source and destination datasets. This allows for the identification and subsequent iteration over only those source datasets containing snapshots absent in the destination.
 + When `-j` > 1, run all `zfs send` commands using gnu `parallel`. Care should be taken
@@ -63,7 +63,7 @@ The code has been refactored for better readability and maintainability, which i
 If you use this script and have any suggestions or feedback, please open an issue or a pull request. I hope this script will be beneficial to others and that useful features can be incorporated into the main project.
 
 ## Testing
-This fork has been tested with FreeBSD 14.0, FreeBSD 14.1
+This fork has been tested with FreeBSD 14.0-14.3
 
 ## Acknowledgements
 A big thank you to everyone who contributed to this script over the past 16+ years, and to all its users.
