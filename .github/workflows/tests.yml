@@ -1,0 +1,17 @@
+name: Unit Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shunit2:
+    name: shunit2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shunit2 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tests/test_zxfer_common.sh

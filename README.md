@@ -63,7 +63,13 @@ The code has been refactored for better readability and maintainability, which i
 If you use this script and have any suggestions or feedback, please open an issue or a pull request. I hope this script will be beneficial to others and that useful features can be incorporated into the main project.
 
 ## Testing
-This fork has been tested with FreeBSD 14.0-14.3
+This fork has been tested with FreeBSD 14.0-14.3.
+
+Basic shunit2 smoke tests cover the most widely used helper functions and live in the `tests` directory. Run them with:
+
+```sh
+./tests/test_zxfer_common.sh
+```
 
 ## Acknowledgements
 A big thank you to everyone who contributed to this script over the past 16+ years, and to all its users.
