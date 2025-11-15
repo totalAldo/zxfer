@@ -20,13 +20,13 @@ setUp() {
 	g_option_V_very_verbose=0
 	TMPDIR="$TEST_TMPDIR"
 	if [ -n "${TEST_TMPDIR:-}" ]; then
-		rm -rf "$TEST_TMPDIR"/*
+		rm -rf "${TEST_TMPDIR:?}/"*
 	fi
 }
 
 test_escape_for_double_quotes_escapes_special_chars() {
-	input=$(printf '%s' 'text"with`special$chars\and normal')
-	expected=$(printf '%s' 'text\"with\`special\$chars\\and normal')
+	input=$(printf '%s' "text\"with\`special\$chars\\and normal")
+	expected=$(printf '%s' "text\\\"with\\\`special\\\$chars\\\\and normal")
 
 	result=$(escape_for_double_quotes "$input")
 
