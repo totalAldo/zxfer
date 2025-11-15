@@ -1,6 +1,9 @@
 CHANGELOG
 =========
 
+2025.11.15
+-add .shellcheckrc
+
 2025.11.14
 -spelling fixes
 -copyright year update
@@ -16,6 +19,12 @@ CHANGELOG
 -update zxfer.spec file
 -document zxfer.8 option restrictions and compression requirements
 -sync zxfer.1m with zxfer.8
+
+2024.09.20
+-fix bug in transfer_properties() where the source dataset was not being properly set
+
+2024.09.19
+-add -x option to exclude datasets that match the given grep pattern
 
 2024.08.04
 -fix an issue with copying the first snapshot when a destination dataset doesn't
