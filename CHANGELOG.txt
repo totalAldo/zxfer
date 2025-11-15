@@ -2,6 +2,9 @@ CHANGELOG
 =========
 
 2025.11.15
+-remove the legacy rsync (-S) mode and delete unused options and helpers
+-drop the rsync dependency from zxfer.spec and refresh the man pages/README
+-update integration tests and scripts now that rsync transfer paths no longer exist
 -vendor shunit2 test harness and helper script
 -add zxfer_common shunit2 smoke tests and make them executable
 -document how to run the new shunit2 tests

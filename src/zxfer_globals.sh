@@ -55,11 +55,8 @@ init_globals() {
 	g_option_d_delete_destination_snapshots=0
 	g_option_D_display_progress_bar=""
 	g_option_e_restore_property_mode=0
-	g_option_E_rsync_exclude_patterns=""
-	g_option_f_rsync_file_options=""
 	g_option_F_force_rollback=""
 	g_option_g_grandfather_protection=""
-	g_option_i_rsync_include_zfs_mountpoints=0
 	g_option_I_ignore_properties=""
 	# number of parallel job processes to run when listing zfs snapshots
 	# in the source (default 1 does not use parallel).
@@ -67,20 +64,15 @@ init_globals() {
 	# that can run at the same time.
 	g_option_j_jobs=1
 	g_option_k_backup_property_mode=0
-	g_option_l_rsync_legacy_mountpoint=0
-	g_option_L_rsync_levels_deep=""
 	g_option_o_override_property=""
 	g_option_O_origin_host=""
-	g_option_p_rsync_persist=0
 	g_option_P_transfer_property=0
 	g_option_R_recursive=""
 	g_option_m_migrate=0
 	g_option_n_dryrun=0
 	g_option_N_nonrecursive=""
-	g_option_S_rsync_mode=0
 	g_option_s_make_snapshot=0
 	g_option_T_target_host=""
-	g_option_u_rsync_use_existing_snapshot=0
 	g_option_U_skip_unsupported_properties=0
 	g_option_v_verbose=0
 	g_option_V_very_verbose=0
@@ -120,8 +112,6 @@ init_globals() {
 	g_ssh_target_control_socket=""
 	g_ssh_target_control_socket_dir=""
 
-	g_cmd_rsync=""
-
 	# default zfs commands, can be overridden by -O or -T
 	g_LZFS=$g_cmd_zfs
 	g_RZFS=$g_cmd_zfs
@@ -145,14 +135,7 @@ init_globals() {
 
 	g_restored_backup_file_contents=""
 
-	# used in rsync transfers, to turn off the backup file writing
-	# the first time
-	g_dont_write_backup=0
-
 	g_ensure_writable=0 # when creating/setting properties, ensures readonly=off
-
-	# default rsync options - see http://www.daemonforums.org/showthread.php?t=3948
-	g_default_rsync_options="-clptgoD --inplace --relative -H --numeric-ids"
 
 	# the readonly properties list 3 properties that are technically not
 	# readonly but we will remove them from the override list as it does not make
@@ -304,7 +287,7 @@ trap trap_exit INT TERM HUP QUIT EXIT
 # Check command line parameters.
 #
 read_command_line_switches() {
-	while getopts bBc:deE:f:Fg:hiI:j:klL:lmnN:o:O:pPPR:sST:u:UvVwY?:D:zZ:x: l_i; do
+	while getopts bBc:dD:eFg:hI:j:kmnN:o:O:PR:sT:UvVwx:YzZ: l_i; do
 		case $l_i in
 		b)
 			g_option_b_beep_always=1
@@ -327,12 +310,6 @@ read_command_line_switches() {
 			# are substituted
 			g_option_P_transfer_property=1
 			;;
-		E)
-			g_option_E_rsync_exclude_patterns="--exclude=$OPTARG $g_option_E_rsync_exclude_patterns"
-			;;
-		f)
-			g_option_f_rsync_file_options="$OPTARG"
-			;;
 		F)
 			g_option_F_force_rollback="-F"
 			;;
@@ -341,9 +318,6 @@ read_command_line_switches() {
 			;;
 		h)
 			throw_usage_error
-			;;
-		i)
-			g_option_i_rsync_include_zfs_mountpoints=1
 			;;
 		I)
 			g_option_I_ignore_properties="$OPTARG"
@@ -357,12 +331,6 @@ read_command_line_switches() {
 			# In order to back up the properties of the source, the
 			# properties of the source must be transferred as well.
 			g_option_P_transfer_property=1
-			;;
-		l)
-			g_option_l_rsync_legacy_mountpoint=1
-			;;
-		L)
-			g_option_L_rsync_levels_deep="$OPTARG"
 			;;
 		m)
 			g_option_m_migrate=1
@@ -388,9 +356,6 @@ read_command_line_switches() {
 			l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
 			g_LZFS="$l_origin_ssh_cmd $g_option_O_origin_host $g_cmd_zfs"
 			;;
-		p)
-			g_option_p_rsync_persist=1
-			;;
 		P)
 			g_option_P_transfer_property=1
 			;;
@@ -399,9 +364,6 @@ read_command_line_switches() {
 			;;
 		s)
 			g_option_s_make_snapshot=1
-			;;
-		S)
-			g_option_S_rsync_mode=1
 			;;
 		T)
 			# since we are using the -T option, we are pushing a remote transfer
@@ -412,10 +374,6 @@ read_command_line_switches() {
 			g_option_T_target_host="$l_new_target_host"
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
 			g_RZFS="$l_target_ssh_cmd $g_option_T_target_host $g_cmd_zfs"
-			;;
-		u)
-			g_option_u_rsync_use_existing_snapshot=1
-			g_snapshot_name="$OPTARG"
 			;;
 		U)
 			g_option_U_skip_unsupported_properties=1
@@ -500,10 +458,6 @@ init_variables() {
 		fi
 	fi
 
-	if [ "$g_option_S_rsync_mode" -eq 1 ]; then
-		g_cmd_rsync=$(which rsync)
-	fi
-
 	l_home_operating_system=$(get_os "")
 	if [ "$l_home_operating_system" = "SunOS" ]; then
 		g_cmd_awk=$(which gawk)
@@ -526,53 +480,16 @@ consistency_check() {
 		throw_usage_error "You cannot use both beep modes at the same time."
 	fi
 
-	if [ "$g_option_S_rsync_mode" -eq 1 ]; then
-		# rsync mode
+	if [ "$g_option_z_compress" -eq 1 ] &&
+		[ "$g_option_O_origin_host" = "" ] &&
+		[ "$g_option_T_target_host" = "" ]; then
+		throw_usage_error "-z option can only be used with -O or -T option"
+	fi
 
-		# check for incompatible options
-		if [ "$g_option_F_force_rollback" = "-F" ]; then
-			throw_usage_error "-F option cannot be used with -S (rsync mode)"
-		fi
-
-		if [ "$g_option_s_make_snapshot" -eq 1 ]; then
-			throw_usage_error "-s option cannot be used with -S (rsync mode)"
-		fi
-
-		if [ "$g_option_O_origin_host" != "" ] ||
-			[ "$g_option_T_target_host" != "" ]; then
-			throw_usage_error "-O or -T option cannot be used with -S (rsync mode)"
-		fi
-
-		if [ "$g_option_m_migrate" -eq 1 ]; then
-			throw_usage_error "-m option cannot be used with -S (rsync mode)"
-		fi
-
-		if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
-			throw_usage_error "-Y option cannot be used with -S (rsync mode)"
-		fi
-	else
-		#zfs send mode
-
-		# check for incompatible options
-		if [ "$g_option_f_rsync_file_options" != "" ]; then
-			throw_usage_error "-f option can only be used with -S (rsync mode)"
-		fi
-
-		if [ "$g_option_L_rsync_levels_deep" != "" ]; then
-			throw_usage_error "-L option can only be used with -S (rsync mode)"
-		fi
-
-		if [ "$g_option_z_compress" -eq 1 ] &&
-			[ "$g_option_O_origin_host" = "" ] &&
-			[ "$g_option_T_target_host" = "" ]; then
-			throw_usage_error "-z option can only be used with -O or -T option"
-		fi
-
-		# disallow migration related options and remote transfers at same time
-		if [ "$g_option_T_target_host" != "" ] || [ "$g_option_O_origin_host" != "" ]; then
-			if [ "$g_option_m_migrate" -eq 1 ] || [ "$g_option_c_services" != "" ]; then
-				throw_usage_error "You cannot migrate to or from a remote host."
-			fi
+	# disallow migration related options and remote transfers at same time
+	if [ "$g_option_T_target_host" != "" ] || [ "$g_option_O_origin_host" != "" ]; then
+		if [ "$g_option_m_migrate" -eq 1 ] || [ "$g_option_c_services" != "" ]; then
+			throw_usage_error "You cannot migrate to or from a remote host."
 		fi
 	fi
 }
@@ -637,7 +554,7 @@ write_backup_properties() {
 	echov "Writing backup info to location $l_backup_file_dir/$g_backup_file_extension.$l_is_tail"
 
 	# Construct the backup file contents
-	l_backup_file_header="#zxfer property backup file;#version:$g_zxfer_version;#R options:$g_option_R_recursive;#N options:$g_option_N_nonrecursive;#destination:$g_destination;#initial_source:$l_is_tail;#g_option_S_rsync_mode:$g_option_S_rsync_mode;"
+	l_backup_file_header="#zxfer property backup file;#version:$g_zxfer_version;#R options:$g_option_R_recursive;#N options:$g_option_N_nonrecursive;#destination:$g_destination;#initial_source:$l_is_tail;"
 	l_backup_date=$(date)
 	g_backup_file_contents="$l_backup_file_header#backup_date:$l_backup_date$g_backup_file_contents"
 

@@ -165,38 +165,6 @@ basic_replication_test() {
 	log "Basic replication test passed"
 }
 
-rsync_mode_test() {
-	# Validate rsync mode (-S) layered on top of recursive replication (-R) so
-	# filesystems without snapshots can still be synchronized via rsync.
-	log "Starting rsync mode test"
-	src_dataset="$SRC_POOL/rsync_src"
-	dest_root="$DEST_POOL/rsync_dest"
-	# In rsync mode zxfer recreates the full source dataset path under the
-	# destination root, not just the leaf dataset name.
-	dest_dataset="$dest_root/$src_dataset"
-
-	zfs destroy -r "$DEST_POOL/rsync_dest" >/dev/null 2>&1 || true
-	zfs destroy -r "$SRC_POOL/rsync_src" >/dev/null 2>&1 || true
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	append_data_to_dataset "$src_dataset" "rsync.txt" "rsync data 1"
-
-	run_zxfer -v -S -R "$src_dataset" "$dest_root"
-
-	dest_mount=$(get_mountpoint "$dest_dataset")
-	assert_exists "$dest_mount/rsync.txt" "Rsync destination file missing."
-
-	append_data_to_dataset "$src_dataset" "rsync.txt" "rsync data 2"
-	run_zxfer -v -S -R "$src_dataset" "$dest_root"
-
-	if ! grep -q "rsync data 2" "$dest_mount/rsync.txt"; then
-		fail "Rsync destination file missing appended data."
-	fi
-
-	log "Rsync mode test passed"
-}
-
 main() {
 	require_root
 	require_cmd zpool
@@ -235,8 +203,6 @@ main() {
 	zpool create "$DEST_POOL" "$DEST_IMG"
 
 	basic_replication_test
-	# rsync mode is broken
-	#rsync_mode_test
 
 	log "All integration tests passed."
 }

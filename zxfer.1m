@@ -68,20 +68,6 @@
 .PD 0
 .HP 6n
 \fBzxfer\fR
-{-S}
-[\fB\-dilpPnv\fR]
-[\fB\-k\fR\ |\ \fB\-e\fR]
-[\fB\-b\fR\ |\ \fB\-B\fR]
-[\fB\-f\fR\ \fI/path/to/rsfile\fR]
-{-R\ /path/to/src1,path/to/src2...\ |\ -N\ /path/to/src1,path/to/src2...}
-[\fB\-o\fR\ \fIoption1=value1,option2=value2...\fR]
-[\fB\-E\fR\ \fIpattern\fR]
-[\fB\-L\fR\ \fIvalue\fR]
-[\fB\-u\fR\ \fIsnapshot\fR]
-\fIdestination\fR
-.br
-.HP 6n
-\fBzxfer\fR
 [\fB\-h\fR]
 .PD
 .PP
@@ -92,34 +78,17 @@ is a ZFS filesystem e.g.
 .SH "DESCRIPTION"
 The
 \fBzxfer\fR
-utility performs two main functions. It can replicate ZFS
-filesystems (including snapshots and properties) using
+utility replicates ZFS filesystems (including snapshots and properties) using
 zfs(8)
 \fIsend\fR
-to do the heavy lifting.
+to do the heavy lifting. It can transfer dataset properties,
+optionally override them, and create missing descendants so the destination
+matches the source layout. This is desirable when we want parity between
+the source and destination snapshot regimes, or when we need a single
+command that transfers both data and relevant dataset metadata.
 .PP
-It can also transfer files and
-directories and the filesystems underlying them using
-rsync(1).
-It will first recursively
-snapshot those filesystems so that an atomic snapshot of all files
-and directories exists as a base. It then creates a replica of the source
-filesystem hierarchy down to the pool level at the destination. It then
-transfers the files and directories. This is desirable when we have different
-snapshotting regimes on source and destination, and want to copy across
-the latest contents of the filesystem(s).
-.PP
-Both
-zfs(8)
-\fIsend\fR
-and
-rsync(1)
-use checksums/hashes to verify that the data copied to the destination is
-the same data that was sent from the source, so we have a similar degree of
-surety of end-to-end data integrity as the ZFS filesystem itself.
-.PP
-Either method allows for the properties of each filesystem to be transferred
-and specific properties overridden as necessary. For example,
+The transfer process allows for the properties of each filesystem to be
+replicated and specific properties overridden as necessary. For example,
 \fIcompression\fR,
 \fIreadonly\fR,
 and
@@ -130,19 +99,13 @@ do not exist,
 \fBzxfer\fR
 will automatically create them.
 .PP
-Both methods also allow
+The script also allows
 the backup and restore of the original filesystem properties so that
 if it is desirable to backup the filesystem(s) for archival purposes
 using
 \fIcompression\fR
 etc. as overrides, the original properties may be restored without the
 user having to make a note of what those original properties were.
-.PP
-\fIIMPORTANT:\fR
-Note that switching between these two modes is done with -S.
-Depending on the mode, the workings of an option may be nonexistent,
-subtly or grossly different. Don't assume an option works the exact same way
-that it did with the other mode.
 .PP
 Note also that
 \fBzxfer\fR
@@ -172,11 +135,11 @@ means that if you are going to use it for backups you should treat it more
 like alpha level software - i.e. trust it at your own risk.
 .PP
 Modifying an example first is a good way to start using the script, as
-there are some options (e.g. -d and -F in normal mode) that are in practice
+there are some options (e.g. -d and -F) that are in practice
 always used.
 .SH "SNAPSHOTS"
 \fBzxfer\fR
-in Normal mode as a backup/restore solution is designed to be used
+as a backup/restore solution is designed to be used
 hand-in-hand with a regular snapshotting
 regime. If there is no regular snapshotting regime in place then the results
 won't be nearly as good.
@@ -184,13 +147,12 @@ won't be nearly as good.
 would still be useful to reliably and easily copy
 a pool for example, but you would be missing the main point of the program.
 .SH "OPTIONS"
-Common options are listed, followed by
-options as they function specifically with
+The following options control the
 zfs(8)
 \fIsend\fR
-mode, followed by options as they work specifically to
-rsync(1)
-aka -S mode.
+replication workflow managed by
+\fBzxfer\fR.
+Unless noted otherwise the semantics apply uniformly across all invocations.
 .PP
 Please note that options with arguments (e.g. -R, -N
 and the like) can not be concatenated after other options.
@@ -378,45 +340,10 @@ they are:
 \fIshareiscsi\fR,
 \fIvscan\fR,
 \fIxattr\fR.
-If using -S, all filesystems in the pools containing the source directories/files
-will be created on the destination if they aren't in existence already, whether
-they are to hold files/directories or not.
-.TP 8n
-\fB\-S\fR
-rsync(1)
-mode.
-If -S is specified,
-rsync(1)
-mode is triggered. If -S is absent,
-zfs(8)
-\fIsend\fR
-mode is in effect. Several options have different effects depending
-on whether -S is present or not. Consult the relevant option section before
-using.
-.sp
-When
-\fB\-S\fR
-is enabled the utility rejects
-\fB\-F\fR,
-\fB\-m\fR,
-\fB\-O\fR,
-\fB\-s\fR,
-\fB\-T\fR
-and any attempt to raise
-\fB\-Y\fR
-above its default of 1.
-.sp
-It is also possible to transfer to readonly destination filesystems, but
-this is only supported if either
-[\fB\-o\fR]
-or
-[\fB\-P\fR]
-is enabled.
 .TP 8n
 \fB\-v\fR
 (v)erbose mode.
-.SS "Normal | zfs send/receive mode"
-(i.e. -S is absent)
+.SS "ZFS send/receive mode"
 .TP 8n
 \fB\-c\fR
 A space delimited list of SMF services in quotes to be temporarily disabled
@@ -467,15 +394,6 @@ so the destination side will roll back to the most recent snapshot that
 matches the stream. This forcibly destroys any newer snapshots or data that
 only exist on the destination and allows incremental sends to proceed when
 the target has diverged.
-This switch is only valid in normal (non
-\fB\-S\fR)
-mode.
-.sp
-Attempts to combine
-\fB\-F\fR
-with
-\fB\-S\fR
-result in an error.
 .TP 8n
 \fB\-g\fR
 (g)randfather protection. Specify a number of days old (relative to the system
@@ -518,10 +436,7 @@ or properties that are not supported on the destination.
 Run up to this many zfs send/receive jobs concurrently and parallelize listing
 snapshots when determining the work queue. The default is 1, which disables
 background sends. Raising this value can hide WAN latency or speed up large
-replications, but will also increase memory, CPU and I/O load. Only applies in
-normal (non
-\fB\-S\fR)
-mode.
+replications, but will also increase memory, CPU and I/O load.
 .TP 8n
 \fB\-m\fR
 After sending all snapshots, (m)igrate the source to the destination filesystem by
@@ -538,11 +453,6 @@ Note also that
 and
 [\fB\-T\fR]
 (i.e. remote transfers) are not supported with this option enabled.
-Likewise,
-\fB\-m\fR
-cannot be combined with
-\fB\-S\fR
-mode.
 .TP 8n
 \fB\-N\fR
 Replicate the listed filesystem. Note the provisos listed above in
@@ -625,23 +535,17 @@ ssh root@192.168.0.1 command ...
 So with Solaris, specifying the pfexec at the end results in:
 .sp
 ssh user1@192.168.0.1 pfexec command ...
-.sp
-This option may only be used when
-\fB\-S\fR
-is not specified.
 .TP 8n
 \fB\-R\fR
 (R)ecursively replicate all filesystems under the specified source. If not
 specifying
-[\fB\-S\fR],
-you
-\fImust\fR
-invoke one and only one of either
+[\fB\-N\fR],
+you must invoke one and only one of either
 [\fB\-R\fR]
 or
 [\fB\-N\fR].
 Note that if you enable this option, you must specify only one filesystem,
-and that it starts without a "/". e.g.  specifying -R
+and that it starts without a "/". e.g. specifying -R
 \fItank/tmp\fR
 will transfer
 \fItank/tmp\fR,
@@ -664,10 +568,6 @@ at the end, and ensure that a current snapshot is taken before or during the
 second execution. e.g. use this option to ensure that a relatively current
 snapshot exists, create it manually, or wait until your own snapshotting
 regime does the job for you (if you have one).
-.sp
-This switch is ignored in
-\fB\-S\fR
-mode and will cause the program to exit with an error if specified there.
 .TP 8n
 \fB\-T\fR
 Specify a (T)arget user@host. This allows transfers TO a remote host via ssh.
@@ -689,9 +589,6 @@ e.g. -T "user1@192.168.0.1 pfexec"
 .sp
 Like
 [\fB\-O\fR],
-this option is only available in normal (non
-\fB\-S\fR)
-mode.
 .TP 8n
 \fB\-U\fR
 Skip replicating any properties that are not supported by the destination.
@@ -712,10 +609,6 @@ uses zfs ra(w) send mode
 \fB\-Y\fR
 (Y)ield after no zfs send or zfs destroy commands are executed or 8 iterations
 have been performed, whichever comes first.
-When
-\fB\-S\fR
-is in effect the yield counter must remain at its default of 1; raising it
-causes the program to exit.
 .TP 8n
 \fB\-z\fR
 Pipe the send stream through zstd -3 compression and then decode it at the
@@ -757,138 +650,6 @@ zfs send dataset@snap1 | zstd -T0 -9 | ssh user@host zstd -d | /sbin/zfs receive
 .RS 8n
 .sp
 .RE
-.SS "Rsync mode"
-(i.e. -S is specified)
-.TP 8n
-\fB\-d\fR
-(d)elete files on the destination that do not exist on the source. This is
-equivalent to
-\fBrsync --del\fR.
-.TP 8n
-\fB\-E\fR
-Pass (E)xclude patterns to
-rsync(1).
-e.g. If you want to specify "--exclude=/boot/zfs/zpool.cache" when
-rsync(1)
-is called, then
-use "-E /boot/zfs/zpool.cache". You can specify this option as many times as
-you like, and it will pass each exclude pattern to
-rsync(1).
-My understanding of how to get this to work is to specify the exclude as a
-continuation of the filesystem mountpoint on which the file/directory is
-stored. e.g. with "/boot/zfs/zpool.cache"
-it works because the mountpoint of zroot is effectively "/".
-.TP 8n
-\fB\-f\fR
-Specify a (f)ile that contains a list of options to feed to
-\fBrsync\fR.
-In this event, no other options will be given to
-\fBrsync\fR.
-(If this option is not enabled, the default options given to
-\fBrsync\fR
-are
-\fB-clptgoD --inplace --relative -H --numeric-ids\fR.
-)
-.sp
-It has been suggested that it might be more convenient to be able to specify
-custom options to rsync by means of a switch and the options in quotes or
-some other delimiting character. If
-there is enough feedback I will consider implementing this option.
-.TP 8n
-\fB\-i\fR
-(i)nclude directories corresponding to ZFS filesystem mountpoints on the
-destination when transferring. The default is to exclude them, since the
-destination may correspond to a filesystem from another pool mounted there,
-which has its own data and would be restored independently.
-.TP 8n
-\fB\-l\fR
-Treat (l)egacy mountpoints as being equal to "/". If this is not enabled,
-\fBzxfer\fR
-will fail with an error when it encounters a legacy mountpoint.
-.TP 8n
-\fB\-L\fR
-Specify how many (L)evels deep in the source filesystem tree the filesystem
-that was originally a backed up pool now lies. Most likely, this will only
-need to be used in the event of a restore, as the default level (zero)
-will create filesystems from the pool level on down at the target. e.g.
-if we are trying to restore
-\fI/storage/backups/zroot/tmp/stuff.txt\fR
-which was originally in a pool named
-\fIzroot\fR,
-and wished it to end up where it originally came from (e.g. at
-\fIzroot/tmp/stuff.txt\fR
-) we would indicate with -L 2
-that the original pool is located 2 levels deep on the source. If we did not specify
-that option, we would end up with the file transferred to
-\fI/zroot/backups/zroot/tmp/stuff.txt,\fR
-which is not what is wanted.
-.TP 8n
-\fB\-N\fR
-Replicate the listed director(y|ies) or file(s). Note the provisos listed above in
-[\fB\-R\fR].
-It works similarly but is not recursive. e.g.  specifying -N
-\fI/tmp\fR
-will transfer only
-\fI/tmp\fR.
-.TP 8n
-\fB\-p\fR
-(p)ersist through
-rsync(1)
-errors. This saves having to feed directories individually to
-\fBzxfer\fR,
-if we expect rsync to return an error at some point (e.g. when it tries to
-overwrite itself).
-.TP 8n
-\fB\-R\fR
-(R)ecursively replicate all directories and files under the specified source(s).
-If specifying
-[\fB\-S\fR],
-you
-\fImust\fR
-invoke at least one or both of either
-[\fB\-R\fR]
-or
-[\fB\-N\fR].
-The idea is that this utility makes an atomic clone of the filesystems you will need
-to get your files/directories from, and you can use
-\fBrsync\fR
-to decide what to transfer within a given pool.
-.sp
-Note that if you enable this option, you can specify as many directories as
-you like, separated by commas (with no spaces). Directories must start with a
-\fI/\fR
-and may or may not end with a
-\fI/\fR.
-Read the
-rsync(1)
-man page to get the gist of how that works.
-e.g.  specifying -R
-\fI/tmp\fR
-will transfer
-\fI/tmp\fR,
-\fI/tmp/foo,\fR
-\fI/tmp/foo/bar\fR
-etc.
-.sp
-Note also that
-\fBzxfer\fR
-will only transfer the contents of the directory "/" if
-[\fB\-l\fR]
-is invoked, "/" is mounted as legacy, and it will only transfer
-across those files and directories belonging to the same ZFS filesystem as / belongs
-to.
-.sp
-Another action not supported is
-recursively transferring a directory that contains directories that are in
-fact filesystems from other pools, or in fact any included
-directories where the filesystem mountpoints diverge from what ZFS
-would assign by default.
-.TP 8n
-\fB\-u\fR
-(u)se an already existing snapshot as the source to transfer from. You should
-first check that this snapshot exists on all the filesystems that house the
-files and directories to be used in the transfer. This gives us the option of
-restoring files/directories without having to roll back.
 .SH "EXAMPLES"
 Note that some of these example commands are lengthy, so be sure to fix
 the line wrapping appropriately. Also if you wonder why
@@ -1042,109 +803,7 @@ following command:
 .PP
 \fBzxfer\fR
 \fB-deFPv -N backup01/filesystem/home storage\fR
-.SS "Ex6 - Recursive directory backup"
-We might want to backup a directory within a pool, using rsync
-to do the heavy lifting, while also making a backup of the properties
-of the filesystems transferred. Transferring via
-[\fB\-S\fR]
-will allow us to have different snapshotting regimes on
-source and destination coexisting happily.
-.PP
-\fBzxfer\fR
-\fB-SkPv -R /storage/home backup01/rsbacks\fR
-.PP
-The resulting filesystem structure will look like:
-\fIbackup01/rsbacks/storage/home\fR.
-.PP
-If we wanted to non-recursively transfer that directory
-we would just change the
-[\fB\-R\fR]
-to an
-[\fB\-N\fR].
-.SS "Ex7 - Recursive directory restore"
-To restore the directory backed up in Ex6, we would do so using the
-following command:
-.PP
-\fBzxfer\fR
-\fB-SePv -L 2 -N /backup01/rsbacks/storage/home storage\fR
-.PP
-Note that we had to specify a drop back of 2 levels of filesystems,
-so that
-\fBzxfer\fR
-would know that the pool level is not
-\fIbackup01\fR
-but
-\fIstorage\fR.
-Specifying -L of 1 would indicate that the pool level was
-\fIrsbacks\fR,
-which it was not. Leaving out
-[\fB\-L\fR]
-would be equivalent to L=0, or specifying that the pool level
-was
-\fIbackup01\fR.
-.PP
-Note also that this will re-create all the original
-filesystems that existed on the pool "storage" with their original properties,
-if they have since been deleted. If those filesystems still exist,
-\fBzxfer\fR
-will
-ensure that each such filesystem have the properties they originally had. Note
-that if those
-filesystems still exist, no data will be changed other than what you have
-specified to be rsynced across.
-.PP
-If you wish to not have filesystems created
-or properties set (just the files/directories you want rsynced),
-just forego
-[\fB\-P\fR]
-and
-[\fB\-o\fR].
-Note that this will only work on filesystems that are writable.
-.SS "Ex8 - Backup FreeBSD 8.2 root mirror"
-This will make a recursive snapshot of the root mirror, create similar
-filesystems on the pool
-\fIstorage\fR,
-transfer the properties over,
-rsync(1)
-across the directories and files needed to restore the system,
-and destroy the snapshots when done. To see how to do this in more
-detail, check out the
-\fBzxfer\fR
-wiki.
-.PP
-\fBzxfer\fR
-\fB-SPkld\fR
-\fB-R /bin,/boot,/compat,/etc,/lib,/libexec,/rescue,/root,/sbin,/tmp,/usr,/var,/vshare\fR
-\fB-N /.cshrc,/.profile storage/zr_backup\fR
-.PP
-The resulting filesystem structure will look something like:
-\fIstorage/zr_backup/zroot\fR
-\fIstorage/zr_backup/zroot/usr\fR
-\fIstorage/zr_backup/zroot/var\fR
-etc.
-.SS "Ex9 - Restore FreeBSD 8.2 root mirror"
-To restore the config files backed up in Ex8, we would do so using the
-following command after installing the system,
-installing
-\fBzxfer\fR
-and booting up in the system.
-This uses the snapshot auto-2010-11-14_14.00. Note that
-for this to work properly
-\fI/var/empty\fR
-must be set to mutable. Also, the flag "schg" must be turned off to transfer
-properly. For the full sequence of commands, see the
-\fBzxfer\fR
-wiki. Here is the command for the
-\fBzxfer\fR
-part of the procedure (note you will need to add any directories of your creation kept on your zroot e.g. "vshare"):
-.PP
-\fBzxfer\fR
-\fB-SpldBv -E /boot/zfs/zpool.cache\fR
-\fB-u auto-2010-11-14_14.00\fR
-\fB-L 2\fR
-\fB-N $zrootdir/.cshrc,$zrootdir/.profile\fR
-\fB-R $zrootdir/bin,$zrootdir/boot,$zrootdir/compat,$zrootdir/etc,$zrootdir/lib,$zrootdir/libexec,$zrootdir/rescue,$zrootdir/root,$zrootdir/sbin,$zrootdir/tmp,$zrootdir/usr,$zrootdir/var,$zrootdir/vshare zroot\fR
-.SS "Ex10 - Migrate a filesystem"
+.SS "Ex6 - Migrate a filesystem"
 We might want to migrate a filesystem (including properties).
 Note that this is only allowable when the original mountpoint is
 not the default (i.e. pool/filesystem). In the following example,
@@ -1156,7 +815,7 @@ then that will be the mountpoint of the new filesystem.
 .PP
 \fBzxfer\fR
 \fB-PmFdv -N original_pool/fs new_pool/location\fR
-.SS "Ex11 - Compress a filesystem"
+.SS "Ex7 - Compress a filesystem"
 If we want to compress a filesystem, it is not enough to simply
 set a compression setting of some sort on that filesystem. This
 will only cause new files to be compressed. If we want to compress
@@ -1165,9 +824,9 @@ location (where compression is enabled).
 .PP
 \fBzxfer\fR
 \fB-PmFdv -o compression=gzip -N original_pool/fs new_pool/location\fR
-.SS "Ex12 - Compress a filesystem..."
+.SS "Ex8 - Compress a filesystem..."
 - and store it in the original location.
-This is probably what you want to do instead of example 11. Usually
+This is probably what you want to do instead of example 7. Usually
 what we want to do when we want to compress
 a filesystem - it is already in the location we want it to be, just
 we haven't realized we wanted it compressed at the time. Or maybe
@@ -1213,7 +872,7 @@ appropriately).
 .PP
 \fBzxfer\fR
 \fB-PmFdv -o compression=gzip -N new_pool/location/fs original_pool\fR
-.SS "Ex13 - Backup a pool to a remote host"
+.SS "Ex9 - Backup a pool to a remote host"
 Notice this is the same as in Ex2 with the exception of option
 [\fB\-T\fR],
 and uses the same options which
@@ -1225,9 +884,9 @@ Here is the command:
 .PP
 \fBzxfer\fR
 \fB-dFkPv -o copies=2,compression=lzjb -T root@192.168.123.1 -R storage backup01/pools\fR
-.SS "Ex14 - Restore a pool from a remote host"
+.SS "Ex10 - Restore a pool from a remote host"
 Use the following command, assuming that you are restoring from a situation as
-in Ex13. Again, if using Solaris refer to
+in Ex9. Again, if using Solaris refer to
 [\fB\-O\fR].
 .PP
 \fBzxfer\fR
@@ -1236,7 +895,6 @@ in Ex13. Again, if using Solaris refer to
 \fBzxfer\fR
 exits 0 on success, 1 on an error and 2 if a command line option is incorrect.
 .SH "SEE ALSO"
-rsync(1),
 zfs(1),
 zpool(1)
 .SH "COMPATIBILITY"
@@ -1266,8 +924,6 @@ also encouraging the existence of this project under its own banner.
 You can read Constantin's blog "Constant Thinking" at
 constantin.glez.de - if you are at all interested in the world of ZFS it is
 worth reading regularly (his non-ZFS stuff is good too).
-.PP
-Thanks also to the creators of rsync for their excellent tool.
 .SH "AUTHORS"
 The basis for
 \fBzxfer\fR,
@@ -1308,4 +964,3 @@ donating at some stage in the future.
 .SH "CREDITS"
 \fBzxfer\fR
 is distributed under the BSD license. See the file COPYING for details.
-.PP

@@ -207,7 +207,6 @@ resolve_human_vars() {
 # or sets it after the fact.
 # Also, checks to see if the override properties given as options are valid.
 # Needs: $initial_source, $g_actual_dest, $g_recursive_dest_list
-# $g_dont_write_backup
 # $g_ensure_writable
 #
 transfer_properties() {
@@ -249,9 +248,7 @@ transfer_properties() {
 	l_source_pvs="$human_results"
 
 	# add to the details to allow backup of properties
-	# unless $g_dont_write_backup non-zero, as with first rsync transfer
-	# of properties
-	if [ "$g_option_k_backup_property_mode" -eq 1 ] && [ "$g_dont_write_backup" -eq 0 ]; then
+	if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
 		g_backup_file_contents="$g_backup_file_contents;\
 $l_source,$g_actual_dest,$l_source_pvs"
 	fi

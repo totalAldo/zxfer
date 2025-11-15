@@ -278,9 +278,8 @@ copy_filesystems() {
 #
 run_zfs_mode() {
 	if [ "$g_option_R_recursive" != "" ] && [ "$g_option_N_nonrecursive" != "" ]; then
-		throw_usage_error "If using normal mode (i.e. no -S), you must choose either -N to transfer \
-a single filesystem or -R to transfer a single filesystem and its children \
-recursively, but not both -N and -R at the same time."
+		throw_usage_error "You must choose either -N to transfer a single filesystem or -R to transfer \
+a single filesystem and its children recursively, but not both -N and -R at the same time."
 	elif [ "$g_option_R_recursive" != "" ]; then
 		initial_source="$g_option_R_recursive"
 	elif [ "$g_option_N_nonrecursive" != "" ]; then

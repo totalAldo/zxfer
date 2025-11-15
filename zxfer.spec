@@ -1,7 +1,7 @@
 Name:           zxfer
 Version:        2.0.1
 Release:        0.1%{?dist}
-Summary:        Optimized ZFS snapshot replication script with rsync mode
+Summary:        Optimized ZFS snapshot replication script
 
 License:        BSD-2-Clause
 URL:            https://github.com/totalAldo/zxfer
@@ -13,7 +13,6 @@ Requires:       /bin/sh
 Requires:       /sbin/zfs
 Requires:       /usr/bin/gawk
 Requires:       /usr/bin/parallel
-Requires:       /usr/bin/rsync
 Requires:       /usr/bin/ssh
 Requires:       /usr/bin/zstd
 
@@ -21,11 +20,11 @@ Provides:       zxfer-turbo
 
 %description
 zxfer turbo is a refactored release of the long-standing zxfer utility.  It
-adds GNU parallel powered snapshot discovery, optional rsync replication, raw
-send support, zstd-compressed ssh streams, dataset property synchronization and
-additional safety checks.  The script is aimed at power users who need to
-replicate or prune large OpenZFS installations quickly while retaining the
-original one-command workflow.
+adds GNU parallel powered snapshot discovery, high-performance ZFS replication,
+zstd-compressed ssh streams, dataset property synchronization and additional
+safety checks.  The script is aimed at power users who need to replicate or
+prune large OpenZFS installations quickly while retaining the original
+one-command workflow.
 
 %prep
 %autosetup

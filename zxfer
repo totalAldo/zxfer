@@ -33,8 +33,8 @@
 #
 # zxfer
 #
-# Transfer a source zfs filesystem, directory or files to a destination, using
-# either zfs send/receive or rsync to do the heavy lifting.
+# Transfer a source zfs filesystem, directory or files to a destination using
+# zfs send/receive to do the heavy lifting.
 
 # 2024.03 refactoring by Aldo Gonzalez
 
@@ -68,11 +68,7 @@
 # The other use case was to backup a SSD based root mirror to a larger
 # HDD based storage pool. It needed atomicity and it needed to be independent
 # of snapshots, because I was keeping most of the snapshots on the HDD based
-# pool. For this I used rsync.
-
-# In both cases I wanted the reliability that comes with checking hashes
-# and checksums against the original files to ensure that the correct
-# information had been written, and AFAIK both tools to do this.
+# pool. Both workflows relied on tooling that offered checksum validation.
 
 # Since then, the scripts have been merged, and the number of features has
 # increased. I hope you find it useful.
@@ -99,10 +95,6 @@ usage:
            [-D 'progress dialog options'] [-I properties,to,ignore]
            [-T user@host] [-o option1=value1,option2=value2...] [-g days]
            destination
-     zxfer {-S} [-dilpPnv] [-k | -e] [-b | -B] [-f /path/to/rsfile]
-           {-R /path/to/src1,path/to/src2... | -N /path/to/src1,path/to/src2...}
-           [-o option1=value1,option2=value2...] [-E pattern] [-L value]
-           [-u snapshot] destination
      zxfer [-h]
 
            Where destination is a ZFS filesystem e.g.  poolname/fsname
@@ -129,8 +121,6 @@ dir=$(dirname "$0")
 . "$dir"/src/zxfer_zfs_send_receive.sh
 . "$dir"/src/zxfer_inspect_delete_snap.sh
 
-. "$dir"/src/zxfer_rsync_mode.sh
-
 init_globals
 
 read_command_line_switches "$@"
@@ -148,11 +138,7 @@ init_variables
 
 consistency_check
 
-if [ $g_option_S_rsync_mode -eq 1 ]; then
-	run_rsync_mode
-else
-	run_zfs_mode_loop
-fi
+run_zfs_mode_loop
 
 # writes property backup info to file
 if [ $g_option_k_backup_property_mode -eq 1 ]; then
