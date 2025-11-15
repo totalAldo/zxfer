@@ -16,14 +16,17 @@ oneTimeTearDown() {
 
 setUp() {
 	g_option_n_dryrun=0
+	g_option_v_verbose=0
+	g_option_V_very_verbose=0
+	TMPDIR="$TEST_TMPDIR"
 	if [ -n "${TEST_TMPDIR:-}" ]; then
-		rm -f "$TEST_TMPDIR"/*
+		rm -rf "$TEST_TMPDIR"/*
 	fi
 }
 
 test_escape_for_double_quotes_escapes_special_chars() {
-	input="text\"with\\\`special\$chars\\and normal"
-	expected="text\\\"with\\\`special\\\$chars\\\\and normal"
+	input=$(printf '%s' 'text"with`special$chars\and normal')
+	expected=$(printf '%s' 'text\"with\`special\$chars\\and normal')
 
 	result=$(escape_for_double_quotes "$input")
 
@@ -57,6 +60,82 @@ test_get_temp_file_creates_unique_file() {
 	assertNotEquals "Two consecutive temp file names should be unique." "$file_one" "$file_two"
 
 	rm -f "$file_one" "$file_two"
+}
+
+test_get_temp_file_honors_tmpdir_variable() {
+	custom_tmp="$TEST_TMPDIR/custom"
+	mkdir -p "$custom_tmp"
+	TMPDIR="$custom_tmp"
+
+	file=$(get_temp_file)
+
+	case "$file" in
+	"$custom_tmp"/*) inside=0 ;;
+	*) inside=1 ;;
+	esac
+
+	assertEquals "Temp file should be created inside TMPDIR." 0 "$inside"
+	assertTrue "Temp file should exist." "[ -f \"$file\" ]"
+
+	rm -f "$file"
+	TMPDIR="$TEST_TMPDIR"
+}
+
+test_echov_outputs_only_when_verbose_enabled() {
+	g_option_v_verbose=1
+	output=$(echov "verbose message")
+
+	assertEquals "verbose message" "$output"
+
+	g_option_v_verbose=0
+	output=$(echov "hidden message")
+
+	assertEquals "" "$output"
+}
+
+test_echoV_outputs_only_when_very_verbose_enabled() {
+	g_option_V_very_verbose=1
+	output=$(echoV "debug message" 2>&1)
+
+	assertEquals "debug message" "$output"
+
+	g_option_V_very_verbose=0
+	output=$(echoV "hidden debug" 2>&1)
+
+	assertEquals "" "$output"
+}
+
+test_execute_background_cmd_writes_output_file() {
+	temp_file="$TEST_TMPDIR/bg_output"
+
+	execute_background_cmd "printf bg-data" "$temp_file"
+	bg_pid=$!
+	wait "$bg_pid"
+
+	assertTrue "Background output file should be created." "[ -f \"$temp_file\" ]"
+	assertEquals "bg-data" "$(cat "$temp_file")"
+}
+
+test_exists_destination_returns_one_on_success() {
+	old_g_RZFS=${g_RZFS-}
+	g_RZFS=true
+
+	result=$(exists_destination "pool/fs")
+
+	assertEquals "Destination should exist when command succeeds." "1" "$result"
+
+	g_RZFS=$old_g_RZFS
+}
+
+test_exists_destination_returns_zero_on_failure() {
+	old_g_RZFS=${g_RZFS-}
+	g_RZFS=false
+
+	result=$(exists_destination "pool/fs")
+
+	assertEquals "Destination should not exist when command fails." "0" "$result"
+
+	g_RZFS=$old_g_RZFS
 }
 
 . "$SHUNIT2_BIN"
