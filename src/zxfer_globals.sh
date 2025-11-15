@@ -42,7 +42,7 @@
 #
 init_globals() {
     # zxfer version
-    g_zxfer_version="2.0.0-20240919"
+    g_zxfer_version="2.0.1-20251114"
 
     # max number of iterations to run iterate through run_zfs_mode
     # if changes are made to the filesystems
