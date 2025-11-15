@@ -12,6 +12,7 @@ CHANGELOG
 -Resolve cat path correctly for local property restores
 -Filter existing-destination property list correctly
 -Manage ssh control sockets per host
+-update zxfer.spec file
 
 2024.08.04
 -fix an issue with copying the first snapshot when a destination dataset doesn't
