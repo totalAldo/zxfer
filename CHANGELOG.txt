@@ -2,11 +2,12 @@ CHANGELOG
 =========
 
 2025.11.14
--spelling fix
+-spelling fixes
 -copyright year update
 -Secure ssh control socket creation
 -Ensure -o overrides get applied in transfer_properties
 -fix misspelling of throw_error in transfer_properties
+-Handle local vs remote backup writes correctly
 
 2024.08.04
 -fix an issue with copying the first snapshot when a destination dataset doesn't
