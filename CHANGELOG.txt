@@ -1,6 +1,10 @@
 CHANGELOG
 =========
 
+2025.11.14
+-spelling fix
+-copyright year update
+
 2024.08.04
 -fix an issue with copying the first snapshot when a destination dataset doesn't
  exist
@@ -51,7 +55,7 @@ CHANGELOG
 -remove creation of one temporary file
 
 2024.07.15
--add -x option to sepcify number of parallel jobs for zfs list
+-add -x option to specify number of parallel jobs for zfs list
 
 2024.07.12
 -batch zfs destroy commands

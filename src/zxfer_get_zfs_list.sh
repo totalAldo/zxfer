@@ -53,7 +53,7 @@ write_source_snapshot_list_to_file() {
         # xargs mangles the output of the snapshots and is not reliable.
         # gnu parallel is used instead which must be installed on source systems
         #
-        # eventhough the snapshots are not ordered in creation time globally,
+        # even though the snapshots are not ordered in creation time globally,
         # they are ordered by dataset which is what is needed.
         #
         # if the g_LZFS command is remote, then escape the command to execute
@@ -267,7 +267,7 @@ get_zfs_list() {
 
     g_rzfs_list_hr_snap=$(cat "$l_rzfs_list_hr_snap_tmp_file")
 
-    # get a list of all desintation datasets recursively
+    # get a list of all destination datasets recursively
     l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $g_destination"
     echoV "Running command: $l_cmd"
     g_recursive_dest_list=$($l_cmd)

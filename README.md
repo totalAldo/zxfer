@@ -17,7 +17,7 @@ replication until there are no changes in the destination.
 + `/bin/sh ./zxfer/zxfer -vd -Z 'zstd -9 -T0' -Y -j8 -F -O user@host -R tank tank/backups/`
 
 ## New Options
-+ `-j`: specify the number of parallel zfs list snaphot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound). When j > 1, this number also controls the number of concurrent `zfs send` commands that are run in parallel.
++ `-j`: specify the number of parallel zfs list snapshot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound). When j > 1, this number also controls the number of concurrent `zfs send` commands that are run in parallel.
 + `-V`: Enables very verbose mode.
 + `-w`: Activates raw send.
 + `-x`: exclude grep pattern for datasets
@@ -50,7 +50,7 @@ replication until there are no changes in the destination.
   to no overload a system with too many parallel `zfs send` commands.
 + Use an `ssh` control socket to reduce the number of `ssh` connections
 + Parallelize `get_dest_snapshots_to_delete_per_dataset()`
-+ Create global temproary files used when checking for snapshtos to delete to reduce the number of `mktemp` calls
++ Create global temporary files used when checking for snapshots to delete to reduce the number of `mktemp` calls
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:

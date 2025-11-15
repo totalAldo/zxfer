@@ -237,7 +237,7 @@ transfer_properties() {
     # Some localizations (German, French) use a comma as a decimal separator which
     # changes the interpretation of the value on machines with a different
     # localization.  Some OSes (OS X) use odd units (Ki) instead of K, and the
-    # values cannot be interpretted properly on other localizations
+    # values cannot be interpreted properly on other localizations
     # Resolve this issue by passing -p which generates 'script parsable' output
     # However, some properties have a value of 'none', that in -p ends up having
     # a different value (filesystem_count=18446744073709551615)

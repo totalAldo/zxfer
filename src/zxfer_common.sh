@@ -179,7 +179,7 @@ echov() {
 }
 
 #
-# Very verbose mode - print mesage to standard error
+# Very verbose mode - print message to standard error
 #
 echoV() {
     if [ "$g_option_V_very_verbose" -eq 1 ]; then
