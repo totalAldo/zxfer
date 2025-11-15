@@ -65,13 +65,20 @@ If you use this script and have any suggestions or feedback, please open an issu
 ## Testing
 This fork has been tested with FreeBSD 14.0-14.3.
 
+### About the legacy rsync mode
+Earlier zxfer releases (and the unmaintained upstream project) shipped an `-S`
+mode that wrapped rsync to mirror datasets without snapshots. That mode was
+removed in this fork to simplify the codebase and focus on the core ZFS
+send/receive workflow. If you previously relied on `-S`, please migrate to the
+standard ZFS replication features described above or pin an older release.
+
 Basic shunit2 smoke tests cover the most widely used helper functions and live in the `tests` directory. Run them with:
 
 ```sh
 ./tests/test_zxfer_common.sh
 ```
 
-Integration tests are available for environments that have ZFS kernel modules loaded (FreeBSD, Illumos, or Linux with OpenZFS) and require root privileges. They create temporary pools backed by sparse files, exercise both zfs and rsync transfer modes, and tear everything down automatically:
+Integration tests are available for environments that have ZFS kernel modules loaded (FreeBSD, Illumos, or Linux with OpenZFS) and require root privileges. They create temporary pools backed by sparse files, exercise the zfs replication workflow, and tear everything down automatically:
 
 ```sh
 sudo ./tests/integration_zxfer.sh
