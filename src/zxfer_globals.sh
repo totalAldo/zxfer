@@ -429,7 +429,11 @@ init_variables() {
     fi
 
     if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
-        g_cmd_cat=$("$g_cmd_ssh" "$g_option_O_origin_host" which cat)
+        if [ "$g_option_O_origin_host" = "" ]; then
+            g_cmd_cat=$(which cat)
+        else
+            g_cmd_cat=$($g_cmd_ssh "$g_option_O_origin_host" which cat)
+        fi
     fi
 
     if [ "$g_option_S_rsync_mode" -eq 1 ]; then

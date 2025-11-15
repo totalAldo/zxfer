@@ -9,6 +9,7 @@ CHANGELOG
 -fix misspelling of throw_error in transfer_properties
 -Handle local vs remote backup writes correctly
 -Fix remote property restore lookup
+-Resolve cat path correctly for local property restores
 
 2024.08.04
 -fix an issue with copying the first snapshot when a destination dataset doesn't
