@@ -153,7 +153,8 @@ write_destination_snapshot_list_to_files() {
 
 	# sort the destination snapshots and replace the destination dataset with the prefix
 	# of the source for comparison
-	l_cmd="sed -e 's|$l_destination_dataset|$initial_source|g' $l_rzfs_list_hr_snap_tmp_file | sort > $l_dest_snaps_stripped_sorted_tmp_file"
+	l_escaped_destination_dataset=$(printf '%s\n' "$l_destination_dataset" | sed 's/[].[^$\\*|]/\\&/g')
+	l_cmd="sed -e 's|$l_escaped_destination_dataset|$initial_source|g' $l_rzfs_list_hr_snap_tmp_file | sort > $l_dest_snaps_stripped_sorted_tmp_file"
 	echoV "Running command: $l_cmd"
 	eval "$l_cmd"
 }
