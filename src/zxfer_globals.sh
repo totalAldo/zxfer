@@ -30,8 +30,16 @@
 
 # BSD HEADER END
 
-# for shellcheck linting, uncomment this line
-#. ./zxfer_common.sh; . ./zxfer_get_zfs_list.sh; . ./zxfer_inspect_delete_snap.sh; . ./zxfer_rsync_mode.sh; . ./zxfer_transfer_properties.sh; . ./zxfer_zfs_mode.sh; . ./zxfer_zfs_send_receive.sh
+# for ShellCheck
+if false; then
+    . ./zxfer_common.sh
+    . ./zxfer_get_zfs_list.sh
+    . ./zxfer_inspect_delete_snap.sh
+    . ./zxfer_rsync_mode.sh
+    . ./zxfer_transfer_properties.sh
+    . ./zxfer_zfs_mode.sh
+    . ./zxfer_zfs_send_receive.sh
+fi
 
 ################################################################################
 # DEFINE GLOBALS used by zxfer

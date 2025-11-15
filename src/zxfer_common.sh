@@ -30,8 +30,10 @@
 
 # BSD HEADER END
 
-# for shellcheck linting, uncomment this line
-#. ./zxfer_globals.sh;
+# for ShellCheck
+if false; then
+    . ./zxfer_globals.sh
+fi
 
 ################################################################################
 # COMMON FUNCTIONS FOR ZXFER

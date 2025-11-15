@@ -30,8 +30,10 @@
 
 # BSD HEADER END
 
-# for shellcheck linting, uncomment this line
-#. ./zxfer_globals.sh; . ./zxfer_inspect_delete_snap.sh; . ./zxfer_zfs_mode.sh;
+# for ShellCheck
+if false; then
+    . ./zxfer_globals.sh
+fi
 
 #
 # Returns a list of destination snapshots that don't exist in the source.

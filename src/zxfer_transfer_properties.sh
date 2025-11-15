@@ -30,8 +30,10 @@
 
 # BSD HEADER END
 
-# for shellcheck linting, uncomment this line
-#. ./zxfer_globals.sh; . ./zxfer_get_zfs_list.sh; . ./zxfer_get_zfs_list.sh; . ./zxfer_rsync_mode.sh;
+# for ShellCheck
+if false; then
+    . ./zxfer_globals.sh
+fi
 
 # module variables
 m_new_rmvs_pv=""

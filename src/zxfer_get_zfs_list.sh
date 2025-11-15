@@ -30,8 +30,10 @@
 
 # BSD HEADER END
 
-# for shellcheck linting, uncomment this line
-#. ./zxfer_globals.sh;  . ./zxfer_get_zfs_list.sh; . ./zxfer_inspect_delete_snap.sh;
+# for ShellCheck
+if false; then
+    . ./zxfer_globals.sh
+fi
 
 #
 # Determine the source snapshots sorted by creation time. Since this
