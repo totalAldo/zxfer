@@ -22,8 +22,8 @@ setUp() {
 }
 
 test_escape_for_double_quotes_escapes_special_chars() {
-	input='text"with`special$chars\and normal'
-	expected='text\"with\`special\$chars\\and normal'
+	input="text\"with\\\`special\$chars\\and normal"
+	expected="text\\\"with\\\`special\\\$chars\\\\and normal"
 
 	result=$(escape_for_double_quotes "$input")
 
