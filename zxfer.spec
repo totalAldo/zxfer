@@ -1,77 +1,73 @@
-Name:        zxfer
-Version:     1.2.0
-Release:     2%{?dist}
-License:     see COPYING
-Group:       External packages
-URL:         https://github.com/allanjude/zxfer/
-# master version
-#Source:      https://github.com/allanjude/zxfer/archive/master.zip
-# release version
-#https://github.com/allanjude/zxfer/archive/%{version}.gz
-Source:      %{name}-%{version}.tar.gz
-BuildRoot:   %{_tmppath}/%{pkg}-%{version}
-Requires:  zfs /bin/sh /usr/bin/cat /usr/bin/rsync /usr/bin/gawk
-Summary:  zxfer: transfer ZFS filesystems, snapshots, properties, files and directories
-BuildArch:	noarch
+Name:           zxfer
+Version:        2.0.1
+Release:        0.1%{?dist}
+Summary:        Optimized ZFS snapshot replication script with rsync mode
+
+License:        BSD-2-Clause
+URL:            https://github.com/totalAldo/zxfer
+Source0:        https://github.com/totalAldo/zxfer/archive/refs/tags/v%{version}.tar.gz
+
+BuildArch:      noarch
+
+Requires:       /bin/sh
+Requires:       /sbin/zfs
+Requires:       /usr/bin/gawk
+Requires:       /usr/bin/parallel
+Requires:       /usr/bin/rsync
+Requires:       /usr/bin/ssh
+Requires:       /usr/bin/zstd
+
+Provides:       zxfer-turbo
+
 %description
-
-A continuation of development on zxfer, a popular script for managing ZFS
-snapshot replication
-
-The Original author seems to have abandoned the project, there have been no
-updates since May 2011 and the script fails to work correctly in FreeBSD
-versions after 8.2 and 9.0 due to new ZFS properties.
-
-For now, most of the documentation will reside at the original page, until
-someone reorganizes it.
-
-Original Project Home: http://code.google.com/p/zxfer/
-...
-transfer ZFS filesystems, snapshots, properties, files and directories
-
-Zxfer is a fork of Constantin Gonzalez's zfs-replicate, with many additional
-features (80%+ of code is new). In a nutshell, the aim of zxfer is to make
-backups, restores and transfers on ZFS filesystems able to be done with a
-single command, while having similar end-to-end assurance of data integrity as
-the ZFS filesystem itself.
-
-...
+zxfer turbo is a refactored release of the long-standing zxfer utility.  It
+adds GNU parallel powered snapshot discovery, optional rsync replication, raw
+send support, zstd-compressed ssh streams, dataset property synchronization and
+additional safety checks.  The script is aimed at power users who need to
+replicate or prune large OpenZFS installations quickly while retaining the
+original one-command workflow.
 
 %prep
-# master version
-#%setup -q -n %{name}-master
-# release version
-%setup -q -n %{name}-%{version}
+%autosetup
+
+%build
+# Nothing to build, this is a shell script collection.
 
 %install
-rm -rf ${RPM_BUILD_ROOT}
-mkdir -p \
-${RPM_BUILD_ROOT}%{_bindir} \
-${RPM_BUILD_ROOT}%{_mandir}/man8 \
-${RPM_BUILD_ROOT}%{_docdir}/%{name}-%{version}
-
-install -m0644 zxfer.8 \
-   ${RPM_BUILD_ROOT}%{_mandir}/man8
-install -m0644 CHANGELOG.txt COPYING README.md README.txt \
-   ${RPM_BUILD_ROOT}%{_docdir}/%{name}-%{version}
-install -m0755 zxfer ${RPM_BUILD_ROOT}%{_bindir}
-
-%clean
 rm -rf %{buildroot}
 
+# Install the project into a private libexec tree so the helper modules can be
+# located relative to the launcher.
+install -d %{buildroot}%{_libexecdir}/%{name}
+install -m0755 zxfer %{buildroot}%{_libexecdir}/%{name}/zxfer
+for helper in src/*.sh; do
+    install -Dm0644 "$helper" %{buildroot}%{_libexecdir}/%{name}/$helper
+done
+
+# Public wrapper script.
+install -d %{buildroot}%{_bindir}
+cat > %{buildroot}%{_bindir}/zxfer <<'EOF'
+#!/bin/sh
+exec %{_libexecdir}/%{name}/zxfer "$@"
+EOF
+chmod 0755 %{buildroot}%{_bindir}/zxfer
+
+# Manual page and documentation.
+install -Dm0644 zxfer.8 %{buildroot}%{_mandir}/man8/zxfer.8
+install -Dm0644 README.md %{buildroot}%{_docdir}/%{name}-%{version}/README.md
+install -Dm0644 README.txt %{buildroot}%{_docdir}/%{name}-%{version}/README.txt
+install -Dm0644 CHANGELOG.txt %{buildroot}%{_docdir}/%{name}-%{version}/CHANGELOG.txt
+install -Dm0644 COPYING %{buildroot}%{_docdir}/%{name}-%{version}/COPYING
 
 %files
+%license %{_docdir}/%{name}-%{version}/COPYING
+%doc %{_docdir}/%{name}-%{version}/README.md
+%doc %{_docdir}/%{name}-%{version}/README.txt
+%doc %{_docdir}/%{name}-%{version}/CHANGELOG.txt
 %{_bindir}/zxfer
-
-%doc
-%{_docdir}/%{name}-%{version}/CHANGELOG.txt
-%{_docdir}/%{name}-%{version}/COPYING
-%{_docdir}/%{name}-%{version}/README.md
-%{_docdir}/%{name}-%{version}/README.txt
-%{_mandir}/man8/zxfer.8.gz
+%{_libexecdir}/%{name}
+%{_mandir}/man8/zxfer.8*
 
 %changelog
-* Wed Jul 19 2017 Tru Huynh <tru@pasteur.fr> - 1.1.6-2
-- add Requires for: cat rsync gawk
-* Wed Jul 19 2017 Tru Huynh <tru@pasteur.fr> - 1.1.6-1
-- initial version
+* Fri Nov 14 2025 Aldo Gonzalez - 2.0.1-0.1
+- Track zxfer turbo 2.0.1 release and modernize Source URL (see CHANGELOG.txt for upstream details).
