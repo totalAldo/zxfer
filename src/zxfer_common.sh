@@ -63,7 +63,10 @@ debug_end() {
 #
 get_temp_file() {
 	l_timestamp=$(date +%s)
-	l_file=$(mktemp -t "zxfer.$l_timestamp") || throw_error "Error creating temporary file."
+	l_tmpdir=${TMPDIR:-/tmp}
+	# On GNU mktemp the template must include X, so build the template ourselves.
+	l_file=$(mktemp "$l_tmpdir/zxfer.$l_timestamp.XXXXXX") ||
+		throw_error "Error creating temporary file."
 	echoV "New temporary file: $l_file"
 
 	# return the temp file name
