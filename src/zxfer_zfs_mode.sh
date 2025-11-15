@@ -160,7 +160,7 @@ newsnap() {
 
     # We snapshot from the base of the initial source
     # Extract the filesystem name from the initial source snapshot by removing the '@' and everything after it
-    l_sourcefs="${initial_source%@*}"
+    l_sourcefs="${l_initial_source%@*}"
 
     l_snap=$g_zxfer_new_snapshot_name
 

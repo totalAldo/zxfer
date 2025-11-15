@@ -4,6 +4,7 @@ CHANGELOG
 2025.11.15
 -add .shellcheckrc
 -Fixed handling of filtered destination properties in transfer_properties
+-Use argument in newsnap instead of global initial_source
 
 2025.11.14
 -spelling fixes
