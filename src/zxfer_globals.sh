@@ -566,9 +566,18 @@ write_backup_properties() {
 
     # Execute the command
     if [ "$g_option_n_dryrun" -eq 0 ]; then
-        echo "$l_backup_file_cmd" | "$g_cmd_ssh $g_option_T_target_host" sh ||
-            throw_error "Error writing backup file. Is filesystem mounted?"
+        if [ "$g_option_T_target_host" = "" ]; then
+            sh -c "$l_backup_file_cmd" ||
+                throw_error "Error writing backup file. Is filesystem mounted?"
+        else
+            echo "$l_backup_file_cmd" | $g_cmd_ssh "$g_option_T_target_host" sh ||
+                throw_error "Error writing backup file. Is filesystem mounted?"
+        fi
     else
-        echo "echo \"$l_backup_file_cmd\" | \"$g_cmd_ssh $g_option_T_target_host\" sh"
+        if [ "$g_option_T_target_host" = "" ]; then
+            echo "sh -c \"$l_backup_file_cmd\""
+        else
+            echo "echo \"$l_backup_file_cmd\" | $g_cmd_ssh \"$g_option_T_target_host\" sh"
+        fi
     fi
 }
