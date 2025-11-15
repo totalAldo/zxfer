@@ -486,7 +486,7 @@ with specified properties."
         if [ -n "$g_option_I_ignore_properties" ]; then
             remove_properties "$m_new_rmv_pvs" "$g_option_I_ignore_properties"
         fi
-        dest_pv="$m_new_rmv_pvs"
+        dest_pvs="$m_new_rmv_pvs"
 
         # Test to see if any of the four properties that must be specified at
         # creation time differ from destination to the overrides, if so
