@@ -42,7 +42,7 @@
 # the compression ratio of the data. The estimate is based on the size of the
 # dataset. When compression is used, the bar will terminate sooner,
 # ending at the compression ratio.
-# Takes $g_LZFS (which may contain the ssh commmand if -O is used)
+# Takes $g_LZFS (which may contain the ssh command if -O is used)
 #
 calculate_size_estimate() {
     l_snapshot=$1
@@ -132,7 +132,7 @@ wrap_command_with_ssh() {
     if [ "$l_is_compress" -eq 0 ]; then
         echo "$g_cmd_ssh $l_option \"$l_cmd\""
     else
-        # when compression is enabled, send and recieve are wrapped differently
+        # when compression is enabled, send and receive are wrapped differently
         if [ "$l_direction" = "send" ]; then
             echo "$g_cmd_ssh $l_option \"$l_cmd | $g_cmd_compress\" | $g_cmd_decompress"
         else
