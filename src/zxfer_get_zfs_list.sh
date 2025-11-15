@@ -59,6 +59,7 @@ write_source_snapshot_list_to_file() {
         # if the g_LZFS command is remote, then escape the command to execute
         # it wrapped around an ssh command
         if [ ! "$g_option_O_origin_host" = "" ]; then
+            l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
             #l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
             # use gnu parallel to prevent mangling of output
             # when there are a lot of snapshtos, the output can be several megabytes and benefit
@@ -70,9 +71,9 @@ write_source_snapshot_list_to_file() {
             # check if compression is enabled
             if [ "$g_option_z_compress" -eq 1 ]; then
                 # IllumOS requires -d 1 when listing snapshots for one dataset
-                l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
+                l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
             else
-                l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}'\""
+                l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}'\""
             fi
         else
             #l_cmd="$g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'"

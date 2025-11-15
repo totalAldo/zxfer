@@ -114,11 +114,11 @@ init_globals() {
     # enable compression in ssh options so that remote snapshot lists that
     # contain thousands of snapshots are compressed
     g_cmd_ssh=$(which ssh)
-    # when using ssh, setup the control socket to use one connection
-    # for all commands
-    g_ssh_control_socket=""
-    g_ssh_control_socket_dir=""
-    g_ssh_user_host=""
+    # ssh control sockets used for origin (-O) and target (-T) hosts
+    g_ssh_origin_control_socket=""
+    g_ssh_origin_control_socket_dir=""
+    g_ssh_target_control_socket=""
+    g_ssh_target_control_socket_dir=""
 
     g_cmd_rsync=""
 
@@ -175,35 +175,90 @@ xattr,dnodesize"
     g_solexp_readonly_properties="jailed,aclmode,shareiscsi"
 }
 
-# a function to setup the ssh control socket
-# needs $g_ssh_user_host
+# setup an ssh control socket for the specified role (origin or target)
 setup_ssh_control_socket() {
+    l_host=$1
+    l_role=$2
+
+    [ -z "$l_host" ] && return
+
     l_timestamp=$(date +%s)
-    if ! g_ssh_control_socket_dir=$(mktemp -d -t zxfer_ssh_control_socket.$l_timestamp); then
+    if ! l_control_dir=$(mktemp -d -t "zxfer_ssh_control_socket.${l_role}.$l_timestamp"); then
         throw_error "Error creating temporary directory for ssh control socket."
     fi
-    g_ssh_control_socket="$g_ssh_control_socket_dir/socket"
-    # establish the control socket
-    eval "$g_cmd_ssh -M -S $g_ssh_control_socket $g_ssh_user_host -fN"
+    l_control_socket="$l_control_dir/socket"
 
-    g_cmd_ssh="$g_cmd_ssh -S $g_ssh_control_socket"
+    case "$l_role" in
+    origin)
+        [ "$g_ssh_origin_control_socket" != "" ] && close_origin_ssh_control_socket
+        g_ssh_origin_control_socket_dir="$l_control_dir"
+        g_ssh_origin_control_socket="$l_control_socket"
+        ;;
+    target)
+        [ "$g_ssh_target_control_socket" != "" ] && close_target_ssh_control_socket
+        g_ssh_target_control_socket_dir="$l_control_dir"
+        g_ssh_target_control_socket="$l_control_socket"
+        ;;
+    esac
+
+    eval "$g_cmd_ssh -M -S $l_control_socket $l_host -fN"
 }
 
-# close the ssh control socket
-# needs $g_ssh_user_host
-close_ssh_control_socket() {
-    if [ "$g_ssh_control_socket" != "" ]; then
-        l_cmd="$g_cmd_ssh -O exit $g_ssh_user_host"
-        echoV "Closing ssh control socket: $l_cmd"
-        # suppress the "Exit request sent." message
-        eval "$l_cmd" 2>/dev/null
+close_origin_ssh_control_socket() {
+    if [ "$g_option_O_origin_host" = "" ] || [ "$g_ssh_origin_control_socket" = "" ]; then
+        return
     fi
 
-    if [ "$g_ssh_control_socket_dir" != "" ] && [ -d "$g_ssh_control_socket_dir" ]; then
-        rm -rf "$g_ssh_control_socket_dir"
-        g_ssh_control_socket_dir=""
-        g_ssh_control_socket=""
+    l_cmd="$g_cmd_ssh -S $g_ssh_origin_control_socket -O exit $g_option_O_origin_host"
+    echoV "Closing origin ssh control socket: $l_cmd"
+    eval "$l_cmd" 2>/dev/null
+
+    if [ "$g_ssh_origin_control_socket_dir" != "" ] && [ -d "$g_ssh_origin_control_socket_dir" ]; then
+        rm -rf "$g_ssh_origin_control_socket_dir"
     fi
+    g_ssh_origin_control_socket=""
+    g_ssh_origin_control_socket_dir=""
+}
+
+close_target_ssh_control_socket() {
+    if [ "$g_option_T_target_host" = "" ] || [ "$g_ssh_target_control_socket" = "" ]; then
+        return
+    fi
+
+    l_cmd="$g_cmd_ssh -S $g_ssh_target_control_socket -O exit $g_option_T_target_host"
+    echoV "Closing target ssh control socket: $l_cmd"
+    eval "$l_cmd" 2>/dev/null
+
+    if [ "$g_ssh_target_control_socket_dir" != "" ] && [ -d "$g_ssh_target_control_socket_dir" ]; then
+        rm -rf "$g_ssh_target_control_socket_dir"
+    fi
+    g_ssh_target_control_socket=""
+    g_ssh_target_control_socket_dir=""
+}
+
+close_all_ssh_control_sockets() {
+    close_origin_ssh_control_socket
+    close_target_ssh_control_socket
+}
+
+get_ssh_cmd_for_host() {
+    l_host=$1
+    if [ "$l_host" = "" ]; then
+        echo "$g_cmd_ssh"
+        return
+    fi
+
+    if [ "$l_host" = "$g_option_O_origin_host" ] && [ "$g_ssh_origin_control_socket" != "" ]; then
+        echo "$g_cmd_ssh -S $g_ssh_origin_control_socket"
+        return
+    fi
+
+    if [ "$l_host" = "$g_option_T_target_host" ] && [ "$g_ssh_target_control_socket" != "" ]; then
+        echo "$g_cmd_ssh -S $g_ssh_target_control_socket"
+        return
+    fi
+
+    echo "$g_cmd_ssh"
 }
 
 #
@@ -216,7 +271,7 @@ trap_exit() {
     # kill all background jobs
     kill $(jobs -p) 2>/dev/null
 
-    close_ssh_control_socket
+    close_all_ssh_control_sockets
 
     # Remove temporary files if they exist
     for l_temp_file in "$g_delete_source_tmp_file" \
@@ -323,10 +378,11 @@ read_command_line_switches() {
             # since we are using the -O option, we are pulling a remote transfer
             # so we need to use the ssh command to execute the zfs commands
             # $OPTARG is the user@host
-            g_ssh_user_host="$OPTARG"
-            setup_ssh_control_socket
-            g_LZFS="$g_cmd_ssh $OPTARG $g_cmd_zfs"
-            g_option_O_origin_host="$OPTARG"
+            l_new_origin_host="$OPTARG"
+            setup_ssh_control_socket "$l_new_origin_host" "origin"
+            g_option_O_origin_host="$l_new_origin_host"
+            l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
+            g_LZFS="$l_origin_ssh_cmd $g_option_O_origin_host $g_cmd_zfs"
             ;;
         p)
             g_option_p_rsync_persist=1
@@ -347,10 +403,11 @@ read_command_line_switches() {
             # since we are using the -T option, we are pushing a remote transfer
             # so we need to use the ssh command to execute the zfs commands
             # $OPTARG is the user@host
-            g_ssh_user_host="$OPTARG"
-            setup_ssh_control_socket
-            g_RZFS="$g_cmd_ssh $OPTARG $g_cmd_zfs"
-            g_option_T_target_host="$OPTARG"
+            l_new_target_host="$OPTARG"
+            setup_ssh_control_socket "$l_new_target_host" "target"
+            g_option_T_target_host="$l_new_target_host"
+            l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
+            g_RZFS="$l_target_ssh_cmd $g_option_T_target_host $g_cmd_zfs"
             ;;
         u)
             g_option_u_rsync_use_existing_snapshot=1
@@ -416,14 +473,16 @@ extract_snapshot_name() {
 init_variables() {
     # determine the source operating system
     if [ "$g_option_O_origin_host" != "" ]; then
-        g_source_operating_system=$(get_os "$g_cmd_ssh $g_option_O_origin_host")
+        l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
+        g_source_operating_system=$(get_os "$l_origin_ssh_cmd $g_option_O_origin_host")
     else
         g_source_operating_system=$(get_os "")
     fi
 
     # determine the destination operating system
     if [ "$g_option_T_target_host" != "" ]; then
-        g_destination_operating_system=$(get_os "$g_cmd_ssh $g_option_T_target_host")
+        l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
+        g_destination_operating_system=$(get_os "$l_target_ssh_cmd $g_option_T_target_host")
     else
         g_destination_operating_system=$(get_os "")
     fi
@@ -432,7 +491,8 @@ init_variables() {
         if [ "$g_option_O_origin_host" = "" ]; then
             g_cmd_cat=$(which cat)
         else
-            g_cmd_cat=$($g_cmd_ssh "$g_option_O_origin_host" which cat)
+            l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
+            g_cmd_cat=$($l_origin_ssh_cmd "$g_option_O_origin_host" which cat)
         fi
     fi
 
@@ -536,8 +596,9 @@ get_backup_properties() {
                 l_found_backup_file=1
             fi
         else
-            if $g_cmd_ssh "$g_option_O_origin_host" "[ -r '$l_backup_file' ]"; then
-                g_restored_backup_file_contents=$($g_cmd_ssh "$g_option_O_origin_host" "$g_cmd_cat '$l_backup_file'")
+            l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
+            if $l_origin_ssh_cmd "$g_option_O_origin_host" "[ -r '$l_backup_file' ]"; then
+                g_restored_backup_file_contents=$($l_origin_ssh_cmd "$g_option_O_origin_host" "$g_cmd_cat '$l_backup_file'")
                 l_found_backup_file=1
             fi
         fi
@@ -584,14 +645,16 @@ write_backup_properties() {
             sh -c "$l_backup_file_cmd" ||
                 throw_error "Error writing backup file. Is filesystem mounted?"
         else
-            echo "$l_backup_file_cmd" | $g_cmd_ssh "$g_option_T_target_host" sh ||
+            l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
+            echo "$l_backup_file_cmd" | $l_target_ssh_cmd "$g_option_T_target_host" sh ||
                 throw_error "Error writing backup file. Is filesystem mounted?"
         fi
     else
         if [ "$g_option_T_target_host" = "" ]; then
             echo "sh -c \"$l_backup_file_cmd\""
         else
-            echo "echo \"$l_backup_file_cmd\" | $g_cmd_ssh \"$g_option_T_target_host\" sh"
+            l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
+            echo "echo \"$l_backup_file_cmd\" | $l_target_ssh_cmd \"$g_option_T_target_host\" sh"
         fi
     fi
 }
