@@ -277,7 +277,11 @@ trap_exit() {
     l_exit_status=$?
 
     # kill all background jobs
-    kill $(jobs -p) 2>/dev/null
+    l_job_pids=$(jobs -p)
+    if [ -n "$l_job_pids" ]; then
+        # shellcheck disable=SC2086  # split into individual PIDs on purpose
+        kill $l_job_pids 2>/dev/null
+    fi
 
     close_all_ssh_control_sockets
 
