@@ -125,6 +125,8 @@ init_globals() {
 	g_last_common_snap=""
 	g_actual_dest=""
 	g_src_snapshot_transfer_list=""
+	g_pending_receive_create_opts=""
+	g_pending_receive_create_dest=""
 
 	# temporary files used by get_dest_snapshots_to_delete_per_dataset()
 	g_delete_source_tmp_file=$(get_temp_file)
