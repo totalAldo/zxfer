@@ -129,14 +129,16 @@ wrap_command_with_ssh() {
     l_is_compress=$3
     l_direction=$4
 
+    l_ssh_cmd=$(get_ssh_cmd_for_host "$l_option")
+
     if [ "$l_is_compress" -eq 0 ]; then
-        echo "$g_cmd_ssh $l_option \"$l_cmd\""
+        echo "$l_ssh_cmd $l_option \"$l_cmd\""
     else
         # when compression is enabled, send and receive are wrapped differently
         if [ "$l_direction" = "send" ]; then
-            echo "$g_cmd_ssh $l_option \"$l_cmd | $g_cmd_compress\" | $g_cmd_decompress"
+            echo "$l_ssh_cmd $l_option \"$l_cmd | $g_cmd_compress\" | $g_cmd_decompress"
         else
-            echo "$g_cmd_compress | $g_cmd_ssh $l_option \"$g_cmd_decompress | $l_cmd\""
+            echo "$g_cmd_compress | $l_ssh_cmd $l_option \"$g_cmd_decompress | $l_cmd\""
         fi
     fi
 }
