@@ -7,8 +7,8 @@
 
 # pass the pool name as the first argument
 if [ "$#" -ne 1 ]; then
-    echo "Usage: $0 <pool_name>"
-    exit 1
+	echo "Usage: $0 <pool_name>"
+	exit 1
 fi
 
 pool_name=$1
@@ -23,12 +23,12 @@ zfs create "$test_dataset"/src
 
 # create child datasets
 for i in 1 2 3; do
-    zfs create "$test_dataset"/src/child$i
+	zfs create "$test_dataset"/src/child$i
 
-    # create snapshots
-    for j in 1 2 3 4; do
-        zfs snap -r "$test_dataset"/src/child$i@snap$j
-    done
+	# create snapshots
+	for j in 1 2 3 4; do
+		zfs snap -r "$test_dataset"/src/child$i@snap$j
+	done
 done
 
 # some other snapshots

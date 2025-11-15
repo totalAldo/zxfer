@@ -32,8 +32,8 @@
 
 # for ShellCheck
 if false; then
-    # shellcheck source=src/zxfer_globals.sh
-    . ./zxfer_globals.sh
+	# shellcheck source=src/zxfer_globals.sh
+	. ./zxfer_globals.sh
 fi
 
 ################################################################################
@@ -51,23 +51,23 @@ fi
 # Add the debug_start() and debug_end() functions to enable/disable debugging
 # between code blocks.
 debug_start() {
-    set -x
+	set -x
 }
 
 debug_end() {
-    set +x
+	set +x
 }
 
 #
 # Create a temporary file and return the filename.
 #
 get_temp_file() {
-    l_timestamp=$(date +%s)
-    l_file=$(mktemp -t "zxfer.$l_timestamp") || throw_error "Error creating temporary file."
-    echoV "New temporary file: $l_file"
+	l_timestamp=$(date +%s)
+	l_file=$(mktemp -t "zxfer.$l_timestamp") || throw_error "Error creating temporary file."
+	echoV "New temporary file: $l_file"
 
-    # return the temp file name
-    echo "$l_file"
+	# return the temp file name
+	echo "$l_file"
 }
 
 #
@@ -75,17 +75,17 @@ get_temp_file() {
 # Takes: $1=either $g_option_O_origin_host or $g_option_T_target_host
 #
 get_os() {
-    l_input_options=$1
-    l_output_os=""
+	l_input_options=$1
+	l_output_os=""
 
-    # Get uname of the destination (target) machine, local or remote
-    if [ "$l_input_options" = "" ]; then
-        l_output_os=$(uname)
-    else
-        l_output_os=$($l_input_options uname)
-    fi
+	# Get uname of the destination (target) machine, local or remote
+	if [ "$l_input_options" = "" ]; then
+		l_output_os=$(uname)
+	else
+		l_output_os=$($l_input_options uname)
+	fi
 
-    echo "$l_output_os"
+	echo "$l_output_os"
 }
 
 #
@@ -97,23 +97,23 @@ get_os() {
 # 2 - usage error
 # 3 - error that prevents the script from continuing
 throw_error() {
-    l_msg=$1
-    l_exit_status=${2:-1} # global used by beep
+	l_msg=$1
+	l_exit_status=${2:-1} # global used by beep
 
-    echo "$l_msg"
-    beep "$l_exit_status"
-    exit "$l_exit_status"
+	echo "$l_msg"
+	beep "$l_exit_status"
+	exit "$l_exit_status"
 }
 
 throw_usage_error() {
-    l_msg=$1
-    l_exit_status=${2:-2} # global used by beep
-    if [ "$l_msg" != "" ]; then
-        echo "Error: $l_msg"
-    fi
-    usage
-    beep "$l_exit_status"
-    exit "$l_exit_status"
+	l_msg=$1
+	l_exit_status=${2:-2} # global used by beep
+	if [ "$l_msg" != "" ]; then
+		echo "Error: $l_msg"
+	fi
+	usage
+	beep "$l_exit_status"
+	exit "$l_exit_status"
 }
 
 # sample usage:
@@ -121,22 +121,22 @@ throw_usage_error() {
 # l_cmd: command to execute
 # l_is_continue_on_fail: 1 to continue on fail, 0 to stop on fail
 execute_command() {
-    l_cmd=$1
-    l_is_continue_on_fail=${2:-0}
+	l_cmd=$1
+	l_is_continue_on_fail=${2:-0}
 
-    if [ "$g_option_n_dryrun" -eq 1 ]; then
-        echov "Dry run: $l_cmd"
-        return
-    fi
+	if [ "$g_option_n_dryrun" -eq 1 ]; then
+		echov "Dry run: $l_cmd"
+		return
+	fi
 
-    echov "$l_cmd"
-    if [ "$l_is_continue_on_fail" -eq 1 ]; then
-        eval "$l_cmd" || {
-            echo "Non-critical error when executing command. Continuing."
-        }
-    else
-        eval "$l_cmd" || throw_error "Error when executing command."
-    fi
+	echov "$l_cmd"
+	if [ "$l_is_continue_on_fail" -eq 1 ]; then
+		eval "$l_cmd" || {
+			echo "Non-critical error when executing command. Continuing."
+		}
+	else
+		eval "$l_cmd" || throw_error "Error when executing command."
+	fi
 }
 
 #
@@ -147,76 +147,76 @@ execute_command() {
 # l_output_file: file to write the output to
 #
 execute_background_cmd() {
-    l_cmd=$1
-    l_output_file=$2
+	l_cmd=$1
+	l_output_file=$2
 
-    echoV "Executing command in the background: $l_cmd"
-    $l_cmd >"$l_output_file" &
+	echoV "Executing command in the background: $l_cmd"
+	$l_cmd >"$l_output_file" &
 }
 
 # Escape characters that have special meaning inside double quotes so that the
 # returned string can be safely reinserted into a double-quoted context without
 # triggering command substitution or other expansions.
 escape_for_double_quotes() {
-    printf '%s' "$1" | sed 's/[\\$`\"]/\\&/g'
+	printf '%s' "$1" | sed 's/[\\$`\"]/\\&/g'
 }
 
 #
 # Checks if the destination dataset exists, returns 1 if it does, 0 if it does not.
 #
 exists_destination() {
-    l_dest=$1
+	l_dest=$1
 
-    # Check if the destination dataset exists
-    # quote the command in case it is being run within an ssh command
-    l_cmd="$g_RZFS list -H $l_dest"
-    echoV "Checking if destination exists: $l_cmd"
+	# Check if the destination dataset exists
+	# quote the command in case it is being run within an ssh command
+	l_cmd="$g_RZFS list -H $l_dest"
+	echoV "Checking if destination exists: $l_cmd"
 
-    if eval "$l_cmd" >/dev/null 2>&1; then
-        echo 1
-    else
-        echo 0
-    fi
+	if eval "$l_cmd" >/dev/null 2>&1; then
+		echo 1
+	else
+		echo 0
+	fi
 }
 
 #
 # Print out information if in verbose mode
 #
 echov() {
-    if [ "$g_option_v_verbose" -eq 1 ]; then
-        echo "$@"
-    fi
+	if [ "$g_option_v_verbose" -eq 1 ]; then
+		echo "$@"
+	fi
 }
 
 #
 # Very verbose mode - print message to standard error
 #
 echoV() {
-    if [ "$g_option_V_very_verbose" -eq 1 ]; then
-        echo "$@" >&2
-    fi
+	if [ "$g_option_V_very_verbose" -eq 1 ]; then
+		echo "$@" >&2
+	fi
 }
 
 #
 # Beeps a success sound if -B enabled, and a failure sound if -b or -B enabled.
 #
 beep() {
-    l_exit_status=${1:-1} # default to 1 (failure)
+	l_exit_status=${1:-1} # default to 1 (failure)
 
-    if [ "$g_option_b_beep_always" -eq 1 ] || [ "$g_option_B_beep_on_success" -eq 1 ]; then
-        # load the speaker kernel module if not loaded already
-        l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
-        if [ "$l_speaker_km_loaded" = "0" ]; then
-            kldload "speaker"
-        fi
+	if [ "$g_option_b_beep_always" -eq 1 ] || [ "$g_option_B_beep_on_success" -eq 1 ]; then
+		# load the speaker kernel module if not loaded already
+		l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
+		if [ "$l_speaker_km_loaded" = "0" ]; then
+			kldload "speaker"
+		fi
 
-        # play the appropriate beep
-        if [ "$l_exit_status" -eq 0 ]; then
-            if [ "$g_option_B_beep_on_success" -eq 1 ]; then
-                echo "T255CCMLEG~EG..." >/dev/speaker # success sound
-            fi
-        else
-            echo "T150A<C.." >/dev/speaker # failure sound
-        fi
-    fi
+		# play the appropriate beep
+		if [ "$l_exit_status" -eq 0 ]; then
+			if [ "$g_option_B_beep_on_success" -eq 1 ]; then
+				echo "T255CCMLEG~EG..." >/dev/speaker # success sound
+			fi
+		else
+			echo "T150A<C.." >/dev/speaker # failure sound
+		fi
+	fi
 }

@@ -32,8 +32,8 @@
 
 # for ShellCheck
 if false; then
-    # shellcheck source=src/zxfer_globals.sh
-    . ./zxfer_globals.sh
+	# shellcheck source=src/zxfer_globals.sh
+	. ./zxfer_globals.sh
 fi
 
 ################################################################################
@@ -48,24 +48,24 @@ fi
 # Takes $g_LZFS (which may contain the ssh command if -O is used)
 #
 calculate_size_estimate() {
-    l_snapshot=$1
+	l_snapshot=$1
 
-    l_size_dataset=$($g_LZFS send -nPv "$l_snapshot" 2>&1) ||
-        throw_error "Error calculating estimate: $l_size_dataset"
-    l_size_est=$(echo "$l_size_dataset" | grep ^size | tail -n 1 | cut -f 2)
+	l_size_dataset=$($g_LZFS send -nPv "$l_snapshot" 2>&1) ||
+		throw_error "Error calculating estimate: $l_size_dataset"
+	l_size_est=$(echo "$l_size_dataset" | grep ^size | tail -n 1 | cut -f 2)
 
-    echo "$l_size_est"
+	echo "$l_size_est"
 }
 
 setup_progress_dialog() {
-    l_size_est=$1
-    l_snapshot=$2
+	l_size_est=$1
+	l_snapshot=$2
 
-    l_progress_dialog=$(echo "$g_option_D_display_progress_bar" |
-        sed "s#%%size%%#$l_size_est#g" |
-        sed "s#%%title%%#$l_snapshot#g")
+	l_progress_dialog=$(echo "$g_option_D_display_progress_bar" |
+		sed "s#%%size%%#$l_size_est#g" |
+		sed "s#%%title%%#$l_snapshot#g")
 
-    echo "$l_progress_dialog"
+	echo "$l_progress_dialog"
 }
 
 #
@@ -74,17 +74,17 @@ setup_progress_dialog() {
 # Error when executing command.
 #
 handle_progress_bar_option() {
-    l_snapshot=$1
-    l_progress_bar_cmd=""
+	l_snapshot=$1
+	l_progress_bar_cmd=""
 
-    # Calculate the size estimate and set up the progress dialog
-    l_size_est=$(calculate_size_estimate "$l_snapshot")
-    l_progress_dialog=$(setup_progress_dialog "$l_size_est" "$l_snapshot")
+	# Calculate the size estimate and set up the progress dialog
+	l_size_est=$(calculate_size_estimate "$l_snapshot")
+	l_progress_dialog=$(setup_progress_dialog "$l_size_est" "$l_snapshot")
 
-    # Modify the send command to include the progress dialog
-    l_progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | $l_progress_dialog"
+	# Modify the send command to include the progress dialog
+	l_progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | $l_progress_dialog"
 
-    echo "$l_progress_bar_cmd"
+	echo "$l_progress_bar_cmd"
 }
 
 #
@@ -94,56 +94,56 @@ handle_progress_bar_option() {
 # Takes g_option_V_very_verbose, g_option_w_raw_send, g_first_source_snap
 #
 get_send_command() {
-    l_previous_snapshot=$1
-    l_current_snapshot=$2
+	l_previous_snapshot=$1
+	l_current_snapshot=$2
 
-    l_v=""
-    if [ "$g_option_V_very_verbose" -eq 1 ]; then
-        l_v="-v"
-    fi
+	l_v=""
+	if [ "$g_option_V_very_verbose" -eq 1 ]; then
+		l_v="-v"
+	fi
 
-    # 2024.03.31 - add support for -w option (raw send)
-    l_w=""
-    if [ "$g_option_w_raw_send" -eq 1 ]; then
-        l_w="-w"
-    fi
+	# 2024.03.31 - add support for -w option (raw send)
+	l_w=""
+	if [ "$g_option_w_raw_send" -eq 1 ]; then
+		l_w="-w"
+	fi
 
-    # if there is no previous snapshot, send the current snapshot which creates the dataset on the target
-    if [ -z "$l_previous_snapshot" ]; then
-        echo "$g_cmd_zfs send $l_v $l_w $l_current_snapshot"
-        return # exit the function
-    fi
+	# if there is no previous snapshot, send the current snapshot which creates the dataset on the target
+	if [ -z "$l_previous_snapshot" ]; then
+		echo "$g_cmd_zfs send $l_v $l_w $l_current_snapshot"
+		return # exit the function
+	fi
 
-    # previous version
-    #echo "$g_cmd_zfs send -i $l_previous_snapshot $l_current_snapshot"
+	# previous version
+	#echo "$g_cmd_zfs send -i $l_previous_snapshot $l_current_snapshot"
 
-    # 2024.03.19 new version - send all incremental snapshots in one stream
-    echo "$g_cmd_zfs send $l_v $l_w -I $l_previous_snapshot $l_current_snapshot"
+	# 2024.03.19 new version - send all incremental snapshots in one stream
+	echo "$g_cmd_zfs send $l_v $l_w -I $l_previous_snapshot $l_current_snapshot"
 }
 
 get_receive_command() {
-    l_dest=$1
-    echo "$g_cmd_zfs receive $g_option_F_force_rollback $l_dest"
+	l_dest=$1
+	echo "$g_cmd_zfs receive $g_option_F_force_rollback $l_dest"
 }
 
 wrap_command_with_ssh() {
-    l_cmd=$1
-    l_option=$2
-    l_is_compress=$3
-    l_direction=$4
+	l_cmd=$1
+	l_option=$2
+	l_is_compress=$3
+	l_direction=$4
 
-    l_ssh_cmd=$(get_ssh_cmd_for_host "$l_option")
+	l_ssh_cmd=$(get_ssh_cmd_for_host "$l_option")
 
-    if [ "$l_is_compress" -eq 0 ]; then
-        echo "$l_ssh_cmd $l_option \"$l_cmd\""
-    else
-        # when compression is enabled, send and receive are wrapped differently
-        if [ "$l_direction" = "send" ]; then
-            echo "$l_ssh_cmd $l_option \"$l_cmd | $g_cmd_compress\" | $g_cmd_decompress"
-        else
-            echo "$g_cmd_compress | $l_ssh_cmd $l_option \"$g_cmd_decompress | $l_cmd\""
-        fi
-    fi
+	if [ "$l_is_compress" -eq 0 ]; then
+		echo "$l_ssh_cmd $l_option \"$l_cmd\""
+	else
+		# when compression is enabled, send and receive are wrapped differently
+		if [ "$l_direction" = "send" ]; then
+			echo "$l_ssh_cmd $l_option \"$l_cmd | $g_cmd_compress\" | $g_cmd_decompress"
+		else
+			echo "$g_cmd_compress | $l_ssh_cmd $l_option \"$g_cmd_decompress | $l_cmd\""
+		fi
+	fi
 }
 
 #
@@ -151,50 +151,50 @@ wrap_command_with_ssh() {
 # Takes $g_option_D_display_progress_bar $g_option_z_compress, $g_option_O_origin_host, $g_option_T_target_host
 #
 zfs_send_receive() {
-    echoV "Begin zfs_send_receive()"
-    l_previous_snapshot=$1
-    l_current_snapshot=$2
-    l_dest=$3
-    # 4th optional parameter specifies if background process is allowed, with a default to 1
-    l_is_allow_background=${4:-1}
+	echoV "Begin zfs_send_receive()"
+	l_previous_snapshot=$1
+	l_current_snapshot=$2
+	l_dest=$3
+	# 4th optional parameter specifies if background process is allowed, with a default to 1
+	l_is_allow_background=${4:-1}
 
-    # Set up the send and receive commands
-    l_send_cmd=$(get_send_command "$l_previous_snapshot" "$l_current_snapshot")
-    l_recv_cmd=$(get_receive_command "$l_dest")
+	# Set up the send and receive commands
+	l_send_cmd=$(get_send_command "$l_previous_snapshot" "$l_current_snapshot")
+	l_recv_cmd=$(get_receive_command "$l_dest")
 
-    if [ "$g_option_O_origin_host" != "" ]; then
-        l_send_cmd=$(wrap_command_with_ssh "$l_send_cmd" "$g_option_O_origin_host" "$g_option_z_compress" "send")
-    fi
-    if [ "$g_option_T_target_host" != "" ]; then
-        l_recv_cmd=$(wrap_command_with_ssh "$l_recv_cmd" "$g_option_T_target_host" "$g_option_z_compress" "receive")
-    fi
+	if [ "$g_option_O_origin_host" != "" ]; then
+		l_send_cmd=$(wrap_command_with_ssh "$l_send_cmd" "$g_option_O_origin_host" "$g_option_z_compress" "send")
+	fi
+	if [ "$g_option_T_target_host" != "" ]; then
+		l_recv_cmd=$(wrap_command_with_ssh "$l_recv_cmd" "$g_option_T_target_host" "$g_option_z_compress" "receive")
+	fi
 
-    # Perform this after ssh wrapping occurs
-    if [ "$g_option_D_display_progress_bar" != "" ]; then
-        l_progress_bar_cmd=$(handle_progress_bar_option "$l_current_snapshot")
-        l_send_cmd="$l_send_cmd $l_progress_bar_cmd"
-    fi
+	# Perform this after ssh wrapping occurs
+	if [ "$g_option_D_display_progress_bar" != "" ]; then
+		l_progress_bar_cmd=$(handle_progress_bar_option "$l_current_snapshot")
+		l_send_cmd="$l_send_cmd $l_progress_bar_cmd"
+	fi
 
-    if [ "$l_is_allow_background" -eq 1 ] && [ "$g_option_j_jobs" -gt 1 ]; then
-        # implement naive job control.
-        # if there are more than this many jobs, wait until they are all
-        # completed before spawning new ones
-        if [ "$g_count_zfs_send_jobs" -ge "$g_option_j_jobs" ]; then
-            echov "Max jobs reached [$g_count_zfs_send_jobs]. Waiting for jobs to complete."
-            wait
-            g_count_zfs_send_jobs=0
-        fi
+	if [ "$l_is_allow_background" -eq 1 ] && [ "$g_option_j_jobs" -gt 1 ]; then
+		# implement naive job control.
+		# if there are more than this many jobs, wait until they are all
+		# completed before spawning new ones
+		if [ "$g_count_zfs_send_jobs" -ge "$g_option_j_jobs" ]; then
+			echov "Max jobs reached [$g_count_zfs_send_jobs]. Waiting for jobs to complete."
+			wait
+			g_count_zfs_send_jobs=0
+		fi
 
-        # increment the job count
-        g_count_zfs_send_jobs=$((g_count_zfs_send_jobs + 1))
+		# increment the job count
+		g_count_zfs_send_jobs=$((g_count_zfs_send_jobs + 1))
 
-        execute_command "$l_send_cmd | $l_recv_cmd" &
-    else
-        execute_command "$l_send_cmd | $l_recv_cmd"
-    fi
+		execute_command "$l_send_cmd | $l_recv_cmd" &
+	else
+		execute_command "$l_send_cmd | $l_recv_cmd"
+	fi
 
-    # shellcheck disable=SC2034
-    g_is_performed_send_destroy=1
+	# shellcheck disable=SC2034
+	g_is_performed_send_destroy=1
 
-    echoV "End zfs_send_receive()"
+	echoV "End zfs_send_receive()"
 }
