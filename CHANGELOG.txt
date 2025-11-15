@@ -8,6 +8,7 @@ CHANGELOG
 -add GitHub Actions workflow to run shunit2 tests on pushes and PRs
 -fix get_temp_file mktemp template to work on GNU/Linux CI runners
 -exclude vendored tests/shunit2 from codespell checks
+-add integration test script that provisions loopback ZFS pools for zxfer smoke tests
 -add shfmt formatting gate to lint workflow
 -multiple lint fixes
 -Add lint workflow for codespell & ShellCheck
@@ -16,6 +17,7 @@ CHANGELOG
 -add .shellcheckrc
 -Fixed handling of filtered destination properties in transfer_properties
 -Use argument in newsnap instead of global initial_source
+-Fix -m migration guard to reject unmounted sources
 
 2025.11.14
 -spelling fixes
