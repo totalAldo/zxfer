@@ -4,6 +4,8 @@ CHANGELOG
 2025.11.14
 -spelling fix
 -copyright year update
+-Secure ssh control socket creation
+-Ensure -o overrides get applied in transfer_properties
 
 2024.08.04
 -fix an issue with copying the first snapshot when a destination dataset doesn't

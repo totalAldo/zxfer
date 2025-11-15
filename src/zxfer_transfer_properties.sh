@@ -311,9 +311,10 @@ $l_source,$g_actual_dest,$l_source_pvs"
         for op_line in $g_option_o_override_property_pv; do
             op_property=$(echo "$op_line" | cut -f1 -d=)
             op_value=$(echo "$op_line" | cut -f2 -d=)
+            override_property=$op_property
+            override_value=$op_value
             override_source="override"
-            override_pvs="$override_pvs$override_property=\
-$override_value=$override_source,"
+            override_pvs="$override_pvs$override_property=$override_value=$override_source,"
         done
     else
         # Get a list of properties and values to override the destination's.
