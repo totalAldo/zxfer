@@ -99,7 +99,7 @@ get_last_common_snapshot() {
 		# -m 1 is used to stop searching after the first match, removed due to lack of support in Illumos
 		if echo "$l_dest_snap_list" | grep -qF "$l_snap_name"; then
 
-			l_last_common_snap=$l_snap_name
+			l_last_common_snap=$l_source_snap
 
 			echoV "Found last common snapshot: $l_last_common_snap."
 
@@ -226,12 +226,13 @@ set_src_snapshot_transfer_list() {
 	# This prepares a list of source snapshots to transfer, beginning with
 	# the first snapshot after the last common one.
 	for l_test_snap in $l_zfs_source_snaps; do
-		if [ "$l_test_snap" != "$l_source@$g_last_common_snap" ]; then
-			if [ $l_found_common = 0 ]; then
-				g_src_snapshot_transfer_list="$l_test_snap,$g_src_snapshot_transfer_list"
-			fi
-		else
+		if [ "$g_last_common_snap" != "" ] && [ "$l_test_snap" = "$g_last_common_snap" ]; then
 			l_found_common=1
+			continue
+		fi
+
+		if [ $l_found_common = 0 ]; then
+			g_src_snapshot_transfer_list="$l_test_snap,$g_src_snapshot_transfer_list"
 		fi
 	done
 
