@@ -71,6 +71,14 @@ Basic shunit2 smoke tests cover the most widely used helper functions and live i
 ./tests/test_zxfer_common.sh
 ```
 
+Integration tests are available for environments that have ZFS kernel modules loaded (FreeBSD, Illumos, or Linux with OpenZFS) and require root privileges. They create temporary pools backed by sparse files, exercise both zfs and rsync transfer modes, and tear everything down automatically:
+
+```sh
+sudo ./tests/integration_zxfer.sh
+```
+
+Use the `ZXFER_BIN` or `SPARSE_SIZE_MB` environment variables to point at an alternate zxfer binary or adjust pool sizes if needed.
+
 ## Acknowledgements
 A big thank you to everyone who contributed to this script over the past 16+ years, and to all its users.
 
