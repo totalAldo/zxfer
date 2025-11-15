@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # This script generates the tests for zxfer.sh
-# it generates locate zfs dataset source and dest and creates multiple
+# it generates local zfs dataset source and dest and creates multiple
 # snapshots. It then uses zxfer in various combinations to replicate the
 # datasets to the destination
 
