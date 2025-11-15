@@ -114,7 +114,7 @@ write_destination_snapshot_list_to_files() {
     l_destination_dataset="$g_destination/$l_source_dataset"
 
     # check if the destination zfs dataset exists before listing snapshots
-    if [ $(exists_destination "$l_destination_dataset") -eq 1 ]; then
+    if [ "$(exists_destination "$l_destination_dataset")" -eq 1 ]; then
         # dataset exists
 
         # using parallel when metadata cached is slower - disabling
