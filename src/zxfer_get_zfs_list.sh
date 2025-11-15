@@ -32,8 +32,8 @@
 
 # for ShellCheck
 if false; then
-    # shellcheck source=src/zxfer_globals.sh
-    . ./zxfer_globals.sh
+	# shellcheck source=src/zxfer_globals.sh
+	. ./zxfer_globals.sh
 fi
 
 #
@@ -43,56 +43,56 @@ fi
 # multiple datasets concurrently.
 #
 write_source_snapshot_list_to_file() {
-    l_outfile=$1
+	l_outfile=$1
 
-    #
-    # it is important to get this in ascending order because when getting
-    # in descending order, the datasets names are not ordered as we want.
-    # Don't use -S creation for this command, instead, reverse the results below
-    #
-    # Get a list of source snapshots in ascending order by creation date
-    if [ "$g_option_j_jobs" -gt 1 ]; then
-        # 2024.07.15
-        # xargs mangles the output of the snapshots and is not reliable.
-        # gnu parallel is used instead which must be installed on source systems
-        #
-        # even though the snapshots are not ordered in creation time globally,
-        # they are ordered by dataset which is what is needed.
-        #
-        # if the g_LZFS command is remote, then escape the command to execute
-        # it wrapped around an ssh command
-        if [ ! "$g_option_O_origin_host" = "" ]; then
-            l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-            #l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
-            # use gnu parallel to prevent mangling of output
-            # when there are a lot of snapshtos, the output can be several megabytes and benefit
-            # from compression. We use zstd -9 due to the small size and time that it takes
-            # to generate the output. zstd -9 has shown better compression than zstd -12
-            # and significantly better compression than gzip.
-            # zstd -19 takes too long
+	#
+	# it is important to get this in ascending order because when getting
+	# in descending order, the datasets names are not ordered as we want.
+	# Don't use -S creation for this command, instead, reverse the results below
+	#
+	# Get a list of source snapshots in ascending order by creation date
+	if [ "$g_option_j_jobs" -gt 1 ]; then
+		# 2024.07.15
+		# xargs mangles the output of the snapshots and is not reliable.
+		# gnu parallel is used instead which must be installed on source systems
+		#
+		# even though the snapshots are not ordered in creation time globally,
+		# they are ordered by dataset which is what is needed.
+		#
+		# if the g_LZFS command is remote, then escape the command to execute
+		# it wrapped around an ssh command
+		if [ ! "$g_option_O_origin_host" = "" ]; then
+			l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
+			#l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
+			# use gnu parallel to prevent mangling of output
+			# when there are a lot of snapshtos, the output can be several megabytes and benefit
+			# from compression. We use zstd -9 due to the small size and time that it takes
+			# to generate the output. zstd -9 has shown better compression than zstd -12
+			# and significantly better compression than gzip.
+			# zstd -19 takes too long
 
-            # check if compression is enabled
-            if [ "$g_option_z_compress" -eq 1 ]; then
-                # IllumOS requires -d 1 when listing snapshots for one dataset
-                l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
-            else
-                l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}'\""
-            fi
-        else
-            #l_cmd="$g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'"
-            l_cmd="$g_LZFS list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'"
-        fi
+			# check if compression is enabled
+			if [ "$g_option_z_compress" -eq 1 ]; then
+				# IllumOS requires -d 1 when listing snapshots for one dataset
+				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
+			else
+				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}'\""
+			fi
+		else
+			#l_cmd="$g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'"
+			l_cmd="$g_LZFS list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'"
+		fi
 
-        echoV "Running command in the background: $l_cmd"
-        eval "$l_cmd" >"$l_outfile" &
+		echoV "Running command in the background: $l_cmd"
+		eval "$l_cmd" >"$l_outfile" &
 
-    else
-        l_cmd="$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source"
+	else
+		l_cmd="$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source"
 
-        execute_background_cmd \
-            "$l_cmd" \
-            "$l_outfile"
-    fi
+		execute_background_cmd \
+			"$l_cmd" \
+			"$l_outfile"
+	fi
 }
 
 # We only need the snapshots of the intended destination dataset, not
@@ -104,55 +104,55 @@ write_source_snapshot_list_to_file() {
 # Parallelization support has been added and is useful in situations when
 # the ARC is not populated such as when a removable disk us mounted.
 write_destination_snapshot_list_to_files() {
-    l_rzfs_list_hr_snap_tmp_file=$1
-    l_dest_snaps_stripped_sorted_tmp_file=$2
+	l_rzfs_list_hr_snap_tmp_file=$1
+	l_dest_snaps_stripped_sorted_tmp_file=$2
 
-    # determine the last dataset in $initial_source. This will be the last
-    # dataset after a forward slash "/" or if no forward slash exists, then
-    # is is the name of the dataset itself.
-    l_source_dataset=$(echo "$initial_source" | awk -F'/' '{print $NF}')
+	# determine the last dataset in $initial_source. This will be the last
+	# dataset after a forward slash "/" or if no forward slash exists, then
+	# is is the name of the dataset itself.
+	l_source_dataset=$(echo "$initial_source" | awk -F'/' '{print $NF}')
 
-    l_destination_dataset="$g_destination/$l_source_dataset"
+	l_destination_dataset="$g_destination/$l_source_dataset"
 
-    # check if the destination zfs dataset exists before listing snapshots
-    if [ "$(exists_destination "$l_destination_dataset")" -eq 1 ]; then
-        # dataset exists
+	# check if the destination zfs dataset exists before listing snapshots
+	if [ "$(exists_destination "$l_destination_dataset")" -eq 1 ]; then
+		# dataset exists
 
-        # using parallel when metadata cached is slower - disabling
-        #if [ $g_option_j_jobs -gt 1 ]; then
-        #    # if the g_RZFS command is remote, then escape the command to execute
-        #    if [ ! "$g_option_T_origin_host" = "" ]; then
-        #        if [ "$g_option_z_compress" -eq 1 ]; then
-        #            l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
-        #        else
-        #            l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}'\""
-        #        fi
-        #    else
-        #        l_cmd="$g_RZFS list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_RZFS list -H -o name -d 1 -t snapshot {}'"
-        #    fi
-        #else
-        #    # do not perform in the background so we can sort the results
-        #    # before the longest operation is complete
-        #    l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
-        #fi
+		# using parallel when metadata cached is slower - disabling
+		#if [ $g_option_j_jobs -gt 1 ]; then
+		#    # if the g_RZFS command is remote, then escape the command to execute
+		#    if [ ! "$g_option_T_origin_host" = "" ]; then
+		#        if [ "$g_option_z_compress" -eq 1 ]; then
+		#            l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
+		#        else
+		#            l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}'\""
+		#        fi
+		#    else
+		#        l_cmd="$g_RZFS list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_RZFS list -H -o name -d 1 -t snapshot {}'"
+		#    fi
+		#else
+		#    # do not perform in the background so we can sort the results
+		#    # before the longest operation is complete
+		#    l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
+		#fi
 
-        l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
-        echoV "Running command: $l_cmd"
-        # make sure to eval and then pipe the contents to the file in case
-        # the command uses ssh
-        eval "$l_cmd" > "$l_rzfs_list_hr_snap_tmp_file"
+		l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
+		echoV "Running command: $l_cmd"
+		# make sure to eval and then pipe the contents to the file in case
+		# the command uses ssh
+		eval "$l_cmd" >"$l_rzfs_list_hr_snap_tmp_file"
 
-    else
-        # dataset does not exist
-        echoV "Destination dataset does not exist: $l_destination_dataset"
-        echo "" >"$l_rzfs_list_hr_snap_tmp_file"
-    fi
+	else
+		# dataset does not exist
+		echoV "Destination dataset does not exist: $l_destination_dataset"
+		echo "" >"$l_rzfs_list_hr_snap_tmp_file"
+	fi
 
-    # sort the destination snapshots and replace the destination dataset with the prefix
-    # of the source for comparison
-    l_cmd="sed -e 's|$l_destination_dataset|$initial_source|g' $l_rzfs_list_hr_snap_tmp_file | sort > $l_dest_snaps_stripped_sorted_tmp_file"
-    echoV "Running command: $l_cmd"
-    eval "$l_cmd"
+	# sort the destination snapshots and replace the destination dataset with the prefix
+	# of the source for comparison
+	l_cmd="sed -e 's|$l_destination_dataset|$initial_source|g' $l_rzfs_list_hr_snap_tmp_file | sort > $l_dest_snaps_stripped_sorted_tmp_file"
+	echoV "Running command: $l_cmd"
+	eval "$l_cmd"
 }
 
 # compare the source and destination snapshots and identify source datasets
@@ -161,50 +161,50 @@ write_destination_snapshot_list_to_files() {
 # Afterwards, g_recursive_source_list only contains the names of
 # the datasets that need to be transferred.
 set_g_recursive_source_list() {
-    l_lzfs_list_hr_s_snap_tmp_file=$1
-    l_dest_snaps_stripped_sorted_tmp_file=$2
+	l_lzfs_list_hr_s_snap_tmp_file=$1
+	l_dest_snaps_stripped_sorted_tmp_file=$2
 
-    l_source_snaps_sorted_tmp_file=$(get_temp_file)
+	l_source_snaps_sorted_tmp_file=$(get_temp_file)
 
-    # sort the source snapshots for use with comm
-    # wait until background processes are finished before attempting to sort
-    l_cmd="sort $l_lzfs_list_hr_s_snap_tmp_file > $l_source_snaps_sorted_tmp_file"
-    echoV "Running command: $l_cmd"
-    eval "$l_cmd"
+	# sort the source snapshots for use with comm
+	# wait until background processes are finished before attempting to sort
+	l_cmd="sort $l_lzfs_list_hr_s_snap_tmp_file > $l_source_snaps_sorted_tmp_file"
+	echoV "Running command: $l_cmd"
+	eval "$l_cmd"
 
-    # shellcheck disable=SC2016
-    g_recursive_source_list=$(comm -23 \
-        "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
-        "$g_cmd_awk" -F@ '{print $1}' | sort -u)
+	# shellcheck disable=SC2016
+	g_recursive_source_list=$(comm -23 \
+		"$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
+		"$g_cmd_awk" -F@ '{print $1}' | sort -u)
 
-    # if excluding datasets, remove them from the list
-    if [ "$g_option_x_exclude_datasets" != "" ]; then
-        g_recursive_source_list=$(echo "$g_recursive_source_list" | grep -v "$g_option_x_exclude_datasets")
-    fi
+	# if excluding datasets, remove them from the list
+	if [ "$g_option_x_exclude_datasets" != "" ]; then
+		g_recursive_source_list=$(echo "$g_recursive_source_list" | grep -v "$g_option_x_exclude_datasets")
+	fi
 
-    # debugging
-    if [ "$g_option_V_very_verbose" -eq 1 ]; then
-        echo "====================================================================="
-        echo "====== Snapshots present in source but missing in destination ======"
-        comm -23 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
-        echo "====== Source datasets that differ from destination ======"
-        echo "g_recursive_source_list:"
-        echo "$g_recursive_source_list"
-        echo "Source dataset count: $(echo "$g_recursive_source_list" | grep -cve '^\s*$')"
-        echo "====================================================================="
-        echo "====== Extra Destination snapshots not in source ======"
-        comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
-        echo "====== Destination datasets with extra snapshots not in source ======"
-        # shellcheck disable=SC2016
-        comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" | "$g_cmd_awk" -F@ '{print $1}' | sort -u
-        echo "====================================================================="
-    fi
+	# debugging
+	if [ "$g_option_V_very_verbose" -eq 1 ]; then
+		echo "====================================================================="
+		echo "====== Snapshots present in source but missing in destination ======"
+		comm -23 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+		echo "====== Source datasets that differ from destination ======"
+		echo "g_recursive_source_list:"
+		echo "$g_recursive_source_list"
+		echo "Source dataset count: $(echo "$g_recursive_source_list" | grep -cve '^\s*$')"
+		echo "====================================================================="
+		echo "====== Extra Destination snapshots not in source ======"
+		comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+		echo "====== Destination datasets with extra snapshots not in source ======"
+		# shellcheck disable=SC2016
+		comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" | "$g_cmd_awk" -F@ '{print $1}' | sort -u
+		echo "====================================================================="
+	fi
 
-    if [ "$g_recursive_source_list" = "" ]; then
-        echov "No new snapshots to transfer."
-    fi
+	if [ "$g_recursive_source_list" = "" ]; then
+		echov "No new snapshots to transfer."
+	fi
 
-    rm "$l_source_snaps_sorted_tmp_file" &
+	rm "$l_source_snaps_sorted_tmp_file" &
 }
 
 #
@@ -251,62 +251,62 @@ set_g_recursive_source_list() {
 #    specifying -t snapshot displays only snapshots.
 #
 get_zfs_list() {
-    echoV "Begin get_zfs_list()"
+	echoV "Begin get_zfs_list()"
 
-    # create temporary files used by the background processes
-    l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
+	# create temporary files used by the background processes
+	l_lzfs_list_hr_s_snap_tmp_file=$(get_temp_file)
 
-    #
-    # BEGIN background process
-    #
-    write_source_snapshot_list_to_file "$l_lzfs_list_hr_s_snap_tmp_file"
+	#
+	# BEGIN background process
+	#
+	write_source_snapshot_list_to_file "$l_lzfs_list_hr_s_snap_tmp_file"
 
-    #
-    # Run as many commands prior to the wait command as possible.
-    #
+	#
+	# Run as many commands prior to the wait command as possible.
+	#
 
-    l_rzfs_list_hr_snap_tmp_file=$(get_temp_file)
-    l_dest_snaps_stripped_sorted_tmp_file=$(get_temp_file)
+	l_rzfs_list_hr_snap_tmp_file=$(get_temp_file)
+	l_dest_snaps_stripped_sorted_tmp_file=$(get_temp_file)
 
-    # this function writes to both files passed as parameters
-    write_destination_snapshot_list_to_files "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+	# this function writes to both files passed as parameters
+	write_destination_snapshot_list_to_files "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 
-    # shellcheck disable=SC2034
-    g_rzfs_list_hr_snap=$(cat "$l_rzfs_list_hr_snap_tmp_file")
+	# shellcheck disable=SC2034
+	g_rzfs_list_hr_snap=$(cat "$l_rzfs_list_hr_snap_tmp_file")
 
-    # get a list of all destination datasets recursively
-    l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $g_destination"
-    echoV "Running command: $l_cmd"
-    g_recursive_dest_list=$($l_cmd)
+	# get a list of all destination datasets recursively
+	l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $g_destination"
+	echoV "Running command: $l_cmd"
+	g_recursive_dest_list=$($l_cmd)
 
-    echoV "Waiting for background processes to finish."
-    wait
-    echoV "Background processes finished."
+	echoV "Waiting for background processes to finish."
+	wait
+	echoV "Background processes finished."
 
-    #
-    # END background process
-    #
-    set_g_recursive_source_list "$l_lzfs_list_hr_s_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+	#
+	# END background process
+	#
+	set_g_recursive_source_list "$l_lzfs_list_hr_s_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 
-    # get the reversed order (not using tac due to solaris compatibility)
-    g_lzfs_list_hr_S_snap=$(cat -n "$l_lzfs_list_hr_s_snap_tmp_file" | sort -nr | cut -c 8-)
+	# get the reversed order (not using tac due to solaris compatibility)
+	g_lzfs_list_hr_S_snap=$(cat -n "$l_lzfs_list_hr_s_snap_tmp_file" | sort -nr | cut -c 8-)
 
-    # remove temporary files
-    rm "$l_lzfs_list_hr_s_snap_tmp_file" \
-        "$l_rzfs_list_hr_snap_tmp_file" \
-        "$l_dest_snaps_stripped_sorted_tmp_file"
+	# remove temporary files
+	rm "$l_lzfs_list_hr_s_snap_tmp_file" \
+		"$l_rzfs_list_hr_snap_tmp_file" \
+		"$l_dest_snaps_stripped_sorted_tmp_file"
 
-    #
-    # Errors
-    #
+	#
+	# Errors
+	#
 
-    if [ "$g_lzfs_list_hr_S_snap" = "" ]; then
-        throw_error "Failed to retrieve snapshots from the source" 3
-    fi
+	if [ "$g_lzfs_list_hr_S_snap" = "" ]; then
+		throw_error "Failed to retrieve snapshots from the source" 3
+	fi
 
-    if [ "$g_recursive_dest_list" = "" ]; then
-        throw_usage_error "Failed to retrieve list of datasets from the destination"
-    fi
+	if [ "$g_recursive_dest_list" = "" ]; then
+		throw_usage_error "Failed to retrieve list of datasets from the destination"
+	fi
 
-    echoV "End get_zfs_list()"
+	echoV "End get_zfs_list()"
 }
