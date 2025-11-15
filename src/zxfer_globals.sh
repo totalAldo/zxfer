@@ -82,6 +82,7 @@ init_globals() {
 	g_option_z_compress=0
 
 	source=""
+	g_initial_source_had_trailing_slash=0
 
 	# keep track of the number of background zfs send jobs
 	g_count_zfs_send_jobs=0
