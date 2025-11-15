@@ -1,1 +1,2 @@
-source-path=src
+external-sources=true
+source-path=SCRIPTDIR:SCRIPTDIR/src
