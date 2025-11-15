@@ -122,6 +122,11 @@ copy_snapshots() {
 	# get the final snapshot name
 	echoV "Final snapshot: $l_final_snapshot"
 
+	if [ "$g_last_common_snap" = "$l_final_snapshot" ]; then
+		echoV "No new snapshots to copy for $g_actual_dest."
+		return
+	fi
+
 	# begin copying snapshots to the final snap from the last common snapshot
 	zfs_send_receive "$g_last_common_snap" "$l_final_snapshot" "$g_actual_dest" "1"
 }

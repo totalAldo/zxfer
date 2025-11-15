@@ -165,6 +165,54 @@ basic_replication_test() {
 	log "Basic replication test passed"
 }
 
+generate_tests_replication() {
+	# Mirror the old tests/generateTests.sh workflow using the integration pools.
+	log "Starting multi-dataset replication test"
+
+	src_parent="$SRC_POOL/zxfer_tests"
+	src_dataset="$src_parent/src"
+	dest_root="$DEST_POOL/zxfer_tests"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$src_parent" >/dev/null 2>&1 || true
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+
+	zfs create "$src_parent"
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	# Ensure the top-level dataset has at least one snapshot so zxfer creates
+	# the destination parent before children are replicated.
+	zfs snap "$src_dataset@root_snap"
+
+	for child in 1 2 3; do
+		child_dataset="$src_dataset/child$child"
+		zfs create "$child_dataset"
+
+		for snap in 1 2 3 4; do
+			zfs snap -r "$child_dataset@snap$snap"
+		done
+	done
+
+	zfs snap -r "$src_dataset/child1@snap1_1"
+	zfs snap -r "$src_dataset/child1@snap2_1"
+
+	run_zxfer -v -R "$src_dataset" "$dest_root"
+
+	for child in 1 2 3; do
+		child_dest_dataset="$dest_dataset/child$child"
+		for snap in 1 2 3 4; do
+			assert_snapshot_exists "$child_dest_dataset" "snap$snap"
+		done
+	done
+
+	assert_snapshot_exists "$dest_dataset/child1" "snap1_1"
+	assert_snapshot_exists "$dest_dataset/child1" "snap2_1"
+	assert_snapshot_exists "$dest_dataset" "root_snap"
+
+	log "Multi-dataset replication test passed"
+}
+
 main() {
 	require_root
 	require_cmd zpool
@@ -203,6 +251,7 @@ main() {
 	zpool create "$DEST_POOL" "$DEST_IMG"
 
 	basic_replication_test
+	generate_tests_replication
 
 	log "All integration tests passed."
 }
