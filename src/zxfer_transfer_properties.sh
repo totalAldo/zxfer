@@ -628,7 +628,7 @@ with specified properties."
 
             if [ "$g_option_n_dryrun" -eq 0 ]; then
                 $g_RZFS set "${ov_property}=${ov_value}" "$g_actual_dest" ||
-                    trhow_error "Error when setting properties on destination filesystem."
+                    throw_error "Error when setting properties on destination filesystem."
             else
                 echo "$g_RZFS set $ov_property=$ov_value $g_actual_dest"
             fi
