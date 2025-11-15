@@ -32,6 +32,7 @@
 
 # for ShellCheck
 if false; then
+    # shellcheck source=src/zxfer_globals.sh
     . ./zxfer_globals.sh
 fi
 
@@ -109,7 +110,7 @@ get_send_command() {
 
     # if there is no previous snapshot, send the current snapshot which creates the dataset on the target
     if [ -z "$l_previous_snapshot" ]; then
-        echo $g_cmd_zfs send $l_v $l_w "$l_current_snapshot"
+        echo "$g_cmd_zfs send $l_v $l_w $l_current_snapshot"
         return # exit the function
     fi
 
@@ -192,6 +193,7 @@ zfs_send_receive() {
         execute_command "$l_send_cmd | $l_recv_cmd"
     fi
 
+    # shellcheck disable=SC2034
     g_is_performed_send_destroy=1
 
     echoV "End zfs_send_receive()"

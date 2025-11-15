@@ -32,6 +32,7 @@
 
 # for ShellCheck
 if false; then
+    # shellcheck source=src/zxfer_globals.sh
     . ./zxfer_globals.sh
 fi
 
@@ -376,6 +377,7 @@ $l_source,$g_actual_dest,$l_source_pvs"
         override_pvs="$m_only_supported_properties"
     fi
 
+    # shellcheck disable=SC2154
     dest_exist=$(echo "$g_recursive_dest_list" | grep -c "^$g_actual_dest$")
 
     # This is where we actually create or modify the destination filesystem.

@@ -32,6 +32,7 @@
 
 # for ShellCheck
 if false; then
+    # shellcheck source=src/zxfer_globals.sh
     . ./zxfer_globals.sh
 fi
 

@@ -32,6 +32,7 @@
 
 # for ShellCheck
 if false; then
+    # shellcheck source=src/zxfer_globals.sh
     . ./zxfer_globals.sh
 fi
 
@@ -50,7 +51,7 @@ write_source_snapshot_list_to_file() {
     # Don't use -S creation for this command, instead, reverse the results below
     #
     # Get a list of source snapshots in ascending order by creation date
-    if [ $g_option_j_jobs -gt 1 ]; then
+    if [ "$g_option_j_jobs" -gt 1 ]; then
         # 2024.07.15
         # xargs mangles the output of the snapshots and is not reliable.
         # gnu parallel is used instead which must be installed on source systems
@@ -171,6 +172,7 @@ set_g_recursive_source_list() {
     echoV "Running command: $l_cmd"
     eval "$l_cmd"
 
+    # shellcheck disable=SC2016
     g_recursive_source_list=$(comm -23 \
         "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
         "$g_cmd_awk" -F@ '{print $1}' | sort -u)
@@ -193,6 +195,7 @@ set_g_recursive_source_list() {
         echo "====== Extra Destination snapshots not in source ======"
         comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
         echo "====== Destination datasets with extra snapshots not in source ======"
+        # shellcheck disable=SC2016
         comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" | "$g_cmd_awk" -F@ '{print $1}' | sort -u
         echo "====================================================================="
     fi
@@ -268,6 +271,7 @@ get_zfs_list() {
     # this function writes to both files passed as parameters
     write_destination_snapshot_list_to_files "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 
+    # shellcheck disable=SC2034
     g_rzfs_list_hr_snap=$(cat "$l_rzfs_list_hr_snap_tmp_file")
 
     # get a list of all destination datasets recursively

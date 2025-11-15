@@ -32,6 +32,7 @@
 
 # for ShellCheck
 if false; then
+    # shellcheck source=src/zxfer_globals.sh
     . ./zxfer_globals.sh
 fi
 
@@ -80,9 +81,11 @@ prepare_rs_property_transfer() {
         # If the original source was backup/test/zroot and we are transferring
         # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
         l_dest_tail=$(echo "$source" | sed -e "s%^$l_part_of_source_to_delete%%g")
+        # shellcheck disable=SC2034
         g_actual_dest="$g_destination"/"$l_dest_tail"
     else
         l_trailing_slash_dest_tail=$(echo "$source" | sed -e "s%^$initial_source%%g")
+        # shellcheck disable=SC2034
         g_actual_dest="$g_destination$l_trailing_slash_dest_tail"
     fi
 }
@@ -107,7 +110,7 @@ get_exclude_list() {
     # Second, by default we exclude filesystem mountpoints on the
     # destination, as they will have their own rsync transfer or be
     # left for an independent restore procedure.
-    if [ $g_option_i_rsync_include_zfs_mountpoints -eq 0 ]; then
+    if [ "$g_option_i_rsync_include_zfs_mountpoints" -eq 0 ]; then
         dest_exclude_dir_list=$(echo "$rzfs_list_Ho_mountpoint" | grep "^$rs_dest" | grep -v "^$rs_dest$")
         dest_exclude_dir_list=$(echo "$dest_exclude_dir_list" |
             sed -e "s%^$rs_dest%%g")
@@ -155,7 +158,8 @@ get_zfs_list_rsync_mode() {
         if [ "$g_option_L_rsync_levels_deep" -lt "1" ]; then
             throw_usage_error "Option L, if specified, should be 1 or greater."
         fi
-        inc_g_option_L_rsync_levels_deep=$(expr $g_option_L_rsync_levels_deep + 1)
+        # shellcheck disable=SC2003
+        inc_g_option_L_rsync_levels_deep=$(expr "$g_option_L_rsync_levels_deep" + 1)
     fi
 
     for source_RN in $option_RN; do
@@ -179,7 +183,19 @@ get_zfs_list_rsync_mode() {
 directories are contained in filesystems with as many \"/\" as L."
                 fi
                 old_root_fs=$root_fs
-                root_fs=$(echo "$fs" | $g_cmd_awk '{for (i=1; i <= '$inc_g_option_L_rsync_levels_deep'; i++) printf("%s%c", $i, (i=='$inc_g_option_L_rsync_levels_deep')?ORS:OFS)}' FS=/ OFS=/ ORS=)
+                # shellcheck disable=SC2016
+                root_fs=$(
+                    echo "$fs" |
+                        "$g_cmd_awk" -v depth="$inc_g_option_L_rsync_levels_deep" '
+                            BEGIN { FS = "/" }
+                            {
+                                out = $1
+                                for (i = 2; i <= depth; i++) {
+                                    out = out "/" $i
+                                }
+                                print out
+                            }'
+                )
 
                 if [ "$root_fs" != "$old_root_fs" ] && [ "$old_root_fs" != "" ]; then
                     throw_usage_error "No common root filesystem. If using option L, ensure \
@@ -293,7 +309,7 @@ rsync_transfer() {
         opt_src_fs_mountpoint=$($g_LZFS get -Ho value mountpoint "$opt_src_fs")
 
         if [ "$opt_src_fs_mountpoint" = "legacy" ]; then
-            if [ $g_option_l_rsync_legacy_mountpoint -eq 0 ]; then
+            if [ "$g_option_l_rsync_legacy_mountpoint" -eq 0 ]; then
                 throw_usage_error "Legacy mountpoint encountered. Enable -l to assume \
 that the legacy mountpoint is \"/\"."
             fi
@@ -325,12 +341,14 @@ that the legacy mountpoint is \"/\"."
         if [ "$g_option_L_rsync_levels_deep" != "" ]; then
             # This will trim ($g_option_L_rsync_levels_deep + 1) folders off the beginning of the fs, e.g.
             # "tank/foo/bar/zroot/tmp/yum" becomes (with g_option_L_rsync_levels_deep = 3) "tmp/yum"
-            inc_g_option_L_rsync_levels_deep=$(expr $g_option_L_rsync_levels_deep + 1)
+            # shellcheck disable=SC2003
+            inc_g_option_L_rsync_levels_deep=$(expr "$g_option_L_rsync_levels_deep" + 1)
 
             n=1
-            while [ ${n} -le ${inc_g_option_L_rsync_levels_deep} ]; do
+            while [ "$n" -le "$inc_g_option_L_rsync_levels_deep" ]; do
                 opt_src_fs_modif=$(echo "$opt_src_fs_modif" | sed -e 's%^[^/]*%%' | sed -e 's%^/%%')
-                n=$((n + 1))
+                # shellcheck disable=SC2003
+                n=$(expr "$n" + 1)
             done
         fi
         #rs_dest="/$g_destination/$opt_src_fs_modif$opt_src_tail"
@@ -341,7 +359,7 @@ that the legacy mountpoint is \"/\"."
 
         dest_root_mountpoint=$($g_RZFS get -Ho value mountpoint "$dest_root")
         if [ "$dest_root_mountpoint" = "legacy" ]; then
-            if [ $g_option_l_rsync_legacy_mountpoint -eq 0 ]; then
+            if [ "$g_option_l_rsync_legacy_mountpoint" -eq 0 ]; then
                 throw_usage_error "Legacy mountpoint encountered. Enable -l to assume \
 that the legacy mountpoint is \"/\"."
             fi
@@ -354,7 +372,7 @@ that the legacy mountpoint is \"/\"."
             # Appends a slash and the "-r" option, to suit rsync
             rs_source="$rs_source/"
             full_rs_options="$full_rs_options $exclude_options -r"
-            if [ $g_option_d_delete_destination_snapshots -eq 1 ]; then
+            if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then
                 full_rs_options="$full_rs_options --del"
             fi
         elif [ -d "$rs_source" ]; then
@@ -362,7 +380,7 @@ that the legacy mountpoint is \"/\"."
             # if a directory
             rs_source="$rs_source/"
             full_rs_options="$full_rs_options -d"
-            if [ $g_option_d_delete_destination_snapshots -eq 1 ]; then
+            if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then
                 full_rs_options="$full_rs_options --del"
             fi
         else
@@ -381,8 +399,8 @@ that the legacy mountpoint is \"/\"."
 options $full_rs_options"
 
         # Now that we have something to feed rsync, we will call it.
-        if [ $g_option_n_dryrun -eq 0 ]; then
-            if [ $g_option_p_rsync_persist -eq 1 ]; then
+        if [ "$g_option_n_dryrun" -eq 0 ]; then
+            if [ "$g_option_p_rsync_persist" -eq 1 ]; then
                 $g_cmd_rsync "$full_rs_options" "$rs_source_safe" "$rs_dest_safe" # persist in face of error
             else
                 $g_cmd_rsync "$full_rs_options" "$rs_source_safe" "$rs_dest_safe" ||
@@ -427,14 +445,14 @@ options $full_rs_options"
 run_rsync_mode() {
     # destroys old snapshots used in any previous (incomplete) use of
     # the script's functionality, if not using a custom snapshot
-    if [ $g_option_u_rsync_use_existing_snapshot -eq 0 ]; then
+    if [ "$g_option_u_rsync_use_existing_snapshot" -eq 0 ]; then
         clean_up
     fi
 
     get_zfs_list_rsync_mode
 
     # If we are restoring properties get the backup properties
-    if [ $g_option_e_restore_property_mode -eq 1 ]; then
+    if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
         get_backup_properties
     fi
 
@@ -450,12 +468,13 @@ run_rsync_mode() {
     fi
 
     # recursively snapshot the source (if not using custom snapshot)
-    if [ $g_option_u_rsync_use_existing_snapshot -eq 0 ]; then
+    if [ "$g_option_u_rsync_use_existing_snapshot" -eq 0 ]; then
         $g_LZFS snapshot -r "${initial_source}@${g_snapshot_name}"
     fi
 
     # for the first iteration of property transfer, we need to override the
     # readonly property of the filesystem so that rsync will work.
+    # shellcheck disable=SC2034
     g_ensure_writable=1
 
     # make sure override list includes "readonly=off"
@@ -471,10 +490,11 @@ run_rsync_mode() {
     fi
 
     # we don't want to write the backup info this time, as it will be done later
+    # shellcheck disable=SC2034
     g_dont_write_backup=1
 
     # Transfer source properties to destination if required, or create the fs.
-    if [ $g_option_P_transfer_property -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
+    if [ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
         # loop that sets the filesystem properties
         for source in $g_recursive_source_list; do
             # prepares some variables for property_transfer
@@ -517,9 +537,11 @@ a single file, use -N."
     # properties are transferred.
 
     # this time we want to write the backup
+    # shellcheck disable=SC2034
     g_dont_write_backup=0
 
     # this time the properties should be as intended on dest.
+    # shellcheck disable=SC2034
     g_ensure_writable=0
 
     # clean up g_option_o_override_property to remove readonly=off
@@ -529,7 +551,7 @@ a single file, use -N."
     get_zfs_list_rsync_mode
 
     # Transfer source properties to destination if required.
-    if [ $g_option_P_transfer_property -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
+    if [ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
         # loop that sets the filesystem properties
         for source in $g_recursive_source_list; do
 
@@ -541,7 +563,7 @@ a single file, use -N."
     fi
 
     # We clean up snapshots if we aren't using a custom snapshot
-    if [ $g_option_u_rsync_use_existing_snapshot -eq 0 ]; then
+    if [ "$g_option_u_rsync_use_existing_snapshot" -eq 0 ]; then
         clean_up
     fi
 }
