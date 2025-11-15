@@ -244,10 +244,10 @@ inspect_delete_snap() {
 	l_source=$2
 
 	# Get the list of source snapshots in descending order by creation date
-	l_zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep "^$l_source@")
+	l_zfs_source_snaps=$(echo "$g_lzfs_list_hr_S_snap" | grep -F "$l_source@")
 
 	# get the list of destinations snapshots for the destination dataset
-	l_zfs_dest_snaps=$(echo "$g_rzfs_list_hr_snap" | grep "^$g_actual_dest@")
+	l_zfs_dest_snaps=$(echo "$g_rzfs_list_hr_snap" | grep -F "$g_actual_dest@")
 
 	# Deletes non-common snaps on destination if asked to.
 	if [ "$l_is_delete_snap" -eq 1 ]; then
