@@ -115,7 +115,12 @@ write_destination_snapshot_list_to_files() {
 	# is is the name of the dataset itself.
 	l_source_dataset=$(echo "$initial_source" | awk -F'/' '{print $NF}')
 
-	l_destination_dataset="$g_destination/$l_source_dataset"
+	if [ "$g_initial_source_had_trailing_slash" -eq 1 ]; then
+		# Trailing slash replicates directly into $g_destination (no child dataset)
+		l_destination_dataset="$g_destination"
+	else
+		l_destination_dataset="$g_destination/$l_source_dataset"
+	fi
 
 	# check if the destination zfs dataset exists before listing snapshots
 	if [ "$(exists_destination "$l_destination_dataset")" -eq 1 ]; then

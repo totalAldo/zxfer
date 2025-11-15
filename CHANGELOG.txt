@@ -2,6 +2,7 @@ CHANGELOG
 =========
 
 2025.11.15
+-Destination snapshot lookup now respects trailing-slash sources so incremental sends compare against the correct dataset
 -Track fully qualified last-common snapshot
 -Escape dataset names before sed substitution
 -Fix GNU parallel snapshot listing
