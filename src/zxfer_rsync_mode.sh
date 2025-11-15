@@ -2,7 +2,7 @@
 # BSD HEADER START
 # This file is part of zxfer project.
 
-# Copyright (c) 2024 Aldo Gonzalez
+# Copyright (c) 2024-2025 Aldo Gonzalez
 # Copyright (c) 2013-2019 Allan Jude <allanjude@freebsd.org>
 # Copyright (c) 2010,2011 Ivan Nash Dreckman
 # Copyright (c) 2007,2008 Constantin Gonzalez
