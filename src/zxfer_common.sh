@@ -151,6 +151,13 @@ execute_background_cmd() {
     $l_cmd >"$l_output_file" &
 }
 
+# Escape characters that have special meaning inside double quotes so that the
+# returned string can be safely reinserted into a double-quoted context without
+# triggering command substitution or other expansions.
+escape_for_double_quotes() {
+    printf '%s' "$1" | sed 's/[\\$`\"]/\\&/g'
+}
+
 #
 # Checks if the destination dataset exists, returns 1 if it does, 0 if it does not.
 #
