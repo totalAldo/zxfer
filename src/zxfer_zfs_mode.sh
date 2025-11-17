@@ -135,7 +135,20 @@ copy_snapshots() {
 # Stop a list of SMF services. The services are read in from stdin.
 #
 stopsvcs() {
-	while read -r service; do
+	l_raw_services=$(cat)
+
+	# Nothing to do if the caller provided an empty string.
+	[ -n "$l_raw_services" ] || return
+
+	l_normalized_services=$(printf '%s\n' "$l_raw_services" | awk '
+{
+	for (i = 1; i <= NF; i++)
+		print $i
+}')
+
+	[ -n "$l_normalized_services" ] || return
+
+	while IFS= read -r service; do
 		echov "Disabling service $service."
 		svcadm disable -st "$service" ||
 			{
@@ -145,7 +158,9 @@ stopsvcs() {
 			}
 		m_services_to_restart="$m_services_to_restart $service"
 		g_services_need_relaunch=1
-	done
+	done <<EOF
+$l_normalized_services
+EOF
 }
 
 #
