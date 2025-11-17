@@ -9,6 +9,9 @@
 # shellcheck source=src/zxfer_globals.sh
 . "$ZXFER_ROOT/src/zxfer_globals.sh"
 
+# shellcheck source=src/zxfer_inspect_delete_snap.sh
+. "$ZXFER_ROOT/src/zxfer_inspect_delete_snap.sh"
+
 oneTimeSetUp() {
 	TEST_TMPDIR=$(mktemp -d -t zxfer_shunit.XXXXXX)
 }
@@ -218,6 +221,53 @@ test_write_backup_properties_treats_backup_data_as_literal() {
 	fi
 	unset FAKE_ZFS_MOUNTPOINT
 	rm -f "$backup_file"
+}
+
+test_get_last_common_snapshot_matches_snapshot_name_only() {
+	# Destination snapshot names use the destination dataset prefix, so the
+	# helper must compare on the snapshot component rather than the full path.
+	l_source_snaps="tank/doET/tank@zxfer_2
+tank/doET/tank@zxfer_1"
+	l_dest_snaps="tank/backups/nucbackup/tank/doET/tank@zxfer_1"
+
+	result=$(get_last_common_snapshot "$l_source_snaps" "$l_dest_snaps")
+
+	assertEquals "tank/doET/tank@zxfer_1" "$result"
+}
+
+test_get_last_common_snapshot_returns_empty_when_no_snapshot_match() {
+	# If the destination never reported the snapshot name, the helper must
+	# return an empty string so zxfer performs a full send.
+	l_source_snaps="tank/doET/tank@zxfer_2
+tank/doET/tank@zxfer_1"
+	l_dest_snaps="tank/backups/nucbackup/tank/doET/tank@zxfer_3"
+
+	result=$(get_last_common_snapshot "$l_source_snaps" "$l_dest_snaps")
+
+	assertEquals "" "$result"
+}
+
+test_inspect_delete_snap_filters_exact_dataset_matches() {
+	init_globals
+	g_option_d_delete_destination_snapshots=0
+	g_lzfs_list_hr_S_snap=$(
+		cat <<'EOF'
+tank/zfsbackup/doCGA/tank@zxfer_30473_20251114214157
+tank/zfsbackup/doET/tank@zxfer_98767_20251117000001
+tank/zfsbackup/doET/tank@zxfer_30473_20251114214157
+EOF
+	)
+	g_rzfs_list_hr_snap=$(
+		cat <<'EOF'
+tank/backups/nucbackup/tank/zfsbackup/doCGA/tank@zxfer_30473_20251114214157
+tank/backups/nucbackup/tank/zfsbackup/doET/tank@zxfer_30473_20251114214157
+EOF
+	)
+	g_actual_dest="tank/backups/nucbackup/tank/zfsbackup/doET/tank"
+
+	inspect_delete_snap 0 "tank/zfsbackup/doET/tank"
+
+	assertEquals "tank/zfsbackup/doET/tank@zxfer_30473_20251114214157" "$g_last_common_snap"
 }
 
 . "$SHUNIT2_BIN"
