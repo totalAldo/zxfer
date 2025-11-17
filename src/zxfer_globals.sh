@@ -40,6 +40,10 @@
 #
 # Define global variables
 #
+
+# Secure location for property backup files (override via ZXFER_BACKUP_DIR).
+g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
+
 init_globals() {
 	# zxfer version
 	g_zxfer_version="2.0.0-20251117"
@@ -94,6 +98,7 @@ init_globals() {
 	g_destination=""
 	g_backup_file_extension=".zxfer_backup_info"
 	g_backup_file_contents=""
+	g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
 
 	# operating systems
 	g_source_operating_system=""
@@ -514,6 +519,157 @@ consistency_check() {
 	fi
 }
 
+sanitize_backup_component() {
+	l_component=$1
+	if [ "$l_component" = "" ]; then
+		printf '_\n'
+		return
+	fi
+	l_sanitized=$(printf '%s' "$l_component" | tr -c 'A-Za-z0-9._-' '_')
+	if [ "$l_sanitized" = "" ]; then
+		l_sanitized="_"
+	fi
+	printf '%s\n' "$l_sanitized"
+}
+
+sanitize_dataset_relpath() {
+	l_path=$1
+	l_trim=${l_path#/}
+	l_trim=${l_trim%/}
+	if [ "$l_trim" = "" ]; then
+		printf 'dataset\n'
+		return
+	fi
+	OLDIFS=$IFS
+	IFS="/"
+	l_result=""
+	for l_part in $l_trim; do
+		[ "$l_part" = "" ] && continue
+		l_part=$(sanitize_backup_component "$l_part")
+		l_result="$l_result/$l_part"
+	done
+	IFS=$OLDIFS
+	l_result=${l_result#/}
+	if [ "$l_result" = "" ]; then
+		l_result="dataset"
+	fi
+	printf '%s\n' "$l_result"
+}
+
+get_backup_storage_dir() {
+	l_mountpoint=$1
+	l_dataset=$2
+	[ -z "${g_backup_storage_root:-}" ] && g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
+
+	case "$l_mountpoint" in
+	""|"-")
+		l_relative="detached"
+		;;
+	legacy|none)
+		l_relative=$(sanitize_backup_component "$l_mountpoint")
+		;;
+	/)
+		l_relative="root"
+		;;
+	*)
+		l_trim=${l_mountpoint#/}
+		l_trim=${l_trim%/}
+		if [ "$l_trim" = "" ]; then
+			l_relative="root"
+		else
+			OLDIFS=$IFS
+			IFS="/"
+			l_relative=""
+			for l_part in $l_trim; do
+				[ "$l_part" = "" ] && continue
+				[ "$l_part" = "." ] && continue
+				[ "$l_part" = ".." ] && continue
+				l_part=$(sanitize_backup_component "$l_part")
+				l_relative="$l_relative/$l_part"
+			done
+			IFS=$OLDIFS
+			l_relative=${l_relative#/}
+			if [ "$l_relative" = "" ]; then
+				l_relative="root"
+			fi
+		fi
+		;;
+	esac
+
+	case "$l_mountpoint" in
+	""|"-"|legacy|none)
+		l_dataset_rel=$(sanitize_dataset_relpath "$l_dataset")
+		l_relative="$l_relative/$l_dataset_rel"
+		;;
+	esac
+
+	printf '%s/%s\n' "$g_backup_storage_root" "$l_relative"
+}
+
+ensure_local_backup_dir() {
+	l_dir=$1
+	if [ -L "$l_dir" ]; then
+		throw_error "Refusing to use backup directory $l_dir because it is a symlink."
+	fi
+	if [ -e "$l_dir" ] && [ ! -d "$l_dir" ]; then
+		throw_error "Refusing to use backup directory $l_dir because it is not a directory."
+	fi
+	if [ ! -d "$l_dir" ]; then
+		l_old_umask=$(umask)
+		umask 077
+		if ! mkdir -p "$l_dir"; then
+			umask "$l_old_umask"
+			throw_error "Error creating secure backup directory $l_dir."
+		fi
+		umask "$l_old_umask"
+	fi
+	if ! chmod 700 "$l_dir"; then
+		throw_error "Error securing backup directory $l_dir."
+	fi
+}
+
+escape_for_single_quotes() {
+	l_value=$1
+	printf '%s' "$l_value" | sed "s/'/'\\\\''/g"
+}
+
+ensure_remote_backup_dir() {
+	l_dir=$1
+	l_host=$2
+
+	[ "$l_host" = "" ] && return
+
+	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$l_host")
+	l_dir_single=$(escape_for_single_quotes "$l_dir")
+	l_remote_cmd="[ -L '$l_dir_single' ] && { echo 'Refusing to use symlinked zxfer backup directory.' >&2; exit 1; }; if [ -e '$l_dir_single' ] && [ ! -d '$l_dir_single' ]; then echo 'Backup path exists but is not a directory.' >&2; exit 1; fi; umask 077; mkdir -p '$l_dir_single' && chmod 700 '$l_dir_single'"
+	l_remote_cmd=$(escape_for_double_quotes "$l_remote_cmd")
+	if ! $l_target_ssh_cmd "$l_host" "$l_remote_cmd"; then
+		throw_error "Error preparing backup directory on $l_host."
+	fi
+}
+
+read_local_backup_file() {
+	l_path=$1
+	if [ ! -f "$l_path" ] || [ -h "$l_path" ]; then
+		return 1
+	fi
+	cat "$l_path"
+}
+
+read_remote_backup_file() {
+	l_host=$1
+	l_path=$2
+
+	l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$l_host")
+	l_path_single=$(escape_for_single_quotes "$l_path")
+	l_remote_test_cmd=$(escape_for_double_quotes "[ -f '$l_path_single' ] && [ ! -h '$l_path_single' ]")
+	if ! $l_origin_ssh_cmd "$l_host" "$l_remote_test_cmd"; then
+		return 1
+	fi
+	l_remote_cat_cmd=$(escape_for_double_quotes "$g_cmd_cat '$l_path_single'")
+	$l_origin_ssh_cmd "$l_host" "$l_remote_cat_cmd"
+}
+
 #
 # Gets the backup properties from a previous backup of those properties
 # This takes $initial_source. The backup file is usually in directory
@@ -527,21 +683,46 @@ get_backup_properties() {
 	l_suspect_fs=$initial_source
 	l_suspect_fs_tail=""
 	l_found_backup_file=0
+	l_used_legacy_backup=0
+	l_legacy_backup_path=""
+	l_expected_secure_backup=""
 
 	while [ $l_found_backup_file -eq 0 ]; do
-		l_backup_file_dir=$($g_LZFS get -H -o value mountpoint "$l_suspect_fs")
-		l_backup_file="$l_backup_file_dir/$g_backup_file_extension.$l_suspect_fs_tail"
+		l_mountpoint=$($g_LZFS get -H -o value mountpoint "$l_suspect_fs")
+		l_secure_dir=$(get_backup_storage_dir "$l_mountpoint" "$l_suspect_fs")
+		l_backup_file="$l_secure_dir/$g_backup_file_extension.$l_suspect_fs_tail"
+		l_legacy_backup_file=""
+		case "$l_mountpoint" in
+		""|"-"|legacy|none)
+			;;
+		*)
+			l_legacy_backup_file=$l_mountpoint/$g_backup_file_extension.$l_suspect_fs_tail
+			;;
+		esac
 
 		if [ "$g_option_O_origin_host" = "" ]; then
-			if [ -r "$l_backup_file" ]; then
-				g_restored_backup_file_contents=$(cat "$l_backup_file")
+			if l_backup_contents=$(read_local_backup_file "$l_backup_file"); then
+				g_restored_backup_file_contents=$l_backup_contents
 				l_found_backup_file=1
+			elif [ "$l_legacy_backup_file" != "" ] &&
+				l_backup_contents=$(read_local_backup_file "$l_legacy_backup_file"); then
+				g_restored_backup_file_contents=$l_backup_contents
+				l_found_backup_file=1
+				l_used_legacy_backup=1
+				l_legacy_backup_path="$l_legacy_backup_file"
+				l_expected_secure_backup="$l_backup_file"
 			fi
 		else
-			l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-			if $l_origin_ssh_cmd "$g_option_O_origin_host" "[ -r '$l_backup_file' ]"; then
-				g_restored_backup_file_contents=$($l_origin_ssh_cmd "$g_option_O_origin_host" "$g_cmd_cat '$l_backup_file'")
+			if l_backup_contents=$(read_remote_backup_file "$g_option_O_origin_host" "$l_backup_file"); then
+				g_restored_backup_file_contents=$l_backup_contents
 				l_found_backup_file=1
+			elif [ "$l_legacy_backup_file" != "" ] &&
+				l_backup_contents=$(read_remote_backup_file "$g_option_O_origin_host" "$l_legacy_backup_file"); then
+				g_restored_backup_file_contents=$l_backup_contents
+				l_found_backup_file=1
+				l_used_legacy_backup=1
+				l_legacy_backup_path="$l_legacy_backup_file"
+				l_expected_secure_backup="$l_backup_file"
 			fi
 		fi
 
@@ -560,6 +741,10 @@ get_backup_properties() {
 		fi
 	done
 
+	if [ $l_used_legacy_backup -eq 1 ]; then
+		echo "Warning: read legacy backup metadata from $l_legacy_backup_path. Move it to $l_expected_secure_backup (or set ZXFER_BACKUP_DIR) to use the hardened storage path." >&2
+	fi
+
 	# at this point the $g_backup_file_contents will be a list of lines with
 	# $source,$g_actual_dest,$source_pvs
 }
@@ -569,39 +754,46 @@ get_backup_properties() {
 # corresponding to the destination filesystem
 #
 write_backup_properties() {
+	[ -z "${g_backup_storage_root:-}" ] && g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
 	l_is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
-	l_backup_file_dir=$($g_RZFS get -H -o value mountpoint "$g_destination")
-	echov "Writing backup info to location $l_backup_file_dir/$g_backup_file_extension.$l_is_tail"
+	l_destination_mountpoint=$($g_RZFS get -H -o value mountpoint "$g_destination")
+	l_backup_file_dir=$(get_backup_storage_dir "$l_destination_mountpoint" "$g_destination")
+	l_backup_file_path=$l_backup_file_dir/$g_backup_file_extension.$l_is_tail
+	echov "Writing backup info to secure path $l_backup_file_path (mountpoint $l_destination_mountpoint)"
 
 	# Construct the backup file contents
 	l_backup_file_header="#zxfer property backup file;#version:$g_zxfer_version;#R options:$g_option_R_recursive;#N options:$g_option_N_nonrecursive;#destination:$g_destination;#initial_source:$l_is_tail;"
 	l_backup_date=$(date)
 	g_backup_file_contents="$l_backup_file_header#backup_date:$l_backup_date$g_backup_file_contents"
 
-	l_backup_file_path=$l_backup_file_dir/$g_backup_file_extension.$l_is_tail
-
 	# Execute the command
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
 		if [ "$g_option_T_target_host" = "" ]; then
+			ensure_local_backup_dir "$g_backup_storage_root"
+			ensure_local_backup_dir "$l_backup_file_dir"
+			l_old_umask=$(umask)
+			umask 077
 			if ! printf '%s' "$g_backup_file_contents" | tr ";" "\n" >"$l_backup_file_path"; then
+				umask "$l_old_umask"
 				throw_error "Error writing backup file. Is filesystem mounted?"
 			fi
+			umask "$l_old_umask"
 		else
+			ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host"
+			ensure_remote_backup_dir "$l_backup_file_dir" "$g_option_T_target_host"
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-			l_remote_backup_file_path=$(escape_for_double_quotes "$l_backup_file_path")
 			if ! printf '%s' "$g_backup_file_contents" | tr ";" "\n" |
-				$l_target_ssh_cmd "$g_option_T_target_host" "cat > \"$l_remote_backup_file_path\""; then
+				$l_target_ssh_cmd "$g_option_T_target_host" "$(escape_for_double_quotes "umask 077; cat > \"$l_backup_file_path\"")"; then
 				throw_error "Error writing backup file. Is filesystem mounted?"
 			fi
 		fi
 	else
 		l_backup_file_contents_safe=$(escape_for_double_quotes "$g_backup_file_contents")
 		if [ "$g_option_T_target_host" = "" ]; then
-			printf '%s\n' "printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" > \"$l_backup_file_path\""
+			printf '%s\n' "umask 077; printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" > \"$l_backup_file_path\""
 		else
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-			l_remote_backup_file_path=$(escape_for_double_quotes "$l_backup_file_path")
-			printf '%s\n' "printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" | $l_target_ssh_cmd \"$g_option_T_target_host\" \"cat > \\\"$l_remote_backup_file_path\\\"\""
+			printf '%s\n' "printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" | $l_target_ssh_cmd \"$g_option_T_target_host\" \"umask 077; cat > \\\"$l_backup_file_path\\\"\""
 		fi
 	fi
 }

@@ -59,6 +59,17 @@ The code has been refactored for better readability and maintainability, which i
 + Segmenting the code into smaller files, grouped by functionality.
 + Renaming variables to indicate whether they are global, modular, or local references.
 
+## Property Backup Storage
+The `-k` option now writes `.zxfer_backup_info.*` files into a hardened metadata
+directory so unprivileged users cannot pre-create symlinks inside live
+mountpoints. By default zxfer uses `/var/db/zxfer/<mountpoint>/` (mirroring
+their mountpoint path underneath a root-owned directory), but you can override
+the location by exporting `ZXFER_BACKUP_DIR=/secure/path` before invoking zxfer.
+The directory must remain writable only by administrators. The `-e` restore mode
+first looks inside this secure directory and still falls back to legacy backup
+files found inside the dataset mountpoints, emitting a warning so you can move
+those files into the hardened store.
+
 ## Feedback Welcome
 If you use this script and have any suggestions or feedback, please open an issue or a pull request. I hope this script will be beneficial to others and that useful features can be incorporated into the main project.
 
