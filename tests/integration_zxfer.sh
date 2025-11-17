@@ -113,7 +113,7 @@ usage_error_tests() {
 	assert_usage_error_case "Missing destination" "Need a destination." -R tank/src
 	assert_usage_error_case "Missing -N/-R source flag" "You must specify a source with either -N or -R." backup/target
 	assert_usage_error_case "Conflicting -N and -R flags" \
-"You must choose either -N to transfer a single filesystem or -R to transfer a single filesystem and its children recursively, but not both -N and -R at the same time." \
+		"You must choose either -N to transfer a single filesystem or -R to transfer a single filesystem and its children recursively, but not both -N and -R at the same time." \
 		-N tank/src -R tank/src backup/target
 
 	log "Usage error tests passed"
