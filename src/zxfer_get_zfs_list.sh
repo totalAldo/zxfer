@@ -73,17 +73,19 @@ write_source_snapshot_list_to_file() {
 
 			# check if compression is enabled
 			l_remote_parallel_cmd=$(escape_for_double_quotes "$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}")
+			l_remote_parallel_runner="sh -c \\\"$l_remote_parallel_cmd\\\" sh"
 
 			if [ "$g_option_z_compress" -eq 1 ]; then
 				# IllumOS requires -d 1 when listing snapshots for one dataset
-				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer \\\"$l_remote_parallel_cmd\\\" | zstd -9\" | zstd -d"
+				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner | zstd -9\" | zstd -d"
 			else
-				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer \\\"$l_remote_parallel_cmd\\\"\""
+				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner\""
 			fi
 		else
 			#l_cmd="$g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'"
 			l_local_parallel_cmd=$(escape_for_double_quotes "$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}")
-			l_cmd="$g_LZFS list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer \\\"$l_local_parallel_cmd\\\""
+			l_local_parallel_runner="sh -c \\\"$l_local_parallel_cmd\\\" sh"
+			l_cmd="$g_LZFS list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_local_parallel_runner"
 		fi
 
 		echoV "Running command in the background: $l_cmd"
@@ -156,10 +158,15 @@ write_destination_snapshot_list_to_files() {
 		echo "" >"$l_rzfs_list_hr_snap_tmp_file"
 	fi
 
-	# sort the destination snapshots and replace the destination dataset with the prefix
-	# of the source for comparison
-	l_escaped_destination_dataset=$(printf '%s\n' "$l_destination_dataset" | sed 's/[].[^$\\*|]/\\&/g')
-	l_cmd="sed -e 's|$l_escaped_destination_dataset|$initial_source|g' $l_rzfs_list_hr_snap_tmp_file | sort > $l_dest_snaps_stripped_sorted_tmp_file"
+	# Normalize the destination snapshot paths for comm comparison unless the
+	# user explicitly requested trailing-slash semantics, in which case the
+	# destination dataset already matches the source layout.
+	if [ "$g_initial_source_had_trailing_slash" -eq 1 ]; then
+		l_cmd="sort $l_rzfs_list_hr_snap_tmp_file > $l_dest_snaps_stripped_sorted_tmp_file"
+	else
+		l_escaped_destination_dataset=$(printf '%s\n' "$l_destination_dataset" | sed 's/[].[^$\\*|]/\\&/g')
+		l_cmd="sed -e 's|$l_escaped_destination_dataset|$initial_source|g' $l_rzfs_list_hr_snap_tmp_file | sort > $l_dest_snaps_stripped_sorted_tmp_file"
+	fi
 	echoV "Running command: $l_cmd"
 	eval "$l_cmd"
 }
