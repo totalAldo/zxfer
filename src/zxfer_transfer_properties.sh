@@ -244,7 +244,7 @@ run_zfs_create_with_properties() {
 			"$g_RZFS" "$@"
 		else
 			printf '%s' "$g_RZFS"
-			for l_arg do
+			for l_arg; do
 				printf ' "%s"' "$(escape_for_double_quotes "$l_arg")"
 			done
 			printf '\n'
