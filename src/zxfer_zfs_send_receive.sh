@@ -86,8 +86,20 @@ zxfer_progress_passthrough() {
 	}
 
 	rm -f "$l_fifo"
+	l_old_umask=$(umask)
+	umask 077
 	if ! mkfifo "$l_fifo"; then
+		umask "$l_old_umask"
 		echoV "Unable to mkfifo $l_fifo for progress bar; continuing without it."
+		rm -f "$l_fifo"
+		cat
+		return $?
+	fi
+	umask "$l_old_umask"
+
+	# Explicitly lock down the FIFO permissions in case umask enforcement fails.
+	if ! chmod 600 "$l_fifo"; then
+		echoV "Unable to secure permissions on $l_fifo for progress bar; continuing without it."
 		rm -f "$l_fifo"
 		cat
 		return $?
