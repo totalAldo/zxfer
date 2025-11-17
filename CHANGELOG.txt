@@ -1,6 +1,11 @@
 CHANGELOG
 =========
 
+2025.11.19
+-Quote the progress passthrough hook with single quotes so remote `-O -D` pulls keep the ssh command coherent and progress works on origin hosts.
+-Estimate incremental stream sizes when a previous snapshot exists so the progress dialog reflects the bytes that will actually be sent.
+-Keep g_is_performed_send_destroy unset during dry-run sends so `-Y -n` exits after the first loop when no mutations occur.
+
 2025.11.18
 -Eliminate command injection in transfer_properties() by building `zfs create` argument lists without eval so property values are passed verbatim even when the destination dataset does not yet exist.
 

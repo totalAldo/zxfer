@@ -164,6 +164,12 @@ escape_for_double_quotes() {
 	printf '%s' "$1" | sed 's/[\\$`\"]/\\&/g'
 }
 
+# Escape characters for a single-quoted context by closing and reopening quotes
+# around embedded apostrophes.
+escape_for_single_quotes() {
+	printf '%s' "$1" | sed "s/'/'\"'\"'/g"
+}
+
 #
 # Checks if the destination dataset exists, returns 1 if it does, 0 if it does not.
 #

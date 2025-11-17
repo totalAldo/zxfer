@@ -54,6 +54,17 @@ test_escape_for_double_quotes_escapes_special_chars() {
 	assertEquals "Input should be properly escaped for double quotes." "$expected" "$result"
 }
 
+test_escape_for_single_quotes_escapes_apostrophes() {
+	# Single-quoted contexts require reopening the quotes around apostrophes,
+	# so ensure the helper inserts the standard '"'"' sequence.
+	input=$(printf "%s" "needs'single'quotes")
+	expected=$(printf "%s" "needs'\"'\"'single'\"'\"'quotes")
+
+	result=$(escape_for_single_quotes "$input")
+
+	assertEquals "Input should be properly escaped for single quotes." "$expected" "$result"
+}
+
 test_execute_command_respects_dry_run_mode() {
 	# With --dry-run enabled, execute_command should not run but still
 	# describe the action, so no temp files should be created.

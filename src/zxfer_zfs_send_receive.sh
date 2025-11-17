@@ -48,10 +48,16 @@ fi
 # Takes $g_LZFS (which may contain the ssh command if -O is used)
 #
 calculate_size_estimate() {
-	l_snapshot=$1
+	l_current_snapshot=$1
+	l_previous_snapshot=$2
 
-	l_size_dataset=$($g_LZFS send -nPv "$l_snapshot" 2>&1) ||
-		throw_error "Error calculating estimate: $l_size_dataset"
+	if [ -n "$l_previous_snapshot" ]; then
+		l_size_dataset=$($g_LZFS send -nPv -I "$l_previous_snapshot" "$l_current_snapshot" 2>&1) ||
+			throw_error "Error calculating incremental estimate: $l_size_dataset"
+	else
+		l_size_dataset=$($g_LZFS send -nPv "$l_current_snapshot" 2>&1) ||
+			throw_error "Error calculating estimate: $l_size_dataset"
+	fi
 	l_size_est=$(echo "$l_size_dataset" | grep ^size | tail -n 1 | cut -f 2)
 
 	echo "$l_size_est"
@@ -85,7 +91,7 @@ zxfer_progress_passthrough() {
 		rm -f "$l_fifo"
 		cat
 		return $?
-	}
+	fi
 
 	sh -c "$l_progress_dialog" <"$l_fifo" &
 	l_progress_pid=$!
@@ -111,15 +117,16 @@ zxfer_progress_passthrough() {
 #
 handle_progress_bar_option() {
 	l_snapshot=$1
+	l_previous_snapshot=$2
 	l_progress_bar_cmd=""
 
 	# Calculate the size estimate and set up the progress dialog
-	l_size_est=$(calculate_size_estimate "$l_snapshot")
+	l_size_est=$(calculate_size_estimate "$l_snapshot" "$l_previous_snapshot")
 	l_progress_dialog=$(setup_progress_dialog "$l_size_est" "$l_snapshot")
 
 	# Modify the send command to include the progress dialog
-	l_escaped_progress_dialog=$(escape_for_double_quotes "$l_progress_dialog")
-	l_progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | zxfer_progress_passthrough \"$l_escaped_progress_dialog\""
+	l_escaped_progress_dialog=$(escape_for_single_quotes "$l_progress_dialog")
+	l_progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | zxfer_progress_passthrough '$l_escaped_progress_dialog'"
 
 	echo "$l_progress_bar_cmd"
 }
@@ -238,15 +245,20 @@ zfs_send_receive() {
 
 	# Perform this after ssh wrapping occurs
 	if [ "$g_option_D_display_progress_bar" != "" ]; then
-		l_progress_bar_cmd=$(handle_progress_bar_option "$l_current_snapshot")
+		l_progress_bar_cmd=$(handle_progress_bar_option "$l_current_snapshot" "$l_previous_snapshot")
 		l_send_cmd="$l_send_cmd $l_progress_bar_cmd"
 	fi
 
-	if [ "$l_is_allow_background" -eq 1 ] && [ "$g_option_j_jobs" -gt 1 ]; then
+	l_job_limit=${g_option_j_jobs:-1}
+	case $l_job_limit in
+	'' | *[!0-9]*) l_job_limit=1 ;; # fall back to safe single-job mode if unset/invalid
+	esac
+
+	if [ "$l_is_allow_background" -eq 1 ] && [ "$l_job_limit" -gt 1 ]; then
 		# implement naive job control.
 		# if there are more than this many jobs, wait until they are all
 		# completed before spawning new ones
-		if [ "$g_count_zfs_send_jobs" -ge "$g_option_j_jobs" ]; then
+		if [ "$g_count_zfs_send_jobs" -ge "$l_job_limit" ]; then
 			echov "Max jobs reached [$g_count_zfs_send_jobs]. Waiting for jobs to complete."
 			wait_for_zfs_send_jobs "job limit"
 		fi
@@ -264,9 +276,10 @@ zfs_send_receive() {
 	else
 		execute_command "$l_send_cmd | $l_recv_cmd"
 	fi
-
-	# shellcheck disable=SC2034
-	g_is_performed_send_destroy=1
+	if [ "$g_option_n_dryrun" -ne 1 ]; then
+		# shellcheck disable=SC2034
+		g_is_performed_send_destroy=1
+	fi
 
 	echoV "End zfs_send_receive()"
 }
