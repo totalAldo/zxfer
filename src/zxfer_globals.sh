@@ -570,10 +570,10 @@ get_backup_storage_dir() {
 	[ -z "${g_backup_storage_root:-}" ] && g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
 
 	case "$l_mountpoint" in
-	""|"-")
+	"" | "-")
 		l_relative="detached"
 		;;
-	legacy|none)
+	legacy | none)
 		l_relative=$(sanitize_backup_component "$l_mountpoint")
 		;;
 	/)
@@ -605,7 +605,7 @@ get_backup_storage_dir() {
 	esac
 
 	case "$l_mountpoint" in
-	""|"-"|legacy|none)
+	"" | "-" | legacy | none)
 		l_dataset_rel=$(sanitize_dataset_relpath "$l_dataset")
 		l_relative="$l_relative/$l_dataset_rel"
 		;;
@@ -701,8 +701,7 @@ get_backup_properties() {
 		l_backup_file="$l_secure_dir/$g_backup_file_extension.$l_suspect_fs_tail"
 		l_legacy_backup_file=""
 		case "$l_mountpoint" in
-		""|"-"|legacy|none)
-			;;
+		"" | "-" | legacy | none) ;;
 		*)
 			l_legacy_backup_file=$l_mountpoint/$g_backup_file_extension.$l_suspect_fs_tail
 			;;
