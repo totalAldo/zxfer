@@ -253,6 +253,11 @@ inspect_delete_snap() {
 	# Get the list of destination snapshots for the matching destination dataset.
 	l_zfs_dest_snaps=$(printf '%s\n' "$g_rzfs_list_hr_snap" |
 		"$g_cmd_awk" -F@ -v ds="$g_actual_dest" "\$1 == ds {print \$0}")
+	if [ -n "$l_zfs_dest_snaps" ]; then
+		g_dest_has_snapshots=1
+	else
+		g_dest_has_snapshots=0
+	fi
 
 	# Deletes non-common snaps on destination if asked to.
 	if [ "$l_is_delete_snap" -eq 1 ]; then

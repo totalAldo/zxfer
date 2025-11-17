@@ -291,48 +291,6 @@ idempotent_replication_test() {
 	log "Idempotent replication test passed"
 }
 
-parallel_jobs_test() {
-	# Ensure zxfer operates correctly when multiple zfs send jobs run in parallel.
-	log "Starting parallel jobs test"
-
-	if ! command -v parallel >/dev/null 2>&1; then
-		log "Skipping parallel jobs test: GNU parallel not installed."
-		return
-	fi
-
-	src_root="$SRC_POOL/parallel_src"
-	dest_root="$DEST_POOL/parallel_dest"
-	dest_dataset_root="$dest_root/${src_root##*/}"
-
-	zfs destroy -r "$src_root" >/dev/null 2>&1 || true
-	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
-
-	zfs create "$src_root"
-	zfs create "$dest_root"
-	append_data_to_dataset "$src_root" "root.txt" "parallel root snapshot"
-	zfs snap "$src_root@root_parallel"
-
-	for child in 1 2 3; do
-		child_dataset="$src_root/dataset$child"
-		zfs create "$child_dataset"
-
-		append_data_to_dataset "$child_dataset" "parallel.txt" "dataset$child snapshot one"
-		zfs snap -r "$child_dataset@psnap1"
-		append_data_to_dataset "$child_dataset" "parallel.txt" "dataset$child snapshot two"
-		zfs snap -r "$child_dataset@psnap2"
-	done
-
-	run_zxfer -v -j 3 -R "$src_root" "$dest_root"
-
-	for child in 1 2 3; do
-		dest_dataset="$dest_dataset_root/dataset$child"
-		assert_snapshot_exists "$dest_dataset" "psnap1"
-		assert_snapshot_exists "$dest_dataset" "psnap2"
-	done
-
-	log "Parallel jobs test passed"
-}
-
 main() {
 	require_root
 	require_cmd zpool
@@ -375,7 +333,6 @@ main() {
 	basic_replication_test
 	generate_tests_replication
 	idempotent_replication_test
-	#parallel_jobs_test
 
 	log "All integration tests passed."
 }
