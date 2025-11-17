@@ -138,6 +138,7 @@ stopsvcs() {
 				exit 1
 			}
 		m_services_to_restart="$m_services_to_restart $service"
+		g_services_need_relaunch=1
 	done
 }
 
@@ -145,6 +146,11 @@ stopsvcs() {
 # Relaunch a list of stopped services
 #
 relaunch() {
+	[ -z "$m_services_to_restart" ] && return
+
+	# Assume relaunch completes; set flag early so trap_exit won't loop
+	g_services_need_relaunch=0
+
 	for l_i in $m_services_to_restart; do
 		echov "Restarting service $l_i"
 		svcadm enable "$l_i" || {

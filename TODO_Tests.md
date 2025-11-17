@@ -3,7 +3,7 @@
 Current integration coverage in `tests/integration_zxfer.sh` only exercises three local replication happy paths (basic recursive send, multi-dataset propagation, and idempotent reruns). The codebase includes many option-driven branches that are still untested end-to-end. Add the following higher-level tests to reach coverage across every path:
 
 ## CLI and Option Validation
-- [ ] `zxfer:133-150`, `src/zxfer_zfs_mode.sh:279-288` – invoke `zxfer` without a destination, with missing `-N/-R`, and with both flags simultaneously to verify `throw_usage_error` halts and prints usage.  
+- [x] `zxfer:133-150`, `src/zxfer_zfs_mode.sh:279-288` – invoke `zxfer` without a destination, with missing `-N/-R`, and with both flags simultaneously to verify `throw_usage_error` halts and prints usage. (Covered by `usage_error_tests` in `tests/integration_zxfer.sh`.)  
 - [ ] `src/zxfer_zfs_mode.sh:297-305` – run with sources/destinations that start with `/` and with a snapshot source (`pool/fs@snap`) to cover `check_snapshot` and path validation errors.  
 - [ ] `src/zxfer_zfs_mode.sh:307-311` – pass `-c` without `-m` to ensure migration guard fails.  
 - [ ] `src/zxfer_globals.sh:473-499` – cover each `consistency_check` branch: `-k` with `-e`, `-b` with `-B`, `-z` without `-O/-T`, and `-m`/`-c` with remote hosts.  

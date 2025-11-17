@@ -81,6 +81,9 @@ init_globals() {
 	g_option_w_raw_send=0
 	g_option_z_compress=0
 
+	# services stopped by -c/-m that must be restarted on exit
+	g_services_need_relaunch=0
+
 	source=""
 	g_initial_source_had_trailing_slash=0
 
@@ -272,6 +275,17 @@ trap_exit() {
 			rm "$l_temp_file"
 		fi
 	done
+
+	if [ "${g_services_need_relaunch:-0}" -eq 1 ]; then
+		# Prevent re-entrancy loops if relaunch exits due to failure.
+		g_services_need_relaunch=0
+		if command -v relaunch >/dev/null 2>&1; then
+			echoV "zxfer exiting early; restarting stopped services."
+			relaunch
+		else
+			echoV "zxfer exiting with services still stopped; relaunch() unavailable."
+		fi
+	fi
 
 	echoV "zxfer exiting with status $l_exit_status"
 
