@@ -202,6 +202,57 @@ resolve_human_vars() {
 }
 
 #
+# Build and execute a "zfs create" command while safely passing property=value
+# assignments as individual arguments, avoiding eval so property data cannot be
+# treated as shell syntax.
+# $1: "yes" to include -p (create parent datasets), anything else skips it
+# $2: dataset type (volume/filesystem) to decide whether -V is required
+# $3: volume size (only used when type=volume)
+# $4: comma-separated property=value list (sources already removed)
+# $5: destination dataset name
+#
+run_zfs_create_with_properties() {
+	l_with_parents=$1
+	l_dataset_type=$2
+	l_volume_size=$3
+	l_property_list=$4
+	l_destination=$5
+
+	(
+		set -- create
+
+		if [ "$l_with_parents" = "yes" ]; then
+			set -- "$@" "-p"
+		fi
+
+		if [ "$l_dataset_type" = "volume" ] && [ -n "$l_volume_size" ]; then
+			set -- "$@" "-V" "$l_volume_size"
+		fi
+
+		l_cmd_ifs=$IFS
+		IFS=","
+		for l_prop_value in $l_property_list; do
+			if [ "$l_prop_value" != "" ]; then
+				set -- "$@" "-o" "$l_prop_value"
+			fi
+		done
+		IFS=$l_cmd_ifs
+
+		set -- "$@" "$l_destination"
+
+		if [ "$g_option_n_dryrun" -eq 0 ]; then
+			"$g_RZFS" "$@"
+		else
+			printf '%s' "$g_RZFS"
+			for l_arg do
+				printf ' "%s"' "$(escape_for_double_quotes "$l_arg")"
+			done
+			printf '\n'
+		fi
+	)
+}
+
+#
 # Transfers properties from any source to destination.
 # Either creates the filesystem if it doesn't exist,
 # or sets it after the fact.
@@ -386,13 +437,6 @@ $l_source,$g_actual_dest,$l_source_pvs"
 			# as this is the initial source, we want to transfer all properties from
 			# the source, overridden with g_option_o_override_property values as necessary
 			remove_sources "$override_pvs"
-			override_option_list=$(echo "$m_new_rmvs_pv" | tr "," "\n" | sed "s/\(.*\)=\(.*\)/\1=\'\2\'/g" | tr "\n" "," | sed 's/,$//' | sed -e 's/,/ -o /g')
-			if [ "$override_option_list" != "" ]; then
-				override_option_list=" -o $override_option_list"
-			fi
-			if [ "$l_source_dstype" = "volume" ]; then
-				override_option_list=" -V $l_source_volsize $override_option_list"
-			fi
 
 			# If not, create it with the override list and be done with it -
 			# we have now transferred all properties
@@ -403,11 +447,8 @@ with specified properties."
 			# (This and reversion back is so that $g_RZFS command works with -r)
 			IFS=$OLDIFS
 
-			if [ "$g_option_n_dryrun" -eq 0 ]; then
-				eval "$g_RZFS create $override_option_list $g_actual_dest" ||
-					throw_error "Error when creating destination filesystem."
-			else
-				echo "$g_RZFS create $override_option_list $g_actual_dest"
+			if ! run_zfs_create_with_properties "no" "$l_source_dstype" "$l_source_volsize" "$m_new_rmvs_pv" "$g_actual_dest"; then
+				throw_error "Error when creating destination filesystem."
 			fi
 
 			#change the field separator to a ","
@@ -425,14 +466,6 @@ with specified properties."
 			creation_pvs="$m_new_rmv_pvs"
 
 			remove_sources "$creation_pvs"
-			creation_option_list=$(echo "$m_new_rmvs_pv" | tr "," "\n" | sed "s/\(.*\)=\(.*\)/\1=\'\2\'/" | tr "\n" "," | sed 's/,$//' | sed -e 's/,/ -o /g')
-
-			if [ "$creation_option_list" != "" ]; then
-				creation_option_list=" -o $creation_option_list"
-			fi
-			if [ "$l_source_dstype" = "volume" ]; then
-				creation_option_list=" -V $l_source_volsize $creation_option_list"
-			fi
 
 			# revert to old field separator
 			# (This and reversion back is so that $g_RZFS command works with -r)
@@ -440,11 +473,8 @@ with specified properties."
 
 			echov "Creating destination filesystem \"$g_actual_dest\" \
 with specified properties."
-			if [ "$g_option_n_dryrun" -eq 0 ]; then
-				eval "$g_RZFS create -p $creation_option_list $g_actual_dest" ||
-					throw_error "Error when creating destination filesystem."
-			else
-				echo "$g_RZFS create -p $creation_option_list $g_actual_dest"
+			if ! run_zfs_create_with_properties "yes" "$l_source_dstype" "$l_source_volsize" "$m_new_rmvs_pv" "$g_actual_dest"; then
+				throw_error "Error when creating destination filesystem."
 			fi
 
 			#change the field separator to a ","
