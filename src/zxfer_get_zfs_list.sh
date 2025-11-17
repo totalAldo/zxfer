@@ -72,20 +72,20 @@ write_source_snapshot_list_to_file() {
 			# zstd -19 takes too long
 
 			# check if compression is enabled
-			l_remote_parallel_cmd=$(escape_for_double_quotes "$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}")
+			l_remote_parallel_cmd=$(escape_for_double_quotes "$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
 			l_remote_parallel_runner="sh -c \\\"$l_remote_parallel_cmd\\\" sh"
 
 			if [ "$g_option_z_compress" -eq 1 ]; then
 				# IllumOS requires -d 1 when listing snapshots for one dataset
-				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner | zstd -9\" | zstd -d"
+				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {} | zstd -9\" | zstd -d"
 			else
-				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner\""
+				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {}\""
 			fi
 		else
 			#l_cmd="$g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'"
-			l_local_parallel_cmd=$(escape_for_double_quotes "$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}")
+			l_local_parallel_cmd=$(escape_for_double_quotes "$g_LZFS list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
 			l_local_parallel_runner="sh -c \\\"$l_local_parallel_cmd\\\" sh"
-			l_cmd="$g_LZFS list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_local_parallel_runner"
+			l_cmd="$g_LZFS list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_local_parallel_runner {}"
 		fi
 
 		echoV "Running command in the background: $l_cmd"

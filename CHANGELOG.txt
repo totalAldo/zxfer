@@ -5,7 +5,7 @@ CHANGELOG
 -Eliminate command injection in write_backup_properties() by streaming raw property data directly into the backup file and expand shunit2 coverage for the helper
 -Normalize destination snapshot prefixes for non-trailing-slash transfers so dataset detection matches pre-2025.11.14 behavior, while keeping trailing-slash multi-host replicas isolated.
 -Filter source/destination snapshot lists by exact dataset names when building replication plans so nested filesystems that share a basename (for example, trailing “/tank”) no longer collide when computing the last common snapshot.
--Wrap the GNU parallel snapshot listing commands in `sh -c` so per-dataset jobs execute `/sbin/zfs list …` with proper argument splitting even when dataset names contain spaces or slashes.
+-Wrap the GNU parallel snapshot listing commands in `sh -c` and pass dataset names as `$1` arguments so per-dataset jobs execute `/sbin/zfs list … "$1"` with proper argument splitting even when datasets contain slashes or spaces, fixing both local and remote `-O` listing.
 
 2025.11.15
 -Destination snapshot lookup now respects trailing-slash sources so incremental sends compare against the correct dataset
