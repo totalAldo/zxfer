@@ -255,7 +255,9 @@ $l_source,$g_actual_dest,$l_source_pvs"
 
 	# If we are restoring properties, then get l_source_pvs from the backup file
 	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
-		l_source_pvs=$(echo "$g_restored_backup_file_contents" | grep "^[^,]*,$l_source," |
+		# Escape the dataset so grep does not treat dots or other chars as regex.
+		l_source_regex=$(printf '%s\n' "$l_source" | sed 's/[].[^$\\*]/\\&/g')
+		l_source_pvs=$(echo "$g_restored_backup_file_contents" | grep "^[^,]*,$l_source_regex," |
 			sed -e 's/^[^,]*,[^,]*,//g')
 		if [ "$l_source_pvs" = "" ]; then
 			throw_usage_error "Can't find the properties for the filesystem $l_source"
