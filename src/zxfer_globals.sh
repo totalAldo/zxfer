@@ -127,6 +127,7 @@ init_globals() {
 	g_rzfs_list_hr_snap=""
 
 	g_last_common_snap=""
+	g_dest_has_snapshots=0
 	g_actual_dest=""
 	g_src_snapshot_transfer_list=""
 	g_pending_receive_create_opts=""

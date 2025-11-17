@@ -111,6 +111,12 @@ copy_snapshots() {
 		# set the last common snapshot to the first snapshot so that all snapshots
 		# are copied below
 		g_last_common_snap=$l_first_snapshot
+		g_dest_has_snapshots=1
+	elif [ "$g_dest_has_snapshots" -eq 0 ]; then
+		echov "Destination dataset [$g_actual_dest] exists but has no snapshots. Seeding with [$l_first_snapshot]"
+		zfs_send_receive "" "$l_first_snapshot" "$g_actual_dest" "0"
+		g_last_common_snap=$l_first_snapshot
+		g_dest_has_snapshots=1
 	fi
 
 	# get the final snapshot name
