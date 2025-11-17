@@ -206,20 +206,44 @@ echoV() {
 beep() {
 	l_exit_status=${1:-1} # default to 1 (failure)
 
-	if [ "$g_option_b_beep_always" -eq 1 ] || [ "$g_option_B_beep_on_success" -eq 1 ]; then
-		# load the speaker kernel module if not loaded already
-		l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
-		if [ "$l_speaker_km_loaded" = "0" ]; then
-			kldload "speaker"
-		fi
+	if [ "$g_option_b_beep_always" -ne 1 ] && [ "$g_option_B_beep_on_success" -ne 1 ]; then
+		return
+	fi
 
-		# play the appropriate beep
-		if [ "$l_exit_status" -eq 0 ]; then
-			if [ "$g_option_B_beep_on_success" -eq 1 ]; then
-				echo "T255CCMLEG~EG..." >/dev/speaker # success sound
-			fi
-		else
-			echo "T150A<C.." >/dev/speaker # failure sound
+	# Speaker control is FreeBSD-specific; skip on other hosts so replication continues.
+	l_os=$(uname 2>/dev/null || echo "unknown")
+	if [ "$l_os" != "FreeBSD" ]; then
+		echoV "Beep requested but unsupported on $l_os; skipping."
+		return
+	fi
+
+	if ! command -v kldstat >/dev/null 2>&1 || ! command -v kldload >/dev/null 2>&1; then
+		echoV "Beep requested but speaker tools are missing; skipping."
+		return
+	fi
+
+	if ! [ -c /dev/speaker ]; then
+		echoV "Beep requested but /dev/speaker missing; skipping."
+		return
+	fi
+
+	# load the speaker kernel module if not loaded already
+	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
+	if [ "$l_speaker_km_loaded" = "0" ]; then
+		if ! kldload "speaker" >/dev/null 2>&1; then
+			echoV "Unable to load speaker module; skipping beep."
+			return
 		fi
+	fi
+
+	# play the appropriate beep
+	if [ "$l_exit_status" -eq 0 ]; then
+		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
+			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
+				echoV "Success beep failed; skipping."
+		fi
+	else
+		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
+			echoV "Failure beep failed; skipping."
 	fi
 }
