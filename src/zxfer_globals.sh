@@ -44,6 +44,14 @@
 # Secure location for property backup files (override via ZXFER_BACKUP_DIR).
 g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
 
+# Some unit tests source zxfer helpers without calling init_globals(), so make
+# sure the awk command resolves to something usable even before the real
+# initialization logic runs.
+if [ -z "${g_cmd_awk:-}" ]; then
+	g_cmd_awk=$(command -v awk 2>/dev/null || :)
+	[ -n "$g_cmd_awk" ] || g_cmd_awk=awk
+fi
+
 init_globals() {
 	# zxfer version
 	g_zxfer_version="2.0.0-20251117"

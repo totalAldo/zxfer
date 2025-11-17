@@ -1,6 +1,9 @@
 CHANGELOG
 =========
 
+2025.11.18
+-Eliminate command injection in transfer_properties() by building `zfs create` argument lists without eval so property values are passed verbatim even when the destination dataset does not yet exist.
+
 2025.11.17
 -Fail replication immediately when any background `-j` zfs send/receive job exits non-zero by tracking their PIDs, surfacing failures, and terminating the remaining jobs instead of silently reporting success.
 -Store `.zxfer_backup_info.*` metadata under a root-owned `ZXFER_BACKUP_DIR` (default `/var/db/zxfer`), harden directory creation against symlinks, and warn when falling back to legacy files so attackers can no longer pre-create mountpoint symlinks to clobber arbitrary files during `-k`.
