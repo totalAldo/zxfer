@@ -89,6 +89,7 @@ init_globals() {
 
 	# keep track of the number of background zfs send jobs
 	g_count_zfs_send_jobs=0
+	g_zfs_send_job_pids=""
 
 	g_destination=""
 	g_backup_file_extension=".zxfer_backup_info"

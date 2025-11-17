@@ -293,8 +293,7 @@ copy_filesystems() {
 	done
 
 	# wait for background zfs_send_receive processes before proceeding
-	echoV "Waiting for all zfs send/receive processes to finish."
-	wait
+	wait_for_zfs_send_jobs "final sync"
 
 	echoV "End copy_filesystems()"
 }

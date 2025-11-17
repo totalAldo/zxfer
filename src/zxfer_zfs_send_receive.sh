@@ -183,6 +183,36 @@ wrap_command_with_ssh() {
 	fi
 }
 
+wait_for_zfs_send_jobs() {
+	l_reason=$1
+
+	if [ "$l_reason" != "" ] && [ -n "$g_zfs_send_job_pids" ]; then
+		echoV "Waiting for zfs send/receive jobs ($l_reason)."
+	fi
+
+	if [ -z "$g_zfs_send_job_pids" ]; then
+		g_count_zfs_send_jobs=0
+		return 0
+	fi
+
+	for l_pid in $g_zfs_send_job_pids; do
+		wait "$l_pid"
+		l_pid_status=$?
+		if [ "$l_pid_status" -ne 0 ]; then
+			for l_remaining_pid in $g_zfs_send_job_pids; do
+				[ "$l_remaining_pid" = "$l_pid" ] && continue
+				kill "$l_remaining_pid" 2>/dev/null || true
+			done
+			g_zfs_send_job_pids=""
+			g_count_zfs_send_jobs=0
+			throw_error "zfs send/receive job failed (PID $l_pid, exit $l_pid_status)."
+		fi
+	done
+
+	g_zfs_send_job_pids=""
+	g_count_zfs_send_jobs=0
+}
+
 #
 # Handle zfs send/receive
 # Takes $g_option_D_display_progress_bar $g_option_z_compress, $g_option_O_origin_host, $g_option_T_target_host
@@ -218,14 +248,19 @@ zfs_send_receive() {
 		# completed before spawning new ones
 		if [ "$g_count_zfs_send_jobs" -ge "$g_option_j_jobs" ]; then
 			echov "Max jobs reached [$g_count_zfs_send_jobs]. Waiting for jobs to complete."
-			wait
-			g_count_zfs_send_jobs=0
+			wait_for_zfs_send_jobs "job limit"
 		fi
 
 		# increment the job count
 		g_count_zfs_send_jobs=$((g_count_zfs_send_jobs + 1))
 
 		execute_command "$l_send_cmd | $l_recv_cmd" &
+		l_background_job_pid=$!
+		if [ -z "$g_zfs_send_job_pids" ]; then
+			g_zfs_send_job_pids=$l_background_job_pid
+		else
+			g_zfs_send_job_pids="$g_zfs_send_job_pids $l_background_job_pid"
+		fi
 	else
 		execute_command "$l_send_cmd | $l_recv_cmd"
 	fi
