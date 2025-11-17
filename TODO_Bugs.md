@@ -1,10 +1,7 @@
 # TODO – Logical Bugs
 
-## src/zxfer_globals.sh
-- [ ] `trap_exit()` (src/zxfer_globals.sh:253-279) never calls `relaunch()`. When migrations are run with `-m/-c`, services are stopped but remain disabled if the script exits early, leaving production daemons offline. Track whether services were stopped and guarantee they are restarted from the trap.
-
 ## src/zxfer_inspect_delete_snap.sh
-- [ ] `get_last_common_snapshot()` (src/zxfer_inspect_delete_snap.sh:77-109) searches for the snapshot suffix using `grep -qF "$l_snap_name"`. Because the destination list still contains dataset prefixes (`pool/fs@snap`), a snapshot named `snap1` will incorrectly match `snap10`, and the code will try to resume from a snapshot the destination does not have. Anchor the match to `@${name}$` or strip dataset prefixes before the comparison.
+- [x] `get_last_common_snapshot()` (src/zxfer_inspect_delete_snap.sh:77-109) searches for the snapshot suffix using `grep -qF "$l_snap_name"`. Because the destination list still contains dataset prefixes (`pool/fs@snap`), a snapshot named `snap1` will incorrectly match `snap10`, and the code will try to resume from a snapshot the destination does not have. Anchor the match to `@${name}$` or strip dataset prefixes before the comparison.
 
 ## src/zxfer_transfer_properties.sh
 - [ ] When restoring properties from a backup (`g_option_e_restore_property_mode`), the script builds a `grep` regex with the raw dataset name (src/zxfer_transfer_properties.sh:258-260). Datasets with dots or other regex metacharacters match the wrong line, so properties from a different filesystem can be applied silently. Escape the dataset string before constructing the regex.

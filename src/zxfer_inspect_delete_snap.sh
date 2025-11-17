@@ -83,8 +83,9 @@ get_last_common_snapshot() {
 	l_zfs_dest_snaps=$2
 
 	# Convert the destination snapshots into a list with newlines so that we
-	# can use grep to search for the source snapshot
-	l_dest_snap_list=$(echo "$l_zfs_dest_snaps" | tr ' ' '\n')
+	# can use grep to search for the source snapshot. Only the snapshot names
+	# are needed because dataset prefixes differ between source and destination.
+	l_dest_snap_list=$(echo "$l_zfs_dest_snaps" | tr ' ' '\n' | $g_cmd_awk -F'@' "{print \$2}")
 
 	# the last common snapshot
 	l_snap_name=""
@@ -97,7 +98,7 @@ get_last_common_snapshot() {
 		# Use grep to check if the source snapshot is in the destination snapshots
 		# -F is used to match the string exactly, -q is used to suppress output
 		# -m 1 is used to stop searching after the first match, removed due to lack of support in Illumos
-		if echo "$l_dest_snap_list" | grep -qF "$l_snap_name"; then
+		if echo "$l_dest_snap_list" | grep -qFx "$l_snap_name"; then
 
 			l_last_common_snap=$l_source_snap
 
