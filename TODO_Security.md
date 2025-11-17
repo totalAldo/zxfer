@@ -1,6 +1,6 @@
 # TODO – Security Review
 
-- [ ] Harden the progress FIFO in `src/zxfer_zfs_send_receive.sh:71-104`. `zxfer_progress_passthrough()` creates the FIFO with the caller’s default umask, so on the common `022` umask the FIFO is world-readable and any local user can read (or stall) the replicated ZFS send stream as it flows through `/tmp/zxfer-progress.*`. Force `umask 077` (and/or `chmod 600`) before `mkfifo` so only the zxfer operator can observe or interfere with snapshot contents.
+- [x] Harden the progress FIFO in `src/zxfer_zfs_send_receive.sh:71-104`. `zxfer_progress_passthrough()` creates the FIFO with the caller’s default umask, so on the common `022` umask the FIFO is world-readable and any local user can read (or stall) the replicated ZFS send stream as it flows through `/tmp/zxfer-progress.*`. Force `umask 077` (and/or `chmod 600`) before `mkfifo` so only the zxfer operator can observe or interfere with snapshot contents.
 
 - [ ] Quote `-O/-T` host arguments everywhere they feed into `eval`. Both `setup_ssh_control_socket()` (`src/zxfer_globals.sh:183-241`) and the remote command wrappers (`wrap_command_with_ssh()` and the `l_cmd=...` strings in `src/zxfer_zfs_send_receive.sh:166-186` and `src/zxfer_get_zfs_list.sh:103-205`) concatenate the user-supplied host spec directly into eval’d strings. A host value such as `-O "backup.example.com; touch /tmp/pwn"` runs arbitrary local commands before ssh even starts. Rework these sites to pass the host as an argument (or at least quote it via `printf %s`) and drop `eval`.
 
