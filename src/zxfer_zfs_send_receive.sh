@@ -68,6 +68,42 @@ setup_progress_dialog() {
 	echo "$l_progress_dialog"
 }
 
+zxfer_progress_passthrough() {
+	l_progress_dialog=$1
+
+	# Tee stdin to the progress command while preserving the send stream.
+	l_tmpdir=${TMPDIR:-/tmp}
+	l_fifo=$(mktemp "$l_tmpdir/zxfer-progress.XXXXXX") || {
+		echoV "Unable to create FIFO for progress bar; continuing without it."
+		cat
+		return $?
+	}
+
+	rm -f "$l_fifo"
+	if ! mkfifo "$l_fifo"; then
+		echoV "Unable to mkfifo $l_fifo for progress bar; continuing without it."
+		rm -f "$l_fifo"
+		cat
+		return $?
+	}
+
+	sh -c "$l_progress_dialog" <"$l_fifo" &
+	l_progress_pid=$!
+
+	tee "$l_fifo"
+	l_tee_status=$?
+
+	wait "$l_progress_pid" 2>/dev/null
+	l_progress_status=$?
+	rm -f "$l_fifo"
+
+	if [ "$l_progress_status" -ne 0 ]; then
+		echoV "Progress bar command exited with status $l_progress_status"
+	fi
+
+	return "$l_tee_status"
+}
+
 #
 # 2024.03.08 - generates error when creating a new dataset in target with:
 # cannot receive new filesystem stream: incomplete stream
@@ -82,7 +118,8 @@ handle_progress_bar_option() {
 	l_progress_dialog=$(setup_progress_dialog "$l_size_est" "$l_snapshot")
 
 	# Modify the send command to include the progress dialog
-	l_progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | $l_progress_dialog"
+	l_escaped_progress_dialog=$(escape_for_double_quotes "$l_progress_dialog")
+	l_progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | zxfer_progress_passthrough \"$l_escaped_progress_dialog\""
 
 	echo "$l_progress_bar_cmd"
 }

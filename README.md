@@ -105,6 +105,7 @@ Changes
 	Example usage:
 
 		-D 'bar -s %%size%% -bl 1m -bs 256m'
+	The send stream now gets tee'd before the progress command is invoked, so your progress handler can consume stdin without echoing it back (handy for dialog(1) gauges or custom counters) while `zfs receive` continues to see the full stream.
 + Ignore new read-only properties added in FreeBSD 9.1: 'written' and 'refcompressratio'
 + Ignore new read-only properties added in FreeBSD 9.2/8.4: 'logicalused' and 'logicalreferenced'
 + "Unsupported Properties" support, do not copy properties that are unsupported by the destination pool. Allows replication from 11-CURRENT to 9.2 etc, by automatically ignoring new properties such as: volmode, filesystem_limit, snapshot_limit, filesystem_count, snapshot_count, redundant_metadata
