@@ -27,6 +27,7 @@ setUp() {
 	g_option_v_verbose=0
 	g_option_V_very_verbose=0
 	g_backup_file_contents=""
+	g_backup_storage_root="$TEST_TMPDIR/backup_store"
 	TMPDIR="$TEST_TMPDIR"
 	if [ -n "${TEST_TMPDIR:-}" ]; then
 		rm -rf "${TEST_TMPDIR:?}/"*
@@ -201,9 +202,11 @@ test_write_backup_properties_treats_backup_data_as_literal() {
 	write_backup_properties
 
 	l_tail=${initial_source##*/}
-	backup_file="$mount_dir/$g_backup_file_extension.$l_tail"
+	secure_dir=$(get_backup_storage_dir "$mount_dir" "$g_destination")
+	backup_file="$secure_dir/$g_backup_file_extension.$l_tail"
 
 	assertTrue "Backup property file should be written." "[ -f \"$backup_file\" ]"
+	assertFalse "Backup file must not be written into dataset mountpoints." "[ -f \"$mount_dir/$g_backup_file_extension.$l_tail\" ]"
 	assertFalse "Command substitutions within properties must not run." "[ -f \"$sentinel_file\" ]"
 
 	backup_contents=$(cat "$backup_file")

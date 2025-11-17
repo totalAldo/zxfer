@@ -197,8 +197,15 @@ In order to allow the restoration of filesystems within the hierarchy,
 \fBzxfer\fR
 will begin at the level you specify, and traverse the filesystem hierarchy back
 to the pool level until it finds an appropriate .zxfer_backup_info
-file or fails. It will use the first such file it comes across, so be careful about
-backing up from multiple individual levels of the same filesystem hierarchy.
+file inside the hardened metadata directory
+(\fBZXFER_BACKUP_DIR\fR/\fImountpoint\fR/.zxfer_backup_info.<tail>) or fails.
+It will use the first such file it comes across, so be careful about backing up
+from multiple individual levels of the same filesystem hierarchy. Legacy files
+that still live directly inside dataset mountpoints are read as a fallback, but
+\fBzxfer\fR
+will warn so you can relocate them into the hardened directory (which defaults
+to \fI/var/db/zxfer\fR and can be changed by exporting
+\fBZXFER_BACKUP_DIR\fR).
 .TP 8n
 \fB\-h\fR
 Prints (h)elp.
@@ -206,17 +213,23 @@ Prints (h)elp.
 \fB\-k\fR
 Bac(k)up property mode. This backs up the original filesystem property settings
 to a file
-\fI.zxfer_backup_info.<pool_name>.\fR
-This file is located in the directory that is the mountpoint of the parent
-filesystem that will contain the root filesystem you are sending.
-e.g. if you are backing up
+\fI.zxfer_backup_info.<pool_name>\fR
+stored inside the secured metadata directory
+(\fBZXFER_BACKUP_DIR\fR/\fImountpoint\fR/). This keeps the metadata outside live
+mountpoints so unprivileged users cannot pre-create symlinks. For example, if
+you are backing up
 \fIzroot\fR
 to be located as per
 \fIstorage/backups/zroot/...\fR
-the file
-\fI/storage/backups/.zxfer_backup_info.zroot\fR
-would hold all the information about the original values of the filesystem
-properties, and some other useful info.
+and you keep the default
+\fBZXFER_BACKUP_DIR\fR
+of \fI/var/db/zxfer\fR, the file
+\fI/var/db/zxfer/storage/backups/.zxfer_backup_info.zroot\fR
+would hold all the information about the original filesystem properties, and
+some other useful info. Point
+\fBZXFER_BACKUP_DIR\fR
+at another root-owned directory if you need the metadata on a different
+filesystem.
 .sp
 This allows us to use the
 [\fB\-o\fR]

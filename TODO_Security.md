@@ -1,10 +1,5 @@
 # TODO – Security Review
 
-- [x] **Command injection when writing property backups** (`src/zxfer_globals.sh:565`)
-  - `write_backup_properties()` builds a shell command such as `echo "$g_backup_file_contents" | tr ";" "\n" > …` and feeds it to `sh -c`. The `$g_backup_file_contents` blob contains raw property names and values pulled from the (potentially remote) source dataset (`src/zxfer_transfer_properties.sh:252`). Any property value containing command substitutions, backticks, or shell metacharacters (`$()`, `` ` ``, `;`, etc.) is therefore executed locally with zxfer’s privileges when the backup file is written. A malicious source can trigger RCE simply by setting a user property like `zfs set user:note='$(touch /tmp/pwn)' pool/fs` before replication and running zxfer with `-k`.
-  - **Impact:** Remote source (or anyone who can set properties on it) gains arbitrary command execution on the host running zxfer whenever property backups are enabled.
-  - **Fix:** Property backups are now streamed via `printf '%s' "$g_backup_file_contents" | tr ';' '\n'` with direct redirection (and `ssh cat` for remote hosts), so the data never flows through `sh -c` and is treated as opaque text.
-
 - [ ] **Arbitrary file clobber via backup file path** (`src/zxfer_globals.sh:555-585`)
   - The same `write_backup_properties()` routine writes its output to `$mountpoint/.zxfer_backup_info.$dataset`, where `mountpoint` is pulled verbatim from the destination dataset. Those mountpoints frequently correspond to user-writable trees (think `/home` or shared SMB exports), so any local user with access can pre-create `.zxfer_backup_info.<tail>` as a symlink to `/etc/passwd`, `/root/.ssh/authorized_keys`, etc. When root later runs `zxfer -k`, the `sh -c "… > path"` redirection follows the symlink and overwrites the attacker’s chosen file with zxfer’s metadata, yielding privilege escalation or at minimum a destructive DoS.
   - **Impact:** A non-privileged user who can write inside the destination mountpoint can coerce zxfer to overwrite arbitrary files on the replication host the next time properties are backed up.

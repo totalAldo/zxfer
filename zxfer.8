@@ -190,25 +190,44 @@ A word of warning:
 In order to allow the restoration of filesystems within the hierarchy,
 .Nm
 will begin at the level you specify, and traverse the filesystem hierarchy back
-to the pool level until it finds an appropriate .zxfer_backup_info
-file or fails. It will use the first such file it comes across, so be careful about
+to the pool level until it finds an appropriate
+.Pa .zxfer_backup_info
+file inside the hardened metadata directory
+.Pq Pa ZXFER_BACKUP_DIR/mountpoint/.zxfer_backup_info.<tail>
+or fails. It will use the first such file it comes across, so be careful about
 backing up from multiple individual levels of the same filesystem hierarchy.
+Legacy files that still live directly inside dataset mountpoints are read as a
+fallback, but
+.Nm
+will warn so you can relocate them into the hardened directory (which defaults
+to
+.Pa /var/db/zxfer
+and can be changed by exporting
+.Ev ZXFER_BACKUP_DIR Ns ).
 .It Fl h
 Prints (h)elp.
 .It Fl k
 Bac(k)up property mode. This backs up the original filesystem property settings
 to a file
-.Pa .zxfer_backup_info.<pool_name>.
-This file is located in the directory that is the mountpoint of the parent
-filesystem that will contain the root filesystem you are sending.
-e.g. if you are backing up
+.Pa .zxfer_backup_info.<pool_name>
+stored inside the hardened metadata directory
+.Pq Pa ZXFER_BACKUP_DIR/mountpoint/.
+This file lives outside the dataset mountpoints so unprivileged users cannot
+pre-create symlinks. For example, if you are backing up
 .Pa zroot
 to be located as per
 .Pa storage/backups/zroot/...
+and you keep the default
+.Ev ZXFER_BACKUP_DIR
+of
+.Pa /var/db/zxfer ,
 the file
-.Pa /storage/backups/.zxfer_backup_info.zroot
+.Pa /var/db/zxfer/storage/backups/.zxfer_backup_info.zroot
 would hold all the information about the original values of the filesystem
-properties, and some other useful info.
+properties, and some other useful info. Set
+.Ev ZXFER_BACKUP_DIR
+to point at an alternate root-owned directory if you need to relocate the
+metadata.
 .Pp
 This allows us to use the
 .Op Fl o
