@@ -80,6 +80,45 @@ run_zxfer() {
 	$ZXFER_BIN "$@"
 }
 
+assert_usage_error_case() {
+	l_desc=$1
+	l_expected_msg=$2
+	shift 2
+
+	set +e
+	l_output=$("$ZXFER_BIN" "$@" 2>&1)
+	l_status=$?
+	set -e
+
+	if [ "$l_status" -eq 0 ]; then
+		fail "$l_desc: expected zxfer to exit with a usage error."
+	fi
+
+	if [ "$l_status" -ne 2 ]; then
+		fail "$l_desc: expected exit status 2, got $l_status. Output: $l_output"
+	fi
+
+	if ! printf '%s\n' "$l_output" | grep -F "Error: $l_expected_msg" >/dev/null 2>&1; then
+		fail "$l_desc: usage output missing \"Error: $l_expected_msg\". Output: $l_output"
+	fi
+
+	if ! printf '%s\n' "$l_output" | grep -F "usage:" >/dev/null 2>&1; then
+		fail "$l_desc: usage output missing usage synopsis. Output: $l_output"
+	fi
+}
+
+usage_error_tests() {
+	log "Starting usage error tests"
+
+	assert_usage_error_case "Missing destination" "Need a destination." -R tank/src
+	assert_usage_error_case "Missing -N/-R source flag" "You must specify a source with either -N or -R." backup/target
+	assert_usage_error_case "Conflicting -N and -R flags" \
+"You must choose either -N to transfer a single filesystem or -R to transfer a single filesystem and its children recursively, but not both -N and -R at the same time." \
+		-N tank/src -R tank/src backup/target
+
+	log "Usage error tests passed"
+}
+
 cleanup() {
 	set +e
 	if [ -n "${SRC_POOL:-}" ] && zpool list "$SRC_POOL" >/dev/null 2>&1; then
@@ -306,6 +345,8 @@ main() {
 	fi
 
 	assert_exists "$ZXFER_BIN" "zxfer binary not found at $ZXFER_BIN"
+
+	usage_error_tests
 
 	WORKDIR=$(mktemp -d -t zxfer_integration.XXXXXX)
 	trap cleanup EXIT INT TERM
