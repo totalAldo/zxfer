@@ -104,6 +104,7 @@ init_globals() {
 	g_cmd_awk=$(which awk) # location of awk or gawk on home OS
 	g_cmd_zfs=$(which zfs)
 	g_cmd_parallel=$(which parallel)
+	g_origin_parallel_cmd=""
 	# enable compression in ssh options so that remote snapshot lists that
 	# contain thousands of snapshots are compressed
 	g_cmd_ssh=$(which ssh)

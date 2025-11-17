@@ -37,6 +37,37 @@ if false; then
 fi
 
 #
+# Ensure GNU parallel exists locally (for piping) and resolve the remote path
+# when -j is used with -O. Fails closed when the binary cannot be located.
+#
+ensure_parallel_available_for_source_jobs() {
+	if [ "$g_option_j_jobs" -le 1 ]; then
+		return
+	fi
+
+	if [ "$g_cmd_parallel" = "" ]; then
+		throw_error "The -j option requires GNU parallel but it was not found in PATH on the local host."
+	fi
+
+	if [ "$g_option_O_origin_host" = "" ]; then
+		return
+	fi
+
+	if [ "$g_origin_parallel_cmd" != "" ]; then
+		return
+	fi
+
+	l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
+	l_remote_parallel=$($l_origin_ssh_cmd "$g_option_O_origin_host" "command -v parallel" 2>/dev/null | head -n 1)
+
+	if [ "$l_remote_parallel" = "" ]; then
+		throw_error "GNU parallel not found on origin host $g_option_O_origin_host but -j $g_option_j_jobs was requested. Install GNU parallel remotely or rerun without -j."
+	fi
+
+	g_origin_parallel_cmd=$l_remote_parallel
+}
+
+#
 # Determine the source snapshots sorted by creation time. Since this
 # can take a long time, the command is run in the background. In addition,
 # to optimize the process, gnu parallel is used to retrieve snapshots from
@@ -52,6 +83,15 @@ write_source_snapshot_list_to_file() {
 	#
 	# Get a list of source snapshots in ascending order by creation date
 	if [ "$g_option_j_jobs" -gt 1 ]; then
+		ensure_parallel_available_for_source_jobs
+
+		if [ ! "$g_option_O_origin_host" = "" ]; then
+			l_parallel_path=$g_origin_parallel_cmd
+		else
+			l_parallel_path=$g_cmd_parallel
+		fi
+		l_parallel_invoke="\"$(escape_for_double_quotes "$l_parallel_path")\""
+
 		# 2024.07.15
 		# xargs mangles the output of the snapshots and is not reliable.
 		# gnu parallel is used instead which must be installed on source systems
@@ -77,15 +117,15 @@ write_source_snapshot_list_to_file() {
 
 			if [ "$g_option_z_compress" -eq 1 ]; then
 				# IllumOS requires -d 1 when listing snapshots for one dataset
-				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {} | zstd -9\" | zstd -d"
+				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {} | zstd -9\" | zstd -d"
 			else
-				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {}\""
+				l_cmd="$l_origin_ssh_cmd $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {}\""
 			fi
 		else
 			#l_cmd="$g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'"
 			l_local_parallel_cmd=$(escape_for_double_quotes "$g_LZFS list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
 			l_local_parallel_runner="sh -c \\\"$l_local_parallel_cmd\\\" sh"
-			l_cmd="$g_LZFS list -Hr -o name $initial_source | $g_cmd_parallel -j $g_option_j_jobs --line-buffer $l_local_parallel_runner {}"
+			l_cmd="$g_LZFS list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_local_parallel_runner {}"
 		fi
 
 		echoV "Running command in the background: $l_cmd"

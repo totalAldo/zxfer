@@ -1,11 +1,5 @@
 # TODO – Logical Bugs
 
-## src/zxfer_common.sh
-- [ ] `beep()` (src/zxfer_common.sh:206-220) always runs FreeBSD-only `kldstat`/`kldload` and writes to `/dev/speaker` whenever either `-b` or `-B` is set. On Linux/OpenZFS hosts those tools do not exist, so enabling the beep options aborts the run before data is replicated. Add an OS check (or degrade gracefully) before touching speaker-specific devices.
-
-## src/zxfer_get_zfs_list.sh
-- [ ] Parallel snapshot discovery with `-j`+`-O` uses the *local* path returned by `which parallel` inside the remote ssh command (src/zxfer_get_zfs_list.sh:64-87). If GNU parallel is installed in a different path on the origin host, the ssh command fails immediately and no snapshots are discovered. Detect the remote path (e.g., run `which parallel` on the origin host) or refuse `-j` when the binary cannot be found remotely.
-
 ## src/zxfer_globals.sh
 - [ ] `trap_exit()` (src/zxfer_globals.sh:253-279) never calls `relaunch()`. When migrations are run with `-m/-c`, services are stopped but remain disabled if the script exits early, leaving production daemons offline. Track whether services were stopped and guarantee they are restarted from the trap.
 
