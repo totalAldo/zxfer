@@ -1,8 +1,10 @@
 CHANGELOG
 =========
 
-2025.11.15
+2025.11.17
 -Eliminate command injection in write_backup_properties() by streaming raw property data directly into the backup file and expand shunit2 coverage for the helper
+
+2025.11.15
 -Destination snapshot lookup now respects trailing-slash sources so incremental sends compare against the correct dataset
 -Track fully qualified last-common snapshot
 -Escape dataset names before sed substitution
