@@ -581,11 +581,11 @@ write_backup_properties() {
 	else
 		l_backup_file_contents_safe=$(escape_for_double_quotes "$g_backup_file_contents")
 		if [ "$g_option_T_target_host" = "" ]; then
-			echo "printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" > \"$l_backup_file_path\""
+			printf '%s\n' "printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" > \"$l_backup_file_path\""
 		else
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
 			l_remote_backup_file_path=$(escape_for_double_quotes "$l_backup_file_path")
-			echo "printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" | $l_target_ssh_cmd \"$g_option_T_target_host\" \"cat > \\\"$l_remote_backup_file_path\\\"\""
+			printf '%s\n' "printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" | $l_target_ssh_cmd \"$g_option_T_target_host\" \"cat > \\\"$l_remote_backup_file_path\\\"\""
 		fi
 	fi
 }
