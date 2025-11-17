@@ -56,9 +56,9 @@ test_escape_for_double_quotes_escapes_special_chars() {
 
 test_escape_for_single_quotes_escapes_apostrophes() {
 	# Single-quoted contexts require reopening the quotes around apostrophes,
-	# so ensure the helper inserts the standard '"'"' sequence.
+	# so ensure the helper inserts the standard '\''' sequence.
 	input=$(printf "%s" "needs'single'quotes")
-	expected=$(printf "%s" "needs'\"'\"'single'\"'\"'quotes")
+	expected=$(printf "%s" "needs'\\''single'\\''quotes")
 
 	result=$(escape_for_single_quotes "$input")
 
