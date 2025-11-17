@@ -2,6 +2,7 @@ CHANGELOG
 =========
 
 2025.11.17
+-Fail replication immediately when any background `-j` zfs send/receive job exits non-zero by tracking their PIDs, surfacing failures, and terminating the remaining jobs instead of silently reporting success.
 -Ensure the -D progress hook tees the send stream so non-pass-through progress commands no longer truncate the data before `zfs receive`.
 -Seed existing destination datasets that have no snapshots by sending the first snapshot before incremental streams so pre-created replicas keep their full history instead of only the newest snapshot.
 -Gate the beep() helper on FreeBSD speaker support so Linux/OpenZFS hosts skip hardware beeps gracefully instead of aborting when -b/-B is set.
