@@ -6,6 +6,9 @@
 # shellcheck source=tests/test_helper.sh
 . "$(dirname "$0")/test_helper.sh"
 
+# shellcheck source=src/zxfer_globals.sh
+. "$ZXFER_ROOT/src/zxfer_globals.sh"
+
 oneTimeSetUp() {
 	TEST_TMPDIR=$(mktemp -d -t zxfer_shunit.XXXXXX)
 }
@@ -20,10 +23,20 @@ setUp() {
 	g_option_n_dryrun=0
 	g_option_v_verbose=0
 	g_option_V_very_verbose=0
+	g_backup_file_contents=""
 	TMPDIR="$TEST_TMPDIR"
 	if [ -n "${TEST_TMPDIR:-}" ]; then
 		rm -rf "${TEST_TMPDIR:?}/"*
 	fi
+}
+
+fake_zfs_mountpoint_cmd() {
+	if [ "$1" = "get" ]; then
+		printf '%s\n' "$FAKE_ZFS_MOUNTPOINT"
+		return 0
+	fi
+
+	return 1
 }
 
 test_escape_for_double_quotes_escapes_special_chars() {
@@ -156,6 +169,55 @@ test_exists_destination_returns_zero_on_failure() {
 	assertEquals "Destination should not exist when command fails." "0" "$result"
 
 	g_RZFS=$old_g_RZFS
+}
+
+test_write_backup_properties_treats_backup_data_as_literal() {
+	# Property backups must never interpret dataset-controlled data as shell
+	# commands. Ensure values containing command substitutions are written
+	# verbatim and do not execute locally.
+	mount_dir="$TEST_TMPDIR/mnt"
+	mkdir -p "$mount_dir"
+	FAKE_ZFS_MOUNTPOINT="$mount_dir"
+	old_g_RZFS=${g_RZFS-}
+	g_RZFS=fake_zfs_mountpoint_cmd
+
+	initial_source="pool/src"
+	g_destination="pool/dst"
+	g_actual_dest="$g_destination"
+	g_backup_file_extension=".zxfer_backup_info"
+	g_zxfer_version="test-version"
+	g_option_R_recursive=""
+	g_option_N_nonrecursive=""
+	g_option_T_target_host=""
+	g_option_n_dryrun=0
+
+	sentinel_file="$TEST_TMPDIR/sentinel_touch"
+	rm -f "$sentinel_file"
+	g_backup_file_contents=";$initial_source,$g_destination,user:note=\$(touch $sentinel_file)"
+
+	write_backup_properties
+
+	l_tail=${initial_source##*/}
+	backup_file="$mount_dir/$g_backup_file_extension.$l_tail"
+
+	assertTrue "Backup property file should be written." "[ -f \"$backup_file\" ]"
+	assertFalse "Command substitutions within properties must not run." "[ -f \"$sentinel_file\" ]"
+
+	backup_contents=$(cat "$backup_file")
+	needle="\$(touch $sentinel_file)"
+	case "$backup_contents" in
+	*"$needle"*) found=0 ;;
+	*) found=1 ;;
+	esac
+	assertEquals "Backup file should contain literal property data." 0 "$found"
+
+	if [ -n "${old_g_RZFS-}" ]; then
+		g_RZFS=$old_g_RZFS
+	else
+		unset g_RZFS
+	fi
+	unset FAKE_ZFS_MOUNTPOINT
+	rm -f "$backup_file"
 }
 
 . "$SHUNIT2_BIN"

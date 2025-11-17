@@ -561,25 +561,29 @@ write_backup_properties() {
 	l_backup_date=$(date)
 	g_backup_file_contents="$l_backup_file_header#backup_date:$l_backup_date$g_backup_file_contents"
 
-	# Construct the command to write the backup file
-	l_backup_file_cmd="echo \"$g_backup_file_contents\" | tr \";\" \"\n\" > $l_backup_file_dir/$g_backup_file_extension.$l_is_tail"
+	l_backup_file_path=$l_backup_file_dir/$g_backup_file_extension.$l_is_tail
 
 	# Execute the command
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
 		if [ "$g_option_T_target_host" = "" ]; then
-			sh -c "$l_backup_file_cmd" ||
+			if ! printf '%s' "$g_backup_file_contents" | tr ";" "\n" >"$l_backup_file_path"; then
 				throw_error "Error writing backup file. Is filesystem mounted?"
+			fi
 		else
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-			echo "$l_backup_file_cmd" | $l_target_ssh_cmd "$g_option_T_target_host" sh ||
+			l_remote_backup_file_path=$(escape_for_double_quotes "$l_backup_file_path")
+			if ! printf '%s' "$g_backup_file_contents" | tr ";" "\n" |
+				$l_target_ssh_cmd "$g_option_T_target_host" "cat > \"$l_remote_backup_file_path\""; then
 				throw_error "Error writing backup file. Is filesystem mounted?"
+			fi
 		fi
 	else
 		if [ "$g_option_T_target_host" = "" ]; then
-			echo "sh -c \"$l_backup_file_cmd\""
+			echo "printf '%s' '<backup properties>' | tr ';' \"\\n\" > \"$l_backup_file_path\""
 		else
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-			echo "echo \"$l_backup_file_cmd\" | $l_target_ssh_cmd \"$g_option_T_target_host\" sh"
+			l_remote_backup_file_path=$(escape_for_double_quotes "$l_backup_file_path")
+			echo "printf '%s' '<backup properties>' | tr ';' \"\\n\" | $l_target_ssh_cmd \"$g_option_T_target_host\" \"cat > \\\"$l_remote_backup_file_path\\\"\""
 		fi
 	fi
 }
