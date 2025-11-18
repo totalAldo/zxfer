@@ -314,10 +314,7 @@ copy_filesystems() {
 	echoV "End copy_filesystems()"
 }
 
-#
-# zfs send/receive mode, aka zfs-replicate mode, aka normal mode
-#
-run_zfs_mode() {
+resolve_initial_source_from_options() {
 	if [ "$g_option_R_recursive" != "" ] && [ "$g_option_N_nonrecursive" != "" ]; then
 		throw_usage_error "You must choose either -N to transfer a single filesystem or -R to transfer \
 a single filesystem and its children recursively, but not both -N and -R at the same time."
@@ -328,7 +325,9 @@ a single filesystem and its children recursively, but not both -N and -R at the 
 	else
 		throw_usage_error "You must specify a source with either -N or -R."
 	fi
+}
 
+normalize_source_destination_paths() {
 	# Record whether the user supplied a trailing slash before normalizing the path.
 	g_initial_source_had_trailing_slash=$(echo "$initial_source" | grep -c '..*/$')
 
@@ -346,8 +345,9 @@ a single filesystem and its children recursively, but not both -N and -R at the 
 	# make later concatenation produce an illegal double slash, so normalize it
 	# once up front.
 	g_destination=$(strip_trailing_slashes "$g_destination")
+}
 
-	# Checks options to see if appropriate for a source snapshot
+validate_zfs_mode_preconditions() {
 	echoV "Checking source snapshot."
 	check_snapshot "$initial_source"
 
@@ -355,7 +355,15 @@ a single filesystem and its children recursively, but not both -N and -R at the 
 	# To think twice if they really mean to do the migration.
 	[ -n "$g_option_c_services" ] && [ "$g_option_m_migrate" -eq 0 ] &&
 		throw_error "When using -c, -m needs to be specified as well."
+}
 
+update_recursive_source_list_if_needed() {
+	if [ "$g_option_R_recursive" = "" ]; then
+		g_recursive_source_list=$initial_source
+	fi
+}
+
+initialize_replication_context() {
 	# Caches all the zfs list calls, gets the recursive list, and gives
 	# an opportunity to exit if the source is not present
 	get_zfs_list
@@ -369,70 +377,85 @@ a single filesystem and its children recursively, but not both -N and -R at the 
 		calculate_unsupported_properties
 	fi
 
-	# If recursive option is not selected, then we only iterate once through
-	# the initial source as source
-	if [ "$g_option_R_recursive" = "" ]; then
-		g_recursive_source_list=$initial_source
-	fi
+	update_recursive_source_list_if_needed
+}
 
+refresh_dataset_iteration_state() {
+	get_zfs_list
+	update_recursive_source_list_if_needed
+}
+
+maybe_capture_preflight_snapshot() {
 	#
 	# If using -s, do a new recursive snapshot, then copy all new snapshots too.
 	#
-	if [ "$g_option_s_make_snapshot" -eq 1 ] && [ "$g_option_m_migrate" -eq 0 ]; then
-		# Create the new snapshot with a unique name.
-		newsnap "$initial_source"
-
-		# Because there are new snapshots, need to get_zfs_list again
-		get_zfs_list
+	if [ "$g_option_s_make_snapshot" -eq 0 ] || [ "$g_option_m_migrate" -eq 1 ]; then
+		return
 	fi
 
-	#
-	# If migrating, stop the affected services, unmount the source filesystem, do
-	# one last snapshot and replicate that, then give the destination file system
-	# the mount point of the source one and restart the services.
-	# Note that the replication and transfer of the mountpoint property is done
-	# by the main loop.
-	# The restarting of the services is done after the main loop is finished.
-	if [ "$g_option_m_migrate" -eq 1 ]; then
-		# Check if any services need to be disabled before doing a migration.
-		if [ -n "$g_option_c_services" ]; then
-			echo "$g_option_c_services" | stopsvcs
-		fi
+	# Create the new snapshot with a unique name.
+	newsnap "$initial_source"
 
-		for l_source in $g_recursive_source_list; do
-			# unmount the source filesystem before doing the last snapshot.
-			echov "Unmounting $l_source."
-			$g_LZFS unmount "$l_source" ||
-				{
-					echo "Couldn't unmount source $l_source."
-					relaunch
-					exit 1
-				}
-		done
+	# Because there are new snapshots, need to refresh the cached lists.
+	refresh_dataset_iteration_state
+}
 
-		# Create the new snapshot with a unique name.
-		newsnap "$initial_source"
+prepare_migration_services() {
+	[ "$g_option_m_migrate" -eq 1 ] || return
 
-		# We include the mountpoint as a property that should be transferred.
-		# Note that $g_option_P_transfer_property is automatically set to 1, to transfer the property.
-		g_readonly_properties=$(echo "$g_readonly_properties" |
-			sed -e 's/,mountpoint//g')
-
-		# Now we must make the script aware of the new snapshots in existence so
-		# we can copy them over.
-		get_zfs_list
+	# Check if any services need to be disabled before doing a migration.
+	if [ -n "$g_option_c_services" ]; then
+		echo "$g_option_c_services" | stopsvcs
 	fi
 
-	if [ "$g_option_g_grandfather_protection" != "" ]; then
-		echov "Checking grandfather status of all snapshots marked for deletion..."
+	for l_source in $g_recursive_source_list; do
+		# Unmount the source filesystem before doing the last snapshot.
+		echov "Unmounting $l_source."
+		$g_LZFS unmount "$l_source" ||
+			{
+				echo "Couldn't unmount source $l_source."
+				relaunch
+				exit 1
+			}
+	done
 
-		for l_source in $g_recursive_source_list; do
-			set_actual_dest "$l_source"
-			# turn off delete so that we are only checking snapshots, pass 0
-			inspect_delete_snap 0 "$l_source"
-		done
-		echov "Grandfather check passed."
-	fi
+	# Create the new snapshot with a unique name.
+	newsnap "$initial_source"
+
+	# We include the mountpoint as a property that should be transferred.
+	# Note that $g_option_P_transfer_property is automatically set to 1, to transfer the property.
+	g_readonly_properties=$(echo "$g_readonly_properties" |
+		sed -e 's/,mountpoint//g')
+
+	# Now we must make the script aware of the new snapshots in existence so
+	# we can copy them over.
+	refresh_dataset_iteration_state
+}
+
+perform_grandfather_protection_checks() {
+	[ "$g_option_g_grandfather_protection" != "" ] || return
+
+	echov "Checking grandfather status of all snapshots marked for deletion..."
+
+	for l_source in $g_recursive_source_list; do
+		set_actual_dest "$l_source"
+		# turn off delete so that we are only checking snapshots, pass 0
+		inspect_delete_snap 0 "$l_source"
+	done
+	echov "Grandfather check passed."
+}
+
+#
+# zfs send/receive mode, aka zfs-replicate mode, aka normal mode
+#
+run_zfs_mode() {
+	resolve_initial_source_from_options
+	normalize_source_destination_paths
+	validate_zfs_mode_preconditions
+	initialize_replication_context
+	maybe_capture_preflight_snapshot
+	prepare_migration_services
+	perform_grandfather_protection_checks
 
 	copy_filesystems
 
