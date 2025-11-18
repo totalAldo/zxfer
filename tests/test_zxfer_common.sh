@@ -13,10 +13,10 @@
 . "$ZXFER_ROOT/src/zxfer_inspect_delete_snap.sh"
 
 create_fake_ssh_bin() {
-# Re-create the fake ssh helper after each cleanup so setUp() can freely
-# truncate the temp directory without leaving a stale interpreter. The helper
-# echoes both argv[0] and all arguments so tests can assert the full command
-# line.
+	# Re-create the fake ssh helper after each cleanup so setUp() can freely
+	# truncate the temp directory without leaving a stale interpreter. The helper
+	# echoes both argv[0] and all arguments so tests can assert the full command
+	# line.
 	cat >"$FAKE_SSH_BIN" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$0"
@@ -477,8 +477,7 @@ test_read_local_backup_file_refuses_non_root_owned_metadata() {
 	assertEquals "Reading non-root metadata should exit with an error." 1 "$status"
 
 	case "$output" in
-	*"Refusing to use backup metadata $backup_file because it is owned by UID 1234 instead of root."*)
-		;;
+	*"Refusing to use backup metadata $backup_file because it is owned by UID 1234 instead of root."*) ;;
 	*)
 		fail "read_local_backup_file did not report an insecure owner: $output"
 		;;
