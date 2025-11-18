@@ -687,6 +687,52 @@ get_path_owner_uid() {
 	return 1
 }
 
+get_path_mode_octal() {
+	l_path=$1
+
+	if [ ! -e "$l_path" ]; then
+		return 1
+	fi
+
+	if command -v stat >/dev/null 2>&1; then
+		if l_mode=$(stat -f '%OLp' "$l_path" 2>/dev/null); then
+			printf '%s\n' "$l_mode"
+			return 0
+		fi
+		if l_mode=$(stat -c '%a' "$l_path" 2>/dev/null); then
+			printf '%s\n' "$l_mode"
+			return 0
+		fi
+	fi
+
+	if l_ls_output=$(ls -ldn -- "$l_path" 2>/dev/null); then
+		l_perm_str=$(printf '%s\n' "$l_ls_output" | ${g_cmd_awk:-awk} '{print $1}')
+		if [ "$l_perm_str" = "-rw-------" ]; then
+			printf '600\n'
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+require_secure_backup_file() {
+	l_path=$1
+
+	if ! l_owner_uid=$(get_path_owner_uid "$l_path"); then
+		throw_error "Cannot determine the owner of backup metadata $l_path."
+	fi
+	if [ "$l_owner_uid" != "0" ]; then
+		throw_error "Refusing to use backup metadata $l_path because it is owned by UID $l_owner_uid instead of root."
+	fi
+	if ! l_mode=$(get_path_mode_octal "$l_path"); then
+		throw_error "Cannot determine the permissions for backup metadata $l_path."
+	fi
+	if [ "$l_mode" != "600" ]; then
+		throw_error "Refusing to use backup metadata $l_path because its permissions ($l_mode) are not 0600."
+	fi
+}
+
 ensure_local_backup_dir() {
 	l_dir=$1
 	if [ -L "$l_dir" ]; then
@@ -740,6 +786,7 @@ read_local_backup_file() {
 	if [ ! -f "$l_path" ] || [ -h "$l_path" ]; then
 		return 1
 	fi
+	require_secure_backup_file "$l_path"
 	cat "$l_path"
 }
 
@@ -749,12 +796,71 @@ read_remote_backup_file() {
 
 	l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$l_host")
 	l_path_single=$(escape_for_single_quotes "$l_path")
-	l_remote_test_cmd=$(escape_for_double_quotes "[ -f '$l_path_single' ] && [ ! -h '$l_path_single' ]")
-	if ! $l_origin_ssh_cmd "$l_host" "$l_remote_test_cmd"; then
-		return 1
+	l_remote_insecure_owner_status=95
+	l_remote_insecure_mode_status=96
+	l_remote_unknown_status=97
+	l_remote_awk_cmd=${g_cmd_awk:-awk}
+	l_remote_secure_cat_cmd=$(escape_for_double_quotes "
+if [ ! -f '$l_path_single' ] || [ -h '$l_path_single' ]; then
+	exit 1
+fi
+l_uid=''
+if command -v stat >/dev/null 2>&1; then
+	l_uid=\$(stat -f '%u' '$l_path_single' 2>/dev/null)
+	if [ \"\$l_uid\" = '' ]; then
+		l_uid=\$(stat -c '%u' '$l_path_single' 2>/dev/null)
 	fi
-	l_remote_cat_cmd=$(escape_for_double_quotes "$g_cmd_cat '$l_path_single'")
-	$l_origin_ssh_cmd "$l_host" "$l_remote_cat_cmd"
+fi
+if [ \"\$l_uid\" = '' ]; then
+	l_ls_line=\$(ls -ldn -- '$l_path_single' 2>/dev/null) || l_ls_line=''
+	if [ \"\$l_ls_line\" != '' ]; then
+		l_uid=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$3}')
+	fi
+fi
+if [ \"\$l_uid\" = '' ]; then
+	exit $l_remote_unknown_status
+fi
+if [ \"\$l_uid\" != '0' ]; then
+	exit $l_remote_insecure_owner_status
+fi
+l_mode=''
+if command -v stat >/dev/null 2>&1; then
+	l_mode=\$(stat -f '%OLp' '$l_path_single' 2>/dev/null)
+	if [ \"\$l_mode\" = '' ]; then
+		l_mode=\$(stat -c '%a' '$l_path_single' 2>/dev/null)
+	fi
+fi
+if [ \"\$l_mode\" = '' ]; then
+	if [ \"\$l_ls_line\" = '' ]; then
+		l_ls_line=\$(ls -ldn -- '$l_path_single' 2>/dev/null) || l_ls_line=''
+	fi
+	if [ \"\$l_ls_line\" != '' ]; then
+		l_perm=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$1}')
+		if [ \"\$l_perm\" = '-rw-------' ]; then
+			l_mode='600'
+		fi
+	fi
+fi
+if [ \"\$l_mode\" = '' ]; then
+	exit $l_remote_unknown_status
+fi
+if [ \"\$l_mode\" != '600' ]; then
+	exit $l_remote_insecure_mode_status
+fi
+$g_cmd_cat '$l_path_single'
+")
+	$l_origin_ssh_cmd "$l_host" "$l_remote_secure_cat_cmd"
+	l_remote_status=$?
+	if [ $l_remote_status -eq $l_remote_insecure_owner_status ]; then
+		throw_error "Refusing to use backup metadata $l_path on $l_host because it is not owned by root."
+	fi
+	if [ $l_remote_status -eq $l_remote_insecure_mode_status ]; then
+		throw_error "Refusing to use backup metadata $l_path on $l_host because its permissions are not 0600."
+	fi
+	if [ $l_remote_status -eq $l_remote_unknown_status ]; then
+		throw_error "Cannot determine ownership or permissions for backup metadata $l_path on $l_host."
+	fi
+	return $l_remote_status
 }
 
 #
