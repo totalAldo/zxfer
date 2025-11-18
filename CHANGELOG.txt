@@ -2,6 +2,7 @@ CHANGELOG
 =========
 
 2025.11.17
+-Reject non-numeric `-j` arguments during option parsing so invalid job counts emit a zxfer usage error instead of `/bin/sh: integer expression expected` later on.
 -Allow zxfer to bootstrap into brand-new destinations by tolerating an empty `zfs list -t filesystem,volume … "$g_destination"` result instead of aborting when no datasets exist yet on the target.
 -Refuse to use zxfer backup metadata directories unless they are owned by root locally or by the remote ssh user (root also permitted) so attackers cannot pre-create `ZXFER_BACKUP_DIR` paths and retain ownership of `.zxfer_backup_info.*` files.
 -Quote -O/-T ssh host specs before constructing eval'd pipelines and open/close ssh control sockets without eval so a crafted host argument can no longer inject local commands before ssh starts.
