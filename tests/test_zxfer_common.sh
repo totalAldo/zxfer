@@ -43,6 +43,16 @@ fake_zfs_mountpoint_cmd() {
 	return 1
 }
 
+read_backup_file_with_mocked_security() {
+	l_path=$1
+
+	(
+		get_path_owner_uid() { printf '%s\n' "0"; }
+		get_path_mode_octal() { printf '%s\n' "600"; }
+		read_local_backup_file "$l_path"
+	)
+}
+
 test_escape_for_double_quotes_escapes_special_chars() {
 	# Validate that the helper escapes characters which would break options
 	# passed via the shell, such as quotes, backticks, and dollars.
@@ -359,6 +369,43 @@ test_write_backup_properties_treats_backup_data_as_literal() {
 		unset g_RZFS
 	fi
 	unset FAKE_ZFS_MOUNTPOINT
+	rm -f "$backup_file"
+}
+
+test_read_local_backup_file_refuses_non_root_owned_metadata() {
+	# read_local_backup_file must refuse to parse metadata when the file is
+	# not root-owned to prevent tampering from less-privileged users.
+	backup_file="$TEST_TMPDIR/insecure_backup"
+	printf '%s\n' "tampered" >"$backup_file"
+
+	if output=$(read_local_backup_file "$backup_file" 2>&1); then
+		status=0
+	else
+		status=$?
+	fi
+
+	assertEquals "Reading non-root metadata should exit with an error." 1 "$status"
+
+	case "$output" in
+	*"Refusing to use backup metadata $backup_file because it is owned by UID "*)
+		;;
+	*)
+		fail "read_local_backup_file did not report an insecure owner: $output"
+		;;
+	esac
+
+	rm -f "$backup_file"
+}
+
+test_read_local_backup_file_returns_contents_when_secure() {
+	# When metadata ownership and permissions pass validation, the helper
+	# should return the literal on-disk contents.
+	backup_file="$TEST_TMPDIR/secure_backup"
+	printf '%s\n' "trusted" >"$backup_file"
+
+	result=$(read_backup_file_with_mocked_security "$backup_file")
+
+	assertEquals "trusted" "$result"
 	rm -f "$backup_file"
 }
 
