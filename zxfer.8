@@ -360,6 +360,24 @@ of the destination. Requires -m.
 .It Fl d
 (d)elete snapshots on the destination that are absent on the source. This may
 be necessary to function properly anyway, in a similar fashion to
+.Pp
+.Nm
+batches those snapshot deletions into background
+.Xr zfs 8
+.Cm destroy
+commands so replication can continue while snapshots are removed. The background
+jobs are tied to the lifetime of
+.Nm :
+its EXIT trap kills any remaining destroy processes when the main script
+terminates so snapshot deletes never run unattended. If
+.Nm
+exits before the kernel finishes destroying the targeted snapshots, rerun
+.Nm
+with
+.Fl d
+to resume cleanup;
+.Nm
+will relaunch the pending destroys on the next pass.
 .It Fl D
 .Nm
 will pipe

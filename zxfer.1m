@@ -366,6 +366,14 @@ of the destination. Requires -m.
 \fB\-d\fR
 (d)elete snapshots on the destination that are absent on the source. This may
 be necessary to function properly anyway, in a similar fashion to
+.PP
+\fBzxfer\fR batches snapshot deletions into background zfs(8) \fIdestroy\fR
+commands so replication can continue while cleanup executes. Those background
+jobs remain tied to the lifetime of the main process via its EXIT trap; if
+\fBzxfer\fR exits for any reason, the trap terminates outstanding destroy jobs
+so they never run unattended. If \fBzxfer\fR stops before the kernel finishes
+deleting the snapshots, rerun \fBzxfer\fR with \fB\-d\fR to resume cleanup and
+finish removing the stale datasets.
 .TP 8n
 \fB\-D\fR
 \fBzxfer\fR
