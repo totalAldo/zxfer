@@ -78,6 +78,7 @@ init_globals() {
 	g_option_k_backup_property_mode=0
 	g_option_o_override_property=""
 	g_option_O_origin_host=""
+	g_option_O_origin_host_safe=""
 	g_option_P_transfer_property=0
 	g_option_R_recursive=""
 	g_option_m_migrate=0
@@ -85,6 +86,7 @@ init_globals() {
 	g_option_N_nonrecursive=""
 	g_option_s_make_snapshot=0
 	g_option_T_target_host=""
+	g_option_T_target_host_safe=""
 	g_option_U_skip_unsupported_properties=0
 	g_option_v_verbose=0
 	g_option_V_very_verbose=0
@@ -206,7 +208,19 @@ setup_ssh_control_socket() {
 		;;
 	esac
 
-	eval "$g_cmd_ssh -M -S $l_control_socket $l_host -fN"
+	l_host_tokens=$(split_host_spec_tokens "$l_host")
+	set -- "$g_cmd_ssh" -M -S "$l_control_socket"
+	if [ "$l_host_tokens" != "" ]; then
+		while IFS= read -r l_token || [ -n "$l_token" ]; do
+			set -- "$@" "$l_token"
+		done <<EOF
+$l_host_tokens
+EOF
+	fi
+	set -- "$@" -fN
+	if ! "$@"; then
+		throw_error "Error creating ssh control socket for $l_role host."
+	fi
 }
 
 close_origin_ssh_control_socket() {
@@ -214,9 +228,18 @@ close_origin_ssh_control_socket() {
 		return
 	fi
 
-	l_cmd="$g_cmd_ssh -S $g_ssh_origin_control_socket -O exit $g_option_O_origin_host"
-	echoV "Closing origin ssh control socket: $l_cmd"
-	eval "$l_cmd" 2>/dev/null
+	l_host_tokens=$(split_host_spec_tokens "$g_option_O_origin_host")
+	set -- "$g_cmd_ssh" -S "$g_ssh_origin_control_socket" -O exit
+	if [ "$l_host_tokens" != "" ]; then
+		while IFS= read -r l_token || [ -n "$l_token" ]; do
+			set -- "$@" "$l_token"
+		done <<EOF
+$l_host_tokens
+EOF
+	fi
+	l_log_cmd="$g_cmd_ssh -S $g_ssh_origin_control_socket -O exit $(quote_host_spec_tokens "$g_option_O_origin_host")"
+	echoV "Closing origin ssh control socket: $l_log_cmd"
+	"$@" 2>/dev/null
 
 	if [ "$g_ssh_origin_control_socket_dir" != "" ] && [ -d "$g_ssh_origin_control_socket_dir" ]; then
 		rm -rf "$g_ssh_origin_control_socket_dir"
@@ -230,9 +253,18 @@ close_target_ssh_control_socket() {
 		return
 	fi
 
-	l_cmd="$g_cmd_ssh -S $g_ssh_target_control_socket -O exit $g_option_T_target_host"
-	echoV "Closing target ssh control socket: $l_cmd"
-	eval "$l_cmd" 2>/dev/null
+	l_host_tokens=$(split_host_spec_tokens "$g_option_T_target_host")
+	set -- "$g_cmd_ssh" -S "$g_ssh_target_control_socket" -O exit
+	if [ "$l_host_tokens" != "" ]; then
+		while IFS= read -r l_token || [ -n "$l_token" ]; do
+			set -- "$@" "$l_token"
+		done <<EOF
+$l_host_tokens
+EOF
+	fi
+	l_log_cmd="$g_cmd_ssh -S $g_ssh_target_control_socket -O exit $(quote_host_spec_tokens "$g_option_T_target_host")"
+	echoV "Closing target ssh control socket: $l_log_cmd"
+	"$@" 2>/dev/null
 
 	if [ "$g_ssh_target_control_socket_dir" != "" ] && [ -d "$g_ssh_target_control_socket_dir" ]; then
 		rm -rf "$g_ssh_target_control_socket_dir"
@@ -386,8 +418,9 @@ read_command_line_switches() {
 			l_new_origin_host="$OPTARG"
 			setup_ssh_control_socket "$l_new_origin_host" "origin"
 			g_option_O_origin_host="$l_new_origin_host"
+			g_option_O_origin_host_safe=$(quote_host_spec_tokens "$g_option_O_origin_host")
 			l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-			g_LZFS="$l_origin_ssh_cmd $g_option_O_origin_host $g_cmd_zfs"
+			g_LZFS="$l_origin_ssh_cmd $g_option_O_origin_host_safe $g_cmd_zfs"
 			;;
 		P)
 			g_option_P_transfer_property=1
@@ -405,8 +438,9 @@ read_command_line_switches() {
 			l_new_target_host="$OPTARG"
 			setup_ssh_control_socket "$l_new_target_host" "target"
 			g_option_T_target_host="$l_new_target_host"
+			g_option_T_target_host_safe=$(quote_host_spec_tokens "$g_option_T_target_host")
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-			g_RZFS="$l_target_ssh_cmd $g_option_T_target_host $g_cmd_zfs"
+			g_RZFS="$l_target_ssh_cmd $g_option_T_target_host_safe $g_cmd_zfs"
 			;;
 		U)
 			g_option_U_skip_unsupported_properties=1
@@ -469,7 +503,7 @@ init_variables() {
 	# determine the source operating system
 	if [ "$g_option_O_origin_host" != "" ]; then
 		l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-		g_source_operating_system=$(get_os "$l_origin_ssh_cmd $g_option_O_origin_host")
+		g_source_operating_system=$(get_os "$l_origin_ssh_cmd $g_option_O_origin_host_safe")
 	else
 		g_source_operating_system=$(get_os "")
 	fi
@@ -477,7 +511,7 @@ init_variables() {
 	# determine the destination operating system
 	if [ "$g_option_T_target_host" != "" ]; then
 		l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-		g_destination_operating_system=$(get_os "$l_target_ssh_cmd $g_option_T_target_host")
+		g_destination_operating_system=$(get_os "$l_target_ssh_cmd $g_option_T_target_host_safe")
 	else
 		g_destination_operating_system=$(get_os "")
 	fi

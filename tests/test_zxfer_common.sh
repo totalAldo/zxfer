@@ -65,6 +65,23 @@ test_escape_for_single_quotes_escapes_apostrophes() {
 	assertEquals "Input should be properly escaped for single quotes." "$expected" "$result"
 }
 
+test_split_host_spec_tokens_handles_multi_word_hosts() {
+	# Host specs may append privilege wrappers like "pfexec" or ssh options.
+	result=$(split_host_spec_tokens "user@host pfexec -p 2222")
+	expected=$(printf "%s\n" "user@host" "pfexec" "-p" "2222")
+
+	assertEquals "Host spec should be split into whitespace-delimited tokens." "$expected" "$result"
+}
+
+test_quote_host_spec_tokens_neutralizes_metacharacters() {
+	# Ensure characters such as semicolons are quoted so they cannot escape
+	# into new local commands when eval'd later.
+	result=$(quote_host_spec_tokens "backup.example.com; touch /tmp/pwn")
+	expected="'backup.example.com;' 'touch' '/tmp/pwn'"
+
+	assertEquals "Host spec should be rendered as safely quoted tokens." "$expected" "$result"
+}
+
 test_execute_command_respects_dry_run_mode() {
 	# With --dry-run enabled, execute_command should not run but still
 	# describe the action, so no temp files should be created.
