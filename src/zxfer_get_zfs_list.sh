@@ -337,7 +337,9 @@ get_zfs_list() {
 	# get a list of all destination datasets recursively
 	l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $g_destination"
 	echoV "Running command: $l_cmd"
-	g_recursive_dest_list=$($l_cmd)
+	if ! g_recursive_dest_list=$($l_cmd); then
+		throw_usage_error "Failed to retrieve list of datasets from the destination"
+	fi
 
 	echoV "Waiting for background processes to finish."
 	wait
@@ -365,7 +367,7 @@ get_zfs_list() {
 	fi
 
 	if [ "$g_recursive_dest_list" = "" ]; then
-		throw_usage_error "Failed to retrieve list of datasets from the destination"
+		echoV "Destination dataset list is empty; assuming no existing datasets under \"$g_destination\""
 	fi
 
 	echoV "End get_zfs_list()"
