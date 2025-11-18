@@ -68,6 +68,49 @@ ensure_parallel_available_for_source_jobs() {
 }
 
 #
+# Build the ZFS list command used to enumerate source snapshots based on the
+# current CLI state. Separating this from execution allows tests to assert on
+# the constructed pipeline without invoking ZFS.
+#
+build_source_snapshot_list_cmd() {
+	if [ "$g_option_j_jobs" -le 1 ]; then
+		printf '%s\n' "$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source"
+		return
+	fi
+
+	ensure_parallel_available_for_source_jobs
+
+	if [ ! "$g_option_O_origin_host" = "" ]; then
+		l_parallel_path=$g_origin_parallel_cmd
+	else
+		l_parallel_path=$g_cmd_parallel
+	fi
+	l_parallel_invoke="\"$(escape_for_double_quotes "$l_parallel_path")\""
+
+	if [ ! "$g_option_O_origin_host" = "" ]; then
+		l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
+		l_remote_parallel_cmd=$(escape_for_double_quotes "$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
+		l_remote_parallel_runner="sh -c \\\"$l_remote_parallel_cmd\\\" sh"
+		l_origin_host_args=$g_option_O_origin_host_safe
+		if [ "$l_origin_host_args" = "" ]; then
+			l_origin_host_args=$(quote_host_spec_tokens "$g_option_O_origin_host")
+		fi
+
+		if [ "$g_option_z_compress" -eq 1 ]; then
+			l_cmd="$l_origin_ssh_cmd $l_origin_host_args \"$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {} | zstd -9\" | zstd -d"
+		else
+			l_cmd="$l_origin_ssh_cmd $l_origin_host_args \"$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {}\""
+		fi
+		printf '%s\n' "$l_cmd"
+		return
+	fi
+
+	l_local_parallel_cmd=$(escape_for_double_quotes "$g_LZFS list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
+	l_local_parallel_runner="sh -c \\\"$l_local_parallel_cmd\\\" sh"
+	l_cmd="$g_LZFS list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_local_parallel_runner {}"
+	printf '%s\n' "$l_cmd"
+}
+#
 # Determine the source snapshots sorted by creation time. Since this
 # can take a long time, the command is run in the background. In addition,
 # to optimize the process, gnu parallel is used to retrieve snapshots from
@@ -81,67 +124,35 @@ write_source_snapshot_list_to_file() {
 	# in descending order, the datasets names are not ordered as we want.
 	# Don't use -S creation for this command, instead, reverse the results below
 	#
-	# Get a list of source snapshots in ascending order by creation date
+	l_cmd=$(build_source_snapshot_list_cmd)
+
 	if [ "$g_option_j_jobs" -gt 1 ]; then
-		ensure_parallel_available_for_source_jobs
-
-		if [ ! "$g_option_O_origin_host" = "" ]; then
-			l_parallel_path=$g_origin_parallel_cmd
-		else
-			l_parallel_path=$g_cmd_parallel
-		fi
-		l_parallel_invoke="\"$(escape_for_double_quotes "$l_parallel_path")\""
-
-		# 2024.07.15
-		# xargs mangles the output of the snapshots and is not reliable.
-		# gnu parallel is used instead which must be installed on source systems
-		#
-		# even though the snapshots are not ordered in creation time globally,
-		# they are ordered by dataset which is what is needed.
-		#
-		# if the g_LZFS command is remote, then escape the command to execute
-		# it wrapped around an ssh command
-		if [ ! "$g_option_O_origin_host" = "" ]; then
-			l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-			#l_cmd="$g_cmd_ssh $g_option_O_origin_host \"$g_cmd_zfs list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_cmd_zfs list -H -o name -s creation -t snapshot {}'\""
-			# use gnu parallel to prevent mangling of output
-			# when there are a lot of snapshtos, the output can be several megabytes and benefit
-			# from compression. We use zstd -9 due to the small size and time that it takes
-			# to generate the output. zstd -9 has shown better compression than zstd -12
-			# and significantly better compression than gzip.
-			# zstd -19 takes too long
-
-			# check if compression is enabled
-			l_remote_parallel_cmd=$(escape_for_double_quotes "$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
-			l_remote_parallel_runner="sh -c \\\"$l_remote_parallel_cmd\\\" sh"
-			l_origin_host_args=$g_option_O_origin_host_safe
-			if [ "$l_origin_host_args" = "" ]; then
-				l_origin_host_args=$(quote_host_spec_tokens "$g_option_O_origin_host")
-			fi
-
-			if [ "$g_option_z_compress" -eq 1 ]; then
-				# IllumOS requires -d 1 when listing snapshots for one dataset
-				l_cmd="$l_origin_ssh_cmd $l_origin_host_args \"$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {} | zstd -9\" | zstd -d"
-			else
-				l_cmd="$l_origin_ssh_cmd $l_origin_host_args \"$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {}\""
-			fi
-		else
-			#l_cmd="$g_LZFS list -Hr -o name $initial_source | xargs -n 1 -P $g_option_j_jobs -I {} sh -c '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'"
-			l_local_parallel_cmd=$(escape_for_double_quotes "$g_LZFS list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
-			l_local_parallel_runner="sh -c \\\"$l_local_parallel_cmd\\\" sh"
-			l_cmd="$g_LZFS list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_local_parallel_runner {}"
-		fi
-
 		echoV "Running command in the background: $l_cmd"
 		eval "$l_cmd" >"$l_outfile" &
-
 	else
-		l_cmd="$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source"
-
 		execute_background_cmd \
 			"$l_cmd" \
 			"$l_outfile"
 	fi
+}
+
+# Normalize the destination snapshot list so it can be directly compared to the
+# source listing via comm. When the user provided a trailing slash on the
+# source, the destination dataset already aligns and only needs stable sorting.
+#
+normalize_destination_snapshot_list() {
+	l_destination_dataset=$1
+	l_input_file=$2
+	l_output_file=$3
+
+	if [ "$g_initial_source_had_trailing_slash" -eq 1 ]; then
+		l_cmd="sort $l_input_file > $l_output_file"
+	else
+		l_escaped_destination_dataset=$(printf '%s\n' "$l_destination_dataset" | sed 's/[].[^$\\*|]/\\&/g')
+		l_cmd="sed -e 's|$l_escaped_destination_dataset|$initial_source|g' $l_input_file | sort > $l_output_file"
+	fi
+	echoV "Running command: $l_cmd"
+	eval "$l_cmd"
 }
 
 # We only need the snapshots of the intended destination dataset, not
@@ -202,17 +213,7 @@ write_destination_snapshot_list_to_files() {
 		echo "" >"$l_rzfs_list_hr_snap_tmp_file"
 	fi
 
-	# Normalize the destination snapshot paths for comm comparison unless the
-	# user explicitly requested trailing-slash semantics, in which case the
-	# destination dataset already matches the source layout.
-	if [ "$g_initial_source_had_trailing_slash" -eq 1 ]; then
-		l_cmd="sort $l_rzfs_list_hr_snap_tmp_file > $l_dest_snaps_stripped_sorted_tmp_file"
-	else
-		l_escaped_destination_dataset=$(printf '%s\n' "$l_destination_dataset" | sed 's/[].[^$\\*|]/\\&/g')
-		l_cmd="sed -e 's|$l_escaped_destination_dataset|$initial_source|g' $l_rzfs_list_hr_snap_tmp_file | sort > $l_dest_snaps_stripped_sorted_tmp_file"
-	fi
-	echoV "Running command: $l_cmd"
-	eval "$l_cmd"
+	normalize_destination_snapshot_list "$l_destination_dataset" "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 }
 
 # compare the source and destination snapshots and identify source datasets
@@ -220,6 +221,29 @@ write_destination_snapshot_list_to_files() {
 # datasets that contain snapshots that are not in the destination.
 # Afterwards, g_recursive_source_list only contains the names of
 # the datasets that need to be transferred.
+#
+# Diff sorted snapshot listings. The default mode returns snapshots only
+# present in the source, while destination_minus_source highlights extra
+# snapshots on the target.
+#
+diff_snapshot_lists() {
+	l_source_sorted_file=$1
+	l_destination_sorted_file=$2
+	l_mode=${3:-source_minus_destination}
+
+	case "$l_mode" in
+	source_minus_destination)
+		comm -23 "$l_source_sorted_file" "$l_destination_sorted_file"
+		;;
+	destination_minus_source)
+		comm -13 "$l_source_sorted_file" "$l_destination_sorted_file"
+		;;
+	*)
+		throw_error "Unknown snapshot diff mode: $l_mode"
+		;;
+	esac
+}
+
 set_g_recursive_source_list() {
 	l_lzfs_list_hr_s_snap_tmp_file=$1
 	l_dest_snaps_stripped_sorted_tmp_file=$2
@@ -232,12 +256,14 @@ set_g_recursive_source_list() {
 	echoV "Running command: $l_cmd"
 	eval "$l_cmd"
 
-	# shellcheck disable=SC2016
-	g_recursive_source_list=$(comm -23 \
-		"$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
-		"$g_cmd_awk" -F@ '{print $1}' | sort -u)
-	# shellcheck disable=SC2016
-	# awk script should see literal $1.
+	l_missing_snapshots=$(diff_snapshot_lists "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "source_minus_destination")
+	if [ "$l_missing_snapshots" != "" ]; then
+		# shellcheck disable=SC2016  # awk script should see literal $1.
+		g_recursive_source_list=$(printf '%s\n' "$l_missing_snapshots" | "$g_cmd_awk" -F@ '{print $1}' | sort -u)
+	else
+		g_recursive_source_list=""
+	fi
+	# shellcheck disable=SC2016  # awk script should see literal $1.
 	g_recursive_source_dataset_list=$("$g_cmd_awk" -F@ '{print $1}' "$l_source_snaps_sorted_tmp_file" | sort -u)
 
 	# if excluding datasets, remove them from the list
@@ -250,17 +276,24 @@ set_g_recursive_source_list() {
 	if [ "$g_option_V_very_verbose" -eq 1 ]; then
 		echo "====================================================================="
 		echo "====== Snapshots present in source but missing in destination ======"
-		comm -23 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+		if [ "$l_missing_snapshots" != "" ]; then
+			printf '%s\n' "$l_missing_snapshots"
+		fi
 		echo "====== Source datasets that differ from destination ======"
 		echo "g_recursive_source_list:"
 		echo "$g_recursive_source_list"
 		echo "Source dataset count: $(echo "$g_recursive_source_list" | grep -cve '^\s*$')"
 		echo "====================================================================="
 		echo "====== Extra Destination snapshots not in source ======"
-		comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+		l_destination_extra_snapshots=$(diff_snapshot_lists "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "destination_minus_source")
+		if [ "$l_destination_extra_snapshots" != "" ]; then
+			printf '%s\n' "$l_destination_extra_snapshots"
+		fi
 		echo "====== Destination datasets with extra snapshots not in source ======"
-		# shellcheck disable=SC2016
-		comm -13 "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" | "$g_cmd_awk" -F@ '{print $1}' | sort -u
+		if [ "$l_destination_extra_snapshots" != "" ]; then
+			# shellcheck disable=SC2016
+			printf '%s\n' "$l_destination_extra_snapshots" | "$g_cmd_awk" -F@ '{print $1}' | sort -u
+		fi
 		echo "====================================================================="
 	fi
 

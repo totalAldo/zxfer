@@ -2,6 +2,8 @@ CHANGELOG
 =========
 
 2025.11.18
+-Refactor snapshot listing orchestration (`write_source_snapshot_list_to_file()`, `write_destination_snapshot_list_to_files()`, `set_g_recursive_source_list()`) into data-flow helpers that build the source command string, normalize destination prefixes, and diff sorted lists so background jobs no longer embed inline eval plumbing, enabling shunit2 coverage of ssh/parallel/compression permutations without touching live ZFS.
+-Refactor `transfer_properties()` into composable helpers (source property collection, override derivation, destination diff/apply) and add shunit2 coverage with injectable set/inherit runners so safety-sensitive property logic can be unit-tested without touching real pools.
 -Allow zxfer to treat backup directories and metadata files owned by the invoking user as secure when root privileges are unavailable (while still enforcing 0700/0600 permissions) so shunit2 and CI runs on Linux can exercise the helpers without failing ownership checks.
 -Run recursive property/backup passes even when every dataset is already in sync so -P/-o/-k still enforce metadata, and skip writing `.zxfer_backup_info.*` files when no property data was captured to avoid clobbering prior backups.
 -Reset PATH to `/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin`, resolve required binaries to their absolute paths, and teach zxfer to honor `ZXFER_SECURE_PATH[_APPEND]` so PATH hijacking is no longer possible when zxfer runs with elevated privileges.
@@ -18,7 +20,6 @@ CHANGELOG
 -Estimate incremental stream sizes when a previous snapshot exists so the progress dialog reflects the bytes that will actually be sent.
 -Keep g_is_performed_send_destroy unset during dry-run sends so `-Y -n` exits after the first loop when no mutations occur.
 -Eliminate command injection in transfer_properties() by building `zfs create` argument lists without eval so property values are passed verbatim even when the destination dataset does not yet exist.
--Refactor `transfer_properties()` into composable helpers (source property collection, override derivation, destination diff/apply) and add shunit2 coverage with injectable set/inherit runners so safety-sensitive property logic can be unit-tested without touching real pools.
 -Fail replication immediately when any background `-j` zfs send/receive job exits non-zero by tracking their PIDs, surfacing failures, and terminating the remaining jobs instead of silently reporting success.
 -Store `.zxfer_backup_info.*` metadata under a root-owned `ZXFER_BACKUP_DIR` (default `/var/db/zxfer`), harden directory creation against symlinks, and warn when falling back to legacy files so attackers can no longer pre-create mountpoint symlinks to clobber arbitrary files during `-k`.
 -Ensure the -D progress hook tees the send stream so non-pass-through progress commands no longer truncate the data before `zfs receive`.
