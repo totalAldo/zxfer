@@ -1,3 +1,1 @@
 # TODO – Security Review
-
-- [ ] Validate ownership of `ZXFER_BACKUP_DIR` targets in `ensure_local_backup_dir()`/`ensure_remote_backup_dir()` (`src/zxfer_globals.sh:617-657`). Today the helpers only reject symlinks and non-directories, so if an attacker pre-creates the configured metadata directory (e.g., by pointing `ZXFER_BACKUP_DIR` at `/tmp/zxfer-meta`) zxfer happily `chmod 700`s it but leaves the attacker as the owner with full read/write access to `.zxfer_backup_info.*`. Enforce that the directory is owned by root (or the ssh user) before writing backup state so property metadata cannot be leaked or poisoned.

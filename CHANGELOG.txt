@@ -1,17 +1,14 @@
 CHANGELOG
 =========
 
-2025.11.19
+2025.11.17
+-Refuse to use zxfer backup metadata directories unless they are owned by root locally or by the remote ssh user (root also permitted) so attackers cannot pre-create `ZXFER_BACKUP_DIR` paths and retain ownership of `.zxfer_backup_info.*` files.
 -Quote -O/-T ssh host specs before constructing eval'd pipelines and open/close ssh control sockets without eval so a crafted host argument can no longer inject local commands before ssh starts.
 -Create zxfer progress FIFOs with umask 077 and chmod 600 so local users cannot read or stall the replicated send stream via /tmp/zxfer-progress.*
 -Quote the progress passthrough hook with single quotes so remote `-O -D` pulls keep the ssh command coherent and progress works on origin hosts.
 -Estimate incremental stream sizes when a previous snapshot exists so the progress dialog reflects the bytes that will actually be sent.
 -Keep g_is_performed_send_destroy unset during dry-run sends so `-Y -n` exits after the first loop when no mutations occur.
-
-2025.11.18
 -Eliminate command injection in transfer_properties() by building `zfs create` argument lists without eval so property values are passed verbatim even when the destination dataset does not yet exist.
-
-2025.11.17
 -Fail replication immediately when any background `-j` zfs send/receive job exits non-zero by tracking their PIDs, surfacing failures, and terminating the remaining jobs instead of silently reporting success.
 -Store `.zxfer_backup_info.*` metadata under a root-owned `ZXFER_BACKUP_DIR` (default `/var/db/zxfer`), harden directory creation against symlinks, and warn when falling back to legacy files so attackers can no longer pre-create mountpoint symlinks to clobber arbitrary files during `-k`.
 -Ensure the -D progress hook tees the send stream so non-pass-through progress commands no longer truncate the data before `zfs receive`.
