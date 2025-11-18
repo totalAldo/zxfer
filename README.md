@@ -107,10 +107,16 @@ removed in this fork to simplify the codebase and focus on the core ZFS
 send/receive workflow. If you previously relied on `-S`, please migrate to the
 standard ZFS replication features described above or pin an older release.
 
-Basic shunit2 smoke tests cover the most widely used helper functions and live in the `tests` directory. Run them with:
+Basic shunit2 smoke tests cover the most widely used helper functions and live in the `tests` directory. Run every suite (for example `tests/test_zxfer_common.sh` and `tests/test_zxfer_zfs_mode.sh`) with:
 
 ```sh
-./tests/test_zxfer_common.sh
+./tests/run_shunit_tests.sh
+```
+
+Pass one or more suite paths to target a specific file:
+
+```sh
+./tests/run_shunit_tests.sh test_zxfer_zfs_mode.sh
 ```
 
 Integration tests are available for environments that have ZFS kernel modules loaded (FreeBSD, Illumos, or Linux with OpenZFS) and require root privileges. They create temporary pools backed by sparse files, exercise the zfs replication workflow, and tear everything down automatically:

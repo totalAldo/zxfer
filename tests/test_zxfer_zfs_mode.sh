@@ -66,19 +66,29 @@ setUp() {
 
 test_resolve_initial_source_prefers_recursive_flag() {
 	g_option_R_recursive="tank/src"
-	g_option_N_nonrecursive="tank/nonrecursive"
 
 	resolve_initial_source_from_options
 
 	assertEquals "Recursive source should be selected when -R is provided." "$g_option_R_recursive" "$initial_source"
 }
 
+test_resolve_initial_source_uses_nonrecursive_when_only_N_set() {
+	g_option_N_nonrecursive="tank/nonrecursive"
+
+	resolve_initial_source_from_options
+
+	assertEquals "Non-recursive source should be selected when -N is provided." "$g_option_N_nonrecursive" "$initial_source"
+}
+
 test_resolve_initial_source_conflicts_trigger_usage_error() {
 	g_option_R_recursive="tank/src"
 	g_option_N_nonrecursive="tank/child"
 
-	(resolve_initial_source_from_options) >/dev/null 2>&1
-	status=$?
+	if (resolve_initial_source_from_options) >/dev/null 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
 
 	if [ "$status" -eq 0 ]; then
 		fail "Conflicting -N/-R flags must exit with a usage error."
