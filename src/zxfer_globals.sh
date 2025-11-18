@@ -44,6 +44,89 @@
 # Secure location for property backup files (override via ZXFER_BACKUP_DIR).
 g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
 
+# Directories considered safe for PATH lookups. Administrators may override the
+# entire list via ZXFER_SECURE_PATH or append additional trusted directories via
+# ZXFER_SECURE_PATH_APPEND.
+ZXFER_DEFAULT_SECURE_PATH="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+
+zxfer_compute_secure_path() {
+	l_candidate=$ZXFER_DEFAULT_SECURE_PATH
+	if [ -n "${ZXFER_SECURE_PATH:-}" ]; then
+		l_candidate=$ZXFER_SECURE_PATH
+	fi
+	if [ -n "${ZXFER_SECURE_PATH_APPEND:-}" ]; then
+		if [ "$l_candidate" = "" ]; then
+			l_candidate=$ZXFER_SECURE_PATH_APPEND
+		else
+			l_candidate=$l_candidate:$ZXFER_SECURE_PATH_APPEND
+		fi
+	fi
+
+	OLDIFS=$IFS
+	IFS=":"
+	l_clean=""
+	for l_entry in $l_candidate; do
+		case "$l_entry" in
+		''|.)
+			continue
+			;;
+		/*)
+			if [ "$l_clean" = "" ]; then
+				l_clean=$l_entry
+			else
+				l_clean=$l_clean:$l_entry
+			fi
+			;;
+		*)
+			# Ignore relative path segments to keep PATH confined to absolute directories.
+			continue
+			;;
+		esac
+	done
+	IFS=$OLDIFS
+
+	if [ "$l_clean" = "" ]; then
+		l_clean=$ZXFER_DEFAULT_SECURE_PATH
+	fi
+
+	printf '%s\n' "$l_clean"
+}
+
+zxfer_apply_secure_path() {
+	g_zxfer_secure_path=$(zxfer_compute_secure_path)
+	PATH=$g_zxfer_secure_path
+	export PATH
+}
+
+zxfer_fatal_missing_dependency() {
+	l_msg=$1
+	if command -v throw_error >/dev/null 2>&1; then
+		throw_error "$l_msg"
+	else
+		printf '%s\n' "$l_msg" >&2
+		exit 1
+	fi
+}
+
+zxfer_find_required_tool() {
+	l_tool=$1
+	l_label=${2:-$l_tool}
+	l_path=$(command -v "$l_tool" 2>/dev/null || :)
+	if [ "$l_path" = "" ]; then
+		zxfer_fatal_missing_dependency "Required dependency \"$l_label\" not found in secure PATH ($g_zxfer_secure_path). Set ZXFER_SECURE_PATH or install the binary."
+	fi
+	case "$l_path" in
+	/*)
+		;;
+	*)
+		zxfer_fatal_missing_dependency "Required dependency \"$l_label\" resolved to \"$l_path\", but zxfer requires an absolute path."
+		;;
+	esac
+	printf '%s\n' "$l_path"
+}
+
+zxfer_apply_secure_path
+
 # Some unit tests source zxfer helpers without calling init_globals(), so make
 # sure the awk command resolves to something usable even before the real
 # initialization logic runs.
@@ -54,7 +137,7 @@ fi
 
 init_globals() {
 	# zxfer version
-	g_zxfer_version="2.0.0-20251117"
+	g_zxfer_version="2.0.0-20251118"
 
 	# max number of iterations to run iterate through run_zfs_mode
 	# if changes are made to the filesystems
@@ -122,13 +205,13 @@ init_globals() {
 
 	g_cmd_cat=""
 
-	g_cmd_awk=$(which awk) # location of awk or gawk on home OS
-	g_cmd_zfs=$(which zfs)
-	g_cmd_parallel=$(which parallel)
+	g_cmd_awk=$(zxfer_find_required_tool awk "awk")
+	g_cmd_zfs=$(zxfer_find_required_tool zfs "zfs")
+	g_cmd_parallel=$(command -v parallel 2>/dev/null || :)
 	g_origin_parallel_cmd=""
 	# enable compression in ssh options so that remote snapshot lists that
 	# contain thousands of snapshots are compressed
-	g_cmd_ssh=$(which ssh)
+	g_cmd_ssh=$(zxfer_find_required_tool ssh "ssh")
 	# ssh control sockets used for origin (-O) and target (-T) hosts
 	g_ssh_origin_control_socket=""
 	g_ssh_origin_control_socket_dir=""
@@ -538,16 +621,29 @@ init_variables() {
 
 	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
 		if [ "$g_option_O_origin_host" = "" ]; then
-			g_cmd_cat=$(which cat)
+			g_cmd_cat=$(zxfer_find_required_tool cat "cat")
 		else
 			l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-			g_cmd_cat=$($l_origin_ssh_cmd "$g_option_O_origin_host" which cat)
+			g_cmd_cat=$($l_origin_ssh_cmd "$g_option_O_origin_host" "PATH=$g_zxfer_secure_path" command -v cat)
+			if [ "$g_cmd_cat" = "" ]; then
+				throw_error "cat not found on origin host $g_option_O_origin_host."
+			fi
+			case "$g_cmd_cat" in
+			/*)
+				;;
+			*)
+				throw_error "cat on origin host $g_option_O_origin_host resolved to \"$g_cmd_cat\" which is not an absolute path."
+				;;
+			esac
 		fi
 	fi
 
 	l_home_operating_system=$(get_os "")
 	if [ "$l_home_operating_system" = "SunOS" ]; then
-		g_cmd_awk=$(which gawk)
+		l_gawk_path=$(command -v gawk 2>/dev/null || :)
+		if [ "$l_gawk_path" != "" ]; then
+			g_cmd_awk=$l_gawk_path
+		fi
 	fi
 }
 

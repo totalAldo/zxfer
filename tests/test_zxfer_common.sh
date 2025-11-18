@@ -53,6 +53,36 @@ read_backup_file_with_mocked_security() {
 	)
 }
 
+test_zxfer_compute_secure_path_defaults_to_allowlist() {
+	result=$(
+		unset ZXFER_SECURE_PATH
+		unset ZXFER_SECURE_PATH_APPEND
+		zxfer_compute_secure_path
+	)
+
+	assertEquals "Default secure PATH should only include trusted system directories." "$ZXFER_DEFAULT_SECURE_PATH" "$result"
+}
+
+test_zxfer_compute_secure_path_filters_relative_entries() {
+	result=$(
+		ZXFER_SECURE_PATH="./bin:/tmp/bin:relative:/usr/sbin"
+		unset ZXFER_SECURE_PATH_APPEND
+		zxfer_compute_secure_path
+	)
+
+	assertEquals "Relative path segments must be dropped from the secure PATH." "/tmp/bin:/usr/sbin" "$result"
+}
+
+test_zxfer_compute_secure_path_appends_extra_entries() {
+	result=$(
+		ZXFER_SECURE_PATH="/sbin:/bin"
+		ZXFER_SECURE_PATH_APPEND=":/opt/zfs/bin:./malicious"
+		zxfer_compute_secure_path
+	)
+
+	assertEquals "ZXFER_SECURE_PATH_APPEND should only add absolute directories to the allowlist." "/sbin:/bin:/opt/zfs/bin" "$result"
+}
+
 test_escape_for_double_quotes_escapes_special_chars() {
 	# Validate that the helper escapes characters which would break options
 	# passed via the shell, such as quotes, backticks, and dollars.
