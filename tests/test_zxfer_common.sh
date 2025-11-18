@@ -404,11 +404,20 @@ test_write_backup_properties_treats_backup_data_as_literal() {
 
 test_read_local_backup_file_refuses_non_root_owned_metadata() {
 	# read_local_backup_file must refuse to parse metadata when the file is
-	# not root-owned to prevent tampering from less-privileged users.
+	# not root-owned to prevent tampering from less-privileged users. Stub
+	# the ownership/mode helpers so the test does not rely on the invoking
+	# user's UID or default umask.
 	backup_file="$TEST_TMPDIR/insecure_backup"
 	printf '%s\n' "tampered" >"$backup_file"
+	chmod 600 "$backup_file"
 
-	if output=$(read_local_backup_file "$backup_file" 2>&1); then
+	if output=$(
+		(
+			get_path_owner_uid() { printf '%s\n' "1234"; }
+			get_path_mode_octal() { printf '%s\n' "600"; }
+			read_local_backup_file "$backup_file"
+		) 2>&1
+	); then
 		status=0
 	else
 		status=$?
@@ -417,7 +426,7 @@ test_read_local_backup_file_refuses_non_root_owned_metadata() {
 	assertEquals "Reading non-root metadata should exit with an error." 1 "$status"
 
 	case "$output" in
-	*"Refusing to use backup metadata $backup_file because it is owned by UID "*)
+	*"Refusing to use backup metadata $backup_file because it is owned by UID 1234 instead of root."*)
 		;;
 	*)
 		fail "read_local_backup_file did not report an insecure owner: $output"
