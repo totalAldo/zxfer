@@ -12,6 +12,9 @@
 # shellcheck source=src/zxfer_inspect_delete_snap.sh
 . "$ZXFER_ROOT/src/zxfer_inspect_delete_snap.sh"
 
+# shellcheck source=src/zxfer_transfer_properties.sh
+. "$ZXFER_ROOT/src/zxfer_transfer_properties.sh"
+
 create_fake_ssh_bin() {
 	# Re-create the fake ssh helper after each cleanup so setUp() can freely
 	# truncate the temp directory without leaving a stale interpreter. The helper
@@ -67,6 +70,19 @@ read_backup_file_with_mocked_security() {
 		get_path_mode_octal() { printf '%s\n' "600"; }
 		read_local_backup_file "$l_path"
 	)
+}
+
+fake_property_set_runner() {
+	FAKE_SET_CALLS="${FAKE_SET_CALLS}${1}=${2}@${3};"
+}
+
+fake_property_inherit_runner() {
+	FAKE_INHERIT_CALLS="${FAKE_INHERIT_CALLS}${1}@${2};"
+}
+
+sort_property_list() {
+	l_list=$1
+	echo "$l_list" | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//'
 }
 
 test_zxfer_compute_secure_path_defaults_to_allowlist() {
@@ -221,6 +237,75 @@ test_refresh_compression_commands_tokenizes_custom_pipeline() {
 	else
 		unset g_cmd_decompress_safe
 	fi
+}
+
+test_derive_override_lists_handles_overrides_only() {
+	result=$(derive_override_lists "compression=lz4=local" "compression=lzjb" 0 "filesystem")
+
+	{
+		IFS= read -r override_pvs
+		IFS= read -r creation_pvs
+	} <<EOF
+$result
+EOF
+
+	assertEquals "Override list should reflect -o values with override sources." "compression=lzjb=override" "$override_pvs"
+	assertEquals "Creation list should stay empty when only -o is supplied." "" "$creation_pvs"
+}
+
+test_derive_override_lists_includes_local_props_for_creation() {
+	source_pvs="compression=lz4=local,refreservation=4G=received,quota=none=local"
+	override_opts="quota=8G"
+	result=$(derive_override_lists "$source_pvs" "$override_opts" 1 "volume")
+
+	{
+		IFS= read -r override_pvs
+		IFS= read -r creation_pvs
+	} <<EOF
+$result
+EOF
+
+	expected_override="compression=lz4=local,quota=8G=override,refreservation=4G=received"
+	assertEquals "Overrides should include source properties with user overrides applied." "$(sort_property_list "$expected_override")" "$(sort_property_list "$override_pvs")"
+	assertEquals "Creation list should keep local props and zvol refreservation even if not local." "compression=lz4=local,refreservation=4G=received" "$creation_pvs"
+}
+
+test_diff_properties_separates_set_and_inherit_lists() {
+	override_pvs="compression=lz4=local,atime=off=received"
+	dest_pvs="compression=lzjb=local,atime=on=local"
+	result=$(diff_properties "$override_pvs" "$dest_pvs" "casesensitivity,normalization,jailed,utf8only")
+
+	{
+		IFS= read -r initial_set_list
+		IFS= read -r set_list
+		IFS= read -r inherit_list
+	} <<EOF
+$result
+EOF
+
+	assertEquals "Initial pass should require setting every diverging property." "compression=lz4,atime=off" "$initial_set_list"
+	assertEquals "Child dataset should only set properties sourced locally on the parent." "compression=lz4" "$set_list"
+	assertEquals "Child dataset should inherit properties whose source is not local." "atime=off" "$inherit_list"
+}
+
+test_apply_property_changes_skips_inherit_for_initial_source() {
+	FAKE_SET_CALLS=""
+	FAKE_INHERIT_CALLS=""
+
+	apply_property_changes "pool/src" 1 "compression=lz4" "" "" fake_property_set_runner fake_property_inherit_runner
+
+	assertEquals "Initial source should call the set runner with initial diff list." "compression=lz4@pool/src;" "$FAKE_SET_CALLS"
+	assertEquals "Initial source should not inherit properties." "" "$FAKE_INHERIT_CALLS"
+}
+
+test_apply_property_changes_invokes_inherit_runner_for_children() {
+	FAKE_SET_CALLS=""
+	FAKE_INHERIT_CALLS=""
+
+	apply_property_changes "pool/src" 0 "" "compression=lz4" "atime=off" fake_property_set_runner fake_property_inherit_runner
+
+	assertEquals "Child dataset should apply child set list." "compression=lz4@pool/src;" "$FAKE_SET_CALLS"
+	assertEquals "Child dataset should inherit requested properties." "atime@pool/src;" "$FAKE_INHERIT_CALLS"
 }
 
 test_strip_trailing_slashes_trims_dataset_suffixes() {

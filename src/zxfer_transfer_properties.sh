@@ -253,6 +253,490 @@ run_zfs_create_with_properties() {
 }
 
 #
+# Retrieve the normalized property/value/source list for a dataset while
+# handling locales that require both machine (-Hp) and human (-H) parsing.
+# $1: dataset to query
+# $2: zfs command to execute (defaults to $g_LZFS)
+#
+get_normalized_dataset_properties() {
+	l_dataset=$1
+	l_zfs_cmd=$2
+
+	if [ -z "$l_zfs_cmd" ]; then
+		l_zfs_cmd=$g_LZFS
+	fi
+
+	l_machine_pvs=$($l_zfs_cmd get -Hpo property,value,source all "$l_dataset" |
+		tr "\t" "=" | tr "\n" ",")
+	l_machine_pvs=${l_machine_pvs%,}
+	l_human_pvs=$($l_zfs_cmd get -Ho property,value,source all "$l_dataset" |
+		tr "\t" "=" | tr "\n" ",")
+	l_human_pvs=${l_human_pvs%,}
+	resolve_human_vars "$l_machine_pvs" "$l_human_pvs"
+
+	printf '%s\n' "$human_results"
+}
+
+#
+# Replace any readonly=on entries with readonly=off so zxfer can ensure the
+# destination stays writable when --ensure-writable is enabled.
+# $1: comma-separated property list
+#
+force_readonly_off() {
+	if [ -z "$1" ]; then
+		printf '%s\n' ""
+		return
+	fi
+
+	printf '%s\n' "$(echo "$1" | sed -e 's/readonly=on/readonly=off/g')"
+}
+
+#
+# Collect the effective source property list, optionally persisting/restoring
+# backup metadata and honoring the writable flag.
+# $1: source dataset
+# $2: destination dataset (for backup bookkeeping)
+# $3: ensure-writable flag (1 to force readonly=off)
+# $4: zfs command used to inspect the source (defaults to $g_LZFS)
+#
+collect_source_props() {
+	l_source=$1
+	l_dest=$2
+	l_ensure_writable=$3
+	l_zfs_cmd=$4
+
+	if [ -z "$l_zfs_cmd" ]; then
+		l_zfs_cmd=$g_LZFS
+	fi
+
+	l_source_pvs=$(get_normalized_dataset_properties "$l_source" "$l_zfs_cmd")
+
+	if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
+		g_backup_file_contents="$g_backup_file_contents;\
+$l_source,$l_dest,$l_source_pvs"
+	fi
+
+	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
+		l_source_regex=$(printf '%s\n' "$l_source" | sed 's/[].[^$\\*]/\\&/g')
+		l_source_pvs=$(echo "$g_restored_backup_file_contents" |
+			grep "^[^,]*,$l_source_regex," | sed -e 's/^[^,]*,[^,]*,//g')
+		if [ "$l_source_pvs" = "" ]; then
+			throw_usage_error "Can't find the properties for the filesystem $l_source"
+		fi
+	fi
+
+	if [ "$l_ensure_writable" -eq 1 ]; then
+		l_source_pvs=$(force_readonly_off "$l_source_pvs")
+	fi
+
+	printf '%s\n' "$l_source_pvs"
+}
+
+#
+# Validate that every override property supplied via -o exists on the source.
+# $1: comma-separated override list (property=value)
+# $2: comma-separated source property/value/source list
+#
+validate_override_properties() {
+	l_override_list=$1
+	l_source_pvs=$2
+
+	if [ -z "$l_override_list" ]; then
+		return
+	fi
+
+	l_oldifs=$IFS
+	IFS=","
+	for op_line in $l_override_list; do
+		l_found_property=0
+		op_property=$(echo "$op_line" | cut -f1 -d=)
+		for sp_line in $l_source_pvs; do
+			sp_property=$(echo "$sp_line" | cut -f1 -d=)
+			if [ "$op_property" = "$sp_property" ]; then
+				l_found_property=1
+				break
+			fi
+		done
+		if [ $l_found_property -eq 0 ]; then
+			IFS=$l_oldifs
+			throw_usage_error "Invalid option property - check -o list for syntax errors."
+		fi
+	done
+	IFS=$l_oldifs
+}
+
+#
+# Build the override and creation property sets based on -P/-o arguments.
+# Returns two newline-separated lines: override_pvs and creation_pvs.
+# $1: source property/value/source list
+# $2: -o override list (property=value)
+# $3: $g_option_P_transfer_property flag
+# $4: dataset type (filesystem/volume)
+#
+derive_override_lists() {
+	l_source_pvs=$1
+	l_override_options=$2
+	l_transfer_all_flag=$3
+	l_source_dstype=$4
+
+	override_pvs=""
+	creation_pvs=""
+
+	l_oldifs=$IFS
+	IFS=","
+
+	if [ "$l_transfer_all_flag" -eq 0 ]; then
+		for op_line in $l_override_options; do
+			op_property=$(echo "$op_line" | cut -f1 -d=)
+			op_value=$(echo "$op_line" | cut -f2 -d=)
+			override_pvs="$override_pvs$op_property=$op_value=override,"
+		done
+	else
+		for sp_line in $l_source_pvs; do
+			override_property=$(echo "$sp_line" | cut -f1 -d=)
+			override_value=$(echo "$sp_line" | cut -f2 -d=)
+			override_source=$(echo "$sp_line" | cut -f3 -d=)
+			creation_property=$override_property
+			creation_value=$override_value
+			creation_source=$override_source
+			for op_line in $l_override_options; do
+				op_property=$(echo "$op_line" | cut -f1 -d=)
+				op_value=$(echo "$op_line" | cut -f2 -d=)
+				if [ "$op_property" = "$override_property" ]; then
+					override_property=$op_property
+					override_value=$op_value
+					override_source="override"
+					creation_property="NULL"
+					break
+				fi
+			done
+			override_pvs="$override_pvs$override_property=$override_value=$override_source,"
+			if [ "$creation_property" != "NULL" ] && [ "$creation_source" = "local" ]; then
+				creation_pvs="$creation_pvs$creation_property=$creation_value=$creation_source,"
+			elif [ "$l_source_dstype" = "volume" ] && [ "$creation_property" = "refreservation" ]; then
+				creation_pvs="$creation_pvs$creation_property=$creation_value=$creation_source,"
+			fi
+		done
+	fi
+
+	IFS=$l_oldifs
+
+	override_pvs=${override_pvs%,}
+	creation_pvs=${creation_pvs%,}
+
+	printf '%s\n' "$override_pvs"
+	printf '%s\n' "$creation_pvs"
+}
+
+#
+# Remove readonly/ignored properties from a list while preserving formatting.
+# $1: comma-separated property list
+# $2: readonly property list to remove
+# $3: additional ignore list to remove
+#
+sanitize_property_list() {
+	l_input_list=$1
+	l_remove_list=$2
+	l_ignore_list=$3
+
+	if [ -z "$l_input_list" ]; then
+		printf '%s\n' ""
+		return
+	fi
+
+	l_filtered_list=$l_input_list
+	l_oldifs=$IFS
+	IFS=","
+
+	if [ -n "$l_remove_list" ]; then
+		remove_properties "$l_filtered_list" "$l_remove_list"
+		l_filtered_list="$m_new_rmv_pvs"
+	fi
+
+	if [ -n "$l_ignore_list" ]; then
+		remove_properties "$l_filtered_list" "$l_ignore_list"
+		l_filtered_list="$m_new_rmv_pvs"
+	fi
+
+	IFS=$l_oldifs
+	printf '%s\n' "$l_filtered_list"
+}
+
+#
+# Drop properties unsupported on the destination.
+# $1: comma-separated property list
+# $2: unsupported property names
+#
+strip_unsupported_properties() {
+	l_input_list=$1
+	l_unsupported_list=$2
+
+	if [ -z "$l_unsupported_list" ] || [ -z "$l_input_list" ]; then
+		printf '%s\n' "$l_input_list"
+		return
+	fi
+
+	remove_unsupported_properties "$l_input_list"
+	printf '%s\n' "$m_only_supported_properties"
+}
+
+#
+# Create the destination dataset when it does not exist.
+# Returns 0 when the dataset was created (no further work needed) and 1 when
+# it already exists and requires diffing.
+# $1: dest_exist flag (0 when absent)
+# $2: is_initial_source flag (1 when processing the root source)
+# $3: override property list
+# $4: creation property list
+# $5: source dataset type
+# $6: source volume size
+# $7: destination dataset name
+# $8: optional runner for zfs create (defaults to run_zfs_create_with_properties)
+#
+ensure_destination_exists() {
+	l_dest_exist=$1
+	l_is_initial_source=$2
+	l_override_pvs=$3
+	l_creation_pvs=$4
+	l_source_dstype=$5
+	l_source_volsize=$6
+	l_destination=$7
+	l_create_runner=$8
+
+	if [ "$l_dest_exist" != "0" ]; then
+		return 1
+	fi
+
+	if [ -z "$l_create_runner" ]; then
+		l_create_runner="run_zfs_create_with_properties"
+	fi
+
+	echov "Creating destination filesystem \"$l_destination\" with specified properties."
+
+	l_oldifs=$IFS
+	IFS=","
+	if [ "$l_is_initial_source" -eq 1 ]; then
+		remove_sources "$l_override_pvs"
+		l_property_list="$m_new_rmvs_pv"
+		l_with_parents="no"
+	else
+		l_filtered_creation=$(sanitize_property_list "$l_creation_pvs" "$g_readonly_properties" "$g_option_I_ignore_properties")
+		remove_sources "$l_filtered_creation"
+		l_property_list="$m_new_rmvs_pv"
+		l_with_parents="yes"
+	fi
+	IFS=$l_oldifs
+
+	if ! $l_create_runner "$l_with_parents" "$l_source_dstype" "$l_source_volsize" "$l_property_list" "$l_destination"; then
+		throw_error "Error when creating destination filesystem."
+	fi
+
+	return 0
+}
+
+#
+# Collect destination properties via the remote/local zfs command.
+# $1: dataset name
+# $2: command used to query properties (defaults to $g_RZFS)
+#
+collect_destination_props() {
+	l_dataset=$1
+	l_zfs_cmd=$2
+
+	if [ -z "$l_zfs_cmd" ]; then
+		l_zfs_cmd=$g_RZFS
+	fi
+
+	get_normalized_dataset_properties "$l_dataset" "$l_zfs_cmd"
+}
+
+#
+# Default runner for `zfs set`, allowing unit tests to override this behavior.
+# $1: property name
+# $2: property value
+# $3: destination dataset
+#
+zxfer_run_zfs_set_property() {
+	l_property_safe=$(escape_for_double_quotes "$1")
+	l_value_safe=$(escape_for_double_quotes "$2")
+	l_destination=$3
+
+	if [ "$g_option_n_dryrun" -eq 0 ]; then
+		$g_RZFS set "${l_property_safe}=${l_value_safe}" "$l_destination" ||
+			throw_error "Error when setting properties on destination filesystem."
+	else
+		echo "$g_RZFS set ${l_property_safe}=${l_value_safe} $l_destination"
+	fi
+}
+
+#
+# Default runner for `zfs inherit`.
+# $1: property name
+# $2: destination dataset
+#
+zxfer_run_zfs_inherit_property() {
+	l_property_safe=$(escape_for_double_quotes "$1")
+	l_destination=$2
+
+	if [ "$g_option_n_dryrun" -eq 0 ]; then
+		$g_RZFS inherit "$l_property_safe" "$l_destination" ||
+			throw_error "Error when inheriting properties on destination filesystem."
+	else
+		echo "$g_RZFS inherit $l_property_safe $l_destination"
+	fi
+}
+
+#
+# Compare override and destination property lists, enforcing "must create"
+# restrictions and returning the required set/inherit operations.
+# Returns three newline-separated lines: initial_set_list, set_list, inherit_list.
+# $1: override property list
+# $2: destination property list
+# $3: must-create property names
+#
+diff_properties() {
+	l_override_pvs=$1
+	l_dest_pvs=$2
+	l_must_create_properties=$3
+
+	l_oldifs=$IFS
+	IFS=","
+
+	select_mc "$l_override_pvs" "$l_must_create_properties"
+	l_mc_override_pvs="$m_new_mc_pvs"
+
+	select_mc "$l_dest_pvs" "$l_must_create_properties"
+	l_mc_dest_pvs="$m_new_mc_pvs"
+
+	for ov_line in $l_mc_override_pvs; do
+		ov_property=$(echo "$ov_line" | cut -f1 -d=)
+		ov_value=$(echo "$ov_line" | cut -f2 -d=)
+		for dest_line in $l_mc_dest_pvs; do
+			dest_property=$(echo "$dest_line" | cut -f1 -d=)
+			dest_value=$(echo "$dest_line" | cut -f2 -d=)
+			if [ "$ov_property" = "$dest_property" ] && [ "$ov_value" != "$dest_value" ]; then
+				echo "Error: The property \"$dest_property\" may only be set"
+				echo "       at filesystem creation time. To modify this property"
+				echo "       you will need to first destroy target filesystem."
+				usage
+				beep
+				exit 1
+			fi
+		done
+	done
+
+	remove_properties "$l_override_pvs" "$l_must_create_properties"
+	l_filtered_override="$m_new_rmv_pvs"
+
+	remove_properties "$l_dest_pvs" "$l_must_create_properties"
+	l_filtered_dest="$m_new_rmv_pvs"
+
+	ov_initsrc_set_list=""
+	ov_set_list=""
+	ov_inherit_list=""
+
+	for ov_line in $l_filtered_override; do
+		ov_property=$(echo "$ov_line" | cut -f1 -d=)
+		ov_value=$(echo "$ov_line" | cut -f2 -d=)
+		ov_source=$(echo "$ov_line" | cut -f3 -d=)
+		for dest_line in $l_filtered_dest; do
+			dest_property=$(echo "$dest_line" | cut -f1 -d=)
+			dest_value=$(echo "$dest_line" | cut -f2 -d=)
+			dest_source=$(echo "$dest_line" | cut -f3 -d=)
+			if [ "$ov_property" = "$dest_property" ]; then
+				if [ "$dest_value" != "$ov_value" ] || [ "$dest_source" != "local" ]; then
+					ov_initsrc_set_list="$ov_initsrc_set_list$ov_property=$ov_value,"
+				fi
+
+				if [ "$ov_value" != "$dest_value" ]; then
+					if [ "$ov_source" = "local" ]; then
+						ov_set_list="$ov_set_list$ov_property=$ov_value,"
+					else
+						ov_inherit_list="$ov_inherit_list$ov_property=$ov_value,"
+					fi
+				elif [ "$ov_source" = "local" ] && [ "$dest_source" != "local" ]; then
+					ov_set_list="$ov_set_list$ov_property=$ov_value,"
+				elif [ "$ov_source" != "local" ] && [ "$dest_source" = "local" ]; then
+					ov_inherit_list="$ov_inherit_list$ov_property=$ov_value,"
+				fi
+
+				l_filtered_dest=$(echo "$l_filtered_dest" | tr -s "," "\n" |
+					grep -v ^"$dest_line"$ | tr -s "\n" ",")
+				break
+			fi
+		done
+	done
+
+	IFS=$l_oldifs
+
+	printf '%s\n' "${ov_initsrc_set_list%,}"
+	printf '%s\n' "${ov_set_list%,}"
+	printf '%s\n' "${ov_inherit_list%,}"
+}
+
+#
+# Apply pending property modifications/inheritance via set_runner/inherit_runner.
+# $1: destination dataset
+# $2: is_initial_source flag (1 means use initial_set_list)
+# $3: initial source set list
+# $4: child set list
+# $5: inherit list
+# $6: optional set runner function (defaults to zxfer_run_zfs_set_property)
+# $7: optional inherit runner function (defaults to zxfer_run_zfs_inherit_property)
+#
+apply_property_changes() {
+	l_destination=$1
+	l_is_initial_source=$2
+	l_initial_set_list=$3
+	l_child_set_list=$4
+	l_inherit_list=$5
+	l_set_runner=$6
+	l_inherit_runner=$7
+
+	if [ -z "$l_set_runner" ]; then
+		l_set_runner="zxfer_run_zfs_set_property"
+	fi
+	if [ -z "$l_inherit_runner" ]; then
+		l_inherit_runner="zxfer_run_zfs_inherit_property"
+	fi
+
+	if [ "$l_is_initial_source" -eq 1 ]; then
+		l_active_set_list=$l_initial_set_list
+	else
+		l_active_set_list=$l_child_set_list
+	fi
+
+	if [ "$l_active_set_list" != "" ] ||
+		([ "$l_is_initial_source" -eq 0 ] && [ "$l_inherit_list" != "" ]); then
+		echov "Setting properties/sources on destination filesystem \"$l_destination\"."
+	fi
+
+	l_oldifs=$IFS
+	if [ "$l_active_set_list" != "" ]; then
+		IFS=","
+		for ov_line in $l_active_set_list; do
+			ov_property=$(echo "$ov_line" | cut -f1 -d=)
+			ov_value=$(echo "$ov_line" | cut -f2 -d=)
+			IFS=$l_oldifs
+			$l_set_runner "$ov_property" "$ov_value" "$l_destination"
+			IFS=","
+		done
+	fi
+
+	if [ "$l_is_initial_source" -eq 0 ] && [ "$l_inherit_list" != "" ]; then
+		IFS=","
+		for ov_line in $l_inherit_list; do
+			ov_property=$(echo "$ov_line" | cut -f1 -d=)
+			IFS=$l_oldifs
+			$l_inherit_runner "$ov_property" "$l_destination"
+			IFS=","
+		done
+	fi
+
+	IFS=$l_oldifs
+}
+
+#
 # Transfers properties from any source to destination.
 # Either creates the filesystem if it doesn't exist,
 # or sets it after the fact.
@@ -266,445 +750,62 @@ transfer_properties() {
 
 	l_source=$1
 
-	# We have chosen to set all source properties in the case of -P
-	# Any -o values will be set too, and will override any values from -P.
-	# Where the destination does not exist, it will be created.
+	if [ "$initial_source" = "$l_source" ]; then
+		l_is_initial_source=1
+	else
+		l_is_initial_source=0
+	fi
 
-	# Get the list of properties to enforce on the destination. This will be an
-	# amalgam of -o options, and if -P exists, a list of the source properties.
+	l_source_pvs=$(collect_source_props "$l_source" "$g_actual_dest" "$g_ensure_writable" "$g_LZFS")
 
-	# get source properties,values,sources in form
-	# property1=value1=source1,property2=value2=source2,...
-	# Use -p to remove units, since localization can make these incompatible
-	l_source_pvs=$($g_LZFS get -Hpo property,value,source all "$l_source" |
-		tr "\t" "=" | tr "\n" ",")
-	l_source_pvs=${l_source_pvs%,}
-	l_source_human_pvs=$($g_LZFS get -Ho property,value,source all "$l_source" |
-		tr "\t" "=" | tr "\n" ",")
-	l_source_human_pvs=${l_source_human_pvs%,}
-
-	# Check if the source is a zvol, which requires some special handling
 	l_source_dstype=$($g_LZFS get -Hpo value type "$l_source")
 	l_source_volsize=$($g_LZFS get -Hpo value volsize "$l_source")
 
-	# Some localizations (German, French) use a comma as a decimal separator which
-	# changes the interpretation of the value on machines with a different
-	# localization.  Some OSes (OS X) use odd units (Ki) instead of K, and the
-	# values cannot be interpreted properly on other localizations
-	# Resolve this issue by passing -p which generates 'script parsable' output
-	# However, some properties have a value of 'none', that in -p ends up having
-	# a different value (filesystem_count=18446744073709551615)
-	# clean these up by comparing the two outputs and making the right decision
-	resolve_human_vars "$l_source_pvs" "$l_source_human_pvs"
-	l_source_pvs="$human_results"
-
-	# add to the details to allow backup of properties
-	if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
-		g_backup_file_contents="$g_backup_file_contents;\
-$l_source,$g_actual_dest,$l_source_pvs"
-	fi
-
-	# If we are restoring properties, then get l_source_pvs from the backup file
-	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
-		# Escape the dataset so grep does not treat dots or other chars as regex.
-		l_source_regex=$(printf '%s\n' "$l_source" | sed 's/[].[^$\\*]/\\&/g')
-		l_source_pvs=$(echo "$g_restored_backup_file_contents" | grep "^[^,]*,$l_source_regex," |
-			sed -e 's/^[^,]*,[^,]*,//g')
-		if [ "$l_source_pvs" = "" ]; then
-			throw_usage_error "Can't find the properties for the filesystem $l_source"
-		fi
-	fi
-
-	# Just using g_option_o_override_property_pv so that we can modify it
 	g_option_o_override_property_pv=$g_option_o_override_property
 
-	# Now to ensure writable, if that is set.
 	if [ "$g_ensure_writable" -eq 1 ]; then
-		# make sure that the g_option_o_override_property_pv includes only readonly=off
-		g_option_o_override_property_pv=$(echo "$g_option_o_override_property_pv" | sed -e 's/readonly=on/readonly=off/g')
-
-		# make sure that the l_source_pvs includes only readonly=off
-		l_source_pvs=$(echo "$l_source_pvs" | sed -e 's/readonly=on/readonly=off/g')
+		g_option_o_override_property_pv=$(force_readonly_off "$g_option_o_override_property_pv")
 	fi
 
-	valid_option_property=0
-	#change the field separator to a ","
-	OLDIFS=$IFS
-	IFS=","
-
-	# Test to see if each -o property is valid; leave value testing to zfs.
-	# Note that this only needs to be done once and this is a good place.
-	if [ "$initial_source" = "$l_source" ]; then
-		for op_line in $g_option_o_override_property_pv; do
-			op_property=$(echo "$op_line" | cut -f1 -d=)
-			for sp_line in $l_source_pvs; do
-				sp_property=$(echo "$sp_line" | cut -f1 -d=)
-				if [ "$op_property" = "$sp_property" ]; then
-					valid_option_property=1
-					break # break out of the loop, we found what we wanted
-				fi
-			done
-			if [ $valid_option_property -eq 0 ]; then
-				throw_usage_error "Invalid option property - check -o list for syntax errors."
-			else
-				valid_option_property=0
-			fi
-		done
+	if [ $l_is_initial_source -eq 1 ]; then
+		validate_override_properties "$g_option_o_override_property_pv" "$l_source_pvs"
 	fi
 
-	# Create the override_pvs list and creation_pvs list.
-	# creation_pvs will be used in the instance where we need to create the
-	# destination. override_pvs will be used in the instance where we need
-	# to set/inherit destination properties.
-	override_pvs=""
-	creation_pvs=""
-	# note that if this function is executed, either option P or o must
-	# have been invoked
-	if [ "$g_option_P_transfer_property" -eq 0 ]; then # i.e. option o contains something
-		for op_line in $g_option_o_override_property_pv; do
-			op_property=$(echo "$op_line" | cut -f1 -d=)
-			op_value=$(echo "$op_line" | cut -f2 -d=)
-			override_property=$op_property
-			override_value=$op_value
-			override_source="override"
-			override_pvs="$override_pvs$override_property=$override_value=$override_source,"
-		done
-	else
-		# Get a list of properties and values to override the destination's.
-		# Note that the overrides need to be removed from the creation list as
-		# they will be auto-inherited from the initial source. Note also that
-		# only "local" options need to be specified in the creation list, as
-		# all others will be auto-inherited.
-		#
-		for sp_line in $l_source_pvs; do
-			override_property=$(echo "$sp_line" | cut -f1 -d=)
-			override_value=$(echo "$sp_line" | cut -f2 -d=)
-			override_source=$(echo "$sp_line" | cut -f3 -d=)
-			creation_property=$override_property
-			creation_value=$override_value
-			creation_source=$override_source
-			for op_line in $g_option_o_override_property_pv; do
-				op_property=$(echo "$op_line" | cut -f1 -d=)
-				op_value=$(echo "$op_line" | cut -f2 -d=)
-				if [ "$op_property" = "$override_property" ]; then
-					override_property=$op_property
-					override_value=$op_value
-					override_source="override"
-					creation_property="NULL"
-					break # break out of the loop, we found what we wanted
-				fi
-			done
-			override_pvs="$override_pvs$override_property=$override_value=$override_source,"
-			if [ "$creation_property" != "NULL" ] && [ "$creation_source" = "local" ]; then
-				creation_pvs="$creation_pvs$creation_property=$creation_value=$creation_source,"
-			elif [ "$l_source_dstype" = "volume" ] && [ "$creation_property" = "refreservation" ]; then
-				creation_pvs="$creation_pvs$creation_property=$creation_value=$creation_source,"
-			fi
-		done
-	fi
-
-	# Remove several properties not supported on FreeBSD.
 	if [ "$g_destination_operating_system" = "FreeBSD" ]; then
 		g_readonly_properties="$g_readonly_properties,$g_fbsd_readonly_properties"
 	fi
-
-	# Remove several properties not supported on Solaris Express.
 	if [ "$g_destination_operating_system" = "SunOS" ] && [ "$g_source_operating_system" = "FreeBSD" ]; then
 		g_readonly_properties="$g_readonly_properties,$g_solexp_readonly_properties"
 	fi
 
-	# Remove the readonly properties and values.
-	remove_properties "$override_pvs" "$g_readonly_properties"
-	# Remove the properties the user has asked us to ignore
-	if [ -n "$g_option_I_ignore_properties" ]; then
-		remove_properties "$m_new_rmv_pvs" "$g_option_I_ignore_properties"
-	fi
-	override_pvs="$m_new_rmv_pvs"
+	{
+		IFS= read -r override_pvs
+		IFS= read -r creation_pvs
+	} <<EOF
+$(derive_override_lists "$l_source_pvs" "$g_option_o_override_property_pv" "$g_option_P_transfer_property" "$l_source_dstype")
+EOF
 
-	# Remove any properties that are not supported by the destination
-	if [ -n "$unsupported_properties" ]; then
-		remove_unsupported_properties "$override_pvs"
-		override_pvs="$m_only_supported_properties"
-	fi
+	override_pvs=$(sanitize_property_list "$override_pvs" "$g_readonly_properties" "$g_option_I_ignore_properties")
+	override_pvs=$(strip_unsupported_properties "$override_pvs" "$unsupported_properties")
 
-	# shellcheck disable=SC2154
-	# Escape dataset name so regex anchors match exact dataset only.
 	dest_regex=$(printf '%s\n' "$g_actual_dest" | sed 's/[].[^$\\*]/\\&/g')
-	# shellcheck disable=SC2154
-	# Populated by zxfer_get_zfs_list.sh before property handling.
 	dest_exist=$(printf '%s\n' "$g_recursive_dest_list" | grep -c "^$dest_regex$")
 
-	# This is where we actually create or modify the destination filesystem.
-	# Is the destination absent? If so, just create with correct option list.
-	if [ "$dest_exist" = "0" ]; then
-		if [ "$initial_source" = "$l_source" ]; then
-			# as this is the initial source, we want to transfer all properties from
-			# the source, overridden with g_option_o_override_property values as necessary
-			remove_sources "$override_pvs"
-
-			# If not, create it with the override list and be done with it -
-			# we have now transferred all properties
-			echov "Creating destination filesystem \"$g_actual_dest\" \
-with specified properties."
-
-			# revert to old field separator
-			# (This and reversion back is so that $g_RZFS command works with -r)
-			IFS=$OLDIFS
-
-			if ! run_zfs_create_with_properties "no" "$l_source_dstype" "$l_source_volsize" "$m_new_rmvs_pv" "$g_actual_dest"; then
-				throw_error "Error when creating destination filesystem."
-			fi
-
-			#change the field separator to a ","
-			OLDIFS=$IFS
-			IFS=","
-
-		else
-			# for non-initial source, all the overrides will be inherited, hence
-			# create with creation_pvs list
-			remove_properties "$creation_pvs" "$g_readonly_properties"
-			# Remove the properties the user has asked us to ignore
-			if [ -n "$g_option_I_ignore_properties" ]; then
-				remove_properties "$m_new_rmv_pvs" "$g_option_I_ignore_properties"
-			fi
-			creation_pvs="$m_new_rmv_pvs"
-
-			remove_sources "$creation_pvs"
-
-			# revert to old field separator
-			# (This and reversion back is so that $g_RZFS command works with -r)
-			IFS=$OLDIFS
-
-			echov "Creating destination filesystem \"$g_actual_dest\" \
-with specified properties."
-			if ! run_zfs_create_with_properties "yes" "$l_source_dstype" "$l_source_volsize" "$m_new_rmvs_pv" "$g_actual_dest"; then
-				throw_error "Error when creating destination filesystem."
-			fi
-
-			#change the field separator to a ","
-			OLDIFS=$IFS
-			IFS=","
-		fi
-	else # it does exist, need to create.
-
-		# For the child, we need to do:
-		# If the destination list does exist, we need to do the following:
-		# 1. Check that the "must create" properties are the same, otherwise exit.
-		# 2. Check that all the remaining values and sources are appropriate on the
-		#      destination, or are required to be set or inherited.
-
-		# For the initial source, we need to do:
-		# If the destination list does exist, we need to do the following:
-		# 1. Check that the "must create" properties are the same, otherwise exit.
-		# 2. Check that all the remaining values are the same, and that each source
-		#      is "local". This applies both to -P properties and -o properties
-		# 3. If either of those are different, we need to set them.
-
-		# revert to old field separator
-		# (This and reversion back is so that $g_RZFS command works with -r)
-		IFS=$OLDIFS
-
-		dest_pvs=$($g_RZFS get -Hpo property,value,source all "$g_actual_dest")
-		dest_human_pvs=$($g_RZFS get -Ho property,value,source all "$g_actual_dest")
-
-		#change the field separator to a ","
-		OLDIFS=$IFS
-		IFS=","
-
-		dest_pvs=$(echo "$dest_pvs" | tr -s "\t" "=" | tr -s "\n" ",")
-		dest_pvs=${dest_pvs%,}
-		dest_human_pvs=${dest_human_pvs%,}
-		resolve_human_vars "$dest_pvs" "$dest_human_pvs"
-		dest_pvs="$human_results"
-
-		# remove the readonly properties and values as we are not comparing to them
-		remove_properties "$dest_pvs" "$g_readonly_properties"
-		# Remove the properties the user has asked us to ignore
-		if [ -n "$g_option_I_ignore_properties" ]; then
-			remove_properties "$m_new_rmv_pvs" "$g_option_I_ignore_properties"
-		fi
-		dest_pvs="$m_new_rmv_pvs"
-
-		# Test to see if any of the four properties that must be specified at
-		# creation time differ from destination to the overrides, if so
-		# terminate with an error.
-
-		must_create_properties="casesensitivity,normalization,jailed,utf8only"
-
-		select_mc "$override_pvs" "$must_create_properties"
-		mc_override_pvs="$m_new_mc_pvs"
-
-		select_mc "$dest_pvs" "$must_create_properties"
-		mc_dest_pvs="$m_new_mc_pvs"
-
-		# this for loop tests for a "must create" property that we can't set
-		for ov_line in $mc_override_pvs; do
-			ov_property=$(echo "$ov_line" | cut -f1 -d=)
-			ov_value=$(echo "$ov_line" | cut -f2 -d=)
-			for dest_line in $mc_dest_pvs; do
-				found_dest=0
-				dest_property=$(echo "$dest_line" | cut -f1 -d=)
-				dest_value=$(echo "$dest_line" | cut -f2 -d=)
-				for l_mc_property in $must_create_properties; do
-					if [ "$l_mc_property" = "$dest_property" ] && [ "$l_mc_property" = "$ov_property" ]; then
-						if [ "$ov_value" != "$dest_value" ]; then
-							echo "Error: The property \"$dest_property\" may only be set"
-							echo "       at filesystem creation time. To modify this property"
-							echo "       you will need to first destroy target filesystem."
-							usage
-							beep
-							exit 1
-						fi
-						# we've matched the must create property, remove it.
-						must_create_properties=$(echo "$must_create_properties" | tr -s "," "\n")
-						must_create_properties=$(echo "$must_create_properties" | grep -v ^"$l_mc_property"$ | tr -s "\n" ",")
-						found_dest=1
-						break # break out of the loop, we found what we wanted
-					fi
-				done
-				if [ $found_dest -eq 1 ]; then
-					break
-				fi
-			done
-		done
-
-		# At this stage, the "must create" properties are fine.
-		# Now we need to compare destination values and sources for each
-		# property from the $override_pv list. If the destination's source field
-		# is not "local" and the value field from both source and destination
-		# do not match, we will need to set the destination property.
-		#
-
-		# remove the "must create" properties from the $override_pvs list
-		must_create_properties="casesensitivity,normalization,jailed,utf8only"
-		remove_properties "$override_pvs" "$must_create_properties"
-		override_pvs="$m_new_rmv_pvs"
-
-		remove_properties "$dest_pvs" "$must_create_properties,$g_readonly_properties"
-		# Remove the properties the user has asked us to ignore
-		if [ -n "$g_option_I_ignore_properties" ]; then
-			remove_properties "$m_new_rmv_pvs" "$g_option_I_ignore_properties"
-		fi
-
-		dest_pvs="$m_new_rmv_pvs"
-
-		# zfs set takes a long time; let's only set the properties we need to set
-		# or inherit the properties we need to inherit
-
-		# changes begin here
-
-		ov_initsrc_set_list="" # for initial source only
-		ov_set_list=""         # for child sources
-		ov_inherit_list=""     # for child sources
-		for ov_line in $override_pvs; do
-			ov_property=$(echo "$ov_line" | cut -f1 -d=)
-			ov_value=$(echo "$ov_line" | cut -f2 -d=)
-			ov_source=$(echo "$ov_line" | cut -f3 -d=)
-			for dest_line in $dest_pvs; do
-				dest_property=$(echo "$dest_line" | cut -f1 -d=)
-				dest_value=$(echo "$dest_line" | cut -f2 -d=)
-				dest_source=$(echo "$dest_line" | cut -f3 -d=)
-				if [ "$ov_property" = "$dest_property" ]; then
-					if [ "$dest_value" != "$ov_value" ] || [ "$dest_source" != "local" ]; then
-						ov_initsrc_set_list="$ov_initsrc_set_list$ov_property=$ov_value,"
-					fi
-					# Now we decide whether to leave, set, or inherit on the destination
-					if [ "$ov_value" != "$dest_value" ]; then
-						# value needs to be set or inherited, which one?
-						if [ "$ov_source" = "local" ]; then
-							#value needs to be set
-							ov_set_list="$ov_set_list$ov_property=$ov_value,"
-						else
-							# source is not local and value needs to be force inherited
-							ov_inherit_list="$ov_inherit_list$ov_property=$ov_value,"
-						fi
-					# at this stage, the src and dest values are the same, just need
-					# to figure out whether to set or inherit
-					elif [ "$ov_source" = "local" ] && [ "$dest_source" != "local" ]; then
-						# value needs to be set
-						ov_set_list="$ov_set_list$ov_property=$ov_value,"
-					elif [ "$ov_source" != "local" ] && [ "$dest_source" = "local" ]; then
-						# need to force inherit
-						ov_inherit_list="$ov_inherit_list$ov_property=$ov_value,"
-					fi
-				fi
-				# we've matched the dest_line, remove it.
-				dest_pvs=$(echo "$dest_pvs" | tr -s "," "\n" | grep -v ^"$dest_line"$)
-				dest_pvs=$(echo "$dest_pvs" | tr -s "\n" ",")
-				break
-			done
-		done
-
-		# remove commas from end of line
-		ov_initsrc_set_list=${ov_initsrc_set_list%,}
-		ov_set_list=${ov_set_list%,}
-		ov_inherit_list=${ov_inherit_list%,}
-
-		# Now we have a list of only changes to make using zfs set.
-		# Let's make the changes.
-
-		# First notify the user
-		if [ "$ov_set_list" != "" ] ||
-			[ "$ov_inherit_list" != "" ] ||
-			[ "$ov_initsrc_set_list" != "" ]; then
-			echov "Setting properties/sources on destination filesystem \"$g_actual_dest\"."
-		fi
-
-		if [ "$initial_source" = "$l_source" ]; then
-			ov_set_list="$ov_initsrc_set_list"
-		fi
-
-		# set properties that need setting
-		for ov_line in $ov_set_list; do
-			ov_property=$(echo "$ov_line" | cut -f1 -d=)
-			ov_value=$(echo "$ov_line" | cut -f2 -d=)
-			ov_property_safe=$(escape_for_double_quotes "$ov_property")
-			ov_value_safe=$(escape_for_double_quotes "$ov_value")
-
-			# revert to old field separator
-			# (This and reversion back is so that $g_RZFS command works with -r)
-			IFS=$OLDIFS
-
-			if [ "$g_option_n_dryrun" -eq 0 ]; then
-				$g_RZFS set "${ov_property_safe}=${ov_value_safe}" "$g_actual_dest" ||
-					throw_error "Error when setting properties on destination filesystem."
-			else
-				echo "$g_RZFS set ${ov_property_safe}=${ov_value_safe} $g_actual_dest"
-			fi
-
-			#change the field separator to a ","
-			OLDIFS=$IFS
-			IFS=","
-
-		done
-
-		if [ "$initial_source" != "$l_source" ]; then
-			# Now we have a list of only changes to make using zfs inherit.
-			# Let's make the changes.
-			for ov_line in $ov_inherit_list; do
-				ov_property=$(echo "$ov_line" | cut -f1 -d=)
-				ov_value=$(echo "$ov_line" | cut -f2 -d=)
-				ov_property_safe=$(escape_for_double_quotes "$ov_property")
-
-				# revert to old field separator
-				# (This and reversion back is so that $g_RZFS command works with -r)
-				IFS=$OLDIFS
-
-				if [ "$g_option_n_dryrun" -eq 0 ]; then
-					$g_RZFS inherit "$ov_property_safe" "$g_actual_dest" ||
-						throw_error "Error when inheriting properties on destination filesystem."
-				else
-					echo "$g_RZFS inherit $ov_property_safe $g_actual_dest"
-				fi
-
-				#change the field separator to a ","
-				OLDIFS=$IFS
-				IFS=","
-
-			done
-		fi
+	if ensure_destination_exists "$dest_exist" "$l_is_initial_source" "$override_pvs" "$creation_pvs" "$l_source_dstype" "$l_source_volsize" "$g_actual_dest" ""; then
+		return
 	fi
 
-	# revert to old field separator
-	IFS=$OLDIFS
+	dest_pvs=$(collect_destination_props "$g_actual_dest" "$g_RZFS")
+	dest_pvs=$(sanitize_property_list "$dest_pvs" "$g_readonly_properties" "$g_option_I_ignore_properties")
+
+	must_create_properties="casesensitivity,normalization,jailed,utf8only"
+	{
+		IFS= read -r ov_initsrc_set_list
+		IFS= read -r ov_set_list
+		IFS= read -r ov_inherit_list
+	} <<EOF
+$(diff_properties "$override_pvs" "$dest_pvs" "$must_create_properties")
+EOF
+
+	apply_property_changes "$g_actual_dest" "$l_is_initial_source" "$ov_initsrc_set_list" "$ov_set_list" "$ov_inherit_list" "" ""
 }
