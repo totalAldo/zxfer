@@ -170,17 +170,22 @@ escape_for_single_quotes() {
 	printf '%s' "$1" | sed "s/'/'\"'\"'/g"
 }
 
-# Split a user-supplied -O/-T host spec into tokens without invoking the shell
-# parser so whitespace-separated ssh arguments (like "user@host pfexec") are
-# preserved verbatim and characters such as ';' cannot escape into new commands.
-split_host_spec_tokens() {
-	l_host_spec=$1
-	if [ "$l_host_spec" = "" ]; then
+# Split whitespace-delimited arguments into separate lines without invoking the
+# shell parser. This intentionally ignores quoting so callers must escape
+# metacharacters themselves, preventing shell injection attacks.
+split_tokens_on_whitespace() {
+	l_input=$1
+	if [ "$l_input" = "" ]; then
 		return
 	fi
 
+	# Ensure shell metacharacters such as ';', '|', and '&' break tokens even
+	# when users omit the following whitespace, so injected commands remain
+	# literal arguments instead of spawning new pipelines.
+	l_normalized_input=$(printf '%s' "$l_input" | sed 's/[;|&]/& /g')
+
 	l_awk_cmd=${g_cmd_awk:-$(command -v awk 2>/dev/null || echo awk)}
-	printf '%s\n' "$l_host_spec" | "$l_awk_cmd" '
+	printf '%s\n' "$l_normalized_input" | "$l_awk_cmd" '
 	{
 		for (i = 1; i <= NF; i++) {
 			print $i
@@ -188,16 +193,19 @@ split_host_spec_tokens() {
 	}'
 }
 
-# Quote a host spec for safe reinsertion into eval'd strings by wrapping each
-# token in single quotes. This keeps multi-word ssh arguments working while
-# preventing the shell from interpreting metacharacters provided by the user.
-quote_host_spec_tokens() {
-	l_host_spec=$1
-	if [ "$l_host_spec" = "" ]; then
-		return
-	fi
+# Split a user-supplied -O/-T host spec into tokens without invoking the shell
+# parser so whitespace-separated ssh arguments (like "user@host pfexec") are
+# preserved verbatim and characters such as ';' cannot escape into new commands.
+split_host_spec_tokens() {
+	split_tokens_on_whitespace "$1"
+}
 
-	l_tokens=$(split_host_spec_tokens "$l_host_spec")
+split_cli_tokens() {
+	split_tokens_on_whitespace "$1"
+}
+
+quote_token_stream() {
+	l_tokens=$1
 	if [ "$l_tokens" = "" ]; then
 		return
 	fi
@@ -215,6 +223,37 @@ quote_host_spec_tokens() {
 $l_tokens
 EOF
 	printf '%s' "$l_output"
+}
+
+# Quote a host spec for safe reinsertion into eval'd strings by wrapping each
+# token in single quotes. This keeps multi-word ssh arguments working while
+# preventing the shell from interpreting metacharacters provided by the user.
+quote_host_spec_tokens() {
+	l_host_spec=$1
+	if [ "$l_host_spec" = "" ]; then
+		return
+	fi
+
+	l_tokens=$(split_host_spec_tokens "$l_host_spec")
+	if [ "$l_tokens" = "" ]; then
+		return
+	fi
+
+	quote_token_stream "$l_tokens"
+}
+
+quote_cli_tokens() {
+	l_cli_string=$1
+	if [ "$l_cli_string" = "" ]; then
+		return
+	fi
+
+	l_tokens=$(split_cli_tokens "$l_cli_string")
+	if [ "$l_tokens" = "" ]; then
+		return
+	fi
+
+	quote_token_stream "$l_tokens"
 }
 
 # Remove trailing slash characters from dataset-like arguments while leaving

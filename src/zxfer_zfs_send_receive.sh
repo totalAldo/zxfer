@@ -199,11 +199,14 @@ wrap_command_with_ssh() {
 	if [ "$l_is_compress" -eq 0 ]; then
 		echo "$l_ssh_prefix \"$l_cmd\""
 	else
+		if [ "$g_cmd_compress_safe" = "" ] || [ "$g_cmd_decompress_safe" = "" ]; then
+			throw_error "Compression enabled but commands are not configured safely."
+		fi
 		# when compression is enabled, send and receive are wrapped differently
 		if [ "$l_direction" = "send" ]; then
-			echo "$l_ssh_prefix \"$l_cmd | $g_cmd_compress\" | $g_cmd_decompress"
+			echo "$l_ssh_prefix \"$l_cmd | $g_cmd_compress_safe\" | $g_cmd_decompress_safe"
 		else
-			echo "$g_cmd_compress | $l_ssh_prefix \"$g_cmd_decompress | $l_cmd\""
+			echo "$g_cmd_compress_safe | $l_ssh_prefix \"$g_cmd_decompress_safe | $l_cmd\""
 		fi
 	fi
 }
