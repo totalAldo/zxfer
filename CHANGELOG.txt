@@ -2,6 +2,7 @@ CHANGELOG
 =========
 
 2025.11.18
+-Fix ssh control socket initialization to create temp directories with mktemp-compatible templates (suffix `XXXXXX`) so Linux and GNU coreutils builds no longer abort zxfer or the shunit2 probe when -O/-T opens a control socket.
 -Add `tests/run_shunit_tests.sh` to execute every shunit2 suite (or a specific subset) from one command so contributors can easily exercise helpers like `test_zxfer_zfs_mode.sh` without remembering individual scripts.
 -Expand `tests/test_zxfer_zfs_mode.sh` coverage for `set_actual_dest()`, `refresh_dataset_iteration_state()`, grandfather protection, and the `-Y` run loop so option parsing and migration orchestration stay regression-tested.
 -Refactor snapshot listing orchestration (`write_source_snapshot_list_to_file()`, `write_destination_snapshot_list_to_files()`, `set_g_recursive_source_list()`) into data-flow helpers that build the source command string, normalize destination prefixes, and diff sorted lists so background jobs no longer embed inline eval plumbing, enabling shunit2 coverage of ssh/parallel/compression permutations without touching live ZFS.
