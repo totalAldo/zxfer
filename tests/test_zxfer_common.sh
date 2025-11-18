@@ -25,10 +25,52 @@ create_fake_ssh_bin() {
 	# line.
 	cat >"$FAKE_SSH_BIN" <<'EOF'
 #!/bin/sh
+if [ -n "${FAKE_SSH_LOG:-}" ]; then
+	printf '%s\n' "$@" >>"$FAKE_SSH_LOG"
+fi
+if [ -n "${FAKE_SSH_STDOUT_OVERRIDE:-}" ]; then
+	printf '%s\n' "$FAKE_SSH_STDOUT_OVERRIDE"
+	exit "${FAKE_SSH_EXIT_STATUS:-0}"
+fi
+if [ "${FAKE_SSH_SUPPRESS_STDOUT:-0}" = "1" ]; then
+	exit "${FAKE_SSH_EXIT_STATUS:-0}"
+fi
 printf '%s\n' "$0"
 printf '%s\n' "$@"
+exit "${FAKE_SSH_EXIT_STATUS:-0}"
 EOF
 	chmod +x "$FAKE_SSH_BIN"
+}
+
+create_passthrough_zstd() {
+	l_path=$1
+	cat >"$l_path" <<'EOF'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--) shift
+		break
+		;;
+	-*) shift
+		;;
+	*) break
+		;;
+	esac
+done
+cat
+EOF
+	chmod +x "$l_path"
+}
+
+# Some macOS sandboxes report sysconf(_SC_ARG_MAX) failures when invoking
+# /usr/bin/xargs without arguments. Provide a shell stub for the shunit2 lookup
+# that mirrors the behavior needed by _shunit_extractTestFunctions().
+xargs() {
+	if command [ "$#" -eq 0 ]; then
+		tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//'
+	else
+		command xargs "$@"
+	fi
 }
 
 oneTimeSetUp() {
@@ -53,6 +95,10 @@ setUp() {
 	if [ -n "${TEST_TMPDIR:-}" ]; then
 		rm -rf "${TEST_TMPDIR:?}/"*
 	fi
+	unset FAKE_SSH_LOG
+	unset FAKE_SSH_STDOUT_OVERRIDE
+	unset FAKE_SSH_SUPPRESS_STDOUT
+	unset FAKE_SSH_EXIT_STATUS
 	create_fake_ssh_bin
 }
 
@@ -608,7 +654,12 @@ test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
 	assertContains "GNU parallel invocation should include the job count." "$result" "\"/usr/local/bin/parallel\" -j 4 --line-buffer"
 	l_expected_parallel_cmd=$(escape_for_double_quotes "$g_LZFS list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
 	l_expected_runner="sh -c \\\"$l_expected_parallel_cmd\\\" sh"
-	assertContains "Parallel runner should execute the per-dataset command." "$result" "$l_expected_runner"
+	case "$result" in
+	*"$l_expected_runner"*) ;;
+	*)
+		fail "Parallel runner should execute the per-dataset command."
+		;;
+	esac
 }
 
 test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() {
@@ -628,7 +679,99 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 	assertContains "Remote listing should start with ssh." "$result" "$g_cmd_ssh"
 	assertContains "Host spec tokens should be quoted for ssh." "$result" "'backup@example.com' 'pfexec' '-p' '2222'"
 	assertContains "Remote GNU parallel path should be used." "$result" "\"/opt/bin/parallel\" -j 8 --line-buffer"
-	assertContains "Compression should be applied when requested." "$result" "| zstd -9\" | zstd -d"
+	assertContains "Compression should be applied when requested." "$result" "| zstd -9' | zstd -d"
+}
+
+test_ensure_parallel_remote_fetches_remote_parallel_path() {
+	g_option_j_jobs=4
+	g_cmd_parallel="/usr/local/bin/parallel"
+	g_option_O_origin_host="aldo@172.16.0.4"
+	g_option_O_origin_host_safe=""
+	g_origin_parallel_cmd=""
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_ssh_origin_control_socket=""
+	g_ssh_origin_control_socket_dir=""
+
+	FAKE_SSH_SUPPRESS_STDOUT=1 setup_ssh_control_socket "$g_option_O_origin_host" "origin"
+	unset FAKE_SSH_SUPPRESS_STDOUT
+
+	remote_log="$TEST_TMPDIR/remote_parallel_probe.log"
+	: >"$remote_log"
+	FAKE_SSH_LOG="$remote_log"
+	FAKE_SSH_STDOUT_OVERRIDE="/opt/bin/parallel"
+	FAKE_SSH_SUPPRESS_STDOUT=1
+	export FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE FAKE_SSH_SUPPRESS_STDOUT
+
+	ensure_parallel_available_for_source_jobs
+
+	unset FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE FAKE_SSH_SUPPRESS_STDOUT
+
+	assertEquals "Remote GNU parallel path should be detected via ssh." "/opt/bin/parallel" "$g_origin_parallel_cmd"
+	{
+		IFS= read -r log_line1
+		IFS= read -r log_line2
+		IFS= read -r log_line3
+		IFS= read -r log_line4
+	} <"$remote_log"
+
+	assertEquals "ssh should reuse the established control socket." "-S" "$log_line1"
+	assertEquals "SSH must pass the control socket path as the next argument." "$g_ssh_origin_control_socket" "$log_line2"
+	assertEquals "ssh should direct probes at the origin host." "$g_option_O_origin_host" "$log_line3"
+	assertEquals "Remote probe command should remain a single token." "command -v parallel" "$log_line4"
+}
+
+test_remote_snapshot_listing_pipeline_handles_cli_flow() {
+	g_option_j_jobs=4
+	g_option_z_compress=1
+	g_cmd_parallel="/usr/local/bin/parallel"
+	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_cmd_zfs="/usr/sbin/zfs"
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_O_origin_host="aldo@172.16.0.4"
+	g_option_O_origin_host_safe=""
+	initial_source="zroot"
+
+	FAKE_SSH_SUPPRESS_STDOUT=1 setup_ssh_control_socket "$g_option_O_origin_host" "origin"
+	unset FAKE_SSH_SUPPRESS_STDOUT
+
+	l_cmd=$(build_source_snapshot_list_cmd)
+
+	remote_log="$TEST_TMPDIR/remote_snapshot_list.log"
+	: >"$remote_log"
+	FAKE_SSH_LOG="$remote_log"
+	FAKE_SSH_STDOUT_OVERRIDE="payload"
+	FAKE_SSH_SUPPRESS_STDOUT=1
+	export FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE FAKE_SSH_SUPPRESS_STDOUT
+
+	fake_zstd="$TEST_TMPDIR/zstd"
+	create_passthrough_zstd "$fake_zstd"
+	old_path=$PATH
+	PATH="$(dirname "$fake_zstd"):$PATH"
+
+	eval "$l_cmd" >"$TEST_TMPDIR/source_snapshot_list.log"
+	status=$?
+
+	PATH=$old_path
+	unset FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE FAKE_SSH_SUPPRESS_STDOUT
+	rm -f "$fake_zstd"
+
+	assertEquals "Remote snapshot listing pipeline should execute without syntax errors." 0 "$status"
+	assertEquals "payload" "$(cat "$TEST_TMPDIR/source_snapshot_list.log")"
+
+	{
+		IFS= read -r log_line1
+		IFS= read -r log_line2
+		IFS= read -r log_line3
+		IFS= read -r log_line4
+	} <"$remote_log"
+
+	assertEquals "ssh should reuse the established control socket." "-S" "$log_line1"
+	assertEquals "SSH must pass the control socket path as the next argument." "$g_ssh_origin_control_socket" "$log_line2"
+	assertEquals "ssh should connect to the requested origin host." "$g_option_O_origin_host" "$log_line3"
+	assertContains "Remote command should include the dataset listing pipeline." "$log_line4" '/usr/sbin/zfs list -Hr -o name zroot | "/opt/bin/parallel" -j 4 --line-buffer'
+	assertContains "Remote command should invoke the per-dataset runner." "$log_line4" 'sh -c \"'
+	assertContains "Remote command should preserve the \\$1 placeholder." "$log_line4" "\"\\$1\""
+	assertContains "Compression pipeline should be preserved in the remote command." "$log_line4" "| zstd -9"
 }
 
 test_normalize_destination_snapshot_list_maps_destination_prefix_to_source() {

@@ -96,10 +96,14 @@ build_source_snapshot_list_cmd() {
 			l_origin_host_args=$(quote_host_spec_tokens "$g_option_O_origin_host")
 		fi
 
+		l_remote_pipeline="$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {}"
 		if [ "$g_option_z_compress" -eq 1 ]; then
-			l_cmd="$l_origin_ssh_cmd $l_origin_host_args \"$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {} | zstd -9\" | zstd -d"
-		else
-			l_cmd="$l_origin_ssh_cmd $l_origin_host_args \"$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {}\""
+			l_remote_pipeline="$l_remote_pipeline | zstd -9"
+		fi
+		l_remote_pipeline_quoted=$(escape_for_single_quotes "$l_remote_pipeline")
+		l_cmd="$l_origin_ssh_cmd $l_origin_host_args '$l_remote_pipeline_quoted'"
+		if [ "$g_option_z_compress" -eq 1 ]; then
+			l_cmd="$l_cmd | zstd -d"
 		fi
 		printf '%s\n' "$l_cmd"
 		return
