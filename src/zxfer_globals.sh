@@ -293,7 +293,7 @@ setup_ssh_control_socket() {
 	[ -z "$l_host" ] && return
 
 	l_timestamp=$(date +%s)
-	if ! l_control_dir=$(mktemp -d -t "zxfer_ssh_control_socket.${l_role}.$l_timestamp"); then
+	if ! l_control_dir=$(mktemp -d -t "zxfer_ssh_control_socket.${l_role}.$l_timestamp.XXXXXX"); then
 		throw_error "Error creating temporary directory for ssh control socket."
 	fi
 	l_control_socket="$l_control_dir/socket"
