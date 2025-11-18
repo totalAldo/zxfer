@@ -131,7 +131,9 @@ zxfer_apply_secure_path
 # initialization logic runs.
 if [ -z "${g_cmd_awk:-}" ]; then
 	g_cmd_awk=$(command -v awk 2>/dev/null || :)
-	[ -n "$g_cmd_awk" ] || g_cmd_awk=awk
+	if [ -z "$g_cmd_awk" ]; then
+		g_cmd_awk='awk'
+	fi
 fi
 
 init_globals() {
@@ -794,6 +796,8 @@ get_path_owner_uid() {
 	fi
 
 	if l_ls_output=$(ls -ldn -- "$l_path" 2>/dev/null); then
+		# shellcheck disable=SC2016
+		# awk needs literal $3.
 		l_uid=$(printf '%s\n' "$l_ls_output" | ${g_cmd_awk:-awk} '{print $3}')
 		if [ "$l_uid" != "" ]; then
 			printf '%s\n' "$l_uid"
@@ -823,6 +827,8 @@ get_path_mode_octal() {
 	fi
 
 	if l_ls_output=$(ls -ldn -- "$l_path" 2>/dev/null); then
+		# shellcheck disable=SC2016
+		# awk needs literal $1.
 		l_perm_str=$(printf '%s\n' "$l_ls_output" | ${g_cmd_awk:-awk} '{print $1}')
 		if [ "$l_perm_str" = "-rw-------" ]; then
 			printf '600\n'
@@ -833,14 +839,53 @@ get_path_mode_octal() {
 	return 1
 }
 
+get_effective_user_uid() {
+	if command -v id >/dev/null 2>&1; then
+		if l_uid=$(id -u 2>/dev/null); then
+			printf '%s\n' "$l_uid"
+			return 0
+		fi
+	fi
+	return 1
+}
+
+backup_owner_uid_is_allowed() {
+	l_owner_uid=$1
+
+	if [ "$l_owner_uid" = "0" ]; then
+		return 0
+	fi
+
+	if l_effective_uid=$(get_effective_user_uid); then
+		if [ "$l_owner_uid" = "$l_effective_uid" ]; then
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+describe_expected_backup_owner() {
+	l_desc="root (UID 0)"
+
+	if l_effective_uid=$(get_effective_user_uid); then
+		if [ "$l_effective_uid" != "0" ]; then
+			l_desc="$l_desc or UID $l_effective_uid"
+		fi
+	fi
+
+	printf '%s\n' "$l_desc"
+}
+
 require_secure_backup_file() {
 	l_path=$1
 
 	if ! l_owner_uid=$(get_path_owner_uid "$l_path"); then
 		throw_error "Cannot determine the owner of backup metadata $l_path."
 	fi
-	if [ "$l_owner_uid" != "0" ]; then
-		throw_error "Refusing to use backup metadata $l_path because it is owned by UID $l_owner_uid instead of root."
+	if ! backup_owner_uid_is_allowed "$l_owner_uid"; then
+		l_expected_owner_desc=$(describe_expected_backup_owner)
+		throw_error "Refusing to use backup metadata $l_path because it is owned by UID $l_owner_uid instead of $l_expected_owner_desc."
 	fi
 	if ! l_mode=$(get_path_mode_octal "$l_path"); then
 		throw_error "Cannot determine the permissions for backup metadata $l_path."
@@ -870,8 +915,9 @@ ensure_local_backup_dir() {
 	if ! l_owner_uid=$(get_path_owner_uid "$l_dir"); then
 		throw_error "Cannot determine the owner of backup directory $l_dir."
 	fi
-	if [ "$l_owner_uid" != "0" ]; then
-		throw_error "Refusing to use backup directory $l_dir because it is owned by UID $l_owner_uid instead of root."
+	if ! backup_owner_uid_is_allowed "$l_owner_uid"; then
+		l_expected_owner_desc=$(describe_expected_backup_owner)
+		throw_error "Refusing to use backup directory $l_dir because it is owned by UID $l_owner_uid instead of $l_expected_owner_desc."
 	fi
 	if ! chmod 700 "$l_dir"; then
 		throw_error "Error securing backup directory $l_dir."

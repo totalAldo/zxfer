@@ -85,7 +85,8 @@
 
 #
 # Print out usage information
-#
+# shellcheck disable=SC2329
+# usage() is called indirectly via throw_usage_error() in src/zxfer_common.sh.
 usage() {
 	cat <<EOT
 usage:
@@ -141,7 +142,7 @@ consistency_check
 run_zfs_mode_loop
 
 # writes property backup info to file
-if [ $g_option_k_backup_property_mode -eq 1 ]; then
+if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
 	write_backup_properties
 fi
 

@@ -70,31 +70,19 @@ read_backup_file_with_mocked_security() {
 }
 
 test_zxfer_compute_secure_path_defaults_to_allowlist() {
-	result=$(
-		unset ZXFER_SECURE_PATH
-		unset ZXFER_SECURE_PATH_APPEND
-		zxfer_compute_secure_path
-	)
+	result=$(ZXFER_SECURE_PATH="" ZXFER_SECURE_PATH_APPEND="" zxfer_compute_secure_path)
 
 	assertEquals "Default secure PATH should only include trusted system directories." "$ZXFER_DEFAULT_SECURE_PATH" "$result"
 }
 
 test_zxfer_compute_secure_path_filters_relative_entries() {
-	result=$(
-		ZXFER_SECURE_PATH="./bin:/tmp/bin:relative:/usr/sbin"
-		unset ZXFER_SECURE_PATH_APPEND
-		zxfer_compute_secure_path
-	)
+	result=$(ZXFER_SECURE_PATH="./bin:/tmp/bin:relative:/usr/sbin" ZXFER_SECURE_PATH_APPEND="" zxfer_compute_secure_path)
 
 	assertEquals "Relative path segments must be dropped from the secure PATH." "/tmp/bin:/usr/sbin" "$result"
 }
 
 test_zxfer_compute_secure_path_appends_extra_entries() {
-	result=$(
-		ZXFER_SECURE_PATH="/sbin:/bin"
-		ZXFER_SECURE_PATH_APPEND=":/opt/zfs/bin:./malicious"
-		zxfer_compute_secure_path
-	)
+	result=$(ZXFER_SECURE_PATH="/sbin:/bin" ZXFER_SECURE_PATH_APPEND=":/opt/zfs/bin:./malicious" zxfer_compute_secure_path)
 
 	assertEquals "ZXFER_SECURE_PATH_APPEND should only add absolute directories to the allowlist." "/sbin:/bin:/opt/zfs/bin" "$result"
 }
@@ -476,8 +464,17 @@ test_read_local_backup_file_refuses_non_root_owned_metadata() {
 
 	assertEquals "Reading non-root metadata should exit with an error." 1 "$status"
 
+	expected_owner_desc="root (UID 0)"
+	if command -v id >/dev/null 2>&1; then
+		if current_uid=$(id -u 2>/dev/null); then
+			if [ "$current_uid" != "0" ]; then
+				expected_owner_desc="$expected_owner_desc or UID $current_uid"
+			fi
+		fi
+	fi
+
 	case "$output" in
-	*"Refusing to use backup metadata $backup_file because it is owned by UID 1234 instead of root."*) ;;
+	*"Refusing to use backup metadata $backup_file because it is owned by UID 1234 instead of $expected_owner_desc."*) ;;
 	*)
 		fail "read_local_backup_file did not report an insecure owner: $output"
 		;;

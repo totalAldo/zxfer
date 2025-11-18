@@ -185,6 +185,8 @@ split_tokens_on_whitespace() {
 	l_normalized_input=$(printf '%s' "$l_input" | sed 's/[;|&]/& /g')
 
 	l_awk_cmd=${g_cmd_awk:-$(command -v awk 2>/dev/null || echo awk)}
+	# shellcheck disable=SC2016
+	# $i references belong to awk, not the shell.
 	printf '%s\n' "$l_normalized_input" | "$l_awk_cmd" '
 	{
 		for (i = 1; i <= NF; i++) {
