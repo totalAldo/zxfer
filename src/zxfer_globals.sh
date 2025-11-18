@@ -624,7 +624,9 @@ init_variables() {
 			g_cmd_cat=$(zxfer_find_required_tool cat "cat")
 		else
 			l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-			g_cmd_cat=$($l_origin_ssh_cmd "$g_option_O_origin_host" "PATH=$g_zxfer_secure_path" command -v cat)
+			if ! g_cmd_cat=$(invoke_ssh_command_for_host "$l_origin_ssh_cmd" "$g_option_O_origin_host" "PATH=$g_zxfer_secure_path" command -v cat); then
+				throw_error "cat not found on origin host $g_option_O_origin_host."
+			fi
 			if [ "$g_cmd_cat" = "" ]; then
 				throw_error "cat not found on origin host $g_option_O_origin_host."
 			fi
@@ -892,7 +894,7 @@ ensure_remote_backup_dir() {
 	l_dir_single=$(escape_for_single_quotes "$l_dir")
 	l_remote_cmd="[ -L '$l_dir_single' ] && { echo 'Refusing to use symlinked zxfer backup directory.' >&2; exit 1; }; if [ -e '$l_dir_single' ] && [ ! -d '$l_dir_single' ]; then echo 'Backup path exists but is not a directory.' >&2; exit 1; fi; umask 077; if ! mkdir -p '$l_dir_single'; then echo 'Error creating secure backup directory.' >&2; exit 1; fi; if ! chmod 700 '$l_dir_single'; then echo 'Error securing backup directory.' >&2; exit 1; fi; l_expected_uid=\$(id -u); l_dir_uid=''; if l_dir_uid=\$(stat -f '%u' '$l_dir_single' 2>/dev/null); then :; elif l_dir_uid=\$(stat -c '%u' '$l_dir_single' 2>/dev/null); then :; else l_ls_line=\$(ls -ldn -- '$l_dir_single' 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_dir_uid=\$(printf '%s\n' \"\$l_ls_line\" | awk '{print \$3}'); fi; fi; if [ \"\$l_dir_uid\" = '' ]; then echo 'Unable to determine backup directory owner.' >&2; exit 1; fi; if [ \"\$l_dir_uid\" != 0 ] && [ \"\$l_dir_uid\" != \"\$l_expected_uid\" ]; then echo 'Backup directory must be owned by root or the ssh user.' >&2; exit 1; fi"
 	l_remote_cmd=$(escape_for_double_quotes "$l_remote_cmd")
-	if ! $l_target_ssh_cmd "$l_host" "$l_remote_cmd"; then
+	if ! invoke_ssh_command_for_host "$l_target_ssh_cmd" "$l_host" "$l_remote_cmd"; then
 		throw_error "Error preparing backup directory on $l_host."
 	fi
 }
@@ -965,7 +967,7 @@ if [ \"\$l_mode\" != '600' ]; then
 fi
 $g_cmd_cat '$l_path_single'
 ")
-	$l_origin_ssh_cmd "$l_host" "$l_remote_secure_cat_cmd"
+	invoke_ssh_command_for_host "$l_origin_ssh_cmd" "$l_host" "$l_remote_secure_cat_cmd"
 	l_remote_status=$?
 	if [ $l_remote_status -eq $l_remote_insecure_owner_status ]; then
 		throw_error "Refusing to use backup metadata $l_path on $l_host because it is not owned by root."
@@ -1090,8 +1092,9 @@ write_backup_properties() {
 			ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host"
 			ensure_remote_backup_dir "$l_backup_file_dir" "$g_option_T_target_host"
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
+			l_remote_write_cmd=$(escape_for_double_quotes "umask 077; cat > \"$l_backup_file_path\"")
 			if ! printf '%s' "$g_backup_file_contents" | tr ";" "\n" |
-				$l_target_ssh_cmd "$g_option_T_target_host" "$(escape_for_double_quotes "umask 077; cat > \"$l_backup_file_path\"")"; then
+				invoke_ssh_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_write_cmd"; then
 				throw_error "Error writing backup file. Is filesystem mounted?"
 			fi
 		fi
@@ -1101,7 +1104,11 @@ write_backup_properties() {
 			printf '%s\n' "umask 077; printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" > \"$l_backup_file_path\""
 		else
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-			printf '%s\n' "printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" | $l_target_ssh_cmd \"$g_option_T_target_host\" \"umask 077; cat > \\\"$l_backup_file_path\\\"\""
+			l_target_host_args=$(quote_host_spec_tokens "$g_option_T_target_host")
+			if [ "$l_target_host_args" != "" ]; then
+				l_target_host_args=" $l_target_host_args"
+			fi
+			printf '%s\n' "printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" | $l_target_ssh_cmd$l_target_host_args \"umask 077; cat > \\\"$l_backup_file_path\\\"\""
 		fi
 	fi
 }
