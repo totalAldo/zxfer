@@ -15,6 +15,9 @@
 # shellcheck source=src/zxfer_transfer_properties.sh
 . "$ZXFER_ROOT/src/zxfer_transfer_properties.sh"
 
+# shellcheck source=src/zxfer_get_zfs_list.sh
+. "$ZXFER_ROOT/src/zxfer_get_zfs_list.sh"
+
 create_fake_ssh_bin() {
 	# Re-create the fake ssh helper after each cleanup so setUp() can freely
 	# truncate the temp directory without leaving a stale interpreter. The helper
@@ -578,6 +581,111 @@ test_read_local_backup_file_returns_contents_when_secure() {
 
 	assertEquals "trusted" "$result"
 	rm -f "$backup_file"
+}
+
+test_build_source_snapshot_list_cmd_serial_returns_direct_list() {
+	g_LZFS="/sbin/zfs"
+	initial_source="tank/data"
+	g_option_j_jobs=1
+
+	result=$(build_source_snapshot_list_cmd)
+
+	assertEquals "Serial snapshot listing should call zfs directly." "$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source" "$result"
+}
+
+test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
+	g_LZFS="/sbin/zfs"
+	initial_source="tank/home"
+	g_option_j_jobs=4
+	g_cmd_parallel="/usr/local/bin/parallel"
+	g_origin_parallel_cmd=""
+	g_option_O_origin_host=""
+	g_option_z_compress=0
+
+	result=$(build_source_snapshot_list_cmd)
+
+	assertContains "Parallel listing should include dataset enumeration." "$result" "$g_LZFS list -Hr -o name $initial_source |"
+	assertContains "GNU parallel invocation should include the job count." "$result" "\"/usr/local/bin/parallel\" -j 4 --line-buffer"
+	l_expected_parallel_cmd=$(escape_for_double_quotes "$g_LZFS list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
+	l_expected_runner="sh -c \\\"$l_expected_parallel_cmd\\\" sh"
+	assertContains "Parallel runner should execute the per-dataset command." "$result" "$l_expected_runner"
+}
+
+test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() {
+	g_LZFS="/sbin/zfs"
+	g_cmd_zfs="/usr/sbin/zfs"
+	initial_source="tank/src"
+	g_option_j_jobs=8
+	g_cmd_parallel="/usr/local/bin/parallel"
+	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_option_O_origin_host="backup@example.com pfexec -p 2222"
+	g_option_O_origin_host_safe=""
+	g_option_z_compress=1
+	g_cmd_ssh="/usr/bin/ssh"
+
+	result=$(build_source_snapshot_list_cmd)
+
+	assertContains "Remote listing should start with ssh." "$result" "$g_cmd_ssh"
+	assertContains "Host spec tokens should be quoted for ssh." "$result" "'backup@example.com' 'pfexec' '-p' '2222'"
+	assertContains "Remote GNU parallel path should be used." "$result" "\"/opt/bin/parallel\" -j 8 --line-buffer"
+	assertContains "Compression should be applied when requested." "$result" "| zstd -9\" | zstd -d"
+}
+
+test_normalize_destination_snapshot_list_maps_destination_prefix_to_source() {
+	input_file="$TEST_TMPDIR/dest_snaps.txt"
+	output_file="$TEST_TMPDIR/normalized_snaps.txt"
+	cat <<'EOF' >"$input_file"
+tank/backup/app@snap2
+tank/backup/app@snap1
+EOF
+	initial_source="tank/src/app"
+	g_initial_source_had_trailing_slash=0
+
+	normalize_destination_snapshot_list "tank/backup/app" "$input_file" "$output_file"
+
+	result=$(cat "$output_file")
+	expected="tank/src/app@snap1
+tank/src/app@snap2"
+	assertEquals "Destination snapshot paths should be rewritten to match the source dataset." "$expected" "$result"
+}
+
+test_normalize_destination_snapshot_list_keeps_dataset_when_trailing_slash_requested() {
+	input_file="$TEST_TMPDIR/dest_snaps_trailing.txt"
+	output_file="$TEST_TMPDIR/normalized_snaps_trailing.txt"
+	cat <<'EOF' >"$input_file"
+tank/dst@snapB
+tank/dst@snapA
+EOF
+	initial_source="tank/dst"
+	g_initial_source_had_trailing_slash=1
+
+	normalize_destination_snapshot_list "tank/dst" "$input_file" "$output_file"
+
+	result=$(cat "$output_file")
+	expected="tank/dst@snapA
+tank/dst@snapB"
+	assertEquals "Trailing slash semantics should only sort the destination list." "$expected" "$result"
+}
+
+test_diff_snapshot_lists_supports_source_and_destination_modes() {
+	source_file="$TEST_TMPDIR/source_snaps.txt"
+	dest_file="$TEST_TMPDIR/dest_snaps_diff.txt"
+	cat <<'EOF' >"$source_file"
+pool/src@app
+pool/src@bpp
+pool/src@cpp
+EOF
+	cat <<'EOF' >"$dest_file"
+pool/src@app
+pool/src@cpp
+pool/src@dpp
+EOF
+
+	result_missing=$(diff_snapshot_lists "$source_file" "$dest_file" "source_minus_destination")
+	assertEquals "pool/src@bpp" "$result_missing"
+
+	result_extra=$(diff_snapshot_lists "$source_file" "$dest_file" "destination_minus_source")
+	assertEquals "pool/src@dpp" "$result_extra"
 }
 
 test_get_last_common_snapshot_matches_snapshot_name_only() {
