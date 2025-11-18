@@ -648,6 +648,35 @@ get_backup_storage_dir() {
 	printf '%s/%s\n' "$g_backup_storage_root" "$l_relative"
 }
 
+get_path_owner_uid() {
+	l_path=$1
+
+	if [ ! -e "$l_path" ]; then
+		return 1
+	fi
+
+	if command -v stat >/dev/null 2>&1; then
+		if l_uid=$(stat -f '%u' "$l_path" 2>/dev/null); then
+			printf '%s\n' "$l_uid"
+			return 0
+		fi
+		if l_uid=$(stat -c '%u' "$l_path" 2>/dev/null); then
+			printf '%s\n' "$l_uid"
+			return 0
+		fi
+	fi
+
+	if l_ls_output=$(ls -ldn -- "$l_path" 2>/dev/null); then
+		l_uid=$(printf '%s\n' "$l_ls_output" | ${g_cmd_awk:-awk} '{print $3}')
+		if [ "$l_uid" != "" ]; then
+			printf '%s\n' "$l_uid"
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
 ensure_local_backup_dir() {
 	l_dir=$1
 	if [ -L "$l_dir" ]; then
@@ -664,6 +693,12 @@ ensure_local_backup_dir() {
 			throw_error "Error creating secure backup directory $l_dir."
 		fi
 		umask "$l_old_umask"
+	fi
+	if ! l_owner_uid=$(get_path_owner_uid "$l_dir"); then
+		throw_error "Cannot determine the owner of backup directory $l_dir."
+	fi
+	if [ "$l_owner_uid" != "0" ]; then
+		throw_error "Refusing to use backup directory $l_dir because it is owned by UID $l_owner_uid instead of root."
 	fi
 	if ! chmod 700 "$l_dir"; then
 		throw_error "Error securing backup directory $l_dir."
@@ -683,7 +718,7 @@ ensure_remote_backup_dir() {
 
 	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$l_host")
 	l_dir_single=$(escape_for_single_quotes "$l_dir")
-	l_remote_cmd="[ -L '$l_dir_single' ] && { echo 'Refusing to use symlinked zxfer backup directory.' >&2; exit 1; }; if [ -e '$l_dir_single' ] && [ ! -d '$l_dir_single' ]; then echo 'Backup path exists but is not a directory.' >&2; exit 1; fi; umask 077; mkdir -p '$l_dir_single' && chmod 700 '$l_dir_single'"
+	l_remote_cmd="[ -L '$l_dir_single' ] && { echo 'Refusing to use symlinked zxfer backup directory.' >&2; exit 1; }; if [ -e '$l_dir_single' ] && [ ! -d '$l_dir_single' ]; then echo 'Backup path exists but is not a directory.' >&2; exit 1; fi; umask 077; if ! mkdir -p '$l_dir_single'; then echo 'Error creating secure backup directory.' >&2; exit 1; fi; if ! chmod 700 '$l_dir_single'; then echo 'Error securing backup directory.' >&2; exit 1; fi; l_expected_uid=\$(id -u); l_dir_uid=''; if l_dir_uid=\$(stat -f '%u' '$l_dir_single' 2>/dev/null); then :; elif l_dir_uid=\$(stat -c '%u' '$l_dir_single' 2>/dev/null); then :; else l_ls_line=\$(ls -ldn -- '$l_dir_single' 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_dir_uid=\$(printf '%s\n' \"\$l_ls_line\" | awk '{print \$3}'); fi; fi; if [ \"\$l_dir_uid\" = '' ]; then echo 'Unable to determine backup directory owner.' >&2; exit 1; fi; if [ \"\$l_dir_uid\" != 0 ] && [ \"\$l_dir_uid\" != \"\$l_expected_uid\" ]; then echo 'Backup directory must be owned by root or the ssh user.' >&2; exit 1; fi"
 	l_remote_cmd=$(escape_for_double_quotes "$l_remote_cmd")
 	if ! $l_target_ssh_cmd "$l_host" "$l_remote_cmd"; then
 		throw_error "Error preparing backup directory on $l_host."
