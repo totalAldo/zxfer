@@ -132,13 +132,13 @@ grandfather_test() {
 	l_destination_snapshot=$1
 
 	l_current_date=$(date +%s) # current date in seconds from 1970
-	l_snap_date=$($g_RZFS get -H -o value -p creation "$l_destination_snapshot")
+	l_snap_date=$(run_destination_zfs_cmd get -H -o value -p creation "$l_destination_snapshot")
 
 	l_diff_sec=$((l_current_date - l_snap_date))
 	l_diff_day=$((l_diff_sec / 86400))
 
 	if [ $l_diff_day -ge "$g_option_g_grandfather_protection" ]; then
-		l_snap_date_english=$($g_RZFS get -H -o value creation "$l_destination_snapshot")
+		l_snap_date_english=$(run_destination_zfs_cmd get -H -o value creation "$l_destination_snapshot")
 		l_current_date_english=$(date)
 		l_error_msg="On the destination there is a snapshot marked for destruction
             by zxfer that is protected by the use of the \"grandfather

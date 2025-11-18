@@ -224,11 +224,11 @@ check_snapshot() {
 calculate_unsupported_properties() {
 	# Get a list of the supported properties from the destination
 	l_dest_pool_name=${g_destination%%/*}
-	l_dest_supported_properties=$($g_RZFS get -Ho property all "$l_dest_pool_name")
+	l_dest_supported_properties=$(run_destination_zfs_cmd get -Ho property all "$l_dest_pool_name")
 
 	# Get a list of the supported properties from the source
 	l_source_pool_name=${initial_source%%/*}
-	l_source_supported_properties=$($g_LZFS get -Ho property all "$l_source_pool_name")
+	l_source_supported_properties=$(run_source_zfs_cmd get -Ho property all "$l_source_pool_name")
 
 	unsupported_properties=""
 
@@ -276,13 +276,13 @@ copy_filesystems() {
 		# If using the -m feature, check if the source is mounted,
 		# otherwise there's no point in us doing the remounting.
 		if [ "$g_option_m_migrate" -eq 1 ]; then
-			l_source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$l_source")
+			l_source_to_migrate_mounted=$(run_source_zfs_cmd get -Ho value mounted "$l_source")
 			if [ "$l_source_to_migrate_mounted" != "yes" ]; then
 				echo "The source filesystem is not mounted, cannot use -m."
 				exit 1
 			fi
-			mountpoint=$($g_LZFS get -Ho value mountpoint "$l_source")
-			propsource=$($g_LZFS get -Ho source mountpoint "$l_source")
+			mountpoint=$(run_source_zfs_cmd get -Ho value mountpoint "$l_source")
+			propsource=$(run_source_zfs_cmd get -Ho source mountpoint "$l_source")
 			echov "Mountpoint is: $mountpoint. Source: $propsource."
 		fi
 
@@ -411,12 +411,11 @@ prepare_migration_services() {
 	for l_source in $g_recursive_source_list; do
 		# Unmount the source filesystem before doing the last snapshot.
 		echov "Unmounting $l_source."
-		$g_LZFS unmount "$l_source" ||
-			{
-				echo "Couldn't unmount source $l_source."
-				relaunch
-				exit 1
-			}
+		if ! run_source_zfs_cmd unmount "$l_source"; then
+			echo "Couldn't unmount source $l_source."
+			relaunch
+			exit 1
+		fi
 	done
 
 	# Create the new snapshot with a unique name.

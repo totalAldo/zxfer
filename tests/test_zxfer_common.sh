@@ -217,6 +217,94 @@ test_invoke_ssh_command_for_host_preserves_argument_boundaries() {
 	assertEquals "ssh helper should keep multi-word host specs and remote commands intact." "$expected" "$result"
 }
 
+test_run_source_zfs_cmd_uses_remote_ssh_when_origin_specified() {
+	old_cmd_ssh=$g_cmd_ssh
+	old_cmd_zfs=$g_cmd_zfs
+	old_origin_host=$g_option_O_origin_host
+
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_cmd_zfs="/sbin/zfs"
+	g_option_O_origin_host="backup@example.com pfexec -p 2222"
+	g_ssh_origin_control_socket=""
+	g_ssh_origin_control_socket_dir=""
+
+	remote_log="$TEST_TMPDIR/run_source_zfs_cmd.log"
+	: >"$remote_log"
+	FAKE_SSH_LOG="$remote_log"
+	FAKE_SSH_SUPPRESS_STDOUT=1
+	export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+
+	run_source_zfs_cmd list tank/fs@snap
+
+	unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+	{
+		IFS= read -r arg1
+		IFS= read -r arg2
+		IFS= read -r arg3
+		IFS= read -r arg4
+		IFS= read -r arg5
+		IFS= read -r arg6
+		IFS= read -r arg7
+	} <"$remote_log"
+
+	assertEquals "ssh should target the origin host without literal quotes." "backup@example.com" "$arg1"
+	assertEquals "Privilege wrappers must remain separate tokens." "pfexec" "$arg2"
+	assertEquals "Port flag should pass through literally." "-p" "$arg3"
+	assertEquals "Port argument should remain intact." "2222" "$arg4"
+	assertEquals "zfs binary should be invoked on the origin side." "$g_cmd_zfs" "$arg5"
+	assertEquals "Remote command should preserve requested subcommand." "list" "$arg6"
+	assertEquals "Dataset argument should not be re-quoted locally." "tank/fs@snap" "$arg7"
+
+	g_cmd_ssh=$old_cmd_ssh
+	g_cmd_zfs=$old_cmd_zfs
+	g_option_O_origin_host=$old_origin_host
+	g_option_O_origin_host_safe=""
+}
+
+test_run_destination_zfs_cmd_uses_remote_ssh_when_target_specified() {
+	old_cmd_ssh=$g_cmd_ssh
+	old_cmd_zfs=$g_cmd_zfs
+	old_target_host=$g_option_T_target_host
+
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_cmd_zfs="/sbin/zfs"
+	g_option_T_target_host="target@example.com doas"
+	g_ssh_target_control_socket=""
+	g_ssh_target_control_socket_dir=""
+
+	remote_log="$TEST_TMPDIR/run_destination_zfs_cmd.log"
+	: >"$remote_log"
+	FAKE_SSH_LOG="$remote_log"
+	FAKE_SSH_SUPPRESS_STDOUT=1
+	export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+
+	run_destination_zfs_cmd get -H name tank/dst
+
+	unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+	{
+		IFS= read -r targ1
+		IFS= read -r targ2
+		IFS= read -r targ3
+		IFS= read -r targ4
+		IFS= read -r targ5
+		IFS= read -r targ6
+		IFS= read -r targ7
+	} <"$remote_log"
+
+	assertEquals "ssh should connect to the target host without stray quotes." "target@example.com" "$targ1"
+	assertEquals "Additional host-spec tokens must survive argument splitting." "doas" "$targ2"
+	assertEquals "Remote call should include the zfs binary path." "$g_cmd_zfs" "$targ3"
+	assertEquals "Command verb should pass through untouched." "get" "$targ4"
+	assertEquals "Original flags should be preserved." "-H" "$targ5"
+	assertEquals "Property argument should pass through verbatim." "name" "$targ6"
+	assertEquals "Dataset argument should remain literal." "tank/dst" "$targ7"
+
+	g_cmd_ssh=$old_cmd_ssh
+	g_cmd_zfs=$old_cmd_zfs
+	g_option_T_target_host=$old_target_host
+	g_option_T_target_host_safe=""
+}
+
 test_refresh_compression_commands_tokenizes_custom_pipeline() {
 	# When -Z/ZXFER_COMPRESSION supplies a custom command, ensure zxfer stores
 	# the quoted representation so eval never executes the raw string.

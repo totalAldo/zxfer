@@ -242,7 +242,7 @@ run_zfs_create_with_properties() {
 		set -- "$@" "$l_destination"
 
 		if [ "$g_option_n_dryrun" -eq 0 ]; then
-			"$g_RZFS" "$@"
+			run_destination_zfs_cmd "$@"
 		else
 			printf '%s' "$g_RZFS"
 			for l_arg; do
@@ -267,10 +267,10 @@ get_normalized_dataset_properties() {
 		l_zfs_cmd=$g_LZFS
 	fi
 
-	l_machine_pvs=$($l_zfs_cmd get -Hpo property,value,source all "$l_dataset" |
+	l_machine_pvs=$(run_zfs_cmd_for_spec "$l_zfs_cmd" get -Hpo property,value,source all "$l_dataset" |
 		tr "\t" "=" | tr "\n" ",")
 	l_machine_pvs=${l_machine_pvs%,}
-	l_human_pvs=$($l_zfs_cmd get -Ho property,value,source all "$l_dataset" |
+	l_human_pvs=$(run_zfs_cmd_for_spec "$l_zfs_cmd" get -Ho property,value,source all "$l_dataset" |
 		tr "\t" "=" | tr "\n" ",")
 	l_human_pvs=${l_human_pvs%,}
 	resolve_human_vars "$l_machine_pvs" "$l_human_pvs"
@@ -563,8 +563,9 @@ zxfer_run_zfs_set_property() {
 	l_destination=$3
 
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		$g_RZFS set "${l_property_safe}=${l_value_safe}" "$l_destination" ||
+		if ! run_destination_zfs_cmd set "${l_property_safe}=${l_value_safe}" "$l_destination"; then
 			throw_error "Error when setting properties on destination filesystem."
+		fi
 	else
 		echo "$g_RZFS set ${l_property_safe}=${l_value_safe} $l_destination"
 	fi
@@ -580,8 +581,9 @@ zxfer_run_zfs_inherit_property() {
 	l_destination=$2
 
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		$g_RZFS inherit "$l_property_safe" "$l_destination" ||
+		if ! run_destination_zfs_cmd inherit "$l_property_safe" "$l_destination"; then
 			throw_error "Error when inheriting properties on destination filesystem."
+		fi
 	else
 		echo "$g_RZFS inherit $l_property_safe $l_destination"
 	fi
@@ -759,8 +761,8 @@ transfer_properties() {
 
 	l_source_pvs=$(collect_source_props "$l_source" "$g_actual_dest" "$g_ensure_writable" "$g_LZFS")
 
-	l_source_dstype=$($g_LZFS get -Hpo value type "$l_source")
-	l_source_volsize=$($g_LZFS get -Hpo value volsize "$l_source")
+	l_source_dstype=$(run_source_zfs_cmd get -Hpo value type "$l_source")
+	l_source_volsize=$(run_source_zfs_cmd get -Hpo value volsize "$l_source")
 
 	g_option_o_override_property_pv=$g_option_o_override_property
 
