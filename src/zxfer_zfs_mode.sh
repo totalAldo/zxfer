@@ -318,13 +318,18 @@ a single filesystem and its children recursively, but not both -N and -R at the 
 
 	# Now that we know whether there was a trailing slash on the source, no
 	# need to confuse things by keeping it on there. Get rid of it.
-	initial_source=${initial_source%/}
+	initial_source=$(strip_trailing_slashes "$initial_source")
 
 	# Source and destination can't start with "/", but it's an easy mistake to make
 	if [ "$(echo "$initial_source" | grep -c '^/')" -eq "1" ] ||
 		[ "$(echo "$g_destination" | grep -c '^/')" -eq "1" ]; then
 		throw_usage_error "Source and destination must not begin with \"/\". Note the example."
 	fi
+
+	# Trailing slashes on the destination are meaningless for dataset names but
+	# make later concatenation produce an illegal double slash, so normalize it
+	# once up front.
+	g_destination=$(strip_trailing_slashes "$g_destination")
 
 	# Checks options to see if appropriate for a source snapshot
 	echoV "Checking source snapshot."
