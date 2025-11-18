@@ -52,11 +52,13 @@ calculate_size_estimate() {
 	l_previous_snapshot=$2
 
 	if [ -n "$l_previous_snapshot" ]; then
-		l_size_dataset=$($g_LZFS send -nPv -I "$l_previous_snapshot" "$l_current_snapshot" 2>&1) ||
+		if ! l_size_dataset=$(run_source_zfs_cmd send -nPv -I "$l_previous_snapshot" "$l_current_snapshot" 2>&1); then
 			throw_error "Error calculating incremental estimate: $l_size_dataset"
+		fi
 	else
-		l_size_dataset=$($g_LZFS send -nPv "$l_current_snapshot" 2>&1) ||
+		if ! l_size_dataset=$(run_source_zfs_cmd send -nPv "$l_current_snapshot" 2>&1); then
 			throw_error "Error calculating estimate: $l_size_dataset"
+		fi
 	fi
 	l_size_est=$(echo "$l_size_dataset" | grep ^size | tail -n 1 | cut -f 2)
 

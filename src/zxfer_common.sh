@@ -85,7 +85,8 @@ get_os() {
 	if [ "$l_input_options" = "" ]; then
 		l_output_os=$(uname)
 	else
-		l_output_os=$($l_input_options uname)
+		l_cmd="$l_input_options uname"
+		l_output_os=$(eval "$l_cmd")
 	fi
 
 	echo "$l_output_os"
@@ -154,7 +155,7 @@ execute_background_cmd() {
 	l_output_file=$2
 
 	echoV "Executing command in the background: $l_cmd"
-	$l_cmd >"$l_output_file" &
+	eval "$l_cmd" >"$l_output_file" &
 }
 
 # Escape characters that have special meaning inside double quotes so that the
@@ -308,6 +309,53 @@ EOF
 
 		exec "$@"
 	)
+}
+
+# Execute a zfs command on the origin (source) host, transparently invoking
+# ssh when -O is in effect so callers can treat this like a local command.
+run_source_zfs_cmd() {
+	if [ "$g_option_O_origin_host" = "" ]; then
+		if [ -n "$g_LZFS" ] && [ "$g_LZFS" != "$g_cmd_zfs" ]; then
+			"$g_LZFS" "$@"
+		else
+			"$g_cmd_zfs" "$@"
+		fi
+		return
+	fi
+
+	l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
+	invoke_ssh_command_for_host "$l_origin_ssh_cmd" "$g_option_O_origin_host" "$g_cmd_zfs" "$@"
+}
+
+# Execute a zfs command on the destination (target) host, using ssh when -T is
+# active so shell quoting does not leak into the remote hostname.
+run_destination_zfs_cmd() {
+	if [ "$g_option_T_target_host" = "" ]; then
+		if [ -n "$g_RZFS" ] && [ "$g_RZFS" != "$g_cmd_zfs" ]; then
+			"$g_RZFS" "$@"
+		else
+			"$g_cmd_zfs" "$@"
+		fi
+		return
+	fi
+
+	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
+	invoke_ssh_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$g_cmd_zfs" "$@"
+}
+
+# Run a zfs command based on the provided command specifier, delegating to the
+# source or destination helper when the spec references $g_LZFS or $g_RZFS.
+run_zfs_cmd_for_spec() {
+	l_cmd_spec=$1
+	shift
+
+	if [ "$l_cmd_spec" = "$g_LZFS" ]; then
+		run_source_zfs_cmd "$@"
+	elif [ "$l_cmd_spec" = "$g_RZFS" ]; then
+		run_destination_zfs_cmd "$@"
+	else
+		"$l_cmd_spec" "$@"
+	fi
 }
 
 # Remove trailing slash characters from dataset-like arguments while leaving

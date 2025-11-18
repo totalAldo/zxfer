@@ -1044,7 +1044,7 @@ get_backup_properties() {
 	l_expected_secure_backup=""
 
 	while [ $l_found_backup_file -eq 0 ]; do
-		l_mountpoint=$($g_LZFS get -H -o value mountpoint "$l_suspect_fs")
+		l_mountpoint=$(run_source_zfs_cmd get -H -o value mountpoint "$l_suspect_fs")
 		l_secure_dir=$(get_backup_storage_dir "$l_mountpoint" "$l_suspect_fs")
 		l_backup_file="$l_secure_dir/$g_backup_file_extension.$l_suspect_fs_tail"
 		l_legacy_backup_file=""
@@ -1115,7 +1115,7 @@ write_backup_properties() {
 	fi
 	[ -z "${g_backup_storage_root:-}" ] && g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
 	l_is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
-	l_destination_mountpoint=$($g_RZFS get -H -o value mountpoint "$g_destination")
+	l_destination_mountpoint=$(run_destination_zfs_cmd get -H -o value mountpoint "$g_destination")
 	l_backup_file_dir=$(get_backup_storage_dir "$l_destination_mountpoint" "$g_destination")
 	l_backup_file_path=$l_backup_file_dir/$g_backup_file_extension.$l_is_tail
 	echov "Writing backup info to secure path $l_backup_file_path (mountpoint $l_destination_mountpoint)"
