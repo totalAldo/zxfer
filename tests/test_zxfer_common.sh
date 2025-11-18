@@ -82,6 +82,26 @@ test_quote_host_spec_tokens_neutralizes_metacharacters() {
 	assertEquals "Host spec should be rendered as safely quoted tokens." "$expected" "$result"
 }
 
+test_strip_trailing_slashes_trims_dataset_suffixes() {
+	# Datasets may be provided with a trailing slash; ensure we drop all trailing
+	# separators so concatenated child names never gain a double slash.
+	result=$(strip_trailing_slashes "pool/dst///")
+	assertEquals "Trailing slashes should be removed." "pool/dst" "$result"
+
+	result=$(strip_trailing_slashes "pool/dst")
+	assertEquals "Paths without trailing slashes should be unchanged." "pool/dst" "$result"
+}
+
+test_strip_trailing_slashes_preserves_absolute_placeholders() {
+	# Absolute paths are rejected later, so inputs that consist entirely of
+	# slashes must be passed through untouched.
+	result=$(strip_trailing_slashes "/")
+	assertEquals "Single slash inputs should be preserved." "/" "$result"
+
+	result=$(strip_trailing_slashes "")
+	assertEquals "Empty inputs should stay empty." "" "$result"
+}
+
 test_execute_command_respects_dry_run_mode() {
 	# With --dry-run enabled, execute_command should not run but still
 	# describe the action, so no temp files should be created.

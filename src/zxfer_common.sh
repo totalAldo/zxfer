@@ -217,6 +217,28 @@ EOF
 	printf '%s' "$l_output"
 }
 
+# Remove trailing slash characters from dataset-like arguments while leaving
+# strings that consist entirely of '/' untouched so callers can still reject
+# absolute paths explicitly.
+strip_trailing_slashes() {
+	l_path=$1
+
+	case "$l_path" in
+	*[!/]*)
+		;;
+	*)
+		printf '%s\n' "$l_path"
+		return
+		;;
+	esac
+
+	while [ "${l_path%/}" != "$l_path" ]; do
+		l_path=${l_path%/}
+	done
+
+	printf '%s\n' "$l_path"
+}
+
 #
 # Checks if the destination dataset exists, returns 1 if it does, 0 if it does not.
 #

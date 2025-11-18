@@ -19,6 +19,7 @@ CHANGELOG
 -Resolve GNU parallel via ssh for -j snapshot listings so remote -O hosts no longer reuse the local path and abort when the binary lives elsewhere, and refuse -j when the remote binary is missing.
 -Eliminate command injection in write_backup_properties() by streaming raw property data directly into the backup file and expand shunit2 coverage for the helper
 -Normalize destination snapshot prefixes for non-trailing-slash transfers so dataset detection matches pre-2025.11.14 behavior, while keeping trailing-slash multi-host replicas isolated.
+-Strip trailing slashes from destination dataset arguments before replication so `zxfer -N tank/src backup/dst/` no longer builds illegal `backup/dst//child` targets that `zfs receive` rejects.
 -Filter source/destination snapshot lists by exact dataset names when building replication plans so nested filesystems that share a basename (for example, trailing “/tank”) no longer collide when computing the last common snapshot.
 -Wrap the GNU parallel snapshot listing commands in `sh -c` and pass dataset names as `$1` arguments so per-dataset jobs execute `/sbin/zfs list … "$1"` with proper argument splitting even when datasets contain slashes or spaces, fixing both local and remote `-O` listing.
 
