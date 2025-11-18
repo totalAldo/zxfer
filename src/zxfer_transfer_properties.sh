@@ -149,12 +149,13 @@ remove_unsupported_properties() {
 	IFS=","
 
 	m_only_supported_properties=""
+	unsupported_properties=${unsupported_properties:-}
 	for l_orig_line in $l_orig_set_list; do
 		l_found_unsup=0
 		l_orig_set_property=$(echo "$l_orig_line" | cut -f1 -d=)
 		l_orig_set_value=$(echo "$l_orig_line" | cut -f2 -d=)
 		l_orig_set_source=$(echo "$l_orig_line" | cut -f3 -d=)
-		for l_property in $unsupported_properties; do
+		for l_property in ${unsupported_properties:-}; do
 			if [ "$l_property" = "$l_orig_set_property" ]; then
 				l_found_unsup=1
 				break
@@ -707,7 +708,7 @@ apply_property_changes() {
 	fi
 
 	if [ "$l_active_set_list" != "" ] ||
-		([ "$l_is_initial_source" -eq 0 ] && [ "$l_inherit_list" != "" ]); then
+		{ [ "$l_is_initial_source" -eq 0 ] && [ "$l_inherit_list" != "" ]; }; then
 		echov "Setting properties/sources on destination filesystem \"$l_destination\"."
 	fi
 
@@ -789,7 +790,7 @@ EOF
 	override_pvs=$(strip_unsupported_properties "$override_pvs" "$unsupported_properties")
 
 	dest_regex=$(printf '%s\n' "$g_actual_dest" | sed 's/[].[^$\\*]/\\&/g')
-	dest_exist=$(printf '%s\n' "$g_recursive_dest_list" | grep -c "^$dest_regex$")
+	dest_exist=$(printf '%s\n' "${g_recursive_dest_list:-}" | grep -c "^$dest_regex$")
 
 	if ensure_destination_exists "$dest_exist" "$l_is_initial_source" "$override_pvs" "$creation_pvs" "$l_source_dstype" "$l_source_volsize" "$g_actual_dest" ""; then
 		return
