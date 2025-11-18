@@ -256,6 +256,58 @@ quote_cli_tokens() {
 	quote_token_stream "$l_tokens"
 }
 
+# Expand a composed ssh command and host spec into discrete arguments before
+# executing the remote command so multi-token -O/-T inputs (like "host pfexec")
+# are not collapsed into a single hostname. STDIN/STDOUT/STDERR are passed
+# through to the invoked ssh process.
+invoke_ssh_command_for_host() {
+	l_ssh_cmd=$1
+	l_host_spec=$2
+	shift 2
+
+	[ "$l_ssh_cmd" = "" ] && return 1
+
+	if [ $# -gt 0 ]; then
+		l_remote_args_stream=$(printf '%s\n' "$@")
+	else
+		l_remote_args_stream=""
+	fi
+
+	(
+		l_inner_remote_stream=$l_remote_args_stream
+		l_ssh_tokens=$(split_cli_tokens "$l_ssh_cmd")
+		set --
+		if [ "$l_ssh_tokens" != "" ]; then
+			while IFS= read -r l_token || [ -n "$l_token" ]; do
+				set -- "$@" "$l_token"
+			done <<EOF
+$l_ssh_tokens
+EOF
+		else
+			set -- "$l_ssh_cmd"
+		fi
+
+		l_host_tokens=$(split_host_spec_tokens "$l_host_spec")
+		if [ "$l_host_tokens" != "" ]; then
+			while IFS= read -r l_token || [ -n "$l_token" ]; do
+				set -- "$@" "$l_token"
+			done <<EOF
+$l_host_tokens
+EOF
+		fi
+
+		if [ "$l_inner_remote_stream" != "" ]; then
+			while IFS= read -r l_token || [ -n "$l_token" ]; do
+				set -- "$@" "$l_token"
+			done <<EOF
+$l_inner_remote_stream
+EOF
+		fi
+
+		exec "$@"
+	)
+}
+
 # Remove trailing slash characters from dataset-like arguments while leaving
 # strings that consist entirely of '/' untouched so callers can still reject
 # absolute paths explicitly.

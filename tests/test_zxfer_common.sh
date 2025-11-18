@@ -14,6 +14,12 @@
 
 oneTimeSetUp() {
 	TEST_TMPDIR=$(mktemp -d -t zxfer_shunit.XXXXXX)
+	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
+	cat >"$FAKE_SSH_BIN" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@"
+EOF
+	chmod +x "$FAKE_SSH_BIN"
 }
 
 oneTimeTearDown() {
@@ -137,6 +143,15 @@ test_quote_cli_tokens_blocks_shell_metacharacters() {
 	expected="'zstd' '-3;' 'touch' '/tmp/pwn' '|' 'cat'"
 
 	assertEquals "CLI tokens should remain literal even with metacharacters." "$expected" "$result"
+}
+
+test_invoke_ssh_command_for_host_preserves_argument_boundaries() {
+	fake_cmd="$FAKE_SSH_BIN -q -p 2222"
+	host_spec="backup@example.com pfexec doas"
+	result=$(invoke_ssh_command_for_host "$fake_cmd" "$host_spec" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup")
+	expected=$(printf "%s\\n" "$FAKE_SSH_BIN" "-q" "-p" "2222" "backup@example.com" "pfexec" "doas" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup")
+
+	assertEquals "ssh helper should keep multi-word host specs and remote commands intact." "$expected" "$result"
 }
 
 test_refresh_compression_commands_tokenizes_custom_pipeline() {
