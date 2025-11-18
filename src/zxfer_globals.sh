@@ -224,6 +224,7 @@ init_globals() {
 
 	# dataset and snapshot lists
 	g_recursive_source_list=""
+	g_recursive_source_dataset_list=""
 	g_lzfs_list_hr_S_snap=""
 	g_rzfs_list_hr_snap=""
 
@@ -1064,6 +1065,10 @@ get_backup_properties() {
 # corresponding to the destination filesystem
 #
 write_backup_properties() {
+	if [ "$g_backup_file_contents" = "" ]; then
+		echov "No property data collected; skipping backup write."
+		return
+	fi
 	[ -z "${g_backup_storage_root:-}" ] && g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
 	l_is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
 	l_destination_mountpoint=$($g_RZFS get -H -o value mountpoint "$g_destination")
