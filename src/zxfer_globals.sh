@@ -117,6 +117,8 @@ init_globals() {
 	# default compression commands
 	g_cmd_compress="zstd -3"
 	g_cmd_decompress="zstd -d"
+	g_cmd_compress_safe=""
+	g_cmd_decompress_safe=""
 
 	g_cmd_cat=""
 
@@ -180,6 +182,22 @@ xattr,dnodesize"
 
 	# Properties not supported on Solaris Express 11
 	g_solexp_readonly_properties="jailed,aclmode,shareiscsi"
+
+	refresh_compression_commands
+}
+
+refresh_compression_commands() {
+	g_cmd_compress_safe=$(quote_cli_tokens "$g_cmd_compress")
+	g_cmd_decompress_safe=$(quote_cli_tokens "$g_cmd_decompress")
+
+	if [ "$g_option_z_compress" -eq 1 ]; then
+		if [ "$g_cmd_compress_safe" = "" ]; then
+			throw_usage_error "Compression command (-Z/ZXFER_COMPRESSION) cannot be empty." 2
+		fi
+		if [ "$g_cmd_decompress_safe" = "" ]; then
+			throw_error "Compression requested but decompression command missing."
+		fi
+	fi
 }
 
 # setup an ssh control socket for the specified role (origin or target)
@@ -476,6 +494,8 @@ read_command_line_switches() {
 			;;
 		esac
 	done
+
+	refresh_compression_commands
 }
 
 # Function to extract snapshot name

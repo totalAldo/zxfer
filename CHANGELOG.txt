@@ -7,6 +7,7 @@ CHANGELOG
 -Refuse to use zxfer backup metadata directories unless they are owned by root locally or by the remote ssh user (root also permitted) so attackers cannot pre-create `ZXFER_BACKUP_DIR` paths and retain ownership of `.zxfer_backup_info.*` files.
 -Require property restores (-e) to read `.zxfer_backup_info.*` files only when they are root-owned and mode 0600 so compromised backup directories cannot poison mountpoint, sharing, or encryption metadata.
 -Quote -O/-T ssh host specs before constructing eval'd pipelines and open/close ssh control sockets without eval so a crafted host argument can no longer inject local commands before ssh starts.
+-Treat `-Z/ZXFER_COMPRESSION` strings as tokenized commands and refuse empty compression pipelines so attacker-controlled configs cannot splice arbitrary shell syntax into the send/receive ssh pipelines.
 -Create zxfer progress FIFOs with umask 077 and chmod 600 so local users cannot read or stall the replicated send stream via /tmp/zxfer-progress.*
 -Quote the progress passthrough hook with single quotes so remote `-O -D` pulls keep the ssh command coherent and progress works on origin hosts.
 -Estimate incremental stream sizes when a previous snapshot exists so the progress dialog reflects the bytes that will actually be sent.

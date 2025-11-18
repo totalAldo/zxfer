@@ -82,6 +82,94 @@ test_quote_host_spec_tokens_neutralizes_metacharacters() {
 	assertEquals "Host spec should be rendered as safely quoted tokens." "$expected" "$result"
 }
 
+test_quote_cli_tokens_preserves_argument_boundaries() {
+	# Compression commands should behave like arrays, preserving each argument.
+	result=$(quote_cli_tokens "zstd -3 --long=27")
+	expected="'zstd' '-3' '--long=27'"
+
+	assertEquals "CLI tokens should be individually quoted." "$expected" "$result"
+}
+
+test_quote_cli_tokens_blocks_shell_metacharacters() {
+	# Metacharacters such as ';' or '|' must be neutralized instead of being
+	# interpreted as new commands or pipelines.
+	result=$(quote_cli_tokens "zstd -3; touch /tmp/pwn | cat")
+	expected="'zstd' '-3;' 'touch' '/tmp/pwn' '|' 'cat'"
+
+	assertEquals "CLI tokens should remain literal even with metacharacters." "$expected" "$result"
+}
+
+test_refresh_compression_commands_tokenizes_custom_pipeline() {
+	# When -Z/ZXFER_COMPRESSION supplies a custom command, ensure zxfer stores
+	# the quoted representation so eval never executes the raw string.
+	if [ "${g_cmd_compress+x}" = x ]; then
+		old_g_cmd_compress=$g_cmd_compress
+		old_g_cmd_compress_set=1
+	else
+		old_g_cmd_compress_set=0
+	fi
+	if [ "${g_cmd_decompress+x}" = x ]; then
+		old_g_cmd_decompress=$g_cmd_decompress
+		old_g_cmd_decompress_set=1
+	else
+		old_g_cmd_decompress_set=0
+	fi
+	if [ "${g_cmd_compress_safe+x}" = x ]; then
+		old_g_cmd_compress_safe=$g_cmd_compress_safe
+		old_g_cmd_compress_safe_set=1
+	else
+		old_g_cmd_compress_safe_set=0
+	fi
+	if [ "${g_cmd_decompress_safe+x}" = x ]; then
+		old_g_cmd_decompress_safe=$g_cmd_decompress_safe
+		old_g_cmd_decompress_safe_set=1
+	else
+		old_g_cmd_decompress_safe_set=0
+	fi
+	if [ "${g_option_z_compress+x}" = x ]; then
+		old_g_option_z_compress=$g_option_z_compress
+		old_g_option_z_compress_set=1
+	else
+		old_g_option_z_compress_set=0
+	fi
+
+	g_cmd_compress="zstd -3;touch /tmp/pwn"
+	g_cmd_decompress="zstd -d"
+	g_cmd_compress_safe=""
+	g_cmd_decompress_safe=""
+	g_option_z_compress=0
+
+	refresh_compression_commands
+
+	assertEquals "Compression command tokens should be quoted." "'zstd' '-3;' 'touch' '/tmp/pwn'" "$g_cmd_compress_safe"
+
+	if [ $old_g_cmd_compress_set -eq 1 ]; then
+		g_cmd_compress=$old_g_cmd_compress
+	else
+		unset g_cmd_compress
+	fi
+	if [ $old_g_cmd_decompress_set -eq 1 ]; then
+		g_cmd_decompress=$old_g_cmd_decompress
+	else
+		unset g_cmd_decompress
+	fi
+	if [ $old_g_option_z_compress_set -eq 1 ]; then
+		g_option_z_compress=$old_g_option_z_compress
+	else
+		unset g_option_z_compress
+	fi
+	if [ $old_g_cmd_compress_safe_set -eq 1 ]; then
+		g_cmd_compress_safe=$old_g_cmd_compress_safe
+	else
+		unset g_cmd_compress_safe
+	fi
+	if [ $old_g_cmd_decompress_safe_set -eq 1 ]; then
+		g_cmd_decompress_safe=$old_g_cmd_decompress_safe
+	else
+		unset g_cmd_decompress_safe
+	fi
+}
+
 test_strip_trailing_slashes_trims_dataset_suffixes() {
 	# Datasets may be provided with a trailing slash; ensure we drop all trailing
 	# separators so concatenated child names never gain a double slash.
