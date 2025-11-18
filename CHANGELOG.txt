@@ -2,6 +2,7 @@ CHANGELOG
 =========
 
 2025.11.18
+-Add `tests/run_shunit_tests.sh` to execute every shunit2 suite (or a specific subset) from one command so contributors can easily exercise helpers like `test_zxfer_zfs_mode.sh` without remembering individual scripts.
 -Refactor snapshot listing orchestration (`write_source_snapshot_list_to_file()`, `write_destination_snapshot_list_to_files()`, `set_g_recursive_source_list()`) into data-flow helpers that build the source command string, normalize destination prefixes, and diff sorted lists so background jobs no longer embed inline eval plumbing, enabling shunit2 coverage of ssh/parallel/compression permutations without touching live ZFS.
 -Refactor `transfer_properties()` into composable helpers (source property collection, override derivation, destination diff/apply) and add shunit2 coverage with injectable set/inherit runners so safety-sensitive property logic can be unit-tested without touching real pools.
 -Allow zxfer to treat backup directories and metadata files owned by the invoking user as secure when root privileges are unavailable (while still enforcing 0700/0600 permissions) so shunit2 and CI runs on Linux can exercise the helpers without failing ownership checks.

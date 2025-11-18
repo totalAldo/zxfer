@@ -14,4 +14,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./tests/test_zxfer_common.sh
+          ./tests/run_shunit_tests.sh
