@@ -535,6 +535,16 @@ init_variables() {
 # Checks that options make sense, etc.
 #
 consistency_check() {
+	# Validate -j early so arithmetic comparisons do not trip /bin/sh errors.
+	case ${g_option_j_jobs:-} in
+	'' | *[!0-9]*)
+		throw_usage_error "The -j option requires a positive integer job count, but received \"${g_option_j_jobs:-}\"."
+		;;
+	esac
+	if [ "$g_option_j_jobs" -le 0 ]; then
+		throw_usage_error "The -j option requires a job count of at least 1."
+	fi
+
 	# disallow backup and restore of properties at same time
 	if [ "$g_option_k_backup_property_mode" -eq 1 ] &&
 		[ "$g_option_e_restore_property_mode" -eq 1 ]; then
