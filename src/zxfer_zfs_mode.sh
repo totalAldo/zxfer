@@ -253,7 +253,23 @@ calculate_unsupported_properties() {
 copy_filesystems() {
 	echoV "Begin copy_filesystems()"
 
-	for l_source in $g_recursive_source_list; do
+	l_property_pass_required=0
+	if [ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
+		l_property_pass_required=1
+	fi
+
+	l_iteration_list=$g_recursive_source_list
+
+	if [ "$g_option_R_recursive" != "" ] && [ $l_property_pass_required -eq 1 ]; then
+		l_iteration_list=$(printf '%s\n%s\n' "$g_recursive_source_list" "$g_recursive_source_dataset_list" |
+			grep -v '^[[:space:]]*$' | sort -u)
+	fi
+
+	if [ "$g_option_R_recursive" != "" ] && [ $l_property_pass_required -eq 1 ] && [ "$l_iteration_list" = "" ]; then
+		l_iteration_list=$initial_source
+	fi
+
+	for l_source in $l_iteration_list; do
 
 		set_actual_dest "$l_source"
 

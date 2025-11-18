@@ -12,14 +12,23 @@
 # shellcheck source=src/zxfer_inspect_delete_snap.sh
 . "$ZXFER_ROOT/src/zxfer_inspect_delete_snap.sh"
 
-oneTimeSetUp() {
-	TEST_TMPDIR=$(mktemp -d -t zxfer_shunit.XXXXXX)
-	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
+create_fake_ssh_bin() {
+# Re-create the fake ssh helper after each cleanup so setUp() can freely
+# truncate the temp directory without leaving a stale interpreter. The helper
+# echoes both argv[0] and all arguments so tests can assert the full command
+# line.
 	cat >"$FAKE_SSH_BIN" <<'EOF'
 #!/bin/sh
+printf '%s\n' "$0"
 printf '%s\n' "$@"
 EOF
 	chmod +x "$FAKE_SSH_BIN"
+}
+
+oneTimeSetUp() {
+	TEST_TMPDIR=$(mktemp -d -t zxfer_shunit.XXXXXX)
+	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
+	create_fake_ssh_bin
 }
 
 oneTimeTearDown() {
@@ -38,6 +47,7 @@ setUp() {
 	if [ -n "${TEST_TMPDIR:-}" ]; then
 		rm -rf "${TEST_TMPDIR:?}/"*
 	fi
+	create_fake_ssh_bin
 }
 
 fake_zfs_mountpoint_cmd() {
@@ -415,6 +425,32 @@ test_write_backup_properties_treats_backup_data_as_literal() {
 	fi
 	unset FAKE_ZFS_MOUNTPOINT
 	rm -f "$backup_file"
+}
+
+test_write_backup_properties_skips_when_no_data() {
+	old_g_backup_storage_root=${g_backup_storage_root-}
+	g_backup_storage_root="$TEST_TMPDIR/backup-skip"
+	rm -rf "$g_backup_storage_root"
+
+	initial_source="pool/src"
+	g_destination="pool/dst"
+	g_backup_file_extension=".zxfer_backup_info"
+	g_zxfer_version="test-version"
+	g_option_R_recursive=""
+	g_option_N_nonrecursive=""
+	g_option_T_target_host=""
+	g_option_n_dryrun=0
+	g_backup_file_contents=""
+
+	write_backup_properties
+
+	assertFalse "Backup metadata should not be written when no properties were collected." "[ -d \"$g_backup_storage_root\" ]"
+
+	if [ -n "${old_g_backup_storage_root-}" ]; then
+		g_backup_storage_root=$old_g_backup_storage_root
+	else
+		unset g_backup_storage_root
+	fi
 }
 
 test_read_local_backup_file_refuses_non_root_owned_metadata() {

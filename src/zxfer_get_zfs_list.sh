@@ -236,10 +236,12 @@ set_g_recursive_source_list() {
 	g_recursive_source_list=$(comm -23 \
 		"$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
 		"$g_cmd_awk" -F@ '{print $1}' | sort -u)
+	g_recursive_source_dataset_list=$("$g_cmd_awk" -F@ '{print $1}' "$l_source_snaps_sorted_tmp_file" | sort -u)
 
 	# if excluding datasets, remove them from the list
 	if [ "$g_option_x_exclude_datasets" != "" ]; then
 		g_recursive_source_list=$(echo "$g_recursive_source_list" | grep -v "$g_option_x_exclude_datasets")
+		g_recursive_source_dataset_list=$(echo "$g_recursive_source_dataset_list" | grep -v "$g_option_x_exclude_datasets")
 	fi
 
 	# debugging
