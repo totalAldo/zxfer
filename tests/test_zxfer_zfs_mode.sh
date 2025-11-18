@@ -108,6 +108,52 @@ test_normalize_source_destination_strips_trailing_slashes() {
 	assertEquals "Trailing slash flag should record the original suffix." "1" "$g_initial_source_had_trailing_slash"
 }
 
+test_set_actual_dest_without_trailing_slash_appends_relative_path() {
+	initial_source="tank/src"
+	g_destination="backup/target"
+	g_initial_source_had_trailing_slash=0
+
+	set_actual_dest "tank/src/projects/alpha"
+
+	assertEquals "Destination should mirror the relative source suffix." "backup/target/src/projects/alpha" "$g_actual_dest"
+}
+
+test_set_actual_dest_with_trailing_slash_preserves_destination_prefix() {
+	initial_source="tank/src"
+	g_destination="backup/target"
+	g_initial_source_had_trailing_slash=1
+
+	set_actual_dest "tank/src/projects/beta"
+
+	assertEquals "Trailing slash should replicate directly under the destination root." "backup/target/projects/beta" "$g_actual_dest"
+}
+
+test_refresh_dataset_iteration_state_populates_recursive_list_when_not_recursive() {
+	g_option_R_recursive=""
+	initial_source="tank/src"
+	g_recursive_source_list=""
+	STUB_ZFS_LIST_CALLS=0
+
+	refresh_dataset_iteration_state
+
+	assertEquals "Refresh should re-populate the recursive source list when -R is unset." \
+		"$initial_source" "$g_recursive_source_list"
+	assertEquals "get_zfs_list should be invoked once during refresh." "1" "$STUB_ZFS_LIST_CALLS"
+}
+
+test_refresh_dataset_iteration_state_preserves_list_when_recursive_mode_set() {
+	g_option_R_recursive="tank/src"
+	initial_source="tank/src"
+	g_recursive_source_list="tank/src tank/src/child"
+	STUB_ZFS_LIST_CALLS=0
+
+	refresh_dataset_iteration_state
+
+	assertEquals "Recursive option should keep the existing dataset list untouched." \
+		"tank/src tank/src/child" "$g_recursive_source_list"
+	assertEquals "get_zfs_list should still be called exactly once." "1" "$STUB_ZFS_LIST_CALLS"
+}
+
 test_maybe_capture_preflight_snapshot_captures_when_enabled() {
 	g_option_s_make_snapshot=1
 	initial_source="tank/src"
@@ -150,6 +196,87 @@ unmount tank/src/child" "$(cat "$STUB_ZFS_CMD_LOG")"
 		fail "Readonly properties list should drop mountpoint during migration."
 		;;
 	esac
+}
+
+test_perform_grandfather_protection_checks_skips_when_flag_unset() {
+	g_option_g_grandfather_protection=""
+	g_recursive_source_list="tank/src tank/src/child"
+	log="$TEST_TMPDIR/grandfather_skip.log"
+	rm -f "$log"
+
+	(
+		GRANDFATHER_LOG="$log"
+		set_actual_dest() { echo "set $1" >>"$GRANDFATHER_LOG"; }
+		inspect_delete_snap() { echo "inspect $1 $2" >>"$GRANDFATHER_LOG"; }
+		perform_grandfather_protection_checks
+	)
+
+	assertFalse "Grandfather check should no-op when flag is unset." "[ -s \"$log\" ]"
+}
+
+test_perform_grandfather_protection_checks_calls_helpers_for_each_dataset() {
+	g_option_g_grandfather_protection="enabled"
+	g_recursive_source_list="tank/src tank/src/child"
+	log="$TEST_TMPDIR/grandfather_calls.log"
+	rm -f "$log"
+
+	(
+		GRANDFATHER_LOG="$log"
+		set_actual_dest() { printf 'set %s\n' "$1" >>"$GRANDFATHER_LOG"; }
+		inspect_delete_snap() { printf 'inspect %s %s\n' "$1" "$2" >>"$GRANDFATHER_LOG"; }
+		perform_grandfather_protection_checks
+	)
+
+	expected="set tank/src
+inspect 0 tank/src
+set tank/src/child
+inspect 0 tank/src/child"
+	assertEquals "Grandfather protection should inspect every dataset slated for replication." \
+		"$expected" "$(cat "$log")"
+}
+
+test_run_zfs_mode_loop_exits_after_single_iteration_when_no_changes() {
+	g_option_Y_yield_iterations=4
+	g_MAX_YIELD_ITERATIONS=8
+	log="$TEST_TMPDIR/run_loop_single.log"
+	: >"$log"
+
+	(
+		RUN_LOOP_LOG="$log"
+		run_zfs_mode() {
+			printf 'run\n' >>"$RUN_LOOP_LOG"
+			g_is_performed_send_destroy=0
+		}
+		run_zfs_mode_loop
+	)
+
+	line_count=$(awk 'END {print NR}' "$log")
+	assertEquals "Loop should stop after one iteration when no sends/destroys occur." "1" "$line_count"
+}
+
+test_run_zfs_mode_loop_repeats_until_changes_stop() {
+	g_option_Y_yield_iterations=4
+	g_MAX_YIELD_ITERATIONS=8
+	log="$TEST_TMPDIR/run_loop_repeat.log"
+	: >"$log"
+
+	(
+		RUN_LOOP_LOG="$log"
+		iteration=0
+		run_zfs_mode() {
+			iteration=$((iteration + 1))
+			printf 'run %s\n' "$iteration" >>"$RUN_LOOP_LOG"
+			if [ "$iteration" -ge 2 ]; then
+				g_is_performed_send_destroy=0
+			else
+				g_is_performed_send_destroy=1
+			fi
+		}
+		run_zfs_mode_loop
+	)
+
+	line_count=$(awk 'END {print NR}' "$log")
+	assertEquals "Loop should run until the helper clears the send/destroy flag." "2" "$line_count"
 }
 
 # shellcheck disable=SC1090
