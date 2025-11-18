@@ -82,6 +82,18 @@ first looks inside this secure directory and still falls back to legacy backup
 files found inside the dataset mountpoints, emitting a warning so you can move
 those files into the hardened store.
 
+## Secure PATH Defaults
+zxfer manipulates live pools as root, so it now rebuilds `PATH` from a trusted
+allowlist before resolving helper binaries. By default zxfer only searches
+`/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin` and records the
+absolute path to `zfs`, `ssh`, `awk`, and other dependencies. This prevents a
+malicious user from prepending an untrusted directory and slipping a trojan
+binary into the replication workflow. If your tooling lives outside those
+directories you can export `ZXFER_SECURE_PATH` to replace the allowlist entirely
+or `ZXFER_SECURE_PATH_APPEND` to add extra **absolute** directories (relative
+paths are ignored). Remote helper discovery uses the same allowlist, so include
+any custom directories that exist on the hosts referenced by `-O/-T`.
+
 ## Feedback Welcome
 If you use this script and have any suggestions or feedback, please open an issue or a pull request. I hope this script will be beneficial to others and that useful features can be incorporated into the main project.
 

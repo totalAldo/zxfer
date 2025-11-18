@@ -263,8 +263,7 @@ strip_trailing_slashes() {
 	l_path=$1
 
 	case "$l_path" in
-	*[!/]*)
-		;;
+	*[!/]*) ;;
 	*)
 		printf '%s\n' "$l_path"
 		return
