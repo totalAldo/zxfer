@@ -236,6 +236,8 @@ set_g_recursive_source_list() {
 	g_recursive_source_list=$(comm -23 \
 		"$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" |
 		"$g_cmd_awk" -F@ '{print $1}' | sort -u)
+	# shellcheck disable=SC2016
+	# awk script should see literal $1.
 	g_recursive_source_dataset_list=$("$g_cmd_awk" -F@ '{print $1}' "$l_source_snaps_sorted_tmp_file" | sort -u)
 
 	# if excluding datasets, remove them from the list

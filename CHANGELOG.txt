@@ -2,6 +2,7 @@ CHANGELOG
 =========
 
 2025.11.18
+-Allow zxfer to treat backup directories and metadata files owned by the invoking user as secure when root privileges are unavailable (while still enforcing 0700/0600 permissions) so shunit2 and CI runs on Linux can exercise the helpers without failing ownership checks.
 -Run recursive property/backup passes even when every dataset is already in sync so -P/-o/-k still enforce metadata, and skip writing `.zxfer_backup_info.*` files when no property data was captured to avoid clobbering prior backups.
 -Reset PATH to `/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin`, resolve required binaries to their absolute paths, and teach zxfer to honor `ZXFER_SECURE_PATH[_APPEND]` so PATH hijacking is no longer possible when zxfer runs with elevated privileges.
 

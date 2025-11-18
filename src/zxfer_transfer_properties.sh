@@ -430,6 +430,8 @@ $l_source,$g_actual_dest,$l_source_pvs"
 	# shellcheck disable=SC2154
 	# Escape dataset name so regex anchors match exact dataset only.
 	dest_regex=$(printf '%s\n' "$g_actual_dest" | sed 's/[].[^$\\*]/\\&/g')
+	# shellcheck disable=SC2154
+	# Populated by zxfer_get_zfs_list.sh before property handling.
 	dest_exist=$(printf '%s\n' "$g_recursive_dest_list" | grep -c "^$dest_regex$")
 
 	# This is where we actually create or modify the destination filesystem.
