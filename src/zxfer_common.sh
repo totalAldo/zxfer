@@ -170,6 +170,53 @@ escape_for_single_quotes() {
 	printf '%s' "$1" | sed "s/'/'\"'\"'/g"
 }
 
+# Split a user-supplied -O/-T host spec into tokens without invoking the shell
+# parser so whitespace-separated ssh arguments (like "user@host pfexec") are
+# preserved verbatim and characters such as ';' cannot escape into new commands.
+split_host_spec_tokens() {
+	l_host_spec=$1
+	if [ "$l_host_spec" = "" ]; then
+		return
+	fi
+
+	l_awk_cmd=${g_cmd_awk:-$(command -v awk 2>/dev/null || echo awk)}
+	printf '%s\n' "$l_host_spec" | "$l_awk_cmd" '
+	{
+		for (i = 1; i <= NF; i++) {
+			print $i
+		}
+	}'
+}
+
+# Quote a host spec for safe reinsertion into eval'd strings by wrapping each
+# token in single quotes. This keeps multi-word ssh arguments working while
+# preventing the shell from interpreting metacharacters provided by the user.
+quote_host_spec_tokens() {
+	l_host_spec=$1
+	if [ "$l_host_spec" = "" ]; then
+		return
+	fi
+
+	l_tokens=$(split_host_spec_tokens "$l_host_spec")
+	if [ "$l_tokens" = "" ]; then
+		return
+	fi
+
+	l_output=""
+	while IFS= read -r l_token || [ -n "$l_token" ]; do
+		[ "$l_token" = "" ] && continue
+		l_safe_token=$(escape_for_single_quotes "$l_token")
+		if [ "$l_output" = "" ]; then
+			l_output="'$l_safe_token'"
+		else
+			l_output="$l_output '$l_safe_token'"
+		fi
+	done <<EOF
+$l_tokens
+EOF
+	printf '%s' "$l_output"
+}
+
 #
 # Checks if the destination dataset exists, returns 1 if it does, 0 if it does not.
 #
