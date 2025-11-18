@@ -67,7 +67,7 @@ zxfer_compute_secure_path() {
 	l_clean=""
 	for l_entry in $l_candidate; do
 		case "$l_entry" in
-		''|.)
+		'' | .)
 			continue
 			;;
 		/*)
@@ -116,8 +116,7 @@ zxfer_find_required_tool() {
 		zxfer_fatal_missing_dependency "Required dependency \"$l_label\" not found in secure PATH ($g_zxfer_secure_path). Set ZXFER_SECURE_PATH or install the binary."
 	fi
 	case "$l_path" in
-	/*)
-		;;
+	/*) ;;
 	*)
 		zxfer_fatal_missing_dependency "Required dependency \"$l_label\" resolved to \"$l_path\", but zxfer requires an absolute path."
 		;;
@@ -632,8 +631,7 @@ init_variables() {
 				throw_error "cat not found on origin host $g_option_O_origin_host."
 			fi
 			case "$g_cmd_cat" in
-			/*)
-				;;
+			/*) ;;
 			*)
 				throw_error "cat on origin host $g_option_O_origin_host resolved to \"$g_cmd_cat\" which is not an absolute path."
 				;;
