@@ -89,8 +89,8 @@ build_source_snapshot_list_cmd() {
 
 	if [ ! "$g_option_O_origin_host" = "" ]; then
 		l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-		l_remote_parallel_cmd=$(escape_for_double_quotes "$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
-		l_remote_parallel_runner="sh -c \\\"$l_remote_parallel_cmd\\\" sh"
+		l_remote_parallel_cmd="$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot \"\$1\""
+		l_remote_parallel_runner="sh -c '$(escape_for_single_quotes "$l_remote_parallel_cmd")' sh"
 		l_origin_host_args=$g_option_O_origin_host_safe
 		if [ "$l_origin_host_args" = "" ]; then
 			l_origin_host_args=$(quote_host_spec_tokens "$g_option_O_origin_host")
@@ -109,8 +109,8 @@ build_source_snapshot_list_cmd() {
 		return
 	fi
 
-	l_local_parallel_cmd=$(escape_for_double_quotes "$g_LZFS list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
-	l_local_parallel_runner="sh -c \\\"$l_local_parallel_cmd\\\" sh"
+	l_local_parallel_cmd="$g_LZFS list -H -o name -s creation -d 1 -t snapshot \"\$1\""
+	l_local_parallel_runner="sh -c '$(escape_for_single_quotes "$l_local_parallel_cmd")' sh"
 	l_cmd="$g_LZFS list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_local_parallel_runner {}"
 	printf '%s\n' "$l_cmd"
 }

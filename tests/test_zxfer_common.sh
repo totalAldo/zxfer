@@ -740,12 +740,25 @@ test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
 
 	assertContains "Parallel listing should include dataset enumeration." "$result" "$g_LZFS list -Hr -o name $initial_source |"
 	assertContains "GNU parallel invocation should include the job count." "$result" "\"/usr/local/bin/parallel\" -j 4 --line-buffer"
-	l_expected_parallel_cmd=$(escape_for_double_quotes "$g_LZFS list -H -o name -s creation -d 1 -t snapshot \\\"\\\$1\\\"")
-	l_expected_runner="sh -c \\\"$l_expected_parallel_cmd\\\" sh"
+	l_expected_parallel_cmd="$g_LZFS list -H -o name -s creation -d 1 -t snapshot \"\$1\""
+	l_expected_runner="sh -c '$(escape_for_single_quotes "$l_expected_parallel_cmd")' sh"
 	case "$result" in
 	*"$l_expected_runner"*) ;;
 	*)
 		fail "Parallel runner should execute the per-dataset command."
+		;;
+	esac
+	l_bad_escape='\\"'
+	case "$result" in
+	*"$l_bad_escape"*)
+		fail "Runner should not rely on csh-incompatible escaped quotes."
+		;;
+	esac
+	l_literal_placeholder='"$1"'
+	assertContains "Runner should pass datasets via \$1." "$result" "$l_literal_placeholder"
+	case "$result" in
+	*'"\$1"'*)
+		fail "Runner should allow \$1 expansion without escaping."
 		;;
 	esac
 }
@@ -768,6 +781,13 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 	assertContains "Host spec tokens should be quoted for ssh." "$result" "'backup@example.com' 'pfexec' '-p' '2222'"
 	assertContains "Remote GNU parallel path should be used." "$result" "\"/opt/bin/parallel\" -j 8 --line-buffer"
 	assertContains "Compression should be applied when requested." "$result" "| zstd -9' | zstd -d"
+	l_single_quote_runner="sh -c '\''"
+	case "$result" in
+	*"$l_single_quote_runner"*) ;;
+	*)
+		fail "Remote runner should wrap the dataset command in single quotes."
+		;;
+	esac
 }
 
 test_ensure_parallel_remote_fetches_remote_parallel_path() {
@@ -857,8 +877,15 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	assertEquals "SSH must pass the control socket path as the next argument." "$g_ssh_origin_control_socket" "$log_line2"
 	assertEquals "ssh should connect to the requested origin host." "$g_option_O_origin_host" "$log_line3"
 	assertContains "Remote command should include the dataset listing pipeline." "$log_line4" '/usr/sbin/zfs list -Hr -o name zroot | "/opt/bin/parallel" -j 4 --line-buffer'
-	assertContains "Remote command should invoke the per-dataset runner." "$log_line4" 'sh -c \"'
-	assertContains "Remote command should preserve the \\$1 placeholder." "$log_line4" "\"\\$1\""
+	l_runner_snippet="sh -c '"
+	assertContains "Remote command should invoke the per-dataset runner." "$log_line4" "$l_runner_snippet"
+	l_literal_placeholder='"$1"'
+	assertContains "Remote command should preserve the \$1 placeholder." "$log_line4" "$l_literal_placeholder"
+	case "$log_line4" in
+	*'"\$1"'*)
+		fail "Remote runner should allow \$1 expansion without escaping."
+		;;
+	esac
 	assertContains "Compression pipeline should be preserved in the remote command." "$log_line4" "| zstd -9"
 }
 
