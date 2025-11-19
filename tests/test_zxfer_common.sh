@@ -18,6 +18,9 @@
 # shellcheck source=src/zxfer_get_zfs_list.sh
 . "$ZXFER_ROOT/src/zxfer_get_zfs_list.sh"
 
+# shellcheck source=src/zxfer_zfs_send_receive.sh
+. "$ZXFER_ROOT/src/zxfer_zfs_send_receive.sh"
+
 create_fake_ssh_bin() {
 	# Re-create the fake ssh helper after each cleanup so setUp() can freely
 	# truncate the temp directory without leaving a stale interpreter. The helper
@@ -206,6 +209,139 @@ test_quote_cli_tokens_blocks_shell_metacharacters() {
 	expected="'zstd' '-3;' 'touch' '/tmp/pwn' '|' 'cat'"
 
 	assertEquals "CLI tokens should remain literal even with metacharacters." "$expected" "$result"
+}
+
+test_split_tokens_on_whitespace_breaks_metacharacters() {
+	result=$(split_tokens_on_whitespace "cmd;rm -rf|grep foo&echo done")
+	expected=$(printf '%s\n' "cmd;" "rm" "-rf|" "grep" "foo&" "echo" "done")
+
+	assertEquals "Tokenizer should break arguments on whitespace while leaving metacharacters literal." "$expected" "$result"
+}
+
+test_quote_token_stream_preserves_each_token() {
+	tokens=$(printf '%s\n' "alpha" "beta value" "" "gamma")
+	result=$(quote_token_stream "$tokens")
+	expected="'alpha' 'beta value' 'gamma'"
+
+	assertEquals "Token stream quoting should ignore blank lines and wrap each entry." "$expected" "$result"
+}
+
+test_run_zfs_cmd_for_spec_routes_to_source_runner() {
+	result=$(
+		g_LZFS="/sbin/zfs"
+		g_RZFS="/usr/sbin/zfs"
+		run_source_zfs_cmd() { printf 'source %s %s\n' "$1" "$2"; }
+		run_destination_zfs_cmd() { printf 'destination %s\n' "$1"; }
+		run_zfs_cmd_for_spec "/sbin/zfs" list tank/fs
+	)
+
+	assertEquals "Spec matching g_LZFS should call run_source_zfs_cmd." "source list tank/fs" "$result"
+}
+
+test_run_zfs_cmd_for_spec_routes_to_destination_runner() {
+	result=$(
+		g_LZFS="/sbin/zfs"
+		g_RZFS="/usr/sbin/zfs"
+		run_source_zfs_cmd() { printf 'source %s\n' "$1"; }
+		run_destination_zfs_cmd() { printf 'destination %s %s\n' "$1" "$2"; }
+		run_zfs_cmd_for_spec "/usr/sbin/zfs" get name tank/dst
+	)
+
+	assertEquals "Spec matching g_RZFS should call run_destination_zfs_cmd." "destination get name" "$result"
+}
+
+test_run_zfs_cmd_for_spec_executes_literal_command_when_not_wrapped() {
+	tool="$TEST_TMPDIR/echo_tool"
+	cat >"$tool" <<'EOF'
+#!/bin/sh
+echo "$@"
+EOF
+	chmod +x "$tool"
+
+	result=$(run_zfs_cmd_for_spec "$tool" alpha beta)
+
+	assertEquals "Arbitrary command specs should be executed directly." "alpha beta" "$result"
+}
+
+test_sanitize_backup_component_replaces_invalid_characters() {
+	result=$(sanitize_backup_component "../unsafe path!")
+	assertEquals ".._unsafe_path_" "$result"
+}
+
+test_sanitize_dataset_relpath_normalizes_nested_segments() {
+	result=$(sanitize_dataset_relpath "/tank/src//child-")
+	assertEquals "tank/src/child-" "$result"
+}
+
+test_get_backup_storage_dir_derives_detached_layout() {
+	g_backup_storage_root="$TEST_TMPDIR/backup_root"
+	result=$(get_backup_storage_dir "-" "tank/src/child")
+	expected="$g_backup_storage_root/detached/tank/src/child"
+
+	assertEquals "Detached mountpoints should include sanitized dataset path." "$expected" "$result"
+}
+
+test_backup_owner_uid_is_allowed_accepts_root_and_effective_uid() {
+	result_root=$(
+		get_effective_user_uid() { printf '%s\n' 1000; }
+		if backup_owner_uid_is_allowed 0; then echo ok; else echo fail; fi
+	)
+	assertEquals "Root must always be allowed." "ok" "$result_root"
+
+	result_user=$(
+		get_effective_user_uid() { printf '%s\n' 4242; }
+		if backup_owner_uid_is_allowed 4242; then echo ok; else echo fail; fi
+	)
+	assertEquals "Effective UID should be permitted when matching the owner." "ok" "$result_user"
+}
+
+test_describe_expected_backup_owner_includes_effective_uid_when_non_root() {
+	result=$(
+		get_effective_user_uid() { printf '%s\n' 9999; }
+		describe_expected_backup_owner
+	)
+	assertEquals "root (UID 0) or UID 9999" "$result"
+}
+
+test_require_secure_backup_file_rejects_non_0600_permissions() {
+	tmp_file="$TEST_TMPDIR/insecure_backup"
+	: >"$tmp_file"
+	(
+		throw_error() {
+			printf 'ERROR:%s' "$1"
+			exit ${2:-1}
+		}
+		get_path_owner_uid() { printf '%s\n' 0; }
+		get_path_mode_octal() { printf '%s\n' 644; }
+		require_secure_backup_file "$tmp_file"
+	) >/dev/null 2>&1
+	status=$?
+	assertEquals "Insecure permissions should trigger an error." 1 "$status"
+}
+
+test_require_secure_backup_file_accepts_secure_metadata() {
+	tmp_file="$TEST_TMPDIR/secure_backup"
+	: >"$tmp_file"
+	(
+		throw_error() {
+			echo "unexpected"
+			exit ${2:-1}
+		}
+		get_path_owner_uid() { printf '%s\n' 0; }
+		get_path_mode_octal() { printf '%s\n' 600; }
+		require_secure_backup_file "$tmp_file"
+	)
+	status=$?
+	assertEquals "Secure metadata should pass validation." 0 "$status"
+}
+
+test_ensure_local_backup_dir_creates_secure_directory() {
+	l_dir="$TEST_TMPDIR/local_backup"
+	rm -rf "$l_dir"
+	ensure_local_backup_dir "$l_dir"
+	assertTrue "Secure directory should be created." "[ -d '$l_dir' ]"
+	perms=$(stat -f '%Lp' "$l_dir" 2>/dev/null || stat -c '%a' "$l_dir")
+	assertEquals "Backup directory must be chmod 700." "700" "$perms"
 }
 
 test_invoke_ssh_command_for_host_preserves_argument_boundaries() {
@@ -991,6 +1127,334 @@ EOF
 	inspect_delete_snap 0 "tank/zfsbackup/doET/tank"
 
 	assertEquals "tank/zfsbackup/doET/tank@zxfer_30473_20251114214157" "$g_last_common_snap"
+}
+
+test_get_dest_snapshots_to_delete_per_dataset_returns_extra_dest_entries() {
+	g_delete_source_tmp_file=$(mktemp -t zxfer_src.XXXXXX)
+	g_delete_dest_tmp_file=$(mktemp -t zxfer_dst.XXXXXX)
+	g_delete_snapshots_to_delete_tmp_file=$(mktemp -t zxfer_diff.XXXXXX)
+	source_list=$(printf '%s\n%s' "tank/fs@s1" "tank/fs@s2")
+	dest_list=$(printf '%s\n%s' "tank/fs@s1" "tank/fs@s3")
+	result=$(get_dest_snapshots_to_delete_per_dataset "$source_list" "$dest_list")
+	assertEquals "tank/fs@s3" "$result"
+	rm -f "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" "$g_delete_snapshots_to_delete_tmp_file"
+}
+
+test_set_src_snapshot_transfer_list_collects_newer_snapshots() {
+	g_last_common_snap="tank/fs@snap1"
+	set_src_snapshot_transfer_list "tank/fs@snap3 tank/fs@snap2 tank/fs@snap1" "tank/fs"
+	expected=$(printf '%s\n%s' "tank/fs@snap2" "tank/fs@snap3")
+	assertEquals "$expected" "$g_src_snapshot_transfer_list"
+}
+
+test_delete_snaps_invokes_destroy_for_missing_snapshots() {
+	log="$TEST_TMPDIR/delete_snap_cmd.log"
+	g_delete_source_tmp_file=$(mktemp -t zxfer_src.XXXXXX)
+	g_delete_dest_tmp_file=$(mktemp -t zxfer_dst.XXXXXX)
+	g_delete_snapshots_to_delete_tmp_file=$(mktemp -t zxfer_diff.XXXXXX)
+	source_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+	dest_list=$(printf '%s\n%s\n%s' "tank/fs@snap1" "tank/fs@snap2" "tank/fs@snap3")
+	(
+		g_RZFS="/sbin/zfs"
+		g_option_n_dryrun=0
+		execute_background_cmd() { printf '%s\n' "$1" >"$log"; }
+		delete_snaps "$source_list" "$dest_list"
+	)
+	result=$(cat "$log")
+	assertEquals "/sbin/zfs destroy tank/fs@snap3" "$result"
+	rm -f "$log" "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" "$g_delete_snapshots_to_delete_tmp_file"
+}
+
+test_grandfather_test_allows_young_snapshots() {
+	g_option_g_grandfather_protection=30
+	current=$(date +%s)
+	old=$((current - 3 * 86400))
+	result=$(
+		run_destination_zfs_cmd() {
+			if [ "$5" = "-p" ]; then
+				printf '%s\n' "$old"
+			else
+				printf '%s\n' "Mon Jan  1 00:00:00 UTC 2024"
+			fi
+		}
+		grandfather_test "tank/fs@snap"
+		echo "ok"
+	)
+	assertEquals "ok" "$result"
+}
+
+test_grandfather_test_blocks_old_snapshots() {
+	g_option_g_grandfather_protection=1
+	current=$(date +%s)
+	very_old=$((current - 10 * 86400))
+	(
+		throw_usage_error() {
+			echo "grandfather:$1"
+			exit 2
+		}
+		run_destination_zfs_cmd() {
+			if [ "$5" = "-p" ]; then
+				printf '%s\n' "$very_old"
+			else
+				printf '%s\n' "Sun Jan  1 00:00:00 UTC 2023"
+			fi
+		}
+		grandfather_test "tank/fs@ancient"
+	) >/dev/null 2>&1
+	assertEquals "Grandfather violations should exit with status 2." 2 "$?"
+}
+
+test_remove_sources_strips_source_suffix() {
+	l_oldifs=$IFS
+	IFS=","
+	remove_sources "compression=lz4=local,atime=off=override"
+	IFS=$l_oldifs
+	assertEquals "compression=lz4,atime=off" "$m_new_rmvs_pv"
+}
+
+test_remove_properties_drops_requested_entries() {
+	l_oldifs=$IFS
+	IFS=","
+	remove_properties "compression=lz4=local,atime=off=local" "atime"
+	IFS=$l_oldifs
+	assertEquals "compression=lz4=local" "$m_new_rmv_pvs"
+}
+
+test_resolve_human_vars_prefers_human_overrides() {
+	resolve_human_vars "compression=lz4=local,atime=on=local" "compression=lz4,atime=none"
+	assertEquals "compression=lz4=local,atime=none=local" "$human_results"
+}
+
+test_validate_override_properties_rejects_unknown_property() {
+	(
+		throw_usage_error() {
+			echo "invalid"
+			exit 2
+		}
+		validate_override_properties "copies=2" "compression=lz4=local"
+	) >/dev/null 2>&1
+	assertEquals "Unknown overrides should raise a usage error." 2 "$?"
+}
+
+test_validate_override_properties_accepts_known_property() {
+	validate_override_properties "compression=lz4" "compression=lz4=local"
+	assertEquals 0 "$?"
+}
+
+test_derive_override_lists_with_transfer_all_preserves_sources() {
+	result=$(derive_override_lists "compression=lz4=local,atime=off=local" "compression=lz4" 1 filesystem)
+	{
+		IFS= read -r override_line
+		IFS= read -r creation_line
+	} <<EOF
+$result
+EOF
+	assertEquals "compression=lz4=override,atime=off=local" "$override_line"
+	assertEquals "atime=off=local" "$creation_line"
+}
+
+test_derive_override_lists_without_transfer_all_uses_overrides_only() {
+	result=$(derive_override_lists "compression=lz4=local" "atime=off" 0 filesystem)
+	{
+		IFS= read -r override_line
+		IFS= read -r creation_line
+	} <<EOF
+$result
+EOF
+	assertEquals "atime=off=override" "$override_line"
+	assertEquals "" "$creation_line"
+}
+
+test_sanitize_property_list_removes_readonly_and_ignored_sets() {
+	list="compression=lz4=local,atime=off=local"
+	readonly="compression"
+	ignore="atime"
+	result=$(sanitize_property_list "$list" "$readonly" "$ignore")
+	assertEquals "" "$result"
+}
+
+test_strip_unsupported_properties_removes_matching_entries() {
+	unsupported_properties="checksum"
+	result=$(strip_unsupported_properties "compression=lz4=local,checksum=sha256=local" "checksum")
+	assertEquals "compression=lz4=local" "$result"
+}
+
+test_diff_properties_returns_expected_set_and_inherit_lists() {
+	result=$(diff_properties "compression=lz4=local,atime=off=received" "compression=lz4=local,atime=on=local" "")
+	{
+		IFS= read -r init_list
+		IFS= read -r set_list
+		IFS= read -r inherit_list
+	} <<EOF
+$result
+EOF
+	assertEquals "atime=off" "$init_list"
+	assertEquals "" "$set_list"
+	assertEquals "atime=off" "$inherit_list"
+}
+
+test_apply_property_changes_uses_initial_set_list_for_root_dataset() {
+	log="$TEST_TMPDIR/property_apply_initial.log"
+	set_runner() { printf 'set %s=%s %s\n' "$1" "$2" "$3" >>"$log"; }
+	inherit_runner() { printf 'inherit %s %s\n' "$1" "$2" >>"$log"; }
+	apply_property_changes "tank/dst" 1 "compression=lz4,atime=off" "copies=2" "checksum" set_runner inherit_runner
+	result=$(cat "$log")
+	expected="set compression=lz4 tank/dst
+set atime=off tank/dst"
+	assertEquals "$expected" "$result"
+	rm -f "$log"
+}
+
+test_apply_property_changes_sets_and_inherits_on_children() {
+	log="$TEST_TMPDIR/property_apply_child.log"
+	set_runner() { printf 'set %s=%s %s\n' "$1" "$2" "$3" >>"$log"; }
+	inherit_runner() { printf 'inherit %s %s\n' "$1" "$2" >>"$log"; }
+	apply_property_changes "tank/dst/child" 0 "compression=lz4" "atime=off" "encryption" set_runner inherit_runner
+	result=$(cat "$log")
+	expected="set atime=off tank/dst/child
+inherit encryption tank/dst/child"
+	assertEquals "$expected" "$result"
+	rm -f "$log"
+}
+
+test_write_destination_snapshot_list_to_files_normalizes_destination_path() {
+	full_file="$TEST_TMPDIR/dest_snapshots.txt"
+	norm_file="$TEST_TMPDIR/dest_snapshots_normalized.txt"
+	(
+		initial_source="tank/src"
+		g_destination="backup/dst"
+		g_initial_source_had_trailing_slash=0
+		g_RZFS="$TEST_TMPDIR/fake_rzfs"
+		cat >"$g_RZFS" <<'EOF'
+#!/bin/sh
+cat <<'DATA'
+backup/dst/src@snapA
+backup/dst/src@snapB
+DATA
+EOF
+		chmod +x "$g_RZFS"
+		exists_destination() { echo 1; }
+		write_destination_snapshot_list_to_files "$full_file" "$norm_file"
+	)
+	result=$(cat "$norm_file")
+	expected="tank/src@snapA
+tank/src@snapB"
+	assertEquals "Destination snapshots should be rewritten to match the source prefix." "$expected" "$result"
+}
+
+test_set_g_recursive_source_list_updates_dataset_caches() {
+	source_tmp=$(mktemp -t zxfer_srcsnap.XXXXXX)
+	dest_tmp=$(mktemp -t zxfer_dstsnap.XXXXXX)
+	cat <<'EOF' >"$source_tmp"
+tank/src@a
+tank/src@b
+tank/src/child@a
+EOF
+	cat <<'EOF' >"$dest_tmp"
+tank/src@a
+EOF
+	g_cmd_awk=${g_cmd_awk:-$(command -v awk)}
+	g_option_x_exclude_datasets=""
+	set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+	expected_list=$(printf '%s\n%s' "tank/src" "tank/src/child")
+	assertEquals "Missing datasets should be identified for replication." "$expected_list" "$g_recursive_source_list"
+	expected_datasets=$(printf '%s\n%s' "tank/src" "tank/src/child")
+	assertEquals "Dataset cache should include every source filesystem." "$expected_datasets" "$g_recursive_source_dataset_list"
+	rm -f "$source_tmp" "$dest_tmp"
+}
+
+test_calculate_size_estimate_uses_incremental_send_probe() {
+	result=$(
+		run_source_zfs_cmd() { printf 'size\t2048\n'; }
+		calculate_size_estimate "tank/fs@snap2" "tank/fs@snap1"
+	)
+	assertEquals "2048" "$result"
+}
+
+test_calculate_size_estimate_handles_full_send_estimate() {
+	result=$(
+		run_source_zfs_cmd() { printf 'size\t1024\n'; }
+		calculate_size_estimate "tank/fs@snap1" ""
+	)
+	assertEquals "1024" "$result"
+}
+
+test_setup_progress_dialog_substitutes_placeholders() {
+	g_option_D_display_progress_bar="pv -s %%size%% -N %%title%%"
+	result=$(setup_progress_dialog 4096 "tank/fs@snap")
+	assertEquals "pv -s 4096 -N tank/fs@snap" "$result"
+}
+
+test_wrap_command_with_ssh_without_compression_quotes_command() {
+	result=$(
+		get_ssh_cmd_for_host() { echo "/usr/bin/ssh"; }
+		quote_host_spec_tokens() { echo "'backup@example.com'"; }
+		wrap_command_with_ssh "zfs send tank/src@snap" "backup@example.com" 0 send
+	)
+	assertEquals "/usr/bin/ssh 'backup@example.com' \"zfs send tank/src@snap\"" "$result"
+}
+
+test_wrap_command_with_ssh_streams_compression_on_send() {
+	result=$(
+		g_cmd_compress_safe="gzip"
+		g_cmd_decompress_safe="gunzip"
+		get_ssh_cmd_for_host() { echo "/usr/bin/ssh"; }
+		quote_host_spec_tokens() { echo "'backup'"; }
+		wrap_command_with_ssh "zfs send tank/src@snap" "backup" 1 send
+	)
+	assertEquals "/usr/bin/ssh 'backup' \"zfs send tank/src@snap | gzip\" | gunzip" "$result"
+}
+
+test_get_send_command_generates_incremental_streams_with_flags() {
+	g_cmd_zfs="/sbin/zfs"
+	g_option_V_very_verbose=1
+	g_option_w_raw_send=1
+	result=$(get_send_command "tank/fs@snap1" "tank/fs@snap2")
+	assertEquals "/sbin/zfs send -v -w -I tank/fs@snap1 tank/fs@snap2" "$result"
+}
+
+test_get_send_command_emits_full_stream_when_no_common_snapshot() {
+	g_cmd_zfs="/sbin/zfs"
+	g_option_V_very_verbose=0
+	g_option_w_raw_send=0
+	result=$(get_send_command "" "tank/fs@snap1")
+	assertEquals "/sbin/zfs send   tank/fs@snap1" "$result"
+}
+
+test_get_receive_command_honors_force_flag() {
+	g_cmd_zfs="/sbin/zfs"
+	g_option_F_force_rollback="-F"
+	result=$(get_receive_command "tank/dst")
+	assertEquals "/sbin/zfs receive -F tank/dst" "$result"
+}
+
+test_wait_for_zfs_send_jobs_clears_pid_list_on_success() {
+	sleep 0.05 &
+	pid1=$!
+	sleep 0.05 &
+	pid2=$!
+	g_zfs_send_job_pids="$pid1 $pid2"
+	g_count_zfs_send_jobs=2
+	wait_for_zfs_send_jobs "unit"
+	assertEquals "" "$g_zfs_send_job_pids"
+	assertEquals 0 "$g_count_zfs_send_jobs"
+}
+
+test_wait_for_zfs_send_jobs_reports_failure() {
+	(
+		throw_error() {
+			echo "send failure"
+			exit 1
+		}
+		sleep 1 &
+		ok_pid=$!
+		sh -c 'exit 3' &
+		bad_pid=$!
+		g_zfs_send_job_pids="$ok_pid $bad_pid"
+		g_count_zfs_send_jobs=2
+		wait_for_zfs_send_jobs "failure"
+	) >/dev/null 2>&1
+	assertEquals "Job failures should surface via throw_error." 1 "$?"
 }
 
 . "$SHUNIT2_BIN"

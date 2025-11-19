@@ -155,8 +155,8 @@ extended_usage_error_tests() {
 		"Source and destination must not begin with \"/\"." \
 		-R tank/src /backup/target
 
-	# Test snapshot source (not supported for recursive/non-recursive flags in this way usually, 
-	# or at least zxfer often expects filesystems. 
+	# Test snapshot source (not supported for recursive/non-recursive flags in this way usually,
+	# or at least zxfer often expects filesystems.
 	# Based on code reading, check_snapshot should reject if it looks like a snapshot but we wanted a fs)
 	# Actually zxfer_zfs_mode.sh:303 checks if source is a snapshot and fails if so for normal mode.
 	assert_error_case "Source is a snapshot" \
@@ -215,7 +215,7 @@ snapshot_deletion_test() {
 
 	# Run with -d (snap1 should be deleted)
 	run_zxfer -v -d -R "$src_dataset" "$dest_root"
-	
+
 	if zfs list -t snapshot "$dest_dataset@snap1" >/dev/null 2>&1; then
 		fail "Snapshot snap1 should have been deleted."
 	fi

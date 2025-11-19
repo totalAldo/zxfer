@@ -188,9 +188,12 @@ delete_snaps() {
 		l_snapshot=$(extract_snapshot_name "$l_snap_to_delete")
 
 		# prepend this snapshot to the list of snapshots to delete in a comma
-		# delimited list. It is ok for the list to have a trailing comma.
+		# delimited list; the trailing comma is trimmed before issuing zfs destroy.
 		l_unprotected_snaps_to_delete="$l_snapshot,$l_unprotected_snaps_to_delete"
 	done
+
+	# drop any trailing delimiter so the destroy command receives valid names
+	l_unprotected_snaps_to_delete=${l_unprotected_snaps_to_delete%,}
 
 	# if there are no snapshots because they are all protected by the grandfather
 	# option, then there is nothing to do
