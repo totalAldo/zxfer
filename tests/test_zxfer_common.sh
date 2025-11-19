@@ -227,6 +227,7 @@ test_quote_token_stream_preserves_each_token() {
 }
 
 test_run_zfs_cmd_for_spec_routes_to_source_runner() {
+	# shellcheck disable=SC2030,SC2031
 	result=$(
 		g_LZFS="/sbin/zfs"
 		g_RZFS="/usr/sbin/zfs"
@@ -239,6 +240,7 @@ test_run_zfs_cmd_for_spec_routes_to_source_runner() {
 }
 
 test_run_zfs_cmd_for_spec_routes_to_destination_runner() {
+	# shellcheck disable=SC2030,SC2031
 	result=$(
 		g_LZFS="/sbin/zfs"
 		g_RZFS="/usr/sbin/zfs"
@@ -309,7 +311,7 @@ test_require_secure_backup_file_rejects_non_0600_permissions() {
 	(
 		throw_error() {
 			printf 'ERROR:%s' "$1"
-			exit ${2:-1}
+			exit "${2:-1}"
 		}
 		get_path_owner_uid() { printf '%s\n' 0; }
 		get_path_mode_octal() { printf '%s\n' 644; }
@@ -325,7 +327,7 @@ test_require_secure_backup_file_accepts_secure_metadata() {
 	(
 		throw_error() {
 			echo "unexpected"
-			exit ${2:-1}
+			exit "${2:-1}"
 		}
 		get_path_owner_uid() { printf '%s\n' 0; }
 		get_path_mode_octal() { printf '%s\n' 600; }
@@ -699,6 +701,7 @@ test_execute_background_cmd_writes_output_file() {
 test_exists_destination_returns_one_on_success() {
 	# exists_destination checks the remote ZFS command stored in g_RZFS;
 	# when the check succeeds, the helper returns 1.
+	# shellcheck disable=SC2031
 	old_g_RZFS=${g_RZFS-}
 	g_RZFS=true
 
@@ -712,6 +715,7 @@ test_exists_destination_returns_one_on_success() {
 test_exists_destination_returns_zero_on_failure() {
 	# When the remote ZFS check fails, the helper should return 0 so callers
 	# can detect that the destination needs to be created.
+	# shellcheck disable=SC2031
 	old_g_RZFS=${g_RZFS-}
 	g_RZFS=false
 
@@ -890,10 +894,10 @@ test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
 		fail "Runner should not rely on csh-incompatible escaped quotes."
 		;;
 	esac
-	l_literal_placeholder='"$1"'
+	l_literal_placeholder="\"\$1\""
 	assertContains "Runner should pass datasets via \$1." "$result" "$l_literal_placeholder"
 	case "$result" in
-	*'"\$1"'*)
+	*"\"\\$1\""*)
 		fail "Runner should allow \$1 expansion without escaping."
 		;;
 	esac
@@ -1015,10 +1019,10 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	assertContains "Remote command should include the dataset listing pipeline." "$log_line4" '/usr/sbin/zfs list -Hr -o name zroot | "/opt/bin/parallel" -j 4 --line-buffer'
 	l_runner_snippet="sh -c '"
 	assertContains "Remote command should invoke the per-dataset runner." "$log_line4" "$l_runner_snippet"
-	l_literal_placeholder='"$1"'
+	l_literal_placeholder="\"\$1\""
 	assertContains "Remote command should preserve the \$1 placeholder." "$log_line4" "$l_literal_placeholder"
 	case "$log_line4" in
-	*'"\$1"'*)
+	*"\"\\$1\""*)
 		fail "Remote runner should allow \$1 expansion without escaping."
 		;;
 	esac
@@ -1295,7 +1299,9 @@ EOF
 
 test_apply_property_changes_uses_initial_set_list_for_root_dataset() {
 	log="$TEST_TMPDIR/property_apply_initial.log"
+	# shellcheck disable=SC2329
 	set_runner() { printf 'set %s=%s %s\n' "$1" "$2" "$3" >>"$log"; }
+	# shellcheck disable=SC2329
 	inherit_runner() { printf 'inherit %s %s\n' "$1" "$2" >>"$log"; }
 	apply_property_changes "tank/dst" 1 "compression=lz4,atime=off" "copies=2" "checksum" set_runner inherit_runner
 	result=$(cat "$log")
@@ -1307,7 +1313,9 @@ set atime=off tank/dst"
 
 test_apply_property_changes_sets_and_inherits_on_children() {
 	log="$TEST_TMPDIR/property_apply_child.log"
+	# shellcheck disable=SC2329
 	set_runner() { printf 'set %s=%s %s\n' "$1" "$2" "$3" >>"$log"; }
+	# shellcheck disable=SC2329
 	inherit_runner() { printf 'inherit %s %s\n' "$1" "$2" >>"$log"; }
 	apply_property_changes "tank/dst/child" 0 "compression=lz4" "atime=off" "encryption" set_runner inherit_runner
 	result=$(cat "$log")
@@ -1320,6 +1328,7 @@ inherit encryption tank/dst/child"
 test_write_destination_snapshot_list_to_files_normalizes_destination_path() {
 	full_file="$TEST_TMPDIR/dest_snapshots.txt"
 	norm_file="$TEST_TMPDIR/dest_snapshots_normalized.txt"
+	# shellcheck disable=SC2030,SC2031
 	(
 		initial_source="tank/src"
 		g_destination="backup/dst"
