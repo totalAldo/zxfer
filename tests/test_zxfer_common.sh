@@ -352,15 +352,24 @@ test_ensure_local_backup_dir_creates_secure_directory() {
 	rm -rf "$l_dir"
 	ensure_local_backup_dir "$l_dir"
 	assertTrue "Secure directory should be created." "[ -d '$l_dir' ]"
-	perms=$(stat -f '%Lp' "$l_dir" 2>/dev/null || stat -c '%a' "$l_dir")
+	perms=$(stat -c '%a' "$l_dir" 2>/dev/null || stat -f '%Lp' "$l_dir" 2>/dev/null)
 	assertEquals "Backup directory must be chmod 700." "700" "$perms"
 }
 
 test_invoke_ssh_command_for_host_preserves_argument_boundaries() {
 	fake_cmd="$FAKE_SSH_BIN -q -p 2222"
 	host_spec="backup@example.com pfexec doas"
-	result=$(invoke_ssh_command_for_host "$fake_cmd" "$host_spec" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup")
-	expected=$(printf "%s\\n" "$FAKE_SSH_BIN" "-q" "-p" "2222" "backup@example.com" "pfexec" "doas" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup")
+	log_file="$TEST_TMPDIR/invoke_cmd.log"
+	: >"$log_file"
+	FAKE_SSH_LOG="$log_file"
+	FAKE_SSH_SUPPRESS_STDOUT=1
+	export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+
+	invoke_ssh_command_for_host "$fake_cmd" "$host_spec" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup"
+
+	unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+	expected=$(printf '%s\n' "-q" "-p" "2222" "backup@example.com" "pfexec" "doas" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup")
+	result=$(cat "$log_file")
 
 	assertEquals "ssh helper should keep multi-word host specs and remote commands intact." "$expected" "$result"
 }
