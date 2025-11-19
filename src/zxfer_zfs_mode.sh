@@ -259,13 +259,22 @@ copy_filesystems() {
 	fi
 
 	l_iteration_list=$g_recursive_source_list
+	l_force_dataset_iteration=0
 
 	if [ "$g_option_R_recursive" != "" ] && [ $l_property_pass_required -eq 1 ]; then
-		l_iteration_list=$(printf '%s\n%s\n' "$g_recursive_source_list" "$g_recursive_source_dataset_list" |
+		l_force_dataset_iteration=1
+	fi
+
+	if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then
+		l_force_dataset_iteration=1
+	fi
+
+	if [ "$l_force_dataset_iteration" -eq 1 ]; then
+		l_iteration_list=$(printf '%s\n%s\n' "$l_iteration_list" "$g_recursive_source_dataset_list" |
 			grep -v '^[[:space:]]*$' | sort -u)
 	fi
 
-	if [ "$g_option_R_recursive" != "" ] && [ $l_property_pass_required -eq 1 ] && [ "$l_iteration_list" = "" ]; then
+	if [ "$l_iteration_list" = "" ] && [ "$l_force_dataset_iteration" -eq 1 ]; then
 		l_iteration_list=$initial_source
 	fi
 

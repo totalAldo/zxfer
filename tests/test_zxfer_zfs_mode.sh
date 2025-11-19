@@ -56,10 +56,14 @@ setUp() {
 	g_option_s_make_snapshot=0
 	g_option_m_migrate=0
 	g_option_c_services=""
+	g_option_d_delete_destination_snapshots=0
+	g_option_P_transfer_property=0
+	g_option_o_override_property=""
 	g_destination="backup/target"
 	g_initial_source_had_trailing_slash=0
 	initial_source=""
 	g_recursive_source_list=""
+	g_recursive_source_dataset_list=""
 	g_readonly_properties="type,mountpoint,creation"
 	g_LZFS="mock_zfs_tool"
 }
@@ -232,6 +236,75 @@ inspect 0 tank/src
 set tank/src/child
 inspect 0 tank/src/child"
 	assertEquals "Grandfather protection should inspect every dataset slated for replication." \
+		"$expected" "$(cat "$log")"
+}
+
+test_copy_filesystems_inspects_source_when_only_deletions_pending() {
+	g_option_d_delete_destination_snapshots=1
+	initial_source="tank/src"
+	g_recursive_source_list=""
+	g_recursive_source_dataset_list="tank/src"
+	log="$TEST_TMPDIR/delete_only_single.log"
+	rm -f "$log"
+
+	(
+		COPY_FS_LOG="$log"
+		set_actual_dest() {
+			g_actual_dest=$1
+			printf 'set %s\n' "$1" >>"$COPY_FS_LOG"
+		}
+		inspect_delete_snap() {
+			printf 'inspect %s %s\n' "$1" "$2" >>"$COPY_FS_LOG"
+		}
+		copy_snapshots() {
+			printf 'copy %s\n' "$g_actual_dest" >>"$COPY_FS_LOG"
+		}
+		copy_filesystems
+	)
+
+	expected="set tank/src
+inspect 1 tank/src
+copy tank/src"
+	assertEquals "-d should still inspect the dataset even when no new snapshots exist." \
+		"$expected" "$(cat "$log")"
+}
+
+test_copy_filesystems_inspects_all_datasets_for_recursive_deletes() {
+	g_option_d_delete_destination_snapshots=1
+	g_option_R_recursive="tank/src"
+	initial_source="tank/src"
+	g_recursive_source_list=""
+	g_recursive_source_dataset_list="tank/src
+tank/src/child1
+tank/src/child2"
+	log="$TEST_TMPDIR/delete_only_recursive.log"
+	rm -f "$log"
+
+	(
+		COPY_FS_LOG="$log"
+		set_actual_dest() {
+			g_actual_dest=$1
+			printf 'set %s\n' "$1" >>"$COPY_FS_LOG"
+		}
+		inspect_delete_snap() {
+			printf 'inspect %s %s\n' "$1" "$2" >>"$COPY_FS_LOG"
+		}
+		copy_snapshots() {
+			printf 'copy %s\n' "$g_actual_dest" >>"$COPY_FS_LOG"
+		}
+		copy_filesystems
+	)
+
+	expected="set tank/src
+inspect 1 tank/src
+copy tank/src
+set tank/src/child1
+inspect 1 tank/src/child1
+copy tank/src/child1
+set tank/src/child2
+inspect 1 tank/src/child2
+copy tank/src/child2"
+	assertEquals "Recursive -d runs should inspect every dataset even without pending sends." \
 		"$expected" "$(cat "$log")"
 }
 

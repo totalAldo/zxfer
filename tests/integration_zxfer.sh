@@ -119,6 +119,111 @@ usage_error_tests() {
 	log "Usage error tests passed"
 }
 
+assert_error_case() {
+	l_desc=$1
+	l_expected_msg=$2
+	l_expected_status=${3:-1}
+	shift 3
+
+	set +e
+	l_output=$("$ZXFER_BIN" "$@" 2>&1)
+	l_status=$?
+	set -e
+
+	if [ "$l_status" -eq 0 ]; then
+		fail "$l_desc: expected zxfer to exit with error status $l_expected_status."
+	fi
+
+	if [ "$l_status" -ne "$l_expected_status" ]; then
+		fail "$l_desc: expected exit status $l_expected_status, got $l_status. Output: $l_output"
+	fi
+
+	if ! printf '%s\n' "$l_output" | grep -F "$l_expected_msg" >/dev/null 2>&1; then
+		fail "$l_desc: output missing \"$l_expected_msg\". Output: $l_output"
+	fi
+}
+
+extended_usage_error_tests() {
+	log "Starting extended usage error tests"
+
+	# Test sources/destinations starting with / (should fail validation)
+	assert_usage_error_case "Source starting with /" \
+		"Source and destination must not begin with \"/\"." \
+		-R /tank/src backup/target
+
+	assert_usage_error_case "Destination starting with /" \
+		"Source and destination must not begin with \"/\"." \
+		-R tank/src /backup/target
+
+	# Test snapshot source (not supported for recursive/non-recursive flags in this way usually, 
+	# or at least zxfer often expects filesystems. 
+	# Based on code reading, check_snapshot should reject if it looks like a snapshot but we wanted a fs)
+	# Actually zxfer_zfs_mode.sh:303 checks if source is a snapshot and fails if so for normal mode.
+	assert_error_case "Source is a snapshot" \
+		"Snapshots are not allowed as a source." \
+		1 \
+		-R tank/src@snap backup/target
+
+	# Test -c without -m
+	assert_error_case "-c without -m" \
+		"When using -c, -m needs to be specified as well." \
+		1 \
+		-c svc:/network/ssh -R tank/src backup/target
+
+	log "Extended usage error tests passed"
+}
+
+snapshot_deletion_test() {
+	log "Starting snapshot deletion test"
+
+	src_dataset="$SRC_POOL/snapdel_src"
+	dest_root="$DEST_POOL/snapdel_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	# Create initial state
+	append_data_to_dataset "$src_dataset" "file.txt" "data1"
+	zfs snap -r "$src_dataset@snap1"
+	append_data_to_dataset "$src_dataset" "file.txt" "data2"
+	zfs snap -r "$src_dataset@snap2"
+
+	# Replicate
+	run_zxfer -v -R "$src_dataset" "$dest_root"
+	assert_snapshot_exists "$dest_dataset" "snap1"
+	assert_snapshot_exists "$dest_dataset" "snap2"
+
+	# Delete snap1 on source
+	zfs destroy -r "$src_dataset@snap1"
+
+	# Run without -d (snap1 should remain on dest)
+	run_zxfer -v -R "$src_dataset" "$dest_root"
+	assert_snapshot_exists "$dest_dataset" "snap1"
+	assert_snapshot_exists "$dest_dataset" "snap2"
+
+	# Run with -n -d (dry run, snap1 should remain)
+	# We capture output to verify it *would* delete
+	output=$(run_zxfer -v -n -d -R "$src_dataset" "$dest_root" 2>&1)
+	if ! printf '%s\n' "$output" | grep -q "zfs destroy .*@snap1"; then
+		fail "Dry run with -d did not propose destroying snap1. Output: $output"
+	fi
+	assert_snapshot_exists "$dest_dataset" "snap1"
+
+	# Run with -d (snap1 should be deleted)
+	run_zxfer -v -d -R "$src_dataset" "$dest_root"
+	
+	if zfs list -t snapshot "$dest_dataset@snap1" >/dev/null 2>&1; then
+		fail "Snapshot snap1 should have been deleted."
+	fi
+	assert_snapshot_exists "$dest_dataset" "snap2"
+
+	log "Snapshot deletion test passed"
+}
+
 cleanup() {
 	set +e
 	if [ -n "${SRC_POOL:-}" ] && zpool list "$SRC_POOL" >/dev/null 2>&1; then
@@ -333,6 +438,8 @@ main() {
 	basic_replication_test
 	generate_tests_replication
 	idempotent_replication_test
+	extended_usage_error_tests
+	snapshot_deletion_test
 
 	log "All integration tests passed."
 }
