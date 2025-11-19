@@ -132,6 +132,16 @@ fake_property_inherit_runner() {
 	FAKE_INHERIT_CALLS="${FAKE_INHERIT_CALLS}${1}@${2};"
 }
 
+property_set_logger() {
+	[ -n "${PROPERTY_LOG:-}" ] || return 1
+	printf 'set %s=%s %s\n' "$1" "$2" "$3" >>"$PROPERTY_LOG"
+}
+
+property_inherit_logger() {
+	[ -n "${PROPERTY_LOG:-}" ] || return 1
+	printf 'inherit %s %s\n' "$1" "$2" >>"$PROPERTY_LOG"
+}
+
 sort_property_list() {
 	l_list=$1
 	echo "$l_list" | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//'
@@ -1299,11 +1309,7 @@ EOF
 
 test_apply_property_changes_uses_initial_set_list_for_root_dataset() {
 	log="$TEST_TMPDIR/property_apply_initial.log"
-	# shellcheck disable=SC2329
-	set_runner() { printf 'set %s=%s %s\n' "$1" "$2" "$3" >>"$log"; }
-	# shellcheck disable=SC2329
-	inherit_runner() { printf 'inherit %s %s\n' "$1" "$2" >>"$log"; }
-	apply_property_changes "tank/dst" 1 "compression=lz4,atime=off" "copies=2" "checksum" set_runner inherit_runner
+	PROPERTY_LOG="$log" apply_property_changes "tank/dst" 1 "compression=lz4,atime=off" "copies=2" "checksum" property_set_logger property_inherit_logger
 	result=$(cat "$log")
 	expected="set compression=lz4 tank/dst
 set atime=off tank/dst"
@@ -1313,11 +1319,7 @@ set atime=off tank/dst"
 
 test_apply_property_changes_sets_and_inherits_on_children() {
 	log="$TEST_TMPDIR/property_apply_child.log"
-	# shellcheck disable=SC2329
-	set_runner() { printf 'set %s=%s %s\n' "$1" "$2" "$3" >>"$log"; }
-	# shellcheck disable=SC2329
-	inherit_runner() { printf 'inherit %s %s\n' "$1" "$2" >>"$log"; }
-	apply_property_changes "tank/dst/child" 0 "compression=lz4" "atime=off" "encryption" set_runner inherit_runner
+	PROPERTY_LOG="$log" apply_property_changes "tank/dst/child" 0 "compression=lz4" "atime=off" "encryption" property_set_logger property_inherit_logger
 	result=$(cat "$log")
 	expected="set atime=off tank/dst/child
 inherit encryption tank/dst/child"
