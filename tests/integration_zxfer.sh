@@ -231,6 +231,99 @@ extended_usage_error_tests() {
 	log "Extended usage error tests passed"
 }
 
+secure_path_dependency_tests() {
+	log "Starting secure PATH dependency tests"
+
+	mock_path="$WORKDIR/mock_secure_path"
+	rm -rf "$mock_path"
+	mkdir -p "$mock_path"
+	cat >"$mock_path/ssh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$mock_path/ssh"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+
+	set +e
+	output=$(ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -R tank/src backup/target 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "zxfer should fail when secure PATH lacks required tools."
+	fi
+	if ! printf '%s\n' "$output" | grep -q 'Required dependency "zfs" not found'; then
+		fail "Expected missing zfs dependency error. Output: $output"
+	fi
+
+	rm -rf "$mock_path"
+
+	log "Secure PATH dependency tests passed"
+}
+
+remote_migration_guard_tests() {
+	log "Starting remote/migration guard tests"
+
+	mock_bin_dir="$WORKDIR/mockbin"
+	rm -rf "$mock_bin_dir"
+	mkdir -p "$mock_bin_dir"
+	cat >"$mock_bin_dir/ssh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$mock_bin_dir/ssh"
+	secure_path="$mock_bin_dir:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+
+	# Using -m with a remote origin should be rejected before any replication starts.
+	ZXFER_SECURE_PATH="$secure_path" assert_usage_error_case "Migration with remote origin" \
+		"You cannot migrate to or from a remote host." \
+		-m -O remotehost -R tank/src backup/target
+
+	# Using -c without migration is already covered; ensure -c paired with a remote target also fails.
+	ZXFER_SECURE_PATH="$secure_path" assert_usage_error_case "Service stop with remote target" \
+		"You cannot migrate to or from a remote host." \
+		-c svc:/network/ssh -T remotehost -R tank/src backup/target
+
+	rm -rf "$mock_bin_dir"
+
+	log "Remote/migration guard tests passed"
+}
+
+missing_parallel_error_test() {
+	log "Starting missing GNU parallel error test"
+
+	mock_path="$WORKDIR/mock_no_parallel"
+	rm -rf "$mock_path"
+	mkdir -p "$mock_path"
+
+	# Provide required dependencies except GNU parallel.
+	for bin in zfs ssh awk cat; do
+		actual=$(command -v "$bin" 2>/dev/null || true)
+		if [ "$actual" = "" ]; then
+			fail "Required binary $bin not found on host; cannot run missing parallel test."
+		fi
+		ln -s "$actual" "$mock_path/$bin"
+	done
+
+	secure_path="$mock_path"
+
+	set +e
+	output=$(ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -R tank/src backup/target 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "zxfer should fail when GNU parallel is missing for -j>1."
+	fi
+	if ! printf '%s\n' "$output" | grep -q "The -j option requires GNU parallel but it was not found in PATH on the local host."; then
+		fail "Missing parallel error message not found. Output: $output"
+	fi
+
+	rm -rf "$mock_path"
+
+	log "Missing GNU parallel error test passed"
+}
+
 consistency_option_validation_tests() {
 	log "Starting option consistency tests"
 
@@ -245,6 +338,10 @@ consistency_option_validation_tests() {
 	assert_usage_error_case "Compression without remote" \
 		"-z option can only be used with -O or -T option" \
 		-z -R tank/src backup/target
+
+	assert_usage_error_case "Empty compression command" \
+		"Compression command (-Z/ZXFER_COMPRESSION) cannot be empty." \
+		-Z "" -R tank/src backup/target
 
 	assert_usage_error_case "Zero job count" \
 		"The -j option requires a job count of at least 1." \
@@ -851,6 +948,290 @@ dry_run_deletion_test() {
 	log "Dry-run deletion test passed"
 }
 
+delete_dest_only_snapshot_test() {
+	log "Starting destination-only snapshot delete test"
+
+	src_dataset="$SRC_POOL/destonly_src"
+	dest_root="$DEST_POOL/destonly_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "file.txt" "base"
+	zfs snap -r "$src_dataset@base"
+
+	run_zxfer -v -R "$src_dataset" "$dest_root"
+	assert_snapshot_exists "$dest_dataset" "base"
+
+	# Create a destination-only snapshot that should be removed by -d even when no new sends are pending.
+	zfs snap -r "$dest_dataset@destonly"
+
+	set +e
+	output=$("$ZXFER_BIN" -v -Y -d -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -ne 0 ]; then
+		fail "zxfer -Y -d run failed. Output: $output"
+	fi
+
+	wait_for_destroy_process_to_finish "$dest_dataset" "destonly" 30
+	wait_for_snapshot_absent "$dest_dataset" "destonly"
+	assert_snapshot_exists "$dest_dataset" "base"
+
+	iter_count=$(printf '%s\n' "$output" | grep -c "Begin Iteration")
+	if [ "$iter_count" -lt 1 ]; then
+		fail "Expected yield loop iterations when deleting destination-only snapshots; saw $iter_count. Output: $output"
+	fi
+
+	log "Destination-only snapshot delete test passed"
+}
+
+migration_unmounted_guard_test() {
+	log "Starting migration unmounted guard test"
+
+	src_dataset="$SRC_POOL/unmounted_src"
+	dest_root="$DEST_POOL/unmounted_dest"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	# Unmount the source to trigger the guard.
+	if ! zfs unmount "$src_dataset"; then
+		fail "Failed to unmount $src_dataset to trigger migration guard."
+	fi
+
+	set +e
+	output=$("$ZXFER_BIN" -v -m -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "Migration guard should fail when source is unmounted."
+	fi
+	if ! printf '%s\n' "$output" | grep -q "The source filesystem is not mounted, cannot use -m."; then
+		fail "Migration guard error message missing. Output: $output"
+	fi
+
+	log "Migration unmounted guard test passed"
+}
+
+grandfather_protection_test() {
+	log "Starting grandfather protection test"
+
+	src_dataset="$SRC_POOL/grand_src"
+	dest_root="$DEST_POOL/grand_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "file.txt" "one"
+	zfs snap -r "$src_dataset@base"
+
+	run_zxfer -v -R "$src_dataset" "$dest_root"
+	assert_snapshot_exists "$dest_dataset" "base"
+
+	# With -g 0, any deletion attempt should be rejected before destroying snapshots.
+	set +e
+	output=$("$ZXFER_BIN" -v -g 0 -d -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "Grandfather protection should fail when -g 0 blocks deletion."
+	fi
+	if ! printf '%s\n' "$output" | grep -q "grandfather"; then
+		fail "Grandfather protection message missing. Output: $output"
+	fi
+
+	assert_snapshot_exists "$dest_dataset" "base"
+
+	log "Grandfather protection test passed"
+}
+
+send_command_dryrun_test() {
+	log "Starting send command dry-run test"
+
+	src_dataset="$SRC_POOL/sendcmd_src"
+	dest_root="$DEST_POOL/sendcmd_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "file.txt" "one"
+	zfs snap -r "$src_dataset@snap1"
+	append_data_to_dataset "$src_dataset" "file.txt" "two"
+	zfs snap -r "$src_dataset@snap2"
+
+	set +e
+	output=$("$ZXFER_BIN" -v -V -w -n -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -ne 0 ]; then
+		fail "Dry-run send command test failed. Output: $output"
+	fi
+
+	if ! printf '%s\n' "$output" | grep -q "send -v -w -I"; then
+		fail "Expected raw incremental send command with verbosity in output. Output: $output"
+	fi
+
+	if zfs list "$dest_dataset" >/dev/null 2>&1; then
+		fail "Dry run should not create destination dataset $dest_dataset."
+	fi
+
+	log "Send command dry-run test passed"
+}
+
+property_backup_restore_test() {
+	log "Starting property backup/restore test"
+
+	src_dataset="$SRC_POOL/prop_backup_src"
+	dest_root="$DEST_POOL/prop_backup_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+	backup_dir="$WORKDIR/backup_props"
+
+	rm -rf "$backup_dir"
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	zfs set test:prop=one "$src_dataset"
+
+	# First run backs up properties into a hardened temp directory.
+	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$src_dataset" "$dest_root"
+
+	# Verify destination received the property and the backup file exists with a header.
+	dest_prop=$(zfs get -H -o value test:prop "$dest_dataset")
+	if [ "$dest_prop" != "one" ]; then
+		fail "Destination property expected 'one', got '$dest_prop'."
+	fi
+
+	backup_file=$(find "$backup_dir" -type f -name '*.zxfer_backup_info.*' | head -n 1)
+	if [ "$backup_file" = "" ]; then
+		fail "Backup metadata file was not written under $backup_dir."
+	fi
+	if ! grep -q "#zxfer property backup file;" "$backup_file"; then
+		fail "Backup metadata missing expected header."
+	fi
+
+	# Mutate destination then restore from backup metadata.
+	zfs set test:prop=mutated "$dest_dataset"
+	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -e -R "$src_dataset" "$dest_root"
+
+	dest_prop_after=$(zfs get -H -o value test:prop "$dest_dataset")
+	if [ "$dest_prop_after" != "one" ]; then
+		fail "Property restore expected 'one', got '$dest_prop_after'."
+	fi
+
+	log "Property backup/restore test passed"
+}
+
+backup_dir_symlink_guard_test() {
+	log "Starting backup directory symlink guard test"
+
+	src_dataset="$SRC_POOL/backup_symlink_src"
+	dest_root="$DEST_POOL/backup_symlink_dest"
+	backup_dir_link="$WORKDIR/backup_symlink"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+	rm -rf "$backup_dir_link"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	zfs set test:prop=one "$src_dataset"
+
+	ln -s /tmp "$backup_dir_link"
+
+	set +e
+	output=$(ZXFER_BACKUP_DIR="$backup_dir_link" "$ZXFER_BIN" -v -k -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "Backup write should fail when ZXFER_BACKUP_DIR is a symlink."
+	fi
+	if ! printf '%s\n' "$output" | grep -q "Refusing to use backup directory"; then
+		fail "Expected symlink guard error. Output: $output"
+	fi
+
+	rm -rf "$backup_dir_link"
+
+	log "Backup directory symlink guard test passed"
+}
+
+background_send_failure_test() {
+	log "Starting background send failure test"
+
+	src_dataset="$SRC_POOL/sendfail_src"
+	dest_root="$DEST_POOL/sendfail_dest"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "one"
+	zfs snap -r "$src_dataset@base"
+
+	real_zfs=$(command -v zfs 2>/dev/null || true)
+	if [ "$real_zfs" = "" ]; then
+		fail "zfs binary not found for send failure test."
+	fi
+
+	wrapper_dir="$WORKDIR/zfs_wrapper_fail_send"
+	rm -rf "$wrapper_dir"
+	mkdir -p "$wrapper_dir"
+	cat >"$wrapper_dir/zfs" <<EOF
+#!/bin/sh
+if [ "\$1" = "send" ]; then
+	exit 1
+fi
+exec "$real_zfs" "\$@"
+EOF
+	chmod +x "$wrapper_dir/zfs"
+
+	for bin in awk ssh cat zstd; do
+		real_bin=$(command -v "$bin" 2>/dev/null || true)
+		if [ "$real_bin" != "" ]; then
+			ln -sf "$real_bin" "$wrapper_dir/$bin"
+		fi
+	done
+
+	set +e
+	output=$(ZXFER_SECURE_PATH="$wrapper_dir" "$ZXFER_BIN" -v -j 2 -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	rm -rf "$wrapper_dir"
+
+	if [ "$status" -eq 0 ]; then
+		fail "zxfer should fail when zfs send exits non-zero."
+	fi
+	if ! printf '%s\n' "$output" | grep -q "zfs send/receive job failed"; then
+		fail "Expected send failure message. Output: $output"
+	fi
+
+	log "Background send failure test passed"
+}
+
 force_rollback_test() {
 	log "Starting force rollback test"
 
@@ -975,6 +1356,42 @@ idempotent_replication_test() {
 	log "Idempotent replication test passed"
 }
 
+yield_loop_dryrun_iteration_test() {
+	log "Starting yield loop dry-run iteration test"
+
+	src_dataset="$SRC_POOL/yield_src"
+	dest_root="$DEST_POOL/yield_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	zfs snap -r "$src_dataset@base"
+	ZXFER_BACKUP_DIR= run_zxfer -v -R "$src_dataset" "$dest_root"
+
+	# With no new snapshots to send, -Y -n should perform a single iteration.
+	set +e
+	output=$("$ZXFER_BIN" -v -Y -n -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -ne 0 ]; then
+		fail "Expected zxfer -Y -n to exit successfully. Output: $output"
+	fi
+
+	iter_count=$(printf '%s\n' "$output" | grep -c "Begin Iteration")
+	if [ "$iter_count" -ne 1 ]; then
+		fail "Expected a single iteration under -Y -n; found $iter_count. Output: $output"
+	fi
+
+	assert_snapshot_exists "$dest_dataset" "base"
+
+	log "Yield loop dry-run iteration test passed"
+}
+
 main() {
 	require_root
 	require_cmd zpool
@@ -1014,12 +1431,38 @@ main() {
 	log "Creating destination pool $DEST_POOL"
 	zpool create "$DEST_POOL" "$DEST_IMG"
 
-	TEST_SEQUENCE="usage_error_tests basic_replication_test non_recursive_replication_test \
-generate_tests_replication idempotent_replication_test auto_snapshot_replication_test \
-auto_snapshot_nonrecursive_test trailing_slash_destination_test exclude_filter_test \
-parallel_jobs_listing_test progress_wrapper_test job_limit_enforcement_test missing_destination_error_test invalid_override_property_test \
-dry_run_replication_test dry_run_deletion_test force_rollback_test \
-failure_handling_tests extended_usage_error_tests consistency_option_validation_tests snapshot_deletion_test"
+	TEST_SEQUENCE="usage_error_tests \
+basic_replication_test \
+non_recursive_replication_test \
+generate_tests_replication \
+idempotent_replication_test \
+auto_snapshot_replication_test \
+auto_snapshot_nonrecursive_test \
+trailing_slash_destination_test \
+exclude_filter_test \
+missing_destination_error_test \
+invalid_override_property_test \
+dry_run_replication_test \
+yield_loop_dryrun_iteration_test \
+force_rollback_test \
+failure_handling_tests \
+extended_usage_error_tests \
+consistency_option_validation_tests \
+snapshot_deletion_test \
+send_command_dryrun_test \
+background_send_failure_test \
+backup_dir_symlink_guard_test \
+grandfather_protection_test \
+migration_unmounted_guard_test \
+remote_migration_guard_tests \
+missing_parallel_error_test \
+secure_path_dependency_tests \
+property_backup_restore_test \
+delete_dest_only_snapshot_test \
+dry_run_deletion_test \
+progress_wrapper_test \
+job_limit_enforcement_test \
+parallel_jobs_listing_test"
 	set -- $TEST_SEQUENCE
 	TOTAL_TESTS=$#
 
