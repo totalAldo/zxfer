@@ -49,6 +49,11 @@ ensure_parallel_available_for_source_jobs() {
 		throw_error "The -j option requires GNU parallel but it was not found in PATH on the local host."
 	fi
 
+	# Ensure we are using GNU parallel and not a differing implementation.
+	if ! "$g_cmd_parallel" --version 2>/dev/null | head -n 1 | grep -q "GNU parallel"; then
+		throw_error "The -j option requires GNU parallel, but \"$g_cmd_parallel\" is not GNU parallel."
+	fi
+
 	if [ "$g_option_O_origin_host" = "" ]; then
 		return
 	fi
@@ -62,6 +67,10 @@ ensure_parallel_available_for_source_jobs() {
 
 	if [ "$l_remote_parallel" = "" ]; then
 		throw_error "GNU parallel not found on origin host $g_option_O_origin_host but -j $g_option_j_jobs was requested. Install GNU parallel remotely or rerun without -j."
+	fi
+
+	if ! $l_origin_ssh_cmd "$g_option_O_origin_host" "$l_remote_parallel --version" 2>/dev/null | head -n 1 | grep -q "GNU parallel"; then
+		throw_error "The -j option requires GNU parallel on origin host $g_option_O_origin_host, but \"$l_remote_parallel\" is not GNU parallel."
 	fi
 
 	g_origin_parallel_cmd=$l_remote_parallel
@@ -82,26 +91,18 @@ build_source_snapshot_list_cmd() {
 
 	if [ ! "$g_option_O_origin_host" = "" ]; then
 		l_parallel_path=$g_origin_parallel_cmd
-	else
-		l_parallel_path=$g_cmd_parallel
-	fi
-	l_parallel_invoke="\"$(escape_for_double_quotes "$l_parallel_path")\""
-
-	if [ ! "$g_option_O_origin_host" = "" ]; then
 		l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-		l_remote_parallel_cmd="$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot \"\$1\""
-		l_remote_parallel_runner="sh -c '$(escape_for_single_quotes "$l_remote_parallel_cmd")' sh"
 		l_origin_host_args=$g_option_O_origin_host_safe
 		if [ "$l_origin_host_args" = "" ]; then
 			l_origin_host_args=$(quote_host_spec_tokens "$g_option_O_origin_host")
 		fi
 
-		l_remote_pipeline="$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_remote_parallel_runner {}"
+		l_remote_parallel_runner="$g_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}"
+		l_remote_pipeline="$g_cmd_zfs list -Hr -o name $initial_source | $l_parallel_path -j $g_option_j_jobs --line-buffer '$l_remote_parallel_runner'"
 		if [ "$g_option_z_compress" -eq 1 ]; then
 			l_remote_pipeline="$l_remote_pipeline | zstd -9"
 		fi
-		l_remote_pipeline_quoted=$(escape_for_single_quotes "$l_remote_pipeline")
-		l_cmd="$l_origin_ssh_cmd $l_origin_host_args '$l_remote_pipeline_quoted'"
+		l_cmd="$l_origin_ssh_cmd $l_origin_host_args \"$l_remote_pipeline\""
 		if [ "$g_option_z_compress" -eq 1 ]; then
 			l_cmd="$l_cmd | zstd -d"
 		fi
@@ -109,9 +110,9 @@ build_source_snapshot_list_cmd() {
 		return
 	fi
 
-	l_local_parallel_cmd="$g_LZFS list -H -o name -s creation -d 1 -t snapshot \"\$1\""
-	l_local_parallel_runner="sh -c '$(escape_for_single_quotes "$l_local_parallel_cmd")' sh"
-	l_cmd="$g_LZFS list -Hr -o name $initial_source | $l_parallel_invoke -j $g_option_j_jobs --line-buffer $l_local_parallel_runner {}"
+	l_parallel_path=$g_cmd_parallel
+	l_local_parallel_runner="$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}"
+	l_cmd="$g_LZFS list -Hr -o name $initial_source | $l_parallel_path -j $g_option_j_jobs --line-buffer '$l_local_parallel_runner'"
 	printf '%s\n' "$l_cmd"
 }
 #

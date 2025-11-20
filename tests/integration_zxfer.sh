@@ -15,6 +15,13 @@ GREEN=$(printf '\033[32m')
 YELLOW=$(printf '\033[33m')
 RESET=$(printf '\033[0m')
 
+has_gnu_parallel() {
+	if ! command -v parallel >/dev/null 2>&1; then
+		return 1
+	fi
+	parallel --version 2>/dev/null | grep -q "GNU parallel"
+}
+
 require_cmd() {
 	l_cmd=$1
 	if ! command -v "$l_cmd" >/dev/null 2>&1; then
@@ -587,6 +594,65 @@ exclude_filter_test() {
 	log "Exclude filter test passed"
 }
 
+parallel_jobs_listing_test() {
+	log "Starting parallel jobs listing test"
+
+	if ! has_gnu_parallel; then
+		log "Skipping parallel jobs listing test (GNU parallel not available)"
+		return
+	fi
+
+	src_dataset="$SRC_POOL/parallel_list_src"
+	dest_root="$DEST_POOL/parallel_list_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "file.txt" "one"
+	zfs snap -r "$src_dataset@pl1"
+	append_data_to_dataset "$src_dataset" "file.txt" "two"
+	zfs snap -r "$src_dataset@pl2"
+
+	run_zxfer -v -j 2 -R "$src_dataset" "$dest_root"
+
+	assert_snapshot_exists "$dest_dataset" "pl1"
+	assert_snapshot_exists "$dest_dataset" "pl2"
+
+	log "Parallel jobs listing test passed"
+}
+
+progress_wrapper_test() {
+	log "Starting progress wrapper test"
+
+	if ! has_gnu_parallel; then
+		log "Skipping progress wrapper test (GNU parallel not available)"
+		return
+	fi
+
+	src_dataset="$SRC_POOL/progress_src"
+	dest_root="$DEST_POOL/progress_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "file.txt" "progress data"
+	zfs snap -r "$src_dataset@p1"
+
+	run_zxfer -v -j 2 -D "cat >/dev/null" -R "$src_dataset" "$dest_root"
+
+	assert_snapshot_exists "$dest_dataset" "p1"
+
+	log "Progress wrapper test passed"
+}
+
 dry_run_replication_test() {
 	log "Starting dry-run replication test"
 
@@ -813,8 +879,8 @@ main() {
 TEST_SEQUENCE="usage_error_tests basic_replication_test non_recursive_replication_test \
 generate_tests_replication idempotent_replication_test auto_snapshot_replication_test \
 auto_snapshot_nonrecursive_test trailing_slash_destination_test exclude_filter_test \
-dry_run_replication_test dry_run_deletion_test force_rollback_test extended_usage_error_tests \
-consistency_option_validation_tests snapshot_deletion_test"
+parallel_jobs_listing_test progress_wrapper_test dry_run_replication_test dry_run_deletion_test \
+force_rollback_test extended_usage_error_tests consistency_option_validation_tests snapshot_deletion_test"
 	set -- $TEST_SEQUENCE
 	TOTAL_TESTS=$#
 
