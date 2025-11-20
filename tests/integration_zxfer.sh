@@ -257,6 +257,22 @@ consistency_option_validation_tests() {
 	log "Option consistency tests passed"
 }
 
+failure_handling_tests() {
+	log "Starting missing dataset error tests"
+
+	# Ensure destination exists so the source failure path is hit.
+	dest_root="$DEST_POOL/failure_dest"
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs create "$dest_root"
+
+	assert_error_case "Missing source dataset" \
+		"Failed to retrieve snapshots from the source" \
+		3 \
+		-R "$SRC_POOL/no_such_dataset" "$dest_root"
+
+	log "Missing dataset error tests passed"
+}
+
 snapshot_deletion_test() {
 	log "Starting snapshot deletion test"
 
@@ -646,11 +662,71 @@ progress_wrapper_test() {
 	append_data_to_dataset "$src_dataset" "file.txt" "progress data"
 	zfs snap -r "$src_dataset@p1"
 
-	run_zxfer -v -j 2 -D "cat >/dev/null" -R "$src_dataset" "$dest_root"
+run_zxfer -v -j 2 -D "cat >/dev/null" -R "$src_dataset" "$dest_root"
 
 	assert_snapshot_exists "$dest_dataset" "p1"
 
 	log "Progress wrapper test passed"
+}
+
+missing_destination_error_test() {
+	log "Starting missing destination error test"
+
+	src_dataset="$SRC_POOL/missing_dest_src"
+
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+	zfs create "$src_dataset"
+	zfs snap -r "$src_dataset@p1"
+
+	set +e
+	output=$(run_zxfer -v -R "$src_dataset" nosuchdestpool/target 2>&1)
+	status=$?
+	set -e
+
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	if [ "$status" -eq 0 ]; then
+		fail "Missing destination list should cause zxfer to fail."
+	fi
+	if [ "$status" -ne 2 ]; then
+		fail "Missing destination list should exit with status 2, got $status. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "Failed to retrieve list of datasets from the destination"; then
+		fail "Missing destination error message missing. Output: $output"
+	fi
+
+	log "Missing destination error test passed"
+}
+
+invalid_override_property_test() {
+	log "Starting invalid override property test"
+
+	src_dataset="$SRC_POOL/invalid_prop_src"
+	dest_root="$DEST_POOL/invalid_prop_dest"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs snap -r "$src_dataset@p1"
+	zfs create "$dest_root"
+
+	set +e
+	output=$(run_zxfer -v -o "definitelynotaproperty=on" -N "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "Invalid override property should cause zxfer to fail."
+	fi
+	if [ "$status" -ne 2 ]; then
+		fail "Invalid override property should exit with status 2, got $status. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "Invalid option property - check -o list for syntax errors."; then
+		fail "Invalid override property error message missing. Output: $output"
+	fi
+
+	log "Invalid override property test passed"
 }
 
 dry_run_replication_test() {
@@ -879,8 +955,9 @@ main() {
 TEST_SEQUENCE="usage_error_tests basic_replication_test non_recursive_replication_test \
 generate_tests_replication idempotent_replication_test auto_snapshot_replication_test \
 auto_snapshot_nonrecursive_test trailing_slash_destination_test exclude_filter_test \
-parallel_jobs_listing_test progress_wrapper_test dry_run_replication_test dry_run_deletion_test \
-force_rollback_test extended_usage_error_tests consistency_option_validation_tests snapshot_deletion_test"
+parallel_jobs_listing_test progress_wrapper_test missing_destination_error_test invalid_override_property_test \
+dry_run_replication_test dry_run_deletion_test force_rollback_test \
+failure_handling_tests extended_usage_error_tests consistency_option_validation_tests snapshot_deletion_test"
 	set -- $TEST_SEQUENCE
 	TOTAL_TESTS=$#
 
