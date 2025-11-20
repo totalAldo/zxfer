@@ -366,6 +366,19 @@ validate_zfs_mode_preconditions() {
 		throw_error "When using -c, -m needs to be specified as well."
 }
 
+check_backup_storage_dir_if_needed() {
+	[ "$g_option_k_backup_property_mode" -eq 1 ] || return
+
+	# Validate or create the backup directory before any replication work so we
+	# fail closed on unsafe paths (e.g., symlinks) instead of performing ZFS
+	# operations first.
+	if [ "$g_option_T_target_host" = "" ]; then
+		ensure_local_backup_dir "$g_backup_storage_root"
+	else
+		ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host"
+	fi
+}
+
 update_recursive_source_list_if_needed() {
 	if [ "$g_option_R_recursive" = "" ]; then
 		g_recursive_source_list=$initial_source
@@ -460,6 +473,7 @@ run_zfs_mode() {
 	resolve_initial_source_from_options
 	normalize_source_destination_paths
 	validate_zfs_mode_preconditions
+	check_backup_storage_dir_if_needed
 	initialize_replication_context
 	maybe_capture_preflight_snapshot
 	prepare_migration_services
