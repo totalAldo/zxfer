@@ -242,7 +242,8 @@ secure_path_dependency_tests() {
 exit 0
 EOF
 	chmod +x "$mock_path/ssh"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	# Deliberately omit zfs from the secure PATH to ensure zxfer aborts cleanly.
+	secure_path="$mock_path"
 
 	set +e
 	output=$(ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -R tank/src backup/target 2>&1)
@@ -1003,6 +1004,9 @@ migration_unmounted_guard_test() {
 	zfs create "$src_dataset"
 	zfs create "$dest_root"
 
+	append_data_to_dataset "$src_dataset" "file.txt" "one"
+	zfs snap -r "$src_dataset@unmounted"
+
 	# Unmount the source to trigger the guard.
 	if ! zfs unmount "$src_dataset"; then
 		fail "Failed to unmount $src_dataset to trigger migration guard."
@@ -1113,6 +1117,8 @@ property_backup_restore_test() {
 	zfs create "$src_dataset"
 	zfs create "$dest_root"
 	zfs set test:prop=one "$src_dataset"
+	append_data_to_dataset "$src_dataset" "file.txt" "one"
+	zfs snap -r "$src_dataset@propbackup1"
 
 	# First run backs up properties into a hardened temp directory.
 	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$src_dataset" "$dest_root"
@@ -1157,6 +1163,8 @@ backup_dir_symlink_guard_test() {
 	zfs create "$src_dataset"
 	zfs create "$dest_root"
 	zfs set test:prop=one "$src_dataset"
+	append_data_to_dataset "$src_dataset" "file.txt" "one"
+	zfs snap -r "$src_dataset@symlinkguard1"
 
 	ln -s /tmp "$backup_dir_link"
 
@@ -1179,6 +1187,11 @@ backup_dir_symlink_guard_test() {
 
 background_send_failure_test() {
 	log "Starting background send failure test"
+
+	if ! has_gnu_parallel; then
+		log "Skipping background send failure test (GNU parallel not available)"
+		return
+	fi
 
 	src_dataset="$SRC_POOL/sendfail_src"
 	dest_root="$DEST_POOL/sendfail_dest"
@@ -1214,6 +1227,10 @@ EOF
 			ln -sf "$real_bin" "$wrapper_dir/$bin"
 		fi
 	done
+	real_parallel=$(command -v parallel 2>/dev/null || true)
+	if [ "$real_parallel" != "" ]; then
+		ln -sf "$real_parallel" "$wrapper_dir/parallel"
+	fi
 
 	set +e
 	output=$(ZXFER_SECURE_PATH="$wrapper_dir" "$ZXFER_BIN" -v -j 2 -R "$src_dataset" "$dest_root" 2>&1)
@@ -1450,7 +1467,6 @@ extended_usage_error_tests \
 consistency_option_validation_tests \
 snapshot_deletion_test \
 send_command_dryrun_test \
-background_send_failure_test \
 backup_dir_symlink_guard_test \
 grandfather_protection_test \
 migration_unmounted_guard_test \
@@ -1462,6 +1478,7 @@ delete_dest_only_snapshot_test \
 dry_run_deletion_test \
 progress_wrapper_test \
 job_limit_enforcement_test \
+background_send_failure_test \
 parallel_jobs_listing_test"
 	set -- $TEST_SEQUENCE
 	TOTAL_TESTS=$#

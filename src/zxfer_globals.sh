@@ -92,9 +92,36 @@ zxfer_compute_secure_path() {
 	printf '%s\n' "$l_clean"
 }
 
+merge_path_allowlists() {
+	l_primary=$1
+	l_secondary=$2
+
+	OLDIFS=$IFS
+	IFS=":"
+	l_merged=""
+	for l_entry in $l_primary $l_secondary; do
+		[ -n "$l_entry" ] || continue
+		case ":$l_merged:" in
+		*:"$l_entry":*)
+			continue
+			;;
+		esac
+		if [ "$l_merged" = "" ]; then
+			l_merged=$l_entry
+		else
+			l_merged=$l_merged:$l_entry
+		fi
+	done
+	IFS=$OLDIFS
+
+	printf '%s\n' "$l_merged"
+}
+
 zxfer_apply_secure_path() {
 	g_zxfer_secure_path=$(zxfer_compute_secure_path)
-	PATH=$g_zxfer_secure_path
+	g_zxfer_dependency_path=$g_zxfer_secure_path
+	g_zxfer_runtime_path=$(merge_path_allowlists "$g_zxfer_secure_path" "$ZXFER_DEFAULT_SECURE_PATH")
+	PATH=$g_zxfer_runtime_path
 	export PATH
 }
 
@@ -111,7 +138,9 @@ zxfer_fatal_missing_dependency() {
 zxfer_find_required_tool() {
 	l_tool=$1
 	l_label=${2:-$l_tool}
-	l_path=$(command -v "$l_tool" 2>/dev/null || :)
+	l_search_path=${g_zxfer_dependency_path:-$g_zxfer_secure_path}
+	[ -n "$l_search_path" ] || l_search_path=$ZXFER_DEFAULT_SECURE_PATH
+	l_path=$(PATH=$l_search_path command -v "$l_tool" 2>/dev/null || :)
 	if [ "$l_path" = "" ]; then
 		zxfer_fatal_missing_dependency "Required dependency \"$l_label\" not found in secure PATH ($g_zxfer_secure_path). Set ZXFER_SECURE_PATH or install the binary."
 	fi
@@ -130,7 +159,9 @@ zxfer_apply_secure_path
 # sure the awk command resolves to something usable even before the real
 # initialization logic runs.
 if [ -z "${g_cmd_awk:-}" ]; then
-	g_cmd_awk=$(command -v awk 2>/dev/null || :)
+	l_search_path=${g_zxfer_dependency_path:-$g_zxfer_secure_path}
+	[ -n "$l_search_path" ] || l_search_path=$ZXFER_DEFAULT_SECURE_PATH
+	g_cmd_awk=$(PATH=$l_search_path command -v awk 2>/dev/null || :)
 	if [ -z "$g_cmd_awk" ]; then
 		g_cmd_awk='awk'
 	fi
@@ -138,7 +169,7 @@ fi
 
 init_globals() {
 	# zxfer version
-	g_zxfer_version="2.0.0-20251118"
+	g_zxfer_version="2.0.0-20251120"
 
 	# max number of iterations to run iterate through run_zfs_mode
 	# if changes are made to the filesystems
@@ -208,7 +239,7 @@ init_globals() {
 
 	g_cmd_awk=$(zxfer_find_required_tool awk "awk")
 	g_cmd_zfs=$(zxfer_find_required_tool zfs "zfs")
-	g_cmd_parallel=$(command -v parallel 2>/dev/null || :)
+	g_cmd_parallel=$(PATH=$g_zxfer_dependency_path command -v parallel 2>/dev/null || :)
 	g_origin_parallel_cmd=""
 	# enable compression in ssh options so that remote snapshot lists that
 	# contain thousands of snapshots are compressed
@@ -626,7 +657,7 @@ init_variables() {
 			g_cmd_cat=$(zxfer_find_required_tool cat "cat")
 		else
 			l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-			if ! g_cmd_cat=$(invoke_ssh_command_for_host "$l_origin_ssh_cmd" "$g_option_O_origin_host" "PATH=$g_zxfer_secure_path" command -v cat); then
+			if ! g_cmd_cat=$(invoke_ssh_command_for_host "$l_origin_ssh_cmd" "$g_option_O_origin_host" "PATH=$g_zxfer_dependency_path" command -v cat); then
 				throw_error "cat not found on origin host $g_option_O_origin_host."
 			fi
 			if [ "$g_cmd_cat" = "" ]; then
@@ -643,7 +674,7 @@ init_variables() {
 
 	l_home_operating_system=$(get_os "")
 	if [ "$l_home_operating_system" = "SunOS" ]; then
-		l_gawk_path=$(command -v gawk 2>/dev/null || :)
+		l_gawk_path=$(PATH=$g_zxfer_dependency_path command -v gawk 2>/dev/null || :)
 		if [ "$l_gawk_path" != "" ]; then
 			g_cmd_awk=$l_gawk_path
 		fi

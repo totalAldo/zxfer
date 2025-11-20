@@ -92,7 +92,11 @@ binary into the replication workflow. If your tooling lives outside those
 directories you can export `ZXFER_SECURE_PATH` to replace the allowlist entirely
 or `ZXFER_SECURE_PATH_APPEND` to add extra **absolute** directories (relative
 paths are ignored). Remote helper discovery uses the same allowlist, so include
-any custom directories that exist on the hosts referenced by `-O/-T`.
+any custom directories that exist on the hosts referenced by `-O/-T`. zxfer
+still appends the default allowlist to its runtime `PATH` so core utilities like
+`date`, `mktemp`, and `sed` remain available even when `ZXFER_SECURE_PATH` is
+set to a narrow directory list; dependency resolution continues to honor the
+restricted secure PATH.
 
 ## Feedback Welcome
 If you use this script and have any suggestions or feedback, please open an issue or a pull request. I hope this script will be beneficial to others and that useful features can be incorporated into the main project.
