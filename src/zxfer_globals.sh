@@ -713,6 +713,19 @@ consistency_check() {
 		throw_usage_error "-z option can only be used with -O or -T option"
 	fi
 
+	if [ "$g_option_g_grandfather_protection" != "" ]; then
+		case $g_option_g_grandfather_protection in
+		*[!0-9]*)
+			throw_usage_error "grandfather protection requires a positive integer; received \"$g_option_g_grandfather_protection\"."
+			;;
+		*)
+			if [ "$g_option_g_grandfather_protection" -le 0 ]; then
+				throw_usage_error "grandfather protection requires days greater than 0; received \"$g_option_g_grandfather_protection\"."
+			fi
+			;;
+		esac
+	fi
+
 	# disallow migration related options and remote transfers at same time
 	if [ "$g_option_T_target_host" != "" ] || [ "$g_option_O_origin_host" != "" ]; then
 		if [ "$g_option_m_migrate" -eq 1 ] || [ "$g_option_c_services" != "" ]; then
