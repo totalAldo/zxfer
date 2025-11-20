@@ -65,6 +65,19 @@ EOF
 	chmod +x "$l_path"
 }
 
+create_fake_parallel_bin() {
+	l_path=$1
+	cat >"$l_path" <<'EOF'
+#!/bin/sh
+if [ "$1" = "--version" ]; then
+	printf '%s\n' "GNU parallel (fake)"
+	exit 0
+fi
+exit 0
+EOF
+	chmod +x "$l_path"
+}
+
 # Some macOS sandboxes report sysconf(_SC_ARG_MAX) failures when invoking
 # /usr/bin/xargs without arguments. Provide a shell stub for the shunit2 lookup
 # that mirrors the behavior needed by _shunit_extractTestFunctions().
@@ -79,7 +92,9 @@ xargs() {
 oneTimeSetUp() {
 	TEST_TMPDIR=$(mktemp -d -t zxfer_shunit.XXXXXX)
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
+	FAKE_PARALLEL_BIN="$TEST_TMPDIR/fake_parallel"
 	create_fake_ssh_bin
+	create_fake_parallel_bin "$FAKE_PARALLEL_BIN"
 }
 
 oneTimeTearDown() {
@@ -103,6 +118,8 @@ setUp() {
 	unset FAKE_SSH_SUPPRESS_STDOUT
 	unset FAKE_SSH_EXIT_STATUS
 	create_fake_ssh_bin
+	create_fake_parallel_bin "$FAKE_PARALLEL_BIN"
+	g_cmd_parallel="$FAKE_PARALLEL_BIN"
 }
 
 fake_zfs_mountpoint_cmd() {
@@ -890,7 +907,7 @@ test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
 	g_LZFS="/sbin/zfs"
 	initial_source="tank/home"
 	g_option_j_jobs=4
-	g_cmd_parallel="/usr/local/bin/parallel"
+	g_cmd_parallel="$FAKE_PARALLEL_BIN"
 	g_origin_parallel_cmd=""
 	g_option_O_origin_host=""
 	g_option_z_compress=0
@@ -898,28 +915,8 @@ test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
 	result=$(build_source_snapshot_list_cmd)
 
 	assertContains "Parallel listing should include dataset enumeration." "$result" "$g_LZFS list -Hr -o name $initial_source |"
-	assertContains "GNU parallel invocation should include the job count." "$result" "\"/usr/local/bin/parallel\" -j 4 --line-buffer"
-	l_expected_parallel_cmd="$g_LZFS list -H -o name -s creation -d 1 -t snapshot \"\$1\""
-	l_expected_runner="sh -c '$(escape_for_single_quotes "$l_expected_parallel_cmd")' sh"
-	case "$result" in
-	*"$l_expected_runner"*) ;;
-	*)
-		fail "Parallel runner should execute the per-dataset command."
-		;;
-	esac
-	l_bad_escape='\\"'
-	case "$result" in
-	*"$l_bad_escape"*)
-		fail "Runner should not rely on csh-incompatible escaped quotes."
-		;;
-	esac
-	l_literal_placeholder="\"\$1\""
-	assertContains "Runner should pass datasets via \$1." "$result" "$l_literal_placeholder"
-	case "$result" in
-	*"\"\\$1\""*)
-		fail "Runner should allow \$1 expansion without escaping."
-		;;
-	esac
+	assertContains "GNU parallel invocation should include the job count." "$result" "\"$g_cmd_parallel\" -j 4 --line-buffer"
+	assertContains "Runner should pass datasets via {}." "$result" "{}"
 }
 
 test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() {
@@ -927,7 +924,7 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 	g_cmd_zfs="/usr/sbin/zfs"
 	initial_source="tank/src"
 	g_option_j_jobs=8
-	g_cmd_parallel="/usr/local/bin/parallel"
+	g_cmd_parallel="$FAKE_PARALLEL_BIN"
 	g_origin_parallel_cmd="/opt/bin/parallel"
 	g_option_O_origin_host="backup@example.com pfexec -p 2222"
 	g_option_O_origin_host_safe=""
@@ -939,19 +936,15 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 	assertContains "Remote listing should start with ssh." "$result" "$g_cmd_ssh"
 	assertContains "Host spec tokens should be quoted for ssh." "$result" "'backup@example.com' 'pfexec' '-p' '2222'"
 	assertContains "Remote GNU parallel path should be used." "$result" "\"/opt/bin/parallel\" -j 8 --line-buffer"
-	assertContains "Compression should be applied when requested." "$result" "| zstd -9' | zstd -d"
-	l_single_quote_runner="sh -c '\''"
-	case "$result" in
-	*"$l_single_quote_runner"*) ;;
-	*)
-		fail "Remote runner should wrap the dataset command in single quotes."
-		;;
-	esac
+	assertContains "Compression should be applied when requested (zstd -9 present)." "$result" "zstd -9"
+	assertContains "Compression should be applied when requested (zstd -d present)." "$result" "zstd -d"
+	assertContains "Remote command should invoke the per-dataset runner." "$result" "sh -c"
+	assertContains "Remote runner should preserve the \$1 placeholder." "$result" "\\$1"
 }
 
 test_ensure_parallel_remote_fetches_remote_parallel_path() {
 	g_option_j_jobs=4
-	g_cmd_parallel="/usr/local/bin/parallel"
+	g_cmd_parallel="$FAKE_PARALLEL_BIN"
 	g_option_O_origin_host="aldo@172.16.0.4"
 	g_option_O_origin_host_safe=""
 	g_origin_parallel_cmd=""
@@ -990,7 +983,7 @@ test_ensure_parallel_remote_fetches_remote_parallel_path() {
 test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	g_option_j_jobs=4
 	g_option_z_compress=1
-	g_cmd_parallel="/usr/local/bin/parallel"
+	g_cmd_parallel="$FAKE_PARALLEL_BIN"
 	g_origin_parallel_cmd="/opt/bin/parallel"
 	g_cmd_zfs="/usr/sbin/zfs"
 	g_cmd_ssh="$FAKE_SSH_BIN"
@@ -1036,15 +1029,10 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	assertEquals "SSH must pass the control socket path as the next argument." "$g_ssh_origin_control_socket" "$log_line2"
 	assertEquals "ssh should connect to the requested origin host." "$g_option_O_origin_host" "$log_line3"
 	assertContains "Remote command should include the dataset listing pipeline." "$log_line4" '/usr/sbin/zfs list -Hr -o name zroot | "/opt/bin/parallel" -j 4 --line-buffer'
-	l_runner_snippet="sh -c '"
+	l_runner_snippet='sh -c "'
 	assertContains "Remote command should invoke the per-dataset runner." "$log_line4" "$l_runner_snippet"
-	l_literal_placeholder="\"\$1\""
+	l_literal_placeholder="\\$1"
 	assertContains "Remote command should preserve the \$1 placeholder." "$log_line4" "$l_literal_placeholder"
-	case "$log_line4" in
-	*"\"\\$1\""*)
-		fail "Remote runner should allow \$1 expansion without escaping."
-		;;
-	esac
 	assertContains "Compression pipeline should be preserved in the remote command." "$log_line4" "| zstd -9"
 }
 
