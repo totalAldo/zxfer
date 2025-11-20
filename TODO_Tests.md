@@ -21,7 +21,7 @@ Current integration coverage in `tests/integration_zxfer.sh` focuses on local re
 ## Snapshot Transfer & Send/Receive Pipeline
 - [ ] `src/zxfer_zfs_mode.sh:223-273` – craft a dataset with no pending snapshots to ensure `copy_snapshots` returns early; also cover the branch where the destination dataset does not yet exist so the first snapshot is sent synchronously.  
 - [ ] `src/zxfer_zfs_send_receive.sh:100-123` – verify `get_send_command` behavior for initial full sends, incremental sends, `-v`, and `-w` (raw) flags by observing the constructed command via a dry-run wrapper.  
-- [ ] `src/zxfer_zfs_send_receive.sh:124-147` – supply `-F` during a run where the destination has diverged to confirm the receive command includes `-F` and actually rolls the target back.  
+- [x] `src/zxfer_zfs_send_receive.sh:124-147` – supply `-F` during a run where the destination has diverged to confirm the receive command includes `-F` and actually rolls the target back. (Covered by `force_rollback_test`.)  
 - [ ] `src/zxfer_zfs_send_receive.sh:150-200` – add a test with `-j 3` to prove background sends respect the job limit (no more than `-j` concurrent `zfs send` processes) and another to ensure the `l_is_allow_background=0` path is hit for the first snapshot.  
 - [ ] `src/zxfer_zfs_send_receive.sh:44-89` – run with `-D 'pv -s %%size%% > /dev/null'` so `calculate_size_estimate` and `handle_progress_bar_option` wrap the send stream without breaking dataset creation.  
 - [ ] `src/zxfer_zfs_send_receive.sh:129-176` – cover local, `-O`, `-T`, and combined `-O/-T` transfers, both with and without `-z/-Z`, to exercise `wrap_command_with_ssh` compression logic and ensure the decompression half on receive works.  
