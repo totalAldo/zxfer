@@ -173,6 +173,32 @@ extended_usage_error_tests() {
 	log "Extended usage error tests passed"
 }
 
+consistency_option_validation_tests() {
+	log "Starting option consistency tests"
+
+	assert_usage_error_case "Backup and restore properties together" \
+		"You cannot bac(k)up and r(e)store properties at the same time." \
+		-k -e -R tank/src backup/target
+
+	assert_usage_error_case "Both beep modes" \
+		"You cannot use both beep modes at the same time." \
+		-b -B -R tank/src backup/target
+
+	assert_usage_error_case "Compression without remote" \
+		"-z option can only be used with -O or -T option" \
+		-z -R tank/src backup/target
+
+	assert_usage_error_case "Zero job count" \
+		"The -j option requires a job count of at least 1." \
+		-j 0 -R tank/src backup/target
+
+	assert_usage_error_case "Non-numeric job count" \
+		"The -j option requires a positive integer job count, but received \"abc\"." \
+		-j abc -R tank/src backup/target
+
+	log "Option consistency tests passed"
+}
+
 snapshot_deletion_test() {
 	log "Starting snapshot deletion test"
 
@@ -309,6 +335,77 @@ basic_replication_test() {
 	log "Basic replication test passed"
 }
 
+non_recursive_replication_test() {
+	log "Starting non-recursive replication test"
+
+	src_dataset="$SRC_POOL/nonrec_src"
+	child_dataset="$src_dataset/child"
+	dest_root="$DEST_POOL/nonrec_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$child_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "root.txt" "root data 1"
+	zfs snap "$src_dataset@rootsnap1"
+	append_data_to_dataset "$src_dataset" "root.txt" "root data 2"
+	zfs snap "$src_dataset@rootsnap2"
+
+	append_data_to_dataset "$child_dataset" "child.txt" "child data"
+	zfs snap "$child_dataset@childsnap1"
+
+	run_zxfer -v -N "$src_dataset" "$dest_root"
+
+	assert_snapshot_exists "$dest_dataset" "rootsnap1"
+	assert_snapshot_exists "$dest_dataset" "rootsnap2"
+
+	if zfs list "$dest_dataset/child" >/dev/null 2>&1; then
+		fail "Child dataset should not be replicated when using -N."
+	fi
+
+	log "Non-recursive replication test passed"
+}
+
+auto_snapshot_replication_test() {
+	log "Starting auto-snapshot replication test"
+
+	src_dataset="$SRC_POOL/newsnap_src"
+	child_dataset="$src_dataset/child"
+	dest_root="$DEST_POOL/newsnap_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+	dest_child="$dest_dataset/${child_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$child_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "parent.txt" "parent data"
+	append_data_to_dataset "$child_dataset" "child.txt" "child data"
+
+	run_zxfer -v -s -R "$src_dataset" "$dest_root"
+
+	src_snapshot_name=$(zfs list -H -o name -t snapshot "$src_dataset" | sed -n '1p')
+	snap_suffix=${src_snapshot_name#*@}
+
+	if [ -z "$snap_suffix" ] || [ "$snap_suffix" = "$src_snapshot_name" ]; then
+		fail "Auto snapshot was not created on source dataset $src_dataset."
+	fi
+
+	assert_snapshot_exists "$src_dataset" "$snap_suffix"
+	assert_snapshot_exists "$child_dataset" "$snap_suffix"
+	assert_snapshot_exists "$dest_dataset" "$snap_suffix"
+	assert_snapshot_exists "$dest_child" "$snap_suffix"
+
+	log "Auto-snapshot replication test passed"
+}
+
 generate_tests_replication() {
 	# Mirror the old tests/generateTests.sh workflow using the integration pools.
 	log "Starting multi-dataset replication test"
@@ -436,9 +533,12 @@ main() {
 	zpool create "$DEST_POOL" "$DEST_IMG"
 
 	basic_replication_test
+	non_recursive_replication_test
 	generate_tests_replication
 	idempotent_replication_test
+	auto_snapshot_replication_test
 	extended_usage_error_tests
+	consistency_option_validation_tests
 	snapshot_deletion_test
 
 	log "All integration tests passed."
