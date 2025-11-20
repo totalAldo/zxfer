@@ -48,6 +48,43 @@ assert_snapshot_exists() {
 	fi
 }
 
+wait_for_snapshot_absent() {
+	l_dataset=$1
+	l_snapshot=$2
+	l_attempts=${3:-60}
+
+	l_i=0
+	while [ "$l_i" -lt "$l_attempts" ]; do
+		if ! zfs list -t snapshot "$l_dataset@$l_snapshot" >/dev/null 2>&1; then
+			return
+		fi
+		sleep 1
+		l_i=$((l_i + 1))
+	done
+
+	fail "Snapshot $l_dataset@$l_snapshot still present after waiting."
+}
+
+wait_for_destroy_process_to_finish() {
+	l_dataset=$1
+	l_snapshot=$2
+	l_attempts=${3:-30}
+
+	if ! command -v pgrep >/dev/null 2>&1; then
+		return
+	fi
+
+	l_pattern="zfs destroy .*${l_dataset}@${l_snapshot}"
+	l_i=0
+	while [ "$l_i" -lt "$l_attempts" ]; do
+		if ! pgrep -f "$l_pattern" >/dev/null 2>&1; then
+			return
+		fi
+		sleep 1
+		l_i=$((l_i + 1))
+	done
+}
+
 require_root() {
 	if [ "$(id -u)" -ne 0 ]; then
 		fail "Integration tests must be run as root."
@@ -256,9 +293,8 @@ snapshot_deletion_test() {
 	# Run with -d (snap1 should be deleted)
 	run_zxfer -v -d -R "$src_dataset" "$dest_root"
 
-	if zfs list -t snapshot "$dest_dataset@snap1" >/dev/null 2>&1; then
-		fail "Snapshot snap1 should have been deleted."
-	fi
+	wait_for_destroy_process_to_finish "$dest_dataset" "snap1" 30
+	wait_for_snapshot_absent "$dest_dataset" "snap1"
 	assert_snapshot_exists "$dest_dataset" "snap2"
 
 	log "Snapshot deletion test passed"
@@ -551,6 +587,43 @@ exclude_filter_test() {
 	log "Exclude filter test passed"
 }
 
+force_rollback_test() {
+	log "Starting force rollback test"
+
+	src_dataset="$SRC_POOL/rollback_src"
+	dest_root="$DEST_POOL/rollback_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "file.txt" "original"
+	zfs snap "$src_dataset@snap1"
+
+	run_zxfer -v -N "$src_dataset" "$dest_root"
+	assert_snapshot_exists "$dest_dataset" "snap1"
+
+	# Diverge destination with an extra snapshot.
+	append_data_to_dataset "$dest_dataset" "file.txt" "dest divergence"
+	zfs snap "$dest_dataset@destonly"
+
+	# Advance source and create a new snapshot to send.
+	append_data_to_dataset "$src_dataset" "file.txt" "source update"
+	zfs snap "$src_dataset@snap2"
+
+	run_zxfer -v -F -N "$src_dataset" "$dest_root"
+
+	assert_snapshot_exists "$dest_dataset" "snap2"
+	if zfs list -t snapshot "$dest_dataset@destonly" >/dev/null 2>&1; then
+		fail "Force rollback should remove divergent destination snapshot destonly."
+	fi
+
+	log "Force rollback test passed"
+}
+
 generate_tests_replication() {
 	# Mirror the old tests/generateTests.sh workflow using the integration pools.
 	log "Starting multi-dataset replication test"
@@ -680,7 +753,7 @@ main() {
 	TEST_SEQUENCE="usage_error_tests basic_replication_test non_recursive_replication_test \
 generate_tests_replication idempotent_replication_test auto_snapshot_replication_test \
 auto_snapshot_nonrecursive_test trailing_slash_destination_test exclude_filter_test \
-extended_usage_error_tests consistency_option_validation_tests snapshot_deletion_test"
+force_rollback_test extended_usage_error_tests consistency_option_validation_tests snapshot_deletion_test"
 	set -- $TEST_SEQUENCE
 	TOTAL_TESTS=$#
 
