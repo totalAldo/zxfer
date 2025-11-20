@@ -10,13 +10,13 @@ Current integration coverage in `tests/integration_zxfer.sh` focuses on local re
 - [ ] `src/zxfer_transfer_properties.sh:283-296` – supply an invalid `-o property=value` to ensure option validation rejects unknown properties.  
 
 ## Dataset Selection & Snapshot Discovery
-- [ ] `src/zxfer_zfs_mode.sh:51-72` – replicate once with a trailing slash on the source and once without to verify `set_actual_dest` either creates child datasets or writes directly into the destination root.  
+- [x] `src/zxfer_zfs_mode.sh:51-72` – replicate once with a trailing slash on the source and once without to verify `set_actual_dest` either creates child datasets or writes directly into the destination root. (Covered by `trailing_slash_destination_test`.)  
 - [x] `src/zxfer_zfs_mode.sh:279-334` – add a non-recursive `-N` test to prove child datasets are not touched, and another with `-R` to ensure recursion still works when child datasets share parents. (`non_recursive_replication_test` now covers the `-N` path alongside existing recursive coverage.)  
-- [ ] `src/zxfer_get_zfs_list.sh:172-196` – exercise the `-x` exclude filter so datasets matching the pattern are removed from `g_recursive_source_list`.  
+- [x] `src/zxfer_get_zfs_list.sh:172-196` – exercise the `-x` exclude filter so datasets matching the pattern are removed from `g_recursive_source_list`. (Covered by `exclude_filter_test`.)  
 - [ ] `src/zxfer_get_zfs_list.sh:45-113` – run with `-j 1` and `-j >1` to hit both code paths in `write_source_snapshot_list_to_file`, including the remote/`zstd` compression branch by running with `-O localhost -z`.  
 - [ ] `src/zxfer_get_zfs_list.sh:108-165` – cover the “destination dataset missing” path so the stripped snapshot list is empty and `g_recursive_source_list` only reflects sources with new snapshots.  
 - [ ] `src/zxfer_get_zfs_list.sh:201-244` – force `g_recursive_source_list` to be empty (no new snapshots) and assert the integration run exits cleanly without touching send/receive to cover `comm -23` and the V-verbose diagnostics.  
-- [ ] `src/zxfer_zfs_mode.sh:332-341` – run with `-s` (once with `-R` and once with `-N`) so the non-migration snapshot branch in `newsnap` executes, proving the auto-created snapshot is replicated. (`auto_snapshot_replication_test` covers the `-R` branch; `-N` coverage still needed.)  
+- [x] `src/zxfer_zfs_mode.sh:332-341` – run with `-s` (once with `-R` and once with `-N`) so the non-migration snapshot branch in `newsnap` executes, proving the auto-created snapshot is replicated. (Covered by `auto_snapshot_replication_test` for the `-R` path and `auto_snapshot_nonrecursive_test` for `-N`.)  
 
 ## Snapshot Transfer & Send/Receive Pipeline
 - [ ] `src/zxfer_zfs_mode.sh:223-273` – craft a dataset with no pending snapshots to ensure `copy_snapshots` returns early; also cover the branch where the destination dataset does not yet exist so the first snapshot is sent synchronously.  

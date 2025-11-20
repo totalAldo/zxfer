@@ -10,6 +10,10 @@ SPARSE_SIZE_MB=${SPARSE_SIZE_MB:-256}
 OS_NAME=$(uname -s)
 MD_DEVICES=""
 MD_DRIVER_READY=0
+RED=$(printf '\033[31m')
+GREEN=$(printf '\033[32m')
+YELLOW=$(printf '\033[33m')
+RESET=$(printf '\033[0m')
 
 require_cmd() {
 	l_cmd=$1
@@ -24,7 +28,7 @@ log() {
 }
 
 fail() {
-	echo "ERROR: $*" >&2
+	printf '%sERROR:%s %s\n' "$RED" "$RESET" "$*" >&2
 	exit 1
 }
 
@@ -78,6 +82,16 @@ append_data_to_dataset() {
 run_zxfer() {
 	log "Running: $ZXFER_BIN $*"
 	$ZXFER_BIN "$@"
+}
+
+run_test() {
+	l_index=$1
+	l_total=$2
+	l_func=$3
+
+	log "$(printf '[%d/%d] Starting %s%s%s' "$l_index" "$l_total" "$YELLOW" "$l_func" "$RESET")"
+	"$l_func"
+	log "$(printf '%s[%d/%d] PASS%s %s' "$GREEN" "$l_index" "$l_total" "$RESET" "$l_func")"
 }
 
 assert_usage_error_case() {
@@ -388,10 +402,11 @@ auto_snapshot_replication_test() {
 
 	append_data_to_dataset "$src_dataset" "parent.txt" "parent data"
 	append_data_to_dataset "$child_dataset" "child.txt" "child data"
+	zfs snap -r "$src_dataset@preseed"
 
 	run_zxfer -v -s -R "$src_dataset" "$dest_root"
 
-	src_snapshot_name=$(zfs list -H -o name -t snapshot "$src_dataset" | sed -n '1p')
+	src_snapshot_name=$(zfs list -H -o name -t snapshot -s creation "$src_dataset" | tail -n 1)
 	snap_suffix=${src_snapshot_name#*@}
 
 	if [ -z "$snap_suffix" ] || [ "$snap_suffix" = "$src_snapshot_name" ]; then
@@ -404,6 +419,136 @@ auto_snapshot_replication_test() {
 	assert_snapshot_exists "$dest_child" "$snap_suffix"
 
 	log "Auto-snapshot replication test passed"
+}
+
+auto_snapshot_nonrecursive_test() {
+	log "Starting auto-snapshot non-recursive test"
+
+	src_dataset="$SRC_POOL/newsnap_nonrec_src"
+	child_dataset="$src_dataset/child"
+	dest_root="$DEST_POOL/newsnap_nonrec_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$child_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "parent.txt" "parent data"
+	append_data_to_dataset "$child_dataset" "child.txt" "child data"
+	zfs snap "$src_dataset@preseed"
+
+	run_zxfer -v -s -N "$src_dataset" "$dest_root"
+
+	src_snapshot_name=$(zfs list -H -o name -t snapshot -s creation "$src_dataset" | tail -n 1)
+	snap_suffix=${src_snapshot_name#*@}
+
+	if [ -z "$snap_suffix" ] || [ "$snap_suffix" = "$src_snapshot_name" ]; then
+		fail "Auto snapshot was not created on source dataset $src_dataset."
+	fi
+
+	assert_snapshot_exists "$src_dataset" "$snap_suffix"
+	assert_snapshot_exists "$dest_dataset" "$snap_suffix"
+
+	if zfs list -t snapshot "$child_dataset@$snap_suffix" >/dev/null 2>&1; then
+		fail "Child dataset should not receive auto snapshot when using -s with -N."
+	fi
+	if zfs list "$dest_dataset/${child_dataset##*/}" >/dev/null 2>&1; then
+		fail "Child dataset should not be replicated when using -N with auto snapshot."
+	fi
+
+	log "Auto-snapshot non-recursive test passed"
+}
+
+trailing_slash_destination_test() {
+	log "Starting trailing slash destination test"
+
+	# Without trailing slash: destination should contain the source basename
+	src_dataset="$SRC_POOL/tslash_no"
+	child_dataset="$src_dataset/child"
+	dest_root="$DEST_POOL/tslash_dest_no"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+	dest_child="$dest_dataset/${child_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$child_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "file.txt" "data"
+	zfs snap -r "$src_dataset@tsnap"
+
+	run_zxfer -v -R "$src_dataset" "$dest_root"
+
+	assert_snapshot_exists "$dest_dataset" "tsnap"
+	assert_snapshot_exists "$dest_child" "tsnap"
+
+	# With trailing slash: destination should be written directly into dest_root
+	src_dataset="$SRC_POOL/tslash_yes"
+	child_dataset="$src_dataset/child"
+	dest_root="$DEST_POOL/tslash_dest_yes"
+	dest_child="$dest_root/${child_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$child_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "file.txt" "data2"
+	zfs snap -r "$src_dataset@tsnap"
+
+	run_zxfer -v -F -R "$src_dataset/" "$dest_root"
+
+	assert_snapshot_exists "$dest_root" "tsnap"
+	assert_snapshot_exists "$dest_child" "tsnap"
+
+	if zfs list "$dest_root/${src_dataset##*/}" >/dev/null 2>&1; then
+		fail "Trailing slash should not create an extra child dataset under destination root."
+	fi
+
+	log "Trailing slash destination test passed"
+}
+
+exclude_filter_test() {
+	log "Starting exclude filter test"
+
+	src_parent="$SRC_POOL/exclude_src"
+	include_child="$src_parent/include_ds"
+	exclude_child="$src_parent/exclude_me"
+	dest_root="$DEST_POOL/exclude_dest"
+	dest_parent="$dest_root/${src_parent##*/}"
+	dest_include="$dest_parent/${include_child##*/}"
+	dest_exclude="$dest_parent/${exclude_child##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_parent" >/dev/null 2>&1 || true
+
+	zfs create "$src_parent"
+	zfs create "$include_child"
+	zfs create "$exclude_child"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_parent" "parent.txt" "parent data"
+	append_data_to_dataset "$include_child" "include.txt" "include data"
+	append_data_to_dataset "$exclude_child" "exclude.txt" "exclude data"
+	zfs snap -r "$src_parent@exsnap"
+
+	run_zxfer -v -x "exclude_me" -R "$src_parent" "$dest_root"
+
+	assert_snapshot_exists "$dest_parent" "exsnap"
+	assert_snapshot_exists "$dest_include" "exsnap"
+
+	if zfs list "$dest_exclude" >/dev/null 2>&1; then
+		fail "Dataset matching exclude pattern should not be replicated."
+	fi
+
+	log "Exclude filter test passed"
 }
 
 generate_tests_replication() {
@@ -532,14 +677,18 @@ main() {
 	log "Creating destination pool $DEST_POOL"
 	zpool create "$DEST_POOL" "$DEST_IMG"
 
-	basic_replication_test
-	non_recursive_replication_test
-	generate_tests_replication
-	idempotent_replication_test
-	auto_snapshot_replication_test
-	extended_usage_error_tests
-	consistency_option_validation_tests
-	snapshot_deletion_test
+	TEST_SEQUENCE="usage_error_tests basic_replication_test non_recursive_replication_test \
+generate_tests_replication idempotent_replication_test auto_snapshot_replication_test \
+auto_snapshot_nonrecursive_test trailing_slash_destination_test exclude_filter_test \
+extended_usage_error_tests consistency_option_validation_tests snapshot_deletion_test"
+	set -- $TEST_SEQUENCE
+	TOTAL_TESTS=$#
+
+	l_index=1
+	for test_func in $TEST_SEQUENCE; do
+		run_test "$l_index" "$TOTAL_TESTS" "$test_func"
+		l_index=$((l_index + 1))
+	done
 
 	log "All integration tests passed."
 }
