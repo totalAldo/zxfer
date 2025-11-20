@@ -28,8 +28,8 @@ Current integration coverage in `tests/integration_zxfer.sh` focuses on local re
 - [ ] `src/zxfer_zfs_mode.sh:404-437` – enable `-Y` so the loop repeats at least twice: one run where `g_is_performed_send_destroy` stays `1` (due to `-d` or a pending send) and another where it drops to `0` to exit.  
 
 ## Snapshot Deletion & Retention
-- [ ] `src/zxfer_inspect_delete_snap.sh:159-215` – replicate, remove a snapshot on the source, rerun with `-d` to ensure `delete_snaps` destroys extra destination snapshots and toggles `g_is_performed_send_destroy`.  
-- [ ] `src/zxfer_inspect_delete_snap.sh:199-207` – repeat the deletion scenario with `-n` to cover the dry-run guard that prints the destroy command without executing.  
+- [x] `src/zxfer_inspect_delete_snap.sh:159-215` – replicate, remove a snapshot on the source, rerun with `-d` to ensure `delete_snaps` destroys extra destination snapshots and toggles `g_is_performed_send_destroy`. (Covered by `snapshot_deletion_test`.)  
+- [x] `src/zxfer_inspect_delete_snap.sh:199-207` – repeat the deletion scenario with `-n` to cover the dry-run guard that prints the destroy command without executing. (Covered by `dry_run_deletion_test`.)  
 - [ ] `src/zxfer_inspect_delete_snap.sh:123-155` – set `-g 0` while trying to delete a snapshot so `grandfather_test` triggers the protection error path.  
 - [ ] `src/zxfer_inspect_delete_snap.sh:47-71` – induce mismatched source/destination snapshot names to validate `get_dest_snapshots_to_delete_per_dataset`’s background sorting logic (ensure both temp files are consumed).  
 
@@ -57,7 +57,7 @@ Current integration coverage in `tests/integration_zxfer.sh` focuses on local re
 - [ ] `src/zxfer_globals.sh:355-382` – verify that `get_os` resolves correctly for both local and remote hosts (mock `uname` responses) so platform-specific property filters (`g_fbsd_readonly_properties`, `g_solexp_readonly_properties`) engage.  
 
 ## Dry Run, Logging, and Audible Alerts
-- [ ] `src/zxfer_common.sh:126-144` & `src/zxfer_inspect_delete_snap.sh:199-207` – create a single test that runs `zxfer -n` through a typical replication and another with `-n -d` to show both send and destroy commands are printed instead of executed.  
+- [x] `src/zxfer_common.sh:126-144` & `src/zxfer_inspect_delete_snap.sh:199-207` – create a single test that runs `zxfer -n` through a typical replication and another with `-n -d` to show both send and destroy commands are printed instead of executed. (Covered by `dry_run_replication_test` and `dry_run_deletion_test`.)  
 - [ ] `src/zxfer_common.sh:188-219` – run with `-v` and `-V` to assert verbose output and debug logging appear; capture stderr to ensure `echoV` emits to stderr only.  
 - [ ] `src/zxfer_common.sh:203-220` – (platform-dependent) add a FreeBSD-only test that sets `-b` and `-B` separately, confirming `beep` loads `speaker.ko` once and writes to `/dev/speaker`, and fails gracefully when the module is missing.  
 

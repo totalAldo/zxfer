@@ -291,7 +291,7 @@ snapshot_deletion_test() {
 	assert_snapshot_exists "$dest_dataset" "snap1"
 
 	# Run with -d (snap1 should be deleted)
-	run_zxfer -v -d -R "$src_dataset" "$dest_root"
+	run_zxfer -v -Y -d -R "$src_dataset" "$dest_root"
 
 	wait_for_destroy_process_to_finish "$dest_dataset" "snap1" 30
 	wait_for_snapshot_absent "$dest_dataset" "snap1"
@@ -587,6 +587,66 @@ exclude_filter_test() {
 	log "Exclude filter test passed"
 }
 
+dry_run_replication_test() {
+	log "Starting dry-run replication test"
+
+	src_dataset="$SRC_POOL/dryrun_src"
+	dest_root="$DEST_POOL/dryrun_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs snap -r "$src_dataset@dr1"
+	zfs create "$dest_root"
+
+	output=$("$ZXFER_BIN" -v -n -R "$src_dataset" "$dest_root" 2>&1)
+	log "$output"
+
+	if zfs list "$dest_dataset" >/dev/null 2>&1; then
+		fail "Dry run should not create destination dataset $dest_dataset."
+	fi
+
+	log "Dry-run replication test passed"
+}
+
+dry_run_deletion_test() {
+	log "Starting dry-run deletion test"
+
+	src_dataset="$SRC_POOL/dryrun_del_src"
+	dest_root="$DEST_POOL/dryrun_del_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_dataset" >/dev/null 2>&1 || true
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "file.txt" "one"
+	zfs snap -r "$src_dataset@snap1"
+	append_data_to_dataset "$src_dataset" "file.txt" "two"
+	zfs snap -r "$src_dataset@snap2"
+
+	run_zxfer -v -R "$src_dataset" "$dest_root"
+	assert_snapshot_exists "$dest_dataset" "snap1"
+	assert_snapshot_exists "$dest_dataset" "snap2"
+
+	zfs destroy -r "$src_dataset@snap1"
+
+	output=$("$ZXFER_BIN" -v -n -d -R "$src_dataset" "$dest_root" 2>&1)
+	log "$output"
+
+	if ! printf '%s\n' "$output" | grep -q "zfs destroy .*@snap1"; then
+		fail "Dry run with -d did not show destroy command for snap1."
+	fi
+	assert_snapshot_exists "$dest_dataset" "snap1"
+	assert_snapshot_exists "$dest_dataset" "snap2"
+
+	log "Dry-run deletion test passed"
+}
+
 force_rollback_test() {
 	log "Starting force rollback test"
 
@@ -750,10 +810,11 @@ main() {
 	log "Creating destination pool $DEST_POOL"
 	zpool create "$DEST_POOL" "$DEST_IMG"
 
-	TEST_SEQUENCE="usage_error_tests basic_replication_test non_recursive_replication_test \
+TEST_SEQUENCE="usage_error_tests basic_replication_test non_recursive_replication_test \
 generate_tests_replication idempotent_replication_test auto_snapshot_replication_test \
 auto_snapshot_nonrecursive_test trailing_slash_destination_test exclude_filter_test \
-force_rollback_test extended_usage_error_tests consistency_option_validation_tests snapshot_deletion_test"
+dry_run_replication_test dry_run_deletion_test force_rollback_test extended_usage_error_tests \
+consistency_option_validation_tests snapshot_deletion_test"
 	set -- $TEST_SEQUENCE
 	TOTAL_TESTS=$#
 
