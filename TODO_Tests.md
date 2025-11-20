@@ -62,6 +62,6 @@ Current integration coverage in `tests/integration_zxfer.sh` focuses on local re
 - [ ] `src/zxfer_common.sh:203-220` – (platform-dependent) add a FreeBSD-only test that sets `-b` and `-B` separately, confirming `beep` loads `speaker.ko` once and writes to `/dev/speaker`, and fails gracefully when the module is missing.  
 
 ## Failure Handling
-- [ ] `src/zxfer_get_zfs_list.sh:312-317` – feed zxfer a nonexistent source dataset to trigger “Failed to retrieve snapshots from the source,” and a nonexistent destination root to trigger “Failed to retrieve list of datasets from the destination,” ensuring both fatal error paths are covered.  
+- [x] `src/zxfer_get_zfs_list.sh:312-317` – feed zxfer a nonexistent source dataset to trigger “Failed to retrieve snapshots from the source,” and a nonexistent destination root to trigger “Failed to retrieve list of datasets from the destination,” ensuring both fatal error paths are covered. (Covered by `failure_handling_tests` and `missing_destination_error_test`.)  
 
 Document the intent, preconditions (e.g., need for GNU parallel, SSH keys, SMF availability, ability to create ZFS pools backed by sparse files), and expected assertions inside each new test case so they can be implemented incrementally in `tests/integration_zxfer.sh` (or companion scripts) without destabilizing existing scenarios.
