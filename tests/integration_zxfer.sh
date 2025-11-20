@@ -662,11 +662,57 @@ progress_wrapper_test() {
 	append_data_to_dataset "$src_dataset" "file.txt" "progress data"
 	zfs snap -r "$src_dataset@p1"
 
-run_zxfer -v -j 2 -D "cat >/dev/null" -R "$src_dataset" "$dest_root"
+	run_zxfer -v -j 2 -D "cat >/dev/null" -R "$src_dataset" "$dest_root"
 
 	assert_snapshot_exists "$dest_dataset" "p1"
 
 	log "Progress wrapper test passed"
+}
+
+job_limit_enforcement_test() {
+	log "Starting job limit enforcement test"
+
+	if ! has_gnu_parallel; then
+		log "Skipping job limit enforcement test (GNU parallel not available)"
+		return
+	fi
+
+	src_root="$SRC_POOL/joblimit_src"
+	dest_root="$DEST_POOL/joblimit_dest"
+
+	zfs destroy -r "$dest_root" >/dev/null 2>&1 || true
+	zfs destroy -r "$src_root" >/dev/null 2>&1 || true
+
+	zfs create "$src_root"
+	zfs create "$dest_root"
+
+	for i in 1 2 3 4; do
+		child="$src_root/fs$i"
+		zfs create "$child"
+		append_data_to_dataset "$child" "file.txt" "data$i"
+	done
+
+	# First recursive snapshot seeds parent and children.
+	zfs snap -r "$src_root@base"
+
+	for i in 1 2 3 4; do
+		child="$src_root/fs$i"
+		append_data_to_dataset "$child" "file.txt" "more$i"
+	done
+	zfs snap -r "$src_root@next"
+
+	run_zxfer -v -j 3 -R "$src_root" "$dest_root"
+
+	for i in 1 2 3 4; do
+		dest_child="$dest_root/joblimit_src/fs$i"
+		assert_snapshot_exists "$dest_child" "base"
+		assert_snapshot_exists "$dest_child" "next"
+	done
+
+	assert_snapshot_exists "$dest_root/joblimit_src" "base"
+	assert_snapshot_exists "$dest_root/joblimit_src" "next"
+
+	log "Job limit enforcement test passed"
 }
 
 missing_destination_error_test() {
@@ -955,7 +1001,7 @@ main() {
 TEST_SEQUENCE="usage_error_tests basic_replication_test non_recursive_replication_test \
 generate_tests_replication idempotent_replication_test auto_snapshot_replication_test \
 auto_snapshot_nonrecursive_test trailing_slash_destination_test exclude_filter_test \
-parallel_jobs_listing_test progress_wrapper_test missing_destination_error_test invalid_override_property_test \
+parallel_jobs_listing_test progress_wrapper_test job_limit_enforcement_test missing_destination_error_test invalid_override_property_test \
 dry_run_replication_test dry_run_deletion_test force_rollback_test \
 failure_handling_tests extended_usage_error_tests consistency_option_validation_tests snapshot_deletion_test"
 	set -- $TEST_SEQUENCE
