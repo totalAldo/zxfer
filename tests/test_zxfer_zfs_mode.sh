@@ -34,6 +34,21 @@ mock_zfs_tool() {
 	printf '%s\n' "$*" >>"$STUB_ZFS_CMD_LOG"
 }
 
+run_source_zfs_cmd() {
+	if [ "$1" = "get" ] && [ "$2" = "-Ho" ] && [ "$3" = "value" ] && [ "$4" = "mounted" ]; then
+		# Simulate a mounted filesystem so migration preflight passes.
+		printf 'yes\n'
+		return 0
+	fi
+
+	if [ "$1" = "unmount" ]; then
+		printf 'unmount %s\n' "$2" >>"$STUB_ZFS_CMD_LOG"
+		return 0
+	fi
+
+	mock_zfs_tool "$@"
+}
+
 oneTimeSetUp() {
 	TEST_TMPDIR=$(mktemp -d -t zxfer_zfs_mode.XXXXXX)
 }
