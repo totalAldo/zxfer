@@ -242,6 +242,14 @@ secure_path_dependency_tests() {
 exit 0
 EOF
 	chmod +x "$mock_path/ssh"
+	for bin in awk cat sed date mktemp tr printf grep cut head sort; do
+		real_bin=$(command -v "$bin" 2>/dev/null || true)
+		if [ "$real_bin" != "" ]; then
+			ln -s "$real_bin" "$mock_path/$bin"
+		else
+			fail "Required binary $bin not found on host; cannot run secure PATH test."
+		fi
+	done
 	# Deliberately omit zfs from the secure PATH to ensure zxfer aborts cleanly.
 	secure_path="$mock_path"
 
@@ -1470,15 +1478,15 @@ send_command_dryrun_test \
 backup_dir_symlink_guard_test \
 grandfather_protection_test \
 migration_unmounted_guard_test \
-missing_parallel_error_test \
-secure_path_dependency_tests \
 property_backup_restore_test \
 delete_dest_only_snapshot_test \
 dry_run_deletion_test \
 progress_wrapper_test \
 job_limit_enforcement_test \
 background_send_failure_test \
+secure_path_dependency_tests \
 remote_migration_guard_tests \
+missing_parallel_error_test \
 parallel_jobs_listing_test"
 	set -- $TEST_SEQUENCE
 	TOTAL_TESTS=$#
