@@ -1082,7 +1082,7 @@ get_backup_properties() {
 	# it or terminating with an error.
 	# shellcheck disable=SC2154
 	l_suspect_fs=$initial_source
-	l_suspect_fs_tail=""
+	l_suspect_fs_tail=$(echo "$l_suspect_fs" | sed -e 's/.*\///g')
 	l_found_backup_file=0
 	l_used_legacy_backup=0
 	l_legacy_backup_path=""
