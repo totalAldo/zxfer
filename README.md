@@ -53,16 +53,13 @@ replication until there are no changes in the destination.
 + Create global temporary files used when checking for snapshots to delete to reduce the number of `mktemp` calls
 
 ## Snapshot Deletion Behavior
-The `-d` flag batches snapshot deletes and runs the resulting `zfs destroy`
-commands in the background so transfers can proceed without blocking. zxfer ties
-those background jobs to the lifetime of the main process: when zxfer exits for
-any reason, the `trap_exit` helper kills outstanding destroy jobs instead of
-letting them continue unattended on production pools. This is intentional to
-keep deletions supervised. The `g_is_performed_send_destroy` flag therefore
-only indicates that zxfer launched a destroy operation—it does not guarantee
-that the kernel finished removing the snapshot. If zxfer terminates while
-deletes are still running, rerun the tool with `-d` once the previous background
-jobs have been reaped to complete the cleanup.
+The `-d` flag batches snapshot deletes, waits for the `zfs destroy` call to
+complete, and rolls the destination dataset back to the last common snapshot
+before streaming. This prevents incremental receives from failing when a newer
+destination snapshot is removed and ensures the receive side aligns with the
+source before the next send. The `g_is_performed_send_destroy` flag still tracks
+that zxfer changed remote state for `-Y` iterations, but snapshot cleanup should
+finish before the command returns.
 
 ## Code Refactoring
 The code has been refactored for better readability and maintainability, which includes:

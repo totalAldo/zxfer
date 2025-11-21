@@ -210,13 +210,17 @@ delete_snaps() {
 	l_zfs_dest_dataset=$(echo "$l_snaps_to_delete" | head -n 1 | "$g_cmd_awk" -F'@' '{print $1}')
 
 	# build the destroy command
-	l_cmd="$g_RZFS destroy $l_zfs_dest_dataset@$l_unprotected_snaps_to_delete"
-	echov "$l_cmd"
+	l_destroy_target="$l_zfs_dest_dataset@$l_unprotected_snaps_to_delete"
+	l_cmd="$g_RZFS destroy $l_destroy_target"
 	if [ "$g_option_n_dryrun" -eq 1 ]; then
-		echov "Dry run, skipping delete."
+		echov "Dry run: $l_cmd"
 		return
 	fi
-	execute_background_cmd "$l_cmd" /dev/null
+
+	g_did_delete_dest_snapshots=1
+	if ! run_destination_zfs_cmd destroy "$l_destroy_target"; then
+		throw_error "Error when executing command."
+	fi
 
 	# set the flag to indicate that a destroy command was sent
 	# shellcheck disable=SC2034
@@ -254,6 +258,8 @@ inspect_delete_snap() {
 	#echoV "Begin inspect_delete_snap()"
 	l_is_delete_snap=$1
 	l_source=$2
+
+	g_did_delete_dest_snapshots=0
 
 	# Get only the snapshots for the exact source dataset in descending order
 	# by creation date.

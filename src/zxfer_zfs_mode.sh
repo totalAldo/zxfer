@@ -67,9 +67,33 @@ set_actual_dest() {
 		l_dest_tail=$(echo "$l_source" | sed -e "s%^$l_part_of_source_to_delete%%g")
 		g_actual_dest="$g_destination"/"$l_dest_tail"
 	else
-		l_trailing_slash_dest_tail=$(echo "$l_source" | sed -e "s%^$initial_source%%g")
-		g_actual_dest="$g_destination$l_trailing_slash_dest_tail"
+	l_trailing_slash_dest_tail=$(echo "$l_source" | sed -e "s%^$initial_source%%g")
+	g_actual_dest="$g_destination$l_trailing_slash_dest_tail"
 	fi
+}
+
+rollback_destination_to_last_common_snapshot() {
+	# Only roll back when snapshot deletion pruned newer points on the destination.
+	if [ "${g_did_delete_dest_snapshots:-0}" -ne 1 ]; then
+		return
+	fi
+
+	if [ "$(exists_destination "$g_actual_dest")" -eq 0 ]; then
+		return
+	fi
+
+	l_last_common_name=$(extract_snapshot_name "$g_last_common_snap")
+	if [ -z "$l_last_common_name" ]; then
+		return
+	fi
+
+	l_dest_snapshot="$g_actual_dest@$l_last_common_name"
+	echov "Rolling back $g_actual_dest to last common snapshot [$l_dest_snapshot] after deletions."
+	if ! run_destination_zfs_cmd rollback -r "$l_dest_snapshot"; then
+		throw_error "Failed to roll back destination [$g_actual_dest] to $l_dest_snapshot after deleting snapshots."
+	fi
+
+	g_did_delete_dest_snapshots=0
 }
 
 #
@@ -94,6 +118,8 @@ copy_snapshots() {
 		# keep looping until the end of the list
 		l_final_snapshot=$l_snapshot
 	done
+
+	rollback_destination_to_last_common_snapshot
 
 	if [ -z "$l_final_snapshot" ]; then
 		echoV "No snapshots to copy, skipping destination dataset: $g_actual_dest."

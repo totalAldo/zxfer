@@ -1168,7 +1168,7 @@ test_delete_snaps_invokes_destroy_for_missing_snapshots() {
 	(
 		g_RZFS="/sbin/zfs"
 		g_option_n_dryrun=0
-		execute_background_cmd() { printf '%s\n' "$1" >"$log"; }
+		run_destination_zfs_cmd() { printf '%s %s %s\n' "$g_RZFS" "$1" "$2" >"$log"; }
 		delete_snaps "$source_list" "$dest_list"
 	)
 	result=$(cat "$log")
