@@ -1,6 +1,9 @@
 CHANGELOG
 =========
 
+2025.11.20
+-add integration tests
+
 2025.11.19
 -Ensure `-d` deletion passes walk every dataset even when no new snapshots are pending so orphaned destination snapshots are proposed/destroyed during dry-run and live zxfer runs, and cover the copy loop behavior via new shunit2 tests.
 -Add shunit2 coverage for quoting helpers, backup directory sanitizers, snapshot deletion guards, property diff/apply logic, snapshot listing orchestration, and zfs send/receive plumbing, and strip the trailing comma from batched destroy commands so `zxfer -d` emits valid `zfs destroy dataset@snap1,snap2` arguments.

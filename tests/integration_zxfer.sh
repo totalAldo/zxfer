@@ -1470,7 +1470,6 @@ send_command_dryrun_test \
 backup_dir_symlink_guard_test \
 grandfather_protection_test \
 migration_unmounted_guard_test \
-remote_migration_guard_tests \
 missing_parallel_error_test \
 secure_path_dependency_tests \
 property_backup_restore_test \
@@ -1479,6 +1478,7 @@ dry_run_deletion_test \
 progress_wrapper_test \
 job_limit_enforcement_test \
 background_send_failure_test \
+remote_migration_guard_tests \
 parallel_jobs_listing_test"
 	set -- $TEST_SEQUENCE
 	TOTAL_TESTS=$#
