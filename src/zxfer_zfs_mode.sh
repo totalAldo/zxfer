@@ -430,6 +430,14 @@ prepare_migration_services() {
 		echo "$g_option_c_services" | stopsvcs
 	fi
 
+	# Validate that each dataset is mounted before we attempt to unmount or snapshot.
+	for l_source in $g_recursive_source_list; do
+		l_source_mounted=$(run_source_zfs_cmd get -Ho value mounted "$l_source")
+		if [ "$l_source_mounted" != "yes" ]; then
+			throw_usage_error "The source filesystem is not mounted, cannot use -m."
+		fi
+	done
+
 	for l_source in $g_recursive_source_list; do
 		# Unmount the source filesystem before doing the last snapshot.
 		echov "Unmounting $l_source."
