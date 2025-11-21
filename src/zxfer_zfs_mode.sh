@@ -412,14 +412,15 @@ update_recursive_source_list_if_needed() {
 }
 
 initialize_replication_context() {
-	# Caches all the zfs list calls, gets the recursive list, and gives
-	# an opportunity to exit if the source is not present
-	get_zfs_list
-
-	# If we are restoring properties get the backup properties
+	# Fail fast when restoring properties from backup metadata so we do not
+	# attempt destination inspections before confirming the backup exists.
 	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
 		get_backup_properties
 	fi
+
+	# Caches all the zfs list calls, gets the recursive list, and gives
+	# an opportunity to exit if the source is not present
+	get_zfs_list
 
 	if [ "$g_option_U_skip_unsupported_properties" -eq 1 ]; then
 		calculate_unsupported_properties
