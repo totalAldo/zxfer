@@ -288,7 +288,7 @@ init_globals() {
 	g_readonly_properties="type,creation,used,available,referenced,\
 compressratio,mounted,version,primarycache,secondarycache,\
 usedbysnapshots,usedbydataset,usedbychildren,usedbyrefreservation,\
-version,volsize,mountpoint,mlslabel,keysource,keystatus,rekeydate,encryption,pbkdf2iters,snapshots_changed,special_small_blocks,\
+version,volsize,mountpoint,mlslabel,keysource,keystatus,rekeydate,encryption,encryptionroot,keylocation,keyformat,pbkdf2iters,snapshots_changed,special_small_blocks,\
 refcompressratio,written,logicalused,logicalreferenced,createtxg,guid,origin,\
 filesystem_count,snapshot_count,clones,defer_destroy,receive_resume_token,\
 userrefs,objsetid"
@@ -1081,6 +1081,12 @@ get_backup_properties() {
 	# until the pool level, looking for the backup file, stopping when we find
 	# it or terminating with an error.
 	# shellcheck disable=SC2154
+	if [ -n "${ZXFER_BACKUP_DIR:-}" ]; then
+		g_backup_storage_root=$ZXFER_BACKUP_DIR
+	elif [ -z "${g_backup_storage_root:-}" ]; then
+		g_backup_storage_root=/var/db/zxfer
+	fi
+
 	l_suspect_fs=$initial_source
 	l_suspect_fs_tail=$(echo "$l_suspect_fs" | sed -e 's/.*\///g')
 	l_found_backup_file=0
@@ -1093,8 +1099,22 @@ get_backup_properties() {
 			l_suspect_fs_tail=$(echo "$l_suspect_fs" | sed -e 's/.*\///g')
 		fi
 		l_mountpoint=$(run_source_zfs_cmd get -H -o value mountpoint "$l_suspect_fs")
+		l_mountpoint_rel=${l_mountpoint#/}
 		l_secure_dir=$(get_backup_storage_dir "$l_mountpoint" "$l_suspect_fs")
 		l_backup_file="$l_secure_dir/$g_backup_file_extension.$l_suspect_fs_tail"
+		# Fall back to the raw mountpoint path under ZXFER_BACKUP_DIR; some callers
+		# lay out backup metadata using the literal mountpoint rather than the
+		# sanitized path returned by get_backup_storage_dir().
+		l_mount_backup_file=""
+		if [ "$l_mountpoint_rel" != "" ]; then
+			l_mount_backup_file="$g_backup_storage_root/$l_mountpoint_rel/$g_backup_file_extension.$l_suspect_fs_tail"
+		fi
+		# Also try a dataset-relative path in case the mountpoint is empty/legacy.
+		l_dataset_rel=${l_suspect_fs#/}
+		l_dataset_backup_file=""
+		if [ "$l_dataset_rel" != "" ]; then
+			l_dataset_backup_file="$g_backup_storage_root/$l_dataset_rel/$g_backup_file_extension.$l_suspect_fs_tail"
+		fi
 		l_legacy_backup_file=""
 		case "$l_mountpoint" in
 		"" | "-" | legacy | none) ;;
@@ -1103,30 +1123,50 @@ get_backup_properties() {
 			;;
 		esac
 
+		# Try each candidate path in order. Security failures propagate via
+		# require_secure_backup_file() and will terminate the run with the
+		# expected error message.
 		if [ "$g_option_O_origin_host" = "" ]; then
-			if l_backup_contents=$(read_local_backup_file "$l_backup_file"); then
-				g_restored_backup_file_contents=$l_backup_contents
-				l_found_backup_file=1
-			elif [ "$l_legacy_backup_file" != "" ] &&
-				l_backup_contents=$(read_local_backup_file "$l_legacy_backup_file"); then
-				g_restored_backup_file_contents=$l_backup_contents
-				l_found_backup_file=1
-				l_used_legacy_backup=1
-				l_legacy_backup_path="$l_legacy_backup_file"
-				l_expected_secure_backup="$l_backup_file"
+			for l_candidate in "$l_backup_file" "$l_mount_backup_file" "$l_dataset_backup_file" "$l_legacy_backup_file"; do
+				[ "$l_candidate" = "" ] && continue
+				if l_backup_contents=$(read_local_backup_file "$l_candidate"); then
+					g_restored_backup_file_contents=$l_backup_contents
+					l_found_backup_file=1
+					if [ "$l_candidate" = "$l_legacy_backup_file" ]; then
+						l_used_legacy_backup=1
+						l_legacy_backup_path="$l_candidate"
+						l_expected_secure_backup="$l_backup_file"
+					fi
+					break
+				fi
+			done
+			# As a last resort, look for the expected filename anywhere under
+			# the backup root. This guards against platform-specific mountpoint
+			# representations (e.g., differing leading paths on FreeBSD) while
+			# still enforcing permissions via read_local_backup_file().
+			if [ $l_found_backup_file -eq 0 ] && [ -d "$g_backup_storage_root" ]; then
+				l_find_name="$g_backup_file_extension.$l_suspect_fs_tail"
+				l_found_path=$(find "$g_backup_storage_root" -name "$l_find_name" -type f 2>/dev/null | head -n 1)
+				if [ "$l_found_path" != "" ] &&
+					l_backup_contents=$(read_local_backup_file "$l_found_path"); then
+					g_restored_backup_file_contents=$l_backup_contents
+					l_found_backup_file=1
+				fi
 			fi
 		else
-			if l_backup_contents=$(read_remote_backup_file "$g_option_O_origin_host" "$l_backup_file"); then
-				g_restored_backup_file_contents=$l_backup_contents
-				l_found_backup_file=1
-			elif [ "$l_legacy_backup_file" != "" ] &&
-				l_backup_contents=$(read_remote_backup_file "$g_option_O_origin_host" "$l_legacy_backup_file"); then
-				g_restored_backup_file_contents=$l_backup_contents
-				l_found_backup_file=1
-				l_used_legacy_backup=1
-				l_legacy_backup_path="$l_legacy_backup_file"
-				l_expected_secure_backup="$l_backup_file"
-			fi
+			for l_candidate in "$l_backup_file" "$l_mount_backup_file" "$l_dataset_backup_file" "$l_legacy_backup_file"; do
+				[ "$l_candidate" = "" ] && continue
+				if l_backup_contents=$(read_remote_backup_file "$g_option_O_origin_host" "$l_candidate"); then
+					g_restored_backup_file_contents=$l_backup_contents
+					l_found_backup_file=1
+					if [ "$l_candidate" = "$l_legacy_backup_file" ]; then
+						l_used_legacy_backup=1
+						l_legacy_backup_path="$l_candidate"
+						l_expected_secure_backup="$l_backup_file"
+					fi
+					break
+				fi
+			done
 		fi
 
 		if [ $l_found_backup_file -eq 0 ]; then

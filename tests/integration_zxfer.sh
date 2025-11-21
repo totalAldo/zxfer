@@ -2579,8 +2579,6 @@ send_command_dryrun_test \
 raw_send_replication_test \
 backup_dir_symlink_guard_test \
 missing_backup_metadata_error_test \
-insecure_backup_metadata_guard_test \
-legacy_backup_fallback_warning_test \
 grandfather_protection_test \
 migration_unmounted_guard_test \
 property_backup_restore_test \
@@ -2606,6 +2604,8 @@ migration_service_success_test \
 migration_service_failure_test \
 get_os_detection_test \
 verbose_debug_logging_test \
+legacy_backup_fallback_warning_test \
+insecure_backup_metadata_guard_test \
 beep_handling_test"
 	set -- $TEST_SEQUENCE
 	TOTAL_TESTS=$#
