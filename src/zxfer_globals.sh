@@ -1089,6 +1089,9 @@ get_backup_properties() {
 	l_expected_secure_backup=""
 
 	while [ $l_found_backup_file -eq 0 ]; do
+		if [ "$l_suspect_fs_tail" = "" ]; then
+			l_suspect_fs_tail=$(echo "$l_suspect_fs" | sed -e 's/.*\///g')
+		fi
 		l_mountpoint=$(run_source_zfs_cmd get -H -o value mountpoint "$l_suspect_fs")
 		l_secure_dir=$(get_backup_storage_dir "$l_mountpoint" "$l_suspect_fs")
 		l_backup_file="$l_secure_dir/$g_backup_file_extension.$l_suspect_fs_tail"
