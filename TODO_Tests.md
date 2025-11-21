@@ -1,0 +1,5 @@
+- Add integration coverage for seeding an existing destination dataset that has no snapshots so `copy_snapshots` hits the non-creation branch (src/zxfer_zfs_mode.sh:103-120).
+- Add an integration test for `-D` progress templating that exercises `%%size%%`/`%%title%%` replacement and the FIFO passthrough pipeline in `zxfer_progress_passthrough` (src/zxfer_zfs_send_receive.sh:68-145).
+- Add integration coverage for secure PATH append handling to prove `ZXFER_SECURE_PATH_APPEND` only honors absolute entries and that dependency lookups use the merged allowlist (src/zxfer_globals.sh:52-126).
+- Add an integration test using multi-token ssh host specs (extra ssh options/helper commands) to validate `invoke_ssh_command_for_host`/`quote_host_spec_tokens` quoting and control socket setup (src/zxfer_common.sh:174-344).
+- Add asymmetric `-z` compression integration tests where only the origin or only the target is remote to cover both wrap_command_with_ssh send/receive compression branches (src/zxfer_zfs_send_receive.sh:187-213).

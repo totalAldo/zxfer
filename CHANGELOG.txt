@@ -3,6 +3,10 @@ CHANGELOG
 
 2025.11.20
 -add integration tests
+-Wait for `-d` snapshot deletions to finish and roll the destination back to the
+ last common snapshot before sending incrementals so mismatched snapshot names
+ no longer trigger `zfs receive ... has been modified since most recent snapshot`
+ failures mid-run.
 
 2025.11.19
 -Ensure `-d` deletion passes walk every dataset even when no new snapshots are pending so orphaned destination snapshots are proposed/destroyed during dry-run and live zxfer runs, and cover the copy loop behavior via new shunit2 tests.
