@@ -287,7 +287,7 @@ init_globals() {
 	g_readonly_properties="type,creation,used,available,referenced,\
 compressratio,mounted,version,primarycache,secondarycache,\
 usedbysnapshots,usedbydataset,usedbychildren,usedbyrefreservation,\
-version,volsize,mountpoint,mlslabel,keysource,keystatus,rekeydate,encryption,\
+version,volsize,mountpoint,mlslabel,keysource,keystatus,rekeydate,encryption,pbkdf2iters,snapshots_changed,special_small_blocks,\
 refcompressratio,written,logicalused,logicalreferenced,createtxg,guid,origin,\
 filesystem_count,snapshot_count,clones,defer_destroy,receive_resume_token,\
 userrefs,objsetid"
