@@ -293,10 +293,12 @@ force_readonly_off() {
 }
 
 #
-# Collect the effective source property list, optionally persisting/restoring
-# backup metadata and honoring the writable flag.
+# Collect the source property list and derive the effective list used for
+# transfer. Results are stored in module variables:
+#  m_source_pvs_raw - normalized properties from the live source
+#  m_source_pvs_effective - properties after restore/writable handling
 # $1: source dataset
-# $2: destination dataset (for backup bookkeeping)
+# $2: destination dataset (for restore bookkeeping)
 # $3: ensure-writable flag (1 to force readonly=off)
 # $4: zfs command used to inspect the source (defaults to $g_LZFS)
 #
@@ -310,27 +312,21 @@ collect_source_props() {
 		l_zfs_cmd=$g_LZFS
 	fi
 
-	l_source_pvs=$(get_normalized_dataset_properties "$l_source" "$l_zfs_cmd")
-
-	if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
-		g_backup_file_contents="$g_backup_file_contents;\
-$l_source,$l_dest,$l_source_pvs"
-	fi
+	m_source_pvs_raw=$(get_normalized_dataset_properties "$l_source" "$l_zfs_cmd")
+	m_source_pvs_effective=$m_source_pvs_raw
 
 	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
 		l_source_regex=$(printf '%s\n' "$l_source" | sed 's/[].[^$\\*]/\\&/g')
-		l_source_pvs=$(echo "$g_restored_backup_file_contents" |
+		m_source_pvs_effective=$(echo "$g_restored_backup_file_contents" |
 			grep "^[^,]*,$l_source_regex," | sed -e 's/^[^,]*,[^,]*,//g')
-		if [ "$l_source_pvs" = "" ]; then
+		if [ "$m_source_pvs_effective" = "" ]; then
 			throw_usage_error "Can't find the properties for the filesystem $l_source"
 		fi
 	fi
 
 	if [ "$l_ensure_writable" -eq 1 ]; then
-		l_source_pvs=$(force_readonly_off "$l_source_pvs")
+		m_source_pvs_effective=$(force_readonly_off "$m_source_pvs_effective")
 	fi
-
-	printf '%s\n' "$l_source_pvs"
 }
 
 #
@@ -759,7 +755,15 @@ transfer_properties() {
 		l_is_initial_source=0
 	fi
 
-	l_source_pvs=$(collect_source_props "$l_source" "$g_actual_dest" "$g_ensure_writable" "$g_LZFS")
+	collect_source_props "$l_source" "$g_actual_dest" "$g_ensure_writable" "$g_LZFS"
+	l_source_pvs=$m_source_pvs_effective
+
+	# Persist raw source properties for -k backups in the parent shell (avoid
+	# command-substitution subshells dropping global state).
+	if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
+		g_backup_file_contents="$g_backup_file_contents;\
+$l_source,$g_actual_dest,$m_source_pvs_raw"
+	fi
 
 	l_source_dstype=$(run_source_zfs_cmd get -Hpo value type "$l_source")
 	l_source_volsize=$(run_source_zfs_cmd get -Hpo value volsize "$l_source")
@@ -794,7 +798,11 @@ EOF
 	dest_regex=$(printf '%s\n' "$g_actual_dest" | sed 's/[].[^$\\*]/\\&/g')
 	dest_exist=$(printf '%s\n' "${g_recursive_dest_list:-}" | grep -c "^$dest_regex$")
 
+	# Track when zxfer created the destination during this property pass so the
+	# seed receive can safely use -F on an empty dataset.
+	g_dest_created_by_zxfer=0
 	if ensure_destination_exists "$dest_exist" "$l_is_initial_source" "$override_pvs" "$creation_pvs" "$l_source_dstype" "$l_source_volsize" "$g_actual_dest" ""; then
+		g_dest_created_by_zxfer=1
 		return
 	fi
 

@@ -81,6 +81,7 @@ setUp() {
 	g_recursive_source_dataset_list=""
 	g_readonly_properties="type,mountpoint,creation"
 	g_LZFS="mock_zfs_tool"
+	g_dest_created_by_zxfer=0
 }
 
 test_resolve_initial_source_prefers_recursive_flag() {
@@ -321,6 +322,30 @@ inspect 1 tank/src/child2
 copy tank/src/child2"
 	assertEquals "Recursive -d runs should inspect every dataset even without pending sends." \
 		"$expected" "$(cat "$log")"
+}
+
+test_copy_snapshots_seeds_existing_destination_into_snapshot() {
+	g_actual_dest="backup/target/src"
+	g_dest_has_snapshots=0
+	g_dest_created_by_zxfer=1
+	g_src_snapshot_transfer_list="tank/src@seed1 tank/src@seed2"
+	log="$TEST_TMPDIR/seed_existing.log"
+	rm -f "$log"
+
+	(
+		SEED_LOG="$log"
+		rollback_destination_to_last_common_snapshot() { :; }
+		exists_destination() { printf '1\n'; }
+		zfs_send_receive() {
+			printf 'prev=%s curr=%s dest=%s force=%s bg=%s\n' \
+				"${1:-<none>}" "$2" "$3" "${g_option_F_force_rollback:-<none>}" "$4" >>"$SEED_LOG"
+		}
+		copy_snapshots
+	)
+
+	expected="prev=<none> curr=tank/src@seed1 dest=backup/target/src force=-F bg=0"
+	assertEquals "Existing destinations without snapshots should be seeded with forced receive when zxfer created them." \
+		"$expected" "$(head -n 1 "$log")"
 }
 
 test_run_zfs_mode_loop_exits_after_single_iteration_when_no_changes() {

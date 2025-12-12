@@ -140,7 +140,15 @@ copy_snapshots() {
 		g_dest_has_snapshots=1
 	elif [ "$g_dest_has_snapshots" -eq 0 ]; then
 		echov "Destination dataset [$g_actual_dest] exists but has no snapshots. Seeding with [$l_first_snapshot]"
+		# If zxfer just created this empty destination to apply must-create
+		# properties, force the initial receive so older OpenZFS versions accept
+		# the full stream into the existing dataset.
+		l_prev_force=${g_option_F_force_rollback:-}
+		if [ "${g_dest_created_by_zxfer:-0}" -eq 1 ]; then
+			g_option_F_force_rollback="-F"
+		fi
 		zfs_send_receive "" "$l_first_snapshot" "$g_actual_dest" "0"
+		g_option_F_force_rollback=$l_prev_force
 		g_last_common_snap=$l_first_snapshot
 		g_dest_has_snapshots=1
 	fi
@@ -307,6 +315,8 @@ copy_filesystems() {
 	for l_source in $l_iteration_list; do
 
 		set_actual_dest "$l_source"
+		# Reset per-dataset state derived from transfer_properties().
+		g_dest_created_by_zxfer=0
 
 		# If using the -m feature, check if the source is mounted,
 		# otherwise there's no point in us doing the remounting.
