@@ -382,9 +382,30 @@ get_zfs_list() {
 	# get a list of all destination datasets recursively
 	l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $g_destination"
 	echoV "Running command: $l_cmd"
-	if ! g_recursive_dest_list=$($l_cmd); then
-		throw_usage_error "Failed to retrieve list of datasets from the destination"
+	l_dest_list_tmp_file=$(get_temp_file)
+	l_dest_list_err_file=$(get_temp_file)
+	if run_destination_zfs_cmd list -t filesystem,volume -Hr -o name "$g_destination" >"$l_dest_list_tmp_file" 2>"$l_dest_list_err_file"; then
+		g_recursive_dest_list=$(cat "$l_dest_list_tmp_file")
+	else
+		l_dest_err=$(cat "$l_dest_list_err_file")
+		if printf '%s\n' "$l_dest_err" | grep -qi "dataset does not exist"; then
+			l_dest_pool=${g_destination%%/*}
+			if [ "$l_dest_pool" = "" ]; then
+				l_dest_pool=$g_destination
+			fi
+			if run_destination_zfs_cmd list -H -o name "$l_dest_pool" >/dev/null 2>&1; then
+				g_recursive_dest_list=""
+				echoV "Destination dataset missing; treating as empty list for bootstrap."
+			else
+				rm -f "$l_dest_list_tmp_file" "$l_dest_list_err_file"
+				throw_usage_error "Failed to retrieve list of datasets from the destination"
+			fi
+		else
+			rm -f "$l_dest_list_tmp_file" "$l_dest_list_err_file"
+			throw_usage_error "Failed to retrieve list of datasets from the destination"
+		fi
 	fi
+	rm -f "$l_dest_list_tmp_file" "$l_dest_list_err_file"
 
 	echoV "Waiting for background processes to finish."
 	wait

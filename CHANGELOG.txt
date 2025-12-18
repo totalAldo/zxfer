@@ -3,6 +3,12 @@ CHANGELOG
 
 2025.12.18
 -Fix property restore lookup to match backup file format (source,destination,properties), with a fallback for legacy order.
+-Create ssh control sockets with -fN before the host spec so options are parsed correctly and remote commands are not invoked.
+-Fix remote backup metadata prep/validation commands to avoid escaped command substitutions and keep remote scripts one-line for ssh on FreeBSD.
+-Fix remote backup metadata writes to avoid double-escaping quotes so directories are created and files can be written on FreeBSD.
+-Treat missing destination datasets as empty listings during get_zfs_list so bootstrap restores do not fail on new targets.
+-Only treat missing destination datasets as empty when the destination pool exists, keeping the missing-pool error behavior intact.
+-Create parent datasets when needed for initial destination creation so restores can bootstrap into new targets.
 
 2025.12.12
 -When zxfer pre-creates an empty destination for property transfer (-P/-k), seed it with a forced full receive (-F) so older OpenZFS versions accept the initial stream while preserving must-create properties.

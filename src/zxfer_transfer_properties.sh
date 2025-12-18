@@ -521,6 +521,11 @@ ensure_destination_exists() {
 		remove_sources "$l_override_pvs"
 		l_property_list="$m_new_rmvs_pv"
 		l_with_parents="no"
+		l_parent_dataset=${l_destination%/*}
+		if [ "$l_parent_dataset" != "$l_destination" ] &&
+			[ "$(exists_destination "$l_parent_dataset")" -eq 0 ]; then
+			l_with_parents="yes"
+		fi
 	else
 		l_filtered_creation=$(sanitize_property_list "$l_creation_pvs" "$g_readonly_properties" "$g_option_I_ignore_properties")
 		remove_sources "$l_filtered_creation"

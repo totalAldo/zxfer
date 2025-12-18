@@ -344,7 +344,7 @@ setup_ssh_control_socket() {
 	esac
 
 	l_host_tokens=$(split_host_spec_tokens "$l_host")
-	set -- "$g_cmd_ssh" -M -S "$l_control_socket"
+	set -- "$g_cmd_ssh" -M -S "$l_control_socket" -fN
 	if [ "$l_host_tokens" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
 			set -- "$@" "$l_token"
@@ -352,7 +352,6 @@ setup_ssh_control_socket() {
 $l_host_tokens
 EOF
 	fi
-	set -- "$@" -fN
 	if ! "$@"; then
 		throw_error "Error creating ssh control socket for $l_role host."
 	fi
@@ -983,7 +982,6 @@ ensure_remote_backup_dir() {
 	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$l_host")
 	l_dir_single=$(escape_for_single_quotes "$l_dir")
 	l_remote_cmd="[ -L '$l_dir_single' ] && { echo 'Refusing to use symlinked zxfer backup directory.' >&2; exit 1; }; if [ -e '$l_dir_single' ] && [ ! -d '$l_dir_single' ]; then echo 'Backup path exists but is not a directory.' >&2; exit 1; fi; umask 077; if ! mkdir -p '$l_dir_single'; then echo 'Error creating secure backup directory.' >&2; exit 1; fi; if ! chmod 700 '$l_dir_single'; then echo 'Error securing backup directory.' >&2; exit 1; fi; l_expected_uid=\$(id -u); l_dir_uid=''; if l_dir_uid=\$(stat -f '%u' '$l_dir_single' 2>/dev/null); then :; elif l_dir_uid=\$(stat -c '%u' '$l_dir_single' 2>/dev/null); then :; else l_ls_line=\$(ls -ldn -- '$l_dir_single' 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_dir_uid=\$(printf '%s\n' \"\$l_ls_line\" | awk '{print \$3}'); fi; fi; if [ \"\$l_dir_uid\" = '' ]; then echo 'Unable to determine backup directory owner.' >&2; exit 1; fi; if [ \"\$l_dir_uid\" != 0 ] && [ \"\$l_dir_uid\" != \"\$l_expected_uid\" ]; then echo 'Backup directory must be owned by root or the ssh user.' >&2; exit 1; fi"
-	l_remote_cmd=$(escape_for_double_quotes "$l_remote_cmd")
 	if ! invoke_ssh_command_for_host "$l_target_ssh_cmd" "$l_host" "$l_remote_cmd"; then
 		throw_error "Error preparing backup directory on $l_host."
 	fi
@@ -1008,55 +1006,18 @@ read_remote_backup_file() {
 	l_remote_insecure_mode_status=96
 	l_remote_unknown_status=97
 	l_remote_awk_cmd=${g_cmd_awk:-awk}
-	l_remote_secure_cat_cmd=$(escape_for_double_quotes "
-if [ ! -f '$l_path_single' ] || [ -h '$l_path_single' ]; then
-	exit 1
-fi
-l_uid=''
-if command -v stat >/dev/null 2>&1; then
-	l_uid=\$(stat -f '%u' '$l_path_single' 2>/dev/null)
-	if [ \"\$l_uid\" = '' ]; then
-		l_uid=\$(stat -c '%u' '$l_path_single' 2>/dev/null)
-	fi
-fi
-if [ \"\$l_uid\" = '' ]; then
-	l_ls_line=\$(ls -ldn -- '$l_path_single' 2>/dev/null) || l_ls_line=''
-	if [ \"\$l_ls_line\" != '' ]; then
-		l_uid=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$3}')
-	fi
-fi
-if [ \"\$l_uid\" = '' ]; then
-	exit $l_remote_unknown_status
-fi
-if [ \"\$l_uid\" != '0' ]; then
-	exit $l_remote_insecure_owner_status
-fi
-l_mode=''
-if command -v stat >/dev/null 2>&1; then
-	l_mode=\$(stat -f '%OLp' '$l_path_single' 2>/dev/null)
-	if [ \"\$l_mode\" = '' ]; then
-		l_mode=\$(stat -c '%a' '$l_path_single' 2>/dev/null)
-	fi
-fi
-if [ \"\$l_mode\" = '' ]; then
-	if [ \"\$l_ls_line\" = '' ]; then
-		l_ls_line=\$(ls -ldn -- '$l_path_single' 2>/dev/null) || l_ls_line=''
-	fi
-	if [ \"\$l_ls_line\" != '' ]; then
-		l_perm=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$1}')
-		if [ \"\$l_perm\" = '-rw-------' ]; then
-			l_mode='600'
-		fi
-	fi
-fi
-if [ \"\$l_mode\" = '' ]; then
-	exit $l_remote_unknown_status
-fi
-if [ \"\$l_mode\" != '600' ]; then
-	exit $l_remote_insecure_mode_status
-fi
-$g_cmd_cat '$l_path_single'
-")
+	l_remote_secure_cat_cmd="if [ ! -f '$l_path_single' ] || [ -h '$l_path_single' ]; then exit 1; fi; \
+l_uid=''; \
+if command -v stat >/dev/null 2>&1; then l_uid=\$(stat -f '%u' '$l_path_single' 2>/dev/null); if [ \"\$l_uid\" = '' ]; then l_uid=\$(stat -c '%u' '$l_path_single' 2>/dev/null); fi; fi; \
+if [ \"\$l_uid\" = '' ]; then l_ls_line=\$(ls -ldn -- '$l_path_single' 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_uid=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$3}'); fi; fi; \
+if [ \"\$l_uid\" = '' ]; then exit $l_remote_unknown_status; fi; \
+if [ \"\$l_uid\" != '0' ]; then exit $l_remote_insecure_owner_status; fi; \
+l_mode=''; \
+if command -v stat >/dev/null 2>&1; then l_mode=\$(stat -f '%OLp' '$l_path_single' 2>/dev/null); if [ \"\$l_mode\" = '' ]; then l_mode=\$(stat -c '%a' '$l_path_single' 2>/dev/null); fi; fi; \
+if [ \"\$l_mode\" = '' ]; then if [ \"\$l_ls_line\" = '' ]; then l_ls_line=\$(ls -ldn -- '$l_path_single' 2>/dev/null) || l_ls_line=''; fi; if [ \"\$l_ls_line\" != '' ]; then l_perm=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$1}'); if [ \"\$l_perm\" = '-rw-------' ]; then l_mode='600'; fi; fi; fi; \
+if [ \"\$l_mode\" = '' ]; then exit $l_remote_unknown_status; fi; \
+if [ \"\$l_mode\" != '600' ]; then exit $l_remote_insecure_mode_status; fi; \
+$g_cmd_cat '$l_path_single'"
 	invoke_ssh_command_for_host "$l_origin_ssh_cmd" "$l_host" "$l_remote_secure_cat_cmd"
 	l_remote_status=$?
 	if [ $l_remote_status -eq $l_remote_insecure_owner_status ]; then
@@ -1229,7 +1190,8 @@ write_backup_properties() {
 			ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host"
 			ensure_remote_backup_dir "$l_backup_file_dir" "$g_option_T_target_host"
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-			l_remote_write_cmd=$(escape_for_double_quotes "umask 077; cat > \"$l_backup_file_path\"")
+			l_backup_file_path_single=$(escape_for_single_quotes "$l_backup_file_path")
+			l_remote_write_cmd="umask 077; cat > '$l_backup_file_path_single'"
 			if ! printf '%s' "$g_backup_file_contents" | tr ";" "\n" |
 				invoke_ssh_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_write_cmd"; then
 				throw_error "Error writing backup file. Is filesystem mounted?"
