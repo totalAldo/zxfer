@@ -1,6 +1,9 @@
 CHANGELOG
 =========
 
+2025.12.18
+-Fix property restore lookup to match backup file format (source,destination,properties), with a fallback for legacy order.
+
 2025.12.12
 -When zxfer pre-creates an empty destination for property transfer (-P/-k), seed it with a forced full receive (-F) so older OpenZFS versions accept the initial stream while preserving must-create properties.
 -Fix property backup (-k) collection to persist in the parent shell so backup metadata files are actually written during runs.

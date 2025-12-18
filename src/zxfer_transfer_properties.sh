@@ -318,7 +318,12 @@ collect_source_props() {
 	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
 		l_source_regex=$(printf '%s\n' "$l_source" | sed 's/[].[^$\\*]/\\&/g')
 		m_source_pvs_effective=$(echo "$g_restored_backup_file_contents" |
-			grep "^[^,]*,$l_source_regex," | sed -e 's/^[^,]*,[^,]*,//g')
+			grep "^$l_source_regex," | sed -e 's/^[^,]*,[^,]*,//g')
+		if [ "$m_source_pvs_effective" = "" ]; then
+			# Fall back to legacy order if older backups stored dest,source,props.
+			m_source_pvs_effective=$(echo "$g_restored_backup_file_contents" |
+				grep "^[^,]*,$l_source_regex," | sed -e 's/^[^,]*,[^,]*,//g')
+		fi
 		if [ "$m_source_pvs_effective" = "" ]; then
 			throw_usage_error "Can't find the properties for the filesystem $l_source"
 		fi

@@ -241,7 +241,15 @@ EOF
 
 run_zxfer() {
 	log "Running: $ZXFER_BIN $*"
-	$ZXFER_BIN "$@"
+	# Preserve inline env overrides when run_zxfer is invoked as VAR=... run_zxfer.
+	ZXFER_BACKUP_DIR=${ZXFER_BACKUP_DIR-} \
+	ZXFER_SECURE_PATH=${ZXFER_SECURE_PATH-} \
+	ZXFER_SECURE_PATH_APPEND=${ZXFER_SECURE_PATH_APPEND-} \
+	MOCK_SSH_LOG=${MOCK_SSH_LOG-} \
+	MOCK_SSH_FORCE_UNAME=${MOCK_SSH_FORCE_UNAME-} \
+	MOCK_SSH_FILTER_PROPERTY=${MOCK_SSH_FILTER_PROPERTY-} \
+	MOCK_SVCADM_LOG=${MOCK_SVCADM_LOG-} \
+	"$ZXFER_BIN" "$@"
 }
 
 run_test() {
@@ -1355,7 +1363,7 @@ property_backup_restore_test() {
 	if [ "$backup_file" = "" ]; then
 		fail "Backup metadata file was not written under $backup_dir."
 	fi
-	if ! grep -q "#zxfer property backup file;" "$backup_file"; then
+	if ! grep -q "^#zxfer property backup file" "$backup_file"; then
 		fail "Backup metadata missing expected header."
 	fi
 
