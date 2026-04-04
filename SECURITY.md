@@ -11,7 +11,7 @@ resolution security-sensitive by default.
 
 Key protections already present in the project include:
 
-- secure-PATH resolution for required local and remote helpers
+- secure-PATH resolution for required local helpers and the main remote helper lookups (`zfs`, `cat`, and GNU `parallel`)
 - structured failure reporting instead of ad hoc error handling
 - hardened `ZXFER_ERROR_LOG` path validation
 - secured property backup metadata directories and file-permission checks
@@ -24,6 +24,10 @@ Current open security concerns are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.m
 Please do not open a public issue for a suspected command-injection, trust-
 boundary, privilege-escalation, or data-destruction vulnerability until the
 maintainer has had a chance to assess it privately.
+
+Send private vulnerability reports to:
+
+- `zxfer@totalaldo.com`
 
 If possible, include:
 

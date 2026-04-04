@@ -9,22 +9,20 @@ Source0:        https://github.com/totalAldo/zxfer/archive/refs/tags/v%{version}
 
 BuildArch:      noarch
 
+# Keep the core dependency set portable. zxfer resolves runtime helpers through
+# its secure-PATH model, so downstream packagers may swap these generic
+# requirements for distro-specific package names or virtual provides.
 Requires:       /bin/sh
-Requires:       /sbin/zfs
-Requires:       /usr/bin/gawk
-Requires:       /usr/bin/parallel
+Requires:       /usr/bin/awk
 Requires:       /usr/bin/ssh
-Requires:       /usr/bin/zstd
-
-Provides:       zxfer-turbo
+Requires:       zfs
 
 %description
-zxfer turbo is a refactored release of the long-standing zxfer utility.  It
-adds GNU parallel powered snapshot discovery, high-performance ZFS replication,
-zstd-compressed ssh streams, dataset property synchronization and additional
-safety checks.  The script is aimed at power users who need to replicate or
-prune large OpenZFS installations quickly while retaining the original
-one-command workflow.
+zxfer is a maintained release of the long-standing zxfer utility. It adds
+high-performance ZFS replication, dataset property synchronization, and
+additional safety checks while retaining the original one-command workflow.
+Optional features use GNU parallel for `-j` snapshot discovery and zstd for
+`-z` / `-Z` compressed ssh streams when those tools are installed.
 
 %prep
 %autosetup
@@ -69,4 +67,5 @@ install -Dm0644 COPYING %{buildroot}%{_docdir}/%{name}-%{version}/COPYING
 
 %changelog
 * Sat Apr 04 2026 Aldo Gonzalez - 2.0-20260404-0.1
-- Track zxfer turbo 2.0-20260404 release and modernize Source URL (see CHANGELOG.txt for upstream details).
+- Track zxfer 2.0-20260404 release and modernize Source URL (see CHANGELOG.txt for upstream details).
+- Make platform/security docs clearer about remote helper hardening and macOS caveats, and loosen the RPM spec away from a path-locked `/sbin/zfs` dependency so downstream packagers can adapt it more easily.

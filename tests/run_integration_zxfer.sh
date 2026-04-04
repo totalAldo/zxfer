@@ -45,7 +45,7 @@ require_cmd() {
 
 print_usage() {
 	cat <<'EOF'
-usage: ./tests/integration_zxfer.sh [--yes] [--skip-test name] [--keep-going] [--help]
+usage: ./tests/run_integration_zxfer.sh [--yes] [--skip-test name] [--keep-going] [--help]
 
 By default the integration harness prompts for approval before data-modifying
 wrapped external commands (for example zpool, zfs, rm, mkdir, mktemp, chmod,
@@ -2833,7 +2833,8 @@ force_rollback_test() {
 }
 
 generate_tests_replication() {
-	# Mirror the old tests/generateTests.sh workflow using the integration pools.
+	# Exercise the historical multi-dataset replication layout using file-backed
+	# integration pools instead of direct host datasets.
 	log "Starting multi-dataset replication test"
 
 	src_parent="$SRC_POOL/zxfer_tests"

@@ -318,8 +318,12 @@ test_read_command_line_switches_sets_flags_in_current_shell() {
 	assertEquals "Parallel job count should be captured from -j." "4" "$g_option_j_jobs"
 	assertEquals "Nonrecursive source should be captured from -N." "tank/nonrecursive" "$g_option_N_nonrecursive"
 	assertEquals "Override property should be captured from -o." "atime=off" "$g_option_o_override_property"
+	# read_command_line_switches runs in the current shell here; the SC2031
+	# warning is triggered by separate subshell-based coverage elsewhere.
+	# shellcheck disable=SC2031
 	assertEquals "Origin host should be captured from -O." "origin.example pfexec" "$g_option_O_origin_host"
 	assertEquals "Recursive source should be captured from -R." "tank/src" "$g_option_R_recursive"
+	# shellcheck disable=SC2031
 	assertEquals "Target host should be captured from -T." "target.example doas" "$g_option_T_target_host"
 	assertEquals "Exclude list should be captured from -x." "child" "$g_option_x_exclude_datasets"
 	assertEquals "Very-verbose mode should imply verbose mode." "1" "$g_option_v_verbose"

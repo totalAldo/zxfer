@@ -48,7 +48,7 @@ bash xtrace-based approximation.
 Run the integration suite interactively:
 
 ```sh
-./tests/integration_zxfer.sh
+./tests/run_integration_zxfer.sh
 ```
 
 By default, the harness prompts before data-modifying wrapped external
@@ -57,26 +57,26 @@ commands. This is the safest mode when testing on a real workstation.
 Run it unattended:
 
 ```sh
-./tests/integration_zxfer.sh --yes
+./tests/run_integration_zxfer.sh --yes
 ```
 
 Keep running after failures:
 
 ```sh
-./tests/integration_zxfer.sh --yes --keep-going
+./tests/run_integration_zxfer.sh --yes --keep-going
 ```
 
 Skip one or more tests:
 
 ```sh
-./tests/integration_zxfer.sh --yes --skip-test property_creation_with_zvol_test
+./tests/run_integration_zxfer.sh --yes --skip-test property_creation_with_zvol_test
 ```
 
 Or:
 
 ```sh
 ZXFER_SKIP_TESTS="property_creation_with_zvol_test property_override_and_ignore_test" \
-./tests/integration_zxfer.sh --yes --keep-going
+./tests/run_integration_zxfer.sh --yes --keep-going
 ```
 
 Useful environment variables:

@@ -2717,17 +2717,18 @@ test_zxfer_append_failure_report_to_log_rejects_unknown_mode() {
 
 test_zxfer_append_failure_report_to_log_warns_when_file_creation_fails() {
 	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	log_parent="$physical_tmpdir/no_write"
-	log_path="$log_parent/failure.log"
+	log_path="$physical_tmpdir/create_failure.log"
 	stderr_file="$TEST_TMPDIR/error_log_create_failure.stderr"
-	mkdir -p "$log_parent"
-	chmod 500 "$log_parent"
 	ZXFER_ERROR_LOG="$log_path"
 
 	set +e
-	zxfer_append_failure_report_to_log "message: create-failed" >"$TEST_TMPDIR/error_log_create_failure.stdout" 2>"$stderr_file"
+	(
+		zxfer_create_error_log_file() {
+			return 1
+		}
+		zxfer_append_failure_report_to_log "message: create-failed"
+	) >"$TEST_TMPDIR/error_log_create_failure.stdout" 2>"$stderr_file"
 	status=$?
-	chmod 700 "$log_parent" >/dev/null 2>&1 || true
 	grep -F "unable to create ZXFER_ERROR_LOG file" "$stderr_file" >/dev/null 2>&1
 	grep_status=$?
 	stderr_contents=$(cat "$stderr_file" 2>/dev/null || true)
@@ -2744,7 +2745,7 @@ test_zxfer_append_failure_report_to_log_warns_when_chmod_fails() {
 
 	set +e
 	(
-		chmod() {
+		zxfer_chmod_error_log_file() {
 			return 1
 		}
 		zxfer_append_failure_report_to_log "message: chmod-failed"

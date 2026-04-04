@@ -204,25 +204,8 @@ write_destination_snapshot_list_to_files() {
 	# check if the destination zfs dataset exists before listing snapshots
 	if [ "$(exists_destination "$l_destination_dataset")" -eq 1 ]; then
 		# dataset exists
-
-		# using parallel when metadata cached is slower - disabling
-		#if [ $g_option_j_jobs -gt 1 ]; then
-		#    # if the g_RZFS command is remote, then escape the command to execute
-		#    if [ ! "$g_option_T_origin_host" = "" ]; then
-		#        if [ "$g_option_z_compress" -eq 1 ]; then
-		#            l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}' | zstd -9\" | zstd -d"
-		#        else
-		#            l_cmd="$g_cmd_ssh $g_option_T_target_host \"$g_cmd_zfs list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_cmd_zfs list -H -o name -d 1 -t snapshot {}'\""
-		#        fi
-		#    else
-		#        l_cmd="$g_RZFS list -Hr -o name $l_destination_dataset | $g_cmd_parallel -j $g_option_j_jobs --line-buffer '$g_RZFS list -H -o name -d 1 -t snapshot {}'"
-		#    fi
-		#else
-		#    # do not perform in the background so we can sort the results
-		#    # before the longest operation is complete
-		#    l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
-		#fi
-
+		# Keep destination-side snapshot listing serial here. The older parallel
+		# variant added complexity and was not a net win once metadata was cached.
 		l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
 		echoV "Running command: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
@@ -328,47 +311,11 @@ set_g_recursive_source_list() {
 }
 
 #
-# Caches zfs list commands to cut execution time
-# Uses background processes when listing snapshots to speed up the results.
-# Often, the source and destination datasets reside on different pools
-# and running the zfs list commands in parallel can speed up the process.
-#
-# zfs list options used in this function include:
-# -H  Used for scripting mode.  Do not print headers and separate fields by
-#     a single tab instead of arbitrary white space.
-# -r  Recursively display any children of the dataset on the command line.
-# -o property
-#    A comma-separated list of properties to display.  The property must
-#    be:
-#    •   One of the properties described in the Native Properties section
-#        of zfsprops(7)
-#    •   A user property
-#    •   The value name to display the dataset name
-#    •   The value space to display space usage properties on file systems
-#        and volumes.  This is a shortcut for specifying
-#        -o name,avail,used,usedsnap,usedds,usedrefreserv,usedchild -t
-#        filesystem,volume.
-# -s property
-#    A property for sorting the output by column in ascending order based
-#    on the value of the property.  The property must be one of the
-#    properties described in the Properties section of zfsprops(7) or the
-#    value name to sort by the dataset name.  Multiple properties can be
-#    specified at one time using multiple -s property options.  Multiple
-#    -s options are evaluated from left to right in decreasing order of
-#    importance.  The following is a list of sorting criteria:
-#    •   Numeric types sort in numeric order.
-#    •   String types sort in alphabetical order.
-#    •   Types inappropriate for a row sort that row to the literal
-#        bottom, regardless of the specified ordering.
-#
-#    If no sorting options are specified the existing behavior of zfs list
-#    is preserved.
-# -S property
-#    Same as -s, but sorts by property in descending order.
-# -t type
-#    A comma-separated list of types to display, where type is one of
-#    filesystem, snapshot, volume, bookmark, or all.  For example,
-#    specifying -t snapshot displays only snapshots.
+# Build the source and destination snapshot caches used by replication.
+# zxfer relies on `zfs list` in machine-readable mode (`-H`), recursive dataset
+# traversal (`-r`) where needed, exact-name output (`-o name`), snapshot-only
+# listing (`-t snapshot`), and creation-order sorting for per-dataset snapshot
+# discovery on the source side.
 #
 get_zfs_list() {
 	zxfer_set_failure_stage "snapshot discovery"

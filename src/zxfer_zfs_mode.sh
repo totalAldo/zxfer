@@ -114,11 +114,8 @@ rollback_destination_to_last_common_snapshot() {
 # Takes: $g_last_common_snap, $g_src_snapshot_transfer_list
 #
 copy_snapshots() {
-	# This can get stale, especially if it has taken hours to copy the
-	# previous snapshot. Consider adding a time check and refreshing the list of
-	# snapshots if it has been too long since we got the list.
-	# 2024.07.15 - the recommended solution is to use -Y to repeat the process
-	# until there are no further differences
+	# Long-running transfers can drift from the original plan; refresh live
+	# destination state before sending, and use -Y to repeat until convergence.
 	l_first_snapshot=""
 	l_final_snapshot=""
 	g_dest_seed_requires_property_reconcile=0
@@ -611,7 +608,7 @@ perform_grandfather_protection_checks() {
 }
 
 #
-# zfs send/receive mode, aka zfs-replicate mode, aka normal mode
+# ZFS snapshot replication mode.
 #
 run_zfs_mode() {
 	resolve_initial_source_from_options

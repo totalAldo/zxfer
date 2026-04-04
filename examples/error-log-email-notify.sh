@@ -2,8 +2,9 @@
 
 # Template: replace the email address, log path, dataset names, and optional
 # origin/target host settings before use. This example enables ZXFER_ERROR_LOG,
-# captures the current run's structured failure report from stderr, and emails
-# it through mailx, BSD mail, or sendmail when zxfer exits non-zero.
+# captures the current run's structured failure report plus any extra stderr
+# warnings, and emails that context through mailx, BSD mail, or sendmail when
+# zxfer exits non-zero.
 
 set -eu
 
@@ -53,6 +54,27 @@ capture {
 }
 END {
 	printf "%s", last
+}
+' "$l_log_file"
+}
+
+extract_non_report_stderr() {
+	l_log_file=$1
+
+	awk '
+/^zxfer: failure report begin$/ {
+	capture = 1
+	next
+}
+/^zxfer: failure report end$/ {
+	capture = 0
+	next
+}
+capture {
+	next
+}
+{
+	print
 }
 ' "$l_log_file"
 }
@@ -123,13 +145,32 @@ send_alert_with_mail_client() {
 	printf '%s\n' "$l_body" | "$@"
 }
 
+validate_sendmail_header_value() {
+	l_name=$1
+	l_value=$2
+	l_newline='
+'
+	l_carriage_return=$(printf '\r')
+
+	case "$l_value" in
+	*"$l_newline"* | *"$l_carriage_return"*)
+		printf '%s\n' "$l_name must be a single line when using sendmail." >&2
+		return 1
+		;;
+	esac
+}
+
 send_alert_with_sendmail() {
 	l_command=$1
 	l_subject=$2
 	l_body=$3
 
+	validate_sendmail_header_value "ALERT_TO" "$ALERT_TO" || return 1
+	validate_sendmail_header_value "Subject" "$l_subject" || return 1
+
 	set -- "$l_command" -t
 	if [ -n "$MAIL_FROM" ]; then
+		validate_sendmail_header_value "MAIL_FROM" "$MAIL_FROM" || return 1
 		if [ -z "$SENDMAIL_FROM_FLAG" ]; then
 			printf '%s\n' "MAIL_FROM is set but SENDMAIL_FROM_FLAG is empty. Set SENDMAIL_FROM_FLAG or clear MAIL_FROM." >&2
 			return 1
@@ -274,6 +315,10 @@ emit_report() {
 	printf 'zxfer: failure report end\n'
 }
 
+if [ -n "${MOCK_ZXFER_EXTRA_STDERR:-}" ]; then
+	printf '%s\n' "$MOCK_ZXFER_EXTRA_STDERR" >&2
+fi
+
 emit_report >&2
 
 if [ "${MOCK_ZXFER_APPEND_ERROR_LOG:-1}" = "1" ]; then
@@ -402,6 +447,46 @@ self_test_usr_lib_sendmail_case() {
 	self_test_assert_contains "$l_case_dir/sendmail.body" "From: solaris@example.com"
 }
 
+self_test_rejects_multiline_sendmail_headers_case() {
+	l_tmpdir=$1
+	l_bad_alert_dir="$l_tmpdir/sendmail-bad-alert-to"
+	l_bad_from_dir="$l_tmpdir/sendmail-bad-mail-from"
+	l_bad_alert_to='alerts@example.com
+Bcc: injected@example.com'
+	l_bad_mail_from='sender@example.com
+Cc: injected@example.com'
+
+	mkdir -p "$l_bad_alert_dir/bin" "$l_bad_from_dir/bin"
+	write_self_test_zxfer "$l_bad_alert_dir/bin/zxfer"
+	write_self_test_zxfer "$l_bad_from_dir/bin/zxfer"
+	write_self_test_mail_capture "$l_bad_alert_dir/bin/sendmail"
+	write_self_test_mail_capture "$l_bad_from_dir/bin/sendmail"
+
+	l_status=$(run_script_for_self_test "$l_bad_alert_dir" "$l_bad_alert_dir/bin" \
+		MAILER="sendmail" \
+		ALERT_TO="$l_bad_alert_to")
+	if [ "$l_status" -ne 3 ]; then
+		self_test_fail "multiline ALERT_TO case expected exit status 3, got $l_status"
+	fi
+	self_test_assert_contains "$l_bad_alert_dir/stderr" "ALERT_TO must be a single line when using sendmail."
+	self_test_assert_contains "$l_bad_alert_dir/stderr" "warning: failed to deliver zxfer alert mail."
+	if [ -e "$l_bad_alert_dir/sendmail.argv" ] || [ -e "$l_bad_alert_dir/sendmail.body" ]; then
+		self_test_fail "multiline ALERT_TO case should reject the header before invoking sendmail."
+	fi
+
+	l_status=$(run_script_for_self_test "$l_bad_from_dir" "$l_bad_from_dir/bin" \
+		MAILER="sendmail" \
+		MAIL_FROM="$l_bad_mail_from")
+	if [ "$l_status" -ne 3 ]; then
+		self_test_fail "multiline MAIL_FROM case expected exit status 3, got $l_status"
+	fi
+	self_test_assert_contains "$l_bad_from_dir/stderr" "MAIL_FROM must be a single line when using sendmail."
+	self_test_assert_contains "$l_bad_from_dir/stderr" "warning: failed to deliver zxfer alert mail."
+	if [ -e "$l_bad_from_dir/sendmail.argv" ] || [ -e "$l_bad_from_dir/sendmail.body" ]; then
+		self_test_fail "multiline MAIL_FROM case should reject the header before invoking sendmail."
+	fi
+}
+
 self_test_missing_mailer_case() {
 	l_tmpdir=$1
 	l_case_dir="$l_tmpdir/no-mailer"
@@ -460,6 +545,25 @@ self_test_root_error_log_parent_case() {
 	if [ "$l_parent" != "/" ]; then
 		self_test_fail "root-level ERROR_LOG case expected parent /, got $l_parent"
 	fi
+}
+
+self_test_includes_extra_stderr_case() {
+	l_tmpdir=$1
+	l_case_dir="$l_tmpdir/extra-stderr"
+
+	mkdir -p "$l_case_dir/bin"
+	write_self_test_zxfer "$l_case_dir/bin/zxfer"
+	write_self_test_mail_capture "$l_case_dir/bin/mailx"
+
+	l_status=$(run_script_for_self_test "$l_case_dir" "$l_case_dir/bin" \
+		MOCK_ZXFER_EXTRA_STDERR="warning: ZXFER_ERROR_LOG append failed")
+	if [ "$l_status" -ne 3 ]; then
+		self_test_fail "extra stderr case expected exit status 3, got $l_status"
+	fi
+
+	self_test_assert_contains "$l_case_dir/mailx.body" "Additional stderr output:"
+	self_test_assert_contains "$l_case_dir/mailx.body" "warning: ZXFER_ERROR_LOG append failed"
+	self_test_assert_contains "$l_case_dir/mailx.body" "zxfer: failure report begin"
 }
 
 self_test_ignores_stale_error_log_case() {
@@ -546,9 +650,11 @@ run_self_test() {
 	self_test_mail_fallback_case "$l_tmpdir"
 	self_test_sendmail_case "$l_tmpdir"
 	self_test_usr_lib_sendmail_case "$l_tmpdir"
+	self_test_rejects_multiline_sendmail_headers_case "$l_tmpdir"
 	self_test_missing_mailer_case "$l_tmpdir"
 	self_test_relative_error_log_case "$l_tmpdir"
 	self_test_root_error_log_parent_case
+	self_test_includes_extra_stderr_case "$l_tmpdir"
 	self_test_ignores_stale_error_log_case "$l_tmpdir"
 	if [ "${ZXFER_MAIL_SELF_TEST_NO_RECURSE:-0}" != 1 ]; then
 		self_test_ignores_caller_mail_env_case
@@ -593,6 +699,7 @@ main() {
 	fi
 
 	report=$(extract_latest_failure_report "$stderr_capture")
+	extra_stderr=$(extract_non_report_stderr "$stderr_capture")
 
 	if [ -z "$report" ]; then
 		report="No structured failure report was found in the current zxfer stderr output."
@@ -622,6 +729,13 @@ Error log: $ERROR_LOG
 
 $report
 EOF
+		if [ -n "$extra_stderr" ]; then
+			cat <<EOF
+
+Additional stderr output:
+$extra_stderr
+EOF
+		fi
 	)
 
 	set +e

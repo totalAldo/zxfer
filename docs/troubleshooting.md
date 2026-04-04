@@ -153,7 +153,9 @@ failure report from stderr, and sends mail through `mailx`, BSD `mail`, or
 [examples/error-log-email-notify.sh](../examples/error-log-email-notify.sh). The
 example auto-detects those mailers, accepts `MAIL_FROM`,
 `MAIL_FROM_FLAG`, and `SENDMAIL_FROM_FLAG` overrides for sender-address
-requirements, and can be validated with
+requirements, rejects multiline `sendmail` header values in `ALERT_TO` and
+`MAIL_FROM`, includes stderr warnings outside the structured failure block in
+the alert body, and can be validated with
 `sh ./examples/error-log-email-notify.sh --self-test` before you point it at a
 real pool or MTA.
 

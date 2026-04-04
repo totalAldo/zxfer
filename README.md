@@ -1,10 +1,10 @@
-zxfer (turbo)
+zxfer
 =====
 
 `zxfer` is a POSIX shell tool for ZFS snapshot replication across local and
-remote hosts. This fork began as `zxfer (turbo)`, a refactored version of
-zxfer created to optimize ZFS replication after lengthy replication times when
-transferring large dataset snapshots.
+remote hosts. This maintained fork refactored the older upstream utility to
+improve replication performance, code readability, and operational safety on
+large dataset trees.
 
 The project’s modifications were motivated by the need to reduce both `ssh` and
 local replication time while improving code readability and maintainability.
@@ -13,17 +13,6 @@ changes, and it now focuses on high-reliability `zfs send` / `zfs receive`
 replication, safer failure handling, stronger dependency resolution, and better
 test coverage across FreeBSD, Linux, illumos/Solaris, and OpenZFS on macOS.
 
-+ Implement new -D parameter, allows you to put a progress indicator app between the zfs send and zfs receive. Provides macros %%size%% and %%title%%.
-	Example usage:
-
-		-D 'bar -s %%size%% -bl 1m -bs 256m'
-+ Ignore new read-only properties added in FreeBSD 9.1: 'written' and 'refcompressratio'
-+ Ignore new read-only properties added in FreeBSD 9.2/8.4: 'logicalused' and 'logicalreferenced'
-+ "Unsupported Properties" support, do not copy properties that are unsupported by the destination pool. Allows replication from 11-CURRENT to 9.2 etc, by automatically ignoring new properties such as: volmode, filesystem_limit, snapshot_limit, filesystem_count, snapshot_count, redundant_metadata
-+ Fixed -o mountpoint=foo , it is no longer ignored as readonly if explicitly requested by the user
-+ Implemented new -I parameter, ignore these properties and do not try to set them
-+ Implemented new -U parameter, do not try to replicate unsupported properties, to skip properties that the destination does not understand
-=======
 For the full CLI reference, use the man page:
 
 ```sh
@@ -165,11 +154,13 @@ Primary development has been on FreeBSD 14.x, but this fork also supports:
 
 - Linux with OpenZFS
 - illumos/Solaris systems with `zfs` / `svcadm`
-- OpenZFS on macOS, including `/usr/local/zfs/bin` layouts
+- OpenZFS on macOS, including `/usr/local/zfs/bin` layouts, with platform-specific property caveats tracked in `KNOWN_ISSUES.md`
 
 zxfer resolves `zfs`, `ssh`, `awk`, and other required tools through a trusted
-secure-PATH model. Remote `zfs` and related helpers are resolved on the remote
-host rather than assuming the same absolute path exists everywhere.
+secure-PATH model. Remote `zfs`, `cat`, and GNU `parallel` lookups are resolved
+on the remote host rather than assuming the same absolute path exists
+everywhere. Remote `uname` and source-listing `zstd` resolution still have open
+hardening gaps; see [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 
 Current caveats are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 
@@ -190,19 +181,19 @@ Run shell coverage:
 Run the integration harness:
 
 ```sh
-./tests/integration_zxfer.sh
+./tests/run_integration_zxfer.sh
 ```
 
 Run the integration harness unattended:
 
 ```sh
-./tests/integration_zxfer.sh --yes
+./tests/run_integration_zxfer.sh --yes
 ```
 
 Continue after failures and print a summary:
 
 ```sh
-./tests/integration_zxfer.sh --yes --keep-going
+./tests/run_integration_zxfer.sh --yes --keep-going
 ```
 
 GitHub Actions includes:

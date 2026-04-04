@@ -803,7 +803,7 @@ To restore the filesystem backed up in Ex4, we would do so using the
 following command:
 .PP
 \fBzxfer\fR
-\fB-deFPv -N backup01/filesystem/home storage\fR
+\fB-deFPv -N backup01/filesystems/home storage\fR
 .SS "Ex6 - Migrate a filesystem"
 We might want to migrate a filesystem (including properties).
 Note that this is only allowable when the original mountpoint is
@@ -927,8 +927,8 @@ exit status.
 .PP
 The repository includes \fBexamples/error-log-email-notify.sh\fR, which shows
 how to set \fBZXFER_ERROR_LOG\fR, capture the current run's failure report from
-\fIstderr\fR, and send an alert with \fBmailx\fR, BSD \fBmail\fR, or
-\fBsendmail\fR.
+\fIstderr\fR along with any extra stderr warnings, and send an alert with
+\fBmailx\fR, BSD \fBmail\fR, or \fBsendmail\fR.
 .PP
 \fBzxfer\fR
 prints its immediate error message and then emits a delimited failure report to
@@ -994,20 +994,20 @@ Note that FreeBSD does not support the transfer of several properties. See
 section for details on this.
 .PP
 There are several properties that are skipped over when transferring
-or setting properties - search the script for "readonly_properties"
-to see what they are. If you find that certain newer ZFS properties
-are not being transferred, there is a good chance that those properties
-they have been added to this list. That is
-because testing has indicated that attempting to create with or set those
-properties would cause the script to fail. If you can make a good case
-that the script should heed those property values,
-feel free to email me.
+or setting properties when testing has shown that creating or setting
+them would fail on one or more supported platforms. If certain newer ZFS
+properties are not being transferred, they may have been added to that
+compatibility filter. See the
+[\fB\-P\fR]
+documentation for current platform-specific limitations.
 .PP
-Send bug reports to ivannashdreckman at fastmailgolf dot fm, but not before
-removing the sport originating in Scotland from the email address. If you like
-\fBzxfer\fR
-and find it useful, send some feedback saying how you use it, and consider
-donating at some stage in the future.
+Report bugs through the project issue tracker:
+.br
+https://github.com/totalAldo/zxfer/issues
+.PP
+For security-sensitive issues, follow the private reporting guidance in
+\fBSECURITY.md\fR
+instead of opening a public issue.
 .SH "CREDITS"
 \fBzxfer\fR
 is distributed under the BSD license. See the file COPYING for details.

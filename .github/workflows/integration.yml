@@ -33,4 +33,4 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-          sudo env "PATH=$PATH" "TMPDIR=$TMPDIR" ./tests/integration_zxfer.sh --yes --keep-going
+          sudo env "PATH=$PATH" "TMPDIR=$TMPDIR" ./tests/run_integration_zxfer.sh --yes --keep-going

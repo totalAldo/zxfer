@@ -51,13 +51,13 @@ Run coverage when useful:
 Run integration tests only on a safe host:
 
 ```sh
-./tests/integration_zxfer.sh --yes --keep-going
+./tests/run_integration_zxfer.sh --yes --keep-going
 ```
 
 Run the integration harness interactively when you want per-command approval:
 
 ```sh
-./tests/integration_zxfer.sh
+./tests/run_integration_zxfer.sh
 ```
 
 ## Documentation Expectations

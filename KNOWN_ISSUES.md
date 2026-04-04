@@ -16,9 +16,14 @@ historical bugs should be removed instead of accumulated here.
   Recommended fix: resolve `zstd` remotely through the same secure-PATH mechanism used for `zfs`, `cat`, and GNU `parallel`, then build the remote listing pipeline with that absolute path.
 
 - OpenZFS-on-macOS property integration remains less deterministic than FreeBSD/Linux for some inherited child-dataset properties.
-  File: `tests/integration_zxfer.sh` (`property_creation_with_zvol_test()`, `property_override_and_ignore_test()`).
+  File: `tests/run_integration_zxfer.sh` (`property_creation_with_zvol_test()`, `property_override_and_ignore_test()`).
   Impact: Darwin integration tests currently skip the strict child `atime=off` assertions because that behavior has not been made stable enough to use as a portable end-to-end gate. This is currently treated as a platform-specific certification gap rather than a proven production data-loss bug.
   Recommended fix: investigate the exact property-source/value differences on Darwin after receive and property reconciliation, then either normalize zxfer's post-receive behavior or narrow the documented expectations for that platform.
+
+- FreeBSD still reports some created or updated dataset properties with unexpected source classifications (`default` versus `local`).
+  Files: `src/zxfer_globals.sh` (`g_fbsd_readonly_properties`), `src/zxfer_transfer_properties.sh` (`transfer_properties()`).
+  Impact: properties such as `quota`, `reservation`, `canmount`, `refquota`, and `refreservation` can land with a different property source than operators might expect after `zfs create` / `zfs set`. This does not currently affect inheritable-property reconciliation, but it remains a platform-specific behavior difference worth documenting.
+  Recommended fix: keep FreeBSD-specific assertions narrow in tests and investigate whether post-create reconciliation can normalize the reported property source without introducing cross-platform regressions.
 
 ## Security Review
 
@@ -34,8 +39,8 @@ historical bugs should be removed instead of accumulated here.
 
 ## Testing Limitations
 
-- `tests/integration_zxfer.sh` is file-backed and considerably safer than earlier versions, but it is not fully sandboxed.
-  File: `tests/integration_zxfer.sh`.
+- `tests/run_integration_zxfer.sh` is file-backed and considerably safer than earlier versions, but it is not fully sandboxed.
+  File: `tests/run_integration_zxfer.sh`.
   Impact: the harness avoids raw devices and should only create/destroy its own file-backed pools, but it still performs real kernel ZFS operations, mount activity, and dataset changes on the host.
   Current state: this is partially mitigated by the dedicated GitHub Actions integration workflow, which now runs the file-backed harness on `ubuntu-24.04` with ZFS installed at job runtime.
   Operational guidance: use a disposable VM, throwaway host, or CI runner for zero-risk validation; do not describe the harness as fully sandboxed.

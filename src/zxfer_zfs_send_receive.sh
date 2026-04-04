@@ -124,11 +124,6 @@ zxfer_progress_passthrough() {
 	return "$l_tee_status"
 }
 
-#
-# 2024.03.08 - generates error when creating a new dataset in target with:
-# cannot receive new filesystem stream: incomplete stream
-# Error when executing command.
-#
 handle_progress_bar_option() {
 	l_snapshot=$1
 	l_previous_snapshot=$2
@@ -160,22 +155,19 @@ get_send_command() {
 		l_v="-v"
 	fi
 
-	# 2024.03.31 - add support for -w option (raw send)
+	# Include raw-send mode when requested.
 	l_w=""
 	if [ "$g_option_w_raw_send" -eq 1 ]; then
 		l_w="-w"
 	fi
 
-	# if there is no previous snapshot, send the current snapshot which creates the dataset on the target
+	# Without a previous snapshot, send the current snapshot and create the target dataset.
 	if [ -z "$l_previous_snapshot" ]; then
 		echo "$g_cmd_zfs send $l_v $l_w $l_current_snapshot"
 		return # exit the function
 	fi
 
-	# previous version
-	#echo "$g_cmd_zfs send -i $l_previous_snapshot $l_current_snapshot"
-
-	# 2024.03.19 new version - send all incremental snapshots in one stream
+	# Stream the full incremental range in one send operation.
 	echo "$g_cmd_zfs send $l_v $l_w -I $l_previous_snapshot $l_current_snapshot"
 }
 

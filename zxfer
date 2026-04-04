@@ -33,57 +33,9 @@
 #
 # zxfer
 #
-# Transfer a source zfs filesystem, directory or files to a destination using
-# zfs send/receive to do the heavy lifting.
-
-# 2024.03 refactoring by Aldo Gonzalez
-
-# 2024.03 refactoring by Aldo Gonzalez
-
-# Comments, suggestions, bug reports please to:
-# Allan Jude  <allanjude a-t freebsd d-o-t org>
-#
-
-# Acknowledgments
-# Thanks to Ivan Nash Dreckman for creating zxfer and writing good documentation
-# which resulted in zxfer being the most useful of the available tools
-#
-# Thanks to Constantin Gonzalez (original author of zfs-replicate) for
-# the generous permission and licensing of his script zfs-replicate which
-# (version 0.7) was used as the basis for this script. Thanks in turn to
-# those who contributed to his script.
-
-# Also thanks very much to Constantin for his encouragement, support and
-# collaboration along the way. His advice on various decision paths has been
-# invaluable.
-
-# Background
-# This script is a merge of two scripts - one of my own using Constantin's
-# as a template, and my extensively modified version of his zfs-replicate
-# script.
-
-# There were two different use cases that lead to both being developed. One
-# was an extension of zfs-replicate - I wanted to be able to easily back up
-# a whole storage pool to a HDD via an e-SATA dock, with one command. I
-# wanted an exact replica of that pool, including snapshots and properties.
-
-# The other use case was to backup a SSD based root mirror to a larger
-# HDD based storage pool. It needed atomicity and it needed to be independent
-# of snapshots, because I was keeping most of the snapshots on the HDD based
-# pool. Both workflows relied on tooling that offered checksum validation.
-
-# Since then, the scripts have been merged, and the number of features has
-# increased. I hope you find it useful.
-
-# Known bugs/gotchas:
-# 2024.03.09
-# - The -D option does not work as expected when creating a dataset on the target
-#
-# (This is a bug of ZFS on FreeBSD and not this script.)
-# There are several properties in FreeBSD that when set via "zfs create"
-# or "zfs set" will have the source stay as default while others are
-# set to local. This does not have any real impacts because these properties
-# are not inheritable. See definition for $g_fbsd_readonly_properties.
+# ZFS-native snapshot replication for local and remote OpenZFS systems.
+# Uses `zfs send` / `zfs receive` with property synchronization, secure helper
+# resolution, and structured failure reporting.
 
 #
 # Print out usage information

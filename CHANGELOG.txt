@@ -23,6 +23,8 @@ CHANGELOG
 -Reorganize the repository layout by adding `docs/`, `examples/`, `man/`, `packaging/`, contributor/security docs, issue/PR templates, and `CODEOWNERS`, and move the manpages/spec/plaintext compatibility README into the new structure.
 -Refresh `README.md`, `AGENTS.md`, the manpages, and project docs so they match the current source tree, secure-PATH model, integration harness behavior, and testing/CI workflow.
 -Add `.gitignore` for local/editor/test artifacts and clean up stale documentation like `TODO_Tests.md`/`README.txt` by merging the still-relevant parts into the canonical docs.
+-Remove stale README merge debris, fix the backup/restore manpage example path mismatch, and align the RPM spec with the current `zxfer` name plus optional `parallel`/`zstd` feature dependencies.
+-Clarify README/platform documentation so remote helper hardening claims match the current `KNOWN_ISSUES.md` scope, note the macOS caveat inline, and make the RPM spec more portable by replacing the fixed `/sbin/zfs` dependency with a generic `zfs` requirement.
 
 2026.04.02
 -Make the integration harness safer and more usable by default: confirm data-modifying wrapped commands unless `--yes` is passed, add `--skip-test`, and add `--keep-going` failure collection.
@@ -36,7 +38,7 @@ CHANGELOG
 -Stop after seeding the first snapshot into an empty destination when that seed is already the newest snapshot, avoiding invalid `zfs send -I snap snap` streams during first-run replication, property backup/restore tests, trailing-slash/exclude tests, and legacy backup fallback flows.
 -Recheck live destination snapshots before reseeding an existing dataset during `-Y -d` iterations so destination-only snapshot cleanup does not trigger a second full receive into a dataset that still has the last common snapshot.
 -Wrap the remote `-O ... -j ...` snapshot-listing pipeline in `sh -c` before it reaches the origin host’s login shell, fixing `csh` quote parsing failures that showed up as `Unmatched '"'`, broken `zstd` streams, and `Failed to retrieve snapshots from the source`.
--Make `tests/integration_zxfer.sh` prompt for approval before data-modifying wrapped external commands by default, and add `--yes` to run the harness without confirmations.
+-Make `tests/run_integration_zxfer.sh` prompt for approval before data-modifying wrapped external commands by default, and add `--yes` to run the harness without confirmations.
 -Resolve `zfs` (and remote `cat` for `-e`) on origin/target hosts through the secure PATH so mixed Linux/FreeBSD/Solaris replication no longer assumes the local absolute binary path exists remotely.
 -Probe remote GNU `parallel` via the secure PATH using the host-spec tokenization helper so `-O "host pfexec ..."` remains portable and safe.
 -Emit a detailed failure report to stderr on every non-zero exit, including failure class/stage, source and destination context, the original shell-quoted invocation, and the last attempted command.
@@ -387,8 +389,8 @@ CHANGELOG
 20080813 zfs-replicate 0.7 is released by Constantin Gonzalez as the
            last update in his zfs-replicate utility. This may be found at
          http://blogs.sun.com/constantin/entry/zfs_replicator_script_new_edition
-- tests/integration_zxfer.sh now supports `--skip-test <function>` and
+- tests/run_integration_zxfer.sh now supports `--skip-test <function>` and
   `ZXFER_SKIP_TESTS` so specific integration cases can be skipped while the rest
   of the suite continues to run.
-- tests/integration_zxfer.sh now supports `--keep-going` so integration runs
+- tests/run_integration_zxfer.sh now supports `--keep-going` so integration runs
   can continue after failing cases and report the full failure list at the end.

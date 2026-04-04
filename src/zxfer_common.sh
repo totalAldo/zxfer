@@ -275,6 +275,24 @@ zxfer_find_symlink_path_component() {
 	return 1
 }
 
+zxfer_create_error_log_file() {
+	l_log_path=$1
+
+	# Avoid using a redirection on the special builtin ":" in the current shell.
+	# On dash, a permission-denied redirection for a special builtin is a fatal
+	# shell error, which can abort the caller before we emit the warning.
+	(
+		umask 077
+		: >"$l_log_path"
+	)
+}
+
+zxfer_chmod_error_log_file() {
+	l_log_path=$1
+
+	chmod 600 "$l_log_path"
+}
+
 zxfer_append_failure_report_to_log() {
 	l_report=$1
 	l_log_path=${ZXFER_ERROR_LOG:-}
@@ -329,17 +347,11 @@ zxfer_append_failure_report_to_log() {
 			return 1
 		fi
 	else
-		# Avoid using a redirection on the special builtin ":" in the current shell.
-		# On dash, a permission-denied redirection for a special builtin is a fatal
-		# shell error, which can abort the caller before we emit the warning.
-		if ! (
-			umask 077
-			: >"$l_log_path"
-		); then
+		if ! zxfer_create_error_log_file "$l_log_path"; then
 			zxfer_warn_stderr "zxfer: warning: unable to create ZXFER_ERROR_LOG file \"$l_log_path\"."
 			return 1
 		fi
-		if ! chmod 600 "$l_log_path"; then
+		if ! zxfer_chmod_error_log_file "$l_log_path"; then
 			zxfer_warn_stderr "zxfer: warning: unable to chmod ZXFER_ERROR_LOG file \"$l_log_path\" to 0600."
 			return 1
 		fi

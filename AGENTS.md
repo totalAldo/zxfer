@@ -9,7 +9,7 @@
 - zxfer now rebuilds `PATH` from a trusted allowlist and resolves required helpers to absolute paths. If a change touches dependency lookup or remote helper execution, preserve `ZXFER_SECURE_PATH` / `ZXFER_SECURE_PATH_APPEND` behavior locally and over `-O/-T`.
 - Non-zero exits now emit a structured stderr failure report and may optionally mirror it to `ZXFER_ERROR_LOG`. Keep new error paths compatible with that centralized reporting flow.
 - Integration tests use file-backed sparse pools rooted under a temporary `WORKDIR`. On macOS and Linux they no longer hard-require root, but they still require OpenZFS permissions that allow `zpool create` / `zpool destroy`; on FreeBSD root may still be required depending on device/module setup.
-- `tests/integration_zxfer.sh` prompts for approval before data-modifying wrapped external commands by default. Use `--yes` only when the user explicitly wants unattended execution.
+- `tests/run_integration_zxfer.sh` prompts for approval before data-modifying wrapped external commands by default. Use `--yes` only when the user explicitly wants unattended execution.
 - Temporary files should use `${TMPDIR:-/tmp}` via the existing helpers and be removed even on failure paths to prevent leaks on long-lived hosts.
 
 ## Priority Stack
@@ -21,7 +21,7 @@
 ## Safety Expectations
 - Treat every command as if it will run on a production host; avoid destructive ZFS operations unless explicitly scoped to throwaway sparse files created by the tests.
 - Prefer reviewing helper functions in `src/zxfer_common.sh` and `src/zxfer_globals.sh` before re-implementing logic—many guardrails (argument validation, snapshot sanity checks, logging helpers) already exist.
-- When a fix requires pool-level changes, rely on `tests/integration_zxfer.sh`, which creates isolated file-backed temporary pools under `WORKDIR`; never target live pools or datasets without the user’s confirmation.
+- When a fix requires pool-level changes, rely on `tests/run_integration_zxfer.sh`, which creates isolated file-backed temporary pools under `WORKDIR`; never target live pools or datasets without the user’s confirmation.
 - Keep the integration harness file-backed only. Do not add raw-device, loopback-device, or host-import/export paths without a very strong reason and explicit documentation.
 - The integration harness is safer than before, but it still performs real kernel ZFS operations. For “zero host risk” requests, recommend a disposable VM rather than claiming the harness is fully sandboxed.
 - Fail closed: check command exit codes, propagate errors via `die()`/`log_err()` helpers, and default to aborting when state is uncertain.
@@ -54,7 +54,7 @@
 - **Collect context first:** read `README.md`, `CHANGELOG.txt`, and any scripts relevant to the task before editing. Use `rg` for targeted searches and avoid assumptions about legacy behavior.
 - **Plan before executing:** outline the approach (especially for anything touching ZFS send/receive) and share it with the user when changes affect replication semantics or dataset deletion.
 - **Edit safely:** prefer `apply_patch` for small changes, keep modifications minimal, and never revert user edits unless asked. When updating shell code, mirror the project’s indentation (tabs) and quoting style.
-- **Validate continuously:** run `./tests/run_shunit_tests.sh` after meaningful shell changes. Use targeted suites for faster iteration, run `tests/run_coverage.sh` when expanding tests, and only use `./tests/integration_zxfer.sh --yes` when the environment truly has safe file-backed ZFS test permissions. Mention when integration tests were skipped and why.
+- **Validate continuously:** run `./tests/run_shunit_tests.sh` after meaningful shell changes. Use targeted suites for faster iteration, run `tests/run_coverage.sh` when expanding tests, and only use `./tests/run_integration_zxfer.sh --yes` when the environment truly has safe file-backed ZFS test permissions. Mention when integration tests were skipped and why.
 - **Explain trade-offs:** whenever a change impacts the priority stack, call out how safety/security were preserved, how maintainability was affected, and why performance adjustments are justified.
 - **Document artifacts:** update comments and docs alongside code so future contributors can follow the rationale without reverse-engineering the change.
 
