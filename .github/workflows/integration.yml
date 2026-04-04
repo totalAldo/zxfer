@@ -1,0 +1,36 @@
+name: Integration Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  zfs-integration:
+    name: ZFS Integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install ZFS prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+          sudo apt-get update
+          sudo apt-get install -y csh zfsutils-linux
+          sudo modprobe zfs
+          sudo zfs version
+          sudo zpool version
+
+      - name: Run integration tests
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+          sudo env "PATH=$PATH" "TMPDIR=$TMPDIR" ./tests/integration_zxfer.sh --yes --keep-going

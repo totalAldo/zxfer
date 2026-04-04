@@ -2,7 +2,7 @@
 # BSD HEADER START
 # This file is part of zxfer project.
 
-# Copyright (c) 2024-2025 Aldo Gonzalez
+# Copyright (c) 2024-2026 Aldo Gonzalez
 # Copyright (c) 2013-2019 Allan Jude <allanjude@freebsd.org>
 # Copyright (c) 2010,2011 Ivan Nash Dreckman
 # Copyright (c) 2007,2008 Constantin Gonzalez
@@ -30,8 +30,11 @@
 
 # BSD HEADER END
 
-# for shellcheck linting, uncomment this line
-#. ./zxfer_globals.sh;
+# for ShellCheck
+if false; then
+	# shellcheck source=src/zxfer_globals.sh
+	. ./zxfer_globals.sh
+fi
 
 ################################################################################
 # ZFS MODE FUNCTIONS
@@ -46,33 +49,63 @@ m_services_to_restart=""
 # Output is $g_actual_dest
 #
 set_actual_dest() {
-    l_source=$1
+	l_source=$1
 
-    # This gets the root filesystem transferred - e.g.
-    # the string after the very last "/" e.g. backup/test/zroot -> zroot
-    l_base_fs=${initial_source##*/}
-    # This gets everything but the base_fs, so that we can later delete it from
-    # $l_source
-    l_part_of_source_to_delete=${initial_source%"$l_base_fs"}
+	# This gets the root filesystem transferred - e.g.
+	# the string after the very last "/" e.g. backup/test/zroot -> zroot
+	l_base_fs=${initial_source##*/}
+	# This gets everything but the base_fs, so that we can later delete it from
+	# $l_source
+	l_part_of_source_to_delete=${initial_source%"$l_base_fs"}
 
-    # 0 if not a trailing slash; regex is one character of any sort followed by
-    # zero or more of any character until "/" followed by the end of the
-    # string.
-    # as in the "cp" man page
-    l_trailing_slash=$(echo "$initial_source" | grep -c '..*/$')
+	# A trailing slash means that the root filesystem is transferred straight
+	# into the dest fs, no trailing slash means that this fs is created
+	# inside the destination.
+	if [ "$g_initial_source_had_trailing_slash" -eq 0 ]; then
+		# If the original source was backup/test/zroot and we are transferring
+		# backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
+		l_dest_tail=$(echo "$l_source" | sed -e "s%^$l_part_of_source_to_delete%%g")
+		g_actual_dest="$g_destination"/"$l_dest_tail"
+	else
+		l_trailing_slash_dest_tail=$(echo "$l_source" | sed -e "s%^$initial_source%%g")
+		g_actual_dest="$g_destination$l_trailing_slash_dest_tail"
+	fi
 
-    # A trailing slash means that the root filesystem is transferred straight
-    # into the dest fs, no trailing slash means that this fs is created
-    # inside the destination.
-    if [ "$l_trailing_slash" -eq 0 ]; then
-        # If the original source was backup/test/zroot and we are transferring
-        # backup/test/zroot/tmp/foo, $l_dest_tail is zroot/tmp/foo
-        l_dest_tail=$(echo "$l_source" | sed -e "s%^$l_part_of_source_to_delete%%g")
-        g_actual_dest="$g_destination"/"$l_dest_tail"
-    else
-        l_trailing_slash_dest_tail=$(echo "$l_source" | sed -e "s%^$initial_source%%g")
-        g_actual_dest="$g_destination$l_trailing_slash_dest_tail"
-    fi
+	zxfer_set_current_dataset_context "$l_source" "$g_actual_dest"
+}
+
+rollback_destination_to_last_common_snapshot() {
+	# Never perform a destructive rollback unless the caller explicitly opted in
+	# to receive-side forcing with -F. Without that flag, zxfer should fail safe
+	# if the destination current head has diverged.
+	if [ "${g_option_F_force_rollback:-}" = "" ]; then
+		return
+	fi
+
+	# Only roll back when snapshot deletion pruned newer points on the destination.
+	if [ "${g_did_delete_dest_snapshots:-0}" -ne 1 ]; then
+		return
+	fi
+	if [ "${g_deleted_dest_newer_snapshots:-0}" -ne 1 ]; then
+		return
+	fi
+
+	if [ "$(exists_destination "$g_actual_dest")" -eq 0 ]; then
+		return
+	fi
+
+	l_last_common_name=$(extract_snapshot_name "$g_last_common_snap")
+	if [ -z "$l_last_common_name" ]; then
+		return
+	fi
+
+	l_dest_snapshot="$g_actual_dest@$l_last_common_name"
+	echov "Rolling back $g_actual_dest to last common snapshot [$l_dest_snapshot] after deletions."
+	if ! run_destination_zfs_cmd rollback -r "$l_dest_snapshot"; then
+		throw_error "Failed to roll back destination [$g_actual_dest] to $l_dest_snapshot after deleting snapshots."
+	fi
+
+	g_did_delete_dest_snapshots=0
 }
 
 #
@@ -81,110 +114,223 @@ set_actual_dest() {
 # Takes: $g_last_common_snap, $g_src_snapshot_transfer_list
 #
 copy_snapshots() {
-    # This can get stale, especially if it has taken hours to copy the
-    # previous snapshot. Consider adding a time check and refreshing the list of
-    # snapshots if it has been too long since we got the list.
-    # 2024.07.15 - the recommended solution is to use -Y to repeat the process
-    # until there are no further differences
-    l_first_snapshot=""
-    l_final_snapshot=""
+	# This can get stale, especially if it has taken hours to copy the
+	# previous snapshot. Consider adding a time check and refreshing the list of
+	# snapshots if it has been too long since we got the list.
+	# 2024.07.15 - the recommended solution is to use -Y to repeat the process
+	# until there are no further differences
+	l_first_snapshot=""
+	l_final_snapshot=""
+	g_dest_seed_requires_property_reconcile=0
 
-    # find the first and final snapshot for this dataset on the source
-    for l_snapshot in $g_src_snapshot_transfer_list; do
-        # set the first snapshot
-        [ -z "$l_first_snapshot" ] && l_first_snapshot=$l_snapshot
+	reconcile_live_destination_snapshot_state
 
-        # keep looping until the end of the list
-        l_final_snapshot=$l_snapshot
-    done
+	# find the first and final snapshot for this dataset on the source
+	for l_snapshot in $g_src_snapshot_transfer_list; do
+		# set the first snapshot
+		[ -z "$l_first_snapshot" ] && l_first_snapshot=$l_snapshot
 
-    if [ -z "$l_final_snapshot" ]; then
-        echoV "No snapshots to copy, skipping destination dataset: $g_actual_dest."
-        return
-    fi
+		# keep looping until the end of the list
+		l_final_snapshot=$l_snapshot
+	done
 
-    # check if the destination exists and if not,
-    # create it by sending the first snapshot
-    if [ "$(exists_destination "$g_actual_dest")" -eq 0 ]; then
-        # get the first snapshot name with full path
-        echov "Destination dataset does not exist [$g_actual_dest]. Sending first snapshot [$l_first_snapshot]"
-        # do not allow this to be run in the background
-        zfs_send_receive "" "$l_first_snapshot" "$g_actual_dest" "0"
+	if [ -z "$l_final_snapshot" ]; then
+		echoV "No snapshots to copy, skipping destination dataset: $g_actual_dest."
+		return
+	fi
 
-        # set the last common snapshot to the first snapshot so that all snapshots
-        # are copied below
-        g_last_common_snap=$l_first_snapshot
-    fi
+	# When there is nothing new to send, there is no need to roll the
+	# destination back after deleting extra snapshots.
+	if [ "$g_last_common_snap" = "$l_final_snapshot" ]; then
+		echoV "No new snapshots to copy for $g_actual_dest."
+		return
+	fi
 
-    # get the final snapshot name
-    echoV "Final snapshot: $l_final_snapshot"
+	rollback_destination_to_last_common_snapshot
 
-    # begin copying snapshots to the final snap from the last common snapshot
-    zfs_send_receive "$g_last_common_snap" "$l_final_snapshot" "$g_actual_dest" "1"
+	# check if the destination exists and if not,
+	# create it by sending the first snapshot
+	if [ "$(exists_destination "$g_actual_dest")" -eq 0 ]; then
+		# get the first snapshot name with full path
+		echov "Destination dataset does not exist [$g_actual_dest]. Sending first snapshot [$l_first_snapshot]"
+		# do not allow this to be run in the background
+		zfs_send_receive "" "$l_first_snapshot" "$g_actual_dest" "0"
+		g_dest_seed_requires_property_reconcile=1
+
+		# set the last common snapshot to the first snapshot so that all snapshots
+		# are copied below
+		g_last_common_snap=$l_first_snapshot
+		g_dest_has_snapshots=1
+	elif [ "$g_dest_has_snapshots" -eq 0 ]; then
+		echov "Destination dataset [$g_actual_dest] exists but has no snapshots. Seeding with [$l_first_snapshot]"
+		# A full receive into an existing dataset requires -F on some OpenZFS
+		# implementations even when the destination has no snapshots yet. Keep the
+		# force flag scoped to this bootstrap receive so normal later increments
+		# retain the caller's configured behavior.
+		echov "Temporarily enabling receive-side -F to seed existing empty destination dataset [$g_actual_dest]."
+		l_prev_force=${g_option_F_force_rollback:-}
+		g_option_F_force_rollback="-F"
+		zfs_send_receive "" "$l_first_snapshot" "$g_actual_dest" "0"
+		g_option_F_force_rollback=$l_prev_force
+		g_dest_seed_requires_property_reconcile=1
+		g_last_common_snap=$l_first_snapshot
+		g_dest_has_snapshots=1
+	fi
+
+	# A destination bootstrap/seed can fully satisfy the transfer when there is
+	# only one source snapshot. Do not attempt an incremental send from a
+	# snapshot to itself.
+	if [ "$g_last_common_snap" = "$l_final_snapshot" ]; then
+		echoV "Seed snapshot already matches final snapshot for $g_actual_dest."
+		return
+	fi
+
+	# get the final snapshot name
+	echoV "Final snapshot: $l_final_snapshot"
+
+	# begin copying snapshots to the final snap from the last common snapshot
+	zfs_send_receive "$g_last_common_snap" "$l_final_snapshot" "$g_actual_dest" "1"
+}
+
+#
+# When running with -Y, the cached destination snapshot list can briefly lag a
+# deletion from the previous iteration. Before reseeding an existing dataset,
+# verify whether the destination already has a common snapshot so we do not try
+# to receive a full stream into an existing filesystem.
+#
+reconcile_live_destination_snapshot_state() {
+	[ "$g_dest_has_snapshots" -eq 0 ] || return
+	[ "$(exists_destination "$g_actual_dest")" -eq 1 ] || return
+
+	l_live_dest_snaps=$(run_destination_zfs_cmd list -Hr -o name -t snapshot "$g_actual_dest" 2>/dev/null || :)
+	[ -n "$l_live_dest_snaps" ] || return
+
+	l_newline='
+'
+	l_dest_snap_names="$l_newline"
+	for l_live_dest_snap in $l_live_dest_snaps; do
+		l_live_dest_snap_name=$(extract_snapshot_name "$l_live_dest_snap")
+		[ -n "$l_live_dest_snap_name" ] || continue
+		l_dest_snap_names="${l_dest_snap_names}${l_live_dest_snap_name}${l_newline}"
+	done
+
+	l_confirmed_common_snap=""
+	l_remaining_source_snaps=""
+	l_found_common_snap=0
+
+	for l_source_snap in $g_src_snapshot_transfer_list; do
+		l_source_snap_name=$(extract_snapshot_name "$l_source_snap")
+		[ -n "$l_source_snap_name" ] || continue
+
+		case "$l_dest_snap_names" in
+		*"$l_newline$l_source_snap_name$l_newline"*)
+			l_confirmed_common_snap=$l_source_snap
+			l_found_common_snap=1
+			l_remaining_source_snaps=""
+			;;
+		*)
+			if [ "$l_found_common_snap" -eq 1 ]; then
+				if [ -z "$l_remaining_source_snaps" ]; then
+					l_remaining_source_snaps=$l_source_snap
+				else
+					l_remaining_source_snaps="$l_remaining_source_snaps $l_source_snap"
+				fi
+			fi
+			;;
+		esac
+	done
+
+	[ -n "$l_confirmed_common_snap" ] || return
+
+	g_dest_has_snapshots=1
+	g_last_common_snap=$l_confirmed_common_snap
+	g_src_snapshot_transfer_list=$l_remaining_source_snaps
+	echoV "Refreshed destination snapshot cache for $g_actual_dest using live snapshot state."
 }
 
 #
 # Stop a list of SMF services. The services are read in from stdin.
 #
 stopsvcs() {
-    while read -r service; do
-        echov "Disabling service $service."
-        svcadm disable -st "$service" ||
-            {
-                echo "Could not disable service $service."
-                relaunch
-                exit 1
-            }
-        m_services_to_restart="$m_services_to_restart $service"
-    done
+	zxfer_set_failure_stage "migration service handling"
+	l_raw_services=$(cat)
+
+	# Nothing to do if the caller provided an empty string.
+	[ -n "$l_raw_services" ] || return
+
+	l_normalized_services=$(printf '%s\n' "$l_raw_services" | awk '
+{
+	for (i = 1; i <= NF; i++)
+		print $i
+}')
+
+	[ -n "$l_normalized_services" ] || return
+
+	while IFS= read -r service; do
+		echov "Disabling service $service."
+		svcadm disable -st "$service" ||
+			{
+				relaunch
+				throw_error "Could not disable service $service."
+			}
+		m_services_to_restart="$m_services_to_restart $service"
+		g_services_need_relaunch=1
+	done <<EOF
+$l_normalized_services
+EOF
 }
 
 #
 # Relaunch a list of stopped services
 #
 relaunch() {
-    for l_i in $m_services_to_restart; do
-        echov "Restarting service $l_i"
-        svcadm enable "$l_i" || {
-            echo "Couldn't re-enable service $l_i."
-            exit
-        }
-    done
+	zxfer_set_failure_stage "migration service handling"
+	[ -z "$m_services_to_restart" ] && return
+
+	# Assume relaunch completes; set flag early so trap_exit won't loop
+	g_services_need_relaunch=0
+
+	for l_i in $m_services_to_restart; do
+		echov "Restarting service $l_i"
+		svcadm enable "$l_i" || {
+			throw_error "Couldn't re-enable service $l_i."
+		}
+	done
 }
 
 #
 # Create a new recursive snapshot.
 #
 newsnap() {
-    l_initial_source=$1
+	l_initial_source=$1
 
-    # We snapshot from the base of the initial source
-    # Extract the filesystem name from the initial source snapshot by removing the '@' and everything after it
-    l_sourcefs="${initial_source%@*}"
+	# We snapshot from the base of the initial source
+	# Extract the filesystem name from the initial source snapshot by removing the '@' and everything after it
+	l_sourcefs="${l_initial_source%@*}"
 
-    l_snap=$g_zxfer_new_snapshot_name
+	l_snap=$g_zxfer_new_snapshot_name
 
-    if [ "$g_option_R_recursive" != "" ]; then
-        echov "Creating recursive snapshot $l_sourcefs@$l_snap."
-        cmd="$g_LZFS snapshot -r $l_sourcefs@$l_snap"
-    else
-        echov "Creating snapshot $l_sourcefs@$l_snap."
-        cmd="$g_LZFS snapshot $l_sourcefs@$l_snap"
-    fi
+	if [ "$g_option_R_recursive" != "" ]; then
+		echov "Creating recursive snapshot $l_sourcefs@$l_snap."
+		cmd="$g_LZFS snapshot -r $l_sourcefs@$l_snap"
+	else
+		echov "Creating snapshot $l_sourcefs@$l_snap."
+		cmd="$g_LZFS snapshot $l_sourcefs@$l_snap"
+	fi
 
-    execute_command "$cmd"
+	execute_command "$cmd"
 }
 
 #
 # Tests to see if they are trying to sync a snapshots; exit if so
 #
 check_snapshot() {
-    l_initial_source=$1
+	l_initial_source=$1
 
-    l_initial_sourcesnap=$(extract_snapshot_name "$l_initial_source")
+	l_initial_sourcesnap=$(extract_snapshot_name "$l_initial_source")
 
-    # When using -s or -m, we don't want the source to be a snapshot.
-    [ -n "$l_initial_sourcesnap" ] && throw_error "Snapshots are not allowed as a source."
+	# When using -s or -m, we don't want the source to be a snapshot.
+	[ -n "$l_initial_sourcesnap" ] && throw_error "Snapshots are not allowed as a source."
 }
 
 #
@@ -193,202 +339,296 @@ check_snapshot() {
 # This allows replicating data from newer version of ZFS to older versions
 #
 calculate_unsupported_properties() {
-    # Get a list of the supported properties from the destination
-    l_dest_pool_name=${g_destination%%/*}
-    l_dest_supported_properties=$($g_RZFS get -Ho property all "$l_dest_pool_name")
+	# Get a list of the supported properties from the destination
+	l_dest_pool_name=${g_destination%%/*}
+	l_dest_supported_properties=$(run_destination_zfs_cmd get -Ho property all "$l_dest_pool_name")
 
-    # Get a list of the supported properties from the source
-    l_source_pool_name=${initial_source%%/*}
-    l_source_supported_properties=$($g_LZFS get -Ho property all "$l_source_pool_name")
+	# Get a list of the supported properties from the source
+	l_source_pool_name=${initial_source%%/*}
+	l_source_supported_properties=$(run_source_zfs_cmd get -Ho property all "$l_source_pool_name")
 
-    unsupported_properties=""
+	unsupported_properties=""
 
-    for s_p in $l_source_supported_properties; do
-        l_found_supported_prop=0
-        for d_p in $l_dest_supported_properties; do
-            if [ "$s_p" = "$d_p" ]; then
-                l_found_supported_prop=1
-                break
-            fi
-        done
-        if [ $l_found_supported_prop -eq 0 ]; then
-            unsupported_properties="${unsupported_properties}${s_p},"
-        fi
-    done
-    unsupported_properties=${unsupported_properties%,}
+	for s_p in $l_source_supported_properties; do
+		l_found_supported_prop=0
+		for d_p in $l_dest_supported_properties; do
+			if [ "$s_p" = "$d_p" ]; then
+				l_found_supported_prop=1
+				break
+			fi
+		done
+		if [ $l_found_supported_prop -eq 0 ]; then
+			unsupported_properties="${unsupported_properties}${s_p},"
+		fi
+	done
+	unsupported_properties=${unsupported_properties%,}
 }
 
 #
 # main loop that copies the filesystems
 #
 copy_filesystems() {
-    echoV "Begin copy_filesystems()"
+	echoV "Begin copy_filesystems()"
 
-    for l_source in $g_recursive_source_list; do
+	l_property_pass_required=0
+	l_post_seed_property_sources=""
+	if [ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
+		l_property_pass_required=1
+	fi
 
-        set_actual_dest "$l_source"
+	l_iteration_list=$g_recursive_source_list
+	l_force_dataset_iteration=0
 
-        # If using the -m feature, check if the source is mounted,
-        # otherwise there's no point in us doing the remounting.
-        if [ "$g_option_m_migrate" -eq 1 ]; then
-            l_source_to_migrate_mounted=$($g_LZFS get -Ho value mounted "$l_source")
-            if [ "$l_source_to_migrate_mounted" = "yes" ]; then
-                echo "The source filesystem is not mounted, why use -m?"
-                exit 1
-            fi
-            mountpoint=$($g_LZFS get -Ho value mountpoint "$l_source")
-            propsource=$($g_LZFS get -Ho source mountpoint "$l_source")
-            echov "Mountpoint is: $mountpoint. Source: $propsource."
-        fi
+	if [ "$g_option_R_recursive" != "" ] && [ $l_property_pass_required -eq 1 ]; then
+		l_force_dataset_iteration=1
+	fi
 
-        # Inspect the source and destination snapshots so that we are in position to
-        # transfer using the latest common snapshot as a base, and transferring the
-        # newer snapshots on source, in order.
-        inspect_delete_snap "$g_option_d_delete_destination_snapshots" "$l_source"
+	if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then
+		l_force_dataset_iteration=1
+	fi
 
-        # Transfer source properties to destination if required.
-        if [ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
-            transfer_properties "$l_source"
-        fi
+	if [ "$l_force_dataset_iteration" -eq 1 ]; then
+		l_iteration_list=$(printf '%s\n%s\n' "$l_iteration_list" "$g_recursive_source_dataset_list" |
+			grep -v '^[[:space:]]*$' | sort -u)
+	fi
 
-        #
-        # We now have a valid source filesystem, volume or snapshot to copy from and an
-        # assumed valid destination filesystem to copy to with a possible snapshot name
-        # to give to the destination snapshot.
-        #
-        copy_snapshots
+	if [ "$l_iteration_list" = "" ] && [ "$l_force_dataset_iteration" -eq 1 ]; then
+		l_iteration_list=$initial_source
+	fi
 
-        #
-        # Now we have replicated all existing snapshots.
-        #
-    done
+	for l_source in $l_iteration_list; do
 
-    # wait for background zfs_send_receive processes before proceeding
-    echoV "Waiting for all zfs send/receive processes to finish."
-    wait
+		set_actual_dest "$l_source"
+		# Reset per-dataset state derived from transfer_properties().
+		# shellcheck disable=SC2034
+		g_dest_created_by_zxfer=0
 
-    echoV "End copy_filesystems()"
+		# Inspect the source and destination snapshots so that we are in position to
+		# transfer using the latest common snapshot as a base, and transferring the
+		# newer snapshots on source, in order.
+		inspect_delete_snap "$g_option_d_delete_destination_snapshots" "$l_source"
+
+		# Transfer source properties to destination if required.
+		if [ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]; then
+			transfer_properties "$l_source"
+		fi
+
+		#
+		# We now have a valid source filesystem, volume or snapshot to copy from and an
+		# assumed valid destination filesystem to copy to with a possible snapshot name
+		# to give to the destination snapshot.
+		#
+		copy_snapshots
+
+		# Full seed receives into empty destinations can leave mutable properties
+		# needing one final reconciliation pass after all send/receive activity
+		# completes. Defer that pass so later receives cannot overwrite it again.
+		if [ $l_property_pass_required -eq 1 ] &&
+			[ "${g_dest_seed_requires_property_reconcile:-0}" -eq 1 ] &&
+			[ "$g_option_n_dryrun" -eq 0 ]; then
+			l_post_seed_property_sources=$(printf '%s\n%s\n' "$l_post_seed_property_sources" "$l_source" |
+				grep -v '^[[:space:]]*$' | sort -u)
+		fi
+
+		#
+		# Now we have replicated all existing snapshots.
+		#
+	done
+
+	# wait for background zfs_send_receive processes before proceeding
+	wait_for_zfs_send_jobs "final sync"
+
+	if [ $l_property_pass_required -eq 1 ] &&
+		[ "$g_option_n_dryrun" -eq 0 ] &&
+		[ -n "$l_post_seed_property_sources" ]; then
+		refresh_dataset_iteration_state
+		for l_source in $l_post_seed_property_sources; do
+			set_actual_dest "$l_source"
+			transfer_properties "$l_source" 1
+		done
+	fi
+
+	echoV "End copy_filesystems()"
+}
+
+resolve_initial_source_from_options() {
+	if [ "$g_option_R_recursive" != "" ] && [ "$g_option_N_nonrecursive" != "" ]; then
+		throw_usage_error "You must choose either -N to transfer a single filesystem or -R to transfer \
+a single filesystem and its children recursively, but not both -N and -R at the same time."
+	elif [ "$g_option_R_recursive" != "" ]; then
+		initial_source="$g_option_R_recursive"
+	elif [ "$g_option_N_nonrecursive" != "" ]; then
+		initial_source="$g_option_N_nonrecursive"
+	else
+		throw_usage_error "You must specify a source with either -N or -R."
+	fi
+}
+
+normalize_source_destination_paths() {
+	# Record whether the user supplied a trailing slash before normalizing the path.
+	g_initial_source_had_trailing_slash=$(echo "$initial_source" | grep -c '..*/$')
+
+	# Now that we know whether there was a trailing slash on the source, no
+	# need to confuse things by keeping it on there. Get rid of it.
+	initial_source=$(strip_trailing_slashes "$initial_source")
+
+	# Source and destination can't start with "/", but it's an easy mistake to make
+	if [ "$(echo "$initial_source" | grep -c '^/')" -eq "1" ] ||
+		[ "$(echo "$g_destination" | grep -c '^/')" -eq "1" ]; then
+		throw_usage_error "Source and destination must not begin with \"/\". Note the example."
+	fi
+
+	# Trailing slashes on the destination are meaningless for dataset names but
+	# make later concatenation produce an illegal double slash, so normalize it
+	# once up front.
+	g_destination=$(strip_trailing_slashes "$g_destination")
+	zxfer_set_failure_roots "$initial_source" "$g_destination"
+}
+
+validate_zfs_mode_preconditions() {
+	echoV "Checking source snapshot."
+	check_snapshot "$initial_source"
+
+	# When using -c you must use -m as well rule. This forces the user
+	# To think twice if they really mean to do the migration.
+	[ -n "$g_option_c_services" ] && [ "$g_option_m_migrate" -eq 0 ] &&
+		throw_error "When using -c, -m needs to be specified as well."
+
+	if [ -n "$g_option_c_services" ] && ! command -v svcadm >/dev/null 2>&1; then
+		throw_usage_error "The -c service-management option requires Solaris/illumos SMF (svcadm)."
+	fi
+}
+
+check_backup_storage_dir_if_needed() {
+	[ "$g_option_k_backup_property_mode" -eq 1 ] || return
+
+	# Validate or create the backup directory before any replication work so we
+	# fail closed on unsafe paths (e.g., symlinks) instead of performing ZFS
+	# operations first.
+	if [ "$g_option_T_target_host" = "" ]; then
+		ensure_local_backup_dir "$g_backup_storage_root"
+	else
+		ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host"
+	fi
+}
+
+update_recursive_source_list_if_needed() {
+	if [ "$g_option_R_recursive" = "" ]; then
+		g_recursive_source_list=$initial_source
+	fi
+}
+
+initialize_replication_context() {
+	# Fail fast when restoring properties from backup metadata so we do not
+	# attempt destination inspections before confirming the backup exists.
+	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
+		get_backup_properties
+	fi
+
+	# Caches all the zfs list calls, gets the recursive list, and gives
+	# an opportunity to exit if the source is not present
+	get_zfs_list
+
+	if [ "$g_option_U_skip_unsupported_properties" -eq 1 ]; then
+		calculate_unsupported_properties
+	fi
+
+	update_recursive_source_list_if_needed
+}
+
+refresh_dataset_iteration_state() {
+	get_zfs_list
+	update_recursive_source_list_if_needed
+}
+
+maybe_capture_preflight_snapshot() {
+	#
+	# If using -s, do a new recursive snapshot, then copy all new snapshots too.
+	#
+	if [ "$g_option_s_make_snapshot" -eq 0 ] || [ "$g_option_m_migrate" -eq 1 ]; then
+		return
+	fi
+
+	# Create the new snapshot with a unique name.
+	newsnap "$initial_source"
+
+	# Because there are new snapshots, need to refresh the cached lists.
+	refresh_dataset_iteration_state
+}
+
+prepare_migration_services() {
+	zxfer_set_failure_stage "migration service handling"
+	[ "$g_option_m_migrate" -eq 1 ] || return
+
+	# Check if any services need to be disabled before doing a migration.
+	if [ -n "$g_option_c_services" ]; then
+		stopsvcs <<EOF
+$g_option_c_services
+EOF
+	fi
+
+	# Validate that each dataset is mounted before we attempt to unmount or snapshot.
+	for l_source in $g_recursive_source_list; do
+		l_source_mounted=$(run_source_zfs_cmd get -Ho value mounted "$l_source")
+		if [ "$l_source_mounted" != "yes" ]; then
+			throw_usage_error "The source filesystem is not mounted, cannot use -m."
+		fi
+	done
+
+	for l_source in $g_recursive_source_list; do
+		# Unmount the source filesystem before doing the last snapshot.
+		echov "Unmounting $l_source."
+		if ! run_source_zfs_cmd unmount "$l_source"; then
+			relaunch
+			throw_error "Couldn't unmount source $l_source."
+		fi
+	done
+
+	# Create the new snapshot with a unique name.
+	newsnap "$initial_source"
+
+	# We include the mountpoint as a property that should be transferred.
+	# Note that $g_option_P_transfer_property is automatically set to 1, to transfer the property.
+	g_readonly_properties=$(echo "$g_readonly_properties" |
+		sed -e 's/,mountpoint//g')
+
+	# Now we must make the script aware of the new snapshots in existence so
+	# we can copy them over.
+	refresh_dataset_iteration_state
+}
+
+perform_grandfather_protection_checks() {
+	[ "$g_option_g_grandfather_protection" != "" ] || return 0
+
+	echov "Checking grandfather status of all snapshots marked for deletion..."
+
+	for l_source in $g_recursive_source_list; do
+		set_actual_dest "$l_source"
+		# turn off delete so that we are only checking snapshots, pass 0
+		inspect_delete_snap 0 "$l_source"
+	done
+	echov "Grandfather check passed."
 }
 
 #
 # zfs send/receive mode, aka zfs-replicate mode, aka normal mode
 #
 run_zfs_mode() {
-    if [ "$g_option_R_recursive" != "" ] && [ "$g_option_N_nonrecursive" != "" ]; then
-        throw_usage_error "If using normal mode (i.e. no -S), you must choose either -N to transfer \
-a single filesystem or -R to transfer a single filesystem and its children \
-recursively, but not both -N and -R at the same time."
-    elif [ "$g_option_R_recursive" != "" ]; then
-        initial_source="$g_option_R_recursive"
-    elif [ "$g_option_N_nonrecursive" != "" ]; then
-        initial_source="$g_option_N_nonrecursive"
-    else
-        throw_usage_error "You must specify a source with either -N or -R."
-    fi
+	resolve_initial_source_from_options
+	normalize_source_destination_paths
+	validate_zfs_mode_preconditions
+	check_backup_storage_dir_if_needed
+	initialize_replication_context
+	maybe_capture_preflight_snapshot
+	prepare_migration_services
+	perform_grandfather_protection_checks
 
-    # Now that we know whether there was a trailing slash on the source, no
-    # need to confuse things by keeping it on there. Get rid of it.
-    initial_source=${initial_source%/}
+	copy_filesystems
 
-    # Source and destination can't start with "/", but it's an easy mistake to make
-    if [ "$(echo "$initial_source" | grep -c '^/')" -eq "1" ] ||
-        [ "$(echo "$g_destination" | grep -c '^/')" -eq "1" ]; then
-        throw_usage_error "Source and destination must not begin with \"/\". Note the example."
-    fi
-
-    # Checks options to see if appropriate for a source snapshot
-    echoV "Checking source snapshot."
-    check_snapshot "$initial_source"
-
-    # When using -c you must use -m as well rule. This forces the user
-    # To think twice if they really mean to do the migration.
-    [ -n "$g_option_c_services" ] && [ "$g_option_m_migrate" -eq 0 ] &&
-        throw_error "When using -c, -m needs to be specified as well."
-
-    # Caches all the zfs list calls, gets the recursive list, and gives
-    # an opportunity to exit if the source is not present
-    get_zfs_list
-
-    # If we are restoring properties get the backup properties
-    if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
-        get_backup_properties
-    fi
-
-    if [ "$g_option_U_skip_unsupported_properties" -eq 1 ]; then
-        calculate_unsupported_properties
-    fi
-
-    # If recursive option is not selected, then we only iterate once through
-    # the initial source as source
-    if [ "$g_option_R_recursive" = "" ]; then
-        g_recursive_source_list=$initial_source
-    fi
-
-    #
-    # If using -s, do a new recursive snapshot, then copy all new snapshots too.
-    #
-    if [ "$g_option_s_make_snapshot" -eq 1 ] && [ "$g_option_m_migrate" -eq 0 ]; then
-        # Create the new snapshot with a unique name.
-        newsnap "$initial_source"
-
-        # Because there are new snapshots, need to get_zfs_list again
-        get_zfs_list
-    fi
-
-    #
-    # If migrating, stop the affected services, unmount the source filesystem, do
-    # one last snapshot and replicate that, then give the destination file system
-    # the mount point of the source one and restart the services.
-    # Note that the replication and transfer of the mountpoint property is done
-    # by the main loop.
-    # The restarting of the services is done after the main loop is finished.
-    if [ "$g_option_m_migrate" -eq 1 ]; then
-        # Check if any services need to be disabled before doing a migration.
-        if [ -n "$g_option_c_services" ]; then
-            echo "$g_option_c_services" | stopsvcs
-        fi
-
-        for l_source in $g_recursive_source_list; do
-            # unmount the source filesystem before doing the last snapshot.
-            echov "Unmounting $l_source."
-            $g_LZFS unmount "$l_source" ||
-                {
-                    echo "Couldn't unmount source $l_source."
-                    relaunch
-                    exit 1
-                }
-        done
-
-        # Create the new snapshot with a unique name.
-        newsnap "$initial_source"
-
-        # We include the mountpoint as a property that should be transferred.
-        # Note that $g_option_P_transfer_property is automatically set to 1, to transfer the property.
-        g_readonly_properties=$(echo "$g_readonly_properties" |
-            sed -e 's/,mountpoint//g')
-
-        # Now we must make the script aware of the new snapshots in existence so
-        # we can copy them over.
-        get_zfs_list
-    fi
-
-    if [ "$g_option_g_grandfather_protection" != "" ]; then
-        echov "Checking grandfather status of all snapshots marked for deletion..."
-
-        for l_source in $g_recursive_source_list; do
-            set_actual_dest "$l_source"
-            # turn off delete so that we are only checking snapshots, pass 0
-            inspect_delete_snap 0 "$l_source"
-        done
-        echov "Grandfather check passed."
-    fi
-
-    copy_filesystems
-
-    if [ "$g_option_m_migrate" -eq 1 ]; then
-        # Re-launch any stopped services.
-        relaunch
-    fi
+	if [ "$g_option_m_migrate" -eq 1 ]; then
+		# Re-launch any stopped services.
+		relaunch
+	fi
 }
 
 #
@@ -397,38 +637,38 @@ recursively, but not both -N and -R at the same time."
 # Otherwise, run the zfs mode once
 #
 run_zfs_mode_loop() {
-    l_num_iterations=0
+	l_num_iterations=0
 
-    # run this in a loop until there are no more zfs send or zfs destroy commands
-    # that are issued
-    while true; do
-        # if a send or destroy command is performed, set this to 1 indicating
-        # that a change was made during run_zfs_mode
-        g_is_performed_send_destroy=0
+	# run this in a loop until there are no more zfs send or zfs destroy commands
+	# that are issued
+	while true; do
+		# if a send or destroy command is performed, set this to 1 indicating
+		# that a change was made during run_zfs_mode
+		g_is_performed_send_destroy=0
 
-        l_num_iterations=$((l_num_iterations + 1))
-        if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
-            echov "Begin Iteration[$l_num_iterations of $g_option_Y_yield_iterations]. Running in zfs send/receive mode."
-        fi
+		l_num_iterations=$((l_num_iterations + 1))
+		if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
+			echov "Begin Iteration[$l_num_iterations of $g_option_Y_yield_iterations]. Running in zfs send/receive mode."
+		fi
 
-        run_zfs_mode
+		run_zfs_mode
 
-        if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
-            echov "End Iteration[$l_num_iterations of $g_option_Y_yield_iterations]."
-        fi
+		if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
+			echov "End Iteration[$l_num_iterations of $g_option_Y_yield_iterations]."
+		fi
 
-        # check if we need to perform another iteration
-        if [ "$g_is_performed_send_destroy" -eq 0 ]; then
-            echoV "Exiting loop. No send or destroy commands were performed during last iteration."
-            break
-        fi
-        if [ "$l_num_iterations" -ge "$g_option_Y_yield_iterations" ]; then
-            if [ "$g_option_Y_yield_iterations" -ge "$g_MAX_YIELD_ITERATIONS" ]; then
-                echoV "Exiting loop. Reached maximum number of iterations.
+		# check if we need to perform another iteration
+		if [ "$g_is_performed_send_destroy" -eq 0 ]; then
+			echoV "Exiting loop. No send or destroy commands were performed during last iteration."
+			break
+		fi
+		if [ "$l_num_iterations" -ge "$g_option_Y_yield_iterations" ]; then
+			if [ "$g_option_Y_yield_iterations" -ge "$g_MAX_YIELD_ITERATIONS" ]; then
+				echoV "Exiting loop. Reached maximum number of iterations.
 If consistently not completing replication in allotted iterations,
 consider using compression, increasing bandwidth, increasing I/O or reducing snapshot frequency."
-            fi
-            break
-        fi
-    done
+			fi
+			break
+		fi
+	done
 }

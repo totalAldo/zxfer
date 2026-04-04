@@ -1,85 +1,18 @@
 zxfer (turbo)
 =====
 
-2024-2025 - This is a refactored version of zxfer, with the goal of optimizing ZFS replication. Enhancements include improved code readability and performance, additional error handling functions, and new options.
+`zxfer` is a POSIX shell tool for ZFS snapshot replication across local and
+remote hosts. This fork began as `zxfer (turbo)`, a refactored version of
+zxfer created to optimize ZFS replication after lengthy replication times when
+transferring large dataset snapshots.
 
-These changes were motivated by the lengthy replication times experienced when transferring large dataset snapshots. These modifications have significantly decreased the time required for both `ssh` and local replication.
+The project’s modifications were motivated by the need to reduce both `ssh` and
+local replication time while improving code readability and maintainability.
+That work added stronger error handling, new options, and performance-oriented
+changes, and it now focuses on high-reliability `zfs send` / `zfs receive`
+replication, safer failure handling, stronger dependency resolution, and better
+test coverage across FreeBSD, Linux, illumos/Solaris, and OpenZFS on macOS.
 
-## Example usage with new options
-Replicate two remote pools from the same host over `ssh`.
-Use `-j8` to run 8 parallel `zfs list` commands on the source host.
-Begin replication of the first pool in the background so that both host pools are
-replicated in parallel.
-+ `/bin/sh ./zxfer/zxfer -vdz -j8 -F -O user@host -R zroot tank/backups/ &`
-
-From the same host, use `zstd -9 -T0` compression on the source, and `-Y` to repeat
-replication until there are no changes in the destination.
-+ `/bin/sh ./zxfer/zxfer -vd -Z 'zstd -9 -T0' -Y -j8 -F -O user@host -R tank tank/backups/`
-
-## New Options
-+ `-j`: specify the number of parallel zfs list snapshot commands to run via gnu parallel (this can improve the performance when listing source snapshots that are cpu-bound). When j > 1, this number also controls the number of concurrent `zfs send` commands that are run in parallel.
-+ `-V`: Enables very verbose mode.
-+ `-w`: Activates raw send.
-+ `-x`: exclude grep pattern for datasets
-+ `-Y`: Yields when there are no more snapshots to send or destroy, or after 8 iterations, whichever comes first.
-+ `-z`: pipe ssh transfers through zstd default compression
-+ `-Z`: custom zstd compression supporting higher compression levels or multiple threads
-
-## Performance Improvements
-+ Code has been reviewed and modified for parallel execution where possible.
-+ Execute `zfs list` commands concurrently.
-+ Run `zfs destroy` commands as background processes.
-+ Use `zfs send -I` instead of `zfs send -i` for incremental replication to send the entire snapshot chain.
-+ The `inspect_delete_snap()` function has been refactored to use the `comm` command instead of nested loops. Previously, the function used nested loops to identify which destination snapshots should be deleted. This process was executed even when the `-d` option was not in use leading to O(n^2) performance. For instance, if both the source and destination contained 1,000 snapshots, the loop would iterate 1,000,000 times. Each iteration would spawn at least two `grep` and two `cut` commands to compare snapshot names. The new implementation with `comm` is more efficient and readable.
-+ Reduce I/O load by listing only the names of the destination snapshots.
-  Previously, the destination snapshots were sorted by creation time which
-  caused the snapshot metadata to be fetched.
-+ Batch multiple `zfs destroy` commands into a single command to reduce the number of spawned
-  processes.
-+ Optimize `get_zfs_list()` by only checking the snapshots of the intended
-  destination dataset if it exists. Previouslly the parent dataset listed all snapshots
-  which potentially increased the number of snapshots to check and may have included
-  destination datasets that did not need to be checked
-+ Compress the output of the source snapshot list when using `ssh` via `zstd -9`.
-  When there are many snapshots, the output of the `zfs list` command can be several
-  megabytes and it is highly compressible. While `ssh` offers compression options
-  including the use of `zstd`, compression is now explicitly set by piping the
-  `zfs list` output through `zstd -9`
-+ To enhance efficiency in send/receive operations, initially execute a `comm` command to compare source and destination datasets. This allows for the identification and subsequent iteration over only those source datasets containing snapshots absent in the destination.
-+ When `-j` > 1, run all `zfs send` commands using gnu `parallel`. Care should be taken
-  to no overload a system with too many parallel `zfs send` commands.
-+ Use an `ssh` control socket to reduce the number of `ssh` connections
-+ Parallelize `get_dest_snapshots_to_delete_per_dataset()`
-+ Create global temporary files used when checking for snapshots to delete to reduce the number of `mktemp` calls
-
-## Code Refactoring
-The code has been refactored for better readability and maintainability, which includes:
-+ Dividing the code into smaller, more manageable functions.
-+ Incorporating error handling and debugging functions.
-+ Segmenting the code into smaller files, grouped by functionality.
-+ Renaming variables to indicate whether they are global, modular, or local references.
-
-## Feedback Welcome
-If you use this script and have any suggestions or feedback, please open an issue or a pull request. I hope this script will be beneficial to others and that useful features can be incorporated into the main project.
-
-## Testing
-This fork has been tested with FreeBSD 14.0-14.3
-
-## Acknowledgements
-A big thank you to everyone who contributed to this script over the past 16+ years, and to all its users.
-
-Best Wishes, Aldo
-
----
-## Original README Contents:
-A continuation of development on zxfer, a popular script for managing ZFS snapshot replication
-
-The Original author seems to have abandoned the project, there have been no updates since May 2011 and the script fails to work correctly in FreeBSD versions after 8.2 and 9.0 due to new ZFS properties.
-
-[Original Project Home](http://code.google.com/p/zxfer)
-
-Changes
-=======
 + Implement new -D parameter, allows you to put a progress indicator app between the zfs send and zfs receive. Provides macros %%size%% and %%title%%.
 	Example usage:
 
@@ -90,73 +23,210 @@ Changes
 + Fixed -o mountpoint=foo , it is no longer ignored as readonly if explicitly requested by the user
 + Implemented new -I parameter, ignore these properties and do not try to set them
 + Implemented new -U parameter, do not try to replicate unsupported properties, to skip properties that the destination does not understand
+=======
+For the full CLI reference, use the man page:
 
-# Installation
+```sh
+man zxfer
+```
 
+Or read the bundled manpages in this checkout:
 
-You will need to be root before starting.
+- [man/zxfer.8](./man/zxfer.8) for FreeBSD/Linux-style installs
+- [man/zxfer.1m](./man/zxfer.1m) for Solaris/illumos-style installs
 
-	$ su
+## Highlights
 
-## FreeBSD:
+- POSIX `/bin/sh` implementation with no Bash dependency
+- Recursive and non-recursive snapshot replication
+- Local and remote replication with `-O` / `-T`
+- Remote host specs that can include wrappers such as `pfexec` or `doas`
+- Optional remote compression with `zstd`
+- Optional progress hooks with `-D`
+- Property replication, property ignore lists, and unsupported-property skipping
+- Hardened property backup / restore with `-k` and `-e`
+- Structured stderr failure reports with optional `ZXFER_ERROR_LOG` mirroring
+- File-backed integration harness plus shunit2 unit coverage
 
-### Via pkg (Recommended)
-	pkg install zxfer
+## Quick Start
 
+Replicate a local recursive dataset tree:
 
-### Via Ports
-#### Auto
+```sh
+./zxfer -v -R tank/data backup/data
+```
 
-a) Go to ports directory.
+Pull snapshots from a remote host:
 
-	# cd /usr/ports/sysutils/zxfer
-b) Install
+```sh
+./zxfer -v -O user@example.com -R zroot backup/zroot
+```
 
-	# make install
-##### Manual
-Here are the directions for those who want to do it manually.
-a) Copy zxfer to /usr/local/sbin.
+Repeat until there are no remaining changes:
 
-	# cp zxfer /usr/local/sbin
-b) Copy zxfer.8.gz to /usr/local/man/man8
+```sh
+./zxfer -v -Y -R tank/src backup/dst
+```
 
-	# cp zxfer.8.gz /usr/local/man/man8
+Use remote compression:
 
-### FreeNAS
+```sh
+./zxfer -v -z -T backup@example.com -R tank/src backup/dst
+```
 
-As the freenas file system is not persistent for user changes, we will need to;
+## Performance-Oriented Examples
 
-a) Create a standard jail via the freenas UI
+Replicate two remote pools from the same origin host over `ssh`, using `-j8`
+to parallelize source snapshot discovery and allow concurrent send/receive
+jobs. Run the first replication in the background so both pool trees can
+progress at the same time:
 
-b) Add the datasets required for the transfer to the jail via the jails storage manager in the UI
+```sh
+./zxfer -v -d -z -j8 -F -O user@host -R zroot tank/backups/ &
+```
 
-c) Use either the pkg or port methods above to install zxfer
+From the same host, use a custom `zstd` command and `-Y` to repeat replication
+until the destination converges:
 
-all instructions for the above can be found here
+```sh
+./zxfer -v -d -Z 'zstd -T0 -9' -Y -j8 -F -O user@host -R tank tank/backups/
+```
 
-http://doc.freenas.org/9.3/freenas_jails.html
+## Fork-Specific Options
 
-### OpenSolaris, Solaris 11 Express:
-a) Copy zxfer to /usr/sfw/bin.
+These are some of the most visible options added or expanded in this maintained
+fork. For the full CLI reference, use the man pages.
 
-	# cp zxfer /usr/sfw/bin
+- `-j jobs`: parallelize source snapshot discovery with GNU `parallel` and run
+  up to that many `zfs send`/`zfs receive` jobs concurrently
+- `-V`: enable very verbose debug output
+- `-w`: use raw `zfs send`
+- `-x pattern`: exclude matching datasets from recursive replication
+- `-Y`: repeat replication until no sends or destroys are performed, or until
+  the built-in 8-iteration cap is reached
+- `-z`: compress ssh transfers with `zstd`
+- `-Z "command"`: replace the default compression command with a custom `zstd`
+  pipeline, for example multithreaded or higher-compression settings
 
-b) Set the path to include this.
+## Performance And Maintainability Improvements
 
-	# PATH=$PATH:/usr/sfw/bin
+Compared with the older upstream base, the current fork includes:
 
-c) Copy zxfer.1m to /usr/share/man/man1m
+- Parallel source snapshot discovery and concurrent send/receive execution when
+  `-j` is used
+- `zfs send -I` incremental replication so the full snapshot chain is sent in
+  one stream when appropriate
+- Exact dataset and snapshot diffing with `comm`, which avoids older
+  nested-loop comparison paths and scales much better on large snapshot sets
+- Destination-side snapshot discovery that only inspects the intended dataset
+  and only lists snapshot names, avoiding unnecessary metadata sorting work
+- Batched destination snapshot deletion plus background destroy handling so
+  cleanup can proceed efficiently during replication
+- SSH control-socket reuse for `-O` and `-T`, reducing repeated connection
+  setup overhead
+- Optional `zstd` compression for ssh replication plus customizable `-Z`
+  compression commands
+- Deterministic snapshot sorting and comparison via `LC_ALL=C`, so snapshot
+  planning behaves consistently across Linux, FreeBSD, macOS, and Solaris-like
+  environments
+- Secure-PATH resolution for required helpers, including remote `zfs`, `cat`,
+  and GNU `parallel`, so mixed-platform hosts do not depend on matching binary
+  locations
+- Structured failure reporting, optional `ZXFER_ERROR_LOG` mirroring, and much
+  broader shunit2 and integration coverage
 
-	# cp zxfer.1m /usr/share/man/man1m
+## Code Refactoring
 
-d) Delete the old catman page, if you are updating.
+The current tree has also been reworked for readability and maintainability:
 
-	# rm /usr/share/man/cat1m/zxfer.1m
+- functionality is split into focused shell modules under `src/`
+- helper functions are smaller and more testable than the older monolithic flow
+- quoting, ssh, backup-metadata, and failure-reporting paths are centralized
+- the test suite now covers shell helpers, snapshot discovery, property logic,
+  send/receive plumbing, and the file-backed integration harness
 
-e) Set the MANPATH variable correctly.
+## Documentation Map
 
-	# MANPATH=$MANPATH:/usr/sfw/share/man
+- [docs/README.md](./docs/README.md): documentation index
+- [docs/platforms.md](./docs/platforms.md): platform support and compatibility notes
+- [docs/testing.md](./docs/testing.md): unit, coverage, and integration workflows
+- [docs/troubleshooting.md](./docs/troubleshooting.md): common failures and what they usually mean
+- [docs/architecture.md](./docs/architecture.md): module layout and replication flow
+- [docs/upstream-history.md](./docs/upstream-history.md): historical context and removed legacy behavior
+- [examples/README.md](./examples/README.md): runnable command templates for common replication flows
+- [KNOWN_ISSUES.md](./KNOWN_ISSUES.md): current open issues and testing limitations
+- [CHANGELOG.txt](./CHANGELOG.txt): release history
+- [SECURITY.md](./SECURITY.md): security model and reporting guidance
+- [CONTRIBUTING.md](./CONTRIBUTING.md): contributor workflow
 
-**Note that this will not set the paths permanently.**
+## Platform Notes
 
-(I don't know how. If you know how, please inform me.)
+Primary development has been on FreeBSD 14.x, but this fork also supports:
+
+- Linux with OpenZFS
+- illumos/Solaris systems with `zfs` / `svcadm`
+- OpenZFS on macOS, including `/usr/local/zfs/bin` layouts
+
+zxfer resolves `zfs`, `ssh`, `awk`, and other required tools through a trusted
+secure-PATH model. Remote `zfs` and related helpers are resolved on the remote
+host rather than assuming the same absolute path exists everywhere.
+
+Current caveats are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
+
+## Testing
+
+Run all shunit2 suites:
+
+```sh
+./tests/run_shunit_tests.sh
+```
+
+Run shell coverage:
+
+```sh
+./tests/run_coverage.sh
+```
+
+Run the integration harness:
+
+```sh
+./tests/integration_zxfer.sh
+```
+
+Run the integration harness unattended:
+
+```sh
+./tests/integration_zxfer.sh --yes
+```
+
+Continue after failures and print a summary:
+
+```sh
+./tests/integration_zxfer.sh --yes --keep-going
+```
+
+GitHub Actions includes:
+
+- lint workflow
+- shunit2 workflow
+- Ubuntu ZFS integration workflow using file-backed test pools and
+  `--keep-going` failure collection
+
+See [docs/testing.md](./docs/testing.md) for full details and safety notes.
+
+## Project Status
+
+- Active fork focused on reliability, portability, and testability
+- Legacy rsync mode (`-S`) has been removed
+- Known open issues are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md)
+
+## Feedback
+
+Issues and pull requests are welcome. For contribution guidelines, see
+[CONTRIBUTING.md](./CONTRIBUTING.md).
+
+## Acknowledgements
+
+A big thank you to everyone who has contributed to zxfer over the years, and to
+the operators who have continued using and testing it across multiple ZFS
+platforms.

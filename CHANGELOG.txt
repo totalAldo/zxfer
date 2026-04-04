@@ -1,9 +1,161 @@
 CHANGELOG
 =========
 
+2026.04.04
+-Defer `-O`/`-T` ssh control-socket creation until after CLI consistency checks pass so usage errors like `-m` or `-c` with remote hosts fail closed without attempting a live ssh connection.
+-Relax the FreeBSD beep integration assertion to accept either missing speaker helper tools or a missing `/dev/speaker`, matching legitimate host-specific skip paths.
+-Generalize `examples/error-log-email-notify.sh` for Linux, illumos, FreeBSD, and macOS mail setups by checking `mailx`, BSD `mail`, and `sendmail`, exposing sender/remote/raw-send knobs, and preserving the original zxfer exit status if mail delivery itself fails.
+-Add a built-in `--self-test` to `examples/error-log-email-notify.sh`, cover it from the integration harness, and refresh the example/troubleshooting/manpage docs so operators can validate alert delivery logic before using it against production pools.
+
+2026.04.03
+-Restore the local `-j` source snapshot-listing path to the direct GNU `parallel` runner used by `development`, fixing Linux background-listing regressions that showed up in job-limit, progress-wrapper, and background-send integration tests as `Failed to retrieve snapshots from the source: missing command`.
+-Preserve the failing source snapshot-listing command in snapshot-discovery failure reports even after later destination `zfs list` calls run, and add unit coverage for the local `-j` direct GNU `parallel` runner so the regression cannot slip back in unnoticed.
+-Force snapshot sorting and `comm` comparisons through `LC_ALL=C` in discovery and delete-planning helpers so macOS/BSD locale collation does not reorder dataset paths differently from Linux or destabilize shunit2 expectations.
+-Run wrapped remote host specs like `host pfexec` / `host doas` through `sh -c` when building send/receive ssh pipelines so wrapper commands execute the intended remote pipeline instead of trying to `exec` the whole pipeline string as a binary.
+-Treat remote `command -v` exit status `1` with empty output as a missing dependency rather than a probe failure, restoring the expected `GNU parallel not found on origin host` error path for remote `-j` validation.
+-Prefer GNU `stat -c` before BSD `stat -f` when checking backup metadata ownership and permissions locally or remotely, fixing Linux/GitHub restore and remote-backup integration failures caused by GNU `stat -f` emitting filesystem metadata instead of numeric uid/mode values.
+-Track zxfer temp files under a per-run prefix and remove the whole prefix set in `trap_exit`, fixing leaked `/tmp/zxfer.*` files after interrupted background-send integration runs.
+-Gate the explicit pre-send `zfs rollback -r` path behind `-F` so `-d` no longer performs a destructive rollback unless the caller explicitly opted into forced receive behavior.
+-Tighten restore-mode backup metadata fallback under `ZXFER_BACKUP_DIR` by requiring fallback files to match the requested source dataset and aborting on ambiguous basename collisions instead of choosing the first hit.
+-Adjust the mismatch-deletion integration flow to use `-F` for resend-after-delete divergence cases, keeping the test aligned with zxfer’s fail-safe rollback semantics.
+-Expand shunit2 coverage for rollback gating, backup-metadata ambiguity, must-create property propagation, remote shell/probe behavior, and the newer failure-reporting paths.
+-Add a dedicated GitHub Actions ZFS integration workflow, run the harness with `--keep-going`, and clean up the remaining ShellCheck/shfmt/CI issues in tests and helpers.
+-Reorganize the repository layout by adding `docs/`, `examples/`, `man/`, `packaging/`, contributor/security docs, issue/PR templates, and `CODEOWNERS`, and move the manpages/spec/plaintext compatibility README into the new structure.
+-Refresh `README.md`, `AGENTS.md`, the manpages, and project docs so they match the current source tree, secure-PATH model, integration harness behavior, and testing/CI workflow.
+-Add `.gitignore` for local/editor/test artifacts and clean up stale documentation like `TODO_Tests.md`/`README.txt` by merging the still-relevant parts into the canonical docs.
+
+2026.04.02
+-Make the integration harness safer and more usable by default: confirm data-modifying wrapped commands unless `--yes` is passed, add `--skip-test`, and add `--keep-going` failure collection.
+-Harden the macOS/OpenZFS integration harness by avoiding unnecessary destination mounts, fixing mock helper overwrites/ssh argv handling, and improving diagnostics around flaky snapshot assertions.
+-Fix multiple property-transfer edge cases around seeded or pre-created destinations, must-create property validation, override handling, unsupported-property filtering, and post-seed property reconciliation.
+-Fix remote command and snapshot-listing regressions for real `ssh` command joining, wrapped host specs, and `csh`/`tcsh` remote shells, including better remote dependency probing and clearer failure reporting.
+-Add more end-to-end coverage for remote property backup/restore, existing-empty destination seeding, secure-path append resolution, progress placeholder passthrough, target-only remote compression, legacy backup fallback warnings, and exact-name snapshot deletion safety.
+-Clean up shellcheck/shfmt issues across the source and test suites and add CI parity checks for the updated shell/test workflow.
+
+2026.04.01
+-Stop after seeding the first snapshot into an empty destination when that seed is already the newest snapshot, avoiding invalid `zfs send -I snap snap` streams during first-run replication, property backup/restore tests, trailing-slash/exclude tests, and legacy backup fallback flows.
+-Recheck live destination snapshots before reseeding an existing dataset during `-Y -d` iterations so destination-only snapshot cleanup does not trigger a second full receive into a dataset that still has the last common snapshot.
+-Wrap the remote `-O ... -j ...` snapshot-listing pipeline in `sh -c` before it reaches the origin host’s login shell, fixing `csh` quote parsing failures that showed up as `Unmatched '"'`, broken `zstd` streams, and `Failed to retrieve snapshots from the source`.
+-Make `tests/integration_zxfer.sh` prompt for approval before data-modifying wrapped external commands by default, and add `--yes` to run the harness without confirmations.
+-Resolve `zfs` (and remote `cat` for `-e`) on origin/target hosts through the secure PATH so mixed Linux/FreeBSD/Solaris replication no longer assumes the local absolute binary path exists remotely.
+-Probe remote GNU `parallel` via the secure PATH using the host-spec tokenization helper so `-O "host pfexec ..."` remains portable and safe.
+-Emit a detailed failure report to stderr on every non-zero exit, including failure class/stage, source and destination context, the original shell-quoted invocation, and the last attempted command.
+-Add optional secure failure-report mirroring via `ZXFER_ERROR_LOG`, refusing relative paths, symlinked path components, and insecure existing log files while preserving the original zxfer exit status if the log append fails.
+-Harden startup argument capture by forcing the bootstrap PATH to the built-in allowlist before any early awk/sed helpers run, preventing PATH-injected binaries from executing before secure-path initialization.
+-Convert remaining ad hoc fatal exits in migration/property/backup flows to the centralized error-reporting path and add shunit2/integration coverage for stderr reporting and error-log behavior.
+-Add `tests/run_coverage.sh` with `kcov` support plus a bash-xtrace fallback, and expand shunit2 coverage for globals, snapshot-listing, zfs-mode, and send/receive helpers.
+
+2026.03.31
+-update copyright years
+
+2025.12.18
+-Fix property restore lookup to match backup file format (source,destination,properties), with a fallback for legacy order.
+-Create ssh control sockets with -fN before the host spec so options are parsed correctly and remote commands are not invoked.
+-Fix remote backup metadata prep/validation commands to avoid escaped command substitutions and keep remote scripts one-line for ssh on FreeBSD.
+-Fix remote backup metadata writes to avoid double-escaping quotes so directories are created and files can be written on FreeBSD.
+-Treat missing destination datasets as empty listings during get_zfs_list so bootstrap restores do not fail on new targets.
+-Only treat missing destination datasets as empty when the destination pool exists, keeping the missing-pool error behavior intact.
+-Create parent datasets when needed for initial destination creation so restores can bootstrap into new targets.
+
+2025.12.12
+-When zxfer pre-creates an empty destination for property transfer (-P/-k), seed it with a forced full receive (-F) so older OpenZFS versions accept the initial stream while preserving must-create properties.
+-Fix property backup (-k) collection to persist in the parent shell so backup metadata files are actually written during runs.
+
+2025.11.20
+-add integration tests
+-Wait for `-d` snapshot deletions to finish and roll the destination back to the
+ last common snapshot before sending incrementals so mismatched snapshot names
+ no longer trigger `zfs receive ... has been modified since most recent snapshot`
+ failures mid-run.
+
+2025.11.19
+-Ensure `-d` deletion passes walk every dataset even when no new snapshots are pending so orphaned destination snapshots are proposed/destroyed during dry-run and live zxfer runs, and cover the copy loop behavior via new shunit2 tests.
+-Add shunit2 coverage for quoting helpers, backup directory sanitizers, snapshot deletion guards, property diff/apply logic, snapshot listing orchestration, and zfs send/receive plumbing, and strip the trailing comma from batched destroy commands so `zxfer -d` emits valid `zfs destroy dataset@snap1,snap2` arguments.
+
+2025.11.18
+-Fix ssh control socket initialization to create temp directories with mktemp-compatible templates (suffix `XXXXXX`) so Linux and GNU coreutils builds no longer abort zxfer or the shunit2 probe when -O/-T opens a control socket.
+-Add `tests/run_shunit_tests.sh` to execute every shunit2 suite (or a specific subset) from one command so contributors can easily exercise helpers like `test_zxfer_zfs_mode.sh` without remembering individual scripts.
+-Expand `tests/test_zxfer_zfs_mode.sh` coverage for `set_actual_dest()`, `refresh_dataset_iteration_state()`, grandfather protection, and the `-Y` run loop so option parsing and migration orchestration stay regression-tested.
+-Refactor snapshot listing orchestration (`write_source_snapshot_list_to_file()`, `write_destination_snapshot_list_to_files()`, `set_g_recursive_source_list()`) into data-flow helpers that build the source command string, normalize destination prefixes, and diff sorted lists so background jobs no longer embed inline eval plumbing, enabling shunit2 coverage of ssh/parallel/compression permutations without touching live ZFS.
+-Quote the per-dataset GNU parallel runner with literal single quotes so remote shells that default to `/bin/csh` no longer emit repeated `Unmatched '"'` errors when `-O` and `-j` are used together, stop escaping the `$1` placeholder so dataset arguments reach the per-dataset `zfs list`, and add shunit2 coverage to guard the new quoting.
+-Refactor `transfer_properties()` into composable helpers (source property collection, override derivation, destination diff/apply) and add shunit2 coverage with injectable set/inherit runners so safety-sensitive property logic can be unit-tested without touching real pools.
+-Allow zxfer to treat backup directories and metadata files owned by the invoking user as secure when root privileges are unavailable (while still enforcing 0700/0600 permissions) so shunit2 and CI runs on Linux can exercise the helpers without failing ownership checks.
+-Run recursive property/backup passes even when every dataset is already in sync so -P/-o/-k still enforce metadata, and skip writing `.zxfer_backup_info.*` files when no property data was captured to avoid clobbering prior backups.
+-Reset PATH to `/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin`, resolve required binaries to their absolute paths, and teach zxfer to honor `ZXFER_SECURE_PATH[_APPEND]` so PATH hijacking is no longer possible when zxfer runs with elevated privileges.
+
+2025.11.17
+-Reject non-numeric `-j` arguments during option parsing so invalid job counts emit a zxfer usage error instead of `/bin/sh: integer expression expected` later on.
+-Allow zxfer to bootstrap into brand-new destinations by tolerating an empty `zfs list -t filesystem,volume … "$g_destination"` result instead of aborting when no datasets exist yet on the target.
+-Refuse to use zxfer backup metadata directories unless they are owned by root locally or by the remote ssh user (root also permitted) so attackers cannot pre-create `ZXFER_BACKUP_DIR` paths and retain ownership of `.zxfer_backup_info.*` files.
+-Require property restores (-e) to read `.zxfer_backup_info.*` files only when they are root-owned and mode 0600 so compromised backup directories cannot poison mountpoint, sharing, or encryption metadata.
+-Quote -O/-T ssh host specs before constructing eval'd pipelines and open/close ssh control sockets without eval so a crafted host argument can no longer inject local commands before ssh starts.
+-Treat `-Z/ZXFER_COMPRESSION` strings as tokenized commands and refuse empty compression pipelines so attacker-controlled configs cannot splice arbitrary shell syntax into the send/receive ssh pipelines.
+-Create zxfer progress FIFOs with umask 077 and chmod 600 so local users cannot read or stall the replicated send stream via /tmp/zxfer-progress.*
+-Quote the progress passthrough hook with single quotes so remote `-O -D` pulls keep the ssh command coherent and progress works on origin hosts.
+-Estimate incremental stream sizes when a previous snapshot exists so the progress dialog reflects the bytes that will actually be sent.
+-Keep g_is_performed_send_destroy unset during dry-run sends so `-Y -n` exits after the first loop when no mutations occur.
+-Eliminate command injection in transfer_properties() by building `zfs create` argument lists without eval so property values are passed verbatim even when the destination dataset does not yet exist.
+-Fail replication immediately when any background `-j` zfs send/receive job exits non-zero by tracking their PIDs, surfacing failures, and terminating the remaining jobs instead of silently reporting success.
+-Store `.zxfer_backup_info.*` metadata under a root-owned `ZXFER_BACKUP_DIR` (default `/var/db/zxfer`), harden directory creation against symlinks, and warn when falling back to legacy files so attackers can no longer pre-create mountpoint symlinks to clobber arbitrary files during `-k`.
+-Ensure the -D progress hook tees the send stream so non-pass-through progress commands no longer truncate the data before `zfs receive`.
+-Seed existing destination datasets that have no snapshots by sending the first snapshot before incremental streams so pre-created replicas keep their full history instead of only the newest snapshot.
+-Gate the beep() helper on FreeBSD speaker support so Linux/OpenZFS hosts skip hardware beeps gracefully instead of aborting when -b/-B is set.
+-Resolve GNU parallel via ssh for -j snapshot listings so remote -O hosts no longer reuse the local path and abort when the binary lives elsewhere, and refuse -j when the remote binary is missing.
+-Eliminate command injection in write_backup_properties() by streaming raw property data directly into the backup file and expand shunit2 coverage for the helper
+-Normalize destination snapshot prefixes for non-trailing-slash transfers so dataset detection matches pre-2025.11.14 behavior, while keeping trailing-slash multi-host replicas isolated.
+-Strip trailing slashes from destination dataset arguments before replication so `zxfer -N tank/src backup/dst/` no longer builds illegal `backup/dst//child` targets that `zfs receive` rejects.
+-Filter source/destination snapshot lists by exact dataset names when building replication plans so nested filesystems that share a basename (for example, trailing “/tank”) no longer collide when computing the last common snapshot.
+-Wrap the GNU parallel snapshot listing commands in `sh -c` and pass dataset names as `$1` arguments so per-dataset jobs execute `/sbin/zfs list … "$1"` with proper argument splitting even when datasets contain slashes or spaces, fixing both local and remote `-O` listing.
+
+2025.11.15
+-Destination snapshot lookup now respects trailing-slash sources so incremental sends compare against the correct dataset
+-Track fully qualified last-common snapshot
+-Escape dataset names before sed substitution
+-Fix GNU parallel snapshot listing
+-Restore trailing-slash destination handling
+-Literalize snapshot prefix matching
+-Fix integration multi-dataset replication
+-remove the legacy rsync (-S) mode and delete unused options and helpers
+-drop the rsync dependency from zxfer.spec and refresh the man pages/README
+-update integration tests and scripts now that rsync transfer paths no longer exist
+-vendor shunit2 test harness and helper script
+-add zxfer_common shunit2 smoke tests and make them executable
+-document how to run the new shunit2 tests
+-add GitHub Actions workflow to run shunit2 tests on pushes and PRs
+-fix get_temp_file mktemp template to work on GNU/Linux CI runners
+-exclude vendored tests/shunit2 from codespell checks
+-add integration test script that provisions loopback ZFS pools for zxfer smoke tests
+-add shfmt formatting gate to lint workflow
+-multiple lint fixes
+-Add lint workflow for codespell & ShellCheck
+-fix shellcheck warnings
+-source files for shellcheck
+-add .shellcheckrc
+-Fixed handling of filtered destination properties in transfer_properties
+-Use argument in newsnap instead of global initial_source
+-Fix -m migration guard to reject unmounted sources
+
 2025.11.14
--spelling fix
+-spelling fixes
 -copyright year update
+-Secure ssh control socket creation
+-Ensure -o overrides get applied in transfer_properties
+-fix misspelling of throw_error in transfer_properties
+-Handle local vs remote backup writes correctly
+-Fix remote property restore lookup
+-Resolve cat path correctly for local property restores
+-Filter existing-destination property list correctly
+-Manage ssh control sockets per host
+-Fix property/rsync command injection
+-update zxfer.spec file
+-document zxfer.8 option restrictions and compression requirements
+-sync zxfer.1m with zxfer.8
+
+2024.09.20
+-fix bug in transfer_properties() where the source dataset was not being properly set
+
+2024.09.19
+-add -x option to exclude datasets that match the given grep pattern
 
 2024.08.04
 -fix an issue with copying the first snapshot when a destination dataset doesn't
@@ -235,3 +387,8 @@ CHANGELOG
 20080813 zfs-replicate 0.7 is released by Constantin Gonzalez as the
            last update in his zfs-replicate utility. This may be found at
          http://blogs.sun.com/constantin/entry/zfs_replicator_script_new_edition
+- tests/integration_zxfer.sh now supports `--skip-test <function>` and
+  `ZXFER_SKIP_TESTS` so specific integration cases can be skipped while the rest
+  of the suite continues to run.
+- tests/integration_zxfer.sh now supports `--keep-going` so integration runs
+  can continue after failing cases and report the full failure list at the end.

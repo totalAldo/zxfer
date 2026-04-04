@@ -1,0 +1,12 @@
+# Update these owners if the repository is transferred or additional reviewers
+# need to be required automatically.
+
+* @totalAldo
+
+/src/ @totalAldo
+/tests/ @totalAldo
+/docs/ @totalAldo
+/examples/ @totalAldo
+/man/ @totalAldo
+/packaging/ @totalAldo
+/.github/workflows/ @totalAldo

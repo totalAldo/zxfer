@@ -1,0 +1,45 @@
+# Security
+
+## Scope
+
+zxfer runs privileged filesystem and replication commands and often needs
+either root, delegated ZFS privileges, or privileged remote wrappers. That
+makes shell quoting, remote execution, file ownership checks, and dependency
+resolution security-sensitive by default.
+
+## Current Security Model
+
+Key protections already present in the project include:
+
+- secure-PATH resolution for required local and remote helpers
+- structured failure reporting instead of ad hoc error handling
+- hardened `ZXFER_ERROR_LOG` path validation
+- secured property backup metadata directories and file-permission checks
+- explicit handling for wrapped remote host specs
+
+Current open security concerns are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
+
+## Reporting A Vulnerability
+
+Please do not open a public issue for a suspected command-injection, trust-
+boundary, privilege-escalation, or data-destruction vulnerability until the
+maintainer has had a chance to assess it privately.
+
+If possible, include:
+
+- affected command line
+- platform and shell
+- exact stderr output
+- whether the issue is local, remote, or backup-metadata related
+- minimal reproduction steps
+
+## Security Review Hotspots
+
+Changes in these areas should receive extra scrutiny:
+
+- remote command construction
+- any `eval` usage
+- secure-PATH resolution
+- property backup / restore lookup
+- ssh control-socket management
+- snapshot deletion and rollback behavior

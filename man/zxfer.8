@@ -1,8 +1,8 @@
 .\"
-.\" Copyright (c) 2024-2025 Aldo Gonzalez
+.\" Copyright (c) 2024-2026 Aldo Gonzalez
 .\" Copyright (c) 2013-2016 Allan Jude <allanjude@freebsd.org>
-.\" Copyright (c) 2010, 2011 Ivan Nash Dreckman
-.\" Copyright (c) 2007, 2008 Constantin Gonzalez
+.\" Copyright (c) 2010,2011 Ivan Nash Dreckman
+.\" Copyright (c) 2007,2008 Constantin Gonzalez
 .\" All rights reserved.
 .\"
 .\" Redistribution and use in source and binary forms, with or without
@@ -26,37 +26,41 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd Mar 14, 2024
+.Dd Apr 3, 2026
 .Dt ZXFER 8
 .Os
 .Sh NAME
 .Nm zxfer
-.Nd "transfer ZFS filesystems, snapshots, properties, files and directories"
+.Nd "replicate ZFS filesystems, snapshots, and properties"
 .Sh SYNOPSIS
 .Nm
-.Op Fl dFnPsUvVwY
-.Op Fl k | e
-.Op Fl b | B
-.Brq -N path/to/src | -R path/to/src
-.Op Fl m Op Ar c "FMRI|pattern[ FMRI|pattern]...]"
+.Op Fl b
+.Op Fl B
+.Op Fl c Ar "FMRI|pattern[ FMRI|pattern]..."
+.Op Fl d
 .Op Fl D Ar 'progress dialog options'
-.Op Fl I Ar properties,to,ignore
-.Op [-z] [-Z 'zstd compression command'] Fl O Ar user@host
-.Op Fl T Ar user@host
-.Op Fl o Ar option1=value1,option2=value2...
+.Op Fl e
+.Op Fl F
 .Op Fl g Ar days
-.Ar destination
-.Nm
-.Brq -S
-.Op Fl dilpPnv
-.Op Fl k | e
-.Op Fl b | B
-.Op Fl f Ar /path/to/rsfile
-.Brq -R /path/to/src1,path/to/src2... | -N /path/to/src1,path/to/src2...
+.Op Fl I Ar properties,to,ignore
+.Op Fl j Ar jobs
+.Op Fl k
+.Op Fl m
+.Op Fl n
+.Brq -N path/to/src | -R path/to/src
 .Op Fl o Ar option1=value1,option2=value2...
-.Op Fl E Ar pattern
-.Op Fl L Ar value
-.Op Fl u Ar snapshot
+.Op Fl O Ar user@host
+.Op Fl P
+.Op Fl s
+.Op Fl T Ar user@host
+.Op Fl U
+.Op Fl v
+.Op Fl V
+.Op Fl w
+.Op Fl x Ar pattern
+.Op Fl Y
+.Op Fl z
+.Op Fl Z Ar "zstd compression command"
 .Ar destination
 .Nm
 .Op Fl h
@@ -68,34 +72,17 @@ is a ZFS filesystem e.g.
 .Sh DESCRIPTION
 The
 .Nm
-utility performs two main functions. It can replicate ZFS
-filesystems (including snapshots and properties) using
+utility replicates ZFS filesystems (including snapshots and properties) using
 .Xr zfs 8
 .Va send
-to do the heavy lifting.
+to do the heavy lifting. It can transfer dataset properties,
+optionally override them, and create missing descendants so the destination
+matches the source layout. This is desirable when we want parity between
+the source and destination snapshot regimes, or when we need a single
+command that transfers both data and relevant dataset metadata.
 .Pp
-It can also transfer files and
-directories and the filesystems underlying them using
-.Xr rsync 1 .
-It will first recursively
-snapshot those filesystems so that an atomic snapshot of all files
-and directories exists as a base. It then creates a replica of the source
-filesystem hierarchy down to the pool level at the destination. It then
-transfers the files and directories. This is desirable when we have different
-snapshotting regimes on source and destination, and want to copy across
-the latest contents of the filesystem(s).
-.Pp
-Both
-.Xr zfs 8
-.Va send
-and
-.Xr rsync 1
-use checksums/hashes to verify that the data copied to the destination is
-the same data that was sent from the source, so we have a similar degree of
-surety of end-to-end data integrity as the ZFS filesystem itself.
-.Pp
-Either method allows for the properties of each filesystem to be transferred
-and specific properties overridden as necessary. For example,
+The transfer process allows for the properties of each filesystem to be
+replicated and specific properties overridden as necessary. For example,
 .Va compression ,
 .Va readonly ,
 and
@@ -106,7 +93,7 @@ do not exist,
 .Nm
 will automatically create them.
 .Pp
-Both methods also allow
+The script also allows
 the backup and restore of the original filesystem properties so that
 if it is desirable to backup the filesystem(s) for archival purposes
 using
@@ -114,17 +101,18 @@ using
 etc. as overrides, the original properties may be restored without the
 user having to make a note of what those original properties were.
 .Pp
-.Em IMPORTANT:
-Note that switching between these two modes is done with -S.
-Depending on the mode, the workings of an option may be nonexistent,
-subtly or grossly different. Don't assume an option works the exact same way
-that it did with the other mode.
-.Pp
-Note also that
 .Nm
-should be run from root, as to do anything useful
-.Xr zfs 8
-must also be run from root.
+requires privileges sufficient for the requested
+.Xr zfs 8 ,
+.Xr zpool 8 ,
+and
+.Xr ssh 1
+operations. In practice this often means root, delegated ZFS privileges, or a
+remote wrapper such as
+.Dq pfexec
+or
+.Dq doas ,
+depending on platform and workflow.
 .Pp
 Note that at present, the usage of spaces in
 .Xr zfs 8
@@ -135,24 +123,19 @@ You MUST read, understand and agree to the disclaimer in the BSD license
 before applying any of these examples or using
 .Nm .
 (See the file "COPYING" that should have been included with this utility.)
-I eat my own cooking - I use
+Review the command line carefully and validate your workflow on test datasets,
+throwaway pools, or a disposable host before using
 .Nm
-as per the examples given and as my primary form of backup. That being said,
-you are strongly urged to have a look
-at the script and try it out on some non-risky pools and filesystems before
-using it in production. At this stage, straying too far from the given examples
-will probably furnish you with the material to submit some bug reports.
-Run a backup before using it and don't shoot
-me if something goes wrong. This software is about beta level, which
-means that if you are going to use it for backups you should treat it more
-like alpha level software - i.e. trust it at your own risk.
+against production data. Keep independent backups and confirm the option
+combination you intend to use, especially when enabling snapshot deletion,
+rollback, migration, or property restore modes.
 .Pp
 Modifying an example first is a good way to start using the script, as
-there are some options (e.g. -d and -F in normal mode) that are in practice
+there are some options (e.g. -d and -F) that are in practice
 always used.
 .Sh SNAPSHOTS
 .Nm
-in Normal mode as a backup/restore solution is designed to be used
+as a backup/restore solution is designed to be used
 hand-in-hand with a regular snapshotting
 regime. If there is no regular snapshotting regime in place then the results
 won't be nearly as good.
@@ -161,13 +144,12 @@ would still be useful to reliably and easily copy
 a pool for example, but you would be missing the main point of the program.
 .Pp
 .Sh OPTIONS
-Common options are listed, followed by
-options as they function specifically with
+The following options control the
 .Xr zfs 8
 .Va send
-mode, followed by options as they work specifically to
-.Xr rsync 1
-aka -S mode.
+replication workflow managed by
+.Nm .
+Unless noted otherwise the semantics apply uniformly across all invocations.
 .Pp
 Please note that options with arguments (e.g. -R, -N
 and the like) can not be concatenated after other options.
@@ -210,25 +192,44 @@ A word of warning:
 In order to allow the restoration of filesystems within the hierarchy,
 .Nm
 will begin at the level you specify, and traverse the filesystem hierarchy back
-to the pool level until it finds an appropriate .zxfer_backup_info
-file or fails. It will use the first such file it comes across, so be careful about
+to the pool level until it finds an appropriate
+.Pa .zxfer_backup_info
+file inside the hardened metadata directory
+.Pq Pa ZXFER_BACKUP_DIR/mountpoint/.zxfer_backup_info.<tail>
+or fails. It will use the first such file it comes across, so be careful about
 backing up from multiple individual levels of the same filesystem hierarchy.
+Legacy files that still live directly inside dataset mountpoints are read as a
+fallback, but
+.Nm
+will warn so you can relocate them into the hardened directory (which defaults
+to
+.Pa /var/db/zxfer
+and can be changed by exporting
+.Ev ZXFER_BACKUP_DIR Ns ).
 .It Fl h
 Prints (h)elp.
 .It Fl k
 Bac(k)up property mode. This backs up the original filesystem property settings
 to a file
-.Pa .zxfer_backup_info.<pool_name>.
-This file is located in the directory that is the mountpoint of the parent
-filesystem that will contain the root filesystem you are sending.
-e.g. if you are backing up
+.Pa .zxfer_backup_info.<pool_name>
+stored inside the hardened metadata directory
+.Pq Pa ZXFER_BACKUP_DIR/mountpoint/.
+This file lives outside the dataset mountpoints so unprivileged users cannot
+pre-create symlinks. For example, if you are backing up
 .Pa zroot
 to be located as per
 .Pa storage/backups/zroot/...
+and you keep the default
+.Ev ZXFER_BACKUP_DIR
+of
+.Pa /var/db/zxfer ,
 the file
-.Pa /storage/backups/.zxfer_backup_info.zroot
+.Pa /var/db/zxfer/storage/backups/.zxfer_backup_info.zroot
 would hold all the information about the original values of the filesystem
-properties, and some other useful info.
+properties, and some other useful info. Set
+.Ev ZXFER_BACKUP_DIR
+to point at an alternate secure directory owned by root or the effective UID if you need to relocate the
+metadata.
 .Pp
 This allows us to use the
 .Op Fl o
@@ -337,8 +338,7 @@ judged that it would not make sense to try and transfer them. They are:
 .Va version ,
 .Va volsize ,
 .Va mountpoint .
-There are several properties in FreeBSD 8.2
-that are not supported and hence will
+There are several properties that may be unsupported on some platforms and hence will
 not be transferred via
 .Nm ,
 they are:
@@ -349,32 +349,10 @@ they are:
 .Va shareiscsi ,
 .Va vscan ,
 .Va xattr .
-If using -S, all filesystems in the pools containing the source directories/files
-will be created on the destination if they aren't in existence already, whether
-they are to hold files/directories or not.
-.It Fl S
-.Xr rsync 1
-mode.
-If -S is specified,
-.Xr rsync 1
-mode is triggered. If -S is absent,
-.Xr zfs 8
-.Va send
-mode is in effect. Several options have different effects depending
-on whether -S is present or not. Consult the relevant option section before
-using.
-.Pp
-It is also possible to transfer to readonly destination filesystems, but
-this is only supported if either
-.Op Fl o
-or
-.Op Fl P
-is enabled.
 .It Fl v
 (v)erbose mode.
 .El
-.Ss Normal | zfs send/receive mode
-(i.e. -S is absent)
+.Ss ZFS send/receive mode
 .Bl -tag -width indent
 .It Fl c
 A space delimited list of SMF services in quotes to be temporarily disabled
@@ -383,6 +361,24 @@ of the destination. Requires -m.
 .It Fl d
 (d)elete snapshots on the destination that are absent on the source. This may
 be necessary to function properly anyway, in a similar fashion to
+.Pp
+.Nm
+batches those snapshot deletions into background
+.Xr zfs 8
+.Cm destroy
+commands so replication can continue while snapshots are removed. The background
+jobs are tied to the lifetime of
+.Nm :
+its EXIT trap kills any remaining destroy processes when the main script
+terminates so snapshot deletes never run unattended. If
+.Nm
+exits before the kernel finishes destroying the targeted snapshots, rerun
+.Nm
+with
+.Fl d
+to resume cleanup;
+.Nm
+will relaunch the pending destroys on the next pass.
 .It Fl D
 .Nm
 will pipe
@@ -401,7 +397,6 @@ Example:
 .Pp
 .Nm
 .Fl O Ar user@host Fl D Ar 'bar -s %%size%%' Fl R Ar source destination
-.Op Fl F .
 This will occur if you are using
 .Nm
 for routine backups and in the interim, culling snapshots on the source.
@@ -410,6 +405,14 @@ often gets deleted on the source. Any snapshots on the destination more
 recent than the most recent common snapshot must be deleted for
 .Cm zfs send
 to work.
+.It Fl F
+Pass (F) to
+.Xr zfs 8
+.Cm receive
+so the destination side will roll back to the most recent snapshot that
+matches the stream. This forcibly destroys any newer snapshots or data that
+only exist on the destination and allows incremental sends to proceed when
+the target has diverged.
 .It Fl g
 (g)randfather protection. Specify a number of days old (relative to the system
 date) at and above which snapshots on the destination won't be deleted. For use
@@ -445,6 +448,11 @@ less than 375 days old are not protected.
 Do not copy this comma separated list of properties when performing replication.
 Useful for skipping properties like quotas that can interfere with replication,
 or properties that are not supported on the destination.
+.It Fl j Ar jobs
+Run up to this many zfs send/receive jobs concurrently and parallelize listing
+snapshots when determining the work queue. The default is 1, which disables
+background sends. Raising this value can hide WAN latency or speed up large
+replications, but will also increase memory, CPU and I/O load.
 .It Fl m
 After sending all snapshots, (m)igrate the source to the destination filesystem by
 unmounting the source filesystem and changing the new filesystem's
@@ -468,6 +476,13 @@ e.g.  specifying -N
 .Pa tank/tmp
 will transfer only
 .Pa tank/tmp .
+.It Fl x Ar pattern
+Exclude any datasets whose names match the supplied regular expression from
+the recursive replication list. The pattern is passed to
+.Xr grep 1
+.Fl v ,
+so be sure to escape shell metacharacters or provide quotes where appropriate.
+Useful when a recursive send should omit scratch datasets or other prefixes.
 .It Fl O
 Specify an (O)rigin user@host. This allows transfers FROM a remote host via ssh.
 e.g. Whatever filesystems you specify as the source are taken to exist on that
@@ -484,27 +499,17 @@ and so does your local machine if
 .Op Fl T
 is not also used.
 .Pp
-This option has been somewhat tested in FreeBSD 8.2 and Solaris 11 Express
-and
-appears to be working. (Consider it alpha level.) These are the only
-operating systems that it has been tested on, and possibly/probably won't
-work on others.
-.Pp
-Note also that transferring between different operating systems and even
-different
-versions of the same operating system (e.g. FreeBSD 8.1 and 8.2) has not been
-tested and will probably fail or give unexpected results. As
-.Xr zfs 1 ,
-has been developed, new properties have come into being, and those properties
-have either been supported in FreeBSD or they haven't. So it is difficult to
-know what a user would like to have such properties be when they are copied
-from one OS (or version) to another. At least between OS versions, you are
-advised to use the same OS and zpool and zfs version from source to
-destination.
-It's not likely I will test this thoroughly in
-the near future, as it requires an estimated n^2 number of tested transfers,
-where n is the number of operating system variations to support.
-You are welcome to try it though, and report bugs back to me.
+This fork is exercised across FreeBSD, Linux with OpenZFS, illumos/Solaris,
+and OpenZFS on macOS. Remote helper resolution is designed to tolerate
+different absolute
+.Xr zfs 8
+paths on each host, but property support can still differ across operating
+systems and ZFS versions. When mixing platforms or versions, validate
+property behavior carefully and consider
+.Fl I
+or
+.Fl U
+if the destination cannot support every source property.
 .Pp
 Note that if at all possible, do not try and be clever
 and run
@@ -532,18 +537,17 @@ ssh root@192.168.0.1 command ...
 So with Solaris, specifying the pfexec at the end results in:
 .Pp
 ssh user1@192.168.0.1 pfexec command ...
+.Pp
 .It Fl R
 (R)ecursively replicate all filesystems under the specified source. If not
 specifying
-.Op Fl S ,
-you
-.Em must
-invoke one and only one of either
+.Op Fl N ,
+you must invoke one and only one of either
 .Op Fl R
 or
 .Op Fl N .
 Note that if you enable this option, you must specify only one filesystem,
-and that it starts without a "/". e.g.  specifying -R
+and that it starts without a "/". e.g. specifying -R
 .Pa tank/tmp
 will transfer
 .Pa tank/tmp ,
@@ -565,6 +569,7 @@ at the end, and ensure that a current snapshot is taken before or during the
 second execution. e.g. use this option to ensure that a relatively current
 snapshot exists, create it manually, or wait until your own snapshotting
 regime does the job for you (if you have one).
+.Pp
 .It Fl T
 Specify a (T)arget user@host. This allows transfers TO a remote host via ssh.
 e.g. Whatever filesystem you specify as the destination will be where the
@@ -582,6 +587,9 @@ Again, please note that if you are using Solaris, you will most likely need to u
 quotes and spacing exactly:
 .Pp
 e.g. -T "user1@192.168.0.1 pfexec"
+.Pp
+Like
+.Op Fl O ,
 .It Fl U
 Skip replicating any properties that are not supported by the destination.
 Before replication begins, a list of supported properties is fetched from the
@@ -599,16 +607,24 @@ uses zfs ra(w) send mode
 have been performed, whichever comes first.
 .It Fl z
 Pipe the send stream through zstd -3 compression and then decode it at the
-target using zstd -d.
+remote side using zstd -d. This option requires either
+.Op Fl O
+or
+.Op Fl T
+because compression only occurs when traffic flows over ssh.
 This converts:
 .Pp
-ssh user@host "/sbin/zfs send dataset@snap1 | /sbin/zfs receive
+.Dl zfs send dataset@snap1 | ssh user@host "/sbin/zfs receive destination"
 .Pp
 to
 .Pp
-ssh user@host "/sbin/zfs send dataset@snap1 | zstd -3" | zstd -d | /sbin/zfs receive
+.Dl zfs send dataset@snap1 | zstd -3 | ssh user@host "zstd -d | /sbin/zfs receive destination"
 .It Fl Z
 Pass the zstd command to use during compression.
+.Op Fl O
+or
+.Op Fl T
+must also be provided.
 .Pp
 e.g.
 .Pp
@@ -616,132 +632,8 @@ e.g.
 .Pp
 This will modify the default -z option to
 .Pp
-ssh user@host "/sbin/zfs send dataset@snap1 | zstd -T0 -9" | zstd -d | /sbin/zfs receive
+.Dl zfs send dataset@snap1 | zstd -T0 -9 | ssh user@host "zstd -d | /sbin/zfs receive"
 
-.El
-.Ss Rsync mode
-(i.e. -S is specified)
-.Bl -tag -width indent
-.It Fl d
-(d)elete files on the destination that do not exist on the source. This is
-equivalent to
-.Cm rsync --del .
-.It Fl E
-Pass (E)xclude patterns to
-.Xr rsync 1 .
-e.g. If you want to specify "--exclude=/boot/zfs/zpool.cache" when
-.Xr rsync 1
-is called, then
-use "-E /boot/zfs/zpool.cache". You can specify this option as many times as
-you like, and it will pass each exclude pattern to
-.Xr rsync 1 .
-My understanding of how to get this to work is to specify the exclude as a
-continuation of the filesystem mountpoint on which the file/directory is
-stored. e.g. with "/boot/zfs/zpool.cache"
-it works because the mountpoint of zroot is effectively "/".
-.It Fl f
-Specify a (f)ile that contains a list of options to feed to
-.Cm rsync .
-In this event, no other options will be given to
-.Cm rsync .
-(If this option is not enabled, the default options given to
-.Cm rsync
-are
-.Cm -clptgoD --inplace --relative -H --numeric-ids .
-)
-.Pp
-It has been suggested that it might be more convenient to be able to specify
-custom options to rsync by means of a switch and the options in quotes or
-some other delimiting character. If
-there is enough feedback I will consider implementing this option.
-.It Fl i
-(i)nclude directories corresponding to ZFS filesystem mountpoints on the
-destination when transferring. The default is to exclude them, since the
-destination may correspond to a filesystem from another pool mounted there,
-which has its own data and would be restored independently.
-.It Fl l
-Treat (l)egacy mountpoints as being equal to "/". If this is not enabled,
-.Nm
-will fail with an error when it encounters a legacy mountpoint.
-.It Fl L
-Specify how many (L)evels deep in the source filesystem tree the filesystem
-that was originally a backed up pool now lies. Most likely, this will only
-need to be used in the event of a restore, as the default level (zero)
-will create filesystems from the pool level on down at the target. e.g.
-if we are trying to restore
-.Pa /storage/backups/zroot/tmp/stuff.txt
-which was originally in a pool named
-.Pa zroot ,
-and wished it to end up where it originally came from (e.g. at
-.Pa zroot/tmp/stuff.txt
-) we would indicate with -L 2
-that the original pool is located 2 levels deep on the source. If we did not specify
-that option, we would end up with the file transferred to
-.Pa /zroot/backups/zroot/tmp/stuff.txt,
-which is not what is wanted.
-.It Fl N
-Replicate the listed director(y|ies) or file(s). Note the provisos listed above in
-.Op Fl R .
-It works similarly but is not recursive. e.g.  specifying -N
-.Pa /tmp
-will transfer only
-.Pa /tmp .
-.It Fl p
-(p)ersist through
-.Xr rsync 1
-errors. This saves having to feed directories individually to
-.Nm ,
-if we expect rsync to return an error at some point (e.g. when it tries to
-overwrite itself).
-.It Fl R
-(R)ecursively replicate all directories and files under the specified source(s).
-If specifying
-.Op Fl S ,
-you
-.Em must
-invoke at least one or both of either
-.Op Fl R
-or
-.Op Fl N .
-The idea is that this utility makes an atomic clone of the filesystems you will need
-to get your files/directories from, and you can use
-.Cm rsync
-to decide what to transfer within a given pool.
-.Pp
-Note that if you enable this option, you can specify as many directories as
-you like, separated by commas (with no spaces). Directories must start with a
-.Pa /
-and may or may not end with a
-.Pa / .
-Read the
-.Xr rsync 1
-man page to get the gist of how that works.
-e.g.  specifying -R
-.Pa /tmp
-will transfer
-.Pa /tmp ,
-.Pa /tmp/foo,
-.Pa /tmp/foo/bar
-etc.
-.Pp
-Note also that
-.Nm
-will only transfer the contents of the directory "/" if
-.Op Fl l
-is invoked, "/" is mounted as legacy, and it will only transfer
-across those files and directories belonging to the same ZFS filesystem as / belongs
-to.
-.Pp
-Another action not supported is
-recursively transferring a directory that contains directories that are in
-fact filesystems from other pools, or in fact any included
-directories where the filesystem mountpoints diverge from what ZFS
-would assign by default.
-.It Fl u
-(u)se an already existing snapshot as the source to transfer from. You should
-first check that this snapshot exists on all the filesystems that house the
-files and directories to be used in the transfer. This gives us the option of
-restoring files/directories without having to roll back.
 .El
 .Sh EXAMPLES
 Note that some of these example commands are lengthy, so be sure to fix
@@ -853,10 +745,9 @@ to copy the backup to. Then we would issue the following command:
 .Nm
 .Cm -deFPv -R backup01/pools/storage/ storage
 .Pp
-Note that the trailing slash enables us to copy the
-.Pa zroot
-filesystem directly to the pool level, and then the child filesystems
-below that, which is where we want them. If the pool name is to be changed,
+Note that the trailing slash enables us to copy the backed-up root filesystem
+directly to the pool level, and then the child filesystems below that, which
+is where we want them. If the pool name is to be changed,
 the command becomes:
 .Pp
 .Nm
@@ -886,113 +777,7 @@ following command:
 .Nm
 .Cm -deFPv -N backup01/filesystem/home storage
 .Pp
-.Ss Ex6 - Recursive directory backup
-We might want to backup a directory within a pool, using rsync
-to do the heavy lifting, while also making a backup of the properties
-of the filesystems transferred. Transferring via
-.Op Fl S
-will allow us to have different snapshotting regimes on
-source and destination coexisting happily.
-.Pp
-.Nm
-.Cm -SkPv -R /storage/home backup01/rsbacks
-.Pp
-The resulting filesystem structure will look like:
-.Pa backup01/rsbacks/storage/home .
-.Pp
-If we wanted to non-recursively transfer that directory
-we would just change the
-.Op Fl R
-to an
-.Op Fl N .
-.Pp
-.Ss Ex7 - Recursive directory restore
-To restore the directory backed up in Ex6, we would do so using the
-following command:
-.Pp
-.Nm
-.Cm -SePv -L 2 -N /backup01/rsbacks/storage/home storage
-.Pp
-Note that we had to specify a drop back of 2 levels of filesystems,
-so that
-.Nm
-would know that the pool level is not
-.Pa backup01
-but
-.Pa storage .
-Specifying -L of 1 would indicate that the pool level was
-.Pa rsbacks ,
-which it was not. Leaving out
-.Op Fl L
-would be equivalent to L=0, or specifying that the pool level
-was
-.Pa backup01 .
-.Pp
-Note also that this will re-create all the original
-filesystems that existed on the pool "storage" with their original properties,
-if they have since been deleted. If those filesystems still exist,
-.Nm
-will
-ensure that each such filesystem have the properties they originally had. Note
-that if those
-filesystems still exist, no data will be changed other than what you have
-specified to be rsynced across.
-.Pp
-If you wish to not have filesystems created
-or properties set (just the files/directories you want rsynced),
-just forego
-.Op Fl P
-and
-.Op Fl o .
-Note that this will only work on filesystems that are writable.
-.Pp
-.Ss Ex8 - Backup FreeBSD 8.2 root mirror
-This will make a recursive snapshot of the root mirror, create similar
-filesystems on the pool
-.Pa storage ,
-transfer the properties over,
-.Xr rsync 1
-across the directories and files needed to restore the system,
-and destroy the snapshots when done. To see how to do this in more
-detail, check out the
-.Nm
-wiki.
-.Pp
-.Nm
-.Cm -SPkld
-.Cm -R /bin,/boot,/compat,/etc,/lib,/libexec,/rescue,/root,/sbin,/tmp,/usr,/var,/vshare
-.Cm -N /.cshrc,/.profile storage/zr_backup
-.Pp
-The resulting filesystem structure will look something like:
-.Pa storage/zr_backup/zroot
-.Pa storage/zr_backup/zroot/usr
-.Pa storage/zr_backup/zroot/var
-etc.
-.Pp
-.Ss Ex9 - Restore FreeBSD 8.2 root mirror
-To restore the config files backed up in Ex8, we would do so using the
-following command after installing the system,
-installing
-.Nm
-and booting up in the system.
-This uses the snapshot auto-2010-11-14_14.00. Note that
-for this to work properly
-.Pa /var/empty
-must be set to mutable. Also, the flag "schg" must be turned off to transfer
-properly. For the full sequence of commands, see the
-.Nm
-wiki. Here is the command for the
-.Nm
-part of the procedure (note you will need to add any directories of your creation kept on your zroot e.g. "vshare"):
-.Pp
-.Nm
-.Cm -SpldBv -E /boot/zfs/zpool.cache
-.Cm -u auto-2010-11-14_14.00
-.Cm -L 2
-.Cm -N $zrootdir/.cshrc,$zrootdir/.profile
-.Cm -R $zrootdir/bin,$zrootdir/boot,$zrootdir/compat,$zrootdir/etc,$zrootdir/lib,$zrootdir/libexec,$zrootdir/rescue,$zrootdir/root,$zrootdir/sbin,$zrootdir/tmp,$zrootdir/usr,$zrootdir/var,$zrootdir/vshare zroot
-.Pp
-.Ss Ex10 - Migrate a filesystem
+.Ss Ex6 - Migrate a filesystem
 We might want to migrate a filesystem (including properties).
 Note that this is only allowable when the original mountpoint is
 not the default (i.e. pool/filesystem). In the following example,
@@ -1005,7 +790,7 @@ then that will be the mountpoint of the new filesystem.
 .Nm
 .Cm -PmFdv -N original_pool/fs new_pool/location
 .Pp
-.Ss Ex11 - Compress a filesystem
+.Ss Ex7 - Compress a filesystem
 If we want to compress a filesystem, it is not enough to simply
 set a compression setting of some sort on that filesystem. This
 will only cause new files to be compressed. If we want to compress
@@ -1015,9 +800,9 @@ location (where compression is enabled).
 .Nm
 .Cm -PmFdv -o compression=gzip -N original_pool/fs new_pool/location
 .Pp
-.Ss Ex12 - Compress a filesystem...
+.Ss Ex8 - Compress a filesystem...
 - and store it in the original location.
-This is probably what you want to do instead of example 11. Usually
+This is probably what you want to do instead of example 7. Usually
 what we want to do when we want to compress
 a filesystem - it is already in the location we want it to be, just
 we haven't realized we wanted it compressed at the time. Or maybe
@@ -1064,7 +849,7 @@ appropriately).
 .Nm
 .Cm -PmFdv -o compression=gzip -N new_pool/location/fs original_pool
 .Pp
-.Ss Ex13 - Backup a pool to a remote host
+.Ss Ex9 - Backup a pool to a remote host
 Notice this is the same as in Ex2 with the exception of option
 .Op Fl T ,
 and uses the same options which
@@ -1077,31 +862,93 @@ Here is the command:
 .Nm
 .Cm -dFkPv -o copies=2,compression=lzjb -T root@192.168.123.1 -R storage backup01/pools
 .Pp
-.Ss Ex14 - Restore a pool from a remote host
+.Ss Ex10 - Restore a pool from a remote host
 Use the following command, assuming that you are restoring from a situation as
-in Ex13. Again, if using Solaris refer to
+in Ex9. Again, if using Solaris refer to
 .Op Fl O .
 .Pp
 .Nm
 .Cm -deFPv -O root@192.168.123.1 -R backup01/pools/storage/ storage
 .Pp
+.Sh ENVIRONMENT
+.Bl -tag -width ".Ev ZXFER_SECURE_PATH_APPEND"
+.It Ev ZXFER_BACKUP_DIR
+Secure directory owned by root or the effective UID that holds `.zxfer_backup_info.*` metadata generated by
+.Fl k
+and consumed by
+.Fl e .
+Defaults to
+.Pa /var/db/zxfer
+and must not be writable by unprivileged users.
+.It Ev ZXFER_SECURE_PATH
+Overrides the whitelist of directories that zxfer trusts when it resolves
+.Xr zfs 8 ,
+.Xr ssh 1 ,
+.Xr awk 1 ,
+and other helper binaries. The default value is
+.Pa /sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin .
+Only absolute directories are honored so zxfer cannot be tricked into executing
+programs from the current working directory or other user-controlled paths.
+.It Ev ZXFER_SECURE_PATH_APPEND
+Appends extra absolute directories to the secure PATH whitelist, allowing
+administrators to point zxfer at custom locations (both locally and on hosts
+referenced by
+.Fl O
+and
+.Fl T )
+without replacing the stock list.
+.It Ev ZXFER_ERROR_LOG
+Absolute path to a local file where zxfer should append the same delimited
+failure report that it writes to
+.Dv stderr
+on non-zero exits. The parent directory must already exist, any symlinked path
+component is refused, existing log files must be owned by root or the effective
+UID and already use mode 0600, and newly created log files are chmodded to
+0600. If zxfer cannot append the report it emits a warning to
+.Dv stderr
+but preserves the original zxfer exit status.
+.Pp
+The repository includes
+.Pa examples/error-log-email-notify.sh ,
+which shows how to set
+.Ev ZXFER_ERROR_LOG ,
+capture the current run's failure report from
+.Dv stderr
+and send an alert with
+.Xr mailx 1 ,
+BSD
+.Xr mail 1 ,
+or
+.Xr sendmail 8 .
+.El
+.Pp
+.Nm
+prints its immediate error message and then emits a delimited failure report to
+.Dv stderr
+on every non-zero exit. The block begins with
+.Dq zxfer: failure report begin
+and ends with
+.Dq zxfer: failure report end ,
+using stable
+.Dq key: value
+lines so operators can archive or post-process the output. When available, the
+report includes the failure class and stage, source and destination context,
+the original shell-quoted invocation, and the last command zxfer attempted.
+.Pp
 .Sh EXIT VALUES
 .Nm
-exits 0 on success, 1 on an error and 2 if a command line option is incorrect.
+exits 0 on success, 1 on a runtime error, 2 if a command line option is
+incorrect, and 3 when zxfer cannot retrieve the source snapshots needed to
+continue replication.
 .Sh SEE ALSO
-.Xr rsync 1 ,
 .Xr zfs 1 ,
 .Xr zpool 1
 .Sh COMPATIBILITY
 .Nm
-is tested (somewhat) before release on FreeBSD 8.2-RELEASE and Solaris
-Express 11. It
-was tested on the last version of OpenSolaris and FreeBSD 8.1 as of 0.9.0 and
-may continue to function correctly, but in order to ease my workload I am
-only going to test
-.Nm
-against Solaris Express 11 and whatever version I run of FreeBSD, in my case
-8.2.
+targets FreeBSD, Linux with OpenZFS, illumos/Solaris systems, and OpenZFS on
+macOS. Cross-version and cross-platform replication can still expose property
+or helper-path differences, so mixed-environment deployments should validate
+their exact send/receive and property behavior before production use.
 .Sh THANKS
 Thanks to Constantin Gonzalez for his constant collaboration, guidance, and
 his
@@ -1120,7 +967,6 @@ You can read Constantin's blog "Constant Thinking" at
 constantin.glez.de - if you are at all interested in the world of ZFS it is
 worth reading regularly (his non-ZFS stuff is good too).
 .Pp
-Thanks also to the creators of rsync for their excellent tool.
 .Sh AUTHORS
 The basis for
 .Nm ,
@@ -1162,6 +1008,3 @@ donating at some stage in the future.
 .Nm
 is distributed under the BSD license. See the file COPYING for details.
 .Pp
-The website for
-.Nm
-is http://www.zxfer.org. For additional help, consult the wiki on that site.

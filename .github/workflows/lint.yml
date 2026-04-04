@@ -1,0 +1,49 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shfmt:
+    name: shfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install shfmt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shfmt
+      - name: Run shfmt
+        run: |
+          shfmt -d zxfer $(git ls-files '*.sh')
+
+  codespell:
+    name: Codespell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install codespell
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install codespell
+      - name: Run codespell
+        run: |
+          codespell --config .codespellrc .
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+      - name: Run ShellCheck
+        shell: bash
+        env:
+          SHELLCHECK_OPTS: --external-sources --source-path=.:src
+        run: |
+          set -euo pipefail
+          shellcheck zxfer $(git ls-files '*.sh')
