@@ -15,6 +15,7 @@ ZXFER_CONFIRM_WRAPPER_DIR=""
 ZXFER_REAL_BIN=""
 ZXFER_SKIP_TESTS=${ZXFER_SKIP_TESTS:-""}
 ZXFER_KEEP_GOING=${ZXFER_KEEP_GOING:-0}
+ZXFER_ABORT_REQUESTED=${ZXFER_ABORT_REQUESTED:-0}
 ZXFER_PRESERVE_WORKDIR_ON_FAILURE=${ZXFER_PRESERVE_WORKDIR_ON_FAILURE:-0}
 ZXFER_FAILED_TESTS=""
 SRC_POOL_CREATED=0
@@ -989,6 +990,9 @@ run_test() {
 	l_status=$?
 	set -e
 	if [ "$l_status" -ne 0 ]; then
+		if [ "${ZXFER_ABORT_REQUESTED:-0}" -eq 1 ] || [ "$l_status" -eq 130 ] || [ "$l_status" -eq 143 ]; then
+			exit "$l_status"
+		fi
 		log "$(printf '%s[%d/%d] FAIL%s %s (exit %s)' "$RED" "$l_index" "$l_total" "$RESET" "$l_func" "$l_status")"
 		append_failed_test "$l_func"
 		if [ "$ZXFER_KEEP_GOING" -eq 1 ]; then
@@ -1600,11 +1604,28 @@ snapshot_deletion_test() {
 	log "Snapshot deletion test passed"
 }
 
+abort_integration_run() {
+	l_signal=$1
+	l_status=$2
+
+	ZXFER_ABORT_REQUESTED=1
+	trap - INT TERM
+	log "Received $l_signal, aborting integration test run."
+	exit "$l_status"
+}
+
 cleanup() {
 	set +e
 	l_exit_status=$?
 	l_cleanup_ok=1
 	l_preserve_reason=""
+	l_job_pids=$(jobs -p 2>/dev/null || true)
+	if [ -n "$l_job_pids" ]; then
+		# shellcheck disable=SC2086  # split into individual PIDs on purpose
+		kill $l_job_pids 2>/dev/null || true
+		# shellcheck disable=SC2086  # wait accepts individual PIDs
+		wait $l_job_pids 2>/dev/null || true
+	fi
 	destroy_test_pool_if_owned "source" "${SRC_POOL:-}" "${SRC_POOL_CREATED:-0}" "${SRC_IMG:-}" || l_cleanup_ok=0
 	destroy_test_pool_if_owned "destination" "${DEST_POOL:-}" "${DEST_POOL_CREATED:-0}" "${DEST_IMG:-}" || l_cleanup_ok=0
 	if [ "$l_cleanup_ok" -ne 1 ]; then
@@ -3123,6 +3144,8 @@ remote_helper_path_shell_metacharacters_test() {
 	marker="$WORKDIR/$marker_rel"
 	mock_path="$WORKDIR/mock_remote_helper.\$(touch $marker_rel)"
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
+		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
 	safe_rm_f "$marker"
 	safe_rm_rf "$mock_path"
 	mkdir -p "$mock_path"
@@ -3147,7 +3170,8 @@ remote_helper_path_shell_metacharacters_test() {
 
 	(
 		cd "$WORKDIR"
-		ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -O localhost -R "$src_dataset" "$dest_root"
+		log "Running: $zxfer_bin_abs -v -O localhost -R $src_dataset $dest_root"
+		ZXFER_SECURE_PATH="$secure_path" "$zxfer_bin_abs" -v -O localhost -R "$src_dataset" "$dest_root"
 	)
 
 	assert_snapshot_exists "$dest_dataset" "rhs1"
@@ -3875,7 +3899,9 @@ main() {
 	WORKDIR=$(mktemp -d -t zxfer_integration.XXXXXX)
 	WORKDIR=$(cd -P "$WORKDIR" && pwd)
 	TEST_RUN_ID="$(date +%s).$$"
-	trap cleanup EXIT INT TERM
+	trap cleanup EXIT
+	trap 'abort_integration_run INT 130' INT
+	trap 'abort_integration_run TERM 143' TERM
 	setup_command_confirmation_wrappers
 
 	usage_error_tests
