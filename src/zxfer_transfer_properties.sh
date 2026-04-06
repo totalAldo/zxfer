@@ -246,11 +246,7 @@ run_zfs_create_with_properties() {
 		if [ "$g_option_n_dryrun" -eq 0 ]; then
 			run_destination_zfs_cmd "$@"
 		else
-			printf '%s' "$g_RZFS"
-			for l_arg; do
-				printf ' "%s"' "$(escape_for_double_quotes "$l_arg")"
-			done
-			printf '\n'
+			zxfer_build_destination_zfs_command "$@"
 		fi
 	)
 }
@@ -548,7 +544,8 @@ strip_unsupported_properties() {
 # $5: source dataset type
 # $6: source volume size
 # $7: destination dataset name
-# $8: optional runner for zfs create (defaults to run_zfs_create_with_properties)
+# $8: readonly property list used for child creation sanitization
+# $9: optional runner for zfs create (defaults to run_zfs_create_with_properties)
 #
 ensure_destination_exists() {
 	l_dest_exist=$1
@@ -558,7 +555,8 @@ ensure_destination_exists() {
 	l_source_dstype=$5
 	l_source_volsize=$6
 	l_destination=$7
-	l_create_runner=$8
+	l_readonly_properties=$8
+	l_create_runner=$9
 
 	if [ "$l_dest_exist" != "0" ]; then
 		return 1
@@ -582,7 +580,7 @@ ensure_destination_exists() {
 			l_with_parents="yes"
 		fi
 	else
-		l_filtered_creation=$(sanitize_property_list "$l_creation_pvs" "$g_readonly_properties" "$g_option_I_ignore_properties")
+		l_filtered_creation=$(sanitize_property_list "$l_creation_pvs" "$l_readonly_properties" "$g_option_I_ignore_properties")
 		remove_sources "$l_filtered_creation"
 		l_property_list="$m_new_rmvs_pv"
 		l_with_parents="yes"
@@ -612,6 +610,52 @@ collect_destination_props() {
 	get_normalized_dataset_properties "$l_dataset" "$l_zfs_cmd"
 }
 
+zxfer_build_destination_zfs_command() {
+	l_subcommand=$1
+	shift
+
+	if [ "$g_option_T_target_host" = "" ]; then
+		if [ -n "$g_RZFS" ] && [ "$g_RZFS" != "$g_cmd_zfs" ]; then
+			zxfer_render_command_for_report "$g_RZFS" "$l_subcommand" "$@"
+		else
+			zxfer_render_command_for_report "" "$g_cmd_zfs" "$l_subcommand" "$@"
+		fi
+		return
+	fi
+
+	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
+	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
+	l_remote_tokens=$(printf '%s\n%s' "$l_target_zfs_cmd" "$l_subcommand")
+	for l_arg in "$@"; do
+		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
+	done
+	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
+	build_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_cmd"
+}
+
+zxfer_build_destination_zfs_property_command() {
+	zxfer_build_destination_zfs_command "$@"
+}
+
+zxfer_run_destination_zfs_property_command() {
+	l_subcommand=$1
+	shift
+
+	if [ "$g_option_T_target_host" = "" ]; then
+		run_destination_zfs_cmd "$l_subcommand" "$@"
+		return
+	fi
+
+	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
+	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
+	l_remote_tokens=$(printf '%s\n%s' "$l_target_zfs_cmd" "$l_subcommand")
+	for l_arg in "$@"; do
+		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
+	done
+	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
+	invoke_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_cmd"
+}
+
 #
 # Default runner for `zfs set`, allowing unit tests to override this behavior.
 # $1: property name
@@ -619,17 +663,19 @@ collect_destination_props() {
 # $3: destination dataset
 #
 zxfer_run_zfs_set_property() {
-	l_property_safe=$(escape_for_double_quotes "$1")
-	l_value_safe=$(escape_for_double_quotes "$2")
+	l_property=$1
+	l_value=$2
 	l_destination=$3
+	l_assignment=$l_property=$l_value
+	l_display_cmd=$(zxfer_build_destination_zfs_property_command set "$l_assignment" "$l_destination")
 
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		echov "$g_RZFS set ${l_property_safe}=${l_value_safe} $l_destination"
-		if ! run_destination_zfs_cmd set "${l_property_safe}=${l_value_safe}" "$l_destination"; then
+		echov "$l_display_cmd"
+		if ! zxfer_run_destination_zfs_property_command set "$l_assignment" "$l_destination"; then
 			throw_error "Error when setting properties on destination filesystem."
 		fi
 	else
-		echo "$g_RZFS set ${l_property_safe}=${l_value_safe} $l_destination"
+		echo "$l_display_cmd"
 	fi
 }
 
@@ -639,16 +685,17 @@ zxfer_run_zfs_set_property() {
 # $2: destination dataset
 #
 zxfer_run_zfs_inherit_property() {
-	l_property_safe=$(escape_for_double_quotes "$1")
+	l_property=$1
 	l_destination=$2
+	l_display_cmd=$(zxfer_build_destination_zfs_property_command inherit "$l_property" "$l_destination")
 
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		echov "$g_RZFS inherit $l_property_safe $l_destination"
-		if ! run_destination_zfs_cmd inherit "$l_property_safe" "$l_destination"; then
+		echov "$l_display_cmd"
+		if ! zxfer_run_destination_zfs_property_command inherit "$l_property" "$l_destination"; then
 			throw_error "Error when inheriting properties on destination filesystem."
 		fi
 	else
-		echo "$g_RZFS inherit $l_property_safe $l_destination"
+		echo "$l_display_cmd"
 	fi
 }
 
@@ -748,12 +795,14 @@ you will need to first destroy target filesystem."
 # $2: override property list
 # $3: current child set list
 # $4: current inherit list
+# $5: readonly property list used when sanitizing parent properties
 #
 adjust_child_inherit_to_match_parent() {
 	l_destination=$1
 	l_override_pvs=$2
 	l_set_list=$3
 	l_inherit_list=$4
+	l_readonly_properties=$5
 
 	if [ -z "$l_inherit_list" ]; then
 		printf '%s\n' "$l_set_list"
@@ -770,7 +819,7 @@ adjust_child_inherit_to_match_parent() {
 	fi
 
 	l_parent_dest_pvs=$(collect_destination_props "$l_parent_dataset" "$g_RZFS")
-	l_parent_dest_pvs=$(sanitize_property_list "$l_parent_dest_pvs" "$g_readonly_properties" "$g_option_I_ignore_properties")
+	l_parent_dest_pvs=$(sanitize_property_list "$l_parent_dest_pvs" "$l_readonly_properties" "$g_option_I_ignore_properties")
 
 	l_new_set_list=$l_set_list
 	l_new_inherit_list=""
@@ -888,6 +937,7 @@ transfer_properties() {
 	l_source=$1
 	l_skip_backup_capture=${2:-0}
 	must_create_properties="casesensitivity,normalization,jailed,utf8only"
+	l_effective_readonly_properties=$g_readonly_properties
 
 	if [ "$initial_source" = "$l_source" ]; then
 		l_is_initial_source=1
@@ -924,11 +974,21 @@ $l_source,$g_actual_dest,$m_source_pvs_raw"
 		validate_override_properties "$g_option_o_override_property_pv" "$l_source_pvs"
 	fi
 
-	if [ "$g_destination_operating_system" = "FreeBSD" ]; then
-		g_readonly_properties="$g_readonly_properties,$g_fbsd_readonly_properties"
+	if [ "$g_destination_operating_system" = "FreeBSD" ] && [ -n "$g_fbsd_readonly_properties" ]; then
+		if [ -n "$l_effective_readonly_properties" ]; then
+			l_effective_readonly_properties="$l_effective_readonly_properties,$g_fbsd_readonly_properties"
+		else
+			l_effective_readonly_properties=$g_fbsd_readonly_properties
+		fi
 	fi
-	if [ "$g_destination_operating_system" = "SunOS" ] && [ "$g_source_operating_system" = "FreeBSD" ]; then
-		g_readonly_properties="$g_readonly_properties,$g_solexp_readonly_properties"
+	if [ "$g_destination_operating_system" = "SunOS" ] &&
+		[ "$g_source_operating_system" = "FreeBSD" ] &&
+		[ -n "$g_solexp_readonly_properties" ]; then
+		if [ -n "$l_effective_readonly_properties" ]; then
+			l_effective_readonly_properties="$l_effective_readonly_properties,$g_solexp_readonly_properties"
+		else
+			l_effective_readonly_properties=$g_solexp_readonly_properties
+		fi
 	fi
 
 	{
@@ -938,7 +998,7 @@ $l_source,$g_actual_dest,$m_source_pvs_raw"
 $(derive_override_lists "$l_source_pvs" "$g_option_o_override_property_pv" "$g_option_P_transfer_property" "$l_source_dstype")
 EOF
 
-	override_pvs=$(sanitize_property_list "$override_pvs" "$g_readonly_properties" "$g_option_I_ignore_properties")
+	override_pvs=$(sanitize_property_list "$override_pvs" "$l_effective_readonly_properties" "$g_option_I_ignore_properties")
 	override_pvs=$(strip_unsupported_properties "$override_pvs" "$unsupported_properties")
 	echoV "transfer_properties override_pvs: $override_pvs"
 
@@ -949,7 +1009,7 @@ EOF
 	# seed receive can safely use -F on an empty dataset.
 	# shellcheck disable=SC2034
 	g_dest_created_by_zxfer=0
-	if ensure_destination_exists "$dest_exist" "$l_is_initial_source" "$override_pvs" "$creation_pvs" "$l_source_dstype" "$l_source_volsize" "$g_actual_dest" ""; then
+	if ensure_destination_exists "$dest_exist" "$l_is_initial_source" "$override_pvs" "$creation_pvs" "$l_source_dstype" "$l_source_volsize" "$g_actual_dest" "$l_effective_readonly_properties" ""; then
 		# shellcheck disable=SC2034
 		g_dest_created_by_zxfer=1
 		return
@@ -957,7 +1017,7 @@ EOF
 
 	dest_pvs=$(collect_destination_props "$g_actual_dest" "$g_RZFS")
 	dest_pvs=$(ensure_required_properties_present "$g_actual_dest" "$dest_pvs" "$g_RZFS" "$must_create_properties")
-	dest_pvs=$(sanitize_property_list "$dest_pvs" "$g_readonly_properties" "$g_option_I_ignore_properties")
+	dest_pvs=$(sanitize_property_list "$dest_pvs" "$l_effective_readonly_properties" "$g_option_I_ignore_properties")
 	echoV "transfer_properties dest_pvs: $dest_pvs"
 
 	l_diff_properties_tmp=$(get_temp_file)
@@ -975,7 +1035,7 @@ EOF
 			IFS= read -r ov_set_list
 			IFS= read -r ov_inherit_list
 		} <<EOF
-$(adjust_child_inherit_to_match_parent "$g_actual_dest" "$override_pvs" "$ov_set_list" "$ov_inherit_list")
+$(adjust_child_inherit_to_match_parent "$g_actual_dest" "$override_pvs" "$ov_set_list" "$ov_inherit_list" "$l_effective_readonly_properties")
 EOF
 		echoV "transfer_properties adjusted child_set: $ov_set_list"
 		echoV "transfer_properties adjusted inherit: $ov_inherit_list"

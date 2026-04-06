@@ -250,6 +250,19 @@ diff_snapshot_lists() {
 	esac
 }
 
+# Reverse a numbered line stream produced by `cat -n`. Strip the line number by
+# tab-delimited field rather than a fixed character offset so large line counts
+# do not truncate the first character of the payload.
+reverse_numbered_line_stream() {
+	LC_ALL=C sort -nr | cut -f2-
+}
+
+reverse_file_lines() {
+	l_input_file=$1
+
+	cat -n "$l_input_file" | reverse_numbered_line_stream
+}
+
 set_g_recursive_source_list() {
 	l_lzfs_list_hr_s_snap_tmp_file=$1
 	l_dest_snaps_stripped_sorted_tmp_file=$2
@@ -274,8 +287,8 @@ set_g_recursive_source_list() {
 
 	# if excluding datasets, remove them from the list
 	if [ "$g_option_x_exclude_datasets" != "" ]; then
-		g_recursive_source_list=$(echo "$g_recursive_source_list" | grep -v "$g_option_x_exclude_datasets")
-		g_recursive_source_dataset_list=$(echo "$g_recursive_source_dataset_list" | grep -v "$g_option_x_exclude_datasets")
+		g_recursive_source_list=$(echo "$g_recursive_source_list" | grep -v -e "$g_option_x_exclude_datasets")
+		g_recursive_source_dataset_list=$(echo "$g_recursive_source_dataset_list" | grep -v -e "$g_option_x_exclude_datasets")
 	fi
 
 	# debugging
@@ -387,7 +400,7 @@ get_zfs_list() {
 	set_g_recursive_source_list "$l_lzfs_list_hr_s_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 
 	# get the reversed order (not using tac due to solaris compatibility)
-	g_lzfs_list_hr_S_snap=$(cat -n "$l_lzfs_list_hr_s_snap_tmp_file" | LC_ALL=C sort -nr | cut -c 8-)
+	g_lzfs_list_hr_S_snap=$(reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file")
 
 	# remove temporary files
 	rm "$l_lzfs_list_hr_s_snap_tmp_file" \

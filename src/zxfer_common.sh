@@ -47,17 +47,6 @@ fi
 #  g_option_B_beep_on_success
 ################################################################################
 
-#
-# Add the debug_start() and debug_end() functions to enable/disable debugging
-# between code blocks.
-debug_start() {
-	set -x
-}
-
-debug_end() {
-	set +x
-}
-
 zxfer_init_failure_context_defaults() {
 	: "${g_zxfer_failure_report_emitted:=0}"
 	: "${g_zxfer_failure_class:=}"
@@ -125,6 +114,27 @@ zxfer_quote_command_argv() {
 	printf '%s\n' "$l_output"
 }
 
+# Render an optional shell-ready command prefix plus argv tokens into the
+# single-line report format used by dry-run output and failure summaries.
+zxfer_render_command_for_report() {
+	l_prefix=$1
+	shift
+
+	if [ $# -gt 0 ]; then
+		l_quoted_args=$(zxfer_quote_command_argv "$@")
+	else
+		l_quoted_args=""
+	fi
+
+	if [ "$l_prefix" != "" ] && [ "$l_quoted_args" != "" ]; then
+		printf '%s %s\n' "$l_prefix" "$l_quoted_args"
+	elif [ "$l_prefix" != "" ]; then
+		printf '%s\n' "$l_prefix"
+	else
+		printf '%s\n' "$l_quoted_args"
+	fi
+}
+
 zxfer_set_failure_stage() {
 	zxfer_init_failure_context_defaults
 	[ -n "$1" ] && g_zxfer_failure_stage=$1
@@ -140,16 +150,6 @@ zxfer_set_current_dataset_context() {
 	zxfer_init_failure_context_defaults
 	[ $# -ge 1 ] && [ -n "$1" ] && g_zxfer_failure_current_source=$1
 	[ $# -ge 2 ] && [ -n "$2" ] && g_zxfer_failure_current_destination=$2
-}
-
-zxfer_record_failure() {
-	l_failure_class=$1
-	l_failure_message=$2
-
-	zxfer_init_failure_context_defaults
-
-	[ -n "$l_failure_class" ] && g_zxfer_failure_class=$l_failure_class
-	[ -n "$l_failure_message" ] && g_zxfer_failure_message=$l_failure_message
 }
 
 zxfer_record_last_command_string() {
@@ -507,17 +507,10 @@ execute_background_cmd() {
 	g_last_background_pid=$!
 }
 
-# Escape characters that have special meaning inside double quotes so that the
-# returned string can be safely reinserted into a double-quoted context without
-# triggering command substitution or other expansions.
-escape_for_double_quotes() {
-	printf '%s' "$1" | sed 's/[\\$`\"]/\\&/g'
-}
-
 # Escape characters for a single-quoted context by closing and reopening quotes
 # around embedded apostrophes.
 escape_for_single_quotes() {
-	printf '%s' "$1" | sed "s/'/'\"'\"'/g"
+	printf '%s' "$1" | sed "s/'/'\\\\''/g"
 }
 
 # Split whitespace-delimited arguments into separate lines without invoking the

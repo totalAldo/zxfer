@@ -483,6 +483,12 @@ the recursive replication list. The pattern is passed to
 .Fl v ,
 so be sure to escape shell metacharacters or provide quotes where appropriate.
 Useful when a recursive send should omit scratch datasets or other prefixes.
+To exclude only
+.Pa tank/data
+without also matching
+.Pa tank/data.bob ,
+use an anchored pattern such as
+.Dq ^tank/data$ .
 .It Fl O
 Specify an (O)rigin user@host. This allows transfers FROM a remote host via ssh.
 e.g. Whatever filesystems you specify as the source are taken to exist on that

@@ -217,6 +217,47 @@ test_diff_snapshot_lists_rejects_unknown_mode() {
 		"$output" "Unknown snapshot diff mode: unknown_mode"
 }
 
+test_reverse_numbered_line_stream_preserves_full_payload_for_seven_digit_line_numbers() {
+	output=$(
+		cat <<'EOF' | reverse_numbered_line_stream
+     2	tank/src@snap-b
+1000000	tank/src@snap-million
+     1	tank/src@snap-a
+EOF
+	)
+
+	assertEquals "Reversing numbered snapshot listings should preserve the full payload once line numbers grow past six digits." \
+		"tank/src@snap-million
+tank/src@snap-b
+tank/src@snap-a" "$output"
+}
+
+test_reverse_file_lines_preserves_full_payload_for_seven_digit_numbered_input() {
+	input_file="$TEST_TMPDIR/reverse_file_lines_input.txt"
+	: >"$input_file"
+
+	output=$(
+		(
+			cat() {
+				if [ "$1" = "-n" ] && [ "$2" = "$input_file" ]; then
+					printf '%s\n' \
+						'     2	tank/src@snap-b' \
+						'1000000	tank/src@snap-million' \
+						'     1	tank/src@snap-a'
+				else
+					command cat "$@"
+				fi
+			}
+			reverse_file_lines "$input_file"
+		)
+	)
+
+	assertEquals "reverse_file_lines should preserve the full payload when cat -n emits seven-digit line numbers." \
+		"tank/src@snap-million
+tank/src@snap-b
+tank/src@snap-a" "$output"
+}
+
 test_set_g_recursive_source_list_applies_exclude_filter_and_verbose_output() {
 	source_tmp="$TEST_TMPDIR/source_snapshots.txt"
 	dest_tmp="$TEST_TMPDIR/dest_snapshots.txt"
@@ -246,6 +287,33 @@ EOF
 		"$output" "Snapshots present in source but missing in destination"
 	assertContains "Very-verbose mode should print the extra-destination snapshot heading." \
 		"$output" "Extra Destination snapshots not in source"
+}
+
+test_set_g_recursive_source_list_accepts_leading_dash_exclude_patterns() {
+	source_tmp="$TEST_TMPDIR/source_dash_pattern_snapshots.txt"
+	dest_tmp="$TEST_TMPDIR/dest_dash_pattern_snapshots.txt"
+	output_file="$TEST_TMPDIR/dash_pattern_output.txt"
+	cat <<'EOF' >"$source_tmp"
+tank/src@a
+tank/src/child-exclude@a
+tank/src@b
+tank/src/child-exclude@b
+EOF
+	: >"$dest_tmp"
+	sort "$source_tmp" -o "$source_tmp"
+	g_option_x_exclude_datasets="-exclude$"
+
+	set_g_recursive_source_list "$source_tmp" "$dest_tmp" >"$output_file" 2>&1
+	output=$(cat "$output_file")
+
+	assertEquals "Leading-dash regex patterns should still exclude matching datasets." \
+		"tank/src" "$g_recursive_source_list"
+	assertEquals "Leading-dash regex patterns should also filter the dataset cache." \
+		"tank/src" "$g_recursive_source_dataset_list"
+	assertNotContains "Leading-dash patterns should be treated as regexes, not grep options." \
+		"$output" "illegal option"
+	assertNotContains "Leading-dash patterns should not trigger grep usage errors on GNU systems either." \
+		"$output" "invalid option"
 }
 
 test_write_destination_snapshot_list_to_files_outputs_empty_when_destination_missing() {

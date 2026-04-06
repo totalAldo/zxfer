@@ -1161,7 +1161,9 @@ test_write_backup_properties_renders_remote_dry_run_command() {
 	)
 
 	assertContains "Remote dry-run backup writes should render the ssh command prefix." \
-		"$result" "/usr/bin/ssh 'target.example' 'doas'"
+		"$result" "'/usr/bin/ssh' 'target.example'"
+	assertContains "Remote dry-run backup writes should render the local backup-content command with the common argv formatter." \
+		"$result" "'printf' '%s'"
 	assertContains "Remote dry-run backup writes should render the remote cat pipeline." \
 		"$result" ".zxfer_backup_info.src"
 }
@@ -1187,7 +1189,7 @@ test_write_backup_properties_renders_local_dry_run_command() {
 	)
 
 	assertContains "Local dry-run backup writes should render a local redirection command." \
-		"$result" "umask 077; printf '%s'"
+		"$result" "umask 077; 'printf' '%s'"
 	assertContains "Local dry-run backup writes should target the secure backup path." \
 		"$result" ".zxfer_backup_info.src"
 }

@@ -486,6 +486,8 @@ grep(1)
 \fB\-v\fR,
 so be sure to escape shell metacharacters or provide quotes where appropriate.
 Useful when a recursive send should omit scratch datasets or other prefixes.
+To exclude only \fItank/data\fR without also matching \fItank/data.bob\fR,
+use an anchored pattern such as \fB^tank/data$\fR.
 .TP 8n
 \fB\-O\fR
 Specify an (O)rigin user@host. This allows transfers FROM a remote host via ssh.

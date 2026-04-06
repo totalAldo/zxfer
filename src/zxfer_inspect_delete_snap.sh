@@ -83,7 +83,6 @@ $l_dest_snapshot"
 
 	# Print the matching lines
 	echo "$l_dest_snaps_to_delete"
-	#echoV "End get_dest_snapshots_to_delete_per_dataset()"
 }
 
 #
@@ -310,7 +309,6 @@ set_src_snapshot_transfer_list() {
 }
 
 inspect_delete_snap() {
-	#echoV "Begin inspect_delete_snap()"
 	l_is_delete_snap=$1
 	l_source=$2
 
@@ -348,5 +346,4 @@ inspect_delete_snap() {
 	# Create a list of source snapshots to transfer, beginning with the
 	# first snapshot after the last common one.
 	set_src_snapshot_transfer_list "$l_zfs_source_snaps" "$l_source"
-	#echoV "End inspect_delete_snap()"
 }

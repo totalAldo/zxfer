@@ -329,17 +329,6 @@ test_zxfer_compute_secure_path_uses_append_when_default_is_empty() {
 		"/opt/trusted/bin" "$(cat "$outfile")"
 }
 
-test_escape_for_double_quotes_escapes_special_chars() {
-	# Validate that the helper escapes characters which would break options
-	# passed via the shell, such as quotes, backticks, and dollars.
-	input=$(printf '%s' "text\"with\`special\$chars\\and normal")
-	expected=$(printf '%s' "text\\\"with\\\`special\\\$chars\\\\and normal")
-
-	result=$(escape_for_double_quotes "$input")
-
-	assertEquals "Input should be properly escaped for double quotes." "$expected" "$result"
-}
-
 test_escape_for_single_quotes_escapes_apostrophes() {
 	# Single-quoted contexts require reopening the quotes around apostrophes,
 	# so ensure the helper inserts the standard '\''' sequence.
@@ -2309,6 +2298,14 @@ test_zxfer_quote_command_argv_escapes_control_chars_and_apostrophes() {
 	assertEquals "Quoted argv should remain one-line and shell-safe for reports." "$expected" "$result"
 }
 
+test_zxfer_render_command_for_report_appends_quoted_argv_to_prefix() {
+	result=$(zxfer_render_command_for_report "/usr/bin/ssh 'host' /sbin/zfs" "create" "-o" "compression=lz4")
+	expected="/usr/bin/ssh 'host' /sbin/zfs 'create' '-o' 'compression=lz4'"
+
+	assertEquals "Report rendering should preserve the shell-ready prefix and quote appended argv tokens." \
+		"$expected" "$result"
+}
+
 test_zxfer_render_failure_report_includes_context_fields() {
 	g_zxfer_version="test-version"
 	g_option_R_recursive="tank/src"
@@ -2367,11 +2364,11 @@ test_zxfer_render_failure_report_defaults_runtime_class_for_nonusage_exit() {
 		"$report" "message: zxfer exited with status 1."
 }
 
-test_zxfer_record_failure_and_render_defaults_cover_usage_mode() {
+test_zxfer_render_failure_defaults_cover_usage_mode() {
 	g_zxfer_version="test-version"
 	g_option_R_recursive=""
 	g_option_N_nonrecursive="tank/src"
-	zxfer_record_failure "" ""
+	zxfer_reset_failure_context "unit"
 
 	report=$(zxfer_render_failure_report 2)
 
@@ -2381,15 +2378,6 @@ test_zxfer_record_failure_and_render_defaults_cover_usage_mode() {
 		"$report" "message: zxfer exited with status 2."
 	assertContains "Failure reports should identify nonrecursive mode when -N is set." \
 		"$report" "mode: nonrecursive"
-}
-
-test_zxfer_record_failure_sets_class_and_message() {
-	zxfer_reset_failure_context "unit"
-
-	zxfer_record_failure "dependency" "missing zfs"
-
-	assertEquals "zxfer_record_failure should record the failure class." "dependency" "$g_zxfer_failure_class"
-	assertEquals "zxfer_record_failure should record the failure message." "missing zfs" "$g_zxfer_failure_message"
 }
 
 test_throw_error_writes_message_to_stderr() {

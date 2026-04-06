@@ -90,7 +90,8 @@ fork. For the full CLI reference, use the man pages.
   up to that many `zfs send`/`zfs receive` jobs concurrently
 - `-V`: enable very verbose debug output
 - `-w`: use raw `zfs send`
-- `-x pattern`: exclude matching datasets from recursive replication
+- `-x pattern`: exclude datasets whose names match a regex from recursive
+  replication; use `-x '^tank/data$'` to exclude only `tank/data`
 - `-Y`: repeat replication until no sends or destroys are performed, or until
   the built-in 8-iteration cap is reached
 - `-z`: compress ssh transfers with `zstd`

@@ -1,6 +1,14 @@
 CHANGELOG
 =========
 
+2026.04.06
+-Stop mutating `g_readonly_properties` inside `transfer_properties()` by building a per-call effective readonly-property list for platform-specific filtering, preventing recursive and `-Y` property passes from growing the list across datasets and iterations while preserving migration-mode `mountpoint` handling.
+-Pass the effective readonly-property list explicitly through destination-creation and child-inherit helpers, and add shunit2 coverage so repeated FreeBSD/SunOS property transfers do not silently reintroduce list growth.
+-Stop shell-escaping `zfs set` / `zfs inherit` argv before direct execution, preserving literal property names and values locally, and route remote `-T` property updates through a shell-quoted ssh command so assignments survive ssh's remote-shell command joining.
+-Reverse source snapshot caches with a tab-field strip instead of `cut -c 8-`, preventing large recursive source lists from truncating snapshot names once `cat -n` line numbers grow past six digits.
+-Pass `-x` exclusion patterns to `grep` via `-e` so leading-dash regexes work portably across supported platforms, and document anchored exact-match examples for dataset exclusion in the README and manpages.
+-Standardize the remaining dry-run command rendering on the shared report formatter so `zfs create` and backup-metadata write previews use one quoting path, and remove the older double-quote-specific display helper.
+
 2026.04.04
 -Defer `-O`/`-T` ssh control-socket creation until after CLI consistency checks pass so usage errors like `-m` or `-c` with remote hosts fail closed without attempting a live ssh connection.
 -Relax the FreeBSD beep integration assertion to accept either missing speaker helper tools or a missing `/dev/speaker`, matching legitimate host-specific skip paths.

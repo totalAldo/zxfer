@@ -41,8 +41,17 @@
 # Define global variables
 #
 
+zxfer_refresh_backup_storage_root() {
+	if [ -n "${ZXFER_BACKUP_DIR:-}" ]; then
+		g_backup_storage_root=$ZXFER_BACKUP_DIR
+	elif [ -z "${g_backup_storage_root:-}" ]; then
+		g_backup_storage_root=/var/db/zxfer
+	fi
+}
+
 # Secure location for property backup files (override via ZXFER_BACKUP_DIR).
-g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
+g_backup_storage_root=""
+zxfer_refresh_backup_storage_root
 
 # Directories considered safe for PATH lookups. Administrators may override the
 # entire list via ZXFER_SECURE_PATH or append additional trusted directories via
@@ -222,7 +231,7 @@ init_globals() {
 	zxfer_reset_failure_context "startup"
 
 	# zxfer version
-	g_zxfer_version="2.0-20260404"
+	g_zxfer_version="2.0-20260406"
 
 	# max number of iterations to run iterate through run_zfs_mode
 	# if changes are made to the filesystems
@@ -278,7 +287,7 @@ init_globals() {
 	g_destination=""
 	g_backup_file_extension=".zxfer_backup_info"
 	g_backup_file_contents=""
-	g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
+	zxfer_refresh_backup_storage_root
 	g_dest_seed_requires_property_reconcile=0
 
 	# operating systems
@@ -884,7 +893,7 @@ sanitize_dataset_relpath() {
 get_backup_storage_dir() {
 	l_mountpoint=$1
 	l_dataset=$2
-	[ -z "${g_backup_storage_root:-}" ] && g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
+	zxfer_refresh_backup_storage_root
 
 	case "$l_mountpoint" in
 	"" | "-")
@@ -1110,11 +1119,6 @@ ensure_local_backup_dir() {
 	fi
 }
 
-escape_for_single_quotes() {
-	l_value=$1
-	printf '%s' "$l_value" | sed "s/'/'\\\\''/g"
-}
-
 ensure_remote_backup_dir() {
 	l_dir=$1
 	l_host=$2
@@ -1217,11 +1221,7 @@ get_backup_properties() {
 	# until the pool level, looking for the backup file, stopping when we find
 	# it or terminating with an error.
 	# shellcheck disable=SC2154
-	if [ -n "${ZXFER_BACKUP_DIR:-}" ]; then
-		g_backup_storage_root=$ZXFER_BACKUP_DIR
-	elif [ -z "${g_backup_storage_root:-}" ]; then
-		g_backup_storage_root=/var/db/zxfer
-	fi
+	zxfer_refresh_backup_storage_root
 
 	l_suspect_fs=$initial_source
 	l_suspect_fs_tail=$(echo "$l_suspect_fs" | sed -e 's/.*\///g')
@@ -1361,7 +1361,7 @@ write_backup_properties() {
 		echov "No property data collected; skipping backup write."
 		return
 	fi
-	[ -z "${g_backup_storage_root:-}" ] && g_backup_storage_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
+	zxfer_refresh_backup_storage_root
 	l_is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
 	l_destination_mountpoint=$(run_destination_zfs_cmd get -H -o value mountpoint "$g_destination")
 	l_backup_file_dir=$(get_backup_storage_dir "$l_destination_mountpoint" "$g_destination")
@@ -1398,16 +1398,16 @@ write_backup_properties() {
 			fi
 		fi
 	else
-		l_backup_file_contents_safe=$(escape_for_double_quotes "$g_backup_file_contents")
+		l_backup_contents_cmd=$(zxfer_render_command_for_report "" printf '%s' "$g_backup_file_contents")
+		l_translate_cmd=$(zxfer_render_command_for_report "" tr ";" "\n")
+		l_backup_file_path_safe=$(zxfer_quote_token_for_report "$l_backup_file_path")
 		if [ "$g_option_T_target_host" = "" ]; then
-			printf '%s\n' "umask 077; printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" > \"$l_backup_file_path\""
+			printf '%s\n' "umask 077; $l_backup_contents_cmd | $l_translate_cmd > $l_backup_file_path_safe"
 		else
 			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-			l_target_host_args=$(quote_host_spec_tokens "$g_option_T_target_host")
-			if [ "$l_target_host_args" != "" ]; then
-				l_target_host_args=" $l_target_host_args"
-			fi
-			printf '%s\n' "printf '%s' \"$l_backup_file_contents_safe\" | tr ';' \"\\n\" | $l_target_ssh_cmd$l_target_host_args \"umask 077; cat > \\\"$l_backup_file_path\\\"\""
+			l_remote_write_cmd="umask 077; cat > $l_backup_file_path_safe"
+			l_remote_write_shell_cmd=$(build_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_write_cmd")
+			printf '%s\n' "$l_backup_contents_cmd | $l_translate_cmd | $l_remote_write_shell_cmd"
 		fi
 	fi
 }

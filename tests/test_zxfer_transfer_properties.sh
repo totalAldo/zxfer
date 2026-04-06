@@ -97,7 +97,7 @@ test_run_zfs_create_with_properties_renders_dry_run_command() {
 	result=$(run_zfs_create_with_properties no filesystem "" "compression=lz4,quota=1G" "backup/dst")
 
 	assertEquals "Dry-run zfs create should render a safely quoted command line." \
-		"/usr/bin/ssh 'host' /sbin/zfs \"create\" \"-o\" \"compression=lz4\" \"-o\" \"quota=1G\" \"backup/dst\"" "$result"
+		"/usr/bin/ssh 'host' /sbin/zfs 'create' '-o' 'compression=lz4' '-o' 'quota=1G' 'backup/dst'" "$result"
 }
 
 test_get_normalized_dataset_properties_defaults_to_g_lzfs() {
@@ -236,7 +236,7 @@ test_ensure_required_properties_present_appends_missing_creation_time_props() {
 
 test_ensure_destination_exists_returns_one_when_dataset_already_exists() {
 	set +e
-	ensure_destination_exists 1 1 "" "" filesystem "" "backup/dst" ""
+	ensure_destination_exists 1 1 "" "" filesystem "" "backup/dst" "$g_readonly_properties" ""
 	status=$?
 
 	assertEquals "Existing destinations should skip creation and return 1." 1 "$status"
@@ -251,7 +251,7 @@ test_ensure_destination_exists_initial_source_adds_parents_when_missing() {
 			create_runner() {
 				printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5"
 			}
-			ensure_destination_exists 0 1 "compression=lz4=local,atime=off=override" "" filesystem "" "backup/dst/child" create_runner
+			ensure_destination_exists 0 1 "compression=lz4=local,atime=off=override" "" filesystem "" "backup/dst/child" "$g_readonly_properties" create_runner
 		)
 	)
 
@@ -265,13 +265,12 @@ test_ensure_destination_exists_child_uses_creation_properties() {
 			create_runner() {
 				printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5"
 			}
-			g_readonly_properties="readonly"
 			g_option_I_ignore_properties="mountpoint"
-			ensure_destination_exists 0 0 "" "mountpoint=/mnt=local,readonly=off=local,compression=lz4=local" filesystem "" "backup/dst/child" create_runner
+			ensure_destination_exists 0 0 "" "mountpoint=/mnt=local,readonly=off=local,compression=lz4=local" filesystem "" "backup/dst/child" "readonly" create_runner
 		)
 	)
 
-	assertEquals "Child dataset creation should use filtered creation properties and always create parents." \
+	assertEquals "Child dataset creation should use the supplied readonly list, filtered creation properties, and always create parents." \
 		"yes|filesystem||compression=lz4|backup/dst/child" "$result"
 }
 
@@ -286,7 +285,7 @@ test_ensure_destination_exists_reports_create_failures() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_destination_exists 0 1 "compression=lz4=local" "" filesystem "" "backup/dst" create_runner
+			ensure_destination_exists 0 1 "compression=lz4=local" "" filesystem "" "backup/dst" "$g_readonly_properties" create_runner
 		)
 	)
 	status=$?
@@ -301,16 +300,16 @@ test_ensure_destination_exists_uses_default_runner_when_unspecified_in_current_s
 	run_zfs_create_with_properties() {
 		printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" >"$log"
 	}
-	g_readonly_properties="readonly"
+	g_readonly_properties=""
 	g_option_I_ignore_properties=""
 
-	ensure_destination_exists 0 0 "" "readonly=off=local,compression=lz4=local" filesystem "" "backup/dst/child" ""
+	ensure_destination_exists 0 0 "" "readonly=off=local,compression=lz4=local" filesystem "" "backup/dst/child" "readonly" ""
 	status=$?
 
 	unset -f run_zfs_create_with_properties
 
 	assertEquals "Blank create-runner arguments should fall back to the default zfs create helper." 0 "$status"
-	assertEquals "Default create-runner selection should sanitize creation properties before invocation." \
+	assertEquals "Default create-runner selection should sanitize creation properties using the supplied readonly list before invocation." \
 		"yes|filesystem||compression=lz4|backup/dst/child" "$(cat "$log")"
 }
 
@@ -333,7 +332,7 @@ test_zxfer_run_zfs_set_property_handles_dry_run_and_failures() {
 	g_option_n_dryrun=1
 	g_RZFS="/remote/zfs"
 	assertEquals "Dry-run property sets should render the destination command." \
-		"/remote/zfs set quota=1G backup/dst" \
+		"/remote/zfs 'set' 'quota=1G' 'backup/dst'" \
 		"$(zxfer_run_zfs_set_property quota 1G backup/dst)"
 
 	set +e
@@ -357,11 +356,90 @@ test_zxfer_run_zfs_set_property_handles_dry_run_and_failures() {
 		"$output" "Error when setting properties on destination filesystem."
 }
 
+test_zxfer_run_zfs_set_property_preserves_literal_assignment_for_local_exec() {
+	log="$TEST_TMPDIR/set_property_local.log"
+	l_property="user:test\$\\\`\"\\\\"
+	l_value="value with spaces \$\\\`\"\\\\"
+
+	run_destination_zfs_cmd() {
+		printf '%s\n' "$@" >"$log"
+	}
+
+	g_option_n_dryrun=0
+	g_option_T_target_host=""
+	g_RZFS="/sbin/zfs"
+	zxfer_run_zfs_set_property "$l_property" "$l_value" "backup/dst"
+
+	unset -f run_destination_zfs_cmd
+
+	assertEquals "Live local property sets should pass the literal assignment to zfs without shell-style escaping." \
+		"$(printf '%s\n' "set" "$l_property=$l_value" "backup/dst")" "$(cat "$log")"
+}
+
+test_zxfer_run_zfs_set_property_preserves_literal_assignment_for_remote_exec() {
+	fake_ssh="$TEST_TMPDIR/fake_ssh_join_exec_set"
+	remote_zfs="$TEST_TMPDIR/fake_remote_zfs_set"
+	ssh_log="$TEST_TMPDIR/fake_ssh_join_exec_set.log"
+	remote_log="$TEST_TMPDIR/fake_remote_zfs_set.log"
+	l_property="user:test\$\\\`\"\\\\"
+	l_value="value with spaces \$\\\`\"\\\\"
+	old_g_cmd_ssh=${g_cmd_ssh-}
+	old_target_host=$g_option_T_target_host
+	old_target_cmd_zfs=${g_target_cmd_zfs-}
+
+	cat >"$fake_ssh" <<'EOF'
+#!/bin/sh
+host=$1
+shift
+remote_cmd=""
+for arg in "$@"; do
+	if [ "$remote_cmd" = "" ]; then
+		remote_cmd=$arg
+	else
+		remote_cmd="$remote_cmd $arg"
+	fi
+done
+if [ -n "${FAKE_SSH_LOG:-}" ]; then
+	printf '%s\n' "$host" >>"$FAKE_SSH_LOG"
+	printf '%s\n' "$remote_cmd" >>"$FAKE_SSH_LOG"
+fi
+/bin/sh -c "$remote_cmd"
+EOF
+	chmod +x "$fake_ssh"
+
+	cat >"$remote_zfs" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$ZXFER_REMOTE_ZFS_LOG"
+EOF
+	chmod +x "$remote_zfs"
+
+	FAKE_SSH_LOG="$ssh_log"
+	ZXFER_REMOTE_ZFS_LOG="$remote_log"
+	export FAKE_SSH_LOG ZXFER_REMOTE_ZFS_LOG
+
+	g_option_n_dryrun=0
+	g_cmd_ssh="$fake_ssh"
+	g_option_T_target_host="target.example"
+	g_target_cmd_zfs="$remote_zfs"
+
+	zxfer_run_zfs_set_property "$l_property" "$l_value" "backup/dst"
+
+	unset FAKE_SSH_LOG ZXFER_REMOTE_ZFS_LOG
+	g_cmd_ssh=$old_g_cmd_ssh
+	g_option_T_target_host=$old_target_host
+	g_target_cmd_zfs=$old_target_cmd_zfs
+
+	assertEquals "Remote property sets should preserve the literal assignment after ssh joins the remote command into a shell string." \
+		"$(printf '%s\n' "set" "$l_property=$l_value" "backup/dst")" "$(cat "$remote_log")"
+	assertEquals "Remote property sets should keep the target host as the ssh destination." \
+		"target.example" "$(sed -n '1p' "$ssh_log")"
+}
+
 test_zxfer_run_zfs_inherit_property_handles_dry_run_and_failures() {
 	g_option_n_dryrun=1
 	g_RZFS="/remote/zfs"
 	assertEquals "Dry-run inherit operations should render the destination command." \
-		"/remote/zfs inherit quota backup/dst" \
+		"/remote/zfs 'inherit' 'quota' 'backup/dst'" \
 		"$(zxfer_run_zfs_inherit_property quota backup/dst)"
 
 	set +e
@@ -383,6 +461,102 @@ test_zxfer_run_zfs_inherit_property_handles_dry_run_and_failures() {
 	assertEquals "Live inherit failures should abort." 1 "$status"
 	assertContains "Live inherit failures should surface the inherit error." \
 		"$output" "Error when inheriting properties on destination filesystem."
+}
+
+test_zxfer_run_zfs_inherit_property_preserves_literal_property_for_local_exec() {
+	log="$TEST_TMPDIR/inherit_property_local.log"
+	l_property="user:test\$\\\`\"\\\\"
+
+	run_destination_zfs_cmd() {
+		printf '%s\n' "$@" >"$log"
+	}
+
+	g_option_n_dryrun=0
+	g_option_T_target_host=""
+	g_RZFS="/sbin/zfs"
+	zxfer_run_zfs_inherit_property "$l_property" "backup/dst"
+
+	unset -f run_destination_zfs_cmd
+
+	assertEquals "Live local property inheritance should pass the literal property name to zfs without shell-style escaping." \
+		"$(printf '%s\n' "inherit" "$l_property" "backup/dst")" "$(cat "$log")"
+}
+
+test_zxfer_run_zfs_inherit_property_preserves_literal_property_for_remote_exec_with_wrapper_host_spec() {
+	fake_ssh="$TEST_TMPDIR/fake_ssh_join_exec_inherit"
+	fake_doas="$TEST_TMPDIR/doas"
+	remote_zfs="$TEST_TMPDIR/fake_remote_zfs_inherit"
+	ssh_log="$TEST_TMPDIR/fake_ssh_join_exec_inherit.log"
+	remote_log="$TEST_TMPDIR/fake_remote_zfs_inherit.log"
+	l_property="user:test'quote"
+	old_g_cmd_ssh=${g_cmd_ssh-}
+	old_target_host=$g_option_T_target_host
+	old_target_cmd_zfs=${g_target_cmd_zfs-}
+	old_fake_remote_path=${FAKE_REMOTE_PATH-}
+
+	cat >"$fake_ssh" <<'EOF'
+#!/bin/sh
+host=$1
+shift
+remote_cmd=""
+for arg in "$@"; do
+	if [ "$remote_cmd" = "" ]; then
+		remote_cmd=$arg
+	else
+		remote_cmd="$remote_cmd $arg"
+	fi
+done
+if [ -n "${FAKE_SSH_LOG:-}" ]; then
+	printf '%s\n' "$host" >>"$FAKE_SSH_LOG"
+	printf '%s\n' "$remote_cmd" >>"$FAKE_SSH_LOG"
+fi
+PATH=${FAKE_REMOTE_PATH:-$PATH}
+export PATH
+/bin/sh -c "$remote_cmd"
+EOF
+	chmod +x "$fake_ssh"
+
+	cat >"$fake_doas" <<'EOF'
+#!/bin/sh
+exec "$@"
+EOF
+	chmod +x "$fake_doas"
+
+	cat >"$remote_zfs" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$ZXFER_REMOTE_ZFS_LOG"
+EOF
+	chmod +x "$remote_zfs"
+
+	FAKE_SSH_LOG="$ssh_log"
+	FAKE_REMOTE_PATH="$TEST_TMPDIR:$PATH"
+	ZXFER_REMOTE_ZFS_LOG="$remote_log"
+	export FAKE_SSH_LOG FAKE_REMOTE_PATH ZXFER_REMOTE_ZFS_LOG
+
+	g_option_n_dryrun=0
+	g_cmd_ssh="$fake_ssh"
+	g_option_T_target_host="target.example doas"
+	g_target_cmd_zfs="$remote_zfs"
+
+	zxfer_run_zfs_inherit_property "$l_property" "backup/dst"
+
+	unset FAKE_SSH_LOG ZXFER_REMOTE_ZFS_LOG
+	if [ -n "${old_fake_remote_path:+set}" ]; then
+		FAKE_REMOTE_PATH=$old_fake_remote_path
+		export FAKE_REMOTE_PATH
+	else
+		unset FAKE_REMOTE_PATH
+	fi
+	g_cmd_ssh=$old_g_cmd_ssh
+	g_option_T_target_host=$old_target_host
+	g_target_cmd_zfs=$old_target_cmd_zfs
+
+	assertEquals "Remote property inheritance should preserve literal property names after ssh joins the remote command into a shell string." \
+		"$(printf '%s\n' "inherit" "$l_property" "backup/dst")" "$(cat "$remote_log")"
+	assertEquals "Wrapper-style target specs should still keep the ssh destination host separate from wrapper tokens." \
+		"target.example" "$(sed -n '1p' "$ssh_log")"
+	assertContains "Wrapper-style target specs should preserve the wrapper token in the remote shell command." \
+		"$(sed -n '2p' "$ssh_log")" "'doas'"
 }
 
 test_diff_properties_rejects_must_create_mismatches() {
@@ -467,7 +641,8 @@ test_adjust_child_inherit_to_match_parent_promotes_mismatched_parent_values_to_s
 		adjust_child_inherit_to_match_parent "backup/dst/child" \
 			"checksum=sha256=inherited,atime=off=inherited" \
 			"quota=32M" \
-			"checksum=sha256,atime=off"
+			"checksum=sha256,atime=off" \
+			"$g_readonly_properties"
 	) >"$outfile"
 
 	assertEquals "Parent-matching inherited properties should remain in the inherit list." \
@@ -492,13 +667,39 @@ test_adjust_child_inherit_to_match_parent_preserves_inherit_when_parent_matches(
 		adjust_child_inherit_to_match_parent "backup/dst/child" \
 			"checksum=sha256=inherited,atime=off=inherited" \
 			"" \
-			"checksum=sha256,atime=off"
+			"checksum=sha256,atime=off" \
+			"$g_readonly_properties"
 	) >"$outfile"
 
 	assertEquals "When the parent already has the desired values, no local sets are needed." \
 		"" "$(sed -n '1p' "$outfile")"
 	assertEquals "Matching parent values should preserve inheritance requests." \
 		"checksum=sha256,atime=off" "$(sed -n '2p' "$outfile")"
+}
+
+test_adjust_child_inherit_to_match_parent_uses_supplied_readonly_list() {
+	outfile="$TEST_TMPDIR/adjust_child_inherit_readonly.out"
+
+	(
+		exists_destination() {
+			printf '1\n'
+		}
+		collect_destination_props() {
+			printf '%s\n' "compression=lz4=local,atime=off=local"
+		}
+		g_readonly_properties=""
+		g_option_I_ignore_properties=""
+		adjust_child_inherit_to_match_parent "backup/dst/child" \
+			"compression=lz4=inherited,atime=off=inherited" \
+			"" \
+			"compression=lz4,atime=off" \
+			"atime"
+	) >"$outfile"
+
+	assertEquals "Supplied readonly properties should be removed from the parent comparison set before deciding whether a child may inherit." \
+		"atime=off" "$(sed -n '1p' "$outfile")"
+	assertEquals "Only properties still visible after readonly filtering should remain inherited." \
+		"compression=lz4" "$(sed -n '2p' "$outfile")"
 }
 
 test_apply_property_changes_uses_default_runners_when_unspecified() {
@@ -708,8 +909,12 @@ test_transfer_properties_queries_missing_must_create_properties_before_diffing()
 		"$result" "ensure-required tank/src compression=lz4=local casesensitivity,normalization,jailed,utf8only"
 	assertContains "Destination properties should be augmented with missing must-create entries before diffing." \
 		"$result" "ensure-required backup/dst compression=off=local casesensitivity,normalization,jailed,utf8only"
-	assertContains "Property diffing should receive the appended must-create properties." \
-		"$result" "diff compression=lz4=local,casesensitivity=sensitive=local || compression=off=local,casesensitivity=insensitive=local || casesensitivity,normalization,jailed,utf8only"
+	assertContains "Property diffing should run after the must-create source properties are appended." \
+		"$result" "compression=lz4=local,casesensitivity=sensitive=local"
+	assertContains "Property diffing should run after the must-create destination properties are appended." \
+		"$result" "compression=off=local,casesensitivity=insensitive=local"
+	assertContains "Property diffing should still receive the must-create property list." \
+		"$result" "casesensitivity,normalization,jailed,utf8only"
 }
 
 test_transfer_properties_propagates_must_create_diff_failures() {
@@ -873,7 +1078,9 @@ test_transfer_properties_skip_backup_capture_preserves_existing_backup_contents(
 		"existing" "$g_backup_file_contents"
 }
 
-test_transfer_properties_appends_freebsd_readonly_properties_in_current_shell() {
+test_transfer_properties_uses_freebsd_readonly_properties_without_mutating_global_state() {
+	log="$TEST_TMPDIR/transfer_freebsd_readonly.log"
+	: >"$log"
 	g_destination_operating_system="FreeBSD"
 	g_source_operating_system="Linux"
 	g_readonly_properties="readonly"
@@ -900,6 +1107,7 @@ test_transfer_properties_appends_freebsd_readonly_properties_in_current_shell() 
 		printf '\n'
 	}
 	sanitize_property_list() {
+		printf '%s\n' "$2" >>"$log"
 		printf '%s\n' "$1"
 	}
 	strip_unsupported_properties() {
@@ -910,6 +1118,7 @@ test_transfer_properties_appends_freebsd_readonly_properties_in_current_shell() 
 	}
 
 	transfer_properties "tank/src"
+	transfer_properties "tank/src"
 
 	unset -f collect_source_props
 	unset -f run_source_zfs_cmd
@@ -919,11 +1128,16 @@ test_transfer_properties_appends_freebsd_readonly_properties_in_current_shell() 
 	unset -f strip_unsupported_properties
 	unset -f ensure_destination_exists
 
-	assertEquals "FreeBSD destinations should extend the readonly-property list with FreeBSD-specific entries." \
-		"readonly,aclmode" "$g_readonly_properties"
+	assertEquals "FreeBSD-specific readonly properties should be applied per transfer without mutating the global base list." \
+		"readonly" "$g_readonly_properties"
+	assertEquals "Repeated transfers should reuse the same effective FreeBSD readonly list instead of appending duplicates." \
+		"readonly,aclmode
+readonly,aclmode" "$(cat "$log")"
 }
 
-test_transfer_properties_appends_solexp_readonly_properties_for_sunos_targets() {
+test_transfer_properties_uses_solexp_readonly_properties_without_mutating_global_state() {
+	log="$TEST_TMPDIR/transfer_solexp_readonly.log"
+	: >"$log"
 	g_destination_operating_system="SunOS"
 	g_source_operating_system="FreeBSD"
 	g_readonly_properties="readonly"
@@ -950,6 +1164,7 @@ test_transfer_properties_appends_solexp_readonly_properties_for_sunos_targets() 
 		printf '\n'
 	}
 	sanitize_property_list() {
+		printf '%s\n' "$2" >>"$log"
 		printf '%s\n' "$1"
 	}
 	strip_unsupported_properties() {
@@ -960,6 +1175,7 @@ test_transfer_properties_appends_solexp_readonly_properties_for_sunos_targets() 
 	}
 
 	transfer_properties "tank/src"
+	transfer_properties "tank/src"
 
 	unset -f collect_source_props
 	unset -f run_source_zfs_cmd
@@ -969,8 +1185,11 @@ test_transfer_properties_appends_solexp_readonly_properties_for_sunos_targets() 
 	unset -f strip_unsupported_properties
 	unset -f ensure_destination_exists
 
-	assertEquals "SunOS targets receiving from FreeBSD should extend the readonly-property list with Solaris-exported FreeBSD entries." \
-		"readonly,jailed" "$g_readonly_properties"
+	assertEquals "SunOS-specific readonly properties should be applied per transfer without mutating the global base list." \
+		"readonly" "$g_readonly_properties"
+	assertEquals "Repeated FreeBSD-to-SunOS transfers should reuse the same effective readonly list instead of appending duplicates." \
+		"readonly,jailed
+readonly,jailed" "$(cat "$log")"
 }
 
 . "$SHUNIT2_BIN"
