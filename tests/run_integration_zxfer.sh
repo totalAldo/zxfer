@@ -3195,9 +3195,9 @@ remote_helper_path_shell_metacharacters_test() {
 		cd "$WORKDIR"
 		log "Running: $zxfer_bin_abs -v -O localhost -R $src_dataset $dest_root"
 		MOCK_SSH_COMMAND_V_TOOL="zfs" \
-		MOCK_SSH_COMMAND_V_RESULT="$mock_path/zfs" \
-		ZXFER_SECURE_PATH="$secure_path" \
-		"$zxfer_bin_abs" -v -O localhost -R "$src_dataset" "$dest_root"
+			MOCK_SSH_COMMAND_V_RESULT="$mock_path/zfs" \
+			ZXFER_SECURE_PATH="$secure_path" \
+			"$zxfer_bin_abs" -v -O localhost -R "$src_dataset" "$dest_root"
 	)
 
 	assert_snapshot_exists "$dest_dataset" "rhs1"
