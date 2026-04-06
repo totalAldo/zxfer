@@ -930,7 +930,9 @@ exit status.
 The repository includes \fBexamples/error-log-email-notify.sh\fR, which shows
 how to set \fBZXFER_ERROR_LOG\fR, capture the current run's failure report from
 \fIstderr\fR along with any extra stderr warnings, and send an alert with
-\fBmailx\fR, BSD \fBmail\fR, or \fBsendmail\fR.
+\fBmailx\fR, BSD \fBmail\fR, or \fBsendmail\fR. The wrapper also accepts a
+whitespace-separated \fBSRC_DATASETS\fR list so multiple source roots can be
+replicated sequentially while preserving the first non-zero zxfer exit status.
 .PP
 \fBzxfer\fR
 prints its immediate error message and then emits a delimited failure report to

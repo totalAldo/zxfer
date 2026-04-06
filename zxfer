@@ -131,6 +131,16 @@ dir=$(dirname "$0")
 . "$dir"/src/zxfer_zfs_send_receive.sh
 . "$dir"/src/zxfer_inspect_delete_snap.sh
 
+# Keep mixed-version installs working when only the launcher was updated to the
+# deferred remote-connection prep flow.
+if ! command -v prepare_remote_host_connections >/dev/null 2>&1; then
+	prepare_remote_host_connections() {
+		if command -v refresh_remote_zfs_commands >/dev/null 2>&1; then
+			refresh_remote_zfs_commands
+		fi
+	}
+fi
+
 init_globals
 
 zxfer_set_failure_stage "cli parse"

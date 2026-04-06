@@ -143,7 +143,7 @@ The current tree has also been reworked for readability and maintainability:
 - [docs/troubleshooting.md](./docs/troubleshooting.md): common failures and what they usually mean
 - [docs/architecture.md](./docs/architecture.md): module layout and replication flow
 - [docs/upstream-history.md](./docs/upstream-history.md): historical context and removed legacy behavior
-- [examples/README.md](./examples/README.md): runnable command templates for common replication flows
+- [examples/README.md](./examples/README.md): runnable command templates for common replication flows, including the `ZXFER_ERROR_LOG` mail wrapper and its multi-source `SRC_DATASETS` mode
 - [KNOWN_ISSUES.md](./KNOWN_ISSUES.md): current open issues and testing limitations
 - [CHANGELOG.txt](./CHANGELOG.txt): release history
 - [SECURITY.md](./SECURITY.md): security model and reporting guidance

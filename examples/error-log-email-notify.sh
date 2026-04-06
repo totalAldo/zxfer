@@ -4,7 +4,9 @@
 # origin/target host settings before use. This example enables ZXFER_ERROR_LOG,
 # captures the current run's structured failure report plus any extra stderr
 # warnings, and emails that context through mailx, BSD mail, or sendmail when
-# zxfer exits non-zero.
+# zxfer exits non-zero. For multiple source roots, set SRC_DATASETS to a
+# whitespace-separated list; the wrapper runs them sequentially and stops on the
+# first failure.
 
 set -eu
 
@@ -21,6 +23,7 @@ REPO_ROOT=$(
 ALERT_TO=${ALERT_TO:-"root@example.com"}
 ERROR_LOG=${ERROR_LOG:-"/var/log/zxfer/error.log"}
 SRC_DATASET=${SRC_DATASET:-"tank/src"}
+SRC_DATASETS=${SRC_DATASETS:-$SRC_DATASET}
 DEST_DATASET=${DEST_DATASET:-"backup/dst"}
 ORIGIN_HOST=${ORIGIN_HOST:-""}
 TARGET_HOST=${TARGET_HOST:-""}
@@ -208,7 +211,9 @@ send_alert_mail() {
 	esac
 }
 
-run_zxfer() {
+run_zxfer_for_source() {
+	l_source_dataset=$1
+
 	set -- "$ZXFER_BIN" -v
 	if [ -n "$ORIGIN_HOST" ]; then
 		set -- "$@" -O "$ORIGIN_HOST"
@@ -219,8 +224,64 @@ run_zxfer() {
 	if [ "$RAW_SEND" = "1" ]; then
 		set -- "$@" -w
 	fi
-	set -- "$@" -R "$SRC_DATASET" "$DEST_DATASET"
+	set -- "$@" -R "$l_source_dataset" "$DEST_DATASET"
 	ZXFER_ERROR_LOG="$ERROR_LOG" "$@"
+}
+
+send_failure_alert_for_run() {
+	l_status=$1
+	l_source_dataset=$2
+	l_stderr_capture=$3
+
+	report=$(extract_latest_failure_report "$l_stderr_capture")
+	extra_stderr=$(extract_non_report_stderr "$l_stderr_capture")
+
+	if [ -z "$report" ]; then
+		report="No structured failure report was found in the current zxfer stderr output."
+	fi
+
+	failure_class=$(printf '%s\n' "$report" | report_field failure_class || :)
+	failure_stage=$(printf '%s\n' "$report" | report_field failure_stage || :)
+	source_root=$(printf '%s\n' "$report" | report_field source_root || :)
+	destination_root=$(printf '%s\n' "$report" | report_field destination_root || :)
+
+	if [ -z "$failure_class" ]; then
+		failure_class="runtime"
+	fi
+	if [ -z "$failure_stage" ]; then
+		failure_stage="unknown-stage"
+	fi
+
+	l_host=$(current_host_name)
+	subject="zxfer failure [$failure_class/$failure_stage] on $l_host"
+	body=$(
+		cat <<EOF
+zxfer exited with status $l_status on $l_host.
+
+Requested source dataset: $l_source_dataset
+Source root: ${source_root:-$l_source_dataset}
+Destination root: ${destination_root:-$DEST_DATASET}
+Error log: $ERROR_LOG
+
+$report
+EOF
+		if [ -n "$extra_stderr" ]; then
+			cat <<EOF
+
+Additional stderr output:
+$extra_stderr
+EOF
+		fi
+	)
+
+	set +e
+	send_alert_mail "$subject" "$body"
+	mail_status=$?
+	set -e
+
+	if [ "$mail_status" -ne 0 ]; then
+		printf '%s\n' "warning: failed to deliver zxfer alert mail." >&2
+	fi
 }
 
 validate_error_log_path() {
@@ -300,7 +361,10 @@ write_self_test_zxfer() {
 
 	cat >"$l_path" <<'EOF'
 #!/bin/sh
-printf '%s\n' "$@" >"${MOCK_ZXFER_ARGS_LOG:?}"
+{
+	printf '%s\n' "-- invocation --"
+	printf '%s\n' "$@"
+} >>"${MOCK_ZXFER_ARGS_LOG:?}"
 
 emit_report() {
 	printf 'zxfer: failure report begin\n'
@@ -315,17 +379,21 @@ emit_report() {
 	printf 'zxfer: failure report end\n'
 }
 
-if [ -n "${MOCK_ZXFER_EXTRA_STDERR:-}" ]; then
-	printf '%s\n' "$MOCK_ZXFER_EXTRA_STDERR" >&2
+status=${MOCK_ZXFER_STATUS:-3}
+
+if [ "$status" -ne 0 ]; then
+	if [ -n "${MOCK_ZXFER_EXTRA_STDERR:-}" ]; then
+		printf '%s\n' "$MOCK_ZXFER_EXTRA_STDERR" >&2
+	fi
+
+	emit_report >&2
+
+	if [ "${MOCK_ZXFER_APPEND_ERROR_LOG:-1}" = "1" ]; then
+		emit_report >>"${ZXFER_ERROR_LOG:?}"
+	fi
 fi
 
-emit_report >&2
-
-if [ "${MOCK_ZXFER_APPEND_ERROR_LOG:-1}" = "1" ]; then
-	emit_report >>"${ZXFER_ERROR_LOG:?}"
-fi
-
-exit "${MOCK_ZXFER_STATUS:-3}"
+exit "$status"
 EOF
 	chmod +x "$l_path"
 }
@@ -566,6 +634,32 @@ self_test_includes_extra_stderr_case() {
 	self_test_assert_contains "$l_case_dir/mailx.body" "zxfer: failure report begin"
 }
 
+self_test_multiple_source_datasets_case() {
+	l_tmpdir=$1
+	l_case_dir="$l_tmpdir/multiple-sources"
+
+	mkdir -p "$l_case_dir/bin"
+	write_self_test_zxfer "$l_case_dir/bin/zxfer"
+
+	l_status=$(run_script_for_self_test "$l_case_dir" "$l_case_dir/bin" \
+		MOCK_ZXFER_STATUS=0 \
+		SRC_DATASETS="tank/source tank/archive")
+	if [ "$l_status" -ne 0 ]; then
+		self_test_fail "multiple source datasets case expected exit status 0, got $l_status"
+	fi
+
+	l_invocation_count=$(grep -c '^-- invocation --$' "$l_case_dir/zxfer.argv" 2>/dev/null || printf '%s\n' 0)
+	if [ "$l_invocation_count" -ne 2 ]; then
+		self_test_fail "multiple source datasets case expected 2 zxfer invocations, got $l_invocation_count"
+	fi
+	self_test_assert_contains "$l_case_dir/zxfer.argv" "tank/source"
+	self_test_assert_contains "$l_case_dir/zxfer.argv" "tank/archive"
+	self_test_assert_contains "$l_case_dir/zxfer.argv" "backup/dest"
+	if [ -e "$l_case_dir/mailx.argv" ] || [ -e "$l_case_dir/mailx.body" ]; then
+		self_test_fail "multiple source datasets case should not invoke a mailer on success."
+	fi
+}
+
 self_test_ignores_stale_error_log_case() {
 	l_tmpdir=$1
 	l_case_dir="$l_tmpdir/stale-error-log"
@@ -655,6 +749,7 @@ run_self_test() {
 	self_test_relative_error_log_case "$l_tmpdir"
 	self_test_root_error_log_parent_case
 	self_test_includes_extra_stderr_case "$l_tmpdir"
+	self_test_multiple_source_datasets_case "$l_tmpdir"
 	self_test_ignores_stale_error_log_case "$l_tmpdir"
 	if [ "${ZXFER_MAIL_SELF_TEST_NO_RECURSE:-0}" != 1 ]; then
 		self_test_ignores_caller_mail_env_case
@@ -686,68 +781,33 @@ main() {
 	stderr_capture="$run_tmpdir/zxfer.stderr"
 	trap 'rm -rf "$run_tmpdir"' EXIT HUP INT TERM
 
-	set +e
-	run_zxfer 2>"$stderr_capture"
-	status=$?
-	set -e
-	if [ -s "$stderr_capture" ]; then
-		cat "$stderr_capture" >&2 || :
-	fi
+	source_count=0
+	for source_dataset in $SRC_DATASETS; do
+		source_count=$((source_count + 1))
+		: >"$stderr_capture"
 
-	if [ "$status" -eq 0 ]; then
-		exit 0
-	fi
-
-	report=$(extract_latest_failure_report "$stderr_capture")
-	extra_stderr=$(extract_non_report_stderr "$stderr_capture")
-
-	if [ -z "$report" ]; then
-		report="No structured failure report was found in the current zxfer stderr output."
-	fi
-
-	failure_class=$(printf '%s\n' "$report" | report_field failure_class || :)
-	failure_stage=$(printf '%s\n' "$report" | report_field failure_stage || :)
-	source_root=$(printf '%s\n' "$report" | report_field source_root || :)
-	destination_root=$(printf '%s\n' "$report" | report_field destination_root || :)
-
-	if [ -z "$failure_class" ]; then
-		failure_class="runtime"
-	fi
-	if [ -z "$failure_stage" ]; then
-		failure_stage="unknown-stage"
-	fi
-
-	l_host=$(current_host_name)
-	subject="zxfer failure [$failure_class/$failure_stage] on $l_host"
-	body=$(
-		cat <<EOF
-zxfer exited with status $status on $l_host.
-
-Source root: ${source_root:-$SRC_DATASET}
-Destination root: ${destination_root:-$DEST_DATASET}
-Error log: $ERROR_LOG
-
-$report
-EOF
-		if [ -n "$extra_stderr" ]; then
-			cat <<EOF
-
-Additional stderr output:
-$extra_stderr
-EOF
+		set +e
+		run_zxfer_for_source "$source_dataset" 2>"$stderr_capture"
+		status=$?
+		set -e
+		if [ -s "$stderr_capture" ]; then
+			cat "$stderr_capture" >&2 || :
 		fi
-	)
 
-	set +e
-	send_alert_mail "$subject" "$body"
-	mail_status=$?
-	set -e
+		if [ "$status" -eq 0 ]; then
+			continue
+		fi
 
-	if [ "$mail_status" -ne 0 ]; then
-		printf '%s\n' "warning: failed to deliver zxfer alert mail." >&2
+		send_failure_alert_for_run "$status" "$source_dataset" "$stderr_capture"
+		exit "$status"
+	done
+
+	if [ "$source_count" -eq 0 ]; then
+		printf '%s\n' "SRC_DATASETS must contain at least one source dataset." >&2
+		exit 2
 	fi
 
-	exit "$status"
+	exit 0
 }
 
 main "$@"

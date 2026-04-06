@@ -24,6 +24,7 @@ For [`error-log-email-notify.sh`](./error-log-email-notify.sh):
 
 - Linux and illumos deployments commonly use `mailx`; FreeBSD and macOS often provide BSD `mail` in the base system. Leave `MAILER=auto` unless you need to force `mailx`, `mail`, or `sendmail`.
 - Set `TARGET_HOST`, `ORIGIN_HOST`, and `RAW_SEND=1` when the wrapped zxfer command needs `-T`, `-O`, or `-w` in addition to the default `-v -R`.
+- Set `SRC_DATASETS="tank/source tank/archive"` to run the wrapper sequentially for multiple source roots; `SRC_DATASET` remains the single-source default for backward compatibility.
 - The alert body includes the current run's structured failure report plus any stderr warnings emitted outside that report, such as `ZXFER_ERROR_LOG` append failures.
 - Set `MAIL_FROM` when your MTA requires a sender address. The default `MAIL_FROM_FLAG` is `-r` for `mailx`/`mail`, and the default `SENDMAIL_FROM_FLAG` is `-f` for `sendmail`; override either flag if your local mailer expects something different.
 - When forcing `MAILER=sendmail`, keep `ALERT_TO` and `MAIL_FROM` as single-line header values; embedded newlines are rejected.

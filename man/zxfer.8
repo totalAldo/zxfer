@@ -926,6 +926,10 @@ BSD
 .Xr mail 1 ,
 or
 .Xr sendmail 8 .
+It also accepts a whitespace-separated
+.Ev SRC_DATASETS
+list so the wrapper can run multiple source roots sequentially while preserving
+the first non-zero zxfer exit status.
 .El
 .Pp
 .Nm
