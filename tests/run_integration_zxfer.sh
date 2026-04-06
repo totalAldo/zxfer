@@ -3119,8 +3119,9 @@ remote_origin_target_uncompressed_test() {
 remote_helper_path_shell_metacharacters_test() {
 	log "Starting remote helper path shell metacharacters test"
 
-	marker="$WORKDIR/remote_helper_path_marker"
-	mock_path="$WORKDIR/mock_remote_helper.\$(touch $marker)"
+	marker_rel="remote_helper_path_marker"
+	marker="$WORKDIR/$marker_rel"
+	mock_path="$WORKDIR/mock_remote_helper.\$(touch $marker_rel)"
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 	safe_rm_f "$marker"
 	safe_rm_rf "$mock_path"
@@ -3144,7 +3145,10 @@ remote_helper_path_shell_metacharacters_test() {
 	append_data_to_dataset "$src_dataset" "file.txt" "helper-path-one"
 	zfs snap -r "$src_dataset@rhs1"
 
-	ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -O localhost -R "$src_dataset" "$dest_root"
+	(
+		cd "$WORKDIR"
+		ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -O localhost -R "$src_dataset" "$dest_root"
+	)
 
 	assert_snapshot_exists "$dest_dataset" "rhs1"
 	if [ -e "$marker" ]; then
