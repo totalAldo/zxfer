@@ -291,6 +291,37 @@ test_prepare_remote_host_connections_sets_up_control_sockets_after_validation() 
 		"$result" "rzfs=/usr/bin/ssh 'target.example' 'doas' /remote/target/zfs"
 }
 
+test_prepare_remote_host_connections_logs_when_control_sockets_are_unavailable() {
+	output=$(
+		(
+			echoV() {
+				printf '%s\n' "$*"
+			}
+			get_ssh_cmd_for_host() {
+				printf '%s\n' "/usr/bin/ssh"
+			}
+			g_option_O_origin_host="origin.example pfexec"
+			g_option_T_target_host="target.example doas"
+			g_cmd_zfs="/sbin/zfs"
+			g_origin_cmd_zfs="/remote/origin/zfs"
+			g_target_cmd_zfs="/remote/target/zfs"
+			g_ssh_supports_control_sockets=0
+			prepare_remote_host_connections
+			printf 'lzfs=%s\n' "$g_LZFS"
+			printf 'rzfs=%s\n' "$g_RZFS"
+		)
+	)
+
+	assertContains "Origin preparation should explain when ssh control sockets are unavailable." \
+		"$output" "ssh client does not support control sockets; continuing without connection reuse for origin host."
+	assertContains "Target preparation should explain when ssh control sockets are unavailable." \
+		"$output" "ssh client does not support control sockets; continuing without connection reuse for target host."
+	assertContains "Remote zfs wrappers should still refresh even without control socket support." \
+		"$output" "lzfs=/usr/bin/ssh 'origin.example' 'pfexec' /remote/origin/zfs"
+	assertContains "Remote zfs wrappers should still refresh target commands even without control socket support." \
+		"$output" "rzfs=/usr/bin/ssh 'target.example' 'doas' /remote/target/zfs"
+}
+
 test_read_command_line_switches_sets_flags_in_current_shell() {
 	OPTIND=1
 	g_cmd_ssh="/usr/bin/ssh"
@@ -362,6 +393,24 @@ test_read_command_line_switches_rejects_invalid_option() {
 
 	assertEquals "Invalid options should exit with usage status." 2 "$status"
 	assertContains "Invalid options should use the generic usage error." "$output" "Invalid option provided."
+}
+
+test_read_command_line_switches_exits_zero_for_help() {
+	set +e
+	output=$(
+		(
+			usage() {
+				printf '%s\n' "usage output"
+			}
+			OPTIND=1
+			read_command_line_switches -h
+			printf '%s\n' "after-help"
+		)
+	)
+	status=$?
+
+	assertEquals "The help switch should exit successfully." 0 "$status"
+	assertEquals "The help switch should print usage and stop parsing immediately." "usage output" "$output"
 }
 
 test_consistency_check_rejects_non_numeric_jobs() {

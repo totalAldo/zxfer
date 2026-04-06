@@ -111,12 +111,28 @@ Recommended usage:
 
 ## GitHub Actions
 
-The project currently ships three GitHub Actions workflows:
+The project currently ships four GitHub Actions workflows:
 
-- `lint.yml`: ShellCheck, shfmt, and repository hygiene checks
-- `tests.yml`: shunit2 unit tests
-- `integration.yml`: Ubuntu integration tests with runtime ZFS setup
+- `lint.yml`: `actionlint`, ShellCheck, shfmt, and repository hygiene checks
+- `coverage.yml`: Ubuntu shell coverage using the bash-xtrace fallback, with the
+  coverage directory uploaded as a workflow artifact
+- `tests.yml`: shunit2 unit tests on `ubuntu-latest` and `macos-latest`
+- `integration.yml`: Ubuntu integration tests with runtime ZFS setup, preserving
+  the harness workdir on failure and uploading it as a workflow artifact
 
 The integration job installs `zfsutils-linux`, loads the `zfs` module, and runs
 the file-backed harness on `ubuntu-24.04` with `--yes --keep-going` so one
-failure does not stop the rest of the integration pass.
+failure does not stop the rest of the integration pass. In CI it also sets
+`ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1`, so a failing run leaves its temporary
+workdir under the job `TMPDIR` long enough for artifact upload.
+
+The CI workflows use GitHub Actions concurrency cancellation keyed by workflow
+name plus pull request number or ref, so stale branch runs are canceled when a
+new push supersedes them.
+
+The macOS GitHub-hosted runner is currently used for `/bin/sh` and BSD-userland
+unit coverage only. It is not a required hosted ZFS integration gate because
+Darwin/OpenZFS property behavior remains less deterministic than
+FreeBSD/Linux, as documented in [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
+The macOS shunit2 job intentionally does not install ZFS; it is meant to catch
+shell and userland portability regressions in the mock-heavy unit suites.

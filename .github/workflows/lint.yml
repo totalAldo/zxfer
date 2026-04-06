@@ -4,7 +4,33 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install actionlint
+        shell: bash
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/$archive"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+          install -m 0755 "$RUNNER_TEMP/actionlint" /usr/local/bin/actionlint
+      - name: Run actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          actionlint
+
   shfmt:
     name: shfmt
     runs-on: ubuntu-latest
@@ -16,7 +42,7 @@ jobs:
           sudo apt-get install -y shfmt
       - name: Run shfmt
         run: |
-          shfmt -d zxfer $(git ls-files '*.sh')
+          git ls-files -z '*.sh' | xargs -0 shfmt -d zxfer
 
   codespell:
     name: Codespell
@@ -46,4 +72,4 @@ jobs:
           SHELLCHECK_OPTS: --external-sources --source-path=.:src
         run: |
           set -euo pipefail
-          shellcheck zxfer $(git ls-files '*.sh')
+          git ls-files -z '*.sh' | xargs -0 shellcheck zxfer

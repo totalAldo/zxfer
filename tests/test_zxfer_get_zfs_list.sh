@@ -126,6 +126,18 @@ EOF
 		"$output" "GNU parallel not found on origin host origin.example"
 }
 
+test_ensure_parallel_available_for_source_jobs_returns_success_when_parallel_is_not_requested() {
+	g_option_j_jobs=1
+	g_cmd_parallel=""
+	g_origin_parallel_cmd=""
+
+	ensure_parallel_available_for_source_jobs
+	status=$?
+
+	assertEquals "Serial snapshot listing should not require GNU parallel." 0 "$status"
+	assertEquals "Serial snapshot listing should leave the remote parallel path unset." "" "$g_origin_parallel_cmd"
+}
+
 test_write_source_snapshot_list_to_file_uses_execute_background_cmd_when_serial() {
 	log="$TEST_TMPDIR/source_serial.log"
 	outfile="$TEST_TMPDIR/source_serial.out"
@@ -331,6 +343,43 @@ test_write_destination_snapshot_list_to_files_outputs_empty_when_destination_mis
 	assertEquals "Missing destination datasets should yield an empty normalized snapshot file." "" "$(cat "$norm_file")"
 }
 
+test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing_slash_sources() {
+	full_file="$TEST_TMPDIR/dest_trailing_existing_full.txt"
+	norm_file="$TEST_TMPDIR/dest_trailing_existing_norm.txt"
+	arg_file="$TEST_TMPDIR/dest_trailing_existing_arg.txt"
+	cmd_file="$TEST_TMPDIR/dest_trailing_existing_cmd.txt"
+	g_initial_source_had_trailing_slash=1
+	initial_source="tank/src"
+	g_destination="backup/dst"
+
+	(
+		exists_destination() {
+			printf '%s\n' "$1" >"$arg_file"
+			printf '%s\n' 1
+		}
+		zxfer_record_last_command_string() {
+			:
+		}
+		# shellcheck disable=SC2317,SC2329  # Invoked indirectly via g_RZFS in eval-built test command.
+		fake_rzfs() {
+			printf '%s\n' "$*" >"$cmd_file"
+			printf '%s\n' "backup/dst/child@snap2" "backup/dst@snap1"
+		}
+		g_RZFS="fake_rzfs"
+		write_destination_snapshot_list_to_files "$full_file" "$norm_file"
+	)
+
+	assertEquals "Trailing-slash replication should probe the destination root dataset directly." \
+		"backup/dst" "$(cat "$arg_file")"
+	assertContains "Trailing-slash replication should list snapshots from the destination root dataset, not a child suffix." \
+		"$(cat "$cmd_file")" "snapshot backup/dst"
+	assertNotContains "Trailing-slash replication should not append the source basename to the destination root." \
+		"$(cat "$cmd_file")" "backup/dst/src"
+	assertEquals "Trailing-slash replication should leave normalized destination snapshots rooted at the destination dataset." \
+		"backup/dst/child@snap2
+backup/dst@snap1" "$(cat "$norm_file")"
+}
+
 test_normalize_destination_snapshot_list_preserves_destination_when_trailing_slash_requested() {
 	input_file="$TEST_TMPDIR/dest_trailing_input.txt"
 	output_file="$TEST_TMPDIR/dest_trailing_output.txt"
@@ -509,6 +558,57 @@ test_get_zfs_list_restores_source_last_command_when_background_snapshot_listing_
 		"$output" "\"missing command\" >&2; exit 3'"
 	assertContains "Failure handling should still emit the source snapshot error." \
 		"$output" "msg=Failed to retrieve snapshots from the source: missing command"
+}
+
+test_get_zfs_list_reports_generic_source_failure_when_background_snapshot_listing_has_no_stderr() {
+	set +e
+	output=$(
+		(
+			counter_file="$TEST_TMPDIR/get_zfs_fail_blank.counter"
+			printf '%s\n' 0 >"$counter_file"
+			get_temp_file() {
+				idx=$(cat "$counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$counter_file"
+				printf '%s\n' "$TEST_TMPDIR/get_zfs_fail_blank.$idx"
+			}
+			write_source_snapshot_list_to_file() {
+				: >"$1"
+				: >"$2"
+				sh -c 'exit 1' &
+				g_source_snapshot_list_pid=$!
+				g_source_snapshot_list_cmd="sh -c 'exit 1'"
+			}
+			write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
+					printf '%s\n' "backup/dst"
+					return 0
+				fi
+				return 1
+			}
+			throw_error() {
+				printf 'cmd=%s\n' "$g_zxfer_failure_last_command"
+				printf 'msg=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			get_zfs_list
+		)
+	)
+	status=$?
+
+	assertEquals "Background source snapshot failures without stderr should still keep exit status 3." 3 "$status"
+	assertContains "Failure handling should still restore the last attempted source snapshot command." \
+		"$output" "cmd=sh -c 'exit 1'"
+	assertContains "Failure handling should fall back to the generic source snapshot retrieval error when stderr is empty." \
+		"$output" "msg=Failed to retrieve snapshots from the source"
 }
 
 . "$SHUNIT2_BIN"

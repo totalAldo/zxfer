@@ -1,0 +1,33 @@
+name: Coverage
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: shell coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run coverage
+        shell: bash
+        env:
+          COVERAGE_DIR: ${{ runner.temp }}/coverage
+          ZXFER_COVERAGE_MODE: bash-xtrace
+        run: |
+          set -euo pipefail
+          ./tests/run_coverage.sh
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: zxfer-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/coverage
+          if-no-files-found: warn

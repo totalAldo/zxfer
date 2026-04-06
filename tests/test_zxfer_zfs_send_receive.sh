@@ -295,6 +295,48 @@ test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
 		"$(cat "$log")" "pids="
 }
 
+test_zfs_send_receive_appends_multiple_background_job_pids_and_logs_force_flag() {
+	log="$TEST_TMPDIR/background_pipeline_multiple.log"
+	: >"$log"
+
+	(
+		EXEC_LOG="$log"
+		get_send_command() {
+			printf '%s\n' "sendcmd-$2"
+		}
+		get_receive_command() {
+			printf '%s\n' "recvcmd"
+		}
+		echov() {
+			printf 'verbose:%s\n' "$*" >>"$EXEC_LOG"
+		}
+		execute_command() {
+			printf '%s\n' "$1" >>"$EXEC_LOG"
+		}
+		g_option_j_jobs=3
+		g_option_F_force_rollback="-F"
+		g_option_v_verbose=1
+		zfs_send_receive "tank/src@snap0" "tank/src@snap1" "backup/dst" "1"
+		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
+		# shellcheck disable=SC2086
+		set -- $g_zfs_send_job_pids
+		wait "$@"
+		printf 'count=%s\n' "$g_count_zfs_send_jobs" >>"$EXEC_LOG"
+		printf 'pids=%s\n' "$g_zfs_send_job_pids" >>"$EXEC_LOG"
+	)
+
+	assertContains "Background send/receive should log when the receive-side force flag is active." \
+		"$(cat "$log")" "verbose:Receive-side force flag (-F) is active for destination [backup/dst]."
+	assertContains "The first background transfer should still execute its composed pipeline." \
+		"$(cat "$log")" "sendcmd-tank/src@snap1 | recvcmd"
+	assertContains "The second background transfer should also execute its composed pipeline." \
+		"$(cat "$log")" "sendcmd-tank/src@snap2 | recvcmd"
+	assertContains "Launching multiple background transfers should append additional tracked PIDs instead of replacing the first one." \
+		"$(cat "$log")" "count=2"
+	assertContains "Launching multiple background transfers should retain the tracked PID list." \
+		"$(cat "$log")" "pids="
+}
+
 test_zfs_send_receive_waits_at_job_limit_before_backgrounding() {
 	log="$TEST_TMPDIR/job_limit.log"
 	: >"$log"

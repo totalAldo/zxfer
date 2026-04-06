@@ -2,6 +2,13 @@ CHANGELOG
 =========
 
 2026.04.06
+-Update the GitHub Actions artifact-upload steps to `actions/upload-artifact@v6`, which runs on Node 24 by default, so the new GitHub-hosted runner deprecation warning for Node 20 no longer fires on the coverage and integration workflows.
+-Fix the coverage workflow to set `COVERAGE_DIR` from `runner.temp` at step scope instead of job scope, matching where the GitHub Actions `runner` context is actually available and preventing workflow-parse failures on GitHub.
+-Fix the GitHub Actions `actionlint` job by installing the pinned upstream Linux release binary directly, since the `rhysd/actionlint` repository does not publish a `v1` GitHub Action ref and newer `actionlint` releases can require a newer Go toolchain than the runner job was setting up.
+-Preserve the integration harness workdir on CI failures when `ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1` is set, and upload the failed Ubuntu GitHub Actions integration workdir as an artifact so logs, mock outputs, and captured stderr/stdout files remain available for debugging.
+-Add `actionlint` to the GitHub Actions lint workflow so workflow YAML and expressions are validated in CI alongside ShellCheck, shfmt, and the existing repository-hygiene checks.
+-Add a dedicated GitHub Actions coverage workflow on `ubuntu-latest` that runs `tests/run_coverage.sh` in bash-xtrace mode, uploads the resulting coverage directory as an artifact, and use workflow-level concurrency cancellation so stale branch runs do not pile up across lint, unit, integration, and coverage jobs.
+-Run the GitHub Actions shunit2 workflow as a matrix on `ubuntu-latest` and `macos-latest`, and document that hosted macOS remains a unit/smoke portability gate rather than a required ZFS integration gate while the current Darwin property caveats remain open.
 -Add a launcher-side compatibility shim for `prepare_remote_host_connections()` so mixed-version installs do not emit a spurious `prepare_remote_host_connections: not found` error when only the top-level `zxfer` script was updated.
 -Extend `examples/error-log-email-notify.sh` with a POSIX-safe whitespace-separated `SRC_DATASETS` list, running each source root sequentially with the existing alerting flow and stopping on the first failure.
 -Expand the example self-test and add launcher shunit2 coverage for the mixed-version compatibility path, then refresh the README, troubleshooting guide, examples README, and both manpages to document the wrapper changes.

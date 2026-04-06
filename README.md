@@ -199,10 +199,18 @@ Continue after failures and print a summary:
 
 GitHub Actions includes:
 
-- lint workflow
-- shunit2 workflow
+- lint workflow, including GitHub Actions validation with `actionlint`
+- shell coverage workflow on `ubuntu-latest`, with artifact upload
+- shunit2 workflow on `ubuntu-latest` and `macos-latest`
 - Ubuntu ZFS integration workflow using file-backed test pools and
-  `--keep-going` failure collection
+  `--keep-going` failure collection, with failed workdirs uploaded as artifacts
+
+Hosted macOS CI is currently used for unit and shell-portability coverage, not
+as a required ZFS integration gate, because the Darwin/OpenZFS property
+behavior described in `KNOWN_ISSUES.md` is not yet stable enough for strict
+end-to-end certification.
+The coverage workflow currently uses the shipped bash-xtrace fallback rather
+than requiring `kcov` on the runner.
 
 See [docs/testing.md](./docs/testing.md) for full details and safety notes.
 

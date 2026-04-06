@@ -15,6 +15,7 @@ ZXFER_CONFIRM_WRAPPER_DIR=""
 ZXFER_REAL_BIN=""
 ZXFER_SKIP_TESTS=${ZXFER_SKIP_TESTS:-""}
 ZXFER_KEEP_GOING=${ZXFER_KEEP_GOING:-0}
+ZXFER_PRESERVE_WORKDIR_ON_FAILURE=${ZXFER_PRESERVE_WORKDIR_ON_FAILURE:-0}
 ZXFER_FAILED_TESTS=""
 SRC_POOL_CREATED=0
 DEST_POOL_CREATED=0
@@ -1588,15 +1589,25 @@ snapshot_deletion_test() {
 
 cleanup() {
 	set +e
+	l_exit_status=$?
 	l_cleanup_ok=1
+	l_preserve_reason=""
 	destroy_test_pool_if_owned "source" "${SRC_POOL:-}" "${SRC_POOL_CREATED:-0}" "${SRC_IMG:-}" || l_cleanup_ok=0
 	destroy_test_pool_if_owned "destination" "${DEST_POOL:-}" "${DEST_POOL_CREATED:-0}" "${DEST_IMG:-}" || l_cleanup_ok=0
-	if [ "$l_cleanup_ok" -eq 1 ]; then
+	if [ "$l_cleanup_ok" -ne 1 ]; then
+		l_preserve_reason="test pools were not fully cleaned up"
+	elif [ "$l_exit_status" -ne 0 ] && [ "${ZXFER_PRESERVE_WORKDIR_ON_FAILURE:-0}" = "1" ]; then
+		l_preserve_reason="the integration run failed and ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1"
+	fi
+
+	if [ -z "$l_preserve_reason" ]; then
 		[ -n "${WORKDIR:-}" ] && safe_rm_rf "$WORKDIR"
 	else
-		printf 'WARNING: preserving integration workdir %s because test pools were not fully cleaned up.\n' \
-			"${WORKDIR:-<unset>}" >&2
+		printf 'WARNING: preserving integration workdir %s because %s.\n' \
+			"${WORKDIR:-<unset>}" "$l_preserve_reason" >&2
 	fi
+
+	return "$l_exit_status"
 }
 
 basic_replication_test() {

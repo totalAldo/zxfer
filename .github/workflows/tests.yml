@@ -4,14 +4,27 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   shunit2:
-    name: shunit2
-    runs-on: ubuntu-latest
+    name: shunit2 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - uses: actions/checkout@v5
       - name: Run shunit2 tests
         shell: bash
         run: |
           set -euo pipefail
+          # This unit matrix intentionally does not install ZFS on macOS.
+          # The shunit2 suites are used here as a /bin/sh and BSD-userland
+          # portability gate without requiring a live ZFS stack.
           ./tests/run_shunit_tests.sh

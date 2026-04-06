@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   zfs-integration:
     name: ZFS Integration
@@ -29,8 +33,31 @@ jobs:
       - name: Run integration tests
         shell: bash
         env:
-          TMPDIR: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}/zxfer-integration-tmp
+          ZXFER_PRESERVE_WORKDIR_ON_FAILURE: 1
         run: |
           set -euo pipefail
           export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-          sudo env "PATH=$PATH" "TMPDIR=$TMPDIR" ./tests/run_integration_zxfer.sh --yes --keep-going
+          mkdir -p "$TMPDIR"
+          sudo env "PATH=$PATH" "TMPDIR=$TMPDIR" \
+            "ZXFER_PRESERVE_WORKDIR_ON_FAILURE=$ZXFER_PRESERVE_WORKDIR_ON_FAILURE" \
+            ./tests/run_integration_zxfer.sh --yes --keep-going
+
+      - name: Prepare integration artifacts
+        if: failure()
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}/zxfer-integration-tmp
+        run: |
+          set -euo pipefail
+          if [ -e "$TMPDIR" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "$TMPDIR"
+          fi
+
+      - name: Upload integration artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: zxfer-integration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/zxfer-integration-tmp
+          if-no-files-found: warn

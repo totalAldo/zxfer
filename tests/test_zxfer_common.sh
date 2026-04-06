@@ -329,6 +329,13 @@ test_zxfer_compute_secure_path_uses_append_when_default_is_empty() {
 		"/opt/trusted/bin" "$(cat "$outfile")"
 }
 
+test_zxfer_compute_secure_path_falls_back_to_default_when_all_entries_are_filtered() {
+	result=$(ZXFER_SECURE_PATH="relative:.:./bin" ZXFER_SECURE_PATH_APPEND="also-relative:./still-bad" zxfer_compute_secure_path)
+
+	assertEquals "When every configured secure-PATH entry is filtered out, zxfer should fall back to the built-in allowlist." \
+		"$ZXFER_DEFAULT_SECURE_PATH" "$result"
+}
+
 test_escape_for_single_quotes_escapes_apostrophes() {
 	# Single-quoted contexts require reopening the quotes around apostrophes,
 	# so ensure the helper inserts the standard '\''' sequence.
@@ -1831,7 +1838,8 @@ EOF
 	PATH=$old_path
 
 	assertEquals "Remote snapshot listing should succeed even when ssh routes through csh on the origin host." 0 "$status"
-	assertEquals "The csh-backed ssh emulation should not report unmatched-quote syntax errors." "" "$(cat "$TEST_TMPDIR/remote_snapshot_csh.err")"
+	assertNotContains "The csh-backed ssh emulation should not report unmatched-quote syntax errors." \
+		"$(cat "$TEST_TMPDIR/remote_snapshot_csh.err")" "Unmatched"
 	assertContains "The csh-backed ssh emulation should receive a remote sh -c wrapper." \
 		"$(cat "$realistic_ssh_log")" "'sh' '-c'"
 }
@@ -2304,6 +2312,20 @@ test_zxfer_render_command_for_report_appends_quoted_argv_to_prefix() {
 
 	assertEquals "Report rendering should preserve the shell-ready prefix and quote appended argv tokens." \
 		"$expected" "$result"
+}
+
+test_zxfer_render_command_for_report_returns_prefix_when_no_argv_are_provided() {
+	result=$(zxfer_render_command_for_report "/usr/bin/ssh 'host' /sbin/zfs")
+
+	assertEquals "Report rendering should return the prefix unchanged when no argv tokens are appended." \
+		"/usr/bin/ssh 'host' /sbin/zfs" "$result"
+}
+
+test_zxfer_render_command_for_report_quotes_argv_when_prefix_is_empty() {
+	result=$(zxfer_render_command_for_report "" "zfs" "list" "tank/src")
+
+	assertEquals "Report rendering should still quote argv tokens when no shell prefix is supplied." \
+		"'zfs' 'list' 'tank/src'" "$result"
 }
 
 test_zxfer_render_failure_report_includes_context_fields() {

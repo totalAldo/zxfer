@@ -191,6 +191,18 @@ test_get_dest_snapshots_to_delete_per_dataset_matches_exact_names_without_prefix
 		"tank/fs@daily-1" "$(cat "$outfile")"
 }
 
+test_get_dest_snapshots_to_delete_per_dataset_returns_multiple_extra_snapshots_in_input_order() {
+	outfile="$TEST_TMPDIR/delete_multiple.out"
+
+	get_dest_snapshots_to_delete_per_dataset \
+		"tank/fs@snap1 tank/fs@snap3" \
+		"tank/fs@snap1 tank/fs@extra1 tank/fs@snap3 tank/fs@extra2" >"$outfile"
+
+	assertEquals "Destination-only snapshot deletion should preserve each extra snapshot in destination order." \
+		"tank/fs@extra1
+tank/fs@extra2" "$(cat "$outfile")"
+}
+
 test_delete_snaps_runs_grandfather_checks_before_destroying() {
 	log_file="$TEST_TMPDIR/delete_grandfather.log"
 	source_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
@@ -266,6 +278,52 @@ test_deleted_snapshots_include_newer_than_last_common_detects_newer_deletions() 
 
 	if ! deleted_snapshots_include_newer_than_last_common "$(printf '%s\n%s' "backup/dst@old" "backup/dst@newer")"; then
 		fail "Deleting a destination snapshot newer than the last common snapshot should keep rollback eligible."
+	fi
+}
+
+test_deleted_snapshots_include_newer_than_last_common_treats_unknown_last_common_creation_as_rollback_eligible() {
+	g_actual_dest="backup/dst"
+	g_last_common_snap="tank/src@common"
+
+	run_destination_zfs_cmd() {
+		case "$7" in
+		backup/dst@common)
+			printf '%s\n' "unknown"
+			;;
+		backup/dst@old)
+			printf '%s\n' 100
+			;;
+		*)
+			return 1
+			;;
+		esac
+	}
+
+	if ! deleted_snapshots_include_newer_than_last_common "backup/dst@old"; then
+		fail "Unknown last-common creation times should fail closed and keep rollback eligible."
+	fi
+}
+
+test_deleted_snapshots_include_newer_than_last_common_treats_unknown_deleted_creation_as_rollback_eligible() {
+	g_actual_dest="backup/dst"
+	g_last_common_snap="tank/src@common"
+
+	run_destination_zfs_cmd() {
+		case "$7" in
+		backup/dst@common)
+			printf '%s\n' 200
+			;;
+		backup/dst@old)
+			printf '%s\n' "unknown"
+			;;
+		*)
+			return 1
+			;;
+		esac
+	}
+
+	if ! deleted_snapshots_include_newer_than_last_common "backup/dst@old"; then
+		fail "Unknown deleted-snapshot creation times should fail closed and keep rollback eligible."
 	fi
 }
 
