@@ -841,6 +841,21 @@ mock_ssh_matches_missing_tool_probe() {
 	esac
 }
 
+mock_ssh_matches_command_v_override() {
+	l_cmd=$1
+
+	[ -n "${MOCK_SSH_COMMAND_V_TOOL:-}" ] || return 1
+	[ -n "${MOCK_SSH_COMMAND_V_RESULT:-}" ] || return 1
+
+	case "$l_cmd" in
+	*"command -v"*"$MOCK_SSH_COMMAND_V_TOOL"*)
+		printf '%s\n' "$MOCK_SSH_COMMAND_V_RESULT"
+		return 0
+		;;
+	*) return 1 ;;
+	esac
+}
+
 l_socket=""
 l_op=""
 l_host=""
@@ -906,16 +921,20 @@ fi
 		l_cmd=$1
 		l_shell=${MOCK_SSH_REMOTE_SHELL:-sh}
 
-	if [ -n "${MOCK_SSH_FORCE_UNAME:-}" ] && [ "$l_cmd" = "uname" ]; then
-		printf '%s\n' "$MOCK_SSH_FORCE_UNAME"
-		exit 0
-	fi
+		if [ -n "${MOCK_SSH_FORCE_UNAME:-}" ] && [ "$l_cmd" = "uname" ]; then
+			printf '%s\n' "$MOCK_SSH_FORCE_UNAME"
+			exit 0
+		fi
 
-		if [ -n "${MOCK_SSH_FILTER_PROPERTY:-}" ] && printf '%s\n' "$l_cmd" |
-			grep -q "^zfs get -Ho property all "; then
-		l_pool=${l_cmd#*all }
-		if [ -n "$l_pool" ]; then
-			zfs get -Ho property all "$l_pool" | grep -v "^${MOCK_SSH_FILTER_PROPERTY}$"
+			if mock_ssh_matches_command_v_override "$l_cmd"; then
+				exit 0
+			fi
+
+			if [ -n "${MOCK_SSH_FILTER_PROPERTY:-}" ] && printf '%s\n' "$l_cmd" |
+				grep -q "^zfs get -Ho property all "; then
+			l_pool=${l_cmd#*all }
+			if [ -n "$l_pool" ]; then
+				zfs get -Ho property all "$l_pool" | grep -v "^${MOCK_SSH_FILTER_PROPERTY}$"
 			exit 0
 		fi
 		fi
@@ -965,6 +984,8 @@ run_zxfer() {
 		ZXFER_SECURE_PATH_APPEND=${ZXFER_SECURE_PATH_APPEND-} \
 		MOCK_SSH_LOG=${MOCK_SSH_LOG-} \
 		MOCK_SSH_REMOTE_SHELL=${MOCK_SSH_REMOTE_SHELL-} \
+		MOCK_SSH_COMMAND_V_TOOL=${MOCK_SSH_COMMAND_V_TOOL-} \
+		MOCK_SSH_COMMAND_V_RESULT=${MOCK_SSH_COMMAND_V_RESULT-} \
 		MOCK_SSH_FORCE_UNAME=${MOCK_SSH_FORCE_UNAME-} \
 		MOCK_SSH_FILTER_PROPERTY=${MOCK_SSH_FILTER_PROPERTY-} \
 		MOCK_SSH_MISSING_TOOL=${MOCK_SSH_MISSING_TOOL-} \
@@ -3143,19 +3164,21 @@ remote_helper_path_shell_metacharacters_test() {
 	marker_rel="remote_helper_path_marker"
 	marker="$WORKDIR/$marker_rel"
 	mock_path="$WORKDIR/mock_remote_helper.\$(touch $marker_rel)"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	ssh_mock_dir="$WORKDIR/mock_remote_helper_safe"
+	secure_path="$ssh_mock_dir:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
 		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
 	safe_rm_f "$marker"
-	safe_rm_rf "$mock_path"
+	safe_rm_rf "$mock_path" "$ssh_mock_dir"
 	mkdir -p "$mock_path"
+	mkdir -p "$ssh_mock_dir"
 
 	real_zfs=$(resolve_host_command zfs)
 	if [ "$real_zfs" = "" ]; then
 		fail "zfs not found on host; cannot run remote helper path shell metacharacters test."
 	fi
 	ln -s "$real_zfs" "$mock_path/zfs"
-	write_mock_ssh_script "$mock_path/ssh"
+	write_mock_ssh_script "$ssh_mock_dir/ssh"
 
 	src_dataset="$SRC_POOL/remote_helper_shell_src"
 	dest_root="$DEST_POOL/remote_helper_shell_dest"
@@ -3171,7 +3194,10 @@ remote_helper_path_shell_metacharacters_test() {
 	(
 		cd "$WORKDIR"
 		log "Running: $zxfer_bin_abs -v -O localhost -R $src_dataset $dest_root"
-		ZXFER_SECURE_PATH="$secure_path" "$zxfer_bin_abs" -v -O localhost -R "$src_dataset" "$dest_root"
+		MOCK_SSH_COMMAND_V_TOOL="zfs" \
+		MOCK_SSH_COMMAND_V_RESULT="$mock_path/zfs" \
+		ZXFER_SECURE_PATH="$secure_path" \
+		"$zxfer_bin_abs" -v -O localhost -R "$src_dataset" "$dest_root"
 	)
 
 	assert_snapshot_exists "$dest_dataset" "rhs1"
@@ -3179,7 +3205,7 @@ remote_helper_path_shell_metacharacters_test() {
 		fail "Resolved helper paths containing shell metacharacters should not execute locally; marker file was created at $marker."
 	fi
 
-	safe_rm_rf "$mock_path"
+	safe_rm_rf "$mock_path" "$ssh_mock_dir"
 
 	log "Remote helper path shell metacharacters test passed"
 }
