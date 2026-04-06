@@ -10,11 +10,6 @@ describe a concrete failure mode or exploit path.
 
 ## Critical
 
-- [Security] Resolved remote helper paths are only validated as “absolute,” not shell-safe.
-  Files: `src/zxfer_globals.sh` (`resolve_remote_required_tool()`, `refresh_remote_zfs_commands()`), `src/zxfer_get_zfs_list.sh` (`build_source_snapshot_list_cmd()`, `write_source_snapshot_list_to_file()`), `src/zxfer_common.sh` (`execute_background_cmd()`, `execute_command()`).
-  Risk: `resolve_remote_required_tool()` accepts any first-line remote `command -v` result that begins with `/`, but it does not reject shell metacharacters, quotes, comment markers, or control whitespace inside that path. `refresh_remote_zfs_commands()` then interpolates the resolved remote helper path straight into `g_LZFS` / `g_RZFS`, and later paths execute `eval`-built command strings based on those variables. In a harness, setting `g_origin_cmd_zfs` to `/bin/echo; touch <marker> #` under `-O` made `build_source_snapshot_list_cmd()` render the injected `touch`, and `execute_background_cmd()` created the local marker file.
-  Recommended fix: reject resolved helper paths containing shell-significant characters or non-printable whitespace, and stop splicing helper-path strings into `eval` / `sh -c` command builders. Prefer argv-based execution paths that treat resolved helper paths as opaque arguments instead of shell fragments.
-
 - [Security] Resolved local helper paths from `ZXFER_SECURE_PATH` are only validated as “absolute,” not shell-safe.
   Files: `src/zxfer_globals.sh` (`zxfer_find_required_tool()`, `zxfer_assign_required_tool()`), `src/zxfer_get_zfs_list.sh` (`build_source_snapshot_list_cmd()`, `write_source_snapshot_list_to_file()`), `src/zxfer_common.sh` (`execute_background_cmd()`, `execute_command()`, `exists_destination()`), `src/zxfer_zfs_send_receive.sh` (`get_send_command()`, `get_receive_command()`).
   Risk: local helper discovery has the same validation gap as the remote path, but via `ZXFER_SECURE_PATH`. `zxfer_find_required_tool()` accepts any `command -v` result that begins with `/`, even if the pathname contains shell-significant characters such as command substitutions. Several later code paths then splice `g_cmd_zfs` or other resolved helpers into `eval`-built command strings. In a harness, setting `ZXFER_SECURE_PATH` to a directory literally named `.../bin$(touch <marker>)` made `build_source_snapshot_list_cmd()` render `/tmp/.../bin$(touch <marker>)/zfs list ...`, and `execute_background_cmd()` created the marker file when it `eval`ed that command string.
@@ -120,7 +115,7 @@ describe a concrete failure mode or exploit path.
 - [Availability] Migration service relaunch still abandons remaining services after the first enable failure.
   Files: `src/zxfer_zfs_mode.sh` (`relaunch()`), `src/zxfer_globals.sh` (`trap_exit()`).
   Impact: `relaunch()` clears `g_services_need_relaunch` before any `svcadm enable` succeeds, then aborts on the first enable failure. If multiple services were disabled for `-m -c ...`, a failure reenabling one service leaves the later services unattempted and still stopped. Because both `relaunch()` and `trap_exit()` clear the relaunch-needed flag before the restart sequence completes, the shutdown path also loses the signal that more services still need recovery.
-  Recommended fix: keep restart-needed state asserted until all requested services have been reenabled successfully, and continue attempting the remaining services while collecting failures.
+  Recommended fix: keep restart-needed state asserted until all requested services have been re-enabled successfully, and continue attempting the remaining services while collecting failures.
 
 - [Safety] Dry-run `-n -k` still mutates local and remote backup directories during preflight.
   Files: `src/zxfer_zfs_mode.sh` (`check_backup_storage_dir_if_needed()`), `src/zxfer_globals.sh` (`ensure_local_backup_dir()`, `ensure_remote_backup_dir()`), `man/zxfer.8`, `man/zxfer.1m`.

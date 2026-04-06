@@ -2,6 +2,8 @@ CHANGELOG
 =========
 
 2026.04.06
+-Route remote source/destination `zfs` helpers through shell-quoted token streams instead of raw ssh argv concatenation, and rebuild the snapshot-listing, snapshot-creation, delete, and remote backup-read command renderers around the same quoting model so metacharacter-bearing resolved remote helper paths no longer execute locally when zxfer evaluates or logs remote command pipelines.
+-Add shunit2 regressions for malicious resolved remote `zfs` and `cat` paths plus a manual integration-harness regression that resolves `ssh`/`zfs` from a directory whose name literally contains `$(touch ...)`, ensuring remote-origin runs succeed without creating the marker file.
 -Update the GitHub Actions artifact-upload steps to `actions/upload-artifact@v6`, which runs on Node 24 by default, so the new GitHub-hosted runner deprecation warning for Node 20 no longer fires on the coverage and integration workflows.
 -Fix the coverage workflow to set `COVERAGE_DIR` from `runner.temp` at step scope instead of job scope, matching where the GitHub Actions `runner` context is actually available and preventing workflow-parse failures on GitHub.
 -Fix the GitHub Actions `actionlint` job by installing the pinned upstream Linux release binary directly, since the `rhysd/actionlint` repository does not publish a `v1` GitHub Action ref and newer `actionlint` releases can require a newer Go toolchain than the runner job was setting up.

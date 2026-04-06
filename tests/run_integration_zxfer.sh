@@ -3105,6 +3105,46 @@ remote_origin_target_uncompressed_test() {
 	log "Remote uncompressed origin/target test passed"
 }
 
+remote_helper_path_shell_metacharacters_test() {
+	log "Starting remote helper path shell metacharacters test"
+
+	marker="$WORKDIR/remote_helper_path_marker"
+	mock_path="$WORKDIR/mock_remote_helper.\$(touch $marker)"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	safe_rm_f "$marker"
+	safe_rm_rf "$mock_path"
+	mkdir -p "$mock_path"
+
+	real_zfs=$(resolve_host_command zfs)
+	if [ "$real_zfs" = "" ]; then
+		fail "zfs not found on host; cannot run remote helper path shell metacharacters test."
+	fi
+	ln -s "$real_zfs" "$mock_path/zfs"
+	write_mock_ssh_script "$mock_path/ssh"
+
+	src_dataset="$SRC_POOL/remote_helper_shell_src"
+	dest_root="$DEST_POOL/remote_helper_shell_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "helper-path-one"
+	zfs snap -r "$src_dataset@rhs1"
+
+	ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -O localhost -R "$src_dataset" "$dest_root"
+
+	assert_snapshot_exists "$dest_dataset" "rhs1"
+	if [ -e "$marker" ]; then
+		fail "Resolved helper paths containing shell metacharacters should not execute locally; marker file was created at $marker."
+	fi
+
+	safe_rm_rf "$mock_path"
+
+	log "Remote helper path shell metacharacters test passed"
+}
+
 remote_compression_pipeline_test() {
 	log "Starting remote compression pipeline test"
 
@@ -3892,6 +3932,7 @@ property_creation_with_zvol_test \
 	error_log_email_example_self_test \
 	remote_migration_guard_tests \
 	remote_origin_target_uncompressed_test \
+	remote_helper_path_shell_metacharacters_test \
 	remote_compression_pipeline_test \
 	target_only_remote_compression_test \
 	remote_csh_origin_snapshot_listing_test \

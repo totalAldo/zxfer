@@ -87,7 +87,7 @@ ensure_parallel_available_for_source_jobs() {
 #
 build_source_snapshot_list_cmd() {
 	if [ "$g_option_j_jobs" -le 1 ]; then
-		printf '%s\n' "$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source"
+		zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$initial_source"
 		return
 	fi
 
@@ -99,10 +99,12 @@ build_source_snapshot_list_cmd() {
 		l_parallel_path=$g_origin_parallel_cmd
 		l_remote_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
 		l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-
-		l_remote_runner_cmd="$l_remote_zfs_cmd list -H -o name -s creation -d 1 -t snapshot {}"
-		l_remote_runner_single=$(escape_for_single_quotes "$l_remote_runner_cmd")
-		l_remote_pipeline="$l_remote_zfs_cmd list -Hr -o name $initial_source | \"$l_parallel_path\" -j $g_option_j_jobs --line-buffer '$l_remote_runner_single'"
+		l_parallel_cmd=$(build_shell_command_from_argv "$l_parallel_path")
+		l_remote_list_cmd=$(build_shell_command_from_argv \
+			"$l_remote_zfs_cmd" list -Hr -o name "$initial_source")
+		l_remote_runner_cmd=$(build_shell_command_from_argv \
+			"$l_remote_zfs_cmd" list -H -o name -s creation -d 1 -t snapshot "{}")
+		l_remote_pipeline="$l_remote_list_cmd | $l_parallel_cmd -j $g_option_j_jobs --line-buffer $(build_shell_command_from_argv "$l_remote_runner_cmd")"
 		if [ "$g_option_z_compress" -eq 1 ]; then
 			l_remote_pipeline="$l_remote_pipeline | zstd -9"
 		fi
@@ -116,7 +118,9 @@ build_source_snapshot_list_cmd() {
 	fi
 
 	l_parallel_path=$g_cmd_parallel
-	l_cmd="$g_LZFS list -Hr -o name $initial_source | \"$l_parallel_path\" -j $g_option_j_jobs --line-buffer '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'"
+	l_list_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name "$initial_source")
+	l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name -s creation -d 1 -t snapshot "{}")
+	l_cmd="$l_list_cmd | $(build_shell_command_from_argv "$l_parallel_path") -j $g_option_j_jobs --line-buffer $(build_shell_command_from_argv "$l_runner_cmd")"
 	printf '%s\n' "$l_cmd"
 }
 #
@@ -206,12 +210,14 @@ write_destination_snapshot_list_to_files() {
 		# dataset exists
 		# Keep destination-side snapshot listing serial here. The older parallel
 		# variant added complexity and was not a net win once metadata was cached.
-		l_cmd="$g_RZFS list -Hr -o name -t snapshot $l_destination_dataset"
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset")
 		echoV "Running command: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
 		# make sure to eval and then pipe the contents to the file in case
 		# the command uses ssh
-		eval "$l_cmd" >"$l_rzfs_list_hr_snap_tmp_file"
+		if ! run_destination_zfs_cmd list -Hr -o name -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file"; then
+			throw_error "Failed to retrieve snapshot list from the destination."
+		fi
 
 	else
 		# dataset does not exist
@@ -359,7 +365,7 @@ get_zfs_list() {
 	g_rzfs_list_hr_snap=$(cat "$l_rzfs_list_hr_snap_tmp_file")
 
 	# get a list of all destination datasets recursively
-	l_cmd="$g_RZFS list -t filesystem,volume -Hr -o name $g_destination"
+	l_cmd=$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")
 	echoV "Running command: $l_cmd"
 	zxfer_record_last_command_string "$l_cmd"
 	l_dest_list_tmp_file=$(get_temp_file)

@@ -573,8 +573,8 @@ g_option_B_beep_on_success=0
 g_option_R_recursive="tank/src"
 g_zxfer_new_snapshot_name="zxfer_unit"
 g_LZFS="mock_zfs_tool"
-execute_command() {
-	printf '%s\n' "$1" >>"$SNAPSHOT_LOG"
+run_source_zfs_cmd() {
+	printf '%s\n' "$*" >>"$SNAPSHOT_LOG"
 }
 newsnap "tank/src@old"
 EOF
@@ -582,7 +582,7 @@ EOF
 	: "$output"
 
 	assertEquals "Recursive snapshots should use the -r flag and strip the old snapshot suffix." \
-		"mock_zfs_tool snapshot -r tank/src@zxfer_unit" "$(cat "$log")"
+		"snapshot -r tank/src@zxfer_unit" "$(cat "$log")"
 }
 
 test_newsnap_uses_nonrecursive_snapshot_without_r_flag() {
@@ -600,8 +600,8 @@ g_option_B_beep_on_success=0
 g_option_R_recursive=""
 g_zxfer_new_snapshot_name="zxfer_single"
 g_LZFS="mock_zfs_tool"
-execute_command() {
-	printf '%s\n' "$1" >>"$SNAPSHOT_LOG"
+run_source_zfs_cmd() {
+	printf '%s\n' "$*" >>"$SNAPSHOT_LOG"
 }
 newsnap "tank/src@old"
 EOF
@@ -609,7 +609,7 @@ EOF
 	: "$output"
 
 	assertEquals "Non-recursive snapshots should omit the -r flag." \
-		"mock_zfs_tool snapshot tank/src@zxfer_single" "$(cat "$log")"
+		"snapshot tank/src@zxfer_single" "$(cat "$log")"
 }
 
 test_newsnap_builds_recursive_command_in_current_shell() {
@@ -618,16 +618,16 @@ test_newsnap_builds_recursive_command_in_current_shell() {
 	g_zxfer_new_snapshot_name="zxfer_current"
 	g_LZFS="mock_zfs_tool"
 	. "$ZXFER_ROOT/src/zxfer_zfs_mode.sh"
-	execute_command() {
-		printf '%s\n' "$1" >"$log"
+	run_source_zfs_cmd() {
+		printf '%s\n' "$*" >"$log"
 	}
 
 	newsnap "tank/src@old"
 
-	unset -f execute_command
+	unset -f run_source_zfs_cmd
 
 	assertEquals "Current-shell recursive snapshot generation should include the -r flag." \
-		"mock_zfs_tool snapshot -r tank/src@zxfer_current" "$(cat "$log")"
+		"snapshot -r tank/src@zxfer_current" "$(cat "$log")"
 }
 
 test_newsnap_builds_nonrecursive_command_in_current_shell() {
@@ -636,16 +636,16 @@ test_newsnap_builds_nonrecursive_command_in_current_shell() {
 	g_zxfer_new_snapshot_name="zxfer_current_single"
 	g_LZFS="mock_zfs_tool"
 	. "$ZXFER_ROOT/src/zxfer_zfs_mode.sh"
-	execute_command() {
-		printf '%s\n' "$1" >"$log"
+	run_source_zfs_cmd() {
+		printf '%s\n' "$*" >"$log"
 	}
 
 	newsnap "tank/src@old"
 
-	unset -f execute_command
+	unset -f run_source_zfs_cmd
 
 	assertEquals "Current-shell non-recursive snapshot generation should omit the -r flag." \
-		"mock_zfs_tool snapshot tank/src@zxfer_current_single" "$(cat "$log")"
+		"snapshot tank/src@zxfer_current_single" "$(cat "$log")"
 }
 
 test_calculate_unsupported_properties_collects_source_only_entries() {

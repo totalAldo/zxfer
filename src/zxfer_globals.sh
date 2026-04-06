@@ -1167,6 +1167,7 @@ read_remote_backup_file() {
 		;;
 	esac
 	l_path_ls_single=$(escape_for_single_quotes "$l_path_ls_path")
+	l_remote_cat_cmd=$(build_shell_command_from_argv "$g_cmd_cat" "$l_path")
 	l_remote_secure_cat_cmd="if [ ! -f '$l_path_single' ] || [ -h '$l_path_single' ]; then exit 1; fi; \
 l_uid=''; \
 if command -v stat >/dev/null 2>&1; then l_uid=\$(stat -c '%u' '$l_path_single' 2>/dev/null); if [ \"\$l_uid\" = '' ] || printf '%s' \"\$l_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_uid=\$(stat -f '%u' '$l_path_single' 2>/dev/null); fi; fi; \
@@ -1178,7 +1179,7 @@ if command -v stat >/dev/null 2>&1; then l_mode=\$(stat -c '%a' '$l_path_single'
 if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then if [ \"\$l_ls_line\" = '' ]; then l_ls_line=\$(ls -ldn '$l_path_ls_single' 2>/dev/null) || l_ls_line=''; fi; if [ \"\$l_ls_line\" != '' ]; then l_perm=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$1}'); if [ \"\$l_perm\" = '-rw-------' ]; then l_mode='600'; fi; fi; fi; \
 if [ \"\$l_mode\" = '' ]; then exit $l_remote_unknown_status; fi; \
 if [ \"\$l_mode\" != '600' ]; then exit $l_remote_insecure_mode_status; fi; \
-$g_cmd_cat '$l_path_single'"
+$l_remote_cat_cmd"
 	l_remote_secure_cat_shell_cmd=$(build_remote_sh_c_command "$l_remote_secure_cat_cmd")
 	invoke_ssh_shell_command_for_host "$l_origin_ssh_cmd" "$l_host" "$l_remote_secure_cat_shell_cmd"
 	l_remote_status=$?

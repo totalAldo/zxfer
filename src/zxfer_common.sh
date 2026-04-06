@@ -570,6 +570,20 @@ EOF
 	printf '%s' "$l_output"
 }
 
+build_shell_command_from_argv() {
+	l_output=""
+	for l_arg in "$@"; do
+		l_safe_arg=$(escape_for_single_quotes "$l_arg")
+		if [ "$l_output" = "" ]; then
+			l_output="'$l_safe_arg'"
+		else
+			l_output="$l_output '$l_safe_arg'"
+		fi
+	done
+
+	printf '%s' "$l_output"
+}
+
 # Quote a host spec for safe reinsertion into eval'd strings by wrapping each
 # token in single quotes. This keeps multi-word ssh arguments working while
 # preventing the shell from interpreting metacharacters provided by the user.
@@ -734,7 +748,12 @@ run_source_zfs_cmd() {
 
 	l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
 	l_origin_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
-	invoke_ssh_command_for_host "$l_origin_ssh_cmd" "$g_option_O_origin_host" "$l_origin_zfs_cmd" "$@"
+	l_remote_tokens=$(printf '%s\n' "$l_origin_zfs_cmd")
+	for l_arg in "$@"; do
+		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
+	done
+	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
+	invoke_ssh_shell_command_for_host "$l_origin_ssh_cmd" "$g_option_O_origin_host" "$l_remote_cmd"
 }
 
 # Execute a zfs command on the destination (target) host, using ssh when -T is
@@ -753,7 +772,71 @@ run_destination_zfs_cmd() {
 
 	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
 	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
-	invoke_ssh_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_target_zfs_cmd" "$@"
+	l_remote_tokens=$(printf '%s\n' "$l_target_zfs_cmd")
+	for l_arg in "$@"; do
+		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
+	done
+	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
+	invoke_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_cmd"
+}
+
+zxfer_render_source_zfs_command() {
+	l_subcommand=$1
+	shift
+
+	if [ "$g_option_O_origin_host" = "" ]; then
+		l_source_zfs_cmd=$g_cmd_zfs
+		if [ -n "$g_LZFS" ] && [ "$g_LZFS" != "$g_cmd_zfs" ]; then
+			l_source_zfs_cmd=$g_LZFS
+		fi
+		build_shell_command_from_argv "$l_source_zfs_cmd" "$l_subcommand" "$@"
+		return
+	fi
+
+	l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
+	l_origin_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
+	l_remote_tokens=$(printf '%s\n%s' "$l_origin_zfs_cmd" "$l_subcommand")
+	for l_arg in "$@"; do
+		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
+	done
+	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
+	build_ssh_shell_command_for_host "$l_origin_ssh_cmd" "$g_option_O_origin_host" "$l_remote_cmd"
+}
+
+zxfer_render_destination_zfs_command() {
+	l_subcommand=$1
+	shift
+
+	if [ "$g_option_T_target_host" = "" ]; then
+		l_target_zfs_cmd=$g_cmd_zfs
+		if [ -n "$g_RZFS" ] && [ "$g_RZFS" != "$g_cmd_zfs" ]; then
+			l_target_zfs_cmd=$g_RZFS
+		fi
+		build_shell_command_from_argv "$l_target_zfs_cmd" "$l_subcommand" "$@"
+		return
+	fi
+
+	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
+	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
+	l_remote_tokens=$(printf '%s\n%s' "$l_target_zfs_cmd" "$l_subcommand")
+	for l_arg in "$@"; do
+		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
+	done
+	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
+	build_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_cmd"
+}
+
+zxfer_render_zfs_command_for_spec() {
+	l_cmd_spec=$1
+	shift
+
+	if [ "$l_cmd_spec" = "$g_LZFS" ]; then
+		zxfer_render_source_zfs_command "$@"
+	elif [ "$l_cmd_spec" = "$g_RZFS" ]; then
+		zxfer_render_destination_zfs_command "$@"
+	else
+		build_shell_command_from_argv "$l_cmd_spec" "$@"
+	fi
 }
 
 # Run a zfs command based on the provided command specifier, delegating to the
@@ -800,11 +883,10 @@ exists_destination() {
 	l_dest=$1
 
 	# Check if the destination dataset exists
-	# quote the command in case it is being run within an ssh command
-	l_cmd="$g_RZFS list -H $l_dest"
+	l_cmd=$(zxfer_render_destination_zfs_command list -H "$l_dest")
 	echoV "Checking if destination exists: $l_cmd"
 
-	if eval "$l_cmd" >/dev/null 2>&1; then
+	if run_destination_zfs_cmd list -H "$l_dest" >/dev/null 2>&1; then
 		echo 1
 	else
 		echo 0

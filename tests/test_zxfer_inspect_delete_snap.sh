@@ -76,7 +76,7 @@ test_delete_snaps_dry_run_prints_destroy_command() {
 	output=$(delete_snaps "$source_list" "$dest_list")
 
 	assertContains "Dry-run snapshot deletion should print the rendered destroy command." \
-		"$output" "Dry run: /sbin/zfs destroy tank/fs@snap3"
+		"$output" "Dry run: '/sbin/zfs' 'destroy' 'tank/fs@snap3'"
 }
 
 test_delete_snaps_throws_when_destroy_fails() {

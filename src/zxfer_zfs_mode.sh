@@ -309,13 +309,24 @@ newsnap() {
 
 	if [ "$g_option_R_recursive" != "" ]; then
 		echov "Creating recursive snapshot $l_sourcefs@$l_snap."
-		cmd="$g_LZFS snapshot -r $l_sourcefs@$l_snap"
+		cmd=$(zxfer_render_source_zfs_command snapshot -r "$l_sourcefs@$l_snap")
 	else
 		echov "Creating snapshot $l_sourcefs@$l_snap."
-		cmd="$g_LZFS snapshot $l_sourcefs@$l_snap"
+		cmd=$(zxfer_render_source_zfs_command snapshot "$l_sourcefs@$l_snap")
 	fi
 
-	execute_command "$cmd"
+	zxfer_record_last_command_string "$cmd"
+	if [ "$g_option_n_dryrun" -eq 1 ]; then
+		echov "Dry run: $cmd"
+		return
+	fi
+
+	echov "$cmd"
+	if [ "$g_option_R_recursive" != "" ]; then
+		run_source_zfs_cmd snapshot -r "$l_sourcefs@$l_snap" || throw_error "Error when executing command."
+	else
+		run_source_zfs_cmd snapshot "$l_sourcefs@$l_snap" || throw_error "Error when executing command."
+	fi
 }
 
 #

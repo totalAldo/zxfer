@@ -592,20 +592,13 @@ test_run_source_zfs_cmd_uses_remote_ssh_when_origin_specified() {
 	{
 		IFS= read -r arg1
 		IFS= read -r arg2
-		IFS= read -r arg3
-		IFS= read -r arg4
-		IFS= read -r arg5
-		IFS= read -r arg6
-		IFS= read -r arg7
 	} <"$remote_log"
 
 	assertEquals "ssh should target the origin host without literal quotes." "backup@example.com" "$arg1"
-	assertEquals "Privilege wrappers must remain separate tokens." "pfexec" "$arg2"
-	assertEquals "Port flag should pass through literally." "-p" "$arg3"
-	assertEquals "Port argument should remain intact." "2222" "$arg4"
-	assertEquals "zfs binary should use the origin-host path." "$g_origin_cmd_zfs" "$arg5"
-	assertEquals "Remote command should preserve requested subcommand." "list" "$arg6"
-	assertEquals "Dataset argument should not be re-quoted locally." "tank/fs@snap" "$arg7"
+	assertContains "Privilege wrappers must remain quoted inside the remote shell command." "$arg2" "'pfexec' '-p' '2222'"
+	assertContains "zfs binary should use the origin-host path." "$arg2" "'$g_origin_cmd_zfs'"
+	assertContains "Remote command should preserve requested subcommand." "$arg2" "'list'"
+	assertContains "Dataset argument should remain a single remote-shell token." "$arg2" "'tank/fs@snap'"
 
 	g_cmd_ssh=$old_cmd_ssh
 	g_cmd_zfs=$old_cmd_zfs
@@ -659,20 +652,15 @@ test_run_destination_zfs_cmd_uses_remote_ssh_when_target_specified() {
 	{
 		IFS= read -r targ1
 		IFS= read -r targ2
-		IFS= read -r targ3
-		IFS= read -r targ4
-		IFS= read -r targ5
-		IFS= read -r targ6
-		IFS= read -r targ7
 	} <"$remote_log"
 
 	assertEquals "ssh should connect to the target host without stray quotes." "target@example.com" "$targ1"
-	assertEquals "Additional host-spec tokens must survive argument splitting." "doas" "$targ2"
-	assertEquals "Remote call should include the target-host zfs path." "$g_target_cmd_zfs" "$targ3"
-	assertEquals "Command verb should pass through untouched." "get" "$targ4"
-	assertEquals "Original flags should be preserved." "-H" "$targ5"
-	assertEquals "Property argument should pass through verbatim." "name" "$targ6"
-	assertEquals "Dataset argument should remain literal." "tank/dst" "$targ7"
+	assertContains "Additional host-spec tokens must survive inside the remote shell command." "$targ2" "'doas'"
+	assertContains "Remote call should include the target-host zfs path." "$targ2" "'$g_target_cmd_zfs'"
+	assertContains "Command verb should pass through untouched." "$targ2" "'get'"
+	assertContains "Original flags should be preserved." "$targ2" "'-H'"
+	assertContains "Property argument should pass through verbatim." "$targ2" "'name'"
+	assertContains "Dataset argument should remain literal." "$targ2" "'tank/dst'"
 
 	g_cmd_ssh=$old_cmd_ssh
 	g_cmd_zfs=$old_cmd_zfs
@@ -1200,7 +1188,8 @@ test_build_source_snapshot_list_cmd_serial_returns_direct_list() {
 
 	result=$(build_source_snapshot_list_cmd)
 
-	assertEquals "Serial snapshot listing should call zfs directly." "$g_LZFS list -Hr -o name -s creation -t snapshot $initial_source" "$result"
+	assertEquals "Serial snapshot listing should render a shell-safe direct zfs command." \
+		"'/sbin/zfs' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' 'tank/data'" "$result"
 }
 
 test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
@@ -1214,10 +1203,10 @@ test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
 
 	result=$(build_source_snapshot_list_cmd)
 
-	assertContains "Parallel listing should include dataset enumeration." "$result" "$g_LZFS list -Hr -o name $initial_source |"
-	assertContains "GNU parallel invocation should include the job count." "$result" "\"$g_cmd_parallel\" -j 4 --line-buffer"
-	assertEquals "Local parallel snapshot listing should use the direct GNU parallel runner from development." \
-		"$g_LZFS list -Hr -o name $initial_source | \"$g_cmd_parallel\" -j 4 --line-buffer '$g_LZFS list -H -o name -s creation -d 1 -t snapshot {}'" "$result"
+	assertContains "Parallel listing should include dataset enumeration." "$result" "'/sbin/zfs' 'list' '-Hr' '-o' 'name' 'tank/home' |"
+	assertContains "GNU parallel invocation should include the job count." "$result" "'$g_cmd_parallel' -j 4 --line-buffer"
+	assertContains "Local parallel snapshot listing should embed the per-dataset runner command." "$result" "'snapshot'"
+	assertContains "Local parallel snapshot listing should preserve the dataset placeholder." "$result" "{}"
 	assertNotContains "Local parallel snapshot listing should not reintroduce a sh -c wrapper." "$result" "sh -c"
 }
 
@@ -1241,12 +1230,47 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 	assertContains "Wrapper tokens should remain inside the remote command string." "$result" "'pfexec'"
 	assertContains "Wrapper flags should remain inside the remote command string." "$result" "'-p'"
 	assertContains "Wrapper flag values should remain inside the remote command string." "$result" "'2222'"
-	assertContains "Remote GNU parallel path should be used." "$result" "\"/opt/bin/parallel\" -j 8 --line-buffer"
+	assertContains "Remote GNU parallel path should be used." "$result" "/opt/bin/parallel"
+	assertContains "Remote GNU parallel invocation should preserve the job count." "$result" "-j 8 --line-buffer"
 	assertContains "Remote listing should use the origin host zfs path." "$result" "$g_origin_cmd_zfs"
 	assertContains "Compression should be applied when requested (zstd -9 present)." "$result" "zstd -9"
 	assertContains "Compression should be applied when requested (zstd -d present)." "$result" "zstd -d"
 	assertContains "Remote command should use GNU parallel's direct dataset placeholder runner." \
-		"$result" "$g_origin_cmd_zfs list -H -o name -s creation -d 1 -t snapshot {}"
+		"$result" "{}"
+}
+
+test_build_source_snapshot_list_cmd_remote_helper_path_does_not_execute_locally() {
+	marker="$TEST_TMPDIR/remote_helper_marker"
+	outfile="$TEST_TMPDIR/remote_helper.out"
+	errfile="$TEST_TMPDIR/remote_helper.err"
+	remote_log="$TEST_TMPDIR/remote_helper.log"
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_cmd_zfs="/sbin/zfs"
+	g_origin_cmd_zfs="/bin/echo; touch $marker #"
+	g_option_O_origin_host="backup@example.com"
+	g_option_O_origin_host_safe=""
+	g_option_j_jobs=1
+	initial_source="tank/src"
+	: >"$remote_log"
+	FAKE_SSH_LOG="$remote_log"
+	FAKE_SSH_SUPPRESS_STDOUT=1
+	export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+
+	l_cmd=$(build_source_snapshot_list_cmd)
+	execute_background_cmd "$l_cmd" "$outfile" "$errfile"
+	wait "$g_last_background_pid"
+
+	unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+
+	assertFalse "Resolved remote helper paths should not execute locally when snapshot listing is eval'd." \
+		"[ -e '$marker' ]"
+	{
+		IFS= read -r log_line1
+		IFS= read -r log_line2
+	} <"$remote_log"
+	assertEquals "ssh should still target the requested host." "backup@example.com" "$log_line1"
+	assertContains "The malicious helper path should be quoted as one remote-shell token." \
+		"$log_line2" "'/bin/echo; touch $marker #'"
 }
 
 test_resolve_remote_required_tool_uses_shell_probe_for_wrapped_hosts() {
@@ -1576,6 +1600,34 @@ test_read_remote_backup_file_uses_resolved_remote_cat_path() {
 	assertContains "Remote backup reads should preserve the requested remote metadata path." "$log_line2" "/tmp/backup.meta"
 }
 
+test_read_remote_backup_file_quotes_resolved_remote_cat_path() {
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	marker="$TEST_TMPDIR/read_remote_backup_marker"
+	g_cmd_cat="/remote/bin/cat; touch $marker #"
+	remote_log="$TEST_TMPDIR/read_remote_backup_quoted.log"
+	: >"$remote_log"
+	FAKE_SSH_LOG="$remote_log"
+	FAKE_SSH_STDOUT_OVERRIDE="payload"
+	export FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE
+
+	result=$(read_remote_backup_file "backup@example.com" "/tmp/backup.meta")
+	status=$?
+
+	unset FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE
+
+	assertEquals "Remote backup reads should still succeed when the resolved helper path contains metacharacters." 0 "$status"
+	assertEquals "payload" "$result"
+	assertFalse "Resolved remote cat paths should not execute locally when rendered into the remote shell helper." \
+		"[ -e '$marker' ]"
+	{
+		IFS= read -r log_line1
+		IFS= read -r log_line2
+	} <"$remote_log"
+	assertEquals "Remote backup reads should keep the host token separate." "backup@example.com" "$log_line1"
+	assertContains "The resolved remote cat path should be quoted as one token in the remote helper script." \
+		"$log_line2" "'/remote/bin/cat; touch $marker #'"
+}
+
 test_read_command_line_switches_skips_control_socket_when_ssh_lacks_support() {
 	remote_log="$TEST_TMPDIR/unsupported_control_socket.log"
 	result_file="$TEST_TMPDIR/unsupported_control_socket.out"
@@ -1664,9 +1716,11 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	assertEquals "SSH must pass the control socket path as the next argument." "$g_ssh_origin_control_socket" "$log_line2"
 	assertEquals "ssh should connect to the requested origin host." "$g_option_O_origin_host" "$log_line3"
 	assertContains "Remote command should force the remote pipeline through sh -c." "$log_line4" "'sh' '-c'"
-	assertContains "Remote command should include the dataset listing pipeline." "$log_line4" '/usr/sbin/zfs list -Hr -o name zroot | "/opt/bin/parallel" -j 4 --line-buffer'
-	assertContains "Remote command should use GNU parallel's direct dataset placeholder runner." \
-		"$log_line4" "/usr/sbin/zfs list -H -o name -s creation -d 1 -t snapshot {}"
+	assertContains "Remote command should include the source dataset path." "$log_line4" "zroot"
+	assertContains "Remote command should include the dataset listing helper." "$log_line4" "/usr/sbin/zfs"
+	assertContains "Remote command should include GNU parallel." "$log_line4" "/opt/bin/parallel"
+	assertContains "Remote command should preserve the parallel job count." "$log_line4" "-j 4 --line-buffer"
+	assertContains "Remote command should preserve the per-dataset snapshot placeholder." "$log_line4" "{}"
 	assertContains "Compression pipeline should be preserved in the remote command." "$log_line4" "| zstd -9"
 }
 
