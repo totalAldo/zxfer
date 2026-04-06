@@ -414,6 +414,21 @@ wait_for_snapshot_absent() {
 	fail "Snapshot $l_dataset@$l_snapshot still present after waiting."
 }
 
+assert_output_mentions_snapshot_destroy() {
+	l_output=$1
+	l_dataset=$2
+	l_snapshot=$3
+	l_target="$l_dataset@$l_snapshot"
+
+	if ! printf '%s\n' "$l_output" | grep -F "$l_target" >/dev/null 2>&1; then
+		fail "Expected dry-run output to mention snapshot target $l_target. Output: $l_output"
+	fi
+
+	if ! printf '%s\n' "$l_output" | grep -F "destroy" >/dev/null 2>&1; then
+		fail "Expected dry-run output to include a destroy operation for $l_target. Output: $l_output"
+	fi
+}
+
 wait_for_destroy_process_to_finish() {
 	l_dataset=$1
 	l_snapshot=$2
@@ -1572,9 +1587,7 @@ snapshot_deletion_test() {
 	# Run with -n -d (dry run, snap1 should remain)
 	# We capture output to verify it *would* delete
 	output=$(run_zxfer -v -n -d -R "$src_dataset" "$dest_root" 2>&1)
-	if ! printf '%s\n' "$output" | grep -q "zfs destroy .*@snap1"; then
-		fail "Dry run with -d did not propose destroying snap1. Output: $output"
-	fi
+	assert_output_mentions_snapshot_destroy "$output" "$dest_dataset" "snap1"
 	assert_snapshot_exists "$dest_dataset" "snap1"
 
 	# Run with -d (snap1 should be deleted)
@@ -2101,9 +2114,7 @@ dry_run_deletion_test() {
 	output=$("$ZXFER_BIN" -v -n -d -R "$src_dataset" "$dest_root" 2>&1)
 	log "$output"
 
-	if ! printf '%s\n' "$output" | grep -q "zfs destroy .*@snap1"; then
-		fail "Dry run with -d did not show destroy command for snap1."
-	fi
+	assert_output_mentions_snapshot_destroy "$output" "$dest_dataset" "snap1"
 	assert_snapshot_exists "$dest_dataset" "snap1"
 	assert_snapshot_exists "$dest_dataset" "snap2"
 
