@@ -90,7 +90,10 @@ rollback_destination_to_last_common_snapshot() {
 		return
 	fi
 
-	if [ "$(exists_destination "$g_actual_dest")" -eq 0 ]; then
+	if ! l_dest_exists=$(exists_destination "$g_actual_dest"); then
+		throw_error "$l_dest_exists"
+	fi
+	if [ "$l_dest_exists" -eq 0 ]; then
 		return
 	fi
 
@@ -108,6 +111,25 @@ rollback_destination_to_last_common_snapshot() {
 	g_did_delete_dest_snapshots=0
 }
 
+get_live_destination_snapshots() {
+	if ! l_snapshot_records=$(run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$g_actual_dest"); then
+		printf '%s\n' "$l_snapshot_records"
+		return 1
+	fi
+
+	while IFS= read -r l_snapshot_record; do
+		[ -n "$l_snapshot_record" ] || continue
+		l_snapshot_path=$(extract_snapshot_path "$l_snapshot_record")
+		case "$l_snapshot_path" in
+		"$g_actual_dest"@*)
+			printf '%s\n' "$l_snapshot_record"
+			;;
+		esac
+	done <<-EOF
+		$(normalize_snapshot_record_list "$l_snapshot_records")
+	EOF
+}
+
 #
 # Copy from the last common snapshot to the most recent snapshot.
 # Assumes that the list of snapshots is given in creation order ascending.
@@ -118,23 +140,31 @@ copy_snapshots() {
 	# destination state before sending, and use -Y to repeat until convergence.
 	l_first_snapshot=""
 	l_final_snapshot=""
+	l_first_snapshot_path=""
+	l_final_snapshot_path=""
 	g_dest_seed_requires_property_reconcile=0
 
 	reconcile_live_destination_snapshot_state
 
 	# find the first and final snapshot for this dataset on the source
-	for l_snapshot in $g_src_snapshot_transfer_list; do
+	while IFS= read -r l_snapshot; do
+		[ -n "$l_snapshot" ] || continue
 		# set the first snapshot
 		[ -z "$l_first_snapshot" ] && l_first_snapshot=$l_snapshot
 
 		# keep looping until the end of the list
 		l_final_snapshot=$l_snapshot
-	done
+	done <<-EOF
+		$(normalize_snapshot_record_list "$g_src_snapshot_transfer_list")
+	EOF
 
 	if [ -z "$l_final_snapshot" ]; then
 		echoV "No snapshots to copy, skipping destination dataset: $g_actual_dest."
 		return
 	fi
+
+	l_first_snapshot_path=$(extract_snapshot_path "$l_first_snapshot")
+	l_final_snapshot_path=$(extract_snapshot_path "$l_final_snapshot")
 
 	# When there is nothing new to send, there is no need to roll the
 	# destination back after deleting extra snapshots.
@@ -147,11 +177,26 @@ copy_snapshots() {
 
 	# check if the destination exists and if not,
 	# create it by sending the first snapshot
-	if [ "$(exists_destination "$g_actual_dest")" -eq 0 ]; then
+	if ! l_dest_exists=$(exists_destination "$g_actual_dest"); then
+		throw_error "$l_dest_exists"
+	fi
+	if [ "$l_dest_exists" -eq 1 ] &&
+		[ "${g_last_common_snap:-}" = "" ] &&
+		[ "$g_dest_has_snapshots" -eq 1 ]; then
+		if ! l_live_dest_snaps=$(get_live_destination_snapshots 2>&1); then
+			throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
+		fi
+		if [ -z "$l_live_dest_snaps" ]; then
+			g_dest_has_snapshots=0
+		else
+			throw_error "Destination dataset [$g_actual_dest] has snapshots but none share a common guid with the source. Refusing to perform a full receive into an existing snapshotted dataset."
+		fi
+	fi
+	if [ "$l_dest_exists" -eq 0 ]; then
 		# get the first snapshot name with full path
-		echov "Destination dataset does not exist [$g_actual_dest]. Sending first snapshot [$l_first_snapshot]"
+		echov "Destination dataset does not exist [$g_actual_dest]. Sending first snapshot [$l_first_snapshot_path]"
 		# do not allow this to be run in the background
-		zfs_send_receive "" "$l_first_snapshot" "$g_actual_dest" "0"
+		zfs_send_receive "" "$l_first_snapshot_path" "$g_actual_dest" "0"
 		g_dest_seed_requires_property_reconcile=1
 
 		# set the last common snapshot to the first snapshot so that all snapshots
@@ -159,7 +204,7 @@ copy_snapshots() {
 		g_last_common_snap=$l_first_snapshot
 		g_dest_has_snapshots=1
 	elif [ "$g_dest_has_snapshots" -eq 0 ]; then
-		echov "Destination dataset [$g_actual_dest] exists but has no snapshots. Seeding with [$l_first_snapshot]"
+		echov "Destination dataset [$g_actual_dest] exists but has no snapshots. Seeding with [$l_first_snapshot_path]"
 		# A full receive into an existing dataset requires -F on some OpenZFS
 		# implementations even when the destination has no snapshots yet. Keep the
 		# force flag scoped to this bootstrap receive so normal later increments
@@ -167,7 +212,7 @@ copy_snapshots() {
 		echov "Temporarily enabling receive-side -F to seed existing empty destination dataset [$g_actual_dest]."
 		l_prev_force=${g_option_F_force_rollback:-}
 		g_option_F_force_rollback="-F"
-		zfs_send_receive "" "$l_first_snapshot" "$g_actual_dest" "0"
+		zfs_send_receive "" "$l_first_snapshot_path" "$g_actual_dest" "0"
 		g_option_F_force_rollback=$l_prev_force
 		g_dest_seed_requires_property_reconcile=1
 		g_last_common_snap=$l_first_snapshot
@@ -183,10 +228,10 @@ copy_snapshots() {
 	fi
 
 	# get the final snapshot name
-	echoV "Final snapshot: $l_final_snapshot"
+	echoV "Final snapshot: $l_final_snapshot_path"
 
 	# begin copying snapshots to the final snap from the last common snapshot
-	zfs_send_receive "$g_last_common_snap" "$l_final_snapshot" "$g_actual_dest" "1"
+	zfs_send_receive "$(extract_snapshot_path "$g_last_common_snap")" "$l_final_snapshot_path" "$g_actual_dest" "1"
 }
 
 #
@@ -197,30 +242,40 @@ copy_snapshots() {
 #
 reconcile_live_destination_snapshot_state() {
 	[ "$g_dest_has_snapshots" -eq 0 ] || return
-	[ "$(exists_destination "$g_actual_dest")" -eq 1 ] || return
+	if ! l_dest_exists=$(exists_destination "$g_actual_dest"); then
+		throw_error "$l_dest_exists"
+	fi
+	[ "$l_dest_exists" -eq 1 ] || return
 
-	l_live_dest_snaps=$(run_destination_zfs_cmd list -Hr -o name -t snapshot "$g_actual_dest" 2>/dev/null || :)
+	if ! l_live_dest_snaps=$(get_live_destination_snapshots 2>&1); then
+		throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
+	fi
 	[ -n "$l_live_dest_snaps" ] || return
+	g_dest_has_snapshots=1
 
 	l_newline='
 '
 	l_dest_snap_names="$l_newline"
-	for l_live_dest_snap in $l_live_dest_snaps; do
-		l_live_dest_snap_name=$(extract_snapshot_name "$l_live_dest_snap")
-		[ -n "$l_live_dest_snap_name" ] || continue
-		l_dest_snap_names="${l_dest_snap_names}${l_live_dest_snap_name}${l_newline}"
-	done
+	while IFS= read -r l_live_dest_snap; do
+		[ -n "$l_live_dest_snap" ] || continue
+		l_live_dest_identity=$(extract_snapshot_identity "$l_live_dest_snap")
+		[ -n "$l_live_dest_identity" ] || continue
+		l_dest_snap_names="${l_dest_snap_names}${l_live_dest_identity}${l_newline}"
+	done <<-EOF
+		$(normalize_snapshot_record_list "$l_live_dest_snaps")
+	EOF
 
 	l_confirmed_common_snap=""
 	l_remaining_source_snaps=""
 	l_found_common_snap=0
 
-	for l_source_snap in $g_src_snapshot_transfer_list; do
-		l_source_snap_name=$(extract_snapshot_name "$l_source_snap")
-		[ -n "$l_source_snap_name" ] || continue
+	while IFS= read -r l_source_snap; do
+		[ -n "$l_source_snap" ] || continue
+		l_source_snap_identity=$(extract_snapshot_identity "$l_source_snap")
+		[ -n "$l_source_snap_identity" ] || continue
 
 		case "$l_dest_snap_names" in
-		*"$l_newline$l_source_snap_name$l_newline"*)
+		*"$l_newline$l_source_snap_identity$l_newline"*)
 			l_confirmed_common_snap=$l_source_snap
 			l_found_common_snap=1
 			l_remaining_source_snaps=""
@@ -230,12 +285,15 @@ reconcile_live_destination_snapshot_state() {
 				if [ -z "$l_remaining_source_snaps" ]; then
 					l_remaining_source_snaps=$l_source_snap
 				else
-					l_remaining_source_snaps="$l_remaining_source_snaps $l_source_snap"
+					l_remaining_source_snaps="$l_remaining_source_snaps
+$l_source_snap"
 				fi
 			fi
 			;;
 		esac
-	done
+	done <<-EOF
+		$(normalize_snapshot_record_list "$g_src_snapshot_transfer_list")
+	EOF
 
 	[ -n "$l_confirmed_common_snap" ] || return
 
@@ -255,11 +313,7 @@ stopsvcs() {
 	# Nothing to do if the caller provided an empty string.
 	[ -n "$l_raw_services" ] || return
 
-	l_normalized_services=$(printf '%s\n' "$l_raw_services" | awk '
-{
-	for (i = 1; i <= NF; i++)
-		print $i
-}')
+	l_normalized_services=$(normalize_service_list "$l_raw_services")
 
 	[ -n "$l_normalized_services" ] || return
 
@@ -270,6 +324,43 @@ stopsvcs() {
 				relaunch
 				throw_error "Could not disable service $service."
 			}
+		m_services_to_restart="$m_services_to_restart $service"
+		g_services_need_relaunch=1
+	done <<EOF
+$l_normalized_services
+EOF
+}
+
+normalize_service_list() {
+	l_raw_services=$1
+	[ -n "$l_raw_services" ] || return
+
+	printf '%s\n' "$l_raw_services" | awk '
+{
+	for (i = 1; i <= NF; i++)
+		print $i
+}'
+}
+
+preview_service_disable_commands() {
+	l_raw_services=$1
+	l_normalized_services=$(normalize_service_list "$l_raw_services")
+	[ -n "$l_normalized_services" ] || return
+
+	while IFS= read -r service; do
+		echov "Dry run: $(build_shell_command_from_argv svcadm disable -st "$service")"
+	done <<EOF
+$l_normalized_services
+EOF
+}
+
+record_services_for_relaunch() {
+	l_raw_services=$1
+	l_normalized_services=$(normalize_service_list "$l_raw_services")
+	[ -n "$l_normalized_services" ] || return
+
+	while IFS= read -r service; do
+		[ -n "$service" ] || continue
 		m_services_to_restart="$m_services_to_restart $service"
 		g_services_need_relaunch=1
 	done <<EOF
@@ -289,6 +380,10 @@ relaunch() {
 
 	for l_i in $m_services_to_restart; do
 		echov "Restarting service $l_i"
+		if [ "$g_option_n_dryrun" -eq 1 ]; then
+			echov "Dry run: $(build_shell_command_from_argv svcadm enable "$l_i")"
+			continue
+		fi
 		svcadm enable "$l_i" || {
 			throw_error "Couldn't re-enable service $l_i."
 		}
@@ -516,7 +611,7 @@ check_backup_storage_dir_if_needed() {
 	if [ "$g_option_T_target_host" = "" ]; then
 		ensure_local_backup_dir "$g_backup_storage_root"
 	else
-		ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host"
+		ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host" destination
 	fi
 }
 
@@ -560,13 +655,40 @@ maybe_capture_preflight_snapshot() {
 	# Create the new snapshot with a unique name.
 	newsnap "$initial_source"
 
+	if [ "$g_option_n_dryrun" -eq 1 ]; then
+		return
+	fi
+
 	# Because there are new snapshots, need to refresh the cached lists.
 	refresh_dataset_iteration_state
+}
+
+preview_migration_services_dry_run() {
+	if [ -n "$g_option_c_services" ]; then
+		preview_service_disable_commands "$g_option_c_services"
+		record_services_for_relaunch "$g_option_c_services"
+	fi
+
+	for l_source in $g_recursive_source_list; do
+		echov "Dry run: $(zxfer_render_source_zfs_command unmount "$l_source")"
+	done
+
+	newsnap "$initial_source"
+
+	# Dry-run migration should still model the later property-planning state so
+	# mountpoint transfer previews match the live -m path.
+	g_readonly_properties=$(echo "$g_readonly_properties" |
+		sed -e 's/,mountpoint//g')
 }
 
 prepare_migration_services() {
 	zxfer_set_failure_stage "migration service handling"
 	[ "$g_option_m_migrate" -eq 1 ] || return
+
+	if [ "$g_option_n_dryrun" -eq 1 ]; then
+		preview_migration_services_dry_run
+		return
+	fi
 
 	# Check if any services need to be disabled before doing a migration.
 	if [ -n "$g_option_c_services" ]; then

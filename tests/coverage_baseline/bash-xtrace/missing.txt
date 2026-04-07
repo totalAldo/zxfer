@@ -1,0 +1,186 @@
+src/zxfer_common.sh
+  36:	. ./zxfer_globals.sh
+  82:BEGIN {
+  83:	ORS = ""
+  86:	if (NR > 1) {
+  87:		printf "\\n"
+  89:	line = $0
+  90:	gsub(/\\/, "\\\\", line)
+  91:	gsub(/\t/, "\\t", line)
+  92:	gsub(/\r/, "\\r", line)
+  93:	printf "%s", line
+  95:'
+  170:		return 0
+  193:		return 0
+  199:		if [ -n "$l_remaining_pids" ]; then
+  200:			l_remaining_pids="$l_remaining_pids $l_existing_pid"
+  202:			l_remaining_pids=$l_existing_pid
+  213:			continue
+  380:		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_log_path\" because it is a symlink."
+  381:		return 1
+  419:		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
+  420:		return 1
+  595:		for (i = 1; i <= NF; i++) {
+  596:			print $i
+  598:	}'
+  615:		return
+  658:		return
+  672:		return
+  933:	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
+  934:	l_remote_tokens=$(printf '%s\n%s' "$l_target_zfs_cmd" "$l_subcommand")
+  935:	for l_arg in "$@"; do
+  936:		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
+  938:	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
+  939:	build_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd"
+  948:	elif [ "$l_cmd_spec" = "$g_RZFS" ]; then
+  949:		zxfer_render_destination_zfs_command "$@"
+  951:		build_shell_command_from_argv "$l_cmd_spec" "$@"
+  1028:		printf 'Failed to determine whether destination dataset [%s] exists.\n' "$l_dest"
+  1079:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
+  1080:	if [ "$l_speaker_km_loaded" = "0" ]; then
+  1081:		if ! kldload "speaker" >/dev/null 2>&1; then
+  1082:			echoV "Unable to load speaker module; skipping beep."
+  1083:			return
+  1088:	if [ "$l_exit_status" -eq 0 ]; then
+  1089:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
+  1090:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
+  1091:				echoV "Success beep failed; skipping."
+  1094:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
+  1095:			echoV "Failure beep failed; skipping."
+
+src/zxfer_get_zfs_list.sh
+  36:	. ./zxfer_globals.sh
+  102:		l_remote_list_cmd=$(build_shell_command_from_argv \
+  104:		l_remote_runner_cmd=$(build_shell_command_from_argv \
+  149:			eval "$l_cmd" >"$l_outfile" 2>"$l_errfile" &
+  157:			"$l_cmd" \
+  158:			"$l_outfile" \
+  159:			"$l_errfile"
+  213:		throw_error "$l_destination_exists"
+  226:			throw_error "Failed to retrieve snapshot list from the destination."
+  388:				l_dest_pool=$g_destination
+  394:				rm -f "$l_dest_list_tmp_file" "$l_dest_list_err_file"
+  395:				throw_usage_error "Failed to retrieve list of datasets from the destination"
+  398:			rm -f "$l_dest_list_tmp_file" "$l_dest_list_err_file"
+  399:			throw_usage_error "Failed to retrieve list of datasets from the destination"
+  423:		"$l_rzfs_list_hr_snap_tmp_file" \
+  424:		"$l_dest_snaps_stripped_sorted_tmp_file"
+
+src/zxfer_globals.sh
+  157:			printf '%s\n' "Required dependency \"$l_label\" on $l_scope resolved to \"$l_path\", but zxfer requires a single-line absolute path without control whitespace."
+  247:		g_cmd_awk='awk'
+  430:		throw_error "Error creating temporary directory for ssh control socket."
+  457:		throw_error "Error creating ssh control socket for $l_role host."
+  558:		"$g_delete_dest_tmp_file" \
+  559:		"$g_delete_snapshots_to_delete_tmp_file"; do
+  561:			rm "$l_temp_file"
+  567:		rm -f "$l_temp_file"
+  793:		printf '%s\n' ""
+  794:		return
+  828:			g_zxfer_failure_class=dependency
+  829:			throw_error "$g_target_cmd_zfs"
+  843:				g_zxfer_failure_class=dependency
+  844:				throw_error "$g_cmd_cat"
+  919:		l_sanitized="_"
+  943:		l_result="dataset"
+  967:			l_relative="root"
+  982:				l_relative="root"
+  1002:		return 1
+  1010:				printf '%s\n' "$l_uid"
+  1011:				return 0
+  1042:	return 1
+  1049:		return 1
+  1057:				printf '%s\n' "$l_mode"
+  1058:				return 0
+  1089:	return 1
+  1160:			umask "$l_old_umask"
+  1161:			throw_error "Error creating secure backup directory $l_dir."
+  1260:		return 0
+  1289:			l_suspect_fs_tail=$(echo "$l_suspect_fs" | sed -e 's/.*\///g')
+  1355:				done <"$l_find_results_file"
+  1393:				l_suspect_fs_tail=$(echo "$l_suspect_fs" | sed -e 's/.*\///g')
+  1394:				l_suspect_fs=$l_suspect_fs_parent
+
+src/zxfer_inspect_delete_snap.sh
+  36:	. ./zxfer_globals.sh
+  101:	done <"$g_delete_snapshots_to_delete_tmp_file"
+  122:	l_newline='
+  286:		echoV "No unprotected snapshots to delete."
+  287:		return
+  359:	l_zfs_source_snaps=$(printf '%s\n' "$g_lzfs_list_hr_S_snap" |
+  363:	l_zfs_dest_snaps=$(printf '%s\n' "$g_rzfs_list_hr_snap" |
+
+src/zxfer_transfer_properties.sh
+  36:	. ./zxfer_globals.sh
+  89:				l_mc_property_list=$(echo "$l_mc_property_list" | tr -s "," "\n" |
+  272:	l_machine_pvs=$(run_zfs_cmd_for_spec "$l_zfs_cmd" get -Hpo property,value,source all "$l_dataset" |
+  275:	l_human_pvs=$(run_zfs_cmd_for_spec "$l_zfs_cmd" get -Ho property,value,source all "$l_dataset" |
+  321:		m_source_pvs_effective=$(echo "$g_restored_backup_file_contents" |
+  325:			m_source_pvs_effective=$(echo "$g_restored_backup_file_contents" |
+  364:			IFS=$l_oldifs
+  365:			throw_usage_error "Invalid option property - check -o list for syntax errors."
+  485:		l_zfs_cmd=$g_LZFS
+  509:				IFS=$l_oldifs
+  510:				printf '%s\n' "Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
+  511:				return 1
+  525:			continue
+  531:			l_result=$l_explicit_property
+  702:			zxfer_render_command_for_report "" "$g_cmd_zfs" "$l_subcommand" "$@"
+  854:				l_filtered_dest=$(echo "$l_filtered_dest" | tr -s "," "\n" |
+  887:		printf '%s\n' "$l_set_list"
+  888:		printf '%s\n' ""
+  889:		return
+  894:		printf '%s\n' "$l_set_list"
+  895:		printf '%s\n' "$l_inherit_list"
+  896:		return
+  900:		throw_error "$l_parent_exists"
+  903:		printf '%s\n' "$l_set_list"
+  904:		printf '%s\n' "$l_inherit_list"
+  905:		return
+  1051:			throw_error "$m_source_pvs_effective"
+  1078:			l_effective_readonly_properties=$g_fbsd_readonly_properties
+  1087:			l_effective_readonly_properties=$g_solexp_readonly_properties
+  1134:			IFS= read -r ov_set_list
+  1135:			IFS= read -r ov_inherit_list
+  1139:		echoV "transfer_properties adjusted child_set: $ov_set_list"
+  1140:		echoV "transfer_properties adjusted inherit: $ov_inherit_list"
+
+src/zxfer_zfs_mode.sh
+  36:	. ./zxfer_globals.sh
+  108:		throw_error "Failed to roll back destination [$g_actual_dest] to $l_dest_snapshot after deleting snapshots."
+  181:		throw_error "$l_dest_exists"
+  187:			throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
+  256:	l_newline='
+  285:				if [ -z "$l_remaining_source_snaps" ]; then
+  286:					l_remaining_source_snaps=$l_source_snap
+  324:				relaunch
+  325:				throw_error "Could not disable service $service."
+  340:	for (i = 1; i <= NF; i++)
+  341:		print $i
+  342:}'
+  384:			echov "Dry run: $(build_shell_command_from_argv svcadm enable "$l_i")"
+  385:			continue
+  415:		echov "Dry run: $cmd"
+  416:		return
+  494:		l_iteration_list=$(printf '%s\n%s\n' "$l_iteration_list" "$g_recursive_source_dataset_list" |
+  499:		l_iteration_list=$initial_source
+  532:			l_post_seed_property_sources=$(printf '%s\n%s\n' "$l_post_seed_property_sources" "$l_source" |
+  680:	g_readonly_properties=$(echo "$g_readonly_properties" |
+  696:$g_option_c_services
+  697:EOF
+  722:	g_readonly_properties=$(echo "$g_readonly_properties" |
+  796:			if [ "$g_option_Y_yield_iterations" -ge "$g_MAX_YIELD_ITERATIONS" ]; then
+  801:			break
+
+src/zxfer_zfs_send_receive.sh
+  36:	. ./zxfer_globals.sh
+  72:	l_progress_dialog=$(echo "$g_option_D_display_progress_bar" |
+  73:		sed "s#%%size%%#$l_size_est#g" |
+  230:			l_remote_shell_cmd=$(build_remote_sh_c_command "$l_cmd")
+  231:			build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd"
+  243:				l_remote_shell_cmd=$(build_remote_sh_c_command "$l_remote_cmd")
+  244:				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd") || return 1
+  245:				echo "$l_wrapped_remote_cmd | $g_cmd_decompress_safe"
+  257:				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_option" "$l_remote_cmd") || return 1
+  258:				echo "$g_cmd_compress_safe | $l_wrapped_remote_cmd"
+

@@ -2,10 +2,19 @@
 #
 # shunit2 tests for zxfer_transfer_properties.sh helpers.
 #
-# shellcheck disable=SC2317,SC2329
+# shellcheck disable=SC1090,SC2034,SC2317,SC2329
+
+case "$0" in
+/*)
+	TESTS_DIR=$(dirname "$0")
+	;;
+*)
+	TESTS_DIR=${PWD:-.}/$(dirname "$0")
+	;;
+esac
 
 # shellcheck source=tests/test_helper.sh
-. "$(dirname "$0")/test_helper.sh"
+. "$TESTS_DIR/test_helper.sh"
 
 # shellcheck source=src/zxfer_globals.sh
 . "$ZXFER_ROOT/src/zxfer_globals.sh"
@@ -100,6 +109,14 @@ test_run_zfs_create_with_properties_renders_dry_run_command() {
 		"/usr/bin/ssh 'host' /sbin/zfs 'create' '-o' 'compression=lz4' '-o' 'quota=1G' 'backup/dst'" "$result"
 }
 
+test_run_zfs_create_with_properties_rejects_volume_without_size() {
+	set +e
+	run_zfs_create_with_properties yes volume "" "compression=lz4" "backup/dst" >/dev/null 2>&1
+	status=$?
+
+	assertEquals "Volume creates should fail closed when the source volsize is unavailable." 1 "$status"
+}
+
 test_get_normalized_dataset_properties_defaults_to_g_lzfs() {
 	result=$(
 		(
@@ -117,6 +134,33 @@ test_get_normalized_dataset_properties_defaults_to_g_lzfs() {
 
 	assertEquals "Normalized property lookup should merge machine and human values, preserving human none values." \
 		"quota=none=local,compression=lz4=local" "$result"
+}
+
+test_get_normalized_dataset_properties_tracks_profile_counters_by_lookup_side() {
+	output_file="$TEST_TMPDIR/normalized_profile.out"
+	old_very_verbose=${g_option_V_very_verbose-}
+
+	g_option_V_very_verbose=1
+
+	(
+		run_zfs_cmd_for_spec() {
+			if [ "$3" = "-Hpo" ]; then
+				printf 'compression\tlz4\tlocal\n'
+			else
+				printf 'compression\tlz4\tlocal\n'
+			fi
+		}
+		get_normalized_dataset_properties "tank/src" "/sbin/zfs" source >/dev/null
+		get_normalized_dataset_properties "backup/dst" "/sbin/zfs" destination >/dev/null
+		printf 'source=%s\n' "${g_zxfer_profile_normalized_property_reads_source:-0}" >"$output_file"
+		printf 'destination=%s\n' "${g_zxfer_profile_normalized_property_reads_destination:-0}" >>"$output_file"
+	)
+
+	g_option_V_very_verbose=$old_very_verbose
+
+	assertEquals "Very-verbose profiling should track normalized property reads by lookup side." \
+		"source=1
+destination=1" "$(cat "$output_file")"
 }
 
 test_force_readonly_off_handles_empty_and_rewrites_property() {
@@ -187,6 +231,25 @@ test_collect_source_props_fails_when_backup_entry_missing() {
 		"$output" "Can't find the properties for the filesystem tank/src"
 }
 
+test_collect_source_props_restore_mode_matches_exact_awkward_dataset_tails() {
+	output_file="$TEST_TMPDIR/collect_source_awkward_tail.out"
+
+	(
+		get_normalized_dataset_properties() {
+			printf '%s\n' "compression=off=local"
+		}
+		g_option_e_restore_property_mode=1
+		g_restored_backup_file_contents=$(printf '%s\n%s\n' \
+			"tank/src/child.tail-010,backup/dst,user:note=value,with,commas=local" \
+			"tank/src/child.tail-01,backup/dst,user:note=value=with=equals;and:semicolon=local")
+		collect_source_props "tank/src/child.tail-01" "backup/dst" 0 ""
+		printf '%s\n' "$m_source_pvs_effective" >"$output_file"
+	)
+
+	assertEquals "Restore-mode source matching should select the exact awkward dataset tail and preserve the raw serialized payload." \
+		"user:note=value=with=equals;and:semicolon=local" "$(cat "$output_file")"
+}
+
 test_validate_override_properties_returns_success_for_empty_list_in_current_shell() {
 	validate_override_properties "" "compression=lz4=local"
 	status=$?
@@ -224,7 +287,10 @@ test_ensure_required_properties_present_appends_missing_creation_time_props() {
 			run_zfs_cmd_for_spec() {
 				if [ "$5" = "casesensitivity" ]; then
 					printf 'casesensitivity\tsensitive\tlocal\n'
+					return 0
 				fi
+				printf '%s\n' "invalid property"
+				return 1
 			}
 			ensure_required_properties_present "tank/src" "compression=lz4=local" "/sbin/zfs" "casesensitivity,utf8only"
 		)
@@ -232,6 +298,174 @@ test_ensure_required_properties_present_appends_missing_creation_time_props() {
 
 	assertEquals "Missing required creation-time properties should be appended from explicit zfs get queries." \
 		"compression=lz4=local,casesensitivity=sensitive=local" "$result"
+}
+
+test_ensure_required_properties_present_tracks_backfill_probe_count_when_very_verbose() {
+	output_file="$TEST_TMPDIR/required_property_profile.out"
+	old_very_verbose=${g_option_V_very_verbose-}
+
+	g_option_V_very_verbose=1
+
+	(
+		run_zfs_cmd_for_spec() {
+			if [ "$5" = "casesensitivity" ]; then
+				printf 'casesensitivity\tsensitive\tlocal\n'
+				return 0
+			fi
+			printf '%s\n' "not supported"
+			return 1
+		}
+		ensure_required_properties_present "tank/src" "compression=lz4=local" "/sbin/zfs" "casesensitivity,utf8only" >/dev/null
+		printf '%s\n' "${g_zxfer_profile_required_property_backfill_gets:-0}" >"$output_file"
+	)
+
+	g_option_V_very_verbose=$old_very_verbose
+
+	assertEquals "Very-verbose profiling should count explicit must-create backfill probes." \
+		"2" "$(cat "$output_file")"
+}
+
+test_ensure_required_properties_present_skips_nonapplicable_creation_time_props() {
+	result=$(
+		(
+			run_zfs_cmd_for_spec() {
+				printf '%s\n' "cannot get property: property does not apply to datasets of this type"
+				return 1
+			}
+			ensure_required_properties_present "tank/vol" "compression=lz4=local" "/sbin/zfs" "casesensitivity,utf8only"
+		)
+	)
+
+	assertEquals "Explicit must-create probes that clearly do not apply to the dataset type should be skipped." \
+		"compression=lz4=local" "$result"
+}
+
+test_ensure_required_properties_present_reports_probe_failures_for_required_props() {
+	set +e
+	output=$(
+		(
+			run_zfs_cmd_for_spec() {
+				printf '%s\n' "permission denied"
+				return 1
+			}
+			ensure_required_properties_present "tank/src" "compression=lz4=local" "/sbin/zfs" "casesensitivity"
+		)
+	)
+	status=$?
+
+	assertEquals "Unexpected must-create probe failures should return non-zero." 1 "$status"
+	assertContains "Probe failures should identify the missing required property and dataset." \
+		"$output" "Failed to retrieve required creation-time property [casesensitivity] for dataset [tank/src]: permission denied"
+}
+
+test_get_validated_source_dataset_create_metadata_returns_filesystem_without_volsize() {
+	result=$(
+		(
+			run_source_zfs_cmd() {
+				if [ "$4" = "type" ]; then
+					printf '%s\n' "filesystem"
+				else
+					printf '%s\n' "unexpected $*"
+					return 1
+				fi
+			}
+			get_validated_source_dataset_create_metadata "tank/src"
+		)
+	)
+
+	assertEquals "Filesystem metadata validation should return the type and a blank volume size." \
+		"filesystem" "$result"
+}
+
+test_get_validated_source_dataset_create_metadata_reports_type_probe_failures() {
+	set +e
+	output=$(
+		(
+			run_source_zfs_cmd() {
+				printf '%s\n' "permission denied"
+				return 1
+			}
+			get_validated_source_dataset_create_metadata "tank/src"
+		)
+	)
+	status=$?
+
+	assertEquals "Source type probe failures should abort metadata validation." 1 "$status"
+	assertContains "Type probe failures should identify the source dataset." \
+		"$output" "Failed to retrieve source dataset type for [tank/src]: permission denied"
+}
+
+test_get_validated_source_dataset_create_metadata_reports_unknown_type_output() {
+	set +e
+	output=$(
+		(
+			run_source_zfs_cmd() {
+				printf '%s\n' "snapshot"
+			}
+			get_validated_source_dataset_create_metadata "tank/src"
+		)
+	)
+	status=$?
+
+	assertEquals "Unexpected source type output should abort metadata validation." 1 "$status"
+	assertContains "Unexpected source type output should be surfaced." \
+		"$output" "Invalid source dataset type for [tank/src]: snapshot"
+}
+
+test_get_validated_source_dataset_create_metadata_requires_nonempty_volsize_for_volumes() {
+	set +e
+	output=$(
+		(
+			run_source_zfs_cmd() {
+				if [ "$4" = "type" ]; then
+					printf '%s\n' "volume"
+				elif [ "$4" = "volsize" ]; then
+					printf '\n'
+				else
+					printf '%s\n' "unexpected $*"
+					return 1
+				fi
+			}
+			get_validated_source_dataset_create_metadata "tank/vol"
+		)
+	)
+	status=$?
+
+	assertEquals "Volume metadata validation should reject empty volsize output." 1 "$status"
+	assertContains "Empty volsize output should identify the source zvol." \
+		"$output" "Failed to retrieve source zvol size for [tank/vol]: empty volsize"
+}
+
+test_get_validated_source_dataset_create_metadata_reports_volsize_probe_failures() {
+	set +e
+	output=$(
+		(
+			run_source_zfs_cmd() {
+				if [ "$4" = "type" ]; then
+					printf '%s\n' "volume"
+				elif [ "$4" = "volsize" ]; then
+					printf '%s\n' "ssh timeout"
+					return 1
+				else
+					printf '%s\n' "unexpected $*"
+					return 1
+				fi
+			}
+			get_validated_source_dataset_create_metadata "tank/vol"
+		)
+	)
+	status=$?
+
+	assertEquals "Volume metadata validation should abort on volsize probe failures." 1 "$status"
+	assertContains "Volsize probe failures should identify the source zvol." \
+		"$output" "Failed to retrieve source zvol size for [tank/vol]: ssh timeout"
+}
+
+test_get_required_creation_properties_for_dataset_type_skips_filesystem_only_props_for_volumes() {
+	assertEquals "Volumes should not probe filesystem-only must-create properties." \
+		"" "$(get_required_creation_properties_for_dataset_type "volume")"
+	assertEquals "Filesystems should continue to enforce must-create creation properties." \
+		"casesensitivity,normalization,jailed,utf8only" "$(get_required_creation_properties_for_dataset_type "filesystem")"
 }
 
 test_ensure_destination_exists_returns_one_when_dataset_already_exists() {
@@ -259,6 +493,28 @@ test_ensure_destination_exists_initial_source_adds_parents_when_missing() {
 		"yes|filesystem||compression=lz4,atime=off|backup/dst/child" "$result"
 }
 
+test_ensure_destination_exists_reports_parent_probe_failures() {
+	set +e
+	output=$(
+		(
+			exists_destination() {
+				printf '%s\n' "Failed to determine whether destination dataset [backup/dst] exists: permission denied"
+				return 1
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			ensure_destination_exists 0 1 "compression=lz4=local" "" filesystem "" "backup/dst/child" "$g_readonly_properties" create_runner
+		)
+	)
+	status=$?
+
+	assertEquals "Parent destination probe failures should abort creation planning." 1 "$status"
+	assertContains "Parent destination probe failures should surface the probe error." \
+		"$output" "Failed to determine whether destination dataset [backup/dst] exists: permission denied"
+}
+
 test_ensure_destination_exists_child_uses_creation_properties() {
 	result=$(
 		(
@@ -280,6 +536,9 @@ test_ensure_destination_exists_reports_create_failures() {
 		(
 			create_runner() {
 				return 1
+			}
+			exists_destination() {
+				printf '0\n'
 			}
 			throw_error() {
 				printf '%s\n' "$1"
@@ -376,6 +635,37 @@ test_zxfer_run_zfs_set_property_preserves_literal_assignment_for_local_exec() {
 		"$(printf '%s\n' "set" "$l_property=$l_value" "backup/dst")" "$(cat "$log")"
 }
 
+test_zxfer_run_zfs_set_property_fuzz_preserves_delimiter_heavy_values_for_local_exec() {
+	current_log=""
+	l_property="user:zxfer.fuzz"
+	case_file="$TEST_TMPDIR/set_property_local_fuzz_cases.txt"
+	cat >"$case_file" <<'EOF'
+value,with,commas|backup/dst.child-01
+value=with=equals|backup/dst.tail-02
+value;with:semicolon|backup/dst.tail-03
+value,=; mixed|backup/dst.tail-04
+EOF
+
+	run_destination_zfs_cmd() {
+		printf '%s\n' "$@" >"$current_log"
+	}
+
+	g_option_n_dryrun=0
+	g_option_T_target_host=""
+	g_RZFS="/sbin/zfs"
+	case_index=0
+	while IFS='|' read -r l_value l_destination || [ -n "$l_value$l_destination" ]; do
+		[ -n "$l_destination" ] || continue
+		case_index=$((case_index + 1))
+		current_log="$TEST_TMPDIR/set_property_local_fuzz_$case_index.log"
+		zxfer_run_zfs_set_property "$l_property" "$l_value" "$l_destination"
+		assertEquals "Local property fuzz case $case_index should preserve the literal assignment and dataset tail." \
+			"$(printf '%s\n' "set" "$l_property=$l_value" "$l_destination")" "$(cat "$current_log")"
+	done <"$case_file"
+
+	unset -f run_destination_zfs_cmd
+}
+
 test_zxfer_run_zfs_set_property_preserves_literal_assignment_for_remote_exec() {
 	fake_ssh="$TEST_TMPDIR/fake_ssh_join_exec_set"
 	remote_zfs="$TEST_TMPDIR/fake_remote_zfs_set"
@@ -433,6 +723,154 @@ EOF
 		"$(printf '%s\n' "set" "$l_property=$l_value" "backup/dst")" "$(cat "$remote_log")"
 	assertEquals "Remote property sets should keep the target host as the ssh destination." \
 		"target.example" "$(sed -n '1p' "$ssh_log")"
+}
+
+test_zxfer_run_destination_zfs_property_command_passes_destination_profile_side_when_hosts_match() {
+	fake_ssh="$TEST_TMPDIR/fake_ssh_destination_profile_side"
+	ssh_log="$TEST_TMPDIR/fake_ssh_destination_profile_side.log"
+	old_g_cmd_ssh=${g_cmd_ssh-}
+	old_origin_host=$g_option_O_origin_host
+	old_target_host=$g_option_T_target_host
+	old_target_cmd_zfs=${g_target_cmd_zfs-}
+	old_very_verbose=${g_option_V_very_verbose-}
+	old_total_ssh=${g_zxfer_profile_ssh_shell_invocations-}
+	old_source_ssh=${g_zxfer_profile_source_ssh_shell_invocations-}
+	old_destination_ssh=${g_zxfer_profile_destination_ssh_shell_invocations-}
+
+	cat >"$fake_ssh" <<'EOF'
+#!/bin/sh
+host=$1
+shift
+	printf '%s\n' "$host" >"$FAKE_SSH_LOG"
+exit 0
+EOF
+	chmod +x "$fake_ssh"
+
+	FAKE_SSH_LOG="$ssh_log"
+	export FAKE_SSH_LOG
+
+	g_cmd_ssh="$fake_ssh"
+	g_option_O_origin_host="shared.example"
+	g_option_T_target_host="shared.example"
+	g_target_cmd_zfs="/remote/zfs"
+	g_option_V_very_verbose=1
+	g_zxfer_profile_ssh_shell_invocations=0
+	g_zxfer_profile_source_ssh_shell_invocations=0
+	g_zxfer_profile_destination_ssh_shell_invocations=0
+
+	zxfer_run_destination_zfs_property_command set "user:test=value" "backup/dst"
+
+	result_total_ssh=${g_zxfer_profile_ssh_shell_invocations:-0}
+	result_source_ssh=${g_zxfer_profile_source_ssh_shell_invocations:-0}
+	result_destination_ssh=${g_zxfer_profile_destination_ssh_shell_invocations:-0}
+
+	unset FAKE_SSH_LOG
+	g_cmd_ssh=$old_g_cmd_ssh
+	g_option_O_origin_host=$old_origin_host
+	g_option_T_target_host=$old_target_host
+	g_target_cmd_zfs=$old_target_cmd_zfs
+	g_option_V_very_verbose=$old_very_verbose
+	g_zxfer_profile_ssh_shell_invocations=$old_total_ssh
+	g_zxfer_profile_source_ssh_shell_invocations=$old_source_ssh
+	g_zxfer_profile_destination_ssh_shell_invocations=$old_destination_ssh
+
+	assertEquals "Destination-side property commands should keep the shared host as the ssh destination." \
+		"shared.example" "$(cat "$ssh_log")"
+	assertEquals "Destination-side property commands should increment the total ssh shell counter." \
+		"1" "$result_total_ssh"
+	assertEquals "Destination-side property commands should not increment the source-side ssh shell counter when origin and target share the same host spec." \
+		"0" "$result_source_ssh"
+	assertEquals "Destination-side property commands should increment the destination-side ssh shell counter when origin and target share the same host spec." \
+		"1" "$result_destination_ssh"
+}
+
+test_zxfer_run_zfs_set_property_fuzz_preserves_delimiter_heavy_values_for_remote_exec() {
+	fake_ssh="$TEST_TMPDIR/fake_ssh_join_exec_set_fuzz"
+	fake_doas="$TEST_TMPDIR/doas"
+	remote_zfs="$TEST_TMPDIR/fake_remote_zfs_set_fuzz"
+	ssh_log="$TEST_TMPDIR/fake_ssh_join_exec_set_fuzz.log"
+	remote_log="$TEST_TMPDIR/fake_remote_zfs_set_fuzz.log"
+	case_file="$TEST_TMPDIR/set_property_remote_fuzz_cases.txt"
+	l_property="user:zxfer.fuzz"
+	old_g_cmd_ssh=${g_cmd_ssh-}
+	old_target_host=$g_option_T_target_host
+	old_target_cmd_zfs=${g_target_cmd_zfs-}
+	old_fake_remote_path=${FAKE_REMOTE_PATH-}
+
+	cat >"$fake_ssh" <<'EOF'
+#!/bin/sh
+host=$1
+shift
+remote_cmd=""
+for arg in "$@"; do
+	if [ "$remote_cmd" = "" ]; then
+		remote_cmd=$arg
+	else
+		remote_cmd="$remote_cmd $arg"
+	fi
+done
+if [ -n "${FAKE_SSH_LOG:-}" ]; then
+	printf '%s\n' "$host" >>"$FAKE_SSH_LOG"
+	printf '%s\n' "$remote_cmd" >>"$FAKE_SSH_LOG"
+fi
+PATH=${FAKE_REMOTE_PATH:-$PATH}
+export PATH
+/bin/sh -c "$remote_cmd"
+EOF
+	chmod +x "$fake_ssh"
+
+	cat >"$fake_doas" <<'EOF'
+#!/bin/sh
+exec "$@"
+EOF
+	chmod +x "$fake_doas"
+
+	cat >"$remote_zfs" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$ZXFER_REMOTE_ZFS_LOG"
+EOF
+	chmod +x "$remote_zfs"
+
+	cat >"$case_file" <<'EOF'
+value,with,commas|backup/dst.child-01
+value=with=equals|backup/dst.tail-02
+value;with:semicolon|backup/dst.tail-03
+value,=; mixed|backup/dst.tail-04
+EOF
+
+	FAKE_SSH_LOG="$ssh_log"
+	FAKE_REMOTE_PATH="$TEST_TMPDIR:$PATH"
+	ZXFER_REMOTE_ZFS_LOG="$remote_log"
+	export FAKE_SSH_LOG FAKE_REMOTE_PATH ZXFER_REMOTE_ZFS_LOG
+
+	g_option_n_dryrun=0
+	g_cmd_ssh="$fake_ssh"
+	g_option_T_target_host="target.example doas"
+	g_target_cmd_zfs="$remote_zfs"
+	case_index=0
+	while IFS='|' read -r l_value l_destination || [ -n "$l_value$l_destination" ]; do
+		[ -n "$l_destination" ] || continue
+		case_index=$((case_index + 1))
+		: >"$ssh_log"
+		zxfer_run_zfs_set_property "$l_property" "$l_value" "$l_destination"
+		assertEquals "Remote property fuzz case $case_index should preserve the literal assignment after ssh joins the remote command." \
+			"$(printf '%s\n' "set" "$l_property=$l_value" "$l_destination")" "$(cat "$remote_log")"
+		assertEquals "Remote property fuzz case $case_index should keep the target host separate from wrapper tokens." \
+			"target.example" "$(sed -n '1p' "$ssh_log")"
+		assertContains "Remote property fuzz case $case_index should preserve the doas wrapper in the remote command string." \
+			"$(sed -n '2p' "$ssh_log")" "'doas'"
+	done <"$case_file"
+
+	unset FAKE_SSH_LOG ZXFER_REMOTE_ZFS_LOG
+	if [ -n "${old_fake_remote_path:+set}" ]; then
+		FAKE_REMOTE_PATH=$old_fake_remote_path
+		export FAKE_REMOTE_PATH
+	else
+		unset FAKE_REMOTE_PATH
+	fi
+	g_cmd_ssh=$old_g_cmd_ssh
+	g_option_T_target_host=$old_target_host
+	g_target_cmd_zfs=$old_target_cmd_zfs
 }
 
 test_zxfer_run_zfs_inherit_property_handles_dry_run_and_failures() {
@@ -755,7 +1193,7 @@ test_transfer_properties_marks_created_destinations_and_records_backup() {
 			m_source_pvs_effective="compression=lz4=local"
 		}
 		run_source_zfs_cmd() {
-			if [ "$5" = "type" ]; then
+			if [ "$4" = "type" ]; then
 				printf '%s\n' "filesystem"
 			else
 				printf '%s\n' "-"
@@ -773,6 +1211,9 @@ test_transfer_properties_marks_created_destinations_and_records_backup() {
 		}
 		strip_unsupported_properties() {
 			printf '%s\n' "$1"
+		}
+		ensure_required_properties_present() {
+			printf '%s\n' "$2"
 		}
 		ensure_destination_exists() {
 			printf 'ensure %s\n' "$2" >>"$LOG_FILE"
@@ -806,7 +1247,7 @@ test_transfer_properties_diffs_existing_destinations_and_applies_changes() {
 			m_source_pvs_effective="compression=lz4=local"
 		}
 		run_source_zfs_cmd() {
-			if [ "$5" = "type" ]; then
+			if [ "$4" = "type" ]; then
 				printf '%s\n' "filesystem"
 			else
 				printf '%s\n' "-"
@@ -821,6 +1262,9 @@ test_transfer_properties_diffs_existing_destinations_and_applies_changes() {
 		}
 		strip_unsupported_properties() {
 			printf '%s\n' "$1"
+		}
+		ensure_required_properties_present() {
+			printf '%s\n' "$2"
 		}
 		ensure_destination_exists() {
 			return 1
@@ -858,7 +1302,7 @@ test_transfer_properties_queries_missing_must_create_properties_before_diffing()
 			m_source_pvs_effective="compression=lz4=local"
 		}
 		run_source_zfs_cmd() {
-			if [ "$5" = "type" ]; then
+			if [ "$4" = "type" ]; then
 				printf '%s\n' "filesystem"
 			else
 				printf '%s\n' "-"
@@ -926,7 +1370,7 @@ test_transfer_properties_propagates_must_create_diff_failures() {
 				m_source_pvs_effective="compression=lz4=local"
 			}
 			run_source_zfs_cmd() {
-				if [ "$5" = "type" ]; then
+				if [ "$4" = "type" ]; then
 					printf '%s\n' "filesystem"
 				else
 					printf '%s\n' "-"
@@ -944,6 +1388,9 @@ test_transfer_properties_propagates_must_create_diff_failures() {
 			}
 			strip_unsupported_properties() {
 				printf '%s\n' "$1"
+			}
+			ensure_required_properties_present() {
+				printf '%s\n' "$2"
 			}
 			ensure_destination_exists() {
 				return 1
@@ -976,6 +1423,254 @@ test_transfer_properties_propagates_must_create_diff_failures() {
 		"$output" "must-create mismatch"
 }
 
+test_transfer_properties_fails_when_source_required_property_probe_fails() {
+	set +e
+	output=$(
+		(
+			collect_source_props() {
+				m_source_pvs_raw="compression=lz4=local"
+				m_source_pvs_effective="compression=lz4=local"
+			}
+			run_source_zfs_cmd() {
+				if [ "$4" = "type" ]; then
+					printf '%s\n' "filesystem"
+				else
+					printf '%s\n' "-"
+				fi
+			}
+			run_zfs_cmd_for_spec() {
+				if [ "$5" = "casesensitivity" ] && [ "$6" = "tank/src" ]; then
+					printf '%s\n' "permission denied"
+					return 1
+				fi
+				printf '%s\n' "unexpected probe $*"
+				return 1
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_actual_dest="backup/dst"
+			transfer_properties "tank/src"
+		)
+	)
+	status=$?
+
+	assertEquals "Source must-create probe failures should abort property transfer." 1 "$status"
+	assertContains "Property transfer should preserve the source required-property probe failure." \
+		"$output" "Failed to retrieve required creation-time property [casesensitivity] for dataset [tank/src]: permission denied"
+}
+
+test_transfer_properties_fails_when_destination_required_property_probe_fails() {
+	set +e
+	output=$(
+		(
+			collect_source_props() {
+				m_source_pvs_raw="compression=lz4=local,casesensitivity=sensitive=local,normalization=none=local,jailed=off=local,utf8only=on=local"
+				m_source_pvs_effective="$m_source_pvs_raw"
+			}
+			run_source_zfs_cmd() {
+				if [ "$4" = "type" ]; then
+					printf '%s\n' "filesystem"
+				else
+					printf '%s\n' "-"
+				fi
+			}
+			run_zfs_cmd_for_spec() {
+				if [ "$5" = "casesensitivity" ] && [ "$6" = "backup/dst" ]; then
+					printf '%s\n' "ssh timeout"
+					return 1
+				fi
+				printf '%s\n' "invalid property"
+				return 1
+			}
+			validate_override_properties() {
+				:
+			}
+			derive_override_lists() {
+				printf 'compression=lz4=local,casesensitivity=sensitive=local\n'
+				printf '\n'
+			}
+			sanitize_property_list() {
+				printf '%s\n' "$1"
+			}
+			strip_unsupported_properties() {
+				printf '%s\n' "$1"
+			}
+			ensure_destination_exists() {
+				return 1
+			}
+			collect_destination_props() {
+				printf '%s\n' "compression=off=local,normalization=none=local,jailed=off=local,utf8only=on=local"
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_recursive_dest_list="backup/dst"
+			g_actual_dest="backup/dst"
+			transfer_properties "tank/src"
+		)
+	)
+	status=$?
+
+	assertEquals "Destination must-create probe failures should abort property transfer." 1 "$status"
+	assertContains "Property transfer should preserve the destination required-property probe failure." \
+		"$output" "Failed to retrieve required creation-time property [casesensitivity] for dataset [backup/dst]: ssh timeout"
+}
+
+test_transfer_properties_skips_filesystem_only_required_property_probes_for_volumes() {
+	log="$TEST_TMPDIR/transfer_volume_required_props.log"
+	: >"$log"
+
+	(
+		LOG_FILE="$log"
+		collect_source_props() {
+			m_source_pvs_raw="compression=lz4=local"
+			m_source_pvs_effective="$m_source_pvs_raw"
+		}
+		run_source_zfs_cmd() {
+			if [ "$4" = "type" ]; then
+				printf '%s\n' "volume"
+			elif [ "$4" = "volsize" ]; then
+				printf '%s\n' "8M"
+			else
+				printf '%s\n' "-"
+			fi
+		}
+		ensure_required_properties_present() {
+			printf 'ensure-required %s %s %s\n' "$1" "$2" "$4" >>"$LOG_FILE"
+			if [ -n "$4" ]; then
+				printf '%s\n' "unexpected required property list: $4"
+				exit 1
+			fi
+			printf '%s\n' "$2"
+		}
+		validate_override_properties() {
+			:
+		}
+		derive_override_lists() {
+			printf 'compression=lz4=local\n'
+			printf '\n'
+		}
+		sanitize_property_list() {
+			printf '%s\n' "$1"
+		}
+		strip_unsupported_properties() {
+			printf '%s\n' "$1"
+		}
+		ensure_destination_exists() {
+			printf 'ensure %s %s %s\n' "$5" "$6" "$7" >>"$LOG_FILE"
+			return 0
+		}
+		initial_source="tank/vol"
+		g_actual_dest="backup/vol"
+		transfer_properties "tank/vol"
+		printf 'created=%s\n' "$g_dest_created_by_zxfer" >>"$LOG_FILE"
+	)
+
+	assertEquals "Volume transfers should not probe filesystem-only creation-time properties before creation." \
+		"ensure-required tank/vol compression=lz4=local 
+ensure-required tank/vol compression=lz4=local 
+ensure volume 8M backup/vol
+created=1" "$(cat "$log")"
+}
+
+test_transfer_properties_fails_when_source_type_probe_fails() {
+	set +e
+	output=$(
+		(
+			collect_source_props() {
+				m_source_pvs_raw="compression=lz4=local"
+				m_source_pvs_effective="$m_source_pvs_raw"
+			}
+			run_source_zfs_cmd() {
+				if [ "$4" = "type" ]; then
+					printf '%s\n' "permission denied"
+					return 1
+				fi
+				printf '%s\n' "unexpected $*"
+				return 1
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			transfer_properties "tank/src"
+		)
+	)
+	status=$?
+
+	assertEquals "Source type probe failures should abort property transfer." 1 "$status"
+	assertContains "Property transfer should preserve the source type probe failure." \
+		"$output" "Failed to retrieve source dataset type for [tank/src]: permission denied"
+}
+
+test_transfer_properties_fails_when_source_volume_size_probe_fails() {
+	set +e
+	output=$(
+		(
+			collect_source_props() {
+				m_source_pvs_raw="compression=lz4=local"
+				m_source_pvs_effective="$m_source_pvs_raw"
+			}
+			run_source_zfs_cmd() {
+				if [ "$4" = "type" ]; then
+					printf '%s\n' "volume"
+				elif [ "$4" = "volsize" ]; then
+					printf '%s\n' "ssh timeout"
+					return 1
+				else
+					printf '%s\n' "unexpected $*"
+					return 1
+				fi
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			transfer_properties "tank/vol"
+		)
+	)
+	status=$?
+
+	assertEquals "Source volume-size probe failures should abort property transfer." 1 "$status"
+	assertContains "Property transfer should preserve the source zvol size probe failure." \
+		"$output" "Failed to retrieve source zvol size for [tank/vol]: ssh timeout"
+}
+
+test_transfer_properties_fails_when_source_volume_size_is_empty() {
+	set +e
+	output=$(
+		(
+			collect_source_props() {
+				m_source_pvs_raw="compression=lz4=local"
+				m_source_pvs_effective="$m_source_pvs_raw"
+			}
+			run_source_zfs_cmd() {
+				if [ "$4" = "type" ]; then
+					printf '%s\n' "volume"
+				elif [ "$4" = "volsize" ]; then
+					printf '\n'
+				else
+					printf '%s\n' "unexpected $*"
+					return 1
+				fi
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			transfer_properties "tank/vol"
+		)
+	)
+	status=$?
+
+	assertEquals "Empty source volume sizes should abort property transfer." 1 "$status"
+	assertContains "Property transfer should reject empty zvol sizes." \
+		"$output" "Failed to retrieve source zvol size for [tank/vol]: empty volsize"
+}
+
 test_transfer_properties_forces_readonly_overrides_in_current_shell() {
 	log="$TEST_TMPDIR/transfer_writable.log"
 	: >"$log"
@@ -990,7 +1685,7 @@ test_transfer_properties_forces_readonly_overrides_in_current_shell() {
 		m_source_pvs_effective="readonly=off=local,compression=lz4=local"
 	}
 	run_source_zfs_cmd() {
-		if [ "$5" = "type" ]; then
+		if [ "$4" = "type" ]; then
 			printf '%s\n' "filesystem"
 		else
 			printf '%s\n' "-"
@@ -1008,6 +1703,9 @@ test_transfer_properties_forces_readonly_overrides_in_current_shell() {
 	}
 	strip_unsupported_properties() {
 		printf '%s\n' "$1"
+	}
+	ensure_required_properties_present() {
+		printf '%s\n' "$2"
 	}
 	ensure_destination_exists() {
 		return 0
@@ -1041,7 +1739,7 @@ test_transfer_properties_skip_backup_capture_preserves_existing_backup_contents(
 		m_source_pvs_effective="$m_source_pvs_raw"
 	}
 	run_source_zfs_cmd() {
-		if [ "$5" = "type" ]; then
+		if [ "$4" = "type" ]; then
 			printf '%s\n' "filesystem"
 		else
 			printf '%s\n' "-"
@@ -1059,6 +1757,9 @@ test_transfer_properties_skip_backup_capture_preserves_existing_backup_contents(
 	}
 	strip_unsupported_properties() {
 		printf '%s\n' "$1"
+	}
+	ensure_required_properties_present() {
+		printf '%s\n' "$2"
 	}
 	ensure_destination_exists() {
 		return 0
@@ -1093,7 +1794,7 @@ test_transfer_properties_uses_freebsd_readonly_properties_without_mutating_globa
 		m_source_pvs_effective="compression=lz4=local"
 	}
 	run_source_zfs_cmd() {
-		if [ "$5" = "type" ]; then
+		if [ "$4" = "type" ]; then
 			printf '%s\n' "filesystem"
 		else
 			printf '%s\n' "-"
@@ -1112,6 +1813,9 @@ test_transfer_properties_uses_freebsd_readonly_properties_without_mutating_globa
 	}
 	strip_unsupported_properties() {
 		printf '%s\n' "$1"
+	}
+	ensure_required_properties_present() {
+		printf '%s\n' "$2"
 	}
 	ensure_destination_exists() {
 		return 0
@@ -1150,7 +1854,7 @@ test_transfer_properties_uses_solexp_readonly_properties_without_mutating_global
 		m_source_pvs_effective="compression=lz4=local"
 	}
 	run_source_zfs_cmd() {
-		if [ "$5" = "type" ]; then
+		if [ "$4" = "type" ]; then
 			printf '%s\n' "filesystem"
 		else
 			printf '%s\n' "-"
@@ -1169,6 +1873,9 @@ test_transfer_properties_uses_solexp_readonly_properties_without_mutating_global
 	}
 	strip_unsupported_properties() {
 		printf '%s\n' "$1"
+	}
+	ensure_required_properties_present() {
+		printf '%s\n' "$2"
 	}
 	ensure_destination_exists() {
 		return 0
@@ -1192,4 +1899,5 @@ test_transfer_properties_uses_solexp_readonly_properties_without_mutating_global
 readonly,jailed" "$(cat "$log")"
 }
 
+# shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

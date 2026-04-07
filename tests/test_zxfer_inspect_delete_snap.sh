@@ -2,9 +2,19 @@
 #
 # shunit2 tests for zxfer_inspect_delete_snap.sh helpers.
 #
+# shellcheck disable=SC1090,SC2034,SC2317,SC2329
+
+case "$0" in
+/*)
+	TESTS_DIR=$(dirname "$0")
+	;;
+*)
+	TESTS_DIR=${PWD:-.}/$(dirname "$0")
+	;;
+esac
 
 # shellcheck source=tests/test_helper.sh
-. "$(dirname "$0")/test_helper.sh"
+. "$TESTS_DIR/test_helper.sh"
 
 # shellcheck source=src/zxfer_globals.sh
 . "$ZXFER_ROOT/src/zxfer_globals.sh"
@@ -353,15 +363,15 @@ EOF
 test_inspect_delete_snap_marks_destination_present_when_matching_dataset_exists() {
 	g_lzfs_list_hr_S_snap=$(
 		cat <<'EOF'
-tank/src@zxfer_3
-tank/src@zxfer_2
-tank/src@zxfer_1
+tank/src@zxfer_3	333
+tank/src@zxfer_2	222
+tank/src@zxfer_1	111
 EOF
 	)
 	g_rzfs_list_hr_snap=$(
 		cat <<'EOF'
-backup/dst@zxfer_2
-backup/dst@zxfer_1
+backup/dst@zxfer_2	222
+backup/dst@zxfer_1	111
 EOF
 	)
 	g_actual_dest="backup/dst"
@@ -370,7 +380,32 @@ EOF
 
 	assertEquals "Matching destination datasets should be marked as present." 1 "$g_dest_has_snapshots"
 	assertEquals "The most recent common snapshot should be detected from the matching destination list." \
-		"tank/src@zxfer_2" "$g_last_common_snap"
+		"tank/src@zxfer_2	222" "$g_last_common_snap"
+}
+
+test_inspect_delete_snap_requires_matching_guid_for_common_snapshot_detection() {
+	g_lzfs_list_hr_S_snap=$(
+		cat <<'EOF'
+tank/src@zxfer_3	333
+tank/src@zxfer_2	222
+tank/src@zxfer_1	111
+EOF
+	)
+	g_rzfs_list_hr_snap=$(
+		cat <<'EOF'
+backup/dst@zxfer_2	999
+backup/dst@zxfer_1	111
+EOF
+	)
+	g_actual_dest="backup/dst"
+
+	inspect_delete_snap 0 "tank/src"
+
+	assertEquals "Same-named but unrelated destination snapshots should not be treated as the common base." \
+		"tank/src@zxfer_1	111" "$g_last_common_snap"
+	assertEquals "Transfer planning should keep the divergent source snapshot when the destination guid differs." \
+		"tank/src@zxfer_2	222
+tank/src@zxfer_3	333" "$g_src_snapshot_transfer_list"
 }
 
 test_inspect_delete_snap_invokes_delete_path_when_requested() {
@@ -409,4 +444,5 @@ backup/dst@zxfer_1
 backup/dst@old_only"
 }
 
+# shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

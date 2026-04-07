@@ -1,0 +1,8 @@
+90.72	517	469	48	src/zxfer_common.sh
+91.88	197	181	16	src/zxfer_get_zfs_list.sh
+95.37	712	679	33	src/zxfer_globals.sh
+94.96	139	132	7	src/zxfer_inspect_delete_snap.sh
+94.09	558	525	33	src/zxfer_transfer_properties.sh
+92.47	332	307	25	src/zxfer_zfs_mode.sh
+94.87	195	185	10	src/zxfer_zfs_send_receive.sh
+93.51	2650	2478	172	TOTAL

@@ -139,20 +139,57 @@ ssh_supports_control_sockets() {
 	"$g_cmd_ssh" -M -V >/dev/null 2>&1
 }
 
+zxfer_validate_resolved_tool_path() {
+	l_path=$1
+	l_label=$2
+	l_scope=${3:-}
+
+	l_tab=$(printf '\t')
+	l_cr=$(printf '\r')
+	l_lf=$(printf '\n_')
+	l_lf=${l_lf%_}
+
+	case "$l_path" in
+	*"$l_tab"* | *"$l_cr"* | *"$l_lf"*)
+		if [ "$l_scope" = "" ]; then
+			printf '%s\n' "Required dependency \"$l_label\" resolved to \"$l_path\", but zxfer requires a single-line absolute path without control whitespace."
+		else
+			printf '%s\n' "Required dependency \"$l_label\" on $l_scope resolved to \"$l_path\", but zxfer requires a single-line absolute path without control whitespace."
+		fi
+		return 1
+		;;
+	esac
+
+	case "$l_path" in
+	/*)
+		printf '%s\n' "$l_path"
+		return 0
+		;;
+	*)
+		if [ "$l_scope" = "" ]; then
+			printf '%s\n' "Required dependency \"$l_label\" resolved to \"$l_path\", but zxfer requires an absolute path."
+		else
+			printf '%s\n' "Required dependency \"$l_label\" on $l_scope resolved to \"$l_path\", but zxfer requires an absolute path."
+		fi
+		return 1
+		;;
+	esac
+}
+
 resolve_remote_required_tool() {
 	l_host=$1
 	l_tool=$2
 	l_label=${3:-$l_tool}
+	l_profile_side=${4:-}
 
 	[ -n "$l_host" ] || return 1
 
-	l_ssh_cmd=$(get_ssh_cmd_for_host "$l_host")
 	l_dependency_path=${g_zxfer_dependency_path:-$ZXFER_DEFAULT_SECURE_PATH}
 	l_dependency_path_single=$(escape_for_single_quotes "$l_dependency_path")
 	l_tool_single=$(escape_for_single_quotes "$l_tool")
 	l_remote_probe="PATH='$l_dependency_path_single'; export PATH; command -v '$l_tool_single'"
 	l_remote_probe_cmd=$(build_remote_sh_c_command "$l_remote_probe")
-	l_remote_output=$(invoke_ssh_shell_command_for_host "$l_ssh_cmd" "$l_host" "$l_remote_probe_cmd" 2>/dev/null)
+	l_remote_output=$(invoke_ssh_shell_command_for_host "$l_host" "$l_remote_probe_cmd" "$l_profile_side" 2>/dev/null)
 	l_remote_status=$?
 	l_resolved_path=$(printf '%s\n' "$l_remote_output" | sed -n '1p')
 	if [ "$l_remote_status" -ne 0 ]; then
@@ -168,16 +205,7 @@ resolve_remote_required_tool() {
 		return 1
 	fi
 
-	case "$l_resolved_path" in
-	/*)
-		printf '%s\n' "$l_resolved_path"
-		return 0
-		;;
-	*)
-		printf '%s\n' "Required dependency \"$l_label\" on host $l_host resolved to \"$l_resolved_path\", but zxfer requires an absolute path."
-		return 1
-		;;
-	esac
+	zxfer_validate_resolved_tool_path "$l_resolved_path" "$l_label" "host $l_host"
 }
 
 zxfer_find_required_tool() {
@@ -190,14 +218,8 @@ zxfer_find_required_tool() {
 		printf '%s\n' "Required dependency \"$l_label\" not found in secure PATH ($g_zxfer_secure_path). Set ZXFER_SECURE_PATH or install the binary."
 		return 1
 	fi
-	case "$l_path" in
-	/*) ;;
-	*)
-		printf '%s\n' "Required dependency \"$l_label\" resolved to \"$l_path\", but zxfer requires an absolute path."
-		return 1
-		;;
-	esac
-	printf '%s\n' "$l_path"
+
+	zxfer_validate_resolved_tool_path "$l_path" "$l_label"
 }
 
 zxfer_assign_required_tool() {
@@ -283,6 +305,35 @@ init_globals() {
 	# keep track of the number of background zfs send jobs
 	g_count_zfs_send_jobs=0
 	g_zfs_send_job_pids=""
+	g_zxfer_cleanup_pids=""
+	g_zxfer_profile_start_epoch=$(date '+%s' 2>/dev/null || :)
+	g_zxfer_profile_has_data=0
+	g_zxfer_profile_summary_emitted=0
+	g_zxfer_profile_source_zfs_calls=0
+	g_zxfer_profile_destination_zfs_calls=0
+	g_zxfer_profile_other_zfs_calls=0
+	g_zxfer_profile_zfs_list_calls=0
+	g_zxfer_profile_zfs_get_calls=0
+	g_zxfer_profile_zfs_send_calls=0
+	g_zxfer_profile_zfs_receive_calls=0
+	g_zxfer_profile_ssh_shell_invocations=0
+	g_zxfer_profile_source_ssh_shell_invocations=0
+	g_zxfer_profile_destination_ssh_shell_invocations=0
+	g_zxfer_profile_other_ssh_shell_invocations=0
+	g_zxfer_profile_source_snapshot_list_commands=0
+	g_zxfer_profile_source_snapshot_list_parallel_commands=0
+	g_zxfer_profile_send_receive_pipeline_commands=0
+	g_zxfer_profile_send_receive_background_pipeline_commands=0
+	g_zxfer_profile_exists_destination_calls=0
+	g_zxfer_profile_normalized_property_reads_source=0
+	g_zxfer_profile_normalized_property_reads_destination=0
+	g_zxfer_profile_normalized_property_reads_other=0
+	g_zxfer_profile_required_property_backfill_gets=0
+	g_zxfer_profile_parent_destination_property_reads=0
+	g_zxfer_profile_bucket_source_inspection=0
+	g_zxfer_profile_bucket_destination_inspection=0
+	g_zxfer_profile_bucket_property_reconciliation=0
+	g_zxfer_profile_bucket_send_receive_setup=0
 
 	g_destination=""
 	g_backup_file_extension=".zxfer_backup_info"
@@ -305,6 +356,12 @@ init_globals() {
 	zxfer_assign_required_tool g_cmd_awk awk "awk"
 	zxfer_assign_required_tool g_cmd_zfs zfs "zfs"
 	g_cmd_parallel=$(PATH=$g_zxfer_dependency_path command -v parallel 2>/dev/null || :)
+	if [ "$g_cmd_parallel" != "" ]; then
+		if ! g_cmd_parallel=$(zxfer_validate_resolved_tool_path "$g_cmd_parallel" "GNU parallel"); then
+			g_zxfer_failure_class=dependency
+			throw_error "$g_cmd_parallel"
+		fi
+	fi
 	g_origin_parallel_cmd=""
 	# enable compression in ssh options so that remote snapshot lists that
 	# contain thousands of snapshots are compressed
@@ -444,7 +501,11 @@ close_origin_ssh_control_socket() {
 $l_host_tokens
 EOF
 	fi
-	l_log_cmd="$g_cmd_ssh -S $g_ssh_origin_control_socket -O exit $(quote_host_spec_tokens "$g_option_O_origin_host")"
+	l_log_cmd=$(build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_origin_control_socket" -O exit)
+	l_host_safe=$(quote_host_spec_tokens "$g_option_O_origin_host")
+	if [ "$l_host_safe" != "" ]; then
+		l_log_cmd="$l_log_cmd $l_host_safe"
+	fi
 	echoV "Closing origin ssh control socket: $l_log_cmd"
 	"$@" 2>/dev/null
 
@@ -469,7 +530,11 @@ close_target_ssh_control_socket() {
 $l_host_tokens
 EOF
 	fi
-	l_log_cmd="$g_cmd_ssh -S $g_ssh_target_control_socket -O exit $(quote_host_spec_tokens "$g_option_T_target_host")"
+	l_log_cmd=$(build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_target_control_socket" -O exit)
+	l_host_safe=$(quote_host_spec_tokens "$g_option_T_target_host")
+	if [ "$l_host_safe" != "" ]; then
+		l_log_cmd="$l_log_cmd $l_host_safe"
+	fi
 	echoV "Closing target ssh control socket: $l_log_cmd"
 	"$@" 2>/dev/null
 
@@ -488,9 +553,7 @@ close_all_ssh_control_sockets() {
 refresh_remote_zfs_commands() {
 	if [ "$g_option_O_origin_host" != "" ]; then
 		g_option_O_origin_host_safe=$(quote_host_spec_tokens "$g_option_O_origin_host")
-		l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-		l_origin_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
-		g_LZFS="$l_origin_ssh_cmd $g_option_O_origin_host_safe $l_origin_zfs_cmd"
+		g_LZFS=${g_origin_cmd_zfs:-$g_cmd_zfs}
 	else
 		g_option_O_origin_host_safe=""
 		g_LZFS=$g_cmd_zfs
@@ -498,33 +561,11 @@ refresh_remote_zfs_commands() {
 
 	if [ "$g_option_T_target_host" != "" ]; then
 		g_option_T_target_host_safe=$(quote_host_spec_tokens "$g_option_T_target_host")
-		l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-		l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
-		g_RZFS="$l_target_ssh_cmd $g_option_T_target_host_safe $l_target_zfs_cmd"
+		g_RZFS=${g_target_cmd_zfs:-$g_cmd_zfs}
 	else
 		g_option_T_target_host_safe=""
 		g_RZFS=$g_cmd_zfs
 	fi
-}
-
-get_ssh_cmd_for_host() {
-	l_host=$1
-	if [ "$l_host" = "" ]; then
-		echo "$g_cmd_ssh"
-		return
-	fi
-
-	if [ "$l_host" = "$g_option_O_origin_host" ] && [ "$g_ssh_origin_control_socket" != "" ]; then
-		echo "$g_cmd_ssh -S $g_ssh_origin_control_socket"
-		return
-	fi
-
-	if [ "$l_host" = "$g_option_T_target_host" ] && [ "$g_ssh_target_control_socket" != "" ]; then
-		echo "$g_cmd_ssh -S $g_ssh_target_control_socket"
-		return
-	fi
-
-	echo "$g_cmd_ssh"
 }
 
 #
@@ -534,12 +575,10 @@ trap_exit() {
 	# get the exit status of the last command
 	l_exit_status=$?
 
-	# kill all background jobs
-	l_job_pids=$(jobs -p)
-	if [ -n "$l_job_pids" ]; then
-		# shellcheck disable=SC2086  # split into individual PIDs on purpose
-		kill $l_job_pids 2>/dev/null
-	fi
+	# Only terminate zxfer-owned background processes. Killing every direct child
+	# of the shell is too broad and can clobber coverage helpers or command
+	# substitution plumbing in the caller.
+	zxfer_kill_registered_cleanup_pids
 
 	close_all_ssh_control_sockets
 
@@ -569,6 +608,7 @@ trap_exit() {
 	fi
 
 	echoV "zxfer exiting with status $l_exit_status"
+	zxfer_profile_emit_summary
 	zxfer_emit_failure_report "$l_exit_status"
 
 	# exit this script
@@ -730,22 +770,69 @@ prepare_remote_host_connections() {
 	refresh_remote_zfs_commands
 }
 
-# Function to extract snapshot name
-extract_snapshot_name() {
-	# use the method below to not spawn grep and cut
-	#echo "$1" | grep @ | cut -d@ -f2
+# Extract the dataset@snapshot path from a snapshot record. Records may include
+# a tab-delimited GUID suffix (`dataset@snap<TAB>guid`) for identity-safe
+# comparisons; callers that need the executable ZFS path should use this helper.
+extract_snapshot_path() {
+	l_snapshot_record=$1
+	l_tab='	'
 
-	# Check if the input contains an '@' symbol
-	case "$1" in
-	*@*)
-		# Extract the part after the '@' symbol using parameter expansion
-		echo "${1#*@}"
+	case "$l_snapshot_record" in
+	*"$l_tab"*)
+		printf '%s\n' "${l_snapshot_record%%	*}"
 		;;
 	*)
-		# If no '@' symbol is found, return an empty string or handle as needed
-		echo ""
+		printf '%s\n' "$l_snapshot_record"
 		;;
 	esac
+}
+
+# Function to extract snapshot name
+extract_snapshot_name() {
+	l_snapshot_path=$(extract_snapshot_path "$1")
+
+	case "$l_snapshot_path" in
+	*@*)
+		printf '%s\n' "${l_snapshot_path#*@}"
+		;;
+	*)
+		printf '%s\n' ""
+		;;
+	esac
+}
+
+extract_snapshot_guid() {
+	l_snapshot_record=$1
+	l_tab='	'
+
+	case "$l_snapshot_record" in
+	*"$l_tab"*)
+		printf '%s\n' "${l_snapshot_record#*	}"
+		;;
+	*)
+		printf '%s\n' ""
+		;;
+	esac
+}
+
+extract_snapshot_identity() {
+	l_snapshot_name=$(extract_snapshot_name "$1")
+	l_snapshot_guid=$(extract_snapshot_guid "$1")
+
+	[ -n "$l_snapshot_name" ] || {
+		printf '%s\n' ""
+		return
+	}
+
+	if [ -n "$l_snapshot_guid" ]; then
+		printf '%s\t%s\n' "$l_snapshot_name" "$l_snapshot_guid"
+	else
+		printf '%s\n' "$l_snapshot_name"
+	fi
+}
+
+normalize_snapshot_record_list() {
+	printf '%s\n' "$1" | tr ' ' '\n'
 }
 
 #
@@ -754,9 +841,8 @@ extract_snapshot_name() {
 init_variables() {
 	# determine the source operating system
 	if [ "$g_option_O_origin_host" != "" ]; then
-		l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
-		g_source_operating_system=$(get_os "$l_origin_ssh_cmd $g_option_O_origin_host_safe")
-		if ! g_origin_cmd_zfs=$(resolve_remote_required_tool "$g_option_O_origin_host" zfs "zfs"); then
+		g_source_operating_system=$(get_os "$g_option_O_origin_host" source)
+		if ! g_origin_cmd_zfs=$(resolve_remote_required_tool "$g_option_O_origin_host" zfs "zfs" source); then
 			g_zxfer_failure_class=dependency
 			throw_error "$g_origin_cmd_zfs"
 		fi
@@ -767,9 +853,8 @@ init_variables() {
 
 	# determine the destination operating system
 	if [ "$g_option_T_target_host" != "" ]; then
-		l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
-		g_destination_operating_system=$(get_os "$l_target_ssh_cmd $g_option_T_target_host_safe")
-		if ! g_target_cmd_zfs=$(resolve_remote_required_tool "$g_option_T_target_host" zfs "zfs"); then
+		g_destination_operating_system=$(get_os "$g_option_T_target_host" destination)
+		if ! g_target_cmd_zfs=$(resolve_remote_required_tool "$g_option_T_target_host" zfs "zfs" destination); then
 			g_zxfer_failure_class=dependency
 			throw_error "$g_target_cmd_zfs"
 		fi
@@ -784,7 +869,7 @@ init_variables() {
 		if [ "$g_option_O_origin_host" = "" ]; then
 			zxfer_assign_required_tool g_cmd_cat cat "cat"
 		else
-			if ! g_cmd_cat=$(resolve_remote_required_tool "$g_option_O_origin_host" cat "cat"); then
+			if ! g_cmd_cat=$(resolve_remote_required_tool "$g_option_O_origin_host" cat "cat" source); then
 				g_zxfer_failure_class=dependency
 				throw_error "$g_cmd_cat"
 			fi
@@ -1122,10 +1207,10 @@ ensure_local_backup_dir() {
 ensure_remote_backup_dir() {
 	l_dir=$1
 	l_host=$2
+	l_profile_side=${3:-}
 
 	[ "$l_host" = "" ] && return
 
-	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$l_host")
 	l_dir_single=$(escape_for_single_quotes "$l_dir")
 	l_dir_ls_path=$l_dir
 	case "$l_dir_ls_path" in
@@ -1136,7 +1221,7 @@ ensure_remote_backup_dir() {
 	l_dir_ls_single=$(escape_for_single_quotes "$l_dir_ls_path")
 	l_remote_cmd="[ -L '$l_dir_single' ] && { echo 'Refusing to use symlinked zxfer backup directory.' >&2; exit 1; }; if [ -e '$l_dir_single' ] && [ ! -d '$l_dir_single' ]; then echo 'Backup path exists but is not a directory.' >&2; exit 1; fi; umask 077; if ! mkdir -p '$l_dir_single'; then echo 'Error creating secure backup directory.' >&2; exit 1; fi; if ! chmod 700 '$l_dir_single'; then echo 'Error securing backup directory.' >&2; exit 1; fi; l_expected_uid=\$(id -u); l_dir_uid=''; if command -v stat >/dev/null 2>&1; then l_dir_uid=\$(stat -c '%u' '$l_dir_single' 2>/dev/null); if [ \"\$l_dir_uid\" = '' ] || printf '%s' \"\$l_dir_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_dir_uid=\$(stat -f '%u' '$l_dir_single' 2>/dev/null); fi; fi; if [ \"\$l_dir_uid\" = '' ] || printf '%s' \"\$l_dir_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_ls_line=\$(ls -ldn '$l_dir_ls_single' 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_dir_uid=\$(printf '%s\n' \"\$l_ls_line\" | awk '{print \$3}'); fi; fi; if [ \"\$l_dir_uid\" = '' ]; then echo 'Unable to determine backup directory owner.' >&2; exit 1; fi; if [ \"\$l_dir_uid\" != 0 ] && [ \"\$l_dir_uid\" != \"\$l_expected_uid\" ]; then echo 'Backup directory must be owned by root or the ssh user.' >&2; exit 1; fi"
 	l_remote_shell_cmd=$(build_remote_sh_c_command "$l_remote_cmd")
-	if ! invoke_ssh_shell_command_for_host "$l_target_ssh_cmd" "$l_host" "$l_remote_shell_cmd"; then
+	if ! invoke_ssh_shell_command_for_host "$l_host" "$l_remote_shell_cmd" "$l_profile_side"; then
 		throw_error "Error preparing backup directory on $l_host."
 	fi
 }
@@ -1153,8 +1238,8 @@ read_local_backup_file() {
 read_remote_backup_file() {
 	l_host=$1
 	l_path=$2
+	l_profile_side=${3:-}
 
-	l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$l_host")
 	l_path_single=$(escape_for_single_quotes "$l_path")
 	l_remote_insecure_owner_status=95
 	l_remote_insecure_mode_status=96
@@ -1177,11 +1262,11 @@ if [ \"\$l_uid\" != '0' ]; then exit $l_remote_insecure_owner_status; fi; \
 l_mode=''; \
 if command -v stat >/dev/null 2>&1; then l_mode=\$(stat -c '%a' '$l_path_single' 2>/dev/null); if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_mode=\$(stat -f '%OLp' '$l_path_single' 2>/dev/null); fi; fi; \
 if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then if [ \"\$l_ls_line\" = '' ]; then l_ls_line=\$(ls -ldn '$l_path_ls_single' 2>/dev/null) || l_ls_line=''; fi; if [ \"\$l_ls_line\" != '' ]; then l_perm=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$1}'); if [ \"\$l_perm\" = '-rw-------' ]; then l_mode='600'; fi; fi; fi; \
-if [ \"\$l_mode\" = '' ]; then exit $l_remote_unknown_status; fi; \
+	if [ \"\$l_mode\" = '' ]; then exit $l_remote_unknown_status; fi; \
 if [ \"\$l_mode\" != '600' ]; then exit $l_remote_insecure_mode_status; fi; \
 $l_remote_cat_cmd"
 	l_remote_secure_cat_shell_cmd=$(build_remote_sh_c_command "$l_remote_secure_cat_cmd")
-	invoke_ssh_shell_command_for_host "$l_origin_ssh_cmd" "$l_host" "$l_remote_secure_cat_shell_cmd"
+	invoke_ssh_shell_command_for_host "$l_host" "$l_remote_secure_cat_shell_cmd" "$l_profile_side"
 	l_remote_status=$?
 	if [ $l_remote_status -eq $l_remote_insecure_owner_status ]; then
 		throw_error "Refusing to use backup metadata $l_path on $l_host because it is not owned by root."
@@ -1316,7 +1401,7 @@ get_backup_properties() {
 		else
 			for l_candidate in "$l_backup_file" "$l_mount_backup_file" "$l_dataset_backup_file" "$l_legacy_backup_file"; do
 				[ "$l_candidate" = "" ] && continue
-				if l_backup_contents=$(read_remote_backup_file "$g_option_O_origin_host" "$l_candidate") &&
+				if l_backup_contents=$(read_remote_backup_file "$g_option_O_origin_host" "$l_candidate" source) &&
 					backup_metadata_matches_source "$l_backup_contents" "$initial_source"; then
 					g_restored_backup_file_contents=$l_backup_contents
 					l_found_backup_file=1
@@ -1387,14 +1472,13 @@ write_backup_properties() {
 			fi
 			umask "$l_old_umask"
 		else
-			ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host"
-			ensure_remote_backup_dir "$l_backup_file_dir" "$g_option_T_target_host"
-			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
+			ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host" destination
+			ensure_remote_backup_dir "$l_backup_file_dir" "$g_option_T_target_host" destination
 			l_backup_file_path_single=$(escape_for_single_quotes "$l_backup_file_path")
 			l_remote_write_cmd="umask 077; cat > '$l_backup_file_path_single'"
 			l_remote_write_shell_cmd=$(build_remote_sh_c_command "$l_remote_write_cmd")
 			if ! printf '%s' "$g_backup_file_contents" | tr ";" "\n" |
-				invoke_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_write_shell_cmd"; then
+				invoke_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_write_shell_cmd" destination; then
 				throw_error "Error writing backup file. Is filesystem mounted?"
 			fi
 		fi
@@ -1405,9 +1489,21 @@ write_backup_properties() {
 		if [ "$g_option_T_target_host" = "" ]; then
 			printf '%s\n' "umask 077; $l_backup_contents_cmd | $l_translate_cmd > $l_backup_file_path_safe"
 		else
-			l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
 			l_remote_write_cmd="umask 077; cat > $l_backup_file_path_safe"
-			l_remote_write_shell_cmd=$(build_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_write_cmd")
+			l_host_tokens=$(split_host_spec_tokens "$g_option_T_target_host")
+			l_host_token_count=0
+			if [ "$l_host_tokens" != "" ]; then
+				while IFS= read -r l_token || [ -n "$l_token" ]; do
+					[ "$l_token" = "" ] && continue
+					l_host_token_count=$((l_host_token_count + 1))
+				done <<EOF
+$l_host_tokens
+EOF
+			fi
+			if [ "$l_host_token_count" -gt 1 ]; then
+				l_remote_write_cmd=$(build_remote_sh_c_command "$l_remote_write_cmd")
+			fi
+			l_remote_write_shell_cmd=$(build_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_write_cmd")
 			printf '%s\n' "$l_backup_contents_cmd | $l_translate_cmd | $l_remote_write_shell_cmd"
 		fi
 	fi

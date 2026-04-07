@@ -162,6 +162,260 @@ zxfer_record_last_command_argv() {
 	g_zxfer_failure_last_command=$(zxfer_quote_command_argv "$@")
 }
 
+zxfer_profile_metrics_enabled() {
+	[ "${g_option_V_very_verbose:-0}" -eq 1 ]
+}
+
+zxfer_profile_increment_counter() {
+	l_counter_name=$1
+	l_increment_by=${2:-1}
+
+	zxfer_profile_metrics_enabled || return 0
+
+	case "$l_counter_name" in
+	'')
+		return 0
+		;;
+	esac
+
+	g_zxfer_profile_has_data=1
+
+	case "$l_increment_by" in
+	'' | *[!0-9]*)
+		l_increment_by=1
+		;;
+	esac
+
+	eval "l_counter_value=\${$l_counter_name:-0}"
+	case "$l_counter_value" in
+	'' | *[!0-9]*)
+		l_counter_value=0
+		;;
+	esac
+
+	l_counter_value=$((l_counter_value + l_increment_by))
+	eval "$l_counter_name=\$l_counter_value"
+}
+
+zxfer_profile_record_bucket() {
+	l_bucket=$1
+
+	case "$l_bucket" in
+	source_inspection)
+		zxfer_profile_increment_counter g_zxfer_profile_bucket_source_inspection
+		;;
+	destination_inspection)
+		zxfer_profile_increment_counter g_zxfer_profile_bucket_destination_inspection
+		;;
+	property_reconciliation)
+		zxfer_profile_increment_counter g_zxfer_profile_bucket_property_reconciliation
+		;;
+	send_receive_setup)
+		zxfer_profile_increment_counter g_zxfer_profile_bucket_send_receive_setup
+		;;
+	esac
+}
+
+zxfer_profile_record_zfs_call() {
+	l_side=$1
+	l_verb=$2
+
+	zxfer_profile_metrics_enabled || return 0
+
+	case "$l_side" in
+	source)
+		zxfer_profile_increment_counter g_zxfer_profile_source_zfs_calls
+		;;
+	destination)
+		zxfer_profile_increment_counter g_zxfer_profile_destination_zfs_calls
+		;;
+	*)
+		zxfer_profile_increment_counter g_zxfer_profile_other_zfs_calls
+		;;
+	esac
+
+	case "$l_verb" in
+	list)
+		zxfer_profile_increment_counter g_zxfer_profile_zfs_list_calls
+		;;
+	get)
+		zxfer_profile_increment_counter g_zxfer_profile_zfs_get_calls
+		;;
+	send)
+		zxfer_profile_increment_counter g_zxfer_profile_zfs_send_calls
+		;;
+	receive)
+		zxfer_profile_increment_counter g_zxfer_profile_zfs_receive_calls
+		;;
+	esac
+
+	case "${g_zxfer_failure_stage:-}" in
+	"property transfer")
+		zxfer_profile_record_bucket property_reconciliation
+		;;
+	"send/receive")
+		case "$l_verb" in
+		send | receive)
+			zxfer_profile_record_bucket send_receive_setup
+			;;
+		list | get)
+			[ "$l_side" = "destination" ] && zxfer_profile_record_bucket destination_inspection
+			[ "$l_side" = "source" ] && zxfer_profile_record_bucket source_inspection
+			;;
+		esac
+		;;
+	"snapshot discovery")
+		[ "$l_side" = "destination" ] && zxfer_profile_record_bucket destination_inspection
+		[ "$l_side" = "source" ] && zxfer_profile_record_bucket source_inspection
+		;;
+	*)
+		case "$l_verb" in
+		list | get)
+			[ "$l_side" = "destination" ] && zxfer_profile_record_bucket destination_inspection
+			[ "$l_side" = "source" ] && zxfer_profile_record_bucket source_inspection
+			;;
+		esac
+		;;
+	esac
+}
+
+zxfer_profile_record_ssh_invocation() {
+	l_host_spec=$1
+	l_side=${2:-}
+
+	zxfer_profile_metrics_enabled || return 0
+
+	zxfer_profile_increment_counter g_zxfer_profile_ssh_shell_invocations
+
+	case "$l_side" in
+	source)
+		zxfer_profile_increment_counter g_zxfer_profile_source_ssh_shell_invocations
+		return 0
+		;;
+	destination)
+		zxfer_profile_increment_counter g_zxfer_profile_destination_ssh_shell_invocations
+		return 0
+		;;
+	other)
+		zxfer_profile_increment_counter g_zxfer_profile_other_ssh_shell_invocations
+		return 0
+		;;
+	esac
+
+	if [ -n "${g_option_O_origin_host:-}" ] && [ "$l_host_spec" = "$g_option_O_origin_host" ]; then
+		zxfer_profile_increment_counter g_zxfer_profile_source_ssh_shell_invocations
+	elif [ -n "${g_option_T_target_host:-}" ] && [ "$l_host_spec" = "$g_option_T_target_host" ]; then
+		zxfer_profile_increment_counter g_zxfer_profile_destination_ssh_shell_invocations
+	else
+		zxfer_profile_increment_counter g_zxfer_profile_other_ssh_shell_invocations
+	fi
+}
+
+zxfer_profile_emit_summary() {
+	zxfer_profile_metrics_enabled || return 0
+	[ "${g_zxfer_profile_has_data:-0}" -eq 1 ] || return 0
+
+	if [ "${g_zxfer_profile_summary_emitted:-0}" -eq 1 ]; then
+		return 0
+	fi
+	g_zxfer_profile_summary_emitted=1
+
+	l_end_epoch=$(date '+%s' 2>/dev/null || :)
+	l_start_epoch=${g_zxfer_profile_start_epoch:-}
+	l_elapsed=unknown
+	case "$l_start_epoch:$l_end_epoch" in
+	*[!0-9:]* | :* | *:) ;;
+	*)
+		l_elapsed=$((l_end_epoch - l_start_epoch))
+		;;
+	esac
+
+	zxfer_warn_stderr "zxfer profile: elapsed_seconds=$l_elapsed"
+	zxfer_warn_stderr "zxfer profile: source_zfs_calls=${g_zxfer_profile_source_zfs_calls:-0}"
+	zxfer_warn_stderr "zxfer profile: destination_zfs_calls=${g_zxfer_profile_destination_zfs_calls:-0}"
+	zxfer_warn_stderr "zxfer profile: other_zfs_calls=${g_zxfer_profile_other_zfs_calls:-0}"
+	zxfer_warn_stderr "zxfer profile: zfs_list_calls=${g_zxfer_profile_zfs_list_calls:-0}"
+	zxfer_warn_stderr "zxfer profile: zfs_get_calls=${g_zxfer_profile_zfs_get_calls:-0}"
+	zxfer_warn_stderr "zxfer profile: zfs_send_calls=${g_zxfer_profile_zfs_send_calls:-0}"
+	zxfer_warn_stderr "zxfer profile: zfs_receive_calls=${g_zxfer_profile_zfs_receive_calls:-0}"
+	zxfer_warn_stderr "zxfer profile: ssh_shell_invocations=${g_zxfer_profile_ssh_shell_invocations:-0}"
+	zxfer_warn_stderr "zxfer profile: source_ssh_shell_invocations=${g_zxfer_profile_source_ssh_shell_invocations:-0}"
+	zxfer_warn_stderr "zxfer profile: destination_ssh_shell_invocations=${g_zxfer_profile_destination_ssh_shell_invocations:-0}"
+	zxfer_warn_stderr "zxfer profile: other_ssh_shell_invocations=${g_zxfer_profile_other_ssh_shell_invocations:-0}"
+	zxfer_warn_stderr "zxfer profile: source_snapshot_list_commands=${g_zxfer_profile_source_snapshot_list_commands:-0}"
+	zxfer_warn_stderr "zxfer profile: source_snapshot_list_parallel_commands=${g_zxfer_profile_source_snapshot_list_parallel_commands:-0}"
+	zxfer_warn_stderr "zxfer profile: send_receive_pipeline_commands=${g_zxfer_profile_send_receive_pipeline_commands:-0}"
+	zxfer_warn_stderr "zxfer profile: send_receive_background_pipeline_commands=${g_zxfer_profile_send_receive_background_pipeline_commands:-0}"
+	zxfer_warn_stderr "zxfer profile: exists_destination_calls=${g_zxfer_profile_exists_destination_calls:-0}"
+	zxfer_warn_stderr "zxfer profile: normalized_property_reads_source=${g_zxfer_profile_normalized_property_reads_source:-0}"
+	zxfer_warn_stderr "zxfer profile: normalized_property_reads_destination=${g_zxfer_profile_normalized_property_reads_destination:-0}"
+	zxfer_warn_stderr "zxfer profile: normalized_property_reads_other=${g_zxfer_profile_normalized_property_reads_other:-0}"
+	zxfer_warn_stderr "zxfer profile: required_property_backfill_gets=${g_zxfer_profile_required_property_backfill_gets:-0}"
+	zxfer_warn_stderr "zxfer profile: parent_destination_property_reads=${g_zxfer_profile_parent_destination_property_reads:-0}"
+	zxfer_warn_stderr "zxfer profile: bucket_source_inspection=${g_zxfer_profile_bucket_source_inspection:-0}"
+	zxfer_warn_stderr "zxfer profile: bucket_destination_inspection=${g_zxfer_profile_bucket_destination_inspection:-0}"
+	zxfer_warn_stderr "zxfer profile: bucket_property_reconciliation=${g_zxfer_profile_bucket_property_reconciliation:-0}"
+	zxfer_warn_stderr "zxfer profile: bucket_send_receive_setup=${g_zxfer_profile_bucket_send_receive_setup:-0}"
+}
+
+zxfer_register_cleanup_pid() {
+	l_pid=$1
+
+	case "$l_pid" in
+	'' | *[!0-9]*)
+		return 0
+		;;
+	esac
+
+	[ "$l_pid" = "$$" ] && return 0
+
+	for l_existing_pid in ${g_zxfer_cleanup_pids:-}; do
+		[ "$l_existing_pid" = "$l_pid" ] && return 0
+	done
+
+	if [ -n "${g_zxfer_cleanup_pids:-}" ]; then
+		g_zxfer_cleanup_pids="$g_zxfer_cleanup_pids $l_pid"
+	else
+		g_zxfer_cleanup_pids=$l_pid
+	fi
+}
+
+zxfer_unregister_cleanup_pid() {
+	l_pid=$1
+	l_remaining_pids=""
+
+	case "$l_pid" in
+	'' | *[!0-9]*)
+		return 0
+		;;
+	esac
+
+	for l_existing_pid in ${g_zxfer_cleanup_pids:-}; do
+		[ "$l_existing_pid" = "$l_pid" ] && continue
+		if [ -n "$l_remaining_pids" ]; then
+			l_remaining_pids="$l_remaining_pids $l_existing_pid"
+		else
+			l_remaining_pids=$l_existing_pid
+		fi
+	done
+
+	g_zxfer_cleanup_pids=$l_remaining_pids
+}
+
+zxfer_kill_registered_cleanup_pids() {
+	for l_pid in ${g_zxfer_cleanup_pids:-}; do
+		case "$l_pid" in
+		'' | *[!0-9]*)
+			continue
+			;;
+		esac
+		[ "$l_pid" = "$$" ] && continue
+		kill "$l_pid" 2>/dev/null || true
+	done
+
+	g_zxfer_cleanup_pids=""
+}
+
 zxfer_print_usage_to_stderr() {
 	if command -v usage >/dev/null 2>&1; then
 		usage >&2
@@ -397,15 +651,16 @@ get_temp_file() {
 # Takes: $1=either $g_option_O_origin_host or $g_option_T_target_host
 #
 get_os() {
-	l_input_options=$1
+	l_host_spec=$1
+	l_profile_side=${2:-}
 	l_output_os=""
 
 	# Get uname of the destination (target) machine, local or remote
-	if [ "$l_input_options" = "" ]; then
+	if [ "$l_host_spec" = "" ]; then
 		l_output_os=$(uname)
 	else
-		l_cmd="$l_input_options uname"
-		l_output_os=$(eval "$l_cmd")
+		l_remote_cmd=$(build_shell_command_from_argv uname)
+		l_output_os=$(invoke_ssh_shell_command_for_host "$l_host_spec" "$l_remote_cmd" "$l_profile_side")
 	fi
 
 	echo "$l_output_os"
@@ -467,14 +722,15 @@ throw_error_with_usage() {
 execute_command() {
 	l_cmd=$1
 	l_is_continue_on_fail=${2:-0}
+	l_display_cmd=${3:-$l_cmd}
 	zxfer_record_last_command_string "$l_cmd"
 
 	if [ "$g_option_n_dryrun" -eq 1 ]; then
-		echov "Dry run: $l_cmd"
+		echov "Dry run: $l_display_cmd"
 		return
 	fi
 
-	echov "$l_cmd"
+	echov "$l_display_cmd"
 	if [ "$l_is_continue_on_fail" -eq 1 ]; then
 		eval "$l_cmd" || {
 			echo "Non-critical error when executing command. Continuing."
@@ -505,6 +761,7 @@ execute_background_cmd() {
 	fi
 	# shellcheck disable=SC2034
 	g_last_background_pid=$!
+	zxfer_register_cleanup_pid "$g_last_background_pid"
 }
 
 # Escape characters for a single-quoted context by closing and reopening quotes
@@ -615,50 +872,74 @@ quote_cli_tokens() {
 	quote_token_stream "$l_tokens"
 }
 
-# Expand a composed ssh command and host spec into discrete arguments before
+# Render the ssh transport argv for a given host, including any control socket,
+# as a newline-delimited token stream that can be safely re-quoted or executed.
+get_ssh_transport_tokens_for_host() {
+	l_host=$1
+
+	printf '%s\n' "$g_cmd_ssh"
+
+	if [ "$l_host" = "" ]; then
+		return
+	fi
+
+	if [ "$l_host" = "$g_option_O_origin_host" ] && [ "$g_ssh_origin_control_socket" != "" ]; then
+		printf '%s\n%s\n' "-S" "$g_ssh_origin_control_socket"
+		return
+	fi
+
+	if [ "$l_host" = "$g_option_T_target_host" ] && [ "$g_ssh_target_control_socket" != "" ]; then
+		printf '%s\n%s\n' "-S" "$g_ssh_target_control_socket"
+	fi
+}
+
+# Render the local ssh transport command used for a host spec. This is a
+# display helper only; execution paths should use the argv-based helpers below.
+get_ssh_cmd_for_host() {
+	l_host=$1
+	l_transport_tokens=$(get_ssh_transport_tokens_for_host "$l_host")
+	quote_token_stream "$l_transport_tokens"
+}
+
+# Expand the ssh transport and host spec into discrete arguments before
 # executing the remote command so multi-token -O/-T inputs (like "host pfexec")
-# are not collapsed into a single hostname. STDIN/STDOUT/STDERR are passed
-# through to the invoked ssh process.
+# are preserved without reparsing a shell string. STDIN/STDOUT/STDERR are
+# passed through to the invoked ssh process.
 invoke_ssh_command_for_host() {
-	l_ssh_cmd=$1
-	l_host_spec=$2
-	shift 2
+	l_host_spec=$1
+	shift
 
-	[ "$l_ssh_cmd" = "" ] && return 1
-
+	l_transport_tokens=$(get_ssh_transport_tokens_for_host "$l_host_spec")
+	l_host_tokens=$(split_host_spec_tokens "$l_host_spec")
+	l_remote_args_stream=""
 	if [ $# -gt 0 ]; then
 		l_remote_args_stream=$(printf '%s\n' "$@")
-	else
-		l_remote_args_stream=""
 	fi
 
-	l_inner_remote_stream=$l_remote_args_stream
-	l_ssh_tokens=$(split_cli_tokens "$l_ssh_cmd")
 	set --
-	if [ "$l_ssh_tokens" != "" ]; then
+	if [ "$l_transport_tokens" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
+			[ "$l_token" = "" ] && continue
 			set -- "$@" "$l_token"
 		done <<EOF
-$l_ssh_tokens
+$l_transport_tokens
 EOF
-	else
-		set -- "$l_ssh_cmd"
 	fi
 
-	l_host_tokens=$(split_host_spec_tokens "$l_host_spec")
 	if [ "$l_host_tokens" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
+			[ "$l_token" = "" ] && continue
 			set -- "$@" "$l_token"
 		done <<EOF
 $l_host_tokens
 EOF
 	fi
 
-	if [ "$l_inner_remote_stream" != "" ]; then
+	if [ "$l_remote_args_stream" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
 			set -- "$@" "$l_token"
 		done <<EOF
-$l_inner_remote_stream
+$l_remote_args_stream
 EOF
 	fi
 
@@ -666,18 +947,16 @@ EOF
 	"$@"
 }
 
-# Execute a shell-ready remote command string through ssh while preserving any
-# wrapper tokens embedded in the -O/-T host spec (for example "host pfexec").
-# The remote command must already be quoted for execution by the remote shell.
+# Build a shell-ready local ssh command string while preserving any wrapper
+# tokens embedded in the -O/-T host spec (for example "host pfexec"). The
+# remote command must already be quoted for execution by the remote shell.
 build_ssh_shell_command_for_host() {
-	l_ssh_cmd=$1
-	l_host_spec=$2
-	l_remote_shell_cmd=$3
+	l_host_spec=$1
+	l_remote_shell_cmd=$2
 
-	[ "$l_ssh_cmd" = "" ] && return 1
 	[ "$l_remote_shell_cmd" = "" ] && return 1
 
-	l_ssh_tokens=$(split_cli_tokens "$l_ssh_cmd")
+	l_transport_tokens=$(get_ssh_transport_tokens_for_host "$l_host_spec")
 	l_host_tokens=$(split_host_spec_tokens "$l_host_spec")
 	[ "$l_host_tokens" != "" ] || return 1
 
@@ -705,25 +984,62 @@ EOF
 		l_full_remote_cmd="$l_wrapper_cmd $l_remote_shell_cmd"
 	fi
 
-	l_command_tokens=$(printf '%s\n%s\n%s\n' "$l_ssh_tokens" "$l_ssh_host" "$l_full_remote_cmd")
+	l_command_tokens=$(printf '%s\n%s\n%s\n' "$l_transport_tokens" "$l_ssh_host" "$l_full_remote_cmd")
 	quote_token_stream "$l_command_tokens"
 }
 
-# Execute a shell-ready remote command string through ssh while preserving any
-# wrapper tokens embedded in the -O/-T host spec (for example "host pfexec").
-# The remote command must already be quoted for execution by the remote shell.
+# Execute a shell-ready remote command string through ssh without reparsing a
+# local shell string. Wrapper tokens embedded in the -O/-T host spec are
+# preserved as part of the single remote command argument.
 invoke_ssh_shell_command_for_host() {
-	l_ssh_cmd=$1
-	l_host_spec=$2
-	l_remote_shell_cmd=$3
+	l_host_spec=$1
+	l_remote_shell_cmd=$2
+	l_profile_side=${3:-}
 
-	[ "$l_ssh_cmd" = "" ] && return 1
 	[ "$l_remote_shell_cmd" = "" ] && return 1
+	zxfer_profile_record_ssh_invocation "$l_host_spec" "$l_profile_side"
 
-	l_local_cmd=$(build_ssh_shell_command_for_host "$l_ssh_cmd" "$l_host_spec" "$l_remote_shell_cmd") || return 1
+	l_transport_tokens=$(get_ssh_transport_tokens_for_host "$l_host_spec")
+	l_host_tokens=$(split_host_spec_tokens "$l_host_spec")
+	[ "$l_host_tokens" != "" ] || return 1
 
-	zxfer_record_last_command_string "$l_local_cmd"
-	eval "$l_local_cmd"
+	l_ssh_host=""
+	l_wrapper_tokens=""
+	while IFS= read -r l_token || [ -n "$l_token" ]; do
+		[ "$l_token" = "" ] && continue
+		if [ "$l_ssh_host" = "" ]; then
+			l_ssh_host=$l_token
+		elif [ "$l_wrapper_tokens" = "" ]; then
+			l_wrapper_tokens=$l_token
+		else
+			l_wrapper_tokens="$l_wrapper_tokens
+$l_token"
+		fi
+	done <<EOF
+$l_host_tokens
+EOF
+
+	[ "$l_ssh_host" != "" ] || return 1
+
+	l_full_remote_cmd=$l_remote_shell_cmd
+	if [ "$l_wrapper_tokens" != "" ]; then
+		l_wrapper_cmd=$(quote_token_stream "$l_wrapper_tokens")
+		l_full_remote_cmd="$l_wrapper_cmd $l_remote_shell_cmd"
+	fi
+
+	set --
+	if [ "$l_transport_tokens" != "" ]; then
+		while IFS= read -r l_token || [ -n "$l_token" ]; do
+			[ "$l_token" = "" ] && continue
+			set -- "$@" "$l_token"
+		done <<EOF
+$l_transport_tokens
+EOF
+	fi
+	set -- "$@" "$l_ssh_host" "$l_full_remote_cmd"
+
+	zxfer_record_last_command_argv "$@"
+	"$@"
 }
 
 build_remote_sh_c_command() {
@@ -735,6 +1051,8 @@ build_remote_sh_c_command() {
 # Execute a zfs command on the origin (source) host, transparently invoking
 # ssh when -O is in effect so callers can treat this like a local command.
 run_source_zfs_cmd() {
+	zxfer_profile_record_zfs_call source "$1"
+
 	if [ "$g_option_O_origin_host" = "" ]; then
 		if [ -n "$g_LZFS" ] && [ "$g_LZFS" != "$g_cmd_zfs" ]; then
 			zxfer_record_last_command_argv "$g_LZFS" "$@"
@@ -746,19 +1064,20 @@ run_source_zfs_cmd() {
 		return
 	fi
 
-	l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
 	l_origin_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
 	l_remote_tokens=$(printf '%s\n' "$l_origin_zfs_cmd")
 	for l_arg in "$@"; do
 		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
 	done
 	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
-	invoke_ssh_shell_command_for_host "$l_origin_ssh_cmd" "$g_option_O_origin_host" "$l_remote_cmd"
+	invoke_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_cmd" source
 }
 
 # Execute a zfs command on the destination (target) host, using ssh when -T is
 # active so shell quoting does not leak into the remote hostname.
 run_destination_zfs_cmd() {
+	zxfer_profile_record_zfs_call destination "$1"
+
 	if [ "$g_option_T_target_host" = "" ]; then
 		if [ -n "$g_RZFS" ] && [ "$g_RZFS" != "$g_cmd_zfs" ]; then
 			zxfer_record_last_command_argv "$g_RZFS" "$@"
@@ -770,14 +1089,13 @@ run_destination_zfs_cmd() {
 		return
 	fi
 
-	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
 	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
 	l_remote_tokens=$(printf '%s\n' "$l_target_zfs_cmd")
 	for l_arg in "$@"; do
 		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
 	done
 	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
-	invoke_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_cmd"
+	invoke_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd" destination
 }
 
 zxfer_render_source_zfs_command() {
@@ -793,14 +1111,13 @@ zxfer_render_source_zfs_command() {
 		return
 	fi
 
-	l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
 	l_origin_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
 	l_remote_tokens=$(printf '%s\n%s' "$l_origin_zfs_cmd" "$l_subcommand")
 	for l_arg in "$@"; do
 		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
 	done
 	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
-	build_ssh_shell_command_for_host "$l_origin_ssh_cmd" "$g_option_O_origin_host" "$l_remote_cmd"
+	build_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_cmd"
 }
 
 zxfer_render_destination_zfs_command() {
@@ -816,14 +1133,13 @@ zxfer_render_destination_zfs_command() {
 		return
 	fi
 
-	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
 	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
 	l_remote_tokens=$(printf '%s\n%s' "$l_target_zfs_cmd" "$l_subcommand")
 	for l_arg in "$@"; do
 		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
 	done
 	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
-	build_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_cmd"
+	build_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd"
 }
 
 zxfer_render_zfs_command_for_spec() {
@@ -850,6 +1166,7 @@ run_zfs_cmd_for_spec() {
 	elif [ "$l_cmd_spec" = "$g_RZFS" ]; then
 		run_destination_zfs_cmd "$@"
 	else
+		zxfer_profile_record_zfs_call other "$1"
 		zxfer_record_last_command_argv "$l_cmd_spec" "$@"
 		"$l_cmd_spec" "$@"
 	fi
@@ -876,21 +1193,46 @@ strip_trailing_slashes() {
 	printf '%s\n' "$l_path"
 }
 
+zxfer_destination_probe_reports_missing() {
+	l_probe_err=$1
+
+	case "$l_probe_err" in
+	*"dataset does not exist"* | *"Dataset does not exist"* | *"no such dataset"* | *"No such dataset"*)
+		return 0
+		;;
+	esac
+
+	return 1
+}
+
 #
-# Checks if the destination dataset exists, returns 1 if it does, 0 if it does not.
+# Checks whether the destination dataset exists.
+# Prints 1 when it exists, 0 when it is explicitly missing, and returns non-zero
+# with an explanatory message when the probe itself fails.
 #
 exists_destination() {
 	l_dest=$1
+	zxfer_profile_increment_counter g_zxfer_profile_exists_destination_calls
 
-	# Check if the destination dataset exists
 	l_cmd=$(zxfer_render_destination_zfs_command list -H "$l_dest")
 	echoV "Checking if destination exists: $l_cmd"
 
-	if run_destination_zfs_cmd list -H "$l_dest" >/dev/null 2>&1; then
-		echo 1
-	else
-		echo 0
+	if l_probe_err=$(run_destination_zfs_cmd list -H "$l_dest" 2>&1 >/dev/null); then
+		printf '%s\n' 1
+		return 0
 	fi
+
+	if zxfer_destination_probe_reports_missing "$l_probe_err"; then
+		printf '%s\n' 0
+		return 0
+	fi
+
+	if [ -n "$l_probe_err" ]; then
+		printf 'Failed to determine whether destination dataset [%s] exists: %s\n' "$l_dest" "$l_probe_err"
+	else
+		printf 'Failed to determine whether destination dataset [%s] exists.\n' "$l_dest"
+	fi
+	return 1
 }
 
 #

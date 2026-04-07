@@ -244,7 +244,14 @@ backup will be able to store the correct properties of the original.
 \fB\-n\fR
 Dry ru(n) mode. Prints out the commands that would otherwise execute but does
 not execute them. This may not work in all circumstances as it may expect the
-existence of filesystems etc. that won't be created.
+existence of filesystems etc. that won't be created. When combined with
+\fB\-s\fR
+or
+\fB\-m\fR,
+\fBzxfer\fR
+only previews the source-side snapshot plus the migration service-disable,
+service-enable, and unmount commands; it does not execute them or refresh
+cached state as though those actions had already happened.
 .TP 8n
 \fB\-o\fR
 (o)verride property mode. Property overrides are specified with commas to separate.
@@ -469,6 +476,10 @@ Note also that
 and
 [\fB\-T\fR]
 (i.e. remote transfers) are not supported with this option enabled.
+.sp
+With
+\fB\-n\fR,
+these migration preflight steps are previewed only.
 .TP 8n
 \fB\-N\fR
 Replicate the listed filesystem. Note the provisos listed above in
@@ -572,6 +583,11 @@ at the end, and ensure that a current snapshot is taken before or during the
 second execution. e.g. use this option to ensure that a relatively current
 snapshot exists, create it manually, or wait until your own snapshotting
 regime does the job for you (if you have one).
+.sp
+With
+\fB\-n\fR,
+\fBzxfer\fR
+only previews this snapshot command.
 .TP 8n
 \fB\-T\fR
 Specify a (T)arget user@host. This allows transfers TO a remote host via ssh.
@@ -605,7 +621,8 @@ This allows replicating from newer versions of OpenZFS to older versions.
 (v) verbose mode
 .TP 8n
 \fB\-V\fR
-(V)ery verbose mode, prints debugging messages to stderr
+(V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
+profiling counters for ZFS, ssh, and selected replication hot paths
 .TP 8n
 \fB\-w\fR
 uses zfs ra(w) send mode

@@ -2,10 +2,19 @@
 #
 # shunit2 tests for zxfer_zfs_send_receive.sh helpers.
 #
-# shellcheck disable=SC2030,SC2031
+# shellcheck disable=SC1090,SC2030,SC2031,SC2317,SC2329
+
+case "$0" in
+/*)
+	TESTS_DIR=$(dirname "$0")
+	;;
+*)
+	TESTS_DIR=${PWD:-.}/$(dirname "$0")
+	;;
+esac
 
 # shellcheck source=tests/test_helper.sh
-. "$(dirname "$0")/test_helper.sh"
+. "$TESTS_DIR/test_helper.sh"
 
 # shellcheck source=src/zxfer_globals.sh
 . "$ZXFER_ROOT/src/zxfer_globals.sh"
@@ -30,6 +39,7 @@ setUp() {
 	g_option_v_verbose=0
 	g_option_V_very_verbose=0
 	g_option_D_display_progress_bar=""
+	g_option_w_raw_send=0
 	g_option_O_origin_host=""
 	g_option_T_target_host=""
 	g_option_z_compress=0
@@ -48,8 +58,6 @@ setUp() {
 
 test_wrap_command_with_ssh_receive_direction_with_compression() {
 	result=$(
-		get_ssh_cmd_for_host() { printf '%s\n' "/usr/bin/ssh"; }
-		quote_host_spec_tokens() { printf '%s\n' "'target.example' 'doas'"; }
 		split_host_spec_tokens() { printf '%s\n%s\n' "target.example" "doas"; }
 		build_remote_sh_c_command() { printf '%s\n' "'sh' '-c' 'gunzip | zfs receive tank/dst'"; }
 		build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'target.example' 'doas' 'sh' '-c' 'gunzip | zfs receive tank/dst'"; }
@@ -247,12 +255,55 @@ test_zxfer_progress_passthrough_logs_progress_command_failures() {
 		"$(cat "$log")" "Progress bar command exited with status 7"
 }
 
+test_get_send_command_exec_treats_local_zfs_path_as_literal() {
+	marker="$TEST_TMPDIR/send_exec_marker"
+	old_cmd_zfs=$g_cmd_zfs
+	g_cmd_zfs="/bin/echo; touch $marker #"
+
+	cmd=$(get_send_command "" "tank/fs@snap1" "$g_cmd_zfs" "exec")
+
+	if eval "$cmd" >/dev/null 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	g_cmd_zfs=$old_cmd_zfs
+
+	: "$status"
+	assertContains "Exec-mode send commands should quote the resolved zfs helper path." \
+		"$cmd" "'/bin/echo; touch $marker #'"
+	assertFalse "Exec-mode send commands should not execute shell metacharacters from the local zfs path." \
+		"[ -e '$marker' ]"
+}
+
+test_get_receive_command_exec_treats_local_zfs_path_as_literal() {
+	marker="$TEST_TMPDIR/recv_exec_marker"
+	old_cmd_zfs=$g_cmd_zfs
+	g_cmd_zfs="/bin/echo; touch $marker #"
+
+	cmd=$(get_receive_command "tank/dst" "$g_cmd_zfs" "exec")
+
+	if eval "$cmd" >/dev/null 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	g_cmd_zfs=$old_cmd_zfs
+
+	: "$status"
+	assertContains "Exec-mode receive commands should quote the resolved zfs helper path." \
+		"$cmd" "'/bin/echo; touch $marker #'"
+	assertFalse "Exec-mode receive commands should not execute shell metacharacters from the local zfs path." \
+		"[ -e '$marker' ]"
+}
+
 test_zfs_send_receive_runs_foreground_pipeline() {
 	log="$TEST_TMPDIR/foreground_pipeline.log"
 	: >"$log"
 
 	(
 		EXEC_LOG="$log"
+		echoV() { :; }
 		get_send_command() { printf '%s\n' "sendcmd"; }
 		get_receive_command() { printf '%s\n' "recvcmd"; }
 		execute_command() {
@@ -265,6 +316,161 @@ test_zfs_send_receive_runs_foreground_pipeline() {
 	assertEquals "Foreground send/receive should execute a single pipeline." \
 		"sendcmd | recvcmd
 performed=1" "$(cat "$log")"
+}
+
+test_zfs_send_receive_tracks_profile_counters_when_very_verbose() {
+	log="$TEST_TMPDIR/foreground_pipeline_profile.log"
+	: >"$log"
+
+	(
+		EXEC_LOG="$log"
+		echoV() { :; }
+		get_send_command() { printf '%s\n' "sendcmd"; }
+		get_receive_command() { printf '%s\n' "recvcmd"; }
+		execute_command() {
+			printf '%s\n' "$1" >>"$EXEC_LOG"
+		}
+		g_option_V_very_verbose=1
+		g_zxfer_profile_source_zfs_calls=0
+		g_zxfer_profile_destination_zfs_calls=0
+		g_zxfer_profile_zfs_send_calls=0
+		g_zxfer_profile_zfs_receive_calls=0
+		g_zxfer_profile_send_receive_pipeline_commands=0
+		g_zxfer_profile_send_receive_background_pipeline_commands=0
+		g_zxfer_profile_bucket_send_receive_setup=0
+		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		{
+			printf 'source_zfs=%s\n' "${g_zxfer_profile_source_zfs_calls:-0}"
+			printf 'destination_zfs=%s\n' "${g_zxfer_profile_destination_zfs_calls:-0}"
+			printf 'send_calls=%s\n' "${g_zxfer_profile_zfs_send_calls:-0}"
+			printf 'receive_calls=%s\n' "${g_zxfer_profile_zfs_receive_calls:-0}"
+			printf 'pipelines=%s\n' "${g_zxfer_profile_send_receive_pipeline_commands:-0}"
+			printf 'background=%s\n' "${g_zxfer_profile_send_receive_background_pipeline_commands:-0}"
+			printf 'bucket=%s\n' "${g_zxfer_profile_bucket_send_receive_setup:-0}"
+		} >>"$EXEC_LOG"
+	)
+
+	assertEquals "Very-verbose profiling should track foreground send/receive pipeline counts." \
+		"sendcmd | recvcmd
+source_zfs=1
+destination_zfs=1
+send_calls=1
+receive_calls=1
+pipelines=1
+background=0
+bucket=1" "$(cat "$log")"
+}
+
+test_zfs_send_receive_tracks_remote_ssh_profile_counters_when_very_verbose() {
+	log="$TEST_TMPDIR/remote_pipeline_profile.log"
+	: >"$log"
+
+	(
+		EXEC_LOG="$log"
+		echoV() { :; }
+		get_send_command() { printf '%s\n' "sendcmd"; }
+		get_receive_command() { printf '%s\n' "recvcmd"; }
+		wrap_command_with_ssh() {
+			printf '%s\n' "$1 via $2"
+		}
+		execute_command() {
+			printf '%s\n' "$1" >>"$EXEC_LOG"
+		}
+		g_option_V_very_verbose=1
+		g_option_O_origin_host="origin.example"
+		g_option_T_target_host="target.example"
+		g_zxfer_profile_ssh_shell_invocations=0
+		g_zxfer_profile_source_ssh_shell_invocations=0
+		g_zxfer_profile_destination_ssh_shell_invocations=0
+		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		{
+			printf 'ssh=%s\n' "${g_zxfer_profile_ssh_shell_invocations:-0}"
+			printf 'source_ssh=%s\n' "${g_zxfer_profile_source_ssh_shell_invocations:-0}"
+			printf 'destination_ssh=%s\n' "${g_zxfer_profile_destination_ssh_shell_invocations:-0}"
+		} >>"$EXEC_LOG"
+	)
+
+	assertEquals "Very-verbose profiling should count remote send/receive ssh hops once per side." \
+		"sendcmd via origin.example | recvcmd via target.example
+ssh=2
+source_ssh=1
+destination_ssh=1" "$(cat "$log")"
+}
+
+test_zfs_send_receive_tracks_remote_ssh_counters_when_origin_and_target_share_host_spec() {
+	log="$TEST_TMPDIR/remote_pipeline_same_host_profile.log"
+	: >"$log"
+
+	(
+		EXEC_LOG="$log"
+		echoV() { :; }
+		get_send_command() { printf '%s\n' "sendcmd"; }
+		get_receive_command() { printf '%s\n' "recvcmd"; }
+		wrap_command_with_ssh() {
+			printf '%s\n' "$1 via $2"
+		}
+		execute_command() {
+			printf '%s\n' "$1" >>"$EXEC_LOG"
+		}
+		g_option_V_very_verbose=1
+		g_option_O_origin_host="shared.example"
+		g_option_T_target_host="shared.example"
+		g_zxfer_profile_ssh_shell_invocations=0
+		g_zxfer_profile_source_ssh_shell_invocations=0
+		g_zxfer_profile_destination_ssh_shell_invocations=0
+		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		{
+			printf 'ssh=%s\n' "${g_zxfer_profile_ssh_shell_invocations:-0}"
+			printf 'source_ssh=%s\n' "${g_zxfer_profile_source_ssh_shell_invocations:-0}"
+			printf 'destination_ssh=%s\n' "${g_zxfer_profile_destination_ssh_shell_invocations:-0}"
+		} >>"$EXEC_LOG"
+	)
+
+	assertEquals "Remote send/receive profiling should attribute source and destination ssh counts separately even when both ends share the same host spec." \
+		"sendcmd via shared.example | recvcmd via shared.example
+ssh=2
+source_ssh=1
+destination_ssh=1" "$(cat "$log")"
+}
+
+test_zfs_send_receive_dry_run_skips_actual_call_profile_counters() {
+	log="$TEST_TMPDIR/dry_run_pipeline_profile.log"
+	: >"$log"
+
+	(
+		EXEC_LOG="$log"
+		echoV() { :; }
+		echov() { :; }
+		get_send_command() { printf '%s\n' "sendcmd"; }
+		get_receive_command() { printf '%s\n' "recvcmd"; }
+		g_option_n_dryrun=1
+		g_option_V_very_verbose=1
+		g_option_O_origin_host="origin.example"
+		g_option_T_target_host="target.example"
+		g_zxfer_profile_source_zfs_calls=0
+		g_zxfer_profile_destination_zfs_calls=0
+		g_zxfer_profile_zfs_send_calls=0
+		g_zxfer_profile_zfs_receive_calls=0
+		g_zxfer_profile_ssh_shell_invocations=0
+		g_zxfer_profile_send_receive_pipeline_commands=0
+		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		{
+			printf 'source_zfs=%s\n' "${g_zxfer_profile_source_zfs_calls:-0}"
+			printf 'destination_zfs=%s\n' "${g_zxfer_profile_destination_zfs_calls:-0}"
+			printf 'send_calls=%s\n' "${g_zxfer_profile_zfs_send_calls:-0}"
+			printf 'receive_calls=%s\n' "${g_zxfer_profile_zfs_receive_calls:-0}"
+			printf 'ssh=%s\n' "${g_zxfer_profile_ssh_shell_invocations:-0}"
+			printf 'pipelines=%s\n' "${g_zxfer_profile_send_receive_pipeline_commands:-0}"
+		} >"$EXEC_LOG"
+	)
+
+	assertEquals "Dry-run send/receive should not claim actual zfs or ssh execution in the profile counters." \
+		"source_zfs=0
+destination_zfs=0
+send_calls=0
+receive_calls=0
+ssh=0
+pipelines=1" "$(cat "$log")"
 }
 
 test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
@@ -416,4 +622,34 @@ test_zfs_send_receive_adds_remote_wrappers_and_progress_pipeline() {
 		"sendcmd<origin.example:1:send> | progress | recvcmd<target.example:1:receive>" "$(cat "$log")"
 }
 
+test_zfs_send_receive_uses_resolved_remote_zfs_paths() {
+	log="$TEST_TMPDIR/remote_zfs_paths.log"
+	: >"$log"
+
+	(
+		EXEC_LOG="$log"
+		execute_command() {
+			printf 'exec=%s\n' "$1" >>"$EXEC_LOG"
+			printf 'display=%s\n' "$3" >>"$EXEC_LOG"
+		}
+		g_cmd_ssh="/usr/bin/ssh"
+		g_option_O_origin_host="origin.example"
+		g_option_T_target_host="target.example"
+		g_origin_cmd_zfs="/remote/origin/zfs"
+		g_target_cmd_zfs="/remote/target/zfs"
+		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+	)
+	display_line=$(grep '^display=' "$log")
+
+	assertContains "The exec pipeline should use the resolved origin-host zfs path." \
+		"$(cat "$log")" "/remote/origin/zfs"
+	assertContains "The exec pipeline should use the resolved target-host zfs path." \
+		"$(cat "$log")" "/remote/target/zfs"
+	assertContains "The display pipeline should also use the resolved origin-host zfs path." \
+		"$display_line" "/remote/origin/zfs"
+	assertContains "The display pipeline should also use the resolved target-host zfs path." \
+		"$display_line" "/remote/target/zfs"
+}
+
+# shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

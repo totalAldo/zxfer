@@ -88,7 +88,8 @@ fork. For the full CLI reference, use the man pages.
 
 - `-j jobs`: parallelize source snapshot discovery with GNU `parallel` and run
   up to that many `zfs send`/`zfs receive` jobs concurrently
-- `-V`: enable very verbose debug output
+- `-V`: enable very verbose debug output and emit end-of-run profiling counters
+  to stderr
 - `-w`: use raw `zfs send`
 - `-x pattern`: exclude datasets whose names match a regex from recursive
   replication; use `-x '^tank/data$'` to exclude only `tank/data`
@@ -151,7 +152,8 @@ The current tree has also been reworked for readability and maintainability:
 
 ## Platform Notes
 
-Primary development has been on FreeBSD 14.x, but this fork also supports:
+Primary development and current manual testing have been on FreeBSD 14.x and
+FreeBSD 15.x, but this fork also supports:
 
 - Linux with OpenZFS
 - illumos/Solaris systems with `zfs` / `svcadm`
@@ -173,10 +175,22 @@ Run all shunit2 suites:
 ./tests/run_shunit_tests.sh
 ```
 
+Run local lint with the same pinned toolchain as CI:
+
+```sh
+./tests/run_lint.sh
+```
+
 Run shell coverage:
 
 ```sh
 ./tests/run_coverage.sh
+```
+
+Run the enforced bash-xtrace coverage gate locally:
+
+```sh
+ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
 ```
 
 Run the integration harness:
@@ -199,9 +213,17 @@ Continue after failures and print a summary:
 
 GitHub Actions includes:
 
-- lint workflow, including GitHub Actions validation with `actionlint`
-- shell coverage workflow on `ubuntu-latest`, with artifact upload
-- shunit2 workflow on `ubuntu-latest` and `macos-latest`
+- lint workflow, via the shared `tests/run_lint.sh` bootstrap, including
+  pinned `actionlint`, `checkbashisms`, `shfmt`, `codespell`, and ShellCheck
+  toolchains
+- shell coverage workflow with both the shipped `bash-xtrace` fallback and a
+  Docker-backed `kcov` pass, each uploaded as its own artifact; the
+  bash-xtrace lane enforces committed per-file and total coverage minimums,
+  rejects regressions versus the checked-in baseline, and publishes the
+  `missing.txt` diff in the GitHub step summary
+- shunit2 workflow on `ubuntu-latest` and `macos-latest`, plus an Ubuntu
+  portable-shell matrix for `dash`, `bash --posix`, `busybox ash`, and an
+  initially non-blocking `posh` lane
 - Ubuntu ZFS integration workflow using file-backed test pools and
   `--keep-going` failure collection, with failed workdirs uploaded as artifacts
 
@@ -209,8 +231,15 @@ Hosted macOS CI is currently used for unit and shell-portability coverage, not
 as a required ZFS integration gate, because the Darwin/OpenZFS property
 behavior described in `KNOWN_ISSUES.md` is not yet stable enough for strict
 end-to-end certification.
-The coverage workflow currently uses the shipped bash-xtrace fallback rather
-than requiring `kcov` on the runner.
+FreeBSD coverage is currently maintained through local/manual validation rather
+than a hosted GitHub Actions lane, and current project testing includes
+FreeBSD 15.x in addition to the long-running FreeBSD 14.x environment.
+The coverage workflow keeps the shipped bash-xtrace fallback and also runs a
+separate Linux `kcov` pass, which gives better visibility into child-shell and
+launcher coverage without depending on a runner-installed `kcov` package or an
+unpinned container tag. The enforced baseline lives in
+`tests/coverage_baseline/bash-xtrace/`, and the explicit floor policy lives in
+`tests/coverage_policy.tsv`.
 
 See [docs/testing.md](./docs/testing.md) for full details and safety notes.
 

@@ -2,10 +2,19 @@
 #
 # Basic shunit2 tests for zxfer_common.sh helpers.
 #
-# shellcheck disable=SC2030,SC2031,SC2317,SC2329
+# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2317,SC2329
+
+case "$0" in
+/*)
+	TESTS_DIR=$(dirname "$0")
+	;;
+*)
+	TESTS_DIR=${PWD:-.}/$(dirname "$0")
+	;;
+esac
 
 # shellcheck source=tests/test_helper.sh
-. "$(dirname "$0")/test_helper.sh"
+. "$TESTS_DIR/test_helper.sh"
 
 # shellcheck source=src/zxfer_globals.sh
 . "$ZXFER_ROOT/src/zxfer_globals.sh"
@@ -176,6 +185,7 @@ usage() {
 # Some macOS sandboxes report sysconf(_SC_ARG_MAX) failures when invoking
 # /usr/bin/xargs without arguments. Provide a shell stub for the shunit2 lookup
 # that mirrors the behavior needed by _shunit_extractTestFunctions().
+# shellcheck disable=SC2120
 xargs() {
 	if command [ "$#" -eq 0 ]; then
 		tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//'
@@ -243,6 +253,7 @@ setUp() {
 	g_ssh_target_control_socket_dir=""
 	g_zxfer_original_invocation=""
 	g_option_Y_yield_iterations=1
+	g_zxfer_cleanup_pids=""
 	zxfer_reset_failure_context "unit"
 }
 
@@ -459,6 +470,165 @@ EOF
 	assertEquals "Arbitrary command specs should be executed directly." "alpha beta" "$result"
 }
 
+test_run_zfs_cmd_for_spec_tracks_other_profile_counter_when_very_verbose() {
+	tool="$TEST_TMPDIR/profile_other_zfs"
+	cat >"$tool" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*"
+EOF
+	chmod +x "$tool"
+
+	g_option_V_very_verbose=1
+	g_zxfer_profile_other_zfs_calls=0
+	g_zxfer_profile_zfs_get_calls=0
+
+	run_zfs_cmd_for_spec "$tool" get name tank/other >/dev/null
+
+	assertEquals "Very-verbose profiling should count direct-spec zfs calls in the other bucket." \
+		1 "$g_zxfer_profile_other_zfs_calls"
+	assertEquals "Very-verbose profiling should still classify the direct-spec verb." \
+		1 "$g_zxfer_profile_zfs_get_calls"
+}
+
+test_run_source_zfs_cmd_tracks_profile_counters_when_very_verbose() {
+	tool="$TEST_TMPDIR/profile_source_zfs"
+	cat >"$tool" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*"
+EOF
+	chmod +x "$tool"
+
+	g_option_V_very_verbose=1
+	g_zxfer_failure_stage="snapshot discovery"
+	g_cmd_zfs="$tool"
+	g_LZFS="$tool"
+	g_zxfer_profile_source_zfs_calls=0
+	g_zxfer_profile_zfs_list_calls=0
+	g_zxfer_profile_bucket_source_inspection=0
+
+	run_source_zfs_cmd list tank/src >/dev/null
+
+	assertEquals "Very-verbose profiling should count source-side zfs calls." \
+		1 "$g_zxfer_profile_source_zfs_calls"
+	assertEquals "Very-verbose profiling should count list verbs separately." \
+		1 "$g_zxfer_profile_zfs_list_calls"
+	assertEquals "Snapshot discovery source calls should contribute to the source-inspection bucket." \
+		1 "$g_zxfer_profile_bucket_source_inspection"
+}
+
+test_invoke_ssh_shell_command_for_host_tracks_profile_counters_when_very_verbose() {
+	FAKE_SSH_LOG="$TEST_TMPDIR/ssh_profile.log"
+	export FAKE_SSH_LOG
+	g_option_V_very_verbose=1
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_O_origin_host="origin.example"
+	g_zxfer_profile_ssh_shell_invocations=0
+	g_zxfer_profile_source_ssh_shell_invocations=0
+
+	invoke_ssh_shell_command_for_host "origin.example" "'/bin/true'" >/dev/null
+
+	unset FAKE_SSH_LOG
+
+	assertEquals "Very-verbose profiling should count ssh shell invocations." \
+		1 "$g_zxfer_profile_ssh_shell_invocations"
+	assertEquals "Very-verbose profiling should attribute origin-host ssh invocations to the source side." \
+		1 "$g_zxfer_profile_source_ssh_shell_invocations"
+}
+
+test_invoke_ssh_shell_command_for_host_tracks_explicit_profile_side_when_origin_and_target_match() {
+	FAKE_SSH_LOG="$TEST_TMPDIR/ssh_profile_same_host.log"
+	export FAKE_SSH_LOG
+	g_option_V_very_verbose=1
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_O_origin_host="shared.example"
+	g_option_T_target_host="shared.example"
+	g_zxfer_profile_ssh_shell_invocations=0
+	g_zxfer_profile_source_ssh_shell_invocations=0
+	g_zxfer_profile_destination_ssh_shell_invocations=0
+
+	invoke_ssh_shell_command_for_host "shared.example" "'/bin/true'" source >/dev/null
+	invoke_ssh_shell_command_for_host "shared.example" "'/bin/true'" destination >/dev/null
+
+	unset FAKE_SSH_LOG
+
+	assertEquals "Explicit profile sides should still count total ssh invocations." \
+		2 "$g_zxfer_profile_ssh_shell_invocations"
+	assertEquals "Explicit source-side attribution should remain correct when origin and target share the same host spec." \
+		1 "$g_zxfer_profile_source_ssh_shell_invocations"
+	assertEquals "Explicit destination-side attribution should remain correct when origin and target share the same host spec." \
+		1 "$g_zxfer_profile_destination_ssh_shell_invocations"
+}
+
+test_zxfer_profile_record_ssh_invocation_tracks_other_and_inferred_sides() {
+	g_option_V_very_verbose=1
+	g_option_O_origin_host="origin.example"
+	g_option_T_target_host="target.example"
+	g_zxfer_profile_ssh_shell_invocations=0
+	g_zxfer_profile_source_ssh_shell_invocations=0
+	g_zxfer_profile_destination_ssh_shell_invocations=0
+	g_zxfer_profile_other_ssh_shell_invocations=0
+
+	zxfer_profile_record_ssh_invocation "wrapper.example" other
+	zxfer_profile_record_ssh_invocation "target.example"
+	zxfer_profile_record_ssh_invocation "unknown.example"
+
+	assertEquals "Explicit other-side attribution should still count toward total ssh invocations." \
+		3 "$g_zxfer_profile_ssh_shell_invocations"
+	assertEquals "Inferred destination-side attribution should count target-host ssh invocations." \
+		1 "$g_zxfer_profile_destination_ssh_shell_invocations"
+	assertEquals "Explicit other-side attribution and unknown hosts should both count toward the other-side ssh bucket." \
+		2 "$g_zxfer_profile_other_ssh_shell_invocations"
+	assertEquals "Origin-side attribution should remain unchanged when only other and destination paths are exercised." \
+		0 "$g_zxfer_profile_source_ssh_shell_invocations"
+}
+
+test_zxfer_profile_record_zfs_call_tracks_remaining_verbs_and_buckets() {
+	g_option_V_very_verbose=1
+	g_zxfer_failure_stage=""
+	g_zxfer_profile_bucket_source_inspection=0
+	g_zxfer_profile_bucket_destination_inspection=0
+	g_zxfer_profile_bucket_property_reconciliation=0
+	g_zxfer_profile_bucket_send_receive_setup=0
+	g_zxfer_profile_source_zfs_calls=0
+	g_zxfer_profile_destination_zfs_calls=0
+	g_zxfer_profile_zfs_list_calls=0
+	g_zxfer_profile_zfs_get_calls=0
+	g_zxfer_profile_zfs_send_calls=0
+	g_zxfer_profile_zfs_receive_calls=0
+
+	zxfer_profile_record_bucket destination_inspection
+	zxfer_profile_record_bucket property_reconciliation
+
+	g_zxfer_failure_stage="property transfer"
+	zxfer_profile_record_zfs_call destination send
+
+	g_zxfer_failure_stage="send/receive"
+	zxfer_profile_record_zfs_call destination receive
+	zxfer_profile_record_zfs_call destination list
+	zxfer_profile_record_zfs_call source get
+
+	assertEquals "Destination-side zfs calls should include send, receive, and list verbs." \
+		3 "$g_zxfer_profile_destination_zfs_calls"
+	assertEquals "Source-side zfs calls should include the source get verb." \
+		1 "$g_zxfer_profile_source_zfs_calls"
+	assertEquals "Send verbs should increment the send counter." \
+		1 "$g_zxfer_profile_zfs_send_calls"
+	assertEquals "Receive verbs should increment the receive counter." \
+		1 "$g_zxfer_profile_zfs_receive_calls"
+	assertEquals "List verbs should increment the list counter." \
+		1 "$g_zxfer_profile_zfs_list_calls"
+	assertEquals "Get verbs should increment the get counter." \
+		1 "$g_zxfer_profile_zfs_get_calls"
+	assertEquals "Destination-inspection bucket accounting should include the direct bucket hit and send/receive destination list probes." \
+		2 "$g_zxfer_profile_bucket_destination_inspection"
+	assertEquals "Property-reconciliation bucket accounting should include the direct hit and property-transfer send probe." \
+		2 "$g_zxfer_profile_bucket_property_reconciliation"
+	assertEquals "Send/receive setup bucket accounting should include receive-side send/receive probes." \
+		1 "$g_zxfer_profile_bucket_send_receive_setup"
+	assertEquals "Source-inspection bucket accounting should include source-side get probes during send/receive setup." \
+		1 "$g_zxfer_profile_bucket_source_inspection"
+}
+
 test_sanitize_backup_component_replaces_invalid_characters() {
 	result=$(sanitize_backup_component "../unsafe path!")
 	assertEquals ".._unsafe_path_" "$result"
@@ -541,27 +711,30 @@ test_ensure_local_backup_dir_creates_secure_directory() {
 }
 
 test_invoke_ssh_command_for_host_preserves_argument_boundaries() {
-	fake_cmd="$FAKE_SSH_BIN -q -p 2222"
 	host_spec="backup@example.com pfexec doas"
 	log_file="$TEST_TMPDIR/invoke_cmd.log"
 	: >"$log_file"
 	FAKE_SSH_LOG="$log_file"
 	FAKE_SSH_SUPPRESS_STDOUT=1
 	export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_O_origin_host="$host_spec"
+	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
 
-	invoke_ssh_command_for_host "$fake_cmd" "$host_spec" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup"
+	invoke_ssh_command_for_host "$host_spec" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup"
 
 	unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
-	expected=$(printf '%s\n' "-q" "-p" "2222" "backup@example.com" "pfexec" "doas" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup")
+	expected=$(printf '%s\n' "-S" "$TEST_TMPDIR/origin.sock" "backup@example.com" "pfexec" "doas" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup")
 	result=$(cat "$log_file")
 
-	assertEquals "ssh helper should keep multi-word host specs and remote commands intact." "$expected" "$result"
+	assertEquals "ssh helper should keep control-socket, multi-word host specs, and remote commands intact." "$expected" "$result"
 }
 
 test_invoke_ssh_command_for_host_runs_without_remote_args() {
 	outfile="$TEST_TMPDIR/invoke_ssh_noargs.out"
+	g_cmd_ssh="$FAKE_SSH_BIN"
 
-	invoke_ssh_command_for_host "$FAKE_SSH_BIN" "" >"$outfile"
+	invoke_ssh_command_for_host "" >"$outfile"
 
 	assertEquals "ssh helpers should still invoke the base command when no host or remote argv is provided." \
 		"$FAKE_SSH_BIN" "$(cat "$outfile")"
@@ -733,27 +906,27 @@ test_refresh_compression_commands_tokenizes_custom_pipeline() {
 
 	assertEquals "Compression command tokens should be quoted." "'zstd' '-3;' 'touch' '/tmp/pwn'" "$g_cmd_compress_safe"
 
-	if [ $old_g_cmd_compress_set -eq 1 ]; then
+	if [ "$old_g_cmd_compress_set" -eq 1 ]; then
 		g_cmd_compress=$old_g_cmd_compress
 	else
 		unset g_cmd_compress
 	fi
-	if [ $old_g_cmd_decompress_set -eq 1 ]; then
+	if [ "$old_g_cmd_decompress_set" -eq 1 ]; then
 		g_cmd_decompress=$old_g_cmd_decompress
 	else
 		unset g_cmd_decompress
 	fi
-	if [ $old_g_option_z_compress_set -eq 1 ]; then
+	if [ "$old_g_option_z_compress_set" -eq 1 ]; then
 		g_option_z_compress=$old_g_option_z_compress
 	else
 		unset g_option_z_compress
 	fi
-	if [ $old_g_cmd_compress_safe_set -eq 1 ]; then
+	if [ "$old_g_cmd_compress_safe_set" -eq 1 ]; then
 		g_cmd_compress_safe=$old_g_cmd_compress_safe
 	else
 		unset g_cmd_compress_safe
 	fi
-	if [ $old_g_cmd_decompress_safe_set -eq 1 ]; then
+	if [ "$old_g_cmd_decompress_safe_set" -eq 1 ]; then
 		g_cmd_decompress_safe=$old_g_cmd_decompress_safe
 	else
 		unset g_cmd_decompress_safe
@@ -991,14 +1164,18 @@ test_beep_skips_when_speaker_device_is_missing() {
 }
 
 test_beep_skips_when_speaker_tools_are_missing() {
+	fake_bin_dir="$TEST_TMPDIR/no_speaker_tools"
+	fake_uname_bin="$fake_bin_dir/uname"
+	mkdir -p "$fake_bin_dir"
+	cat >"$fake_uname_bin" <<'EOF'
+#!/bin/sh
+printf '%s\n' "FreeBSD"
+EOF
+	chmod +x "$fake_uname_bin"
+
 	output=$(
 		(
-			uname() {
-				printf '%s\n' "FreeBSD"
-			}
-			mkdir -p "$TEST_TMPDIR/no_speaker_tools"
-			# shellcheck disable=SC2123
-			PATH="$TEST_TMPDIR/no_speaker_tools"
+			PATH="$fake_bin_dir"
 			g_option_b_beep_always=1
 			g_option_V_very_verbose=1
 			beep 1
@@ -1013,11 +1190,14 @@ test_execute_background_cmd_writes_output_file() {
 	# Background commands are used for option pipelines; ensure their stdout
 	# still lands in the provided tempfile.
 	temp_file="$TEST_TMPDIR/bg_output"
+	g_last_background_pid=""
 
 	execute_background_cmd "printf bg-data" "$temp_file"
-	bg_pid=$!
+	bg_pid=$g_last_background_pid
 	wait "$bg_pid"
 
+	assertTrue "execute_background_cmd should expose the spawned PID for callers." \
+		"[ -n \"$bg_pid\" ]"
 	assertTrue "Background output file should be created." "[ -f \"$temp_file\" ]"
 	assertEquals "bg-data" "$(cat "$temp_file")"
 }
@@ -1036,18 +1216,38 @@ test_exists_destination_returns_one_on_success() {
 	g_RZFS=$old_g_RZFS
 }
 
-test_exists_destination_returns_zero_on_failure() {
-	# When the remote ZFS check fails, the helper should return 0 so callers
-	# can detect that the destination needs to be created.
-	# shellcheck disable=SC2031
-	old_g_RZFS=${g_RZFS-}
-	g_RZFS=false
+test_exists_destination_returns_zero_when_dataset_is_missing() {
+	result=$(
+		(
+			run_destination_zfs_cmd() {
+				printf '%s\n' "cannot open 'pool/fs': dataset does not exist" >&2
+				return 1
+			}
+			exists_destination "pool/fs"
+		)
+	)
+	status=$?
 
-	result=$(exists_destination "pool/fs")
+	assertEquals "Explicit missing-dataset errors should map to destination absent." 0 "$status"
+	assertEquals "Missing destinations should still return 0." "0" "$result"
+}
 
-	assertEquals "Destination should not exist when command fails." "0" "$result"
+test_exists_destination_reports_probe_failures() {
+	set +e
+	output=$(
+		(
+			run_destination_zfs_cmd() {
+				printf '%s\n' "ssh: permission denied" >&2
+				return 1
+			}
+			exists_destination "pool/fs"
+		)
+	)
+	status=$?
 
-	g_RZFS=$old_g_RZFS
+	assertEquals "Operational probe failures should return non-zero." 1 "$status"
+	assertContains "Operational probe failures should preserve the destination context." \
+		"$output" "Failed to determine whether destination dataset [pool/fs] exists: ssh: permission denied"
 }
 
 test_write_backup_properties_treats_backup_data_as_literal() {
@@ -1189,7 +1389,7 @@ test_build_source_snapshot_list_cmd_serial_returns_direct_list() {
 	result=$(build_source_snapshot_list_cmd)
 
 	assertEquals "Serial snapshot listing should render a shell-safe direct zfs command." \
-		"'/sbin/zfs' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' 'tank/data'" "$result"
+		"'/sbin/zfs' 'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' 'tank/data'" "$result"
 }
 
 test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
@@ -1443,9 +1643,52 @@ test_init_variables_resolves_remote_tool_paths_and_restore_cat() {
 	assertContains "Destination OS should be populated from remote get_os()." "$result" "dest_os=RemoteOS"
 	assertContains "Origin zfs path should use the remote lookup result." "$result" "origin_zfs=/remote/origin/zfs"
 	assertContains "Target zfs path should use the remote lookup result." "$result" "target_zfs=/remote/target/zfs"
-	assertContains "g_LZFS should incorporate the remote origin zfs path." "$result" "lzfs=/usr/bin/ssh 'origin.example' 'pfexec' /remote/origin/zfs"
-	assertContains "g_RZFS should incorporate the remote target zfs path." "$result" "rzfs=/usr/bin/ssh 'target.example' 'doas' /remote/target/zfs"
+	assertContains "g_LZFS should track the resolved remote origin zfs path." "$result" "lzfs=/remote/origin/zfs"
+	assertContains "g_RZFS should track the resolved remote target zfs path." "$result" "rzfs=/remote/target/zfs"
 	assertContains "Restore mode should resolve cat on the origin host." "$result" "cat=/remote/origin/cat"
+}
+
+test_init_variables_passes_explicit_profile_sides_when_origin_and_target_match() {
+	log_file="$TEST_TMPDIR/init_variables_profile_sides.log"
+	: >"$log_file"
+
+	(
+		get_os() {
+			printf 'os:%s:%s\n' "$1" "${2:-}" >>"$log_file"
+			printf '%s\n' "RemoteOS"
+		}
+		resolve_remote_required_tool() {
+			printf 'tool:%s:%s:%s:%s\n' "$1" "$2" "$3" "${4:-}" >>"$log_file"
+			case "$2" in
+			zfs)
+				printf '%s\n' "/remote/$2"
+				;;
+			cat)
+				printf '%s\n' "/remote/$2"
+				;;
+			esac
+		}
+		g_cmd_ssh="/usr/bin/ssh"
+		g_cmd_zfs="/sbin/zfs"
+		g_option_O_origin_host="shared.example"
+		g_option_O_origin_host_safe="'shared.example'"
+		g_option_T_target_host="shared.example"
+		g_option_T_target_host_safe="'shared.example'"
+		g_option_e_restore_property_mode=1
+		init_variables
+	)
+
+	result=$(cat "$log_file")
+	assertContains "Origin OS probes should be tagged as source-side even when origin and target share the same host spec." \
+		"$result" "os:shared.example:source"
+	assertContains "Target OS probes should be tagged as destination-side even when origin and target share the same host spec." \
+		"$result" "os:shared.example:destination"
+	assertContains "Origin zfs dependency probes should be tagged as source-side." \
+		"$result" "tool:shared.example:zfs:zfs:source"
+	assertContains "Target zfs dependency probes should be tagged as destination-side." \
+		"$result" "tool:shared.example:zfs:zfs:destination"
+	assertContains "Origin restore-metadata cat probes should be tagged as source-side." \
+		"$result" "tool:shared.example:cat:cat:source"
 }
 
 test_init_variables_marks_remote_zfs_lookup_failures_as_dependency_errors() {
@@ -1663,7 +1906,7 @@ test_read_command_line_switches_skips_control_socket_when_ssh_lacks_support() {
 	assertEquals "Parsing should not emit stderr noise when multiplexing is unavailable." "" "$(cat "$stderr_file")"
 	assertContains "$result" "origin=backup@example.com"
 	assertContains "$result" "socket="
-	assertContains "$result" "lzfs=$FAKE_SSH_BIN 'backup@example.com' /sbin/zfs"
+	assertContains "$result" "lzfs=/sbin/zfs"
 }
 
 test_remote_snapshot_listing_pipeline_handles_cli_flow() {
@@ -1741,17 +1984,17 @@ if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name" ]
 	printf '%s\n' "zroot/usr"
 	exit 0
 fi
-if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] &&
+if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
 	[ "$5" = "-s" ] && [ "$6" = "creation" ] && [ "$7" = "-d" ] && [ "$8" = "1" ] &&
 	[ "$9" = "-t" ] && [ "${10}" = "snapshot" ] && [ "${11}" = "zroot" ]; then
-	printf '%s\n' "zroot@snap1"
-	printf '%s\n' "zroot@snap2"
+	printf '%s\n' "zroot@snap1	101"
+	printf '%s\n' "zroot@snap2	102"
 	exit 0
 fi
-if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] &&
+if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
 	[ "$5" = "-s" ] && [ "$6" = "creation" ] && [ "$7" = "-d" ] && [ "$8" = "1" ] &&
 	[ "$9" = "-t" ] && [ "${10}" = "snapshot" ] && [ "${11}" = "zroot/usr" ]; then
-	printf '%s\n' "zroot/usr@snap1"
+	printf '%s\n' "zroot/usr@snap1	201"
 	exit 0
 fi
 printf 'unexpected argv:' >&2
@@ -1786,9 +2029,9 @@ EOF
 
 	assertEquals "Remote snapshot listing should execute the GNU parallel runner without malformed zfs argv." 0 "$status"
 	assertEquals "The executed remote pipeline should return all source snapshots." \
-		"zroot@snap1
-zroot@snap2
-zroot/usr@snap1" "$(cat "$TEST_TMPDIR/remote_snapshot_exec.out")"
+		"zroot@snap1	101
+zroot@snap2	102
+zroot/usr@snap1	201" "$(cat "$TEST_TMPDIR/remote_snapshot_exec.out")"
 	assertEquals "The executed remote pipeline should not emit zfs usage or malformed-argv errors." \
 		"" "$(cat "$TEST_TMPDIR/remote_snapshot_exec.err")"
 }
@@ -1805,17 +2048,17 @@ if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name" ]
 	printf '%s\n' "tank/home/usr"
 	exit 0
 fi
-if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] &&
+if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
 	[ "$5" = "-s" ] && [ "$6" = "creation" ] && [ "$7" = "-d" ] && [ "$8" = "1" ] &&
 	[ "$9" = "-t" ] && [ "${10}" = "snapshot" ] && [ "${11}" = "tank/home" ]; then
-	printf '%s\n' "tank/home@snap1"
-	printf '%s\n' "tank/home@snap2"
+	printf '%s\n' "tank/home@snap1	301"
+	printf '%s\n' "tank/home@snap2	302"
 	exit 0
 fi
-if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] &&
+if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
 	[ "$5" = "-s" ] && [ "$6" = "creation" ] && [ "$7" = "-d" ] && [ "$8" = "1" ] &&
 	[ "$9" = "-t" ] && [ "${10}" = "snapshot" ] && [ "${11}" = "tank/home/usr" ]; then
-	printf '%s\n' "tank/home/usr@snap1"
+	printf '%s\n' "tank/home/usr@snap1	401"
 	exit 0
 fi
 	printf 'unexpected argv:' >&2
@@ -1838,9 +2081,9 @@ EOF
 
 	assertEquals "Local snapshot listing should execute the GNU parallel runner without malformed zfs argv." 0 "$status"
 	assertEquals "The executed local pipeline should return all source snapshots." \
-		"tank/home@snap1
-tank/home@snap2
-tank/home/usr@snap1" "$(cat "$TEST_TMPDIR/local_snapshot_exec.out")"
+		"tank/home@snap1	301
+tank/home@snap2	302
+tank/home/usr@snap1	401" "$(cat "$TEST_TMPDIR/local_snapshot_exec.out")"
 	assertEquals "The executed local pipeline should not emit zfs usage or malformed-argv errors." \
 		"" "$(cat "$TEST_TMPDIR/local_snapshot_exec.err")"
 }
@@ -1955,16 +2198,24 @@ EOF
 	assertEquals "pool/src@dpp" "$result_extra"
 }
 
-test_get_last_common_snapshot_matches_snapshot_name_only() {
-	# Destination snapshot names use the destination dataset prefix, so the
-	# helper must compare on the snapshot component rather than the full path.
-	l_source_snaps="tank/doET/tank@zxfer_2
-tank/doET/tank@zxfer_1"
-	l_dest_snaps="tank/backups/nucbackup/tank/doET/tank@zxfer_1"
+test_get_last_common_snapshot_requires_matching_guid() {
+	l_source_snaps=$(
+		cat <<'EOF'
+tank/doET/tank@zxfer_2	222
+tank/doET/tank@zxfer_1	111
+EOF
+	)
+	l_dest_snaps=$(
+		cat <<'EOF'
+tank/backups/nucbackup/tank/doET/tank@zxfer_2	999
+tank/backups/nucbackup/tank/doET/tank@zxfer_1	111
+EOF
+	)
 
 	result=$(get_last_common_snapshot "$l_source_snaps" "$l_dest_snaps")
 
-	assertEquals "tank/doET/tank@zxfer_1" "$result"
+	assertEquals "Common-snapshot detection should require matching guid identity, not just snapshot name." \
+		"tank/doET/tank@zxfer_1	111" "$result"
 }
 
 test_get_last_common_snapshot_returns_empty_when_no_snapshot_match() {
@@ -2013,6 +2264,26 @@ test_get_dest_snapshots_to_delete_per_dataset_returns_extra_dest_entries() {
 	dest_list=$(printf '%s\n%s' "tank/fs@s1" "tank/fs@s3")
 	result=$(get_dest_snapshots_to_delete_per_dataset "$source_list" "$dest_list")
 	assertEquals "tank/fs@s3" "$result"
+	rm -f "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" "$g_delete_snapshots_to_delete_tmp_file"
+}
+
+test_get_dest_snapshots_to_delete_per_dataset_treats_guid_mismatches_as_extra() {
+	g_delete_source_tmp_file=$(mktemp -t zxfer_src.XXXXXX)
+	g_delete_dest_tmp_file=$(mktemp -t zxfer_dst.XXXXXX)
+	g_delete_snapshots_to_delete_tmp_file=$(mktemp -t zxfer_diff.XXXXXX)
+	source_list=$(
+		cat <<'EOF'
+tank/fs@s1	111
+EOF
+	)
+	dest_list=$(
+		cat <<'EOF'
+tank/fs@s1	999
+EOF
+	)
+	result=$(get_dest_snapshots_to_delete_per_dataset "$source_list" "$dest_list")
+	assertEquals "Same-named destination snapshots with a different guid should be treated as divergent extras." \
+		"tank/fs@s1" "$result"
 	rm -f "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" "$g_delete_snapshots_to_delete_tmp_file"
 }
 
@@ -2281,22 +2552,20 @@ test_setup_progress_dialog_substitutes_placeholders() {
 
 test_wrap_command_with_ssh_without_compression_quotes_command() {
 	result=$(
-		get_ssh_cmd_for_host() { echo "/usr/bin/ssh"; }
-		quote_host_spec_tokens() { echo "'backup@example.com'"; }
+		g_cmd_ssh="/usr/bin/ssh"
 		wrap_command_with_ssh "zfs send tank/src@snap" "backup@example.com" 0 send
 	)
-	assertEquals "/usr/bin/ssh 'backup@example.com' \"zfs send tank/src@snap\"" "$result"
+	assertEquals "'/usr/bin/ssh' 'backup@example.com' 'zfs send tank/src@snap'" "$result"
 }
 
 test_wrap_command_with_ssh_streams_compression_on_send() {
 	result=$(
+		g_cmd_ssh="/usr/bin/ssh"
 		g_cmd_compress_safe="gzip"
 		g_cmd_decompress_safe="gunzip"
-		get_ssh_cmd_for_host() { echo "/usr/bin/ssh"; }
-		quote_host_spec_tokens() { echo "'backup'"; }
 		wrap_command_with_ssh "zfs send tank/src@snap" "backup" 1 send
 	)
-	assertEquals "/usr/bin/ssh 'backup' \"zfs send tank/src@snap | gzip\" | gunzip" "$result"
+	assertEquals "'/usr/bin/ssh' 'backup' 'zfs send tank/src@snap | gzip' | gunzip" "$result"
 }
 
 test_get_send_command_generates_incremental_streams_with_flags() {
@@ -2533,6 +2802,40 @@ EOF
 	assertEquals "Early invocation capture should not execute PATH-injected awk/sed helpers." "" "$marker_contents"
 }
 
+test_zxfer_usage_error_with_very_verbose_does_not_emit_profile_summary() {
+	secure_path_dir="$TEST_TMPDIR/usage_secure_path"
+	stdout_file="$TEST_TMPDIR/usage.stdout"
+	stderr_file="$TEST_TMPDIR/usage.stderr"
+	real_awk=$(command -v awk 2>/dev/null || :)
+	mkdir -p "$secure_path_dir"
+
+	if [ -z "$real_awk" ]; then
+		fail "Host test requires awk on the local system PATH."
+	fi
+
+	ln -s "$real_awk" "$secure_path_dir/awk"
+	cat >"$secure_path_dir/zfs" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	cat >"$secure_path_dir/ssh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$secure_path_dir/zfs" "$secure_path_dir/ssh"
+
+	set +e
+	ZXFER_SECURE_PATH="$secure_path_dir" \
+		"$ZXFER_ROOT/zxfer" -V >"$stdout_file" 2>"$stderr_file"
+	status=$?
+
+	assertEquals "Very-verbose usage errors should still exit with usage status." 2 "$status"
+	assertEquals "Usage errors should not write to stdout." "" "$(cat "$stdout_file")"
+	assertContains "$(cat "$stderr_file")" "Error: Need a destination."
+	assertNotContains "Usage-mode very-verbose exits should not emit profiling counters." \
+		"$(cat "$stderr_file")" "zxfer profile:"
+}
+
 test_trap_exit_emits_failure_report_once() {
 	set +e
 	output=$(
@@ -2553,6 +2856,71 @@ test_trap_exit_emits_failure_report_once() {
 	count=$(printf '%s\n' "$output" | grep -c "^zxfer: failure report begin$")
 	assertEquals "trap_exit helper path should preserve the failing exit status." 1 "$status"
 	assertEquals "trap_exit should emit the failure report only once even when EXIT re-triggers cleanup." 1 "$count"
+}
+
+test_trap_exit_emits_profile_summary_once_in_very_verbose_mode() {
+	set +e
+	output=$(
+		(
+			trap - EXIT INT TERM HUP QUIT
+			g_option_V_very_verbose=1
+			g_zxfer_profile_has_data=1
+			g_zxfer_profile_summary_emitted=0
+			g_zxfer_profile_start_epoch=$(($(date +%s) - 3))
+			g_zxfer_profile_source_zfs_calls=3
+			g_zxfer_profile_destination_zfs_calls=4
+			g_zxfer_profile_ssh_shell_invocations=2
+			g_zxfer_profile_source_snapshot_list_commands=1
+			g_zxfer_profile_send_receive_pipeline_commands=2
+			g_zxfer_profile_exists_destination_calls=5
+			g_zxfer_profile_normalized_property_reads_source=6
+			g_zxfer_profile_normalized_property_reads_destination=7
+			g_zxfer_profile_required_property_backfill_gets=1
+			g_zxfer_profile_parent_destination_property_reads=2
+			g_zxfer_profile_bucket_source_inspection=8
+			g_zxfer_profile_bucket_destination_inspection=9
+			g_zxfer_profile_bucket_property_reconciliation=10
+			g_zxfer_profile_bucket_send_receive_setup=11
+			g_delete_source_tmp_file=""
+			g_delete_dest_tmp_file=""
+			g_delete_snapshots_to_delete_tmp_file=""
+			g_services_need_relaunch=0
+			close_all_ssh_control_sockets() {
+				:
+			}
+			zxfer_emit_failure_report() {
+				:
+			}
+			true
+			trap_exit
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "trap_exit should preserve success when only emitting profiling output." 0 "$status"
+	assertContains "Very-verbose exits should emit the source zfs profile counter." \
+		"$output" "zxfer profile: source_zfs_calls=3"
+	assertContains "Very-verbose exits should emit the property-read profile counter." \
+		"$output" "zxfer profile: normalized_property_reads_destination=7"
+	assertContains "Very-verbose exits should emit the send/receive bucket counter." \
+		"$output" "zxfer profile: bucket_send_receive_setup=11"
+	count=$(printf '%s\n' "$output" | grep -c "^zxfer profile: source_zfs_calls=3$")
+	assertEquals "trap_exit should emit the profile summary only once." 1 "$count"
+}
+
+test_zxfer_profile_emit_summary_returns_without_output_when_already_emitted() {
+	output=$(
+		(
+			g_option_V_very_verbose=1
+			g_zxfer_profile_has_data=1
+			g_zxfer_profile_summary_emitted=1
+			zxfer_profile_emit_summary
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "An already-emitted profile summary should return success." 0 "$status"
+	assertEquals "An already-emitted profile summary should not emit duplicate output." "" "$output"
 }
 
 test_zxfer_append_failure_report_to_log_creates_secure_file() {
@@ -2847,8 +3215,33 @@ test_trap_exit_preserves_failure_status_when_error_log_warning_fails() {
 		"$output" "refusing ZXFER_ERROR_LOG path \"relative.log\" because it is not absolute"
 }
 
+test_zxfer_kill_registered_cleanup_pids_only_terminates_registered_pids() {
+	g_zxfer_cleanup_pids=""
+
+	sleep 30 &
+	registered_pid=$!
+	zxfer_register_cleanup_pid "$registered_pid"
+
+	sleep 30 &
+	unrelated_pid=$!
+
+	zxfer_kill_registered_cleanup_pids
+	wait "$registered_pid" 2>/dev/null || true
+	sleep 1
+
+	assertFalse "Registered cleanup jobs should be terminated." \
+		"kill -0 \"$registered_pid\" >/dev/null 2>&1"
+	assertTrue "Cleanup should not terminate unrelated child processes." \
+		"kill -0 \"$unrelated_pid\" >/dev/null 2>&1"
+	assertEquals "Cleanup PID tracking should be cleared after termination." "" "$g_zxfer_cleanup_pids"
+
+	kill -s KILL "$unrelated_pid" >/dev/null 2>&1 || true
+	wait "$unrelated_pid" 2>/dev/null || true
+}
+
 test_execute_command_records_last_command_string() {
 	g_option_n_dryrun=1
+	g_zxfer_failure_last_command=""
 
 	execute_command "printf 'hello'"
 
@@ -2868,12 +3261,119 @@ test_run_source_zfs_cmd_records_local_command() {
 
 test_invoke_ssh_command_for_host_records_remote_command() {
 	FAKE_SSH_STDOUT_OVERRIDE="ok"
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_O_origin_host="backup@example.com pfexec"
+	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
 
-	invoke_ssh_command_for_host "$FAKE_SSH_BIN -q -p 2222" "backup@example.com pfexec" /sbin/zfs list -H tank/src >/dev/null
+	invoke_ssh_command_for_host "backup@example.com pfexec" /sbin/zfs list -H tank/src >/dev/null
 
 	assertEquals "SSH command recording should preserve every token boundary." \
-		"'$FAKE_SSH_BIN' '-q' '-p' '2222' 'backup@example.com' 'pfexec' '/sbin/zfs' 'list' '-H' 'tank/src'" \
+		"'$FAKE_SSH_BIN' '-S' '$TEST_TMPDIR/origin.sock' 'backup@example.com' 'pfexec' '/sbin/zfs' 'list' '-H' 'tank/src'" \
 		"$g_zxfer_failure_last_command"
+}
+
+test_build_ssh_shell_command_for_host_quotes_control_socket_path_for_eval() {
+	marker_rel="control_socket_marker"
+	marker="$TEST_TMPDIR/$marker_rel"
+	log_file="$TEST_TMPDIR/control_socket_eval.log"
+	socket_path="$TEST_TMPDIR/socket.\$(touch $marker_rel)"
+	safe_cmd=$(build_remote_sh_c_command "printf ok >/dev/null")
+	: >"$log_file"
+	rm -f "$marker"
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_O_origin_host="backup@example.com"
+	g_ssh_origin_control_socket="$socket_path"
+	FAKE_SSH_LOG="$log_file"
+	FAKE_SSH_SUPPRESS_STDOUT=1
+	export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+
+	cmd=$(build_ssh_shell_command_for_host "backup@example.com" "$safe_cmd")
+	(
+		cd "$TEST_TMPDIR" || exit 1
+		execute_command "$cmd"
+	)
+
+	unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+
+	assertFalse "Control-socket paths should stay literal when ssh commands are eval-rendered." \
+		"[ -e '$marker' ]"
+	assertEquals "Rendered ssh commands should pass the control socket as a single argv token." \
+		"-S
+$socket_path
+backup@example.com
+'sh' '-c' 'printf ok >/dev/null'" "$(cat "$log_file")"
+}
+
+test_build_ssh_shell_command_for_host_fuzzes_wrapper_specs_and_control_socket_paths() {
+	marker_rel="control_socket_fuzz_marker"
+	marker="$TEST_TMPDIR/$marker_rel"
+	case_file="$TEST_TMPDIR/control_socket_fuzz_cases.txt"
+	safe_cmd=$(build_remote_sh_c_command "printf ok >/dev/null")
+	cat >"$case_file" <<EOF
+backup@example.com doas|$TEST_TMPDIR/socket,comma
+backup@example.com pfexec -u root|$TEST_TMPDIR/socket=equals
+backup@example.com env LC_ALL=C doas|$TEST_TMPDIR/socket:semicolon;literal
+backup@example.com doas|$TEST_TMPDIR/socket.\$(touch $marker_rel)
+EOF
+
+	case_index=0
+	while IFS='|' read -r host_spec socket_path || [ -n "$host_spec$socket_path" ]; do
+		[ -n "$host_spec" ] || continue
+		case_index=$((case_index + 1))
+		log_file="$TEST_TMPDIR/control_socket_fuzz_$case_index.log"
+		: >"$log_file"
+		rm -f "$marker"
+		g_cmd_ssh="$FAKE_SSH_BIN"
+		g_option_O_origin_host=$host_spec
+		g_ssh_origin_control_socket=$socket_path
+		FAKE_SSH_LOG="$log_file"
+		FAKE_SSH_SUPPRESS_STDOUT=1
+		export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+
+		cmd=$(build_ssh_shell_command_for_host "$host_spec" "$safe_cmd")
+		(
+			cd "$TEST_TMPDIR" || exit 1
+			execute_command "$cmd"
+		)
+
+		unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+
+		{
+			IFS= read -r log_line1
+			IFS= read -r log_line2
+			IFS= read -r log_line3
+			IFS= read -r log_line4
+		} <"$log_file"
+
+		assertFalse "Control-socket fuzz case $case_index should not execute command substitutions from the socket path." \
+			"[ -e '$marker' ]"
+		assertEquals "Control-socket fuzz case $case_index should pass -S separately." "-S" "$log_line1"
+		assertEquals "Control-socket fuzz case $case_index should preserve the literal control-socket path." \
+			"$socket_path" "$log_line2"
+		assertEquals "Control-socket fuzz case $case_index should keep the ssh host token separate from wrappers." \
+			"backup@example.com" "$log_line3"
+		assertContains "Control-socket fuzz case $case_index should preserve the quoted remote command payload." \
+			"$log_line4" "'sh' '-c' 'printf ok >/dev/null'"
+
+		case "$host_spec" in
+		*" doas"*)
+			assertContains "Control-socket fuzz case $case_index should keep doas in the remote wrapper chain." \
+				"$log_line4" "'doas'"
+			;;
+		esac
+		case "$host_spec" in
+		*"pfexec -u root"*)
+			assertContains "Control-socket fuzz case $case_index should keep pfexec wrapper tokens quoted." \
+				"$log_line4" "'pfexec' '-u' 'root'"
+			;;
+		esac
+		case "$host_spec" in
+		*"LC_ALL=C doas"*)
+			assertContains "Control-socket fuzz case $case_index should keep env-style wrapper tokens quoted." \
+				"$log_line4" "'env' 'LC_ALL=C' 'doas'"
+			;;
+		esac
+	done <"$case_file"
 }
 
 test_read_remote_backup_file_rejects_insecure_remote_owner() {
@@ -2955,17 +3455,40 @@ test_throw_error_with_usage_writes_message_and_usage_to_stderr() {
 
 test_get_os_handles_local_and_remote_invocations() {
 	local_result=$(get_os "")
-	remote_result=$(
+	if remote_result=$(
 		(
-			fake_remote() {
-				printf '%s\n' "RemoteOS"
-			}
-			get_os fake_remote
+			g_cmd_ssh="$FAKE_SSH_BIN"
+			FAKE_SSH_STDOUT_OVERRIDE="RemoteOS"
+			export FAKE_SSH_STDOUT_OVERRIDE
+			get_os "backup@example.com pfexec"
 		)
-	)
+	); then
+		remote_status=0
+	else
+		remote_status=$?
+	fi
+	unset FAKE_SSH_STDOUT_OVERRIDE
 
 	assertEquals "Local OS detection should match uname output." "$(uname)" "$local_result"
-	assertEquals "Remote OS detection should eval the supplied remote command prefix." "RemoteOS" "$remote_result"
+	assertEquals "Remote OS detection should succeed through the ssh helper path." 0 "$remote_status"
+	assertEquals "Remote OS detection should execute uname through the ssh helper path." "RemoteOS" "$remote_result"
+}
+
+test_get_os_treats_local_ssh_path_as_literal() {
+	marker="$TEST_TMPDIR/get_os_ssh_marker"
+	old_cmd_ssh=${g_cmd_ssh:-}
+	g_cmd_ssh="/bin/echo; touch $marker #"
+
+	if get_os "backup@example.com" >/dev/null 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	g_cmd_ssh=$old_cmd_ssh
+
+	: "$status"
+	assertFalse "Local ssh helper paths should not execute shell metacharacters during OS detection." \
+		"[ -e '$marker' ]"
 }
 
 test_execute_command_continue_on_fail_reports_noncritical_error() {
@@ -3062,4 +3585,5 @@ test_zxfer_find_symlink_path_component_rejects_relative_paths() {
 	assertEquals "Relative path checks should not report a symlink component." "" "$result"
 }
 
+# shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

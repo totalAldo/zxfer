@@ -64,7 +64,7 @@ ensure_parallel_available_for_source_jobs() {
 		return 0
 	fi
 
-	if ! l_remote_parallel=$(resolve_remote_required_tool "$g_option_O_origin_host" parallel "GNU parallel"); then
+	if ! l_remote_parallel=$(resolve_remote_required_tool "$g_option_O_origin_host" parallel "GNU parallel" source); then
 		case "$l_remote_parallel" in
 		"Required dependency \"GNU parallel\" not found on host "*)
 			printf '%s\n' "GNU parallel not found on origin host $g_option_O_origin_host but -j $g_option_j_jobs was requested. Install GNU parallel remotely or rerun without -j."
@@ -87,7 +87,7 @@ ensure_parallel_available_for_source_jobs() {
 #
 build_source_snapshot_list_cmd() {
 	if [ "$g_option_j_jobs" -le 1 ]; then
-		zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$initial_source"
+		zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$initial_source"
 		return
 	fi
 
@@ -98,18 +98,17 @@ build_source_snapshot_list_cmd() {
 	if [ ! "$g_option_O_origin_host" = "" ]; then
 		l_parallel_path=$g_origin_parallel_cmd
 		l_remote_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
-		l_origin_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_O_origin_host")
 		l_parallel_cmd=$(build_shell_command_from_argv "$l_parallel_path")
 		l_remote_list_cmd=$(build_shell_command_from_argv \
 			"$l_remote_zfs_cmd" list -Hr -o name "$initial_source")
 		l_remote_runner_cmd=$(build_shell_command_from_argv \
-			"$l_remote_zfs_cmd" list -H -o name -s creation -d 1 -t snapshot "{}")
+			"$l_remote_zfs_cmd" list -H -o name,guid -s creation -d 1 -t snapshot "{}")
 		l_remote_pipeline="$l_remote_list_cmd | $l_parallel_cmd -j $g_option_j_jobs --line-buffer $(build_shell_command_from_argv "$l_remote_runner_cmd")"
 		if [ "$g_option_z_compress" -eq 1 ]; then
 			l_remote_pipeline="$l_remote_pipeline | zstd -9"
 		fi
 		l_remote_shell_cmd=$(build_remote_sh_c_command "$l_remote_pipeline")
-		l_cmd=$(build_ssh_shell_command_for_host "$l_origin_ssh_cmd" "$g_option_O_origin_host" "$l_remote_shell_cmd") || return 1
+		l_cmd=$(build_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_shell_cmd") || return 1
 		if [ "$g_option_z_compress" -eq 1 ]; then
 			l_cmd="$l_cmd | zstd -d"
 		fi
@@ -119,7 +118,7 @@ build_source_snapshot_list_cmd() {
 
 	l_parallel_path=$g_cmd_parallel
 	l_list_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name "$initial_source")
-	l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name -s creation -d 1 -t snapshot "{}")
+	l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name,guid -s creation -d 1 -t snapshot "{}")
 	l_cmd="$l_list_cmd | $(build_shell_command_from_argv "$l_parallel_path") -j $g_option_j_jobs --line-buffer $(build_shell_command_from_argv "$l_runner_cmd")"
 	printf '%s\n' "$l_cmd"
 }
@@ -132,6 +131,8 @@ build_source_snapshot_list_cmd() {
 write_source_snapshot_list_to_file() {
 	l_outfile=$1
 	l_errfile=${2:-}
+	zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_commands
+	zxfer_profile_record_bucket source_inspection
 
 	#
 	# it is important to get this in ascending order because when getting
@@ -142,8 +143,12 @@ write_source_snapshot_list_to_file() {
 		throw_error "$l_cmd"
 	fi
 	g_source_snapshot_list_cmd=$l_cmd
+	if [ "$g_option_O_origin_host" != "" ]; then
+		zxfer_profile_record_ssh_invocation "$g_option_O_origin_host" source
+	fi
 
 	if [ "$g_option_j_jobs" -gt 1 ]; then
+		zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_parallel_commands
 		echoV "Running command in the background: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
 		if [ -n "$l_errfile" ]; then
@@ -152,6 +157,7 @@ write_source_snapshot_list_to_file() {
 			eval "$l_cmd" >"$l_outfile" &
 		fi
 		g_source_snapshot_list_pid=$!
+		zxfer_register_cleanup_pid "$g_source_snapshot_list_pid"
 	else
 		execute_background_cmd \
 			"$l_cmd" \
@@ -171,14 +177,17 @@ normalize_destination_snapshot_list() {
 	l_output_file=$3
 
 	if [ "$g_initial_source_had_trailing_slash" -eq 1 ]; then
-		l_cmd="LC_ALL=C sort $l_input_file > $l_output_file"
+		l_cmd=$(zxfer_render_command_for_report "LC_ALL=C" sort "$l_input_file")
+		echoV "Running command: $l_cmd > $(zxfer_quote_token_for_report "$l_output_file")"
+		zxfer_record_last_command_string "$l_cmd > $(zxfer_quote_token_for_report "$l_output_file")"
+		LC_ALL=C sort "$l_input_file" >"$l_output_file"
 	else
 		l_escaped_destination_dataset=$(printf '%s\n' "$l_destination_dataset" | sed 's/[].[^$\\*|]/\\&/g')
-		l_cmd="sed -e 's|$l_escaped_destination_dataset|$initial_source|g' $l_input_file | LC_ALL=C sort > $l_output_file"
+		l_cmd=$(zxfer_render_command_for_report "" sed -e "s|$l_escaped_destination_dataset|$initial_source|g" "$l_input_file")
+		echoV "Running command: $l_cmd | LC_ALL=C sort > $(zxfer_quote_token_for_report "$l_output_file")"
+		zxfer_record_last_command_string "$l_cmd | LC_ALL=C sort > $(zxfer_quote_token_for_report "$l_output_file")"
+		sed -e "s|$l_escaped_destination_dataset|$initial_source|g" "$l_input_file" | LC_ALL=C sort >"$l_output_file"
 	fi
-	echoV "Running command: $l_cmd"
-	zxfer_record_last_command_string "$l_cmd"
-	eval "$l_cmd"
 }
 
 # We only need the snapshots of the intended destination dataset, not
@@ -188,7 +197,7 @@ normalize_destination_snapshot_list() {
 # This significantly improves performance as the metadata
 # doesn't need to be searched for the creation time of each snapshot.
 # Parallelization support has been added and is useful in situations when
-# the ARC is not populated such as when a removable disk us mounted.
+# the ARC is not populated such as when a removable disk is mounted.
 write_destination_snapshot_list_to_files() {
 	l_rzfs_list_hr_snap_tmp_file=$1
 	l_dest_snaps_stripped_sorted_tmp_file=$2
@@ -206,16 +215,20 @@ write_destination_snapshot_list_to_files() {
 	fi
 
 	# check if the destination zfs dataset exists before listing snapshots
-	if [ "$(exists_destination "$l_destination_dataset")" -eq 1 ]; then
+	if ! l_destination_exists=$(exists_destination "$l_destination_dataset"); then
+		throw_error "$l_destination_exists"
+	fi
+
+	if [ "$l_destination_exists" -eq 1 ]; then
 		# dataset exists
 		# Keep destination-side snapshot listing serial here. The older parallel
 		# variant added complexity and was not a net win once metadata was cached.
-		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset")
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
 		echoV "Running command: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
 		# make sure to eval and then pipe the contents to the file in case
 		# the command uses ssh
-		if ! run_destination_zfs_cmd list -Hr -o name -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file"; then
+		if ! run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file"; then
 			throw_error "Failed to retrieve snapshot list from the destination."
 		fi
 
@@ -277,9 +290,10 @@ set_g_recursive_source_list() {
 
 	# sort the source snapshots for use with comm
 	# wait until background processes are finished before attempting to sort
-	l_cmd="LC_ALL=C sort $l_lzfs_list_hr_s_snap_tmp_file > $l_source_snaps_sorted_tmp_file"
-	echoV "Running command: $l_cmd"
-	eval "$l_cmd"
+	l_cmd=$(zxfer_render_command_for_report "LC_ALL=C" sort "$l_lzfs_list_hr_s_snap_tmp_file")
+	echoV "Running command: $l_cmd > $(zxfer_quote_token_for_report "$l_source_snaps_sorted_tmp_file")"
+	zxfer_record_last_command_string "$l_cmd > $(zxfer_quote_token_for_report "$l_source_snaps_sorted_tmp_file")"
+	LC_ALL=C sort "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snaps_sorted_tmp_file"
 
 	l_missing_snapshots=$(diff_snapshot_lists "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "source_minus_destination")
 	if [ "$l_missing_snapshots" != "" ]; then
@@ -332,9 +346,9 @@ set_g_recursive_source_list() {
 #
 # Build the source and destination snapshot caches used by replication.
 # zxfer relies on `zfs list` in machine-readable mode (`-H`), recursive dataset
-# traversal (`-r`) where needed, exact-name output (`-o name`), snapshot-only
-# listing (`-t snapshot`), and creation-order sorting for per-dataset snapshot
-# discovery on the source side.
+# traversal (`-r`) where needed, name-plus-guid output (`-o name,guid`),
+# snapshot-only listing (`-t snapshot`), and creation-order sorting for
+# per-dataset snapshot discovery on the source side.
 #
 get_zfs_list() {
 	zxfer_set_failure_stage "snapshot discovery"
@@ -397,6 +411,8 @@ get_zfs_list() {
 	l_source_snapshot_wait_status=0
 	if [ -n "${g_source_snapshot_list_pid:-}" ]; then
 		wait "$g_source_snapshot_list_pid" || l_source_snapshot_wait_status=$?
+		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
+		g_source_snapshot_list_pid=""
 	fi
 	echoV "Background processes finished."
 

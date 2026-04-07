@@ -247,7 +247,14 @@ backup will be able to store the correct properties of the original.
 .It Fl n
 Dry ru(n) mode. Prints out the commands that would otherwise execute but does
 not execute them. This may not work in all circumstances as it may expect the
-existence of filesystems etc. that won't be created.
+existence of filesystems etc. that won't be created. When combined with
+.Fl s
+or
+.Fl m ,
+.Nm
+only previews the source-side snapshot plus the migration service-disable,
+service-enable, and unmount commands; it does not execute them or refresh
+cached state as though those actions had already happened.
 .It Fl o
 (o)verride property mode. Property overrides are specified with commas to separate.
 .Pp
@@ -468,6 +475,10 @@ Note also that
 and
 .Op Fl T
 (i.e. remote transfers) are not supported with this option enabled.
+.Pp
+With
+.Fl n ,
+these migration preflight steps are previewed only.
 .It Fl N
 Replicate the listed filesystem. Note the provisos listed above in
 .Op Fl R .
@@ -576,6 +587,11 @@ second execution. e.g. use this option to ensure that a relatively current
 snapshot exists, create it manually, or wait until your own snapshotting
 regime does the job for you (if you have one).
 .Pp
+With
+.Fl n ,
+.Nm
+only previews this snapshot command.
+.Pp
 .It Fl T
 Specify a (T)arget user@host. This allows transfers TO a remote host via ssh.
 e.g. Whatever filesystem you specify as the destination will be where the
@@ -605,7 +621,8 @@ This allows replicating from newer versions of OpenZFS to older versions.
 .It Fl v
 (v) verbose mode
 .It Fl V
-(V)ery verbose mode, prints debugging messages to stderr
+(V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
+profiling counters for ZFS, ssh, and selected replication hot paths
 .It Fl w
 uses zfs ra(w) send mode
 .It Fl Y

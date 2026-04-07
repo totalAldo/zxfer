@@ -17,6 +17,10 @@ Pass specific suite paths to limit execution, e.g.:
 
   tests/run_shunit_tests.sh test_zxfer_common.sh
   tests/run_shunit_tests.sh tests/test_zxfer_zfs_mode.sh
+
+Set ZXFER_TEST_SHELL to an alternate shell executable to run each suite through
+that interpreter. For multi-word shell modes such as "bash --posix", point
+ZXFER_TEST_SHELL at a wrapper script that execs the desired command.
 EOF
 }
 
@@ -38,6 +42,44 @@ resolve_suite_path() {
 	esac
 }
 
+resolve_test_shell_runner() {
+	l_test_shell=${ZXFER_TEST_SHELL:-}
+
+	if [ -z "$l_test_shell" ]; then
+		TEST_SHELL_RUNNER=""
+		TEST_SHELL_LABEL=""
+		return 0
+	fi
+
+	case "$l_test_shell" in
+	*/*)
+		l_runner=$l_test_shell
+		;;
+	*)
+		l_runner=$(command -v "$l_test_shell" 2>/dev/null || true)
+		;;
+	esac
+
+	if [ -z "${l_runner:-}" ] || [ ! -x "$l_runner" ]; then
+		echo "ZXFER_TEST_SHELL is not executable: $l_test_shell" >&2
+		return 1
+	fi
+
+	TEST_SHELL_RUNNER=$l_runner
+	TEST_SHELL_LABEL=$l_test_shell
+	return 0
+}
+
+run_suite_command() {
+	l_suite_path=$1
+
+	if [ -n "${TEST_SHELL_RUNNER:-}" ]; then
+		"$TEST_SHELL_RUNNER" "$l_suite_path"
+	else
+		"$l_suite_path"
+	fi
+}
+
 if [ "$#" -gt 0 ]; then
 	case "$1" in
 	-h | --help)
@@ -53,6 +95,8 @@ if [ "$#" -eq 0 ]; then
 	echo "No shunit2 suites found in $TEST_DIR" >&2
 	exit 1
 fi
+
+resolve_test_shell_runner
 
 overall_status=0
 passed_count=0
@@ -75,8 +119,12 @@ for suite in "$@"; do
 		;;
 	esac
 
-	echo "==> Running shunit2 suite: $suite_path"
-	if "$suite_path"; then
+	if [ -n "${TEST_SHELL_LABEL:-}" ]; then
+		echo "==> Running shunit2 suite with test shell [$TEST_SHELL_LABEL]: $suite_path"
+	else
+		echo "==> Running shunit2 suite: $suite_path"
+	fi
+	if run_suite_command "$suite_path"; then
 		passed_count=$((passed_count + 1))
 	else
 		status=$?

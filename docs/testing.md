@@ -16,14 +16,30 @@ Run all suites:
 ./tests/run_shunit_tests.sh
 ```
 
+Run the local lint stack with the same pinned toolchain as CI:
+
+```sh
+./tests/run_lint.sh
+```
+
 Run one suite:
 
 ```sh
 ./tests/run_shunit_tests.sh tests/test_zxfer_zfs_mode.sh
 ```
 
+Run the suites under a specific alternate shell:
+
+```sh
+ZXFER_TEST_SHELL=/bin/dash ./tests/run_shunit_tests.sh
+```
+
+For multi-word shell modes such as `bash --posix`, point `ZXFER_TEST_SHELL` at
+an executable wrapper script that `exec`s the desired command.
+
 The test layout mirrors the source layout:
 
+- `test_run_shunit_tests.sh`
 - `test_zxfer_common.sh`
 - `test_zxfer_globals.sh`
 - `test_zxfer_get_zfs_list.sh`
@@ -42,6 +58,38 @@ Generate shell coverage:
 
 The coverage runner prefers `kcov` when available and otherwise falls back to a
 bash xtrace-based approximation.
+
+That fallback now discounts shell syntax that bash xtrace cannot attribute to a
+real command line, such as `case` labels, here-doc bodies/delimiters attached
+to control-flow terminators, grouping delimiters, and multiline string
+continuations.
+
+The bash-xtrace path is also the enforcement path. It appends a `TOTAL` row to
+`coverage/bash-xtrace/summary.tsv`, checks the current summary against the
+committed minimums in `tests/coverage_policy.tsv`, rejects total or per-file
+coverage regressions relative to
+`tests/coverage_baseline/bash-xtrace/summary.tsv`, and writes a unified diff
+against `tests/coverage_baseline/bash-xtrace/missing.txt` to
+`coverage/bash-xtrace/missing.diff`.
+
+Run the policy gate locally:
+
+```sh
+ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
+```
+
+Bypass the gate when you intentionally need a fresh report before updating the
+committed baseline:
+
+```sh
+ZXFER_COVERAGE_MODE=bash-xtrace ZXFER_COVERAGE_ENFORCE_POLICY=0 ./tests/run_coverage.sh
+```
+
+Locally, you can force the higher-fidelity path when `kcov` is installed:
+
+```sh
+ZXFER_COVERAGE_MODE=kcov ./tests/run_coverage.sh
+```
 
 ## Integration Harness
 
@@ -113,10 +161,16 @@ Recommended usage:
 
 The project currently ships four GitHub Actions workflows:
 
-- `lint.yml`: `actionlint`, ShellCheck, shfmt, and repository hygiene checks
-- `coverage.yml`: Ubuntu shell coverage using the bash-xtrace fallback, with the
-  coverage directory uploaded as a workflow artifact
-- `tests.yml`: shunit2 unit tests on `ubuntu-latest` and `macos-latest`
+- `lint.yml`: `actionlint`, `checkbashisms`, ShellCheck, shfmt, and repository
+  hygiene checks through the shared `tests/run_lint.sh` bootstrap with pinned
+  tool versions and hashes
+- `coverage.yml`: shell coverage with both the bash-xtrace fallback and a
+  Docker-backed `kcov` pass, each uploaded as its own workflow artifact; the
+  bash-xtrace lane is the coverage-policy gate and publishes the current
+  `missing.txt` diff plus the policy report into the GitHub step summary
+- `tests.yml`: shunit2 unit tests on `ubuntu-latest` and `macos-latest`, plus
+  an Ubuntu portable-shell matrix for `dash`, `bash --posix`, `busybox ash`,
+  and an initially non-blocking `posh` lane
 - `integration.yml`: Ubuntu integration tests with runtime ZFS setup, preserving
   the harness workdir on failure and uploading it as a workflow artifact
 
@@ -130,9 +184,20 @@ The CI workflows use GitHub Actions concurrency cancellation keyed by workflow
 name plus pull request number or ref, so stale branch runs are canceled when a
 new push supersedes them.
 
+The `kcov` job runs on `ubuntu-24.04` and uses the official `kcov/kcov` Docker
+image pinned by digest instead of installing `kcov` from the runner package
+manager. That keeps the higher-fidelity coverage lane available even though
+current Ubuntu runner images do not consistently ship a native `kcov` package.
+The bash-xtrace job is kept alongside it because the line-oriented
+`summary.tsv`, `policy_failures.tsv`, and `missing.txt` diff outputs are stable
+enough to enforce no-regression coverage policy in CI and on local developer
+machines.
+
 The macOS GitHub-hosted runner is currently used for `/bin/sh` and BSD-userland
 unit coverage only. It is not a required hosted ZFS integration gate because
 Darwin/OpenZFS property behavior remains less deterministic than
 FreeBSD/Linux, as documented in [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 The macOS shunit2 job intentionally does not install ZFS; it is meant to catch
 shell and userland portability regressions in the mock-heavy unit suites.
+The Ubuntu portable-shell matrix uses `ZXFER_TEST_SHELL` to rerun those same
+shunit2 suites under alternate interpreters without changing the suite shebangs.

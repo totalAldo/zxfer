@@ -9,67 +9,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  actionlint:
-    name: actionlint
-    runs-on: ubuntu-latest
+  lint:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - actionlint
+          - checkbashisms
+          - shfmt
+          - codespell
+          - shellcheck
     steps:
       - uses: actions/checkout@v5
-      - name: Install actionlint
+      - name: Run lint target
         shell: bash
         env:
-          ACTIONLINT_VERSION: 1.7.12
+          ZXFER_LINT_TOOL_DIR: ${{ runner.temp }}/zxfer-lint-tools
         run: |
           set -euo pipefail
-          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
-          curl -fsSL "$url" -o "$RUNNER_TEMP/$archive"
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
-          install -m 0755 "$RUNNER_TEMP/actionlint" /usr/local/bin/actionlint
-      - name: Run actionlint
-        shell: bash
-        run: |
-          set -euo pipefail
-          actionlint
-
-  shfmt:
-    name: shfmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install shfmt
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shfmt
-      - name: Run shfmt
-        run: |
-          git ls-files -z '*.sh' | xargs -0 shfmt -d zxfer
-
-  codespell:
-    name: Codespell
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install codespell
-        run: |
-          python3 -m pip install --upgrade pip
-          pip install codespell
-      - name: Run codespell
-        run: |
-          codespell --config .codespellrc .
-
-  shellcheck:
-    name: ShellCheck
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install ShellCheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
-      - name: Run ShellCheck
-        shell: bash
-        env:
-          SHELLCHECK_OPTS: --external-sources --source-path=.:src
-        run: |
-          set -euo pipefail
-          git ls-files -z '*.sh' | xargs -0 shellcheck zxfer
+          ./tests/run_lint.sh "${{ matrix.target }}"

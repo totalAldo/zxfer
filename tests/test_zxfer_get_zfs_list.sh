@@ -2,10 +2,19 @@
 #
 # shunit2 tests for zxfer_get_zfs_list.sh helpers.
 #
-# shellcheck disable=SC2030
+# shellcheck disable=SC1090,SC2030,SC2317,SC2329
+
+case "$0" in
+/*)
+	TESTS_DIR=$(dirname "$0")
+	;;
+*)
+	TESTS_DIR=${PWD:-.}/$(dirname "$0")
+	;;
+esac
 
 # shellcheck source=tests/test_helper.sh
-. "$(dirname "$0")/test_helper.sh"
+. "$TESTS_DIR/test_helper.sh"
 
 # shellcheck source=src/zxfer_globals.sh
 . "$ZXFER_ROOT/src/zxfer_globals.sh"
@@ -161,6 +170,75 @@ test_write_source_snapshot_list_to_file_uses_execute_background_cmd_when_serial(
 	assertEquals "Serial snapshot listing should delegate to execute_background_cmd." \
 		"printf 'snap-serial'|$outfile|$errfile
 4242" "$(cat "$log")"
+}
+
+test_write_source_snapshot_list_to_file_tracks_profile_counters_when_very_verbose() {
+	log="$TEST_TMPDIR/source_profile.log"
+	outfile="$TEST_TMPDIR/source_profile.out"
+	errfile="$TEST_TMPDIR/source_profile.err"
+	: >"$log"
+
+	(
+		echoV() {
+			:
+		}
+		build_source_snapshot_list_cmd() {
+			printf '%s\n' "printf 'snap-profile'"
+		}
+		g_option_V_very_verbose=1
+		g_option_j_jobs=2
+		write_source_snapshot_list_to_file "$outfile" "$errfile"
+		wait "$g_source_snapshot_list_pid"
+		printf '%s\n' "$(cat "$outfile")" >"$log"
+		{
+			printf 'commands=%s\n' "${g_zxfer_profile_source_snapshot_list_commands:-0}"
+			printf 'parallel=%s\n' "${g_zxfer_profile_source_snapshot_list_parallel_commands:-0}"
+			printf 'bucket=%s\n' "${g_zxfer_profile_bucket_source_inspection:-0}"
+		} >>"$log"
+	)
+
+	assertEquals "Very-verbose profiling should track source snapshot list command counts." \
+		"snap-profile
+commands=1
+parallel=1
+bucket=1" "$(cat "$log")"
+}
+
+test_write_source_snapshot_list_to_file_tracks_remote_ssh_profile_counter_when_very_verbose() {
+	log="$TEST_TMPDIR/source_remote_profile.log"
+	outfile="$TEST_TMPDIR/source_remote_profile.out"
+	errfile="$TEST_TMPDIR/source_remote_profile.err"
+	: >"$log"
+
+	(
+		echoV() {
+			:
+		}
+		build_source_snapshot_list_cmd() {
+			printf '%s\n' "printf 'remote-snap-profile'"
+		}
+		execute_background_cmd() {
+			printf '%s|%s|%s\n' "$1" "$2" "$3" >"$log"
+			g_last_background_pid=3131
+		}
+		g_option_V_very_verbose=1
+		g_option_j_jobs=1
+		g_option_O_origin_host="origin.example"
+		g_zxfer_profile_ssh_shell_invocations=0
+		g_zxfer_profile_source_ssh_shell_invocations=0
+		write_source_snapshot_list_to_file "$outfile" "$errfile"
+		{
+			printf 'pid=%s\n' "$g_source_snapshot_list_pid"
+			printf 'ssh=%s\n' "${g_zxfer_profile_ssh_shell_invocations:-0}"
+			printf 'source_ssh=%s\n' "${g_zxfer_profile_source_ssh_shell_invocations:-0}"
+		} >>"$log"
+	)
+
+	assertEquals "Very-verbose profiling should count the remote ssh hop used for source snapshot discovery." \
+		"printf 'remote-snap-profile'|$outfile|$errfile
+pid=3131
+ssh=1
+source_ssh=1" "$(cat "$log")"
 }
 
 test_write_source_snapshot_list_to_file_backgrounds_parallel_command() {
@@ -397,6 +475,23 @@ EOF
 backup/dst@snap1" "$(cat "$output_file")"
 }
 
+test_normalize_destination_snapshot_list_treats_temp_paths_as_literal() {
+	marker="$TEST_TMPDIR/normalize_temp_path_marker"
+	input_file="$TEST_TMPDIR/input.\$(touch normalize_temp_path_marker)"
+	output_file="$TEST_TMPDIR/output.\$(touch normalize_temp_path_marker)"
+	rm -f "$marker" "$input_file" "$output_file"
+	printf '%s\n%s\n' "backup/dst@b" "backup/dst@a" >"$input_file"
+	g_initial_source_had_trailing_slash=0
+	initial_source="tank/src"
+
+	normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+
+	assertEquals "Normalization should still rewrite and sort snapshot names when temp paths contain metacharacters." \
+		"tank/src@a
+tank/src@b" "$(cat "$output_file")"
+	assertFalse "Normalization should not execute command substitutions embedded in temp file paths." "[ -e '$marker' ]"
+}
+
 test_set_g_recursive_source_list_logs_when_no_new_snapshots_exist() {
 	source_tmp="$TEST_TMPDIR/source_same_snapshots.txt"
 	dest_tmp="$TEST_TMPDIR/dest_same_snapshots.txt"
@@ -422,6 +517,72 @@ EOF
 		"tank/src" "$g_recursive_source_dataset_list"
 	assertContains "Verbose mode should explain when no new snapshots need transfer." \
 		"$(cat "$output_file")" "No new snapshots to transfer."
+}
+
+test_set_g_recursive_source_list_treats_tmpdir_derived_paths_as_literal() {
+	old_tmpdir=${TMPDIR:-}
+	marker="$TEST_TMPDIR/source_sort_marker"
+	tmpdir_with_payload="$TEST_TMPDIR/tmpdir.\$(touch source_sort_marker)"
+	source_tmp="$TEST_TMPDIR/source_sort_input.txt"
+	dest_tmp="$TEST_TMPDIR/dest_sort_input.txt"
+	rm -f "$marker"
+	rm -rf "$tmpdir_with_payload"
+	mkdir -p "$tmpdir_with_payload"
+	printf '%s\n%s\n' "tank/src@snap1" "tank/src@snap2" >"$source_tmp"
+	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
+	TMPDIR=$tmpdir_with_payload
+
+	set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+
+	TMPDIR=$old_tmpdir
+
+	assertEquals "Sorting source snapshots should still identify the missing dataset when TMPDIR contains metacharacters." \
+		"tank/src" "$g_recursive_source_list"
+	assertFalse "Sorting source snapshots should not execute command substitutions embedded in TMPDIR-derived temp paths." \
+		"[ -e '$marker' ]"
+}
+
+test_set_g_recursive_source_list_fuzzes_tmpdir_derived_paths_with_odd_characters() {
+	old_tmpdir=${TMPDIR:-}
+	marker="$TEST_TMPDIR/source_sort_marker_fuzz"
+	case_file="$TEST_TMPDIR/tmpdir_fuzz_cases.txt"
+	source_tmp="$TEST_TMPDIR/source_sort_fuzz_input.txt"
+	dest_tmp="$TEST_TMPDIR/dest_sort_fuzz_input.txt"
+	printf '%s\n%s\n' "tank/src@snap1" "tank/src@snap2" >"$source_tmp"
+	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
+	cat >"$case_file" <<EOF
+tmpdir,comma
+tmpdir=equals
+tmpdir:semicolon;literal
+tmpdir.\$(touch source_sort_marker_fuzz)
+EOF
+
+	case_index=0
+	rm -f "$marker"
+	while IFS= read -r tmpdir_tail || [ -n "$tmpdir_tail" ]; do
+		[ -n "$tmpdir_tail" ] || continue
+		case_index=$((case_index + 1))
+		tmpdir_case="$TEST_TMPDIR/$tmpdir_tail"
+		rm -rf "$tmpdir_case"
+		mkdir -p "$tmpdir_case"
+		TMPDIR=$tmpdir_case
+		g_recursive_source_list=""
+		g_recursive_source_dataset_list=""
+
+		set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+
+		assertEquals "TMPDIR fuzz case $case_index should still identify the missing dataset." \
+			"tank/src" "$g_recursive_source_list"
+	done <"$case_file"
+
+	if [ -n "${old_tmpdir+set}" ]; then
+		TMPDIR=$old_tmpdir
+	else
+		unset TMPDIR
+	fi
+
+	assertFalse "TMPDIR fuzz cases should not execute command substitutions embedded in derived temp paths." \
+		"[ -e '$marker' ]"
 }
 
 test_get_zfs_list_bootstraps_missing_destination_dataset_when_pool_exists() {
@@ -611,4 +772,5 @@ test_get_zfs_list_reports_generic_source_failure_when_background_snapshot_listin
 		"$output" "msg=Failed to retrieve snapshots from the source"
 }
 
+# shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

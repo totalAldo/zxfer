@@ -4,8 +4,17 @@
 #
 # shellcheck disable=SC2030,SC2031,SC2317,SC2329
 
+case "$0" in
+/*)
+	TESTS_DIR=$(dirname "$0")
+	;;
+*)
+	TESTS_DIR=${PWD:-.}/$(dirname "$0")
+	;;
+esac
+
 # shellcheck source=tests/test_helper.sh
-. "$(dirname "$0")/test_helper.sh"
+. "$TESTS_DIR/test_helper.sh"
 
 # shellcheck source=src/zxfer_globals.sh
 . "$ZXFER_ROOT/src/zxfer_globals.sh"
@@ -101,6 +110,7 @@ setUp() {
 
 	g_option_R_recursive=""
 	g_option_N_nonrecursive=""
+	g_option_n_dryrun=0
 	g_option_s_make_snapshot=0
 	g_option_m_migrate=0
 	g_option_c_services=""
@@ -275,12 +285,24 @@ test_refresh_dataset_iteration_state_preserves_list_when_recursive_mode_set() {
 
 test_maybe_capture_preflight_snapshot_captures_when_enabled() {
 	g_option_s_make_snapshot=1
+	g_option_n_dryrun=0
 	initial_source="tank/src"
 
 	maybe_capture_preflight_snapshot
 
 	assertEquals "Snapshot helper should run once when -s is enabled." "tank/src" "$(cat "$STUB_NEW_SNAP_LOG")"
 	assertEquals "Refreshing dataset state should call get_zfs_list exactly once." "1" "$STUB_ZFS_LIST_CALLS"
+}
+
+test_maybe_capture_preflight_snapshot_dry_run_skips_refresh() {
+	g_option_s_make_snapshot=1
+	g_option_n_dryrun=1
+	initial_source="tank/src"
+
+	maybe_capture_preflight_snapshot
+
+	assertEquals "Dry-run -s should still preview the snapshot helper once." "tank/src" "$(cat "$STUB_NEW_SNAP_LOG")"
+	assertEquals "Dry-run -s should not refresh cached dataset state." "0" "$STUB_ZFS_LIST_CALLS"
 }
 
 test_maybe_capture_preflight_snapshot_skips_when_migrating() {
@@ -296,6 +318,7 @@ test_maybe_capture_preflight_snapshot_skips_when_migrating() {
 
 test_prepare_migration_services_stops_services_and_unmounts_sources() {
 	g_option_m_migrate=1
+	g_option_n_dryrun=0
 	g_option_c_services="svc:/network/iscsi_target svc:/network/nfs/server"
 	g_option_R_recursive="tank/src"
 	initial_source="tank/src"
@@ -315,6 +338,45 @@ unmount tank/src/child" "$(cat "$STUB_ZFS_CMD_LOG")"
 		fail "Readonly properties list should drop mountpoint during migration."
 		;;
 	esac
+}
+
+test_prepare_migration_services_dry_run_previews_without_mutating_state() {
+	g_option_m_migrate=1
+	g_option_n_dryrun=1
+	g_option_v_verbose=1
+	g_option_c_services="svc:/network/iscsi_target svc:/network/nfs/server"
+	initial_source="tank/src"
+	g_recursive_source_list="tank/src tank/src/child"
+	state_log="$TEST_TMPDIR/migration_dry_run_state.log"
+	output=$(
+		(
+			prepare_migration_services
+			printf 'readonly=%s\n' "$g_readonly_properties" >"$state_log"
+			printf 'restart=%s\n' "$m_services_to_restart" >>"$state_log"
+			printf 'need=%s\n' "$g_services_need_relaunch" >>"$state_log"
+		) 2>&1
+	)
+
+	assertEquals "Dry-run migration should not call stopsvcs." "" "$(cat "$STUB_STOPSVCS_LOG")"
+	assertEquals "Dry-run migration should not unmount any datasets." "" "$(cat "$STUB_ZFS_CMD_LOG")"
+	assertEquals "Dry-run migration should still preview the final snapshot helper once." \
+		"tank/src" "$(cat "$STUB_NEW_SNAP_LOG")"
+	assertEquals "Dry-run migration should not refresh cached dataset state." "0" "$STUB_ZFS_LIST_CALLS"
+	case "$(grep '^readonly=' "$state_log")" in
+	*mountpoint*)
+		fail "Dry-run migration should still drop mountpoint from the effective readonly-property list."
+		;;
+	esac
+	assertContains "Dry-run migration should still track which services would need relaunch later." \
+		"$(cat "$state_log")" "restart= svc:/network/iscsi_target svc:/network/nfs/server"
+	assertContains "Dry-run migration should still flag relaunch as required." \
+		"$(cat "$state_log")" "need=1"
+	assertContains "Dry-run migration should preview service-disabling commands." \
+		"$output" "Dry run: 'svcadm' 'disable' '-st' 'svc:/network/iscsi_target'"
+	assertContains "Dry-run migration should preview unmount commands for each source dataset." \
+		"$output" "Dry run: 'mock_zfs_tool' 'unmount' 'tank/src'"
+	assertContains "Dry-run migration should preview descendant unmount commands too." \
+		"$output" "Dry run: 'mock_zfs_tool' 'unmount' 'tank/src/child'"
 }
 
 test_prepare_migration_services_preserves_service_restart_state_in_current_shell() {
@@ -558,6 +620,41 @@ test_relaunch_throws_when_service_enable_fails() {
 		"$output" "Couldn't re-enable service svc:/network/nfs/server."
 }
 
+test_relaunch_dry_run_previews_enable_commands_without_executing() {
+	log="$TEST_TMPDIR/relaunch_dry_run.log"
+	output=$(
+		ZXFER_TEST_ROOT=$ZXFER_ROOT SVC_LOG="$log" /bin/sh <<'EOF'
+. "$ZXFER_TEST_ROOT/src/zxfer_common.sh"
+. "$ZXFER_TEST_ROOT/src/zxfer_globals.sh"
+. "$ZXFER_TEST_ROOT/src/zxfer_zfs_mode.sh"
+g_option_n_dryrun=1
+g_option_v_verbose=1
+g_option_V_very_verbose=0
+g_option_b_beep_always=0
+g_option_B_beep_on_success=0
+m_services_to_restart=" svc:/network/nfs/server svc:/network/ssh"
+g_services_need_relaunch=1
+svcadm() {
+	printf '%s\n' "$*" >>"$SVC_LOG"
+}
+relaunch
+printf 'need=%s\n' "$g_services_need_relaunch"
+EOF
+	)
+
+	l_relaunch_log=""
+	if [ -f "$log" ]; then
+		l_relaunch_log=$(cat "$log")
+	fi
+	assertEquals "Dry-run relaunch should not execute svcadm enable." "" "$l_relaunch_log"
+	assertContains "Dry-run relaunch should preview the first enable command." \
+		"$output" "Dry run: 'svcadm' 'enable' 'svc:/network/nfs/server'"
+	assertContains "Dry-run relaunch should preview every queued enable command." \
+		"$output" "Dry run: 'svcadm' 'enable' 'svc:/network/ssh'"
+	assertContains "Dry-run relaunch should still clear the relaunch-needed flag." \
+		"$output" "need=0"
+}
+
 test_newsnap_uses_recursive_snapshot_flag() {
 	log="$TEST_TMPDIR/newsnap.log"
 	output=$(
@@ -646,6 +743,37 @@ test_newsnap_builds_nonrecursive_command_in_current_shell() {
 
 	assertEquals "Current-shell non-recursive snapshot generation should omit the -r flag." \
 		"snapshot tank/src@zxfer_current_single" "$(cat "$log")"
+}
+
+test_newsnap_dry_run_previews_without_executing() {
+	log="$TEST_TMPDIR/newsnap_dry_run.log"
+	output=$(
+		ZXFER_TEST_ROOT=$ZXFER_ROOT SNAPSHOT_LOG="$log" /bin/sh <<'EOF'
+. "$ZXFER_TEST_ROOT/src/zxfer_common.sh"
+. "$ZXFER_TEST_ROOT/src/zxfer_globals.sh"
+. "$ZXFER_TEST_ROOT/src/zxfer_zfs_mode.sh"
+g_option_n_dryrun=1
+g_option_v_verbose=1
+g_option_V_very_verbose=0
+g_option_b_beep_always=0
+g_option_B_beep_on_success=0
+g_option_R_recursive="tank/src"
+g_zxfer_new_snapshot_name="zxfer_dry_run"
+g_LZFS="mock_zfs_tool"
+run_source_zfs_cmd() {
+	printf '%s\n' "$*" >>"$SNAPSHOT_LOG"
+}
+newsnap "tank/src@old"
+EOF
+	)
+
+	l_snapshot_log=""
+	if [ -f "$log" ]; then
+		l_snapshot_log=$(cat "$log")
+	fi
+	assertEquals "Dry-run snapshots should not execute the source zfs command." "" "$l_snapshot_log"
+	assertContains "Dry-run snapshots should render the snapshot command." \
+		"$output" "Dry run: 'mock_zfs_tool' 'snapshot' '-r' 'tank/src@zxfer_dry_run'"
 }
 
 test_calculate_unsupported_properties_collects_source_only_entries() {
@@ -777,14 +905,46 @@ test_rollback_destination_to_last_common_snapshot_skips_when_not_needed() {
 		"" "$(cat "$log")"
 }
 
+test_rollback_destination_to_last_common_snapshot_reports_probe_failures() {
+	g_option_F_force_rollback="-F"
+	g_did_delete_dest_snapshots=1
+	g_deleted_dest_newer_snapshots=1
+	g_actual_dest="backup/target/src"
+	g_last_common_snap="tank/src@snap1"
+
+	set +e
+	output=$(
+		(
+			exists_destination() {
+				printf '%s\n' "Failed to determine whether destination dataset [backup/target/src] exists: ssh failure"
+				return 1
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			rollback_destination_to_last_common_snapshot
+		)
+	)
+	status=$?
+
+	assertEquals "Rollback should fail closed when destination existence checks fail." 1 "$status"
+	assertContains "Rollback should surface the destination probe failure." \
+		"$output" "Failed to determine whether destination dataset [backup/target/src] exists: ssh failure"
+}
+
 test_copy_snapshots_skips_when_no_pending_snapshots() {
 	g_actual_dest="backup/target/src"
+	g_dest_has_snapshots=1
 	g_src_snapshot_transfer_list=""
 	log="$TEST_TMPDIR/copy_none.log"
 	: >"$log"
 
 	(
 		COPY_LOG="$log"
+		reconcile_live_destination_snapshot_state() {
+			:
+		}
 		rollback_destination_to_last_common_snapshot() {
 			printf 'rollback\n' >>"$COPY_LOG"
 		}
@@ -855,7 +1015,7 @@ test_copy_snapshots_rechecks_live_destination_snapshots_before_reseeding() {
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=0
 	g_last_common_snap=""
-	g_src_snapshot_transfer_list="tank/src@base"
+	g_src_snapshot_transfer_list="tank/src@base	111"
 	log="$TEST_TMPDIR/copy_live_recheck.log"
 	: >"$log"
 
@@ -869,9 +1029,9 @@ test_copy_snapshots_rechecks_live_destination_snapshots_before_reseeding() {
 			}
 			run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
+					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
 					[ "$7" = "backup/target/src" ]; then
-					printf '%s\n' "backup/target/src@base"
+					printf '%s\n' "backup/target/src@base	111"
 					return 0
 				fi
 				printf '%s\n' "$*" >>"$log"
@@ -891,11 +1051,205 @@ test_copy_snapshots_rechecks_live_destination_snapshots_before_reseeding() {
 	assertEquals "A live destination snapshot recheck should prevent reseeding an existing dataset." \
 		"" "$(cat "$log")"
 	assertContains "The live destination snapshot should be promoted to the last common snapshot." \
-		"$output" "last=tank/src@base"
+		"$output" "last=tank/src@base	111"
 	assertContains "The destination should be marked as already containing snapshots after the live recheck." \
 		"$output" "dest_has=1"
 	assertContains "No further source snapshots should remain once the live common snapshot is confirmed." \
 		"$output" "remaining="
+}
+
+test_copy_snapshots_live_recheck_requires_matching_guid() {
+	g_actual_dest="backup/target/src"
+	g_dest_has_snapshots=0
+	g_last_common_snap=""
+	g_src_snapshot_transfer_list="tank/src@base	111"
+	log="$TEST_TMPDIR/copy_live_recheck_guid.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			rollback_destination_to_last_common_snapshot() {
+				:
+			}
+			exists_destination() {
+				printf '1\n'
+			}
+			run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
+					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
+					[ "$7" = "backup/target/src" ]; then
+					printf '%s\n' "backup/target/src@base	999"
+					return 0
+				fi
+				printf '%s\n' "$*" >>"$log"
+				return 0
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zfs_send_receive() {
+				printf 'send %s %s %s %s\n' "$1" "$2" "$3" "$4" >>"$log"
+			}
+
+			copy_snapshots
+		)
+	)
+	status=$?
+
+	assertEquals "A same-named but unrelated destination snapshot should fail closed instead of seeding an existing snapshotted dataset." \
+		1 "$status"
+	assertContains "The failure should explain that there is no common guid anchor for the existing destination dataset." \
+		"$output" "Destination dataset [backup/target/src] has snapshots but none share a common guid with the source."
+	assertEquals "No send should be attempted when guid matching leaves an existing destination without a common snapshot." \
+		"" "$(cat "$log")"
+}
+
+test_copy_snapshots_seeds_existing_destination_when_live_probe_confirms_no_snapshots() {
+	g_actual_dest="backup/target/src"
+	g_dest_has_snapshots=1
+	g_last_common_snap=""
+	g_src_snapshot_transfer_list="tank/src@base"
+	g_option_F_force_rollback=""
+	log="$TEST_TMPDIR/copy_live_empty_seed.log"
+	: >"$log"
+
+	(
+		COPY_LOG="$log"
+		reconcile_live_destination_snapshot_state() {
+			:
+		}
+		rollback_destination_to_last_common_snapshot() {
+			:
+		}
+		exists_destination() {
+			printf '1\n'
+		}
+		run_destination_zfs_cmd() {
+			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
+				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
+				[ "$7" = "backup/target/src" ]; then
+				return 0
+			fi
+			printf '%s\n' "$*" >>"$COPY_LOG"
+			return 0
+		}
+		zfs_send_receive() {
+			printf 'prev=%s curr=%s dest=%s bg=%s force=%s\n' \
+				"$1" "$2" "$3" "$4" "${g_option_F_force_rollback:-}" >>"$COPY_LOG"
+		}
+
+		copy_snapshots
+	)
+
+	assertEquals "A fresh live probe should allow seeding when an existing destination no longer has snapshots." \
+		"prev= curr=tank/src@base dest=backup/target/src bg=0 force=-F" "$(cat "$log")"
+}
+
+test_copy_snapshots_ignores_descendant_snapshots_when_rechecking_parent_dataset() {
+	g_actual_dest="backup/target/src"
+	g_dest_has_snapshots=1
+	g_last_common_snap=""
+	g_src_snapshot_transfer_list="tank/src@base"
+	g_option_F_force_rollback=""
+	log="$TEST_TMPDIR/copy_live_child_only_seed.log"
+	: >"$log"
+
+	(
+		COPY_LOG="$log"
+		reconcile_live_destination_snapshot_state() {
+			:
+		}
+		rollback_destination_to_last_common_snapshot() {
+			:
+		}
+		exists_destination() {
+			printf '1\n'
+		}
+		run_destination_zfs_cmd() {
+			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
+				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
+				[ "$7" = "backup/target/src" ]; then
+				printf '%s\n' "backup/target/src/child@base	999"
+				return 0
+			fi
+			printf '%s\n' "$*" >>"$COPY_LOG"
+			return 0
+		}
+		zfs_send_receive() {
+			printf 'prev=%s curr=%s dest=%s bg=%s force=%s\n' \
+				"$1" "$2" "$3" "$4" "${g_option_F_force_rollback:-}" >>"$COPY_LOG"
+		}
+
+		copy_snapshots
+	)
+
+	assertEquals "Child-dataset snapshots should not block seeding the current dataset when the current dataset has no snapshots." \
+		"prev= curr=tank/src@base dest=backup/target/src bg=0 force=-F" "$(cat "$log")"
+}
+
+test_copy_snapshots_reports_destination_probe_failures() {
+	g_actual_dest="backup/target/src"
+	g_src_snapshot_transfer_list="tank/src@snap1 tank/src@snap2"
+	g_last_common_snap=""
+	g_dest_has_snapshots=0
+
+	set +e
+	output=$(
+		(
+			rollback_destination_to_last_common_snapshot() {
+				:
+			}
+			exists_destination() {
+				printf '%s\n' "Failed to determine whether destination dataset [backup/target/src] exists: permission denied"
+				return 1
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			copy_snapshots
+		)
+	)
+	status=$?
+
+	assertEquals "copy_snapshots should fail closed when destination existence checks fail." 1 "$status"
+	assertContains "copy_snapshots should surface the destination probe failure." \
+		"$output" "Failed to determine whether destination dataset [backup/target/src] exists: permission denied"
+}
+
+test_copy_snapshots_reports_live_snapshot_recheck_failures() {
+	g_actual_dest="backup/target/src"
+	g_dest_has_snapshots=0
+	g_last_common_snap=""
+	g_src_snapshot_transfer_list="tank/src@base"
+
+	set +e
+	output=$(
+		(
+			rollback_destination_to_last_common_snapshot() {
+				:
+			}
+			exists_destination() {
+				printf '1\n'
+			}
+			run_destination_zfs_cmd() {
+				printf '%s\n' "ssh timeout"
+				return 1
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			copy_snapshots
+		)
+	)
+	status=$?
+
+	assertEquals "Live destination snapshot recheck failures should abort instead of reseeding." 1 "$status"
+	assertContains "Live destination snapshot recheck failures should preserve the destination context." \
+		"$output" "Failed to retrieve live destination snapshots for [backup/target/src]: ssh timeout"
 }
 
 test_copy_snapshots_skips_when_last_common_matches_final_snapshot() {
@@ -1272,8 +1626,10 @@ test_copy_snapshots_seeds_existing_destination_into_snapshot() {
 
 	(
 		SEED_LOG="$log"
+		reconcile_live_destination_snapshot_state() { :; }
 		rollback_destination_to_last_common_snapshot() { :; }
 		exists_destination() { printf '1\n'; }
+		run_destination_zfs_cmd() { return 0; }
 		zfs_send_receive() {
 			printf 'prev=%s curr=%s dest=%s force=%s bg=%s\n' \
 				"${1:-<none>}" "$2" "$3" "${g_option_F_force_rollback:-<none>}" "$4" >>"$SEED_LOG"

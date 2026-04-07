@@ -2,10 +2,19 @@
 #
 # shunit2 tests for zxfer_globals.sh helpers.
 #
-# shellcheck disable=SC2030,SC2317,SC2329
+# shellcheck disable=SC1090,SC2030,SC2034,SC2218,SC2317,SC2329
+
+case "$0" in
+/*)
+	TESTS_DIR=$(dirname "$0")
+	;;
+*)
+	TESTS_DIR=${PWD:-.}/$(dirname "$0")
+	;;
+esac
 
 # shellcheck source=tests/test_helper.sh
-. "$(dirname "$0")/test_helper.sh"
+. "$TESTS_DIR/test_helper.sh"
 
 # shellcheck source=src/zxfer_globals.sh
 . "$ZXFER_ROOT/src/zxfer_globals.sh"
@@ -173,6 +182,18 @@ EOF
 		"$tool_dir/mocktool" "$result"
 }
 
+test_zxfer_validate_resolved_tool_path_rejects_control_whitespace() {
+	tab=$(printf '\t')
+
+	set +e
+	result=$(zxfer_validate_resolved_tool_path "/tmp/mock${tab}tool" "mocktool")
+	status=$?
+
+	assertEquals "Resolved tool paths with control whitespace should be rejected." 1 "$status"
+	assertContains "Rejected tool paths should explain the control-whitespace requirement." \
+		"$result" "single-line absolute path without control whitespace"
+}
+
 test_zxfer_assign_required_tool_marks_dependency_failures() {
 	set +e
 	output=$(
@@ -208,6 +229,52 @@ test_zxfer_assign_required_tool_sets_target_variable_on_success() {
 	)
 
 	assertEquals "Successful tool assignment should populate the requested variable." "/opt/mock/mocktool" "$result"
+}
+
+test_init_globals_rejects_control_whitespace_in_optional_parallel_path() {
+	tab=$(printf '\t')
+	parallel_dir="$TEST_TMPDIR/parallel${tab}bin"
+	mkdir -p "$parallel_dir"
+	cat >"$parallel_dir/parallel" <<'EOF'
+#!/bin/sh
+printf '%s\n' "GNU parallel (fake)"
+exit 0
+EOF
+	chmod +x "$parallel_dir/parallel"
+
+	set +e
+	output=$(
+		(
+			g_zxfer_dependency_path="$parallel_dir"
+			zxfer_assign_required_tool() {
+				if [ "$2" = "awk" ]; then
+					# shellcheck disable=SC2034
+					l_real_awk=$(command -v awk 2>/dev/null || printf '%s\n' awk)
+					eval "$1=\$l_real_awk"
+				else
+					eval "$1=/stub/$2"
+				fi
+			}
+			ssh_supports_control_sockets() {
+				return 1
+			}
+			get_temp_file() {
+				printf '%s\n' "$TEST_TMPDIR/tmp"
+			}
+			throw_error() {
+				printf 'class=%s msg=%s\n' "$g_zxfer_failure_class" "$1"
+				exit 1
+			}
+			init_globals
+		)
+	)
+	status=$?
+
+	assertEquals "init_globals should fail when optional GNU parallel resolves to a path with control whitespace." 1 "$status"
+	assertContains "Invalid optional parallel resolutions should be classified as dependency failures." \
+		"$output" "class=dependency"
+	assertContains "Invalid optional parallel resolutions should explain the path validation failure." \
+		"$output" "single-line absolute path without control whitespace"
 }
 
 test_read_command_line_switches_sets_options_and_remote_paths() {
@@ -247,8 +314,8 @@ test_read_command_line_switches_sets_options_and_remote_paths() {
 
 	assertContains "Origin host should be recorded from -O." "$result" "origin=origin.example pfexec"
 	assertContains "Target host should be recorded from -T." "$result" "target=target.example doas"
-	assertContains "Origin zfs wrapper should use the quoted host spec." "$result" "lzfs=/usr/bin/ssh 'origin.example' 'pfexec' /sbin/zfs"
-	assertContains "Target zfs wrapper should use the quoted host spec." "$result" "rzfs=/usr/bin/ssh 'target.example' 'doas' /sbin/zfs"
+	assertContains "Origin zfs spec should remain the resolved zfs path until remote execution is rendered." "$result" "lzfs=/sbin/zfs"
+	assertContains "Target zfs spec should remain the resolved zfs path until remote execution is rendered." "$result" "rzfs=/sbin/zfs"
 	assertContains "Parallel job count should come from -j." "$result" "jobs=4"
 	assertContains "Yield iterations should expand to the max when -Y is set." "$result" "yield=8"
 	assertContains "Custom compression should be recorded from -Z." "$result" "compress=zstd -9"
@@ -285,10 +352,10 @@ test_prepare_remote_host_connections_sets_up_control_sockets_after_validation() 
 		"$(cat "$log")" "setup origin.example pfexec origin"
 	assertContains "Target control socket setup should happen during remote preparation." \
 		"$(cat "$log")" "setup target.example doas target"
-	assertContains "Origin zfs wrapper should be refreshed after socket setup." \
-		"$result" "lzfs=/usr/bin/ssh 'origin.example' 'pfexec' /remote/origin/zfs"
-	assertContains "Target zfs wrapper should be refreshed after socket setup." \
-		"$result" "rzfs=/usr/bin/ssh 'target.example' 'doas' /remote/target/zfs"
+	assertContains "Origin zfs spec should refresh to the resolved origin helper path." \
+		"$result" "lzfs=/remote/origin/zfs"
+	assertContains "Target zfs spec should refresh to the resolved target helper path." \
+		"$result" "rzfs=/remote/target/zfs"
 }
 
 test_prepare_remote_host_connections_logs_when_control_sockets_are_unavailable() {
@@ -316,10 +383,10 @@ test_prepare_remote_host_connections_logs_when_control_sockets_are_unavailable()
 		"$output" "ssh client does not support control sockets; continuing without connection reuse for origin host."
 	assertContains "Target preparation should explain when ssh control sockets are unavailable." \
 		"$output" "ssh client does not support control sockets; continuing without connection reuse for target host."
-	assertContains "Remote zfs wrappers should still refresh even without control socket support." \
-		"$output" "lzfs=/usr/bin/ssh 'origin.example' 'pfexec' /remote/origin/zfs"
-	assertContains "Remote zfs wrappers should still refresh target commands even without control socket support." \
-		"$output" "rzfs=/usr/bin/ssh 'target.example' 'doas' /remote/target/zfs"
+	assertContains "Remote zfs specs should still refresh even without control socket support." \
+		"$output" "lzfs=/remote/origin/zfs"
+	assertContains "Remote zfs specs should still refresh target commands even without control socket support." \
+		"$output" "rzfs=/remote/target/zfs"
 }
 
 test_read_command_line_switches_sets_flags_in_current_shell() {
@@ -365,10 +432,10 @@ test_read_command_line_switches_sets_flags_in_current_shell() {
 	assertEquals "Yield iterations should expand to the configured maximum." "9" "$g_option_Y_yield_iterations"
 	assertEquals "The parser should preserve the custom compression command from -Z." "zstd -9" "$g_cmd_compress"
 	assertEquals "Property transfer should be enabled by property-affecting switches." "1" "$g_option_P_transfer_property"
-	assertEquals "Origin zfs wrapper should include the quoted host spec and local zfs path." \
-		"/usr/bin/ssh 'origin.example' 'pfexec' /sbin/zfs" "$g_LZFS"
-	assertEquals "Target zfs wrapper should include the quoted host spec and local zfs path." \
-		"/usr/bin/ssh 'target.example' 'doas' /sbin/zfs" "$g_RZFS"
+	assertEquals "Origin zfs spec should remain the resolved zfs path after parsing." \
+		"/sbin/zfs" "$g_LZFS"
+	assertEquals "Target zfs spec should remain the resolved zfs path after parsing." \
+		"/sbin/zfs" "$g_RZFS"
 
 	unset -f refresh_compression_commands
 	. "$ZXFER_ROOT/src/zxfer_globals.sh"
@@ -716,11 +783,11 @@ test_get_ssh_cmd_for_host_prefers_matching_control_socket() {
 	g_ssh_target_control_socket="$TEST_TMPDIR/target.sock"
 
 	assertEquals "Origin host ssh command should reuse the origin control socket." \
-		"$FAKE_SSH_BIN -S $TEST_TMPDIR/origin.sock" "$(get_ssh_cmd_for_host "origin.example")"
+		"'$FAKE_SSH_BIN' '-S' '$TEST_TMPDIR/origin.sock'" "$(get_ssh_cmd_for_host "origin.example")"
 	assertEquals "Target host ssh command should reuse the target control socket." \
-		"$FAKE_SSH_BIN -S $TEST_TMPDIR/target.sock" "$(get_ssh_cmd_for_host "target.example")"
+		"'$FAKE_SSH_BIN' '-S' '$TEST_TMPDIR/target.sock'" "$(get_ssh_cmd_for_host "target.example")"
 	assertEquals "Unmatched hosts should use the base ssh command." \
-		"$FAKE_SSH_BIN" "$(get_ssh_cmd_for_host "other.example")"
+		"'$FAKE_SSH_BIN'" "$(get_ssh_cmd_for_host "other.example")"
 }
 
 test_close_target_ssh_control_socket_uses_host_tokens_and_cleans_state() {
@@ -933,7 +1000,7 @@ test_get_ssh_cmd_for_host_returns_base_command_for_empty_host() {
 	g_cmd_ssh="/usr/bin/ssh"
 
 	assertEquals "Hosts omitted from wrapper lookups should return the base ssh command." \
-		"/usr/bin/ssh" "$(get_ssh_cmd_for_host "")"
+		"'/usr/bin/ssh'" "$(get_ssh_cmd_for_host "")"
 }
 
 test_get_effective_user_uid_returns_failure_when_id_is_unavailable() {
@@ -1193,15 +1260,10 @@ test_write_backup_properties_renders_remote_dry_run_command() {
 	g_zxfer_version="test-version"
 	g_backup_file_contents=";tank/src,backup/dst,compression=lz4"
 	initial_source="tank/src"
+	g_cmd_ssh="/usr/bin/ssh"
 
 	result=$(
 		(
-			get_ssh_cmd_for_host() {
-				printf '%s\n' "/usr/bin/ssh"
-			}
-			quote_host_spec_tokens() {
-				printf '%s\n' "'target.example' 'doas'"
-			}
 			run_destination_zfs_cmd() {
 				printf '%s\n' "/mnt/backups"
 			}
@@ -1210,9 +1272,13 @@ test_write_backup_properties_renders_remote_dry_run_command() {
 	)
 
 	assertContains "Remote dry-run backup writes should render the ssh command prefix." \
-		"$result" "'/usr/bin/ssh' 'target.example'"
+		"$result" "'/usr/bin/ssh'"
+	assertContains "Remote dry-run backup writes should target the ssh host separately from wrapper tokens." \
+		"$result" "'target.example'"
 	assertContains "Remote dry-run backup writes should render the local backup-content command with the common argv formatter." \
 		"$result" "'printf' '%s'"
+	assertContains "Remote dry-run backup writes should preserve wrapper tokens in the rendered remote pipeline." \
+		"$result" "doas"
 	assertContains "Remote dry-run backup writes should render the remote cat pipeline." \
 		"$result" ".zxfer_backup_info.src"
 }
@@ -1286,6 +1352,30 @@ test_get_backup_properties_uses_find_fallback_under_backup_root() {
 
 	assertEquals "Backup-property discovery should fall back to searching under the backup root." \
 		"tank/src/child,backup/dst,compression=lz4" "$g_restored_backup_file_contents"
+}
+
+test_get_backup_properties_find_fallback_ignores_same_tail_other_sources_with_delimiter_heavy_payloads() {
+	g_backup_storage_root="$TEST_TMPDIR/fallback_exact_store"
+	first_dir="$g_backup_storage_root/layout/one"
+	second_dir="$g_backup_storage_root/layout/two"
+	mkdir -p "$first_dir" "$second_dir"
+	first_file="$first_dir/.zxfer_backup_info.child.tail-01"
+	second_file="$second_dir/.zxfer_backup_info.child.tail-01"
+	printf '%s\n' "tank/other/child.tail-01,backup/dst,user:note=value,with,commas=local" >"$first_file"
+	printf '%s\n' "tank/src/child.tail-01,backup/dst,user:note=value=with=equals;and:semicolon=local" >"$second_file"
+	chmod 600 "$first_file" "$second_file"
+	initial_source="tank/src/child.tail-01"
+	g_option_O_origin_host=""
+	g_backup_file_extension=".zxfer_backup_info"
+
+	run_source_zfs_cmd() {
+		printf '%s\n' "/mnt/backups"
+	}
+
+	get_backup_properties
+
+	assertEquals "Find-fallback backup discovery should ignore same-tail metadata for other sources and preserve delimiter-heavy payloads." \
+		"tank/src/child.tail-01,backup/dst,user:note=value=with=equals;and:semicolon=local" "$g_restored_backup_file_contents"
 }
 
 test_get_backup_properties_rejects_ambiguous_find_fallback_matches() {
@@ -1533,4 +1623,5 @@ test_write_backup_properties_reports_remote_write_failure() {
 		"$output" "Error writing backup file. Is filesystem mounted?"
 }
 
+# shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

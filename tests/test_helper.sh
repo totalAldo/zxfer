@@ -3,7 +3,18 @@
 # Shared helpers for zxfer shunit2 test suites.
 #
 
-ZXFER_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+if [ -n "${TESTS_DIR:-}" ]; then
+	ZXFER_ROOT=$TESTS_DIR/..
+else
+	case "$0" in
+	/*)
+		ZXFER_ROOT=$(dirname "$0")/..
+		;;
+	*)
+		ZXFER_ROOT=${PWD:-.}/$(dirname "$0")/..
+		;;
+	esac
+fi
 SHUNIT2_BIN="$ZXFER_ROOT/tests/shunit2/shunit2"
 
 if [ ! -r "$SHUNIT2_BIN" ]; then

@@ -8,59 +8,7 @@ documentation and portability gaps.
 Generic architecture notes are intentionally omitted unless they currently
 describe a concrete failure mode or exploit path.
 
-## Critical
-
-- [Security] Resolved local helper paths from `ZXFER_SECURE_PATH` are only validated as “absolute,” not shell-safe.
-  Files: `src/zxfer_globals.sh` (`zxfer_find_required_tool()`, `zxfer_assign_required_tool()`), `src/zxfer_get_zfs_list.sh` (`build_source_snapshot_list_cmd()`, `write_source_snapshot_list_to_file()`), `src/zxfer_common.sh` (`execute_background_cmd()`, `execute_command()`, `exists_destination()`), `src/zxfer_zfs_send_receive.sh` (`get_send_command()`, `get_receive_command()`).
-  Risk: local helper discovery has the same validation gap as the remote path, but via `ZXFER_SECURE_PATH`. `zxfer_find_required_tool()` accepts any `command -v` result that begins with `/`, even if the pathname contains shell-significant characters such as command substitutions. Several later code paths then splice `g_cmd_zfs` or other resolved helpers into `eval`-built command strings. In a harness, setting `ZXFER_SECURE_PATH` to a directory literally named `.../bin$(touch <marker>)` made `build_source_snapshot_list_cmd()` render `/tmp/.../bin$(touch <marker>)/zfs list ...`, and `execute_background_cmd()` created the marker file when it `eval`ed that command string.
-  Recommended fix: apply the same shell-safety validation to locally resolved helper paths, and stop building `eval` command strings from resolved helper-path variables. Treat resolved helpers as argv elements, not shell fragments.
-
-- [Security] Local GNU `parallel` resolution still bypasses helper-path validation entirely.
-  Files: `src/zxfer_globals.sh` (`init_globals()`), `src/zxfer_get_zfs_list.sh` (`ensure_parallel_available_for_source_jobs()`, `build_source_snapshot_list_cmd()`), `src/zxfer_common.sh` (`execute_background_cmd()`).
-  Risk: unlike `zfs`, `ssh`, and `cat`, the local `parallel` binary is not resolved through `zxfer_find_required_tool()`. `init_globals()` assigns `g_cmd_parallel` directly from `command -v parallel`, and `ensure_parallel_available_for_source_jobs()` only checks `"$g_cmd_parallel" --version` before `build_source_snapshot_list_cmd()` interpolates that path into an `eval`-executed pipeline. In a harness, setting `g_cmd_parallel` to a fake GNU parallel under a directory named `.../bin$(touch <marker>)` made the built command include that command substitution, and `execute_background_cmd()` created the marker file when it evaluated the listing pipeline.
-  Recommended fix: resolve local GNU `parallel` through the same absolute-path and shell-safety validation used for other required helpers, and stop embedding the resulting path into `eval` strings.
-
-- [Security] SSH control-socket paths are interpolated into `eval` command strings without shell quoting.
-  Files: `src/zxfer_globals.sh` (`setup_ssh_control_socket()`, `get_ssh_cmd_for_host()`, `refresh_remote_zfs_commands()`), `src/zxfer_get_zfs_list.sh` (`build_source_snapshot_list_cmd()`, `write_source_snapshot_list_to_file()`), `src/zxfer_common.sh` (`execute_background_cmd()`, `execute_command()`).
-  Risk: `get_ssh_cmd_for_host()` renders control-socket reuse as a plain string like `ssh -S <socket>`, and `refresh_remote_zfs_commands()` splices that string directly into `g_LZFS` / `g_RZFS`. Later snapshot-list and helper paths feed those composite command strings through `eval`. In a harness, setting `g_ssh_origin_control_socket` to a path containing `$(touch <marker>)` made `build_source_snapshot_list_cmd()` render that command substitution in the `ssh -S ...` prefix, and `execute_background_cmd()` created the marker file when it evaluated the command. Because `setup_ssh_control_socket()` sources these socket paths from `mktemp` under `${TMPDIR:-/tmp}`, a shell-significant `TMPDIR` segment or similarly malformed socket path can become a local command-execution vector.
-  Recommended fix: treat control-socket paths as argv data rather than string fragments, and stop composing `ssh -S <socket>` into `eval`-executed command text. At minimum, quote or validate socket paths for shell safety before they ever reach `g_LZFS` / `g_RZFS`.
-
-- [Data integrity] Destination-existence probes still treat operational failures as “dataset absent”.
-  Files: `src/zxfer_common.sh` (`exists_destination()`), `src/zxfer_zfs_mode.sh` (`copy_snapshots()`, `reconcile_live_destination_snapshot_state()`, `rollback_destination_to_last_common_snapshot()`), `src/zxfer_transfer_properties.sh` (`ensure_destination_exists()`).
-  Impact: `exists_destination()` currently runs `zfs list` and returns `0` for every non-zero outcome, so ssh failures, permission denials, wrapper misconfiguration, and transient remote errors are all collapsed into the same “dataset does not exist” signal. That false absence then drives higher-level control flow: `copy_snapshots()` can enter the missing-destination seed path, `rollback_destination_to_last_common_snapshot()` can silently skip a needed rollback because the destination is believed absent, and `ensure_destination_exists()` can enable parent-creation mode (`-p`) because a parent probe failed rather than because the parent is truly missing.
-  Recommended fix: make destination-existence checks distinguish “not found” from other failures and fail closed on probe errors instead of treating every error as proof of absence.
-
-- [Data integrity] Existing-destination live snapshot rechecks still treat probe failures as “empty destination”.
-  Files: `src/zxfer_zfs_mode.sh` (`reconcile_live_destination_snapshot_state()`, `copy_snapshots()`).
-  Impact: when `g_dest_has_snapshots=0` but the destination dataset already exists, zxfer tries a live `zfs list -t snapshot` recheck before it decides whether to seed the dataset. That recheck currently uses `run_destination_zfs_cmd ... || :`, so ssh failures, permission errors, or other listing errors collapse into an empty result. `copy_snapshots()` then falls through the “exists but has no snapshots” branch and temporarily enables `-F` for a full seed receive. On a destination that actually does have snapshots, a transient listing failure can therefore be misinterpreted as proof of emptiness and drive a destructive reseed path.
-  Recommended fix: fail closed when the live destination snapshot probe errors, or require a positive success result that proves the dataset has zero snapshots before entering the forced seed branch.
-
-- [Data integrity] Common-snapshot detection still trusts snapshot names without validating snapshot identity.
-  Files: `src/zxfer_inspect_delete_snap.sh` (`get_last_common_snapshot()`, `get_dest_snapshots_to_delete_per_dataset()`, `inspect_delete_snap()`), `src/zxfer_zfs_mode.sh` (`copy_snapshots()`, `reconcile_live_destination_snapshot_state()`, `rollback_destination_to_last_common_snapshot()`).
-  Impact: zxfer treats `source@name` and `dest@name` as the same snapshot solely because the `@name` strings match. If source and destination each created unrelated snapshots with the same name, zxfer can misclassify them as a valid common base, skip deletion of divergent destination snapshots that merely share names, roll the destination back to the wrong `@name`, and then attempt an incremental send from a snapshot lineage that the destination does not actually have.
-  Recommended fix: validate common snapshots by GUID or other lineage-safe identity data from both sides before using them as delete, rollback, or incremental-send anchors.
-
-- [Data integrity] Must-create property lookup failures still disable the creation-time mismatch guard.
-  Files: `src/zxfer_transfer_properties.sh` (`ensure_required_properties_present()`, `transfer_properties()`, `diff_properties()`).
-  Impact: zxfer relies on `ensure_required_properties_present()` to append creation-time properties such as `casesensitivity`, `normalization`, `jailed`, and `utf8only` when `zfs get all` omits them. That helper currently treats a failed explicit `zfs get -Hpo property,value,source <prop> <dataset>` probe as “property absent” and silently continues. If one of those explicit lookups fails on the source or destination, `diff_properties()` can run without the must-create property and skip the guard that should fail when source and destination differ in a creation-time setting.
-  Recommended fix: fail closed when a required creation-time property is missing from `zfs get all` and its explicit probe fails, rather than silently treating the property as unavailable.
-
-- [Data integrity] Source type/volsize probe failures can still create a filesystem where a zvol was required.
-  Files: `src/zxfer_transfer_properties.sh` (`transfer_properties()`, `ensure_destination_exists()`, `run_zfs_create_with_properties()`).
-  Impact: `transfer_properties()` reads the source dataset type and volsize with `run_source_zfs_cmd get -Hpo value type|volsize ...`, but it never checks whether those probes succeeded. For a missing destination, `ensure_destination_exists()` passes the resulting values straight into `run_zfs_create_with_properties()`, which only adds `-V <volsize>` when `l_source_dstype=volume` and `l_source_volsize` is non-empty. A failed volsize probe can therefore fall through to a filesystem create instead of a zvol create.
-  Recommended fix: fail closed when the source dataset type or required zvol size probe fails, and require a validated non-empty `volsize` before continuing with destination creation for `type=volume`.
-
-- [Safety] Dry-run `-n -s` and `-n -m` still perform source-side snapshot and migration actions.
-  Files: `src/zxfer_zfs_mode.sh` (`run_zfs_mode()`, `maybe_capture_preflight_snapshot()`, `prepare_migration_services()`, `stopsvcs()`), `man/zxfer.8`, `man/zxfer.1m`.
-  Impact: `-n -s` still calls `newsnap "$initial_source"` and refreshes the cached dataset state, so a dry run can create a real snapshot on the source. `-n -m` is worse: it still disables any SMF services requested with `-c`, unmounts recursive source datasets, takes the migration snapshot, and refreshes dataset lists before the main replication phase. That means a supposedly non-executing dry run can still alter live source state in exactly the areas operators use `-s` and `-m` to protect most carefully.
-  Recommended fix: skip `maybe_capture_preflight_snapshot()` and `prepare_migration_services()` entirely in dry-run mode, or convert them to render-only previews.
-
 ## High
-
-- [Reliability] Remote `zfs send` / `zfs receive` still shell out to the local `zfs` path when `-O` or `-T` is used.
-  Files: `src/zxfer_zfs_send_receive.sh` (`get_send_command()`, `get_receive_command()`, `zfs_send_receive()`), `src/zxfer_globals.sh` (`init_variables()`).
-  Impact: zxfer now probes and stores remote `zfs` paths in `g_origin_cmd_zfs` / `g_target_cmd_zfs`, but the main replication stream still builds send/receive commands with `g_cmd_zfs`. Mixed-platform or mixed-layout hosts can therefore pass dependency validation and snapshot discovery, then fail during the actual replication stream because the remote host does not have `zfs` at the local absolute path.
-  Recommended fix: build send/receive commands from the already resolved remote `zfs` paths, or from argv-based source/target command helpers, instead of hard-coding `g_cmd_zfs` into the stream command string.
 
 - [Security/Reliability] Remote compression still depends on bare remote `zstd`, and source snapshot discovery ignores custom `-Z` compression settings.
   Files: `src/zxfer_get_zfs_list.sh` (`build_source_snapshot_list_cmd()`), `src/zxfer_zfs_send_receive.sh` (`wrap_command_with_ssh()`).
@@ -210,11 +158,6 @@ describe a concrete failure mode or exploit path.
   Recommended fix: require a valid zxfer backup-file header before restore, parse and validate the stored format or version fields, and fail closed on unknown or missing metadata formats.
 
 ## Low
-
-- [Security/Reliability] Remote OS detection still goes through `eval` and the remote login shell's default `PATH`.
-  Files: `src/zxfer_common.sh` (`get_os()`), `src/zxfer_globals.sh` (`init_variables()`).
-  Impact: remote platform detection can execute the remote account's `uname` instead of a securely resolved binary, and shell behavior differences remain in play earlier than the hardened remote `zfs` and `cat` lookup paths. This mostly affects feature gating and platform-specific property handling, not the main replication stream.
-  Recommended fix: replace `get_os()` with the same argv-based ssh helper path used by `run_source_zfs_cmd()` and `run_destination_zfs_cmd()`, or resolve `uname` remotely through the secure PATH before use.
 
 - [Compatibility] Remote-origin `-j` validation is still asymmetric for GNU `parallel`.
   Files: `src/zxfer_get_zfs_list.sh` (`ensure_parallel_available_for_source_jobs()`, `build_source_snapshot_list_cmd()`), `tests/test_zxfer_get_zfs_list.sh`, `tests/run_integration_zxfer.sh`.

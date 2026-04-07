@@ -221,6 +221,10 @@ run_zfs_create_with_properties() {
 	l_property_list=$4
 	l_destination=$5
 
+	if [ "$l_dataset_type" = "volume" ] && [ -z "$l_volume_size" ]; then
+		return 1
+	fi
+
 	(
 		set -- create
 
@@ -256,14 +260,28 @@ run_zfs_create_with_properties() {
 # handling locales that require both machine (-Hp) and human (-H) parsing.
 # $1: dataset to query
 # $2: zfs command to execute (defaults to $g_LZFS)
+# $3: optional lookup side label (source/destination/other) for profiling
 #
 get_normalized_dataset_properties() {
 	l_dataset=$1
 	l_zfs_cmd=$2
+	l_lookup_side=${3:-other}
 
 	if [ -z "$l_zfs_cmd" ]; then
 		l_zfs_cmd=$g_LZFS
 	fi
+
+	case "$l_lookup_side" in
+	source)
+		zxfer_profile_increment_counter g_zxfer_profile_normalized_property_reads_source
+		;;
+	destination)
+		zxfer_profile_increment_counter g_zxfer_profile_normalized_property_reads_destination
+		;;
+	*)
+		zxfer_profile_increment_counter g_zxfer_profile_normalized_property_reads_other
+		;;
+	esac
 
 	l_machine_pvs=$(run_zfs_cmd_for_spec "$l_zfs_cmd" get -Hpo property,value,source all "$l_dataset" |
 		tr "\t" "=" | tr "\n" ",")
@@ -309,7 +327,7 @@ collect_source_props() {
 		l_zfs_cmd=$g_LZFS
 	fi
 
-	m_source_pvs_raw=$(get_normalized_dataset_properties "$l_source" "$l_zfs_cmd")
+	m_source_pvs_raw=$(get_normalized_dataset_properties "$l_source" "$l_zfs_cmd" source)
 	m_source_pvs_effective=$m_source_pvs_raw
 
 	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
@@ -497,12 +515,30 @@ ensure_required_properties_present() {
 
 		[ "$l_found_property" -eq 0 ] || continue
 
-		l_explicit_property=$(run_zfs_cmd_for_spec "$l_zfs_cmd" get -Hpo property,value,source "$l_required_property" "$l_dataset" 2>/dev/null |
-			sed -n '1p' | tr '\t' '=')
-		case "$l_explicit_property" in
-		"$l_required_property"=*=*) ;;
-		*) continue ;;
-		esac
+		zxfer_profile_increment_counter g_zxfer_profile_required_property_backfill_gets
+		if l_explicit_probe_output=$(run_zfs_cmd_for_spec "$l_zfs_cmd" get -Hpo property,value,source "$l_required_property" "$l_dataset" 2>&1); then
+			l_explicit_property=$(printf '%s\n' "$l_explicit_probe_output" | sed -n '1p' | tr '\t' '=')
+			case "$l_explicit_property" in
+			"$l_required_property"=*=*) ;;
+			*)
+				IFS=$l_oldifs
+				printf '%s\n' "Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
+				return 1
+				;;
+			esac
+		else
+			case "$l_explicit_probe_output" in
+			*"does not apply"* | *"invalid property"* | *"no such property"* | *"not supported"*)
+				continue
+				;;
+			*)
+				IFS=$l_oldifs
+				printf '%s\n' "Failed to retrieve required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
+				return 1
+				;;
+			esac
+			continue
+		fi
 
 		if [ -n "$l_result" ]; then
 			l_result="$l_result,$l_explicit_property"
@@ -513,6 +549,62 @@ ensure_required_properties_present() {
 	IFS=$l_oldifs
 
 	printf '%s\n' "$l_result"
+}
+
+#
+# Retrieve and validate the source dataset type plus any required creation
+# metadata before planning destination creation or property diffs.
+# Returns two newline-separated lines: dataset_type, volume_size.
+# $1: source dataset
+#
+get_validated_source_dataset_create_metadata() {
+	l_source=$1
+	l_source_volsize=""
+
+	if ! l_source_dstype=$(run_source_zfs_cmd get -Hpo value type "$l_source" 2>&1); then
+		printf '%s\n' "Failed to retrieve source dataset type for [$l_source]: $l_source_dstype"
+		return 1
+	fi
+
+	case "$l_source_dstype" in
+	filesystem) ;;
+	volume)
+		if ! l_source_volsize=$(run_source_zfs_cmd get -Hpo value volsize "$l_source" 2>&1); then
+			printf '%s\n' "Failed to retrieve source zvol size for [$l_source]: $l_source_volsize"
+			return 1
+		fi
+		if [ -z "$l_source_volsize" ] || [ "$l_source_volsize" = "-" ]; then
+			printf '%s\n' "Failed to retrieve source zvol size for [$l_source]: empty volsize"
+			return 1
+		fi
+		;;
+	*)
+		printf '%s\n' "Invalid source dataset type for [$l_source]: $l_source_dstype"
+		return 1
+		;;
+	esac
+
+	printf '%s\n' "$l_source_dstype"
+	printf '%s\n' "$l_source_volsize"
+}
+
+#
+# Return the applicable creation-time properties for the source dataset type.
+# Filesystems need these properties to be compared at creation time; volumes do
+# not support them and should not probe them opportunistically.
+# $1: dataset type (filesystem/volume)
+#
+get_required_creation_properties_for_dataset_type() {
+	l_dataset_type=$1
+
+	case "$l_dataset_type" in
+	volume)
+		printf '\n'
+		;;
+	*)
+		printf '%s\n' "casesensitivity,normalization,jailed,utf8only"
+		;;
+	esac
 }
 
 #
@@ -575,9 +667,13 @@ ensure_destination_exists() {
 		l_property_list="$m_new_rmvs_pv"
 		l_with_parents="no"
 		l_parent_dataset=${l_destination%/*}
-		if [ "$l_parent_dataset" != "$l_destination" ] &&
-			[ "$(exists_destination "$l_parent_dataset")" -eq 0 ]; then
-			l_with_parents="yes"
+		if [ "$l_parent_dataset" != "$l_destination" ]; then
+			if ! l_parent_exists=$(exists_destination "$l_parent_dataset"); then
+				throw_error "$l_parent_exists"
+			fi
+			if [ "$l_parent_exists" -eq 0 ]; then
+				l_with_parents="yes"
+			fi
 		fi
 	else
 		l_filtered_creation=$(sanitize_property_list "$l_creation_pvs" "$l_readonly_properties" "$g_option_I_ignore_properties")
@@ -607,7 +703,7 @@ collect_destination_props() {
 		l_zfs_cmd=$g_RZFS
 	fi
 
-	get_normalized_dataset_properties "$l_dataset" "$l_zfs_cmd"
+	get_normalized_dataset_properties "$l_dataset" "$l_zfs_cmd" destination
 }
 
 zxfer_build_destination_zfs_command() {
@@ -623,14 +719,13 @@ zxfer_build_destination_zfs_command() {
 		return
 	fi
 
-	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
 	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
 	l_remote_tokens=$(printf '%s\n%s' "$l_target_zfs_cmd" "$l_subcommand")
 	for l_arg in "$@"; do
 		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
 	done
 	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
-	build_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_cmd"
+	build_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd"
 }
 
 zxfer_build_destination_zfs_property_command() {
@@ -646,14 +741,13 @@ zxfer_run_destination_zfs_property_command() {
 		return
 	fi
 
-	l_target_ssh_cmd=$(get_ssh_cmd_for_host "$g_option_T_target_host")
 	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
 	l_remote_tokens=$(printf '%s\n%s' "$l_target_zfs_cmd" "$l_subcommand")
 	for l_arg in "$@"; do
 		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
 	done
 	l_remote_cmd=$(quote_token_stream "$l_remote_tokens")
-	invoke_ssh_shell_command_for_host "$l_target_ssh_cmd" "$g_option_T_target_host" "$l_remote_cmd"
+	invoke_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd" destination
 }
 
 #
@@ -811,13 +905,22 @@ adjust_child_inherit_to_match_parent() {
 	fi
 
 	l_parent_dataset=${l_destination%/*}
-	if [ "$l_parent_dataset" = "$l_destination" ] ||
-		[ "$(exists_destination "$l_parent_dataset")" -eq 0 ]; then
+	if [ "$l_parent_dataset" = "$l_destination" ]; then
 		printf '%s\n' "$l_set_list"
 		printf '%s\n' "$l_inherit_list"
 		return
 	fi
 
+	if ! l_parent_exists=$(exists_destination "$l_parent_dataset"); then
+		throw_error "$l_parent_exists"
+	fi
+	if [ "$l_parent_exists" -eq 0 ]; then
+		printf '%s\n' "$l_set_list"
+		printf '%s\n' "$l_inherit_list"
+		return
+	fi
+
+	zxfer_profile_increment_counter g_zxfer_profile_parent_destination_property_reads
 	l_parent_dest_pvs=$(collect_destination_props "$l_parent_dataset" "$g_RZFS")
 	l_parent_dest_pvs=$(sanitize_property_list "$l_parent_dest_pvs" "$l_readonly_properties" "$g_option_I_ignore_properties")
 
@@ -936,7 +1039,6 @@ transfer_properties() {
 
 	l_source=$1
 	l_skip_backup_capture=${2:-0}
-	must_create_properties="casesensitivity,normalization,jailed,utf8only"
 	l_effective_readonly_properties=$g_readonly_properties
 
 	if [ "$initial_source" = "$l_source" ]; then
@@ -946,10 +1048,24 @@ transfer_properties() {
 	fi
 
 	collect_source_props "$l_source" "$g_actual_dest" "$g_ensure_writable" "$g_LZFS"
+	if ! l_source_create_metadata=$(get_validated_source_dataset_create_metadata "$l_source"); then
+		throw_error "$l_source_create_metadata"
+	fi
+	{
+		IFS= read -r l_source_dstype
+		IFS= read -r l_source_volsize
+	} <<EOF
+$l_source_create_metadata
+EOF
+	must_create_properties=$(get_required_creation_properties_for_dataset_type "$l_source_dstype")
 
 	if [ "$g_option_e_restore_property_mode" -eq 0 ]; then
-		m_source_pvs_raw=$(ensure_required_properties_present "$l_source" "$m_source_pvs_raw" "$g_LZFS" "$must_create_properties")
-		m_source_pvs_effective=$(ensure_required_properties_present "$l_source" "$m_source_pvs_effective" "$g_LZFS" "$must_create_properties")
+		if ! m_source_pvs_raw=$(ensure_required_properties_present "$l_source" "$m_source_pvs_raw" "$g_LZFS" "$must_create_properties"); then
+			throw_error "$m_source_pvs_raw"
+		fi
+		if ! m_source_pvs_effective=$(ensure_required_properties_present "$l_source" "$m_source_pvs_effective" "$g_LZFS" "$must_create_properties"); then
+			throw_error "$m_source_pvs_effective"
+		fi
 	fi
 
 	l_source_pvs=$m_source_pvs_effective
@@ -960,9 +1076,6 @@ transfer_properties() {
 		g_backup_file_contents="$g_backup_file_contents;\
 $l_source,$g_actual_dest,$m_source_pvs_raw"
 	fi
-
-	l_source_dstype=$(run_source_zfs_cmd get -Hpo value type "$l_source")
-	l_source_volsize=$(run_source_zfs_cmd get -Hpo value volsize "$l_source")
 
 	g_option_o_override_property_pv=$g_option_o_override_property
 
@@ -1016,7 +1129,9 @@ EOF
 	fi
 
 	dest_pvs=$(collect_destination_props "$g_actual_dest" "$g_RZFS")
-	dest_pvs=$(ensure_required_properties_present "$g_actual_dest" "$dest_pvs" "$g_RZFS" "$must_create_properties")
+	if ! dest_pvs=$(ensure_required_properties_present "$g_actual_dest" "$dest_pvs" "$g_RZFS" "$must_create_properties"); then
+		throw_error "$dest_pvs"
+	fi
 	dest_pvs=$(sanitize_property_list "$dest_pvs" "$l_effective_readonly_properties" "$g_option_I_ignore_properties")
 	echoV "transfer_properties dest_pvs: $dest_pvs"
 

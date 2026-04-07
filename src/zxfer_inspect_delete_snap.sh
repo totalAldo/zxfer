@@ -44,24 +44,39 @@ fi
 # g_delete_dest_tmp_file
 # g_delete_snapshots_to_delete_tmp_file
 #
+write_snapshot_identities_to_file() {
+	l_snapshot_records=$1
+	l_output_file=$2
+
+	{
+		while IFS= read -r l_snapshot_record; do
+			[ -n "$l_snapshot_record" ] || continue
+			l_snapshot_identity=$(extract_snapshot_identity "$l_snapshot_record")
+			[ -n "$l_snapshot_identity" ] || continue
+			printf '%s\n' "$l_snapshot_identity"
+		done <<-EOF
+			$(normalize_snapshot_record_list "$l_snapshot_records")
+		EOF
+	} | LC_ALL=C sort -u >"$l_output_file"
+}
+
 get_dest_snapshots_to_delete_per_dataset() {
 	echoV "Begin get_dest_snapshots_to_delete_per_dataset()"
 	l_zfs_source_snaps=$1
 	l_zfs_dest_snaps=$2
 
-	# Write the snapshot names to the temporary files so that we can pass them to comm
+	# Write snapshot identity keys (name + guid) to the temporary files so that
+	# `comm` can distinguish same-named but unrelated snapshots.
 	# run the first process in the background
-	# shellcheck disable=SC2016
-	printf '%s\n' "$l_zfs_source_snaps" | tr ' ' '\n' |
-		$g_cmd_awk -F'@' 'NF && $2 != "" {print $2}' | LC_ALL=C sort -u >"$g_delete_source_tmp_file" &
+	write_snapshot_identities_to_file "$l_zfs_source_snaps" "$g_delete_source_tmp_file" &
 	PID=$!
+	zxfer_register_cleanup_pid "$PID"
 
-	# shellcheck disable=SC2016
-	printf '%s\n' "$l_zfs_dest_snaps" | tr ' ' '\n' |
-		$g_cmd_awk -F'@' 'NF && $2 != "" {print $2}' | LC_ALL=C sort -u >"$g_delete_dest_tmp_file"
+	write_snapshot_identities_to_file "$l_zfs_dest_snaps" "$g_delete_dest_tmp_file"
 
 	# wait for the background process to finish
 	wait $PID
+	zxfer_unregister_cleanup_pid "$PID"
 
 	# Use comm to find snapshots in g_delete_dest_tmp_file that don't have a match in g_delete_source_tmp_file
 	LC_ALL=C comm -13 "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" >"$g_delete_snapshots_to_delete_tmp_file"
@@ -69,16 +84,20 @@ get_dest_snapshots_to_delete_per_dataset() {
 	l_dest_snaps_to_delete=""
 	while IFS= read -r l_snapshot_name; do
 		[ -n "$l_snapshot_name" ] || continue
-		for l_dest_snapshot in $l_zfs_dest_snaps; do
-			if [ "$(extract_snapshot_name "$l_dest_snapshot")" = "$l_snapshot_name" ]; then
+		while IFS= read -r l_dest_snapshot; do
+			[ -n "$l_dest_snapshot" ] || continue
+			if [ "$(extract_snapshot_identity "$l_dest_snapshot")" = "$l_snapshot_name" ]; then
+				l_dest_snapshot_path=$(extract_snapshot_path "$l_dest_snapshot")
 				if [ -n "$l_dest_snaps_to_delete" ]; then
 					l_dest_snaps_to_delete="$l_dest_snaps_to_delete
-$l_dest_snapshot"
+$l_dest_snapshot_path"
 				else
-					l_dest_snaps_to_delete=$l_dest_snapshot
+					l_dest_snaps_to_delete=$l_dest_snapshot_path
 				fi
 			fi
-		done
+		done <<-EOF
+			$(normalize_snapshot_record_list "$l_zfs_dest_snaps")
+		EOF
 	done <"$g_delete_snapshots_to_delete_tmp_file"
 
 	# Print the matching lines
@@ -97,30 +116,33 @@ get_last_common_snapshot() {
 	# unordered list of destination datasets and snapshots
 	l_zfs_dest_snaps=$2
 
-	# Convert destination snapshots into a newline-delimited list of just the
-	# snapshot component so we can do exact membership checks without relying on
-	# awk (unit tests source helpers before init_globals runs).
+	# Convert destination snapshots into a newline-delimited list of identity keys
+	# (name + guid) so same-named but unrelated snapshots are not treated as
+	# common anchors.
 	l_newline='
 '
 	l_dest_snap_list="$l_newline"
-	for l_dest_snap in $l_zfs_dest_snaps; do
-		l_dest_name=$(extract_snapshot_name "$l_dest_snap")
-		[ -n "$l_dest_name" ] || continue
-		l_dest_snap_list="${l_dest_snap_list}${l_dest_name}${l_newline}"
-	done
+	while IFS= read -r l_dest_snap; do
+		[ -n "$l_dest_snap" ] || continue
+		l_dest_identity=$(extract_snapshot_identity "$l_dest_snap")
+		[ -n "$l_dest_identity" ] || continue
+		l_dest_snap_list="${l_dest_snap_list}${l_dest_identity}${l_newline}"
+	done <<-EOF
+		$(normalize_snapshot_record_list "$l_zfs_dest_snaps")
+	EOF
 
 	# the last common snapshot
-	l_snap_name=""
+	l_snap_identity=""
 
 	# loop through the source snapshots sorted in descending creation order
 	# (newest first) to find the most recent common snapshot
-	for l_source_snap in $l_zfs_source_snaps; do
-		l_snap_name=$(extract_snapshot_name "$l_source_snap")
-
-		[ -n "$l_snap_name" ] || continue
+	while IFS= read -r l_source_snap; do
+		[ -n "$l_source_snap" ] || continue
+		l_snap_identity=$(extract_snapshot_identity "$l_source_snap")
+		[ -n "$l_snap_identity" ] || continue
 
 		case "$l_dest_snap_list" in
-		*"$l_newline$l_snap_name$l_newline"*)
+		*"$l_newline$l_snap_identity$l_newline"*)
 			l_last_common_snap=$l_source_snap
 
 			echoV "Found last common snapshot: $l_last_common_snap."
@@ -130,7 +152,9 @@ get_last_common_snapshot() {
 			return
 			;;
 		esac
-	done
+	done <<-EOF
+		$(normalize_snapshot_record_list "$l_zfs_source_snaps")
+	EOF
 
 	echoV "No common snapshot found."
 
@@ -159,8 +183,10 @@ deleted_snapshots_include_newer_than_last_common() {
 		;;
 	esac
 
-	for l_deleted_snapshot in $l_deleted_snapshots; do
-		l_deleted_creation=$(run_destination_zfs_cmd get -H -o value -p creation "$l_deleted_snapshot" 2>/dev/null || :)
+	while IFS= read -r l_deleted_snapshot; do
+		[ -n "$l_deleted_snapshot" ] || continue
+		l_deleted_snapshot_path=$(extract_snapshot_path "$l_deleted_snapshot")
+		l_deleted_creation=$(run_destination_zfs_cmd get -H -o value -p creation "$l_deleted_snapshot_path" 2>/dev/null || :)
 		case "$l_deleted_creation" in
 		'' | *[!0-9]*)
 			return 0
@@ -169,7 +195,9 @@ deleted_snapshots_include_newer_than_last_common() {
 		if [ "$l_deleted_creation" -gt "$l_last_common_creation" ]; then
 			return 0
 		fi
-	done
+	done <<-EOF
+		$(normalize_snapshot_record_list "$l_deleted_snapshots")
+	EOF
 
 	return 1
 }
@@ -234,7 +262,8 @@ delete_snaps() {
 	l_unprotected_snaps_to_delete=""
 
 	# checks if any of the snapshots to delete are protected by the grandfather option
-	for l_snap_to_delete in $l_snaps_to_delete; do
+	while IFS= read -r l_snap_to_delete; do
+		[ -n "$l_snap_to_delete" ] || continue
 		if [ "$g_option_g_grandfather_protection" != "" ]; then
 			grandfather_test "$l_snap_to_delete"
 		fi
@@ -244,7 +273,9 @@ delete_snaps() {
 		# prepend this snapshot to the list of snapshots to delete in a comma
 		# delimited list; the trailing comma is trimmed before issuing zfs destroy.
 		l_unprotected_snaps_to_delete="$l_snapshot,$l_unprotected_snaps_to_delete"
-	done
+	done <<-EOF
+		$(normalize_snapshot_record_list "$l_snaps_to_delete")
+	EOF
 
 	# drop any trailing delimiter so the destroy command receives valid names
 	l_unprotected_snaps_to_delete=${l_unprotected_snaps_to_delete%,}
@@ -294,18 +325,24 @@ set_src_snapshot_transfer_list() {
 
 	# This prepares a list of source snapshots to transfer, beginning with
 	# the first snapshot after the last common one.
-	for l_test_snap in $l_zfs_source_snaps; do
+	while IFS= read -r l_test_snap; do
+		[ -n "$l_test_snap" ] || continue
 		if [ "$g_last_common_snap" != "" ] && [ "$l_test_snap" = "$g_last_common_snap" ]; then
 			l_found_common=1
 			continue
 		fi
 
-		if [ $l_found_common = 0 ]; then
-			g_src_snapshot_transfer_list="$l_test_snap,$g_src_snapshot_transfer_list"
+		if [ "$l_found_common" -eq 0 ]; then
+			if [ -n "$g_src_snapshot_transfer_list" ]; then
+				g_src_snapshot_transfer_list="$l_test_snap
+$g_src_snapshot_transfer_list"
+			else
+				g_src_snapshot_transfer_list=$l_test_snap
+			fi
 		fi
-	done
-
-	g_src_snapshot_transfer_list=$(echo "$g_src_snapshot_transfer_list" | tr -s "," "\n")
+	done <<-EOF
+		$(normalize_snapshot_record_list "$l_zfs_source_snaps")
+	EOF
 }
 
 inspect_delete_snap() {

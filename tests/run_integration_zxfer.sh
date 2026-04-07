@@ -856,6 +856,19 @@ mock_ssh_matches_command_v_override() {
 	esac
 }
 
+mock_ssh_is_uname_command() {
+	l_cmd=$1
+
+	case "$l_cmd" in
+	uname | "'uname'" | '"uname"')
+		return 0
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
 l_socket=""
 l_op=""
 l_host=""
@@ -921,7 +934,7 @@ fi
 		l_cmd=$1
 		l_shell=${MOCK_SSH_REMOTE_SHELL:-sh}
 
-		if [ -n "${MOCK_SSH_FORCE_UNAME:-}" ] && [ "$l_cmd" = "uname" ]; then
+		if [ -n "${MOCK_SSH_FORCE_UNAME:-}" ] && mock_ssh_is_uname_command "$l_cmd"; then
 			printf '%s\n' "$MOCK_SSH_FORCE_UNAME"
 			exit 0
 		fi
@@ -945,7 +958,7 @@ fi
 		exec "$l_shell" -c "$l_cmd"
 	fi
 
-if [ -n "${MOCK_SSH_FORCE_UNAME:-}" ] && [ "$1" = "uname" ]; then
+if [ -n "${MOCK_SSH_FORCE_UNAME:-}" ] && mock_ssh_is_uname_command "$1"; then
 	printf '%s\n' "$MOCK_SSH_FORCE_UNAME"
 	exit 0
 fi
@@ -1640,7 +1653,9 @@ cleanup() {
 	l_exit_status=$?
 	l_cleanup_ok=1
 	l_preserve_reason=""
-	l_job_pids=$(jobs -p 2>/dev/null || true)
+	l_job_pids=$(ps -o pid= -o ppid= 2>/dev/null | awk -v ppid="$$" '
+		$2 == ppid {print $1}
+	' || true)
 	if [ -n "$l_job_pids" ]; then
 		# shellcheck disable=SC2086  # split into individual PIDs on purpose
 		kill $l_job_pids 2>/dev/null || true
@@ -3158,6 +3173,52 @@ remote_origin_target_uncompressed_test() {
 	log "Remote uncompressed origin/target test passed"
 }
 
+local_helper_path_shell_metacharacters_test() {
+	log "Starting local helper path shell metacharacters test"
+
+	marker_rel="local_helper_path_marker"
+	marker="$WORKDIR/$marker_rel"
+	mock_path="$WORKDIR/mock_local_helper.\$(touch $marker_rel)"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
+		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
+	safe_rm_f "$marker"
+	safe_rm_rf "$mock_path"
+	mkdir -p "$mock_path"
+
+	real_zfs=$(resolve_host_command zfs)
+	if [ "$real_zfs" = "" ]; then
+		fail "zfs not found on host; cannot run local helper path shell metacharacters test."
+	fi
+	ln -s "$real_zfs" "$mock_path/zfs"
+
+	src_dataset="$SRC_POOL/local_helper_shell_src"
+	dest_root="$DEST_POOL/local_helper_shell_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "helper-path-one"
+	zfs snap -r "$src_dataset@lhs1"
+
+	(
+		cd "$WORKDIR"
+		log "Running: $zxfer_bin_abs -v -R $src_dataset $dest_root"
+		ZXFER_SECURE_PATH="$secure_path" "$zxfer_bin_abs" -v -R "$src_dataset" "$dest_root"
+	)
+
+	assert_snapshot_exists "$dest_dataset" "lhs1"
+	if [ -e "$marker" ]; then
+		fail "Resolved local helper paths containing shell metacharacters should not execute locally; marker file was created at $marker."
+	fi
+
+	safe_rm_rf "$mock_path"
+
+	log "Local helper path shell metacharacters test passed"
+}
+
 remote_helper_path_shell_metacharacters_test() {
 	log "Starting remote helper path shell metacharacters test"
 
@@ -3208,6 +3269,57 @@ remote_helper_path_shell_metacharacters_test() {
 	safe_rm_rf "$mock_path" "$ssh_mock_dir"
 
 	log "Remote helper path shell metacharacters test passed"
+}
+
+control_socket_path_shell_metacharacters_test() {
+	log "Starting control socket path shell metacharacters test"
+
+	marker_rel="control_socket_path_marker"
+	marker="$WORKDIR/$marker_rel"
+	tmpdir_with_payload="$WORKDIR/mock_tmpdir.\$(touch $marker_rel)"
+	mock_path="$WORKDIR/mock_control_socket_safe"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
+		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
+	safe_rm_f "$marker"
+	safe_rm_rf "$tmpdir_with_payload" "$mock_path"
+	mkdir -p "$tmpdir_with_payload"
+	mkdir -p "$mock_path"
+
+	real_zfs=$(resolve_host_command zfs)
+	if [ "$real_zfs" = "" ]; then
+		fail "zfs not found on host; cannot run control socket path shell metacharacters test."
+	fi
+	ln -s "$real_zfs" "$mock_path/zfs"
+	write_mock_ssh_script "$mock_path/ssh"
+
+	src_dataset="$SRC_POOL/control_socket_shell_src"
+	dest_root="$DEST_POOL/control_socket_shell_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "control-socket-one"
+	zfs snap -r "$src_dataset@css1"
+
+	(
+		cd "$WORKDIR"
+		log "Running: $zxfer_bin_abs -v -O localhost -R $src_dataset $dest_root"
+		TMPDIR="$tmpdir_with_payload" \
+			ZXFER_SECURE_PATH="$secure_path" \
+			"$zxfer_bin_abs" -v -O localhost -R "$src_dataset" "$dest_root"
+	)
+
+	assert_snapshot_exists "$dest_dataset" "css1"
+	if [ -e "$marker" ]; then
+		fail "SSH control-socket paths containing shell metacharacters should not execute locally; marker file was created at $marker."
+	fi
+
+	safe_rm_rf "$tmpdir_with_payload" "$mock_path"
+
+	log "Control socket path shell metacharacters test passed"
 }
 
 remote_compression_pipeline_test() {
@@ -3426,7 +3538,7 @@ EOF
 	ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -T localhost -R "$src_dataset" "$dest_root" >/dev/null 2>&1 &
 	zxfer_pid=$!
 	sleep 2
-	kill -INT "$zxfer_pid" >/dev/null 2>&1 || true
+	kill -s INT "$zxfer_pid" >/dev/null 2>&1 || true
 	wait "$zxfer_pid"
 	set -e
 
@@ -3836,7 +3948,11 @@ EOF
 		fail "Expected MockLocalOS from local get_os, got $local_os"
 	fi
 
-	remote_os=$(MOCK_SSH_FORCE_UNAME="MockRemoteOS" MOCK_REMOTE_CMD="$mock_path/ssh remotehost" PATH="$mock_path:$PATH" sh -c '. ./src/zxfer_common.sh; get_os "$MOCK_REMOTE_CMD"')
+	remote_os=$(MOCK_SSH_FORCE_UNAME="MockRemoteOS" PATH="$mock_path:$PATH" sh -c '
+		. ./src/zxfer_common.sh
+		g_cmd_ssh="'"$mock_path"'/ssh"
+		get_os "remotehost"
+	')
 	if [ "$remote_os" != "MockRemoteOS" ]; then
 		fail "Expected MockRemoteOS from remote get_os, got $remote_os"
 	fi
@@ -3998,6 +4114,8 @@ property_creation_with_zvol_test \
 	invalid_error_log_warning_test \
 	error_log_email_example_self_test \
 	remote_migration_guard_tests \
+	local_helper_path_shell_metacharacters_test \
+	control_socket_path_shell_metacharacters_test \
 	remote_origin_target_uncompressed_test \
 	remote_helper_path_shell_metacharacters_test \
 	remote_compression_pipeline_test \

@@ -36,6 +36,12 @@ Run unit tests:
 ./tests/run_shunit_tests.sh
 ```
 
+Run the pinned local lint stack:
+
+```sh
+./tests/run_lint.sh
+```
+
 Run targeted suites when editing a specific area:
 
 ```sh
@@ -47,6 +53,18 @@ Run coverage when useful:
 ```sh
 ./tests/run_coverage.sh
 ```
+
+Run the enforced bash-xtrace coverage gate when changing shell logic, tests,
+or coverage tooling:
+
+```sh
+ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
+```
+
+That local run matches the GitHub Actions policy lane: it checks the committed
+minimums in `tests/coverage_policy.tsv`, rejects regressions relative to
+`tests/coverage_baseline/bash-xtrace/summary.tsv`, and writes the
+`missing.txt` diff that CI publishes in the PR step summary.
 
 Run integration tests only on a safe host:
 
@@ -79,3 +97,10 @@ Good pull requests explain:
 - what platforms were considered
 - what tests were run
 - whether any safety or security assumptions changed
+- whether CI, coverage policy, or baseline artifacts changed intentionally
+
+GitHub Actions also runs an Ubuntu portable-shell matrix for `dash`,
+`bash --posix`, `busybox ash`, and a non-blocking `posh` lane, plus a separate
+Docker-backed `kcov` coverage artifact job. Local development does not require
+`kcov`, but shell-portability-sensitive changes should mention whether those CI
+lanes were considered.

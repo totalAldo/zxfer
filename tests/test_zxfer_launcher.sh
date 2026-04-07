@@ -2,9 +2,19 @@
 #
 # shunit2 tests for zxfer launcher compatibility.
 #
+# shellcheck disable=SC1090,SC2317,SC2329
+
+case "$0" in
+/*)
+	TESTS_DIR=$(dirname "$0")
+	;;
+*)
+	TESTS_DIR=${PWD:-.}/$(dirname "$0")
+	;;
+esac
 
 # shellcheck source=tests/test_helper.sh
-. "$(dirname "$0")/test_helper.sh"
+. "$TESTS_DIR/test_helper.sh"
 
 oneTimeSetUp() {
 	TEST_TMPDIR=$(mktemp -d -t zxfer_launcher.XXXXXX)
@@ -105,4 +115,5 @@ test_launcher_falls_back_when_prepare_remote_host_connections_is_missing() {
 		"" "$output"
 }
 
+# shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

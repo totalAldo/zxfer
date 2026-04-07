@@ -28,3 +28,74 @@ jobs:
           # The shunit2 suites are used here as a /bin/sh and BSD-userland
           # portability gate without requiring a live ZFS stack.
           ./tests/run_shunit_tests.sh
+
+  portable-shells:
+    name: shunit2 (${{ matrix.shell_name }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shell_name: dash
+            shell_kind: dash
+            experimental: false
+          - shell_name: bash --posix
+            shell_kind: bash-posix
+            experimental: false
+          - shell_name: busybox ash
+            shell_kind: busybox-ash
+            experimental: false
+          - shell_name: posh
+            shell_kind: posh
+            experimental: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install portable shells
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y busybox posh
+      - name: Resolve shell under test
+        id: shell_under_test
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrapper_dir="$RUNNER_TEMP/zxfer-test-shells"
+          mkdir -p "$wrapper_dir"
+          case "${{ matrix.shell_kind }}" in
+            dash)
+              shell_under_test="$(command -v dash)"
+              ;;
+            bash-posix)
+              bash_bin="$(command -v bash)"
+              shell_under_test="$wrapper_dir/bash-posix"
+              printf '%s\n' '#!/bin/sh' \
+                "exec \"$bash_bin\" --posix \"\$@\"" >"$shell_under_test"
+              chmod 755 "$shell_under_test"
+              ;;
+            busybox-ash)
+              busybox_bin="$(command -v busybox)"
+              shell_under_test="$wrapper_dir/busybox-ash"
+              printf '%s\n' '#!/bin/sh' \
+                "exec \"$busybox_bin\" ash \"\$@\"" >"$shell_under_test"
+              chmod 755 "$shell_under_test"
+              ;;
+            posh)
+              shell_under_test="$(command -v posh)"
+              ;;
+            *)
+              echo "Unknown shell kind: ${{ matrix.shell_kind }}" >&2
+              exit 1
+              ;;
+          esac
+          printf 'shell_under_test=%s\n' "$shell_under_test" >>"$GITHUB_OUTPUT"
+          printf 'Using shell under test: %s\n' "$shell_under_test"
+      - name: Run shunit2 tests under selected shell
+        shell: bash
+        env:
+          ZXFER_TEST_SHELL: ${{ steps.shell_under_test.outputs.shell_under_test }}
+        run: |
+          set -euo pipefail
+          ./tests/run_shunit_tests.sh

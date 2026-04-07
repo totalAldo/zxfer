@@ -45,7 +45,7 @@ fi
 # the compression ratio of the data. The estimate is based on the size of the
 # dataset. When compression is used, the bar will terminate sooner,
 # ending at the compression ratio.
-# Takes $g_LZFS (which may contain the ssh command if -O is used)
+# Uses the source-side zfs helper selected by $g_LZFS.
 #
 calculate_size_estimate() {
 	l_current_snapshot=$1
@@ -109,12 +109,14 @@ zxfer_progress_passthrough() {
 
 	sh -c "$l_progress_dialog" <"$l_fifo" &
 	l_progress_pid=$!
+	zxfer_register_cleanup_pid "$l_progress_pid"
 
 	tee "$l_fifo"
 	l_tee_status=$?
 
 	wait "$l_progress_pid" 2>/dev/null
 	l_progress_status=$?
+	zxfer_unregister_cleanup_pid "$l_progress_pid"
 	rm -f "$l_fifo"
 
 	if [ "$l_progress_status" -ne 0 ]; then
@@ -149,6 +151,8 @@ handle_progress_bar_option() {
 get_send_command() {
 	l_previous_snapshot=$1
 	l_current_snapshot=$2
+	l_zfs_cmd=${3:-$g_cmd_zfs}
+	l_mode=${4:-display}
 
 	l_v=""
 	if [ "$g_option_V_very_verbose" -eq 1 ]; then
@@ -163,17 +167,45 @@ get_send_command() {
 
 	# Without a previous snapshot, send the current snapshot and create the target dataset.
 	if [ -z "$l_previous_snapshot" ]; then
-		echo "$g_cmd_zfs send $l_v $l_w $l_current_snapshot"
+		if [ "$l_mode" = "exec" ]; then
+			set -- "$l_zfs_cmd" send
+			[ "$l_v" != "" ] && set -- "$@" "$l_v"
+			[ "$l_w" != "" ] && set -- "$@" "$l_w"
+			set -- "$@" "$l_current_snapshot"
+			build_shell_command_from_argv "$@"
+			return # exit the function
+		fi
+		echo "$l_zfs_cmd send $l_v $l_w $l_current_snapshot"
 		return # exit the function
 	fi
 
 	# Stream the full incremental range in one send operation.
-	echo "$g_cmd_zfs send $l_v $l_w -I $l_previous_snapshot $l_current_snapshot"
+	if [ "$l_mode" = "exec" ]; then
+		set -- "$l_zfs_cmd" send
+		[ "$l_v" != "" ] && set -- "$@" "$l_v"
+		[ "$l_w" != "" ] && set -- "$@" "$l_w"
+		set -- "$@" -I "$l_previous_snapshot" "$l_current_snapshot"
+		build_shell_command_from_argv "$@"
+		return
+	fi
+
+	echo "$l_zfs_cmd send $l_v $l_w -I $l_previous_snapshot $l_current_snapshot"
 }
 
 get_receive_command() {
 	l_dest=$1
-	echo "$g_cmd_zfs receive $g_option_F_force_rollback $l_dest"
+	l_zfs_cmd=${2:-$g_cmd_zfs}
+	l_mode=${3:-display}
+
+	if [ "$l_mode" = "exec" ]; then
+		set -- "$l_zfs_cmd" receive
+		[ "$g_option_F_force_rollback" != "" ] && set -- "$@" "$g_option_F_force_rollback"
+		set -- "$@" "$l_dest"
+		build_shell_command_from_argv "$@"
+		return
+	fi
+
+	echo "$l_zfs_cmd receive $g_option_F_force_rollback $l_dest"
 }
 
 wrap_command_with_ssh() {
@@ -182,8 +214,6 @@ wrap_command_with_ssh() {
 	l_is_compress=$3
 	l_direction=$4
 
-	l_ssh_cmd=$(get_ssh_cmd_for_host "$l_option")
-	l_host_args=$(quote_host_spec_tokens "$l_option")
 	l_host_tokens=$(split_host_spec_tokens "$l_option")
 	l_host_token_count=0
 	if [ "$l_host_tokens" != "" ]; then
@@ -194,18 +224,13 @@ wrap_command_with_ssh() {
 $l_host_tokens
 EOF
 	fi
-	if [ "$l_host_args" != "" ]; then
-		l_ssh_prefix="$l_ssh_cmd $l_host_args"
-	else
-		l_ssh_prefix="$l_ssh_cmd"
-	fi
 
 	if [ "$l_is_compress" -eq 0 ]; then
 		if [ "$l_host_token_count" -gt 1 ]; then
 			l_remote_shell_cmd=$(build_remote_sh_c_command "$l_cmd")
-			build_ssh_shell_command_for_host "$l_ssh_cmd" "$l_option" "$l_remote_shell_cmd"
+			build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd"
 		else
-			echo "$l_ssh_prefix \"$l_cmd\""
+			build_ssh_shell_command_for_host "$l_option" "$l_cmd"
 		fi
 	else
 		if [ "$g_cmd_compress_safe" = "" ] || [ "$g_cmd_decompress_safe" = "" ]; then
@@ -216,21 +241,41 @@ EOF
 			l_remote_cmd="$l_cmd | $g_cmd_compress_safe"
 			if [ "$l_host_token_count" -gt 1 ]; then
 				l_remote_shell_cmd=$(build_remote_sh_c_command "$l_remote_cmd")
-				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_ssh_cmd" "$l_option" "$l_remote_shell_cmd") || return 1
+				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd") || return 1
 				echo "$l_wrapped_remote_cmd | $g_cmd_decompress_safe"
 			else
-				echo "$l_ssh_prefix \"$l_remote_cmd\" | $g_cmd_decompress_safe"
+				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_option" "$l_remote_cmd") || return 1
+				echo "$l_wrapped_remote_cmd | $g_cmd_decompress_safe"
 			fi
 		else
 			l_remote_cmd="$g_cmd_decompress_safe | $l_cmd"
 			if [ "$l_host_token_count" -gt 1 ]; then
 				l_remote_shell_cmd=$(build_remote_sh_c_command "$l_remote_cmd")
-				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_ssh_cmd" "$l_option" "$l_remote_shell_cmd") || return 1
+				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd") || return 1
 				echo "$g_cmd_compress_safe | $l_wrapped_remote_cmd"
 			else
-				echo "$g_cmd_compress_safe | $l_ssh_prefix \"$l_remote_cmd\""
+				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_option" "$l_remote_cmd") || return 1
+				echo "$g_cmd_compress_safe | $l_wrapped_remote_cmd"
 			fi
 		fi
+	fi
+}
+
+zxfer_profile_record_send_receive_pipeline_metrics() {
+	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
+		return 0
+	fi
+
+	zxfer_profile_increment_counter g_zxfer_profile_source_zfs_calls
+	zxfer_profile_increment_counter g_zxfer_profile_destination_zfs_calls
+	zxfer_profile_increment_counter g_zxfer_profile_zfs_send_calls
+	zxfer_profile_increment_counter g_zxfer_profile_zfs_receive_calls
+
+	if [ -n "${g_option_O_origin_host:-}" ]; then
+		zxfer_profile_record_ssh_invocation "$g_option_O_origin_host" source
+	fi
+	if [ -n "${g_option_T_target_host:-}" ]; then
+		zxfer_profile_record_ssh_invocation "$g_option_T_target_host" destination
 	fi
 }
 
@@ -249,10 +294,12 @@ wait_for_zfs_send_jobs() {
 	for l_pid in $g_zfs_send_job_pids; do
 		wait "$l_pid"
 		l_pid_status=$?
+		zxfer_unregister_cleanup_pid "$l_pid"
 		if [ "$l_pid_status" -ne 0 ]; then
 			for l_remaining_pid in $g_zfs_send_job_pids; do
 				[ "$l_remaining_pid" = "$l_pid" ] && continue
 				kill "$l_remaining_pid" 2>/dev/null || true
+				zxfer_unregister_cleanup_pid "$l_remaining_pid"
 			done
 			g_zfs_send_job_pids=""
 			g_count_zfs_send_jobs=0
@@ -276,26 +323,46 @@ zfs_send_receive() {
 	l_dest=$3
 	# 4th optional parameter specifies if background process is allowed, with a default to 1
 	l_is_allow_background=${4:-1}
+	l_send_zfs_cmd=$g_cmd_zfs
+	l_recv_zfs_cmd=$g_cmd_zfs
+
+	if [ "$g_option_O_origin_host" != "" ]; then
+		l_send_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
+	fi
+	if [ "$g_option_T_target_host" != "" ]; then
+		l_recv_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
+	fi
 
 	# Set up the send and receive commands
-	l_send_cmd=$(get_send_command "$l_previous_snapshot" "$l_current_snapshot")
-	l_recv_cmd=$(get_receive_command "$l_dest")
+	l_send_display_cmd=$(get_send_command "$l_previous_snapshot" "$l_current_snapshot" "$l_send_zfs_cmd")
+	l_recv_display_cmd=$(get_receive_command "$l_dest" "$l_recv_zfs_cmd")
+	l_send_cmd=$(get_send_command "$l_previous_snapshot" "$l_current_snapshot" "$l_send_zfs_cmd" "exec")
+	l_recv_cmd=$(get_receive_command "$l_dest" "$l_recv_zfs_cmd" "exec")
 	if [ "${g_option_F_force_rollback:-}" != "" ]; then
 		echov "Receive-side force flag (-F) is active for destination [$l_dest]."
 	fi
 
 	if [ "$g_option_O_origin_host" != "" ]; then
+		l_send_display_cmd=$(wrap_command_with_ssh "$l_send_display_cmd" "$g_option_O_origin_host" "$g_option_z_compress" "send")
 		l_send_cmd=$(wrap_command_with_ssh "$l_send_cmd" "$g_option_O_origin_host" "$g_option_z_compress" "send")
 	fi
 	if [ "$g_option_T_target_host" != "" ]; then
+		l_recv_display_cmd=$(wrap_command_with_ssh "$l_recv_display_cmd" "$g_option_T_target_host" "$g_option_z_compress" "receive")
 		l_recv_cmd=$(wrap_command_with_ssh "$l_recv_cmd" "$g_option_T_target_host" "$g_option_z_compress" "receive")
 	fi
 
 	# Perform this after ssh wrapping occurs
 	if [ "$g_option_D_display_progress_bar" != "" ]; then
 		l_progress_bar_cmd=$(handle_progress_bar_option "$l_current_snapshot" "$l_previous_snapshot")
+		l_send_display_cmd="$l_send_display_cmd $l_progress_bar_cmd"
 		l_send_cmd="$l_send_cmd $l_progress_bar_cmd"
 	fi
+
+	l_pipeline_display_cmd="$l_send_display_cmd | $l_recv_display_cmd"
+	l_pipeline_exec_cmd="$l_send_cmd | $l_recv_cmd"
+	zxfer_profile_increment_counter g_zxfer_profile_send_receive_pipeline_commands
+	zxfer_profile_record_bucket send_receive_setup
+	zxfer_profile_record_send_receive_pipeline_metrics
 
 	l_job_limit=${g_option_j_jobs:-1}
 	case $l_job_limit in
@@ -313,16 +380,18 @@ zfs_send_receive() {
 
 		# increment the job count
 		g_count_zfs_send_jobs=$((g_count_zfs_send_jobs + 1))
+		zxfer_profile_increment_counter g_zxfer_profile_send_receive_background_pipeline_commands
 
-		execute_command "$l_send_cmd | $l_recv_cmd" &
+		execute_command "$l_pipeline_exec_cmd" 0 "$l_pipeline_display_cmd" &
 		l_background_job_pid=$!
+		zxfer_register_cleanup_pid "$l_background_job_pid"
 		if [ -z "$g_zfs_send_job_pids" ]; then
 			g_zfs_send_job_pids=$l_background_job_pid
 		else
 			g_zfs_send_job_pids="$g_zfs_send_job_pids $l_background_job_pid"
 		fi
 	else
-		execute_command "$l_send_cmd | $l_recv_cmd"
+		execute_command "$l_pipeline_exec_cmd" 0 "$l_pipeline_display_cmd"
 	fi
 	if [ "$g_option_n_dryrun" -ne 1 ]; then
 		# shellcheck disable=SC2034
