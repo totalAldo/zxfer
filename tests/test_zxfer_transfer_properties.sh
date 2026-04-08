@@ -1218,25 +1218,6 @@ test_collect_source_props_restore_mode_matches_exact_awkward_dataset_tails() {
 		"user:note=value%3Dwith%3Dequals%3Band%3Bsemicolon=local" "$(cat "$output_file")"
 }
 
-test_collect_source_props_restore_mode_matches_exact_awkward_dataset_tails() {
-	output_file="$TEST_TMPDIR/collect_source_awkward_tail.out"
-
-	(
-		get_normalized_dataset_properties() {
-			printf '%s\n' "compression=off=local"
-		}
-		g_option_e_restore_property_mode=1
-		g_restored_backup_file_contents=$(printf '%s\n%s\n' \
-			"tank/src/child.tail-010,backup/dst,user:note=value,with,commas=local" \
-			"tank/src/child.tail-01,backup/dst,user:note=value=with=equals;and:semicolon=local")
-		collect_source_props "tank/src/child.tail-01" "backup/dst" 0 ""
-		printf '%s\n' "$m_source_pvs_effective" >"$output_file"
-	)
-
-	assertEquals "Restore-mode source matching should select the exact awkward dataset tail and preserve the raw serialized payload." \
-		"user:note=value=with=equals;and:semicolon=local" "$(cat "$output_file")"
-}
-
 test_validate_override_properties_returns_success_for_empty_list_in_current_shell() {
 	validate_override_properties "" "compression=lz4=local"
 	status=$?

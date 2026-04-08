@@ -1675,7 +1675,7 @@ test_build_source_snapshot_list_cmd_serial_returns_direct_list() {
 	result=$(build_source_snapshot_list_cmd)
 
 	assertEquals "Serial snapshot listing should render a shell-safe direct zfs command." \
-		"'/sbin/zfs' 'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' 'tank/data'" "$result"
+		"'/sbin/zfs' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' 'tank/data'" "$result"
 }
 
 test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
@@ -2476,17 +2476,17 @@ if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-t" ] && [ "$4" = "filesys
 	printf '%s\n' "zroot/usr"
 	exit 0
 fi
-if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
+if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] &&
 	[ "$5" = "-s" ] && [ "$6" = "creation" ] && [ "$7" = "-d" ] && [ "$8" = "1" ] &&
 	[ "$9" = "-t" ] && [ "${10}" = "snapshot" ] && [ "${11}" = "zroot" ]; then
-	printf '%s\n' "zroot@snap1	101"
-	printf '%s\n' "zroot@snap2	102"
+	printf '%s\n' "zroot@snap1"
+	printf '%s\n' "zroot@snap2"
 	exit 0
 fi
-if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
+if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] &&
 	[ "$5" = "-s" ] && [ "$6" = "creation" ] && [ "$7" = "-d" ] && [ "$8" = "1" ] &&
 	[ "$9" = "-t" ] && [ "${10}" = "snapshot" ] && [ "${11}" = "zroot/usr" ]; then
-	printf '%s\n' "zroot/usr@snap1	201"
+	printf '%s\n' "zroot/usr@snap1"
 	exit 0
 fi
 printf 'unexpected argv:' >&2
@@ -2534,9 +2534,9 @@ EOF
 
 	assertEquals "Remote snapshot listing should execute the GNU parallel runner without malformed zfs argv." 0 "$status"
 	assertEquals "The executed remote pipeline should return all source snapshots." \
-		"zroot@snap1	101
-zroot@snap2	102
-zroot/usr@snap1	201" "$(cat "$TEST_TMPDIR/remote_snapshot_exec.out")"
+		"zroot@snap1
+zroot@snap2
+zroot/usr@snap1" "$(cat "$TEST_TMPDIR/remote_snapshot_exec.out")"
 	assertEquals "The executed remote pipeline should not emit zfs usage or malformed-argv errors." \
 		"" "$(cat "$TEST_TMPDIR/remote_snapshot_exec.err")"
 }
@@ -2554,17 +2554,17 @@ if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-t" ] && [ "$4" = "filesys
 	printf '%s\n' "tank/home/usr"
 	exit 0
 fi
-if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
+if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] &&
 	[ "$5" = "-s" ] && [ "$6" = "creation" ] && [ "$7" = "-d" ] && [ "$8" = "1" ] &&
 	[ "$9" = "-t" ] && [ "${10}" = "snapshot" ] && [ "${11}" = "tank/home" ]; then
-	printf '%s\n' "tank/home@snap1	301"
-	printf '%s\n' "tank/home@snap2	302"
+	printf '%s\n' "tank/home@snap1"
+	printf '%s\n' "tank/home@snap2"
 	exit 0
 fi
-if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
+if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] &&
 	[ "$5" = "-s" ] && [ "$6" = "creation" ] && [ "$7" = "-d" ] && [ "$8" = "1" ] &&
 	[ "$9" = "-t" ] && [ "${10}" = "snapshot" ] && [ "${11}" = "tank/home/usr" ]; then
-	printf '%s\n' "tank/home/usr@snap1	401"
+	printf '%s\n' "tank/home/usr@snap1"
 	exit 0
 fi
 	printf 'unexpected argv:' >&2
@@ -2594,9 +2594,9 @@ EOF
 
 	assertEquals "Local snapshot listing should execute the GNU parallel runner without malformed zfs argv." 0 "$status"
 	assertEquals "The executed local pipeline should return all source snapshots." \
-		"tank/home@snap1	301
-tank/home@snap2	302
-tank/home/usr@snap1	401" "$(cat "$TEST_TMPDIR/local_snapshot_exec.out")"
+		"tank/home@snap1
+tank/home@snap2
+tank/home/usr@snap1" "$(cat "$TEST_TMPDIR/local_snapshot_exec.out")"
 	assertEquals "The executed local pipeline should not emit zfs usage or malformed-argv errors." \
 		"" "$(cat "$TEST_TMPDIR/local_snapshot_exec.err")"
 }

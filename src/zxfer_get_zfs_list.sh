@@ -559,12 +559,12 @@ write_destination_snapshot_list_to_files() {
 		# dataset exists
 		# Keep destination-side snapshot listing serial here. The older parallel
 		# variant added complexity and was not a net win once metadata was cached.
-		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset")
 		echoV "Running command: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
 		# make sure to eval and then pipe the contents to the file in case
 		# the command uses ssh
-		if ! run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file"; then
+		if ! run_destination_zfs_cmd list -Hr -o name -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file"; then
 			throw_error "Failed to retrieve snapshot list from the destination."
 		fi
 

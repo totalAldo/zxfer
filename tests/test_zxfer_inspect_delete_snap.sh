@@ -682,8 +682,8 @@ EOF
 	)
 	g_rzfs_list_hr_snap=$(
 		cat <<'EOF'
-backup/dst@zxfer_2	222
-backup/dst@zxfer_1	111
+backup/dst@zxfer_2
+backup/dst@zxfer_1
 EOF
 	)
 	g_actual_dest="backup/dst"

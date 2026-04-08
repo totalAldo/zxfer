@@ -564,62 +564,6 @@ get_required_creation_properties_for_dataset_type() {
 }
 
 #
-# Retrieve and validate the source dataset type plus any required creation
-# metadata before planning destination creation or property diffs.
-# Returns two newline-separated lines: dataset_type, volume_size.
-# $1: source dataset
-#
-get_validated_source_dataset_create_metadata() {
-	l_source=$1
-	l_source_volsize=""
-
-	if ! l_source_dstype=$(run_source_zfs_cmd get -Hpo value type "$l_source" 2>&1); then
-		printf '%s\n' "Failed to retrieve source dataset type for [$l_source]: $l_source_dstype"
-		return 1
-	fi
-
-	case "$l_source_dstype" in
-	filesystem) ;;
-	volume)
-		if ! l_source_volsize=$(run_source_zfs_cmd get -Hpo value volsize "$l_source" 2>&1); then
-			printf '%s\n' "Failed to retrieve source zvol size for [$l_source]: $l_source_volsize"
-			return 1
-		fi
-		if [ -z "$l_source_volsize" ] || [ "$l_source_volsize" = "-" ]; then
-			printf '%s\n' "Failed to retrieve source zvol size for [$l_source]: empty volsize"
-			return 1
-		fi
-		;;
-	*)
-		printf '%s\n' "Invalid source dataset type for [$l_source]: $l_source_dstype"
-		return 1
-		;;
-	esac
-
-	printf '%s\n' "$l_source_dstype"
-	printf '%s\n' "$l_source_volsize"
-}
-
-#
-# Return the applicable creation-time properties for the source dataset type.
-# Filesystems need these properties to be compared at creation time; volumes do
-# not support them and should not probe them opportunistically.
-# $1: dataset type (filesystem/volume)
-#
-get_required_creation_properties_for_dataset_type() {
-	l_dataset_type=$1
-
-	case "$l_dataset_type" in
-	volume)
-		printf '\n'
-		;;
-	*)
-		printf '%s\n' "casesensitivity,normalization,jailed,utf8only"
-		;;
-	esac
-}
-
-#
 # Drop properties unsupported on the destination.
 # $1: comma-separated property list
 # $2: unsupported property names
