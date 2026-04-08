@@ -3034,7 +3034,7 @@ test_transfer_properties_diffs_existing_destinations_and_applies_changes() {
 			printf '\n'
 		}
 		apply_property_changes() {
-			printf 'apply %s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" >>"$LOG_FILE"
+			printf 'apply %s %s %s %s%s\n' "$1" "$2" "$3" "$4" "${5:+ $5}" >>"$LOG_FILE"
 		}
 		g_recursive_dest_list="backup/dst"
 		g_actual_dest="backup/dst"
@@ -3389,7 +3389,7 @@ test_transfer_properties_skips_filesystem_only_required_property_probes_for_volu
 			fi
 		}
 		ensure_required_properties_present() {
-			printf 'ensure-required %s %s %s\n' "$1" "$2" "$4" >>"$LOG_FILE"
+			printf 'ensure-required %s %s%s\n' "$1" "$2" "${4:+ $4}" >>"$LOG_FILE"
 			if [ -n "$4" ]; then
 				printf '%s\n' "unexpected required property list: $4"
 				exit 1
