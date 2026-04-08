@@ -10,70 +10,10 @@ describe a concrete failure mode or exploit path.
 
 ## High
 
-- [Security/Reliability] Remote compression still depends on bare remote `zstd`, and source snapshot discovery ignores custom `-Z` compression settings.
-  Files: `src/zxfer_get_zfs_list.sh` (`build_source_snapshot_list_cmd()`), `src/zxfer_zfs_send_receive.sh` (`wrap_command_with_ssh()`).
-  Impact: remote snapshot discovery and remote send/receive compression still depend on whatever `zstd` the remote login shell resolves from its default `PATH`. In addition, the `-O ... -j ... -z` source-listing path hard-codes `zstd -9` / `zstd -d` instead of reusing the sanitized `-Z` command, so operators can get a different compression path for listing than for the replication stream.
-  Recommended fix: resolve remote compression helpers through the same secure-PATH mechanism used for `zfs`, `cat`, and GNU `parallel`, and route the source-listing compression path through the same validated command settings used by the main send/receive pipeline.
-
-- [Reliability] `-U` destination capability probe failures still collapse into “supports nothing”.
-  Files: `src/zxfer_zfs_mode.sh` (`calculate_unsupported_properties()`), `src/zxfer_transfer_properties.sh` (`remove_unsupported_properties()`, `strip_unsupported_properties()`).
-  Impact: `calculate_unsupported_properties()` does not check whether `run_destination_zfs_cmd get -Ho property all "$l_dest_pool_name"` succeeded. When that probe fails, the destination property list becomes empty, every source property is marked unsupported, and the later `strip_unsupported_properties()` pass can silently drop the entire property-transfer set. A transient remote or probe failure under `-U` therefore degrades into “replicate no properties” instead of aborting.
-  Recommended fix: fail closed when the destination capability query fails, or only derive `unsupported_properties` from a positively validated capability result.
-
-- [Data integrity] Property transfer and backup serialization still cannot safely represent property values containing raw `,`, `=`, or `;`.
-  Files: `src/zxfer_transfer_properties.sh` (`get_normalized_dataset_properties()`, `derive_override_lists()`, `diff_properties()`, `apply_property_changes()`), `src/zxfer_globals.sh` (`write_backup_properties()`, `get_backup_properties()`).
-  Impact: zxfer serializes property state with ad hoc comma/equals/semicolon delimiters and reparses it with `cut`, `tr`, and `IFS=,` loops. Properties whose values legitimately contain those characters, including some share options and arbitrary user properties, can therefore be truncated, split into fake fields, or restored incorrectly.
-  Recommended fix: replace the delimiter-packed property format with a tab/newline-safe representation, or add consistent escaping and unescaping.
-
-- [Reliability] Remote backup metadata handling remains asymmetric versus the local path.
-  Files: `src/zxfer_globals.sh` (`ensure_remote_backup_dir()`, `read_remote_backup_file()`, `get_backup_properties()`, `write_backup_properties()`).
-  Impact: a non-root remote `-k` backup can create secure metadata owned by the ssh user, but a later remote `-e` restore fails closed because `read_remote_backup_file()` rejects any owner other than UID 0. Remote restore also lacks the local `find`-based fallback under `ZXFER_BACKUP_DIR`, so a valid secure backup that local restore would discover can still be missed remotely. In addition, live remote backup writes still invoke target-side `cat` by bare name rather than through a resolved helper path.
-  Recommended fix: align remote backup-file ownership validation with `backup_owner_uid_is_allowed()` semantics, port the ambiguity-checked `find` fallback to the remote path, and resolve the target-side write helper through the same secure-lookup model used elsewhere.
-
-- [Reliability] Backup metadata write/read lookup is keyed to different filesystem trees.
-  Files: `src/zxfer_globals.sh` (`get_backup_properties()`, `write_backup_properties()`, `get_backup_storage_dir()`).
-  Impact: `-k` writes the secure backup file under a directory derived from the destination root mountpoint, while `-e` searches directories derived from the source filesystem ancestry. When source and destination mountpoints differ, the primary secure lookup cannot find the file that the matching backup run wrote. Local restore usually survives only because it falls back to a broad filename search under `ZXFER_BACKUP_DIR`; remote restore has no such fallback and therefore misses otherwise valid backups more often.
-  Recommended fix: key both backup writes and restores from the same stable identifier set, then remove the dependence on whole-tree `find` scans to recover from layout mismatches.
-
-- [Reliability] Backup metadata filenames still use only the last source path component.
-  Files: `src/zxfer_globals.sh` (`write_backup_properties()`, `get_backup_properties()`).
-  Impact: backup files are named `.zxfer_backup_info.<tail>`, where `<tail>` is only `${initial_source##*/}`. Distinct replication roots such as `tank/a/src` and `tank/b/src` therefore map to the same filename whenever they share the same secure backup directory, so later runs can overwrite earlier metadata and make `-e` restores pick up the wrong replication set.
-  Recommended fix: include a collision-resistant identifier derived from the full source dataset, or source-plus-destination pair, in the backup filename instead of using only the tail component.
-
-- [Data integrity] Restore mode still ignores the recorded destination dataset in backup metadata rows.
-  Files: `src/zxfer_globals.sh` (`backup_metadata_matches_source()`, `get_backup_properties()`), `src/zxfer_transfer_properties.sh` (`collect_source_props()`).
-  Impact: `get_backup_properties()` accepts any candidate backup file that contains the requested source dataset, without checking the recorded destination column or the backup header destination. Later, `collect_source_props()` restores properties by grepping only on the source dataset and stripping the first two comma-separated fields from every match. If the chosen metadata contains the same source dataset for a different destination, zxfer silently restores the wrong property set; if it contains multiple same-source rows, zxfer concatenates multiple property lists instead of selecting one exact match.
-  Recommended fix: require an exact source-plus-destination match, and ideally one unique row, when selecting backup files and extracting restored property lists.
-
-- [Security/Reliability] Secure backup path derivation is still not collision-resistant, and the raw mountpoint fallback can escape `ZXFER_BACKUP_DIR`.
-  Files: `src/zxfer_globals.sh` (`sanitize_backup_component()`, `sanitize_dataset_relpath()`, `get_backup_storage_dir()`, `get_backup_properties()`).
-  Impact: secure backup directories are derived by normalizing mountpoint components with `tr -c 'A-Za-z0-9._-' '_'`, so distinct custom mountpoints such as `/mnt/foo+bar`, `/mnt/foo?bar`, and `/mnt/foo bar` all collapse to the same secure path. In addition, restore-mode fallback still concatenates the literal mountpoint under `ZXFER_BACKUP_DIR`, so mountpoints containing `..` segments can probe paths outside the configured backup root.
-  Recommended fix: switch the secure backup layout to a reversible collision-resistant encoding and canonicalize or reject raw mountpoint fallback paths that would leave `ZXFER_BACKUP_DIR`.
-
-- [Security] Backup-directory preparation still follows nested symlink path components.
-  Files: `src/zxfer_globals.sh` (`ensure_local_backup_dir()`, `ensure_remote_backup_dir()`), `src/zxfer_common.sh` (`zxfer_find_symlink_path_component()`).
-  Impact: local and remote backup-directory setup only rejects the final requested directory when it is itself a symlink. If any parent component of `ZXFER_BACKUP_DIR` or a derived secure backup subdirectory is a symlink, `mkdir -p` follows it and zxfer happily creates the “secure” metadata directory through that redirect.
-  Recommended fix: reject backup paths with any symlinked component before `mkdir -p` or `chmod`, using the same whole-path check already implemented for `ZXFER_ERROR_LOG`, and apply equivalent validation on the remote helper path as well.
-
-- [Security] Backup metadata reads still follow nested symlink path components.
-  Files: `src/zxfer_globals.sh` (`read_local_backup_file()`, `read_remote_backup_file()`), `src/zxfer_common.sh` (`zxfer_find_symlink_path_component()`).
-  Impact: local backup reads only reject the final metadata path when it is itself a symlink, and the remote secure-cat probe does the same with `[ -h "$path" ]`. If a parent directory inside `ZXFER_BACKUP_DIR` or a raw mountpoint fallback path is a symlink, restore still follows it and accepts the target file as long as its owner and mode checks pass.
-  Recommended fix: reject backup metadata paths whose parent components are symlinks before reading them, and apply the same policy on remote reads.
-
-- [Availability] Migration service relaunch still abandons remaining services after the first enable failure.
-  Files: `src/zxfer_zfs_mode.sh` (`relaunch()`), `src/zxfer_globals.sh` (`trap_exit()`).
-  Impact: `relaunch()` clears `g_services_need_relaunch` before any `svcadm enable` succeeds, then aborts on the first enable failure. If multiple services were disabled for `-m -c ...`, a failure reenabling one service leaves the later services unattempted and still stopped. Because both `relaunch()` and `trap_exit()` clear the relaunch-needed flag before the restart sequence completes, the shutdown path also loses the signal that more services still need recovery.
-  Recommended fix: keep restart-needed state asserted until all requested services have been re-enabled successfully, and continue attempting the remaining services while collecting failures.
-
-- [Safety] Dry-run `-n -k` still mutates local and remote backup directories during preflight.
-  Files: `src/zxfer_zfs_mode.sh` (`check_backup_storage_dir_if_needed()`), `src/zxfer_globals.sh` (`ensure_local_backup_dir()`, `ensure_remote_backup_dir()`), `man/zxfer.8`, `man/zxfer.1m`.
-  Impact: the `-n` documentation says zxfer prints commands without executing them, but `run_zfs_mode()` still calls `check_backup_storage_dir_if_needed()` before any dry-run gating. As a result, `-n -k` can create or chmod `ZXFER_BACKUP_DIR` locally, and `-n -k -T host` still runs the remote backup-directory preparation helper over ssh.
-  Recommended fix: skip backup-directory creation and hardening in dry-run mode, or report the intended backup-directory actions without executing them.
-
-- [Security] Temporary-file and progress-FIFO roots still trust caller-supplied `TMPDIR` without validating the parent directory.
-  Files: `src/zxfer_common.sh` (`get_temp_file()`), `src/zxfer_zfs_send_receive.sh` (`zxfer_progress_passthrough()`), `src/zxfer_globals.sh` (`trap_exit()` cleanup of `g_zxfer_temp_prefix` artifacts), `tests/test_zxfer_common.sh`.
-  Risk: zxfer intentionally honors `TMPDIR` for snapshot-list caches, diff files, restore lookup scratch files, and the progress FIFO path. In an elevated or environment-preserving run, a hostile `TMPDIR` can therefore steer those artifacts into an attacker-controlled parent directory that zxfer never ownership-checks or scans for symlink components. The progress path is weaker still: it allocates a name with `mktemp`, immediately removes that file, and then recreates the same pathname with `mkfifo`, reopening a race window inside the caller-chosen temp root.
-  Recommended fix: ignore `TMPDIR` in privileged mode or require it to resolve under a trusted non-symlink directory owned by root or the effective UID, and build the progress FIFO inside a private `mktemp -d` directory instead of deleting and recreating a pathname in place.
+- [Interface] The comma-delimited `-o` override syntax still cannot carry raw commas inside one property value.
+  Files: `src/zxfer_globals.sh` (`read_command_line_switches()`), `src/zxfer_transfer_properties.sh` (`derive_override_lists()`).
+  Impact: live source properties and backup metadata now escape raw `,`, `=`, and `;` safely, and `-o` override values now preserve raw `=` and `;` after the first separator. However, the CLI still tokenizes `-o` on raw commas before value escaping, so an operator-supplied override such as `-o user:note=value,with,commas` is still split into fake assignments.
+  Recommended fix: add an explicit comma-escaping parser for `-o`, or introduce a repeatable override flag that accepts one `property=value` assignment per option instance.
 
 - [Security] Hardened pathname checks are still non-atomic for `ZXFER_ERROR_LOG` and backup metadata I/O.
   Files: `src/zxfer_common.sh` (`zxfer_append_failure_report_to_log()`, `zxfer_create_error_log_file()`), `src/zxfer_globals.sh` (`read_local_backup_file()`, `read_remote_backup_file()`, `write_backup_properties()`).
@@ -92,6 +32,11 @@ describe a concrete failure mode or exploit path.
   Risk: unlike `ZXFER_ERROR_LOG`, the backup-root override is not required to be absolute. If the environment sets `ZXFER_BACKUP_DIR=relative-backups`, zxfer will happily create and use `./relative-backups/...` locally and will pass the same relative path to remote helpers under `-O` / `-T`, making the effective storage root depend on the caller's or remote shell's current directory.
   Recommended fix: require `ZXFER_BACKUP_DIR` to be an absolute canonical path, locally and remotely, or reject relative overrides outright.
 
+- [Security/Reliability] Remote backup-directory and metadata guard helpers still trust the ambient remote `PATH` for auxiliary tools.
+  Files: `src/zxfer_globals.sh` (`ensure_remote_backup_dir()`, `read_remote_backup_file()`).
+  Risk: the secure-PATH model now resolves remote `zfs`, `cat`, GNU `parallel`, `find`, and compression helpers, but the remote backup-dir and backup-metadata guard scripts still invoke `stat`, `ls`, `id`, `grep`, `awk`, `mkdir`, and `chmod` by bare name. A hostile or misconfigured remote `PATH` can therefore change ownership checks, permission checks, or backup-directory preparation behavior even when zxfer's resolved helper paths are otherwise locked down.
+  Recommended fix: run these remote helper scripts under the same validated remote `PATH`, or resolve their auxiliary commands explicitly before composing the remote shell command.
+
 - [Security] Remote SSH host-authentication policy is still inherited entirely from ambient ssh configuration.
   Files: `src/zxfer_globals.sh` (`zxfer_assign_required_tool()`, `setup_ssh_control_socket()`, `get_ssh_cmd_for_host()`), `src/zxfer_common.sh` (`invoke_ssh_command_for_host()`, `invoke_ssh_shell_command_for_host()`), `src/zxfer_zfs_send_receive.sh` (`wrap_command_with_ssh()`).
   Risk: zxfer resolves `ssh` to an absolute path, but it never adds its own `StrictHostKeyChecking`, `UserKnownHostsFile`, `BatchMode`, or similar transport-safety options. That means remote replication, backup-metadata probes, and helper-path discovery all inherit whatever host-key and authentication policy the local user's ssh config happens to allow.
@@ -107,20 +52,10 @@ describe a concrete failure mode or exploit path.
   Risk: the failure-report escapers currently normalize backslashes, tabs, carriage returns, and embedded newlines, but they leave other non-printable bytes such as ANSI escape sequences untouched. In terminal-driven or pager-driven workflows, that allows log or terminal injection such as color spoofing, cursor movement, or other control-sequence side effects inside the structured report.
   Recommended fix: escape or strip all non-printable control bytes before rendering report fields, and add regression coverage that asserts `invocation:` and `last_command:` never contain raw control characters.
 
-- [Reliability] Parallel send/receive failure detection is still serialized by launch order.
-  Files: `src/zxfer_zfs_send_receive.sh` (`wait_for_zfs_send_jobs()`, `zfs_send_receive()`).
-  Impact: zxfer records background send/receive shell PIDs in launch order and then waits on them sequentially. If an earlier transfer is still running while a later transfer has already failed, zxfer does not notice that failure or attempt to kill the remaining jobs until the earlier PID exits. A fast failure in one dataset can therefore sit undetected behind a long-running earlier job.
-  Recommended fix: switch to prompt failure detection for background jobs, for example `wait -n` where available, or per-job status files and polling with process-group teardown.
-
-- [Reliability] `-g` grandfather-protection probe failures still misclassify snapshots as ancient.
-  Files: `src/zxfer_inspect_delete_snap.sh` (`grandfather_test()`, `delete_snaps()`).
-  Impact: `grandfather_test()` does not check whether `run_destination_zfs_cmd get -H -o value -p creation "$l_destination_snapshot"` succeeded or returned a numeric epoch. When that probe fails, the empty value is fed into shell arithmetic as zero, so zxfer reports the snapshot as roughly 1970-era and blocks deletion with a misleading grandfather-protection error.
-  Recommended fix: validate the creation-time probe before doing age arithmetic, and fail with an explicit destination metadata lookup error instead of treating unknown timestamps as protected ancient snapshots.
-
-- [Reliability] Backup metadata mountpoint probe failures still collapse into the detached layout.
-  Files: `src/zxfer_globals.sh` (`get_backup_properties()`, `write_backup_properties()`).
-  Impact: both backup restore and backup write paths call `run_source_zfs_cmd` or `run_destination_zfs_cmd get -H -o value mountpoint ...` without checking whether the mountpoint query actually succeeded. If that probe fails, the empty result is treated the same as a real blank or detached mountpoint. Restore can then read a matching file from `ZXFER_BACKUP_DIR/detached/...` even though the source mountpoint lookup failed, and `-k` writes can target `.../detached/...` unexpectedly instead of aborting.
-  Recommended fix: fail closed when the mountpoint lookup errors, and only use the detached layout when a successful probe explicitly reports a detached or blank mountpoint.
+- [Reliability] Backup metadata mountpoint probe failures still distort restore compatibility fallback lookup.
+  Files: `src/zxfer_globals.sh` (`get_backup_properties()`).
+  Impact: secure backup writes now use the source-dataset-relative tree and no longer depend on mountpoints, but restore still probes the source mountpoint before trying older compatibility paths. When that probe fails, the empty result is treated the same as a real blank or detached mountpoint, so restore can inspect `ZXFER_BACKUP_DIR/detached/...` compatibility locations even though the source mountpoint lookup itself failed.
+  Recommended fix: fail closed when the mountpoint lookup errors, and only use detached or mountpoint-derived compatibility paths when a successful probe explicitly reports that layout.
 
 - [Compatibility] `-U` unsupported-property detection still conflates property presence with property support.
   Files: `src/zxfer_zfs_mode.sh` (`calculate_unsupported_properties()`), `src/zxfer_transfer_properties.sh` (`remove_unsupported_properties()`, `strip_unsupported_properties()`).
@@ -134,7 +69,7 @@ describe a concrete failure mode or exploit path.
 
 - [Reliability] `-k` backup metadata can accumulate duplicate records across `-Y` iterations.
   Files: `src/zxfer_transfer_properties.sh` (`transfer_properties()`, `collect_source_props()`), `zxfer`.
-  Impact: `transfer_properties()` appends raw source property rows to the global backup buffer every time a dataset gets a property pass, while the launcher writes the backup file only once after `run_zfs_mode_loop()` completes. On a multi-iteration `-Y` run, the same dataset can therefore be recorded multiple times in one backup file. A later `-e` restore greps by source dataset and can misparse those duplicate rows as a single comma-delimited property list.
+  Impact: `transfer_properties()` appends raw source property rows to the global backup buffer every time a dataset gets a property pass, while the launcher writes the backup file only once after `run_zfs_mode_loop()` completes. On a multi-iteration `-Y` run, the same dataset can therefore be recorded multiple times in one backup file. Restore now fails closed on ambiguous exact source/destination duplicates instead of concatenating them, but that still turns the generated backup metadata into an unusable ambiguous file.
   Recommended fix: store backup metadata keyed by source dataset, or deduplicate before write, instead of appending repeated rows into one flat string.
 
 - [Durability] `-k` backup metadata is only flushed after the entire replication loop exits successfully.
@@ -147,22 +82,22 @@ describe a concrete failure mode or exploit path.
   Impact: the `-n` documentation says zxfer prints commands without executing them, but remote runs still prepare ssh control sockets and probe remote OS and helper paths during launcher preflight, and snapshot discovery still executes its background listing commands even when dry-run is enabled.
   Recommended fix: gate remote preflight and snapshot-discovery execution behind `g_option_n_dryrun`, or split dry-run into separate render-only and validate-against-live-state modes.
 
-- [Interface] Dry-run `-n -D` still executes live send-estimate probes.
+- [Interface] Dry-run `-n -D` still executes live progress-size probes when the template uses `%%size%%`.
   Files: `src/zxfer_zfs_send_receive.sh` (`calculate_size_estimate()`, `handle_progress_bar_option()`, `zfs_send_receive()`), `man/zxfer.8`, `man/zxfer.1m`.
-  Impact: when a progress command is configured with `-D`, zxfer still calls `run_source_zfs_cmd send -nPv ...` to estimate stream size before it renders the dry-run pipeline. That means `-n -D` can still hit local or remote source hosts, prompt for ssh authentication, and fail on read-side send or permission errors even though the actual replication command is never executed.
-  Recommended fix: skip progress-size probing in dry-run mode, or render the progress command with an unknown-size placeholder unless the operator explicitly opts into live validation.
+  Impact: when the configured progress template contains `%%size%%`, `handle_progress_bar_option()` still probes the live source before rendering a dry-run pipeline. Local single-job runs still use the exact `zfs send -nPv` estimate, while remote or `-j` runs now prefer cheaper `written@...` or `referenced` probes with exact fallback. Either way, `-n -D` can still contact local or remote source hosts, prompt for ssh authentication, and fail on source-side metadata or send-estimate errors even though the replication command itself is never executed. Templates that omit `%%size%%` no longer probe.
+  Recommended fix: skip progress-size probing entirely in dry-run mode, or render the progress command with an unknown-size placeholder unless the operator explicitly opts into live validation.
 
 - [Compatibility] Restore mode still does not validate the backup file header or version marker.
   Files: `src/zxfer_globals.sh` (`get_backup_properties()`, `write_backup_properties()`), `src/zxfer_transfer_properties.sh` (`collect_source_props()`), `tests/test_zxfer_globals.sh`, `tests/run_integration_zxfer.sh`.
-  Impact: current writes add a `#zxfer property backup file` header plus version metadata, but restore never checks for that marker or enforces any format version before consuming rows. A secure file with no header, or even one with an unrelated first line, is still accepted as long as it contains a source-matching row. That means future format changes cannot be rejected cleanly, and manually created or stale files can be mistaken for valid zxfer metadata without any explicit compatibility check.
+  Impact: current writes add a `#zxfer property backup file` header plus version metadata, but restore never checks for that marker or enforces any format version before consuming rows. A secure file with no header, or even one with an unrelated first line, is still accepted as long as it contains one exact source/destination row. That means future format changes cannot be rejected cleanly, and manually created or stale files can be mistaken for valid zxfer metadata without any explicit compatibility check.
   Recommended fix: require a valid zxfer backup-file header before restore, parse and validate the stored format or version fields, and fail closed on unknown or missing metadata formats.
 
 ## Low
 
-- [Compatibility] Remote-origin `-j` validation is still asymmetric for GNU `parallel`.
-  Files: `src/zxfer_get_zfs_list.sh` (`ensure_parallel_available_for_source_jobs()`, `build_source_snapshot_list_cmd()`), `tests/test_zxfer_get_zfs_list.sh`, `tests/run_integration_zxfer.sh`.
-  Impact: the remote-origin `-O ... -j ...` snapshot-listing pipeline executes GNU `parallel` only on the origin host, but zxfer still fails early if the local host lacks GNU `parallel`. At the same time, the remote probe only resolves a binary named `parallel` and never confirms that it is actually GNU `parallel`, unlike the local validation path. That means some valid remote-origin runs are rejected unnecessarily, while some invalid remote-origin setups can pass dependency checks and fail later with a non-GNU implementation.
-  Recommended fix: validate local GNU `parallel` only when the generated pipeline actually uses it, and apply the same GNU-versus-non-GNU version check to the resolved remote origin binary.
+- [Compatibility] Remote adaptive discovery still trusts the resolved origin-host `parallel` binary without confirming it is GNU `parallel`.
+  Files: `src/zxfer_get_zfs_list.sh` (`ensure_parallel_available_for_source_jobs()`, `build_source_snapshot_list_cmd()`), `src/zxfer_globals.sh` (`resolve_remote_required_tool()`), `tests/test_zxfer_get_zfs_list.sh`, `tests/run_integration_zxfer.sh`.
+  Impact: adaptive `-j` source discovery now defers GNU `parallel` validation until it actually selects the per-dataset branch, and remote-origin runs no longer require a local `parallel` binary when only the remote branch will execute it. However, once that remote branch is selected, zxfer still trusts the resolved remote `parallel` path by name only. A non-GNU `parallel` implementation on the origin host can therefore pass startup validation and then fail later with different argv or output behavior.
+  Recommended fix: when the remote per-dataset discovery path is selected, run a one-time remote `--version` check against the resolved origin-host helper and require a GNU `parallel` signature before building the command pipeline.
 
 - [Compatibility] SSH control-socket setup and teardown still misuse wrapper-style host specs.
   Files: `src/zxfer_globals.sh` (`setup_ssh_control_socket()`, `close_origin_ssh_control_socket()`, `close_target_ssh_control_socket()`, `prepare_remote_host_connections()`), `README.md`, `man/zxfer.8`, `man/zxfer.1m`, `tests/test_zxfer_globals.sh`.
@@ -173,11 +108,6 @@ describe a concrete failure mode or exploit path.
   Files: `src/zxfer_globals.sh` (`refresh_compression_commands()`, `read_command_line_switches()`), `CHANGELOG.txt`, `tests/test_zxfer_common.sh`, `tests/test_zxfer_globals.sh`, `tests/run_integration_zxfer.sh`.
   Impact: current releases only honor `-Z`, yet the empty-command usage error and historical changelog entries still imply that `ZXFER_COMPRESSION` can supply the compression pipeline. Wrappers or operators that try to configure compression through the advertised environment variable silently fall back to the default `zstd -3` / `zstd -d` behavior.
   Recommended fix: either implement a real `ZXFER_COMPRESSION` configuration path, with matching decompression handling and docs, or remove the variable name from current diagnostics, tests, and changelog text.
-
-- [Documentation] Backup-metadata manpages still describe the old mountpoint-based path and filename conventions.
-  Files: `man/zxfer.8`, `man/zxfer.1m`, `src/zxfer_globals.sh` (`get_backup_storage_dir()`, `write_backup_properties()`, `get_backup_properties()`), `tests/test_zxfer_globals.sh`.
-  Impact: the current manpages still say restore searches `ZXFER_BACKUP_DIR/mountpoint/.zxfer_backup_info.<tail>` and that `-k` writes `.zxfer_backup_info.<pool_name>` under `ZXFER_BACKUP_DIR/mountpoint/`. Current code instead writes `.zxfer_backup_info.<tail>` under the hardened `get_backup_storage_dir()` layout, which sanitizes mountpoints and uses special `root`, `legacy`, `none`, and `detached` directory forms.
-  Recommended fix: update the manpages to describe the actual hardened backup layout and naming rules.
 
 - [Observability] Backup file headers still record ambiguous source/destination metadata.
   Files: `src/zxfer_globals.sh` (`write_backup_properties()`), `tests/run_integration_zxfer.sh`.

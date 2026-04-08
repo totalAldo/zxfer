@@ -162,6 +162,9 @@ render_bash_xtrace_report() {
 	l_summary_file=$3
 	l_missing_file=$4
 
+	: >"$l_summary_file"
+	: >"$l_missing_file"
+
 	awk -v target_list_file="$l_target_list_file" \
 		-v merged_trace_file="$l_trace_file" \
 		-v summary_file="$l_summary_file" \
@@ -232,6 +235,39 @@ function has_unbalanced_double_quote(line,    i, ch, escaped, quote_count) {
 	}
 	return (quote_count % 2) == 1
 }
+function has_unbalanced_single_quote(line,    i, ch, quote_count) {
+	quote_count = 0
+	for (i = 1; i <= length(line); i++) {
+		ch = substr(line, i, 1)
+		if (ch == "'\''") {
+			quote_count++
+		}
+	}
+	return (quote_count % 2) == 1
+}
+function starts_multiline_single_quote(line, t) {
+	t = trim(line)
+	return (has_unbalanced_single_quote(line) && t ~ /'\''$/)
+}
+function count_trailing_backslashes(line,    i, ch, count) {
+	count = 0
+	for (i = length(line); i >= 1; i--) {
+		ch = substr(line, i, 1)
+		if (ch == " " || ch == "\t")
+			continue
+		if (ch != "\\")
+			break
+		count++
+	}
+	return count
+}
+function ends_with_line_continuation(line, t, trailing_backslashes) {
+	t = trim(line)
+	if (t == "")
+		return 0
+	trailing_backslashes = count_trailing_backslashes(line)
+	return (trailing_backslashes % 2) == 1
+}
 function heredoc_delimiter(line,    match_count, start, length_part, delimiter) {
 	match_count = match(line, /<<-?[[:space:]]*[A-Za-z_][A-Za-z0-9_]*/)
 	if (match_count == 0) {
@@ -253,6 +289,18 @@ function is_case_pattern_line(line, t) {
 	}
 	return (t ~ /^.+\)[[:space:]]*(;;)?$/)
 }
+function starts_multiline_command_substitution(line, t) {
+	t = trim(line)
+	return (t ~ /\$\([[:space:]]*$/)
+}
+function opens_command_substitution_subshell(line, t) {
+	t = trim(line)
+	return (t == "(")
+}
+function closes_command_substitution_scope(line, t) {
+	t = trim(line)
+	return (t ~ /^\)/)
+}
 function is_coverable_line(line, t, l_heredoc_delimiter) {
 	t = trim(line)
 	if (coverage_in_heredoc == 1) {
@@ -262,9 +310,42 @@ function is_coverable_line(line, t, l_heredoc_delimiter) {
 		}
 		return 0
 	}
+	if (coverage_in_command_substitution == 1) {
+		if (starts_multiline_command_substitution(line) || opens_command_substitution_subshell(line)) {
+			coverage_command_substitution_depth++
+		}
+		if (closes_command_substitution_scope(line)) {
+			coverage_command_substitution_depth--
+			if (coverage_command_substitution_depth <= 0) {
+				coverage_in_command_substitution = 0
+				coverage_command_substitution_depth = 0
+			}
+		}
+		return 0
+	}
 	if (coverage_in_multiline_double_quote == 1) {
 		if (has_unbalanced_double_quote(line)) {
 			coverage_in_multiline_double_quote = 0
+		}
+		return 0
+	}
+	if (coverage_in_multiline_single_quote == 1) {
+		if (has_unbalanced_single_quote(line)) {
+			coverage_in_multiline_single_quote = 0
+		}
+		return 0
+	}
+	if (coverage_in_backslash_continuation == 1) {
+		if (starts_multiline_command_substitution(line)) {
+			coverage_in_command_substitution = 1
+			coverage_command_substitution_depth = 1
+		} else if (has_unbalanced_double_quote(line)) {
+			coverage_in_multiline_double_quote = 1
+		} else if (starts_multiline_single_quote(line)) {
+			coverage_in_multiline_single_quote = 1
+		}
+		if (!ends_with_line_continuation(line)) {
+			coverage_in_backslash_continuation = 0
 		}
 		return 0
 	}
@@ -284,6 +365,11 @@ function is_coverable_line(line, t, l_heredoc_delimiter) {
 		}
 		return 0
 	}
+	if (starts_multiline_command_substitution(line)) {
+		coverage_in_command_substitution = 1
+		coverage_command_substitution_depth = 1
+		return 0
+	}
 	if (is_case_pattern_line(line)) return 0
 	l_heredoc_delimiter = heredoc_delimiter(line)
 	if (l_heredoc_delimiter != "" && t ~ /^(done|[{}])[[:space:]].*<<-?[[:space:]]*[A-Za-z_][A-Za-z0-9_]*$/) {
@@ -294,6 +380,13 @@ function is_coverable_line(line, t, l_heredoc_delimiter) {
 	if (has_unbalanced_double_quote(line)) {
 		coverage_in_multiline_double_quote = 1
 		return 0
+	}
+	if (starts_multiline_single_quote(line)) {
+		coverage_in_multiline_single_quote = 1
+		return 0
+	}
+	if (ends_with_line_continuation(line)) {
+		coverage_in_backslash_continuation = 1
 	}
 	return 1
 }
@@ -374,7 +467,7 @@ BEGIN {
 	total_hit = 0
 	total_miss = 0
 }
-NF >= 5 {
+NF >= 5 && $5 != "TOTAL" {
 	print $0
 	total_coverable += $2
 	total_hit += $3

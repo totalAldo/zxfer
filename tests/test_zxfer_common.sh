@@ -16,20 +16,7 @@ esac
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-# shellcheck source=src/zxfer_globals.sh
-. "$ZXFER_ROOT/src/zxfer_globals.sh"
-
-# shellcheck source=src/zxfer_inspect_delete_snap.sh
-. "$ZXFER_ROOT/src/zxfer_inspect_delete_snap.sh"
-
-# shellcheck source=src/zxfer_transfer_properties.sh
-. "$ZXFER_ROOT/src/zxfer_transfer_properties.sh"
-
-# shellcheck source=src/zxfer_get_zfs_list.sh
-. "$ZXFER_ROOT/src/zxfer_get_zfs_list.sh"
-
-# shellcheck source=src/zxfer_zfs_send_receive.sh
-. "$ZXFER_ROOT/src/zxfer_zfs_send_receive.sh"
+zxfer_source_runtime_modules_through "zxfer_inspect_delete_snap.sh"
 
 create_fake_ssh_bin() {
 	# Re-create the fake ssh helper after each cleanup so setUp() can freely
@@ -139,6 +126,46 @@ EOF
 	chmod +x "$l_path"
 }
 
+fake_remote_capability_response() {
+	cat <<'EOF'
+ZXFER_REMOTE_CAPS_V1
+os	RemoteOS
+tool	zfs	0	/remote/bin/zfs
+tool	parallel	0	/opt/bin/parallel
+tool	cat	0	/remote/bin/cat
+EOF
+}
+
+fake_remote_capability_response_missing_zfs() {
+	cat <<'EOF'
+ZXFER_REMOTE_CAPS_V1
+os	RemoteOS
+tool	zfs	1	-
+tool	parallel	0	/opt/bin/parallel
+tool	cat	0	/remote/bin/cat
+EOF
+}
+
+fake_remote_capability_response_missing_parallel() {
+	cat <<'EOF'
+ZXFER_REMOTE_CAPS_V1
+os	RemoteOS
+tool	zfs	0	/remote/bin/zfs
+tool	parallel	1	-
+tool	cat	0	/remote/bin/cat
+EOF
+}
+
+fake_remote_capability_response_relative_zfs() {
+	cat <<'EOF'
+ZXFER_REMOTE_CAPS_V1
+os	RemoteOS
+tool	zfs	0	zfs
+tool	parallel	0	/opt/bin/parallel
+tool	cat	0	/remote/bin/cat
+EOF
+}
+
 create_fake_parallel_exec_bin() {
 	l_path=$1
 	cat >"$l_path" <<'EOF'
@@ -196,6 +223,7 @@ xargs() {
 
 oneTimeSetUp() {
 	TEST_TMPDIR=$(mktemp -d -t zxfer_shunit.XXXXXX)
+	TEST_TMPDIR_PHYSICAL=$(cd -P "$TEST_TMPDIR" && pwd)
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
 	FAKE_PARALLEL_BIN="$TEST_TMPDIR/fake_parallel"
 	create_fake_ssh_bin
@@ -226,7 +254,7 @@ setUp() {
 	g_option_T_target_host_safe=""
 	g_option_e_restore_property_mode=0
 	g_backup_file_contents=""
-	g_backup_storage_root="$TEST_TMPDIR/backup_store"
+	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/backup_store"
 	TMPDIR="$TEST_TMPDIR"
 	if [ -n "${TEST_TMPDIR:-}" ]; then
 		relax_test_tmpdir_permissions
@@ -237,23 +265,41 @@ setUp() {
 	unset FAKE_SSH_SUPPRESS_STDOUT
 	unset FAKE_SSH_EXIT_STATUS
 	unset ZXFER_ERROR_LOG
+	g_origin_remote_capabilities_host=""
+	g_origin_remote_capabilities_response=""
+	g_target_remote_capabilities_host=""
+	g_target_remote_capabilities_response=""
 	create_fake_ssh_bin
 	create_fake_parallel_bin "$FAKE_PARALLEL_BIN"
 	g_cmd_parallel="$FAKE_PARALLEL_BIN"
 	g_cmd_zfs="/sbin/zfs"
 	g_cmd_cat=""
+	g_cmd_compress="zstd -3"
+	g_cmd_decompress="zstd -d"
+	g_cmd_compress_safe="'zstd' '-3'"
+	g_cmd_decompress_safe="'zstd' '-d'"
 	g_origin_cmd_zfs=""
 	g_target_cmd_zfs=""
 	g_origin_parallel_cmd=""
+	g_origin_cmd_compress_safe=""
+	g_origin_cmd_decompress_safe=""
+	g_target_cmd_compress_safe=""
+	g_target_cmd_decompress_safe=""
 	g_LZFS=""
 	g_RZFS=""
+	g_option_z_compress=0
 	g_ssh_origin_control_socket=""
+	g_ssh_origin_control_socket_lease_file=""
+	zxfer_reset_destination_existence_cache
 	g_ssh_origin_control_socket_dir=""
 	g_ssh_target_control_socket=""
+	g_ssh_target_control_socket_lease_file=""
 	g_ssh_target_control_socket_dir=""
 	g_zxfer_original_invocation=""
 	g_option_Y_yield_iterations=1
 	g_zxfer_cleanup_pids=""
+	g_zxfer_effective_tmpdir=""
+	g_zxfer_effective_tmpdir_requested=""
 	zxfer_reset_failure_context "unit"
 }
 
@@ -281,7 +327,7 @@ read_backup_file_with_mocked_security() {
 }
 
 fake_property_set_runner() {
-	FAKE_SET_CALLS="${FAKE_SET_CALLS}${1}=${2}@${3};"
+	FAKE_SET_CALLS="${FAKE_SET_CALLS}${1}@${2};"
 }
 
 fake_property_inherit_runner() {
@@ -290,7 +336,7 @@ fake_property_inherit_runner() {
 
 property_set_logger() {
 	[ -n "${PROPERTY_LOG:-}" ] || return 1
-	printf 'set %s=%s %s\n' "$1" "$2" "$3" >>"$PROPERTY_LOG"
+	printf 'set %s %s\n' "$1" "$2" >>"$PROPERTY_LOG"
 }
 
 property_inherit_logger() {
@@ -413,6 +459,14 @@ test_quote_token_stream_preserves_each_token() {
 	expected="'alpha' 'beta value' 'gamma'"
 
 	assertEquals "Token stream quoting should ignore blank lines and wrap each entry." "$expected" "$result"
+}
+
+test_quote_token_stream_returns_empty_for_blank_input() {
+	outfile="$TEST_TMPDIR/quote_token_stream_empty.out"
+
+	quote_token_stream "" >"$outfile"
+
+	assertEquals "Blank token streams should remain blank after quoting." "" "$(cat "$outfile")"
 }
 
 test_quote_host_spec_tokens_returns_empty_for_blank_input() {
@@ -629,20 +683,20 @@ test_zxfer_profile_record_zfs_call_tracks_remaining_verbs_and_buckets() {
 		1 "$g_zxfer_profile_bucket_source_inspection"
 }
 
-test_sanitize_backup_component_replaces_invalid_characters() {
+test_sanitize_backup_component_encodes_components_collision_free() {
 	result=$(sanitize_backup_component "../unsafe path!")
-	assertEquals ".._unsafe_path_" "$result"
+	assertEquals "h2E2E2F756E73616665207061746821" "$result"
 }
 
-test_sanitize_dataset_relpath_normalizes_nested_segments() {
+test_sanitize_dataset_relpath_encodes_nested_segments() {
 	result=$(sanitize_dataset_relpath "/tank/src//child-")
-	assertEquals "tank/src/child-" "$result"
+	assertEquals "h74616E6B/h737263/h6368696C642D" "$result"
 }
 
 test_get_backup_storage_dir_derives_detached_layout() {
 	g_backup_storage_root="$TEST_TMPDIR/backup_root"
 	result=$(get_backup_storage_dir "-" "tank/src/child")
-	expected="$g_backup_storage_root/detached/tank/src/child"
+	expected="$g_backup_storage_root/detached/h74616E6B/h737263/h6368696C64"
 
 	assertEquals "Detached mountpoints should include sanitized dataset path." "$expected" "$result"
 }
@@ -702,7 +756,7 @@ test_require_secure_backup_file_accepts_secure_metadata() {
 }
 
 test_ensure_local_backup_dir_creates_secure_directory() {
-	l_dir="$TEST_TMPDIR/local_backup"
+	l_dir=$(cd -P "$TEST_TMPDIR" && pwd)/local_backup
 	rm -rf "$l_dir"
 	ensure_local_backup_dir "$l_dir"
 	assertTrue "Secure directory should be created." "[ -d '$l_dir' ]"
@@ -988,7 +1042,7 @@ test_apply_property_changes_skips_inherit_for_initial_source() {
 
 	apply_property_changes "pool/src" 1 "compression=lz4" "" "" fake_property_set_runner fake_property_inherit_runner
 
-	assertEquals "Initial source should call the set runner with initial diff list." "compression=lz4@pool/src;" "$FAKE_SET_CALLS"
+	assertEquals "Initial source should call the set runner once with the full initial diff list." "compression=lz4@pool/src;" "$FAKE_SET_CALLS"
 	assertEquals "Initial source should not inherit properties." "" "$FAKE_INHERIT_CALLS"
 }
 
@@ -998,7 +1052,7 @@ test_apply_property_changes_invokes_inherit_runner_for_children() {
 
 	apply_property_changes "pool/src" 0 "" "compression=lz4" "atime=off" fake_property_set_runner fake_property_inherit_runner
 
-	assertEquals "Child dataset should apply child set list." "compression=lz4@pool/src;" "$FAKE_SET_CALLS"
+	assertEquals "Child dataset should apply the full child set list in one runner call." "compression=lz4@pool/src;" "$FAKE_SET_CALLS"
 	assertEquals "Child dataset should inherit requested properties." "atime@pool/src;" "$FAKE_INHERIT_CALLS"
 }
 
@@ -1058,20 +1112,126 @@ test_get_temp_file_creates_unique_file() {
 
 test_get_temp_file_honors_tmpdir_variable() {
 	# Honor the TMPDIR override so tests or CLI invocations can direct
-	# scratch files to a specific filesystem.
+	# scratch files to a specific filesystem, but use the validated
+	# physical directory path rather than a logical symlinked alias.
 	custom_tmp="$TEST_TMPDIR/custom"
 	mkdir -p "$custom_tmp"
+	physical_custom_tmp=$(cd -P "$custom_tmp" && pwd)
 	TMPDIR="$custom_tmp"
 
 	file=$(get_temp_file)
 
 	case "$file" in
-	"$custom_tmp"/*) inside=0 ;;
+	"$physical_custom_tmp"/*) inside=0 ;;
 	*) inside=1 ;;
 	esac
 
-	assertEquals "Temp file should be created inside TMPDIR." 0 "$inside"
+	assertEquals "Temp file should be created inside the validated TMPDIR root." 0 "$inside"
 	assertTrue "Temp file should exist." "[ -f \"$file\" ]"
+
+	rm -f "$file"
+	TMPDIR="$TEST_TMPDIR"
+}
+
+test_get_temp_file_uses_physical_tmpdir_for_symlinked_tmpdir_paths() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	real_tmp="$physical_tmpdir/tmp_real"
+	link_tmp="$physical_tmpdir/tmp_link"
+	mkdir -p "$real_tmp"
+	ln -s "$real_tmp" "$link_tmp"
+	TMPDIR="$link_tmp"
+	g_zxfer_effective_tmpdir=""
+	g_zxfer_effective_tmpdir_requested=""
+
+	file=$(get_temp_file)
+
+	case "$file" in
+	"$real_tmp"/*) inside_real=0 ;;
+	*) inside_real=1 ;;
+	esac
+	case "$file" in
+	"$link_tmp"/*) inside_link=0 ;;
+	*) inside_link=1 ;;
+	esac
+
+	assertEquals "Temp files should use the physical TMPDIR target instead of the symlinked path." 0 "$inside_real"
+	assertEquals "Temp files should not be created through the symlinked TMPDIR path itself." 1 "$inside_link"
+	assertTrue "Temp file should exist under the physical TMPDIR path." "[ -f \"$file\" ]"
+
+	rm -f "$file"
+	TMPDIR="$TEST_TMPDIR"
+}
+
+test_get_temp_file_rejects_non_sticky_world_writable_tmpdir_and_falls_back_to_system_tmp() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	insecure_tmp="$physical_tmpdir/insecure_tmp"
+	mkdir -p "$insecure_tmp"
+	chmod 0777 "$insecure_tmp"
+	TMPDIR="$insecure_tmp"
+	g_zxfer_effective_tmpdir=""
+	g_zxfer_effective_tmpdir_requested=""
+
+	file=$(get_temp_file)
+	status=$?
+
+	assertEquals "Non-sticky world-writable TMPDIR values should not prevent temporary file creation." 0 "$status"
+	case "$file" in
+	"$insecure_tmp"/*) inside_insecure=0 ;;
+	*) inside_insecure=1 ;;
+	esac
+	assertEquals "Non-sticky world-writable TMPDIR values should be rejected." 1 "$inside_insecure"
+	assertTrue "Fallback temp file should exist." "[ -f \"$file\" ]"
+
+	rm -f "$file"
+	chmod 0700 "$insecure_tmp"
+	TMPDIR="$TEST_TMPDIR"
+}
+
+test_get_temp_file_allows_sticky_world_writable_tmpdir() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	sticky_tmp="$physical_tmpdir/sticky_tmp"
+	mkdir -p "$sticky_tmp"
+	chmod 1777 "$sticky_tmp"
+	TMPDIR="$sticky_tmp"
+	g_zxfer_effective_tmpdir=""
+	g_zxfer_effective_tmpdir_requested=""
+
+	file=$(get_temp_file)
+
+	case "$file" in
+	"$sticky_tmp"/*) inside_sticky=0 ;;
+	*) inside_sticky=1 ;;
+	esac
+
+	assertEquals "Sticky world-writable TMPDIR values should remain usable." 0 "$inside_sticky"
+	assertTrue "Sticky TMPDIR temp file should exist." "[ -f \"$file\" ]"
+
+	rm -f "$file"
+	chmod 0700 "$sticky_tmp"
+	TMPDIR="$TEST_TMPDIR"
+}
+
+test_get_temp_file_ignores_relative_tmpdir_and_falls_back_to_system_tmp() {
+	old_pwd=$(pwd)
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	mkdir -p "$physical_tmpdir/relative_tmp_root"
+	cd "$physical_tmpdir" || fail "Unable to cd into physical tempdir."
+	TMPDIR="relative_tmp_root"
+	g_zxfer_effective_tmpdir=""
+	g_zxfer_effective_tmpdir_requested=""
+
+	file=$(get_temp_file)
+	status=$?
+
+	cd "$old_pwd" || fail "Unable to restore working directory."
+
+	assertEquals "Relative TMPDIR values should not prevent temporary file creation." 0 "$status"
+	case "$file" in
+	"$physical_tmpdir"/relative_tmp_root/*) inside_relative=0 ;;
+	*) inside_relative=1 ;;
+	esac
+	assertEquals "Relative TMPDIR values should be ignored instead of being used directly." 1 "$inside_relative"
+	assertTrue "Fallback temp file should exist." "[ -f \"$file\" ]"
 
 	rm -f "$file"
 	TMPDIR="$TEST_TMPDIR"
@@ -1250,6 +1410,109 @@ test_exists_destination_reports_probe_failures() {
 		"$output" "Failed to determine whether destination dataset [pool/fs] exists: ssh: permission denied"
 }
 
+test_exists_destination_reports_probe_failures_without_stderr() {
+	set +e
+	output=$(
+		(
+			run_destination_zfs_cmd() {
+				return 1
+			}
+			exists_destination "pool/fs"
+		)
+	)
+	status=$?
+
+	assertEquals "Silent destination probe failures should still return non-zero." 1 "$status"
+	assertContains "Silent destination probe failures should still report the destination dataset." \
+		"$output" "Failed to determine whether destination dataset [pool/fs] exists."
+}
+
+test_exists_destination_uses_cached_exact_result_without_reprobing() {
+	output=$(
+		(
+			zxfer_set_destination_existence_cache_entry "pool/fs" 1
+			run_destination_zfs_cmd() {
+				printf '%s\n' "probe should not run" >&2
+				return 1
+			}
+			exists_destination "pool/fs"
+		)
+	)
+
+	assertEquals "Exact cached destination results should be returned without another zfs probe." \
+		"1" "$output"
+}
+
+test_exists_destination_infers_missing_descendants_from_seeded_tree() {
+	output=$(
+		(
+			zxfer_seed_destination_existence_cache_from_recursive_list "backup/dst" "backup/dst
+backup/dst/existing"
+			run_destination_zfs_cmd() {
+				printf '%s\n' "probe should not run" >&2
+				return 1
+			}
+			exists_destination "backup/dst/missing"
+		)
+	)
+
+	assertEquals "Datasets omitted from a seeded destination subtree should be treated as missing without another zfs probe." \
+		"0" "$output"
+}
+
+test_exists_destination_live_bypasses_cache_and_refreshes_exact_entry() {
+	output=$(
+		(
+			l_result_file="$TEST_TMPDIR/exists_destination_cache_refresh.out"
+			zxfer_mark_destination_root_missing_in_cache "backup/dst"
+			run_destination_zfs_cmd() {
+				return 0
+			}
+			exists_destination "backup/dst/child" live >"$l_result_file"
+			l_live_result=$(cat "$l_result_file")
+			printf 'live=%s\n' "$l_live_result"
+			run_destination_zfs_cmd() {
+				printf '%s\n' "probe should not run" >&2
+				return 1
+			}
+			exists_destination "backup/dst/child" >"$l_result_file"
+			l_cached_result=$(cat "$l_result_file")
+			printf 'cached=%s\n' "$l_cached_result"
+		)
+	)
+
+	assertContains "Live destination probes should bypass cached subtree-missing state." \
+		"$output" "live=1"
+	assertContains "Successful live probes should refresh the exact cache entry for later callers." \
+		"$output" "cached=1"
+}
+
+test_exists_destination_cached_hits_do_not_increment_probe_counter() {
+	output=$(
+		(
+			g_option_V_very_verbose=1
+			g_zxfer_profile_exists_destination_calls=0
+			zxfer_set_destination_existence_cache_entry "pool/fs" 1
+			run_destination_zfs_cmd() {
+				printf '%s\n' "probe should not run" >&2
+				return 1
+			}
+			exists_destination "pool/fs" >/dev/null
+			printf 'cached_calls=%s\n' "$g_zxfer_profile_exists_destination_calls"
+			run_destination_zfs_cmd() {
+				return 0
+			}
+			exists_destination "pool/other" live >/dev/null
+			printf 'live_calls=%s\n' "$g_zxfer_profile_exists_destination_calls"
+		)
+	)
+
+	assertContains "Cached destination answers should not count as live destination probes." \
+		"$output" "cached_calls=0"
+	assertContains "Live destination probes should still increment the destination-probe profile counter." \
+		"$output" "live_calls=1"
+}
+
 test_write_backup_properties_treats_backup_data_as_literal() {
 	# Property backups must never interpret dataset-controlled data as shell
 	# commands. Ensure values containing command substitutions are written
@@ -1276,12 +1539,12 @@ test_write_backup_properties_treats_backup_data_as_literal() {
 
 	write_backup_properties
 
-	l_tail=${initial_source##*/}
-	secure_dir=$(get_backup_storage_dir "$mount_dir" "$g_destination")
-	backup_file="$secure_dir/$g_backup_file_extension.$l_tail"
+	secure_dir=$(get_backup_storage_dir_for_dataset_tree "$initial_source")
+	backup_name=$(zxfer_get_backup_metadata_filename "$initial_source" "$g_destination")
+	backup_file="$secure_dir/$backup_name"
 
 	assertTrue "Backup property file should be written." "[ -f \"$backup_file\" ]"
-	assertFalse "Backup file must not be written into dataset mountpoints." "[ -f \"$mount_dir/$g_backup_file_extension.$l_tail\" ]"
+	assertFalse "Backup file must not be written into dataset mountpoints." "[ -f \"$mount_dir/$backup_name\" ]"
 	assertFalse "Command substitutions within properties must not run." "[ -f \"$sentinel_file\" ]"
 
 	backup_contents=$(cat "$backup_file")
@@ -1332,7 +1595,7 @@ test_read_local_backup_file_refuses_non_root_owned_metadata() {
 	# not root-owned to prevent tampering from less-privileged users. Stub
 	# the ownership/mode helpers so the test does not rely on the invoking
 	# user's UID or default umask.
-	backup_file="$TEST_TMPDIR/insecure_backup"
+	backup_file="$TEST_TMPDIR_PHYSICAL/insecure_backup"
 	printf '%s\n' "tampered" >"$backup_file"
 	chmod 600 "$backup_file"
 
@@ -1372,13 +1635,36 @@ test_read_local_backup_file_refuses_non_root_owned_metadata() {
 test_read_local_backup_file_returns_contents_when_secure() {
 	# When metadata ownership and permissions pass validation, the helper
 	# should return the literal on-disk contents.
-	backup_file="$TEST_TMPDIR/secure_backup"
+	backup_file="$TEST_TMPDIR_PHYSICAL/secure_backup"
 	printf '%s\n' "trusted" >"$backup_file"
 
 	result=$(read_backup_file_with_mocked_security "$backup_file")
 
 	assertEquals "trusted" "$result"
 	rm -f "$backup_file"
+}
+
+test_read_local_backup_file_rejects_nested_symlink_components() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	real_dir="$physical_tmpdir/read_local_backup_real"
+	link_dir="$physical_tmpdir/read_local_backup_link"
+	backup_file="$link_dir/backup.meta"
+	mkdir -p "$real_dir"
+	printf '%s\n' "trusted" >"$real_dir/backup.meta"
+	chmod 600 "$real_dir/backup.meta"
+	ln -s "$real_dir" "$link_dir"
+
+	set +e
+	output=$(
+		(
+			read_local_backup_file "$backup_file"
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Backup metadata reads should reject symlinked parent components." 1 "$status"
+	assertContains "Nested symlink reads should identify the offending path component." \
+		"$output" "Refusing to use backup metadata $backup_file because path component $link_dir is a symlink."
 }
 
 test_build_source_snapshot_list_cmd_serial_returns_direct_list() {
@@ -1401,12 +1687,27 @@ test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
 	g_option_O_origin_host=""
 	g_option_z_compress=0
 
-	result=$(build_source_snapshot_list_cmd)
+	result=$(
+		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 2
+			}
+			zxfer_get_source_snapshot_discovery_dataset_list() {
+				printf '%s\n' "tank/home"
+				printf '%s\n' "tank/home/usr"
+			}
+			build_source_snapshot_list_cmd
+		)
+	)
 
-	assertContains "Parallel listing should include dataset enumeration." "$result" "'/sbin/zfs' 'list' '-Hr' '-o' 'name' 'tank/home' |"
+	assertContains "Adaptive listing should inline the prefetched dataset list for moderate trees." \
+		"$result" "'printf'"
+	assertContains "Adaptive listing should preserve the prefetched dataset order inside the inline list." \
+		"$result" "'tank/home' 'tank/home/usr'"
 	assertContains "GNU parallel invocation should include the job count." "$result" "'$g_cmd_parallel' -j 4 --line-buffer"
 	assertContains "Local parallel snapshot listing should embed the per-dataset runner command." "$result" "'snapshot'"
 	assertContains "Local parallel snapshot listing should preserve the dataset placeholder." "$result" "{}"
+	assertNotContains "Local parallel snapshot listing should no longer defer the branch decision into a shell-side dataset counter." "$result" "l_dataset_count"
 	assertNotContains "Local parallel snapshot listing should not reintroduce a sh -c wrapper." "$result" "sh -c"
 }
 
@@ -1414,6 +1715,8 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 	g_LZFS="/sbin/zfs"
 	g_cmd_zfs="/usr/sbin/zfs"
 	g_origin_cmd_zfs="/opt/openzfs/bin/zfs"
+	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
+	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-T0' '-9'"
 	initial_source="tank/src"
 	g_option_j_jobs=8
 	g_cmd_parallel="$FAKE_PARALLEL_BIN"
@@ -1423,20 +1726,38 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 	g_option_z_compress=1
 	g_cmd_ssh="/usr/bin/ssh"
 
-	result=$(build_source_snapshot_list_cmd)
+	result=$(
+		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 2
+			}
+			zxfer_get_source_snapshot_discovery_dataset_list() {
+				printf '%s\n' "tank/src"
+				printf '%s\n' "tank/src/child"
+			}
+			build_source_snapshot_list_cmd
+		)
+	)
 
 	assertContains "Remote listing should start with ssh." "$result" "$g_cmd_ssh"
 	assertContains "The ssh target host should remain a standalone local argument." "$result" "'backup@example.com'"
 	assertContains "Wrapper tokens should remain inside the remote command string." "$result" "'pfexec'"
 	assertContains "Wrapper flags should remain inside the remote command string." "$result" "'-p'"
 	assertContains "Wrapper flag values should remain inside the remote command string." "$result" "'2222'"
+	assertContains "Adaptive remote listing should inline the prefetched dataset list for moderate trees." \
+		"$result" "'printf'"
+	assertContains "Adaptive remote listing should include the first prefetched dataset in the inline list." \
+		"$result" "tank/src"
+	assertContains "Adaptive remote listing should include the second prefetched dataset in the inline list." \
+		"$result" "tank/src/child"
 	assertContains "Remote GNU parallel path should be used." "$result" "/opt/bin/parallel"
 	assertContains "Remote GNU parallel invocation should preserve the job count." "$result" "-j 8 --line-buffer"
 	assertContains "Remote listing should use the origin host zfs path." "$result" "$g_origin_cmd_zfs"
-	assertContains "Compression should be applied when requested (zstd -9 present)." "$result" "zstd -9"
-	assertContains "Compression should be applied when requested (zstd -d present)." "$result" "zstd -d"
+	assertNotContains "Adaptive remote metadata discovery should skip the resolved remote compressor path." "$result" "/remote/bin/zstd"
+	assertNotContains "Adaptive remote metadata discovery should not require a local decompression stage." "$result" "/local/bin/zstd"
 	assertContains "Remote command should use GNU parallel's direct dataset placeholder runner." \
 		"$result" "{}"
+	assertNotContains "Adaptive remote listing should no longer defer the branch decision into a shell-side dataset counter." "$result" "l_dataset_count"
 }
 
 test_build_source_snapshot_list_cmd_remote_helper_path_does_not_execute_locally() {
@@ -1479,7 +1800,7 @@ test_resolve_remote_required_tool_uses_shell_probe_for_wrapped_hosts() {
 	remote_log="$TEST_TMPDIR/resolve_remote_required_tool.log"
 	: >"$remote_log"
 	FAKE_SSH_LOG="$remote_log"
-	FAKE_SSH_STDOUT_OVERRIDE="/remote/bin/zfs"
+	FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response)
 	export FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE
 
 	result=$(resolve_remote_required_tool "backup@example.com pfexec -p 2222" zfs)
@@ -1496,10 +1817,12 @@ test_resolve_remote_required_tool_uses_shell_probe_for_wrapped_hosts() {
 	assertContains "Privilege wrapper should be preserved inside the remote command string." "$log_line2" "'pfexec'"
 	assertContains "Wrapper flags should be preserved inside the remote command string." "$log_line2" "'-p'"
 	assertContains "Wrapper flag values should be preserved inside the remote command string." "$log_line2" "'2222'"
-	assertContains "Remote lookup should execute via sh -c for wrapped hosts." "$log_line2" "'sh' '-c'"
-	assertContains "Remote lookup should pin the secure PATH inside the shell probe." "$log_line2" "/opt/openzfs/bin:/usr/sbin"
-	assertContains "Remote lookup should query the requested tool directly." "$log_line2" "command -v"
-	assertContains "Remote lookup should include the requested tool name in the remote shell command." "$log_line2" "zfs"
+	assertContains "Remote capability discovery should execute via sh -c for wrapped hosts." "$log_line2" "'sh' '-c'"
+	assertContains "Remote capability discovery should pin the secure PATH inside the shell probe." "$log_line2" "/opt/openzfs/bin:/usr/sbin"
+	assertContains "Remote capability discovery should query uname in the single handshake." "$log_line2" "uname"
+	assertContains "Remote capability discovery should query zfs in the single handshake." "$log_line2" "zfs"
+	assertContains "Remote capability discovery should query parallel in the single handshake." "$log_line2" "parallel"
+	assertContains "Remote capability discovery should query cat in the single handshake." "$log_line2" "cat"
 }
 
 test_resolve_remote_required_tool_handles_realistic_ssh_command_joining() {
@@ -1524,11 +1847,13 @@ EOF
 
 	unset FAKE_SSH_LOG
 
-	assertEquals "Remote lookup should survive ssh joining the remote command into a shell string." "$remote_bin_dir/zfs" "$result"
+	assertEquals "Remote lookup should survive ssh joining the remote capability handshake into a shell string." "$remote_bin_dir/zfs" "$result"
 	assertContains "The realistic ssh emulation should receive the expected remote shell command." \
 		"$(cat "$realistic_ssh_log")" "command -v"
 	assertContains "The realistic ssh emulation should include the requested tool name." \
 		"$(cat "$realistic_ssh_log")" "zfs"
+	assertContains "The realistic ssh emulation should also include the uname probe from the combined handshake." \
+		"$(cat "$realistic_ssh_log")" "uname"
 }
 
 test_resolve_remote_required_tool_reports_remote_probe_failures() {
@@ -1551,14 +1876,14 @@ test_resolve_remote_required_tool_reports_remote_probe_failures() {
 test_resolve_remote_required_tool_reports_missing_remote_dependency() {
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_zxfer_dependency_path="/opt/openzfs/bin:/usr/sbin"
-	FAKE_SSH_SUPPRESS_STDOUT=1
-	export FAKE_SSH_SUPPRESS_STDOUT
+	FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response_missing_zfs)
+	export FAKE_SSH_STDOUT_OVERRIDE
 
 	set +e
 	result=$(resolve_remote_required_tool "backup@example.com" zfs "zfs")
 	status=$?
 
-	unset FAKE_SSH_SUPPRESS_STDOUT
+	unset FAKE_SSH_STDOUT_OVERRIDE
 
 	assertEquals "Remote lookup should fail when the secure PATH probe returns no result." 1 "$status"
 	assertEquals "Missing remote tools should mention the secure PATH guidance." \
@@ -1566,28 +1891,27 @@ test_resolve_remote_required_tool_reports_missing_remote_dependency() {
 		"$result"
 }
 
-test_resolve_remote_required_tool_treats_exit_1_without_output_as_missing_dependency() {
+test_resolve_remote_required_tool_maps_missing_tool_from_capability_handshake_to_missing_dependency() {
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_zxfer_dependency_path="/opt/openzfs/bin:/usr/sbin"
-	FAKE_SSH_SUPPRESS_STDOUT=1
-	FAKE_SSH_EXIT_STATUS=1
-	export FAKE_SSH_SUPPRESS_STDOUT FAKE_SSH_EXIT_STATUS
+	FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response_missing_parallel)
+	export FAKE_SSH_STDOUT_OVERRIDE
 
 	set +e
 	result=$(resolve_remote_required_tool "backup@example.com" parallel "GNU parallel")
 	status=$?
 
-	unset FAKE_SSH_SUPPRESS_STDOUT FAKE_SSH_EXIT_STATUS
+	unset FAKE_SSH_STDOUT_OVERRIDE
 
-	assertEquals "Remote lookup should treat exit status 1 without output as a missing dependency." 1 "$status"
-	assertEquals "Exit-1 command -v probes should map to the user-facing missing dependency guidance." \
+	assertEquals "Remote lookup should treat handshake-reported missing tools as missing dependencies." 1 "$status"
+	assertEquals "Handshake-reported missing tools should map to the user-facing missing dependency guidance." \
 		"Required dependency \"GNU parallel\" not found on host backup@example.com in secure PATH (/opt/openzfs/bin:/usr/sbin). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary." \
 		"$result"
 }
 
 test_resolve_remote_required_tool_rejects_relative_remote_path() {
 	g_cmd_ssh="$FAKE_SSH_BIN"
-	FAKE_SSH_STDOUT_OVERRIDE="zfs"
+	FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response_relative_zfs)
 	export FAKE_SSH_STDOUT_OVERRIDE
 
 	set +e
@@ -1600,6 +1924,57 @@ test_resolve_remote_required_tool_rejects_relative_remote_path() {
 	assertEquals "Relative remote tool paths should be rejected explicitly." \
 		"Required dependency \"zfs\" on host backup@example.com resolved to \"zfs\", but zxfer requires an absolute path." \
 		"$result"
+}
+
+test_resolve_remote_required_tool_uses_fresh_capability_cache_file_before_ssh() {
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_zxfer_dependency_path="/opt/openzfs/bin:/usr/sbin"
+	if ! cache_path=$(zxfer_remote_capability_cache_path "backup@example.com"); then
+		fail "Expected a cache path for remote capability caching."
+	fi
+	{
+		printf '%s\n' "$(date '+%s')"
+		fake_remote_capability_response
+	} >"$cache_path"
+	chmod 600 "$cache_path"
+	FAKE_SSH_EXIT_STATUS=255
+	export FAKE_SSH_EXIT_STATUS
+
+	result=$(resolve_remote_required_tool "backup@example.com" parallel "GNU parallel")
+
+	unset FAKE_SSH_EXIT_STATUS
+
+	assertEquals "Fresh remote capability cache files should satisfy later remote helper lookups without ssh." \
+		"/opt/bin/parallel" "$result"
+}
+
+test_resolve_remote_required_tool_supports_remote_cat_from_handshake() {
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response)
+	export FAKE_SSH_STDOUT_OVERRIDE
+
+	result=$(resolve_remote_required_tool "backup@example.com" cat "cat")
+
+	unset FAKE_SSH_STDOUT_OVERRIDE
+
+	assertEquals "Remote restore-mode cat lookups should reuse the combined capability handshake." \
+		"/remote/bin/cat" "$result"
+}
+
+test_resolve_remote_required_tool_rejects_unknown_tools_after_handshake() {
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response)
+	export FAKE_SSH_STDOUT_OVERRIDE
+
+	set +e
+	result=$(resolve_remote_required_tool "backup@example.com" not-a-real-tool "not-a-real-tool")
+	status=$?
+
+	unset FAKE_SSH_STDOUT_OVERRIDE
+
+	assertEquals "Unknown remote helper lookups should fail cleanly after the handshake." 1 "$status"
+	assertEquals "Unknown remote helper lookups should surface the generic query failure." \
+		"Failed to query dependency \"not-a-real-tool\" on host backup@example.com." "$result"
 }
 
 test_init_variables_resolves_remote_tool_paths_and_restore_cat() {
@@ -1622,6 +1997,7 @@ test_init_variables_resolves_remote_tool_paths_and_restore_cat() {
 				return 1
 			fi
 		}
+		g_option_z_compress=0
 		g_cmd_ssh="/usr/bin/ssh"
 		g_cmd_zfs="/sbin/zfs"
 		g_option_O_origin_host="origin.example pfexec"
@@ -1668,6 +2044,7 @@ test_init_variables_passes_explicit_profile_sides_when_origin_and_target_match()
 				;;
 			esac
 		}
+		g_option_z_compress=0
 		g_cmd_ssh="/usr/bin/ssh"
 		g_cmd_zfs="/sbin/zfs"
 		g_option_O_origin_host="shared.example"
@@ -1736,7 +2113,7 @@ test_ensure_parallel_remote_fetches_remote_parallel_path() {
 	remote_log="$TEST_TMPDIR/remote_parallel_probe.log"
 	: >"$remote_log"
 	FAKE_SSH_LOG="$remote_log"
-	FAKE_SSH_STDOUT_OVERRIDE="/opt/bin/parallel"
+	FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response)
 	FAKE_SSH_SUPPRESS_STDOUT=1
 	export FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE FAKE_SSH_SUPPRESS_STDOUT
 
@@ -1755,10 +2132,10 @@ test_ensure_parallel_remote_fetches_remote_parallel_path() {
 	assertEquals "ssh should reuse the established control socket." "-S" "$log_line1"
 	assertEquals "SSH must pass the control socket path as the next argument." "$g_ssh_origin_control_socket" "$log_line2"
 	assertEquals "ssh should direct probes at the origin host." "$g_option_O_origin_host" "$log_line3"
-	assertContains "Remote probe should execute via sh -c so wrapper host specs stay valid." "$log_line4" "'sh' '-c'"
-	assertContains "Remote probe should pin the secure PATH inside the shell probe." "$log_line4" "$g_zxfer_dependency_path"
-	assertContains "Remote probe should look up the requested tool directly." "$log_line4" "command -v"
-	assertContains "Remote probe should include the requested tool name." "$log_line4" "parallel"
+	assertContains "Remote capability discovery should execute via sh -c so wrapper host specs stay valid." "$log_line4" "'sh' '-c'"
+	assertContains "Remote capability discovery should pin the secure PATH inside the shell probe." "$log_line4" "$g_zxfer_dependency_path"
+	assertContains "Remote capability discovery should include the requested parallel probe." "$log_line4" "parallel"
+	assertContains "Remote capability discovery should include uname in the combined probe." "$log_line4" "uname"
 }
 
 test_ensure_parallel_available_for_source_jobs_reports_remote_probe_failures() {
@@ -1843,6 +2220,23 @@ test_read_remote_backup_file_uses_resolved_remote_cat_path() {
 	assertContains "Remote backup reads should preserve the requested remote metadata path." "$log_line2" "/tmp/backup.meta"
 }
 
+test_read_remote_backup_file_accepts_ssh_user_owned_metadata() {
+	realistic_ssh_bin="$TEST_TMPDIR/read_remote_backup_exec_ssh"
+	remote_file="$TEST_TMPDIR_PHYSICAL/remote_backup.meta"
+	printf '%s\n' "payload" >"$remote_file"
+	chmod 600 "$remote_file"
+	create_fake_ssh_join_exec_bin "$realistic_ssh_bin"
+	g_cmd_ssh="$realistic_ssh_bin"
+	g_cmd_cat="/bin/cat"
+
+	result=$(read_remote_backup_file "backup@example.com" "$remote_file")
+	status=$?
+
+	assertEquals "Remote backup reads should accept secure metadata owned by the remote ssh user." 0 "$status"
+	assertEquals "Remote backup reads should pass through the payload for ssh-user-owned secure metadata." \
+		"payload" "$result"
+}
+
 test_read_remote_backup_file_quotes_resolved_remote_cat_path() {
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	marker="$TEST_TMPDIR/read_remote_backup_marker"
@@ -1869,6 +2263,95 @@ test_read_remote_backup_file_quotes_resolved_remote_cat_path() {
 	assertEquals "Remote backup reads should keep the host token separate." "backup@example.com" "$log_line1"
 	assertContains "The resolved remote cat path should be quoted as one token in the remote helper script." \
 		"$log_line2" "'/remote/bin/cat; touch $marker #'"
+}
+
+test_read_remote_backup_file_rejects_nested_symlink_components() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	real_dir="$physical_tmpdir/read_remote_backup_real"
+	link_dir="$physical_tmpdir/read_remote_backup_link"
+	backup_file="$link_dir/backup.meta"
+	mkdir -p "$real_dir"
+	printf '%s\n' "trusted" >"$real_dir/backup.meta"
+	chmod 600 "$real_dir/backup.meta"
+	ln -s "$real_dir" "$link_dir"
+
+	set +e
+	output=$(
+		(
+			build_remote_sh_c_command() {
+				printf '%s\n' "$1"
+			}
+			invoke_ssh_shell_command_for_host() {
+				sh -c "$2"
+			}
+			g_cmd_cat="/bin/cat"
+			read_remote_backup_file "backup@example.com" "$backup_file"
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Remote backup reads should reject symlinked parent components before cat runs." 1 "$status"
+	assertContains "Remote nested symlink reads should identify the offending path component." \
+		"$output" "Refusing to use backup metadata $backup_file because path component $link_dir is a symlink."
+}
+
+test_read_remote_backup_file_rejects_root_owned_nested_symlink_components() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	real_dir="$physical_tmpdir/read_remote_backup_root_real"
+	link_dir="$physical_tmpdir/read_remote_backup_root_link"
+	backup_file="$link_dir/backup.meta"
+	fake_bin="$physical_tmpdir/read_remote_backup_root_bin"
+	mkdir -p "$real_dir" "$fake_bin"
+	printf '%s\n' "trusted" >"$real_dir/backup.meta"
+	chmod 600 "$real_dir/backup.meta"
+	ln -s "$real_dir" "$link_dir"
+	cat >"$fake_bin/stat" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+	"-c %u"|"-f %u")
+		printf '0\n'
+		exit 0
+		;;
+	"-c %a"|"-f %OLp")
+		printf '600\n'
+		exit 0
+		;;
+esac
+exit 1
+EOF
+	cat >"$fake_bin/ls" <<'EOF'
+#!/bin/sh
+for last_arg do :; done
+	printf '%s\n' "-rw------- 1 0 0 0 Jan  1 00:00 $last_arg"
+EOF
+	cat >"$fake_bin/id" <<'EOF'
+#!/bin/sh
+if [ "${1-}" = "-u" ]; then
+	printf '1000\n'
+	exit 0
+fi
+exit 1
+EOF
+	chmod +x "$fake_bin/stat" "$fake_bin/ls" "$fake_bin/id"
+
+	set +e
+	output=$(
+		(
+			build_remote_sh_c_command() {
+				printf '%s\n' "$1"
+			}
+			invoke_ssh_shell_command_for_host() {
+				PATH="$fake_bin:$PATH" sh -c "$2"
+			}
+			g_cmd_cat="/bin/cat"
+			read_remote_backup_file "backup@example.com" "$backup_file"
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Remote backup reads should reject nested symlink components even when remote ownership probes report a secure root-owned path." 1 "$status"
+	assertContains "Root-owned nested symlink reads should still identify the offending path component." \
+		"$output" "Refusing to use backup metadata $backup_file because path component $link_dir is a symlink."
 }
 
 test_read_command_line_switches_skips_control_socket_when_ssh_lacks_support() {
@@ -1924,7 +2407,22 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	FAKE_SSH_SUPPRESS_STDOUT=1 setup_ssh_control_socket "$g_option_O_origin_host" "origin"
 	unset FAKE_SSH_SUPPRESS_STDOUT
 
-	l_cmd=$(build_source_snapshot_list_cmd)
+	fake_zstd="$TEST_TMPDIR/zstd"
+	g_cmd_decompress_safe="'$fake_zstd' '-d'"
+	g_origin_cmd_compress_safe="'$fake_zstd' '-9'"
+
+	l_cmd=$(
+		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 2
+			}
+			zxfer_get_source_snapshot_discovery_dataset_list() {
+				printf '%s\n' "zroot"
+				printf '%s\n' "zroot/usr"
+			}
+			build_source_snapshot_list_cmd
+		)
+	)
 
 	remote_log="$TEST_TMPDIR/remote_snapshot_list.log"
 	: >"$remote_log"
@@ -1933,17 +2431,10 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	FAKE_SSH_SUPPRESS_STDOUT=1
 	export FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE FAKE_SSH_SUPPRESS_STDOUT
 
-	fake_zstd="$TEST_TMPDIR/zstd"
-	create_passthrough_zstd "$fake_zstd"
-	old_path=$PATH
-	PATH="$(dirname "$fake_zstd"):$PATH"
-
 	eval "$l_cmd" >"$TEST_TMPDIR/source_snapshot_list.log"
 	status=$?
 
-	PATH=$old_path
 	unset FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE FAKE_SSH_SUPPRESS_STDOUT
-	rm -f "$fake_zstd"
 
 	assertEquals "Remote snapshot listing pipeline should execute without syntax errors." 0 "$status"
 	assertEquals "payload" "$(cat "$TEST_TMPDIR/source_snapshot_list.log")"
@@ -1964,7 +2455,7 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	assertContains "Remote command should include GNU parallel." "$log_line4" "/opt/bin/parallel"
 	assertContains "Remote command should preserve the parallel job count." "$log_line4" "-j 4 --line-buffer"
 	assertContains "Remote command should preserve the per-dataset snapshot placeholder." "$log_line4" "{}"
-	assertContains "Compression pipeline should be preserved in the remote command." "$log_line4" "| zstd -9"
+	assertNotContains "Adaptive remote metadata discovery should skip the compressor helper in the rendered ssh pipeline." "$log_line4" "$fake_zstd"
 }
 
 test_remote_snapshot_listing_pipeline_executes_parallel_runner_for_each_dataset() {
@@ -1979,7 +2470,8 @@ test_remote_snapshot_listing_pipeline_executes_parallel_runner_for_each_dataset(
 	create_passthrough_zstd "$fake_zstd"
 	cat >"$fake_remote_zfs" <<'EOF'
 #!/bin/sh
-if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] && [ "$5" = "zroot" ]; then
+if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-t" ] && [ "$4" = "filesystem,volume" ] &&
+	[ "$5" = "-o" ] && [ "$6" = "name" ] && [ "$7" = "zroot" ]; then
 	printf '%s\n' "zroot"
 	printf '%s\n' "zroot/usr"
 	exit 0
@@ -2010,6 +2502,8 @@ EOF
 	g_origin_parallel_cmd="$fake_parallel"
 	g_cmd_zfs="$fake_remote_zfs"
 	g_origin_cmd_zfs="$fake_remote_zfs"
+	g_cmd_decompress_safe="'$fake_zstd' '-d'"
+	g_origin_cmd_compress_safe="'$fake_zstd' '-9'"
 	g_cmd_ssh="$realistic_ssh_bin"
 	g_option_O_origin_host="aldo@172.16.0.4"
 	g_option_O_origin_host_safe=""
@@ -2020,7 +2514,18 @@ EOF
 	FAKE_SSH_LOG="$realistic_ssh_log"
 	export FAKE_SSH_LOG
 
-	l_cmd=$(build_source_snapshot_list_cmd)
+	l_cmd=$(
+		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 2
+			}
+			zxfer_get_source_snapshot_discovery_dataset_list() {
+				printf '%s\n' "zroot"
+				printf '%s\n' "zroot/usr"
+			}
+			build_source_snapshot_list_cmd
+		)
+	)
 	eval "$l_cmd" >"$TEST_TMPDIR/remote_snapshot_exec.out" 2>"$TEST_TMPDIR/remote_snapshot_exec.err"
 	status=$?
 
@@ -2043,7 +2548,8 @@ test_local_snapshot_listing_pipeline_executes_direct_parallel_runner_for_each_da
 	create_fake_parallel_exec_bin "$fake_parallel"
 	cat >"$fake_local_zfs" <<'EOF'
 #!/bin/sh
-if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] && [ "$5" = "tank/home" ]; then
+if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-t" ] && [ "$4" = "filesystem,volume" ] &&
+	[ "$5" = "-o" ] && [ "$6" = "name" ] && [ "$7" = "tank/home" ]; then
 	printf '%s\n' "tank/home"
 	printf '%s\n' "tank/home/usr"
 	exit 0
@@ -2075,7 +2581,14 @@ EOF
 	g_LZFS="$fake_local_zfs"
 	initial_source="tank/home"
 
-	l_cmd=$(build_source_snapshot_list_cmd)
+	l_cmd=$(
+		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 2
+			}
+			build_source_snapshot_list_cmd
+		)
+	)
 	eval "$l_cmd" >"$TEST_TMPDIR/local_snapshot_exec.out" 2>"$TEST_TMPDIR/local_snapshot_exec.err"
 	status=$?
 
@@ -2103,8 +2616,15 @@ test_remote_snapshot_listing_pipeline_handles_csh_remote_shell() {
 	create_passthrough_zstd "$fake_zstd"
 	cat >"$fake_remote_zfs" <<'EOF'
 #!/bin/sh
-if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] && [ "$5" = "zroot" ]; then
+if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-t" ] && [ "$4" = "filesystem,volume" ] &&
+	[ "$5" = "-o" ] && [ "$6" = "name" ] && [ "$7" = "zroot" ]; then
 	printf '%s\n' "zroot"
+	exit 0
+fi
+if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] &&
+	[ "$5" = "-s" ] && [ "$6" = "creation" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+	[ "$9" = "zroot" ]; then
+	printf '%s\n' "zroot@snap1"
 	exit 0
 fi
 exit 0
@@ -2117,6 +2637,8 @@ EOF
 	g_origin_parallel_cmd="$FAKE_PARALLEL_BIN"
 	g_cmd_zfs="$fake_remote_zfs"
 	g_origin_cmd_zfs="$fake_remote_zfs"
+	g_cmd_decompress_safe="'$fake_zstd' '-d'"
+	g_origin_cmd_compress_safe="'$fake_zstd' '-9'"
 	g_cmd_ssh="$realistic_ssh_bin"
 	g_option_O_origin_host="aldo@172.16.0.4"
 	g_option_O_origin_host_safe=""
@@ -2250,9 +2772,26 @@ EOF
 	)
 	g_actual_dest="tank/backups/nucbackup/tank/zfsbackup/doET/tank"
 
+	zxfer_get_snapshot_identity_records_for_dataset() {
+		case "$1:$2" in
+		source:tank/zfsbackup/doET/tank)
+			printf '%s\n' \
+				"tank/zfsbackup/doET/tank@zxfer_98767_20251117000001" \
+				"tank/zfsbackup/doET/tank@zxfer_30473_20251114214157"
+			;;
+		destination:tank/backups/nucbackup/tank/zfsbackup/doET/tank)
+			printf '%s\n' "tank/backups/nucbackup/tank/zfsbackup/doET/tank@zxfer_30473_20251114214157"
+			;;
+		*)
+			return 1
+			;;
+		esac
+	}
+
 	inspect_delete_snap 0 "tank/zfsbackup/doET/tank"
 
 	assertEquals "tank/zfsbackup/doET/tank@zxfer_30473_20251114214157" "$g_last_common_snap"
+	unset -f zxfer_get_snapshot_identity_records_for_dataset
 	rm -f "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" "$g_delete_snapshots_to_delete_tmp_file"
 }
 
@@ -2336,9 +2875,10 @@ test_grandfather_test_blocks_old_snapshots() {
 	very_old=$((current - 10 * 86400))
 	set +e
 	ZXFER_TEST_VERY_OLD=$very_old ZXFER_TEST_ROOT=$ZXFER_ROOT /bin/sh <<'EOF' >/dev/null 2>&1
-. "$ZXFER_TEST_ROOT/src/zxfer_common.sh"
-. "$ZXFER_TEST_ROOT/src/zxfer_globals.sh"
-. "$ZXFER_TEST_ROOT/src/zxfer_inspect_delete_snap.sh"
+TESTS_DIR=$ZXFER_TEST_ROOT/tests
+# shellcheck source=tests/test_helper.sh
+. "$ZXFER_TEST_ROOT/tests/test_helper.sh"
+zxfer_source_runtime_modules_through "zxfer_inspect_delete_snap.sh" "$ZXFER_TEST_ROOT"
 g_option_n_dryrun=0
 g_option_v_verbose=0
 g_option_V_very_verbose=0
@@ -2386,9 +2926,10 @@ test_resolve_human_vars_prefers_human_overrides() {
 test_validate_override_properties_rejects_unknown_property() {
 	set +e
 	ZXFER_TEST_ROOT=$ZXFER_ROOT /bin/sh <<'EOF' >/dev/null 2>&1
-. "$ZXFER_TEST_ROOT/src/zxfer_common.sh"
-. "$ZXFER_TEST_ROOT/src/zxfer_globals.sh"
-. "$ZXFER_TEST_ROOT/src/zxfer_transfer_properties.sh"
+TESTS_DIR=$ZXFER_TEST_ROOT/tests
+# shellcheck source=tests/test_helper.sh
+. "$ZXFER_TEST_ROOT/tests/test_helper.sh"
+zxfer_source_runtime_modules_through "zxfer_transfer_properties.sh" "$ZXFER_TEST_ROOT"
 g_option_n_dryrun=0
 g_option_v_verbose=0
 g_option_V_very_verbose=0
@@ -2465,8 +3006,7 @@ test_apply_property_changes_uses_initial_set_list_for_root_dataset() {
 	log="$TEST_TMPDIR/property_apply_initial.log"
 	PROPERTY_LOG="$log" apply_property_changes "tank/dst" 1 "compression=lz4,atime=off" "copies=2" "checksum" property_set_logger property_inherit_logger
 	result=$(cat "$log")
-	expected="set compression=lz4 tank/dst
-set atime=off tank/dst"
+	expected="set compression=lz4,atime=off tank/dst"
 	assertEquals "$expected" "$result"
 	rm -f "$log"
 }
@@ -2793,6 +3333,12 @@ EOF
 
 	assertEquals "Help output should succeed even when the secure PATH lacks required tools." 0 "$status"
 	assertContains "$(cat "$stdout_file")" "usage:"
+	assertContains "Help output should advertise the standalone -c service list option." \
+		"$(cat "$stdout_file")" "[-c FMRI|pattern[ FMRI|pattern]...]"
+	assertContains "Help output should advertise the migration flag separately from -c." \
+		"$(cat "$stdout_file")" "[-m]"
+	assertContains "Help output should advertise the unsupported-property skip flag." \
+		"$(cat "$stdout_file")" "[-U]"
 	assertEquals "Help prescan should bypass dependency initialization errors." "" "$(cat "$stderr_file")"
 	if [ -f "$marker_file" ]; then
 		marker_contents=$(cat "$marker_file")
@@ -2867,6 +3413,10 @@ test_trap_exit_emits_profile_summary_once_in_very_verbose_mode() {
 			g_zxfer_profile_has_data=1
 			g_zxfer_profile_summary_emitted=0
 			g_zxfer_profile_start_epoch=$(($(date +%s) - 3))
+			g_zxfer_profile_ssh_setup_ms=111
+			g_zxfer_profile_source_snapshot_listing_ms=222
+			g_zxfer_profile_destination_snapshot_listing_ms=333
+			g_zxfer_profile_snapshot_diff_sort_ms=444
 			g_zxfer_profile_source_zfs_calls=3
 			g_zxfer_profile_destination_zfs_calls=4
 			g_zxfer_profile_ssh_shell_invocations=2
@@ -2900,6 +3450,10 @@ test_trap_exit_emits_profile_summary_once_in_very_verbose_mode() {
 	assertEquals "trap_exit should preserve success when only emitting profiling output." 0 "$status"
 	assertContains "Very-verbose exits should emit the source zfs profile counter." \
 		"$output" "zxfer profile: source_zfs_calls=3"
+	assertContains "Very-verbose exits should emit the accumulated ssh setup stage timing." \
+		"$output" "zxfer profile: ssh_setup_ms=111"
+	assertContains "Very-verbose exits should emit the accumulated snapshot diff/sort stage timing." \
+		"$output" "zxfer profile: snapshot_diff_sort_ms=444"
 	assertContains "Very-verbose exits should emit the property-read profile counter." \
 		"$output" "zxfer profile: normalized_property_reads_destination=7"
 	assertContains "Very-verbose exits should emit the send/receive bucket counter." \
@@ -2921,6 +3475,58 @@ test_zxfer_profile_emit_summary_returns_without_output_when_already_emitted() {
 
 	assertEquals "An already-emitted profile summary should return success." 0 "$status"
 	assertEquals "An already-emitted profile summary should not emit duplicate output." "" "$output"
+}
+
+test_zxfer_profile_increment_counter_normalizes_blank_and_invalid_inputs_in_current_shell() {
+	g_option_V_very_verbose=1
+	g_zxfer_profile_has_data=0
+	g_test_profile_counter="bogus"
+
+	zxfer_profile_increment_counter ""
+	assertEquals "Blank profile counter names should be ignored without marking profile data present." \
+		0 "$g_zxfer_profile_has_data"
+
+	zxfer_profile_increment_counter g_test_profile_counter "bogus"
+
+	assertEquals "Profile counter updates should mark that profile data exists." 1 "$g_zxfer_profile_has_data"
+	assertEquals "Invalid increment amounts and counter values should be normalized before incrementing." \
+		1 "$g_test_profile_counter"
+}
+
+test_zxfer_profile_now_ms_falls_back_to_second_resolution_when_millisecond_format_is_unavailable() {
+	output=$(
+		(
+			date() {
+				if [ "$1" = "+%s%3N" ]; then
+					printf '%s\n' "not-supported"
+				else
+					printf '%s\n' "42"
+				fi
+			}
+			zxfer_profile_now_ms
+		)
+	)
+	status=$?
+
+	assertEquals "Profile millisecond timestamps should still succeed when date lacks %N-style support." \
+		0 "$status"
+	assertEquals "Second-resolution fallbacks should be normalized into millisecond units." \
+		42000 "$output"
+}
+
+test_zxfer_profile_add_elapsed_ms_accumulates_only_valid_positive_durations_in_current_shell() {
+	g_option_V_very_verbose=1
+	g_zxfer_profile_has_data=0
+	g_test_profile_elapsed_ms=5
+
+	zxfer_profile_add_elapsed_ms g_test_profile_elapsed_ms 10 25
+	zxfer_profile_add_elapsed_ms g_test_profile_elapsed_ms bogus 30
+	zxfer_profile_add_elapsed_ms g_test_profile_elapsed_ms 40 35
+
+	assertEquals "Elapsed stage timings should accumulate onto existing millisecond totals." \
+		20 "$g_test_profile_elapsed_ms"
+	assertEquals "Elapsed stage timings should mark that profiling data exists." \
+		1 "$g_zxfer_profile_has_data"
 }
 
 test_zxfer_append_failure_report_to_log_creates_secure_file() {
@@ -3230,13 +3836,43 @@ test_zxfer_kill_registered_cleanup_pids_only_terminates_registered_pids() {
 	sleep 1
 
 	assertFalse "Registered cleanup jobs should be terminated." \
-		"kill -0 \"$registered_pid\" >/dev/null 2>&1"
+		"kill -s 0 \"$registered_pid\" >/dev/null 2>&1"
 	assertTrue "Cleanup should not terminate unrelated child processes." \
-		"kill -0 \"$unrelated_pid\" >/dev/null 2>&1"
+		"kill -s 0 \"$unrelated_pid\" >/dev/null 2>&1"
 	assertEquals "Cleanup PID tracking should be cleared after termination." "" "$g_zxfer_cleanup_pids"
 
 	kill -s KILL "$unrelated_pid" >/dev/null 2>&1 || true
 	wait "$unrelated_pid" 2>/dev/null || true
+}
+
+test_zxfer_cleanup_pid_helpers_ignore_invalid_inputs_in_current_shell() {
+	log="$TEST_TMPDIR/cleanup_pid_helpers.log"
+	: >"$log"
+	g_zxfer_cleanup_pids="101 202 303"
+
+	zxfer_register_cleanup_pid ""
+	zxfer_register_cleanup_pid "abc"
+	assertEquals "Cleanup PID registration should ignore empty and non-numeric inputs." \
+		"101 202 303" "$g_zxfer_cleanup_pids"
+
+	zxfer_unregister_cleanup_pid ""
+	zxfer_unregister_cleanup_pid "abc"
+	zxfer_unregister_cleanup_pid "202"
+	assertEquals "Cleanup PID unregistration should ignore invalid inputs and preserve the remaining list order." \
+		"101 303" "$g_zxfer_cleanup_pids"
+
+	KILL_LOG="$log"
+	kill() {
+		printf '%s\n' "$1" >>"$KILL_LOG"
+	}
+	g_zxfer_cleanup_pids="abc 101 $$ 303"
+	zxfer_kill_registered_cleanup_pids
+	unset -f kill
+
+	assertEquals "Cleanup termination should skip invalid entries and the current shell PID." \
+		"101
+303" "$(cat "$log")"
+	assertEquals "Cleanup PID tracking should be cleared after termination." "" "$g_zxfer_cleanup_pids"
 }
 
 test_execute_command_records_last_command_string() {
@@ -3270,6 +3906,43 @@ test_invoke_ssh_command_for_host_records_remote_command() {
 	assertEquals "SSH command recording should preserve every token boundary." \
 		"'$FAKE_SSH_BIN' '-S' '$TEST_TMPDIR/origin.sock' 'backup@example.com' 'pfexec' '/sbin/zfs' 'list' '-H' 'tank/src'" \
 		"$g_zxfer_failure_last_command"
+}
+
+test_zxfer_render_destination_zfs_command_uses_remote_target_tool_path() {
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_T_target_host="backup@example.com"
+	g_option_T_target_host_safe=$(quote_host_spec_tokens "$g_option_T_target_host")
+	g_target_cmd_zfs="/remote/bin/zfs"
+
+	rendered=$(zxfer_render_destination_zfs_command list -H backup/target)
+
+	assertContains "Remote destination zfs rendering should route through ssh." \
+		"$rendered" "'$FAKE_SSH_BIN'"
+	assertContains "Remote destination zfs rendering should target the configured host." \
+		"$rendered" "'backup@example.com'"
+	assertContains "Remote destination zfs rendering should mention the resolved remote zfs path." \
+		"$rendered" "/remote/bin/zfs"
+	assertContains "Remote destination zfs rendering should preserve the requested subcommand and dataset." \
+		"$rendered" "backup/target"
+}
+
+test_zxfer_render_zfs_command_for_spec_routes_destination_and_literal_commands() {
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_T_target_host="backup@example.com"
+	g_option_T_target_host_safe=$(quote_host_spec_tokens "$g_option_T_target_host")
+	g_target_cmd_zfs="/remote/bin/zfs"
+	g_LZFS="mock_source_spec"
+	g_RZFS="mock_destination_spec"
+
+	destination_rendered=$(zxfer_render_zfs_command_for_spec "$g_RZFS" list -H backup/target)
+	literal_rendered=$(zxfer_render_zfs_command_for_spec "/bin/echo" hello world)
+
+	assertContains "Destination command specs should reuse the destination render helper." \
+		"$destination_rendered" "/remote/bin/zfs"
+	assertContains "Destination command specs should preserve the requested dataset argument." \
+		"$destination_rendered" "backup/target"
+	assertEquals "Literal command specs should be rendered as direct shell-quoted argv." \
+		"'/bin/echo' 'hello' 'world'" "$literal_rendered"
 }
 
 test_build_ssh_shell_command_for_host_quotes_control_socket_path_for_eval() {
@@ -3393,7 +4066,7 @@ test_read_remote_backup_file_rejects_insecure_remote_owner() {
 
 	assertEquals "Remote backup reads should abort on insecure remote ownership." 1 "$status"
 	assertContains "Insecure remote ownership should use the documented error." \
-		"$output" "Refusing to use backup metadata /tmp/backup.meta on backup@example.com because it is not owned by root."
+		"$output" "Refusing to use backup metadata /tmp/backup.meta on backup@example.com because it is not owned by root or the ssh user."
 }
 
 test_read_remote_backup_file_rejects_insecure_remote_mode() {
@@ -3436,6 +4109,31 @@ test_read_remote_backup_file_rejects_unknown_remote_security_metadata() {
 		"$output" "Cannot determine ownership or permissions for backup metadata /tmp/backup.meta on backup@example.com."
 }
 
+test_read_remote_backup_file_allows_trusted_absolute_root_symlink_components() {
+	backup_file=$(mktemp /tmp/read_remote_trusted.XXXXXX)
+	outfile="$TEST_TMPDIR/read_remote_trusted.out"
+	printf '%s\n' "backup-data" >"$backup_file"
+	chmod 600 "$backup_file"
+	g_cmd_cat="/bin/cat"
+
+	(
+		build_remote_sh_c_command() {
+			printf '%s\n' "$1"
+		}
+		invoke_ssh_shell_command_for_host() {
+			sh -c "$2"
+		}
+		read_remote_backup_file "backup@example.com" "$backup_file"
+	) >"$outfile"
+	status=$?
+
+	assertEquals "Trusted top-level system symlink components should not block remote backup reads, which keeps default /var- or /tmp-backed remote roots working on macOS." 0 "$status"
+	assertEquals "Trusted absolute symlink components should still allow the secure metadata contents to be read." \
+		"backup-data" "$(cat "$outfile")"
+
+	rm -f "$backup_file"
+}
+
 test_throw_error_with_usage_writes_message_and_usage_to_stderr() {
 	stdout_file="$TEST_TMPDIR/throw_error_with_usage.stdout"
 	stderr_file="$TEST_TMPDIR/throw_error_with_usage.stderr"
@@ -3458,7 +4156,7 @@ test_get_os_handles_local_and_remote_invocations() {
 	if remote_result=$(
 		(
 			g_cmd_ssh="$FAKE_SSH_BIN"
-			FAKE_SSH_STDOUT_OVERRIDE="RemoteOS"
+			FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response)
 			export FAKE_SSH_STDOUT_OVERRIDE
 			get_os "backup@example.com pfexec"
 		)
@@ -3472,6 +4170,20 @@ test_get_os_handles_local_and_remote_invocations() {
 	assertEquals "Local OS detection should match uname output." "$(uname)" "$local_result"
 	assertEquals "Remote OS detection should succeed through the ssh helper path." 0 "$remote_status"
 	assertEquals "Remote OS detection should execute uname through the ssh helper path." "RemoteOS" "$remote_result"
+}
+
+test_get_os_fails_when_remote_helper_is_unavailable() {
+	set +e
+	result=$(
+		(
+			unset -f zxfer_get_remote_host_operating_system 2>/dev/null || :
+			get_os "backup@example.com" 2>/dev/null
+		)
+	)
+	status=$?
+
+	assertEquals "Remote OS detection should fail when the remote helper module is unavailable." 1 "$status"
+	assertEquals "Failed remote OS detection should not print a payload." "" "$result"
 }
 
 test_get_os_treats_local_ssh_path_as_literal() {
@@ -3577,12 +4289,224 @@ test_zxfer_find_symlink_path_component_detects_nested_symlink() {
 	assertEquals "Nested symlink detection should return the offending path component." "$link_dir" "$result"
 }
 
-test_zxfer_find_symlink_path_component_rejects_relative_paths() {
-	result=$(zxfer_find_symlink_path_component "relative/path")
+test_zxfer_find_symlink_path_component_detects_relative_symlink() {
+	old_pwd=$(pwd)
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	real_dir="$physical_tmpdir/relative_real_dir"
+	link_dir="$physical_tmpdir/relative_link_dir"
+	mkdir -p "$real_dir/subdir"
+	ln -s "$real_dir" "$link_dir"
+	cd "$physical_tmpdir" || fail "Unable to cd into physical tempdir."
+
+	result=$(zxfer_find_symlink_path_component "./relative_link_dir/subdir/file")
 	status=$?
 
-	assertEquals "Relative paths should not be scanned for symlink components." 1 "$status"
-	assertEquals "Relative path checks should not report a symlink component." "" "$result"
+	cd "$old_pwd" || fail "Unable to restore working directory."
+
+	assertEquals "Relative paths should be scanned for nested symlink components." 0 "$status"
+	assertEquals "Relative symlink checks should return the offending relative path component." "./relative_link_dir" "$result"
+}
+
+test_zxfer_find_symlink_path_component_ignores_trusted_absolute_root_symlink() {
+	result=$(zxfer_find_symlink_path_component "/tmp/zxfer-trusted-root-symlink-probe/subdir/file")
+	status=$?
+
+	assertEquals "Trusted top-level system symlink components such as /tmp on macOS should be ignored." 1 "$status"
+	assertEquals "Trusted absolute symlink components should not be reported as unsafe." "" "$result"
+}
+
+test_zxfer_find_symlink_path_component_returns_empty_for_relative_non_symlink_path() {
+	old_pwd=$(pwd)
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	mkdir -p "$physical_tmpdir/relative_plain_dir/subdir"
+	cd "$physical_tmpdir" || fail "Unable to cd into physical tempdir."
+
+	result=$(zxfer_find_symlink_path_component "./relative_plain_dir/subdir/file")
+	status=$?
+
+	cd "$old_pwd" || fail "Unable to restore working directory."
+
+	assertEquals "Relative paths without symlink components should still return failure." 1 "$status"
+	assertEquals "Relative non-symlink checks should not report a component." "" "$result"
+}
+
+test_zxfer_try_get_effective_tmpdir_resolves_symlinked_tmpdir_to_physical_path() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	real_tmp="$physical_tmpdir/effective_tmp_real"
+	link_tmp="$physical_tmpdir/effective_tmp_link"
+	mkdir -p "$real_tmp"
+	ln -s "$real_tmp" "$link_tmp"
+	TMPDIR="$link_tmp"
+	g_zxfer_effective_tmpdir=""
+	g_zxfer_effective_tmpdir_requested=""
+
+	result=$(zxfer_try_get_effective_tmpdir)
+	status=$?
+
+	assertEquals "Symlinked TMPDIR values should still resolve successfully when their physical target is trusted." 0 "$status"
+	assertEquals "Effective TMPDIR resolution should return the physical directory path." "$real_tmp" "$result"
+	TMPDIR="$TEST_TMPDIR"
+}
+
+test_zxfer_try_get_effective_tmpdir_prefers_memory_backed_default_candidates_in_current_shell() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	ram_tmp="$physical_tmpdir/default_tmp_ram"
+	disk_tmp="$physical_tmpdir/default_tmp_disk"
+	mkdir -p "$ram_tmp" "$disk_tmp"
+	output=$(
+		(
+			unset TMPDIR
+			g_zxfer_effective_tmpdir=""
+			g_zxfer_effective_tmpdir_requested=""
+			output_file="$TEST_TMPDIR/effective_tmp_default_current_shell.out"
+
+			zxfer_list_default_tmpdir_candidates() {
+				printf '%s\n' "$ram_tmp"
+				printf '%s\n' "$disk_tmp"
+			}
+
+			zxfer_try_get_effective_tmpdir >"$output_file" || exit $?
+			result=$(cat "$output_file")
+			printf 'result=%s\n' "$result"
+			printf 'request=%s\n' "$g_zxfer_effective_tmpdir_requested"
+		)
+	)
+	status=$?
+
+	assertEquals "Unset TMPDIR should prefer the first validated default temp-root candidate, which lets zxfer prefer memory-backed roots when available." \
+		0 "$status"
+	assertContains "Unset TMPDIR should resolve to the preferred memory-backed default candidate." \
+		"$output" "result=$ram_tmp"
+	assertContains "Default-tempdir selections should cache under the synthetic default request key." \
+		"$output" "request=__ZXFER_DEFAULT_TMPDIR__"
+}
+
+test_zxfer_try_get_effective_tmpdir_prefers_explicit_tmpdir_over_default_candidates_in_current_shell() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	explicit_tmp="$physical_tmpdir/effective_tmp_explicit"
+	ram_tmp="$physical_tmpdir/effective_tmp_default_ram"
+	mkdir -p "$explicit_tmp" "$ram_tmp"
+	output=$(
+		(
+			TMPDIR="$explicit_tmp"
+			g_zxfer_effective_tmpdir=""
+			g_zxfer_effective_tmpdir_requested=""
+			output_file="$TEST_TMPDIR/effective_tmp_explicit_current_shell.out"
+
+			zxfer_list_default_tmpdir_candidates() {
+				printf '%s\n' "$ram_tmp"
+				printf '%s\n' "/tmp"
+			}
+
+			zxfer_try_get_effective_tmpdir >"$output_file" || exit $?
+			result=$(cat "$output_file")
+			printf 'result=%s\n' "$result"
+			printf 'request=%s\n' "$g_zxfer_effective_tmpdir_requested"
+		)
+	)
+	status=$?
+
+	assertEquals "A valid explicit TMPDIR should still win over the default memory-backed candidate list." \
+		0 "$status"
+	assertContains "A valid explicit TMPDIR should remain the effective temp root." \
+		"$output" "result=$explicit_tmp"
+	assertContains "The cache key should still reflect the explicit TMPDIR request." \
+		"$output" "request=$explicit_tmp"
+}
+
+test_zxfer_try_get_effective_tmpdir_falls_back_to_preferred_default_candidate_when_tmpdir_is_unsafe() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	insecure_tmp="$physical_tmpdir/effective_tmp_insecure_preferred"
+	ram_tmp="$physical_tmpdir/effective_tmp_fallback_ram"
+	disk_tmp="$physical_tmpdir/effective_tmp_fallback_disk"
+	mkdir -p "$insecure_tmp" "$ram_tmp" "$disk_tmp"
+	chmod 0777 "$insecure_tmp"
+	output=$(
+		(
+			TMPDIR="$insecure_tmp"
+			g_zxfer_effective_tmpdir=""
+			g_zxfer_effective_tmpdir_requested=""
+
+			zxfer_list_default_tmpdir_candidates() {
+				printf '%s\n' "$ram_tmp"
+				printf '%s\n' "$disk_tmp"
+			}
+
+			result=$(zxfer_try_get_effective_tmpdir) || exit $?
+			printf 'result=%s\n' "$result"
+		)
+	)
+	status=$?
+	chmod 0700 "$insecure_tmp"
+
+	assertEquals "Unsafe TMPDIR values should still resolve cleanly by falling back to the preferred validated default temp root." \
+		0 "$status"
+	assertContains "Unsafe TMPDIR values should fall back to the preferred validated default candidate before disk-backed fallbacks." \
+		"$output" "result=$ram_tmp"
+}
+
+test_zxfer_try_get_effective_tmpdir_rejects_non_sticky_world_writable_tmpdir() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	insecure_tmp="$physical_tmpdir/effective_tmp_insecure"
+	mkdir -p "$insecure_tmp"
+	chmod 0777 "$insecure_tmp"
+	TMPDIR="$insecure_tmp"
+	g_zxfer_effective_tmpdir=""
+	g_zxfer_effective_tmpdir_requested=""
+
+	result=$(zxfer_try_get_effective_tmpdir)
+	status=$?
+
+	assertEquals "Unsafe world-writable TMPDIR values should still resolve by falling back to the system temp root." 0 "$status"
+	assertNotEquals "Unsafe world-writable TMPDIR values should not remain selected." "$insecure_tmp" "$result"
+
+	chmod 0700 "$insecure_tmp"
+	TMPDIR="$TEST_TMPDIR"
+}
+
+test_zxfer_try_get_effective_tmpdir_reuses_cached_value_in_current_shell() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	cached_tmp="$physical_tmpdir/effective_tmp_cached"
+	mkdir -p "$cached_tmp"
+	TMPDIR="$cached_tmp"
+	g_zxfer_effective_tmpdir=""
+	g_zxfer_effective_tmpdir_requested=""
+
+	first_out="$TEST_TMPDIR/effective_tmp_first.out"
+	second_out="$TEST_TMPDIR/effective_tmp_second.out"
+	zxfer_try_get_effective_tmpdir >"$first_out"
+	first_status=$?
+	zxfer_try_get_effective_tmpdir >"$second_out"
+	second_status=$?
+
+	assertEquals "The first effective TMPDIR lookup should succeed for a trusted directory." \
+		0 "$first_status"
+	assertEquals "Repeated effective TMPDIR lookups should reuse the cached value." \
+		0 "$second_status"
+	assertEquals "The first lookup should return the trusted TMPDIR path." \
+		"$cached_tmp" "$(cat "$first_out")"
+	assertEquals "The cached lookup should return the same TMPDIR path." \
+		"$cached_tmp" "$(cat "$second_out")"
+	assertEquals "The cached TMPDIR path should remain stored in the current shell." \
+		"$cached_tmp" "$g_zxfer_effective_tmpdir"
+	assertEquals "The cached TMPDIR request key should remain stored in the current shell." \
+		"$cached_tmp" "$g_zxfer_effective_tmpdir_requested"
+
+	TMPDIR="$TEST_TMPDIR"
+}
+
+test_zxfer_create_private_temp_dir_returns_failure_when_effective_tmpdir_lookup_fails_in_current_shell() {
+	zxfer_try_get_effective_tmpdir() {
+		return 1
+	}
+
+	zxfer_create_private_temp_dir "zxfer_private_tmp" >"$TEST_TMPDIR/private_temp_dir.out" 2>/dev/null
+	status=$?
+
+	unset -f zxfer_try_get_effective_tmpdir
+
+	assertEquals "Private temp directory creation should fail when the effective temp root cannot be determined." \
+		1 "$status"
 }
 
 # shellcheck source=tests/shunit2/shunit2

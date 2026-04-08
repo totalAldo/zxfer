@@ -16,11 +16,7 @@ esac
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-# shellcheck source=src/zxfer_globals.sh
-. "$ZXFER_ROOT/src/zxfer_globals.sh"
-
-# shellcheck source=src/zxfer_get_zfs_list.sh
-. "$ZXFER_ROOT/src/zxfer_get_zfs_list.sh"
+zxfer_source_runtime_modules_through "zxfer_get_zfs_list.sh"
 
 usage() {
 	:
@@ -36,6 +32,22 @@ if [ "\$1" = "--version" ]; then
 	exit 0
 fi
 exit 0
+EOF
+	chmod +x "$l_path"
+}
+
+create_fake_ssh_handshake_bin() {
+	l_path=$1
+	l_parallel_status=$2
+	cat >"$l_path" <<EOF
+#!/bin/sh
+cat <<'INNER_EOF'
+ZXFER_REMOTE_CAPS_V1
+os	RemoteOS
+tool	zfs	0	/remote/bin/zfs
+tool	parallel	$l_parallel_status	$([ "$l_parallel_status" = "0" ] && printf '%s' /opt/bin/parallel || printf '%s' -)
+tool	cat	0	/remote/bin/cat
+INNER_EOF
 EOF
 	chmod +x "$l_path"
 }
@@ -63,6 +75,12 @@ setUp() {
 	g_initial_source_had_trailing_slash=0
 	initial_source="tank/src"
 	g_destination="backup/dst"
+	g_origin_remote_capabilities_host=""
+	g_origin_remote_capabilities_response=""
+	g_origin_remote_capabilities_bootstrap_source=""
+	g_target_remote_capabilities_host=""
+	g_target_remote_capabilities_response=""
+	g_target_remote_capabilities_bootstrap_source=""
 	g_cmd_parallel="$GNU_PARALLEL_BIN"
 	g_origin_parallel_cmd=""
 	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
@@ -71,11 +89,223 @@ setUp() {
 	g_cmd_zfs="/sbin/zfs"
 	g_recursive_source_list=""
 	g_recursive_source_dataset_list=""
+	g_lzfs_list_hr_snap=""
 	g_lzfs_list_hr_S_snap=""
+	g_rzfs_list_hr_snap=""
 	g_recursive_dest_list=""
+	g_recursive_destination_extra_dataset_list=""
+	g_zxfer_linear_reverse_max_lines=""
 	g_last_background_pid=""
 	g_source_snapshot_list_pid=""
+	zxfer_reset_destination_existence_cache
+	zxfer_reset_snapshot_record_indexes
 	zxfer_reset_failure_context "unit"
+}
+
+test_zxfer_get_source_snapshot_parallel_dataset_threshold_scales_locally() {
+	g_option_j_jobs=5
+
+	result=$(zxfer_get_source_snapshot_parallel_dataset_threshold)
+
+	assertEquals "Local adaptive source discovery should scale with the configured job count." \
+		"10" "$result"
+}
+
+test_zxfer_get_source_snapshot_parallel_dataset_threshold_treats_invalid_jobs_as_single_job_in_current_shell() {
+	output_file="$TEST_TMPDIR/source_parallel_threshold.out"
+	g_option_j_jobs="invalid"
+
+	zxfer_get_source_snapshot_parallel_dataset_threshold >"$output_file"
+
+	assertEquals "Invalid job counts should fall back to the single-job adaptive discovery threshold." \
+		"8" "$(cat "$output_file")"
+}
+
+test_zxfer_get_source_snapshot_parallel_dataset_threshold_biases_remote_warm_startup_lower() {
+	g_option_j_jobs=2
+	g_option_O_origin_host="origin.example"
+	g_origin_remote_capabilities_bootstrap_source="cache"
+	g_ssh_supports_control_sockets=1
+	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.socket"
+
+	result=$(zxfer_get_source_snapshot_parallel_dataset_threshold)
+
+	assertEquals "Warm cached remote startup should allow a lower dataset threshold before parallel discovery is used." \
+		"6" "$result"
+}
+
+test_zxfer_get_source_snapshot_parallel_dataset_threshold_biases_remote_cold_startup_higher() {
+	g_option_j_jobs=2
+	g_option_O_origin_host="origin.example"
+	g_origin_remote_capabilities_bootstrap_source="live"
+	g_ssh_supports_control_sockets=0
+	g_ssh_origin_control_socket=""
+
+	result=$(zxfer_get_source_snapshot_parallel_dataset_threshold)
+
+	assertEquals "Cold remote startup without control-socket reuse should require a larger dataset tree before parallel discovery is used." \
+		"14" "$result"
+}
+
+test_zxfer_count_source_snapshot_discovery_datasets_counts_entries_and_empty_input() {
+	result=$(zxfer_count_source_snapshot_discovery_datasets "tank/src
+tank/src/child")
+	empty_result=$(zxfer_count_source_snapshot_discovery_datasets "")
+
+	assertEquals "Source snapshot discovery dataset counting should return the number of newline-delimited datasets." \
+		"2" "$result"
+	assertEquals "Source snapshot discovery dataset counting should treat empty input as zero datasets." \
+		"0" "$empty_result"
+}
+
+test_zxfer_count_source_snapshot_discovery_datasets_rejects_nonnumeric_awk_output_in_current_shell() {
+	fake_awk="$TEST_TMPDIR/fake_bad_awk"
+	orig_cmd_awk=$g_cmd_awk
+	cat >"$fake_awk" <<'EOF'
+#!/bin/sh
+printf '%s\n' "not-a-number"
+EOF
+	chmod +x "$fake_awk"
+	g_cmd_awk="$fake_awk"
+
+	set +e
+	zxfer_count_source_snapshot_discovery_datasets "tank/src"
+	status=$?
+	g_cmd_awk=$orig_cmd_awk
+
+	assertEquals "Source snapshot discovery dataset counting should fail when awk does not return a numeric line count." \
+		1 "$status"
+}
+
+test_zxfer_build_source_snapshot_dataset_list_printf_cmd_preserves_dataset_boundaries() {
+	cmd=$(zxfer_build_source_snapshot_dataset_list_printf_cmd "tank/src
+tank/src/child")
+
+	result=$(eval "$cmd")
+
+	assertEquals "Inlined source dataset lists should round-trip each dataset as a separate line." \
+		"tank/src
+tank/src/child" "$result"
+}
+
+test_destination_snapshot_dataset_helpers_map_root_and_child_datasets() {
+	assertEquals "Non-trailing-slash recursive replication should append the source root name under the destination root." \
+		"backup/dst/src" "$(zxfer_get_destination_snapshot_root_dataset)"
+	assertEquals "Non-trailing-slash recursive replication should map child datasets beneath the derived destination root." \
+		"backup/dst/src/child" "$(zxfer_get_destination_dataset_for_source_dataset "tank/src/child")"
+
+	g_initial_source_had_trailing_slash=1
+	assertEquals "Trailing-slash recursive replication should keep the destination root unchanged." \
+		"backup/dst" "$(zxfer_get_destination_snapshot_root_dataset)"
+	assertEquals "Trailing-slash recursive replication should map child datasets directly beneath the requested destination." \
+		"backup/dst/child" "$(zxfer_get_destination_dataset_for_source_dataset "tank/src/child")"
+}
+
+test_destination_snapshot_dataset_helpers_cover_exact_root_and_fallback_mappings() {
+	assertEquals "Non-trailing-slash mapping should fall back to the destination root when a dataset does not extend the initial source path." \
+		"backup/dst/src" "$(zxfer_get_destination_dataset_for_source_dataset "otherpool/unrelated")"
+
+	g_initial_source_had_trailing_slash=1
+	assertEquals "Trailing-slash mapping should keep the destination root unchanged for the exact source dataset." \
+		"backup/dst" "$(zxfer_get_destination_dataset_for_source_dataset "tank/src")"
+}
+
+test_zxfer_write_snapshot_identity_file_from_records_normalizes_and_sorts_identities() {
+	output_file="$TEST_TMPDIR/snapshot_identities.txt"
+
+	zxfer_write_snapshot_identity_file_from_records \
+		"tank/src@snap2	222
+tank/src@snap1	111
+tank/src@snap2	222" \
+		"$output_file"
+
+	assertEquals "Snapshot identity file generation should normalize, deduplicate, and sort the extracted identities." \
+		"snap1	111
+snap2	222" "$(cat "$output_file")"
+}
+
+test_zxfer_should_inline_source_snapshot_dataset_list_rejects_large_inputs() {
+	large_dataset_list=$(awk 'BEGIN { for (i = 1; i <= 80; i++) print "tank/src/child" }')
+
+	assertTrue "Moderate dataset lists should stay inline to avoid a second discovery pass." \
+		"zxfer_should_inline_source_snapshot_dataset_list 'tank/src
+tank/src/child' 2"
+	assertFalse "Very large dataset lists should fall back to a streamed dataset enumeration command." \
+		"zxfer_should_inline_source_snapshot_dataset_list '$large_dataset_list' 80"
+}
+
+test_zxfer_should_inline_source_snapshot_dataset_list_rejects_invalid_numeric_inputs_in_current_shell() {
+	set +e
+	zxfer_should_inline_source_snapshot_dataset_list "tank/src" "not-a-number"
+	invalid_count_status=$?
+
+	(
+		wc() {
+			printf '%s\n' "not-a-number"
+		}
+		zxfer_should_inline_source_snapshot_dataset_list "tank/src" 1
+	)
+	invalid_size_status=$?
+
+	assertEquals "Inline dataset-list selection should reject non-numeric dataset counts." \
+		1 "$invalid_count_status"
+	assertEquals "Inline dataset-list selection should reject non-numeric byte counts." \
+		1 "$invalid_size_status"
+}
+
+test_build_source_snapshot_list_cmd_reports_adaptive_helper_failures_in_current_shell() {
+	g_option_j_jobs=2
+	output_file="$TEST_TMPDIR/source_snapshot_cmd.out"
+
+	set +e
+	(
+		zxfer_get_source_snapshot_parallel_dataset_threshold() {
+			return 1
+		}
+		build_source_snapshot_list_cmd >"$output_file"
+	)
+	threshold_status=$?
+	threshold_output=$(cat "$output_file")
+
+	(
+		zxfer_get_source_snapshot_parallel_dataset_threshold() {
+			printf '%s\n' "8"
+		}
+		zxfer_get_source_snapshot_discovery_dataset_list() {
+			return 1
+		}
+		build_source_snapshot_list_cmd >"$output_file"
+	)
+	dataset_list_status=$?
+	dataset_list_output=$(cat "$output_file")
+
+	(
+		zxfer_get_source_snapshot_parallel_dataset_threshold() {
+			printf '%s\n' "8"
+		}
+		zxfer_get_source_snapshot_discovery_dataset_list() {
+			printf '%s\n' "tank/src"
+		}
+		zxfer_count_source_snapshot_discovery_datasets() {
+			return 1
+		}
+		build_source_snapshot_list_cmd >"$output_file"
+	)
+	dataset_count_status=$?
+	dataset_count_output=$(cat "$output_file")
+
+	assertEquals "Adaptive source snapshot command construction should fail when the discovery threshold cannot be determined." \
+		1 "$threshold_status"
+	assertContains "Threshold failures should report the adaptive discovery threshold error." \
+		"$threshold_output" "Failed to determine the adaptive source snapshot discovery threshold."
+	assertEquals "Adaptive source snapshot command construction should fail when the dataset prepass cannot be retrieved." \
+		1 "$dataset_list_status"
+	assertContains "Dataset-list failures should report the adaptive discovery dataset error." \
+		"$dataset_list_output" "Failed to retrieve the source dataset list for adaptive snapshot discovery."
+	assertEquals "Adaptive source snapshot command construction should fail when the dataset prepass cannot be counted." \
+		1 "$dataset_count_status"
+	assertContains "Dataset-count failures should report the adaptive discovery counting error." \
+		"$dataset_count_output" "Failed to count source datasets for adaptive snapshot discovery."
 }
 
 test_ensure_parallel_available_for_source_jobs_requires_local_parallel() {
@@ -115,11 +345,7 @@ test_ensure_parallel_available_for_source_jobs_reports_missing_remote_parallel_i
 	output=$(
 		(
 			ssh_bin="$TEST_TMPDIR/missing_remote_parallel_ssh"
-			cat >"$ssh_bin" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-			chmod +x "$ssh_bin"
+			create_fake_ssh_handshake_bin "$ssh_bin" 1
 			g_cmd_ssh="$ssh_bin"
 			g_option_j_jobs=2
 			g_option_O_origin_host="origin.example"
@@ -145,6 +371,242 @@ test_ensure_parallel_available_for_source_jobs_returns_success_when_parallel_is_
 
 	assertEquals "Serial snapshot listing should not require GNU parallel." 0 "$status"
 	assertEquals "Serial snapshot listing should leave the remote parallel path unset." "" "$g_origin_parallel_cmd"
+}
+
+test_ensure_parallel_available_for_source_jobs_skips_local_parallel_for_remote_runs() {
+	g_option_j_jobs=2
+	g_cmd_parallel=""
+	g_option_O_origin_host="origin.example"
+	g_origin_parallel_cmd="/opt/bin/parallel"
+
+	ensure_parallel_available_for_source_jobs
+	status=$?
+
+	assertEquals "Remote source-job setup should not require a local GNU parallel binary when only the origin-host branch will execute it." \
+		0 "$status"
+}
+
+test_build_source_snapshot_list_cmd_requires_local_parallel_before_dataset_prepass() {
+	g_option_j_jobs=2
+	g_cmd_parallel=""
+	g_option_O_origin_host=""
+
+	set +e
+	result=$(build_source_snapshot_list_cmd 2>&1)
+	status=$?
+	set -e
+
+	assertEquals "Local -j runs should fail fast when GNU parallel is unavailable." 1 "$status"
+	assertContains "The local missing-parallel error should surface before adaptive dataset discovery runs." \
+		"$result" "requires GNU parallel but it was not found in PATH on the local host"
+}
+
+test_build_source_snapshot_list_cmd_uses_serial_local_discovery_below_threshold() {
+	g_option_j_jobs=2
+	g_cmd_parallel="$GNU_PARALLEL_BIN"
+	g_option_O_origin_host=""
+
+	result=$(
+		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 9
+			}
+			zxfer_get_source_snapshot_discovery_dataset_list() {
+				printf '%s\n' "tank/src"
+			}
+			build_source_snapshot_list_cmd
+		)
+	)
+
+	assertEquals "Small local trees should stay on the direct recursive snapshot listing path even when -j is set." \
+		"'$g_LZFS' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' '$initial_source'" "$result"
+}
+
+test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_at_threshold() {
+	g_option_j_jobs=2
+	g_cmd_parallel="$GNU_PARALLEL_BIN"
+	g_option_O_origin_host=""
+
+	result=$(
+		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 2
+			}
+			zxfer_get_source_snapshot_discovery_dataset_list() {
+				printf '%s\n' "tank/src"
+				printf '%s\n' "tank/src/child"
+			}
+			build_source_snapshot_list_cmd
+		)
+	)
+
+	assertContains "Parallel local discovery should inline the moderate dataset list instead of recounting it inside the shell command." \
+		"$result" "'printf'"
+	assertContains "Parallel local discovery should preserve the prefetched dataset order inside the inline list." \
+		"$result" "'tank/src' 'tank/src/child'"
+	assertContains "Parallel local discovery should still use GNU parallel once the threshold is met." \
+		"$result" "'$g_cmd_parallel' -j 2 --line-buffer"
+	assertNotContains "Parallel local discovery should no longer defer the branch decision into a shell-side dataset counter." \
+		"$result" "l_dataset_count"
+}
+
+test_build_source_snapshot_list_cmd_uses_serial_remote_discovery_below_threshold_without_parallel_validation() {
+	g_option_j_jobs=2
+	g_option_O_origin_host="origin.example"
+	g_option_z_compress=1
+	g_cmd_parallel=""
+	g_origin_parallel_cmd=""
+	g_origin_cmd_zfs="/remote/bin/zfs"
+	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
+	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-T0' '-9'"
+
+	result=$(
+		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 6
+			}
+			zxfer_get_source_snapshot_discovery_dataset_list() {
+				printf '%s\n' "tank/src"
+			}
+			build_source_snapshot_list_cmd
+			printf 'meta=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-0}"
+			printf 'skip=%s\n' "${g_source_snapshot_list_skipped_metadata_compression:-0}"
+		)
+	)
+
+	assertContains "Small remote trees should stay on the recursive remote snapshot listing path." \
+		"$result" "/remote/bin/zfs"
+	assertNotContains "Remote serial discovery should now skip metadata compression on multi-job runs." \
+		"$result" "/remote/bin/zstd"
+	assertNotContains "Remote serial discovery should not add local decompression when metadata compression is skipped." \
+		"$result" "/local/bin/zstd"
+	assertNotContains "Remote serial discovery should not require GNU parallel when the serial path wins." \
+		"$result" "parallel"
+	assertContains "Adaptive remote serial discovery should record that metadata compression was intentionally skipped." \
+		"$result" "meta=0"
+	assertContains "Adaptive remote serial discovery should record the explicit metadata-compression skip state." \
+		"$result" "skip=1"
+}
+
+test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_streamed_dataset_list() {
+	g_option_j_jobs=2
+	g_option_O_origin_host="origin.example"
+	g_option_z_compress=0
+	g_cmd_parallel=""
+	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_origin_cmd_zfs="/remote/bin/zfs"
+	large_dataset_list=$(awk 'BEGIN { for (i = 1; i <= 65; i++) print "tank/src/child" i }')
+
+	result=$(
+		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 2
+			}
+			zxfer_get_source_snapshot_discovery_dataset_list() {
+				printf '%s\n' "$large_dataset_list"
+			}
+			build_source_snapshot_list_cmd
+			printf 'meta=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-0}"
+			printf 'skip=%s\n' "${g_source_snapshot_list_skipped_metadata_compression:-0}"
+		)
+	)
+
+	assertNotContains "Large remote trees should not inline the dataset list when the streamed remote branch wins." \
+		"$result" "'printf'"
+	assertNotContains "Large remote trees should not embed the prefetched dataset list inside the remote command string when the streamed branch wins." \
+		"$result" "tank/src/child65"
+	assertContains "Large remote trees should still use GNU parallel on the origin host." \
+		"$result" "/opt/bin/parallel"
+	assertContains "Remote discovery without -z should keep metadata compression disabled." \
+		"$result" "meta=0"
+	assertContains "Remote discovery without -z should not mark the adaptive metadata-compression skip state." \
+		"$result" "skip=0"
+}
+
+test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_without_metadata_compression() {
+	g_option_j_jobs=2
+	g_option_O_origin_host="origin.example"
+	g_option_z_compress=1
+	g_cmd_parallel=""
+	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_origin_cmd_zfs="/remote/bin/zfs"
+	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
+	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-T0' '-9'"
+
+	result=$(
+		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 2
+			}
+			zxfer_get_source_snapshot_discovery_dataset_list() {
+				printf '%s\n' "tank/src"
+				printf '%s\n' "tank/src/child"
+			}
+			build_source_snapshot_list_cmd
+			printf 'meta=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-0}"
+			printf 'skip=%s\n' "${g_source_snapshot_list_skipped_metadata_compression:-0}"
+		)
+	)
+
+	assertContains "Adaptive remote source discovery should retain the remote GNU parallel path for larger trees." \
+		"$result" "/opt/bin/parallel"
+	assertContains "Adaptive remote source discovery should inline the prefetched dataset list for moderate trees." \
+		"$result" "'printf'"
+	assertContains "Adaptive remote source discovery should include the first prefetched dataset in the inline list." \
+		"$result" "tank/src"
+	assertContains "Adaptive remote source discovery should include the second prefetched dataset in the inline list." \
+		"$result" "tank/src/child"
+	assertNotContains "Adaptive remote source discovery should skip metadata compression on multi-job remote runs." \
+		"$result" "/remote/bin/zstd"
+	assertNotContains "Adaptive remote source discovery should not add local decompression when metadata compression is skipped." \
+		"$result" "/local/bin/zstd"
+	assertContains "Adaptive remote source discovery should keep the metadata-compression flag clear when compression is skipped." \
+		"$result" "meta=0"
+	assertContains "Adaptive remote source discovery should mark the explicit metadata-compression skip state." \
+		"$result" "skip=1"
+}
+
+test_zxfer_should_skip_remote_snapshot_discovery_compression_requires_remote_multi_job_compressed_run() {
+	g_option_z_compress=1
+	g_option_O_origin_host="origin.example"
+	g_option_j_jobs=2
+
+	set +e
+	zxfer_should_skip_remote_snapshot_discovery_compression
+	status=$?
+	set -e
+
+	assertEquals "Remote multi-job discovery should skip metadata compression." \
+		0 "$status"
+
+	set +e
+	g_option_j_jobs=1
+	zxfer_should_skip_remote_snapshot_discovery_compression
+	status=$?
+	set -e
+
+	assertEquals "Single-job discovery should not claim the adaptive remote skip path." \
+		1 "$status"
+
+	set +e
+	g_option_j_jobs=2
+	g_option_O_origin_host=""
+	zxfer_should_skip_remote_snapshot_discovery_compression
+	status=$?
+	set -e
+
+	assertEquals "Local discovery should not use the remote metadata compression skip path." \
+		1 "$status"
+
+	set +e
+	g_option_O_origin_host="origin.example"
+	g_option_z_compress=0
+	zxfer_should_skip_remote_snapshot_discovery_compression
+	status=$?
+	set -e
+
+	assertEquals "Discovery should not skip metadata compression when -z is disabled." \
+		1 "$status"
 }
 
 test_write_source_snapshot_list_to_file_uses_execute_background_cmd_when_serial() {
@@ -183,6 +645,7 @@ test_write_source_snapshot_list_to_file_tracks_profile_counters_when_very_verbos
 			:
 		}
 		build_source_snapshot_list_cmd() {
+			g_source_snapshot_list_uses_parallel=1
 			printf '%s\n' "printf 'snap-profile'"
 		}
 		g_option_V_very_verbose=1
@@ -241,6 +704,64 @@ ssh=1
 source_ssh=1" "$(cat "$log")"
 }
 
+test_write_source_snapshot_list_to_file_logs_when_remote_metadata_compression_is_skipped() {
+	log="$TEST_TMPDIR/source_remote_skip_compress.log"
+	outfile="$TEST_TMPDIR/source_remote_skip_compress.out"
+	errfile="$TEST_TMPDIR/source_remote_skip_compress.err"
+	: >"$log"
+
+	(
+		echoV() {
+			printf '%s\n' "$*" >>"$log"
+		}
+		build_source_snapshot_list_cmd() {
+			g_source_snapshot_list_skipped_metadata_compression=1
+			printf '%s\n' "printf 'remote-snap-profile'"
+		}
+		execute_background_cmd() {
+			printf '%s\n' "run" >>"$log"
+			g_last_background_pid=3131
+		}
+		g_option_V_very_verbose=1
+		g_option_j_jobs=2
+		g_option_z_compress=1
+		g_option_O_origin_host="origin.example"
+		write_source_snapshot_list_to_file "$outfile" "$errfile"
+	)
+
+	assertContains "Very-verbose remote discovery should explain when adaptive metadata compression is skipped." \
+		"$(cat "$log")" "Skipping remote source snapshot-list compression for adaptive metadata discovery."
+}
+
+test_write_source_snapshot_list_to_file_does_not_log_metadata_skip_for_single_job_remote_listing() {
+	log="$TEST_TMPDIR/source_remote_no_skip.log"
+	outfile="$TEST_TMPDIR/source_remote_no_skip.out"
+	errfile="$TEST_TMPDIR/source_remote_no_skip.err"
+	: >"$log"
+
+	(
+		echoV() {
+			printf '%s\n' "$*" >>"$log"
+		}
+		build_source_snapshot_list_cmd() {
+			g_source_snapshot_list_skipped_metadata_compression=0
+			printf '%s\n' "printf 'remote-snap-profile'"
+		}
+		execute_background_cmd() {
+			printf '%s\n' "run" >>"$log"
+			g_last_background_pid=3131
+		}
+		g_option_V_very_verbose=1
+		g_option_j_jobs=1
+		g_option_z_compress=1
+		g_option_O_origin_host="origin.example"
+		write_source_snapshot_list_to_file "$outfile" "$errfile"
+	)
+
+	assertNotContains "Single-job remote listing should not log the adaptive metadata-compression skip message." \
+		"$(cat "$log")" "Skipping remote source snapshot-list compression for adaptive metadata discovery."
+}
+
 test_write_source_snapshot_list_to_file_backgrounds_parallel_command() {
 	outfile="$TEST_TMPDIR/source_parallel.out"
 	lastcmd_file="$TEST_TMPDIR/source_parallel.lastcmd"
@@ -270,6 +791,13 @@ test_write_source_snapshot_list_to_file_surfaces_parallel_validation_errors() {
 	set +e
 	output=$(
 		(
+			zxfer_get_source_snapshot_parallel_dataset_threshold() {
+				printf '%s\n' 2
+			}
+			zxfer_get_source_snapshot_discovery_dataset_list() {
+				printf '%s\n' "tank/src"
+				printf '%s\n' "tank/src/child"
+			}
 			throw_error() {
 				printf '%s\n' "$1"
 				exit 1
@@ -322,30 +850,150 @@ tank/src@snap-b
 tank/src@snap-a" "$output"
 }
 
-test_reverse_file_lines_preserves_full_payload_for_seven_digit_numbered_input() {
-	input_file="$TEST_TMPDIR/reverse_file_lines_input.txt"
-	: >"$input_file"
-
+test_reverse_numbered_line_stream_uses_linear_reverse_for_monotonic_numbered_input() {
 	output=$(
 		(
-			cat() {
-				if [ "$1" = "-n" ] && [ "$2" = "$input_file" ]; then
-					printf '%s\n' \
-						'     2	tank/src@snap-b' \
-						'1000000	tank/src@snap-million' \
-						'     1	tank/src@snap-a'
-				else
-					command cat "$@"
-				fi
+			zxfer_reverse_numbered_file_lines_with_sort() {
+				printf '%s\n' "sort-fallback-should-not-run"
+				return 23
 			}
+			cat <<'EOF' | reverse_numbered_line_stream
+     1	tank/src@snap-a
+     2	tank/src@snap-b
+1000000	tank/src@snap-million
+EOF
+		)
+	)
+
+	assertEquals "Monotonic numbered input should use the linear reverse path instead of the sort fallback." \
+		"tank/src@snap-million
+tank/src@snap-b
+tank/src@snap-a" "$output"
+}
+
+test_reverse_numbered_line_stream_preserves_full_payload_when_falling_back_to_sort() {
+	output=$(
+		(
+			g_zxfer_linear_reverse_max_lines=1
+			cat <<'EOF' | reverse_numbered_line_stream
+     2	tank/src@snap-b
+1000000	tank/src@snap-million
+     1	tank/src@snap-a
+EOF
+		)
+	)
+
+	assertEquals "The large-input fallback should preserve the full payload once line numbers grow past six digits." \
+		"tank/src@snap-million
+tank/src@snap-b
+tank/src@snap-a" "$output"
+}
+
+test_reverse_file_lines_uses_linear_reverse_for_small_inputs() {
+	input_file="$TEST_TMPDIR/reverse_file_lines_input.txt"
+	cat <<'EOF' >"$input_file"
+tank/src@snap-a
+tank/src@snap-million
+tank/src@snap-b
+EOF
+	output=$(reverse_file_lines "$input_file")
+
+	assertEquals "reverse_file_lines should reverse small inputs without depending on numbered-sort formatting." \
+		"tank/src@snap-b
+tank/src@snap-million
+tank/src@snap-a" "$output"
+}
+
+test_reverse_file_lines_falls_back_to_sort_for_large_inputs() {
+	input_file="$TEST_TMPDIR/reverse_file_lines_fallback_input.txt"
+	cat <<'EOF' >"$input_file"
+tank/src@snap-a
+tank/src@snap-b
+tank/src@snap-million
+tank/src@snap-c
+EOF
+	output=$(
+		(
+			g_zxfer_linear_reverse_max_lines=1
 			reverse_file_lines "$input_file"
 		)
 	)
 
-	assertEquals "reverse_file_lines should preserve the full payload when cat -n emits seven-digit line numbers." \
-		"tank/src@snap-million
+	assertEquals "reverse_file_lines should retain the sort-based fallback for larger inputs to avoid unbounded awk memory growth." \
+		"tank/src@snap-c
+tank/src@snap-million
 tank/src@snap-b
 tank/src@snap-a" "$output"
+}
+
+test_zxfer_should_use_linear_reverse_for_file_rejects_non_numeric_threshold() {
+	input_file="$TEST_TMPDIR/reverse_threshold_input.txt"
+	printf '%s\n' "tank/src@snap-a" >"$input_file"
+
+	output=$(
+		(
+			g_zxfer_linear_reverse_max_lines="bogus"
+			zxfer_should_use_linear_reverse_for_file "$input_file"
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertEquals "Non-numeric reverse thresholds should disable the linear awk fast path." \
+		"status=1" "$output"
+}
+
+test_zxfer_should_use_linear_reverse_for_file_rejects_non_numeric_wc_output() {
+	input_file="$TEST_TMPDIR/reverse_wc_input.txt"
+	printf '%s\n' "tank/src@snap-a" >"$input_file"
+
+	output=$(
+		(
+			wc() {
+				printf '%s\n' "bogus"
+			}
+			zxfer_should_use_linear_reverse_for_file "$input_file"
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertEquals "Invalid line-count output should disable the linear awk fast path." \
+		"status=1" "$output"
+}
+
+test_reverse_numbered_line_stream_returns_failure_when_buffering_fails() {
+	output=$(
+		(
+			cat() {
+				return 1
+			}
+			printf '%s\n' "     1	tank/src@snap-a" | reverse_numbered_line_stream
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertEquals "reverse_numbered_line_stream should fail cleanly when it cannot buffer stdin." \
+		"status=1" "$output"
+}
+
+test_zxfer_reverse_plain_file_lines_with_sort_returns_failure_when_numbering_fails() {
+	input_file="$TEST_TMPDIR/reverse_sort_failure_input.txt"
+	printf '%s\n' "tank/src@snap-a" >"$input_file"
+
+	output=$(
+		(
+			cat() {
+				if [ "$1" = "-n" ]; then
+					return 1
+				fi
+				command cat "$@"
+			}
+			zxfer_reverse_plain_file_lines_with_sort "$input_file"
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertEquals "The sort fallback should fail cleanly when numbering the file fails." \
+		"status=1" "$output"
 }
 
 test_set_g_recursive_source_list_applies_exclude_filter_and_verbose_output() {
@@ -419,6 +1067,62 @@ test_write_destination_snapshot_list_to_files_outputs_empty_when_destination_mis
 
 	assertEquals "Missing destination datasets should yield an empty raw snapshot file." "" "$(cat "$full_file")"
 	assertEquals "Missing destination datasets should yield an empty normalized snapshot file." "" "$(cat "$norm_file")"
+}
+
+test_write_destination_snapshot_list_to_files_reports_destination_probe_failures() {
+	full_file="$TEST_TMPDIR/dest_probe_fail_full.txt"
+	norm_file="$TEST_TMPDIR/dest_probe_fail_norm.txt"
+
+	set +e
+	output=$(
+		(
+			exists_destination() {
+				printf '%s\n' "Failed to determine whether destination dataset [backup/dst/src] exists: permission denied"
+				return 1
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			write_destination_snapshot_list_to_files "$full_file" "$norm_file"
+		)
+	)
+	status=$?
+
+	assertEquals "Destination snapshot discovery should fail closed when destination existence checks fail." 1 "$status"
+	assertContains "Destination snapshot discovery should surface the destination probe failure." \
+		"$output" "Failed to determine whether destination dataset [backup/dst/src] exists: permission denied"
+}
+
+test_write_destination_snapshot_list_to_files_reports_snapshot_listing_failures() {
+	full_file="$TEST_TMPDIR/dest_list_fail_full.txt"
+	norm_file="$TEST_TMPDIR/dest_list_fail_norm.txt"
+
+	set +e
+	output=$(
+		(
+			exists_destination() {
+				printf '1\n'
+			}
+			zxfer_record_last_command_string() {
+				:
+			}
+			run_destination_zfs_cmd() {
+				printf '%s\n' "ssh timeout" >&2
+				return 1
+			}
+			throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			write_destination_snapshot_list_to_files "$full_file" "$norm_file"
+		)
+	)
+	status=$?
+
+	assertEquals "Destination snapshot discovery should abort when listing snapshots fails." 1 "$status"
+	assertContains "Destination snapshot listing failures should surface the generic destination snapshot-list error." \
+		"$output" "Failed to retrieve snapshot list from the destination."
 }
 
 test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing_slash_sources() {
@@ -508,15 +1212,222 @@ EOF
 	sort "$dest_tmp" -o "$dest_tmp"
 	g_option_v_verbose=1
 	g_option_x_exclude_datasets=""
+	output=$(
+		(
+			zxfer_get_snapshot_identity_records_for_dataset() {
+				if [ "$1:$2" = "source:tank/src" ]; then
+					printf '%s\n' "tank/src@a	111" "tank/src@b	222"
+					return 0
+				fi
+				if [ "$1:$2" = "destination:backup/dst/src" ]; then
+					printf '%s\n' "backup/dst/src@a	111" "backup/dst/src@b	222"
+					return 0
+				fi
+				return 1
+			}
 
-	set_g_recursive_source_list "$source_tmp" "$dest_tmp" >"$output_file"
+			set_g_recursive_source_list "$source_tmp" "$dest_tmp" >"$output_file"
+			printf 'source=%s\n' "$g_recursive_source_list"
+			printf 'datasets=%s\n' "$g_recursive_source_dataset_list"
+			printf 'dest=%s\n' "$g_recursive_destination_extra_dataset_list"
+		)
+	)
 
-	assertEquals "Matching source and destination snapshots should leave no datasets queued for transfer." \
-		"" "$g_recursive_source_list"
-	assertEquals "Dataset caches should still reflect the source datasets even when nothing needs transfer." \
-		"tank/src" "$g_recursive_source_dataset_list"
+	assertContains "Matching source and destination snapshots should leave no datasets queued for transfer after guid validation." \
+		"$output" "source="
+	assertContains "Dataset caches should still reflect the source datasets even when nothing needs transfer." \
+		"$output" "datasets=tank/src"
+	assertContains "Matching source and destination snapshots should leave no datasets queued for delete-only inspection after guid validation." \
+		"$output" "dest="
 	assertContains "Verbose mode should explain when no new snapshots need transfer." \
 		"$(cat "$output_file")" "No new snapshots to transfer."
+}
+
+test_set_g_recursive_source_list_tracks_destination_only_snapshot_datasets() {
+	source_tmp="$TEST_TMPDIR/source_delete_delta.txt"
+	dest_tmp="$TEST_TMPDIR/dest_delete_delta.txt"
+	cat <<'EOF' >"$source_tmp"
+tank/src@a
+EOF
+	cat <<'EOF' >"$dest_tmp"
+tank/src@a
+tank/src/child@extra
+EOF
+	sort "$source_tmp" -o "$source_tmp"
+	sort "$dest_tmp" -o "$dest_tmp"
+	g_option_x_exclude_datasets=""
+
+	zxfer_get_snapshot_identity_records_for_dataset() {
+		if [ "$1:$2" = "source:tank/src" ]; then
+			printf '%s\n' "tank/src@a	111"
+			return 0
+		fi
+		if [ "$1:$2" = "destination:backup/dst/src" ]; then
+			printf '%s\n' "backup/dst/src@a	111"
+			return 0
+		fi
+		return 1
+	}
+
+	set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+
+	assertEquals "Destination-only snapshot datasets should be tracked separately for delete-only inspection." \
+		"tank/src/child" "$g_recursive_destination_extra_dataset_list"
+	unset -f zxfer_get_snapshot_identity_records_for_dataset
+}
+
+test_set_g_recursive_source_list_marks_guid_divergence_when_name_only_lists_match() {
+	source_tmp="$TEST_TMPDIR/source_guid_divergence.txt"
+	dest_tmp="$TEST_TMPDIR/dest_guid_divergence.txt"
+	output_file="$TEST_TMPDIR/source_guid_divergence.out"
+	cat <<'EOF' >"$source_tmp"
+tank/src@same
+EOF
+	cat <<'EOF' >"$dest_tmp"
+tank/src@same
+EOF
+	sort "$source_tmp" -o "$source_tmp"
+	sort "$dest_tmp" -o "$dest_tmp"
+	g_option_x_exclude_datasets=""
+
+	(
+		zxfer_get_snapshot_identity_records_for_dataset() {
+			case "$1:$2" in
+			source:tank/src)
+				printf '%s\n' "tank/src@same	111"
+				;;
+			destination:backup/dst/src)
+				printf '%s\n' "backup/dst/src@same	999"
+				;;
+			*)
+				return 1
+				;;
+			esac
+		}
+
+		set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+		printf 'source=%s\n' "$g_recursive_source_list"
+		printf 'dest=%s\n' "$g_recursive_destination_extra_dataset_list"
+	) >"$output_file"
+
+	assertContains "Datasets that only differ by guid should still be marked for transfer after lazy identity validation." \
+		"$(cat "$output_file")" "source=tank/src"
+	assertContains "Datasets that only differ by guid should still be marked for delete inspection after lazy identity validation." \
+		"$(cat "$output_file")" "dest=tank/src"
+}
+
+test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_updates_lists_in_current_shell() {
+	source_tmp="$TEST_TMPDIR/refine_guid_source.txt"
+	dest_tmp="$TEST_TMPDIR/refine_guid_dest.txt"
+	printf '%s\n' "tank/src@same" >"$source_tmp"
+	printf '%s\n' "tank/src@same" >"$dest_tmp"
+	g_recursive_source_list=""
+	g_recursive_destination_extra_dataset_list=""
+
+	zxfer_get_snapshot_identity_records_for_dataset() {
+		case "$1:$2" in
+		source:tank/src)
+			printf '%s\n' "tank/src@same	111"
+			;;
+		destination:backup/dst/src)
+			printf '%s\n' "backup/dst/src@same	999"
+			;;
+		*)
+			return 1
+			;;
+		esac
+	}
+
+	zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
+
+	assertEquals "Lazy identity refinement should add guid-divergent datasets back into the source-delta list in the current shell." \
+		"tank/src" "$g_recursive_source_list"
+	assertEquals "Lazy identity refinement should add guid-divergent datasets back into the destination-extra list in the current shell." \
+		"tank/src" "$g_recursive_destination_extra_dataset_list"
+	unset -f zxfer_get_snapshot_identity_records_for_dataset
+}
+
+test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_identity_probe_failures() {
+	source_tmp="$TEST_TMPDIR/refine_guid_error_source.txt"
+	dest_tmp="$TEST_TMPDIR/refine_guid_error_dest.txt"
+	printf '%s\n' "tank/src@same" >"$source_tmp"
+	printf '%s\n' "tank/src@same" >"$dest_tmp"
+
+	set +e
+	output=$(
+		(
+			zxfer_get_snapshot_identity_records_for_dataset() {
+				return 1
+			}
+
+			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Lazy identity refinement should fail closed when a source identity probe fails." 1 "$status"
+	assertContains "Source identity probe failures should surface the dataset that could not be validated." \
+		"$output" "Failed to retrieve source snapshot identities for [tank/src]."
+}
+
+test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_destination_identity_probe_failures() {
+	source_tmp="$TEST_TMPDIR/refine_guid_dest_error_source.txt"
+	dest_tmp="$TEST_TMPDIR/refine_guid_dest_error_dest.txt"
+	printf '%s\n' "tank/src@same" >"$source_tmp"
+	printf '%s\n' "tank/src@same" >"$dest_tmp"
+
+	set +e
+	output=$(
+		(
+			zxfer_get_snapshot_identity_records_for_dataset() {
+				if [ "$1:$2" = "source:tank/src" ]; then
+					printf '%s\n' "tank/src@same	111"
+				elif [ "$1:$2" = "destination:backup/dst/src" ]; then
+					return 1
+				fi
+			}
+
+			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Lazy identity refinement should fail closed when a destination identity probe fails." 1 "$status"
+	assertContains "Destination identity probe failures should surface the mapped destination dataset." \
+		"$output" "Failed to retrieve destination snapshot identities for [backup/dst/src]."
+}
+
+test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_merges_existing_lists_in_current_shell() {
+	source_tmp="$TEST_TMPDIR/refine_guid_merge_source.txt"
+	dest_tmp="$TEST_TMPDIR/refine_guid_merge_dest.txt"
+	printf '%s\n' "tank/src@same" >"$source_tmp"
+	printf '%s\n' "tank/src@same" >"$dest_tmp"
+	g_recursive_source_list="tank/already"
+	g_recursive_destination_extra_dataset_list="tank/extra"
+
+	zxfer_get_snapshot_identity_records_for_dataset() {
+		case "$1:$2" in
+		source:tank/src)
+			printf '%s\n' "tank/src@same	111"
+			;;
+		destination:backup/dst/src)
+			printf '%s\n' "backup/dst/src@same	999"
+			;;
+		*)
+			return 1
+			;;
+		esac
+	}
+
+	zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
+
+	assertEquals "Guid-divergent datasets should be merged into the existing source-delta list." \
+		"tank/already
+tank/src" "$g_recursive_source_list"
+	assertEquals "Guid-divergent datasets should be merged into the existing destination-extra list." \
+		"tank/extra
+tank/src" "$g_recursive_destination_extra_dataset_list"
+	unset -f zxfer_get_snapshot_identity_records_for_dataset
 }
 
 test_set_g_recursive_source_list_treats_tmpdir_derived_paths_as_literal() {
@@ -623,14 +1534,258 @@ EOF
 			}
 			get_zfs_list
 			printf 'dest=%s\n' "$g_recursive_dest_list"
-			printf 'source=%s\n' "$g_lzfs_list_hr_S_snap"
+			printf 'source_reversed_before=%s\n' "${g_lzfs_list_hr_S_snap:-}"
+			printf 'source=%s\n' "$(zxfer_get_snapshot_records_for_dataset source "tank/src")"
 		)
 	)
 
 	assertContains "Bootstrap path should treat the missing destination dataset as an empty recursive list." "$output" "dest="
-	assertContains "Source snapshots should still be collected and reversed for send planning." \
+	assertContains "Snapshot discovery should leave the reversed source cache unset until a later consumer asks for per-dataset records." \
+		"$output" "source_reversed_before="
+	assertContains "Per-dataset source lookups should still lazily return newest-first records for send planning." \
 		"$output" "source=tank/src@snapB
 tank/src@snapA"
+}
+
+test_get_zfs_list_reports_pool_lookup_failure_when_destination_root_has_no_slash() {
+	set +e
+	output=$(
+		(
+			counter_file="$TEST_TMPDIR/get_zfs_list_root_missing.counter"
+			printf '%s\n' 0 >"$counter_file"
+			get_temp_file() {
+				idx=$(cat "$counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$counter_file"
+				printf '%s\n' "$TEST_TMPDIR/get_zfs_list_root_missing.$idx"
+			}
+			write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+			}
+			write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			set_g_recursive_source_list() {
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
+			}
+			run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
+					printf '%s\n' "dataset does not exist" >&2
+					return 1
+				fi
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] && [ "$5" = "backup" ]; then
+					printf '%s\n' "pool lookup failed" >&2
+					return 1
+				fi
+				return 1
+			}
+			throw_usage_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_destination="backup"
+			get_zfs_list
+		)
+	)
+	status=$?
+
+	assertEquals "Missing destination roots without a slash should still fail closed when the pool lookup fails." 1 "$status"
+	assertContains "Destination-root lookup failures should preserve the documented dataset-list message." \
+		"$output" "Failed to retrieve list of datasets from the destination"
+}
+
+test_get_zfs_list_seeds_destination_existence_cache_from_recursive_dataset_list() {
+	output=$(
+		(
+			write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+			}
+			write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			reverse_file_lines() {
+				cat "$1"
+			}
+			run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
+					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
+					[ "$7" = "backup/dst" ]; then
+					printf '%s\n' "backup/dst"
+					printf '%s\n' "backup/dst/existing"
+					return 0
+				fi
+				return 1
+			}
+			get_zfs_list
+			printf 'root=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst")"
+			printf 'existing=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst/existing")"
+			printf 'missing=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst/missing")"
+		)
+	)
+
+	assertContains "Destination discovery should seed the root dataset into the existence cache." \
+		"$output" "root=1"
+	assertContains "Destination discovery should seed known descendants into the existence cache." \
+		"$output" "existing=1"
+	assertContains "Destination discovery should let later callers infer missing descendants without another probe." \
+		"$output" "missing=0"
+}
+
+test_get_zfs_list_lazily_builds_per_dataset_snapshot_indexes() {
+	output=$(
+		(
+			source_root_file="$TEST_TMPDIR/get_zfs_lazy_source_root.records"
+			source_child_file="$TEST_TMPDIR/get_zfs_lazy_source_child.records"
+			dest_root_file="$TEST_TMPDIR/get_zfs_lazy_dest_root.records"
+			dest_child_file="$TEST_TMPDIR/get_zfs_lazy_dest_child.records"
+			write_source_snapshot_list_to_file() {
+				cat <<'EOF' >"$1"
+tank/src@snap1
+tank/src/child@child1
+tank/src@snap2
+EOF
+			}
+			write_destination_snapshot_list_to_files() {
+				cat <<'EOF' >"$1"
+backup/dst@snap2
+backup/dst@legacy1
+backup/dst/child@child1
+EOF
+				: >"$2"
+			}
+			set_g_recursive_source_list() {
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list=$(printf '%s\n%s' "tank/src" "tank/src/child")
+			}
+			run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
+					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
+					[ "$7" = "backup/dst" ]; then
+					printf '%s\n' "backup/dst"
+					printf '%s\n' "backup/dst/child"
+					return 0
+				fi
+				return 1
+			}
+			get_zfs_list
+			printf 'source_ready_before=%s\n' "${g_zxfer_source_snapshot_record_index_ready:-0}"
+			printf 'dest_ready_before=%s\n' "${g_zxfer_destination_snapshot_record_index_ready:-0}"
+			zxfer_get_snapshot_records_for_dataset source "tank/src" >"$source_root_file"
+			zxfer_get_snapshot_records_for_dataset source "tank/src/child" >"$source_child_file"
+			zxfer_get_snapshot_records_for_dataset destination "backup/dst" >"$dest_root_file"
+			zxfer_get_snapshot_records_for_dataset destination "backup/dst/child" >"$dest_child_file"
+			printf 'source_root=%s\n' "$(cat "$source_root_file")"
+			printf 'source_child=%s\n' "$(cat "$source_child_file")"
+			printf 'dest_root=%s\n' "$(cat "$dest_root_file")"
+			printf 'dest_child=%s\n' "$(cat "$dest_child_file")"
+			printf 'source_ready_after=%s\n' "${g_zxfer_source_snapshot_record_index_ready:-0}"
+			printf 'dest_ready_after=%s\n' "${g_zxfer_destination_snapshot_record_index_ready:-0}"
+		)
+	)
+
+	assertContains "Snapshot discovery should leave the source per-dataset index unset until a consumer needs it." \
+		"$output" "source_ready_before=0"
+	assertContains "Snapshot discovery should leave the destination per-dataset index unset until a consumer needs it." \
+		"$output" "dest_ready_before=0"
+	assertContains "Snapshot discovery should cache newest-first source snapshots for the root dataset." \
+		"$output" "source_root=tank/src@snap2
+tank/src@snap1"
+	assertContains "Snapshot discovery should cache source snapshots for child datasets separately." \
+		"$output" "source_child=tank/src/child@child1"
+	assertContains "Snapshot discovery should cache destination snapshots in live destination order." \
+		"$output" "dest_root=backup/dst@snap2
+backup/dst@legacy1"
+	assertContains "Snapshot discovery should cache destination child snapshots separately." \
+		"$output" "dest_child=backup/dst/child@child1"
+	assertContains "The source per-dataset index should be built lazily on first lookup." \
+		"$output" "source_ready_after=1"
+	assertContains "The destination per-dataset index should be built lazily on first lookup." \
+		"$output" "dest_ready_after=1"
+}
+
+test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
+	output=$(
+		(
+			counter_file="$TEST_TMPDIR/get_zfs_profile.counter"
+			now_counter_file="$TEST_TMPDIR/get_zfs_profile.now.counter"
+			printf '%s\n' 0 >"$counter_file"
+			printf '%s\n' 0 >"$now_counter_file"
+			get_temp_file() {
+				idx=$(cat "$counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$counter_file"
+				printf '%s\n' "$TEST_TMPDIR/get_zfs_profile.$idx"
+			}
+			zxfer_profile_now_ms() {
+				idx=$(cat "$now_counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$now_counter_file"
+				if [ "$idx" = "1" ]; then
+					printf '%s\n' 1000
+				elif [ "$idx" = "2" ]; then
+					printf '%s\n' 1500
+				elif [ "$idx" = "3" ]; then
+					printf '%s\n' 1900
+				elif [ "$idx" = "4" ]; then
+					printf '%s\n' 2600
+				elif [ "$idx" = "5" ]; then
+					printf '%s\n' 3000
+				elif [ "$idx" = "6" ]; then
+					printf '%s\n' 3550
+				fi
+			}
+			echoV() {
+				:
+			}
+			write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			reverse_file_lines() {
+				cat "$1"
+			}
+			zxfer_build_snapshot_record_index() {
+				:
+			}
+			g_option_V_very_verbose=1
+			run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
+					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
+					[ "$7" = "backup/dst" ]; then
+					printf '%s\n' "backup/dst"
+					return 0
+				fi
+				return 1
+			}
+			get_zfs_list
+			printf 'source_ms=%s\n' "${g_zxfer_profile_source_snapshot_listing_ms:-0}"
+			printf 'destination_ms=%s\n' "${g_zxfer_profile_destination_snapshot_listing_ms:-0}"
+			printf 'diff_ms=%s\n' "${g_zxfer_profile_snapshot_diff_sort_ms:-0}"
+		)
+	)
+
+	assertContains "Very-verbose snapshot discovery should accumulate source snapshot listing timings." \
+		"$output" "source_ms=1600"
+	assertContains "Very-verbose snapshot discovery should accumulate destination listing timings." \
+		"$output" "destination_ms=400"
+	assertContains "Very-verbose snapshot discovery should accumulate diff/sort timings." \
+		"$output" "diff_ms=550"
 }
 
 test_get_zfs_list_throws_when_source_snapshot_list_is_empty() {

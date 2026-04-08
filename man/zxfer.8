@@ -195,7 +195,7 @@ will begin at the level you specify, and traverse the filesystem hierarchy back
 to the pool level until it finds an appropriate
 .Pa .zxfer_backup_info
 file inside the hardened metadata directory
-.Pq Pa ZXFER_BACKUP_DIR/mountpoint/.zxfer_backup_info.<tail>
+.Pq Pa ZXFER_BACKUP_DIR/source/dataset/path/.zxfer_backup_info.<tail>.<id>
 or fails. It will use the first such file it comes across, so be careful about
 backing up from multiple individual levels of the same filesystem hierarchy.
 Legacy files that still live directly inside dataset mountpoints are read as a
@@ -211,20 +211,22 @@ Prints (h)elp.
 .It Fl k
 Bac(k)up property mode. This backs up the original filesystem property settings
 to a file
-.Pa .zxfer_backup_info.<pool_name>
+.Pa .zxfer_backup_info.<tail>.<id>
 stored inside the hardened metadata directory
-.Pq Pa ZXFER_BACKUP_DIR/mountpoint/.
+.Pq Pa ZXFER_BACKUP_DIR/source/dataset/path/.
 This file lives outside the dataset mountpoints so unprivileged users cannot
-pre-create symlinks. For example, if you are backing up
-.Pa zroot
-to be located as per
-.Pa storage/backups/zroot/...
+pre-create symlinks. The
+.Aq id
+suffix is derived from the full source and destination pair so distinct
+replication runs do not overwrite each other just because they share the same
+source tail. For example, if you are backing up
+.Pa tank/src
 and you keep the default
 .Ev ZXFER_BACKUP_DIR
 of
 .Pa /var/db/zxfer ,
 the file
-.Pa /var/db/zxfer/storage/backups/.zxfer_backup_info.zroot
+.Pa /var/db/zxfer/tank/src/.zxfer_backup_info.src.k1234567890.8
 would hold all the information about the original values of the filesystem
 properties, and some other useful info. Set
 .Ev ZXFER_BACKUP_DIR
@@ -248,6 +250,12 @@ backup will be able to store the correct properties of the original.
 Dry ru(n) mode. Prints out the commands that would otherwise execute but does
 not execute them. This may not work in all circumstances as it may expect the
 existence of filesystems etc. that won't be created. When combined with
+.Fl k ,
+.Nm
+also only previews the local or remote secure backup-directory preparation
+commands under
+.Ev ZXFER_BACKUP_DIR
+instead of creating or chmodding those directories during preflight. When combined with
 .Fl s
 or
 .Fl m ,
@@ -396,6 +404,9 @@ A number of macros will be replaced with values before the command is executed:
 .Bl -tag -width a
 .It %%size%%
 Will be replaced with the estimated size of the snapshot.
+On remote or multi-job runs,
+.Nm
+may use a cheaper approximate probe for this value to reduce startup latency.
 .It %%title%%
 Will be replaced with the name of the source dataset@snapshot.
 .El
@@ -456,10 +467,12 @@ Do not copy this comma separated list of properties when performing replication.
 Useful for skipping properties like quotas that can interfere with replication,
 or properties that are not supported on the destination.
 .It Fl j Ar jobs
-Run up to this many zfs send/receive jobs concurrently and parallelize listing
-snapshots when determining the work queue. The default is 1, which disables
-background sends. Raising this value can hide WAN latency or speed up large
-replications, but will also increase memory, CPU and I/O load.
+Run up to this many zfs send/receive jobs concurrently and use adaptive source
+snapshot discovery when determining the work queue. Larger trees can still use
+GNU parallel for per-dataset source listing, while smaller or startup-bound
+runs stay on the cheaper single recursive listing path. The default is 1,
+which disables background sends. Raising this value can hide WAN latency or
+speed up large replications, but will also increase memory, CPU and I/O load.
 .It Fl m
 After sending all snapshots, (m)igrate the source to the destination filesystem by
 unmounting the source filesystem and changing the new filesystem's
@@ -622,7 +635,8 @@ This allows replicating from newer versions of OpenZFS to older versions.
 (v) verbose mode
 .It Fl V
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
-profiling counters for ZFS, ssh, and selected replication hot paths
+profiling counters plus accumulated stage timings for ssh setup, snapshot
+listing, and diff/sort hot paths
 .It Fl w
 uses zfs ra(w) send mode
 .It Fl Y
@@ -642,6 +656,13 @@ This converts:
 to
 .Pp
 .Dl zfs send dataset@snap1 | zstd -3 | ssh user@host "zstd -d | /sbin/zfs receive destination"
+.Pp
+Adaptive remote source snapshot-list metadata discovery
+.Pq Fl O No with Fl j No and Fl z
+may skip metadata compression so no-op or startup-bound runs avoid extra
+compression/decompression work before zxfer decides whether any snapshots
+actually need transfer. This does not change the compression behavior of real
+send/receive streams.
 .It Fl Z
 Pass the zstd command to use during compression.
 .Op Fl O
@@ -651,11 +672,16 @@ must also be provided.
 .Pp
 e.g.
 .Pp
--Z "zstd -T0 -9"
+-Z "zstd -T0 -3"
 .Pp
 This will modify the default -z option to
 .Pp
-.Dl zfs send dataset@snap1 | zstd -T0 -9 | ssh user@host "zstd -d | /sbin/zfs receive"
+.Dl zfs send dataset@snap1 | zstd -T0 -3 | ssh user@host "zstd -d | /sbin/zfs receive"
+.Pp
+Higher custom levels such as
+.Li -9
+can improve compression ratio, but they consume substantially more CPU time and
+are therefore not the default.
 
 .El
 .Sh EXAMPLES
@@ -930,6 +956,15 @@ UID and already use mode 0600, and newly created log files are chmodded to
 0600. If zxfer cannot append the report it emits a warning to
 .Dv stderr
 but preserves the original zxfer exit status.
+.It Ev TMPDIR
+Optional local scratch root for zxfer temporary files, FIFOs, and caches.
+When set, it must resolve to an absolute directory owned by root or the
+effective UID and not be writable by other users unless the sticky bit is set;
+otherwise zxfer prefers a validated memory-backed temporary directory such as
+.Pa /dev/shm
+or
+.Pa /run/shm
+when available and falls back to the system temporary directory.
 .Pp
 The repository includes
 .Pa examples/error-log-email-notify.sh ,

@@ -10,15 +10,23 @@ replication flow.
 ## Module Layout
 
 - [../src/zxfer_common.sh](../src/zxfer_common.sh): shared helpers, secure-path
-  handling, quoting, ssh helpers, temp files, failure reporting
+  handling, quoting, temp files, failure reporting
 - [../src/zxfer_globals.sh](../src/zxfer_globals.sh): global initialization,
-  CLI parsing, dependency resolution, backup metadata lookup
+  CLI parsing, local dependency resolution, runtime state
+- [../src/zxfer_secure_paths.sh](../src/zxfer_secure_paths.sh): filesystem
+  ownership/mode checks, secure-path validation, symlink-aware path guards
+- [../src/zxfer_remote_cli.sh](../src/zxfer_remote_cli.sh): remote helper
+  resolution, capability handshakes, ssh control-socket management
+- [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh): backup
+  metadata path derivation, secure lookup, legacy fallback, read/write flows
+- [../src/zxfer_property_cache.sh](../src/zxfer_property_cache.sh): normalized
+  property caching, prefetch state, iteration cache invalidation
 - [../src/zxfer_get_zfs_list.sh](../src/zxfer_get_zfs_list.sh): source and
   destination dataset / snapshot discovery
 - [../src/zxfer_inspect_delete_snap.sh](../src/zxfer_inspect_delete_snap.sh):
   snapshot comparison and deletion planning
 - [../src/zxfer_transfer_properties.sh](../src/zxfer_transfer_properties.sh):
-  property collection, filtering, diffing, and apply logic
+  property diffing, filtering, override planning, and apply logic
 - [../src/zxfer_zfs_send_receive.sh](../src/zxfer_zfs_send_receive.sh): send /
   receive command construction, progress pipeline, compression handling
 - [../src/zxfer_zfs_mode.sh](../src/zxfer_zfs_mode.sh): dataset iteration,

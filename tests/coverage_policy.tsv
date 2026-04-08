@@ -2,8 +2,12 @@
 TOTAL	87.00
 src/zxfer_common.sh	85.00
 src/zxfer_get_zfs_list.sh	89.50
+src/zxfer_backup_metadata.sh	90.00
 src/zxfer_globals.sh	83.50
 src/zxfer_inspect_delete_snap.sh	83.00
+src/zxfer_property_cache.sh	90.00
+src/zxfer_remote_cli.sh	90.00
+src/zxfer_secure_paths.sh	90.00
 src/zxfer_transfer_properties.sh	92.00
 src/zxfer_zfs_mode.sh	88.50
 src/zxfer_zfs_send_receive.sh	93.00

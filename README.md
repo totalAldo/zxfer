@@ -31,9 +31,12 @@ Or read the bundled manpages in this checkout:
 - Local and remote replication with `-O` / `-T`
 - Remote host specs that can include wrappers such as `pfexec` or `doas`
 - Optional remote compression with `zstd`
-- Optional progress hooks with `-D`
+- Optional progress hooks with `-D` (uses approximate `%%size%%` values on
+  remote or multi-job runs to reduce startup latency)
 - Property replication, property ignore lists, and unsupported-property skipping
-- Hardened property backup / restore with `-k` and `-e`
+- Hardened property backup / restore with `-k` and `-e`, stored under a
+  source-dataset-relative tree in `ZXFER_BACKUP_DIR` with keyed metadata
+  filenames per source/destination pair
 - Structured stderr failure reports with optional `ZXFER_ERROR_LOG` mirroring
 - File-backed integration harness plus shunit2 unit coverage
 
@@ -66,7 +69,7 @@ Use remote compression:
 ## Performance-Oriented Examples
 
 Replicate two remote pools from the same origin host over `ssh`, using `-j8`
-to parallelize source snapshot discovery and allow concurrent send/receive
+to allow adaptive multi-dataset source discovery and concurrent send/receive
 jobs. Run the first replication in the background so both pool trees can
 progress at the same time:
 
@@ -74,11 +77,12 @@ progress at the same time:
 ./zxfer -v -d -z -j8 -F -O user@host -R zroot tank/backups/ &
 ```
 
-From the same host, use a custom `zstd` command and `-Y` to repeat replication
-until the destination converges:
+From the same host, use a custom multithreaded `zstd` command and `-Y` to
+repeat replication until the destination converges while keeping the default
+`-3` compression level:
 
 ```sh
-./zxfer -v -d -Z 'zstd -T0 -9' -Y -j8 -F -O user@host -R tank tank/backups/
+./zxfer -v -d -Z 'zstd -T0 -3' -Y -j8 -F -O user@host -R tank tank/backups/
 ```
 
 ## Fork-Specific Options
@@ -86,25 +90,31 @@ until the destination converges:
 These are some of the most visible options added or expanded in this maintained
 fork. For the full CLI reference, use the man pages.
 
-- `-j jobs`: parallelize source snapshot discovery with GNU `parallel` and run
-  up to that many `zfs send`/`zfs receive` jobs concurrently
+- `-j jobs`: use adaptive source snapshot discovery, including GNU `parallel`
+  on larger trees, and run up to that many `zfs send`/`zfs receive` jobs
+  concurrently
 - `-V`: enable very verbose debug output and emit end-of-run profiling counters
-  to stderr
+  and accumulated stage timings to stderr
 - `-w`: use raw `zfs send`
 - `-x pattern`: exclude datasets whose names match a regex from recursive
   replication; use `-x '^tank/data$'` to exclude only `tank/data`
 - `-Y`: repeat replication until no sends or destroys are performed, or until
   the built-in 8-iteration cap is reached
-- `-z`: compress ssh transfers with `zstd`
+- `-z`: compress ssh send/receive streams with `zstd`; remote adaptive
+  snapshot-list metadata discovery now skips metadata compression on
+  `-O ... -j ...` discovery runs while leaving send/receive stream compression
+  unchanged
 - `-Z "command"`: replace the default compression command with a custom `zstd`
-  pipeline, for example multithreaded or higher-compression settings
+  pipeline, for example multithreaded `zstd -T0 -3`. Higher levels such as
+  `-9` trade much more CPU time for smaller ratio gains and are not the
+  default.
 
 ## Performance And Maintainability Improvements
 
 Compared with the older upstream base, the current fork includes:
 
-- Parallel source snapshot discovery and concurrent send/receive execution when
-  `-j` is used
+- Adaptive source snapshot discovery plus concurrent send/receive execution
+  when `-j` is used
 - `zfs send -I` incremental replication so the full snapshot chain is sent in
   one stream when appropriate
 - Exact dataset and snapshot diffing with `comm`, which avoids older
@@ -113,10 +123,13 @@ Compared with the older upstream base, the current fork includes:
   and only lists snapshot names, avoiding unnecessary metadata sorting work
 - Batched destination snapshot deletion plus background destroy handling so
   cleanup can proceed efficiently during replication
+- Batched per-dataset `zfs set` property updates during reconciliation, cutting
+  remote `ssh` round trips on `-P`, `-o`, and post-seed property passes
 - SSH control-socket reuse for `-O` and `-T`, reducing repeated connection
   setup overhead
 - Optional `zstd` compression for ssh replication plus customizable `-Z`
-  compression commands
+  compression commands, with adaptive remote `-O ... -j ... -z` metadata
+  discovery avoiding extra `zstd` work on no-op paths
 - Deterministic snapshot sorting and comparison via `LC_ALL=C`, so snapshot
   planning behaves consistently across Linux, FreeBSD, macOS, and Solaris-like
   environments
@@ -160,10 +173,11 @@ FreeBSD 15.x, but this fork also supports:
 - OpenZFS on macOS, including `/usr/local/zfs/bin` layouts, with platform-specific property caveats tracked in `KNOWN_ISSUES.md`
 
 zxfer resolves `zfs`, `ssh`, `awk`, and other required tools through a trusted
-secure-PATH model. Remote `zfs`, `cat`, and GNU `parallel` lookups are resolved
-on the remote host rather than assuming the same absolute path exists
-everywhere. Remote `uname` and source-listing `zstd` resolution still have open
-hardening gaps; see [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
+secure-PATH model. Remote `zfs`, `cat`, GNU `parallel`, and compression helper
+lookups are resolved on the remote host rather than assuming the same absolute
+path exists everywhere. Custom `-Z` compression commands now flow through the
+same validated helper-resolution path for both replication streams and remote
+source snapshot discovery.
 
 Current caveats are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 

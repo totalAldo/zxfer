@@ -37,7 +37,7 @@ ZXFER_TEST_SHELL=/bin/dash ./tests/run_shunit_tests.sh
 For multi-word shell modes such as `bash --posix`, point `ZXFER_TEST_SHELL` at
 an executable wrapper script that `exec`s the desired command.
 
-The test layout mirrors the source layout:
+The test layout broadly follows the source layout:
 
 - `test_run_shunit_tests.sh`
 - `test_zxfer_common.sh`
@@ -47,6 +47,10 @@ The test layout mirrors the source layout:
 - `test_zxfer_transfer_properties.sh`
 - `test_zxfer_zfs_mode.sh`
 - `test_zxfer_zfs_send_receive.sh`
+
+Some extracted helper modules are still covered inside adjacent suites. For
+example, `src/zxfer_property_cache.sh` is exercised by
+`test_zxfer_transfer_properties.sh` rather than a separate peer-named suite.
 
 ## Coverage
 
@@ -131,7 +135,12 @@ Useful environment variables:
 
 - `ZXFER_BIN`
 - `SPARSE_SIZE_MB`
-- `TMPDIR`
+- `TMPDIR`:
+  must resolve to an absolute directory owned by root or the effective UID and
+  must not be writable by other users unless the sticky bit is set, or zxfer
+  will fall back to a validated default temp root, preferring memory-backed
+  locations such as `/dev/shm` or `/run/shm` when available before falling
+  back to the system temporary directory for scratch files, FIFOs, and caches
 - `ZXFER_SKIP_TESTS`
 
 ## Safety Model

@@ -48,10 +48,349 @@ zxfer_refresh_backup_storage_root() {
 		g_backup_storage_root=/var/db/zxfer
 	fi
 }
+zxfer_reset_destination_existence_cache() {
+	g_destination_existence_cache=""
+	g_destination_existence_cache_root=""
+	g_destination_existence_cache_root_complete=0
+}
+
+zxfer_reset_snapshot_record_indexes() {
+	if [ -n "${g_zxfer_snapshot_index_dir:-}" ] && [ -d "$g_zxfer_snapshot_index_dir" ]; then
+		rm -rf "$g_zxfer_snapshot_index_dir"
+	fi
+
+	g_zxfer_snapshot_index_dir=""
+	g_zxfer_snapshot_index_unavailable=0
+	g_zxfer_source_snapshot_record_index=""
+	g_zxfer_source_snapshot_record_index_ready=0
+	g_zxfer_destination_snapshot_record_index=""
+	g_zxfer_destination_snapshot_record_index_ready=0
+}
+
+zxfer_ensure_snapshot_index_dir() {
+	if [ "${g_zxfer_snapshot_index_unavailable:-0}" -eq 1 ]; then
+		return 1
+	fi
+
+	if [ -n "${g_zxfer_snapshot_index_dir:-}" ] && [ -d "$g_zxfer_snapshot_index_dir" ]; then
+		return 0
+	fi
+
+	if ! l_tmpdir=$(zxfer_try_get_effective_tmpdir); then
+		g_zxfer_snapshot_index_unavailable=1
+		g_zxfer_snapshot_index_dir=""
+		return 1
+	fi
+	if ! g_zxfer_snapshot_index_dir=$(mktemp -d "$l_tmpdir/zxfer-snapshot-index.XXXXXX" 2>/dev/null); then
+		g_zxfer_snapshot_index_unavailable=1
+		g_zxfer_snapshot_index_dir=""
+		return 1
+	fi
+
+	return 0
+}
+
+zxfer_build_snapshot_record_index() {
+	l_side=$1
+	l_snapshot_records=$2
+
+	case "$l_side" in
+	source)
+		g_zxfer_source_snapshot_record_index=""
+		g_zxfer_source_snapshot_record_index_ready=0
+		;;
+	destination)
+		g_zxfer_destination_snapshot_record_index=""
+		g_zxfer_destination_snapshot_record_index_ready=0
+		;;
+	*)
+		return 1
+		;;
+	esac
+
+	if ! zxfer_ensure_snapshot_index_dir; then
+		return 1
+	fi
+
+	l_side_dir=$g_zxfer_snapshot_index_dir/$l_side
+	rm -rf "$l_side_dir"
+	if ! mkdir -p "$l_side_dir"; then
+		g_zxfer_snapshot_index_unavailable=1
+		return 1
+	fi
+
+	# shellcheck disable=SC2016  # awk program should see literal $0.
+	l_index_map=$(printf '%s\n' "$l_snapshot_records" | "${g_cmd_awk:-awk}" -v index_dir="$l_side_dir" '
+$0 != "" {
+	record = $0
+	tab_pos = index(record, "\t")
+	snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record)
+	at_pos = index(snapshot_path, "@")
+	if (at_pos <= 0)
+		next
+	dataset = substr(snapshot_path, 1, at_pos - 1)
+	if (!(dataset in file_paths)) {
+		file_count++
+		file_paths[dataset] = index_dir "/" file_count ".records"
+		dataset_order[file_count] = dataset
+	}
+	print record >> file_paths[dataset]
+	# Avoid exhausting awk output descriptors on deep recursive trees.
+	close(file_paths[dataset])
+}
+END {
+	for (i = 1; i <= file_count; i++)
+		print dataset_order[i] "\t" file_paths[dataset_order[i]]
+}') || {
+		g_zxfer_snapshot_index_unavailable=1
+		return 1
+	}
+
+	case "$l_side" in
+	source)
+		g_zxfer_source_snapshot_record_index=$l_index_map
+		g_zxfer_source_snapshot_record_index_ready=1
+		;;
+	destination)
+		g_zxfer_destination_snapshot_record_index=$l_index_map
+		g_zxfer_destination_snapshot_record_index_ready=1
+		;;
+	esac
+
+	return 0
+}
+
+zxfer_ensure_source_snapshot_record_cache() {
+	[ -n "${g_lzfs_list_hr_S_snap:-}" ] && return 0
+	[ -n "${g_lzfs_list_hr_snap:-}" ] || return 1
+
+	if ! g_lzfs_list_hr_S_snap=$(zxfer_reverse_snapshot_record_list "$g_lzfs_list_hr_snap"); then
+		return 1
+	fi
+
+	[ -n "${g_lzfs_list_hr_S_snap:-}" ]
+}
+
+zxfer_ensure_snapshot_record_index_for_side() {
+	l_side=$1
+
+	case "$l_side" in
+	source)
+		[ "${g_zxfer_source_snapshot_record_index_ready:-0}" -eq 1 ] && return 0
+		zxfer_ensure_source_snapshot_record_cache || return 1
+		l_snapshot_records=$g_lzfs_list_hr_S_snap
+		;;
+	destination)
+		[ "${g_zxfer_destination_snapshot_record_index_ready:-0}" -eq 1 ] && return 0
+		l_snapshot_records=${g_rzfs_list_hr_snap:-}
+		;;
+	*)
+		return 1
+		;;
+	esac
+
+	[ -n "$l_snapshot_records" ] || return 1
+
+	zxfer_build_snapshot_record_index "$l_side" "$l_snapshot_records"
+}
+
+zxfer_get_indexed_snapshot_records_for_dataset() {
+	l_side=$1
+	l_dataset=$2
+
+	case "$l_side" in
+	source)
+		l_index_map=${g_zxfer_source_snapshot_record_index:-}
+		l_index_ready=${g_zxfer_source_snapshot_record_index_ready:-0}
+		;;
+	destination)
+		l_index_map=${g_zxfer_destination_snapshot_record_index:-}
+		l_index_ready=${g_zxfer_destination_snapshot_record_index_ready:-0}
+		;;
+	*)
+		return 1
+		;;
+	esac
+
+	[ "$l_index_ready" -eq 1 ] || return 1
+
+	while IFS='	' read -r l_indexed_dataset l_record_file || [ -n "${l_indexed_dataset}${l_record_file}" ]; do
+		[ -n "$l_indexed_dataset" ] || continue
+		if [ "$l_indexed_dataset" = "$l_dataset" ]; then
+			if [ -f "$l_record_file" ]; then
+				cat "$l_record_file"
+				return 0
+			fi
+			return 1
+		fi
+	done <<-EOF
+		$l_index_map
+	EOF
+
+	return 0
+}
+
+zxfer_get_snapshot_records_for_dataset() {
+	l_side=$1
+	l_dataset=$2
+
+	if zxfer_get_indexed_snapshot_records_for_dataset "$l_side" "$l_dataset"; then
+		return 0
+	fi
+	if zxfer_ensure_snapshot_record_index_for_side "$l_side"; then
+		if zxfer_get_indexed_snapshot_records_for_dataset "$l_side" "$l_dataset"; then
+			return 0
+		fi
+	fi
+
+	case "$l_side" in
+	source)
+		zxfer_ensure_source_snapshot_record_cache || return 0
+		# shellcheck disable=SC2016  # awk program should see literal $1/$0.
+		printf '%s\n' "$g_lzfs_list_hr_S_snap" | "${g_cmd_awk:-awk}" -F@ -v ds="$l_dataset" '$1 == ds { print $0 }'
+		;;
+	destination)
+		# shellcheck disable=SC2016  # awk program should see literal $1/$0.
+		printf '%s\n' "$g_rzfs_list_hr_snap" | "${g_cmd_awk:-awk}" -F@ -v ds="$l_dataset" '$1 == ds { print $0 }'
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+zxfer_set_destination_existence_cache_entry() {
+	l_dataset=$1
+	l_exists_state=$2
+	l_updated_cache=""
+
+	while IFS='	' read -r l_cached_dataset l_cached_state || [ -n "${l_cached_dataset}${l_cached_state}" ]; do
+		[ -n "$l_cached_dataset" ] || continue
+		[ "$l_cached_dataset" = "$l_dataset" ] && continue
+		if [ -n "$l_updated_cache" ]; then
+			l_updated_cache="$l_updated_cache
+$l_cached_dataset	$l_cached_state"
+		else
+			l_updated_cache="$l_cached_dataset	$l_cached_state"
+		fi
+	done <<-EOF
+		${g_destination_existence_cache:-}
+	EOF
+
+	if [ -n "$l_updated_cache" ]; then
+		g_destination_existence_cache="$l_updated_cache
+$l_dataset	$l_exists_state"
+	else
+		g_destination_existence_cache="$l_dataset	$l_exists_state"
+	fi
+}
+
+zxfer_get_destination_existence_cache_entry() {
+	l_dataset=$1
+
+	while IFS='	' read -r l_cached_dataset l_cached_state || [ -n "${l_cached_dataset}${l_cached_state}" ]; do
+		[ -n "$l_cached_dataset" ] || continue
+		if [ "$l_cached_dataset" = "$l_dataset" ]; then
+			printf '%s\n' "$l_cached_state"
+			return 0
+		fi
+	done <<-EOF
+		${g_destination_existence_cache:-}
+	EOF
+
+	if [ "${g_destination_existence_cache_root_complete:-0}" -eq 1 ] &&
+		[ -n "${g_destination_existence_cache_root:-}" ]; then
+		case "$l_dataset" in
+		"$g_destination_existence_cache_root" | "$g_destination_existence_cache_root"/*)
+			printf '%s\n' 0
+			return 0
+			;;
+		esac
+	fi
+
+	return 1
+}
+
+zxfer_seed_destination_existence_cache_from_recursive_list() {
+	l_root_dataset=$1
+	l_recursive_dest_list=$2
+
+	zxfer_reset_destination_existence_cache
+	g_destination_existence_cache_root=$l_root_dataset
+	g_destination_existence_cache_root_complete=1
+
+	while IFS= read -r l_dataset; do
+		[ -n "$l_dataset" ] || continue
+		zxfer_set_destination_existence_cache_entry "$l_dataset" 1
+	done <<-EOF
+		$l_recursive_dest_list
+	EOF
+}
+
+zxfer_mark_destination_root_missing_in_cache() {
+	l_root_dataset=$1
+
+	zxfer_reset_destination_existence_cache
+	g_destination_existence_cache_root=$l_root_dataset
+	g_destination_existence_cache_root_complete=1
+	[ -n "$l_root_dataset" ] && zxfer_set_destination_existence_cache_entry "$l_root_dataset" 0
+}
+
+zxfer_mark_destination_hierarchy_exists() {
+	l_dataset=$1
+	l_cache_root=${g_destination_existence_cache_root:-}
+
+	while [ -n "$l_dataset" ]; do
+		zxfer_set_destination_existence_cache_entry "$l_dataset" 1
+		if [ -n "$l_cache_root" ] && [ "$l_dataset" = "$l_cache_root" ]; then
+			break
+		fi
+		l_parent_dataset=${l_dataset%/*}
+		[ "$l_parent_dataset" = "$l_dataset" ] && break
+		l_dataset=$l_parent_dataset
+	done
+}
+
+zxfer_note_destination_dataset_exists() {
+	l_dataset=$1
+	l_created_dataset=$1
+	l_recursive_dest_list=${g_recursive_dest_list:-}
+
+	[ -n "$l_dataset" ] || return
+
+	zxfer_mark_destination_hierarchy_exists "$l_dataset"
+
+	case "
+$l_recursive_dest_list
+" in
+	*"
+$l_created_dataset
+"*) ;;
+	*)
+		if [ -n "$l_recursive_dest_list" ]; then
+			g_recursive_dest_list="$g_recursive_dest_list
+$l_created_dataset"
+		else
+			g_recursive_dest_list=$l_created_dataset
+		fi
+		;;
+	esac
+}
 
 # Secure location for property backup files (override via ZXFER_BACKUP_DIR).
 g_backup_storage_root=""
 zxfer_refresh_backup_storage_root
+
+# Short-lived remote capability cache used to avoid repeating helper discovery
+# across closely spaced zxfer processes targeting the same host.
+g_zxfer_remote_capability_cache_ttl=15
+g_zxfer_remote_capability_cache_wait_retries=5
+g_origin_remote_capabilities_host=""
+g_origin_remote_capabilities_response=""
+g_origin_remote_capabilities_bootstrap_source=""
+g_target_remote_capabilities_host=""
+g_target_remote_capabilities_response=""
+g_target_remote_capabilities_bootstrap_source=""
 
 # Directories considered safe for PATH lookups. Administrators may override the
 # entire list via ZXFER_SECURE_PATH or append additional trusted directories via
@@ -176,38 +515,6 @@ zxfer_validate_resolved_tool_path() {
 	esac
 }
 
-resolve_remote_required_tool() {
-	l_host=$1
-	l_tool=$2
-	l_label=${3:-$l_tool}
-	l_profile_side=${4:-}
-
-	[ -n "$l_host" ] || return 1
-
-	l_dependency_path=${g_zxfer_dependency_path:-$ZXFER_DEFAULT_SECURE_PATH}
-	l_dependency_path_single=$(escape_for_single_quotes "$l_dependency_path")
-	l_tool_single=$(escape_for_single_quotes "$l_tool")
-	l_remote_probe="PATH='$l_dependency_path_single'; export PATH; command -v '$l_tool_single'"
-	l_remote_probe_cmd=$(build_remote_sh_c_command "$l_remote_probe")
-	l_remote_output=$(invoke_ssh_shell_command_for_host "$l_host" "$l_remote_probe_cmd" "$l_profile_side" 2>/dev/null)
-	l_remote_status=$?
-	l_resolved_path=$(printf '%s\n' "$l_remote_output" | sed -n '1p')
-	if [ "$l_remote_status" -ne 0 ]; then
-		if [ "$l_remote_status" -eq 1 ] && [ "$l_resolved_path" = "" ]; then
-			printf '%s\n' "Required dependency \"$l_label\" not found on host $l_host in secure PATH ($g_zxfer_dependency_path). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary."
-			return 1
-		fi
-		printf '%s\n' "Failed to query dependency \"$l_label\" on host $l_host."
-		return 1
-	fi
-	if [ "$l_resolved_path" = "" ]; then
-		printf '%s\n' "Required dependency \"$l_label\" not found on host $l_host in secure PATH ($g_zxfer_dependency_path). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary."
-		return 1
-	fi
-
-	zxfer_validate_resolved_tool_path "$l_resolved_path" "$l_label" "host $l_host"
-}
-
 zxfer_find_required_tool() {
 	l_tool=$1
 	l_label=${2:-$l_tool}
@@ -253,7 +560,7 @@ init_globals() {
 	zxfer_reset_failure_context "startup"
 
 	# zxfer version
-	g_zxfer_version="2.0-20260406"
+	g_zxfer_version="2.0-20260407"
 
 	# max number of iterations to run iterate through run_zfs_mode
 	# if changes are made to the filesystems
@@ -296,6 +603,7 @@ init_globals() {
 
 	# services stopped by -c/-m that must be restarted on exit
 	g_services_need_relaunch=0
+	g_services_relaunch_in_progress=0
 
 	source=""
 	initial_source=""
@@ -305,10 +613,36 @@ init_globals() {
 	# keep track of the number of background zfs send jobs
 	g_count_zfs_send_jobs=0
 	g_zfs_send_job_pids=""
+	g_zfs_send_job_records=""
+	g_zfs_send_job_queue_open=0
+	g_zfs_send_job_queue_unavailable=0
+	g_destination_existence_cache=""
+	g_destination_existence_cache_root=""
+	g_destination_existence_cache_root_complete=0
+	g_destination_snapshot_creation_cache=""
+	g_zxfer_snapshot_index_dir=""
+	g_zxfer_snapshot_index_unavailable=0
+	g_zxfer_source_snapshot_record_index=""
+	g_zxfer_source_snapshot_record_index_ready=0
+	g_zxfer_destination_snapshot_record_index=""
+	g_zxfer_destination_snapshot_record_index_ready=0
+	g_origin_remote_capabilities_host=""
+	g_origin_remote_capabilities_response=""
+	g_origin_remote_capabilities_bootstrap_source=""
+	g_target_remote_capabilities_host=""
+	g_target_remote_capabilities_response=""
+	g_target_remote_capabilities_bootstrap_source=""
+	g_source_snapshot_list_uses_parallel=0
 	g_zxfer_cleanup_pids=""
+	g_zxfer_effective_tmpdir=""
+	g_zxfer_effective_tmpdir_requested=""
 	g_zxfer_profile_start_epoch=$(date '+%s' 2>/dev/null || :)
 	g_zxfer_profile_has_data=0
 	g_zxfer_profile_summary_emitted=0
+	g_zxfer_profile_ssh_setup_ms=0
+	g_zxfer_profile_source_snapshot_listing_ms=0
+	g_zxfer_profile_destination_snapshot_listing_ms=0
+	g_zxfer_profile_snapshot_diff_sort_ms=0
 	g_zxfer_profile_source_zfs_calls=0
 	g_zxfer_profile_destination_zfs_calls=0
 	g_zxfer_profile_other_zfs_calls=0
@@ -334,6 +668,14 @@ init_globals() {
 	g_zxfer_profile_bucket_destination_inspection=0
 	g_zxfer_profile_bucket_property_reconciliation=0
 	g_zxfer_profile_bucket_send_receive_setup=0
+	g_zxfer_property_cache_dir=""
+	g_zxfer_property_cache_unavailable=0
+	g_zxfer_source_property_tree_prefetch_root=""
+	g_zxfer_source_property_tree_prefetch_zfs_cmd=""
+	g_zxfer_source_property_tree_prefetch_state=0
+	g_zxfer_destination_property_tree_prefetch_root=""
+	g_zxfer_destination_property_tree_prefetch_zfs_cmd=""
+	g_zxfer_destination_property_tree_prefetch_state=0
 
 	g_destination=""
 	g_backup_file_extension=".zxfer_backup_info"
@@ -350,6 +692,10 @@ init_globals() {
 	g_cmd_decompress="zstd -d"
 	g_cmd_compress_safe=""
 	g_cmd_decompress_safe=""
+	g_origin_cmd_compress_safe=""
+	g_origin_cmd_decompress_safe=""
+	g_target_cmd_compress_safe=""
+	g_target_cmd_decompress_safe=""
 
 	g_cmd_cat=""
 
@@ -369,8 +715,10 @@ init_globals() {
 	# ssh control sockets used for origin (-O) and target (-T) hosts
 	g_ssh_origin_control_socket=""
 	g_ssh_origin_control_socket_dir=""
+	g_ssh_origin_control_socket_lease_file=""
 	g_ssh_target_control_socket=""
 	g_ssh_target_control_socket_dir=""
+	g_ssh_target_control_socket_lease_file=""
 	g_ssh_supports_control_sockets=0
 	if ssh_supports_control_sockets; then
 		g_ssh_supports_control_sockets=1
@@ -385,6 +733,8 @@ init_globals() {
 	# dataset and snapshot lists
 	g_recursive_source_list=""
 	g_recursive_source_dataset_list=""
+	g_recursive_destination_extra_dataset_list=""
+	g_lzfs_list_hr_snap=""
 	g_lzfs_list_hr_S_snap=""
 	g_rzfs_list_hr_snap=""
 
@@ -434,138 +784,81 @@ xattr,dnodesize"
 }
 
 refresh_compression_commands() {
-	g_cmd_compress_safe=$(quote_cli_tokens "$g_cmd_compress")
-	g_cmd_decompress_safe=$(quote_cli_tokens "$g_cmd_decompress")
-
 	if [ "$g_option_z_compress" -eq 1 ]; then
-		if [ "$g_cmd_compress_safe" = "" ]; then
+		if [ "$g_cmd_compress" = "" ]; then
 			throw_usage_error "Compression command (-Z/ZXFER_COMPRESSION) cannot be empty." 2
 		fi
-		if [ "$g_cmd_decompress_safe" = "" ]; then
+		l_compress_tokens=$(split_cli_tokens "$g_cmd_compress")
+		if [ "$l_compress_tokens" = "" ]; then
+			throw_usage_error "Compression command (-Z/ZXFER_COMPRESSION) cannot be empty." 2
+		fi
+		if [ "$g_cmd_decompress" = "" ]; then
 			throw_error "Compression requested but decompression command missing."
 		fi
-	fi
-}
-
-# setup an ssh control socket for the specified role (origin or target)
-setup_ssh_control_socket() {
-	l_host=$1
-	l_role=$2
-
-	[ -z "$l_host" ] && return
-
-	l_timestamp=$(date +%s)
-	if ! l_control_dir=$(mktemp -d -t "zxfer_ssh_control_socket.${l_role}.$l_timestamp.XXXXXX"); then
-		throw_error "Error creating temporary directory for ssh control socket."
-	fi
-	l_control_socket="$l_control_dir/socket"
-
-	case "$l_role" in
-	origin)
-		[ "$g_ssh_origin_control_socket" != "" ] && close_origin_ssh_control_socket
-		g_ssh_origin_control_socket_dir="$l_control_dir"
-		g_ssh_origin_control_socket="$l_control_socket"
-		;;
-	target)
-		[ "$g_ssh_target_control_socket" != "" ] && close_target_ssh_control_socket
-		g_ssh_target_control_socket_dir="$l_control_dir"
-		g_ssh_target_control_socket="$l_control_socket"
-		;;
-	esac
-
-	l_host_tokens=$(split_host_spec_tokens "$l_host")
-	set -- "$g_cmd_ssh" -M -S "$l_control_socket" -fN
-	if [ "$l_host_tokens" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			set -- "$@" "$l_token"
-		done <<EOF
-$l_host_tokens
-EOF
-	fi
-	if ! "$@"; then
-		throw_error "Error creating ssh control socket for $l_role host."
-	fi
-}
-
-close_origin_ssh_control_socket() {
-	if [ "$g_option_O_origin_host" = "" ] || [ "$g_ssh_origin_control_socket" = "" ]; then
+		l_decompress_tokens=$(split_cli_tokens "$g_cmd_decompress")
+		if [ "$l_decompress_tokens" = "" ]; then
+			throw_error "Compression requested but decompression command missing."
+		fi
+		if ! g_cmd_compress_safe=$(zxfer_resolve_local_cli_command_safe "$g_cmd_compress" "compression command"); then
+			g_zxfer_failure_class=dependency
+			throw_error "$g_cmd_compress_safe"
+		fi
+		if ! g_cmd_decompress_safe=$(zxfer_resolve_local_cli_command_safe "$g_cmd_decompress" "decompression command"); then
+			g_zxfer_failure_class=dependency
+			throw_error "$g_cmd_decompress_safe"
+		fi
 		return
 	fi
 
-	l_host_tokens=$(split_host_spec_tokens "$g_option_O_origin_host")
-	set -- "$g_cmd_ssh" -S "$g_ssh_origin_control_socket" -O exit
-	if [ "$l_host_tokens" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			set -- "$@" "$l_token"
-		done <<EOF
-$l_host_tokens
-EOF
-	fi
-	l_log_cmd=$(build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_origin_control_socket" -O exit)
-	l_host_safe=$(quote_host_spec_tokens "$g_option_O_origin_host")
-	if [ "$l_host_safe" != "" ]; then
-		l_log_cmd="$l_log_cmd $l_host_safe"
-	fi
-	echoV "Closing origin ssh control socket: $l_log_cmd"
-	"$@" 2>/dev/null
-
-	if [ "$g_ssh_origin_control_socket_dir" != "" ] && [ -d "$g_ssh_origin_control_socket_dir" ]; then
-		rm -rf "$g_ssh_origin_control_socket_dir"
-	fi
-	g_ssh_origin_control_socket=""
-	g_ssh_origin_control_socket_dir=""
+	g_cmd_compress_safe=$(quote_cli_tokens "$g_cmd_compress")
+	g_cmd_decompress_safe=$(quote_cli_tokens "$g_cmd_decompress")
 }
 
-close_target_ssh_control_socket() {
-	if [ "$g_option_T_target_host" = "" ] || [ "$g_ssh_target_control_socket" = "" ]; then
-		return
-	fi
+zxfer_requote_cli_command_with_resolved_head() {
+	l_cli_string=$1
+	l_resolved_head=$2
+	l_cli_tokens=$(split_cli_tokens "$l_cli_string")
+	[ -n "$l_cli_tokens" ] || return 1
 
-	l_host_tokens=$(split_host_spec_tokens "$g_option_T_target_host")
-	set -- "$g_cmd_ssh" -S "$g_ssh_target_control_socket" -O exit
-	if [ "$l_host_tokens" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			set -- "$@" "$l_token"
-		done <<EOF
-$l_host_tokens
-EOF
-	fi
-	l_log_cmd=$(build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_target_control_socket" -O exit)
-	l_host_safe=$(quote_host_spec_tokens "$g_option_T_target_host")
-	if [ "$l_host_safe" != "" ]; then
-		l_log_cmd="$l_log_cmd $l_host_safe"
-	fi
-	echoV "Closing target ssh control socket: $l_log_cmd"
-	"$@" 2>/dev/null
+	l_output_tokens=""
+	l_replaced_head=0
 
-	if [ "$g_ssh_target_control_socket_dir" != "" ] && [ -d "$g_ssh_target_control_socket_dir" ]; then
-		rm -rf "$g_ssh_target_control_socket_dir"
-	fi
-	g_ssh_target_control_socket=""
-	g_ssh_target_control_socket_dir=""
+	while IFS= read -r l_cli_token || [ -n "$l_cli_token" ]; do
+		[ -n "$l_cli_token" ] || continue
+		if [ "$l_replaced_head" -eq 0 ]; then
+			l_cli_token=$l_resolved_head
+			l_replaced_head=1
+		fi
+		if [ "$l_output_tokens" = "" ]; then
+			l_output_tokens=$l_cli_token
+		else
+			l_output_tokens="$l_output_tokens
+$l_cli_token"
+		fi
+	done <<-EOF
+		$l_cli_tokens
+	EOF
+
+	[ "$l_replaced_head" -eq 1 ] || return 1
+	quote_token_stream "$l_output_tokens"
 }
 
-close_all_ssh_control_sockets() {
-	close_origin_ssh_control_socket
-	close_target_ssh_control_socket
-}
-
-refresh_remote_zfs_commands() {
-	if [ "$g_option_O_origin_host" != "" ]; then
-		g_option_O_origin_host_safe=$(quote_host_spec_tokens "$g_option_O_origin_host")
-		g_LZFS=${g_origin_cmd_zfs:-$g_cmd_zfs}
-	else
-		g_option_O_origin_host_safe=""
-		g_LZFS=$g_cmd_zfs
+zxfer_resolve_local_cli_command_safe() {
+	l_cli_string=$1
+	l_label=${2:-command}
+	l_cli_tokens=$(split_cli_tokens "$l_cli_string")
+	l_cli_head=$(printf '%s\n' "$l_cli_tokens" | sed -n '1p')
+	if [ -z "$l_cli_head" ]; then
+		printf '%s\n' "Required dependency \"$l_label\" must not be empty or whitespace-only."
+		return 1
 	fi
 
-	if [ "$g_option_T_target_host" != "" ]; then
-		g_option_T_target_host_safe=$(quote_host_spec_tokens "$g_option_T_target_host")
-		g_RZFS=${g_target_cmd_zfs:-$g_cmd_zfs}
-	else
-		g_option_T_target_host_safe=""
-		g_RZFS=$g_cmd_zfs
+	if ! l_resolved_head=$(zxfer_find_required_tool "$l_cli_head" "$l_label"); then
+		printf '%s\n' "$l_resolved_head"
+		return 1
 	fi
+
+	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head"
 }
 
 #
@@ -580,7 +873,9 @@ trap_exit() {
 	# substitution plumbing in the caller.
 	zxfer_kill_registered_cleanup_pids
 
-	close_all_ssh_control_sockets
+	if command -v close_all_ssh_control_sockets >/dev/null 2>&1; then
+		close_all_ssh_control_sockets
+	fi
 
 	# Remove temporary files if they exist
 	for l_temp_file in "$g_delete_source_tmp_file" \
@@ -590,16 +885,23 @@ trap_exit() {
 			rm "$l_temp_file"
 		fi
 	done
-	l_tmpdir=${TMPDIR:-/tmp}
-	for l_temp_file in "$l_tmpdir/${g_zxfer_temp_prefix:-zxfer.unset}".*; do
-		[ -e "$l_temp_file" ] || continue
-		rm -f "$l_temp_file"
-	done
+	if l_tmpdir=$(zxfer_try_get_effective_tmpdir 2>/dev/null); then
+		for l_temp_file in "$l_tmpdir/${g_zxfer_temp_prefix:-zxfer.unset}".*; do
+			[ -e "$l_temp_file" ] || continue
+			rm -rf "$l_temp_file"
+		done
+	fi
+	if [ -n "${g_zxfer_property_cache_dir:-}" ] && [ -d "$g_zxfer_property_cache_dir" ]; then
+		rm -rf "$g_zxfer_property_cache_dir"
+	fi
+	if [ -n "${g_zxfer_snapshot_index_dir:-}" ] && [ -d "$g_zxfer_snapshot_index_dir" ]; then
+		rm -rf "$g_zxfer_snapshot_index_dir"
+	fi
 
 	if [ "${g_services_need_relaunch:-0}" -eq 1 ]; then
-		# Prevent re-entrancy loops if relaunch exits due to failure.
-		g_services_need_relaunch=0
-		if command -v relaunch >/dev/null 2>&1; then
+		if [ "${g_services_relaunch_in_progress:-0}" -eq 1 ]; then
+			echoV "zxfer exiting with services still stopped after a failed relaunch attempt."
+		elif command -v relaunch >/dev/null 2>&1; then
 			echoV "zxfer exiting early; restarting stopped services."
 			relaunch
 		else
@@ -750,26 +1052,6 @@ read_command_line_switches() {
 	refresh_compression_commands
 }
 
-prepare_remote_host_connections() {
-	if [ "$g_option_O_origin_host" != "" ]; then
-		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
-			setup_ssh_control_socket "$g_option_O_origin_host" "origin"
-		else
-			echoV "ssh client does not support control sockets; continuing without connection reuse for origin host."
-		fi
-	fi
-
-	if [ "$g_option_T_target_host" != "" ]; then
-		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
-			setup_ssh_control_socket "$g_option_T_target_host" "target"
-		else
-			echoV "ssh client does not support control sockets; continuing without connection reuse for target host."
-		fi
-	fi
-
-	refresh_remote_zfs_commands
-}
-
 # Extract the dataset@snapshot path from a snapshot record. Records may include
 # a tab-delimited GUID suffix (`dataset@snap<TAB>guid`) for identity-safe
 # comparisons; callers that need the executable ZFS path should use this helper.
@@ -794,6 +1076,19 @@ extract_snapshot_name() {
 	case "$l_snapshot_path" in
 	*@*)
 		printf '%s\n' "${l_snapshot_path#*@}"
+		;;
+	*)
+		printf '%s\n' ""
+		;;
+	esac
+}
+
+extract_snapshot_dataset() {
+	l_snapshot_path=$(extract_snapshot_path "$1")
+
+	case "$l_snapshot_path" in
+	*@*)
+		printf '%s\n' "${l_snapshot_path%@*}"
 		;;
 	*)
 		printf '%s\n' ""
@@ -835,16 +1130,186 @@ normalize_snapshot_record_list() {
 	printf '%s\n' "$1" | tr ' ' '\n'
 }
 
+zxfer_snapshot_record_list_contains_guid() {
+	l_tab='	'
+	case "$1" in
+	*"$l_tab"*)
+		return 0
+		;;
+	esac
+
+	return 1
+}
+
+zxfer_reverse_snapshot_record_list() {
+	l_snapshot_records=$1
+
+	[ -n "$l_snapshot_records" ] || return 0
+
+	# shellcheck disable=SC2016  # awk program should see literal $0/NR.
+	printf '%s\n' "$l_snapshot_records" | "${g_cmd_awk:-awk}" '{ l_records[NR] = $0 } END { for (l_i = NR; l_i >= 1; l_i--) if (l_records[l_i] != "") print l_records[l_i] }'
+}
+
+zxfer_snapshot_record_lists_share_snapshot_name() {
+	l_source_records=$1
+	l_destination_records=$2
+	l_section_break="@@ZXFER_SNAPSHOT_NAME_SET_BREAK@@"
+	l_overlap_awk=$(
+		cat <<'EOF'
+BEGIN { in_source = 0 }
+$0 == section_break {
+	in_source = 1
+	next
+}
+!in_source {
+	if ($0 != "") {
+		record = $0
+		tab_pos = index(record, "\t")
+		snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record)
+		at_pos = index(snapshot_path, "@")
+		if (at_pos > 0)
+			destination_names[substr(snapshot_path, at_pos + 1)] = 1
+	}
+	next
+}
+$0 != "" {
+	record = $0
+	tab_pos = index(record, "\t")
+	snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record)
+	at_pos = index(snapshot_path, "@")
+	if (at_pos > 0) {
+		snapshot_name = substr(snapshot_path, at_pos + 1)
+		if (snapshot_name in destination_names)
+			found = 1
+	}
+}
+END { exit(found ? 0 : 1) }
+EOF
+	)
+
+	{
+		normalize_snapshot_record_list "$l_destination_records"
+		printf '%s\n' "$l_section_break"
+		normalize_snapshot_record_list "$l_source_records"
+	} | "${g_cmd_awk:-awk}" -v section_break="$l_section_break" "$l_overlap_awk"
+}
+
+zxfer_filter_snapshot_identity_records_to_reference_paths() {
+	l_identity_records=$1
+	l_reference_records=$2
+	l_section_break="@@ZXFER_SNAPSHOT_PATH_FILTER_BREAK@@"
+	l_filter_awk=$(
+		cat <<'EOF'
+BEGIN { in_identity = 0 }
+$0 == section_break {
+	in_identity = 1
+	next
+}
+!in_identity {
+	if ($0 != "") {
+		record = $0
+		tab_pos = index(record, "\t")
+		snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record)
+		reference_paths[snapshot_path] = 1
+	}
+	next
+}
+$0 != "" {
+	record = $0
+	tab_pos = index(record, "\t")
+	snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record)
+	if (snapshot_path in reference_paths)
+		print record
+}
+EOF
+	)
+
+	{
+		normalize_snapshot_record_list "$l_reference_records"
+		printf '%s\n' "$l_section_break"
+		normalize_snapshot_record_list "$l_identity_records"
+	} | "${g_cmd_awk:-awk}" -v section_break="$l_section_break" "$l_filter_awk"
+}
+
+zxfer_get_source_snapshot_identity_records_for_dataset() {
+	l_dataset=$1
+
+	if ! l_snapshot_records=$(run_source_zfs_cmd list -H -o name,guid -s creation -d 1 -t snapshot "$l_dataset"); then
+		return 1
+	fi
+
+	l_snapshot_records=$(normalize_snapshot_record_list "$l_snapshot_records")
+	zxfer_reverse_snapshot_record_list "$l_snapshot_records"
+}
+
+zxfer_get_destination_snapshot_identity_records_for_dataset() {
+	l_dataset=$1
+
+	if ! l_snapshot_records=$(run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_dataset"); then
+		return 1
+	fi
+
+	while IFS= read -r l_snapshot_record; do
+		[ -n "$l_snapshot_record" ] || continue
+		l_snapshot_path=$(extract_snapshot_path "$l_snapshot_record")
+		case "$l_snapshot_path" in
+		"$l_dataset"@*)
+			printf '%s\n' "$l_snapshot_record"
+			;;
+		esac
+	done <<-EOF
+		$(normalize_snapshot_record_list "$l_snapshot_records")
+	EOF
+}
+
+zxfer_get_snapshot_identity_records_for_dataset() {
+	l_side=$1
+	l_dataset=$2
+	l_reference_records=${3:-}
+
+	case "$l_side" in
+	source)
+		l_identity_records=$(zxfer_get_source_snapshot_identity_records_for_dataset "$l_dataset") || return 1
+		;;
+	destination)
+		l_identity_records=$(zxfer_get_destination_snapshot_identity_records_for_dataset "$l_dataset") || return 1
+		;;
+	*)
+		return 1
+		;;
+	esac
+
+	if [ -n "$l_reference_records" ]; then
+		zxfer_filter_snapshot_identity_records_to_reference_paths "$l_identity_records" "$l_reference_records"
+	else
+		printf '%s\n' "$l_identity_records"
+	fi
+}
+
 #
 # Initializes OS and local/remote specific variables
 #
 init_variables() {
+	g_origin_cmd_compress_safe=$g_cmd_compress_safe
+	g_origin_cmd_decompress_safe=$g_cmd_decompress_safe
+	g_target_cmd_compress_safe=$g_cmd_compress_safe
+	g_target_cmd_decompress_safe=$g_cmd_decompress_safe
+
 	# determine the source operating system
 	if [ "$g_option_O_origin_host" != "" ]; then
-		g_source_operating_system=$(get_os "$g_option_O_origin_host" source)
+		if ! g_source_operating_system=$(get_os "$g_option_O_origin_host" source); then
+			g_zxfer_failure_class=dependency
+			throw_error "Failed to determine operating system on host $g_option_O_origin_host."
+		fi
 		if ! g_origin_cmd_zfs=$(resolve_remote_required_tool "$g_option_O_origin_host" zfs "zfs" source); then
 			g_zxfer_failure_class=dependency
 			throw_error "$g_origin_cmd_zfs"
+		fi
+		if [ "$g_option_z_compress" -eq 1 ]; then
+			if ! g_origin_cmd_compress_safe=$(zxfer_resolve_remote_cli_command_safe "$g_option_O_origin_host" "$g_cmd_compress" "compression command" source); then
+				g_zxfer_failure_class=dependency
+				throw_error "$g_origin_cmd_compress_safe"
+			fi
 		fi
 	else
 		g_source_operating_system=$(get_os "")
@@ -853,10 +1318,19 @@ init_variables() {
 
 	# determine the destination operating system
 	if [ "$g_option_T_target_host" != "" ]; then
-		g_destination_operating_system=$(get_os "$g_option_T_target_host" destination)
+		if ! g_destination_operating_system=$(get_os "$g_option_T_target_host" destination); then
+			g_zxfer_failure_class=dependency
+			throw_error "Failed to determine operating system on host $g_option_T_target_host."
+		fi
 		if ! g_target_cmd_zfs=$(resolve_remote_required_tool "$g_option_T_target_host" zfs "zfs" destination); then
 			g_zxfer_failure_class=dependency
 			throw_error "$g_target_cmd_zfs"
+		fi
+		if [ "$g_option_z_compress" -eq 1 ]; then
+			if ! g_target_cmd_decompress_safe=$(zxfer_resolve_remote_cli_command_safe "$g_option_T_target_host" "$g_cmd_decompress" "decompression command" destination); then
+				g_zxfer_failure_class=dependency
+				throw_error "$g_target_cmd_decompress_safe"
+			fi
 		fi
 	else
 		g_destination_operating_system=$(get_os "")
@@ -934,577 +1408,6 @@ consistency_check() {
 	if [ "$g_option_T_target_host" != "" ] || [ "$g_option_O_origin_host" != "" ]; then
 		if [ "$g_option_m_migrate" -eq 1 ] || [ "$g_option_c_services" != "" ]; then
 			throw_usage_error "You cannot migrate to or from a remote host."
-		fi
-	fi
-}
-
-sanitize_backup_component() {
-	l_component=$1
-	if [ "$l_component" = "" ]; then
-		printf '_\n'
-		return
-	fi
-	l_sanitized=$(printf '%s' "$l_component" | tr -c 'A-Za-z0-9._-' '_')
-	if [ "$l_sanitized" = "" ]; then
-		l_sanitized="_"
-	fi
-	printf '%s\n' "$l_sanitized"
-}
-
-sanitize_dataset_relpath() {
-	l_path=$1
-	l_trim=${l_path#/}
-	l_trim=${l_trim%/}
-	if [ "$l_trim" = "" ]; then
-		printf 'dataset\n'
-		return
-	fi
-	OLDIFS=$IFS
-	IFS="/"
-	l_result=""
-	for l_part in $l_trim; do
-		[ "$l_part" = "" ] && continue
-		l_part=$(sanitize_backup_component "$l_part")
-		l_result="$l_result/$l_part"
-	done
-	IFS=$OLDIFS
-	l_result=${l_result#/}
-	if [ "$l_result" = "" ]; then
-		l_result="dataset"
-	fi
-	printf '%s\n' "$l_result"
-}
-
-get_backup_storage_dir() {
-	l_mountpoint=$1
-	l_dataset=$2
-	zxfer_refresh_backup_storage_root
-
-	case "$l_mountpoint" in
-	"" | "-")
-		l_relative="detached"
-		;;
-	legacy | none)
-		l_relative=$(sanitize_backup_component "$l_mountpoint")
-		;;
-	/)
-		l_relative="root"
-		;;
-	*)
-		l_trim=${l_mountpoint#/}
-		l_trim=${l_trim%/}
-		if [ "$l_trim" = "" ]; then
-			l_relative="root"
-		else
-			OLDIFS=$IFS
-			IFS="/"
-			l_relative=""
-			for l_part in $l_trim; do
-				[ "$l_part" = "" ] && continue
-				[ "$l_part" = "." ] && continue
-				[ "$l_part" = ".." ] && continue
-				l_part=$(sanitize_backup_component "$l_part")
-				l_relative="$l_relative/$l_part"
-			done
-			IFS=$OLDIFS
-			l_relative=${l_relative#/}
-			if [ "$l_relative" = "" ]; then
-				l_relative="root"
-			fi
-		fi
-		;;
-	esac
-
-	case "$l_mountpoint" in
-	"" | "-" | legacy | none)
-		l_dataset_rel=$(sanitize_dataset_relpath "$l_dataset")
-		l_relative="$l_relative/$l_dataset_rel"
-		;;
-	esac
-
-	printf '%s/%s\n' "$g_backup_storage_root" "$l_relative"
-}
-
-get_path_owner_uid() {
-	l_path=$1
-
-	if [ ! -e "$l_path" ]; then
-		return 1
-	fi
-
-	if command -v stat >/dev/null 2>&1; then
-		if l_uid=$(stat -c '%u' "$l_path" 2>/dev/null); then
-			case "$l_uid" in
-			'' | *[!0-9]*) ;;
-			*)
-				printf '%s\n' "$l_uid"
-				return 0
-				;;
-			esac
-		fi
-		if l_uid=$(stat -f '%u' "$l_path" 2>/dev/null); then
-			case "$l_uid" in
-			'' | *[!0-9]*) ;;
-			*)
-				printf '%s\n' "$l_uid"
-				return 0
-				;;
-			esac
-		fi
-	fi
-
-	l_ls_path=$l_path
-	case "$l_ls_path" in
-	-*)
-		l_ls_path=./$l_ls_path
-		;;
-	esac
-	if l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
-		# shellcheck disable=SC2016
-		# awk needs literal $3.
-		l_uid=$(printf '%s\n' "$l_ls_output" | ${g_cmd_awk:-awk} '{print $3}')
-		if [ "$l_uid" != "" ]; then
-			printf '%s\n' "$l_uid"
-			return 0
-		fi
-	fi
-
-	return 1
-}
-
-get_path_mode_octal() {
-	l_path=$1
-
-	if [ ! -e "$l_path" ]; then
-		return 1
-	fi
-
-	if command -v stat >/dev/null 2>&1; then
-		if l_mode=$(stat -c '%a' "$l_path" 2>/dev/null); then
-			case "$l_mode" in
-			'' | *[!0-9]*) ;;
-			*)
-				printf '%s\n' "$l_mode"
-				return 0
-				;;
-			esac
-		fi
-		if l_mode=$(stat -f '%OLp' "$l_path" 2>/dev/null); then
-			case "$l_mode" in
-			'' | *[!0-9]*) ;;
-			*)
-				printf '%s\n' "$l_mode"
-				return 0
-				;;
-			esac
-		fi
-	fi
-
-	l_ls_path=$l_path
-	case "$l_ls_path" in
-	-*)
-		l_ls_path=./$l_ls_path
-		;;
-	esac
-	if l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
-		# shellcheck disable=SC2016
-		# awk needs literal $1.
-		l_perm_str=$(printf '%s\n' "$l_ls_output" | ${g_cmd_awk:-awk} '{print $1}')
-		if [ "$l_perm_str" = "-rw-------" ]; then
-			printf '600\n'
-			return 0
-		fi
-	fi
-
-	return 1
-}
-
-get_effective_user_uid() {
-	if command -v id >/dev/null 2>&1; then
-		if l_uid=$(id -u 2>/dev/null); then
-			printf '%s\n' "$l_uid"
-			return 0
-		fi
-	fi
-	return 1
-}
-
-backup_owner_uid_is_allowed() {
-	l_owner_uid=$1
-
-	if [ "$l_owner_uid" = "0" ]; then
-		return 0
-	fi
-
-	if l_effective_uid=$(get_effective_user_uid); then
-		if [ "$l_owner_uid" = "$l_effective_uid" ]; then
-			return 0
-		fi
-	fi
-
-	return 1
-}
-
-describe_expected_backup_owner() {
-	l_desc="root (UID 0)"
-
-	if l_effective_uid=$(get_effective_user_uid); then
-		if [ "$l_effective_uid" != "0" ]; then
-			l_desc="$l_desc or UID $l_effective_uid"
-		fi
-	fi
-
-	printf '%s\n' "$l_desc"
-}
-
-require_secure_backup_file() {
-	l_path=$1
-
-	if ! l_owner_uid=$(get_path_owner_uid "$l_path"); then
-		throw_error "Cannot determine the owner of backup metadata $l_path."
-	fi
-	if ! backup_owner_uid_is_allowed "$l_owner_uid"; then
-		l_expected_owner_desc=$(describe_expected_backup_owner)
-		throw_error "Refusing to use backup metadata $l_path because it is owned by UID $l_owner_uid instead of $l_expected_owner_desc."
-	fi
-	if ! l_mode=$(get_path_mode_octal "$l_path"); then
-		throw_error "Cannot determine the permissions for backup metadata $l_path."
-	fi
-	if [ "$l_mode" != "600" ]; then
-		throw_error "Refusing to use backup metadata $l_path because its permissions ($l_mode) are not 0600."
-	fi
-}
-
-ensure_local_backup_dir() {
-	l_dir=$1
-	if [ -L "$l_dir" ]; then
-		throw_error "Refusing to use backup directory $l_dir because it is a symlink."
-	fi
-	if [ -e "$l_dir" ] && [ ! -d "$l_dir" ]; then
-		throw_error "Refusing to use backup directory $l_dir because it is not a directory."
-	fi
-	if [ ! -d "$l_dir" ]; then
-		l_old_umask=$(umask)
-		umask 077
-		if ! mkdir -p "$l_dir"; then
-			umask "$l_old_umask"
-			throw_error "Error creating secure backup directory $l_dir."
-		fi
-		umask "$l_old_umask"
-	fi
-	if ! l_owner_uid=$(get_path_owner_uid "$l_dir"); then
-		throw_error "Cannot determine the owner of backup directory $l_dir."
-	fi
-	if ! backup_owner_uid_is_allowed "$l_owner_uid"; then
-		l_expected_owner_desc=$(describe_expected_backup_owner)
-		throw_error "Refusing to use backup directory $l_dir because it is owned by UID $l_owner_uid instead of $l_expected_owner_desc."
-	fi
-	if ! chmod 700 "$l_dir"; then
-		throw_error "Error securing backup directory $l_dir."
-	fi
-}
-
-ensure_remote_backup_dir() {
-	l_dir=$1
-	l_host=$2
-	l_profile_side=${3:-}
-
-	[ "$l_host" = "" ] && return
-
-	l_dir_single=$(escape_for_single_quotes "$l_dir")
-	l_dir_ls_path=$l_dir
-	case "$l_dir_ls_path" in
-	-*)
-		l_dir_ls_path=./$l_dir_ls_path
-		;;
-	esac
-	l_dir_ls_single=$(escape_for_single_quotes "$l_dir_ls_path")
-	l_remote_cmd="[ -L '$l_dir_single' ] && { echo 'Refusing to use symlinked zxfer backup directory.' >&2; exit 1; }; if [ -e '$l_dir_single' ] && [ ! -d '$l_dir_single' ]; then echo 'Backup path exists but is not a directory.' >&2; exit 1; fi; umask 077; if ! mkdir -p '$l_dir_single'; then echo 'Error creating secure backup directory.' >&2; exit 1; fi; if ! chmod 700 '$l_dir_single'; then echo 'Error securing backup directory.' >&2; exit 1; fi; l_expected_uid=\$(id -u); l_dir_uid=''; if command -v stat >/dev/null 2>&1; then l_dir_uid=\$(stat -c '%u' '$l_dir_single' 2>/dev/null); if [ \"\$l_dir_uid\" = '' ] || printf '%s' \"\$l_dir_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_dir_uid=\$(stat -f '%u' '$l_dir_single' 2>/dev/null); fi; fi; if [ \"\$l_dir_uid\" = '' ] || printf '%s' \"\$l_dir_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_ls_line=\$(ls -ldn '$l_dir_ls_single' 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_dir_uid=\$(printf '%s\n' \"\$l_ls_line\" | awk '{print \$3}'); fi; fi; if [ \"\$l_dir_uid\" = '' ]; then echo 'Unable to determine backup directory owner.' >&2; exit 1; fi; if [ \"\$l_dir_uid\" != 0 ] && [ \"\$l_dir_uid\" != \"\$l_expected_uid\" ]; then echo 'Backup directory must be owned by root or the ssh user.' >&2; exit 1; fi"
-	l_remote_shell_cmd=$(build_remote_sh_c_command "$l_remote_cmd")
-	if ! invoke_ssh_shell_command_for_host "$l_host" "$l_remote_shell_cmd" "$l_profile_side"; then
-		throw_error "Error preparing backup directory on $l_host."
-	fi
-}
-
-read_local_backup_file() {
-	l_path=$1
-	if [ ! -f "$l_path" ] || [ -h "$l_path" ]; then
-		return 1
-	fi
-	require_secure_backup_file "$l_path"
-	cat "$l_path"
-}
-
-read_remote_backup_file() {
-	l_host=$1
-	l_path=$2
-	l_profile_side=${3:-}
-
-	l_path_single=$(escape_for_single_quotes "$l_path")
-	l_remote_insecure_owner_status=95
-	l_remote_insecure_mode_status=96
-	l_remote_unknown_status=97
-	l_remote_awk_cmd="awk"
-	l_path_ls_path=$l_path
-	case "$l_path_ls_path" in
-	-*)
-		l_path_ls_path=./$l_path_ls_path
-		;;
-	esac
-	l_path_ls_single=$(escape_for_single_quotes "$l_path_ls_path")
-	l_remote_cat_cmd=$(build_shell_command_from_argv "$g_cmd_cat" "$l_path")
-	l_remote_secure_cat_cmd="if [ ! -f '$l_path_single' ] || [ -h '$l_path_single' ]; then exit 1; fi; \
-l_uid=''; \
-if command -v stat >/dev/null 2>&1; then l_uid=\$(stat -c '%u' '$l_path_single' 2>/dev/null); if [ \"\$l_uid\" = '' ] || printf '%s' \"\$l_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_uid=\$(stat -f '%u' '$l_path_single' 2>/dev/null); fi; fi; \
-if [ \"\$l_uid\" = '' ] || printf '%s' \"\$l_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_ls_line=\$(ls -ldn '$l_path_ls_single' 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_uid=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$3}'); fi; fi; \
-if [ \"\$l_uid\" = '' ]; then exit $l_remote_unknown_status; fi; \
-if [ \"\$l_uid\" != '0' ]; then exit $l_remote_insecure_owner_status; fi; \
-l_mode=''; \
-if command -v stat >/dev/null 2>&1; then l_mode=\$(stat -c '%a' '$l_path_single' 2>/dev/null); if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_mode=\$(stat -f '%OLp' '$l_path_single' 2>/dev/null); fi; fi; \
-if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then if [ \"\$l_ls_line\" = '' ]; then l_ls_line=\$(ls -ldn '$l_path_ls_single' 2>/dev/null) || l_ls_line=''; fi; if [ \"\$l_ls_line\" != '' ]; then l_perm=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$1}'); if [ \"\$l_perm\" = '-rw-------' ]; then l_mode='600'; fi; fi; fi; \
-	if [ \"\$l_mode\" = '' ]; then exit $l_remote_unknown_status; fi; \
-if [ \"\$l_mode\" != '600' ]; then exit $l_remote_insecure_mode_status; fi; \
-$l_remote_cat_cmd"
-	l_remote_secure_cat_shell_cmd=$(build_remote_sh_c_command "$l_remote_secure_cat_cmd")
-	invoke_ssh_shell_command_for_host "$l_host" "$l_remote_secure_cat_shell_cmd" "$l_profile_side"
-	l_remote_status=$?
-	if [ $l_remote_status -eq $l_remote_insecure_owner_status ]; then
-		throw_error "Refusing to use backup metadata $l_path on $l_host because it is not owned by root."
-	fi
-	if [ $l_remote_status -eq $l_remote_insecure_mode_status ]; then
-		throw_error "Refusing to use backup metadata $l_path on $l_host because its permissions are not 0600."
-	fi
-	if [ $l_remote_status -eq $l_remote_unknown_status ]; then
-		throw_error "Cannot determine ownership or permissions for backup metadata $l_path on $l_host."
-	fi
-	return $l_remote_status
-}
-
-backup_metadata_matches_source() {
-	l_backup_contents=$1
-	l_expected_source=$2
-
-	l_source_regex=$(printf '%s\n' "$l_expected_source" | sed 's/[].[^$\\*]/\\&/g')
-	if printf '%s\n' "$l_backup_contents" | grep -q "^$l_source_regex,"; then
-		return 0
-	fi
-	if printf '%s\n' "$l_backup_contents" | grep -q "^[^,]*,$l_source_regex,"; then
-		return 0
-	fi
-
-	return 1
-}
-
-#
-# Gets the backup properties from a previous backup of those properties
-# This takes $initial_source. The backup file is usually in directory
-# corresponding to the parent filesystem of $initial_source
-#
-get_backup_properties() {
-	zxfer_set_failure_stage "backup metadata read"
-
-	# We will step back through the filesystem hierarchy from $initial_source
-	# until the pool level, looking for the backup file, stopping when we find
-	# it or terminating with an error.
-	# shellcheck disable=SC2154
-	zxfer_refresh_backup_storage_root
-
-	l_suspect_fs=$initial_source
-	l_suspect_fs_tail=$(echo "$l_suspect_fs" | sed -e 's/.*\///g')
-	l_found_backup_file=0
-	l_used_legacy_backup=0
-	l_legacy_backup_path=""
-	l_expected_secure_backup=""
-
-	while [ $l_found_backup_file -eq 0 ]; do
-		if [ "$l_suspect_fs_tail" = "" ]; then
-			l_suspect_fs_tail=$(echo "$l_suspect_fs" | sed -e 's/.*\///g')
-		fi
-		l_mountpoint=$(run_source_zfs_cmd get -H -o value mountpoint "$l_suspect_fs")
-		l_mountpoint_rel=${l_mountpoint#/}
-		l_secure_dir=$(get_backup_storage_dir "$l_mountpoint" "$l_suspect_fs")
-		l_backup_file="$l_secure_dir/$g_backup_file_extension.$l_suspect_fs_tail"
-		# Fall back to the raw mountpoint path under ZXFER_BACKUP_DIR; some callers
-		# lay out backup metadata using the literal mountpoint rather than the
-		# sanitized path returned by get_backup_storage_dir().
-		l_mount_backup_file=""
-		if [ "$l_mountpoint_rel" != "" ]; then
-			l_mount_backup_file="$g_backup_storage_root/$l_mountpoint_rel/$g_backup_file_extension.$l_suspect_fs_tail"
-		fi
-		# Also try a dataset-relative path in case the mountpoint is empty/legacy.
-		l_dataset_rel=${l_suspect_fs#/}
-		l_dataset_backup_file=""
-		if [ "$l_dataset_rel" != "" ]; then
-			l_dataset_backup_file="$g_backup_storage_root/$l_dataset_rel/$g_backup_file_extension.$l_suspect_fs_tail"
-		fi
-		l_legacy_backup_file=""
-		case "$l_mountpoint" in
-		"" | "-" | legacy | none) ;;
-		*)
-			l_legacy_backup_file=$l_mountpoint/$g_backup_file_extension.$l_suspect_fs_tail
-			;;
-		esac
-
-		# Try each candidate path in order. Security failures propagate via
-		# require_secure_backup_file() and will terminate the run with the
-		# expected error message.
-		if [ "$g_option_O_origin_host" = "" ]; then
-			for l_candidate in "$l_backup_file" "$l_mount_backup_file" "$l_dataset_backup_file" "$l_legacy_backup_file"; do
-				[ "$l_candidate" = "" ] && continue
-				if l_backup_contents=$(read_local_backup_file "$l_candidate") &&
-					backup_metadata_matches_source "$l_backup_contents" "$initial_source"; then
-					g_restored_backup_file_contents=$l_backup_contents
-					l_found_backup_file=1
-					if [ "$l_candidate" = "$l_legacy_backup_file" ]; then
-						l_used_legacy_backup=1
-						l_legacy_backup_path="$l_candidate"
-						l_expected_secure_backup="$l_backup_file"
-					fi
-					break
-				fi
-			done
-			# As a last resort, look for the expected filename anywhere under
-			# the backup root. Only accept files whose contents actually match
-			# the requested source dataset, and fail closed if multiple secure
-			# candidates match.
-			if [ $l_found_backup_file -eq 0 ] && [ -d "$g_backup_storage_root" ]; then
-				l_find_name="$g_backup_file_extension.$l_suspect_fs_tail"
-				l_find_results_file=$(get_temp_file)
-				find "$g_backup_storage_root" -name "$l_find_name" -type f 2>/dev/null >"$l_find_results_file"
-				l_matching_backup_count=0
-				l_matching_backup_path=""
-				l_matching_backup_contents=""
-				while IFS= read -r l_found_path; do
-					[ -n "$l_found_path" ] || continue
-					if l_backup_contents=$(read_local_backup_file "$l_found_path") &&
-						backup_metadata_matches_source "$l_backup_contents" "$initial_source"; then
-						l_matching_backup_count=$((l_matching_backup_count + 1))
-						if [ $l_matching_backup_count -eq 1 ]; then
-							l_matching_backup_path=$l_found_path
-							l_matching_backup_contents=$l_backup_contents
-						fi
-					fi
-				done <"$l_find_results_file"
-				rm -f "$l_find_results_file"
-
-				case "$l_matching_backup_count" in
-				0) ;;
-				1)
-					g_restored_backup_file_contents=$l_matching_backup_contents
-					l_found_backup_file=1
-					;;
-				*)
-					throw_error_with_usage "Multiple backup property files named $l_find_name under $g_backup_storage_root matched the source dataset $initial_source. Remove the ambiguous files or restore from a specific secure backup path."
-					;;
-				esac
-			fi
-		else
-			for l_candidate in "$l_backup_file" "$l_mount_backup_file" "$l_dataset_backup_file" "$l_legacy_backup_file"; do
-				[ "$l_candidate" = "" ] && continue
-				if l_backup_contents=$(read_remote_backup_file "$g_option_O_origin_host" "$l_candidate" source) &&
-					backup_metadata_matches_source "$l_backup_contents" "$initial_source"; then
-					g_restored_backup_file_contents=$l_backup_contents
-					l_found_backup_file=1
-					if [ "$l_candidate" = "$l_legacy_backup_file" ]; then
-						l_used_legacy_backup=1
-						l_legacy_backup_path="$l_candidate"
-						l_expected_secure_backup="$l_backup_file"
-					fi
-					break
-				fi
-			done
-		fi
-
-		if [ $l_found_backup_file -eq 0 ]; then
-			l_suspect_fs_parent=$(echo "$l_suspect_fs" | sed -e 's%/[^/]*$%%g')
-			if [ "$l_suspect_fs_parent" = "$l_suspect_fs" ]; then
-				throw_error_with_usage "Cannot find backup property file. Ensure that it
-exists and that it is in a directory corresponding to the
-mountpoints of one of the ancestor filesystems of the source."
-			else
-				l_suspect_fs_tail=$(echo "$l_suspect_fs" | sed -e 's/.*\///g')
-				l_suspect_fs=$l_suspect_fs_parent
-			fi
-		fi
-	done
-
-	if [ $l_used_legacy_backup -eq 1 ]; then
-		echo "Warning: read legacy backup metadata from $l_legacy_backup_path. Move it to $l_expected_secure_backup (or set ZXFER_BACKUP_DIR) to use the hardened storage path." >&2
-	fi
-
-	# at this point the $g_backup_file_contents will be a list of lines with
-	# $source,$g_actual_dest,$source_pvs
-}
-
-#
-# Writes the backup properties to a file that is in the directory
-# corresponding to the destination filesystem
-#
-write_backup_properties() {
-	zxfer_set_failure_stage "backup metadata write"
-
-	if [ "$g_backup_file_contents" = "" ]; then
-		echov "No property data collected; skipping backup write."
-		return
-	fi
-	zxfer_refresh_backup_storage_root
-	l_is_tail=$(echo "$initial_source" | sed -e 's/.*\///g')
-	l_destination_mountpoint=$(run_destination_zfs_cmd get -H -o value mountpoint "$g_destination")
-	l_backup_file_dir=$(get_backup_storage_dir "$l_destination_mountpoint" "$g_destination")
-	l_backup_file_path=$l_backup_file_dir/$g_backup_file_extension.$l_is_tail
-	echov "Writing backup info to secure path $l_backup_file_path (mountpoint $l_destination_mountpoint)"
-
-	# Construct the backup file contents
-	l_backup_file_header="#zxfer property backup file;#version:$g_zxfer_version;#R options:$g_option_R_recursive;#N options:$g_option_N_nonrecursive;#destination:$g_destination;#initial_source:$l_is_tail;"
-	l_backup_date=$(date)
-	g_backup_file_contents="$l_backup_file_header#backup_date:$l_backup_date$g_backup_file_contents"
-
-	# Execute the command
-	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		if [ "$g_option_T_target_host" = "" ]; then
-			ensure_local_backup_dir "$g_backup_storage_root"
-			ensure_local_backup_dir "$l_backup_file_dir"
-			l_old_umask=$(umask)
-			umask 077
-			if ! printf '%s' "$g_backup_file_contents" | tr ";" "\n" >"$l_backup_file_path"; then
-				umask "$l_old_umask"
-				throw_error "Error writing backup file. Is filesystem mounted?"
-			fi
-			umask "$l_old_umask"
-		else
-			ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host" destination
-			ensure_remote_backup_dir "$l_backup_file_dir" "$g_option_T_target_host" destination
-			l_backup_file_path_single=$(escape_for_single_quotes "$l_backup_file_path")
-			l_remote_write_cmd="umask 077; cat > '$l_backup_file_path_single'"
-			l_remote_write_shell_cmd=$(build_remote_sh_c_command "$l_remote_write_cmd")
-			if ! printf '%s' "$g_backup_file_contents" | tr ";" "\n" |
-				invoke_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_write_shell_cmd" destination; then
-				throw_error "Error writing backup file. Is filesystem mounted?"
-			fi
-		fi
-	else
-		l_backup_contents_cmd=$(zxfer_render_command_for_report "" printf '%s' "$g_backup_file_contents")
-		l_translate_cmd=$(zxfer_render_command_for_report "" tr ";" "\n")
-		l_backup_file_path_safe=$(zxfer_quote_token_for_report "$l_backup_file_path")
-		if [ "$g_option_T_target_host" = "" ]; then
-			printf '%s\n' "umask 077; $l_backup_contents_cmd | $l_translate_cmd > $l_backup_file_path_safe"
-		else
-			l_remote_write_cmd="umask 077; cat > $l_backup_file_path_safe"
-			l_host_tokens=$(split_host_spec_tokens "$g_option_T_target_host")
-			l_host_token_count=0
-			if [ "$l_host_tokens" != "" ]; then
-				while IFS= read -r l_token || [ -n "$l_token" ]; do
-					[ "$l_token" = "" ] && continue
-					l_host_token_count=$((l_host_token_count + 1))
-				done <<EOF
-$l_host_tokens
-EOF
-			fi
-			if [ "$l_host_token_count" -gt 1 ]; then
-				l_remote_write_cmd=$(build_remote_sh_c_command "$l_remote_write_cmd")
-			fi
-			l_remote_write_shell_cmd=$(build_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_write_cmd")
-			printf '%s\n' "$l_backup_contents_cmd | $l_translate_cmd | $l_remote_write_shell_cmd"
 		fi
 	fi
 }

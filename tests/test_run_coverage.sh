@@ -53,6 +53,24 @@ EOF
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_appends_total_summary_row_replaces_existing_total() {
+	l_summary_file="$TEST_TMPDIR/summary-existing-total.tsv"
+	cat >"$l_summary_file" <<'EOF'
+80.00	10	8	2	src/a.sh
+50.00	4	2	2	src/b.sh
+71.43	14	10	4	TOTAL
+EOF
+
+	output=$(run_coverage_helper "append_total_summary_row \"$l_summary_file\"; cat \"$l_summary_file\"")
+	total_count=$(printf '%s\n' "$output" | grep -c 'TOTAL$')
+
+	assertEquals "The total-row helper should keep only one aggregate TOTAL row when rerun." \
+		"1" "$total_count"
+	assertContains "The recomputed TOTAL row should still reflect only per-file rows." \
+		"$output" "71.43	14	10	4	TOTAL"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_coverage_render_bash_xtrace_report_uses_repo_relative_paths() {
 	l_fake_root="$TEST_TMPDIR/fake-root"
 	l_source_file="$l_fake_root/src/fake.sh"
@@ -130,6 +148,243 @@ TRACE
 		"$output" "payload"
 	assertNotContains "Multiline string bodies should not be treated as missing executable lines." \
 		"$output" "line two"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_ignores_multiline_command_substitutions() {
+	l_fake_root="$TEST_TMPDIR/fake-root-command-subst"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-command-subst.list"
+	l_trace_file="$TEST_TMPDIR/merged-command-subst.trace"
+	l_summary_file="$TEST_TMPDIR/render-command-subst-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-command-subst-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+captured=$(
+printf '%s\n' one
+)
+printf '%s\n' "$captured"
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:5: printf '%s\n' "\$captured"
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "The bash-xtrace fallback should ignore multiline command-substitution bodies that bash does not trace with line numbers." \
+		"$output" "100.00	1	1	0	src/fake.sh"
+	assertNotContains "Multiline command-substitution bodies should not be treated as missing executable lines." \
+		"$output" "captured=\$("
+	assertNotContains "The inner command-substitution body should not appear as uncovered shell code." \
+		"$output" "one"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_ignores_command_substitution_close_lines_with_redirections() {
+	l_fake_root="$TEST_TMPDIR/fake-root-command-subst-redir"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-command-subst-redir.list"
+	l_trace_file="$TEST_TMPDIR/merged-command-subst-redir.trace"
+	l_summary_file="$TEST_TMPDIR/render-command-subst-redir-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-command-subst-redir-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+captured=$(
+printf '%s\n' one
+) 2>/dev/null
+printf '%s\n' done
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:5: printf '%s\n' done
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "A command-substitution close line with redirections should end the ignored multiline body." \
+		"$output" "100.00	1	1	0	src/fake.sh"
+	assertNotContains "The multiline command-substitution opening line should not be reported as missing shell code." \
+		"$output" "captured=\$("
+	assertNotContains "The command-substitution body should not appear as uncovered shell code." \
+		"$output" "one"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_tracks_nested_scopes_inside_multiline_command_substitutions() {
+	l_fake_root="$TEST_TMPDIR/fake-root-command-subst-nested"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-command-subst-nested.list"
+	l_trace_file="$TEST_TMPDIR/merged-command-subst-nested.trace"
+	l_summary_file="$TEST_TMPDIR/render-command-subst-nested-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-command-subst-nested-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+captured=$(
+(
+printf '%s\n' one
+) 2>/dev/null
+printf '%s\n' two
+)
+printf '%s\n' "$captured"
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:8: printf '%s\n' "\$captured"
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "Nested subshell closes inside a multiline command substitution should not terminate the ignored body early." \
+		"$output" "100.00	1	1	0	src/fake.sh"
+	assertNotContains "Lines that still belong to the multiline command substitution body should not appear as uncovered shell code after an inner subshell close." \
+		"$output" "two"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_ignores_multiline_single_quoted_bodies() {
+	l_fake_root="$TEST_TMPDIR/fake-root-single-quote"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-single-quote.list"
+	l_trace_file="$TEST_TMPDIR/merged-single-quote.trace"
+	l_summary_file="$TEST_TMPDIR/render-single-quote-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-single-quote-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+awk '
+BEGIN {
+	print "hello"
+}
+' "$1"
+printf '%s\n' done
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:7: printf '%s\n' done
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "The bash-xtrace fallback should ignore multiline single-quoted command bodies such as embedded awk programs." \
+		"$output" "100.00	1	1	0	src/fake.sh"
+	assertNotContains "The opening awk quote should not be treated as missing shell code." \
+		"$output" "awk '"
+	assertNotContains "Inner awk-program lines should not appear as uncovered shell code." \
+		"$output" "print \"hello\""
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_ignores_multiline_single_quoted_bodies_started_on_backslash_continuations() {
+	l_fake_root="$TEST_TMPDIR/fake-root-single-quote-continuation"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-single-quote-continuation.list"
+	l_trace_file="$TEST_TMPDIR/merged-single-quote-continuation.trace"
+	l_summary_file="$TEST_TMPDIR/render-single-quote-continuation-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-single-quote-continuation-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+awk \
+	-v mode=1 '
+BEGIN {
+	print "hello"
+}
+' "$1"
+printf '%s\n' done
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:2: awk -v mode=1 ...
++$l_source_file:8: printf '%s\n' done
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "The bash-xtrace fallback should keep ignoring multiline single-quoted bodies when the opening quote starts on a backslash-continuation line." \
+		"$output" "100.00	2	2	0	src/fake.sh"
+	assertNotContains "The embedded awk body should not reappear as uncovered shell code when its opening quote follows a continuation line." \
+		"$output" "print \"hello\""
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_ignores_backslash_continuation_lines() {
+	l_fake_root="$TEST_TMPDIR/fake-root-continuation"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-continuation.list"
+	l_trace_file="$TEST_TMPDIR/merged-continuation.trace"
+	l_summary_file="$TEST_TMPDIR/render-continuation-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-continuation-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+rm -f "$1" \
+	"$2" \
+	"$3"
+printf '%s\n' done
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:2: rm -f "$1" "$2" "$3"
++$l_source_file:5: printf '%s\n' done
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "The bash-xtrace fallback should count only the first line of a backslash-continued shell command." \
+		"$output" "100.00	2	2	0	src/fake.sh"
+	assertNotContains "Backslash continuation payload lines should not appear as uncovered shell code." \
+		"$output" "\"\$2\" \\"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_overwrites_existing_outputs() {
+	l_fake_root="$TEST_TMPDIR/fake-root-overwrite"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-overwrite.list"
+	l_trace_file="$TEST_TMPDIR/merged-overwrite.trace"
+	l_summary_file="$TEST_TMPDIR/render-overwrite-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-overwrite-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+printf '%s\n' one
+printf '%s\n' two
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	printf '+%s:2: printf '\''%%s\\n'\'' one\n' "$l_source_file" >"$l_trace_file"
+	cat >"$l_summary_file" <<'EOF'
+99.00	1	1	0	src/stale.sh
+99.00	1	1	0	TOTAL
+EOF
+	cat >"$l_missing_file" <<'EOF'
+src/stale.sh
+  1:stale
+EOF
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\")\"")
+
+	assertContains "The renderer should replace stale summary content with the current target set." \
+		"$output" "50.00	2	1	1	src/fake.sh"
+	assertNotContains "The renderer should not append to stale summary rows from prior runs." \
+		"$output" "src/stale.sh"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

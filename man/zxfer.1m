@@ -193,7 +193,7 @@ In order to allow the restoration of filesystems within the hierarchy,
 will begin at the level you specify, and traverse the filesystem hierarchy back
 to the pool level until it finds an appropriate .zxfer_backup_info
 file inside the hardened metadata directory
-(\fBZXFER_BACKUP_DIR\fR/\fImountpoint\fR/.zxfer_backup_info.<tail>) or fails.
+(\fBZXFER_BACKUP_DIR\fR/\fIsource/dataset/path\fR/.zxfer_backup_info.<tail>.<id>) or fails.
 It will use the first such file it comes across, so be careful about backing up
 from multiple individual levels of the same filesystem hierarchy. Legacy files
 that still live directly inside dataset mountpoints are read as a fallback, but
@@ -208,18 +208,19 @@ Prints (h)elp.
 \fB\-k\fR
 Bac(k)up property mode. This backs up the original filesystem property settings
 to a file
-\fI.zxfer_backup_info.<pool_name>\fR
+\fI.zxfer_backup_info.<tail>.<id>\fR
 stored inside the secured metadata directory
-(\fBZXFER_BACKUP_DIR\fR/\fImountpoint\fR/). This keeps the metadata outside live
-mountpoints so unprivileged users cannot pre-create symlinks. For example, if
+(\fBZXFER_BACKUP_DIR\fR/\fIsource/dataset/path\fR/). This keeps the metadata outside live
+mountpoints so unprivileged users cannot pre-create symlinks. The
+\fI<id>\fR suffix is derived from the full source and destination pair so
+distinct replication runs do not overwrite each other just because they share
+the same source tail. For example, if
 you are backing up
-\fIzroot\fR
-to be located as per
-\fIstorage/backups/zroot/...\fR
+\fItank/src\fR
 and you keep the default
 \fBZXFER_BACKUP_DIR\fR
 of \fI/var/db/zxfer\fR, the file
-\fI/var/db/zxfer/storage/backups/.zxfer_backup_info.zroot\fR
+\fI/var/db/zxfer/tank/src/.zxfer_backup_info.src.k1234567890.8\fR
 would hold all the information about the original filesystem properties, and
 some other useful info. Point
 \fBZXFER_BACKUP_DIR\fR
@@ -245,6 +246,12 @@ backup will be able to store the correct properties of the original.
 Dry ru(n) mode. Prints out the commands that would otherwise execute but does
 not execute them. This may not work in all circumstances as it may expect the
 existence of filesystems etc. that won't be created. When combined with
+\fB\-k\fR,
+\fBzxfer\fR
+also only previews the local or remote secure backup-directory preparation
+commands under
+\fBZXFER_BACKUP_DIR\fR
+instead of creating or chmodding those directories during preflight. When combined with
 \fB\-s\fR
 or
 \fB\-m\fR,
@@ -390,6 +397,8 @@ A number of macros will be replaced with values before the command is executed:
 .TP 3n
 %%size%%
 Will be replaced with the estimated size of the snapshot.
+On remote or multi-job runs, \fBzxfer\fR may use a cheaper approximate probe
+for this value to reduce startup latency.
 .PD
 .TP 3n
 %%title%%
@@ -456,10 +465,12 @@ Useful for skipping properties like quotas that can interfere with replication,
 or properties that are not supported on the destination.
 .TP 8n
 \fB\-j\fR \fIjobs\fR
-Run up to this many zfs send/receive jobs concurrently and parallelize listing
-snapshots when determining the work queue. The default is 1, which disables
-background sends. Raising this value can hide WAN latency or speed up large
-replications, but will also increase memory, CPU and I/O load.
+Run up to this many zfs send/receive jobs concurrently and use adaptive source
+snapshot discovery when determining the work queue. Larger trees can still use
+GNU parallel for per-dataset source listing, while smaller or startup-bound
+runs stay on the cheaper single recursive listing path. The default is 1,
+which disables background sends. Raising this value can hide WAN latency or
+speed up large replications, but will also increase memory, CPU and I/O load.
 .TP 8n
 \fB\-m\fR
 After sending all snapshots, (m)igrate the source to the destination filesystem by
@@ -622,7 +633,8 @@ This allows replicating from newer versions of OpenZFS to older versions.
 .TP 8n
 \fB\-V\fR
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
-profiling counters for ZFS, ssh, and selected replication hot paths
+profiling counters plus accumulated stage timings for ssh setup, snapshot
+listing, and diff/sort hot paths
 .TP 8n
 \fB\-w\fR
 uses zfs ra(w) send mode
@@ -650,6 +662,12 @@ to
 .RS 14n
 zfs send dataset@snap1 | zstd -3 | ssh user@host zstd -d | /sbin/zfs receive destination
 .RE
+.sp
+Adaptive remote source snapshot-list metadata discovery
+(\fB\-O\fR with \fB\-j\fR and \fB\-z\fR) may skip metadata compression so
+no-op or startup-bound runs avoid extra compression/decompression work before
+zxfer decides whether any snapshots actually need transfer. This does not
+change the compression behavior of real send/receive streams.
 .RE
 .TP 8n
 \fB\-Z\fR
@@ -661,14 +679,17 @@ must also be provided.
 .sp
 e.g.
 .sp
--Z "zstd -T0 -9"
+-Z "zstd -T0 -3"
 .sp
 This will modify the default -z option to
 .sp
 .RS 14n
-zfs send dataset@snap1 | zstd -T0 -9 | ssh user@host zstd -d | /sbin/zfs receive
+zfs send dataset@snap1 | zstd -T0 -3 | ssh user@host zstd -d | /sbin/zfs receive
 .RE
 .RS 8n
+.sp
+Higher custom levels such as \fB\-9\fR can improve compression ratio, but they
+consume substantially more CPU time and are therefore not the default.
 .sp
 .RE
 .SH "EXAMPLES"
@@ -943,6 +964,14 @@ log files must be owned by root or the effective UID and already use mode
 0600, and newly created log files are chmodded to 0600. If zxfer cannot append
 the report it emits a warning to \fIstderr\fR but preserves the original zxfer
 exit status.
+.TP 8n
+\fBTMPDIR\fR
+Optional local scratch root for zxfer temporary files, FIFOs, and caches.
+When set, it must resolve to an absolute directory owned by root or the
+effective UID and not be writable by other users unless the sticky bit is set;
+otherwise zxfer prefers a validated memory-backed temporary directory such as
+\fB/dev/shm\fR or \fB/run/shm\fR when available and falls back to the system
+temporary directory.
 .PP
 The repository includes \fBexamples/error-log-email-notify.sh\fR, which shows
 how to set \fBZXFER_ERROR_LOG\fR, capture the current run's failure report from

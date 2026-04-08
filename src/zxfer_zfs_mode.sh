@@ -90,7 +90,7 @@ rollback_destination_to_last_common_snapshot() {
 		return
 	fi
 
-	if ! l_dest_exists=$(exists_destination "$g_actual_dest"); then
+	if ! l_dest_exists=$(exists_destination "$g_actual_dest" live); then
 		throw_error "$l_dest_exists"
 	fi
 	if [ "$l_dest_exists" -eq 0 ]; then
@@ -165,10 +165,11 @@ copy_snapshots() {
 
 	l_first_snapshot_path=$(extract_snapshot_path "$l_first_snapshot")
 	l_final_snapshot_path=$(extract_snapshot_path "$l_final_snapshot")
+	l_last_common_path=$(extract_snapshot_path "$g_last_common_snap")
 
 	# When there is nothing new to send, there is no need to roll the
 	# destination back after deleting extra snapshots.
-	if [ "$g_last_common_snap" = "$l_final_snapshot" ]; then
+	if [ -n "$l_last_common_path" ] && [ "$l_last_common_path" = "$l_final_snapshot_path" ]; then
 		echoV "No new snapshots to copy for $g_actual_dest."
 		return
 	fi
@@ -222,7 +223,8 @@ copy_snapshots() {
 	# A destination bootstrap/seed can fully satisfy the transfer when there is
 	# only one source snapshot. Do not attempt an incremental send from a
 	# snapshot to itself.
-	if [ "$g_last_common_snap" = "$l_final_snapshot" ]; then
+	if [ -n "$(extract_snapshot_path "$g_last_common_snap")" ] &&
+		[ "$(extract_snapshot_path "$g_last_common_snap")" = "$l_final_snapshot_path" ]; then
 		echoV "Seed snapshot already matches final snapshot for $g_actual_dest."
 		return
 	fi
@@ -242,7 +244,7 @@ copy_snapshots() {
 #
 reconcile_live_destination_snapshot_state() {
 	[ "$g_dest_has_snapshots" -eq 0 ] || return
-	if ! l_dest_exists=$(exists_destination "$g_actual_dest"); then
+	if ! l_dest_exists=$(exists_destination "$g_actual_dest" live); then
 		throw_error "$l_dest_exists"
 	fi
 	[ "$l_dest_exists" -eq 1 ] || return
@@ -253,46 +255,104 @@ reconcile_live_destination_snapshot_state() {
 	[ -n "$l_live_dest_snaps" ] || return
 	g_dest_has_snapshots=1
 
-	l_newline='
-'
-	l_dest_snap_names="$l_newline"
-	while IFS= read -r l_live_dest_snap; do
-		[ -n "$l_live_dest_snap" ] || continue
-		l_live_dest_identity=$(extract_snapshot_identity "$l_live_dest_snap")
-		[ -n "$l_live_dest_identity" ] || continue
-		l_dest_snap_names="${l_dest_snap_names}${l_live_dest_identity}${l_newline}"
-	done <<-EOF
-		$(normalize_snapshot_record_list "$l_live_dest_snaps")
-	EOF
+	# Build a destination identity set once, then scan the source records in
+	# order so we keep the newest matching snapshot and the remaining tail after
+	# it without repeated large shell-string membership checks.
+	l_reconcile_source_records=$g_src_snapshot_transfer_list
+	if zxfer_snapshot_record_lists_share_snapshot_name "$g_src_snapshot_transfer_list" "$l_live_dest_snaps"; then
+		if ! zxfer_snapshot_record_list_contains_guid "$g_src_snapshot_transfer_list"; then
+			l_reconcile_source_dataset=""
+			while IFS= read -r l_reconcile_source_record; do
+				[ -n "$l_reconcile_source_record" ] || continue
+				l_reconcile_source_dataset=$(extract_snapshot_dataset "$l_reconcile_source_record")
+				[ -n "$l_reconcile_source_dataset" ] && break
+			done <<-EOF
+				$(normalize_snapshot_record_list "$g_src_snapshot_transfer_list")
+			EOF
+
+			if [ -n "$l_reconcile_source_dataset" ]; then
+				if ! l_reconcile_source_records=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_reconcile_source_dataset" "$g_src_snapshot_transfer_list"); then
+					throw_error "Failed to retrieve source snapshot identities for [$l_reconcile_source_dataset]."
+				fi
+			fi
+		fi
+	fi
+
+	l_section_break="@@ZXFER_SET_BREAK@@"
+	l_reconcile_snapshot_awk=$(
+		cat <<'EOF'
+BEGIN {
+	in_source = 0
+	found_common = 0
+	remaining_count = 0
+}
+$0 == section_break {
+	in_source = 1
+	next
+}
+!in_source {
+	if ($0 != "")
+		dest_identities[$0] = 1
+	next
+}
+$0 != "" {
+	record = $0
+	tab_pos = index(record, "\t")
+	snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record)
+	snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : "")
+	at_pos = index(snapshot_path, "@")
+	if (at_pos <= 0)
+		next
+	snapshot_identity = substr(snapshot_path, at_pos + 1)
+	if (snapshot_guid != "")
+		snapshot_identity = snapshot_identity "\t" snapshot_guid
+	if (snapshot_identity in dest_identities) {
+		common = record
+		found_common = 1
+		remaining_count = 0
+		next
+	}
+	if (found_common)
+		remaining[++remaining_count] = record
+}
+END {
+	if (common != "")
+		print common
+	for (i = 1; i <= remaining_count; i++)
+		print remaining[i]
+}
+EOF
+	)
+	l_reconcile_result=$(
+		{
+			while IFS= read -r l_live_dest_snap; do
+				[ -n "$l_live_dest_snap" ] || continue
+				l_live_dest_identity=$(extract_snapshot_identity "$l_live_dest_snap")
+				[ -n "$l_live_dest_identity" ] || continue
+				printf '%s\n' "$l_live_dest_identity"
+			done <<-EOF
+				$(normalize_snapshot_record_list "$l_live_dest_snaps")
+			EOF
+			printf '%s\n' "$l_section_break"
+			normalize_snapshot_record_list "$l_reconcile_source_records"
+		} | "${g_cmd_awk:-awk}" -v section_break="$l_section_break" "$l_reconcile_snapshot_awk"
+	)
 
 	l_confirmed_common_snap=""
 	l_remaining_source_snaps=""
-	l_found_common_snap=0
-
-	while IFS= read -r l_source_snap; do
-		[ -n "$l_source_snap" ] || continue
-		l_source_snap_identity=$(extract_snapshot_identity "$l_source_snap")
-		[ -n "$l_source_snap_identity" ] || continue
-
-		case "$l_dest_snap_names" in
-		*"$l_newline$l_source_snap_identity$l_newline"*)
-			l_confirmed_common_snap=$l_source_snap
-			l_found_common_snap=1
-			l_remaining_source_snaps=""
-			;;
-		*)
-			if [ "$l_found_common_snap" -eq 1 ]; then
-				if [ -z "$l_remaining_source_snaps" ]; then
-					l_remaining_source_snaps=$l_source_snap
-				else
-					l_remaining_source_snaps="$l_remaining_source_snaps
-$l_source_snap"
-				fi
-			fi
-			;;
-		esac
+	l_is_first_result_line=1
+	while IFS= read -r l_reconcile_line; do
+		if [ "$l_is_first_result_line" -eq 1 ]; then
+			l_confirmed_common_snap=$l_reconcile_line
+			l_is_first_result_line=0
+		elif [ -z "$l_remaining_source_snaps" ]; then
+			l_remaining_source_snaps=$l_reconcile_line
+		else
+			l_remaining_source_snaps="$l_remaining_source_snaps
+$l_reconcile_line"
+		fi
 	done <<-EOF
-		$(normalize_snapshot_record_list "$g_src_snapshot_transfer_list")
+		$(printf '%s\n' "$l_reconcile_result")
 	EOF
 
 	[ -n "$l_confirmed_common_snap" ] || return
@@ -373,10 +433,15 @@ EOF
 #
 relaunch() {
 	zxfer_set_failure_stage "migration service handling"
-	[ -z "$m_services_to_restart" ] && return
+	[ -z "$m_services_to_restart" ] && {
+		g_services_need_relaunch=0
+		g_services_relaunch_in_progress=0
+		return
+	}
 
-	# Assume relaunch completes; set flag early so trap_exit won't loop
-	g_services_need_relaunch=0
+	g_services_relaunch_in_progress=1
+	l_failed_services=""
+	l_failed_count=0
 
 	for l_i in $m_services_to_restart; do
 		echov "Restarting service $l_i"
@@ -384,10 +449,28 @@ relaunch() {
 			echov "Dry run: $(build_shell_command_from_argv svcadm enable "$l_i")"
 			continue
 		fi
-		svcadm enable "$l_i" || {
-			throw_error "Couldn't re-enable service $l_i."
-		}
+		if ! svcadm enable "$l_i"; then
+			l_failed_count=$((l_failed_count + 1))
+			if [ -z "$l_failed_services" ]; then
+				l_failed_services=$l_i
+			else
+				l_failed_services="$l_failed_services $l_i"
+			fi
+		fi
 	done
+
+	if [ "$l_failed_count" -gt 0 ]; then
+		m_services_to_restart=$l_failed_services
+		g_services_need_relaunch=1
+		if [ "$l_failed_count" -eq 1 ]; then
+			throw_error "Couldn't re-enable service $l_failed_services."
+		fi
+		throw_error "Couldn't re-enable services: $l_failed_services."
+	fi
+
+	m_services_to_restart=""
+	g_services_need_relaunch=0
+	g_services_relaunch_in_progress=0
 }
 
 #
@@ -444,11 +527,15 @@ check_snapshot() {
 calculate_unsupported_properties() {
 	# Get a list of the supported properties from the destination
 	l_dest_pool_name=${g_destination%%/*}
-	l_dest_supported_properties=$(run_destination_zfs_cmd get -Ho property all "$l_dest_pool_name")
+	if ! l_dest_supported_properties=$(run_destination_zfs_cmd get -Ho property all "$l_dest_pool_name" 2>&1); then
+		throw_error "Failed to retrieve destination supported property list for pool [$l_dest_pool_name]: $l_dest_supported_properties"
+	fi
 
 	# Get a list of the supported properties from the source
 	l_source_pool_name=${initial_source%%/*}
-	l_source_supported_properties=$(run_source_zfs_cmd get -Ho property all "$l_source_pool_name")
+	if ! l_source_supported_properties=$(run_source_zfs_cmd get -Ho property all "$l_source_pool_name" 2>&1); then
+		throw_error "Failed to retrieve source supported property list for pool [$l_source_pool_name]: $l_source_supported_properties"
+	fi
 
 	unsupported_properties=""
 
@@ -480,28 +567,26 @@ copy_filesystems() {
 	fi
 
 	l_iteration_list=$g_recursive_source_list
-	l_force_dataset_iteration=0
 
 	if [ "$g_option_R_recursive" != "" ] && [ $l_property_pass_required -eq 1 ]; then
-		l_force_dataset_iteration=1
-	fi
-
-	if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then
-		l_force_dataset_iteration=1
-	fi
-
-	if [ "$l_force_dataset_iteration" -eq 1 ]; then
 		l_iteration_list=$(printf '%s\n%s\n' "$l_iteration_list" "$g_recursive_source_dataset_list" |
 			grep -v '^[[:space:]]*$' | sort -u)
 	fi
 
-	if [ "$l_iteration_list" = "" ] && [ "$l_force_dataset_iteration" -eq 1 ]; then
-		l_iteration_list=$initial_source
+	if [ "$g_option_d_delete_destination_snapshots" -eq 1 ] &&
+		[ -n "${g_recursive_destination_extra_dataset_list:-}" ]; then
+		l_iteration_list=$(printf '%s\n%s\n' "$l_iteration_list" "$g_recursive_destination_extra_dataset_list" |
+			grep -v '^[[:space:]]*$' | sort -u)
 	fi
+
+	zxfer_refresh_property_tree_prefetch_context
 
 	for l_source in $l_iteration_list; do
 
 		set_actual_dest "$l_source"
+		if [ -n "${g_zfs_send_job_pids:-}" ]; then
+			zxfer_reset_destination_property_iteration_cache
+		fi
 		# Reset per-dataset state derived from transfer_properties().
 		# shellcheck disable=SC2034
 		g_dest_created_by_zxfer=0
@@ -529,6 +614,7 @@ copy_filesystems() {
 		if [ $l_property_pass_required -eq 1 ] &&
 			[ "${g_dest_seed_requires_property_reconcile:-0}" -eq 1 ] &&
 			[ "$g_option_n_dryrun" -eq 0 ]; then
+			zxfer_note_destination_dataset_exists "$g_actual_dest"
 			l_post_seed_property_sources=$(printf '%s\n%s\n' "$l_post_seed_property_sources" "$l_source" |
 				grep -v '^[[:space:]]*$' | sort -u)
 		fi
@@ -544,7 +630,7 @@ copy_filesystems() {
 	if [ $l_property_pass_required -eq 1 ] &&
 		[ "$g_option_n_dryrun" -eq 0 ] &&
 		[ -n "$l_post_seed_property_sources" ]; then
-		refresh_dataset_iteration_state
+		zxfer_reset_destination_property_iteration_cache
 		for l_source in $l_post_seed_property_sources; do
 			set_actual_dest "$l_source"
 			transfer_properties "$l_source" 1
@@ -605,6 +691,20 @@ validate_zfs_mode_preconditions() {
 check_backup_storage_dir_if_needed() {
 	[ "$g_option_k_backup_property_mode" -eq 1 ] || return
 
+	if [ "$g_option_n_dryrun" -eq 1 ]; then
+		l_backup_dir_cmd=$(build_shell_command_from_argv mkdir -p "$g_backup_storage_root")
+		l_backup_dir_mode_cmd=$(build_shell_command_from_argv chmod 700 "$g_backup_storage_root")
+		if [ "$g_option_T_target_host" = "" ]; then
+			echov "Dry run: umask 077; $l_backup_dir_cmd; $l_backup_dir_mode_cmd"
+		else
+			l_remote_backup_dir_cmd="umask 077; $l_backup_dir_cmd; $l_backup_dir_mode_cmd"
+			l_remote_backup_shell_cmd=$(build_remote_sh_c_command "$l_remote_backup_dir_cmd")
+			l_remote_backup_display_cmd=$(build_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_backup_shell_cmd")
+			echov "Dry run: $l_remote_backup_display_cmd"
+		fi
+		return
+	fi
+
 	# Validate or create the backup directory before any replication work so we
 	# fail closed on unsafe paths (e.g., symlinks) instead of performing ZFS
 	# operations first.
@@ -642,6 +742,7 @@ initialize_replication_context() {
 refresh_dataset_iteration_state() {
 	get_zfs_list
 	update_recursive_source_list_if_needed
+	zxfer_refresh_property_tree_prefetch_context
 }
 
 maybe_capture_preflight_snapshot() {
@@ -699,7 +800,9 @@ EOF
 
 	# Validate that each dataset is mounted before we attempt to unmount or snapshot.
 	for l_source in $g_recursive_source_list; do
-		l_source_mounted=$(run_source_zfs_cmd get -Ho value mounted "$l_source")
+		if ! l_source_mounted=$(run_source_zfs_cmd get -Ho value mounted "$l_source"); then
+			throw_error "Couldn't determine whether source $l_source is mounted."
+		fi
 		if [ "$l_source_mounted" != "yes" ]; then
 			throw_usage_error "The source filesystem is not mounted, cannot use -m."
 		fi
@@ -775,6 +878,8 @@ run_zfs_mode_loop() {
 		# if a send or destroy command is performed, set this to 1 indicating
 		# that a change was made during run_zfs_mode
 		g_is_performed_send_destroy=0
+
+		zxfer_reset_property_iteration_caches
 
 		l_num_iterations=$((l_num_iterations + 1))
 		if [ "$g_option_Y_yield_iterations" -gt 1 ]; then

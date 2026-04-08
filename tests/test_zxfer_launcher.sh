@@ -59,15 +59,35 @@ EOF
 read_command_line_switches() {
 	OPTIND=1
 }
-refresh_remote_zfs_commands() {
-	printf '%s\n' "refresh_remote_zfs_commands" >>"${ZXFER_TEST_LOG:?}"
-}
 init_variables() {
 	printf '%s\n' "init_variables" >>"${ZXFER_TEST_LOG:?}"
 }
 EOF
 
+	cat >"$l_fixture_dir/src/zxfer_secure_paths.sh" <<'EOF'
+#!/bin/sh
+EOF
+
+	cat >"$l_fixture_dir/src/zxfer_remote_cli.sh" <<'EOF'
+#!/bin/sh
+refresh_remote_zfs_commands() {
+	printf '%s\n' "refresh_remote_zfs_commands" >>"${ZXFER_TEST_LOG:?}"
+}
+prepare_remote_host_connections() {
+	printf '%s\n' "prepare_remote_host_connections" >>"${ZXFER_TEST_LOG:?}"
+	refresh_remote_zfs_commands
+}
+EOF
+
+	cat >"$l_fixture_dir/src/zxfer_property_cache.sh" <<'EOF'
+#!/bin/sh
+EOF
+
 	cat >"$l_fixture_dir/src/zxfer_transfer_properties.sh" <<'EOF'
+#!/bin/sh
+EOF
+
+	cat >"$l_fixture_dir/src/zxfer_backup_metadata.sh" <<'EOF'
 #!/bin/sh
 write_backup_properties() {
 	:
@@ -88,8 +108,8 @@ EOF
 	done
 }
 
-test_launcher_falls_back_when_prepare_remote_host_connections_is_missing() {
-	fixture_dir="$TEST_TMPDIR/mixed-version"
+test_launcher_runs_remote_connection_prep_from_remote_cli_module() {
+	fixture_dir="$TEST_TMPDIR/launcher-remote-cli"
 	rm -rf "$fixture_dir"
 	mkdir -p "$fixture_dir"
 	create_minimal_launcher_fixture "$fixture_dir"
@@ -103,15 +123,17 @@ test_launcher_falls_back_when_prepare_remote_host_connections_is_missing() {
 	status=$?
 	set -e
 
-	assertEquals "The launcher should still succeed when the sourced globals lack prepare_remote_host_connections()." \
+	assertEquals "The launcher should succeed when the required remote CLI module is present." \
 		0 "$status"
-	assertContains "The compatibility shim should still refresh remote wrappers." \
+	assertContains "The launcher should invoke remote connection preparation from the dedicated remote CLI module." \
+		"$(cat "$log_path")" "prepare_remote_host_connections"
+	assertContains "Remote connection preparation should refresh remote wrappers." \
 		"$(cat "$log_path")" "refresh_remote_zfs_commands"
 	assertContains "The launcher should continue into init_variables()." \
 		"$(cat "$log_path")" "init_variables"
 	assertContains "The launcher should continue into replication." \
 		"$(cat "$log_path")" "run_zfs_mode_loop"
-	assertEquals "The mixed-version fallback should avoid a spurious command-not-found error." \
+	assertEquals "The launcher should not emit a spurious command-not-found error when the required module is present." \
 		"" "$output"
 }
 

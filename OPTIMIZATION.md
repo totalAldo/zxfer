@@ -1,7 +1,11 @@
 # Optimization Review
 
-This document catalogs performance opportunities found by reviewing the current
-`zxfer` codebase. It focuses on four areas the project already cares about:
+This document catalogs the current performance baseline in the `zxfer`
+codebase. The larger discovery, caching, delete-path, property-path,
+progress-planning, and remote-startup optimizations are already landed, so
+this file now serves primarily as a compact baseline and measurement reference
+for any future profiling-driven work. It focuses on four areas the project
+already cares about:
 
 - caching repeated work
 - minimizing `zfs` and `ssh` calls
@@ -18,394 +22,133 @@ The current tree already contains several good performance-oriented choices:
 - snapshot tree diffing for recursive replication already relies on sorted lists
   plus `comm` instead of older nested-loop comparison patterns
 - `zfs send -I` is used so incremental chains move in one stream
-- origin snapshot discovery can already parallelize with GNU `parallel`
-- concurrent send/receive jobs already exist behind `-j`
-- ssh control sockets are reused for `-O` and `-T`
-
-The suggestions below target the places where the remaining overhead is still
-noticeable.
-
-## Highest-Value Opportunities
-
-### 1. Batch `zfs set` operations per dataset
-
-Where:
-
-- `apply_property_changes()` in `src/zxfer_transfer_properties.sh`
-- `zxfer_run_zfs_set_property()` in `src/zxfer_transfer_properties.sh`
-
-What happens now:
-
-- property updates are applied one property at a time
-- for remote targets, each property becomes a separate ssh-backed `zfs set`
-  round trip
-
-Why it matters:
-
-- recursive property sync on large trees turns into many small remote calls
-- latency dominates on `-T` runs even when the actual property work is trivial
-
-Suggestion:
-
-- batch consecutive property sets for the same dataset into a single
-  `zfs set prop=value ... dataset` call after diffing is complete
-- keep dry-run output expanded enough to stay operator-readable
-- do not batch across dataset boundaries or mix `set` and `inherit` in the same
-  execution path
-- verify whether repeated `zfs inherit` calls can also be safely collapsed on
-  the supported platforms; if not, leave inherit one-at-a-time
-
-Expected impact:
-
-- high for `-P`, `-o`, post-seed property reconciliation, and remote targets
-
-### 2. Cache raw normalized property reads per iteration
-
-Where:
-
-- `get_normalized_dataset_properties()` in `src/zxfer_transfer_properties.sh`
-- `collect_source_props()` and `collect_destination_props()`
-- `ensure_required_properties_present()`
-- `adjust_child_inherit_to_match_parent()`
-
-What happens now:
-
-- each normalized property read performs two `zfs get all` calls per dataset
-  (`-Hpo` and `-Ho`)
-- `ensure_required_properties_present()` may add extra per-property `zfs get`
-  calls for missing creation-time properties
-- parent destination properties can be re-fetched repeatedly while processing
-  sibling datasets
-
-Why it matters:
-
-- property transfer is one of the most metadata-heavy phases in recursive mode
-- remote `-O` and `-T` runs pay ssh latency on every repeated property read
-- sibling datasets often share the same parent, so repeated parent reads are
-  avoidable
-
-Suggestion:
-
-- add source-side and destination-side property caches scoped to a single
-  replication iteration, and clear them at the start of each `-Y` pass
-- key caches by inspection side plus dataset, not dataset name alone, so source
-  and destination lookups cannot collide
-- cache the raw normalized property list returned by ZFS inspection, then apply
-  restore-mode overrides, ensure-writable handling, readonly filtering, ignore
-  filtering, and unsupported-property filtering per caller
-- cache the destination parent property reads used by
-  `adjust_child_inherit_to_match_parent()` so shared parents are only fetched
-  once per iteration
-- invalidate destination-side cache entries after any operation that can change
-  effective destination properties on that dataset, including create, receive,
-  `zfs set`, and `zfs inherit`
-
-Expected impact:
-
-- high on recursive property-heavy runs, especially over ssh
-
-### 3. Remove the quadratic delete-mapping path
-
-Where:
-
-- `get_dest_snapshots_to_delete_per_dataset()` in
-  `src/zxfer_inspect_delete_snap.sh`
-
-What happens now:
-
-- `comm` first finds identities that exist only on the destination
-- then each identity is matched back to the full destination snapshot path by
-  rescanning the entire destination list
-
-Why it matters:
-
-- this is effectively O(deletes * destination_snapshots) for each dataset
-- the cost grows quickly on snapshot-heavy destinations
-
-Suggestion:
-
-- build the destination identity-to-path mapping once and resolve deletions in a
-  single pass against that map
-- an `awk`-based set/mapping pass is a good fit here because it can preserve
-  destination order without rescanning
-- keep the final destroy list in destination order so grandfather checks,
-  rollback eligibility, and operator-visible output stay aligned with the live
-  target state
-
-Expected impact:
-
-- high on deletion-heavy trees or long-retention destinations
-
-### 4. Replace shell string membership tests with set-based matching
-
-Where:
-
-- `get_last_common_snapshot()` in `src/zxfer_inspect_delete_snap.sh`
-- `reconcile_live_destination_snapshot_state()` in `src/zxfer_zfs_mode.sh`
-
-What happens now:
-
-- destination snapshot identities are concatenated into one large newline-padded
-  shell string
-- each source snapshot then checks membership with a shell `case` substring
-  match
-
-Why it matters:
-
-- repeated full-string scans scale poorly on large lists
-- large concatenated shell strings also increase memory churn
-
-Suggestion:
-
-- replace string membership with a file-backed or `awk`-backed set lookup keyed
-  by snapshot identity (`name+guid`)
-- keep the source-side scan order so the newest common snapshot is still chosen
-  correctly
-- apply the same identity-set approach to the live destination recheck path so
-  initial planning and late reconciliation use the same matching semantics
-
-Expected impact:
-
-- high on deep histories and large recursive trees
-
-### 5. Replace batch-barrier job control with a rolling worker pool
-
-Where:
-
-- `zfs_send_receive()` in `src/zxfer_zfs_send_receive.sh`
-- `wait_for_zfs_send_jobs()` in `src/zxfer_zfs_send_receive.sh`
-
-What happens now:
-
-- once the job limit is reached, zxfer waits for all running jobs to finish
-  before starting the next batch
-
-Why it matters:
-
-- one slow transfer stalls the whole next wave
-- throughput drops whenever job durations are uneven, which is common across
-  mixed-size datasets
-
-Suggestion:
-
-- replace the current batch barrier with a rolling concurrency limiter
-- a FIFO/token semaphore or per-job status-file approach would preserve POSIX
-  shell portability while keeping the pipeline full
-- preserve the current fail-fast behavior: on the first non-zero send/receive
-  exit, stop scheduling new work, terminate remaining in-flight jobs, and
-  surface the failing PID/status in the final error
-
-Expected impact:
-
-- high when `-j` is used for actual replication, especially with uneven dataset
-  sizes
-
-## Medium-Value Opportunities
-
-### 6. Collapse redundant destination existence probes
-
-Where:
-
-- `exists_destination()` in `src/zxfer_common.sh`
-- callers in `src/zxfer_get_zfs_list.sh`, `src/zxfer_zfs_mode.sh`, and
-  `src/zxfer_transfer_properties.sh`
-
-What happens now:
-
-- many code paths probe destination existence with a fresh `zfs list -H`
-  command
-- some flows probe first and then immediately run a second command that would
-  have answered the same question
-
-Examples:
-
-- destination snapshot discovery checks existence before issuing the snapshot
-  list command
-- `copy_snapshots()` and `reconcile_live_destination_snapshot_state()` each
-  re-check destination existence live
-- `ensure_destination_exists()` may check whether the parent exists with a new
-  probe even though `g_recursive_dest_list` already exists
-
-Suggestion:
-
-- add a lightweight per-iteration destination existence cache seeded from
-  `g_recursive_dest_list`
-- update it when zxfer creates a dataset or receives into a new one
-- keep live rechecks only on fail-closed paths where stale state would be
-  unsafe, such as destructive rollback or full-seed refusal logic
-
-Expected impact:
-
-- medium; largest win is on remote targets with many datasets
-
-### 7. Avoid full-tree refreshes after seed receives when only property state changed
-
-Where:
-
-- `copy_filesystems()` and `refresh_dataset_iteration_state()` in
-  `src/zxfer_zfs_mode.sh`
-
-What happens now:
-
-- if any dataset needed post-seed property reconciliation, zxfer refreshes the
-  entire source and destination snapshot state before that final property pass
-
-Why it matters:
-
-- this rebuilds lists that the property pass does not actually need
-- on large recursive trees the refresh can dominate the tail end of a run
-
-Suggestion:
-
-- track newly created/seeded datasets incrementally and update
-  `g_recursive_dest_list` in memory
-- only re-read the specific destination property state needed for the post-seed
-  pass
-- keep the broader refresh for paths that actually change snapshot planning
-  inputs, such as new source snapshots or a fresh `-Y` iteration
-
-Expected impact:
-
-- medium on bootstrap or first-replication runs
-
-### 8. Make source snapshot discovery adaptive instead of always N+1 on `-j`
-
-Where:
-
-- `build_source_snapshot_list_cmd()` in `src/zxfer_get_zfs_list.sh`
-
-What happens now:
-
-- serial mode uses one recursive `zfs list`
-- parallel mode first lists datasets, then runs one snapshot-list command per
-  dataset via GNU `parallel`
-
-Why it matters:
-
-- the current `-j` discovery path can be better on cold caches and very large
-  trees
-- it can also be worse on hot caches, low dataset counts, or high ssh latency
-  because it multiplies command startup overhead
-
-Suggestion:
-
-- add an adaptive threshold so zxfer chooses between single-call and per-dataset
-  discovery based on dataset count, local-vs-remote execution, and measured ssh
-  startup cost
-- if the interface should stay unchanged, start with an internal heuristic and
-  expose tuning only if needed later
-
-Expected impact:
-
-- medium; highly workload-dependent
-
-### 9. Replace sort-based reversal with a linear reversal path
-
-Where:
-
-- `reverse_file_lines()` and `reverse_numbered_line_stream()` in
-  `src/zxfer_get_zfs_list.sh`
-
-What happens now:
-
-- ascending source snapshot lists are reversed via `cat -n | sort -nr | cut`
-
-Why it matters:
-
-- this is an O(n log n) sort for a task that is logically just reversal
-- it also adds extra process and I/O overhead on very large snapshot lists
-
-Suggestion:
-
-- replace the sort pipeline with a POSIX `awk` reversal pass
-- if memory usage becomes a concern on huge trees, document the trade-off and
-  benchmark both implementations before switching
-
-Expected impact:
-
-- medium on large snapshot inventories, low elsewhere
-
-## Lower-Priority Cleanup
-
-### 10. Reduce extra send probes when the progress bar is enabled
-
-Where:
-
-- `calculate_size_estimate()` and `handle_progress_bar_option()` in
-  `src/zxfer_zfs_send_receive.sh`
-
-What happens now:
-
-- each progress-enabled transfer performs an extra `zfs send -nPv` estimate
-
-Why it matters:
-
-- the progress feature doubles the number of send-planning probes for that
-  dataset
-- on remote origin hosts this also adds latency
-
-Suggestion:
-
-- keep the current behavior for accuracy, but consider a cheaper estimate mode
-  for `-j` or remote runs
-- another option is to make the expensive estimate optional under a separate
-  progress style later
-
-Expected impact:
-
-- low to medium, depending on how often `-D` is used
-
-### 11. Replace small nested shell loops in property diff helpers with one-pass `awk`
-
-Where:
-
-- `validate_override_properties()`
-- `derive_override_lists()`
-- `diff_properties()`
-- `adjust_child_inherit_to_match_parent()`
-- `calculate_unsupported_properties()`
-
-What happens now:
-
-- many helpers repeatedly split the same strings with `cut`, `grep`, `tr`, and
-  nested shell loops
-
-Why it matters:
-
-- each individual list is small, so these are not the first bottleneck to fix
-- however, the code does a lot of process spawning in the property path
-
-Suggestion:
-
-- once the higher-value `zfs`/`ssh` round-trip reductions are done, consider
-  moving list diffing and property-field extraction into one-pass `awk`
-  transforms
-- do this only if profiling still shows the shell-side parsing to be material
-
-Expected impact:
-
-- low by itself; mostly a cleanup after the larger wins above
-
-## Suggested Implementation Order
-
-1. Batch `zfs set` operations.
-2. Add per-iteration property caches with explicit invalidation.
-3. Remove the O(n^2) destination-delete mapping.
-4. Replace common-snapshot substring matching with set-based lookups.
-5. Convert `-j` send scheduling from barrier batches to a rolling pool.
-6. Collapse redundant destination existence checks.
-7. Revisit adaptive source discovery and linear reversal once the larger
-   metadata costs are down.
+- source snapshot discovery now adapts between a single recursive list and the
+  older per-dataset GNU `parallel` fan-out based on dataset count plus remote
+  startup warmth, validates GNU `parallel` only when the chosen branch
+  actually needs it, and reuses the prefetched dataset list directly inside the
+  selected command path, so startup-bound and externally orchestrated `-j` runs
+  no longer always pay the full N+1 discovery cost before data moves
+- remote startup discovery now collapses `uname` plus helper-path lookups into
+  one per-host capability handshake, with current-process reuse and a
+  short-lived cross-process cache stored in a validated per-user `0700`
+  directory under `TMPDIR`
+- concurrent sibling zxfer processes now coalesce remote capability handshakes
+  through a secure per-host lock, so a burst of same-host processes reuses one
+  live probe result instead of stampeding the helper-discovery ssh path before
+  the cache is populated
+- ssh control sockets are now reused across sibling zxfer processes through a
+  validated per-user cache directory under `TMPDIR`, with per-process lease
+  files and stale-lease pruning so one process can reuse another process's
+  live transport without tearing it down out from under concurrent siblings
+- `-j` send/receive scheduling now keeps a rolling background worker pool full
+  instead of waiting for an entire batch to drain before launching the next
+  transfer
+- common-snapshot selection and live destination rechecks already compare
+  snapshot identities using `name+guid` records instead of trusting snapshot
+  names alone
+- common-snapshot selection and live destination rechecks now use one-pass
+  `awk`-backed identity-set lookups instead of repeated shell-string
+  membership scans
+- recursive snapshot discovery now keeps the raw global source/destination
+  snapshot caches and lazily builds the per-dataset source/destination
+  snapshot indexes only when delete/common-snapshot planning actually asks for
+  per-dataset records, so no-op runs no longer pay the reverse/index build
+  cost up front while delete/common-snapshot paths still consume pre-sliced
+  records instead of re-filtering the full global snapshot lists for every
+  dataset pass
+- recursive snapshot discovery now starts with name-only source and
+  destination snapshot records plus name-only per-dataset indexes, and only
+  fetches guid-bearing records for datasets whose overlapping snapshot names
+  actually require common-snapshot, delete, rollback, or live-recheck
+  identity validation
+- recursive `-d` runs now track datasets with destination-only snapshot deltas
+  separately and iterate only datasets with source deltas, destination-only
+  deltas, or explicit property-reconcile work, so no-op recursive delete runs
+  no longer force every dataset through `get_last_common_snapshot()`,
+  delete-planning, and copy-path setup just because `-d` is enabled
+- per-dataset property reconciliation now batches consecutive `zfs set`
+  operations instead of issuing one destination-side call per property
+- normalized property reads and explicit required-property probes are now cached
+  per replication iteration with destination-side invalidation after create,
+  receive, set, and inherit operations
+- recursive property-transfer runs now prefetch source and destination property
+  trees once per iteration, slice normalized per-dataset results locally, and
+  reuse prefetched destination parent state for child-inherit adjustment before
+  falling back to exact live reads for datasets created or mutated mid-iteration
+- the remaining small property-diff helper loops now use `awk`-backed
+  transforms for override validation, override/create-list derivation,
+  destination diffing, child inherit adjustment, and unsupported-property
+  filtering instead of repeatedly spawning `cut`, `grep`, and shell nested-loop
+  scans across the same short property lists
+- destination-only snapshot deletion planning now resolves identity-to-path
+  matches in one destination-order-preserving pass instead of rescanning the
+  full destination snapshot list for every delete candidate
+- rollback-eligibility and grandfather checks now batch per-dataset snapshot
+  `creation` reads and cache the numeric results locally, so delete-heavy
+  runs no longer pay one remote `zfs get creation` round trip per candidate
+  snapshot before the final human-readable grandfather error path
+- destination existence probes now fail closed on operational errors instead of
+  treating every failed `zfs list` as proof that the dataset is absent
+- destination existence answers are now cached per replication iteration from
+  the recursive destination dataset list and updated after successful creates
+  and foreground receives, reducing redundant `zfs list -H` probes on non-
+  destructive paths while keeping live rechecks on safety-critical branches
+- deferred post-seed property reconciliation now updates seeded destination
+  datasets incrementally and clears only destination-side property state,
+  avoiding a full source/destination snapshot-tree refresh at the end of
+  bootstrap and first-replication runs
+- progress-enabled send/receive runs now skip size probes entirely when the
+  configured `-D` template does not use `%%size%%`, and remote or multi-job
+  transfers now prefer cheaper approximate size probes with exact fallback
+  instead of always paying an extra `zfs send -nPv` estimate round trip
+- adaptive remote source snapshot discovery now keeps send-stream compression
+  semantics unchanged but skips `zstd` around `-O ... -j ... -z` metadata
+  listing runs, removing compression/decompression overhead from no-op and
+  startup-bound discovery paths while preserving stream compression for actual
+  replication
+- source snapshot list reversal now uses a bounded POSIX-`awk` fast path with
+  automatic sort fallback for larger inputs, and that reversal is now also
+  deferred until a later consumer actually requests newest-first per-dataset
+  source records, avoiding the old unconditional `cat -n | sort -nr | cut`
+  path and the newer eager reverse-on-discovery cost on typical no-op runs
+  without making large trees depend on unbounded awk memory or weakening
+  cross-shell failure handling on the fallback path
+
+The larger discovery, caching, delete, property-path, progress-planning, lazy
+snapshot-identity, and remote-startup optimizations have already landed. There
+are no queued high-value optimization items at the moment; future work should
+come from fresh profiling of real no-op, bootstrap, and multi-host runs rather
+than from the older startup bottlenecks this branch has already addressed.
+
+## Remaining Opportunity
+
+The April 7, 2026 no-op trace that originally motivated this review has now had
+its last concrete open item addressed: remote snapshot-discovery compression is
+adaptive instead of unconditional. The older trace also flagged shell-side
+remote dataset counting, eager `name,guid` discovery, private per-process
+control sockets, and recursive `-d` no-op dataset scans; those are already
+landed optimizations and should not be treated as open work.
+
+There are no queued high-confidence optimization items at the moment. Future
+work should come from fresh `-V` timings on real no-op, bootstrap, and
+multi-host runs rather than from the older startup bottlenecks that are now
+closed.
 
 ## Measurement Plan
 
-Any implementation work should be measured before and after. The safest first
-step is lightweight call counting around the existing helpers:
+Any future implementation work should be measured before and after. The safest
+first step is lightweight call counting around the existing helpers:
 
 - `-V` is now the intended baseline mode for this work: it emits an end-of-run
   profiling summary with these counters without affecting normal output modes
 - count calls to `run_source_zfs_cmd()`, `run_destination_zfs_cmd()`, and
   `invoke_ssh_shell_command_for_host()`
+- on `-O` / `-T` startup-sensitive runs, separate first-process measurements
+  from warm-cache sibling-process measurements so the remote capability
+  handshake cache benefit remains visible
+- `exists_destination_calls` now tracks only live destination probes, not
+  cache hits, so it can be used directly when measuring the destination-
+  existence cache effectiveness
 - count those calls separately for source inspection, destination inspection,
   property reconciliation, and send/receive setup
 - record wall-clock time for:
@@ -415,9 +158,10 @@ step is lightweight call counting around the existing helpers:
   - remote runs with non-trivial RTT
 - distinguish first-run or cold-cache behavior from repeated hot-cache behavior
 
-Recommended success metrics:
+Recommended success metrics for future work:
 
-- fewer `zfs get` and `zfs list` calls per replicated dataset
+- fewer `zfs get`, `zfs list`, and snapshot-slice passes per replicated
+  dataset/tree
 - fewer ssh command invocations on `-O` and `-T`
 - better steady-state throughput with `-j`
 - no change to replication semantics, rollback safety, or deletion safety

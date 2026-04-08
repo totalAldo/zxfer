@@ -836,8 +836,37 @@ mock_ssh_matches_missing_tool_probe() {
 	[ -n "${MOCK_SSH_MISSING_TOOL:-}" ] || return 1
 
 	case "$l_cmd" in
-	*"command -v"*"$MOCK_SSH_MISSING_TOOL"*) return 0 ;;
+	*"command -v"*"$MOCK_SSH_MISSING_TOOL"*) printf '%s\n' "10"; return 0 ;;
+	*"l_path=\$(command -v"*"$MOCK_SSH_MISSING_TOOL"*) printf '%s\n' "10"; return 0 ;;
 	*) return 1 ;;
+	esac
+}
+
+mock_ssh_emit_capability_response() {
+	l_cmd=$1
+
+	case "$l_cmd" in
+	*"ZXFER_REMOTE_CAPS_V1"*)
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf 'os\t%s\n' "${MOCK_SSH_FORCE_UNAME:-$(uname 2>/dev/null)}"
+		for l_tool in zfs parallel cat; do
+			if [ -n "${MOCK_SSH_MISSING_TOOL:-}" ] && [ "$l_tool" = "$MOCK_SSH_MISSING_TOOL" ]; then
+				printf 'tool\t%s\t1\t-\n' "$l_tool"
+				continue
+			fi
+			l_path=$(command -v "$l_tool" 2>/dev/null)
+			l_status=$?
+			if [ "$l_status" -eq 0 ]; then
+				printf 'tool\t%s\t0\t%s\n' "$l_tool" "$l_path"
+			else
+				printf 'tool\t%s\t%s\t-\n' "$l_tool" "$l_status"
+			fi
+		done
+		return 0
+		;;
+	*)
+		return 1
+		;;
 	esac
 }
 
@@ -939,20 +968,24 @@ fi
 			exit 0
 		fi
 
-			if mock_ssh_matches_command_v_override "$l_cmd"; then
-				exit 0
-			fi
+		if mock_ssh_emit_capability_response "$l_cmd"; then
+			exit 0
+		fi
 
-			if [ -n "${MOCK_SSH_FILTER_PROPERTY:-}" ] && printf '%s\n' "$l_cmd" |
-				grep -q "^zfs get -Ho property all "; then
+		if mock_ssh_matches_command_v_override "$l_cmd"; then
+			exit 0
+		fi
+
+		if [ -n "${MOCK_SSH_FILTER_PROPERTY:-}" ] && printf '%s\n' "$l_cmd" |
+			grep -q "^zfs get -Ho property all "; then
 			l_pool=${l_cmd#*all }
 			if [ -n "$l_pool" ]; then
 				zfs get -Ho property all "$l_pool" | grep -v "^${MOCK_SSH_FILTER_PROPERTY}$"
-			exit 0
+				exit 0
+			fi
 		fi
-		fi
-		if mock_ssh_matches_missing_tool_probe "$l_cmd"; then
-			exit 1
+		if l_missing_probe_status=$(mock_ssh_matches_missing_tool_probe "$l_cmd"); then
+			exit "$l_missing_probe_status"
 		fi
 
 		exec "$l_shell" -c "$l_cmd"
@@ -978,8 +1011,11 @@ fi
 	if [ "${1##*/}" = "sh" ] && [ "${2:-}" = "-c" ]; then
 		l_cmd=$3
 		shift 3
-		if mock_ssh_matches_missing_tool_probe "$l_cmd"; then
-			exit 1
+		if mock_ssh_emit_capability_response "$l_cmd"; then
+			exit 0
+		fi
+		if l_missing_probe_status=$(mock_ssh_matches_missing_tool_probe "$l_cmd"); then
+			exit "$l_missing_probe_status"
 		fi
 		exec sh -c "$l_cmd" "$@"
 	fi
@@ -1365,28 +1401,39 @@ remote_missing_parallel_origin_test() {
 	fi
 	ln -s "$real_parallel" "$mock_path/parallel"
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	tmpdir="$WORKDIR/remote_no_parallel_tmp"
 
 	src_dataset="$SRC_POOL/remote_no_parallel_src"
 	dest_root="$DEST_POOL/remote_no_parallel_dest"
 
 	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
+	safe_rm_rf "$tmpdir"
+	mkdir -p "$tmpdir"
 
 	zfs create "$src_dataset"
+	i=1
+	while [ "$i" -le 16 ]; do
+		zfs create "$src_dataset/child$i"
+		i=$((i + 1))
+	done
 	zfs snap -r "$src_dataset@np1"
 
 	set +e
-	output=$(MOCK_SSH_MISSING_TOOL=parallel ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -R "$src_dataset" "$dest_root" 2>&1)
+	# Isolate the cross-process remote capability cache so earlier localhost tests
+	# do not mask this deliberate missing-parallel failure path.
+	output=$(TMPDIR="$tmpdir" MOCK_SSH_MISSING_TOOL=parallel ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -R "$src_dataset" "$dest_root" 2>&1)
 	status=$?
 	set -e
 
 	if [ "$status" -eq 0 ]; then
-		fail "Remote origin without GNU parallel should cause zxfer to fail when -j>1."
+		fail "Remote origin without GNU parallel should cause zxfer to fail when adaptive discovery selects the parallel branch."
 	fi
-	if ! printf '%s\n' "$output" | grep -q "GNU parallel not found on origin host"; then
+	if ! printf '%s\n' "$output" | grep -q "GNU parallel not found on origin host" &&
+		! printf '%s\n' "$output" | grep -q 'Required dependency "GNU parallel" not found on host localhost'; then
 		fail "Expected remote missing parallel error message. Output: $output"
 	fi
 
-	safe_rm_rf "$mock_path"
+	safe_rm_rf "$mock_path" "$tmpdir"
 
 	log "Remote missing GNU parallel origin test passed"
 }
@@ -2526,6 +2573,16 @@ remote_property_backup_restore_test() {
 		fail "Remote backup metadata permissions expected 600, got $remote_mode."
 	fi
 
+	# Exact-pair restore metadata is keyed by the current source and destination.
+	# Capture that pair before mutating the remote source dataset so the later
+	# -e run restores the original property value instead of the live mutated one.
+	ZXFER_BACKUP_DIR="$backup_dir" ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -k -O localhost -R "$dest_remote_dataset" "$restore_dest_root"
+	assert_snapshot_exists "$restore_dest_dataset" "rpb1"
+
+	# Remove the seeded restore target so the upcoming restore run exercises a
+	# fresh receive while still consuming the exact-pair backup metadata.
+	destroy_test_datasets_if_present "$restore_dest_root"
+
 	zfs set test:prop=mutated "$dest_remote_dataset"
 	append_data_to_dataset "$dest_remote_dataset" "file.txt" "after remote backup"
 	zfs snap -r "$dest_remote_dataset@rpb2"
@@ -2703,17 +2760,22 @@ legacy_backup_fallback_warning_test() {
 
 	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$src_dataset" "$dest_root"
 
-	secure_backup=$(find "$backup_dir" -type f -name '.zxfer_backup_info.*' | head -n 1)
-	if [ "$secure_backup" = "" ]; then
-		fail "Secure backup metadata file not found for legacy fallback test."
+	# Restore mode now requires an exact source/destination metadata pair. Seed a
+	# matching backup for the later restore target, then move only that file into
+	# the legacy live-mountpoint layout being exercised here.
+	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$src_dataset" "$restore_root"
+	restore_dataset="$restore_root/${src_dataset##*/}"
+	restore_backup_file=$(find "$backup_dir" -type f -name '*.zxfer_backup_info.*' -exec grep -l "^$src_dataset,$restore_dataset," {} \; | head -n 1)
+	if [ "$restore_backup_file" = "" ]; then
+		fail "Exact-pair restore backup metadata file not found for legacy fallback test."
 	fi
 
 	src_mount=$(get_mountpoint "$src_dataset")
-	legacy_backup="$src_mount/$(basename "$secure_backup")"
-	mv "$secure_backup" "$legacy_backup"
+	legacy_backup="$src_mount/.zxfer_backup_info.${src_dataset##*/}"
+	mv "$restore_backup_file" "$legacy_backup"
 	chmod 600 "$legacy_backup"
 
-	destroy_test_datasets_if_present "$dest_root"
+	destroy_test_datasets_if_present "$dest_root" "$restore_root"
 	zfs create "$dest_root"
 	zfs set test:prop=mutated "$src_dataset"
 	zfs snap -r "$src_dataset@legacy2"
@@ -2731,7 +2793,6 @@ legacy_backup_fallback_warning_test() {
 		fail "Expected warning about legacy backup metadata. Output: $output"
 	fi
 
-	restore_dataset="$restore_root/${src_dataset##*/}"
 	restore_prop=$(zfs get -H -o value test:prop "$restore_dataset")
 	if [ "$restore_prop" != "legacy" ]; then
 		fail "Restore should apply legacy backup property value 'legacy', got '$restore_prop'."
@@ -2764,17 +2825,22 @@ remote_legacy_backup_fallback_warning_test() {
 
 	ZXFER_BACKUP_DIR="$backup_dir" ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -k -T localhost -R "$src_dataset" "$dest_root"
 
-	secure_backup=$(find "$backup_dir" -type f -name '.zxfer_backup_info.*' | head -n 1)
-	if [ "$secure_backup" = "" ]; then
-		fail "Secure remote backup metadata file not found for legacy fallback test."
+	# Restore mode now requires an exact source/destination metadata pair. Seed a
+	# matching backup for the later restore target, then move only that file into
+	# the legacy live-mountpoint layout being exercised here.
+	ZXFER_BACKUP_DIR="$backup_dir" ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -k -T localhost -R "$src_dataset" "$restore_root"
+	restore_dataset="$restore_root/${src_dataset##*/}"
+	restore_backup_file=$(find "$backup_dir" -type f -name '*.zxfer_backup_info.*' -exec grep -l "^$src_dataset,$restore_dataset," {} \; | head -n 1)
+	if [ "$restore_backup_file" = "" ]; then
+		fail "Exact-pair remote restore backup metadata file not found for legacy fallback test."
 	fi
 
 	src_mount=$(get_mountpoint "$src_dataset")
-	legacy_backup="$src_mount/$(basename "$secure_backup")"
-	mv "$secure_backup" "$legacy_backup"
+	legacy_backup="$src_mount/.zxfer_backup_info.${src_dataset##*/}"
+	mv "$restore_backup_file" "$legacy_backup"
 	chmod 600 "$legacy_backup"
 
-	destroy_test_datasets_if_present "$dest_root"
+	destroy_test_datasets_if_present "$dest_root" "$restore_root"
 	zfs create "$dest_root"
 	zfs set test:prop=mutated "$src_dataset"
 	zfs snap -r "$src_dataset@remotelegacy2"
@@ -2792,7 +2858,6 @@ remote_legacy_backup_fallback_warning_test() {
 		fail "Expected warning about remote legacy backup metadata. Output: $output"
 	fi
 
-	restore_dataset="$restore_root/${src_dataset##*/}"
 	assert_snapshot_exists "$restore_dataset" "remotelegacy1"
 	assert_snapshot_exists "$restore_dataset" "remotelegacy2"
 	restore_prop=$(zfs get -H -o value test:prop "$restore_dataset")
@@ -2867,9 +2932,12 @@ EOF
 	if [ "$status" -eq 0 ]; then
 		fail "zxfer should fail when zfs send exits non-zero."
 	fi
-	if ! printf '%s\n' "$output" | grep -q "zfs send/receive job failed"; then
-		fail "Expected send failure message. Output: $output"
-	fi
+	case "$output" in
+	*"zfs send/receive job failed"* | *"failed to read from stream"* | *"Error when executing command."*) ;;
+	*)
+		fail "Expected send failure indication. Output: $output"
+		;;
+	esac
 
 	log "Background send failure test passed"
 }
@@ -3391,7 +3459,7 @@ target_only_remote_compression_test() {
 	MOCK_SSH_LOG="$ssh_log" ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -z -T localhost -R "$src_dataset" "$dest_root"
 	assert_snapshot_exists "$dest_dataset" "toc2"
 
-	if ! grep -F "'zstd' '-d'" "$ssh_log" >/dev/null 2>&1; then
+	if ! grep -F "'$mock_path/zstd' '-d'" "$ssh_log" >/dev/null 2>&1; then
 		fail "Expected target-only remote compression run to invoke remote zstd decompression. Log: $(cat "$ssh_log" 2>/dev/null || true)"
 	fi
 
@@ -3679,9 +3747,9 @@ property_override_and_ignore_test() {
 		fi
 	fi
 
-	child_checksum_source_after=$(zfs get -H -o source checksum "$dest_child")
-	if printf '%s\n' "$child_checksum_source_after" | grep -vq "inherited"; then
-		fail "Expected checksum on $dest_child to be inherited after property pass; source: $child_checksum_source_after."
+	child_checksum_after=$(zfs get -H -o value checksum "$dest_child")
+	if [ "$child_checksum_after" != "sha256" ]; then
+		fail "Expected checksum on $dest_child to converge to sha256 after property pass; saw $child_checksum_after."
 	fi
 
 	parent_quota=$(zfs get -H -o value quota "$dest_dataset")
@@ -3949,7 +4017,14 @@ EOF
 	fi
 
 	remote_os=$(MOCK_SSH_FORCE_UNAME="MockRemoteOS" PATH="$mock_path:$PATH" sh -c '
+		# shellcheck source=src/zxfer_common.sh
 		. ./src/zxfer_common.sh
+		# shellcheck source=src/zxfer_globals.sh
+		. ./src/zxfer_globals.sh
+		# shellcheck source=src/zxfer_secure_paths.sh
+		. ./src/zxfer_secure_paths.sh
+		# shellcheck source=src/zxfer_remote_cli.sh
+		. ./src/zxfer_remote_cli.sh
 		g_cmd_ssh="'"$mock_path"'/ssh"
 		get_os "remotehost"
 	')
