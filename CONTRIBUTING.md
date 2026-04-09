@@ -16,6 +16,8 @@ should prioritize:
 - avoid Bash-specific features
 - avoid GNU-only assumptions unless gated
 - preserve cross-platform behavior where possible
+- follow [docs/coding-style.md](./docs/coding-style.md) for project-specific
+  shell, naming, module, and test conventions
 
 ## Repository Layout
 
@@ -42,10 +44,16 @@ Run the pinned local lint stack:
 ./tests/run_lint.sh
 ```
 
+If you prefer a prebuilt contributor environment, open the repository in the
+included `.devcontainer/` from GitHub Codespaces or VS Code. It preinstalls
+the Ubuntu 24.04 multi-shell, lint, and `kcov` tooling used for local lint,
+shunit2, and coverage work, but it does not replace a ZFS-capable host or
+disposable VM for the manual integration harness.
+
 Run targeted suites when editing a specific area:
 
 ```sh
-./tests/run_shunit_tests.sh tests/test_zxfer_zfs_mode.sh
+./tests/run_shunit_tests.sh tests/test_zxfer_replication.sh
 ```
 
 Run coverage when useful:

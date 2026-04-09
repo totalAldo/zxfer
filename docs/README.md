@@ -12,7 +12,10 @@ with operator and contributor reference material.
 ## Guides
 
 - [platforms.md](./platforms.md): supported platforms, caveats, and path layouts
+- [external-tools.md](./external-tools.md): runtime, optional, and test tool inventory for packaging and ports work
+- [cli-examples.md](./cli-examples.md): one-page CLI example reference covering every current option
 - [testing.md](./testing.md): shunit2, coverage, integration harness, and CI
+- [coding-style.md](./coding-style.md): project-specific shell and module style guide
 - [troubleshooting.md](./troubleshooting.md): common failures and debugging hints
 - [architecture.md](./architecture.md): module layout and high-level execution flow
 - [upstream-history.md](./upstream-history.md): historical context and removed features

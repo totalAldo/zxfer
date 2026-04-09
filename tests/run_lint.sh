@@ -36,6 +36,8 @@ Targets:
   all
 
 Options:
+  --bootstrap-only
+               download/install the selected tools without running the lint checks
   --list        print the available lint targets
   -h, --help    show this help
 
@@ -140,6 +142,10 @@ set_actionlint_asset() {
 		ACTIONLINT_ASSET=actionlint_1.7.12_linux_amd64.tar.gz
 		ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 		;;
+	linux/arm64)
+		ACTIONLINT_ASSET=actionlint_1.7.12_linux_arm64.tar.gz
+		ACTIONLINT_SHA256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+		;;
 	darwin/amd64)
 		ACTIONLINT_ASSET=actionlint_1.7.12_darwin_amd64.tar.gz
 		ACTIONLINT_SHA256=5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644
@@ -160,6 +166,10 @@ set_shfmt_asset() {
 		SHFMT_ASSET=shfmt_v3.13.0_linux_amd64
 		SHFMT_SHA256=70aa99784703a8d6569bbf0b1e43e1a91906a4166bf1a79de42050a6d0de7551
 		;;
+	linux/arm64)
+		SHFMT_ASSET=shfmt_v3.13.0_linux_arm64
+		SHFMT_SHA256=2091a31afd47742051a77bf7cfd175533ab07e924c20ef3151cd108fa1cab5b0
+		;;
 	darwin/amd64)
 		SHFMT_ASSET=shfmt_v3.13.0_darwin_amd64
 		SHFMT_SHA256=b6890a0009abf71d36d7c536ad56e3132c547ceb77cd5d5ee62b3469ab4e9417
@@ -179,6 +189,10 @@ set_shellcheck_asset() {
 	linux/amd64)
 		SHELLCHECK_ASSET=shellcheck-v0.11.0.linux.x86_64.tar.xz
 		SHELLCHECK_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+		;;
+	linux/arm64)
+		SHELLCHECK_ASSET=shellcheck-v0.11.0.linux.aarch64.tar.xz
+		SHELLCHECK_SHA256=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
 		;;
 	darwin/amd64)
 		SHELLCHECK_ASSET=shellcheck-v0.11.0.darwin.x86_64.tar.xz
@@ -361,6 +375,34 @@ run_target() {
 	esac
 }
 
+bootstrap_target() {
+	case "$1" in
+	actionlint)
+		printf '==> bootstrap actionlint %s\n' "$ACTIONLINT_VERSION"
+		ensure_actionlint
+		;;
+	checkbashisms)
+		printf '==> bootstrap checkbashisms (devscripts %s)\n' "$DEVSCRIPTS_VERSION"
+		ensure_checkbashisms
+		;;
+	shfmt)
+		printf '==> bootstrap shfmt %s\n' "$SHFMT_VERSION"
+		ensure_shfmt
+		;;
+	codespell)
+		printf '==> bootstrap codespell %s\n' "$CODESPELL_VERSION"
+		ensure_codespell
+		;;
+	shellcheck)
+		printf '==> bootstrap shellcheck %s\n' "$SHELLCHECK_VERSION"
+		ensure_shellcheck
+		;;
+	*)
+		die "Unknown lint target: $1"
+		;;
+	esac
+}
+
 append_target() {
 	l_target=$1
 
@@ -400,6 +442,7 @@ require_command git
 require_command tar
 
 TARGET_LIST=
+BOOTSTRAP_ONLY=0
 if [ "$#" -eq 0 ]; then
 	append_default_targets
 else
@@ -412,6 +455,9 @@ else
 		--list)
 			print_default_targets
 			exit 0
+			;;
+		--bootstrap-only)
+			BOOTSTRAP_ONLY=1
 			;;
 		all)
 			TARGET_LIST=
@@ -429,7 +475,11 @@ fi
 
 while IFS= read -r l_target; do
 	[ -n "$l_target" ] || continue
-	run_target "$l_target"
+	if [ "$BOOTSTRAP_ONLY" -eq 1 ]; then
+		bootstrap_target "$l_target"
+	else
+		run_target "$l_target"
+	fi
 done <<EOF
 $TARGET_LIST
 EOF

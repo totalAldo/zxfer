@@ -12,6 +12,13 @@ already cares about:
 - improving concurrency behavior
 - replacing shell paths that scale poorly on large dataset/snapshot trees
 
+The current flat `src/` layout keeps the hot paths for this work in focused
+modules: remote startup and transport reuse in `src/zxfer_remote_hosts.sh`,
+snapshot discovery and diff planning in `src/zxfer_snapshot_discovery.sh`,
+property caching and reconciliation in `src/zxfer_property_cache.sh` and
+`src/zxfer_property_reconcile.sh`, send/receive setup in
+`src/zxfer_send_receive.sh`, and profiling output in `src/zxfer_reporting.sh`.
+
 This is a review document only. No behavior changes are proposed here without
 separate implementation, tests, and manual integration validation.
 
@@ -24,10 +31,12 @@ The current tree already contains several good performance-oriented choices:
 - `zfs send -I` is used so incremental chains move in one stream
 - source snapshot discovery now adapts between a single recursive list and the
   older per-dataset GNU `parallel` fan-out based on dataset count plus remote
-  startup warmth, validates GNU `parallel` only when the chosen branch
-  actually needs it, and reuses the prefetched dataset list directly inside the
-  selected command path, so startup-bound and externally orchestrated `-j` runs
-  no longer always pay the full N+1 discovery cost before data moves
+  startup warmth, validates local GNU `parallel` only when the chosen branch
+  actually needs it, resolves the remote origin-host `parallel` path only when
+  the remote parallel branch wins, and reuses the prefetched dataset list
+  directly inside the selected command path, so startup-bound and externally
+  orchestrated `-j` runs no longer always pay the full N+1 discovery cost
+  before data moves
 - remote startup discovery now collapses `uname` plus helper-path lookups into
   one per-host capability handshake, with current-process reuse and a
   short-lived cross-process cache stored in a validated per-user `0700`
@@ -64,7 +73,7 @@ The current tree already contains several good performance-oriented choices:
 - recursive `-d` runs now track datasets with destination-only snapshot deltas
   separately and iterate only datasets with source deltas, destination-only
   deltas, or explicit property-reconcile work, so no-op recursive delete runs
-  no longer force every dataset through `get_last_common_snapshot()`,
+  no longer force every dataset through `zxfer_get_last_common_snapshot()`,
   delete-planning, and copy-path setup just because `-d` is enabled
 - per-dataset property reconciliation now batches consecutive `zfs set`
   operations instead of issuing one destination-side call per property
@@ -116,9 +125,30 @@ The current tree already contains several good performance-oriented choices:
 
 The larger discovery, caching, delete, property-path, progress-planning, lazy
 snapshot-identity, and remote-startup optimizations have already landed. There
-are no queued high-value optimization items at the moment; future work should
-come from fresh profiling of real no-op, bootstrap, and multi-host runs rather
-than from the older startup bottlenecks this branch has already addressed.
+are no queued pure-throughput optimization items at the moment; future work
+should come from fresh profiling of real no-op, bootstrap, and multi-host runs
+rather than from the older startup bottlenecks this branch has already
+addressed.
+
+## Current Caveats In Optimized Paths
+
+The current optimization baseline is good, but a few correctness and
+compatibility caveats still sit inside performance-sensitive paths:
+
+- adaptive remote `-j` discovery now defers origin-host helper resolution until
+  the parallel branch actually wins, but the remote branch still trusts the
+  resolved origin-host `parallel` path by name only instead of confirming a GNU
+  `parallel` signature with a remote `--version` probe
+- cross-process ssh control-socket reuse is landed and measured, but
+  wrapper-style remote specs such as `host pfexec` and `host doas` still have
+  a known setup/teardown caveat in the control-socket helpers because those
+  transport-control operations should use only the ssh destination host tokens
+- dry-run `-n` still performs launcher preflight and snapshot-discovery work,
+  so dry-run timings are not a pure render-only optimization baseline when
+  remote helper resolution or snapshot listing dominates startup cost
+
+These are tracked as current issues because they affect the behavior of already
+optimized paths, not because the old startup bottlenecks remain open.
 
 ## Remaining Opportunity
 
@@ -129,10 +159,11 @@ remote dataset counting, eager `name,guid` discovery, private per-process
 control sockets, and recursive `-d` no-op dataset scans; those are already
 landed optimizations and should not be treated as open work.
 
-There are no queued high-confidence optimization items at the moment. Future
+There are no queued pure-throughput optimization items at the moment. Future
 work should come from fresh `-V` timings on real no-op, bootstrap, and
 multi-host runs rather than from the older startup bottlenecks that are now
-closed.
+closed, while keeping the known correctness caveats above separate from any
+new performance-only proposals.
 
 ## Measurement Plan
 
@@ -140,7 +171,13 @@ Any future implementation work should be measured before and after. The safest
 first step is lightweight call counting around the existing helpers:
 
 - `-V` is now the intended baseline mode for this work: it emits an end-of-run
-  profiling summary with these counters without affecting normal output modes
+  profiling summary without affecting normal output modes
+- the current `-V` summary already includes elapsed time, ssh setup time,
+  source/destination snapshot-listing time, diff/sort time, source/destination
+  and total `zfs` / `ssh` call counts, source snapshot-list command counts,
+  send/receive pipeline counts, destination-existence probes, normalized
+  property-read counters, required-property backfill counters, and per-stage
+  bucket counters
 - count calls to `run_source_zfs_cmd()`, `run_destination_zfs_cmd()`, and
   `invoke_ssh_shell_command_for_host()`
 - on `-O` / `-T` startup-sensitive runs, separate first-process measurements

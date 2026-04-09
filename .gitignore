@@ -1,5 +1,7 @@
 .DS_Store
 
+.lock
+
 .idea/
 .vscode/
 

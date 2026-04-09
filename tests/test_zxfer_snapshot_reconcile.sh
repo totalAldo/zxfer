@@ -1,33 +1,22 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_inspect_delete_snap.sh helpers.
+# shunit2 tests for zxfer_snapshot_reconcile.sh helpers.
 #
 # shellcheck disable=SC1090,SC2034,SC2317,SC2329
 
-case "$0" in
-/*)
-	TESTS_DIR=$(dirname "$0")
-	;;
-*)
-	TESTS_DIR=${PWD:-.}/$(dirname "$0")
-	;;
-esac
+TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-zxfer_source_runtime_modules_through "zxfer_inspect_delete_snap.sh"
-
-usage() {
-	:
-}
+zxfer_source_runtime_modules_through "zxfer_snapshot_reconcile.sh"
 
 oneTimeSetUp() {
-	TEST_TMPDIR=$(mktemp -d -t zxfer_inspect_delete.XXXXXX)
+	zxfer_test_create_tmpdir "zxfer_inspect_delete"
 }
 
 oneTimeTearDown() {
-	rm -rf "$TEST_TMPDIR"
+	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
@@ -68,10 +57,10 @@ test_delete_snaps_returns_when_nothing_needs_deletion() {
 	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
 
 	(
-		run_destination_zfs_cmd() {
+		zxfer_run_destination_zfs_cmd() {
 			printf '%s\n' "$*" >>"$log_file"
 		}
-		delete_snaps "$source_list" "$dest_list"
+		zxfer_delete_snaps "$source_list" "$dest_list"
 	)
 
 	assertEquals "No destroy command should run when destination snapshots already match the source." "" "$(cat "$log_file")"
@@ -83,7 +72,7 @@ test_delete_snaps_dry_run_prints_destroy_command() {
 	source_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
 	dest_list=$(printf '%s\n%s\n%s' "tank/fs@snap1" "tank/fs@snap2" "tank/fs@snap3")
 
-	output=$(delete_snaps "$source_list" "$dest_list")
+	output=$(zxfer_delete_snaps "$source_list" "$dest_list")
 
 	assertContains "Dry-run snapshot deletion should print the rendered destroy command." \
 		"$output" "Dry run: '/sbin/zfs' 'destroy' 'tank/fs@snap3'"
@@ -96,14 +85,14 @@ test_delete_snaps_throws_when_destroy_fails() {
 	set +e
 	output=$(
 		(
-			run_destination_zfs_cmd() {
+			zxfer_run_destination_zfs_cmd() {
 				return 1
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			delete_snaps "$source_list" "$dest_list"
+			zxfer_delete_snaps "$source_list" "$dest_list"
 		)
 	)
 	status=$?
@@ -121,18 +110,18 @@ test_grandfather_test_reports_detailed_context_for_old_snapshots() {
 	set +e
 	output=$(
 		(
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit 2
 			}
-			run_destination_zfs_cmd() {
+			zxfer_run_destination_zfs_cmd() {
 				if [ "$5" = "-p" ]; then
 					printf '%s\n' "$old_epoch"
 				else
 					printf '%s\n' "Sun Jan  1 00:00:00 UTC 2023"
 				fi
 			}
-			grandfather_test "tank/fs@ancient"
+			zxfer_grandfather_test "tank/fs@ancient"
 		)
 	)
 	status=$?
@@ -152,7 +141,7 @@ test_grandfather_test_allows_recent_snapshots() {
 	recent_epoch=$((current_epoch - 2 * 86400))
 	outfile="$TEST_TMPDIR/grandfather_recent.out"
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		if [ "$5" = "-p" ]; then
 			printf '%s\n' "$recent_epoch"
 		else
@@ -160,10 +149,10 @@ test_grandfather_test_allows_recent_snapshots() {
 		fi
 	}
 
-	grandfather_test "tank/fs@recent" >"$outfile"
+	zxfer_grandfather_test "tank/fs@recent" >"$outfile"
 	status=$?
 
-	unset -f run_destination_zfs_cmd
+	unset -f zxfer_run_destination_zfs_cmd
 
 	assertEquals "Recent snapshots should pass grandfather protection checks." 0 "$status"
 	assertEquals "Passing grandfather checks should not emit output." "" "$(cat "$outfile")"
@@ -175,17 +164,17 @@ test_grandfather_test_reports_creation_probe_failures() {
 	set +e
 	output=$(
 		(
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			run_destination_zfs_cmd() {
+			zxfer_run_destination_zfs_cmd() {
 				if [ "$5" = "-p" ]; then
 					return 1
 				fi
 				return 0
 			}
-			grandfather_test "tank/fs@missing"
+			zxfer_grandfather_test "tank/fs@missing"
 		) 2>&1
 	)
 	status=$?
@@ -198,7 +187,7 @@ test_grandfather_test_reports_creation_probe_failures() {
 test_set_src_snapshot_transfer_list_transfers_all_snapshots_when_no_common_snapshot_exists() {
 	g_last_common_snap=""
 
-	set_src_snapshot_transfer_list "tank/fs@snap3 tank/fs@snap2 tank/fs@snap1" "tank/fs"
+	zxfer_set_src_snapshot_transfer_list "tank/fs@snap3 tank/fs@snap2 tank/fs@snap1" "tank/fs"
 
 	expected=$(printf '%s\n%s\n%s' "tank/fs@snap1" "tank/fs@snap2" "tank/fs@snap3")
 	assertEquals "Without a common snapshot, every source snapshot should be scheduled for transfer." \
@@ -208,7 +197,7 @@ test_set_src_snapshot_transfer_list_transfers_all_snapshots_when_no_common_snaps
 test_get_last_common_snapshot_matches_exact_names_without_prefix_collisions() {
 	outfile="$TEST_TMPDIR/last_common_exact.out"
 
-	get_last_common_snapshot \
+	zxfer_get_last_common_snapshot \
 		"tank/fs@daily-10 tank/fs@daily-1" \
 		"backup/fs@daily-1 backup/fs@daily-11" >"$outfile"
 
@@ -219,7 +208,7 @@ test_get_last_common_snapshot_matches_exact_names_without_prefix_collisions() {
 test_get_dest_snapshots_to_delete_per_dataset_matches_exact_names_without_prefix_collisions() {
 	outfile="$TEST_TMPDIR/delete_exact.out"
 
-	get_dest_snapshots_to_delete_per_dataset \
+	zxfer_get_dest_snapshots_to_delete_per_dataset \
 		"tank/fs@daily-10" \
 		"tank/fs@daily-10 tank/fs@daily-1" >"$outfile"
 
@@ -230,7 +219,7 @@ test_get_dest_snapshots_to_delete_per_dataset_matches_exact_names_without_prefix
 test_get_dest_snapshots_to_delete_per_dataset_returns_multiple_extra_snapshots_in_input_order() {
 	outfile="$TEST_TMPDIR/delete_multiple.out"
 
-	get_dest_snapshots_to_delete_per_dataset \
+	zxfer_get_dest_snapshots_to_delete_per_dataset \
 		"tank/fs@snap1 tank/fs@snap3" \
 		"tank/fs@snap1 tank/fs@zeta tank/fs@snap3 tank/fs@alpha" >"$outfile"
 
@@ -242,7 +231,7 @@ tank/fs@alpha" "$(cat "$outfile")"
 test_get_dest_snapshots_to_delete_per_dataset_preserves_destination_order_for_guid_divergence() {
 	outfile="$TEST_TMPDIR/delete_guid_order.out"
 
-	get_dest_snapshots_to_delete_per_dataset \
+	zxfer_get_dest_snapshots_to_delete_per_dataset \
 		"tank/fs@snap1	111" \
 		"tank/fs@snap1	999 tank/fs@alpha	222" >"$outfile"
 
@@ -257,21 +246,21 @@ test_delete_snaps_runs_grandfather_checks_before_destroying() {
 	dest_list=$(printf '%s\n%s\n%s' "tank/fs@snap1" "tank/fs@snap2" "tank/fs@snap3")
 	g_option_g_grandfather_protection=7
 
-	grandfather_test() {
+	zxfer_grandfather_test() {
 		printf 'grandfather %s\n' "$1" >>"$log_file"
 	}
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		printf 'destroy %s\n' "$*" >>"$log_file"
 		return 0
 	}
 
-	delete_snaps "$source_list" "$dest_list"
+	zxfer_delete_snaps "$source_list" "$dest_list"
 
-	unset -f grandfather_test
-	unset -f run_destination_zfs_cmd
+	unset -f zxfer_grandfather_test
+	unset -f zxfer_run_destination_zfs_cmd
 	# Restore the real helper after replacing it with a test stub.
-	# shellcheck source=src/zxfer_inspect_delete_snap.sh
-	. "$ZXFER_ROOT/src/zxfer_inspect_delete_snap.sh"
+	# shellcheck source=src/zxfer_snapshot_reconcile.sh
+	. "$ZXFER_ROOT/src/zxfer_snapshot_reconcile.sh"
 
 	assertContains "Grandfather protection should be checked for each candidate deletion." \
 		"$(cat "$log_file")" "grandfather tank/fs@snap3"
@@ -286,7 +275,7 @@ test_delete_snaps_marks_rollback_eligible_when_deleting_newer_snapshots() {
 	g_actual_dest="tank/fs"
 	g_last_common_snap="tank/fs@snap2"
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		case "$*" in
 		"get -H -o value -p creation tank/fs@snap2")
 			printf '%s\n' 200
@@ -303,9 +292,9 @@ test_delete_snaps_marks_rollback_eligible_when_deleting_newer_snapshots() {
 		esac
 	}
 
-	delete_snaps "$source_list" "$dest_list"
+	zxfer_delete_snaps "$source_list" "$dest_list"
 
-	unset -f run_destination_zfs_cmd
+	unset -f zxfer_run_destination_zfs_cmd
 
 	assertEquals "Deleting a destination snapshot newer than the last common snapshot should preserve rollback eligibility." \
 		1 "$g_deleted_dest_newer_snapshots"
@@ -325,7 +314,7 @@ test_delete_snaps_batches_creation_time_reads_for_rollback_and_grandfather_check
 	g_last_common_snap="tank/fs@snap2"
 	g_option_g_grandfather_protection=999
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		printf '%s\n' "$*" >>"$log_file"
 		case "$*" in
 		"get -H -o name,value -p creation tank/fs@snap2 tank/fs@snap3 tank/fs@snap4")
@@ -342,9 +331,9 @@ test_delete_snaps_batches_creation_time_reads_for_rollback_and_grandfather_check
 		esac
 	}
 
-	delete_snaps "$source_list" "$dest_list"
+	zxfer_delete_snaps "$source_list" "$dest_list"
 
-	unset -f run_destination_zfs_cmd
+	unset -f zxfer_run_destination_zfs_cmd
 
 	batch_count=$("${g_cmd_awk:-awk}" '/^get -H -o name,value -p creation / { count++ } END { print count + 0 }' "$log_file")
 	single_count=$("${g_cmd_awk:-awk}" '/^get -H -o value -p creation / { count++ } END { print count + 0 }' "$log_file")
@@ -364,7 +353,7 @@ test_delete_snaps_falls_back_to_single_creation_probes_when_batch_prefetch_fails
 	g_actual_dest="tank/fs"
 	g_last_common_snap="tank/fs@snap2"
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		printf '%s\n' "$*" >>"$log_file"
 		case "$*" in
 		"get -H -o name,value -p creation tank/fs@snap2 tank/fs@snap3")
@@ -385,9 +374,9 @@ test_delete_snaps_falls_back_to_single_creation_probes_when_batch_prefetch_fails
 		esac
 	}
 
-	delete_snaps "$source_list" "$dest_list"
+	zxfer_delete_snaps "$source_list" "$dest_list"
 
-	unset -f run_destination_zfs_cmd
+	unset -f zxfer_run_destination_zfs_cmd
 
 	batch_count=$("${g_cmd_awk:-awk}" '/^get -H -o name,value -p creation / { count++ } END { print count + 0 }' "$log_file")
 	single_count=$("${g_cmd_awk:-awk}" '/^get -H -o value -p creation / { count++ } END { print count + 0 }' "$log_file")
@@ -411,7 +400,7 @@ test_delete_snaps_falls_back_to_single_creation_probe_when_batched_creation_valu
 	g_last_common_snap="tank/fs@snap2"
 	g_option_g_grandfather_protection=999
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		printf '%s\n' "$*" >>"$log_file"
 		case "$*" in
 		"get -H -o name,value -p creation tank/fs@snap2 tank/fs@snap3")
@@ -430,9 +419,9 @@ test_delete_snaps_falls_back_to_single_creation_probe_when_batched_creation_valu
 		esac
 	}
 
-	delete_snaps "$source_list" "$dest_list"
+	zxfer_delete_snaps "$source_list" "$dest_list"
 
-	unset -f run_destination_zfs_cmd
+	unset -f zxfer_run_destination_zfs_cmd
 
 	assertContains "Delete planning should still use one batched creation-time lookup attempt first." \
 		"$(cat "$log_file")" "get -H -o name,value -p creation tank/fs@snap2 tank/fs@snap3"
@@ -452,7 +441,7 @@ test_zxfer_prefetch_destination_snapshot_creation_paths_flushes_when_batch_limit
 		}'
 	)
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		printf '%s\n' "$*" >>"$log_file"
 		shift 5
 		for l_snapshot_path in "$@"; do
@@ -463,7 +452,7 @@ test_zxfer_prefetch_destination_snapshot_creation_paths_flushes_when_batch_limit
 	zxfer_reset_destination_snapshot_creation_cache
 	zxfer_prefetch_destination_snapshot_creation_paths "$snapshot_records"
 
-	unset -f run_destination_zfs_cmd
+	unset -f zxfer_run_destination_zfs_cmd
 
 	batch_count=$("${g_cmd_awk:-awk}" '/^get -H -o name,value -p creation / { count++ } END { print count + 0 }' "$log_file")
 
@@ -480,7 +469,7 @@ test_zxfer_prefetch_delete_snapshot_creation_times_prefetches_last_common_when_d
 	g_actual_dest="tank/fs"
 	g_last_common_snap="tank/src@snap2"
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		printf '%s\n' "$*" >>"$log_file"
 		case "$*" in
 		"get -H -o name,value -p creation tank/fs@snap2")
@@ -495,7 +484,7 @@ test_zxfer_prefetch_delete_snapshot_creation_times_prefetches_last_common_when_d
 	zxfer_reset_destination_snapshot_creation_cache
 	zxfer_prefetch_delete_snapshot_creation_times ""
 
-	unset -f run_destination_zfs_cmd
+	unset -f zxfer_run_destination_zfs_cmd
 
 	assertContains "An empty delete list should still prefetch the last common destination snapshot when available." \
 		"$(cat "$log_file")" "get -H -o name,value -p creation tank/fs@snap2"
@@ -507,7 +496,7 @@ test_deleted_snapshots_include_newer_than_last_common_skips_older_only_deletions
 	g_actual_dest="backup/dst"
 	g_last_common_snap="tank/src@common"
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		case "$7" in
 		backup/dst@common)
 			printf '%s\n' 200
@@ -524,7 +513,7 @@ test_deleted_snapshots_include_newer_than_last_common_skips_older_only_deletions
 		esac
 	}
 
-	if deleted_snapshots_include_newer_than_last_common "$(printf '%s\n%s' "backup/dst@old1" "backup/dst@old2")"; then
+	if zxfer_deleted_snapshots_include_newer_than_last_common "$(printf '%s\n%s' "backup/dst@old1" "backup/dst@old2")"; then
 		fail "Older-only destination deletions should not require rollback."
 	fi
 }
@@ -533,7 +522,7 @@ test_deleted_snapshots_include_newer_than_last_common_detects_newer_deletions() 
 	g_actual_dest="backup/dst"
 	g_last_common_snap="tank/src@common"
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		case "$7" in
 		backup/dst@common)
 			printf '%s\n' 200
@@ -550,7 +539,7 @@ test_deleted_snapshots_include_newer_than_last_common_detects_newer_deletions() 
 		esac
 	}
 
-	if ! deleted_snapshots_include_newer_than_last_common "$(printf '%s\n%s' "backup/dst@old" "backup/dst@newer")"; then
+	if ! zxfer_deleted_snapshots_include_newer_than_last_common "$(printf '%s\n%s' "backup/dst@old" "backup/dst@newer")"; then
 		fail "Deleting a destination snapshot newer than the last common snapshot should keep rollback eligible."
 	fi
 }
@@ -559,7 +548,7 @@ test_deleted_snapshots_include_newer_than_last_common_treats_unknown_last_common
 	g_actual_dest="backup/dst"
 	g_last_common_snap="tank/src@common"
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		case "$7" in
 		backup/dst@common)
 			printf '%s\n' "unknown"
@@ -573,7 +562,7 @@ test_deleted_snapshots_include_newer_than_last_common_treats_unknown_last_common
 		esac
 	}
 
-	if ! deleted_snapshots_include_newer_than_last_common "backup/dst@old"; then
+	if ! zxfer_deleted_snapshots_include_newer_than_last_common "backup/dst@old"; then
 		fail "Unknown last-common creation times should fail closed and keep rollback eligible."
 	fi
 }
@@ -582,7 +571,7 @@ test_deleted_snapshots_include_newer_than_last_common_treats_unknown_deleted_cre
 	g_actual_dest="backup/dst"
 	g_last_common_snap="tank/src@common"
 
-	run_destination_zfs_cmd() {
+	zxfer_run_destination_zfs_cmd() {
 		case "$7" in
 		backup/dst@common)
 			printf '%s\n' 200
@@ -596,7 +585,7 @@ test_deleted_snapshots_include_newer_than_last_common_treats_unknown_deleted_cre
 		esac
 	}
 
-	if ! deleted_snapshots_include_newer_than_last_common "backup/dst@old"; then
+	if ! zxfer_deleted_snapshots_include_newer_than_last_common "backup/dst@old"; then
 		fail "Unknown deleted-snapshot creation times should fail closed and keep rollback eligible."
 	fi
 }
@@ -615,7 +604,7 @@ EOF
 	)
 	g_actual_dest="backup/dst"
 
-	inspect_delete_snap 0 "tank/src"
+	zxfer_inspect_delete_snap 0 "tank/src"
 
 	expected_transfer=$(printf '%s\n%s' "tank/src@zxfer_2" "tank/src@zxfer_3")
 	assertEquals "Missing destination datasets should be reported as having no snapshots." 0 "$g_dest_has_snapshots"
@@ -640,7 +629,7 @@ EOF
 	)
 	g_actual_dest="backup/dst"
 
-	inspect_delete_snap 0 "tank/src"
+	zxfer_inspect_delete_snap 0 "tank/src"
 
 	assertEquals "Matching destination datasets should be marked as present." 1 "$g_dest_has_snapshots"
 	assertEquals "The most recent common snapshot should be detected from the matching destination list." \
@@ -663,7 +652,7 @@ EOF
 	)
 	g_actual_dest="backup/dst"
 
-	inspect_delete_snap 0 "tank/src"
+	zxfer_inspect_delete_snap 0 "tank/src"
 
 	assertEquals "Same-named but unrelated destination snapshots should not be treated as the common base." \
 		"tank/src@zxfer_1	111" "$g_last_common_snap"
@@ -707,7 +696,7 @@ EOF
 				return 1
 			}
 
-			inspect_delete_snap 0 "tank/src"
+			zxfer_inspect_delete_snap 0 "tank/src"
 			printf 'last=%s\n' "$g_last_common_snap"
 			printf 'transfer=%s\n' "$g_src_snapshot_transfer_list"
 		)
@@ -739,7 +728,7 @@ EOF
 	g_actual_dest="backup/dst"
 
 	(
-		delete_snaps() {
+		zxfer_delete_snaps() {
 			printf 'source=%s\n' "$1" >"$log_file"
 			printf 'dest=%s\n' "$2" >>"$log_file"
 		}
@@ -760,14 +749,14 @@ EOF
 			fi
 			return 1
 		}
-		inspect_delete_snap 1 "tank/src"
+		zxfer_inspect_delete_snap 1 "tank/src"
 	)
 
-	assertContains "inspect_delete_snap should pass the filtered source snapshot list into delete_snaps." \
+	assertContains "zxfer_inspect_delete_snap should pass the filtered source snapshot list into zxfer_delete_snaps." \
 		"$(cat "$log_file")" "source=tank/src@zxfer_3	333
 tank/src@zxfer_2	222
 tank/src@zxfer_1	111"
-	assertContains "inspect_delete_snap should pass the matching destination dataset snapshots into delete_snaps." \
+	assertContains "zxfer_inspect_delete_snap should pass the matching destination dataset snapshots into zxfer_delete_snaps." \
 		"$(cat "$log_file")" "dest=backup/dst@zxfer_2	222
 backup/dst@zxfer_1	111
 backup/dst@old_only	999"
@@ -792,7 +781,7 @@ backup/dst@zxfer_1	111
 EOF
 	)"
 
-	inspect_delete_snap 0 "tank/src"
+	zxfer_inspect_delete_snap 0 "tank/src"
 
 	assertEquals "Indexed source/destination snapshot records should still drive common-snapshot detection when the legacy global lists are unavailable." \
 		"tank/src@zxfer_2	222" "$g_last_common_snap"

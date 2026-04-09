@@ -11,6 +11,7 @@ here.
 - [ ] `ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh` when shell logic, tests, or coverage tooling changed
 - [ ] targeted suites for edited modules
 - [ ] integration tests, if safe and relevant
+- [ ] GitHub Actions test matrix passes (including FreeBSD and OmniOS/illumos VMs)
 - [ ] docs, workflow metadata, and coverage policy/baseline files updated as needed
 
 ## Platforms Considered

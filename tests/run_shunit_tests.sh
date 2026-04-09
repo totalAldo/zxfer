@@ -15,8 +15,8 @@ Usage: tests/run_shunit_tests.sh [suite ...]
 Runs every shunit2 suite (tests/test_*.sh) when no arguments are provided.
 Pass specific suite paths to limit execution, e.g.:
 
-  tests/run_shunit_tests.sh test_zxfer_common.sh
-  tests/run_shunit_tests.sh tests/test_zxfer_zfs_mode.sh
+  tests/run_shunit_tests.sh test_zxfer_reporting.sh
+  tests/run_shunit_tests.sh tests/test_zxfer_replication.sh
 
 Set ZXFER_TEST_SHELL to an alternate shell executable to run each suite through
 that interpreter. For multi-word shell modes such as "bash --posix", point

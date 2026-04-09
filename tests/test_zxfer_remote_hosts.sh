@@ -1,31 +1,34 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_globals.sh helpers.
+# shunit2 tests for zxfer_remote_hosts.sh and related runtime helpers.
 #
-# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2218,SC2317,SC2329
+# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
-case "$0" in
-/*)
-	TESTS_DIR=$(dirname "$0")
-	;;
-*)
-	TESTS_DIR=${PWD:-.}/$(dirname "$0")
-	;;
-esac
+TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-zxfer_source_runtime_modules_through "zxfer_backup_metadata.sh"
-
-usage() {
-	:
-}
+zxfer_source_runtime_modules_through "zxfer_replication.sh"
 
 tearDown() {
-	if effective_uid=$(get_effective_user_uid 2>/dev/null); then
+	if effective_uid=$(zxfer_get_effective_user_uid 2>/dev/null); then
 		rm -rf "$TEST_TMPDIR/zxfer-remote-capabilities.$effective_uid.d"
 		rm -rf "$TEST_TMPDIR/zxfer-s.$effective_uid.d"
+		default_effective_tmpdir=$(
+			unset TMPDIR
+			zxfer_try_get_effective_tmpdir 2>/dev/null
+		)
+		default_socket_tmpdir=$(
+			unset TMPDIR
+			zxfer_try_get_socket_cache_tmpdir 2>/dev/null
+		)
+		if [ -n "$default_effective_tmpdir" ]; then
+			rm -rf "$default_effective_tmpdir/zxfer-remote-capabilities.$effective_uid.d"
+		fi
+		if [ -n "$default_socket_tmpdir" ]; then
+			rm -rf "$default_socket_tmpdir/zxfer-s.$effective_uid.d"
+		fi
 	fi
 }
 
@@ -51,14 +54,14 @@ EOF
 }
 
 oneTimeSetUp() {
-	TEST_TMPDIR=$(mktemp -d -t zxfer_globals.XXXXXX)
+	zxfer_test_create_tmpdir "zxfer_remote_hosts"
 	TEST_TMPDIR_PHYSICAL=$(cd -P "$TEST_TMPDIR" && pwd)
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
 	create_fake_ssh_bin
 }
 
 oneTimeTearDown() {
-	rm -rf "$TEST_TMPDIR"
+	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
@@ -97,7 +100,7 @@ setUp() {
 	g_ssh_target_control_socket_dir=""
 	g_ssh_target_control_socket_lease_file=""
 	g_ssh_supports_control_sockets=0
-	g_MAX_YIELD_ITERATIONS=8
+	g_test_max_yield_iterations=8
 	g_zxfer_remote_capability_cache_wait_retries=5
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
@@ -106,6 +109,9 @@ setUp() {
 	g_lzfs_list_hr_snap=""
 	g_lzfs_list_hr_S_snap=""
 	g_rzfs_list_hr_snap=""
+	zxfer_get_max_yield_iterations() {
+		printf '%s\n' "$g_test_max_yield_iterations"
+	}
 	zxfer_reset_snapshot_record_indexes
 	zxfer_reset_failure_context "unit"
 	create_fake_ssh_bin
@@ -401,10 +407,10 @@ test_zxfer_parse_remote_capability_response_extracts_fields() {
 	result=$(
 		(
 			zxfer_parse_remote_capability_response "$(fake_remote_capability_response)"
-			printf 'os=%s\n' "$m_remote_capability_os"
-			printf 'zfs=%s:%s\n' "$m_remote_capability_zfs_status" "$m_remote_capability_zfs_path"
-			printf 'parallel=%s:%s\n' "$m_remote_capability_parallel_status" "$m_remote_capability_parallel_path"
-			printf 'cat=%s:%s\n' "$m_remote_capability_cat_status" "$m_remote_capability_cat_path"
+			printf 'os=%s\n' "$g_zxfer_remote_capability_os"
+			printf 'zfs=%s:%s\n' "$g_zxfer_remote_capability_zfs_status" "$g_zxfer_remote_capability_zfs_path"
+			printf 'parallel=%s:%s\n' "$g_zxfer_remote_capability_parallel_status" "$g_zxfer_remote_capability_parallel_path"
+			printf 'cat=%s:%s\n' "$g_zxfer_remote_capability_cat_status" "$g_zxfer_remote_capability_cat_path"
 		)
 	)
 
@@ -422,8 +428,8 @@ os	RemoteOS
 tool	zfs	0	/remote/bin/zfs
 tool	parallel	1	-
 tool	cat	1	-"
-			printf 'parallel=%s:%s\n' "$m_remote_capability_parallel_status" "$m_remote_capability_parallel_path"
-			printf 'cat=%s:%s\n' "$m_remote_capability_cat_status" "$m_remote_capability_cat_path"
+			printf 'parallel=%s:%s\n' "$g_zxfer_remote_capability_parallel_status" "$g_zxfer_remote_capability_parallel_path"
+			printf 'cat=%s:%s\n' "$g_zxfer_remote_capability_cat_status" "$g_zxfer_remote_capability_cat_path"
 		)
 	)
 
@@ -502,6 +508,27 @@ extra	line"
 	assertEquals "Capability records with extra lines should not print a parsed payload." "" "$output"
 }
 
+test_zxfer_parse_remote_capability_response_rejects_control_whitespace_helper_paths() {
+	tab=$(printf '\t')
+	cr=$(printf '\r')
+
+	set +e
+	output=$(
+		(
+			zxfer_parse_remote_capability_response "ZXFER_REMOTE_CAPS_V1
+os${tab}RemoteOS
+tool${tab}zfs${tab}0${tab}/remote/bin/zfs${cr}
+tool${tab}parallel${tab}0${tab}/opt/bin/parallel
+tool${tab}cat${tab}0${tab}/remote/bin/cat"
+		)
+	)
+	status=$?
+
+	assertEquals "Capability payloads with control-whitespace helper paths should be rejected as invalid handshakes." \
+		1 "$status"
+	assertEquals "Rejected control-whitespace capability payloads should not print a parsed payload." "" "$output"
+}
+
 test_zxfer_store_cached_remote_capability_response_for_host_updates_target_slot() {
 	g_option_O_origin_host="origin.example"
 	g_option_T_target_host="target.example"
@@ -543,9 +570,9 @@ test_zxfer_store_cached_remote_capability_response_for_host_falls_back_to_target
 
 test_zxfer_ensure_remote_capability_cache_dir_creates_secure_directory() {
 	cache_dir=$(zxfer_ensure_remote_capability_cache_dir)
-	mode=$(get_path_mode_octal "$cache_dir")
-	owner=$(get_path_owner_uid "$cache_dir")
-	effective_uid=$(get_effective_user_uid)
+	mode=$(zxfer_get_path_mode_octal "$cache_dir")
+	owner=$(zxfer_get_path_owner_uid "$cache_dir")
+	effective_uid=$(zxfer_get_effective_user_uid)
 
 	assertTrue "Capability cache directory creation should succeed." "[ -d '$cache_dir' ]"
 	assertEquals "Capability cache directories should be created with 0700 permissions." "700" "$mode"
@@ -557,7 +584,7 @@ test_zxfer_ensure_remote_capability_cache_dir_returns_failure_when_uid_lookup_fa
 	set +e
 	output=$(
 		(
-			get_effective_user_uid() {
+			zxfer_get_effective_user_uid() {
 				return 1
 			}
 			zxfer_ensure_remote_capability_cache_dir
@@ -588,7 +615,7 @@ test_zxfer_ensure_remote_capability_cache_dir_returns_failure_when_effective_tmp
 }
 
 test_zxfer_ensure_remote_capability_cache_dir_rejects_insecure_existing_mode() {
-	effective_uid=$(get_effective_user_uid)
+	effective_uid=$(zxfer_get_effective_user_uid)
 	cache_dir="$TEST_TMPDIR/zxfer-remote-capabilities.$effective_uid.d"
 	mkdir "$cache_dir"
 	chmod 755 "$cache_dir"
@@ -602,7 +629,7 @@ test_zxfer_ensure_remote_capability_cache_dir_rejects_insecure_existing_mode() {
 }
 
 test_zxfer_ensure_remote_capability_cache_dir_returns_failure_when_existing_owner_lookup_fails() {
-	effective_uid=$(get_effective_user_uid)
+	effective_uid=$(zxfer_get_effective_user_uid)
 	cache_dir="$TEST_TMPDIR/zxfer-remote-capabilities.$effective_uid.d"
 	mkdir "$cache_dir"
 	chmod 700 "$cache_dir"
@@ -610,7 +637,7 @@ test_zxfer_ensure_remote_capability_cache_dir_returns_failure_when_existing_owne
 	set +e
 	output=$(
 		(
-			get_path_owner_uid() {
+			zxfer_get_path_owner_uid() {
 				return 1
 			}
 			zxfer_ensure_remote_capability_cache_dir
@@ -623,7 +650,7 @@ test_zxfer_ensure_remote_capability_cache_dir_returns_failure_when_existing_owne
 }
 
 test_zxfer_ensure_remote_capability_cache_dir_reports_existing_owner_lookup_failure_in_current_shell() {
-	effective_uid=$(get_effective_user_uid)
+	effective_uid=$(zxfer_get_effective_user_uid)
 	cache_dir="$TEST_TMPDIR/zxfer-remote-capabilities.$effective_uid.d"
 	mkdir "$cache_dir"
 	chmod 700 "$cache_dir"
@@ -651,7 +678,7 @@ EOF
 }
 
 test_zxfer_ensure_remote_capability_cache_dir_returns_failure_when_existing_mode_lookup_fails() {
-	effective_uid=$(get_effective_user_uid)
+	effective_uid=$(zxfer_get_effective_user_uid)
 	cache_dir="$TEST_TMPDIR/zxfer-remote-capabilities.$effective_uid.d"
 	mkdir "$cache_dir"
 	chmod 700 "$cache_dir"
@@ -659,7 +686,7 @@ test_zxfer_ensure_remote_capability_cache_dir_returns_failure_when_existing_mode
 	set +e
 	output=$(
 		(
-			get_path_mode_octal() {
+			zxfer_get_path_mode_octal() {
 				return 1
 			}
 			zxfer_ensure_remote_capability_cache_dir
@@ -672,7 +699,7 @@ test_zxfer_ensure_remote_capability_cache_dir_returns_failure_when_existing_mode
 }
 
 test_zxfer_ensure_remote_capability_cache_dir_returns_failure_when_mkdir_fails() {
-	effective_uid=$(get_effective_user_uid)
+	effective_uid=$(zxfer_get_effective_user_uid)
 	cache_dir="$TEST_TMPDIR/zxfer-remote-capabilities.$effective_uid.d"
 	rm -rf "$cache_dir"
 
@@ -692,7 +719,7 @@ test_zxfer_ensure_remote_capability_cache_dir_returns_failure_when_mkdir_fails()
 }
 
 test_zxfer_remote_capability_cache_path_rejects_symlinked_cache_dir() {
-	effective_uid=$(get_effective_user_uid)
+	effective_uid=$(zxfer_get_effective_user_uid)
 	cache_dir="$TEST_TMPDIR/zxfer-remote-capabilities.$effective_uid.d"
 	rm -rf "$cache_dir"
 	ln -s "$TEST_TMPDIR/other-cache-dir" "$cache_dir"
@@ -767,7 +794,7 @@ test_zxfer_ensure_ssh_control_socket_cache_dir_returns_failure_when_uid_lookup_f
 	set +e
 	output=$(
 		(
-			get_effective_user_uid() {
+			zxfer_get_effective_user_uid() {
 				return 1
 			}
 			zxfer_ensure_ssh_control_socket_cache_dir
@@ -798,7 +825,7 @@ test_zxfer_ensure_ssh_control_socket_cache_dir_returns_failure_when_effective_tm
 }
 
 test_zxfer_ensure_ssh_control_socket_cache_dir_rejects_insecure_existing_mode() {
-	effective_uid=$(get_effective_user_uid)
+	effective_uid=$(zxfer_get_effective_user_uid)
 	cache_dir="$TEST_TMPDIR/zxfer-s.$effective_uid.d"
 	mkdir -p "$cache_dir"
 	chmod 755 "$cache_dir"
@@ -812,7 +839,7 @@ test_zxfer_ensure_ssh_control_socket_cache_dir_rejects_insecure_existing_mode() 
 }
 
 test_zxfer_ensure_ssh_control_socket_cache_dir_reports_existing_owner_lookup_failure_in_current_shell() {
-	effective_uid=$(get_effective_user_uid)
+	effective_uid=$(zxfer_get_effective_user_uid)
 	cache_dir="$TEST_TMPDIR/zxfer-s.$effective_uid.d"
 	mkdir -p "$cache_dir"
 	chmod 700 "$cache_dir"
@@ -856,7 +883,7 @@ test_zxfer_ensure_ssh_control_socket_cache_dir_returns_failure_when_mkdir_fails(
 }
 
 test_zxfer_ensure_ssh_control_socket_cache_dir_reports_direct_lookup_failures_in_current_shell() {
-	effective_uid=$(get_effective_user_uid)
+	effective_uid=$(zxfer_get_effective_user_uid)
 	cache_dir="$TEST_TMPDIR/zxfer-s.$effective_uid.d"
 	rm -rf "$cache_dir"
 	ln -s "$TEST_TMPDIR/other-shared-cache-dir" "$cache_dir"
@@ -869,7 +896,7 @@ test_zxfer_ensure_ssh_control_socket_cache_dir_reports_direct_lookup_failures_in
 	chmod 700 "$cache_dir"
 
 	(
-		get_path_owner_uid() {
+		zxfer_get_path_owner_uid() {
 			return 1
 		}
 		zxfer_ensure_ssh_control_socket_cache_dir >/dev/null
@@ -877,7 +904,7 @@ test_zxfer_ensure_ssh_control_socket_cache_dir_reports_direct_lookup_failures_in
 	owner_status=$?
 
 	(
-		get_path_mode_octal() {
+		zxfer_get_path_mode_octal() {
 			return 1
 		}
 		zxfer_ensure_ssh_control_socket_cache_dir >/dev/null
@@ -886,7 +913,7 @@ test_zxfer_ensure_ssh_control_socket_cache_dir_reports_direct_lookup_failures_in
 
 	rm -rf "$cache_dir"
 	(
-		get_path_owner_uid() {
+		zxfer_get_path_owner_uid() {
 			return 1
 		}
 		zxfer_ensure_ssh_control_socket_cache_dir >/dev/null
@@ -894,7 +921,7 @@ test_zxfer_ensure_ssh_control_socket_cache_dir_reports_direct_lookup_failures_in
 	create_owner_status=$?
 
 	(
-		get_path_mode_octal() {
+		zxfer_get_path_mode_octal() {
 			return 1
 		}
 		zxfer_ensure_ssh_control_socket_cache_dir >/dev/null
@@ -923,15 +950,15 @@ test_zxfer_ensure_ssh_control_socket_entry_dir_creates_secure_entry_and_leases_d
 	assertTrue "Shared ssh control socket entry dirs should persist a secure identity file." \
 		"[ -f '$entry_dir/id' ]"
 	assertEquals "Shared ssh control socket entry dirs should be mode 0700." \
-		"700" "$(get_path_mode_octal "$entry_dir")"
+		"700" "$(zxfer_get_path_mode_octal "$entry_dir")"
 	assertEquals "Shared ssh control socket lease dirs should be mode 0700." \
-		"700" "$(get_path_mode_octal "$entry_dir/leases")"
+		"700" "$(zxfer_get_path_mode_octal "$entry_dir/leases")"
 	assertEquals "Shared ssh control socket identity files should be mode 0600." \
-		"600" "$(get_path_mode_octal "$entry_dir/id")"
+		"600" "$(zxfer_get_path_mode_octal "$entry_dir/id")"
 }
 
 test_zxfer_ensure_ssh_control_socket_entry_dir_uses_suffix_when_identity_mismatches_existing_key() {
-	cache_root=$(zxfer_try_get_socket_cache_tmpdir)
+	cache_dir=$(zxfer_get_ssh_control_socket_cache_dir_for_key "kshared")
 	result=$(
 		(
 			zxfer_ssh_control_socket_cache_key() {
@@ -945,25 +972,22 @@ test_zxfer_ensure_ssh_control_socket_entry_dir_uses_suffix_when_identity_mismatc
 	)
 
 	assertContains "Mismatched shared ssh control socket identities should keep the first cache entry on the base key." \
-		"$result" "first=$cache_root/zxfer-s.$(id -u).d/kshared"
+		"$result" "first=$cache_dir/kshared"
 	assertContains "Mismatched shared ssh control socket identities should fall back to a suffixed cache entry instead of reusing the wrong socket." \
-		"$result" "second=$cache_root/zxfer-s.$(id -u).d/kshared.1"
+		"$result" "second=$cache_dir/kshared.1"
 }
 
 test_zxfer_ensure_ssh_control_socket_entry_dir_keeps_socket_paths_short_for_long_hosts() {
+	long_tmpdir="$TEST_TMPDIR_PHYSICAL/socket-root-segment-0123456789/socket-root-segment-0123456789/socket-root-segment-0123456789"
+	mkdir -p "$long_tmpdir"
 	expected_tmpdir=$(
-		if [ "${TEST_TMPDIR#*/}" != "$TEST_TMPDIR" ]; then
-			TMPDIR=${TEST_TMPDIR%/*}
-			export TMPDIR
-		fi
+		unset TMPDIR
 		zxfer_try_get_socket_cache_tmpdir
 	)
 
 	result=$(
-		if [ "${TEST_TMPDIR#*/}" != "$TEST_TMPDIR" ]; then
-			TMPDIR=${TEST_TMPDIR%/*}
-			export TMPDIR
-		fi
+		TMPDIR=$long_tmpdir
+		export TMPDIR
 		g_cmd_ssh="/opt/local/bin/really-long-custom-ssh-wrapper"
 		entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "aldo@doBackup.clientsupportsoftware.com pfexec -u root")
 		socket_path="$entry_dir/s"
@@ -981,8 +1005,8 @@ test_zxfer_ensure_ssh_control_socket_entry_dir_keeps_socket_paths_short_for_long
 }
 
 test_zxfer_ensure_ssh_control_socket_entry_dir_rejects_symlinked_entry_dir() {
-	cache_dir=$(zxfer_ensure_ssh_control_socket_cache_dir)
 	cache_key=$(zxfer_ssh_control_socket_cache_key "origin.example")
+	cache_dir=$(zxfer_get_ssh_control_socket_cache_dir_for_key "$cache_key")
 	ln -s "$TEST_TMPDIR/other-entry-dir" "$cache_dir/$cache_key"
 
 	set +e
@@ -1013,7 +1037,7 @@ test_zxfer_ensure_ssh_control_socket_entry_dir_reports_existing_entry_lookup_fai
 
 	set +e
 	(
-		get_path_owner_uid() {
+		zxfer_get_path_owner_uid() {
 			return 1
 		}
 		zxfer_ensure_ssh_control_socket_entry_dir "origin.example" >/dev/null
@@ -1021,7 +1045,7 @@ test_zxfer_ensure_ssh_control_socket_entry_dir_reports_existing_entry_lookup_fai
 	owner_status=$?
 
 	(
-		get_effective_user_uid() {
+		zxfer_get_effective_user_uid() {
 			return 1
 		}
 		zxfer_ensure_ssh_control_socket_entry_dir "origin.example" >/dev/null
@@ -1029,7 +1053,7 @@ test_zxfer_ensure_ssh_control_socket_entry_dir_reports_existing_entry_lookup_fai
 	uid_status=$?
 
 	(
-		get_path_mode_octal() {
+		zxfer_get_path_mode_octal() {
 			return 1
 		}
 		zxfer_ensure_ssh_control_socket_entry_dir "origin.example" >/dev/null
@@ -1047,18 +1071,12 @@ test_zxfer_ensure_ssh_control_socket_entry_dir_reports_existing_entry_lookup_fai
 test_zxfer_ensure_ssh_control_socket_entry_dir_reports_cache_key_failure_in_current_shell_direct() {
 	set +e
 	zxfer_ssh_control_socket_cache_key() {
-		return 1
+		return 4
 	}
 	zxfer_ensure_ssh_control_socket_entry_dir "origin.example" >/dev/null 2>&1
 	status=$?
-	# shellcheck source=src/zxfer_globals.sh
-	. "$ZXFER_ROOT/src/zxfer_globals.sh"
-	# shellcheck source=src/zxfer_secure_paths.sh
-	. "$ZXFER_ROOT/src/zxfer_secure_paths.sh"
-	# shellcheck source=src/zxfer_remote_cli.sh
-	. "$ZXFER_ROOT/src/zxfer_remote_cli.sh"
-	# shellcheck source=src/zxfer_backup_metadata.sh
-	. "$ZXFER_ROOT/src/zxfer_backup_metadata.sh"
+	# shellcheck source=src/zxfer_modules.sh
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_backup_metadata.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
 	assertEquals "Shared ssh control socket entry creation should fail when cache-key derivation fails in the current shell." \
 		1 "$status"
@@ -1076,7 +1094,7 @@ test_zxfer_ensure_ssh_control_socket_entry_dir_reports_existing_entry_uid_and_mo
 		zxfer_ensure_ssh_control_socket_cache_dir() {
 			printf '%s\n' "$cache_dir"
 		}
-		get_effective_user_uid() {
+		zxfer_get_effective_user_uid() {
 			return 1
 		}
 		zxfer_ensure_ssh_control_socket_entry_dir "origin.example" >/dev/null
@@ -1087,7 +1105,7 @@ test_zxfer_ensure_ssh_control_socket_entry_dir_reports_existing_entry_uid_and_mo
 		zxfer_ensure_ssh_control_socket_cache_dir() {
 			printf '%s\n' "$cache_dir"
 		}
-		get_path_mode_octal() {
+		zxfer_get_path_mode_octal() {
 			return 1
 		}
 		zxfer_ensure_ssh_control_socket_entry_dir "origin.example" >/dev/null
@@ -1106,7 +1124,7 @@ test_zxfer_read_ssh_control_socket_entry_identity_file_reports_lookup_failures_i
 
 	set +e
 	(
-		get_effective_user_uid() {
+		zxfer_get_effective_user_uid() {
 			return 1
 		}
 		zxfer_read_ssh_control_socket_entry_identity_file "$identity_path" >/dev/null
@@ -1114,7 +1132,7 @@ test_zxfer_read_ssh_control_socket_entry_identity_file_reports_lookup_failures_i
 	uid_status=$?
 
 	(
-		get_path_owner_uid() {
+		zxfer_get_path_owner_uid() {
 			return 1
 		}
 		zxfer_read_ssh_control_socket_entry_identity_file "$identity_path" >/dev/null
@@ -1122,7 +1140,7 @@ test_zxfer_read_ssh_control_socket_entry_identity_file_reports_lookup_failures_i
 	owner_status=$?
 
 	(
-		get_path_mode_octal() {
+		zxfer_get_path_mode_octal() {
 			return 1
 		}
 		zxfer_read_ssh_control_socket_entry_identity_file "$identity_path" >/dev/null
@@ -1143,7 +1161,7 @@ test_zxfer_write_ssh_control_socket_entry_identity_file_reports_failures_in_curr
 
 	set +e
 	(
-		get_effective_user_uid() {
+		zxfer_get_effective_user_uid() {
 			return 1
 		}
 		zxfer_write_ssh_control_socket_entry_identity_file "$entry_dir" "origin.example"
@@ -1151,7 +1169,7 @@ test_zxfer_write_ssh_control_socket_entry_identity_file_reports_failures_in_curr
 	uid_status=$?
 
 	(
-		get_path_owner_uid() {
+		zxfer_get_path_owner_uid() {
 			return 1
 		}
 		zxfer_write_ssh_control_socket_entry_identity_file "$entry_dir" "origin.example"
@@ -1194,22 +1212,16 @@ test_zxfer_write_ssh_control_socket_entry_identity_file_rejects_mismatched_owner
 	chmod 600 "$identity_path"
 
 	set +e
-	get_effective_user_uid() {
+	zxfer_get_effective_user_uid() {
 		printf '%s\n' "111"
 	}
-	get_path_owner_uid() {
+	zxfer_get_path_owner_uid() {
 		printf '%s\n' "222"
 	}
 	zxfer_write_ssh_control_socket_entry_identity_file "$entry_dir" "origin.example" >/dev/null 2>&1
 	status=$?
-	# shellcheck source=src/zxfer_globals.sh
-	. "$ZXFER_ROOT/src/zxfer_globals.sh"
-	# shellcheck source=src/zxfer_secure_paths.sh
-	. "$ZXFER_ROOT/src/zxfer_secure_paths.sh"
-	# shellcheck source=src/zxfer_remote_cli.sh
-	. "$ZXFER_ROOT/src/zxfer_remote_cli.sh"
-	# shellcheck source=src/zxfer_backup_metadata.sh
-	. "$ZXFER_ROOT/src/zxfer_backup_metadata.sh"
+	# shellcheck source=src/zxfer_modules.sh
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_backup_metadata.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
 	assertEquals "Shared ssh control socket identity writes should reject existing identity files owned by a different uid." \
 		1 "$status"
@@ -1223,18 +1235,12 @@ test_zxfer_write_ssh_control_socket_entry_identity_file_reports_render_failure_i
 
 	set +e
 	zxfer_render_ssh_control_socket_entry_identity() {
-		return 1
+		return 4
 	}
 	zxfer_write_ssh_control_socket_entry_identity_file "$entry_dir" "origin.example" >/dev/null 2>&1
 	status=$?
-	# shellcheck source=src/zxfer_globals.sh
-	. "$ZXFER_ROOT/src/zxfer_globals.sh"
-	# shellcheck source=src/zxfer_secure_paths.sh
-	. "$ZXFER_ROOT/src/zxfer_secure_paths.sh"
-	# shellcheck source=src/zxfer_remote_cli.sh
-	. "$ZXFER_ROOT/src/zxfer_remote_cli.sh"
-	# shellcheck source=src/zxfer_backup_metadata.sh
-	. "$ZXFER_ROOT/src/zxfer_backup_metadata.sh"
+	# shellcheck source=src/zxfer_modules.sh
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_backup_metadata.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
 	assertEquals "Shared ssh control socket identity writes should fail when the identity renderer fails in the current shell." \
 		1 "$status"
@@ -1250,19 +1256,13 @@ test_zxfer_write_ssh_control_socket_entry_identity_file_reports_mktemp_failure_i
 
 	set +e
 	mktemp() {
-		return 1
+		return 4
 	}
 	zxfer_write_ssh_control_socket_entry_identity_file "$entry_dir" "origin.example" >/dev/null 2>&1
 	status=$?
 	unset -f mktemp
-	# shellcheck source=src/zxfer_globals.sh
-	. "$ZXFER_ROOT/src/zxfer_globals.sh"
-	# shellcheck source=src/zxfer_secure_paths.sh
-	. "$ZXFER_ROOT/src/zxfer_secure_paths.sh"
-	# shellcheck source=src/zxfer_remote_cli.sh
-	. "$ZXFER_ROOT/src/zxfer_remote_cli.sh"
-	# shellcheck source=src/zxfer_backup_metadata.sh
-	. "$ZXFER_ROOT/src/zxfer_backup_metadata.sh"
+	# shellcheck source=src/zxfer_modules.sh
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_backup_metadata.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
 	assertEquals "Shared ssh control socket identity writes should fail when temporary-file creation fails in the current shell." \
 		1 "$status"
@@ -1410,11 +1410,11 @@ test_zxfer_try_acquire_remote_capability_cache_lock_creates_secure_lock_and_pid_
 	assertTrue "Capability cache lock acquisition should create the lock directory." \
 		"[ -d '$lock_dir' ]"
 	assertEquals "Capability cache lock directories should be owner-only." \
-		"700" "$(get_path_mode_octal "$lock_dir")"
+		"700" "$(zxfer_get_path_mode_octal "$lock_dir")"
 	assertTrue "Capability cache lock acquisition should create a pid file." \
 		"[ -f '$pid_path' ]"
 	assertEquals "Capability cache lock pid files should be owner-only." \
-		"600" "$(get_path_mode_octal "$pid_path")"
+		"600" "$(zxfer_get_path_mode_octal "$pid_path")"
 	lock_pid=$(cat "$pid_path")
 	case "$lock_pid" in
 	'' | *[!0-9]*)
@@ -1513,7 +1513,7 @@ test_zxfer_ensure_remote_host_capabilities_waits_for_sibling_cache_fill() {
 	(
 		g_option_O_origin_host="origin.example"
 		zxfer_get_cached_remote_capability_response_for_host() {
-			return 1
+			return 4
 		}
 		zxfer_read_remote_capability_cache_file() {
 			return 1
@@ -1551,7 +1551,7 @@ test_zxfer_ensure_remote_capability_cache_dir_reports_post_create_lookup_failure
 	set +e
 	(
 		TMPDIR="$owner_tmp"
-		get_path_owner_uid() {
+		zxfer_get_path_owner_uid() {
 			return 1
 		}
 		zxfer_ensure_remote_capability_cache_dir >/dev/null
@@ -1560,7 +1560,7 @@ test_zxfer_ensure_remote_capability_cache_dir_reports_post_create_lookup_failure
 
 	(
 		TMPDIR="$mode_tmp"
-		get_path_mode_octal() {
+		zxfer_get_path_mode_octal() {
 			return 1
 		}
 		zxfer_ensure_remote_capability_cache_dir >/dev/null
@@ -1601,7 +1601,7 @@ test_zxfer_remote_capability_cache_lock_helpers_report_lookup_and_timeout_failur
 
 	set +e
 	(
-		get_effective_user_uid() {
+		zxfer_get_effective_user_uid() {
 			return 1
 		}
 		zxfer_validate_remote_capability_cache_lock_dir "$lock_dir" >/dev/null
@@ -1609,7 +1609,7 @@ test_zxfer_remote_capability_cache_lock_helpers_report_lookup_and_timeout_failur
 	validate_uid_status=$?
 
 	(
-		get_path_owner_uid() {
+		zxfer_get_path_owner_uid() {
 			return 1
 		}
 		zxfer_validate_remote_capability_cache_lock_dir "$lock_dir" >/dev/null
@@ -1617,7 +1617,7 @@ test_zxfer_remote_capability_cache_lock_helpers_report_lookup_and_timeout_failur
 	validate_owner_status=$?
 
 	(
-		get_path_mode_octal() {
+		zxfer_get_path_mode_octal() {
 			return 1
 		}
 		zxfer_validate_remote_capability_cache_lock_dir "$lock_dir" >/dev/null
@@ -1625,7 +1625,7 @@ test_zxfer_remote_capability_cache_lock_helpers_report_lookup_and_timeout_failur
 	validate_mode_status=$?
 
 	(
-		get_effective_user_uid() {
+		zxfer_get_effective_user_uid() {
 			return 1
 		}
 		zxfer_read_remote_capability_cache_lock_pid_file "$pid_path" >/dev/null
@@ -1633,7 +1633,7 @@ test_zxfer_remote_capability_cache_lock_helpers_report_lookup_and_timeout_failur
 	pid_uid_status=$?
 
 	(
-		get_path_owner_uid() {
+		zxfer_get_path_owner_uid() {
 			return 1
 		}
 		zxfer_read_remote_capability_cache_lock_pid_file "$pid_path" >/dev/null
@@ -1641,7 +1641,7 @@ test_zxfer_remote_capability_cache_lock_helpers_report_lookup_and_timeout_failur
 	pid_owner_status=$?
 
 	(
-		get_path_mode_octal() {
+		zxfer_get_path_mode_octal() {
 			return 1
 		}
 		zxfer_read_remote_capability_cache_lock_pid_file "$pid_path" >/dev/null
@@ -2120,7 +2120,7 @@ test_zxfer_read_remote_capability_cache_file_returns_failure_when_uid_lookup_fai
 	set +e
 	output=$(
 		(
-			get_effective_user_uid() {
+			zxfer_get_effective_user_uid() {
 				return 1
 			}
 			zxfer_read_remote_capability_cache_file "origin.example"
@@ -2143,7 +2143,7 @@ test_zxfer_read_remote_capability_cache_file_returns_failure_when_owner_lookup_f
 	set +e
 	output=$(
 		(
-			get_path_owner_uid() {
+			zxfer_get_path_owner_uid() {
 				return 1
 			}
 			zxfer_read_remote_capability_cache_file "origin.example"
@@ -2166,7 +2166,7 @@ test_zxfer_read_remote_capability_cache_file_returns_failure_when_mode_lookup_fa
 	set +e
 	output=$(
 		(
-			get_path_mode_octal() {
+			zxfer_get_path_mode_octal() {
 				return 1
 			}
 			zxfer_read_remote_capability_cache_file "origin.example"
@@ -2188,7 +2188,7 @@ test_zxfer_read_remote_capability_cache_file_reports_direct_lookup_failures_in_c
 
 	set +e
 	(
-		get_effective_user_uid() {
+		zxfer_get_effective_user_uid() {
 			return 1
 		}
 		zxfer_read_remote_capability_cache_file "origin.example" >/dev/null
@@ -2196,7 +2196,7 @@ test_zxfer_read_remote_capability_cache_file_reports_direct_lookup_failures_in_c
 	uid_status=$?
 
 	(
-		get_path_owner_uid() {
+		zxfer_get_path_owner_uid() {
 			return 1
 		}
 		zxfer_read_remote_capability_cache_file "origin.example" >/dev/null
@@ -2204,7 +2204,7 @@ test_zxfer_read_remote_capability_cache_file_reports_direct_lookup_failures_in_c
 	owner_status=$?
 
 	(
-		get_path_mode_octal() {
+		zxfer_get_path_mode_octal() {
 			return 1
 		}
 		zxfer_read_remote_capability_cache_file "origin.example" >/dev/null
@@ -2263,7 +2263,7 @@ test_zxfer_write_remote_capability_cache_file_returns_failure_when_existing_uid_
 	set +e
 	output=$(
 		(
-			get_effective_user_uid() {
+			zxfer_get_effective_user_uid() {
 				return 1
 			}
 			zxfer_write_remote_capability_cache_file "origin.example" "$(fake_remote_capability_response)"
@@ -2286,7 +2286,7 @@ test_zxfer_write_remote_capability_cache_file_returns_failure_when_existing_owne
 	set +e
 	output=$(
 		(
-			get_path_owner_uid() {
+			zxfer_get_path_owner_uid() {
 				return 1
 			}
 			zxfer_write_remote_capability_cache_file "origin.example" "$(fake_remote_capability_response)"
@@ -2312,7 +2312,7 @@ test_zxfer_write_remote_capability_cache_file_rejects_symlink_target() {
 
 test_zxfer_write_remote_capability_cache_file_returns_failure_when_mktemp_fails() {
 	mktemp() {
-		return 1
+		return 4
 	}
 
 	set +e
@@ -2356,7 +2356,7 @@ test_zxfer_write_remote_capability_cache_file_reports_existing_lookup_failures_i
 
 	set +e
 	(
-		get_effective_user_uid() {
+		zxfer_get_effective_user_uid() {
 			return 1
 		}
 		zxfer_write_remote_capability_cache_file "origin.example" "$(fake_remote_capability_response)"
@@ -2364,7 +2364,7 @@ test_zxfer_write_remote_capability_cache_file_reports_existing_lookup_failures_i
 	uid_status=$?
 
 	(
-		get_path_owner_uid() {
+		zxfer_get_path_owner_uid() {
 			return 1
 		}
 		zxfer_write_remote_capability_cache_file "origin.example" "$(fake_remote_capability_response)"
@@ -2446,11 +2446,35 @@ tool	zfs	0	/remote/bin/zfs"
 		"FallbackOS" "$output"
 }
 
+test_zxfer_get_remote_host_operating_system_falls_back_to_direct_probe_when_capability_payload_has_invalid_helper_path() {
+	tab=$(printf '\t')
+	cr=$(printf '\r')
+
+	output=$(
+		(
+			zxfer_ensure_remote_host_capabilities() {
+				printf 'ZXFER_REMOTE_CAPS_V1\n'
+				printf 'os%sRemoteOS\n' "$tab"
+				printf 'tool%szfs%s0%s/remote/bin/zfs%s\n' "$tab" "$tab" "$tab" "$cr"
+				printf 'tool%sparallel%s1%s-\n' "$tab" "$tab" "$tab"
+				printf 'tool%scat%s1%s-\n' "$tab" "$tab" "$tab"
+			}
+			zxfer_get_remote_host_operating_system_direct() {
+				printf '%s\n' "FallbackOS"
+			}
+			zxfer_get_remote_host_operating_system "origin.example" source
+		)
+	)
+
+	assertEquals "Remote OS lookups should fall back to a direct uname probe when the capability payload includes an invalid helper path." \
+		"FallbackOS" "$output"
+}
+
 test_zxfer_get_remote_host_operating_system_direct_returns_first_output_line() {
 	output=$(
 		(
 			g_zxfer_dependency_path="/secure/bin:/usr/bin"
-			invoke_ssh_shell_command_for_host() {
+			zxfer_invoke_ssh_shell_command_for_host() {
 				printf '%s|%s|%s\n' "$1" "$2" "${3:-}" >"$TEST_TMPDIR/remote_os_direct.log"
 				printf '%s\n' "MockRemoteOS" "ignored-extra-line"
 			}
@@ -2472,7 +2496,7 @@ test_zxfer_get_remote_host_operating_system_direct_rejects_empty_output() {
 	set +e
 	output=$(
 		(
-			invoke_ssh_shell_command_for_host() {
+			zxfer_invoke_ssh_shell_command_for_host() {
 				return 0
 			}
 			zxfer_get_remote_host_operating_system_direct "origin.example" source
@@ -2557,7 +2581,7 @@ test_resolve_remote_required_tool_falls_back_to_direct_probe_when_capability_han
 			zxfer_resolve_remote_cli_tool_direct() {
 				printf '%s\n' "/remote/bin/zfs"
 			}
-			resolve_remote_required_tool "origin.example" zfs "zfs"
+			zxfer_resolve_remote_required_tool "origin.example" zfs "zfs"
 		)
 	)
 	status=$?
@@ -2577,7 +2601,7 @@ test_resolve_remote_required_tool_falls_back_to_direct_probe_for_malformed_hands
 			zxfer_resolve_remote_cli_tool_direct() {
 				printf '%s\n' "/remote/bin/zfs"
 			}
-			resolve_remote_required_tool "origin.example" zfs "zfs"
+			zxfer_resolve_remote_required_tool "origin.example" zfs "zfs"
 		)
 	)
 	status=$?
@@ -2585,6 +2609,33 @@ test_resolve_remote_required_tool_falls_back_to_direct_probe_for_malformed_hands
 	assertEquals "Malformed handshake payloads should also fall back to the direct secure probe." 0 "$status"
 	assertEquals "Malformed-handshake fallback should return the direct probe result." \
 		"/remote/bin/zfs" "$output"
+}
+
+test_resolve_remote_required_tool_falls_back_to_direct_probe_for_handshake_payload_with_invalid_helper_path() {
+	tab=$(printf '\t')
+	cr=$(printf '\r')
+
+	output=$(
+		(
+			zxfer_ensure_remote_host_capabilities() {
+				printf 'ZXFER_REMOTE_CAPS_V1\n'
+				printf 'os%sRemoteOS\n' "$tab"
+				printf 'tool%szfs%s0%s/remote/bin/zfs%s\n' "$tab" "$tab" "$tab" "$cr"
+				printf 'tool%sparallel%s1%s-\n' "$tab" "$tab" "$tab"
+				printf 'tool%scat%s1%s-\n' "$tab" "$tab" "$tab"
+			}
+			zxfer_resolve_remote_cli_tool_direct() {
+				printf '%s\n' "/remote/direct/zfs"
+			}
+			zxfer_resolve_remote_required_tool "origin.example" zfs "zfs"
+		)
+	)
+	status=$?
+
+	assertEquals "Invalid helper paths inside capability payloads should trigger the secure direct-probe fallback." \
+		0 "$status"
+	assertEquals "Invalid-helper-path fallback should return the direct probe result." \
+		"/remote/direct/zfs" "$output"
 }
 
 test_resolve_remote_required_tool_propagates_direct_probe_failure_when_capability_handshake_fails() {
@@ -2598,7 +2649,7 @@ test_resolve_remote_required_tool_propagates_direct_probe_failure_when_capabilit
 				printf '%s\n' "Required dependency \"zfs\" not found on host origin.example in secure PATH (/secure/bin). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary."
 				return 1
 			}
-			resolve_remote_required_tool "origin.example" zfs "zfs"
+			zxfer_resolve_remote_required_tool "origin.example" zfs "zfs"
 		)
 	)
 	status=$?
@@ -2620,7 +2671,7 @@ test_resolve_remote_required_tool_propagates_direct_probe_failure_for_malformed_
 				printf '%s\n' "Required dependency \"zfs\" not found on host origin.example in secure PATH (/secure/bin). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary."
 				return 1
 			}
-			resolve_remote_required_tool "origin.example" zfs "zfs"
+			zxfer_resolve_remote_required_tool "origin.example" zfs "zfs"
 		)
 	)
 	status=$?
@@ -2643,7 +2694,7 @@ tool	parallel	0	/opt/bin/parallel
 tool	cat	0	/remote/bin/cat
 EOF
 			}
-			resolve_remote_required_tool "origin.example" zfs "zfs"
+			zxfer_resolve_remote_required_tool "origin.example" zfs "zfs"
 		)
 	)
 	status=$?
@@ -2657,9 +2708,11 @@ test_init_globals_initializes_defaults_and_temp_files() {
 	real_awk=$(command -v awk 2>/dev/null || printf '%s\n' awk)
 	result=$(
 		(
-			counter_file="$TEST_TMPDIR/init_globals.counter"
+			counter_file="$TEST_TMPDIR/zxfer_init_globals.counter"
 			printf '%s\n' 0 >"$counter_file"
-			get_temp_file() {
+			g_zxfer_services_to_restart="stale-service"
+			g_zxfer_property_cache_path="/tmp/stale-cache"
+			zxfer_get_temp_file() {
 				temp_index=$(cat "$counter_file")
 				temp_index=$((temp_index + 1))
 				printf '%s\n' "$temp_index" >"$counter_file"
@@ -2672,11 +2725,11 @@ test_init_globals_initializes_defaults_and_temp_files() {
 					eval "$1=/stub/$2"
 				fi
 			}
-			ssh_supports_control_sockets() {
+			zxfer_ssh_supports_control_sockets() {
 				return 0
 			}
 			ZXFER_BACKUP_DIR="$TEST_TMPDIR/backup_root"
-			init_globals
+			zxfer_init_globals
 			printf 'awk=%s\n' "$g_cmd_awk"
 			printf 'zfs=%s\n' "$g_cmd_zfs"
 			printf 'ssh=%s\n' "$g_cmd_ssh"
@@ -2686,18 +2739,22 @@ test_init_globals_initializes_defaults_and_temp_files() {
 			printf 'tmp1=%s\n' "$g_delete_source_tmp_file"
 			printf 'tmp2=%s\n' "$g_delete_dest_tmp_file"
 			printf 'tmp3=%s\n' "$g_delete_snapshots_to_delete_tmp_file"
+			printf 'restart=<%s>\n' "$g_zxfer_services_to_restart"
+			printf 'cache_path=<%s>\n' "$g_zxfer_property_cache_path"
 		)
 	)
 
-	assertContains "init_globals should resolve awk through the helper." "$result" "awk=$real_awk"
-	assertContains "init_globals should resolve zfs through the helper." "$result" "zfs=/stub/zfs"
-	assertContains "init_globals should resolve ssh through the helper." "$result" "ssh=/stub/ssh"
-	assertContains "init_globals should honor ZXFER_BACKUP_DIR when set." "$result" "backup=$TEST_TMPDIR/backup_root"
-	assertContains "init_globals should enable control sockets when ssh supports them." "$result" "control=1"
+	assertContains "zxfer_init_globals should resolve awk through the helper." "$result" "awk=$real_awk"
+	assertContains "zxfer_init_globals should resolve zfs through the helper." "$result" "zfs=/stub/zfs"
+	assertContains "zxfer_init_globals should resolve ssh through the helper." "$result" "ssh=/stub/ssh"
+	assertContains "zxfer_init_globals should honor ZXFER_BACKUP_DIR when set." "$result" "backup=$TEST_TMPDIR/backup_root"
+	assertContains "zxfer_init_globals should enable control sockets when ssh supports them." "$result" "control=1"
 	assertContains "Yield iterations should default to 1." "$result" "yield=1"
 	assertContains "Delete source temp file should be initialized." "$result" "tmp1=$TEST_TMPDIR/tmp.1"
 	assertContains "Delete destination temp file should be initialized." "$result" "tmp2=$TEST_TMPDIR/tmp.2"
 	assertContains "Delete diff temp file should be initialized." "$result" "tmp3=$TEST_TMPDIR/tmp.3"
+	assertContains "Runtime init should clear stale service restart state." "$result" "restart=<>"
+	assertContains "Runtime init should clear stale property-cache path state." "$result" "cache_path=<>"
 }
 
 test_zxfer_find_required_tool_reports_missing_dependency() {
@@ -2785,7 +2842,7 @@ test_zxfer_assign_required_tool_marks_dependency_failures() {
 				printf '%s\n' "lookup failed"
 				return 1
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf 'class=%s msg=%s\n' "$g_zxfer_failure_class" "$1"
 				exit 1
 			}
@@ -2838,22 +2895,22 @@ EOF
 					eval "$1=/stub/$2"
 				fi
 			}
-			ssh_supports_control_sockets() {
+			zxfer_ssh_supports_control_sockets() {
 				return 1
 			}
-			get_temp_file() {
+			zxfer_get_temp_file() {
 				printf '%s\n' "$TEST_TMPDIR/tmp"
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf 'class=%s msg=%s\n' "$g_zxfer_failure_class" "$1"
 				exit 1
 			}
-			init_globals
+			zxfer_init_globals
 		)
 	)
 	status=$?
 
-	assertEquals "init_globals should fail when optional GNU parallel resolves to a path with control whitespace." 1 "$status"
+	assertEquals "zxfer_init_globals should fail when optional GNU parallel resolves to a path with control whitespace." 1 "$status"
 	assertContains "Invalid optional parallel resolutions should be classified as dependency failures." \
 		"$output" "class=dependency"
 	assertContains "Invalid optional parallel resolutions should explain the path validation failure." \
@@ -2861,7 +2918,7 @@ EOF
 }
 
 test_extract_snapshot_identity_returns_empty_for_non_snapshot_path() {
-	result=$(extract_snapshot_identity "tank/src")
+	result=$(zxfer_extract_snapshot_identity "tank/src")
 
 	assertEquals "Snapshot identities should be empty when the record does not include a snapshot suffix." \
 		"" "$result"
@@ -2869,9 +2926,9 @@ test_extract_snapshot_identity_returns_empty_for_non_snapshot_path() {
 
 test_extract_snapshot_dataset_and_guid_detection_helpers() {
 	assertEquals "Snapshot dataset extraction should strip the snapshot suffix from guid-bearing records." \
-		"tank/src" "$(extract_snapshot_dataset "tank/src@snap1	123")"
+		"tank/src" "$(zxfer_extract_snapshot_dataset "tank/src@snap1	123")"
 	assertEquals "Snapshot dataset extraction should return empty for non-snapshot records." \
-		"" "$(extract_snapshot_dataset "tank/src")"
+		"" "$(zxfer_extract_snapshot_dataset "tank/src")"
 	assertTrue "Guid detection should report true when a snapshot record includes a guid field." \
 		'zxfer_snapshot_record_list_contains_guid "tank/src@snap1	123"'
 	assertFalse "Guid detection should report false for name-only snapshot records." \
@@ -2919,7 +2976,7 @@ tank/src@snap1	111" "$result"
 test_zxfer_get_source_snapshot_identity_records_for_dataset_reverses_creation_order() {
 	result=$(
 		(
-			run_source_zfs_cmd() {
+			zxfer_run_source_zfs_cmd() {
 				printf '%s\n' \
 					"tank/src@snap1	111" \
 					"tank/src@snap2	222" \
@@ -2939,7 +2996,7 @@ tank/src@snap1	111" "$result"
 test_zxfer_get_destination_snapshot_identity_records_for_dataset_filters_descendants() {
 	result=$(
 		(
-			run_destination_zfs_cmd() {
+			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' \
 					"backup/dst@snap1	111" \
 					"backup/dst/child@snap1	211" \
@@ -2995,7 +3052,7 @@ test_zxfer_snapshot_identity_record_helpers_report_lookup_failures_and_destinati
 	set +e
 	output=$(
 		(
-			run_source_zfs_cmd() {
+			zxfer_run_source_zfs_cmd() {
 				return 1
 			}
 
@@ -3008,7 +3065,7 @@ test_zxfer_snapshot_identity_record_helpers_report_lookup_failures_and_destinati
 
 	output=$(
 		(
-			run_destination_zfs_cmd() {
+			zxfer_run_destination_zfs_cmd() {
 				return 1
 			}
 
@@ -3039,19 +3096,19 @@ test_read_command_line_switches_sets_options_and_remote_paths() {
 	: >"$log"
 	result=$(
 		(
-			get_ssh_cmd_for_host() {
+			zxfer_get_ssh_cmd_for_host() {
 				printf '%s\n' "/usr/bin/ssh"
 			}
-			refresh_compression_commands() {
+			zxfer_refresh_compression_commands() {
 				printf 'refresh\n' >>"$log"
 				g_cmd_compress_safe="zstd -9"
 				g_cmd_decompress_safe="zstd -d"
 			}
 			g_ssh_supports_control_sockets=1
 			g_cmd_zfs="/sbin/zfs"
-			g_MAX_YIELD_ITERATIONS=8
+			g_test_max_yield_iterations=8
 			OPTIND=1
-			read_command_line_switches \
+			zxfer_read_command_line_switches \
 				-b -B -c "svc:/network/nfs/server" -d -D "pv -N %%title%%" \
 				-e -F -g 7 -I "mountpoint" -j 4 -k -m -n \
 				-N "tank/nonrecursive" -o "atime=off" -O "origin.example pfexec" \
@@ -3089,13 +3146,13 @@ test_prepare_remote_host_connections_sets_up_control_sockets_after_validation() 
 
 	result=$(
 		(
-			setup_ssh_control_socket() {
+			zxfer_setup_ssh_control_socket() {
 				printf 'setup %s %s\n' "$1" "$2" >>"$log"
 			}
 			zxfer_preload_remote_host_capabilities() {
 				printf 'preload %s %s\n' "$1" "$2" >>"$log"
 			}
-			get_ssh_cmd_for_host() {
+			zxfer_get_ssh_cmd_for_host() {
 				printf '%s\n' "/usr/bin/ssh"
 			}
 			zxfer_profile_now_ms() {
@@ -3115,7 +3172,7 @@ test_prepare_remote_host_connections_sets_up_control_sockets_after_validation() 
 			g_origin_cmd_zfs="/remote/origin/zfs"
 			g_target_cmd_zfs="/remote/target/zfs"
 			g_ssh_supports_control_sockets=1
-			prepare_remote_host_connections
+			zxfer_prepare_remote_host_connections
 			printf 'lzfs=%s\n' "$g_LZFS"
 			printf 'rzfs=%s\n' "$g_RZFS"
 			printf 'ssh_setup_ms=%s\n' "${g_zxfer_profile_ssh_setup_ms:-0}"
@@ -3144,13 +3201,13 @@ test_prepare_remote_host_connections_logs_when_control_sockets_are_unavailable()
 
 	output=$(
 		(
-			echoV() {
+			zxfer_echoV() {
 				printf '%s\n' "$*"
 			}
 			zxfer_preload_remote_host_capabilities() {
 				printf 'preload %s %s\n' "$1" "$2" >>"$log"
 			}
-			get_ssh_cmd_for_host() {
+			zxfer_get_ssh_cmd_for_host() {
 				printf '%s\n' "/usr/bin/ssh"
 			}
 			g_option_O_origin_host="origin.example pfexec"
@@ -3159,7 +3216,7 @@ test_prepare_remote_host_connections_logs_when_control_sockets_are_unavailable()
 			g_origin_cmd_zfs="/remote/origin/zfs"
 			g_target_cmd_zfs="/remote/target/zfs"
 			g_ssh_supports_control_sockets=0
-			prepare_remote_host_connections
+			zxfer_prepare_remote_host_connections
 			printf 'lzfs=%s\n' "$g_LZFS"
 			printf 'rzfs=%s\n' "$g_RZFS"
 		)
@@ -3183,13 +3240,13 @@ test_read_command_line_switches_sets_flags_in_current_shell() {
 	OPTIND=1
 	g_cmd_ssh="/usr/bin/ssh"
 	g_cmd_zfs="/sbin/zfs"
-	g_MAX_YIELD_ITERATIONS=9
+	g_test_max_yield_iterations=9
 	g_ssh_supports_control_sockets=0
-	refresh_compression_commands() {
+	zxfer_refresh_compression_commands() {
 		:
 	}
 
-	read_command_line_switches \
+	zxfer_read_command_line_switches \
 		-b -B -c "svc:/network/nfs/server" -d -D "pv -N %%title%%" \
 		-e -F -g 7 -I "mountpoint" -j 4 -k -m -n \
 		-N "tank/nonrecursive" -o "atime=off" -V \
@@ -3206,7 +3263,7 @@ test_read_command_line_switches_sets_flags_in_current_shell() {
 	assertEquals "Parallel job count should be captured from -j." "4" "$g_option_j_jobs"
 	assertEquals "Nonrecursive source should be captured from -N." "tank/nonrecursive" "$g_option_N_nonrecursive"
 	assertEquals "Override property should be captured from -o." "atime=off" "$g_option_o_override_property"
-	# read_command_line_switches runs in the current shell here; the SC2031
+	# zxfer_read_command_line_switches runs in the current shell here; the SC2031
 	# warning is triggered by separate subshell-based coverage elsewhere.
 	# shellcheck disable=SC2031
 	assertEquals "Origin host should be captured from -O." "origin.example pfexec" "$g_option_O_origin_host"
@@ -3227,30 +3284,24 @@ test_read_command_line_switches_sets_flags_in_current_shell() {
 	assertEquals "Target zfs spec should remain the resolved zfs path after parsing." \
 		"/sbin/zfs" "$g_RZFS"
 
-	unset -f refresh_compression_commands
-	# shellcheck source=src/zxfer_globals.sh
-	. "$ZXFER_ROOT/src/zxfer_globals.sh"
-	# shellcheck source=src/zxfer_secure_paths.sh
-	. "$ZXFER_ROOT/src/zxfer_secure_paths.sh"
-	# shellcheck source=src/zxfer_remote_cli.sh
-	. "$ZXFER_ROOT/src/zxfer_remote_cli.sh"
-	# shellcheck source=src/zxfer_backup_metadata.sh
-	. "$ZXFER_ROOT/src/zxfer_backup_metadata.sh"
+	unset -f zxfer_refresh_compression_commands
+	# shellcheck source=src/zxfer_modules.sh
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_backup_metadata.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 }
 
 test_read_command_line_switches_rejects_invalid_option() {
 	set +e
 	output=$(
 		(
-			refresh_compression_commands() {
+			zxfer_refresh_compression_commands() {
 				:
 			}
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit "${2:-2}"
 			}
 			OPTIND=1
-			read_command_line_switches -Q 2>/dev/null
+			zxfer_read_command_line_switches -Q 2>/dev/null
 		)
 	)
 	status=$?
@@ -3263,11 +3314,11 @@ test_read_command_line_switches_exits_zero_for_help() {
 	set +e
 	output=$(
 		(
-			usage() {
+			zxfer_usage() {
 				printf '%s\n' "usage output"
 			}
 			OPTIND=1
-			read_command_line_switches -h
+			zxfer_read_command_line_switches -h
 			printf '%s\n' "after-help"
 		)
 	)
@@ -3281,12 +3332,12 @@ test_consistency_check_rejects_non_numeric_jobs() {
 	set +e
 	output=$(
 		(
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit 2
 			}
 			g_option_j_jobs=abc
-			consistency_check
+			zxfer_consistency_check
 		)
 	)
 	status=$?
@@ -3300,12 +3351,12 @@ test_consistency_check_rejects_zero_jobs() {
 	set +e
 	output=$(
 		(
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit 2
 			}
 			g_option_j_jobs=0
-			consistency_check
+			zxfer_consistency_check
 		)
 	)
 	status=$?
@@ -3319,13 +3370,13 @@ test_consistency_check_rejects_remote_migration_conflicts() {
 	set +e
 	output=$(
 		(
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit 2
 			}
 			g_option_O_origin_host="origin.example"
 			g_option_m_migrate=1
-			consistency_check
+			zxfer_consistency_check
 		)
 	)
 	status=$?
@@ -3339,12 +3390,12 @@ test_consistency_check_rejects_compression_without_remote_host() {
 	set +e
 	output=$(
 		(
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit 2
 			}
 			g_option_z_compress=1
-			consistency_check
+			zxfer_consistency_check
 		)
 	)
 	status=$?
@@ -3365,13 +3416,13 @@ EOF
 
 	result=$(
 		(
-			get_os() {
+			zxfer_get_os() {
 				printf '%s\n' "SunOS"
 			}
 			g_cmd_zfs="/sbin/zfs"
 			g_cmd_awk="/usr/bin/awk"
 			g_zxfer_dependency_path="$gawk_dir"
-			init_variables
+			zxfer_init_variables
 			printf '%s\n' "$g_cmd_awk"
 		)
 	)
@@ -3382,7 +3433,7 @@ EOF
 test_init_variables_uses_local_cat_lookup_in_restore_mode() {
 	result=$(
 		(
-			get_os() {
+			zxfer_get_os() {
 				printf '%s\n' "FreeBSD"
 			}
 			zxfer_assign_required_tool() {
@@ -3393,7 +3444,7 @@ test_init_variables_uses_local_cat_lookup_in_restore_mode() {
 				fi
 			}
 			g_option_e_restore_property_mode=1
-			init_variables
+			zxfer_init_variables
 			printf 'cat=%s\n' "$g_cmd_cat"
 		)
 	)
@@ -3416,7 +3467,7 @@ test_refresh_compression_commands_resolves_local_helpers_when_enabled() {
 			g_option_z_compress=1
 			g_cmd_compress="zstd -T0 -9"
 			g_cmd_decompress="zstd -d"
-			refresh_compression_commands
+			zxfer_refresh_compression_commands
 			printf 'compress=%s\n' "$g_cmd_compress_safe"
 			printf 'decompress=%s\n' "$g_cmd_decompress_safe"
 		)
@@ -3431,10 +3482,10 @@ test_refresh_compression_commands_resolves_local_helpers_when_enabled() {
 test_zxfer_resolve_remote_cli_command_safe_resolves_first_token_and_preserves_args() {
 	result=$(
 		(
-			build_remote_sh_c_command() {
+			zxfer_build_remote_sh_c_command() {
 				printf '%s\n' "$1"
 			}
-			invoke_ssh_shell_command_for_host() {
+			zxfer_invoke_ssh_shell_command_for_host() {
 				printf '%s\n' "/remote/bin/zstd"
 			}
 			zxfer_resolve_remote_cli_command_safe "origin.example" "zstd -T0 -9" "compression command" source
@@ -3480,7 +3531,7 @@ test_zxfer_resolve_remote_cli_tool_delegates_known_tools_in_current_shell() {
 	log_file="$TEST_TMPDIR/resolve_remote_cli_tool_known.log"
 
 	(
-		resolve_remote_required_tool() {
+		zxfer_resolve_remote_required_tool() {
 			printf '%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" >"$log_file"
 			printf '%s\n' "/remote/bin/zfs"
 		}
@@ -3488,7 +3539,7 @@ test_zxfer_resolve_remote_cli_tool_delegates_known_tools_in_current_shell() {
 	)
 	status=$?
 
-	assertEquals "Known remote CLI tools should delegate to resolve_remote_required_tool." 0 "$status"
+	assertEquals "Known remote CLI tools should delegate to zxfer_resolve_remote_required_tool." 0 "$status"
 	assertEquals "Known remote CLI tool delegation should preserve the host, tool, label, and profile side." \
 		"origin.example:zfs:source zfs:source" "$(cat "$log_file")"
 	assertEquals "Known remote CLI tool delegation should return the resolved remote helper path." \
@@ -3500,10 +3551,10 @@ test_zxfer_resolve_remote_cli_tool_reports_missing_and_query_failures_in_current
 	error_output="$TEST_TMPDIR/resolve_remote_cli_tool_error.out"
 
 	(
-		build_remote_sh_c_command() {
+		zxfer_build_remote_sh_c_command() {
 			printf '%s\n' "$1"
 		}
-		invoke_ssh_shell_command_for_host() {
+		zxfer_invoke_ssh_shell_command_for_host() {
 			return 10
 		}
 		g_zxfer_dependency_path="/secure/bin"
@@ -3512,10 +3563,10 @@ test_zxfer_resolve_remote_cli_tool_reports_missing_and_query_failures_in_current
 	missing_status=$?
 
 	(
-		build_remote_sh_c_command() {
+		zxfer_build_remote_sh_c_command() {
 			printf '%s\n' "$1"
 		}
-		invoke_ssh_shell_command_for_host() {
+		zxfer_invoke_ssh_shell_command_for_host() {
 			return 77
 		}
 		g_zxfer_dependency_path="/secure/bin"
@@ -3560,10 +3611,10 @@ test_zxfer_resolve_remote_cli_command_safe_rejects_blank_commands_and_surfaces_l
 test_init_variables_resolves_remote_compression_helpers() {
 	result=$(
 		(
-			get_os() {
+			zxfer_get_os() {
 				printf '%s\n' "RemoteOS"
 			}
-			resolve_remote_required_tool() {
+			zxfer_resolve_remote_required_tool() {
 				if [ "$1:$2" = "origin.example:zfs" ]; then
 					printf '%s\n' "/remote/origin/zfs"
 				elif [ "$1:$2" = "target.example:zfs" ]; then
@@ -3590,7 +3641,7 @@ test_init_variables_resolves_remote_compression_helpers() {
 			g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
 			g_option_O_origin_host="origin.example"
 			g_option_T_target_host="target.example"
-			init_variables
+			zxfer_init_variables
 			printf 'origin-compress=%s\n' "$g_origin_cmd_compress_safe"
 			printf 'origin-decompress=%s\n' "$g_origin_cmd_decompress_safe"
 			printf 'target-compress=%s\n' "$g_target_cmd_compress_safe"
@@ -3612,10 +3663,10 @@ test_init_variables_marks_remote_compression_lookup_failures_as_dependency_error
 	set +e
 	output=$(
 		(
-			get_os() {
+			zxfer_get_os() {
 				printf '%s\n' "RemoteOS"
 			}
-			resolve_remote_required_tool() {
+			zxfer_resolve_remote_required_tool() {
 				if [ "$1:$2" = "origin.example:zfs" ]; then
 					printf '%s\n' "/remote/origin/zfs"
 				else
@@ -3627,7 +3678,7 @@ test_init_variables_marks_remote_compression_lookup_failures_as_dependency_error
 				printf '%s\n' "remote compression lookup failed"
 				return 1
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf 'class=%s msg=%s\n' "$g_zxfer_failure_class" "$1"
 				exit 1
 			}
@@ -3637,7 +3688,7 @@ test_init_variables_marks_remote_compression_lookup_failures_as_dependency_error
 			g_cmd_compress_safe="'/local/bin/zstd' '-T0' '-9'"
 			g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
 			g_option_O_origin_host="origin.example"
-			init_variables
+			zxfer_init_variables
 		)
 	)
 	status=$?
@@ -3653,10 +3704,10 @@ test_init_variables_marks_remote_target_zfs_lookup_failures_as_dependency_errors
 	set +e
 	output=$(
 		(
-			get_os() {
+			zxfer_get_os() {
 				printf '%s\n' "RemoteOS"
 			}
-			resolve_remote_required_tool() {
+			zxfer_resolve_remote_required_tool() {
 				if [ "$1:$2" = "origin.example:zfs" ]; then
 					printf '%s\n' "/remote/origin/zfs"
 				elif [ "$1:$2" = "target.example:zfs" ]; then
@@ -3666,13 +3717,13 @@ test_init_variables_marks_remote_target_zfs_lookup_failures_as_dependency_errors
 					printf '%s\n' "/resolved/$2"
 				fi
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf 'class=%s msg=%s\n' "$g_zxfer_failure_class" "$1"
 				exit 1
 			}
 			g_option_O_origin_host="origin.example"
 			g_option_T_target_host="target.example"
-			init_variables
+			zxfer_init_variables
 		)
 	)
 	status=$?
@@ -3688,15 +3739,15 @@ test_init_variables_marks_remote_source_os_lookup_failures_as_dependency_errors(
 	set +e
 	output=$(
 		(
-			get_os() {
+			zxfer_get_os() {
 				return 1
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf 'class=%s msg=%s\n' "$g_zxfer_failure_class" "$1"
 				exit 1
 			}
 			g_option_O_origin_host="origin.example"
-			init_variables
+			zxfer_init_variables
 		)
 	)
 	status=$?
@@ -3712,22 +3763,22 @@ test_init_variables_marks_remote_destination_os_lookup_failures_as_dependency_er
 	set +e
 	output=$(
 		(
-			get_os() {
+			zxfer_get_os() {
 				if [ "$1" = "target.example" ]; then
 					return 1
 				fi
 				printf '%s\n' "RemoteOS"
 			}
-			resolve_remote_required_tool() {
+			zxfer_resolve_remote_required_tool() {
 				printf '%s\n' "/resolved/$2"
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf 'class=%s msg=%s\n' "$g_zxfer_failure_class" "$1"
 				exit 1
 			}
 			g_option_O_origin_host="origin.example"
 			g_option_T_target_host="target.example"
-			init_variables
+			zxfer_init_variables
 		)
 	)
 	status=$?
@@ -3743,10 +3794,10 @@ test_init_variables_marks_remote_target_decompression_lookup_failures_as_depende
 	set +e
 	output=$(
 		(
-			get_os() {
+			zxfer_get_os() {
 				printf '%s\n' "RemoteOS"
 			}
-			resolve_remote_required_tool() {
+			zxfer_resolve_remote_required_tool() {
 				if [ "$1:$2" = "origin.example:zfs" ]; then
 					printf '%s\n' "/remote/origin/zfs"
 				elif [ "$1:$2" = "target.example:zfs" ]; then
@@ -3759,7 +3810,7 @@ test_init_variables_marks_remote_target_decompression_lookup_failures_as_depende
 				printf '%s\n' "target decompression lookup failed"
 				return 1
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf 'class=%s msg=%s\n' "$g_zxfer_failure_class" "$1"
 				exit 1
 			}
@@ -3770,7 +3821,7 @@ test_init_variables_marks_remote_target_decompression_lookup_failures_as_depende
 			g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
 			g_option_O_origin_host="origin.example"
 			g_option_T_target_host="target.example"
-			init_variables
+			zxfer_init_variables
 		)
 	)
 	status=$?
@@ -3786,10 +3837,10 @@ test_init_variables_marks_remote_restore_cat_lookup_failures_as_dependency_error
 	set +e
 	output=$(
 		(
-			get_os() {
+			zxfer_get_os() {
 				printf '%s\n' "RemoteOS"
 			}
-			resolve_remote_required_tool() {
+			zxfer_resolve_remote_required_tool() {
 				if [ "$1:$2" = "origin.example:zfs" ]; then
 					printf '%s\n' "/remote/origin/zfs"
 				elif [ "$1:$2" = "origin.example:cat" ]; then
@@ -3799,13 +3850,13 @@ test_init_variables_marks_remote_restore_cat_lookup_failures_as_dependency_error
 					printf '%s\n' "/resolved/$2"
 				fi
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf 'class=%s msg=%s\n' "$g_zxfer_failure_class" "$1"
 				exit 1
 			}
 			g_option_O_origin_host="origin.example"
 			g_option_e_restore_property_mode=1
-			init_variables
+			zxfer_init_variables
 		)
 	)
 	status=$?
@@ -3821,21 +3872,21 @@ test_refresh_compression_commands_rejects_empty_compression_command() {
 	set +e
 	output=$(
 		(
-			quote_cli_tokens() {
+			zxfer_quote_cli_tokens() {
 				if [ "$1" = "" ]; then
 					printf '%s' ""
 				else
 					printf "'%s'\n" "$1"
 				fi
 			}
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit "${2:-2}"
 			}
 			g_option_z_compress=1
 			g_cmd_compress=""
 			g_cmd_decompress="zstd -d"
-			refresh_compression_commands
+			zxfer_refresh_compression_commands
 		)
 	)
 	status=$?
@@ -3849,14 +3900,14 @@ test_refresh_compression_commands_rejects_whitespace_only_compression_command() 
 	set +e
 	output=$(
 		(
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit "${2:-2}"
 			}
 			g_option_z_compress=1
 			g_cmd_compress="   "
 			g_cmd_decompress="zstd -d"
-			refresh_compression_commands
+			zxfer_refresh_compression_commands
 		)
 	)
 	status=$?
@@ -3870,21 +3921,21 @@ test_refresh_compression_commands_rejects_missing_decompress_command() {
 	set +e
 	output=$(
 		(
-			quote_cli_tokens() {
+			zxfer_quote_cli_tokens() {
 				if [ "$1" = "zstd -3" ]; then
 					printf '%s\n' "'zstd' '-3'"
 				else
 					printf '%s' ""
 				fi
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
 			g_option_z_compress=1
 			g_cmd_compress="zstd -3"
 			g_cmd_decompress=""
-			refresh_compression_commands
+			zxfer_refresh_compression_commands
 		)
 	)
 	status=$?
@@ -3898,14 +3949,14 @@ test_refresh_compression_commands_rejects_whitespace_only_decompress_command() {
 	set +e
 	output=$(
 		(
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
 			g_option_z_compress=1
 			g_cmd_compress="zstd -3"
 			g_cmd_decompress="   "
-			refresh_compression_commands
+			zxfer_refresh_compression_commands
 		)
 	)
 	status=$?
@@ -3926,7 +3977,7 @@ test_close_origin_ssh_control_socket_uses_host_tokens_and_cleans_state() {
 	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
 	g_ssh_origin_control_socket_dir="$socket_dir"
 
-	close_origin_ssh_control_socket
+	zxfer_close_origin_ssh_control_socket
 
 	unset FAKE_SSH_LOG
 
@@ -3951,7 +4002,7 @@ test_get_path_owner_uid_falls_back_to_ls_for_dash_prefixed_paths() {
 			stat() {
 				return 1
 			}
-			get_path_owner_uid "-owner_file"
+			zxfer_get_path_owner_uid "-owner_file"
 		)
 	)
 
@@ -3970,7 +4021,7 @@ test_get_path_mode_octal_falls_back_to_ls_for_dash_prefixed_paths() {
 			ls() {
 				printf '%s\n' "-rw------- 1 0 0 0 Jan 1 00:00 ./-mode_file"
 			}
-			get_path_mode_octal "-mode_file"
+			zxfer_get_path_mode_octal "-mode_file"
 		)
 	)
 
@@ -3978,7 +4029,7 @@ test_get_path_mode_octal_falls_back_to_ls_for_dash_prefixed_paths() {
 }
 
 test_merge_path_allowlists_deduplicates_entries() {
-	result=$(merge_path_allowlists "/sbin:/bin:/usr/bin" "/bin:/usr/local/bin:/usr/bin")
+	result=$(zxfer_merge_path_allowlists "/sbin:/bin:/usr/bin" "/bin:/usr/local/bin:/usr/bin")
 
 	assertEquals "Merged PATH allowlists should keep first-seen ordering and drop duplicates." \
 		"/sbin:/bin:/usr/bin:/usr/local/bin" "$result"
@@ -4009,7 +4060,7 @@ test_ssh_supports_control_sockets_reflects_ssh_status() {
 
 	FAKE_SSH_EXIT_STATUS=0
 	export FAKE_SSH_EXIT_STATUS
-	if ssh_supports_control_sockets; then
+	if zxfer_ssh_supports_control_sockets; then
 		status_supported=0
 	else
 		status_supported=1
@@ -4017,7 +4068,7 @@ test_ssh_supports_control_sockets_reflects_ssh_status() {
 
 	FAKE_SSH_EXIT_STATUS=1
 	export FAKE_SSH_EXIT_STATUS
-	if ssh_supports_control_sockets; then
+	if zxfer_ssh_supports_control_sockets; then
 		status_unsupported=0
 	else
 		status_unsupported=1
@@ -4025,8 +4076,8 @@ test_ssh_supports_control_sockets_reflects_ssh_status() {
 
 	unset FAKE_SSH_EXIT_STATUS
 
-	assertEquals "ssh_supports_control_sockets should succeed when ssh -M -V succeeds." 0 "$status_supported"
-	assertEquals "ssh_supports_control_sockets should fail when ssh -M -V fails." 1 "$status_unsupported"
+	assertEquals "zxfer_ssh_supports_control_sockets should succeed when ssh -M -V succeeds." 0 "$status_supported"
+	assertEquals "zxfer_ssh_supports_control_sockets should fail when ssh -M -V fails." 1 "$status_unsupported"
 }
 
 test_zxfer_ensure_ssh_control_socket_cache_dir_creates_secure_directory() {
@@ -4037,7 +4088,7 @@ test_zxfer_ensure_ssh_control_socket_cache_dir_creates_secure_directory() {
 	assertTrue "Shared ssh control socket cache directories should exist after creation." \
 		"[ -d '$cache_dir' ]"
 	assertEquals "Shared ssh control socket cache directories should be mode 0700." \
-		"700" "$(get_path_mode_octal "$cache_dir")"
+		"700" "$(zxfer_get_path_mode_octal "$cache_dir")"
 }
 
 test_zxfer_ensure_ssh_control_socket_cache_dir_uses_effective_tmpdir_in_current_shell() {
@@ -4090,11 +4141,11 @@ test_get_ssh_cmd_for_host_prefers_matching_control_socket() {
 	g_ssh_target_control_socket="$TEST_TMPDIR/target.sock"
 
 	assertEquals "Origin host ssh command should reuse the origin control socket." \
-		"'$FAKE_SSH_BIN' '-S' '$TEST_TMPDIR/origin.sock'" "$(get_ssh_cmd_for_host "origin.example")"
+		"'$FAKE_SSH_BIN' '-S' '$TEST_TMPDIR/origin.sock'" "$(zxfer_get_ssh_cmd_for_host "origin.example")"
 	assertEquals "Target host ssh command should reuse the target control socket." \
-		"'$FAKE_SSH_BIN' '-S' '$TEST_TMPDIR/target.sock'" "$(get_ssh_cmd_for_host "target.example")"
+		"'$FAKE_SSH_BIN' '-S' '$TEST_TMPDIR/target.sock'" "$(zxfer_get_ssh_cmd_for_host "target.example")"
 	assertEquals "Unmatched hosts should use the base ssh command." \
-		"'$FAKE_SSH_BIN'" "$(get_ssh_cmd_for_host "other.example")"
+		"'$FAKE_SSH_BIN'" "$(zxfer_get_ssh_cmd_for_host "other.example")"
 }
 
 test_close_target_ssh_control_socket_uses_host_tokens_and_cleans_state() {
@@ -4108,7 +4159,7 @@ test_close_target_ssh_control_socket_uses_host_tokens_and_cleans_state() {
 	g_ssh_target_control_socket="$TEST_TMPDIR/target.sock"
 	g_ssh_target_control_socket_dir="$socket_dir"
 
-	close_target_ssh_control_socket
+	zxfer_close_target_ssh_control_socket
 
 	unset FAKE_SSH_LOG
 
@@ -4134,26 +4185,26 @@ test_trap_exit_relaunches_services_when_requested() {
 			g_option_b_beep_always=0
 			g_option_B_beep_on_success=0
 			g_services_need_relaunch=1
-			close_all_ssh_control_sockets() {
+			zxfer_close_all_ssh_control_sockets() {
 				:
 			}
-			echoV() {
+			zxfer_echoV() {
 				printf '%s\n' "$*"
 			}
-			relaunch() {
-				printf 'relaunch need=%s\n' "$g_services_need_relaunch"
+			zxfer_relaunch() {
+				printf 'zxfer_relaunch need=%s\n' "$g_services_need_relaunch"
 			}
 			true
-			trap_exit
+			zxfer_trap_exit
 		)
 	)
 	status=$?
 
-	assertEquals "trap_exit should preserve a successful exit status when cleanup relaunch succeeds." 0 "$status"
-	assertContains "trap_exit should log that it is restarting stopped services." \
+	assertEquals "zxfer_trap_exit should preserve a successful exit status when cleanup zxfer_relaunch succeeds." 0 "$status"
+	assertContains "zxfer_trap_exit should log that it is restarting stopped services." \
 		"$output" "zxfer exiting early; restarting stopped services."
-	assertContains "trap_exit should invoke relaunch when services are still marked for restart." \
-		"$output" "relaunch need=1"
+	assertContains "zxfer_trap_exit should invoke zxfer_relaunch when services are still marked for restart." \
+		"$output" "zxfer_relaunch need=1"
 }
 
 test_trap_exit_skips_relaunch_when_relaunch_is_already_in_progress() {
@@ -4167,53 +4218,54 @@ test_trap_exit_skips_relaunch_when_relaunch_is_already_in_progress() {
 			g_option_B_beep_on_success=0
 			g_services_need_relaunch=1
 			g_services_relaunch_in_progress=1
-			close_all_ssh_control_sockets() {
+			zxfer_close_all_ssh_control_sockets() {
 				:
 			}
-			echoV() {
+			zxfer_echoV() {
 				printf '%s\n' "$*"
 			}
-			relaunch() {
-				printf 'relaunch-called\n'
+			zxfer_relaunch() {
+				printf 'zxfer_relaunch-called\n'
 			}
 			true
-			trap_exit
+			zxfer_trap_exit
 		)
 	)
 	status=$?
 
-	assertEquals "trap_exit should preserve a successful exit status when relaunch already failed earlier." 0 "$status"
-	assertContains "trap_exit should log that it is preserving stopped-service state after a failed relaunch attempt." \
-		"$output" "zxfer exiting with services still stopped after a failed relaunch attempt."
-	assertNotContains "trap_exit should not invoke relaunch again while a failed relaunch attempt is already in progress." \
-		"$output" "relaunch-called"
+	assertEquals "zxfer_trap_exit should preserve a successful exit status when zxfer_relaunch already failed earlier." 0 "$status"
+	assertContains "zxfer_trap_exit should log that it is preserving stopped-service state after a failed zxfer_relaunch attempt." \
+		"$output" "zxfer exiting with services still stopped after a failed zxfer_relaunch attempt."
+	assertNotContains "zxfer_trap_exit should not invoke zxfer_relaunch again while a failed zxfer_relaunch attempt is already in progress." \
+		"$output" "zxfer_relaunch-called"
 }
 
 test_trap_exit_logs_when_relaunch_is_unavailable() {
 	output=$(
 		(
 			trap - EXIT INT TERM HUP QUIT
+			unset -f zxfer_relaunch 2>/dev/null
 			g_option_n_dryrun=0
 			g_option_v_verbose=0
 			g_option_V_very_verbose=0
 			g_option_b_beep_always=0
 			g_option_B_beep_on_success=0
 			g_services_need_relaunch=1
-			close_all_ssh_control_sockets() {
+			zxfer_close_all_ssh_control_sockets() {
 				:
 			}
-			echoV() {
+			zxfer_echoV() {
 				printf '%s\n' "$*"
 			}
 			true
-			trap_exit
+			zxfer_trap_exit
 		)
 	)
 	status=$?
 
-	assertEquals "trap_exit should preserve a successful exit status when relaunch is unavailable." 0 "$status"
-	assertContains "trap_exit should log when stopped services cannot be restarted because relaunch() is missing." \
-		"$output" "zxfer exiting with services still stopped; relaunch() unavailable."
+	assertEquals "zxfer_trap_exit should preserve a successful exit status when zxfer_relaunch is unavailable." 0 "$status"
+	assertContains "zxfer_trap_exit should log when stopped services cannot be restarted because zxfer_relaunch() is missing." \
+		"$output" "zxfer exiting with services still stopped; zxfer_relaunch() unavailable."
 }
 
 test_trap_exit_removes_temp_files_and_iteration_cache_dirs() {
@@ -4239,26 +4291,26 @@ test_trap_exit_removes_temp_files_and_iteration_cache_dirs() {
 			g_zxfer_property_cache_dir="$TEST_TMPDIR/property-cache"
 			g_zxfer_snapshot_index_dir="$TEST_TMPDIR/snapshot-index"
 			mkdir -p "$g_zxfer_property_cache_dir" "$g_zxfer_snapshot_index_dir"
-			close_all_ssh_control_sockets() {
+			zxfer_close_all_ssh_control_sockets() {
 				:
 			}
-			echoV() {
+			zxfer_echoV() {
 				printf '%s\n' "$*"
 			}
 			true
-			trap_exit
+			zxfer_trap_exit
 		)
 	)
 	status=$?
 
-	assertEquals "trap_exit should preserve a successful exit status after cleaning temp files and cache directories." 0 "$status"
-	assertFalse "trap_exit should remove the delete-source temp file." "[ -e '$TEST_TMPDIR/delete-source.tmp' ]"
-	assertFalse "trap_exit should remove the delete-destination temp file." "[ -e '$TEST_TMPDIR/delete-dest.tmp' ]"
-	assertFalse "trap_exit should remove the delete-diff temp file." "[ -e '$TEST_TMPDIR/delete-diff.tmp' ]"
-	assertFalse "trap_exit should remove prefixed tmpdir scratch files for the current run." "[ -e '$TEST_TMPDIR/trap-cleanup.stale' ]"
-	assertFalse "trap_exit should remove prefixed tmpdir scratch directories for the current run." "[ -d '$TEST_TMPDIR/trap-cleanup.dir' ]"
-	assertFalse "trap_exit should remove the property cache directory." "[ -d '$TEST_TMPDIR/property-cache' ]"
-	assertFalse "trap_exit should remove the snapshot index directory." "[ -d '$TEST_TMPDIR/snapshot-index' ]"
+	assertEquals "zxfer_trap_exit should preserve a successful exit status after cleaning temp files and cache directories." 0 "$status"
+	assertFalse "zxfer_trap_exit should remove the delete-source temp file." "[ -e '$TEST_TMPDIR/delete-source.tmp' ]"
+	assertFalse "zxfer_trap_exit should remove the delete-destination temp file." "[ -e '$TEST_TMPDIR/delete-dest.tmp' ]"
+	assertFalse "zxfer_trap_exit should remove the delete-diff temp file." "[ -e '$TEST_TMPDIR/delete-diff.tmp' ]"
+	assertFalse "zxfer_trap_exit should remove prefixed tmpdir scratch files for the current run." "[ -e '$TEST_TMPDIR/trap-cleanup.stale' ]"
+	assertFalse "zxfer_trap_exit should remove prefixed tmpdir scratch directories for the current run." "[ -d '$TEST_TMPDIR/trap-cleanup.dir' ]"
+	assertFalse "zxfer_trap_exit should remove the property cache directory." "[ -d '$TEST_TMPDIR/property-cache' ]"
+	assertFalse "zxfer_trap_exit should remove the snapshot index directory." "[ -d '$TEST_TMPDIR/snapshot-index' ]"
 }
 
 test_setup_ssh_control_socket_replaces_existing_target_socket_state() {
@@ -4269,7 +4321,7 @@ test_setup_ssh_control_socket_replaces_existing_target_socket_state() {
 
 	result=$(
 		(
-			close_target_ssh_control_socket() {
+			zxfer_close_target_ssh_control_socket() {
 				printf 'closed\n'
 			}
 			zxfer_check_ssh_control_socket_for_host() {
@@ -4278,7 +4330,7 @@ test_setup_ssh_control_socket_replaces_existing_target_socket_state() {
 			g_cmd_ssh="$FAKE_SSH_BIN"
 			g_ssh_target_control_socket="$TEST_TMPDIR/old_target.sock"
 			g_ssh_target_control_socket_dir="$TEST_TMPDIR/old_target_dir"
-			setup_ssh_control_socket "target.example doas" "target"
+			zxfer_setup_ssh_control_socket "target.example doas" "target"
 			printf 'socket=%s\n' "$g_ssh_target_control_socket"
 			printf 'dir=%s\n' "$g_ssh_target_control_socket_dir"
 		)
@@ -4302,6 +4354,9 @@ doas" "$(cat "$log")"
 test_setup_ssh_control_socket_reuses_live_cached_socket_without_opening_new_master() {
 	log="$TEST_TMPDIR/setup_cached_socket.log"
 	: >"$log"
+	cache_key=$(zxfer_ssh_control_socket_cache_key "origin.example pfexec")
+	cache_dir=$(zxfer_get_ssh_control_socket_cache_dir_for_key "$cache_key")
+	expected_entry_dir="$cache_dir/$cache_key"
 
 	result=$(
 		(
@@ -4313,7 +4368,7 @@ test_setup_ssh_control_socket_reuses_live_cached_socket_without_opening_new_mast
 				printf 'open\n' >>"$log"
 				return 0
 			}
-			setup_ssh_control_socket "origin.example pfexec" "origin"
+			zxfer_setup_ssh_control_socket "origin.example pfexec" "origin"
 			printf 'socket=%s\n' "$g_ssh_origin_control_socket"
 			printf 'dir=%s\n' "$g_ssh_origin_control_socket_dir"
 			printf 'lease=%s\n' "$g_ssh_origin_control_socket_lease_file"
@@ -4322,25 +4377,25 @@ test_setup_ssh_control_socket_reuses_live_cached_socket_without_opening_new_mast
 
 	assertEquals "Reusing a live cached control socket should not start a second ssh master." "" "$(cat "$log")"
 	assertContains "Cached control socket reuse should still publish the socket path for the origin host." \
-		"$result" "socket=$TEST_TMPDIR/zxfer-s.$(id -u).d/"
+		"$result" "socket=$expected_entry_dir/s"
 	assertContains "Cached control socket reuse should still publish the shared cache entry directory." \
-		"$result" "dir=$TEST_TMPDIR/zxfer-s.$(id -u).d/"
+		"$result" "dir=$expected_entry_dir"
 	assertContains "Cached control socket reuse should register a per-process lease file." \
-		"$result" "lease=$TEST_TMPDIR/zxfer-s.$(id -u).d/"
+		"$result" "lease=$expected_entry_dir/leases/lease."
 }
 
 test_setup_ssh_control_socket_reports_cache_dir_failures() {
 	set +e
 	output=$(
 		(
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
 			zxfer_ensure_ssh_control_socket_entry_dir() {
 				return 1
 			}
-			setup_ssh_control_socket "origin.example" "origin"
+			zxfer_setup_ssh_control_socket "origin.example" "origin"
 		)
 	)
 	status=$?
@@ -4357,7 +4412,7 @@ test_setup_ssh_control_socket_reports_lock_failures() {
 	set +e
 	output=$(
 		(
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
@@ -4367,7 +4422,7 @@ test_setup_ssh_control_socket_reports_lock_failures() {
 			zxfer_acquire_ssh_control_socket_lock() {
 				return 1
 			}
-			setup_ssh_control_socket "origin.example" "origin"
+			zxfer_setup_ssh_control_socket "origin.example" "origin"
 		)
 	)
 	status=$?
@@ -4384,7 +4439,7 @@ test_setup_ssh_control_socket_reports_master_open_failures() {
 	set +e
 	output=$(
 		(
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
@@ -4400,7 +4455,7 @@ test_setup_ssh_control_socket_reports_master_open_failures() {
 			zxfer_open_ssh_control_socket_for_host() {
 				return 1
 			}
-			setup_ssh_control_socket "origin.example" "origin"
+			zxfer_setup_ssh_control_socket "origin.example" "origin"
 		)
 	)
 	status=$?
@@ -4417,7 +4472,7 @@ test_setup_ssh_control_socket_reports_lease_creation_failures() {
 	set +e
 	output=$(
 		(
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
@@ -4433,7 +4488,7 @@ test_setup_ssh_control_socket_reports_lease_creation_failures() {
 			zxfer_create_ssh_control_socket_lease_file() {
 				return 1
 			}
-			setup_ssh_control_socket "origin.example" "origin"
+			zxfer_setup_ssh_control_socket "origin.example" "origin"
 		)
 	)
 	status=$?
@@ -4458,7 +4513,7 @@ test_close_origin_ssh_control_socket_preserves_shared_socket_when_other_leases_e
 	g_ssh_origin_control_socket_dir="$entry_dir"
 	g_ssh_origin_control_socket_lease_file="$lease_file"
 
-	close_origin_ssh_control_socket
+	zxfer_close_origin_ssh_control_socket
 
 	unset FAKE_SSH_LOG
 
@@ -4472,6 +4527,41 @@ test_close_origin_ssh_control_socket_preserves_shared_socket_when_other_leases_e
 		"[ -d '$entry_dir' ]"
 	assertEquals "Closing a shared origin socket should not send ssh -O exit while sibling leases remain." "" \
 		"$(cat "$log" 2>/dev/null)"
+}
+
+test_close_origin_ssh_control_socket_closes_shared_socket_when_last_lease_exits() {
+	log="$TEST_TMPDIR/close_origin_last_lease.log"
+	entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "origin.example pfexec")
+	lease_file=$(zxfer_create_ssh_control_socket_lease_file "$entry_dir")
+	: >"$entry_dir/s"
+	FAKE_SSH_LOG="$log"
+	export FAKE_SSH_LOG
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_O_origin_host="origin.example pfexec"
+	g_ssh_origin_control_socket="$entry_dir/s"
+	g_ssh_origin_control_socket_dir="$entry_dir"
+	g_ssh_origin_control_socket_lease_file="$lease_file"
+	zxfer_check_ssh_control_socket_for_host() {
+		return 0
+	}
+
+	zxfer_close_origin_ssh_control_socket
+
+	unset FAKE_SSH_LOG
+
+	assertEquals "Last shared origin-socket lease release should clear the in-process socket path." "" \
+		"$g_ssh_origin_control_socket"
+	assertEquals "Last shared origin-socket lease release should clear the in-process lease path." "" \
+		"$g_ssh_origin_control_socket_lease_file"
+	assertFalse "Last shared origin-socket lease release should remove the shared cache entry after ssh exits." \
+		"[ -d '$entry_dir' ]"
+	assertEquals "Last shared origin-socket lease release should close the shared ssh master with preserved host tokens." \
+		"-S
+$entry_dir/s
+-O
+exit
+origin.example
+pfexec" "$(cat "$log")"
 }
 
 test_close_target_ssh_control_socket_closes_shared_socket_when_last_lease_exits() {
@@ -4490,7 +4580,7 @@ test_close_target_ssh_control_socket_closes_shared_socket_when_last_lease_exits(
 		return 0
 	}
 
-	close_target_ssh_control_socket
+	zxfer_close_target_ssh_control_socket
 
 	unset FAKE_SSH_LOG
 
@@ -4522,9 +4612,28 @@ test_close_origin_ssh_control_socket_removes_stale_shared_entry_when_socket_is_n
 		return 1
 	}
 
-	close_origin_ssh_control_socket
+	zxfer_close_origin_ssh_control_socket
 
 	assertFalse "Last shared origin-socket lease release should remove stale cache entries when the socket is no longer live." \
+		"[ -d '$entry_dir' ]"
+}
+
+test_close_target_ssh_control_socket_removes_stale_shared_entry_when_socket_is_not_live() {
+	entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "target.example")
+	lease_file=$(zxfer_create_ssh_control_socket_lease_file "$entry_dir")
+	: >"$entry_dir/s"
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_T_target_host="target.example"
+	g_ssh_target_control_socket="$entry_dir/s"
+	g_ssh_target_control_socket_dir="$entry_dir"
+	g_ssh_target_control_socket_lease_file="$lease_file"
+	zxfer_check_ssh_control_socket_for_host() {
+		return 1
+	}
+
+	zxfer_close_target_ssh_control_socket
+
+	assertFalse "Last shared target-socket lease release should remove stale cache entries when the socket is no longer live." \
 		"[ -d '$entry_dir' ]"
 }
 
@@ -4532,13 +4641,13 @@ test_consistency_check_rejects_backup_and_restore_modes_together() {
 	set +e
 	output=$(
 		(
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit 2
 			}
 			g_option_k_backup_property_mode=1
 			g_option_e_restore_property_mode=1
-			consistency_check
+			zxfer_consistency_check
 		)
 	)
 	status=$?
@@ -4552,13 +4661,13 @@ test_consistency_check_rejects_dual_beep_modes() {
 	set +e
 	output=$(
 		(
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit 2
 			}
 			g_option_b_beep_always=1
 			g_option_B_beep_on_success=1
-			consistency_check
+			zxfer_consistency_check
 		)
 	)
 	status=$?
@@ -4572,24 +4681,24 @@ test_consistency_check_rejects_invalid_grandfather_values() {
 	set +e
 	output_non_numeric=$(
 		(
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit 2
 			}
 			g_option_g_grandfather_protection="abc"
-			consistency_check
+			zxfer_consistency_check
 		)
 	)
 	status_non_numeric=$?
 
 	output_zero=$(
 		(
-			throw_usage_error() {
+			zxfer_throw_usage_error() {
 				printf '%s\n' "$1"
 				exit 2
 			}
 			g_option_g_grandfather_protection="0"
-			consistency_check
+			zxfer_consistency_check
 		)
 	)
 	status_zero=$?
@@ -4602,69 +4711,32 @@ test_consistency_check_rejects_invalid_grandfather_values() {
 		"$output_zero" "grandfather protection requires days greater than 0; received \"0\"."
 }
 
-test_sanitize_backup_helpers_cover_empty_root_and_legacy_cases() {
+test_get_backup_storage_dir_for_dataset_tree_uses_dataset_hierarchy() {
 	g_backup_storage_root="$TEST_TMPDIR/backup_root"
 
-	assertEquals "Empty backup components should normalize to a stable placeholder encoding." "h00" "$(sanitize_backup_component "")"
-	assertEquals "Empty dataset paths should normalize to the dataset placeholder." "dataset" "$(sanitize_dataset_relpath "/")"
-	assertEquals "Root mountpoints should map to the root backup directory." \
-		"$g_backup_storage_root/root" "$(get_backup_storage_dir "/" "tank/src")"
-	assertEquals "Legacy mountpoints should append the sanitized dataset path." \
-		"$g_backup_storage_root/legacy/h74616E6B/h737263" "$(get_backup_storage_dir "legacy" "tank/src")"
+	assertEquals "Dataset-tree backup storage should mirror the dataset hierarchy under ZXFER_BACKUP_DIR." \
+		"$g_backup_storage_root/tank/src/child" "$(zxfer_get_backup_storage_dir_for_dataset_tree "tank/src/child")"
+	assertEquals "Dataset-tree backup storage should trim trailing slashes." \
+		"$g_backup_storage_root/tank/src" "$(zxfer_get_backup_storage_dir_for_dataset_tree "tank/src/")"
+	assertEquals "Empty dataset-tree lookups should use the dataset placeholder bucket." \
+		"$g_backup_storage_root/dataset" "$(zxfer_get_backup_storage_dir_for_dataset_tree "/")"
 }
 
-test_backup_storage_helpers_cover_new_encoding_branches_in_current_shell() {
+test_get_backup_storage_dir_for_dataset_tree_runs_in_current_shell() {
 	g_backup_storage_root="$TEST_TMPDIR/backup_root_current_shell"
 	output_file="$TEST_TMPDIR/backup_helper_current_shell.out"
 
-	sanitize_backup_component "../unsafe path!" >"$output_file"
-	assertEquals "Backup component encoding should run in the current shell for collision-resistant path coverage." \
-		"h2E2E2F756E73616665207061746821" "$(cat "$output_file")"
+	zxfer_get_backup_storage_dir_for_dataset_tree "tank/src/child" >"$output_file"
+	assertEquals "Dataset-tree storage lookups should run in the current shell for coverage." \
+		"$g_backup_storage_root/tank/src/child" "$(cat "$output_file")"
 
-	sanitize_backup_component "" >"$output_file"
-	assertEquals "Empty backup component encoding should use the deterministic placeholder in the current shell." \
-		"h00" "$(cat "$output_file")"
-
-	sanitize_dataset_relpath "/tank/src" >"$output_file"
-	assertEquals "Dataset relpath encoding should run in the current shell for coverage." \
-		"h74616E6B/h737263" "$(cat "$output_file")"
-
-	sanitize_dataset_relpath "/" >"$output_file"
-	assertEquals "Empty dataset relpaths should return the dataset placeholder in the current shell." \
-		"dataset" "$(cat "$output_file")"
-
-	zxfer_legacy_sanitize_backup_component "" >"$output_file"
-	assertEquals "Legacy backup component sanitizing should preserve the underscore placeholder in the current shell." \
-		"_" "$(cat "$output_file")"
-
-	zxfer_legacy_sanitize_dataset_relpath "/" >"$output_file"
-	assertEquals "Legacy dataset relpath sanitizing should preserve the dataset placeholder in the current shell." \
-		"dataset" "$(cat "$output_file")"
-
-	get_backup_storage_dir "///" "tank/src" >"$output_file"
-	assertEquals "Slash-only mountpoints should map to the root backup directory in the current shell." \
-		"$g_backup_storage_root/root" "$(cat "$output_file")"
-
-	get_backup_storage_dir_for_dataset_tree "/" >"$output_file"
-	assertEquals "Empty dataset-tree storage lookups should use the dataset placeholder in the current shell." \
+	zxfer_get_backup_storage_dir_for_dataset_tree "/" >"$output_file"
+	assertEquals "Rootlike dataset-tree lookups should use the dataset placeholder in the current shell." \
 		"$g_backup_storage_root/dataset" "$(cat "$output_file")"
-
-	zxfer_get_legacy_backup_storage_dir "none" "tank/src" >"$output_file"
-	assertEquals "Legacy compatibility storage lookups should run in the current shell." \
-		"$g_backup_storage_root/none/tank/src" "$(cat "$output_file")"
 }
 
 test_backup_storage_helpers_cover_fallback_encoding_failures_in_current_shell() {
 	output_file="$TEST_TMPDIR/backup_helper_fallback.out"
-
-	(
-		od() {
-			:
-		}
-		sanitize_backup_component "tank" >"$output_file"
-	)
-	assertEquals "Backup component encoding should fall back to h00 when the hex encoder produces no output in the current shell." \
-		"h00" "$(cat "$output_file")"
 
 	(
 		cksum() {
@@ -4679,95 +4751,6 @@ test_backup_storage_helpers_cover_fallback_encoding_failures_in_current_shell() 
 		"k00" "$(cat "$output_file")"
 }
 
-test_sanitize_dataset_relpath_returns_dataset_for_only_slashes() {
-	assertEquals "Slash-only dataset paths should normalize to the dataset placeholder." \
-		"dataset" "$(sanitize_dataset_relpath "///")"
-}
-
-test_get_backup_storage_dir_encodes_dot_segments_without_collapsing() {
-	g_backup_storage_root="$TEST_TMPDIR/backup_root"
-
-	assertEquals "Collision-resistant backup storage paths should encode literal dot-segments instead of collapsing them." \
-		"$g_backup_storage_root/h2E/h2E2E" "$(get_backup_storage_dir "/./.." "tank/src")"
-}
-
-test_get_backup_storage_dir_for_dataset_tree_uses_dataset_hierarchy() {
-	g_backup_storage_root="$TEST_TMPDIR/backup_root"
-
-	assertEquals "Dataset-tree backup storage should mirror the dataset hierarchy under ZXFER_BACKUP_DIR." \
-		"$g_backup_storage_root/tank/src/child" "$(get_backup_storage_dir_for_dataset_tree "tank/src/child")"
-	assertEquals "Dataset-tree backup storage should trim trailing slashes." \
-		"$g_backup_storage_root/tank/src" "$(get_backup_storage_dir_for_dataset_tree "tank/src/")"
-}
-
-test_get_backup_storage_dir_keeps_distinct_mountpoints_separate() {
-	g_backup_storage_root="$TEST_TMPDIR/backup_root"
-
-	first=$(get_backup_storage_dir "/mnt/foo+bar" "tank/src")
-	second=$(get_backup_storage_dir "/mnt/foo?bar" "tank/src")
-	third=$(get_backup_storage_dir "/mnt/foo bar" "tank/src")
-
-	assertNotEquals "Distinct custom mountpoints should no longer collapse onto the same secure backup directory." \
-		"$first" "$second"
-	assertNotEquals "Space-delimited mountpoints should no longer collide with punctuation-normalized mountpoints." \
-		"$first" "$third"
-	assertContains "Encoded secure backup storage paths should stay rooted under ZXFER_BACKUP_DIR." \
-		"$first" "$g_backup_storage_root/"
-}
-
-test_zxfer_get_legacy_backup_storage_dir_preserves_sanitized_compatibility_layout() {
-	g_backup_storage_root="$TEST_TMPDIR/backup_root"
-
-	assertEquals "Legacy mountpoint compatibility lookup should preserve the older sanitized backup layout." \
-		"$g_backup_storage_root/mnt/foo_bar" "$(zxfer_get_legacy_backup_storage_dir "/mnt/foo+bar" "tank/src")"
-}
-
-test_zxfer_get_safe_raw_backup_storage_dir_for_mountpoint_canonicalizes_internal_dot_segments() {
-	g_backup_storage_root="$TEST_TMPDIR/backup_root"
-
-	assertEquals "Raw mountpoint compatibility paths should canonicalize internal dot-segments while staying under ZXFER_BACKUP_DIR." \
-		"$g_backup_storage_root/mnt/safe" "$(zxfer_get_safe_raw_backup_storage_dir_for_mountpoint "/mnt/backups/../safe")"
-}
-
-test_zxfer_get_safe_raw_backup_storage_dir_for_mountpoint_rejects_escape_attempts() {
-	g_backup_storage_root="$TEST_TMPDIR/backup_root"
-	output_file="$TEST_TMPDIR/raw_mount_escape.out"
-
-	set +e
-	(
-		zxfer_get_safe_raw_backup_storage_dir_for_mountpoint "/../../escape" >"$output_file"
-		printf '%s\n' "$?"
-	) >"$TEST_TMPDIR/raw_mount_escape.status"
-	status=$(cat "$TEST_TMPDIR/raw_mount_escape.status")
-
-	assertEquals "Raw mountpoint compatibility paths should be rejected when canonicalization would leave ZXFER_BACKUP_DIR." \
-		1 "$status"
-	assertEquals "Rejected raw mountpoint compatibility paths should not emit an escaped path." \
-		"" "$(cat "$output_file")"
-}
-
-test_zxfer_get_safe_raw_backup_storage_dir_for_mountpoint_covers_dot_and_empty_results_in_current_shell() {
-	g_backup_storage_root="$TEST_TMPDIR/backup_root_current_shell"
-	output_file="$TEST_TMPDIR/raw_mount_current_shell.out"
-	status_file="$TEST_TMPDIR/raw_mount_current_shell.status"
-
-	zxfer_get_safe_raw_backup_storage_dir_for_mountpoint "/./safe" >"$output_file"
-	assertEquals "Raw mountpoint canonicalization should skip '.' segments in the current shell." \
-		"$g_backup_storage_root/safe" "$(cat "$output_file")"
-
-	set +e
-	(
-		zxfer_get_safe_raw_backup_storage_dir_for_mountpoint "/./safe/.." >"$output_file"
-		printf '%s\n' "$?"
-	) >"$status_file"
-	status=$(cat "$status_file")
-
-	assertEquals "Raw mountpoint canonicalization should reject paths that collapse to an empty location in the current shell." \
-		1 "$status"
-	assertEquals "Rejected raw mountpoint paths should not emit output in the current shell." \
-		"" "$(cat "$output_file")"
-}
-
 test_zxfer_get_backup_metadata_filename_runs_in_current_shell() {
 	output_file="$TEST_TMPDIR/backup_filename_current_shell.out"
 	g_backup_file_extension=".zxfer_backup_info"
@@ -4778,18 +4761,18 @@ test_zxfer_get_backup_metadata_filename_runs_in_current_shell() {
 		"$(cat "$output_file")" ".zxfer_backup_info.src.k"
 }
 
-test_backup_metadata_matches_source_accepts_exact_modern_and_legacy_pairs() {
+test_backup_metadata_matches_source_accepts_only_exact_modern_pairs() {
 	assertEquals "Backup metadata matching should accept the modern source,destination,properties record order." \
 		0 "$(
 			(
-				backup_metadata_matches_source "tank/src,backup/dst,compression=lz4" "tank/src" "backup/dst"
+				zxfer_backup_metadata_matches_source "tank/src,backup/dst,compression=lz4" "tank/src" "backup/dst"
 				printf '%s\n' "$?"
 			)
 		)"
-	assertEquals "Backup metadata matching should accept the legacy destination,source,properties record order." \
-		0 "$(
+	assertEquals "Backup metadata matching should reject the legacy destination,source,properties record order." \
+		1 "$(
 			(
-				backup_metadata_matches_source "backup/dst,tank/src,compression=lz4" "tank/src" "backup/dst"
+				zxfer_backup_metadata_matches_source "backup/dst,tank/src,compression=lz4" "tank/src" "backup/dst"
 				printf '%s\n' "$?"
 			)
 		)"
@@ -4799,16 +4782,76 @@ test_backup_metadata_matches_source_rejects_wrong_destination_and_ambiguous_pair
 	assertEquals "Backup metadata matching should reject rows for the requested source dataset when the recorded destination does not match." \
 		1 "$(
 			(
-				backup_metadata_matches_source "tank/src,backup/other,compression=lz4" "tank/src" "backup/dst"
+				zxfer_backup_metadata_matches_source "tank/src,backup/other,compression=lz4" "tank/src" "backup/dst"
 				printf '%s\n' "$?"
 			)
 		)"
 	assertEquals "Backup metadata matching should reject files that contain multiple exact matches for the same source/destination pair." \
 		2 "$(
 			(
-				backup_metadata_matches_source "$(printf '%s\n%s\n' \
+				zxfer_backup_metadata_matches_source "$(printf '%s\n%s\n' \
 					'tank/src,backup/dst,compression=lz4' \
 					'tank/src,backup/dst,compression=off')" "tank/src" "backup/dst"
+				printf '%s\n' "$?"
+			)
+		)"
+}
+
+test_backup_metadata_matches_source_rejects_malformed_current_format_rows() {
+	assertEquals "Backup metadata matching should reject rows that do not contain the current source,destination,properties format." \
+		3 "$(
+			(
+				zxfer_backup_metadata_matches_source "tank/src,backup/dst" "tank/src" "backup/dst"
+				printf '%s\n' "$?"
+			)
+		)"
+	assertEquals "Backup metadata matching should reject rows that contain extra raw field delimiters." \
+		3 "$(
+			(
+				zxfer_backup_metadata_matches_source "tank/src,backup/dst,compression=lz4,extra" "tank/src" "backup/dst"
+				printf '%s\n' "$?"
+			)
+		)"
+}
+
+test_zxfer_try_backup_restore_candidate_returns_missing_for_missing_local_candidate() {
+	assertEquals "Missing local backup candidates should return the candidate-missing sentinel so ancestor lookup can continue." \
+		1 "$(
+			(
+				zxfer_read_local_backup_file() {
+					return 4
+				}
+				zxfer_try_backup_restore_candidate "/tmp/missing.meta" "tank/src" "backup/dst"
+				printf '%s\n' "$?"
+			)
+		)"
+}
+
+test_zxfer_try_backup_restore_candidate_returns_missing_for_missing_remote_candidate() {
+	assertEquals "Missing remote backup candidates should return the candidate-missing sentinel so ancestor lookup can continue." \
+		1 "$(
+			(
+				zxfer_read_remote_backup_file() {
+					return 4
+				}
+				zxfer_try_backup_restore_candidate "/tmp/missing.meta" "tank/src" "backup/dst" "backup@example.com" source
+				printf '%s\n' "$?"
+			)
+		)"
+}
+
+test_zxfer_try_backup_restore_candidate_returns_failure_for_unexpected_match_status() {
+	assertEquals "Unexpected backup-metadata match statuses should fail closed as read/parse errors." \
+		5 "$(
+			(
+				zxfer_read_local_backup_file() {
+					printf '%s\n' "tank/src,backup/dst,compression=lz4"
+					return 0
+				}
+				zxfer_backup_metadata_matches_source() {
+					return 99
+				}
+				zxfer_try_backup_restore_candidate "/tmp/weird.meta" "tank/src" "backup/dst"
 				printf '%s\n' "$?"
 			)
 		)"
@@ -4857,7 +4900,7 @@ test_get_path_owner_uid_and_mode_use_numeric_stat_output() {
 				return 1
 			}
 			: >"$TEST_TMPDIR/stat-owner-file"
-			get_path_owner_uid "$TEST_TMPDIR/stat-owner-file"
+			zxfer_get_path_owner_uid "$TEST_TMPDIR/stat-owner-file"
 		)
 	)
 	result_mode=$(
@@ -4873,7 +4916,7 @@ test_get_path_owner_uid_and_mode_use_numeric_stat_output() {
 				return 1
 			}
 			: >"$TEST_TMPDIR/stat-mode-file"
-			get_path_mode_octal "$TEST_TMPDIR/stat-mode-file"
+			zxfer_get_path_mode_octal "$TEST_TMPDIR/stat-mode-file"
 		)
 	)
 
@@ -4884,9 +4927,9 @@ test_get_path_owner_uid_and_mode_use_numeric_stat_output() {
 test_get_path_owner_uid_and_mode_return_failure_for_missing_paths() {
 	missing_path="$TEST_TMPDIR/does_not_exist"
 
-	get_path_owner_uid "$missing_path" >/dev/null 2>&1
+	zxfer_get_path_owner_uid "$missing_path" >/dev/null 2>&1
 	owner_status=$?
-	get_path_mode_octal "$missing_path" >/dev/null 2>&1
+	zxfer_get_path_mode_octal "$missing_path" >/dev/null 2>&1
 	mode_status=$?
 
 	assertEquals "Owner lookups should fail cleanly for missing paths." 1 "$owner_status"
@@ -4897,7 +4940,7 @@ test_get_ssh_cmd_for_host_returns_base_command_for_empty_host() {
 	g_cmd_ssh="/usr/bin/ssh"
 
 	assertEquals "Hosts omitted from wrapper lookups should return the base ssh command." \
-		"'/usr/bin/ssh'" "$(get_ssh_cmd_for_host "")"
+		"'/usr/bin/ssh'" "$(zxfer_get_ssh_cmd_for_host "")"
 }
 
 test_get_effective_user_uid_returns_failure_when_id_is_unavailable() {
@@ -4907,23 +4950,12 @@ test_get_effective_user_uid_returns_failure_when_id_is_unavailable() {
 	PATH="$empty_path"
 	outfile="$TEST_TMPDIR/effective_uid.out"
 
-	get_effective_user_uid >"$outfile"
+	zxfer_get_effective_user_uid >"$outfile"
 	status=$?
 	PATH=$old_path
 
 	assertEquals "Missing id binaries should make effective-UID detection fail cleanly." 1 "$status"
 	assertEquals "Failed effective-UID detection should not emit output." "" "$(cat "$outfile")"
-}
-
-test_get_backup_storage_dir_handles_detached_none_and_blank_mountpoints() {
-	g_backup_storage_root="$TEST_TMPDIR/backup_root"
-
-	assertEquals "Blank mountpoints should use the detached layout with the dataset suffix appended." \
-		"$g_backup_storage_root/detached/h74616E6B/h737263" "$(get_backup_storage_dir "" "tank/src")"
-	assertEquals "\"none\" mountpoints should use the detached layout with the dataset suffix appended." \
-		"$g_backup_storage_root/none/h74616E6B/h737263" "$(get_backup_storage_dir "none" "tank/src")"
-	assertEquals "\"-\" mountpoints should use the detached layout with the dataset suffix appended." \
-		"$g_backup_storage_root/detached/h74616E6B/h737263" "$(get_backup_storage_dir "-" "tank/src")"
 }
 
 test_get_path_owner_uid_and_mode_use_stat_when_available() {
@@ -4939,7 +4971,7 @@ test_get_path_owner_uid_and_mode_use_stat_when_available() {
 				fi
 				return 1
 			}
-			get_path_owner_uid "$owned_file"
+			zxfer_get_path_owner_uid "$owned_file"
 		)
 	)
 
@@ -4952,7 +4984,7 @@ test_get_path_owner_uid_and_mode_use_stat_when_available() {
 				fi
 				return 1
 			}
-			get_path_mode_octal "$owned_file"
+			zxfer_get_path_mode_octal "$owned_file"
 		)
 	)
 
@@ -4972,22 +5004,22 @@ test_ensure_local_backup_dir_rejects_symlink_and_non_directory_targets() {
 	set +e
 	symlink_output=$(
 		(
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_local_backup_dir "$symlink_dir"
+			zxfer_ensure_local_backup_dir "$symlink_dir"
 		)
 	)
 	symlink_status=$?
 
 	non_dir_output=$(
 		(
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_local_backup_dir "$non_dir"
+			zxfer_ensure_local_backup_dir "$non_dir"
 		)
 	)
 	non_dir_status=$?
@@ -5011,11 +5043,11 @@ test_ensure_local_backup_dir_rejects_nested_symlink_components() {
 	set +e
 	output=$(
 		(
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_local_backup_dir "$target_dir"
+			zxfer_ensure_local_backup_dir "$target_dir"
 		)
 	)
 	status=$?
@@ -5039,11 +5071,11 @@ test_ensure_local_backup_dir_rejects_relative_nested_symlink_components() {
 	set +e
 	output=$(
 		(
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_local_backup_dir "$target_dir"
+			zxfer_ensure_local_backup_dir "$target_dir"
 		)
 	)
 	status=$?
@@ -5060,7 +5092,7 @@ test_ensure_local_backup_dir_allows_trusted_absolute_root_symlink_components() {
 	target_dir=$(mktemp -d /tmp/zxfer-local-trusted.XXXXXX)/subdir
 	rm -rf "${target_dir%/subdir}"
 
-	ensure_local_backup_dir "$target_dir"
+	zxfer_ensure_local_backup_dir "$target_dir"
 	status=$?
 
 	assertEquals "Trusted top-level system symlink components should not block local backup directory creation, which keeps default /var- or /tmp-backed paths working on macOS." \
@@ -5078,34 +5110,34 @@ test_ensure_local_backup_dir_rejects_unknown_or_disallowed_owner() {
 	set +e
 	unknown_owner_output=$(
 		(
-			get_path_owner_uid() {
+			zxfer_get_path_owner_uid() {
 				return 1
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_local_backup_dir "$backup_dir"
+			zxfer_ensure_local_backup_dir "$backup_dir"
 		)
 	)
 	unknown_owner_status=$?
 
 	disallowed_owner_output=$(
 		(
-			get_path_owner_uid() {
+			zxfer_get_path_owner_uid() {
 				printf '%s\n' "1234"
 			}
-			backup_owner_uid_is_allowed() {
+			zxfer_backup_owner_uid_is_allowed() {
 				return 1
 			}
-			describe_expected_backup_owner() {
+			zxfer_describe_expected_backup_owner() {
 				printf '%s\n' "root (UID 0)"
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_local_backup_dir "$backup_dir"
+			zxfer_ensure_local_backup_dir "$backup_dir"
 		)
 	)
 	disallowed_owner_status=$?
@@ -5130,18 +5162,18 @@ EOF
 	old_path=$PATH
 	PATH="$fake_bin:$PATH"
 	THROW_MSG=""
-	throw_error() {
+	zxfer_throw_error() {
 		THROW_MSG=$1
 		return 1
 	}
 
-	ensure_local_backup_dir "$backup_dir"
+	zxfer_ensure_local_backup_dir "$backup_dir"
 	status=$?
 
-	unset -f throw_error
+	unset -f zxfer_throw_error
 	PATH=$old_path
 
-	assertEquals "chmod failures should cause ensure_local_backup_dir to fail." 1 "$status"
+	assertEquals "chmod failures should cause zxfer_ensure_local_backup_dir to fail." 1 "$status"
 	assertContains "chmod failures should use the documented backup-directory error." \
 		"$THROW_MSG" "Error securing backup directory $backup_dir."
 }
@@ -5154,22 +5186,22 @@ test_ensure_local_backup_dir_reports_mkdir_failures_in_current_shell() {
 			mkdir() {
 				return 1
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_local_backup_dir "$backup_dir"
+			zxfer_ensure_local_backup_dir "$backup_dir"
 		)
 	)
 	status=$?
 
-	assertEquals "mkdir failures should cause ensure_local_backup_dir to fail." 1 "$status"
+	assertEquals "mkdir failures should cause zxfer_ensure_local_backup_dir to fail." 1 "$status"
 	assertContains "mkdir failures should use the documented secure backup-directory error." \
 		"$output" "Error creating secure backup directory $backup_dir."
 }
 
 test_ensure_remote_backup_dir_skips_without_host_and_reports_ssh_failures() {
-	if ensure_remote_backup_dir "$TEST_TMPDIR/remote_backup" ""; then
+	if zxfer_ensure_remote_backup_dir "$TEST_TMPDIR/remote_backup" ""; then
 		empty_host_status=0
 	else
 		empty_host_status=1
@@ -5178,17 +5210,17 @@ test_ensure_remote_backup_dir_skips_without_host_and_reports_ssh_failures() {
 	set +e
 	ssh_failure_output=$(
 		(
-			get_ssh_cmd_for_host() {
+			zxfer_get_ssh_cmd_for_host() {
 				printf '%s\n' "/usr/bin/ssh"
 			}
-			invoke_ssh_shell_command_for_host() {
+			zxfer_invoke_ssh_shell_command_for_host() {
 				return 1
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_remote_backup_dir "-remote_backup" "backup@example.com"
+			zxfer_ensure_remote_backup_dir "-remote_backup" "backup@example.com"
 		)
 	)
 	ssh_failure_status=$?
@@ -5210,7 +5242,7 @@ EOF
 	chmod +x "$ssh_bin"
 	g_cmd_ssh="$ssh_bin"
 
-	ensure_remote_backup_dir "-remote_backup" "backup@example.com"
+	zxfer_ensure_remote_backup_dir "-remote_backup" "backup@example.com"
 
 	assertContains "Dash-prefixed remote backup paths should be rewritten for ls-based owner checks." \
 		"$(cat "$ssh_log")" "./-remote_backup"
@@ -5227,17 +5259,17 @@ test_ensure_remote_backup_dir_rejects_nested_symlink_components() {
 	set +e
 	output=$(
 		(
-			build_remote_sh_c_command() {
+			zxfer_build_remote_sh_c_command() {
 				printf '%s\n' "$1"
 			}
-			invoke_ssh_shell_command_for_host() {
+			zxfer_invoke_ssh_shell_command_for_host() {
 				sh -c "$2"
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_remote_backup_dir "$target_dir" "backup@example.com"
+			zxfer_ensure_remote_backup_dir "$target_dir" "backup@example.com"
 		) 2>&1
 	)
 	status=$?
@@ -5278,17 +5310,17 @@ EOF
 	set +e
 	output=$(
 		(
-			build_remote_sh_c_command() {
+			zxfer_build_remote_sh_c_command() {
 				printf '%s\n' "$1"
 			}
-			invoke_ssh_shell_command_for_host() {
+			zxfer_invoke_ssh_shell_command_for_host() {
 				PATH="$fake_bin:$PATH" sh -c "$2"
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_remote_backup_dir "$target_dir" "backup@example.com"
+			zxfer_ensure_remote_backup_dir "$target_dir" "backup@example.com"
 		) 2>&1
 	)
 	status=$?
@@ -5314,17 +5346,17 @@ test_ensure_remote_backup_dir_rejects_relative_nested_symlink_components() {
 	set +e
 	output=$(
 		(
-			build_remote_sh_c_command() {
+			zxfer_build_remote_sh_c_command() {
 				printf '%s\n' "$1"
 			}
-			invoke_ssh_shell_command_for_host() {
+			zxfer_invoke_ssh_shell_command_for_host() {
 				sh -c "$2"
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			ensure_remote_backup_dir "$target_dir" "backup@example.com"
+			zxfer_ensure_remote_backup_dir "$target_dir" "backup@example.com"
 		) 2>&1
 	)
 	status=$?
@@ -5344,17 +5376,17 @@ test_ensure_remote_backup_dir_allows_trusted_absolute_root_symlink_components() 
 	rm -rf "${target_dir%/subdir}"
 
 	(
-		build_remote_sh_c_command() {
+		zxfer_build_remote_sh_c_command() {
 			printf '%s\n' "$1"
 		}
-		invoke_ssh_shell_command_for_host() {
+		zxfer_invoke_ssh_shell_command_for_host() {
 			sh -c "$2"
 		}
-		throw_error() {
+		zxfer_throw_error() {
 			printf '%s\n' "$1"
 			exit 1
 		}
-		ensure_remote_backup_dir "$target_dir" "backup@example.com"
+		zxfer_ensure_remote_backup_dir "$target_dir" "backup@example.com"
 	)
 	status=$?
 
@@ -5364,1002 +5396,6 @@ test_ensure_remote_backup_dir_allows_trusted_absolute_root_symlink_components() 
 		"[ -d \"$target_dir\" ]"
 
 	rm -rf "${target_dir%/subdir}"
-}
-
-test_read_remote_backup_file_quotes_dash_prefixed_paths() {
-	ssh_log="$TEST_TMPDIR/read_remote_dash.log"
-	ssh_bin="$TEST_TMPDIR/read_remote_dash_ssh"
-	outfile="$TEST_TMPDIR/read_remote_dash.out"
-	cat >"$ssh_bin" <<EOF
-#!/bin/sh
-printf '%s\n' "\$@" >"$ssh_log"
-printf '%s\n' "backup-data"
-exit 0
-EOF
-	chmod +x "$ssh_bin"
-	g_cmd_ssh="$ssh_bin"
-	g_cmd_cat="/bin/cat"
-
-	read_remote_backup_file "backup@example.com" "-remote_backup_file" >"$outfile"
-	status=$?
-
-	assertEquals "Successful remote backup reads should preserve the ssh exit status." 0 "$status"
-	assertEquals "Successful remote backup reads should pass through the remote file contents." \
-		"backup-data" "$(cat "$outfile")"
-	assertContains "Dash-prefixed remote metadata paths should be rewritten for ls-based owner checks." \
-		"$(cat "$ssh_log")" "./-remote_backup_file"
-}
-
-test_zxfer_find_remote_backup_files_by_name_handles_blank_inputs_and_success_in_current_shell() {
-	blank_output="$TEST_TMPDIR/remote_find_blank.out"
-	success_output="$TEST_TMPDIR/remote_find_success.out"
-
-	zxfer_find_remote_backup_files_by_name "" "/var/db/zxfer" ".zxfer_backup_info.src" source >"$blank_output"
-	blank_status=$?
-
-	(
-		zxfer_resolve_remote_cli_command_safe() {
-			printf '%s\n' "'/remote/bin/find'"
-		}
-		build_remote_sh_c_command() {
-			printf '%s\n' "$1"
-		}
-		invoke_ssh_shell_command_for_host() {
-			printf '%s\n' "$2"
-		}
-		zxfer_find_remote_backup_files_by_name "backup@example.com" "/var/db/zxfer" ".zxfer_backup_info.src" source >"$success_output"
-	)
-	success_status=$?
-
-	assertEquals "Blank remote-host lookups should return success without output." 0 "$blank_status"
-	assertEquals "Blank remote-host lookups should not emit find commands." "" "$(cat "$blank_output")"
-	assertEquals "Remote backup find helper should succeed when the secure remote command resolves." 0 "$success_status"
-	assertContains "Remote backup find helper should use the resolved remote find path." \
-		"$(cat "$success_output")" "/remote/bin/find"
-	assertContains "Remote backup find helper should preserve the requested backup root." \
-		"$(cat "$success_output")" "/var/db/zxfer"
-	assertContains "Remote backup find helper should preserve the requested metadata filename." \
-		"$(cat "$success_output")" ".zxfer_backup_info.src"
-}
-
-test_zxfer_find_remote_backup_files_by_name_reports_resolution_failures_in_current_shell() {
-	outfile="$TEST_TMPDIR/remote_find_failure.out"
-
-	(
-		zxfer_resolve_remote_cli_command_safe() {
-			return 1
-		}
-		zxfer_find_remote_backup_files_by_name "backup@example.com" "/var/db/zxfer" ".zxfer_backup_info.src" source >"$outfile"
-	)
-	status=$?
-
-	assertEquals "Remote backup find helper should fail when the remote find command cannot be resolved." 1 "$status"
-	assertEquals "Remote backup find helper should not emit output when helper resolution fails." "" "$(cat "$outfile")"
-}
-
-test_write_backup_properties_renders_remote_dry_run_command() {
-	g_option_n_dryrun=1
-	g_option_T_target_host="target.example doas"
-	g_destination="backup/dst"
-	g_actual_dest="$g_destination"
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root=""
-	g_zxfer_version="test-version"
-	g_backup_file_contents=";tank/src,backup/dst,compression=lz4"
-	initial_source="tank/src"
-	g_cmd_ssh="/usr/bin/ssh"
-	expected_name=$(zxfer_get_backup_metadata_filename "$initial_source" "$g_destination")
-
-	result=$(
-		(
-			run_destination_zfs_cmd() {
-				printf '%s\n' "/mnt/backups"
-			}
-			write_backup_properties
-		)
-	)
-
-	assertContains "Remote dry-run backup writes should render the ssh command prefix." \
-		"$result" "'/usr/bin/ssh'"
-	assertContains "Remote dry-run backup writes should target the ssh host separately from wrapper tokens." \
-		"$result" "'target.example'"
-	assertContains "Remote dry-run backup writes should render the local backup-content command with the common argv formatter." \
-		"$result" "'printf' '%s'"
-	assertContains "Remote dry-run backup writes should preserve wrapper tokens in the rendered remote pipeline." \
-		"$result" "doas"
-	assertContains "Remote dry-run backup writes should render the remote cat pipeline." \
-		"$result" "$expected_name"
-}
-
-test_write_backup_properties_renders_local_dry_run_command() {
-	g_option_n_dryrun=1
-	g_option_T_target_host=""
-	g_destination="backup/dst"
-	g_actual_dest="$g_destination"
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root=""
-	g_zxfer_version="test-version"
-	g_backup_file_contents=";tank/src,backup/dst,compression=lz4"
-	initial_source="tank/src"
-	expected_name=$(zxfer_get_backup_metadata_filename "$initial_source" "$g_destination")
-
-	result=$(
-		(
-			run_destination_zfs_cmd() {
-				printf '%s\n' "/mnt/backups"
-			}
-			write_backup_properties
-		)
-	)
-
-	assertContains "Local dry-run backup writes should render a local redirection command." \
-		"$result" "umask 077; 'printf' '%s'"
-	assertContains "Local dry-run backup writes should target the secure backup path." \
-		"$result" "$expected_name"
-}
-
-test_write_backup_properties_preserves_encoded_delimiter_heavy_payloads() {
-	g_option_n_dryrun=0
-	g_option_T_target_host=""
-	g_destination="backup/dst"
-	g_actual_dest="$g_destination"
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/backup_store_write_encoded"
-	g_zxfer_version="test-version"
-	g_backup_file_contents=";tank/src,backup/dst,user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi=local"
-	initial_source="tank/src"
-	expected_name=$(zxfer_get_backup_metadata_filename "$initial_source" "$g_destination")
-
-	write_backup_properties
-
-	written_file=$(find "$g_backup_storage_root" -name "$expected_name" -type f | head -n 1)
-
-	assertTrue "Backup-property writes should create a metadata file under the secure backup root." \
-		"[ -n \"$written_file\" ]"
-	assertEquals "Backup-property writes should use the source dataset tree instead of the destination mountpoint tree." \
-		"$g_backup_storage_root/tank/src/$expected_name" "$written_file"
-	assertContains "Backup-property writes should preserve encoded delimiter-heavy property payloads as one metadata row." \
-		"$(cat "$written_file")" "tank/src,backup/dst,user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi=local"
-}
-
-test_write_backup_properties_and_get_backup_properties_share_dataset_tree_layout() {
-	g_option_n_dryrun=0
-	g_option_T_target_host=""
-	g_destination="backup/dst"
-	g_actual_dest="$g_destination/src"
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/backup_store_shared_layout"
-	g_zxfer_version="test-version"
-	g_backup_file_contents=";tank/src,backup/dst/src,compression=lz4"
-	initial_source="tank/src"
-	g_initial_source_had_trailing_slash=0
-	g_option_O_origin_host=""
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/source"
-	}
-
-	write_backup_properties
-	get_backup_properties
-
-	assertContains "Backup-property restore should find the file written by the matching recursive backup run without needing a whole-tree fallback scan." \
-		"$g_restored_backup_file_contents" "tank/src,backup/dst/src,compression=lz4"
-}
-
-test_get_backup_properties_reads_legacy_local_backup_and_warns() {
-	mount_dir="$TEST_TMPDIR_PHYSICAL/legacy_mount"
-	mkdir -p "$mount_dir"
-	legacy_backup="$mount_dir/.zxfer_backup_info.child"
-	printf '%s\n' "tank/src/child,backup/dst,compression=lz4" >"$legacy_backup"
-	chmod 600 "$legacy_backup"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/backup_store"
-	stderr_file="$TEST_TMPDIR/legacy_backup.stderr"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "$mount_dir"
-	}
-
-	get_backup_properties 2>"$stderr_file"
-
-	assertEquals "Legacy backup reads should restore the backup file contents." \
-		"tank/src/child,backup/dst,compression=lz4" "$g_restored_backup_file_contents"
-	assertContains "Legacy backup reads should emit a warning about the hardened storage path." \
-		"$(cat "$stderr_file")" "Warning: read legacy backup metadata from $legacy_backup."
-}
-
-test_get_backup_properties_uses_find_fallback_under_backup_root() {
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/fallback_store"
-	fallback_dir="$g_backup_storage_root/unexpected/layout"
-	mkdir -p "$fallback_dir"
-	fallback_file="$fallback_dir/.zxfer_backup_info.child"
-	printf '%s\n' "tank/src/child,backup/dst,compression=lz4" >"$fallback_file"
-	chmod 600 "$fallback_file"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups"
-	}
-
-	get_backup_properties
-
-	assertEquals "Backup-property discovery should fall back to searching under the backup root." \
-		"tank/src/child,backup/dst,compression=lz4" "$g_restored_backup_file_contents"
-}
-
-test_get_backup_properties_find_fallback_ignores_same_tail_other_sources_with_delimiter_heavy_payloads() {
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/fallback_exact_store"
-	first_dir="$g_backup_storage_root/layout/one"
-	second_dir="$g_backup_storage_root/layout/two"
-	mkdir -p "$first_dir" "$second_dir"
-	first_file="$first_dir/.zxfer_backup_info.child.tail-01"
-	second_file="$second_dir/.zxfer_backup_info.child.tail-01"
-	printf '%s\n' "tank/other/child.tail-01,backup/dst,user:note=value%2Cwith%2Ccommas=local" >"$first_file"
-	printf '%s\n' "tank/src/child.tail-01,backup/dst,user:note=value%3Dwith%3Dequals%3Band%3Bsemicolon=local" >"$second_file"
-	chmod 600 "$first_file" "$second_file"
-	initial_source="tank/src/child.tail-01"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups"
-	}
-
-	get_backup_properties
-
-	assertEquals "Find-fallback backup discovery should ignore same-tail metadata for other sources and preserve encoded delimiter-heavy payloads." \
-		"tank/src/child.tail-01,backup/dst,user:note=value%3Dwith%3Dequals%3Band%3Bsemicolon=local" "$g_restored_backup_file_contents"
-}
-
-test_get_backup_properties_find_fallback_ignores_same_source_other_destinations() {
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/fallback_exact_destination_store"
-	first_dir="$g_backup_storage_root/layout/one"
-	second_dir="$g_backup_storage_root/layout/two"
-	mkdir -p "$first_dir" "$second_dir"
-	first_file="$first_dir/.zxfer_backup_info.child"
-	second_file="$second_dir/.zxfer_backup_info.child"
-	printf '%s\n' "tank/src/child,backup/other,compression=off" >"$first_file"
-	printf '%s\n' "tank/src/child,backup/dst,compression=lz4" >"$second_file"
-	chmod 600 "$first_file" "$second_file"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups"
-	}
-
-	get_backup_properties
-
-	assertEquals "Find-fallback backup discovery should ignore same-source metadata files whose recorded destination does not match the requested restore target." \
-		"tank/src/child,backup/dst,compression=lz4" "$g_restored_backup_file_contents"
-}
-
-test_get_backup_properties_rejects_ambiguous_exact_pair_rows_in_single_file() {
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/ambiguous_rows_store"
-	fallback_dir="$g_backup_storage_root/layout/one"
-	mkdir -p "$fallback_dir"
-	fallback_file="$fallback_dir/.zxfer_backup_info.child"
-	printf '%s\n%s\n' \
-		"tank/src/child,backup/dst,compression=lz4" \
-		"tank/src/child,backup/dst,compression=off" >"$fallback_file"
-	chmod 600 "$fallback_file"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-	stdout_file="$TEST_TMPDIR/ambiguous_rows.out"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups"
-	}
-
-	set +e
-	(
-		throw_error_with_usage() {
-			printf '%s\n' "$1"
-			exit 1
-		}
-		get_backup_properties
-	) >"$stdout_file" 2>&1
-	status=$?
-	output=$(cat "$stdout_file")
-
-	assertEquals "Backup restore should reject a candidate backup file that contains multiple exact rows for the same source/destination pair." 1 "$status"
-	assertContains "Ambiguous exact-pair row failures should identify the matching backup filename." \
-		"$output" ".zxfer_backup_info.child"
-	assertContains "Ambiguous exact-pair row failures should identify the exact source/destination pair." \
-		"$output" "contains multiple entries for source dataset tank/src/child and destination backup/dst."
-}
-
-test_get_backup_properties_rejects_ambiguous_exact_pair_rows_in_direct_local_candidate() {
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/direct_ambiguous_store"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-	direct_dir="$g_backup_storage_root/tank/src/child"
-	direct_file="$direct_dir/$(zxfer_get_backup_metadata_filename "$initial_source" "$g_destination")"
-	stdout_file="$TEST_TMPDIR/direct_ambiguous_local.out"
-	mkdir -p "$direct_dir"
-	printf '%s\n%s\n' \
-		"tank/src/child,backup/dst,compression=lz4" \
-		"tank/src/child,backup/dst,compression=off" >"$direct_file"
-	chmod 600 "$direct_file"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups"
-	}
-
-	set +e
-	(
-		throw_error_with_usage() {
-			printf '%s\n' "$1"
-			exit 1
-		}
-		get_backup_properties
-	) >"$stdout_file" 2>&1
-	status=$?
-	output=$(cat "$stdout_file")
-
-	assertEquals "Direct secure backup candidates should fail closed when they contain duplicate exact source/destination rows." 1 "$status"
-	assertContains "Direct local candidate failures should identify the exact secure backup file." \
-		"$output" "$direct_file"
-	assertContains "Direct local candidate failures should identify the exact source/destination pair." \
-		"$output" "contains multiple entries for source dataset tank/src/child and destination backup/dst."
-}
-
-test_get_backup_properties_rejects_ambiguous_exact_pair_rows_in_direct_remote_candidate() {
-	g_backup_storage_root="$TEST_TMPDIR/direct_remote_ambiguous_store"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host="backup@example.com"
-	g_backup_file_extension=".zxfer_backup_info"
-	direct_file="$g_backup_storage_root/tank/src/child/$(zxfer_get_backup_metadata_filename "$initial_source" "$g_destination")"
-	stdout_file="$TEST_TMPDIR/direct_ambiguous_remote.out"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups"
-	}
-
-	read_remote_backup_file() {
-		if [ "$2" = "$direct_file" ]; then
-			printf '%s\n%s\n' \
-				"tank/src/child,backup/dst,compression=lz4" \
-				"tank/src/child,backup/dst,compression=off"
-			return 0
-		fi
-		return 1
-	}
-
-	set +e
-	(
-		throw_error_with_usage() {
-			printf '%s\n' "$1"
-			exit 1
-		}
-		get_backup_properties
-	) >"$stdout_file" 2>&1
-	status=$?
-	output=$(cat "$stdout_file")
-
-	assertEquals "Direct remote secure backup candidates should fail closed when they contain duplicate exact source/destination rows." 1 "$status"
-	assertContains "Direct remote candidate failures should identify the exact secure backup file." \
-		"$output" "$direct_file"
-	assertContains "Direct remote candidate failures should identify the exact source/destination pair." \
-		"$output" "contains multiple entries for source dataset tank/src/child and destination backup/dst."
-}
-
-test_get_backup_properties_rejects_ambiguous_find_fallback_matches() {
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/ambiguous_store"
-	first_dir="$g_backup_storage_root/layout/one"
-	second_dir="$g_backup_storage_root/layout/two"
-	mkdir -p "$first_dir" "$second_dir"
-	first_file="$first_dir/.zxfer_backup_info.child"
-	second_file="$second_dir/.zxfer_backup_info.child"
-	printf '%s\n' "tank/src/child,backup/dst,compression=lz4" >"$first_file"
-	printf '%s\n' "tank/src/child,backup/dst,compression=off" >"$second_file"
-	chmod 600 "$first_file" "$second_file"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups"
-	}
-
-	set +e
-	output=$(
-		(
-			throw_error_with_usage() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			get_backup_properties
-		)
-	)
-	status=$?
-
-	assertEquals "Ambiguous backup-root fallback matches should abort instead of choosing one arbitrarily." 1 "$status"
-	assertContains "Ambiguous fallback failures should identify the filename." \
-		"$output" "Multiple backup property files named .zxfer_backup_info.child"
-}
-
-test_get_backup_properties_walks_up_to_parent_filesystem() {
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/ancestor_store"
-	parent_secure_dir="$g_backup_storage_root/tank/parent"
-	mkdir -p "$parent_secure_dir"
-	parent_backup="$parent_secure_dir/.zxfer_backup_info.parent"
-	find_log="$TEST_TMPDIR/ancestor_find.log"
-	printf '%s\n' "tank/parent/child,backup/dst,compression=lz4" >"$parent_backup"
-	chmod 600 "$parent_backup"
-	initial_source="tank/parent/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-
-	run_source_zfs_cmd() {
-		case "$6" in
-		tank/parent/child)
-			printf '%s\n' "/mnt/child"
-			;;
-		tank/parent)
-			printf '%s\n' "/mnt/parent"
-			;;
-		*)
-			return 1
-			;;
-		esac
-	}
-
-	find() {
-		printf '%s\n' "unexpected find fallback" >>"$find_log"
-		return 1
-	}
-
-	get_backup_properties
-
-	assertEquals "Backup-property discovery should walk up to ancestor datasets when the child has no metadata file." \
-		"tank/parent/child,backup/dst,compression=lz4" "$g_restored_backup_file_contents"
-	assertFalse "Backup-property discovery should not need the whole-root fallback scan when the matching ancestor dataset tree file exists." \
-		"[ -f \"$find_log\" ]"
-}
-
-test_get_backup_properties_reads_legacy_sanitized_mountpoint_backup_layout() {
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/legacy_sanitized_store"
-	legacy_secure_dir="$g_backup_storage_root/mnt/foo_bar"
-	mkdir -p "$legacy_secure_dir"
-	legacy_backup="$legacy_secure_dir/.zxfer_backup_info.child"
-	printf '%s\n' "tank/src/child,backup/dst,compression=lz4" >"$legacy_backup"
-	chmod 600 "$legacy_backup"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/foo+bar"
-	}
-
-	get_backup_properties
-
-	assertEquals "Backup-property restore should keep reading the older sanitized mountpoint compatibility layout." \
-		"tank/src/child,backup/dst,compression=lz4" "$g_restored_backup_file_contents"
-}
-
-test_get_backup_properties_reads_remote_legacy_backup_and_warns() {
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host="backup@example.com"
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root="$TEST_TMPDIR/remote_backup_store"
-	stderr_file="$TEST_TMPDIR/remote_legacy_backup.stderr"
-	legacy_backup="/mnt/remote/.zxfer_backup_info.child"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/remote"
-	}
-
-	read_remote_backup_file() {
-		if [ "$2" = "$legacy_backup" ]; then
-			printf '%s\n' "tank/src/child,backup/dst,compression=lz4"
-			return 0
-		fi
-		return 1
-	}
-
-	get_backup_properties 2>"$stderr_file"
-
-	assertEquals "Remote legacy backup reads should restore the backup file contents." \
-		"tank/src/child,backup/dst,compression=lz4" "$g_restored_backup_file_contents"
-	assertContains "Remote legacy backup reads should emit a warning about the hardened storage path." \
-		"$(cat "$stderr_file")" "Warning: read legacy backup metadata from $legacy_backup."
-}
-
-test_get_backup_properties_reads_remote_ancestor_dataset_tree_without_find_fallback() {
-	g_backup_storage_root="$TEST_TMPDIR/remote_ancestor_store"
-	initial_source="tank/parent/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host="backup@example.com"
-	g_backup_file_extension=".zxfer_backup_info"
-	parent_backup="$g_backup_storage_root/tank/parent/.zxfer_backup_info.parent"
-	find_log="$TEST_TMPDIR/remote_ancestor_find.log"
-
-	run_source_zfs_cmd() {
-		case "$6" in
-		tank/parent/child)
-			printf '%s\n' "/mnt/child"
-			;;
-		tank/parent)
-			printf '%s\n' "/mnt/parent"
-			;;
-		*)
-			return 1
-			;;
-		esac
-	}
-
-	read_remote_backup_file() {
-		if [ "$2" = "$parent_backup" ]; then
-			printf '%s\n' "tank/parent/child,backup/dst,compression=lz4"
-			return 0
-		fi
-		return 1
-	}
-
-	zxfer_find_remote_backup_files_by_name() {
-		printf '%s\n' "unexpected remote find fallback" >>"$find_log"
-		return 1
-	}
-
-	get_backup_properties
-
-	assertEquals "Remote backup-property discovery should walk up to the ancestor dataset tree without using whole-root fallback scans." \
-		"tank/parent/child,backup/dst,compression=lz4" "$g_restored_backup_file_contents"
-	assertFalse "Remote backup-property discovery should not need the remote find fallback when the matching ancestor dataset tree file exists." \
-		"[ -f \"$find_log\" ]"
-}
-
-test_get_backup_properties_uses_remote_find_fallback_under_backup_root() {
-	g_backup_storage_root="$TEST_TMPDIR/remote_fallback_store"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host="backup@example.com"
-	g_backup_file_extension=".zxfer_backup_info"
-	fallback_file="$g_backup_storage_root/layout/one/.zxfer_backup_info.child"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups"
-	}
-
-	zxfer_find_remote_backup_files_by_name() {
-		printf '%s\n' "$fallback_file"
-	}
-
-	read_remote_backup_file() {
-		if [ "$2" = "$fallback_file" ]; then
-			printf '%s\n' "tank/src/child,backup/dst,compression=lz4"
-			return 0
-		fi
-		return 1
-	}
-
-	get_backup_properties
-
-	assertEquals "Remote backup-property discovery should fall back to searching under the configured backup root." \
-		"tank/src/child,backup/dst,compression=lz4" "$g_restored_backup_file_contents"
-}
-
-test_get_backup_properties_uses_canonicalized_raw_mountpoint_fallback_under_backup_root() {
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/raw_mount_fallback_store"
-	fallback_dir="$g_backup_storage_root/mnt/safe"
-	mkdir -p "$fallback_dir"
-	fallback_file="$fallback_dir/.zxfer_backup_info.child"
-	printf '%s\n' "tank/src/child,backup/dst,compression=lz4" >"$fallback_file"
-	chmod 600 "$fallback_file"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups/../safe"
-	}
-
-	get_backup_properties
-
-	assertEquals "Backup-property restore should canonicalize raw mountpoint compatibility paths that stay inside ZXFER_BACKUP_DIR." \
-		"tank/src/child,backup/dst,compression=lz4" "$g_restored_backup_file_contents"
-}
-
-test_get_backup_properties_rejects_raw_mountpoint_fallbacks_that_escape_backup_root() {
-	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/raw_mount_escape_store/root"
-	escaped_dir="$TEST_TMPDIR_PHYSICAL/raw_mount_escape_store/escaped"
-	mkdir -p "$g_backup_storage_root" "$escaped_dir"
-	escaped_file="$escaped_dir/.zxfer_backup_info.child"
-	stdout_file="$TEST_TMPDIR/raw_mount_escape_lookup.out"
-	printf '%s\n' "tank/src/child,backup/dst,compression=lz4" >"$escaped_file"
-	chmod 600 "$escaped_file"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/../../escaped"
-	}
-
-	set +e
-	(
-		throw_error() {
-			printf '%s\n' "$1"
-			exit 1
-		}
-		get_backup_properties
-	) >"$stdout_file" 2>&1
-	status=$?
-	output=$(cat "$stdout_file")
-
-	assertEquals "Backup-property restore should fail closed instead of following raw mountpoint fallbacks that escape ZXFER_BACKUP_DIR." 1 "$status"
-	assertContains "Rejected raw mountpoint fallback escapes should degrade into the normal missing-backup failure." \
-		"$output" "Cannot find backup property file."
-}
-
-test_get_backup_properties_rejects_ambiguous_remote_find_fallback_matches() {
-	g_backup_storage_root="$TEST_TMPDIR/remote_ambiguous_store"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host="backup@example.com"
-	g_backup_file_extension=".zxfer_backup_info"
-	first_file="$g_backup_storage_root/layout/one/.zxfer_backup_info.child"
-	second_file="$g_backup_storage_root/layout/two/.zxfer_backup_info.child"
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups"
-	}
-
-	zxfer_find_remote_backup_files_by_name() {
-		printf '%s\n%s\n' "$first_file" "$second_file"
-	}
-
-	read_remote_backup_file() {
-		case "$2" in
-		"$first_file")
-			printf '%s\n' "tank/src/child,backup/dst,compression=lz4"
-			return 0
-			;;
-		"$second_file")
-			printf '%s\n' "tank/src/child,backup/dst,compression=off"
-			return 0
-			;;
-		esac
-		return 1
-	}
-
-	set +e
-	output=$(
-		(
-			throw_error_with_usage() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			get_backup_properties
-		)
-	)
-	status=$?
-
-	assertEquals "Ambiguous remote backup-root fallback matches should abort instead of choosing one arbitrarily." 1 "$status"
-	assertContains "Ambiguous remote fallback failures should identify the filename." \
-		"$output" "Multiple backup property files named .zxfer_backup_info.child"
-}
-
-test_get_backup_properties_reports_remote_find_fallback_search_failures() {
-	g_backup_storage_root="$TEST_TMPDIR/remote_find_failure_store"
-	initial_source="tank/src/child"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=1
-	g_option_O_origin_host="backup@example.com"
-	g_backup_file_extension=".zxfer_backup_info"
-	expected_name=$(zxfer_get_backup_metadata_filename "$initial_source" "$g_destination")
-
-	run_source_zfs_cmd() {
-		printf '%s\n' "/mnt/backups"
-	}
-
-	read_remote_backup_file() {
-		return 1
-	}
-
-	zxfer_find_remote_backup_files_by_name() {
-		return 1
-	}
-
-	set +e
-	output=$(
-		(
-			throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			get_backup_properties
-		)
-	)
-	status=$?
-
-	assertEquals "Remote restore should fail closed when the backup-root fallback search itself fails." 1 "$status"
-	assertContains "Remote fallback search failures should identify the searched filename and backup root." \
-		"$output" "Failed to search for backup property file $expected_name under $g_backup_storage_root on $g_option_O_origin_host."
-}
-
-test_get_backup_properties_reports_missing_backup_file() {
-	initial_source="tank"
-	g_option_O_origin_host=""
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root="$TEST_TMPDIR/missing_store"
-
-	set +e
-	output=$(
-		(
-			run_source_zfs_cmd() {
-				printf '%s\n' "-"
-			}
-			throw_error_with_usage() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			get_backup_properties
-		)
-	)
-	status=$?
-
-	assertEquals "Missing backup metadata should abort with an error." 1 "$status"
-	assertContains "Missing backup metadata should use the documented guidance." \
-		"$output" "Cannot find backup property file. Ensure that it"
-}
-
-test_require_secure_backup_file_reports_unknown_owner_and_mode() {
-	backup_file="$TEST_TMPDIR/secure_meta"
-	printf '%s\n' "payload" >"$backup_file"
-	chmod 600 "$backup_file"
-
-	set +e
-	owner_output=$(
-		(
-			get_path_owner_uid() {
-				return 1
-			}
-			throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			require_secure_backup_file "$backup_file"
-		)
-	)
-	owner_status=$?
-
-	mode_output=$(
-		(
-			get_path_owner_uid() {
-				printf '%s\n' "0"
-			}
-			get_path_mode_octal() {
-				return 1
-			}
-			throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			require_secure_backup_file "$backup_file"
-		)
-	)
-	mode_status=$?
-
-	assertEquals "Unknown backup-file owners should be rejected." 1 "$owner_status"
-	assertContains "Unknown owner failures should mention the metadata path." \
-		"$owner_output" "Cannot determine the owner of backup metadata $backup_file."
-	assertEquals "Unknown backup-file permissions should be rejected." 1 "$mode_status"
-	assertContains "Unknown mode failures should mention the metadata path." \
-		"$mode_output" "Cannot determine the permissions for backup metadata $backup_file."
-}
-
-test_require_secure_backup_file_rejects_non_0600_permissions() {
-	backup_file="$TEST_TMPDIR/insecure_meta"
-	printf '%s\n' "payload" >"$backup_file"
-	chmod 644 "$backup_file"
-
-	set +e
-	output=$(
-		(
-			throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			require_secure_backup_file "$backup_file"
-		)
-	)
-	status=$?
-
-	assertEquals "Non-0600 backup metadata should be rejected." 1 "$status"
-	assertContains "Non-0600 backup metadata failures should identify the observed mode." \
-		"$output" "Refusing to use backup metadata $backup_file because its permissions (644) are not 0600."
-}
-
-test_write_backup_properties_reports_local_write_failure() {
-	g_option_n_dryrun=0
-	g_option_T_target_host=""
-	g_destination="backup/dst"
-	g_actual_dest="$g_destination"
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root=""
-	g_zxfer_version="test-version"
-	g_backup_file_contents=";tank/src,backup/dst,compression=lz4"
-	initial_source="tank/src"
-
-	set +e
-	output=$(
-		(
-			get_backup_storage_dir_for_dataset_tree() {
-				printf '%s\n' "$TEST_TMPDIR/missing/secure/path"
-			}
-			ensure_local_backup_dir() {
-				:
-			}
-			throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			write_backup_properties 2>/dev/null
-		)
-	)
-	status=$?
-
-	assertEquals "Local backup writes should abort when the secure file cannot be created." 1 "$status"
-	assertContains "Local backup write failures should mention the mounted-filesystem guidance." \
-		"$output" "Error writing backup file. Is filesystem mounted?"
-}
-
-test_write_backup_properties_reports_remote_write_failure() {
-	g_option_n_dryrun=0
-	g_option_T_target_host="target.example"
-	g_destination="backup/dst"
-	g_actual_dest="$g_destination"
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root=""
-	g_zxfer_version="test-version"
-	g_backup_file_contents=";tank/src,backup/dst,compression=lz4"
-	initial_source="tank/src"
-
-	set +e
-	output=$(
-		(
-			get_backup_storage_dir_for_dataset_tree() {
-				printf '%s\n' "/var/db/zxfer/tank/src"
-			}
-			ensure_remote_backup_dir() {
-				:
-			}
-			zxfer_resolve_remote_cli_command_safe() {
-				printf '%s\n' "'/remote/bin/cat'"
-			}
-			invoke_ssh_shell_command_for_host() {
-				return 1
-			}
-			throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			write_backup_properties
-		)
-	)
-	status=$?
-
-	assertEquals "Remote backup writes should abort when the remote write command fails." 1 "$status"
-	assertContains "Remote backup write failures should mention the mounted-filesystem guidance." \
-		"$output" "Error writing backup file. Is filesystem mounted?"
-}
-
-test_write_backup_properties_uses_resolved_remote_cat_helper_for_live_writes() {
-	g_option_n_dryrun=0
-	g_option_T_target_host="target.example"
-	g_destination="backup/dst"
-	g_actual_dest="$g_destination"
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root=""
-	g_zxfer_version="test-version"
-	g_backup_file_contents=";tank/src,backup/dst,compression=lz4"
-	initial_source="tank/src"
-	log_file="$TEST_TMPDIR/remote_backup_write_helper.log"
-	expected_name=$(zxfer_get_backup_metadata_filename "$initial_source" "$g_destination")
-
-	get_backup_storage_dir_for_dataset_tree() {
-		printf '%s\n' "/var/db/zxfer/tank/src"
-	}
-
-	ensure_remote_backup_dir() {
-		:
-	}
-
-	zxfer_resolve_remote_cli_command_safe() {
-		printf '%s\n' "'/remote/bin/cat'"
-	}
-
-	invoke_ssh_shell_command_for_host() {
-		printf '%s\n' "$2" >"$log_file"
-		cat >/dev/null
-		return 0
-	}
-
-	write_backup_properties
-
-	assertContains "Live remote backup writes should use the resolved remote cat helper instead of bare cat." \
-		"$(cat "$log_file")" "/remote/bin/cat"
-	assertContains "Live remote backup writes should target the source dataset tree under ZXFER_BACKUP_DIR." \
-		"$(cat "$log_file")" "/var/db/zxfer/tank/src/$expected_name"
-}
-
-test_write_backup_properties_marks_remote_cat_lookup_failures_as_dependency_errors() {
-	g_option_n_dryrun=0
-	g_option_T_target_host="target.example"
-	g_destination="backup/dst"
-	g_actual_dest="$g_destination"
-	g_backup_file_extension=".zxfer_backup_info"
-	g_backup_storage_root=""
-	g_zxfer_version="test-version"
-	g_backup_file_contents=";tank/src,backup/dst,compression=lz4"
-	initial_source="tank/src"
-
-	set +e
-	output=$(
-		(
-			get_backup_storage_dir_for_dataset_tree() {
-				printf '%s\n' "/var/db/zxfer/tank/src"
-			}
-			ensure_remote_backup_dir() {
-				:
-			}
-			zxfer_resolve_remote_cli_command_safe() {
-				printf '%s\n' "remote cat lookup failed"
-				return 1
-			}
-			throw_error() {
-				printf 'class=%s msg=%s\n' "$g_zxfer_failure_class" "$1"
-				exit 1
-			}
-			write_backup_properties
-		)
-	)
-	status=$?
-
-	assertEquals "Remote backup writes should abort when the secure remote cat helper cannot be resolved." 1 "$status"
-	assertContains "Remote backup write helper lookup failures should be classified as dependency errors." \
-		"$output" "class=dependency"
-	assertContains "Remote backup write helper lookup failures should preserve the lookup message." \
-		"$output" "msg=remote cat lookup failed"
 }
 
 # shellcheck source=tests/shunit2/shunit2

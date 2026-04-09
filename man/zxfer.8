@@ -192,17 +192,15 @@ A word of warning:
 In order to allow the restoration of filesystems within the hierarchy,
 .Nm
 will begin at the level you specify, and traverse the filesystem hierarchy back
-to the pool level until it finds an appropriate
-.Pa .zxfer_backup_info
-file inside the hardened metadata directory
-.Pq Pa ZXFER_BACKUP_DIR/source/dataset/path/.zxfer_backup_info.<tail>.<id>
-or fails. It will use the first such file it comes across, so be careful about
-backing up from multiple individual levels of the same filesystem hierarchy.
-Legacy files that still live directly inside dataset mountpoints are read as a
-fallback, but
-.Nm
-will warn so you can relocate them into the hardened directory (which defaults
-to
+to the pool level, checking the current keyed
+.Pa .zxfer_backup_info.<tail>.<id>
+file in each hardened metadata directory
+.Pq Pa ZXFER_BACKUP_DIR/source/dataset/path/
+until it finds one that contains an exact current-format
+.Dq source,destination,properties
+row for the requested source and destination, or fails. Older backup metadata
+layouts are not supported; restore the properties only from files stored in
+the hardened directory (which defaults to
 .Pa /var/db/zxfer
 and can be changed by exporting
 .Ev ZXFER_BACKUP_DIR Ns ).
@@ -247,9 +245,18 @@ is not yet supported. A workaround is to refrain from using
 property overrides in the intermediate backup; this will mean that the ultimate
 backup will be able to store the correct properties of the original.
 .It Fl n
-Dry ru(n) mode. Prints out the commands that would otherwise execute but does
-not execute them. This may not work in all circumstances as it may expect the
-existence of filesystems etc. that won't be created. When combined with
+Dry ru(n) mode. Prints out the commands that would otherwise execute, but
+current releases still run launcher preflight and snapshot-discovery commands
+needed to validate the requested replication. Remote dry runs may therefore
+still open ssh control sockets, resolve remote helpers, and list source or
+destination snapshots, and
+.Fl D
+templates that reference
+.Ql %%size%%
+may still probe the live source for an estimate. Use this as a render-plus-validation
+preview rather than a strict no-exec sandbox. This may not work in all
+circumstances as it may expect the existence of filesystems etc. that won't be
+created. When combined with
 .Fl k ,
 .Nm
 also only previews the local or remote secure backup-directory preparation
@@ -271,13 +278,12 @@ e.g.
 For example,
 .Fl o Ar compression=lzjb
 will cause all destination filesystems to be set to lzjb compression. If using
-recursive mode, only the root filesystem will be
-.Cm set ,
-and all other filesystems
-will
-.Cm inherit
-from this. Note that this option will also override any values that would
-otherwise be
+recursive mode, current releases apply the override across the replicated tree
+so descendant filesystems may also be
+.Cm set
+explicitly when needed to preserve the requested effective value; they do not
+currently remain inherited-only from the root filesystem. Note that this
+option will also override any values that would otherwise be
 .Cm set
 by "-P". Invoking this option will also create the destination filesystem(s)
 if they do not already exist.
@@ -327,7 +333,6 @@ must be set (using
 at filesystem creation time. These are:
 .Va casesensitivity ,
 .Va normalization ,
-.Va jailed ,
 .Va utf8only .
 If you are trying to replicate such a filesystem where one of these properties is
 different from source to destination, destroy the destination
@@ -393,7 +398,7 @@ with
 .Fl d
 to resume cleanup;
 .Nm
-will relaunch the pending destroys on the next pass.
+will zxfer_relaunch the pending destroys on the next pass.
 .It Fl D
 .Nm
 will pipe
@@ -407,6 +412,11 @@ Will be replaced with the estimated size of the snapshot.
 On remote or multi-job runs,
 .Nm
 may use a cheaper approximate probe for this value to reduce startup latency.
+When combined with
+.Fl n ,
+templates that reference
+.Ql %%size%%
+can still trigger live local or remote size-estimate probes.
 .It %%title%%
 Will be replaced with the name of the source dataset@snapshot.
 .El

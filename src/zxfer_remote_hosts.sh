@@ -30,13 +30,26 @@
 
 # BSD HEADER END
 
-# for ShellCheck
+# shellcheck shell=sh disable=SC2034,SC2154
 
 ################################################################################
 # REMOTE HOST / SSH CONTROL SOCKET / REMOTE TOOL RESOLUTION
 ################################################################################
 
-ssh_supports_control_sockets() {
+# Module contract:
+# owns globals: per-host ssh control-socket state plus remote capability/tool resolution state such as g_ssh_origin_control_socket*, g_ssh_target_control_socket*, g_origin_remote_capabilities_*, g_target_remote_capabilities_*, and the resolved remote zfs helper selections.
+# reads globals: g_cmd_ssh, g_option_O_*/g_option_T_*, local helper paths, and temp-root helpers.
+# mutates caches: remote capability cache files and shared ssh control-socket directories.
+# returns via stdout: remote OS/tool paths, ssh argv renderings, and remote-safe command strings.
+
+ZXFER_SSH_CONTROL_SOCKET_PATH_MAX=104
+ZXFER_SSH_CONTROL_SOCKET_TEMP_SUFFIX_SAMPLE=".Mvij6x1tYLn6woxm"
+
+################################################################################
+# SSH CONTROL SOCKET SUPPORT / CACHE KEYS
+################################################################################
+
+zxfer_ssh_supports_control_sockets() {
 	[ -n "${g_cmd_ssh:-}" ] || return 1
 	"$g_cmd_ssh" -M -V >/dev/null 2>&1
 }
@@ -65,20 +78,55 @@ zxfer_render_ssh_control_socket_entry_identity() {
 	printf '%s\n%s\n' "${g_cmd_ssh:-ssh}" "$l_host_spec"
 }
 
+zxfer_is_ssh_control_socket_entry_path_short_enough() {
+	l_entry_dir=$1
+	l_temp_listener_path="$l_entry_dir/s$ZXFER_SSH_CONTROL_SOCKET_TEMP_SUFFIX_SAMPLE"
+
+	[ "${#l_temp_listener_path}" -lt "$ZXFER_SSH_CONTROL_SOCKET_PATH_MAX" ]
+}
+
+zxfer_get_ssh_control_socket_cache_dir_for_key() {
+	l_cache_key=$1
+
+	if ! l_cache_dir=$(zxfer_ensure_ssh_control_socket_cache_dir); then
+		return 1
+	fi
+	if zxfer_is_ssh_control_socket_entry_path_short_enough "$l_cache_dir/$l_cache_key"; then
+		printf '%s\n' "$l_cache_dir"
+		return 0
+	fi
+
+	if ! l_short_cache_dir=$(
+		unset TMPDIR
+		zxfer_ensure_ssh_control_socket_cache_dir
+	); then
+		return 1
+	fi
+	if [ "$l_short_cache_dir" = "$l_cache_dir" ]; then
+		return 1
+	fi
+	if ! zxfer_is_ssh_control_socket_entry_path_short_enough "$l_short_cache_dir/$l_cache_key"; then
+		return 1
+	fi
+
+	zxfer_echoV "Ignoring TMPDIR ${TMPDIR:-} for ssh control sockets; using shorter cache root $l_short_cache_dir."
+	printf '%s\n' "$l_short_cache_dir"
+}
+
 zxfer_read_ssh_control_socket_entry_identity_file() {
 	l_identity_path=$1
 
 	[ -f "$l_identity_path" ] || return 1
 	[ ! -L "$l_identity_path" ] || return 1
 	[ ! -h "$l_identity_path" ] || return 1
-	if ! l_effective_uid=$(get_effective_user_uid); then
+	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 		return 1
 	fi
-	if ! l_owner_uid=$(get_path_owner_uid "$l_identity_path"); then
+	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_identity_path"); then
 		return 1
 	fi
 	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(get_path_mode_octal "$l_identity_path"); then
+	if ! l_mode=$(zxfer_get_path_mode_octal "$l_identity_path"); then
 		return 1
 	fi
 	[ "$l_mode" = "600" ] || return 1
@@ -95,10 +143,10 @@ zxfer_write_ssh_control_socket_entry_identity_file() {
 	[ ! -h "$l_identity_path" ] || return 1
 	if [ -e "$l_identity_path" ]; then
 		[ -f "$l_identity_path" ] || return 1
-		if ! l_effective_uid=$(get_effective_user_uid); then
+		if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 			return 1
 		fi
-		if ! l_owner_uid=$(get_path_owner_uid "$l_identity_path"); then
+		if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_identity_path"); then
 			return 1
 		fi
 		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
@@ -128,7 +176,7 @@ zxfer_ensure_ssh_control_socket_cache_dir() {
 	if ! l_tmpdir=$(zxfer_try_get_socket_cache_tmpdir); then
 		return 1
 	fi
-	if ! l_effective_uid=$(get_effective_user_uid); then
+	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 		return 1
 	fi
 	l_cache_dir="$l_tmpdir/zxfer-s.$l_effective_uid.d"
@@ -139,11 +187,11 @@ zxfer_ensure_ssh_control_socket_cache_dir() {
 
 	if [ -e "$l_cache_dir" ]; then
 		[ -d "$l_cache_dir" ] || return 1
-		if ! l_owner_uid=$(get_path_owner_uid "$l_cache_dir"); then
+		if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_dir"); then
 			return 1
 		fi
 		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-		if ! l_mode=$(get_path_mode_octal "$l_cache_dir"); then
+		if ! l_mode=$(zxfer_get_path_mode_octal "$l_cache_dir"); then
 			return 1
 		fi
 		[ "$l_mode" = "700" ] || return 1
@@ -159,11 +207,11 @@ zxfer_ensure_ssh_control_socket_cache_dir() {
 	fi
 	umask "$l_old_umask"
 
-	if ! l_owner_uid=$(get_path_owner_uid "$l_cache_dir"); then
+	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_dir"); then
 		return 1
 	fi
 	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(get_path_mode_octal "$l_cache_dir"); then
+	if ! l_mode=$(zxfer_get_path_mode_octal "$l_cache_dir"); then
 		return 1
 	fi
 	[ "$l_mode" = "700" ] || return 1
@@ -173,10 +221,10 @@ zxfer_ensure_ssh_control_socket_cache_dir() {
 zxfer_ensure_ssh_control_socket_entry_dir() {
 	l_host_spec=$1
 
-	if ! l_cache_dir=$(zxfer_ensure_ssh_control_socket_cache_dir); then
+	if ! l_cache_key=$(zxfer_ssh_control_socket_cache_key "$l_host_spec"); then
 		return 1
 	fi
-	if ! l_cache_key=$(zxfer_ssh_control_socket_cache_key "$l_host_spec"); then
+	if ! l_cache_dir=$(zxfer_get_ssh_control_socket_cache_dir_for_key "$l_cache_key"); then
 		return 1
 	fi
 	l_expected_identity=$(zxfer_render_ssh_control_socket_entry_identity "$l_host_spec")
@@ -188,20 +236,24 @@ zxfer_ensure_ssh_control_socket_entry_dir() {
 			l_entry_dir="$l_cache_dir/$l_cache_key.$l_suffix"
 		fi
 
+		if ! zxfer_is_ssh_control_socket_entry_path_short_enough "$l_entry_dir"; then
+			return 1
+		fi
+
 		if [ -L "$l_entry_dir" ] || [ -h "$l_entry_dir" ]; then
 			return 1
 		fi
 
 		if [ -e "$l_entry_dir" ]; then
 			[ -d "$l_entry_dir" ] || return 1
-			if ! l_owner_uid=$(get_path_owner_uid "$l_entry_dir"); then
+			if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_entry_dir"); then
 				return 1
 			fi
-			if ! l_effective_uid=$(get_effective_user_uid); then
+			if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 				return 1
 			fi
 			[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-			if ! l_mode=$(get_path_mode_octal "$l_entry_dir"); then
+			if ! l_mode=$(zxfer_get_path_mode_octal "$l_entry_dir"); then
 				return 1
 			fi
 			[ "$l_mode" = "700" ] || return 1
@@ -216,14 +268,14 @@ zxfer_ensure_ssh_control_socket_entry_dir() {
 			else
 				umask "$l_old_umask"
 			fi
-			if ! l_owner_uid=$(get_path_owner_uid "$l_entry_dir"); then
+			if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_entry_dir"); then
 				return 1
 			fi
-			if ! l_effective_uid=$(get_effective_user_uid); then
+			if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 				return 1
 			fi
 			[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-			if ! l_mode=$(get_path_mode_octal "$l_entry_dir"); then
+			if ! l_mode=$(zxfer_get_path_mode_octal "$l_entry_dir"); then
 				return 1
 			fi
 			[ "$l_mode" = "700" ] || return 1
@@ -235,14 +287,14 @@ zxfer_ensure_ssh_control_socket_entry_dir() {
 		fi
 		if [ -e "$l_leases_dir" ]; then
 			[ -d "$l_leases_dir" ] || return 1
-			if ! l_owner_uid=$(get_path_owner_uid "$l_leases_dir"); then
+			if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_leases_dir"); then
 				return 1
 			fi
-			if ! l_effective_uid=$(get_effective_user_uid); then
+			if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 				return 1
 			fi
 			[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-			if ! l_mode=$(get_path_mode_octal "$l_leases_dir"); then
+			if ! l_mode=$(zxfer_get_path_mode_octal "$l_leases_dir"); then
 				return 1
 			fi
 			[ "$l_mode" = "700" ] || return 1
@@ -257,14 +309,14 @@ zxfer_ensure_ssh_control_socket_entry_dir() {
 			else
 				umask "$l_old_umask"
 			fi
-			if ! l_owner_uid=$(get_path_owner_uid "$l_leases_dir"); then
+			if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_leases_dir"); then
 				return 1
 			fi
-			if ! l_effective_uid=$(get_effective_user_uid); then
+			if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 				return 1
 			fi
 			[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-			if ! l_mode=$(get_path_mode_octal "$l_leases_dir"); then
+			if ! l_mode=$(zxfer_get_path_mode_octal "$l_leases_dir"); then
 				return 1
 			fi
 			[ "$l_mode" = "700" ] || return 1
@@ -377,7 +429,7 @@ zxfer_check_ssh_control_socket_for_host() {
 	[ -n "$l_host" ] || return 1
 	[ -n "$l_socket_path" ] || return 1
 
-	l_host_tokens=$(split_host_spec_tokens "$l_host")
+	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host")
 	set -- "$g_cmd_ssh" -S "$l_socket_path" -O check
 	if [ "$l_host_tokens" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
@@ -397,7 +449,7 @@ zxfer_open_ssh_control_socket_for_host() {
 	[ -n "$l_host" ] || return 1
 	[ -n "$l_socket_path" ] || return 1
 
-	l_host_tokens=$(split_host_spec_tokens "$l_host")
+	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host")
 	set -- "$g_cmd_ssh" -M -S "$l_socket_path" -fN
 	if [ "$l_host_tokens" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
@@ -447,6 +499,10 @@ zxfer_clear_ssh_control_socket_role_state() {
 	esac
 }
 
+################################################################################
+# REMOTE CAPABILITY CACHE / HANDSHAKE PARSING
+################################################################################
+
 zxfer_remote_capability_cache_key() {
 	l_host_spec=$1
 	l_key_hex=$(printf '%s\n%s' "$l_host_spec" "${g_zxfer_dependency_path:-$ZXFER_DEFAULT_SECURE_PATH}" |
@@ -461,7 +517,7 @@ zxfer_ensure_remote_capability_cache_dir() {
 	if ! l_tmpdir=$(zxfer_try_get_effective_tmpdir); then
 		return 1
 	fi
-	if ! l_effective_uid=$(get_effective_user_uid); then
+	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 		return 1
 	fi
 	l_cache_dir="$l_tmpdir/zxfer-remote-capabilities.$l_effective_uid.d"
@@ -472,11 +528,11 @@ zxfer_ensure_remote_capability_cache_dir() {
 
 	if [ -e "$l_cache_dir" ]; then
 		[ -d "$l_cache_dir" ] || return 1
-		if ! l_owner_uid=$(get_path_owner_uid "$l_cache_dir"); then
+		if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_dir"); then
 			return 1
 		fi
 		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-		if ! l_mode=$(get_path_mode_octal "$l_cache_dir"); then
+		if ! l_mode=$(zxfer_get_path_mode_octal "$l_cache_dir"); then
 			return 1
 		fi
 		[ "$l_mode" = "700" ] || return 1
@@ -492,11 +548,11 @@ zxfer_ensure_remote_capability_cache_dir() {
 	fi
 	umask "$l_old_umask"
 
-	if ! l_owner_uid=$(get_path_owner_uid "$l_cache_dir"); then
+	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_dir"); then
 		return 1
 	fi
 	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(get_path_mode_octal "$l_cache_dir"); then
+	if ! l_mode=$(zxfer_get_path_mode_octal "$l_cache_dir"); then
 		return 1
 	fi
 	[ "$l_mode" = "700" ] || return 1
@@ -528,14 +584,14 @@ zxfer_validate_remote_capability_cache_lock_dir() {
 	[ -d "$l_lock_dir" ] || return 1
 	[ ! -L "$l_lock_dir" ] || return 1
 	[ ! -h "$l_lock_dir" ] || return 1
-	if ! l_effective_uid=$(get_effective_user_uid); then
+	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 		return 1
 	fi
-	if ! l_owner_uid=$(get_path_owner_uid "$l_lock_dir"); then
+	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_lock_dir"); then
 		return 1
 	fi
 	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(get_path_mode_octal "$l_lock_dir"); then
+	if ! l_mode=$(zxfer_get_path_mode_octal "$l_lock_dir"); then
 		return 1
 	fi
 	[ "$l_mode" = "700" ] || return 1
@@ -547,14 +603,14 @@ zxfer_read_remote_capability_cache_lock_pid_file() {
 	[ -f "$l_pid_path" ] || return 1
 	[ ! -L "$l_pid_path" ] || return 1
 	[ ! -h "$l_pid_path" ] || return 1
-	if ! l_effective_uid=$(get_effective_user_uid); then
+	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 		return 1
 	fi
-	if ! l_owner_uid=$(get_path_owner_uid "$l_pid_path"); then
+	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_pid_path"); then
 		return 1
 	fi
 	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(get_path_mode_octal "$l_pid_path"); then
+	if ! l_mode=$(zxfer_get_path_mode_octal "$l_pid_path"); then
 		return 1
 	fi
 	[ "$l_mode" = "600" ] || return 1
@@ -715,13 +771,13 @@ zxfer_parse_remote_capability_response() {
 	l_response=$1
 	l_tab='	'
 
-	m_remote_capability_os=""
-	m_remote_capability_zfs_status=""
-	m_remote_capability_zfs_path=""
-	m_remote_capability_parallel_status=""
-	m_remote_capability_parallel_path=""
-	m_remote_capability_cat_status=""
-	m_remote_capability_cat_path=""
+	g_zxfer_remote_capability_os=""
+	g_zxfer_remote_capability_zfs_status=""
+	g_zxfer_remote_capability_zfs_path=""
+	g_zxfer_remote_capability_parallel_status=""
+	g_zxfer_remote_capability_parallel_path=""
+	g_zxfer_remote_capability_cat_status=""
+	g_zxfer_remote_capability_cat_path=""
 
 	l_line_number=0
 	while IFS= read -r l_line || [ -n "$l_line" ]; do
@@ -733,8 +789,8 @@ zxfer_parse_remote_capability_response() {
 		2)
 			case "$l_line" in
 			os"$l_tab"*)
-				m_remote_capability_os=${l_line#os"$l_tab"}
-				[ -n "$m_remote_capability_os" ] || return 1
+				g_zxfer_remote_capability_os=${l_line#os"$l_tab"}
+				[ -n "$g_zxfer_remote_capability_os" ] || return 1
 				;;
 			*)
 				return 1
@@ -759,33 +815,34 @@ zxfer_parse_remote_capability_response() {
 			if [ "$l_record_status" -eq 0 ]; then
 				[ -n "$l_record_path" ] || return 1
 				[ "$l_record_path" != "-" ] || return 1
+				(zxfer_validate_resolved_tool_path "$l_record_path" "$l_record_tool" >/dev/null 2>&1) || return 1
 			else
 				[ "$l_record_path" = "-" ] || return 1
 			fi
 
 			case "$l_record_tool" in
 			zfs)
-				m_remote_capability_zfs_status=$l_record_status
+				g_zxfer_remote_capability_zfs_status=$l_record_status
 				if [ "$l_record_status" -eq 0 ]; then
-					m_remote_capability_zfs_path=$l_record_path
+					g_zxfer_remote_capability_zfs_path=$l_record_path
 				else
-					m_remote_capability_zfs_path=""
+					g_zxfer_remote_capability_zfs_path=""
 				fi
 				;;
 			parallel)
-				m_remote_capability_parallel_status=$l_record_status
+				g_zxfer_remote_capability_parallel_status=$l_record_status
 				if [ "$l_record_status" -eq 0 ]; then
-					m_remote_capability_parallel_path=$l_record_path
+					g_zxfer_remote_capability_parallel_path=$l_record_path
 				else
-					m_remote_capability_parallel_path=""
+					g_zxfer_remote_capability_parallel_path=""
 				fi
 				;;
 			cat)
-				m_remote_capability_cat_status=$l_record_status
+				g_zxfer_remote_capability_cat_status=$l_record_status
 				if [ "$l_record_status" -eq 0 ]; then
-					m_remote_capability_cat_path=$l_record_path
+					g_zxfer_remote_capability_cat_path=$l_record_path
 				else
-					m_remote_capability_cat_path=""
+					g_zxfer_remote_capability_cat_path=""
 				fi
 				;;
 			*)
@@ -802,10 +859,10 @@ zxfer_parse_remote_capability_response() {
 	EOF
 
 	[ "$l_line_number" -eq 5 ] || return 1
-	[ -n "$m_remote_capability_os" ] || return 1
-	[ -n "$m_remote_capability_zfs_status" ] || return 1
-	[ -n "$m_remote_capability_parallel_status" ] || return 1
-	[ -n "$m_remote_capability_cat_status" ] || return 1
+	[ -n "$g_zxfer_remote_capability_os" ] || return 1
+	[ -n "$g_zxfer_remote_capability_zfs_status" ] || return 1
+	[ -n "$g_zxfer_remote_capability_parallel_status" ] || return 1
+	[ -n "$g_zxfer_remote_capability_cat_status" ] || return 1
 	return 0
 }
 
@@ -892,14 +949,14 @@ zxfer_read_remote_capability_cache_file() {
 	[ -f "$l_cache_path" ] || return 1
 	[ ! -L "$l_cache_path" ] || return 1
 	[ ! -h "$l_cache_path" ] || return 1
-	if ! l_effective_uid=$(get_effective_user_uid); then
+	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 		return 1
 	fi
-	if ! l_owner_uid=$(get_path_owner_uid "$l_cache_path"); then
+	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_path"); then
 		return 1
 	fi
 	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(get_path_mode_octal "$l_cache_path"); then
+	if ! l_mode=$(zxfer_get_path_mode_octal "$l_cache_path"); then
 		return 1
 	fi
 	[ "$l_mode" = "600" ] || return 1
@@ -939,10 +996,10 @@ zxfer_write_remote_capability_cache_file() {
 	[ ! -h "$l_cache_path" ] || return 1
 	if [ -e "$l_cache_path" ]; then
 		[ -f "$l_cache_path" ] || return 1
-		if ! l_effective_uid=$(get_effective_user_uid); then
+		if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 			return 1
 		fi
-		if ! l_owner_uid=$(get_path_owner_uid "$l_cache_path"); then
+		if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_path"); then
 			return 1
 		fi
 		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
@@ -976,10 +1033,10 @@ zxfer_fetch_remote_host_capabilities_live() {
 	[ -n "$l_host_spec" ] || return 1
 
 	l_dependency_path=${g_zxfer_dependency_path:-$ZXFER_DEFAULT_SECURE_PATH}
-	l_dependency_path_single=$(escape_for_single_quotes "$l_dependency_path")
+	l_dependency_path_single=$(zxfer_escape_for_single_quotes "$l_dependency_path")
 	l_remote_probe="PATH='$l_dependency_path_single'; export PATH; l_os=\$(uname 2>/dev/null) || exit \$?; printf '%s\n' 'ZXFER_REMOTE_CAPS_V1'; printf '%s\t%s\n' 'os' \"\$l_os\"; for l_tool in zfs parallel cat; do l_path=\$(command -v \"\$l_tool\" 2>/dev/null); l_status=\$?; if [ \"\$l_status\" -eq 0 ]; then printf '%s\t%s\t0\t%s\n' 'tool' \"\$l_tool\" \"\$l_path\"; elif [ \"\$l_status\" -eq 1 ]; then printf '%s\t%s\t1\t-\n' 'tool' \"\$l_tool\"; else printf '%s\t%s\t%s\t-\n' 'tool' \"\$l_tool\" \"\$l_status\"; fi; done"
-	l_remote_probe_cmd=$(build_remote_sh_c_command "$l_remote_probe")
-	l_remote_output=$(invoke_ssh_shell_command_for_host "$l_host_spec" "$l_remote_probe_cmd" "$l_profile_side" 2>/dev/null)
+	l_remote_probe_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_probe")
+	l_remote_output=$(zxfer_invoke_ssh_shell_command_for_host "$l_host_spec" "$l_remote_probe_cmd" "$l_profile_side" 2>/dev/null)
 	l_remote_status=$?
 
 	[ "$l_remote_status" -eq 0 ] || return 1
@@ -1077,10 +1134,10 @@ zxfer_get_remote_host_operating_system_direct() {
 	l_profile_side=${2:-}
 
 	l_dependency_path=${g_zxfer_dependency_path:-$ZXFER_DEFAULT_SECURE_PATH}
-	l_dependency_path_single=$(escape_for_single_quotes "$l_dependency_path")
+	l_dependency_path_single=$(zxfer_escape_for_single_quotes "$l_dependency_path")
 	l_remote_probe="PATH='$l_dependency_path_single'; export PATH; uname 2>/dev/null"
-	l_remote_probe_cmd=$(build_remote_sh_c_command "$l_remote_probe")
-	l_remote_output=$(invoke_ssh_shell_command_for_host "$l_host_spec" "$l_remote_probe_cmd" "$l_profile_side" 2>/dev/null)
+	l_remote_probe_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_probe")
+	l_remote_output=$(zxfer_invoke_ssh_shell_command_for_host "$l_host_spec" "$l_remote_probe_cmd" "$l_profile_side" 2>/dev/null)
 	l_remote_status=$?
 
 	[ "$l_remote_status" -eq 0 ] || return 1
@@ -1101,10 +1158,14 @@ zxfer_get_remote_host_operating_system() {
 		zxfer_get_remote_host_operating_system_direct "$l_host_spec" "$l_profile_side"
 		return
 	fi
-	printf '%s\n' "$m_remote_capability_os"
+	printf '%s\n' "$g_zxfer_remote_capability_os"
 }
 
-resolve_remote_required_tool() {
+################################################################################
+# REMOTE TOOL / COMMAND RESOLUTION
+################################################################################
+
+zxfer_resolve_remote_required_tool() {
 	l_host=$1
 	l_tool=$2
 	l_label=${3:-$l_tool}
@@ -1131,16 +1192,16 @@ resolve_remote_required_tool() {
 
 	case "$l_tool" in
 	zfs)
-		l_tool_status=$m_remote_capability_zfs_status
-		l_resolved_path=$m_remote_capability_zfs_path
+		l_tool_status=$g_zxfer_remote_capability_zfs_status
+		l_resolved_path=$g_zxfer_remote_capability_zfs_path
 		;;
 	parallel)
-		l_tool_status=$m_remote_capability_parallel_status
-		l_resolved_path=$m_remote_capability_parallel_path
+		l_tool_status=$g_zxfer_remote_capability_parallel_status
+		l_resolved_path=$g_zxfer_remote_capability_parallel_path
 		;;
 	cat)
-		l_tool_status=$m_remote_capability_cat_status
-		l_resolved_path=$m_remote_capability_cat_path
+		l_tool_status=$g_zxfer_remote_capability_cat_status
+		l_resolved_path=$g_zxfer_remote_capability_cat_path
 		;;
 	*)
 		printf '%s\n' "Failed to query dependency \"$l_label\" on host $l_host."
@@ -1170,11 +1231,11 @@ zxfer_resolve_remote_cli_tool_direct() {
 	l_profile_side=${4:-}
 
 	l_dependency_path=${g_zxfer_dependency_path:-$ZXFER_DEFAULT_SECURE_PATH}
-	l_dependency_path_single=$(escape_for_single_quotes "$l_dependency_path")
-	l_tool_single=$(escape_for_single_quotes "$l_tool")
+	l_dependency_path_single=$(zxfer_escape_for_single_quotes "$l_dependency_path")
+	l_tool_single=$(zxfer_escape_for_single_quotes "$l_tool")
 	l_remote_probe="PATH='$l_dependency_path_single'; export PATH; l_path=\$(command -v '$l_tool_single' 2>/dev/null); l_status=\$?; if [ \"\$l_status\" -eq 0 ]; then printf '%s\n' \"\$l_path\"; elif [ \"\$l_status\" -eq 1 ]; then exit 10; else exit \"\$l_status\"; fi"
-	l_remote_probe_cmd=$(build_remote_sh_c_command "$l_remote_probe")
-	l_remote_output=$(invoke_ssh_shell_command_for_host "$l_host" "$l_remote_probe_cmd" "$l_profile_side" 2>/dev/null)
+	l_remote_probe_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_probe")
+	l_remote_output=$(zxfer_invoke_ssh_shell_command_for_host "$l_host" "$l_remote_probe_cmd" "$l_profile_side" 2>/dev/null)
 	l_remote_status=$?
 
 	case "$l_remote_status" in
@@ -1200,7 +1261,7 @@ zxfer_resolve_remote_cli_tool() {
 
 	case "$l_tool" in
 	zfs | parallel | cat)
-		resolve_remote_required_tool "$l_host" "$l_tool" "$l_label" "$l_profile_side"
+		zxfer_resolve_remote_required_tool "$l_host" "$l_tool" "$l_label" "$l_profile_side"
 		return
 		;;
 	esac
@@ -1213,7 +1274,7 @@ zxfer_resolve_remote_cli_command_safe() {
 	l_cli_string=$2
 	l_label=${3:-command}
 	l_profile_side=${4:-}
-	l_cli_tokens=$(split_cli_tokens "$l_cli_string")
+	l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string")
 	l_cli_head=$(printf '%s\n' "$l_cli_tokens" | sed -n '1p')
 	if [ -z "$l_cli_head" ]; then
 		printf '%s\n' "Required dependency \"$l_label\" must not be empty or whitespace-only."
@@ -1229,7 +1290,7 @@ zxfer_resolve_remote_cli_command_safe() {
 }
 
 # setup an ssh control socket for the specified role (origin or target)
-setup_ssh_control_socket() {
+zxfer_setup_ssh_control_socket() {
 	l_host=$1
 	l_role=$2
 
@@ -1237,45 +1298,45 @@ setup_ssh_control_socket() {
 
 	case "$l_role" in
 	origin)
-		[ "$g_ssh_origin_control_socket" != "" ] && close_origin_ssh_control_socket
+		[ "$g_ssh_origin_control_socket" != "" ] && zxfer_close_origin_ssh_control_socket
 		;;
 	target)
-		[ "$g_ssh_target_control_socket" != "" ] && close_target_ssh_control_socket
+		[ "$g_ssh_target_control_socket" != "" ] && zxfer_close_target_ssh_control_socket
 		;;
 	esac
 
 	if ! l_control_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "$l_host"); then
-		throw_error "Error creating temporary directory for ssh control socket."
+		zxfer_throw_error "Error creating temporary directory for ssh control socket."
 	fi
 	l_control_socket="$l_control_dir/s"
 
 	if ! l_lock_dir=$(zxfer_acquire_ssh_control_socket_lock "$l_control_dir"); then
-		throw_error "Error creating ssh control socket for $l_role host."
+		zxfer_throw_error "Error creating ssh control socket for $l_role host."
 	fi
 	zxfer_prune_stale_ssh_control_socket_leases "$l_control_dir"
 	if ! zxfer_check_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
 		rm -f "$l_control_socket"
 		if ! zxfer_open_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
 			zxfer_release_ssh_control_socket_lock "$l_lock_dir"
-			throw_error "Error creating ssh control socket for $l_role host."
+			zxfer_throw_error "Error creating ssh control socket for $l_role host."
 		fi
 	fi
 
 	if ! l_lease_file=$(zxfer_create_ssh_control_socket_lease_file "$l_control_dir"); then
 		zxfer_release_ssh_control_socket_lock "$l_lock_dir"
-		throw_error "Error creating ssh control socket for $l_role host."
+		zxfer_throw_error "Error creating ssh control socket for $l_role host."
 	fi
 	zxfer_release_ssh_control_socket_lock "$l_lock_dir"
 
 	zxfer_set_ssh_control_socket_role_state "$l_role" "$l_control_socket" "$l_control_dir" "$l_lease_file"
 }
 
-close_origin_ssh_control_socket() {
+zxfer_close_origin_ssh_control_socket() {
 	if [ "$g_option_O_origin_host" = "" ] || [ "$g_ssh_origin_control_socket" = "" ]; then
 		return
 	fi
 
-	l_host_tokens=$(split_host_spec_tokens "$g_option_O_origin_host")
+	l_host_tokens=$(zxfer_split_host_spec_tokens "$g_option_O_origin_host")
 	set -- "$g_cmd_ssh" -S "$g_ssh_origin_control_socket" -O exit
 	if [ "$l_host_tokens" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
@@ -1295,12 +1356,12 @@ EOF
 		fi
 		if [ "$l_remaining_leases" -eq 0 ]; then
 			if zxfer_check_ssh_control_socket_for_host "$g_option_O_origin_host" "$g_ssh_origin_control_socket"; then
-				l_log_cmd=$(build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_origin_control_socket" -O exit)
-				l_host_safe=$(quote_host_spec_tokens "$g_option_O_origin_host")
+				l_log_cmd=$(zxfer_build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_origin_control_socket" -O exit)
+				l_host_safe=$(zxfer_quote_host_spec_tokens "$g_option_O_origin_host")
 				if [ "$l_host_safe" != "" ]; then
 					l_log_cmd="$l_log_cmd $l_host_safe"
 				fi
-				echoV "Closing origin ssh control socket: $l_log_cmd"
+				zxfer_echoV "Closing origin ssh control socket: $l_log_cmd"
 				if "$@" 2>/dev/null; then
 					[ -d "$g_ssh_origin_control_socket_dir" ] && rm -rf "$g_ssh_origin_control_socket_dir"
 				fi
@@ -1309,12 +1370,12 @@ EOF
 			fi
 		fi
 	else
-		l_log_cmd=$(build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_origin_control_socket" -O exit)
-		l_host_safe=$(quote_host_spec_tokens "$g_option_O_origin_host")
+		l_log_cmd=$(zxfer_build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_origin_control_socket" -O exit)
+		l_host_safe=$(zxfer_quote_host_spec_tokens "$g_option_O_origin_host")
 		if [ "$l_host_safe" != "" ]; then
 			l_log_cmd="$l_log_cmd $l_host_safe"
 		fi
-		echoV "Closing origin ssh control socket: $l_log_cmd"
+		zxfer_echoV "Closing origin ssh control socket: $l_log_cmd"
 		"$@" 2>/dev/null
 
 		if [ "$g_ssh_origin_control_socket_dir" != "" ] && [ -d "$g_ssh_origin_control_socket_dir" ]; then
@@ -1324,12 +1385,12 @@ EOF
 	zxfer_clear_ssh_control_socket_role_state origin
 }
 
-close_target_ssh_control_socket() {
+zxfer_close_target_ssh_control_socket() {
 	if [ "$g_option_T_target_host" = "" ] || [ "$g_ssh_target_control_socket" = "" ]; then
 		return
 	fi
 
-	l_host_tokens=$(split_host_spec_tokens "$g_option_T_target_host")
+	l_host_tokens=$(zxfer_split_host_spec_tokens "$g_option_T_target_host")
 	set -- "$g_cmd_ssh" -S "$g_ssh_target_control_socket" -O exit
 	if [ "$l_host_tokens" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
@@ -1349,12 +1410,12 @@ EOF
 		fi
 		if [ "$l_remaining_leases" -eq 0 ]; then
 			if zxfer_check_ssh_control_socket_for_host "$g_option_T_target_host" "$g_ssh_target_control_socket"; then
-				l_log_cmd=$(build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_target_control_socket" -O exit)
-				l_host_safe=$(quote_host_spec_tokens "$g_option_T_target_host")
+				l_log_cmd=$(zxfer_build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_target_control_socket" -O exit)
+				l_host_safe=$(zxfer_quote_host_spec_tokens "$g_option_T_target_host")
 				if [ "$l_host_safe" != "" ]; then
 					l_log_cmd="$l_log_cmd $l_host_safe"
 				fi
-				echoV "Closing target ssh control socket: $l_log_cmd"
+				zxfer_echoV "Closing target ssh control socket: $l_log_cmd"
 				if "$@" 2>/dev/null; then
 					[ -d "$g_ssh_target_control_socket_dir" ] && rm -rf "$g_ssh_target_control_socket_dir"
 				fi
@@ -1363,12 +1424,12 @@ EOF
 			fi
 		fi
 	else
-		l_log_cmd=$(build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_target_control_socket" -O exit)
-		l_host_safe=$(quote_host_spec_tokens "$g_option_T_target_host")
+		l_log_cmd=$(zxfer_build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_target_control_socket" -O exit)
+		l_host_safe=$(zxfer_quote_host_spec_tokens "$g_option_T_target_host")
 		if [ "$l_host_safe" != "" ]; then
 			l_log_cmd="$l_log_cmd $l_host_safe"
 		fi
-		echoV "Closing target ssh control socket: $l_log_cmd"
+		zxfer_echoV "Closing target ssh control socket: $l_log_cmd"
 		"$@" 2>/dev/null
 
 		if [ "$g_ssh_target_control_socket_dir" != "" ] && [ -d "$g_ssh_target_control_socket_dir" ]; then
@@ -1378,15 +1439,19 @@ EOF
 	zxfer_clear_ssh_control_socket_role_state target
 }
 
-close_all_ssh_control_sockets() {
-	close_origin_ssh_control_socket
-	close_target_ssh_control_socket
+zxfer_close_all_ssh_control_sockets() {
+	zxfer_close_origin_ssh_control_socket
+	zxfer_close_target_ssh_control_socket
 }
 
+################################################################################
+# REMOTE CONNECTION BOOTSTRAP / ACTIVE COMMAND SELECTION
+################################################################################
+
 # shellcheck disable=SC2034
-refresh_remote_zfs_commands() {
+zxfer_refresh_remote_zfs_commands() {
 	if [ "$g_option_O_origin_host" != "" ]; then
-		g_option_O_origin_host_safe=$(quote_host_spec_tokens "$g_option_O_origin_host")
+		g_option_O_origin_host_safe=$(zxfer_quote_host_spec_tokens "$g_option_O_origin_host")
 		g_LZFS=${g_origin_cmd_zfs:-$g_cmd_zfs}
 	else
 		g_option_O_origin_host_safe=""
@@ -1394,7 +1459,7 @@ refresh_remote_zfs_commands() {
 	fi
 
 	if [ "$g_option_T_target_host" != "" ]; then
-		g_option_T_target_host_safe=$(quote_host_spec_tokens "$g_option_T_target_host")
+		g_option_T_target_host_safe=$(zxfer_quote_host_spec_tokens "$g_option_T_target_host")
 		g_RZFS=${g_target_cmd_zfs:-$g_cmd_zfs}
 	else
 		g_option_T_target_host_safe=""
@@ -1402,7 +1467,7 @@ refresh_remote_zfs_commands() {
 	fi
 }
 
-prepare_remote_host_connections() {
+zxfer_prepare_remote_host_connections() {
 	l_ssh_setup_start_ms=""
 
 	if [ "$g_option_O_origin_host" != "" ] || [ "$g_option_T_target_host" != "" ]; then
@@ -1411,22 +1476,22 @@ prepare_remote_host_connections() {
 
 	if [ "$g_option_O_origin_host" != "" ]; then
 		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
-			setup_ssh_control_socket "$g_option_O_origin_host" "origin"
+			zxfer_setup_ssh_control_socket "$g_option_O_origin_host" "origin"
 		else
-			echoV "ssh client does not support control sockets; continuing without connection reuse for origin host."
+			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for origin host."
 		fi
 		zxfer_preload_remote_host_capabilities "$g_option_O_origin_host" source >/dev/null 2>&1 || :
 	fi
 
 	if [ "$g_option_T_target_host" != "" ]; then
 		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
-			setup_ssh_control_socket "$g_option_T_target_host" "target"
+			zxfer_setup_ssh_control_socket "$g_option_T_target_host" "target"
 		else
-			echoV "ssh client does not support control sockets; continuing without connection reuse for target host."
+			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for target host."
 		fi
 		zxfer_preload_remote_host_capabilities "$g_option_T_target_host" destination >/dev/null 2>&1 || :
 	fi
 
-	refresh_remote_zfs_commands
+	zxfer_refresh_remote_zfs_commands
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_ssh_setup_ms "$l_ssh_setup_start_ms"
 }

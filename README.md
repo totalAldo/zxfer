@@ -24,19 +24,23 @@ Or read the bundled manpages in this checkout:
 - [man/zxfer.8](./man/zxfer.8) for FreeBSD/Linux-style installs
 - [man/zxfer.1m](./man/zxfer.1m) for Solaris/illumos-style installs
 
+For a task-oriented option cookbook, see
+[docs/cli-examples.md](./docs/cli-examples.md).
+
 ## Highlights
 
 - POSIX `/bin/sh` implementation with no Bash dependency
 - Recursive and non-recursive snapshot replication
 - Local and remote replication with `-O` / `-T`
-- Remote host specs that can include wrappers such as `pfexec` or `doas`
+- Remote command host specs that can include wrappers such as `pfexec` or `doas`
 - Optional remote compression with `zstd`
 - Optional progress hooks with `-D` (uses approximate `%%size%%` values on
   remote or multi-job runs to reduce startup latency)
 - Property replication, property ignore lists, and unsupported-property skipping
 - Hardened property backup / restore with `-k` and `-e`, stored under a
   source-dataset-relative tree in `ZXFER_BACKUP_DIR` with keyed metadata
-  filenames per source/destination pair
+  filenames per source/destination pair; older backup-metadata layouts are
+  intentionally unsupported
 - Structured stderr failure reports with optional `ZXFER_ERROR_LOG` mirroring
 - File-backed integration harness plus shunit2 unit coverage
 
@@ -143,7 +147,15 @@ Compared with the older upstream base, the current fork includes:
 
 The current tree has also been reworked for readability and maintainability:
 
-- functionality is split into focused shell modules under `src/`
+- `zxfer` now sources only `src/zxfer_modules.sh`, which centralizes module
+  source order for the launcher, tests, and direct-sourcing fixtures
+- `src/` remains flat, with focused modules grouped by long-lived
+  responsibilities such as reporting, exec, runtime, CLI, snapshot state,
+  remote hosts, property reconciliation, and replication
+- startup state now flows through explicit init/reset helpers rather than
+  relying on source-time scratch-global initialization
+- module names stay purpose-based; broad reuse is not, by itself, a reason to
+  introduce generic files such as `common`, `globals`, `utils`, or `lib`
 - helper functions are smaller and more testable than the older monolithic flow
 - quoting, ssh, backup-metadata, and failure-reporting paths are centralized
 - the test suite now covers shell helpers, snapshot discovery, property logic,
@@ -153,7 +165,10 @@ The current tree has also been reworked for readability and maintainability:
 
 - [docs/README.md](./docs/README.md): documentation index
 - [docs/platforms.md](./docs/platforms.md): platform support and compatibility notes
+- [docs/external-tools.md](./docs/external-tools.md): external tool inventory for packaging, ports, and dependency review
+- [docs/cli-examples.md](./docs/cli-examples.md): consolidated CLI examples for every current option
 - [docs/testing.md](./docs/testing.md): unit, coverage, and integration workflows
+- [docs/coding-style.md](./docs/coding-style.md): project-specific shell, module, and test style guide
 - [docs/troubleshooting.md](./docs/troubleshooting.md): common failures and what they usually mean
 - [docs/architecture.md](./docs/architecture.md): module layout and replication flow
 - [docs/upstream-history.md](./docs/upstream-history.md): historical context and removed legacy behavior
@@ -195,6 +210,13 @@ Run local lint with the same pinned toolchain as CI:
 ./tests/run_lint.sh
 ```
 
+For a ready-made contributor environment, open the repository in the included
+VS Code / GitHub Codespaces devcontainer. It preinstalls `dash`,
+`bash-posix`, `busybox-ash`, `posh`, `kcov`, Ubuntu `zfsutils-linux`
+userland (`zfs`, `zpool`), and the pinned lint toolchain used by
+`tests/run_lint.sh`, but it does not replace a real ZFS-capable host or
+disposable VM for `tests/run_integration_zxfer.sh`.
+
 Run shell coverage:
 
 ```sh
@@ -235,19 +257,21 @@ GitHub Actions includes:
   bash-xtrace lane enforces committed per-file and total coverage minimums,
   rejects regressions versus the checked-in baseline, and publishes the
   `missing.txt` diff in the GitHub step summary
-- shunit2 workflow on `ubuntu-latest` and `macos-latest`, plus an Ubuntu
-  portable-shell matrix for `dash`, `bash --posix`, `busybox ash`, and an
-  initially non-blocking `posh` lane
-- Ubuntu ZFS integration workflow using file-backed test pools and
-  `--keep-going` failure collection, with failed workdirs uploaded as artifacts
+- shunit2 workflow on Ubuntu and macOS, plus an Ubuntu portable-shell matrix
+  for `dash`, `bash --posix`, `busybox ash`, and an initially non-blocking
+  `posh` lane, plus additional FreeBSD and OmniOS VM-backed unit jobs
+- ZFS integration workflow on Ubuntu 24.04, FreeBSD, and OmniOS using
+  file-backed test pools and `--keep-going` failure collection, with failed
+  Ubuntu, FreeBSD, and OmniOS workdirs uploaded as artifacts
 
 Hosted macOS CI is currently used for unit and shell-portability coverage, not
 as a required ZFS integration gate, because the Darwin/OpenZFS property
 behavior described in `KNOWN_ISSUES.md` is not yet stable enough for strict
 end-to-end certification.
-FreeBSD coverage is currently maintained through local/manual validation rather
-than a hosted GitHub Actions lane, and current project testing includes
-FreeBSD 15.x in addition to the long-running FreeBSD 14.x environment.
+FreeBSD and OmniOS now also have hosted GitHub Actions lanes for both unit and
+integration coverage through VM-backed jobs, but current project testing still
+includes local validation on FreeBSD 14.x and 15.x in addition to those hosted
+checks.
 The coverage workflow keeps the shipped bash-xtrace fallback and also runs a
 separate Linux `kcov` pass, which gives better visibility into child-shell and
 launcher coverage without depending on a runner-installed `kcov` package or an

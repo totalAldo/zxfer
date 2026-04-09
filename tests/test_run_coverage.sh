@@ -3,25 +3,18 @@
 # shunit2 tests for the coverage runner script.
 #
 
-case "$0" in
-/*)
-	TESTS_DIR=$(dirname "$0")
-	;;
-*)
-	TESTS_DIR=${PWD:-.}/$(dirname "$0")
-	;;
-esac
+TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
 oneTimeSetUp() {
-	TEST_TMPDIR=$(mktemp -d -t zxfer_run_coverage.XXXXXX)
+	zxfer_test_create_tmpdir "zxfer_run_coverage"
 	RUN_COVERAGE_BIN="$ZXFER_ROOT/tests/run_coverage.sh"
 }
 
 oneTimeTearDown() {
-	rm -rf "$TEST_TMPDIR"
+	zxfer_test_cleanup_tmpdir
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -418,6 +411,34 @@ EOF
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_policy_accepts_small_hit_regressions_within_tolerance() {
+	l_summary_file="$TEST_TMPDIR/policy-tolerance-summary.tsv"
+	l_policy_file="$TEST_TMPDIR/policy-tolerance.tsv"
+	l_baseline_file="$TEST_TMPDIR/policy-tolerance-baseline.tsv"
+	l_report_file="$TEST_TMPDIR/policy-tolerance-report.txt"
+	l_failures_file="$TEST_TMPDIR/policy-tolerance-failures.tsv"
+
+	cat >"$l_summary_file" <<'EOF'
+70.00	10	7	3	src/a.sh
+69.23	13	9	4	TOTAL
+EOF
+	cat >"$l_policy_file" <<'EOF'
+TOTAL	69.00
+src/a.sh	69.00
+EOF
+	cat >"$l_baseline_file" <<'EOF'
+80.00	10	8	2	src/a.sh
+76.92	13	10	3	TOTAL
+EOF
+
+	output=$(run_coverage_helper \
+		"COVERAGE_POLICY_FILE=\"$l_policy_file\"; COVERAGE_BASELINE_SUMMARY_FILE=\"$l_baseline_file\"; ZXFER_COVERAGE_REGRESSION_HIT_TOLERANCE=1; ZXFER_COVERAGE_TOTAL_REGRESSION_HIT_TOLERANCE=1; enforce_bash_xtrace_policy \"$l_summary_file\" \"$l_report_file\" \"$l_failures_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_report_file\")\" \"\$(cat \"$l_failures_file\")\"")
+
+	assertContains "Small baseline hit regressions within the configured tolerance should still pass the no-regression gate." \
+		"$output" "Coverage policy passed."
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_coverage_policy_reports_regressions_and_missing_policy_entries() {
 	l_summary_file="$TEST_TMPDIR/policy-fail-summary.tsv"
 	l_policy_file="$TEST_TMPDIR/policy-fail.tsv"
@@ -439,7 +460,7 @@ EOF
 
 	set +e
 	output=$(run_coverage_helper \
-		"COVERAGE_POLICY_FILE=\"$l_policy_file\"; COVERAGE_BASELINE_SUMMARY_FILE=\"$l_baseline_file\"; set +e; enforce_bash_xtrace_policy \"$l_summary_file\" \"$l_report_file\" \"$l_failures_file\"; status=\$?; set -e; printf '%s\n---\n%s\n' \"\$(cat \"$l_report_file\")\" \"\$(cat \"$l_failures_file\")\"; exit \"\$status\"")
+		"COVERAGE_POLICY_FILE=\"$l_policy_file\"; COVERAGE_BASELINE_SUMMARY_FILE=\"$l_baseline_file\"; ZXFER_COVERAGE_REGRESSION_HIT_TOLERANCE=0; ZXFER_COVERAGE_TOTAL_REGRESSION_HIT_TOLERANCE=0; set +e; enforce_bash_xtrace_policy \"$l_summary_file\" \"$l_report_file\" \"$l_failures_file\"; status=\$?; set -e; printf '%s\n---\n%s\n' \"\$(cat \"$l_report_file\")\" \"\$(cat \"$l_failures_file\")\"; exit \"\$status\"")
 	status=$?
 	set -e
 
@@ -448,6 +469,41 @@ EOF
 		"$output" "missing-policy	src/a.sh"
 	assertContains "The report should record the baseline regression for the target." \
 		"$output" "regression	src/a.sh"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_policy_reports_regressions_beyond_hit_tolerance() {
+	l_summary_file="$TEST_TMPDIR/policy-hit-fail-summary.tsv"
+	l_policy_file="$TEST_TMPDIR/policy-hit-fail.tsv"
+	l_baseline_file="$TEST_TMPDIR/policy-hit-fail-baseline.tsv"
+	l_report_file="$TEST_TMPDIR/policy-hit-fail-report.txt"
+	l_failures_file="$TEST_TMPDIR/policy-hit-fail-failures.tsv"
+
+	cat >"$l_summary_file" <<'EOF'
+70.00	10	7	3	src/a.sh
+69.23	13	9	4	TOTAL
+EOF
+	cat >"$l_policy_file" <<'EOF'
+TOTAL	69.00
+src/a.sh	69.00
+EOF
+	cat >"$l_baseline_file" <<'EOF'
+90.00	10	9	1	src/a.sh
+84.62	13	11	2	TOTAL
+EOF
+
+	set +e
+	output=$(run_coverage_helper \
+		"COVERAGE_POLICY_FILE=\"$l_policy_file\"; COVERAGE_BASELINE_SUMMARY_FILE=\"$l_baseline_file\"; ZXFER_COVERAGE_REGRESSION_HIT_TOLERANCE=1; ZXFER_COVERAGE_TOTAL_REGRESSION_HIT_TOLERANCE=1; set +e; enforce_bash_xtrace_policy \"$l_summary_file\" \"$l_report_file\" \"$l_failures_file\"; status=\$?; set -e; printf '%s\n---\n%s\n' \"\$(cat \"$l_report_file\")\" \"\$(cat \"$l_failures_file\")\"; exit \"\$status\"")
+	status=$?
+	set -e
+
+	assertEquals "Regressions that exceed the configured baseline hit tolerance should still fail the coverage gate." \
+		1 "$status"
+	assertContains "The failures TSV should still record the regression once it exceeds tolerance." \
+		"$output" "regression	src/a.sh"
+	assertContains "The TOTAL row should also fail when the overall hit regression exceeds tolerance." \
+		"$output" "regression	TOTAL"
 }
 
 # shellcheck source=tests/shunit2/shunit2

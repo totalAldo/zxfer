@@ -1,0 +1,28 @@
+{
+  "name": "zxfer",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "ZXFER_LINT_TOOL_DIR": "/usr/local/share/zxfer/lint-tools"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "mkhl.shfmt",
+        "redhat.vscode-yaml",
+        "timonwong.shellcheck"
+      ],
+      "settings": {
+        "files.insertFinalNewline": true,
+        "[shellscript]": {
+          "editor.defaultFormatter": "mkhl.shfmt",
+          "editor.formatOnSave": true
+        }
+      }
+    }
+  },
+  "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}"
+}

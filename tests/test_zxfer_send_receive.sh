@@ -1,52 +1,22 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_zfs_send_receive.sh helpers.
+# shunit2 tests for zxfer_send_receive.sh helpers.
 #
-# shellcheck disable=SC1090,SC2030,SC2031,SC2317,SC2329
+# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
-case "$0" in
-/*)
-	TESTS_DIR=$(dirname "$0")
-	;;
-*)
-	TESTS_DIR=${PWD:-.}/$(dirname "$0")
-	;;
-esac
+TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-# shellcheck source=src/zxfer_common.sh
-. "$ZXFER_ROOT/src/zxfer_common.sh"
-
-# shellcheck source=src/zxfer_globals.sh
-. "$ZXFER_ROOT/src/zxfer_globals.sh"
-
-# shellcheck source=src/zxfer_secure_paths.sh
-. "$ZXFER_ROOT/src/zxfer_secure_paths.sh"
-
-# shellcheck source=src/zxfer_remote_cli.sh
-. "$ZXFER_ROOT/src/zxfer_remote_cli.sh"
-
-# shellcheck source=src/zxfer_backup_metadata.sh
-. "$ZXFER_ROOT/src/zxfer_backup_metadata.sh"
-
-# shellcheck source=src/zxfer_property_cache.sh
-. "$ZXFER_ROOT/src/zxfer_property_cache.sh"
-
-# shellcheck source=src/zxfer_zfs_send_receive.sh
-. "$ZXFER_ROOT/src/zxfer_zfs_send_receive.sh"
-
-usage() {
-	:
-}
+zxfer_source_runtime_modules_through "zxfer_send_receive.sh"
 
 oneTimeSetUp() {
-	TEST_TMPDIR=$(mktemp -d -t zxfer_send_receive.XXXXXX)
+	zxfer_test_create_tmpdir "zxfer_send_receive"
 }
 
 oneTimeTearDown() {
-	rm -rf "$TEST_TMPDIR"
+	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
@@ -94,10 +64,10 @@ setUp() {
 test_wrap_command_with_ssh_receive_direction_with_compression() {
 	result=$(
 		g_option_T_target_host="target.example doas"
-		split_host_spec_tokens() { printf '%s\n%s\n' "target.example" "doas"; }
-		build_remote_sh_c_command() { printf '%s\n' "'sh' '-c' 'target-gunzip | zfs receive tank/dst'"; }
-		build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'target.example' 'doas' 'sh' '-c' 'target-gunzip | zfs receive tank/dst'"; }
-		wrap_command_with_ssh "zfs receive tank/dst" "target.example doas" 1 receive
+		zxfer_split_host_spec_tokens() { printf '%s\n%s\n' "target.example" "doas"; }
+		zxfer_build_remote_sh_c_command() { printf '%s\n' "'sh' '-c' 'target-gunzip | zfs receive tank/dst'"; }
+		zxfer_build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'target.example' 'doas' 'sh' '-c' 'target-gunzip | zfs receive tank/dst'"; }
+		zxfer_wrap_command_with_ssh "zfs receive tank/dst" "target.example doas" 1 receive
 	)
 
 	assertEquals "Receive-side compression should wrap the remote command in the documented direction." \
@@ -106,10 +76,10 @@ test_wrap_command_with_ssh_receive_direction_with_compression() {
 
 test_wrap_command_with_ssh_without_compression_uses_remote_shell_wrapper_for_multi_token_hosts() {
 	result=$(
-		split_host_spec_tokens() { printf '%s\n%s\n' "origin.example" "pfexec"; }
-		build_remote_sh_c_command() { printf '%s\n' "'sh' '-c' 'zfs send tank/src@snap'"; }
-		build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'origin.example' 'pfexec' 'sh' '-c' 'zfs send tank/src@snap'"; }
-		wrap_command_with_ssh "zfs send tank/src@snap" "origin.example pfexec" 0 send
+		zxfer_split_host_spec_tokens() { printf '%s\n%s\n' "origin.example" "pfexec"; }
+		zxfer_build_remote_sh_c_command() { printf '%s\n' "'sh' '-c' 'zfs send tank/src@snap'"; }
+		zxfer_build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'origin.example' 'pfexec' 'sh' '-c' 'zfs send tank/src@snap'"; }
+		zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "origin.example pfexec" 0 send
 	)
 
 	assertEquals "Non-compressed wrapper hosts should execute through a remote sh -c wrapper." \
@@ -119,10 +89,10 @@ test_wrap_command_with_ssh_without_compression_uses_remote_shell_wrapper_for_mul
 test_wrap_command_with_ssh_send_direction_with_compression_and_wrapper_host() {
 	result=$(
 		g_option_O_origin_host="origin.example pfexec"
-		split_host_spec_tokens() { printf '%s\n%s\n' "origin.example" "pfexec"; }
-		build_remote_sh_c_command() { printf '%s\n' "'sh' '-c' 'zfs send tank/src@snap | remote-gzip'"; }
-		build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'origin.example' 'pfexec' 'sh' '-c' 'zfs send tank/src@snap | remote-gzip'"; }
-		wrap_command_with_ssh "zfs send tank/src@snap" "origin.example pfexec" 1 send
+		zxfer_split_host_spec_tokens() { printf '%s\n%s\n' "origin.example" "pfexec"; }
+		zxfer_build_remote_sh_c_command() { printf '%s\n' "'sh' '-c' 'zfs send tank/src@snap | remote-gzip'"; }
+		zxfer_build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'origin.example' 'pfexec' 'sh' '-c' 'zfs send tank/src@snap | remote-gzip'"; }
+		zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "origin.example pfexec" 1 send
 	)
 
 	assertEquals "Compressed send wrappers should compress remotely before piping back through the safe decompressor." \
@@ -132,9 +102,9 @@ test_wrap_command_with_ssh_send_direction_with_compression_and_wrapper_host() {
 test_wrap_command_with_ssh_send_direction_with_compression_and_simple_host() {
 	result=$(
 		g_option_O_origin_host="origin.example"
-		split_host_spec_tokens() { printf '%s\n' "origin.example"; }
-		build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'origin.example' 'zfs send tank/src@snap | remote-gzip'"; }
-		wrap_command_with_ssh "zfs send tank/src@snap" "origin.example" 1 send
+		zxfer_split_host_spec_tokens() { printf '%s\n' "origin.example"; }
+		zxfer_build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'origin.example' 'zfs send tank/src@snap | remote-gzip'"; }
+		zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "origin.example" 1 send
 	)
 
 	assertEquals "Compressed send wrappers on simple hosts should still append the safe local decompressor." \
@@ -144,9 +114,9 @@ test_wrap_command_with_ssh_send_direction_with_compression_and_simple_host() {
 test_wrap_command_with_ssh_receive_direction_with_compression_and_simple_host() {
 	result=$(
 		g_option_T_target_host="target.example"
-		split_host_spec_tokens() { printf '%s\n' "target.example"; }
-		build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'target.example' 'target-gunzip | zfs receive tank/dst'"; }
-		wrap_command_with_ssh "zfs receive tank/dst" "target.example" 1 receive
+		zxfer_split_host_spec_tokens() { printf '%s\n' "target.example"; }
+		zxfer_build_ssh_shell_command_for_host() { printf '%s\n' "'/usr/bin/ssh' 'target.example' 'target-gunzip | zfs receive tank/dst'"; }
+		zxfer_wrap_command_with_ssh "zfs receive tank/dst" "target.example" 1 receive
 	)
 
 	assertEquals "Compressed receive wrappers on simple hosts should stream through the safe compressor locally." \
@@ -158,13 +128,13 @@ test_wrap_command_with_ssh_rejects_missing_safe_compression_commands() {
 	output=$(
 		(
 			exec 8</dev/null
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
 			g_cmd_compress_safe=""
 			g_cmd_decompress_safe=""
-			wrap_command_with_ssh "zfs send tank/src@snap" "origin.example" 1 send
+			zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "origin.example" 1 send
 		)
 	)
 	status=$?
@@ -178,15 +148,15 @@ test_calculate_size_estimate_reports_incremental_probe_failures() {
 	set +e
 	output=$(
 		(
-			run_source_zfs_cmd() {
+			zxfer_run_source_zfs_cmd() {
 				printf '%s\n' "probe failed"
 				return 1
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			calculate_size_estimate "tank/src@snap2" "tank/src@snap1"
+			zxfer_calculate_size_estimate "tank/src@snap2" "tank/src@snap1"
 		)
 	)
 	status=$?
@@ -200,15 +170,15 @@ test_calculate_size_estimate_reports_full_probe_failures() {
 	set +e
 	output=$(
 		(
-			run_source_zfs_cmd() {
+			zxfer_run_source_zfs_cmd() {
 				printf '%s\n' "probe failed"
 				return 1
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			calculate_size_estimate "tank/src@snap1" ""
+			zxfer_calculate_size_estimate "tank/src@snap1" ""
 		)
 	)
 	status=$?
@@ -299,11 +269,11 @@ test_calculate_size_estimate_uses_fast_incremental_probe_when_requested() {
 	result=$(
 		(
 			LOG_FILE="$log"
-			run_source_zfs_cmd() {
+			zxfer_run_source_zfs_cmd() {
 				printf '%s\n' "$*" >>"$LOG_FILE"
 				printf '%s\n' "2048"
 			}
-			calculate_size_estimate "tank/src@snap2" "tank/src@snap1" 1
+			zxfer_calculate_size_estimate "tank/src@snap2" "tank/src@snap1" 1
 		)
 	)
 
@@ -320,7 +290,7 @@ test_calculate_size_estimate_falls_back_to_exact_incremental_probe_when_fast_mod
 	result=$(
 		(
 			LOG_FILE="$log"
-			run_source_zfs_cmd() {
+			zxfer_run_source_zfs_cmd() {
 				printf '%s\n' "$*" >>"$LOG_FILE"
 				if [ "$1" = "get" ]; then
 					printf '%s\n' "unsupported"
@@ -329,7 +299,7 @@ test_calculate_size_estimate_falls_back_to_exact_incremental_probe_when_fast_mod
 					printf 'size\t8192\n'
 				fi
 			}
-			calculate_size_estimate "tank/src@snap2" "tank/src@snap1" 1
+			zxfer_calculate_size_estimate "tank/src@snap2" "tank/src@snap1" 1
 		)
 	)
 
@@ -347,11 +317,11 @@ test_calculate_size_estimate_uses_fast_full_probe_when_requested() {
 	result=$(
 		(
 			LOG_FILE="$log"
-			run_source_zfs_cmd() {
+			zxfer_run_source_zfs_cmd() {
 				printf '%s\n' "$*" >>"$LOG_FILE"
 				printf '%s\n' "16384"
 			}
-			calculate_size_estimate "tank/src@snap2" "" 1
+			zxfer_calculate_size_estimate "tank/src@snap2" "" 1
 		)
 	)
 
@@ -369,7 +339,7 @@ test_calculate_size_estimate_falls_back_to_exact_full_probe_when_fast_mode_fails
 		(
 			LOG_FILE="$log"
 			g_option_V_very_verbose=1
-			run_source_zfs_cmd() {
+			zxfer_run_source_zfs_cmd() {
 				printf '%s\n' "$*" >>"$LOG_FILE"
 				if [ "$1" = "list" ]; then
 					printf '%s\n' "unsupported"
@@ -377,7 +347,7 @@ test_calculate_size_estimate_falls_back_to_exact_full_probe_when_fast_mode_fails
 				fi
 				printf 'size\t12288\n'
 			}
-			calculate_size_estimate "tank/src@snap2" "" 1
+			zxfer_calculate_size_estimate "tank/src@snap2" "" 1
 		) 2>&1
 	)
 
@@ -393,10 +363,10 @@ send -nPv tank/src@snap2" "$(cat "$log")"
 test_handle_progress_bar_option_builds_passthrough_pipeline() {
 	g_option_D_display_progress_bar="pv -s %%size%% -N %%title%%"
 	result=$(
-		calculate_size_estimate() {
+		zxfer_calculate_size_estimate() {
 			printf '%s\n' "4096"
 		}
-		handle_progress_bar_option "tank/src@snap2" "tank/src@snap1"
+		zxfer_handle_progress_bar_option "tank/src@snap2" "tank/src@snap1"
 	)
 
 	assertContains "Progress handling should preserve the progress passthrough helper." \
@@ -412,11 +382,11 @@ test_handle_progress_bar_option_skips_size_probe_when_size_macro_is_unused() {
 	result=$(
 		(
 			LOG_FILE="$log"
-			calculate_size_estimate() {
+			zxfer_calculate_size_estimate() {
 				printf '%s\n' "called" >>"$LOG_FILE"
 				printf '%s\n' "4096"
 			}
-			handle_progress_bar_option "tank/src@snap2" "tank/src@snap1"
+			zxfer_handle_progress_bar_option "tank/src@snap2" "tank/src@snap1"
 		)
 	)
 
@@ -435,11 +405,11 @@ test_handle_progress_bar_option_prefers_fast_estimate_for_remote_or_parallel_run
 	result=$(
 		(
 			MODE_LOG="$mode_log"
-			calculate_size_estimate() {
+			zxfer_calculate_size_estimate() {
 				printf '%s\n' "$3" >"$MODE_LOG"
 				printf '%s\n' "4096"
 			}
-			handle_progress_bar_option "tank/src@snap2" "tank/src@snap1"
+			zxfer_handle_progress_bar_option "tank/src@snap2" "tank/src@snap1"
 		)
 	)
 
@@ -452,17 +422,27 @@ test_handle_progress_bar_option_prefers_fast_estimate_for_remote_or_parallel_run
 test_setup_progress_dialog_substitutes_estimate_and_snapshot_title() {
 	g_option_D_display_progress_bar="pv -s %%size%% -N %%title%%"
 
-	result=$(setup_progress_dialog "8192" "tank/src@snap9")
+	result=$(zxfer_setup_progress_dialog "8192" "tank/src@snap9")
 
 	assertEquals "Progress-dialog setup should substitute both the size estimate and snapshot title." \
 		"pv -s 8192 -N tank/src@snap9" "$result"
+}
+
+test_setup_progress_dialog_substitutes_estimate_and_snapshot_title_in_current_shell() {
+	output_file="$TEST_TMPDIR/setup_progress_dialog_current_shell.out"
+	g_option_D_display_progress_bar="pv -s %%size%% -N %%title%%"
+
+	zxfer_setup_progress_dialog "8192" "tank/src@snap9" >"$output_file"
+
+	assertEquals "Direct progress-dialog setup calls should still substitute both the size estimate and snapshot title." \
+		"pv -s 8192 -N tank/src@snap9" "$(cat "$output_file")"
 }
 
 test_get_send_command_display_includes_verbose_raw_flags_for_full_send() {
 	g_option_V_very_verbose=1
 	g_option_w_raw_send=1
 
-	result=$(get_send_command "" "tank/src@snap9")
+	result=$(zxfer_get_send_command "" "tank/src@snap9")
 
 	assertEquals "Display-mode full sends should include verbose and raw flags when enabled." \
 		"/sbin/zfs send -v -w tank/src@snap9" "$result"
@@ -472,7 +452,7 @@ test_wait_for_zfs_send_jobs_returns_immediately_when_empty() {
 	g_zfs_send_job_pids=""
 	g_count_zfs_send_jobs=5
 
-	wait_for_zfs_send_jobs "unit"
+	zxfer_wait_for_zfs_send_jobs "unit"
 
 	assertEquals "Waiting with no jobs should reset the running-job count." 0 "$g_count_zfs_send_jobs"
 }
@@ -481,7 +461,7 @@ test_zxfer_open_send_job_completion_queue_marks_queue_unavailable_when_tempdir_s
 	log="$TEST_TMPDIR/queue_tempdir_fail.log"
 
 	(
-		echoV() {
+		zxfer_echoV() {
 			printf '%s\n' "$1" >>"$log"
 		}
 		zxfer_create_private_temp_dir() {
@@ -503,7 +483,7 @@ test_zxfer_open_send_job_completion_queue_marks_queue_unavailable_when_mkfifo_fa
 	log="$TEST_TMPDIR/queue_mkfifo_fail.log"
 
 	(
-		echoV() {
+		zxfer_echoV() {
 			printf '%s\n' "$1" >>"$log"
 		}
 		mkfifo() {
@@ -525,7 +505,7 @@ test_zxfer_open_send_job_completion_queue_marks_queue_unavailable_when_chmod_fai
 	log="$TEST_TMPDIR/queue_chmod_fail.log"
 
 	(
-		echoV() {
+		zxfer_echoV() {
 			printf '%s\n' "$1" >>"$log"
 		}
 		chmod() {
@@ -547,7 +527,7 @@ test_zxfer_open_send_job_completion_queue_marks_queue_unavailable_when_open_fail
 	log="$TEST_TMPDIR/queue_open_fail.log"
 
 	(
-		echoV() {
+		zxfer_echoV() {
 			printf '%s\n' "$1" >>"$log"
 		}
 		zxfer_open_send_job_completion_queue_fd() {
@@ -618,7 +598,7 @@ test_zxfer_run_background_pipeline_executes_command_and_reports_completion() {
 	(
 		exec 8>>"$queue_file"
 		g_zfs_send_job_queue_open=1
-		echov() {
+		zxfer_echov() {
 			printf '%s\n' "$1" >>"$log"
 		}
 		zxfer_run_background_pipeline "printf 'runner-ok' >'$TEST_TMPDIR/bg_payload.txt'" "displaycmd" "$status_file"
@@ -646,7 +626,7 @@ test_zxfer_run_background_pipeline_dry_run_skips_eval_and_returns_success() {
 
 	g_option_n_dryrun=1
 	(
-		echov() {
+		zxfer_echov() {
 			printf '%s\n' "$1" >>"$log"
 		}
 		zxfer_run_background_pipeline "touch '$TEST_TMPDIR/bg_dry_payload.txt'" "dry-display" "$status_file"
@@ -669,13 +649,13 @@ test_wait_for_next_zfs_send_job_completion_falls_back_when_queue_is_not_open() {
 
 	(
 		EXEC_LOG="$log"
-		wait_for_zfs_send_jobs() {
+		zxfer_wait_for_zfs_send_jobs() {
 			printf 'wait:%s\n' "$1" >>"$EXEC_LOG"
 		}
 		g_count_zfs_send_jobs=1
 		g_zfs_send_job_queue_open=0
 		g_zfs_send_job_records="101	$TEST_TMPDIR/status"
-		wait_for_next_zfs_send_job_completion "unit"
+		zxfer_wait_for_next_zfs_send_job_completion "unit"
 	)
 
 	assertEquals "Closed completion queues should fall back to the legacy wait helper." \
@@ -706,7 +686,7 @@ test_wait_for_next_zfs_send_job_completion_uses_wait_status_when_status_file_is_
 			zxfer_terminate_remaining_send_jobs() {
 				:
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf 'error:%s\n' "$1"
 				exit 1
 			}
@@ -714,7 +694,7 @@ test_wait_for_next_zfs_send_job_completion_uses_wait_status_when_status_file_is_
 			g_zfs_send_job_records="record"
 			g_count_zfs_send_jobs=1
 			g_zfs_send_job_pids="$job_pid"
-			wait_for_next_zfs_send_job_completion "unit"
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
 		)
 	)
 	status=$?
@@ -726,11 +706,76 @@ test_wait_for_next_zfs_send_job_completion_uses_wait_status_when_status_file_is_
 		"$output" "exit 7"
 }
 
+test_wait_for_next_zfs_send_job_completion_reports_queue_read_failures() {
+	set +e
+	output=$(
+		(
+			queue_file="$TEST_TMPDIR/wait_next_empty_queue.txt"
+			: >"$queue_file"
+			exec 8<"$queue_file"
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="101	$TEST_TMPDIR/status"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	status=$?
+
+	assertEquals "Rolling send/receive waits should fail closed when the completion queue cannot be read." \
+		1 "$status"
+	assertContains "Queue read failures should terminate the remaining jobs before aborting." \
+		"$output" "terminated"
+	assertContains "Queue read failures should preserve the documented wait failure." \
+		"$output" "Failed waiting for zfs send/receive jobs."
+}
+
+test_wait_for_next_zfs_send_job_completion_reports_unknown_completed_status_files() {
+	set +e
+	output=$(
+		(
+			status_file="$TEST_TMPDIR/wait_next_unmatched_status.txt"
+			queue_file="$TEST_TMPDIR/wait_next_unmatched_queue.txt"
+			printf '%s\n' 0 >"$status_file"
+			printf '%s\n' "$status_file" >"$queue_file"
+			exec 8<"$queue_file"
+			zxfer_find_send_job_pid_by_status_file() {
+				return 1
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="101	$TEST_TMPDIR/other_status"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	status=$?
+
+	assertEquals "Rolling send/receive waits should fail closed when a completed status file does not match a tracked PID." \
+		1 "$status"
+	assertContains "Unknown completed status files should terminate the remaining jobs before aborting." \
+		"$output" "terminated"
+	assertContains "Unknown completed status files should preserve the documented matching failure." \
+		"$output" "Failed to match a completed zfs send/receive job to a tracked PID."
+}
+
 test_zxfer_progress_passthrough_falls_back_when_mktemp_fails() {
 	log="$TEST_TMPDIR/progress_mktemp.log"
 	output=$(
 		printf 'payload\n' | (
-			echoV() {
+			zxfer_echoV() {
 				printf '%s\n' "$1" >>"$log"
 			}
 			mktemp() {
@@ -751,7 +796,7 @@ test_zxfer_progress_passthrough_falls_back_when_mkfifo_fails() {
 	log="$TEST_TMPDIR/progress_mkfifo.log"
 	output=$(
 		printf 'payload\n' | (
-			echoV() {
+			zxfer_echoV() {
 				printf '%s\n' "$1" >>"$log"
 			}
 			mktemp() {
@@ -775,7 +820,7 @@ test_zxfer_progress_passthrough_falls_back_when_chmod_fails() {
 	log="$TEST_TMPDIR/progress_chmod.log"
 	output=$(
 		printf 'payload\n' | (
-			echoV() {
+			zxfer_echoV() {
 				printf '%s\n' "$1" >>"$log"
 			}
 			mktemp() {
@@ -802,7 +847,7 @@ test_zxfer_progress_passthrough_logs_progress_command_failures() {
 	log="$TEST_TMPDIR/progress_status.log"
 	output=$(
 		printf 'payload\n' | (
-			echoV() {
+			zxfer_echoV() {
 				printf '%s\n' "$1" >>"$log"
 			}
 			zxfer_progress_passthrough "cat >/dev/null; exit 7"
@@ -858,7 +903,7 @@ test_get_send_command_exec_treats_local_zfs_path_as_literal() {
 	old_cmd_zfs=$g_cmd_zfs
 	g_cmd_zfs="/bin/echo; touch $marker #"
 
-	cmd=$(get_send_command "" "tank/fs@snap1" "$g_cmd_zfs" "exec")
+	cmd=$(zxfer_get_send_command "" "tank/fs@snap1" "$g_cmd_zfs" "exec")
 
 	if eval "$cmd" >/dev/null 2>&1; then
 		status=0
@@ -879,7 +924,7 @@ test_get_receive_command_exec_treats_local_zfs_path_as_literal() {
 	old_cmd_zfs=$g_cmd_zfs
 	g_cmd_zfs="/bin/echo; touch $marker #"
 
-	cmd=$(get_receive_command "tank/dst" "$g_cmd_zfs" "exec")
+	cmd=$(zxfer_get_receive_command "tank/dst" "$g_cmd_zfs" "exec")
 
 	if eval "$cmd" >/dev/null 2>&1; then
 		status=0
@@ -901,13 +946,13 @@ test_zfs_send_receive_runs_foreground_pipeline() {
 
 	(
 		EXEC_LOG="$log"
-		echoV() { :; }
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
-		execute_command() {
+		zxfer_echoV() { :; }
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_execute_command() {
 			printf '%s\n' "$1" >>"$EXEC_LOG"
 		}
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 		printf 'performed=%s\n' "$g_is_performed_send_destroy" >>"$EXEC_LOG"
 	)
 
@@ -922,16 +967,16 @@ test_zfs_send_receive_invalidates_destination_cache_after_live_receive() {
 
 	(
 		EXEC_LOG="$log"
-		echoV() { :; }
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
-		execute_command() {
+		zxfer_echoV() { :; }
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_execute_command() {
 			printf 'exec=%s\n' "$1" >>"$EXEC_LOG"
 		}
 		zxfer_invalidate_destination_property_cache() {
 			printf 'invalidate=%s\n' "$1" >>"$EXEC_LOG"
 		}
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 	)
 
 	assertEquals "Successful live send/receive should invalidate the destination property cache for the receive dataset." \
@@ -942,14 +987,14 @@ invalidate=backup/dst" "$(cat "$log")"
 test_zfs_send_receive_marks_destination_hierarchy_exists_after_foreground_receive() {
 	output=$(
 		(
-			echoV() { :; }
-			get_send_command() { printf '%s\n' "sendcmd"; }
-			get_receive_command() { printf '%s\n' "recvcmd"; }
+			zxfer_echoV() { :; }
+			zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+			zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
 			zxfer_mark_destination_root_missing_in_cache "backup"
-			execute_command() {
+			zxfer_execute_command() {
 				:
 			}
-			zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst/child" "0"
+			zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst/child" "0"
 			printf 'root=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup")"
 			printf 'parent=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst")"
 			printf 'child=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst/child")"
@@ -973,10 +1018,10 @@ test_zfs_send_receive_tracks_profile_counters_when_very_verbose() {
 
 	(
 		EXEC_LOG="$log"
-		echoV() { :; }
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
-		execute_command() {
+		zxfer_echoV() { :; }
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_execute_command() {
 			printf '%s\n' "$1" >>"$EXEC_LOG"
 		}
 		g_option_V_very_verbose=1
@@ -987,7 +1032,7 @@ test_zfs_send_receive_tracks_profile_counters_when_very_verbose() {
 		g_zxfer_profile_send_receive_pipeline_commands=0
 		g_zxfer_profile_send_receive_background_pipeline_commands=0
 		g_zxfer_profile_bucket_send_receive_setup=0
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 		{
 			printf 'source_zfs=%s\n' "${g_zxfer_profile_source_zfs_calls:-0}"
 			printf 'destination_zfs=%s\n' "${g_zxfer_profile_destination_zfs_calls:-0}"
@@ -1016,13 +1061,13 @@ test_zfs_send_receive_tracks_remote_ssh_profile_counters_when_very_verbose() {
 
 	(
 		EXEC_LOG="$log"
-		echoV() { :; }
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
-		wrap_command_with_ssh() {
+		zxfer_echoV() { :; }
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_wrap_command_with_ssh() {
 			printf '%s\n' "$1 via $2"
 		}
-		execute_command() {
+		zxfer_execute_command() {
 			printf '%s\n' "$1" >>"$EXEC_LOG"
 		}
 		g_option_V_very_verbose=1
@@ -1031,7 +1076,7 @@ test_zfs_send_receive_tracks_remote_ssh_profile_counters_when_very_verbose() {
 		g_zxfer_profile_ssh_shell_invocations=0
 		g_zxfer_profile_source_ssh_shell_invocations=0
 		g_zxfer_profile_destination_ssh_shell_invocations=0
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 		{
 			printf 'ssh=%s\n' "${g_zxfer_profile_ssh_shell_invocations:-0}"
 			printf 'source_ssh=%s\n' "${g_zxfer_profile_source_ssh_shell_invocations:-0}"
@@ -1052,13 +1097,13 @@ test_zfs_send_receive_tracks_remote_ssh_counters_when_origin_and_target_share_ho
 
 	(
 		EXEC_LOG="$log"
-		echoV() { :; }
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
-		wrap_command_with_ssh() {
+		zxfer_echoV() { :; }
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_wrap_command_with_ssh() {
 			printf '%s\n' "$1 via $2"
 		}
-		execute_command() {
+		zxfer_execute_command() {
 			printf '%s\n' "$1" >>"$EXEC_LOG"
 		}
 		g_option_V_very_verbose=1
@@ -1067,7 +1112,7 @@ test_zfs_send_receive_tracks_remote_ssh_counters_when_origin_and_target_share_ho
 		g_zxfer_profile_ssh_shell_invocations=0
 		g_zxfer_profile_source_ssh_shell_invocations=0
 		g_zxfer_profile_destination_ssh_shell_invocations=0
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 		{
 			printf 'ssh=%s\n' "${g_zxfer_profile_ssh_shell_invocations:-0}"
 			printf 'source_ssh=%s\n' "${g_zxfer_profile_source_ssh_shell_invocations:-0}"
@@ -1088,10 +1133,10 @@ test_zfs_send_receive_dry_run_skips_actual_call_profile_counters() {
 
 	(
 		EXEC_LOG="$log"
-		echoV() { :; }
-		echov() { :; }
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_echoV() { :; }
+		zxfer_echov() { :; }
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
 		g_option_n_dryrun=1
 		g_option_V_very_verbose=1
 		g_option_O_origin_host="origin.example"
@@ -1102,7 +1147,7 @@ test_zfs_send_receive_dry_run_skips_actual_call_profile_counters() {
 		g_zxfer_profile_zfs_receive_calls=0
 		g_zxfer_profile_ssh_shell_invocations=0
 		g_zxfer_profile_send_receive_pipeline_commands=0
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 		{
 			printf 'source_zfs=%s\n' "${g_zxfer_profile_source_zfs_calls:-0}"
 			printf 'destination_zfs=%s\n' "${g_zxfer_profile_destination_zfs_calls:-0}"
@@ -1122,14 +1167,29 @@ ssh=0
 pipelines=1" "$(cat "$log")"
 }
 
+test_zfs_send_receive_dry_run_emits_raw_incremental_pipeline_on_stdout() {
+	output=$(
+		(
+			g_option_n_dryrun=1
+			g_option_v_verbose=1
+			g_option_V_very_verbose=1
+			g_option_w_raw_send=1
+			zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		)
+	)
+
+	assertContains "Dry-run send/receive should keep the operator-facing incremental raw-send pipeline on stdout." \
+		"$output" "/sbin/zfs send -v -w -I tank/src@snap1 tank/src@snap2 | /sbin/zfs receive  backup/dst"
+}
+
 test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
 	log="$TEST_TMPDIR/background_pipeline.log"
 	: >"$log"
 
 	(
 		EXEC_LOG="$log"
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
 		zxfer_run_background_pipeline() {
 			printf '%s\n' "$2" >>"$EXEC_LOG"
 			printf '0\n' >"$3"
@@ -1137,7 +1197,7 @@ test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
 			exit 0
 		}
 		g_option_j_jobs=3
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
 		# shellcheck disable=SC2086
 		set -- $g_zfs_send_job_pids
 		wait "$@"
@@ -1159,13 +1219,13 @@ test_zfs_send_receive_appends_multiple_background_job_pids_and_logs_force_flag()
 
 	(
 		EXEC_LOG="$log"
-		get_send_command() {
+		zxfer_get_send_command() {
 			printf '%s\n' "sendcmd-$2"
 		}
-		get_receive_command() {
+		zxfer_get_receive_command() {
 			printf '%s\n' "recvcmd"
 		}
-		echov() {
+		zxfer_echov() {
 			printf 'verbose:%s\n' "$*" >>"$EXEC_LOG"
 		}
 		zxfer_run_background_pipeline() {
@@ -1177,8 +1237,8 @@ test_zfs_send_receive_appends_multiple_background_job_pids_and_logs_force_flag()
 		g_option_j_jobs=3
 		g_option_F_force_rollback="-F"
 		g_option_v_verbose=1
-		zfs_send_receive "tank/src@snap0" "tank/src@snap1" "backup/dst" "1"
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
+		zxfer_zfs_send_receive "tank/src@snap0" "tank/src@snap1" "backup/dst" "1"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
 		# shellcheck disable=SC2086
 		set -- $g_zfs_send_job_pids
 		wait "$@"
@@ -1198,27 +1258,60 @@ test_zfs_send_receive_appends_multiple_background_job_pids_and_logs_force_flag()
 		"$(cat "$log")" "pids="
 }
 
+test_zfs_send_receive_appends_multiple_background_job_pids_in_current_shell() {
+	output_file="$TEST_TMPDIR/background_pipeline_multiple_current_shell.out"
+
+	(
+		zxfer_get_send_command() {
+			printf '%s\n' "sendcmd-$2"
+		}
+		zxfer_get_receive_command() {
+			printf '%s\n' "recvcmd"
+		}
+		zxfer_open_send_job_completion_queue() {
+			return 1
+		}
+		zxfer_execute_command() {
+			sleep 1
+		}
+		g_option_j_jobs=3
+		zxfer_zfs_send_receive "tank/src@snap0" "tank/src@snap1" "backup/dst" "1"
+		first=$g_zfs_send_job_pids
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
+		second=$g_zfs_send_job_pids
+		# shellcheck disable=SC2086
+		set -- $g_zfs_send_job_pids
+		printf 'argc=%s\n' "$#" >"$output_file"
+		printf 'first=%s\n' "$first" >>"$output_file"
+		printf 'second=%s\n' "$second" >>"$output_file"
+		wait "$@"
+	)
+
+	assertContains "Launching multiple legacy background transfers should leave two tracked PIDs in the current shell." \
+		"$(cat "$output_file")" "argc=2"
+}
+
 test_zfs_send_receive_waits_at_job_limit_before_backgrounding() {
 	log="$TEST_TMPDIR/job_limit.log"
 	: >"$log"
 
 	(
 		EXEC_LOG="$log"
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
 		zxfer_open_send_job_completion_queue() {
 			return 1
 		}
-		wait_for_zfs_send_jobs() {
+		zxfer_wait_for_zfs_send_jobs() {
 			printf 'wait:%s\n' "$1" >>"$EXEC_LOG"
 			g_count_zfs_send_jobs=0
 		}
-		execute_command() {
+		zxfer_execute_command() {
 			printf '%s\n' "$1" >>"$EXEC_LOG"
 		}
 		g_option_j_jobs=2
 		g_count_zfs_send_jobs=2
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
 		if [ -n "${g_zfs_send_job_pids:-}" ]; then
 			# shellcheck disable=SC2086
 			set -- $g_zfs_send_job_pids
@@ -1237,17 +1330,17 @@ test_zfs_send_receive_falls_back_to_legacy_background_path_when_queue_is_unavail
 
 	(
 		EXEC_LOG="$log"
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
 		zxfer_open_send_job_completion_queue() {
 			return 1
 		}
-		execute_command() {
+		zxfer_execute_command() {
 			printf '%s\n' "$1" >>"$EXEC_LOG"
 		}
 		g_option_j_jobs=2
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-		wait_for_zfs_send_jobs "final sync"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
+		zxfer_wait_for_zfs_send_jobs "final sync"
 		printf 'count=%s\n' "$g_count_zfs_send_jobs" >>"$EXEC_LOG"
 		printf 'pids=%s\n' "$g_zfs_send_job_pids" >>"$EXEC_LOG"
 	)
@@ -1264,11 +1357,11 @@ test_zfs_send_receive_uses_rolling_pool_when_a_job_finishes_early() {
 
 	(
 		EXEC_LOG="$log"
-		echov() { :; }
-		get_send_command() {
+		zxfer_echov() { :; }
+		zxfer_get_send_command() {
 			printf '%s\n' "sendcmd-$2"
 		}
-		get_receive_command() {
+		zxfer_get_receive_command() {
 			printf '%s\n' "recvcmd"
 		}
 		zxfer_run_background_pipeline() {
@@ -1299,10 +1392,10 @@ test_zfs_send_receive_uses_rolling_pool_when_a_job_finishes_early() {
 			exit 99
 		}
 		g_option_j_jobs=2
-		zfs_send_receive "tank/src@base" "tank/src@snap1" "backup/dst" "1"
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-		zfs_send_receive "tank/src@snap2" "tank/src@snap3" "backup/dst" "1"
-		wait_for_zfs_send_jobs "final sync"
+		zxfer_zfs_send_receive "tank/src@base" "tank/src@snap1" "backup/dst" "1"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
+		zxfer_zfs_send_receive "tank/src@snap2" "tank/src@snap3" "backup/dst" "1"
+		zxfer_wait_for_zfs_send_jobs "final sync"
 		printf 'count=%s\n' "$g_count_zfs_send_jobs" >>"$EXEC_LOG"
 		printf 'pids=%s\n' "${g_zfs_send_job_pids:-}" >>"$EXEC_LOG"
 	)
@@ -1330,14 +1423,14 @@ test_zfs_send_receive_rolling_pool_fails_fast_and_kills_inflight_jobs() {
 	output=$(
 		(
 			EXEC_LOG="$log"
-			echov() { :; }
-			get_send_command() {
+			zxfer_echov() { :; }
+			zxfer_get_send_command() {
 				printf '%s\n' "sendcmd-$2"
 			}
-			get_receive_command() {
+			zxfer_get_receive_command() {
 				printf '%s\n' "recvcmd"
 			}
-			throw_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit 1
 			}
@@ -1366,9 +1459,9 @@ test_zfs_send_receive_rolling_pool_fails_fast_and_kills_inflight_jobs() {
 				exit 99
 			}
 			g_option_j_jobs=2
-			zfs_send_receive "tank/src@base" "tank/src@snap1" "backup/dst" "1"
-			zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-			zfs_send_receive "tank/src@snap2" "tank/src@snap3" "backup/dst" "1"
+			zxfer_zfs_send_receive "tank/src@base" "tank/src@snap1" "backup/dst" "1"
+			zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
+			zxfer_zfs_send_receive "tank/src@snap2" "tank/src@snap3" "backup/dst" "1"
 		)
 	)
 	status=$?
@@ -1400,13 +1493,13 @@ test_zfs_send_receive_invalid_job_limit_falls_back_to_single_job_mode() {
 
 	(
 		EXEC_LOG="$log"
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
-		execute_command() {
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_execute_command() {
 			printf '%s\n' "$1" >>"$EXEC_LOG"
 		}
 		g_option_j_jobs="invalid"
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
 		printf 'count=%s\n' "$g_count_zfs_send_jobs" >>"$EXEC_LOG"
 		printf 'pids=%s\n' "${g_zfs_send_job_pids:-}" >>"$EXEC_LOG"
 	)
@@ -1423,22 +1516,22 @@ test_zfs_send_receive_adds_remote_wrappers_and_progress_pipeline() {
 
 	(
 		EXEC_LOG="$log"
-		get_send_command() { printf '%s\n' "sendcmd"; }
-		get_receive_command() { printf '%s\n' "recvcmd"; }
-		wrap_command_with_ssh() {
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_wrap_command_with_ssh() {
 			printf '%s<%s:%s:%s>\n' "$1" "$2" "$3" "$4"
 		}
-		handle_progress_bar_option() {
+		zxfer_handle_progress_bar_option() {
 			printf '%s\n' "| progress"
 		}
-		execute_command() {
+		zxfer_execute_command() {
 			printf '%s\n' "$1" >>"$EXEC_LOG"
 		}
 		g_option_O_origin_host="origin.example"
 		g_option_T_target_host="target.example"
 		g_option_z_compress=1
 		g_option_D_display_progress_bar="pv"
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 	)
 
 	assertEquals "Remote send/receive should wrap both ends and append the progress helper." \
@@ -1451,7 +1544,7 @@ test_zfs_send_receive_uses_resolved_remote_zfs_paths() {
 
 	(
 		EXEC_LOG="$log"
-		execute_command() {
+		zxfer_execute_command() {
 			printf 'exec=%s\n' "$1" >>"$EXEC_LOG"
 			printf 'display=%s\n' "$3" >>"$EXEC_LOG"
 		}
@@ -1460,7 +1553,7 @@ test_zfs_send_receive_uses_resolved_remote_zfs_paths() {
 		g_option_T_target_host="target.example"
 		g_origin_cmd_zfs="/remote/origin/zfs"
 		g_target_cmd_zfs="/remote/target/zfs"
-		zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 	)
 	display_line=$(grep '^display=' "$log")
 

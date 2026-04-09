@@ -2,24 +2,27 @@ name: Unit Tests
 
 on:
   push:
-  pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Cancel superseded runs for the same pushed ref.
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   shunit2:
     name: shunit2 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest
-          - macos-latest
+          - ubuntu-24.04
+          - macos-15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Run shunit2 tests
         shell: bash
         run: |
@@ -31,7 +34,10 @@ jobs:
 
   portable-shells:
     name: shunit2 (${{ matrix.shell_name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -50,7 +56,7 @@ jobs:
             shell_kind: posh
             experimental: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install portable shells
         shell: bash
         run: |
@@ -99,3 +105,46 @@ jobs:
         run: |
           set -euo pipefail
           ./tests/run_shunit_tests.sh
+
+  shunit2-freebsd:
+    name: shunit2 (FreeBSD)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Run shunit2 tests on FreeBSD
+        uses: vmactions/freebsd-vm@7ca82f79fe3078fecded6d3a2bff094995447bbd # v1
+        with:
+          usesh: true
+          run: |
+            ./tests/run_shunit_tests.sh
+
+  shunit2-omnios:
+    name: shunit2 (OmniOS)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Run shunit2 tests on OmniOS
+        uses: vmactions/omnios-vm@68da93c6d9812b29fc90c5b5141b093f84a590fb # v1
+        with:
+          usesh: true
+          prepare: |
+            PKG_SUCCESS_ON_NOP=1 pkg install bash
+          run: |
+            bash_bin=$(command -v bash)
+            wrapper=$(mktemp /tmp/zxfer-bash-posix.XXXXXX)
+            printf '%s\n' '#!/bin/sh' "exec \"$bash_bin\" --posix \"\$@\"" >"$wrapper"
+            chmod 755 "$wrapper"
+            export ZXFER_TEST_SHELL="$wrapper"
+            # OmniOS /usr/xpg4/bin/sh follows ksh-style subshell function-binding
+            # semantics and does not honor the subshell helper overrides used by
+            # the shunit suites. Keep OmniOS runtime coverage in the integration
+            # job, but run the unit suites through a POSIX bash wrapper here so
+            # the tests exercise zxfer logic rather than shell-specific stubbing
+            # behavior.
+            "$bash_bin" ./tests/run_shunit_tests.sh

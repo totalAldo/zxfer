@@ -2,20 +2,21 @@ name: Coverage
 
 on:
   push:
-  pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Cancel superseded runs for the same pushed ref.
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   coverage-bash-xtrace:
     name: shell coverage (bash-xtrace policy)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Run coverage
         shell: bash
         env:
@@ -95,7 +96,7 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: zxfer-coverage-bash-xtrace-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/coverage
@@ -104,10 +105,11 @@ jobs:
   coverage-kcov:
     name: shell coverage (kcov)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Run coverage with kcov
         shell: bash
         env:
@@ -127,7 +129,7 @@ jobs:
             sh -lc './tests/run_coverage.sh'
       - name: Upload kcov artifact
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: zxfer-coverage-kcov-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/coverage-kcov

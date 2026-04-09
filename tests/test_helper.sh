@@ -22,58 +22,104 @@ if [ ! -r "$SHUNIT2_BIN" ]; then
 	exit 1
 fi
 
-# shellcheck source=src/zxfer_common.sh
-. "$ZXFER_ROOT/src/zxfer_common.sh"
+# shellcheck source=src/zxfer_modules.sh
+ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT \
+	ZXFER_SOURCE_MODULES_THROUGH=zxfer_dependencies.sh \
+	. "$ZXFER_ROOT/src/zxfer_modules.sh"
 
 zxfer_source_runtime_modules_through() {
 	l_last_module=$1
 	l_root=${2:-$ZXFER_ROOT}
 
-	# shellcheck source=src/zxfer_globals.sh
-	. "$l_root/src/zxfer_globals.sh"
-	[ "$l_last_module" = "zxfer_globals.sh" ] && return 0
-
-	# shellcheck source=src/zxfer_secure_paths.sh
-	. "$l_root/src/zxfer_secure_paths.sh"
-	[ "$l_last_module" = "zxfer_secure_paths.sh" ] && return 0
-
-	# shellcheck source=src/zxfer_remote_cli.sh
-	. "$l_root/src/zxfer_remote_cli.sh"
-	[ "$l_last_module" = "zxfer_remote_cli.sh" ] && return 0
-
-	# shellcheck source=src/zxfer_backup_metadata.sh
-	. "$l_root/src/zxfer_backup_metadata.sh"
-	[ "$l_last_module" = "zxfer_backup_metadata.sh" ] && return 0
-
-	# shellcheck source=src/zxfer_property_cache.sh
-	. "$l_root/src/zxfer_property_cache.sh"
-	[ "$l_last_module" = "zxfer_property_cache.sh" ] && return 0
-
-	# shellcheck source=src/zxfer_transfer_properties.sh
-	. "$l_root/src/zxfer_transfer_properties.sh"
-	[ "$l_last_module" = "zxfer_transfer_properties.sh" ] && return 0
-
-	# shellcheck source=src/zxfer_zfs_mode.sh
-	. "$l_root/src/zxfer_zfs_mode.sh"
-	[ "$l_last_module" = "zxfer_zfs_mode.sh" ] && return 0
-
-	# shellcheck source=src/zxfer_get_zfs_list.sh
-	. "$l_root/src/zxfer_get_zfs_list.sh"
-	[ "$l_last_module" = "zxfer_get_zfs_list.sh" ] && return 0
-
-	# shellcheck source=src/zxfer_zfs_send_receive.sh
-	. "$l_root/src/zxfer_zfs_send_receive.sh"
-	[ "$l_last_module" = "zxfer_zfs_send_receive.sh" ] && return 0
-
-	# shellcheck source=src/zxfer_inspect_delete_snap.sh
-	. "$l_root/src/zxfer_inspect_delete_snap.sh"
-	[ "$l_last_module" = "zxfer_inspect_delete_snap.sh" ] && return 0
-
-	printf 'Unknown zxfer module for test runtime load: %s\n' "$l_last_module" >&2
-	return 1
+	# shellcheck source=src/zxfer_modules.sh
+	ZXFER_SOURCE_MODULES_ROOT=$l_root \
+		ZXFER_SOURCE_MODULES_THROUGH=$l_last_module \
+		. "$l_root/src/zxfer_modules.sh"
 }
 
-# Provide sane defaults for globals that zxfer_common expects.
+zxfer_test_create_tmpdir() {
+	l_prefix=$1
+
+	TEST_TMPDIR=$(mktemp -d -t "${l_prefix}.XXXXXX") || {
+		echo "Unable to create test temp directory with prefix ${l_prefix}." >&2
+		exit 1
+	}
+}
+
+zxfer_test_cleanup_tmpdir() {
+	if [ -n "${TEST_TMPDIR:-}" ]; then
+		rm -rf "$TEST_TMPDIR"
+	fi
+}
+
+zxfer_test_capture_subshell() {
+	l_script=$1
+	l_restore_errexit=0
+
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+
+	set +e
+	# shellcheck disable=SC2034  # Consumed by calling test suites after capture.
+	ZXFER_TEST_CAPTURE_OUTPUT=$(
+		(
+			eval "$l_script"
+		) 2>&1
+	)
+	ZXFER_TEST_CAPTURE_STATUS=$?
+	if [ "$l_restore_errexit" = "1" ]; then
+		set -e
+	fi
+}
+
+zxfer_test_capture_subshell_split() {
+	l_stdout_file=$1
+	l_stderr_file=$2
+	l_script=$3
+	l_restore_errexit=0
+
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+
+	set +e
+	(
+		eval "$l_script"
+	) >"$l_stdout_file" 2>"$l_stderr_file"
+	# shellcheck disable=SC2034  # Consumed by calling test suites after capture.
+	ZXFER_TEST_CAPTURE_STATUS=$?
+	if [ "$l_restore_errexit" = "1" ]; then
+		set -e
+	fi
+}
+
+# Most suites only need zxfer_usage() to exist so zxfer_throw_usage_error() has a target.
+zxfer_usage() {
+	:
+}
+
+oneTimeSetUp() {
+	:
+}
+
+oneTimeTearDown() {
+	:
+}
+
+setUp() {
+	:
+}
+
+tearDown() {
+	:
+}
+
+# Provide sane defaults for globals that zxfer helpers expect.
 : "${g_option_n_dryrun:=0}"
 : "${g_option_v_verbose:=0}"
 : "${g_option_V_very_verbose:=0}"

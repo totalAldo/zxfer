@@ -7,6 +7,7 @@ that still expect a plain-text README.
 The current project documentation lives in:
 
 - README.md      - primary project overview, testing notes, and current fork behavior
+- docs/external-tools.md - runtime, optional, and test tool inventory for packaging work
 - man/zxfer.8    - full CLI reference and examples for FreeBSD/Linux-style installs
 - man/zxfer.1m   - full CLI reference and examples for Solaris/illumos installs
 - CHANGELOG.txt  - release history

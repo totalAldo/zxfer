@@ -191,15 +191,14 @@ A word of warning:
 In order to allow the restoration of filesystems within the hierarchy,
 \fBzxfer\fR
 will begin at the level you specify, and traverse the filesystem hierarchy back
-to the pool level until it finds an appropriate .zxfer_backup_info
-file inside the hardened metadata directory
-(\fBZXFER_BACKUP_DIR\fR/\fIsource/dataset/path\fR/.zxfer_backup_info.<tail>.<id>) or fails.
-It will use the first such file it comes across, so be careful about backing up
-from multiple individual levels of the same filesystem hierarchy. Legacy files
-that still live directly inside dataset mountpoints are read as a fallback, but
-\fBzxfer\fR
-will warn so you can relocate them into the hardened directory (which defaults
-to \fI/var/db/zxfer\fR and can be changed by exporting
+to the pool level, checking the current keyed
+\fI.zxfer_backup_info.<tail>.<id>\fR file in each hardened metadata directory
+(\fBZXFER_BACKUP_DIR\fR/\fIsource/dataset/path\fR/) until it finds one that
+contains an exact current-format
+\fIsource,destination,properties\fR row for the requested source and
+destination, or fails. Older backup metadata layouts are not supported;
+restore the properties only from files stored in the hardened directory (which
+defaults to \fI/var/db/zxfer\fR and can be changed by exporting
 \fBZXFER_BACKUP_DIR\fR).
 .TP 8n
 \fB\-h\fR
@@ -243,9 +242,15 @@ property overrides in the intermediate backup; this will mean that the ultimate
 backup will be able to store the correct properties of the original.
 .TP 8n
 \fB\-n\fR
-Dry ru(n) mode. Prints out the commands that would otherwise execute but does
-not execute them. This may not work in all circumstances as it may expect the
-existence of filesystems etc. that won't be created. When combined with
+Dry ru(n) mode. Prints out the commands that would otherwise execute, but
+current releases still run launcher preflight and snapshot-discovery commands
+needed to validate the requested replication. Remote dry runs may therefore
+still open ssh control sockets, resolve remote helpers, and list source or
+destination snapshots, and \fB-D\fR templates that reference \fB%%size%%\fR
+may still probe the live source for an estimate. Use this as a
+render-plus-validation preview rather than a strict no-exec sandbox. This may
+not work in all circumstances as it may expect the existence of filesystems
+etc. that won't be created. When combined with
 \fB\-k\fR,
 \fBzxfer\fR
 also only previews the local or remote secure backup-directory preparation
@@ -268,16 +273,13 @@ e.g.
 For example,
 \fB\-o\fR \fIcompression=lzjb\fR
 will cause all destination filesystems to be set to lzjb compression. If using
-recursive mode, only the root filesystem will be
-\fBset\fR,
-and all other filesystems
-will
-\fBinherit\fR
-from this. Note that this option will also override any values that would
-otherwise be
-\fBset\fR
-by "-P". Invoking this option will also create the destination filesystem(s)
-if they do not already exist.
+recursive mode, current releases apply the override across the replicated tree
+so descendant filesystems may also be \fBset\fR explicitly when needed to
+preserve the requested effective value; they do not currently remain
+inherited-only from the root filesystem. Note that this option will also
+override any values that would otherwise be \fBset\fR by "-P". Invoking this
+option will also create the destination filesystem(s) if they do not already
+exist.
 .TP 8n
 \fB\-P\fR
 Transfer (P)roperty mode. This causes the destination to have properties explicitly
@@ -325,7 +327,6 @@ must be set (using
 at filesystem creation time. These are:
 \fIcasesensitivity\fR,
 \fInormalization\fR,
-\fIjailed\fR,
 \fIutf8only\fR.
 If you are trying to replicate such a filesystem where one of these properties is
 different from source to destination, destroy the destination
@@ -399,6 +400,8 @@ A number of macros will be replaced with values before the command is executed:
 Will be replaced with the estimated size of the snapshot.
 On remote or multi-job runs, \fBzxfer\fR may use a cheaper approximate probe
 for this value to reduce startup latency.
+When combined with \fB\-n\fR, templates that reference \fB%%size%%\fR can
+still trigger live local or remote size-estimate probes.
 .PD
 .TP 3n
 %%title%%

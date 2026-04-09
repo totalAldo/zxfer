@@ -29,6 +29,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 # BSD HEADER END
+# shellcheck shell=sh disable=SC2034,SC2154
 
 #
 # zxfer
@@ -40,8 +41,8 @@
 #
 # Print out usage information
 # shellcheck disable=SC2329
-# usage() is called indirectly via throw_usage_error() in src/zxfer_common.sh.
-usage() {
+# zxfer_usage() is called indirectly via zxfer_throw_usage_error() in src/zxfer_reporting.sh.
+zxfer_usage() {
 	cat <<EOT
 usage:
      zxfer [-b | -B] [-c FMRI|pattern[ FMRI|pattern]...] [-d] [-D 'progress dialog options']
@@ -62,7 +63,7 @@ EOT
 }
 
 # Bootstrap with the built-in allowlist before sourcing helpers so early startup
-# never executes PATH-injected awk/sed binaries. init_globals() later applies the
+# never executes PATH-injected awk/sed binaries. zxfer_init_globals() later applies the
 # configurable secure PATH derived from ZXFER_SECURE_PATH(_APPEND).
 ZXFER_EARLY_DEFAULT_SECURE_PATH="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 PATH=$ZXFER_EARLY_DEFAULT_SECURE_PATH
@@ -74,7 +75,7 @@ zxfer_prescan_help_flag() {
 	while getopts ":h" l_opt "$@"; do
 		case $l_opt in
 		h)
-			usage
+			zxfer_usage
 			exit 0
 			;;
 		*) ;;
@@ -120,36 +121,16 @@ g_zxfer_failure_stage=startup
 
 zxfer_prescan_help_flag "$@"
 
-# Source other scripts from this project
-dir=$(dirname "$0")
-# shellcheck source=src/zxfer_common.sh
-. "$dir"/src/zxfer_common.sh
-# shellcheck source=src/zxfer_globals.sh
-. "$dir"/src/zxfer_globals.sh
-# shellcheck source=src/zxfer_secure_paths.sh
-. "$dir"/src/zxfer_secure_paths.sh
-# shellcheck source=src/zxfer_remote_cli.sh
-. "$dir"/src/zxfer_remote_cli.sh
-# shellcheck source=src/zxfer_backup_metadata.sh
-. "$dir"/src/zxfer_backup_metadata.sh
-# shellcheck source=src/zxfer_property_cache.sh
-. "$dir"/src/zxfer_property_cache.sh
-# shellcheck source=src/zxfer_transfer_properties.sh
-. "$dir"/src/zxfer_transfer_properties.sh
+# Source runtime modules from this project
+g_zxfer_launcher_dir=$(dirname "$0")
+# shellcheck source=src/zxfer_modules.sh
+ZXFER_SOURCE_MODULES_ROOT=$g_zxfer_launcher_dir . "$g_zxfer_launcher_dir"/src/zxfer_modules.sh
 
-# shellcheck source=src/zxfer_zfs_mode.sh
-. "$dir"/src/zxfer_zfs_mode.sh
-# shellcheck source=src/zxfer_get_zfs_list.sh
-. "$dir"/src/zxfer_get_zfs_list.sh
-# shellcheck source=src/zxfer_zfs_send_receive.sh
-. "$dir"/src/zxfer_zfs_send_receive.sh
-# shellcheck source=src/zxfer_inspect_delete_snap.sh
-. "$dir"/src/zxfer_inspect_delete_snap.sh
-
-init_globals
+zxfer_register_runtime_traps
+zxfer_init_globals
 
 zxfer_set_failure_stage "cli parse"
-read_command_line_switches "$@"
+zxfer_read_command_line_switches "$@"
 
 # Read out source and dest values
 shift "$((OPTIND - 1))"
@@ -157,23 +138,23 @@ g_destination=$1
 
 # Basic consistency checking
 if [ $# -lt 1 ]; then
-	throw_usage_error "Need a destination."
+	zxfer_throw_usage_error "Need a destination."
 fi
 
 zxfer_set_failure_roots "" "$g_destination"
 zxfer_set_failure_stage "cli validation"
-consistency_check
-prepare_remote_host_connections
-init_variables
+zxfer_consistency_check
+zxfer_prepare_remote_host_connections
+zxfer_init_variables
 
 zxfer_set_failure_stage "replication"
-run_zfs_mode_loop
+zxfer_run_zfs_mode_loop
 
 # writes property backup info to file
 if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
-	write_backup_properties
+	zxfer_write_backup_properties
 fi
 
 # exit with success
-beep 0
+zxfer_beep 0
 exit 0

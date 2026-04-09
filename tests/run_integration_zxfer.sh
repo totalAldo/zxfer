@@ -373,6 +373,14 @@ assert_exists() {
 	fi
 }
 
+assert_dataset_absent() {
+	l_dataset=$1
+
+	if zfs list "$l_dataset" >/dev/null 2>&1; then
+		fail "Dataset $l_dataset should not exist."
+	fi
+}
+
 assert_snapshot_exists() {
 	l_dataset=$1
 	l_snapshot=$2
@@ -413,6 +421,24 @@ wait_for_snapshot_absent() {
 	done
 
 	fail "Snapshot $l_dataset@$l_snapshot still present after waiting."
+}
+
+get_latest_snapshot_name_for_dataset() {
+	l_dataset=$1
+
+	list_exact_snapshot_names_for_dataset "$l_dataset" |
+		awk 'NF { last = $0 } END { if (last != "") print last }'
+}
+
+list_exact_snapshot_names_for_dataset() {
+	l_dataset=$1
+
+	if ! l_snapshot_list=$(zfs list -H -o name -t snapshot -s creation -r "$l_dataset" 2>&1); then
+		fail "Failed to list snapshots for $l_dataset: $l_snapshot_list"
+	fi
+
+	printf '%s\n' "$l_snapshot_list" |
+		awk -v dataset="$l_dataset" 'index($0, dataset "@") == 1 { print $0 }'
 }
 
 assert_output_mentions_snapshot_destroy() {
@@ -742,6 +768,31 @@ get_file_mode_octal() {
 	return 1
 }
 
+find_backup_metadata_file_for_exact_pair() {
+	l_backup_root=$1
+	l_source_dataset=$2
+	l_destination_dataset=$3
+
+	find "$l_backup_root" -type f -name '.zxfer_backup_info.*' 2>/dev/null |
+		while IFS= read -r l_backup_file || [ -n "$l_backup_file" ]; do
+			if awk -v dataset_pair="$l_source_dataset,$l_destination_dataset," '
+				BEGIN {
+					found = 0
+				}
+				index($0, dataset_pair) == 1 {
+					found = 1
+					exit
+				}
+				END {
+					exit(found ? 0 : 1)
+				}
+			' "$l_backup_file" >/dev/null 2>&1; then
+				printf '%s\n' "$l_backup_file"
+				break
+			fi
+		done
+}
+
 set_test_dataset_mountpoint() {
 	l_dataset=$1
 	l_mountpoint=$2
@@ -847,6 +898,10 @@ mock_ssh_emit_capability_response() {
 
 	case "$l_cmd" in
 	*"ZXFER_REMOTE_CAPS_V1"*)
+		if [ -n "${MOCK_SSH_CAPABILITY_RESPONSE_FILE:-}" ]; then
+			cat "$MOCK_SSH_CAPABILITY_RESPONSE_FILE"
+			return $?
+		fi
 		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
 		printf 'os\t%s\n' "${MOCK_SSH_FORCE_UNAME:-$(uname 2>/dev/null)}"
 		for l_tool in zfs parallel cat; do
@@ -1033,6 +1088,7 @@ run_zxfer() {
 		ZXFER_SECURE_PATH_APPEND=${ZXFER_SECURE_PATH_APPEND-} \
 		MOCK_SSH_LOG=${MOCK_SSH_LOG-} \
 		MOCK_SSH_REMOTE_SHELL=${MOCK_SSH_REMOTE_SHELL-} \
+		MOCK_SSH_CAPABILITY_RESPONSE_FILE=${MOCK_SSH_CAPABILITY_RESPONSE_FILE-} \
 		MOCK_SSH_COMMAND_V_TOOL=${MOCK_SSH_COMMAND_V_TOOL-} \
 		MOCK_SSH_COMMAND_V_RESULT=${MOCK_SSH_COMMAND_V_RESULT-} \
 		MOCK_SSH_FORCE_UNAME=${MOCK_SSH_FORCE_UNAME-} \
@@ -1186,8 +1242,8 @@ extended_usage_error_tests() {
 
 	# Test snapshot source (not supported for recursive/non-recursive flags in this way usually,
 	# or at least zxfer often expects filesystems.
-	# Based on code reading, check_snapshot should reject if it looks like a snapshot but we wanted a fs)
-	# Actually zxfer_zfs_mode.sh:303 checks if source is a snapshot and fails if so for normal mode.
+	# Based on code reading, zxfer_check_snapshot should reject if it looks like a snapshot but we wanted a fs)
+	# Actually zxfer_replication.sh:303 checks if source is a snapshot and fails if so for normal mode.
 	assert_error_case "Source is a snapshot" \
 		"Snapshots are not allowed as a source." \
 		1 \
@@ -1814,7 +1870,7 @@ auto_snapshot_replication_test() {
 
 	run_zxfer -v -s -R "$src_dataset" "$dest_root"
 
-	src_snapshot_name=$(zfs list -H -o name -t snapshot -s creation "$src_dataset" | tail -n 1)
+	src_snapshot_name=$(get_latest_snapshot_name_for_dataset "$src_dataset")
 	snap_suffix=${src_snapshot_name#*@}
 
 	if [ -z "$snap_suffix" ] || [ "$snap_suffix" = "$src_snapshot_name" ]; then
@@ -1849,7 +1905,7 @@ auto_snapshot_nonrecursive_test() {
 
 	run_zxfer -v -s -N "$src_dataset" "$dest_root"
 
-	src_snapshot_name=$(zfs list -H -o name -t snapshot -s creation "$src_dataset" | tail -n 1)
+	src_snapshot_name=$(get_latest_snapshot_name_for_dataset "$src_dataset")
 	snap_suffix=${src_snapshot_name#*@}
 
 	if [ -z "$snap_suffix" ] || [ "$snap_suffix" = "$src_snapshot_name" ]; then
@@ -2120,7 +2176,7 @@ missing_destination_error_test() {
 	zfs snap -r "$src_dataset@p1"
 
 	set +e
-	output=$(run_zxfer -v -R "$src_dataset" nosuchdestpool/target 2>&1)
+	output=$("$ZXFER_BIN" -v -R "$src_dataset" nosuchdestpool/target 2>&1)
 	status=$?
 	set -e
 
@@ -2132,7 +2188,7 @@ missing_destination_error_test() {
 	if [ "$status" -ne 2 ]; then
 		fail "Missing destination list should exit with status 2, got $status. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -q "Failed to retrieve list of datasets from the destination"; then
+	if ! printf '%s\n' "$output" | grep -F "Failed to retrieve list of datasets from the destination" >/dev/null 2>&1; then
 		fail "Missing destination error message missing. Output: $output"
 	fi
 
@@ -2152,7 +2208,7 @@ invalid_override_property_test() {
 	zfs create "$dest_root"
 
 	set +e
-	output=$(run_zxfer -v -o "definitelynotaproperty=on" -N "$src_dataset" "$dest_root" 2>&1)
+	output=$("$ZXFER_BIN" -v -o "definitelynotaproperty=on" -N "$src_dataset" "$dest_root" 2>&1)
 	status=$?
 	set -e
 
@@ -2162,7 +2218,7 @@ invalid_override_property_test() {
 	if [ "$status" -ne 2 ]; then
 		fail "Invalid override property should exit with status 2, got $status. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -q "Invalid option property - check -o list for syntax errors."; then
+	if ! printf '%s\n' "$output" | grep -F "Invalid option property - check -o list for syntax errors." >/dev/null 2>&1; then
 		fail "Invalid override property error message missing. Output: $output"
 	fi
 
@@ -2511,9 +2567,9 @@ property_backup_restore_test() {
 		fail "Destination property expected 'one', got '$dest_prop'."
 	fi
 
-	backup_file=$(find "$backup_dir" -type f -name '*.zxfer_backup_info.*' | head -n 1)
+	backup_file=$(find_backup_metadata_file_for_exact_pair "$backup_dir" "$src_dataset" "$dest_dataset")
 	if [ "$backup_file" = "" ]; then
-		fail "Backup metadata file was not written under $backup_dir."
+		fail "Exact-pair backup metadata file was not written under $backup_dir."
 	fi
 	if ! grep -q "^#zxfer property backup file" "$backup_file"; then
 		fail "Backup metadata missing expected header."
@@ -2564,9 +2620,9 @@ remote_property_backup_restore_test() {
 
 	set_test_dataset_mountpoint "$dest_remote_dataset" "$WORKDIR/mnt/remote_prop_dest"
 
-	remote_backup_file=$(find "$backup_dir" -type f -name '*.zxfer_backup_info.*' | head -n 1)
+	remote_backup_file=$(find_backup_metadata_file_for_exact_pair "$backup_dir" "$src_dataset" "$dest_remote_dataset")
 	if [ "$remote_backup_file" = "" ]; then
-		fail "Remote backup metadata file not created under $backup_dir."
+		fail "Exact-pair remote backup metadata file not created under $backup_dir."
 	fi
 	remote_mode=$(get_file_mode_octal "$remote_backup_file" 2>/dev/null || echo "")
 	if [ "$remote_mode" != "600" ]; then
@@ -2670,6 +2726,7 @@ insecure_backup_metadata_guard_test() {
 
 	src_dataset="$SRC_POOL/insecure_backup_src"
 	dest_root="$DEST_POOL/insecure_backup_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
 	backup_root="$WORKDIR/insecure_backup_dir"
 
 	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
@@ -2678,13 +2735,13 @@ insecure_backup_metadata_guard_test() {
 	zfs create "$src_dataset"
 	zfs snap -r "$src_dataset@insecure1"
 
-	src_mount=$(get_mountpoint "$src_dataset")
-	src_rel_mount=${src_mount#/}
-	local_backup_dir="$backup_root/$src_rel_mount"
-	mkdir -p "$local_backup_dir"
-	local_backup_file="$local_backup_dir/.zxfer_backup_info.${src_dataset##*/}"
-	printf '#zxfer property backup file;\n%s,%s,placeholder=on=local\n' "$src_dataset" "$dest_root/${src_dataset##*/}" >"$local_backup_file"
+	ZXFER_BACKUP_DIR="$backup_root" run_zxfer -v -k -R "$src_dataset" "$dest_root"
+	local_backup_file=$(find_backup_metadata_file_for_exact_pair "$backup_root" "$src_dataset" "$dest_dataset")
+	if [ "$local_backup_file" = "" ]; then
+		fail "Exact-pair local backup metadata file not found for insecure metadata guard test."
+	fi
 	chmod 644 "$local_backup_file"
+	destroy_test_datasets_if_present "$dest_root"
 
 	set +e
 	output=$(ZXFER_BACKUP_DIR="$backup_root" "$ZXFER_BIN" -v -e -R "$src_dataset" "$dest_root" 2>&1)
@@ -2708,20 +2765,24 @@ insecure_backup_metadata_guard_test() {
 	remote_backup_root="$WORKDIR/remote_insecure_backup_dir"
 	safe_rm_rf "$remote_backup_root"
 
-	destroy_test_datasets_if_present "$src_dataset"
+	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
 	zfs create "$src_dataset"
 	zfs snap -r "$src_dataset@insecure2"
 
-	src_mount=$(get_mountpoint "$src_dataset")
-	src_rel_mount=${src_mount#/}
-	remote_backup_dir="$remote_backup_root/$src_rel_mount"
-	mkdir -p "$remote_backup_dir"
-	remote_backup_file="$remote_backup_dir/.zxfer_backup_info.${src_dataset##*/}"
-	printf '#zxfer property backup file;\n%s,%s,placeholder=on=local\n' "$src_dataset" "$dest_root/${src_dataset##*/}" >"$remote_backup_file"
-	chmod 600 "$remote_backup_file"
-	if command -v chown >/dev/null 2>&1; then
-		chown 1 "$remote_backup_file" >/dev/null 2>&1 || true
+	ZXFER_BACKUP_DIR="$remote_backup_root" run_zxfer -v -k -R "$src_dataset" "$dest_root"
+	remote_backup_file=$(find_backup_metadata_file_for_exact_pair "$remote_backup_root" "$src_dataset" "$dest_dataset")
+	if [ "$remote_backup_file" = "" ]; then
+		fail "Exact-pair remote backup metadata file not found for insecure metadata guard test."
 	fi
+	remote_expected_error="not owned by root"
+	chmod 600 "$remote_backup_file"
+	if command -v chown >/dev/null 2>&1 && chown 1 "$remote_backup_file" >/dev/null 2>&1; then
+		:
+	else
+		chmod 644 "$remote_backup_file"
+		remote_expected_error="permissions"
+	fi
+	destroy_test_datasets_if_present "$dest_root"
 
 	set +e
 	output=$(ZXFER_BACKUP_DIR="$remote_backup_root" ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -e -O localhost -R "$src_dataset" "$dest_root" 2>&1)
@@ -2731,8 +2792,8 @@ insecure_backup_metadata_guard_test() {
 	if [ "$status" -eq 0 ]; then
 		fail "Insecure remote backup metadata should cause restore to fail."
 	fi
-	if ! printf '%s\n' "$output" | grep -q "not owned by root" >/dev/null 2>&1; then
-		fail "Expected ownership rejection message for insecure remote metadata. Output: $output"
+	if ! printf '%s\n' "$output" | grep -q "$remote_expected_error" >/dev/null 2>&1; then
+		fail "Expected remote metadata rejection message [$remote_expected_error]. Output: $output"
 	fi
 	if zfs list "$dest_root/${src_dataset##*/}" >/dev/null 2>&1; then
 		fail "Destination dataset should not be created when remote backup metadata is rejected."
@@ -2741,8 +2802,8 @@ insecure_backup_metadata_guard_test() {
 	log "Insecure backup metadata guard test passed"
 }
 
-legacy_backup_fallback_warning_test() {
-	log "Starting legacy backup fallback warning test"
+legacy_backup_layout_rejected_test() {
+	log "Starting legacy backup layout rejection test"
 
 	src_dataset="$SRC_POOL/legacy_backup_src"
 	dest_root="$DEST_POOL/legacy_backup_dest"
@@ -2760,14 +2821,11 @@ legacy_backup_fallback_warning_test() {
 
 	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$src_dataset" "$dest_root"
 
-	# Restore mode now requires an exact source/destination metadata pair. Seed a
-	# matching backup for the later restore target, then move only that file into
-	# the legacy live-mountpoint layout being exercised here.
 	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$src_dataset" "$restore_root"
 	restore_dataset="$restore_root/${src_dataset##*/}"
-	restore_backup_file=$(find "$backup_dir" -type f -name '*.zxfer_backup_info.*' -exec grep -l "^$src_dataset,$restore_dataset," {} \; | head -n 1)
+	restore_backup_file=$(find_backup_metadata_file_for_exact_pair "$backup_dir" "$src_dataset" "$restore_dataset")
 	if [ "$restore_backup_file" = "" ]; then
-		fail "Exact-pair restore backup metadata file not found for legacy fallback test."
+		fail "Exact-pair restore backup metadata file not found for legacy rejection test."
 	fi
 
 	src_mount=$(get_mountpoint "$src_dataset")
@@ -2786,23 +2844,21 @@ legacy_backup_fallback_warning_test() {
 	status=$?
 	set -e
 
-	if [ "$status" -ne 0 ]; then
-		fail "Restore with legacy backup metadata should succeed. Output: $output"
+	if [ "$status" -eq 0 ]; then
+		fail "Restore with legacy backup metadata should fail closed. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -q "Warning: read legacy backup metadata" >/dev/null 2>&1; then
-		fail "Expected warning about legacy backup metadata. Output: $output"
+	if ! printf '%s\n' "$output" | grep -q "Cannot find backup property file" >/dev/null 2>&1; then
+		fail "Expected missing-backup failure for legacy backup metadata. Output: $output"
 	fi
-
-	restore_prop=$(zfs get -H -o value test:prop "$restore_dataset")
-	if [ "$restore_prop" != "legacy" ]; then
-		fail "Restore should apply legacy backup property value 'legacy', got '$restore_prop'."
+	if zfs list "$restore_dataset" >/dev/null 2>&1; then
+		fail "Restore dataset should not be created when only legacy backup metadata is available."
 	fi
 
-	log "Legacy backup fallback warning test passed"
+	log "Legacy backup layout rejection test passed"
 }
 
-remote_legacy_backup_fallback_warning_test() {
-	log "Starting remote legacy backup fallback warning test"
+remote_legacy_backup_layout_rejected_test() {
+	log "Starting remote legacy backup layout rejection test"
 
 	mock_path="$WORKDIR/mock_remote_legacy_backup"
 	prepare_mock_bin_dir "$mock_path" ssh
@@ -2825,14 +2881,11 @@ remote_legacy_backup_fallback_warning_test() {
 
 	ZXFER_BACKUP_DIR="$backup_dir" ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -k -T localhost -R "$src_dataset" "$dest_root"
 
-	# Restore mode now requires an exact source/destination metadata pair. Seed a
-	# matching backup for the later restore target, then move only that file into
-	# the legacy live-mountpoint layout being exercised here.
 	ZXFER_BACKUP_DIR="$backup_dir" ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -k -T localhost -R "$src_dataset" "$restore_root"
 	restore_dataset="$restore_root/${src_dataset##*/}"
-	restore_backup_file=$(find "$backup_dir" -type f -name '*.zxfer_backup_info.*' -exec grep -l "^$src_dataset,$restore_dataset," {} \; | head -n 1)
+	restore_backup_file=$(find_backup_metadata_file_for_exact_pair "$backup_dir" "$src_dataset" "$restore_dataset")
 	if [ "$restore_backup_file" = "" ]; then
-		fail "Exact-pair remote restore backup metadata file not found for legacy fallback test."
+		fail "Exact-pair remote restore backup metadata file not found for legacy rejection test."
 	fi
 
 	src_mount=$(get_mountpoint "$src_dataset")
@@ -2851,21 +2904,17 @@ remote_legacy_backup_fallback_warning_test() {
 	status=$?
 	set -e
 
-	if [ "$status" -ne 0 ]; then
-		fail "Remote restore with legacy backup metadata should succeed. Output: $output"
+	if [ "$status" -eq 0 ]; then
+		fail "Remote restore with legacy backup metadata should fail closed. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -q "Warning: read legacy backup metadata" >/dev/null 2>&1; then
-		fail "Expected warning about remote legacy backup metadata. Output: $output"
+	if ! printf '%s\n' "$output" | grep -q "Cannot find backup property file" >/dev/null 2>&1; then
+		fail "Expected missing-backup failure for remote legacy backup metadata. Output: $output"
 	fi
-
-	assert_snapshot_exists "$restore_dataset" "remotelegacy1"
-	assert_snapshot_exists "$restore_dataset" "remotelegacy2"
-	restore_prop=$(zfs get -H -o value test:prop "$restore_dataset")
-	if [ "$restore_prop" != "legacy" ]; then
-		fail "Remote restore should apply legacy backup property value 'legacy', got '$restore_prop'."
+	if zfs list "$restore_dataset" >/dev/null 2>&1; then
+		fail "Remote restore dataset should not be created when only legacy backup metadata is available."
 	fi
 
-	log "Remote legacy backup fallback warning test passed"
+	log "Remote legacy backup layout rejection test passed"
 }
 
 background_send_failure_test() {
@@ -3052,11 +3101,11 @@ idempotent_replication_test() {
 
 	run_zxfer -v -R "$src_dataset" "$dest_root"
 
-	snapshots_before=$(zfs list -H -o name -t snapshot "$dest_dataset")
+	snapshots_before=$(list_exact_snapshot_names_for_dataset "$dest_dataset")
 
 	run_zxfer -v -R "$src_dataset" "$dest_root"
 
-	snapshots_after=$(zfs list -H -o name -t snapshot "$dest_dataset")
+	snapshots_after=$(list_exact_snapshot_names_for_dataset "$dest_dataset")
 
 	if [ "$snapshots_before" != "$snapshots_after" ]; then
 		fail "zxfer should be idempotent; destination snapshots changed after a no-op run."
@@ -3339,6 +3388,57 @@ remote_helper_path_shell_metacharacters_test() {
 	log "Remote helper path shell metacharacters test passed"
 }
 
+garbage_wrapped_host_spec_fails_closed_test() {
+	log "Starting garbage wrapped host spec fail-closed test"
+
+	marker_rel="garbage_host_spec_marker"
+	marker="$WORKDIR/$marker_rel"
+	mock_path="$WORKDIR/mock_garbage_host_spec"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
+		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
+	l_host_spec="garbage-host.example \$(touch $marker_rel)"
+	safe_rm_f "$marker"
+	prepare_mock_bin_dir "$mock_path" ssh
+	write_mock_ssh_script "$mock_path/ssh"
+
+	src_dataset="$SRC_POOL/garbage_host_spec_src"
+	dest_root="$DEST_POOL/garbage_host_spec_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "garbage-host-spec"
+	zfs snap -r "$src_dataset@ghs1"
+
+	set +e
+	output=$(
+		cd "$WORKDIR" &&
+			ZXFER_SECURE_PATH="$secure_path" \
+				"$zxfer_bin_abs" -v -O "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
+	)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "Garbage wrapped host specs should fail closed instead of replicating successfully. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -F "Error creating ssh control socket for origin host." >/dev/null 2>&1 &&
+		! printf '%s\n' "$output" | grep -F "Failed to determine operating system on host garbage-host.example" >/dev/null 2>&1; then
+		fail "Garbage wrapped host specs should abort during remote startup before replication begins. Output: $output"
+	fi
+	if [ -e "$marker" ]; then
+		fail "Garbage wrapped host specs should not execute embedded shell fragments; marker file was created at $marker."
+	fi
+	assert_dataset_absent "$dest_dataset"
+
+	safe_rm_rf "$mock_path"
+
+	log "Garbage wrapped host spec fail-closed test passed"
+}
+
 control_socket_path_shell_metacharacters_test() {
 	log "Starting control socket path shell metacharacters test"
 
@@ -3388,6 +3488,122 @@ control_socket_path_shell_metacharacters_test() {
 	safe_rm_rf "$tmpdir_with_payload" "$mock_path"
 
 	log "Control socket path shell metacharacters test passed"
+}
+
+remote_capability_control_whitespace_path_falls_back_to_direct_probe_test() {
+	log "Starting remote capability control-whitespace path fallback test"
+
+	marker_rel="remote_capability_control_whitespace_marker"
+	marker="$WORKDIR/$marker_rel"
+	mock_path="$WORKDIR/mock_remote_capability_control_whitespace"
+	capability_file="$WORKDIR/mock_remote_capability_control_whitespace.txt"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
+		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
+	l_host_spec="control-whitespace.example"
+	safe_rm_f "$marker" "$capability_file"
+	prepare_mock_bin_dir "$mock_path" ssh
+	write_mock_ssh_script "$mock_path/ssh"
+
+	{
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf 'os\t%s\n' "MockRemoteOS"
+		printf "tool\tzfs\t0\t/tmp/mock_remote_helper.\$(touch %s)/zfs\r\n" "$marker_rel"
+		printf 'tool\tparallel\t1\t-\n'
+		printf 'tool\tcat\t1\t-\n'
+	} >"$capability_file"
+
+	src_dataset="$SRC_POOL/remote_capability_control_whitespace_src"
+	dest_root="$DEST_POOL/remote_capability_control_whitespace_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "control-whitespace-path"
+	zfs snap -r "$src_dataset@rcw1"
+
+	set +e
+	output=$(
+		cd "$WORKDIR" &&
+			MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_file" \
+				ZXFER_SECURE_PATH="$secure_path" \
+				"$zxfer_bin_abs" -v -O "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
+	)
+	status=$?
+	set -e
+
+	if [ "$status" -ne 0 ]; then
+		fail "Remote capability responses with control-whitespace helper paths should degrade safely to the direct probe path when it is available. Output: $output"
+	fi
+	assert_snapshot_exists "$dest_dataset" "rcw1"
+	if [ -e "$marker" ]; then
+		fail "Control-whitespace helper paths from remote capabilities should not execute embedded shell fragments during fallback; marker file was created at $marker."
+	fi
+
+	safe_rm_rf "$mock_path"
+	safe_rm_f "$capability_file"
+
+	log "Remote capability control-whitespace path fallback test passed"
+}
+
+target_capability_control_whitespace_path_falls_back_to_direct_probe_test() {
+	log "Starting target capability control-whitespace path fallback test"
+
+	marker_rel="target_capability_control_whitespace_marker"
+	marker="$WORKDIR/$marker_rel"
+	mock_path="$WORKDIR/mock_target_capability_control_whitespace"
+	capability_file="$WORKDIR/mock_target_capability_control_whitespace.txt"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
+		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
+	l_host_spec="target-control-whitespace.example"
+	safe_rm_f "$marker" "$capability_file"
+	prepare_mock_bin_dir "$mock_path" ssh
+	write_mock_ssh_script "$mock_path/ssh"
+
+	{
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf 'os\t%s\n' "MockRemoteOS"
+		printf "tool\tzfs\t0\t/tmp/mock_remote_helper.\$(touch %s)/zfs\r\n" "$marker_rel"
+		printf 'tool\tparallel\t1\t-\n'
+		printf 'tool\tcat\t1\t-\n'
+	} >"$capability_file"
+
+	src_dataset="$SRC_POOL/target_capability_control_whitespace_src"
+	dest_root="$DEST_POOL/target_capability_control_whitespace_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "target-control-whitespace-path"
+	zfs snap -r "$src_dataset@tcw1"
+
+	set +e
+	output=$(
+		cd "$WORKDIR" &&
+			MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_file" \
+				ZXFER_SECURE_PATH="$secure_path" \
+				"$zxfer_bin_abs" -v -T "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
+	)
+	status=$?
+	set -e
+
+	if [ "$status" -ne 0 ]; then
+		fail "Target capability responses with control-whitespace helper paths should degrade safely to the direct probe path when it is available. Output: $output"
+	fi
+	assert_snapshot_exists "$dest_dataset" "tcw1"
+	if [ -e "$marker" ]; then
+		fail "Target control-whitespace helper paths from remote capabilities should not execute embedded shell fragments during fallback; marker file was created at $marker."
+	fi
+
+	safe_rm_rf "$mock_path"
+	safe_rm_f "$capability_file"
+
+	log "Target capability control-whitespace path fallback test passed"
 }
 
 remote_compression_pipeline_test() {
@@ -3566,6 +3782,187 @@ remote_wrapped_host_spec_test() {
 	log "Remote wrapped host spec test passed"
 }
 
+malformed_remote_capability_response_fails_closed_test() {
+	log "Starting malformed remote capability response fail-closed test"
+
+	marker_rel="malformed_remote_capability_marker"
+	marker="$WORKDIR/$marker_rel"
+	mock_path="$WORKDIR/mock_malformed_remote_capability"
+	capability_file="$WORKDIR/mock_malformed_remote_capability.txt"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
+		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
+	l_host_spec="malformed-capability.example"
+	safe_rm_f "$marker" "$capability_file"
+	prepare_mock_bin_dir "$mock_path" ssh
+	write_mock_ssh_script "$mock_path/ssh"
+
+	{
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf 'os\t%s\n' "MockRemoteOS"
+		printf 'tool\tzfs\t0\t%s\n' "/remote/bin/zfs"
+		printf 'tool\tparallel\t1\t-\n'
+		printf '%s\n' "\$(touch $marker_rel)"
+		printf 'tool\tcat\t1\t-\n'
+	} >"$capability_file"
+
+	src_dataset="$SRC_POOL/malformed_remote_capability_src"
+	dest_root="$DEST_POOL/malformed_remote_capability_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "malformed-capability"
+	zfs snap -r "$src_dataset@mrc1"
+
+	set +e
+	output=$(
+		cd "$WORKDIR" &&
+			MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_file" \
+				MOCK_SSH_MISSING_TOOL="zfs" \
+				ZXFER_SECURE_PATH="$secure_path" \
+				"$zxfer_bin_abs" -v -O "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
+	)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "Malformed remote capability responses should fail closed. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -F "Required dependency \"zfs\" not found on host $l_host_spec" >/dev/null 2>&1; then
+		fail "Malformed remote capability responses should fall back to a secure remote dependency probe and fail closed. Output: $output"
+	fi
+	if [ -e "$marker" ]; then
+		fail "Malformed remote capability payloads should not execute embedded shell fragments; marker file was created at $marker."
+	fi
+	assert_dataset_absent "$dest_dataset"
+
+	safe_rm_rf "$mock_path"
+	safe_rm_f "$capability_file"
+
+	log "Malformed remote capability response fail-closed test passed"
+}
+
+malformed_remote_capability_response_falls_back_to_direct_probe_test() {
+	log "Starting malformed remote capability response fallback test"
+
+	marker_rel="malformed_remote_capability_fallback_marker"
+	marker="$WORKDIR/$marker_rel"
+	mock_path="$WORKDIR/mock_malformed_remote_capability_fallback"
+	capability_file="$WORKDIR/mock_malformed_remote_capability_fallback.txt"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
+		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
+	l_host_spec="malformed-fallback.example"
+	safe_rm_f "$marker" "$capability_file"
+	prepare_mock_bin_dir "$mock_path" ssh
+	write_mock_ssh_script "$mock_path/ssh"
+
+	{
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf 'os\t%s\n' "MockRemoteOS"
+		printf 'tool\tzfs\t0\t%s\n' "/remote/bin/zfs"
+		printf 'tool\tparallel\t1\t-\n'
+		printf '%s\n' "\$(touch $marker_rel)"
+		printf 'tool\tcat\t1\t-\n'
+	} >"$capability_file"
+
+	src_dataset="$SRC_POOL/malformed_remote_capability_fallback_src"
+	dest_root="$DEST_POOL/malformed_remote_capability_fallback_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "malformed-capability-fallback"
+	zfs snap -r "$src_dataset@mrf1"
+
+	set +e
+	output=$(
+		cd "$WORKDIR" &&
+			MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_file" \
+				ZXFER_SECURE_PATH="$secure_path" \
+				"$zxfer_bin_abs" -v -O "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
+	)
+	status=$?
+	set -e
+
+	if [ "$status" -ne 0 ]; then
+		fail "Malformed remote capability responses should fall back to direct probes and still allow replication. Output: $output"
+	fi
+	assert_snapshot_exists "$dest_dataset" "mrf1"
+	if [ -e "$marker" ]; then
+		fail "Malformed remote capability payloads should not execute embedded shell fragments during fallback; marker file was created at $marker."
+	fi
+
+	safe_rm_rf "$mock_path"
+	safe_rm_f "$capability_file"
+
+	log "Malformed remote capability response fallback test passed"
+}
+
+malformed_target_capability_response_falls_back_to_direct_probe_test() {
+	log "Starting malformed target capability response fallback test"
+
+	marker_rel="malformed_target_capability_fallback_marker"
+	marker="$WORKDIR/$marker_rel"
+	mock_path="$WORKDIR/mock_malformed_target_capability_fallback"
+	capability_file="$WORKDIR/mock_malformed_target_capability_fallback.txt"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
+		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
+	l_host_spec="malformed-target-fallback.example"
+	safe_rm_f "$marker" "$capability_file"
+	prepare_mock_bin_dir "$mock_path" ssh
+	write_mock_ssh_script "$mock_path/ssh"
+
+	{
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf 'os\t%s\n' "MockRemoteOS"
+		printf 'tool\tzfs\t0\t%s\n' "/remote/bin/zfs"
+		printf 'tool\tparallel\t1\t-\n'
+		printf '%s\n' "\$(touch $marker_rel)"
+		printf 'tool\tcat\t1\t-\n'
+	} >"$capability_file"
+
+	src_dataset="$SRC_POOL/malformed_target_capability_fallback_src"
+	dest_root="$DEST_POOL/malformed_target_capability_fallback_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "malformed-target-capability-fallback"
+	zfs snap -r "$src_dataset@mtf1"
+
+	set +e
+	output=$(
+		cd "$WORKDIR" &&
+			MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_file" \
+				ZXFER_SECURE_PATH="$secure_path" \
+				"$zxfer_bin_abs" -v -T "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
+	)
+	status=$?
+	set -e
+
+	if [ "$status" -ne 0 ]; then
+		fail "Malformed target capability responses should fall back to direct probes and still allow replication. Output: $output"
+	fi
+	assert_snapshot_exists "$dest_dataset" "mtf1"
+	if [ -e "$marker" ]; then
+		fail "Malformed target capability payloads should not execute embedded shell fragments during fallback; marker file was created at $marker."
+	fi
+
+	safe_rm_rf "$mock_path"
+	safe_rm_f "$capability_file"
+
+	log "Malformed target capability response fallback test passed"
+}
+
 trap_exit_cleanup_test() {
 	log "Starting trap exit cleanup test"
 
@@ -3636,7 +4033,7 @@ EOF
 	fi
 
 	if pgrep -f "zfs send .*trap_src" >/dev/null 2>&1; then
-		fail "Background zfs send still running after trap_exit handling."
+		fail "Background zfs send still running after zxfer_trap_exit handling."
 	fi
 
 	log "Trap exit cleanup test passed"
@@ -3758,7 +4155,7 @@ property_override_and_ignore_test() {
 		fail "Override quota not applied to parent/child: parent=$parent_quota child=$child_quota."
 	fi
 
-	parent_snap_count=$(zfs list -H -t snapshot "$dest_dataset" | wc -l | tr -d ' ')
+	parent_snap_count=$(list_exact_snapshot_names_for_dataset "$dest_dataset" | wc -l | tr -d ' ')
 	if [ "$parent_snap_count" -ne 1 ]; then
 		fail "Property-only pass should not create extra snapshots; found $parent_snap_count on $dest_dataset."
 	fi
@@ -3998,7 +4395,7 @@ EOF
 }
 
 get_os_detection_test() {
-	log "Starting get_os detection test"
+	log "Starting zxfer_get_os detection test"
 
 	mock_path="$WORKDIR/mock_get_os"
 	safe_rm_rf "$mock_path"
@@ -4011,25 +4408,19 @@ EOF
 	chmod +x "$mock_path/uname"
 	write_mock_ssh_script "$mock_path/ssh"
 
-	local_os=$(PATH="$mock_path:$PATH" sh -c '. ./src/zxfer_common.sh; get_os ""')
+	local_os=$(ZXFER_SECURE_PATH="$mock_path" PATH="$mock_path:$PATH" sh -c 'ZXFER_SOURCE_MODULES_ROOT=. ZXFER_SOURCE_MODULES_THROUGH=zxfer_runtime.sh . ./src/zxfer_modules.sh; zxfer_get_os ""')
 	if [ "$local_os" != "MockLocalOS" ]; then
-		fail "Expected MockLocalOS from local get_os, got $local_os"
+		fail "Expected MockLocalOS from local zxfer_get_os, got $local_os"
 	fi
 
-	remote_os=$(MOCK_SSH_FORCE_UNAME="MockRemoteOS" PATH="$mock_path:$PATH" sh -c '
-		# shellcheck source=src/zxfer_common.sh
-		. ./src/zxfer_common.sh
-		# shellcheck source=src/zxfer_globals.sh
-		. ./src/zxfer_globals.sh
-		# shellcheck source=src/zxfer_secure_paths.sh
-		. ./src/zxfer_secure_paths.sh
-		# shellcheck source=src/zxfer_remote_cli.sh
-		. ./src/zxfer_remote_cli.sh
+	remote_os=$(MOCK_SSH_FORCE_UNAME="MockRemoteOS" ZXFER_SECURE_PATH="$mock_path" PATH="$mock_path:$PATH" sh -c '
+		# shellcheck source=src/zxfer_modules.sh
+		ZXFER_SOURCE_MODULES_ROOT=. ZXFER_SOURCE_MODULES_THROUGH=zxfer_remote_hosts.sh . ./src/zxfer_modules.sh
 		g_cmd_ssh="'"$mock_path"'/ssh"
-		get_os "remotehost"
+		zxfer_get_os "remotehost"
 	')
 	if [ "$remote_os" != "MockRemoteOS" ]; then
-		fail "Expected MockRemoteOS from remote get_os, got $remote_os"
+		fail "Expected MockRemoteOS from remote zxfer_get_os, got $remote_os"
 	fi
 
 	log "Get_os detection test passed"
@@ -4060,10 +4451,10 @@ verbose_debug_logging_test() {
 		fail "Verbose/debug dry run should succeed. See $stdout_log and $stderr_log."
 	fi
 	if ! grep -q "New temporary file" "$stderr_log"; then
-		fail "echoV debug output missing from stderr."
+		fail "zxfer_echoV debug output missing from stderr."
 	fi
 	if grep -q "New temporary file" "$stdout_log"; then
-		fail "echoV debug output should not appear on stdout."
+		fail "zxfer_echoV debug output should not appear on stdout."
 	fi
 	if ! grep -q "Destination dataset does not exist" "$stdout_log"; then
 		fail "Verbose output missing expected dataset message on stdout."
@@ -4190,13 +4581,19 @@ property_creation_with_zvol_test \
 	error_log_email_example_self_test \
 	remote_migration_guard_tests \
 	local_helper_path_shell_metacharacters_test \
+	garbage_wrapped_host_spec_fails_closed_test \
 	control_socket_path_shell_metacharacters_test \
 	remote_origin_target_uncompressed_test \
 	remote_helper_path_shell_metacharacters_test \
+	remote_capability_control_whitespace_path_falls_back_to_direct_probe_test \
+	target_capability_control_whitespace_path_falls_back_to_direct_probe_test \
 	remote_compression_pipeline_test \
 	target_only_remote_compression_test \
 	remote_csh_origin_snapshot_listing_test \
 	remote_wrapped_host_spec_test \
+	malformed_remote_capability_response_fails_closed_test \
+	malformed_remote_capability_response_falls_back_to_direct_probe_test \
+	malformed_target_capability_response_falls_back_to_direct_probe_test \
 trap_exit_cleanup_test \
 missing_parallel_error_test \
 remote_missing_parallel_origin_test \
@@ -4205,8 +4602,8 @@ migration_service_success_test \
 migration_service_failure_test \
 	get_os_detection_test \
 	verbose_debug_logging_test \
-	legacy_backup_fallback_warning_test \
-	remote_legacy_backup_fallback_warning_test \
+	legacy_backup_layout_rejected_test \
+	remote_legacy_backup_layout_rejected_test \
 	insecure_backup_metadata_guard_test \
 	beep_handling_test"
 	# shellcheck disable=SC2086

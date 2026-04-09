@@ -76,15 +76,20 @@ Or:
 
 What it usually means:
 
-- `ZXFER_BACKUP_DIR` does not contain the expected file
+- `ZXFER_BACKUP_DIR` does not contain the expected exact keyed file
+- the keyed file exists but does not contain one exact current-format
+  `source,destination,properties` row for the requested pair
 - secure file ownership / mode checks rejected the metadata
-- legacy fallback was needed but not present
+- the only available metadata is in an older unsupported layout
 
 What to inspect:
 
 - `ZXFER_BACKUP_DIR`
+- the source-dataset-relative tree under `ZXFER_BACKUP_DIR`
+- the exact source/destination pair that was backed up with `-k`
 - ownership and permissions of `.zxfer_backup_info.*`
-- whether the backup belongs to the intended dataset
+- whether the backup file contains exactly one current-format row for the
+  intended source/destination pair
 
 ## Failure Report Logging And Email Alerts
 

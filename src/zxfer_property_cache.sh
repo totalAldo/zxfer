@@ -36,43 +36,23 @@
 # PROPERTY NORMALIZATION / CACHE / PREFETCH HELPERS
 ################################################################################
 
-# module variables
-m_normalized_dataset_properties=""
-m_normalized_dataset_properties_cache_hit=0
-m_required_properties_result=""
-m_required_property_probe_result=""
-m_destination_pvs_raw=""
-m_property_cache_path=""
-m_property_cache_key=""
+# Module contract:
+# owns globals: per-iteration property cache paths, recursive prefetch state, and per-call lookup/result channels such as g_zxfer_normalized_dataset_properties, g_zxfer_required_properties_result, g_zxfer_required_property_probe_result, g_zxfer_destination_pvs_raw, g_zxfer_property_cache_path, and g_zxfer_property_cache_key.
+# reads globals: g_LZFS/g_RZFS, g_cmd_awk, temp-root helpers, and current dataset context.
+# mutates caches: on-disk property cache entries and recursive prefetch state.
+# returns via stdout: serialized property records, decoded assignments, and normalized property payloads.
 
-zxfer_escape_serialized_property_value() {
-	l_value=$1
-
-	printf '%s\n' "$l_value" | "${g_cmd_awk:-awk}" '
-{
-	gsub(/%/, "%25")
-	gsub(/,/, "%2C")
-	gsub(/=/, "%3D")
-	gsub(/;/, "%3B")
-	gsub(/\t/, "%09")
-	gsub(/\r/, "%0D")
-	print
-}'
+zxfer_reset_property_lookup_results() {
+	g_zxfer_normalized_dataset_properties=""
+	g_zxfer_normalized_dataset_properties_cache_hit=0
+	g_zxfer_required_properties_result=""
+	g_zxfer_required_property_probe_result=""
+	g_zxfer_destination_pvs_raw=""
 }
 
-zxfer_unescape_serialized_property_value() {
-	l_value=$1
-
-	printf '%s\n' "$l_value" | "${g_cmd_awk:-awk}" '
-{
-	gsub(/%0D/, "\r")
-	gsub(/%09/, "\t")
-	gsub(/%3B/, ";")
-	gsub(/%3D/, "=")
-	gsub(/%2C/, ",")
-	gsub(/%25/, "%")
-	print
-}'
+zxfer_reset_property_cache_path_state() {
+	g_zxfer_property_cache_path=""
+	g_zxfer_property_cache_key=""
 }
 
 zxfer_serialize_property_records_from_stdin() {
@@ -170,6 +150,8 @@ zxfer_reset_property_iteration_caches() {
 		rm -rf "$g_zxfer_property_cache_dir"
 	fi
 
+	zxfer_reset_property_lookup_results
+	zxfer_reset_property_cache_path_state
 	g_zxfer_property_cache_dir=""
 	g_zxfer_property_cache_unavailable=0
 	g_zxfer_source_property_tree_prefetch_root=""
@@ -202,7 +184,7 @@ zxfer_refresh_property_tree_prefetch_context() {
 		return
 	fi
 
-	g_zxfer_source_property_tree_prefetch_root=${initial_source:-}
+	g_zxfer_source_property_tree_prefetch_root=${g_initial_source:-}
 	g_zxfer_source_property_tree_prefetch_zfs_cmd=${g_LZFS:-}
 	g_zxfer_source_property_tree_prefetch_state=0
 	g_zxfer_destination_property_tree_prefetch_root=${g_destination:-}
@@ -235,18 +217,20 @@ zxfer_ensure_property_cache_dir() {
 
 zxfer_property_cache_encode_key() {
 	l_key=$1
+	g_zxfer_property_cache_key=""
 	l_key_hex=$(printf '%s' "$l_key" | LC_ALL=C od -An -tx1 -v | tr -d ' \n')
 	if [ "$l_key_hex" = "" ]; then
 		l_key_hex="00"
 	fi
-	m_property_cache_key=$l_key_hex
-	printf '%s\n' "$m_property_cache_key"
+	g_zxfer_property_cache_key=$l_key_hex
+	printf '%s\n' "$g_zxfer_property_cache_key"
 }
 
 zxfer_property_cache_dataset_path() {
 	l_bucket=$1
 	l_side=$2
 	l_dataset=$3
+	g_zxfer_property_cache_path=""
 
 	if ! zxfer_ensure_property_cache_dir; then
 		return 1
@@ -256,8 +240,8 @@ zxfer_property_cache_dataset_path() {
 		return 1
 	fi
 
-	m_property_cache_path=$g_zxfer_property_cache_dir/$l_bucket/$l_side/$l_dataset_key
-	printf '%s\n' "$m_property_cache_path"
+	g_zxfer_property_cache_path=$g_zxfer_property_cache_dir/$l_bucket/$l_side/$l_dataset_key
+	printf '%s\n' "$g_zxfer_property_cache_path"
 }
 
 zxfer_property_cache_property_path() {
@@ -265,6 +249,7 @@ zxfer_property_cache_property_path() {
 	l_side=$2
 	l_dataset=$3
 	l_property=$4
+	g_zxfer_property_cache_path=""
 
 	if ! zxfer_ensure_property_cache_dir; then
 		return 1
@@ -277,8 +262,8 @@ zxfer_property_cache_property_path() {
 		return 1
 	fi
 
-	m_property_cache_path=$g_zxfer_property_cache_dir/$l_bucket/$l_side/$l_dataset_key/$l_property_key
-	printf '%s\n' "$m_property_cache_path"
+	g_zxfer_property_cache_path=$g_zxfer_property_cache_dir/$l_bucket/$l_side/$l_dataset_key/$l_property_key
+	printf '%s\n' "$g_zxfer_property_cache_path"
 }
 
 zxfer_property_cache_store() {
@@ -337,8 +322,8 @@ zxfer_get_property_tree_prefetch_dataset_list() {
 			printf '%s\n' "$g_recursive_source_list" | tr ' ' '\n'
 			return 0
 		fi
-		if [ -n "${initial_source:-}" ]; then
-			printf '%s\n' "$initial_source"
+		if [ -n "${g_initial_source:-}" ]; then
+			printf '%s\n' "$g_initial_source"
 			return 0
 		fi
 		;;
@@ -452,13 +437,13 @@ zxfer_prefetch_recursive_normalized_properties() {
 		return 1
 	fi
 
-	l_dataset_filter_file=$(get_temp_file)
-	l_machine_tree_file=$(get_temp_file)
-	l_human_tree_file=$(get_temp_file)
-	l_machine_grouped_file=$(get_temp_file)
-	l_human_grouped_file=$(get_temp_file)
-	l_combined_grouped_file=$(get_temp_file)
-	l_tree_err_file=$(get_temp_file)
+	l_dataset_filter_file=$(zxfer_get_temp_file)
+	l_machine_tree_file=$(zxfer_get_temp_file)
+	l_human_tree_file=$(zxfer_get_temp_file)
+	l_machine_grouped_file=$(zxfer_get_temp_file)
+	l_human_grouped_file=$(zxfer_get_temp_file)
+	l_combined_grouped_file=$(zxfer_get_temp_file)
+	l_tree_err_file=$(zxfer_get_temp_file)
 
 	# shellcheck disable=SC2016
 	printf '%s\n' "$l_dataset_list" | grep -v '^[[:space:]]*$' |
@@ -475,7 +460,7 @@ zxfer_prefetch_recursive_normalized_properties() {
 	fi
 
 	zxfer_profile_increment_counter "$l_profile_counter"
-	if ! run_zfs_cmd_for_spec "$l_zfs_cmd" get -r -Hpo name,property,value,source all "$l_root_dataset" >"$l_machine_tree_file" 2>"$l_tree_err_file"; then
+	if ! zxfer_run_zfs_cmd_for_spec "$l_zfs_cmd" get -r -Hpo name,property,value,source all "$l_root_dataset" >"$l_machine_tree_file" 2>"$l_tree_err_file"; then
 		rm -f "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
 			"$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file" \
 			"$l_tree_err_file"
@@ -485,7 +470,7 @@ zxfer_prefetch_recursive_normalized_properties() {
 		esac
 		return 1
 	fi
-	if ! run_zfs_cmd_for_spec "$l_zfs_cmd" get -r -Ho name,property,value,source all "$l_root_dataset" >"$l_human_tree_file" 2>"$l_tree_err_file"; then
+	if ! zxfer_run_zfs_cmd_for_spec "$l_zfs_cmd" get -r -Ho name,property,value,source all "$l_root_dataset" >"$l_human_tree_file" 2>"$l_tree_err_file"; then
 		rm -f "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
 			"$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file" \
 			"$l_tree_err_file"
@@ -554,9 +539,9 @@ END {
 		[ -n "$l_dataset" ] || continue
 		[ -n "$l_machine_pvs" ] || continue
 		[ -n "$l_human_pvs" ] || continue
-		resolve_human_vars "$l_machine_pvs" "$l_human_pvs"
+		zxfer_resolve_human_vars "$l_machine_pvs" "$l_human_pvs"
 		if zxfer_property_cache_dataset_path normalized "$l_side" "$l_dataset" >/dev/null 2>&1; then
-			zxfer_property_cache_store "$m_property_cache_path" "$human_results" >/dev/null 2>&1 || :
+			zxfer_property_cache_store "$g_zxfer_property_cache_path" "$human_results" >/dev/null 2>&1 || :
 		fi
 	done <"$l_combined_grouped_file"
 
@@ -613,7 +598,7 @@ $l_dataset
 	if ! zxfer_property_cache_dataset_path normalized "$l_lookup_side" "$l_dataset" >/dev/null 2>&1; then
 		return 1
 	fi
-	[ -f "$m_property_cache_path" ]
+	[ -f "$g_zxfer_property_cache_path" ]
 }
 
 zxfer_load_normalized_dataset_properties() {
@@ -625,21 +610,21 @@ zxfer_load_normalized_dataset_properties() {
 		l_zfs_cmd=$g_LZFS
 	fi
 
-	m_normalized_dataset_properties=""
-	m_normalized_dataset_properties_cache_hit=0
+	g_zxfer_normalized_dataset_properties=""
+	g_zxfer_normalized_dataset_properties_cache_hit=0
 
 	l_cache_path=""
 	if zxfer_property_cache_dataset_path normalized "$l_lookup_side" "$l_dataset" >/dev/null 2>&1; then
-		l_cache_path=$m_property_cache_path
+		l_cache_path=$g_zxfer_property_cache_path
 		if [ -f "$l_cache_path" ]; then
-			m_normalized_dataset_properties=$(cat "$l_cache_path")
-			m_normalized_dataset_properties_cache_hit=1
+			g_zxfer_normalized_dataset_properties=$(cat "$l_cache_path")
+			g_zxfer_normalized_dataset_properties_cache_hit=1
 			return 0
 		fi
 		if zxfer_maybe_prefetch_recursive_normalized_properties "$l_dataset" "$l_zfs_cmd" "$l_lookup_side" >/dev/null 2>&1 &&
 			[ -f "$l_cache_path" ]; then
-			m_normalized_dataset_properties=$(cat "$l_cache_path")
-			m_normalized_dataset_properties_cache_hit=1
+			g_zxfer_normalized_dataset_properties=$(cat "$l_cache_path")
+			g_zxfer_normalized_dataset_properties_cache_hit=1
 			return 0
 		fi
 	fi
@@ -656,21 +641,21 @@ zxfer_load_normalized_dataset_properties() {
 		;;
 	esac
 
-	if ! l_machine_pvs=$(run_zfs_cmd_for_spec "$l_zfs_cmd" get -Hpo property,value,source all "$l_dataset" 2>&1); then
+	if ! l_machine_pvs=$(zxfer_run_zfs_cmd_for_spec "$l_zfs_cmd" get -Hpo property,value,source all "$l_dataset" 2>&1); then
 		printf '%s\n' "$l_machine_pvs"
 		return 1
 	fi
 	l_machine_pvs=$(printf '%s\n' "$l_machine_pvs" | zxfer_serialize_property_records_from_stdin)
-	if ! l_human_pvs=$(run_zfs_cmd_for_spec "$l_zfs_cmd" get -Ho property,value,source all "$l_dataset" 2>&1); then
+	if ! l_human_pvs=$(zxfer_run_zfs_cmd_for_spec "$l_zfs_cmd" get -Ho property,value,source all "$l_dataset" 2>&1); then
 		printf '%s\n' "$l_human_pvs"
 		return 1
 	fi
 	l_human_pvs=$(printf '%s\n' "$l_human_pvs" | zxfer_serialize_property_records_from_stdin)
-	resolve_human_vars "$l_machine_pvs" "$l_human_pvs"
-	m_normalized_dataset_properties=$human_results
+	zxfer_resolve_human_vars "$l_machine_pvs" "$l_human_pvs"
+	g_zxfer_normalized_dataset_properties=$human_results
 
 	if [ -n "$l_cache_path" ]; then
-		zxfer_property_cache_store "$l_cache_path" "$m_normalized_dataset_properties" >/dev/null 2>&1 || :
+		zxfer_property_cache_store "$l_cache_path" "$g_zxfer_normalized_dataset_properties" >/dev/null 2>&1 || :
 	fi
 
 	return 0
@@ -686,50 +671,51 @@ zxfer_get_required_property_probe() {
 		l_zfs_cmd=$g_LZFS
 	fi
 
-	m_required_property_probe_result=""
+	g_zxfer_required_properties_result=""
+	g_zxfer_required_property_probe_result=""
 
 	l_cache_path=""
 	if zxfer_property_cache_property_path required "$l_lookup_side" "$l_dataset" "$l_required_property" >/dev/null 2>&1; then
-		l_cache_path=$m_property_cache_path
+		l_cache_path=$g_zxfer_property_cache_path
 		if [ -f "$l_cache_path" ]; then
-			m_required_property_probe_result=$(cat "$l_cache_path")
+			g_zxfer_required_property_probe_result=$(cat "$l_cache_path")
 			return 0
 		fi
 	fi
 
 	zxfer_profile_increment_counter g_zxfer_profile_required_property_backfill_gets
-	if l_explicit_probe_output=$(run_zfs_cmd_for_spec "$l_zfs_cmd" get -Hpo property,value,source "$l_required_property" "$l_dataset" 2>&1); then
+	if l_explicit_probe_output=$(zxfer_run_zfs_cmd_for_spec "$l_zfs_cmd" get -Hpo property,value,source "$l_required_property" "$l_dataset" 2>&1); then
 		l_explicit_property=$(printf '%s\n' "$l_explicit_probe_output" | zxfer_serialize_property_records_from_stdin)
 		case "$l_explicit_property" in
 		"$l_required_property"=*=*) ;;
 		*)
-			m_required_properties_result="Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
-			printf '%s\n' "$m_required_properties_result"
+			g_zxfer_required_properties_result="Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
+			printf '%s\n' "$g_zxfer_required_properties_result"
 			return 1
 			;;
 		esac
-		m_required_property_probe_result=$l_explicit_property
+		g_zxfer_required_property_probe_result=$l_explicit_property
 	else
 		case "$l_explicit_probe_output" in
 		*"does not apply"* | *"invalid property"* | *"no such property"* | *"not supported"*)
-			m_required_property_probe_result="__ZXFER_REQUIRED_PROPERTY_UNSUPPORTED__"
+			g_zxfer_required_property_probe_result="__ZXFER_REQUIRED_PROPERTY_UNSUPPORTED__"
 			;;
 		*)
-			m_required_properties_result="Failed to retrieve required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
-			printf '%s\n' "$m_required_properties_result"
+			g_zxfer_required_properties_result="Failed to retrieve required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
+			printf '%s\n' "$g_zxfer_required_properties_result"
 			return 1
 			;;
 		esac
 	fi
 
 	if [ -n "$l_cache_path" ]; then
-		zxfer_property_cache_store "$l_cache_path" "$m_required_property_probe_result" >/dev/null 2>&1 || :
+		zxfer_property_cache_store "$l_cache_path" "$g_zxfer_required_property_probe_result" >/dev/null 2>&1 || :
 	fi
 
 	return 0
 }
 
-populate_required_properties_present() {
+zxfer_populate_required_properties_present() {
 	l_dataset=$1
 	l_property_list=$2
 	l_zfs_cmd=$3
@@ -740,6 +726,7 @@ populate_required_properties_present() {
 		l_zfs_cmd=$g_LZFS
 	fi
 
+	g_zxfer_required_properties_result=""
 	l_result=$l_property_list
 	l_oldifs=$IFS
 	IFS=","
@@ -761,25 +748,25 @@ populate_required_properties_present() {
 			return 1
 		fi
 
-		case "$m_required_property_probe_result" in
+		case "$g_zxfer_required_property_probe_result" in
 		"" | "__ZXFER_REQUIRED_PROPERTY_UNSUPPORTED__")
 			continue
 			;;
 		esac
 
 		if [ -n "$l_result" ]; then
-			l_result="$l_result,$m_required_property_probe_result"
+			l_result="$l_result,$g_zxfer_required_property_probe_result"
 		else
-			l_result=$m_required_property_probe_result
+			l_result=$g_zxfer_required_property_probe_result
 		fi
 	done
 	IFS=$l_oldifs
 
-	m_required_properties_result=$l_result
+	g_zxfer_required_properties_result=$l_result
 	return 0
 }
 
-load_destination_props() {
+zxfer_load_destination_props() {
 	l_dataset=$1
 	l_zfs_cmd=$2
 
@@ -787,11 +774,12 @@ load_destination_props() {
 		l_zfs_cmd=$g_RZFS
 	fi
 
+	g_zxfer_destination_pvs_raw=""
 	if ! zxfer_load_normalized_dataset_properties "$l_dataset" "$l_zfs_cmd" destination; then
 		return 1
 	fi
 
-	m_destination_pvs_raw=$m_normalized_dataset_properties
+	g_zxfer_destination_pvs_raw=$g_zxfer_normalized_dataset_properties
 	return 0
 }
 
@@ -799,31 +787,32 @@ load_destination_props() {
 # Normalize the list of properties to set by using a mix of human-readable and
 # machine-readable values
 #
-resolve_human_vars() {
-	_machine_vars=$1
-	_human_vars=$2
-	_FUNCIFS=$IFS
+zxfer_resolve_human_vars() {
+	l_machine_vars=$1
+	l_human_vars=$2
+	l_funcifs=$IFS
 	IFS=","
 
-	human_results=
-	for h_var in $_human_vars; do
-		h_prop=${h_var%%=*}
-		for m_var in $_machine_vars; do
-			m_prop=${m_var%%=*}
-			if [ "$h_prop" = "$m_prop" ]; then
-				machine_property=$(echo "$m_var" | cut -f1 -d=)
-				machine_value=$(echo "$m_var" | cut -f2 -d=)
-				machine_source=$(echo "$m_var" | cut -f3 -d=)
-				human_value=$(echo "$h_var" | cut -f2 -d=)
-				if [ "$human_value" = "none" ]; then
-					machine_value=$human_value
+	l_human_results=
+	for l_human_var in $l_human_vars; do
+		l_human_prop=${l_human_var%%=*}
+		for l_machine_var in $l_machine_vars; do
+			l_machine_prop=${l_machine_var%%=*}
+			if [ "$l_human_prop" = "$l_machine_prop" ]; then
+				l_machine_property=$(echo "$l_machine_var" | cut -f1 -d=)
+				l_machine_value=$(echo "$l_machine_var" | cut -f2 -d=)
+				l_machine_source=$(echo "$l_machine_var" | cut -f3 -d=)
+				l_human_value=$(echo "$l_human_var" | cut -f2 -d=)
+				if [ "$l_human_value" = "none" ]; then
+					l_machine_value=$l_human_value
 				fi
-				human_results="${human_results}$machine_property=$machine_value=$machine_source,"
+				l_human_results="${l_human_results}$l_machine_property=$l_machine_value=$l_machine_source,"
 			fi
 		done
 	done
-	human_results=${human_results%,}
-	IFS=$_FUNCIFS
+	l_human_results=${l_human_results%,}
+	IFS=$l_funcifs
+	human_results=$l_human_results
 }
 
 # Retrieve the normalized property/value/source list for a dataset while
@@ -832,9 +821,9 @@ resolve_human_vars() {
 # $2: zfs command to execute (defaults to $g_LZFS)
 # $3: optional lookup side label (source/destination/other) for profiling
 #
-get_normalized_dataset_properties() {
+zxfer_get_normalized_dataset_properties() {
 	zxfer_load_normalized_dataset_properties "$1" "$2" "$3" || return 1
-	printf '%s\n' "$m_normalized_dataset_properties"
+	printf '%s\n' "$g_zxfer_normalized_dataset_properties"
 }
 
 #
@@ -847,9 +836,9 @@ get_normalized_dataset_properties() {
 # $3: zfs command used to query properties
 # $4: comma-separated list of required property names
 #
-ensure_required_properties_present() {
-	populate_required_properties_present "$1" "$2" "$3" "$4" "$5" || return 1
-	printf '%s\n' "$m_required_properties_result"
+zxfer_ensure_required_properties_present() {
+	zxfer_populate_required_properties_present "$1" "$2" "$3" "$4" "$5" || return 1
+	printf '%s\n' "$g_zxfer_required_properties_result"
 }
 
 #
@@ -857,7 +846,7 @@ ensure_required_properties_present() {
 # $1: dataset name
 # $2: command used to query properties (defaults to $g_RZFS)
 #
-collect_destination_props() {
-	load_destination_props "$1" "$2" || return 1
-	printf '%s\n' "$m_destination_pvs_raw"
+zxfer_collect_destination_props() {
+	zxfer_load_destination_props "$1" "$2" || return 1
+	printf '%s\n' "$g_zxfer_destination_pvs_raw"
 }

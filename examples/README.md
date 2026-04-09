@@ -4,6 +4,9 @@ This directory holds small command templates for the most common zxfer
 workflows. Review and edit dataset names, hostnames, and option flags before
 running anything against a real system.
 
+For an option-by-option CLI cookbook that covers the full current flag set, see
+[../docs/cli-examples.md](../docs/cli-examples.md).
+
 ## Included Templates
 
 - [local-recursive-replication.sh](./local-recursive-replication.sh): local recursive send/receive

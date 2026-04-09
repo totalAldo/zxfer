@@ -41,9 +41,8 @@ matters especially when:
 - wrapped host specs are used, for example `user@host pfexec`
 - restore mode (`-e`) needs a remote `cat`
 - `-j` requires GNU `parallel` on the origin host
-
-Remote `uname` detection and the remote `zstd` path used by `-O ... -j ... -z`
-are still tracked as open hardening gaps in [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
+- custom `-Z` compression commands or default `zstd` helpers must be resolved
+  per host instead of assuming one shared absolute path
 
 ## Service Management
 
@@ -56,7 +55,11 @@ not available.
 See [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) for the current cross-platform
 limitations, including:
 
-- remote `uname` / OS detection hardening gaps
-- remote `zstd` lookup in source snapshot listing
+- remote backup-directory and backup-metadata guard helpers still relying on
+  the ambient remote `PATH` for some auxiliary tools
+- wrapper-style host specs still having SSH control-socket caveats during
+  preflight and teardown
+- remote adaptive `-j` discovery still validating `parallel` by resolved path
+  and name rather than by an explicit GNU `parallel` version probe
 - Darwin-specific property behavior that is not yet strict enough for full
   end-to-end certification

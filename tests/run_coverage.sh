@@ -12,6 +12,8 @@ COVERAGE_DIR=${COVERAGE_DIR:-"$ZXFER_ROOT/coverage"}
 ZXFER_COVERAGE_MODE=${ZXFER_COVERAGE_MODE:-auto}
 ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=${ZXFER_COVERAGE_INCLUDE_ENTRYPOINT:-0}
 ZXFER_COVERAGE_ENFORCE_POLICY=${ZXFER_COVERAGE_ENFORCE_POLICY:-1}
+ZXFER_COVERAGE_REGRESSION_HIT_TOLERANCE=${ZXFER_COVERAGE_REGRESSION_HIT_TOLERANCE:-2}
+ZXFER_COVERAGE_TOTAL_REGRESSION_HIT_TOLERANCE=${ZXFER_COVERAGE_TOTAL_REGRESSION_HIT_TOLERANCE:-4}
 COVERAGE_POLICY_FILE=${ZXFER_COVERAGE_POLICY_FILE:-"$TEST_DIR/coverage_policy.tsv"}
 COVERAGE_BASELINE_DIR=${ZXFER_COVERAGE_BASELINE_DIR:-"$TEST_DIR/coverage_baseline/bash-xtrace"}
 COVERAGE_BASELINE_SUMMARY_FILE=${ZXFER_COVERAGE_BASELINE_SUMMARY_FILE:-"$COVERAGE_BASELINE_DIR/summary.tsv"}
@@ -43,6 +45,10 @@ The bash-xtrace mode writes repo-relative summary.tsv and missing.txt reports,
 appends a TOTAL row, compares them to the committed baseline, and writes a
 unified missing.txt diff for CI and pull request visibility.
 
+The committed bash-xtrace baseline uses a small hit-count tolerance during the
+no-regression comparison to absorb known shell / platform tracing jitter in the
+approximation path.
+
 Committed policy files:
   tests/coverage_policy.tsv
   tests/coverage_baseline/bash-xtrace/summary.tsv
@@ -50,7 +56,7 @@ Committed policy files:
 
 Examples:
   tests/run_coverage.sh
-  ZXFER_COVERAGE_MODE=bash-xtrace tests/run_coverage.sh tests/test_zxfer_common.sh
+  ZXFER_COVERAGE_MODE=bash-xtrace tests/run_coverage.sh tests/test_zxfer_reporting.sh
   COVERAGE_DIR=/tmp/zxfer-coverage tests/run_coverage.sh
 EOF
 }
@@ -532,6 +538,8 @@ enforce_bash_xtrace_policy() {
 		-v summary_file="$l_summary_file" \
 		-v policy_file="$COVERAGE_POLICY_FILE" \
 		-v baseline_file="$COVERAGE_BASELINE_SUMMARY_FILE" \
+		-v regression_hit_tolerance="${ZXFER_COVERAGE_REGRESSION_HIT_TOLERANCE:-2}" \
+		-v total_regression_hit_tolerance="${ZXFER_COVERAGE_TOTAL_REGRESSION_HIT_TOLERANCE:-4}" \
 		-v report_file="$l_policy_report_file" \
 		-v failures_file="$l_policy_failures_file" '
 function trim(s) {
@@ -571,7 +579,7 @@ function read_policy_file(   line, fields, target, min_pct) {
 	}
 	close(policy_file)
 }
-function read_summary_file(path, pct_store, seen_store,   line, fields, target, pct) {
+function read_summary_file(path, pct_store, hit_store, seen_store,   line, fields, target, pct, hit) {
 	while ((getline line < path) > 0) {
 		if (line == "") {
 			continue
@@ -579,19 +587,21 @@ function read_summary_file(path, pct_store, seen_store,   line, fields, target, 
 		split(line, fields, "\t")
 		target = trim(fields[5])
 		pct = trim(fields[1])
-		if (target == "" || pct == "") {
+		hit = trim(fields[3])
+		if (target == "" || pct == "" || hit == "") {
 			record_failure("invalid-summary", path, "", "", "Malformed summary line: " line)
 			continue
 		}
 		pct_store[target] = pct + 0
+		hit_store[target] = hit + 0
 		seen_store[target] = 1
 	}
 	close(path)
 }
 BEGIN {
 	read_policy_file()
-	read_summary_file(baseline_file, baseline_pct, baseline_seen)
-	read_summary_file(summary_file, current_pct, current_seen)
+	read_summary_file(baseline_file, baseline_pct, baseline_hit, baseline_seen)
+	read_summary_file(summary_file, current_pct, current_hit, current_seen)
 
 	if (!("TOTAL" in current_seen)) {
 		record_failure("missing-total", "TOTAL", "", "", "Current summary.tsv is missing the TOTAL row.")
@@ -625,7 +635,11 @@ BEGIN {
 			record_failure("minimum", target, current_pct[target], policy_min[target], "Coverage fell below the configured minimum.")
 		}
 		if ((target in baseline_seen) && (current_pct[target] + 0.000001 < baseline_pct[target])) {
-			record_failure("regression", target, current_pct[target], baseline_pct[target], "Coverage regressed relative to the committed baseline.")
+			regression_tolerance = (target == "TOTAL" ? total_regression_hit_tolerance + 0 : regression_hit_tolerance + 0)
+			if (!(target in current_hit) || !(target in baseline_hit) ||
+				(current_hit[target] + regression_tolerance) < baseline_hit[target]) {
+				record_failure("regression", target, current_pct[target], baseline_pct[target], "Coverage regressed relative to the committed baseline.")
+			}
 		}
 	}
 

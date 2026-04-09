@@ -2,10 +2,10 @@ name: Integration Tests
 
 on:
   push:
-  pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Cancel superseded runs for the same pushed ref.
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -17,7 +17,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install ZFS prerequisites
         shell: bash
@@ -56,8 +56,65 @@ jobs:
 
       - name: Upload integration artifacts
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: zxfer-integration-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/zxfer-integration-tmp
+          if-no-files-found: warn
+
+  integration-freebsd:
+    name: ZFS Integration (FreeBSD)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Run integration tests on FreeBSD
+        uses: vmactions/freebsd-vm@7ca82f79fe3078fecded6d3a2bff094995447bbd # v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y parallel zstd
+            kldload zfs || true
+          run: |
+            export TMPDIR="$GITHUB_WORKSPACE/ci-artifacts/integration-freebsd"
+            export ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1
+            rm -rf "$TMPDIR"
+            mkdir -p "$TMPDIR"
+            ./tests/run_integration_zxfer.sh --yes --keep-going
+      - name: Upload FreeBSD integration artifacts
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: zxfer-integration-freebsd-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/ci-artifacts/integration-freebsd
+          if-no-files-found: warn
+
+  integration-omnios:
+    name: ZFS Integration (OmniOS)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Run integration tests on OmniOS
+        uses: vmactions/omnios-vm@68da93c6d9812b29fc90c5b5141b093f84a590fb # v1
+        with:
+          usesh: true
+          prepare: |
+            PKG_SUCCESS_ON_NOP=1 pkg install zstd
+          run: |
+            export TMPDIR="$GITHUB_WORKSPACE/ci-artifacts/integration-omnios"
+            export ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1
+            rm -rf "$TMPDIR"
+            mkdir -p "$TMPDIR"
+            /usr/xpg4/bin/sh ./tests/run_integration_zxfer.sh --yes --keep-going
+      - name: Upload OmniOS integration artifacts
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: zxfer-integration-omnios-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/ci-artifacts/integration-omnios
           if-no-files-found: warn

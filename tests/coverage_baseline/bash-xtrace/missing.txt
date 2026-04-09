@@ -1,229 +1,144 @@
 src/zxfer_backup_metadata.sh
-  45:	l_sanitized=$(printf '%s' "$l_component" |
-  61:		l_sanitized="_"
-  109:		l_result="dataset"
-  133:			l_relative="root"
-  175:		l_relative="root"
-  181:			l_relative="root"
-  196:				l_relative="root"
-  225:		return 1
-  302:	l_key_hex=$(printf '%s' "$l_identity" |
-  315:		return 1
-  329:		throw_error "Refusing to use backup directory $l_dir because it is a symlink."
-  696:					done <"$l_find_results_file"
-  718:							if [ $l_backup_match_status -eq 2 ]; then
-  719:								l_fallback_usage_error_message="Backup property file $l_found_path contains multiple entries for source dataset $initial_source and destination $l_expected_root_destination. Remove the ambiguous rows or restore from a specific exact backup path."
-  720:								l_fallback_parse_failed=1
-  721:								break
-  748:		done <"$l_fallback_datasets_file"
+  90:	l_key_hex=$(printf '%s' "$l_identity" |
+  117:		zxfer_throw_error "Refusing to use backup directory $l_dir because it is a symlink."
+  247:		return 5
 
-src/zxfer_common.sh
-  36:	. ./zxfer_globals.sh
-  207:			return 1
-  226:		return 0
-  238:			return 0
-  244:		return 0
-  255:		l_counter_value=0
-  626:		return 1
-  636:		return 1
-  640:		return 1
-  648:		l_ls_path=./$l_ls_path
-  652:		return 1
-  662:		return 1
-  673:			return 1
-  699:		return 1
-  716:		l_ls_path=./$l_ls_path
-  720:		return 1
-  779:			:
-  819:		g_zxfer_effective_tmpdir_requested=$l_request_key
-  820:		g_zxfer_effective_tmpdir=""
-  821:		return 1
-  883:		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_log_path\" because it is a symlink."
-  884:		return 1
-  922:		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
-  923:		return 1
-  1165:		return
-  1179:		return
-  1606:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
-  1607:	if [ "$l_speaker_km_loaded" = "0" ]; then
-  1608:		if ! kldload "speaker" >/dev/null 2>&1; then
-  1609:			echoV "Unable to load speaker module; skipping beep."
-  1610:			return
-  1615:	if [ "$l_exit_status" -eq 0 ]; then
-  1616:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
-  1617:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
-  1618:				echoV "Success beep failed; skipping."
-  1621:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
-  1622:			echoV "Failure beep failed; skipping."
+src/zxfer_exec.sh
+  177:		return
+  191:		return
 
-src/zxfer_get_zfs_list.sh
-  36:	. ./zxfer_globals.sh
-  195:		l_jobs=1
-  249:		l_remote_serial_cmd=$(build_shell_command_from_argv \
-  255:				g_source_snapshot_list_uses_metadata_compression=1
-  256:				l_remote_compress_safe=${g_origin_cmd_compress_safe:-$g_cmd_compress_safe}
-  257:				l_remote_serial_cmd="$l_remote_serial_cmd | $l_remote_compress_safe"
-  263:			l_cmd="$l_cmd | $g_cmd_decompress_safe"
-  270:		return 1
-  279:		l_remote_runner_cmd=$(build_shell_command_from_argv \
-  285:			l_remote_dataset_input_cmd=$(build_shell_command_from_argv \
-  293:				g_source_snapshot_list_uses_metadata_compression=1
-  294:				l_remote_compress_safe=${g_origin_cmd_compress_safe:-$g_cmd_compress_safe}
-  295:				l_remote_pipeline="$l_remote_pipeline | $l_remote_compress_safe"
-  301:			l_cmd="$l_cmd | $g_cmd_decompress_safe"
-  313:		l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -t filesystem,volume -o name "$initial_source")
-  509:	done <"$l_candidate_datasets_tmp_file"
-  517:		g_recursive_source_list=$(printf '%s\n%s\n' "$g_recursive_source_list" "$l_identity_source_datasets" |
-  522:		g_recursive_destination_extra_dataset_list=$(printf '%s\n%s\n' "$g_recursive_destination_extra_dataset_list" "$l_identity_destination_datasets" |
-  826:				l_dest_pool=$g_destination
-  837:			rm -f "$l_dest_list_tmp_file" "$l_dest_list_err_file"
-  838:			throw_usage_error "Failed to retrieve list of datasets from the destination"
-
-src/zxfer_globals.sh
-  168:		return 1
-  254:		printf '%s\n' "$g_rzfs_list_hr_snap" | "${g_cmd_awk:-awk}" -F@ -v ds="$l_dataset" '$1 == ds { print $0 }'
-  369:	*)
-  477:	[ -n "${g_cmd_ssh:-}" ] || return 1
-  478:	"$g_cmd_ssh" -M -V >/dev/null 2>&1
-  555:		g_cmd_awk='awk'
-  803:			g_zxfer_failure_class=dependency
-  804:			throw_error "$g_cmd_compress_safe"
-  807:			g_zxfer_failure_class=dependency
-  808:			throw_error "$g_cmd_decompress_safe"
-  1331:				g_zxfer_failure_class=dependency
-  1332:				throw_error "$g_target_cmd_decompress_safe"
-
-src/zxfer_inspect_delete_snap.sh
-  36:	. ./zxfer_globals.sh
-  69:	$0 != "" { record = $0; tab_pos = index(record, "\t"); snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record); snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : ""); at_pos = index(snapshot_path, "@"); if (at_pos > 0) { snapshot_identity = substr(snapshot_path, at_pos + 1); if (snapshot_guid != "") snapshot_identity = snapshot_identity "\t" snapshot_guid; if (snapshot_identity in delete_identities) print snapshot_path } }' "$l_identity_file" - <<-EOF
-  70:		$(normalize_snapshot_record_list "$l_snapshot_records")
-  71:	EOF
-  508:				throw_error "Failed to retrieve source snapshot identities for [$l_source]."
-  514:				throw_error "Failed to retrieve destination snapshot identities for [$g_actual_dest]."
+src/zxfer_path_security.sh
+  285:		return 1
+  297:		l_ls_path=./$l_ls_path
+  365:		l_ls_path=./$l_ls_path
 
 src/zxfer_property_cache.sh
-  49:	l_value=$1
-  64:	l_value=$1
-  256:		return 1
-  274:		return 1
-  277:		return 1
-  290:		return 1
-  305:		return
-  427:		source) g_zxfer_source_property_tree_prefetch_state=2 ;;
-  449:		source) g_zxfer_source_property_tree_prefetch_state=2 ;;
-  450:		destination) g_zxfer_destination_property_tree_prefetch_state=2 ;;
-  452:		return 1
-  489:		rm -f "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
-  493:		source) g_zxfer_source_property_tree_prefetch_state=2 ;;
-  494:		destination) g_zxfer_destination_property_tree_prefetch_state=2 ;;
-  496:		return 1
-  505:		destination) g_zxfer_destination_property_tree_prefetch_state=2 ;;
-  514:		source) g_zxfer_source_property_tree_prefetch_state=2 ;;
-  551:			continue
-  561:	done <"$l_combined_grouped_file"
-  592:	destination)
-  604:	*)
-  610:		return 1
-  614:		return 1
-  686:		l_zfs_cmd=$g_LZFS
+  262:		return 1
+  412:		source) g_zxfer_source_property_tree_prefetch_state=2 ;;
+  434:		source) g_zxfer_source_property_tree_prefetch_state=2 ;;
+  435:		destination) g_zxfer_destination_property_tree_prefetch_state=2 ;;
+  437:		return 1
+  479:		destination) g_zxfer_destination_property_tree_prefetch_state=2 ;;
+  490:		destination) g_zxfer_destination_property_tree_prefetch_state=2 ;;
+  499:		source) g_zxfer_source_property_tree_prefetch_state=2 ;;
+  536:			continue
+  546:	done <"$l_combined_grouped_file"
+  577:	destination)
+  589:	*)
 
-src/zxfer_remote_cli.sh
-  55:	l_key_hex=$(printf '%s' "$l_identity" |
-  110:	if ! (
-  113:	) >"$l_tmp_identity_path"; then
-  143:			return 1
-  163:		return 1
-  198:				return 1
-  212:				umask "$l_old_umask"
-  213:				if [ ! -d "$l_entry_dir" ]; then
-  214:					return 1
-  220:				return 1
-  223:				return 1
-  227:				return 1
-  234:			return 1
-  239:				return 1
-  242:				return 1
-  246:				return 1
-  253:				umask "$l_old_umask"
-  254:				if [ ! -d "$l_leases_dir" ]; then
-  255:					return 1
-  261:				return 1
-  264:				return 1
-  268:				return 1
-  286:			return 1
-  452:	l_key_hex=$(printf '%s\n%s' "$l_host_spec" "${g_zxfer_dependency_path:-$ZXFER_DEFAULT_SECURE_PATH}" |
-  476:			return 1
-  496:		return 1
-  581:	if ! (
-  584:	) >"$l_tmp_pid_path"; then
-  585:		rm -f "$l_tmp_pid_path"
-  586:		return 1
-  704:		return 1
-  708:		return 1
-  748:				$l_line
-  749:			EOF
-  896:		return 1
-  899:		return 1
-  903:		return 1
-  943:			return 1
-  946:			return 1
-  954:	if ! (
-  958:	) >"$l_tmp_cache_path"; then
-  959:		rm -f "$l_tmp_cache_path"
-  960:		return 1
-  1018:			return 1
-  1028:				return 1
-  1041:					return 1
-  1294:			l_remaining_leases=1
-  1298:				l_log_cmd=$(build_shell_command_from_argv "$g_cmd_ssh" -S "$g_ssh_origin_control_socket" -O exit)
-  1299:				l_host_safe=$(quote_host_spec_tokens "$g_option_O_origin_host")
-  1300:				if [ "$l_host_safe" != "" ]; then
-  1301:					l_log_cmd="$l_log_cmd $l_host_safe"
-  1303:				echoV "Closing origin ssh control socket: $l_log_cmd"
-  1304:				if "$@" 2>/dev/null; then
-  1305:					[ -d "$g_ssh_origin_control_socket_dir" ] && rm -rf "$g_ssh_origin_control_socket_dir"
-  1348:			l_remaining_leases=1
-  1361:			elif [ "$g_ssh_target_control_socket_dir" != "" ] && [ -d "$g_ssh_target_control_socket_dir" ]; then
-  1362:				rm -rf "$g_ssh_target_control_socket_dir"
+src/zxfer_property_reconcile.sh
+  94:		l_effective_readonly_properties=$(printf '%s' ",$l_effective_readonly_properties," |
+  160:				l_mc_property_list=$(echo "$l_mc_property_list" | tr -s "," "\n" |
+  275:	} <"$l_filter_tmp"
+  379:		g_zxfer_source_pvs_effective=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
+  391:			zxfer_throw_usage_error "Failed to parse the restored properties for the filesystem $l_source and destination $l_destination"
+  771:			zxfer_render_command_for_report "" "$g_cmd_zfs" "$l_subcommand" "$@"
+  1342:			zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]."
 
-src/zxfer_secure_paths.sh
-  130:	return 1
-  201:			zxfer_reject_backup_metadata_path "Refusing to use backup metadata $l_path because it is a symlink."
+src/zxfer_remote_hosts.sh
+  65:	l_key_hex=$(printf '%s' "$l_identity" |
+  120:	if ! (
+  123:	) >"$l_tmp_identity_path"; then
+  153:			return 1
+  173:		return 1
+  208:				return 1
+  222:				umask "$l_old_umask"
+  223:				if [ ! -d "$l_entry_dir" ]; then
+  224:					return 1
+  230:				return 1
+  233:				return 1
+  237:				return 1
+  244:			return 1
+  249:				return 1
+  252:				return 1
+  256:				return 1
+  263:				umask "$l_old_umask"
+  264:				if [ ! -d "$l_leases_dir" ]; then
+  265:					return 1
+  271:				return 1
+  274:				return 1
+  278:				return 1
+  296:			return 1
+  466:	l_key_hex=$(printf '%s\n%s' "$l_host_spec" "${g_zxfer_dependency_path:-$ZXFER_DEFAULT_SECURE_PATH}" |
+  490:			return 1
+  510:		return 1
+  595:	if ! (
+  598:	) >"$l_tmp_pid_path"; then
+  599:		rm -f "$l_tmp_pid_path"
+  600:		return 1
+  718:		return 1
+  722:		return 1
+  762:				$l_line
+  763:			EOF
+  911:		return 1
+  914:		return 1
+  918:		return 1
+  958:			return 1
+  961:			return 1
+  969:	if ! (
+  973:	) >"$l_tmp_cache_path"; then
+  974:		rm -f "$l_tmp_cache_path"
+  975:		return 1
+  1033:			return 1
+  1043:				return 1
+  1056:					return 1
+  1313:			l_remaining_leases=1
+  1367:			l_remaining_leases=1
 
-src/zxfer_transfer_properties.sh
-  91:				l_mc_property_list=$(echo "$l_mc_property_list" | tr -s "," "\n" |
-  207:	} <"$l_filter_tmp"
-  309:		m_source_pvs_effective=$(backup_metadata_extract_properties_for_dataset_pair \
-  321:			throw_usage_error "Failed to parse the restored properties for the filesystem $l_source and destination $l_destination"
-  662:			zxfer_render_command_for_report "" "$g_cmd_zfs" "$l_subcommand" "$@"
-  1180:			l_effective_readonly_properties=$g_fbsd_readonly_properties
-  1189:			l_effective_readonly_properties=$g_solexp_readonly_properties
-  1246:			throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]."
+src/zxfer_replication.sh
+  97:		return
+  107:		return
+  112:		return
+  165:		zxfer_throw_error "$l_dest_exists"
+  171:			zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
+  408:				zxfer_relaunch
+  409:				zxfer_throw_error "Could not disable service $service."
+  555:		l_iteration_list=$(printf '%s\n%s\n' "$l_iteration_list" "$g_recursive_source_dataset_list" |
+  561:		l_iteration_list=$(printf '%s\n%s\n' "$l_iteration_list" "$g_recursive_destination_extra_dataset_list" |
+  802:$g_option_c_services
+  803:EOF
 
-src/zxfer_zfs_mode.sh
-  36:	. ./zxfer_globals.sh
-  182:		throw_error "$l_dest_exists"
-  188:			throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
-  384:				relaunch
-  385:				throw_error "Could not disable service $service."
-  498:		echov "Dry run: $cmd"
-  499:		return
-  572:		l_iteration_list=$(printf '%s\n%s\n' "$l_iteration_list" "$g_recursive_source_dataset_list" |
-  578:		l_iteration_list=$(printf '%s\n%s\n' "$l_iteration_list" "$g_recursive_destination_extra_dataset_list" |
-  618:			l_post_seed_property_sources=$(printf '%s\n%s\n' "$l_post_seed_property_sources" "$l_source" |
-  781:	g_readonly_properties=$(echo "$g_readonly_properties" |
-  797:$g_option_c_services
-  798:EOF
-  825:	g_readonly_properties=$(echo "$g_readonly_properties" |
+src/zxfer_reporting.sh
+  692:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
+  693:	if [ "$l_speaker_km_loaded" = "0" ]; then
+  694:		if ! kldload "speaker" >/dev/null 2>&1; then
+  695:			zxfer_echoV "Unable to load speaker module; skipping beep."
+  696:			return
+  701:	if [ "$l_exit_status" -eq 0 ]; then
+  702:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
+  703:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
+  704:				zxfer_echoV "Success beep failed; skipping."
+  707:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
+  708:			zxfer_echoV "Failure beep failed; skipping."
 
-src/zxfer_zfs_send_receive.sh
-  36:	. ./zxfer_globals.sh
-  153:	l_progress_dialog=$(echo "$g_option_D_display_progress_bar" |
-  154:		sed "s#%%size%%#$l_size_est#g" |
-  579:		zxfer_terminate_remaining_send_jobs
-  580:		throw_error "Failed waiting for zfs send/receive jobs."
-  584:		rm -f "$l_completed_status_file"
-  585:		zxfer_terminate_remaining_send_jobs
-  586:		throw_error "Failed to match a completed zfs send/receive job to a tracked PID."
-  751:				g_zfs_send_job_pids="$g_zfs_send_job_pids $l_background_job_pid"
+src/zxfer_runtime.sh
+  236:	printf '%s\n' "$ZXFER_MAX_YIELD_ITERATIONS"
+
+src/zxfer_send_receive.sh
+  162:	l_progress_dialog=$(echo "$g_option_D_display_progress_bar" |
+  163:		sed "s#%%size%%#$l_size_est#g" |
+  687:		l_receive_force_flag=$5
+
+src/zxfer_snapshot_discovery.sh
+  266:		l_remote_serial_cmd=$(zxfer_build_shell_command_from_argv \
+  296:		l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
+  302:			l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
+  526:	done <"$l_candidate_datasets_tmp_file"
+  534:		g_recursive_source_list=$(printf '%s\n%s\n' "$g_recursive_source_list" "$l_identity_source_datasets" |
+  539:		g_recursive_destination_extra_dataset_list=$(printf '%s\n%s\n' "$g_recursive_destination_extra_dataset_list" "$l_identity_destination_datasets" |
+  843:				l_dest_pool=$g_destination
+  854:			rm -f "$l_dest_list_tmp_file" "$l_dest_list_err_file"
+  855:			zxfer_throw_usage_error "Failed to retrieve list of datasets from the destination"
+
+src/zxfer_snapshot_reconcile.sh
+  83:	$0 != "" { record = $0; tab_pos = index(record, "\t"); snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record); snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : ""); at_pos = index(snapshot_path, "@"); if (at_pos > 0) { snapshot_identity = substr(snapshot_path, at_pos + 1); if (snapshot_guid != "") snapshot_identity = snapshot_identity "\t" snapshot_guid; if (snapshot_identity in delete_identities) print snapshot_path } }' "$l_identity_file" - <<-EOF
+  84:		$(zxfer_normalize_snapshot_record_list "$l_snapshot_records")
+  85:	EOF
+  522:				zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_source]."
+  528:				zxfer_throw_error "Failed to retrieve destination snapshot identities for [$g_actual_dest]."
+
+src/zxfer_snapshot_state.sh
+  161:		return 1
+  247:		printf '%s\n' "$g_rzfs_list_hr_snap" | "${g_cmd_awk:-awk}" -F@ -v ds="$l_dataset" '$1 == ds { print $0 }'
+  362:	*)
 

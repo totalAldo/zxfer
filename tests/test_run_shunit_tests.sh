@@ -3,25 +3,18 @@
 # shunit2 tests for the shunit2 runner script.
 #
 
-case "$0" in
-/*)
-	TESTS_DIR=$(dirname "$0")
-	;;
-*)
-	TESTS_DIR=${PWD:-.}/$(dirname "$0")
-	;;
-esac
+TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
 oneTimeSetUp() {
-	TEST_TMPDIR=$(mktemp -d -t zxfer_run_shunit_tests.XXXXXX)
+	zxfer_test_create_tmpdir "zxfer_run_shunit_tests"
 	RUN_SHUNIT_TESTS_BIN="$ZXFER_ROOT/tests/run_shunit_tests.sh"
 }
 
 oneTimeTearDown() {
-	rm -rf "$TEST_TMPDIR"
+	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
@@ -108,18 +101,15 @@ test_run_shunit_tests_rejects_missing_zxfer_test_shell() {
 	write_fake_suite "$l_suite_path" "missing-shell"
 	chmod +x "$l_suite_path"
 
-	set +e
-	output=$(
-		ZXFER_TEST_SHELL="$TEST_TMPDIR/does-not-exist" \
-			FAKE_SUITE_LOG="$FAKE_SUITE_LOG" \
-			"$RUN_SHUNIT_TESTS_BIN" "$l_suite_path" 2>&1
-	)
-	status=$?
-	set -e
+	zxfer_test_capture_subshell "
+		ZXFER_TEST_SHELL=\"$TEST_TMPDIR/does-not-exist\" \
+			FAKE_SUITE_LOG=\"$FAKE_SUITE_LOG\" \
+			\"$RUN_SHUNIT_TESTS_BIN\" \"$l_suite_path\"
+	"
 
-	assertEquals "A missing alternate shell should fail before any suites are run." 1 "$status"
+	assertEquals "A missing alternate shell should fail before any suites are run." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "The runner should surface a clear error when ZXFER_TEST_SHELL cannot be executed." \
-		"$output" "ZXFER_TEST_SHELL is not executable: $TEST_TMPDIR/does-not-exist"
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ZXFER_TEST_SHELL is not executable: $TEST_TMPDIR/does-not-exist"
 	assertEquals "The fake suite should not run when the alternate shell is invalid." \
 		"" "$(cat "$FAKE_SUITE_LOG")"
 }

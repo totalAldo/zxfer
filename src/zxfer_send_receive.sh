@@ -29,16 +29,25 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 # BSD HEADER END
-
-# for ShellCheck
-if false; then
-	# shellcheck source=src/zxfer_globals.sh
-	. ./zxfer_globals.sh
-fi
+# shellcheck shell=sh disable=SC2034,SC2154
 
 ################################################################################
-# ZFS MODE FUNCTIONS RELATED TO zfs_send_receive
+# SEND / RECEIVE PIPELINE HELPERS
 ################################################################################
+
+# Module contract:
+# owns globals: send/receive job queue state and rolling completion queue handles.
+# reads globals: g_option_j_jobs, g_option_D_display_progress_bar, remote host specs, and zfs/compression helpers.
+# mutates caches: destination-existence/property caches and background job tracking after live receives.
+# returns via stdout: rendered send/receive commands, progress dialogs, and size estimates.
+
+zxfer_reset_send_receive_state() {
+	g_count_zfs_send_jobs=0
+	g_zfs_send_job_pids=""
+	g_zfs_send_job_records=""
+	g_zfs_send_job_queue_open=0
+	g_zfs_send_job_queue_unavailable=0
+}
 
 #
 # The snapshot size is estimated. The estimate does not take into consideration
@@ -83,7 +92,7 @@ zxfer_extract_numeric_progress_estimate() {
 zxfer_calculate_fast_full_size_estimate() {
 	l_current_snapshot=$1
 
-	if ! l_size_dataset=$(run_source_zfs_cmd list -Hp -o referenced "$l_current_snapshot" 2>&1); then
+	if ! l_size_dataset=$(zxfer_run_source_zfs_cmd list -Hp -o referenced "$l_current_snapshot" 2>&1); then
 		return 1
 	fi
 
@@ -102,14 +111,14 @@ zxfer_calculate_fast_incremental_size_estimate() {
 		return 1
 	fi
 
-	if ! l_size_dataset=$(run_source_zfs_cmd get -Hpo value "written@$l_previous_snapshot_name" "$l_current_dataset" 2>&1); then
+	if ! l_size_dataset=$(zxfer_run_source_zfs_cmd get -Hpo value "written@$l_previous_snapshot_name" "$l_current_dataset" 2>&1); then
 		return 1
 	fi
 
 	zxfer_extract_numeric_progress_estimate "$l_size_dataset"
 }
 
-calculate_size_estimate() {
+zxfer_calculate_size_estimate() {
 	l_current_snapshot=$1
 	l_previous_snapshot=$2
 	l_prefer_fast_estimate=${3:-0}
@@ -117,28 +126,28 @@ calculate_size_estimate() {
 	if [ "$l_prefer_fast_estimate" -eq 1 ]; then
 		if [ -n "$l_previous_snapshot" ]; then
 			if l_size_est=$(zxfer_calculate_fast_incremental_size_estimate "$l_current_snapshot" "$l_previous_snapshot"); then
-				echoV "Using fast approximate incremental progress estimate for $l_current_snapshot."
+				zxfer_echoV "Using fast approximate incremental progress estimate for $l_current_snapshot."
 				echo "$l_size_est"
 				return 0
 			fi
-			echoV "Falling back to exact incremental progress estimate for $l_current_snapshot."
+			zxfer_echoV "Falling back to exact incremental progress estimate for $l_current_snapshot."
 		else
 			if l_size_est=$(zxfer_calculate_fast_full_size_estimate "$l_current_snapshot"); then
-				echoV "Using fast approximate full progress estimate for $l_current_snapshot."
+				zxfer_echoV "Using fast approximate full progress estimate for $l_current_snapshot."
 				echo "$l_size_est"
 				return 0
 			fi
-			echoV "Falling back to exact full progress estimate for $l_current_snapshot."
+			zxfer_echoV "Falling back to exact full progress estimate for $l_current_snapshot."
 		fi
 	fi
 
 	if [ -n "$l_previous_snapshot" ]; then
-		if ! l_size_dataset=$(run_source_zfs_cmd send -nPv -I "$l_previous_snapshot" "$l_current_snapshot" 2>&1); then
-			throw_error "Error calculating incremental estimate: $l_size_dataset"
+		if ! l_size_dataset=$(zxfer_run_source_zfs_cmd send -nPv -I "$l_previous_snapshot" "$l_current_snapshot" 2>&1); then
+			zxfer_throw_error "Error calculating incremental estimate: $l_size_dataset"
 		fi
 	else
-		if ! l_size_dataset=$(run_source_zfs_cmd send -nPv "$l_current_snapshot" 2>&1); then
-			throw_error "Error calculating estimate: $l_size_dataset"
+		if ! l_size_dataset=$(zxfer_run_source_zfs_cmd send -nPv "$l_current_snapshot" 2>&1); then
+			zxfer_throw_error "Error calculating estimate: $l_size_dataset"
 		fi
 	fi
 	l_size_est=$(echo "$l_size_dataset" | grep ^size | tail -n 1 | cut -f 2)
@@ -146,7 +155,7 @@ calculate_size_estimate() {
 	echo "$l_size_est"
 }
 
-setup_progress_dialog() {
+zxfer_setup_progress_dialog() {
 	l_size_est=$1
 	l_snapshot=$2
 
@@ -163,7 +172,7 @@ zxfer_progress_passthrough() {
 	# Tee stdin to the progress command while preserving the send stream.
 	l_temp_prefix="${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}.progress"
 	l_fifo_dir=$(zxfer_create_private_temp_dir "$l_temp_prefix") || {
-		echoV "Unable to create FIFO for progress bar; continuing without it."
+		zxfer_echoV "Unable to create FIFO for progress bar; continuing without it."
 		cat
 		return $?
 	}
@@ -172,7 +181,7 @@ zxfer_progress_passthrough() {
 	umask 077
 	if ! mkfifo "$l_fifo"; then
 		umask "$l_old_umask"
-		echoV "Unable to mkfifo $l_fifo for progress bar; continuing without it."
+		zxfer_echoV "Unable to mkfifo $l_fifo for progress bar; continuing without it."
 		rm -rf "$l_fifo_dir"
 		cat
 		return $?
@@ -181,7 +190,7 @@ zxfer_progress_passthrough() {
 
 	# Explicitly lock down the FIFO permissions in case umask enforcement fails.
 	if ! chmod 600 "$l_fifo"; then
-		echoV "Unable to secure permissions on $l_fifo for progress bar; continuing without it."
+		zxfer_echoV "Unable to secure permissions on $l_fifo for progress bar; continuing without it."
 		rm -rf "$l_fifo_dir"
 		cat
 		return $?
@@ -201,13 +210,13 @@ zxfer_progress_passthrough() {
 	rmdir "$l_fifo_dir" 2>/dev/null || rm -rf "$l_fifo_dir"
 
 	if [ "$l_progress_status" -ne 0 ]; then
-		echoV "Progress bar command exited with status $l_progress_status"
+		zxfer_echoV "Progress bar command exited with status $l_progress_status"
 	fi
 
 	return "$l_tee_status"
 }
 
-handle_progress_bar_option() {
+zxfer_handle_progress_bar_option() {
 	l_snapshot=$1
 	l_previous_snapshot=$2
 	l_progress_bar_cmd=""
@@ -219,12 +228,12 @@ handle_progress_bar_option() {
 		if zxfer_should_use_fast_progress_estimate; then
 			l_use_fast_estimate=1
 		fi
-		l_size_est=$(calculate_size_estimate "$l_snapshot" "$l_previous_snapshot" "$l_use_fast_estimate")
+		l_size_est=$(zxfer_calculate_size_estimate "$l_snapshot" "$l_previous_snapshot" "$l_use_fast_estimate")
 	fi
-	l_progress_dialog=$(setup_progress_dialog "$l_size_est" "$l_snapshot")
+	l_progress_dialog=$(zxfer_setup_progress_dialog "$l_size_est" "$l_snapshot")
 
 	# Modify the send command to include the progress dialog
-	l_escaped_progress_dialog=$(escape_for_single_quotes "$l_progress_dialog")
+	l_escaped_progress_dialog=$(zxfer_escape_for_single_quotes "$l_progress_dialog")
 	l_progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | zxfer_progress_passthrough '$l_escaped_progress_dialog'"
 
 	echo "$l_progress_bar_cmd"
@@ -233,10 +242,10 @@ handle_progress_bar_option() {
 #
 # Returns the send command. If no previous snapshot is provided,
 # a full snapshot is sent starting from the first snapshot which is set
-# in get_last_common_snapshot()
+# in zxfer_get_last_common_snapshot()
 # Takes g_option_V_very_verbose, g_option_w_raw_send, g_first_source_snap
 #
-get_send_command() {
+zxfer_get_send_command() {
 	l_previous_snapshot=$1
 	l_current_snapshot=$2
 	l_zfs_cmd=${3:-$g_cmd_zfs}
@@ -260,7 +269,7 @@ get_send_command() {
 			[ "$l_v" != "" ] && set -- "$@" "$l_v"
 			[ "$l_w" != "" ] && set -- "$@" "$l_w"
 			set -- "$@" "$l_current_snapshot"
-			build_shell_command_from_argv "$@"
+			zxfer_build_shell_command_from_argv "$@"
 			return # exit the function
 		fi
 		echo "$l_zfs_cmd send $l_v $l_w $l_current_snapshot"
@@ -273,30 +282,35 @@ get_send_command() {
 		[ "$l_v" != "" ] && set -- "$@" "$l_v"
 		[ "$l_w" != "" ] && set -- "$@" "$l_w"
 		set -- "$@" -I "$l_previous_snapshot" "$l_current_snapshot"
-		build_shell_command_from_argv "$@"
+		zxfer_build_shell_command_from_argv "$@"
 		return
 	fi
 
 	echo "$l_zfs_cmd send $l_v $l_w -I $l_previous_snapshot $l_current_snapshot"
 }
 
-get_receive_command() {
+zxfer_get_receive_command() {
 	l_dest=$1
 	l_zfs_cmd=${2:-$g_cmd_zfs}
 	l_mode=${3:-display}
+	if [ $# -ge 4 ]; then
+		l_receive_force_flag=$4
+	else
+		l_receive_force_flag=${g_option_F_force_rollback:-}
+	fi
 
 	if [ "$l_mode" = "exec" ]; then
 		set -- "$l_zfs_cmd" receive
-		[ "$g_option_F_force_rollback" != "" ] && set -- "$@" "$g_option_F_force_rollback"
+		[ "$l_receive_force_flag" != "" ] && set -- "$@" "$l_receive_force_flag"
 		set -- "$@" "$l_dest"
-		build_shell_command_from_argv "$@"
+		zxfer_build_shell_command_from_argv "$@"
 		return
 	fi
 
-	echo "$l_zfs_cmd receive $g_option_F_force_rollback $l_dest"
+	echo "$l_zfs_cmd receive $l_receive_force_flag $l_dest"
 }
 
-wrap_command_with_ssh() {
+zxfer_wrap_command_with_ssh() {
 	l_cmd=$1
 	l_option=$2
 	l_is_compress=$3
@@ -304,7 +318,7 @@ wrap_command_with_ssh() {
 	l_remote_compress_safe=${g_cmd_compress_safe:-}
 	l_remote_decompress_safe=${g_cmd_decompress_safe:-}
 
-	l_host_tokens=$(split_host_spec_tokens "$l_option")
+	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_option")
 	l_host_token_count=0
 	if [ "$l_host_tokens" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
@@ -325,35 +339,35 @@ EOF
 
 	if [ "$l_is_compress" -eq 0 ]; then
 		if [ "$l_host_token_count" -gt 1 ]; then
-			l_remote_shell_cmd=$(build_remote_sh_c_command "$l_cmd")
-			build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd"
+			l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_cmd")
+			zxfer_build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd"
 		else
-			build_ssh_shell_command_for_host "$l_option" "$l_cmd"
+			zxfer_build_ssh_shell_command_for_host "$l_option" "$l_cmd"
 		fi
 	else
 		if [ "$g_cmd_compress_safe" = "" ] || [ "$g_cmd_decompress_safe" = "" ] ||
 			[ "$l_remote_compress_safe" = "" ] || [ "$l_remote_decompress_safe" = "" ]; then
-			throw_error "Compression enabled but commands are not configured safely."
+			zxfer_throw_error "Compression enabled but commands are not configured safely."
 		fi
 		# when compression is enabled, send and receive are wrapped differently
 		if [ "$l_direction" = "send" ]; then
 			l_remote_cmd="$l_cmd | $l_remote_compress_safe"
 			if [ "$l_host_token_count" -gt 1 ]; then
-				l_remote_shell_cmd=$(build_remote_sh_c_command "$l_remote_cmd")
-				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd") || return 1
+				l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_cmd")
+				l_wrapped_remote_cmd=$(zxfer_build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd") || return 1
 				echo "$l_wrapped_remote_cmd | $g_cmd_decompress_safe"
 			else
-				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_option" "$l_remote_cmd") || return 1
+				l_wrapped_remote_cmd=$(zxfer_build_ssh_shell_command_for_host "$l_option" "$l_remote_cmd") || return 1
 				echo "$l_wrapped_remote_cmd | $g_cmd_decompress_safe"
 			fi
 		else
 			l_remote_cmd="$l_remote_decompress_safe | $l_cmd"
 			if [ "$l_host_token_count" -gt 1 ]; then
-				l_remote_shell_cmd=$(build_remote_sh_c_command "$l_remote_cmd")
-				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd") || return 1
+				l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_cmd")
+				l_wrapped_remote_cmd=$(zxfer_build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd") || return 1
 				echo "$g_cmd_compress_safe | $l_wrapped_remote_cmd"
 			else
-				l_wrapped_remote_cmd=$(build_ssh_shell_command_for_host "$l_option" "$l_remote_cmd") || return 1
+				l_wrapped_remote_cmd=$(zxfer_build_ssh_shell_command_for_host "$l_option" "$l_remote_cmd") || return 1
 				echo "$g_cmd_compress_safe | $l_wrapped_remote_cmd"
 			fi
 		fi
@@ -389,7 +403,7 @@ zxfer_open_send_job_completion_queue() {
 	l_temp_prefix="${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}.queue"
 	l_queue_dir=$(zxfer_create_private_temp_dir "$l_temp_prefix")
 	if [ "$l_queue_dir" = "" ]; then
-		echoV "Unable to create rolling send/receive completion queue; falling back to batch waits."
+		zxfer_echoV "Unable to create rolling send/receive completion queue; falling back to batch waits."
 		g_zfs_send_job_queue_unavailable=1
 		return 1
 	fi
@@ -399,7 +413,7 @@ zxfer_open_send_job_completion_queue() {
 	umask 077
 	if ! mkfifo "$l_queue_path"; then
 		umask "$l_old_umask"
-		echoV "Unable to create rolling send/receive completion queue; falling back to batch waits."
+		zxfer_echoV "Unable to create rolling send/receive completion queue; falling back to batch waits."
 		rm -rf "$l_queue_dir"
 		g_zfs_send_job_queue_unavailable=1
 		return 1
@@ -407,14 +421,14 @@ zxfer_open_send_job_completion_queue() {
 	umask "$l_old_umask"
 
 	if ! chmod 600 "$l_queue_path"; then
-		echoV "Unable to secure rolling send/receive completion queue; falling back to batch waits."
+		zxfer_echoV "Unable to secure rolling send/receive completion queue; falling back to batch waits."
 		rm -rf "$l_queue_dir"
 		g_zfs_send_job_queue_unavailable=1
 		return 1
 	fi
 
 	if ! zxfer_open_send_job_completion_queue_fd "$l_queue_path"; then
-		echoV "Unable to open rolling send/receive completion queue; falling back to batch waits."
+		zxfer_echoV "Unable to open rolling send/receive completion queue; falling back to batch waits."
 		rm -rf "$l_queue_dir"
 		g_zfs_send_job_queue_unavailable=1
 		return 1
@@ -546,9 +560,9 @@ zxfer_run_background_pipeline() {
 
 	zxfer_record_last_command_string "$l_exec_cmd"
 	if [ "$g_option_n_dryrun" -eq 1 ]; then
-		echov "Dry run: $l_display_cmd"
+		zxfer_echov "Dry run: $l_display_cmd"
 	else
-		echov "$l_display_cmd"
+		zxfer_echov "$l_display_cmd"
 		eval "$l_exec_cmd"
 		l_job_status=$?
 	fi
@@ -561,7 +575,7 @@ zxfer_run_background_pipeline() {
 	return "$l_job_status"
 }
 
-wait_for_next_zfs_send_job_completion() {
+zxfer_wait_for_next_zfs_send_job_completion() {
 	l_reason=$1
 	l_completed_status_file=""
 	l_pid=""
@@ -571,19 +585,19 @@ wait_for_next_zfs_send_job_completion() {
 	[ "${g_count_zfs_send_jobs:-0}" -gt 0 ] || return 0
 
 	if [ "${g_zfs_send_job_queue_open:-0}" -ne 1 ] || [ -z "${g_zfs_send_job_records:-}" ]; then
-		wait_for_zfs_send_jobs "$l_reason"
+		zxfer_wait_for_zfs_send_jobs "$l_reason"
 		return 0
 	fi
 
 	if ! IFS= read -r l_completed_status_file <&8; then
 		zxfer_terminate_remaining_send_jobs
-		throw_error "Failed waiting for zfs send/receive jobs."
+		zxfer_throw_error "Failed waiting for zfs send/receive jobs."
 	fi
 
 	if ! l_pid=$(zxfer_find_send_job_pid_by_status_file "$l_completed_status_file"); then
 		rm -f "$l_completed_status_file"
 		zxfer_terminate_remaining_send_jobs
-		throw_error "Failed to match a completed zfs send/receive job to a tracked PID."
+		zxfer_throw_error "Failed to match a completed zfs send/receive job to a tracked PID."
 	fi
 
 	wait "$l_pid" 2>/dev/null || l_wait_status=$?
@@ -603,11 +617,11 @@ wait_for_next_zfs_send_job_completion() {
 
 	if [ "$l_pid_status" -ne 0 ]; then
 		zxfer_terminate_remaining_send_jobs
-		throw_error "zfs send/receive job failed (PID $l_pid, exit $l_pid_status)."
+		zxfer_throw_error "zfs send/receive job failed (PID $l_pid, exit $l_pid_status)."
 	fi
 }
 
-wait_for_zfs_send_jobs_legacy() {
+zxfer_wait_for_zfs_send_jobs_legacy() {
 	l_reason=$1
 
 	for l_pid in $g_zfs_send_job_pids; do
@@ -622,7 +636,7 @@ wait_for_zfs_send_jobs_legacy() {
 			done
 			g_zfs_send_job_pids=""
 			g_count_zfs_send_jobs=0
-			throw_error "zfs send/receive job failed (PID $l_pid, exit $l_pid_status)."
+			zxfer_throw_error "zfs send/receive job failed (PID $l_pid, exit $l_pid_status)."
 		fi
 	done
 
@@ -630,11 +644,11 @@ wait_for_zfs_send_jobs_legacy() {
 	g_count_zfs_send_jobs=0
 }
 
-wait_for_zfs_send_jobs() {
+zxfer_wait_for_zfs_send_jobs() {
 	l_reason=$1
 
 	if [ "$l_reason" != "" ] && [ -n "$g_zfs_send_job_pids" ]; then
-		echoV "Waiting for zfs send/receive jobs ($l_reason)."
+		zxfer_echoV "Waiting for zfs send/receive jobs ($l_reason)."
 	fi
 
 	if [ -z "$g_zfs_send_job_pids" ]; then
@@ -645,7 +659,7 @@ wait_for_zfs_send_jobs() {
 
 	if [ "${g_zfs_send_job_queue_open:-0}" -eq 1 ] && [ -n "${g_zfs_send_job_records:-}" ]; then
 		while [ "${g_count_zfs_send_jobs:-0}" -gt 0 ]; do
-			wait_for_next_zfs_send_job_completion ""
+			zxfer_wait_for_next_zfs_send_job_completion ""
 		done
 		g_zfs_send_job_pids=""
 		g_zfs_send_job_records=""
@@ -654,21 +668,26 @@ wait_for_zfs_send_jobs() {
 		return 0
 	fi
 
-	wait_for_zfs_send_jobs_legacy "$l_reason"
+	zxfer_wait_for_zfs_send_jobs_legacy "$l_reason"
 }
 
 #
 # Handle zfs send/receive
 # Takes $g_option_D_display_progress_bar $g_option_z_compress, $g_option_O_origin_host, $g_option_T_target_host
 #
-zfs_send_receive() {
+zxfer_zfs_send_receive() {
 	zxfer_set_failure_stage "send/receive"
-	echoV "Begin zfs_send_receive()"
+	zxfer_echoV "Begin zxfer_zfs_send_receive()"
 	l_previous_snapshot=$1
 	l_current_snapshot=$2
 	l_dest=$3
 	# 4th optional parameter specifies if background process is allowed, with a default to 1
 	l_is_allow_background=${4:-1}
+	if [ $# -ge 5 ]; then
+		l_receive_force_flag=$5
+	else
+		l_receive_force_flag=${g_option_F_force_rollback:-}
+	fi
 	l_send_zfs_cmd=$g_cmd_zfs
 	l_recv_zfs_cmd=$g_cmd_zfs
 	l_did_run_in_background=0
@@ -681,26 +700,26 @@ zfs_send_receive() {
 	fi
 
 	# Set up the send and receive commands
-	l_send_display_cmd=$(get_send_command "$l_previous_snapshot" "$l_current_snapshot" "$l_send_zfs_cmd")
-	l_recv_display_cmd=$(get_receive_command "$l_dest" "$l_recv_zfs_cmd")
-	l_send_cmd=$(get_send_command "$l_previous_snapshot" "$l_current_snapshot" "$l_send_zfs_cmd" "exec")
-	l_recv_cmd=$(get_receive_command "$l_dest" "$l_recv_zfs_cmd" "exec")
-	if [ "${g_option_F_force_rollback:-}" != "" ]; then
-		echov "Receive-side force flag (-F) is active for destination [$l_dest]."
+	l_send_display_cmd=$(zxfer_get_send_command "$l_previous_snapshot" "$l_current_snapshot" "$l_send_zfs_cmd")
+	l_recv_display_cmd=$(zxfer_get_receive_command "$l_dest" "$l_recv_zfs_cmd" display "$l_receive_force_flag")
+	l_send_cmd=$(zxfer_get_send_command "$l_previous_snapshot" "$l_current_snapshot" "$l_send_zfs_cmd" "exec")
+	l_recv_cmd=$(zxfer_get_receive_command "$l_dest" "$l_recv_zfs_cmd" "exec" "$l_receive_force_flag")
+	if [ "$l_receive_force_flag" != "" ]; then
+		zxfer_echov "Receive-side force flag (-F) is active for destination [$l_dest]."
 	fi
 
 	if [ "$g_option_O_origin_host" != "" ]; then
-		l_send_display_cmd=$(wrap_command_with_ssh "$l_send_display_cmd" "$g_option_O_origin_host" "$g_option_z_compress" "send")
-		l_send_cmd=$(wrap_command_with_ssh "$l_send_cmd" "$g_option_O_origin_host" "$g_option_z_compress" "send")
+		l_send_display_cmd=$(zxfer_wrap_command_with_ssh "$l_send_display_cmd" "$g_option_O_origin_host" "$g_option_z_compress" "send")
+		l_send_cmd=$(zxfer_wrap_command_with_ssh "$l_send_cmd" "$g_option_O_origin_host" "$g_option_z_compress" "send")
 	fi
 	if [ "$g_option_T_target_host" != "" ]; then
-		l_recv_display_cmd=$(wrap_command_with_ssh "$l_recv_display_cmd" "$g_option_T_target_host" "$g_option_z_compress" "receive")
-		l_recv_cmd=$(wrap_command_with_ssh "$l_recv_cmd" "$g_option_T_target_host" "$g_option_z_compress" "receive")
+		l_recv_display_cmd=$(zxfer_wrap_command_with_ssh "$l_recv_display_cmd" "$g_option_T_target_host" "$g_option_z_compress" "receive")
+		l_recv_cmd=$(zxfer_wrap_command_with_ssh "$l_recv_cmd" "$g_option_T_target_host" "$g_option_z_compress" "receive")
 	fi
 
 	# Perform this after ssh wrapping occurs
 	if [ "$g_option_D_display_progress_bar" != "" ]; then
-		l_progress_bar_cmd=$(handle_progress_bar_option "$l_current_snapshot" "$l_previous_snapshot")
+		l_progress_bar_cmd=$(zxfer_handle_progress_bar_option "$l_current_snapshot" "$l_previous_snapshot")
 		l_send_display_cmd="$l_send_display_cmd $l_progress_bar_cmd"
 		l_send_cmd="$l_send_cmd $l_progress_bar_cmd"
 	fi
@@ -723,20 +742,20 @@ zfs_send_receive() {
 		fi
 
 		if [ "$g_count_zfs_send_jobs" -ge "$l_job_limit" ]; then
-			echov "Max jobs reached [$g_count_zfs_send_jobs]. Waiting for jobs to complete."
+			zxfer_echov "Max jobs reached [$g_count_zfs_send_jobs]. Waiting for jobs to complete."
 			if [ "$l_use_rolling_pool" -eq 1 ]; then
-				wait_for_next_zfs_send_job_completion "job limit"
+				zxfer_wait_for_next_zfs_send_job_completion "job limit"
 			else
-				wait_for_zfs_send_jobs "job limit"
+				zxfer_wait_for_zfs_send_jobs "job limit"
 			fi
 		fi
 
 		zxfer_profile_increment_counter g_zxfer_profile_send_receive_background_pipeline_commands
 		if [ "$l_use_rolling_pool" -eq 1 ]; then
-			l_status_file=$(get_temp_file)
+			l_status_file=$(zxfer_get_temp_file)
 			zxfer_run_background_pipeline "$l_pipeline_exec_cmd" "$l_pipeline_display_cmd" "$l_status_file" &
 		else
-			execute_command "$l_pipeline_exec_cmd" 0 "$l_pipeline_display_cmd" &
+			zxfer_execute_command "$l_pipeline_exec_cmd" 0 "$l_pipeline_display_cmd" &
 		fi
 		l_background_job_pid=$!
 		l_did_run_in_background=1
@@ -752,7 +771,7 @@ zfs_send_receive() {
 			fi
 		fi
 	else
-		execute_command "$l_pipeline_exec_cmd" 0 "$l_pipeline_display_cmd"
+		zxfer_execute_command "$l_pipeline_exec_cmd" 0 "$l_pipeline_display_cmd"
 	fi
 	if [ "$g_option_n_dryrun" -ne 1 ]; then
 		if [ "$l_did_run_in_background" -eq 0 ]; then
@@ -763,5 +782,5 @@ zfs_send_receive() {
 		g_is_performed_send_destroy=1
 	fi
 
-	echoV "End zfs_send_receive()"
+	zxfer_echoV "End zxfer_zfs_send_receive()"
 }

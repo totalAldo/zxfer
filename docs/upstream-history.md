@@ -20,6 +20,10 @@ Compared with the older upstream project, this fork emphasizes:
 The legacy rsync mode (`-S`) from the older upstream project has been removed.
 This fork focuses on ZFS-native replication only.
 
+Legacy backup-metadata restore compatibility has also been removed. Current
+`-e` restores require the hardened source-dataset-relative keyed files written
+by current `-k` runs under `ZXFER_BACKUP_DIR`.
+
 If you depended on rsync-style behavior, use an older release or another tool.
 
 ## Where To Find Current Guidance
