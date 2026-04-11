@@ -13,111 +13,101 @@ File references below use the current flat `src/` layout and the shared
 adjacent shunit suites, so a referenced test file may not always be
 peer-named to the implementation module it exercises.
 
-## High
-
-- [Interface] The comma-delimited `-o` override syntax still cannot carry raw commas inside one property value.
-  Files: `src/zxfer_cli.sh` (`read_command_line_switches()`), `src/zxfer_property_reconcile.sh` (`zxfer_derive_override_lists()`).
-  Impact: live source properties and backup metadata now escape raw `,`, `=`, and `;` safely, and `-o` override values now preserve raw `=` and `;` after the first separator. However, the CLI still tokenizes `-o` on raw commas before value escaping, so an operator-supplied override such as `-o user:note=value,with,commas` is still split into fake assignments.
-  Recommended fix: add an explicit comma-escaping parser for `-o`, or introduce a repeatable override flag that accepts one `property=value` assignment per option instance.
-
-- [Security] Hardened pathname checks are still non-atomic for `ZXFER_ERROR_LOG` and backup metadata I/O.
-  Files: `src/zxfer_reporting.sh` (`zxfer_append_failure_report_to_log()`, `zxfer_create_error_log_file()`), `src/zxfer_backup_metadata.sh` (`zxfer_read_local_backup_file()`, `zxfer_read_remote_backup_file()`, `zxfer_write_backup_properties()`).
-  Risk: these helpers validate a pathname first, then reopen that same pathname later with `cat`, `>`, or `>>`. `ZXFER_ERROR_LOG` is especially exposed because its parent directory only has to exist; it does not have to be owner-controlled. A competing local process can therefore swap in a different file after the owner/mode/symlink checks but before the append or create happens.
-  Recommended fix: move these flows to atomic open/create primitives so validation and I/O operate on the same object, or create into a trusted temporary file and `rename` it into place only after validating the final destination path.
-
 ## Medium
 
-- [Security/Reliability] `ZXFER_SECURE_PATH` is not authoritative for the live runtime `PATH`.
-  Files: `src/zxfer_dependencies.sh` (`zxfer_compute_secure_path()`, `zxfer_merge_path_allowlists()`, `zxfer_apply_secure_path()`), `tests/test_zxfer_dependencies.sh`, `man/zxfer.8`, `man/zxfer.1m`, `CHANGELOG.txt`.
-  Risk: the documentation and changelog describe `ZXFER_SECURE_PATH` as the whitelist of trusted helper directories, but `zxfer_apply_secure_path()` always merges the built-in system directories back into `PATH` even when the operator explicitly overrides the allowlist. Dependency resolution does use the strict configured path, yet every later bare helper invocation that still relies on `PATH` can resolve from the built-in directories anyway.
-  Recommended fix: when `ZXFER_SECURE_PATH` is set, keep the runtime `PATH` confined to that exact allowlist, or finish converting the remaining bare helper calls to absolute resolved paths so the runtime `PATH` no longer matters.
+- [Reliability] ZXFER_ERROR_LOG lock acquisition still has no stale-lock recovery path.
+  Files: `src/zxfer_reporting.sh` (`zxfer_acquire_error_log_lock()`, `zxfer_release_error_log_lock()`, `zxfer_append_failure_report_to_log()`).
+  Impact: the error-log lock still uses a bare directory with no pid or age metadata, and acquisition gives up after three retries. If a prior crash or suppressed release failure leaves the lock directory behind, later failure reports cannot determine that the lock is stale and will skip mirroring to `ZXFER_ERROR_LOG` until the directory is removed manually.
+  Recommended fix: record lock ownership metadata and reap abandoned error-log lock directories, or add a safe stale-lock timeout/validation path before giving up on mirroring the failure report.
 
-- [Security] `ZXFER_BACKUP_DIR` still accepts relative paths, so “secure” metadata can silently follow the current working directory.
-  Files: `src/zxfer_runtime.sh` (`zxfer_refresh_backup_storage_root()`), `src/zxfer_backup_metadata.sh` (`zxfer_get_backup_storage_dir()`, `zxfer_ensure_local_backup_dir()`, `zxfer_ensure_remote_backup_dir()`), `man/zxfer.8`, `man/zxfer.1m`.
-  Risk: unlike `ZXFER_ERROR_LOG`, the backup-root override is not required to be absolute. If the environment sets `ZXFER_BACKUP_DIR=relative-backups`, zxfer will happily create and use `./relative-backups/...` locally and will pass the same relative path to remote helpers under `-O` / `-T`, making the effective storage root depend on the caller's or remote shell's current directory.
-  Recommended fix: require `ZXFER_BACKUP_DIR` to be an absolute canonical path, locally and remotely, or reject relative overrides outright.
+- [Interface/Reliability] Host-spec and custom helper tokenization still ignores shell quoting and backslash escaping.
+  Files: `src/zxfer_exec.sh` (`zxfer_split_tokens_on_whitespace()`, `zxfer_split_host_spec_tokens()`, `zxfer_split_cli_tokens()`), `src/zxfer_dependencies.sh` (`zxfer_resolve_local_cli_command_safe()`, `zxfer_requote_cli_command_with_resolved_head()`), `src/zxfer_cli.sh` (`zxfer_refresh_compression_commands()`).
+  Impact: public string inputs such as `-O` / `-T` wrapper specs and `-Z` custom compression commands still flow through a whitespace-only tokenizer that ignores shell quoting and backslash escapes and intentionally injects token breaks around `;`, `|`, and `&`. Legitimate single arguments like `sudo -u "ZFS Admin"` or helper paths under directories with spaces therefore get silently split into the wrong argv, leading to failed dependency resolution, broken remote wrapper execution, or misreported helper errors instead of a clear validation failure.
+  Recommended fix: either implement a safe POSIX shell-word parser for these public string interfaces, or fail closed by explicitly rejecting quoted/backslash-escaped inputs that cannot be represented losslessly instead of silently re-tokenizing them.
 
-- [Security/Reliability] Remote backup-directory and metadata guard helpers still trust the ambient remote `PATH` for auxiliary tools.
-  Files: `src/zxfer_backup_metadata.sh` (`zxfer_ensure_remote_backup_dir()`, `zxfer_read_remote_backup_file()`).
-  Risk: the secure-PATH model now resolves remote `zfs`, `cat`, GNU `parallel`, `find`, and compression helpers, but the remote backup-dir and backup-metadata guard scripts still invoke `stat`, `ls`, `id`, `grep`, `awk`, `mkdir`, and `chmod` by bare name. A hostile or misconfigured remote `PATH` can therefore change ownership checks, permission checks, or backup-directory preparation behavior even when zxfer's resolved helper paths are otherwise locked down.
-  Recommended fix: run these remote helper scripts under the same validated remote `PATH`, or resolve their auxiliary commands explicitly before composing the remote shell command.
+- [Reliability] ssh control-socket lease pruning still trusts bare PIDs and can misclassify stale leases as live.
+  Files: `src/zxfer_remote_hosts.sh` (`zxfer_prune_stale_ssh_control_socket_leases()`, `zxfer_count_ssh_control_socket_leases()`, `zxfer_close_origin_ssh_control_socket()`, `zxfer_close_target_ssh_control_socket()`).
+  Impact: lease filenames still encode only the holder PID, and stale-lease pruning only checks `kill -s 0` on that PID. If a leaked lease file outlives its original process and the PID is later reused by an unrelated process, zxfer treats the stale lease as active. The last-live close path can then skip closing the control socket and leave the cache directory behind until an operator removes the stale lease manually.
+  Recommended fix: store stronger lease-holder metadata such as pid start time or entry identity, and validate that metadata before treating a lease as live; otherwise add a safe stale-lease timeout or reap path instead of trusting PID liveness alone.
 
-- [Security] Remote SSH host-authentication policy is still inherited entirely from ambient ssh configuration.
-  Files: `src/zxfer_dependencies.sh` (`zxfer_assign_required_tool()`), `src/zxfer_remote_hosts.sh` (`setup_ssh_control_socket()`), `src/zxfer_exec.sh` (`get_ssh_cmd_for_host()`, `invoke_ssh_command_for_host()`, `invoke_ssh_shell_command_for_host()`), `src/zxfer_send_receive.sh` (`zxfer_wrap_command_with_ssh()`).
-  Risk: zxfer resolves `ssh` to an absolute path, but it never adds its own `StrictHostKeyChecking`, `UserKnownHostsFile`, `BatchMode`, or similar transport-safety options. That means remote replication, backup-metadata probes, and helper-path discovery all inherit whatever host-key and authentication policy the local user's ssh config happens to allow.
-  Recommended fix: add an explicit safe default ssh option set for zxfer-managed connections, or a dedicated opt-out, and document clearly when the tool is relying on ambient ssh trust policy.
+- [Safety/Reliability] Trap-exit cleanup still tracks bare background PIDs and can kill reused unrelated processes.
+  Files: `src/zxfer_runtime.sh` (`zxfer_register_cleanup_pid()`, `zxfer_unregister_cleanup_pid()`, `zxfer_kill_registered_cleanup_pids()`, `zxfer_trap_exit()`), `src/zxfer_exec.sh` (`zxfer_execute_background_cmd()`), `src/zxfer_snapshot_discovery.sh` (`zxfer_execute_source_snapshot_list_in_background()`), `src/zxfer_send_receive.sh` (`zxfer_register_send_job()`, `zxfer_zfs_send_receive()`), `src/zxfer_snapshot_reconcile.sh` (`zxfer_build_snapshots_to_delete_list()`).
+  Impact: zxfer still records only numeric PIDs for background helpers and, on trap exit, blindly sends `kill` to every registered PID. If a helper exits before it is unregistered and the PID is reused before zxfer aborts, trap cleanup can signal an unrelated local process instead of a zxfer-owned child. The same stale-PID path can also leave the real background helper uncollected while zxfer believes cleanup has run.
+  Recommended fix: store stronger ownership metadata such as process start time or process-group identity, verify that a registered PID is still the expected zxfer-owned child before killing it, or move background cleanup to dedicated process groups instead of bare PID tracking.
 
-- [Security] Structured failure reports can disclose operator-supplied secrets from custom command hooks and wrappers.
-  Files: `zxfer` (`g_zxfer_original_invocation` capture), `src/zxfer_reporting.sh` (`zxfer_render_failure_report()`, `zxfer_record_last_command_string()`, `zxfer_record_last_command_argv()`, `zxfer_append_failure_report_to_log()`), `man/zxfer.8`, `man/zxfer.1m`.
-  Risk: every non-zero exit emits the original shell-quoted invocation plus the last attempted command to `stderr`, and `ZXFER_ERROR_LOG` mirrors the same block verbatim. Any sensitive material operators place in custom hook strings such as `-D`, `-Z`, wrapper-style host specs, or other ad hoc shell fragments is therefore written back out on failure.
-  Recommended fix: add a mode that suppresses or redacts `invocation` and `last_command` in failure reports, and document clearly that secret-bearing arguments should not be passed on the zxfer command line while the current reporting format remains verbatim.
+- [Safety/Reliability] Abort cleanup still targets wrapper-shell PIDs instead of full background process groups.
+  Files: `src/zxfer_exec.sh` (`zxfer_execute_background_cmd()`), `src/zxfer_send_receive.sh` (`zxfer_run_background_pipeline()`, `zxfer_zfs_send_receive()`, `zxfer_terminate_remaining_send_jobs()`), `src/zxfer_runtime.sh` (`zxfer_kill_registered_cleanup_pids()`, `zxfer_trap_exit()`).
+  Impact: background snapshot-list and send/receive work is still launched via shell wrappers that `eval` pipelines in a child shell, while cleanup only records and kills the wrapper PID. On abort, killing that shell does not guarantee the pipeline grandchildren are reaped, so zxfer can exit while a `zfs send`, `zfs receive`, or remote ssh pipeline keeps running in the background. That widens the blast radius of a failed run because the operator may think cleanup completed when data-path processes are still active.
+  Recommended fix: run background work in dedicated process groups or otherwise capture the full job lineage, and have cleanup signal the process group or a verified child set instead of only the wrapper shell PID.
 
-- [Security] Structured failure reports still pass through raw terminal control characters.
-  Files: `zxfer` (`zxfer_escape_report_value_early()`, `zxfer_quote_token_for_report_early()`), `src/zxfer_reporting.sh` (`zxfer_escape_report_value()`, `zxfer_quote_token_for_report()`, `zxfer_render_failure_report()`, `zxfer_append_failure_report_to_log()`), `tests/test_zxfer_reporting.sh`.
-  Risk: the failure-report escapers currently normalize backslashes, tabs, carriage returns, and embedded newlines, but they leave other non-printable bytes such as ANSI escape sequences untouched. In terminal-driven or pager-driven workflows, that allows log or terminal injection such as color spoofing, cursor movement, or other control-sequence side effects inside the structured report.
-  Recommended fix: escape or strip all non-printable control bytes before rendering report fields, and add regression coverage that asserts `invocation:` and `last_command:` never contain raw control characters.
+- [Reliability] Remote capability cache locks still trust bare PIDs and can misclassify stale locks as live.
+  Files: `src/zxfer_remote_hosts.sh` (`zxfer_try_acquire_remote_capability_cache_lock()`, `zxfer_reap_stale_pidless_remote_capability_cache_lock()`, `zxfer_ensure_remote_host_capabilities()`).
+  Impact: the capability-cache lock directory still records only a `pid` file, and acquisition treats any `kill -s 0` success as proof that the lock is still owned by a live peer. After PID reuse, an abandoned lock can survive both the wait path and the pidless-lock reap path, causing opportunistic capability bootstrap and preload to wait on or fail behind a lock that no current zxfer process actually owns.
+  Recommended fix: record and validate stronger owner metadata such as pid start time or lock identity before honoring a live PID, or add a safe stale-lock expiry/reap path for capability-cache locks that outlive their original owner.
 
-- [Compatibility] `-U` unsupported-property detection still conflates property presence with property support.
-  Files: `src/zxfer_replication.sh` (`zxfer_calculate_unsupported_properties()`), `src/zxfer_property_reconcile.sh` (`zxfer_remove_unsupported_properties()`, `zxfer_strip_unsupported_properties()`).
-  Impact: zxfer derives the “supported property” sets from `zfs get -Ho property all` on the source and destination pool roots, then strips any transferred property whose name only appears on the source side. That can falsely drop user properties or other dataset-specific properties when they are valid on the destination but simply not present on the destination pool root at probe time.
-  Recommended fix: detect unsupported properties from actual destination capability failures, or a stable capability query, instead of using pool-root property presence as a proxy for support.
+- [Reliability/Observability] Successful live remote capability probes still treat local cache-write failures as warning-only success.
+  Files: `src/zxfer_remote_hosts.sh` (`zxfer_write_remote_capability_cache_file()`, `zxfer_ensure_remote_host_capabilities()`, `zxfer_preload_remote_host_capabilities()`).
+  Impact: after a live capability fetch succeeds, `zxfer_ensure_remote_host_capabilities()` now warns when `zxfer_write_remote_capability_cache_file()` fails, but it still returns success and leaves the broken local cache path eligible for more best-effort writes on later probes. Repeated runs can therefore keep falling back to live remote probes and re-emitting the same warning instead of transitioning the local cache into an explicit degraded state for the rest of the run.
+  Recommended fix: either make local capability-cache persistence part of the checked success contract, or mark the local cache unavailable after the first warning so repeated live-probe fallback is an explicit degraded mode instead of repeated best-effort cache writes.
 
-- [Reliability] `-k` backup metadata can accumulate duplicate records across `-Y` iterations.
-  Files: `src/zxfer_property_reconcile.sh` (`zxfer_transfer_properties()`, `zxfer_collect_source_props()`), `src/zxfer_replication.sh` (`zxfer_run_zfs_mode_loop()`), `zxfer` (final backup flush).
-  Impact: `zxfer_transfer_properties()` appends raw source property rows to the global backup buffer every time a dataset gets a property pass, while the top-level launcher still writes the backup file only once after `zxfer_run_zfs_mode_loop()` completes. On a multi-iteration `-Y` run, the same dataset can therefore be recorded multiple times in one backup file. Restore now fails closed on ambiguous exact source/destination duplicates instead of concatenating them, but that still turns the generated backup metadata into an unusable ambiguous file.
-  Recommended fix: store backup metadata keyed by source dataset, or deduplicate before write, instead of appending repeated rows into one flat string.
+- [Reliability] Remote capability cache lock release failures still degrade to warning-only cleanup.
+  Files: `src/zxfer_remote_hosts.sh` (`zxfer_release_remote_capability_cache_lock()`, `zxfer_ensure_remote_host_capabilities()`).
+  Impact: `zxfer_ensure_remote_host_capabilities()` now warns when `zxfer_release_remote_capability_cache_lock()` fails, but successful live-probe paths still continue after that warning without repairing or reaping the leftover lock. Later runs can then wait on or fail behind the stale lock until the acquisition-side reap logic recovers it, and PID reuse can still confuse that recovery.
+  Recommended fix: make remote capability lock release part of a checked cleanup contract, or repair/reap the leftover lock immediately after warning instead of leaving stale-lock recovery to a later acquisition path.
 
-- [Durability] `-k` backup metadata is only flushed after the entire replication loop exits successfully.
-  Files: `src/zxfer_property_reconcile.sh` (`zxfer_transfer_properties()`), `src/zxfer_replication.sh` (`zxfer_run_zfs_mode_loop()`), `zxfer` (final backup flush), `src/zxfer_backup_metadata.sh` (`zxfer_write_backup_properties()`).
-  Impact: zxfer collects backup rows in `g_backup_file_contents` during property reconciliation, but the top-level launcher does not call `zxfer_write_backup_properties()` until after `zxfer_run_zfs_mode_loop()` returns. If a later dataset or send/receive step fails, the process exits through `trap_exit` first and no backup file is written at all, even for datasets whose property state was already collected.
-  Recommended fix: write backup metadata incrementally, or stage it atomically per completed dataset or iteration, instead of deferring the only on-disk write until final process success.
+- [Reliability] ZXFER_ERROR_LOG lock release still suppresses stale lock cleanup failures.
+  Files: `src/zxfer_reporting.sh` (`zxfer_release_error_log_lock()`, `zxfer_append_failure_report_to_log()`).
+  Impact: `zxfer_release_error_log_lock()` still does `rmdir ... || true` and always reports success. If local lock-dir removal fails after a failure report is mirrored, zxfer silently leaves the `.zxfer-error-log.lock.*` directory behind. Later failure reports can then warn that they are unable to acquire the log lock and skip mirroring to `ZXFER_ERROR_LOG`, while the original release failure is lost.
+  Recommended fix: return nonzero when the lock directory still exists after release, and have the error-log append path surface or repair that stale-lock condition instead of treating every release attempt as successful.
 
-- [Interface] Dry-run `-n` still performs live preflight and snapshot-discovery validation.
-  Files: `zxfer` (launcher startup flow), `src/zxfer_remote_hosts.sh` (`prepare_remote_host_connections()`), `src/zxfer_runtime.sh` (`init_variables()`), `src/zxfer_snapshot_discovery.sh` (`zxfer_write_source_snapshot_list_to_file()`, `zxfer_write_destination_snapshot_list_to_files()`), `src/zxfer_exec.sh` (`execute_background_cmd()`).
-  Impact: current dry-run mode still prepares ssh control sockets, probes remote OS and helper paths during launcher preflight, and executes background snapshot-listing commands needed to validate current source and destination state. The manpages now describe `-n` as a render-plus-validation preview, but operators still cannot use it as a strict no-exec sandbox.
-  Recommended fix: gate remote preflight and snapshot-discovery execution behind `g_option_n_dryrun`, or split dry-run into separate render-only and validate-against-live-state modes.
+- [Reliability] Corrupt ssh control-socket identity files still get treated as benign cache-key collisions.
+  Files: `src/zxfer_remote_hosts.sh` (`zxfer_ensure_ssh_control_socket_entry_dir()`, `zxfer_read_ssh_control_socket_entry_identity_file()`).
+  Impact: when an existing control-socket entry has an unreadable, invalid, or otherwise failing `id` file, `zxfer_ensure_ssh_control_socket_entry_dir()` still treats that the same as a legitimate identity mismatch and just increments the numeric suffix. Repeated runs can therefore accumulate orphaned cache directories and bypass reuse of an entry whose local identity state is actually corrupted, instead of surfacing the broken cache metadata.
+  Recommended fix: distinguish identity-file read or validation failures from true identity mismatches, and either fail closed or repair/reap the broken entry instead of silently allocating a suffixed sibling directory.
 
-- [Interface] Dry-run `-n -D` still executes live progress-size probes when the template uses `%%size%%`.
-  Files: `src/zxfer_send_receive.sh` (`zxfer_calculate_size_estimate()`, `zxfer_handle_progress_bar_option()`, `zxfer_zfs_send_receive()`), `tests/test_zxfer_send_receive.sh`.
-  Impact: when the configured progress template contains `%%size%%`, `zxfer_handle_progress_bar_option()` still probes the live source before rendering a dry-run pipeline. Local single-job runs still use the exact `zfs send -nPv` estimate, while remote or `-j` runs now prefer cheaper `written@...` or `referenced` probes with exact fallback. Either way, `-n -D` can still contact local or remote source hosts, prompt for ssh authentication, and fail on source-side metadata or send-estimate errors even though the replication command itself is never executed. The manpages now call this out explicitly, and templates that omit `%%size%%` no longer probe.
-  Recommended fix: skip progress-size probing entirely in dry-run mode, or render the progress command with an unknown-size placeholder unless the operator explicitly opts into live validation.
+- [Reliability] ssh control-socket setup can leak a newly opened master when lease creation fails.
+  Files: `src/zxfer_remote_hosts.sh` (`zxfer_setup_ssh_control_socket()`, `zxfer_create_ssh_control_socket_lease_file()`, `zxfer_open_ssh_control_socket_for_host()`).
+  Impact: `zxfer_setup_ssh_control_socket()` still opens a new `ssh -M -fN` master before creating the per-process lease file. If `zxfer_create_ssh_control_socket_lease_file()` then fails, zxfer throws immediately without closing the just-opened master or reaping the cache directory. That can leave an untracked live control socket behind, leak the local cache directory, and let later runs inherit a master that was never associated with a valid lease.
+  Recommended fix: either create/validate the lease path before opening the master, or explicitly close and reap the new control socket and cache directory when lease creation fails after a fresh open.
 
-- [Compatibility] Restore mode still does not validate the backup file header or version marker.
-  Files: `src/zxfer_backup_metadata.sh` (`zxfer_get_backup_properties()`, `zxfer_write_backup_properties()`), `src/zxfer_property_reconcile.sh` (`zxfer_collect_source_props()`), `tests/test_zxfer_remote_hosts.sh`, `tests/run_integration_zxfer.sh`.
-  Impact: current writes add a `#zxfer property backup file` header plus version metadata, but restore never checks for that marker or enforces any format version before consuming rows. A secure file with no header, or even one with an unrelated first line, is still accepted as long as it contains one exact source/destination row. That means future format changes cannot be rejected cleanly, and manually created or stale files can be mistaken for valid zxfer metadata without any explicit compatibility check.
-  Recommended fix: require a valid zxfer backup-file header before restore, parse and validate the stored format or version fields, and fail closed on unknown or missing metadata formats.
+- [Reliability/Observability] exit cleanup still ignores ssh control-socket close failures.
+  Files: `src/zxfer_runtime.sh` (`zxfer_trap_exit()`), `src/zxfer_remote_hosts.sh` (`zxfer_close_all_ssh_control_sockets()`).
+  Impact: `zxfer_trap_exit()` still calls `zxfer_close_all_ssh_control_sockets()` and ignores its nonzero status. If final control-socket teardown fails after an otherwise successful replication, zxfer can still exit with the original status and emit no structured failure for the leaked master/socket-cache state. Operators may only get a best-effort stderr message while the command still reports success.
+  Recommended fix: if cleanup hits a control-socket close failure while the main exit status is still `0`, promote the final exit to a runtime failure or at least capture the close error in the structured failure report so teardown leaks are not reported as success.
 
-## Low
+- [Reliability] Remaining wrapper-builder and probe helpers still collapse exact helper failures to generic exit status `1`.
+  Files: `src/zxfer_send_receive.sh` (`zxfer_wrap_command_with_ssh()`), `src/zxfer_snapshot_discovery.sh` (`zxfer_render_remote_source_snapshot_serial_list_cmd()`, `zxfer_build_source_snapshot_list_cmd()`, `zxfer_local_parallel_functional_probe_reports_gnu()`), `src/zxfer_remote_hosts.sh` (`zxfer_read_remote_capability_cache_lock_pid_file()`).
+  Impact: these helpers still use unchecked command substitution or `... || return 1` wrappers around lower-level helpers such as `zxfer_build_ssh_shell_command_for_host()` and `zxfer_read_runtime_artifact_file()`. When those lower-level helpers fail, the caller still flattens the real nonzero status to generic `1` and can blur the difference between local validation, readback, and transport/setup failures.
+  Recommended fix: convert the remaining substitutions to the same current-shell exact-status pattern used by the runtime-artifact migrations: run the helper in an explicit `if ...; then ... else l_status=$?; return "$l_status"; fi` branch and only publish the captured string on success.
 
-- [Compatibility] Remote adaptive discovery still trusts the resolved origin-host `parallel` binary without confirming it is GNU `parallel`.
-  Files: `src/zxfer_snapshot_discovery.sh` (`zxfer_ensure_parallel_available_for_source_jobs()`, `zxfer_build_source_snapshot_list_cmd()`), `src/zxfer_remote_hosts.sh` (`resolve_remote_required_tool()`), `tests/test_zxfer_snapshot_discovery.sh`, `tests/run_integration_zxfer.sh`.
-  Impact: adaptive `-j` source discovery now defers GNU `parallel` validation until it actually selects the per-dataset branch, and remote-origin runs no longer require a local `parallel` binary when only the remote branch will execute it. However, once that remote branch is selected, zxfer still trusts the resolved remote `parallel` path by name only. A non-GNU `parallel` implementation on the origin host can therefore pass startup validation and then fail later with different argv or output behavior.
-  Recommended fix: when the remote per-dataset discovery path is selected, run a one-time remote `--version` check against the resolved origin-host helper and require a GNU `parallel` signature before building the command pipeline.
+## SUGGESTED SOLUTIONS
 
-- [Interface] `ZXFER_COMPRESSION` is referenced by current diagnostics and tests, but the runtime does not actually support it.
-  Files: `src/zxfer_cli.sh` (`refresh_compression_commands()`, `read_command_line_switches()`), `CHANGELOG.txt`, `tests/test_zxfer_cli.sh`, `tests/test_zxfer_remote_hosts.sh`, `tests/run_integration_zxfer.sh`.
-  Impact: current releases only honor `-Z`, yet the empty-command usage error and historical changelog entries still imply that `ZXFER_COMPRESSION` can supply the compression pipeline. Wrappers or operators that try to configure compression through the advertised environment variable silently fall back to the default `zstd -3` / `zstd -d` behavior.
-  Recommended fix: either implement a real `ZXFER_COMPRESSION` configuration path, with matching decompression handling and docs, or remove the variable name from current diagnostics, tests, and changelog text.
+Most of the remaining entries cluster around a small number of recurring implementation patterns:
 
-- [Observability] Backup file headers still record ambiguous source/destination metadata.
-  Files: `src/zxfer_backup_metadata.sh` (`zxfer_write_backup_properties()`), `tests/run_integration_zxfer.sh`.
-  Impact: the backup header stores `#initial_source:${g_initial_source##*/}` and `#destination:$g_destination`, while the body rows use the full source dataset and the per-row actual destination. For nested datasets, trailing-slash restores, or multi-dataset recursive backups, that means the header can describe only the source tail and the destination root rather than the exact dataset pair represented by each row. Operators inspecting a backup file can therefore misidentify what it belongs to.
-  Recommended fix: write full, unambiguous source and destination identifiers into the header, or drop the misleading header fields entirely.
+- ad hoc lock and lease lifecycle management
+- weak ownership tracking for background work and abort cleanup
+- helpers that either flatten exact failures to generic exit status `1` or
+  treat partial cache persistence/cleanup failures as warning-only success
+- public string interfaces that treat shell syntax as unstructured whitespace
 
-- [Limitation] Chained `-k` backups still cannot preserve original-source properties across intermediate override hops.
-  Files: `src/zxfer_property_reconcile.sh` (`zxfer_collect_source_props()`, `zxfer_transfer_properties()`), `man/zxfer.8`, `man/zxfer.1m`.
-  Impact: when backing up a backup to another location, the final `-k` metadata is always built from the intermediate source dataset’s live properties. zxfer has no path to carry forward the earlier `.zxfer_backup_info` contents as the provenance source for the next hop. As a result, overrides or local property changes applied on the intermediate backup become the recorded “original” properties for later `-e` restores from the final backup. The manpages already warn that this is not yet supported.
-  Recommended fix: add a mode that propagates prior backup metadata forward when the source was itself produced from a zxfer property backup, or explicitly encode original-source provenance separately from the intermediate dataset’s live state.
+The highest-leverage path is to replace those patterns centrally instead of
+continuing to fix each call site independently.
 
-## Testing Limitations
+- Standardize locks and leases behind one metadata-bearing primitive.
+  Scope: this would eliminate most of the stale-lock, bare-PID, suppressed-release, corrupt-entry-metadata, and silent cleanup issues in ssh control-socket locks, ssh lease files, remote capability-cache locks, and `ZXFER_ERROR_LOG` locks.
+  Direction: every lock or lease should record owner PID, process-start identity, hostname, purpose, and creation time in a common format. Acquisition should validate and reap stale owners, release should be a checked operation, and callers should stop open-coding plain lock directories and PID files with slightly different semantics.
 
-- `tests/run_integration_zxfer.sh` is file-backed and considerably safer than earlier versions, but it is not fully sandboxed.
-  File: `tests/run_integration_zxfer.sh`.
-  Impact: the harness avoids raw devices and should only create and destroy its own file-backed pools, but it still performs real kernel ZFS operations, mount activity, and dataset changes on the host.
-  Current state: this is partially mitigated by hosted GitHub Actions integration workflows on `ubuntu-24.04`, FreeBSD, and OmniOS; the Ubuntu lane also preserves the failing harness workdir for artifact upload.
-  Operational guidance: use a disposable VM, throwaway host, or CI runner for zero-risk validation; do not describe the harness as fully sandboxed.
+- Introduce a background job supervisor that owns process groups and completion records.
+  Scope: this is the architectural fix for the current trap-exit PID reuse problem, wrapper-shell-only cleanup, and the broader class of background send/receive and snapshot-listing cleanup issues.
+  Direction: launch long-lived background work under a single helper that records process-group identity plus start metadata, writes structured completion state, and exposes one verified teardown path. Abort cleanup should signal a validated process group or owned child set, not a bare PID captured from a wrapper shell.
 
-- OpenZFS-on-macOS property integration remains less deterministic than FreeBSD and Linux for some inherited child-dataset properties.
-  File: `tests/run_integration_zxfer.sh` (`property_creation_with_zvol_test()`, `property_override_and_ignore_test()`).
-  Impact: Darwin integration tests currently skip the strict child `atime=off` assertions because that behavior has not been made stable enough to use as a portable end-to-end gate. This is currently a platform-specific certification gap rather than a proven production data-loss bug.
-  Recommended follow-up: investigate the exact property-source and value differences on Darwin after receive and property reconciliation, then either normalize zxfer's post-receive behavior or narrow the documented expectations for that platform.
+- Enforce one result/status contract for reusable helpers.
+  Scope: this addresses the remaining wrappers that still return success after partial local cache persistence/cleanup failures or normalize precise lower-level failures to generic exit status `1`.
+  Direction: codify that a helper either returns `0` and completes its documented side effects, or returns the original nonzero status and leaves callers in an explicit degraded state. The current remaining migrations are concentrated in wrapper-builder and probe helpers such as `zxfer_wrap_command_with_ssh()`, the remote/parallel snapshot-discovery builders, the remote capability-lock pid reload path, and the remote capability cache warm/release paths.
+
+- Replace shell-like free-form string parsing with structured argv handling or strict rejection.
+  Scope: this is the cross-cutting fix for host-spec tokenization, custom helper parsing, and other public interfaces that currently mis-handle quotes, escapes, and spaces.
+  Direction: where compatibility allows, introduce structured alternatives such as repeatable argv-style flags or explicit wrapper/helper configuration variables. For legacy string interfaces that must remain, use one centralized strict parser or reject inputs that cannot be represented losslessly instead of silently re-tokenizing them.
+
+If these solutions are implemented in order, the first four should retire most
+of the remaining medium-severity issues.

@@ -16,6 +16,8 @@ should prioritize:
 - avoid Bash-specific features
 - avoid GNU-only assumptions unless gated
 - preserve cross-platform behavior where possible
+- respect `.editorconfig` when your editor supports it; shell sources use tabs
+  while docs and workflow files use LF line endings with space indentation
 - follow [docs/coding-style.md](./docs/coding-style.md) for project-specific
   shell, naming, module, and test conventions
 
@@ -23,7 +25,8 @@ should prioritize:
 
 - `zxfer`: entry point
 - `src/`: functional shell modules
-- `tests/`: shunit2 suites, coverage runner, integration harness
+- `tests/`: shunit2 suites, coverage runner, direct integration harness, and
+  the VM-backed integration matrix
 - `docs/`: operator and contributor guides
 - `examples/`: runnable command templates for common workflows
 - `man/`: primary CLI reference (`zxfer.8`, `zxfer.1m`)
@@ -48,7 +51,7 @@ If you prefer a prebuilt contributor environment, open the repository in the
 included `.devcontainer/` from GitHub Codespaces or VS Code. It preinstalls
 the Ubuntu 24.04 multi-shell, lint, and `kcov` tooling used for local lint,
 shunit2, and coverage work, but it does not replace a ZFS-capable host or
-disposable VM for the manual integration harness.
+disposable VM or QEMU-capable host for the integration runners.
 
 Run targeted suites when editing a specific area:
 
@@ -74,7 +77,21 @@ minimums in `tests/coverage_policy.tsv`, rejects regressions relative to
 `tests/coverage_baseline/bash-xtrace/summary.tsv`, and writes the
 `missing.txt` diff that CI publishes in the PR step summary.
 
-Run integration tests only on a safe host:
+Run the default unattended VM-backed integration profile:
+
+```sh
+./tests/run_vm_matrix.sh --profile local
+```
+
+For tighter development loops, prefer a single guest plus a named in-guest
+test selection before widening back out to the full local profile:
+
+```sh
+./tests/run_vm_matrix.sh --profile local --guest ubuntu --only-test basic_replication_test
+```
+
+Run integration tests directly on a safe host only when you intentionally want
+the expert/manual harness:
 
 ```sh
 ./tests/run_integration_zxfer.sh --yes --keep-going
@@ -95,6 +112,19 @@ When behavior changes, update the relevant docs:
 - man pages
 - `docs/` guides when workflows or platform behavior changes
 - `KNOWN_ISSUES.md` if the change resolves or introduces a real open issue
+- When modifying replication logic, state initialization, or adding new
+  features, ensure the corresponding Mermaid diagrams in `architecture.md` and
+  `README.md` are updated to reflect the new control flow.
+
+## Filing Issues
+
+Use the GitHub issue forms for bug reports, feature requests, and
+platform-compatibility findings. Include the OS release, ZFS/OpenZFS version,
+shell, privilege model, pool or dataset layout, and any remote-wrapper details
+needed to reproduce the problem safely.
+
+Redact hostnames, credentials, and dataset names as needed. For security-
+sensitive reports, follow `SECURITY.md` instead of opening a public issue.
 
 ## Pull Requests
 

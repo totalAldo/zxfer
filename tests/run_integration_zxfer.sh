@@ -14,10 +14,14 @@ ZXFER_CONFIRM_COMMANDS=${ZXFER_CONFIRM_COMMANDS:-"chmod chown kill ln mkdir mkte
 ZXFER_CONFIRM_WRAPPER_DIR=""
 ZXFER_REAL_BIN=""
 ZXFER_SKIP_TESTS=${ZXFER_SKIP_TESTS:-""}
+ZXFER_ONLY_TESTS=${ZXFER_ONLY_TESTS:-""}
 ZXFER_KEEP_GOING=${ZXFER_KEEP_GOING:-0}
 ZXFER_ABORT_REQUESTED=${ZXFER_ABORT_REQUESTED:-0}
+ZXFER_LIST_FAILED_TESTS_ONLY=${ZXFER_LIST_FAILED_TESTS_ONLY:-0}
 ZXFER_PRESERVE_WORKDIR_ON_FAILURE=${ZXFER_PRESERVE_WORKDIR_ON_FAILURE:-0}
 ZXFER_FAILED_TESTS=""
+ZXFER_LAST_TEST_STDOUT_CAPTURE=""
+ZXFER_LAST_TEST_STDERR_CAPTURE=""
 SRC_POOL_CREATED=0
 DEST_POOL_CREATED=0
 TEST_POOL_MARKER_PROP="org.zxfer:test"
@@ -34,7 +38,7 @@ has_gnu_parallel() {
 	if ! command -v parallel >/dev/null 2>&1; then
 		return 1
 	fi
-	parallel --version 2>/dev/null | grep -q "GNU parallel"
+	parallel --version 2>&1 | grep -Eq "GNU parallel|GNU Parallel"
 }
 
 require_cmd() {
@@ -47,7 +51,7 @@ require_cmd() {
 
 print_usage() {
 	cat <<'EOF'
-usage: ./tests/run_integration_zxfer.sh [--yes] [--skip-test name] [--keep-going] [--help]
+usage: ./tests/run_integration_zxfer.sh [--yes] [--skip-test name[,name...]] [--only-test name[,name...]] [--keep-going] [--failed-tests-only] [--help]
 
 By default the integration harness prompts for approval before data-modifying
 wrapped external commands (for example zpool, zfs, rm, mkdir, mktemp, chmod,
@@ -58,25 +62,65 @@ Use --skip-test <name> to skip one integration test function. Repeat the flag
 to skip more than one test, or set ZXFER_SKIP_TESTS to a whitespace-separated
 list of test function names.
 
+Use --only-test <name> to run only one or more named integration test
+functions. The flag accepts a single function name or a comma-delimited list,
+can be repeated, and can also be set through ZXFER_ONLY_TESTS.
+
 Use --keep-going to continue after a failing integration test and print a
 summary of failed test functions at the end.
+
+Use --failed-tests-only to suppress passing test chatter and replay only the
+captured output from failing integration tests plus the final summary. This
+mode still prints a concise `[N/TOTAL] PASS test_name` or `[N/TOTAL] SKIP
+test_name` line for each non-failing test so unattended runs show forward
+progress without full chatter.
 EOF
+}
+
+append_test_names() {
+	l_current=$1
+	l_spec=$2
+	l_result=$l_current
+	l_tests=
+
+	[ -n "$l_spec" ] || {
+		printf '%s\n' "$l_result"
+		return
+	}
+
+	l_tests=$(printf '%s\n' "$l_spec" | tr ',' ' ')
+	for l_test in $l_tests; do
+		[ -n "$l_test" ] || continue
+		case " $l_result " in
+		*" $l_test "*) ;;
+		*)
+			if [ -n "$l_result" ]; then
+				l_result="$l_result $l_test"
+			else
+				l_result=$l_test
+			fi
+			;;
+		esac
+	done
+
+	printf '%s\n' "$l_result"
 }
 
 append_skip_test() {
 	l_test=$1
 
-	[ -n "$l_test" ] || return
-	case " ${ZXFER_SKIP_TESTS:-} " in
-	*" $l_test "*) ;;
-	*)
-		if [ -n "${ZXFER_SKIP_TESTS:-}" ]; then
-			ZXFER_SKIP_TESTS="$ZXFER_SKIP_TESTS $l_test"
-		else
-			ZXFER_SKIP_TESTS=$l_test
-		fi
-		;;
-	esac
+	ZXFER_SKIP_TESTS=$(append_test_names "${ZXFER_SKIP_TESTS:-}" "$l_test")
+}
+
+append_only_test() {
+	l_test=$1
+
+	ZXFER_ONLY_TESTS=$(append_test_names "${ZXFER_ONLY_TESTS:-}" "$l_test")
+}
+
+normalize_requested_test_filters() {
+	ZXFER_SKIP_TESTS=$(append_test_names "" "${ZXFER_SKIP_TESTS:-}")
+	ZXFER_ONLY_TESTS=$(append_test_names "" "${ZXFER_ONLY_TESTS:-}")
 }
 
 parse_args() {
@@ -94,8 +138,20 @@ parse_args() {
 			fi
 			append_skip_test "$1"
 			;;
+		--only-test)
+			shift
+			if [ $# -eq 0 ] || [ -z "$1" ]; then
+				printf '%s\n' "--only-test requires at least one test function name." >&2
+				print_usage >&2
+				exit 2
+			fi
+			append_only_test "$1"
+			;;
 		--keep-going)
 			ZXFER_KEEP_GOING=1
+			;;
+		--failed-tests-only)
+			ZXFER_LIST_FAILED_TESTS_ONLY=1
 			;;
 		-h | --help)
 			print_usage
@@ -109,6 +165,122 @@ parse_args() {
 		esac
 		shift
 	done
+}
+
+list_failed_tests_only_enabled() {
+	[ "${ZXFER_LIST_FAILED_TESTS_ONLY:-0}" -eq 1 ]
+}
+
+reset_test_output_captures() {
+	ZXFER_LAST_TEST_STDOUT_CAPTURE=""
+	ZXFER_LAST_TEST_STDERR_CAPTURE=""
+}
+
+replay_test_output_captures() {
+	l_test_name=${1:-integration_test}
+
+	if [ -n "${ZXFER_LAST_TEST_STDOUT_CAPTURE:-}" ] &&
+		[ -s "$ZXFER_LAST_TEST_STDOUT_CAPTURE" ]; then
+		printf '%s\n' "--- $l_test_name stdout ---"
+		cat "$ZXFER_LAST_TEST_STDOUT_CAPTURE"
+	fi
+	if [ -n "${ZXFER_LAST_TEST_STDERR_CAPTURE:-}" ] &&
+		[ -s "$ZXFER_LAST_TEST_STDERR_CAPTURE" ]; then
+		printf '%s\n' "--- $l_test_name stderr ---" >&2
+		cat "$ZXFER_LAST_TEST_STDERR_CAPTURE" >&2
+	fi
+}
+
+cleanup_test_output_captures() {
+	if [ -n "${ZXFER_LAST_TEST_STDOUT_CAPTURE:-}" ]; then
+		rm -f "$ZXFER_LAST_TEST_STDOUT_CAPTURE" >/dev/null 2>&1 || true
+	fi
+	if [ -n "${ZXFER_LAST_TEST_STDERR_CAPTURE:-}" ]; then
+		rm -f "$ZXFER_LAST_TEST_STDERR_CAPTURE" >/dev/null 2>&1 || true
+	fi
+	reset_test_output_captures
+}
+
+run_test_body() {
+	l_func=$1
+
+	reset_test_output_captures
+	if ! list_failed_tests_only_enabled; then
+		set +e
+		(
+			"$l_func"
+		)
+		l_status=$?
+		set -e
+		return "$l_status"
+	fi
+
+	ZXFER_LAST_TEST_STDOUT_CAPTURE=$(mktemp "$WORKDIR/${l_func}.stdout.XXXXXX") ||
+		fail "Unable to create stdout capture for integration test $l_func."
+	ZXFER_LAST_TEST_STDERR_CAPTURE=$(mktemp "$WORKDIR/${l_func}.stderr.XXXXXX") || {
+		rm -f "$ZXFER_LAST_TEST_STDOUT_CAPTURE" >/dev/null 2>&1 || true
+		reset_test_output_captures
+		fail "Unable to create stderr capture for integration test $l_func."
+	}
+
+	set +e
+	(
+		"$l_func"
+	) >"$ZXFER_LAST_TEST_STDOUT_CAPTURE" 2>"$ZXFER_LAST_TEST_STDERR_CAPTURE"
+	l_status=$?
+	set -e
+	return "$l_status"
+}
+
+test_is_selected() {
+	l_test=$1
+
+	if [ -z "${ZXFER_ONLY_TESTS:-}" ]; then
+		return 0
+	fi
+
+	case " ${ZXFER_ONLY_TESTS:-} " in
+	*" $l_test "*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+validate_requested_only_tests() {
+	[ -n "${ZXFER_ONLY_TESTS:-}" ] || return 0
+
+	for l_test in $ZXFER_ONLY_TESTS; do
+		l_found=0
+		for l_available_test in $TEST_SEQUENCE; do
+			if [ "$l_available_test" = "$l_test" ]; then
+				l_found=1
+				break
+			fi
+		done
+		if [ "$l_found" -ne 1 ]; then
+			fail "Unknown integration test requested via --only-test: $l_test"
+		fi
+	done
+}
+
+build_requested_test_sequence() {
+	l_sequence=
+
+	normalize_requested_test_filters
+	if [ -z "${ZXFER_ONLY_TESTS:-}" ]; then
+		printf '%s\n' "$TEST_SEQUENCE"
+		return
+	fi
+
+	validate_requested_only_tests
+	for l_test in $TEST_SEQUENCE; do
+		if test_is_selected "$l_test"; then
+			l_sequence=$(append_test_names "$l_sequence" "$l_test")
+		else
+			:
+		fi
+	done
+
+	printf '%s\n' "$l_sequence"
 }
 
 test_is_skipped() {
@@ -357,7 +529,25 @@ setup_command_confirmation_wrappers() {
 }
 
 log() {
+	if list_failed_tests_only_enabled; then
+		return
+	fi
 	printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"
+}
+
+log_summary() {
+	printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"
+}
+
+emit_failed_tests_only_status_line() {
+	l_index=$1
+	l_total=$2
+	l_result=$3
+	l_func=${4:-}
+
+	if list_failed_tests_only_enabled; then
+		printf '[%s/%s] %s %s\n' "$l_index" "$l_total" "$l_result" "$l_func"
+	fi
 }
 
 fail() {
@@ -895,34 +1085,57 @@ mock_ssh_matches_missing_tool_probe() {
 
 mock_ssh_emit_capability_response() {
 	l_cmd=$1
+	l_tools=""
 
 	case "$l_cmd" in
-	*"ZXFER_REMOTE_CAPS_V1"*)
-		if [ -n "${MOCK_SSH_CAPABILITY_RESPONSE_FILE:-}" ]; then
-			cat "$MOCK_SSH_CAPABILITY_RESPONSE_FILE"
-			return $?
-		fi
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
-		printf 'os\t%s\n' "${MOCK_SSH_FORCE_UNAME:-$(uname 2>/dev/null)}"
-		for l_tool in zfs parallel cat; do
-			if [ -n "${MOCK_SSH_MISSING_TOOL:-}" ] && [ "$l_tool" = "$MOCK_SSH_MISSING_TOOL" ]; then
-				printf 'tool\t%s\t1\t-\n' "$l_tool"
-				continue
-			fi
-			l_path=$(command -v "$l_tool" 2>/dev/null)
-			l_status=$?
-			if [ "$l_status" -eq 0 ]; then
-				printf 'tool\t%s\t0\t%s\n' "$l_tool" "$l_path"
-			else
-				printf 'tool\t%s\t%s\t-\n' "$l_tool" "$l_status"
-			fi
-		done
-		return 0
+	*"ZXFER_REMOTE_CAPS_V2"*)
 		;;
 	*)
 		return 1
 		;;
 	esac
+
+	if [ -n "${MOCK_SSH_CAPABILITY_RESPONSE_FILE:-}" ]; then
+		cat "$MOCK_SSH_CAPABILITY_RESPONSE_FILE"
+		return $?
+	fi
+
+	l_tools=$(printf '%s\n' "$l_cmd" | awk '
+		found == 0 {
+			if ($0 ~ /<<'\''ZXFER_REMOTE_CAPABILITY_TOOLS'\''$/) {
+				found = 1
+			}
+			next
+		}
+		$0 == "ZXFER_REMOTE_CAPABILITY_TOOLS" {
+			exit
+		}
+		$0 != "" {
+			print
+		}
+	')
+	if [ -z "$l_tools" ]; then
+		l_tools=$(printf '%s\n' "zfs" "parallel" "cat")
+	fi
+
+	printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
+	printf 'os\t%s\n' "${MOCK_SSH_FORCE_UNAME:-$(uname 2>/dev/null)}"
+	printf '%s\n' "$l_tools" |
+	while IFS= read -r l_tool || [ -n "$l_tool" ]; do
+		[ -n "$l_tool" ] || continue
+		if [ -n "${MOCK_SSH_MISSING_TOOL:-}" ] && [ "$l_tool" = "$MOCK_SSH_MISSING_TOOL" ]; then
+			printf 'tool\t%s\t1\t-\n' "$l_tool"
+			continue
+		fi
+		l_path=$(command -v "$l_tool" 2>/dev/null)
+		l_status=$?
+		if [ "$l_status" -eq 0 ]; then
+			printf 'tool\t%s\t0\t%s\n' "$l_tool" "$l_path"
+		else
+			printf 'tool\t%s\t%s\t-\n' "$l_tool" "$l_status"
+		fi
+	done
+	return 0
 }
 
 mock_ssh_matches_command_v_override() {
@@ -956,6 +1169,13 @@ mock_ssh_is_uname_command() {
 l_socket=""
 l_op=""
 l_host=""
+
+if [ -n "${MOCK_SSH_ARGV_LOG:-}" ]; then
+	printf '%s\n' "---" >>"$MOCK_SSH_ARGV_LOG"
+	for l_arg in "$@"; do
+		printf 'argv:%s\n' "$l_arg" >>"$MOCK_SSH_ARGV_LOG"
+	done
+fi
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -1086,7 +1306,10 @@ run_zxfer() {
 	ZXFER_BACKUP_DIR=${ZXFER_BACKUP_DIR-} \
 		ZXFER_SECURE_PATH=${ZXFER_SECURE_PATH-} \
 		ZXFER_SECURE_PATH_APPEND=${ZXFER_SECURE_PATH_APPEND-} \
+		ZXFER_SSH_USER_KNOWN_HOSTS_FILE=${ZXFER_SSH_USER_KNOWN_HOSTS_FILE-} \
+		ZXFER_SSH_USE_AMBIENT_CONFIG=${ZXFER_SSH_USE_AMBIENT_CONFIG-} \
 		MOCK_SSH_LOG=${MOCK_SSH_LOG-} \
+		MOCK_SSH_ARGV_LOG=${MOCK_SSH_ARGV_LOG-} \
 		MOCK_SSH_REMOTE_SHELL=${MOCK_SSH_REMOTE_SHELL-} \
 		MOCK_SSH_CAPABILITY_RESPONSE_FILE=${MOCK_SSH_CAPABILITY_RESPONSE_FILE-} \
 		MOCK_SSH_COMMAND_V_TOOL=${MOCK_SSH_COMMAND_V_TOOL-} \
@@ -1104,29 +1327,45 @@ run_test() {
 	l_total=$2
 	l_func=$3
 
-	log "$(printf '[%d/%d] Starting %s%s%s' "$l_index" "$l_total" "$YELLOW" "$l_func" "$RESET")"
+	if ! list_failed_tests_only_enabled; then
+		log "$(printf '[%d/%d] Starting %s%s%s' "$l_index" "$l_total" "$YELLOW" "$l_func" "$RESET")"
+	fi
 	if test_is_skipped "$l_func"; then
-		log "$(printf '%s[%d/%d] SKIP%s %s' "$YELLOW" "$l_index" "$l_total" "$RESET" "$l_func")"
+		emit_failed_tests_only_status_line "$l_index" "$l_total" "SKIP" "$l_func"
+		if ! list_failed_tests_only_enabled; then
+			log "$(printf '%s[%d/%d] SKIP%s %s' "$YELLOW" "$l_index" "$l_total" "$RESET" "$l_func")"
+		fi
 		return
 	fi
-	set +e
-	(
-		"$l_func"
-	)
-	l_status=$?
-	set -e
+	if run_test_body "$l_func"; then
+		l_status=0
+	else
+		l_status=$?
+	fi
 	if [ "$l_status" -ne 0 ]; then
+		if list_failed_tests_only_enabled; then
+			log_summary "$(printf '%s[%d/%d] FAIL%s %s (exit %s)' "$RED" "$l_index" "$l_total" "$RESET" "$l_func" "$l_status")"
+			replay_test_output_captures "$l_func"
+		fi
+		cleanup_test_output_captures
 		if [ "${ZXFER_ABORT_REQUESTED:-0}" -eq 1 ] || [ "$l_status" -eq 130 ] || [ "$l_status" -eq 143 ]; then
 			exit "$l_status"
 		fi
-		log "$(printf '%s[%d/%d] FAIL%s %s (exit %s)' "$RED" "$l_index" "$l_total" "$RESET" "$l_func" "$l_status")"
+		if ! list_failed_tests_only_enabled; then
+			log "$(printf '%s[%d/%d] FAIL%s %s (exit %s)' "$RED" "$l_index" "$l_total" "$RESET" "$l_func" "$l_status")"
+		fi
 		append_failed_test "$l_func"
 		if [ "$ZXFER_KEEP_GOING" -eq 1 ]; then
 			return
 		fi
 		exit "$l_status"
 	fi
-	log "$(printf '%s[%d/%d] PASS%s %s' "$GREEN" "$l_index" "$l_total" "$RESET" "$l_func")"
+	cleanup_test_output_captures
+	if list_failed_tests_only_enabled; then
+		emit_failed_tests_only_status_line "$l_index" "$l_total" "PASS" "$l_func"
+	else
+		log "$(printf '%s[%d/%d] PASS%s %s' "$GREEN" "$l_index" "$l_total" "$RESET" "$l_func")"
+	fi
 }
 
 assert_usage_error_case() {
@@ -1202,6 +1441,108 @@ usage_error_failure_report_test() {
 	safe_rm_f "$stdout_log" "$stderr_log"
 
 	log "Usage error failure report test passed"
+}
+
+usage_error_failure_report_redaction_test() {
+	log "Starting usage error failure report redaction test"
+
+	secret_source="tank/secret-source"
+	stdout_log="$WORKDIR/usage_failure_redacted.stdout"
+	stderr_log="$WORKDIR/usage_failure_redacted.stderr"
+	safe_rm_f "$stdout_log" "$stderr_log"
+
+	set +e
+	ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1 "$ZXFER_BIN" -R "$secret_source" >"$stdout_log" 2>"$stderr_log"
+	status=$?
+	set -e
+
+	if [ "$status" -ne 2 ]; then
+		fail "Usage failure report redaction test expected exit status 2, got $status. See $stderr_log."
+	fi
+	if [ -s "$stdout_log" ]; then
+		fail "Usage failure report redaction test should not write to stdout. Output: $(cat "$stdout_log")"
+	fi
+	if ! grep -q "^invocation: \[redacted\]$" "$stderr_log"; then
+		fail "Usage failure report redaction test missing redacted invocation field. Output: $(cat "$stderr_log")"
+	fi
+	if grep -F "$secret_source" "$stderr_log" >/dev/null 2>&1; then
+		fail "Usage failure report redaction test leaked the secret-bearing source argument. Output: $(cat "$stderr_log")"
+	fi
+
+	safe_rm_f "$stdout_log" "$stderr_log"
+
+	log "Usage error failure report redaction test passed"
+}
+
+usage_error_failure_report_control_character_escaping_test() {
+	log "Starting usage error failure report control-character escaping test"
+
+	esc=$(printf '\033')
+	bell=$(printf '\007')
+	control_source=$(printf 'tank/src%s[31m%s' "$esc" "$bell")
+	stdout_log="$WORKDIR/usage_failure_control_chars.stdout"
+	stderr_log="$WORKDIR/usage_failure_control_chars.stderr"
+	safe_rm_f "$stdout_log" "$stderr_log"
+
+	set +e
+	"$ZXFER_BIN" -R "$control_source" >"$stdout_log" 2>"$stderr_log"
+	status=$?
+	set -e
+
+	if [ "$status" -ne 2 ]; then
+		fail "Usage failure report control-character escaping test expected exit status 2, got $status. See $stderr_log."
+	fi
+	if [ -s "$stdout_log" ]; then
+		fail "Usage failure report control-character escaping test should not write to stdout. Output: $(cat "$stdout_log")"
+	fi
+	if ! grep -F -x "invocation: '$ZXFER_BIN' '-R' 'tank/src\\x1B[31m\\x07'" "$stderr_log" >/dev/null 2>&1; then
+		fail "Usage failure report control-character escaping test missing escaped ESC sequence. Output: $(cat "$stderr_log")"
+	fi
+	if ! grep -F '\x07' "$stderr_log" >/dev/null 2>&1; then
+		fail "Usage failure report control-character escaping test missing escaped BEL sequence. Output: $(cat "$stderr_log")"
+	fi
+	if grep -F '\\x1B' "$stderr_log" >/dev/null 2>&1; then
+		fail "Usage failure report control-character escaping test double-escaped the ESC marker. Output: $(cat "$stderr_log")"
+	fi
+	if grep -F "$esc" "$stderr_log" >/dev/null 2>&1; then
+		fail "Usage failure report control-character escaping test leaked a raw ESC byte. Output: $(cat "$stderr_log")"
+	fi
+	if grep -F "$bell" "$stderr_log" >/dev/null 2>&1; then
+		fail "Usage failure report control-character escaping test leaked a raw BEL byte. Output: $(cat "$stderr_log")"
+	fi
+
+	safe_rm_f "$stdout_log" "$stderr_log"
+
+	log "Usage error failure report control-character escaping test passed"
+}
+
+usage_error_failure_report_trailing_newline_preservation_test() {
+	log "Starting usage error failure report trailing-newline preservation test"
+
+	trailing_source=$(printf 'tank/src\n_')
+	trailing_source=${trailing_source%_}
+	stdout_log="$WORKDIR/usage_failure_trailing_newline.stdout"
+	stderr_log="$WORKDIR/usage_failure_trailing_newline.stderr"
+	safe_rm_f "$stdout_log" "$stderr_log"
+
+	set +e
+	"$ZXFER_BIN" -R "$trailing_source" >"$stdout_log" 2>"$stderr_log"
+	status=$?
+	set -e
+
+	if [ "$status" -ne 2 ]; then
+		fail "Usage failure report trailing-newline preservation test expected exit status 2, got $status. See $stderr_log."
+	fi
+	if [ -s "$stdout_log" ]; then
+		fail "Usage failure report trailing-newline preservation test should not write to stdout. Output: $(cat "$stdout_log")"
+	fi
+	if ! grep -F -x "invocation: '$ZXFER_BIN' '-R' 'tank/src\\n'" "$stderr_log" >/dev/null 2>&1; then
+		fail "Usage failure report trailing-newline preservation test missing escaped newline marker. Output: $(cat "$stderr_log")"
+	fi
+
+	safe_rm_f "$stdout_log" "$stderr_log"
+
+	log "Usage error failure report trailing-newline preservation test passed"
 }
 
 assert_error_case() {
@@ -1406,38 +1747,38 @@ EOF
 }
 
 missing_parallel_error_test() {
-	log "Starting missing GNU parallel error test"
+	log "Starting missing GNU parallel fallback test"
 
 	mock_path="$WORKDIR/mock_no_parallel"
-	safe_rm_rf "$mock_path"
-	mkdir -p "$mock_path"
-
-	# Provide required dependencies except GNU parallel.
-	for bin in zfs ssh awk cat; do
-		actual=$(resolve_host_command "$bin")
-		if [ "$actual" = "" ]; then
-			fail "Required binary $bin not found on host; cannot run missing parallel test."
-		fi
-		ln -s "$actual" "$mock_path/$bin"
-	done
+	prepare_mock_bin_dir "$mock_path" \
+		awk cat chmod comm cut date grep head id ln ls mkdir mkfifo mktemp rm rmdir sed sort ssh stat tr uname zfs
 
 	secure_path="$mock_path"
+	src_dataset="$SRC_POOL/no_parallel_src"
+	dest_root="$DEST_POOL/no_parallel_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
 
-	set +e
-	output=$(ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -R tank/src backup/target 2>&1)
-	status=$?
-	set -e
+	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
 
-	if [ "$status" -eq 0 ]; then
-		fail "zxfer should fail when GNU parallel is missing for -j>1."
-	fi
-	if ! printf '%s\n' "$output" | grep -q "The -j option requires GNU parallel but it was not found in PATH on the local host."; then
-		fail "Missing parallel error message not found. Output: $output"
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "file.txt" "one"
+	zfs snap -r "$src_dataset@np1"
+	append_data_to_dataset "$src_dataset" "file.txt" "two"
+	zfs snap -r "$src_dataset@np2"
+
+	output=$(ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -R "$src_dataset" "$dest_root" 2>&1)
+
+	assert_snapshot_exists "$dest_dataset" "np1"
+	assert_snapshot_exists "$dest_dataset" "np2"
+	if ! printf '%s\n' "$output" | grep -q "Falling back to serial source snapshot listing."; then
+		fail "Missing local serial-fallback message not found. Output: $output"
 	fi
 
 	safe_rm_rf "$mock_path"
 
-	log "Missing GNU parallel error test passed"
+	log "Missing GNU parallel fallback test passed"
 }
 
 remote_missing_parallel_origin_test() {
@@ -1467,6 +1808,7 @@ remote_missing_parallel_origin_test() {
 	mkdir -p "$tmpdir"
 
 	zfs create "$src_dataset"
+	zfs create "$dest_root"
 	i=1
 	while [ "$i" -le 16 ]; do
 		zfs create "$src_dataset/child$i"
@@ -1481,17 +1823,78 @@ remote_missing_parallel_origin_test() {
 	status=$?
 	set -e
 
-	if [ "$status" -eq 0 ]; then
-		fail "Remote origin without GNU parallel should cause zxfer to fail when adaptive discovery selects the parallel branch."
+	if [ "$status" -ne 0 ]; then
+		fail "Remote origin without GNU parallel should fall back to serial discovery and still succeed. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -q "GNU parallel not found on origin host" &&
-		! printf '%s\n' "$output" | grep -q 'Required dependency "GNU parallel" not found on host localhost'; then
-		fail "Expected remote missing parallel error message. Output: $output"
+	assert_snapshot_exists "$dest_root/${src_dataset##*/}" "np1"
+	if ! printf '%s\n' "$output" | grep -q "Falling back to serial source snapshot listing."; then
+		fail "Expected remote serial-fallback message. Output: $output"
 	fi
 
 	safe_rm_rf "$mock_path" "$tmpdir"
 
 	log "Remote missing GNU parallel origin test passed"
+}
+
+remote_non_gnu_parallel_origin_test() {
+	log "Starting remote non-GNU parallel origin test"
+
+	mock_path="$WORKDIR/mock_remote_non_gnu_parallel"
+	prepare_mock_bin_dir "$mock_path" ssh
+	write_mock_ssh_script "$mock_path/ssh"
+	cat >"$mock_path/parallel" <<'EOF'
+#!/bin/sh
+if [ "$1" = "--will-cite" ]; then
+	shift
+fi
+if [ "$1" = "--version" ]; then
+	printf '%s\n' "parallel from elsewhere"
+	exit 0
+fi
+	printf '%s\n' "non-GNU parallel mock cannot execute GNU parallel workloads" >&2
+exit 64
+EOF
+	chmod +x "$mock_path/parallel"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	tmpdir="$WORKDIR/remote_non_gnu_parallel_tmp"
+
+	src_dataset="$SRC_POOL/remote_non_gnu_parallel_src"
+	dest_root="$DEST_POOL/remote_non_gnu_parallel_dest"
+
+	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
+	safe_rm_rf "$tmpdir"
+	mkdir -p "$tmpdir"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	i=1
+	while [ "$i" -le 16 ]; do
+		zfs create "$src_dataset/child$i"
+		i=$((i + 1))
+	done
+	zfs snap -r "$src_dataset@ng1"
+
+	set +e
+	output=$(TMPDIR="$tmpdir" ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "Remote origin with a non-GNU parallel implementation should fail closed once the rendered parallel listing runs. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "non-GNU parallel mock cannot execute GNU parallel workloads"; then
+		fail "Expected the remote non-GNU parallel runtime stderr to be preserved. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "Failed to retrieve snapshots from the source:"; then
+		fail "Expected the source snapshot-list failure to fail closed through the normal source-error path. Output: $output"
+	fi
+	if printf '%s\n' "$output" | grep -q "Falling back to serial source snapshot listing."; then
+		fail "Remote non-GNU parallel should no longer fall back to serial once the helper resolves. Output: $output"
+	fi
+
+	safe_rm_rf "$mock_path" "$tmpdir"
+
+	log "Remote non-GNU parallel origin test passed"
 }
 
 consistency_option_validation_tests() {
@@ -1510,7 +1913,7 @@ consistency_option_validation_tests() {
 		-z -R tank/src backup/target
 
 	assert_usage_error_case "Empty compression command" \
-		"Compression command (-Z/ZXFER_COMPRESSION) cannot be empty." \
+		"Compression command (-Z) cannot be empty." \
 		-Z "" -R tank/src backup/target
 
 	assert_usage_error_case "Zero job count" \
@@ -1577,6 +1980,56 @@ runtime_failure_report_test() {
 	fi
 
 	log "Runtime failure report test passed"
+}
+
+runtime_failure_report_redaction_test() {
+	log "Starting runtime failure report redaction test"
+
+	dest_root="$DEST_POOL/failure_report_redacted_dest"
+	progress_secret="printf runtime-secret-token"
+	log_path="$WORKDIR/runtime_failure_redacted.report"
+	stdout_log="$WORKDIR/runtime_failure_redacted.stdout"
+	stderr_log="$WORKDIR/runtime_failure_redacted.stderr"
+	destroy_test_datasets_if_present "$dest_root"
+	zfs create "$dest_root"
+	safe_rm_f "$log_path" "$stdout_log" "$stderr_log"
+
+	set +e
+	ZXFER_ERROR_LOG="$log_path" \
+		ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1 \
+		"$ZXFER_BIN" -D "$progress_secret" -R "$SRC_POOL/no_such_dataset" "$dest_root" >"$stdout_log" 2>"$stderr_log"
+	status=$?
+	set -e
+
+	if [ "$status" -ne 3 ]; then
+		fail "Runtime failure report redaction test expected exit status 3, got $status. Output: $(cat "$stderr_log")"
+	fi
+	if [ -s "$stdout_log" ]; then
+		fail "Runtime failure report redaction test should not write to stdout. Output: $(cat "$stdout_log")"
+	fi
+	if [ ! -f "$log_path" ]; then
+		fail "Runtime failure report redaction test expected ZXFER_ERROR_LOG output."
+	fi
+	if ! grep -q "^invocation: \[redacted\]$" "$stderr_log"; then
+		fail "Runtime failure report redaction test missing redacted invocation on stderr. Output: $(cat "$stderr_log")"
+	fi
+	if ! grep -q "^last_command: \[redacted\]$" "$stderr_log"; then
+		fail "Runtime failure report redaction test missing redacted last_command on stderr. Output: $(cat "$stderr_log")"
+	fi
+	if ! grep -q "^invocation: \[redacted\]$" "$log_path"; then
+		fail "Runtime failure report redaction test missing redacted invocation in ZXFER_ERROR_LOG. Output: $(cat "$log_path")"
+	fi
+	if ! grep -q "^last_command: \[redacted\]$" "$log_path"; then
+		fail "Runtime failure report redaction test missing redacted last_command in ZXFER_ERROR_LOG. Output: $(cat "$log_path")"
+	fi
+	if grep -F "$progress_secret" "$stderr_log" >/dev/null 2>&1; then
+		fail "Runtime failure report redaction test leaked the secret-bearing progress command on stderr. Output: $(cat "$stderr_log")"
+	fi
+	if grep -F "$progress_secret" "$log_path" >/dev/null 2>&1; then
+		fail "Runtime failure report redaction test leaked the secret-bearing progress command in ZXFER_ERROR_LOG. Output: $(cat "$log_path")"
+	fi
+
+	log "Runtime failure report redaction test passed"
 }
 
 error_log_mirror_test() {
@@ -1725,10 +2178,21 @@ snapshot_deletion_test() {
 	assert_snapshot_exists "$dest_dataset" "snap1"
 	assert_snapshot_exists "$dest_dataset" "snap2"
 
-	# Run with -n -d (dry run, snap1 should remain)
-	# We capture output to verify it *would* delete
-	output=$(run_zxfer -v -n -d -R "$src_dataset" "$dest_root" 2>&1)
-	assert_output_mentions_snapshot_destroy "$output" "$dest_dataset" "snap1"
+	# Run with -n -d (strict dry run, snap1 should remain and live delete
+	# planning is intentionally skipped)
+	set +e
+	output=$("$ZXFER_BIN" -v -V -n -d -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+	if [ "$status" -ne 0 ]; then
+		fail "Strict dry-run snapshot deletion preview failed with status $status. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "Dry run: skipping live replication-state validation and command planning."; then
+		fail "Expected strict dry-run planning skip message for snapshot deletion preview. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "Dry run: send/receive and property-reconcile commands require live snapshot discovery and are not rendered."; then
+		fail "Expected strict dry-run no-render message for snapshot deletion preview. Output: $output"
+	fi
 	assert_snapshot_exists "$dest_dataset" "snap1"
 
 	# Run with -d (snap1 should be deleted)
@@ -1747,7 +2211,7 @@ abort_integration_run() {
 
 	ZXFER_ABORT_REQUESTED=1
 	trap - INT TERM
-	log "Received $l_signal, aborting integration test run."
+	log_summary "Received $l_signal, aborting integration test run."
 	exit "$l_status"
 }
 
@@ -2248,6 +2712,57 @@ dry_run_replication_test() {
 	log "Dry-run replication test passed"
 }
 
+remote_dry_run_noexec_progress_test() {
+	log "Starting remote dry-run no-exec progress test"
+
+	mock_path="$WORKDIR/mock_remote_dryrun"
+	prepare_mock_bin_dir "$mock_path" ssh
+	write_mock_ssh_script "$mock_path/ssh"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	ssh_log="$WORKDIR/mock_remote_dryrun.log"
+	progress_script="$WORKDIR/mock_remote_dryrun_progress.sh"
+	progress_log="$WORKDIR/mock_remote_dryrun_progress.log"
+
+	src_dataset="$SRC_POOL/remote_dryrun_src"
+	dest_root="$DEST_POOL/remote_dryrun_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
+	safe_rm_f "$ssh_log" "$progress_log"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	append_data_to_dataset "$src_dataset" "file.txt" "remote dry run"
+	zfs snap -r "$src_dataset@rdr1"
+
+	write_progress_logger_script "$progress_script"
+
+	set +e
+	output=$(ZXFER_SECURE_PATH="$secure_path" \
+		MOCK_SSH_LOG="$ssh_log" \
+		"$ZXFER_BIN" -v -V -n -D "$progress_script $progress_log %%size%% %%title%%" -T localhost -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -ne 0 ]; then
+		fail "Remote dry-run no-exec progress test expected success, got $status. Output: $output"
+	fi
+	if [ -e "$ssh_log" ] && [ -s "$ssh_log" ]; then
+		fail "Strict remote dry-run should not execute ssh. Log: $(cat "$ssh_log")"
+	fi
+	if [ -e "$progress_log" ]; then
+		fail "Strict remote dry-run should not execute the progress helper. Log: $(cat "$progress_log")"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "Dry run: skipping live %%size%% progress estimate discovery."; then
+		fail "Remote dry-run should report that live %%size%% estimation was skipped. Output: $output"
+	fi
+	if zfs list "$dest_dataset" >/dev/null 2>&1; then
+		fail "Remote dry run should not create destination dataset $dest_dataset."
+	fi
+
+	log "Remote dry-run no-exec progress test passed"
+}
+
 dry_run_deletion_test() {
 	log "Starting dry-run deletion test"
 
@@ -2271,10 +2786,15 @@ dry_run_deletion_test() {
 
 	destroy_test_dataset "$src_dataset@snap1"
 
-	output=$("$ZXFER_BIN" -v -n -d -R "$src_dataset" "$dest_root" 2>&1)
+	output=$("$ZXFER_BIN" -v -V -n -d -R "$src_dataset" "$dest_root" 2>&1)
 	log "$output"
 
-	assert_output_mentions_snapshot_destroy "$output" "$dest_dataset" "snap1"
+	if ! printf '%s\n' "$output" | grep -q "Dry run: skipping live replication-state validation and command planning."; then
+		fail "Expected strict dry-run planning skip message for deletion preview. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "Dry run: send/receive and property-reconcile commands require live snapshot discovery and are not rendered."; then
+		fail "Expected strict dry-run no-render message for deletion preview. Output: $output"
+	fi
 	assert_snapshot_exists "$dest_dataset" "snap1"
 	assert_snapshot_exists "$dest_dataset" "snap2"
 
@@ -2491,8 +3011,11 @@ send_command_dryrun_test() {
 		fail "Dry-run send command test failed. Output: $output"
 	fi
 
-	if ! printf '%s\n' "$output" | grep -q "send -v -w -I"; then
-		fail "Expected raw incremental send command with verbosity in output. Output: $output"
+	if ! printf '%s\n' "$output" | grep -q "Dry run: send/receive and property-reconcile commands require live snapshot discovery and are not rendered."; then
+		fail "Expected strict dry-run no-render message instead of a live send pipeline. Output: $output"
+	fi
+	if printf '%s\n' "$output" | grep -q "send -v -w -I"; then
+		fail "Strict dry-run should not render a live incremental send command anymore. Output: $output"
 	fi
 
 	if zfs list "$dest_dataset" >/dev/null 2>&1; then
@@ -2574,6 +3097,15 @@ property_backup_restore_test() {
 	if ! grep -q "^#zxfer property backup file" "$backup_file"; then
 		fail "Backup metadata missing expected header."
 	fi
+	if ! grep -q "^#format_version:1$" "$backup_file"; then
+		fail "Backup metadata missing expected format-version marker."
+	fi
+	if ! grep -q "^#source_root:$src_dataset$" "$backup_file"; then
+		fail "Backup metadata missing the expected full source_root header."
+	fi
+	if ! grep -q "^#destination_root:$dest_root$" "$backup_file"; then
+		fail "Backup metadata missing the expected full destination_root header."
+	fi
 
 	# Mutate destination then restore from backup metadata.
 	zfs set test:prop=mutated "$dest_dataset"
@@ -2585,6 +3117,47 @@ property_backup_restore_test() {
 	fi
 
 	log "Property backup/restore test passed"
+}
+
+chained_property_backup_provenance_test() {
+	log "Starting chained property-backup provenance test"
+
+	src_dataset="$SRC_POOL/prop_chain_src"
+	intermediate_root="$DEST_POOL/prop_chain_mid"
+	intermediate_dataset="$intermediate_root/${src_dataset##*/}"
+	final_root="$DEST_POOL/prop_chain_final"
+	final_dataset="$final_root/${intermediate_dataset##*/}"
+	backup_dir="$WORKDIR/prop_chain_backup"
+
+	safe_rm_rf "$backup_dir"
+	destroy_test_datasets_if_present "$final_root" "$intermediate_root" "$src_dataset"
+
+	zfs create "$src_dataset"
+	zfs create "$intermediate_root"
+	zfs create "$final_root"
+	zfs set test:prop=one "$src_dataset"
+	append_data_to_dataset "$src_dataset" "file.txt" "chain provenance"
+	zfs snap -r "$src_dataset@chain1"
+
+	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$src_dataset" "$intermediate_root"
+
+	zfs set test:prop=two "$intermediate_dataset"
+	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$intermediate_dataset" "$final_root"
+
+	final_prop=$(zfs get -H -o value test:prop "$final_dataset")
+	if [ "$final_prop" != "two" ]; then
+		fail "Chained backup expected the live intermediate property value 'two' on the final dataset, got '$final_prop'."
+	fi
+
+	zfs set test:prop=mutated "$final_dataset"
+	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -e -R "$intermediate_dataset" "$final_root"
+
+	final_restored_prop=$(zfs get -H -o value test:prop "$final_dataset")
+	if [ "$final_restored_prop" != "one" ]; then
+		fail "Chained backup restore expected the original upstream property value 'one', got '$final_restored_prop'."
+	fi
+
+	log "Chained property-backup provenance test passed"
 }
 
 remote_property_backup_restore_test() {
@@ -2627,6 +3200,15 @@ remote_property_backup_restore_test() {
 	remote_mode=$(get_file_mode_octal "$remote_backup_file" 2>/dev/null || echo "")
 	if [ "$remote_mode" != "600" ]; then
 		fail "Remote backup metadata permissions expected 600, got $remote_mode."
+	fi
+	if ! grep -q "^#format_version:1$" "$remote_backup_file"; then
+		fail "Remote backup metadata missing expected format-version marker."
+	fi
+	if ! grep -q "^#source_root:$src_dataset$" "$remote_backup_file"; then
+		fail "Remote backup metadata missing the expected full source_root header."
+	fi
+	if ! grep -q "^#destination_root:$dest_remote_root$" "$remote_backup_file"; then
+		fail "Remote backup metadata missing the expected full destination_root header."
 	fi
 
 	# Exact-pair restore metadata is keyed by the current source and destination.
@@ -2688,6 +3270,35 @@ backup_dir_symlink_guard_test() {
 	safe_rm_rf "$backup_dir_link"
 
 	log "Backup directory symlink guard test passed"
+}
+
+relative_backup_dir_rejection_test() {
+	log "Starting relative backup directory rejection test"
+
+	src_dataset="$SRC_POOL/backup_relative_src"
+	dest_root="$DEST_POOL/backup_relative_dest"
+
+	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	zfs set test:prop=one "$src_dataset"
+	append_data_to_dataset "$src_dataset" "file.txt" "one"
+	zfs snap -r "$src_dataset@relativeguard1"
+
+	set +e
+	output=$(ZXFER_BACKUP_DIR="relative-backups" "$ZXFER_BIN" -v -k -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "Backup write should fail when ZXFER_BACKUP_DIR is relative."
+	fi
+	if ! printf '%s\n' "$output" | grep -q "ZXFER_BACKUP_DIR must be an absolute path"; then
+		fail "Expected relative backup-dir rejection message. Output: $output"
+	fi
+
+	log "Relative backup directory rejection test passed"
 }
 
 missing_backup_metadata_error_test() {
@@ -2857,6 +3468,73 @@ legacy_backup_layout_rejected_test() {
 	log "Legacy backup layout rejection test passed"
 }
 
+unsupported_backup_format_version_rejected_test() {
+	log "Starting unsupported backup format-version rejection test"
+
+	src_dataset="$SRC_POOL/unsupported_backup_format_src"
+	restore_root="$DEST_POOL/unsupported_backup_format_restore"
+	restore_dataset="$restore_root/${src_dataset##*/}"
+	backup_dir="$WORKDIR/unsupported_backup_format_dir"
+	invalid_backup_tmp="$WORKDIR/unsupported_backup_format.tmp"
+
+	destroy_test_datasets_if_present "$restore_root" "$src_dataset"
+	safe_rm_rf "$backup_dir"
+	safe_rm_f "$invalid_backup_tmp"
+
+	zfs create "$src_dataset"
+	zfs create "$restore_root"
+	zfs set test:prop=format "$src_dataset"
+	append_data_to_dataset "$src_dataset" "file.txt" "unsupported backup format"
+	zfs snap -r "$src_dataset@format1"
+
+	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$src_dataset" "$restore_root"
+
+	restore_backup_file=$(find_backup_metadata_file_for_exact_pair "$backup_dir" "$src_dataset" "$restore_dataset")
+	if [ "$restore_backup_file" = "" ]; then
+		fail "Exact-pair restore backup metadata file not found for unsupported format-version rejection test."
+	fi
+
+	if ! awk '
+		BEGIN {
+			rewritten = 0
+		}
+		/^#format_version:1$/ {
+			print "#format_version:999"
+			rewritten = 1
+			next
+		}
+		{
+			print
+		}
+		END {
+			exit(rewritten ? 0 : 1)
+		}
+	' "$restore_backup_file" >"$invalid_backup_tmp"; then
+		fail "Failed to rewrite backup metadata format version for rejection test."
+	fi
+	mv "$invalid_backup_tmp" "$restore_backup_file"
+	chmod 600 "$restore_backup_file"
+
+	destroy_test_datasets_if_present "$restore_root"
+
+	set +e
+	output=$(ZXFER_BACKUP_DIR="$backup_dir" "$ZXFER_BIN" -v -e -R "$src_dataset" "$restore_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "Restore with unsupported backup metadata format version should fail closed. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "does not declare supported zxfer backup metadata format version #format_version:1" >/dev/null 2>&1; then
+		fail "Expected unsupported format-version failure. Output: $output"
+	fi
+	if zfs list "$restore_dataset" >/dev/null 2>&1; then
+		fail "Restore dataset should not be created when backup metadata format version is unsupported."
+	fi
+
+	log "Unsupported backup format-version rejection test passed"
+}
+
 remote_legacy_backup_layout_rejected_test() {
 	log "Starting remote legacy backup layout rejection test"
 
@@ -2960,7 +3638,7 @@ exec "$real_zfs" "\$@"
 EOF
 	chmod +x "$wrapper_dir/zfs"
 
-	for bin in awk ssh cat zstd; do
+	for bin in awk cat chmod cut date grep head id ln ls mkdir mktemp rm rmdir sed sort ssh stat tr uname zstd; do
 		real_bin=$(resolve_host_command "$bin")
 		if [ "$real_bin" != "" ]; then
 			ln -sf "$real_bin" "$wrapper_dir/$bin"
@@ -2970,9 +3648,10 @@ EOF
 	if [ "$real_parallel" != "" ]; then
 		ln -sf "$real_parallel" "$wrapper_dir/parallel"
 	fi
+	secure_path="$wrapper_dir:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 
 	set +e
-	output=$(ZXFER_SECURE_PATH="$wrapper_dir" "$ZXFER_BIN" -v -j 2 -R "$src_dataset" "$dest_root" 2>&1)
+	output=$(ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -R "$src_dataset" "$dest_root" 2>&1)
 	status=$?
 	set -e
 
@@ -3506,7 +4185,7 @@ remote_capability_control_whitespace_path_falls_back_to_direct_probe_test() {
 	write_mock_ssh_script "$mock_path/ssh"
 
 	{
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
 		printf 'os\t%s\n' "MockRemoteOS"
 		printf "tool\tzfs\t0\t/tmp/mock_remote_helper.\$(touch %s)/zfs\r\n" "$marker_rel"
 		printf 'tool\tparallel\t1\t-\n'
@@ -3564,7 +4243,7 @@ target_capability_control_whitespace_path_falls_back_to_direct_probe_test() {
 	write_mock_ssh_script "$mock_path/ssh"
 
 	{
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
 		printf 'os\t%s\n' "MockRemoteOS"
 		printf "tool\tzfs\t0\t/tmp/mock_remote_helper.\$(touch %s)/zfs\r\n" "$marker_rel"
 		printf 'tool\tparallel\t1\t-\n'
@@ -3798,7 +4477,7 @@ malformed_remote_capability_response_fails_closed_test() {
 	write_mock_ssh_script "$mock_path/ssh"
 
 	{
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
 		printf 'os\t%s\n' "MockRemoteOS"
 		printf 'tool\tzfs\t0\t%s\n' "/remote/bin/zfs"
 		printf 'tool\tparallel\t1\t-\n'
@@ -3861,7 +4540,7 @@ malformed_remote_capability_response_falls_back_to_direct_probe_test() {
 	write_mock_ssh_script "$mock_path/ssh"
 
 	{
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
 		printf 'os\t%s\n' "MockRemoteOS"
 		printf 'tool\tzfs\t0\t%s\n' "/remote/bin/zfs"
 		printf 'tool\tparallel\t1\t-\n'
@@ -3920,7 +4599,7 @@ malformed_target_capability_response_falls_back_to_direct_probe_test() {
 	write_mock_ssh_script "$mock_path/ssh"
 
 	{
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V1"
+		printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
 		printf 'os\t%s\n' "MockRemoteOS"
 		printf 'tool\tzfs\t0\t%s\n' "/remote/bin/zfs"
 		printf 'tool\tparallel\t1\t-\n'
@@ -3972,13 +4651,16 @@ trap_exit_cleanup_test() {
 	fi
 
 	mock_path="$WORKDIR/mock_trap_exit"
+	send_marker="$WORKDIR/mock_trap_exit_send_started"
 	prepare_mock_bin_dir "$mock_path" ssh zfs
 	write_mock_ssh_script "$mock_path/ssh"
 	real_zfs=$(resolve_host_command zfs)
+	safe_rm_f "$send_marker"
 	safe_rm_f "$mock_path/zfs"
 	cat >"$mock_path/zfs" <<EOF
 #!/bin/sh
 if [ "\$1" = "send" ]; then
+	: >"$send_marker"
 	sleep 5
 fi
 exec "$real_zfs" "\$@"
@@ -4002,7 +4684,22 @@ EOF
 	set +e
 	ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -T localhost -R "$src_dataset" "$dest_root" >/dev/null 2>&1 &
 	zxfer_pid=$!
-	sleep 2
+	send_started=0
+	i=0
+	while [ "$i" -lt 10 ]; do
+		if [ -f "$send_marker" ]; then
+			send_started=1
+			break
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	if [ "$send_started" -ne 1 ]; then
+		kill -s TERM "$zxfer_pid" >/dev/null 2>&1 || true
+		wait "$zxfer_pid" >/dev/null 2>&1 || true
+		set -e
+		fail "Trap exit cleanup test never observed the mocked zfs send start marker."
+	fi
 	kill -s INT "$zxfer_pid" >/dev/null 2>&1 || true
 	wait "$zxfer_pid"
 	set -e
@@ -4035,6 +4732,8 @@ EOF
 	if pgrep -f "zfs send .*trap_src" >/dev/null 2>&1; then
 		fail "Background zfs send still running after zxfer_trap_exit handling."
 	fi
+
+	safe_rm_f "$send_marker"
 
 	log "Trap exit cleanup test passed"
 }
@@ -4163,11 +4862,107 @@ property_override_and_ignore_test() {
 	log "Property override/ignore test passed"
 }
 
+escaped_comma_override_test() {
+	log "Starting escaped comma override test"
+
+	src_dataset="$SRC_POOL/escaped_override_src"
+	dest_root="$DEST_POOL/escaped_override_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+
+	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	zfs set user:note=source "$src_dataset"
+	append_data_to_dataset "$src_dataset" "file.txt" "escaped override"
+	zfs snap -r "$src_dataset@eco1"
+
+	run_zxfer -v -R "$src_dataset" "$dest_root"
+	run_zxfer -v -P -o 'user:note=value\,with\,commas=and;semi' -R "$src_dataset" "$dest_root"
+
+	dest_note=$(zfs get -H -o value user:note "$dest_dataset")
+	if [ "$dest_note" != "value,with,commas=and;semi" ]; then
+		fail "Escaped-comma override expected 'value,with,commas=and;semi' on $dest_dataset, got '$dest_note'."
+	fi
+
+	log "Escaped comma override test passed"
+}
+
+managed_ssh_policy_test() {
+	log "Starting managed ssh policy test"
+
+	mock_path="$WORKDIR/mock_managed_ssh"
+	prepare_mock_bin_dir "$mock_path" ssh
+	write_mock_ssh_script "$mock_path/ssh"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	ssh_log="$WORKDIR/mock_managed_ssh.log"
+	ssh_argv_log="$WORKDIR/mock_managed_ssh.argv.log"
+	known_hosts="$WORKDIR/mock_managed_ssh_known_hosts"
+
+	src_dataset="$SRC_POOL/managed_ssh_src"
+	dest_root_managed="$DEST_POOL/managed_ssh_dest"
+	dest_root_ambient="$DEST_POOL/managed_ssh_ambient_dest"
+	dest_dataset_managed="$dest_root_managed/${src_dataset##*/}"
+	dest_dataset_ambient="$dest_root_ambient/${src_dataset##*/}"
+
+	safe_rm_f "$ssh_log" "$ssh_argv_log" "$known_hosts"
+	: >"$known_hosts"
+	destroy_test_datasets_if_present "$dest_root_managed" "$dest_root_ambient" "$src_dataset"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root_managed"
+	zfs create "$dest_root_ambient"
+	append_data_to_dataset "$src_dataset" "file.txt" "managed ssh"
+	zfs snap -r "$src_dataset@msp1"
+
+	ZXFER_SECURE_PATH="$secure_path" \
+		MOCK_SSH_LOG="$ssh_log" \
+		MOCK_SSH_ARGV_LOG="$ssh_argv_log" \
+		ZXFER_SSH_USER_KNOWN_HOSTS_FILE="$known_hosts" \
+		run_zxfer -v -T localhost -R "$src_dataset" "$dest_root_managed"
+
+	assert_snapshot_exists "$dest_dataset_managed" "msp1"
+	if ! grep -q "^argv:BatchMode=yes$" "$ssh_argv_log"; then
+		fail "Managed ssh runs should pass BatchMode=yes. Log: $(cat "$ssh_argv_log")"
+	fi
+	if ! grep -q "^argv:StrictHostKeyChecking=yes$" "$ssh_argv_log"; then
+		fail "Managed ssh runs should pass StrictHostKeyChecking=yes. Log: $(cat "$ssh_argv_log")"
+	fi
+	if ! grep -q "^argv:UserKnownHostsFile=$known_hosts$" "$ssh_argv_log"; then
+		fail "Managed ssh runs should pass the explicit known-hosts file. Log: $(cat "$ssh_argv_log")"
+	fi
+
+	safe_rm_f "$ssh_argv_log"
+
+	ZXFER_SECURE_PATH="$secure_path" \
+		MOCK_SSH_LOG="$ssh_log" \
+		MOCK_SSH_ARGV_LOG="$ssh_argv_log" \
+		ZXFER_SSH_USE_AMBIENT_CONFIG=1 \
+		ZXFER_SSH_USER_KNOWN_HOSTS_FILE="$known_hosts" \
+		run_zxfer -v -T localhost -R "$src_dataset" "$dest_root_ambient"
+
+	assert_snapshot_exists "$dest_dataset_ambient" "msp1"
+	if grep -q "^argv:BatchMode=yes$" "$ssh_argv_log"; then
+		fail "Ambient-config opt-out should suppress BatchMode=yes. Log: $(cat "$ssh_argv_log")"
+	fi
+	if grep -q "^argv:StrictHostKeyChecking=yes$" "$ssh_argv_log"; then
+		fail "Ambient-config opt-out should suppress StrictHostKeyChecking=yes. Log: $(cat "$ssh_argv_log")"
+	fi
+	if grep -q "^argv:UserKnownHostsFile=$known_hosts$" "$ssh_argv_log"; then
+		fail "Ambient-config opt-out should suppress the managed UserKnownHostsFile override. Log: $(cat "$ssh_argv_log")"
+	fi
+
+	log "Managed ssh policy test passed"
+}
+
 unsupported_property_skip_test() {
 	log "Starting unsupported property skip test"
 
 	mock_path="$WORKDIR/mock_unsupported_props"
 	mock_log="$WORKDIR/mock_unsupported_props.log"
+	src_dataset="$SRC_POOL/unsupported_src"
+	dest_root="$DEST_POOL/unsupported_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
 	prepare_mock_bin_dir "$mock_path" zfs
 	real_zfs=$(resolve_host_command zfs)
 	safe_rm_f "$mock_path/zfs"
@@ -4175,18 +4970,18 @@ unsupported_property_skip_test() {
 	cat >"$mock_path/zfs" <<EOF
 #!/bin/sh
 [ -n "\${MOCK_UNSUPPORTED_LOG:-}" ] && printf '%s\n' "\$*" >>"\$MOCK_UNSUPPORTED_LOG"
-if [ "\$1" = "get" ] && [ "\$2" = "-Ho" ] && [ "\$3" = "property" ] && [ "\$4" = "all" ] && [ "\$5" = "$DEST_POOL" ]; then
-	"$real_zfs" "\$@" | grep -v '^compression$'
-	exit \$?
+if [ "\$1" = "get" ] && [ "\$2" = "-Hpo" ] && [ "\$3" = "property,value,source" ] && [ "\$4" = "compression" ]; then
+	case "\$5" in
+	"$DEST_POOL" | "$dest_root")
+		printf '%s\n' "cannot get property: invalid property 'compression'" >&2
+		exit 1
+		;;
+	esac
 fi
 exec "$real_zfs" "\$@"
 EOF
 	chmod +x "$mock_path/zfs"
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-
-	src_dataset="$SRC_POOL/unsupported_src"
-	dest_root="$DEST_POOL/unsupported_dest"
-	dest_dataset="$dest_root/${src_dataset##*/}"
 
 	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
 
@@ -4450,14 +5245,14 @@ verbose_debug_logging_test() {
 	if [ "$status" -ne 0 ]; then
 		fail "Verbose/debug dry run should succeed. See $stdout_log and $stderr_log."
 	fi
-	if ! grep -q "New temporary file" "$stderr_log"; then
-		fail "zxfer_echoV debug output missing from stderr."
+	if ! grep -q "Dry run: skipping live replication-state validation and command planning." "$stderr_log"; then
+		fail "zxfer_echoV dry-run debug output missing from stderr."
 	fi
-	if grep -q "New temporary file" "$stdout_log"; then
-		fail "zxfer_echoV debug output should not appear on stdout."
+	if grep -q "Dry run: skipping live replication-state validation and command planning." "$stdout_log"; then
+		fail "zxfer_echoV dry-run debug output should not appear on stdout."
 	fi
-	if ! grep -q "Destination dataset does not exist" "$stdout_log"; then
-		fail "Verbose output missing expected dataset message on stdout."
+	if ! grep -q "Checking source snapshot." "$stderr_log"; then
+		fail "Verbose output missing expected stderr status message."
 	fi
 	if zfs list "$dest_dataset" >/dev/null 2>&1; then
 		fail "Dry run should not create destination dataset $dest_dataset."
@@ -4512,7 +5307,15 @@ main() {
 	trap 'abort_integration_run TERM 143' TERM
 	setup_command_confirmation_wrappers
 
-	usage_error_tests
+	if run_test_body usage_error_tests; then
+		cleanup_test_output_captures
+	else
+		l_status=$?
+		log_summary "$(printf '%sPRECHECK FAIL%s usage_error_tests (exit %s)' "$RED" "$RESET" "$l_status")"
+		replay_test_output_captures "usage_error_tests"
+		cleanup_test_output_captures
+		exit "$l_status"
+	fi
 	SRC_POOL=$(generate_test_pool_name "src")
 	DEST_POOL=$(generate_test_pool_name "dest")
 	SRC_MOUNT_ROOT="$WORKDIR/mnt/src"
@@ -4533,6 +5336,9 @@ main() {
 
 	TEST_SEQUENCE="usage_error_tests \
 usage_error_failure_report_test \
+usage_error_failure_report_redaction_test \
+usage_error_failure_report_control_character_escaping_test \
+usage_error_failure_report_trailing_newline_preservation_test \
 basic_replication_test \
 non_recursive_replication_test \
 generate_tests_replication \
@@ -4544,10 +5350,12 @@ exclude_filter_test \
 missing_destination_error_test \
 invalid_override_property_test \
 dry_run_replication_test \
+remote_dry_run_noexec_progress_test \
 yield_loop_dryrun_iteration_test \
 force_rollback_test \
 failure_handling_tests \
 runtime_failure_report_test \
+runtime_failure_report_redaction_test \
 extended_usage_error_tests \
 consistency_option_validation_tests \
 snapshot_deletion_test \
@@ -4556,13 +5364,16 @@ snapshot_name_prefix_collision_deletion_test \
 send_command_dryrun_test \
 raw_send_replication_test \
 backup_dir_symlink_guard_test \
+relative_backup_dir_rejection_test \
 missing_backup_metadata_error_test \
 grandfather_protection_test \
 migration_unmounted_guard_test \
 property_backup_restore_test \
+chained_property_backup_provenance_test \
 remote_property_backup_restore_test \
 property_creation_with_zvol_test \
 	property_override_and_ignore_test \
+	escaped_comma_override_test \
 	unsupported_property_skip_test \
 	must_create_property_error_test \
 	delete_dest_only_snapshot_test \
@@ -4594,18 +5405,22 @@ property_creation_with_zvol_test \
 	malformed_remote_capability_response_fails_closed_test \
 	malformed_remote_capability_response_falls_back_to_direct_probe_test \
 	malformed_target_capability_response_falls_back_to_direct_probe_test \
-trap_exit_cleanup_test \
-missing_parallel_error_test \
-remote_missing_parallel_origin_test \
-parallel_jobs_listing_test \
-migration_service_success_test \
-migration_service_failure_test \
+	trap_exit_cleanup_test \
+	missing_parallel_error_test \
+	remote_missing_parallel_origin_test \
+	remote_non_gnu_parallel_origin_test \
+	managed_ssh_policy_test \
+	parallel_jobs_listing_test \
+	migration_service_success_test \
+	migration_service_failure_test \
 	get_os_detection_test \
 	verbose_debug_logging_test \
 	legacy_backup_layout_rejected_test \
+	unsupported_backup_format_version_rejected_test \
 	remote_legacy_backup_layout_rejected_test \
 	insecure_backup_metadata_guard_test \
 	beep_handling_test"
+	TEST_SEQUENCE=$(build_requested_test_sequence)
 	# shellcheck disable=SC2086
 	set -- $TEST_SEQUENCE
 	TOTAL_TESTS=$#
@@ -4617,11 +5432,13 @@ migration_service_failure_test \
 	done
 
 	if [ -n "${ZXFER_FAILED_TESTS:-}" ]; then
-		log "Integration failures: $ZXFER_FAILED_TESTS"
+		log_summary "Integration failures: $ZXFER_FAILED_TESTS"
 		exit 1
 	fi
 
-	log "All integration tests passed."
+	log_summary "All integration tests passed."
 }
 
-main "$@"
+if [ "${ZXFER_RUN_INTEGRATION_SOURCE_ONLY:-0}" != "1" ]; then
+	main "$@"
+fi

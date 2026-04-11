@@ -62,15 +62,28 @@ Push to a remote destination:
 ./zxfer -V -R tank/data backup/data
 ```
 
+This end-of-run profile now includes stage timings plus contention and reuse
+counters for ssh control-socket waits, remote-capability cache waits,
+capability-bootstrap sources (`live`, `cache`, `memory`), and any remaining
+direct remote helper probes. While the run is active, `-V` also prints
+prefixed remote ssh commands, remote probe commands, and ssh control-socket
+check/open commands so a slow remote bootstrap shows the exact in-flight
+command.
+
 ### `-n` Dry-run preview
 
 ```sh
 ./zxfer -n -v -R tank/data backup/data
 ```
 
-Use this to preview rendered commands and preflight checks. Current dry runs may
-still probe local or remote snapshots, helper paths, and `%%size%%` progress
-estimates.
+Use this to preview rendered commands and preflight checks. Dry runs now stay
+strictly no-exec: they skip live helper resolution, snapshot discovery,
+backup-restore validation, unsupported-property detection, and `%%size%%`
+progress probes. Because strict dry-run no longer inspects live snapshot
+state, it does not render the eventual send/receive or property-reconcile
+commands. With `-k`, dry-run still previews secure backup-directory
+preparation plus the staged metadata-write commands, including chained
+provenance alias writes, without touching the live backup store.
 
 ### `-R` Recursive replication
 
@@ -105,6 +118,14 @@ Replicates only `tank/apps/api`.
 ```sh
 ./zxfer -v -j 4 -R tank/projects backup/projects
 ```
+
+`-j` still controls the send/receive job ceiling, and on origin-side runs it
+also enables adaptive source snapshot discovery that can use GNU `parallel`
+when the validated helper is available. Local origin runs fall back to the
+serial discovery path when the helper is missing or is not GNU `parallel`.
+Remote origin runs still fall back for the explicit missing-helper case, but
+other remote helper probe or execution failures abort the run instead of being
+silently treated as a serial fallback.
 
 ### `-x pattern` Exclude datasets from a recursive run
 
@@ -154,6 +175,13 @@ the most recent snapshot that matches the stream.
 ./zxfer -v -o 'compression=lz4,atime=off' -R tank/data backup/data
 ```
 
+Quote the full `-o` argument when one value needs a literal comma, and escape
+that comma as `\,`:
+
+```sh
+./zxfer -v -o 'user:note=value\,with\,commas' -N tank/data/app backup/data/app
+```
+
 ### `-I properties,to,ignore` Skip selected properties
 
 ```sh
@@ -177,7 +205,10 @@ ZXFER_BACKUP_DIR=/var/db/zxfer \
 ```
 
 `-k` also enables property transfer so the destination still receives the live
-source property set after the backup metadata is captured.
+source property set after the backup metadata is captured. `ZXFER_BACKUP_DIR`
+must be an absolute path. Current-format backup files write the
+`#format_version`, `#source_root`, and `#destination_root` header markers
+before the exact source/destination property rows.
 
 ### `-e` Restore properties from a prior `-k` backup
 
@@ -190,7 +221,8 @@ This looks up the exact keyed backup metadata file beneath the current
 source-dataset-relative tree under `ZXFER_BACKUP_DIR`.
 `-e` also flows through the property-transfer path during the restore.
 Older mountpoint-local `.zxfer_backup_info.*` files and other legacy metadata
-layouts are intentionally unsupported.
+layouts are intentionally unsupported. `ZXFER_BACKUP_DIR` must be an absolute
+path.
 
 ## Remote Replication And Stream Options
 
@@ -218,7 +250,9 @@ Solaris or illumos wrapper-style host specs are supported:
 ./zxfer -v -z -T backup-dst@example.com -R tank/data backup/data
 ```
 
-`-z` requires either `-O` or `-T`.
+`-z` requires either `-O` or `-T`. On remote-origin runs that also use
+adaptive `-j` source discovery, the same validated compression/decompression
+pipeline is reused for the source snapshot-list metadata stream.
 
 ### `-Z command` Use a custom compression command
 

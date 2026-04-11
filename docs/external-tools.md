@@ -42,9 +42,9 @@ These tools are only required when the corresponding feature is used.
 
 | Tool | Used by | When required | Packaging guidance |
 | --- | --- | --- | --- |
-| `cat` | property backup restore | `-e` restore mode; remote `cat` is resolved per origin host | base system; do not add a separate FreeBSD package dependency |
-| GNU `parallel` | adaptive source snapshot discovery | when `-j` requests the parallel discovery path; required on the local origin or remote origin host | consider a package dependency only if the port should guarantee `-j` support out of the box |
-| `zstd` | compressed send/receive streams | `-z` or default/custom `-Z` compression paths | consider a package dependency only if the port should guarantee compression support out of the box |
+| `cat` | property backup restore and remote backup metadata writes | `-e` restore mode on the origin side, plus `-k` when backup metadata is written through a remote target helper; remote `cat` is resolved per host role | base system; do not add a separate FreeBSD package dependency |
+| GNU `parallel` | faster adaptive source snapshot discovery | optional accelerator for the `-j` parallel discovery path on the local origin or remote origin host; local origin runs fall back to serial discovery when it is missing or not GNU-compatible, and remote origin runs fall back only for the explicit missing-helper case while other remote helper failures abort | consider a package dependency only if the port should guarantee the faster discovery path out of the box |
+| `zstd` | compressed send/receive streams and remote snapshot-discovery metadata compression | `-z` or default/custom `-Z` compression paths, including remote `-O ... -j ...` metadata discovery when ssh compression is active | consider a package dependency only if the port should guarantee compression support out of the box |
 | `svcadm` | migration/service handling | `-c` and `-m` on illumos/Solaris-family systems | not a FreeBSD package dependency |
 | `kldstat`, `kldload`, `/dev/speaker` | audible status beeps | FreeBSD-only `-b` / `-B` path | base system and device availability; not a package dependency |
 
@@ -97,7 +97,7 @@ Current runtime inventory:
 On FreeBSD, these are expected from base and usually do not belong in
 `RUN_DEPENDS`.
 
-## Integration Harness Dependencies
+## Direct Integration Harness Dependencies
 
 These tools are used by [run_integration_zxfer.sh](../tests/run_integration_zxfer.sh),
 not by the installed `zxfer` command.
@@ -117,6 +117,27 @@ Important packaging note:
 - `zpool` is a test-harness dependency, not an installed-command runtime
   dependency.
 
+## VM Matrix Host Dependencies
+
+These tools are used by [run_vm_matrix.sh](../tests/run_vm_matrix.sh) on the
+host that orchestrates disposable guests:
+
+| Tool | Why it is needed |
+| --- | --- |
+| `qemu-system-x86_64` | boot x86_64 guests for the local `qemu` backend |
+| `qemu-system-aarch64` | boot preferred arm64 guests on Apple Silicon and other arm64 hosts |
+| `edk2-aarch64-code.fd` or equivalent QEMU UEFI firmware | boot arm64 cloud images under the local `qemu` backend |
+| `qemu-img` | create writable overlays above cached base images |
+| `curl` | download guest images and checksum manifests |
+| `python3` | serve NoCloud metadata and allocate local ephemeral TCP ports |
+| `ssh`, `ssh-keygen`, `ssh-keyscan` | provision guests, copy the checkout, and collect artifacts |
+| `tar` | transfer the current checkout into guests and stream guest artifacts back out |
+| `xz` | decompress the pinned FreeBSD cloud image |
+| `zstd` | future-proof `.zst` guest image support when a selected guest ships one |
+
+These are local QA or CI-orchestration dependencies, not installed-command
+runtime dependencies of `zxfer`.
+
 ## Unit, Coverage, And Lint Tooling
 
 These tools are used for development, CI, or local QA.
@@ -127,6 +148,10 @@ These tools are used for development, CI, or local QA.
 - `/bin/sh` is sufficient for the normal shunit2 runner
 - alternate shells such as `dash`, `bash --posix`, `busybox ash`, and
   `/usr/xpg4/bin/sh` are CI/test-matrix tools, not runtime dependencies
+- OmniOS shunit2 guest runs through `tests/run_vm_matrix.sh --test-layer shunit2`
+  install `bash` in the guest and export a `bash --posix` wrapper via
+  `ZXFER_TEST_SHELL`, because `/usr/xpg4/bin/sh` does not honor the mock-heavy
+  subshell helper overrides the same way
 
 ### Coverage Tooling
 
@@ -176,7 +201,7 @@ VS Code container use. That image is based on Ubuntu 24.04 and preinstalls:
 This is a contributor convenience environment for lint, unit, and local
 coverage work. It is not an installed-command runtime dependency and does not
 provide a live ZFS kernel stack, so it still does not replace a real
-ZFS-capable host or VM for the manual integration harness.
+ZFS-capable host or VM for the direct integration harness or the VM matrix.
 
 ## Packaging Guidance For FreeBSD Ports
 

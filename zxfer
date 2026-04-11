@@ -85,34 +85,84 @@ zxfer_prescan_help_flag() {
 }
 
 zxfer_escape_report_value_early() {
-	printf '%s' "$1" | awk '
+	# Keep raw ASCII control bytes inert in failure-report fields so startup
+	# invocation capture cannot inject terminal control sequences or lose
+	# trailing newline markers in shell command substitution.
+	l_report_value=$1
+	l_trailing_newlines=0
+	l_scan_value=$l_report_value
+	while :; do
+		case $l_scan_value in
+		*'
+')
+			l_trailing_newlines=$((l_trailing_newlines + 1))
+			l_scan_value=${l_scan_value%?}
+			;;
+		*)
+			break
+			;;
+		esac
+	done
+
+	# shellcheck disable=SC2016
+	printf '%s' "$l_report_value" | LC_ALL=C awk '
 BEGIN {
 	ORS = ""
+	for (i = 1; i < 32; i++) {
+		ctrl[sprintf("%c", i)] = sprintf("\\x%02X", i)
+	}
+	ctrl[sprintf("%c", 9)] = "\\t"
+	ctrl[sprintf("%c", 13)] = "\\r"
+	ctrl[sprintf("%c", 127)] = "\\x7F"
 }
 {
 	if (NR > 1) {
 		printf "\\n"
 	}
 	line = $0
-	gsub(/\\/, "\\\\", line)
-	gsub(/\t/, "\\t", line)
-	gsub(/\r/, "\\r", line)
-	printf "%s", line
+	for (i = 1; i <= length(line); i++) {
+		c = substr(line, i, 1)
+		if (c == "\\") {
+			printf "\\\\"
+		} else if (c in ctrl) {
+			printf "%s", ctrl[c]
+		} else {
+			printf "%s", c
+		}
+	}
 }
 '
+	while [ "$l_trailing_newlines" -gt 0 ]; do
+		printf '\\n'
+		l_trailing_newlines=$((l_trailing_newlines - 1))
+	done
 }
 
-zxfer_quote_token_for_report_early() {
+zxfer_quote_token_for_failure_context_early() {
 	l_value_escaped=$(zxfer_escape_report_value_early "$1")
 	l_value_safe=$(printf '%s' "$l_value_escaped" | sed "s/'/'\"'\"'/g")
 	printf "'%s'" "$l_value_safe"
 }
 
-g_zxfer_original_invocation=$(zxfer_quote_token_for_report_early "$0")
-for l_zxfer_arg in "$@"; do
-	l_zxfer_quoted_arg=$(zxfer_quote_token_for_report_early "$l_zxfer_arg")
-	g_zxfer_original_invocation="$g_zxfer_original_invocation $l_zxfer_quoted_arg"
-done
+zxfer_failure_report_redacts_commands_early() {
+	case "${ZXFER_REDACT_FAILURE_REPORT_COMMANDS:-}" in
+	1 | [Yy][Ee][Ss] | [Tt][Rr][Uu][Ee] | [Oo][Nn])
+		return 0
+		;;
+	esac
+
+	return 1
+}
+
+if zxfer_failure_report_redacts_commands_early; then
+	g_zxfer_original_invocation="[redacted]"
+else
+	g_zxfer_original_invocation=$(zxfer_quote_token_for_failure_context_early "$0")
+	for l_zxfer_arg in "$@"; do
+		l_zxfer_quoted_arg=$(zxfer_quote_token_for_failure_context_early "$l_zxfer_arg")
+		g_zxfer_original_invocation="$g_zxfer_original_invocation $l_zxfer_quoted_arg"
+	done
+fi
 g_zxfer_failure_stage=startup
 
 ###############################################################################
@@ -150,7 +200,8 @@ zxfer_init_variables
 zxfer_set_failure_stage "replication"
 zxfer_run_zfs_mode_loop
 
-# writes property backup info to file
+# Final backup-metadata preview / safety flush. Live -k runs already persist
+# after each successful per-dataset replication step.
 if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
 	zxfer_write_backup_properties
 fi

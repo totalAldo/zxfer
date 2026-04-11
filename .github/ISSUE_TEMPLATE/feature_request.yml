@@ -1,0 +1,76 @@
+name: Feature request
+description: Propose a new zxfer capability or workflow change with safety, compatibility, and operator impact spelled out.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        zxfer changes can affect replication semantics, operator-visible output, and production storage safety. Please describe the operator problem first and call out any compatibility or safety impact directly.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What operator need, limitation, or pain point is driving this request?
+      placeholder: Recursive replication needs a safer way to ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_change
+    attributes:
+      label: Proposed change
+      description: Describe the behavior, flag, workflow, or documentation update you want.
+    validations:
+      required: true
+  - type: checkboxes
+    id: impact_area
+    attributes:
+      label: Impact area
+      description: Check every area this request could affect.
+      options:
+        - label: Replication planning or ordering
+        - label: Snapshot deletion or retention
+        - label: Remote execution, ssh, or helper lookup
+        - label: Output, help text, exit codes, or structured failure reports
+        - label: Packaging, CI, or contributor workflow
+        - label: Documentation only
+  - type: dropdown
+    id: affected_platforms
+    attributes:
+      label: Affected platforms
+      multiple: true
+      options:
+        - FreeBSD
+        - Linux/OpenZFS
+        - illumos/Solaris
+        - OpenZFS on macOS
+        - Not platform-specific
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and operator impact
+      description: Explain any expected flag, output, workflow, or replication-semantics changes.
+      placeholder: Existing flags would remain unchanged; new behavior would be opt-in under ...
+    validations:
+      required: true
+  - type: textarea
+    id: safety_security
+    attributes:
+      label: Safety and security considerations
+      description: Call out any pool-risk, rollback, dataset-deletion, credential, or trust-boundary concerns.
+      placeholder: This should fail closed when the destination state is uncertain and must not expand remote shell injection surfaces.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds, rejected designs, or related prior art.
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Include example commands, links to docs, or notes about tests and docs that would need to change.

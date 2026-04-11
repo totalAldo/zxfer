@@ -41,15 +41,62 @@
 # mutates caches: none; updates current delete/rollback state for replication.
 # returns via stdout: last-common snapshot values, delete lists, and filtered snapshot identities.
 
+# Purpose: Reset the snapshot reconcile state so the next snapshot-reconcile
+# pass starts from a clean state.
+# Usage: Called during last-common-snapshot selection and delete planning
+# before this module reuses mutable scratch globals or cached decisions.
 zxfer_reset_snapshot_reconcile_state() {
 	g_last_common_snap=""
 	g_dest_has_snapshots=0
 	g_did_delete_dest_snapshots=0
 	g_deleted_dest_newer_snapshots=0
 	g_src_snapshot_transfer_list=""
+	g_zxfer_snapshot_record_capture_result=""
 	zxfer_reset_destination_snapshot_creation_cache
 }
 
+# Purpose: Capture the snapshot records for dataset into staged state or module
+# globals for later use.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# later helpers need a checked snapshot of command output or computed state.
+zxfer_capture_snapshot_records_for_dataset() {
+	l_side=$1
+	l_dataset=$2
+
+	g_zxfer_snapshot_record_capture_result=""
+	if ! zxfer_create_runtime_artifact_file "zxfer-snapshot-records" >/dev/null; then
+		return 1
+	fi
+	l_capture_file=$g_zxfer_runtime_artifact_path_result
+	if zxfer_get_snapshot_records_for_dataset "$l_side" "$l_dataset" >"$l_capture_file"; then
+		:
+	else
+		l_capture_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
+		return "$l_capture_status"
+	fi
+	if ! zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null; then
+		l_capture_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
+		return "$l_capture_status"
+	fi
+	zxfer_cleanup_runtime_artifact_path "$l_capture_file"
+
+	g_zxfer_snapshot_record_capture_result=$g_zxfer_runtime_artifact_read_result
+	case "$g_zxfer_snapshot_record_capture_result" in
+	*'
+')
+		g_zxfer_snapshot_record_capture_result=${g_zxfer_snapshot_record_capture_result%?}
+		;;
+	esac
+
+	return 0
+}
+
+# Purpose: Write the snapshot identities to file in the normalized form later
+# zxfer steps expect.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# the module needs a stable staged file or emitted stream for downstream use.
 #
 # Returns a list of destination snapshots that don't exist in the source.
 # The source and destination snapshots should correspond to 1 dataset.
@@ -57,10 +104,16 @@ zxfer_reset_snapshot_reconcile_state() {
 # g_delete_source_tmp_file
 # g_delete_dest_tmp_file
 # g_delete_snapshots_to_delete_tmp_file
-#
 zxfer_write_snapshot_identities_to_file() {
 	l_snapshot_records=$1
 	l_output_file=$2
+
+	if zxfer_read_normalized_snapshot_record_list "$l_snapshot_records" >/dev/null; then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
 
 	{
 		while IFS= read -r l_snapshot_record; do
@@ -68,54 +121,100 @@ zxfer_write_snapshot_identities_to_file() {
 			l_snapshot_identity=$(zxfer_extract_snapshot_identity "$l_snapshot_record")
 			[ -n "$l_snapshot_identity" ] || continue
 			printf '%s\n' "$l_snapshot_identity"
-		done <<-EOF
-			$(zxfer_normalize_snapshot_record_list "$l_snapshot_records")
-		EOF
+		done <<EOF
+$g_zxfer_runtime_artifact_read_result
+EOF
 	} | LC_ALL=C sort -u >"$l_output_file"
 }
 
+# Purpose: Write the destination snapshot paths for identity file in the
+# normalized form later zxfer steps expect.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# the module needs a stable staged file or emitted stream for downstream use.
 zxfer_write_destination_snapshot_paths_for_identity_file() {
 	l_snapshot_records=$1
 	l_identity_file=$2
 
+	if zxfer_read_normalized_snapshot_record_list "$l_snapshot_records" >/dev/null; then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
+
 	# shellcheck disable=SC2016
 	"${g_cmd_awk:-awk}" 'NR == FNR { if ($0 != "") delete_identities[$0] = 1; next }
 	$0 != "" { record = $0; tab_pos = index(record, "\t"); snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record); snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : ""); at_pos = index(snapshot_path, "@"); if (at_pos > 0) { snapshot_identity = substr(snapshot_path, at_pos + 1); if (snapshot_guid != "") snapshot_identity = snapshot_identity "\t" snapshot_guid; if (snapshot_identity in delete_identities) print snapshot_path } }' "$l_identity_file" - <<-EOF
-		$(zxfer_normalize_snapshot_record_list "$l_snapshot_records")
+		$g_zxfer_runtime_artifact_read_result
 	EOF
 }
 
+# Purpose: Return the dest snapshots to delete per dataset in the form expected
+# by later helpers.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# sibling helpers need the same lookup without duplicating module logic.
 zxfer_get_dest_snapshots_to_delete_per_dataset() {
 	zxfer_echoV "Begin zxfer_get_dest_snapshots_to_delete_per_dataset()"
 	l_zfs_source_snaps=$1
 	l_zfs_dest_snaps=$2
+	l_source_identity_status=0
+	l_dest_identity_status=0
+	l_snapshot_diff_status=0
+	l_snapshot_path_status=0
+
+	if zxfer_ensure_snapshot_delete_temp_artifacts; then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
 
 	# Write snapshot identity keys (name + guid) to the temporary files so that
 	# `comm` can distinguish same-named but unrelated snapshots.
 	# run the first process in the background
 	zxfer_write_snapshot_identities_to_file "$l_zfs_source_snaps" "$g_delete_source_tmp_file" &
-	PID=$!
-	zxfer_register_cleanup_pid "$PID"
+	l_source_identity_pid=$!
+	zxfer_register_cleanup_pid "$l_source_identity_pid"
 
 	zxfer_write_snapshot_identities_to_file "$l_zfs_dest_snaps" "$g_delete_dest_tmp_file"
+	l_dest_identity_status=$?
 
 	# wait for the background process to finish
-	wait $PID
-	zxfer_unregister_cleanup_pid "$PID"
+	wait "$l_source_identity_pid" 2>/dev/null
+	l_source_identity_status=$?
+	zxfer_unregister_cleanup_pid "$l_source_identity_pid"
+
+	if [ "$l_dest_identity_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to generate destination snapshot identities for delete planning."
+	fi
+	if [ "$l_source_identity_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to generate source snapshot identities for delete planning."
+	fi
 
 	# Use comm to find snapshots in g_delete_dest_tmp_file that don't have a match in g_delete_source_tmp_file
 	LC_ALL=C comm -13 "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" >"$g_delete_snapshots_to_delete_tmp_file"
+	l_snapshot_diff_status=$?
+	if [ "$l_snapshot_diff_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to diff source and destination snapshot identities for delete planning."
+	fi
 
 	l_dest_snaps_to_delete=$(zxfer_write_destination_snapshot_paths_for_identity_file "$l_zfs_dest_snaps" "$g_delete_snapshots_to_delete_tmp_file")
+	l_snapshot_path_status=$?
+	if [ "$l_snapshot_path_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to map destination snapshot identities back to snapshot paths for delete planning."
+	fi
 
 	# Print the matching lines
 	printf '%s\n' "$l_dest_snaps_to_delete"
 }
 
+# Purpose: Return the last common snapshot in the form expected by later
+# helpers.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# sibling helpers need the same lookup without duplicating module logic.
 #
 # find the most recent common snapshot. The source list is in descending order
 # by creation date. The destination list is unordered.
-#
 zxfer_get_last_common_snapshot() {
 	zxfer_echoV "Begin zxfer_get_last_common_snapshot()"
 
@@ -123,19 +222,15 @@ zxfer_get_last_common_snapshot() {
 	l_zfs_source_snaps=$1
 	# unordered list of destination datasets and snapshots
 	l_zfs_dest_snaps=$2
+	l_dest_identity_file=""
+	l_source_snapshot_file=""
 
 	# Build a destination identity set and then scan the source list once in its
 	# existing newest-first order so we still choose the most recent common
 	# snapshot without repeated shell-string scans.
-	l_section_break="@@ZXFER_SET_BREAK@@"
 	l_common_snapshot_awk=$(
 		cat <<'EOF'
-BEGIN { in_source = 0 }
-$0 == section_break {
-	in_source = 1
-	next
-}
-!in_source {
+NR == FNR {
 	if ($0 != "")
 		dest_identities[$0] = 1
 	next
@@ -158,20 +253,62 @@ $0 != "" {
 }
 EOF
 	)
-	l_last_common_snap=$(
-		{
-			while IFS= read -r l_dest_snap; do
-				[ -n "$l_dest_snap" ] || continue
-				l_dest_identity=$(zxfer_extract_snapshot_identity "$l_dest_snap")
-				[ -n "$l_dest_identity" ] || continue
-				printf '%s\n' "$l_dest_identity"
-			done <<-EOF
-				$(zxfer_normalize_snapshot_record_list "$l_zfs_dest_snaps")
-			EOF
-			printf '%s\n' "$l_section_break"
-			zxfer_normalize_snapshot_record_list "$l_zfs_source_snaps"
-		} | "${g_cmd_awk:-awk}" -v section_break="$l_section_break" "$l_common_snapshot_awk"
-	)
+	if zxfer_read_normalized_snapshot_record_list "$l_zfs_dest_snaps" >/dev/null; then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
+	l_normalized_dest_snaps=$g_zxfer_runtime_artifact_read_result
+
+	if zxfer_get_temp_file >/dev/null; then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
+	l_dest_identity_file=$g_zxfer_temp_file_result
+	if zxfer_get_temp_file >/dev/null; then
+		:
+	else
+		l_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_dest_identity_file"
+		return "$l_status"
+	fi
+	l_source_snapshot_file=$g_zxfer_temp_file_result
+
+	if zxfer_write_snapshot_identities_to_file "$l_normalized_dest_snaps" "$l_dest_identity_file"; then
+		:
+	else
+		l_status=$?
+		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
+		return "$l_status"
+	fi
+	if zxfer_read_normalized_snapshot_record_list "$l_zfs_source_snaps" >/dev/null; then
+		:
+	else
+		l_status=$?
+		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
+		return "$l_status"
+	fi
+	if zxfer_write_runtime_artifact_file \
+		"$l_source_snapshot_file" "$g_zxfer_runtime_artifact_read_result"; then
+		:
+	else
+		l_status=$?
+		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
+		return "$l_status"
+	fi
+
+	if l_last_common_snap=$("${g_cmd_awk:-awk}" "$l_common_snapshot_awk" \
+		"$l_dest_identity_file" "$l_source_snapshot_file"); then
+		:
+	else
+		l_status=$?
+		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
+		return "$l_status"
+	fi
+	zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
 
 	if [ -n "$l_last_common_snap" ]; then
 		zxfer_echoV "Found last common snapshot: $l_last_common_snap."
@@ -189,10 +326,17 @@ EOF
 	zxfer_echoV "End zxfer_get_last_common_snapshot()"
 }
 
+# Purpose: Reset the destination snapshot creation cache so the next snapshot-
+# reconcile pass starts from a clean state.
+# Usage: Called during last-common-snapshot selection and delete planning
+# before this module reuses mutable scratch globals or cached decisions.
 zxfer_reset_destination_snapshot_creation_cache() {
 	g_destination_snapshot_creation_cache=""
 }
 
+# Purpose: Check whether the snapshot creation epoch is numeric.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# later helpers need a boolean answer about the snapshot creation epoch.
 zxfer_snapshot_creation_epoch_is_numeric() {
 	case "$1" in
 	'' | *[!0-9]*)
@@ -203,6 +347,38 @@ zxfer_snapshot_creation_epoch_is_numeric() {
 	return 0
 }
 
+# Purpose: Format the snapshot creation epoch for display for display or
+# serialized output.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# operators or downstream helpers need a stable presentation.
+#
+# Render a validated snapshot creation epoch for operator-facing diagnostics
+# without issuing a second live remote `zfs get creation` query.
+zxfer_format_snapshot_creation_epoch_for_display() {
+	l_creation_epoch=$1
+
+	if ! zxfer_snapshot_creation_epoch_is_numeric "$l_creation_epoch"; then
+		return 1
+	fi
+
+	if l_creation_display=$(date -r "$l_creation_epoch" 2>/dev/null); then
+		printf '%s\n' "$l_creation_display"
+		return 0
+	fi
+
+	if l_creation_display=$(date -d "@$l_creation_epoch" 2>/dev/null); then
+		printf '%s\n' "$l_creation_display"
+		return 0
+	fi
+
+	printf '%s\n' "$l_creation_epoch (unix epoch)"
+	return 0
+}
+
+# Purpose: Look up the destination snapshot creation cache in the cache or
+# staged state owned by this module.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# later helpers need a reusable answer without repeating a live probe.
 zxfer_lookup_destination_snapshot_creation_cache() {
 	l_lookup_snapshot_path=$1
 
@@ -221,6 +397,10 @@ zxfer_lookup_destination_snapshot_creation_cache() {
 	return 1
 }
 
+# Purpose: Store the destination snapshot creation cache entries in the cache
+# or staging location owned by this module.
+# Usage: Called during last-common-snapshot selection and delete planning after
+# zxfer has a validated value that later helpers may reuse.
 zxfer_store_destination_snapshot_creation_cache_entries() {
 	l_cache_results=$1
 
@@ -240,6 +420,10 @@ $l_cache_snapshot_path	$l_cache_creation_value"
 	EOF
 }
 
+# Purpose: Prefetch the destination snapshot creation paths so later lookups
+# can reuse staged data.
+# Usage: Called during last-common-snapshot selection and delete planning
+# before a loop would otherwise repeat the same live probe or read.
 zxfer_prefetch_destination_snapshot_creation_paths() {
 	l_prefetch_snapshot_records=$1
 	l_prefetch_batch_limit=128
@@ -256,7 +440,12 @@ zxfer_prefetch_destination_snapshot_creation_paths() {
 		if [ "$l_prefetch_batch_count" -lt "$l_prefetch_batch_limit" ]; then
 			continue
 		fi
-		l_prefetch_creation_results=$(zxfer_run_destination_zfs_cmd get -H -o name,value -p creation "$@" 2>/dev/null) || return 1
+		if l_prefetch_creation_results=$(zxfer_run_destination_zfs_cmd get -H -o name,value -p creation "$@"); then
+			:
+		else
+			l_status=$?
+			return "$l_status"
+		fi
 		zxfer_store_destination_snapshot_creation_cache_entries "$l_prefetch_creation_results"
 		set --
 		l_prefetch_batch_count=0
@@ -266,13 +455,28 @@ zxfer_prefetch_destination_snapshot_creation_paths() {
 
 	[ "$l_prefetch_batch_count" -gt 0 ] || return 0
 
-	l_prefetch_creation_results=$(zxfer_run_destination_zfs_cmd get -H -o name,value -p creation "$@" 2>/dev/null) || return 1
+	if l_prefetch_creation_results=$(zxfer_run_destination_zfs_cmd get -H -o name,value -p creation "$@"); then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
 	zxfer_store_destination_snapshot_creation_cache_entries "$l_prefetch_creation_results"
 }
 
+# Purpose: Prefetch the delete snapshot creation times so later lookups can
+# reuse staged data.
+# Usage: Called during last-common-snapshot selection and delete planning
+# before a loop would otherwise repeat the same live probe or read.
 zxfer_prefetch_delete_snapshot_creation_times() {
 	l_delete_snapshot_records=$1
-	l_delete_prefetch_records=$l_delete_snapshot_records
+	l_delete_prefetch_records=""
+
+	if [ -n "$l_delete_snapshot_records" ] &&
+		{ [ -n "${g_option_g_grandfather_protection:-}" ] ||
+			{ [ -n "${g_last_common_snap:-}" ] && [ -n "${g_actual_dest:-}" ]; }; }; then
+		l_delete_prefetch_records=$l_delete_snapshot_records
+	fi
 
 	if [ -n "${g_last_common_snap:-}" ] && [ -n "${g_actual_dest:-}" ]; then
 		l_delete_last_common_name=$(zxfer_extract_snapshot_name "$g_last_common_snap")
@@ -290,6 +494,10 @@ $l_delete_prefetch_records"
 	zxfer_prefetch_destination_snapshot_creation_paths "$l_delete_prefetch_records"
 }
 
+# Purpose: Return the destination snapshot creation epoch in the form expected
+# by later helpers.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# sibling helpers need the same lookup without duplicating module logic.
 zxfer_get_destination_snapshot_creation_epoch() {
 	l_snapshot_path=$1
 
@@ -298,13 +506,23 @@ zxfer_get_destination_snapshot_creation_epoch() {
 		return 0
 	fi
 
-	l_creation_value=$(zxfer_run_destination_zfs_cmd get -H -o value -p creation "$l_snapshot_path" 2>/dev/null || :)
+	if l_creation_value=$(zxfer_run_destination_zfs_cmd get -H -o value -p creation "$l_snapshot_path"); then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
 	if zxfer_snapshot_creation_epoch_is_numeric "$l_creation_value"; then
 		zxfer_store_destination_snapshot_creation_cache_entries "$(printf '%s\t%s\n' "$l_snapshot_path" "$l_creation_value")"
 	fi
 	printf '%s\n' "$l_creation_value"
 }
 
+# Purpose: Check how deleted snapshots include newer than last common interacts
+# with the current safety rules.
+# Usage: Called during last-common-snapshot selection and delete planning
+# before zxfer deletes snapshots that could invalidate the last-common-snapshot
+# anchor.
 zxfer_deleted_snapshots_include_newer_than_last_common() {
 	l_deleted_snapshots=$1
 
@@ -317,6 +535,10 @@ zxfer_deleted_snapshots_include_newer_than_last_common() {
 
 	l_last_common_dest_snapshot="$g_actual_dest@$l_last_common_name"
 	l_last_common_creation=$(zxfer_get_destination_snapshot_creation_epoch "$l_last_common_dest_snapshot")
+	l_last_common_creation_status=$?
+	if [ "$l_last_common_creation_status" -ne 0 ]; then
+		return 2
+	fi
 	case "$l_last_common_creation" in
 	'' | *[!0-9]*)
 		# Fail safe: if we cannot compare creation times, keep rollback eligible.
@@ -328,6 +550,10 @@ zxfer_deleted_snapshots_include_newer_than_last_common() {
 		[ -n "$l_deleted_snapshot" ] || continue
 		l_deleted_snapshot_path=$(zxfer_extract_snapshot_path "$l_deleted_snapshot")
 		l_deleted_creation=$(zxfer_get_destination_snapshot_creation_epoch "$l_deleted_snapshot_path")
+		l_deleted_creation_status=$?
+		if [ "$l_deleted_creation_status" -ne 0 ]; then
+			return 2
+		fi
 		case "$l_deleted_creation" in
 		'' | *[!0-9]*)
 			return 0
@@ -343,14 +569,21 @@ zxfer_deleted_snapshots_include_newer_than_last_common() {
 	return 1
 }
 
+# Purpose: Apply grandfather-retention safety checks to the test.
+# Usage: Called during last-common-snapshot selection and delete planning
+# before delete planning removes snapshots that may still fall inside the
+# protected retention window.
 #
 # Tests a snapshot to see if it is older than the grandfather option allows for.
-#
 zxfer_grandfather_test() {
 	l_destination_snapshot=$1
 
 	l_current_date=$(date +%s) # current date in seconds from 1970
 	l_snap_date=$(zxfer_get_destination_snapshot_creation_epoch "$l_destination_snapshot")
+	l_snap_date_status=$?
+	if [ "$l_snap_date_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to query creation time for destination snapshot $l_destination_snapshot. Review prior stderr for the transport or query error."
+	fi
 	case "$l_snap_date" in
 	'' | *[!0-9]*)
 		zxfer_throw_error "Couldn't determine creation time for destination snapshot $l_destination_snapshot."
@@ -361,7 +594,11 @@ zxfer_grandfather_test() {
 	l_diff_day=$((l_diff_sec / 86400))
 
 	if [ $l_diff_day -ge "$g_option_g_grandfather_protection" ]; then
-		l_snap_date_english=$(zxfer_run_destination_zfs_cmd get -H -o value creation "$l_destination_snapshot")
+		l_snap_date_english=$(zxfer_format_snapshot_creation_epoch_for_display "$l_snap_date")
+		l_snap_date_english_status=$?
+		if [ "$l_snap_date_english_status" -ne 0 ] || [ -z "$l_snap_date_english" ]; then
+			l_snap_date_english="$l_snap_date (unix epoch)"
+		fi
 		l_current_date_english=$(date)
 		l_error_msg="On the destination there is a snapshot marked for destruction
             by zxfer that is protected by the use of the \"grandfather
@@ -384,15 +621,23 @@ zxfer_grandfather_test() {
 	fi
 }
 
+# Purpose: Delete the snaps through the guarded reconciliation path owned by
+# this module.
+# Usage: Called during last-common-snapshot selection and delete planning after
+# safety checks confirm the extra state can be removed.
 #
 # Delete snapshots in destination that aren't in source
-#
 zxfer_delete_snaps() {
 	zxfer_echoV "Begin zxfer_delete_snaps()"
 	l_zfs_source_snaps=$1
 	l_zfs_dest_snaps=$2
 
-	l_snaps_to_delete=$(zxfer_get_dest_snapshots_to_delete_per_dataset "$l_zfs_source_snaps" "$l_zfs_dest_snaps")
+	if l_snaps_to_delete=$(zxfer_get_dest_snapshots_to_delete_per_dataset "$l_zfs_source_snaps" "$l_zfs_dest_snaps"); then
+		:
+	else
+		l_delete_plan_status=$?
+		return "$l_delete_plan_status"
+	fi
 
 	# if l_snaps_to_delete is empty, there is nothing to do
 	if [ "$l_snaps_to_delete" = "" ]; then
@@ -401,10 +646,17 @@ zxfer_delete_snaps() {
 	fi
 
 	zxfer_reset_destination_snapshot_creation_cache
-	zxfer_prefetch_delete_snapshot_creation_times "$l_snaps_to_delete" >/dev/null 2>&1 || :
+	if ! zxfer_prefetch_delete_snapshot_creation_times "$l_snaps_to_delete" >/dev/null; then
+		zxfer_throw_error "Failed to query destination snapshot creation times while planning snapshot deletions. Review prior stderr for the transport or query error."
+	fi
 
 	g_deleted_dest_newer_snapshots=0
-	if zxfer_deleted_snapshots_include_newer_than_last_common "$l_snaps_to_delete"; then
+	zxfer_deleted_snapshots_include_newer_than_last_common "$l_snaps_to_delete"
+	l_deleted_newer_status=$?
+	if [ "$l_deleted_newer_status" -eq 2 ]; then
+		zxfer_throw_error "Failed to query destination snapshot creation times while evaluating rollback eligibility. Review prior stderr for the transport or query error."
+	fi
+	if [ "$l_deleted_newer_status" -eq 0 ]; then
 		g_deleted_dest_newer_snapshots=1
 	fi
 
@@ -456,6 +708,11 @@ zxfer_delete_snaps() {
 	zxfer_echoV "End zxfer_delete_snaps()"
 }
 
+# Purpose: Update the src snapshot transfer list in the shared runtime state.
+# Usage: Called during last-common-snapshot selection and delete planning after
+# a probe or planning step changes the active context that later helpers should
+# use.
+#
 # g_last_common_snap may be blank when no common snapshot is found.
 zxfer_set_src_snapshot_transfer_list() {
 	l_zfs_source_snaps=$1
@@ -489,6 +746,9 @@ $g_src_snapshot_transfer_list"
 	EOF
 }
 
+# Purpose: Inspect the delete snap before later delete or rollback decisions.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# zxfer needs one focused probe before it mutates live state.
 zxfer_inspect_delete_snap() {
 	l_is_delete_snap=$1
 	l_source=$2
@@ -500,10 +760,16 @@ zxfer_inspect_delete_snap() {
 
 	# Get only the snapshots for the exact source dataset in descending order
 	# by creation date.
-	l_zfs_source_snaps=$(zxfer_get_snapshot_records_for_dataset source "$l_source")
+	if ! zxfer_capture_snapshot_records_for_dataset source "$l_source"; then
+		zxfer_throw_error "Failed to retrieve source snapshot records for [$l_source]."
+	fi
+	l_zfs_source_snaps=$g_zxfer_snapshot_record_capture_result
 
 	# Get the list of destination snapshots for the matching destination dataset.
-	l_zfs_dest_snaps=$(zxfer_get_snapshot_records_for_dataset destination "$g_actual_dest")
+	if ! zxfer_capture_snapshot_records_for_dataset destination "$g_actual_dest"; then
+		zxfer_throw_error "Failed to retrieve destination snapshot records for [$g_actual_dest]."
+	fi
+	l_zfs_dest_snaps=$g_zxfer_snapshot_record_capture_result
 	l_identity_source_snaps=$l_zfs_source_snaps
 	l_identity_dest_snaps=$l_zfs_dest_snaps
 	if [ -n "$l_zfs_dest_snaps" ]; then
@@ -531,7 +797,9 @@ zxfer_inspect_delete_snap() {
 	fi
 
 	# Find the most recent common snapshot on source and destination.
-	g_last_common_snap=$(zxfer_get_last_common_snapshot "$l_identity_source_snaps" "$l_identity_dest_snaps")
+	if ! g_last_common_snap=$(zxfer_get_last_common_snapshot "$l_identity_source_snaps" "$l_identity_dest_snaps"); then
+		zxfer_throw_error "Failed to determine the last common snapshot for [$l_source] and [$g_actual_dest]."
+	fi
 
 	# Deletes non-common snaps on destination if asked to.
 	if [ "$l_is_delete_snap" -eq 1 ]; then

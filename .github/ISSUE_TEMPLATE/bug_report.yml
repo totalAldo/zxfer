@@ -1,0 +1,138 @@
+name: Bug report
+description: Report a zxfer bug or regression with enough platform and pool context to reproduce it safely.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report public bugs here. Redact hostnames, dataset names, keys, and secrets as needed.
+
+        If the report involves a security issue, secret exposure, or command-injection surface, follow [`SECURITY.md`](https://github.com/totalAldo/zxfer/blob/main/SECURITY.md) instead of opening a public issue.
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Safety checks
+      options:
+        - label: I redacted sensitive host, dataset, and credential details as needed.
+          required: true
+        - label: I understand public issues are not the right place for security-sensitive reports.
+          required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the failure briefly.
+      placeholder: Recursive remote replication aborts after the first dataset when -j and -z are combined.
+    validations:
+      required: true
+  - type: input
+    id: os_family
+    attributes:
+      label: Platform
+      description: Operating system or distribution family.
+      placeholder: FreeBSD, Ubuntu, OmniOS, macOS
+    validations:
+      required: true
+  - type: input
+    id: os_release
+    attributes:
+      label: OS release
+      description: Include kernel or release details when relevant.
+      placeholder: FreeBSD 14.2-RELEASE, Ubuntu 24.04, OmniOS r151050, macOS 15.4
+    validations:
+      required: true
+  - type: input
+    id: zfs_version
+    attributes:
+      label: ZFS or OpenZFS version
+      placeholder: OpenZFS 2.2.3
+    validations:
+      required: true
+  - type: input
+    id: shell
+    attributes:
+      label: Shell
+      description: The /bin/sh implementation or wrapper in use.
+      placeholder: /bin/sh, dash, bash --posix, /usr/xpg4/bin/sh
+    validations:
+      required: true
+  - type: input
+    id: zxfer_version
+    attributes:
+      label: zxfer version or commit
+      description: Release tag, package version, or commit hash.
+      placeholder: 2026.04.11 or abc1234
+  - type: dropdown
+    id: replication_topology
+    attributes:
+      label: Replication topology
+      options:
+        - Local only
+        - Remote origin (-O)
+        - Remote target (-T)
+        - Both remote origin and target
+        - Not a replication run
+    validations:
+      required: true
+  - type: dropdown
+    id: privilege_model
+    attributes:
+      label: Privilege model
+      options:
+        - root
+        - sudo
+        - doas
+        - pfexec
+        - unprivileged user
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: pool_layout
+    attributes:
+      label: Pool and dataset layout
+      description: Describe the source and destination pool setup, including whether the report is on disposable file-backed pools or live pools.
+      placeholder: |
+        Source: file-backed scratch pool srcpool with srcpool/data
+        Destination: file-backed scratch pool dstpool with dstpool/backup
+        Notes: remote host uses wrapper user@host doas, no encryption, recursive datasets
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Paste the zxfer command and any relevant environment overrides.
+      render: shell
+      placeholder: ./zxfer -v -O user@example.com -R srcpool/data dstpool/backup
+    validations:
+      required: true
+  - type: textarea
+    id: observed_output
+    attributes:
+      label: Observed output
+      description: Paste the relevant stdout, stderr, structured failure report, or log excerpt.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: Describe what should have happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction_notes
+    attributes:
+      label: Reproduction notes
+      description: Include safe reproduction steps, whether the bug reproduces in `tests/run_vm_matrix.sh`, and any remote wrapper or helper-path details that matter.
+      placeholder: |
+        1. Create disposable file-backed pools.
+        2. Take two snapshots on the source dataset.
+        3. Run the command above with -j2.
+        4. The second dataset aborts after the first incremental send.
+    validations:
+      required: true

@@ -37,11 +37,14 @@
 ################################################################################
 
 # Module contract:
-# owns globals: none.
+# owns globals: secure-staging result scratch.
 # reads globals: g_cmd_awk.
 # mutates caches: none.
 # returns via stdout: owner/mode probes, symlink probes, and validated temp-root paths.
 
+# Purpose: Return the path owner UID in the form expected by later helpers.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# sibling helpers need the same lookup without duplicating module logic.
 zxfer_get_path_owner_uid() {
 	l_path=$1
 
@@ -89,6 +92,9 @@ zxfer_get_path_owner_uid() {
 	return 1
 }
 
+# Purpose: Return the path mode octal in the form expected by later helpers.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# sibling helpers need the same lookup without duplicating module logic.
 zxfer_get_path_mode_octal() {
 	l_path=$1
 
@@ -136,6 +142,9 @@ zxfer_get_path_mode_octal() {
 	return 1
 }
 
+# Purpose: Return the effective user UID in the form expected by later helpers.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# sibling helpers need the same lookup without duplicating module logic.
 zxfer_get_effective_user_uid() {
 	if command -v id >/dev/null 2>&1; then
 		if l_uid=$(id -u 2>/dev/null); then
@@ -146,6 +155,9 @@ zxfer_get_effective_user_uid() {
 	return 1
 }
 
+# Purpose: Check whether the backup owner UID is allowed.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# later helpers need a boolean answer about the backup owner UID.
 zxfer_backup_owner_uid_is_allowed() {
 	l_owner_uid=$1
 
@@ -162,6 +174,9 @@ zxfer_backup_owner_uid_is_allowed() {
 	return 1
 }
 
+# Purpose: Describe the expected backup owner in operator-facing text.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# validation or reporting logic needs one canonical explanation string.
 zxfer_describe_expected_backup_owner() {
 	l_desc="root (UID 0)"
 
@@ -174,24 +189,23 @@ zxfer_describe_expected_backup_owner() {
 	printf '%s\n' "$l_desc"
 }
 
+# Purpose: Require the secure backup file before the surrounding flow
+# continues.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# later helpers should stop immediately if the precondition is not met.
 zxfer_require_secure_backup_file() {
 	l_path=$1
+	l_display_path=${2:-$l_path}
 
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_path"); then
-		zxfer_throw_error "Cannot determine the owner of backup metadata $l_path."
-	fi
-	if ! zxfer_backup_owner_uid_is_allowed "$l_owner_uid"; then
-		l_expected_owner_desc=$(zxfer_describe_expected_backup_owner)
-		zxfer_throw_error "Refusing to use backup metadata $l_path because it is owned by UID $l_owner_uid instead of $l_expected_owner_desc."
-	fi
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_path"); then
-		zxfer_throw_error "Cannot determine the permissions for backup metadata $l_path."
-	fi
-	if [ "$l_mode" != "600" ]; then
-		zxfer_throw_error "Refusing to use backup metadata $l_path because its permissions ($l_mode) are not 0600."
+	if ! l_error=$(zxfer_check_secure_backup_file "$l_path" "$l_display_path"); then
+		zxfer_throw_error "$l_error"
 	fi
 }
 
+# Purpose: Reject the backup metadata path with the validation failure owned by
+# this module.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when a
+# path or input should fail closed with one consistent error path.
 zxfer_reject_backup_metadata_path() {
 	l_msg=$1
 
@@ -199,6 +213,10 @@ zxfer_reject_backup_metadata_path() {
 	return 1
 }
 
+# Purpose: Require the backup metadata path without symlinks before the
+# surrounding flow continues.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# later helpers should stop immediately if the precondition is not met.
 zxfer_require_backup_metadata_path_without_symlinks() {
 	l_path=$1
 
@@ -210,6 +228,10 @@ zxfer_require_backup_metadata_path_without_symlinks() {
 	fi
 }
 
+# Purpose: Find the symlink path component in the tracked state owned by this
+# module.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# later helpers need an existing record instead of rebuilding one.
 zxfer_find_symlink_path_component() {
 	l_path=$1
 
@@ -260,6 +282,9 @@ zxfer_find_symlink_path_component() {
 	return 1
 }
 
+# Purpose: Check whether the symlink path component is trusted.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# later helpers need a boolean answer about a validated or trusted state.
 zxfer_is_trusted_symlink_path_component() {
 	l_path=$1
 
@@ -328,6 +353,9 @@ zxfer_is_trusted_symlink_path_component() {
 	return 0
 }
 
+# Purpose: Validate the temp root candidate before zxfer relies on it.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths to fail
+# closed on malformed, unsafe, or stale input.
 zxfer_validate_temp_root_candidate() {
 	l_candidate=$1
 
@@ -394,4 +422,78 @@ zxfer_validate_temp_root_candidate() {
 	esac
 
 	printf '%s\n' "$l_physical_dir"
+}
+
+# Purpose: Return the path parent directory in the form expected by later
+# helpers.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# sibling helpers need the same lookup without duplicating module logic.
+zxfer_get_path_parent_dir() {
+	l_path=$1
+
+	l_parent=${l_path%/*}
+	if [ "$l_parent" = "$l_path" ] || [ "$l_parent" = "" ]; then
+		l_parent=/
+	fi
+
+	printf '%s\n' "$l_parent"
+}
+
+# Purpose: Create the secure staging directory for path using the safety checks
+# owned by this module.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# zxfer needs a fresh staged resource or persistent helper state.
+zxfer_create_secure_staging_dir_for_path() {
+	l_path=$1
+	l_prefix=${2:-zxfer.stage}
+
+	g_zxfer_secure_staging_dir_result=""
+	if ! l_parent=$(zxfer_get_path_parent_dir "$l_path"); then
+		return 1
+	fi
+	if ! l_parent=$(zxfer_validate_temp_root_candidate "$l_parent"); then
+		return 1
+	fi
+
+	l_old_umask=$(umask)
+	umask 077
+	l_stage_dir=$(mktemp -d "$l_parent/.$l_prefix.XXXXXX" 2>/dev/null)
+	l_stage_status=$?
+	umask "$l_old_umask"
+	[ $l_stage_status -eq 0 ] || return 1
+
+	# Register same-directory staging so trap cleanup can reap it on aborts.
+	if command -v zxfer_register_runtime_artifact_path >/dev/null 2>&1; then
+		zxfer_register_runtime_artifact_path "$l_stage_dir"
+	fi
+
+	g_zxfer_secure_staging_dir_result=$l_stage_dir
+	printf '%s\n' "$l_stage_dir"
+}
+
+# Purpose: Check the secure backup file using the fail-closed rules owned by
+# this module.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths before
+# later helpers act on a result that must be validated first.
+zxfer_check_secure_backup_file() {
+	l_check_path=$1
+	l_check_display_path=${2:-$l_check_path}
+
+	if ! l_check_owner_uid=$(zxfer_get_path_owner_uid "$l_check_path"); then
+		printf '%s\n' "Cannot determine the owner of backup metadata $l_check_display_path."
+		return 1
+	fi
+	if ! zxfer_backup_owner_uid_is_allowed "$l_check_owner_uid"; then
+		l_check_expected_owner_desc=$(zxfer_describe_expected_backup_owner)
+		printf '%s\n' "Refusing to use backup metadata $l_check_display_path because it is owned by UID $l_check_owner_uid instead of $l_check_expected_owner_desc."
+		return 1
+	fi
+	if ! l_check_mode=$(zxfer_get_path_mode_octal "$l_check_path"); then
+		printf '%s\n' "Cannot determine the permissions for backup metadata $l_check_display_path."
+		return 1
+	fi
+	if [ "$l_check_mode" != "600" ]; then
+		printf '%s\n' "Refusing to use backup metadata $l_check_display_path because its permissions ($l_check_mode) are not 0600."
+		return 1
+	fi
 }

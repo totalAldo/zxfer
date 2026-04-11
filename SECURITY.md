@@ -13,9 +13,18 @@ Key protections already present in the project include:
 
 - secure-PATH resolution for required local helpers and the main remote helper lookups (`zfs`, `cat`, and GNU `parallel`)
 - structured failure reporting instead of ad hoc error handling
+- opt-in failure-report redaction for `invocation` and `last_command`
 - hardened `ZXFER_ERROR_LOG` path validation
 - secured property backup metadata directories and file-permission checks
 - explicit handling for wrapped remote host specs
+
+Failure reports remain verbatim by default for compatibility. If local wrapper
+arguments, hook strings, or other command-line fragments can contain secrets,
+set `ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1` so `invocation` and
+`last_command` are rendered as `[redacted]` in both `stderr` output and any
+`ZXFER_ERROR_LOG` mirror. Raw ASCII control bytes in structured failure-report
+values are also escaped before output so terminal and pager control sequences
+cannot execute from report fields.
 
 Current open security concerns are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 

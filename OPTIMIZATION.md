@@ -38,13 +38,16 @@ The current tree already contains several good performance-oriented choices:
   orchestrated `-j` runs no longer always pay the full N+1 discovery cost
   before data moves
 - remote startup discovery now collapses `uname` plus helper-path lookups into
-  one per-host capability handshake, with current-process reuse and a
-  short-lived cross-process cache stored in a validated per-user `0700`
-  directory under `TMPDIR`
+  one requested-tool-aware per-host capability handshake, with current-process
+  reuse, a short-lived cross-process cache stored in a validated per-user
+  `0700` directory under `TMPDIR`, and generic remote helper lookups such as
+  `zstd` satisfied from that cached payload when the active run shape already
+  requested the tool head
 - concurrent sibling zxfer processes now coalesce remote capability handshakes
-  through a secure per-host lock, so a burst of same-host processes reuses one
-  live probe result instead of stampeding the helper-discovery ssh path before
-  the cache is populated
+  through a secure per-host lock plus a bounded fast-retry window before the
+  older whole-second backoff, so a burst of same-host processes reuses one
+  live probe result instead of stampeding the helper-discovery ssh path or
+  paying avoidable 1-second convoy delays before the cache is populated
 - ssh control sockets are now reused across sibling zxfer processes through a
   validated per-user cache directory under `TMPDIR`, with per-process lease
   files and stale-lease pruning so one process can reuse another process's
@@ -111,10 +114,10 @@ The current tree already contains several good performance-oriented choices:
   transfers now prefer cheaper approximate size probes with exact fallback
   instead of always paying an extra `zfs send -nPv` estimate round trip
 - adaptive remote source snapshot discovery now keeps send-stream compression
-  semantics unchanged but skips `zstd` around `-O ... -j ... -z` metadata
-  listing runs, removing compression/decompression overhead from no-op and
-  startup-bound discovery paths while preserving stream compression for actual
-  replication
+  semantics unchanged and reuses the validated remote/local metadata
+  compression pipeline on `-O ... -j ... -z/-Z` listing runs, while requested-
+  tool capability caching avoids paying a second ssh helper probe for the
+  compressor or decompressor head during startup
 - source snapshot list reversal now uses a bounded POSIX-`awk` fast path with
   automatic sort fallback for larger inputs, and that reversal is now also
   deferred until a later consumer actually requests newest-first per-dataset
@@ -143,9 +146,10 @@ compatibility caveats still sit inside performance-sensitive paths:
   wrapper-style remote specs such as `host pfexec` and `host doas` still have
   a known setup/teardown caveat in the control-socket helpers because those
   transport-control operations should use only the ssh destination host tokens
-- dry-run `-n` still performs launcher preflight and snapshot-discovery work,
-  so dry-run timings are not a pure render-only optimization baseline when
-  remote helper resolution or snapshot listing dominates startup cost
+- strict dry-run `-n` now intentionally skips live helper validation,
+  snapshot discovery, and other startup probes, so dry-run timings are a
+  render-only preview metric and should not be compared directly to live no-op
+  or startup-bound measurements
 
 These are tracked as current issues because they affect the behavior of already
 optimized paths, not because the old startup bottlenecks remain open.
@@ -176,8 +180,10 @@ first step is lightweight call counting around the existing helpers:
   source/destination snapshot-listing time, diff/sort time, source/destination
   and total `zfs` / `ssh` call counts, source snapshot-list command counts,
   send/receive pipeline counts, destination-existence probes, normalized
-  property-read counters, required-property backfill counters, and per-stage
-  bucket counters
+  property-read counters, required-property backfill counters, per-stage
+  bucket counters, ssh control-socket wait counts/timing, remote-capability
+  cache wait counts/timing, remote-capability bootstrap-source totals, and
+  direct remote helper probe counts
 - count calls to `run_source_zfs_cmd()`, `run_destination_zfs_cmd()`, and
   `invoke_ssh_shell_command_for_host()`
 - on `-O` / `-T` startup-sensitive runs, separate first-process measurements

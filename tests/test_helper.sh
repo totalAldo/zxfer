@@ -27,6 +27,11 @@ ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT \
 	ZXFER_SOURCE_MODULES_THROUGH=zxfer_dependencies.sh \
 	. "$ZXFER_ROOT/src/zxfer_modules.sh"
 
+# Test suites should not inherit runner-only environment knobs from the
+# developer's shell unless a specific case opts in explicitly.
+unset ZXFER_REDACT_FAILURE_REPORT_COMMANDS
+unset ZXFER_TEST_SHELL
+
 zxfer_source_runtime_modules_through() {
 	l_last_module=$1
 	l_root=${2:-$ZXFER_ROOT}
@@ -101,6 +106,54 @@ zxfer_test_capture_subshell_split() {
 # Most suites only need zxfer_usage() to exist so zxfer_throw_usage_error() has a target.
 zxfer_usage() {
 	:
+}
+
+zxfer_test_render_current_backup_metadata_contents() {
+	l_format_version=${ZXFER_BACKUP_METADATA_FORMAT_VERSION:-1}
+	l_header_line=${ZXFER_BACKUP_METADATA_HEADER_LINE:-#zxfer property backup file}
+	l_source_root=${ZXFER_TEST_BACKUP_SOURCE_ROOT:-}
+	l_destination_root=${ZXFER_TEST_BACKUP_DESTINATION_ROOT:-}
+	l_first_row=""
+
+	for l_line in "$@"; do
+		[ -n "$l_line" ] || continue
+		l_first_row=$l_line
+		break
+	done
+
+	if [ -n "$l_first_row" ]; then
+		if [ -z "$l_source_root" ]; then
+			l_source_root=${l_first_row%%,*}
+		fi
+		if [ -z "$l_destination_root" ]; then
+			l_row_remainder=${l_first_row#*,}
+			if [ "$l_row_remainder" != "$l_first_row" ]; then
+				l_destination_root=${l_row_remainder%%,*}
+			fi
+		fi
+	fi
+
+	if [ -z "$l_source_root" ]; then
+		l_source_root=${g_initial_source:-}
+	fi
+	if [ -z "$l_destination_root" ]; then
+		l_destination_root=${g_destination:-}
+	fi
+
+	printf '%s\n' "$l_header_line"
+	printf '%s\n' "#format_version:$l_format_version"
+	printf '%s\n' "#version:test-version"
+	if [ -n "$l_source_root" ]; then
+		printf '%s\n' "#source_root:$l_source_root"
+	fi
+	if [ -n "$l_destination_root" ]; then
+		printf '%s\n' "#destination_root:$l_destination_root"
+	fi
+
+	for l_line in "$@"; do
+		[ -n "$l_line" ] || continue
+		printf '%s\n' "$l_line"
+	done
 }
 
 oneTimeSetUp() {

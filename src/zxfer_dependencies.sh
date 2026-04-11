@@ -46,6 +46,10 @@
 # ZXFER_SECURE_PATH_APPEND.
 ZXFER_DEFAULT_SECURE_PATH="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 
+# Purpose: Compute the secure path from the active configuration and runtime
+# state.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# when later helpers need a derived value without duplicating the calculation.
 zxfer_compute_secure_path() {
 	l_candidate=$ZXFER_DEFAULT_SECURE_PATH
 	if [ -n "${ZXFER_SECURE_PATH:-}" ]; then
@@ -89,6 +93,31 @@ zxfer_compute_secure_path() {
 	printf '%s\n' "$l_clean"
 }
 
+# Purpose: Return the effective dependency path in the form expected by later
+# helpers.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# when sibling helpers need the same lookup without duplicating module logic.
+zxfer_get_effective_dependency_path() {
+	if [ -n "${ZXFER_SECURE_PATH:-}" ] || [ -n "${ZXFER_SECURE_PATH_APPEND:-}" ]; then
+		zxfer_compute_secure_path
+		return
+	fi
+
+	if [ -n "${g_zxfer_dependency_path:-}" ]; then
+		printf '%s\n' "$g_zxfer_dependency_path"
+		return
+	fi
+	if [ -n "${g_zxfer_secure_path:-}" ]; then
+		printf '%s\n' "$g_zxfer_secure_path"
+		return
+	fi
+
+	printf '%s\n' "$ZXFER_DEFAULT_SECURE_PATH"
+}
+
+# Purpose: Merge the path allowlists while preserving zxfer's precedence rules.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# when multiple configuration sources contribute to one effective value.
 zxfer_merge_path_allowlists() {
 	l_primary=$1
 	l_secondary=$2
@@ -114,14 +143,32 @@ zxfer_merge_path_allowlists() {
 	printf '%s\n' "$l_merged"
 }
 
-zxfer_apply_secure_path() {
+# Purpose: Refresh the secure path state from the current configuration and
+# runtime state.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# after inputs change and downstream helpers need the derived value rebuilt.
+zxfer_refresh_secure_path_state() {
 	g_zxfer_secure_path=$(zxfer_compute_secure_path)
 	g_zxfer_dependency_path=$g_zxfer_secure_path
-	g_zxfer_runtime_path=$(zxfer_merge_path_allowlists "$g_zxfer_secure_path" "$ZXFER_DEFAULT_SECURE_PATH")
+	g_zxfer_runtime_path=$g_zxfer_secure_path
+}
+
+# Purpose: Apply the secure path through the controlled helper path owned by
+# this module.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# once planning is complete and zxfer is ready to mutate live state.
+zxfer_apply_secure_path() {
+	zxfer_refresh_secure_path_state
+	# Keep the live runtime PATH equal to the configured secure allowlist so
+	# later bare helper lookups cannot escape an explicit ZXFER_SECURE_PATH.
 	PATH=$g_zxfer_runtime_path
 	export PATH
 }
 
+# Purpose: Normalize the resolved tool path into the stable form used across
+# zxfer.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# before comparison, caching, or reporting depends on exact formatting.
 zxfer_normalize_resolved_tool_path() {
 	l_path=$1
 
@@ -155,6 +202,9 @@ zxfer_normalize_resolved_tool_path() {
 	printf '%s\n' "$l_path"
 }
 
+# Purpose: Validate the resolved tool path before zxfer relies on it.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution to
+# fail closed on malformed, unsafe, or stale input.
 zxfer_validate_resolved_tool_path() {
 	l_path=$1
 	l_label=$2
@@ -193,6 +243,9 @@ zxfer_validate_resolved_tool_path() {
 	esac
 }
 
+# Purpose: Find the required tool in the tracked state owned by this module.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# when later helpers need an existing record instead of rebuilding one.
 zxfer_find_required_tool() {
 	l_tool=$1
 	l_label=${2:-$l_tool}
@@ -207,6 +260,11 @@ zxfer_find_required_tool() {
 	zxfer_validate_resolved_tool_path "$l_path" "$l_label"
 }
 
+# Purpose: Assign the required tool into the shared runtime variable that owns
+# it.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# after a validated lookup succeeds and downstream helpers should reuse the
+# stored result.
 zxfer_assign_required_tool() {
 	l_var_name=$1
 	l_tool=$2
@@ -220,6 +278,11 @@ zxfer_assign_required_tool() {
 	eval "$l_var_name=\$l_resolved_path"
 }
 
+# Purpose: Rebuild a CLI command string around a validated absolute helper path
+# for its head token.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# after the command head is resolved so later rendering keeps the caller's
+# remaining arguments intact.
 zxfer_requote_cli_command_with_resolved_head() {
 	l_cli_string=$1
 	l_resolved_head=$2
@@ -249,6 +312,10 @@ $l_cli_token"
 	zxfer_quote_token_stream "$l_output_tokens"
 }
 
+# Purpose: Resolve the effective local CLI command safe that zxfer should use.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# after configuration, cache state, or remote state can change the final
+# choice.
 zxfer_resolve_local_cli_command_safe() {
 	l_cli_string=$1
 	l_label=${2:-command}
@@ -267,8 +334,13 @@ zxfer_resolve_local_cli_command_safe() {
 	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head"
 }
 
+# Purpose: Initialize the dependency defaults before later helpers depend on
+# it.
+# Usage: Called during secure-PATH bootstrap and local dependency resolution
+# during bootstrap so downstream code sees consistent defaults and runtime
+# state.
 zxfer_initialize_dependency_defaults() {
-	zxfer_apply_secure_path
+	zxfer_refresh_secure_path_state
 
 	if [ -z "${g_cmd_awk:-}" ]; then
 		l_search_path=${g_zxfer_dependency_path:-$g_zxfer_secure_path}

@@ -1,3 +1,6 @@
+# The shunit2 tests are low resource tests, so we can run them all in high parallel counts even on the slower shells
+# --jobs 30 is selected to exceed the actual number of test files to ensure that all tests are run in parallel as much as possible.
+# The test runner will automatically scale down the parallelism if there are fewer test files than the specified job count.
 name: Unit Tests
 
 on:
@@ -12,7 +15,7 @@ jobs:
   shunit2:
     name: shunit2 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
@@ -30,12 +33,12 @@ jobs:
           # This unit matrix intentionally does not install ZFS on macOS.
           # The shunit2 suites are used here as a /bin/sh and BSD-userland
           # portability gate without requiring a live ZFS stack.
-          ./tests/run_shunit_tests.sh
+          ./tests/run_shunit_tests.sh --jobs 30
 
   portable-shells:
     name: shunit2 (${{ matrix.shell_name }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       contents: read
     continue-on-error: ${{ matrix.experimental }}
@@ -52,9 +55,11 @@ jobs:
           - shell_name: busybox ash
             shell_kind: busybox-ash
             experimental: false
-          - shell_name: posh
-            shell_kind: posh
-            experimental: true
+          # Disabled: the posh pass currently exceeds 30 minutes of execution
+          # time on GitHub-hosted runners.
+          # - shell_name: posh
+          #   shell_kind: posh
+          #   experimental: true
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install portable shells
@@ -104,7 +109,7 @@ jobs:
           ZXFER_TEST_SHELL: ${{ steps.shell_under_test.outputs.shell_under_test }}
         run: |
           set -euo pipefail
-          ./tests/run_shunit_tests.sh
+          ./tests/run_shunit_tests.sh --jobs 30
 
   shunit2-freebsd:
     name: shunit2 (FreeBSD)
@@ -119,7 +124,7 @@ jobs:
         with:
           usesh: true
           run: |
-            ./tests/run_shunit_tests.sh
+            ./tests/run_shunit_tests.sh --jobs 30
 
   shunit2-omnios:
     name: shunit2 (OmniOS)
@@ -147,4 +152,4 @@ jobs:
             # job, but run the unit suites through a POSIX bash wrapper here so
             # the tests exercise zxfer logic rather than shell-specific stubbing
             # behavior.
-            "$bash_bin" ./tests/run_shunit_tests.sh
+            "$bash_bin" ./tests/run_shunit_tests.sh --jobs 30

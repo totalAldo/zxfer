@@ -142,10 +142,7 @@ bash_supports_xtrace_line_numbers() {
 	l_bash_bin=$1
 	l_probe_file=${TMPDIR:-/tmp}/zxfer.coverage.probe.$$
 	(
-		BASH_XTRACEFD=9
-		PS4='+${BASH_SOURCE}:${LINENO}: '
-		export BASH_XTRACEFD PS4
-		"$l_bash_bin" --noprofile --norc -x <<'EOF' 9>"$l_probe_file" >/dev/null 2>&1
+		capture_bash_xtrace_to_file "$l_bash_bin" "$l_probe_file" -s <<'EOF' >/dev/null 2>&1
 probe() {
 	printf '%s\n' ok >/dev/null
 }
@@ -160,6 +157,21 @@ EOF
 
 	rm -f "$l_probe_file"
 	return 1
+}
+
+capture_bash_xtrace_to_file() {
+	l_bash_bin=$1
+	l_trace_file=$2
+	shift 2
+
+	# Keep the coverage trace off fd 9 because send/receive tests exercise
+	# their own queue descriptors on 8/9 and may close them during setUp().
+	(
+		exec 7>"$l_trace_file"
+		ZXFER_COVERAGE_BASH_BIN=$l_bash_bin \
+			BASH_XTRACEFD=7 PS4='+${BASH_SOURCE}:${LINENO}: ' \
+			exec "$l_bash_bin" --noprofile --norc -x "$@"
+	)
 }
 
 render_bash_xtrace_report() {
@@ -721,9 +733,7 @@ run_with_bash_xtrace() {
 		l_suite_name=$(basename "$l_suite_path" .sh)
 		l_trace_file="$l_trace_dir/$l_suite_name.trace"
 		echo "==> Running bash-xtrace coverage for $l_suite_path"
-		if ! BASH_XTRACEFD=9 PS4='+${BASH_SOURCE}:${LINENO}: ' \
-			"$l_bash_bin" --noprofile --norc -x "$l_suite_path" \
-			9>"$l_trace_file"; then
+		if ! capture_bash_xtrace_to_file "$l_bash_bin" "$l_trace_file" "$l_suite_path"; then
 			l_overall_status=1
 		fi
 		cat "$l_trace_file" >>"$l_merged_trace"

@@ -26,7 +26,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd Apr 3, 2026
+.Dd Apr 11, 2026
 .Dt ZXFER 8
 .Os
 .Sh NAME
@@ -198,9 +198,16 @@ file in each hardened metadata directory
 .Pq Pa ZXFER_BACKUP_DIR/source/dataset/path/
 until it finds one that contains an exact current-format
 .Dq source,destination,properties
-row for the requested source and destination, or fails. Older backup metadata
-layouts are not supported; restore the properties only from files stored in
-the hardened directory (which defaults to
+row for the requested source and destination, or fails. The keyed file must
+also carry the
+.Dq #zxfer property backup file
+header and a supported
+.Dq #format_version
+marker before
+.Nm
+will consume any restore rows. Older, unversioned, or otherwise unsupported
+backup metadata layouts are not supported; restore the properties only from
+files stored in the hardened directory (which defaults to
 .Pa /var/db/zxfer
 and can be changed by exporting
 .Ev ZXFER_BACKUP_DIR Ns ).
@@ -214,10 +221,24 @@ stored inside the hardened metadata directory
 .Pq Pa ZXFER_BACKUP_DIR/source/dataset/path/.
 This file lives outside the dataset mountpoints so unprivileged users cannot
 pre-create symlinks. The
+.Dq #zxfer property backup file
+header and
+.Dq #format_version
+marker are written automatically so future restore runs can validate the
+metadata format before consuming exact source/destination rows. The
 .Aq id
 suffix is derived from the full source and destination pair so distinct
 replication runs do not overwrite each other just because they share the same
-source tail. For example, if you are backing up
+source tail. The metadata header also records the full
+.Dq source_root
+and
+.Dq destination_root
+dataset identifiers for the backup run, while the body rows retain the exact
+source/destination pairs later consumed by
+.Fl e .
+Current-format files emit only those versioned root markers; the older
+compatibility alias lines are no longer written.
+For example, if you are backing up
 .Pa tank/src
 and you keep the default
 .Ev ZXFER_BACKUP_DIR
@@ -238,31 +259,44 @@ option freely, e.g. specifying
 .Va compression
 etc. without having to remember what the original options were.
 .Pp
-A word of warning: if you intend to backup to one location and further backup
-that backup to another location - sourcing the properties to use in the final
-backup property file from the property backup file in the intermediate backup
-is not yet supported. A workaround is to refrain from using
-property overrides in the intermediate backup; this will mean that the ultimate
-backup will be able to store the correct properties of the original.
+If the current source was itself produced from an earlier
+.Nm
+property backup, chained
+.Fl k
+runs now forward that original-source property provenance into the next hop's
+backup metadata instead of re-recording intermediate override or local-property
+drift as the restored baseline.
+.Pp
+When
+.Fl k
+publishes backup metadata through a remote target specified by
+.Fl T ,
+.Nm
+also resolves and validates the target host's
+.Xr cat 1
+helper through the same secure remote-helper path instead of assuming a fixed
+remote binary location.
 .It Fl n
 Dry ru(n) mode. Prints out the commands that would otherwise execute, but
-current releases still run launcher preflight and snapshot-discovery commands
-needed to validate the requested replication. Remote dry runs may therefore
-still open ssh control sockets, resolve remote helpers, and list source or
-destination snapshots, and
+current releases now treat this as a strict no-exec preview: launcher ssh
+preflight, remote helper validation, live backup-restore checks,
+unsupported-property discovery, snapshot discovery, and
 .Fl D
 templates that reference
 .Ql %%size%%
-may still probe the live source for an estimate. Use this as a render-plus-validation
-preview rather than a strict no-exec sandbox. This may not work in all
-circumstances as it may expect the existence of filesystems etc. that won't be
-created. When combined with
+are all skipped instead of validated against the live source or destination.
+This means dry runs no longer render the eventual send/receive or
+property-reconcile commands, because those require live snapshot state. Use
+this when you need a safe preflight preview rather than live validation. When combined with
 .Fl k ,
 .Nm
-also only previews the local or remote secure backup-directory preparation
-commands under
+also previews the local or remote secure backup-directory preparation and
+staged backup-metadata write commands under
 .Ev ZXFER_BACKUP_DIR
-instead of creating or chmodding those directories during preflight. When combined with
+instead of creating, chmodding, or writing those metadata files during
+preflight; chained
+.Fl k
+backups also preview any forwarded provenance alias write. When combined with
 .Fl s
 or
 .Fl m ,
@@ -275,6 +309,13 @@ cached state as though those actions had already happened.
 .Pp
 e.g.
 .Fl o Ar property1=value1,property2=value2...
+.Pp
+If one value must contain a literal comma, quote the full
+.Fl o
+argument and escape that comma as
+.Ql \e, ,
+for example
+.Fl o Ar 'user:note=value\e,with\e,commas' .
 For example,
 .Fl o Ar compression=lzjb
 will cause all destination filesystems to be set to lzjb compression. If using
@@ -416,7 +457,8 @@ When combined with
 .Fl n ,
 templates that reference
 .Ql %%size%%
-can still trigger live local or remote size-estimate probes.
+no longer probe the live source; strict dry-run leaves size estimates unknown
+because send planning is skipped entirely.
 .It %%title%%
 Will be replaced with the name of the source dataset@snapshot.
 .El
@@ -480,7 +522,11 @@ or properties that are not supported on the destination.
 Run up to this many zfs send/receive jobs concurrently and use adaptive source
 snapshot discovery when determining the work queue. Larger trees can still use
 GNU parallel for per-dataset source listing, while smaller or startup-bound
-runs stay on the cheaper single recursive listing path. The default is 1,
+runs stay on the cheaper single recursive listing path. Local-origin runs fall
+back to the serial source snapshot listing path when GNU parallel is missing or
+not GNU parallel. Remote-origin runs still fall back for the explicit
+missing-helper case, but once a remote helper resolves, zxfer trusts it and
+fails closed if the rendered source listing later errors. The default is 1,
 which disables background sends. Raising this value can hide WAN latency or
 speed up large replications, but will also increase memory, CPU and I/O load.
 .It Fl m
@@ -646,7 +692,12 @@ This allows replicating from newer versions of OpenZFS to older versions.
 .It Fl V
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
 profiling counters plus accumulated stage timings for ssh setup, snapshot
-listing, and diff/sort hot paths
+listing, and diff/sort hot paths, along with ssh control-socket wait,
+remote-capability cache wait, capability-bootstrap source, and direct remote
+helper-probe counters. While the run is active it also prints prefixed live
+remote ssh commands, remote probe commands, and ssh control-socket check/open
+commands before each execution so slow startup or remote-probe phases are
+visible in real time.
 .It Fl w
 uses zfs ra(w) send mode
 .It Fl Y
@@ -669,10 +720,9 @@ to
 .Pp
 Adaptive remote source snapshot-list metadata discovery
 .Pq Fl O No with Fl j No and Fl z
-may skip metadata compression so no-op or startup-bound runs avoid extra
-compression/decompression work before zxfer decides whether any snapshots
-actually need transfer. This does not change the compression behavior of real
-send/receive streams.
+uses the selected compression/decompression pipeline when ssh is active,
+including adaptive source-discovery runs before zxfer decides whether any
+snapshots actually need transfer.
 .It Fl Z
 Pass the zstd command to use during compression.
 .Op Fl O
@@ -930,7 +980,7 @@ in Ex9. Again, if using Solaris refer to
 .Cm -deFPv -O root@192.168.123.1 -R backup01/pools/storage/ storage
 .Pp
 .Sh ENVIRONMENT
-.Bl -tag -width ".Ev ZXFER_SECURE_PATH_APPEND"
+.Bl -tag -width ".Ev ZXFER_SSH_USER_KNOWN_HOSTS_FILE"
 .It Ev ZXFER_BACKUP_DIR
 Secure directory owned by root or the effective UID that holds `.zxfer_backup_info.*` metadata generated by
 .Fl k
@@ -938,7 +988,7 @@ and consumed by
 .Fl e .
 Defaults to
 .Pa /var/db/zxfer
-and must not be writable by unprivileged users.
+and must be an absolute path that is not writable by unprivileged users.
 .It Ev ZXFER_SECURE_PATH
 Overrides the whitelist of directories that zxfer trusts when it resolves
 .Xr zfs 8 ,
@@ -948,6 +998,13 @@ and other helper binaries. The default value is
 .Pa /sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin .
 Only absolute directories are honored so zxfer cannot be tricked into executing
 programs from the current working directory or other user-controlled paths.
+The computed allowlist also becomes the live runtime
+.Ev PATH ,
+and zxfer also exports the same value before remote capability handshakes,
+helper-discovery probes, backup-directory helpers, and backup-metadata helper
+scripts run, so every trusted helper directory that later bare command lookups
+may need must appear here or be added through
+.Ev ZXFER_SECURE_PATH_APPEND .
 .It Ev ZXFER_SECURE_PATH_APPEND
 Appends extra absolute directories to the secure PATH whitelist, allowing
 administrators to point zxfer at custom locations (both locally and on hosts
@@ -955,17 +1012,84 @@ referenced by
 .Fl O
 and
 .Fl T )
-without replacing the stock list.
+without replacing the stock list. These appended directories also become part
+of the exported runtime
+.Ev PATH .
+.It Ev ZXFER_SSH_BATCH_MODE
+Overrides the default
+.Ql yes
+value that zxfer passes as
+.Cm BatchMode
+for its own
+.Xr ssh 1
+connections.
+.It Ev ZXFER_SSH_STRICT_HOST_KEY_CHECKING
+Overrides the default
+.Ql yes
+value that zxfer passes as
+.Cm StrictHostKeyChecking
+for its own
+.Xr ssh 1
+connections.
+.It Ev ZXFER_SSH_USER_KNOWN_HOSTS_FILE
+Optional absolute path that zxfer passes as
+.Cm UserKnownHostsFile
+for its own
+.Xr ssh 1
+connections. When unset, zxfer still relies on the local
+.Xr ssh 1
+configuration and defaults for known-hosts file discovery even though it
+forces
+.Cm BatchMode=yes
+and
+.Cm StrictHostKeyChecking=yes .
+.It Ev ZXFER_SSH_USE_AMBIENT_CONFIG
+When set to
+.Ql 1 ,
+.Ql yes ,
+.Ql true ,
+or
+.Ql on ,
+zxfer stops adding its own
+.Cm BatchMode ,
+.Cm StrictHostKeyChecking ,
+and
+.Cm UserKnownHostsFile
+options, so remote connections fall back entirely to the ambient local
+.Xr ssh 1
+configuration.
 .It Ev ZXFER_ERROR_LOG
 Absolute path to a local file where zxfer should append the same delimited
 failure report that it writes to
 .Dv stderr
-on non-zero exits. The parent directory must already exist, any symlinked path
-component is refused, existing log files must be owned by root or the effective
-UID and already use mode 0600, and newly created log files are chmodded to
-0600. If zxfer cannot append the report it emits a warning to
+on non-zero exits. The parent directory must already exist, be owned by root
+or the effective UID, and not be writable by other users unless the sticky bit
+is set. Any symlinked path component is refused, existing log files must be
+owned by root or the effective UID and already use mode 0600, and zxfer stages
+appends through a sibling temporary file before the final rename. If zxfer
+cannot append the report it emits a warning to
 .Dv stderr
 but preserves the original zxfer exit status.
+.It Ev ZXFER_REDACT_FAILURE_REPORT_COMMANDS
+When set to
+.Ql 1 ,
+.Ql yes ,
+.Ql true ,
+or
+.Ql on ,
+zxfer replaces the
+.Dq invocation
+and
+.Dq last_command
+fields in structured failure reports with
+.Dq [redacted]
+on both
+.Dv stderr
+and any
+.Ev ZXFER_ERROR_LOG
+mirror. The default remains verbatim for compatibility, so operators should
+avoid putting secret-bearing hook strings or wrapper arguments directly on the
+zxfer command line unless this redaction mode is enabled.
 .It Ev TMPDIR
 Optional local scratch root for zxfer temporary files, FIFOs, and caches.
 When set, it must resolve to an absolute directory owned by root or the
@@ -1006,6 +1130,14 @@ using stable
 lines so operators can archive or post-process the output. When available, the
 report includes the failure class and stage, source and destination context,
 the original shell-quoted invocation, and the last command zxfer attempted.
+Raw ASCII control bytes inside report values are escaped before output so the
+structured block stays inert in terminals, pagers, and
+.Ev ZXFER_ERROR_LOG .
+Set
+.Ev ZXFER_REDACT_FAILURE_REPORT_COMMANDS
+to redact those last two fields as
+.Dq [redacted]
+when the command line itself may carry secrets.
 .Pp
 .Sh EXIT VALUES
 .Nm

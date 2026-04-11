@@ -58,6 +58,7 @@ setUp() {
 	: >"$TEST_TMPDIR/zxfer_stopsvcs.log"
 	: >"$TEST_TMPDIR/zxfer_newsnap.log"
 	: >"$TEST_TMPDIR/zfs_cmd.log"
+	unset ZXFER_BACKUP_DIR
 	STUB_STOPSVCS_LOG="$TEST_TMPDIR/zxfer_stopsvcs.log"
 	STUB_NEW_SNAP_LOG="$TEST_TMPDIR/zxfer_newsnap.log"
 	STUB_ZFS_CMD_LOG="$TEST_TMPDIR/zfs_cmd.log"
@@ -101,6 +102,7 @@ setUp() {
 	g_option_d_delete_destination_snapshots=0
 	g_option_F_force_rollback=""
 	g_option_P_transfer_property=0
+	g_option_k_backup_property_mode=0
 	g_option_o_override_property=""
 	g_destination="backup/target"
 	g_initial_source_had_trailing_slash=0
@@ -109,13 +111,21 @@ setUp() {
 	g_recursive_source_dataset_list=""
 	g_recursive_destination_extra_dataset_list=""
 	g_recursive_dest_list=""
+	g_zxfer_source_snapshot_record_cache_file=""
+	g_zxfer_destination_snapshot_record_cache_file=""
 	g_did_delete_dest_snapshots=0
 	g_last_common_snap=""
 	g_dest_has_snapshots=0
 	g_src_snapshot_transfer_list=""
 	g_actual_dest=""
 	g_backup_storage_root="$TEST_TMPDIR/backup_store"
+	g_backup_file_contents=""
+	g_pending_backup_file_contents=""
+	g_zxfer_post_seed_property_sources_result=""
+	g_zxfer_replication_iteration_list_result=""
+	g_zxfer_replication_file_read_result=""
 	g_zxfer_new_snapshot_name="zxfer_test_snapshot"
+	g_zxfer_source_pvs_raw=""
 	g_test_base_readonly_properties="type,mountpoint,creation"
 	g_LZFS="mock_zfs_tool"
 	g_dest_created_by_zxfer=0
@@ -231,6 +241,68 @@ test_normalize_source_destination_rejects_absolute_paths() {
 	assertEquals "Absolute destination paths should be rejected." "2" "$status_dest"
 }
 
+test_zxfer_read_replication_stage_file_preserves_runtime_readback_failures() {
+	stage_file="$TEST_TMPDIR/replication_stage_failure"
+	printf '%s\n' "tank/src" >"$stage_file"
+
+	output=$(
+		(
+			g_zxfer_replication_file_read_result="stale-replication-stage"
+			zxfer_read_runtime_artifact_file() {
+				return 27
+			}
+			zxfer_read_replication_stage_file "$stage_file" >/dev/null
+			printf 'status=%s\n' "$?"
+			printf 'scratch=<%s>\n' "$g_zxfer_replication_file_read_result"
+		)
+	)
+
+	assertContains "Replication stage-file reads should preserve runtime readback failures exactly." \
+		"$output" "status=27"
+	assertContains "Replication stage-file readback failures should clear the published scratch result." \
+		"$output" "scratch=<>"
+}
+
+test_current_destination_is_initial_source_dataset_matches_resolved_destination() {
+	output=$(
+		(
+			g_initial_source="tank/src"
+			g_actual_dest="backup/target/src"
+			zxfer_compute_actual_dest_for_source() {
+				printf '%s\n' "backup/target/src"
+			}
+			if zxfer_current_destination_is_initial_source_dataset; then
+				printf 'status=0\n'
+			else
+				printf 'status=%s\n' "$?"
+			fi
+		)
+	)
+
+	assertEquals "Current-destination checks should succeed when the resolved initial destination matches the active destination." \
+		"status=0" "$output"
+}
+
+test_current_destination_is_initial_source_dataset_fails_closed_when_resolution_fails() {
+	output=$(
+		(
+			g_initial_source="tank/src"
+			g_actual_dest="backup/target/src"
+			zxfer_compute_actual_dest_for_source() {
+				return 41
+			}
+			if zxfer_current_destination_is_initial_source_dataset; then
+				printf 'status=0\n'
+			else
+				printf 'status=%s\n' "$?"
+			fi
+		)
+	)
+
+	assertEquals "Current-destination checks should fail closed when destination resolution fails." \
+		"status=1" "$output"
+}
+
 test_set_actual_dest_without_trailing_slash_appends_relative_path() {
 	g_initial_source="tank/src"
 	g_destination="backup/target"
@@ -249,6 +321,17 @@ test_set_actual_dest_with_trailing_slash_preserves_destination_prefix() {
 	zxfer_set_actual_dest "tank/src/projects/beta"
 
 	assertEquals "Trailing slash should replicate directly under the destination root." "backup/target/projects/beta" "$g_actual_dest"
+}
+
+test_set_actual_dest_treats_regex_significant_source_names_as_literal_paths() {
+	g_initial_source="tank/app.v1"
+	g_destination="backup/target"
+	g_initial_source_had_trailing_slash=0
+
+	zxfer_set_actual_dest "tank/app.v1/projects.release"
+
+	assertEquals "Destination mapping should preserve dots in the source root and child dataset names as literal path components." \
+		"backup/target/app.v1/projects.release" "$g_actual_dest"
 }
 
 test_refresh_dataset_iteration_state_populates_recursive_list_when_not_recursive() {
@@ -796,6 +879,25 @@ test_relaunch_dry_run_previews_enable_commands_in_current_shell() {
 	assertEquals "Current-shell dry-run zxfer_relaunch should preview enable commands without executing svcadm." \
 		"Restarting service svc:/network/nfs/server
 Dry run: 'svcadm' 'enable' 'svc:/network/nfs/server'" "$(cat "$log")"
+}
+
+test_check_snapshot_rejects_snapshot_sources() {
+	set +e
+	output=$(
+		(
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_check_snapshot "tank/src@snap1"
+		)
+	)
+	status=$?
+
+	assertEquals "Snapshot-source validation should abort when the requested source is already a snapshot." \
+		1 "$status"
+	assertContains "Snapshot-source validation should explain why snapshot sources are rejected." \
+		"$output" "Snapshots are not allowed as a source."
 }
 
 test_newsnap_uses_recursive_snapshot_flag() {
@@ -1418,6 +1520,48 @@ EOF
 		"$output" "dest_has=1"
 }
 
+test_reconcile_live_destination_snapshot_state_refreshes_stale_common_snapshot_when_destination_already_has_snapshots() {
+	g_actual_dest="backup/target/src"
+	g_dest_has_snapshots=1
+	g_last_common_snap="tank/src@snap1	111"
+	g_src_snapshot_transfer_list=$(
+		cat <<'EOF'
+tank/src@snap2	222
+tank/src@snap3	333
+tank/src@snap4	444
+EOF
+	)
+
+	output=$(
+		(
+			zxfer_exists_destination() {
+				printf '1\n'
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
+					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
+					[ "$7" = "backup/target/src" ]; then
+					printf '%s\n' "backup/target/src@snap4	444"
+					return 0
+				fi
+				return 1
+			}
+
+			zxfer_reconcile_live_destination_snapshot_state
+			printf 'last=%s\n' "$g_last_common_snap"
+			printf 'remaining=%s\n' "$g_src_snapshot_transfer_list"
+			printf 'dest_has=%s\n' "$g_dest_has_snapshots"
+		)
+	)
+
+	assertContains "Live reconciliation should refresh a stale cached common snapshot even when destination snapshots were already detected earlier." \
+		"$output" "last=tank/src@snap4	444"
+	assertContains "Live reconciliation should clear the pending transfer list when the destination already has the final snapshot." \
+		"$output" "remaining="
+	assertContains "Refreshing a stale cached common snapshot should keep the destination marked as snapshotted." \
+		"$output" "dest_has=1"
+}
+
 test_reconcile_live_destination_snapshot_state_live_rechecks_cached_missing_children() {
 	g_initial_source="tank/src"
 	g_destination="backup/target"
@@ -1558,6 +1702,57 @@ test_copy_snapshots_live_recheck_requires_matching_guid() {
 		"$output" "Destination dataset [backup/target/src] has snapshots but none share a common guid with the source."
 	assertEquals "No send should be attempted when guid matching leaves an existing destination without a common snapshot." \
 		"" "$(cat "$log")"
+}
+
+test_copy_snapshots_skips_send_when_live_destination_already_has_final_snapshot() {
+	g_actual_dest="backup/target/src"
+	g_dest_has_snapshots=1
+	g_last_common_snap="tank/src@snap1	111"
+	g_src_snapshot_transfer_list=$(
+		cat <<'EOF'
+tank/src@snap2	222
+tank/src@snap3	333
+tank/src@snap4	444
+EOF
+	)
+	log="$TEST_TMPDIR/copy_live_tip_already_present.log"
+	: >"$log"
+
+	output=$(
+		(
+			COPY_LOG="$log"
+			zxfer_exists_destination() {
+				printf '1\n'
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
+					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
+					[ "$7" = "backup/target/src" ]; then
+					printf '%s\n' "backup/target/src@snap4	444"
+					return 0
+				fi
+				printf '%s\n' "$*" >>"$COPY_LOG"
+				return 0
+			}
+			zxfer_rollback_destination_to_last_common_snapshot() {
+				printf '%s\n' "rollback" >>"$COPY_LOG"
+			}
+			zxfer_zfs_send_receive() {
+				printf 'send %s %s %s %s\n' "$1" "$2" "$3" "$4" >>"$COPY_LOG"
+			}
+
+			zxfer_copy_snapshots
+			printf 'last=%s\n' "$g_last_common_snap"
+			printf 'remaining=%s\n' "$g_src_snapshot_transfer_list"
+		)
+	)
+
+	assertEquals "Copy planning should not roll back or resend when a live refresh confirms the destination already has the final snapshot." \
+		"" "$(cat "$log")"
+	assertContains "The live destination tip should replace the stale cached common snapshot before copy planning decides whether a send is needed." \
+		"$output" "last=tank/src@snap4	444"
+	assertContains "Copy planning should clear the remaining transfer list when the live destination already has the final snapshot." \
+		"$output" "remaining="
 }
 
 test_copy_snapshots_seeds_existing_destination_when_live_probe_confirms_no_snapshots() {
@@ -1816,6 +2011,12 @@ test_copy_snapshots_does_not_pre_rollback_after_deletions_without_force_flag() {
 			printf '1\n'
 		}
 		zxfer_run_destination_zfs_cmd() {
+			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
+				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
+				[ "$7" = "backup/target/src" ]; then
+				printf '%s\n' "backup/target/src@snap1"
+				return 0
+			fi
 			printf 'rollback %s\n' "$*" >>"$COPY_LOG"
 			return 0
 		}
@@ -1846,6 +2047,12 @@ test_copy_snapshots_does_not_pre_rollback_after_older_snapshot_deletions() {
 			printf '1\n'
 		}
 		zxfer_run_destination_zfs_cmd() {
+			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
+				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
+				[ "$7" = "backup/target/src" ]; then
+				printf '%s\n' "backup/target/src@snap1"
+				return 0
+			fi
 			printf 'rollback %s\n' "$*" >>"$COPY_LOG"
 			return 0
 		}
@@ -1908,6 +2115,25 @@ test_check_backup_storage_dir_if_needed_routes_local_and_remote() {
 		"$TEST_TMPDIR/remote_backup target.example" "$(cat "$remote_log")"
 }
 
+test_check_backup_storage_dir_if_needed_refreshes_backup_root_from_environment() {
+	output=$(
+		(
+			g_option_k_backup_property_mode=1
+			g_option_n_dryrun=1
+			g_option_v_verbose=1
+			g_option_T_target_host=""
+			g_backup_storage_root="$TEST_TMPDIR/stale_backup"
+			ZXFER_BACKUP_DIR="$TEST_TMPDIR/refreshed backup"
+			zxfer_check_backup_storage_dir_if_needed
+		) 2>&1
+	)
+
+	assertContains "Backup-dir preflight should refresh the root from ZXFER_BACKUP_DIR before rendering dry-run output." \
+		"$output" "'$TEST_TMPDIR/refreshed backup'"
+	assertNotContains "Backup-dir preflight should not keep previewing a stale cached backup root after ZXFER_BACKUP_DIR changes." \
+		"$output" "'$TEST_TMPDIR/stale_backup'"
+}
+
 test_check_backup_storage_dir_if_needed_dry_run_previews_without_mutating_dirs() {
 	local_log="$TEST_TMPDIR/check_backup_dry_run_local.log"
 	remote_log="$TEST_TMPDIR/check_backup_dry_run_remote.log"
@@ -1931,6 +2157,8 @@ test_check_backup_storage_dir_if_needed_dry_run_previews_without_mutating_dirs()
 			g_option_T_target_host=""
 			g_backup_storage_root="$TEST_TMPDIR/local backup"
 			zxfer_check_backup_storage_dir_if_needed
+			g_zxfer_dependency_path="/stale/secure/path"
+			ZXFER_SECURE_PATH="/fresh/secure/path:/usr/bin"
 			g_option_T_target_host="target.example doas"
 			g_backup_storage_root="/var/db/zxfer remote"
 			zxfer_check_backup_storage_dir_if_needed
@@ -1944,13 +2172,37 @@ test_check_backup_storage_dir_if_needed_dry_run_previews_without_mutating_dirs()
 	assertContains "Dry-run backup preflight should preview the local secure backup-dir creation command." \
 		"$output" "Dry run: umask 077; 'mkdir' '-p' '$TEST_TMPDIR/local backup'; 'chmod' '700' '$TEST_TMPDIR/local backup'"
 	assertContains "Dry-run backup preflight should preview the remote ssh transport instead of executing it." \
-		"$output" "Dry run: '/usr/bin/ssh' 'target.example'"
+		"$output" "Dry run: '/usr/bin/ssh' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' 'target.example'"
 	assertContains "Dry-run backup preflight should preserve remote wrapper tokens in the rendered preview." \
 		"$output" "doas"
+	assertContains "Dry-run remote backup preflight should preview the secure-PATH prologue that live execution now applies." \
+		"$output" "PATH="
+	assertContains "Dry-run remote backup preflight should refresh the secure-PATH wrapper from ZXFER_SECURE_PATH instead of a stale cached value." \
+		"$output" "/fresh/secure/path:/usr/bin"
+	assertNotContains "Dry-run remote backup preflight should not keep previewing a stale cached secure PATH after ZXFER_SECURE_PATH changes." \
+		"$output" "/stale/secure/path"
+	assertContains "Dry-run remote backup preflight should preview the remote symlink guard that live execution enforces." \
+		"$output" "Refusing to use symlinked zxfer backup directory."
 	assertContains "Dry-run backup preflight should preview the remote secure backup-dir path." \
 		"$output" "'/var/db/zxfer remote'"
 	assertContains "Dry-run backup preflight should preview the remote chmod command." \
 		"$output" "'chmod'"
+}
+
+test_check_backup_storage_dir_if_needed_rejects_relative_backup_dir_override() {
+	zxfer_test_capture_subshell "
+		g_option_k_backup_property_mode=1
+		g_option_n_dryrun=1
+		g_option_v_verbose=1
+		g_backup_storage_root='$TEST_TMPDIR/stale_backup'
+		ZXFER_BACKUP_DIR='relative-backups'
+		zxfer_check_backup_storage_dir_if_needed
+	"
+
+	assertEquals "Backup-dir preflight should fail closed when ZXFER_BACKUP_DIR is relative." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Relative backup-root preflight failures should explain the absolute-path requirement." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ZXFER_BACKUP_DIR must be an absolute path"
 }
 
 test_initialize_replication_context_runs_restore_and_unsupported_scan() {
@@ -1981,6 +2233,67 @@ test_initialize_replication_context_runs_restore_and_unsupported_scan() {
 list
 unsupported
 recursive=tank/src" "$(cat "$log")"
+}
+
+test_initialize_replication_context_skips_live_validation_in_dry_run() {
+	log="$TEST_TMPDIR/init_context_dry_run.log"
+	: >"$log"
+	g_initial_source="tank/src"
+	g_option_R_recursive=""
+
+	output=$(
+		(
+			CTX_LOG="$log"
+			zxfer_echoV() {
+				printf '%s\n' "$*"
+			}
+			zxfer_get_backup_properties() {
+				printf 'backup\n' >>"$CTX_LOG"
+			}
+			zxfer_get_zfs_list() {
+				printf 'list\n' >>"$CTX_LOG"
+			}
+			zxfer_calculate_unsupported_properties() {
+				printf 'unsupported\n' >>"$CTX_LOG"
+			}
+			g_option_n_dryrun=1
+			g_option_e_restore_property_mode=1
+			g_option_U_skip_unsupported_properties=1
+			g_recursive_source_dataset_list="stale-source stale-child"
+			g_recursive_destination_extra_dataset_list="stale-extra"
+			g_recursive_dest_list="stale-dest"
+			g_lzfs_list_hr_snap="stale-source@snap"
+			g_rzfs_list_hr_snap="stale-dest@snap"
+			g_source_snapshot_list_cmd="stale-command"
+			g_destination_existence_cache_root="stale-root"
+			g_zxfer_source_snapshot_record_index_ready=1
+			zxfer_initialize_replication_context
+			{
+				printf 'recursive=%s\n' "$g_recursive_source_list"
+				printf 'datasets=%s\n' "$g_recursive_source_dataset_list"
+				printf 'extras=%s\n' "${g_recursive_destination_extra_dataset_list:-}"
+				printf 'dests=%s\n' "${g_recursive_dest_list:-}"
+				printf 'source_snaps=%s\n' "${g_lzfs_list_hr_snap:-}"
+				printf 'dest_snaps=%s\n' "${g_rzfs_list_hr_snap:-}"
+				printf 'source_cmd=%s\n' "${g_source_snapshot_list_cmd:-}"
+				printf 'dest_cache_root=%s\n' "${g_destination_existence_cache_root:-}"
+				printf 'source_index_ready=%s\n' "${g_zxfer_source_snapshot_record_index_ready:-}"
+			} >>"$CTX_LOG"
+		)
+	)
+
+	assertEquals "Dry-run initialization should not perform live backup restore, discovery, or unsupported-property scans." \
+		"recursive=tank/src
+datasets=tank/src
+extras=
+dests=
+source_snaps=
+dest_snaps=
+source_cmd=
+dest_cache_root=
+source_index_ready=0" "$(cat "$log")"
+	assertContains "Dry-run initialization should explain that the live validation stages are skipped." \
+		"$output" "Dry run: skipping live backup-restore validation, snapshot discovery, and unsupported-property detection."
 }
 
 test_run_zfs_mode_calls_steps_in_order_and_relaunches_for_migration() {
@@ -2014,6 +2327,122 @@ prepare
 grandfather
 copy
 zxfer_relaunch" "$(cat "$log")"
+}
+
+test_run_zfs_mode_dry_run_skips_live_planning_and_copy() {
+	log="$TEST_TMPDIR/zxfer_run_zfs_mode_dry_run.log"
+	: >"$log"
+
+	output=$(
+		(
+			RUN_LOG="$log"
+			zxfer_echoV() {
+				printf '%s\n' "$*"
+			}
+			zxfer_resolve_initial_source_from_options() {
+				printf 'resolve\n' >>"$RUN_LOG"
+				g_initial_source="tank/src"
+			}
+			zxfer_normalize_source_destination_paths() { printf 'normalize\n' >>"$RUN_LOG"; }
+			zxfer_validate_zfs_mode_preconditions() { printf 'validate\n' >>"$RUN_LOG"; }
+			zxfer_check_backup_storage_dir_if_needed() { printf 'backupdir\n' >>"$RUN_LOG"; }
+			zxfer_initialize_replication_context() { printf 'context\n' >>"$RUN_LOG"; }
+			zxfer_maybe_capture_preflight_snapshot() { printf 'snapshot\n' >>"$RUN_LOG"; }
+			zxfer_prepare_migration_services() { printf 'prepare\n' >>"$RUN_LOG"; }
+			zxfer_perform_grandfather_protection_checks() { printf 'grandfather\n' >>"$RUN_LOG"; }
+			zxfer_copy_filesystems() { printf 'copy\n' >>"$RUN_LOG"; }
+			zxfer_relaunch() { printf 'zxfer_relaunch\n' >>"$RUN_LOG"; }
+			g_option_n_dryrun=1
+			g_option_s_make_snapshot=1
+			g_option_D_display_progress_bar="pv -s %%size%% -N %%title%%"
+			zxfer_run_zfs_mode
+		)
+	)
+
+	assertEquals "Strict dry-run should stop before live replication planning, grandfather checks, data copy, or zxfer_relaunch." \
+		"resolve
+normalize
+validate
+backupdir
+snapshot
+prepare" "$(cat "$log")"
+	assertContains "Strict dry-run should explain that live planning is skipped." \
+		"$output" "Dry run: skipping live replication-state validation and command planning."
+	assertContains "Strict dry-run should explain that live %%size%% discovery is skipped." \
+		"$output" "Dry run: skipping live %%size%% progress estimate discovery."
+	assertContains "Strict dry-run should explain that send/receive rendering is skipped without live discovery." \
+		"$output" "Dry run: send/receive and property-reconcile commands require live snapshot discovery and are not rendered."
+}
+
+test_preview_zfs_mode_dry_run_overwrites_stale_recursive_state() {
+	output=$(
+		(
+			zxfer_echoV() {
+				printf '%s\n' "$*"
+			}
+			zxfer_maybe_capture_preflight_snapshot() {
+				printf 'snapshot_list=<%s>\n' "$g_recursive_source_list"
+			}
+			zxfer_prepare_migration_services() {
+				printf 'prepare_list=<%s>\n' "$g_recursive_source_list"
+				printf 'prepare_datasets=<%s>\n' "$g_recursive_source_dataset_list"
+				printf 'prepare_extras=<%s>\n' "${g_recursive_destination_extra_dataset_list:-}"
+				printf 'prepare_dest=<%s>\n' "${g_recursive_dest_list:-}"
+			}
+			g_initial_source="tank/src"
+			g_option_R_recursive="tank/src"
+			g_recursive_source_list="stale/src stale/src/child"
+			g_recursive_source_dataset_list="stale/src stale/src/child"
+			g_recursive_destination_extra_dataset_list="stale-extra"
+			g_recursive_dest_list="stale-dest"
+			g_lzfs_list_hr_snap="stale-source@snap"
+			g_rzfs_list_hr_snap="stale-dest@snap"
+			g_source_snapshot_list_cmd="stale-command"
+			g_destination_existence_cache_root="stale-root"
+			g_zxfer_source_snapshot_record_index_ready=1
+			zxfer_preview_zfs_mode_dry_run
+			printf 'after_list=<%s>\n' "$g_recursive_source_list"
+			printf 'after_datasets=<%s>\n' "$g_recursive_source_dataset_list"
+			printf 'after_extras=<%s>\n' "${g_recursive_destination_extra_dataset_list:-}"
+			printf 'after_dest=<%s>\n' "${g_recursive_dest_list:-}"
+			printf 'after_source_snaps=<%s>\n' "${g_lzfs_list_hr_snap:-}"
+			printf 'after_dest_snaps=<%s>\n' "${g_rzfs_list_hr_snap:-}"
+			printf 'after_source_cmd=<%s>\n' "${g_source_snapshot_list_cmd:-}"
+			printf 'after_dest_cache_root=<%s>\n' "${g_destination_existence_cache_root:-}"
+			printf 'after_source_index_ready=<%s>\n' "${g_zxfer_source_snapshot_record_index_ready:-}"
+		)
+	)
+
+	assertContains "Strict dry-run preview should explain that recursive descendant discovery is skipped." \
+		"$output" "Dry run: recursive descendant discovery is skipped; previewing only the explicitly requested source dataset."
+	assertContains "Strict dry-run preview should replace stale recursive source state before the snapshot preview runs." \
+		"$output" "snapshot_list=<tank/src>"
+	assertContains "Strict dry-run preview should expose only the explicit source dataset to later preview helpers." \
+		"$output" "prepare_list=<tank/src>"
+	assertContains "Strict dry-run preview should reset the cached recursive source dataset list to the explicit source dataset." \
+		"$output" "prepare_datasets=<tank/src>"
+	assertContains "Strict dry-run preview should clear stale destination-extra datasets." \
+		"$output" "prepare_extras=<>"
+	assertContains "Strict dry-run preview should clear stale destination dataset caches." \
+		"$output" "prepare_dest=<>"
+	assertContains "Strict dry-run preview should leave the current-shell recursive source list normalized to the explicit source dataset." \
+		"$output" "after_list=<tank/src>"
+	assertContains "Strict dry-run preview should leave the current-shell recursive source dataset cache normalized to the explicit source dataset." \
+		"$output" "after_datasets=<tank/src>"
+	assertContains "Strict dry-run preview should leave destination-extra datasets cleared in the current shell." \
+		"$output" "after_extras=<>"
+	assertContains "Strict dry-run preview should leave destination dataset caches cleared in the current shell." \
+		"$output" "after_dest=<>"
+	assertContains "Strict dry-run preview should clear stale source snapshot caches." \
+		"$output" "after_source_snaps=<>"
+	assertContains "Strict dry-run preview should clear stale destination snapshot caches." \
+		"$output" "after_dest_snaps=<>"
+	assertContains "Strict dry-run preview should clear the stale rendered source snapshot command." \
+		"$output" "after_source_cmd=<>"
+	assertContains "Strict dry-run preview should clear the destination existence cache root." \
+		"$output" "after_dest_cache_root=<>"
+	assertContains "Strict dry-run preview should reset snapshot-record index readiness." \
+		"$output" "after_source_index_ready=<0>"
 }
 
 test_perform_grandfather_protection_checks_skips_when_flag_unset() {
@@ -2266,6 +2695,340 @@ copy tank/src/child"
 		"$expected" "$(cat "$log")"
 }
 
+test_copy_filesystems_flushes_backup_metadata_after_snapshot_copy() {
+	g_option_P_transfer_property=1
+	g_option_k_backup_property_mode=1
+	g_option_R_recursive="tank/src"
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_source_dataset_list="$g_recursive_source_list"
+	log="$TEST_TMPDIR/copy_filesystems_backup_flush.log"
+	rm -f "$log"
+
+	(
+		FLUSH_LOG="$log"
+		zxfer_set_actual_dest() {
+			g_actual_dest="backup/target/src"
+			printf 'set %s\n' "$1" >>"$FLUSH_LOG"
+		}
+		zxfer_inspect_delete_snap() {
+			printf 'inspect %s %s\n' "$1" "$2" >>"$FLUSH_LOG"
+		}
+		zxfer_transfer_properties() {
+			g_backup_file_contents=";tank/src,backup/target/src,compression=lz4=local"
+			printf 'props %s\n' "$1" >>"$FLUSH_LOG"
+		}
+		zxfer_copy_snapshots() {
+			printf 'copy %s\n' "$g_actual_dest" >>"$FLUSH_LOG"
+		}
+		zxfer_flush_captured_backup_metadata_if_live() {
+			printf 'flush %s\n' "$g_backup_file_contents" >>"$FLUSH_LOG"
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait %s\n' "$1" >>"$FLUSH_LOG"
+		}
+
+		zxfer_copy_filesystems
+	)
+
+	assertEquals "Live backup metadata flushes should happen after snapshot copy orchestration succeeds, not during the property-transfer helper." \
+		"set tank/src
+inspect 0 tank/src
+props tank/src
+copy backup/target/src
+flush ;tank/src,backup/target/src,compression=lz4=local
+wait final sync" "$(cat "$log")"
+}
+
+test_copy_filesystems_does_not_flush_backup_metadata_when_snapshot_copy_fails() {
+	g_option_P_transfer_property=1
+	g_option_k_backup_property_mode=1
+	g_option_R_recursive="tank/src"
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_source_dataset_list="$g_recursive_source_list"
+	log="$TEST_TMPDIR/copy_filesystems_backup_flush_failure.log"
+	rm -f "$log"
+
+	set +e
+	output=$(
+		(
+			FLUSH_LOG="$log"
+			zxfer_set_actual_dest() {
+				g_actual_dest="backup/target/src"
+				printf 'set %s\n' "$1" >>"$FLUSH_LOG"
+			}
+			zxfer_inspect_delete_snap() {
+				printf 'inspect %s %s\n' "$1" "$2" >>"$FLUSH_LOG"
+			}
+			zxfer_transfer_properties() {
+				g_backup_file_contents=";tank/src,backup/target/src,compression=lz4=local"
+				printf 'props %s\n' "$1" >>"$FLUSH_LOG"
+			}
+			zxfer_copy_snapshots() {
+				printf 'copy %s\n' "$g_actual_dest" >>"$FLUSH_LOG"
+				zxfer_throw_error "copy failed"
+			}
+			zxfer_flush_captured_backup_metadata_if_live() {
+				printf 'unexpected flush %s\n' "$g_backup_file_contents" >>"$FLUSH_LOG"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_copy_filesystems
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Snapshot-copy failures should still abort the property-enabled copy loop." 1 "$status"
+	assertContains "Snapshot-copy failures should preserve the copy failure text." \
+		"$output" "copy failed"
+	assertNotContains "Backup metadata should not flush when snapshot copy fails before the dataset completes." \
+		"$(cat "$log")" "unexpected flush"
+}
+
+test_copy_filesystems_defers_backup_metadata_flush_until_final_sync_when_send_jobs_are_pending() {
+	g_option_P_transfer_property=1
+	g_option_k_backup_property_mode=1
+	g_option_R_recursive="tank/src"
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_source_dataset_list="$g_recursive_source_list"
+	log="$TEST_TMPDIR/copy_filesystems_backup_flush_deferred.log"
+	rm -f "$log"
+
+	(
+		FLUSH_LOG="$log"
+		zxfer_set_actual_dest() {
+			g_actual_dest="backup/target/src"
+			printf 'set %s\n' "$1" >>"$FLUSH_LOG"
+		}
+		zxfer_inspect_delete_snap() {
+			printf 'inspect %s %s\n' "$1" "$2" >>"$FLUSH_LOG"
+		}
+		zxfer_transfer_properties() {
+			g_backup_file_contents=";tank/src,backup/target/src,compression=lz4=local"
+			printf 'props %s\n' "$1" >>"$FLUSH_LOG"
+		}
+		zxfer_copy_snapshots() {
+			g_zfs_send_job_pids="12345"
+			printf 'copy %s\n' "$g_actual_dest" >>"$FLUSH_LOG"
+		}
+		zxfer_flush_captured_backup_metadata_if_live() {
+			printf 'flush %s\n' "$g_backup_file_contents" >>"$FLUSH_LOG"
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait %s\n' "$1" >>"$FLUSH_LOG"
+			g_zfs_send_job_pids=""
+		}
+
+		zxfer_copy_filesystems
+	)
+
+	assertEquals "When background send jobs are still pending, backup metadata flush should wait until final sync confirms they have finished." \
+		"set tank/src
+inspect 0 tank/src
+props tank/src
+copy backup/target/src
+wait final sync
+flush ;tank/src,backup/target/src,compression=lz4=local" "$(cat "$log")"
+}
+
+test_copy_filesystems_defers_backup_metadata_flush_until_post_seed_reconcile_finishes() {
+	g_option_P_transfer_property=1
+	g_option_k_backup_property_mode=1
+	g_option_R_recursive="tank/src"
+	g_option_n_dryrun=0
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_source_dataset_list="$g_recursive_source_list"
+	log="$TEST_TMPDIR/copy_filesystems_backup_flush_post_seed.log"
+	rm -f "$log"
+
+	(
+		FLUSH_LOG="$log"
+		zxfer_set_actual_dest() {
+			g_actual_dest="backup/target/src"
+			printf 'set %s\n' "$1" >>"$FLUSH_LOG"
+		}
+		zxfer_inspect_delete_snap() {
+			printf 'inspect %s %s\n' "$1" "$2" >>"$FLUSH_LOG"
+		}
+		zxfer_transfer_properties() {
+			g_zxfer_source_pvs_raw="compression=lz4=local"
+			g_backup_file_contents=";tank/src,backup/target/src,compression=lz4=local"
+			printf 'props %s skip=%s\n' "$1" "${2:-0}" >>"$FLUSH_LOG"
+		}
+		zxfer_copy_snapshots() {
+			g_dest_seed_requires_property_reconcile=1
+			printf 'copy %s\n' "$g_actual_dest" >>"$FLUSH_LOG"
+		}
+		zxfer_note_destination_dataset_exists() {
+			printf 'note %s\n' "$1" >>"$FLUSH_LOG"
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait %s\n' "$1" >>"$FLUSH_LOG"
+		}
+		zxfer_reset_destination_property_iteration_cache() {
+			printf 'reset\n' >>"$FLUSH_LOG"
+		}
+		zxfer_flush_captured_backup_metadata_if_live() {
+			printf 'flush %s\n' "$g_backup_file_contents" >>"$FLUSH_LOG"
+		}
+
+		zxfer_copy_filesystems
+	)
+
+	assertEquals "Seeded destinations should flush buffered backup metadata only after the deferred post-seed property reconcile succeeds." \
+		"set tank/src
+inspect 0 tank/src
+props tank/src skip=0
+copy backup/target/src
+note backup/target/src
+wait final sync
+reset
+set tank/src
+props tank/src skip=1
+flush ;tank/src,backup/target/src,compression=lz4=local" "$(cat "$log")"
+}
+
+test_copy_filesystems_does_not_flush_backup_metadata_when_post_seed_reconcile_fails() {
+	g_option_P_transfer_property=1
+	g_option_k_backup_property_mode=1
+	g_option_R_recursive="tank/src"
+	g_option_n_dryrun=0
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_source_dataset_list="$g_recursive_source_list"
+	log="$TEST_TMPDIR/copy_filesystems_backup_flush_post_seed_failure.log"
+	rm -f "$log"
+
+	set +e
+	output=$(
+		(
+			FLUSH_LOG="$log"
+			zxfer_set_actual_dest() {
+				g_actual_dest="backup/target/src"
+				printf 'set %s\n' "$1" >>"$FLUSH_LOG"
+			}
+			zxfer_inspect_delete_snap() {
+				printf 'inspect %s %s\n' "$1" "$2" >>"$FLUSH_LOG"
+			}
+			zxfer_transfer_properties() {
+				g_backup_file_contents=";tank/src,backup/target/src,compression=lz4=local"
+				printf 'props %s skip=%s\n' "$1" "${2:-0}" >>"$FLUSH_LOG"
+				if [ "${2:-0}" -eq 1 ]; then
+					zxfer_throw_error "post-seed reconcile failed"
+				fi
+			}
+			zxfer_copy_snapshots() {
+				g_dest_seed_requires_property_reconcile=1
+				printf 'copy %s\n' "$g_actual_dest" >>"$FLUSH_LOG"
+			}
+			zxfer_note_destination_dataset_exists() {
+				printf 'note %s\n' "$1" >>"$FLUSH_LOG"
+			}
+			zxfer_wait_for_zfs_send_jobs() {
+				printf 'wait %s\n' "$1" >>"$FLUSH_LOG"
+			}
+			zxfer_reset_destination_property_iteration_cache() {
+				printf 'reset\n' >>"$FLUSH_LOG"
+			}
+			zxfer_flush_captured_backup_metadata_if_live() {
+				printf 'unexpected flush %s\n' "$g_backup_file_contents" >>"$FLUSH_LOG"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+
+			zxfer_copy_filesystems
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Post-seed property-reconcile failures should still abort the copy loop." 1 "$status"
+	assertContains "Post-seed reconcile failures should preserve the property error." \
+		"$output" "post-seed reconcile failed"
+	assertNotContains "Seeded destinations should not flush backup metadata before the deferred property reconcile succeeds." \
+		"$(cat "$log")" "unexpected flush"
+}
+
+test_copy_filesystems_does_not_flush_seeded_rows_during_later_completed_datasets() {
+	g_option_P_transfer_property=1
+	g_option_k_backup_property_mode=1
+	g_option_R_recursive="tank/src"
+	g_option_n_dryrun=0
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src
+tank/src/child"
+	g_recursive_source_dataset_list="$g_recursive_source_list"
+	log="$TEST_TMPDIR/copy_filesystems_backup_pending_mix.log"
+	rm -f "$log"
+
+	(
+		FLUSH_LOG="$log"
+		zxfer_set_actual_dest() {
+			case "$1" in
+			tank/src) g_actual_dest="backup/target/src" ;;
+			tank/src/child) g_actual_dest="backup/target/src/child" ;;
+			esac
+			printf 'set %s\n' "$1" >>"$FLUSH_LOG"
+		}
+		zxfer_inspect_delete_snap() {
+			printf 'inspect %s %s\n' "$1" "$2" >>"$FLUSH_LOG"
+		}
+		zxfer_transfer_properties() {
+			case "$1" in
+			tank/src) g_zxfer_source_pvs_raw="compression=lz4=local" ;;
+			tank/src/child) g_zxfer_source_pvs_raw="quota=1G=local" ;;
+			esac
+			zxfer_capture_backup_metadata_for_completed_transfer "$1" "$g_actual_dest" "$g_zxfer_source_pvs_raw" "${2:-0}"
+			printf 'props %s skip=%s live=%s pending=%s\n' "$1" "${2:-0}" \
+				"${g_backup_file_contents:-}" "${g_pending_backup_file_contents:-}" >>"$FLUSH_LOG"
+		}
+		zxfer_copy_snapshots() {
+			case "$g_actual_dest" in
+			backup/target/src) g_dest_seed_requires_property_reconcile=1 ;;
+			backup/target/src/child) g_dest_seed_requires_property_reconcile=0 ;;
+			esac
+			printf 'copy %s\n' "$g_actual_dest" >>"$FLUSH_LOG"
+		}
+		zxfer_note_destination_dataset_exists() {
+			printf 'note %s\n' "$1" >>"$FLUSH_LOG"
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait %s\n' "$1" >>"$FLUSH_LOG"
+		}
+		zxfer_reset_destination_property_iteration_cache() {
+			printf 'reset\n' >>"$FLUSH_LOG"
+		}
+		zxfer_flush_captured_backup_metadata_if_live() {
+			printf 'flush live=%s pending=%s\n' "${g_backup_file_contents:-}" "${g_pending_backup_file_contents:-}" >>"$FLUSH_LOG"
+		}
+
+		zxfer_copy_filesystems
+	)
+
+	assertEquals "A later completed dataset should not flush an earlier seeded dataset's deferred backup row before post-seed reconcile finishes." \
+		"set tank/src
+inspect 0 tank/src
+props tank/src skip=0 live=;tank/src,backup/target/src,compression=lz4=local pending=
+copy backup/target/src
+note backup/target/src
+set tank/src/child
+inspect 0 tank/src/child
+props tank/src/child skip=0 live=;tank/src/child,backup/target/src/child,quota=1G=local pending=;tank/src,backup/target/src,compression=lz4=local
+copy backup/target/src/child
+flush live=;tank/src/child,backup/target/src/child,quota=1G=local pending=;tank/src,backup/target/src,compression=lz4=local
+wait final sync
+reset
+set tank/src
+props tank/src skip=1 live=;tank/src/child,backup/target/src/child,quota=1G=local pending=;tank/src,backup/target/src,compression=lz4=local
+flush live=;tank/src/child,backup/target/src/child,quota=1G=local;tank/src,backup/target/src,compression=lz4=local pending=" "$(cat "$log")"
+}
+
 test_copy_filesystems_reconciles_properties_after_seeding_created_destination() {
 	g_option_P_transfer_property=1
 	g_option_R_recursive="tank/src"
@@ -2324,6 +3087,23 @@ set tank/src/child
 props tank/src/child created=1 skip=1 dest_present=1"
 	assertEquals "Created destinations should receive a second property reconciliation after the seed snapshot is received." \
 		"$expected" "$(cat "$log")"
+}
+
+test_build_replication_iteration_list_merges_sources_in_current_shell() {
+	g_option_R_recursive="tank/src"
+	g_option_d_delete_destination_snapshots=1
+	g_recursive_source_list="tank/src"
+	g_recursive_source_dataset_list="tank/src
+tank/src/child"
+	g_recursive_destination_extra_dataset_list="tank/src/child
+tank/src/extra"
+
+	zxfer_build_replication_iteration_list 1
+
+	assertEquals "Recursive property and delete planning should build the merged iteration list in current-shell scratch." \
+		"tank/src
+tank/src/child
+tank/src/extra" "$g_zxfer_replication_iteration_list_result"
 }
 
 test_copy_filesystems_merges_iteration_sources_and_deduplicates_post_seed_reconcile_in_current_shell() {
@@ -2396,6 +3176,100 @@ set tank/src/child
 props tank/src/child skip=1"
 	assertEquals "Recursive property and delete planning should iterate over the union of source deltas, source datasets, and destination-only deltas, then reconcile each seeded dataset once." \
 		"$expected" "$(cat "$log")"
+}
+
+test_copy_filesystems_rethrows_iteration_list_dedupe_failures() {
+	g_option_P_transfer_property=1
+	g_option_R_recursive="tank/src"
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_source_dataset_list="tank/src
+tank/src/child"
+	g_recursive_destination_extra_dataset_list="tank/src/extra"
+	log="$TEST_TMPDIR/iteration_list_dedupe_failure.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			ITERATION_LOG="$log"
+			sort() {
+				printf '%s\n' "sort failed" >&2
+				return 9
+			}
+			zxfer_set_actual_dest() {
+				printf 'set %s\n' "$1" >>"$ITERATION_LOG"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+
+			zxfer_copy_filesystems
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Iteration-list dedupe failures should abort the copy loop." \
+		"1" "$status"
+	assertContains "Iteration-list dedupe failures should preserve the underlying sort error." \
+		"$output" "sort failed"
+	assertContains "Iteration-list dedupe failures should be reported with iteration-list context." \
+		"$output" "Failed to prepare replication dataset iteration list."
+	assertEquals "Iteration-list dedupe failures should stop before dataset iteration begins." \
+		"" "$(cat "$log")"
+}
+
+test_copy_filesystems_rethrows_iteration_list_readback_failures() {
+	g_option_P_transfer_property=1
+	g_option_R_recursive="tank/src"
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_source_dataset_list="tank/src
+tank/src/child"
+	g_recursive_destination_extra_dataset_list="tank/src/extra"
+	log="$TEST_TMPDIR/iteration_list_readback_failure.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			ITERATION_LOG="$log"
+			call_count=0
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/iteration-readback-$call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			cat() {
+				if [ "$1" = "$TEST_TMPDIR/iteration-readback-3.tmp" ]; then
+					printf '%s\n' "read failed" >&2
+					return 9
+				fi
+				command cat "$@"
+			}
+			zxfer_set_actual_dest() {
+				printf 'set %s\n' "$1" >>"$ITERATION_LOG"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+
+			zxfer_copy_filesystems
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Iteration-list staged readback failures should abort the copy loop." \
+		"1" "$status"
+	assertContains "Iteration-list staged readback failures should preserve the underlying readback error." \
+		"$output" "read failed"
+	assertContains "Iteration-list staged readback failures should be reported with iteration-list context." \
+		"$output" "Failed to prepare replication dataset iteration list."
+	assertEquals "Iteration-list staged readback failures should stop before dataset iteration begins." \
+		"" "$(cat "$log")"
 }
 
 test_copy_filesystems_refreshes_property_tree_prefetch_context_before_iteration() {
@@ -2578,6 +3452,232 @@ props skip=1" "$(cat "$log")"
 	. "$ZXFER_ROOT/src/zxfer_property_cache.sh"
 	# shellcheck source=src/zxfer_replication.sh
 	. "$ZXFER_ROOT/src/zxfer_replication.sh"
+}
+
+test_copy_filesystems_rethrows_post_seed_queue_tempfile_failures() {
+	g_option_P_transfer_property=1
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	log="$TEST_TMPDIR/post_seed_queue_tempfile_failure.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			QUEUE_LOG="$log"
+			zxfer_build_replication_iteration_list() {
+				g_zxfer_replication_iteration_list_result="tank/src"
+			}
+			zxfer_get_temp_file() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+
+			zxfer_copy_filesystems
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Post-seed queue temp-file allocation failures should abort the copy loop." \
+		"1" "$status"
+	assertContains "Post-seed queue temp-file allocation failures should preserve the temp-file error." \
+		"$output" "Error creating temporary file."
+	assertEquals "Post-seed queue temp-file allocation failures should stop before any dataset work begins." \
+		"" "$(cat "$log")"
+}
+
+test_copy_filesystems_rethrows_post_seed_queue_append_failures() {
+	g_option_P_transfer_property=1
+	g_option_n_dryrun=0
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_dest_list=""
+	log="$TEST_TMPDIR/post_seed_queue_append_failure.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			QUEUE_LOG="$log"
+			zxfer_set_actual_dest() {
+				g_actual_dest="backup/target/src"
+				printf 'set %s\n' "$1" >>"$QUEUE_LOG"
+			}
+			zxfer_inspect_delete_snap() {
+				printf 'inspect %s %s\n' "$1" "$2" >>"$QUEUE_LOG"
+			}
+			zxfer_transfer_properties() {
+				g_zxfer_source_pvs_raw="compression=lz4=local"
+				printf 'props %s skip=%s\n' "$1" "${2:-0}" >>"$QUEUE_LOG"
+			}
+			zxfer_copy_snapshots() {
+				g_dest_seed_requires_property_reconcile=1
+				printf 'copy %s\n' "$g_actual_dest" >>"$QUEUE_LOG"
+			}
+			zxfer_note_destination_dataset_exists() {
+				printf 'note %s\n' "$1" >>"$QUEUE_LOG"
+			}
+			zxfer_append_post_seed_property_source() {
+				return 1
+			}
+			zxfer_wait_for_zfs_send_jobs() {
+				printf 'wait %s\n' "$1" >>"$QUEUE_LOG"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+
+			zxfer_copy_filesystems
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Post-seed queue append failures should abort the copy loop." \
+		"1" "$status"
+	assertContains "Post-seed queue append failures should identify the dataset that could not be queued." \
+		"$output" "Failed to queue post-seed property reconcile source [tank/src]."
+	assertNotContains "Post-seed queue append failures should stop before final sync or the deferred reconcile pass." \
+		"$(cat "$log")" "wait final sync"
+	assertNotContains "Post-seed queue append failures should not run the second property pass." \
+		"$(cat "$log")" "skip=1"
+}
+
+test_copy_filesystems_rethrows_post_seed_queue_dedupe_failures() {
+	g_option_P_transfer_property=1
+	g_option_n_dryrun=0
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_dest_list=""
+	log="$TEST_TMPDIR/post_seed_queue_dedupe_failure.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			QUEUE_LOG="$log"
+			zxfer_build_replication_iteration_list() {
+				g_zxfer_replication_iteration_list_result="tank/src"
+			}
+			zxfer_set_actual_dest() {
+				g_actual_dest="backup/target/src"
+				printf 'set %s\n' "$1" >>"$QUEUE_LOG"
+			}
+			zxfer_inspect_delete_snap() {
+				printf 'inspect %s %s\n' "$1" "$2" >>"$QUEUE_LOG"
+			}
+			zxfer_transfer_properties() {
+				printf 'props %s skip=%s\n' "$1" "${2:-0}" >>"$QUEUE_LOG"
+			}
+			zxfer_copy_snapshots() {
+				g_dest_seed_requires_property_reconcile=1
+				printf 'copy %s\n' "$g_actual_dest" >>"$QUEUE_LOG"
+			}
+			zxfer_note_destination_dataset_exists() {
+				printf 'note %s\n' "$1" >>"$QUEUE_LOG"
+			}
+			zxfer_wait_for_zfs_send_jobs() {
+				printf 'wait %s\n' "$1" >>"$QUEUE_LOG"
+			}
+			sort() {
+				printf '%s\n' "sort failed" >&2
+				return 9
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+
+			zxfer_copy_filesystems
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Post-seed queue dedupe failures should abort the copy loop." \
+		"1" "$status"
+	assertContains "Post-seed queue dedupe failures should surface the underlying dedupe error." \
+		"$output" "sort failed"
+	assertContains "Post-seed queue dedupe failures should be reported with queue context." \
+		"$output" "Failed to prepare post-seed property reconcile source queue."
+	assertNotContains "Post-seed queue dedupe failures should stop before the deferred reconcile pass resets destination caches." \
+		"$(cat "$log")" "reset-destination-cache"
+	assertNotContains "Post-seed queue dedupe failures should not run the second property pass." \
+		"$(cat "$log")" "skip=1"
+}
+
+test_copy_filesystems_rethrows_post_seed_queue_readback_failures() {
+	g_option_P_transfer_property=1
+	g_option_n_dryrun=0
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_dest_list=""
+	log="$TEST_TMPDIR/post_seed_queue_readback_failure.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			QUEUE_LOG="$log"
+			call_count=0
+			zxfer_build_replication_iteration_list() {
+				g_zxfer_replication_iteration_list_result="tank/src"
+			}
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/post-seed-readback-$call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			cat() {
+				if [ "$1" = "$TEST_TMPDIR/post-seed-readback-3.tmp" ]; then
+					printf '%s\n' "read failed" >&2
+					return 9
+				fi
+				command cat "$@"
+			}
+			zxfer_set_actual_dest() {
+				g_actual_dest="backup/target/src"
+				printf 'set %s\n' "$1" >>"$QUEUE_LOG"
+			}
+			zxfer_inspect_delete_snap() {
+				printf 'inspect %s %s\n' "$1" "$2" >>"$QUEUE_LOG"
+			}
+			zxfer_transfer_properties() {
+				printf 'props %s skip=%s\n' "$1" "${2:-0}" >>"$QUEUE_LOG"
+			}
+			zxfer_copy_snapshots() {
+				g_dest_seed_requires_property_reconcile=1
+				printf 'copy %s\n' "$g_actual_dest" >>"$QUEUE_LOG"
+			}
+			zxfer_note_destination_dataset_exists() {
+				printf 'note %s\n' "$1" >>"$QUEUE_LOG"
+			}
+			zxfer_wait_for_zfs_send_jobs() {
+				printf 'wait %s\n' "$1" >>"$QUEUE_LOG"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+
+			zxfer_copy_filesystems
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Post-seed queue staged readback failures should abort the copy loop." \
+		"1" "$status"
+	assertContains "Post-seed queue staged readback failures should preserve the underlying readback error." \
+		"$output" "read failed"
+	assertContains "Post-seed queue staged readback failures should be reported with queue context." \
+		"$output" "Failed to prepare post-seed property reconcile source queue."
+	assertNotContains "Post-seed queue staged readback failures should stop before the deferred reconcile pass resets destination caches." \
+		"$(cat "$log")" "reset-destination-cache"
+	assertNotContains "Post-seed queue staged readback failures should not run the second property pass." \
+		"$(cat "$log")" "skip=1"
 }
 
 test_copy_filesystems_keeps_verbose_output_visible_while_tracking_post_seed_reconcile_sources() {
@@ -2961,6 +4061,34 @@ reset
 run 2" "$(cat "$log")"
 }
 
+test_run_zfs_mode_loop_keeps_backup_metadata_unique_across_iterations() {
+	g_option_Y_yield_iterations=4
+	g_test_max_yield_iterations=8
+	g_option_k_backup_property_mode=1
+	g_backup_file_contents=""
+
+	output=$(
+		(
+			iteration=0
+			zxfer_run_zfs_mode() {
+				iteration=$((iteration + 1))
+				if [ "$iteration" -eq 1 ]; then
+					zxfer_append_backup_metadata_record "tank/src" "backup/dst" "compression=lz4=local"
+					g_is_performed_send_destroy=1
+				else
+					zxfer_append_backup_metadata_record "tank/src" "backup/dst" "readonly=on=local"
+					g_is_performed_send_destroy=0
+				fi
+			}
+			zxfer_run_zfs_mode_loop
+			printf 'backup=%s\n' "$g_backup_file_contents"
+		)
+	)
+
+	assertContains "Repeated -Y iterations should keep one exact backup-metadata row per source/destination pair." \
+		"$output" "backup=;tank/src,backup/dst,readonly=on=local"
+}
+
 test_run_zfs_mode_loop_logs_hint_when_hard_iteration_limit_is_reached() {
 	g_option_Y_yield_iterations=2
 	g_test_max_yield_iterations=2
@@ -2977,6 +4105,309 @@ test_run_zfs_mode_loop_logs_hint_when_hard_iteration_limit_is_reached() {
 
 	assertContains "Reaching the hard yield-iteration limit should emit the replication tuning hint." \
 		"$output" "consider using compression, increasing bandwidth, increasing I/O or reducing snapshot frequency."
+}
+
+test_seed_destination_for_snapshot_transfer_reports_destination_probe_failures() {
+	g_actual_dest="backup/target/src"
+	g_last_common_snap=""
+	g_dest_has_snapshots=0
+
+	set +e
+	output=$(
+		(
+			zxfer_exists_destination() {
+				printf '%s\n' "Failed to determine whether destination dataset [backup/target/src] exists: ssh timeout"
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_seed_destination_for_snapshot_transfer "tank/src@base" "tank/src@base"
+		)
+	)
+	status=$?
+
+	assertEquals "Destination seeding should fail closed when destination existence checks fail." \
+		1 "$status"
+	assertContains "Destination seeding should surface the destination existence probe failure." \
+		"$output" "Failed to determine whether destination dataset [backup/target/src] exists: ssh timeout"
+}
+
+test_seed_destination_for_snapshot_transfer_reports_live_snapshot_recheck_failures() {
+	g_actual_dest="backup/target/src"
+	g_last_common_snap=""
+	g_dest_has_snapshots=1
+
+	set +e
+	output=$(
+		(
+			zxfer_exists_destination() {
+				printf '1\n'
+			}
+			zxfer_get_live_destination_snapshots() {
+				printf '%s\n' "ssh timeout"
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_seed_destination_for_snapshot_transfer "tank/src@base" "tank/src@base"
+		)
+	)
+	status=$?
+
+	assertEquals "Destination seeding should fail closed when the live destination snapshot recheck fails." \
+		1 "$status"
+	assertContains "Destination seeding should preserve the live destination snapshot recheck diagnostic." \
+		"$output" "Failed to retrieve live destination snapshots for [backup/target/src]: ssh timeout"
+}
+
+test_build_replication_iteration_list_reports_second_tempfile_failures() {
+	g_recursive_source_list="tank/src"
+
+	set +e
+	output=$(
+		(
+			call_count=0
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				if [ "$call_count" -eq 1 ]; then
+					g_zxfer_temp_file_result="$TEST_TMPDIR/iteration-input.tmp"
+					: >"$g_zxfer_temp_file_result"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_build_replication_iteration_list 0
+		)
+	)
+	status=$?
+
+	assertEquals "Replication iteration-list building should fail closed when the second tempfile cannot be allocated." \
+		1 "$status"
+	assertEquals "Replication iteration-list building should not emit output for second-tempfile failures." \
+		"" "$output"
+}
+
+test_build_replication_iteration_list_reports_filter_command_failures() {
+	g_recursive_source_list="tank/src"
+
+	set +e
+	output=$(
+		(
+			call_count=0
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/iteration-filter-$call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			grep() {
+				return 9
+			}
+			zxfer_build_replication_iteration_list 0
+		)
+	)
+	status=$?
+
+	assertEquals "Replication iteration-list building should fail closed when the blank-line filter command fails." \
+		9 "$status"
+	assertEquals "Replication iteration-list building should not emit output for filter-command failures." \
+		"" "$output"
+}
+
+test_build_replication_iteration_list_reports_sorted_readback_failures() {
+	g_recursive_source_list="tank/src"
+
+	set +e
+	output=$(
+		(
+			call_count=0
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/iteration-readback-$call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			cat() {
+				if [ "$1" = "$TEST_TMPDIR/iteration-readback-3.tmp" ]; then
+					printf '%s\n' "read failed" >&2
+					return 9
+				fi
+				command cat "$@"
+			}
+			zxfer_build_replication_iteration_list 0
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Replication iteration-list building should fail closed when the sorted staging file cannot be read back." \
+		9 "$status"
+	assertContains "Replication iteration-list building should preserve the sorted staging readback diagnostic." \
+		"$output" "read failed"
+}
+
+test_collect_post_seed_property_sources_sorts_unique_sources_in_current_shell() {
+	post_seed_file="$TEST_TMPDIR/post_seed_sources.txt"
+	cat >"$post_seed_file" <<'EOF'
+
+tank/src/child
+tank/src
+tank/src/child
+EOF
+
+	zxfer_collect_post_seed_property_sources "$post_seed_file"
+
+	assertEquals "Post-seed property reconcile source collection should sort and deduplicate non-empty queued datasets." \
+		"tank/src
+tank/src/child" "$g_zxfer_post_seed_property_sources_result"
+}
+
+test_append_post_seed_property_source_appends_sources_when_tracking_file_exists() {
+	post_seed_file="$TEST_TMPDIR/post_seed_append.txt"
+	: >"$post_seed_file"
+
+	zxfer_append_post_seed_property_source "$post_seed_file" "tank/src"
+
+	assertEquals "Appending a post-seed property source should record the dataset in the staging file." \
+		"tank/src" "$(cat "$post_seed_file")"
+}
+
+test_collect_post_seed_property_sources_reports_second_tempfile_failures() {
+	post_seed_file="$TEST_TMPDIR/post_seed_tempfile_failure.txt"
+	printf '%s\n' "tank/src" >"$post_seed_file"
+
+	set +e
+	output=$(
+		(
+			call_count=0
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				if [ "$call_count" -eq 1 ]; then
+					g_zxfer_temp_file_result="$TEST_TMPDIR/post-seed-filtered.tmp"
+					: >"$g_zxfer_temp_file_result"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_collect_post_seed_property_sources "$post_seed_file"
+		)
+	)
+	status=$?
+
+	assertEquals "Post-seed property reconcile source collection should fail closed when the second tempfile cannot be allocated." \
+		1 "$status"
+	assertEquals "Post-seed property reconcile source collection should not emit output for second-tempfile failures." \
+		"" "$output"
+}
+
+test_collect_post_seed_property_sources_reports_filter_command_failures() {
+	post_seed_file="$TEST_TMPDIR/post_seed_filter_failure.txt"
+	printf '%s\n' "tank/src" >"$post_seed_file"
+
+	set +e
+	output=$(
+		(
+			call_count=0
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/post-seed-filter-$call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			grep() {
+				return 9
+			}
+			zxfer_collect_post_seed_property_sources "$post_seed_file"
+		)
+	)
+	status=$?
+
+	assertEquals "Post-seed property reconcile source collection should fail closed when the blank-line filter command fails." \
+		9 "$status"
+	assertEquals "Post-seed property reconcile source collection should not emit output for filter-command failures." \
+		"" "$output"
+}
+
+test_collect_post_seed_property_sources_reports_sorted_readback_failures() {
+	post_seed_file="$TEST_TMPDIR/post_seed_readback_failure.txt"
+	printf '%s\n' "tank/src" >"$post_seed_file"
+
+	set +e
+	output=$(
+		(
+			call_count=0
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/post-seed-readback-$call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			cat() {
+				if [ "$1" = "$TEST_TMPDIR/post-seed-readback-2.tmp" ]; then
+					printf '%s\n' "read failed" >&2
+					return 9
+				fi
+				command cat "$@"
+			}
+			zxfer_collect_post_seed_property_sources "$post_seed_file"
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Post-seed property reconcile source collection should fail closed when the sorted staging file cannot be read back." \
+		9 "$status"
+	assertContains "Post-seed property reconcile source collection should preserve the sorted staging readback diagnostic." \
+		"$output" "read failed"
+}
+
+test_build_replication_iteration_list_reports_initial_tempfile_failures() {
+	g_recursive_source_list="tank/src"
+
+	set +e
+	output=$(
+		(
+			zxfer_get_temp_file() {
+				return 1
+			}
+			zxfer_build_replication_iteration_list 0
+		)
+	)
+	status=$?
+
+	assertEquals "Replication iteration-list building should fail closed when the first tempfile cannot be allocated." \
+		1 "$status"
+	assertEquals "Replication iteration-list building should not emit output for first-tempfile failures." \
+		"" "$output"
+}
+
+test_build_replication_iteration_list_reports_third_tempfile_failures() {
+	g_recursive_source_list="tank/src"
+
+	set +e
+	output=$(
+		(
+			call_count=0
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				if [ "$call_count" -le 2 ]; then
+					g_zxfer_temp_file_result="$TEST_TMPDIR/iteration-third-$call_count.tmp"
+					: >"$g_zxfer_temp_file_result"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_build_replication_iteration_list 0
+		)
+	)
+	status=$?
+
+	assertEquals "Replication iteration-list building should fail closed when the third tempfile cannot be allocated." \
+		1 "$status"
+	assertEquals "Replication iteration-list building should not emit output for third-tempfile failures." \
+		"" "$output"
 }
 
 # shellcheck disable=SC1090

@@ -41,6 +41,10 @@
 # mutates caches: destination-existence cache and cleanup PID tracking through shared helpers.
 # returns via stdout: quoted tokens, rendered commands, remote outputs, and destination probes.
 
+# Purpose: Run a foreground command through zxfer's dry-run, reporting, and
+# failure-context wrapper.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# a helper wants one shared execution path for live and dry-run commands.
 zxfer_execute_command() {
 	l_cmd=$1
 	l_is_continue_on_fail=${2:-0}
@@ -62,13 +66,18 @@ zxfer_execute_command() {
 	fi
 }
 
+# Purpose: Launch a background command and capture its output through the
+# staging path expected by later helpers.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# discovery or probe flows need asynchronous execution without losing the
+# checked output file contract.
 #
 # Execute a command in the background and write the output to a file.
-# Background commands do not honor the dry run option
+# Dry-run callers receive empty placeholder files so later tempfile consumers
+# can continue without executing the background probe.
 #
 # l_cmd: command to execute
 # l_output_file: file to write the output to
-#
 zxfer_execute_background_cmd() {
 	l_cmd=$1
 	l_output_file=$2
@@ -76,6 +85,20 @@ zxfer_execute_background_cmd() {
 
 	zxfer_echoV "Executing command in the background: $l_cmd"
 	zxfer_record_last_command_string "$l_cmd"
+	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
+		zxfer_echoV "Dry run: $l_cmd"
+		g_last_background_pid=""
+		if ! zxfer_write_runtime_artifact_file "$l_output_file" ""; then
+			return 1
+		fi
+		if [ -n "$l_error_file" ]; then
+			if ! zxfer_write_runtime_artifact_file "$l_error_file" ""; then
+				zxfer_cleanup_runtime_artifact_path "$l_output_file"
+				return 1
+			fi
+		fi
+		return 0
+	fi
 	if [ -n "$l_error_file" ]; then
 		eval "$l_cmd" >"$l_output_file" 2>"$l_error_file" &
 	else
@@ -86,12 +109,22 @@ zxfer_execute_background_cmd() {
 	zxfer_register_cleanup_pid "$g_last_background_pid"
 }
 
+# Purpose: Escape a value for reinsertion into a single-quoted shell string.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution
+# before values are embedded in rendered shell commands or remote helper
+# payloads.
+#
 # Escape characters for a single-quoted context by closing and reopening quotes
 # around embedded apostrophes.
 zxfer_escape_for_single_quotes() {
 	printf '%s' "$1" | sed "s/'/'\\\\''/g"
 }
 
+# Purpose: Split the tokens on whitespace into the token stream expected by
+# later helpers.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# zxfer must preserve argument boundaries without invoking a shell parser.
+#
 # Split whitespace-delimited arguments into separate lines without invoking the
 # shell parser. This intentionally ignores quoting so callers must escape
 # metacharacters themselves, preventing shell injection attacks.
@@ -117,6 +150,11 @@ zxfer_split_tokens_on_whitespace() {
 	}'
 }
 
+# Purpose: Split the host spec tokens into the token stream expected by later
+# helpers.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# zxfer must preserve argument boundaries without invoking a shell parser.
+#
 # Split a user-supplied -O/-T host spec into tokens without invoking the shell
 # parser so whitespace-separated ssh arguments (like "user@host pfexec") are
 # preserved verbatim and characters such as ';' cannot escape into new commands.
@@ -124,10 +162,17 @@ zxfer_split_host_spec_tokens() {
 	zxfer_split_tokens_on_whitespace "$1"
 }
 
+# Purpose: Split the CLI tokens into the token stream expected by later
+# helpers.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# zxfer must preserve argument boundaries without invoking a shell parser.
 zxfer_split_cli_tokens() {
 	zxfer_split_tokens_on_whitespace "$1"
 }
 
+# Purpose: Quote the token stream for the shell or report format used by zxfer.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# raw tokens must be preserved without reopening parsing or injection risks.
 zxfer_quote_token_stream() {
 	l_tokens=$1
 	if [ "$l_tokens" = "" ]; then
@@ -149,6 +194,10 @@ EOF
 	printf '%s' "$l_output"
 }
 
+# Purpose: Build the shell command from argv for the next execution or
+# comparison step.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution
+# before other helpers consume the assembled value.
 zxfer_build_shell_command_from_argv() {
 	l_output=""
 	for l_arg in "$@"; do
@@ -163,6 +212,11 @@ zxfer_build_shell_command_from_argv() {
 	printf '%s' "$l_output"
 }
 
+# Purpose: Quote the host spec tokens for the shell or report format used by
+# zxfer.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# raw tokens must be preserved without reopening parsing or injection risks.
+#
 # Quote a host spec for safe reinsertion into eval'd strings by wrapping each
 # token in single quotes. This keeps multi-word ssh arguments working while
 # preventing the shell from interpreting metacharacters provided by the user.
@@ -180,6 +234,9 @@ zxfer_quote_host_spec_tokens() {
 	zxfer_quote_token_stream "$l_tokens"
 }
 
+# Purpose: Quote the CLI tokens for the shell or report format used by zxfer.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# raw tokens must be preserved without reopening parsing or injection risks.
 zxfer_quote_cli_tokens() {
 	l_cli_string=$1
 	if [ "$l_cli_string" = "" ]; then
@@ -194,12 +251,149 @@ zxfer_quote_cli_tokens() {
 	zxfer_quote_token_stream "$l_tokens"
 }
 
+# Purpose: Check whether the SSH policy uses ambient config.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# later helpers need a boolean answer about the SSH policy.
+zxfer_ssh_policy_uses_ambient_config() {
+	case "${ZXFER_SSH_USE_AMBIENT_CONFIG:-}" in
+	1 | [Yy][Ee][Ss] | [Tt][Rr][Uu][Ee] | [Oo][Nn])
+		return 0
+		;;
+	esac
+
+	return 1
+}
+
+# Purpose: Validate the SSH option value before zxfer relies on it.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution to
+# fail closed on malformed, unsafe, or stale input.
+zxfer_validate_ssh_option_value() {
+	l_value=$1
+	l_label=$2
+	l_tab=$(printf '\t')
+	l_cr=$(printf '\r')
+	l_lf=$(printf '\n_')
+	l_lf=${l_lf%_}
+
+	case "$l_value" in
+	'' | *"$l_tab"* | *"$l_cr"* | *"$l_lf"*)
+		printf '%s\n' "$l_label must be a single-line non-empty value."
+		return 1
+		;;
+	esac
+
+	printf '%s\n' "$l_value"
+}
+
+# Purpose: Validate the SSH option path before zxfer relies on it.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution to
+# fail closed on malformed, unsafe, or stale input.
+zxfer_validate_ssh_option_path() {
+	l_path=$1
+	l_label=$2
+
+	if ! l_path=$(zxfer_validate_ssh_option_value "$l_path" "$l_label"); then
+		printf '%s\n' "$l_path"
+		return 1
+	fi
+
+	case "$l_path" in
+	/*)
+		printf '%s\n' "$l_path"
+		return 0
+		;;
+	esac
+
+	printf '%s\n' "$l_label must be an absolute path."
+	return 1
+}
+
+# Purpose: Return the managed SSH option tokens in the form expected by later
+# helpers.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# sibling helpers need the same lookup without duplicating module logic.
+zxfer_get_managed_ssh_option_tokens() {
+	if zxfer_ssh_policy_uses_ambient_config; then
+		return 0
+	fi
+
+	if ! l_batch_mode=$(zxfer_validate_ssh_option_value "${ZXFER_SSH_BATCH_MODE:-yes}" "ZXFER_SSH_BATCH_MODE"); then
+		printf '%s\n' "$l_batch_mode"
+		return 1
+	fi
+
+	if ! l_strict_host_key_checking=$(zxfer_validate_ssh_option_value "${ZXFER_SSH_STRICT_HOST_KEY_CHECKING:-yes}" "ZXFER_SSH_STRICT_HOST_KEY_CHECKING"); then
+		printf '%s\n' "$l_strict_host_key_checking"
+		return 1
+	fi
+
+	if [ -n "${ZXFER_SSH_USER_KNOWN_HOSTS_FILE:-}" ]; then
+		if ! l_known_hosts_file=$(zxfer_validate_ssh_option_path "$ZXFER_SSH_USER_KNOWN_HOSTS_FILE" "ZXFER_SSH_USER_KNOWN_HOSTS_FILE"); then
+			printf '%s\n' "$l_known_hosts_file"
+			return 1
+		fi
+	fi
+
+	printf '%s\n%s\n' "-o" "BatchMode=$l_batch_mode"
+	printf '%s\n%s\n' "-o" "StrictHostKeyChecking=$l_strict_host_key_checking"
+
+	if [ -n "${ZXFER_SSH_USER_KNOWN_HOSTS_FILE:-}" ]; then
+		printf '%s\n%s\n' "-o" "UserKnownHostsFile=$l_known_hosts_file"
+	fi
+}
+
+# Purpose: Render the SSH transport policy identity as a stable shell-safe or
+# operator-facing string.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# zxfer needs to display or transport the value without reparsing it.
+zxfer_render_ssh_transport_policy_identity() {
+	if zxfer_ssh_policy_uses_ambient_config; then
+		printf '%s\n' "ambient"
+		return 0
+	fi
+
+	if ! l_managed_option_tokens=$(zxfer_get_managed_ssh_option_tokens); then
+		printf '%s\n' "$l_managed_option_tokens"
+		return 1
+	fi
+
+	printf '%s\n' "managed"
+	if [ "$l_managed_option_tokens" != "" ]; then
+		printf '%s\n' "$l_managed_option_tokens"
+	fi
+}
+
+# Purpose: Return the SSH base transport tokens in the form expected by later
+# helpers.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# sibling helpers need the same lookup without duplicating module logic.
+zxfer_get_ssh_base_transport_tokens() {
+	if ! l_managed_option_tokens=$(zxfer_get_managed_ssh_option_tokens); then
+		printf '%s\n' "$l_managed_option_tokens"
+		return 1
+	fi
+
+	printf '%s\n' "$g_cmd_ssh"
+	if [ "$l_managed_option_tokens" != "" ]; then
+		printf '%s\n' "$l_managed_option_tokens"
+	fi
+}
+
+# Purpose: Return the SSH transport tokens for host in the form expected by
+# later helpers.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# sibling helpers need the same lookup without duplicating module logic.
+#
 # Render the ssh transport argv for a given host, including any control socket,
 # as a newline-delimited token stream that can be safely re-quoted or executed.
 zxfer_get_ssh_transport_tokens_for_host() {
 	l_host=$1
 
-	printf '%s\n' "$g_cmd_ssh"
+	if ! l_base_transport_tokens=$(zxfer_get_ssh_base_transport_tokens); then
+		printf '%s\n' "$l_base_transport_tokens"
+		return 1
+	fi
+	printf '%s\n' "$l_base_transport_tokens"
 
 	if [ "$l_host" = "" ]; then
 		return
@@ -215,14 +409,83 @@ zxfer_get_ssh_transport_tokens_for_host() {
 	fi
 }
 
+# Purpose: Return the SSH command for host in the form expected by later
+# helpers.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# sibling helpers need the same lookup without duplicating module logic.
+#
 # Render the local ssh transport command used for a host spec. This is a
 # display helper only; execution paths should use the argv-based helpers below.
 zxfer_get_ssh_cmd_for_host() {
 	l_host=$1
-	l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host")
+	if ! l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host"); then
+		zxfer_throw_error "$l_transport_tokens"
+	fi
 	zxfer_quote_token_stream "$l_transport_tokens"
 }
 
+# Purpose: Return the remote command context label in the form expected by
+# later helpers.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# sibling helpers need the same lookup without duplicating module logic.
+zxfer_get_remote_command_context_label() {
+	l_host_spec=$1
+	l_profile_side=${2:-}
+
+	case "$l_profile_side" in
+	source)
+		l_role_label="origin"
+		;;
+	destination)
+		l_role_label="target"
+		;;
+	other)
+		l_role_label="remote"
+		;;
+	*)
+		if [ -n "$l_host_spec" ] &&
+			[ "$l_host_spec" = "${g_option_O_origin_host:-}" ] &&
+			[ "$l_host_spec" = "${g_option_T_target_host:-}" ]; then
+			l_role_label="origin/target"
+		elif [ -n "$l_host_spec" ] &&
+			[ "$l_host_spec" = "${g_option_O_origin_host:-}" ]; then
+			l_role_label="origin"
+		elif [ -n "$l_host_spec" ] &&
+			[ "$l_host_spec" = "${g_option_T_target_host:-}" ]; then
+			l_role_label="target"
+		else
+			l_role_label="remote"
+		fi
+		;;
+	esac
+
+	if [ -n "$l_host_spec" ]; then
+		printf '%s: %s\n' "$l_role_label" "$l_host_spec"
+	else
+		printf '%s\n' "$l_role_label"
+	fi
+}
+
+# Purpose: Emit very-verbose diagnostic output for `-V` runs.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# zxfer wants low-level debug output that should stay hidden in normal verbose
+# mode.
+zxfer_echoV_remote_command_for_host() {
+	l_host_spec=$1
+	l_profile_side=${2:-}
+	shift 2
+
+	l_command_context=$(zxfer_get_remote_command_context_label \
+		"$l_host_spec" "$l_profile_side")
+	l_rendered_command=$(zxfer_render_command_for_report "" "$@")
+	zxfer_echoV "Running remote command [$l_command_context]: $l_rendered_command"
+}
+
+# Purpose: Run the SSH command for host through the controlled execution path
+# owned by this module.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution once
+# planning is complete and zxfer is ready to execute the action.
+#
 # Expand the ssh transport and host spec into discrete arguments before
 # executing the remote command so multi-token -O/-T inputs (like "host pfexec")
 # are preserved without reparsing a shell string. STDIN/STDOUT/STDERR are
@@ -231,7 +494,9 @@ zxfer_invoke_ssh_command_for_host() {
 	l_host_spec=$1
 	shift
 
-	l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec")
+	if ! l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+		zxfer_throw_error "$l_transport_tokens"
+	fi
 	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec")
 	l_remote_args_stream=""
 	if [ $# -gt 0 ]; then
@@ -266,9 +531,15 @@ EOF
 	fi
 
 	zxfer_record_last_command_argv "$@"
+	zxfer_echoV_remote_command_for_host "$l_host_spec" "" "$@"
 	"$@"
 }
 
+# Purpose: Build the SSH shell command for host for the next execution or
+# comparison step.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution
+# before other helpers consume the assembled value.
+#
 # Build a shell-ready local ssh command string while preserving any wrapper
 # tokens embedded in the -O/-T host spec (for example "host pfexec"). The
 # remote command must already be quoted for execution by the remote shell.
@@ -278,7 +549,9 @@ zxfer_build_ssh_shell_command_for_host() {
 
 	[ "$l_remote_shell_cmd" = "" ] && return 1
 
-	l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec")
+	if ! l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+		zxfer_throw_error "$l_transport_tokens"
+	fi
 	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec")
 	[ "$l_host_tokens" != "" ] || return 1
 
@@ -310,6 +583,11 @@ EOF
 	zxfer_quote_token_stream "$l_command_tokens"
 }
 
+# Purpose: Run the SSH shell command for host through the controlled execution
+# path owned by this module.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution once
+# planning is complete and zxfer is ready to execute the action.
+#
 # Execute a shell-ready remote command string through ssh without reparsing a
 # local shell string. Wrapper tokens embedded in the -O/-T host spec are
 # preserved as part of the single remote command argument.
@@ -321,7 +599,9 @@ zxfer_invoke_ssh_shell_command_for_host() {
 	[ "$l_remote_shell_cmd" = "" ] && return 1
 	zxfer_profile_record_ssh_invocation "$l_host_spec" "$l_profile_side"
 
-	l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec")
+	if ! l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+		zxfer_throw_error "$l_transport_tokens"
+	fi
 	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec")
 	[ "$l_host_tokens" != "" ] || return 1
 
@@ -361,15 +641,24 @@ EOF
 	set -- "$@" "$l_ssh_host" "$l_full_remote_cmd"
 
 	zxfer_record_last_command_argv "$@"
+	zxfer_echoV_remote_command_for_host "$l_host_spec" "$l_profile_side" "$@"
 	"$@"
 }
 
+# Purpose: Build the remote sh c command for the next execution or comparison
+# step.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution
+# before other helpers consume the assembled value.
 zxfer_build_remote_sh_c_command() {
 	l_remote_script=$1
-	l_remote_tokens=$(printf '%s\n%s\n%s\n' "sh" "-c" "$l_remote_script")
-	zxfer_quote_token_stream "$l_remote_tokens"
+	zxfer_build_shell_command_from_argv "sh" "-c" "$l_remote_script"
 }
 
+# Purpose: Run the source ZFS command through the controlled execution path
+# owned by this module.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution once
+# planning is complete and zxfer is ready to execute the action.
+#
 # Execute a zfs command on the origin (source) host, transparently invoking
 # ssh when -O is in effect so callers can treat this like a local command.
 zxfer_run_source_zfs_cmd() {
@@ -395,6 +684,11 @@ zxfer_run_source_zfs_cmd() {
 	zxfer_invoke_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_cmd" source
 }
 
+# Purpose: Run the destination ZFS command through the controlled execution
+# path owned by this module.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution once
+# planning is complete and zxfer is ready to execute the action.
+#
 # Execute a zfs command on the destination (target) host, using ssh when -T is
 # active so shell quoting does not leak into the remote hostname.
 zxfer_run_destination_zfs_cmd() {
@@ -420,6 +714,10 @@ zxfer_run_destination_zfs_cmd() {
 	zxfer_invoke_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd" destination
 }
 
+# Purpose: Render the source ZFS command as a stable shell-safe or operator-
+# facing string.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# zxfer needs to display or transport the value without reparsing it.
 zxfer_render_source_zfs_command() {
 	l_subcommand=$1
 	shift
@@ -442,6 +740,10 @@ zxfer_render_source_zfs_command() {
 	zxfer_build_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_cmd"
 }
 
+# Purpose: Render the destination ZFS command as a stable shell-safe or
+# operator-facing string.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# zxfer needs to display or transport the value without reparsing it.
 zxfer_render_destination_zfs_command() {
 	l_subcommand=$1
 	shift
@@ -464,6 +766,10 @@ zxfer_render_destination_zfs_command() {
 	zxfer_build_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd"
 }
 
+# Purpose: Render the ZFS command for spec as a stable shell-safe or operator-
+# facing string.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# zxfer needs to display or transport the value without reparsing it.
 zxfer_render_zfs_command_for_spec() {
 	l_cmd_spec=$1
 	shift
@@ -477,6 +783,11 @@ zxfer_render_zfs_command_for_spec() {
 	fi
 }
 
+# Purpose: Run the ZFS command for spec through the controlled execution path
+# owned by this module.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution once
+# planning is complete and zxfer is ready to execute the action.
+#
 # Run a zfs command based on the provided command specifier, delegating to the
 # source or destination helper when the spec references $g_LZFS or $g_RZFS.
 zxfer_run_zfs_cmd_for_spec() {
@@ -494,6 +805,11 @@ zxfer_run_zfs_cmd_for_spec() {
 	fi
 }
 
+# Purpose: Strip the trailing slashes while preserving the semantics later
+# helpers expect.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution
+# before comparison or execution consumes the cleaned value.
+#
 # Remove trailing slash characters from dataset-like arguments while leaving
 # strings that consist entirely of '/' untouched so callers can still reject
 # absolute paths explicitly.
@@ -515,6 +831,9 @@ zxfer_strip_trailing_slashes() {
 	printf '%s\n' "$l_path"
 }
 
+# Purpose: Check whether the destination probe reports missing.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# later helpers need a boolean answer about the destination probe.
 zxfer_destination_probe_reports_missing() {
 	l_probe_err=$1
 
@@ -527,6 +846,9 @@ zxfer_destination_probe_reports_missing() {
 	return 1
 }
 
+# Purpose: Check whether the destination probe is ambiguous.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# later helpers need a boolean answer about the destination probe.
 zxfer_destination_probe_is_ambiguous() {
 	l_probe_err=$1
 
@@ -539,6 +861,9 @@ zxfer_destination_probe_is_ambiguous() {
 	return 0
 }
 
+# Purpose: Check whether the destination via parent recursive listing exists.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution
+# before later create, seed, or delete decisions depend on presence or absence.
 zxfer_exists_destination_via_parent_recursive_listing() {
 	l_dest=$1
 	l_parent_dataset=${l_dest%/*}
@@ -590,11 +915,13 @@ zxfer_exists_destination_via_parent_recursive_listing() {
 	return 1
 }
 
+# Purpose: Check whether the destination exists.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution
+# before later create, seed, or delete decisions depend on presence or absence.
 #
 # Checks whether the destination dataset exists.
 # Prints 1 when it exists, 0 when it is explicitly missing, and returns non-zero
 # with an explanatory message when the probe itself fails.
-#
 zxfer_exists_destination() {
 	l_dest=$1
 	l_probe_mode=${2:-cache}

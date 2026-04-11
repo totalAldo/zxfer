@@ -1,0 +1,92 @@
+name: Platform compatibility report
+description: Report a portability problem, packaging mismatch, or platform-specific behavioral difference.
+title: "[Compatibility]: "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for platform-specific differences such as shell behavior, helper-path layouts, package variations, or OpenZFS portability gaps.
+  - type: input
+    id: os_family
+    attributes:
+      label: Platform
+      placeholder: FreeBSD, Debian, OmniOS, macOS
+    validations:
+      required: true
+  - type: input
+    id: os_release
+    attributes:
+      label: OS release
+      placeholder: FreeBSD 14.2-RELEASE, Debian 13, OmniOS r151050, macOS 15.4
+    validations:
+      required: true
+  - type: input
+    id: architecture
+    attributes:
+      label: Architecture
+      placeholder: amd64, arm64
+    validations:
+      required: true
+  - type: input
+    id: zfs_version
+    attributes:
+      label: ZFS or OpenZFS version
+      placeholder: OpenZFS 2.2.3
+    validations:
+      required: true
+  - type: input
+    id: shell
+    attributes:
+      label: Shell
+      placeholder: /bin/sh, dash, bash --posix, /usr/xpg4/bin/sh
+    validations:
+      required: true
+  - type: textarea
+    id: install_paths
+    attributes:
+      label: Helper and package layout
+      description: Note any relevant package names, helper paths, or wrapper commands.
+      placeholder: |
+        zfs path: /usr/local/zfs/bin/zfs
+        ssh path: /usr/bin/ssh
+        wrapper: user@host pfexec
+        optional tools missing: parallel
+    validations:
+      required: true
+  - type: textarea
+    id: works
+    attributes:
+      label: What works
+      description: Describe the commands, test paths, or features that succeed.
+    validations:
+      required: true
+  - type: textarea
+    id: fails
+    attributes:
+      label: What fails
+      description: Describe the commands, workflows, or features that fail or differ unexpectedly.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or test path
+      description: Include the command, workflow, or test entrypoint you used.
+      render: shell
+      placeholder: ./tests/run_vm_matrix.sh --profile local --guest freebsd --only-test basic_replication_test
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Include path layout differences, wrapper behavior, or package constraints that could explain the gap.

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue
+    url: https://github.com/totalAldo/zxfer/blob/main/SECURITY.md
+    about: Report security-sensitive issues privately instead of opening a public issue.
+  - name: Usage and troubleshooting guide
+    url: https://github.com/totalAldo/zxfer/blob/main/docs/troubleshooting.md
+    about: Check the troubleshooting guide before filing an operational support question.

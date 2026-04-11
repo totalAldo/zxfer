@@ -125,6 +125,26 @@ The project priority order still applies:
 
 - Use the runtime temp helpers in [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh)
   instead of hard-coding `/tmp` paths.
+- For runtime-temp-root artifacts, prefer the current-shell helpers in
+  [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh):
+  `zxfer_create_runtime_artifact_file`,
+  `zxfer_create_runtime_artifact_dir`,
+  `zxfer_write_runtime_artifact_file`,
+  `zxfer_read_runtime_artifact_file`,
+  `zxfer_write_runtime_cache_file_atomically`,
+  `zxfer_cleanup_runtime_artifact_path`.
+- Do not add new ad hoc runtime-temp-root `mktemp` calls, hard-coded `/tmp`
+  scratch paths, raw `: >"$file"` truncation, unchecked `cat "$file"`
+  readbacks, or unguarded `while ... done <"$file"` loops for staged payloads,
+  captures, or runtime-owned cache objects.
+- When a helper needs staged file contents, read them through the runtime
+  readback helper, capture its status immediately, and only publish result
+  globals after the read succeeds. Parse staged payloads from the in-memory
+  scratch result rather than reading the file repeatedly.
+- Keep path-adjacent secure staging in the owning module when same-directory
+  atomic rename is the security requirement. The runtime artifact layer is for
+  artifacts owned by the validated runtime temp root and runtime-owned cache
+  files, not for every atomic publish flow in the tree.
 - Register background PIDs and cleanup artifacts with the existing runtime
   helpers.
 - Remove temporary files, FIFOs, queues, and cache directories on both success
@@ -138,11 +158,46 @@ The project priority order still applies:
 ## Comments
 
 - Comment why a block exists, not what the shell syntax already says.
+- Every top-level function in `src/` should have an immediately preceding
+  comment block in this short structured form:
+
+```sh
+# Purpose: Return the resolved ssh transport argv for one host spec.
+# Usage: Called during remote bootstrap and command rendering so callers reuse
+# one quoting-safe transport builder instead of rebuilding ssh argv by hand.
+# Returns: Newline-delimited transport tokens.
+zxfer_get_ssh_transport_tokens_for_host() {
+```
+
+- Use `Purpose:` and `Usage:` on every function comment block.
+- Apply this requirement to top-level shell functions defined directly in
+  `src/` modules. Function literals embedded inside generated shell payload
+  strings are not source-level API helpers; document the enclosing builder
+  function instead.
+- Add `Returns:` or `Side effects:` only when stdout contracts, exit-status
+  meaning, global mutation, locking, staging, or cleanup behavior would not be
+  obvious from the function body and name alone.
+- Keep the block immediately above the function it documents.
+- Explain why the helper exists and where it fits in zxfer's flow, not just a
+  paraphrase of the function name.
+- Keep function comments concise and high-signal. Do not add per-argument
+  inventories unless they prevent a real misuse or ambiguity.
+- Normalize existing function comments into the structured form instead of
+  stacking a second header above them.
+- Preserve still-relevant inline comments, block comments, and historical notes
+  when they explain compatibility behavior, safety rationale, platform quirks,
+  security constraints, or past regressions that would be costly to rediscover.
+- Remove or rewrite comments only when they are clearly stale, duplicated, or
+  contradicted by the current code.
+- Do not replace valuable historical context with a generic function docblock.
 - Add short comments for non-obvious `awk`, `sed`, `comm`, `parallel`, ssh, or
   quoting logic.
 - Do not add comments that restate simple assignments or obvious control flow.
 - When compatibility behavior is subtle, mention the affected platform or shell
   family directly in the comment.
+- When a function is updated, review its function comment and any still-relevant
+  nearby comments in the same change. If the implementation contract changes,
+  update the comment immediately instead of leaving drift behind.
 
 ## Tests
 

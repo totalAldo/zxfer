@@ -41,14 +41,19 @@
 # mutates caches: none.
 # returns via stdout: none; parser and validators update shared runtime globals directly.
 
+# Purpose: Refresh the validated compression and decompression command variants
+# derived from the current CLI state.
+# Usage: Called during CLI parsing and startup validation after compression-
+# related options change so later execution paths reuse one safe command-
+# resolution result.
 zxfer_refresh_compression_commands() {
 	if [ "$g_option_z_compress" -eq 1 ]; then
 		if [ "$g_cmd_compress" = "" ]; then
-			zxfer_throw_usage_error "Compression command (-Z/ZXFER_COMPRESSION) cannot be empty." 2
+			zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
 		fi
 		l_compress_tokens=$(zxfer_split_cli_tokens "$g_cmd_compress")
 		if [ "$l_compress_tokens" = "" ]; then
-			zxfer_throw_usage_error "Compression command (-Z/ZXFER_COMPRESSION) cannot be empty." 2
+			zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
 		fi
 		if [ "$g_cmd_decompress" = "" ]; then
 			zxfer_throw_error "Compression requested but decompression command missing."
@@ -72,6 +77,10 @@ zxfer_refresh_compression_commands() {
 	g_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress")
 }
 
+# Purpose: Parse supported command-line switches into the shared `g_option_*`
+# runtime state.
+# Usage: Called during CLI parsing and startup validation before consistency
+# checks and transport bootstrap depend on the parsed flags.
 zxfer_read_command_line_switches() {
 	while getopts bBc:dD:eFg:hI:j:kmnN:o:O:PR:sT:UvVwx:YzZ: l_i; do
 		case $l_i in
@@ -186,6 +195,10 @@ zxfer_read_command_line_switches() {
 	zxfer_refresh_compression_commands
 }
 
+# Purpose: Reject malformed or incompatible CLI combinations before zxfer opens
+# transports or touches datasets.
+# Usage: Called during CLI parsing and startup validation immediately after
+# option parsing so usage failures stop the run before any live side effects.
 zxfer_consistency_check() {
 	# Validate -j early so arithmetic comparisons do not trip /bin/sh errors.
 	case ${g_option_j_jobs:-} in

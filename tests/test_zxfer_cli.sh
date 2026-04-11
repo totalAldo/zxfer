@@ -69,6 +69,13 @@ test_read_command_line_switches_sets_flags_in_current_shell() {
 		8 "$g_option_Y_yield_iterations"
 }
 
+test_read_command_line_switches_preserves_override_escape_sequences() {
+	zxfer_read_command_line_switches -o 'user:note=value\,with\,commas=and;semi'
+
+	assertEquals "Quoted -o values should keep literal-comma escape sequences for the downstream override parser." \
+		'user:note=value\,with\,commas=and;semi' "$g_option_o_override_property"
+}
+
 test_consistency_check_rejects_zero_jobs() {
 	zxfer_test_capture_subshell '
 		zxfer_throw_usage_error() {
@@ -97,7 +104,7 @@ test_refresh_compression_commands_rejects_empty_command() {
 
 	assertEquals "An empty compression command should fail validation." 2 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Compression validation should explain the empty command." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "cannot be empty"
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Compression command (-Z) cannot be empty."
 }
 
 test_refresh_compression_commands_marks_dependency_failure_for_compression_lookup() {

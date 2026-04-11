@@ -38,6 +38,9 @@
 
 : "${ZXFER_SOURCE_MODULES_ROOT:=.}"
 
+# Purpose: Source one `src/` module through the canonical loader path.
+# Usage: Called during module loading and bootstrap sequencing so the launcher
+# and tests share one source-order authority.
 zxfer_source_module() {
 	l_module=$1
 	# shellcheck source=/dev/null

@@ -17,13 +17,14 @@ with operator and contributor reference material.
 - [testing.md](./testing.md): shunit2, coverage, integration harness, and CI
 - [coding-style.md](./coding-style.md): project-specific shell and module style guide
 - [troubleshooting.md](./troubleshooting.md): common failures and debugging hints
-- [architecture.md](./architecture.md): module layout and high-level execution flow
+- [architecture.md](./architecture.md): module layout, high-level execution flow, and Mermaid lifecycle diagrams
+- [roadmap.md](./roadmap.md): planned feature work, compatibility-floor direction, and remaining refactors
 - [upstream-history.md](./upstream-history.md): historical context and removed features
 - [../examples/README.md](../examples/README.md): command templates for common zxfer workflows
 
 ## Additional References
 
-- [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md): open issues and testing limitations
+- [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md): open issues
 - [../SECURITY.md](../SECURITY.md): security model and vulnerability reporting
 - [../CONTRIBUTING.md](../CONTRIBUTING.md): contributor workflow
 - [../CHANGELOG.txt](../CHANGELOG.txt): release history

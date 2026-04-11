@@ -30,6 +30,38 @@ run_coverage_helper() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_capture_bash_xtrace_to_file_survives_fd_9_closure() {
+	l_bash_bin=${ZXFER_COVERAGE_BASH_BIN:-}
+	if [ -z "$l_bash_bin" ]; then
+		l_bash_bin=$(command -v bash)
+	fi
+	if [ -z "$l_bash_bin" ] || [ ! -x "$l_bash_bin" ]; then
+		return 0
+	fi
+	l_support_status=$(run_coverage_helper \
+		"bash_supports_xtrace_line_numbers \"$l_bash_bin\" >/dev/null 2>&1; printf '%s' \"\$?\"")
+	if [ "$l_support_status" != "0" ]; then
+		return 0
+	fi
+	l_script_file="$TEST_TMPDIR/trace-survives-fd9-close.sh"
+	l_trace_file="$TEST_TMPDIR/trace-survives-fd9-close.trace"
+
+	cat >"$l_script_file" <<'EOF'
+#!/bin/sh
+before=1
+exec 9<&- 2>/dev/null || true
+after=1
+EOF
+
+	output=$(run_coverage_helper \
+		"capture_bash_xtrace_to_file \"$l_bash_bin\" \"$l_trace_file\" \"$l_script_file\" >/dev/null 2>&1; cat \"$l_trace_file\"")
+
+	if ! printf '%s\n' "$output" | grep -F -- 'after=1' >/dev/null; then
+		fail "The bash-xtrace capture helper should keep tracing after a suite closes fd 9 for its own descriptor management. Output: $output"
+	fi
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_coverage_appends_total_summary_row() {
 	l_summary_file="$TEST_TMPDIR/summary.tsv"
 	cat >"$l_summary_file" <<'EOF'

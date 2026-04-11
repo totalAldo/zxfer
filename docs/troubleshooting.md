@@ -12,12 +12,14 @@ What it usually means:
 
 - the required binary is outside the secure allowlist
 - `ZXFER_SECURE_PATH` is too narrow
+- the live runtime `PATH` is also confined to that same allowlist
 - the remote host does not have the required tool in the expected directories
 
 What to check:
 
 - `ZXFER_SECURE_PATH`
 - `ZXFER_SECURE_PATH_APPEND`
+- every trusted directory needed for later bare helper invocations
 - remote `zfs`, `ssh`, `cat`, `parallel`, or `zstd` availability
 
 ## Remote Dependency Probe Failures
@@ -31,6 +33,8 @@ Failed to query dependency "zfs" on host ...
 What it usually means:
 
 - ssh failed before the probe completed
+- the per-host remote-capability bootstrap failed before zxfer could reuse a
+  cached helper-path record
 - the wrapped host spec is wrong
 - the remote shell could not run the secure-PATH probe command
 
@@ -38,6 +42,16 @@ What to inspect:
 
 - direct `ssh` connectivity
 - wrapper commands such as `pfexec` / `doas`
+- whether `-V` prints a `Running remote probe [...]` line that identifies the
+  exact probe command that stalled or failed before capture redirection began
+- whether the target host key is already trusted in the active known-hosts
+  files, because zxfer-managed ssh now defaults to `BatchMode=yes` plus
+  `StrictHostKeyChecking=yes`
+- whether `ZXFER_SSH_USER_KNOWN_HOSTS_FILE` should point at a specific absolute
+  known-hosts file for this run
+- whether `-V` shows repeated `remote_capability_bootstrap_live`,
+  `remote_capability_bootstrap_cache`, or `remote_cli_tool_direct_probes`
+  counters that explain which startup probe path was active
 - the stderr failure report and `last_command`
 
 ## Snapshot Discovery Failures
@@ -51,13 +65,20 @@ Failed to retrieve snapshots from the source
 What it usually means:
 
 - remote `zfs list` failed
-- remote `parallel` or `zstd` was missing or misresolved
+- remote `parallel` or `zstd` was missing or misresolved, and either the serial
+  fallback also failed or the remaining snapshot-list command still could not
+  execute
 - source dataset naming or quoting was wrong on the remote side
 
 What to inspect:
 
 - stderr failure report
 - source-side snapshot listing path
+- whether `-V` shows the exact `Running remote probe [...]` or `Running remote
+  command [...]` line for the failing discovery step
+- whether `-V` shows source-discovery startup staying on cached capability
+  data, waiting on an in-run cache fill, or falling back to a direct remote
+  helper probe path
 - any shell quoting problems on the remote host
 
 ## Backup Metadata Restore Failures
@@ -85,6 +106,7 @@ What it usually means:
 What to inspect:
 
 - `ZXFER_BACKUP_DIR`
+- whether `ZXFER_BACKUP_DIR` is set to an absolute path
 - the source-dataset-relative tree under `ZXFER_BACKUP_DIR`
 - the exact source/destination pair that was backed up with `-k`
 - ownership and permissions of `.zxfer_backup_info.*`
@@ -94,7 +116,8 @@ What to inspect:
 ## Failure Report Logging And Email Alerts
 
 To persist every non-zero zxfer failure report, set `ZXFER_ERROR_LOG` to an
-absolute path whose parent directory already exists:
+absolute path whose parent directory already exists, is owned by root or the
+effective UID, and is not writable by other users unless the sticky bit is set:
 
 ```sh
 mkdir -p /var/log/zxfer
@@ -115,6 +138,23 @@ destination_root: backup/dst
 last_command: '/sbin/zfs' 'send' ...
 zxfer: failure report end
 ```
+
+By default that block keeps `invocation` and `last_command` verbatim, so avoid
+putting secret-bearing hook strings or wrapper arguments on the zxfer command
+line unless you first enable redaction:
+
+```sh
+ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1 \
+ZXFER_ERROR_LOG=/var/log/zxfer/error.log \
+./zxfer -v -R tank/src backup/dst
+```
+
+With redaction enabled, those two fields are replaced with `[redacted]` in both
+`stderr` and `ZXFER_ERROR_LOG`.
+
+Even without redaction, zxfer now escapes raw ASCII control bytes in structured
+failure-report values before writing them, so terminal control sequences are
+rendered inert in both `stderr` and `ZXFER_ERROR_LOG`.
 
 To extract the newest report from an existing log:
 
@@ -161,7 +201,9 @@ example auto-detects those mailers, accepts `MAIL_FROM`,
 requirements, rejects multiline `sendmail` header values in `ALERT_TO` and
 `MAIL_FROM`, can iterate sequentially across a whitespace-separated
 `SRC_DATASETS` list, includes stderr warnings outside the structured failure
-block in the alert body, and can be validated with
+block in the alert body, inherits
+`ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1` when you want the mailed report to
+hide `invocation` and `last_command`, and can be validated with
 `sh ./examples/error-log-email-notify.sh --self-test` before you point it at a
 real pool or MTA.
 
