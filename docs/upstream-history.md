@@ -31,5 +31,6 @@ If you depended on rsync-style behavior, use an older release or another tool.
 For current usage and maintenance guidance, start with:
 
 - [../README.md](../README.md) for the project overview and quick start
+- [whats-new-since-v1.1.7.md](./whats-new-since-v1.1.7.md) for an upgrade-oriented summary of the changes from the legacy 2019 release
 - [../man/zxfer.8](../man/zxfer.8) and [../man/zxfer.1m](../man/zxfer.1m) for the full CLI reference
 - [testing.md](./testing.md), [platforms.md](./platforms.md), and [troubleshooting.md](./troubleshooting.md) for operational details

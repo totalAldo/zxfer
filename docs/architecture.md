@@ -95,21 +95,24 @@ own that path-adjacent secure staging locally.
 
 ## High-Level Replication Flow
 
-1. Parse CLI options and initialize secure tool paths.
-2. Load the flat module stack, initialize runtime/session state through the
-   explicit init flow, then resolve source and destination execution context.
-3. Build dataset and snapshot lists.
-4. Inspect source versus destination state.
-5. Optionally delete destination-only snapshots.
-6. Transfer snapshots through explicit stage helpers:
+1. Bootstrap with the built-in trusted PATH allowlist, capture the invocation,
+   and source the flat module stack.
+2. Register runtime traps and initialize runtime/session state through the
+   explicit init flow.
+3. Parse CLI options, validate combinations, and resolve source and
+   destination execution context.
+4. Build dataset and snapshot lists.
+5. Inspect source versus destination state.
+6. Optionally delete destination-only snapshots.
+7. Transfer snapshots through explicit stage helpers:
    live recheck, seed decision, then final send/receive range. Seed-only
    receive `-F` is passed as an internal execution flag without mutating the
    parsed `g_option_*` state.
-7. Optionally transfer or restore properties, including exact-keyed backup
+8. Optionally transfer or restore properties, including exact-keyed backup
    metadata reads and deferred post-seed reconciliation for datasets that were
    seeded into empty destinations.
-8. Repeat when `-Y` is enabled.
-9. Emit structured failure reporting on non-zero exit.
+9. Repeat when `-Y` is enabled.
+10. Emit structured failure reporting on non-zero exit.
 
 ## Execution Lifecycle Diagrams
 

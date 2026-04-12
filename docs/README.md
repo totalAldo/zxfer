@@ -11,6 +11,7 @@ with operator and contributor reference material.
 
 ## Guides
 
+- [whats-new-since-v1.1.7.md](./whats-new-since-v1.1.7.md): operator-focused upgrade guide from the legacy 2019 release
 - [platforms.md](./platforms.md): supported platforms, caveats, and path layouts
 - [external-tools.md](./external-tools.md): runtime, optional, and test tool inventory for packaging and ports work
 - [cli-examples.md](./cli-examples.md): one-page CLI example reference covering every current option

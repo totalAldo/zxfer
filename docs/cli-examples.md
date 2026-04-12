@@ -254,14 +254,14 @@ Solaris or illumos wrapper-style host specs are supported:
 adaptive `-j` source discovery, the same validated compression/decompression
 pipeline is reused for the source snapshot-list metadata stream.
 
-### `-Z command` Use a custom compression command
+### `-Z command` Use a custom `zstd` compressor command
 
 ```sh
 ./zxfer -v -Z 'zstd -T0 -3' -T backup-dst@example.com -R tank/data backup/data
 ```
 
-This still enables `-z`, but replaces the default compressor with the supplied
-command.
+This still enables `-z`, but replaces the default `zstd` compressor with the
+supplied command. The receive side still uses the matching decompression path.
 
 ### `-D command` Pipe the send stream through a progress command
 
