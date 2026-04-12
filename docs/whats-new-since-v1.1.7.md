@@ -43,6 +43,11 @@ What to do:
 - If you relied on rsync mode, stay on an older release for that workflow or
   switch that part of your process to another tool.
 - For ZFS snapshot replication, use current zxfer directly.
+- Within this repository, `upstream-compat-final` is the closest
+  fork-specific reference branch from before rsync removal, while
+  `upstream-archive` mirrors the latest imported upstream
+  [allanjude/zxfer](https://github.com/allanjude/zxfer) history for easy
+  comparison.
 
 ### 2. Property restore now requires current backup metadata
 

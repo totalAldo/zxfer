@@ -31,6 +31,19 @@ Bundled references:
 If you are upgrading from the 2019 `v1.1.7` release, start with
 [docs/whats-new-since-v1.1.7.md](./docs/whats-new-since-v1.1.7.md).
 
+## Branch Guide
+
+- `main`: active development branch for this fork; all new work merges here
+- `upstream-compat-final`: historical branch from this fork before
+  rsync-mode removal and before the later breaking divergence on `main`
+- `upstream-archive`: reference branch that mirrors the latest imported upstream
+  [allanjude/zxfer](https://github.com/allanjude/zxfer) history
+
+If you need the old rsync-capable code path, start by reviewing
+`upstream-compat-final` and `upstream-archive` instead of assuming `main`
+preserves pre-removal behavior. For the full historical context, see
+[docs/upstream-history.md](./docs/upstream-history.md).
+
 ## Quick Start
 
 Replicate a local recursive dataset tree:
