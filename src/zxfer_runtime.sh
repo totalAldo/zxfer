@@ -994,7 +994,7 @@ zxfer_get_max_yield_iterations() {
 # bootstrap so downstream code sees consistent defaults and runtime state.
 zxfer_init_runtime_metadata() {
 	# zxfer version
-	g_zxfer_version="2.0.0-20260411"
+	g_zxfer_version="2.0.0-20260413"
 }
 
 # Purpose: Initialize the option defaults before later helpers depend on it.
@@ -1100,6 +1100,7 @@ zxfer_init_transport_remote_defaults() {
 	g_zxfer_ssh_control_socket_action_command=""
 	g_zxfer_ssh_control_socket_lock_dir_result=""
 	g_zxfer_ssh_control_socket_lock_error=""
+	g_zxfer_ssh_control_socket_lease_count_result=""
 	g_zxfer_remote_capability_cache_ttl=15
 	g_zxfer_remote_capability_cache_wait_retries=5
 	g_source_operating_system=""
@@ -1138,6 +1139,9 @@ zxfer_init_runtime_state_defaults() {
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
 	g_zxfer_temp_file_result=""
+	if command -v zxfer_reset_owned_lock_tracking >/dev/null 2>&1; then
+		zxfer_reset_owned_lock_tracking
+	fi
 	zxfer_reset_runtime_artifact_state
 	g_zxfer_profile_start_epoch=$(date '+%s' 2>/dev/null || :)
 	g_zxfer_profile_has_data=0
@@ -1324,6 +1328,9 @@ zxfer_trap_exit() {
 	if command -v zxfer_close_all_ssh_control_sockets >/dev/null 2>&1; then
 		zxfer_close_all_ssh_control_sockets
 	fi
+	if command -v zxfer_release_registered_owned_locks >/dev/null 2>&1; then
+		zxfer_release_registered_owned_locks || :
+	fi
 
 	zxfer_cleanup_registered_runtime_artifacts
 
@@ -1338,6 +1345,14 @@ zxfer_trap_exit() {
 	if l_tmpdir=$(zxfer_try_get_effective_tmpdir 2>/dev/null); then
 		for l_temp_file in "$l_tmpdir/${g_zxfer_temp_prefix:-zxfer.unset}".*; do
 			[ -e "$l_temp_file" ] || continue
+			if command -v zxfer_remote_host_cache_cleanup_conflicts_with_path >/dev/null 2>&1 &&
+				zxfer_remote_host_cache_cleanup_conflicts_with_path "$l_temp_file"; then
+				continue
+			fi
+			if command -v zxfer_owned_lock_cleanup_conflicts_with_path >/dev/null 2>&1 &&
+				zxfer_owned_lock_cleanup_conflicts_with_path "$l_temp_file"; then
+				continue
+			fi
 			rm -rf "$l_temp_file"
 		done
 	fi
@@ -1349,8 +1364,6 @@ zxfer_trap_exit() {
 	fi
 	if command -v zxfer_cleanup_remote_host_cache_roots >/dev/null 2>&1; then
 		zxfer_cleanup_remote_host_cache_roots >/dev/null 2>&1 || :
-	elif command -v zxfer_cleanup_remote_host_cache_roots_if_empty >/dev/null 2>&1; then
-		zxfer_cleanup_remote_host_cache_roots_if_empty >/dev/null 2>&1 || :
 	fi
 
 	if [ "${g_services_need_relaunch:-0}" -eq 1 ]; then

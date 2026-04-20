@@ -17,6 +17,11 @@ responsibility boundary.
 
 - [../src/zxfer_modules.sh](../src/zxfer_modules.sh): canonical loader and
   source-order entry point for the runtime modules
+- [../src/zxfer_path_security.sh](../src/zxfer_path_security.sh): filesystem
+  ownership/mode checks, secure-path validation, symlink-aware path guards
+- [../src/zxfer_locking.sh](../src/zxfer_locking.sh): shared owned-lock and
+  lease metadata, owner-identity capture, stale-owner validation/reaping,
+  checked release, and trap-time owned-lock cleanup registration helpers
 - [../src/zxfer_reporting.sh](../src/zxfer_reporting.sh): structured failure
   reporting, verbose output helpers, usage errors, and operator-facing status
 - [../src/zxfer_exec.sh](../src/zxfer_exec.sh): shell-safe token handling,
@@ -27,29 +32,28 @@ responsibility boundary.
   initialization, shared per-run defaults, validated temp-root selection,
   runtime-artifact allocation/readback/cleanup, runtime-owned cache staging,
   and trap handling
+- [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh): remote helper
+  resolution, scoped requested-tool capability handshakes and caches, ssh
+  control-socket management, and subsystem-specific adapters around the shared
+  owned-locking layer
 - [../src/zxfer_cli.sh](../src/zxfer_cli.sh): CLI parsing, option validation,
   and compression command interpretation
 - [../src/zxfer_snapshot_state.sh](../src/zxfer_snapshot_state.sh): snapshot
   record parsing, normalization, and cached snapshot index state
-- [../src/zxfer_path_security.sh](../src/zxfer_path_security.sh): filesystem
-  ownership/mode checks, secure-path validation, symlink-aware path guards
-- [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh): remote helper
-  resolution, scoped requested-tool capability handshakes and caches, ssh control-
-  socket management
 - [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh): backup
   metadata accumulation, path derivation, and secure exact-keyed lookup/read/write flows
 - [../src/zxfer_property_cache.sh](../src/zxfer_property_cache.sh): normalized
   property caching, prefetch state, startup/iteration cache reset helpers
-- [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh):
-  source and destination dataset / snapshot discovery
-- [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh):
-  snapshot comparison and deletion planning
 - [../src/zxfer_property_reconcile.sh](../src/zxfer_property_reconcile.sh):
   readonly-property defaults, unsupported-property derivation, property
   diffing, filtering, override planning, per-call scratch resets, and apply
   logic
+- [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh):
+  source and destination dataset / snapshot discovery
 - [../src/zxfer_send_receive.sh](../src/zxfer_send_receive.sh): send /
   receive command construction, progress pipeline, compression handling
+- [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh):
+  snapshot comparison and deletion planning
 - [../src/zxfer_replication.sh](../src/zxfer_replication.sh): dataset iteration,
   replication orchestration, migration/service handling
 
@@ -92,6 +96,25 @@ Not every staging flow belongs in that layer. Modules that intentionally stage
 files beside the final target to preserve same-directory atomic rename and
 trusted-parent checks, such as backup publish or rollback paths, continue to
 own that path-adjacent secure staging locally.
+
+## Owned Lock And Lease Layer
+
+Long-lived coordination state no longer lives in ad hoc pid files or empty
+lock directories. [../src/zxfer_locking.sh](../src/zxfer_locking.sh) owns one
+metadata-bearing directory format for:
+
+- ssh control-socket lock directories
+- per-process ssh lease entries under `leases/`
+- remote capability-cache lock directories
+- `ZXFER_ERROR_LOG` append locks
+
+Each native owned entry records owner PID, process-start identity, hostname,
+purpose, and creation time inside the directory, validates that metadata
+before trusting an existing owner, reaps stale or corrupt owners only after
+validation, and treats release as a checked operation. Runtime trap cleanup
+tracks those owned paths separately from generic temp files and directories so
+zxfer can warn on release failures without deleting an entry that failed its
+ownership check.
 
 ## High-Level Replication Flow
 
@@ -162,7 +185,7 @@ flowchart TD
     V -- "yes: -Y and send/destroy work occurred" --> J
     V -- "no" --> Y["Invoke final -k backup metadata write or dry-run preview hook"]
     Y --> Z["Normal exit path"]
-    Z --> AA["zxfer_trap_exit(): close ssh control sockets, clean runtime artifacts, emit profiling and structured failure report"]
+    Z --> AA["zxfer_trap_exit(): close ssh control sockets, release registered owned locks or leases, clean runtime artifacts, emit profiling and structured failure report"]
 ```
 
 ### Per-Dataset Replication Lifecycle
@@ -251,8 +274,8 @@ sequenceDiagram
     participant Local as local destination
 
     Operator->>Launcher: run zxfer -v -O user@origin -R zroot backup/zroot -j8 -z
-    Launcher->>Origin: open ssh control socket when supported
-    Launcher->>Origin: preload minimum remote capability handshake keyed by PATH and transport policy
+    Launcher->>Origin: open or join the metadata-coordinated ssh control socket when supported
+    Launcher->>Origin: preload the minimum remote capability handshake under a metadata-coordinated cache lock keyed by PATH and transport policy
     Launcher->>Launcher: resolve remote zfs first, then request parallel or compression/helper heads later from scoped cached capability data when needed, falling back to direct probes only when needed
     alt per-dataset -j source discovery selected and required parallel helper resolves
         Launcher->>Origin: build source snapshot inventory via GNU parallel
@@ -267,9 +290,19 @@ sequenceDiagram
         Launcher->>Local: local decompressor | zfs receive ...
     end
     Launcher->>Launcher: wait for remaining background jobs and deferred property work
-    Launcher->>Origin: close control socket during trap cleanup
+    Launcher->>Origin: close the control socket during trap cleanup after releasing the last validated lease
     Launcher-->>Operator: success or structured failure report
 ```
+
+The ssh control-socket lock, per-process lease entries, and the per-host remote
+capability cache lock now share one metadata-bearing owned-directory format.
+Native `.lock` and `lease.*` paths are therefore directories with owner
+metadata rather than bare pid files. That lets sibling zxfer processes
+validate owner identity, reap stale or corrupt entries, and fail closed on
+mismatched release attempts instead of open-coding separate pid-file and
+bare-directory conventions. Older plain-file or pid-directory cache artifacts
+are no longer supported; if a reused cache root still contains them, operators
+must clear the stale entries before rerunning a current release.
 
 ### Example: Diverged Destination With `-d`, `-F`, And `-Y`
 

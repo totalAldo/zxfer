@@ -137,6 +137,7 @@ The test layout broadly follows the source layout:
 - `test_run_integration_zxfer.sh`
 - `test_run_vm_matrix.sh`
 - `test_zxfer_launcher.sh`
+- `test_zxfer_locking.sh`
 - `test_zxfer_reporting.sh`
 - `test_zxfer_exec.sh`
 - `test_zxfer_dependencies.sh`
@@ -167,7 +168,15 @@ through the broader peer suite alone.
 
 The top-level launcher and `tests/test_helper.sh` both source
 `src/zxfer_modules.sh`, so runtime module order is defined in one place rather
-than being duplicated across test fixtures.
+than being duplicated across test fixtures, including the owned-locking layer
+that now sits ahead of reporting and remote-host helpers.
+
+`test_zxfer_locking.sh` owns the shared lock/lease primitive itself:
+metadata render/parse, owner-identity capture, stale-owner reaping, checked
+release mismatches, and trap-time owned-lock cleanup helpers. The remote-host,
+reporting, and runtime suites then cover the subsystem adapters that apply
+that shared metadata-bearing format to ssh control-socket locks and leases,
+remote capability-cache locks, and `ZXFER_ERROR_LOG` locking.
 
 Focused tests that exercise `zxfer_init_globals()` should source through at
 least the property-reconcile boundary, or anything later in

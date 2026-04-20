@@ -771,6 +771,10 @@ zxfer_get_error_log_lock_dir() {
 	printf '%s/.zxfer-error-log.lock.%s\n' "$l_lock_log_parent" "$l_lock_log_name"
 }
 
+zxfer_get_error_log_lock_purpose() {
+	printf '%s\n' "error-log-lock"
+}
+
 # Purpose: Build the per-log lock key used to serialize `ZXFER_ERROR_LOG`
 # appends.
 # Usage: Called during failure reporting, profiling, and verbose operator
@@ -871,7 +875,21 @@ zxfer_acquire_error_log_lock() {
 	l_lock_dir_path=$1
 	l_lock_attempts=0
 
-	while ! mkdir "$l_lock_dir_path" 2>/dev/null; do
+	while ! zxfer_create_owned_lock_dir \
+		"$l_lock_dir_path" lock "$(zxfer_get_error_log_lock_purpose)" >/dev/null; do
+		if [ -L "$l_lock_dir_path" ] || [ -h "$l_lock_dir_path" ]; then
+			return 1
+		fi
+		if [ -d "$l_lock_dir_path" ]; then
+			if zxfer_try_reap_stale_owned_lock_dir \
+				"$l_lock_dir_path" 1 lock "$(zxfer_get_error_log_lock_purpose)" >/dev/null; then
+				continue
+			fi
+			l_reap_status=$?
+			if [ "$l_reap_status" -eq 1 ]; then
+				return 1
+			fi
+		fi
 		l_lock_attempts=$((l_lock_attempts + 1))
 		if [ "$l_lock_attempts" -ge 3 ]; then
 			return 1
@@ -887,8 +905,41 @@ zxfer_acquire_error_log_lock() {
 zxfer_release_error_log_lock() {
 	l_release_lock_dir=$1
 
-	[ -n "$l_release_lock_dir" ] || return 0
-	rmdir "$l_release_lock_dir" 2>/dev/null || true
+	zxfer_release_owned_lock_dir \
+		"$l_release_lock_dir" lock "$(zxfer_get_error_log_lock_purpose)"
+}
+
+zxfer_warn_error_log_lock_release_failure() {
+	l_log_path=$1
+	l_status=$2
+
+	zxfer_warn_stderr "zxfer: warning: unable to release ZXFER_ERROR_LOG lock for \"$l_log_path\" (status $l_status)."
+}
+
+zxfer_release_error_log_lock_warn_only() {
+	l_log_path=$1
+	l_lock_dir=$2
+
+	zxfer_release_error_log_lock "$l_lock_dir"
+	l_release_status=$?
+	if [ "$l_release_status" -eq 0 ]; then
+		return 0
+	fi
+	zxfer_warn_error_log_lock_release_failure "$l_log_path" "$l_release_status"
+	return 0
+}
+
+zxfer_release_error_log_lock_checked() {
+	l_log_path=$1
+	l_lock_dir=$2
+
+	zxfer_release_error_log_lock "$l_lock_dir"
+	l_release_status=$?
+	if [ "$l_release_status" -eq 0 ]; then
+		return 0
+	fi
+	zxfer_warn_error_log_lock_release_failure "$l_log_path" "$l_release_status"
+	return 1
 }
 
 # Purpose: Clean up the error log stage directory that this module created or
@@ -1025,22 +1076,22 @@ zxfer_append_failure_report_to_log() {
 
 	if [ "$l_log_exists" -eq 1 ]; then
 		if ! zxfer_validate_existing_error_log_file "$l_log_path" "$l_log_path"; then
-			zxfer_release_error_log_lock "$l_lock_dir"
+			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 			return 1
 		fi
 	else
 		if ! zxfer_create_error_log_file "$l_log_path"; then
 			zxfer_warn_stderr "zxfer: warning: unable to create ZXFER_ERROR_LOG file \"$l_log_path\"."
-			zxfer_release_error_log_lock "$l_lock_dir"
+			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 			return 1
 		fi
 		if ! zxfer_chmod_error_log_file "$l_log_path"; then
 			zxfer_warn_stderr "zxfer: warning: unable to chmod ZXFER_ERROR_LOG file \"$l_log_path\" to 0600."
-			zxfer_release_error_log_lock "$l_lock_dir"
+			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 			return 1
 		fi
 		if ! zxfer_validate_existing_error_log_file "$l_log_path" "$l_log_path"; then
-			zxfer_release_error_log_lock "$l_lock_dir"
+			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 			return 1
 		fi
 	fi
@@ -1048,16 +1099,16 @@ zxfer_append_failure_report_to_log() {
 	if [ "$l_log_parent_writable" -eq 0 ]; then
 		if ! zxfer_append_failure_report_to_existing_log_directly "$l_report" "$l_log_path"; then
 			zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
-			zxfer_release_error_log_lock "$l_lock_dir"
+			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 			return 1
 		fi
-		zxfer_release_error_log_lock "$l_lock_dir"
-		return 0
+		zxfer_release_error_log_lock_checked "$l_log_path" "$l_lock_dir"
+		return "$?"
 	fi
 
 	if ! zxfer_create_secure_staging_dir_for_path "$l_log_path" "zxfer-error-log" >/dev/null; then
 		zxfer_warn_stderr "zxfer: warning: unable to create ZXFER_ERROR_LOG staging directory for \"$l_log_path\"."
-		zxfer_release_error_log_lock "$l_lock_dir"
+		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 		return 1
 	fi
 	l_stage_dir=$g_zxfer_secure_staging_dir_result
@@ -1066,12 +1117,12 @@ zxfer_append_failure_report_to_log() {
 	if ! ln "$l_log_path" "$l_snapshot_path" 2>/dev/null; then
 		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
 		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock "$l_lock_dir"
+		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 		return 1
 	fi
 	if ! zxfer_validate_existing_error_log_file "$l_snapshot_path" "$l_log_path"; then
 		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock "$l_lock_dir"
+		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 		return 1
 	fi
 	l_old_umask=$(umask)
@@ -1080,31 +1131,31 @@ zxfer_append_failure_report_to_log() {
 		umask "$l_old_umask"
 		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
 		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock "$l_lock_dir"
+		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 		return 1
 	fi
 	if ! printf '%s\n' "$l_report" >>"$l_staged_log_path"; then
 		umask "$l_old_umask"
 		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
 		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock "$l_lock_dir"
+		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 		return 1
 	fi
 	umask "$l_old_umask"
 	if ! zxfer_chmod_error_log_file "$l_staged_log_path"; then
 		zxfer_warn_stderr "zxfer: warning: unable to chmod ZXFER_ERROR_LOG file \"$l_log_path\" to 0600."
 		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock "$l_lock_dir"
+		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 		return 1
 	fi
 	if ! mv -f "$l_staged_log_path" "$l_log_path"; then
 		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
 		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock "$l_lock_dir"
+		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
 		return 1
 	fi
 	zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-	zxfer_release_error_log_lock "$l_lock_dir"
+	zxfer_release_error_log_lock_checked "$l_log_path" "$l_lock_dir"
 }
 
 # Purpose: Emit the failure report in the operator-facing format owned by this

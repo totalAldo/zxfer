@@ -343,6 +343,74 @@ EOF
 		55 "$read_status"
 }
 
+test_zxfer_build_snapshot_record_index_rejects_malformed_stage_maps_and_meta_write_failures() {
+	records=$(printf '%s\n' "tank/src@snap1	111")
+	malformed_awk="$TEST_TMPDIR/mock-inline-stage-map-awk.sh"
+
+	cat >"$malformed_awk" <<'EOF'
+#!/bin/sh
+case "${ZXFER_MOCK_STAGE_ROW_MODE:-}" in
+missing-relpath)
+	printf 'tank/src\t\t/tmp/mock.raw\n'
+	;;
+missing-raw)
+	printf 'tank/src\trecords/1.records\t\n'
+	;;
+*)
+	exit 1
+	;;
+esac
+EOF
+	chmod 700 "$malformed_awk" || fail "Unable to publish the malformed inline stage-map awk fixture."
+
+	set +e
+	g_cmd_awk=false
+	zxfer_build_snapshot_record_index source "$records" >/dev/null 2>&1
+	stage_map_status=$?
+	g_cmd_awk="$malformed_awk"
+	ZXFER_MOCK_STAGE_ROW_MODE=missing-relpath
+	export ZXFER_MOCK_STAGE_ROW_MODE
+	zxfer_build_snapshot_record_index source "$records" >/dev/null 2>&1
+	missing_relpath_status=$?
+	ZXFER_MOCK_STAGE_ROW_MODE=missing-raw
+	export ZXFER_MOCK_STAGE_ROW_MODE
+	zxfer_build_snapshot_record_index source "$records" >/dev/null 2>&1
+	missing_raw_status=$?
+	unset ZXFER_MOCK_STAGE_ROW_MODE
+	unset g_cmd_awk
+	meta_write_output=$(
+		(
+			write_call_count=0
+			zxfer_write_cache_object_contents_to_path() {
+				write_call_count=$((write_call_count + 1))
+				if [ "$write_call_count" -eq 1 ]; then
+					return 0
+				fi
+				return 1
+			}
+			zxfer_read_cache_object_file() {
+				g_zxfer_cache_object_payload_result="ready"
+				g_zxfer_cache_object_metadata_result="manifest=manifest.tsv
+entries=1
+side=source"
+				return 0
+			}
+			zxfer_build_snapshot_record_index source "$records" >/dev/null 2>&1
+			printf 'status=%s\n' "$?"
+		)
+	)
+	set -e
+
+	assertEquals "Snapshot-index builds should fail closed when inline stage-map generation errors." \
+		1 "$stage_map_status"
+	assertEquals "Snapshot-index builds should fail closed when the staged map omits the record-object relpath." \
+		1 "$missing_relpath_status"
+	assertEquals "Snapshot-index builds should fail closed when the staged map omits the raw record path." \
+		1 "$missing_raw_status"
+	assertContains "Snapshot-index builds should fail closed when metadata objects cannot be written after inline staging succeeds." \
+		"$meta_write_output" "status=1"
+}
+
 test_zxfer_build_snapshot_record_index_rejects_invalid_side_and_cleans_up_stage_dir_when_records_dir_creation_fails() {
 	records=$(printf '%s\n' "backup/dst@snap1	111")
 	stage_output=$(
@@ -795,6 +863,62 @@ test_zxfer_build_snapshot_record_index_from_file_cleans_up_stage_dir_when_record
 		"$output" "exists=no"
 }
 
+test_zxfer_build_snapshot_record_index_helpers_cover_awk_and_manifest_write_failures_in_current_shell() {
+	records=$(printf '%s\n' "tank/src@snap1	111")
+	records_file="$TEST_TMPDIR/source_snapshot_records_manifest_failure.raw"
+	failing_awk="$TEST_TMPDIR/failing_snapshot_index_awk.sh"
+	printf '%s\n' "tank/src@snap1	111" >"$records_file"
+	cat >"$failing_awk" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+	chmod 700 "$failing_awk" || fail "Unable to publish the failing snapshot-index awk fixture."
+
+	set +e
+	g_cmd_awk="$failing_awk"
+	zxfer_build_snapshot_record_index source "$records" >/dev/null 2>&1
+	build_awk_status=$?
+	zxfer_build_snapshot_record_index_from_file source "$records_file" >/dev/null 2>&1
+	build_file_awk_status=$?
+	g_cmd_awk=$(command -v awk 2>/dev/null || printf '%s\n' awk)
+
+	stage_dir="$TEST_TMPDIR/direct_snapshot_index_manifest_failure"
+	zxfer_create_cache_object_stage_dir_in_parent() {
+		g_zxfer_runtime_artifact_path_result=$stage_dir
+		command mkdir -p "$stage_dir/records" "$stage_dir/manifest.tsv"
+		return 0
+	}
+	zxfer_build_snapshot_record_index source "$records" >/dev/null 2>&1
+	manifest_status=$?
+	manifest_exists=$([ -e "$stage_dir" ] && printf yes || printf no)
+	zxfer_source_runtime_modules_through "zxfer_snapshot_state.sh"
+
+	stage_dir="$TEST_TMPDIR/file_snapshot_index_manifest_failure"
+	zxfer_create_cache_object_stage_dir_in_parent() {
+		g_zxfer_runtime_artifact_path_result=$stage_dir
+		command mkdir -p "$stage_dir/records" "$stage_dir/manifest.tsv"
+		return 0
+	}
+	zxfer_build_snapshot_record_index_from_file source "$records_file" >/dev/null 2>&1
+	file_manifest_status=$?
+	file_manifest_exists=$([ -e "$stage_dir" ] && printf yes || printf no)
+	zxfer_source_runtime_modules_through "zxfer_snapshot_state.sh"
+	set -e
+
+	assertEquals "Snapshot-index builds should fail closed when the staged-map awk command fails in the current shell." \
+		1 "$build_awk_status"
+	assertEquals "File-backed snapshot-index builds should fail closed when the staged-map awk command fails in the current shell." \
+		1 "$build_file_awk_status"
+	assertEquals "Snapshot-index builds should fail closed when the staged manifest path cannot be opened for writing in the current shell." \
+		1 "$manifest_status"
+	assertEquals "Snapshot-index builds should clean up the stage directory when staged manifest writes fail in the current shell." \
+		"no" "$manifest_exists"
+	assertEquals "File-backed snapshot-index builds should fail closed when the staged manifest path cannot be opened for writing in the current shell." \
+		1 "$file_manifest_status"
+	assertEquals "File-backed snapshot-index builds should clean up the stage directory when staged manifest writes fail in the current shell." \
+		"no" "$file_manifest_exists"
+}
+
 test_zxfer_build_snapshot_record_index_from_file_round_trip_replaces_previous_generation() {
 	initial_records=$(printf '%s\n' \
 		"backup/dst/seed@snap0" \
@@ -1085,6 +1209,45 @@ tank/src@snap1" "$second_output"
 		1 "${g_zxfer_source_snapshot_record_index_ready:-0}"
 	assertNotEquals "Rebuilding after a missing record object should publish a fresh generation directory." \
 		"$first_dir" "$g_zxfer_source_snapshot_record_index_dir"
+}
+
+test_zxfer_get_indexed_snapshot_records_for_dataset_clears_ready_state_when_record_object_read_fails() {
+	records=$(printf '%s\n' \
+		"tank/src@b	222" \
+		"tank/src@a	111")
+	mock_bin="$TEST_TMPDIR/mock_record_object_read_cat"
+	output_file="$TEST_TMPDIR/indexed_snapshot_record_read_failure.out"
+	cat_bin=$(command -v cat)
+
+	zxfer_build_snapshot_record_index source "$records"
+	mkdir -p "$mock_bin" || fail "Unable to create the record-object read failure helper directory."
+	cat >"$mock_bin/cat" <<EOF
+#!/bin/sh
+case "\$1" in
+*/records/*.records)
+	exit 1
+	;;
+esac
+exec "$cat_bin" "\$@"
+EOF
+	chmod 700 "$mock_bin/cat" || fail "Unable to publish the record-object read failure helper."
+
+	previous_path=$PATH
+	set +e
+	PATH="$mock_bin:$PATH"
+	zxfer_get_indexed_snapshot_records_for_dataset source "tank/src" >"$output_file"
+	status=$?
+	PATH=$previous_path
+	set -e
+
+	assertEquals "Unreadable staged record objects should cause indexed lookups to fail." \
+		1 "$status"
+	assertEquals "Unreadable staged record objects should clear the source ready flag." \
+		0 "${g_zxfer_source_snapshot_record_index_ready:-0}"
+	assertEquals "Unreadable staged record objects should clear the remembered source generation directory." \
+		"" "${g_zxfer_source_snapshot_record_index_dir:-}"
+	assertEquals "Unreadable staged record objects should not produce a payload." \
+		"" "$(cat "$output_file")"
 }
 
 test_zxfer_get_snapshot_records_for_dataset_preserves_source_cache_failures() {

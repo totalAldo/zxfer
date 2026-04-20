@@ -1166,6 +1166,8 @@ zxfer_prepare_local_backup_file_stage() {
 	else
 		l_status=$?
 		g_zxfer_backup_local_write_failure_result=staging
+		g_zxfer_backup_stage_dir_result=""
+		g_zxfer_backup_stage_file_result=""
 		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
 		return "$l_status"
 	fi
@@ -1174,6 +1176,8 @@ zxfer_prepare_local_backup_file_stage() {
 	else
 		l_status=$?
 		g_zxfer_backup_local_write_failure_result=staging
+		g_zxfer_backup_stage_dir_result=""
+		g_zxfer_backup_stage_file_result=""
 		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
 		return "$l_status"
 	fi

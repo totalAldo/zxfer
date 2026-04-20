@@ -83,6 +83,7 @@ zxfer_record_remote_capability_cache_wait_metrics() {
 zxfer_reset_ssh_control_socket_lock_state() {
 	g_zxfer_ssh_control_socket_lock_dir_result=""
 	g_zxfer_ssh_control_socket_lock_error=""
+	g_zxfer_ssh_control_socket_lease_count_result=""
 }
 
 # Purpose: Record the SSH control socket lock error for later diagnostics or
@@ -113,6 +114,18 @@ zxfer_emit_ssh_control_socket_lock_failure_message() {
 		return 0
 	fi
 	[ -z "$l_default_message" ] || printf '%s\n' "$l_default_message"
+}
+
+zxfer_get_ssh_control_socket_lock_purpose() {
+	printf '%s\n' "ssh-control-socket-lock"
+}
+
+zxfer_get_ssh_control_socket_lease_purpose() {
+	printf '%s\n' "ssh-control-socket-lease"
+}
+
+zxfer_get_remote_capability_cache_lock_purpose() {
+	printf '%s\n' "remote-capability-cache-lock"
 }
 
 # Purpose: Return the remote host cache root prefix in the form expected by
@@ -282,15 +295,16 @@ zxfer_write_ssh_control_socket_entry_identity_file() {
 	fi
 	l_tmp_identity_path=$g_zxfer_runtime_artifact_path_result
 
-	if ! (
-		umask 077
-		zxfer_render_ssh_control_socket_entry_identity "$l_host_spec"
-	) >"$l_tmp_identity_path"; then
+	if ! l_identity_contents=$(zxfer_render_ssh_control_socket_entry_identity "$l_host_spec"); then
 		zxfer_cleanup_runtime_artifact_path "$l_tmp_identity_path"
 		return 1
 	fi
 
-	chmod 600 "$l_tmp_identity_path" 2>/dev/null || :
+	if ! zxfer_write_runtime_artifact_file "$l_tmp_identity_path" "$l_identity_contents"; then
+		zxfer_cleanup_runtime_artifact_path "$l_tmp_identity_path"
+		return 1
+	fi
+
 	if ! zxfer_publish_runtime_artifact_file "$l_tmp_identity_path" "$l_identity_path"; then
 		zxfer_cleanup_runtime_artifact_path "$l_tmp_identity_path"
 		return 1
@@ -369,22 +383,6 @@ zxfer_ssh_control_socket_cache_dir_path_for_tmpdir() {
 	fi
 
 	printf '%s/%s.s.%s.d\n' "$l_tmpdir" "$l_root_prefix" "$l_effective_uid"
-}
-
-# Purpose: Return the legacy SSH control-socket cache directory path that older
-# runs used under one temporary root.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs to recognize or reap compatibility-era
-# cache directories.
-zxfer_legacy_ssh_control_socket_cache_dir_path_for_tmpdir() {
-	l_tmpdir=$1
-
-	[ -n "$l_tmpdir" ] || return 1
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-
-	printf '%s/zxfer-s.%s.d\n' "$l_tmpdir" "$l_effective_uid"
 }
 
 # Purpose: Ensure the SSH control socket entry directory exists and is ready
@@ -542,10 +540,11 @@ zxfer_acquire_ssh_control_socket_lock() {
 			return 1
 		fi
 		if [ -d "$l_lock_dir" ]; then
-			if zxfer_try_reap_stale_ssh_control_socket_lock_dir "$l_lock_dir" 0; then
+			zxfer_try_reap_stale_ssh_control_socket_lock_dir "$l_lock_dir" 0
+			l_reap_status=$?
+			if [ "$l_reap_status" -eq 0 ]; then
 				continue
 			fi
-			l_reap_status=$?
 			if [ "$l_reap_status" -eq 1 ]; then
 				zxfer_record_ssh_control_socket_lock_wait_metrics "$l_waited" "$l_wait_start_ms"
 				return 1
@@ -570,10 +569,11 @@ zxfer_acquire_ssh_control_socket_lock() {
 		l_attempts=$((l_attempts + 1))
 		if [ "$l_attempts" -ge 10 ]; then
 			if [ -d "$l_lock_dir" ]; then
-				if zxfer_try_reap_stale_ssh_control_socket_lock_dir "$l_lock_dir" 1; then
+				zxfer_try_reap_stale_ssh_control_socket_lock_dir "$l_lock_dir" 1
+				l_reap_status=$?
+				if [ "$l_reap_status" -eq 0 ]; then
 					continue
 				fi
-				l_reap_status=$?
 				if [ "$l_reap_status" -eq 1 ]; then
 					zxfer_record_ssh_control_socket_lock_wait_metrics "$l_waited" "$l_wait_start_ms"
 					return 1
@@ -600,9 +600,9 @@ zxfer_acquire_ssh_control_socket_lock() {
 zxfer_validate_ssh_control_socket_lock_dir() {
 	l_lock_dir=$1
 
-	if [ ! -d "$l_lock_dir" ]; then
+	if [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; then
 		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock path \"$l_lock_dir\" is not a directory."
+			"ssh control socket lock path \"$l_lock_dir\" is missing."
 		return 1
 	fi
 	if [ -L "$l_lock_dir" ] || [ -h "$l_lock_dir" ]; then
@@ -610,31 +610,23 @@ zxfer_validate_ssh_control_socket_lock_dir() {
 			"Refusing symlinked ssh control socket lock path \"$l_lock_dir\"."
 		return 1
 	fi
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to determine the effective uid for ssh control socket lock validation."
-		return 1
+	if zxfer_load_owned_lock_metadata_for_kind_and_purpose \
+		"$l_lock_dir" lock "$(zxfer_get_ssh_control_socket_lock_purpose)"; then
+		return 0
+	else
+		l_status=$?
 	fi
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_lock_dir"); then
+	case "$l_status" in
+	2)
 		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to determine the owner of ssh control socket lock path \"$l_lock_dir\"."
-		return 1
-	fi
-	if [ "$l_owner_uid" != "$l_effective_uid" ]; then
+			"ssh control socket lock path \"$l_lock_dir\" has missing or invalid metadata."
+		;;
+	*)
 		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock path \"$l_lock_dir\" is not owned by the effective uid."
-		return 1
-	fi
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_lock_dir"); then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to determine permissions for ssh control socket lock path \"$l_lock_dir\"."
-		return 1
-	fi
-	if [ "$l_mode" != "700" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"New ssh control socket lock path \"$l_lock_dir\" must have mode 700, found mode $l_mode."
-		return 1
-	fi
+			"ssh control socket lock path \"$l_lock_dir\" failed ownership, permission, or metadata validation."
+		;;
+	esac
+	return 1
 }
 
 # Purpose: Validate the SSH control socket lock directory for reap before zxfer
@@ -685,84 +677,6 @@ zxfer_validate_ssh_control_socket_lock_dir_for_reap() {
 	return 1
 }
 
-# Purpose: Read the SSH control socket lock PID file from staged state into the
-# current shell.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later helpers need a checked reload instead of ad hoc
-# file reads.
-zxfer_read_ssh_control_socket_lock_pid_file() {
-	l_pid_path=$1
-
-	if [ ! -f "$l_pid_path" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock pid file \"$l_pid_path\" is missing or invalid."
-		return 1
-	fi
-	if [ -L "$l_pid_path" ] || [ -h "$l_pid_path" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Refusing symlinked ssh control socket lock pid file \"$l_pid_path\"."
-		return 1
-	fi
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to determine the effective uid for ssh control socket lock pid validation."
-		return 1
-	fi
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_pid_path"); then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to determine the owner of ssh control socket lock pid file \"$l_pid_path\"."
-		return 1
-	fi
-	if [ "$l_owner_uid" != "$l_effective_uid" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock pid file \"$l_pid_path\" is not owned by the effective uid."
-		return 1
-	fi
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_pid_path"); then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to determine permissions for ssh control socket lock pid file \"$l_pid_path\"."
-		return 1
-	fi
-	if [ "$l_mode" != "600" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock pid file \"$l_pid_path\" must have mode 600, found mode $l_mode."
-		return 1
-	fi
-
-	if ! l_lock_pid=$(zxfer_read_runtime_artifact_file "$l_pid_path" 2>/dev/null); then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to read ssh control socket lock pid file \"$l_pid_path\"."
-		return 1
-	fi
-	case "$l_lock_pid" in
-	'' | *[!0-9]*)
-		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock pid file \"$l_pid_path\" does not contain a numeric pid."
-		return 1
-		;;
-	esac
-	printf '%s\n' "$l_lock_pid"
-}
-
-# Purpose: Write the SSH control socket lock PID file in the normalized form
-# later zxfer steps expect.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when the module needs a stable staged file or emitted
-# stream for downstream use.
-zxfer_write_ssh_control_socket_lock_pid_file() {
-	l_lock_dir=$1
-	l_pid_path="$l_lock_dir/pid"
-
-	[ ! -L "$l_pid_path" ] || return 1
-	[ ! -h "$l_pid_path" ] || return 1
-	if ! zxfer_write_runtime_cache_file_atomically "$l_pid_path" "$$
-" "zxfer-ssh-control-lock-pid"; then
-		return 1
-	fi
-	chmod 600 "$l_pid_path" 2>/dev/null || :
-	return 0
-}
-
 # Purpose: Clean up the SSH control socket lock directory that this module
 # created or tracks.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
@@ -771,15 +685,7 @@ zxfer_write_ssh_control_socket_lock_pid_file() {
 zxfer_cleanup_ssh_control_socket_lock_dir() {
 	l_lock_dir=$1
 
-	[ -n "$l_lock_dir" ] || return 0
-	if [ -L "$l_lock_dir" ] || [ -h "$l_lock_dir" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Refusing symlinked ssh control socket lock path \"$l_lock_dir\"."
-		return 1
-	fi
-	[ -d "$l_lock_dir" ] || return 0
-	if rm -rf "$l_lock_dir" 2>/dev/null ||
-		{ [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; }; then
+	if zxfer_cleanup_owned_lock_dir "$l_lock_dir"; then
 		return 0
 	fi
 	zxfer_note_ssh_control_socket_lock_error \
@@ -794,25 +700,35 @@ zxfer_cleanup_ssh_control_socket_lock_dir() {
 # helper state.
 zxfer_create_ssh_control_socket_lock_dir() {
 	l_lock_dir=$1
-	l_old_umask=$(umask)
-	umask 077
-	if ! mkdir "$l_lock_dir" 2>/dev/null; then
-		umask "$l_old_umask"
-		return 1
-	fi
-	umask "$l_old_umask"
 
-	if ! zxfer_validate_ssh_control_socket_lock_dir "$l_lock_dir"; then
-		zxfer_cleanup_ssh_control_socket_lock_dir "$l_lock_dir"
-		return 1
-	fi
-	if ! zxfer_write_ssh_control_socket_lock_pid_file "$l_lock_dir"; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to write ssh control socket lock pid file \"$l_lock_dir/pid\"."
-		zxfer_cleanup_ssh_control_socket_lock_dir "$l_lock_dir"
+	if ! zxfer_create_owned_lock_dir \
+		"$l_lock_dir" lock "$(zxfer_get_ssh_control_socket_lock_purpose)" >/dev/null; then
+		if [ -e "$l_lock_dir" ] || [ -L "$l_lock_dir" ] || [ -h "$l_lock_dir" ]; then
+			zxfer_validate_ssh_control_socket_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
+		fi
 		return 1
 	fi
 	return 0
+}
+
+# Purpose: Detect retired pid-file lock directories so current releases fail
+# closed instead of reaping or trusting old owner state.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management before a missing-metadata lock directory is treated as a
+# reap candidate.
+zxfer_owned_lock_dir_uses_unsupported_pid_file_layout() {
+	l_lock_dir=$1
+	l_metadata_path=$(zxfer_get_owned_lock_metadata_path "$l_lock_dir")
+	l_pid_path="$l_lock_dir/pid"
+
+	if [ -e "$l_metadata_path" ] || [ -L "$l_metadata_path" ] ||
+		[ -h "$l_metadata_path" ]; then
+		return 1
+	fi
+	if [ -e "$l_pid_path" ] || [ -L "$l_pid_path" ] || [ -h "$l_pid_path" ]; then
+		return 0
+	fi
+	return 1
 }
 
 # Purpose: Try to resolve or create the reap stale SSH control socket lock
@@ -823,40 +739,28 @@ zxfer_create_ssh_control_socket_lock_dir() {
 zxfer_try_reap_stale_ssh_control_socket_lock_dir() {
 	l_lock_dir=$1
 	l_allow_pidless_reap=${2:-0}
-	l_pid_path="$l_lock_dir/pid"
 
 	if ! zxfer_validate_ssh_control_socket_lock_dir_for_reap "$l_lock_dir"; then
 		return 1
 	fi
-
-	if [ -e "$l_pid_path" ]; then
-		if ! l_lock_pid=$(zxfer_read_ssh_control_socket_lock_pid_file "$l_pid_path"); then
-			case "$l_allow_pidless_reap" in
-			1 | [Yy][Ee][Ss] | [Tt][Rr][Uu][Ee] | [Oo][Nn])
-				:
-				;;
-			*)
-				return 2
-				;;
-			esac
-		elif kill -s 0 "$l_lock_pid" 2>/dev/null; then
-			return 2
-		fi
-	else
-		case "$l_allow_pidless_reap" in
-		1 | [Yy][Ee][Ss] | [Tt][Rr][Uu][Ee] | [Oo][Nn])
-			:
-			;;
-		*)
-			return 2
-			;;
-		esac
-	fi
-
-	if ! zxfer_cleanup_ssh_control_socket_lock_dir "$l_lock_dir"; then
+	if zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_dir"; then
+		zxfer_note_ssh_control_socket_lock_error \
+			"ssh control socket lock path \"$l_lock_dir\" uses an unsupported pid-file layout. Remove the stale lock directory and retry."
 		return 1
 	fi
-	return 0
+	zxfer_try_reap_stale_owned_lock_dir \
+		"$l_lock_dir" "$l_allow_pidless_reap" \
+		lock "$(zxfer_get_ssh_control_socket_lock_purpose)"
+	l_reap_status=$?
+	if [ "$l_reap_status" -eq 0 ]; then
+		return 0
+	fi
+	if [ "$l_reap_status" -eq 2 ]; then
+		return 2
+	fi
+	zxfer_note_ssh_control_socket_lock_error \
+		"Unable to reap stale or corrupt ssh control socket lock path \"$l_lock_dir\"."
+	return 1
 }
 
 # Purpose: Release the SSH control socket lock after the protected work
@@ -866,36 +770,54 @@ zxfer_try_reap_stale_ssh_control_socket_lock_dir() {
 # longer be held.
 zxfer_release_ssh_control_socket_lock() {
 	l_lock_dir=$1
-	l_pid_path=""
-	[ -n "$l_lock_dir" ] || return 0
-	if [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; then
+
+	if zxfer_release_owned_lock_dir \
+		"$l_lock_dir" lock "$(zxfer_get_ssh_control_socket_lock_purpose)"; then
 		return 0
 	fi
-	[ ! -L "$l_lock_dir" ] || return 1
-	[ ! -h "$l_lock_dir" ] || return 1
-	[ -d "$l_lock_dir" ] || return 1
+	zxfer_note_ssh_control_socket_lock_error \
+		"Failed to release ssh control socket lock path \"$l_lock_dir\"."
+	return 1
+}
 
-	l_pid_path="$l_lock_dir/pid"
-	if [ -e "$l_pid_path" ] || [ -L "$l_pid_path" ] || [ -h "$l_pid_path" ]; then
-		[ ! -L "$l_pid_path" ] || return 1
-		[ ! -h "$l_pid_path" ] || return 1
-		if ! rm -f "$l_pid_path" 2>/dev/null; then
-			return 1
-		fi
-		if [ -e "$l_pid_path" ] || [ -L "$l_pid_path" ] || [ -h "$l_pid_path" ]; then
-			return 1
-		fi
+# Purpose: Warn when the SSH control socket lock could not be released after a
+# primary failure already decided the caller's return status.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when lock release should be checked without suppressing the
+# original transport, cleanup, or lease failure.
+zxfer_warn_ssh_control_socket_lock_release_failure() {
+	l_role=$1
+
+	zxfer_emit_ssh_control_socket_lock_failure_message \
+		"Warning: Failed to release ssh control socket lock for $l_role host." >&2
+}
+
+# Purpose: Release the SSH control socket lock while preserving the caller's
+# primary failure when one already exists.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when lock release should be checked but must not suppress
+# an earlier lease, cleanup, or transport failure.
+zxfer_release_ssh_control_socket_lock_with_precedence() {
+	l_role=$1
+	l_lock_dir=$2
+	l_primary_status=${3:-0}
+
+	[ -n "$l_lock_dir" ] || return "$l_primary_status"
+
+	zxfer_release_ssh_control_socket_lock "$l_lock_dir" >/dev/null 2>&1
+	l_release_status=$?
+	if [ "$l_release_status" -eq 0 ]; then
+		return "$l_primary_status"
 	fi
-
-	if rmdir "$l_lock_dir" >/dev/null 2>&1 ||
-		{ [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; }; then
-		return 0
+	zxfer_warn_ssh_control_socket_lock_release_failure "$l_role"
+	if [ "$l_primary_status" -ne 0 ]; then
+		return "$l_primary_status"
 	fi
 	return 1
 }
 
-# Purpose: Reap stale SSH control-socket lease files that no longer belong to a
-# live process.
+# Purpose: Reap stale SSH control-socket lease entries that no longer belong to
+# a live process.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
 # socket management before lease counts or cleanup decisions rely on the
 # current lease directory contents.
@@ -906,23 +828,39 @@ zxfer_prune_stale_ssh_control_socket_leases() {
 	[ -d "$l_leases_dir" ] || return 0
 
 	set -- "$l_leases_dir"/lease.*
-	[ -e "$1" ] || return 0
+	if [ ! -e "$1" ] && [ ! -L "$1" ] && [ ! -h "$1" ]; then
+		return 0
+	fi
 
 	for l_lease_path in "$@"; do
-		[ -e "$l_lease_path" ] || continue
-		l_lease_name=$(basename "$l_lease_path")
-		l_lease_pid=${l_lease_name#lease.}
-		l_lease_pid=${l_lease_pid%%.*}
-		case "$l_lease_pid" in
-		'' | *[!0-9]*)
-			rm -f "$l_lease_path"
+		if [ ! -e "$l_lease_path" ] && [ ! -L "$l_lease_path" ] &&
+			[ ! -h "$l_lease_path" ]; then
+			continue
+		fi
+		if [ -L "$l_lease_path" ] || [ -h "$l_lease_path" ]; then
+			zxfer_note_ssh_control_socket_lock_error \
+				"Refusing symlinked ssh control socket lease entry \"$l_lease_path\"."
+			return 1
+		fi
+		if [ ! -d "$l_lease_path" ]; then
+			zxfer_note_ssh_control_socket_lock_error \
+				"ssh control socket lease entry \"$l_lease_path\" is not a metadata-bearing directory. Remove the stale entry and retry."
+			return 1
+		fi
+		zxfer_try_reap_stale_owned_lock_dir \
+			"$l_lease_path" 0 lease "$(zxfer_get_ssh_control_socket_lease_purpose)" >/dev/null 2>&1
+		l_reap_status=$?
+		case "$l_reap_status" in
+		0 | 2)
 			continue
 			;;
 		esac
-		if ! kill -s 0 "$l_lease_pid" 2>/dev/null; then
-			rm -f "$l_lease_path"
-		fi
+		zxfer_note_ssh_control_socket_lock_error \
+			"Unable to inspect ssh control socket lease entry \"$l_lease_path\"."
+		return 1
 	done
+
+	return 0
 }
 
 # Purpose: Count the SSH control socket leases for the surrounding remote-host
@@ -933,26 +871,55 @@ zxfer_count_ssh_control_socket_leases() {
 	l_entry_dir=$1
 	l_leases_dir="$l_entry_dir/leases"
 	l_count=0
+	g_zxfer_ssh_control_socket_lease_count_result=""
 
 	[ -d "$l_leases_dir" ] || {
+		g_zxfer_ssh_control_socket_lease_count_result=0
 		printf '%s\n' "0"
 		return 0
 	}
 
 	set -- "$l_leases_dir"/lease.*
-	if [ ! -e "$1" ]; then
+	if [ ! -e "$1" ] && [ ! -L "$1" ] && [ ! -h "$1" ]; then
+		g_zxfer_ssh_control_socket_lease_count_result=0
 		printf '%s\n' "0"
 		return 0
 	fi
 
 	for l_lease_path in "$@"; do
-		[ -e "$l_lease_path" ] || continue
-		l_count=$((l_count + 1))
+		if [ ! -e "$l_lease_path" ] && [ ! -L "$l_lease_path" ] &&
+			[ ! -h "$l_lease_path" ]; then
+			continue
+		fi
+		if [ -L "$l_lease_path" ] || [ -h "$l_lease_path" ]; then
+			zxfer_note_ssh_control_socket_lock_error \
+				"Refusing symlinked ssh control socket lease entry \"$l_lease_path\"."
+			return 1
+		fi
+		if [ ! -d "$l_lease_path" ]; then
+			zxfer_note_ssh_control_socket_lock_error \
+				"ssh control socket lease entry \"$l_lease_path\" is not a metadata-bearing directory. Remove the stale entry and retry."
+			return 1
+		fi
+		zxfer_try_reap_stale_owned_lock_dir \
+			"$l_lease_path" 0 lease "$(zxfer_get_ssh_control_socket_lease_purpose)" >/dev/null 2>&1
+		l_reap_status=$?
+		if [ "$l_reap_status" -eq 0 ]; then
+			continue
+		fi
+		if [ "$l_reap_status" -eq 2 ]; then
+			l_count=$((l_count + 1))
+			continue
+		fi
+		zxfer_note_ssh_control_socket_lock_error \
+			"Unable to inspect ssh control socket lease entry \"$l_lease_path\"."
+		return 1
 	done
+	g_zxfer_ssh_control_socket_lease_count_result=$l_count
 	printf '%s\n' "$l_count"
 }
 
-# Purpose: Create the SSH control socket lease file using the safety checks
+# Purpose: Create the SSH control socket lease entry using the safety checks
 # owned by this module.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
 # socket management when zxfer needs a fresh staged resource or persistent
@@ -962,8 +929,27 @@ zxfer_create_ssh_control_socket_lease_file() {
 	l_leases_dir="$l_entry_dir/leases"
 	l_timestamp=$(date +%s)
 
-	zxfer_create_runtime_artifact_file_in_parent \
-		"$l_leases_dir" "lease.$$.${l_timestamp}"
+	g_zxfer_runtime_artifact_path_result=""
+	if ! l_lease_dir=$(zxfer_create_owned_lock_dir_in_parent \
+		"$l_leases_dir" "lease.$$.${l_timestamp}" \
+		lease "$(zxfer_get_ssh_control_socket_lease_purpose)"); then
+		return 1
+	fi
+	zxfer_register_owned_lock_path "$l_lease_dir"
+	g_zxfer_runtime_artifact_path_result=$l_lease_dir
+	printf '%s\n' "$l_lease_dir"
+}
+
+# Purpose: Release the SSH control socket lease entry after the protected work
+# finishes.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when zxfer no longer needs to hold one process lease on a
+# shared control-socket entry.
+zxfer_release_ssh_control_socket_lease_file() {
+	l_lease_dir=$1
+
+	zxfer_release_owned_lock_dir \
+		"$l_lease_dir" lease "$(zxfer_get_ssh_control_socket_lease_purpose)"
 }
 
 # Purpose: Reset the SSH control socket action state so the next remote-host
@@ -1652,22 +1638,6 @@ zxfer_remote_capability_cache_dir_path_for_tmpdir() {
 		"$l_tmpdir" "$l_root_prefix" "$l_effective_uid"
 }
 
-# Purpose: Return the legacy remote-capability cache directory path that older
-# runs used under one temporary root.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs to recognize or reap compatibility-era
-# capability cache directories.
-zxfer_legacy_remote_capability_cache_dir_path_for_tmpdir() {
-	l_tmpdir=$1
-
-	[ -n "$l_tmpdir" ] || return 1
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-
-	printf '%s/zxfer-remote-capabilities.%s.d\n' "$l_tmpdir" "$l_effective_uid"
-}
-
 # Purpose: Manage remote capability cache path for the remote-host management
 # flow.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
@@ -1707,71 +1677,8 @@ zxfer_remote_capability_cache_lock_path() {
 zxfer_validate_remote_capability_cache_lock_dir() {
 	l_lock_dir=$1
 
-	[ -d "$l_lock_dir" ] || return 1
-	[ ! -L "$l_lock_dir" ] || return 1
-	[ ! -h "$l_lock_dir" ] || return 1
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_lock_dir"); then
-		return 1
-	fi
-	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_lock_dir"); then
-		return 1
-	fi
-	[ "$l_mode" = "700" ] || return 1
-}
-
-# Purpose: Read the remote capability cache lock PID file from staged state
-# into the current shell.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later helpers need a checked reload instead of ad hoc
-# file reads.
-zxfer_read_remote_capability_cache_lock_pid_file() {
-	l_pid_path=$1
-
-	[ -f "$l_pid_path" ] || return 1
-	[ ! -L "$l_pid_path" ] || return 1
-	[ ! -h "$l_pid_path" ] || return 1
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_pid_path"); then
-		return 1
-	fi
-	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_pid_path"); then
-		return 1
-	fi
-	[ "$l_mode" = "600" ] || return 1
-
-	l_lock_pid=$(zxfer_read_runtime_artifact_file "$l_pid_path" 2>/dev/null) || return 1
-	case "$l_lock_pid" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-	printf '%s\n' "$l_lock_pid"
-}
-
-# Purpose: Write the remote capability cache lock PID file in the normalized
-# form later zxfer steps expect.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when the module needs a stable staged file or emitted
-# stream for downstream use.
-zxfer_write_remote_capability_cache_lock_pid_file() {
-	l_lock_dir=$1
-	l_pid_path="$l_lock_dir/pid"
-
-	[ ! -L "$l_pid_path" ] || return 1
-	[ ! -h "$l_pid_path" ] || return 1
-	if ! zxfer_write_runtime_cache_file_atomically "$l_pid_path" "$$
-" "zxfer-remote-capability-lock-pid"; then
-		return 1
-	fi
-	chmod 600 "$l_pid_path" 2>/dev/null || :
-	return 0
+	zxfer_load_owned_lock_metadata_for_kind_and_purpose \
+		"$l_lock_dir" lock "$(zxfer_get_remote_capability_cache_lock_purpose)" >/dev/null 2>&1
 }
 
 # Purpose: Create the remote capability cache lock directory using the safety
@@ -1781,23 +1688,24 @@ zxfer_write_remote_capability_cache_lock_pid_file() {
 # helper state.
 zxfer_create_remote_capability_cache_lock_dir() {
 	l_lock_dir=$1
-	l_old_umask=$(umask)
-	umask 077
-	if ! mkdir "$l_lock_dir" 2>/dev/null; then
-		umask "$l_old_umask"
-		return 1
-	fi
-	umask "$l_old_umask"
 
-	if ! zxfer_validate_remote_capability_cache_lock_dir "$l_lock_dir"; then
-		rm -rf "$l_lock_dir"
-		return 1
-	fi
-	if ! zxfer_write_remote_capability_cache_lock_pid_file "$l_lock_dir"; then
-		rm -rf "$l_lock_dir"
+	if ! zxfer_create_owned_lock_dir \
+		"$l_lock_dir" lock "$(zxfer_get_remote_capability_cache_lock_purpose)" >/dev/null; then
 		return 1
 	fi
 	return 0
+}
+
+# Purpose: Surface an unsupported remote capability cache lock layout before
+# the caller reuses or destroys it.
+# Usage: Called during remote bootstrap and capability caching when current
+# releases encounter a pre-metadata pid-file lock directory that operators must
+# remove explicitly.
+zxfer_warn_unsupported_remote_capability_cache_lock_path() {
+	l_lock_dir=$1
+
+	zxfer_warn_stderr \
+		"Error: remote capability cache lock path \"$l_lock_dir\" uses an unsupported pid-file layout. Remove the stale lock directory and retry."
 }
 
 # Purpose: Try to resolve or create the acquire remote capability cache lock
@@ -1822,34 +1730,38 @@ zxfer_try_acquire_remote_capability_cache_lock() {
 	fi
 
 	[ -d "$l_lock_dir" ] || return 1
-	if ! zxfer_validate_remote_capability_cache_lock_dir "$l_lock_dir"; then
+	if zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_dir"; then
+		zxfer_warn_unsupported_remote_capability_cache_lock_path "$l_lock_dir"
 		return 1
 	fi
-
-	l_lock_pid=""
-	l_lock_pid_path="$l_lock_dir/pid"
-	if [ -e "$l_lock_pid_path" ] &&
-		! l_lock_pid=$(zxfer_read_remote_capability_cache_lock_pid_file "$l_lock_pid_path"); then
-		return 1
+	l_metadata_path=$(zxfer_get_owned_lock_metadata_path "$l_lock_dir")
+	if [ ! -e "$l_metadata_path" ] && [ ! -L "$l_metadata_path" ] &&
+		[ ! -h "$l_metadata_path" ]; then
+		zxfer_try_reap_stale_owned_lock_dir \
+			"$l_lock_dir" 0 lock "$(zxfer_get_remote_capability_cache_lock_purpose)"
+		l_reap_status=$?
+	else
+		zxfer_try_reap_stale_owned_lock_dir \
+			"$l_lock_dir" 1 lock "$(zxfer_get_remote_capability_cache_lock_purpose)"
+		l_reap_status=$?
 	fi
-
-	if [ -n "$l_lock_pid" ]; then
-		if ! kill -s 0 "$l_lock_pid" 2>/dev/null; then
-			if ! rm -rf "$l_lock_dir" 2>/dev/null; then
-				return 1
-			fi
-			if zxfer_create_remote_capability_cache_lock_dir "$l_lock_dir"; then
-				printf '%s\n' "$l_lock_dir"
-				return 0
-			fi
-			[ -d "$l_lock_dir" ] || return 1
-			if ! zxfer_validate_remote_capability_cache_lock_dir "$l_lock_dir"; then
-				return 1
-			fi
+	if [ "$l_reap_status" -eq 0 ]; then
+		if zxfer_create_remote_capability_cache_lock_dir "$l_lock_dir"; then
+			printf '%s\n' "$l_lock_dir"
+			return 0
 		fi
+		[ -d "$l_lock_dir" ] || return 1
+		if ! zxfer_validate_remote_capability_cache_lock_dir "$l_lock_dir"; then
+			return 1
+		fi
+		return 2
 	fi
-
-	return 2
+	case "$l_reap_status" in
+	2)
+		return 2
+		;;
+	esac
+	return 1
 }
 
 # Purpose: Release the remote capability cache lock after the protected work
@@ -1860,12 +1772,38 @@ zxfer_try_acquire_remote_capability_cache_lock() {
 zxfer_release_remote_capability_cache_lock() {
 	l_lock_dir=$1
 
-	[ -n "$l_lock_dir" ] || return 0
-	[ -e "$l_lock_dir" ] || return 0
-	[ ! -L "$l_lock_dir" ] || return 1
-	[ ! -h "$l_lock_dir" ] || return 1
-	[ -d "$l_lock_dir" ] || return 1
-	rm -rf "$l_lock_dir" 2>/dev/null
+	zxfer_release_owned_lock_dir \
+		"$l_lock_dir" lock "$(zxfer_get_remote_capability_cache_lock_purpose)"
+}
+
+# Purpose: Match only the current-format remote-host cache root paths that this
+# module owns so generic temp cleanup does not treat arbitrary scratch
+# directories as remote-host cache state.
+# Usage: Called during trap cleanup and explicit cache-root teardown before
+# unsupported old-format entries are allowed to block directory removal.
+zxfer_is_remote_host_cache_root_path() {
+	l_cache_dir=$1
+
+	[ -n "$l_cache_dir" ] || return 1
+	l_cache_basename=${l_cache_dir##*/}
+
+	if [ -n "${g_zxfer_temp_prefix:-}" ]; then
+		l_root_prefix=$g_zxfer_temp_prefix
+		case "$l_cache_basename" in
+		"${l_root_prefix}.s."[0-9]*.d | \
+			"${l_root_prefix}.remote-capabilities."[0-9]*.d)
+			return 0
+			;;
+		esac
+	fi
+
+	case "$l_cache_basename" in
+	zxfer.*.s.[0-9]*.d | \
+		zxfer.*.remote-capabilities.[0-9]*.d)
+		return 0
+		;;
+	esac
+	return 1
 }
 
 # Purpose: Clean up the empty remote host cache root that this module created
@@ -1896,6 +1834,70 @@ zxfer_cleanup_empty_remote_host_cache_root() {
 	return 1
 }
 
+# Purpose: Detect remote-host cache roots that still contain unsupported
+# old-format lock or lease entries so cleanup does not silently delete them.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management before trap or explicit cache-root cleanup removes a
+# current-run temp-prefix root.
+zxfer_remote_host_cache_root_contains_unsupported_entries() {
+	l_cache_dir=$1
+
+	[ -n "$l_cache_dir" ] || return 1
+	[ -d "$l_cache_dir" ] || return 1
+	[ ! -L "$l_cache_dir" ] || return 1
+	[ ! -h "$l_cache_dir" ] || return 1
+
+	set -- "$l_cache_dir"/*.lock
+	if [ -e "$1" ] || [ -L "$1" ] || [ -h "$1" ]; then
+		for l_lock_path in "$@"; do
+			if [ ! -e "$l_lock_path" ] && [ ! -L "$l_lock_path" ] &&
+				[ ! -h "$l_lock_path" ]; then
+				continue
+			fi
+			if [ -d "$l_lock_path" ] &&
+				zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_path"; then
+				return 0
+			fi
+		done
+	fi
+
+	set -- "$l_cache_dir"/*/leases/lease.*
+	if [ ! -e "$1" ] && [ ! -L "$1" ] && [ ! -h "$1" ]; then
+		return 1
+	fi
+
+	for l_lease_path in "$@"; do
+		if [ ! -e "$l_lease_path" ] && [ ! -L "$l_lease_path" ] &&
+			[ ! -h "$l_lease_path" ]; then
+			continue
+		fi
+		if [ -L "$l_lease_path" ] || [ -h "$l_lease_path" ] ||
+			[ ! -d "$l_lease_path" ]; then
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+# Purpose: Detect remote-host cache cleanup conflicts before generic temp-root
+# cleanup or cache-root teardown removes a path.
+# Usage: Called during trap cleanup and explicit remote-host cache cleanup when
+# owned lock state or unsupported old-format entries must be preserved for
+# checked release or operator cleanup.
+zxfer_remote_host_cache_cleanup_conflicts_with_path() {
+	l_cache_dir=$1
+
+	if command -v zxfer_owned_lock_cleanup_conflicts_with_path >/dev/null 2>&1 &&
+		zxfer_owned_lock_cleanup_conflicts_with_path "$l_cache_dir"; then
+		return 0
+	fi
+	if ! zxfer_is_remote_host_cache_root_path "$l_cache_dir"; then
+		return 1
+	fi
+	zxfer_remote_host_cache_root_contains_unsupported_entries "$l_cache_dir"
+}
+
 # Purpose: Clean up the remote host cache root that this module created or
 # tracks.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
@@ -1905,41 +1907,15 @@ zxfer_cleanup_remote_host_cache_root() {
 	l_cache_dir=$1
 
 	[ -n "$l_cache_dir" ] || return 0
+	if zxfer_remote_host_cache_cleanup_conflicts_with_path "$l_cache_dir"; then
+		zxfer_cleanup_empty_remote_host_cache_root "$l_cache_dir" >/dev/null 2>&1 || :
+		return 0
+	fi
 	if [ -L "$l_cache_dir" ] || [ -h "$l_cache_dir" ]; then
 		rm -f "$l_cache_dir" 2>/dev/null || :
 		return 0
 	fi
 	rm -rf "$l_cache_dir" 2>/dev/null || :
-}
-
-# Purpose: Clean up the legacy remote host cache roots if empty that this
-# module created or tracks.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management on success and failure paths so temporary state does not
-# linger.
-zxfer_cleanup_legacy_remote_host_cache_roots_if_empty() {
-	if l_socket_tmpdir=$(zxfer_try_get_socket_cache_tmpdir 2>/dev/null); then
-		if l_socket_cache_dir=$(
-			zxfer_legacy_ssh_control_socket_cache_dir_path_for_tmpdir "$l_socket_tmpdir" 2>/dev/null
-		); then
-			zxfer_cleanup_empty_remote_host_cache_root "$l_socket_cache_dir" >/dev/null 2>&1 || :
-		fi
-	fi
-	if l_default_tmpdir=$(zxfer_try_get_default_tmpdir 2>/dev/null); then
-		if [ "${l_socket_tmpdir:-}" != "$l_default_tmpdir" ] &&
-			l_socket_cache_dir=$(
-				zxfer_legacy_ssh_control_socket_cache_dir_path_for_tmpdir "$l_default_tmpdir" 2>/dev/null
-			); then
-			zxfer_cleanup_empty_remote_host_cache_root "$l_socket_cache_dir" >/dev/null 2>&1 || :
-		fi
-	fi
-	if l_capability_tmpdir=$(zxfer_try_get_effective_tmpdir 2>/dev/null); then
-		if l_capability_cache_dir=$(
-			zxfer_legacy_remote_capability_cache_dir_path_for_tmpdir "$l_capability_tmpdir" 2>/dev/null
-		); then
-			zxfer_cleanup_empty_remote_host_cache_root "$l_capability_cache_dir" >/dev/null 2>&1 || :
-		fi
-	fi
 }
 
 # Purpose: Clean up the remote host cache roots that this module created or
@@ -1966,17 +1942,6 @@ zxfer_cleanup_remote_host_cache_roots() {
 			zxfer_cleanup_remote_host_cache_root "$l_capability_cache_dir"
 		fi
 	fi
-
-	zxfer_cleanup_legacy_remote_host_cache_roots_if_empty >/dev/null 2>&1 || :
-}
-
-# Purpose: Clean up the remote host cache roots if empty that this module
-# created or tracks.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management on success and failure paths so temporary state does not
-# linger.
-zxfer_cleanup_remote_host_cache_roots_if_empty() {
-	zxfer_cleanup_legacy_remote_host_cache_roots_if_empty
 }
 
 # Purpose: Wait for the for remote capability cache fill to reach the state
@@ -2053,11 +2018,19 @@ zxfer_reap_stale_pidless_remote_capability_cache_lock() {
 		return 1
 	fi
 	[ -e "$l_lock_dir" ] || return 0
-	if ! zxfer_validate_remote_capability_cache_lock_dir "$l_lock_dir"; then
+	if zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_dir"; then
+		zxfer_warn_unsupported_remote_capability_cache_lock_path "$l_lock_dir"
 		return 1
 	fi
-	[ ! -e "$l_lock_dir/pid" ] || return 0
-	rm -rf "$l_lock_dir" 2>/dev/null
+	zxfer_try_reap_stale_owned_lock_dir \
+		"$l_lock_dir" 1 lock "$(zxfer_get_remote_capability_cache_lock_purpose)"
+	l_reap_status=$?
+	case "$l_reap_status" in
+	0 | 2)
+		return 0
+		;;
+	esac
+	return 1
 }
 
 # Purpose: Parse one remote capability payload into the structured globals that
@@ -2569,6 +2542,31 @@ zxfer_warn_remote_capability_cache_lock_release_failure() {
 	printf '%s\n' "Warning: Failed to release local remote capability cache lock for host $l_host_spec (status $l_status)." >&2
 }
 
+# Purpose: Release the remote capability cache lock while preserving the
+# caller's primary failure when one already exists.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when lock release should be checked but must not suppress
+# an earlier live-probe or cache-path failure.
+zxfer_release_remote_capability_cache_lock_with_precedence() {
+	l_host_spec=$1
+	l_lock_dir=$2
+	l_primary_status=${3:-0}
+
+	[ -n "$l_lock_dir" ] || return "$l_primary_status"
+
+	zxfer_release_remote_capability_cache_lock "$l_lock_dir" >/dev/null 2>&1
+	l_release_status=$?
+	if [ "$l_release_status" -eq 0 ]; then
+		return "$l_primary_status"
+	fi
+	zxfer_warn_remote_capability_cache_lock_release_failure \
+		"$l_host_spec" "$l_release_status"
+	if [ "$l_primary_status" -ne 0 ]; then
+		return "$l_primary_status"
+	fi
+	return 1
+}
+
 # Purpose: Build the remote capability probe script for the next execution or
 # comparison step.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
@@ -2710,13 +2708,9 @@ zxfer_ensure_remote_host_capabilities() {
 	else
 		l_live_status=$?
 		if [ -n "$l_capability_lock_dir" ]; then
-			if zxfer_release_remote_capability_cache_lock "$l_capability_lock_dir" >/dev/null 2>&1; then
-				:
-			else
-				l_release_status=$?
-				zxfer_warn_remote_capability_cache_lock_release_failure \
-					"$l_host_spec" "$l_release_status"
-			fi
+			zxfer_release_remote_capability_cache_lock_with_precedence \
+				"$l_host_spec" "$l_capability_lock_dir" "$l_live_status"
+			l_live_status=$?
 		fi
 		return "$l_live_status"
 	fi
@@ -2736,13 +2730,10 @@ zxfer_ensure_remote_host_capabilities() {
 			"$l_host_spec" "$l_cache_write_status"
 	fi
 	if [ -n "$l_capability_lock_dir" ]; then
-		if zxfer_release_remote_capability_cache_lock "$l_capability_lock_dir" >/dev/null 2>&1; then
-			:
-		else
-			l_release_status=$?
-			zxfer_warn_remote_capability_cache_lock_release_failure \
-				"$l_host_spec" "$l_release_status"
-		fi
+		zxfer_release_remote_capability_cache_lock_with_precedence \
+			"$l_host_spec" "$l_capability_lock_dir" 0
+		l_release_status=$?
+		[ "$l_release_status" -eq 0 ] || return "$l_release_status"
 	fi
 	g_zxfer_remote_capability_response_result=$l_live_response
 	printf '%s\n' "$l_live_response"
@@ -3137,6 +3128,37 @@ zxfer_resolve_remote_cli_command_safe() {
 	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head"
 }
 
+# Purpose: Best-effort cleanup for a freshly opened SSH control socket when
+# setup fails before zxfer can publish the corresponding process lease.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management after lease creation fails for a newly opened master so the
+# untracked socket and cache directory do not leak.
+zxfer_try_cleanup_opened_ssh_control_socket_after_lease_failure() {
+	l_host=$1
+	l_role=$2
+	l_socket_path=$3
+	l_entry_dir=$4
+
+	if zxfer_run_ssh_control_socket_action_for_host \
+		"$l_host" "$l_socket_path" exit; then
+		:
+	elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
+		:
+	else
+		zxfer_emit_ssh_control_socket_action_failure_message \
+			"Warning: Failed to close ssh control socket for $l_role host after lease creation failure." >&2
+		return 1
+	fi
+	if [ -n "${g_zxfer_ssh_control_socket_action_command:-}" ]; then
+		zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+	fi
+	if zxfer_cleanup_ssh_control_socket_entry_dir "$l_entry_dir"; then
+		return 0
+	fi
+	printf '%s\n' "Warning: Failed to remove ssh control socket cache directory for $l_role host after lease creation failure." >&2
+	return 1
+}
+
 # Purpose: Set up the shared SSH control socket state for one remote role
 # without duplicating lock and cache handling.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
@@ -3147,6 +3169,7 @@ zxfer_resolve_remote_cli_command_safe() {
 zxfer_setup_ssh_control_socket() {
 	l_host=$1
 	l_role=$2
+	l_opened_control_socket=0
 
 	[ -z "$l_host" ] && return
 
@@ -3175,7 +3198,7 @@ zxfer_setup_ssh_control_socket() {
 	fi
 
 	if zxfer_acquire_ssh_control_socket_lock "$l_control_dir" >/dev/null; then
-		l_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
+		l_ssh_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
 	else
 		if [ -n "${g_zxfer_ssh_control_socket_lock_error:-}" ]; then
 			zxfer_throw_error \
@@ -3184,34 +3207,53 @@ zxfer_setup_ssh_control_socket() {
 		zxfer_throw_error "Error creating ssh control socket for $l_role host."
 	fi
 	zxfer_prune_stale_ssh_control_socket_leases "$l_control_dir"
+	l_prune_status=$?
+	if [ "$l_prune_status" -ne 0 ]; then
+		zxfer_release_ssh_control_socket_lock_with_precedence \
+			"$l_role" "$l_ssh_lock_dir" "$l_prune_status" >/dev/null 2>&1 || :
+		zxfer_emit_ssh_control_socket_lock_failure_message \
+			"Error pruning ssh control socket lease entries for $l_role host." >&2
+		zxfer_throw_error "Error creating ssh control socket for $l_role host."
+	fi
 	if ! zxfer_check_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
 		case "${g_zxfer_ssh_control_socket_action_result:-}" in
 		stale)
 			rm -f "$l_control_socket"
 			;;
 		*)
-			zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+			zxfer_release_ssh_control_socket_lock_with_precedence \
+				"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 			zxfer_emit_ssh_control_socket_action_failure_message \
 				"Error checking ssh control socket for $l_role host." >&2
 			zxfer_throw_error "Error creating ssh control socket for $l_role host."
 			;;
 		esac
 		if ! zxfer_open_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
-			zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+			zxfer_release_ssh_control_socket_lock_with_precedence \
+				"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 			zxfer_throw_error "Error creating ssh control socket for $l_role host."
 		fi
+		l_opened_control_socket=1
 	fi
 
 	zxfer_create_ssh_control_socket_lease_file "$l_control_dir" >/dev/null
 	l_lease_status=$?
 	if [ "$l_lease_status" -ne 0 ]; then
-		zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+		if [ "$l_opened_control_socket" -eq 1 ]; then
+			zxfer_try_cleanup_opened_ssh_control_socket_after_lease_failure \
+				"$l_host" "$l_role" "$l_control_socket" "$l_control_dir" || :
+		fi
+		zxfer_release_ssh_control_socket_lock_with_precedence \
+			"$l_role" "$l_ssh_lock_dir" "$l_lease_status" >/dev/null 2>&1 || :
 		zxfer_throw_error "Error creating ssh control socket for $l_role host."
 	fi
 	l_lease_file=$g_zxfer_runtime_artifact_path_result
-	zxfer_release_ssh_control_socket_lock "$l_lock_dir"
-
 	zxfer_set_ssh_control_socket_role_state "$l_role" "$l_control_socket" "$l_control_dir" "$l_lease_file"
+	if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
+		zxfer_emit_ssh_control_socket_lock_failure_message \
+			"Error releasing ssh control socket lock for $l_role host." >&2
+		zxfer_throw_error "Error creating ssh control socket for $l_role host."
+	fi
 }
 
 # Purpose: Close the origin SSH control socket and release the related handles
@@ -3225,17 +3267,37 @@ zxfer_close_origin_ssh_control_socket() {
 
 	if [ "$g_ssh_origin_control_socket_lease_file" != "" ]; then
 		if zxfer_acquire_ssh_control_socket_lock "$g_ssh_origin_control_socket_dir" >/dev/null; then
-			l_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
-			if zxfer_cleanup_runtime_artifact_path "$g_ssh_origin_control_socket_lease_file"; then
+			l_ssh_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
+			if zxfer_release_ssh_control_socket_lease_file \
+				"$g_ssh_origin_control_socket_lease_file"; then
 				:
 			else
 				l_cleanup_status=$?
-				zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+				zxfer_release_ssh_control_socket_lock_with_precedence \
+					origin "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
 				printf '%s\n' "Error removing ssh control socket lease for origin host." >&2
 				return "$l_cleanup_status"
 			fi
 			zxfer_prune_stale_ssh_control_socket_leases "$g_ssh_origin_control_socket_dir"
-			l_remaining_leases=$(zxfer_count_ssh_control_socket_leases "$g_ssh_origin_control_socket_dir")
+			l_prune_status=$?
+			if [ "$l_prune_status" -ne 0 ]; then
+				zxfer_release_ssh_control_socket_lock_with_precedence \
+					origin "$l_ssh_lock_dir" "$l_prune_status" >/dev/null 2>&1 || :
+				zxfer_emit_ssh_control_socket_lock_failure_message \
+					"Error pruning ssh control socket lease entries for origin host." >&2
+				return "$l_prune_status"
+			fi
+			zxfer_count_ssh_control_socket_leases \
+				"$g_ssh_origin_control_socket_dir" >/dev/null
+			l_count_status=$?
+			if [ "$l_count_status" -ne 0 ]; then
+				zxfer_release_ssh_control_socket_lock_with_precedence \
+					origin "$l_ssh_lock_dir" "$l_count_status" >/dev/null 2>&1 || :
+				zxfer_emit_ssh_control_socket_lock_failure_message \
+					"Error counting ssh control socket lease entries for origin host." >&2
+				return "$l_count_status"
+			fi
+			l_remaining_leases=$g_zxfer_ssh_control_socket_lease_count_result
 		else
 			zxfer_emit_ssh_control_socket_lock_failure_message \
 				"Error acquiring ssh control socket lock for origin host." >&2
@@ -3250,7 +3312,8 @@ zxfer_close_origin_ssh_control_socket() {
 						:
 					else
 						l_cleanup_status=$?
-						zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+						zxfer_release_ssh_control_socket_lock_with_precedence \
+							origin "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
 						printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
 						return "$l_cleanup_status"
 					fi
@@ -3259,7 +3322,8 @@ zxfer_close_origin_ssh_control_socket() {
 						:
 					else
 						l_cleanup_status=$?
-						zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+						zxfer_release_ssh_control_socket_lock_with_precedence \
+							origin "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
 						printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
 						return "$l_cleanup_status"
 					fi
@@ -3269,12 +3333,14 @@ zxfer_close_origin_ssh_control_socket() {
 					l_restore_status=$?
 					if [ "$l_restore_status" -eq 0 ]; then
 						g_ssh_origin_control_socket_lease_file=$g_zxfer_runtime_artifact_path_result
-						zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+						zxfer_release_ssh_control_socket_lock_with_precedence \
+							origin "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 						zxfer_emit_ssh_control_socket_action_failure_message \
 							"Error closing origin ssh control socket." >&2
 						return 1
 					fi
-					zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+					zxfer_release_ssh_control_socket_lock_with_precedence \
+						origin "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 					zxfer_emit_ssh_control_socket_action_failure_message \
 						"Error closing origin ssh control socket." >&2
 					printf '%s\n' "Error restoring ssh control socket lease for origin host." >&2
@@ -3287,7 +3353,8 @@ zxfer_close_origin_ssh_control_socket() {
 					:
 				else
 					l_cleanup_status=$?
-					zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+					zxfer_release_ssh_control_socket_lock_with_precedence \
+						origin "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
 					printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
 					return "$l_cleanup_status"
 				fi
@@ -3297,21 +3364,32 @@ zxfer_close_origin_ssh_control_socket() {
 				l_restore_status=$?
 				if [ "$l_restore_status" -eq 0 ]; then
 					g_ssh_origin_control_socket_lease_file=$g_zxfer_runtime_artifact_path_result
-					zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+					zxfer_release_ssh_control_socket_lock_with_precedence \
+						origin "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 					zxfer_emit_ssh_control_socket_action_failure_message \
 						"Error checking origin ssh control socket." >&2
 					return 1
 				fi
-				zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+				zxfer_release_ssh_control_socket_lock_with_precedence \
+					origin "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 				zxfer_emit_ssh_control_socket_action_failure_message \
 					"Error checking origin ssh control socket." >&2
 				printf '%s\n' "Error restoring ssh control socket lease for origin host." >&2
 				return 1
 			fi
-			zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+			if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
+				zxfer_clear_ssh_control_socket_role_state origin
+				zxfer_emit_ssh_control_socket_lock_failure_message \
+					"Error releasing ssh control socket lock for origin host." >&2
+				return 1
+			fi
 		else
-			zxfer_release_ssh_control_socket_lock "$l_lock_dir"
 			zxfer_clear_ssh_control_socket_role_state origin
+			if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
+				zxfer_emit_ssh_control_socket_lock_failure_message \
+					"Error releasing ssh control socket lock for origin host." >&2
+				return 1
+			fi
 			return 0
 		fi
 	else
@@ -3355,17 +3433,37 @@ zxfer_close_target_ssh_control_socket() {
 
 	if [ "$g_ssh_target_control_socket_lease_file" != "" ]; then
 		if zxfer_acquire_ssh_control_socket_lock "$g_ssh_target_control_socket_dir" >/dev/null; then
-			l_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
-			if zxfer_cleanup_runtime_artifact_path "$g_ssh_target_control_socket_lease_file"; then
+			l_ssh_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
+			if zxfer_release_ssh_control_socket_lease_file \
+				"$g_ssh_target_control_socket_lease_file"; then
 				:
 			else
 				l_cleanup_status=$?
-				zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+				zxfer_release_ssh_control_socket_lock_with_precedence \
+					target "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
 				printf '%s\n' "Error removing ssh control socket lease for target host." >&2
 				return "$l_cleanup_status"
 			fi
 			zxfer_prune_stale_ssh_control_socket_leases "$g_ssh_target_control_socket_dir"
-			l_remaining_leases=$(zxfer_count_ssh_control_socket_leases "$g_ssh_target_control_socket_dir")
+			l_prune_status=$?
+			if [ "$l_prune_status" -ne 0 ]; then
+				zxfer_release_ssh_control_socket_lock_with_precedence \
+					target "$l_ssh_lock_dir" "$l_prune_status" >/dev/null 2>&1 || :
+				zxfer_emit_ssh_control_socket_lock_failure_message \
+					"Error pruning ssh control socket lease entries for target host." >&2
+				return "$l_prune_status"
+			fi
+			zxfer_count_ssh_control_socket_leases \
+				"$g_ssh_target_control_socket_dir" >/dev/null
+			l_count_status=$?
+			if [ "$l_count_status" -ne 0 ]; then
+				zxfer_release_ssh_control_socket_lock_with_precedence \
+					target "$l_ssh_lock_dir" "$l_count_status" >/dev/null 2>&1 || :
+				zxfer_emit_ssh_control_socket_lock_failure_message \
+					"Error counting ssh control socket lease entries for target host." >&2
+				return "$l_count_status"
+			fi
+			l_remaining_leases=$g_zxfer_ssh_control_socket_lease_count_result
 		else
 			zxfer_emit_ssh_control_socket_lock_failure_message \
 				"Error acquiring ssh control socket lock for target host." >&2
@@ -3380,7 +3478,8 @@ zxfer_close_target_ssh_control_socket() {
 						:
 					else
 						l_cleanup_status=$?
-						zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+						zxfer_release_ssh_control_socket_lock_with_precedence \
+							target "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
 						printf '%s\n' "Error removing ssh control socket cache directory for target host." >&2
 						return "$l_cleanup_status"
 					fi
@@ -3389,7 +3488,8 @@ zxfer_close_target_ssh_control_socket() {
 						:
 					else
 						l_cleanup_status=$?
-						zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+						zxfer_release_ssh_control_socket_lock_with_precedence \
+							target "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
 						printf '%s\n' "Error removing ssh control socket cache directory for target host." >&2
 						return "$l_cleanup_status"
 					fi
@@ -3399,12 +3499,14 @@ zxfer_close_target_ssh_control_socket() {
 					l_restore_status=$?
 					if [ "$l_restore_status" -eq 0 ]; then
 						g_ssh_target_control_socket_lease_file=$g_zxfer_runtime_artifact_path_result
-						zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+						zxfer_release_ssh_control_socket_lock_with_precedence \
+							target "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 						zxfer_emit_ssh_control_socket_action_failure_message \
 							"Error closing target ssh control socket." >&2
 						return 1
 					fi
-					zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+					zxfer_release_ssh_control_socket_lock_with_precedence \
+						target "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 					zxfer_emit_ssh_control_socket_action_failure_message \
 						"Error closing target ssh control socket." >&2
 					printf '%s\n' "Error restoring ssh control socket lease for target host." >&2
@@ -3417,7 +3519,8 @@ zxfer_close_target_ssh_control_socket() {
 					:
 				else
 					l_cleanup_status=$?
-					zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+					zxfer_release_ssh_control_socket_lock_with_precedence \
+						target "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
 					printf '%s\n' "Error removing ssh control socket cache directory for target host." >&2
 					return "$l_cleanup_status"
 				fi
@@ -3427,21 +3530,32 @@ zxfer_close_target_ssh_control_socket() {
 				l_restore_status=$?
 				if [ "$l_restore_status" -eq 0 ]; then
 					g_ssh_target_control_socket_lease_file=$g_zxfer_runtime_artifact_path_result
-					zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+					zxfer_release_ssh_control_socket_lock_with_precedence \
+						target "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 					zxfer_emit_ssh_control_socket_action_failure_message \
 						"Error checking target ssh control socket." >&2
 					return 1
 				fi
-				zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+				zxfer_release_ssh_control_socket_lock_with_precedence \
+					target "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 				zxfer_emit_ssh_control_socket_action_failure_message \
 					"Error checking target ssh control socket." >&2
 				printf '%s\n' "Error restoring ssh control socket lease for target host." >&2
 				return 1
 			fi
-			zxfer_release_ssh_control_socket_lock "$l_lock_dir"
+			if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
+				zxfer_clear_ssh_control_socket_role_state target
+				zxfer_emit_ssh_control_socket_lock_failure_message \
+					"Error releasing ssh control socket lock for target host." >&2
+				return 1
+			fi
 		else
-			zxfer_release_ssh_control_socket_lock "$l_lock_dir"
 			zxfer_clear_ssh_control_socket_role_state target
+			if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
+				zxfer_emit_ssh_control_socket_lock_failure_message \
+					"Error releasing ssh control socket lock for target host." >&2
+				return 1
+			fi
 			return 0
 		fi
 	else

@@ -124,7 +124,7 @@ test_runtime_init_default_helpers_cover_current_shell_paths() {
 	)
 
 	assertContains "Runtime metadata initialization should set the current zxfer version string." \
-		"$output" "version=2.0.0-20260411"
+		"$output" "version=2.0.0-20260413"
 	assertContains "Option default initialization should restore the single-job default." \
 		"$output" "jobs=1"
 	assertContains "Transport runtime defaults should clear cached remote capability payloads." \
@@ -141,6 +141,47 @@ test_runtime_init_default_helpers_cover_current_shell_paths() {
 		"$output" "delete_source=<>"
 	assertContains "Temporary artifact initialization should publish the current run temp prefix." \
 		"$output" "temp_prefix=zxfer."
+}
+
+test_zxfer_init_globals_applies_secure_path_after_reset_helpers() {
+	output=$(
+		(
+			reset_replication_calls=0
+			zxfer_refresh_secure_path_state() {
+				printf '%s\n' "refresh"
+			}
+			zxfer_reset_replication_runtime_state() {
+				reset_replication_calls=$((reset_replication_calls + 1))
+			}
+			zxfer_init_dependency_tool_defaults() {
+				printf '%s\n' "deps"
+			}
+			zxfer_init_transport_remote_defaults() {
+				printf '%s\n' "transport"
+			}
+			zxfer_init_temp_artifacts() {
+				printf '%s\n' "temp"
+			}
+			zxfer_apply_secure_path() {
+				g_zxfer_runtime_path="/secure/path"
+				printf '%s\n' "apply"
+			}
+			zxfer_init_globals
+			printf 'runtime=<%s>\n' "${g_zxfer_runtime_path:-}"
+			printf 'replication_resets=%s\n' "$reset_replication_calls"
+		)
+	)
+
+	assertContains "Global runtime initialization should refresh the secure-path state before rebuilding defaults." \
+		"$output" "refresh"
+	assertContains "Global runtime initialization should reset replication state through the public helper when it is available." \
+		"$output" "replication_resets=1"
+	assertContains "Global runtime initialization should still run the dependency, transport, and temp default helpers." \
+		"$output" "deps"
+	assertContains "Global runtime initialization should still reapply the secure runtime PATH after rebuilding defaults." \
+		"$output" "apply"
+	assertContains "Global runtime initialization should leave the secure runtime PATH published in current-shell state." \
+		"$output" "runtime=</secure/path>"
 }
 
 test_runtime_execution_context_init_helpers_cover_local_and_dry_run_remote_paths() {
@@ -354,6 +395,75 @@ test_zxfer_trap_exit_cleans_registered_runtime_artifacts() {
 		"[ -e \"$registered_file\" ]"
 	assertFalse "zxfer_trap_exit should remove registered runtime directories." \
 		"[ -e \"$registered_dir\" ]"
+}
+
+test_zxfer_trap_exit_releases_registered_owned_locks() {
+	lock_dir="$TEST_TMPDIR/trap-owned.lock"
+	zxfer_create_owned_lock_dir "$lock_dir" lock "trap-owned-lock" >/dev/null
+	zxfer_register_owned_lock_path "$lock_dir"
+
+	output=$(
+		(
+			zxfer_close_all_ssh_control_sockets() {
+				:
+			}
+			true
+			zxfer_trap_exit
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "zxfer_trap_exit should preserve success after releasing registered owned locks." \
+		0 "$status"
+	assertEquals "zxfer_trap_exit should keep stderr clean when registered owned locks release cleanly." \
+		"" "$output"
+	assertFalse "zxfer_trap_exit should remove registered owned lock directories." \
+		"[ -e \"$lock_dir\" ]"
+}
+
+test_zxfer_trap_exit_preserves_failed_owned_lock_cleanup_paths_under_temp_prefix() {
+	g_zxfer_temp_prefix="zxfer.trap-owned"
+	cache_root=$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$TEST_TMPDIR") ||
+		fail "Unable to derive the shared remote-host cache root."
+	lock_dir="$cache_root/repro.lock"
+	current_hostname=$(zxfer_get_owned_lock_hostname) ||
+		fail "Unable to derive the current hostname for the owned-lock fixture."
+	created_at=$(zxfer_get_owned_lock_created_at) ||
+		fail "Unable to derive the creation timestamp for the owned-lock fixture."
+
+	mkdir -p "$lock_dir" || fail "Unable to create the owned-lock cleanup fixture."
+	chmod 700 "$lock_dir" || fail "Unable to chmod the owned-lock cleanup fixture."
+	{
+		printf '%s\n' "$ZXFER_LOCK_METADATA_HEADER"
+		printf 'kind\tlock\n'
+		printf 'purpose\ttrap-owned-lock\n'
+		printf 'pid\t%s\n' "$$"
+		printf 'start_token\tlstart:not-the-current-process\n'
+		printf 'hostname\t%s\n' "$current_hostname"
+		printf 'created_at\t%s\n' "$created_at"
+	} >"$lock_dir/metadata"
+	chmod 600 "$lock_dir/metadata" || fail "Unable to chmod the owned-lock cleanup fixture metadata."
+	zxfer_register_owned_lock_path "$lock_dir"
+
+	output=$(
+		(
+			zxfer_close_all_ssh_control_sockets() {
+				:
+			}
+			true
+			zxfer_trap_exit
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "zxfer_trap_exit should preserve the original success status when a later owned-lock release only produces cleanup warnings." \
+		0 "$status"
+	assertContains "zxfer_trap_exit should warn when a registered owned lock cannot be released during cleanup." \
+		"$output" "unable to release owned lock or lease"
+	assertTrue "zxfer_trap_exit should preserve the failed owned lock directory for later inspection instead of deleting it through generic temp-prefix cleanup." \
+		"[ -d \"$lock_dir\" ]"
+	assertTrue "zxfer_trap_exit should preserve the enclosing remote-host cache root when it still contains a failed owned-lock cleanup path." \
+		"[ -d \"$cache_root\" ]"
 }
 
 test_zxfer_cleanup_runtime_artifact_path_preserves_registration_when_delete_fails() {
@@ -615,6 +725,57 @@ test_zxfer_write_runtime_cache_file_atomically_cleans_up_on_write_and_publish_fa
 		"[ -e \"$publish_target\" ]"
 	assertEquals "Failed runtime cache publishes should clean up their staged artifact files." \
 		0 "$publish_stage_count"
+}
+
+test_zxfer_write_runtime_cache_and_cache_object_helpers_cover_success_and_redirection_failures() {
+	cache_target="$TEST_TMPDIR/runtime-cache-success.entry"
+	object_path="$TEST_TMPDIR/cache-object-open-failure"
+	object_target_dir="$TEST_TMPDIR/cache-object-target-dir"
+	stage_dir="$TEST_TMPDIR/cache-object-publish-stage"
+	missing_parent_target="$TEST_TMPDIR/missing-cache-parent/object.dir"
+	published_target="$TEST_TMPDIR/runtime-cache-object.dir"
+	mkdir -p "$object_target_dir" "$stage_dir" || fail "Unable to create the runtime helper fixture directories."
+	ln -s "$object_target_dir" "$object_path" || fail "Unable to create the cache-object redirection failure fixture."
+
+	zxfer_write_runtime_cache_file_atomically "$cache_target" "payload" "zxfer-runtime-cache-test"
+	cache_status=$?
+	cache_mode=$(zxfer_get_path_mode_octal "$cache_target")
+
+	set +e
+	zxfer_write_cache_object_contents_to_path "$object_path" "demo-kind" "" "payload" >/dev/null 2>&1
+	object_write_status=$?
+	if [ -e "$object_path" ] && [ ! -L "$object_path" ]; then
+		object_partial_exists=yes
+	else
+		object_partial_exists=no
+	fi
+	zxfer_publish_cache_object_directory "$stage_dir" "$missing_parent_target" >/dev/null 2>&1
+	missing_parent_status=$?
+	publish_move_output=$(
+		(
+			set +e
+			mv() {
+				return 1
+			}
+			zxfer_publish_cache_object_directory "$stage_dir" "$published_target" >/dev/null 2>&1
+			printf 'status=%s\n' "$?"
+		)
+	)
+	publish_move_status=$(printf '%s\n' "$publish_move_output" | awk -F= '/^status=/{print $2; exit}')
+	set -e
+
+	assertEquals "Atomic runtime cache writes should succeed on the direct helper success path." \
+		0 "$cache_status"
+	assertEquals "Successful atomic runtime cache writes should leave the published target mode at 0600." \
+		600 "$cache_mode"
+	assertEquals "Cache-object content writes should fail closed when the destination path cannot be opened for writing." \
+		1 "$object_write_status"
+	assertEquals "Failed cache-object content writes should not leave a partially published target behind." \
+		no "$object_partial_exists"
+	assertEquals "Publishing cache-object directories should fail closed when the target parent directory is missing." \
+		1 "$missing_parent_status"
+	assertEquals "Publishing cache-object directories should preserve move failures from the live publish step." \
+		1 "$publish_move_status"
 }
 
 test_zxfer_write_runtime_cache_file_atomically_requires_existing_parent_dir() {

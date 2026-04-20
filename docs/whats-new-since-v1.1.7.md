@@ -185,8 +185,11 @@ These are the biggest user-visible additions since the 2019 release.
   `user@host doas` are supported and handled more safely
 - remote helper resolution is per-host instead of assuming the local helper
   path exists remotely
-- ssh control sockets are reused within a run to reduce repeated connection
-  setup work
+- ssh control sockets can be reused within one run and across sibling zxfer
+  processes through a validated per-user cache
+- shared ssh control sockets and remote capability cache fills are coordinated
+  through metadata-bearing lock/lease directories instead of ad hoc pid files,
+  with stale-owner validation and checked release semantics
 
 ### Better property handling
 
@@ -201,6 +204,9 @@ These are the biggest user-visible additions since the 2019 release.
 - failures can also be mirrored to `ZXFER_ERROR_LOG`
 - commands inside failure reports can be redacted with
   `ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1`
+- `ZXFER_ERROR_LOG` appends now use the same metadata-bearing lock format as
+  the ssh and remote-capability coordination layer, including checked release
+  behavior that preserves the original zxfer exit status during trap cleanup
 
 ## Behavior Changes That May Surprise Old Automation
 
@@ -210,6 +216,20 @@ These are not removals, but they are common upgrade surprises.
 
 If you parse stderr, expect different output than `v1.1.7`. Current zxfer
 surfaces more context on non-zero exits.
+
+### Lock and lease state under TMPDIR is no longer plain pid files
+
+If you had automation that inspected or deleted zxfer runtime lock state
+directly, re-test it. Current native shared-state entries are metadata-bearing
+directories:
+
+- ssh control-socket `.lock` paths are directories with owner metadata
+- ssh `leases/lease.*` entries are directories instead of plain files
+- remote capability `<cache>.lock` paths are metadata-bearing directories
+
+Older plain ssh lease files and pid-only `.lock` directories are no longer
+supported. Clear stale old cache roots before the first current-release run
+instead of relying on mixed-format upgrade compatibility.
 
 ### Large recursive runs behave differently
 
@@ -254,6 +274,8 @@ whether you still need it.
 - broad fail-closed reliability work
 - stricter cache, temp-file, and metadata validation
 - better remote capability probing and diagnostics
+- metadata-bearing owned lock/lease coordination for shared ssh control
+  sockets, remote capability caches, and `ZXFER_ERROR_LOG` appends
 - repository reorganization into `docs/`, `examples/`, `man/`, and
   `packaging/`, plus a much broader documentation set
 - stronger VM-backed validation and expanded CI coverage

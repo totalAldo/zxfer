@@ -13,8 +13,8 @@ zxfer_source_runtime_modules_through "zxfer_property_reconcile.sh"
 
 tearDown() {
 	if effective_uid=$(zxfer_get_effective_user_uid 2>/dev/null); then
-		rm -rf "$TEST_TMPDIR/zxfer-remote-capabilities.$effective_uid.d"
-		rm -rf "$TEST_TMPDIR/zxfer-s.$effective_uid.d"
+		rm -rf "$TEST_TMPDIR"/*.remote-capabilities."$effective_uid".d
+		rm -rf "$TEST_TMPDIR"/*.s."$effective_uid".d
 	fi
 }
 
@@ -3282,8 +3282,12 @@ test_rollback_local_backup_file_commit_returns_failure_when_restoring_existing_t
 			mv() {
 				return 1
 			}
-			zxfer_rollback_local_backup_file_commit "$target_file" 1 "$rollback_file" >/dev/null
-			printf '%s\n' "$?"
+			if zxfer_rollback_local_backup_file_commit "$target_file" 1 "$rollback_file" >/dev/null; then
+				l_status=0
+			else
+				l_status=$?
+			fi
+			printf '%s\n' "$l_status"
 		)
 	)
 	set -e
@@ -3304,6 +3308,74 @@ test_rollback_local_backup_file_commit_returns_failure_when_restoring_existing_t
 		0 "$target_exists"
 	assertEquals "Failed rollback restores should preserve the rollback file for manual recovery." \
 		1 "$rollback_exists"
+}
+
+test_prepare_local_backup_file_stage_cleans_up_when_stage_file_write_fails() {
+	backup_file="$TEST_TMPDIR/prepare_stage_write_failure.meta"
+	stage_dir="$TEST_TMPDIR/prepare_stage_write_failure.stage"
+	mkdir -p "$stage_dir/backup.write" || fail "Unable to create the staged write-failure fixture."
+
+	set +e
+	output=$(
+		(
+			zxfer_create_backup_metadata_stage_dir_for_path() {
+				g_zxfer_backup_stage_dir_result=$stage_dir
+				printf '%s\n' "$stage_dir"
+				return 0
+			}
+			if zxfer_prepare_local_backup_file_stage "$backup_file" "#header;payload" >/dev/null 2>&1; then
+				l_status=0
+			else
+				l_status=$?
+			fi
+			printf 'status=%s\n' "$l_status"
+			printf 'failure=<%s>\n' "${g_zxfer_backup_local_write_failure_result:-}"
+			printf 'stage_dir=<%s>\n' "${g_zxfer_backup_stage_dir_result:-}"
+			printf 'stage_file=<%s>\n' "${g_zxfer_backup_stage_file_result:-}"
+			printf 'exists=%s\n' "$([ -e "$stage_dir" ] && printf '%s' yes || printf '%s' no)"
+		)
+	)
+	set -e
+	stage_status=$(printf '%s\n' "$output" | awk -F= '/^status=/{print $2; exit}')
+
+	assertContains "Preparing a local backup-file stage should report the staged write failure status." \
+		"$output" "status="
+	assertNotEquals "Preparing a local backup-file stage should fail closed when the staged file cannot be opened for writing." \
+		0 "${stage_status:-}"
+	assertContains "Preparing a local backup-file stage should classify staged write failures as staging errors." \
+		"$output" "failure=<staging>"
+	assertContains "Preparing a local backup-file stage should clear the published stage directory on staged write failure." \
+		"$output" "stage_dir=<>"
+	assertContains "Preparing a local backup-file stage should clear the published stage file on staged write failure." \
+		"$output" "stage_file=<>"
+	assertContains "Preparing a local backup-file stage should clean up the stage directory when staged writes fail." \
+		"$output" "exists=no"
+}
+
+test_rollback_local_backup_file_commit_preserves_remove_failure_status() {
+	target_file="$TEST_TMPDIR/rollback_remove_failure.meta"
+	rollback_file="$TEST_TMPDIR/rollback_remove_failure.rollback"
+	printf '%s' "new" >"$target_file"
+	printf '%s' "old" >"$rollback_file"
+
+	set +e
+	status=$(
+		(
+			zxfer_remove_local_backup_metadata_path_if_present() {
+				return 47
+			}
+			zxfer_rollback_local_backup_file_commit "$target_file" 1 "$rollback_file" >/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+	set -e
+
+	assertEquals "Backup-file rollback helpers should preserve failures while removing the new target before rollback restore." \
+		47 "$status"
+	if [ ! -e "$rollback_file" ]; then
+		fail "Backup-file rollback helpers should leave the rollback file in place when target removal fails before restore."
+	fi
+	return 0
 }
 
 test_rollback_local_backup_file_commit_removes_new_target_when_no_existing_target() {
@@ -4478,6 +4550,79 @@ test_write_backup_metadata_contents_to_store_marks_remote_write_dependency_statu
 		"$output" "Required remote backup-write helper dependency not found on host target.example in secure PATH"
 }
 
+test_write_backup_metadata_contents_to_store_emits_probe_stderr_for_remote_failure_statuses() {
+	g_option_T_target_host="target.example"
+	g_backup_storage_root="/var/db/zxfer"
+
+	set +e
+	dependency_output=$(
+		(
+			zxfer_ensure_remote_backup_dir() {
+				:
+			}
+			zxfer_resolve_remote_cli_command_safe() {
+				printf '%s\n' "'/remote/bin/cat'"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "$1"
+			}
+			zxfer_run_remote_backup_helper_with_payload() {
+				g_zxfer_remote_probe_stderr="missing dependency"
+				return 99
+			}
+			zxfer_emit_remote_probe_failure_message() {
+				printf '%s\n' "probe-stderr"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_write_backup_metadata_contents_to_store "/var/db/zxfer/tank/src" "/var/db/zxfer/tank/src/.zxfer_backup_info.src" "#header;payload"
+		) 2>&1
+	)
+	dependency_status=$?
+	write_failure_output=$(
+		(
+			zxfer_ensure_remote_backup_dir() {
+				:
+			}
+			zxfer_resolve_remote_cli_command_safe() {
+				printf '%s\n' "'/remote/bin/cat'"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "$1"
+			}
+			zxfer_run_remote_backup_helper_with_payload() {
+				g_zxfer_remote_probe_stderr="write failed"
+				return 92
+			}
+			zxfer_emit_remote_probe_failure_message() {
+				printf '%s\n' "probe-stderr"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_write_backup_metadata_contents_to_store "/var/db/zxfer/tank/src" "/var/db/zxfer/tank/src/.zxfer_backup_info.src" "#header;payload"
+		) 2>&1
+	)
+	write_failure_status=$?
+	set -e
+
+	assertEquals "Single-file remote backup writes should fail closed when the helper reports a dependency status and probe stderr is available." \
+		1 "$dependency_status"
+	assertContains "Single-file remote backup write dependency failures should emit the staged probe stderr before throwing." \
+		"$dependency_output" "probe-stderr"
+	assertContains "Single-file remote backup write dependency failures should still surface the dependency guidance after probe stderr." \
+		"$dependency_output" "Required remote backup-write helper dependency not found on host target.example in secure PATH"
+	assertEquals "Single-file remote backup writes should fail closed when the helper reports a write failure status and probe stderr is available." \
+		1 "$write_failure_status"
+	assertContains "Single-file remote backup write failures should emit the staged probe stderr before throwing." \
+		"$write_failure_output" "probe-stderr"
+	assertContains "Single-file remote backup write failures should still surface the mounted-filesystem guidance after probe stderr." \
+		"$write_failure_output" "Error writing backup file. Is filesystem mounted?"
+}
+
 test_write_backup_metadata_contents_to_store_reports_remote_write_failure() {
 	g_option_T_target_host="target.example"
 	g_backup_storage_root="/var/db/zxfer"
@@ -4619,6 +4764,44 @@ test_write_backup_metadata_pair_contents_to_store_reports_remote_rollback_failur
 	assertEquals "Transactional pair writes should abort when restoring the forwarded alias fails remotely." 1 "$status"
 	assertContains "Transactional pair-write rollback failures should surface the dedicated recovery guidance remotely." \
 		"$output" "restoring forwarded provenance alias"
+}
+
+test_write_backup_metadata_pair_contents_to_store_emits_probe_stderr_for_remote_write_failures() {
+	g_option_T_target_host="target.example"
+	g_backup_storage_root="/var/db/zxfer"
+
+	set +e
+	output=$(
+		(
+			zxfer_ensure_remote_backup_dir() {
+				:
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "$1"
+			}
+			zxfer_run_remote_backup_helper_with_payload() {
+				g_zxfer_remote_probe_stderr="pair write failed"
+				return 92
+			}
+			zxfer_emit_remote_probe_failure_message() {
+				printf '%s\n' "probe-stderr"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_write_backup_metadata_pair_contents_to_store "/var/db/zxfer/tank/src" "/var/db/zxfer/tank/src/.zxfer_backup_info.src" "#header;payload" "/var/db/zxfer/backup/dst/src" "/var/db/zxfer/backup/dst/src/.zxfer_backup_info.src" "#header;forwarded"
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Transactional remote pair writes should fail closed when the helper reports a write failure status and probe stderr is available." \
+		1 "$status"
+	assertContains "Transactional remote pair-write failures should emit the staged probe stderr before throwing." \
+		"$output" "probe-stderr"
+	assertContains "Transactional remote pair-write failures should still surface the mounted-filesystem guidance after probe stderr." \
+		"$output" "Error writing backup file. Is filesystem mounted?"
 }
 
 test_write_backup_metadata_pair_contents_to_store_preserves_transport_failure_stderr() {

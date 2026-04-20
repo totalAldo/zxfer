@@ -1025,8 +1025,13 @@ directory must already exist, be owned by root or the effective UID, and not
 be writable by other users unless the sticky bit is set. Any symlinked path
 component is refused, existing log files must be owned by root or the effective
 UID and already use mode 0600, and zxfer stages appends through a sibling
-temporary file before the final rename. If zxfer cannot append the report it
-emits a warning to \fIstderr\fR but preserves the original zxfer exit status.
+temporary file before the final rename. Appends are coordinated through a
+sibling metadata-bearing lock directory that records PID, process-start
+identity, hostname, purpose, and creation time, and stale owners are reaped
+after validation. If zxfer cannot append the report, or if a successful append
+cannot release that lock cleanly, it emits a warning to \fIstderr\fR; when
+that happens during trap-time failure reporting, zxfer still preserves the
+original exit status.
 .TP 8n
 \fBZXFER_REDACT_FAILURE_REPORT_COMMANDS\fR
 When set to \fB1\fR, \fByes\fR, \fBtrue\fR, or \fBon\fR, zxfer replaces the
@@ -1043,6 +1048,16 @@ effective UID and not be writable by other users unless the sticky bit is set;
 otherwise zxfer prefers a validated memory-backed temporary directory such as
 \fB/dev/shm\fR or \fB/run/shm\fR when available and falls back to the system
 temporary directory.
+.PP
+Current releases coordinate shared ssh control-socket locks, per-process ssh
+leases, remote capability-cache locks, and \fBZXFER_ERROR_LOG\fR appends
+through metadata-bearing owned directories rather than bare PID files. Native
+\fB.lock\fR and \fBlease.*\fR paths therefore appear as directories with owner
+metadata; zxfer validates and reaps stale or corrupt owners before reuse and
+checks release failures instead of ignoring them. Older plain ssh lease files
+and pid-only \fB.lock\fR directories from pre-metadata releases are
+unsupported; clear the stale entry or cache root before rerunning a current
+release.
 .PP
 The repository includes \fBexamples/error-log-email-notify.sh\fR, which shows
 how to set \fBZXFER_ERROR_LOG\fR, capture the current run's failure report from

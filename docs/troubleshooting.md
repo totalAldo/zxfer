@@ -139,6 +139,21 @@ last_command: '/sbin/zfs' 'send' ...
 zxfer: failure report end
 ```
 
+zxfer serializes those appends through a sibling metadata-bearing lock
+directory that records owner PID, process-start identity, hostname, purpose,
+and creation time. Stale owners are reaped automatically after validation. If
+a successful append cannot release that lock cleanly, the append helper now
+fails closed and emits a warning; trap-time failure reporting still preserves
+the original zxfer exit status while surfacing the warning on `stderr`.
+
+The same owned-directory format now also backs shared ssh control-socket locks
+and leases plus remote capability-cache locks under the validated temp root.
+If you inspect temp roots while debugging startup or cleanup, expect `.lock`
+paths and `leases/lease.*` entries to be directories with metadata files, not
+bare pid files. Older plain ssh lease files and pid-only lock directories from
+pre-metadata releases are unsupported; remove the stale entry or cache root if
+zxfer reuses one during a rollout.
+
 By default that block keeps `invocation` and `last_command` verbatim, so avoid
 putting secret-bearing hook strings or wrapper arguments on the zxfer command
 line unless you first enable redaction:

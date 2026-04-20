@@ -27,6 +27,7 @@ create_minimal_launcher_fixture() {
 	cat >"$l_fixture_dir/src/zxfer_modules.sh" <<'EOF'
 #!/bin/sh
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_path_security.sh"
+. "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_locking.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_reporting.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_exec.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_dependencies.sh"
@@ -59,6 +60,10 @@ zxfer_throw_usage_error() {
 zxfer_beep() {
 	:
 }
+EOF
+
+	cat >"$l_fixture_dir/src/zxfer_locking.sh" <<'EOF'
+#!/bin/sh
 EOF
 
 	cat >"$l_fixture_dir/src/zxfer_exec.sh" <<'EOF'

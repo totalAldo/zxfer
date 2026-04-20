@@ -103,6 +103,15 @@ matters especially when:
   helper discovery inside one zxfer run can safely reuse matching handshake
   results without sharing stale helper-path data across different run shapes
 
+Current releases also coordinate shared ssh control sockets, per-process ssh
+leases, and remote capability-cache fills through one metadata-bearing
+directory format under the validated temp root. Native `.lock` and
+`leases/lease.*` paths therefore carry owner metadata instead of relying on
+plain pid files, zxfer validates and reaps stale or corrupt owners before
+reuse, and release failures are checked rather than silently ignored. Older
+plain ssh lease files and pid-only lock directories are no longer supported;
+clear stale reused cache roots before rerunning a current release.
+
 The same validated secure `PATH` is also exported before remote capability
 handshakes, helper-discovery probes, backup-directory prep, and remote
 backup-metadata guard/staging scripts run, so their auxiliary

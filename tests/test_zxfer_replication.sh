@@ -303,6 +303,67 @@ test_current_destination_is_initial_source_dataset_fails_closed_when_resolution_
 		"status=1" "$output"
 }
 
+test_rollback_destination_to_last_common_snapshot_shortcuts_non_destructive_cases_in_current_shell() {
+	output=$(
+		(
+			log="$TEST_TMPDIR/rollback_shortcuts_current.log"
+			: >"$log"
+			g_actual_dest="backup/target/src"
+			g_last_common_snap="tank/src@snap1"
+			zxfer_exists_destination() {
+				printf '%s\n' "exists" >>"$log"
+				printf '%s\n' "0"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "rollback" >>"$log"
+			}
+
+			g_option_F_force_rollback=""
+			g_did_delete_dest_snapshots=1
+			g_deleted_dest_newer_snapshots=1
+			zxfer_rollback_destination_to_last_common_snapshot
+			printf 'no_force_exists=%s\n' "$(awk '/^exists$/ { count++ } END { print count + 0 }' "$log")"
+
+			g_option_F_force_rollback=1
+			g_did_delete_dest_snapshots=0
+			g_deleted_dest_newer_snapshots=1
+			zxfer_rollback_destination_to_last_common_snapshot
+			printf 'no_delete_exists=%s\n' "$(awk '/^exists$/ { count++ } END { print count + 0 }' "$log")"
+
+			g_did_delete_dest_snapshots=1
+			g_deleted_dest_newer_snapshots=0
+			zxfer_rollback_destination_to_last_common_snapshot
+			printf 'no_newer_exists=%s\n' "$(awk '/^exists$/ { count++ } END { print count + 0 }' "$log")"
+
+			g_deleted_dest_newer_snapshots=1
+			zxfer_rollback_destination_to_last_common_snapshot
+			printf 'missing_dest_exists=%s\n' "$(awk '/^exists$/ { count++ } END { print count + 0 }' "$log")"
+
+			g_last_common_snap=""
+			zxfer_exists_destination() {
+				printf '%s\n' "exists" >>"$log"
+				printf '%s\n' "1"
+			}
+			zxfer_rollback_destination_to_last_common_snapshot
+			printf 'empty_common_exists=%s\n' "$(awk '/^exists$/ { count++ } END { print count + 0 }' "$log")"
+			printf 'rollback_calls=%s\n' "$(awk '/^rollback$/ { count++ } END { print count + 0 }' "$log")"
+		)
+	)
+
+	assertContains "Destination rollback should not probe live state when receive-side forcing is disabled." \
+		"$output" "no_force_exists=0"
+	assertContains "Destination rollback should not probe live state when no destination snapshots were deleted." \
+		"$output" "no_delete_exists=0"
+	assertContains "Destination rollback should not probe live state when no newer destination snapshots were deleted." \
+		"$output" "no_newer_exists=0"
+	assertContains "Destination rollback should stop without rolling back when the destination no longer exists." \
+		"$output" "missing_dest_exists=1"
+	assertContains "Destination rollback should stop without issuing a rollback when there is no last common snapshot name." \
+		"$output" "empty_common_exists=2"
+	assertContains "Destination rollback should not issue rollback commands in any non-destructive shortcut path." \
+		"$output" "rollback_calls=0"
+}
+
 test_set_actual_dest_without_trailing_slash_appends_relative_path() {
 	g_initial_source="tank/src"
 	g_destination="backup/target"
@@ -1165,6 +1226,43 @@ test_rollback_destination_to_last_common_snapshot_skips_when_not_needed() {
 
 	assertEquals "Rollback should no-op when -F is absent, deletions did not occur, deleted snapshots were not newer than the last common snapshot, destination is absent, or no common snapshot exists." \
 		"" "$(cat "$log")"
+}
+
+test_zxfer_reconcile_live_destination_snapshot_state_shortcuts_empty_and_missing_live_state() {
+	output=$(
+		(
+			g_actual_dest="backup/target/src"
+			g_last_common_snap=""
+			g_src_snapshot_transfer_list="tank/src@snap1 tank/src@snap2"
+			g_dest_has_snapshots=1
+
+			zxfer_get_snapshot_transfer_bounds() {
+				return 1
+			}
+			zxfer_reconcile_live_destination_snapshot_state
+			printf 'no_bounds_status=%s\n' "$?"
+
+			zxfer_get_snapshot_transfer_bounds() {
+				printf '%s\n%s\n' "tank/src@snap1" "tank/src@snap2"
+			}
+			zxfer_exists_destination() {
+				printf '%s\n' "1"
+			}
+			zxfer_get_live_destination_snapshots() {
+				return 0
+			}
+			zxfer_reconcile_live_destination_snapshot_state
+			printf 'empty_live_status=%s\n' "$?"
+			printf 'dest_has_snapshots=%s\n' "${g_dest_has_snapshots:-1}"
+		)
+	)
+
+	assertContains "Live destination-state reconciliation should return success when there are no transfer bounds to reconcile." \
+		"$output" "no_bounds_status=0"
+	assertContains "Live destination-state reconciliation should return success when the destination has no live snapshots." \
+		"$output" "empty_live_status=0"
+	assertContains "Live destination-state reconciliation should clear the destination snapshot marker when no live snapshots remain." \
+		"$output" "dest_has_snapshots=0"
 }
 
 test_rollback_destination_to_last_common_snapshot_reports_probe_failures() {
@@ -2443,6 +2541,30 @@ test_preview_zfs_mode_dry_run_overwrites_stale_recursive_state() {
 		"$output" "after_dest_cache_root=<>"
 	assertContains "Strict dry-run preview should reset snapshot-record index readiness." \
 		"$output" "after_source_index_ready=<0>"
+}
+
+test_zxfer_preview_zfs_mode_dry_run_emits_restore_and_unsupported_property_notices() {
+	output=$(
+		(
+			g_option_e_restore_property_mode=1
+			g_option_U_skip_unsupported_properties=1
+			zxfer_seed_dry_run_preview_source_list() {
+				:
+			}
+			zxfer_progress_dialog_uses_size_estimate() {
+				return 1
+			}
+			zxfer_echoV() {
+				printf '%s\n' "$1"
+			}
+			zxfer_preview_zfs_mode_dry_run
+		)
+	)
+
+	assertContains "Dry-run preview should explain that it is skipping live backup-metadata restore validation when restore mode is enabled." \
+		"$output" "Dry run: skipping live backup-metadata restore validation."
+	assertContains "Dry-run preview should explain that it is skipping live unsupported-property detection when that scan is disabled." \
+		"$output" "Dry run: skipping live unsupported-property detection."
 }
 
 test_perform_grandfather_protection_checks_skips_when_flag_unset() {

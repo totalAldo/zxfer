@@ -224,13 +224,17 @@ create_fake_parallel_exec_bin() {
 	l_path=$1
 	cat >"$l_path" <<'EOF'
 #!/bin/sh
-if [ "$1" = "--version" ]; then
+if [ "$1" = "--version" ] ||
+	{ [ "$1" = "--will-cite" ] && [ "$2" = "--version" ]; }; then
 	printf '%s\n' "GNU parallel (fake)"
 	exit 0
 fi
 
 while [ $# -gt 0 ]; do
 	case "$1" in
+	--will-cite)
+		shift
+		;;
 	-j)
 		shift 2
 		;;
@@ -4687,6 +4691,12 @@ test_zxfer_append_failure_report_to_log_rejects_existing_insecure_owner() {
 		zxfer_validate_temp_root_candidate() {
 			printf '%s\n' "$1"
 		}
+		zxfer_acquire_error_log_lock() {
+			return 0
+		}
+		zxfer_release_error_log_lock_warn_only() {
+			:
+		}
 		zxfer_get_path_owner_uid() { printf '%s\n' "1234"; }
 		zxfer_append_failure_report_to_log "message: should-not-append"
 	) >"$TEST_TMPDIR/error_log_owner.stdout" 2>"$stderr_file"
@@ -4714,6 +4724,12 @@ test_zxfer_append_failure_report_to_log_rejects_unknown_owner() {
 		zxfer_validate_temp_root_candidate() {
 			printf '%s\n' "$1"
 		}
+		zxfer_acquire_error_log_lock() {
+			return 0
+		}
+		zxfer_release_error_log_lock_warn_only() {
+			:
+		}
 		zxfer_get_path_owner_uid() {
 			return 1
 		}
@@ -4740,6 +4756,12 @@ test_zxfer_append_failure_report_to_log_rejects_unknown_mode() {
 
 	set +e
 	(
+		zxfer_acquire_error_log_lock() {
+			return 0
+		}
+		zxfer_release_error_log_lock_warn_only() {
+			:
+		}
 		zxfer_get_path_owner_uid() {
 			printf '%s\n' "0"
 		}
@@ -4920,6 +4942,33 @@ test_invoke_ssh_command_for_host_records_remote_command() {
 	assertEquals "SSH command recording should preserve every token boundary." \
 		"'$FAKE_SSH_BIN' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' '-S' '$TEST_TMPDIR/origin.sock' 'backup@example.com' 'pfexec' '/sbin/zfs' 'list' '-H' 'tank/src'" \
 		"$g_zxfer_failure_last_command"
+}
+
+test_zxfer_remote_command_context_helpers_cover_remaining_role_labels() {
+	output=$(
+		(
+			g_option_O_origin_host="shared.example"
+			g_option_T_target_host="shared.example"
+			printf 'other=%s\n' "$(zxfer_get_remote_command_context_label "other.example" other)"
+			printf 'shared=%s\n' "$(zxfer_get_remote_command_context_label "shared.example")"
+			g_option_O_origin_host="origin.example"
+			g_option_T_target_host="target.example"
+			printf 'target=%s\n' "$(zxfer_get_remote_command_context_label "target.example")"
+			zxfer_echoV() {
+				printf '%s\n' "$*"
+			}
+			zxfer_echoV_remote_command_for_host "misc.example doas" other /bin/echo hello
+		)
+	)
+
+	assertContains "Remote command context labels should render the explicit other profile side as remote." \
+		"$output" "other=remote: other.example"
+	assertContains "Remote command context labels should render shared origin and target hosts as origin/target." \
+		"$output" "shared=origin/target: shared.example"
+	assertContains "Remote command context labels should infer the target role when only the target host matches." \
+		"$output" "target=target: target.example"
+	assertContains "Very-verbose remote command rendering should include the resolved remote context label." \
+		"$output" "Running remote command [remote: misc.example doas]: '/bin/echo' 'hello'"
 }
 
 test_zxfer_render_destination_zfs_command_uses_remote_target_tool_path() {

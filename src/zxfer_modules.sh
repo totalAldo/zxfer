@@ -51,6 +51,9 @@ zxfer_source_module() {
 zxfer_source_module zxfer_path_security.sh
 [ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_path_security.sh" ] && return 0
 
+zxfer_source_module zxfer_locking.sh
+[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_locking.sh" ] && return 0
+
 zxfer_source_module zxfer_reporting.sh
 [ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_reporting.sh" ] && return 0
 

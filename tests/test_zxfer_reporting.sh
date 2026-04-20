@@ -441,6 +441,44 @@ test_zxfer_acquire_error_log_lock_retries_before_failing() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "sleeps=2"
 }
 
+test_zxfer_release_error_log_lock_warn_only_warns_and_returns_success() {
+	log_path="$TEST_TMPDIR/release_warn_only.log"
+	lock_dir="$TEST_TMPDIR/release_warn_only.lock"
+	stdout_file="$TEST_TMPDIR/release_warn_only.stdout"
+	stderr_file="$TEST_TMPDIR/release_warn_only.stderr"
+
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
+		zxfer_release_error_log_lock() {
+			return 17
+		}
+		zxfer_release_error_log_lock_warn_only \"$log_path\" \"$lock_dir\"
+	"
+
+	assertEquals "Warn-only error-log lock release should still return success." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Warn-only error-log lock release should emit the documented warning." \
+		"$(cat "$stderr_file")" "unable to release ZXFER_ERROR_LOG lock for \"$log_path\" (status 17)"
+}
+
+test_zxfer_release_error_log_lock_checked_warns_and_fails_closed() {
+	log_path="$TEST_TMPDIR/release_checked.log"
+	lock_dir="$TEST_TMPDIR/release_checked.lock"
+	stdout_file="$TEST_TMPDIR/release_checked.stdout"
+	stderr_file="$TEST_TMPDIR/release_checked.stderr"
+
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
+		zxfer_release_error_log_lock() {
+			return 23
+		}
+		zxfer_release_error_log_lock_checked \"$log_path\" \"$lock_dir\"
+	"
+
+	assertEquals "Checked error-log lock release should fail closed when the shared release helper fails." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Checked error-log lock release should emit the documented warning." \
+		"$(cat "$stderr_file")" "unable to release ZXFER_ERROR_LOG lock for \"$log_path\" (status 23)"
+}
+
 test_zxfer_append_failure_report_to_log_warns_when_nonwritable_parent_needs_create() {
 	log_dir="$TEST_TMPDIR/nonwritable-create-parent"
 	log_path="$log_dir/failure.log"
@@ -645,7 +683,12 @@ test_zxfer_append_failure_report_to_log_warns_when_snapshot_copy_fails() {
 	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
 		ZXFER_ERROR_LOG=\"$log_path\"
 		cat() {
-			return 1
+			case \"\$1\" in
+			*/log.snapshot)
+				return 1
+				;;
+			esac
+			command cat \"\$@\"
 		}
 		zxfer_append_failure_report_to_log \"report\"
 	"
@@ -666,7 +709,17 @@ test_zxfer_append_failure_report_to_log_warns_when_atomic_move_fails() {
 	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
 		ZXFER_ERROR_LOG=\"$log_path\"
 		mv() {
-			return 1
+			case \"\$1:\$2\" in
+			-f:*/log.write | */log.write:*)
+				return 1
+				;;
+			esac
+			case \"\$1\" in
+			*/log.write)
+				return 1
+				;;
+			esac
+			command mv \"\$@\"
 		}
 		zxfer_append_failure_report_to_log \"report\"
 	"

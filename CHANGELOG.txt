@@ -1,6 +1,12 @@
 CHANGELOG
 =========
 
+2026.04.13
+-Standardize ssh control-socket locks and leases, remote capability-cache locks, and `ZXFER_ERROR_LOG` locks on one metadata-bearing owned-directory format that records pid, process-start identity, hostname, purpose, and creation time, reaps stale or corrupt owners after validation, and makes release a checked operation so stale bare-PID or metadata-free lock state no longer wedges later runs or disappears silently.
+-Release long-lived owned locks and leases through dedicated trap-time cleanup registration instead of generic runtime-artifact deletion, preserving the original zxfer exit status while still warning if trap cleanup cannot release an owned entry.
+-Convert ssh lease entries from plain files to metadata-bearing lease directories, keep last-lease close and lease-restore-on-close-failure behavior, and refresh the shunit, coverage, and operator docs for the new locking layer and checked error-log release semantics.
+-Stop honoring pre-metadata ssh lease files and pid-only ssh or remote-capability lock directories in reused cache roots, remove the old shared cache-root cleanup helpers, treat metadata-bearing owned directories as the only supported lock format, and document that operators must clear stale old cache artifacts instead of relying on mixed-format upgrade compatibility.
+
 2026.04.11
 -Reopen the rolling send/receive completion-queue writer after job-limit waits, and if that reopen fails drain the remaining rolling jobs before falling back to legacy background waits, so recursive `-j` replications no longer silently skip some sends until a later zxfer pass picks them up.
 -Keep per-run source and destination snapshot-record caches on disk past the initial recursive diff and make per-dataset common-snapshot/delete planning prefer those file-backed caches over the large in-memory list strings, so later datasets no longer get their newest destination snapshots missed on shells that truncate oversized command-substitution payloads during recursive `-R ... -d ... -j ...` runs.
