@@ -194,6 +194,33 @@ test_owned_lock_helper_validators_cover_invalid_inputs_and_fallbacks() {
 		"$ps_failure_output" "ps=1"
 }
 
+test_owned_lock_text_and_procfs_helpers_cover_current_shell_paths() {
+	normalized_file="$TEST_TMPDIR/owned-lock-normalized.out"
+
+	output=$(
+		(
+			set +e
+			tab=$(printf '\t')
+			zxfer_normalize_owned_lock_text_field \
+				"  lock${tab}purpose   with   spaces  " >"$normalized_file"
+			printf 'normalize=%s\n' "$?"
+			zxfer_get_process_start_token_from_procfs "" >/dev/null
+			printf 'empty_pid=%s\n' "$?"
+			zxfer_get_process_start_token_from_procfs "not-a-pid" >/dev/null
+			printf 'invalid_pid=%s\n' "$?"
+		)
+	)
+
+	assertContains "Owned-lock text normalization should succeed after collapsing tabs and repeated spaces into a single validated field." \
+		"$output" "normalize=0"
+	assertEquals "Owned-lock text normalization should trim surrounding whitespace and squeeze internal runs to single spaces." \
+		"lock purpose with spaces" "$(cat "$normalized_file")"
+	assertContains "Procfs start-token lookups should reject empty pid inputs before probing procfs." \
+		"$output" "empty_pid=1"
+	assertContains "Procfs start-token lookups should reject nonnumeric pid inputs before probing procfs." \
+		"$output" "invalid_pid=1"
+}
+
 test_owned_lock_validation_helpers_reject_insecure_paths() {
 	lock_dir="$TEST_TMPDIR/insecure.lock"
 	metadata_path="$lock_dir/metadata"
@@ -247,6 +274,61 @@ test_zxfer_create_and_load_owned_lock_metadata_round_trip() {
 		"" "$g_zxfer_owned_lock_hostname_result"
 	assertNotEquals "Owned lock metadata should preserve the creation timestamp." \
 		"" "$g_zxfer_owned_lock_created_at_result"
+}
+
+test_zxfer_write_and_parse_owned_lock_metadata_file_cover_success_paths_in_current_shell() {
+	lock_dir="$TEST_TMPDIR/direct-write-parse.lock"
+	metadata_path="$lock_dir/metadata"
+	tab=$(printf '\t')
+	mkdir "$lock_dir" || fail "Unable to create direct owned lock metadata fixture directory."
+	chmod 700 "$lock_dir" || fail "Unable to chmod direct owned lock metadata fixture directory."
+
+	output=$(
+		(
+			set +e
+			zxfer_get_process_start_token() {
+				printf '%s\n' "lstart:direct-test"
+			}
+			zxfer_get_owned_lock_hostname() {
+				printf '%s\n' "direct-host"
+			}
+			zxfer_get_owned_lock_created_at() {
+				printf '%s\n' "2026-04-20T00:00:00+0000"
+			}
+			zxfer_write_owned_lock_metadata_file \
+				"$lock_dir" lease "  direct   purpose  " >/dev/null
+			printf 'write=%s\n' "$?"
+			zxfer_parse_owned_lock_metadata_file "$metadata_path" >/dev/null
+			printf 'parse=%s\n' "$?"
+			printf 'kind=<%s>\n' "$g_zxfer_owned_lock_kind_result"
+			printf 'purpose=<%s>\n' "$g_zxfer_owned_lock_purpose_result"
+			printf 'start_token=<%s>\n' "$g_zxfer_owned_lock_start_token_result"
+			printf 'hostname=<%s>\n' "$g_zxfer_owned_lock_hostname_result"
+			printf 'created_at=<%s>\n' "$g_zxfer_owned_lock_created_at_result"
+		)
+	)
+	metadata_contents=$(cat "$metadata_path")
+
+	assertContains "Owned lock metadata writes should succeed on the direct success path." \
+		"$output" "write=0"
+	assertContains "Owned lock metadata parsing should succeed on a freshly written direct metadata file." \
+		"$output" "parse=0"
+	assertContains "Direct metadata parsing should recover the written kind." \
+		"$output" "kind=<lease>"
+	assertContains "Direct metadata parsing should recover the normalized purpose." \
+		"$output" "purpose=<direct purpose>"
+	assertContains "Direct metadata parsing should recover the staged start token." \
+		"$output" "start_token=<lstart:direct-test>"
+	assertContains "Direct metadata parsing should recover the staged hostname." \
+		"$output" "hostname=<direct-host>"
+	assertContains "Direct metadata parsing should recover the staged creation timestamp." \
+		"$output" "created_at=<2026-04-20T00:00:00+0000>"
+	assertContains "Direct metadata writes should normalize the staged purpose line in the metadata file itself." \
+		"$metadata_contents" "purpose${tab}direct purpose"
+	assertContains "Direct metadata writes should store the staged start token in the metadata file itself." \
+		"$metadata_contents" "start_token${tab}lstart:direct-test"
+	assertContains "Direct metadata writes should store the staged hostname in the metadata file itself." \
+		"$metadata_contents" "hostname${tab}direct-host"
 }
 
 test_zxfer_write_owned_lock_metadata_file_handles_invalid_inputs_and_publish_failures() {
@@ -631,6 +713,40 @@ test_owned_lock_owner_and_cleanup_helpers_cover_stale_unknown_and_invalid_target
 		"$cleanup_output" "file=1"
 	assertContains "Owned lock cleanup should still succeed when rm reports failure but the directory is already gone by the post-check." \
 		"$cleanup_output" "rm_fallback=0"
+}
+
+test_owned_lock_owner_and_cleanup_helpers_fail_closed_when_hostname_lookup_or_rm_failures_persist() {
+	lock_dir="$TEST_TMPDIR/cleanup-hard-fail.lock"
+	mkdir "$lock_dir" || fail "Unable to create hard-fail owned lock cleanup fixture."
+
+	hostname_output=$(
+		(
+			set +e
+			zxfer_get_owned_lock_hostname() {
+				return 1
+			}
+			zxfer_owned_lock_owner_is_live "$$" "lstart:test" "host" >/dev/null
+			printf 'hostname=%s\n' "$?"
+		)
+	)
+	cleanup_output=$(
+		(
+			set +e
+			rm() {
+				return 1
+			}
+			zxfer_cleanup_owned_lock_dir "$lock_dir" >/dev/null
+			printf 'cleanup=%s\n' "$?"
+			printf 'exists=%s\n' "$([ -d "$lock_dir" ] && printf yes || printf no)"
+		)
+	)
+
+	assertContains "Owned lock liveness should fail closed when it cannot determine the current hostname." \
+		"$hostname_output" "hostname=2"
+	assertContains "Owned lock cleanup should fail when rm reports failure and the lock directory still exists afterward." \
+		"$cleanup_output" "cleanup=1"
+	assertContains "Owned lock cleanup failure paths should leave the existing directory in place for inspection." \
+		"$cleanup_output" "exists=yes"
 }
 
 test_zxfer_create_owned_lock_dir_failure_paths_clean_up_partial_directories() {

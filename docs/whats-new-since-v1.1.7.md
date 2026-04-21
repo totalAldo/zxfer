@@ -94,8 +94,8 @@ allowlist and resolves required tools to absolute paths.
 Current behavior:
 
 - local helper lookup uses a secure PATH model
-- remote helper lookup resolves `zfs`, `cat`, optional GNU `parallel`, and
-  compression helpers on the remote host
+- remote helper lookup resolves `zfs`, `cat`, `parallel` when `-j > 1`
+  requires it, and compression helpers on the remote host
 - zxfer does not assume the same absolute helper paths exist everywhere
 
 What to do:
@@ -169,8 +169,10 @@ These are the biggest user-visible additions since the 2019 release.
 
 ### New CLI options and behaviors
 
-- `-j jobs`: concurrent send/receive execution with adaptive snapshot
-  discovery for larger recursive trees
+- `-j jobs`: concurrent send/receive execution with explicit per-dataset
+  source discovery when `jobs > 1`; local-origin runs require GNU
+  `parallel`, while remote-origin runs resolve an origin-host `parallel`
+  helper
 - `-V`: very verbose debug output plus profiling counters
 - `-w`: raw `zfs send`
 - `-x pattern`: exclude matching datasets from recursive replication

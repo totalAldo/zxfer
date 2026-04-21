@@ -124,7 +124,7 @@ test_runtime_init_default_helpers_cover_current_shell_paths() {
 	)
 
 	assertContains "Runtime metadata initialization should set the current zxfer version string." \
-		"$output" "version=2.0.0-20260413"
+		"$output" "version=2.0.0-20260420"
 	assertContains "Option default initialization should restore the single-job default." \
 		"$output" "jobs=1"
 	assertContains "Transport runtime defaults should clear cached remote capability payloads." \
@@ -419,6 +419,35 @@ test_zxfer_trap_exit_releases_registered_owned_locks() {
 		"" "$output"
 	assertFalse "zxfer_trap_exit should remove registered owned lock directories." \
 		"[ -e \"$lock_dir\" ]"
+}
+
+test_zxfer_trap_exit_preserves_original_flow_when_ssh_socket_cleanup_fails() {
+	registered_file="$TEST_TMPDIR/trap-close-failure-artifact"
+	: >"$registered_file"
+
+	output=$(
+		(
+			set -e
+			zxfer_register_runtime_artifact_path "$registered_file"
+			zxfer_close_all_ssh_control_sockets() {
+				printf '%s\n' "close failed" >&2
+				return 1
+			}
+			zxfer_echoV() {
+				:
+			}
+			true
+			zxfer_trap_exit
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "zxfer_trap_exit should keep the original successful exit flow when ssh socket cleanup fails." \
+		0 "$status"
+	assertContains "zxfer_trap_exit should preserve ssh socket cleanup diagnostics on stderr." \
+		"$output" "close failed"
+	assertFalse "zxfer_trap_exit should continue removing registered runtime artifacts after ssh socket cleanup failures." \
+		"[ -e \"$registered_file\" ]"
 }
 
 test_zxfer_trap_exit_preserves_failed_owned_lock_cleanup_paths_under_temp_prefix() {
@@ -792,6 +821,45 @@ test_zxfer_write_runtime_cache_file_atomically_requires_existing_parent_dir() {
 		"[ -d \"$missing_parent\" ]"
 	assertFalse "Atomic runtime cache writes should not leave a published cache target behind when the parent is missing." \
 		"[ -e \"$target_path\" ]"
+}
+
+test_zxfer_write_runtime_cache_file_atomically_rejects_non_file_targets_and_parent_lookup_failures() {
+	dir_target="$TEST_TMPDIR/runtime-cache-dir-target"
+	parent_lookup_target="$TEST_TMPDIR/runtime-cache-parent-lookup.entry"
+	stage_failure_target="$TEST_TMPDIR/runtime-cache-stage-failure.entry"
+	mkdir -p "$dir_target" || fail "Unable to create runtime cache directory target fixture."
+
+	set +e
+	zxfer_write_runtime_cache_file_atomically "$dir_target" "payload" "zxfer-runtime-cache-test" >/dev/null 2>&1
+	dir_status=$?
+	parent_lookup_output=$(
+		(
+			zxfer_get_path_parent_dir() {
+				return 1
+			}
+			zxfer_write_runtime_cache_file_atomically \
+				"$parent_lookup_target" "payload" "zxfer-runtime-cache-test" >/dev/null 2>&1
+			printf 'status=%s\n' "$?"
+		)
+	)
+	stage_failure_output=$(
+		(
+			zxfer_stage_runtime_artifact_file_for_path() {
+				return 1
+			}
+			zxfer_write_runtime_cache_file_atomically \
+				"$stage_failure_target" "payload" "zxfer-runtime-cache-test" >/dev/null 2>&1
+			printf 'status=%s\n' "$?"
+		)
+	)
+	set -e
+
+	assertEquals "Atomic runtime cache writes should fail closed when the existing target path is not a regular file." \
+		1 "$dir_status"
+	assertContains "Atomic runtime cache writes should preserve target-parent lookup failures exactly." \
+		"$parent_lookup_output" "status=1"
+	assertContains "Atomic runtime cache writes should fail closed when the staging helper cannot allocate the private artifact path." \
+		"$stage_failure_output" "status=1"
 }
 
 test_get_os_handles_local_and_remote_invocations() {
@@ -1355,9 +1423,10 @@ test_zxfer_read_cache_object_file_rejects_empty_payloads() {
 		"" "$(cat "$empty_output")"
 }
 
-test_zxfer_write_cache_object_file_atomically_cleans_up_stage_dirs_on_write_and_rename_failures() {
+test_zxfer_write_cache_object_file_atomically_cleans_up_stage_dirs_on_write_readback_and_rename_failures() {
 	stage_root="$TEST_TMPDIR/cache-object-stage-cleanup"
 	write_target="$stage_root/write-failure.entry"
+	readback_target="$stage_root/readback-failure.entry"
 	rename_target="$stage_root/rename-failure.entry"
 	mkdir -p "$stage_root" || fail "Unable to create cache-object stage root."
 
@@ -1399,6 +1468,30 @@ test_zxfer_write_cache_object_file_atomically_cleans_up_stage_dirs_on_write_and_
 		"[ -e \"$write_target\" ]"
 	assertEquals "Failed staged payload writes should clean up their private stage directory." \
 		0 "$write_stage_count"
+
+	set +e
+	(
+		zxfer_read_cache_object_file() {
+			return 1
+		}
+		zxfer_write_cache_object_file_atomically \
+			"$readback_target" "demo-kind" "" "payload"
+	)
+	readback_status=$?
+	set -- "$stage_root"/.zxfer-cache-object.*
+	if [ -e "$1" ]; then
+		readback_stage_count=$#
+	else
+		readback_stage_count=0
+	fi
+
+	assertEquals "Atomic cache-object writes should fail closed when the staged object cannot be read back for validation." \
+		1 "$readback_status"
+	assertFalse "Failed staged readback validation should not leave a published cache object behind." \
+		"[ -e \"$readback_target\" ]"
+	assertEquals "Failed staged readback validation should clean up their private stage directory." \
+		0 "$readback_stage_count"
+
 	assertEquals "Atomic cache-object writes should fail closed when the staged object cannot be renamed into place." \
 		1 "$rename_status"
 	assertFalse "Failed cache-object renames should not leave a published cache object behind." \
@@ -1471,6 +1564,22 @@ test_zxfer_write_cache_object_file_atomically_reports_stage_dir_creation_failure
 		"$publish_output" "status=1"
 }
 
+test_zxfer_create_cache_object_stage_dir_for_path_preserves_parent_lookup_failures() {
+	output=$(
+		(
+			zxfer_get_path_parent_dir() {
+				return 1
+			}
+			set +e
+			zxfer_create_cache_object_stage_dir_for_path "$TEST_TMPDIR/cache-object-parent-lookup" >/dev/null
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Cache-object stage-dir creation should preserve target-parent lookup failures." \
+		"$output" "status=1"
+}
+
 test_zxfer_write_cache_object_file_atomically_registers_stage_dirs_in_current_shell_before_failures() {
 	stage_root="$TEST_TMPDIR/cache-object-stage-current-shell"
 	target_path="$stage_root/published.entry"
@@ -1504,6 +1613,55 @@ test_zxfer_write_cache_object_file_atomically_registers_stage_dirs_in_current_sh
 		"$(cat "$trace_file")" "/.zxfer-cache-object."
 	assertEquals "Atomic cache-object writes should still clean up their private stage directory after helper failures." \
 		0 "$stage_count"
+}
+
+test_zxfer_publish_cache_object_directory_preserves_parent_lookup_failures() {
+	stage_dir="$TEST_TMPDIR/cache-object-parent-lookup-stage"
+	target_path="$TEST_TMPDIR/cache-object-parent-lookup-target/object.dir"
+	mkdir -p "$stage_dir" || fail "Unable to create the staged cache-object directory."
+
+	output=$(
+		(
+			zxfer_get_path_parent_dir() {
+				return 1
+			}
+			set +e
+			zxfer_publish_cache_object_directory "$stage_dir" "$target_path" >/dev/null
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Publishing cache-object directories should preserve target-parent lookup failures." \
+		"$output" "status=1"
+}
+
+test_zxfer_write_cache_object_contents_to_path_rejects_invalid_metadata_and_failed_writes() {
+	write_failure_target="$TEST_TMPDIR/cache-object-write-failure.entry"
+
+	set +e
+	zxfer_write_cache_object_contents_to_path \
+		"$TEST_TMPDIR/cache-object-invalid-metadata.entry" \
+		"demo-kind" "broken-metadata-line" "payload" >/dev/null 2>&1
+	metadata_status=$?
+	write_failure_output=$(
+		(
+			printf() {
+				return 1
+			}
+			set +e
+			zxfer_write_cache_object_contents_to_path \
+				"$write_failure_target" \
+				"demo-kind" "kind=demo" "payload" >/dev/null 2>&1
+			command printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertEquals "Cache-object content writes should fail closed when metadata lines are malformed." \
+		1 "$metadata_status"
+	assertContains "Cache-object content writes should fail closed when the staged write operation fails." \
+		"$write_failure_output" "status=1"
+	assertFalse "Failed cache-object content writes should not create the destination path when the staged write operation fails." \
+		"[ -e \"$write_failure_target\" ]"
 }
 
 test_try_get_effective_tmpdir_fails_cleanly_when_no_safe_default_exists() {

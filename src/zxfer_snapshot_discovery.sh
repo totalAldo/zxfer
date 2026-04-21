@@ -67,7 +67,6 @@ zxfer_reset_snapshot_discovery_state() {
 	g_source_snapshot_list_pid=""
 	g_source_snapshot_list_uses_parallel=0
 	g_source_snapshot_list_uses_metadata_compression=0
-	g_origin_parallel_cmd=""
 	g_recursive_source_list=""
 	g_recursive_source_dataset_list=""
 	g_recursive_dest_list=""
@@ -217,9 +216,9 @@ zxfer_get_local_parallel_version_output() {
 # helpers assume the resource or cache is available.
 #
 # Ensure GNU parallel exists locally (for piping) and resolve the remote path
-# when -j is used with -O. Missing helpers still fall back to serial discovery,
-# while resolved remote helpers are trusted and fail closed later if execution
-# proves they are incompatible.
+# when -j is used with -O. Once the user requests -j source discovery, zxfer
+# must stay on the parallel path instead of silently dropping back to the
+# serial source listing.
 zxfer_ensure_parallel_available_for_source_jobs() {
 	g_zxfer_parallel_source_job_check_result=""
 	g_zxfer_parallel_source_job_check_kind=""
@@ -249,11 +248,16 @@ zxfer_ensure_parallel_available_for_source_jobs() {
 		return 0
 	fi
 
-	if ! l_remote_parallel=$(zxfer_resolve_remote_required_tool "$g_option_O_origin_host" parallel "GNU parallel" source); then
+	if [ -n "${g_origin_parallel_cmd:-}" ] &&
+		[ "${g_origin_parallel_cmd_host:-}" = "$g_option_O_origin_host" ]; then
+		return 0
+	fi
+
+	if ! l_remote_parallel=$(zxfer_resolve_remote_required_tool "$g_option_O_origin_host" parallel "parallel" source); then
 		case "$l_remote_parallel" in
-		"Required dependency \"GNU parallel\" not found on host "*)
+		"Required dependency \"parallel\" not found on host "*)
 			g_zxfer_parallel_source_job_check_kind="origin_missing"
-			g_zxfer_parallel_source_job_check_result="GNU parallel not found on origin host $g_option_O_origin_host but -j $g_option_j_jobs was requested. Install GNU parallel remotely or rerun without -j."
+			g_zxfer_parallel_source_job_check_result="parallel not found on origin host $g_option_O_origin_host but -j $g_option_j_jobs was requested. Install parallel remotely or rerun without -j."
 			;;
 		*)
 			g_zxfer_parallel_source_job_check_kind="origin_probe_failed"
@@ -264,203 +268,10 @@ zxfer_ensure_parallel_available_for_source_jobs() {
 		return 1
 	fi
 
-	if [ "${g_origin_parallel_cmd:-}" != "$l_remote_parallel" ]; then
-		g_origin_parallel_cmd=$l_remote_parallel
-	fi
+	g_origin_parallel_cmd=$l_remote_parallel
+	g_origin_parallel_cmd_host=$g_option_O_origin_host
 
 	return 0
-}
-
-# Purpose: Return the source snapshot parallel dataset threshold in the form
-# expected by later helpers.
-# Usage: Called during source and destination snapshot discovery when sibling
-# helpers need the same lookup without duplicating module logic.
-#
-# Choose how many datasets must exist before the more expensive per-dataset GNU
-# parallel discovery path becomes worthwhile. Remote startup stays biased
-# toward the single recursive list until the tree is large enough to repay the
-# extra process fan-out.
-zxfer_get_source_snapshot_parallel_dataset_threshold() {
-	l_jobs=${g_option_j_jobs:-1}
-
-	case "$l_jobs" in
-	'' | *[!0-9]*)
-		l_jobs=1
-		;;
-	esac
-
-	if [ "$g_option_O_origin_host" = "" ]; then
-		l_threshold=$((l_jobs * 2))
-		[ "$l_threshold" -lt 8 ] && l_threshold=8
-		printf '%s\n' "$l_threshold"
-		return 0
-	fi
-
-	case "${g_origin_remote_capabilities_bootstrap_source:-}" in
-	cache | memory)
-		l_threshold=$((l_jobs * 2))
-		[ "$l_threshold" -lt 6 ] && l_threshold=6
-		;;
-	*)
-		l_threshold=$((l_jobs * 3))
-		[ "$l_threshold" -lt 12 ] && l_threshold=12
-		;;
-	esac
-
-	if [ "${g_ssh_supports_control_sockets:-0}" -ne 1 ] ||
-		[ -z "${g_ssh_origin_control_socket:-}" ]; then
-		l_threshold=$((l_threshold + l_jobs))
-	fi
-
-	printf '%s\n' "$l_threshold"
-}
-
-# Purpose: Return the source snapshot discovery dataset list in the form
-# expected by later helpers.
-# Usage: Called during source and destination snapshot discovery when sibling
-# helpers need the same lookup without duplicating module logic.
-zxfer_get_source_snapshot_discovery_dataset_list() {
-	zxfer_run_source_zfs_cmd list -Hr -t filesystem,volume -o name "$g_initial_source"
-}
-
-# Purpose: Count the source snapshot discovery datasets for the surrounding
-# snapshot-discovery flow.
-# Usage: Called during source and destination snapshot discovery when later
-# helpers need a threshold or size decision.
-zxfer_count_source_snapshot_discovery_datasets() {
-	l_dataset_list=$1
-	if [ "$l_dataset_list" = "" ]; then
-		printf '%s\n' "0"
-		return 0
-	fi
-	l_dataset_count=$(printf '%s\n' "$l_dataset_list" | "$g_cmd_awk" 'END { print NR + 0 }')
-
-	case "$l_dataset_count" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-
-	printf '%s\n' "$l_dataset_count"
-}
-
-# Purpose: Check whether zxfer should inline source snapshot dataset list.
-# Usage: Called during source and destination snapshot discovery when later
-# helpers need a boolean branch decision about the current configuration or
-# live state.
-zxfer_should_inline_source_snapshot_dataset_list() {
-	l_dataset_list=$1
-	l_dataset_count=$2
-
-	case "$l_dataset_count" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-
-	[ "$l_dataset_count" -le 64 ] || return 1
-
-	l_dataset_list_bytes=$(printf '%s' "$l_dataset_list" | wc -c | tr -d '[:space:]')
-	case "$l_dataset_list_bytes" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-
-	[ "$l_dataset_list_bytes" -le 8192 ]
-}
-
-# Purpose: Build the source snapshot dataset list printf command for the next
-# execution or comparison step.
-# Usage: Called during source and destination snapshot discovery before other
-# helpers consume the assembled value.
-zxfer_build_source_snapshot_dataset_list_printf_cmd() {
-	l_dataset_list=$1
-	l_tokens=$(printf '%s\n%s' "printf" "%s\n")
-
-	while IFS= read -r l_dataset || [ -n "$l_dataset" ]; do
-		[ "$l_dataset" = "" ] && continue
-		l_tokens=$(printf '%s\n%s' "$l_tokens" "$l_dataset")
-	done <<EOF
-$l_dataset_list
-EOF
-
-	zxfer_quote_token_stream "$l_tokens"
-}
-
-# Purpose: Record the parallel source discovery fallback for later diagnostics
-# or control decisions.
-# Usage: Called during source and destination snapshot discovery when zxfer
-# needs the state preserved for follow-on helpers or reporting.
-zxfer_note_parallel_source_discovery_fallback() {
-	l_reason=$1
-	l_scope=${2:-local}
-
-	if [ "${g_option_v_verbose:-0}" -ne 1 ] &&
-		[ "${g_option_V_very_verbose:-0}" -ne 1 ]; then
-		return 0
-	fi
-
-	case "$l_scope" in
-	origin)
-		printf '%s\n' "Origin-host GNU parallel unavailable for adaptive source discovery. Falling back to serial source snapshot listing." >&2
-		;;
-	*)
-		printf '%s\n' "GNU parallel unavailable for adaptive source discovery. Falling back to serial source snapshot listing." >&2
-		;;
-	esac
-
-	[ -z "$l_reason" ] || printf '%s\n' "$l_reason" >&2
-}
-
-# Purpose: Check whether the parallel source discovery fallback is allowed.
-# Usage: Called during source and destination snapshot discovery when later
-# helpers need a boolean answer about the parallel source discovery fallback.
-#
-# Local adaptive discovery can always degrade to serial when the helper check
-# fails, but remote adaptive discovery should only do so for the explicit
-# missing-helper case. Transport, bootstrap, or other probe failures must stop
-# the run instead of silently masking the origin-host problem.
-zxfer_parallel_source_discovery_fallback_is_allowed() {
-	l_kind=$1
-	l_scope=${2:-local}
-
-	case "$l_scope" in
-	local)
-		return 0
-		;;
-	origin)
-		case "$l_kind" in
-		origin_missing)
-			return 0
-			;;
-		esac
-		return 1
-		;;
-	esac
-
-	return 1
-}
-
-# Purpose: Render the remote source snapshot serial list command as a stable
-# shell-safe or operator-facing string.
-# Usage: Called during source and destination snapshot discovery when zxfer
-# needs to display or transport the value without reparsing it.
-zxfer_render_remote_source_snapshot_serial_list_cmd() {
-	l_remote_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
-	l_remote_serial_cmd=$(zxfer_build_shell_command_from_argv \
-		"$l_remote_zfs_cmd" list -Hr -o name -s creation -t snapshot "$g_initial_source")
-	if [ "$g_option_z_compress" -eq 1 ]; then
-		g_source_snapshot_list_uses_metadata_compression=1
-		l_remote_compress_safe=${g_origin_cmd_compress_safe:-$g_cmd_compress_safe}
-		l_remote_serial_cmd="$l_remote_serial_cmd | $l_remote_compress_safe"
-	fi
-	l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_serial_cmd")
-	l_cmd=$(zxfer_build_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_shell_cmd") || return 1
-	if [ "${g_source_snapshot_list_uses_metadata_compression:-0}" -eq 1 ]; then
-		l_cmd="$l_cmd | $g_cmd_decompress_safe"
-	fi
-	printf '%s\n' "$l_cmd"
 }
 
 # Purpose: Build the source snapshot list command for the next execution or
@@ -481,71 +292,16 @@ zxfer_build_source_snapshot_list_cmd() {
 		return
 	fi
 
-	if [ "$g_option_O_origin_host" = "" ]; then
-		if zxfer_check_parallel_source_jobs_in_current_shell; then
-			l_parallel_status=0
-		else
-			l_parallel_status=$?
-		fi
-		l_parallel_fallback_reason=$g_zxfer_parallel_source_job_check_result
-		l_parallel_fallback_kind=$g_zxfer_parallel_source_job_check_kind
-		if [ "$l_parallel_status" -ne 0 ]; then
-			zxfer_note_parallel_source_discovery_fallback "$l_parallel_fallback_reason" local
-			printf '%s\n' "$l_local_serial_cmd"
-			return 0
-		fi
-	fi
-
-	if ! l_parallel_threshold=$(zxfer_get_source_snapshot_parallel_dataset_threshold); then
-		printf '%s\n' "Failed to determine the adaptive source snapshot discovery threshold."
-		return 1
-	fi
-
-	if ! l_dataset_list=$(zxfer_get_source_snapshot_discovery_dataset_list); then
-		printf '%s\n' "Failed to retrieve the source dataset list for adaptive snapshot discovery."
-		return 1
-	fi
-
-	if ! l_dataset_count=$(zxfer_count_source_snapshot_discovery_datasets "$l_dataset_list"); then
-		printf '%s\n' "Failed to count source datasets for adaptive snapshot discovery."
-		return 1
-	fi
-
-	if [ "$l_dataset_count" -lt "$l_parallel_threshold" ]; then
-		if [ "$g_option_O_origin_host" = "" ]; then
-			printf '%s\n' "$l_local_serial_cmd"
-			return 0
-		fi
-
-		zxfer_render_remote_source_snapshot_serial_list_cmd
-		return 0
-	fi
-
 	if zxfer_check_parallel_source_jobs_in_current_shell; then
 		l_parallel_status=0
 	else
 		l_parallel_status=$?
 	fi
-	l_parallel_fallback_reason=$g_zxfer_parallel_source_job_check_result
-	l_parallel_fallback_kind=$g_zxfer_parallel_source_job_check_kind
 	if [ "$l_parallel_status" -ne 0 ]; then
-		if [ "$g_option_O_origin_host" = "" ]; then
-			zxfer_note_parallel_source_discovery_fallback "$l_parallel_fallback_reason" local
-			printf '%s\n' "$l_local_serial_cmd"
-			return 0
-		fi
-
-		if zxfer_parallel_source_discovery_fallback_is_allowed \
-			"$l_parallel_fallback_kind" origin; then
-			zxfer_note_parallel_source_discovery_fallback "$l_parallel_fallback_reason" origin
-			zxfer_render_remote_source_snapshot_serial_list_cmd
-			return 0
-		fi
-
-		if [ -n "$l_parallel_fallback_reason" ]; then
-			printf '%s\n' "$l_parallel_fallback_reason"
+		if [ -n "${g_zxfer_parallel_source_job_check_result:-}" ]; then
+			printf '%s\n' "$g_zxfer_parallel_source_job_check_result"
 		else
-			printf '%s\n' "Failed to prepare origin-host GNU parallel for adaptive source discovery."
+			printf '%s\n' "Failed to prepare GNU parallel source discovery."
 		fi
 		return "$l_parallel_status"
 	fi
@@ -559,12 +315,8 @@ zxfer_build_source_snapshot_list_cmd() {
 		l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
 			"$l_remote_zfs_cmd" list -H -o name -s creation -d 1 -t snapshot "{}")
 		l_remote_parallel_cmd="$l_parallel_cmd -j $g_option_j_jobs --line-buffer -- \"$l_remote_runner_cmd\""
-		if zxfer_should_inline_source_snapshot_dataset_list "$l_dataset_list" "$l_dataset_count"; then
-			l_remote_dataset_input_cmd=$(zxfer_build_source_snapshot_dataset_list_printf_cmd "$l_dataset_list")
-		else
-			l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
-				"$l_remote_zfs_cmd" list -Hr -t filesystem,volume -o name "$g_initial_source")
-		fi
+		l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
+			"$l_remote_zfs_cmd" list -Hr -t filesystem,volume -o name "$g_initial_source")
 		l_remote_pipeline="$l_remote_dataset_input_cmd | $l_remote_parallel_cmd"
 		if [ "$g_option_z_compress" -eq 1 ]; then
 			g_source_snapshot_list_uses_metadata_compression=1
@@ -583,11 +335,8 @@ zxfer_build_source_snapshot_list_cmd() {
 	l_parallel_path=$g_cmd_parallel
 	l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name -s creation -d 1 -t snapshot "{}")
 	l_parallel_cmd="$(zxfer_build_shell_command_from_argv "$l_parallel_path") -j $g_option_j_jobs --line-buffer -- \"$l_runner_cmd\""
-	if zxfer_should_inline_source_snapshot_dataset_list "$l_dataset_list" "$l_dataset_count"; then
-		l_dataset_input_cmd=$(zxfer_build_source_snapshot_dataset_list_printf_cmd "$l_dataset_list")
-	else
-		l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -t filesystem,volume -o name "$g_initial_source")
-	fi
+	l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec \
+		"$g_LZFS" list -Hr -t filesystem,volume -o name "$g_initial_source")
 	l_cmd="$l_dataset_input_cmd | $l_parallel_cmd"
 	printf '%s\n' "$l_cmd"
 }
@@ -598,8 +347,8 @@ zxfer_build_source_snapshot_list_cmd() {
 # needs to display or transport the value without reparsing it.
 #
 # Dry-run snapshot discovery must stay render-only, so use the simple serial
-# listing shape instead of the adaptive planner that probes datasets and
-# validates optional helpers.
+# listing shape instead of validating GNU parallel helpers or opening remote
+# helper probes during preview-only runs.
 zxfer_render_source_snapshot_list_preview_cmd() {
 	zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$g_initial_source"
 }

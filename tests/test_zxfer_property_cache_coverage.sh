@@ -411,6 +411,145 @@ backup/dst/child"
 		"2" "$(awk 'END {print NR + 0}' "$log")"
 }
 
+test_zxfer_prefetch_recursive_normalized_properties_marks_failure_when_cache_dir_init_fails() {
+	g_zxfer_source_property_tree_prefetch_root="tank/src"
+	g_zxfer_source_property_tree_prefetch_zfs_cmd="/sbin/zfs"
+	g_zxfer_source_property_tree_prefetch_state=0
+	g_recursive_source_dataset_list="tank/src"
+
+	zxfer_ensure_property_cache_dir() {
+		return 1
+	}
+
+	set +e
+	zxfer_prefetch_recursive_normalized_properties source >/dev/null 2>&1
+	status=$?
+	set -e
+
+	assertEquals "Recursive property-tree prefetch should fail closed when the property cache directory cannot be prepared." \
+		"1" "$status"
+	assertEquals "Property-cache directory setup failures should disable source prefetch for the iteration." \
+		"2" "${g_zxfer_source_property_tree_prefetch_state:-0}"
+}
+
+test_zxfer_prefetch_recursive_normalized_properties_cleans_up_staged_files_for_tempfile_failures() {
+	l_failure_modes="first second fourth fifth sixth seventh"
+
+	for l_failure_mode in $l_failure_modes; do
+		rm -f "$TEST_TMPDIR"/prefetch-temp-failure-"$l_failure_mode".*
+		g_zxfer_source_property_tree_prefetch_root="tank/src"
+		g_zxfer_source_property_tree_prefetch_zfs_cmd="/sbin/zfs"
+		g_zxfer_source_property_tree_prefetch_state=0
+		g_recursive_source_dataset_list="tank/src"
+		g_zxfer_temp_file_result=""
+		l_temp_call_count=0
+		l_allocated_files=""
+
+		zxfer_ensure_property_cache_dir() {
+			return 0
+		}
+		zxfer_get_temp_file() {
+			l_temp_call_count=$((l_temp_call_count + 1))
+			case "$l_failure_mode:$l_temp_call_count" in
+			first:1 | second:2 | fourth:4 | fifth:5 | sixth:6 | seventh:7)
+				return 1
+				;;
+			esac
+			g_zxfer_temp_file_result="$TEST_TMPDIR/prefetch-temp-failure-$l_failure_mode.$l_temp_call_count"
+			: >"$g_zxfer_temp_file_result" || return 1
+			if [ -n "$l_allocated_files" ]; then
+				l_allocated_files=$l_allocated_files'
+'$g_zxfer_temp_file_result
+			else
+				l_allocated_files=$g_zxfer_temp_file_result
+			fi
+			return 0
+		}
+
+		set +e
+		zxfer_prefetch_recursive_normalized_properties source >/dev/null 2>&1
+		status=$?
+		set -e
+
+		assertEquals "Recursive property-tree prefetch should fail closed when temporary stage allocation fails [$l_failure_mode]." \
+			"1" "$status"
+		assertEquals "Temporary stage allocation failures should disable source prefetch for the iteration [$l_failure_mode]." \
+			"2" "${g_zxfer_source_property_tree_prefetch_state:-0}"
+
+		while IFS= read -r l_allocated_file || [ -n "$l_allocated_file" ]; do
+			[ -n "$l_allocated_file" ] || continue
+			if [ -e "$l_allocated_file" ]; then
+				fail "Temporary stage allocation failure [$l_failure_mode] should remove staged file $l_allocated_file."
+			fi
+		done <<EOF
+$l_allocated_files
+EOF
+
+		unset -f zxfer_ensure_property_cache_dir
+		unset -f zxfer_get_temp_file
+	done
+}
+
+test_zxfer_prefetch_recursive_normalized_properties_fails_closed_when_grouped_cache_apply_fails() {
+	g_zxfer_source_property_tree_prefetch_root="tank/src"
+	g_zxfer_source_property_tree_prefetch_zfs_cmd="/sbin/zfs"
+	g_zxfer_source_property_tree_prefetch_state=0
+	g_recursive_source_dataset_list="tank/src"
+
+	zxfer_run_zfs_cmd_for_spec() {
+		case "$4" in
+		-Hpo | -Ho)
+			printf '%s\n' "tank/src	compression	lz4	local"
+			return 0
+			;;
+		esac
+		return 1
+	}
+	zxfer_property_cache_dataset_path() {
+		return 1
+	}
+
+	set +e
+	zxfer_prefetch_recursive_normalized_properties source >/dev/null 2>&1
+	status=$?
+	set -e
+
+	assertEquals "Recursive property-tree prefetch should fail closed when grouped cache paths cannot be derived." \
+		"1" "$status"
+	assertEquals "Grouped cache-path failures should disable source prefetch for the iteration." \
+		"2" "${g_zxfer_source_property_tree_prefetch_state:-0}"
+}
+
+test_zxfer_prefetch_recursive_normalized_properties_preserves_grouped_read_failures() {
+	g_zxfer_source_property_tree_prefetch_root="tank/src"
+	g_zxfer_source_property_tree_prefetch_zfs_cmd="/sbin/zfs"
+	g_zxfer_source_property_tree_prefetch_state=0
+	g_recursive_source_dataset_list="tank/src"
+
+	zxfer_run_zfs_cmd_for_spec() {
+		case "$4" in
+		-Hpo | -Ho)
+			printf '%s\n' "tank/src	compression	lz4	local"
+			return 0
+			;;
+		esac
+		return 1
+	}
+	zxfer_read_runtime_artifact_file() {
+		return 27
+	}
+
+	set +e
+	zxfer_prefetch_recursive_normalized_properties source >/dev/null 2>&1
+	status=$?
+	set -e
+
+	assertEquals "Recursive property-tree prefetch should preserve grouped artifact read failures." \
+		"27" "$status"
+	assertEquals "Grouped artifact read failures should disable source prefetch for the iteration." \
+		"2" "${g_zxfer_source_property_tree_prefetch_state:-0}"
+}
+
 test_zxfer_maybe_prefetch_recursive_normalized_properties_covers_success_and_failure_paths_in_current_shell() {
 	source_cache_path="$TEST_TMPDIR/maybe-source.cache"
 	destination_cache_path="$TEST_TMPDIR/maybe-destination.cache"

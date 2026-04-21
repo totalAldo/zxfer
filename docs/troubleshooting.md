@@ -65,9 +65,8 @@ Failed to retrieve snapshots from the source
 What it usually means:
 
 - remote `zfs list` failed
-- remote `parallel` or `zstd` was missing or misresolved, and either the serial
-  fallback also failed or the remaining snapshot-list command still could not
-  execute
+- remote `parallel` or `zstd` was missing or misresolved, so the rendered
+  snapshot-list command could not execute
 - source dataset naming or quoting was wrong on the remote side
 
 What to inspect:

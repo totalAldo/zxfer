@@ -1,5 +1,5 @@
 Name:           zxfer
-Version:        2.0.0-20260413
+Version:        2.0.0-20260420
 Release:        0.1%{?dist}
 Summary:        Optimized ZFS snapshot replication script
 
@@ -17,8 +17,10 @@ Requires:       /usr/bin/awk
 Requires:       /usr/bin/ssh
 Requires:       zfs
 
-# Optional accelerators (GNU parallel for -j discovery, zstd for -z compression
-# and remote snapshot-discovery metadata compression when ssh compression is active)
+# Optional feature helpers (GNU parallel for local `-j > 1` discovery, a
+# resolved remote `parallel` helper for remote-origin `-O ... -j ...` runs, and
+# zstd for -z compression plus remote snapshot-discovery metadata compression
+# when ssh compression is active)
 Recommends:     parallel
 Recommends:     zstd
 
@@ -26,9 +28,11 @@ Recommends:     zstd
 zxfer is a maintained release of the long-standing zxfer utility. It adds
 high-performance ZFS replication, dataset property synchronization, and
 additional safety checks while retaining the original one-command workflow.
-Optional features use GNU parallel for `-j` snapshot discovery and zstd for
-`-z` / `-Z` compressed ssh streams, including remote snapshot-discovery
-metadata compression when that ssh-compression path is active.
+Optional features use GNU parallel for local `-j > 1` snapshot discovery, a
+resolved remote `parallel` helper for remote-origin `-O ... -j ...` snapshot
+discovery, and zstd for `-z` / `-Z` compressed ssh streams, including remote
+snapshot-discovery metadata compression when that ssh-compression path is
+active.
 
 %prep
 %autosetup
@@ -69,6 +73,6 @@ install -Dm0644 man/zxfer.8 %{buildroot}%{_mandir}/man8/zxfer.8
 %{_mandir}/man8/zxfer.8*
 
 %changelog
-* Mon Apr 13 2026 Aldo Gonzalez - 2.0.0-20260413-0.1
-- Track zxfer 2.0.0-20260413 release and modernize Source URL (see CHANGELOG.txt for upstream details).
+* Mon Apr 20 2026 Aldo Gonzalez - 2.0.0-20260420-0.1
+- Track zxfer 2.0.0-20260420 release and modernize Source URL (see CHANGELOG.txt for upstream details).
 - Make platform/security docs clearer about remote helper hardening and macOS caveats, and loosen the RPM spec away from a path-locked `/sbin/zfs` dependency so downstream packagers can adapt it more easily.

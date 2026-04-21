@@ -852,6 +852,21 @@ test_zxfer_store_cached_remote_capability_response_for_host_updates_target_slot(
 		"$g_target_remote_capabilities_response" "tool	cat	0	/remote/bin/cat"
 }
 
+test_zxfer_store_cached_remote_capability_response_for_host_updates_origin_slot() {
+	g_option_O_origin_host="origin.example"
+
+	zxfer_store_cached_remote_capability_response_for_host "origin.example" "$(fake_remote_capability_response)"
+
+	assertEquals "Origin-side host caching should update the origin cache slot." \
+		"origin.example" "$g_origin_remote_capabilities_host"
+	assertEquals "Origin-side host caching should key the cache slot by the active secure dependency path." \
+		"$ZXFER_DEFAULT_SECURE_PATH" "$g_origin_remote_capabilities_dependency_path"
+	assertEquals "Origin-side host caching should also key the cache slot by the active capability-cache identity." \
+		"$(zxfer_render_remote_capability_cache_identity)" "$g_origin_remote_capabilities_cache_identity"
+	assertContains "Origin-side host caching should store the capability payload." \
+		"$g_origin_remote_capabilities_response" "tool	parallel	0	/opt/bin/parallel"
+}
+
 test_zxfer_store_cached_remote_capability_response_for_host_resets_target_bootstrap_source_when_identity_refresh_fails() {
 	output=$(
 		(
@@ -879,6 +894,18 @@ test_zxfer_store_cached_remote_capability_response_for_host_resets_target_bootst
 		"$output" "bootstrap=<>"
 	assertContains "Target-side host caching should still retain the capability payload after an identity refresh failure." \
 		"$output" "response=ZXFER_REMOTE_CAPS_V2"
+}
+
+test_zxfer_get_cached_remote_capability_response_for_host_reads_origin_slot() {
+	g_origin_remote_capabilities_host="origin.example"
+	g_origin_remote_capabilities_dependency_path=$ZXFER_DEFAULT_SECURE_PATH
+	g_origin_remote_capabilities_cache_identity=$(zxfer_render_remote_capability_cache_identity)
+	g_origin_remote_capabilities_response=$(fake_remote_capability_response)
+
+	result=$(zxfer_get_cached_remote_capability_response_for_host "origin.example")
+
+	assertContains "Origin-side cached capability reads should return the cached payload." \
+		"$result" "tool	parallel	0	/opt/bin/parallel"
 }
 
 test_zxfer_get_cached_remote_capability_response_for_host_reads_target_slot() {
@@ -2442,6 +2469,17 @@ test_zxfer_note_remote_capability_bootstrap_source_for_host_preserves_first_sour
 		"live" "$g_origin_remote_capabilities_bootstrap_source"
 }
 
+test_zxfer_note_remote_capability_bootstrap_source_for_host_sets_origin_source_from_cached_slot() {
+	g_origin_remote_capabilities_host="cached-origin.example"
+	g_origin_remote_capabilities_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+		"cached-origin.example")
+
+	zxfer_note_remote_capability_bootstrap_source_for_host "cached-origin.example" cache
+
+	assertEquals "Bootstrap source tracking should also match the cached origin slot when no active origin host is configured." \
+		"cache" "$g_origin_remote_capabilities_bootstrap_source"
+}
+
 test_zxfer_note_remote_capability_bootstrap_source_for_host_sets_target_source_in_current_shell() {
 	g_option_T_target_host="target.example"
 
@@ -2449,6 +2487,17 @@ test_zxfer_note_remote_capability_bootstrap_source_for_host_sets_target_source_i
 	zxfer_note_remote_capability_bootstrap_source_for_host "target.example" cache
 
 	assertEquals "Bootstrap source tracking should preserve the first remote discovery source for the target host." \
+		"live" "$g_target_remote_capabilities_bootstrap_source"
+}
+
+test_zxfer_note_remote_capability_bootstrap_source_for_host_sets_target_source_from_cached_slot() {
+	g_target_remote_capabilities_host="cached-target.example"
+	g_target_remote_capabilities_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+		"cached-target.example")
+
+	zxfer_note_remote_capability_bootstrap_source_for_host "cached-target.example" live
+
+	assertEquals "Bootstrap source tracking should also match the cached target slot when no active target host is configured." \
 		"live" "$g_target_remote_capabilities_bootstrap_source"
 }
 
@@ -3700,19 +3749,32 @@ test_zxfer_write_remote_capability_cache_file_reports_existing_lookup_failures_i
 test_zxfer_preload_remote_host_capabilities_delegates_to_ensure() {
 	log="$TEST_TMPDIR/preload_remote_caps.log"
 	: >"$log"
+	tools_file="$TEST_TMPDIR/preload_remote_caps.tools"
+	g_option_O_origin_host="origin.example"
+	g_option_j_jobs=4
+	g_option_e_restore_property_mode=1
+	g_option_z_compress=1
+	g_cmd_compress="zstd -T0 -9"
 
 	(
 		zxfer_ensure_remote_host_capabilities() {
-			printf 'ensure host=%s side=%s tools=%s\n' \
-				"$1" "${2:-}" "${3:-}" >>"$log"
+			printf 'ensure host=%s side=%s\n' \
+				"$1" "${2:-}" >>"$log"
+			printf '%s\n' "${3:-}" >"$tools_file"
 		}
 		zxfer_preload_remote_host_capabilities "origin.example" source
 	)
 
 	assertContains "Capability preloading should delegate to the shared ensure helper." \
 		"$(cat "$log")" "host=origin.example side=source"
-	assertContains "Capability preloading should warm only the minimum zfs capability scope during startup." \
-		"$(cat "$log")" "tools=zfs"
+	assertContains "Capability preloading should warm zfs for remote origin discovery." \
+		"$(cat "$tools_file")" "zfs"
+	assertContains "Capability preloading should include GNU parallel when -j requests origin-side source fan-out." \
+		"$(cat "$tools_file")" "parallel"
+	assertContains "Capability preloading should include origin-side property-restore helpers when requested." \
+		"$(cat "$tools_file")" "cat"
+	assertContains "Capability preloading should include origin-side compression helpers when remote metadata compression is active." \
+		"$(cat "$tools_file")" "zstd"
 }
 
 test_zxfer_preload_remote_host_capabilities_suppresses_failures_without_verbose() {
@@ -3757,6 +3819,23 @@ test_zxfer_preload_remote_host_capabilities_surfaces_failures_in_verbose_mode() 
 		"$output" "Host key verification failed."
 }
 
+test_zxfer_preload_remote_host_capabilities_falls_back_to_minimal_zfs_scope_when_host_scope_lookup_fails() {
+	tools_file="$TEST_TMPDIR/preload_remote_caps_fallback.tools"
+
+	(
+		zxfer_get_remote_capability_requested_tools_for_host() {
+			return 1
+		}
+		zxfer_ensure_remote_host_capabilities() {
+			printf '%s\n' "${3:-}" >"$tools_file"
+		}
+		zxfer_preload_remote_host_capabilities "origin.example" source
+	)
+
+	assertEquals "Capability preloading should fall back to the minimum zfs scope when host-scoped helper discovery fails." \
+		"zfs" "$(cat "$tools_file")"
+}
+
 test_zxfer_get_remote_host_operating_system_returns_failure_when_capabilities_are_unavailable() {
 	set +e
 	output=$(
@@ -3774,6 +3853,27 @@ test_zxfer_get_remote_host_operating_system_returns_failure_when_capabilities_ar
 
 	assertEquals "Remote OS lookups should fail when both the capability handshake and direct fallback are unavailable." 1 "$status"
 	assertEquals "Failed remote OS lookups should not print a payload." "" "$output"
+}
+
+test_zxfer_get_remote_host_operating_system_preserves_direct_probe_failure_when_capabilities_are_unavailable() {
+	set +e
+	output=$(
+		(
+			zxfer_ensure_remote_host_capabilities() {
+				return 1
+			}
+			zxfer_get_remote_host_operating_system_direct() {
+				printf '%s\n' "uname probe failed"
+				return 1
+			}
+			zxfer_get_remote_host_operating_system "origin.example" source
+		)
+	)
+	status=$?
+
+	assertEquals "Remote OS lookups should still fail when the direct fallback fails after the capability handshake is unavailable." 1 "$status"
+	assertEquals "Remote OS lookups should preserve a non-empty direct-fallback failure message when the capability handshake is unavailable." \
+		"uname probe failed" "$output"
 }
 
 test_zxfer_get_remote_host_operating_system_falls_back_to_direct_probe_when_capabilities_are_unavailable() {
@@ -3833,6 +3933,28 @@ tool	zfs	0	/remote/bin/zfs"
 
 	assertEquals "Remote OS lookups should fall back to a direct uname probe when the capability payload is malformed." \
 		"FallbackOS" "$output"
+}
+
+test_zxfer_get_remote_host_operating_system_preserves_direct_probe_failure_when_capability_payload_is_malformed() {
+	set +e
+	output=$(
+		(
+			zxfer_ensure_remote_host_capabilities() {
+				printf '%s\n' "ZXFER_REMOTE_CAPS_V2
+tool	zfs	0	/remote/bin/zfs"
+			}
+			zxfer_get_remote_host_operating_system_direct() {
+				printf '%s\n' "fallback uname parse failed"
+				return 1
+			}
+			zxfer_get_remote_host_operating_system "origin.example" source
+		)
+	)
+	status=$?
+
+	assertEquals "Remote OS lookups should fail when malformed capability payloads are followed by a failing direct probe." 1 "$status"
+	assertEquals "Remote OS lookups should preserve a non-empty direct-fallback failure message after a malformed capability payload." \
+		"fallback uname parse failed" "$output"
 }
 
 test_zxfer_get_remote_host_operating_system_falls_back_to_direct_probe_when_capability_payload_has_invalid_helper_path() {
@@ -4526,6 +4648,32 @@ test_resolve_remote_required_tool_propagates_direct_probe_failure_for_malformed_
 		"$output" "Required dependency \"zfs\" not found on host origin.example in secure PATH (/secure/bin)."
 }
 
+test_resolve_remote_required_tool_propagates_direct_probe_failure_when_requested_tool_is_absent_from_capabilities() {
+	set +e
+	output=$(
+		(
+			zxfer_ensure_remote_host_capabilities() {
+				cat <<'EOF'
+ZXFER_REMOTE_CAPS_V2
+os	RemoteOS
+tool	zfs	0	/remote/bin/zfs
+tool	cat	0	/remote/bin/cat
+EOF
+			}
+			zxfer_resolve_remote_cli_tool_direct() {
+				printf '%s\n' "Required dependency \"parallel\" not found on host origin.example in secure PATH (/secure/bin). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary."
+				return 1
+			}
+			zxfer_resolve_remote_required_tool "origin.example" parallel "parallel" source
+		)
+	)
+	status=$?
+
+	assertEquals "Remote required-tool resolution should still fail when the capability payload omits the helper and the direct probe also fails." 1 "$status"
+	assertContains "Missing-helpers in the capability payload should preserve the direct-probe failure message when fallback probing also fails." \
+		"$output" "Required dependency \"parallel\" not found on host origin.example in secure PATH (/secure/bin)."
+}
+
 test_resolve_remote_required_tool_requests_scoped_capabilities_for_parallel() {
 	log="$TEST_TMPDIR/resolve_remote_parallel_scope.log"
 	output=$(
@@ -4550,6 +4698,105 @@ test_resolve_remote_required_tool_requests_scoped_capabilities_for_parallel() {
 		"$(cat "$log")" "parallel"
 	assertNotContains "Remote GNU parallel resolution should not preload unrelated helpers." \
 		"$(cat "$log")" "cat"
+}
+
+test_resolve_remote_required_tool_prefers_prewarmed_host_scope_for_parallel() {
+	log="$TEST_TMPDIR/resolve_remote_parallel_host_scope.log"
+	output=$(
+		(
+			LOG_PATH="$log"
+			g_option_O_origin_host="origin.example"
+			g_option_j_jobs=4
+			g_option_e_restore_property_mode=1
+			g_option_z_compress=1
+			g_cmd_compress="zstd -T0 -9"
+			zxfer_ensure_remote_host_capabilities() {
+				printf '%s\n' "${3:-}" >"$LOG_PATH"
+				fake_remote_capability_response
+			}
+			zxfer_resolve_remote_required_tool "origin.example" parallel "GNU parallel" source
+		)
+	)
+	status=$?
+
+	assertEquals "Remote GNU parallel resolution should still succeed when the broader host scope is reused." \
+		0 "$status"
+	assertEquals "Remote GNU parallel resolution should still return the parsed helper path from the broader host scope." \
+		"/opt/bin/parallel" "$output"
+	assertContains "Remote GNU parallel resolution should reuse the host-scoped preload identity when it already includes zfs." \
+		"$(cat "$log")" "zfs"
+	assertContains "Remote GNU parallel resolution should reuse the broader host-scoped preload identity for cat when restore-property mode is active." \
+		"$(cat "$log")" "cat"
+	assertContains "Remote GNU parallel resolution should reuse the broader host-scoped preload identity for compression helpers when -z is active." \
+		"$(cat "$log")" "zstd"
+}
+
+test_zxfer_get_remote_capability_requested_tools_for_resolved_tool_prefers_host_scope_when_it_includes_the_requested_helper() {
+	output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_j_jobs=4
+			g_option_e_restore_property_mode=1
+			g_option_z_compress=1
+			g_cmd_compress="zstd -T0 -9"
+			zxfer_get_remote_capability_requested_tools_for_resolved_tool "origin.example" parallel
+		)
+	)
+	status=$?
+
+	assertEquals "Resolved-tool capability requests should succeed when the host-scoped preload already includes the helper." \
+		0 "$status"
+	assertContains "Resolved-tool capability requests should preserve the host-scoped zfs helper." \
+		"$output" "zfs"
+	assertContains "Resolved-tool capability requests should preserve the requested helper from the host-scoped preload." \
+		"$output" "parallel"
+	assertContains "Resolved-tool capability requests should preserve related host-scoped helpers such as cat." \
+		"$output" "cat"
+	assertContains "Resolved-tool capability requests should preserve host-scoped compression helpers when enabled." \
+		"$output" "zstd"
+}
+
+test_zxfer_get_remote_capability_requested_tools_for_resolved_tool_falls_back_to_tool_scope_when_host_scope_is_unavailable() {
+	output=$(
+		(
+			zxfer_get_remote_capability_requested_tools_for_host() {
+				return 1
+			}
+			zxfer_get_remote_capability_requested_tools_for_resolved_tool "origin.example" zstd
+		)
+	)
+	status=$?
+
+	assertEquals "Resolved-tool capability requests should still succeed when they fall back to the tool-scoped identity." \
+		0 "$status"
+	assertContains "Resolved-tool capability requests should include zfs in the fallback tool scope." \
+		"$output" "zfs"
+	assertContains "Resolved-tool capability requests should include the requested helper in the fallback tool scope." \
+		"$output" "zstd"
+	assertNotContains "Resolved-tool capability requests should not inject unrelated helpers when they fall back to the tool-scoped identity." \
+		"$output" "parallel"
+}
+
+test_zxfer_get_remote_capability_requested_tools_for_resolved_tool_falls_back_to_tool_scope_when_host_scope_omits_helper() {
+	output=$(
+		(
+			zxfer_get_remote_capability_requested_tools_for_host() {
+				printf '%s\n' "zfs
+cat"
+			}
+			zxfer_get_remote_capability_requested_tools_for_resolved_tool "origin.example" parallel
+		)
+	)
+	status=$?
+
+	assertEquals "Resolved-tool capability requests should still succeed when the broader host scope does not include the helper being resolved." \
+		0 "$status"
+	assertContains "Resolved-tool capability requests should keep zfs in the fallback tool scope." \
+		"$output" "zfs"
+	assertContains "Resolved-tool capability requests should add the requested helper when the broader host scope omits it." \
+		"$output" "parallel"
+	assertNotContains "Resolved-tool capability requests should not keep unrelated host-only helpers when they fall back to the helper-specific scope." \
+		"$output" "cat"
 }
 
 test_zxfer_resolve_remote_cli_tool_direct_preserves_transport_diagnostic() {
@@ -4661,6 +4908,45 @@ EOF
 	assertEquals "Unexpected handshake tool statuses should fail closed." 1 "$status"
 	assertEquals "Unexpected handshake tool statuses should surface the generic dependency query error." \
 		"Failed to query dependency \"zfs\" on host origin.example." "$output"
+}
+
+test_zxfer_resolve_remote_cli_tool_falls_back_to_direct_probe_when_capability_handshake_fails_for_generic_tool() {
+	output=$(
+		(
+			zxfer_ensure_remote_host_capabilities() {
+				return 1
+			}
+			zxfer_resolve_remote_cli_tool_direct() {
+				printf '%s\n' "/remote/bin/zstd"
+			}
+			zxfer_resolve_remote_cli_tool "origin.example" zstd "compression command" source
+		)
+	)
+	status=$?
+
+	assertEquals "Generic remote CLI tool resolution should fall back to a direct probe when the capability handshake fails." 0 "$status"
+	assertEquals "Generic remote CLI tool handshake fallback should return the direct-probe result." \
+		"/remote/bin/zstd" "$output"
+}
+
+test_zxfer_resolve_remote_cli_tool_falls_back_to_direct_probe_for_malformed_handshake_payload_for_generic_tool() {
+	output=$(
+		(
+			zxfer_ensure_remote_host_capabilities() {
+				printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
+				printf '%s\n' "os	RemoteOS"
+			}
+			zxfer_resolve_remote_cli_tool_direct() {
+				printf '%s\n' "/remote/bin/zstd"
+			}
+			zxfer_resolve_remote_cli_tool "origin.example" zstd "compression command" source
+		)
+	)
+	status=$?
+
+	assertEquals "Generic remote CLI tool resolution should fall back to a direct probe when the capability payload is malformed." 0 "$status"
+	assertEquals "Generic remote CLI tool malformed-payload fallback should return the direct-probe result." \
+		"/remote/bin/zstd" "$output"
 }
 
 test_zxfer_get_remote_resolved_tool_version_output_returns_full_output() {
@@ -4777,6 +5063,25 @@ EOF
 		"$(cat "$log_file")" "--version"
 	assertContains "Resolved remote tool version probes should preserve the source-side profile tag." \
 		"$(cat "$log_file")" "side=source"
+}
+
+test_zxfer_get_remote_resolved_tool_version_line_preserves_nonempty_probe_failure_output() {
+	set +e
+	output=$(
+		(
+			zxfer_get_remote_resolved_tool_version_output() {
+				printf '%s\n' "remote version probe failed"
+				return 1
+			}
+			zxfer_get_remote_resolved_tool_version_line "origin.example" "/remote/bin/tool" "tool" source
+		)
+	)
+	status=$?
+
+	assertEquals "Resolved remote tool version line probes should fail when the underlying version probe fails." \
+		1 "$status"
+	assertEquals "Resolved remote tool version line probes should preserve a non-empty underlying version-probe failure message." \
+		"remote version probe failed" "$output"
 }
 
 test_zxfer_get_remote_resolved_tool_version_line_reports_probe_failures() {
@@ -5749,6 +6054,51 @@ EOF
 		"" "$(cat "$direct_log" 2>/dev/null)"
 	assertEquals "Cached generic helper resolution should leave the direct-probe counter at zero when no probe is needed." \
 		"0" "$(cat "$probe_file")"
+}
+
+test_zxfer_resolve_remote_cli_tool_prefers_prewarmed_host_scope_for_generic_heads() {
+	result_file="$TEST_TMPDIR/resolve_remote_cli_host_scope.out"
+	log_file="$TEST_TMPDIR/resolve_remote_cli_host_scope.log"
+	direct_log="$TEST_TMPDIR/resolve_remote_cli_host_scope.direct"
+
+	(
+		LOG_PATH="$log_file"
+		g_option_O_origin_host="origin.example"
+		g_option_j_jobs=4
+		g_option_e_restore_property_mode=1
+		g_option_z_compress=1
+		g_cmd_compress="zstd -T0 -9"
+		zxfer_ensure_remote_host_capabilities() {
+			printf '%s\n' "${3:-}" >"$LOG_PATH"
+			cat <<'EOF'
+ZXFER_REMOTE_CAPS_V2
+os	RemoteOS
+tool	zfs	0	/remote/bin/zfs
+tool	parallel	0	/opt/bin/parallel
+tool	cat	0	/remote/bin/cat
+tool	zstd	0	/remote/bin/zstd
+EOF
+		}
+		zxfer_resolve_remote_cli_tool_direct() {
+			printf '%s\n' "direct-probe-called" >"$direct_log"
+			return 1
+		}
+		zxfer_resolve_remote_cli_tool "origin.example" "zstd" "compression command" source >"$result_file"
+	)
+	status=$?
+
+	assertEquals "Generic remote CLI tool resolution should succeed when the broader host scope already advertises the helper." \
+		0 "$status"
+	assertEquals "Generic remote CLI tool resolution should return the parsed helper path from the broader host scope." \
+		"/remote/bin/zstd" "$(cat "$result_file")"
+	assertContains "Generic remote CLI tool resolution should reuse the broader host-scoped preload identity for GNU parallel when -j is active." \
+		"$(cat "$log_file")" "parallel"
+	assertContains "Generic remote CLI tool resolution should reuse the broader host-scoped preload identity for cat when restore-property mode is active." \
+		"$(cat "$log_file")" "cat"
+	assertContains "Generic remote CLI tool resolution should still include the requested generic helper in the reused host scope." \
+		"$(cat "$log_file")" "zstd"
+	assertEquals "Generic remote CLI tool resolution should not reopen a direct probe when the broader host scope already advertises the helper." \
+		"" "$(cat "$direct_log" 2>/dev/null)"
 }
 
 test_zxfer_resolve_local_cli_command_safe_rejects_blank_commands_in_current_shell() {
@@ -7880,6 +8230,58 @@ target.example
 doas" "$(cat "$log")"
 }
 
+test_close_target_ssh_control_socket_preserves_shared_socket_when_other_leases_exist() {
+	log="$TEST_TMPDIR/close_target_shared_other.log"
+	entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "target.example")
+	lease_file=$(zxfer_create_ssh_control_socket_lease_file "$entry_dir")
+	sibling_lease=$(zxfer_create_ssh_control_socket_lease_file "$entry_dir")
+	: >"$entry_dir/s"
+	FAKE_SSH_LOG="$log"
+	export FAKE_SSH_LOG
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_T_target_host="target.example"
+	g_ssh_target_control_socket="$entry_dir/s"
+	g_ssh_target_control_socket_dir="$entry_dir"
+	g_ssh_target_control_socket_lease_file="$lease_file"
+
+	set +e
+	zxfer_close_target_ssh_control_socket
+	close_status=$?
+	set -e
+
+	unset FAKE_SSH_LOG
+	if [ -e "$lease_file" ]; then
+		lease_exists=1
+	else
+		lease_exists=0
+	fi
+	if [ -d "$sibling_lease" ]; then
+		sibling_exists=1
+	else
+		sibling_exists=0
+	fi
+	if [ -d "$entry_dir" ]; then
+		entry_dir_exists=1
+	else
+		entry_dir_exists=0
+	fi
+
+	assertEquals "Closing a shared target socket with sibling leases should succeed." \
+		0 "$close_status"
+	assertEquals "Shared target sockets should clear the in-process socket path after releasing the local lease." "" \
+		"$g_ssh_target_control_socket"
+	assertEquals "Shared target sockets should clear the in-process lease path after releasing the local lease." "" \
+		"$g_ssh_target_control_socket_lease_file"
+	assertEquals "Closing a shared target socket should remove only the current process lease when other leases remain." \
+		0 "$lease_exists"
+	assertEquals "Closing a shared target socket should preserve sibling leases while the shared master remains active." \
+		1 "$sibling_exists"
+	assertEquals "Closing a shared target socket should preserve the cache entry while sibling leases remain." \
+		1 "$entry_dir_exists"
+	assertEquals "Closing a shared target socket should not send ssh -O exit while sibling leases remain." "" \
+		"$(cat "$log" 2>/dev/null || :)"
+}
+
 test_close_target_ssh_control_socket_reports_lock_release_failure_after_other_leases_remain() {
 	errlog="$TEST_TMPDIR/close_target_shared_release.err"
 	entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "target.example")
@@ -8106,6 +8508,35 @@ test_close_target_ssh_control_socket_preserves_lease_count_failures() {
 		"$TEST_TMPDIR/target-count-lock" "$(cat "$release_log")"
 }
 
+test_close_target_ssh_control_socket_surfaces_specific_lock_failure_message() {
+	errlog="$TEST_TMPDIR/close_target_lock_specific.err"
+
+	set +e
+	output=$(
+		(
+			lock_dir="$TEST_TMPDIR/target-lock"
+			g_option_T_target_host="target.example"
+			g_ssh_target_control_socket="$TEST_TMPDIR/target.sock"
+			g_ssh_target_control_socket_dir="$TEST_TMPDIR/target-entry"
+			g_ssh_target_control_socket_lease_file="$TEST_TMPDIR/target.lease"
+
+			zxfer_acquire_ssh_control_socket_lock() {
+				g_zxfer_ssh_control_socket_lock_error="Existing ssh control socket lock path \"$lock_dir\" has unsupported permissions (777). Remove the stale lock directory and retry."
+				return 1
+			}
+
+			zxfer_close_target_ssh_control_socket 2>"$errlog"
+			printf 'status=%s\n' "$?"
+		)
+	)
+	set -e
+
+	assertContains "Target-socket close should fail closed when the shared lock cannot be reacquired." \
+		"$output" "status=1"
+	assertContains "Target-socket close should preserve the host context when surfacing a specific shared-lock failure." \
+		"$(cat "$errlog")" "Error acquiring ssh control socket lock for target host: Existing ssh control socket lock path \"$TEST_TMPDIR/target-lock\" has unsupported permissions (777). Remove the stale lock directory and retry."
+}
+
 test_close_origin_ssh_control_socket_preserves_state_on_transport_failure_without_lease() {
 	errlog="$TEST_TMPDIR/close_origin_transport.err"
 	socket_dir="$TEST_TMPDIR/origin_transport_socket_dir"
@@ -8308,6 +8739,336 @@ test_close_origin_ssh_control_socket_removes_stale_shared_entry_when_socket_is_n
 		0 "$entry_dir_exists"
 }
 
+test_close_target_ssh_control_socket_preserves_state_on_transport_failure_without_lease() {
+	errlog="$TEST_TMPDIR/close_target_transport.err"
+	socket_dir="$TEST_TMPDIR/target_transport_socket_dir"
+	mkdir -p "$socket_dir"
+	FAKE_SSH_EXIT_STATUS=255
+	FAKE_SSH_STDERR="Host key verification failed."
+	export FAKE_SSH_EXIT_STATUS FAKE_SSH_STDERR
+	g_cmd_ssh="$FAKE_SSH_BIN"
+	g_option_T_target_host="target.example"
+	g_ssh_target_control_socket="$TEST_TMPDIR/target_transport.sock"
+	g_ssh_target_control_socket_dir="$socket_dir"
+
+	set +e
+	zxfer_close_target_ssh_control_socket >"$TEST_TMPDIR/close_target_transport.out" 2>"$errlog"
+	status=$?
+	set -e
+
+	unset FAKE_SSH_EXIT_STATUS FAKE_SSH_STDERR
+	if [ -d "$socket_dir" ]; then
+		socket_dir_exists=1
+	else
+		socket_dir_exists=0
+	fi
+
+	assertEquals "Direct target-socket closes should fail when ssh transport shutdown fails." 1 "$status"
+	assertContains "Direct target-socket close failures should preserve the ssh transport diagnostic." \
+		"$(cat "$errlog")" "Host key verification failed."
+	assertEquals "Direct target-socket close failures should preserve the cache directory for retry." \
+		1 "$socket_dir_exists"
+	assertEquals "Direct target-socket close failures should preserve the in-process socket path." \
+		"$TEST_TMPDIR/target_transport.sock" "$g_ssh_target_control_socket"
+	assertEquals "Direct target-socket close failures should preserve the in-process socket dir." \
+		"$socket_dir" "$g_ssh_target_control_socket_dir"
+}
+
+test_close_target_ssh_control_socket_restores_last_lease_on_transport_failure() {
+	errlog="$TEST_TMPDIR/close_target_shared_transport.err"
+	entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "target.example")
+	lease_file=$(zxfer_create_ssh_control_socket_lease_file "$entry_dir")
+	: >"$entry_dir/s"
+	g_option_T_target_host="target.example"
+	g_ssh_target_control_socket="$entry_dir/s"
+	g_ssh_target_control_socket_dir="$entry_dir"
+	g_ssh_target_control_socket_lease_file="$lease_file"
+	zxfer_check_ssh_control_socket_for_host() {
+		g_zxfer_ssh_control_socket_action_result="error"
+		g_zxfer_ssh_control_socket_action_stderr="Host key verification failed."
+		return 1
+	}
+
+	set +e
+	zxfer_close_target_ssh_control_socket >"$TEST_TMPDIR/close_target_shared_transport.out" 2>"$errlog"
+	status=$?
+	set -e
+
+	if [ -d "$entry_dir" ]; then
+		entry_dir_exists=1
+	else
+		entry_dir_exists=0
+	fi
+	if [ -d "$g_ssh_target_control_socket_lease_file" ]; then
+		lease_exists=1
+	else
+		lease_exists=0
+	fi
+
+	assertEquals "Last shared target-socket lease release should fail closed on ssh transport errors." 1 "$status"
+	assertContains "Last shared target-socket lease failures should preserve the ssh transport diagnostic." \
+		"$(cat "$errlog")" "Host key verification failed."
+	assertEquals "Last shared target-socket lease failures should preserve the cache entry for retry." \
+		1 "$entry_dir_exists"
+	assertEquals "Last shared target-socket lease failures should restore an active lease directory for retry." \
+		1 "$lease_exists"
+	assertNotEquals "Restored target-socket leases should not reuse the removed lease path." \
+		"$lease_file" "$g_ssh_target_control_socket_lease_file"
+	assertEquals "Last shared target-socket lease failures should preserve the in-process socket path." \
+		"$entry_dir/s" "$g_ssh_target_control_socket"
+}
+
+test_close_target_ssh_control_socket_restores_last_lease_on_capture_failure() {
+	set +e
+	output=$(
+		(
+			errlog="$TEST_TMPDIR/close_target_shared_capture.err"
+			entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "target.example")
+			lease_file=$(zxfer_create_ssh_control_socket_lease_file "$entry_dir")
+			: >"$entry_dir/s"
+			g_cmd_ssh="$FAKE_SSH_BIN"
+			g_option_T_target_host="target.example"
+			g_ssh_target_control_socket="$entry_dir/s"
+			g_ssh_target_control_socket_dir="$entry_dir"
+			g_ssh_target_control_socket_lease_file="$lease_file"
+			zxfer_check_ssh_control_socket_for_host() {
+				return 0
+			}
+			zxfer_run_ssh_control_socket_action_for_host() {
+				g_zxfer_ssh_control_socket_action_result="capture_error"
+				g_zxfer_ssh_control_socket_action_stderr="Failed to read ssh control socket stderr for exit action."
+				return 1
+			}
+
+			zxfer_close_target_ssh_control_socket >"$TEST_TMPDIR/close_target_shared_capture.out" 2>"$errlog"
+			l_status=$?
+
+			printf 'status=%s\n' "$l_status"
+			printf 'errlog=%s\n' "$(cat "$errlog")"
+			printf 'dir_exists=%s\n' \
+				"$([ -d "$entry_dir" ] && printf yes || printf no)"
+			printf 'lease_exists=%s\n' \
+				"$([ -d "$g_ssh_target_control_socket_lease_file" ] && printf yes || printf no)"
+			printf 'lease_reused=%s\n' \
+				"$([ "$lease_file" = "$g_ssh_target_control_socket_lease_file" ] && printf yes || printf no)"
+			printf 'socket_empty=%s\n' \
+				"$([ -n "$g_ssh_target_control_socket" ] && printf no || printf yes)"
+		)
+	)
+	status=$?
+
+	assertEquals "Target-socket capture-failure close tests should complete the test subshell cleanly." \
+		0 "$status"
+	assertContains "Last shared target-socket lease release should fail closed when ssh exit stderr cannot be reloaded." \
+		"$output" "status=1"
+	assertContains "Last shared target-socket capture failures should preserve the staged stderr diagnostic." \
+		"$output" "errlog=Failed to read ssh control socket stderr for exit action."
+	assertContains "Last shared target-socket capture failures should preserve the cache entry for retry." \
+		"$output" "dir_exists=yes"
+	assertContains "Last shared target-socket capture failures should restore an active lease directory for retry." \
+		"$output" "lease_exists=yes"
+	assertContains "Restored target-socket leases should not reuse the removed lease path after capture failures." \
+		"$output" "lease_reused=no"
+	assertContains "Last shared target-socket capture failures should preserve the in-process socket path." \
+		"$output" "socket_empty=no"
+}
+
+test_close_target_ssh_control_socket_restores_last_lease_on_transport_token_failure() {
+	set +e
+	output=$(
+		(
+			entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "target.example")
+			lease_file=$(zxfer_create_ssh_control_socket_lease_file "$entry_dir")
+			: >"$entry_dir/s"
+			g_cmd_ssh="$FAKE_SSH_BIN"
+			g_option_T_target_host="target.example"
+			g_ssh_target_control_socket="$entry_dir/s"
+			g_ssh_target_control_socket_dir="$entry_dir"
+			g_ssh_target_control_socket_lease_file="$lease_file"
+			zxfer_check_ssh_control_socket_for_host() {
+				g_zxfer_ssh_control_socket_action_result="error"
+				g_zxfer_ssh_control_socket_action_stderr="Managed ssh policy invalid."
+				return 1
+			}
+
+			set +e
+			zxfer_close_target_ssh_control_socket 2>&1
+			status=$?
+			set -e
+
+			printf 'status=%s\n' "$status"
+			printf 'lease=%s\n' "$g_ssh_target_control_socket_lease_file"
+			printf 'lease_exists=%s\n' \
+				"$([ -d "$g_ssh_target_control_socket_lease_file" ] && printf yes || printf no)"
+			printf 'lease_reused=%s\n' \
+				"$([ "$lease_file" = "$g_ssh_target_control_socket_lease_file" ] && printf yes || printf no)"
+		)
+	)
+	status=$?
+
+	assertEquals "Last shared target-socket lease release should fail closed when transport token validation fails." \
+		0 "$status"
+	assertContains "Target transport-token validation failures should preserve the original diagnostic." \
+		"$output" "Managed ssh policy invalid."
+	assertContains "Target transport-token validation failures should preserve the failing close status." \
+		"$output" "status=1"
+	assertContains "Target transport-token validation failures should restore an active lease directory for retry." \
+		"$output" "lease_exists=yes"
+	assertContains "Restored target-socket leases should not reuse the removed lease path after transport token failures." \
+		"$output" "lease_reused=no"
+}
+
+test_close_target_ssh_control_socket_preserves_stale_cleanup_failures_for_last_lease() {
+	set +e
+	output=$(
+		(
+			errlog="$TEST_TMPDIR/close_target_stale_cleanup.err"
+			entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "target.example")
+			lease_file=$(zxfer_create_ssh_control_socket_lease_file "$entry_dir")
+			: >"$entry_dir/s"
+			g_option_T_target_host="target.example"
+			g_ssh_target_control_socket="$entry_dir/s"
+			g_ssh_target_control_socket_dir="$entry_dir"
+			g_ssh_target_control_socket_lease_file="$lease_file"
+			zxfer_check_ssh_control_socket_for_host() {
+				return 0
+			}
+			zxfer_run_ssh_control_socket_action_for_host() {
+				g_zxfer_ssh_control_socket_action_result="stale"
+				return 1
+			}
+			zxfer_cleanup_ssh_control_socket_entry_dir() {
+				return 73
+			}
+
+			set +e
+			zxfer_close_target_ssh_control_socket 2>"$errlog"
+			l_status=$?
+			set -e
+
+			printf 'status=%s\n' "$l_status"
+			printf 'errlog=%s\n' "$(cat "$errlog")"
+			printf 'dir_exists=%s\n' \
+				"$([ -d "$entry_dir" ] && printf yes || printf no)"
+			printf 'lease_exists=%s\n' \
+				"$([ -d "$lease_file" ] && printf yes || printf no)"
+			printf 'socket=%s\n' "$g_ssh_target_control_socket"
+			printf 'lease=%s\n' "$g_ssh_target_control_socket_lease_file"
+		)
+	)
+	status=$?
+
+	assertEquals "Target stale-cleanup failure close tests should complete the test subshell cleanly." \
+		0 "$status"
+	assertContains "Last shared target-socket stale cleanup failures should preserve the local cleanup status." \
+		"$output" "status=73"
+	assertContains "Last shared target-socket stale cleanup failures should emit the specific cleanup diagnostic." \
+		"$output" "errlog=Error removing ssh control socket cache directory for target host."
+	assertContains "Last shared target-socket stale cleanup failures should preserve the cache directory for retry." \
+		"$output" "dir_exists=yes"
+	assertContains "Last shared target-socket stale cleanup failures should still remove the current lease directory first." \
+		"$output" "lease_exists=no"
+}
+
+test_close_target_ssh_control_socket_reports_lock_release_failure_after_last_lease_exits() {
+	set +e
+	output=$(
+		(
+			errlog="$TEST_TMPDIR/close_target_last_release.err"
+			entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "target.example")
+			lease_file=$(zxfer_create_ssh_control_socket_lease_file "$entry_dir")
+			: >"$entry_dir/s"
+			g_option_T_target_host="target.example"
+			g_ssh_target_control_socket="$entry_dir/s"
+			g_ssh_target_control_socket_dir="$entry_dir"
+			g_ssh_target_control_socket_lease_file="$lease_file"
+			zxfer_acquire_ssh_control_socket_lock() {
+				g_zxfer_ssh_control_socket_lock_dir_result="$TEST_TMPDIR/target-last-release.lock"
+				return 0
+			}
+			zxfer_release_ssh_control_socket_lock() {
+				zxfer_note_ssh_control_socket_lock_error \
+					"Failed to release ssh control socket lock path \"$1\"."
+				return 1
+			}
+			zxfer_check_ssh_control_socket_for_host() {
+				return 0
+			}
+			zxfer_run_ssh_control_socket_action_for_host() {
+				g_zxfer_ssh_control_socket_action_result="closed"
+				return 0
+			}
+
+			zxfer_close_target_ssh_control_socket 2>"$errlog"
+			l_status=$?
+
+			printf 'status=%s\n' "$l_status"
+			printf 'socket=%s\n' "${g_ssh_target_control_socket:-}"
+			printf 'lease=%s\n' "${g_ssh_target_control_socket_lease_file:-}"
+			printf 'errlog=%s\n' "$(cat "$errlog")"
+			printf 'dir_exists=%s\n' \
+				"$([ -d "$entry_dir" ] && printf yes || printf no)"
+		)
+	)
+	status=$?
+
+	assertEquals "Target last-lease lock-release failure close tests should complete the test subshell cleanly." \
+		0 "$status"
+	assertContains "Last shared target-socket close should fail closed when the shared lock cannot be released after a successful exit." \
+		"$output" "status=1"
+	assertContains "Last shared target-socket close should clear the socket path after the last lease exits even when lock release fails." \
+		"$output" "socket="
+	assertContains "Last shared target-socket close should clear the lease path after the last lease exits even when lock release fails." \
+		"$output" "lease="
+	assertContains "Last shared target-socket close should surface the checked shared-lock release failure." \
+		"$output" "errlog=Error releasing ssh control socket lock for target host: Failed to release ssh control socket lock path \"$TEST_TMPDIR/target-last-release.lock\"."
+	assertContains "Last shared target-socket close should still remove the cache entry before reporting the shared-lock release failure." \
+		"$output" "dir_exists=no"
+}
+
+test_close_target_ssh_control_socket_preserves_stale_cleanup_failures_without_lease() {
+	set +e
+	output=$(
+		(
+			errlog="$TEST_TMPDIR/close_target_direct_stale_cleanup.err"
+			socket_dir="$TEST_TMPDIR/target_direct_stale_socket_dir"
+			mkdir -p "$socket_dir"
+			g_option_T_target_host="target.example"
+			g_ssh_target_control_socket="$socket_dir/s"
+			g_ssh_target_control_socket_dir="$socket_dir"
+			zxfer_run_ssh_control_socket_action_for_host() {
+				g_zxfer_ssh_control_socket_action_result="stale"
+				return 1
+			}
+			zxfer_cleanup_ssh_control_socket_entry_dir() {
+				return 61
+			}
+
+			set +e
+			zxfer_close_target_ssh_control_socket 2>"$errlog"
+			l_status=$?
+			set -e
+
+			printf 'status=%s\n' "$l_status"
+			printf 'errlog=%s\n' "$(cat "$errlog")"
+			printf 'dir_exists=%s\n' \
+				"$([ -d "$socket_dir" ] && printf yes || printf no)"
+			printf 'socket=%s\n' "$g_ssh_target_control_socket"
+			printf 'dir=%s\n' "$g_ssh_target_control_socket_dir"
+		)
+	)
+	status=$?
+
+	assertEquals "Direct target stale-cleanup failure close tests should complete the test subshell cleanly." \
+		0 "$status"
+	assertContains "Direct target-socket stale cleanup failures should preserve the local cleanup status." \
+		"$output" "status=61"
+	assertContains "Direct target-socket stale cleanup failures should emit the specific cleanup diagnostic." \
+		"$output" "errlog=Error removing ssh control socket cache directory for target host."
+	assertContains "Direct target-socket stale cleanup failures should preserve the cache directory for retry." \
+		"$output" "dir_exists=yes"
+}
+
 test_close_target_ssh_control_socket_removes_stale_shared_entry_when_socket_is_not_live() {
 	entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "target.example")
 	lease_file=$(zxfer_create_ssh_control_socket_lease_file "$entry_dir")
@@ -8332,6 +9093,40 @@ test_close_target_ssh_control_socket_removes_stale_shared_entry_when_socket_is_n
 
 	assertEquals "Last shared target-socket lease release should remove stale cache entries when the socket is no longer live." \
 		0 "$entry_dir_exists"
+}
+
+test_zxfer_close_all_ssh_control_sockets_prefers_origin_failure_and_uses_target_failure_when_origin_succeeds() {
+	set +e
+	output=$(
+		(
+			zxfer_close_origin_ssh_control_socket() {
+				return 7
+			}
+			zxfer_close_target_ssh_control_socket() {
+				return 9
+			}
+
+			set +e
+			zxfer_close_all_ssh_control_sockets
+			printf 'origin_failure_status=%s\n' "$?"
+
+			zxfer_close_origin_ssh_control_socket() {
+				return 0
+			}
+			zxfer_close_target_ssh_control_socket() {
+				return 9
+			}
+
+			zxfer_close_all_ssh_control_sockets
+			printf 'target_failure_status=%s\n' "$?"
+		)
+	)
+	set -e
+
+	assertContains "close-all socket cleanup should preserve the origin close status when origin cleanup fails first." \
+		"$output" "origin_failure_status=7"
+	assertContains "close-all socket cleanup should propagate the target close status when origin cleanup succeeds." \
+		"$output" "target_failure_status=9"
 }
 
 test_setup_ssh_control_socket_reports_existing_close_failures() {

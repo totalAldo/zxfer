@@ -275,13 +275,10 @@ sequenceDiagram
 
     Operator->>Launcher: run zxfer -v -O user@origin -R zroot backup/zroot -j8 -z
     Launcher->>Origin: open or join the metadata-coordinated ssh control socket when supported
-    Launcher->>Origin: preload the minimum remote capability handshake under a metadata-coordinated cache lock keyed by PATH and transport policy
-    Launcher->>Launcher: resolve remote zfs first, then request parallel or compression/helper heads later from scoped cached capability data when needed, falling back to direct probes only when needed
-    alt per-dataset -j source discovery selected and required parallel helper resolves
-        Launcher->>Origin: build source snapshot inventory via GNU parallel
-    else serial fallback path
-        Launcher->>Origin: build source snapshot inventory via serial listing
-    end
+    Launcher->>Origin: preload the CLI-implied remote capability handshake under a metadata-coordinated cache lock keyed by PATH and transport policy
+    Launcher->>Launcher: reuse the warmed remote capability state for zfs, parallel, and compression/helper heads when needed
+    Launcher->>Origin: build the source dataset inventory with remote zfs list
+    Launcher->>Origin: fan out per-dataset snapshot listing via the resolved origin-host parallel helper
     Launcher->>Local: list destination datasets and snapshots
     Launcher->>Launcher: build the iteration list and allow up to 8 background send or receive jobs
     loop queue datasets while job slots remain

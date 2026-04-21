@@ -90,6 +90,16 @@ test_integration_build_requested_test_sequence_rejects_unknown_test_names() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_harness_declares_remote_parallel_probe_failure_case() {
+	harness_contents=$(cat "$INTEGRATION_HARNESS")
+
+	assertContains "The integration harness should define the rendered remote parallel failure integration case." \
+		"$harness_contents" "remote_parallel_functional_probe_failure_origin_test()"
+	assertContains "The integration harness should keep the rendered remote parallel failure case in the declared test sequence." \
+		"$harness_contents" "remote_parallel_functional_probe_failure_origin_test \\"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_run_test_suppresses_passing_output_in_failed_tests_only_mode() {
 	zxfer_test_capture_subshell "
 		ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1

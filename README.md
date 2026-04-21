@@ -76,7 +76,7 @@ Use remote compression:
 - Recursive and non-recursive snapshot replication
 - Local and remote replication with `-O` and `-T`
 - Wrapper-style remote host specs such as `user@host pfexec` or `user@host doas`
-- Adaptive multi-dataset concurrency with `-j`
+- Concurrent send/receive jobs with explicit per-dataset source discovery via `-j`
 - Property replication, overrides, and unsupported-property skipping
 - Property backup and restore with `-k` and `-e`, using hardened metadata
   storage outside dataset mountpoints
@@ -90,8 +90,10 @@ Use remote compression:
 
 ## Useful Options
 
-- `-j jobs`: run concurrent send/receive jobs; source snapshot discovery can
-  use GNU `parallel` when it is available and validated
+- `-j jobs`: run concurrent send/receive jobs; when `jobs > 1`, zxfer uses
+  explicit per-dataset source discovery instead of the serial recursive
+  listing. Local-origin runs require GNU `parallel`; remote-origin runs
+  require a resolved origin-host `parallel` helper
 - `-V`: enable very verbose debug output and end-of-run profiling counters
 - `-x pattern`: exclude datasets from recursive replication
 - `-Y`: repeat replication until no sends or destroys are performed, or until
@@ -121,7 +123,7 @@ Platform caveats, host layouts, and compatibility notes live in
 ## Operational Notes
 
 zxfer rebuilds `PATH` from a trusted allowlist and resolves required helpers to
-absolute paths. Remote `zfs`, `cat`, optional GNU `parallel`, and compression
+absolute paths. Remote `zfs`, `cat`, `parallel` for `-j > 1`, and compression
 helpers are resolved per host instead of assuming the same binary path exists
 everywhere.
 

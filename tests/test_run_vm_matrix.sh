@@ -421,7 +421,7 @@ test_vm_report_guest_command_failure_falls_back_to_assert_lines() {
 	stdout_file="$TEST_TMPDIR/assert-only.stdout"
 	stderr_file="$TEST_TMPDIR/assert-only.stderr"
 	cat <<'EOF' >"$stdout_file"
-ASSERT:Remote adaptive discovery fallback should preserve the validation failure without requiring verbose mode. Not found:<remote parallel validation failed>
+ASSERT:Remote -j discovery should preserve the validation failure without requiring verbose mode. Not found:<remote parallel validation failed>
 EOF
 	: >"$stderr_file"
 
@@ -434,7 +434,7 @@ EOF
 	assertEquals "Assertion-only harness failures should still render through the shared guest failure reporter." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "When suite summaries are unavailable, the reporter should surface the first assertion line from stdout." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ASSERT:Remote adaptive discovery fallback should preserve the validation failure without requiring verbose mode."
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ASSERT:Remote -j discovery should preserve the validation failure without requiring verbose mode."
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

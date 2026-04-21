@@ -994,7 +994,7 @@ zxfer_get_max_yield_iterations() {
 # bootstrap so downstream code sees consistent defaults and runtime state.
 zxfer_init_runtime_metadata() {
 	# zxfer version
-	g_zxfer_version="2.0.0-20260413"
+	g_zxfer_version="2.0.0-20260420"
 }
 
 # Purpose: Initialize the option defaults before later helpers depend on it.
@@ -1106,6 +1106,7 @@ zxfer_init_transport_remote_defaults() {
 	g_source_operating_system=""
 	g_destination_operating_system=""
 	g_origin_parallel_cmd=""
+	g_origin_parallel_cmd_host=""
 	g_zxfer_parallel_source_job_check_kind=""
 
 	# ssh control sockets used for origin (-O) and target (-T) hosts
@@ -1326,7 +1327,10 @@ zxfer_trap_exit() {
 	zxfer_kill_registered_cleanup_pids
 
 	if command -v zxfer_close_all_ssh_control_sockets >/dev/null 2>&1; then
-		zxfer_close_all_ssh_control_sockets
+		# Transport teardown is best-effort during trap cleanup: preserve the
+		# original exit flow and continue runtime cleanup/reporting even when ssh
+		# control socket shutdown fails late.
+		zxfer_close_all_ssh_control_sockets || :
 	fi
 	if command -v zxfer_release_registered_owned_locks >/dev/null 2>&1; then
 		zxfer_release_registered_owned_locks || :

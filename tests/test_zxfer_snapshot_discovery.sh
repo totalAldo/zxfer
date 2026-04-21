@@ -117,6 +117,7 @@ setUp() {
 	g_target_remote_capabilities_bootstrap_source=""
 	g_cmd_parallel="$GNU_PARALLEL_BIN"
 	g_origin_parallel_cmd=""
+	g_origin_parallel_cmd_host=""
 	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
 	g_RZFS="/sbin/zfs"
 	g_LZFS="/sbin/zfs"
@@ -142,8 +143,9 @@ setUp() {
 	zxfer_reset_failure_context "unit"
 }
 
-test_zxfer_reset_snapshot_discovery_state_clears_remote_parallel_state() {
+test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_state() {
 	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_origin_parallel_cmd_host="origin.example"
 	g_zxfer_snapshot_discovery_file_read_result="printf 'snap'"
 	g_zxfer_parallel_source_job_check_kind="origin_missing"
 	g_zxfer_recursive_dataset_list_result="tank/src"
@@ -154,8 +156,10 @@ test_zxfer_reset_snapshot_discovery_state_clears_remote_parallel_state() {
 
 	zxfer_reset_snapshot_discovery_state
 
-	assertEquals "Resetting snapshot discovery state should clear any cached remote parallel helper path." \
-		"" "$g_origin_parallel_cmd"
+	assertEquals "Resetting snapshot discovery state should preserve the cached remote parallel helper path for later discovery passes in the same run." \
+		"/opt/bin/parallel" "$g_origin_parallel_cmd"
+	assertEquals "Resetting snapshot discovery state should preserve the host paired with the cached remote parallel helper path." \
+		"origin.example" "$g_origin_parallel_cmd_host"
 	assertEquals "Resetting snapshot discovery state should clear staged snapshot-discovery file-read scratch." \
 		"" "$g_zxfer_snapshot_discovery_file_read_result"
 	assertEquals "Resetting snapshot discovery state should clear staged parallel-check kind scratch." \
@@ -172,101 +176,33 @@ test_zxfer_reset_snapshot_discovery_state_clears_remote_parallel_state() {
 		"[ -e '$TEST_TMPDIR/destination_cache.raw' ]"
 }
 
-test_zxfer_get_source_snapshot_parallel_dataset_threshold_scales_locally() {
-	g_option_j_jobs=5
+test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_reuse_across_discovery_passes() {
+	log_file="$TEST_TMPDIR/reset_snapshot_discovery_parallel_reuse.log"
 
-	result=$(zxfer_get_source_snapshot_parallel_dataset_threshold)
+	(
+		LOG_FILE="$log_file"
+		g_cmd_parallel=""
+		g_option_j_jobs=4
+		g_option_O_origin_host="origin.example"
+		g_origin_parallel_cmd=""
+		g_origin_parallel_cmd_host=""
+		zxfer_resolve_remote_required_tool() {
+			printf '%s\n' "resolve:$1" >>"$LOG_FILE"
+			printf '%s\n' "/opt/bin/parallel"
+		}
 
-	assertEquals "Local adaptive source discovery should scale with the configured job count." \
-		"10" "$result"
-}
-
-test_zxfer_get_source_snapshot_parallel_dataset_threshold_treats_invalid_jobs_as_single_job_in_current_shell() {
-	output_file="$TEST_TMPDIR/source_parallel_threshold.out"
-	g_option_j_jobs="invalid"
-
-	zxfer_get_source_snapshot_parallel_dataset_threshold >"$output_file"
-
-	assertEquals "Invalid job counts should fall back to the single-job adaptive discovery threshold." \
-		"8" "$(cat "$output_file")"
-}
-
-test_zxfer_get_source_snapshot_parallel_dataset_threshold_biases_remote_warm_startup_lower() {
-	g_option_j_jobs=2
-	g_option_O_origin_host="origin.example"
-	g_origin_remote_capabilities_bootstrap_source="cache"
-	g_ssh_supports_control_sockets=1
-	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.socket"
-
-	result=$(zxfer_get_source_snapshot_parallel_dataset_threshold)
-
-	assertEquals "Warm cached remote startup should allow a lower dataset threshold before parallel discovery is used." \
-		"6" "$result"
-}
-
-test_zxfer_get_source_snapshot_parallel_dataset_threshold_biases_remote_cold_startup_higher() {
-	g_option_j_jobs=2
-	g_option_O_origin_host="origin.example"
-	g_origin_remote_capabilities_bootstrap_source="live"
-	g_ssh_supports_control_sockets=0
-	g_ssh_origin_control_socket=""
-
-	result=$(zxfer_get_source_snapshot_parallel_dataset_threshold)
-
-	assertEquals "Cold remote startup without control-socket reuse should require a larger dataset tree before parallel discovery is used." \
-		"14" "$result"
-}
-
-test_zxfer_count_source_snapshot_discovery_datasets_counts_entries_and_empty_input() {
-	result=$(zxfer_count_source_snapshot_discovery_datasets "tank/src
-tank/src/child")
-	empty_result=$(zxfer_count_source_snapshot_discovery_datasets "")
-
-	assertEquals "Source snapshot discovery dataset counting should return the number of newline-delimited datasets." \
-		"2" "$result"
-	assertEquals "Source snapshot discovery dataset counting should treat empty input as zero datasets." \
-		"0" "$empty_result"
-}
-
-test_zxfer_count_source_snapshot_discovery_datasets_rejects_nonnumeric_awk_output_in_current_shell() {
-	fake_awk="$TEST_TMPDIR/fake_bad_awk"
-	orig_cmd_awk=$g_cmd_awk
-	cat >"$fake_awk" <<'EOF'
-#!/bin/sh
-printf '%s\n' "not-a-number"
-EOF
-	chmod +x "$fake_awk"
-	g_cmd_awk="$fake_awk"
-
-	set +e
-	zxfer_count_source_snapshot_discovery_datasets "tank/src"
-	status=$?
-	g_cmd_awk=$orig_cmd_awk
-
-	assertEquals "Source snapshot discovery dataset counting should fail when awk does not return a numeric line count." \
-		1 "$status"
-}
-
-test_zxfer_get_source_snapshot_discovery_dataset_list_dispatches_recursive_inventory() {
-	log_file="$TEST_TMPDIR/source_dataset_inventory.log"
-
-	result=$(
-		(
-			LOG_FILE=$log_file
-			zxfer_run_source_zfs_cmd() {
-				printf '%s\n' "$*" >"$LOG_FILE"
-				printf '%s\n' "tank/src"
-				printf '%s\n' "tank/src/child"
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list
-		)
+		zxfer_ensure_parallel_available_for_source_jobs || exit 1
+		zxfer_reset_snapshot_discovery_state
+		zxfer_ensure_parallel_available_for_source_jobs || exit 1
+		[ "$g_origin_parallel_cmd" = "/opt/bin/parallel" ] || exit 1
+		[ "$g_origin_parallel_cmd_host" = "origin.example" ] || exit 1
 	)
+	status=$?
 
-	assertEquals "Source dataset discovery should reuse the recursive source zfs inventory helper output verbatim." \
-		"tank/src
-tank/src/child" "$result"
-	assertEquals "Source dataset discovery should request the recursive filesystem and volume inventory for the initial source dataset." \
-		"list -Hr -t filesystem,volume -o name $g_initial_source" "$(cat "$log_file")"
+	assertEquals "Resetting snapshot discovery state should not force a second origin-host parallel resolution during the same zxfer run." \
+		0 "$status"
+	assertEquals "Resetting snapshot discovery state should preserve the cached remote helper so later discovery passes resolve it only once." \
+		"1" "$(wc -l <"$log_file" | tr -d '[:space:]')"
 }
 
 test_zxfer_limit_snapshot_discovery_capture_lines_defaults_invalid_limits_in_current_shell() {
@@ -281,17 +217,6 @@ line3" "invalid" >"$output_file"
 		"line1
 line2
 line3" "$(cat "$output_file")"
-}
-
-test_zxfer_build_source_snapshot_dataset_list_printf_cmd_preserves_dataset_boundaries() {
-	cmd=$(zxfer_build_source_snapshot_dataset_list_printf_cmd "tank/src
-tank/src/child")
-
-	result=$(eval "$cmd")
-
-	assertEquals "Inlined source dataset lists should round-trip each dataset as a separate line." \
-		"tank/src
-tank/src/child" "$result"
 }
 
 test_destination_snapshot_dataset_helpers_map_root_and_child_datasets() {
@@ -329,17 +254,6 @@ test_destination_snapshot_dataset_helpers_treat_regex_significant_source_names_a
 		"backup/dst/releases.2026" "$(zxfer_get_destination_dataset_for_source_dataset "tank/app.v1/releases.2026")"
 }
 
-test_zxfer_parallel_source_discovery_fallback_is_allowed_only_for_local_and_missing_origin_helpers() {
-	assertTrue "Local adaptive source discovery should always be allowed to fall back to the serial path." \
-		"zxfer_parallel_source_discovery_fallback_is_allowed 'any_failure' local"
-	assertTrue "Remote adaptive source discovery should only fall back for the explicit missing-helper case." \
-		"zxfer_parallel_source_discovery_fallback_is_allowed 'origin_missing' origin"
-	assertFalse "Remote adaptive source discovery should fail closed for non-missing origin-host probe failures." \
-		"zxfer_parallel_source_discovery_fallback_is_allowed 'origin_transport' origin"
-	assertFalse "Unknown adaptive source discovery scopes should fail closed." \
-		"zxfer_parallel_source_discovery_fallback_is_allowed 'origin_missing' unexpected"
-}
-
 test_zxfer_write_snapshot_identity_file_from_records_normalizes_and_sorts_identities() {
 	output_file="$TEST_TMPDIR/snapshot_identities.txt"
 
@@ -354,88 +268,38 @@ tank/src@snap2	222" \
 snap2	222" "$(cat "$output_file")"
 }
 
-test_zxfer_should_inline_source_snapshot_dataset_list_rejects_large_inputs() {
-	large_dataset_list=$(awk 'BEGIN { for (i = 1; i <= 80; i++) print "tank/src/child" }')
-
-	assertTrue "Moderate dataset lists should stay inline to avoid a second discovery pass." \
-		"zxfer_should_inline_source_snapshot_dataset_list 'tank/src
-tank/src/child' 2"
-	assertFalse "Very large dataset lists should fall back to a streamed dataset enumeration command." \
-		"zxfer_should_inline_source_snapshot_dataset_list '$large_dataset_list' 80"
-}
-
-test_zxfer_should_inline_source_snapshot_dataset_list_rejects_invalid_numeric_inputs_in_current_shell() {
-	set +e
-	zxfer_should_inline_source_snapshot_dataset_list "tank/src" "not-a-number"
-	invalid_count_status=$?
-
-	(
-		wc() {
-			printf '%s\n' "not-a-number"
-		}
-		zxfer_should_inline_source_snapshot_dataset_list "tank/src" 1
-	)
-	invalid_size_status=$?
-
-	assertEquals "Inline dataset-list selection should reject non-numeric dataset counts." \
-		1 "$invalid_count_status"
-	assertEquals "Inline dataset-list selection should reject non-numeric byte counts." \
-		1 "$invalid_size_status"
-}
-
-test_build_source_snapshot_list_cmd_reports_adaptive_helper_failures_in_current_shell() {
+test_build_source_snapshot_list_cmd_reports_parallel_helper_failures_in_current_shell() {
 	g_option_j_jobs=2
 	output_file="$TEST_TMPDIR/source_snapshot_cmd.out"
 
 	set +e
 	(
-		zxfer_get_source_snapshot_parallel_dataset_threshold() {
+		zxfer_check_parallel_source_jobs_in_current_shell() {
+			g_zxfer_parallel_source_job_check_result="parallel unavailable"
 			return 1
 		}
 		zxfer_build_source_snapshot_list_cmd >"$output_file"
 	)
-	threshold_status=$?
-	threshold_output=$(cat "$output_file")
+	reason_status=$?
+	reason_output=$(cat "$output_file")
 
 	(
-		zxfer_get_source_snapshot_parallel_dataset_threshold() {
-			printf '%s\n' "8"
-		}
-		zxfer_get_source_snapshot_discovery_dataset_list() {
+		zxfer_check_parallel_source_jobs_in_current_shell() {
 			return 1
 		}
 		zxfer_build_source_snapshot_list_cmd >"$output_file"
 	)
-	dataset_list_status=$?
-	dataset_list_output=$(cat "$output_file")
+	generic_status=$?
+	generic_output=$(cat "$output_file")
 
-	(
-		zxfer_get_source_snapshot_parallel_dataset_threshold() {
-			printf '%s\n' "8"
-		}
-		zxfer_get_source_snapshot_discovery_dataset_list() {
-			printf '%s\n' "tank/src"
-		}
-		zxfer_count_source_snapshot_discovery_datasets() {
-			return 1
-		}
-		zxfer_build_source_snapshot_list_cmd >"$output_file"
-	)
-	dataset_count_status=$?
-	dataset_count_output=$(cat "$output_file")
-
-	assertEquals "Adaptive source snapshot command construction should fail when the discovery threshold cannot be determined." \
-		1 "$threshold_status"
-	assertContains "Threshold failures should report the adaptive discovery threshold error." \
-		"$threshold_output" "Failed to determine the adaptive source snapshot discovery threshold."
-	assertEquals "Adaptive source snapshot command construction should fail when the dataset prepass cannot be retrieved." \
-		1 "$dataset_list_status"
-	assertContains "Dataset-list failures should report the adaptive discovery dataset error." \
-		"$dataset_list_output" "Failed to retrieve the source dataset list for adaptive snapshot discovery."
-	assertEquals "Adaptive source snapshot command construction should fail when the dataset prepass cannot be counted." \
-		1 "$dataset_count_status"
-	assertContains "Dataset-count failures should report the adaptive discovery counting error." \
-		"$dataset_count_output" "Failed to count source datasets for adaptive snapshot discovery."
+	assertEquals "Parallel source snapshot command construction should fail when GNU parallel setup fails." \
+		1 "$reason_status"
+	assertContains "Parallel source snapshot command construction should preserve the staged GNU parallel failure reason." \
+		"$reason_output" "parallel unavailable"
+	assertEquals "Parallel source snapshot command construction should still fail when no staged GNU parallel reason is available." \
+		1 "$generic_status"
+	assertContains "Parallel source snapshot command construction should emit a generic GNU parallel setup error when no staged reason exists." \
+		"$generic_output" "Failed to prepare GNU parallel source discovery."
 }
 
 test_ensure_parallel_available_for_source_jobs_requires_local_parallel() {
@@ -517,10 +381,10 @@ test_ensure_parallel_available_for_source_jobs_reports_missing_remote_parallel_i
 	)
 	status=$?
 
-	assertEquals "Missing remote GNU parallel should fail source-job setup." 1 "$status"
+	assertEquals "Missing remote parallel should fail source-job setup." 1 "$status"
 	assertContains "The remote-missing error should identify the origin host." \
-		"$output" "GNU parallel not found on origin host origin.example"
-	assertContains "Missing remote GNU parallel should set a machine-readable reason kind for downstream fallback decisions." \
+		"$output" "parallel not found on origin host origin.example"
+	assertContains "Missing remote parallel should set a machine-readable reason kind for downstream fallback decisions." \
 		"$output" "kind=origin_missing"
 }
 
@@ -553,7 +417,7 @@ test_ensure_parallel_available_for_source_jobs_skips_local_parallel_for_remote_r
 		0 "$status"
 }
 
-test_ensure_parallel_available_for_source_jobs_accepts_resolved_remote_parallel_without_remote_validation() {
+test_ensure_parallel_available_for_source_jobs_accepts_resolved_remote_parallel_after_resolution() {
 	log_file="$TEST_TMPDIR/remote_parallel_resolution.log"
 	: >"$log_file"
 
@@ -562,14 +426,6 @@ test_ensure_parallel_available_for_source_jobs_accepts_resolved_remote_parallel_
 		zxfer_resolve_remote_required_tool() {
 			printf 'resolve:%s\n' "$1" >>"$LOG_FILE"
 			printf '%s\n' "/opt/bin/parallel"
-		}
-		zxfer_get_remote_parallel_version_output() {
-			printf 'version\n' >>"$LOG_FILE"
-			return 99
-		}
-		zxfer_remote_parallel_functional_probe_reports_gnu() {
-			printf 'probe\n' >>"$LOG_FILE"
-			return 99
 		}
 		g_option_j_jobs=2
 		g_option_O_origin_host="origin.example"
@@ -581,14 +437,68 @@ test_ensure_parallel_available_for_source_jobs_accepts_resolved_remote_parallel_
 	)
 	status=$?
 
-	assertEquals "Remote source-job setup should succeed as soon as the remote helper resolves." \
+	assertEquals "Remote source-job setup should succeed once the origin-host helper resolves." \
 		0 "$status"
 	assertContains "Remote source-job setup should still resolve the helper on the origin host." \
 		"$(cat "$log_file")" "resolve:origin.example"
-	assertNotContains "Remote source-job setup should no longer run remote version validation after helper resolution." \
-		"$(cat "$log_file")" "version"
-	assertNotContains "Remote source-job setup should no longer run remote GNU functional probes after helper resolution." \
-		"$(cat "$log_file")" "probe"
+}
+
+test_ensure_parallel_available_for_source_jobs_reuses_cached_remote_parallel_path_for_same_host_and_path() {
+	log_file="$TEST_TMPDIR/remote_parallel_reuse.log"
+	: >"$log_file"
+
+	(
+		LOG_FILE="$log_file"
+		zxfer_resolve_remote_required_tool() {
+			printf 'resolve:%s\n' "$1" >>"$LOG_FILE"
+			printf '%s\n' "/opt/bin/parallel"
+		}
+		g_option_j_jobs=2
+		g_option_O_origin_host="origin.example"
+		g_cmd_parallel=""
+		g_origin_parallel_cmd=""
+		g_origin_parallel_cmd_host=""
+
+		zxfer_ensure_parallel_available_for_source_jobs || exit 1
+		zxfer_ensure_parallel_available_for_source_jobs || exit 1
+		[ "$g_origin_parallel_cmd" = "/opt/bin/parallel" ] || exit 1
+		[ "$g_origin_parallel_cmd_host" = "origin.example" ] || exit 1
+	)
+	status=$?
+
+	assertEquals "Remote source-job setup should succeed when it reuses a previously resolved origin-host parallel helper." \
+		0 "$status"
+	assertEquals "Remote source-job setup should skip re-resolving the helper once the same host/path is cached." \
+		"resolve:origin.example" "$(cat "$log_file")"
+}
+
+test_ensure_parallel_available_for_source_jobs_preserves_remote_parallel_resolution_failures() {
+	set +e
+	output=$(
+		(
+			zxfer_resolve_remote_required_tool() {
+				printf '%s\n' 'Failed to query dependency "parallel" on host origin.example.'
+				return 1
+			}
+			g_option_j_jobs=2
+			g_option_O_origin_host="origin.example"
+			g_cmd_parallel=""
+			g_origin_parallel_cmd=""
+
+			zxfer_ensure_parallel_available_for_source_jobs
+			l_status=$?
+			printf 'kind=%s\n' "${g_zxfer_parallel_source_job_check_kind:-}"
+			exit "$l_status"
+		)
+	)
+	status=$?
+
+	assertEquals "Remote source-job setup should preserve remote parallel resolution failures." \
+		1 "$status"
+	assertContains "Remote parallel resolution failures should preserve the underlying diagnostic." \
+		"$output" 'Failed to query dependency "parallel" on host origin.example.'
+	assertContains "Remote parallel resolution failures should classify the rejection as a probe failure." \
+		"$output" "kind=origin_probe_failed"
 }
 
 test_ensure_parallel_available_for_source_jobs_accepts_local_gnu_parallel_with_will_cite_version_probe() {
@@ -673,31 +583,24 @@ test_ensure_parallel_available_for_source_jobs_refreshes_remote_parallel_path_wh
 		"$(cat "$log_file")" "resolve:origin-b.example"
 }
 
-test_build_source_snapshot_list_cmd_falls_back_to_serial_local_discovery_when_parallel_is_unavailable() {
+test_build_source_snapshot_list_cmd_fails_closed_when_local_parallel_is_unavailable() {
 	g_option_j_jobs=2
 	g_cmd_parallel=""
 	g_option_O_origin_host=""
-	g_option_V_very_verbose=1
 
 	result=$(
 		(
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "should-not-run"
-				return 1
-			}
 			zxfer_build_source_snapshot_list_cmd
-		) 2>&1
+		)
 	)
 	status=$?
 
-	assertEquals "Local -j runs should fall back to the serial source snapshot listing when GNU parallel is unavailable." \
-		0 "$status"
-	assertContains "Local fallback should render the direct serial zfs snapshot listing command." \
-		"$result" "'$g_LZFS' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'"
-	assertContains "Local fallback should explain that GNU parallel was not found in verbose mode." \
+	assertEquals "Local -j runs should fail closed when GNU parallel is unavailable." \
+		1 "$status"
+	assertContains "Local failure should explain that GNU parallel was not found." \
 		"$result" "not found in PATH on the local host"
-	assertContains "Local fallback should explain that adaptive discovery is dropping back to the serial path." \
-		"$result" "Falling back to serial source snapshot listing."
+	assertNotContains "Local -j failures should not silently render the serial source snapshot listing." \
+		"$result" "'$g_LZFS' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'"
 }
 
 test_build_source_snapshot_list_cmd_uses_serial_local_discovery_when_parallel_jobs_are_disabled() {
@@ -712,215 +615,25 @@ test_build_source_snapshot_list_cmd_uses_serial_local_discovery_when_parallel_jo
 		0 "$g_source_snapshot_list_uses_parallel"
 }
 
-test_build_source_snapshot_list_cmd_uses_serial_local_discovery_below_threshold() {
+test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 	g_option_j_jobs=2
 	g_cmd_parallel="$GNU_PARALLEL_BIN"
 	g_option_O_origin_host=""
 
 	result=$(
 		(
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 9
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "tank/src"
-			}
 			zxfer_build_source_snapshot_list_cmd
 		)
 	)
 
-	assertEquals "Small local trees should stay on the direct recursive snapshot listing path even when -j is set." \
-		"'$g_LZFS' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'" "$result"
-}
-
-test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_at_threshold() {
-	g_option_j_jobs=2
-	g_cmd_parallel="$GNU_PARALLEL_BIN"
-	g_option_O_origin_host=""
-
-	result=$(
-		(
-			zxfer_resolve_remote_required_tool() {
-				printf '%s\n' "/opt/bin/parallel"
-			}
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "tank/src"
-				printf '%s\n' "tank/src/child"
-			}
-			zxfer_build_source_snapshot_list_cmd
-		)
-	)
-
-	assertContains "Parallel local discovery should inline the moderate dataset list instead of recounting it inside the shell command." \
-		"$result" "'printf'"
-	assertContains "Parallel local discovery should preserve the prefetched dataset order inside the inline list." \
-		"$result" "'tank/src' 'tank/src/child'"
-	assertContains "Parallel local discovery should still use GNU parallel once the threshold is met." \
-		"$result" "'$g_cmd_parallel' -j 2 --line-buffer"
-	assertNotContains "Parallel local discovery should no longer defer the branch decision into a shell-side dataset counter." \
-		"$result" "l_dataset_count"
-}
-
-test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_with_streamed_dataset_list() {
-	g_option_j_jobs=2
-	g_cmd_parallel="$GNU_PARALLEL_BIN"
-	g_option_O_origin_host=""
-	large_dataset_list=$(awk 'BEGIN { for (i = 1; i <= 65; i++) print "tank/src/child" i }')
-
-	result=$(
-		(
-			zxfer_resolve_remote_required_tool() {
-				printf '%s\n' "/opt/bin/parallel"
-			}
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "$large_dataset_list"
-			}
-			zxfer_build_source_snapshot_list_cmd
-		)
-	)
-
-	assertNotContains "Large local trees should not inline the prefetched dataset list into the parallel command." \
-		"$result" "'printf'"
-	assertContains "Large local trees should fall back to the streamed dataset enumeration command." \
+	assertContains "Local -j discovery should enumerate source datasets directly instead of using the serial snapshot list." \
 		"$result" "'$g_LZFS' 'list' '-Hr' '-t' 'filesystem,volume' '-o' 'name' '$g_initial_source'"
-	assertContains "Large local trees should still run GNU parallel once the adaptive threshold is met." \
+	assertContains "Local -j discovery should use GNU parallel with the requested job count." \
 		"$result" "'$g_cmd_parallel' -j 2 --line-buffer"
-}
-
-test_build_source_snapshot_list_cmd_uses_serial_remote_discovery_below_threshold_with_metadata_compression() {
-	g_option_j_jobs=2
-	g_option_O_origin_host="origin.example"
-	g_option_z_compress=1
-	g_cmd_parallel=""
-	g_origin_parallel_cmd=""
-	g_origin_cmd_zfs="/remote/bin/zfs"
-	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
-	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-T0' '-9'"
-
-	result=$(
-		(
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 6
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "tank/src"
-			}
-			zxfer_build_source_snapshot_list_cmd
-			printf 'meta=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-0}"
-		)
-	)
-
-	assertContains "Small remote trees should stay on the recursive remote snapshot listing path." \
-		"$result" "/remote/bin/zfs"
-	assertContains "Remote serial discovery should append the resolved remote metadata compressor." \
-		"$result" "/remote/bin/zstd"
-	assertContains "Remote serial discovery should append the resolved local metadata decompressor." \
-		"$result" "/local/bin/zstd"
-	assertNotContains "Remote serial discovery should not require GNU parallel when the serial path wins." \
-		"$result" "parallel"
-	assertContains "Remote serial discovery should record that metadata compression was used." \
-		"$result" "meta=1"
-}
-
-test_build_source_snapshot_list_cmd_uses_serial_remote_discovery_with_metadata_compression_in_current_shell() {
-	output_file="$TEST_TMPDIR/source_snapshot_cmd_remote_serial_current_shell.out"
-	g_option_j_jobs=2
-	g_option_O_origin_host="origin.example"
-	g_option_z_compress=1
-	g_cmd_parallel=""
-	g_origin_parallel_cmd=""
-	g_origin_cmd_zfs="/remote/bin/zfs"
-	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
-	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-T0' '-9'"
-
-	(
-		zxfer_get_source_snapshot_parallel_dataset_threshold() {
-			printf '%s\n' 6
-		}
-		zxfer_get_source_snapshot_discovery_dataset_list() {
-			printf '%s\n' "tank/src"
-		}
-		zxfer_build_source_snapshot_list_cmd >"$output_file"
-		printf 'meta=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-0}" >>"$output_file"
-	)
-
-	assertContains "Direct serial remote discovery should still build the remote zfs listing command." \
-		"$(cat "$output_file")" "/remote/bin/zfs"
-	assertContains "Direct serial remote discovery should append the resolved remote compressor when metadata compression is enabled." \
-		"$(cat "$output_file")" "/remote/bin/zstd"
-	assertContains "Direct serial remote discovery should still append the resolved local decompressor when metadata compression is enabled." \
-		"$(cat "$output_file")" "/local/bin/zstd"
-	assertContains "Direct serial remote discovery should still record active metadata compression." \
-		"$(cat "$output_file")" "meta=1"
-}
-
-test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_streamed_dataset_list() {
-	g_option_j_jobs=2
-	g_option_O_origin_host="origin.example"
-	g_option_z_compress=0
-	g_cmd_parallel=""
-	g_origin_parallel_cmd="/opt/bin/parallel"
-	g_origin_cmd_zfs="/remote/bin/zfs"
-	large_dataset_list=$(awk 'BEGIN { for (i = 1; i <= 65; i++) print "tank/src/child" i }')
-
-	result=$(
-		(
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "$large_dataset_list"
-			}
-			zxfer_build_source_snapshot_list_cmd
-			printf 'meta=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-0}"
-		)
-	)
-
-	assertNotContains "Large remote trees should not inline the dataset list when the streamed remote branch wins." \
+	assertContains "Local -j discovery should preserve the per-dataset snapshot runner." \
+		"$result" "'$g_LZFS' 'list' '-H' '-o' 'name' '-s' 'creation' '-d' '1' '-t' 'snapshot' '{}'"
+	assertNotContains "Local -j discovery should not inline a prefetched dataset list." \
 		"$result" "'printf'"
-	assertNotContains "Large remote trees should not embed the prefetched dataset list inside the remote command string when the streamed branch wins." \
-		"$result" "tank/src/child65"
-	assertContains "Large remote trees should still use GNU parallel on the origin host." \
-		"$result" "/opt/bin/parallel"
-	assertContains "Remote discovery without -z should keep metadata compression disabled." \
-		"$result" "meta=0"
-}
-
-test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_streamed_dataset_list_in_current_shell() {
-	output_file="$TEST_TMPDIR/source_snapshot_cmd_remote_parallel_current_shell.out"
-	g_option_j_jobs=2
-	g_option_O_origin_host="origin.example"
-	g_option_z_compress=0
-	g_cmd_parallel=""
-	g_origin_parallel_cmd="/opt/bin/parallel"
-	g_origin_cmd_zfs="/remote/bin/zfs"
-	large_dataset_list=$(awk 'BEGIN { for (i = 1; i <= 65; i++) print "tank/src/child" i }')
-
-	(
-		zxfer_resolve_remote_required_tool() {
-			printf '%s\n' "/opt/bin/parallel"
-		}
-		zxfer_get_source_snapshot_parallel_dataset_threshold() {
-			printf '%s\n' 2
-		}
-		zxfer_get_source_snapshot_discovery_dataset_list() {
-			printf '%s\n' "$large_dataset_list"
-		}
-		zxfer_build_source_snapshot_list_cmd >"$output_file"
-	)
-
-	assertContains "Direct parallel remote discovery should still use GNU parallel on the origin host." \
-		"$(cat "$output_file")" "/opt/bin/parallel"
-	assertContains "Direct parallel remote discovery should fall back to the streamed remote dataset prepass for large trees." \
-		"$(cat "$output_file")" "filesystem,volume"
-	assertContains "Direct parallel remote discovery should still enumerate the configured recursive source root when the streamed prepass wins." \
-		"$(cat "$output_file")" "tank/src"
 }
 
 test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_metadata_compression() {
@@ -935,110 +648,48 @@ test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_metadata
 
 	result=$(
 		(
-			zxfer_resolve_remote_required_tool() {
-				printf '%s\n' "/opt/bin/parallel"
-			}
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "tank/src"
-				printf '%s\n' "tank/src/child"
-			}
 			zxfer_build_source_snapshot_list_cmd
 			printf 'meta=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-0}"
 		)
 	)
 
-	assertContains "Adaptive remote source discovery should retain the remote GNU parallel path for larger trees." \
+	assertContains "Remote -j discovery should stream the origin dataset inventory directly." \
+		"$result" "/remote/bin/zfs"
+	assertContains "Remote -j discovery should use GNU parallel on the origin host." \
 		"$result" "/opt/bin/parallel"
-	assertContains "Adaptive remote source discovery should inline the prefetched dataset list for moderate trees." \
-		"$result" "'printf'"
-	assertContains "Adaptive remote source discovery should include the first prefetched dataset in the inline list." \
-		"$result" "tank/src"
-	assertContains "Adaptive remote source discovery should include the second prefetched dataset in the inline list." \
-		"$result" "tank/src/child"
-	assertContains "Adaptive remote source discovery should append the resolved remote metadata compressor." \
+	assertContains "Remote -j discovery should append the resolved remote metadata compressor." \
 		"$result" "/remote/bin/zstd"
-	assertContains "Adaptive remote source discovery should append the resolved local metadata decompressor." \
+	assertContains "Remote -j discovery should append the resolved local metadata decompressor." \
 		"$result" "/local/bin/zstd"
-	assertContains "Parallel remote discovery with active metadata compression should record the compressor flag." \
+	assertContains "Remote -j discovery should preserve the per-dataset remote snapshot runner." \
+		"$result" "/remote/bin/zfs"
+	assertContains "Remote -j discovery should record that metadata compression was used." \
 		"$result" "meta=1"
 }
 
-test_build_source_snapshot_list_cmd_falls_back_to_serial_remote_discovery_when_parallel_is_unavailable_after_threshold() {
+test_build_source_snapshot_list_cmd_fails_closed_when_remote_parallel_is_unavailable() {
 	g_option_j_jobs=2
 	g_option_O_origin_host="origin.example"
 	g_origin_parallel_cmd=""
 	g_cmd_parallel=""
 	g_origin_cmd_zfs="/remote/bin/zfs"
-	g_option_V_very_verbose=1
 
 	result=$(
 		(
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "tank/src"
-				printf '%s\n' "tank/src/child"
-			}
 			zxfer_check_parallel_source_jobs_in_current_shell() {
-				g_zxfer_parallel_source_job_check_result="remote helper missing from secure PATH"
-				g_zxfer_parallel_source_job_check_kind="origin_missing"
+				g_zxfer_parallel_source_job_check_result='parallel not found on origin host origin.example but -j 2 was requested. Install parallel remotely or rerun without -j.'
 				return 1
 			}
 			zxfer_build_source_snapshot_list_cmd
-		) 2>&1
+		)
 	)
 	status=$?
 
-	assertEquals "Remote adaptive discovery should fall back to the serial remote listing path when origin-host parallel is unavailable after the dataset prepass." \
-		0 "$status"
-	assertContains "Remote adaptive discovery fallback should preserve the availability failure in verbose output." \
-		"$result" "remote helper missing from secure PATH"
-	assertContains "Remote adaptive discovery fallback should explain that discovery is dropping back to the serial path in verbose mode." \
-		"$result" "Falling back to serial source snapshot listing."
-	assertContains "Remote adaptive discovery fallback should render the remote serial zfs listing command instead of aborting." \
-		"$result" "/remote/bin/zfs"
-	assertNotContains "Remote adaptive discovery fallback should not keep the GNU parallel command in the final rendered listing." \
-		"$result" "--line-buffer"
-}
-
-test_build_source_snapshot_list_cmd_fails_closed_for_remote_parallel_probe_errors_after_threshold() {
-	g_option_j_jobs=2
-	g_option_O_origin_host="origin.example"
-	g_origin_parallel_cmd=""
-	g_cmd_parallel=""
-	g_origin_cmd_zfs="/remote/bin/zfs"
-	g_option_V_very_verbose=1
-
-	result=$(
-		(
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "tank/src"
-				printf '%s\n' "tank/src/child"
-			}
-			zxfer_check_parallel_source_jobs_in_current_shell() {
-				g_zxfer_parallel_source_job_check_result='GNU parallel not found on origin host origin.example but -j 2 was requested. Install GNU parallel remotely or rerun without -j.'
-				g_zxfer_parallel_source_job_check_kind="origin_probe_failed"
-				return 1
-			}
-			zxfer_build_source_snapshot_list_cmd
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Remote adaptive discovery should fail closed when origin-host parallel probing fails for reasons other than the helper being missing." \
+	assertEquals "Remote -j discovery should fail closed when origin-host parallel is unavailable." \
 		1 "$status"
-	assertContains "Remote adaptive discovery should preserve the origin-host probe failure reason when it aborts." \
-		"$result" 'GNU parallel not found on origin host origin.example but -j 2 was requested. Install GNU parallel remotely or rerun without -j.'
-	assertNotContains "Remote adaptive discovery should not claim to fall back to serial when the origin-host helper query itself failed." \
-		"$result" "Falling back to serial source snapshot listing."
-	assertNotContains "Remote adaptive discovery should not render the remote serial zfs listing command when origin-host helper probing fails." \
+	assertContains "Remote -j discovery should preserve the origin-host parallel failure reason when it aborts." \
+		"$result" 'parallel not found on origin host origin.example but -j 2 was requested. Install parallel remotely or rerun without -j.'
+	assertNotContains "Remote -j discovery should not silently render the serial remote snapshot listing." \
 		"$result" "/remote/bin/zfs"
 }
 
@@ -1332,7 +983,7 @@ test_write_source_snapshot_list_to_file_skips_execution_in_dry_run() {
 
 	assertNotContains "Dry-run source snapshot discovery should not invoke the background execution helper." \
 		"$(cat "$log")" "execute-background-called"
-	assertNotContains "Dry-run source snapshot discovery should not enter adaptive command planning." \
+	assertNotContains "Dry-run source snapshot discovery should not enter GNU parallel command planning." \
 		"$(cat "$log")" "build-source-command-called"
 	assertContains "Dry-run source snapshot discovery should render the skipped command." \
 		"$(cat "$log")" "'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' 'tank/src'"
@@ -1365,6 +1016,71 @@ test_write_source_snapshot_list_to_file_reports_preview_render_failures_in_dry_r
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Dry-run source snapshot discovery should surface the preview render failure." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "preview render failed"
+}
+
+test_write_source_snapshot_list_to_file_preserves_outfile_stage_failures_in_dry_run() {
+	outfile="$TEST_TMPDIR/source_dry_run_stage_failure.out"
+	errfile="$TEST_TMPDIR/source_dry_run_stage_failure.err"
+
+	output=$(
+		(
+			write_call_count=0
+			zxfer_write_runtime_artifact_file() {
+				write_call_count=$((write_call_count + 1))
+				printf 'write=%s:%s\n' "$write_call_count" "$1"
+				return 23
+			}
+			g_option_n_dryrun=1
+			set +e
+			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+			printf 'calls=%s\n' "$write_call_count"
+		)
+	)
+
+	assertContains "Dry-run source snapshot discovery should preserve outfile staging failures." \
+		"$output" "status=23"
+	assertContains "Dry-run source snapshot discovery should stop after the outfile stage fails." \
+		"$output" "calls=1"
+	assertContains "Dry-run source snapshot discovery should fail on the snapshot outfile stage first." \
+		"$output" "write=1:$outfile"
+}
+
+test_write_source_snapshot_list_to_file_preserves_errfile_stage_failures_in_dry_run() {
+	outfile="$TEST_TMPDIR/source_dry_run_err_stage_failure.out"
+	errfile="$TEST_TMPDIR/source_dry_run_err_stage_failure.err"
+
+	output=$(
+		(
+			write_call_count=0
+			zxfer_write_runtime_artifact_file() {
+				write_call_count=$((write_call_count + 1))
+				printf 'write=%s:%s\n' "$write_call_count" "$1"
+				if [ "$write_call_count" -eq 1 ]; then
+					return 0
+				fi
+				return 29
+			}
+			g_option_n_dryrun=1
+			set +e
+			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+			printf 'calls=%s\n' "$write_call_count"
+		)
+	)
+
+	assertContains "Dry-run source snapshot discovery should preserve stderr staging failures." \
+		"$output" "status=29"
+	assertContains "Dry-run source snapshot discovery should attempt the stderr stage after the outfile stage succeeds." \
+		"$output" "calls=2"
+	assertContains "Dry-run source snapshot discovery should still stage the snapshot outfile before surfacing the stderr failure." \
+		"$output" "write=1:$outfile"
+	assertContains "Dry-run source snapshot discovery should report the stderr staging failure from the second write." \
+		"$output" "write=2:$errfile"
 }
 
 test_write_source_snapshot_list_to_file_runs_serial_builder_output_when_jobs_remain_configured() {
@@ -3336,6 +3052,75 @@ test_write_destination_snapshot_list_to_files_reports_preview_render_failures_in
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "destination preview render failed"
 }
 
+test_write_destination_snapshot_list_to_files_preserves_record_stage_failures_in_dry_run() {
+	records_file="$TEST_TMPDIR/destination_dry_run_stage_failure.records"
+	sorted_file="$TEST_TMPDIR/destination_dry_run_stage_failure.sorted"
+
+	output=$(
+		(
+			write_call_count=0
+			zxfer_write_runtime_artifact_file() {
+				write_call_count=$((write_call_count + 1))
+				printf 'write=%s:%s\n' "$write_call_count" "$1"
+				return 31
+			}
+			g_option_n_dryrun=1
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			set +e
+			zxfer_write_destination_snapshot_list_to_files "$records_file" "$sorted_file"
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+			printf 'calls=%s\n' "$write_call_count"
+		)
+	)
+
+	assertContains "Dry-run destination snapshot discovery should preserve raw-record staging failures." \
+		"$output" "status=31"
+	assertContains "Dry-run destination snapshot discovery should stop after the raw-record stage fails." \
+		"$output" "calls=1"
+	assertContains "Dry-run destination snapshot discovery should fail on the raw destination snapshot stage first." \
+		"$output" "write=1:$records_file"
+}
+
+test_write_destination_snapshot_list_to_files_preserves_sorted_stage_failures_in_dry_run() {
+	records_file="$TEST_TMPDIR/destination_dry_run_sorted_stage_failure.records"
+	sorted_file="$TEST_TMPDIR/destination_dry_run_sorted_stage_failure.sorted"
+
+	output=$(
+		(
+			write_call_count=0
+			zxfer_write_runtime_artifact_file() {
+				write_call_count=$((write_call_count + 1))
+				printf 'write=%s:%s\n' "$write_call_count" "$1"
+				if [ "$write_call_count" -eq 1 ]; then
+					return 0
+				fi
+				return 37
+			}
+			g_option_n_dryrun=1
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			set +e
+			zxfer_write_destination_snapshot_list_to_files "$records_file" "$sorted_file"
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+			printf 'calls=%s\n' "$write_call_count"
+		)
+	)
+
+	assertContains "Dry-run destination snapshot discovery should preserve normalized-list staging failures." \
+		"$output" "status=37"
+	assertContains "Dry-run destination snapshot discovery should attempt the normalized stage after the raw-record stage succeeds." \
+		"$output" "calls=2"
+	assertContains "Dry-run destination snapshot discovery should still stage the raw destination snapshot list first." \
+		"$output" "write=1:$records_file"
+	assertContains "Dry-run destination snapshot discovery should surface the normalized destination snapshot staging failure second." \
+		"$output" "write=2:$sorted_file"
+}
+
 test_get_zfs_list_skips_live_snapshot_discovery_in_dry_run() {
 	log="$TEST_TMPDIR/get_zfs_dry_run.log"
 	: >"$log"
@@ -3535,123 +3320,6 @@ test_zxfer_version_output_reports_gnu_parallel_normalizes_case_and_whitespace() 
 	fi
 }
 
-test_zxfer_note_parallel_source_discovery_fallback_logs_to_stderr_in_verbose_mode() {
-	set +e
-	output=$(
-		(
-			g_option_v_verbose=1
-			g_option_V_very_verbose=0
-			zxfer_note_parallel_source_discovery_fallback "parallel unavailable" origin
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Parallel fallback notes should be emitted successfully in normal verbose mode." \
-		0 "$status"
-	assertContains "Parallel fallback notes should explain that origin-host adaptive discovery is falling back to the serial path." \
-		"$output" "Falling back to serial source snapshot listing."
-	assertContains "Parallel fallback notes should preserve the underlying validation reason in verbose mode." \
-		"$output" "parallel unavailable"
-}
-
-test_zxfer_note_parallel_source_discovery_fallback_is_silent_without_verbose_flags() {
-	set +e
-	output=$(
-		(
-			g_option_v_verbose=0
-			g_option_V_very_verbose=0
-			zxfer_note_parallel_source_discovery_fallback "parallel unavailable" origin
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Parallel fallback notes should still return success when verbosity is disabled." \
-		0 "$status"
-	assertEquals "Parallel fallback notes should stay silent when neither verbose flag is enabled." \
-		"" "$output"
-}
-
-test_zxfer_render_remote_source_snapshot_serial_list_cmd_wraps_remote_compression_pipeline() {
-	output=$(
-		(
-			zxfer_build_shell_command_from_argv() {
-				printf '%s\n' "$*"
-			}
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "sh -c $1"
-			}
-			zxfer_build_ssh_shell_command_for_host() {
-				printf '%s\n' "ssh $1 $2"
-			}
-			g_option_O_origin_host="origin.example"
-			g_option_z_compress=1
-			g_initial_source="tank/src"
-			g_origin_cmd_zfs="/remote/bin/zfs"
-			g_origin_cmd_compress_safe="compress-safe"
-			g_cmd_decompress_safe="decompress-safe"
-			zxfer_render_remote_source_snapshot_serial_list_cmd
-			printf 'uses=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-0}"
-		)
-	)
-
-	assertContains "Remote serial source snapshot rendering should target the resolved remote zfs helper." \
-		"$output" "/remote/bin/zfs list -Hr -o name -s creation -t snapshot tank/src"
-	assertContains "Remote serial source snapshot rendering should add remote metadata compression when it is enabled." \
-		"$output" "compress-safe"
-	assertContains "Remote serial source snapshot rendering should add the local decompressor when remote metadata compression is enabled." \
-		"$output" "decompress-safe"
-	assertContains "Remote serial source snapshot rendering should mark remote metadata compression as active." \
-		"$output" "uses=1"
-}
-
-test_build_source_snapshot_list_cmd_renders_streamed_remote_parallel_pipeline_when_dataset_list_is_large() {
-	output=$(
-		(
-			zxfer_build_shell_command_from_argv() {
-				printf '%s\n' "$*"
-			}
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "sh -c $1"
-			}
-			zxfer_build_ssh_shell_command_for_host() {
-				printf '%s\n' "ssh $1 $2"
-			}
-			zxfer_ensure_parallel_available_for_source_jobs() {
-				return 0
-			}
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' "2"
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n%s\n%s\n' "tank/src" "tank/src/child" "tank/src/grandchild"
-			}
-			zxfer_count_source_snapshot_discovery_datasets() {
-				printf '%s\n' "3"
-			}
-			zxfer_should_inline_source_snapshot_dataset_list() {
-				return 1
-			}
-			g_option_j_jobs=4
-			g_option_O_origin_host="origin.example"
-			g_origin_parallel_cmd="/opt/bin/parallel"
-			g_origin_cmd_zfs="/remote/bin/zfs"
-			g_initial_source="tank/src"
-			zxfer_build_source_snapshot_list_cmd
-			# shellcheck disable=SC2031  # Intentional subshell assertion of planner state.
-			printf 'parallel=%s\n' "${g_source_snapshot_list_uses_parallel:-0}"
-		)
-	)
-
-	assertContains "Adaptive remote source snapshot planning should use the resolved origin-host GNU parallel helper when the dataset tree is large enough." \
-		"$output" "/opt/bin/parallel -j 4 --line-buffer"
-	assertContains "Adaptive remote source snapshot planning should stream the remote dataset inventory when the dataset list is too large to inline." \
-		"$output" "/remote/bin/zfs list -Hr -t filesystem,volume -o name tank/src"
-	assertContains "Adaptive remote source snapshot planning should render the per-dataset snapshot runner on the origin host." \
-		"$output" "/remote/bin/zfs list -H -o name -s creation -d 1 -t snapshot {}"
-	assertContains "Adaptive remote source snapshot planning should mark the parallel planner path as active." \
-		"$output" "parallel=1"
-}
-
 test_build_source_snapshot_list_cmd_preserves_remote_parallel_resolution_from_current_shell() {
 	output=$(
 		(
@@ -3663,18 +3331,6 @@ test_build_source_snapshot_list_cmd_preserves_remote_parallel_resolution_from_cu
 			}
 			zxfer_build_ssh_shell_command_for_host() {
 				printf '%s\n' "ssh $1 $2"
-			}
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' "2"
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n%s\n%s\n' "tank/src" "tank/src/child" "tank/src/grandchild"
-			}
-			zxfer_count_source_snapshot_discovery_datasets() {
-				printf '%s\n' "3"
-			}
-			zxfer_should_inline_source_snapshot_dataset_list() {
-				return 1
 			}
 			zxfer_ensure_parallel_available_for_source_jobs() {
 				g_origin_parallel_cmd="/opt/bin/parallel"
@@ -3690,9 +3346,11 @@ test_build_source_snapshot_list_cmd_preserves_remote_parallel_resolution_from_cu
 		)
 	)
 
-	assertContains "Remote adaptive source snapshot planning should retain the helper path resolved during the current-shell availability check." \
+	assertContains "Remote source snapshot planning should retain the helper path resolved during the current-shell availability check." \
 		"$output" "/opt/bin/parallel -j 4 --line-buffer"
-	assertContains "Remote adaptive source snapshot planning should preserve the resolved origin-host GNU parallel helper after command rendering." \
+	assertContains "Remote source snapshot planning should preserve the direct remote dataset enumeration command." \
+		"$output" "/remote/bin/zfs list -Hr -t filesystem,volume -o name tank/src"
+	assertContains "Remote source snapshot planning should preserve the resolved origin-host GNU parallel helper after command rendering." \
 		"$output" "resolved=/opt/bin/parallel"
 }
 
@@ -3732,6 +3390,41 @@ test_capture_recursive_dataset_list_from_lines_file_reports_tempfile_failures() 
 		"" "$output"
 }
 
+test_capture_recursive_dataset_list_from_lines_file_reports_staged_read_failures() {
+	dataset_lines_file="$TEST_TMPDIR/recursive_dataset_lines_read_failure.txt"
+	sorted_file="$TEST_TMPDIR/recursive_dataset_lines_read_failure.sorted"
+	printf '%s\n' "tank/src/child" >"$dataset_lines_file"
+	printf '%s\n' "tank/src" >>"$dataset_lines_file"
+
+	output=$(
+		(
+			g_zxfer_recursive_dataset_list_result="stale-datasets"
+			zxfer_get_temp_file() {
+				g_zxfer_temp_file_result="$sorted_file"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			zxfer_read_snapshot_discovery_capture_file() {
+				return 41
+			}
+			set +e
+			zxfer_capture_recursive_dataset_list_from_lines_file "$dataset_lines_file"
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+			printf 'sorted_exists=%s\n' "$([ -e "$sorted_file" ] && printf '%s' 1 || printf '%s' 0)"
+			printf 'result=<%s>\n' "${g_zxfer_recursive_dataset_list_result:-}"
+		)
+	)
+
+	assertContains "Recursive dataset-list capture from plain lines should preserve staged readback failures." \
+		"$output" "status=41"
+	assertContains "Recursive dataset-list capture from plain lines should clean up the sorted staging file after a readback failure." \
+		"$output" "sorted_exists=0"
+	assertContains "Recursive dataset-list capture from plain lines should clear stale current-shell results before surfacing readback failures." \
+		"$output" "result=<>"
+}
+
 test_capture_recursive_dataset_list_from_snapshot_records_extracts_sorted_unique_datasets() {
 	zxfer_capture_recursive_dataset_list_from_snapshot_records "$(
 		cat <<'EOF'
@@ -3741,6 +3434,7 @@ tank/src/child@snap3
 EOF
 	)"
 
+	# shellcheck disable=SC2031  # Current-shell scratch is asserted directly in tests.
 	assertEquals "Recursive dataset-list capture from snapshot records should extract, sort, and deduplicate dataset names." \
 		"tank/src
 tank/src/child" "$g_zxfer_recursive_dataset_list_result"
@@ -3799,6 +3493,7 @@ EOF
 
 	zxfer_capture_recursive_dataset_list_from_snapshot_file "$snapshot_records_file"
 
+	# shellcheck disable=SC2031  # Current-shell scratch is asserted directly in tests.
 	assertEquals "Recursive dataset-list capture from snapshot files should extract, sort, and deduplicate dataset names." \
 		"tank/src
 tank/src/child" "$g_zxfer_recursive_dataset_list_result"
@@ -3831,6 +3526,7 @@ test_filter_recursive_dataset_list_with_excludes_passthrough_without_patterns_in
 
 	zxfer_filter_recursive_dataset_list_with_excludes "$input_list"
 
+	# shellcheck disable=SC2031  # Current-shell scratch is asserted directly in tests.
 	assertEquals "Recursive dataset-list filtering should pass the original dataset list through unchanged when no exclude pattern is configured." \
 		"$input_list" "$g_zxfer_recursive_dataset_list_result"
 }
@@ -3847,6 +3543,7 @@ tank/src/child/exclude
 EOF
 	)"
 
+	# shellcheck disable=SC2031  # Current-shell scratch is asserted directly in tests.
 	assertEquals "Recursive dataset-list filtering should remove datasets matching the configured exclude pattern." \
 		"tank/src
 tank/src/child" "$g_zxfer_recursive_dataset_list_result"
@@ -3877,6 +3574,49 @@ test_filter_recursive_dataset_list_with_excludes_reports_second_tempfile_failure
 		1 "$status"
 	assertEquals "Recursive dataset-list filtering should not emit output for second-tempfile failures." \
 		"" "$output"
+}
+
+test_filter_recursive_dataset_list_with_excludes_reports_staged_read_failures() {
+	input_file="$TEST_TMPDIR/recursive_filter_read_failure_input.tmp"
+	filtered_file="$TEST_TMPDIR/recursive_filter_read_failure_filtered.tmp"
+	g_option_x_exclude_datasets='exclude'
+
+	output=$(
+		(
+			call_count=0
+			g_zxfer_recursive_dataset_list_result="stale-filtered-datasets"
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				if [ "$call_count" -eq 1 ]; then
+					g_zxfer_temp_file_result="$input_file"
+				else
+					g_zxfer_temp_file_result="$filtered_file"
+				fi
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			zxfer_read_snapshot_discovery_capture_file() {
+				return 43
+			}
+			set +e
+			zxfer_filter_recursive_dataset_list_with_excludes "$(printf '%s\n%s\n' "tank/src" "tank/src/exclude")"
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+			printf 'input_exists=%s\n' "$([ -e "$input_file" ] && printf '%s' 1 || printf '%s' 0)"
+			printf 'filtered_exists=%s\n' "$([ -e "$filtered_file" ] && printf '%s' 1 || printf '%s' 0)"
+			printf 'result=<%s>\n' "${g_zxfer_recursive_dataset_list_result:-}"
+		)
+	)
+
+	assertContains "Recursive dataset-list filtering should preserve staged readback failures." \
+		"$output" "status=43"
+	assertContains "Recursive dataset-list filtering should clean up the input staging file after a readback failure." \
+		"$output" "input_exists=0"
+	assertContains "Recursive dataset-list filtering should clean up the filtered staging file after a readback failure." \
+		"$output" "filtered_exists=0"
+	assertContains "Recursive dataset-list filtering should clear stale current-shell results before surfacing readback failures." \
+		"$output" "result=<>"
 }
 
 test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_common_snapshot_comm_failures() {

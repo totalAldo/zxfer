@@ -519,16 +519,21 @@ Do not copy this comma separated list of properties when performing replication.
 Useful for skipping properties like quotas that can interfere with replication,
 or properties that are not supported on the destination.
 .It Fl j Ar jobs
-Run up to this many zfs send/receive jobs concurrently and use adaptive source
-snapshot discovery when determining the work queue. Larger trees can still use
-GNU parallel for per-dataset source listing, while smaller or startup-bound
-runs stay on the cheaper single recursive listing path. Local-origin runs fall
-back to the serial source snapshot listing path when GNU parallel is missing or
-not GNU parallel. Remote-origin runs still fall back for the explicit
-missing-helper case, but once a remote helper resolves, zxfer trusts it and
-fails closed if the rendered source listing later errors. The default is 1,
-which disables background sends. Raising this value can hide WAN latency or
-speed up large replications, but will also increase memory, CPU and I/O load.
+Run up to this many zfs send/receive jobs concurrently and use the explicit
+per-dataset source snapshot-discovery path when determining the work queue.
+When jobs is greater than 1, zxfer uses a direct per-dataset source listing
+pipeline instead of the single recursive snapshot list. Local-origin runs
+require GNU parallel on the executing origin host; remote-origin runs through
+.Fl O
+require that the resolved origin-host
+.Sy parallel
+helper exists and assume it is compatible with the rendered pipeline.
+zxfer does not silently fall back to the serial recursive listing once
+.Fl j
+is greater than 1. The default is 1, which disables background sends and keeps
+source snapshot discovery on the serial recursive listing path. Raising this
+value can hide WAN latency or speed up large replications, but will also
+increase memory, CPU and I/O load.
 .It Fl m
 After sending all snapshots, (m)igrate the source to the destination filesystem by
 unmounting the source filesystem and changing the new filesystem's
@@ -718,11 +723,11 @@ to
 .Pp
 .Dl zfs send dataset@snap1 | zstd -3 | ssh user@host "zstd -d | /sbin/zfs receive destination"
 .Pp
-Adaptive remote source snapshot-list metadata discovery
+Remote source snapshot-list metadata discovery
 .Pq Fl O No with Fl j No and Fl z
 uses the selected compression/decompression pipeline when ssh is active,
-including adaptive source-discovery runs before zxfer decides whether any
-snapshots actually need transfer.
+including the remote parallel source-discovery path before zxfer decides
+whether any snapshots actually need transfer.
 .It Fl Z
 Pass the zstd command to use during compression.
 .Op Fl O

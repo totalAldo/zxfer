@@ -2450,28 +2450,16 @@ test_build_source_snapshot_list_cmd_parallel_local_includes_parallel_runner() {
 
 	result=$(
 		(
-			zxfer_resolve_remote_required_tool() {
-				printf '%s\n' "/opt/bin/parallel"
-			}
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "tank/home"
-				printf '%s\n' "tank/home/usr"
-			}
 			zxfer_build_source_snapshot_list_cmd
 		)
 	)
 
-	assertContains "Adaptive listing should inline the prefetched dataset list for moderate trees." \
-		"$result" "'printf'"
-	assertContains "Adaptive listing should preserve the prefetched dataset order inside the inline list." \
-		"$result" "'tank/home' 'tank/home/usr'"
+	assertContains "Local -j listing should enumerate source datasets directly." \
+		"$result" "'/sbin/zfs' 'list' '-Hr' '-t' 'filesystem,volume' '-o' 'name' 'tank/home'"
 	assertContains "GNU parallel invocation should include the job count." "$result" "'$g_cmd_parallel' -j 4 --line-buffer"
 	assertContains "Local parallel snapshot listing should embed the per-dataset runner command." "$result" "'snapshot'"
 	assertContains "Local parallel snapshot listing should preserve the dataset placeholder." "$result" "{}"
-	assertNotContains "Local parallel snapshot listing should no longer defer the branch decision into a shell-side dataset counter." "$result" "l_dataset_count"
+	assertNotContains "Local -j listing should not inline prefetched dataset lists." "$result" "'printf'"
 	assertNotContains "Local parallel snapshot listing should not reintroduce a sh -c wrapper." "$result" "sh -c"
 }
 
@@ -2495,12 +2483,8 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 			zxfer_resolve_remote_required_tool() {
 				printf '%s\n' "/opt/bin/parallel"
 			}
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "tank/src"
-				printf '%s\n' "tank/src/child"
+			zxfer_get_remote_resolved_tool_version_output() {
+				printf '%s\n' "GNU parallel (fake)"
 			}
 			zxfer_build_source_snapshot_list_cmd
 		)
@@ -2511,20 +2495,18 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 	assertContains "Wrapper tokens should remain inside the remote command string." "$result" "'pfexec'"
 	assertContains "Wrapper flags should remain inside the remote command string." "$result" "'-p'"
 	assertContains "Wrapper flag values should remain inside the remote command string." "$result" "'2222'"
-	assertContains "Adaptive remote listing should inline the prefetched dataset list for moderate trees." \
-		"$result" "'printf'"
-	assertContains "Adaptive remote listing should include the first prefetched dataset in the inline list." \
+	assertContains "Remote -j listing should enumerate source datasets on the origin host." \
+		"$result" "filesystem,volume"
+	assertContains "Remote -j listing should preserve the configured source root inside the remote dataset enumeration command." \
 		"$result" "tank/src"
-	assertContains "Adaptive remote listing should include the second prefetched dataset in the inline list." \
-		"$result" "tank/src/child"
 	assertContains "Remote GNU parallel path should be used." "$result" "/opt/bin/parallel"
 	assertContains "Remote GNU parallel invocation should preserve the job count." "$result" "-j 8 --line-buffer"
 	assertContains "Remote listing should use the origin host zfs path." "$result" "$g_origin_cmd_zfs"
-	assertContains "Adaptive remote metadata discovery should include the resolved remote compressor path." "$result" "/remote/bin/zstd"
-	assertContains "Adaptive remote metadata discovery should include the local decompression stage." "$result" "/local/bin/zstd"
+	assertContains "Remote metadata discovery should include the resolved remote compressor path." "$result" "/remote/bin/zstd"
+	assertContains "Remote metadata discovery should include the local decompression stage." "$result" "/local/bin/zstd"
 	assertContains "Remote command should use GNU parallel's direct dataset placeholder runner." \
 		"$result" "{}"
-	assertNotContains "Adaptive remote listing should no longer defer the branch decision into a shell-side dataset counter." "$result" "l_dataset_count"
+	assertNotContains "Remote -j listing should not inline prefetched dataset lists." "$result" "'printf'"
 }
 
 test_build_source_snapshot_list_cmd_remote_helper_path_does_not_execute_locally() {
@@ -2945,9 +2927,9 @@ test_ensure_parallel_available_for_source_jobs_reports_remote_probe_failures() {
 
 	unset FAKE_SSH_SUPPRESS_STDOUT FAKE_SSH_EXIT_STATUS
 
-	assertEquals "Remote GNU parallel probe failures should abort the helper." 1 "$status"
-	assertContains "Remote GNU parallel probe failures should preserve the query failure message." \
-		"$output" "Failed to query dependency \"GNU parallel\" on host aldo@172.16.0.4 pfexec."
+	assertEquals "Remote parallel probe failures should abort the helper." 1 "$status"
+	assertContains "Remote parallel probe failures should preserve the query failure message." \
+		"$output" "Failed to query dependency \"parallel\" on host aldo@172.16.0.4 pfexec."
 }
 
 test_ensure_parallel_available_for_source_jobs_reports_missing_remote_parallel() {
@@ -2955,7 +2937,7 @@ test_ensure_parallel_available_for_source_jobs_reports_missing_remote_parallel()
 	output=$(
 		(
 			zxfer_resolve_remote_required_tool() {
-				printf '%s\n' "Required dependency \"GNU parallel\" not found on host origin.example in secure PATH (/opt/openzfs/bin:/usr/sbin). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary."
+				printf '%s\n' "Required dependency \"parallel\" not found on host origin.example in secure PATH (/opt/openzfs/bin:/usr/sbin). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary."
 				return 1
 			}
 			zxfer_throw_error() {
@@ -2971,9 +2953,9 @@ test_ensure_parallel_available_for_source_jobs_reports_missing_remote_parallel()
 	)
 	status=$?
 
-	assertEquals "Missing remote GNU parallel should abort the helper." 1 "$status"
-	assertContains "Missing remote GNU parallel should be translated into the user-facing guidance." \
-		"$output" "GNU parallel not found on origin host origin.example but -j 4 was requested. Install GNU parallel remotely or rerun without -j."
+	assertEquals "Missing remote parallel should abort the helper." 1 "$status"
+	assertContains "Missing remote parallel should be translated into the user-facing guidance." \
+		"$output" "parallel not found on origin host origin.example but -j 4 was requested. Install parallel remotely or rerun without -j."
 }
 
 test_read_remote_backup_file_uses_resolved_remote_cat_path() {
@@ -3221,12 +3203,8 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 			zxfer_resolve_remote_required_tool() {
 				printf '%s\n' "/opt/bin/parallel"
 			}
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "zroot"
-				printf '%s\n' "zroot/usr"
+			zxfer_get_remote_resolved_tool_version_output() {
+				printf '%s\n' "GNU parallel (fake)"
 			}
 			zxfer_build_source_snapshot_list_cmd
 		)
@@ -3260,7 +3238,7 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	assertContains "Remote command should include GNU parallel." "$log_line_remote_cmd" "/opt/bin/parallel"
 	assertContains "Remote command should preserve the parallel job count." "$log_line_remote_cmd" "-j 4 --line-buffer"
 	assertContains "Remote command should preserve the per-dataset snapshot placeholder." "$log_line_remote_cmd" "{}"
-	assertContains "Adaptive remote metadata discovery should keep the compressor helper in the rendered ssh pipeline." "$log_line_remote_cmd" "$fake_zstd"
+	assertContains "Remote metadata discovery should keep the compressor helper in the rendered ssh pipeline." "$log_line_remote_cmd" "$fake_zstd"
 }
 
 test_remote_snapshot_listing_pipeline_executes_parallel_runner_for_each_dataset() {
@@ -3324,12 +3302,8 @@ EOF
 			zxfer_resolve_remote_required_tool() {
 				printf '%s\n' "$fake_parallel"
 			}
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
-			zxfer_get_source_snapshot_discovery_dataset_list() {
-				printf '%s\n' "zroot"
-				printf '%s\n' "zroot/usr"
+			zxfer_get_remote_resolved_tool_version_output() {
+				printf '%s\n' "GNU parallel (fake)"
 			}
 			zxfer_build_source_snapshot_list_cmd
 		)
@@ -3391,9 +3365,6 @@ EOF
 
 	l_cmd=$(
 		(
-			zxfer_get_source_snapshot_parallel_dataset_threshold() {
-				printf '%s\n' 2
-			}
 			zxfer_build_source_snapshot_list_cmd
 		)
 	)
@@ -3461,6 +3432,9 @@ EOF
 		(
 			zxfer_resolve_remote_required_tool() {
 				printf '%s\n' "$FAKE_PARALLEL_BIN"
+			}
+			zxfer_get_remote_resolved_tool_version_output() {
+				printf '%s\n' "GNU parallel (fake)"
 			}
 			zxfer_build_source_snapshot_list_cmd
 		)
@@ -4969,6 +4943,23 @@ test_zxfer_remote_command_context_helpers_cover_remaining_role_labels() {
 		"$output" "target=target: target.example"
 	assertContains "Very-verbose remote command rendering should include the resolved remote context label." \
 		"$output" "Running remote command [remote: misc.example doas]: '/bin/echo' 'hello'"
+}
+
+test_zxfer_echoV_remote_command_for_host_covers_current_shell_render_path() {
+	trace_file="$TEST_TMPDIR/echoV_remote_command_current_shell.log"
+
+	(
+		g_option_O_origin_host="origin.example"
+		g_option_T_target_host="target.example doas"
+		zxfer_echoV() {
+			printf '%s\n' "$*" >"$trace_file"
+		}
+		zxfer_echoV_remote_command_for_host "target.example doas" "" /bin/echo current-shell
+	)
+
+	assertEquals "Very-verbose remote command rendering should keep the current-shell target-context path shell-quoted exactly once." \
+		"Running remote command [target: target.example doas]: '/bin/echo' 'current-shell'" \
+		"$(cat "$trace_file")"
 }
 
 test_zxfer_render_destination_zfs_command_uses_remote_target_tool_path() {

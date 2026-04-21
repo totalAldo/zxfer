@@ -1747,7 +1747,7 @@ EOF
 }
 
 missing_parallel_error_test() {
-	log "Starting missing GNU parallel fallback test"
+	log "Starting missing GNU parallel failure test"
 
 	mock_path="$WORKDIR/mock_no_parallel"
 	prepare_mock_bin_dir "$mock_path" \
@@ -1768,17 +1768,22 @@ missing_parallel_error_test() {
 	append_data_to_dataset "$src_dataset" "file.txt" "two"
 	zfs snap -r "$src_dataset@np2"
 
+	set +e
 	output=$(ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
 
-	assert_snapshot_exists "$dest_dataset" "np1"
-	assert_snapshot_exists "$dest_dataset" "np2"
-	if ! printf '%s\n' "$output" | grep -q "Falling back to serial source snapshot listing."; then
-		fail "Missing local serial-fallback message not found. Output: $output"
+	if [ "$status" -eq 0 ]; then
+		fail "Local -j run without GNU parallel should fail closed. Output: $output"
+	fi
+	assert_dataset_absent "$dest_dataset"
+	if ! printf '%s\n' "$output" | grep -q "requires GNU parallel but it was not found in PATH on the local host"; then
+		fail "Missing local GNU parallel error not found. Output: $output"
 	fi
 
 	safe_rm_rf "$mock_path"
 
-	log "Missing GNU parallel fallback test passed"
+	log "Missing GNU parallel failure test passed"
 }
 
 remote_missing_parallel_origin_test() {
@@ -1823,12 +1828,12 @@ remote_missing_parallel_origin_test() {
 	status=$?
 	set -e
 
-	if [ "$status" -ne 0 ]; then
-		fail "Remote origin without GNU parallel should fall back to serial discovery and still succeed. Output: $output"
+	if [ "$status" -eq 0 ]; then
+		fail "Remote origin without GNU parallel should fail closed when -j is requested. Output: $output"
 	fi
-	assert_snapshot_exists "$dest_root/${src_dataset##*/}" "np1"
-	if ! printf '%s\n' "$output" | grep -q "Falling back to serial source snapshot listing."; then
-		fail "Expected remote serial-fallback message. Output: $output"
+	assert_dataset_absent "$dest_root/${src_dataset##*/}"
+	if ! printf '%s\n' "$output" | grep -q "parallel not found on origin host localhost but -j 2 was requested"; then
+		fail "Expected remote parallel missing-helper error. Output: $output"
 	fi
 
 	safe_rm_rf "$mock_path" "$tmpdir"
@@ -1837,7 +1842,7 @@ remote_missing_parallel_origin_test() {
 }
 
 remote_non_gnu_parallel_origin_test() {
-	log "Starting remote non-GNU parallel origin test"
+	log "Starting remote incompatible parallel origin test"
 
 	mock_path="$WORKDIR/mock_remote_non_gnu_parallel"
 	prepare_mock_bin_dir "$mock_path" ssh
@@ -1880,21 +1885,90 @@ EOF
 	set -e
 
 	if [ "$status" -eq 0 ]; then
-		fail "Remote origin with a non-GNU parallel implementation should fail closed once the rendered parallel listing runs. Output: $output"
+		fail "Remote origin with an incompatible parallel implementation should fail once the rendered origin-host listing runs. Output: $output"
+	fi
+	assert_dataset_absent "$dest_root/${src_dataset##*/}"
+	if ! printf '%s\n' "$output" | grep -q "Failed to retrieve snapshots from the source"; then
+		fail "Remote incompatible parallel implementations should fail through the rendered source snapshot pipeline. Output: $output"
 	fi
 	if ! printf '%s\n' "$output" | grep -q "non-GNU parallel mock cannot execute GNU parallel workloads"; then
-		fail "Expected the remote non-GNU parallel runtime stderr to be preserved. Output: $output"
+		fail "Remote incompatible parallel implementations should surface the rendered origin-host pipeline failure. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -q "Failed to retrieve snapshots from the source:"; then
-		fail "Expected the source snapshot-list failure to fail closed through the normal source-error path. Output: $output"
+	if printf '%s\n' "$output" | grep -q "requires GNU parallel on origin host localhost"; then
+		fail "Remote incompatible parallel implementations should no longer be rejected during upfront GNU validation. Output: $output"
 	fi
 	if printf '%s\n' "$output" | grep -q "Falling back to serial source snapshot listing."; then
-		fail "Remote non-GNU parallel should no longer fall back to serial once the helper resolves. Output: $output"
+		fail "Remote incompatible parallel implementations should not fall back to serial once the helper resolves. Output: $output"
 	fi
 
 	safe_rm_rf "$mock_path" "$tmpdir"
 
-	log "Remote non-GNU parallel origin test passed"
+	log "Remote incompatible parallel origin test passed"
+}
+
+remote_parallel_functional_probe_failure_origin_test() {
+	log "Starting remote rendered parallel failure origin test"
+
+	mock_path="$WORKDIR/mock_remote_probe_failure_parallel"
+	prepare_mock_bin_dir "$mock_path" ssh
+	write_mock_ssh_script "$mock_path/ssh"
+	cat >"$mock_path/parallel" <<'EOF'
+#!/bin/sh
+if [ "$1" = "--will-cite" ]; then
+	shift
+fi
+if [ "$1" = "--version" ]; then
+	printf '%s\n' "parallel release 20260122"
+	exit 0
+fi
+printf '%s\n' "ssh timeout during remote GNU parallel probe" >&2
+exit 124
+EOF
+	chmod +x "$mock_path/parallel"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	tmpdir="$WORKDIR/remote_probe_failure_parallel_tmp"
+
+	src_dataset="$SRC_POOL/remote_probe_failure_parallel_src"
+	dest_root="$DEST_POOL/remote_probe_failure_parallel_dest"
+
+	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
+	safe_rm_rf "$tmpdir"
+	mkdir -p "$tmpdir"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	i=1
+	while [ "$i" -le 16 ]; do
+		zfs create "$src_dataset/child$i"
+		i=$((i + 1))
+	done
+	zfs snap -r "$src_dataset@pf1"
+
+	set +e
+	output=$(TMPDIR="$tmpdir" ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -eq 0 ]; then
+		fail "Remote origin should fail closed when the rendered parallel listing command fails. Output: $output"
+	fi
+	assert_dataset_absent "$dest_root/${src_dataset##*/}"
+	if ! printf '%s\n' "$output" | grep -q "ssh timeout during remote GNU parallel probe"; then
+		fail "Expected the rendered remote parallel failure diagnostic to be preserved. Output: $output"
+	fi
+	if printf '%s\n' "$output" | grep -q "is not GNU parallel"; then
+		fail "Rendered remote parallel failures should no longer be misreported as upfront GNU validation failures. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "Failed to retrieve snapshots from the source:"; then
+		fail "Rendered remote parallel failures should surface through the source snapshot pipeline. Output: $output"
+	fi
+	if printf '%s\n' "$output" | grep -q "Falling back to serial source snapshot listing."; then
+		fail "Rendered remote parallel failures should not fall back to serial discovery. Output: $output"
+	fi
+
+	safe_rm_rf "$mock_path" "$tmpdir"
+
+	log "Remote rendered parallel failure origin test passed"
 }
 
 consistency_option_validation_tests() {
@@ -5409,6 +5483,7 @@ property_creation_with_zvol_test \
 	missing_parallel_error_test \
 	remote_missing_parallel_origin_test \
 	remote_non_gnu_parallel_origin_test \
+	remote_parallel_functional_probe_failure_origin_test \
 	managed_ssh_policy_test \
 	parallel_jobs_listing_test \
 	migration_service_success_test \

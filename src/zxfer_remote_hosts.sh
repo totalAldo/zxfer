@@ -1498,6 +1498,33 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 	printf '%s\n' "$g_zxfer_remote_capability_requested_tools_result"
 }
 
+# Purpose: Return the remote capability requested tools for resolving one tool
+# in the form expected by later helpers.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when sibling helpers need the prewarmed host scope when it
+# already includes the requested helper.
+zxfer_get_remote_capability_requested_tools_for_resolved_tool() {
+	l_host_spec=$1
+	l_tool=$2
+
+	[ -n "$l_tool" ] || return 1
+	if l_host_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
+		"$l_host_spec"); then
+		case "
+$l_host_requested_tools
+" in
+		*"
+$l_tool
+"*)
+			printf '%s\n' "$l_host_requested_tools"
+			return 0
+			;;
+		esac
+	fi
+
+	zxfer_get_remote_capability_requested_tools_for_tool "$l_tool"
+}
+
 ################################################################################
 # REMOTE CAPABILITY CACHE / HANDSHAKE PARSING
 ################################################################################
@@ -2746,7 +2773,10 @@ zxfer_ensure_remote_host_capabilities() {
 zxfer_preload_remote_host_capabilities() {
 	l_host_spec=$1
 	l_profile_side=${2:-}
-	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
+		"$l_host_spec"); then
+		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+	fi
 
 	if [ "${g_option_v_verbose:-0}" -eq 1 ] || [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
 		zxfer_ensure_remote_host_capabilities \
@@ -2877,7 +2907,8 @@ zxfer_resolve_remote_required_tool() {
 	l_tool=$2
 	l_label=${3:-$l_tool}
 	l_profile_side=${4:-}
-	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool "$l_tool")
+	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+		"$l_host" "$l_tool")
 
 	[ -n "$l_host" ] || return 1
 
@@ -3067,7 +3098,8 @@ zxfer_resolve_remote_cli_tool() {
 	l_tool=$2
 	l_label=${3:-$l_tool}
 	l_profile_side=${4:-}
-	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool "$l_tool")
+	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+		"$l_host" "$l_tool")
 
 	case "$l_tool" in
 	zfs | parallel | cat)

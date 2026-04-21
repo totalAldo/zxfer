@@ -90,12 +90,11 @@ matters especially when:
 - wrapped host specs are used, for example `user@host pfexec`
 - restore mode (`-e`) needs a remote `cat` on the origin, and remote backup
   writes for `-k` use `cat` on the target
-- `-j` can use GNU `parallel` on the origin host for faster source snapshot
-  discovery. Local-origin runs fall back to the serial discovery path when GNU
-  `parallel` is unavailable or another `parallel` implementation is found.
-  Remote-origin runs still fall back for an explicitly missing helper, but
-  other remote helper probe or execution failures stop the run so zxfer does
-  not silently mask a broken origin-side bootstrap path
+- `-j` uses explicit per-dataset source discovery on the executing origin host
+  whenever `jobs > 1`. Local-origin runs require GNU `parallel`; remote-origin
+  runs through `-O` require that the remote host resolve a `parallel` helper.
+  zxfer fails closed if the required helper is missing instead of silently
+  falling back to the serial recursive listing
 - custom `-Z` compression commands or default `zstd` helpers must be resolved
   per host instead of assuming one shared absolute path
 - the per-host remote-capability cache is keyed by the trusted dependency
@@ -130,7 +129,7 @@ In practice, the origin and target roles stay separate:
 flowchart TD
     A["Origin role via -O"] --> B["Remote source-side helpers"]
     B --> C["zfs send and source snapshot discovery"]
-    B --> D["Optional GNU parallel for -j source discovery"]
+    B --> D["parallel helper when -j > 1"]
     B --> E["Optional source-side compression helper"]
     B --> F["Remote cat when -e reads backup metadata from the origin"]
 

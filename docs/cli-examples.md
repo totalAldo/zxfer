@@ -119,13 +119,11 @@ Replicates only `tank/apps/api`.
 ./zxfer -v -j 4 -R tank/projects backup/projects
 ```
 
-`-j` still controls the send/receive job ceiling, and on origin-side runs it
-also enables adaptive source snapshot discovery that can use GNU `parallel`
-when the validated helper is available. Local origin runs fall back to the
-serial discovery path when the helper is missing or is not GNU `parallel`.
-Remote origin runs still fall back for the explicit missing-helper case, but
-other remote helper probe or execution failures abort the run instead of being
-silently treated as a serial fallback.
+`-j` still controls the send/receive job ceiling. When `jobs > 1`, zxfer also
+uses the explicit per-dataset source-discovery path on the executing origin
+host instead of the serial recursive listing. Local-origin runs require GNU
+`parallel`; remote-origin runs through `-O` require a resolved origin-host
+`parallel` helper, and zxfer fails closed if that helper is missing.
 
 ### `-x pattern` Exclude datasets from a recursive run
 
@@ -251,8 +249,8 @@ Solaris or illumos wrapper-style host specs are supported:
 ```
 
 `-z` requires either `-O` or `-T`. On remote-origin runs that also use
-adaptive `-j` source discovery, the same validated compression/decompression
-pipeline is reused for the source snapshot-list metadata stream.
+`-j` source discovery, the same validated compression/decompression pipeline is
+reused for the source snapshot-list metadata stream.
 
 ### `-Z command` Use a custom `zstd` compressor command
 

@@ -1,6 +1,12 @@
 CHANGELOG
 =========
 
+2026.04.20
+-Remove adaptive source snapshot discovery for both local and remote origin runs, so `-j > 1` now always takes the direct per-dataset `parallel` listing path and fails closed instead of silently dropping to the serial recursive snapshot list; local-origin runs still validate GNU `parallel`, while remote-origin runs trust any resolved origin-host `parallel` helper.
+-Skip the remote `-O ... -j ...` dataset-count prepass entirely, eliminating the extra remote tree walk before source snapshot discovery begins and restoring the single-pass origin-host `parallel` behavior that upstream-compat-final benchmarks against.
+-Preload remote host capabilities with the full CLI-implied helper scope instead of a zfs-only bootstrap, so origin-host `parallel`, restore-property `cat`, and remote metadata compression helpers can reuse the warmed capability state instead of opening a second live probe later in startup.
+-Refresh the shunit, integration, coverage-baseline, README, man page, and operator docs to match the new explicit `-j` behavior, including local GNU `parallel` validation and remote origin-host `parallel` helper resolution without a second GNU-specific probe.
+
 2026.04.13
 -Standardize ssh control-socket locks and leases, remote capability-cache locks, and `ZXFER_ERROR_LOG` locks on one metadata-bearing owned-directory format that records pid, process-start identity, hostname, purpose, and creation time, reaps stale or corrupt owners after validation, and makes release a checked operation so stale bare-PID or metadata-free lock state no longer wedges later runs or disappears silently.
 -Release long-lived owned locks and leases through dedicated trap-time cleanup registration instead of generic runtime-artifact deletion, preserving the original zxfer exit status while still warning if trap cleanup cannot release an owned entry.
