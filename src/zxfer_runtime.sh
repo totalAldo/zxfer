@@ -103,73 +103,526 @@ zxfer_get_destination_dataset_for_source_dataset() {
 	esac
 }
 
-# Purpose: Register the cleanup PID with the tracking state owned by this
-# module.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup so cleanup
-# and later lookups can find the live resource.
-zxfer_register_cleanup_pid() {
-	l_pid=$1
+zxfer_get_cleanup_child_wrapper_script_path() {
+	l_cleanup_child_wrapper_script="${ZXFER_SOURCE_MODULES_ROOT:-.}/src/zxfer_cleanup_child_wrapper.sh"
+	[ -r "$l_cleanup_child_wrapper_script" ] || return 1
+	printf '%s\n' "$l_cleanup_child_wrapper_script"
+}
 
-	case "$l_pid" in
-	'' | *[!0-9]*)
+# Purpose: Reset the validated cleanup-helper tracking state so the next
+# runtime pass starts from a clean state.
+# Usage: Called during runtime bootstrap, staging, and trap cleanup before this
+# module reuses mutable scratch globals or cached decisions.
+zxfer_reset_cleanup_pid_tracking() {
+	g_zxfer_cleanup_pids=""
+	g_zxfer_cleanup_pid_records=""
+	g_zxfer_cleanup_pid_record_purpose=""
+	g_zxfer_cleanup_pid_record_start_token=""
+	g_zxfer_cleanup_pid_record_hostname=""
+	g_zxfer_cleanup_pid_record_pgid=""
+	g_zxfer_cleanup_pid_record_teardown_mode=""
+	g_zxfer_cleanup_pid_abort_failure_message=""
+	g_zxfer_cleanup_pid_process_snapshot_result=""
+	g_zxfer_cleanup_pid_set_result=""
+}
+
+zxfer_validate_cleanup_pid_teardown_mode() {
+	case "$1" in
+	child_set | process_group)
 		return 0
 		;;
 	esac
 
-	[ "$l_pid" = "$$" ] && return 0
-
-	for l_existing_pid in ${g_zxfer_cleanup_pids:-}; do
-		[ "$l_existing_pid" = "$l_pid" ] && return 0
-	done
-
-	if [ -n "${g_zxfer_cleanup_pids:-}" ]; then
-		g_zxfer_cleanup_pids="$g_zxfer_cleanup_pids $l_pid"
-	else
-		g_zxfer_cleanup_pids=$l_pid
-	fi
+	return 1
 }
 
-# Purpose: Remove the cleanup PID from the tracking state owned by this module.
+zxfer_read_cleanup_pid_process_group() {
+	l_cleanup_read_pgid_pid=$1
+	l_cleanup_read_pgid_value=$("${g_cmd_ps:-ps}" -o pgid= -p "$l_cleanup_read_pgid_pid" 2>/dev/null |
+		sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed -n '1p')
+
+	case "$l_cleanup_read_pgid_value" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+
+	printf '%s\n' "$l_cleanup_read_pgid_value"
+}
+
+zxfer_find_cleanup_pid_record() {
+	l_cleanup_find_pid=$1
+
+	g_zxfer_cleanup_pid_record_purpose=""
+	g_zxfer_cleanup_pid_record_start_token=""
+	g_zxfer_cleanup_pid_record_hostname=""
+	g_zxfer_cleanup_pid_record_pgid=""
+	g_zxfer_cleanup_pid_record_teardown_mode=""
+
+	while IFS='	' read -r l_cleanup_find_record_pid l_cleanup_find_record_purpose l_cleanup_find_record_start_token l_cleanup_find_record_hostname l_cleanup_find_record_pgid l_cleanup_find_record_teardown_mode || [ -n "${l_cleanup_find_record_pid}${l_cleanup_find_record_purpose}${l_cleanup_find_record_start_token}${l_cleanup_find_record_hostname}${l_cleanup_find_record_pgid}${l_cleanup_find_record_teardown_mode}" ]; do
+		[ -n "$l_cleanup_find_record_pid" ] || continue
+		[ "$l_cleanup_find_record_pid" = "$l_cleanup_find_pid" ] || continue
+		g_zxfer_cleanup_pid_record_purpose=$l_cleanup_find_record_purpose
+		g_zxfer_cleanup_pid_record_start_token=$l_cleanup_find_record_start_token
+		g_zxfer_cleanup_pid_record_hostname=$l_cleanup_find_record_hostname
+		g_zxfer_cleanup_pid_record_pgid=$l_cleanup_find_record_pgid
+		g_zxfer_cleanup_pid_record_teardown_mode=$l_cleanup_find_record_teardown_mode
+		return 0
+	done <<-EOF
+		${g_zxfer_cleanup_pid_records:-}
+	EOF
+
+	return 1
+}
+
+# Purpose: Register the cleanup helper with the tracking state owned by this
+# module.
+# Usage: Called during runtime bootstrap, staging, and trap cleanup so cleanup
+# and later lookups can validate the live helper before teardown.
+zxfer_register_cleanup_pid() {
+	l_cleanup_register_pid=$1
+	l_cleanup_register_purpose=${2:-cleanup helper}
+	l_cleanup_register_teardown_mode=${3:-child_set}
+	l_cleanup_register_had_record=0
+
+	case "$l_cleanup_register_pid" in
+	'' | *[!0-9]*)
+		return 0
+		;;
+	esac
+	[ "$l_cleanup_register_pid" = "$$" ] && return 0
+
+	if ! l_cleanup_register_purpose=$(zxfer_normalize_owned_lock_text_field "$l_cleanup_register_purpose"); then
+		return 1
+	fi
+	if ! zxfer_validate_cleanup_pid_teardown_mode "$l_cleanup_register_teardown_mode"; then
+		return 1
+	fi
+	if zxfer_find_cleanup_pid_record "$l_cleanup_register_pid"; then
+		l_cleanup_register_had_record=1
+	fi
+	if ! kill -s 0 "$l_cleanup_register_pid" 2>/dev/null; then
+		return 0
+	fi
+	if ! l_cleanup_register_start_token=$(zxfer_get_process_start_token "$l_cleanup_register_pid"); then
+		if ! kill -s 0 "$l_cleanup_register_pid" 2>/dev/null; then
+			return 0
+		fi
+		return 1
+	fi
+	if ! l_cleanup_register_hostname=$(zxfer_get_owned_lock_hostname); then
+		if ! kill -s 0 "$l_cleanup_register_pid" 2>/dev/null; then
+			return 0
+		fi
+		return 1
+	fi
+	if [ "$l_cleanup_register_had_record" -eq 1 ]; then
+		if [ "$g_zxfer_cleanup_pid_record_start_token" = "$l_cleanup_register_start_token" ] &&
+			[ "$g_zxfer_cleanup_pid_record_hostname" = "$l_cleanup_register_hostname" ]; then
+			return 0
+		fi
+		# Replace stale records when a numeric PID has been reused for a new
+		# helper before the old record was unregistered.
+		zxfer_unregister_cleanup_pid "$l_cleanup_register_pid"
+	fi
+	l_cleanup_register_pgid=$(zxfer_read_cleanup_pid_process_group "$l_cleanup_register_pid" 2>/dev/null || :)
+
+	if [ -n "${g_zxfer_cleanup_pid_records:-}" ]; then
+		g_zxfer_cleanup_pid_records=$g_zxfer_cleanup_pid_records"
+$l_cleanup_register_pid	$l_cleanup_register_purpose	$l_cleanup_register_start_token	$l_cleanup_register_hostname	$l_cleanup_register_pgid	$l_cleanup_register_teardown_mode"
+	else
+		g_zxfer_cleanup_pid_records="$l_cleanup_register_pid	$l_cleanup_register_purpose	$l_cleanup_register_start_token	$l_cleanup_register_hostname	$l_cleanup_register_pgid	$l_cleanup_register_teardown_mode"
+	fi
+	if [ -n "${g_zxfer_cleanup_pids:-}" ]; then
+		g_zxfer_cleanup_pids="$g_zxfer_cleanup_pids $l_cleanup_register_pid"
+	else
+		g_zxfer_cleanup_pids=$l_cleanup_register_pid
+	fi
+
+	return 0
+}
+
+# Purpose: Remove the cleanup helper from the tracking state owned by this
+# module.
 # Usage: Called during runtime bootstrap, staging, and trap cleanup after the
 # tracked resource has completed or been cleaned up.
 zxfer_unregister_cleanup_pid() {
-	l_pid=$1
-	l_remaining_pids=""
+	l_cleanup_unregister_pid=$1
+	l_cleanup_unregister_remaining_pids=""
+	l_cleanup_unregister_remaining_records=""
 
-	case "$l_pid" in
+	case "$l_cleanup_unregister_pid" in
 	'' | *[!0-9]*)
 		return 0
 		;;
 	esac
 
-	for l_existing_pid in ${g_zxfer_cleanup_pids:-}; do
-		[ "$l_existing_pid" = "$l_pid" ] && continue
-		if [ -n "$l_remaining_pids" ]; then
-			l_remaining_pids="$l_remaining_pids $l_existing_pid"
+	for l_cleanup_unregister_existing_pid in ${g_zxfer_cleanup_pids:-}; do
+		[ "$l_cleanup_unregister_existing_pid" = "$l_cleanup_unregister_pid" ] && continue
+		if [ -n "$l_cleanup_unregister_remaining_pids" ]; then
+			l_cleanup_unregister_remaining_pids="$l_cleanup_unregister_remaining_pids $l_cleanup_unregister_existing_pid"
 		else
-			l_remaining_pids=$l_existing_pid
+			l_cleanup_unregister_remaining_pids=$l_cleanup_unregister_existing_pid
 		fi
 	done
+	while IFS='	' read -r l_cleanup_unregister_record_pid l_cleanup_unregister_record_purpose l_cleanup_unregister_record_start_token l_cleanup_unregister_record_hostname l_cleanup_unregister_record_pgid l_cleanup_unregister_record_teardown_mode || [ -n "${l_cleanup_unregister_record_pid}${l_cleanup_unregister_record_purpose}${l_cleanup_unregister_record_start_token}${l_cleanup_unregister_record_hostname}${l_cleanup_unregister_record_pgid}${l_cleanup_unregister_record_teardown_mode}" ]; do
+		[ -n "$l_cleanup_unregister_record_pid" ] || continue
+		[ "$l_cleanup_unregister_record_pid" = "$l_cleanup_unregister_pid" ] && continue
+		if [ -n "$l_cleanup_unregister_remaining_records" ]; then
+			l_cleanup_unregister_remaining_records=$l_cleanup_unregister_remaining_records"
+$l_cleanup_unregister_record_pid	$l_cleanup_unregister_record_purpose	$l_cleanup_unregister_record_start_token	$l_cleanup_unregister_record_hostname	$l_cleanup_unregister_record_pgid	$l_cleanup_unregister_record_teardown_mode"
+		else
+			l_cleanup_unregister_remaining_records="$l_cleanup_unregister_record_pid	$l_cleanup_unregister_record_purpose	$l_cleanup_unregister_record_start_token	$l_cleanup_unregister_record_hostname	$l_cleanup_unregister_record_pgid	$l_cleanup_unregister_record_teardown_mode"
+		fi
+	done <<-EOF
+		${g_zxfer_cleanup_pid_records:-}
+	EOF
 
-	g_zxfer_cleanup_pids=$l_remaining_pids
+	g_zxfer_cleanup_pids=$l_cleanup_unregister_remaining_pids
+	g_zxfer_cleanup_pid_records=$l_cleanup_unregister_remaining_records
 }
 
-# Purpose: Kill the registered cleanup PIDs that this module still tracks.
+zxfer_read_cleanup_pid_process_snapshot() {
+	g_zxfer_cleanup_pid_process_snapshot_result=""
+	l_cleanup_process_snapshot=$("${g_cmd_ps:-ps}" -o pid= -o ppid= -o pgid= 2>/dev/null) || return 1
+	g_zxfer_cleanup_pid_process_snapshot_result=$l_cleanup_process_snapshot
+	printf '%s\n' "$l_cleanup_process_snapshot"
+}
+
+zxfer_cleanup_pid_snapshot_has_pid_with_pgid() {
+	l_cleanup_snapshot_check_snapshot=$1
+	l_cleanup_snapshot_check_pid=$2
+	l_cleanup_snapshot_check_pgid=$3
+
+	case "$l_cleanup_snapshot_check_pid" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+	case "$l_cleanup_snapshot_check_pgid" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+
+	# shellcheck disable=SC2016
+	printf '%s\n' "$l_cleanup_snapshot_check_snapshot" | "${g_cmd_awk:-awk}" -v want_pid="$l_cleanup_snapshot_check_pid" -v want_pgid="$l_cleanup_snapshot_check_pgid" '
+	$1 == want_pid && $3 == want_pgid {
+		found = 1
+	}
+	END {
+		exit(found ? 0 : 1)
+	}'
+}
+
+zxfer_cleanup_pid_snapshot_has_pid_with_parent() {
+	l_cleanup_snapshot_parent_check_snapshot=$1
+	l_cleanup_snapshot_parent_check_pid=$2
+	l_cleanup_snapshot_parent_check_parent_pid=$3
+
+	case "$l_cleanup_snapshot_parent_check_pid" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+	case "$l_cleanup_snapshot_parent_check_parent_pid" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+
+	# shellcheck disable=SC2016
+	printf '%s\n' "$l_cleanup_snapshot_parent_check_snapshot" | "${g_cmd_awk:-awk}" -v want_pid="$l_cleanup_snapshot_parent_check_pid" -v want_parent_pid="$l_cleanup_snapshot_parent_check_parent_pid" '
+	$1 == want_pid && $2 == want_parent_pid {
+		found = 1
+	}
+	END {
+		exit(found ? 0 : 1)
+	}'
+}
+
+zxfer_get_cleanup_pid_set() {
+	l_cleanup_pid_set_snapshot=$1
+	l_cleanup_pid_set_root_pid=$2
+
+	g_zxfer_cleanup_pid_set_result=""
+	# shellcheck disable=SC2016
+	l_cleanup_pid_set_raw=$(printf '%s\n' "$l_cleanup_pid_set_snapshot" | "${g_cmd_awk:-awk}" -v root="$l_cleanup_pid_set_root_pid" '
+	{
+		pid = $1
+		ppid = $2
+		if (pid != "") {
+			parent[pid] = ppid
+			seen[pid] = 1
+		}
+	}
+	END {
+		if (root == "") {
+			exit 1
+		}
+		target[root] = 1
+		changed = 1
+		while (changed) {
+			changed = 0
+			for (pid in seen) {
+				if ((parent[pid] in target) && !(pid in target)) {
+					target[pid] = 1
+					changed = 1
+				}
+			}
+		}
+		for (pid in target) {
+			print pid
+		}
+	}')
+	l_cleanup_pid_set_status=$?
+	[ "$l_cleanup_pid_set_status" -eq 0 ] || return "$l_cleanup_pid_set_status"
+	l_cleanup_pid_set_value=$(printf '%s\n' "$l_cleanup_pid_set_raw" | LC_ALL=C sort -n)
+	l_cleanup_pid_set_status=$?
+	[ "$l_cleanup_pid_set_status" -eq 0 ] || return "$l_cleanup_pid_set_status"
+	g_zxfer_cleanup_pid_set_result=$l_cleanup_pid_set_value
+	printf '%s\n' "$l_cleanup_pid_set_value"
+}
+
+zxfer_signal_cleanup_pid_set() {
+	l_cleanup_signal_pid_set=$1
+	l_cleanup_signal_name=$2
+	l_cleanup_signal_status=0
+
+	while IFS= read -r l_cleanup_signal_pid || [ -n "$l_cleanup_signal_pid" ]; do
+		[ -n "$l_cleanup_signal_pid" ] || continue
+		kill "-$l_cleanup_signal_name" "$l_cleanup_signal_pid" 2>/dev/null || l_cleanup_signal_status=1
+	done <<-EOF
+		$l_cleanup_signal_pid_set
+	EOF
+
+	return "$l_cleanup_signal_status"
+}
+
+zxfer_signal_cleanup_process_group() {
+	l_cleanup_signal_pgid=$1
+	l_cleanup_signal_name=$2
+
+	case "$l_cleanup_signal_pgid" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+
+	kill "-$l_cleanup_signal_name" "-$l_cleanup_signal_pgid" 2>/dev/null
+}
+
+zxfer_abort_direct_child_pid() {
+	l_cleanup_direct_abort_pid=$1
+	l_cleanup_direct_abort_signal=${2:-TERM}
+	l_cleanup_direct_abort_purpose=${3:-cleanup helper}
+	l_cleanup_direct_abort_signal_status=0
+
+	g_zxfer_cleanup_pid_abort_failure_message=""
+	case "$l_cleanup_direct_abort_pid" in
+	'' | *[!0-9]*)
+		return 0
+		;;
+	esac
+	[ "$l_cleanup_direct_abort_pid" = "$$" ] && return 1
+
+	if ! l_cleanup_direct_abort_purpose=$(zxfer_normalize_owned_lock_text_field "$l_cleanup_direct_abort_purpose"); then
+		return 1
+	fi
+	if ! kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null; then
+		return 0
+	fi
+	if ! zxfer_read_cleanup_pid_process_snapshot >/dev/null; then
+		g_zxfer_cleanup_pid_abort_failure_message="Failed to inspect the process table for cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid)."
+		return 1
+	fi
+	if ! zxfer_cleanup_pid_snapshot_has_pid_with_parent \
+		"$g_zxfer_cleanup_pid_process_snapshot_result" \
+		"$l_cleanup_direct_abort_pid" \
+		"$$"; then
+		if ! kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null; then
+			return 0
+		fi
+		g_zxfer_cleanup_pid_abort_failure_message="Refusing to tear down cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid) because it is no longer an owned child of the current zxfer process."
+		return 1
+	fi
+	if ! zxfer_get_cleanup_pid_set \
+		"$g_zxfer_cleanup_pid_process_snapshot_result" \
+		"$l_cleanup_direct_abort_pid" >/dev/null; then
+		g_zxfer_cleanup_pid_abort_failure_message="Failed to derive the owned child set for cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid)."
+		return 1
+	fi
+	l_cleanup_direct_abort_pid_set=$g_zxfer_cleanup_pid_set_result
+	[ -n "$l_cleanup_direct_abort_pid_set" ] || l_cleanup_direct_abort_pid_set=$l_cleanup_direct_abort_pid
+	zxfer_signal_cleanup_pid_set "$l_cleanup_direct_abort_pid_set" "$l_cleanup_direct_abort_signal" || l_cleanup_direct_abort_signal_status=1
+	if [ "$l_cleanup_direct_abort_signal_status" -ne 0 ]; then
+		if ! kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null; then
+			return 0
+		fi
+		g_zxfer_cleanup_pid_abort_failure_message="Failed to signal the owned child set for cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid)."
+		return 1
+	fi
+
+	return 0
+}
+
+zxfer_abort_cleanup_pid() {
+	l_cleanup_abort_pid=$1
+	l_cleanup_abort_signal=${2:-TERM}
+	l_cleanup_abort_signal_status=0
+	l_cleanup_abort_target_pid_set=""
+
+	g_zxfer_cleanup_pid_abort_failure_message=""
+	if ! zxfer_find_cleanup_pid_record "$l_cleanup_abort_pid"; then
+		if [ -n "${g_zxfer_cleanup_pids:-}" ]; then
+			case " ${g_zxfer_cleanup_pids:-} " in
+			*" $l_cleanup_abort_pid "*)
+				g_zxfer_cleanup_pid_abort_failure_message="Refusing to tear down cleanup helper [PID $l_cleanup_abort_pid] because no validated ownership record was found."
+				return 1
+				;;
+			esac
+		fi
+		return 0
+	fi
+
+	zxfer_owned_lock_owner_is_live \
+		"$l_cleanup_abort_pid" \
+		"$g_zxfer_cleanup_pid_record_start_token" \
+		"$g_zxfer_cleanup_pid_record_hostname"
+	l_cleanup_abort_live_status=$?
+	case "$l_cleanup_abort_live_status" in
+	0)
+		:
+		;;
+	1)
+		zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
+		return 0
+		;;
+	*)
+		g_zxfer_cleanup_pid_abort_failure_message="Failed to validate ownership for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
+		return 1
+		;;
+	esac
+
+	if ! zxfer_read_cleanup_pid_process_snapshot >/dev/null; then
+		g_zxfer_cleanup_pid_abort_failure_message="Failed to inspect the process table for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
+		return 1
+	fi
+
+	l_cleanup_abort_current_shell_pgid=$("${g_cmd_ps:-ps}" -o pgid= -p "$$" 2>/dev/null |
+		sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed -n '1p')
+	case ${g_zxfer_cleanup_pid_record_pgid:-} in
+	'' | *[!0-9]*)
+		l_cleanup_abort_use_process_group=0
+		;;
+	*)
+		l_cleanup_abort_use_process_group=0
+		if [ "${g_zxfer_cleanup_pid_record_teardown_mode:-}" = "process_group" ] &&
+			[ "$g_zxfer_cleanup_pid_record_pgid" != "${l_cleanup_abort_current_shell_pgid:-}" ] &&
+			zxfer_cleanup_pid_snapshot_has_pid_with_pgid \
+				"$g_zxfer_cleanup_pid_process_snapshot_result" \
+				"$l_cleanup_abort_pid" \
+				"$g_zxfer_cleanup_pid_record_pgid"; then
+			l_cleanup_abort_use_process_group=1
+		fi
+		;;
+	esac
+
+	if [ "$l_cleanup_abort_use_process_group" -eq 1 ]; then
+		zxfer_signal_cleanup_process_group "$g_zxfer_cleanup_pid_record_pgid" "$l_cleanup_abort_signal" || l_cleanup_abort_signal_status=1
+	else
+		if ! zxfer_get_cleanup_pid_set \
+			"$g_zxfer_cleanup_pid_process_snapshot_result" \
+			"$l_cleanup_abort_pid" >/dev/null; then
+			zxfer_owned_lock_owner_is_live \
+				"$l_cleanup_abort_pid" \
+				"$g_zxfer_cleanup_pid_record_start_token" \
+				"$g_zxfer_cleanup_pid_record_hostname"
+			l_cleanup_abort_live_status=$?
+			case "$l_cleanup_abort_live_status" in
+			1)
+				zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
+				return 0
+				;;
+			2)
+				g_zxfer_cleanup_pid_abort_failure_message="Failed to validate ownership for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
+				return 1
+				;;
+			esac
+			g_zxfer_cleanup_pid_abort_failure_message="Failed to derive the owned child set for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
+			return 1
+		fi
+		l_cleanup_abort_target_pid_set=$g_zxfer_cleanup_pid_set_result
+		[ -n "$l_cleanup_abort_target_pid_set" ] || l_cleanup_abort_target_pid_set=$l_cleanup_abort_pid
+		zxfer_signal_cleanup_pid_set "$l_cleanup_abort_target_pid_set" "$l_cleanup_abort_signal" || l_cleanup_abort_signal_status=1
+	fi
+
+	if [ "$l_cleanup_abort_signal_status" -ne 0 ]; then
+		zxfer_owned_lock_owner_is_live \
+			"$l_cleanup_abort_pid" \
+			"$g_zxfer_cleanup_pid_record_start_token" \
+			"$g_zxfer_cleanup_pid_record_hostname"
+		l_cleanup_abort_live_status=$?
+		case "$l_cleanup_abort_live_status" in
+		1)
+			zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
+			return 0
+			;;
+		2)
+			g_zxfer_cleanup_pid_abort_failure_message="Failed to validate ownership for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
+			return 1
+			;;
+		esac
+		g_zxfer_cleanup_pid_abort_failure_message="Failed to signal the validated teardown target for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
+		return 1
+	fi
+
+	zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
+	return 0
+}
+
+# Purpose: Stop the registered cleanup helpers that this module still tracks.
 # Usage: Called during runtime bootstrap, staging, and trap cleanup when
 # shutdown or failure handling must stop background work that should not
 # survive the current run.
 zxfer_kill_registered_cleanup_pids() {
-	for l_pid in ${g_zxfer_cleanup_pids:-}; do
-		case "$l_pid" in
+	l_cleanup_kill_abort_status=0
+	l_cleanup_kill_first_failure_message=""
+	l_cleanup_kill_tracked_pids=${g_zxfer_cleanup_pids:-}
+	l_cleanup_kill_remaining_pids=""
+
+	for l_cleanup_kill_pid in $l_cleanup_kill_tracked_pids; do
+		case "$l_cleanup_kill_pid" in
 		'' | *[!0-9]*)
 			continue
 			;;
 		esac
-		[ "$l_pid" = "$$" ] && continue
-		kill "$l_pid" 2>/dev/null || true
+		[ "$l_cleanup_kill_pid" = "$$" ] && continue
+		if ! zxfer_abort_cleanup_pid "$l_cleanup_kill_pid" TERM; then
+			[ -n "$l_cleanup_kill_first_failure_message" ] || l_cleanup_kill_first_failure_message=$g_zxfer_cleanup_pid_abort_failure_message
+			l_cleanup_kill_abort_status=1
+		fi
 	done
 
-	g_zxfer_cleanup_pids=""
+	if [ "$l_cleanup_kill_abort_status" -eq 0 ]; then
+		g_zxfer_cleanup_pid_abort_failure_message=""
+	fi
+	if [ -n "$l_cleanup_kill_first_failure_message" ]; then
+		g_zxfer_cleanup_pid_abort_failure_message=$l_cleanup_kill_first_failure_message
+	fi
+	while IFS='	' read -r l_cleanup_kill_record_pid l_cleanup_kill_record_purpose l_cleanup_kill_record_start_token l_cleanup_kill_record_hostname l_cleanup_kill_record_pgid l_cleanup_kill_record_teardown_mode || [ -n "${l_cleanup_kill_record_pid}${l_cleanup_kill_record_purpose}${l_cleanup_kill_record_start_token}${l_cleanup_kill_record_hostname}${l_cleanup_kill_record_pgid}${l_cleanup_kill_record_teardown_mode}" ]; do
+		[ -n "$l_cleanup_kill_record_pid" ] || continue
+		if [ -n "$l_cleanup_kill_remaining_pids" ]; then
+			l_cleanup_kill_remaining_pids="$l_cleanup_kill_remaining_pids $l_cleanup_kill_record_pid"
+		else
+			l_cleanup_kill_remaining_pids=$l_cleanup_kill_record_pid
+		fi
+	done <<-EOF
+		${g_zxfer_cleanup_pid_records:-}
+	EOF
+	g_zxfer_cleanup_pids=$l_cleanup_kill_remaining_pids
+
+	return "$l_cleanup_kill_abort_status"
 }
 
 # Purpose: List the default temporary directory candidates in the stable order
@@ -994,7 +1447,7 @@ zxfer_get_max_yield_iterations() {
 # bootstrap so downstream code sees consistent defaults and runtime state.
 zxfer_init_runtime_metadata() {
 	# zxfer version
-	g_zxfer_version="2.0.0-20260420"
+	g_zxfer_version="2.0.0-20260423"
 }
 
 # Purpose: Initialize the option defaults before later helpers depend on it.
@@ -1043,6 +1496,7 @@ zxfer_init_option_defaults() {
 # bootstrap so downstream code sees consistent defaults and runtime state.
 zxfer_init_dependency_tool_defaults() {
 	g_cmd_zfs=""
+	g_cmd_ssh=""
 
 	# default compression commands
 	g_cmd_compress="zstd -3"
@@ -1054,6 +1508,7 @@ zxfer_init_dependency_tool_defaults() {
 	g_target_cmd_compress_safe=""
 	g_target_cmd_decompress_safe=""
 	g_cmd_cat=""
+	g_cmd_ps=""
 
 	zxfer_assign_required_tool g_cmd_awk awk "awk"
 	zxfer_assign_required_tool g_cmd_zfs zfs "zfs"
@@ -1067,8 +1522,20 @@ zxfer_init_dependency_tool_defaults() {
 
 	# enable compression in ssh options so that remote snapshot lists that
 	# contain thousands of snapshots are compressed
-	zxfer_assign_required_tool g_cmd_ssh ssh "ssh"
+	zxfer_assign_required_tool g_cmd_ps ps "ps"
 	zxfer_refresh_compression_commands
+}
+
+# Purpose: Refresh the ssh control-socket capability flag from the current
+# local ssh helper state.
+# Usage: Called during runtime bootstrap, staging, and trap cleanup during
+# bootstrap and later lazy ssh resolution so downstream code can rely on one
+# cached support flag.
+zxfer_refresh_ssh_control_socket_support_state() {
+	g_ssh_supports_control_sockets=0
+	if zxfer_ssh_supports_control_sockets; then
+		g_ssh_supports_control_sockets=1
+	fi
 }
 
 # Purpose: Initialize the transport remote defaults before later helpers depend
@@ -1081,11 +1548,13 @@ zxfer_init_transport_remote_defaults() {
 	g_origin_remote_capabilities_cache_identity=""
 	g_origin_remote_capabilities_response=""
 	g_origin_remote_capabilities_bootstrap_source=""
+	g_origin_remote_capabilities_cache_write_unavailable=0
 	g_target_remote_capabilities_host=""
 	g_target_remote_capabilities_dependency_path=""
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
+	g_target_remote_capabilities_cache_write_unavailable=0
 	g_zxfer_remote_capability_response_result=""
 	g_zxfer_remote_capability_tool_records=""
 	g_zxfer_remote_capability_tool_status_result=""
@@ -1116,10 +1585,7 @@ zxfer_init_transport_remote_defaults() {
 	g_ssh_target_control_socket=""
 	g_ssh_target_control_socket_dir=""
 	g_ssh_target_control_socket_lease_file=""
-	g_ssh_supports_control_sockets=0
-	if zxfer_ssh_supports_control_sockets; then
-		g_ssh_supports_control_sockets=1
-	fi
+	zxfer_refresh_ssh_control_socket_support_state
 
 	# default zfs commands, can be overridden by -O or -T
 	g_LZFS=$g_cmd_zfs
@@ -1136,7 +1602,7 @@ zxfer_init_runtime_state_defaults() {
 	g_zxfer_new_snapshot_name=zxfer_$$_$(date +%Y%m%d%H%M%S)
 
 	# profiling and session-scoped scratch state
-	g_zxfer_cleanup_pids=""
+	zxfer_reset_cleanup_pid_tracking
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
 	g_zxfer_temp_file_result=""
@@ -1280,6 +1746,9 @@ zxfer_init_globals() {
 	if command -v zxfer_reset_send_receive_state >/dev/null 2>&1; then
 		zxfer_reset_send_receive_state
 	fi
+	if command -v zxfer_reset_background_job_state >/dev/null 2>&1; then
+		zxfer_reset_background_job_state
+	fi
 	if command -v zxfer_reset_destination_existence_cache >/dev/null 2>&1; then
 		zxfer_reset_destination_existence_cache
 	fi
@@ -1324,13 +1793,37 @@ zxfer_trap_exit() {
 	# Only terminate zxfer-owned background processes. Killing every direct child
 	# of the shell is too broad and can clobber coverage helpers or command
 	# substitution plumbing in the caller.
-	zxfer_kill_registered_cleanup_pids
+	if command -v zxfer_abort_all_background_jobs >/dev/null 2>&1; then
+		if ! zxfer_abort_all_background_jobs; then
+			[ "$l_exit_status" -eq 0 ] && l_exit_status=1
+			g_zxfer_failure_class=runtime
+			g_zxfer_failure_stage="trap cleanup"
+			g_zxfer_failure_message=${g_zxfer_background_job_abort_failure_message:-Failed to tear down one or more supervised background jobs during exit.}
+		fi
+	fi
+	if ! zxfer_kill_registered_cleanup_pids; then
+		[ "$l_exit_status" -eq 0 ] && l_exit_status=1
+		if [ -z "${g_zxfer_failure_message:-}" ]; then
+			g_zxfer_failure_class=runtime
+			g_zxfer_failure_stage="trap cleanup"
+			g_zxfer_failure_message=${g_zxfer_cleanup_pid_abort_failure_message:-Failed to tear down one or more validated cleanup helpers during exit.}
+		fi
+	fi
 
 	if command -v zxfer_close_all_ssh_control_sockets >/dev/null 2>&1; then
-		# Transport teardown is best-effort during trap cleanup: preserve the
-		# original exit flow and continue runtime cleanup/reporting even when ssh
-		# control socket shutdown fails late.
-		zxfer_close_all_ssh_control_sockets || :
+		if zxfer_close_all_ssh_control_sockets; then
+			:
+		else
+			l_close_status=$?
+			if [ "$l_exit_status" -eq 0 ]; then
+				l_exit_status=$l_close_status
+				if [ -z "${g_zxfer_failure_message:-}" ]; then
+					g_zxfer_failure_class=runtime
+					g_zxfer_failure_stage="trap cleanup"
+					g_zxfer_failure_message="Failed to close one or more ssh control sockets during exit."
+				fi
+			fi
+		fi
 	fi
 	if command -v zxfer_release_registered_owned_locks >/dev/null 2>&1; then
 		zxfer_release_registered_owned_locks || :
@@ -1425,7 +1918,9 @@ zxfer_init_source_execution_context() {
 			g_origin_cmd_zfs=${g_origin_cmd_zfs:-$g_cmd_zfs}
 			if [ "$g_option_z_compress" -eq 1 ] &&
 				[ -z "${g_origin_cmd_compress_safe:-}" ]; then
-				g_origin_cmd_compress_safe=$(zxfer_quote_cli_tokens "$g_cmd_compress")
+				if ! g_origin_cmd_compress_safe=$(zxfer_quote_cli_tokens "$g_cmd_compress" "compression command"); then
+					zxfer_throw_error "$g_origin_cmd_compress_safe"
+				fi
 			fi
 			zxfer_echoV "Dry run: skipping live remote source helper validation."
 			return
@@ -1462,7 +1957,9 @@ zxfer_init_destination_execution_context() {
 			g_target_cmd_zfs=${g_target_cmd_zfs:-$g_cmd_zfs}
 			if [ "$g_option_z_compress" -eq 1 ] &&
 				[ -z "${g_target_cmd_decompress_safe:-}" ]; then
-				g_target_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress")
+				if ! g_target_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress" "decompression command"); then
+					zxfer_throw_error "$g_target_cmd_decompress_safe"
+				fi
 			fi
 			zxfer_echoV "Dry run: skipping live remote destination helper validation."
 			return

@@ -1,0 +1,4 @@
+interface:
+  display_name: "zxfer Validation Plan"
+  short_description: "Choose safe zxfer validation steps"
+  default_prompt: "Use $zxfer-validation-plan to choose validation commands for this zxfer change."

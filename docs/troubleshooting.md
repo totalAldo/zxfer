@@ -68,6 +68,8 @@ What it usually means:
 - remote `parallel` or `zstd` was missing or misresolved, so the rendered
   snapshot-list command could not execute
 - source dataset naming or quoting was wrong on the remote side
+- the supervisor could not write or publish the source snapshot-discovery
+  completion record even though the source-side listing command already ran
 
 What to inspect:
 
@@ -79,6 +81,51 @@ What to inspect:
   data, waiting on an in-run cache fill, or falling back to a direct remote
   helper probe path
 - any shell quoting problems on the remote host
+- whether the failure was one of:
+  `Failed to read source snapshot discovery completion metadata.`,
+  `Failed to publish source snapshot discovery completion.`, or
+  `Failed to report source snapshot discovery completion.`
+- the per-job supervisor control directory under the runtime temp root,
+  especially `launch.tsv` and `completion.tsv`, plus temp-root permissions if
+  the failure points at completion metadata rather than the `zfs list` itself
+
+## Background Completion Failures
+
+Examples:
+
+```text
+Failed to read zfs send/receive completion metadata for [tank/src@snap2 -> backup/dst].
+Failed to publish zfs send/receive background completion for [tank/src@snap2 -> backup/dst] (PID 12345, exit 0).
+Failed to report zfs send/receive background completion for [tank/src@snap2 -> backup/dst] (PID 12345, exit 1).
+```
+
+What it usually means:
+
+- the long-lived background worker finished, but the supervisor could not write
+  or reload `completion.tsv`
+- the completion queue notification could not be published back to the parent
+  process
+- the runtime temp root or the per-job control directory became unreadable,
+  unwritable, or was removed mid-run
+- a true cleanup failure usually means zxfer still saw a live owned runner
+  after refreshing the process snapshot; completed jobs and runners that exit
+  during the teardown-signal race are now treated as already finished instead
+
+What to inspect:
+
+- stderr failure report and `last_command`
+- temp-root ownership and permissions
+- the first dataset-aware `zfs send/receive job failed for [...]` line earlier in
+  stderr, because later `zstd: unexpected end of file` or `cannot receive:
+  failed to read from stream` messages are often collateral after zxfer aborts
+  sibling background jobs on the first real failure
+- whether the corresponding supervisor control directory still contains
+  `launch.tsv` and `completion.tsv`
+- whether the failure is isolated to queue publication (`publish`) or
+  completion-file persistence/readback (`read` / `report`)
+- if `completion.tsv` is already present, treat later process-table read
+  failures during trap cleanup as collateral and focus on the earlier
+  dataset-specific failure instead
 
 ## Backup Metadata Restore Failures
 
@@ -153,22 +200,24 @@ bare pid files. Older plain ssh lease files and pid-only lock directories from
 pre-metadata releases are unsupported; remove the stale entry or cache root if
 zxfer reuses one during a rollout.
 
-By default that block keeps `invocation` and `last_command` verbatim, so avoid
-putting secret-bearing hook strings or wrapper arguments on the zxfer command
-line unless you first enable redaction:
+By default that block redacts `invocation` and `last_command` as `[redacted]`,
+so routine failure logs do not capture raw command lines. If you explicitly
+need verbatim command text during local debugging, you can opt into the unsafe
+mode:
 
 ```sh
-ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1 \
+ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 \
 ZXFER_ERROR_LOG=/var/log/zxfer/error.log \
 ./zxfer -v -R tank/src backup/dst
 ```
 
-With redaction enabled, those two fields are replaced with `[redacted]` in both
-`stderr` and `ZXFER_ERROR_LOG`.
+With `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1`, those two fields are emitted
+verbatim in both `stderr` and `ZXFER_ERROR_LOG`, so use that mode only for
+deliberate local debugging on trusted log sinks.
 
-Even without redaction, zxfer now escapes raw ASCII control bytes in structured
-failure-report values before writing them, so terminal control sequences are
-rendered inert in both `stderr` and `ZXFER_ERROR_LOG`.
+Even in unsafe verbatim mode, zxfer escapes raw ASCII control bytes in
+structured failure-report values before writing them, so terminal control
+sequences are rendered inert in both `stderr` and `ZXFER_ERROR_LOG`.
 
 To extract the newest report from an existing log:
 
@@ -215,9 +264,10 @@ example auto-detects those mailers, accepts `MAIL_FROM`,
 requirements, rejects multiline `sendmail` header values in `ALERT_TO` and
 `MAIL_FROM`, can iterate sequentially across a whitespace-separated
 `SRC_DATASETS` list, includes stderr warnings outside the structured failure
-block in the alert body, inherits
-`ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1` when you want the mailed report to
-hide `invocation` and `last_command`, and can be validated with
+block in the alert body, inherits the default safe redaction, and honors
+`ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1` only when you deliberately want the
+mailed report to include verbatim `invocation` and `last_command`. The wrapper
+can be validated with
 `sh ./examples/error-log-email-notify.sh --self-test` before you point it at a
 real pool or MTA.
 

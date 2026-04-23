@@ -21,6 +21,18 @@
 3. **Maintainability & Ease of Development** – keep the codebase simple to understand, test, and modify.
 4. **Performance** – improve throughput only after the other priorities are satisfied and documented.
 
+## Model Guidance
+- Keep this file model-agnostic. Do not add instructions that depend on a specific frontier model version unless a repository workflow truly requires it.
+- When model behavior, OpenAI API behavior, or Codex tooling matters, consult current official OpenAI/Codex docs during the task and prefer those docs over remembered release details.
+- Favor zxfer-specific safety, security, compatibility, and validation rules over generic model-prompting tips.
+
+## Agent Operating Loop
+- Gather targeted repository context before asking product or implementation questions. Prefer `rg`, relevant source modules, tests, docs, and man pages over assumptions.
+- For multi-step work, maintain a visible checklist when the active tooling supports it and update it as the work changes.
+- Use matching repo-scoped skills from `.agents/skills` for repeatable zxfer workflows such as PR review, validation planning, platform portability checks, and release-doc review.
+- Before notable or risky tool use, give a concise preamble that says what context or validation the tool call is meant to provide.
+- Continue through implementation, validation, self-review of the diff, and a final safety/security/compatibility summary unless blocked by missing input, unavailable tooling, or an explicit user stop.
+
 ## Safety Expectations
 - Treat every command as if it will run on a production host; avoid destructive ZFS operations unless explicitly scoped to throwaway sparse files created by the tests.
 - Prefer reviewing the focused helpers in `src/zxfer_reporting.sh`, `src/zxfer_exec.sh`, `src/zxfer_runtime.sh`, `src/zxfer_cli.sh`, `src/zxfer_dependencies.sh`, `src/zxfer_remote_hosts.sh`, `src/zxfer_path_security.sh`, and `src/zxfer_snapshot_state.sh` before re-implementing logic—many guardrails (argument validation, quoting, dependency lookup, snapshot sanity checks, logging helpers) already exist.
@@ -62,9 +74,15 @@
 - Measure before optimizing. Capture representative timings during manual integration tests when they are performed and summarize them in the PR or commit message.
 - Keep resource usage configurable (env vars or flags) instead of hard-coding aggressive defaults.
 
+## Review Expectations
+- In review mode, lead with findings ordered by severity and grounded in file/line references.
+- Prioritize safety, security, replication correctness, missing tests, public-interface drift, and docs drift over cosmetic issues.
+- Avoid low-signal style findings unless they materially affect maintainability, portability, safety, or operator clarity.
+- Call out residual risk and test gaps after findings; if no issues are found, say so directly and still note what was not verified.
+
 ## Patterns & Best Practices for Agents
-- **Collect context first:** read `README.md`, `CHANGELOG.txt`, the relevant man page/example, the scripts you plan to touch, and the matching `tests/test_*.sh` coverage before editing. Also read `docs/testing.md`, `docs/platforms.md`, `docs/architecture.md`, `KNOWN_ISSUES.md`, and `SECURITY.md` when the change touches validation flow, platform behavior, architecture/state ownership, known open risks, or trust boundaries. Use `rg` for targeted searches and avoid assumptions about legacy behavior.
-- **Plan before executing:** outline the approach (especially for anything touching ZFS send/receive) and share it with the user when changes affect replication semantics or dataset deletion.
+- **Collect context first:** read `README.md`, `CHANGELOG.txt`, the relevant man page/example, the scripts you plan to touch, and the matching `tests/test_*.sh` coverage before editing. Also read `docs/testing.md`, `docs/platforms.md`, `docs/architecture.md`, `KNOWN_ISSUES.md`, and `SECURITY.md` when the change touches validation flow, platform behavior, architecture/state ownership, known open risks, or trust boundaries.
+- **Plan before executing:** outline the approach, especially for anything touching ZFS send/receive, replication semantics, or dataset deletion.
 - **Edit safely:** prefer `apply_patch` for small changes, keep modifications minimal, and never revert user edits unless asked. When updating shell code, mirror the project’s indentation (tabs), naming (`zxfer_`, `g_`, `g_option_*`, `l_`), and quoting style, and prefer the shared execution, dependency, and reporting helpers over new ad hoc plumbing.
 - **Validate continuously:** when changing shell logic, run `./tests/run_shunit_tests.sh`, `./tests/run_lint.sh`, and `ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh`. Use targeted suites for faster iteration before the full pass. When the work changes coverage behavior or the expected covered surface, review `tests/coverage_policy.tsv` and `tests/coverage_baseline/bash-xtrace/` deliberately rather than only looking at generated reports. An automated agent may additionally run `tests/run_vm_matrix.sh` when a disposable guest boundary is available and the work benefits from automatic integration coverage, but must not run `tests/run_integration_zxfer.sh` directly on the host. Automatic VM-backed validation should stay on `--profile smoke` or `--profile local`; do not have the agent auto-run `--profile full`, `--profile ci`, or slow emulated guests such as OmniOS on macOS/arm64 hosts. When integration coverage is needed during iteration, tighten the loop first with `tests/run_vm_matrix.sh --profile local --guest ... --only-test ...` so the agent reruns only the affected in-guest cases before widening back out manually when a human chooses to do so.
 - **Explain trade-offs:** whenever a change impacts the priority stack, call out how safety/security were preserved, how maintainability was affected, and why performance adjustments are justified.

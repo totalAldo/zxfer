@@ -181,6 +181,60 @@ test_vm_download_and_verify_file_marks_cached_state() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_refresh_cached_download_uses_cached_copy_when_refresh_fails() {
+	mock_bin="$TEST_TMPDIR/mock-bin-refresh-cached"
+	checksum_file="$TEST_TMPDIR/SHA256SUMS"
+	mkdir -p "$mock_bin"
+	printf '%s\n' "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 ubuntu-24.04-server-cloudimg-arm64.img" >"$checksum_file"
+
+	cat <<'EOF' >"$mock_bin/curl"
+#!/bin/sh
+exit 6
+EOF
+	chmod 700 "$mock_bin/curl"
+
+	zxfer_test_capture_subshell "
+		PATH=\"$mock_bin:\$PATH\"
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		zxfer_vm_refresh_cached_download 'https://example.invalid/SHA256SUMS' \"$checksum_file\" 'Ubuntu 24.04/arm64' 'checksum manifest SHA256SUMS'
+		cat \"$checksum_file\"
+	"
+
+	assertEquals "Cached checksum manifests should allow offline VM reruns when refresh fails." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The refresh helper should warn when it reuses a cached manifest after a download failure." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "reusing cached copy"
+	assertContains "The refresh helper should preserve the existing manifest contents when it falls back to cache." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ubuntu-24.04-server-cloudimg-arm64.img"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_refresh_cached_download_fails_without_cached_copy() {
+	mock_bin="$TEST_TMPDIR/mock-bin-refresh-miss"
+	checksum_file="$TEST_TMPDIR/missing.SHA256SUMS"
+	mkdir -p "$mock_bin"
+
+	cat <<'EOF' >"$mock_bin/curl"
+#!/bin/sh
+exit 6
+EOF
+	chmod 700 "$mock_bin/curl"
+
+	zxfer_test_capture_subshell "
+		PATH=\"$mock_bin:\$PATH\"
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		zxfer_vm_refresh_cached_download 'https://example.invalid/SHA256SUMS' \"$checksum_file\" 'Ubuntu 24.04/arm64' 'checksum manifest SHA256SUMS'
+	"
+
+	assertEquals "Checksum refresh should still fail closed when no cached manifest exists." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The refresh helper should keep the original download failure when it cannot reuse a cache." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to download https://example.invalid/SHA256SUMS"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_decompress_archive_marks_cached_state() {
 	base_image="$TEST_TMPDIR/base-image.qcow2"
 	printf '%s\n' "base-image" >"$base_image"
@@ -709,31 +763,39 @@ test_vm_run_selected_guests_parallel_propagates_failures() {
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_handle_signal_stops_background_guests_and_exits_with_signal_status() {
-	signal_marker="$TEST_TMPDIR/signal-cleanup.marker"
-
 	zxfer_test_capture_subshell "
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		(
-			trap 'printf \"%s\\n\" cleaned >\"$signal_marker\"; exit 0' TERM
-			while :; do
-				sleep 1
-			done
-		) &
-		l_pid=\$!
-		zxfer_vm_register_background_pid \"\$l_pid\"
+		ZXFER_VM_ACTIVE_BACKGROUND_PIDS='101 202'
+		zxfer_vm_stop_active_background_guests() {
+			printf 'stop=%s:%s\\n' \"\$1\" \"\$ZXFER_VM_ACTIVE_BACKGROUND_PIDS\"
+		}
+		zxfer_vm_wait_for_active_background_guests() {
+			printf 'wait=%s\\n' \"\$ZXFER_VM_ACTIVE_BACKGROUND_PIDS\"
+			ZXFER_VM_ACTIVE_BACKGROUND_PIDS=
+		}
+		zxfer_vm_cleanup_runner_state() {
+			printf '%s\\n' 'cleanup=1'
+		}
 		zxfer_vm_handle_signal INT
 	"
 
 	assertEquals "Signal handling should exit with the conventional SIGINT status." \
 		130 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Signal handling should wait for active guest workers to clean up." \
-		"cleaned" "$(cat "$signal_marker")"
+	assertContains "Signal handling should stop the tracked guest workers with TERM." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "stop=TERM:101 202"
+	assertContains "Signal handling should wait for the tracked guest workers before exiting." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "wait=101 202"
+	assertContains "Signal handling should still clean up runner state before exiting." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "cleanup=1"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_run_command_with_captured_output_streams_when_enabled() {
-	zxfer_test_capture_subshell "
+	stdout_capture="$TEST_TMPDIR/stream.capture.stdout"
+	stderr_capture="$TEST_TMPDIR/stream.capture.stderr"
+
+	zxfer_test_capture_subshell_split "$stdout_capture" "$stderr_capture" "
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
 		ZXFER_VM_STREAM_GUEST_OUTPUT=1
@@ -750,13 +812,13 @@ test_vm_run_command_with_captured_output_streams_when_enabled() {
 	assertEquals "Streaming guest output should not fail the helper on successful commands." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "The helper should mirror stdout lines to the console with a prefix." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "[stream stdout] stdout-line"
+		"$(cat "$stdout_capture")" "[stream stdout] stdout-line"
 	assertContains "The helper should mirror stderr lines to the console with a prefix." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "[stream stderr] stderr-line"
+		"$(cat "$stderr_capture")" "[stream stderr] stderr-line"
 	assertContains "The helper should still write stdout to the artifact file." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "stdout-file=stdout-line"
+		"$(cat "$stdout_capture")" "stdout-file=stdout-line"
 	assertContains "The helper should still write stderr to the artifact file." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "stderr-file=stderr-line"
+		"$(cat "$stdout_capture")$(cat "$stderr_capture")" "stderr-file=stderr-line"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -781,7 +843,11 @@ EOF
 	done
 
 	zxfer_test_capture_subshell "
-		PATH=\"$FAKE_BIN_DIR:/usr/bin:/bin\" \"$VM_MATRIX_BIN\" --profile smoke --backend qemu
+		PATH=\"$FAKE_BIN_DIR:/usr/bin:/bin\"
+		ZXFER_VM_UNAME_S=Linux
+		ZXFER_VM_UNAME_M=x86_64
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_main --profile smoke --backend qemu
 	"
 
 	assertEquals "The runner should fail when qemu-system-x86_64 is unavailable." 1 "$ZXFER_TEST_CAPTURE_STATUS"

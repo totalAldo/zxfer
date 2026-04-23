@@ -221,6 +221,139 @@ test_owned_lock_text_and_procfs_helpers_cover_current_shell_paths() {
 		"$output" "invalid_pid=1"
 }
 
+test_zxfer_normalize_owned_lock_text_field_runs_in_current_shell() {
+	tab=$(printf '\t')
+	normalized_value=$(zxfer_normalize_owned_lock_text_field "  owned${tab}lock   value  ")
+
+	assertEquals "Current-shell owned-lock text normalization should trim and squeeze whitespace in one validated pass." \
+		"owned lock value" "$normalized_value"
+}
+
+test_zxfer_get_process_start_token_from_procfs_falls_back_to_btime_when_boot_id_is_unusable() {
+	if [ ! -r "/proc/$$/stat" ]; then
+		assertTrue "Procfs start-token fallback coverage is skipped on hosts without readable /proc support." "true"
+		return 0
+	fi
+
+	fake_tools_dir="$TEST_TMPDIR/procfs_fallback_tools"
+	real_cat=$(command -v cat)
+	real_awk=$(command -v awk)
+	mkdir -p "$fake_tools_dir" || fail "Unable to create fake procfs helper directory."
+	cat >"$fake_tools_dir/cat" <<EOF
+#!/bin/sh
+case "\$1" in
+/proc/sys/kernel/random/boot_id)
+	printf '   \n'
+	;;
+*)
+	exec "$real_cat" "\$@"
+	;;
+esac
+EOF
+	chmod 755 "$fake_tools_dir/cat" || fail "Unable to chmod fake cat helper."
+	cat >"$fake_tools_dir/awk" <<EOF
+#!/bin/sh
+if [ "\$#" -ge 2 ] && [ "\$2" = "/proc/stat" ]; then
+	printf '%s\n' "123456"
+	exit 0
+fi
+exec "$real_awk" "\$@"
+EOF
+	chmod 755 "$fake_tools_dir/awk" || fail "Unable to chmod fake awk helper."
+
+	output=$(
+		(
+			set +e
+			PATH="$fake_tools_dir:$PATH"
+			token=$(zxfer_get_process_start_token_from_procfs "$$")
+			printf 'status=%s\n' "$?"
+			printf 'token=%s\n' "$token"
+		)
+	)
+
+	assertContains "Procfs start-token lookup should still succeed when it must fall back from boot_id to btime." \
+		"$output" "status=0"
+	assertContains "Procfs start-token lookup should encode the fallback btime value in the returned token." \
+		"$output" "token=procfs:123456:"
+}
+
+test_zxfer_get_process_start_token_from_procfs_uses_unknown_boot_identity_when_boot_id_and_btime_are_unusable() {
+	if [ ! -r "/proc/$$/stat" ]; then
+		assertTrue "Procfs unknown-boot fallback coverage is skipped on hosts without readable /proc support." "true"
+		return 0
+	fi
+
+	fake_tools_dir="$TEST_TMPDIR/procfs_unknown_tools"
+	real_cat=$(command -v cat)
+	real_awk=$(command -v awk)
+	saved_path=$PATH
+	mkdir -p "$fake_tools_dir" || fail "Unable to create fake procfs helper directory."
+	cat >"$fake_tools_dir/cat" <<EOF
+#!/bin/sh
+case "\$1" in
+/proc/sys/kernel/random/boot_id)
+	printf '   \n'
+	;;
+*)
+	exec "$real_cat" "\$@"
+	;;
+esac
+EOF
+	chmod 755 "$fake_tools_dir/cat" || fail "Unable to chmod fake cat helper."
+	cat >"$fake_tools_dir/awk" <<EOF
+#!/bin/sh
+if [ "\$#" -ge 2 ] && [ "\$2" = "/proc/stat" ]; then
+	printf '   \n'
+	exit 0
+fi
+exec "$real_awk" "\$@"
+EOF
+	chmod 755 "$fake_tools_dir/awk" || fail "Unable to chmod fake awk helper."
+
+	PATH="$fake_tools_dir:$PATH"
+	token=$(zxfer_get_process_start_token_from_procfs "$$")
+	status=$?
+	PATH=$saved_path
+
+	assertEquals "Procfs start-token lookup should still succeed when both boot_id and btime normalization fail." \
+		0 "$status"
+	assertContains "Procfs start-token lookup should fall back to an unknown boot identity when no normalized boot marker is available." \
+		"$token" "procfs:unknown:"
+}
+
+test_zxfer_get_process_start_token_from_procfs_rejects_proc_stat_without_start_field_in_current_shell() {
+	if [ ! -r "/proc/$$/stat" ]; then
+		assertTrue "Procfs stat-shape validation coverage is skipped on hosts without readable /proc support." "true"
+		return 0
+	fi
+
+	fake_tools_dir="$TEST_TMPDIR/procfs_short_stat_tools"
+	saved_path=$PATH
+	mkdir -p "$fake_tools_dir" || fail "Unable to create fake procfs short-stat helper directory."
+	cat >"$fake_tools_dir/cat" <<EOF
+#!/bin/sh
+case "\$1" in
+/proc/$$/stat)
+	printf '%s\n' "$$ (zxfer) S 1 2 3"
+	;;
+*)
+	exec /bin/cat "\$@"
+	;;
+esac
+EOF
+	chmod 755 "$fake_tools_dir/cat" || fail "Unable to chmod fake cat helper."
+
+	PATH="$fake_tools_dir:$PATH"
+	set +e
+	zxfer_get_process_start_token_from_procfs "$$" >/dev/null
+	status=$?
+	set -e
+	PATH=$saved_path
+
+	assertEquals "Procfs start-token lookup should fail closed when /proc stat data does not include a parseable start field." \
+		1 "$status"
+}
+
 test_owned_lock_validation_helpers_reject_insecure_paths() {
 	lock_dir="$TEST_TMPDIR/insecure.lock"
 	metadata_path="$lock_dir/metadata"
@@ -248,32 +381,46 @@ test_owned_lock_validation_helpers_reject_insecure_paths() {
 
 test_zxfer_create_and_load_owned_lock_metadata_round_trip() {
 	lock_dir="$TEST_TMPDIR/roundtrip.lock"
+	output=$(
+		(
+			set +e
+			zxfer_create_owned_lock_dir "$lock_dir" lock "roundtrip-lock" >/dev/null
+			printf 'create=%s\n' "$?"
+			if [ -f "$lock_dir/metadata" ]; then
+				printf 'metadata=yes\n'
+			else
+				printf 'metadata=no\n'
+			fi
+			zxfer_load_owned_lock_metadata_for_kind_and_purpose \
+				"$lock_dir" lock "roundtrip-lock"
+			printf 'load=%s\n' "$?"
+			printf 'kind=<%s>\n' "$g_zxfer_owned_lock_kind_result"
+			printf 'purpose=<%s>\n' "$g_zxfer_owned_lock_purpose_result"
+			printf 'pid=<%s>\n' "$g_zxfer_owned_lock_pid_result"
+			printf 'start_token=<%s>\n' "$g_zxfer_owned_lock_start_token_result"
+			printf 'hostname=<%s>\n' "$g_zxfer_owned_lock_hostname_result"
+			printf 'created_at=<%s>\n' "$g_zxfer_owned_lock_created_at_result"
+		)
+	)
 
-	zxfer_create_owned_lock_dir "$lock_dir" lock "roundtrip-lock" >/dev/null
-	status=$?
-	assertEquals "Owned lock creation should succeed for a valid metadata-backed lock dir." \
-		0 "$status"
-	assertTrue "Owned lock creation should create the metadata file." \
-		"[ -f '$lock_dir/metadata' ]"
-
-	zxfer_load_owned_lock_metadata_for_kind_and_purpose \
-		"$lock_dir" lock "roundtrip-lock"
-	status=$?
-
-	assertEquals "Owned lock metadata should reload cleanly after creation." \
-		0 "$status"
-	assertEquals "Owned lock metadata should preserve the lock kind." \
-		"lock" "$g_zxfer_owned_lock_kind_result"
-	assertEquals "Owned lock metadata should preserve the normalized purpose." \
-		"roundtrip-lock" "$g_zxfer_owned_lock_purpose_result"
-	assertEquals "Owned lock metadata should preserve the owning pid." \
-		"$$" "$g_zxfer_owned_lock_pid_result"
-	assertNotEquals "Owned lock metadata should preserve the process-start token." \
-		"" "$g_zxfer_owned_lock_start_token_result"
-	assertNotEquals "Owned lock metadata should preserve the hostname." \
-		"" "$g_zxfer_owned_lock_hostname_result"
-	assertNotEquals "Owned lock metadata should preserve the creation timestamp." \
-		"" "$g_zxfer_owned_lock_created_at_result"
+	assertContains "Owned lock creation should succeed for a valid metadata-backed lock dir." \
+		"$output" "create=0"
+	assertContains "Owned lock creation should create the metadata file." \
+		"$output" "metadata=yes"
+	assertContains "Owned lock metadata should reload cleanly after creation." \
+		"$output" "load=0"
+	assertContains "Owned lock metadata should preserve the lock kind." \
+		"$output" "kind=<lock>"
+	assertContains "Owned lock metadata should preserve the normalized purpose." \
+		"$output" "purpose=<roundtrip-lock>"
+	assertContains "Owned lock metadata should preserve the owning pid." \
+		"$output" "pid=<$$>"
+	assertNotContains "Owned lock metadata should preserve a non-empty process-start token." \
+		"$output" "start_token=<>"
+	assertNotContains "Owned lock metadata should preserve a non-empty hostname." \
+		"$output" "hostname=<>"
+	assertNotContains "Owned lock metadata should preserve a non-empty creation timestamp." \
+		"$output" "created_at=<>"
 }
 
 test_zxfer_write_and_parse_owned_lock_metadata_file_cover_success_paths_in_current_shell() {
@@ -793,14 +940,25 @@ test_zxfer_create_owned_lock_dir_in_parent_and_release_owned_locks_cover_success
 	chmod 700 "$parent_dir" || fail "Unable to chmod owned lock parent directory."
 	chmod 755 "$insecure_parent_dir" || fail "Unable to chmod insecure owned lock parent directory."
 
-	lock_dir=$(zxfer_create_owned_lock_dir_in_parent \
-		"$parent_dir" "lease" lease "lease-purpose")
-	create_status=$?
-	zxfer_current_process_owns_owned_lock_dir "$lock_dir" lease "lease-purpose"
-	owns_status=$?
-	zxfer_register_owned_lock_path "$lock_dir"
-	zxfer_release_owned_lock_dir "$lock_dir" lease "lease-purpose" >/dev/null
-	release_status=$?
+	success_output=$(
+		(
+			set +e
+			lock_dir=$(zxfer_create_owned_lock_dir_in_parent \
+				"$parent_dir" "lease" lease "lease-purpose")
+			printf 'create=%s\n' "$?"
+			zxfer_current_process_owns_owned_lock_dir "$lock_dir" lease "lease-purpose"
+			printf 'owns=%s\n' "$?"
+			zxfer_register_owned_lock_path "$lock_dir"
+			zxfer_release_owned_lock_dir "$lock_dir" lease "lease-purpose" >/dev/null
+			printf 'release=%s\n' "$?"
+			if [ -e "$lock_dir" ]; then
+				printf 'exists=yes\n'
+			else
+				printf 'exists=no\n'
+			fi
+			printf 'registered=<%s>\n' "${g_zxfer_owned_lock_cleanup_paths:-}"
+		)
+	)
 	missing_release_output=$(
 		(
 			set +e
@@ -851,16 +1009,16 @@ test_zxfer_create_owned_lock_dir_in_parent_and_release_owned_locks_cover_success
 		)
 	)
 
-	assertEquals "Parent-scoped owned lock creation should succeed for validated parents." \
-		0 "$create_status"
-	assertEquals "Current-process ownership checks should accept freshly created owned locks." \
-		0 "$owns_status"
-	assertEquals "Owned lock release should remove directories owned by the current process." \
-		0 "$release_status"
-	assertFalse "Successful owned lock release should remove the owned directory." \
-		"[ -e '$lock_dir' ]"
-	assertEquals "Successful owned lock release should unregister cleanup state." \
-		"" "${g_zxfer_owned_lock_cleanup_paths:-}"
+	assertContains "Parent-scoped owned lock creation should succeed for validated parents." \
+		"$success_output" "create=0"
+	assertContains "Current-process ownership checks should accept freshly created owned locks." \
+		"$success_output" "owns=0"
+	assertContains "Owned lock release should remove directories owned by the current process." \
+		"$success_output" "release=0"
+	assertContains "Successful owned lock release should remove the owned directory." \
+		"$success_output" "exists=no"
+	assertContains "Successful owned lock release should unregister cleanup state." \
+		"$success_output" "registered=<>"
 	assertContains "Releasing missing owned locks should succeed after unregistering the path." \
 		"$missing_release_output" "missing=0"
 	assertContains "Parent-scoped owned lock creation should reject insecure parents." \
@@ -962,6 +1120,7 @@ test_zxfer_release_registered_owned_locks_warns_and_preserves_remaining_paths() 
 	stderr_file="$TEST_TMPDIR/owned_lock_release.stderr"
 
 	(
+		set +e
 		g_zxfer_owned_lock_cleanup_paths=$cleanup_paths
 		zxfer_release_owned_lock_dir() {
 			case "$1" in

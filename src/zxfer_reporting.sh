@@ -167,13 +167,14 @@ zxfer_quote_command_argv() {
 	printf '%s\n' "$l_output"
 }
 
-# Purpose: Check whether failure reports should redact rendered command
+# Purpose: Check whether failure reports should expose unsafe verbatim command
 # strings.
 # Usage: Called during failure reporting, profiling, and verbose operator
-# output before report renderers decide whether to show live command details or
-# the configured redaction marker.
-zxfer_failure_report_redacts_commands() {
-	case "${ZXFER_REDACT_FAILURE_REPORT_COMMANDS:-}" in
+# output before report renderers decide whether to preserve shell-quoted
+# command details for local debugging or replace them with the redaction
+# marker.
+zxfer_failure_report_uses_unsafe_command_fields() {
+	case "${ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS:-}" in
 	1 | [Yy][Ee][Ss] | [Tt][Rr][Uu][Ee] | [Oo][Nn])
 		return 0
 		;;
@@ -258,11 +259,11 @@ zxfer_record_last_command_string() {
 		g_zxfer_failure_last_command=""
 		return
 	fi
-	if zxfer_failure_report_redacts_commands; then
+	if zxfer_failure_report_uses_unsafe_command_fields; then
+		g_zxfer_failure_last_command=$(zxfer_escape_report_value "$1")
+	else
 		g_zxfer_failure_last_command=$(zxfer_get_failure_report_redaction_marker)
-		return
 	fi
-	g_zxfer_failure_last_command=$(zxfer_escape_report_value "$1")
 }
 
 # Purpose: Record the last command argv for later diagnostics or control
@@ -276,11 +277,11 @@ zxfer_record_last_command_argv() {
 		g_zxfer_failure_last_command=""
 		return
 	fi
-	if zxfer_failure_report_redacts_commands; then
+	if zxfer_failure_report_uses_unsafe_command_fields; then
+		g_zxfer_failure_last_command=$(zxfer_quote_command_argv "$@")
+	else
 		g_zxfer_failure_last_command=$(zxfer_get_failure_report_redaction_marker)
-		return
 	fi
-	g_zxfer_failure_last_command=$(zxfer_quote_command_argv "$@")
 }
 
 # Purpose: Record or emit the metrics enabled for end-of-run profiling.
@@ -684,7 +685,7 @@ zxfer_render_failure_report() {
 	if [ -z "$l_failure_message" ]; then
 		l_failure_message="zxfer exited with status $l_exit_status."
 	fi
-	if zxfer_failure_report_redacts_commands; then
+	if ! zxfer_failure_report_uses_unsafe_command_fields; then
 		if [ -n "$l_report_invocation" ]; then
 			l_report_invocation=$(zxfer_get_failure_report_redaction_marker)
 		fi

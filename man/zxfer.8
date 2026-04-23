@@ -533,7 +533,13 @@ zxfer does not silently fall back to the serial recursive listing once
 is greater than 1. The default is 1, which disables background sends and keeps
 source snapshot discovery on the serial recursive listing path. Raising this
 value can hide WAN latency or speed up large replications, but will also
-increase memory, CPU and I/O load.
+increase memory, CPU and I/O load. The long-lived source-listing and
+send/receive workers launched for this path run under a shared supervisor that
+records launch/completion metadata and tears them down through validated
+process-group or owned-child-set cleanup instead of signaling a bare
+wrapper-shell PID. zxfer also serializes conflicting ancestor/descendant
+destination receives on the same target, even when spare job slots remain, so
+parent and child datasets do not receive concurrently.
 .It Fl m
 After sending all snapshots, (m)igrate the source to the destination filesystem by
 unmounting the source filesystem and changing the new filesystem's
@@ -619,6 +625,14 @@ Please note that if you are using Solaris, you will most likely need to use
 quotes and spacing exactly:
 .Pp
 e.g. -O "user1@192.168.0.1 pfexec"
+.Pp
+The
+.Fl O
+and
+.Fl T
+values are treated as literal whitespace-delimited tokens. Outer shell quoting
+is fine, but embedded quote characters or backslash escapes inside the value
+are rejected instead of being silently re-tokenized.
 .Pp
 The reason this works is because the commands that are related to
 reading/writing/modifying data will be prefaced with in normal circumstances:
@@ -742,6 +756,16 @@ e.g.
 This will modify the default -z option to
 .Pp
 .Dl zfs send dataset@snap1 | zstd -T0 -3 | ssh user@host "zstd -d | /sbin/zfs receive"
+.Pp
+Like
+.Fl O
+and
+.Fl T ,
+the
+.Fl Z
+value must be expressible as literal whitespace-delimited tokens; embedded
+quote characters or backslash escapes are rejected instead of being
+re-tokenized.
 .Pp
 Higher custom levels such as
 .Li -9
@@ -1079,26 +1103,26 @@ successful append cannot release that lock cleanly, it emits a warning to
 .Dv stderr ;
 when that happens during trap-time failure reporting, zxfer still preserves the
 original exit status.
-.It Ev ZXFER_REDACT_FAILURE_REPORT_COMMANDS
+.It Ev ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
 When set to
 .Ql 1 ,
 .Ql yes ,
 .Ql true ,
 or
 .Ql on ,
-zxfer replaces the
+zxfer preserves the
 .Dq invocation
 and
 .Dq last_command
-fields in structured failure reports with
-.Dq [redacted]
+fields verbatim in structured failure reports
 on both
 .Dv stderr
 and any
 .Ev ZXFER_ERROR_LOG
-mirror. The default remains verbatim for compatibility, so operators should
-avoid putting secret-bearing hook strings or wrapper arguments directly on the
-zxfer command line unless this redaction mode is enabled.
+mirror. The default behavior is to redact those two fields as
+.Dq [redacted] ,
+so this override is intended only for deliberate local debugging on trusted
+log sinks.
 .It Ev TMPDIR
 Optional local scratch root for zxfer temporary files, FIFOs, and caches.
 When set, it must resolve to an absolute directory owned by root or the
@@ -1153,15 +1177,18 @@ using stable
 .Dq key: value
 lines so operators can archive or post-process the output. When available, the
 report includes the failure class and stage, source and destination context,
-the original shell-quoted invocation, and the last command zxfer attempted.
-Raw ASCII control bytes inside report values are escaped before output so the
-structured block stays inert in terminals, pagers, and
+and redacted
+.Dq invocation
+/
+.Dq last_command
+placeholders by default. Raw ASCII control bytes inside report values are
+escaped before output so the structured block stays inert in terminals,
+pagers, and
 .Ev ZXFER_ERROR_LOG .
 Set
-.Ev ZXFER_REDACT_FAILURE_REPORT_COMMANDS
-to redact those last two fields as
-.Dq [redacted]
-when the command line itself may carry secrets.
+.Ev ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
+only when you deliberately want those last two fields emitted verbatim for
+local debugging.
 .Pp
 .Sh EXIT VALUES
 .Nm

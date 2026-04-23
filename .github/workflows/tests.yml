@@ -41,25 +41,16 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - shell_name: dash
             shell_kind: dash
-            experimental: false
           - shell_name: bash --posix
             shell_kind: bash-posix
-            experimental: false
           - shell_name: busybox ash
             shell_kind: busybox-ash
-            experimental: false
-          # Disabled: the posh pass currently exceeds 30 minutes of execution
-          # time on GitHub-hosted runners.
-          # - shell_name: posh
-          #   shell_kind: posh
-          #   experimental: true
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install portable shells
@@ -107,6 +98,30 @@ jobs:
         shell: bash
         env:
           ZXFER_TEST_SHELL: ${{ steps.shell_under_test.outputs.shell_under_test }}
+        run: |
+          set -euo pipefail
+          ./tests/run_shunit_tests.sh --jobs 30
+
+  portable-shell-posh:
+    name: shunit2 (posh)
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Install posh
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y posh
+      - name: Run shunit2 tests under posh
+        shell: bash
+        env:
+          ZXFER_TEST_SHELL: /usr/bin/posh
         run: |
           set -euo pipefail
           ./tests/run_shunit_tests.sh --jobs 30

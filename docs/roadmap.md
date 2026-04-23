@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-04-11
+Last reviewed: 2026-04-21
 
 This document tracks the main feature additions, refactors, and compatibility
 decisions that remain after the current reliability and maintainability work.
@@ -84,10 +84,15 @@ supported-platform set or upstream OpenZFS support policy changes.
 
 - Work through the remaining items in [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md)
   as planned engineering work rather than leaving them as indefinite backlog.
-- Prioritize the recurring architectural problems already identified there:
-  lock and lease lifecycle handling, PID ownership tracking, exact-status
-  propagation, and public string interfaces that still rely on whitespace-only
-  tokenization.
+- Prioritize the concrete remaining issues already tracked there: the
+  OpenZFS-on-macOS property-reconciliation gap, remote `-O ... -j > 1`
+  upfront GNU Parallel validation, and the recursive `-o` inheritance
+  flattening behavior.
+- The earlier architectural backlog around lock and lease lifecycle handling,
+  PID ownership validation, exact-status propagation, and literal token
+  parsing has largely been retired on the current branch; prefer follow-on
+  work that removes the remaining platform-specific gaps and behavior
+  exceptions instead of reopening those resolved classes.
 - Prefer centralized fixes that retire classes of issues over one-off patches
   at individual call sites.
 

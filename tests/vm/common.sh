@@ -309,19 +309,52 @@ zxfer_vm_resolve_expected_checksum() {
 zxfer_vm_download_file() {
 	l_url=$1
 	l_dest=$2
+
+	if ! zxfer_vm_try_download_file "$l_url" "$l_dest"; then
+		zxfer_vm_die "Failed to download $l_url"
+	fi
+}
+
+zxfer_vm_try_download_file() {
+	l_url=$1
+	l_dest=$2
 	l_tmp=$l_dest.tmp.$$
 
 	zxfer_vm_mkdir_p "$(dirname "$l_dest")"
 	rm -f "$l_tmp"
 	if zxfer_vm_should_show_progress_bar; then
-		curl -fL --progress-bar "$l_url" -o "$l_tmp" ||
-			zxfer_vm_die "Failed to download $l_url"
+		if ! curl -fL --progress-bar "$l_url" -o "$l_tmp"; then
+			rm -f "$l_tmp"
+			return 1
+		fi
 	else
-		curl -fsSL "$l_url" -o "$l_tmp" ||
-			zxfer_vm_die "Failed to download $l_url"
+		if ! curl -fsSL "$l_url" -o "$l_tmp"; then
+			rm -f "$l_tmp"
+			return 1
+		fi
 	fi
-	mv "$l_tmp" "$l_dest" ||
-		zxfer_vm_die "Failed to move downloaded file into place: $l_dest"
+	if ! mv "$l_tmp" "$l_dest"; then
+		rm -f "$l_tmp"
+		return 1
+	fi
+}
+
+zxfer_vm_refresh_cached_download() {
+	l_url=$1
+	l_dest=$2
+	l_log_prefix=$3
+	l_subject=$4
+
+	if zxfer_vm_try_download_file "$l_url" "$l_dest"; then
+		return 0
+	fi
+
+	if [ -s "$l_dest" ]; then
+		zxfer_vm_warn "[$l_log_prefix] failed to refresh $l_subject; reusing cached copy"
+		return 0
+	fi
+
+	zxfer_vm_die "Failed to download $l_url"
 }
 
 zxfer_vm_download_and_verify_file() {

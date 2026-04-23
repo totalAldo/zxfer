@@ -63,7 +63,7 @@ Important environment variables:
 
 - `ZXFER_SECURE_PATH`: replace the default allowlist entirely
 - `ZXFER_SECURE_PATH_APPEND`: append extra absolute directories
-- `ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1`: redact `invocation` and `last_command` in structured failure reports and any `ZXFER_ERROR_LOG` mirror
+- `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1`: emit verbatim `invocation` and `last_command` in structured failure reports and any `ZXFER_ERROR_LOG` mirror; unsafe for shared logs
 - `ZXFER_SSH_USER_KNOWN_HOSTS_FILE`: pin zxfer-managed ssh host-key checks to a specific absolute known-hosts file
 - `ZXFER_SSH_USE_AMBIENT_CONFIG=1`: opt out of zxfer's default `BatchMode=yes` / `StrictHostKeyChecking=yes` transport policy
 
@@ -94,7 +94,9 @@ matters especially when:
   whenever `jobs > 1`. Local-origin runs require GNU `parallel`; remote-origin
   runs through `-O` require that the remote host resolve a `parallel` helper.
   zxfer fails closed if the required helper is missing instead of silently
-  falling back to the serial recursive listing
+  falling back to the serial recursive listing, and the resulting long-lived
+  discovery and send/receive workers run under the shared supervisor rather
+  than bare wrapper-shell PID cleanup
 - custom `-Z` compression commands or default `zstd` helpers must be resolved
   per host instead of assuming one shared absolute path
 - the per-host remote-capability cache is keyed by the trusted dependency

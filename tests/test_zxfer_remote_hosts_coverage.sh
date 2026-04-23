@@ -932,6 +932,62 @@ test_zxfer_release_remote_capability_cache_lock_with_precedence_warns_and_preser
 		"$output" "Warning: Failed to release local remote capability cache lock for host origin.example (status 19)."
 }
 
+test_zxfer_remote_capability_cache_write_unavailable_helpers_track_origin_and_target_state() {
+	output=$(
+		(
+			set +e
+			zxfer_render_remote_capability_cache_identity_for_host() {
+				if [ "$1" = "broken.example" ]; then
+					return 1
+				fi
+				printf '%s\n' "$1|${2:-zfs}"
+			}
+
+			g_origin_remote_capabilities_host="origin.example"
+			g_origin_remote_capabilities_cache_identity="origin.example|zfs"
+			g_origin_remote_capabilities_cache_write_unavailable=0
+			zxfer_remote_capability_cache_write_is_unavailable_for_host "origin.example"
+			printf 'origin_before=%s\n' "$?"
+			zxfer_note_remote_capability_cache_write_unavailable_for_host "origin.example"
+			printf 'origin_flag=%s\n' "${g_origin_remote_capabilities_cache_write_unavailable:-0}"
+			zxfer_remote_capability_cache_write_is_unavailable_for_host "origin.example"
+			printf 'origin_after=%s\n' "$?"
+
+			g_target_remote_capabilities_host="target.example"
+			g_target_remote_capabilities_cache_identity="target.example|parallel cat"
+			g_target_remote_capabilities_cache_write_unavailable=0
+			zxfer_remote_capability_cache_write_is_unavailable_for_host "target.example" "parallel cat"
+			printf 'target_before=%s\n' "$?"
+			zxfer_note_remote_capability_cache_write_unavailable_for_host "target.example" "parallel cat"
+			printf 'target_flag=%s\n' "${g_target_remote_capabilities_cache_write_unavailable:-0}"
+			zxfer_remote_capability_cache_write_is_unavailable_for_host "target.example" "parallel cat"
+			printf 'target_after=%s\n' "$?"
+
+			zxfer_note_remote_capability_cache_write_unavailable_for_host "broken.example"
+			printf 'broken_note=%s\n' "$?"
+			zxfer_remote_capability_cache_write_is_unavailable_for_host "broken.example"
+			printf 'broken_check=%s\n' "$?"
+		)
+	)
+
+	assertContains "Remote capability cache-write tracking should report origin caches available before they are marked unavailable." \
+		"$output" "origin_before=1"
+	assertContains "Remote capability cache-write tracking should mark origin caches unavailable after a checked write failure." \
+		"$output" "origin_flag=1"
+	assertContains "Remote capability cache-write tracking should report origin caches unavailable after they are marked." \
+		"$output" "origin_after=0"
+	assertContains "Remote capability cache-write tracking should report target caches available before they are marked unavailable." \
+		"$output" "target_before=1"
+	assertContains "Remote capability cache-write tracking should mark target caches unavailable after a checked write failure." \
+		"$output" "target_flag=1"
+	assertContains "Remote capability cache-write tracking should report target caches unavailable after they are marked." \
+		"$output" "target_after=0"
+	assertContains "Remote capability cache-write tracking should treat identity-render failures as no-op success when marking unavailability." \
+		"$output" "broken_note=0"
+	assertContains "Remote capability cache-write tracking should fail closed when identity rendering fails during availability checks." \
+		"$output" "broken_check=1"
+}
+
 test_zxfer_remote_capability_cache_helper_failures_cover_current_shell_direct() {
 	cache_dir=$(zxfer_remote_capability_cache_dir_path_for_tmpdir "$TEST_TMPDIR")
 
@@ -1434,6 +1490,112 @@ test_zxfer_try_cleanup_opened_ssh_control_socket_after_lease_failure_warns_when_
 		"$output" "status=1"
 }
 
+test_zxfer_try_cleanup_opened_ssh_control_socket_after_lease_failure_ignores_stale_socket_and_cleans_cache_dir() {
+	cleanup_log="$TEST_TMPDIR/cleanup_stale_socket.log"
+
+	output=$(
+		(
+			zxfer_run_ssh_control_socket_action_for_host() {
+				g_zxfer_ssh_control_socket_action_result="stale"
+				g_zxfer_ssh_control_socket_action_command="ssh -S $2 -O $3 $1"
+				return 1
+			}
+			zxfer_cleanup_ssh_control_socket_entry_dir() {
+				printf '%s\n' "$1" >"$cleanup_log"
+				return 0
+			}
+			zxfer_try_cleanup_opened_ssh_control_socket_after_lease_failure \
+				"origin.example" origin "$TEST_TMPDIR/stale.socket" \
+				"$TEST_TMPDIR/stale.entry"
+			printf 'status=%s\n' "$?"
+		) 2>&1
+	)
+
+	assertContains "Fresh-master cleanup should treat stale sockets as already closed." \
+		"$output" "status=0"
+	assertEquals "Fresh-master cleanup should still remove the cache directory after stale-socket detection." \
+		"$TEST_TMPDIR/stale.entry" "$(cat "$cleanup_log")"
+}
+
+test_zxfer_try_cleanup_opened_ssh_control_socket_after_lease_failure_warns_when_transport_cleanup_fails() {
+	output=$(
+		(
+			g_zxfer_ssh_control_socket_action_stderr=""
+			zxfer_run_ssh_control_socket_action_for_host() {
+				g_zxfer_ssh_control_socket_action_result="error"
+				g_zxfer_ssh_control_socket_action_command="ssh -S $2 -O $3 $1"
+				return 1
+			}
+			zxfer_try_cleanup_opened_ssh_control_socket_after_lease_failure \
+				"origin.example" origin "$TEST_TMPDIR/action-fail.socket" \
+				"$TEST_TMPDIR/action-fail.entry"
+			printf 'status=%s\n' "$?"
+		) 2>&1
+	)
+
+	assertContains "Fresh-master cleanup should warn when the control-socket transport cannot be closed." \
+		"$output" "Warning: Failed to close ssh control socket for origin host after lease creation failure."
+	assertContains "Fresh-master cleanup should return failure when transport cleanup fails for a non-stale socket." \
+		"$output" "status=1"
+}
+
+test_close_origin_ssh_control_socket_reclaims_stale_shared_socket_and_releases_lock_in_current_shell() {
+	release_log="$TEST_TMPDIR/close_origin_stale.release"
+	cleanup_log="$TEST_TMPDIR/close_origin_stale.cleanup"
+
+	g_option_O_origin_host="origin.example"
+	g_ssh_origin_control_socket="$TEST_TMPDIR/close_origin_stale.socket"
+	g_ssh_origin_control_socket_dir="$TEST_TMPDIR/close_origin_stale.entry"
+	g_ssh_origin_control_socket_lease_file="$TEST_TMPDIR/close_origin_stale.entry/leases/lease.1"
+	mkdir -p "$g_ssh_origin_control_socket_dir/leases" ||
+		fail "Unable to create the stale shared-socket fixture directory."
+	zxfer_reset_ssh_control_socket_action_state
+
+	zxfer_acquire_ssh_control_socket_lock() {
+		g_zxfer_ssh_control_socket_lock_dir_result="$TEST_TMPDIR/close_origin_stale.lock"
+		return 0
+	}
+	zxfer_release_ssh_control_socket_lease_file() {
+		return 0
+	}
+	zxfer_prune_stale_ssh_control_socket_leases() {
+		return 0
+	}
+	zxfer_count_ssh_control_socket_leases() {
+		g_zxfer_ssh_control_socket_lease_count_result=0
+		return 0
+	}
+	zxfer_check_ssh_control_socket_for_host() {
+		g_zxfer_ssh_control_socket_action_result="stale"
+		g_zxfer_ssh_control_socket_action_command="ssh -S $2 -O check $1"
+		return 1
+	}
+	zxfer_cleanup_ssh_control_socket_entry_dir() {
+		printf '%s\n' "$1" >"$cleanup_log"
+		return 0
+	}
+	zxfer_release_ssh_control_socket_lock() {
+		printf '%s\n' "$1" >"$release_log"
+		return 0
+	}
+
+	zxfer_close_origin_ssh_control_socket
+	status=$?
+
+	assertEquals "Current-shell origin ssh control socket close should treat a stale shared socket as successful cleanup." \
+		0 "$status"
+	assertEquals "Current-shell stale shared-socket cleanup should remove the cache directory." \
+		"$TEST_TMPDIR/close_origin_stale.entry" "$(cat "$cleanup_log")"
+	assertEquals "Current-shell stale shared-socket cleanup should release the per-entry lock after cleanup." \
+		"$TEST_TMPDIR/close_origin_stale.lock" "$(cat "$release_log")"
+	assertEquals "Current-shell stale shared-socket cleanup should clear the remembered origin socket path." \
+		"" "${g_ssh_origin_control_socket:-}"
+	assertEquals "Current-shell stale shared-socket cleanup should clear the remembered origin socket directory." \
+		"" "${g_ssh_origin_control_socket_dir:-}"
+	assertEquals "Current-shell stale shared-socket cleanup should clear the remembered origin lease file." \
+		"" "${g_ssh_origin_control_socket_lease_file:-}"
+}
+
 test_close_origin_and_target_ssh_control_socket_return_early_without_state() {
 	output=$(
 		(
@@ -1448,6 +1610,1160 @@ test_close_origin_and_target_ssh_control_socket_return_early_without_state() {
 		"$output" "origin=0"
 	assertContains "Target ssh control socket close should return early without state." \
 		"$output" "target=0"
+}
+
+test_zxfer_remote_host_supervisor_related_branches_cover_current_shell_paths() {
+	branch_root="$TEST_TMPDIR/remote_host_supervisor_branch_coverage"
+	mkdir -p "$branch_root"
+	caps_payload=$(printf '%s\n' \
+		"ZXFER_REMOTE_CAPS_V2" \
+		"os	Linux" \
+		"tool	zfs	0	/sbin/zfs")
+
+	output=$(
+		(
+			set +e
+			g_cmd_ssh=/usr/bin/ssh
+			zxfer_render_ssh_transport_policy_identity() {
+				printf '%s\n' "policy"
+			}
+			cksum() {
+				return 1
+			}
+			zxfer_ssh_control_socket_cache_key "user@example"
+			printf 'ssh_key_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_try_get_socket_cache_tmpdir() {
+				printf '%s\n' "$branch_root"
+			}
+			zxfer_ssh_control_socket_cache_dir_path_for_tmpdir() {
+				printf '%s\n' "$branch_root/socket-cache"
+			}
+			zxfer_get_effective_user_uid() {
+				return 1
+			}
+			zxfer_ensure_ssh_control_socket_cache_dir >/dev/null
+			printf 'socket_uid_status=%s\n' "$?"
+		)
+		(
+			set +e
+			cache_dir="$branch_root/socket-cache-existing-owner"
+			mkdir -p "$cache_dir"
+			zxfer_try_get_socket_cache_tmpdir() {
+				printf '%s\n' "$branch_root"
+			}
+			zxfer_ssh_control_socket_cache_dir_path_for_tmpdir() {
+				printf '%s\n' "$cache_dir"
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_owner_uid() {
+				return 1
+			}
+			zxfer_ensure_ssh_control_socket_cache_dir >/dev/null
+			printf 'socket_owner_status=%s\n' "$?"
+		)
+		(
+			set +e
+			cache_dir="$branch_root/socket-cache-new-owner"
+			rm -rf "$cache_dir"
+			zxfer_try_get_socket_cache_tmpdir() {
+				printf '%s\n' "$branch_root"
+			}
+			zxfer_ssh_control_socket_cache_dir_path_for_tmpdir() {
+				printf '%s\n' "$cache_dir"
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_owner_uid() {
+				return 1
+			}
+			zxfer_ensure_ssh_control_socket_cache_dir >/dev/null
+			printf 'socket_new_owner_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/entry-existing-owner"
+			mkdir -p "$entry_cache/k/leases"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				return 1
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'entry_owner_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/entry-new-owner"
+			rm -rf "$entry_cache"
+			mkdir -p "$entry_cache"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				return 1
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'entry_new_owner_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/entry-lease-owner"
+			mkdir -p "$entry_cache/k/leases"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_owner_uid() {
+				if [ "${1##*/}" = "leases" ]; then
+					return 1
+				fi
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_mode_octal() {
+				printf '%s\n' 700
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'lease_owner_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/entry-identity-write"
+			rm -rf "$entry_cache"
+			mkdir -p "$entry_cache"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_mode_octal() {
+				printf '%s\n' 700
+			}
+			zxfer_write_ssh_control_socket_entry_identity_file() {
+				return 1
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'identity_write_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_render_ssh_transport_policy_identity() {
+				printf '%s\n' policy
+			}
+			zxfer_resolve_remote_capability_requested_tools_for_host() {
+				g_zxfer_remote_capability_requested_tools_result=zfs
+				return 0
+			}
+			cksum() {
+				return 1
+			}
+			zxfer_remote_capability_cache_key "user@example" zfs >/dev/null
+			printf 'remote_key_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_try_get_effective_tmpdir() {
+				printf '%s\n' "$branch_root"
+			}
+			zxfer_remote_capability_cache_dir_path_for_tmpdir() {
+				printf '%s\n' "$branch_root/remote-cap-cache"
+			}
+			zxfer_get_effective_user_uid() {
+				return 1
+			}
+			zxfer_ensure_remote_capability_cache_dir >/dev/null
+			printf 'remote_cache_uid_status=%s\n' "$?"
+		)
+		(
+			set +e
+			cache_dir="$branch_root/remote-cap-cache-existing-owner"
+			mkdir -p "$cache_dir"
+			zxfer_try_get_effective_tmpdir() {
+				printf '%s\n' "$branch_root"
+			}
+			zxfer_remote_capability_cache_dir_path_for_tmpdir() {
+				printf '%s\n' "$cache_dir"
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_owner_uid() {
+				return 1
+			}
+			zxfer_ensure_remote_capability_cache_dir >/dev/null
+			printf 'remote_cache_owner_status=%s\n' "$?"
+		)
+		(
+			set +e
+			live_response=$caps_payload
+			zxfer_get_cached_remote_capability_response_for_host() {
+				return 1
+			}
+			zxfer_read_remote_capability_cache_file() {
+				return 1
+			}
+			zxfer_try_acquire_remote_capability_cache_lock() {
+				printf '%s\n' "$branch_root/live.lock"
+				return 0
+			}
+			zxfer_fetch_remote_host_capabilities_live() {
+				g_zxfer_remote_capability_response_result=$live_response
+				return 0
+			}
+			zxfer_store_cached_remote_capability_response_for_host() {
+				printf 'store:%s\n' "$1"
+			}
+			zxfer_note_remote_capability_bootstrap_source_for_host() {
+				printf 'source:%s\n' "$2"
+			}
+			zxfer_profile_record_remote_capability_bootstrap_source() {
+				:
+			}
+			zxfer_remote_capability_cache_write_is_unavailable_for_host() {
+				return 1
+			}
+			zxfer_write_remote_capability_cache_file() {
+				return 27
+			}
+			zxfer_note_remote_capability_cache_write_unavailable_for_host() {
+				printf 'write_unavailable:%s\n' "$1"
+			}
+			zxfer_warn_remote_capability_cache_write_failure() {
+				printf 'write_warning:%s:%s\n' "$1" "$2"
+			}
+			zxfer_release_remote_capability_cache_lock_with_precedence() {
+				printf 'release:%s:%s:%s\n' "$1" "$2" "$3"
+				return 0
+			}
+			zxfer_ensure_remote_host_capabilities "user@example" source zfs >/dev/null
+			printf 'live_status=%s\n' "$?"
+		)
+		(
+			set +e
+			wait_response=$caps_payload
+			zxfer_get_cached_remote_capability_response_for_host() {
+				return 1
+			}
+			zxfer_read_remote_capability_cache_file() {
+				return 1
+			}
+			zxfer_try_acquire_remote_capability_cache_lock() {
+				return 2
+			}
+			zxfer_wait_for_remote_capability_cache_fill() {
+				printf '%s\n' "$wait_response"
+			}
+			zxfer_store_cached_remote_capability_response_for_host() {
+				printf 'wait_store:%s\n' "$1"
+			}
+			zxfer_note_remote_capability_bootstrap_source_for_host() {
+				printf 'wait_source:%s\n' "$2"
+			}
+			zxfer_profile_record_remote_capability_bootstrap_source() {
+				:
+			}
+			zxfer_ensure_remote_host_capabilities "user@example" source zfs >/dev/null
+			printf 'wait_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_get_cached_remote_capability_response_for_host() {
+				return 1
+			}
+			zxfer_read_remote_capability_cache_file() {
+				return 1
+			}
+			zxfer_try_acquire_remote_capability_cache_lock() {
+				return 2
+			}
+			zxfer_wait_for_remote_capability_cache_fill() {
+				return 1
+			}
+			zxfer_reap_stale_pidless_remote_capability_cache_lock() {
+				return 1
+			}
+			zxfer_ensure_remote_host_capabilities "user@example" source zfs >/dev/null
+			printf 'reap_failure_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_get_cached_remote_capability_response_for_host() {
+				return 1
+			}
+			zxfer_read_remote_capability_cache_file() {
+				return 1
+			}
+			l_try_count=0
+			zxfer_try_acquire_remote_capability_cache_lock() {
+				l_try_count=$((l_try_count + 1))
+				[ "$l_try_count" -eq 1 ] && return 2
+				return 1
+			}
+			zxfer_wait_for_remote_capability_cache_fill() {
+				return 1
+			}
+			zxfer_reap_stale_pidless_remote_capability_cache_lock() {
+				return 0
+			}
+			zxfer_ensure_remote_host_capabilities "user@example" source zfs >/dev/null
+			printf 'second_lock_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_get_cached_remote_capability_response_for_host() {
+				return 1
+			}
+			zxfer_read_remote_capability_cache_file() {
+				return 1
+			}
+			zxfer_try_acquire_remote_capability_cache_lock() {
+				printf '%s\n' "$branch_root/fail-live.lock"
+				return 0
+			}
+			zxfer_fetch_remote_host_capabilities_live() {
+				return 5
+			}
+			zxfer_release_remote_capability_cache_lock_with_precedence() {
+				printf 'release_failure:%s:%s:%s\n' "$1" "$2" "$3"
+				return "$3"
+			}
+			zxfer_ensure_remote_host_capabilities "user@example" source zfs >/dev/null
+			printf 'live_failure_status=%s\n' "$?"
+		)
+	)
+
+	assertContains "SSH cache-key fallback should remain covered." \
+		"$output" "ssh_key_status=0"
+	assertContains "SSH cache-dir effective uid failures should remain covered." \
+		"$output" "socket_uid_status=1"
+	assertContains "SSH cache-dir existing owner lookup failures should remain covered." \
+		"$output" "socket_owner_status=1"
+	assertContains "SSH cache-dir post-create owner lookup failures should remain covered." \
+		"$output" "socket_new_owner_status=1"
+	assertContains "SSH entry owner lookup failures should remain covered." \
+		"$output" "entry_owner_status=1"
+	assertContains "SSH entry post-create owner lookup failures should remain covered." \
+		"$output" "entry_new_owner_status=1"
+	assertContains "SSH lease owner lookup failures should remain covered." \
+		"$output" "lease_owner_status=1"
+	assertContains "SSH identity write failures should remain covered." \
+		"$output" "identity_write_status=1"
+	assertContains "Remote capability cache-key fallback should remain covered." \
+		"$output" "remote_key_status=0"
+	assertContains "Remote capability cache-dir effective uid failures should remain covered." \
+		"$output" "remote_cache_uid_status=1"
+	assertContains "Remote capability cache-dir existing owner failures should remain covered." \
+		"$output" "remote_cache_owner_status=1"
+	assertContains "Live remote capability cache-write failure handling should remain covered." \
+		"$output" "live_status=0"
+	assertContains "Sibling remote capability cache-fill success handling should remain covered." \
+		"$output" "wait_status=0"
+	assertContains "Stale pidless remote capability cache reap failures should remain covered." \
+		"$output" "reap_failure_status=1"
+	assertContains "Second remote capability lock acquisition failures should remain covered." \
+		"$output" "second_lock_status=1"
+	assertContains "Live remote capability probe failures should remain covered." \
+		"$output" "live_failure_status=5"
+}
+
+test_zxfer_ssh_control_socket_entry_dir_error_branches_cover_current_shell_paths() {
+	branch_root="$TEST_TMPDIR/remote_host_entry_dir_branch_coverage"
+	mkdir -p "$branch_root"
+
+	output=$(
+		(
+			set +e
+			entry_cache="$branch_root/entry-existing-uid"
+			mkdir -p "$entry_cache/k/leases"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_effective_user_uid() {
+				return 1
+			}
+			zxfer_get_path_mode_octal() {
+				printf '%s\n' 700
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'entry_existing_uid_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/entry-existing-mode"
+			mkdir -p "$entry_cache/k/leases"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_mode_octal() {
+				return 1
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'entry_existing_mode_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/entry-mkdir"
+			mkdir -p "$entry_cache"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			mkdir() {
+				return 1
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'entry_mkdir_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/entry-new-uid"
+			mkdir -p "$entry_cache"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_effective_user_uid() {
+				return 1
+			}
+			zxfer_get_path_mode_octal() {
+				printf '%s\n' 700
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'entry_new_uid_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/entry-new-mode"
+			mkdir -p "$entry_cache"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_mode_octal() {
+				return 1
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'entry_new_mode_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/lease-symlink"
+			mkdir -p "$entry_cache/k"
+			ln -s missing "$entry_cache/k/leases"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_mode_octal() {
+				printf '%s\n' 700
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'lease_symlink_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/lease-existing-uid"
+			uid_count_file="$branch_root/lease-existing-uid.count"
+			: >"$uid_count_file"
+			mkdir -p "$entry_cache/k/leases"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_effective_user_uid() {
+				l_uid_calls=$(wc -l <"$uid_count_file" | tr -d '[:space:]')
+				printf '%s\n' x >>"$uid_count_file"
+				if [ "$l_uid_calls" -eq 0 ]; then
+					printf '%s\n' 1000
+					return 0
+				fi
+				return 1
+			}
+			zxfer_get_path_mode_octal() {
+				printf '%s\n' 700
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'lease_existing_uid_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/lease-existing-mode"
+			mkdir -p "$entry_cache/k/leases"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_mode_octal() {
+				if [ "${1##*/}" = "leases" ]; then
+					return 1
+				fi
+				printf '%s\n' 700
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'lease_existing_mode_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/lease-mkdir"
+			mkdir -p "$entry_cache/k"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_mode_octal() {
+				printf '%s\n' 700
+			}
+			mkdir() {
+				return 1
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'lease_mkdir_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/lease-new-uid"
+			uid_count_file="$branch_root/lease-new-uid.count"
+			: >"$uid_count_file"
+			mkdir -p "$entry_cache/k"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_effective_user_uid() {
+				l_uid_calls=$(wc -l <"$uid_count_file" | tr -d '[:space:]')
+				printf '%s\n' x >>"$uid_count_file"
+				if [ "$l_uid_calls" -eq 0 ]; then
+					printf '%s\n' 1000
+					return 0
+				fi
+				return 1
+			}
+			zxfer_get_path_mode_octal() {
+				printf '%s\n' 700
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'lease_new_uid_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_cache="$branch_root/lease-new-mode"
+			mkdir -p "$entry_cache/k"
+			zxfer_ssh_control_socket_cache_key() {
+				printf '%s\n' k
+			}
+			zxfer_get_ssh_control_socket_cache_dir_for_key() {
+				printf '%s\n' "$entry_cache"
+			}
+			zxfer_render_ssh_control_socket_entry_identity() {
+				printf '%s\n' identity
+			}
+			zxfer_is_ssh_control_socket_entry_path_short_enough() {
+				return 0
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 1000
+			}
+			zxfer_get_path_mode_octal() {
+				if [ "${1##*/}" = "leases" ]; then
+					return 1
+				fi
+				printf '%s\n' 700
+			}
+			zxfer_ensure_ssh_control_socket_entry_dir "user@example" >/dev/null
+			printf 'lease_new_mode_status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Existing entry-dir effective uid failures should remain covered." \
+		"$output" "entry_existing_uid_status=1"
+	assertContains "Existing entry-dir mode lookup failures should remain covered." \
+		"$output" "entry_existing_mode_status=1"
+	assertContains "Entry-dir creation failures should remain covered." \
+		"$output" "entry_mkdir_status=1"
+	assertContains "New entry-dir effective uid failures should remain covered." \
+		"$output" "entry_new_uid_status=1"
+	assertContains "New entry-dir mode lookup failures should remain covered." \
+		"$output" "entry_new_mode_status=1"
+	assertContains "Lease symlink rejection should remain covered." \
+		"$output" "lease_symlink_status=1"
+	assertContains "Existing lease-dir effective uid failures should remain covered." \
+		"$output" "lease_existing_uid_status=1"
+	assertContains "Existing lease-dir mode lookup failures should remain covered." \
+		"$output" "lease_existing_mode_status=1"
+	assertContains "Lease-dir creation failures should remain covered." \
+		"$output" "lease_mkdir_status=1"
+	assertContains "New lease-dir effective uid failures should remain covered." \
+		"$output" "lease_new_uid_status=1"
+	assertContains "New lease-dir mode lookup failures should remain covered." \
+		"$output" "lease_new_mode_status=1"
+}
+
+test_zxfer_ssh_action_and_remote_tool_resolution_branches_cover_current_shell_paths() {
+	branch_root="$TEST_TMPDIR/remote_host_action_tool_branch_coverage"
+	mkdir -p "$branch_root"
+
+	output=$(
+		(
+			set +e
+			zxfer_run_ssh_control_socket_action_for_host "user@example" "$branch_root/s" bogus >/dev/null
+			printf 'action_invalid_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_get_ssh_base_transport_tokens() {
+				printf '%s\n' "$FAKE_SSH_BIN"
+			}
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n' "bad host"
+				return 1
+			}
+			zxfer_run_ssh_control_socket_action_for_host "bad host" "$branch_root/s" check >/dev/null
+			printf 'action_split_status=%s\n' "$?"
+			printf 'action_split_result=%s\n' "${g_zxfer_ssh_control_socket_action_result:-}"
+			printf 'action_split_stderr=%s\n' "${g_zxfer_ssh_control_socket_action_stderr:-}"
+		)
+		(
+			set +e
+			action_stderr="$branch_root/action-check.err"
+			zxfer_get_ssh_base_transport_tokens() {
+				printf '%s\n' "$FAKE_SSH_BIN"
+			}
+			zxfer_split_host_spec_tokens() {
+				return 0
+			}
+			zxfer_get_temp_file() {
+				g_zxfer_temp_file_result=$action_stderr
+				: >"$action_stderr"
+				return 0
+			}
+			zxfer_run_ssh_control_socket_action_for_host "user@example" "$branch_root/s" check >/dev/null
+			printf 'action_check_status=%s\n' "$?"
+			printf 'action_check_result=%s\n' "${g_zxfer_ssh_control_socket_action_result:-}"
+		)
+		(
+			set +e
+			zxfer_get_ssh_base_transport_tokens() {
+				printf '%s\n' "transport failure"
+				return 7
+			}
+			zxfer_throw_error() {
+				printf 'open_transport_throw=%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			(
+				zxfer_open_ssh_control_socket_for_host "user@example" "$branch_root/s"
+			)
+			printf 'open_transport_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_get_ssh_base_transport_tokens() {
+				printf '%s\n' "$FAKE_SSH_BIN"
+			}
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n' "split failure"
+				return 1
+			}
+			zxfer_throw_error() {
+				printf 'open_split_throw=%s\n' "$1"
+				exit 9
+			}
+			(
+				zxfer_open_ssh_control_socket_for_host "bad host" "$branch_root/s"
+			)
+			printf 'open_split_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_get_remote_capability_requested_tools_for_resolved_tool() {
+				printf '%s\n' zfs
+			}
+			zxfer_ensure_remote_host_capabilities() {
+				return 1
+			}
+			zxfer_resolve_remote_cli_tool_direct() {
+				printf '%s\n' /sbin/zfs
+				return 0
+			}
+			resolved=$(zxfer_resolve_remote_required_tool "user@example" zfs ZFS source)
+			printf 'resolve_ensure_fallback_status=%s\n' "$?"
+			printf 'resolve_ensure_fallback=%s\n' "$resolved"
+		)
+		(
+			set +e
+			zxfer_get_remote_capability_requested_tools_for_resolved_tool() {
+				printf '%s\n' zfs
+			}
+			zxfer_ensure_remote_host_capabilities() {
+				printf '%s\n' "ZXFER_REMOTE_CAPS_V2" "os	Linux"
+			}
+			zxfer_resolve_remote_cli_tool_direct() {
+				printf '%s\n' /sbin/zfs
+				return 0
+			}
+			resolved=$(zxfer_resolve_remote_required_tool "user@example" zfs ZFS source)
+			printf 'resolve_missing_tool_fallback_status=%s\n' "$?"
+			printf 'resolve_missing_tool_fallback=%s\n' "$resolved"
+		)
+		(
+			set +e
+			zxfer_get_remote_capability_requested_tools_for_resolved_tool() {
+				printf '%s\n' tar
+			}
+			zxfer_ensure_remote_host_capabilities() {
+				printf '%s\n' "ZXFER_REMOTE_CAPS_V2" "os	Linux"
+			}
+			zxfer_parse_remote_capability_response() {
+				l_tool=tar
+				return 0
+			}
+			resolved=$(zxfer_resolve_remote_required_tool "user@example" tar TAR source)
+			printf 'resolve_unknown_status=%s\n' "$?"
+			printf 'resolve_unknown=%s\n' "$resolved"
+		)
+	)
+
+	assertContains "Invalid ssh control socket actions should be rejected before execution." \
+		"$output" "action_invalid_status=1"
+	assertContains "Host token split failures should be surfaced as ssh action errors." \
+		"$output" "action_split_status=1"
+	assertContains "Host token split failures should mark the action as an error." \
+		"$output" "action_split_result=error"
+	assertContains "Host token split failures should preserve the split diagnostic." \
+		"$output" "action_split_stderr=bad host"
+	assertContains "Successful ssh control socket checks should mark the socket live." \
+		"$output" "action_check_status=0"
+	assertContains "Successful ssh control socket checks should record a live result." \
+		"$output" "action_check_result=live"
+	assertContains "Open-socket transport failures should be routed through throw_error." \
+		"$output" "open_transport_throw=transport failure:7"
+	assertContains "Open-socket host token failures should be routed through throw_error." \
+		"$output" "open_split_throw=split failure"
+	assertContains "Remote tool resolution should fall back to the direct probe when capability bootstrap fails." \
+		"$output" "resolve_ensure_fallback_status=0"
+	assertContains "Remote tool resolution should preserve the direct fallback path after capability bootstrap failure." \
+		"$output" "resolve_ensure_fallback=/sbin/zfs"
+	assertContains "Remote tool resolution should fall back to the direct probe when parsed capabilities omit a supported tool." \
+		"$output" "resolve_missing_tool_fallback_status=0"
+	assertContains "Remote tool resolution should preserve the direct fallback path for omitted supported tools." \
+		"$output" "resolve_missing_tool_fallback=/sbin/zfs"
+	assertContains "Remote tool resolution should fail closed for unsupported tool labels." \
+		"$output" "resolve_unknown_status=1"
+	assertContains "Remote tool resolution should preserve the unsupported tool diagnostic." \
+		"$output" "Failed to query dependency \"TAR\" on host user@example."
+}
+
+test_zxfer_ssh_lock_and_lease_failure_branches_cover_current_shell_paths() {
+	branch_root="$TEST_TMPDIR/remote_host_lock_lease_branch_coverage"
+	mkdir -p "$branch_root"
+
+	output=$(
+		(
+			set +e
+			lock_path="$branch_root/not-a-directory.lock"
+			: >"$lock_path"
+			zxfer_validate_ssh_control_socket_lock_dir_for_reap "$lock_path" >/dev/null
+			printf 'validate_nondir_status=%s\n' "$?"
+			printf 'validate_nondir_error=%s\n' "${g_zxfer_ssh_control_socket_lock_error:-}"
+			zxfer_try_reap_stale_ssh_control_socket_lock_dir "$lock_path" 1 >/dev/null
+			printf 'try_reap_validate_status=%s\n' "$?"
+		)
+		(
+			set +e
+			entry_dir="$branch_root/prune-error"
+			mkdir -p "$entry_dir/leases/lease.bad"
+			zxfer_try_reap_stale_owned_lock_dir() {
+				return 1
+			}
+			zxfer_prune_stale_ssh_control_socket_leases "$entry_dir" >/dev/null
+			printf 'prune_error_status=%s\n' "$?"
+			printf 'prune_error_message=%s\n' "${g_zxfer_ssh_control_socket_lock_error:-}"
+		)
+		(
+			set +e
+			entry_dir="$branch_root/count-reaped"
+			mkdir -p "$entry_dir/leases/lease.done"
+			zxfer_try_reap_stale_owned_lock_dir() {
+				return 0
+			}
+			count=$(zxfer_count_ssh_control_socket_leases "$entry_dir")
+			printf 'count_reaped_status=%s\n' "$?"
+			printf 'count_reaped=%s\n' "$count"
+		)
+		(
+			set +e
+			entry_dir="$branch_root/count-error"
+			mkdir -p "$entry_dir/leases/lease.bad"
+			zxfer_try_reap_stale_owned_lock_dir() {
+				return 1
+			}
+			zxfer_count_ssh_control_socket_leases "$entry_dir" >/dev/null
+			printf 'count_error_status=%s\n' "$?"
+			printf 'count_error_message=%s\n' "${g_zxfer_ssh_control_socket_lock_error:-}"
+		)
+	)
+
+	assertContains "Lock reap validation should reject non-directory lock paths." \
+		"$output" "validate_nondir_status=1"
+	assertContains "Lock reap validation should preserve the non-directory diagnostic." \
+		"$output" "is not a directory"
+	assertContains "Lock reap should propagate validation failures." \
+		"$output" "try_reap_validate_status=1"
+	assertContains "Lease pruning should fail closed when lease ownership cannot be inspected." \
+		"$output" "prune_error_status=1"
+	assertContains "Lease pruning should preserve the failing lease path diagnostic." \
+		"$output" "Unable to inspect ssh control socket lease entry"
+	assertContains "Lease counting should ignore leases reaped as stale." \
+		"$output" "count_reaped_status=0"
+	assertContains "Lease counting should report zero when all leases are reaped." \
+		"$output" "count_reaped=0"
+	assertContains "Lease counting should fail closed when lease ownership cannot be inspected." \
+		"$output" "count_error_status=1"
+	assertContains "Lease counting should preserve the failing lease path diagnostic." \
+		"$output" "count_error_message=Unable to inspect ssh control socket lease entry"
+}
+
+test_zxfer_ssh_setup_and_close_error_branches_cover_current_shell_paths() {
+	branch_root="$TEST_TMPDIR/remote_host_setup_close_branch_coverage"
+	mkdir -p "$branch_root"
+
+	output=$(
+		(
+			set +e
+			g_option_O_origin_host="origin.example"
+			g_ssh_origin_control_socket="$branch_root/origin-success-cleanup-fail/s"
+			g_ssh_origin_control_socket_dir="$branch_root/origin-success-cleanup-fail"
+			g_ssh_origin_control_socket_lease_file="$branch_root/origin-success-cleanup-fail/leases/lease.1"
+			mkdir -p "$g_ssh_origin_control_socket_dir/leases"
+			zxfer_acquire_ssh_control_socket_lock() {
+				g_zxfer_ssh_control_socket_lock_dir_result="$branch_root/origin-success-cleanup-fail.lock"
+				return 0
+			}
+			zxfer_release_ssh_control_socket_lease_file() {
+				return 0
+			}
+			zxfer_prune_stale_ssh_control_socket_leases() {
+				return 0
+			}
+			zxfer_count_ssh_control_socket_leases() {
+				g_zxfer_ssh_control_socket_lease_count_result=0
+				return 0
+			}
+			zxfer_check_ssh_control_socket_for_host() {
+				g_zxfer_ssh_control_socket_action_result=live
+				g_zxfer_ssh_control_socket_action_command="check $1 $2"
+				return 0
+			}
+			zxfer_run_ssh_control_socket_action_for_host() {
+				g_zxfer_ssh_control_socket_action_command="exit $1 $2"
+				return 0
+			}
+			zxfer_cleanup_ssh_control_socket_entry_dir() {
+				return 5
+			}
+			zxfer_release_ssh_control_socket_lock_with_precedence() {
+				return "$3"
+			}
+			zxfer_close_origin_ssh_control_socket 2>"$branch_root/origin-success-cleanup-fail.err"
+			printf 'origin_success_cleanup_status=%s\n' "$?"
+			printf 'origin_success_cleanup_err=%s\n' "$(cat "$branch_root/origin-success-cleanup-fail.err")"
+		)
+		(
+			set +e
+			g_option_O_origin_host="origin.example"
+			g_ssh_origin_control_socket="$branch_root/origin-stale-cleanup-fail/s"
+			g_ssh_origin_control_socket_dir="$branch_root/origin-stale-cleanup-fail"
+			g_ssh_origin_control_socket_lease_file="$branch_root/origin-stale-cleanup-fail/leases/lease.1"
+			mkdir -p "$g_ssh_origin_control_socket_dir/leases"
+			zxfer_acquire_ssh_control_socket_lock() {
+				g_zxfer_ssh_control_socket_lock_dir_result="$branch_root/origin-stale-cleanup-fail.lock"
+				return 0
+			}
+			zxfer_release_ssh_control_socket_lease_file() {
+				return 0
+			}
+			zxfer_prune_stale_ssh_control_socket_leases() {
+				return 0
+			}
+			zxfer_count_ssh_control_socket_leases() {
+				g_zxfer_ssh_control_socket_lease_count_result=0
+				return 0
+			}
+			zxfer_check_ssh_control_socket_for_host() {
+				g_zxfer_ssh_control_socket_action_result=live
+				g_zxfer_ssh_control_socket_action_command="check $1 $2"
+				return 0
+			}
+			zxfer_run_ssh_control_socket_action_for_host() {
+				g_zxfer_ssh_control_socket_action_result=stale
+				g_zxfer_ssh_control_socket_action_command="exit $1 $2"
+				return 1
+			}
+			zxfer_cleanup_ssh_control_socket_entry_dir() {
+				return 6
+			}
+			zxfer_release_ssh_control_socket_lock_with_precedence() {
+				return "$3"
+			}
+			zxfer_close_origin_ssh_control_socket 2>"$branch_root/origin-stale-cleanup-fail.err"
+			printf 'origin_stale_cleanup_status=%s\n' "$?"
+			printf 'origin_stale_cleanup_err=%s\n' "$(cat "$branch_root/origin-stale-cleanup-fail.err")"
+		)
+		(
+			set +e
+			g_option_O_origin_host="origin.example"
+			g_ssh_origin_control_socket="$branch_root/origin-no-lease-stale/s"
+			g_ssh_origin_control_socket_dir="$branch_root/origin-no-lease-stale"
+			g_ssh_origin_control_socket_lease_file=""
+			mkdir -p "$g_ssh_origin_control_socket_dir"
+			zxfer_run_ssh_control_socket_action_for_host() {
+				g_zxfer_ssh_control_socket_action_result=stale
+				g_zxfer_ssh_control_socket_action_command="exit $1 $2"
+				return 1
+			}
+			zxfer_cleanup_ssh_control_socket_entry_dir() {
+				return 7
+			}
+			zxfer_close_origin_ssh_control_socket 2>"$branch_root/origin-no-lease-stale.err"
+			printf 'origin_no_lease_stale_status=%s\n' "$?"
+			printf 'origin_no_lease_stale_err=%s\n' "$(cat "$branch_root/origin-no-lease-stale.err")"
+		)
+		(
+			set +e
+			control_dir="$branch_root/setup-check-error"
+			release_log="$branch_root/setup-check-error.release"
+			mkdir -p "$control_dir"
+			zxfer_ensure_ssh_control_socket_entry_dir() {
+				printf '%s\n' "$control_dir"
+			}
+			zxfer_get_ssh_base_transport_tokens() {
+				printf '%s\n' "$FAKE_SSH_BIN"
+			}
+			zxfer_acquire_ssh_control_socket_lock() {
+				g_zxfer_ssh_control_socket_lock_dir_result="$branch_root/setup-check-error.lock"
+				return 0
+			}
+			zxfer_prune_stale_ssh_control_socket_leases() {
+				return 0
+			}
+			zxfer_check_ssh_control_socket_for_host() {
+				g_zxfer_ssh_control_socket_action_result=error
+				g_zxfer_ssh_control_socket_action_stderr="check failed"
+				return 1
+			}
+			zxfer_release_ssh_control_socket_lock_with_precedence() {
+				printf 'release_setup_check:%s:%s:%s\n' "$1" "$2" "$3" >>"$release_log"
+				return "$3"
+			}
+			zxfer_throw_error() {
+				printf 'setup_check_throw=%s\n' "$1"
+				exit 9
+			}
+			(
+				zxfer_setup_ssh_control_socket "origin.example" origin
+			) 2>"$branch_root/setup-check-error.err"
+			printf 'setup_check_status=%s\n' "$?"
+			printf 'setup_check_release=%s\n' "$(cat "$release_log")"
+			printf 'setup_check_err=%s\n' "$(cat "$branch_root/setup-check-error.err")"
+		)
+	)
+
+	assertContains "Origin socket close should preserve cleanup failures after a successful exit action." \
+		"$output" "origin_success_cleanup_status=5"
+	assertContains "Origin socket close should report cache cleanup failures after a successful exit action." \
+		"$output" "origin_success_cleanup_err=Error removing ssh control socket cache directory for origin host."
+	assertContains "Origin socket close should preserve cleanup failures after a stale exit action." \
+		"$output" "origin_stale_cleanup_status=6"
+	assertContains "Origin socket close should report cache cleanup failures after a stale exit action." \
+		"$output" "origin_stale_cleanup_err=Error removing ssh control socket cache directory for origin host."
+	assertContains "Origin socket close without a lease should preserve stale cleanup failures." \
+		"$output" "origin_no_lease_stale_status=7"
+	assertContains "Origin socket close without a lease should report stale cleanup failures." \
+		"$output" "origin_no_lease_stale_err=Error removing ssh control socket cache directory for origin host."
+	assertContains "SSH control socket setup should release the lock when check reports a non-stale error." \
+		"$output" "setup_check_release=release_setup_check:origin:$branch_root/setup-check-error.lock:1"
+	assertContains "SSH control socket setup should route non-stale check errors through throw_error." \
+		"$output" "setup_check_throw=Error creating ssh control socket for origin host."
+	assertContains "SSH control socket setup should preserve the action diagnostic before throwing." \
+		"$output" "setup_check_err=check failed"
 }
 
 # shellcheck source=tests/shunit2/shunit2

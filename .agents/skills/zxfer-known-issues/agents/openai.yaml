@@ -1,0 +1,4 @@
+interface:
+  display_name: "zxfer Known Issues"
+  short_description: "Track new zxfer known issues"
+  default_prompt: "Use $zxfer-known-issues to audit this zxfer change for new KNOWN_ISSUES entries and architecture themes."

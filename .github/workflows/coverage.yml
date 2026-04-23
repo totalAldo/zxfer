@@ -29,6 +29,8 @@ jobs:
         if: always()
         shell: bash
         env:
+          GIT_SHA: ${{ github.sha }}
+          GIT_REF: ${{ github.ref }}
           SUMMARY_FILE: ${{ runner.temp }}/coverage/bash-xtrace/summary.tsv
           POLICY_REPORT_FILE: ${{ runner.temp }}/coverage/bash-xtrace/policy_report.txt
           POLICY_FAILURES_FILE: ${{ runner.temp }}/coverage/bash-xtrace/policy_failures.tsv
@@ -37,6 +39,10 @@ jobs:
           set -euo pipefail
           {
             echo "## Bash-Xtrace Coverage Policy"
+            echo
+            echo "Commit: \`$GIT_SHA\`"
+            echo
+            echo "Ref: \`$GIT_REF\`"
             echo
             if [ -f "$POLICY_REPORT_FILE" ]; then
               echo '```text'

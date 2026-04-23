@@ -159,6 +159,33 @@ EOF
 	chmod +x "$l_path"
 }
 
+create_launcher_usage_secure_path() {
+	l_secure_path_dir=$1
+	l_real_awk=$(command -v awk 2>/dev/null || :)
+
+	mkdir -p "$l_secure_path_dir"
+
+	if [ -z "$l_real_awk" ]; then
+		fail "Host test requires awk on the local system PATH."
+		return 1
+	fi
+
+	ln -s "$l_real_awk" "$l_secure_path_dir/awk"
+	cat >"$l_secure_path_dir/ps" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	cat >"$l_secure_path_dir/zfs" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	cat >"$l_secure_path_dir/ssh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$l_secure_path_dir/ps" "$l_secure_path_dir/zfs" "$l_secure_path_dir/ssh"
+}
+
 fake_remote_capability_response() {
 	cat <<'EOF'
 ZXFER_REMOTE_CAPS_V2
@@ -325,7 +352,7 @@ setUp() {
 	unset FAKE_SSH_SUPPRESS_STDOUT
 	unset FAKE_SSH_EXIT_STATUS
 	unset ZXFER_ERROR_LOG
-	unset ZXFER_REDACT_FAILURE_REPORT_COMMANDS
+	unset ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
 	unset ZXFER_SSH_BATCH_MODE
 	unset ZXFER_SSH_STRICT_HOST_KEY_CHECKING
 	unset ZXFER_SSH_USER_KNOWN_HOSTS_FILE
@@ -371,7 +398,7 @@ setUp() {
 	g_ssh_target_control_socket_dir=""
 	g_zxfer_original_invocation=""
 	g_option_Y_yield_iterations=1
-	g_zxfer_cleanup_pids=""
+	zxfer_reset_cleanup_pid_tracking
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
 	zxfer_init_temp_artifacts
@@ -487,6 +514,18 @@ test_split_host_spec_tokens_handles_multi_word_hosts() {
 	assertEquals "Host spec should be split into whitespace-delimited tokens." "$expected" "$result"
 }
 
+test_split_host_spec_tokens_rejects_shell_quotes_and_backslashes() {
+	set +e
+	output=$(zxfer_split_host_spec_tokens 'user@host "ZFS Admin"')
+	status=$?
+	set -e
+
+	assertEquals "Host-spec tokenization should fail closed when the input requires shell quoting semantics." \
+		1 "$status"
+	assertContains "Rejected host specs should explain the literal-token requirement." \
+		"$output" "Host spec (-O/-T) must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+}
+
 test_quote_host_spec_tokens_neutralizes_metacharacters() {
 	# Ensure characters such as semicolons are quoted so they cannot escape
 	# into new local commands when eval'd later.
@@ -504,6 +543,18 @@ test_quote_cli_tokens_preserves_argument_boundaries() {
 	assertEquals "CLI tokens should be individually quoted." "$expected" "$result"
 }
 
+test_split_cli_tokens_rejects_shell_quotes_and_backslashes() {
+	set +e
+	output=$(zxfer_split_cli_tokens 'zstd -T0\ -3' "compression command")
+	status=$?
+	set -e
+
+	assertEquals "CLI tokenization should fail closed when the input relies on shell escaping." \
+		1 "$status"
+	assertContains "Rejected CLI command strings should explain the literal-token requirement." \
+		"$output" "compression command must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+}
+
 test_quote_cli_tokens_blocks_shell_metacharacters() {
 	# Metacharacters such as ';' or '|' must be neutralized instead of being
 	# interpreted as new commands or pipelines.
@@ -511,6 +562,18 @@ test_quote_cli_tokens_blocks_shell_metacharacters() {
 	expected="'zstd' '-3;' 'touch' '/tmp/pwn' '|' 'cat'"
 
 	assertEquals "CLI tokens should remain literal even with metacharacters." "$expected" "$result"
+}
+
+test_quote_cli_tokens_preserves_validation_failures() {
+	set +e
+	output=$(zxfer_quote_cli_tokens '"/opt/zstd dir/zstd" -3' "compression command")
+	status=$?
+	set -e
+
+	assertEquals "CLI quoting should fail closed when token validation rejects the input." \
+		1 "$status"
+	assertContains "CLI quoting should preserve the literal-token validation message." \
+		"$output" "compression command must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
 }
 
 test_split_tokens_on_whitespace_breaks_metacharacters() {
@@ -1012,6 +1075,28 @@ BatchMode=yes
 StrictHostKeyChecking=yes" "$(cat "$outfile")"
 }
 
+test_get_ssh_base_transport_tokens_preserves_local_ssh_resolution_failures() {
+	set +e
+	output=$(
+		(
+			zxfer_get_managed_ssh_option_tokens() {
+				printf '%s\n' "-o\nBatchMode=yes"
+			}
+			zxfer_ensure_local_ssh_command() {
+				g_zxfer_resolved_local_ssh_command_result="ssh lookup failed"
+				return 1
+			}
+			zxfer_get_ssh_base_transport_tokens
+		)
+	)
+	status=$?
+
+	assertEquals "SSH base transport token discovery should fail when local ssh resolution fails." \
+		1 "$status"
+	assertEquals "SSH base transport token discovery should preserve the local ssh resolution diagnostic." \
+		"ssh lookup failed" "$output"
+}
+
 test_invoke_ssh_command_for_host_includes_explicit_known_hosts_override() {
 	log_file="$TEST_TMPDIR/invoke_cmd_known_hosts.log"
 	: >"$log_file"
@@ -1168,6 +1253,75 @@ test_build_ssh_shell_command_for_host_rethrows_transport_policy_validation_failu
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "ZXFER_SSH_USER_KNOWN_HOSTS_FILE must be an absolute path."
 }
 
+test_build_ssh_shell_command_for_host_preserves_transport_token_status() {
+	zxfer_test_capture_subshell "
+		zxfer_get_ssh_transport_tokens_for_host() {
+			printf '%s\n' 'custom transport failure'
+			return 73
+		}
+		zxfer_throw_error() {
+			printf '%s\n' \"\$1\"
+			exit \"\${2:-1}\"
+		}
+		zxfer_build_ssh_shell_command_for_host 'backup.example' \"'sh' '-c' 'printf ok'\"
+	"
+
+	assertEquals "ssh shell-command rendering should preserve the exact transport-token failure status." \
+		73 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "ssh shell-command rendering should preserve the transport-token failure text." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "custom transport failure"
+}
+
+test_ssh_host_spec_helpers_reject_invalid_literal_token_strings() {
+	zxfer_test_capture_subshell "
+		zxfer_throw_error() {
+			printf '%s\n' \"\$1\"
+			exit 1
+		}
+		zxfer_get_ssh_transport_tokens_for_host() {
+			printf '%s\n' '/usr/bin/ssh'
+		}
+		zxfer_invoke_ssh_command_for_host 'backup.example \"pfexec -u zfs\"' '/bin/true'
+	"
+
+	assertEquals "ssh argv execution helpers should reject host specs that rely on shell quoting." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "ssh argv execution helpers should preserve the host-spec literal-token validation message." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Host spec (-O/-T) must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+
+	zxfer_test_capture_subshell "
+		zxfer_throw_error() {
+			printf '%s\n' \"\$1\"
+			exit 1
+		}
+		zxfer_get_ssh_transport_tokens_for_host() {
+			printf '%s\n' '/usr/bin/ssh'
+		}
+		zxfer_build_ssh_shell_command_for_host 'backup.example \"pfexec -u zfs\"' \"'sh' '-c' 'printf ok'\"
+	"
+
+	assertEquals "ssh shell-command rendering should reject host specs that rely on shell quoting." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "ssh shell-command rendering should preserve the host-spec literal-token validation message." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Host spec (-O/-T) must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+
+	zxfer_test_capture_subshell "
+		zxfer_throw_error() {
+			printf '%s\n' \"\$1\"
+			exit 1
+		}
+		zxfer_get_ssh_transport_tokens_for_host() {
+			printf '%s\n' '/usr/bin/ssh'
+		}
+		zxfer_invoke_ssh_shell_command_for_host 'backup.example \"pfexec -u zfs\"' \"'sh' '-c' 'printf ok'\"
+	"
+
+	assertEquals "ssh shell-command execution should reject host specs that rely on shell quoting." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "ssh shell-command execution should preserve the host-spec literal-token validation message." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Host spec (-O/-T) must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+}
+
 test_invoke_ssh_shell_command_for_host_rethrows_transport_policy_validation_failures() {
 	zxfer_test_capture_subshell "
 		g_cmd_ssh='$FAKE_SSH_BIN'
@@ -1292,8 +1446,8 @@ EOF
 
 	assertEquals "The default local source path should execute the resolved zfs binary directly." \
 		"list -H tank/src" "$(cat "$outfile")"
-	assertEquals "Default local source execution should still record the last command." \
-		"'$fake_zfs' 'list' '-H' 'tank/src'" "$g_zxfer_failure_last_command"
+	assertEquals "Default local source execution should redact the last command." \
+		"[redacted]" "$g_zxfer_failure_last_command"
 }
 
 test_run_destination_zfs_cmd_uses_remote_ssh_when_target_specified() {
@@ -1354,8 +1508,8 @@ EOF
 
 	assertEquals "The default local destination path should execute the resolved zfs binary directly." \
 		"get name tank/dst" "$(cat "$outfile")"
-	assertEquals "Default local destination execution should still record the last command." \
-		"'$fake_zfs' 'get' 'name' 'tank/dst'" "$g_zxfer_failure_last_command"
+	assertEquals "Default local destination execution should redact the last command." \
+		"[redacted]" "$g_zxfer_failure_last_command"
 }
 
 test_refresh_compression_commands_tokenizes_custom_pipeline() {
@@ -1802,6 +1956,87 @@ test_execute_background_cmd_writes_output_file() {
 		"[ -n \"$bg_pid\" ]"
 	assertTrue "Background output file should be created." "[ -f \"$temp_file\" ]"
 	assertEquals "bg-data" "$(cat "$temp_file")"
+}
+
+test_execute_background_cmd_fails_closed_when_cleanup_registration_fails() {
+	temp_file="$TEST_TMPDIR/bg_register_fail_output"
+
+	output=$(
+		(
+			zxfer_register_cleanup_pid() {
+				return 1
+			}
+			zxfer_abort_direct_child_pid() {
+				printf 'abort:%s:%s:%s\n' "$1" "$2" "$3"
+				kill -s TERM "$1" 2>/dev/null || :
+				wait "$1" 2>/dev/null || :
+				return 0
+			}
+			zxfer_execute_background_cmd \
+				"sleep 30" \
+				"$temp_file"
+			printf 'status=%s\n' "$?"
+			printf 'pid=%s\n' "${g_last_background_pid:-}"
+		)
+	)
+
+	assertContains "Background helper registration failures should fail closed." \
+		"$output" "status=1"
+	assertContains "Background helper registration failures should clear the published PID." \
+		"$output" "pid="
+	assertContains "Background helper registration failures should route teardown through the validated direct-child abort helper." \
+		"$output" "abort:"
+	assertContains "Background helper registration failures should preserve the cleanup-helper purpose when invoking the validated direct-child abort helper." \
+		"$output" "background command helper"
+}
+
+test_execute_background_cmd_fails_closed_when_cleanup_wrapper_lookup_fails() {
+	temp_file="$TEST_TMPDIR/bg_wrapper_lookup_fail_output"
+
+	output=$(
+		(
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "cleanup wrapper lookup failed"
+				return 1
+			}
+			zxfer_execute_background_cmd "sleep 30" "$temp_file"
+			printf 'status=%s\n' "$?"
+			printf 'pid=%s\n' "${g_last_background_pid:-}"
+		)
+	)
+
+	assertContains "Background execution should fail closed when the cleanup-wrapper lookup fails." \
+		"$output" "status=1"
+	assertContains "Cleanup-wrapper lookup failures should not publish a background PID." \
+		"$output" "pid="
+}
+
+test_execute_background_cmd_preserves_abort_failures_when_cleanup_registration_fails() {
+	temp_file="$TEST_TMPDIR/bg_abort_fail_output"
+
+	output=$(
+		(
+			zxfer_register_cleanup_pid() {
+				return 1
+			}
+			zxfer_abort_direct_child_pid() {
+				printf 'abort:%s:%s:%s\n' "$1" "$2" "$3"
+				return 1
+			}
+			zxfer_execute_background_cmd \
+				"sleep 30" \
+				"$temp_file"
+			printf 'status=%s\n' "$?"
+			printf 'pid=%s\n' "${g_last_background_pid:-}"
+		)
+	)
+
+	assertContains "Background helper registration failures should preserve validated abort failures." \
+		"$output" "status=1"
+	assertContains "Background helper registration failures should still clear the published PID when aborting the helper fails." \
+		"$output" "pid="
+	assertContains "Background helper registration failures should still route teardown through the validated direct-child abort helper before returning the abort failure." \
+		"$output" "abort:"
 }
 
 test_execute_background_cmd_respects_dry_run_mode() {
@@ -4003,34 +4238,18 @@ test_zxfer_render_failure_report_includes_context_fields() {
 	assertContains "$report" "failure_stage: send/receive"
 	assertContains "$report" "source_root: tank/src"
 	assertContains "$report" "current_destination: backup/dst/child"
-	assertContains "$report" "invocation: './zxfer' '-R' 'tank/src' 'backup/dst'"
-	assertContains "$report" "last_command: '/sbin/zfs' 'send' 'tank/src@snap1'"
+	assertContains "$report" "invocation: [redacted]"
+	assertContains "$report" "last_command: [redacted]"
 	assertContains "$report" "zxfer: failure report end"
 }
 
-test_zxfer_usage_error_failure_report_redacts_invocation_when_enabled() {
+test_zxfer_usage_error_failure_report_redacts_invocation_by_default() {
 	secure_path_dir="$TEST_TMPDIR/usage_redaction_secure_path"
 	stdout_file="$TEST_TMPDIR/usage_redaction.stdout"
 	stderr_file="$TEST_TMPDIR/usage_redaction.stderr"
-	real_awk=$(command -v awk 2>/dev/null || :)
 	secret_source="tank/secret-source"
 
-	mkdir -p "$secure_path_dir"
-
-	if [ -z "$real_awk" ]; then
-		fail "Host test requires awk on the local system PATH."
-	fi
-
-	ln -s "$real_awk" "$secure_path_dir/awk"
-	cat >"$secure_path_dir/zfs" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	cat >"$secure_path_dir/ssh" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	chmod +x "$secure_path_dir/zfs" "$secure_path_dir/ssh"
+	create_launcher_usage_secure_path "$secure_path_dir" || return
 
 	set +e
 	env -i \
@@ -4038,43 +4257,26 @@ EOF
 		TMPDIR="$TEST_TMPDIR" \
 		PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
 		ZXFER_SECURE_PATH="$secure_path_dir" \
-		ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1 \
 		"$ZXFER_ROOT/zxfer" -R "$secret_source" >"$stdout_file" 2>"$stderr_file"
 	status=$?
 
-	assertEquals "Usage-error launcher runs should still exit with usage status when failure-report command redaction is enabled." \
+	assertEquals "Usage-error launcher runs should still exit with usage status when failure-report command redaction is enabled by default." \
 		2 "$status"
-	assertContains "Failure-report command redaction should replace the launcher-captured invocation in stderr." \
+	assertContains "Default failure-report command redaction should replace the launcher-captured invocation in stderr." \
 		"$(cat "$stderr_file")" "invocation: [redacted]"
-	assertNotContains "Failure-report command redaction should keep secret-bearing usage arguments out of stderr." \
+	assertNotContains "Default failure-report command redaction should keep secret-bearing usage arguments out of stderr." \
 		"$(cat "$stderr_file")" "$secret_source"
 }
 
-test_zxfer_usage_error_failure_report_escapes_control_bytes_in_invocation() {
+test_zxfer_usage_error_failure_report_escapes_control_bytes_in_invocation_in_unsafe_mode() {
 	secure_path_dir="$TEST_TMPDIR/usage_escape_secure_path"
 	stdout_file="$TEST_TMPDIR/usage_escape.stdout"
 	stderr_file="$TEST_TMPDIR/usage_escape.stderr"
-	real_awk=$(command -v awk 2>/dev/null || :)
 	esc=$(printf '\033')
 	bell=$(printf '\007')
 	control_source=$(printf 'tank/ctrl%s[31m%s' "$esc" "$bell")
 
-	mkdir -p "$secure_path_dir"
-
-	if [ -z "$real_awk" ]; then
-		fail "Host test requires awk on the local system PATH."
-	fi
-
-	ln -s "$real_awk" "$secure_path_dir/awk"
-	cat >"$secure_path_dir/zfs" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	cat >"$secure_path_dir/ssh" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	chmod +x "$secure_path_dir/zfs" "$secure_path_dir/ssh"
+	create_launcher_usage_secure_path "$secure_path_dir" || return
 
 	set +e
 	env -i \
@@ -4082,6 +4284,7 @@ EOF
 		TMPDIR="$TEST_TMPDIR" \
 		PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
 		ZXFER_SECURE_PATH="$secure_path_dir" \
+		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 \
 		"$ZXFER_ROOT/zxfer" -R "$control_source" >"$stdout_file" 2>"$stderr_file"
 	status=$?
 	grep -F -x "invocation: '$ZXFER_ROOT/zxfer' '-R' 'tank/ctrl\\x1B[31m\\x07'" "$stderr_file" >/dev/null 2>&1
@@ -4095,44 +4298,28 @@ EOF
 	grep -F "$bell" "$stderr_file" >/dev/null 2>&1
 	raw_bell_status=$?
 
-	assertEquals "Usage-error launcher runs should still exit with usage status when invocation control bytes are escaped." \
+	assertEquals "Unsafe usage-error launcher runs should still exit with usage status when invocation control bytes are escaped." \
 		2 "$status"
-	assertEquals "Failure reports should render ESC bytes from the launcher-captured invocation as escaped text." \
+	assertEquals "Unsafe failure reports should render ESC bytes from the launcher-captured invocation as escaped text." \
 		0 "$escaped_esc_status"
-	assertEquals "Failure reports should not double-escape control-byte markers from the launcher-captured invocation." \
+	assertEquals "Unsafe failure reports should not double-escape control-byte markers from the launcher-captured invocation." \
 		1 "$double_esc_status"
-	assertEquals "Failure reports should render BEL bytes from the launcher-captured invocation as escaped text." \
+	assertEquals "Unsafe failure reports should render BEL bytes from the launcher-captured invocation as escaped text." \
 		0 "$escaped_bell_status"
-	assertEquals "Failure reports should not contain raw ESC bytes from the launcher-captured invocation." \
+	assertEquals "Unsafe failure reports should not contain raw ESC bytes from the launcher-captured invocation." \
 		1 "$raw_esc_status"
-	assertEquals "Failure reports should not contain raw BEL bytes from the launcher-captured invocation." \
+	assertEquals "Unsafe failure reports should not contain raw BEL bytes from the launcher-captured invocation." \
 		1 "$raw_bell_status"
 }
 
-test_zxfer_usage_error_failure_report_preserves_trailing_newline_in_invocation() {
+test_zxfer_usage_error_failure_report_preserves_trailing_newline_in_invocation_in_unsafe_mode() {
 	secure_path_dir="$TEST_TMPDIR/usage_trailing_newline_secure_path"
 	stdout_file="$TEST_TMPDIR/usage_trailing_newline.stdout"
 	stderr_file="$TEST_TMPDIR/usage_trailing_newline.stderr"
-	real_awk=$(command -v awk 2>/dev/null || :)
 	trailing_source=$(printf 'tank/trailing-source\n_')
 	trailing_source=${trailing_source%_}
 
-	mkdir -p "$secure_path_dir"
-
-	if [ -z "$real_awk" ]; then
-		fail "Host test requires awk on the local system PATH."
-	fi
-
-	ln -s "$real_awk" "$secure_path_dir/awk"
-	cat >"$secure_path_dir/zfs" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	cat >"$secure_path_dir/ssh" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	chmod +x "$secure_path_dir/zfs" "$secure_path_dir/ssh"
+	create_launcher_usage_secure_path "$secure_path_dir" || return
 
 	set +e
 	env -i \
@@ -4140,14 +4327,15 @@ EOF
 		TMPDIR="$TEST_TMPDIR" \
 		PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
 		ZXFER_SECURE_PATH="$secure_path_dir" \
+		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 \
 		"$ZXFER_ROOT/zxfer" -R "$trailing_source" >"$stdout_file" 2>"$stderr_file"
 	status=$?
 	grep -F -x "invocation: '$ZXFER_ROOT/zxfer' '-R' 'tank/trailing-source\\n'" "$stderr_file" >/dev/null 2>&1
 	trailing_newline_status=$?
 
-	assertEquals "Usage-error launcher runs should still exit with usage status when invocation newline markers are preserved." \
+	assertEquals "Unsafe usage-error launcher runs should still exit with usage status when invocation newline markers are preserved." \
 		2 "$status"
-	assertEquals "Failure reports should preserve trailing newline markers from the launcher-captured invocation." \
+	assertEquals "Unsafe failure reports should preserve trailing newline markers from the launcher-captured invocation." \
 		0 "$trailing_newline_status"
 }
 
@@ -4287,23 +4475,8 @@ test_zxfer_usage_error_with_very_verbose_does_not_emit_profile_summary() {
 	secure_path_dir="$TEST_TMPDIR/usage_secure_path"
 	stdout_file="$TEST_TMPDIR/usage.stdout"
 	stderr_file="$TEST_TMPDIR/usage.stderr"
-	real_awk=$(command -v awk 2>/dev/null || :)
-	mkdir -p "$secure_path_dir"
 
-	if [ -z "$real_awk" ]; then
-		fail "Host test requires awk on the local system PATH."
-	fi
-
-	ln -s "$real_awk" "$secure_path_dir/awk"
-	cat >"$secure_path_dir/zfs" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	cat >"$secure_path_dir/ssh" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	chmod +x "$secure_path_dir/zfs" "$secure_path_dir/ssh"
+	create_launcher_usage_secure_path "$secure_path_dir" || return
 
 	set +e
 	env -i \
@@ -4824,65 +4997,69 @@ test_trap_exit_preserves_failure_status_when_error_log_warning_fails() {
 }
 
 test_zxfer_kill_registered_cleanup_pids_only_terminates_registered_pids() {
-	log="$TEST_TMPDIR/cleanup_registered_pids.log"
-	: >"$log"
-	g_zxfer_cleanup_pids=""
+	output=$(
+		(
+			unrelated_pid=60101
+			g_zxfer_cleanup_pids="50101"
+			g_zxfer_cleanup_pid_records="50101	registered cleanup helper	start-token	unit-host	700	child_set"
+			zxfer_abort_cleanup_pid() {
+				printf 'abort:%s\n' "$1"
+				zxfer_unregister_cleanup_pid "$1"
+				return 0
+			}
+			zxfer_kill_registered_cleanup_pids
+			printf 'remaining=<%s>\n' "$g_zxfer_cleanup_pids"
+			printf 'unrelated=<%s>\n' "$unrelated_pid"
+		)
+	)
 
-	sleep 30 &
-	registered_pid=$!
-	zxfer_register_cleanup_pid "$registered_pid"
-
-	sleep 30 &
-	unrelated_pid=$!
-
-	KILL_LOG="$log"
-	kill() {
-		printf '%s\n' "$1" >>"$KILL_LOG"
-		command kill "$@" 2>/dev/null || true
-	}
-	zxfer_kill_registered_cleanup_pids
-	unset -f kill
-	wait "$registered_pid" 2>/dev/null || true
-	sleep 1
-
-	assertFalse "Registered cleanup jobs should be terminated." \
-		"kill -s 0 \"$registered_pid\" >/dev/null 2>&1"
-	assertEquals "Cleanup should only target registered child processes." \
-		"$registered_pid" "$(cat "$log")"
-	assertEquals "Cleanup PID tracking should be cleared after termination." "" "$g_zxfer_cleanup_pids"
-
-	kill -s KILL "$unrelated_pid" >/dev/null 2>&1 || true
-	wait "$unrelated_pid" 2>/dev/null || true
+	assertContains "Cleanup should delegate validated teardown only for tracked helper PIDs." \
+		"$output" "abort:50101"
+	assertNotContains "Cleanup should not delegate teardown for unrelated helper PIDs." \
+		"$output" "abort:60101"
+	assertContains "Cleanup PID tracking should be cleared after termination." \
+		"$output" "remaining=<>"
 }
 
 test_zxfer_cleanup_pid_helpers_ignore_invalid_inputs_in_current_shell() {
-	log="$TEST_TMPDIR/cleanup_pid_helpers.log"
-	: >"$log"
-	g_zxfer_cleanup_pids="101 202 303"
+	sleep 30 &
+	tracked_pid=$!
+	zxfer_register_cleanup_pid "$tracked_pid" "tracked cleanup helper"
 
 	zxfer_register_cleanup_pid ""
 	zxfer_register_cleanup_pid "abc"
 	assertEquals "Cleanup PID registration should ignore empty and non-numeric inputs." \
-		"101 202 303" "$g_zxfer_cleanup_pids"
+		"$tracked_pid" "$g_zxfer_cleanup_pids"
 
 	zxfer_unregister_cleanup_pid ""
 	zxfer_unregister_cleanup_pid "abc"
-	zxfer_unregister_cleanup_pid "202"
+	zxfer_unregister_cleanup_pid "$tracked_pid"
 	assertEquals "Cleanup PID unregistration should ignore invalid inputs and preserve the remaining list order." \
-		"101 303" "$g_zxfer_cleanup_pids"
+		"" "$g_zxfer_cleanup_pids"
 
-	KILL_LOG="$log"
-	kill() {
-		printf '%s\n' "$1" >>"$KILL_LOG"
-	}
-	g_zxfer_cleanup_pids="abc 101 $$ 303"
-	zxfer_kill_registered_cleanup_pids
-	unset -f kill
+	output=$(
+		(
+			l_stub_pid=7001
+			g_zxfer_cleanup_pids="abc $l_stub_pid $$"
+			g_zxfer_cleanup_pid_records="$l_stub_pid	tracked cleanup helper	start-token	unit-host	700	child_set"
+			zxfer_abort_cleanup_pid() {
+				printf 'abort:%s\n' "$1"
+				zxfer_unregister_cleanup_pid "$1"
+				return 0
+			}
+			zxfer_kill_registered_cleanup_pids
+			printf 'remaining=<%s>\n' "$g_zxfer_cleanup_pids"
+		)
+	)
 
-	assertEquals "Cleanup termination should skip invalid entries and the current shell PID." \
-		"101
-303" "$(cat "$log")"
-	assertEquals "Cleanup PID tracking should be cleared after termination." "" "$g_zxfer_cleanup_pids"
+	kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
+	wait "$tracked_pid" 2>/dev/null || true
+	assertContains "Cleanup termination should still delegate teardown for the validated helper when invalid entries are present in the PID list." \
+		"$output" "abort:7001"
+	assertNotContains "Cleanup termination should ignore non-numeric entries in the tracked PID list." \
+		"$output" "abort:abc"
+	assertContains "Cleanup PID tracking should be cleared after termination." \
+		"$output" "remaining=<>"
 }
 
 test_execute_command_records_last_command_string() {
@@ -4891,29 +5068,31 @@ test_execute_command_records_last_command_string() {
 
 	zxfer_execute_command "printf 'hello'"
 
-	assertEquals "zxfer_execute_command should record the exact command string for failure reports." "printf 'hello'" "$g_zxfer_failure_last_command"
+	assertEquals "zxfer_execute_command should redact the exact command string for failure reports by default." "[redacted]" "$g_zxfer_failure_last_command"
 }
 
-test_run_source_zfs_cmd_records_local_command() {
+test_run_source_zfs_cmd_records_local_command_in_unsafe_mode() {
 	g_option_O_origin_host=""
 	g_cmd_zfs="/bin/echo"
 	g_LZFS="$g_cmd_zfs"
+	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 
 	zxfer_run_source_zfs_cmd list -H tank/src >/dev/null
 
-	assertEquals "Direct local ZFS commands should be shell-quoted in the last-command field." \
+	assertEquals "Direct local ZFS commands should be shell-quoted in the last-command field when unsafe mode is enabled." \
 		"'/bin/echo' 'list' '-H' 'tank/src'" "$g_zxfer_failure_last_command"
 }
 
-test_invoke_ssh_command_for_host_records_remote_command() {
+test_invoke_ssh_command_for_host_records_remote_command_in_unsafe_mode() {
 	FAKE_SSH_STDOUT_OVERRIDE="ok"
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_option_O_origin_host="backup@example.com pfexec"
 	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
+	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 
 	zxfer_invoke_ssh_command_for_host "backup@example.com pfexec" /sbin/zfs list -H tank/src >/dev/null
 
-	assertEquals "SSH command recording should preserve every token boundary." \
+	assertEquals "Unsafe SSH command recording should preserve every token boundary." \
 		"'$FAKE_SSH_BIN' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' '-S' '$TEST_TMPDIR/origin.sock' 'backup@example.com' 'pfexec' '/sbin/zfs' 'list' '-H' 'tank/src'" \
 		"$g_zxfer_failure_last_command"
 }
@@ -5336,6 +5515,7 @@ EOF
 	chmod +x "$wrapper"
 	result=$(
 		(
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 			g_option_O_origin_host=""
 			g_cmd_zfs="/sbin/zfs"
 			g_LZFS="$wrapper"
@@ -5359,6 +5539,7 @@ EOF
 	chmod +x "$wrapper"
 	result=$(
 		(
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 			g_option_T_target_host=""
 			g_cmd_zfs="/sbin/zfs"
 			g_RZFS="$wrapper"

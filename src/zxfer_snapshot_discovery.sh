@@ -65,6 +65,7 @@ zxfer_reset_snapshot_discovery_state() {
 	zxfer_cleanup_snapshot_record_cache_files
 	g_source_snapshot_list_cmd=""
 	g_source_snapshot_list_pid=""
+	g_source_snapshot_list_job_id=""
 	g_source_snapshot_list_uses_parallel=0
 	g_source_snapshot_list_uses_metadata_compression=0
 	g_recursive_source_list=""
@@ -182,10 +183,15 @@ zxfer_local_parallel_functional_probe_reports_gnu() {
 
 	[ -n "$l_parallel_path" ] || return 1
 
-	l_probe_output=$(
+	if l_probe_output=$(
 		printf '%s\n' "$l_probe_sentinel" |
 			"$l_parallel_path" --will-cite -j 1 --line-buffer -- "printf '%s\n' {}" 2>/dev/null
-	) || return 1
+	); then
+		:
+	else
+		l_probe_status=$?
+		return "$l_probe_status"
+	fi
 
 	[ "$l_probe_output" = "$l_probe_sentinel" ]
 }
@@ -285,7 +291,12 @@ zxfer_ensure_parallel_available_for_source_jobs() {
 zxfer_build_source_snapshot_list_cmd() {
 	g_source_snapshot_list_uses_parallel=0
 	g_source_snapshot_list_uses_metadata_compression=0
-	l_local_serial_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$g_initial_source")
+	if l_local_serial_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$g_initial_source"); then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
 
 	if [ "$g_option_j_jobs" -le 1 ]; then
 		printf '%s\n' "$l_local_serial_cmd"
@@ -311,20 +322,45 @@ zxfer_build_source_snapshot_list_cmd() {
 	if [ ! "$g_option_O_origin_host" = "" ]; then
 		l_parallel_path=$g_origin_parallel_cmd
 		l_remote_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
-		l_parallel_cmd=$(zxfer_build_shell_command_from_argv "$l_parallel_path")
-		l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
-			"$l_remote_zfs_cmd" list -H -o name -s creation -d 1 -t snapshot "{}")
+		if l_parallel_cmd=$(zxfer_build_shell_command_from_argv "$l_parallel_path"); then
+			:
+		else
+			l_status=$?
+			return "$l_status"
+		fi
+		if l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
+			"$l_remote_zfs_cmd" list -H -o name -s creation -d 1 -t snapshot "{}"); then
+			:
+		else
+			l_status=$?
+			return "$l_status"
+		fi
 		l_remote_parallel_cmd="$l_parallel_cmd -j $g_option_j_jobs --line-buffer -- \"$l_remote_runner_cmd\""
-		l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
-			"$l_remote_zfs_cmd" list -Hr -t filesystem,volume -o name "$g_initial_source")
+		if l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
+			"$l_remote_zfs_cmd" list -Hr -t filesystem,volume -o name "$g_initial_source"); then
+			:
+		else
+			l_status=$?
+			return "$l_status"
+		fi
 		l_remote_pipeline="$l_remote_dataset_input_cmd | $l_remote_parallel_cmd"
 		if [ "$g_option_z_compress" -eq 1 ]; then
 			g_source_snapshot_list_uses_metadata_compression=1
 			l_remote_compress_safe=${g_origin_cmd_compress_safe:-$g_cmd_compress_safe}
 			l_remote_pipeline="$l_remote_pipeline | $l_remote_compress_safe"
 		fi
-		l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_pipeline")
-		l_cmd=$(zxfer_build_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_shell_cmd") || return 1
+		if l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_pipeline"); then
+			:
+		else
+			l_status=$?
+			return "$l_status"
+		fi
+		if l_cmd=$(zxfer_build_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_shell_cmd"); then
+			:
+		else
+			l_status=$?
+			return "$l_status"
+		fi
 		if [ "${g_source_snapshot_list_uses_metadata_compression:-0}" -eq 1 ]; then
 			l_cmd="$l_cmd | $g_cmd_decompress_safe"
 		fi
@@ -333,10 +369,26 @@ zxfer_build_source_snapshot_list_cmd() {
 	fi
 
 	l_parallel_path=$g_cmd_parallel
-	l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name -s creation -d 1 -t snapshot "{}")
-	l_parallel_cmd="$(zxfer_build_shell_command_from_argv "$l_parallel_path") -j $g_option_j_jobs --line-buffer -- \"$l_runner_cmd\""
-	l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec \
-		"$g_LZFS" list -Hr -t filesystem,volume -o name "$g_initial_source")
+	if l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name -s creation -d 1 -t snapshot "{}"); then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
+	if l_parallel_cmd=$(zxfer_build_shell_command_from_argv "$l_parallel_path"); then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
+	l_parallel_cmd="$l_parallel_cmd -j $g_option_j_jobs --line-buffer -- \"$l_runner_cmd\""
+	if l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec \
+		"$g_LZFS" list -Hr -t filesystem,volume -o name "$g_initial_source"); then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
 	l_cmd="$l_dataset_input_cmd | $l_parallel_cmd"
 	printf '%s\n' "$l_cmd"
 }
@@ -399,6 +451,7 @@ zxfer_write_source_snapshot_list_to_file() {
 			fi
 		fi
 		g_source_snapshot_list_pid=""
+		g_source_snapshot_list_job_id=""
 		return 0
 	fi
 
@@ -442,26 +495,19 @@ zxfer_write_source_snapshot_list_to_file() {
 		zxfer_profile_record_ssh_invocation "$g_option_O_origin_host" source
 	fi
 
-	if [ "$g_option_j_jobs" -gt 1 ]; then
-		if [ "${g_source_snapshot_list_uses_parallel:-0}" -eq 1 ]; then
-			zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_parallel_commands
-		fi
-		zxfer_echoV "Running command in the background: $l_cmd"
-		zxfer_record_last_command_string "$l_cmd"
-		if [ -n "$l_errfile" ]; then
-			eval "$l_cmd" >"$l_outfile" 2>"$l_errfile" &
-		else
-			eval "$l_cmd" >"$l_outfile" &
-		fi
-		g_source_snapshot_list_pid=$!
-		zxfer_register_cleanup_pid "$g_source_snapshot_list_pid"
-	else
-		zxfer_execute_background_cmd \
-			"$l_cmd" \
-			"$l_outfile" \
-			"$l_errfile"
-		g_source_snapshot_list_pid=${g_last_background_pid:-}
+	if [ "${g_source_snapshot_list_uses_parallel:-0}" -eq 1 ]; then
+		zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_parallel_commands
 	fi
+	zxfer_echoV "Running command in the background: $l_cmd"
+	zxfer_record_last_command_string "$l_cmd"
+	zxfer_spawn_supervised_background_job \
+		"source_snapshot_list" \
+		"$l_cmd" \
+		"$l_cmd" \
+		"$l_outfile" \
+		"$l_errfile"
+	g_source_snapshot_list_pid=$g_zxfer_background_job_last_runner_pid
+	g_source_snapshot_list_job_id=$g_zxfer_background_job_last_id
 }
 
 # Purpose: Normalize the destination snapshot list into the stable form used
@@ -1387,6 +1433,7 @@ zxfer_get_zfs_list() {
 	# BEGIN background process
 	#
 	g_source_snapshot_list_pid=""
+	g_source_snapshot_list_job_id=""
 	l_source_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
 	zxfer_write_source_snapshot_list_to_file "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
 
@@ -1482,12 +1529,35 @@ zxfer_get_zfs_list() {
 
 	zxfer_echoV "Waiting for background processes to finish."
 	l_source_snapshot_wait_status=0
-	if [ -n "${g_source_snapshot_list_pid:-}" ]; then
-		wait "$g_source_snapshot_list_pid" || l_source_snapshot_wait_status=$?
-		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
+	l_source_snapshot_wait_report_failure=""
+	if [ -n "${g_source_snapshot_list_job_id:-}" ]; then
+		if ! zxfer_wait_for_background_job "$g_source_snapshot_list_job_id"; then
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+				"$l_dest_snaps_stripped_sorted_tmp_file"
+			zxfer_cleanup_snapshot_record_cache_files
+			zxfer_throw_error "Failed to read source snapshot discovery completion metadata."
+		fi
+		l_source_snapshot_wait_status=$g_zxfer_background_job_wait_exit_status
+		l_source_snapshot_wait_report_failure=${g_zxfer_background_job_wait_report_failure:-}
 		g_source_snapshot_list_pid=""
+		g_source_snapshot_list_job_id=""
 	fi
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_source_snapshot_listing_ms "$l_source_snapshot_stage_start_ms"
+
+	case $l_source_snapshot_wait_report_failure in
+	queue_write)
+		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+			"$l_dest_snaps_stripped_sorted_tmp_file"
+		zxfer_cleanup_snapshot_record_cache_files
+		zxfer_throw_error "Failed to publish source snapshot discovery completion."
+		;;
+	completion_write)
+		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+			"$l_dest_snaps_stripped_sorted_tmp_file"
+		zxfer_cleanup_snapshot_record_cache_files
+		zxfer_throw_error "Failed to report source snapshot discovery completion."
+		;;
+	esac
 
 	if [ "$l_source_snapshot_wait_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \

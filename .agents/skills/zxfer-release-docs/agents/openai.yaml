@@ -1,0 +1,4 @@
+interface:
+  display_name: "zxfer Release Docs"
+  short_description: "Keep zxfer release docs aligned"
+  default_prompt: "Use $zxfer-release-docs to find documentation updates needed for this zxfer change."

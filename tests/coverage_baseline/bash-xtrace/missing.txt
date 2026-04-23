@@ -1,3 +1,21 @@
+src/zxfer_background_job_runner.sh
+  192:	zxfer_background_job_runner_main "$@"
+  193:	exit $?
+
+src/zxfer_background_jobs.sh
+  242:	done <<-EOF || l_read_status=$?
+  243:		$g_zxfer_runtime_artifact_read_result
+  244:	EOF
+  267:	done <<-EOF || l_read_status=$?
+  268:		$g_zxfer_runtime_artifact_read_result
+  269:	EOF
+  287:		return 1
+  521:			$l_record
+  522:		EOF
+  550:				zxfer_unregister_background_job_record "$l_job_id"
+  551:				zxfer_cleanup_runtime_artifact_path "$g_zxfer_background_job_record_control_dir" >/dev/null 2>&1 || :
+  552:				return 0
+
 src/zxfer_backup_metadata.sh
   111:	if ! l_updated_records=$(printf '%s' "$l_existing_records" |
   112:		ZXFER_BACKUP_METADATA_SOURCE=$l_source \
@@ -29,11 +47,13 @@ src/zxfer_backup_metadata.sh
   2197:		zxfer_throw_remote_backup_capture_error "$g_option_T_target_host" "writing backup metadata $l_primary_backup_file_path"
 
 src/zxfer_exec.sh
-  478:	l_command_context=$(zxfer_get_remote_command_context_label \
+  103:		return 1
+  115:				g_last_background_pid=""
+  116:				return 1
+  491:	l_command_context=$(zxfer_get_remote_command_context_label \
 
 src/zxfer_locking.sh
   233:	l_normalized_value=$(printf '%s\n' "$l_field_value" |
-  266:	[ -r "/proc/$l_pid/stat" ] || return 1
   267:	l_proc_stat=$(cat "/proc/$l_pid/stat" 2>/dev/null || :)
   268:	[ -n "$l_proc_stat" ] || return 1
   269:	l_proc_rest=$(printf '%s\n' "$l_proc_stat" | sed 's/^[0-9][0-9]* (.*) //')
@@ -354,65 +374,100 @@ src/zxfer_reporting.sh
   1310:			zxfer_echoV "Failure beep failed; skipping."
 
 src/zxfer_runtime.sh
-  479:	if (
-  481:	) 2>/dev/null; then
-  747:	if ! {
-  754:	} >"$l_object_path"; then
-  894:		return 1
-  1239:			l_status=$?
-  1240:			zxfer_cleanup_runtime_artifact_paths \
-  1242:			return "$l_status"
-  1252:			l_status=$?
-  1253:			zxfer_cleanup_runtime_artifact_paths \
-  1256:			return "$l_status"
-  1358:				continue
+  141:	l_cleanup_read_pgid_value=$("${g_cmd_ps:-ps}" -o pgid= -p "$l_cleanup_read_pgid_pid" 2>/dev/null |
+  214:			return 0
+  294:		return 1
+  315:		return 1
+  414:		return 0
+  420:		return 1
+  423:		return 0
+  434:			return 0
+  450:			return 0
+  475:		return 0
+  498:		g_zxfer_cleanup_pid_abort_failure_message="Failed to inspect the process table for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
+  499:		return 1
+  502:	l_cleanup_abort_current_shell_pgid=$("${g_cmd_ps:-ps}" -o pgid= -p "$$" 2>/dev/null |
+  506:		l_cleanup_abort_use_process_group=0
+  542:			g_zxfer_cleanup_pid_abort_failure_message="Failed to derive the owned child set for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
+  543:			return 1
+  558:			zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
+  559:			return 0
+  562:			g_zxfer_cleanup_pid_abort_failure_message="Failed to validate ownership for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
+  563:			return 1
+  922:	if (
+  924:	) 2>/dev/null; then
+  1190:	if ! {
+  1197:	} >"$l_object_path"; then
+  1337:		return 1
+  1684:			l_status=$?
+  1685:			zxfer_cleanup_runtime_artifact_paths \
+  1687:			return "$l_status"
+  1697:			l_status=$?
+  1698:			zxfer_cleanup_runtime_artifact_paths \
+  1701:			return "$l_status"
+  1821:				continue
 
 src/zxfer_send_receive.sh
-  115:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |
-  300:	l_progress_dialog=$(echo "$g_option_D_display_progress_bar" |
-  301:		sed "s#%%size%%#$l_size_est#g" |
-  652:		return 1
-  1020:			$l_completed_record
-  1021:		EOF
-  1052:		zxfer_terminate_remaining_send_jobs
-  1053:		zxfer_throw_error "Failed to read zfs send/receive job status file [$l_completed_status_file]."
-  1062:		zxfer_terminate_remaining_send_jobs
-  1063:		zxfer_throw_error "Failed to publish zfs send/receive background completion (PID $l_pid, exit $l_pid_status)."
-  1066:		zxfer_terminate_remaining_send_jobs
-  1067:		zxfer_throw_error "Failed to report zfs send/receive background completion (PID $l_pid, exit $l_wait_status)."
-  1098:			zxfer_unregister_send_job "$l_pid"
-  1099:			zxfer_terminate_remaining_send_jobs
-  1100:			zxfer_throw_error "Failed to read zfs send/receive job status file [$l_status_file]."
+  116:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |
+  301:	l_progress_dialog=$(echo "$g_option_D_display_progress_bar" |
+  302:		sed "s#%%size%%#$l_size_est#g" |
+  1133:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
+  1140:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
+  1152:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
+  1158:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
+  1164:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
+  1170:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
+  1187:				zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
+  1195:				zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
+  1201:				zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
+  1207:				zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
+  1300:			$l_completed_record
+  1301:		EOF
+  1324:			zxfer_throw_send_job_cleanup_failure
+  1333:			zxfer_throw_send_job_cleanup_failure
+  1339:			zxfer_throw_send_job_cleanup_failure
+  1351:			zxfer_throw_send_job_cleanup_failure
+  1359:		zxfer_throw_error "Failed to report zfs send/receive background completion (PID $l_pid, exit $l_wait_status)."
+  1364:			zxfer_throw_send_job_cleanup_failure
+  1401:				zxfer_throw_send_job_cleanup_failure
+  1411:				zxfer_throw_send_job_cleanup_failure
+  1425:				zxfer_throw_send_job_cleanup_failure
 
 src/zxfer_snapshot_discovery.sh
-  159:	l_normalized_output=$(printf '%s' "$l_output" |
-  160:		tr '[:upper:]' '[:lower:]' |
-  315:		l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
-  318:		l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
-  338:	l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec \
-  599:			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
-  601:			zxfer_throw_error "Failed to stage empty already-changed recursive dataset list for snapshot identity validation."
-  606:		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
-  608:		zxfer_throw_error "Failed to derive recursive candidate dataset list for snapshot identity validation."
-  629:		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
-  631:		zxfer_throw_error "Failed to read staged recursive candidate dataset list for snapshot identity validation."
-  804:			zxfer_throw_error "Failed to stage empty destination snapshot list."
-  915:		l_status=$?
-  916:		return "$l_status"
-  956:		l_status=$?
-  957:		return "$l_status"
-  1242:		return "$l_status"
-  1438:				l_dest_pool=$g_destination
-  1449:			zxfer_cleanup_runtime_artifact_paths "$l_dest_list_tmp_file" "$l_dest_list_err_file"
-  1450:			zxfer_throw_usage_error "Failed to retrieve list of datasets from the destination"
-  1458:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
-  1459:		return "$l_status"
-  1465:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  1467:		return "$l_status"
-  1501:			l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
-  1534:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-  1538:		zxfer_cleanup_snapshot_record_cache_files
-  1539:		zxfer_throw_error "Failed to stage source snapshot record cache."
+  160:	l_normalized_output=$(printf '%s' "$l_output" |
+  161:		tr '[:upper:]' '[:lower:]' |
+  316:		l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
+  319:		l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
+  339:	l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec \
+  594:			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
+  596:			zxfer_throw_error "Failed to stage empty already-changed recursive dataset list for snapshot identity validation."
+  601:		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
+  603:		zxfer_throw_error "Failed to derive recursive candidate dataset list for snapshot identity validation."
+  624:		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
+  626:		zxfer_throw_error "Failed to read staged recursive candidate dataset list for snapshot identity validation."
+  799:			zxfer_throw_error "Failed to stage empty destination snapshot list."
+  910:		l_status=$?
+  911:		return "$l_status"
+  951:		l_status=$?
+  952:		return "$l_status"
+  1237:		return "$l_status"
+  1434:				l_dest_pool=$g_destination
+  1445:			zxfer_cleanup_runtime_artifact_paths "$l_dest_list_tmp_file" "$l_dest_list_err_file"
+  1446:			zxfer_throw_usage_error "Failed to retrieve list of datasets from the destination"
+  1454:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
+  1455:		return "$l_status"
+  1461:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  1463:		return "$l_status"
+  1484:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+  1486:			zxfer_cleanup_snapshot_record_cache_files
+  1487:			zxfer_throw_error "Failed to read source snapshot discovery completion metadata."
+  1498:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+  1500:		zxfer_cleanup_snapshot_record_cache_files
+  1501:		zxfer_throw_error "Failed to publish source snapshot discovery completion."
+  1520:			l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
+  1553:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+  1557:		zxfer_cleanup_snapshot_record_cache_files
+  1558:		zxfer_throw_error "Failed to stage source snapshot record cache."
 
 src/zxfer_snapshot_reconcile.sh
   79:		l_capture_status=$?
@@ -421,42 +476,42 @@ src/zxfer_snapshot_reconcile.sh
   147:	$0 != "" { record = $0; tab_pos = index(record, "\t"); snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record); snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : ""); at_pos = index(snapshot_path, "@"); if (at_pos > 0) { snapshot_identity = substr(snapshot_path, at_pos + 1); if (snapshot_guid != "") snapshot_identity = snapshot_identity "\t" snapshot_guid; if (snapshot_identity in delete_identities) print snapshot_path } }' "$l_identity_file" - <<-EOF
   148:		$g_zxfer_runtime_artifact_read_result
   149:	EOF
-  290:		l_status=$?
-  291:		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
-  292:		return "$l_status"
-  303:	if l_last_common_snap=$("${g_cmd_awk:-awk}" "$l_common_snapshot_awk" \
+  297:		l_status=$?
+  298:		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
+  299:		return "$l_status"
+  310:	if l_last_common_snap=$("${g_cmd_awk:-awk}" "$l_common_snapshot_awk" \
 
 src/zxfer_snapshot_state.sh
   281:	if ! l_manifest_name=$(zxfer_get_cache_object_metadata_value \
   286:	if ! l_entry_count_expected=$(zxfer_get_cache_object_metadata_value \
   295:	if ! l_meta_side=$(zxfer_get_cache_object_metadata_value \
-  425:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  426:		return 1
   432:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
   433:			return 1
   436:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
   437:			return 1
-  474:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  475:		return 1
   478:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
   479:		return 1
   481:	if ! l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
   492:		"ready"; then
+  497:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
+  498:		return 1
+  505:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
+  506:		return 1
+  511:		zxfer_cleanup_runtime_artifact_path "$l_published_index_dir"
+  512:		return 1
   593:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
   594:			return 1
   597:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
   598:			return 1
   616:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
   617:			return 1
-  635:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  636:		return 1
   639:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
   640:		return 1
   642:	if ! l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
   653:		"ready"; then
   666:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
   667:		return 1
-  803:			zxfer_clear_snapshot_record_index_state_for_side "$l_side"
-  804:			return 1
+  672:		zxfer_cleanup_runtime_artifact_path "$l_published_index_dir"
+  673:		return 1
   996:	*)
 

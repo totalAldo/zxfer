@@ -502,7 +502,13 @@ silently fall back to the serial recursive listing once \fB\-j\fR is greater
 than 1. The default is 1, which disables background sends and keeps source
 snapshot discovery on the serial recursive listing path. Raising this value can
 hide WAN latency or speed up large replications, but will also increase
-memory, CPU and I/O load.
+memory, CPU and I/O load. The long-lived source-listing and send/receive
+workers launched for this path run under a shared supervisor that records
+launch/completion metadata and tears them down through validated process-group
+or owned-child-set cleanup instead of signaling a bare wrapper-shell PID.
+\fBzxfer\fR also serializes conflicting ancestor/descendant destination
+receives on the same target, even when spare job slots remain, so parent and
+child datasets do not receive concurrently.
 .TP 8n
 \fB\-m\fR
 After sending all snapshots, (m)igrate the source to the destination filesystem by
@@ -584,6 +590,11 @@ Please note that if you are using Solaris, you will most likely need to use
 quotes and spacing exactly:
 .sp
 e.g. -O "user1@192.168.0.1 pfexec"
+.sp
+The \fB\-O\fR and \fB\-T\fR values are treated as literal whitespace-delimited
+tokens. Outer shell quoting is fine, but embedded quote characters or
+backslash escapes inside the value are rejected instead of being silently
+re-tokenized.
 .sp
 The reason this works is because the commands that are related to
 reading/writing/modifying data will be prefaced with in normal circumstances:
@@ -724,6 +735,10 @@ This will modify the default -z option to
 zfs send dataset@snap1 | zstd -T0 -3 | ssh user@host zstd -d | /sbin/zfs receive
 .RE
 .RS 8n
+.sp
+Like \fB\-O\fR and \fB\-T\fR, the \fB\-Z\fR value must be expressible as
+literal whitespace-delimited tokens; embedded quote characters or backslash
+escapes are rejected instead of being re-tokenized.
 .sp
 Higher custom levels such as \fB\-9\fR can improve compression ratio, but they
 consume substantially more CPU time and are therefore not the default.
@@ -1035,13 +1050,12 @@ cannot release that lock cleanly, it emits a warning to \fIstderr\fR; when
 that happens during trap-time failure reporting, zxfer still preserves the
 original exit status.
 .TP 8n
-\fBZXFER_REDACT_FAILURE_REPORT_COMMANDS\fR
-When set to \fB1\fR, \fByes\fR, \fBtrue\fR, or \fBon\fR, zxfer replaces the
-\fBinvocation\fR and \fBlast_command\fR fields in structured failure reports
-with \fB[redacted]\fR on both \fIstderr\fR and any \fBZXFER_ERROR_LOG\fR
-mirror. The default remains verbatim for compatibility, so operators should
-avoid putting secret-bearing hook strings or wrapper arguments directly on the
-zxfer command line unless this redaction mode is enabled.
+\fBZXFER_UNSAFE_FAILURE_REPORT_COMMANDS\fR
+When set to \fB1\fR, \fByes\fR, \fBtrue\fR, or \fBon\fR, zxfer preserves the
+\fBinvocation\fR and \fBlast_command\fR fields verbatim in structured failure
+reports on both \fIstderr\fR and any \fBZXFER_ERROR_LOG\fR mirror. The default
+behavior is to redact those two fields as \fB[redacted]\fR, so this override
+is intended only for deliberate local debugging on trusted log sinks.
 .TP 8n
 \fBTMPDIR\fR
 Optional local scratch root for zxfer temporary files, FIFOs, and caches.
@@ -1076,12 +1090,12 @@ and ends with
 \fBzxfer: failure report end\fR,
 using stable \fBkey: value\fR lines so operators can archive or post-process
 the output. When available, the report includes the failure class and stage,
-source and destination context, the original shell-quoted invocation, and the
-last command zxfer attempted. Raw ASCII control bytes inside report values are
-escaped before output so the structured block stays inert in terminals, pagers,
-and \fBZXFER_ERROR_LOG\fR. Set
-\fBZXFER_REDACT_FAILURE_REPORT_COMMANDS\fR to redact those last two fields as
-\fB[redacted]\fR when the command line itself may carry secrets.
+source and destination context, and redacted \fBinvocation\fR /
+\fBlast_command\fR placeholders by default. Raw ASCII control bytes inside
+report values are escaped before output so the structured block stays inert in
+terminals, pagers, and \fBZXFER_ERROR_LOG\fR. Set
+\fBZXFER_UNSAFE_FAILURE_REPORT_COMMANDS\fR only when you deliberately want
+those last two fields emitted verbatim for local debugging.
 .SH "EXIT VALUES"
 \fBzxfer\fR
 exits 0 on success, 1 on a runtime error, 2 if a command line option is

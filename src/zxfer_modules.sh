@@ -68,6 +68,9 @@ zxfer_initialize_dependency_defaults
 zxfer_source_module zxfer_runtime.sh
 [ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_runtime.sh" ] && return 0
 
+zxfer_source_module zxfer_background_jobs.sh
+[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_background_jobs.sh" ] && return 0
+
 zxfer_source_module zxfer_remote_hosts.sh
 [ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_remote_hosts.sh" ] && return 0
 

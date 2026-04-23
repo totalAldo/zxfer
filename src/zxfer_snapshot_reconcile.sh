@@ -174,15 +174,22 @@ zxfer_get_dest_snapshots_to_delete_per_dataset() {
 	# run the first process in the background
 	zxfer_write_snapshot_identities_to_file "$l_zfs_source_snaps" "$g_delete_source_tmp_file" &
 	l_source_identity_pid=$!
-	zxfer_register_cleanup_pid "$l_source_identity_pid"
+	l_source_identity_waited=0
+	if ! zxfer_register_cleanup_pid "$l_source_identity_pid" "delete planning identity writer"; then
+		wait "$l_source_identity_pid" 2>/dev/null
+		l_source_identity_status=$?
+		l_source_identity_waited=1
+	fi
 
 	zxfer_write_snapshot_identities_to_file "$l_zfs_dest_snaps" "$g_delete_dest_tmp_file"
 	l_dest_identity_status=$?
 
 	# wait for the background process to finish
-	wait "$l_source_identity_pid" 2>/dev/null
-	l_source_identity_status=$?
-	zxfer_unregister_cleanup_pid "$l_source_identity_pid"
+	if [ "$l_source_identity_waited" -ne 1 ]; then
+		wait "$l_source_identity_pid" 2>/dev/null
+		l_source_identity_status=$?
+		zxfer_unregister_cleanup_pid "$l_source_identity_pid"
+	fi
 
 	if [ "$l_dest_identity_status" -ne 0 ]; then
 		zxfer_throw_error "Failed to generate destination snapshot identities for delete planning."

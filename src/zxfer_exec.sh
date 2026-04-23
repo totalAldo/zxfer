@@ -99,14 +99,27 @@ zxfer_execute_background_cmd() {
 		fi
 		return 0
 	fi
+	if ! l_cleanup_wrapper_script=$(zxfer_get_cleanup_child_wrapper_script_path); then
+		return 1
+	fi
 	if [ -n "$l_error_file" ]; then
-		eval "$l_cmd" >"$l_output_file" 2>"$l_error_file" &
+		"$l_cleanup_wrapper_script" "$l_cmd" >"$l_output_file" 2>"$l_error_file" &
 	else
-		eval "$l_cmd" >"$l_output_file" &
+		"$l_cleanup_wrapper_script" "$l_cmd" >"$l_output_file" &
 	fi
 	# shellcheck disable=SC2034
 	g_last_background_pid=$!
-	zxfer_register_cleanup_pid "$g_last_background_pid"
+	if ! zxfer_register_cleanup_pid "$g_last_background_pid" "background command helper"; then
+		if kill -s 0 "$g_last_background_pid" 2>/dev/null; then
+			if ! zxfer_abort_direct_child_pid "$g_last_background_pid" TERM "background command helper"; then
+				g_last_background_pid=""
+				return 1
+			fi
+			wait "$g_last_background_pid" 2>/dev/null || :
+		fi
+		g_last_background_pid=""
+		return 1
+	fi
 }
 
 # Purpose: Escape a value for reinsertion into a single-quoted shell string.
@@ -150,6 +163,24 @@ zxfer_split_tokens_on_whitespace() {
 	}'
 }
 
+# Purpose: Reject token strings that would require shell parsing semantics
+# zxfer does not implement.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution
+# before public string interfaces are re-tokenized into argv-like streams.
+zxfer_validate_literal_token_string() {
+	l_input=$1
+	l_label=${2:-command}
+
+	case "$l_input" in
+	*\\* | *\"* | *\'*)
+		printf '%s\n' "$l_label must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+		return 1
+		;;
+	esac
+
+	printf '%s\n' "$l_input"
+}
+
 # Purpose: Split the host spec tokens into the token stream expected by later
 # helpers.
 # Usage: Called during command rendering, ssh wrapping, and ZFS execution when
@@ -159,7 +190,12 @@ zxfer_split_tokens_on_whitespace() {
 # parser so whitespace-separated ssh arguments (like "user@host pfexec") are
 # preserved verbatim and characters such as ';' cannot escape into new commands.
 zxfer_split_host_spec_tokens() {
-	zxfer_split_tokens_on_whitespace "$1"
+	if ! l_host_spec=$(zxfer_validate_literal_token_string "$1" "Host spec (-O/-T)"); then
+		printf '%s\n' "$l_host_spec"
+		return 1
+	fi
+
+	zxfer_split_tokens_on_whitespace "$l_host_spec"
 }
 
 # Purpose: Split the CLI tokens into the token stream expected by later
@@ -167,7 +203,15 @@ zxfer_split_host_spec_tokens() {
 # Usage: Called during command rendering, ssh wrapping, and ZFS execution when
 # zxfer must preserve argument boundaries without invoking a shell parser.
 zxfer_split_cli_tokens() {
-	zxfer_split_tokens_on_whitespace "$1"
+	l_cli_string=$1
+	l_label=${2:-CLI command}
+
+	if ! l_cli_string=$(zxfer_validate_literal_token_string "$l_cli_string" "$l_label"); then
+		printf '%s\n' "$l_cli_string"
+		return 1
+	fi
+
+	zxfer_split_tokens_on_whitespace "$l_cli_string"
 }
 
 # Purpose: Quote the token stream for the shell or report format used by zxfer.
@@ -226,7 +270,10 @@ zxfer_quote_host_spec_tokens() {
 		return
 	fi
 
-	l_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec")
+	if ! l_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec"); then
+		printf '%s\n' "$l_tokens"
+		return 1
+	fi
 	if [ "$l_tokens" = "" ]; then
 		return
 	fi
@@ -239,11 +286,15 @@ zxfer_quote_host_spec_tokens() {
 # raw tokens must be preserved without reopening parsing or injection risks.
 zxfer_quote_cli_tokens() {
 	l_cli_string=$1
+	l_label=${2:-CLI command}
 	if [ "$l_cli_string" = "" ]; then
 		return
 	fi
 
-	l_tokens=$(zxfer_split_cli_tokens "$l_cli_string")
+	if ! l_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
+		printf '%s\n' "$l_tokens"
+		return 1
+	fi
 	if [ "$l_tokens" = "" ]; then
 		return
 	fi
@@ -373,7 +424,13 @@ zxfer_get_ssh_base_transport_tokens() {
 		return 1
 	fi
 
-	printf '%s\n' "$g_cmd_ssh"
+	if ! zxfer_ensure_local_ssh_command; then
+		printf '%s\n' "$g_zxfer_resolved_local_ssh_command_result"
+		return 1
+	fi
+	l_ssh_cmd=$g_zxfer_resolved_local_ssh_command_result
+
+	printf '%s\n' "$l_ssh_cmd"
 	if [ "$l_managed_option_tokens" != "" ]; then
 		printf '%s\n' "$l_managed_option_tokens"
 	fi
@@ -418,8 +475,11 @@ zxfer_get_ssh_transport_tokens_for_host() {
 # display helper only; execution paths should use the argv-based helpers below.
 zxfer_get_ssh_cmd_for_host() {
 	l_host=$1
-	if ! l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host"); then
-		zxfer_throw_error "$l_transport_tokens"
+	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host"); then
+		:
+	else
+		l_transport_status=$?
+		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
 	fi
 	zxfer_quote_token_stream "$l_transport_tokens"
 }
@@ -494,10 +554,15 @@ zxfer_invoke_ssh_command_for_host() {
 	l_host_spec=$1
 	shift
 
-	if ! l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
-		zxfer_throw_error "$l_transport_tokens"
+	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+		:
+	else
+		l_transport_status=$?
+		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
 	fi
-	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec")
+	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec"); then
+		zxfer_throw_error "$l_host_tokens"
+	fi
 	l_remote_args_stream=""
 	if [ $# -gt 0 ]; then
 		l_remote_args_stream=$(printf '%s\n' "$@")
@@ -549,10 +614,15 @@ zxfer_build_ssh_shell_command_for_host() {
 
 	[ "$l_remote_shell_cmd" = "" ] && return 1
 
-	if ! l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
-		zxfer_throw_error "$l_transport_tokens"
+	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+		:
+	else
+		l_transport_status=$?
+		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
 	fi
-	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec")
+	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec"); then
+		zxfer_throw_error "$l_host_tokens"
+	fi
 	[ "$l_host_tokens" != "" ] || return 1
 
 	l_ssh_host=""
@@ -599,10 +669,15 @@ zxfer_invoke_ssh_shell_command_for_host() {
 	[ "$l_remote_shell_cmd" = "" ] && return 1
 	zxfer_profile_record_ssh_invocation "$l_host_spec" "$l_profile_side"
 
-	if ! l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
-		zxfer_throw_error "$l_transport_tokens"
+	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+		:
+	else
+		l_transport_status=$?
+		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
 	fi
-	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec")
+	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec"); then
+		zxfer_throw_error "$l_host_tokens"
+	fi
 	[ "$l_host_tokens" != "" ] || return 1
 
 	l_ssh_host=""

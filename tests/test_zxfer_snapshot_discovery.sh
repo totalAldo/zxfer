@@ -66,6 +66,19 @@ EOF
 	chmod +x "$l_path"
 }
 
+create_fake_ssh_bin() {
+	l_path=$1
+	cat >"$l_path" <<'EOF'
+#!/bin/sh
+if [ "$1" = "-M" ] && [ "$2" = "-V" ]; then
+	exit 1
+fi
+printf '%s\n' "$@"
+exit 0
+EOF
+	chmod +x "$l_path"
+}
+
 create_fake_ssh_handshake_bin() {
 	l_path=$1
 	l_parallel_status=$2
@@ -86,8 +99,10 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_get_list"
 	GNU_PARALLEL_BIN="$TEST_TMPDIR/gnu_parallel"
 	NONGNU_PARALLEL_BIN="$TEST_TMPDIR/non_gnu_parallel"
+	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
 	create_parallel_bin "$GNU_PARALLEL_BIN" "GNU parallel (fake)"
 	create_parallel_bin "$NONGNU_PARALLEL_BIN" "parallel from elsewhere"
+	create_fake_ssh_bin "$FAKE_SSH_BIN"
 }
 
 oneTimeTearDown() {
@@ -118,6 +133,7 @@ setUp() {
 	g_cmd_parallel="$GNU_PARALLEL_BIN"
 	g_origin_parallel_cmd=""
 	g_origin_parallel_cmd_host=""
+	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
 	g_RZFS="/sbin/zfs"
 	g_LZFS="/sbin/zfs"
@@ -135,9 +151,14 @@ setUp() {
 	g_zxfer_parallel_source_job_check_kind=""
 	g_zxfer_recursive_dataset_list_result=""
 	g_zxfer_linear_reverse_max_lines=""
+	g_cmd_ps=${g_cmd_ps:-$(command -v ps 2>/dev/null || printf '%s\n' ps)}
+	g_ssh_origin_control_socket=""
+	g_ssh_target_control_socket=""
 	g_last_background_pid=""
 	g_source_snapshot_list_pid=""
+	g_source_snapshot_list_job_id=""
 	g_zxfer_temp_file_result=""
+	zxfer_reset_background_job_state
 	zxfer_reset_destination_existence_cache
 	zxfer_reset_snapshot_record_indexes
 	zxfer_reset_failure_context "unit"
@@ -615,6 +636,24 @@ test_build_source_snapshot_list_cmd_uses_serial_local_discovery_when_parallel_jo
 		0 "$g_source_snapshot_list_uses_parallel"
 }
 
+test_build_source_snapshot_list_cmd_preserves_serial_render_status() {
+	set +e
+	output=$(
+		{
+			zxfer_render_zfs_command_for_spec() {
+				return 67
+			}
+			zxfer_build_source_snapshot_list_cmd
+		}
+	)
+	status=$?
+
+	assertEquals "Serial source snapshot command rendering should preserve the exact render-helper status." \
+		67 "$status"
+	assertEquals "Serial source snapshot command rendering should not emit a partial command when rendering fails." \
+		"" "$output"
+}
+
 test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 	g_option_j_jobs=2
 	g_cmd_parallel="$GNU_PARALLEL_BIN"
@@ -634,6 +673,79 @@ test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 		"$result" "'$g_LZFS' 'list' '-H' '-o' 'name' '-s' 'creation' '-d' '1' '-t' 'snapshot' '{}'"
 	assertNotContains "Local -j discovery should not inline a prefetched dataset list." \
 		"$result" "'printf'"
+}
+
+test_build_source_snapshot_list_cmd_preserves_local_parallel_builder_statuses() {
+	g_option_j_jobs=2
+	g_cmd_parallel="$GNU_PARALLEL_BIN"
+	g_option_O_origin_host=""
+
+	set +e
+	runner_output=$(
+		{
+			zxfer_check_parallel_source_jobs_in_current_shell() {
+				return 0
+			}
+			zxfer_render_zfs_command_for_spec() {
+				if [ "$3" = "-H" ]; then
+					return 68
+				fi
+				printf '%s\n' "unexpected"
+			}
+			zxfer_build_source_snapshot_list_cmd
+		}
+	)
+	runner_status=$?
+	parallel_output=$(
+		{
+			zxfer_check_parallel_source_jobs_in_current_shell() {
+				return 0
+			}
+			zxfer_render_zfs_command_for_spec() {
+				printf '%s\n' "rendered"
+			}
+			zxfer_build_shell_command_from_argv() {
+				return 69
+			}
+			zxfer_build_source_snapshot_list_cmd
+		}
+	)
+	parallel_status=$?
+	dataset_output=$(
+		{
+			zxfer_check_parallel_source_jobs_in_current_shell() {
+				return 0
+			}
+			zxfer_render_zfs_command_for_spec() {
+				if [ "$3" = "-H" ]; then
+					printf '%s\n' "runner"
+					return 0
+				fi
+				if [ "$3" = "-Hr" ]; then
+					return 70
+				fi
+				printf '%s\n' "unexpected"
+			}
+			zxfer_build_shell_command_from_argv() {
+				printf '%s\n' "parallel"
+			}
+			zxfer_build_source_snapshot_list_cmd
+		}
+	)
+	dataset_status=$?
+
+	assertEquals "Local parallel source snapshot planning should preserve runner-render failures." \
+		68 "$runner_status"
+	assertEquals "Local parallel source snapshot planning should not emit a partial command when runner rendering fails." \
+		"" "$runner_output"
+	assertEquals "Local parallel source snapshot planning should preserve GNU parallel shell-render failures." \
+		69 "$parallel_status"
+	assertEquals "Local parallel source snapshot planning should not emit a partial command when GNU parallel shell rendering fails." \
+		"" "$parallel_output"
+	assertEquals "Local parallel source snapshot planning should preserve dataset-input render failures." \
+		70 "$dataset_status"
+	assertEquals "Local parallel source snapshot planning should not emit a partial command when dataset-input rendering fails." \
+		"" "$dataset_output"
 }
 
 test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_metadata_compression() {
@@ -693,7 +805,112 @@ test_build_source_snapshot_list_cmd_fails_closed_when_remote_parallel_is_unavail
 		"$result" "/remote/bin/zfs"
 }
 
-test_write_source_snapshot_list_to_file_uses_execute_background_cmd_when_serial() {
+test_build_source_snapshot_list_cmd_preserves_remote_ssh_wrapper_status() {
+	g_option_j_jobs=2
+	g_option_O_origin_host="origin.example"
+	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_origin_cmd_zfs="/remote/bin/zfs"
+
+	set +e
+	output=$(
+		(
+			zxfer_check_parallel_source_jobs_in_current_shell() {
+				return 0
+			}
+			zxfer_build_ssh_shell_command_for_host() {
+				return 79
+			}
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+	status=$?
+
+	assertEquals "Remote source snapshot command rendering should preserve the exact ssh wrapper builder status." \
+		79 "$status"
+	assertEquals "Remote source snapshot command rendering should not emit a partial command when ssh wrapper rendering fails." \
+		"" "$output"
+}
+
+test_build_source_snapshot_list_cmd_preserves_remote_parallel_builder_statuses() {
+	g_option_j_jobs=2
+	g_option_O_origin_host="origin.example"
+	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_origin_cmd_zfs="/remote/bin/zfs"
+
+	set +e
+	runner_output=$(
+		{
+			zxfer_check_parallel_source_jobs_in_current_shell() {
+				return 0
+			}
+			zxfer_build_shell_command_from_argv() {
+				if [ "$1" = "/opt/bin/parallel" ]; then
+					printf '%s\n' "/opt/bin/parallel"
+					return 0
+				fi
+				if [ "$1" = "/remote/bin/zfs" ] && [ "$3" = "-H" ]; then
+					return 71
+				fi
+				printf '%s\n' "unexpected"
+			}
+			zxfer_build_source_snapshot_list_cmd
+		}
+	)
+	runner_status=$?
+	dataset_output=$(
+		{
+			zxfer_check_parallel_source_jobs_in_current_shell() {
+				return 0
+			}
+			zxfer_build_shell_command_from_argv() {
+				if [ "$1" = "/opt/bin/parallel" ]; then
+					printf '%s\n' "/opt/bin/parallel"
+					return 0
+				fi
+				if [ "$1" = "/remote/bin/zfs" ] && [ "$3" = "-H" ]; then
+					printf '%s\n' "/remote/bin/zfs list -H -o name -s creation -d 1 -t snapshot {}"
+					return 0
+				fi
+				if [ "$1" = "/remote/bin/zfs" ] && [ "$3" = "-Hr" ]; then
+					return 72
+				fi
+				printf '%s\n' "unexpected"
+			}
+			zxfer_build_source_snapshot_list_cmd
+		}
+	)
+	dataset_status=$?
+	remote_shell_output=$(
+		{
+			zxfer_check_parallel_source_jobs_in_current_shell() {
+				return 0
+			}
+			zxfer_build_shell_command_from_argv() {
+				printf '%s\n' "$*"
+			}
+			zxfer_build_remote_sh_c_command() {
+				return 73
+			}
+			zxfer_build_source_snapshot_list_cmd
+		}
+	)
+	remote_shell_status=$?
+
+	assertEquals "Remote parallel source snapshot planning should preserve remote runner shell-render failures." \
+		71 "$runner_status"
+	assertEquals "Remote parallel source snapshot planning should not emit a partial command when remote runner shell rendering fails." \
+		"" "$runner_output"
+	assertEquals "Remote parallel source snapshot planning should preserve remote dataset-input shell-render failures." \
+		72 "$dataset_status"
+	assertEquals "Remote parallel source snapshot planning should not emit a partial command when remote dataset-input shell rendering fails." \
+		"" "$dataset_output"
+	assertEquals "Remote parallel source snapshot planning should preserve remote sh -c wrapper failures." \
+		73 "$remote_shell_status"
+	assertEquals "Remote parallel source snapshot planning should not emit a partial command when remote sh -c wrapper rendering fails." \
+		"" "$remote_shell_output"
+}
+
+test_write_source_snapshot_list_to_file_uses_supervisor_when_serial() {
 	log="$TEST_TMPDIR/source_serial.log"
 	outfile="$TEST_TMPDIR/source_serial.out"
 	errfile="$TEST_TMPDIR/source_serial.err"
@@ -704,18 +921,21 @@ test_write_source_snapshot_list_to_file_uses_execute_background_cmd_when_serial(
 		zxfer_build_source_snapshot_list_cmd() {
 			printf '%s\n' "printf 'snap-serial'"
 		}
-		zxfer_execute_background_cmd() {
-			printf '%s|%s|%s\n' "$1" "$2" "$3" >>"$SOURCE_LOG"
-			g_last_background_pid=4242
+		zxfer_spawn_supervised_background_job() {
+			printf '%s|%s|%s|%s\n' "$1" "$2" "$4" "$5" >>"$SOURCE_LOG"
+			g_zxfer_background_job_last_id="job-serial"
+			g_zxfer_background_job_last_runner_pid=4242
 		}
 		g_option_j_jobs=1
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 		printf '%s\n' "$g_source_snapshot_list_pid" >>"$SOURCE_LOG"
+		printf '%s\n' "$g_source_snapshot_list_job_id" >>"$SOURCE_LOG"
 	)
 
-	assertEquals "Serial snapshot listing should delegate to zxfer_execute_background_cmd." \
-		"printf 'snap-serial'|$outfile|$errfile
-4242" "$(cat "$log")"
+	assertEquals "Serial snapshot listing should delegate to the supervised background runner." \
+		"source_snapshot_list|printf 'snap-serial'|$outfile|$errfile
+4242
+job-serial" "$(cat "$log")"
 }
 
 test_write_source_snapshot_list_to_file_tracks_profile_counters_when_very_verbose() {
@@ -764,9 +984,10 @@ test_write_source_snapshot_list_to_file_tracks_remote_ssh_profile_counter_when_v
 		zxfer_build_source_snapshot_list_cmd() {
 			printf '%s\n' "printf 'remote-snap-profile'"
 		}
-		zxfer_execute_background_cmd() {
-			printf '%s|%s|%s\n' "$1" "$2" "$3" >"$log"
-			g_last_background_pid=3131
+		zxfer_spawn_supervised_background_job() {
+			printf '%s|%s|%s|%s\n' "$1" "$2" "$4" "$5" >"$log"
+			g_zxfer_background_job_last_id="job-remote"
+			g_zxfer_background_job_last_runner_pid=3131
 		}
 		g_option_V_very_verbose=1
 		g_option_j_jobs=1
@@ -776,14 +997,16 @@ test_write_source_snapshot_list_to_file_tracks_remote_ssh_profile_counter_when_v
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 		{
 			printf 'pid=%s\n' "$g_source_snapshot_list_pid"
+			printf 'job=%s\n' "$g_source_snapshot_list_job_id"
 			printf 'ssh=%s\n' "${g_zxfer_profile_ssh_shell_invocations:-0}"
 			printf 'source_ssh=%s\n' "${g_zxfer_profile_source_ssh_shell_invocations:-0}"
 		} >>"$log"
 	)
 
 	assertEquals "Very-verbose profiling should count the remote ssh hop used for source snapshot discovery." \
-		"printf 'remote-snap-profile'|$outfile|$errfile
+		"source_snapshot_list|printf 'remote-snap-profile'|$outfile|$errfile
 pid=3131
+job=job-remote
 ssh=1
 source_ssh=1" "$(cat "$log")"
 }
@@ -826,16 +1049,17 @@ test_write_source_snapshot_list_to_file_uses_current_shell_temp_file_result() {
 		zxfer_build_source_snapshot_list_cmd() {
 			printf '%s\n' "printf 'snap-current-shell'"
 		}
-		zxfer_execute_background_cmd() {
-			printf '%s|%s|%s\n' "$1" "$2" "$3" >>"$LOG_FILE"
-			g_last_background_pid=5151
+		zxfer_spawn_supervised_background_job() {
+			printf '%s|%s|%s|%s\n' "$1" "$2" "$4" "$5" >>"$LOG_FILE"
+			g_zxfer_background_job_last_id="job-current-shell"
+			g_zxfer_background_job_last_runner_pid=5151
 		}
 		g_option_j_jobs=1
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 	)
 
 	assertEquals "Source snapshot discovery should stage the built command through the current-shell temp-file result instead of stdout." \
-		"printf 'snap-current-shell'|$outfile|$errfile" "$(cat "$log")"
+		"source_snapshot_list|printf 'snap-current-shell'|$outfile|$errfile" "$(cat "$log")"
 }
 
 test_write_source_snapshot_list_to_file_uses_current_shell_read_scratch() {
@@ -858,16 +1082,17 @@ test_write_source_snapshot_list_to_file_uses_current_shell_read_scratch() {
 			g_zxfer_snapshot_discovery_file_read_result="printf 'snap-read-scratch'"
 			return 0
 		}
-		zxfer_execute_background_cmd() {
-			printf '%s|%s|%s\n' "$1" "$2" "$3" >>"$LOG_FILE"
-			g_last_background_pid=6161
+		zxfer_spawn_supervised_background_job() {
+			printf '%s|%s|%s|%s\n' "$1" "$2" "$4" "$5" >>"$LOG_FILE"
+			g_zxfer_background_job_last_id="job-read-scratch"
+			g_zxfer_background_job_last_runner_pid=6161
 		}
 		g_option_j_jobs=1
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 	)
 
 	assertEquals "Source snapshot discovery should use the current-shell staged-command read scratch instead of stdout from the file-read helper." \
-		"printf 'snap-read-scratch'|$outfile|$errfile" "$(cat "$log")"
+		"source_snapshot_list|printf 'snap-read-scratch'|$outfile|$errfile" "$(cat "$log")"
 }
 
 test_write_source_snapshot_list_to_file_reports_staged_command_read_failures_after_build_failure() {
@@ -1086,19 +1311,16 @@ test_write_source_snapshot_list_to_file_preserves_errfile_stage_failures_in_dry_
 test_write_source_snapshot_list_to_file_runs_serial_builder_output_when_jobs_remain_configured() {
 	g_option_j_jobs=2
 	outfile="$TEST_TMPDIR/source_parallel_fallback.out"
-	log_file="$TEST_TMPDIR/source_parallel_fallback.log"
 
 	output=$(
 		(
 			zxfer_build_source_snapshot_list_cmd() {
 				printf '%s\n' "printf '%s\n' serial-fallback"
 			}
-			zxfer_register_cleanup_pid() {
-				printf 'pid=%s\n' "$1" >"$log_file"
-			}
 			zxfer_write_source_snapshot_list_to_file "$outfile"
 			wait "$g_source_snapshot_list_pid"
 			printf 'payload=%s\n' "$(cat "$outfile")"
+			printf 'job=%s\n' "${g_source_snapshot_list_job_id:-}"
 		) 2>&1
 	)
 	status=$?
@@ -1107,8 +1329,8 @@ test_write_source_snapshot_list_to_file_runs_serial_builder_output_when_jobs_rem
 		0 "$status"
 	assertContains "Snapshot-list execution should run the builder's serial command output through the background eval path." \
 		"$output" "payload=serial-fallback"
-	assertContains "Snapshot-list execution should still register the background pid for cleanup." \
-		"$(cat "$log_file")" "pid="
+	assertContains "Snapshot-list execution should still track the supervised background job id for later waiting." \
+		"$output" "job=bgjob."
 }
 
 test_diff_snapshot_lists_rejects_unknown_mode() {
@@ -2615,6 +2837,94 @@ test_get_zfs_list_preserves_source_snapshot_record_cache_tempfile_failures() {
 		"" "$output"
 }
 
+test_get_zfs_list_reports_source_snapshot_record_cache_stage_failures() {
+	set +e
+	output=$(
+		(
+			l_read_count=0
+			l_temp_count=0
+			cleanup_log="$TEST_TMPDIR/get-zfs-source-cache-stage.cleanup"
+			cache_cleanup_log="$TEST_TMPDIR/get-zfs-source-cache-stage.cache-cleanup"
+			: >"$cleanup_log"
+			: >"$cache_cleanup_log"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				printf '%s\n' "backup/dst@snapA" >"$1"
+				printf '%s\n' "tank/src@snapA" >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
+					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
+					[ "$7" = "backup/dst" ]; then
+					printf '%s\n' "backup/dst"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_read_snapshot_discovery_capture_file() {
+				l_read_count=$((l_read_count + 1))
+				if [ "$l_read_count" -eq 1 ]; then
+					g_zxfer_snapshot_discovery_file_read_result="backup/dst"
+				elif [ "$l_read_count" -eq 2 ]; then
+					g_zxfer_snapshot_discovery_file_read_result="backup/dst@snapA"
+				elif [ "$l_read_count" -eq 3 ]; then
+					g_zxfer_snapshot_discovery_file_read_result="tank/src@snapA"
+				else
+					return 1
+				fi
+				return 0
+			}
+			zxfer_get_temp_file() {
+				l_temp_count=$((l_temp_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/get-zfs-source-cache-stage-$l_temp_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			zxfer_cleanup_runtime_artifact_paths() {
+				printf '%s\n' "$*" >>"$cleanup_log"
+				return 0
+			}
+			zxfer_cleanup_snapshot_record_cache_files() {
+				printf '%s\n' "cache-cleanup" >>"$cache_cleanup_log"
+				return 0
+			}
+			zxfer_reverse_file_lines() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf 'cleanup=%s\n' "$(cat "$cleanup_log" 2>/dev/null || :)"
+				printf 'cache_cleanup=%s\n' "$(cat "$cache_cleanup_log" 2>/dev/null || :)"
+				printf 'msg=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Source snapshot record-cache staging failures should abort snapshot discovery." \
+		1 "$status"
+	assertContains "Source snapshot record-cache staging failures should clean up the staged source snapshot list file." \
+		"$output" "get-zfs-source-cache-stage-1.tmp"
+	assertContains "Source snapshot record-cache staging failures should clean up the staged source snapshot stderr file." \
+		"$output" "get-zfs-source-cache-stage-2.tmp"
+	assertContains "Source snapshot record-cache staging failures should clean up the staged destination snapshot diff file." \
+		"$output" "get-zfs-source-cache-stage-6.tmp"
+	assertContains "Source snapshot record-cache staging failures should clean up the staged source snapshot-record cache file." \
+		"$output" "get-zfs-source-cache-stage-7.tmp"
+	assertContains "Source snapshot record-cache staging failures should run the snapshot-record cache cleanup helper." \
+		"$output" "cache_cleanup=cache-cleanup"
+	assertContains "Source snapshot record-cache staging failures should report the staged source-cache context." \
+		"$output" "msg=Failed to stage source snapshot record cache."
+}
+
 test_get_zfs_list_lazily_builds_per_dataset_snapshot_indexes() {
 	output=$(
 		(
@@ -2813,7 +3123,9 @@ test_get_zfs_list_restores_source_last_command_when_background_snapshot_listing_
 	set +e
 	output=$(
 		(
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 			counter_file="$TEST_TMPDIR/get_zfs_fail.counter"
+			dest_cache_stage_path=""
 			printf '%s\n' 0 >"$counter_file"
 			zxfer_get_temp_file() {
 				idx=$(cat "$counter_file")
@@ -2823,11 +3135,25 @@ test_get_zfs_list_restores_source_last_command_when_background_snapshot_listing_
 				: >"$g_zxfer_temp_file_result"
 				printf '%s\n' "$TEST_TMPDIR/stdout-only-get_zfs_fail.$idx"
 			}
-			zxfer_build_source_snapshot_list_cmd() {
-				printf '%s\n' "sh -c 'printf \"%s\\n\" \"missing command\" >&2; exit 3'"
+			zxfer_write_source_snapshot_list_to_file() {
+				: >"$1"
+				printf '%s\n' "missing command" >"$2"
+				g_source_snapshot_list_pid=4242
+				g_source_snapshot_list_job_id="job-source"
+				g_source_snapshot_list_cmd="sh -c 'printf \"%s\\n\" \"missing command\" >&2; exit 3'"
+			}
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=3
+				g_zxfer_background_job_wait_report_failure=""
+				return 0
 			}
 			zxfer_exists_destination() {
 				printf '%s\n' 0
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				dest_cache_stage_path=$1
+				: >"$1"
+				: >"$2"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
@@ -2843,7 +3169,7 @@ test_get_zfs_list_restores_source_last_command_when_background_snapshot_listing_
 			zxfer_throw_error() {
 				printf 'cmd=%s\n' "$g_zxfer_failure_last_command"
 				printf 'dst_cache=<%s>\n' "${g_zxfer_destination_snapshot_record_cache_file:-}"
-				if [ -e "$TEST_TMPDIR/get_zfs_fail.5" ]; then
+				if [ -n "$dest_cache_stage_path" ] && [ -e "$dest_cache_stage_path" ]; then
 					printf 'dst_cache_exists=yes\n'
 				else
 					printf 'dst_cache_exists=no\n'
@@ -2873,6 +3199,7 @@ test_get_zfs_list_reports_generic_source_failure_when_background_snapshot_listin
 	set +e
 	output=$(
 		(
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 			counter_file="$TEST_TMPDIR/get_zfs_fail_blank.counter"
 			printf '%s\n' 0 >"$counter_file"
 			zxfer_get_temp_file() {
@@ -2886,9 +3213,14 @@ test_get_zfs_list_reports_generic_source_failure_when_background_snapshot_listin
 			zxfer_write_source_snapshot_list_to_file() {
 				: >"$1"
 				: >"$2"
-				sh -c 'exit 1' &
-				g_source_snapshot_list_pid=$!
+				g_source_snapshot_list_pid=4242
+				g_source_snapshot_list_job_id="job-source"
 				g_source_snapshot_list_cmd="sh -c 'exit 1'"
+			}
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=1
+				g_zxfer_background_job_wait_report_failure=""
+				return 0
 			}
 			zxfer_write_destination_snapshot_list_to_files() {
 				: >"$1"
@@ -2922,17 +3254,133 @@ test_get_zfs_list_reports_generic_source_failure_when_background_snapshot_listin
 		"$output" "msg=Failed to retrieve snapshots from the source"
 }
 
+test_get_zfs_list_reports_supervisor_completion_failures_before_source_stderr_handling() {
+	set +e
+	output=$(
+		(
+			counter_file="$TEST_TMPDIR/get_zfs_completion_write.counter"
+			printf '%s\n' 0 >"$counter_file"
+			zxfer_get_temp_file() {
+				idx=$(cat "$counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$counter_file"
+				g_zxfer_temp_file_result="$TEST_TMPDIR/get_zfs_completion_write.$idx"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				: >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=4242
+				g_source_snapshot_list_job_id="job-source"
+				g_source_snapshot_list_cmd="sh -c 'exit 125'"
+			}
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=125
+				g_zxfer_background_job_wait_report_failure="completion_write"
+				return 0
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
+					printf '%s\n' "backup/dst"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_throw_error() {
+				printf 'msg=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		)
+	)
+	status=$?
+
+	assertEquals "Supervisor completion-write failures during source snapshot discovery should keep the generic failure exit status." \
+		1 "$status"
+	assertContains "Source snapshot discovery should report supervisor completion-write failures directly instead of misattributing them to source stderr." \
+		"$output" "msg=Failed to report source snapshot discovery completion."
+}
+
+test_get_zfs_list_reports_supervisor_queue_publish_failures_before_source_stderr_handling() {
+	set +e
+	output=$(
+		(
+			counter_file="$TEST_TMPDIR/get_zfs_queue_write.counter"
+			printf '%s\n' 0 >"$counter_file"
+			zxfer_get_temp_file() {
+				idx=$(cat "$counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$counter_file"
+				g_zxfer_temp_file_result="$TEST_TMPDIR/get_zfs_queue_write.$idx"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				: >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=4242
+				g_source_snapshot_list_job_id="job-source"
+				g_source_snapshot_list_cmd="sh -c 'exit 125'"
+			}
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=125
+				g_zxfer_background_job_wait_report_failure="queue_write"
+				return 0
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
+					printf '%s\n' "backup/dst"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_throw_error() {
+				printf 'msg=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		)
+	)
+	status=$?
+
+	assertEquals "Supervisor queue-publication failures during source snapshot discovery should keep the generic failure exit status." \
+		1 "$status"
+	assertContains "Source snapshot discovery should report supervisor queue-publication failures directly instead of misattributing them to source stderr." \
+		"$output" "msg=Failed to publish source snapshot discovery completion."
+}
+
 test_get_zfs_list_reports_source_stderr_readback_failures_after_background_failure() {
 	set +e
 	output=$(
 		(
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 			l_read_count=0
 			zxfer_write_source_snapshot_list_to_file() {
 				: >"$1"
 				printf '%s\n' "missing stderr capture" >"$2"
-				sh -c 'exit 1' &
-				g_source_snapshot_list_pid=$!
+				g_source_snapshot_list_pid=4242
+				g_source_snapshot_list_job_id="job-source"
 				g_source_snapshot_list_cmd="sh -c 'exit 1'"
+			}
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=1
+				g_zxfer_background_job_wait_report_failure=""
+				return 0
 			}
 			zxfer_write_destination_snapshot_list_to_files() {
 				printf '%s\n' "backup/dst@snapA" >"$1"
@@ -3181,6 +3629,38 @@ stale-source/child"
 		"$output" "dest="
 }
 
+test_get_zfs_list_dry_run_ignores_stale_background_completion_failure_state() {
+	log="$TEST_TMPDIR/get_zfs_dry_run_stale_completion.log"
+	: >"$log"
+
+	output=$(
+		(
+			LOG_FILE="$log"
+			zxfer_echoV() {
+				printf '%s\n' "$*" >>"$LOG_FILE"
+			}
+			zxfer_throw_error() {
+				printf 'msg=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			g_option_n_dryrun=1
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_zxfer_background_job_wait_report_failure="completion_write"
+			zxfer_get_zfs_list
+			printf 'source=%s\n' "${g_lzfs_list_hr_snap:-}"
+		)
+	)
+	status=$?
+
+	assertEquals "Dry-run snapshot discovery should not reuse stale supervisor completion state when no background job was awaited." \
+		0 "$status"
+	assertContains "Dry-run snapshot discovery should still complete normally when the wait scratch contains stale completion data." \
+		"$output" "source="
+	assertNotContains "Dry-run snapshot discovery should not report a stale supervisor completion failure." \
+		"$output" "Failed to report source snapshot discovery completion."
+}
+
 test_zxfer_read_snapshot_discovery_capture_file_reads_multiline_results_in_current_shell() {
 	capture_file="$TEST_TMPDIR/snapshot_discovery_capture.txt"
 	expected_capture='first line
@@ -3318,6 +3798,38 @@ test_zxfer_version_output_reports_gnu_parallel_normalizes_case_and_whitespace() 
 	if ! zxfer_version_output_reports_gnu_parallel "$(printf '%s\n%s\t%s\n' "Citation text" "GNU" "Parallel 20260122")"; then
 		fail "GNU parallel version detection should normalize case and whitespace before matching the signature."
 	fi
+}
+
+test_zxfer_version_output_reports_gnu_parallel_rejects_non_gnu_output() {
+	if zxfer_version_output_reports_gnu_parallel "$(printf '%s\n' "parallel release 20260122")"; then
+		fail "GNU parallel version detection should reject non-GNU version banners after normalization."
+	fi
+}
+
+test_zxfer_local_parallel_functional_probe_reports_gnu_preserves_probe_status() {
+	probe_helper="$TEST_TMPDIR/non_gnu_parallel_status.sh"
+	cat >"$probe_helper" <<'EOF'
+#!/bin/sh
+exit 74
+EOF
+	chmod 755 "$probe_helper"
+
+	set +e
+	zxfer_local_parallel_functional_probe_reports_gnu "$probe_helper" >/dev/null 2>&1
+	status=$?
+
+	assertEquals "GNU parallel functional probing should preserve the exact helper exit status." \
+		74 "$status"
+}
+
+test_zxfer_local_parallel_functional_probe_reports_gnu_rejects_blank_paths() {
+	set +e
+	zxfer_local_parallel_functional_probe_reports_gnu "" >/dev/null 2>&1
+	status=$?
+	set -e
+
+	assertEquals "GNU parallel functional probing should fail closed when no helper path is provided." \
+		1 "$status"
 }
 
 test_build_source_snapshot_list_cmd_preserves_remote_parallel_resolution_from_current_shell() {

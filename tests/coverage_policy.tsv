@@ -1,6 +1,9 @@
 # target	minimum_pct
 TOTAL	92.50
+src/zxfer_background_jobs.sh	91.50
+src/zxfer_background_job_runner.sh	93.50
 src/zxfer_backup_metadata.sh	94.50
+src/zxfer_cleanup_child_wrapper.sh	95.00
 src/zxfer_cli.sh	94.00
 src/zxfer_dependencies.sh	98.00
 src/zxfer_exec.sh	98.50

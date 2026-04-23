@@ -1,0 +1,4 @@
+interface:
+  display_name: "zxfer PR Review"
+  short_description: "Review zxfer changes for safety"
+  default_prompt: "Use $zxfer-pr-review to review the current zxfer diff for release-blocking issues."

@@ -132,6 +132,30 @@ test_zxfer_validate_resolved_tool_path_accepts_double_quoted_absolute_path() {
 		"/tmp/mocktool.\$(touch marker)" "$result"
 }
 
+test_zxfer_resolve_local_cli_command_safe_rejects_quoted_token_strings() {
+	set +e
+	output=$(zxfer_resolve_local_cli_command_safe '"/opt/zstd dir/zstd" -3' "compression command")
+	status=$?
+	set -e
+
+	assertEquals "Local CLI command resolution should fail closed when the configured command relies on shell quoting." \
+		1 "$status"
+	assertContains "Rejected local CLI commands should explain the literal-token requirement." \
+		"$output" "compression command must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+}
+
+test_zxfer_requote_cli_command_with_resolved_head_surfaces_split_failures() {
+	set +e
+	output=$(zxfer_requote_cli_command_with_resolved_head '"/opt/zstd dir/zstd" -3' "/resolved/zstd" "compression command")
+	status=$?
+	set -e
+
+	assertEquals "Requoting local CLI commands should fail when the original command cannot be split safely." \
+		1 "$status"
+	assertContains "Requoted local CLI command failures should preserve the splitter diagnostic." \
+		"$output" "compression command must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+}
+
 test_zxfer_initialize_dependency_defaults_sets_runtime_path_and_awk() {
 	result=$(
 		(

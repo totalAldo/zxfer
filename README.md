@@ -76,14 +76,17 @@ Use remote compression:
 - Recursive and non-recursive snapshot replication
 - Local and remote replication with `-O` and `-T`
 - Wrapper-style remote host specs such as `user@host pfexec` or `user@host doas`
-- Concurrent send/receive jobs with explicit per-dataset source discovery via `-j`
+- Concurrent send/receive jobs with explicit per-dataset source discovery and
+  supervised long-lived cleanup via `-j`
 - Property replication, overrides, and unsupported-property skipping
 - Property backup and restore with `-k` and `-e`, using hardened metadata
   storage outside dataset mountpoints
 - Optional raw sends with `-w`
 - Optional `zstd` compression with `-z` or a custom `zstd` compressor command
   with `-Z`
-- Structured stderr failure reports with optional `ZXFER_ERROR_LOG` mirroring
+- Structured stderr failure reports with default command-field redaction,
+  optional `ZXFER_ERROR_LOG` mirroring, and an explicit
+  `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1` local-debug override
 - Metadata-bearing lock and lease coordination for ssh control sockets, remote
   capability caches, and `ZXFER_ERROR_LOG` appends, with validated stale-owner
   reaping and checked release semantics
@@ -92,8 +95,14 @@ Use remote compression:
 
 - `-j jobs`: run concurrent send/receive jobs; when `jobs > 1`, zxfer uses
   explicit per-dataset source discovery instead of the serial recursive
-  listing. Local-origin runs require GNU `parallel`; remote-origin runs
-  require a resolved origin-host `parallel` helper
+  listing. Long-lived source-discovery and send/receive workers run under a
+  shared supervisor that records launch/completion metadata and aborts through
+  validated process-group or owned-child-set cleanup instead of signaling a
+  bare wrapper PID. zxfer also serializes conflicting ancestor/descendant
+  destination receives on the same target, even when spare job slots remain,
+  so parent and child datasets do not receive concurrently. Local-origin runs
+  require GNU `parallel`; remote-origin runs require a resolved origin-host
+  `parallel` helper
 - `-V`: enable very verbose debug output and end-of-run profiling counters
 - `-x pattern`: exclude datasets from recursive replication
 - `-Y`: repeat replication until no sends or destroys are performed, or until
@@ -101,6 +110,11 @@ Use remote compression:
 - `-z`: compress ssh send/receive streams with `zstd`
 - `-Z "command"`: replace the default `zstd` compressor command with a custom
   variant such as `zstd -T0 -3`
+
+For `-O`, `-T`, and `-Z`, zxfer treats the option value as literal
+whitespace-delimited argv tokens. Outer shell quoting is fine, but embedded
+quote characters or backslash escapes inside the value are rejected instead of
+being silently re-tokenized.
 
 See the man pages and [docs/cli-examples.md](./docs/cli-examples.md) for the
 full option set and additional workflows.
@@ -145,6 +159,32 @@ preserving the original zxfer exit status. Pre-metadata cache artifacts from
 older releases are no longer supported: if a reused cache root still contains
 plain ssh `leases/lease.*` files or pid-only `.lock` directories, remove the
 stale entry or cache root before rerunning zxfer.
+
+Long-lived source snapshot listing and parallel send/receive work now runs
+under private supervisor control directories beneath the runtime temp root.
+Each job records launch and completion metadata, and trap-time abort validates
+the recorded process group or owned child set before signaling it. Abort
+cleanup is completion-aware: if `completion.tsv` is already present, or a
+failed signal is followed by a refreshed process snapshot that no longer shows
+the runner, zxfer treats the job as already finished and continues cleanup. It
+fails closed only when a refreshed snapshot still shows a live owned runner
+that cannot be validated or signaled, or when the completion record itself
+cannot be persisted. The same checked-cleanup rule now applies to ssh
+control-socket teardown during trap cleanup: if zxfer cannot close a managed
+socket after otherwise successful work, it exits nonzero instead of reporting
+a clean run.
+
+For `-j` send/receive work, the scheduler also treats ancestor/descendant
+destination datasets on the same target as mutually exclusive. zxfer now waits
+for the conflicting receive to finish before launching the next transfer, so
+recursive parent/child destination trees no longer race each other and degrade
+later into truncated-stream collateral failures.
+
+Short-lived local background helpers that still need shell wrappers, such as
+progress dialogs and delete-planning identity writers, now publish validated
+cleanup metadata through the shared runtime registry. The remaining local
+wrapper-style helpers run under a small TERM-aware child wrapper so early-exit
+cleanup no longer falls back to signaling a bare wrapper-shell PID.
 
 Current runtime caveats are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 

@@ -32,6 +32,13 @@ responsibility boundary.
   initialization, shared per-run defaults, validated temp-root selection,
   runtime-artifact allocation/readback/cleanup, runtime-owned cache staging,
   and trap handling
+- [../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh):
+  supervised long-lived background-job registry state, launch/completion
+  metadata, validated process-group or child-set teardown, and shared
+  spawn/wait/abort helpers
+- [../src/zxfer_background_job_runner.sh](../src/zxfer_background_job_runner.sh):
+  standalone supervisor runner entry point that launches one long-lived worker,
+  records launch/completion metadata, and publishes queue notifications
 - [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh): remote helper
   resolution, scoped requested-tool capability handshakes and caches, ssh
   control-socket management, and subsystem-specific adapters around the shared
@@ -68,6 +75,7 @@ The startup path is intentionally explicit:
 3. Module-specific mutable scratch state is then reset through the owning
    module helpers rather than by duplicating those variable inventories in the
    runtime layer. The main examples are
+   [../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh),
    [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh),
    [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh),
    [../src/zxfer_send_receive.sh](../src/zxfer_send_receive.sh),
@@ -96,6 +104,44 @@ Not every staging flow belongs in that layer. Modules that intentionally stage
 files beside the final target to preserve same-directory atomic rename and
 trusted-parent checks, such as backup publish or rollback paths, continue to
 own that path-adjacent secure staging locally.
+
+Long-lived background work now layers on top of the runtime temp root through
+[../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh). Each
+supervised job gets a private control directory containing:
+
+- `launch.tsv` for runner identity, worker pid/pgid, teardown mode, and start time
+- `completion.tsv` for normalized exit status, completion-write or queue-write
+  failure markers, and completion time
+
+That keeps long-lived cleanup and wait logic on structured `job_id` records
+instead of wrapper-shell bare PIDs or caller-owned status files.
+
+The parent runtime does not write those records directly. It spawns the
+standalone helper
+[../src/zxfer_background_job_runner.sh](../src/zxfer_background_job_runner.sh),
+which launches the worker, records the validated launch metadata from inside
+the runner process, and then publishes structured completion state after the
+worker exits. When `setsid` is available the runner prefers a dedicated process
+group and falls back to owned-child-set teardown otherwise. Trap-time transport
+cleanup follows the same checked-cleanup contract: a managed ssh control-socket
+close failure now upgrades an otherwise successful exit into a runtime cleanup
+failure instead of being treated as warning-only success.
+
+Supervisor abort is also completion-aware. If `completion.tsv` already exists,
+zxfer treats the job as finished even when a later process-table read or live
+runner revalidation fails during trap cleanup. If a teardown signal reports
+failure, zxfer rereads the process snapshot before revalidating the runner; if
+the runner disappeared in that race, cleanup succeeds. Only a refreshed
+snapshot that still shows a live owned runner and still cannot be validated or
+signaled is treated as a fatal abort-path failure.
+
+Short-lived background helpers still go through the shared runtime cleanup
+registry in [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh). Helpers that
+need an inline shell wrapper now launch through the standalone
+[../src/zxfer_cleanup_child_wrapper.sh](../src/zxfer_cleanup_child_wrapper.sh),
+which traps TERM and reaps its descendant set before exiting. That keeps the
+remaining local helper paths on validated ownership tracking instead of bare
+wrapper-shell PID teardown.
 
 ## Owned Lock And Lease Layer
 
@@ -131,11 +177,17 @@ ownership check.
    live recheck, seed decision, then final send/receive range. Seed-only
    receive `-F` is passed as an internal execution flag without mutating the
    parsed `g_option_*` state.
-8. Optionally transfer or restore properties, including exact-keyed backup
+8. For long-lived background work, spawn through the shared background-job
+   supervisor, wait by `job_id`, and abort remaining supervised jobs through
+   validated process-group or owned-child-set cleanup on the first failure.
+   Parallel send/receive scheduling also serializes conflicting
+   ancestor/descendant destination datasets on the same target before it
+   spends another background slot.
+9. Optionally transfer or restore properties, including exact-keyed backup
    metadata reads and deferred post-seed reconciliation for datasets that were
    seeded into empty destinations.
-9. Repeat when `-Y` is enabled.
-10. Emit structured failure reporting on non-zero exit.
+10. Repeat when `-Y` is enabled.
+11. Emit structured failure reporting on non-zero exit.
 
 ## Execution Lifecycle Diagrams
 
@@ -144,6 +196,8 @@ launcher plus the main orchestration modules. They intentionally use the real
 function boundaries so operators and contributors can line the diagrams up with
 [`../zxfer`](../zxfer),
 [`../src/zxfer_runtime.sh`](../src/zxfer_runtime.sh),
+[`../src/zxfer_background_jobs.sh`](../src/zxfer_background_jobs.sh),
+[`../src/zxfer_background_job_runner.sh`](../src/zxfer_background_job_runner.sh),
 [`../src/zxfer_remote_hosts.sh`](../src/zxfer_remote_hosts.sh),
 [`../src/zxfer_snapshot_discovery.sh`](../src/zxfer_snapshot_discovery.sh),
 [`../src/zxfer_snapshot_reconcile.sh`](../src/zxfer_snapshot_reconcile.sh),
@@ -174,18 +228,20 @@ flowchart TD
     M -- "no" --> O["Initialize live replication context"]
     O --> P["Optional -e restore metadata load before discovery"]
     P --> Q["Run zxfer_get_zfs_list() to cache source and destination state"]
-    Q --> R["Optional unsupported-property probing when -U is enabled"]
+    Q --> Q1["Long-lived snapshot listing spawns through zxfer_background_jobs.sh and later waits by job_id"]
+    Q1 --> R["Optional unsupported-property probing when -U is enabled"]
     R --> S["Optional preflight snapshot via -s or migration prep via -m"]
     S --> T["Optional grandfather deletion checks via -g"]
     T --> U["Run zxfer_copy_filesystems()"]
     N --> V{"Repeat pass?"}
-    U --> W["Wait for background send jobs and run deferred post-seed property reconcile"]
-    W --> X["Relaunch services after -m if needed"]
-    X --> V
+    U --> W["Spawn send/receive jobs through the supervisor, but wait first when an active destination ancestor or descendant is still running"]
+    W --> X["Wait for supervised background send jobs by job_id and run deferred post-seed property reconcile"]
+    X --> Y["Relaunch services after -m if needed"]
+    Y --> V
     V -- "yes: -Y and send/destroy work occurred" --> J
-    V -- "no" --> Y["Invoke final -k backup metadata write or dry-run preview hook"]
-    Y --> Z["Normal exit path"]
-    Z --> AA["zxfer_trap_exit(): close ssh control sockets, release registered owned locks or leases, clean runtime artifacts, emit profiling and structured failure report"]
+    V -- "no" --> Z["Invoke final -k backup metadata write or dry-run preview hook"]
+    Z --> AA["Normal exit path"]
+    AA --> AB["zxfer_trap_exit(): abort supervised long-lived background jobs, close ssh control sockets, release registered owned locks or leases, clean runtime artifacts, emit profiling and structured failure report"]
 ```
 
 ### Per-Dataset Replication Lifecycle
@@ -216,11 +272,16 @@ flowchart TD
     N --> P["Send remaining snapshot range"]
     O -- "yes" --> P
     O -- "no" --> Q["Seed already satisfies transfer range"]
-    P --> R{"Seed created a deferred property follow-up?"}
-    Q --> R
-    R -- "yes" --> T["Queue dataset for post-seed property reconcile after send jobs finish"]
-    R -- "no" --> S["Dataset pass complete"]
-    T --> S
+    P --> R{"Background send/receive allowed?"}
+    R -- "yes" --> S["Wait for any active destination ancestor or descendant on the same target before spawning the supervised receive"]
+    R -- "no" --> T["Run the send/receive in the foreground"]
+    S --> U["Spawn the supervised send/receive job"]
+    T --> V{"Seed created a deferred property follow-up?"}
+    U --> V
+    Q --> V
+    V -- "yes" --> W["Queue dataset for post-seed property reconcile after send jobs finish"]
+    V -- "no" --> X["Dataset pass complete"]
+    W --> X
 ```
 
 Live `-k` metadata is only persisted immediately when the dataset pass is safe
@@ -281,7 +342,7 @@ sequenceDiagram
     Launcher->>Origin: fan out per-dataset snapshot listing via the resolved origin-host parallel helper
     Launcher->>Local: list destination datasets and snapshots
     Launcher->>Launcher: build the iteration list and allow up to 8 background send or receive jobs
-    loop queue datasets while job slots remain
+    loop queue datasets while job slots remain and no destination ancestor or descendant conflicts remain
         Launcher->>Origin: start remote zfs send ... | remote compression helper
         Origin-->>Launcher: compressed replication stream over ssh
         Launcher->>Local: local decompressor | zfs receive ...

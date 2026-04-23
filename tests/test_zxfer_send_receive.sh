@@ -20,6 +20,7 @@ oneTimeTearDown() {
 }
 
 setUp() {
+	set +e
 	g_option_n_dryrun=0
 	g_option_v_verbose=0
 	g_option_V_very_verbose=0
@@ -37,8 +38,10 @@ setUp() {
 	g_origin_cmd_decompress_safe="remote-gunzip"
 	g_target_cmd_compress_safe="target-gzip"
 	g_target_cmd_decompress_safe="target-gunzip"
+	g_cmd_ps=${g_cmd_ps:-$(command -v ps 2>/dev/null || printf '%s\n' ps)}
 	g_zfs_send_job_pids=""
 	g_zfs_send_job_records=""
+	g_zfs_send_job_supervisor_records=""
 	g_zfs_send_job_queue_open=0
 	g_zfs_send_job_queue_unavailable=0
 	g_zfs_send_job_queue_path=""
@@ -46,6 +49,16 @@ setUp() {
 	g_zfs_send_job_queue_writer_open=0
 	g_zxfer_send_job_status_file_exit_status=""
 	g_zxfer_send_job_status_file_report_failure=""
+	g_zxfer_send_job_record_job_id=""
+	g_zxfer_send_job_record_runner_pid=""
+	g_zxfer_send_job_record_source_dataset=""
+	g_zxfer_send_job_record_source_snapshot=""
+	g_zxfer_send_job_record_dest_dataset=""
+	g_zxfer_send_job_record_target_host=""
+	g_zxfer_send_job_conflict_job_id=""
+	g_zxfer_send_job_conflict_dest_dataset=""
+	g_zxfer_send_job_conflict_target_host=""
+	g_zxfer_send_job_error_context_result=""
 	g_count_zfs_send_jobs=0
 	g_is_performed_send_destroy=0
 	g_zxfer_failure_last_command=""
@@ -63,6 +76,8 @@ setUp() {
 	g_zxfer_progress_size_estimate_result=""
 	g_zxfer_progress_bar_command_result=""
 	zxfer_reset_destination_existence_cache
+	zxfer_reset_background_job_state
+	zxfer_reset_cleanup_pid_tracking
 	TMPDIR="$TEST_TMPDIR"
 	exec 8<&- 2>/dev/null || true
 	exec 9<&- 2>/dev/null || true
@@ -150,6 +165,164 @@ test_wrap_command_with_ssh_rejects_missing_safe_compression_commands() {
 	assertEquals "Unsafe compression settings should abort wrapping." 1 "$status"
 	assertContains "Missing safe compression commands should surface the validation error." \
 		"$output" "Compression enabled but commands are not configured safely."
+}
+
+test_wrap_command_with_ssh_preserves_remote_wrapper_builder_status() {
+	set +e
+	output=$(
+		(
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n%s\n' "origin.example" "pfexec"
+			}
+			zxfer_build_remote_sh_c_command() {
+				return 73
+			}
+			zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "origin.example pfexec" 0 send
+		)
+	)
+	status=$?
+
+	assertEquals "SSH command wrapping should preserve the exact remote-shell wrapper builder status." \
+		73 "$status"
+	assertEquals "SSH command wrapping should not emit a partial wrapped command when remote-shell wrapper construction fails." \
+		"" "$output"
+}
+
+test_wrap_command_with_ssh_preserves_compressed_builder_failures_for_all_host_shapes() {
+	set +e
+	send_wrapper_output=$(
+		(
+			g_option_O_origin_host="origin.example pfexec"
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n%s\n' "origin.example" "pfexec"
+			}
+			zxfer_build_remote_sh_c_command() {
+				return 81
+			}
+			zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "origin.example pfexec" 1 send
+		)
+	)
+	send_wrapper_status=$?
+	send_transport_output=$(
+		(
+			g_option_O_origin_host="origin.example pfexec"
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n%s\n' "origin.example" "pfexec"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "'sh' '-c' 'zfs send tank/src@snap | remote-gzip'"
+			}
+			zxfer_build_ssh_shell_command_for_host() {
+				return 82
+			}
+			zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "origin.example pfexec" 1 send
+		)
+	)
+	send_transport_status=$?
+	send_simple_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n' "origin.example"
+			}
+			zxfer_build_ssh_shell_command_for_host() {
+				return 83
+			}
+			zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "origin.example" 1 send
+		)
+	)
+	send_simple_status=$?
+	receive_wrapper_output=$(
+		(
+			g_option_T_target_host="target.example doas"
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n%s\n' "target.example" "doas"
+			}
+			zxfer_build_remote_sh_c_command() {
+				return 84
+			}
+			zxfer_wrap_command_with_ssh "zfs receive tank/dst" "target.example doas" 1 receive
+		)
+	)
+	receive_wrapper_status=$?
+	receive_transport_output=$(
+		(
+			g_option_T_target_host="target.example doas"
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n%s\n' "target.example" "doas"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "'sh' '-c' 'target-gunzip | zfs receive tank/dst'"
+			}
+			zxfer_build_ssh_shell_command_for_host() {
+				return 85
+			}
+			zxfer_wrap_command_with_ssh "zfs receive tank/dst" "target.example doas" 1 receive
+		)
+	)
+	receive_transport_status=$?
+	receive_simple_output=$(
+		(
+			g_option_T_target_host="target.example"
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n' "target.example"
+			}
+			zxfer_build_ssh_shell_command_for_host() {
+				return 86
+			}
+			zxfer_wrap_command_with_ssh "zfs receive tank/dst" "target.example" 1 receive
+		)
+	)
+	receive_simple_status=$?
+	set -e
+
+	assertEquals "Compressed send wrapping should preserve remote-shell wrapper failures for multi-token hosts." \
+		81 "$send_wrapper_status"
+	assertEquals "Compressed send wrapping should not emit partial output when remote-shell wrapper creation fails." \
+		"" "$send_wrapper_output"
+	assertEquals "Compressed send wrapping should preserve ssh wrapper failures for multi-token hosts." \
+		82 "$send_transport_status"
+	assertEquals "Compressed send wrapping should not emit partial output when ssh wrapper construction fails for multi-token hosts." \
+		"" "$send_transport_output"
+	assertEquals "Compressed send wrapping should preserve ssh wrapper failures for simple hosts." \
+		83 "$send_simple_status"
+	assertEquals "Compressed send wrapping should not emit partial output when ssh wrapper construction fails for simple hosts." \
+		"" "$send_simple_output"
+	assertEquals "Compressed receive wrapping should preserve remote-shell wrapper failures for multi-token hosts." \
+		84 "$receive_wrapper_status"
+	assertEquals "Compressed receive wrapping should not emit partial output when remote-shell wrapper creation fails." \
+		"" "$receive_wrapper_output"
+	assertEquals "Compressed receive wrapping should preserve ssh wrapper failures for multi-token hosts." \
+		85 "$receive_transport_status"
+	assertEquals "Compressed receive wrapping should not emit partial output when ssh wrapper construction fails for multi-token hosts." \
+		"" "$receive_transport_output"
+	assertEquals "Compressed receive wrapping should preserve ssh wrapper failures for simple hosts." \
+		86 "$receive_simple_status"
+	assertEquals "Compressed receive wrapping should not emit partial output when ssh wrapper construction fails for simple hosts." \
+		"" "$receive_simple_output"
+}
+
+test_wrap_command_with_ssh_rethrows_host_spec_split_failures() {
+	set +e
+	output=$(
+		(
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n' "invalid host spec"
+				return 74
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "origin.example pfexec" 0 send
+		)
+	)
+	status=$?
+
+	assertEquals "SSH wrapping should fail closed when host-spec token splitting fails." \
+		1 "$status"
+	assertContains "SSH wrapping should preserve the host-spec split diagnostic." \
+		"$output" "invalid host spec"
 }
 
 test_zxfer_reset_send_receive_state_clears_queue_and_progress_scratch() {
@@ -973,6 +1146,45 @@ test_zxfer_open_send_job_completion_queue_reopen_failure_marks_queue_unavailable
 		"$output" "unavailable=1"
 }
 
+test_zxfer_open_send_job_completion_queue_success_sets_state_and_reuses_open_writer() {
+	output=$(
+		(
+			if ! zxfer_open_send_job_completion_queue; then
+				printf 'open_status=%s\n' "$?"
+				exit 1
+			fi
+			l_queue_path=$g_zfs_send_job_queue_path
+			l_queue_dir=$g_zfs_send_job_queue_dir
+			printf 'open=%s\n' "${g_zfs_send_job_queue_open:-0}"
+			printf 'writer=%s\n' "${g_zfs_send_job_queue_writer_open:-0}"
+			printf 'path=%s\n' "$l_queue_path"
+			printf 'dir=%s\n' "$l_queue_dir"
+			zxfer_open_send_job_completion_queue
+			printf 'reused_path=%s\n' "$g_zfs_send_job_queue_path"
+			zxfer_close_send_job_completion_queue
+			printf 'closed_open=%s\n' "${g_zfs_send_job_queue_open:-0}"
+			printf 'closed_writer=%s\n' "${g_zfs_send_job_queue_writer_open:-0}"
+			printf 'queue_exists=%s\n' "$([ -e "$l_queue_path" ] && printf yes || printf no)"
+			printf 'dir_exists=%s\n' "$([ -e "$l_queue_dir" ] && printf yes || printf no)"
+		)
+	)
+
+	assertContains "Opening the rolling completion queue should mark it open." \
+		"$output" "open=1"
+	assertContains "Opening the rolling completion queue should mark the writer fd open." \
+		"$output" "writer=1"
+	assertContains "Reopening an already-open rolling completion queue should reuse the existing queue path." \
+		"$output" "reused_path=$(printf '%s\n' "$output" | sed -n 's/^path=//p')"
+	assertContains "Closing an opened rolling completion queue should clear the open marker." \
+		"$output" "closed_open=0"
+	assertContains "Closing an opened rolling completion queue should clear the writer-open marker." \
+		"$output" "closed_writer=0"
+	assertContains "Closing an opened rolling completion queue should remove the queue fifo." \
+		"$output" "queue_exists=no"
+	assertContains "Closing an opened rolling completion queue should remove the queue directory." \
+		"$output" "dir_exists=no"
+}
+
 test_zxfer_open_send_job_completion_queue_fd_closes_writer_when_reader_open_fails() {
 	queue_file="$TEST_TMPDIR/open_queue_fd_fail.queue"
 	: >"$queue_file"
@@ -990,6 +1202,23 @@ test_zxfer_open_send_job_completion_queue_fd_closes_writer_when_reader_open_fail
 		1 "$status"
 }
 
+test_zxfer_open_send_job_completion_queue_fd_returns_failure_when_writer_open_fails() {
+	queue_file="$TEST_TMPDIR/open_queue_fd_writer_fail.queue"
+	: >"$queue_file"
+
+	set +e
+	(
+		zxfer_open_send_job_completion_queue_writer_fd() {
+			return 1
+		}
+		zxfer_open_send_job_completion_queue_fd "$queue_file"
+	)
+	status=$?
+
+	assertEquals "Opening the rolling queue should fail when the writer fd cannot be opened." \
+		1 "$status"
+}
+
 test_zxfer_close_send_job_completion_queue_cleans_orphaned_queue_paths() {
 	queue_path="$TEST_TMPDIR/orphaned-queue"
 	: >"$queue_path"
@@ -1003,6 +1232,65 @@ test_zxfer_close_send_job_completion_queue_cleans_orphaned_queue_paths() {
 		"[ -e '$queue_path' ]"
 	assertEquals "Closing remembered rolling queues should clear the stored queue path." \
 		"" "${g_zfs_send_job_queue_path:-}"
+}
+
+test_zxfer_register_send_job_tracks_legacy_pid_lists_and_lookup_records() {
+	status_one="$TEST_TMPDIR/legacy_job_status_one"
+	status_two="$TEST_TMPDIR/legacy_job_status_two"
+
+	output=$(
+		(
+			zxfer_register_cleanup_pid() {
+				printf 'cleanup:%s\n' "$1"
+			}
+			zxfer_register_send_job 101 "$status_one"
+			zxfer_register_send_job 202 "$status_two"
+			printf 'found=%s\n' "$(zxfer_find_send_job_pid_by_status_file "$status_two")"
+			printf 'count=%s\n' "$g_count_zfs_send_jobs"
+			printf 'pids=%s\n' "$g_zfs_send_job_pids"
+			printf 'records=%s\n' "$(printf '%s\n' "$g_zfs_send_job_records" | sed 's/	/:/g')"
+		)
+	)
+
+	assertContains "Registering legacy send jobs should register each PID for cleanup." \
+		"$output" "cleanup:101"
+	assertContains "Registering multiple legacy send jobs should register later PIDs for cleanup too." \
+		"$output" "cleanup:202"
+	assertContains "Legacy send-job lookup should resolve tracked status files back to their PID." \
+		"$output" "found=202"
+	assertContains "Registering legacy send jobs should increment the tracked job count." \
+		"$output" "count=2"
+	assertContains "Registering legacy send jobs should append to the tracked PID list." \
+		"$output" "pids=101 202"
+	assertContains "Registering legacy send jobs should preserve the PID-to-status-file registry." \
+		"$output" "records=101:$status_one
+202:$status_two"
+}
+
+test_zxfer_register_send_job_preserves_cleanup_registration_failures() {
+	status_file="$TEST_TMPDIR/legacy_job_status_fail"
+
+	output=$(
+		(
+			zxfer_register_cleanup_pid() {
+				return 1
+			}
+			zxfer_register_send_job 101 "$status_file"
+			printf 'status=%s\n' "$?"
+			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
+			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
+			printf 'records=<%s>\n' "${g_zfs_send_job_records:-}"
+		)
+	)
+
+	assertContains "Legacy send-job registration should fail closed when validated cleanup tracking cannot be published." \
+		"$output" "status=1"
+	assertContains "Legacy send-job registration failures should preserve the tracked job count." \
+		"$output" "count=0"
+	assertContains "Legacy send-job registration failures should leave the tracked PID list empty." \
+		"$output" "pids=<>"
+	assertContains "Legacy send-job registration failures should leave the PID-to-status-file registry empty." \
+		"$output" "records=<>"
 }
 
 test_zxfer_find_send_job_pid_by_status_file_returns_failure_for_unknown_status_files() {
@@ -1076,6 +1364,78 @@ test_zxfer_unregister_send_job_removes_middle_pid_from_multi_pid_list() {
 		"[ -e '$status_one' ]"
 	assertTrue "Unregistering a tracked job should leave later status files intact." \
 		"[ -e '$status_three' ]"
+}
+
+test_supervised_send_job_helpers_collect_unregister_and_report_missing_jobs() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	zxfer_register_supervised_send_job "job-1" 101 "tank/src@snap1" "backup/dst" ""
+	zxfer_register_supervised_send_job "job-2" 202 "tank/src/child@snap1" "backup/dst/child" ""
+	zxfer_register_supervised_send_job "job-3" 303 "tank/other@snap1" "backup/other" "target.example"
+	ids=$(zxfer_collect_supervised_send_job_ids)
+	found=$(zxfer_find_supervised_send_job_pid_by_job_id "job-2")
+	set +e
+	zxfer_find_supervised_send_job_pid_by_job_id "job-missing" >/dev/null
+	missing_status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+	zxfer_unregister_supervised_send_job "job-2"
+
+	assertEquals "Collecting supervised send-job ids should preserve their registration order." \
+		"job-1
+job-2
+job-3" "$ids"
+	assertEquals "Supervised send-job lookup should resolve tracked job ids back to their runner pid." \
+		202 "$found"
+	assertEquals "Supervised send-job lookup should fail for unknown job ids." \
+		1 "$missing_status"
+	assertEquals "Unregistering one supervised send job should preserve earlier and later tracked runner pids." \
+		"101 303" "${g_zfs_send_job_pids:-}"
+	expected_records=$(printf 'job-1\t101\ttank/src@snap1\tbackup/dst\t\njob-3\t303\ttank/other@snap1\tbackup/other\ttarget.example')
+	assertEquals "Unregistering one supervised send job should preserve earlier and later tracked records." \
+		"$expected_records" "${g_zfs_send_job_supervisor_records:-}"
+	assertEquals "Unregistering one supervised send job should decrement the tracked job count." \
+		2 "${g_count_zfs_send_jobs:-0}"
+}
+
+test_supervised_send_job_helpers_track_metadata_conflicts_and_render_context() {
+	zxfer_register_supervised_send_job "job-1" 101 "tank/src@snap2" "backup/dst" ""
+	zxfer_register_supervised_send_job "job-2" 202 "tank/other@snap9" "backup/other" "target.example"
+
+	if ! zxfer_find_supervised_send_job_record "job-1"; then
+		fail "Expected to find the registered supervised send job."
+	fi
+	assertEquals "Tracked supervised send jobs should preserve the source dataset metadata." \
+		"tank/src" "$g_zxfer_send_job_record_source_dataset"
+	assertEquals "Tracked supervised send jobs should preserve the source snapshot metadata." \
+		"tank/src@snap2" "$g_zxfer_send_job_record_source_snapshot"
+	assertEquals "Tracked supervised send jobs should preserve the destination dataset metadata." \
+		"backup/dst" "$g_zxfer_send_job_record_dest_dataset"
+
+	if ! zxfer_supervised_send_job_conflicts_with_destination "" "backup/dst/child"; then
+		fail "Expected ancestor and descendant destination datasets to conflict."
+	fi
+	assertEquals "Destination-ancestry conflict detection should identify the conflicting tracked job id." \
+		"job-1" "$g_zxfer_send_job_conflict_job_id"
+	assertEquals "Destination-ancestry conflict detection should expose the conflicting active destination dataset." \
+		"backup/dst" "$g_zxfer_send_job_conflict_dest_dataset"
+
+	if zxfer_supervised_send_job_conflicts_with_destination "" "backup/unrelated"; then
+		fail "Unrelated local destination datasets should not conflict."
+	fi
+	if zxfer_supervised_send_job_conflicts_with_destination "" "backup/other/child"; then
+		fail "Different target-host contexts should not conflict with local destinations."
+	fi
+
+	assertEquals "Dataset-aware send-job error contexts should identify the tracked source snapshot and destination dataset." \
+		"[tank/src@snap2 -> backup/dst]" "$(zxfer_get_supervised_send_job_error_context "job-1")"
+	assertEquals "Dataset-aware send-job error contexts should include the target host when present." \
+		"[tank/other@snap9 -> backup/other] on target [target.example]" "$(zxfer_get_supervised_send_job_error_context "job-2")"
 }
 
 test_zxfer_run_background_pipeline_executes_command_and_reports_completion() {
@@ -1300,6 +1660,22 @@ test_wait_for_next_zfs_send_job_completion_falls_back_when_queue_is_not_open() {
 		"wait:unit" "$(cat "$log")"
 }
 
+test_wait_for_next_zfs_send_job_completion_dispatches_to_supervised_handler() {
+	output=$(
+		(
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_wait_for_next_supervised_zfs_send_job_completion() {
+				printf 'supervised=%s\n' "$1"
+			}
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+
+	assertContains "Rolling completion waits should delegate to the supervised handler when supervised jobs are tracked." \
+		"$output" "supervised=unit"
+}
+
 test_wait_for_next_zfs_send_job_completion_uses_wait_status_when_status_file_is_nonnumeric() {
 	set +e
 	output=$(
@@ -1445,6 +1821,46 @@ test_wait_for_next_zfs_send_job_completion_reports_status_write_failures() {
 		"$output" "Failed to record zfs send/receive background status"
 }
 
+test_wait_for_next_zfs_send_job_completion_surfaces_cleanup_abort_failures_before_status_write_failures() {
+	set +e
+	output=$(
+		(
+			status_file="$TEST_TMPDIR/wait_next_status_write_abort_failure.txt"
+			queue_file="$TEST_TMPDIR/wait_next_status_write_abort_failure.queue"
+			printf 'status_write_failed\t%s\t0\n' "$status_file" >"$queue_file"
+			sh -c 'exit 125' &
+			job_pid=$!
+			exec 8<"$queue_file"
+			zxfer_find_send_job_pid_by_status_file() {
+				printf '%s\n' "$job_pid"
+			}
+			zxfer_unregister_send_job() {
+				g_count_zfs_send_jobs=0
+				g_zfs_send_job_pids=""
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="record"
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_pids="$job_pid"
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	status=$?
+
+	assertEquals "Rolling completion waits should surface cleanup-abort failures before status-write failure errors." \
+		1 "$status"
+	assertContains "Cleanup-abort failures should preserve the validated abort failure message before the status-write failure error." \
+		"$output" "validated cleanup abort failed"
+}
+
 test_wait_for_next_zfs_send_job_completion_normalizes_nonnumeric_status_write_failures() {
 	set +e
 	output=$(
@@ -1485,6 +1901,96 @@ test_wait_for_next_zfs_send_job_completion_normalizes_nonnumeric_status_write_fa
 		1 "$status"
 	assertContains "Malformed status-write failure notifications should normalize the status to 125." \
 		"$output" "exit 125)."
+}
+
+test_wait_for_next_zfs_send_job_completion_surfaces_cleanup_abort_failures_before_queue_write_and_nonzero_errors() {
+	set +e
+	queue_write_output=$(
+		(
+			status_file="$TEST_TMPDIR/wait_next_queue_write_abort_failure.status"
+			queue_file="$TEST_TMPDIR/wait_next_queue_write_abort_failure.queue"
+			printf '%s\n' "status	0" >"$status_file"
+			printf '%s\n' "$status_file" >"$queue_file"
+			sh -c 'exit 0' &
+			job_pid=$!
+			exec 8<"$queue_file"
+			zxfer_find_send_job_pid_by_status_file() {
+				printf '%s\n' "$job_pid"
+			}
+			zxfer_get_send_job_completion_status() {
+				g_zxfer_send_job_status_file_exit_status=7
+				g_zxfer_send_job_status_file_report_failure="queue_write"
+			}
+			zxfer_unregister_send_job() {
+				g_count_zfs_send_jobs=0
+				g_zfs_send_job_pids=""
+			}
+			zxfer_close_send_job_completion_queue() {
+				:
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="record"
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_pids="$job_pid"
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	queue_write_status=$?
+	exit_output=$(
+		(
+			status_file="$TEST_TMPDIR/wait_next_nonzero_abort_failure.status"
+			queue_file="$TEST_TMPDIR/wait_next_nonzero_abort_failure.queue"
+			printf '%s\n' "$status_file" >"$queue_file"
+			sh -c 'exit 9' &
+			job_pid=$!
+			exec 8<"$queue_file"
+			zxfer_find_send_job_pid_by_status_file() {
+				printf '%s\n' "$job_pid"
+			}
+			zxfer_get_send_job_completion_status() {
+				g_zxfer_send_job_status_file_exit_status=9
+				g_zxfer_send_job_status_file_report_failure=""
+			}
+			zxfer_unregister_send_job() {
+				g_count_zfs_send_jobs=0
+				g_zfs_send_job_pids=""
+			}
+			zxfer_close_send_job_completion_queue() {
+				:
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="record"
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_pids="$job_pid"
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	exit_status=$?
+
+	assertEquals "Rolling completion waits should surface cleanup-abort failures before queue-write marker errors." \
+		1 "$queue_write_status"
+	assertContains "Cleanup-abort failures should preserve the validated abort failure message before the queue-write marker error." \
+		"$queue_write_output" "validated cleanup abort failed"
+	assertEquals "Rolling completion waits should surface cleanup-abort failures before nonzero-exit errors." \
+		1 "$exit_status"
+	assertContains "Cleanup-abort failures should preserve the validated abort failure message before the nonzero-exit error." \
+		"$exit_output" "validated cleanup abort failed"
 }
 
 test_zxfer_wait_for_zfs_send_jobs_legacy_reports_generic_completion_write_failures() {
@@ -1547,6 +2053,143 @@ EOF
 		"$output" "Failed to publish zfs send/receive background completion"
 }
 
+test_wait_for_next_zfs_send_job_completion_reports_status_read_failures_and_queue_write_markers() {
+	set +e
+	read_failure_output=$(
+		(
+			status_file="$TEST_TMPDIR/wait_next_status_read_failure.txt"
+			queue_file="$TEST_TMPDIR/wait_next_status_read_failure.queue"
+			printf '%s\n' "status	0" >"$status_file"
+			printf '%s\n' "$status_file" >"$queue_file"
+			sh -c 'exit 0' &
+			job_pid=$!
+			exec 8<"$queue_file"
+			zxfer_find_send_job_pid_by_status_file() {
+				printf '%s\n' "$job_pid"
+			}
+			zxfer_get_send_job_completion_status() {
+				return 1
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="record"
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_pids="$job_pid"
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	read_failure_status=$?
+	queue_write_output=$(
+		(
+			status_file="$TEST_TMPDIR/wait_next_queue_write_marker.txt"
+			queue_file="$TEST_TMPDIR/wait_next_queue_write_marker.queue"
+			printf '%s\n' "status	0" >"$status_file"
+			printf '%s\n' "$status_file" >"$queue_file"
+			sh -c 'exit 0' &
+			job_pid=$!
+			exec 8<"$queue_file"
+			zxfer_find_send_job_pid_by_status_file() {
+				printf '%s\n' "$job_pid"
+			}
+			zxfer_get_send_job_completion_status() {
+				g_zxfer_send_job_status_file_exit_status=7
+				g_zxfer_send_job_status_file_report_failure="queue_write"
+			}
+			zxfer_unregister_send_job() {
+				g_count_zfs_send_jobs=0
+				g_zfs_send_job_pids=""
+			}
+			zxfer_close_send_job_completion_queue() {
+				:
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="record"
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_pids="$job_pid"
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	queue_write_status=$?
+	set -e
+
+	assertEquals "Rolling completion waits should fail closed when the completed status file cannot be read." \
+		1 "$read_failure_status"
+	assertContains "Rolling status-file read failures should terminate remaining jobs before aborting." \
+		"$read_failure_output" "terminated"
+	assertContains "Rolling status-file read failures should preserve the documented operator-facing error." \
+		"$read_failure_output" "Failed to read zfs send/receive job status file ["
+	assertEquals "Rolling completion waits should fail closed when the completed status file records a queue-write marker." \
+		1 "$queue_write_status"
+	assertContains "Rolling queue-write markers should terminate remaining jobs before aborting." \
+		"$queue_write_output" "terminated"
+	assertContains "Rolling queue-write markers should preserve the publish-failure error." \
+		"$queue_write_output" "Failed to publish zfs send/receive background completion"
+}
+
+test_wait_for_next_zfs_send_job_completion_reports_completion_write_markers() {
+	set +e
+	output=$(
+		(
+			status_file="$TEST_TMPDIR/wait_next_completion_write_marker.txt"
+			queue_file="$TEST_TMPDIR/wait_next_completion_write_marker.queue"
+			printf '%s\n' "$status_file" >"$queue_file"
+			sh -c 'exit 7' &
+			job_pid=$!
+			exec 8<"$queue_file"
+			zxfer_find_send_job_pid_by_status_file() {
+				printf '%s\n' "$job_pid"
+			}
+			zxfer_get_send_job_completion_status() {
+				g_zxfer_send_job_status_file_exit_status=7
+				g_zxfer_send_job_status_file_report_failure="completion_write"
+			}
+			zxfer_unregister_send_job() {
+				g_count_zfs_send_jobs=0
+				g_zfs_send_job_pids=""
+			}
+			zxfer_close_send_job_completion_queue() {
+				:
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="record"
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_pids="$job_pid"
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Rolling completion waits should fail closed when the completed status file records a completion-write marker." \
+		1 "$status"
+	assertContains "Rolling completion-write markers should terminate remaining jobs before aborting." \
+		"$output" "terminated"
+	assertContains "Rolling completion-write markers should preserve the completion-report error." \
+		"$output" "Failed to report zfs send/receive background completion (PID "
+	assertContains "Rolling completion-write markers should preserve the waited exit status in the completion-report error." \
+		"$output" ", exit 7)."
+}
+
 test_wait_for_next_zfs_send_job_completion_reports_unknown_completed_status_files() {
 	set +e
 	output=$(
@@ -1580,6 +2223,975 @@ test_wait_for_next_zfs_send_job_completion_reports_unknown_completed_status_file
 		"$output" "terminated"
 	assertContains "Unknown completed status files should preserve the documented matching failure." \
 		"$output" "Failed to match a completed zfs send/receive job to a tracked PID."
+}
+
+test_zxfer_terminate_remaining_send_jobs_aborts_supervised_jobs_and_clears_state() {
+	queue_dir=$(mktemp -d "$TEST_TMPDIR/terminate_supervised_queue.XXXXXX")
+	queue_path=$queue_dir/queue
+	: >"$queue_path"
+
+	output=$(
+		(
+			zxfer_register_supervised_send_job "job-1" 101 "tank/src@snap1" "backup/dst" ""
+			zxfer_register_supervised_send_job "job-2" 202 "tank/src@snap2" "backup/other" ""
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_path=$queue_path
+			g_zfs_send_job_queue_dir=$queue_dir
+			zxfer_abort_background_job() {
+				printf 'abort:%s:%s\n' "$1" "$2"
+			}
+			zxfer_terminate_remaining_send_jobs
+			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
+			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
+			printf 'records=<%s>\n' "${g_zfs_send_job_supervisor_records:-}"
+			printf 'queue_open=%s\n' "${g_zfs_send_job_queue_open:-0}"
+			printf 'dir_exists=%s\n' "$([ -e "$queue_dir" ] && printf yes || printf no)"
+		)
+	)
+
+	assertContains "Terminating supervised send jobs should abort each tracked job id through the supervisor." \
+		"$output" "abort:job-1:TERM"
+	assertContains "Terminating supervised send jobs should abort later tracked job ids too." \
+		"$output" "abort:job-2:TERM"
+	assertContains "Terminating supervised send jobs should clear the tracked job count." \
+		"$output" "count=0"
+	assertContains "Terminating supervised send jobs should clear the tracked runner pid list." \
+		"$output" "pids=<>"
+	assertContains "Terminating supervised send jobs should clear the tracked supervisor records." \
+		"$output" "records=<>"
+	assertContains "Terminating supervised send jobs should close the rolling queue." \
+		"$output" "queue_open=0"
+	assertContains "Terminating supervised send jobs should remove the rolling queue directory." \
+		"$output" "dir_exists=no"
+}
+
+test_zxfer_terminate_remaining_send_jobs_returns_failure_when_supervised_id_collection_fails() {
+	output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_collect_supervised_send_job_ids() {
+				return 1
+			}
+			set +e
+			zxfer_terminate_remaining_send_jobs
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+		)
+	)
+
+	assertContains "Supervised teardown should fail closed when the tracked job-id collection fails." \
+		"$output" "status=1"
+}
+
+test_zxfer_terminate_remaining_send_jobs_returns_failure_when_supervised_abort_fails() {
+	output=$(
+		(
+			zxfer_register_supervised_send_job "job-1" 101
+			zxfer_abort_background_job() {
+				return 1
+			}
+			set +e
+			zxfer_terminate_remaining_send_jobs
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+		)
+	)
+
+	assertContains "Supervised teardown should fail closed when aborting a tracked supervised job fails." \
+		"$output" "status=1"
+}
+
+test_zxfer_terminate_remaining_send_jobs_continues_after_supervised_abort_failures_and_preserves_first_message() {
+	queue_dir=$(mktemp -d "$TEST_TMPDIR/terminate_supervised_abort_queue.XXXXXX")
+	queue_path=$queue_dir/queue
+	: >"$queue_path"
+
+	output=$(
+		(
+			zxfer_register_supervised_send_job "job-1" 101
+			zxfer_register_supervised_send_job "job-2" 202
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_path=$queue_path
+			g_zfs_send_job_queue_dir=$queue_dir
+			zxfer_abort_background_job() {
+				printf 'abort:%s:%s\n' "$1" "$2"
+				if [ "$1" = "job-1" ]; then
+					g_zxfer_background_job_abort_failure_message="first supervised abort failed"
+					return 1
+				fi
+				return 0
+			}
+			set +e
+			zxfer_terminate_remaining_send_jobs
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
+			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
+			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
+			printf 'records=<%s>\n' "${g_zfs_send_job_supervisor_records:-}"
+			printf 'queue_open=%s\n' "${g_zfs_send_job_queue_open:-0}"
+			printf 'dir_exists=%s\n' "$([ -e "$queue_dir" ] && printf yes || printf no)"
+		)
+	)
+
+	assertContains "Supervised teardown should still attempt to abort the first tracked job when the aggregate pass fails." \
+		"$output" "abort:job-1:TERM"
+	assertContains "Supervised teardown should continue aborting later tracked jobs after an earlier abort failure." \
+		"$output" "abort:job-2:TERM"
+	assertContains "Supervised teardown should preserve the first abort failure status after the aggregate pass." \
+		"$output" "status=1"
+	assertContains "Supervised teardown should preserve the first abort failure message after the aggregate pass." \
+		"$output" "message=first supervised abort failed"
+	assertContains "Supervised teardown should keep only the failed job tracked after later jobs abort successfully." \
+		"$output" "count=1"
+	assertContains "Supervised teardown should preserve only the failed job pid after later jobs abort successfully." \
+		"$output" "pids=<101>"
+	assertContains "Supervised teardown should preserve only the failed supervisor record after later jobs abort successfully." \
+		"$output" "records=<job-1"
+	assertContains "Supervised teardown should still close the rolling queue after an aggregate abort failure." \
+		"$output" "queue_open=0"
+	assertContains "Supervised teardown should still remove the rolling queue directory after an aggregate abort failure." \
+		"$output" "dir_exists=no"
+}
+
+test_zxfer_terminate_remaining_send_jobs_kills_legacy_jobs_and_cleans_status_files() {
+	status_one="$TEST_TMPDIR/terminate_legacy_status_one"
+	status_two="$TEST_TMPDIR/terminate_legacy_status_two"
+	printf '%s\n' "status	0" >"$status_one"
+	printf '%s\n' "status	0" >"$status_two"
+
+	output=$(
+		(
+			g_zfs_send_job_pids="101 202"
+			g_zfs_send_job_records="101	$status_one
+202	$status_two"
+			g_count_zfs_send_jobs=2
+			zxfer_abort_cleanup_pid() {
+				printf 'abort:%s:%s\n' "$1" "$2"
+			}
+			zxfer_terminate_remaining_send_jobs
+			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
+			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
+			printf 'records=<%s>\n' "${g_zfs_send_job_records:-}"
+		)
+	)
+
+	assertContains "Legacy teardown should abort the first tracked PID through the validated cleanup helper path." \
+		"$output" "abort:101:TERM"
+	assertContains "Legacy teardown should abort later tracked PIDs through the validated cleanup helper path too." \
+		"$output" "abort:202:TERM"
+	assertContains "Legacy teardown should clear the tracked job count." \
+		"$output" "count=0"
+	assertContains "Legacy teardown should clear the tracked PID list." \
+		"$output" "pids=<>"
+	assertContains "Legacy teardown should clear the tracked status-file registry." \
+		"$output" "records=<>"
+	assertFalse "Legacy teardown should remove the first tracked status file." \
+		"[ -e '$status_one' ]"
+	assertFalse "Legacy teardown should remove the second tracked status file." \
+		"[ -e '$status_two' ]"
+}
+
+test_zxfer_terminate_remaining_send_jobs_preserves_first_abort_failure() {
+	status_one="$TEST_TMPDIR/terminate_abort_failure_one.status"
+	status_two="$TEST_TMPDIR/terminate_abort_failure_two.status"
+	: >"$status_one"
+	: >"$status_two"
+
+	output=$(
+		(
+			g_zfs_send_job_pids="101 202"
+			g_zfs_send_job_records="101	$status_one
+202	$status_two"
+			g_count_zfs_send_jobs=2
+			zxfer_abort_cleanup_pid() {
+				if [ "$1" = "101" ]; then
+					g_zxfer_cleanup_pid_abort_failure_message="first send-job abort failed"
+					return 1
+				fi
+				return 0
+			}
+			zxfer_close_send_job_completion_queue() {
+				printf '%s\n' "queue-closed"
+			}
+			zxfer_terminate_remaining_send_jobs
+			printf 'status=%s\n' "$?"
+			printf 'message=%s\n' "$g_zxfer_cleanup_pid_abort_failure_message"
+			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
+			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
+			printf 'records=<%s>\n' "${g_zfs_send_job_records:-}"
+		)
+	)
+
+	assertContains "Legacy send-job teardown should preserve the first validated cleanup abort failure status." \
+		"$output" "status=1"
+	assertContains "Legacy send-job teardown should preserve the first validated cleanup abort failure message." \
+		"$output" "message=first send-job abort failed"
+	assertContains "Legacy send-job teardown should still close the rolling completion queue after an abort failure." \
+		"$output" "queue-closed"
+	assertContains "Legacy send-job teardown should still clear the tracked state after an abort failure." \
+		"$output" "count=0"
+	assertContains "Legacy send-job teardown should still clear the tracked pid list after an abort failure." \
+		"$output" "pids=<>"
+	assertContains "Legacy send-job teardown should still clear the tracked pid-to-status-file registry after an abort failure." \
+		"$output" "records=<>"
+}
+
+test_zxfer_throw_send_job_cleanup_failure_uses_validated_abort_message() {
+	set +e
+	output=$(
+		(
+			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_throw_send_job_cleanup_failure
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Validated send-job cleanup failure helper should fail closed through zxfer_throw_error." \
+		1 "$status"
+	assertContains "Validated send-job cleanup failure helper should preserve the validated abort failure message." \
+		"$output" "validated cleanup abort failed"
+}
+
+test_wait_for_next_zfs_send_job_completion_surfaces_cleanup_abort_failures_on_parse_and_completion_write_paths() {
+	set +e
+	parse_output=$(
+		(
+			queue_file="$TEST_TMPDIR/wait_next_cleanup_abort_parse.queue"
+			printf '\n' >"$queue_file"
+			exec 8<"$queue_file"
+			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="101	$TEST_TMPDIR/other.status"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	parse_status=$?
+	completion_write_output=$(
+		(
+			status_file="$TEST_TMPDIR/wait_next_cleanup_abort_completion.status"
+			queue_file="$TEST_TMPDIR/wait_next_cleanup_abort_completion.queue"
+			printf '%s\n' "$status_file" >"$queue_file"
+			sh -c 'exit 0' &
+			job_pid=$!
+			exec 8<"$queue_file"
+			zxfer_find_send_job_pid_by_status_file() {
+				printf '%s\n' "$job_pid"
+			}
+			zxfer_get_send_job_completion_status() {
+				g_zxfer_send_job_status_file_exit_status=7
+				g_zxfer_send_job_status_file_report_failure="completion_write"
+			}
+			zxfer_unregister_send_job() {
+				g_count_zfs_send_jobs=0
+				g_zfs_send_job_pids=""
+			}
+			zxfer_close_send_job_completion_queue() {
+				:
+			}
+			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="record"
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_pids="$job_pid"
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	completion_write_status=$?
+	set -e
+
+	assertEquals "Rolling completion waits should fail closed when cleanup itself fails during malformed queue-record teardown." \
+		1 "$parse_status"
+	assertContains "Rolling completion waits should surface validated cleanup abort failures before the malformed queue-record error." \
+		"$parse_output" "validated cleanup abort failed"
+	assertEquals "Rolling completion waits should fail closed when cleanup itself fails during completion-write teardown." \
+		1 "$completion_write_status"
+	assertContains "Rolling completion waits should surface validated cleanup abort failures before the completion-write error." \
+		"$completion_write_output" "validated cleanup abort failed"
+}
+
+test_wait_for_next_zfs_send_job_completion_surfaces_cleanup_abort_failures_before_status_read_errors() {
+	set +e
+	output=$(
+		(
+			status_file="$TEST_TMPDIR/wait_next_cleanup_abort_status_read.status"
+			queue_file="$TEST_TMPDIR/wait_next_cleanup_abort_status_read.queue"
+			printf '%s\n' "$status_file" >"$queue_file"
+			sh -c 'exit 0' &
+			job_pid=$!
+			exec 8<"$queue_file"
+			zxfer_find_send_job_pid_by_status_file() {
+				printf '%s\n' "$job_pid"
+			}
+			zxfer_get_send_job_completion_status() {
+				return 1
+			}
+			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_records="record"
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_pids="$job_pid"
+			zxfer_wait_for_next_zfs_send_job_completion "unit"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Rolling completion waits should fail closed when cleanup itself fails during status-read teardown." \
+		1 "$status"
+	assertContains "Rolling completion waits should surface validated cleanup abort failures before the status-read error." \
+		"$output" "validated cleanup abort failed"
+}
+
+test_zxfer_wait_for_next_supervised_zfs_send_job_completion_succeeds_for_the_last_tracked_job() {
+	queue_file="$TEST_TMPDIR/supervised_wait_success.queue"
+	printf '%s\n' "job-1" >"$queue_file"
+
+	output=$(
+		(
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_success.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_zfs_send_job_queue_path=$queue_file
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_pids="101"
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=0
+				g_zxfer_background_job_wait_report_failure=""
+			}
+			zxfer_note_destination_dataset_exists() {
+				printf 'noted=%s\n' "$1"
+			}
+			zxfer_invalidate_destination_property_cache() {
+				printf 'invalidated=%s\n' "$1"
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
+			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
+			printf 'records=<%s>\n' "${g_zfs_send_job_supervisor_records:-}"
+			printf 'queue_open=%s\n' "${g_zfs_send_job_queue_open:-0}"
+		)
+	)
+
+	assertContains "Successful supervised rolling waits should repair the destination-existence cache for the completed destination dataset." \
+		"$output" "noted=backup/dst"
+	assertContains "Successful supervised rolling waits should invalidate the destination property cache for the completed destination dataset." \
+		"$output" "invalidated=backup/dst"
+	assertContains "Supervised rolling waits should decrement the tracked job count after a successful completion." \
+		"$output" "count=0"
+	assertContains "Supervised rolling waits should clear the tracked runner pid list after the last job completes." \
+		"$output" "pids=<>"
+	assertContains "Supervised rolling waits should clear the tracked supervisor registry after the last job completes." \
+		"$output" "records=<>"
+	assertContains "Supervised rolling waits should close the rolling queue after the last job completes." \
+		"$output" "queue_open=0"
+}
+
+test_zxfer_wait_for_supervised_zfs_send_jobs_batch_repairs_destination_state_on_success() {
+	output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			g_zfs_send_job_pids="101"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=0
+				g_zxfer_background_job_wait_report_failure=""
+			}
+			zxfer_note_destination_dataset_exists() {
+				printf 'noted=%s\n' "$1"
+			}
+			zxfer_invalidate_destination_property_cache() {
+				printf 'invalidated=%s\n' "$1"
+			}
+			zxfer_wait_for_supervised_zfs_send_jobs_batch
+			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
+			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
+			printf 'records=<%s>\n' "${g_zfs_send_job_supervisor_records:-}"
+		)
+	)
+
+	assertContains "Successful supervised batch waits should repair the destination-existence cache for the completed destination dataset." \
+		"$output" "noted=backup/dst"
+	assertContains "Successful supervised batch waits should invalidate the destination property cache for the completed destination dataset." \
+		"$output" "invalidated=backup/dst"
+	assertContains "Successful supervised batch waits should clear the tracked job count after draining the batch." \
+		"$output" "count=0"
+	assertContains "Successful supervised batch waits should clear the tracked runner pid list after draining the batch." \
+		"$output" "pids=<>"
+	assertContains "Successful supervised batch waits should clear the tracked supervisor registry after draining the batch." \
+		"$output" "records=<>"
+}
+
+test_zxfer_wait_for_next_supervised_zfs_send_job_completion_rejects_blank_notifications() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_blank.queue"
+			printf '\n' >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_blank.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Supervised rolling waits should fail closed when a completion notification is blank." \
+		1 "$status"
+	assertContains "Malformed supervised notifications should terminate remaining jobs before aborting." \
+		"$output" "terminated"
+	assertContains "Malformed supervised notifications should surface the documented parse failure." \
+		"$output" "Failed to parse a completed zfs send/receive job notification."
+}
+
+test_zxfer_wait_for_next_supervised_zfs_send_job_completion_reports_unknown_job_ids() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_unknown.queue"
+			printf '%s\n' "job-missing" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_unknown.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Supervised rolling waits should fail closed when a completed job id is not tracked." \
+		1 "$status"
+	assertContains "Unknown supervised completion ids should terminate remaining jobs before aborting." \
+		"$output" "terminated"
+	assertContains "Unknown supervised completion ids should surface the documented matching failure." \
+		"$output" "Failed to match a completed zfs send/receive job to a tracked PID."
+}
+
+test_zxfer_wait_for_next_supervised_zfs_send_job_completion_reports_completion_metadata_failures() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_metadata_fail.queue"
+			printf '%s\n' "job-1" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_metadata_fail.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			zxfer_wait_for_background_job() {
+				return 1
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Supervised rolling waits should fail closed when completion metadata cannot be read." \
+		1 "$status"
+	assertContains "Supervised metadata read failures should terminate remaining jobs before aborting." \
+		"$output" "terminated"
+	assertContains "Supervised metadata read failures should preserve the dedicated operator-facing error." \
+		"$output" "Failed to read zfs send/receive completion metadata for [tank/src@snap2 -> backup/dst]."
+}
+
+test_zxfer_wait_for_next_supervised_zfs_send_job_completion_reports_failure_markers_and_nonzero_exits() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	queue_write_output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_queue_write.queue"
+			printf '%s\n' "job-1" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_queue_write.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=7
+				g_zxfer_background_job_wait_report_failure="queue_write"
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	queue_write_status=$?
+	completion_write_output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_completion_write.queue"
+			printf '%s\n' "job-1" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_completion_write.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=7
+				g_zxfer_background_job_wait_report_failure="completion_write"
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	completion_write_status=$?
+	exit_output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_nonzero.queue"
+			printf '%s\n' "job-1" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_nonzero.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=9
+				g_zxfer_background_job_wait_report_failure=""
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	exit_status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Supervised rolling waits should fail closed when a job records a queue-write failure marker." \
+		1 "$queue_write_status"
+	assertContains "Queue-write failures should preserve the publish-failure error." \
+		"$queue_write_output" "Failed to publish zfs send/receive background completion for [tank/src@snap2 -> backup/dst] (PID 101, exit 7)."
+	assertEquals "Supervised rolling waits should fail closed when a job records a completion-write failure marker." \
+		1 "$completion_write_status"
+	assertContains "Completion-write failures should preserve the completion-report error." \
+		"$completion_write_output" "Failed to report zfs send/receive background completion for [tank/src@snap2 -> backup/dst] (PID 101, exit 7)."
+	assertEquals "Supervised rolling waits should fail closed when the completed job exits nonzero." \
+		1 "$exit_status"
+	assertContains "Nonzero supervised job exits should preserve the operator-facing failure." \
+		"$exit_output" "zfs send/receive job failed for [tank/src@snap2 -> backup/dst] (PID 101, exit 9)."
+}
+
+test_zxfer_wait_for_next_supervised_zfs_send_job_completion_falls_back_when_queue_is_unavailable() {
+	output=$(
+		(
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_queue_open=0
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_wait_for_zfs_send_jobs() {
+				printf 'fallback=%s\n' "$1"
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+
+	assertContains "Supervised rolling waits should fall back to the batch wait path when the rolling queue is unavailable." \
+		"$output" "fallback=unit"
+}
+
+test_zxfer_wait_for_next_supervised_zfs_send_job_completion_falls_back_to_legacy_waits_on_queue_read_failure() {
+	queue_dir="$TEST_TMPDIR/supervised_wait_read_fail.dir"
+	queue_file="$queue_dir/completion.queue"
+	mkdir -p "$queue_dir"
+	: >"$queue_file"
+
+	output=$(
+		(
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_read_fail.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_zfs_send_job_queue_path=$queue_file
+			g_zfs_send_job_queue_dir=$queue_dir
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_wait_for_zfs_send_jobs_legacy() {
+				printf 'legacy=%s\n' "$1"
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+			printf 'unavailable=%s\n' "${g_zfs_send_job_queue_unavailable:-0}"
+		)
+	)
+
+	assertContains "Supervised rolling waits should fall back to the legacy wait path when the queue reader hits EOF." \
+		"$output" "legacy=unit"
+	assertContains "Queue reader failures should mark the rolling queue unavailable." \
+		"$output" "unavailable=1"
+}
+
+test_zxfer_wait_for_next_supervised_zfs_send_job_completion_reports_completion_write_failed_notifications_and_abort_failures() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	record_output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_completion_marker.queue"
+			printf '%s\n' "completion_write_failed	job-1	bad" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_completion_marker.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=0
+				g_zxfer_background_job_wait_report_failure=""
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	record_status=$?
+	abort_failure_output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_abort_failure.queue"
+			printf '\n' >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_abort_failure.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101"
+			g_zxfer_background_job_abort_failure_message="abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	abort_failure_status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Supervised rolling waits should fail closed when the runner reports a completion-write failure marker." \
+		1 "$record_status"
+	assertContains "Completion-write failure notifications should terminate remaining jobs before aborting." \
+		"$record_output" "terminated"
+	assertContains "Completion-write failure notifications should normalize malformed marker statuses to 125." \
+		"$record_output" "Failed to record zfs send/receive background completion for [tank/src@snap2 -> backup/dst] (PID 101, exit 125)."
+	assertEquals "Supervised rolling waits should surface supervisor abort failures when cleanup itself fails." \
+		1 "$abort_failure_status"
+	assertContains "Supervisor abort failures should preserve the dedicated abort failure message." \
+		"$abort_failure_output" "abort failed"
+}
+
+test_zxfer_wait_for_next_supervised_zfs_send_job_completion_surfaces_cleanup_abort_failures_before_unknown_job_errors() {
+	set +e
+	output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_unknown_abort_failure.queue"
+			printf '%s\n' "job-missing" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_unknown_abort_failure.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101"
+			g_zxfer_background_job_abort_failure_message="supervised cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Supervised rolling waits should surface supervisor cleanup-abort failures before unknown-job errors." \
+		1 "$status"
+	assertContains "Supervised rolling waits should preserve the supervisor cleanup-abort failure message before the unknown-job error." \
+		"$output" "supervised cleanup abort failed"
+}
+
+test_zxfer_wait_for_next_supervised_zfs_send_job_completion_surfaces_cleanup_abort_failures_before_metadata_and_failure_markers() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	metadata_output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_metadata_abort_failure.queue"
+			printf '%s\n' "job-1" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_metadata_abort_failure.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			zxfer_wait_for_background_job() {
+				return 1
+			}
+			g_zxfer_background_job_abort_failure_message="supervised cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	metadata_status=$?
+	record_output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_completion_marker_abort_failure.queue"
+			printf '%s\n' "completion_write_failed	job-1	7" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_completion_marker_abort_failure.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=0
+				g_zxfer_background_job_wait_report_failure=""
+			}
+			g_zxfer_background_job_abort_failure_message="supervised cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	record_status=$?
+	queue_write_output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_queue_write_abort_failure.queue"
+			printf '%s\n' "job-1" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_queue_write_abort_failure.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=7
+				g_zxfer_background_job_wait_report_failure="queue_write"
+			}
+			g_zxfer_background_job_abort_failure_message="supervised cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	queue_write_status=$?
+	completion_write_output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_completion_write_abort_failure.queue"
+			printf '%s\n' "job-1" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_completion_write_abort_failure.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=7
+				g_zxfer_background_job_wait_report_failure="completion_write"
+			}
+			g_zxfer_background_job_abort_failure_message="supervised cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	completion_write_status=$?
+	exit_output=$(
+		(
+			queue_file="$TEST_TMPDIR/supervised_wait_nonzero_abort_failure.queue"
+			printf '%s\n' "job-1" >"$queue_file"
+			exec 8<"$queue_file"
+			exec 9>"$TEST_TMPDIR/supervised_wait_nonzero_abort_failure.writer"
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=9
+				g_zxfer_background_job_wait_report_failure=""
+			}
+			g_zxfer_background_job_abort_failure_message="supervised cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
+		)
+	)
+	exit_status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Supervised rolling waits should surface supervisor cleanup-abort failures before metadata-read errors." \
+		1 "$metadata_status"
+	assertContains "Supervised rolling waits should preserve the supervisor cleanup-abort failure message before metadata-read errors." \
+		"$metadata_output" "supervised cleanup abort failed"
+	assertEquals "Supervised rolling waits should surface supervisor cleanup-abort failures before completion-write marker errors." \
+		1 "$record_status"
+	assertContains "Supervised rolling waits should preserve the supervisor cleanup-abort failure message before completion-write marker errors." \
+		"$record_output" "supervised cleanup abort failed"
+	assertEquals "Supervised rolling waits should surface supervisor cleanup-abort failures before queue-write marker errors." \
+		1 "$queue_write_status"
+	assertContains "Supervised rolling waits should preserve the supervisor cleanup-abort failure message before queue-write marker errors." \
+		"$queue_write_output" "supervised cleanup abort failed"
+	assertEquals "Supervised rolling waits should surface supervisor cleanup-abort failures before completion-report errors." \
+		1 "$completion_write_status"
+	assertContains "Supervised rolling waits should preserve the supervisor cleanup-abort failure message before completion-report errors." \
+		"$completion_write_output" "supervised cleanup abort failed"
+	assertEquals "Supervised rolling waits should surface supervisor cleanup-abort failures before nonzero-exit errors." \
+		1 "$exit_status"
+	assertContains "Supervised rolling waits should preserve the supervisor cleanup-abort failure message before nonzero-exit errors." \
+		"$exit_output" "supervised cleanup abort failed"
 }
 
 test_wait_for_zfs_send_jobs_legacy_reports_missing_status_file_records() {
@@ -1624,11 +3236,8 @@ test_zxfer_wait_for_zfs_send_jobs_legacy_terminates_remaining_jobs_on_failure() 
 			first_pid=$!
 			sh -c 'exit 0' &
 			second_pid=$!
-			kill() {
-				printf 'killed:%s\n' "$1"
-			}
-			zxfer_unregister_cleanup_pid() {
-				printf 'cleanup:%s\n' "$1"
+			zxfer_abort_cleanup_pid() {
+				printf 'aborted:%s:%s\n' "$1" "$2"
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
@@ -1646,9 +3255,589 @@ $second_pid	$second_status_file"
 	assertEquals "Legacy waits should fail closed when one background job exits nonzero." \
 		1 "$status"
 	assertContains "Legacy waits should terminate the remaining tracked jobs after the first failure." \
-		"$output" "killed:"
+		"$output" "aborted:"
 	assertContains "Legacy waits should preserve the failing job exit status in the operator-facing error." \
 		"$output" "zfs send/receive job failed (PID "
+}
+
+test_zxfer_wait_for_zfs_send_jobs_legacy_surfaces_cleanup_abort_failures_before_record_and_completion_errors() {
+	set +e
+	record_output=$(
+		(
+			sh -c 'exit 0' &
+			job_pid=$!
+			g_zxfer_runtime_artifact_read_result="stale-status"
+			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_pids="$job_pid"
+			g_zfs_send_job_records="999	$TEST_TMPDIR/other.status"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_zfs_send_jobs_legacy "unit"
+		)
+	)
+	record_status=$?
+	completion_write_output=$(
+		(
+			status_file="$TEST_TMPDIR/legacy_cleanup_abort_completion.status"
+			cat >"$status_file" <<'EOF'
+status	0
+report_failure	completion_write
+EOF
+			sh -c 'exit 0' &
+			job_pid=$!
+			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_pids="$job_pid"
+			g_zfs_send_job_records="$job_pid	$status_file"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_zfs_send_jobs_legacy "unit"
+		)
+	)
+	completion_write_status=$?
+	set -e
+
+	assertEquals "Legacy waits should fail closed when cleanup itself fails while handling a missing status-file record." \
+		1 "$record_status"
+	assertContains "Legacy waits should surface validated cleanup abort failures before the missing-record error." \
+		"$record_output" "validated cleanup abort failed"
+	assertEquals "Legacy waits should fail closed when cleanup itself fails while handling a completion-write marker." \
+		1 "$completion_write_status"
+	assertContains "Legacy waits should surface validated cleanup abort failures before the completion-write error." \
+		"$completion_write_output" "validated cleanup abort failed"
+}
+
+test_zxfer_wait_for_zfs_send_jobs_legacy_surfaces_cleanup_abort_failures_before_status_read_errors() {
+	set +e
+	output=$(
+		(
+			status_file="$TEST_TMPDIR/legacy_cleanup_abort_status_read.status"
+			printf 'status\t0\n' >"$status_file"
+			sh -c 'exit 0' &
+			job_pid=$!
+			zxfer_get_send_job_completion_status() {
+				return 1
+			}
+			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_pids="$job_pid"
+			g_zfs_send_job_records="$job_pid	$status_file"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_zfs_send_jobs_legacy "unit"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Legacy waits should fail closed when cleanup itself fails during status-read teardown." \
+		1 "$status"
+	assertContains "Legacy waits should surface validated cleanup abort failures before the status-read error." \
+		"$output" "validated cleanup abort failed"
+}
+
+test_zxfer_wait_for_zfs_send_jobs_legacy_surfaces_cleanup_abort_failures_before_queue_write_and_nonzero_errors() {
+	set +e
+	queue_write_output=$(
+		(
+			status_file="$TEST_TMPDIR/legacy_cleanup_abort_queue_write.status"
+			cat >"$status_file" <<'EOF'
+status	0
+report_failure	queue_write
+EOF
+			sh -c 'exit 0' &
+			job_pid=$!
+			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_pids="$job_pid"
+			g_zfs_send_job_records="$job_pid	$status_file"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_zfs_send_jobs_legacy "unit"
+		)
+	)
+	queue_write_status=$?
+	exit_output=$(
+		(
+			status_file="$TEST_TMPDIR/legacy_cleanup_abort_nonzero.status"
+			printf 'status\t9\n' >"$status_file"
+			sh -c 'exit 9' &
+			job_pid=$!
+			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_pids="$job_pid"
+			g_zfs_send_job_records="$job_pid	$status_file"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_zfs_send_jobs_legacy "unit"
+		)
+	)
+	exit_status=$?
+	set -e
+
+	assertEquals "Legacy waits should surface cleanup-abort failures before queue-write marker errors." \
+		1 "$queue_write_status"
+	assertContains "Legacy waits should preserve the validated cleanup abort failure before the queue-write marker error." \
+		"$queue_write_output" "validated cleanup abort failed"
+	assertEquals "Legacy waits should surface cleanup-abort failures before nonzero-exit errors." \
+		1 "$exit_status"
+	assertContains "Legacy waits should preserve the validated cleanup abort failure before the nonzero-exit error." \
+		"$exit_output" "validated cleanup abort failed"
+}
+
+test_zxfer_wait_for_supervised_zfs_send_jobs_batch_collects_ids_and_reports_failures() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	collect_output=$(
+		(
+			zxfer_collect_supervised_send_job_ids() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_supervised_zfs_send_jobs_batch
+		)
+	)
+	collect_status=$?
+	wait_output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			g_zfs_send_job_pids="101"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_background_job() {
+				return 1
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_supervised_zfs_send_jobs_batch
+		)
+	)
+	wait_status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Batch supervised waits should fail closed when they cannot collect the tracked job ids." \
+		1 "$collect_status"
+	assertContains "Batch supervised waits should preserve the collection failure message." \
+		"$collect_output" "Failed to collect supervised send/receive job ids."
+	assertEquals "Batch supervised waits should fail closed when a tracked job's completion metadata cannot be read." \
+		1 "$wait_status"
+	assertContains "Batch supervised waits should terminate remaining jobs before aborting on metadata failures." \
+		"$wait_output" "terminated"
+	assertContains "Batch supervised waits should preserve the metadata-read failure message." \
+		"$wait_output" "Failed to read zfs send/receive completion metadata for [tank/src@snap2 -> backup/dst]."
+}
+
+test_zxfer_wait_for_supervised_zfs_send_jobs_batch_reports_failure_markers_and_nonzero_exits() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	queue_write_output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			g_zfs_send_job_pids="101"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=7
+				g_zxfer_background_job_wait_report_failure="queue_write"
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_supervised_zfs_send_jobs_batch
+		)
+	)
+	queue_write_status=$?
+	completion_write_output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			g_zfs_send_job_pids="101"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=7
+				g_zxfer_background_job_wait_report_failure="completion_write"
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_supervised_zfs_send_jobs_batch
+		)
+	)
+	completion_write_status=$?
+	exit_output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101	tank/src@snap2	backup/dst	"
+			g_zfs_send_job_pids="101"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=9
+				g_zxfer_background_job_wait_report_failure=""
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_supervised_zfs_send_jobs_batch
+		)
+	)
+	exit_status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Batch supervised waits should fail closed when a job reports a queue-write failure marker." \
+		1 "$queue_write_status"
+	assertContains "Batch queue-write failures should preserve the publish failure message." \
+		"$queue_write_output" "Failed to publish zfs send/receive background completion for [tank/src@snap2 -> backup/dst] (PID 101, exit 7)."
+	assertEquals "Batch supervised waits should fail closed when a job reports a completion-write failure marker." \
+		1 "$completion_write_status"
+	assertContains "Batch completion-write failures should preserve the completion report failure message." \
+		"$completion_write_output" "Failed to report zfs send/receive background completion for [tank/src@snap2 -> backup/dst] (PID 101, exit 7)."
+	assertEquals "Batch supervised waits should fail closed when a job exits nonzero." \
+		1 "$exit_status"
+	assertContains "Batch nonzero exits should preserve the operator-facing failure." \
+		"$exit_output" "zfs send/receive job failed for [tank/src@snap2 -> backup/dst] (PID 101, exit 9)."
+}
+
+test_zxfer_wait_for_supervised_zfs_send_jobs_batch_surfaces_cleanup_abort_failures_before_failure_markers() {
+	set +e
+	queue_write_output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101"
+			g_zfs_send_job_pids="101"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=7
+				g_zxfer_background_job_wait_report_failure="queue_write"
+			}
+			g_zxfer_background_job_abort_failure_message="supervised cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_supervised_zfs_send_jobs_batch
+		)
+	)
+	queue_write_status=$?
+	exit_output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101"
+			g_zfs_send_job_pids="101"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=9
+				g_zxfer_background_job_wait_report_failure=""
+			}
+			g_zxfer_background_job_abort_failure_message="supervised cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_supervised_zfs_send_jobs_batch
+		)
+	)
+	exit_status=$?
+	set -e
+
+	assertEquals "Batch supervised waits should surface supervisor cleanup-abort failures before queue-write marker errors." \
+		1 "$queue_write_status"
+	assertContains "Batch supervised waits should preserve the supervisor cleanup-abort failure message before the queue-write marker error." \
+		"$queue_write_output" "supervised cleanup abort failed"
+	assertEquals "Batch supervised waits should surface supervisor cleanup-abort failures before nonzero-exit errors." \
+		1 "$exit_status"
+	assertContains "Batch supervised waits should preserve the supervisor cleanup-abort failure message before the nonzero-exit error." \
+		"$exit_output" "supervised cleanup abort failed"
+}
+
+test_zxfer_wait_for_supervised_zfs_send_jobs_batch_surfaces_cleanup_abort_failures_before_metadata_and_completion_report_errors() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	metadata_output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101"
+			g_zfs_send_job_pids="101"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_background_job() {
+				return 1
+			}
+			g_zxfer_background_job_abort_failure_message="supervised cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_supervised_zfs_send_jobs_batch
+		)
+	)
+	metadata_status=$?
+	completion_write_output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101"
+			g_zfs_send_job_pids="101"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_background_job() {
+				g_zxfer_background_job_wait_exit_status=7
+				g_zxfer_background_job_wait_report_failure="completion_write"
+			}
+			g_zxfer_background_job_abort_failure_message="supervised cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wait_for_supervised_zfs_send_jobs_batch
+		)
+	)
+	completion_write_status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Batch supervised waits should surface supervisor cleanup-abort failures before metadata-read errors." \
+		1 "$metadata_status"
+	assertContains "Batch supervised waits should preserve the supervisor cleanup-abort failure message before metadata-read errors." \
+		"$metadata_output" "supervised cleanup abort failed"
+	assertEquals "Batch supervised waits should surface supervisor cleanup-abort failures before completion-report errors." \
+		1 "$completion_write_status"
+	assertContains "Batch supervised waits should preserve the supervisor cleanup-abort failure message before completion-report errors." \
+		"$completion_write_output" "supervised cleanup abort failed"
+}
+
+test_zxfer_wait_for_zfs_send_jobs_dispatches_supervised_and_legacy_queue_paths() {
+	output=$(
+		(
+			g_zfs_send_job_pids="101 202"
+			g_zfs_send_job_supervisor_records="job-1	101
+job-2	202"
+			g_zfs_send_job_queue_open=1
+			g_count_zfs_send_jobs=2
+			zxfer_wait_for_next_supervised_zfs_send_job_completion() {
+				printf 'supervised_next:%s\n' "$1"
+				g_count_zfs_send_jobs=$((g_count_zfs_send_jobs - 1))
+			}
+			zxfer_close_send_job_completion_queue() {
+				printf 'closed_supervised\n'
+				g_zfs_send_job_queue_open=0
+			}
+			zxfer_wait_for_zfs_send_jobs "unit"
+			g_zfs_send_job_pids="303 404"
+			g_zfs_send_job_supervisor_records=""
+			g_zfs_send_job_records="303	$TEST_TMPDIR/legacy.303
+404	$TEST_TMPDIR/legacy.404"
+			g_zfs_send_job_queue_open=1
+			g_count_zfs_send_jobs=2
+			zxfer_wait_for_next_zfs_send_job_completion() {
+				printf 'legacy_next:%s\n' "$1"
+				g_count_zfs_send_jobs=$((g_count_zfs_send_jobs - 1))
+			}
+			zxfer_close_send_job_completion_queue() {
+				printf 'closed_legacy\n'
+				g_zfs_send_job_queue_open=0
+			}
+			zxfer_wait_for_zfs_send_jobs "unit"
+			g_zfs_send_job_pids="505"
+			g_zfs_send_job_supervisor_records="job-5	505"
+			g_zfs_send_job_queue_open=0
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_supervised_zfs_send_jobs_batch() {
+				printf 'supervised_batch\n'
+			}
+			zxfer_wait_for_zfs_send_jobs "unit"
+		)
+	)
+
+	assertContains "Queued supervised waits should drain through the rolling single-job helper." \
+		"$output" "supervised_next:"
+	assertContains "Queued supervised waits should close the queue after draining." \
+		"$output" "closed_supervised"
+	assertContains "Queued legacy waits should drain through the rolling legacy helper." \
+		"$output" "legacy_next:"
+	assertContains "Queued legacy waits should close the queue after draining." \
+		"$output" "closed_legacy"
+	assertContains "Non-queued supervised waits should fall back to the batch helper." \
+		"$output" "supervised_batch"
+}
+
+test_zxfer_wait_for_zfs_send_jobs_dispatches_to_legacy_helper_when_queue_is_closed() {
+	output=$(
+		(
+			g_zfs_send_job_queue_open=0
+			g_zfs_send_job_pids="101"
+			g_zfs_send_job_supervisor_records=""
+			zxfer_wait_for_zfs_send_jobs_legacy() {
+				printf 'legacy:%s\n' "$1"
+			}
+			zxfer_wait_for_zfs_send_jobs "unit"
+		)
+	)
+
+	assertContains "Non-queued legacy waits should dispatch through the legacy batch helper." \
+		"$output" "legacy:unit"
+}
+
+test_zxfer_wait_for_zfs_send_jobs_legacy_clears_state_and_closes_queue_on_success() {
+	queue_dir=$(mktemp -d "$TEST_TMPDIR/legacy_wait_success_queue.XXXXXX")
+	queue_path=$queue_dir/queue
+	: >"$queue_path"
+
+	output=$(
+		(
+			sh -c 'exit 0' &
+			job_pid=$!
+			g_zfs_send_job_pids=$job_pid
+			g_zfs_send_job_records=""
+			g_count_zfs_send_jobs=1
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_path=$queue_path
+			g_zfs_send_job_queue_dir=$queue_dir
+			zxfer_close_send_job_completion_queue() {
+				printf 'closed\n'
+				g_zfs_send_job_queue_open=0
+			}
+			zxfer_wait_for_zfs_send_jobs_legacy "unit"
+			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
+			printf 'records=<%s>\n' "${g_zfs_send_job_records:-}"
+			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
+			printf 'queue_open=%s\n' "${g_zfs_send_job_queue_open:-0}"
+		)
+	)
+
+	assertContains "Legacy wait success should clear the tracked pid list." \
+		"$output" "pids=<>"
+	assertContains "Legacy wait success should clear the tracked status-file records." \
+		"$output" "records=<>"
+	assertContains "Legacy wait success should clear the tracked job count." \
+		"$output" "count=0"
+	assertContains "Legacy wait success should close the rolling queue state." \
+		"$output" "closed"
+	assertContains "Legacy wait success should leave the queue marked closed." \
+		"$output" "queue_open=0"
+}
+
+test_zxfer_wait_for_zfs_send_jobs_legacy_dispatches_to_supervised_batch_and_reports_status_read_failures() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	supervised_output=$(
+		(
+			g_zfs_send_job_supervisor_records="job-1	101"
+			zxfer_wait_for_supervised_zfs_send_jobs_batch() {
+				printf '%s\n' "supervised-batch"
+			}
+			zxfer_wait_for_zfs_send_jobs_legacy "unit"
+		)
+	)
+	supervised_status=$?
+	read_failure_output=$(
+		(
+			status_file="$TEST_TMPDIR/legacy_status_read_failure.status"
+			printf 'status\t0\n' >"$status_file"
+			sh -c 'exit 0' &
+			job_pid=$!
+			zxfer_get_send_job_completion_status() {
+				return 1
+			}
+			zxfer_terminate_remaining_send_jobs() {
+				printf '%s\n' "terminated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			g_zfs_send_job_pids="$job_pid"
+			g_zfs_send_job_records="$job_pid	$status_file"
+			g_count_zfs_send_jobs=1
+			zxfer_wait_for_zfs_send_jobs_legacy "unit"
+		)
+	)
+	read_failure_status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Legacy wait dispatch should defer to the supervised batch path when supervised records are tracked." \
+		0 "$supervised_status"
+	assertContains "Legacy wait dispatch should call the supervised batch wait helper when supervised records are tracked." \
+		"$supervised_output" "supervised-batch"
+	assertEquals "Legacy waits should fail closed when a tracked status file cannot be read." \
+		1 "$read_failure_status"
+	assertContains "Legacy status read failures should terminate remaining jobs before aborting." \
+		"$read_failure_output" "terminated"
+	assertContains "Legacy status read failures should preserve the documented operator-facing error." \
+		"$read_failure_output" "Failed to read zfs send/receive job status file ["
 }
 
 test_zxfer_progress_passthrough_falls_back_when_mktemp_fails() {
@@ -1721,6 +3910,101 @@ test_zxfer_progress_passthrough_falls_back_when_chmod_fails() {
 	assertEquals "chmod failure fallback should preserve stdin." "payload" "$output"
 	assertContains "chmod failure fallback should log the degraded path." \
 		"$(cat "$log")" "Unable to secure permissions"
+}
+
+test_zxfer_progress_passthrough_falls_back_when_cleanup_wrapper_resolution_fails() {
+	log="$TEST_TMPDIR/progress_wrapper_missing.log"
+
+	output=$(
+		printf 'payload\n' | (
+			zxfer_echoV() {
+				printf '%s\n' "$1" >>"$log"
+			}
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				return 1
+			}
+			zxfer_progress_passthrough "cat >/dev/null"
+		)
+	)
+	status=$?
+
+	assertEquals "Cleanup-wrapper lookup failures should fall back to a plain passthrough." \
+		0 "$status"
+	assertEquals "Cleanup-wrapper lookup failure fallback should preserve stdin." "payload" "$output"
+	assertContains "Cleanup-wrapper lookup failure fallback should log the degraded path." \
+		"$(cat "$log")" "Unable to resolve the cleanup wrapper for the progress dialog"
+}
+
+test_zxfer_progress_passthrough_falls_back_when_cleanup_registration_fails() {
+	log="$TEST_TMPDIR/progress_register_fail.log"
+	abort_log="$TEST_TMPDIR/progress_register_fail.abort.log"
+
+	output=$(
+		printf 'payload\n' | (
+			zxfer_echoV() {
+				printf '%s\n' "$1" >>"$log"
+			}
+			zxfer_register_cleanup_pid() {
+				return 1
+			}
+			zxfer_abort_direct_child_pid() {
+				printf 'abort:%s:%s:%s\n' "$1" "$2" "$3" >>"$abort_log"
+				kill -s TERM "$1" 2>/dev/null || :
+				wait "$1" 2>/dev/null || :
+				return 0
+			}
+			zxfer_progress_passthrough "sleep 30"
+		)
+	)
+	status=$?
+
+	assertEquals "Cleanup-registration failures should fall back to a plain passthrough when the spawned progress helper tree is reaped successfully." \
+		0 "$status"
+	assertEquals "Cleanup-registration failure fallback should preserve stdin." "payload" "$output"
+	assertContains "Cleanup-registration failure fallback should log the degraded path." \
+		"$(cat "$log")" "Unable to register validated cleanup metadata for the progress dialog"
+	assertContains "Cleanup-registration failure fallback should route teardown through the validated direct-child abort helper." \
+		"$(cat "$abort_log")" "abort:"
+	assertContains "Cleanup-registration failure fallback should preserve the progress-helper purpose when invoking the validated direct-child abort helper." \
+		"$(cat "$abort_log")" "progress dialog helper"
+}
+
+test_zxfer_progress_passthrough_fails_when_cleanup_registration_abort_fails() {
+	abort_log="$TEST_TMPDIR/progress_register_abort_fail.log"
+	l_restore_errexit=0
+
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+
+	set +e
+	output=$(
+		printf 'payload\n' | (
+			zxfer_register_cleanup_pid() {
+				return 1
+			}
+			zxfer_abort_direct_child_pid() {
+				printf 'abort:%s:%s:%s\n' "$1" "$2" "$3" >>"$abort_log"
+				kill -s TERM "$1" 2>/dev/null || :
+				wait "$1" 2>/dev/null || :
+				return 1
+			}
+			zxfer_progress_passthrough "sleep 30"
+		)
+	)
+	status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "Progress passthrough should fail closed when cleanup-registration recovery cannot tear down the spawned helper." \
+		1 "$status"
+	assertEquals "Progress passthrough should not emit fallback output when cleanup-registration recovery itself fails." \
+		"" "$output"
+	assertContains "Cleanup-registration recovery failures should still route teardown through the validated direct-child abort helper." \
+		"$(cat "$abort_log")" "progress dialog helper"
 }
 
 test_zxfer_progress_passthrough_logs_progress_command_failures() {
@@ -2110,59 +4394,60 @@ test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
 		EXEC_LOG="$log"
 		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
 		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
-		zxfer_run_background_pipeline() {
-			printf '%s\n' "$2" >>"$EXEC_LOG"
-			printf '0\n' >"$3"
-			printf '%s\n' "$3" >&9
-			exit 0
+		zxfer_open_send_job_completion_queue() {
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			return 0
+		}
+		zxfer_spawn_supervised_background_job() {
+			printf 'spawn:%s|notify=%s\n' "$3" "${6:-}" >>"$EXEC_LOG"
+			g_zxfer_background_job_last_id="job-1"
+			g_zxfer_background_job_last_runner_pid=111
 		}
 		g_option_j_jobs=3
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-		# shellcheck disable=SC2086
-		set -- $g_zfs_send_job_pids
-		wait "$@"
-		printf 'count=%s\n' "$g_count_zfs_send_jobs" >>"$EXEC_LOG"
-		printf 'pids=%s\n' "$g_zfs_send_job_pids" >>"$EXEC_LOG"
+		{
+			printf 'count=%s\n' "$g_count_zfs_send_jobs"
+			printf 'pids=%s\n' "$g_zfs_send_job_pids"
+		} >>"$EXEC_LOG"
+		printf 'records=%s\n' "$(printf '%s\n' "$g_zfs_send_job_supervisor_records" | sed 's/	/:/g')" >>"$EXEC_LOG"
 	)
 
 	assertContains "Background send/receive should execute the composed pipeline." \
-		"$(cat "$log")" "sendcmd | recvcmd"
+		"$(cat "$log")" "spawn:sendcmd | recvcmd|notify=9"
 	assertContains "Background send/receive should increment the job count." \
 		"$(cat "$log")" "count=1"
 	assertContains "Background send/receive should track the spawned PID." \
-		"$(cat "$log")" "pids="
+		"$(cat "$log")" "pids=111"
+	assertContains "Background send/receive should track the supervised job id alongside dataset metadata for later conflict checks and failure reporting." \
+		"$(cat "$log")" "records=job-1:111:tank/src@snap2:backup/dst:"
 }
 
-test_zfs_send_receive_uses_current_shell_status_file_result_for_rolling_pool() {
-	log="$TEST_TMPDIR/background_pipeline_current_shell_status.log"
+test_zfs_send_receive_passes_queue_notify_fd_to_supervised_background_job_when_rolling_pool_is_open() {
+	log="$TEST_TMPDIR/background_pipeline_notify_fd.log"
 	: >"$log"
 
 	(
 		EXEC_LOG="$log"
 		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
 		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
-		zxfer_get_temp_file() {
-			g_zxfer_temp_file_result="$TEST_TMPDIR/current_shell_status.txt"
-			: >"$g_zxfer_temp_file_result"
-			printf '%s\n' "$TEST_TMPDIR/stdout_only_status.txt"
+		zxfer_open_send_job_completion_queue() {
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			return 0
 		}
-		zxfer_run_background_pipeline() {
-			printf 'status=%s\n' "$3" >>"$EXEC_LOG"
-			printf '0\n' >"$3"
-			printf '%s\n' "$3" >&9
-			exit 0
+		zxfer_spawn_supervised_background_job() {
+			printf 'notify=%s queue_open=%s writer_open=%s\n' \
+				"${6:-}" "${g_zfs_send_job_queue_open:-0}" "${g_zfs_send_job_queue_writer_open:-0}" >>"$EXEC_LOG"
+			g_zxfer_background_job_last_id="job-1"
+			g_zxfer_background_job_last_runner_pid=111
 		}
 		g_option_j_jobs=2
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-		# shellcheck disable=SC2086
-		set -- $g_zfs_send_job_pids
-		wait "$@"
 	)
 
-	assertContains "Rolling background scheduling should consume the current-shell temp-file result, not stdout from the helper." \
-		"$(cat "$log")" "status=$TEST_TMPDIR/current_shell_status.txt"
-	assertNotContains "Rolling background scheduling should ignore stdout-only temp-file helper output." \
-		"$(cat "$log")" "$TEST_TMPDIR/stdout_only_status.txt"
+	assertEquals "Rolling background scheduling should pass the queue writer fd through the supervisor spawn path." \
+		"notify=9 queue_open=1 writer_open=1" "$(cat "$log")"
 }
 
 test_zfs_send_receive_appends_multiple_background_job_pids_and_logs_force_flag() {
@@ -2171,6 +4456,7 @@ test_zfs_send_receive_appends_multiple_background_job_pids_and_logs_force_flag()
 
 	(
 		EXEC_LOG="$log"
+		l_spawn_count=0
 		zxfer_get_send_command() {
 			printf '%s\n' "sendcmd-$2"
 		}
@@ -2180,26 +4466,29 @@ test_zfs_send_receive_appends_multiple_background_job_pids_and_logs_force_flag()
 		zxfer_echov() {
 			printf 'verbose:%s\n' "$*" >>"$EXEC_LOG"
 		}
-		zxfer_run_background_pipeline() {
-			printf '%s\n' "$2" >>"$EXEC_LOG"
-			printf '0\n' >"$3"
-			printf '%s\n' "$3" >&9
-			exit 0
+		zxfer_open_send_job_completion_queue() {
+			return 1
+		}
+		zxfer_spawn_supervised_background_job() {
+			l_spawn_count=$((l_spawn_count + 1))
+			printf 'spawn:%s\n' "$3" >>"$EXEC_LOG"
+			g_zxfer_background_job_last_id="job-$l_spawn_count"
+			g_zxfer_background_job_last_runner_pid=$((100 + l_spawn_count))
 		}
 		g_option_j_jobs=3
 		g_option_F_force_rollback="-F"
 		g_option_v_verbose=1
-		zxfer_zfs_send_receive "tank/src@snap0" "tank/src@snap1" "backup/dst" "1"
-		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-		# shellcheck disable=SC2086
-		set -- $g_zfs_send_job_pids
-		wait "$@"
-		printf 'count=%s\n' "$g_count_zfs_send_jobs" >>"$EXEC_LOG"
-		printf 'pids=%s\n' "$g_zfs_send_job_pids" >>"$EXEC_LOG"
+		zxfer_zfs_send_receive "tank/src@snap0" "tank/src@snap1" "backup/dst-one" "1"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst-two" "1"
+		{
+			printf 'count=%s\n' "$g_count_zfs_send_jobs"
+			printf 'pids=%s\n' "$g_zfs_send_job_pids"
+		} >>"$EXEC_LOG"
+		printf 'records=%s\n' "$(printf '%s\n' "$g_zfs_send_job_supervisor_records" | sed 's/	/:/g')" >>"$EXEC_LOG"
 	)
 
 	assertContains "Background send/receive should log when the receive-side force flag is active." \
-		"$(cat "$log")" "verbose:Receive-side force flag (-F) is active for destination [backup/dst]."
+		"$(cat "$log")" "verbose:Receive-side force flag (-F) is active for destination [backup/dst-one]."
 	assertContains "The first background transfer should still execute its composed pipeline." \
 		"$(cat "$log")" "sendcmd-tank/src@snap1 | recvcmd"
 	assertContains "The second background transfer should also execute its composed pipeline." \
@@ -2207,13 +4496,17 @@ test_zfs_send_receive_appends_multiple_background_job_pids_and_logs_force_flag()
 	assertContains "Launching multiple background transfers should append additional tracked PIDs instead of replacing the first one." \
 		"$(cat "$log")" "count=2"
 	assertContains "Launching multiple background transfers should retain the tracked PID list." \
-		"$(cat "$log")" "pids="
+		"$(cat "$log")" "pids=101 102"
+	assertContains "Launching multiple background transfers should retain the tracked supervised job metadata for both datasets." \
+		"$(cat "$log")" "records=job-1:101:tank/src@snap1:backup/dst-one:
+job-2:102:tank/src@snap2:backup/dst-two:"
 }
 
 test_zfs_send_receive_appends_multiple_background_job_pids_in_current_shell() {
 	output_file="$TEST_TMPDIR/background_pipeline_multiple_current_shell.out"
 
 	(
+		l_spawn_count=0
 		zxfer_get_send_command() {
 			printf '%s\n' "sendcmd-$2"
 		}
@@ -2223,23 +4516,24 @@ test_zfs_send_receive_appends_multiple_background_job_pids_in_current_shell() {
 		zxfer_open_send_job_completion_queue() {
 			return 1
 		}
-		zxfer_execute_command() {
-			sleep 1
+		zxfer_spawn_supervised_background_job() {
+			l_spawn_count=$((l_spawn_count + 1))
+			g_zxfer_background_job_last_id="job-$l_spawn_count"
+			g_zxfer_background_job_last_runner_pid=$((200 + l_spawn_count))
 		}
 		g_option_j_jobs=3
-		zxfer_zfs_send_receive "tank/src@snap0" "tank/src@snap1" "backup/dst" "1"
+		zxfer_zfs_send_receive "tank/src@snap0" "tank/src@snap1" "backup/dst-one" "1"
 		first=$g_zfs_send_job_pids
-		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst-two" "1"
 		second=$g_zfs_send_job_pids
 		# shellcheck disable=SC2086
 		set -- $g_zfs_send_job_pids
 		printf 'argc=%s\n' "$#" >"$output_file"
 		printf 'first=%s\n' "$first" >>"$output_file"
 		printf 'second=%s\n' "$second" >>"$output_file"
-		wait "$@"
 	)
 
-	assertContains "Launching multiple legacy background transfers should leave two tracked PIDs in the current shell." \
+	assertContains "Launching multiple supervised background transfers should leave two tracked runner PIDs in the current shell." \
 		"$(cat "$output_file")" "argc=2"
 }
 
@@ -2258,22 +4552,53 @@ test_zfs_send_receive_waits_at_job_limit_before_backgrounding() {
 			printf 'wait:%s\n' "$1" >>"$EXEC_LOG"
 			g_count_zfs_send_jobs=0
 		}
-		zxfer_execute_command() {
-			printf '%s\n' "$1" >>"$EXEC_LOG"
+		zxfer_spawn_supervised_background_job() {
+			printf 'spawn:%s\n' "$3" >>"$EXEC_LOG"
+			g_zxfer_background_job_last_id="job-1"
+			g_zxfer_background_job_last_runner_pid=111
 		}
 		g_option_j_jobs=2
 		g_count_zfs_send_jobs=2
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-		if [ -n "${g_zfs_send_job_pids:-}" ]; then
-			# shellcheck disable=SC2086
-			set -- $g_zfs_send_job_pids
-			wait "$@"
-		fi
 	)
 
 	assertEquals "Hitting the job limit should wait before spawning the next transfer." \
 		"wait:job limit
-sendcmd | recvcmd" "$(cat "$log")"
+spawn:sendcmd | recvcmd" "$(cat "$log")"
+}
+
+test_zfs_send_receive_waits_for_destination_ancestry_conflicts_before_backgrounding() {
+	log="$TEST_TMPDIR/destination_ancestry_wait.log"
+	: >"$log"
+
+	(
+		EXEC_LOG="$log"
+		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
+		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
+		zxfer_open_send_job_completion_queue() {
+			return 1
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait:%s\n' "$1" >>"$EXEC_LOG"
+			g_zfs_send_job_pids=""
+			g_zfs_send_job_supervisor_records=""
+			g_count_zfs_send_jobs=0
+		}
+		zxfer_spawn_supervised_background_job() {
+			printf 'spawn:%s\n' "$3" >>"$EXEC_LOG"
+			g_zxfer_background_job_last_id="job-new"
+			g_zxfer_background_job_last_runner_pid=222
+		}
+		g_option_j_jobs=3
+		g_count_zfs_send_jobs=1
+		g_zfs_send_job_pids="111"
+		g_zfs_send_job_supervisor_records="job-existing	111	tank/src@snap1	backup/dst	"
+		zxfer_zfs_send_receive "tank/src/child@snap1" "tank/src/child@snap2" "backup/dst/child" "1"
+	)
+
+	assertEquals "Destination-ancestry conflicts should wait even when the numeric job limit still has free slots." \
+		"wait:destination ancestry
+spawn:sendcmd | recvcmd" "$(cat "$log")"
 }
 
 test_zfs_send_receive_reopens_rolling_queue_writer_after_job_limit_wait() {
@@ -2283,7 +4608,6 @@ test_zfs_send_receive_reopens_rolling_queue_writer_after_job_limit_wait() {
 	(
 		EXEC_LOG="$log"
 		l_open_count=0
-		l_temp_count=0
 		zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
 		zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
 		zxfer_open_send_job_completion_queue() {
@@ -2298,22 +4622,14 @@ test_zfs_send_receive_reopens_rolling_queue_writer_after_job_limit_wait() {
 			printf 'wait:%s writer_before=%s\n' "$1" "${g_zfs_send_job_queue_writer_open:-0}" >>"$EXEC_LOG"
 			g_zfs_send_job_queue_writer_open=0
 			g_count_zfs_send_jobs=1
+			g_zfs_send_job_pids=111
+			g_zfs_send_job_supervisor_records="job-existing	111	tank/src@snap1	backup/other	"
 		}
-		zxfer_get_temp_file() {
-			l_temp_count=$((l_temp_count + 1))
-			g_zxfer_temp_file_result="$TEST_TMPDIR/reopen-status.$l_temp_count"
-			: >"$g_zxfer_temp_file_result"
-			return 0
-		}
-		zxfer_run_background_pipeline() {
-			printf 'background:writer=%s queue_open=%s\n' \
-				"${g_zfs_send_job_queue_writer_open:-0}" "${g_zfs_send_job_queue_open:-0}" >>"$EXEC_LOG"
-		}
-		zxfer_register_send_job() {
-			printf 'register:writer=%s status=%s\n' \
-				"${g_zfs_send_job_queue_writer_open:-0}" "$2" >>"$EXEC_LOG"
-			g_zfs_send_job_pids=$1
-			g_count_zfs_send_jobs=$((g_count_zfs_send_jobs + 1))
+		zxfer_spawn_supervised_background_job() {
+			printf 'spawn:writer=%s queue_open=%s notify=%s\n' \
+				"${g_zfs_send_job_queue_writer_open:-0}" "${g_zfs_send_job_queue_open:-0}" "${6:-}" >>"$EXEC_LOG"
+			g_zxfer_background_job_last_id="job-new"
+			g_zxfer_background_job_last_runner_pid=222
 		}
 		g_option_j_jobs=2
 		g_count_zfs_send_jobs=2
@@ -2321,17 +4637,18 @@ test_zfs_send_receive_reopens_rolling_queue_writer_after_job_limit_wait() {
 		g_zfs_send_job_queue_writer_open=0
 		g_option_F_force_rollback=""
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-		if [ -n "${g_zfs_send_job_pids:-}" ]; then
-			wait "$g_zfs_send_job_pids"
-		fi
+		{
+			printf 'count=%s\n' "$g_count_zfs_send_jobs"
+			printf 'pids=%s\n' "$g_zfs_send_job_pids"
+		} >>"$EXEC_LOG"
 	)
 
 	assertContains "Rolling background scheduling should reopen the completion-queue writer after a job-limit wait before spawning the next job." \
 		"$(cat "$log")" "open:2 writer_before=0"
-	assertContains "Reopened rolling background scheduling should register the new job while the queue writer is open." \
-		"$(cat "$log")" "register:writer=1"
 	assertContains "Reopened rolling background scheduling should launch the new job with the queue writer open." \
-		"$(cat "$log")" "background:writer=1 queue_open=1"
+		"$(cat "$log")" "spawn:writer=1 queue_open=1 notify=9"
+	assertContains "Reopened rolling background scheduling should keep both the existing and new runner PIDs tracked." \
+		"$(cat "$log")" "pids=111 222"
 }
 
 test_zfs_send_receive_drains_rolling_jobs_before_legacy_fallback_when_reopen_fails() {
@@ -2361,16 +4678,18 @@ test_zfs_send_receive_drains_rolling_jobs_before_legacy_fallback_when_reopen_fai
 			g_zfs_send_job_queue_writer_open=0
 			g_count_zfs_send_jobs=1
 			g_zfs_send_job_pids=111
-			g_zfs_send_job_records="111	$TEST_TMPDIR/existing.status"
+			g_zfs_send_job_supervisor_records="job-existing	111	tank/src@snap1	backup/dst	"
 		}
 		zxfer_wait_for_zfs_send_jobs() {
-			printf 'wait_all:%s records=%s\n' "$1" "${g_zfs_send_job_records:-}" >>"$EXEC_LOG"
+			printf 'wait_all:%s records=%s\n' "$1" "${g_zfs_send_job_supervisor_records:-}" >>"$EXEC_LOG"
 			g_zfs_send_job_pids=""
-			g_zfs_send_job_records=""
+			g_zfs_send_job_supervisor_records=""
 			g_count_zfs_send_jobs=0
 		}
-		zxfer_execute_command() {
-			printf 'legacy:%s\n' "$1" >>"$EXEC_LOG"
+		zxfer_spawn_supervised_background_job() {
+			printf 'spawn:%s notify=<%s>\n' "$3" "${6:-}" >>"$EXEC_LOG"
+			g_zxfer_background_job_last_id="job-new"
+			g_zxfer_background_job_last_runner_pid=222
 		}
 		g_option_j_jobs=2
 		g_count_zfs_send_jobs=2
@@ -2378,21 +4697,16 @@ test_zfs_send_receive_drains_rolling_jobs_before_legacy_fallback_when_reopen_fai
 		g_zfs_send_job_queue_writer_open=0
 		g_option_F_force_rollback=""
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-		if [ -n "${g_zfs_send_job_pids:-}" ]; then
-			# shellcheck disable=SC2086
-			set -- $g_zfs_send_job_pids
-			wait "$@"
-		fi
 	)
 
 	assertContains "Rolling background scheduling should drain the remaining tracked rolling jobs before falling back to the legacy path when queue-writer reopen fails." \
-		"$(cat "$log")" "wait_all:rolling queue recovery records=111"
-	assertContains "Rolling background scheduling should still spawn the transfer through the legacy background path after draining the rolling jobs." \
-		"$(cat "$log")" "legacy:sendcmd | recvcmd"
+		"$(cat "$log")" "wait_all:rolling queue recovery records=job-existing	111	tank/src@snap1	backup/dst	"
+	assertContains "Rolling background scheduling should still spawn the transfer through the supervisor path after draining the rolling jobs." \
+		"$(cat "$log")" "spawn:sendcmd | recvcmd notify=<>"
 }
 
-test_zfs_send_receive_rethrows_rolling_status_file_allocation_failures() {
-	log="$TEST_TMPDIR/background_pipeline_tempfile_failure.log"
+test_zfs_send_receive_rethrows_supervisor_spawn_failures() {
+	log="$TEST_TMPDIR/background_pipeline_supervisor_failure.log"
 	: >"$log"
 
 	set +e
@@ -2401,12 +4715,13 @@ test_zfs_send_receive_rethrows_rolling_status_file_allocation_failures() {
 			EXEC_LOG="$log"
 			zxfer_get_send_command() { printf '%s\n' "sendcmd"; }
 			zxfer_get_receive_command() { printf '%s\n' "recvcmd"; }
-			zxfer_get_temp_file() {
-				zxfer_throw_error "Error creating temporary file."
+			zxfer_open_send_job_completion_queue() {
+				g_zfs_send_job_queue_open=1
+				g_zfs_send_job_queue_writer_open=1
+				return 0
 			}
-			zxfer_run_background_pipeline() {
-				printf 'unexpected background spawn\n' >>"$EXEC_LOG"
-				exit 0
+			zxfer_spawn_supervised_background_job() {
+				zxfer_throw_error "Error creating temporary file."
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1" >&2
@@ -2418,15 +4733,15 @@ test_zfs_send_receive_rethrows_rolling_status_file_allocation_failures() {
 	)
 	status=$?
 
-	assertEquals "Rolling background scheduling should fail closed when status-file allocation fails." \
+	assertEquals "Rolling background scheduling should fail closed when supervised background-job setup fails." \
 		1 "$status"
-	assertContains "Rolling background scheduling should preserve the temp-file allocation failure." \
+	assertContains "Rolling background scheduling should preserve the supervisor spawn failure." \
 		"$output" "Error creating temporary file."
-	assertEquals "Rolling background scheduling should not spawn a background pipeline after status-file allocation fails." \
+	assertEquals "Rolling background scheduling should not leave a tracked background job after supervisor spawn failure." \
 		"" "$(cat "$log")"
 }
 
-test_zfs_send_receive_falls_back_to_legacy_background_path_when_queue_is_unavailable() {
+test_zfs_send_receive_uses_supervisor_background_path_when_queue_is_unavailable() {
 	log="$TEST_TMPDIR/job_limit_legacy_fallback.log"
 	: >"$log"
 
@@ -2437,8 +4752,15 @@ test_zfs_send_receive_falls_back_to_legacy_background_path_when_queue_is_unavail
 		zxfer_open_send_job_completion_queue() {
 			return 1
 		}
-		zxfer_execute_command() {
-			printf '%s\n' "$1" >>"$EXEC_LOG"
+		zxfer_spawn_supervised_background_job() {
+			printf 'spawn:%s notify=<%s>\n' "$3" "${6:-}" >>"$EXEC_LOG"
+			g_zxfer_background_job_last_id="job-1"
+			g_zxfer_background_job_last_runner_pid=111
+		}
+		zxfer_wait_for_background_job() {
+			printf 'wait:%s\n' "$1" >>"$EXEC_LOG"
+			g_zxfer_background_job_wait_exit_status=0
+			g_zxfer_background_job_wait_report_failure=""
 		}
 		g_option_j_jobs=2
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
@@ -2447,8 +4769,9 @@ test_zfs_send_receive_falls_back_to_legacy_background_path_when_queue_is_unavail
 		printf 'pids=%s\n' "$g_zfs_send_job_pids" >>"$EXEC_LOG"
 	)
 
-	assertEquals "Unavailable rolling queues should fall back to the legacy background path." \
-		"sendcmd | recvcmd
+	assertEquals "Unavailable rolling queues should still use the supervised background path without queue notifications." \
+		"spawn:sendcmd | recvcmd notify=<>
+wait:job-1
 count=0
 pids=" "$(cat "$log")"
 }
@@ -2461,65 +4784,52 @@ test_zfs_send_receive_uses_rolling_pool_when_a_job_finishes_early() {
 
 	(
 		EXEC_LOG="$log"
-		ROLLING_POOL_RELEASE_FIRST="$release_first"
-		zxfer_echov() { :; }
+		l_spawn_count=0
 		zxfer_get_send_command() {
 			printf '%s\n' "sendcmd-$2"
 		}
 		zxfer_get_receive_command() {
 			printf '%s\n' "recvcmd"
 		}
-		zxfer_run_background_pipeline() {
-			l_exec_cmd=$1
-			l_status_file=$3
-			if echo "$l_exec_cmd" | grep -q 'sendcmd-tank/src@snap1'; then
-				printf 'start:1\n' >>"$EXEC_LOG"
-				l_wait_count=0
-				while [ ! -f "${ROLLING_POOL_RELEASE_FIRST:?}" ] &&
-					[ "$l_wait_count" -lt 10 ]; do
-					l_wait_count=$((l_wait_count + 1))
-					sleep 1
-				done
-				printf '0\n' >"$l_status_file"
-				printf '%s\n' "$l_status_file" >&9
-				printf 'end:1\n' >>"$EXEC_LOG"
-				exit 0
-			elif echo "$l_exec_cmd" | grep -q 'sendcmd-tank/src@snap2'; then
-				printf 'start:2\n' >>"$EXEC_LOG"
-				printf '0\n' >"$l_status_file"
-				printf '%s\n' "$l_status_file" >&9
-				printf 'end:2\n' >>"$EXEC_LOG"
-				exit 0
-			elif echo "$l_exec_cmd" | grep -q 'sendcmd-tank/src@snap3'; then
-				printf 'start:3\n' >>"$EXEC_LOG"
-				: >"${ROLLING_POOL_RELEASE_FIRST:?}"
-				printf '0\n' >"$l_status_file"
-				printf '%s\n' "$l_status_file" >&9
-				printf 'end:3\n' >>"$EXEC_LOG"
-				exit 0
-			fi
-			printf '99\n' >"$l_status_file"
-			printf '%s\n' "$l_status_file" >&9
-			exit 99
+		zxfer_open_send_job_completion_queue() {
+			g_zfs_send_job_queue_open=1
+			g_zfs_send_job_queue_writer_open=1
+			return 0
+		}
+		zxfer_spawn_supervised_background_job() {
+			l_spawn_count=$((l_spawn_count + 1))
+			printf 'start:%s\n' "$l_spawn_count" >>"$EXEC_LOG"
+			g_zxfer_background_job_last_id="job-$l_spawn_count"
+			g_zxfer_background_job_last_runner_pid=$((300 + l_spawn_count))
+		}
+		zxfer_wait_for_next_zfs_send_job_completion() {
+			printf 'wait_next:%s\n' "$1" >>"$EXEC_LOG"
+			zxfer_unregister_supervised_send_job "job-2"
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait_all:%s\n' "$1" >>"$EXEC_LOG"
+			g_zfs_send_job_pids=""
+			g_zfs_send_job_supervisor_records=""
+			g_count_zfs_send_jobs=0
 		}
 		g_option_j_jobs=2
-		zxfer_zfs_send_receive "tank/src@base" "tank/src@snap1" "backup/dst" "1"
-		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-		zxfer_zfs_send_receive "tank/src@snap2" "tank/src@snap3" "backup/dst" "1"
+		zxfer_zfs_send_receive "tank/src@base" "tank/src@snap1" "backup/dst-one" "1"
+		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst-two" "1"
+		zxfer_zfs_send_receive "tank/src@snap2" "tank/src@snap3" "backup/dst-three" "1"
 		zxfer_wait_for_zfs_send_jobs "final sync"
 		printf 'count=%s\n' "$g_count_zfs_send_jobs" >>"$EXEC_LOG"
 		printf 'pids=%s\n' "${g_zfs_send_job_pids:-}" >>"$EXEC_LOG"
 	)
 
 	line_start3=$(grep -n '^start:3$' "$log" | cut -d: -f1)
-	line_end1=$(grep -n '^end:1$' "$log" | cut -d: -f1)
+	line_wait=$(grep -n '^wait_next:job limit$' "$log" | cut -d: -f1)
 
-	assertContains "Rolling background scheduling should run the second job to completion." \
-		"$(cat "$log")" "end:2"
-	assertContains "Rolling background scheduling should eventually run the third job too." \
-		"$(cat "$log")" "end:3"
-	assertTrue "The third job should start before the first slow job finishes when a slot frees up early." \
-		"[ '$line_start3' -lt '$line_end1' ]"
+	assertContains "Rolling background scheduling should start the second job before the pool refills a freed slot." \
+		"$(cat "$log")" "start:2"
+	assertContains "Rolling background scheduling should eventually start the third job too." \
+		"$(cat "$log")" "start:3"
+	assertTrue "The third job should start immediately after a single rolling wait frees one slot instead of draining the entire batch first." \
+		"[ '$line_wait' -lt '$line_start3' ]"
 	assertContains "Final waits should drain the rolling job pool and clear the count." \
 		"$(cat "$log")" "count=0"
 	assertContains "Final waits should clear the tracked PID list." \
@@ -2534,7 +4844,7 @@ test_zfs_send_receive_rolling_pool_fails_fast_and_kills_inflight_jobs() {
 	output=$(
 		(
 			EXEC_LOG="$log"
-			zxfer_echov() { :; }
+			l_spawn_count=0
 			zxfer_get_send_command() {
 				printf '%s\n' "sendcmd-$2"
 			}
@@ -2545,47 +4855,33 @@ test_zfs_send_receive_rolling_pool_fails_fast_and_kills_inflight_jobs() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			zxfer_run_background_pipeline() {
-				l_exec_cmd=$1
-				l_status_file=$3
-				if echo "$l_exec_cmd" | grep -q 'sendcmd-tank/src@snap1'; then
-					trap 'printf "killed:1\n" >>"$EXEC_LOG"; printf "143\n" >"$l_status_file"; printf "%s\n" "$l_status_file" >&9 2>/dev/null || :; exit 143' TERM
-					printf 'start:1\n' >>"$EXEC_LOG"
-					while :; do
-						sleep 1
-					done
-				elif echo "$l_exec_cmd" | grep -q 'sendcmd-tank/src@snap2'; then
-					printf 'start:2\n' >>"$EXEC_LOG"
-					printf '7\n' >"$l_status_file"
-					printf '%s\n' "$l_status_file" >&9
-					exit 7
-				elif echo "$l_exec_cmd" | grep -q 'sendcmd-tank/src@snap3'; then
-					printf 'start:3\n' >>"$EXEC_LOG"
-					printf '0\n' >"$l_status_file"
-					printf '%s\n' "$l_status_file" >&9
-					exit 0
-				fi
-				printf '99\n' >"$l_status_file"
-				printf '%s\n' "$l_status_file" >&9
-				exit 99
+			zxfer_open_send_job_completion_queue() {
+				g_zfs_send_job_queue_open=1
+				g_zfs_send_job_queue_writer_open=1
+				return 0
+			}
+			zxfer_spawn_supervised_background_job() {
+				l_spawn_count=$((l_spawn_count + 1))
+				printf 'start:%s\n' "$l_spawn_count" >>"$EXEC_LOG"
+				g_zxfer_background_job_last_id="job-$l_spawn_count"
+				g_zxfer_background_job_last_runner_pid=$((400 + l_spawn_count))
+			}
+			zxfer_wait_for_next_zfs_send_job_completion() {
+				printf 'killed:1\n' >>"$EXEC_LOG"
+				zxfer_throw_error "zfs send/receive job failed (PID 402, exit 7)."
 			}
 			g_option_j_jobs=2
-			zxfer_zfs_send_receive "tank/src@base" "tank/src@snap1" "backup/dst" "1"
-			zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
-			zxfer_zfs_send_receive "tank/src@snap2" "tank/src@snap3" "backup/dst" "1"
+			zxfer_zfs_send_receive "tank/src@base" "tank/src@snap1" "backup/dst-one" "1"
+			zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst-two" "1"
+			zxfer_zfs_send_receive "tank/src@snap2" "tank/src@snap3" "backup/dst-three" "1"
 		)
 	)
 	status=$?
 	set -e
 
-	for _ in 1 2 3 4 5; do
-		grep -q '^killed:1$' "$log" 2>/dev/null && break
-		sleep 1
-	done
-
 	assertEquals "A failed background transfer should abort before scheduling more work." 1 "$status"
 	assertContains "The failure should report the failing background PID and exit status." \
-		"$output" "zfs send/receive job failed (PID "
+		"$output" "zfs send/receive job failed (PID 402, exit 7)."
 	assertContains "The failure should report the non-zero child exit status." \
 		"$output" "exit 7)."
 	assertContains "The first inflight job should have started before the failure was observed." \

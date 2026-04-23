@@ -697,6 +697,36 @@ zxfer_property_pass_is_required() {
 	[ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]
 }
 
+# Purpose: Sort replication iteration work breadth-first by dataset ancestry.
+# Usage: Called while building the dataset iteration list so recursive parent
+# receives are scheduled before descendants, without clustering each child
+# immediately behind its parent when unrelated same-depth work can run first.
+zxfer_sort_replication_iteration_file() {
+	l_input_file=$1
+	l_output_file=$2
+	l_scratch_file=$3
+
+	# shellcheck disable=SC2016
+	l_depth_prefix_awk='
+{
+	depth = gsub("/", "/")
+	printf "%06d\t%s\n", depth, $0
+}'
+	"${g_cmd_awk:-awk}" "$l_depth_prefix_awk" "$l_input_file" >"$l_scratch_file" || return $?
+	sort -u "$l_scratch_file" >"$l_output_file" || return $?
+
+	# shellcheck disable=SC2016
+	l_strip_prefix_awk='
+{
+	tab = index($0, "\t")
+	if (tab <= 0)
+		exit 1
+	print substr($0, tab + 1)
+}'
+	"${g_cmd_awk:-awk}" "$l_strip_prefix_awk" "$l_output_file" >"$l_scratch_file" || return $?
+	cat "$l_scratch_file" >"$l_output_file" || return $?
+}
+
 # Purpose: Build the replication iteration list for the next execution or
 # comparison step.
 # Usage: Called during top-level dataset iteration and replication
@@ -760,7 +790,10 @@ zxfer_build_replication_iteration_list() {
 		;;
 	esac
 
-	sort -u "$l_iteration_filtered_file" >"$l_iteration_sorted_file"
+	zxfer_sort_replication_iteration_file \
+		"$l_iteration_filtered_file" \
+		"$l_iteration_sorted_file" \
+		"$l_iteration_input_file"
 	l_sort_status=$?
 	if [ "$l_sort_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths \

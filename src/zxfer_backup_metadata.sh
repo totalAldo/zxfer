@@ -1359,9 +1359,12 @@ zxfer_run_remote_backup_helper_with_payload() {
 
 	zxfer_reset_remote_probe_capture_state
 
-	if ! l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host"); then
+	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host"); then
+		:
+	else
 		zxfer_profile_record_ssh_invocation "$l_host" "$l_profile_side"
-		zxfer_throw_error "$l_transport_tokens"
+		l_transport_status=$?
+		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
 	fi
 
 	zxfer_create_private_temp_dir "zxfer-remote-backup-helper" >/dev/null
@@ -2313,7 +2316,9 @@ zxfer_write_backup_properties() {
 			else
 				l_pair_backup_contents_cmd=$(zxfer_render_backup_metadata_pair_payload_command "$l_rendered_backup_contents" "$l_forwarded_backup_contents")
 				l_remote_pair_write_cmd=$(zxfer_build_remote_backup_pair_write_cmd "$l_backup_file_dir" "$l_backup_file_path" "$l_forwarded_backup_file_dir" "$l_forwarded_backup_file_path" "$g_option_T_target_host" 99)
-				l_host_tokens=$(zxfer_split_host_spec_tokens "$g_option_T_target_host")
+				if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$g_option_T_target_host"); then
+					zxfer_throw_error "$l_host_tokens"
+				fi
 				l_host_token_count=0
 				if [ "$l_host_tokens" != "" ]; then
 					while IFS= read -r l_token || [ -n "$l_token" ]; do
@@ -2333,7 +2338,9 @@ EOF
 			printf '%s\n' "umask 077; l_stage_dir=\$(mktemp -d $l_backup_stage_template_safe) && $l_backup_contents_cmd | $l_translate_cmd > \"\$l_stage_dir/backup.write\" && chmod 600 \"\$l_stage_dir/backup.write\" && mv -f \"\$l_stage_dir/backup.write\" $l_backup_file_path_safe && rmdir \"\$l_stage_dir\""
 		else
 			l_remote_write_cmd=$(zxfer_build_remote_backup_write_cmd "$l_backup_file_dir" "$l_backup_file_path" "$g_option_T_target_host" "cat" 99)
-			l_host_tokens=$(zxfer_split_host_spec_tokens "$g_option_T_target_host")
+			if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$g_option_T_target_host"); then
+				zxfer_throw_error "$l_host_tokens"
+			fi
 			l_host_token_count=0
 			if [ "$l_host_tokens" != "" ]; then
 				while IFS= read -r l_token || [ -n "$l_token" ]; do

@@ -619,6 +619,46 @@ test_get_dest_snapshots_to_delete_per_dataset_reports_source_identity_write_fail
 		"$output" "Failed to generate source snapshot identities for delete planning."
 }
 
+test_get_dest_snapshots_to_delete_per_dataset_falls_back_to_serial_when_cleanup_registration_fails() {
+	log_file="$TEST_TMPDIR/delete_plan_cleanup_register_fail.log"
+
+	output=$(
+		(
+			LOG_FILE="$log_file"
+			zxfer_register_cleanup_pid() {
+				return 1
+			}
+			zxfer_unregister_cleanup_pid() {
+				printf 'unregister:%s\n' "$1" >>"$LOG_FILE"
+			}
+			zxfer_write_snapshot_identities_to_file() {
+				if [ "$2" = "$g_delete_source_tmp_file" ]; then
+					sleep 1
+					printf '%s\n' "snap1	111" >"$2"
+					printf '%s\n' "source" >>"$LOG_FILE"
+					return 0
+				fi
+				printf '%s\n' "snap1	111
+snap2	222" >"$2"
+				printf '%s\n' "dest" >>"$LOG_FILE"
+			}
+			zxfer_get_dest_snapshots_to_delete_per_dataset \
+				"tank/fs@snap1	111" \
+				"tank/fs@snap1	111
+tank/fs@snap2	222"
+		)
+	)
+	status=$?
+
+	assertEquals "Delete planning should fall back to a serial identity-write path when validated cleanup registration fails." \
+		0 "$status"
+	assertEquals "Delete planning should still return the destination-only snapshot after the serial fallback." \
+		"tank/fs@snap2" "$output"
+	assertEquals "Delete-planning serial fallback should wait for the source identity writer before starting the destination pass." \
+		"source
+dest" "$(cat "$log_file")"
+}
+
 test_get_dest_snapshots_to_delete_per_dataset_preserves_temp_allocation_failures() {
 	status=$(
 		(

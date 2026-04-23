@@ -1,0 +1,4 @@
+interface:
+  display_name: "zxfer Platform Portability"
+  short_description: "Check zxfer portability risks"
+  default_prompt: "Use $zxfer-platform-portability to review this zxfer change for platform risks."

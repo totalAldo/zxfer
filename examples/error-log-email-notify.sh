@@ -4,9 +4,10 @@
 # origin/target host settings before use. This example enables ZXFER_ERROR_LOG,
 # captures the current run's structured failure report plus any extra stderr
 # warnings, and emails that context through mailx, BSD mail, or sendmail when
-# zxfer exits non-zero. Set ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1 first if the
-# wrapped zxfer command can carry secret-bearing hook strings or wrapper
-# arguments. For multiple source roots, set SRC_DATASETS to a whitespace-
+# zxfer exits non-zero. Failure-report command fields are redacted by default;
+# set ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 only for deliberate local
+# debugging if the wrapped zxfer command text itself is needed. For multiple
+# source roots, set SRC_DATASETS to a whitespace-
 # separated list; the wrapper runs them sequentially and stops on the first
 # failure.
 

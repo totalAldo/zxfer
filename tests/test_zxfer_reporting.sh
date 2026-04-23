@@ -37,11 +37,11 @@ setUp() {
 	g_zxfer_original_invocation="'./zxfer' 'backup/dst'"
 	g_zxfer_secure_staging_dir_result=""
 	g_zxfer_runtime_artifact_cleanup_paths=""
-	unset ZXFER_REDACT_FAILURE_REPORT_COMMANDS
+	unset ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
 	zxfer_reset_failure_context "unit"
 }
 
-test_zxfer_render_failure_report_includes_context_fields() {
+test_zxfer_render_failure_report_redacts_command_fields_by_default() {
 	zxfer_set_failure_roots "tank/src" "backup/dst"
 	zxfer_set_current_dataset_context "tank/src/child" "backup/dst/child"
 	zxfer_record_last_command_string "zfs send tank/src@snap1"
@@ -53,38 +53,34 @@ test_zxfer_render_failure_report_includes_context_fields() {
 		"$report" "failure_stage: unit"
 	assertContains "Failure report should include the current source dataset." \
 		"$report" "current_source: tank/src/child"
-	assertContains "Failure report should include the invocation string." \
-		"$report" "invocation: './zxfer' 'backup/dst'"
-	assertContains "Failure report should include the last command." \
-		"$report" "last_command: zfs send tank/src@snap1"
+	assertContains "Failure reports should redact the invocation by default." \
+		"$report" "invocation: [redacted]"
+	assertContains "Failure reports should redact the last command by default." \
+		"$report" "last_command: [redacted]"
 }
 
-test_zxfer_record_last_command_helpers_store_redaction_marker_when_enabled() {
-	ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1
-
+test_zxfer_record_last_command_helpers_store_redaction_marker_by_default() {
 	zxfer_record_last_command_string "printf '%s' super-secret"
-	assertEquals "String-based last-command tracking should store the redaction marker when failure-report command redaction is enabled." \
+	assertEquals "String-based last-command tracking should store the redaction marker by default." \
 		"[redacted]" "$g_zxfer_failure_last_command"
 
 	zxfer_record_last_command_argv "/usr/bin/ssh" "backup.example" "super-secret"
-	assertEquals "Argv-based last-command tracking should store the redaction marker when failure-report command redaction is enabled." \
+	assertEquals "Argv-based last-command tracking should store the redaction marker by default." \
 		"[redacted]" "$g_zxfer_failure_last_command"
 }
 
-test_zxfer_record_last_command_helpers_preserve_empty_input_semantics_when_enabled() {
-	ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1
-
+test_zxfer_record_last_command_helpers_preserve_empty_input_semantics_by_default() {
 	zxfer_record_last_command_string ""
-	assertEquals "String-based last-command tracking should keep empty command strings empty when failure-report command redaction is enabled." \
+	assertEquals "String-based last-command tracking should keep empty command strings empty by default." \
 		"" "$g_zxfer_failure_last_command"
 
 	zxfer_record_last_command_argv
-	assertEquals "Argv-based last-command tracking should keep empty argv lists empty when failure-report command redaction is enabled." \
+	assertEquals "Argv-based last-command tracking should keep empty argv lists empty by default." \
 		"" "$g_zxfer_failure_last_command"
 }
 
-test_zxfer_render_failure_report_redacts_command_fields_when_enabled() {
-	ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1
+test_zxfer_render_failure_report_preserves_command_fields_in_unsafe_mode() {
+	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 	zxfer_set_failure_roots "tank/src" "backup/dst"
 	g_zxfer_original_invocation="'./zxfer' '-Z' 'super-secret-token' 'backup/dst'"
 	g_zxfer_failure_last_command="'/usr/bin/ssh' 'backup.example' 'super-secret-token'"
@@ -92,35 +88,31 @@ test_zxfer_render_failure_report_redacts_command_fields_when_enabled() {
 
 	report=$(zxfer_render_failure_report 1)
 
-	assertContains "Failure reports should redact the original invocation when failure-report command redaction is enabled." \
-		"$report" "invocation: [redacted]"
-	assertContains "Failure reports should redact the last command when failure-report command redaction is enabled." \
-		"$report" "last_command: [redacted]"
-	assertNotContains "Failure-report command redaction should keep the original invocation secret out of the rendered report." \
-		"$report" "super-secret-token"
+	assertContains "Unsafe failure-report mode should preserve the original invocation." \
+		"$report" "invocation: './zxfer' '-Z' 'super-secret-token' 'backup/dst'"
+	assertContains "Unsafe failure-report mode should preserve the last command." \
+		"$report" "last_command: '/usr/bin/ssh' 'backup.example' 'super-secret-token'"
 }
 
-test_zxfer_render_failure_report_keeps_missing_last_command_omitted_when_enabled() {
-	ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1
+test_zxfer_render_failure_report_keeps_missing_last_command_omitted_by_default() {
 	g_zxfer_original_invocation="'./zxfer' '-R' 'tank/src' 'backup/dst'"
 	g_zxfer_failure_message="boom"
 
 	report=$(zxfer_render_failure_report 1)
 
-	assertContains "Failure-report command redaction should still redact the invocation when present." \
+	assertContains "Default failure-report mode should still redact the invocation when present." \
 		"$report" "invocation: [redacted]"
-	assertNotContains "Failure-report command redaction should keep an unset last-command field omitted." \
+	assertNotContains "Default failure-report mode should keep an unset last-command field omitted." \
 		"$report" "last_command:"
 }
 
-test_zxfer_emit_failure_report_redacts_command_fields_in_stderr_and_log_when_enabled() {
+test_zxfer_emit_failure_report_redacts_command_fields_in_stderr_and_log_by_default() {
 	log_path="$TEST_TMPDIR/redacted_failure.log"
 	stdout_file="$TEST_TMPDIR/redacted_failure.stdout"
 	stderr_file="$TEST_TMPDIR/redacted_failure.stderr"
 
 	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
 		ZXFER_ERROR_LOG=\"$log_path\"
-		ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1
 		g_zxfer_failure_report_emitted=0
 		g_zxfer_original_invocation=\"'./zxfer' '-D' 'api-token=super-secret-token'\"
 		g_zxfer_failure_last_command=\"'/usr/bin/ssh' 'backup.example' 'super-secret-token'\"
@@ -128,24 +120,25 @@ test_zxfer_emit_failure_report_redacts_command_fields_in_stderr_and_log_when_ena
 		zxfer_emit_failure_report 1
 	"
 
-	assertEquals "Redacted failure-report emission should succeed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Redacted failure-report emission should redact the invocation in stderr." \
+	assertEquals "Default failure-report emission should succeed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Default failure-report emission should redact the invocation in stderr." \
 		"$(cat "$stderr_file")" "invocation: [redacted]"
-	assertContains "Redacted failure-report emission should redact the last command in stderr." \
+	assertContains "Default failure-report emission should redact the last command in stderr." \
 		"$(cat "$stderr_file")" "last_command: [redacted]"
-	assertNotContains "Redacted failure-report emission should keep secrets out of stderr." \
+	assertNotContains "Default failure-report emission should keep secrets out of stderr." \
 		"$(cat "$stderr_file")" "super-secret-token"
-	assertContains "Redacted failure-report emission should also redact the invocation in ZXFER_ERROR_LOG." \
+	assertContains "Default failure-report emission should also redact the invocation in ZXFER_ERROR_LOG." \
 		"$(cat "$log_path")" "invocation: [redacted]"
-	assertContains "Redacted failure-report emission should also redact the last command in ZXFER_ERROR_LOG." \
+	assertContains "Default failure-report emission should also redact the last command in ZXFER_ERROR_LOG." \
 		"$(cat "$log_path")" "last_command: [redacted]"
-	assertNotContains "Redacted failure-report emission should keep secrets out of ZXFER_ERROR_LOG." \
+	assertNotContains "Default failure-report emission should keep secrets out of ZXFER_ERROR_LOG." \
 		"$(cat "$log_path")" "super-secret-token"
 }
 
-test_zxfer_render_failure_report_escapes_raw_control_bytes_in_command_fields() {
+test_zxfer_render_failure_report_escapes_raw_control_bytes_in_unsafe_mode() {
 	esc=$(printf '\033')
 	bell=$(printf '\007')
+	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 
 	g_zxfer_original_invocation=$(zxfer_quote_command_argv "./zxfer" "-D" "$(printf 'token%swarn' "$esc")")
 	zxfer_record_last_command_argv "/usr/bin/printf" "$(printf 'line%sbell' "$bell")"
@@ -164,19 +157,19 @@ test_zxfer_render_failure_report_escapes_raw_control_bytes_in_command_fields() {
 	grep -F "$bell" "$TEST_TMPDIR/control_escape_report.txt" >/dev/null 2>&1
 	raw_bell_status=$?
 
-	assertEquals "Failure reports should escape ESC bytes in the invocation field." \
+	assertEquals "Unsafe failure reports should escape ESC bytes in the invocation field." \
 		0 "$escaped_invocation_status"
-	assertEquals "Failure reports should escape BEL bytes in the last-command field." \
+	assertEquals "Unsafe failure reports should escape BEL bytes in the last-command field." \
 		0 "$escaped_last_command_status"
-	assertEquals "Failure reports should not double-escape control-byte markers in command fields." \
+	assertEquals "Unsafe failure reports should not double-escape control-byte markers in command fields." \
 		1 "$double_esc_status"
-	assertEquals "Failure reports should not contain raw ESC bytes in command fields." \
+	assertEquals "Unsafe failure reports should not contain raw ESC bytes in command fields." \
 		1 "$raw_esc_status"
-	assertEquals "Failure reports should not contain raw BEL bytes in command fields." \
+	assertEquals "Unsafe failure reports should not contain raw BEL bytes in command fields." \
 		1 "$raw_bell_status"
 }
 
-test_zxfer_emit_failure_report_escapes_raw_control_bytes_in_stderr_and_log() {
+test_zxfer_emit_failure_report_escapes_raw_control_bytes_in_stderr_and_log_in_unsafe_mode() {
 	log_path="$TEST_TMPDIR/control_escaped_failure.log"
 	stdout_file="$TEST_TMPDIR/control_escaped_failure.stdout"
 	stderr_file="$TEST_TMPDIR/control_escaped_failure.stderr"
@@ -185,6 +178,7 @@ test_zxfer_emit_failure_report_escapes_raw_control_bytes_in_stderr_and_log() {
 
 	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
 		ZXFER_ERROR_LOG=\"$log_path\"
+		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 		g_zxfer_failure_report_emitted=0
 		g_zxfer_original_invocation=\$(zxfer_quote_command_argv './zxfer' '-D' \"\$(printf 'token%swarn' '$esc')\")
 		zxfer_record_last_command_argv '/usr/bin/printf' \"\$(printf 'line%sbell' '$bell')\"
@@ -212,32 +206,33 @@ test_zxfer_emit_failure_report_escapes_raw_control_bytes_in_stderr_and_log() {
 	grep -F "$bell" "$log_path" >/dev/null 2>&1
 	log_raw_bell_status=$?
 
-	assertEquals "Control-byte escaping failure-report emission should succeed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "stderr failure reports should escape ESC bytes in invocation." \
+	assertEquals "Unsafe control-byte escaping failure-report emission should succeed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Unsafe stderr failure reports should escape ESC bytes in invocation." \
 		0 "$stderr_invocation_status"
-	assertEquals "stderr failure reports should escape BEL bytes in last_command." \
+	assertEquals "Unsafe stderr failure reports should escape BEL bytes in last_command." \
 		0 "$stderr_last_command_status"
-	assertEquals "stderr failure reports should not double-escape control-byte markers." \
+	assertEquals "Unsafe stderr failure reports should not double-escape control-byte markers." \
 		1 "$stderr_double_esc_status"
-	assertEquals "stderr failure reports should not contain raw ESC bytes." \
+	assertEquals "Unsafe stderr failure reports should not contain raw ESC bytes." \
 		1 "$stderr_raw_esc_status"
-	assertEquals "stderr failure reports should not contain raw BEL bytes." \
+	assertEquals "Unsafe stderr failure reports should not contain raw BEL bytes." \
 		1 "$stderr_raw_bell_status"
-	assertEquals "ZXFER_ERROR_LOG mirrors should escape ESC bytes in invocation." \
+	assertEquals "Unsafe ZXFER_ERROR_LOG mirrors should escape ESC bytes in invocation." \
 		0 "$log_invocation_status"
-	assertEquals "ZXFER_ERROR_LOG mirrors should escape BEL bytes in last_command." \
+	assertEquals "Unsafe ZXFER_ERROR_LOG mirrors should escape BEL bytes in last_command." \
 		0 "$log_last_command_status"
-	assertEquals "ZXFER_ERROR_LOG mirrors should not double-escape control-byte markers." \
+	assertEquals "Unsafe ZXFER_ERROR_LOG mirrors should not double-escape control-byte markers." \
 		1 "$log_double_esc_status"
-	assertEquals "ZXFER_ERROR_LOG mirrors should not contain raw ESC bytes." \
+	assertEquals "Unsafe ZXFER_ERROR_LOG mirrors should not contain raw ESC bytes." \
 		1 "$log_raw_esc_status"
-	assertEquals "ZXFER_ERROR_LOG mirrors should not contain raw BEL bytes." \
+	assertEquals "Unsafe ZXFER_ERROR_LOG mirrors should not contain raw BEL bytes." \
 		1 "$log_raw_bell_status"
 }
 
-test_zxfer_record_last_command_argv_preserves_trailing_newlines_in_failure_report() {
+test_zxfer_record_last_command_argv_preserves_trailing_newlines_in_unsafe_mode() {
 	trailing_arg=$(printf 'line-with-trailing-newline\n_')
 	trailing_arg=${trailing_arg%_}
+	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 
 	zxfer_record_last_command_argv "/usr/bin/printf" "$trailing_arg"
 	g_zxfer_failure_message="boom"
@@ -247,7 +242,7 @@ test_zxfer_record_last_command_argv_preserves_trailing_newlines_in_failure_repor
 	grep -F -x "last_command: '/usr/bin/printf' 'line-with-trailing-newline\\n'" "$TEST_TMPDIR/trailing_newline_report.txt" >/dev/null 2>&1
 	trailing_newline_status=$?
 
-	assertEquals "Argv-based failure-report command capture should preserve trailing newline markers." \
+	assertEquals "Unsafe argv-based failure-report command capture should preserve trailing newline markers." \
 		0 "$trailing_newline_status"
 }
 
@@ -383,6 +378,69 @@ test_zxfer_get_error_log_fallback_lock_dir_uses_system_tmp_fallback_chain() {
 		"/tmp/.zxfer-error-log.lock.kfallback" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
+test_zxfer_get_error_log_fallback_lock_dir_uses_dev_shm_fallback_when_available() {
+	zxfer_test_capture_subshell '
+		TMPDIR="/unsafe-tmpdir"
+		zxfer_capture_reporting_helper_output() {
+			l_result_var=$1
+			l_helper_name=$2
+			l_helper_arg=$3
+			case "$l_helper_name:$l_helper_arg" in
+			"zxfer_validate_temp_root_candidate:/unsafe-tmpdir")
+				return 1
+				;;
+			"zxfer_validate_temp_root_candidate:/dev/shm")
+				eval "$l_result_var=/dev/shm"
+				return 0
+				;;
+			"zxfer_error_log_lock_key:/tmp/failure.log")
+				eval "$l_result_var=kdevshm"
+				return 0
+				;;
+			esac
+			return 1
+		}
+		zxfer_get_error_log_fallback_lock_dir "/tmp/failure.log"
+	'
+
+	assertEquals "Fallback lock-dir lookup should succeed when /dev/shm is the first safe system tmpdir candidate." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Fallback lock-dir lookup should use the derived lock key under /dev/shm when that candidate validates." \
+		"/dev/shm/.zxfer-error-log.lock.kdevshm" "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
+test_zxfer_get_error_log_fallback_lock_dir_uses_run_shm_fallback_when_dev_shm_is_unavailable() {
+	zxfer_test_capture_subshell '
+		TMPDIR="/unsafe-tmpdir"
+		zxfer_capture_reporting_helper_output() {
+			l_result_var=$1
+			l_helper_name=$2
+			l_helper_arg=$3
+			case "$l_helper_name:$l_helper_arg" in
+			"zxfer_validate_temp_root_candidate:/unsafe-tmpdir"|\
+			"zxfer_validate_temp_root_candidate:/dev/shm")
+				return 1
+				;;
+			"zxfer_validate_temp_root_candidate:/run/shm")
+				eval "$l_result_var=/run/shm"
+				return 0
+				;;
+			"zxfer_error_log_lock_key:/tmp/failure.log")
+				eval "$l_result_var=krunshm"
+				return 0
+				;;
+			esac
+			return 1
+		}
+		zxfer_get_error_log_fallback_lock_dir "/tmp/failure.log"
+	'
+
+	assertEquals "Fallback lock-dir lookup should succeed when /run/shm is the first safe system tmpdir candidate." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Fallback lock-dir lookup should use the derived lock key under /run/shm when /dev/shm is unavailable." \
+		"/run/shm/.zxfer-error-log.lock.krunshm" "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
 test_zxfer_get_error_log_fallback_lock_dir_returns_failure_when_no_safe_tmpdir_exists() {
 	zxfer_test_capture_subshell '
 		TMPDIR="/unsafe-tmpdir"
@@ -416,6 +474,75 @@ test_zxfer_get_error_log_fallback_lock_dir_returns_failure_when_lock_key_lookup_
 		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
+test_zxfer_error_log_lock_key_falls_back_to_hex_and_zero_key_when_cksum_is_unusable() {
+	output=$(
+		(
+			set +e
+			cksum() {
+				return 1
+			}
+			od() {
+				printf ' 61 62 63 64 \n'
+			}
+			printf 'hex=%s\n' "$(zxfer_error_log_lock_key '/tmp/failure.log')"
+			od() {
+				printf '\n'
+			}
+			printf 'zero=%s\n' "$(zxfer_error_log_lock_key '/tmp/failure.log')"
+		)
+	)
+
+	assertContains "Error-log lock keys should fall back to a hex digest when cksum is unusable." \
+		"$output" "hex=k61626364"
+	assertContains "Error-log lock keys should fall back to k00 when both cksum and hex derivation are unusable." \
+		"$output" "zero=k00"
+}
+
+test_zxfer_error_log_lock_key_falls_back_to_hex_and_zero_key_in_current_shell() {
+	cksum() {
+		return 1
+	}
+	od() {
+		printf ' 66 6f 6f 0a \n'
+	}
+	hex_key=$(zxfer_error_log_lock_key "/tmp/failure.log")
+	od() {
+		printf '\n'
+	}
+	zero_key=$(zxfer_error_log_lock_key "/tmp/failure.log")
+	unset -f cksum od
+
+	assertEquals "Current-shell error-log lock keys should fall back to a hex digest when cksum is unusable." \
+		"k666f6f0a" "$hex_key"
+	assertEquals "Current-shell error-log lock keys should fall back to k00 when both cksum and hex derivation are unusable." \
+		"k00" "$zero_key"
+}
+
+test_zxfer_capture_reporting_helper_output_preserves_readback_failures_and_cleans_up() {
+	capture_file="$TEST_TMPDIR/reporting_capture_failure.out"
+
+	zxfer_test_capture_subshell "
+		set +e
+		zxfer_create_runtime_artifact_file() {
+			: >\"$capture_file\"
+			g_zxfer_runtime_artifact_path_result=\"$capture_file\"
+			return 0
+		}
+		zxfer_read_runtime_artifact_file() {
+			g_zxfer_runtime_artifact_read_result=''
+			return 17
+		}
+		zxfer_capture_reporting_helper_output l_result printf '%s\\n' 'captured'
+		printf 'status=%s\\n' \"\$?\"
+		printf 'exists=%s\\n' \"\$([ -e \"$capture_file\" ] && printf yes || printf no)\"
+	"
+
+	assertContains "Reporting-helper captures should preserve staged readback failures." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=17"
+	assertContains "Reporting-helper captures should clean up the staged capture file after readback failures." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "exists=no"
+}
+
 test_zxfer_acquire_error_log_lock_retries_before_failing() {
 	zxfer_test_capture_subshell '
 		g_test_sleep_calls=0
@@ -439,6 +566,54 @@ test_zxfer_acquire_error_log_lock_retries_before_failing() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=1"
 	assertContains "Lock acquisition should sleep between failed retries before giving up." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "sleeps=2"
+}
+
+test_zxfer_acquire_error_log_lock_reaps_stale_lock_and_retries_successfully() {
+	zxfer_test_capture_subshell '
+		g_test_create_calls=0
+		g_test_reap_calls=0
+		zxfer_create_owned_lock_dir() {
+			g_test_create_calls=$((g_test_create_calls + 1))
+			if [ "$g_test_create_calls" -eq 1 ]; then
+				mkdir -p "$1"
+				return 1
+			fi
+			return 0
+		}
+		zxfer_try_reap_stale_owned_lock_dir() {
+			g_test_reap_calls=$((g_test_reap_calls + 1))
+			rm -rf "$1"
+			return 0
+		}
+		zxfer_acquire_error_log_lock "'"$TEST_TMPDIR"'/reapable.lock"
+		printf "status=%s\n" "$?"
+		printf "creates=%s\n" "$g_test_create_calls"
+		printf "reaps=%s\n" "$g_test_reap_calls"
+	'
+
+	assertContains "Error-log lock acquisition should succeed after reaping one stale lock directory." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=0"
+	assertContains "Error-log lock acquisition should retry lock creation after a successful stale-lock reap." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "creates=2"
+	assertContains "Error-log lock acquisition should attempt exactly one stale-lock reap in this path." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "reaps=1"
+}
+
+test_zxfer_acquire_error_log_lock_fails_closed_when_stale_reap_errors() {
+	zxfer_test_capture_subshell '
+		lock_dir="'"$TEST_TMPDIR"'/reap_error.lock"
+		mkdir -p "$lock_dir"
+		zxfer_create_owned_lock_dir() {
+			return 1
+		}
+		zxfer_try_reap_stale_owned_lock_dir() {
+			return 1
+		}
+		zxfer_acquire_error_log_lock "$lock_dir"
+	'
+
+	assertEquals "Error-log lock acquisition should fail closed when stale-lock reaping errors." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
 test_zxfer_release_error_log_lock_warn_only_warns_and_returns_success() {
@@ -622,6 +797,198 @@ test_zxfer_create_secure_staging_dir_for_path_registers_and_cleanup_unregisters_
 		"[ -e \"$stage_dir\" ]"
 	assertNotContains "Error-log stage-dir cleanup should unregister the stage directory from runtime cleanup state." \
 		"$g_zxfer_runtime_artifact_cleanup_paths" "$stage_dir"
+}
+
+test_zxfer_cleanup_error_log_stage_dir_falls_back_without_runtime_cleanup_helper_in_current_shell() {
+	stage_dir="$TEST_TMPDIR/error_log_stage_dir_fallback"
+	mkdir -p "$stage_dir" || fail "Unable to create the fallback error-log stage directory."
+	: >"$stage_dir/log.snapshot"
+	: >"$stage_dir/log.write"
+
+	unset -f zxfer_cleanup_runtime_artifact_path
+	zxfer_cleanup_error_log_stage_dir "$stage_dir"
+
+	assertFalse "Error-log stage-dir cleanup should remove staged files even when the runtime cleanup helper is unavailable." \
+		"[ -e \"$stage_dir\" ]"
+
+	zxfer_source_runtime_modules_through "zxfer_runtime.sh"
+	setUp
+}
+
+test_zxfer_get_error_log_fallback_lock_dir_reports_lock_key_capture_failures_in_current_shell() {
+	TMPDIR="$TEST_TMPDIR"
+
+	zxfer_capture_reporting_helper_output() {
+		l_result_var=$1
+		l_helper_name=$2
+		l_helper_arg=$3
+		case "$l_helper_name:$l_helper_arg" in
+		"zxfer_validate_temp_root_candidate:$TEST_TMPDIR")
+			eval "$l_result_var=\$TEST_TMPDIR"
+			return 0
+			;;
+		"zxfer_error_log_lock_key:/tmp/failure.log")
+			return 1
+			;;
+		esac
+		return 1
+	}
+
+	set +e
+	zxfer_get_error_log_fallback_lock_dir "/tmp/failure.log" >/dev/null
+	status=$?
+	set -e
+	unset -f zxfer_capture_reporting_helper_output
+
+	assertEquals "Current-shell fallback lock-dir lookup should fail closed when the derived lock key cannot be captured." \
+		1 "$status"
+}
+
+test_zxfer_create_error_log_file_cleans_up_stage_dir_when_write_or_move_fails() {
+	write_stage_dir="$TEST_TMPDIR/error_log_write_stage"
+	move_stage_dir="$TEST_TMPDIR/error_log_move_stage"
+	write_output=$(
+		(
+			set +e
+			mkdir -p "$write_stage_dir"
+			zxfer_create_secure_staging_dir_for_path() {
+				g_zxfer_secure_staging_dir_result="$write_stage_dir"
+				return 0
+			}
+			zxfer_write_runtime_artifact_file() {
+				return 1
+			}
+			zxfer_create_error_log_file "$TEST_TMPDIR/write_failure.log"
+			printf 'status=%s\n' "$?"
+			printf 'stage_exists=%s\n' "$([ -e "$write_stage_dir" ] && printf yes || printf no)"
+		)
+	)
+	move_output=$(
+		(
+			set +e
+			mkdir -p "$move_stage_dir"
+			zxfer_create_secure_staging_dir_for_path() {
+				g_zxfer_secure_staging_dir_result="$move_stage_dir"
+				return 0
+			}
+			mv() {
+				return 1
+			}
+			zxfer_create_error_log_file "$TEST_TMPDIR/move_failure.log"
+			printf 'status=%s\n' "$?"
+			printf 'stage_exists=%s\n' "$([ -e "$move_stage_dir" ] && printf yes || printf no)"
+		)
+	)
+
+	assertContains "Error-log file creation should fail when the staged file cannot be written." \
+		"$write_output" "status=1"
+	assertContains "Error-log file creation should remove the stage directory when the staged write fails." \
+		"$write_output" "stage_exists=no"
+	assertContains "Error-log file creation should fail when the staged file cannot be moved into place." \
+		"$move_output" "status=1"
+	assertContains "Error-log file creation should remove the stage directory when the final move fails." \
+		"$move_output" "stage_exists=no"
+}
+
+test_zxfer_create_error_log_file_helpers_cover_current_shell_paths() {
+	create_fail_target="$TEST_TMPDIR/error_log_create_fail.log"
+	create_success_target="$TEST_TMPDIR/error_log_create_success.log"
+	create_success_stage="$TEST_TMPDIR/error_log_create_success.stage"
+
+	zxfer_test_capture_subshell "
+		set +e
+		zxfer_create_secure_staging_dir_for_path() {
+			return 1
+		}
+		zxfer_create_error_log_file \"$create_fail_target\" >/dev/null
+		printf 'fail=%s\\n' \"\$?\"
+		unset -f zxfer_create_secure_staging_dir_for_path
+
+		mkdir -p \"$create_success_stage\" || exit 91
+		zxfer_create_secure_staging_dir_for_path() {
+			g_zxfer_secure_staging_dir_result=\"$create_success_stage\"
+			return 0
+		}
+		zxfer_create_error_log_file \"$create_success_target\" >/dev/null
+		printf 'success=%s\\n' \"\$?\"
+		unset -f zxfer_create_secure_staging_dir_for_path
+		printf 'target=%s\\n' \"\$([ -f \"$create_success_target\" ] && printf yes || printf no)\"
+		printf 'contents=<%s>\\n' \"\$([ -f \"$create_success_target\" ] && cat \"$create_success_target\")\"
+		printf 'stage=%s\\n' \"\$([ -e \"$create_success_stage\" ] && printf yes || printf no)\"
+	"
+
+	assertEquals "Current-shell error-log creation helper coverage should complete the subshell cleanly." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Current-shell error-log creation should preserve staging-dir allocation failures." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "fail=1"
+	assertContains "Current-shell error-log creation should succeed when staging and publish both succeed." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "success=0"
+	assertContains "Current-shell error-log creation should publish the target log file." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "target=yes"
+	assertContains "Current-shell error-log creation should create an empty secure log file." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "contents=<>"
+	assertContains "Current-shell error-log creation should remove the staging directory after publishing the file." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "stage=no"
+}
+
+test_zxfer_acquire_error_log_lock_rejects_symlink_and_reap_validation_failures() {
+	lock_target="$TEST_TMPDIR/error_log_lock_target"
+	lock_symlink="$TEST_TMPDIR/error_log_lock_symlink"
+	lock_dir="$TEST_TMPDIR/error_log_lock_dir"
+	mkdir -p "$lock_target" "$lock_dir" || fail "Unable to create error-log lock fixtures."
+	ln -s "$lock_target" "$lock_symlink" || fail "Unable to create the error-log lock symlink fixture."
+
+	symlink_output=$(
+		(
+			set +e
+			zxfer_create_owned_lock_dir() {
+				return 1
+			}
+			zxfer_acquire_error_log_lock "$lock_symlink"
+			printf 'status=%s\n' "$?"
+		)
+	)
+	reap_output=$(
+		(
+			set +e
+			zxfer_create_owned_lock_dir() {
+				return 1
+			}
+			zxfer_try_reap_stale_owned_lock_dir() {
+				return 1
+			}
+			zxfer_acquire_error_log_lock "$lock_dir"
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Error-log lock acquisition should fail closed when the target path is a symlink." \
+		"$symlink_output" "status=1"
+	assertContains "Error-log lock acquisition should fail closed when stale-lock reaping reports a validation failure." \
+		"$reap_output" "status=1"
+}
+
+test_zxfer_acquire_error_log_lock_reports_reap_validation_failures_in_current_shell() {
+	lock_dir="$TEST_TMPDIR/error_log_lock_reap_current"
+	mkdir -p "$lock_dir" || fail "Unable to create the current-shell error-log lock fixture."
+
+	zxfer_create_owned_lock_dir() {
+		return 1
+	}
+	zxfer_try_reap_stale_owned_lock_dir() {
+		return 1
+	}
+
+	set +e
+	zxfer_acquire_error_log_lock "$lock_dir"
+	status=$?
+	set -e
+
+	zxfer_source_runtime_modules_through "zxfer_runtime.sh"
+	setUp
+
+	assertEquals "Current-shell error-log lock acquisition should fail closed when stale-lock reaping returns a validation failure." \
+		1 "$status"
 }
 
 test_zxfer_append_failure_report_to_log_warns_when_snapshot_link_fails() {

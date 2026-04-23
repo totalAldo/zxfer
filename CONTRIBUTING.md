@@ -83,6 +83,13 @@ Run the default unattended VM-backed integration profile:
 ./tests/run_vm_matrix.sh --profile local
 ```
 
+Run guest shunit2 on the same disposable VM boundary when a change needs
+end-to-end shell validation under the guest OS rather than only on the host:
+
+```sh
+./tests/run_vm_matrix.sh --profile local --test-layer shunit2
+```
+
 For tighter development loops, prefer a single guest plus a named in-guest
 test selection before widening back out to the full local profile:
 
@@ -111,7 +118,14 @@ When behavior changes, update the relevant docs:
 - `CHANGELOG.txt`
 - man pages
 - `docs/` guides when workflows or platform behavior changes
+- `SECURITY.md` when trust boundaries, helper resolution, or failure-report
+  handling change
 - `KNOWN_ISSUES.md` if the change resolves or introduces a real open issue
+- `examples/README.md` when runnable wrappers or sample workflows change
+- `packaging/README.txt` and related packaging metadata when install, helper,
+  or dependency expectations move
+- relevant `.github/` workflow or template files when validation entrypoints,
+  required checks, or contributor expectations change
 - When modifying replication logic, state initialization, or adding new
   features, ensure the corresponding Mermaid diagrams in `architecture.md` and
   `README.md` are updated to reflect the new control flow.
@@ -138,7 +152,8 @@ Good pull requests explain:
 - whether CI, coverage policy, or baseline artifacts changed intentionally
 
 GitHub Actions also runs an Ubuntu portable-shell matrix for `dash`,
-`bash --posix`, `busybox ash`, and a non-blocking `posh` lane, plus a separate
-Docker-backed `kcov` coverage artifact job. Local development does not require
-`kcov`, but shell-portability-sensitive changes should mention whether those CI
-lanes were considered.
+`bash --posix`, and `busybox ash` on every push, plus a non-blocking `posh`
+lane on pushes to `main`, and a separate Docker-backed `kcov` coverage
+artifact job. Local development does not require `kcov`, but shell-
+portability-sensitive changes should mention whether those CI lanes were
+considered.

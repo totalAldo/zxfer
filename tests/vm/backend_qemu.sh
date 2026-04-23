@@ -714,7 +714,11 @@ zxfer_vm_backend_qemu_run_guest() {
 	l_base_image_path=$(zxfer_vm_join_path "$l_guest_cache_dir" "$l_guest_base_name")
 
 	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] refreshing checksum manifest $(basename "$l_checksum_file")"
-	zxfer_vm_download_file "$l_guest_checksum_url" "$l_checksum_file"
+	zxfer_vm_refresh_cached_download \
+		"$l_guest_checksum_url" \
+		"$l_checksum_file" \
+		"$l_guest_label/$l_guest_arch" \
+		"checksum manifest $(basename "$l_checksum_file")"
 	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] checksum manifest ready ($(zxfer_vm_format_bytes "$(zxfer_vm_file_size_bytes "$l_checksum_file")"))"
 	l_checksum=$(zxfer_vm_resolve_expected_checksum "$l_checksum_file" "$l_guest_image_filename")
 

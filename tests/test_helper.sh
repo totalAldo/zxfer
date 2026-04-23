@@ -29,7 +29,7 @@ ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT \
 
 # Test suites should not inherit runner-only environment knobs from the
 # developer's shell unless a specific case opts in explicitly.
-unset ZXFER_REDACT_FAILURE_REPORT_COMMANDS
+unset ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
 unset ZXFER_TEST_SHELL
 
 zxfer_source_runtime_modules_through() {

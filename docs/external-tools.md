@@ -26,13 +26,11 @@ These tools are required by the installed `zxfer` command itself.
 | --- | --- | --- | --- |
 | `/bin/sh` | interpreter for `zxfer` and `src/*.sh` | script shebang | base system |
 | `zfs` | all replication, property, snapshot, and existence operations | resolved through the secure-PATH model locally; resolved per host remotely | base system on supported FreeBSD/OpenZFS installs |
-| `ssh` | remote host probing, remote command execution, control sockets | resolved through the secure-PATH model locally | base system |
 | `awk` | parsing, normalization, sorting helpers, report rendering, and cache/index helpers | resolved through the secure-PATH model locally | base system |
+| `ps` | supervised background-job identity validation, process-group checks, and owned-child-set teardown discovery | resolved through the secure-PATH model locally | base system |
 
 Notes:
 
-- `zxfer` currently resolves `ssh` even for local-only runs, so it is a hard
-  dependency of the installed command, not only of `-O` / `-T`.
 - On SunOS/illumos, `gawk` is preferred when available, but plain `awk`
   remains the baseline dependency.
 
@@ -42,8 +40,10 @@ These tools are only required when the corresponding feature is used.
 
 | Tool | Used by | When required | Packaging guidance |
 | --- | --- | --- | --- |
+| `ssh` | remote host probing, remote command execution, control sockets | required when `-O` or `-T` is used, and resolved lazily through the secure-PATH model when remote transport is actually needed | base system on the supported host families; do not make it a local-only hard dependency |
 | `cat` | property backup restore and remote backup metadata writes | `-e` restore mode on the origin side, plus `-k` when backup metadata is written through a remote target helper; remote `cat` is resolved per host role | base system; do not add a separate FreeBSD package dependency |
 | GNU `parallel` | explicit per-dataset source snapshot discovery for `-j > 1` | required on the local origin host whenever `-j > 1` is requested; remote origin hosts must resolve a `parallel` helper, which zxfer assumes is compatible with the rendered pipeline, and zxfer does not silently fall back to the serial recursive listing once `-j > 1` is requested | consider a package dependency if the port should guarantee `-j > 1` support out of the box |
+| `setsid` | supervisor runner process-group isolation | optional; when the local host provides `setsid`, the background-job runner prefers launching long-lived workers in a dedicated process group and falls back to owned-child-set teardown otherwise | usually a base or util-linux userland tool; do not make it a hard dependency unless packaging wants to require process-group isolation everywhere |
 | `zstd` | compressed send/receive streams and remote snapshot-discovery metadata compression | `-z` or default/custom `-Z` compression paths, including remote `-O ... -j ...` metadata discovery when ssh compression is active | consider a package dependency only if the port should guarantee compression support out of the box |
 | `svcadm` | migration/service handling | `-c` and `-m` on illumos/Solaris-family systems | not a FreeBSD package dependency |
 | `kldstat`, `kldload`, `/dev/speaker` | audible status beeps | FreeBSD-only `-b` / `-B` path | base system and device availability; not a package dependency |
@@ -85,6 +85,7 @@ Current runtime inventory:
 - `mktemp`
 - `mv`
 - `od`
+- `ps`
 - `rm`
 - `sed`
 - `sort`

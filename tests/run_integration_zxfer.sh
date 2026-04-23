@@ -1434,8 +1434,11 @@ usage_error_failure_report_test() {
 	if ! grep -q "message: Need a destination\\." "$stderr_log"; then
 		fail "Usage failure report message missing. Output: $(cat "$stderr_log")"
 	fi
-	if ! grep -Eq "invocation: .*'tank/src'" "$stderr_log"; then
-		fail "Usage failure report invocation missing source argument. Output: $(cat "$stderr_log")"
+	if ! grep -q "^invocation: \[redacted\]$" "$stderr_log"; then
+		fail "Usage failure report should redact the invocation by default. Output: $(cat "$stderr_log")"
+	fi
+	if grep -F "tank/src" "$stderr_log" >/dev/null 2>&1; then
+		fail "Usage failure report should not leak the source argument by default. Output: $(cat "$stderr_log")"
 	fi
 
 	safe_rm_f "$stdout_log" "$stderr_log"
@@ -1443,39 +1446,36 @@ usage_error_failure_report_test() {
 	log "Usage error failure report test passed"
 }
 
-usage_error_failure_report_redaction_test() {
-	log "Starting usage error failure report redaction test"
+usage_error_failure_report_unsafe_commands_test() {
+	log "Starting usage error failure report unsafe command test"
 
 	secret_source="tank/secret-source"
-	stdout_log="$WORKDIR/usage_failure_redacted.stdout"
-	stderr_log="$WORKDIR/usage_failure_redacted.stderr"
+	stdout_log="$WORKDIR/usage_failure_unsafe.stdout"
+	stderr_log="$WORKDIR/usage_failure_unsafe.stderr"
 	safe_rm_f "$stdout_log" "$stderr_log"
 
 	set +e
-	ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1 "$ZXFER_BIN" -R "$secret_source" >"$stdout_log" 2>"$stderr_log"
+	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 "$ZXFER_BIN" -R "$secret_source" >"$stdout_log" 2>"$stderr_log"
 	status=$?
 	set -e
 
 	if [ "$status" -ne 2 ]; then
-		fail "Usage failure report redaction test expected exit status 2, got $status. See $stderr_log."
+		fail "Usage failure report unsafe command test expected exit status 2, got $status. See $stderr_log."
 	fi
 	if [ -s "$stdout_log" ]; then
-		fail "Usage failure report redaction test should not write to stdout. Output: $(cat "$stdout_log")"
+		fail "Usage failure report unsafe command test should not write to stdout. Output: $(cat "$stdout_log")"
 	fi
-	if ! grep -q "^invocation: \[redacted\]$" "$stderr_log"; then
-		fail "Usage failure report redaction test missing redacted invocation field. Output: $(cat "$stderr_log")"
-	fi
-	if grep -F "$secret_source" "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report redaction test leaked the secret-bearing source argument. Output: $(cat "$stderr_log")"
+	if ! grep -Eq "invocation: .*'tank/secret-source'" "$stderr_log"; then
+		fail "Usage failure report unsafe command test should preserve the secret-bearing source argument when explicitly enabled. Output: $(cat "$stderr_log")"
 	fi
 
 	safe_rm_f "$stdout_log" "$stderr_log"
 
-	log "Usage error failure report redaction test passed"
+	log "Usage error failure report unsafe command test passed"
 }
 
 usage_error_failure_report_control_character_escaping_test() {
-	log "Starting usage error failure report control-character escaping test"
+	log "Starting usage error failure report unsafe control-character escaping test"
 
 	esc=$(printf '\033')
 	bell=$(printf '\007')
@@ -1485,30 +1485,30 @@ usage_error_failure_report_control_character_escaping_test() {
 	safe_rm_f "$stdout_log" "$stderr_log"
 
 	set +e
-	"$ZXFER_BIN" -R "$control_source" >"$stdout_log" 2>"$stderr_log"
+	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 "$ZXFER_BIN" -R "$control_source" >"$stdout_log" 2>"$stderr_log"
 	status=$?
 	set -e
 
 	if [ "$status" -ne 2 ]; then
-		fail "Usage failure report control-character escaping test expected exit status 2, got $status. See $stderr_log."
+		fail "Usage failure report unsafe control-character escaping test expected exit status 2, got $status. See $stderr_log."
 	fi
 	if [ -s "$stdout_log" ]; then
-		fail "Usage failure report control-character escaping test should not write to stdout. Output: $(cat "$stdout_log")"
+		fail "Usage failure report unsafe control-character escaping test should not write to stdout. Output: $(cat "$stdout_log")"
 	fi
 	if ! grep -F -x "invocation: '$ZXFER_BIN' '-R' 'tank/src\\x1B[31m\\x07'" "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report control-character escaping test missing escaped ESC sequence. Output: $(cat "$stderr_log")"
+		fail "Usage failure report unsafe control-character escaping test missing escaped ESC sequence. Output: $(cat "$stderr_log")"
 	fi
 	if ! grep -F '\x07' "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report control-character escaping test missing escaped BEL sequence. Output: $(cat "$stderr_log")"
+		fail "Usage failure report unsafe control-character escaping test missing escaped BEL sequence. Output: $(cat "$stderr_log")"
 	fi
 	if grep -F '\\x1B' "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report control-character escaping test double-escaped the ESC marker. Output: $(cat "$stderr_log")"
+		fail "Usage failure report unsafe control-character escaping test double-escaped the ESC marker. Output: $(cat "$stderr_log")"
 	fi
 	if grep -F "$esc" "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report control-character escaping test leaked a raw ESC byte. Output: $(cat "$stderr_log")"
+		fail "Usage failure report unsafe control-character escaping test leaked a raw ESC byte. Output: $(cat "$stderr_log")"
 	fi
 	if grep -F "$bell" "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report control-character escaping test leaked a raw BEL byte. Output: $(cat "$stderr_log")"
+		fail "Usage failure report unsafe control-character escaping test leaked a raw BEL byte. Output: $(cat "$stderr_log")"
 	fi
 
 	safe_rm_f "$stdout_log" "$stderr_log"
@@ -1517,7 +1517,7 @@ usage_error_failure_report_control_character_escaping_test() {
 }
 
 usage_error_failure_report_trailing_newline_preservation_test() {
-	log "Starting usage error failure report trailing-newline preservation test"
+	log "Starting usage error failure report unsafe trailing-newline preservation test"
 
 	trailing_source=$(printf 'tank/src\n_')
 	trailing_source=${trailing_source%_}
@@ -1526,23 +1526,23 @@ usage_error_failure_report_trailing_newline_preservation_test() {
 	safe_rm_f "$stdout_log" "$stderr_log"
 
 	set +e
-	"$ZXFER_BIN" -R "$trailing_source" >"$stdout_log" 2>"$stderr_log"
+	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 "$ZXFER_BIN" -R "$trailing_source" >"$stdout_log" 2>"$stderr_log"
 	status=$?
 	set -e
 
 	if [ "$status" -ne 2 ]; then
-		fail "Usage failure report trailing-newline preservation test expected exit status 2, got $status. See $stderr_log."
+		fail "Usage failure report unsafe trailing-newline preservation test expected exit status 2, got $status. See $stderr_log."
 	fi
 	if [ -s "$stdout_log" ]; then
-		fail "Usage failure report trailing-newline preservation test should not write to stdout. Output: $(cat "$stdout_log")"
+		fail "Usage failure report unsafe trailing-newline preservation test should not write to stdout. Output: $(cat "$stdout_log")"
 	fi
 	if ! grep -F -x "invocation: '$ZXFER_BIN' '-R' 'tank/src\\n'" "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report trailing-newline preservation test missing escaped newline marker. Output: $(cat "$stderr_log")"
+		fail "Usage failure report unsafe trailing-newline preservation test missing escaped newline marker. Output: $(cat "$stderr_log")"
 	fi
 
 	safe_rm_f "$stdout_log" "$stderr_log"
 
-	log "Usage error failure report trailing-newline preservation test passed"
+	log "Usage error failure report unsafe trailing-newline preservation test passed"
 }
 
 assert_error_case() {
@@ -1697,7 +1697,7 @@ secure_path_append_resolution_test() {
 	append_path="$WORKDIR/mock_secure_path_append"
 	safe_rm_rf "$base_path" "$append_path"
 
-	prepare_mock_bin_dir "$base_path" awk ssh
+	prepare_mock_bin_dir "$base_path" awk ps ssh
 	prepare_mock_bin_dir "$append_path" zfs
 
 	set +e
@@ -1751,7 +1751,7 @@ missing_parallel_error_test() {
 
 	mock_path="$WORKDIR/mock_no_parallel"
 	prepare_mock_bin_dir "$mock_path" \
-		awk cat chmod comm cut date grep head id ln ls mkdir mkfifo mktemp rm rmdir sed sort ssh stat tr uname zfs
+		awk cat chmod comm cut date grep head id ln ls mkdir mkfifo mktemp ps rm rmdir sed sort ssh stat tr uname zfs
 
 	secure_path="$mock_path"
 	src_dataset="$SRC_POOL/no_parallel_src"
@@ -2057,7 +2057,7 @@ runtime_failure_report_test() {
 }
 
 runtime_failure_report_redaction_test() {
-	log "Starting runtime failure report redaction test"
+	log "Starting runtime failure report default redaction test"
 
 	dest_root="$DEST_POOL/failure_report_redacted_dest"
 	progress_secret="printf runtime-secret-token"
@@ -2070,40 +2070,89 @@ runtime_failure_report_redaction_test() {
 
 	set +e
 	ZXFER_ERROR_LOG="$log_path" \
-		ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1 \
 		"$ZXFER_BIN" -D "$progress_secret" -R "$SRC_POOL/no_such_dataset" "$dest_root" >"$stdout_log" 2>"$stderr_log"
 	status=$?
 	set -e
 
 	if [ "$status" -ne 3 ]; then
-		fail "Runtime failure report redaction test expected exit status 3, got $status. Output: $(cat "$stderr_log")"
+		fail "Runtime failure report default redaction test expected exit status 3, got $status. Output: $(cat "$stderr_log")"
 	fi
 	if [ -s "$stdout_log" ]; then
-		fail "Runtime failure report redaction test should not write to stdout. Output: $(cat "$stdout_log")"
+		fail "Runtime failure report default redaction test should not write to stdout. Output: $(cat "$stdout_log")"
 	fi
 	if [ ! -f "$log_path" ]; then
-		fail "Runtime failure report redaction test expected ZXFER_ERROR_LOG output."
+		fail "Runtime failure report default redaction test expected ZXFER_ERROR_LOG output."
 	fi
 	if ! grep -q "^invocation: \[redacted\]$" "$stderr_log"; then
-		fail "Runtime failure report redaction test missing redacted invocation on stderr. Output: $(cat "$stderr_log")"
+		fail "Runtime failure report default redaction test missing redacted invocation on stderr. Output: $(cat "$stderr_log")"
 	fi
 	if ! grep -q "^last_command: \[redacted\]$" "$stderr_log"; then
-		fail "Runtime failure report redaction test missing redacted last_command on stderr. Output: $(cat "$stderr_log")"
+		fail "Runtime failure report default redaction test missing redacted last_command on stderr. Output: $(cat "$stderr_log")"
 	fi
 	if ! grep -q "^invocation: \[redacted\]$" "$log_path"; then
-		fail "Runtime failure report redaction test missing redacted invocation in ZXFER_ERROR_LOG. Output: $(cat "$log_path")"
+		fail "Runtime failure report default redaction test missing redacted invocation in ZXFER_ERROR_LOG. Output: $(cat "$log_path")"
 	fi
 	if ! grep -q "^last_command: \[redacted\]$" "$log_path"; then
-		fail "Runtime failure report redaction test missing redacted last_command in ZXFER_ERROR_LOG. Output: $(cat "$log_path")"
+		fail "Runtime failure report default redaction test missing redacted last_command in ZXFER_ERROR_LOG. Output: $(cat "$log_path")"
 	fi
 	if grep -F "$progress_secret" "$stderr_log" >/dev/null 2>&1; then
-		fail "Runtime failure report redaction test leaked the secret-bearing progress command on stderr. Output: $(cat "$stderr_log")"
+		fail "Runtime failure report default redaction test leaked the secret-bearing progress command on stderr. Output: $(cat "$stderr_log")"
 	fi
 	if grep -F "$progress_secret" "$log_path" >/dev/null 2>&1; then
-		fail "Runtime failure report redaction test leaked the secret-bearing progress command in ZXFER_ERROR_LOG. Output: $(cat "$log_path")"
+		fail "Runtime failure report default redaction test leaked the secret-bearing progress command in ZXFER_ERROR_LOG. Output: $(cat "$log_path")"
 	fi
 
-	log "Runtime failure report redaction test passed"
+	log "Runtime failure report default redaction test passed"
+}
+
+runtime_failure_report_unsafe_commands_test() {
+	log "Starting runtime failure report unsafe command test"
+
+	dest_root="$DEST_POOL/failure_report_unsafe_dest"
+	progress_secret="printf runtime-secret-token"
+	log_path="$WORKDIR/runtime_failure_unsafe.report"
+	stdout_log="$WORKDIR/runtime_failure_unsafe.stdout"
+	stderr_log="$WORKDIR/runtime_failure_unsafe.stderr"
+	destroy_test_datasets_if_present "$dest_root"
+	zfs create "$dest_root"
+	safe_rm_f "$log_path" "$stdout_log" "$stderr_log"
+
+	set +e
+	ZXFER_ERROR_LOG="$log_path" \
+		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 \
+		"$ZXFER_BIN" -D "$progress_secret" -R "$SRC_POOL/no_such_dataset" "$dest_root" >"$stdout_log" 2>"$stderr_log"
+	status=$?
+	set -e
+
+	if [ "$status" -ne 3 ]; then
+		fail "Runtime failure report unsafe command test expected exit status 3, got $status. Output: $(cat "$stderr_log")"
+	fi
+	if [ -s "$stdout_log" ]; then
+		fail "Runtime failure report unsafe command test should not write to stdout. Output: $(cat "$stdout_log")"
+	fi
+	if [ ! -f "$log_path" ]; then
+		fail "Runtime failure report unsafe command test expected ZXFER_ERROR_LOG output."
+	fi
+	if ! grep -F "$progress_secret" "$stderr_log" >/dev/null 2>&1; then
+		fail "Runtime failure report unsafe command test should preserve the secret-bearing progress command on stderr when explicitly enabled. Output: $(cat "$stderr_log")"
+	fi
+	if ! grep -F "$progress_secret" "$log_path" >/dev/null 2>&1; then
+		fail "Runtime failure report unsafe command test should preserve the secret-bearing progress command in ZXFER_ERROR_LOG when explicitly enabled. Output: $(cat "$log_path")"
+	fi
+	if ! grep -q "^last_command: " "$stderr_log"; then
+		fail "Runtime failure report unsafe command test should preserve last_command on stderr when explicitly enabled. Output: $(cat "$stderr_log")"
+	fi
+	if grep -q "^last_command: \[redacted\]$" "$stderr_log"; then
+		fail "Runtime failure report unsafe command test should not redact last_command on stderr when explicitly enabled. Output: $(cat "$stderr_log")"
+	fi
+	if ! grep -q "^last_command: " "$log_path"; then
+		fail "Runtime failure report unsafe command test should preserve last_command in ZXFER_ERROR_LOG when explicitly enabled. Output: $(cat "$log_path")"
+	fi
+	if grep -q "^last_command: \[redacted\]$" "$log_path"; then
+		fail "Runtime failure report unsafe command test should not redact last_command in ZXFER_ERROR_LOG when explicitly enabled. Output: $(cat "$log_path")"
+	fi
+
+	log "Runtime failure report unsafe command test passed"
 }
 
 error_log_mirror_test() {
@@ -2702,6 +2751,118 @@ job_limit_enforcement_test() {
 	assert_snapshot_exists "$dest_root/joblimit_src" "next"
 
 	log "Job limit enforcement test passed"
+}
+
+background_receive_ancestry_serialization_test() {
+	log "Starting background receive ancestry serialization test"
+
+	if ! has_gnu_parallel; then
+		log "Skipping background receive ancestry serialization test (GNU parallel not available)"
+		return
+	fi
+
+	src_root="$SRC_POOL/receive_ancestry_src"
+	child_dataset="$src_root/child"
+	dest_root="$DEST_POOL/receive_ancestry_dest"
+	dest_dataset="$dest_root/${src_root##*/}"
+	dest_child="$dest_dataset/child"
+
+	destroy_test_datasets_if_present "$dest_root" "$src_root"
+
+	zfs create "$src_root"
+	zfs create "$child_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_root" "root.txt" "base root"
+	append_data_to_dataset "$child_dataset" "child.txt" "base child"
+	zfs snap -r "$src_root@base"
+
+	run_zxfer -v -R "$src_root" "$dest_root" >/dev/null 2>&1
+
+	append_data_to_dataset "$src_root" "root.txt" "next root"
+	append_data_to_dataset "$child_dataset" "child.txt" "next child"
+	zfs snap -r "$src_root@next"
+
+	real_zfs=$(resolve_host_command zfs)
+	if [ "$real_zfs" = "" ]; then
+		fail "zfs binary not found for background receive ancestry serialization test."
+	fi
+
+	wrapper_dir="$WORKDIR/zfs_wrapper_receive_ancestry"
+	state_dir="$WORKDIR/receive_ancestry_state"
+	safe_rm_rf "$wrapper_dir" "$state_dir"
+	mkdir -p "$wrapper_dir" "$state_dir"
+	cat >"$wrapper_dir/zfs" <<EOF
+#!/bin/sh
+real_zfs='$real_zfs'
+state_dir=\${ZXFER_RECEIVE_SERIAL_STATE_DIR:-}
+parent_dataset=\${ZXFER_RECEIVE_PARENT_DATASET:-}
+child_dataset=\${ZXFER_RECEIVE_CHILD_DATASET:-}
+
+if [ "\$1" = "receive" ] && [ -n "\$state_dir" ]; then
+	l_dest_dataset=
+	for l_arg in "\$@"; do
+		l_dest_dataset=\$l_arg
+	done
+	l_slot=
+	l_other_slot=
+	case \$l_dest_dataset in
+	"\$parent_dataset")
+		l_slot=parent
+		l_other_slot=child
+		;;
+	"\$child_dataset")
+		l_slot=child
+		l_other_slot=parent
+		;;
+	esac
+	if [ -n "\$l_slot" ]; then
+		if [ -e "\$state_dir/\$l_other_slot.active" ]; then
+			: >"\$state_dir/violation"
+			printf '%s\t%s\t%s\n' overlap "\$l_dest_dataset" "\$l_other_slot" >>"\$state_dir/events"
+		fi
+		: >"\$state_dir/\$l_slot.active"
+		printf '%s\t%s\n' start "\$l_dest_dataset" >>"\$state_dir/events"
+		sleep 1
+		"\$real_zfs" "\$@"
+		l_status=\$?
+		rm -f "\$state_dir/\$l_slot.active"
+		printf '%s\t%s\t%s\n' end "\$l_dest_dataset" "\$l_status" >>"\$state_dir/events"
+		exit "\$l_status"
+	fi
+fi
+
+exec "\$real_zfs" "\$@"
+EOF
+	chmod +x "$wrapper_dir/zfs"
+	secure_path="$wrapper_dir:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+
+	set +e
+	output=$(ZXFER_SECURE_PATH="$secure_path" \
+		ZXFER_RECEIVE_SERIAL_STATE_DIR="$state_dir" \
+		ZXFER_RECEIVE_PARENT_DATASET="$dest_dataset" \
+		ZXFER_RECEIVE_CHILD_DATASET="$dest_child" \
+		"$ZXFER_BIN" -v -F -j 2 -R "$src_root" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	safe_rm_rf "$wrapper_dir"
+
+	if [ "$status" -ne 0 ]; then
+		fail "zxfer should serialize parent and child background receives instead of failing. Output: $output"
+	fi
+	if [ -e "$state_dir/violation" ]; then
+		fail "Parent and child destination receives should not overlap when -j is enabled. Events: $(cat "$state_dir/events" 2>/dev/null)"
+	fi
+
+	assert_snapshot_exists "$dest_dataset" "base"
+	assert_snapshot_exists "$dest_dataset" "next"
+	assert_snapshot_exists "$dest_child" "base"
+	assert_snapshot_exists "$dest_child" "next"
+
+	safe_rm_rf "$state_dir"
+
+	log "Background receive ancestry serialization test passed"
 }
 
 missing_destination_error_test() {
@@ -4720,43 +4881,125 @@ trap_exit_cleanup_test() {
 	log "Starting trap exit cleanup test"
 
 	if ! has_gnu_parallel; then
-		log "Skipping trap exit cleanup test (GNU parallel not available for background send)"
+		log "Skipping trap exit cleanup test (GNU parallel not available for supervised background jobs)"
 		return
 	fi
 
 	mock_path="$WORKDIR/mock_trap_exit"
+	list_marker="$WORKDIR/mock_trap_exit_list_started"
+	list_shell_pid_file="$WORKDIR/mock_trap_exit_list_shell.pid"
+	list_sleep_pid_file="$WORKDIR/mock_trap_exit_list_sleep.pid"
 	send_marker="$WORKDIR/mock_trap_exit_send_started"
+	send_shell_pid_file="$WORKDIR/mock_trap_exit_send_shell.pid"
+	send_sleep_pid_file="$WORKDIR/mock_trap_exit_send_sleep.pid"
+	runner_script=$(pwd)/src/zxfer_background_job_runner.sh
+	list_src_dataset="$SRC_POOL/trap_list_src"
+	list_dest_root="$DEST_POOL/trap_list_dest"
+	send_src_dataset="$SRC_POOL/trap_send_src"
+	send_dest_root="$DEST_POOL/trap_send_dest"
 	prepare_mock_bin_dir "$mock_path" ssh zfs
 	write_mock_ssh_script "$mock_path/ssh"
 	real_zfs=$(resolve_host_command zfs)
-	safe_rm_f "$send_marker"
+	safe_rm_f \
+		"$list_marker" \
+		"$list_shell_pid_file" \
+		"$list_sleep_pid_file" \
+		"$send_marker" \
+		"$send_shell_pid_file" \
+		"$send_sleep_pid_file"
 	safe_rm_f "$mock_path/zfs"
 	cat >"$mock_path/zfs" <<EOF
 #!/bin/sh
+if [ "\$1" = "list" ]; then
+	case " \$* " in
+	*" -t snapshot "*)
+		case "\$*" in
+		*"$list_src_dataset"*)
+			: >"$list_marker"
+			printf '%s\n' "\$\$" >"$list_shell_pid_file"
+			sleep 30 &
+			l_child_pid=\$!
+			printf '%s\n' "\$l_child_pid" >"$list_sleep_pid_file"
+			wait "\$l_child_pid"
+			exit \$?
+			;;
+		esac
+		;;
+	esac
+fi
 if [ "\$1" = "send" ]; then
 	: >"$send_marker"
-	sleep 5
+	printf '%s\n' "\$\$" >"$send_shell_pid_file"
+	sleep 30 &
+	l_child_pid=\$!
+	printf '%s\n' "\$l_child_pid" >"$send_sleep_pid_file"
+	wait "\$l_child_pid"
+	exit \$?
 fi
 exec "$real_zfs" "\$@"
 EOF
 	chmod +x "$mock_path/zfs"
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 
-	src_dataset="$SRC_POOL/trap_src"
-	dest_root="$DEST_POOL/trap_dest"
+	destroy_test_datasets_if_present \
+		"$list_src_dataset" \
+		"$list_dest_root" \
+		"$send_src_dataset" \
+		"$send_dest_root"
 
-	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
+	zfs create "$list_src_dataset"
+	zfs create "$list_dest_root"
+	append_data_to_dataset "$list_src_dataset" "file.txt" "pending list"
+	zfs snap -r "$list_src_dataset@trap1"
 
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	append_data_to_dataset "$src_dataset" "file.txt" "pending"
-	zfs snap -r "$src_dataset@trap1"
+	zfs create "$send_src_dataset"
+	zfs create "$send_dest_root"
+	append_data_to_dataset "$send_src_dataset" "file.txt" "pending send"
+	zfs snap -r "$send_src_dataset@trap1"
 
 	before_tmp=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type f -name 'zxfer.*' 2>/dev/null || true)
 	before_sockets=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'zxfer_ssh_control_socket.*' 2>/dev/null || true)
 
 	set +e
-	ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -T localhost -R "$src_dataset" "$dest_root" >/dev/null 2>&1 &
+	ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -T localhost -R "$list_src_dataset" "$list_dest_root" >/dev/null 2>&1 &
+	zxfer_pid=$!
+	list_started=0
+	i=0
+	while [ "$i" -lt 10 ]; do
+		if [ -f "$list_marker" ]; then
+			list_started=1
+			break
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	if [ "$list_started" -ne 1 ]; then
+		kill -s TERM "$zxfer_pid" >/dev/null 2>&1 || true
+		wait "$zxfer_pid" >/dev/null 2>&1 || true
+		set -e
+		fail "Trap exit cleanup test never observed the mocked source snapshot listing start marker."
+	fi
+	kill -s INT "$zxfer_pid" >/dev/null 2>&1 || true
+	wait "$zxfer_pid"
+	set -e
+
+	if [ -f "$list_shell_pid_file" ] &&
+		kill -s 0 "$(cat "$list_shell_pid_file")" >/dev/null 2>&1; then
+		fail "Background zfs list wrapper shell still running after zxfer_trap_exit handling."
+	fi
+	if [ -f "$list_sleep_pid_file" ] &&
+		kill -s 0 "$(cat "$list_sleep_pid_file")" >/dev/null 2>&1; then
+		fail "Background zfs list child still running after zxfer_trap_exit handling."
+	fi
+	if pgrep -f "$mock_path/zfs list .*${list_src_dataset}" >/dev/null 2>&1; then
+		fail "Background zfs list still running after zxfer_trap_exit handling."
+	fi
+	if pgrep -f "$runner_script" >/dev/null 2>&1; then
+		fail "Background job runner still running after snapshot discovery trap cleanup."
+	fi
+
+	set +e
+	ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -T localhost -R "$send_src_dataset" "$send_dest_root" >/dev/null 2>&1 &
 	zxfer_pid=$!
 	send_started=0
 	i=0
@@ -4803,11 +5046,28 @@ EOF
 		fail "SSH control sockets leaked after SIGINT: $socket_leaks"
 	fi
 
-	if pgrep -f "zfs send .*trap_src" >/dev/null 2>&1; then
+	if [ -f "$send_shell_pid_file" ] &&
+		kill -s 0 "$(cat "$send_shell_pid_file")" >/dev/null 2>&1; then
+		fail "Background zfs send wrapper shell still running after zxfer_trap_exit handling."
+	fi
+	if [ -f "$send_sleep_pid_file" ] &&
+		kill -s 0 "$(cat "$send_sleep_pid_file")" >/dev/null 2>&1; then
+		fail "Background zfs send child still running after zxfer_trap_exit handling."
+	fi
+	if pgrep -f "$mock_path/zfs send .*${send_src_dataset}" >/dev/null 2>&1; then
 		fail "Background zfs send still running after zxfer_trap_exit handling."
 	fi
+	if pgrep -f "$runner_script" >/dev/null 2>&1; then
+		fail "Background job runner still running after send trap cleanup."
+	fi
 
-	safe_rm_f "$send_marker"
+	safe_rm_f \
+		"$list_marker" \
+		"$list_shell_pid_file" \
+		"$list_sleep_pid_file" \
+		"$send_marker" \
+		"$send_shell_pid_file" \
+		"$send_sleep_pid_file"
 
 	log "Trap exit cleanup test passed"
 }
@@ -5410,7 +5670,7 @@ main() {
 
 	TEST_SEQUENCE="usage_error_tests \
 usage_error_failure_report_test \
-usage_error_failure_report_redaction_test \
+usage_error_failure_report_unsafe_commands_test \
 usage_error_failure_report_control_character_escaping_test \
 usage_error_failure_report_trailing_newline_preservation_test \
 basic_replication_test \
@@ -5430,6 +5690,7 @@ force_rollback_test \
 failure_handling_tests \
 runtime_failure_report_test \
 runtime_failure_report_redaction_test \
+runtime_failure_report_unsafe_commands_test \
 extended_usage_error_tests \
 consistency_option_validation_tests \
 snapshot_deletion_test \
@@ -5456,6 +5717,7 @@ property_creation_with_zvol_test \
 	progress_wrapper_test \
 	progress_placeholder_passthrough_test \
 	job_limit_enforcement_test \
+	background_receive_ancestry_serialization_test \
 	background_send_failure_test \
 	secure_path_dependency_tests \
 	secure_path_failure_report_test \

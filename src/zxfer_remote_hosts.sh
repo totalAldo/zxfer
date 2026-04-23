@@ -156,6 +156,43 @@ zxfer_ssh_supports_control_sockets() {
 	"$g_cmd_ssh" -M -V >/dev/null 2>&1
 }
 
+# Purpose: Return the resolved local ssh helper in the form expected by later
+# helpers.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when remote transport is actually needed so local-only runs
+# do not hard-require ssh during startup.
+zxfer_ensure_local_ssh_command() {
+	g_zxfer_resolved_local_ssh_command_result=""
+
+	if [ -n "${g_cmd_ssh:-}" ]; then
+		g_zxfer_resolved_local_ssh_command_result=$g_cmd_ssh
+		return 0
+	fi
+
+	if ! l_ssh_path=$(zxfer_find_required_tool ssh "ssh"); then
+		g_zxfer_resolved_local_ssh_command_result=$l_ssh_path
+		return 1
+	fi
+
+	g_cmd_ssh=$l_ssh_path
+	g_zxfer_resolved_local_ssh_command_result=$g_cmd_ssh
+	return 0
+}
+
+# Purpose: Return the resolved local ssh helper in the form expected by later
+# helpers.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when remote transport is actually needed so local-only runs
+# do not hard-require ssh during startup.
+zxfer_get_resolved_local_ssh_command() {
+	if ! zxfer_ensure_local_ssh_command; then
+		printf '%s\n' "$g_zxfer_resolved_local_ssh_command_result"
+		return 1
+	fi
+
+	printf '%s\n' "$g_zxfer_resolved_local_ssh_command_result"
+}
+
 # Purpose: Manage SSH control socket cache key for remote transport
 # coordination.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
@@ -505,6 +542,8 @@ zxfer_ensure_ssh_control_socket_entry_dir() {
 					printf '%s\n' "$l_entry_dir"
 					return 0
 				fi
+			else
+				return 1
 			fi
 			l_suffix=$((l_suffix + 1))
 			continue
@@ -1082,7 +1121,11 @@ zxfer_run_ssh_control_socket_action_for_host() {
 		g_zxfer_ssh_control_socket_action_stderr=$l_transport_tokens
 		return 1
 	fi
-	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host")
+	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host"); then
+		g_zxfer_ssh_control_socket_action_result="error"
+		g_zxfer_ssh_control_socket_action_stderr=$l_host_tokens
+		return 1
+	fi
 	set --
 	if [ "$l_transport_tokens" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
@@ -1177,10 +1220,15 @@ zxfer_open_ssh_control_socket_for_host() {
 	[ -n "$l_host" ] || return 1
 	[ -n "$l_socket_path" ] || return 1
 
-	if ! l_transport_tokens=$(zxfer_get_ssh_base_transport_tokens); then
-		zxfer_throw_error "$l_transport_tokens"
+	if l_transport_tokens=$(zxfer_get_ssh_base_transport_tokens); then
+		:
+	else
+		l_transport_status=$?
+		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
 	fi
-	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host")
+	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host"); then
+		zxfer_throw_error "$l_host_tokens"
+	fi
 	set --
 	if [ "$l_transport_tokens" != "" ]; then
 		while IFS= read -r l_token || [ -n "$l_token" ]; do
@@ -1429,7 +1477,11 @@ zxfer_get_remote_capability_requested_tools_for_tool() {
 # without reparsing the full payload themselves.
 zxfer_extract_remote_cli_command_head() {
 	l_cli_string=$1
-	l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string")
+	l_label=${2:-CLI command}
+	if ! l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
+		printf '%s\n' "$l_cli_tokens"
+		return 1
+	fi
 	l_cli_head=$(printf '%s\n' "$l_cli_tokens" | sed -n '1p')
 	[ -n "$l_cli_head" ] || return 1
 	printf '%s\n' "$l_cli_head"
@@ -1478,7 +1530,7 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 			zxfer_append_remote_capability_requested_tool cat
 		fi
 		if [ "${g_option_z_compress:-0}" -eq 1 ]; then
-			if l_compress_head=$(zxfer_extract_remote_cli_command_head "${g_cmd_compress:-}"); then
+			if l_compress_head=$(zxfer_extract_remote_cli_command_head "${g_cmd_compress:-}" "compression command"); then
 				zxfer_append_remote_capability_requested_tool "$l_compress_head"
 			fi
 		fi
@@ -1489,7 +1541,7 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 			zxfer_append_remote_capability_requested_tool cat
 		fi
 		if [ "${g_option_z_compress:-0}" -eq 1 ]; then
-			if l_decompress_head=$(zxfer_extract_remote_cli_command_head "${g_cmd_decompress:-}"); then
+			if l_decompress_head=$(zxfer_extract_remote_cli_command_head "${g_cmd_decompress:-}" "decompression command"); then
 				zxfer_append_remote_capability_requested_tool "$l_decompress_head"
 			fi
 		fi
@@ -2274,9 +2326,12 @@ zxfer_capture_remote_probe_output() {
 
 	zxfer_reset_remote_probe_capture_state
 
-	if ! l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+		:
+	else
 		zxfer_profile_record_ssh_invocation "$l_host_spec" "$l_profile_side"
-		zxfer_throw_error "$l_transport_tokens"
+		l_transport_status=$?
+		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
 	fi
 
 	l_temp_prefix="${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}.remote-probe"
@@ -2374,6 +2429,7 @@ zxfer_store_cached_remote_capability_response_for_host() {
 		if [ "${g_origin_remote_capabilities_cache_identity:-}" != "$l_cache_identity" ] ||
 			[ "${g_origin_remote_capabilities_host:-}" != "$l_host_spec" ]; then
 			g_origin_remote_capabilities_bootstrap_source=""
+			g_origin_remote_capabilities_cache_write_unavailable=0
 		fi
 		g_origin_remote_capabilities_host=$l_host_spec
 		g_origin_remote_capabilities_dependency_path=$l_dependency_path
@@ -2387,6 +2443,7 @@ zxfer_store_cached_remote_capability_response_for_host() {
 		if [ "${g_target_remote_capabilities_cache_identity:-}" != "$l_cache_identity" ] ||
 			[ "${g_target_remote_capabilities_host:-}" != "$l_host_spec" ]; then
 			g_target_remote_capabilities_bootstrap_source=""
+			g_target_remote_capabilities_cache_write_unavailable=0
 		fi
 		g_target_remote_capabilities_host=$l_host_spec
 		g_target_remote_capabilities_dependency_path=$l_dependency_path
@@ -2402,6 +2459,7 @@ zxfer_store_cached_remote_capability_response_for_host() {
 		g_origin_remote_capabilities_cache_identity=$l_cache_identity
 		g_origin_remote_capabilities_response=$l_response
 		g_origin_remote_capabilities_bootstrap_source=""
+		g_origin_remote_capabilities_cache_write_unavailable=0
 		return
 	fi
 
@@ -2411,6 +2469,7 @@ zxfer_store_cached_remote_capability_response_for_host() {
 		g_target_remote_capabilities_cache_identity=$l_cache_identity
 		g_target_remote_capabilities_response=$l_response
 		g_target_remote_capabilities_bootstrap_source=""
+		g_target_remote_capabilities_cache_write_unavailable=0
 	fi
 }
 
@@ -2554,7 +2613,61 @@ zxfer_warn_remote_capability_cache_write_failure() {
 	l_host_spec=$1
 	l_status=$2
 
-	printf '%s\n' "Warning: Failed to write local remote capability cache for host $l_host_spec (status $l_status)." >&2
+	printf '%s\n' "Warning: Failed to write local remote capability cache for host $l_host_spec (status $l_status); disabling further local cache writes for this host during this run." >&2
+}
+
+# Purpose: Check whether local remote capability cache writes are unavailable
+# for host in this run.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management before zxfer retries a local cache write that already
+# failed once for the same host/cache identity.
+zxfer_remote_capability_cache_write_is_unavailable_for_host() {
+	l_host_spec=$1
+	l_requested_tools=${2:-}
+
+	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+		"$l_host_spec" "$l_requested_tools"); then
+		return 1
+	fi
+
+	if [ "$l_host_spec" = "${g_origin_remote_capabilities_host:-}" ] &&
+		[ "$l_cache_identity" = "${g_origin_remote_capabilities_cache_identity:-}" ] &&
+		[ "${g_origin_remote_capabilities_cache_write_unavailable:-0}" -eq 1 ]; then
+		return 0
+	fi
+
+	if [ "$l_host_spec" = "${g_target_remote_capabilities_host:-}" ] &&
+		[ "$l_cache_identity" = "${g_target_remote_capabilities_cache_identity:-}" ] &&
+		[ "${g_target_remote_capabilities_cache_write_unavailable:-0}" -eq 1 ]; then
+		return 0
+	fi
+
+	return 1
+}
+
+# Purpose: Mark local remote capability cache writes unavailable for host in
+# this run after a checked persistence failure.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when zxfer needs an explicit degraded cache state instead
+# of repeated best-effort writes.
+zxfer_note_remote_capability_cache_write_unavailable_for_host() {
+	l_host_spec=$1
+	l_requested_tools=${2:-}
+
+	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+		"$l_host_spec" "$l_requested_tools"); then
+		return 0
+	fi
+
+	if [ "$l_host_spec" = "${g_origin_remote_capabilities_host:-}" ] &&
+		[ "$l_cache_identity" = "${g_origin_remote_capabilities_cache_identity:-}" ]; then
+		g_origin_remote_capabilities_cache_write_unavailable=1
+	fi
+
+	if [ "$l_host_spec" = "${g_target_remote_capabilities_host:-}" ] &&
+		[ "$l_cache_identity" = "${g_target_remote_capabilities_cache_identity:-}" ]; then
+		g_target_remote_capabilities_cache_write_unavailable=1
+	fi
 }
 
 # Purpose: Emit the remote capability cache lock release failure in the
@@ -2748,13 +2861,18 @@ zxfer_ensure_remote_host_capabilities() {
 	zxfer_note_remote_capability_bootstrap_source_for_host \
 		"$l_host_spec" live "$l_requested_tools"
 	zxfer_profile_record_remote_capability_bootstrap_source live
-	if zxfer_write_remote_capability_cache_file \
-		"$l_host_spec" "$l_live_response" "$l_requested_tools" >/dev/null 2>&1; then
-		:
-	else
-		l_cache_write_status=$?
-		zxfer_warn_remote_capability_cache_write_failure \
-			"$l_host_spec" "$l_cache_write_status"
+	if ! zxfer_remote_capability_cache_write_is_unavailable_for_host \
+		"$l_host_spec" "$l_requested_tools"; then
+		if zxfer_write_remote_capability_cache_file \
+			"$l_host_spec" "$l_live_response" "$l_requested_tools" >/dev/null 2>&1; then
+			:
+		else
+			l_cache_write_status=$?
+			zxfer_note_remote_capability_cache_write_unavailable_for_host \
+				"$l_host_spec" "$l_requested_tools"
+			zxfer_warn_remote_capability_cache_write_failure \
+				"$l_host_spec" "$l_cache_write_status"
+		fi
 	fi
 	if [ -n "$l_capability_lock_dir" ]; then
 		zxfer_release_remote_capability_cache_lock_with_precedence \
@@ -3145,7 +3263,10 @@ zxfer_resolve_remote_cli_command_safe() {
 	l_cli_string=$2
 	l_label=${3:-command}
 	l_profile_side=${4:-}
-	l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string")
+	if ! l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
+		printf '%s\n' "$l_cli_tokens"
+		return 1
+	fi
 	l_cli_head=$(printf '%s\n' "$l_cli_tokens" | sed -n '1p')
 	if [ -z "$l_cli_head" ]; then
 		printf '%s\n' "Required dependency \"$l_label\" must not be empty or whitespace-only."
@@ -3157,7 +3278,7 @@ zxfer_resolve_remote_cli_command_safe() {
 		return 1
 	fi
 
-	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head"
+	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head" "$l_label"
 }
 
 # Purpose: Best-effort cleanup for a freshly opened SSH control socket when
@@ -3654,7 +3775,9 @@ zxfer_close_all_ssh_control_sockets() {
 # shellcheck disable=SC2034
 zxfer_refresh_remote_zfs_commands() {
 	if [ "$g_option_O_origin_host" != "" ]; then
-		g_option_O_origin_host_safe=$(zxfer_quote_host_spec_tokens "$g_option_O_origin_host")
+		if ! g_option_O_origin_host_safe=$(zxfer_quote_host_spec_tokens "$g_option_O_origin_host"); then
+			zxfer_throw_usage_error "$g_option_O_origin_host_safe" 2
+		fi
 		g_LZFS=${g_origin_cmd_zfs:-$g_cmd_zfs}
 	else
 		g_option_O_origin_host_safe=""
@@ -3662,7 +3785,9 @@ zxfer_refresh_remote_zfs_commands() {
 	fi
 
 	if [ "$g_option_T_target_host" != "" ]; then
-		g_option_T_target_host_safe=$(zxfer_quote_host_spec_tokens "$g_option_T_target_host")
+		if ! g_option_T_target_host_safe=$(zxfer_quote_host_spec_tokens "$g_option_T_target_host"); then
+			zxfer_throw_usage_error "$g_option_T_target_host_safe" 2
+		fi
 		g_RZFS=${g_target_cmd_zfs:-$g_cmd_zfs}
 	else
 		g_option_T_target_host_safe=""
@@ -3692,6 +3817,16 @@ zxfer_prepare_remote_host_connections() {
 		zxfer_refresh_remote_zfs_commands
 		zxfer_profile_add_elapsed_ms g_zxfer_profile_ssh_setup_ms "$l_ssh_setup_start_ms"
 		return
+	fi
+
+	if [ "$g_option_O_origin_host" != "" ] || [ "$g_option_T_target_host" != "" ]; then
+		if [ -z "${g_cmd_ssh:-}" ]; then
+			if ! zxfer_ensure_local_ssh_command; then
+				g_zxfer_failure_class=dependency
+				zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
+			fi
+		fi
+		zxfer_refresh_ssh_control_socket_support_state
 	fi
 
 	if [ "$g_option_O_origin_host" != "" ]; then

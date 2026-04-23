@@ -813,20 +813,20 @@ test_run_shunit_tests_rejects_missing_zxfer_test_shell() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_test_helper_clears_failure_report_redaction_from_ambient_env() {
+test_test_helper_clears_unsafe_failure_report_commands_from_ambient_env() {
 	zxfer_test_capture_subshell "
 		TESTS_DIR=\"$TESTS_DIR\" \
-		ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1 \
+		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 \
 		PATH=\"${PATH:-/usr/bin:/bin}\" \
 		/bin/sh -c '
 			. \"\$1/test_helper.sh\"
-			if [ -n \"\${ZXFER_REDACT_FAILURE_REPORT_COMMANDS+x}\" ]; then
+			if [ -n \"\${ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS+x}\" ]; then
 				exit 1
 			fi
 		' sh \"$TESTS_DIR\"
 	"
 
-	assertEquals "Sourcing the shared test helper should clear ambient failure-report redaction so unrelated suites stay deterministic." \
+	assertEquals "Sourcing the shared test helper should clear ambient unsafe failure-report command overrides so unrelated suites stay deterministic." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 

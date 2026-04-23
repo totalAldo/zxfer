@@ -144,8 +144,8 @@ zxfer_quote_token_for_failure_context_early() {
 	printf "'%s'" "$l_value_safe"
 }
 
-zxfer_failure_report_redacts_commands_early() {
-	case "${ZXFER_REDACT_FAILURE_REPORT_COMMANDS:-}" in
+zxfer_failure_report_uses_unsafe_command_fields_early() {
+	case "${ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS:-}" in
 	1 | [Yy][Ee][Ss] | [Tt][Rr][Uu][Ee] | [Oo][Nn])
 		return 0
 		;;
@@ -154,14 +154,14 @@ zxfer_failure_report_redacts_commands_early() {
 	return 1
 }
 
-if zxfer_failure_report_redacts_commands_early; then
-	g_zxfer_original_invocation="[redacted]"
-else
+if zxfer_failure_report_uses_unsafe_command_fields_early; then
 	g_zxfer_original_invocation=$(zxfer_quote_token_for_failure_context_early "$0")
 	for l_zxfer_arg in "$@"; do
 		l_zxfer_quoted_arg=$(zxfer_quote_token_for_failure_context_early "$l_zxfer_arg")
 		g_zxfer_original_invocation="$g_zxfer_original_invocation $l_zxfer_quoted_arg"
 	done
+else
+	g_zxfer_original_invocation="[redacted]"
 fi
 g_zxfer_failure_stage=startup
 

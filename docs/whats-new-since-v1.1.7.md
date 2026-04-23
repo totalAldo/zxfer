@@ -172,7 +172,8 @@ These are the biggest user-visible additions since the 2019 release.
 - `-j jobs`: concurrent send/receive execution with explicit per-dataset
   source discovery when `jobs > 1`; local-origin runs require GNU
   `parallel`, while remote-origin runs resolve an origin-host `parallel`
-  helper
+  helper, and the long-lived discovery/send workers now use supervisor-backed
+  teardown instead of bare wrapper-shell PID cleanup
 - `-V`: very verbose debug output plus profiling counters
 - `-w`: raw `zfs send`
 - `-x pattern`: exclude matching datasets from recursive replication
@@ -204,8 +205,9 @@ These are the biggest user-visible additions since the 2019 release.
 
 - non-zero exits now emit a structured stderr failure report
 - failures can also be mirrored to `ZXFER_ERROR_LOG`
-- commands inside failure reports can be redacted with
-  `ZXFER_REDACT_FAILURE_REPORT_COMMANDS=1`
+- command-bearing fields inside failure reports are redacted by default, with
+  an explicit unsafe local-debug override through
+  `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1`
 - `ZXFER_ERROR_LOG` appends now use the same metadata-bearing lock format as
   the ssh and remote-capability coordination layer, including checked release
   behavior that preserves the original zxfer exit status during trap cleanup

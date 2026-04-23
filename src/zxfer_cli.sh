@@ -51,14 +51,18 @@ zxfer_refresh_compression_commands() {
 		if [ "$g_cmd_compress" = "" ]; then
 			zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
 		fi
-		l_compress_tokens=$(zxfer_split_cli_tokens "$g_cmd_compress")
+		if ! l_compress_tokens=$(zxfer_split_cli_tokens "$g_cmd_compress" "Compression command (-Z)"); then
+			zxfer_throw_usage_error "$l_compress_tokens" 2
+		fi
 		if [ "$l_compress_tokens" = "" ]; then
 			zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
 		fi
 		if [ "$g_cmd_decompress" = "" ]; then
 			zxfer_throw_error "Compression requested but decompression command missing."
 		fi
-		l_decompress_tokens=$(zxfer_split_cli_tokens "$g_cmd_decompress")
+		if ! l_decompress_tokens=$(zxfer_split_cli_tokens "$g_cmd_decompress" "Decompression command"); then
+			zxfer_throw_error "$l_decompress_tokens"
+		fi
 		if [ "$l_decompress_tokens" = "" ]; then
 			zxfer_throw_error "Compression requested but decompression command missing."
 		fi
@@ -73,8 +77,12 @@ zxfer_refresh_compression_commands() {
 		return
 	fi
 
-	g_cmd_compress_safe=$(zxfer_quote_cli_tokens "$g_cmd_compress")
-	g_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress")
+	if ! g_cmd_compress_safe=$(zxfer_quote_cli_tokens "$g_cmd_compress" "Compression command"); then
+		zxfer_throw_error "$g_cmd_compress_safe"
+	fi
+	if ! g_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress" "Decompression command"); then
+		zxfer_throw_error "$g_cmd_decompress_safe"
+	fi
 }
 
 # Purpose: Parse supported command-line switches into the shared `g_option_*`

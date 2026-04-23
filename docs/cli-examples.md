@@ -123,7 +123,10 @@ Replicates only `tank/apps/api`.
 uses the explicit per-dataset source-discovery path on the executing origin
 host instead of the serial recursive listing. Local-origin runs require GNU
 `parallel`; remote-origin runs through `-O` require a resolved origin-host
-`parallel` helper, and zxfer fails closed if that helper is missing.
+`parallel` helper, and zxfer fails closed if that helper is missing. The
+resulting long-lived discovery and send/receive workers run under the shared
+background-job supervisor, so abort cleanup validates the tracked process group
+or owned child set instead of signaling a bare wrapper-shell PID.
 
 ### `-x pattern` Exclude datasets from a recursive run
 
@@ -236,6 +239,10 @@ Solaris or illumos wrapper-style host specs are supported:
 ./zxfer -v -O 'user1@solaris.example.com pfexec' -R tank/data backup/data
 ```
 
+The `-O` and `-T` values are treated as literal whitespace-delimited tokens.
+Outer shell quoting is fine, but embedded quote characters or backslash
+escapes inside the value are rejected.
+
 ### `-T host` Push to a remote target host
 
 ```sh
@@ -260,6 +267,9 @@ reused for the source snapshot-list metadata stream.
 
 This still enables `-z`, but replaces the default `zstd` compressor with the
 supplied command. The receive side still uses the matching decompression path.
+Like `-O` and `-T`, the `-Z` value must be expressible as literal
+whitespace-delimited tokens; embedded quote characters or backslash escapes are
+rejected instead of being re-tokenized.
 
 ### `-D command` Pipe the send stream through a progress command
 

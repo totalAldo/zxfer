@@ -572,6 +572,25 @@ test_prepare_migration_services_preserves_service_restart_state_in_current_shell
 		"1" "$g_services_need_relaunch"
 }
 
+test_prepare_migration_services_passes_multiline_service_input_to_stopsvcs_in_current_shell() {
+	g_option_m_migrate=1
+	g_option_c_services="svc:/network/nfs/server
+svc:/system/filesystem/local"
+	g_recursive_source_list=""
+	service_input_file="$TEST_TMPDIR/prepare_migration_services.stdin"
+
+	zxfer_stopsvcs() {
+		cat >"$service_input_file"
+	}
+
+	zxfer_prepare_migration_services
+	zxfer_source_runtime_modules_through "zxfer_replication.sh"
+
+	assertEquals "Migration preflight should pass the configured multiline service list through stdin to zxfer_stopsvcs unchanged." \
+		"svc:/network/nfs/server
+svc:/system/filesystem/local" "$(cat "$service_input_file")"
+}
+
 test_prepare_migration_services_propagates_service_disable_failures() {
 	g_option_m_migrate=1
 	g_option_c_services="svc:/system/filesystem/local"
@@ -3228,6 +3247,29 @@ tank/src/child
 tank/src/extra" "$g_zxfer_replication_iteration_list_result"
 }
 
+test_build_replication_iteration_list_orders_siblings_before_descendants() {
+	g_option_R_recursive="tank/src"
+	g_option_d_delete_destination_snapshots=0
+	g_recursive_source_list="tank/src/jails/amp
+tank/src/jails/amp/root
+tank/src/jails/mail
+tank/src/jails/mail/root
+tank/src/jails/proxy
+tank/src/jails/proxy/root"
+	g_recursive_source_dataset_list=""
+	g_recursive_destination_extra_dataset_list=""
+
+	zxfer_build_replication_iteration_list 0
+
+	assertEquals "Recursive replication should schedule same-depth siblings before descendants so -j can keep unrelated receives running while parent/child ancestry remains serialized." \
+		"tank/src/jails/amp
+tank/src/jails/mail
+tank/src/jails/proxy
+tank/src/jails/amp/root
+tank/src/jails/mail/root
+tank/src/jails/proxy/root" "$g_zxfer_replication_iteration_list_result"
+}
+
 test_copy_filesystems_merges_iteration_sources_and_deduplicates_post_seed_reconcile_in_current_shell() {
 	g_option_P_transfer_property=1
 	g_option_R_recursive="tank/src"
@@ -3392,6 +3434,49 @@ tank/src/child"
 		"$output" "Failed to prepare replication dataset iteration list."
 	assertEquals "Iteration-list staged readback failures should stop before dataset iteration begins." \
 		"" "$(cat "$log")"
+}
+
+test_copy_filesystems_reports_post_seed_property_stage_initialization_failures() {
+	g_option_P_transfer_property=1
+	g_option_R_recursive=""
+	g_initial_source="tank/src"
+	log="$TEST_TMPDIR/copy_filesystems_post_seed_stage_failure.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			zxfer_build_replication_iteration_list() {
+				g_zxfer_replication_iteration_list_result=""
+				return 0
+			}
+			zxfer_get_temp_file() {
+				g_zxfer_temp_file_result="$TEST_TMPDIR/post_seed_stage_failure.txt"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			zxfer_write_runtime_artifact_file() {
+				return 1
+			}
+			zxfer_cleanup_runtime_artifact_path() {
+				printf 'cleanup %s\n' "$1" >>"$log"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+
+			zxfer_copy_filesystems
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Copy-filesystems setup should abort when the post-seed property staging file cannot be initialized." \
+		1 "$status"
+	assertContains "Post-seed property staging initialization failures should be reported as temp-file creation errors." \
+		"$output" "Error creating temporary file."
+	assertEquals "Post-seed property staging initialization failures should clean up the staged path before aborting." \
+		"cleanup $TEST_TMPDIR/post_seed_stage_failure.txt" "$(cat "$log")"
 }
 
 test_copy_filesystems_refreshes_property_tree_prefetch_context_before_iteration() {
@@ -4340,6 +4425,136 @@ test_build_replication_iteration_list_reports_filter_command_failures() {
 		"" "$output"
 }
 
+test_build_replication_iteration_list_reports_stage_write_and_append_failures() {
+	g_recursive_source_list="tank/src"
+	g_recursive_source_dataset_list="tank/src
+tank/src/child"
+	g_recursive_destination_extra_dataset_list="tank/src/extra"
+
+	set +e
+	write_output=$(
+		(
+			call_count=0
+			zxfer_get_temp_file() {
+				call_count=$((call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/iteration-write-$call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			zxfer_write_runtime_artifact_file() {
+				return 1
+			}
+			zxfer_build_replication_iteration_list 0
+		)
+	)
+	write_status=$?
+	recursive_output=$(
+		(
+			temp_call_count=0
+			print_call_count=0
+			zxfer_get_temp_file() {
+				temp_call_count=$((temp_call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/iteration-recursive-$temp_call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			zxfer_write_runtime_artifact_file() {
+				: >"$1"
+				return 0
+			}
+			printf() {
+				print_call_count=$((print_call_count + 1))
+				if [ "$print_call_count" -eq 2 ]; then
+					return 1
+				fi
+				command printf "$@"
+			}
+			g_option_R_recursive="tank/src"
+			g_option_d_delete_destination_snapshots=0
+			zxfer_build_replication_iteration_list 1
+		)
+	)
+	recursive_status=$?
+	extra_output=$(
+		(
+			temp_call_count=0
+			print_call_count=0
+			zxfer_get_temp_file() {
+				temp_call_count=$((temp_call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/iteration-extra-$temp_call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+				return 0
+			}
+			zxfer_write_runtime_artifact_file() {
+				: >"$1"
+				return 0
+			}
+			printf() {
+				print_call_count=$((print_call_count + 1))
+				if [ "$print_call_count" -eq 2 ]; then
+					return 1
+				fi
+				command printf "$@"
+			}
+			g_option_R_recursive=""
+			g_option_d_delete_destination_snapshots=1
+			zxfer_build_replication_iteration_list 0
+		)
+	)
+	extra_status=$?
+	set -e
+
+	assertEquals "Replication iteration-list building should fail closed when the staged input file cannot be initialized." \
+		1 "$write_status"
+	assertEquals "Replication iteration-list building should not emit output for staged-input write failures." \
+		"" "$write_output"
+	assertEquals "Replication iteration-list building should fail closed when appending recursive dataset rows fails." \
+		1 "$recursive_status"
+	assertEquals "Replication iteration-list building should not emit output for recursive append failures." \
+		"" "$recursive_output"
+	assertEquals "Replication iteration-list building should fail closed when appending destination-only dataset rows fails." \
+		1 "$extra_status"
+	assertEquals "Replication iteration-list building should not emit output for destination-extra append failures." \
+		"" "$extra_output"
+}
+
+test_build_replication_iteration_list_reports_source_append_failures_in_current_shell() {
+	g_recursive_source_list="tank/src"
+	g_option_R_recursive=""
+	g_option_d_delete_destination_snapshots=0
+	cleanup_log="$TEST_TMPDIR/iteration_current_cleanup.log"
+	l_temp_call_count=0
+
+	zxfer_get_temp_file() {
+		l_temp_call_count=$((l_temp_call_count + 1))
+		g_zxfer_temp_file_result="$TEST_TMPDIR/iteration-current-$l_temp_call_count.tmp"
+		return 0
+	}
+	zxfer_write_runtime_artifact_file() {
+		mkdir -p "$1"
+		return 0
+	}
+	zxfer_cleanup_runtime_artifact_paths() {
+		printf '%s\n' "$*" >"$cleanup_log"
+		return 0
+	}
+
+	set +e
+	zxfer_build_replication_iteration_list 0 >/dev/null 2>&1
+	status=$?
+	set -e
+	cleanup_paths=$(cat "$cleanup_log" 2>/dev/null || :)
+
+	zxfer_source_runtime_modules_through "zxfer_replication.sh"
+	setUp
+
+	assertEquals "Current-shell iteration-list building should fail closed when appending the source dataset list fails." \
+		1 "$status"
+	assertEquals "Current-shell iteration-list building should clean up every staged tempfile after a source append failure." \
+		"$TEST_TMPDIR/iteration-current-1.tmp $TEST_TMPDIR/iteration-current-2.tmp $TEST_TMPDIR/iteration-current-3.tmp" \
+		"$cleanup_paths"
+}
+
 test_build_replication_iteration_list_reports_sorted_readback_failures() {
 	g_recursive_source_list="tank/src"
 
@@ -4422,6 +4637,28 @@ test_collect_post_seed_property_sources_reports_second_tempfile_failures() {
 	assertEquals "Post-seed property reconcile source collection should fail closed when the second tempfile cannot be allocated." \
 		1 "$status"
 	assertEquals "Post-seed property reconcile source collection should not emit output for second-tempfile failures." \
+		"" "$output"
+}
+
+test_collect_post_seed_property_sources_reports_first_tempfile_failures() {
+	post_seed_file="$TEST_TMPDIR/post_seed_first_tempfile_failure.txt"
+	printf '%s\n' "tank/src" >"$post_seed_file"
+
+	set +e
+	output=$(
+		(
+			zxfer_get_temp_file() {
+				return 1
+			}
+			zxfer_collect_post_seed_property_sources "$post_seed_file"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Post-seed property reconcile source collection should fail closed when the first tempfile cannot be allocated." \
+		1 "$status"
+	assertEquals "Post-seed property reconcile source collection should not emit output for first-tempfile failures." \
 		"" "$output"
 }
 

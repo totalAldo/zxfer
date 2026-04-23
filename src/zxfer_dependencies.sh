@@ -286,7 +286,11 @@ zxfer_assign_required_tool() {
 zxfer_requote_cli_command_with_resolved_head() {
 	l_cli_string=$1
 	l_resolved_head=$2
-	l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string")
+	l_label=${3:-CLI command}
+	if ! l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
+		printf '%s\n' "$l_cli_tokens"
+		return 1
+	fi
 	[ -n "$l_cli_tokens" ] || return 1
 
 	l_output_tokens=""
@@ -319,7 +323,10 @@ $l_cli_token"
 zxfer_resolve_local_cli_command_safe() {
 	l_cli_string=$1
 	l_label=${2:-command}
-	l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string")
+	if ! l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
+		printf '%s\n' "$l_cli_tokens"
+		return 1
+	fi
 	l_cli_head=$(printf '%s\n' "$l_cli_tokens" | sed -n '1p')
 	if [ -z "$l_cli_head" ]; then
 		printf '%s\n' "Required dependency \"$l_label\" must not be empty or whitespace-only."
@@ -331,7 +338,7 @@ zxfer_resolve_local_cli_command_safe() {
 		return 1
 	fi
 
-	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head"
+	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head" "$l_label"
 }
 
 # Purpose: Initialize the dependency defaults before later helpers depend on
