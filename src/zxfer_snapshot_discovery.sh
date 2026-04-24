@@ -291,7 +291,7 @@ zxfer_ensure_parallel_available_for_source_jobs() {
 zxfer_build_source_snapshot_list_cmd() {
 	g_source_snapshot_list_uses_parallel=0
 	g_source_snapshot_list_uses_metadata_compression=0
-	if l_local_serial_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$g_initial_source"); then
+	if l_local_serial_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$g_initial_source"); then
 		:
 	else
 		l_status=$?
@@ -329,7 +329,7 @@ zxfer_build_source_snapshot_list_cmd() {
 			return "$l_status"
 		fi
 		if l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
-			"$l_remote_zfs_cmd" list -H -o name -s creation -d 1 -t snapshot "{}"); then
+			"$l_remote_zfs_cmd" list -H -o name,guid -s creation -d 1 -t snapshot "{}"); then
 			:
 		else
 			l_status=$?
@@ -369,7 +369,7 @@ zxfer_build_source_snapshot_list_cmd() {
 	fi
 
 	l_parallel_path=$g_cmd_parallel
-	if l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name -s creation -d 1 -t snapshot "{}"); then
+	if l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name,guid -s creation -d 1 -t snapshot "{}"); then
 		:
 	else
 		l_status=$?
@@ -402,7 +402,7 @@ zxfer_build_source_snapshot_list_cmd() {
 # listing shape instead of validating GNU parallel helpers or opening remote
 # helper probes during preview-only runs.
 zxfer_render_source_snapshot_list_preview_cmd() {
-	zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$g_initial_source"
+	zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$g_initial_source"
 }
 
 # Purpose: Write the source snapshot list to file in the normalized form later
@@ -500,14 +500,14 @@ zxfer_write_source_snapshot_list_to_file() {
 	fi
 	zxfer_echoV "Running command in the background: $l_cmd"
 	zxfer_record_last_command_string "$l_cmd"
-	zxfer_spawn_supervised_background_job \
-		"source_snapshot_list" \
-		"$l_cmd" \
-		"$l_cmd" \
-		"$l_outfile" \
-		"$l_errfile"
-	g_source_snapshot_list_pid=$g_zxfer_background_job_last_runner_pid
-	g_source_snapshot_list_job_id=$g_zxfer_background_job_last_id
+	if zxfer_execute_background_cmd "$l_cmd" "$l_outfile" "$l_errfile"; then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
+	g_source_snapshot_list_pid=$g_last_background_pid
+	g_source_snapshot_list_job_id=""
 }
 
 # Purpose: Normalize the destination snapshot list into the stable form used
@@ -805,7 +805,7 @@ zxfer_write_destination_snapshot_list_to_files() {
 	fi
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
-		if ! l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset"); then
+		if ! l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset"); then
 			zxfer_throw_error "${l_cmd:-Failed to render dry-run destination snapshot discovery command.}"
 		fi
 		zxfer_echoV "Dry run: $l_cmd"
@@ -834,12 +834,12 @@ zxfer_write_destination_snapshot_list_to_files() {
 		# dataset exists
 		# Keep destination-side snapshot listing serial here. The older parallel
 		# variant added complexity and was not a net win once metadata was cached.
-		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset")
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
 		zxfer_echoV "Running command: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
 		# make sure to eval and then pipe the contents to the file in case
 		# the command uses ssh
-		if ! zxfer_run_destination_zfs_cmd list -Hr -o name -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file"; then
+		if ! zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file"; then
 			zxfer_throw_error "Failed to retrieve snapshot list from the destination."
 		fi
 
@@ -1350,13 +1350,6 @@ zxfer_set_g_recursive_source_list() {
 		g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
 	fi
 
-	zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
-	l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-		return "$l_status"
-	fi
-
 	# debugging
 	if [ "$g_option_V_very_verbose" -eq 1 ]; then
 		echo "====================================================================="
@@ -1396,11 +1389,12 @@ zxfer_set_g_recursive_source_list() {
 # Build the source and destination snapshot caches used by replication.
 # zxfer relies on `zfs list` in machine-readable mode (`-H`), recursive dataset
 # traversal (`-r`) where needed, name-only output during initial discovery
-# (`-o name`),
+# (`-o name,guid`),
 # snapshot-only listing (`-t snapshot`), and creation-order sorting for
-# per-dataset snapshot discovery on the source side. Guid-bearing identity
-# records are fetched lazily later only for datasets that still need exact
-# common-snapshot or delete validation.
+# per-dataset snapshot discovery on the source side. Carrying GUIDs in the
+# initial diff lets same-name/different-snapshot divergence become part of the
+# recursive work queue without restoring a whole-tree per-dataset validation
+# pass on the no-op path.
 zxfer_get_zfs_list() {
 	zxfer_set_failure_stage "snapshot discovery"
 	zxfer_echoV "Begin zxfer_get_zfs_list()"
@@ -1541,6 +1535,10 @@ zxfer_get_zfs_list() {
 		l_source_snapshot_wait_report_failure=${g_zxfer_background_job_wait_report_failure:-}
 		g_source_snapshot_list_pid=""
 		g_source_snapshot_list_job_id=""
+	elif [ -n "${g_source_snapshot_list_pid:-}" ]; then
+		wait "$g_source_snapshot_list_pid" || l_source_snapshot_wait_status=$?
+		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
+		g_source_snapshot_list_pid=""
 	fi
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_source_snapshot_listing_ms "$l_source_snapshot_stage_start_ms"
 

@@ -621,7 +621,7 @@ test_build_source_snapshot_list_cmd_fails_closed_when_local_parallel_is_unavaila
 	assertContains "Local failure should explain that GNU parallel was not found." \
 		"$result" "not found in PATH on the local host"
 	assertNotContains "Local -j failures should not silently render the serial source snapshot listing." \
-		"$result" "'$g_LZFS' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'"
+		"$result" "'$g_LZFS' 'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'"
 }
 
 test_build_source_snapshot_list_cmd_uses_serial_local_discovery_when_parallel_jobs_are_disabled() {
@@ -631,7 +631,7 @@ test_build_source_snapshot_list_cmd_uses_serial_local_discovery_when_parallel_jo
 	result=$(zxfer_build_source_snapshot_list_cmd)
 
 	assertEquals "Source snapshot discovery should use the direct serial listing command when parallel jobs are disabled." \
-		"'$g_LZFS' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'" "$result"
+		"'$g_LZFS' 'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'" "$result"
 	assertEquals "Source snapshot discovery should leave the parallel marker cleared when -j is disabled." \
 		0 "$g_source_snapshot_list_uses_parallel"
 }
@@ -670,7 +670,7 @@ test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 	assertContains "Local -j discovery should use GNU parallel with the requested job count." \
 		"$result" "'$g_cmd_parallel' -j 2 --line-buffer"
 	assertContains "Local -j discovery should preserve the per-dataset snapshot runner." \
-		"$result" "'$g_LZFS' 'list' '-H' '-o' 'name' '-s' 'creation' '-d' '1' '-t' 'snapshot' '{}'"
+		"$result" "'$g_LZFS' 'list' '-H' '-o' 'name,guid' '-s' 'creation' '-d' '1' '-t' 'snapshot' '{}'"
 	assertNotContains "Local -j discovery should not inline a prefetched dataset list." \
 		"$result" "'printf'"
 }
@@ -868,7 +868,7 @@ test_build_source_snapshot_list_cmd_preserves_remote_parallel_builder_statuses()
 					return 0
 				fi
 				if [ "$1" = "/remote/bin/zfs" ] && [ "$3" = "-H" ]; then
-					printf '%s\n' "/remote/bin/zfs list -H -o name -s creation -d 1 -t snapshot {}"
+					printf '%s\n' "/remote/bin/zfs list -H -o name,guid -s creation -d 1 -t snapshot {}"
 					return 0
 				fi
 				if [ "$1" = "/remote/bin/zfs" ] && [ "$3" = "-Hr" ]; then
@@ -910,7 +910,7 @@ test_build_source_snapshot_list_cmd_preserves_remote_parallel_builder_statuses()
 		"" "$remote_shell_output"
 }
 
-test_write_source_snapshot_list_to_file_uses_supervisor_when_serial() {
+test_write_source_snapshot_list_to_file_uses_direct_background_runner_when_serial() {
 	log="$TEST_TMPDIR/source_serial.log"
 	outfile="$TEST_TMPDIR/source_serial.out"
 	errfile="$TEST_TMPDIR/source_serial.err"
@@ -921,10 +921,9 @@ test_write_source_snapshot_list_to_file_uses_supervisor_when_serial() {
 		zxfer_build_source_snapshot_list_cmd() {
 			printf '%s\n' "printf 'snap-serial'"
 		}
-		zxfer_spawn_supervised_background_job() {
-			printf '%s|%s|%s|%s\n' "$1" "$2" "$4" "$5" >>"$SOURCE_LOG"
-			g_zxfer_background_job_last_id="job-serial"
-			g_zxfer_background_job_last_runner_pid=4242
+		zxfer_execute_background_cmd() {
+			printf '%s|%s|%s\n' "$1" "$2" "$3" >>"$SOURCE_LOG"
+			g_last_background_pid=4242
 		}
 		g_option_j_jobs=1
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
@@ -932,10 +931,9 @@ test_write_source_snapshot_list_to_file_uses_supervisor_when_serial() {
 		printf '%s\n' "$g_source_snapshot_list_job_id" >>"$SOURCE_LOG"
 	)
 
-	assertEquals "Serial snapshot listing should delegate to the supervised background runner." \
-		"source_snapshot_list|printf 'snap-serial'|$outfile|$errfile
-4242
-job-serial" "$(cat "$log")"
+	assertEquals "Serial snapshot listing should delegate to the direct background execution helper." \
+		"printf 'snap-serial'|$outfile|$errfile
+4242" "$(cat "$log")"
 }
 
 test_write_source_snapshot_list_to_file_tracks_profile_counters_when_very_verbose() {
@@ -984,10 +982,9 @@ test_write_source_snapshot_list_to_file_tracks_remote_ssh_profile_counter_when_v
 		zxfer_build_source_snapshot_list_cmd() {
 			printf '%s\n' "printf 'remote-snap-profile'"
 		}
-		zxfer_spawn_supervised_background_job() {
-			printf '%s|%s|%s|%s\n' "$1" "$2" "$4" "$5" >"$log"
-			g_zxfer_background_job_last_id="job-remote"
-			g_zxfer_background_job_last_runner_pid=3131
+		zxfer_execute_background_cmd() {
+			printf '%s|%s|%s\n' "$1" "$2" "$3" >"$log"
+			g_last_background_pid=3131
 		}
 		g_option_V_very_verbose=1
 		g_option_j_jobs=1
@@ -1004,9 +1001,9 @@ test_write_source_snapshot_list_to_file_tracks_remote_ssh_profile_counter_when_v
 	)
 
 	assertEquals "Very-verbose profiling should count the remote ssh hop used for source snapshot discovery." \
-		"source_snapshot_list|printf 'remote-snap-profile'|$outfile|$errfile
+		"printf 'remote-snap-profile'|$outfile|$errfile
 pid=3131
-job=job-remote
+job=
 ssh=1
 source_ssh=1" "$(cat "$log")"
 }
@@ -1049,17 +1046,16 @@ test_write_source_snapshot_list_to_file_uses_current_shell_temp_file_result() {
 		zxfer_build_source_snapshot_list_cmd() {
 			printf '%s\n' "printf 'snap-current-shell'"
 		}
-		zxfer_spawn_supervised_background_job() {
-			printf '%s|%s|%s|%s\n' "$1" "$2" "$4" "$5" >>"$LOG_FILE"
-			g_zxfer_background_job_last_id="job-current-shell"
-			g_zxfer_background_job_last_runner_pid=5151
+		zxfer_execute_background_cmd() {
+			printf '%s|%s|%s\n' "$1" "$2" "$3" >>"$LOG_FILE"
+			g_last_background_pid=5151
 		}
 		g_option_j_jobs=1
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 	)
 
 	assertEquals "Source snapshot discovery should stage the built command through the current-shell temp-file result instead of stdout." \
-		"source_snapshot_list|printf 'snap-current-shell'|$outfile|$errfile" "$(cat "$log")"
+		"printf 'snap-current-shell'|$outfile|$errfile" "$(cat "$log")"
 }
 
 test_write_source_snapshot_list_to_file_uses_current_shell_read_scratch() {
@@ -1082,17 +1078,16 @@ test_write_source_snapshot_list_to_file_uses_current_shell_read_scratch() {
 			g_zxfer_snapshot_discovery_file_read_result="printf 'snap-read-scratch'"
 			return 0
 		}
-		zxfer_spawn_supervised_background_job() {
-			printf '%s|%s|%s|%s\n' "$1" "$2" "$4" "$5" >>"$LOG_FILE"
-			g_zxfer_background_job_last_id="job-read-scratch"
-			g_zxfer_background_job_last_runner_pid=6161
+		zxfer_execute_background_cmd() {
+			printf '%s|%s|%s\n' "$1" "$2" "$3" >>"$LOG_FILE"
+			g_last_background_pid=6161
 		}
 		g_option_j_jobs=1
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 	)
 
 	assertEquals "Source snapshot discovery should use the current-shell staged-command read scratch instead of stdout from the file-read helper." \
-		"source_snapshot_list|printf 'snap-read-scratch'|$outfile|$errfile" "$(cat "$log")"
+		"printf 'snap-read-scratch'|$outfile|$errfile" "$(cat "$log")"
 }
 
 test_write_source_snapshot_list_to_file_reports_staged_command_read_failures_after_build_failure() {
@@ -1211,7 +1206,7 @@ test_write_source_snapshot_list_to_file_skips_execution_in_dry_run() {
 	assertNotContains "Dry-run source snapshot discovery should not enter GNU parallel command planning." \
 		"$(cat "$log")" "build-source-command-called"
 	assertContains "Dry-run source snapshot discovery should render the skipped command." \
-		"$(cat "$log")" "'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' 'tank/src'"
+		"$(cat "$log")" "'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' 'tank/src'"
 	assertContains "Dry-run source snapshot discovery should leave the background PID unset." \
 		"$output" "pid="
 	assertContains "Dry-run source snapshot discovery should create the snapshot tempfile placeholder." \
@@ -1329,8 +1324,8 @@ test_write_source_snapshot_list_to_file_runs_serial_builder_output_when_jobs_rem
 		0 "$status"
 	assertContains "Snapshot-list execution should run the builder's serial command output through the background eval path." \
 		"$output" "payload=serial-fallback"
-	assertContains "Snapshot-list execution should still track the supervised background job id for later waiting." \
-		"$output" "job=bgjob."
+	assertContains "Snapshot-list execution should use direct PID waiting instead of a supervised job id." \
+		"$output" "job="
 }
 
 test_diff_snapshot_lists_rejects_unknown_mode() {
@@ -1843,43 +1838,29 @@ EOF
 	unset -f zxfer_get_snapshot_identity_records_for_dataset
 }
 
-test_set_g_recursive_source_list_marks_guid_divergence_when_name_only_lists_match() {
+test_set_g_recursive_source_list_queues_name_identical_guid_divergence_from_initial_records() {
 	source_tmp="$TEST_TMPDIR/source_guid_divergence.txt"
 	dest_tmp="$TEST_TMPDIR/dest_guid_divergence.txt"
 	output_file="$TEST_TMPDIR/source_guid_divergence.out"
 	cat <<'EOF' >"$source_tmp"
-tank/src@same
+tank/src@same	111
 EOF
 	cat <<'EOF' >"$dest_tmp"
-tank/src@same
+tank/src@same	999
 EOF
 	sort "$source_tmp" -o "$source_tmp"
 	sort "$dest_tmp" -o "$dest_tmp"
 	g_option_x_exclude_datasets=""
 
 	(
-		zxfer_get_snapshot_identity_records_for_dataset() {
-			case "$1:$2" in
-			source:tank/src)
-				printf '%s\n' "tank/src@same	111"
-				;;
-			destination:backup/dst/src)
-				printf '%s\n' "backup/dst/src@same	999"
-				;;
-			*)
-				return 1
-				;;
-			esac
-		}
-
 		zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
 		printf 'source=%s\n' "$g_recursive_source_list"
 		printf 'dest=%s\n' "$g_recursive_destination_extra_dataset_list"
 	) >"$output_file"
 
-	assertContains "Datasets that only differ by guid should still be marked for transfer after lazy identity validation." \
+	assertContains "Initial identity-aware discovery should queue same-name source snapshots with different GUIDs for transfer planning." \
 		"$(cat "$output_file")" "source=tank/src"
-	assertContains "Datasets that only differ by guid should still be marked for delete inspection after lazy identity validation." \
+	assertContains "Initial identity-aware discovery should queue same-name destination snapshots with different GUIDs for delete/common-snapshot inspection." \
 		"$(cat "$output_file")" "dest=tank/src"
 }
 
@@ -5005,9 +4986,9 @@ test_set_g_recursive_source_list_reports_recursive_source_inventory_exclude_fail
 		"$output" "Failed to filter recursive source dataset inventory against exclude patterns."
 }
 
-test_set_g_recursive_source_list_propagates_identity_validation_failures() {
-	source_tmp="$TEST_TMPDIR/identity_validation_failure_source.txt"
-	dest_tmp="$TEST_TMPDIR/identity_validation_failure_dest.txt"
+test_set_g_recursive_source_list_does_not_call_whole_tree_identity_validation() {
+	source_tmp="$TEST_TMPDIR/no_identity_validation_source.txt"
+	dest_tmp="$TEST_TMPDIR/no_identity_validation_dest.txt"
 	printf '%s\n' "tank/src@snap1" >"$source_tmp"
 	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
 
@@ -5015,6 +4996,7 @@ test_set_g_recursive_source_list_propagates_identity_validation_failures() {
 	output=$(
 		(
 			zxfer_refine_recursive_snapshot_deltas_with_identity_validation() {
+				printf '%s\n' "unexpected identity validation"
 				return 7
 			}
 			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
@@ -5022,9 +5004,9 @@ test_set_g_recursive_source_list_propagates_identity_validation_failures() {
 	)
 	status=$?
 
-	assertEquals "Recursive delta planning should preserve the exact identity-validation failure status." \
-		7 "$status"
-	assertEquals "Recursive delta planning should not emit output when lazy identity validation fails without its own diagnostic." \
+	assertEquals "Recursive delta planning should skip the whole-tree identity validation pass on name-identical inputs." \
+		0 "$status"
+	assertEquals "Recursive delta planning should not emit identity-validation output when no snapshot names differ." \
 		"" "$output"
 }
 

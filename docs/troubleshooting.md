@@ -68,8 +68,8 @@ What it usually means:
 - remote `parallel` or `zstd` was missing or misresolved, so the rendered
   snapshot-list command could not execute
 - source dataset naming or quoting was wrong on the remote side
-- the supervisor could not write or publish the source snapshot-discovery
-  completion record even though the source-side listing command already ran
+- the tracked background helper could not launch, complete, or publish readable
+  source snapshot output and stderr
 
 What to inspect:
 
@@ -81,13 +81,11 @@ What to inspect:
   data, waiting on an in-run cache fill, or falling back to a direct remote
   helper probe path
 - any shell quoting problems on the remote host
-- whether the failure was one of:
-  `Failed to read source snapshot discovery completion metadata.`,
-  `Failed to publish source snapshot discovery completion.`, or
-  `Failed to report source snapshot discovery completion.`
-- the per-job supervisor control directory under the runtime temp root,
-  especially `launch.tsv` and `completion.tsv`, plus temp-root permissions if
-  the failure points at completion metadata rather than the `zfs list` itself
+- whether the source snapshot output file was empty or unreadable, and whether
+  the paired staged stderr file contains the original `zfs list`, `parallel`,
+  remote helper, or compression error
+- temp-root permissions if the failure points at launching the background
+  helper or registering the cleanup PID rather than the `zfs list` itself
 
 ## Background Completion Failures
 

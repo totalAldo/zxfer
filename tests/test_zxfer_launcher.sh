@@ -148,7 +148,7 @@ EOF
 	done
 }
 
-test_launcher_runs_remote_connection_prep_from_remote_hosts_module() {
+test_launcher_defers_remote_connection_prep_to_runtime_helpers() {
 	fixture_dir="$TEST_TMPDIR/launcher-remote-hosts"
 	rm -rf "$fixture_dir"
 	mkdir -p "$fixture_dir"
@@ -162,9 +162,9 @@ test_launcher_runs_remote_connection_prep_from_remote_hosts_module() {
 
 	assertEquals "The launcher should succeed when the required remote hosts module is present." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "The launcher should invoke remote connection preparation from the dedicated remote hosts module." \
+	assertNotContains "The launcher should not eagerly prepare remote connections before runtime initialization." \
 		"$(cat "$log_path")" "zxfer_prepare_remote_host_connections"
-	assertContains "Remote connection preparation should refresh remote wrappers." \
+	assertNotContains "The launcher should not refresh remote wrappers through eager remote connection preparation." \
 		"$(cat "$log_path")" "zxfer_refresh_remote_zfs_commands"
 	assertContains "The launcher should continue into zxfer_init_variables()." \
 		"$(cat "$log_path")" "zxfer_init_variables"

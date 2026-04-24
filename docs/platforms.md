@@ -50,8 +50,8 @@ flowchart LR
     B --> C{"-O origin host set?"}
     B --> D{"-T target host set?"}
     B --> E["Resolve local helpers from the trusted PATH"]
-    C -->|yes| F["Prepare origin ssh control socket when supported and preload capabilities"]
-    D -->|yes| G["Prepare target ssh control socket when supported and preload capabilities"]
+    C -->|yes| F["Resolve origin helpers when remote origin commands need them"]
+    D -->|yes| G["Resolve target helpers when remote target commands need them"]
     F --> H["Resolve origin-side zfs and optional helper commands from the origin secure PATH"]
     G --> I["Resolve target-side zfs and optional helper commands from the target secure PATH"]
     E --> J["zxfer_send_receive() and other helpers use the resolved command set"]
@@ -94,9 +94,9 @@ matters especially when:
   whenever `jobs > 1`. Local-origin runs require GNU `parallel`; remote-origin
   runs through `-O` require that the remote host resolve a `parallel` helper.
   zxfer fails closed if the required helper is missing instead of silently
-  falling back to the serial recursive listing, and the resulting long-lived
-  discovery and send/receive workers run under the shared supervisor rather
-  than bare wrapper-shell PID cleanup
+  falling back to the serial recursive listing. Source discovery uses tracked
+  background PID cleanup and staged stderr, while send/receive workers run
+  under the shared supervisor rather than bare wrapper-shell PID cleanup
 - custom `-Z` compression commands or default `zstd` helpers must be resolved
   per host instead of assuming one shared absolute path
 - the per-host remote-capability cache is keyed by the trusted dependency

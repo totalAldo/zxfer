@@ -124,9 +124,10 @@ uses the explicit per-dataset source-discovery path on the executing origin
 host instead of the serial recursive listing. Local-origin runs require GNU
 `parallel`; remote-origin runs through `-O` require a resolved origin-host
 `parallel` helper, and zxfer fails closed if that helper is missing. The
-resulting long-lived discovery and send/receive workers run under the shared
-background-job supervisor, so abort cleanup validates the tracked process group
-or owned child set instead of signaling a bare wrapper-shell PID.
+source-discovery helper is still tracked for cleanup by PID, while long-lived
+send/receive workers run under the shared background-job supervisor, so abort
+cleanup validates the tracked process group or owned child set instead of
+signaling a bare wrapper-shell PID.
 
 ### `-x pattern` Exclude datasets from a recursive run
 

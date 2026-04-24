@@ -95,10 +95,11 @@ Use remote compression:
 
 - `-j jobs`: run concurrent send/receive jobs; when `jobs > 1`, zxfer uses
   explicit per-dataset source discovery instead of the serial recursive
-  listing. Long-lived source-discovery and send/receive workers run under a
-  shared supervisor that records launch/completion metadata and aborts through
-  validated process-group or owned-child-set cleanup instead of signaling a
-  bare wrapper PID. zxfer also serializes conflicting ancestor/descendant
+  listing. Source discovery runs as a tracked background helper with staged
+  stderr and registered PID cleanup, while long-lived send/receive workers run
+  under a shared supervisor that records launch/completion metadata and aborts
+  through validated process-group or owned-child-set cleanup instead of
+  signaling a bare wrapper PID. zxfer also serializes conflicting ancestor/descendant
   destination receives on the same target, even when spare job slots remain,
   so parent and child datasets do not receive concurrently. Local-origin runs
   require GNU `parallel`; remote-origin runs require a resolved origin-host
@@ -160,19 +161,18 @@ older releases are no longer supported: if a reused cache root still contains
 plain ssh `leases/lease.*` files or pid-only `.lock` directories, remove the
 stale entry or cache root before rerunning zxfer.
 
-Long-lived source snapshot listing and parallel send/receive work now runs
-under private supervisor control directories beneath the runtime temp root.
-Each job records launch and completion metadata, and trap-time abort validates
-the recorded process group or owned child set before signaling it. Abort
-cleanup is completion-aware: if `completion.tsv` is already present, or a
-failed signal is followed by a refreshed process snapshot that no longer shows
-the runner, zxfer treats the job as already finished and continues cleanup. It
-fails closed only when a refreshed snapshot still shows a live owned runner
-that cannot be validated or signaled, or when the completion record itself
-cannot be persisted. The same checked-cleanup rule now applies to ssh
-control-socket teardown during trap cleanup: if zxfer cannot close a managed
-socket after otherwise successful work, it exits nonzero instead of reporting
-a clean run.
+Long-lived parallel send/receive work runs under private supervisor control
+directories beneath the runtime temp root. Each job records launch and
+completion metadata, and trap-time abort validates the recorded process group
+or owned child set before signaling it. Abort cleanup is completion-aware: if
+`completion.tsv` is already present, or a failed signal is followed by a
+refreshed process snapshot that no longer shows the runner, zxfer treats the
+job as already finished and continues cleanup. It fails closed only when a
+refreshed snapshot still shows a live owned runner that cannot be validated or
+signaled, or when the completion record itself cannot be persisted. The same
+checked-cleanup rule now applies to ssh control-socket teardown during trap
+cleanup: if zxfer cannot close a managed socket after otherwise successful
+work, it exits nonzero instead of reporting a clean run.
 
 For `-j` send/receive work, the scheduler also treats ancestor/descendant
 destination datasets on the same target as mutually exclusive. zxfer now waits

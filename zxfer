@@ -194,7 +194,6 @@ fi
 zxfer_set_failure_roots "" "$g_destination"
 zxfer_set_failure_stage "cli validation"
 zxfer_consistency_check
-zxfer_prepare_remote_host_connections
 zxfer_init_variables
 
 zxfer_set_failure_stage "replication"

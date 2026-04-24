@@ -172,8 +172,9 @@ These are the biggest user-visible additions since the 2019 release.
 - `-j jobs`: concurrent send/receive execution with explicit per-dataset
   source discovery when `jobs > 1`; local-origin runs require GNU
   `parallel`, while remote-origin runs resolve an origin-host `parallel`
-  helper, and the long-lived discovery/send workers now use supervisor-backed
-  teardown instead of bare wrapper-shell PID cleanup
+  helper. Source discovery uses tracked background PID cleanup, and
+  long-lived send/receive workers use supervisor-backed teardown instead of
+  bare wrapper-shell PID cleanup
 - `-V`: very verbose debug output plus profiling counters
 - `-w`: raw `zfs send`
 - `-x pattern`: exclude matching datasets from recursive replication

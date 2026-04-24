@@ -217,8 +217,8 @@ flowchart TD
     C --> D["Register zxfer_trap_exit() and run zxfer_init_globals()"]
     D --> E["Parse flags with zxfer_read_command_line_switches()"]
     E --> F["Validate combinations with zxfer_consistency_check()"]
-    F --> G["Prepare remote hosts with zxfer_prepare_remote_host_connections() when -O or -T"]
-    G --> H["Resolve local/remote helper paths with zxfer_init_variables()"]
+    F --> G["Resolve local and needed remote helper paths with zxfer_init_variables()"]
+    G --> H["Remote runtime helpers open control sockets or fill capability caches only as needed"]
     H --> I["Enter zxfer_run_zfs_mode_loop()"]
     I --> J["Start one pass in zxfer_run_zfs_mode()"]
     J --> K["Resolve source and destination, normalize paths, validate preconditions"]
@@ -228,7 +228,7 @@ flowchart TD
     M -- "no" --> O["Initialize live replication context"]
     O --> P["Optional -e restore metadata load before discovery"]
     P --> Q["Run zxfer_get_zfs_list() to cache source and destination state"]
-    Q --> Q1["Long-lived snapshot listing spawns through zxfer_background_jobs.sh and later waits by job_id"]
+    Q --> Q1["Source snapshot listing runs as a tracked background helper and later waits by PID"]
     Q1 --> R["Optional unsupported-property probing when -U is enabled"]
     R --> S["Optional preflight snapshot via -s or migration prep via -m"]
     S --> T["Optional grandfather deletion checks via -g"]
@@ -335,9 +335,10 @@ sequenceDiagram
     participant Local as local destination
 
     Operator->>Launcher: run zxfer -v -O user@origin -R zroot backup/zroot -j8 -z
-    Launcher->>Origin: open or join the metadata-coordinated ssh control socket when supported
-    Launcher->>Origin: preload the CLI-implied remote capability handshake under a metadata-coordinated cache lock keyed by PATH and transport policy
-    Launcher->>Launcher: reuse the warmed remote capability state for zfs, parallel, and compression/helper heads when needed
+    Launcher->>Launcher: initialize local state and determine the needed remote helper scope
+    Launcher->>Origin: open or join the metadata-coordinated ssh control socket when a remote command first needs it
+    Launcher->>Origin: resolve remote helper capabilities under a metadata-coordinated cache lock keyed by PATH, transport policy, and requested helper scope
+    Launcher->>Launcher: reuse matching remote capability state for zfs, parallel, and compression/helper heads when needed
     Launcher->>Origin: build the source dataset inventory with remote zfs list
     Launcher->>Origin: fan out per-dataset snapshot listing via the resolved origin-host parallel helper
     Launcher->>Local: list destination datasets and snapshots

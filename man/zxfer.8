@@ -533,7 +533,8 @@ zxfer does not silently fall back to the serial recursive listing once
 is greater than 1. The default is 1, which disables background sends and keeps
 source snapshot discovery on the serial recursive listing path. Raising this
 value can hide WAN latency or speed up large replications, but will also
-increase memory, CPU and I/O load. The long-lived source-listing and
+increase memory, CPU and I/O load. Source listing runs as a tracked background
+helper with staged stderr and registered PID cleanup. The long-lived
 send/receive workers launched for this path run under a shared supervisor that
 records launch/completion metadata and tears them down through validated
 process-group or owned-child-set cleanup instead of signaling a bare
@@ -714,8 +715,8 @@ profiling counters plus accumulated stage timings for ssh setup, snapshot
 listing, and diff/sort hot paths, along with ssh control-socket wait,
 remote-capability cache wait, capability-bootstrap source, and direct remote
 helper-probe counters. While the run is active it also prints prefixed live
-remote ssh commands, remote probe commands, and ssh control-socket check/open
-commands before each execution so slow startup or remote-probe phases are
+remote ssh commands, remote probe commands, and any ssh control-socket
+check/open commands before each execution so slow startup or remote-probe phases are
 visible in real time.
 .It Fl w
 uses zfs ra(w) send mode
