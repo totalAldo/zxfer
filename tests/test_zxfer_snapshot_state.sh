@@ -1452,6 +1452,12 @@ EOF
 	chmod 700 "$failing_awk" || fail "Unable to publish the failing snapshot-index awk fixture."
 
 	set +e
+	manifest_status_probe_dir="$TEST_TMPDIR/snapshot_index_manifest_status_probe"
+	command mkdir -p "$manifest_status_probe_dir/manifest.tsv"
+	(: >"$manifest_status_probe_dir/manifest.tsv") >/dev/null 2>&1
+	expected_manifest_write_status=$?
+	rm -rf "$manifest_status_probe_dir"
+
 	g_cmd_awk="$failing_awk"
 	zxfer_build_snapshot_record_index source "$records" >/dev/null 2>&1
 	build_awk_status=$?
@@ -1486,12 +1492,14 @@ EOF
 		1 "$build_awk_status"
 	assertEquals "File-backed snapshot-index builds should fail closed when the staged-map awk command fails in the current shell." \
 		1 "$build_file_awk_status"
+	assertNotEquals "Directory-backed manifest redirection should fail in the active test shell." \
+		0 "$expected_manifest_write_status"
 	assertEquals "Snapshot-index builds should fail closed when the staged manifest path cannot be opened for writing in the current shell." \
-		1 "$manifest_status"
+		"$expected_manifest_write_status" "$manifest_status"
 	assertEquals "Snapshot-index builds should clean up the stage directory when staged manifest writes fail in the current shell." \
 		"no" "$manifest_exists"
 	assertEquals "File-backed snapshot-index builds should fail closed when the staged manifest path cannot be opened for writing in the current shell." \
-		1 "$file_manifest_status"
+		"$expected_manifest_write_status" "$file_manifest_status"
 	assertEquals "File-backed snapshot-index builds should clean up the stage directory when staged manifest writes fail in the current shell." \
 		"no" "$file_manifest_exists"
 }

@@ -5467,7 +5467,7 @@ test_get_os_fails_when_remote_helper_is_unavailable() {
 	)
 	status=$?
 
-	assertEquals "Remote OS detection should fail when the remote helper module is unavailable." 1 "$status"
+	assertEquals "Remote OS detection should preserve missing-helper status." 127 "$status"
 	assertEquals "Failed remote OS detection should not print a payload." "" "$result"
 }
 

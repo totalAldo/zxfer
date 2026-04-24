@@ -214,7 +214,12 @@ zxfer_read_background_job_launch_file() {
 	g_zxfer_background_job_launch_teardown_mode=""
 	g_zxfer_background_job_launch_started_epoch=""
 
-	zxfer_read_runtime_artifact_file "$l_launch_path" >/dev/null || return $?
+	l_read_status=0
+	zxfer_read_runtime_artifact_file "$l_launch_path" >/dev/null ||
+		l_read_status=$?
+	if [ "$l_read_status" -ne 0 ]; then
+		return "$l_read_status"
+	fi
 	while IFS='	' read -r l_key l_value || [ -n "${l_key}${l_value}" ]; do
 		case $l_key in
 		job_id)
@@ -262,7 +267,12 @@ zxfer_read_background_job_completion_file() {
 	g_zxfer_background_job_completion_exit_status=""
 	g_zxfer_background_job_completion_report_failure=""
 
-	zxfer_read_runtime_artifact_file "$l_completion_path" >/dev/null || return $?
+	l_read_status=0
+	zxfer_read_runtime_artifact_file "$l_completion_path" >/dev/null ||
+		l_read_status=$?
+	if [ "$l_read_status" -ne 0 ]; then
+		return "$l_read_status"
+	fi
 	while IFS='	' read -r l_key l_value || [ -n "${l_key}${l_value}" ]; do
 		case $l_key in
 		status)
@@ -293,7 +303,9 @@ zxfer_read_background_job_completion_file() {
 		$g_zxfer_runtime_artifact_read_result
 	EOF
 
-	[ "$l_read_status" -eq 0 ] || return 1
+	if [ "$l_read_status" -ne 0 ]; then
+		return "$l_read_status"
+	fi
 	[ "$l_status_seen" -eq 1 ]
 }
 
@@ -309,8 +321,10 @@ zxfer_get_background_job_completion_status() {
 		g_zxfer_background_job_completion_report_failure=completion_write
 		return 0
 	fi
-	if ! zxfer_read_background_job_completion_file "$l_control_dir"; then
-		return 1
+	l_completion_read_status=0
+	zxfer_read_background_job_completion_file "$l_control_dir" || l_completion_read_status=$?
+	if [ "$l_completion_read_status" -ne 0 ]; then
+		return "$l_completion_read_status"
 	fi
 
 	return 0
@@ -328,15 +342,24 @@ zxfer_spawn_supervised_background_job() {
 	g_zxfer_background_job_last_runner_pid=""
 	g_zxfer_background_job_last_control_dir=""
 
-	if ! l_runner_script=$(zxfer_get_background_job_runner_script_path); then
-		zxfer_throw_error "Failed to locate the background job runner helper."
+	l_spawn_status=0
+	l_runner_script=$(zxfer_get_background_job_runner_script_path) ||
+		l_spawn_status=$?
+	if [ "$l_spawn_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to locate the background job runner helper." "$l_spawn_status"
 	fi
-	if ! l_job_id=$(zxfer_next_background_job_id); then
-		zxfer_throw_error "Failed to allocate a background job id."
+	l_spawn_status=0
+	l_job_id=$(zxfer_next_background_job_id) ||
+		l_spawn_status=$?
+	if [ "$l_spawn_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to allocate a background job id." "$l_spawn_status"
 	fi
 	l_temp_prefix="${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}.$l_job_id"
-	if ! l_control_dir=$(zxfer_create_private_temp_dir "$l_temp_prefix"); then
-		zxfer_throw_error "Error creating temporary file."
+	l_spawn_status=0
+	l_control_dir=$(zxfer_create_private_temp_dir "$l_temp_prefix") ||
+		l_spawn_status=$?
+	if [ "$l_spawn_status" -ne 0 ]; then
+		zxfer_throw_error "Error creating temporary file." "$l_spawn_status"
 	fi
 	l_runner_token="$l_job_id.$(date +%s)"
 	ZXFER_BACKGROUND_JOB_NOTIFY_FD=$l_notify_fd \
@@ -350,7 +373,10 @@ zxfer_spawn_supervised_background_job() {
 		"$l_output_file" \
 		"$l_error_file" &
 	l_runner_pid=$!
-	if ! l_runner_start_token=$(zxfer_get_process_start_token "$l_runner_pid"); then
+	l_spawn_status=0
+	l_runner_start_token=$(zxfer_get_process_start_token "$l_runner_pid") ||
+		l_spawn_status=$?
+	if [ "$l_spawn_status" -ne 0 ]; then
 		zxfer_teardown_unregistered_background_runner \
 			"$l_job_id" \
 			"$l_runner_pid" \
@@ -359,17 +385,20 @@ zxfer_spawn_supervised_background_job() {
 			"$l_runner_token" \
 			"" \
 			"TERM" >/dev/null 2>&1 || :
-		zxfer_throw_error "Failed to validate background job [$l_job_id] runner identity."
+		zxfer_throw_error "Failed to validate background job [$l_job_id] runner identity." "$l_spawn_status"
 	fi
 
-	if ! zxfer_register_background_job_record \
+	l_spawn_status=0
+	zxfer_register_background_job_record \
 		"$l_job_id" \
 		"$l_kind" \
 		"$l_runner_pid" \
 		"$l_control_dir" \
 		"$l_runner_script" \
 		"$l_runner_token" \
-		"$l_runner_start_token"; then
+		"$l_runner_start_token" ||
+		l_spawn_status=$?
+	if [ "$l_spawn_status" -ne 0 ]; then
 		zxfer_teardown_unregistered_background_runner \
 			"$l_job_id" \
 			"$l_runner_pid" \
@@ -378,7 +407,7 @@ zxfer_spawn_supervised_background_job() {
 			"$l_runner_token" \
 			"$l_runner_start_token" \
 			"TERM" >/dev/null 2>&1 || :
-		zxfer_throw_error "Failed to register background job [$l_job_id]."
+		zxfer_throw_error "Failed to register background job [$l_job_id]." "$l_spawn_status"
 	fi
 
 	g_zxfer_background_job_last_id=$l_job_id
@@ -402,8 +431,10 @@ zxfer_wait_for_background_job() {
 	fi
 
 	wait "$g_zxfer_background_job_record_runner_pid" 2>/dev/null || l_wait_status=$?
-	if ! zxfer_get_background_job_completion_status "$g_zxfer_background_job_record_control_dir" "$l_wait_status"; then
+	l_completion_status=0
+	zxfer_get_background_job_completion_status "$g_zxfer_background_job_record_control_dir" "$l_wait_status" ||
 		l_completion_status=$?
+	if [ "$l_completion_status" -ne 0 ]; then
 		zxfer_unregister_background_job_record "$l_job_id"
 		zxfer_cleanup_runtime_artifact_path "$g_zxfer_background_job_record_control_dir" >/dev/null 2>&1 || :
 		return "$l_completion_status"
@@ -422,7 +453,9 @@ zxfer_wait_for_background_job() {
 
 zxfer_read_background_job_process_snapshot() {
 	g_zxfer_background_job_process_snapshot_result=""
-	l_snapshot=$("$g_cmd_ps" -o pid= -o ppid= -o pgid= 2>/dev/null) || return 1
+	l_snapshot_status=0
+	l_snapshot=$("$g_cmd_ps" -o pid= -o ppid= -o pgid= 2>/dev/null) || l_snapshot_status=$?
+	[ "$l_snapshot_status" -eq 0 ] || return "$l_snapshot_status"
 	g_zxfer_background_job_process_snapshot_result=$l_snapshot
 	printf '%s\n' "$l_snapshot"
 }
@@ -525,8 +558,9 @@ zxfer_get_background_job_pid_set() {
 	l_root_pid=$2
 
 	g_zxfer_background_job_pid_set_result=""
+	l_pid_set_status=0
 	# shellcheck disable=SC2016
-	l_pid_set=$(printf '%s\n' "$l_snapshot" | "${g_cmd_awk:-awk}" -v root="$l_root_pid" '
+	l_pid_set_raw=$(printf '%s\n' "$l_snapshot" | "${g_cmd_awk:-awk}" -v root="$l_root_pid" '
 	{
 		pid = $1
 		ppid = $2
@@ -553,9 +587,12 @@ zxfer_get_background_job_pid_set() {
 		for (pid in target) {
 			print pid
 		}
-	}' | LC_ALL=C sort -n)
-	l_status=$?
-	[ "$l_status" -eq 0 ] || return "$l_status"
+	}') || l_pid_set_status=$?
+	[ "$l_pid_set_status" -eq 0 ] || return "$l_pid_set_status"
+	l_pid_set_status=0
+	l_pid_set=$(printf '%s\n' "$l_pid_set_raw" | LC_ALL=C sort -n) ||
+		l_pid_set_status=$?
+	[ "$l_pid_set_status" -eq 0 ] || return "$l_pid_set_status"
 	g_zxfer_background_job_pid_set_result=$l_pid_set
 	printf '%s\n' "$l_pid_set"
 }
@@ -596,7 +633,17 @@ zxfer_signal_validated_background_job_scope() {
 	l_signal_status=0
 	l_signal_target_pid_set=""
 
-	l_signal_current_shell_pgid=$("$g_cmd_ps" -o pgid= -p "$$" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed -n '1p')
+	l_signal_current_shell_pgid_status=0
+	l_signal_current_shell_pgid_raw=$("$g_cmd_ps" -o pgid= -p "$$" 2>/dev/null) ||
+		l_signal_current_shell_pgid_status=$?
+	if [ "$l_signal_current_shell_pgid_status" -eq 0 ]; then
+		l_signal_current_shell_pgid=$(printf '%s\n' "$l_signal_current_shell_pgid_raw" |
+			sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed -n '1p') ||
+			l_signal_current_shell_pgid_status=$?
+	else
+		l_signal_current_shell_pgid=""
+	fi
+	[ "$l_signal_current_shell_pgid_status" -eq 0 ] || l_signal_current_shell_pgid=""
 	case ${g_zxfer_background_job_launch_worker_pgid:-} in
 	'' | *[!0-9]*)
 		l_signal_use_process_group=0
@@ -623,11 +670,14 @@ zxfer_signal_validated_background_job_scope() {
 		zxfer_signal_background_job_process_group "$g_zxfer_background_job_launch_worker_pgid" "$l_signal_name" || l_signal_status=1
 		kill "-$l_signal_name" "$l_signal_runner_pid" 2>/dev/null || l_signal_status=1
 	else
-		if ! zxfer_get_background_job_pid_set \
+		l_signal_pid_set_status=0
+		zxfer_get_background_job_pid_set \
 			"$g_zxfer_background_job_process_snapshot_result" \
-			"$l_signal_runner_pid" >/dev/null; then
+			"$l_signal_runner_pid" >/dev/null ||
+			l_signal_pid_set_status=$?
+		if [ "$l_signal_pid_set_status" -ne 0 ]; then
 			g_zxfer_background_job_abort_failure_message="Failed to derive the owned child set for background job [$l_signal_job_id] cleanup."
-			return 2
+			return "$l_signal_pid_set_status"
 		fi
 		l_signal_target_pid_set=$g_zxfer_background_job_pid_set_result
 		[ -n "$l_signal_target_pid_set" ] || l_signal_target_pid_set=$l_signal_runner_pid
@@ -683,7 +733,9 @@ zxfer_finish_signaled_background_job_abort() {
 			"$l_finish_control_dir"
 		return 0
 	fi
-	if ! zxfer_read_background_job_process_snapshot >/dev/null; then
+	l_finish_snapshot_status=0
+	zxfer_read_background_job_process_snapshot >/dev/null || l_finish_snapshot_status=$?
+	if [ "$l_finish_snapshot_status" -ne 0 ]; then
 		if [ -f "$l_finish_completion_path" ]; then
 			zxfer_cleanup_completed_background_job \
 				"$l_finish_job_id" \
@@ -692,7 +744,7 @@ zxfer_finish_signaled_background_job_abort() {
 			return 0
 		fi
 		g_zxfer_background_job_abort_failure_message="Failed to inspect the process table for background job [$l_finish_job_id] cleanup."
-		return 1
+		return "$l_finish_snapshot_status"
 	fi
 
 	zxfer_background_job_runner_matches \
@@ -743,7 +795,9 @@ zxfer_finish_signaled_background_job_abort() {
 			"$l_finish_control_dir"
 		return 0
 	fi
-	if ! zxfer_read_background_job_process_snapshot >/dev/null; then
+	l_finish_snapshot_status=0
+	zxfer_read_background_job_process_snapshot >/dev/null || l_finish_snapshot_status=$?
+	if [ "$l_finish_snapshot_status" -ne 0 ]; then
 		if [ -f "$l_finish_completion_path" ]; then
 			zxfer_cleanup_completed_background_job \
 				"$l_finish_job_id" \
@@ -752,7 +806,7 @@ zxfer_finish_signaled_background_job_abort() {
 			return 0
 		fi
 		g_zxfer_background_job_abort_failure_message="Failed to inspect the process table for background job [$l_finish_job_id] cleanup."
-		return 1
+		return "$l_finish_snapshot_status"
 	fi
 
 	l_finish_runner_match_status=0
@@ -790,12 +844,18 @@ zxfer_finish_signaled_background_job_abort() {
 		;;
 	esac
 
-	if [ "$l_finish_escalation_status" -eq 2 ] && [ -n "${g_zxfer_background_job_abort_failure_message:-}" ]; then
+	if [ "$l_finish_escalation_status" -ne 0 ] && [ -n "${g_zxfer_background_job_abort_failure_message:-}" ]; then
 		:
 	elif [ "$l_finish_signal_status" -ne 0 ] || [ "$l_finish_escalation_status" -ne 0 ]; then
 		g_zxfer_background_job_abort_failure_message="Failed to signal the validated teardown target for background job [$l_finish_job_id]."
 	else
 		g_zxfer_background_job_abort_failure_message="Refusing to remove background job [$l_finish_job_id] state because the validated runner PID [$l_finish_runner_pid] is still live after abort cleanup signaling."
+	fi
+	if [ "$l_finish_signal_status" -ne 0 ]; then
+		return "$l_finish_signal_status"
+	fi
+	if [ "$l_finish_escalation_status" -ne 0 ]; then
+		return "$l_finish_escalation_status"
 	fi
 	return 1
 }
@@ -828,9 +888,11 @@ zxfer_teardown_unregistered_background_runner() {
 		l_unregistered_have_launch_metadata=1
 	fi
 
-	if ! zxfer_read_background_job_process_snapshot >/dev/null; then
+	l_unregistered_snapshot_status=0
+	zxfer_read_background_job_process_snapshot >/dev/null || l_unregistered_snapshot_status=$?
+	if [ "$l_unregistered_snapshot_status" -ne 0 ]; then
 		g_zxfer_background_job_abort_failure_message="Failed to inspect the process table for background job [$l_unregistered_job_id] cleanup."
-		return 1
+		return "$l_unregistered_snapshot_status"
 	fi
 	if ! zxfer_background_job_snapshot_has_pid_with_parent \
 		"$g_zxfer_background_job_process_snapshot_result" \
@@ -928,7 +990,10 @@ zxfer_abort_background_job() {
 	l_launch_path=$g_zxfer_background_job_record_control_dir/launch.tsv
 	l_completion_path=$g_zxfer_background_job_record_control_dir/completion.tsv
 	if [ -f "$l_launch_path" ]; then
-		if ! zxfer_read_background_job_launch_file "$g_zxfer_background_job_record_control_dir"; then
+		l_launch_read_status=0
+		zxfer_read_background_job_launch_file "$g_zxfer_background_job_record_control_dir" ||
+			l_launch_read_status=$?
+		if [ "$l_launch_read_status" -ne 0 ]; then
 			if [ -f "$l_completion_path" ]; then
 				zxfer_cleanup_completed_background_job \
 					"$l_job_id" \
@@ -937,7 +1002,7 @@ zxfer_abort_background_job() {
 				return 0
 			fi
 			g_zxfer_background_job_abort_failure_message="Failed to read launch metadata for background job [$l_job_id]."
-			return 1
+			return "$l_launch_read_status"
 		fi
 		l_have_launch_metadata=1
 	else
@@ -951,7 +1016,9 @@ zxfer_abort_background_job() {
 		g_zxfer_background_job_launch_teardown_mode=""
 		g_zxfer_background_job_launch_started_epoch=""
 	fi
-	if ! zxfer_read_background_job_process_snapshot >/dev/null; then
+	l_abort_snapshot_status=0
+	zxfer_read_background_job_process_snapshot >/dev/null || l_abort_snapshot_status=$?
+	if [ "$l_abort_snapshot_status" -ne 0 ]; then
 		if [ -f "$l_completion_path" ]; then
 			zxfer_cleanup_completed_background_job \
 				"$l_job_id" \
@@ -960,7 +1027,7 @@ zxfer_abort_background_job() {
 			return 0
 		fi
 		g_zxfer_background_job_abort_failure_message="Failed to inspect the process table for background job [$l_job_id] cleanup."
-		return 1
+		return "$l_abort_snapshot_status"
 	fi
 	if [ "$l_have_launch_metadata" -eq 1 ] &&
 		{
@@ -1048,9 +1115,11 @@ $l_job_id"
 
 	while IFS= read -r l_job_id || [ -n "$l_job_id" ]; do
 		[ -n "$l_job_id" ] || continue
-		if ! zxfer_abort_background_job "$l_job_id" TERM; then
+		l_abort_status=0
+		zxfer_abort_background_job "$l_job_id" TERM || l_abort_status=$?
+		if [ "$l_abort_status" -ne 0 ]; then
 			if [ "$l_abort_failure" -eq 0 ]; then
-				l_abort_failure=1
+				l_abort_failure=$l_abort_status
 				l_first_failure_message=${g_zxfer_background_job_abort_failure_message:-}
 			fi
 		fi
@@ -1060,7 +1129,7 @@ $l_job_id"
 
 	if [ "$l_abort_failure" -ne 0 ]; then
 		g_zxfer_background_job_abort_failure_message=$l_first_failure_message
-		return 1
+		return "$l_abort_failure"
 	fi
 
 	return 0

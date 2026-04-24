@@ -2346,15 +2346,15 @@ test_collect_source_props_propagates_normalized_property_lookup_failures() {
 		(
 			zxfer_get_normalized_dataset_properties() {
 				printf '%s\n' "permission denied"
-				return 1
+				return 27
 			}
 			zxfer_collect_source_props "tank/src" "backup/dst" 0 ""
 		)
 	)
 	status=$?
 
-	assertEquals "Source property collection should return a failure when normalized source inspection fails." \
-		"1" "$status"
+	assertEquals "Source property collection should preserve normalized source inspection failures." \
+		"27" "$status"
 	assertEquals "Source property collection should preserve the normalized-property lookup failure output." \
 		"permission denied" "$output"
 }
@@ -5670,7 +5670,7 @@ test_adjust_child_inherit_to_match_parent_returns_failure_when_parent_props_cann
 			}
 			zxfer_collect_destination_props() {
 				printf '%s\n' "ssh timeout"
-				return 1
+				return 27
 			}
 			zxfer_adjust_child_inherit_to_match_parent "backup/dst/child" \
 				"compression=lz4=local" \
@@ -5682,7 +5682,7 @@ test_adjust_child_inherit_to_match_parent_returns_failure_when_parent_props_cann
 	status=$?
 
 	assertEquals "Parent-property load failures should abort child-inherit reconciliation." \
-		"1" "$status"
+		"27" "$status"
 	assertEquals "Parent-property load failures should not emit partial adjusted lists." \
 		"" "$output"
 }

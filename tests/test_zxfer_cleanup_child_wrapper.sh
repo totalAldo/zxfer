@@ -67,11 +67,36 @@ test_cleanup_child_wrapper_on_signal_returns_143() {
 		"aborted" "$(tr -d '[:space:]' <"$marker_file")"
 }
 
+test_cleanup_child_wrapper_abort_descendants_preserves_listing_failures() {
+	zxfer_test_capture_subshell '
+		zxfer_cleanup_child_wrapper_list_descendants() {
+			return 37
+		}
+		zxfer_cleanup_child_wrapper_abort_descendants
+		printf "status=%s\n" "$?"
+	'
+
+	assertContains "Cleanup child wrapper abort handling should preserve descendant-listing failures." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=37"
+}
+
 test_cleanup_child_wrapper_main_requires_command() {
 	zxfer_test_capture_subshell "sh '$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh'"
 
 	assertEquals "Cleanup child wrapper should fail closed when no command is supplied." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
+}
+
+test_cleanup_child_wrapper_main_reports_stdin_duplication_failures() {
+	sh -c 'exec 3<&0' <&- >/dev/null 2>&1
+	expected_status=$?
+	assertNotEquals "Closed-stdin duplication should fail in the active test shell." \
+		0 "$expected_status"
+
+	zxfer_test_capture_subshell "sh '$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh' 'exit 0' <&-"
+
+	assertEquals "Cleanup child wrapper should preserve stdin-duplication failures before launching the worker." \
+		"$expected_status" "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
 test_cleanup_child_wrapper_source_executes_main_when_not_source_only() {

@@ -64,8 +64,10 @@ zxfer_capture_snapshot_records_for_dataset() {
 	l_dataset=$2
 
 	g_zxfer_snapshot_record_capture_result=""
-	if ! zxfer_create_runtime_artifact_file "zxfer-snapshot-records" >/dev/null; then
-		return 1
+	l_capture_status=0
+	zxfer_create_runtime_artifact_file "zxfer-snapshot-records" >/dev/null || l_capture_status=$?
+	if [ "$l_capture_status" -ne 0 ]; then
+		return "$l_capture_status"
 	fi
 	l_capture_file=$g_zxfer_runtime_artifact_path_result
 	if zxfer_get_snapshot_records_for_dataset "$l_side" "$l_dataset" >"$l_capture_file"; then
@@ -75,8 +77,9 @@ zxfer_capture_snapshot_records_for_dataset() {
 		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
 		return "$l_capture_status"
 	fi
-	if ! zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null; then
-		l_capture_status=$?
+	l_capture_status=0
+	zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null || l_capture_status=$?
+	if [ "$l_capture_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
 		return "$l_capture_status"
 	fi
@@ -176,39 +179,42 @@ zxfer_get_dest_snapshots_to_delete_per_dataset() {
 	l_source_identity_pid=$!
 	l_source_identity_waited=0
 	if ! zxfer_register_cleanup_pid "$l_source_identity_pid" "delete planning identity writer"; then
-		wait "$l_source_identity_pid" 2>/dev/null
-		l_source_identity_status=$?
+		l_source_identity_status=0
+		wait "$l_source_identity_pid" 2>/dev/null || l_source_identity_status=$?
 		l_source_identity_waited=1
 	fi
 
-	zxfer_write_snapshot_identities_to_file "$l_zfs_dest_snaps" "$g_delete_dest_tmp_file"
-	l_dest_identity_status=$?
+	l_dest_identity_status=0
+	zxfer_write_snapshot_identities_to_file "$l_zfs_dest_snaps" "$g_delete_dest_tmp_file" ||
+		l_dest_identity_status=$?
 
 	# wait for the background process to finish
 	if [ "$l_source_identity_waited" -ne 1 ]; then
-		wait "$l_source_identity_pid" 2>/dev/null
-		l_source_identity_status=$?
+		l_source_identity_status=0
+		wait "$l_source_identity_pid" 2>/dev/null || l_source_identity_status=$?
 		zxfer_unregister_cleanup_pid "$l_source_identity_pid"
 	fi
 
 	if [ "$l_dest_identity_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to generate destination snapshot identities for delete planning."
+		zxfer_throw_error "Failed to generate destination snapshot identities for delete planning." "$l_dest_identity_status"
 	fi
 	if [ "$l_source_identity_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to generate source snapshot identities for delete planning."
+		zxfer_throw_error "Failed to generate source snapshot identities for delete planning." "$l_source_identity_status"
 	fi
 
 	# Use comm to find snapshots in g_delete_dest_tmp_file that don't have a match in g_delete_source_tmp_file
-	LC_ALL=C comm -13 "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" >"$g_delete_snapshots_to_delete_tmp_file"
-	l_snapshot_diff_status=$?
+	l_snapshot_diff_status=0
+	LC_ALL=C comm -13 "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" >"$g_delete_snapshots_to_delete_tmp_file" ||
+		l_snapshot_diff_status=$?
 	if [ "$l_snapshot_diff_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to diff source and destination snapshot identities for delete planning."
+		zxfer_throw_error "Failed to diff source and destination snapshot identities for delete planning." "$l_snapshot_diff_status"
 	fi
 
-	l_dest_snaps_to_delete=$(zxfer_write_destination_snapshot_paths_for_identity_file "$l_zfs_dest_snaps" "$g_delete_snapshots_to_delete_tmp_file")
-	l_snapshot_path_status=$?
+	l_snapshot_path_status=0
+	l_dest_snaps_to_delete=$(zxfer_write_destination_snapshot_paths_for_identity_file "$l_zfs_dest_snaps" "$g_delete_snapshots_to_delete_tmp_file") ||
+		l_snapshot_path_status=$?
 	if [ "$l_snapshot_path_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to map destination snapshot identities back to snapshot paths for delete planning."
+		zxfer_throw_error "Failed to map destination snapshot identities back to snapshot paths for delete planning." "$l_snapshot_path_status"
 	fi
 
 	# Print the matching lines
@@ -541,8 +547,9 @@ zxfer_deleted_snapshots_include_newer_than_last_common() {
 	[ -n "$l_last_common_name" ] || return 1
 
 	l_last_common_dest_snapshot="$g_actual_dest@$l_last_common_name"
-	l_last_common_creation=$(zxfer_get_destination_snapshot_creation_epoch "$l_last_common_dest_snapshot")
-	l_last_common_creation_status=$?
+	l_last_common_creation_status=0
+	l_last_common_creation=$(zxfer_get_destination_snapshot_creation_epoch "$l_last_common_dest_snapshot") ||
+		l_last_common_creation_status=$?
 	if [ "$l_last_common_creation_status" -ne 0 ]; then
 		return 2
 	fi
@@ -556,8 +563,9 @@ zxfer_deleted_snapshots_include_newer_than_last_common() {
 	while IFS= read -r l_deleted_snapshot; do
 		[ -n "$l_deleted_snapshot" ] || continue
 		l_deleted_snapshot_path=$(zxfer_extract_snapshot_path "$l_deleted_snapshot")
-		l_deleted_creation=$(zxfer_get_destination_snapshot_creation_epoch "$l_deleted_snapshot_path")
-		l_deleted_creation_status=$?
+		l_deleted_creation_status=0
+		l_deleted_creation=$(zxfer_get_destination_snapshot_creation_epoch "$l_deleted_snapshot_path") ||
+			l_deleted_creation_status=$?
 		if [ "$l_deleted_creation_status" -ne 0 ]; then
 			return 2
 		fi
@@ -586,10 +594,11 @@ zxfer_grandfather_test() {
 	l_destination_snapshot=$1
 
 	l_current_date=$(date +%s) # current date in seconds from 1970
-	l_snap_date=$(zxfer_get_destination_snapshot_creation_epoch "$l_destination_snapshot")
-	l_snap_date_status=$?
+	l_snap_date_status=0
+	l_snap_date=$(zxfer_get_destination_snapshot_creation_epoch "$l_destination_snapshot") ||
+		l_snap_date_status=$?
 	if [ "$l_snap_date_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to query creation time for destination snapshot $l_destination_snapshot. Review prior stderr for the transport or query error."
+		zxfer_throw_error "Failed to query creation time for destination snapshot $l_destination_snapshot. Review prior stderr for the transport or query error." "$l_snap_date_status"
 	fi
 	case "$l_snap_date" in
 	'' | *[!0-9]*)
@@ -601,8 +610,9 @@ zxfer_grandfather_test() {
 	l_diff_day=$((l_diff_sec / 86400))
 
 	if [ $l_diff_day -ge "$g_option_g_grandfather_protection" ]; then
-		l_snap_date_english=$(zxfer_format_snapshot_creation_epoch_for_display "$l_snap_date")
-		l_snap_date_english_status=$?
+		l_snap_date_english_status=0
+		l_snap_date_english=$(zxfer_format_snapshot_creation_epoch_for_display "$l_snap_date") ||
+			l_snap_date_english_status=$?
 		if [ "$l_snap_date_english_status" -ne 0 ] || [ -z "$l_snap_date_english" ]; then
 			l_snap_date_english="$l_snap_date (unix epoch)"
 		fi
@@ -653,13 +663,17 @@ zxfer_delete_snaps() {
 	fi
 
 	zxfer_reset_destination_snapshot_creation_cache
-	if ! zxfer_prefetch_delete_snapshot_creation_times "$l_snaps_to_delete" >/dev/null; then
-		zxfer_throw_error "Failed to query destination snapshot creation times while planning snapshot deletions. Review prior stderr for the transport or query error."
+	l_prefetch_creation_status=0
+	zxfer_prefetch_delete_snapshot_creation_times "$l_snaps_to_delete" >/dev/null ||
+		l_prefetch_creation_status=$?
+	if [ "$l_prefetch_creation_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to query destination snapshot creation times while planning snapshot deletions. Review prior stderr for the transport or query error." "$l_prefetch_creation_status"
 	fi
 
 	g_deleted_dest_newer_snapshots=0
-	zxfer_deleted_snapshots_include_newer_than_last_common "$l_snaps_to_delete"
-	l_deleted_newer_status=$?
+	l_deleted_newer_status=0
+	zxfer_deleted_snapshots_include_newer_than_last_common "$l_snaps_to_delete" ||
+		l_deleted_newer_status=$?
 	if [ "$l_deleted_newer_status" -eq 2 ]; then
 		zxfer_throw_error "Failed to query destination snapshot creation times while evaluating rollback eligibility. Review prior stderr for the transport or query error."
 	fi
@@ -704,8 +718,10 @@ zxfer_delete_snaps() {
 	fi
 
 	g_did_delete_dest_snapshots=1
-	if ! zxfer_run_destination_zfs_cmd destroy "$l_destroy_target"; then
-		zxfer_throw_error "Error when executing command."
+	l_destroy_status=0
+	zxfer_run_destination_zfs_cmd destroy "$l_destroy_target" || l_destroy_status=$?
+	if [ "$l_destroy_status" -ne 0 ]; then
+		zxfer_throw_error "Error when executing command." "$l_destroy_status"
 	fi
 
 	# set the flag to indicate that a destroy command was sent
@@ -767,14 +783,18 @@ zxfer_inspect_delete_snap() {
 
 	# Get only the snapshots for the exact source dataset in descending order
 	# by creation date.
-	if ! zxfer_capture_snapshot_records_for_dataset source "$l_source"; then
-		zxfer_throw_error "Failed to retrieve source snapshot records for [$l_source]."
+	l_source_records_status=0
+	zxfer_capture_snapshot_records_for_dataset source "$l_source" || l_source_records_status=$?
+	if [ "$l_source_records_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to retrieve source snapshot records for [$l_source]." "$l_source_records_status"
 	fi
 	l_zfs_source_snaps=$g_zxfer_snapshot_record_capture_result
 
 	# Get the list of destination snapshots for the matching destination dataset.
-	if ! zxfer_capture_snapshot_records_for_dataset destination "$g_actual_dest"; then
-		zxfer_throw_error "Failed to retrieve destination snapshot records for [$g_actual_dest]."
+	l_dest_records_status=0
+	zxfer_capture_snapshot_records_for_dataset destination "$g_actual_dest" || l_dest_records_status=$?
+	if [ "$l_dest_records_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to retrieve destination snapshot records for [$g_actual_dest]." "$l_dest_records_status"
 	fi
 	l_zfs_dest_snaps=$g_zxfer_snapshot_record_capture_result
 	l_identity_source_snaps=$l_zfs_source_snaps
@@ -791,21 +811,30 @@ zxfer_inspect_delete_snap() {
 
 	if zxfer_snapshot_record_lists_share_snapshot_name "$l_zfs_source_snaps" "$l_zfs_dest_snaps"; then
 		if ! zxfer_snapshot_record_list_contains_guid "$l_zfs_source_snaps"; then
-			if ! l_identity_source_snaps=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_source" "$l_zfs_source_snaps"); then
-				zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_source]."
+			l_identity_source_status=0
+			l_identity_source_snaps=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_source" "$l_zfs_source_snaps") ||
+				l_identity_source_status=$?
+			if [ "$l_identity_source_status" -ne 0 ]; then
+				zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_source]." "$l_identity_source_status"
 			fi
 		fi
 
 		if ! zxfer_snapshot_record_list_contains_guid "$l_zfs_dest_snaps"; then
-			if ! l_identity_dest_snaps=$(zxfer_get_snapshot_identity_records_for_dataset destination "$g_actual_dest" "$l_zfs_dest_snaps"); then
-				zxfer_throw_error "Failed to retrieve destination snapshot identities for [$g_actual_dest]."
+			l_identity_dest_status=0
+			l_identity_dest_snaps=$(zxfer_get_snapshot_identity_records_for_dataset destination "$g_actual_dest" "$l_zfs_dest_snaps") ||
+				l_identity_dest_status=$?
+			if [ "$l_identity_dest_status" -ne 0 ]; then
+				zxfer_throw_error "Failed to retrieve destination snapshot identities for [$g_actual_dest]." "$l_identity_dest_status"
 			fi
 		fi
 	fi
 
 	# Find the most recent common snapshot on source and destination.
-	if ! g_last_common_snap=$(zxfer_get_last_common_snapshot "$l_identity_source_snaps" "$l_identity_dest_snaps"); then
-		zxfer_throw_error "Failed to determine the last common snapshot for [$l_source] and [$g_actual_dest]."
+	l_last_common_status=0
+	g_last_common_snap=$(zxfer_get_last_common_snapshot "$l_identity_source_snaps" "$l_identity_dest_snaps") ||
+		l_last_common_status=$?
+	if [ "$l_last_common_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to determine the last common snapshot for [$l_source] and [$g_actual_dest]." "$l_last_common_status"
 	fi
 
 	# Deletes non-common snaps on destination if asked to.

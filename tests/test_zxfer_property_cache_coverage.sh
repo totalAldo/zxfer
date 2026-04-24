@@ -877,5 +877,43 @@ test_zxfer_property_cache_wrapper_helpers_preserve_exact_failure_statuses() {
 		"required failed" "$required_output"
 }
 
+test_zxfer_load_normalized_dataset_properties_preserves_live_probe_statuses() {
+	set +e
+	machine_output=$(
+		(
+			zxfer_run_zfs_cmd_for_spec() {
+				printf '%s\n' "machine probe failed"
+				return 23
+			}
+			zxfer_load_normalized_dataset_properties "tank/src" "/sbin/zfs" source
+		)
+	)
+	machine_status=$?
+	human_output=$(
+		(
+			zxfer_run_zfs_cmd_for_spec() {
+				if [ "$3" = "-Hpo" ]; then
+					printf '%s\n' "compression	lz4	local"
+					return 0
+				fi
+				printf '%s\n' "human probe failed"
+				return 24
+			}
+			zxfer_load_normalized_dataset_properties "tank/src" "/sbin/zfs" source
+		)
+	)
+	human_status=$?
+	set -e
+
+	assertEquals "Normalized-property live machine probes should preserve exact zfs status." \
+		23 "$machine_status"
+	assertEquals "Normalized-property live machine probes should preserve failure output." \
+		"machine probe failed" "$machine_output"
+	assertEquals "Normalized-property live human probes should preserve exact zfs status." \
+		24 "$human_status"
+	assertEquals "Normalized-property live human probes should preserve failure output." \
+		"human probe failed" "$human_output"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

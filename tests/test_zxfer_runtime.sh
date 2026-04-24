@@ -411,11 +411,11 @@ test_zxfer_abort_direct_child_pid_reports_lookup_and_ownership_failures() {
 			printf "%s\n" "$1"
 		}
 
-		zxfer_read_cleanup_pid_process_snapshot() {
-			return 1
-		}
-		zxfer_abort_direct_child_pid 201 TERM "unit cleanup helper"
-		printf "snapshot=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
+			zxfer_read_cleanup_pid_process_snapshot() {
+				return 23
+			}
+			zxfer_abort_direct_child_pid 201 TERM "unit cleanup helper"
+			printf "snapshot=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
 
 		zxfer_read_cleanup_pid_process_snapshot() {
 			g_zxfer_cleanup_pid_process_snapshot_result="201 999 700"
@@ -437,7 +437,7 @@ test_zxfer_abort_direct_child_pid_reports_lookup_and_ownership_failures() {
 	output=$ZXFER_TEST_CAPTURE_OUTPUT
 
 	assertContains "Validated direct-child abort should fail closed when the process table cannot be inspected." \
-		"$output" "snapshot=1:Failed to inspect the process table for cleanup helper [unit cleanup helper] (PID 201)."
+		"$output" "snapshot=23:Failed to inspect the process table for cleanup helper [unit cleanup helper] (PID 201)."
 	assertContains "Validated direct-child abort should refuse to tear down helpers that are no longer direct children of the current zxfer process." \
 		"$output" "ownership=1:Refusing to tear down cleanup helper [unit cleanup helper] (PID 201) because it is no longer an owned child of the current zxfer process."
 	assertContains "Validated direct-child abort should fail closed when it cannot derive the owned child set." \
@@ -623,7 +623,7 @@ test_zxfer_abort_cleanup_pid_current_shell_revalidation_paths_cover_remaining_br
 		return 0
 	}
 	zxfer_read_cleanup_pid_process_snapshot() {
-		return 1
+		return 29
 	}
 	zxfer_abort_cleanup_pid 301 TERM >/dev/null 2>&1
 	l_snapshot_status=$?
@@ -708,7 +708,7 @@ test_zxfer_abort_cleanup_pid_current_shell_revalidation_paths_cover_remaining_br
 	g_cmd_ps=$l_saved_cmd_ps
 
 	assertEquals "Validated cleanup abort should fail closed when the process table cannot be inspected after ownership validation succeeds." \
-		1 "$l_snapshot_status"
+		29 "$l_snapshot_status"
 	assertEquals "Validated cleanup abort should preserve the process-table failure message in the current shell." \
 		"Failed to inspect the process table for cleanup helper [unit cleanup helper] (PID 301)." "$l_snapshot_message"
 	assertEquals "Validated cleanup abort should fail closed when child-set derivation fails for a still-live helper on the child-set path." \
@@ -1201,7 +1201,7 @@ test_zxfer_trap_exit_fails_closed_when_supervised_background_cleanup_fails() {
 		(
 			zxfer_abort_all_background_jobs() {
 				g_zxfer_background_job_abort_failure_message="validated abort failed"
-				return 1
+				return 17
 			}
 			zxfer_close_all_ssh_control_sockets() {
 				:
@@ -1227,8 +1227,8 @@ test_zxfer_trap_exit_fails_closed_when_supervised_background_cleanup_fails() {
 		set -e
 	fi
 
-	assertEquals "zxfer_trap_exit should fail closed when supervised background cleanup validation fails." \
-		1 "$status"
+	assertEquals "zxfer_trap_exit should preserve supervised background cleanup failure status." \
+		17 "$status"
 	assertContains "Supervised background cleanup failures should surface as runtime trap-cleanup failures." \
 		"$output" "class=runtime"
 	assertContains "Supervised background cleanup failures should mark the trap-cleanup stage." \
@@ -1249,7 +1249,7 @@ test_zxfer_trap_exit_fails_closed_when_validated_cleanup_helper_abort_fails() {
 		(
 			zxfer_kill_registered_cleanup_pids() {
 				g_zxfer_cleanup_pid_abort_failure_message="validated cleanup helper abort failed"
-				return 1
+				return 23
 			}
 			zxfer_close_all_ssh_control_sockets() {
 				:
@@ -1275,8 +1275,8 @@ test_zxfer_trap_exit_fails_closed_when_validated_cleanup_helper_abort_fails() {
 		set -e
 	fi
 
-	assertEquals "zxfer_trap_exit should fail closed when validated cleanup-helper teardown fails." \
-		1 "$status"
+	assertEquals "zxfer_trap_exit should preserve validated cleanup-helper teardown failure status." \
+		23 "$status"
 	assertContains "Validated cleanup-helper teardown failures should surface as runtime trap-cleanup failures." \
 		"$output" "class=runtime"
 	assertContains "Validated cleanup-helper teardown failures should mark the trap-cleanup stage." \

@@ -1193,9 +1193,10 @@ local debugging.
 .Pp
 .Sh EXIT VALUES
 .Nm
-exits 0 on success, 1 on a runtime error, 2 if a command line option is
-incorrect, and 3 when zxfer cannot retrieve the source snapshots needed to
-continue replication.
+exits 0 on success and 2 if a command line option is incorrect. Runtime
+failures exit with the original non-zero status reported by the failing helper
+or command; zxfer-created validation failures that have no lower-level status
+exit 1.
 .Sh SEE ALSO
 .Xr zfs 1 ,
 .Xr zpool 1

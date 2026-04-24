@@ -712,8 +712,13 @@ zxfer_sort_replication_iteration_file() {
 	depth = gsub("/", "/")
 	printf "%06d\t%s\n", depth, $0
 }'
-	"${g_cmd_awk:-awk}" "$l_depth_prefix_awk" "$l_input_file" >"$l_scratch_file" || return $?
-	sort -u "$l_scratch_file" >"$l_output_file" || return $?
+	l_sort_status=0
+	"${g_cmd_awk:-awk}" "$l_depth_prefix_awk" "$l_input_file" >"$l_scratch_file" ||
+		l_sort_status=$?
+	[ "$l_sort_status" -eq 0 ] || return "$l_sort_status"
+	l_sort_status=0
+	sort -u "$l_scratch_file" >"$l_output_file" || l_sort_status=$?
+	[ "$l_sort_status" -eq 0 ] || return "$l_sort_status"
 
 	# shellcheck disable=SC2016
 	l_strip_prefix_awk='
@@ -723,8 +728,13 @@ zxfer_sort_replication_iteration_file() {
 		exit 1
 	print substr($0, tab + 1)
 }'
-	"${g_cmd_awk:-awk}" "$l_strip_prefix_awk" "$l_output_file" >"$l_scratch_file" || return $?
-	cat "$l_scratch_file" >"$l_output_file" || return $?
+	l_sort_status=0
+	"${g_cmd_awk:-awk}" "$l_strip_prefix_awk" "$l_output_file" >"$l_scratch_file" ||
+		l_sort_status=$?
+	[ "$l_sort_status" -eq 0 ] || return "$l_sort_status"
+	l_sort_status=0
+	cat "$l_scratch_file" >"$l_output_file" || l_sort_status=$?
+	[ "$l_sort_status" -eq 0 ] || return "$l_sort_status"
 }
 
 # Purpose: Build the replication iteration list for the next execution or

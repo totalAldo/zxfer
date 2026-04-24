@@ -129,18 +129,18 @@ test_delete_snaps_throws_when_destroy_fails() {
 	output=$(
 		(
 			zxfer_run_destination_zfs_cmd() {
-				return 1
+				return 37
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_delete_snaps "$source_list" "$dest_list"
 		)
 	)
 	status=$?
 
-	assertEquals "Failed destination destroys should abort snapshot deletion." 1 "$status"
+	assertEquals "Failed destination destroys should preserve the destroy status." 37 "$status"
 	assertContains "Failed destination destroys should use the generic execution error." \
 		"$output" "Error when executing command."
 }
@@ -363,7 +363,26 @@ test_zxfer_capture_snapshot_records_for_dataset_and_last_common_snapshot_preserv
 		(
 			set +e
 			zxfer_create_runtime_artifact_file() {
-				return 1
+				return 31
+			}
+			zxfer_capture_snapshot_records_for_dataset source "tank/src"
+			printf 'status=%s\n' "$?"
+			printf 'result=%s\n' "${g_zxfer_snapshot_record_capture_result:-}"
+		)
+	)
+	stage_read_output=$(
+		(
+			set +e
+			zxfer_create_runtime_artifact_file() {
+				g_zxfer_runtime_artifact_path_result="$TEST_TMPDIR/snapshot-record-stage"
+				: >"$g_zxfer_runtime_artifact_path_result"
+				return 0
+			}
+			zxfer_get_snapshot_records_for_dataset() {
+				printf '%s\n' "tank/src@snap1"
+			}
+			zxfer_read_runtime_artifact_file() {
+				return 32
 			}
 			zxfer_capture_snapshot_records_for_dataset source "tank/src"
 			printf 'status=%s\n' "$?"
@@ -385,10 +404,14 @@ test_zxfer_capture_snapshot_records_for_dataset_and_last_common_snapshot_preserv
 		)
 	)
 
-	assertContains "Snapshot-record capture should fail cleanly when the staging file cannot be allocated." \
-		"$stage_create_output" "status=1"
+	assertContains "Snapshot-record capture should preserve staging allocation failures." \
+		"$stage_create_output" "status=31"
 	assertContains "Snapshot-record capture should leave the scratch result empty when staging fails." \
 		"$stage_create_output" "result="
+	assertContains "Snapshot-record capture should preserve staged readback failures." \
+		"$stage_read_output" "status=32"
+	assertContains "Snapshot-record capture should leave the scratch result empty when readback fails." \
+		"$stage_read_output" "result="
 	assertContains "Last-common snapshot lookup should preserve first temp-file allocation failures." \
 		"$initial_tempfile_output" "status=44"
 }
@@ -878,7 +901,7 @@ test_delete_snaps_reports_creation_prefetch_failures_without_falling_back_to_sin
 				printf '%s\n' "$*" >>"$log_file"
 				if [ "$*" = "get -H -o name,value -p creation tank/fs@snap2 tank/fs@snap3" ]; then
 					printf '%s\n' "Permission denied (publickey)." >&2
-					return 1
+					return 38
 				fi
 				if [ "$*" = "destroy tank/fs@snap3" ]; then
 					printf '%s\n' "destroy should not run" >>"$log_file"
@@ -888,7 +911,7 @@ test_delete_snaps_reports_creation_prefetch_failures_without_falling_back_to_sin
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_delete_snaps "$source_list" "$dest_list"
 		) 2>&1
@@ -900,8 +923,8 @@ test_delete_snaps_reports_creation_prefetch_failures_without_falling_back_to_sin
 	batch_count=$("${g_cmd_awk:-awk}" '/^get -H -o name,value -p creation / { count++ } END { print count + 0 }' "$log_file")
 	single_count=$("${g_cmd_awk:-awk}" '/^get -H -o value -p creation / { count++ } END { print count + 0 }' "$log_file")
 
-	assertEquals "Delete planning should abort when the batched creation-time prefetch fails." \
-		1 "$status"
+	assertEquals "Delete planning should preserve batched creation-time prefetch failures." \
+		38 "$status"
 	assertContains "Delete planning should preserve the underlying batched creation-time probe diagnostic." \
 		"$output" "Permission denied (publickey)."
 	assertContains "Delete planning should report batched creation-time probe failures as a destination creation-time query error." \
@@ -1372,21 +1395,21 @@ EOF
 		(
 			zxfer_get_snapshot_identity_records_for_dataset() {
 				if [ "$1:$2" = "source:tank/src" ]; then
-					return 1
+					return 31
 				fi
 				printf '%s\n' "backup/dst@zxfer_1	111"
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_inspect_delete_snap 0 "tank/src"
 		)
 	)
 	status=$?
 
-	assertEquals "Name-only overlapping snapshot sets should abort when source identity lookup fails." \
-		1 "$status"
+	assertEquals "Name-only overlapping snapshot sets should preserve source identity lookup failures." \
+		31 "$status"
 	assertContains "Source identity lookup failures should report the specific source dataset." \
 		"$output" "Failed to retrieve source snapshot identities for [tank/src]."
 }
@@ -1416,21 +1439,21 @@ EOF
 					return 0
 				fi
 				if [ "$1:$2" = "destination:backup/dst" ]; then
-					return 1
+					return 32
 				fi
 				return 1
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_inspect_delete_snap 0 "tank/src"
 		)
 	)
 	status=$?
 
-	assertEquals "Name-only overlapping snapshot sets should abort when destination identity lookup fails." \
-		1 "$status"
+	assertEquals "Name-only overlapping snapshot sets should preserve destination identity lookup failures." \
+		32 "$status"
 	assertContains "Destination identity lookup failures should report the specific destination dataset." \
 		"$output" "Failed to retrieve destination snapshot identities for [backup/dst]."
 }
@@ -1449,7 +1472,7 @@ test_inspect_delete_snap_reports_source_snapshot_record_lookup_failures() {
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_inspect_delete_snap 0 "tank/src"
 		)
@@ -1457,8 +1480,8 @@ test_inspect_delete_snap_reports_source_snapshot_record_lookup_failures() {
 	status=$?
 	set -e
 
-	assertEquals "Delete planning should abort when source snapshot-record lookup fails." \
-		1 "$status"
+	assertEquals "Delete planning should preserve source snapshot-record lookup failures." \
+		23 "$status"
 	assertContains "Source snapshot-record lookup failures should report the specific source dataset." \
 		"$output" "Failed to retrieve source snapshot records for [tank/src]."
 }
@@ -1481,7 +1504,7 @@ test_inspect_delete_snap_reports_destination_snapshot_record_lookup_failures() {
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_inspect_delete_snap 0 "tank/src"
 		)
@@ -1489,8 +1512,8 @@ test_inspect_delete_snap_reports_destination_snapshot_record_lookup_failures() {
 	status=$?
 	set -e
 
-	assertEquals "Delete planning should abort when destination snapshot-record lookup fails." \
-		1 "$status"
+	assertEquals "Delete planning should preserve destination snapshot-record lookup failures." \
+		29 "$status"
 	assertContains "Destination snapshot-record lookup failures should report the specific destination dataset." \
 		"$output" "Failed to retrieve destination snapshot records for [backup/dst]."
 }
@@ -1515,7 +1538,7 @@ test_inspect_delete_snap_reports_last_common_snapshot_failures() {
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_inspect_delete_snap 0 "tank/src"
 		)
@@ -1523,8 +1546,8 @@ test_inspect_delete_snap_reports_last_common_snapshot_failures() {
 	status=$?
 	set -e
 
-	assertEquals "Delete planning should abort when last-common snapshot computation fails." \
-		1 "$status"
+	assertEquals "Delete planning should preserve last-common snapshot computation failures." \
+		41 "$status"
 	assertContains "Last-common snapshot failures should report both dataset sides." \
 		"$output" "Failed to determine the last common snapshot for [tank/src] and [backup/dst]."
 }

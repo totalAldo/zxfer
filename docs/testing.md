@@ -133,6 +133,7 @@ an executable wrapper script that `exec`s the desired command.
 The test layout broadly follows the source layout:
 
 - `test_run_coverage.sh`
+- `test_ci_vmactions_integration.sh`
 - `test_run_shunit_tests.sh`
 - `test_run_integration_zxfer.sh`
 - `test_run_vm_matrix.sh`
@@ -574,8 +575,8 @@ The project currently ships four GitHub Actions workflows:
 - `integration.yml`: integration tests with the direct-host Ubuntu harness on
   `ubuntu-24.04`, plus FreeBSD and OmniOS guest-local `vmactions` lanes that
   install their native prerequisites and run `tests/run_integration_zxfer.sh`
-  directly inside the guest, each preserving failure artifacts in a
-  host-appropriate location
+  inside the guest, each preserving failure artifacts in a host-appropriate
+  location before a host-side status check restores the guest harness result
 
 The Linux integration lane now follows the same direct-host implementation as
 the repository's `main` branch: it runs on GitHub-hosted `ubuntu-24.04`,
@@ -586,8 +587,16 @@ preserved temporary workdir so failure artifacts can still be uploaded.
 The FreeBSD and OmniOS integration lanes still use `vmactions` guests on
 GitHub-hosted runners, but they follow the same direct guest-local harness
 shape as the repository's `main` branch rather than entering the VM-matrix
-entrypoint. That avoids unnecessary host-OS gating inside the guest while
-keeping preserved-workdir handling and artifact uploads intact.
+entrypoint. The in-guest wrapper runs the lane-specific package preparation,
+records the guest preparation or harness exit status, and returns success to
+the VM action so its copyback phase can return preserved workdirs to the
+Ubuntu host; a following host-side step then fails with the recorded status.
+The FreeBSD lane uses the current pinned `vmactions/freebsd-vm` release and
+forces `pkg bootstrap` plus `pkg update`, clears stale package repo/cache state,
+and retries prerequisite installation before continuing with reduced coverage
+if `parallel` or `zstd` remain unavailable. That avoids unnecessary host-OS
+gating inside the guest while keeping preserved-workdir handling and artifact
+uploads intact.
 
 Those integration lanes also run the harness's non-destructive fail-closed
 security regressions. In addition to the existing shell-metacharacter path and

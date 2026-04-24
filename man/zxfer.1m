@@ -1099,9 +1099,10 @@ terminals, pagers, and \fBZXFER_ERROR_LOG\fR. Set
 those last two fields emitted verbatim for local debugging.
 .SH "EXIT VALUES"
 \fBzxfer\fR
-exits 0 on success, 1 on a runtime error, 2 if a command line option is
-incorrect, and 3 when zxfer cannot retrieve the source snapshots needed to
-continue replication.
+exits 0 on success and 2 if a command line option is incorrect. Runtime
+failures exit with the original non-zero status reported by the failing helper
+or command; zxfer-created validation failures that have no lower-level status
+exit 1.
 .SH "SEE ALSO"
 zfs(1),
 zpool(1)

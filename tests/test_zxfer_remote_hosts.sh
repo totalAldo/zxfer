@@ -4955,7 +4955,7 @@ test_zxfer_write_remote_capability_cache_file_returns_failure_when_mktemp_fails(
 	status=$?
 	unset -f mktemp
 
-	assertEquals "Capability cache writes should fail cleanly when mktemp fails." 1 "$status"
+	assertEquals "Capability cache writes should preserve mktemp failure status." 4 "$status"
 }
 
 test_zxfer_write_remote_capability_cache_file_returns_failure_when_path_resolution_fails() {
@@ -6743,7 +6743,8 @@ EOF
 
 	g_option_Y_yield_iterations=17
 	g_zxfer_temp_prefix=""
-	first_prefix=$(zxfer_get_remote_host_cache_root_prefix)
+	zxfer_get_remote_host_cache_root_prefix >/dev/null
+	first_prefix=${g_zxfer_temp_prefix:-}
 	second_prefix=$(zxfer_get_remote_host_cache_root_prefix)
 	g_cmd_ssh="$fake_support_bin"
 	set +e

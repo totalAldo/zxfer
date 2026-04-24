@@ -449,9 +449,16 @@ zxfer_collect_source_props() {
 
 	g_zxfer_source_pvs_raw=""
 	g_zxfer_source_pvs_effective=""
-	zxfer_get_temp_file >/dev/null
+	l_source_props_tmp_status=0
+	zxfer_get_temp_file >/dev/null || l_source_props_tmp_status=$?
+	if [ "$l_source_props_tmp_status" -ne 0 ]; then
+		return "$l_source_props_tmp_status"
+	fi
 	l_source_props_tmp=$g_zxfer_temp_file_result
-	if ! zxfer_get_normalized_dataset_properties "$l_source" "$l_zfs_cmd" source >"$l_source_props_tmp"; then
+	l_source_props_status=0
+	zxfer_get_normalized_dataset_properties "$l_source" "$l_zfs_cmd" source >"$l_source_props_tmp" ||
+		l_source_props_status=$?
+	if [ "$l_source_props_status" -ne 0 ]; then
 		if zxfer_read_property_reconcile_stage_file "$l_source_props_tmp" >/dev/null; then
 			:
 		else
@@ -462,7 +469,7 @@ zxfer_collect_source_props() {
 		g_zxfer_source_pvs_raw=$g_zxfer_property_stage_file_read_result
 		zxfer_cleanup_runtime_artifact_path "$l_source_props_tmp"
 		printf '%s\n' "$g_zxfer_source_pvs_raw"
-		return 1
+		return "$l_source_props_status"
 	fi
 	if zxfer_read_property_reconcile_stage_file "$l_source_props_tmp" >/dev/null; then
 		:
@@ -477,8 +484,9 @@ zxfer_collect_source_props() {
 
 	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
 		if [ -n "$g_restored_backup_file_contents" ]; then
-			zxfer_validate_backup_metadata_format "$g_restored_backup_file_contents"
-			l_restore_format_status=$?
+			l_restore_format_status=0
+			zxfer_validate_backup_metadata_format "$g_restored_backup_file_contents" ||
+				l_restore_format_status=$?
 			case $l_restore_format_status in
 			0) ;;
 			1)
@@ -492,9 +500,10 @@ zxfer_collect_source_props() {
 				;;
 			esac
 		fi
+		l_restore_status=0
 		g_zxfer_source_pvs_effective=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
-			"$g_restored_backup_file_contents" "$l_source" "$l_destination")
-		l_restore_status=$?
+			"$g_restored_backup_file_contents" "$l_source" "$l_destination") ||
+			l_restore_status=$?
 		case $l_restore_status in
 		0) ;;
 		1)
@@ -531,6 +540,7 @@ zxfer_validate_override_properties() {
 		return
 	fi
 
+	l_status=0
 	l_validation_result=$(
 		ZXFER_AWK_OVERRIDE_LIST=$l_override_list "${g_cmd_awk:-awk}" -v source_pvs="$l_source_pvs" '
 function split_override_csv(input, output, field_count, i, character, next_character, field_value) {
@@ -591,8 +601,7 @@ BEGIN {
 		}
 		}
 	}'
-	)
-	l_status=$?
+	) || l_status=$?
 
 	if [ "$l_status" -eq 1 ] && [ -n "$l_validation_result" ]; then
 		zxfer_throw_usage_error "Invalid option property - check -o list for syntax errors."
@@ -620,8 +629,9 @@ zxfer_derive_override_lists() {
 	g_zxfer_override_pvs_result=""
 	g_zxfer_creation_pvs_result=""
 
-	# shellcheck disable=SC2016
 	# awk program needs literal $-style fields; shell variables are passed with -v.
+	l_status=0
+	# shellcheck disable=SC2016
 	l_derived_lists=$(
 		ZXFER_AWK_OVERRIDE_OPTIONS=$l_override_options "${g_cmd_awk:-awk}" \
 			-v source_pvs="$l_source_pvs" \
@@ -724,8 +734,7 @@ BEGIN {
 	print override_output
 	print creation_output
 }'
-	)
-	l_status=$?
+	) || l_status=$?
 
 	if [ "$l_status" -eq 1 ] && [ "$l_derived_lists" = "__ZXFER_OVERRIDE_SYNTAX__" ]; then
 		zxfer_throw_usage_error "Invalid option property - check -o list for syntax errors."
@@ -803,17 +812,23 @@ zxfer_get_validated_source_dataset_create_metadata() {
 	l_source=$1
 	l_source_volsize=""
 
-	if ! l_source_dstype=$(zxfer_run_source_zfs_cmd get -Hpo value type "$l_source" 2>&1); then
+	l_source_dstype_status=0
+	l_source_dstype=$(zxfer_run_source_zfs_cmd get -Hpo value type "$l_source" 2>&1) ||
+		l_source_dstype_status=$?
+	if [ "$l_source_dstype_status" -ne 0 ]; then
 		printf '%s\n' "Failed to retrieve source dataset type for [$l_source]: $l_source_dstype"
-		return 1
+		return "$l_source_dstype_status"
 	fi
 
 	case "$l_source_dstype" in
 	filesystem) ;;
 	volume)
-		if ! l_source_volsize=$(zxfer_run_source_zfs_cmd get -Hpo value volsize "$l_source" 2>&1); then
+		l_source_volsize_status=0
+		l_source_volsize=$(zxfer_run_source_zfs_cmd get -Hpo value volsize "$l_source" 2>&1) ||
+			l_source_volsize_status=$?
+		if [ "$l_source_volsize_status" -ne 0 ]; then
 			printf '%s\n' "Failed to retrieve source zvol size for [$l_source]: $l_source_volsize"
-			return 1
+			return "$l_source_volsize_status"
 		fi
 		if [ -z "$l_source_volsize" ] || [ "$l_source_volsize" = "-" ]; then
 			printf '%s\n' "Failed to retrieve source zvol size for [$l_source]: empty volsize"
@@ -936,9 +951,11 @@ zxfer_get_unsupported_property_probe_dataset() {
 		return 1
 	fi
 
-	if ! l_dest_exists=$(zxfer_exists_destination "$l_probe_dataset"); then
+	l_dest_exists_status=0
+	l_dest_exists=$(zxfer_exists_destination "$l_probe_dataset") || l_dest_exists_status=$?
+	if [ "$l_dest_exists_status" -ne 0 ]; then
 		printf '%s\n' "Failed to determine whether destination dataset [$l_probe_dataset] exists: $l_dest_exists"
-		return 1
+		return "$l_dest_exists_status"
 	fi
 	if [ "$l_dest_exists" -eq 1 ]; then
 		printf '%s\n' "$l_probe_dataset"
@@ -955,9 +972,12 @@ zxfer_get_unsupported_property_probe_dataset() {
 zxfer_get_unsupported_property_probe_dataset_type() {
 	l_probe_dataset=$1
 
-	if ! l_probe_dataset_type=$(zxfer_run_destination_zfs_cmd get -Hpo value type "$l_probe_dataset" 2>&1); then
+	l_probe_dataset_type_status=0
+	l_probe_dataset_type=$(zxfer_run_destination_zfs_cmd get -Hpo value type "$l_probe_dataset" 2>&1) ||
+		l_probe_dataset_type_status=$?
+	if [ "$l_probe_dataset_type_status" -ne 0 ]; then
 		printf '%s\n' "Failed to determine the destination property-support probe dataset type for [$l_probe_dataset]: $l_probe_dataset_type"
-		return 1
+		return "$l_probe_dataset_type_status"
 	fi
 
 	printf '%s\n' "$l_probe_dataset_type"
@@ -993,9 +1013,12 @@ zxfer_get_unsupported_property_probe_destination_for_source() {
 zxfer_get_unsupported_property_probe_dataset_for_source() {
 	l_source_dataset=$1
 
-	if ! l_requested_destination=$(zxfer_get_unsupported_property_probe_destination_for_source "$l_source_dataset"); then
+	l_probe_destination_status=0
+	l_requested_destination=$(zxfer_get_unsupported_property_probe_destination_for_source "$l_source_dataset") ||
+		l_probe_destination_status=$?
+	if [ "$l_probe_destination_status" -ne 0 ]; then
 		printf '%s\n' "$l_requested_destination"
-		return 1
+		return "$l_probe_destination_status"
 	fi
 
 	zxfer_get_unsupported_property_probe_dataset "$l_requested_destination"
@@ -1078,32 +1101,51 @@ zxfer_calculate_unsupported_properties() {
 	for l_scan_source in $l_scan_source_list; do
 		[ -n "$l_scan_source" ] || continue
 
-		if ! l_scan_source_type=$(zxfer_run_source_zfs_cmd get -Hpo value type "$l_scan_source" 2>&1); then
-			zxfer_throw_error "Failed to retrieve source dataset type for unsupported-property scan [$l_scan_source]: $l_scan_source_type"
+		l_scan_source_type_status=0
+		l_scan_source_type=$(zxfer_run_source_zfs_cmd get -Hpo value type "$l_scan_source" 2>&1) ||
+			l_scan_source_type_status=$?
+		if [ "$l_scan_source_type_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to retrieve source dataset type for unsupported-property scan [$l_scan_source]: $l_scan_source_type" "$l_scan_source_type_status"
 		fi
-		if ! l_source_property_list=$(zxfer_run_source_zfs_cmd get -Hpo property all "$l_scan_source" 2>&1); then
-			zxfer_throw_error "Failed to retrieve source property list for dataset [$l_scan_source]: $l_source_property_list"
+		l_source_property_list_status=0
+		l_source_property_list=$(zxfer_run_source_zfs_cmd get -Hpo property all "$l_scan_source" 2>&1) ||
+			l_source_property_list_status=$?
+		if [ "$l_source_property_list_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to retrieve source property list for dataset [$l_scan_source]: $l_source_property_list" "$l_source_property_list_status"
 		fi
-		if ! l_dest_probe_dataset=$(zxfer_get_unsupported_property_probe_dataset_for_source "$l_scan_source"); then
-			zxfer_throw_error "$l_dest_probe_dataset"
+		l_dest_probe_dataset_status=0
+		l_dest_probe_dataset=$(zxfer_get_unsupported_property_probe_dataset_for_source "$l_scan_source") ||
+			l_dest_probe_dataset_status=$?
+		if [ "$l_dest_probe_dataset_status" -ne 0 ]; then
+			zxfer_throw_error "$l_dest_probe_dataset" "$l_dest_probe_dataset_status"
 		fi
-		if ! l_dest_probe_dataset_type=$(zxfer_get_unsupported_property_probe_dataset_type "$l_dest_probe_dataset"); then
-			zxfer_throw_error "$l_dest_probe_dataset_type"
+		l_dest_probe_dataset_type_status=0
+		l_dest_probe_dataset_type=$(zxfer_get_unsupported_property_probe_dataset_type "$l_dest_probe_dataset") ||
+			l_dest_probe_dataset_type_status=$?
+		if [ "$l_dest_probe_dataset_type_status" -ne 0 ]; then
+			zxfer_throw_error "$l_dest_probe_dataset_type" "$l_dest_probe_dataset_type_status"
 		fi
 
-		zxfer_get_temp_file >/dev/null
+		l_source_props_tmp_status=0
+		zxfer_get_temp_file >/dev/null || l_source_props_tmp_status=$?
+		if [ "$l_source_props_tmp_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to allocate source property staging for unsupported-property scan [$l_scan_source]." "$l_source_props_tmp_status"
+		fi
 		l_source_props_tmp=$g_zxfer_temp_file_result
-		if ! zxfer_write_runtime_artifact_file "$l_source_props_tmp" "$l_source_property_list
-"; then
+		l_source_stage_status=0
+		zxfer_write_runtime_artifact_file "$l_source_props_tmp" "$l_source_property_list
+" || l_source_stage_status=$?
+		if [ "$l_source_stage_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_source_props_tmp"
-			zxfer_throw_error "Failed to stage source property list for unsupported-property scan [$l_scan_source]."
+			zxfer_throw_error "Failed to stage source property list for unsupported-property scan [$l_scan_source]." "$l_source_stage_status"
 		fi
 		l_probe_error=""
-		zxfer_read_property_reconcile_stage_file "$l_source_props_tmp" >/dev/null
-		l_source_read_status=$?
+		l_source_read_status=0
+		zxfer_read_property_reconcile_stage_file "$l_source_props_tmp" >/dev/null ||
+			l_source_read_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_source_props_tmp"
 		if [ "$l_source_read_status" -ne 0 ]; then
-			zxfer_throw_error "Failed to read staged source property list for unsupported-property scan [$l_scan_source]."
+			zxfer_throw_error "Failed to read staged source property list for unsupported-property scan [$l_scan_source]." "$l_source_read_status"
 		fi
 
 		while IFS= read -r s_p || [ -n "$s_p" ]; do
@@ -1115,7 +1157,10 @@ zxfer_calculate_unsupported_properties() {
 				;;
 			esac
 
-			if l_dest_property_probe=$(zxfer_run_destination_zfs_cmd get -Hpo property,value,source "$s_p" "$l_dest_probe_dataset" 2>&1); then
+			l_dest_property_probe_status=0
+			l_dest_property_probe=$(zxfer_run_destination_zfs_cmd get -Hpo property,value,source "$s_p" "$l_dest_probe_dataset" 2>&1) ||
+				l_dest_property_probe_status=$?
+			if [ "$l_dest_property_probe_status" -eq 0 ]; then
 				l_resolved_source_property_type_pairs="${l_resolved_source_property_type_pairs}${l_seen_key},"
 				continue
 			fi
@@ -1145,12 +1190,13 @@ zxfer_calculate_unsupported_properties() {
 			fi
 			l_dest_property_probe=$(zxfer_format_destination_property_probe_failure_detail "$l_dest_property_probe")
 			l_probe_error="Failed to probe destination support for property [$s_p] on [$l_dest_probe_dataset]: $l_dest_property_probe"
+			l_probe_error_status=$l_dest_property_probe_status
 			break
 		done <<EOF
 $g_zxfer_property_stage_file_read_result
 EOF
 		if [ -n "$l_probe_error" ]; then
-			zxfer_throw_error "$l_probe_error"
+			zxfer_throw_error "$l_probe_error" "$l_probe_error_status"
 		fi
 	done
 
@@ -1223,8 +1269,11 @@ zxfer_ensure_destination_exists() {
 		l_with_parents="no"
 		l_parent_dataset=${l_destination%/*}
 		if [ "$l_parent_dataset" != "$l_destination" ]; then
-			if ! l_parent_exists=$(zxfer_exists_destination "$l_parent_dataset"); then
-				zxfer_throw_error "$l_parent_exists"
+			l_parent_exists_status=0
+			l_parent_exists=$(zxfer_exists_destination "$l_parent_dataset") ||
+				l_parent_exists_status=$?
+			if [ "$l_parent_exists_status" -ne 0 ]; then
+				zxfer_throw_error "$l_parent_exists" "$l_parent_exists_status"
 			fi
 			if [ "$l_parent_exists" -eq 0 ]; then
 				l_with_parents="yes"
@@ -1238,8 +1287,11 @@ zxfer_ensure_destination_exists() {
 	fi
 	IFS=$l_oldifs
 
-	if ! $l_create_runner "$l_with_parents" "$l_source_dstype" "$l_source_volsize" "$l_property_list" "$l_destination"; then
-		zxfer_throw_error "Error when creating destination filesystem."
+	l_create_status=0
+	$l_create_runner "$l_with_parents" "$l_source_dstype" "$l_source_volsize" "$l_property_list" "$l_destination" ||
+		l_create_status=$?
+	if [ "$l_create_status" -ne 0 ]; then
+		zxfer_throw_error "Error when creating destination filesystem." "$l_create_status"
 	fi
 
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
@@ -1320,8 +1372,10 @@ zxfer_run_zfs_set_assignments() {
 
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
 		zxfer_echov "$l_display_cmd"
-		if ! zxfer_run_destination_zfs_property_command set "$@" "$l_destination"; then
-			zxfer_throw_error "Error when setting properties on destination filesystem."
+		l_set_status=0
+		zxfer_run_destination_zfs_property_command set "$@" "$l_destination" || l_set_status=$?
+		if [ "$l_set_status" -ne 0 ]; then
+			zxfer_throw_error "Error when setting properties on destination filesystem." "$l_set_status"
 		fi
 		zxfer_invalidate_destination_property_cache "$l_destination"
 	else
@@ -1386,8 +1440,11 @@ zxfer_run_zfs_inherit_property() {
 
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
 		zxfer_echov "$l_display_cmd"
-		if ! zxfer_run_destination_zfs_property_command inherit "$l_property" "$l_destination"; then
-			zxfer_throw_error "Error when inheriting properties on destination filesystem."
+		l_inherit_status=0
+		zxfer_run_destination_zfs_property_command inherit "$l_property" "$l_destination" ||
+			l_inherit_status=$?
+		if [ "$l_inherit_status" -ne 0 ]; then
+			zxfer_throw_error "Error when inheriting properties on destination filesystem." "$l_inherit_status"
 		fi
 		zxfer_invalidate_destination_property_cache "$l_destination"
 	else
@@ -1582,8 +1639,10 @@ zxfer_adjust_child_inherit_to_match_parent() {
 		return
 	fi
 
-	if ! l_parent_exists=$(zxfer_exists_destination "$l_parent_dataset"); then
-		zxfer_throw_error "$l_parent_exists"
+	l_parent_exists_status=0
+	l_parent_exists=$(zxfer_exists_destination "$l_parent_dataset") || l_parent_exists_status=$?
+	if [ "$l_parent_exists_status" -ne 0 ]; then
+		zxfer_throw_error "$l_parent_exists" "$l_parent_exists_status"
 	fi
 	if [ "$l_parent_exists" -eq 0 ]; then
 		g_zxfer_adjusted_set_list=$l_set_list
@@ -1595,9 +1654,12 @@ zxfer_adjust_child_inherit_to_match_parent() {
 
 	zxfer_get_temp_file >/dev/null
 	l_parent_dest_tmp=$g_zxfer_temp_file_result
-	if ! zxfer_collect_destination_props "$l_parent_dataset" "$g_RZFS" >"$l_parent_dest_tmp"; then
+	l_parent_dest_status=0
+	zxfer_collect_destination_props "$l_parent_dataset" "$g_RZFS" >"$l_parent_dest_tmp" ||
+		l_parent_dest_status=$?
+	if [ "$l_parent_dest_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
-		return 1
+		return "$l_parent_dest_status"
 	fi
 	if [ "$g_zxfer_normalized_dataset_properties_cache_hit" -eq 0 ]; then
 		zxfer_profile_increment_counter g_zxfer_profile_parent_destination_property_reads
@@ -1613,6 +1675,7 @@ zxfer_adjust_child_inherit_to_match_parent() {
 	zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
 	l_parent_dest_pvs=$(zxfer_sanitize_property_list "$l_parent_dest_pvs" "$l_readonly_properties" "$g_option_I_ignore_properties")
 
+	l_status=0
 	l_adjusted_lists=$(
 		"${g_cmd_awk:-awk}" \
 			-v override_pvs="$l_override_pvs" \
@@ -1687,8 +1750,7 @@ BEGIN {
 	print new_set_list
 	print new_inherit_list
 }'
-	)
-	l_status=$?
+	) || l_status=$?
 
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_throw_error "Failed to reconcile child property inheritance."
@@ -1805,11 +1867,17 @@ zxfer_transfer_properties() {
 		l_is_initial_source=0
 	fi
 
-	if ! zxfer_collect_source_props "$l_source" "$g_actual_dest" "$g_ensure_writable" "$g_LZFS"; then
-		zxfer_throw_error "${g_zxfer_source_pvs_raw:-Failed to retrieve source properties for [$l_source].}"
+	l_collect_source_status=0
+	zxfer_collect_source_props "$l_source" "$g_actual_dest" "$g_ensure_writable" "$g_LZFS" ||
+		l_collect_source_status=$?
+	if [ "$l_collect_source_status" -ne 0 ]; then
+		zxfer_throw_error "${g_zxfer_source_pvs_raw:-Failed to retrieve source properties for [$l_source].}" "$l_collect_source_status"
 	fi
-	if ! l_source_create_metadata=$(zxfer_get_validated_source_dataset_create_metadata "$l_source"); then
-		zxfer_throw_error "$l_source_create_metadata"
+	l_source_create_metadata_status=0
+	l_source_create_metadata=$(zxfer_get_validated_source_dataset_create_metadata "$l_source") ||
+		l_source_create_metadata_status=$?
+	if [ "$l_source_create_metadata_status" -ne 0 ]; then
+		zxfer_throw_error "$l_source_create_metadata" "$l_source_create_metadata_status"
 	fi
 	{
 		IFS= read -r l_source_dstype
@@ -1820,9 +1888,16 @@ EOF
 	l_must_create_properties=$(zxfer_get_required_creation_properties_for_dataset_type "$l_source_dstype")
 
 	if [ "$g_option_e_restore_property_mode" -eq 0 ]; then
-		zxfer_get_temp_file >/dev/null
+		l_required_props_tmp_status=0
+		zxfer_get_temp_file >/dev/null || l_required_props_tmp_status=$?
+		if [ "$l_required_props_tmp_status" -ne 0 ]; then
+			return "$l_required_props_tmp_status"
+		fi
 		l_required_props_tmp=$g_zxfer_temp_file_result
-		if ! zxfer_ensure_required_properties_present "$l_source" "$g_zxfer_source_pvs_raw" "$g_LZFS" "$l_must_create_properties" source >"$l_required_props_tmp"; then
+		l_required_props_status=0
+		zxfer_ensure_required_properties_present "$l_source" "$g_zxfer_source_pvs_raw" "$g_LZFS" "$l_must_create_properties" source >"$l_required_props_tmp" ||
+			l_required_props_status=$?
+		if [ "$l_required_props_status" -ne 0 ]; then
 			if zxfer_read_property_reconcile_stage_file "$l_required_props_tmp" >/dev/null; then
 				:
 			else
@@ -1832,7 +1907,7 @@ EOF
 			fi
 			g_zxfer_source_pvs_raw=$g_zxfer_property_stage_file_read_result
 			zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-			zxfer_throw_error "$g_zxfer_source_pvs_raw"
+			zxfer_throw_error "$g_zxfer_source_pvs_raw" "$l_required_props_status"
 		fi
 		if zxfer_read_property_reconcile_stage_file "$l_required_props_tmp" >/dev/null; then
 			:
@@ -1842,7 +1917,10 @@ EOF
 			return "$l_read_status"
 		fi
 		g_zxfer_source_pvs_raw=$g_zxfer_property_stage_file_read_result
-		if ! zxfer_ensure_required_properties_present "$l_source" "$g_zxfer_source_pvs_effective" "$g_LZFS" "$l_must_create_properties" source >"$l_required_props_tmp"; then
+		l_required_props_status=0
+		zxfer_ensure_required_properties_present "$l_source" "$g_zxfer_source_pvs_effective" "$g_LZFS" "$l_must_create_properties" source >"$l_required_props_tmp" ||
+			l_required_props_status=$?
+		if [ "$l_required_props_status" -ne 0 ]; then
 			if zxfer_read_property_reconcile_stage_file "$l_required_props_tmp" >/dev/null; then
 				:
 			else
@@ -1852,7 +1930,7 @@ EOF
 			fi
 			g_zxfer_source_pvs_effective=$g_zxfer_property_stage_file_read_result
 			zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-			zxfer_throw_error "$g_zxfer_source_pvs_effective"
+			zxfer_throw_error "$g_zxfer_source_pvs_effective" "$l_required_props_status"
 		fi
 		if zxfer_read_property_reconcile_stage_file "$l_required_props_tmp" >/dev/null; then
 			:
@@ -1877,8 +1955,9 @@ EOF
 		zxfer_validate_override_properties "$l_override_property_pv" "$l_source_pvs"
 	fi
 
-	zxfer_derive_override_lists "$l_source_pvs" "$l_override_property_pv" "$g_option_P_transfer_property" "$l_source_dstype" >/dev/null
-	l_derive_override_status=$?
+	l_derive_override_status=0
+	zxfer_derive_override_lists "$l_source_pvs" "$l_override_property_pv" "$g_option_P_transfer_property" "$l_source_dstype" >/dev/null ||
+		l_derive_override_status=$?
 	[ "$l_derive_override_status" -eq 0 ] || return "$l_derive_override_status"
 	l_override_pvs=$g_zxfer_override_pvs_result
 	l_creation_pvs=$g_zxfer_creation_pvs_result
@@ -1906,11 +1985,18 @@ EOF
 		return
 	fi
 
-	zxfer_get_temp_file >/dev/null
+	l_dest_pvs_tmp_status=0
+	zxfer_get_temp_file >/dev/null || l_dest_pvs_tmp_status=$?
+	if [ "$l_dest_pvs_tmp_status" -ne 0 ]; then
+		return "$l_dest_pvs_tmp_status"
+	fi
 	l_dest_pvs_tmp=$g_zxfer_temp_file_result
-	if ! zxfer_collect_destination_props "$g_actual_dest" "$g_RZFS" >"$l_dest_pvs_tmp"; then
+	l_dest_pvs_status=0
+	zxfer_collect_destination_props "$g_actual_dest" "$g_RZFS" >"$l_dest_pvs_tmp" ||
+		l_dest_pvs_status=$?
+	if [ "$l_dest_pvs_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-		zxfer_throw_error "Failed to retrieve destination properties for [$g_actual_dest]."
+		zxfer_throw_error "Failed to retrieve destination properties for [$g_actual_dest]." "$l_dest_pvs_status"
 	fi
 	if zxfer_read_property_reconcile_stage_file "$l_dest_pvs_tmp" >/dev/null; then
 		:
@@ -1920,7 +2006,10 @@ EOF
 		return "$l_read_status"
 	fi
 	l_dest_pvs=$g_zxfer_property_stage_file_read_result
-	if ! zxfer_ensure_required_properties_present "$g_actual_dest" "$l_dest_pvs" "$g_RZFS" "$l_must_create_properties" destination >"$l_dest_pvs_tmp"; then
+	l_dest_required_status=0
+	zxfer_ensure_required_properties_present "$g_actual_dest" "$l_dest_pvs" "$g_RZFS" "$l_must_create_properties" destination >"$l_dest_pvs_tmp" ||
+		l_dest_required_status=$?
+	if [ "$l_dest_required_status" -ne 0 ]; then
 		if zxfer_read_property_reconcile_stage_file "$l_dest_pvs_tmp" >/dev/null; then
 			:
 		else
@@ -1930,7 +2019,7 @@ EOF
 		fi
 		l_dest_pvs=$g_zxfer_property_stage_file_read_result
 		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-		zxfer_throw_error "$l_dest_pvs"
+		zxfer_throw_error "$l_dest_pvs" "$l_dest_required_status"
 	fi
 	if zxfer_read_property_reconcile_stage_file "$l_dest_pvs_tmp" >/dev/null; then
 		:
@@ -1944,11 +2033,18 @@ EOF
 	l_dest_pvs=$(zxfer_sanitize_property_list "$l_dest_pvs" "$l_effective_readonly_properties" "$g_option_I_ignore_properties")
 	zxfer_echoV "zxfer_transfer_properties dest_pvs: $l_dest_pvs"
 
-	zxfer_get_temp_file >/dev/null
+	l_diff_properties_tmp_status=0
+	zxfer_get_temp_file >/dev/null || l_diff_properties_tmp_status=$?
+	if [ "$l_diff_properties_tmp_status" -ne 0 ]; then
+		return "$l_diff_properties_tmp_status"
+	fi
 	l_diff_properties_tmp=$g_zxfer_temp_file_result
-	if ! zxfer_diff_properties "$l_override_pvs" "$l_dest_pvs" "$l_must_create_properties" >"$l_diff_properties_tmp"; then
+	l_diff_properties_status=0
+	zxfer_diff_properties "$l_override_pvs" "$l_dest_pvs" "$l_must_create_properties" >"$l_diff_properties_tmp" ||
+		l_diff_properties_status=$?
+	if [ "$l_diff_properties_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_diff_properties_tmp"
-		zxfer_throw_error "Failed to calculate property reconciliation changes for destination [$g_actual_dest]."
+		zxfer_throw_error "Failed to calculate property reconciliation changes for destination [$g_actual_dest]." "$l_diff_properties_status"
 	fi
 	if zxfer_read_property_reconcile_stage_file "$l_diff_properties_tmp" >/dev/null; then
 		:
@@ -1971,8 +2067,11 @@ EOF
 
 	if [ "$l_is_initial_source" -eq 0 ] &&
 		{ [ "$l_ov_set_list" != "" ] || [ "$l_ov_inherit_list" != "" ]; }; then
-		if ! zxfer_adjust_child_inherit_to_match_parent "$g_actual_dest" "$l_override_pvs" "$l_ov_set_list" "$l_ov_inherit_list" "$l_effective_readonly_properties" >/dev/null; then
-			zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]."
+		l_adjust_status=0
+		zxfer_adjust_child_inherit_to_match_parent "$g_actual_dest" "$l_override_pvs" "$l_ov_set_list" "$l_ov_inherit_list" "$l_effective_readonly_properties" >/dev/null ||
+			l_adjust_status=$?
+		if [ "$l_adjust_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]." "$l_adjust_status"
 		fi
 		l_ov_set_list=$g_zxfer_adjusted_set_list
 		l_ov_inherit_list=$g_zxfer_adjusted_inherit_list

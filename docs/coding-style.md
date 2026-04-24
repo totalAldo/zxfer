@@ -112,6 +112,12 @@ The project priority order still applies:
 
 - Route operator-facing failures through the reporting helpers in
   [../src/zxfer_reporting.sh](../src/zxfer_reporting.sh).
+- Reusable helpers that publish scratch or result globals must follow one
+  result/status contract: return `0` only after publishing a valid result, and
+  on failure clear their result state and return the original non-zero status
+  observed from the failing lower-level helper or command. Use direct status
+  `1` only for zxfer-owned validation failures where there is no lower-level
+  status to preserve.
 - Preserve structured stderr failure reporting, failure classes, and failure
   stages.
 - Prefer existing output helpers such as `zxfer_echov`, `zxfer_echoV`, and `zxfer_throw_error*`

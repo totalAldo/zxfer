@@ -2011,7 +2011,7 @@ failure_handling_tests() {
 
 	assert_error_case "Missing source dataset" \
 		"Failed to retrieve snapshots from the source" \
-		3 \
+		1 \
 		-R "$SRC_POOL/no_such_dataset" "$dest_root"
 
 	log "Missing dataset error tests passed"
@@ -2031,8 +2031,8 @@ runtime_failure_report_test() {
 	status=$?
 	set -e
 
-	if [ "$status" -ne 3 ]; then
-		fail "Runtime failure report test expected exit status 3, got $status. Output: $(cat "$stderr_log")"
+	if [ "$status" -ne 1 ]; then
+		fail "Runtime failure report test expected exit status 1, got $status. Output: $(cat "$stderr_log")"
 	fi
 	if [ -s "$stdout_log" ]; then
 		fail "Runtime failure report should not write to stdout. Output: $(cat "$stdout_log")"
@@ -2074,8 +2074,8 @@ runtime_failure_report_redaction_test() {
 	status=$?
 	set -e
 
-	if [ "$status" -ne 3 ]; then
-		fail "Runtime failure report default redaction test expected exit status 3, got $status. Output: $(cat "$stderr_log")"
+	if [ "$status" -ne 1 ]; then
+		fail "Runtime failure report default redaction test expected exit status 1, got $status. Output: $(cat "$stderr_log")"
 	fi
 	if [ -s "$stdout_log" ]; then
 		fail "Runtime failure report default redaction test should not write to stdout. Output: $(cat "$stdout_log")"
@@ -2124,8 +2124,8 @@ runtime_failure_report_unsafe_commands_test() {
 	status=$?
 	set -e
 
-	if [ "$status" -ne 3 ]; then
-		fail "Runtime failure report unsafe command test expected exit status 3, got $status. Output: $(cat "$stderr_log")"
+	if [ "$status" -ne 1 ]; then
+		fail "Runtime failure report unsafe command test expected exit status 1, got $status. Output: $(cat "$stderr_log")"
 	fi
 	if [ -s "$stdout_log" ]; then
 		fail "Runtime failure report unsafe command test should not write to stdout. Output: $(cat "$stdout_log")"
@@ -2170,8 +2170,8 @@ error_log_mirror_test() {
 	status=$?
 	set -e
 
-	if [ "$status" -ne 3 ]; then
-		fail "ZXFER_ERROR_LOG mirror test expected exit status 3, got $status. Output: $(cat "$stderr_log")"
+	if [ "$status" -ne 1 ]; then
+		fail "ZXFER_ERROR_LOG mirror test expected exit status 1, got $status. Output: $(cat "$stderr_log")"
 	fi
 	if [ ! -f "$log_path" ]; then
 		fail "ZXFER_ERROR_LOG mirror file was not created."
@@ -2239,8 +2239,8 @@ invalid_error_log_warning_test() {
 	status=$?
 	set -e
 
-	if [ "$status" -ne 3 ]; then
-		fail "Invalid ZXFER_ERROR_LOG warning test expected exit status 3, got $status. Output: $(cat "$stderr_log")"
+	if [ "$status" -ne 1 ]; then
+		fail "Invalid ZXFER_ERROR_LOG warning test expected exit status 1, got $status. Output: $(cat "$stderr_log")"
 	fi
 	if ! grep -q "warning: refusing ZXFER_ERROR_LOG path \"$relative_log\" because it is not absolute" "$stderr_log"; then
 		fail "ZXFER_ERROR_LOG warning missing from stderr. Output: $(cat "$stderr_log")"
@@ -2884,8 +2884,8 @@ missing_destination_error_test() {
 	if [ "$status" -eq 0 ]; then
 		fail "Missing destination list should cause zxfer to fail."
 	fi
-	if [ "$status" -ne 2 ]; then
-		fail "Missing destination list should exit with status 2, got $status. Output: $output"
+	if [ "$status" -ne 1 ]; then
+		fail "Missing destination list should preserve the destination lookup status 1, got $status. Output: $output"
 	fi
 	if ! printf '%s\n' "$output" | grep -F "Failed to retrieve list of datasets from the destination" >/dev/null 2>&1; then
 		fail "Missing destination error message missing. Output: $output"

@@ -138,8 +138,15 @@ zxfer_validate_cleanup_pid_teardown_mode() {
 
 zxfer_read_cleanup_pid_process_group() {
 	l_cleanup_read_pgid_pid=$1
-	l_cleanup_read_pgid_value=$("${g_cmd_ps:-ps}" -o pgid= -p "$l_cleanup_read_pgid_pid" 2>/dev/null |
-		sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed -n '1p')
+	l_cleanup_read_pgid_status=0
+	l_cleanup_read_pgid_raw=$("${g_cmd_ps:-ps}" -o pgid= -p "$l_cleanup_read_pgid_pid" 2>/dev/null) ||
+		l_cleanup_read_pgid_status=$?
+	[ "$l_cleanup_read_pgid_status" -eq 0 ] || return "$l_cleanup_read_pgid_status"
+	l_cleanup_read_pgid_status=0
+	l_cleanup_read_pgid_value=$(printf '%s\n' "$l_cleanup_read_pgid_raw" |
+		sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed -n '1p') ||
+		l_cleanup_read_pgid_status=$?
+	[ "$l_cleanup_read_pgid_status" -eq 0 ] || return "$l_cleanup_read_pgid_status"
 
 	case "$l_cleanup_read_pgid_value" in
 	'' | *[!0-9]*)
@@ -192,8 +199,11 @@ zxfer_register_cleanup_pid() {
 	esac
 	[ "$l_cleanup_register_pid" = "$$" ] && return 0
 
-	if ! l_cleanup_register_purpose=$(zxfer_normalize_owned_lock_text_field "$l_cleanup_register_purpose"); then
-		return 1
+	l_cleanup_register_status=0
+	l_cleanup_register_purpose=$(zxfer_normalize_owned_lock_text_field "$l_cleanup_register_purpose") ||
+		l_cleanup_register_status=$?
+	if [ "$l_cleanup_register_status" -ne 0 ]; then
+		return "$l_cleanup_register_status"
 	fi
 	if ! zxfer_validate_cleanup_pid_teardown_mode "$l_cleanup_register_teardown_mode"; then
 		return 1
@@ -204,17 +214,23 @@ zxfer_register_cleanup_pid() {
 	if ! kill -s 0 "$l_cleanup_register_pid" 2>/dev/null; then
 		return 0
 	fi
-	if ! l_cleanup_register_start_token=$(zxfer_get_process_start_token "$l_cleanup_register_pid"); then
+	l_cleanup_register_status=0
+	l_cleanup_register_start_token=$(zxfer_get_process_start_token "$l_cleanup_register_pid") ||
+		l_cleanup_register_status=$?
+	if [ "$l_cleanup_register_status" -ne 0 ]; then
 		if ! kill -s 0 "$l_cleanup_register_pid" 2>/dev/null; then
 			return 0
 		fi
-		return 1
+		return "$l_cleanup_register_status"
 	fi
-	if ! l_cleanup_register_hostname=$(zxfer_get_owned_lock_hostname); then
+	l_cleanup_register_status=0
+	l_cleanup_register_hostname=$(zxfer_get_owned_lock_hostname) ||
+		l_cleanup_register_status=$?
+	if [ "$l_cleanup_register_status" -ne 0 ]; then
 		if ! kill -s 0 "$l_cleanup_register_pid" 2>/dev/null; then
 			return 0
 		fi
-		return 1
+		return "$l_cleanup_register_status"
 	fi
 	if [ "$l_cleanup_register_had_record" -eq 1 ]; then
 		if [ "$g_zxfer_cleanup_pid_record_start_token" = "$l_cleanup_register_start_token" ] &&
@@ -284,7 +300,10 @@ $l_cleanup_unregister_record_pid	$l_cleanup_unregister_record_purpose	$l_cleanup
 
 zxfer_read_cleanup_pid_process_snapshot() {
 	g_zxfer_cleanup_pid_process_snapshot_result=""
-	l_cleanup_process_snapshot=$("${g_cmd_ps:-ps}" -o pid= -o ppid= -o pgid= 2>/dev/null) || return 1
+	l_cleanup_process_snapshot_status=0
+	l_cleanup_process_snapshot=$("${g_cmd_ps:-ps}" -o pid= -o ppid= -o pgid= 2>/dev/null) ||
+		l_cleanup_process_snapshot_status=$?
+	[ "$l_cleanup_process_snapshot_status" -eq 0 ] || return "$l_cleanup_process_snapshot_status"
 	g_zxfer_cleanup_pid_process_snapshot_result=$l_cleanup_process_snapshot
 	printf '%s\n' "$l_cleanup_process_snapshot"
 }
@@ -377,8 +396,9 @@ zxfer_get_cleanup_pid_set() {
 	}')
 	l_cleanup_pid_set_status=$?
 	[ "$l_cleanup_pid_set_status" -eq 0 ] || return "$l_cleanup_pid_set_status"
-	l_cleanup_pid_set_value=$(printf '%s\n' "$l_cleanup_pid_set_raw" | LC_ALL=C sort -n)
-	l_cleanup_pid_set_status=$?
+	l_cleanup_pid_set_status=0
+	l_cleanup_pid_set_value=$(printf '%s\n' "$l_cleanup_pid_set_raw" | LC_ALL=C sort -n) ||
+		l_cleanup_pid_set_status=$?
 	[ "$l_cleanup_pid_set_status" -eq 0 ] || return "$l_cleanup_pid_set_status"
 	g_zxfer_cleanup_pid_set_result=$l_cleanup_pid_set_value
 	printf '%s\n' "$l_cleanup_pid_set_value"
@@ -426,15 +446,20 @@ zxfer_abort_direct_child_pid() {
 	esac
 	[ "$l_cleanup_direct_abort_pid" = "$$" ] && return 1
 
-	if ! l_cleanup_direct_abort_purpose=$(zxfer_normalize_owned_lock_text_field "$l_cleanup_direct_abort_purpose"); then
-		return 1
+	l_cleanup_direct_abort_status=0
+	l_cleanup_direct_abort_purpose=$(zxfer_normalize_owned_lock_text_field "$l_cleanup_direct_abort_purpose") ||
+		l_cleanup_direct_abort_status=$?
+	if [ "$l_cleanup_direct_abort_status" -ne 0 ]; then
+		return "$l_cleanup_direct_abort_status"
 	fi
 	if ! kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null; then
 		return 0
 	fi
-	if ! zxfer_read_cleanup_pid_process_snapshot >/dev/null; then
+	l_cleanup_direct_abort_snapshot_status=0
+	zxfer_read_cleanup_pid_process_snapshot >/dev/null || l_cleanup_direct_abort_snapshot_status=$?
+	if [ "$l_cleanup_direct_abort_snapshot_status" -ne 0 ]; then
 		g_zxfer_cleanup_pid_abort_failure_message="Failed to inspect the process table for cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid)."
-		return 1
+		return "$l_cleanup_direct_abort_snapshot_status"
 	fi
 	if ! zxfer_cleanup_pid_snapshot_has_pid_with_parent \
 		"$g_zxfer_cleanup_pid_process_snapshot_result" \
@@ -446,11 +471,14 @@ zxfer_abort_direct_child_pid() {
 		g_zxfer_cleanup_pid_abort_failure_message="Refusing to tear down cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid) because it is no longer an owned child of the current zxfer process."
 		return 1
 	fi
-	if ! zxfer_get_cleanup_pid_set \
+	l_cleanup_direct_abort_status=0
+	zxfer_get_cleanup_pid_set \
 		"$g_zxfer_cleanup_pid_process_snapshot_result" \
-		"$l_cleanup_direct_abort_pid" >/dev/null; then
+		"$l_cleanup_direct_abort_pid" >/dev/null ||
+		l_cleanup_direct_abort_status=$?
+	if [ "$l_cleanup_direct_abort_status" -ne 0 ]; then
 		g_zxfer_cleanup_pid_abort_failure_message="Failed to derive the owned child set for cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid)."
-		return 1
+		return "$l_cleanup_direct_abort_status"
 	fi
 	l_cleanup_direct_abort_pid_set=$g_zxfer_cleanup_pid_set_result
 	[ -n "$l_cleanup_direct_abort_pid_set" ] || l_cleanup_direct_abort_pid_set=$l_cleanup_direct_abort_pid
@@ -485,11 +513,12 @@ zxfer_abort_cleanup_pid() {
 		return 0
 	fi
 
+	l_cleanup_abort_live_status=0
 	zxfer_owned_lock_owner_is_live \
 		"$l_cleanup_abort_pid" \
 		"$g_zxfer_cleanup_pid_record_start_token" \
-		"$g_zxfer_cleanup_pid_record_hostname"
-	l_cleanup_abort_live_status=$?
+		"$g_zxfer_cleanup_pid_record_hostname" ||
+		l_cleanup_abort_live_status=$?
 	case "$l_cleanup_abort_live_status" in
 	0)
 		:
@@ -504,13 +533,24 @@ zxfer_abort_cleanup_pid() {
 		;;
 	esac
 
-	if ! zxfer_read_cleanup_pid_process_snapshot >/dev/null; then
+	l_cleanup_abort_snapshot_status=0
+	zxfer_read_cleanup_pid_process_snapshot >/dev/null || l_cleanup_abort_snapshot_status=$?
+	if [ "$l_cleanup_abort_snapshot_status" -ne 0 ]; then
 		g_zxfer_cleanup_pid_abort_failure_message="Failed to inspect the process table for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
-		return 1
+		return "$l_cleanup_abort_snapshot_status"
 	fi
 
-	l_cleanup_abort_current_shell_pgid=$("${g_cmd_ps:-ps}" -o pgid= -p "$$" 2>/dev/null |
-		sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed -n '1p')
+	l_cleanup_abort_current_shell_pgid_status=0
+	l_cleanup_abort_current_shell_pgid_raw=$("${g_cmd_ps:-ps}" -o pgid= -p "$$" 2>/dev/null) ||
+		l_cleanup_abort_current_shell_pgid_status=$?
+	if [ "$l_cleanup_abort_current_shell_pgid_status" -eq 0 ]; then
+		l_cleanup_abort_current_shell_pgid=$(printf '%s\n' "$l_cleanup_abort_current_shell_pgid_raw" |
+			sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed -n '1p') ||
+			l_cleanup_abort_current_shell_pgid_status=$?
+	else
+		l_cleanup_abort_current_shell_pgid=""
+	fi
+	[ "$l_cleanup_abort_current_shell_pgid_status" -eq 0 ] || l_cleanup_abort_current_shell_pgid=""
 	case ${g_zxfer_cleanup_pid_record_pgid:-} in
 	'' | *[!0-9]*)
 		l_cleanup_abort_use_process_group=0
@@ -531,14 +571,18 @@ zxfer_abort_cleanup_pid() {
 	if [ "$l_cleanup_abort_use_process_group" -eq 1 ]; then
 		zxfer_signal_cleanup_process_group "$g_zxfer_cleanup_pid_record_pgid" "$l_cleanup_abort_signal" || l_cleanup_abort_signal_status=1
 	else
-		if ! zxfer_get_cleanup_pid_set \
+		l_cleanup_abort_pid_set_status=0
+		zxfer_get_cleanup_pid_set \
 			"$g_zxfer_cleanup_pid_process_snapshot_result" \
-			"$l_cleanup_abort_pid" >/dev/null; then
+			"$l_cleanup_abort_pid" >/dev/null ||
+			l_cleanup_abort_pid_set_status=$?
+		if [ "$l_cleanup_abort_pid_set_status" -ne 0 ]; then
+			l_cleanup_abort_live_status=0
 			zxfer_owned_lock_owner_is_live \
 				"$l_cleanup_abort_pid" \
 				"$g_zxfer_cleanup_pid_record_start_token" \
-				"$g_zxfer_cleanup_pid_record_hostname"
-			l_cleanup_abort_live_status=$?
+				"$g_zxfer_cleanup_pid_record_hostname" ||
+				l_cleanup_abort_live_status=$?
 			case "$l_cleanup_abort_live_status" in
 			1)
 				zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
@@ -550,7 +594,7 @@ zxfer_abort_cleanup_pid() {
 				;;
 			esac
 			g_zxfer_cleanup_pid_abort_failure_message="Failed to derive the owned child set for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
-			return 1
+			return "$l_cleanup_abort_pid_set_status"
 		fi
 		l_cleanup_abort_target_pid_set=$g_zxfer_cleanup_pid_set_result
 		[ -n "$l_cleanup_abort_target_pid_set" ] || l_cleanup_abort_target_pid_set=$l_cleanup_abort_pid
@@ -558,11 +602,12 @@ zxfer_abort_cleanup_pid() {
 	fi
 
 	if [ "$l_cleanup_abort_signal_status" -ne 0 ]; then
+		l_cleanup_abort_live_status=0
 		zxfer_owned_lock_owner_is_live \
 			"$l_cleanup_abort_pid" \
 			"$g_zxfer_cleanup_pid_record_start_token" \
-			"$g_zxfer_cleanup_pid_record_hostname"
-		l_cleanup_abort_live_status=$?
+			"$g_zxfer_cleanup_pid_record_hostname" ||
+			l_cleanup_abort_live_status=$?
 		case "$l_cleanup_abort_live_status" in
 		1)
 			zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
@@ -598,9 +643,11 @@ zxfer_kill_registered_cleanup_pids() {
 			;;
 		esac
 		[ "$l_cleanup_kill_pid" = "$$" ] && continue
-		if ! zxfer_abort_cleanup_pid "$l_cleanup_kill_pid" TERM; then
+		l_cleanup_kill_status=0
+		zxfer_abort_cleanup_pid "$l_cleanup_kill_pid" TERM || l_cleanup_kill_status=$?
+		if [ "$l_cleanup_kill_status" -ne 0 ]; then
 			[ -n "$l_cleanup_kill_first_failure_message" ] || l_cleanup_kill_first_failure_message=$g_zxfer_cleanup_pid_abort_failure_message
-			l_cleanup_kill_abort_status=1
+			[ "$l_cleanup_kill_abort_status" -ne 0 ] || l_cleanup_kill_abort_status=$l_cleanup_kill_status
 		fi
 	done
 
@@ -705,14 +752,20 @@ zxfer_try_get_effective_tmpdir() {
 		elif l_effective_tmpdir=$(zxfer_try_get_default_tmpdir); then
 			zxfer_echoV "Ignoring unsafe TMPDIR $l_requested_tmpdir; using $l_effective_tmpdir instead."
 		else
+			l_effective_tmpdir_status=$?
 			g_zxfer_effective_tmpdir_requested=$l_request_key
 			g_zxfer_effective_tmpdir=""
-			return 1
+			return "$l_effective_tmpdir_status"
 		fi
-	elif ! l_effective_tmpdir=$(zxfer_try_get_default_tmpdir); then
-		g_zxfer_effective_tmpdir_requested=$l_request_key
-		g_zxfer_effective_tmpdir=""
-		return 1
+	else
+		l_effective_tmpdir_status=0
+		l_effective_tmpdir=$(zxfer_try_get_default_tmpdir) ||
+			l_effective_tmpdir_status=$?
+		if [ "$l_effective_tmpdir_status" -ne 0 ]; then
+			g_zxfer_effective_tmpdir_requested=$l_request_key
+			g_zxfer_effective_tmpdir=""
+			return "$l_effective_tmpdir_status"
+		fi
 	fi
 
 	g_zxfer_effective_tmpdir_requested=$l_request_key
@@ -854,11 +907,15 @@ zxfer_create_runtime_artifact_dir() {
 	l_prefix=$1
 
 	g_zxfer_runtime_artifact_path_result=""
-	if ! l_tmpdir=$(zxfer_try_get_effective_tmpdir); then
-		return 1
+	l_status=0
+	l_tmpdir=$(zxfer_try_get_effective_tmpdir) || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
-	if ! l_artifact_dir=$(mktemp -d "$l_tmpdir/$l_prefix.XXXXXX" 2>/dev/null); then
-		return 1
+	l_status=0
+	l_artifact_dir=$(mktemp -d "$l_tmpdir/$l_prefix.XXXXXX" 2>/dev/null) || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 	zxfer_register_runtime_artifact_path "$l_artifact_dir"
 	g_zxfer_runtime_artifact_path_result=$l_artifact_dir
@@ -873,11 +930,15 @@ zxfer_create_runtime_artifact_file() {
 	l_prefix=$1
 
 	g_zxfer_runtime_artifact_path_result=""
-	if ! l_tmpdir=$(zxfer_try_get_effective_tmpdir); then
-		return 1
+	l_status=0
+	l_tmpdir=$(zxfer_try_get_effective_tmpdir) || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
-	if ! l_artifact_file=$(mktemp "$l_tmpdir/$l_prefix.XXXXXX" 2>/dev/null); then
-		return 1
+	l_status=0
+	l_artifact_file=$(mktemp "$l_tmpdir/$l_prefix.XXXXXX" 2>/dev/null) || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 	zxfer_register_runtime_artifact_path "$l_artifact_file"
 	g_zxfer_runtime_artifact_path_result=$l_artifact_file
@@ -893,11 +954,15 @@ zxfer_create_runtime_artifact_file_in_parent() {
 	l_prefix=${2:-zxfer-runtime-artifact}
 
 	g_zxfer_runtime_artifact_path_result=""
-	if ! l_parent_dir=$(zxfer_validate_temp_root_candidate "$l_parent_dir"); then
-		return 1
+	l_status=0
+	l_parent_dir=$(zxfer_validate_temp_root_candidate "$l_parent_dir") || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
-	if ! l_artifact_file=$(mktemp "$l_parent_dir/$l_prefix.XXXXXX" 2>/dev/null); then
-		return 1
+	l_status=0
+	l_artifact_file=$(mktemp "$l_parent_dir/$l_prefix.XXXXXX" 2>/dev/null) || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 	zxfer_register_runtime_artifact_path "$l_artifact_file"
 	g_zxfer_runtime_artifact_path_result=$l_artifact_file
@@ -913,8 +978,10 @@ zxfer_stage_runtime_artifact_file_for_path() {
 	l_prefix=${2:-zxfer-runtime-stage}
 
 	g_zxfer_runtime_artifact_path_result=""
-	if ! l_parent_dir=$(zxfer_get_path_parent_dir "$l_target_path"); then
-		return 1
+	l_status=0
+	l_parent_dir=$(zxfer_get_path_parent_dir "$l_target_path") || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 
 	zxfer_create_runtime_artifact_file_in_parent "$l_parent_dir" ".$l_prefix"
@@ -959,6 +1026,7 @@ zxfer_read_runtime_artifact_file() {
 	g_zxfer_runtime_artifact_read_result=""
 	[ -r "$l_artifact_path" ] || return 1
 
+	l_read_status=0
 	l_artifact_contents=$(
 		cat "$l_artifact_path"
 		l_read_status=$?
@@ -966,8 +1034,7 @@ zxfer_read_runtime_artifact_file() {
 		# blank lines from the artifact survive command substitution intact.
 		printf x
 		exit "$l_read_status"
-	)
-	l_read_status=$?
+	) || l_read_status=$?
 	if [ "$l_read_status" -ne 0 ]; then
 		return "$l_read_status"
 	fi
@@ -988,8 +1055,10 @@ zxfer_publish_runtime_artifact_file() {
 
 	[ -n "$l_stage_file" ] || return 1
 	[ -n "$l_target_path" ] || return 1
-	if ! mv -f "$l_stage_file" "$l_target_path" 2>/dev/null; then
-		return 1
+	l_status=0
+	mv -f "$l_stage_file" "$l_target_path" 2>/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 	zxfer_unregister_runtime_artifact_path "$l_stage_file"
 	return 0
@@ -1011,26 +1080,34 @@ zxfer_write_runtime_cache_file_atomically() {
 		[ -f "$l_target_path" ] || return 1
 	fi
 
-	if ! l_parent_dir=$(zxfer_get_path_parent_dir "$l_target_path"); then
-		return 1
+	l_status=0
+	l_parent_dir=$(zxfer_get_path_parent_dir "$l_target_path") || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 	if [ ! -d "$l_parent_dir" ]; then
 		return 1
 	fi
-	if ! zxfer_stage_runtime_artifact_file_for_path "$l_target_path" "$l_prefix" >/dev/null; then
-		return 1
+	l_status=0
+	zxfer_stage_runtime_artifact_file_for_path "$l_target_path" "$l_prefix" >/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 	l_stage_file=$g_zxfer_runtime_artifact_path_result
 
-	if ! zxfer_write_runtime_artifact_file "$l_stage_file" "$l_cache_payload"; then
+	l_status=0
+	zxfer_write_runtime_artifact_file "$l_stage_file" "$l_cache_payload" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_stage_file"
-		return 1
+		return "$l_status"
 	fi
 
 	chmod 600 "$l_stage_file" 2>/dev/null || :
-	if ! zxfer_publish_runtime_artifact_file "$l_stage_file" "$l_target_path"; then
+	l_status=0
+	zxfer_publish_runtime_artifact_file "$l_stage_file" "$l_target_path" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_stage_file"
-		return 1
+		return "$l_status"
 	fi
 	chmod 600 "$l_target_path" 2>/dev/null || :
 	return 0
@@ -1043,8 +1120,10 @@ zxfer_write_runtime_cache_file_atomically() {
 zxfer_create_private_temp_dir() {
 	l_prefix=$1
 
-	if ! zxfer_create_runtime_artifact_dir "$l_prefix" >/dev/null; then
-		return 1
+	l_status=0
+	zxfer_create_runtime_artifact_dir "$l_prefix" >/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 
 	printf '%s\n' "$g_zxfer_runtime_artifact_path_result"
@@ -1057,8 +1136,10 @@ zxfer_get_temp_file() {
 	g_zxfer_temp_file_result=""
 	# On GNU mktemp the template must include X, so build the template ourselves.
 	l_prefix=${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}
-	if ! zxfer_create_runtime_artifact_file "$l_prefix" >/dev/null; then
-		zxfer_throw_error "Error creating temporary file."
+	l_status=0
+	zxfer_create_runtime_artifact_file "$l_prefix" >/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_throw_error "Error creating temporary file." "$l_status"
 	fi
 	zxfer_echoV "New temporary file: $g_zxfer_runtime_artifact_path_result"
 	g_zxfer_temp_file_result=$g_zxfer_runtime_artifact_path_result
@@ -1135,16 +1216,19 @@ zxfer_create_cache_object_stage_dir_in_parent() {
 	l_prefix=${2:-zxfer-cache-object}
 
 	g_zxfer_runtime_artifact_path_result=""
-	if ! l_parent_dir=$(zxfer_validate_temp_root_candidate "$l_parent_dir"); then
-		return 1
+	l_status=0
+	l_parent_dir=$(zxfer_validate_temp_root_candidate "$l_parent_dir") || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 
 	l_old_umask=$(umask)
 	umask 077
-	l_stage_dir=$(mktemp -d "$l_parent_dir/.$l_prefix.XXXXXX" 2>/dev/null)
-	l_stage_status=$?
+	l_stage_status=0
+	l_stage_dir=$(mktemp -d "$l_parent_dir/.$l_prefix.XXXXXX" 2>/dev/null) ||
+		l_stage_status=$?
 	umask "$l_old_umask"
-	[ $l_stage_status -eq 0 ] || return 1
+	[ "$l_stage_status" -eq 0 ] || return "$l_stage_status"
 
 	zxfer_register_runtime_artifact_path "$l_stage_dir"
 	g_zxfer_runtime_artifact_path_result=$l_stage_dir
@@ -1159,8 +1243,10 @@ zxfer_create_cache_object_stage_dir_for_path() {
 	l_object_path=$1
 	l_prefix=${2:-zxfer-cache-object}
 
-	if ! l_parent_dir=$(zxfer_get_path_parent_dir "$l_object_path"); then
-		return 1
+	l_status=0
+	l_parent_dir=$(zxfer_get_path_parent_dir "$l_object_path") || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 
 	zxfer_create_cache_object_stage_dir_in_parent "$l_parent_dir" "$l_prefix"
@@ -1191,23 +1277,28 @@ zxfer_write_cache_object_contents_to_path() {
 	[ ! -h "$l_object_path" ] || return 1
 	[ -n "$l_object_kind" ] || return 1
 	[ -n "$l_object_payload" ] || return 1
-	if ! zxfer_validate_cache_object_metadata_lines "$l_object_metadata"; then
-		return 1
+	l_object_write_status=0
+	zxfer_validate_cache_object_metadata_lines "$l_object_metadata" ||
+		l_object_write_status=$?
+	if [ "$l_object_write_status" -ne 0 ]; then
+		return "$l_object_write_status"
 	fi
 
 	l_old_umask=$(umask)
 	umask 077
-	if ! {
+	l_object_write_status=0
+	{
 		printf '%s\n' "$ZXFER_CACHE_OBJECT_HEADER_LINE"
 		printf 'kind=%s\n' "$l_object_kind"
 		[ -z "$l_object_metadata" ] || printf '%s\n' "$l_object_metadata"
 		printf '\n'
 		printf '%s' "$l_object_payload"
 		printf '\n%s\n' "$ZXFER_CACHE_OBJECT_END_LINE"
-	} >"$l_object_path"; then
+	} >"$l_object_path" || l_object_write_status=$?
+	if [ "$l_object_write_status" -ne 0 ]; then
 		umask "$l_old_umask"
 		rm -f "$l_object_path" 2>/dev/null || :
-		return 1
+		return "$l_object_write_status"
 	fi
 	umask "$l_old_umask"
 
@@ -1343,35 +1434,47 @@ zxfer_write_cache_object_file_atomically() {
 		[ -f "$l_cache_target_path" ] || return 1
 	fi
 
-	if ! l_cache_parent_dir=$(zxfer_get_path_parent_dir "$l_cache_target_path"); then
-		return 1
+	l_status=0
+	l_cache_parent_dir=$(zxfer_get_path_parent_dir "$l_cache_target_path") || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
-	if ! mkdir -p "$l_cache_parent_dir"; then
-		return 1
+	l_status=0
+	mkdir -p "$l_cache_parent_dir" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
-	if ! zxfer_create_cache_object_stage_dir_for_path \
-		"$l_cache_target_path" "zxfer-cache-object" >/dev/null; then
-		return 1
+	l_status=0
+	zxfer_create_cache_object_stage_dir_for_path \
+		"$l_cache_target_path" "zxfer-cache-object" >/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 	l_cache_stage_dir=$g_zxfer_runtime_artifact_path_result
 	l_cache_stage_file="$l_cache_stage_dir/object"
 
-	if ! zxfer_write_cache_object_contents_to_path \
+	l_status=0
+	zxfer_write_cache_object_contents_to_path \
 		"$l_cache_stage_file" \
 		"$l_cache_object_kind" \
 		"$l_cache_object_metadata" \
-		"$l_cache_object_payload"; then
+		"$l_cache_object_payload" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_cache_stage_dir"
-		return 1
+		return "$l_status"
 	fi
-	if ! zxfer_read_cache_object_file \
-		"$l_cache_stage_file" "$l_cache_object_kind" >/dev/null 2>&1; then
+	l_status=0
+	zxfer_read_cache_object_file \
+		"$l_cache_stage_file" "$l_cache_object_kind" >/dev/null 2>&1 || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_cache_stage_dir"
-		return 1
+		return "$l_status"
 	fi
-	if ! mv -f "$l_cache_stage_file" "$l_cache_target_path" 2>/dev/null; then
+	l_status=0
+	mv -f "$l_cache_stage_file" "$l_cache_target_path" 2>/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_cache_stage_dir"
-		return 1
+		return "$l_status"
 	fi
 	chmod 600 "$l_cache_target_path" 2>/dev/null || :
 	zxfer_cleanup_cache_object_stage_dir "$l_cache_stage_dir"
@@ -1394,18 +1497,24 @@ zxfer_publish_cache_object_directory() {
 	[ -n "$l_object_dir" ] || return 1
 	[ ! -e "$l_object_dir" ] || return 1
 
-	if ! l_parent_dir=$(zxfer_get_path_parent_dir "$l_object_dir"); then
-		return 1
+	l_status=0
+	l_parent_dir=$(zxfer_get_path_parent_dir "$l_object_dir") || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 	if [ ! -d "$l_parent_dir" ]; then
 		return 1
 	fi
-	if ! l_parent_dir=$(zxfer_validate_temp_root_candidate "$l_parent_dir"); then
-		return 1
+	l_status=0
+	l_parent_dir=$(zxfer_validate_temp_root_candidate "$l_parent_dir") || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 
-	if ! mv "$l_stage_dir" "$l_object_dir" 2>/dev/null; then
-		return 1
+	l_status=0
+	mv "$l_stage_dir" "$l_object_dir" 2>/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
 	fi
 	zxfer_unregister_runtime_artifact_path "$l_stage_dir"
 	return 0
@@ -1426,8 +1535,11 @@ zxfer_get_os() {
 	if [ "$l_host_spec" = "" ]; then
 		l_output_os=$(uname)
 	else
-		if ! l_output_os=$(zxfer_get_remote_host_operating_system "$l_host_spec" "$l_profile_side"); then
-			return 1
+		l_os_status=0
+		l_output_os=$(zxfer_get_remote_host_operating_system "$l_host_spec" "$l_profile_side") ||
+			l_os_status=$?
+		if [ "$l_os_status" -ne 0 ]; then
+			return "$l_os_status"
 		fi
 	fi
 
@@ -1514,9 +1626,12 @@ zxfer_init_dependency_tool_defaults() {
 	zxfer_assign_required_tool g_cmd_zfs zfs "zfs"
 	g_cmd_parallel=$(PATH=$g_zxfer_dependency_path command -v parallel 2>/dev/null || :)
 	if [ "$g_cmd_parallel" != "" ]; then
-		if ! g_cmd_parallel=$(zxfer_validate_resolved_tool_path "$g_cmd_parallel" "GNU parallel"); then
+		l_dependency_status=0
+		g_cmd_parallel=$(zxfer_validate_resolved_tool_path "$g_cmd_parallel" "GNU parallel") ||
+			l_dependency_status=$?
+		if [ "$l_dependency_status" -ne 0 ]; then
 			g_zxfer_failure_class=dependency
-			zxfer_throw_error "$g_cmd_parallel"
+			zxfer_throw_error "$g_cmd_parallel" "$l_dependency_status"
 		fi
 	fi
 
@@ -1794,15 +1909,21 @@ zxfer_trap_exit() {
 	# of the shell is too broad and can clobber coverage helpers or command
 	# substitution plumbing in the caller.
 	if command -v zxfer_abort_all_background_jobs >/dev/null 2>&1; then
-		if ! zxfer_abort_all_background_jobs; then
-			[ "$l_exit_status" -eq 0 ] && l_exit_status=1
-			g_zxfer_failure_class=runtime
-			g_zxfer_failure_stage="trap cleanup"
-			g_zxfer_failure_message=${g_zxfer_background_job_abort_failure_message:-Failed to tear down one or more supervised background jobs during exit.}
+		l_background_cleanup_status=0
+		zxfer_abort_all_background_jobs || l_background_cleanup_status=$?
+		if [ "$l_background_cleanup_status" -ne 0 ]; then
+			[ "$l_exit_status" -eq 0 ] && l_exit_status=$l_background_cleanup_status
+			if [ -z "${g_zxfer_failure_message:-}" ]; then
+				g_zxfer_failure_class=runtime
+				g_zxfer_failure_stage="trap cleanup"
+				g_zxfer_failure_message=${g_zxfer_background_job_abort_failure_message:-Failed to tear down one or more supervised background jobs during exit.}
+			fi
 		fi
 	fi
-	if ! zxfer_kill_registered_cleanup_pids; then
-		[ "$l_exit_status" -eq 0 ] && l_exit_status=1
+	l_cleanup_pid_status=0
+	zxfer_kill_registered_cleanup_pids || l_cleanup_pid_status=$?
+	if [ "$l_cleanup_pid_status" -ne 0 ]; then
+		[ "$l_exit_status" -eq 0 ] && l_exit_status=$l_cleanup_pid_status
 		if [ -z "${g_zxfer_failure_message:-}" ]; then
 			g_zxfer_failure_class=runtime
 			g_zxfer_failure_stage="trap cleanup"
@@ -1918,31 +2039,48 @@ zxfer_init_source_execution_context() {
 			g_origin_cmd_zfs=${g_origin_cmd_zfs:-$g_cmd_zfs}
 			if [ "$g_option_z_compress" -eq 1 ] &&
 				[ -z "${g_origin_cmd_compress_safe:-}" ]; then
-				if ! g_origin_cmd_compress_safe=$(zxfer_quote_cli_tokens "$g_cmd_compress" "compression command"); then
-					zxfer_throw_error "$g_origin_cmd_compress_safe"
+				l_source_context_status=0
+				g_origin_cmd_compress_safe=$(zxfer_quote_cli_tokens "$g_cmd_compress" "compression command") ||
+					l_source_context_status=$?
+				if [ "$l_source_context_status" -ne 0 ]; then
+					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
 				fi
 			fi
 			zxfer_echoV "Dry run: skipping live remote source helper validation."
 			return
 		fi
-		if ! g_source_operating_system=$(zxfer_get_os "$g_option_O_origin_host" source); then
+		l_source_context_status=0
+		g_source_operating_system=$(zxfer_get_os "$g_option_O_origin_host" source) ||
+			l_source_context_status=$?
+		if [ "$l_source_context_status" -ne 0 ]; then
 			g_zxfer_failure_class=dependency
-			zxfer_throw_error "Failed to determine operating system on host $g_option_O_origin_host."
+			zxfer_throw_error "Failed to determine operating system on host $g_option_O_origin_host." "$l_source_context_status"
 		fi
-		if ! g_origin_cmd_zfs=$(zxfer_resolve_remote_required_tool "$g_option_O_origin_host" zfs "zfs" source); then
+		l_source_context_status=0
+		g_origin_cmd_zfs=$(zxfer_resolve_remote_required_tool "$g_option_O_origin_host" zfs "zfs" source) ||
+			l_source_context_status=$?
+		if [ "$l_source_context_status" -ne 0 ]; then
 			g_zxfer_failure_class=dependency
-			zxfer_throw_error "$g_origin_cmd_zfs"
+			zxfer_throw_error "$g_origin_cmd_zfs" "$l_source_context_status"
 		fi
 		if [ "$g_option_z_compress" -eq 1 ]; then
-			if ! g_origin_cmd_compress_safe=$(zxfer_resolve_remote_cli_command_safe "$g_option_O_origin_host" "$g_cmd_compress" "compression command" source); then
+			l_source_context_status=0
+			g_origin_cmd_compress_safe=$(zxfer_resolve_remote_cli_command_safe "$g_option_O_origin_host" "$g_cmd_compress" "compression command" source) ||
+				l_source_context_status=$?
+			if [ "$l_source_context_status" -ne 0 ]; then
 				g_zxfer_failure_class=dependency
-				zxfer_throw_error "$g_origin_cmd_compress_safe"
+				zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
 			fi
 		fi
 		return
 	fi
 
-	g_source_operating_system=$(zxfer_get_os "")
+	l_source_context_status=0
+	g_source_operating_system=$(zxfer_get_os "") || l_source_context_status=$?
+	if [ "$l_source_context_status" -ne 0 ]; then
+		g_zxfer_failure_class=dependency
+		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
+	fi
 	g_origin_cmd_zfs=$g_cmd_zfs
 }
 
@@ -1957,31 +2095,48 @@ zxfer_init_destination_execution_context() {
 			g_target_cmd_zfs=${g_target_cmd_zfs:-$g_cmd_zfs}
 			if [ "$g_option_z_compress" -eq 1 ] &&
 				[ -z "${g_target_cmd_decompress_safe:-}" ]; then
-				if ! g_target_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress" "decompression command"); then
-					zxfer_throw_error "$g_target_cmd_decompress_safe"
+				l_destination_context_status=0
+				g_target_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress" "decompression command") ||
+					l_destination_context_status=$?
+				if [ "$l_destination_context_status" -ne 0 ]; then
+					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
 				fi
 			fi
 			zxfer_echoV "Dry run: skipping live remote destination helper validation."
 			return
 		fi
-		if ! g_destination_operating_system=$(zxfer_get_os "$g_option_T_target_host" destination); then
+		l_destination_context_status=0
+		g_destination_operating_system=$(zxfer_get_os "$g_option_T_target_host" destination) ||
+			l_destination_context_status=$?
+		if [ "$l_destination_context_status" -ne 0 ]; then
 			g_zxfer_failure_class=dependency
-			zxfer_throw_error "Failed to determine operating system on host $g_option_T_target_host."
+			zxfer_throw_error "Failed to determine operating system on host $g_option_T_target_host." "$l_destination_context_status"
 		fi
-		if ! g_target_cmd_zfs=$(zxfer_resolve_remote_required_tool "$g_option_T_target_host" zfs "zfs" destination); then
+		l_destination_context_status=0
+		g_target_cmd_zfs=$(zxfer_resolve_remote_required_tool "$g_option_T_target_host" zfs "zfs" destination) ||
+			l_destination_context_status=$?
+		if [ "$l_destination_context_status" -ne 0 ]; then
 			g_zxfer_failure_class=dependency
-			zxfer_throw_error "$g_target_cmd_zfs"
+			zxfer_throw_error "$g_target_cmd_zfs" "$l_destination_context_status"
 		fi
 		if [ "$g_option_z_compress" -eq 1 ]; then
-			if ! g_target_cmd_decompress_safe=$(zxfer_resolve_remote_cli_command_safe "$g_option_T_target_host" "$g_cmd_decompress" "decompression command" destination); then
+			l_destination_context_status=0
+			g_target_cmd_decompress_safe=$(zxfer_resolve_remote_cli_command_safe "$g_option_T_target_host" "$g_cmd_decompress" "decompression command" destination) ||
+				l_destination_context_status=$?
+			if [ "$l_destination_context_status" -ne 0 ]; then
 				g_zxfer_failure_class=dependency
-				zxfer_throw_error "$g_target_cmd_decompress_safe"
+				zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
 			fi
 		fi
 		return
 	fi
 
-	g_destination_operating_system=$(zxfer_get_os "")
+	l_destination_context_status=0
+	g_destination_operating_system=$(zxfer_get_os "") || l_destination_context_status=$?
+	if [ "$l_destination_context_status" -ne 0 ]; then
+		g_zxfer_failure_class=dependency
+		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
+	fi
 	g_target_cmd_zfs=$g_cmd_zfs
 }
 
@@ -2003,9 +2158,12 @@ zxfer_init_restore_property_helpers() {
 		return
 	fi
 
-	if ! g_cmd_cat=$(zxfer_resolve_remote_required_tool "$g_option_O_origin_host" cat "cat" source); then
+	l_restore_property_status=0
+	g_cmd_cat=$(zxfer_resolve_remote_required_tool "$g_option_O_origin_host" cat "cat" source) ||
+		l_restore_property_status=$?
+	if [ "$l_restore_property_status" -ne 0 ]; then
 		g_zxfer_failure_class=dependency
-		zxfer_throw_error "$g_cmd_cat"
+		zxfer_throw_error "$g_cmd_cat" "$l_restore_property_status"
 	fi
 }
 
@@ -2014,7 +2172,12 @@ zxfer_init_restore_property_helpers() {
 # Usage: Called during runtime bootstrap, staging, and trap cleanup during
 # bootstrap so downstream code sees consistent defaults and runtime state.
 zxfer_init_local_awk_compatibility() {
-	l_home_operating_system=$(zxfer_get_os "")
+	l_awk_compatibility_status=0
+	l_home_operating_system=$(zxfer_get_os "") || l_awk_compatibility_status=$?
+	if [ "$l_awk_compatibility_status" -ne 0 ]; then
+		g_zxfer_failure_class=dependency
+		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
+	fi
 	if [ "$l_home_operating_system" != "SunOS" ]; then
 		return
 	fi

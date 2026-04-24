@@ -205,12 +205,16 @@ zxfer_get_local_parallel_version_output() {
 
 	[ -n "$l_parallel_path" ] || return 1
 
-	l_version_output=$("$l_parallel_path" --will-cite --version 2>&1)
-	l_version_status=$?
+	l_version_status=0
+	l_version_output=$("$l_parallel_path" --will-cite --version 2>&1) ||
+		l_version_status=$?
 	if [ "$l_version_status" -ne 0 ] ||
 		[ "$l_version_output" = "" ] ||
 		! zxfer_version_output_reports_gnu_parallel "$l_version_output"; then
-		l_version_output=$("$l_parallel_path" --version 2>&1)
+		l_version_status=0
+		l_version_output=$("$l_parallel_path" --version 2>&1) ||
+			l_version_status=$?
+		[ "$l_version_status" -eq 0 ] || return "$l_version_status"
 	fi
 
 	printf '%s\n' "$l_version_output"
@@ -259,7 +263,10 @@ zxfer_ensure_parallel_available_for_source_jobs() {
 		return 0
 	fi
 
-	if ! l_remote_parallel=$(zxfer_resolve_remote_required_tool "$g_option_O_origin_host" parallel "parallel" source); then
+	l_remote_parallel_status=0
+	l_remote_parallel=$(zxfer_resolve_remote_required_tool "$g_option_O_origin_host" parallel "parallel" source) ||
+		l_remote_parallel_status=$?
+	if [ "$l_remote_parallel_status" -ne 0 ]; then
 		case "$l_remote_parallel" in
 		"Required dependency \"parallel\" not found on host "*)
 			g_zxfer_parallel_source_job_check_kind="origin_missing"
@@ -271,7 +278,7 @@ zxfer_ensure_parallel_available_for_source_jobs() {
 			;;
 		esac
 		printf '%s\n' "$g_zxfer_parallel_source_job_check_result"
-		return 1
+		return "$l_remote_parallel_status"
 	fi
 
 	g_origin_parallel_cmd=$l_remote_parallel
@@ -430,8 +437,10 @@ zxfer_write_source_snapshot_list_to_file() {
 	g_source_snapshot_list_uses_metadata_compression=0
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
-		if ! l_cmd=$(zxfer_render_source_snapshot_list_preview_cmd); then
-			zxfer_throw_error "${l_cmd:-Failed to render dry-run source snapshot discovery command.}"
+		l_status=0
+		l_cmd=$(zxfer_render_source_snapshot_list_preview_cmd) || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_throw_error "${l_cmd:-Failed to render dry-run source snapshot discovery command.}" "$l_status"
 		fi
 		g_source_snapshot_list_cmd=$l_cmd
 		zxfer_echoV "Dry run: $l_cmd"
@@ -462,10 +471,14 @@ zxfer_write_source_snapshot_list_to_file() {
 		return "$l_status"
 	fi
 	l_cmd_tmp_file=$g_zxfer_temp_file_result
-	if ! zxfer_build_source_snapshot_list_cmd >"$l_cmd_tmp_file"; then
-		if ! zxfer_read_snapshot_discovery_capture_file "$l_cmd_tmp_file"; then
+	l_status=0
+	zxfer_build_source_snapshot_list_cmd >"$l_cmd_tmp_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		l_read_status=0
+		zxfer_read_snapshot_discovery_capture_file "$l_cmd_tmp_file" || l_read_status=$?
+		if [ "$l_read_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
-			zxfer_throw_error "Failed to read staged source snapshot discovery command after build failure."
+			zxfer_throw_error "Failed to read staged source snapshot discovery command after build failure." "$l_read_status"
 		fi
 		l_cmd=$g_zxfer_snapshot_discovery_file_read_result
 		case "$l_cmd" in
@@ -475,11 +488,13 @@ zxfer_write_source_snapshot_list_to_file() {
 			;;
 		esac
 		zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
-		zxfer_throw_error "${l_cmd:-Failed to build source snapshot discovery command.}"
+		zxfer_throw_error "${l_cmd:-Failed to build source snapshot discovery command.}" "$l_status"
 	fi
-	if ! zxfer_read_snapshot_discovery_capture_file "$l_cmd_tmp_file"; then
+	l_status=0
+	zxfer_read_snapshot_discovery_capture_file "$l_cmd_tmp_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
-		zxfer_throw_error "Failed to read staged source snapshot discovery command."
+		zxfer_throw_error "Failed to read staged source snapshot discovery command." "$l_status"
 	fi
 	l_cmd=$g_zxfer_snapshot_discovery_file_read_result
 	case "$l_cmd" in
@@ -604,20 +619,27 @@ zxfer_refine_recursive_snapshot_deltas_with_identity_validation() {
 	fi
 	l_common_snapshot_records_tmp_file=$g_zxfer_temp_file_result
 
-	if ! LC_ALL=C comm -12 "$l_source_sorted_file" "$l_destination_sorted_file" >"$l_common_snapshot_records_tmp_file"; then
+	l_status=0
+	LC_ALL=C comm -12 "$l_source_sorted_file" "$l_destination_sorted_file" >"$l_common_snapshot_records_tmp_file" ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 			"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-		zxfer_throw_error "Failed to derive recursive common snapshot list for snapshot identity validation."
+		zxfer_throw_error "Failed to derive recursive common snapshot list for snapshot identity validation." "$l_status"
 	fi
-	if ! zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_common_snapshot_records_tmp_file"; then
+	l_status=0
+	zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_common_snapshot_records_tmp_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 			"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-		zxfer_throw_error "Failed to derive recursive common dataset list for snapshot identity validation."
+		zxfer_throw_error "Failed to derive recursive common dataset list for snapshot identity validation." "$l_status"
 	fi
-	if ! zxfer_write_recursive_dataset_list_result_to_file "$l_common_datasets_tmp_file"; then
+	l_status=0
+	zxfer_write_recursive_dataset_list_result_to_file "$l_common_datasets_tmp_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 			"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-		zxfer_throw_error "Failed to stage recursive common dataset list for snapshot identity validation."
+		zxfer_throw_error "Failed to stage recursive common dataset list for snapshot identity validation." "$l_status"
 	fi
 
 	if [ -n "${g_recursive_source_list:-}" ] || [ -n "${g_recursive_destination_extra_dataset_list:-}" ]; then
@@ -630,92 +652,139 @@ zxfer_refine_recursive_snapshot_deltas_with_identity_validation() {
 				l_already_changed_datasets=$g_recursive_destination_extra_dataset_list
 			fi
 		fi
-		if ! zxfer_capture_recursive_dataset_list_from_snapshot_records "$l_already_changed_datasets"; then
+		l_status=0
+		zxfer_capture_recursive_dataset_list_from_snapshot_records "$l_already_changed_datasets" ||
+			l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 				"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-			zxfer_throw_error "Failed to derive already-changed recursive dataset list for snapshot identity validation."
+			zxfer_throw_error "Failed to derive already-changed recursive dataset list for snapshot identity validation." "$l_status"
 		fi
-		if ! zxfer_write_recursive_dataset_list_result_to_file "$l_already_changed_datasets_tmp_file"; then
+		l_status=0
+		zxfer_write_recursive_dataset_list_result_to_file "$l_already_changed_datasets_tmp_file" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 				"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-			zxfer_throw_error "Failed to stage already-changed recursive dataset list for snapshot identity validation."
+			zxfer_throw_error "Failed to stage already-changed recursive dataset list for snapshot identity validation." "$l_status"
 		fi
 	else
-		if ! zxfer_write_runtime_artifact_file "$l_already_changed_datasets_tmp_file" ""; then
+		l_status=0
+		zxfer_write_runtime_artifact_file "$l_already_changed_datasets_tmp_file" "" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 				"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-			zxfer_throw_error "Failed to stage empty already-changed recursive dataset list for snapshot identity validation."
+			zxfer_throw_error "Failed to stage empty already-changed recursive dataset list for snapshot identity validation." "$l_status"
 		fi
 	fi
 
-	if ! LC_ALL=C comm -23 "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" >"$l_candidate_datasets_tmp_file"; then
+	l_status=0
+	LC_ALL=C comm -23 "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" >"$l_candidate_datasets_tmp_file" ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 			"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-		zxfer_throw_error "Failed to derive recursive candidate dataset list for snapshot identity validation."
+		zxfer_throw_error "Failed to derive recursive candidate dataset list for snapshot identity validation." "$l_status"
 	fi
 	if [ "$g_option_x_exclude_datasets" != "" ]; then
-		if ! zxfer_capture_recursive_dataset_list_from_lines_file "$l_candidate_datasets_tmp_file"; then
+		l_status=0
+		zxfer_capture_recursive_dataset_list_from_lines_file "$l_candidate_datasets_tmp_file" ||
+			l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 				"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-			zxfer_throw_error "Failed to load recursive candidate dataset list for snapshot identity validation filtering."
+			zxfer_throw_error "Failed to load recursive candidate dataset list for snapshot identity validation filtering." "$l_status"
 		fi
-		if ! zxfer_filter_recursive_dataset_list_with_excludes "$g_zxfer_recursive_dataset_list_result"; then
+		l_status=0
+		zxfer_filter_recursive_dataset_list_with_excludes "$g_zxfer_recursive_dataset_list_result" ||
+			l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 				"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-			zxfer_throw_error "Failed to filter recursive candidate dataset list against exclude patterns during snapshot identity validation."
+			zxfer_throw_error "Failed to filter recursive candidate dataset list against exclude patterns during snapshot identity validation." "$l_status"
 		fi
-		if ! zxfer_write_recursive_dataset_list_result_to_file "$l_candidate_datasets_tmp_file"; then
+		l_status=0
+		zxfer_write_recursive_dataset_list_result_to_file "$l_candidate_datasets_tmp_file" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 				"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-			zxfer_throw_error "Failed to stage filtered recursive candidate dataset list for snapshot identity validation."
+			zxfer_throw_error "Failed to stage filtered recursive candidate dataset list for snapshot identity validation." "$l_status"
 		fi
 	fi
 
-	if ! zxfer_read_snapshot_discovery_capture_file "$l_candidate_datasets_tmp_file"; then
+	l_status=0
+	zxfer_read_snapshot_discovery_capture_file "$l_candidate_datasets_tmp_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 			"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-		zxfer_throw_error "Failed to read staged recursive candidate dataset list for snapshot identity validation."
+		zxfer_throw_error "Failed to read staged recursive candidate dataset list for snapshot identity validation." "$l_status"
 	fi
 
+	l_identity_validation_status=0
 	while IFS= read -r l_candidate_dataset || [ -n "$l_candidate_dataset" ]; do
 		[ -n "$l_candidate_dataset" ] || continue
 		l_candidate_destination_dataset=$(zxfer_get_destination_dataset_for_source_dataset "$l_candidate_dataset")
 
-		if ! l_source_identity_records=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_candidate_dataset"); then
+		l_identity_status=0
+		l_source_identity_records=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_candidate_dataset") ||
+			l_identity_status=$?
+		if [ "$l_identity_status" -ne 0 ]; then
+			l_identity_validation_status=$l_identity_status
 			l_identity_validation_error="Failed to retrieve source snapshot identities for [$l_candidate_dataset]."
 			break
 		fi
 
-		if ! l_destination_identity_records=$(zxfer_get_snapshot_identity_records_for_dataset destination "$l_candidate_destination_dataset"); then
+		l_identity_status=0
+		l_destination_identity_records=$(zxfer_get_snapshot_identity_records_for_dataset destination "$l_candidate_destination_dataset") ||
+			l_identity_status=$?
+		if [ "$l_identity_status" -ne 0 ]; then
+			l_identity_validation_status=$l_identity_status
 			l_identity_validation_error="Failed to retrieve destination snapshot identities for [$l_candidate_destination_dataset]."
 			break
 		fi
 
-		if ! zxfer_get_temp_file >/dev/null; then
+		l_identity_status=0
+		zxfer_get_temp_file >/dev/null || l_identity_status=$?
+		if [ "$l_identity_status" -ne 0 ]; then
+			l_identity_validation_status=$l_identity_status
 			l_identity_validation_error="Failed to allocate source snapshot identity staging for [$l_candidate_dataset]."
 			break
 		fi
 		l_source_identity_tmp_file=$g_zxfer_temp_file_result
 
-		if ! zxfer_get_temp_file >/dev/null; then
+		l_identity_status=0
+		zxfer_get_temp_file >/dev/null || l_identity_status=$?
+		if [ "$l_identity_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_source_identity_tmp_file"
+			l_identity_validation_status=$l_identity_status
 			l_identity_validation_error="Failed to allocate destination snapshot identity staging for [$l_candidate_destination_dataset]."
 			break
 		fi
 		l_destination_identity_tmp_file=$g_zxfer_temp_file_result
-		if ! zxfer_write_snapshot_identity_file_from_records "$l_source_identity_records" "$l_source_identity_tmp_file"; then
+		l_identity_status=0
+		zxfer_write_snapshot_identity_file_from_records "$l_source_identity_records" "$l_source_identity_tmp_file" ||
+			l_identity_status=$?
+		if [ "$l_identity_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_source_identity_tmp_file" "$l_destination_identity_tmp_file"
+			l_identity_validation_status=$l_identity_status
 			l_identity_validation_error="Failed to write source snapshot identities for [$l_candidate_dataset]."
 			break
 		fi
-		if ! zxfer_write_snapshot_identity_file_from_records "$l_destination_identity_records" "$l_destination_identity_tmp_file"; then
+		l_identity_status=0
+		zxfer_write_snapshot_identity_file_from_records "$l_destination_identity_records" "$l_destination_identity_tmp_file" ||
+			l_identity_status=$?
+		if [ "$l_identity_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_source_identity_tmp_file" "$l_destination_identity_tmp_file"
+			l_identity_validation_status=$l_identity_status
 			l_identity_validation_error="Failed to write destination snapshot identities for [$l_candidate_destination_dataset]."
 			break
 		fi
 
-		if ! l_source_identity_diff=$(zxfer_diff_snapshot_lists "$l_source_identity_tmp_file" "$l_destination_identity_tmp_file" "source_minus_destination"); then
+		l_identity_status=0
+		l_source_identity_diff=$(zxfer_diff_snapshot_lists "$l_source_identity_tmp_file" "$l_destination_identity_tmp_file" "source_minus_destination") ||
+			l_identity_status=$?
+		if [ "$l_identity_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_source_identity_tmp_file" "$l_destination_identity_tmp_file"
+			l_identity_validation_status=$l_identity_status
 			l_identity_validation_error="Failed to diff source and destination snapshot identities for [$l_candidate_dataset]."
 			break
 		fi
@@ -728,8 +797,12 @@ $l_candidate_dataset"
 			fi
 		fi
 
-		if ! l_destination_identity_diff=$(zxfer_diff_snapshot_lists "$l_source_identity_tmp_file" "$l_destination_identity_tmp_file" "destination_minus_source"); then
+		l_identity_status=0
+		l_destination_identity_diff=$(zxfer_diff_snapshot_lists "$l_source_identity_tmp_file" "$l_destination_identity_tmp_file" "destination_minus_source") ||
+			l_identity_status=$?
+		if [ "$l_identity_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_source_identity_tmp_file" "$l_destination_identity_tmp_file"
+			l_identity_validation_status=$l_identity_status
 			l_identity_validation_error="Failed to diff destination and source snapshot identities for [$l_candidate_dataset]."
 			break
 		fi
@@ -750,23 +823,29 @@ EOF
 	if [ -n "$l_identity_validation_error" ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 			"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-		zxfer_throw_error "$l_identity_validation_error"
+		zxfer_throw_error "$l_identity_validation_error" "$l_identity_validation_status"
 	fi
 
 	if [ -n "$l_identity_source_datasets" ]; then
-		if ! zxfer_capture_recursive_dataset_list_from_snapshot_records "$(printf '%s\n%s\n' "$g_recursive_source_list" "$l_identity_source_datasets")"; then
+		l_status=0
+		zxfer_capture_recursive_dataset_list_from_snapshot_records "$(printf '%s\n%s\n' "$g_recursive_source_list" "$l_identity_source_datasets")" ||
+			l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 				"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-			zxfer_throw_error "Failed to merge recursive source dataset list after snapshot identity validation."
+			zxfer_throw_error "Failed to merge recursive source dataset list after snapshot identity validation." "$l_status"
 		fi
 		g_recursive_source_list=$g_zxfer_recursive_dataset_list_result
 	fi
 
 	if [ -n "$l_identity_destination_datasets" ]; then
-		if ! zxfer_capture_recursive_dataset_list_from_snapshot_records "$(printf '%s\n%s\n' "$g_recursive_destination_extra_dataset_list" "$l_identity_destination_datasets")"; then
+		l_status=0
+		zxfer_capture_recursive_dataset_list_from_snapshot_records "$(printf '%s\n%s\n' "$g_recursive_destination_extra_dataset_list" "$l_identity_destination_datasets")" ||
+			l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
 				"$l_candidate_datasets_tmp_file" "$l_common_snapshot_records_tmp_file"
-			zxfer_throw_error "Failed to merge recursive destination dataset list after snapshot identity validation."
+			zxfer_throw_error "Failed to merge recursive destination dataset list after snapshot identity validation." "$l_status"
 		fi
 		g_recursive_destination_extra_dataset_list=$g_zxfer_recursive_dataset_list_result
 	fi
@@ -805,8 +884,11 @@ zxfer_write_destination_snapshot_list_to_files() {
 	fi
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
-		if ! l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset"); then
-			zxfer_throw_error "${l_cmd:-Failed to render dry-run destination snapshot discovery command.}"
+		l_status=0
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset") ||
+			l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_throw_error "${l_cmd:-Failed to render dry-run destination snapshot discovery command.}" "$l_status"
 		fi
 		zxfer_echoV "Dry run: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
@@ -826,8 +908,10 @@ zxfer_write_destination_snapshot_list_to_files() {
 	fi
 
 	# check if the destination zfs dataset exists before listing snapshots
-	if ! l_destination_exists=$(zxfer_exists_destination "$l_destination_dataset"); then
-		zxfer_throw_error "$l_destination_exists"
+	l_status=0
+	l_destination_exists=$(zxfer_exists_destination "$l_destination_dataset") || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_throw_error "$l_destination_exists" "$l_status"
 	fi
 
 	if [ "$l_destination_exists" -eq 1 ]; then
@@ -839,19 +923,29 @@ zxfer_write_destination_snapshot_list_to_files() {
 		zxfer_record_last_command_string "$l_cmd"
 		# make sure to eval and then pipe the contents to the file in case
 		# the command uses ssh
-		if ! zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file"; then
-			zxfer_throw_error "Failed to retrieve snapshot list from the destination."
+		l_status=0
+		zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file" ||
+			l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$l_status"
 		fi
 
 	else
 		# dataset does not exist
 		zxfer_echoV "Destination dataset does not exist: $l_destination_dataset"
-		if ! zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" ""; then
-			zxfer_throw_error "Failed to stage empty destination snapshot list."
+		l_status=0
+		zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" "" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to stage empty destination snapshot list." "$l_status"
 		fi
 	fi
 
-	zxfer_normalize_destination_snapshot_list "$l_destination_dataset" "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+	l_status=0
+	zxfer_normalize_destination_snapshot_list "$l_destination_dataset" "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
+	fi
 }
 
 # Purpose: Diff the snapshot lists so later helpers act on exact deltas.
@@ -905,7 +999,10 @@ zxfer_should_use_linear_reverse_for_file() {
 	esac
 	[ "$l_max_lines" -gt 0 ] || return 1
 
-	l_line_count=$(wc -l <"$l_input_file" 2>/dev/null | tr -d '[:space:]') || return 1
+	l_line_count_status=0
+	l_line_count=$("${g_cmd_awk:-awk}" 'END { print NR + 0 }' "$l_input_file" 2>/dev/null) ||
+		l_line_count_status=$?
+	[ "$l_line_count_status" -eq 0 ] || return "$l_line_count_status"
 	case "$l_line_count" in
 	'' | *[!0-9]*)
 		return 1
@@ -970,11 +1067,12 @@ zxfer_reverse_numbered_line_stream() {
 
 	if zxfer_should_use_linear_reverse_for_file "$l_input_tmp_file" &&
 		zxfer_numbered_file_is_strictly_increasing "$l_input_tmp_file"; then
-		zxfer_reverse_numbered_file_lines_with_awk "$l_input_tmp_file"
+		l_status=0
+		zxfer_reverse_numbered_file_lines_with_awk "$l_input_tmp_file" || l_status=$?
 	else
-		zxfer_reverse_numbered_file_lines_with_sort "$l_input_tmp_file"
+		l_status=0
+		zxfer_reverse_numbered_file_lines_with_sort "$l_input_tmp_file" || l_status=$?
 	fi
-	l_status=$?
 	zxfer_cleanup_runtime_artifact_path "$l_input_tmp_file"
 	return "$l_status"
 }
@@ -1012,8 +1110,8 @@ zxfer_reverse_plain_file_lines_with_sort() {
 		return "$l_status"
 	fi
 
-	zxfer_reverse_numbered_file_lines_with_sort "$l_numbered_tmp_file"
-	l_status=$?
+	l_status=0
+	zxfer_reverse_numbered_file_lines_with_sort "$l_numbered_tmp_file" || l_status=$?
 	zxfer_cleanup_runtime_artifact_path "$l_numbered_tmp_file"
 	return "$l_status"
 }
@@ -1238,8 +1336,9 @@ zxfer_filter_recursive_dataset_list_with_excludes() {
 		return "$l_status"
 	fi
 
-	grep -v -e "$g_option_x_exclude_datasets" "$l_dataset_list_input_file" >"$l_dataset_list_filtered_file"
-	l_filter_status=$?
+	l_filter_status=0
+	grep -v -e "$g_option_x_exclude_datasets" "$l_dataset_list_input_file" >"$l_dataset_list_filtered_file" ||
+		l_filter_status=$?
 	case "$l_filter_status" in
 	0 | 1) ;;
 	*)
@@ -1282,8 +1381,8 @@ zxfer_set_g_recursive_source_list() {
 	l_lzfs_list_hr_s_snap_tmp_file=$1
 	l_dest_snaps_stripped_sorted_tmp_file=$2
 
-	zxfer_get_temp_file >/dev/null
-	l_status=$?
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		return "$l_status"
 	fi
@@ -1294,58 +1393,79 @@ zxfer_set_g_recursive_source_list() {
 	l_cmd=$(zxfer_render_command_for_report "LC_ALL=C" sort "$l_lzfs_list_hr_s_snap_tmp_file")
 	zxfer_echoV "Running command: $l_cmd > $(zxfer_quote_token_for_report "$l_source_snaps_sorted_tmp_file")"
 	zxfer_record_last_command_string "$l_cmd > $(zxfer_quote_token_for_report "$l_source_snaps_sorted_tmp_file")"
-	if ! LC_ALL=C sort "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snaps_sorted_tmp_file"; then
+	l_status=0
+	LC_ALL=C sort "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snaps_sorted_tmp_file" ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-		zxfer_throw_error "Failed to sort source snapshots for recursive delta planning."
+		zxfer_throw_error "Failed to sort source snapshots for recursive delta planning." "$l_status"
 	fi
 
-	if ! l_missing_snapshots=$(zxfer_diff_snapshot_lists "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "source_minus_destination"); then
+	l_status=0
+	l_missing_snapshots=$(zxfer_diff_snapshot_lists "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "source_minus_destination") ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-		zxfer_throw_error "Failed to diff source and destination snapshots for recursive transfer planning."
+		zxfer_throw_error "Failed to diff source and destination snapshots for recursive transfer planning." "$l_status"
 	fi
-	if ! l_destination_extra_snapshots=$(zxfer_diff_snapshot_lists "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "destination_minus_source"); then
+	l_status=0
+	l_destination_extra_snapshots=$(zxfer_diff_snapshot_lists "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "destination_minus_source") ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-		zxfer_throw_error "Failed to diff destination and source snapshots for recursive delete planning."
+		zxfer_throw_error "Failed to diff destination and source snapshots for recursive delete planning." "$l_status"
 	fi
 	if [ "$l_missing_snapshots" != "" ]; then
-		if ! zxfer_capture_recursive_dataset_list_from_snapshot_records "$l_missing_snapshots"; then
+		l_status=0
+		zxfer_capture_recursive_dataset_list_from_snapshot_records "$l_missing_snapshots" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-			zxfer_throw_error "Failed to derive recursive source dataset transfer list."
+			zxfer_throw_error "Failed to derive recursive source dataset transfer list." "$l_status"
 		fi
 		g_recursive_source_list=$g_zxfer_recursive_dataset_list_result
 	else
 		g_recursive_source_list=""
 	fi
 	if [ "$l_destination_extra_snapshots" != "" ]; then
-		if ! zxfer_capture_recursive_dataset_list_from_snapshot_records "$l_destination_extra_snapshots"; then
+		l_status=0
+		zxfer_capture_recursive_dataset_list_from_snapshot_records "$l_destination_extra_snapshots" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-			zxfer_throw_error "Failed to derive recursive destination dataset delete list."
+			zxfer_throw_error "Failed to derive recursive destination dataset delete list." "$l_status"
 		fi
 		g_recursive_destination_extra_dataset_list=$g_zxfer_recursive_dataset_list_result
 	else
 		g_recursive_destination_extra_dataset_list=""
 	fi
-	if ! zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_source_snaps_sorted_tmp_file"; then
+	l_status=0
+	zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_source_snaps_sorted_tmp_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-		zxfer_throw_error "Failed to derive recursive source dataset inventory."
+		zxfer_throw_error "Failed to derive recursive source dataset inventory." "$l_status"
 	fi
 	g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
 
 	# if excluding datasets, remove them from the list
 	if [ "$g_option_x_exclude_datasets" != "" ]; then
-		if ! zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_list"; then
+		l_status=0
+		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_list" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-			zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns."
+			zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns." "$l_status"
 		fi
 		g_recursive_source_list=$g_zxfer_recursive_dataset_list_result
-		if ! zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_destination_extra_dataset_list"; then
+		l_status=0
+		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_destination_extra_dataset_list" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-			zxfer_throw_error "Failed to filter recursive destination dataset delete list against exclude patterns."
+			zxfer_throw_error "Failed to filter recursive destination dataset delete list against exclude patterns." "$l_status"
 		fi
 		g_recursive_destination_extra_dataset_list=$g_zxfer_recursive_dataset_list_result
-		if ! zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_dataset_list"; then
+		l_status=0
+		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_dataset_list" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-			zxfer_throw_error "Failed to filter recursive source dataset inventory against exclude patterns."
+			zxfer_throw_error "Failed to filter recursive source dataset inventory against exclude patterns." "$l_status"
 		fi
 		g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
 	fi
@@ -1409,14 +1529,14 @@ zxfer_get_zfs_list() {
 	fi
 
 	# create temporary files used by the background processes
-	zxfer_get_temp_file >/dev/null
-	l_status=$?
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		return "$l_status"
 	fi
 	l_lzfs_list_hr_s_snap_tmp_file=$g_zxfer_temp_file_result
-	zxfer_get_temp_file >/dev/null
-	l_status=$?
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_tmp_file"
 		return "$l_status"
@@ -1429,7 +1549,13 @@ zxfer_get_zfs_list() {
 	g_source_snapshot_list_pid=""
 	g_source_snapshot_list_job_id=""
 	l_source_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	zxfer_write_source_snapshot_list_to_file "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
+	l_status=0
+	zxfer_write_source_snapshot_list_to_file "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
+		return "$l_status"
+	fi
 
 	#
 	# Run as many commands prior to the wait command as possible.
@@ -1440,68 +1566,77 @@ zxfer_get_zfs_list() {
 	l_cmd=$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")
 	zxfer_echoV "Running command: $l_cmd"
 	zxfer_record_last_command_string "$l_cmd"
-	zxfer_get_temp_file >/dev/null
-	l_status=$?
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
 		return "$l_status"
 	fi
 	l_dest_list_tmp_file=$g_zxfer_temp_file_result
-	zxfer_get_temp_file >/dev/null
-	l_status=$?
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 			"$l_dest_list_tmp_file"
 		return "$l_status"
 	fi
 	l_dest_list_err_file=$g_zxfer_temp_file_result
-	if zxfer_run_destination_zfs_cmd list -t filesystem,volume -Hr -o name "$g_destination" >"$l_dest_list_tmp_file" 2>"$l_dest_list_err_file"; then
-		if ! zxfer_read_snapshot_discovery_capture_file "$l_dest_list_tmp_file"; then
+	l_dest_inventory_status=0
+	zxfer_run_destination_zfs_cmd list -t filesystem,volume -Hr -o name "$g_destination" >"$l_dest_list_tmp_file" 2>"$l_dest_list_err_file" ||
+		l_dest_inventory_status=$?
+	if [ "$l_dest_inventory_status" -eq 0 ]; then
+		l_status=0
+		zxfer_read_snapshot_discovery_capture_file "$l_dest_list_tmp_file" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_dest_list_tmp_file" "$l_dest_list_err_file"
-			zxfer_throw_usage_error "Failed to read staged destination dataset inventory."
+			zxfer_throw_error "Failed to read staged destination dataset inventory." "$l_status"
 		fi
 		g_recursive_dest_list=$g_zxfer_snapshot_discovery_file_read_result
 		[ -n "$g_recursive_dest_list" ] || {
 			zxfer_cleanup_runtime_artifact_paths "$l_dest_list_tmp_file" "$l_dest_list_err_file"
-			zxfer_throw_usage_error "Staged destination dataset inventory was empty."
+			zxfer_throw_error "Staged destination dataset inventory was empty."
 		}
 		zxfer_seed_destination_existence_cache_from_recursive_list "$g_destination" "$g_recursive_dest_list"
 	else
-		if zxfer_read_snapshot_discovery_capture_file "$l_dest_list_err_file"; then
-			l_dest_err=$g_zxfer_snapshot_discovery_file_read_result
-		else
+		l_status=0
+		zxfer_read_snapshot_discovery_capture_file "$l_dest_list_err_file" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_dest_list_tmp_file" "$l_dest_list_err_file"
-			zxfer_throw_usage_error "Failed to read staged destination dataset inventory stderr."
+			zxfer_throw_error "Failed to read staged destination dataset inventory stderr." "$l_status"
 		fi
+		l_dest_err=$g_zxfer_snapshot_discovery_file_read_result
 		if zxfer_destination_probe_reports_missing "$l_dest_err"; then
 			l_dest_pool=${g_destination%%/*}
 			if [ "$l_dest_pool" = "" ]; then
 				l_dest_pool=$g_destination
 			fi
-			if zxfer_run_destination_zfs_cmd list -H -o name "$l_dest_pool" >/dev/null 2>&1; then
+			l_dest_pool_status=0
+			zxfer_run_destination_zfs_cmd list -H -o name "$l_dest_pool" >/dev/null 2>&1 ||
+				l_dest_pool_status=$?
+			if [ "$l_dest_pool_status" -eq 0 ]; then
 				g_recursive_dest_list=""
 				zxfer_mark_destination_root_missing_in_cache "$g_destination"
 				zxfer_echoV "Destination dataset missing; treating as empty list for bootstrap."
 			else
 				zxfer_cleanup_runtime_artifact_paths "$l_dest_list_tmp_file" "$l_dest_list_err_file"
-				zxfer_throw_usage_error "Failed to retrieve list of datasets from the destination"
+				zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_pool_status"
 			fi
 		else
 			zxfer_cleanup_runtime_artifact_paths "$l_dest_list_tmp_file" "$l_dest_list_err_file"
-			zxfer_throw_usage_error "Failed to retrieve list of datasets from the destination"
+			zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_inventory_status"
 		fi
 	fi
 	zxfer_cleanup_runtime_artifact_paths "$l_dest_list_tmp_file" "$l_dest_list_err_file"
 
-	zxfer_get_temp_file >/dev/null
-	l_status=$?
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
 		return "$l_status"
 	fi
 	l_rzfs_list_hr_snap_tmp_file=$g_zxfer_temp_file_result
-	zxfer_get_temp_file >/dev/null
-	l_status=$?
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 			"$l_rzfs_list_hr_snap_tmp_file"
@@ -1510,13 +1645,23 @@ zxfer_get_zfs_list() {
 	l_dest_snaps_stripped_sorted_tmp_file=$g_zxfer_temp_file_result
 
 	# this function writes to both files passed as parameters
-	zxfer_write_destination_snapshot_list_to_files "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_destination_snapshot_listing_ms "$l_destination_snapshot_stage_start_ms"
-
-	if ! zxfer_read_snapshot_discovery_capture_file "$l_rzfs_list_hr_snap_tmp_file"; then
+	l_status=0
+	zxfer_write_destination_snapshot_list_to_files "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 			"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
-		zxfer_throw_error "Failed to read staged destination snapshot list."
+		zxfer_cleanup_snapshot_record_cache_files
+		return "$l_status"
+	fi
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_destination_snapshot_listing_ms "$l_destination_snapshot_stage_start_ms"
+
+	l_status=0
+	zxfer_read_snapshot_discovery_capture_file "$l_rzfs_list_hr_snap_tmp_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+			"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+		zxfer_throw_error "Failed to read staged destination snapshot list." "$l_status"
 	fi
 	g_rzfs_list_hr_snap=$g_zxfer_snapshot_discovery_file_read_result
 	g_zxfer_destination_snapshot_record_cache_file=$l_rzfs_list_hr_snap_tmp_file
@@ -1525,11 +1670,13 @@ zxfer_get_zfs_list() {
 	l_source_snapshot_wait_status=0
 	l_source_snapshot_wait_report_failure=""
 	if [ -n "${g_source_snapshot_list_job_id:-}" ]; then
-		if ! zxfer_wait_for_background_job "$g_source_snapshot_list_job_id"; then
+		l_wait_helper_status=0
+		zxfer_wait_for_background_job "$g_source_snapshot_list_job_id" || l_wait_helper_status=$?
+		if [ "$l_wait_helper_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
 				"$l_dest_snaps_stripped_sorted_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
-			zxfer_throw_error "Failed to read source snapshot discovery completion metadata."
+			zxfer_throw_error "Failed to read source snapshot discovery completion metadata." "$l_wait_helper_status"
 		fi
 		l_source_snapshot_wait_status=$g_zxfer_background_job_wait_exit_status
 		l_source_snapshot_wait_report_failure=${g_zxfer_background_job_wait_report_failure:-}
@@ -1564,29 +1711,33 @@ zxfer_get_zfs_list() {
 		if [ -n "${g_source_snapshot_list_cmd:-}" ]; then
 			zxfer_record_last_command_string "$g_source_snapshot_list_cmd"
 		fi
-		if zxfer_read_snapshot_discovery_capture_file "$l_lzfs_list_hr_s_snap_err_tmp_file"; then
-			l_source_snapshot_err=$g_zxfer_snapshot_discovery_file_read_result
-			l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
-				"$l_source_snapshot_err" 10)
-		else
+		l_source_stderr_read_status=0
+		zxfer_read_snapshot_discovery_capture_file "$l_lzfs_list_hr_s_snap_err_tmp_file" ||
+			l_source_stderr_read_status=$?
+		if [ "$l_source_stderr_read_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_err_tmp_file"
-			zxfer_throw_error "Failed to read staged source snapshot stderr."
+			zxfer_throw_error "Failed to read staged source snapshot stderr." "$l_source_stderr_read_status"
 		fi
+		l_source_snapshot_err=$g_zxfer_snapshot_discovery_file_read_result
+		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
+			"$l_source_snapshot_err" 10)
 		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_err_tmp_file"
 		if [ "$l_source_snapshot_err" != "" ]; then
-			zxfer_throw_error "Failed to retrieve snapshots from the source: $l_source_snapshot_err" 3
+			zxfer_throw_error "Failed to retrieve snapshots from the source: $l_source_snapshot_err" "$l_source_snapshot_wait_status"
 		fi
-		zxfer_throw_error "Failed to retrieve snapshots from the source" 3
+		zxfer_throw_error "Failed to retrieve snapshots from the source" "$l_source_snapshot_wait_status"
 	fi
-	if ! zxfer_read_snapshot_discovery_capture_file "$l_lzfs_list_hr_s_snap_tmp_file"; then
+	l_status=0
+	zxfer_read_snapshot_discovery_capture_file "$l_lzfs_list_hr_s_snap_tmp_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 			"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 		zxfer_cleanup_snapshot_record_cache_files
-		zxfer_throw_error "Failed to read staged source snapshot list."
+		zxfer_throw_error "Failed to read staged source snapshot list." "$l_status"
 	fi
 	g_lzfs_list_hr_snap=$g_zxfer_snapshot_discovery_file_read_result
-	zxfer_get_temp_file >/dev/null
-	l_status=$?
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
 			"$l_lzfs_list_hr_s_snap_err_tmp_file" \
@@ -1598,13 +1749,16 @@ zxfer_get_zfs_list() {
 	l_cmd=$(zxfer_render_command_for_report "" zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file")
 	zxfer_echoV "Running command: $l_cmd > $(zxfer_quote_token_for_report "$l_source_snapshot_record_cache_file")"
 	zxfer_record_last_command_string "$l_cmd > $(zxfer_quote_token_for_report "$l_source_snapshot_record_cache_file")"
-	if ! zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snapshot_record_cache_file"; then
+	l_status=0
+	zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snapshot_record_cache_file" ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
 			"$l_lzfs_list_hr_s_snap_err_tmp_file" \
 			"$l_dest_snaps_stripped_sorted_tmp_file" \
 			"$l_source_snapshot_record_cache_file"
 		zxfer_cleanup_snapshot_record_cache_files
-		zxfer_throw_error "Failed to stage source snapshot record cache."
+		zxfer_throw_error "Failed to stage source snapshot record cache." "$l_status"
 	fi
 	g_zxfer_source_snapshot_record_cache_file=$l_source_snapshot_record_cache_file
 	zxfer_echoV "Background processes finished."
@@ -1613,8 +1767,9 @@ zxfer_get_zfs_list() {
 	# END background process
 	#
 	l_snapshot_diff_sort_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	zxfer_set_g_recursive_source_list "$l_lzfs_list_hr_s_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
-	l_status=$?
+	l_status=0
+	zxfer_set_g_recursive_source_list "$l_lzfs_list_hr_s_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
+		l_status=$?
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms "$l_snapshot_diff_sort_stage_start_ms"
 	zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
 		"$l_dest_snaps_stripped_sorted_tmp_file"
@@ -1630,7 +1785,7 @@ zxfer_get_zfs_list() {
 	#
 
 	if [ "$g_lzfs_list_hr_snap" = "" ]; then
-		zxfer_throw_error "Failed to retrieve snapshots from the source" 3
+		zxfer_throw_error "Failed to retrieve snapshots from the source"
 	fi
 
 	if [ "$g_recursive_dest_list" = "" ]; then

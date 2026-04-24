@@ -1,6 +1,10 @@
 CHANGELOG
 =========
 
+2026.04.24
+-Complete the helper result/status contract by preserving exact non-zero statuses through staged readbacks, background-job completion waits, process-snapshot helpers, source snapshot discovery failures, property reconciliation staging, and trap cleanup; the old source-snapshot-specific exit status `3` is no longer a public exit bucket.
+-Preserve FreeBSD and OmniOS `vmactions` integration artifacts when guest package preparation or the guest-local harness fails by recording the guest status, allowing the VM action copyback to complete, restoring the recorded status in a host-side workflow step, updating the pinned FreeBSD action to `v1.4.5`, and making FreeBSD package preparation clear stale pkg state, retry prerequisite installation, and continue with reduced coverage when optional `parallel` / `zstd` packages remain unavailable.
+
 2026.04.23
 -Add repo-scoped Codex skills under `.agents/skills` for zxfer PR review, validation planning, platform portability checks, and release-doc review, and update `AGENTS.md` with model-agnostic agent operating-loop guidance so contributor agents can reuse task-specific workflows without embedding model-version-specific instructions.
 -Reduce no-op recursive remote startup work by carrying `name,guid` records through initial source/destination snapshot diffing, so same-name GUID divergence is still detected without the later whole-tree per-dataset GUID identity-validation pass.

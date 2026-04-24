@@ -86,10 +86,13 @@ zxfer_ensure_snapshot_index_dir() {
 		return 0
 	fi
 
-	if ! zxfer_create_runtime_artifact_dir "zxfer-snapshot-index" >/dev/null; then
+	l_index_status=0
+	zxfer_create_runtime_artifact_dir "zxfer-snapshot-index" >/dev/null ||
+		l_index_status=$?
+	if [ "$l_index_status" -ne 0 ]; then
 		g_zxfer_snapshot_index_unavailable=1
 		g_zxfer_snapshot_index_dir=""
-		return 1
+		return "$l_index_status"
 	fi
 	g_zxfer_snapshot_index_dir=$g_zxfer_runtime_artifact_path_result
 
@@ -226,9 +229,12 @@ $l_record_relpath
 		esac
 
 		l_record_path="$l_index_dir/$l_record_relpath"
-		if ! zxfer_read_cache_object_file \
-			"$l_record_path" "$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null; then
-			return 1
+		l_manifest_status=0
+		zxfer_read_cache_object_file \
+			"$l_record_path" "$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null ||
+			l_manifest_status=$?
+		if [ "$l_manifest_status" -ne 0 ]; then
+			return "$l_manifest_status"
 		fi
 
 		if [ -n "$l_index_map" ]; then
@@ -273,28 +279,40 @@ zxfer_validate_snapshot_record_index_object_dir() {
 	[ -d "$l_index_dir" ] || return 1
 	[ ! -L "$l_index_dir" ] || return 1
 	[ ! -h "$l_index_dir" ] || return 1
-	if ! zxfer_read_cache_object_file \
-		"$l_meta_path" "$ZXFER_SNAPSHOT_RECORD_INDEX_OBJECT_KIND" >/dev/null; then
-		return 1
+	l_index_object_status=0
+	zxfer_read_cache_object_file \
+		"$l_meta_path" "$ZXFER_SNAPSHOT_RECORD_INDEX_OBJECT_KIND" >/dev/null ||
+		l_index_object_status=$?
+	if [ "$l_index_object_status" -ne 0 ]; then
+		return "$l_index_object_status"
 	fi
 	[ "$g_zxfer_cache_object_payload_result" = "ready" ] || return 1
-	if ! l_manifest_name=$(zxfer_get_cache_object_metadata_value \
-		"$g_zxfer_cache_object_metadata_result" manifest); then
-		return 1
+	l_index_object_status=0
+	l_manifest_name=$(zxfer_get_cache_object_metadata_value \
+		"$g_zxfer_cache_object_metadata_result" manifest) ||
+		l_index_object_status=$?
+	if [ "$l_index_object_status" -ne 0 ]; then
+		return "$l_index_object_status"
 	fi
 	[ "$l_manifest_name" = "manifest.tsv" ] || return 1
-	if ! l_entry_count_expected=$(zxfer_get_cache_object_metadata_value \
-		"$g_zxfer_cache_object_metadata_result" entries); then
-		return 1
+	l_index_object_status=0
+	l_entry_count_expected=$(zxfer_get_cache_object_metadata_value \
+		"$g_zxfer_cache_object_metadata_result" entries) ||
+		l_index_object_status=$?
+	if [ "$l_index_object_status" -ne 0 ]; then
+		return "$l_index_object_status"
 	fi
 	case "$l_entry_count_expected" in
 	'' | *[!0-9]*)
 		return 1
 		;;
 	esac
-	if ! l_meta_side=$(zxfer_get_cache_object_metadata_value \
-		"$g_zxfer_cache_object_metadata_result" side); then
-		return 1
+	l_index_object_status=0
+	l_meta_side=$(zxfer_get_cache_object_metadata_value \
+		"$g_zxfer_cache_object_metadata_result" side) ||
+		l_index_object_status=$?
+	if [ "$l_index_object_status" -ne 0 ]; then
+		return "$l_index_object_status"
 	fi
 	[ -z "$l_expected_side" ] || [ "$l_meta_side" = "$l_expected_side" ] || return 1
 
@@ -329,9 +347,12 @@ zxfer_validate_snapshot_record_index_for_side() {
 		return 1
 	}
 
-	if ! l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_index_dir" "$l_side"); then
+	l_validate_status=0
+	l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_index_dir" "$l_side") ||
+		l_validate_status=$?
+	if [ "$l_validate_status" -ne 0 ]; then
 		zxfer_clear_snapshot_record_index_state_for_side "$l_side"
-		return 1
+		return "$l_validate_status"
 	fi
 
 	zxfer_set_snapshot_record_index_state_for_side "$l_side" "$l_index_dir" "$l_index_map"
@@ -382,22 +403,30 @@ zxfer_build_snapshot_record_index_from_file() {
 	esac
 	[ -r "$l_snapshot_records_file" ] || return 1
 
-	if ! zxfer_ensure_snapshot_index_dir; then
-		return 1
+	l_build_status=0
+	zxfer_ensure_snapshot_index_dir || l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
+		return "$l_build_status"
 	fi
 
-	if ! zxfer_create_cache_object_stage_dir_in_parent \
-		"$g_zxfer_snapshot_index_dir" "zxfer-snapshot-index-$l_side" >/dev/null; then
-		return 1
+	l_build_status=0
+	zxfer_create_cache_object_stage_dir_in_parent \
+		"$g_zxfer_snapshot_index_dir" "zxfer-snapshot-index-$l_side" >/dev/null ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
+		return "$l_build_status"
 	fi
 	l_stage_dir=$g_zxfer_runtime_artifact_path_result
 	l_manifest_path="$l_stage_dir/manifest.tsv"
 	l_records_dir="$l_stage_dir/records"
-	if ! mkdir -p "$l_records_dir"; then
+	l_build_status=0
+	mkdir -p "$l_records_dir" || l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
 
+	l_build_status=0
 	# shellcheck disable=SC2016  # awk program should see literal $0.
 	l_stage_map=$("${g_cmd_awk:-awk}" -v index_dir="$l_stage_dir" '
 $0 != "" {
@@ -421,10 +450,11 @@ $0 != "" {
 END {
 	for (i = 1; i <= file_count; i++)
 		print dataset_order[i] "\t" "records/" i ".records" "\t" file_paths[dataset_order[i]]
-}' "$l_snapshot_records_file") || {
+}' "$l_snapshot_records_file") || l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
-	}
+		return "$l_build_status"
+	fi
 
 	while IFS='	' read -r l_dataset l_record_relpath l_raw_record_path || [ -n "${l_dataset}${l_record_relpath}${l_raw_record_path}" ]; do
 		[ -n "$l_dataset" ] || continue
@@ -443,17 +473,23 @@ END {
 			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
 			return "$l_read_status"
 		fi
-		if ! zxfer_write_cache_object_contents_to_path \
+		l_build_status=0
+		zxfer_write_cache_object_contents_to_path \
 			"$l_stage_dir/$l_record_relpath" \
-			"$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" "" "$l_record_payload"; then
+			"$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" "" "$l_record_payload" ||
+			l_build_status=$?
+		if [ "$l_build_status" -ne 0 ]; then
 			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-			return 1
+			return "$l_build_status"
 		fi
-		if ! zxfer_read_cache_object_file \
+		l_build_status=0
+		zxfer_read_cache_object_file \
 			"$l_stage_dir/$l_record_relpath" \
-			"$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null; then
+			"$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null ||
+			l_build_status=$?
+		if [ "$l_build_status" -ne 0 ]; then
 			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-			return 1
+			return "$l_build_status"
 		fi
 		zxfer_cleanup_runtime_artifact_path "$l_raw_record_path"
 		if [ -n "$l_manifest_payload" ]; then
@@ -470,47 +506,67 @@ $l_dataset	$l_record_relpath"
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
 		return 1
 	}
-	if ! printf '%s\n' "$l_manifest_payload" >"$l_manifest_path"; then
+	l_build_status=0
+	printf '%s\n' "$l_manifest_payload" >"$l_manifest_path" || l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
-	if ! l_stage_entry_count=$(printf '%s\n' "$l_stage_map" | "${g_cmd_awk:-awk}" 'END {print NR + 0}'); then
+	l_build_status=0
+	l_stage_entry_count=$(printf '%s\n' "$l_stage_map" | "${g_cmd_awk:-awk}" 'END {print NR + 0}') ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
-	if ! l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
-		"$l_stage_dir" "$l_manifest_path" "$l_stage_entry_count"); then
+	l_build_status=0
+	l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
+		"$l_stage_dir" "$l_manifest_path" "$l_stage_entry_count") ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
-	if ! zxfer_write_cache_object_contents_to_path \
+	l_build_status=0
+	zxfer_write_cache_object_contents_to_path \
 		"$l_stage_dir/meta" \
 		"$ZXFER_SNAPSHOT_RECORD_INDEX_OBJECT_KIND" \
 		"side=$l_side
 manifest=manifest.tsv
 entries=$l_stage_entry_count" \
-		"ready"; then
+		"ready" ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
-	if ! l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_stage_dir" "$l_side"); then
+	l_build_status=0
+	l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_stage_dir" "$l_side") ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
 
 	l_stage_base=${l_stage_dir##*/}
 	l_generation_token=${l_stage_base##*.}
 	l_published_index_dir="$g_zxfer_snapshot_index_dir/$l_side.$l_generation_token.obj"
-	if ! zxfer_publish_cache_object_directory "$l_stage_dir" "$l_published_index_dir"; then
+	l_build_status=0
+	zxfer_publish_cache_object_directory "$l_stage_dir" "$l_published_index_dir" ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
 
+	l_build_status=0
 	zxfer_set_snapshot_record_index_state_for_side \
-		"$l_side" "$l_published_index_dir" "$l_index_map" || {
+		"$l_side" "$l_published_index_dir" "$l_index_map" ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_published_index_dir"
-		return 1
-	}
+		return "$l_build_status"
+	fi
 	if [ -n "$l_previous_index_dir" ] && [ "$l_previous_index_dir" != "$l_published_index_dir" ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_previous_index_dir"
 	fi
@@ -543,22 +599,30 @@ zxfer_build_snapshot_record_index() {
 		;;
 	esac
 
-	if ! zxfer_ensure_snapshot_index_dir; then
-		return 1
+	l_build_status=0
+	zxfer_ensure_snapshot_index_dir || l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
+		return "$l_build_status"
 	fi
 
-	if ! zxfer_create_cache_object_stage_dir_in_parent \
-		"$g_zxfer_snapshot_index_dir" "zxfer-snapshot-index-$l_side" >/dev/null; then
-		return 1
+	l_build_status=0
+	zxfer_create_cache_object_stage_dir_in_parent \
+		"$g_zxfer_snapshot_index_dir" "zxfer-snapshot-index-$l_side" >/dev/null ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
+		return "$l_build_status"
 	fi
 	l_stage_dir=$g_zxfer_runtime_artifact_path_result
 	l_manifest_path="$l_stage_dir/manifest.tsv"
 	l_records_dir="$l_stage_dir/records"
-	if ! mkdir -p "$l_records_dir"; then
+	l_build_status=0
+	mkdir -p "$l_records_dir" || l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
 
+	l_build_status=0
 	# shellcheck disable=SC2016  # awk program should see literal $0.
 	l_stage_map=$(printf '%s\n' "$l_snapshot_records" | "${g_cmd_awk:-awk}" -v index_dir="$l_stage_dir" '
 $0 != "" {
@@ -582,10 +646,11 @@ $0 != "" {
 END {
 	for (i = 1; i <= file_count; i++)
 		print dataset_order[i] "\t" "records/" i ".records" "\t" file_paths[dataset_order[i]]
-}') || {
+}') || l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
-	}
+		return "$l_build_status"
+	fi
 
 	while IFS='	' read -r l_dataset l_record_relpath l_raw_record_path || [ -n "${l_dataset}${l_record_relpath}${l_raw_record_path}" ]; do
 		[ -n "$l_dataset" ] || continue
@@ -604,17 +669,23 @@ END {
 			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
 			return "$l_read_status"
 		fi
-		if ! zxfer_write_cache_object_contents_to_path \
+		l_build_status=0
+		zxfer_write_cache_object_contents_to_path \
 			"$l_stage_dir/$l_record_relpath" \
-			"$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" "" "$l_record_payload"; then
+			"$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" "" "$l_record_payload" ||
+			l_build_status=$?
+		if [ "$l_build_status" -ne 0 ]; then
 			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-			return 1
+			return "$l_build_status"
 		fi
-		if ! zxfer_read_cache_object_file \
+		l_build_status=0
+		zxfer_read_cache_object_file \
 			"$l_stage_dir/$l_record_relpath" \
-			"$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null; then
+			"$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null ||
+			l_build_status=$?
+		if [ "$l_build_status" -ne 0 ]; then
 			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-			return 1
+			return "$l_build_status"
 		fi
 		zxfer_cleanup_runtime_artifact_path "$l_raw_record_path"
 		if [ -n "$l_manifest_payload" ]; then
@@ -631,47 +702,67 @@ $l_dataset	$l_record_relpath"
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
 		return 1
 	}
-	if ! printf '%s\n' "$l_manifest_payload" >"$l_manifest_path"; then
+	l_build_status=0
+	printf '%s\n' "$l_manifest_payload" >"$l_manifest_path" || l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
-	if ! l_stage_entry_count=$(printf '%s\n' "$l_stage_map" | "${g_cmd_awk:-awk}" 'END {print NR + 0}'); then
+	l_build_status=0
+	l_stage_entry_count=$(printf '%s\n' "$l_stage_map" | "${g_cmd_awk:-awk}" 'END {print NR + 0}') ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
-	if ! l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
-		"$l_stage_dir" "$l_manifest_path" "$l_stage_entry_count"); then
+	l_build_status=0
+	l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
+		"$l_stage_dir" "$l_manifest_path" "$l_stage_entry_count") ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
-	if ! zxfer_write_cache_object_contents_to_path \
+	l_build_status=0
+	zxfer_write_cache_object_contents_to_path \
 		"$l_stage_dir/meta" \
 		"$ZXFER_SNAPSHOT_RECORD_INDEX_OBJECT_KIND" \
 		"side=$l_side
 manifest=manifest.tsv
 entries=$l_stage_entry_count" \
-		"ready"; then
+		"ready" ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
-	if ! l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_stage_dir" "$l_side"); then
+	l_build_status=0
+	l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_stage_dir" "$l_side") ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
 
 	l_stage_base=${l_stage_dir##*/}
 	l_generation_token=${l_stage_base##*.}
 	l_published_index_dir="$g_zxfer_snapshot_index_dir/$l_side.$l_generation_token.obj"
-	if ! zxfer_publish_cache_object_directory "$l_stage_dir" "$l_published_index_dir"; then
+	l_build_status=0
+	zxfer_publish_cache_object_directory "$l_stage_dir" "$l_published_index_dir" ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
+		return "$l_build_status"
 	fi
 
+	l_build_status=0
 	zxfer_set_snapshot_record_index_state_for_side \
-		"$l_side" "$l_published_index_dir" "$l_index_map" || {
+		"$l_side" "$l_published_index_dir" "$l_index_map" ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_published_index_dir"
-		return 1
-	}
+		return "$l_build_status"
+	fi
 	if [ -n "$l_previous_index_dir" ] && [ "$l_previous_index_dir" != "$l_published_index_dir" ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_previous_index_dir"
 	fi
@@ -712,8 +803,10 @@ zxfer_ensure_snapshot_record_index_for_side() {
 		fi
 		if l_snapshot_record_cache_file=$(zxfer_snapshot_record_cache_file_for_side "$l_side") &&
 			[ -r "$l_snapshot_record_cache_file" ]; then
-			zxfer_build_snapshot_record_index_from_file "$l_side" "$l_snapshot_record_cache_file"
-			return $?
+			l_status=0
+			zxfer_build_snapshot_record_index_from_file "$l_side" "$l_snapshot_record_cache_file" ||
+				l_status=$?
+			return "$l_status"
 		fi
 		if zxfer_ensure_source_snapshot_record_cache; then
 			:
@@ -730,8 +823,10 @@ zxfer_ensure_snapshot_record_index_for_side() {
 		fi
 		if l_snapshot_record_cache_file=$(zxfer_snapshot_record_cache_file_for_side "$l_side") &&
 			[ -r "$l_snapshot_record_cache_file" ]; then
-			zxfer_build_snapshot_record_index_from_file "$l_side" "$l_snapshot_record_cache_file"
-			return $?
+			l_status=0
+			zxfer_build_snapshot_record_index_from_file "$l_side" "$l_snapshot_record_cache_file" ||
+				l_status=$?
+			return "$l_status"
 		fi
 		l_snapshot_records=${g_rzfs_list_hr_snap:-}
 		;;
@@ -786,22 +881,33 @@ zxfer_get_indexed_snapshot_records_for_dataset() {
 	esac
 
 	[ "$l_index_ready" -eq 1 ] || return 1
-	if ! l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_index_dir" "$l_side"); then
+	l_lookup_status=0
+	l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_index_dir" "$l_side") ||
+		l_lookup_status=$?
+	if [ "$l_lookup_status" -ne 0 ]; then
 		zxfer_clear_snapshot_record_index_state_for_side "$l_side"
-		return 1
+		return "$l_lookup_status"
 	fi
-	zxfer_set_snapshot_record_index_state_for_side "$l_side" "$l_index_dir" "$l_index_map" || return 1
+	l_lookup_status=0
+	zxfer_set_snapshot_record_index_state_for_side "$l_side" "$l_index_dir" "$l_index_map" ||
+		l_lookup_status=$?
+	if [ "$l_lookup_status" -ne 0 ]; then
+		return "$l_lookup_status"
+	fi
 
 	while IFS='	' read -r l_indexed_dataset l_record_file || [ -n "${l_indexed_dataset}${l_record_file}" ]; do
 		[ -n "$l_indexed_dataset" ] || continue
 		if [ "$l_indexed_dataset" = "$l_dataset" ]; then
-			if zxfer_read_cache_object_file \
-				"$l_record_file" "$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null; then
+			l_lookup_status=0
+			zxfer_read_cache_object_file \
+				"$l_record_file" "$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null ||
+				l_lookup_status=$?
+			if [ "$l_lookup_status" -eq 0 ]; then
 				printf '%s\n' "$g_zxfer_cache_object_payload_result"
 				return 0
 			fi
 			zxfer_clear_snapshot_record_index_state_for_side "$l_side"
-			return 1
+			return "$l_lookup_status"
 		fi
 	done <<-EOF
 		$l_index_map
@@ -831,9 +937,11 @@ zxfer_get_snapshot_records_for_dataset() {
 	fi
 	if l_snapshot_record_cache_file=$(zxfer_snapshot_record_cache_file_for_side "$l_snapshot_lookup_side") &&
 		[ -r "$l_snapshot_record_cache_file" ]; then
+		l_status=0
 		zxfer_filter_snapshot_record_file_for_dataset \
-			"$l_snapshot_record_cache_file" "$l_snapshot_lookup_dataset"
-		return $?
+			"$l_snapshot_record_cache_file" "$l_snapshot_lookup_dataset" ||
+			l_status=$?
+		return "$l_status"
 	fi
 
 	case "$l_snapshot_lookup_side" in

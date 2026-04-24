@@ -2270,7 +2270,7 @@ test_zxfer_terminate_remaining_send_jobs_returns_failure_when_supervised_id_coll
 		(
 			g_zfs_send_job_supervisor_records="job-1	101"
 			zxfer_collect_supervised_send_job_ids() {
-				return 1
+				return 37
 			}
 			set +e
 			zxfer_terminate_remaining_send_jobs
@@ -2280,8 +2280,8 @@ test_zxfer_terminate_remaining_send_jobs_returns_failure_when_supervised_id_coll
 		)
 	)
 
-	assertContains "Supervised teardown should fail closed when the tracked job-id collection fails." \
-		"$output" "status=1"
+	assertContains "Supervised teardown should preserve tracked job-id collection failures." \
+		"$output" "status=37"
 }
 
 test_zxfer_terminate_remaining_send_jobs_returns_failure_when_supervised_abort_fails() {
@@ -2289,7 +2289,7 @@ test_zxfer_terminate_remaining_send_jobs_returns_failure_when_supervised_abort_f
 		(
 			zxfer_register_supervised_send_job "job-1" 101
 			zxfer_abort_background_job() {
-				return 1
+				return 38
 			}
 			set +e
 			zxfer_terminate_remaining_send_jobs
@@ -2299,8 +2299,8 @@ test_zxfer_terminate_remaining_send_jobs_returns_failure_when_supervised_abort_f
 		)
 	)
 
-	assertContains "Supervised teardown should fail closed when aborting a tracked supervised job fails." \
-		"$output" "status=1"
+	assertContains "Supervised teardown should preserve tracked supervised-job abort failures." \
+		"$output" "status=38"
 }
 
 test_zxfer_terminate_remaining_send_jobs_continues_after_supervised_abort_failures_and_preserves_first_message() {
@@ -2319,7 +2319,7 @@ test_zxfer_terminate_remaining_send_jobs_continues_after_supervised_abort_failur
 				printf 'abort:%s:%s\n' "$1" "$2"
 				if [ "$1" = "job-1" ]; then
 					g_zxfer_background_job_abort_failure_message="first supervised abort failed"
-					return 1
+					return 39
 				fi
 				return 0
 			}
@@ -2342,7 +2342,7 @@ test_zxfer_terminate_remaining_send_jobs_continues_after_supervised_abort_failur
 	assertContains "Supervised teardown should continue aborting later tracked jobs after an earlier abort failure." \
 		"$output" "abort:job-2:TERM"
 	assertContains "Supervised teardown should preserve the first abort failure status after the aggregate pass." \
-		"$output" "status=1"
+		"$output" "status=39"
 	assertContains "Supervised teardown should preserve the first abort failure message after the aggregate pass." \
 		"$output" "message=first supervised abort failed"
 	assertContains "Supervised teardown should keep only the failed job tracked after later jobs abort successfully." \
@@ -2410,7 +2410,7 @@ test_zxfer_terminate_remaining_send_jobs_preserves_first_abort_failure() {
 			zxfer_abort_cleanup_pid() {
 				if [ "$1" = "101" ]; then
 					g_zxfer_cleanup_pid_abort_failure_message="first send-job abort failed"
-					return 1
+					return 40
 				fi
 				return 0
 			}
@@ -2427,7 +2427,7 @@ test_zxfer_terminate_remaining_send_jobs_preserves_first_abort_failure() {
 	)
 
 	assertContains "Legacy send-job teardown should preserve the first validated cleanup abort failure status." \
-		"$output" "status=1"
+		"$output" "status=40"
 	assertContains "Legacy send-job teardown should preserve the first validated cleanup abort failure message." \
 		"$output" "message=first send-job abort failed"
 	assertContains "Legacy send-job teardown should still close the rolling completion queue after an abort failure." \
@@ -2447,16 +2447,16 @@ test_zxfer_throw_send_job_cleanup_failure_uses_validated_abort_message() {
 			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
-			zxfer_throw_send_job_cleanup_failure
+			zxfer_throw_send_job_cleanup_failure 41
 		)
 	)
 	status=$?
 	set -e
 
-	assertEquals "Validated send-job cleanup failure helper should fail closed through zxfer_throw_error." \
-		1 "$status"
+	assertEquals "Validated send-job cleanup failure helper should preserve its cleanup status through zxfer_throw_error." \
+		41 "$status"
 	assertContains "Validated send-job cleanup failure helper should preserve the validated abort failure message." \
 		"$output" "validated cleanup abort failed"
 }
@@ -3989,7 +3989,7 @@ test_zxfer_progress_passthrough_fails_when_cleanup_registration_abort_fails() {
 				printf 'abort:%s:%s:%s\n' "$1" "$2" "$3" >>"$abort_log"
 				kill -s TERM "$1" 2>/dev/null || :
 				wait "$1" 2>/dev/null || :
-				return 1
+				return 37
 			}
 			zxfer_progress_passthrough "sleep 30"
 		)
@@ -4000,7 +4000,7 @@ test_zxfer_progress_passthrough_fails_when_cleanup_registration_abort_fails() {
 	fi
 
 	assertEquals "Progress passthrough should fail closed when cleanup-registration recovery cannot tear down the spawned helper." \
-		1 "$status"
+		37 "$status"
 	assertEquals "Progress passthrough should not emit fallback output when cleanup-registration recovery itself fails." \
 		"" "$output"
 	assertContains "Cleanup-registration recovery failures should still route teardown through the validated direct-child abort helper." \

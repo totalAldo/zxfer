@@ -2897,9 +2897,11 @@ zxfer_preload_remote_host_capabilities() {
 	fi
 
 	if [ "${g_option_v_verbose:-0}" -eq 1 ] || [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
+		l_preload_status=0
 		zxfer_ensure_remote_host_capabilities \
-			"$l_host_spec" "$l_profile_side" "$l_requested_tools" >/dev/null
-		return $?
+			"$l_host_spec" "$l_profile_side" "$l_requested_tools" >/dev/null ||
+			l_preload_status=$?
+		return "$l_preload_status"
 	fi
 
 	zxfer_ensure_remote_host_capabilities \

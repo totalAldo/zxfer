@@ -71,18 +71,21 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Run integration tests on FreeBSD
-        uses: vmactions/freebsd-vm@7ca82f79fe3078fecded6d3a2bff094995447bbd # v1
+        uses: vmactions/freebsd-vm@d1e65811565151536c0c894fff74f06351ed26e6 # v1.4.5
         with:
           usesh: true
-          prepare: |
-            pkg install -y parallel zstd
-            kldload zfs || true
           run: |
             export TMPDIR="$GITHUB_WORKSPACE/ci-artifacts/integration-freebsd"
             export ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1
-            rm -rf "$TMPDIR"
-            mkdir -p "$TMPDIR"
-            ./tests/run_integration_zxfer.sh --yes --keep-going
+            export ZXFER_CI_GUEST_PREPARE='sh ./tests/ci/prepare_freebsd_vmactions_integration.sh'
+            sh ./tests/ci/run_vmactions_integration.sh /bin/sh
+      - name: Check FreeBSD integration status
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh ./tests/ci/check_vmactions_integration_status.sh \
+            "${{ github.workspace }}/ci-artifacts/integration-freebsd" \
+            FreeBSD
       - name: Upload FreeBSD integration artifacts
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -103,14 +106,20 @@ jobs:
         uses: vmactions/omnios-vm@68da93c6d9812b29fc90c5b5141b093f84a590fb # v1
         with:
           usesh: true
-          prepare: |
-            PKG_SUCCESS_ON_NOP=1 pkg install zstd
           run: |
             export TMPDIR="$GITHUB_WORKSPACE/ci-artifacts/integration-omnios"
             export ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1
-            rm -rf "$TMPDIR"
-            mkdir -p "$TMPDIR"
-            /usr/xpg4/bin/sh ./tests/run_integration_zxfer.sh --yes --keep-going
+            export ZXFER_CI_GUEST_PREPARE='
+            PKG_SUCCESS_ON_NOP=1 pkg install zstd
+            '
+            /usr/xpg4/bin/sh ./tests/ci/run_vmactions_integration.sh /usr/xpg4/bin/sh
+      - name: Check OmniOS integration status
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh ./tests/ci/check_vmactions_integration_status.sh \
+            "${{ github.workspace }}/ci-artifacts/integration-omnios" \
+            OmniOS
       - name: Upload OmniOS integration artifacts
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

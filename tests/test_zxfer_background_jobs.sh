@@ -338,6 +338,65 @@ EOF
 		"completion_write" "$g_zxfer_background_job_completion_report_failure"
 }
 
+test_background_job_metadata_read_helpers_preserve_runtime_read_failures_in_current_shell() {
+	control_dir="$TEST_TMPDIR/background_job_metadata_runtime_read_failure"
+	mkdir -p "$control_dir"
+
+	output=$(
+		(
+			set +e
+			g_zxfer_background_job_launch_job_id=stale-launch
+			g_zxfer_background_job_completion_exit_status=99
+			zxfer_read_runtime_artifact_file() {
+				g_zxfer_runtime_artifact_read_result=""
+				return 23
+			}
+			zxfer_read_background_job_launch_file "$control_dir"
+			printf 'launch_status=%s\n' "$?"
+			printf 'launch_job=<%s>\n' "$g_zxfer_background_job_launch_job_id"
+			zxfer_read_background_job_completion_file "$control_dir"
+			printf 'completion_status=%s\n' "$?"
+			printf 'completion_exit=<%s>\n' "$g_zxfer_background_job_completion_exit_status"
+		)
+	)
+
+	assertContains "Launch metadata reads should preserve runtime readback failures." \
+		"$output" "launch_status=23"
+	assertContains "Failed launch metadata reads should clear stale launch scratch." \
+		"$output" "launch_job=<>"
+	assertContains "Completion metadata reads should preserve runtime readback failures." \
+		"$output" "completion_status=23"
+	assertContains "Failed completion metadata reads should clear stale completion scratch." \
+		"$output" "completion_exit=<>"
+}
+
+test_zxfer_get_background_job_pid_set_preserves_sort_failures_in_current_shell() {
+	fake_bin="$TEST_TMPDIR/background_job_pid_set_fake_bin"
+	mkdir -p "$fake_bin"
+	cat >"$fake_bin/sort" <<'EOF'
+#!/bin/sh
+exit 29
+EOF
+	chmod 700 "$fake_bin/sort" || fail "Unable to publish failing sort fixture."
+
+	output=$(
+		(
+			set +e
+			PATH=$fake_bin:$PATH
+			g_zxfer_background_job_pid_set_result=stale
+			zxfer_get_background_job_pid_set "101 1 101
+102 101 101" 101 >/dev/null
+			printf 'status=%s\n' "$?"
+			printf 'pid_set=<%s>\n' "$g_zxfer_background_job_pid_set_result"
+		)
+	)
+
+	assertContains "PID-set derivation should preserve sort failures." \
+		"$output" "status=29"
+	assertContains "PID-set derivation should clear stale scratch when sorting fails." \
+		"$output" "pid_set=<>"
+}
+
 test_get_background_job_completion_status_fails_closed_when_completion_read_fails() {
 	control_dir="$TEST_TMPDIR/background_job_completion_read_failure"
 	mkdir -p "$control_dir"
@@ -347,7 +406,7 @@ test_get_background_job_completion_status_fails_closed_when_completion_read_fail
 		(
 			set +e
 			zxfer_read_background_job_completion_file() {
-				return 1
+				return 17
 			}
 			zxfer_get_background_job_completion_status "$control_dir" 7
 			printf 'status=%s\n' "$?"
@@ -355,7 +414,7 @@ test_get_background_job_completion_status_fails_closed_when_completion_read_fail
 	)
 
 	assertContains "Background-job completion status lookups should fail closed when completion metadata cannot be read." \
-		"$output" "status=1"
+		"$output" "status=17"
 }
 
 test_abort_background_job_signals_validated_process_group_and_runner_without_ps_args_identity_checks() {
@@ -813,6 +872,8 @@ test_wait_for_background_job_reports_missing_records_and_completion_read_failure
 		"$missing_output" "status=1"
 	assertEquals "Waiting for a tracked job should preserve completion-read failures in the current shell." \
 		0 "$wait_failure_status"
+	assertContains "Waiting for a tracked job should return the exact completion-read failure status." \
+		"$wait_failure_output" "status=17"
 	assertContains "Completion-read failures should unregister the tracked job record." \
 		"$wait_failure_output" "records=<>"
 	assertContains "Completion-read failures should remove the private control directory." \
@@ -1369,7 +1430,7 @@ test_teardown_unregistered_background_runner_covers_fail_closed_paths() {
 		(
 			set +e
 			zxfer_read_background_job_process_snapshot() {
-				return 1
+				return 37
 			}
 			zxfer_teardown_unregistered_background_runner "job-snapshot" 7301 "$control_dir" "/tmp/runner" "token" "" "TERM"
 			printf 'snapshot_status=%s\n' "$?"
@@ -1452,7 +1513,7 @@ test_teardown_unregistered_background_runner_covers_fail_closed_paths() {
 	assertContains "Unregistered-runner teardown should return success for invalid runner pids after cleanup." \
 		"$output" "invalid_status=0"
 	assertContains "Unregistered-runner teardown should fail closed when process snapshots cannot be read." \
-		"$output" "snapshot_status=1"
+		"$output" "snapshot_status=37"
 	assertContains "Unregistered-runner teardown should report process-table failures." \
 		"$output" "snapshot_message=Failed to inspect the process table"
 	assertContains "Unregistered-runner teardown should reap and clean when the recorded runner is no longer an owned direct child." \
@@ -1747,7 +1808,7 @@ test_abort_background_job_reports_snapshot_and_signal_failures() {
 				return 0
 			}
 			zxfer_read_background_job_process_snapshot() {
-				return 1
+				return 37
 			}
 			zxfer_abort_background_job "job-5" TERM
 			printf 'status=%s\n' "$?"
@@ -1783,7 +1844,7 @@ test_abort_background_job_reports_snapshot_and_signal_failures() {
 	assertEquals "Abort cleanup should fail closed when the process snapshot cannot be collected." \
 		0 "$snapshot_status"
 	assertContains "Process-snapshot failures should preserve the cleanup error." \
-		"$snapshot_output" "status=1"
+		"$snapshot_output" "status=37"
 	assertContains "Process-snapshot failures should preserve the dedicated failure message." \
 		"$snapshot_output" "Failed to inspect the process table"
 	assertEquals "Abort cleanup should fail closed when signaling the validated teardown target fails." \
@@ -1940,6 +2001,7 @@ test_abort_background_job_treats_post_signal_snapshot_read_failure_with_late_com
 
 	output=$(
 		(
+			set +e
 			g_test_snapshot_calls=0
 			zxfer_background_job_runner_matches() {
 				return 0
@@ -1981,6 +2043,48 @@ test_abort_background_job_treats_post_signal_snapshot_read_failure_with_late_com
 		"$output" "records=<>"
 	assertContains "Abort cleanup should remove the private control directory when a late completion marker wins over the post-signal snapshot reread failure." \
 		"$output" "dir_exists=no"
+}
+
+test_abort_background_job_preserves_post_signal_snapshot_read_failures() {
+	control_dir="$TEST_TMPDIR/background_job_abort_post_signal_snapshot_failure"
+	mkdir -p "$control_dir"
+	zxfer_register_background_job_record "job-post-snapshot-failure" "send_receive" 6521 "$control_dir" "/tmp/runner" "token-post-snapshot-failure" "start-post-snapshot-failure"
+
+	output=$(
+		(
+			set +e
+			g_test_snapshot_calls=0
+			zxfer_background_job_runner_matches() {
+				return 0
+			}
+			zxfer_read_background_job_process_snapshot() {
+				g_test_snapshot_calls=$((g_test_snapshot_calls + 1))
+				if [ "$g_test_snapshot_calls" -eq 1 ]; then
+					g_zxfer_background_job_process_snapshot_result="6521 1 6521
+6522 6521 6522"
+					return 0
+				fi
+				return 38
+			}
+			zxfer_get_background_job_pid_set() {
+				g_zxfer_background_job_pid_set_result="6521 6522"
+			}
+			zxfer_signal_background_job_pid_set() {
+				return 1
+			}
+			zxfer_abort_background_job "job-post-snapshot-failure" TERM
+			printf 'status=%s\n' "$?"
+			printf 'snapshot_calls=%s\n' "$g_test_snapshot_calls"
+			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
+		)
+	)
+
+	assertContains "Abort cleanup should preserve exact post-signal process-snapshot read failures." \
+		"$output" "status=38"
+	assertContains "Abort cleanup should reread the process snapshot before reporting post-signal snapshot failures." \
+		"$output" "snapshot_calls=2"
+	assertContains "Post-signal process-snapshot failures should preserve the dedicated failure message." \
+		"$output" "Failed to inspect the process table"
 }
 
 test_abort_background_job_treats_post_signal_identity_validation_failure_with_late_completion_as_success() {

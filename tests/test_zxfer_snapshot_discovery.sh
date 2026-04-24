@@ -1458,22 +1458,26 @@ test_zxfer_should_use_linear_reverse_for_file_rejects_non_numeric_threshold() {
 		"status=1" "$output"
 }
 
-test_zxfer_should_use_linear_reverse_for_file_rejects_non_numeric_wc_output() {
+test_zxfer_should_use_linear_reverse_for_file_preserves_line_count_failures() {
 	input_file="$TEST_TMPDIR/reverse_wc_input.txt"
+	failing_awk="$TEST_TMPDIR/reverse_count_awk_fails"
 	printf '%s\n' "tank/src@snap-a" >"$input_file"
+	cat >"$failing_awk" <<'EOF'
+#!/bin/sh
+exit 37
+EOF
+	chmod +x "$failing_awk"
 
 	output=$(
 		(
-			wc() {
-				printf '%s\n' "bogus"
-			}
+			g_cmd_awk=$failing_awk
 			zxfer_should_use_linear_reverse_for_file "$input_file"
 			printf 'status=%s\n' "$?"
 		)
 	)
 
-	assertEquals "Invalid line-count output should disable the linear awk fast path." \
-		"status=1" "$output"
+	assertEquals "Line-count helper failures should return the exact underlying status." \
+		"status=37" "$output"
 }
 
 test_reverse_numbered_line_stream_returns_failure_when_buffering_fails() {
@@ -1973,8 +1977,8 @@ test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_sou
 	)
 	status=$?
 
-	assertEquals "Lazy identity refinement should fail closed when the source-minus-destination identity diff fails." \
-		1 "$status"
+	assertEquals "Lazy identity refinement should preserve source-minus-destination identity diff failures." \
+		4 "$status"
 	assertContains "Source identity diff failures should surface the recursive dataset being validated." \
 		"$output" "Failed to diff source and destination snapshot identities for [tank/src]."
 }
@@ -2007,8 +2011,8 @@ test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_des
 	)
 	status=$?
 
-	assertEquals "Lazy identity refinement should fail closed when the destination-minus-source identity diff fails." \
-		1 "$status"
+	assertEquals "Lazy identity refinement should preserve destination-minus-source identity diff failures." \
+		5 "$status"
 	assertContains "Destination identity diff failures should surface the recursive dataset being validated." \
 		"$output" "Failed to diff destination and source snapshot identities for [tank/src]."
 }
@@ -2064,8 +2068,8 @@ test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_com
 	)
 	status=$?
 
-	assertEquals "Lazy identity refinement should fail closed when deriving the common recursive dataset list fails before sort notices." \
-		1 "$status"
+	assertEquals "Lazy identity refinement should preserve common recursive dataset derivation failures." \
+		11 "$status"
 	assertContains "Common recursive dataset derivation failures should preserve the upstream awk failure." \
 		"$output" "awk failed"
 	assertContains "Common recursive dataset derivation failures should report a specific identity-validation error." \
@@ -2087,8 +2091,8 @@ test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_inv
 	)
 	status=$?
 
-	assertEquals "Lazy identity refinement should fail closed when exclude filtering uses an invalid pattern." \
-		1 "$status"
+	assertEquals "Lazy identity refinement should preserve invalid exclude-filter statuses." \
+		2 "$status"
 	assertContains "Identity-validation exclude filter failures should report the candidate-dataset context." \
 		"$output" "Failed to filter recursive candidate dataset list against exclude patterns during snapshot identity validation."
 }
@@ -2138,7 +2142,7 @@ test_set_g_recursive_source_list_reports_recursive_snapshot_diff_failures() {
 	status=$?
 
 	assertEquals "Recursive delta planning should fail closed when the source-minus-destination diff fails." \
-		1 "$status"
+		6 "$status"
 	assertContains "Recursive delta planning should preserve a specific transfer-planning diff error." \
 		"$output" "Failed to diff source and destination snapshots for recursive transfer planning."
 }
@@ -2165,7 +2169,7 @@ test_set_g_recursive_source_list_reports_recursive_source_dataset_transfer_awk_f
 	status=$?
 
 	assertEquals "Recursive delta planning should fail closed when deriving the source transfer dataset list fails before sort notices." \
-		1 "$status"
+		8 "$status"
 	assertContains "Recursive delta planning should preserve the upstream awk failure from the source transfer dataset derivation." \
 		"$output" "awk failed"
 	assertContains "Recursive delta planning should report a specific source transfer dataset derivation error." \
@@ -2194,7 +2198,7 @@ test_set_g_recursive_source_list_reports_recursive_destination_dataset_delete_aw
 	status=$?
 
 	assertEquals "Recursive delete-only planning should fail closed when deriving destination delete datasets fails before sort notices." \
-		1 "$status"
+		9 "$status"
 	assertContains "Recursive delete-only planning should preserve the upstream awk failure from the destination delete dataset derivation." \
 		"$output" "awk failed"
 	assertContains "Recursive delete-only planning should report a specific destination delete dataset derivation error." \
@@ -2229,7 +2233,7 @@ test_set_g_recursive_source_list_reports_recursive_source_dataset_inventory_fail
 	status=$?
 
 	assertEquals "Recursive delta planning should fail closed when source dataset inventory derivation fails." \
-		1 "$status"
+		7 "$status"
 	assertContains "Recursive delta planning should preserve a specific source dataset inventory error." \
 		"$output" "Failed to derive recursive source dataset inventory."
 }
@@ -2256,7 +2260,7 @@ test_set_g_recursive_source_list_reports_recursive_source_dataset_inventory_awk_
 	status=$?
 
 	assertEquals "Recursive delta planning should fail closed when source dataset inventory derivation fails before sort notices." \
-		1 "$status"
+		10 "$status"
 	assertContains "Recursive delta planning should preserve the upstream awk failure from source dataset inventory derivation." \
 		"$output" "awk failed"
 	assertContains "Recursive delta planning should report a specific source dataset inventory error." \
@@ -2279,7 +2283,7 @@ test_set_g_recursive_source_list_reports_invalid_exclude_pattern_failures() {
 	status=$?
 
 	assertEquals "Recursive delta planning should fail closed when exclude filtering uses an invalid pattern." \
-		1 "$status"
+		2 "$status"
 	assertContains "Recursive delta planning should report the specific exclude-filter failure context." \
 		"$output" "Failed to filter recursive source dataset transfer list against exclude patterns."
 }
@@ -2467,9 +2471,9 @@ test_get_zfs_list_reports_pool_lookup_failure_when_destination_root_has_no_slash
 				fi
 				return 1
 			}
-			zxfer_throw_usage_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			g_destination="backup"
 			zxfer_get_zfs_list
@@ -2550,19 +2554,19 @@ test_get_zfs_list_reports_destination_inventory_readback_failures() {
 				return 1
 			}
 			zxfer_read_snapshot_discovery_capture_file() {
-				return 1
+				return 27
 			}
-			zxfer_throw_usage_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_get_zfs_list
 		) 2>&1
 	)
 	status=$?
 
-	assertEquals "Destination inventory readback failures should abort snapshot discovery." \
-		1 "$status"
+	assertEquals "Destination inventory readback failures should preserve the staged read status." \
+		27 "$status"
 	assertContains "Destination inventory readback failures should report the staged destination inventory context." \
 		"$output" "Failed to read staged destination dataset inventory."
 }
@@ -2585,19 +2589,19 @@ test_get_zfs_list_reports_destination_inventory_stderr_readback_failures() {
 				return 0
 			}
 			zxfer_read_snapshot_discovery_capture_file() {
-				return 1
+				return 28
 			}
-			zxfer_throw_usage_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_get_zfs_list
 		) 2>&1
 	)
 	status=$?
 
-	assertEquals "Destination inventory stderr readback failures should abort snapshot discovery." \
-		1 "$status"
+	assertEquals "Destination inventory stderr readback failures should preserve the staged stderr read status." \
+		28 "$status"
 	assertContains "Destination inventory stderr readback failures should report the staged stderr context." \
 		"$output" "Failed to read staged destination dataset inventory stderr."
 	assertFalse "Destination inventory stderr readback failures should not continue into missing-destination fallback checks." \
@@ -2633,9 +2637,9 @@ test_get_zfs_list_reports_empty_destination_inventory_readbacks() {
 				g_zxfer_snapshot_discovery_file_read_result=""
 				return 0
 			}
-			zxfer_throw_usage_error() {
+			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_get_zfs_list
 		) 2>&1
@@ -2682,21 +2686,21 @@ backup/dst/existing"
 					return 0
 				fi
 				if [ "$l_read_count" -eq 2 ]; then
-					return 1
+					return 28
 				fi
 				return 0
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_get_zfs_list
 		) 2>&1
 	)
 	status=$?
 
-	assertEquals "Destination snapshot-list readback failures should abort snapshot discovery." \
-		1 "$status"
+	assertEquals "Destination snapshot-list readback failures should preserve the readback status." \
+		28 "$status"
 	assertContains "Destination snapshot-list readback failures should report the staged destination snapshot context." \
 		"$output" "Failed to read staged destination snapshot list."
 }
@@ -2739,21 +2743,21 @@ backup/dst/existing"
 					return 0
 				fi
 				if [ "$l_read_count" -eq 3 ]; then
-					return 1
+					return 29
 				fi
 				return 0
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				exit 1
+				exit "${2:-1}"
 			}
 			zxfer_get_zfs_list
 		) 2>&1
 	)
 	status=$?
 
-	assertEquals "Source snapshot-list readback failures should abort snapshot discovery." \
-		1 "$status"
+	assertEquals "Source snapshot-list readback failures should preserve the readback status." \
+		29 "$status"
 	assertContains "Source snapshot-list readback failures should report the staged source snapshot context." \
 		"$output" "Failed to read staged source snapshot list."
 }
@@ -3095,7 +3099,7 @@ test_get_zfs_list_throws_when_source_snapshot_list_is_empty() {
 	)
 	status=$?
 
-	assertEquals "Empty source snapshot listings should abort with status 3." 3 "$status"
+	assertEquals "Empty source snapshot listings should abort with zxfer's direct invariant failure status." 1 "$status"
 	assertContains "Empty source snapshot listings should surface the retrieval failure." \
 		"$output" "Failed to retrieve snapshots from the source"
 }
@@ -3121,10 +3125,10 @@ test_get_zfs_list_restores_source_last_command_when_background_snapshot_listing_
 				printf '%s\n' "missing command" >"$2"
 				g_source_snapshot_list_pid=4242
 				g_source_snapshot_list_job_id="job-source"
-				g_source_snapshot_list_cmd="sh -c 'printf \"%s\\n\" \"missing command\" >&2; exit 3'"
+				g_source_snapshot_list_cmd="sh -c 'printf \"%s\\n\" \"missing command\" >&2; exit 37'"
 			}
 			zxfer_wait_for_background_job() {
-				g_zxfer_background_job_wait_exit_status=3
+				g_zxfer_background_job_wait_exit_status=37
 				g_zxfer_background_job_wait_report_failure=""
 				return 0
 			}
@@ -3163,11 +3167,11 @@ test_get_zfs_list_restores_source_last_command_when_background_snapshot_listing_
 	)
 	status=$?
 
-	assertEquals "Background source snapshot listing failures should keep exit status 3." 3 "$status"
+	assertEquals "Background source snapshot listing failures should propagate the exact worker status." 37 "$status"
 	assertContains "Failure handling should restore the source snapshot command before reporting." \
 		"$output" "cmd=sh -c 'printf \"%s"
 	assertContains "The restored command should still reference the failing source snapshot probe." \
-		"$output" "\"missing command\" >&2; exit 3'"
+		"$output" "\"missing command\" >&2; exit 37'"
 	assertContains "Background source snapshot listing failures should clear the remembered destination snapshot cache path before reporting." \
 		"$output" "dst_cache=<>"
 	assertContains "Background source snapshot listing failures should remove the staged destination snapshot cache file before reporting." \
@@ -3228,7 +3232,7 @@ test_get_zfs_list_reports_generic_source_failure_when_background_snapshot_listin
 	)
 	status=$?
 
-	assertEquals "Background source snapshot failures without stderr should still keep exit status 3." 3 "$status"
+	assertEquals "Background source snapshot failures without stderr should still propagate the exact worker status." 1 "$status"
 	assertContains "Failure handling should still restore the last attempted source snapshot command." \
 		"$output" "cmd=sh -c 'exit 1'"
 	assertContains "Failure handling should fall back to the generic source snapshot retrieval error when stderr is empty." \
@@ -3388,7 +3392,7 @@ test_get_zfs_list_reports_source_stderr_readback_failures_after_background_failu
 					g_zxfer_snapshot_discovery_file_read_result="backup/dst@snapA"
 					return 0
 				fi
-				return 1
+				return 31
 			}
 			zxfer_throw_error() {
 				printf 'cmd=%s\n' "$g_zxfer_failure_last_command"
@@ -3400,7 +3404,7 @@ test_get_zfs_list_reports_source_stderr_readback_failures_after_background_failu
 	)
 	status=$?
 
-	assertEquals "Background source stderr readback failures should abort snapshot discovery." 1 "$status"
+	assertEquals "Background source stderr readback failures should preserve the readback status." 31 "$status"
 	assertContains "Background source stderr readback failures should still restore the source snapshot command context." \
 		"$output" "cmd=sh -c 'exit 1'"
 	assertContains "Background source stderr readback failures should report the staged stderr context." \
