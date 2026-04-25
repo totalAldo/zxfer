@@ -122,12 +122,21 @@ resolve_test_shell_runner() {
 list_child_pids_for_parent() {
 	l_parent_pid=$1
 	l_ps_output=
+	l_pgrep_output=
 
 	case "$l_parent_pid" in
 	'' | *[!0-9]*)
 		return 1
 		;;
 	esac
+
+	if command -v pgrep >/dev/null 2>&1; then
+		l_pgrep_output=$(pgrep -P "$l_parent_pid" 2>/dev/null || true)
+		if [ -n "$l_pgrep_output" ]; then
+			printf '%s\n' "$l_pgrep_output"
+			return 0
+		fi
+	fi
 
 	if l_ps_output=$(ps -eo pid= -o ppid= 2>/dev/null); then
 		:
@@ -809,6 +818,7 @@ handle_runner_signal() {
 	if ! wait_for_runner_tracked_shutdown; then
 		signal_foreground_suite KILL
 		signal_pending_workers KILL
+		wait_for_runner_tracked_shutdown || :
 	fi
 	wait_for_runner_tracked_processes
 	cleanup_runner_state

@@ -138,6 +138,27 @@ process_parent_pid() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+process_state_for_pid() {
+	l_pid=$1
+	l_state=
+
+	l_state=$(ps -o stat= -p "$l_pid" 2>/dev/null |
+		awk '
+			$1 == "STAT" || $1 == "STATE" { next }
+			$1 != "" { print $1; exit }
+		')
+	if [ -z "$l_state" ]; then
+		l_state=$(ps -o s= -p "$l_pid" 2>/dev/null |
+			awk '
+				$1 == "S" || $1 == "STAT" || $1 == "STATE" { next }
+				$1 != "" { print $1; exit }
+			')
+	fi
+
+	printf '%s\n' "$l_state"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 send_test_signal_to_pid() {
 	l_test_signal_to_pid_signal=$1
 	l_test_signal_to_pid_pid=$2
@@ -202,10 +223,7 @@ fake_suite_process_running_p() {
 		fi
 	fi
 
-	l_state=$(ps -o stat= -p "$l_pid" 2>/dev/null | tr -d '[:space:]')
-	if [ -z "$l_state" ]; then
-		l_state=$(ps -o s= -p "$l_pid" 2>/dev/null | tr -d '[:space:]')
-	fi
+	l_state=$(process_state_for_pid "$l_pid")
 	case "$l_state" in
 	Z* | z* | *zombie* | *defunct*)
 		return 1
@@ -283,6 +301,46 @@ test_find_runner_ancestor_uses_nearest_nested_runner_before_current_test_shell()
 
 	assertEquals "When shell wrappers hide the original background PID, the helper should still signal the nearest nested runner and stop before the outer runner." \
 		200 "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_process_state_for_pid_ignores_omnios_headers_before_zombie_state() {
+	result=$(
+		ps() {
+			if [ "$1:$2:$3:$4" = "-o:stat=:-p:123" ]; then
+				printf '%s\n' "STAT"
+				printf '%s\n' "Z"
+				return 0
+			fi
+			return 1
+		}
+
+		process_state_for_pid 123
+	)
+
+	assertEquals "Process-state parsing should ignore OmniOS-style headers before checking for zombie processes." \
+		"Z" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_process_state_for_pid_falls_back_to_short_state_column() {
+	result=$(
+		ps() {
+			if [ "$1:$2:$3:$4" = "-o:stat=:-p:123" ]; then
+				return 1
+			elif [ "$1:$2:$3:$4" = "-o:s=:-p:123" ]; then
+				printf '%s\n' "S"
+				printf '%s\n' "Z"
+				return 0
+			fi
+			return 1
+		}
+
+		process_state_for_pid 123
+	)
+
+	assertEquals "Process-state parsing should use the short state column when stat is unavailable." \
+		"Z" "$result"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
