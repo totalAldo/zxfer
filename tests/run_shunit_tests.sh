@@ -926,18 +926,22 @@ handle_runner_signal() {
 
 	RUNNER_SHUTTING_DOWN=1
 	trap - HUP INT TERM
-	signal_foreground_suite TERM
-	signal_pending_workers TERM
+	# Keep wrapper shells alive while payload suites are terminated so they can
+	# reap children before the runner exits. This avoids persistent suite PIDs
+	# on illumos/OmniOS when a suite ignores TERM.
+	signal_foreground_suite_child TERM
+	signal_pending_worker_children TERM
 	if ! wait_for_runner_tracked_shutdown; then
-		# Kill the suite payloads first and give their wrappers a chance to
-		# reap them. Killing wrapper shells at the same time can leave stale
-		# zombie children visible longer on illumos/OmniOS.
 		signal_foreground_suite_child KILL
 		signal_pending_worker_children KILL
 		if ! wait_for_runner_tracked_shutdown; then
-			signal_foreground_suite KILL
-			signal_pending_workers KILL
-			wait_for_runner_tracked_shutdown || :
+			signal_foreground_suite TERM
+			signal_pending_workers TERM
+			if ! wait_for_runner_tracked_shutdown; then
+				signal_foreground_suite KILL
+				signal_pending_workers KILL
+				wait_for_runner_tracked_shutdown || :
+			fi
 		fi
 	fi
 	wait_for_runner_tracked_processes
