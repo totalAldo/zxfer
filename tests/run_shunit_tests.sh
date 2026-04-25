@@ -18,6 +18,7 @@ RUNNER_NEXT_WORKER_ID=1
 RUNNER_DEFER_SIGNALS=0
 RUNNER_DEFERRED_SIGNAL=""
 RUNNER_FOREGROUND_SUITE_PID=""
+RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=""
 RUNNER_SHUTTING_DOWN=0
 RUNNER_SIGNAL_SHUTDOWN_GRACE_SECONDS=2
 
@@ -261,6 +262,7 @@ cleanup_runner_state() {
 	RUNNER_PENDING_WORKERS=""
 	RUNNER_INFLIGHT_COUNT=0
 	RUNNER_FOREGROUND_SUITE_PID=""
+	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=""
 }
 
 append_worker_id() {
@@ -304,6 +306,7 @@ consume_deferred_runner_signal() {
 
 signal_foreground_suite() {
 	l_signal=$1
+	l_child_pid=""
 
 	case "${RUNNER_FOREGROUND_SUITE_PID:-}" in
 	'' | *[!0-9]*)
@@ -311,10 +314,23 @@ signal_foreground_suite() {
 		;;
 	esac
 
-	signal_pid_and_descendants "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID"
+	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
+		l_child_pid=$(cat "$RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE" 2>/dev/null || true)
+	fi
+	case "$l_child_pid" in
+	'' | *[!0-9]*)
+		signal_pid_and_descendants "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID"
+		;;
+	*)
+		signal_pid_and_descendants "$l_signal" "$l_child_pid"
+		kill -s "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" >/dev/null 2>&1 || true
+		;;
+	esac
 }
 
 foreground_suite_running_p() {
+	l_child_pid=""
+
 	case "${RUNNER_FOREGROUND_SUITE_PID:-}" in
 	'' | *[!0-9]*)
 		return 1
@@ -324,30 +340,81 @@ foreground_suite_running_p() {
 	if kill -s 0 "$RUNNER_FOREGROUND_SUITE_PID" >/dev/null 2>&1; then
 		return 0
 	fi
+	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
+		l_child_pid=$(cat "$RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE" 2>/dev/null || true)
+	fi
+	case "$l_child_pid" in
+	'' | *[!0-9]*) ;;
+	*)
+		if kill -s 0 "$l_child_pid" >/dev/null 2>&1; then
+			return 0
+		fi
+		;;
+	esac
 
 	return 1
 }
 
 run_suite_foreground() {
 	l_suite_path=$1
+	l_status_file=
+	l_child_pid_file=
+	l_wait_status=0
 
 	emit_suite_banner "$l_suite_path"
-	RUNNER_DEFER_SIGNALS=1
-	if [ -n "${TEST_SHELL_RUNNER:-}" ]; then
-		"$TEST_SHELL_RUNNER" "$l_suite_path" &
-	else
-		"$l_suite_path" &
+	if ! ensure_runner_state_dir; then
+		overall_status=1
+		failed_count=$((failed_count + 1))
+		return 0
 	fi
+	l_status_file="$RUNNER_STATE_DIR/foreground.status"
+	l_child_pid_file="$RUNNER_STATE_DIR/foreground.child.pid"
+	rm -f "$l_status_file"
+	rm -f "$l_child_pid_file"
+	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=$l_child_pid_file
+
+	# macOS /bin/sh can defer traps while blocked in wait, so serial mode
+	# polls this wrapper's status file instead of waiting directly on the suite.
+	RUNNER_DEFER_SIGNALS=1
+	(
+		set +e
+		trap - HUP INT TERM
+		if [ -n "${TEST_SHELL_RUNNER:-}" ]; then
+			"$TEST_SHELL_RUNNER" "$l_suite_path" &
+		else
+			"$l_suite_path" &
+		fi
+		l_suite_pid=$!
+		printf '%s\n' "$l_suite_pid" >"$l_child_pid_file" 2>/dev/null || :
+		wait "$l_suite_pid"
+		l_status=$?
+		printf '%s\n' "$l_status" >"$l_status_file" 2>/dev/null || :
+		exit "$l_status"
+	) &
 	RUNNER_FOREGROUND_SUITE_PID=$!
 	RUNNER_DEFER_SIGNALS=0
 	consume_deferred_runner_signal
 
+	while [ ! -r "$l_status_file" ]; do
+		if ! foreground_suite_running_p; then
+			break
+		fi
+		sleep 1
+	done
+
 	if wait "$RUNNER_FOREGROUND_SUITE_PID"; then
-		l_status=0
+		l_wait_status=0
 	else
-		l_status=$?
+		l_wait_status=$?
 	fi
 	RUNNER_FOREGROUND_SUITE_PID=""
+	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=""
+
+	l_status=$l_wait_status
+	if [ -r "$l_status_file" ]; then
+		l_status=$(cat "$l_status_file" 2>/dev/null || printf '%s\n' "$l_wait_status")
+	fi
+	rm -f "$l_status_file" "$l_child_pid_file"
 
 	if [ "$l_status" -eq 0 ]; then
 		passed_count=$((passed_count + 1))

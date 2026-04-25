@@ -22,9 +22,48 @@ setUp() {
 	FAKE_TEST_SHELL_LOG="$TEST_TMPDIR/fake-test-shell.log"
 	FAKE_SUITE_STARTED="$TEST_TMPDIR/fake-suite.started"
 	FAKE_SUITE_RELEASE="$TEST_TMPDIR/fake-suite.release"
+	RUN_SHUNIT_TESTS_WAIT_LIMIT=${ZXFER_RUN_SHUNIT_TESTS_WAIT_LIMIT:-15}
+	RUN_SHUNIT_TESTS_WATCHDOG_SECONDS=${ZXFER_RUN_SHUNIT_TESTS_WATCHDOG_SECONDS:-20}
 	: >"$FAKE_SUITE_LOG"
 	: >"$FAKE_TEST_SHELL_LOG"
 	rm -f "$FAKE_SUITE_STARTED" "$FAKE_SUITE_RELEASE"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+find_runner_ancestor_for_suite_pid() {
+	l_pid=$1
+	l_expected_runner_pid=${2:-}
+	l_runner_pid=
+	l_cmd=
+
+	while :; do
+		case "$l_pid" in
+		'' | *[!0-9]* | 0 | 1)
+			break
+			;;
+		esac
+
+		if [ -n "$l_expected_runner_pid" ] && [ "$l_pid" = "$l_expected_runner_pid" ]; then
+			printf '%s\n' "$l_pid"
+			return 0
+		fi
+
+		l_cmd=$(process_command_for_pid "$l_pid")
+		case "$l_cmd" in
+		*"$RUN_SHUNIT_TESTS_BIN"*)
+			l_runner_pid=$l_pid
+			;;
+		esac
+
+		l_pid=$(process_parent_pid "$l_pid")
+	done
+
+	if [ -z "$l_runner_pid" ]; then
+		l_runner_pid=$(find_process_ancestor_by_marker \
+			"$1" "$(basename "$RUN_SHUNIT_TESTS_BIN")" 2>/dev/null || true)
+	fi
+
+	printf '%s\n' "$l_runner_pid"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -369,7 +408,7 @@ EOF
 
 	l_saw_live_output=1
 	l_wait_count=0
-	while [ "$l_wait_count" -lt 5 ]; do
+	while [ "$l_wait_count" -lt "$RUN_SHUNIT_TESTS_WAIT_LIMIT" ]; do
 		if [ -f "$FAKE_SUITE_STARTED" ]; then
 			case "$(cat "$l_output_path" 2>/dev/null || true)" in
 			*"serial-start"*)
@@ -448,8 +487,7 @@ EOF
 	fi
 
 	l_suite_pid=$(cat "$l_suite_pid_path")
-	l_runner_signal_pid=$(find_process_ancestor_by_marker \
-		"$l_suite_pid" "$(basename "$RUN_SHUNIT_TESTS_BIN")" 2>/dev/null || true)
+	l_runner_signal_pid=$(find_runner_ancestor_for_suite_pid "$l_suite_pid" "$l_runner_pid")
 	case "$l_runner_signal_pid" in
 	'' | *[!0-9]*)
 		l_runner_signal_pid=$l_runner_pid
@@ -457,7 +495,7 @@ EOF
 	esac
 	kill -s TERM "$l_runner_signal_pid" >/dev/null 2>&1 || :
 	(
-		sleep 5
+		sleep "$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS"
 		kill -s KILL "$l_runner_signal_pid" >/dev/null 2>&1 || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
 		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
@@ -579,8 +617,7 @@ EOF
 	fi
 
 	l_suite_pid=$(cat "$l_suite_pid_path")
-	l_runner_signal_pid=$(find_process_ancestor_by_marker \
-		"$l_suite_pid" "$(basename "$RUN_SHUNIT_TESTS_BIN")" 2>/dev/null || true)
+	l_runner_signal_pid=$(find_runner_ancestor_for_suite_pid "$l_suite_pid" "$l_runner_pid")
 	case "$l_runner_signal_pid" in
 	'' | *[!0-9]*)
 		l_runner_signal_pid=$l_runner_pid
@@ -589,7 +626,7 @@ EOF
 
 	kill -s TERM "$l_runner_signal_pid" >/dev/null 2>&1 || :
 	(
-		sleep 5
+		sleep "$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS"
 		kill -s KILL "$l_runner_signal_pid" >/dev/null 2>&1 || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
 		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
