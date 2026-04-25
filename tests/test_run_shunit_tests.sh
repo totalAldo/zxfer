@@ -33,6 +33,7 @@ setUp() {
 find_runner_ancestor_for_suite_pid() {
 	l_pid=$1
 	l_expected_runner_pid=${2:-}
+	l_current_test_pid=$$
 	l_runner_pid=
 	l_cmd=
 
@@ -43,6 +44,10 @@ find_runner_ancestor_for_suite_pid() {
 			;;
 		esac
 
+		if [ "$l_pid" = "$l_current_test_pid" ]; then
+			break
+		fi
+
 		if [ -n "$l_expected_runner_pid" ] && [ "$l_pid" = "$l_expected_runner_pid" ]; then
 			printf '%s\n' "$l_pid"
 			return 0
@@ -51,17 +56,14 @@ find_runner_ancestor_for_suite_pid() {
 		l_cmd=$(process_command_for_pid "$l_pid")
 		case "$l_cmd" in
 		*"$RUN_SHUNIT_TESTS_BIN"*)
-			l_runner_pid=$l_pid
+			if [ -z "$l_runner_pid" ]; then
+				l_runner_pid=$l_pid
+			fi
 			;;
 		esac
 
 		l_pid=$(process_parent_pid "$l_pid")
 	done
-
-	if [ -z "$l_runner_pid" ]; then
-		l_runner_pid=$(find_process_ancestor_by_marker \
-			"$1" "$(basename "$RUN_SHUNIT_TESTS_BIN")" 2>/dev/null || true)
-	fi
 
 	printf '%s\n' "$l_runner_pid"
 }
@@ -100,8 +102,21 @@ process_command_for_pid() {
 	l_cmd=
 
 	l_cmd=$(ps -o args= -p "$l_pid" 2>/dev/null | sed -n '1p')
+	case "$(printf '%s\n' "$l_cmd" | tr -d '[:space:]')" in
+	ARGS | COMMAND | CMD)
+		l_cmd=
+		;;
+	esac
 	if [ -z "$l_cmd" ]; then
 		l_cmd=$(ps -o command= -p "$l_pid" 2>/dev/null | sed -n '1p')
+	fi
+	case "$(printf '%s\n' "$l_cmd" | tr -d '[:space:]')" in
+	ARGS | COMMAND | CMD)
+		l_cmd=
+		;;
+	esac
+	if [ -z "$l_cmd" ] && command -v pargs >/dev/null 2>&1; then
+		l_cmd=$(pargs -l "$l_pid" 2>/dev/null | sed -n '1p')
 	fi
 
 	printf '%s\n' "$l_cmd"
@@ -112,12 +127,30 @@ process_parent_pid() {
 	l_pid=$1
 	l_ppid=
 
-	l_ppid=$(ps -o ppid= -p "$l_pid" 2>/dev/null | tr -d '[:space:]')
+	l_ppid=$(ps -o ppid= -p "$l_pid" 2>/dev/null |
+		awk '$1 ~ /^[0-9]+$/ { print $1; exit }')
 	if [ -z "$l_ppid" ]; then
-		l_ppid=$(ps -o ppid -p "$l_pid" 2>/dev/null | sed -n '2p' | tr -d '[:space:]')
+		l_ppid=$(ps -o ppid -p "$l_pid" 2>/dev/null |
+			awk '$1 ~ /^[0-9]+$/ { value = $1 } END { if (value != "") print value }')
 	fi
 
 	printf '%s\n' "$l_ppid"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+send_test_signal_to_pid() {
+	l_test_signal_to_pid_signal=$1
+	l_test_signal_to_pid_pid=$2
+
+	case "$l_test_signal_to_pid_pid" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+
+	kill -s "$l_test_signal_to_pid_signal" "$l_test_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	kill "-$l_test_signal_to_pid_signal" "$l_test_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	return 1
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -153,7 +186,7 @@ fake_suite_process_running_p() {
 	l_state=
 	l_cmd=
 
-	if ! kill -s 0 "$l_pid" >/dev/null 2>&1; then
+	if ! send_test_signal_to_pid 0 "$l_pid"; then
 		return 1
 	fi
 
@@ -180,6 +213,76 @@ fake_suite_process_running_p() {
 	esac
 
 	return 0
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_find_runner_ancestor_does_not_select_outer_runner_when_expected_pid_is_missing() {
+	result=$(
+		l_current_pid=$$
+		process_parent_pid() {
+			if [ "$1" = "$l_current_pid" ]; then
+				printf '%s\n' 300
+				return 0
+			fi
+			if [ "$1" = 100 ]; then
+				printf '%s\n' 200
+			elif [ "$1" = 200 ]; then
+				printf '%s\n' "$l_current_pid"
+			elif [ "$1" = 300 ]; then
+				printf '%s\n' 1
+			else
+				printf '%s\n' ""
+			fi
+		}
+		process_command_for_pid() {
+			if [ "$1" = 300 ]; then
+				printf '%s\n' "$RUN_SHUNIT_TESTS_BIN --jobs 1 tests/test_run_shunit_tests.sh"
+			else
+				printf '%s\n' "unrelated-process"
+			fi
+		}
+
+		find_runner_ancestor_for_suite_pid 100 999
+	)
+
+	assertEquals "When the expected nested runner PID is not in the process tree, the helper must not fall back to an outer shunit runner ancestor." \
+		"" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_find_runner_ancestor_uses_nearest_nested_runner_before_current_test_shell() {
+	result=$(
+		l_current_pid=$$
+		process_parent_pid() {
+			if [ "$1" = "$l_current_pid" ]; then
+				printf '%s\n' 300
+				return 0
+			fi
+			if [ "$1" = 100 ]; then
+				printf '%s\n' 200
+			elif [ "$1" = 200 ]; then
+				printf '%s\n' "$l_current_pid"
+			elif [ "$1" = 300 ]; then
+				printf '%s\n' 1
+			else
+				printf '%s\n' ""
+			fi
+		}
+		process_command_for_pid() {
+			if [ "$1" = 200 ]; then
+				printf '%s\n' "$RUN_SHUNIT_TESTS_BIN --jobs 1 nested-suite.sh"
+			elif [ "$1" = 300 ]; then
+				printf '%s\n' "$RUN_SHUNIT_TESTS_BIN --jobs 1 tests/test_run_shunit_tests.sh"
+			else
+				printf '%s\n' "unrelated-process"
+			fi
+		}
+
+		find_runner_ancestor_for_suite_pid 100 999
+	)
+
+	assertEquals "When shell wrappers hide the original background PID, the helper should still signal the nearest nested runner and stop before the outer runner." \
+		200 "$result"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -380,6 +483,7 @@ test_run_shunit_tests_streams_serial_output_when_jobs_is_one() {
 	l_suite_path="$TEST_TMPDIR/serial-stream-suite.sh"
 	l_output_path="$TEST_TMPDIR/serial-stream.output"
 	l_status_path="$TEST_TMPDIR/serial-stream.status"
+	l_restore_errexit=0
 
 	write_fake_suite_with_body "$l_suite_path" <<'EOF'
 #!/bin/sh
@@ -425,7 +529,14 @@ EOF
 		0 "$l_saw_live_output"
 
 	: >"$FAKE_SUITE_RELEASE"
-	wait "$l_runner_pid"
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	wait "$l_runner_pid" >/dev/null 2>&1
+	[ "$l_restore_errexit" = "1" ] && set -e
 
 	assertEquals "Serial execution should still complete successfully after streaming live output." \
 		0 "$(cat "$l_status_path")"
@@ -480,7 +591,7 @@ EOF
 	done
 
 	if [ "$l_started" -ne 0 ]; then
-		kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_runner_pid" || :
 		wait "$l_runner_pid" >/dev/null 2>&1 || :
 		fail "The term-resistant suite never started under the serial runner."
 		return 0
@@ -493,14 +604,14 @@ EOF
 		l_runner_signal_pid=$l_runner_pid
 		;;
 	esac
-	kill -s TERM "$l_runner_signal_pid" >/dev/null 2>&1 || :
+	send_test_signal_to_pid TERM "$l_runner_signal_pid" || :
 	(
 		sleep "$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS"
-		kill -s KILL "$l_runner_signal_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
 		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
 		*)
-			kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
 			;;
 		esac
 	) &
@@ -538,14 +649,14 @@ EOF
 	done
 
 	if [ "$l_suite_gone" -ne 0 ]; then
-		kill -s KILL "$l_suite_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_suite_pid" || :
 	fi
 	if [ "$l_runner_gone" -ne 0 ]; then
-		kill -s KILL "$l_runner_signal_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
 		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
 		*)
-			kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
 			;;
 		esac
 	fi
@@ -610,7 +721,7 @@ EOF
 	done
 
 	if [ "$l_started" -ne 0 ]; then
-		kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_runner_pid" || :
 		wait "$l_runner_pid" >/dev/null 2>&1 || :
 		fail "The term-resistant suite never started under the parallel runner."
 		return 0
@@ -624,14 +735,14 @@ EOF
 		;;
 	esac
 
-	kill -s TERM "$l_runner_signal_pid" >/dev/null 2>&1 || :
+	send_test_signal_to_pid TERM "$l_runner_signal_pid" || :
 	(
 		sleep "$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS"
-		kill -s KILL "$l_runner_signal_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
 		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
 		*)
-			kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
 			;;
 		esac
 	) &
@@ -669,14 +780,14 @@ EOF
 	done
 
 	if [ "$l_suite_gone" -ne 0 ]; then
-		kill -s KILL "$l_suite_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_suite_pid" || :
 	fi
 	if [ "$l_runner_gone" -ne 0 ]; then
-		kill -s KILL "$l_runner_signal_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
 		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
 		*)
-			kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
 			;;
 		esac
 	fi
@@ -716,7 +827,7 @@ case "$1" in
 	printf '%s\n' "$$" >"${FAKE_SUITE_LOG:?}"
 	: >"${FAKE_SUITE_STARTED:?}"
 	trap '' TERM
-	kill -s TERM "$PPID"
+	kill -TERM "$PPID"
 	while :; do
 		sleep 1
 	done
@@ -754,7 +865,7 @@ EOF
 	l_suite_gone=1
 	l_wait_count=0
 	while [ "$l_wait_count" -lt 5 ]; do
-		if ! kill -s 0 "$l_suite_pid" >/dev/null 2>&1; then
+		if ! send_test_signal_to_pid 0 "$l_suite_pid"; then
 			l_suite_gone=0
 			break
 		fi

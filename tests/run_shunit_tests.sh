@@ -146,13 +146,39 @@ list_child_pids_for_parent() {
 	'
 }
 
-signal_process_descendants() {
-	l_signal=$1
-	l_parent_pid=$2
+send_signal_to_pid() {
+	l_send_signal_to_pid_signal=$1
+	l_send_signal_to_pid_pid=$2
 
-	for l_child_pid in $(list_child_pids_for_parent "$l_parent_pid"); do
-		signal_process_descendants "$l_signal" "$l_child_pid"
-		kill -s "$l_signal" "$l_child_pid" >/dev/null 2>&1 || true
+	case "$l_send_signal_to_pid_pid" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+
+	# Some illumos/Solaris shells have historically been less consistent
+	# about the POSIX `kill -s NAME` form; keep `kill -NAME` as a fallback.
+	kill -s "$l_send_signal_to_pid_signal" "$l_send_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	kill "-$l_send_signal_to_pid_signal" "$l_send_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	return 1
+}
+
+signal_process_descendants() {
+	l_signal_process_descendants_signal=$1
+	l_signal_process_descendants_pending=$2
+	l_signal_process_descendants_next=
+	l_signal_process_descendants_parent=
+	l_signal_process_descendants_child=
+
+	while [ -n "$l_signal_process_descendants_pending" ]; do
+		l_signal_process_descendants_next=
+		for l_signal_process_descendants_parent in $l_signal_process_descendants_pending; do
+			for l_signal_process_descendants_child in $(list_child_pids_for_parent "$l_signal_process_descendants_parent"); do
+				send_signal_to_pid "$l_signal_process_descendants_signal" "$l_signal_process_descendants_child" || true
+				l_signal_process_descendants_next="${l_signal_process_descendants_next}${l_signal_process_descendants_next:+ }$l_signal_process_descendants_child"
+			done
+		done
+		l_signal_process_descendants_pending=$l_signal_process_descendants_next
 	done
 }
 
@@ -167,7 +193,7 @@ signal_pid_and_descendants() {
 	esac
 
 	signal_process_descendants "$l_signal" "$l_pid"
-	kill -s "$l_signal" "$l_pid" >/dev/null 2>&1 || true
+	send_signal_to_pid "$l_signal" "$l_pid" || true
 }
 
 count_runnable_suites() {
@@ -323,7 +349,7 @@ signal_foreground_suite() {
 		;;
 	*)
 		signal_pid_and_descendants "$l_signal" "$l_child_pid"
-		kill -s "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" >/dev/null 2>&1 || true
+		send_signal_to_pid "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" || true
 		;;
 	esac
 }
@@ -337,7 +363,7 @@ foreground_suite_running_p() {
 		;;
 	esac
 
-	if kill -s 0 "$RUNNER_FOREGROUND_SUITE_PID" >/dev/null 2>&1; then
+	if send_signal_to_pid 0 "$RUNNER_FOREGROUND_SUITE_PID"; then
 		return 0
 	fi
 	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
@@ -346,7 +372,7 @@ foreground_suite_running_p() {
 	case "$l_child_pid" in
 	'' | *[!0-9]*) ;;
 	*)
-		if kill -s 0 "$l_child_pid" >/dev/null 2>&1; then
+		if send_signal_to_pid 0 "$l_child_pid"; then
 			return 0
 		fi
 		;;
@@ -466,7 +492,7 @@ launch_suite_worker() {
 				return 1
 				;;
 			esac
-			if kill -s 0 "$l_suite_pid" >/dev/null 2>&1; then
+			if send_signal_to_pid 0 "$l_suite_pid"; then
 				return 0
 			fi
 			return 1
@@ -606,7 +632,7 @@ wait_for_next_worker_completion() {
 				continue
 				;;
 			esac
-			if ! kill -s 0 "$l_pid" >/dev/null 2>&1; then
+			if ! send_signal_to_pid 0 "$l_pid"; then
 				: >"$l_ready_file"
 				RUNNER_INFLIGHT_COUNT=$((RUNNER_INFLIGHT_COUNT - 1))
 				return 0
@@ -685,7 +711,7 @@ pending_worker_pids_running_p() {
 				continue
 				;;
 			esac
-			if kill -s 0 "$l_pid" >/dev/null 2>&1; then
+			if send_signal_to_pid 0 "$l_pid"; then
 				return 0
 			fi
 		done

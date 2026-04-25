@@ -103,6 +103,17 @@ zxfer_perf_nonnegative_integer_p() {
 	[ "$1" -ge 0 ]
 }
 
+zxfer_perf_count_words() {
+	l_perf_count_words_count=0
+
+	for l_perf_count_words_word in $1; do
+		[ -n "$l_perf_count_words_word" ] || continue
+		l_perf_count_words_count=$((l_perf_count_words_count + 1))
+	done
+
+	printf '%s\n' "$l_perf_count_words_count"
+}
+
 zxfer_perf_parse_args() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
@@ -184,6 +195,34 @@ zxfer_perf_apply_profile_defaults() {
 		zxfer_perf_list_contains "$ZXFER_PERF_CASE_LIST" "$l_case" ||
 			zxfer_perf_die "Unknown performance case requested: $l_case"
 	done
+}
+
+zxfer_perf_case_description() {
+	case "$1" in
+	chain_local)
+		printf '%s\n' "local recursive chain replication; measures startup latency, send throughput, receive cost, and cleanup"
+		;;
+	fanout_local_j1_props)
+		printf '%s\n' "local fanout replication with one job; measures sibling dataset/property reconciliation without concurrency"
+		;;
+	fanout_local_j4_props)
+		printf '%s\n' "local fanout replication with four jobs; measures sibling dataset/property reconciliation with concurrency"
+		;;
+	chain_remote_mock)
+		printf '%s\n' "mock-remote chain replication; measures ssh command construction and remote round-trip counters"
+		;;
+	chain_remote_mock_compressed)
+		printf '%s\n' "mock-remote compressed chain replication; measures ssh plus compression/decompression pipeline overhead"
+		;;
+	*)
+		printf '%s\n' "custom performance case"
+		;;
+	esac
+}
+
+zxfer_perf_log_configuration() {
+	log_summary "Performance profile $ZXFER_PERF_PROFILE: cases=[$ZXFER_PERF_CASES] warmups=$ZXFER_PERF_WARMUPS samples=$ZXFER_PERF_SAMPLES sparse_pool_mb=$ZXFER_PERF_SPARSE_SIZE_MB chain_snapshots=$ZXFER_PERF_CHAIN_SNAPSHOTS fanout_datasets=$ZXFER_PERF_FANOUT_DATASETS payload_mb=$ZXFER_PERF_PAYLOAD_MB"
+	log_summary "Performance artifacts will be written under $ZXFER_PERF_OUTPUT_DIR"
 }
 
 zxfer_perf_now_ms() {
@@ -345,6 +384,17 @@ zxfer_perf_count_mock_ssh_invocations() {
 	awk 'index($0, "close ") != 1 { count++ } END { print count + 0 }' "$l_log"
 }
 
+zxfer_perf_calculate_throughput() {
+	l_perf_calculate_throughput_bytes=$1
+	l_perf_calculate_throughput_wall_ms=$2
+
+	if [ "$l_perf_calculate_throughput_wall_ms" -gt 0 ]; then
+		awk -v bytes="$l_perf_calculate_throughput_bytes" -v ms="$l_perf_calculate_throughput_wall_ms" 'BEGIN { printf "%.2f", (bytes * 1000) / ms }'
+	else
+		printf '%s\n' 0
+	fi
+}
+
 zxfer_perf_record_sample() {
 	l_case=$1
 	l_sample_kind=$2
@@ -357,9 +407,7 @@ zxfer_perf_record_sample() {
 	l_mock_ssh_log=${9:-}
 	l_throughput=0
 
-	if [ "$l_wall_ms" -gt 0 ]; then
-		l_throughput=$(awk -v bytes="$l_estimated_send_bytes" -v ms="$l_wall_ms" 'BEGIN { printf "%.2f", (bytes * 1000) / ms }')
-	fi
+	l_throughput=$(zxfer_perf_calculate_throughput "$l_estimated_send_bytes" "$l_wall_ms")
 	l_mock_ssh_invocations=$(zxfer_perf_count_mock_ssh_invocations "$l_mock_ssh_log")
 
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -385,6 +433,23 @@ zxfer_perf_record_sample() {
 		"$l_mock_ssh_invocations" \
 		"$l_stdout_file" \
 		"$l_stderr_file" >>"$ZXFER_PERF_SAMPLES_FILE"
+}
+
+zxfer_perf_log_sample_result() {
+	l_perf_result_case=$1
+	l_perf_result_sample_kind=$2
+	l_perf_result_sample_index=$3
+	l_perf_result_status=$4
+	l_perf_result_wall_ms=$5
+	l_perf_result_estimated_send_bytes=$6
+	l_perf_result_stderr_file=$7
+	l_perf_result_mock_ssh_log=${8:-}
+	l_perf_result_throughput=$(zxfer_perf_calculate_throughput "$l_perf_result_estimated_send_bytes" "$l_perf_result_wall_ms")
+	l_perf_result_startup_ms=$(zxfer_perf_profile_value "$l_perf_result_stderr_file" startup_latency_ms)
+	l_perf_result_cleanup_ms=$(zxfer_perf_profile_value "$l_perf_result_stderr_file" cleanup_ms)
+	l_perf_result_mock_ssh_invocations=$(zxfer_perf_count_mock_ssh_invocations "$l_perf_result_mock_ssh_log")
+
+	log_summary "Completed perf case $l_perf_result_case ($l_perf_result_sample_kind $l_perf_result_sample_index): status=$l_perf_result_status wall_ms=$l_perf_result_wall_ms throughput_Bps=$l_perf_result_throughput startup_latency_ms=$l_perf_result_startup_ms cleanup_ms=$l_perf_result_cleanup_ms mock_ssh_invocations=$l_perf_result_mock_ssh_invocations"
 }
 
 zxfer_perf_prepare_remote_mock_path() {
@@ -433,25 +498,29 @@ zxfer_perf_run_chain_case() {
 	l_ssh_log="$ZXFER_PERF_CURRENT_CASE_DIR/${l_sample_kind}_${l_sample_index}.mock_ssh.log"
 	l_secure_path=""
 
+	log_summary "Preparing chain fixture for $l_case: snapshots=$ZXFER_PERF_CHAIN_SNAPSHOTS payload_mb_per_snapshot=$ZXFER_PERF_PAYLOAD_MB remote=$l_remote compressed=$l_compressed source=$l_src_dataset destination_root=$l_dest_root"
 	destroy_test_datasets_if_present "$l_src_dataset" "$l_dest_root"
 	zfs create "$l_src_dataset"
 	zfs create "$l_dest_root"
 
-	l_i=1
-	while [ "$l_i" -le "$ZXFER_PERF_CHAIN_SNAPSHOTS" ]; do
-		zxfer_perf_write_payload_mb "$l_src_dataset" "payload.$l_i.bin" "$ZXFER_PERF_PAYLOAD_MB"
-		zfs snap "$l_src_dataset@s$l_i"
-		l_i=$((l_i + 1))
+	l_perf_chain_snapshot_index=1
+	while [ "$l_perf_chain_snapshot_index" -le "$ZXFER_PERF_CHAIN_SNAPSHOTS" ]; do
+		zxfer_perf_write_payload_mb "$l_src_dataset" "payload.$l_perf_chain_snapshot_index.bin" "$ZXFER_PERF_PAYLOAD_MB"
+		zfs snap "$l_src_dataset@s$l_perf_chain_snapshot_index"
+		l_perf_chain_snapshot_index=$((l_perf_chain_snapshot_index + 1))
 	done
 	ZXFER_PERF_LAST_ESTIMATED_SEND_BYTES=$(zxfer_perf_estimate_send_bytes "$l_src_dataset@s1" "$l_src_dataset@s$ZXFER_PERF_CHAIN_SNAPSHOTS")
+	log_summary "Estimated send size for $l_case ($l_sample_kind $l_sample_index): estimated_send_bytes=$ZXFER_PERF_LAST_ESTIMATED_SEND_BYTES"
 	ZXFER_PERF_LAST_MOCK_SSH_LOG=""
 
 	if [ "$l_remote" -eq 1 ]; then
 		zxfer_perf_prepare_remote_mock_path "$l_mock_path" "$l_compressed"
 		l_secure_path=$(zxfer_perf_build_mock_secure_path "$l_mock_path")
 		ZXFER_PERF_LAST_MOCK_SSH_LOG=$l_ssh_log
+		log_summary "Prepared mock ssh path for $l_case: mock_path=$l_mock_path mock_log=$l_ssh_log"
 	fi
 
+	log_summary "Measuring $l_case ($l_sample_kind $l_sample_index): invoking zxfer; raw_stdout=$l_stdout_file raw_stderr=$l_stderr_file"
 	l_start_ms=$(zxfer_perf_now_ms)
 	set +e
 	if [ "$l_remote" -eq 1 ] && [ "$l_compressed" -eq 1 ]; then
@@ -469,6 +538,7 @@ zxfer_perf_run_chain_case() {
 	l_wall_ms=$((l_end_ms - l_start_ms))
 
 	zxfer_perf_record_sample "$l_case" "$l_sample_kind" "$l_sample_index" "$l_status" "$l_wall_ms" "$ZXFER_PERF_LAST_ESTIMATED_SEND_BYTES" "$l_stdout_file" "$l_stderr_file" "$ZXFER_PERF_LAST_MOCK_SSH_LOG"
+	zxfer_perf_log_sample_result "$l_case" "$l_sample_kind" "$l_sample_index" "$l_status" "$l_wall_ms" "$ZXFER_PERF_LAST_ESTIMATED_SEND_BYTES" "$l_stderr_file" "$ZXFER_PERF_LAST_MOCK_SSH_LOG"
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_perf_die "$l_case $l_sample_kind $l_sample_index failed with status $l_status; see $l_stderr_file"
 	fi
@@ -489,31 +559,34 @@ zxfer_perf_run_fanout_case() {
 	l_stderr_file="$ZXFER_PERF_CURRENT_CASE_DIR/${l_sample_kind}_${l_sample_index}.stderr"
 	l_estimated=0
 
+	log_summary "Preparing fanout fixture for $l_case: datasets=$ZXFER_PERF_FANOUT_DATASETS jobs=$l_jobs payload_mb_per_dataset=$ZXFER_PERF_PAYLOAD_MB source_parent=$l_src_parent destination_root=$l_dest_root"
 	destroy_test_datasets_if_present "$l_src_parent" "$l_dest_root"
 	zfs create "$l_src_parent"
 	zfs create "$l_dest_root"
 	zfs set compression=lz4 "$l_src_parent"
 
-	l_i=1
-	while [ "$l_i" -le "$ZXFER_PERF_FANOUT_DATASETS" ]; do
-		l_child="$l_src_parent/ds$l_i"
+	l_perf_fanout_dataset_index=1
+	while [ "$l_perf_fanout_dataset_index" -le "$ZXFER_PERF_FANOUT_DATASETS" ]; do
+		l_child="$l_src_parent/ds$l_perf_fanout_dataset_index"
 		zfs create "$l_child"
 		zfs set atime=off "$l_child"
 		zxfer_perf_write_payload_mb "$l_child" "payload.bin" "$ZXFER_PERF_PAYLOAD_MB"
-		l_i=$((l_i + 1))
+		l_perf_fanout_dataset_index=$((l_perf_fanout_dataset_index + 1))
 	done
 	zfs snap -r "$l_src_parent@s1"
 
-	l_i=1
-	while [ "$l_i" -le "$ZXFER_PERF_FANOUT_DATASETS" ]; do
-		l_child="$l_src_parent/ds$l_i"
+	l_perf_fanout_estimate_index=1
+	while [ "$l_perf_fanout_estimate_index" -le "$ZXFER_PERF_FANOUT_DATASETS" ]; do
+		l_child="$l_src_parent/ds$l_perf_fanout_estimate_index"
 		l_size=$(zxfer_perf_estimate_send_bytes "" "$l_child@s1")
 		l_estimated=$((l_estimated + l_size))
-		l_i=$((l_i + 1))
+		l_perf_fanout_estimate_index=$((l_perf_fanout_estimate_index + 1))
 	done
 	ZXFER_PERF_LAST_ESTIMATED_SEND_BYTES=$l_estimated
+	log_summary "Estimated send size for $l_case ($l_sample_kind $l_sample_index): estimated_send_bytes=$ZXFER_PERF_LAST_ESTIMATED_SEND_BYTES"
 	ZXFER_PERF_LAST_MOCK_SSH_LOG=""
 
+	log_summary "Measuring $l_case ($l_sample_kind $l_sample_index): invoking zxfer with jobs=$l_jobs; raw_stdout=$l_stdout_file raw_stderr=$l_stderr_file"
 	l_start_ms=$(zxfer_perf_now_ms)
 	set +e
 	"$ZXFER_BIN" -V -P -j "$l_jobs" -R "$l_src_parent" "$l_dest_root" >"$l_stdout_file" 2>"$l_stderr_file"
@@ -523,6 +596,7 @@ zxfer_perf_run_fanout_case() {
 	l_wall_ms=$((l_end_ms - l_start_ms))
 
 	zxfer_perf_record_sample "$l_case" "$l_sample_kind" "$l_sample_index" "$l_status" "$l_wall_ms" "$ZXFER_PERF_LAST_ESTIMATED_SEND_BYTES" "$l_stdout_file" "$l_stderr_file" ""
+	zxfer_perf_log_sample_result "$l_case" "$l_sample_kind" "$l_sample_index" "$l_status" "$l_wall_ms" "$ZXFER_PERF_LAST_ESTIMATED_SEND_BYTES" "$l_stderr_file" ""
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_perf_die "$l_case $l_sample_kind $l_sample_index failed with status $l_status; see $l_stderr_file"
 	fi
@@ -534,10 +608,18 @@ zxfer_perf_run_case_sample() {
 	l_case=$1
 	l_sample_kind=$2
 	l_sample_index=$3
+	l_case_number=${4:-?}
+	l_case_count=${5:-?}
+	l_sample_total=$ZXFER_PERF_SAMPLES
+	l_case_description=$(zxfer_perf_case_description "$l_case")
+
+	if [ "$l_sample_kind" = "warmup" ]; then
+		l_sample_total=$ZXFER_PERF_WARMUPS
+	fi
 
 	ZXFER_PERF_CURRENT_CASE_DIR="$ZXFER_PERF_OUTPUT_DIR/raw/$l_case"
 	mkdir -p "$ZXFER_PERF_CURRENT_CASE_DIR"
-	log_summary "Running perf case $l_case ($l_sample_kind $l_sample_index)"
+	log_summary "Starting perf case $l_case ($l_sample_kind $l_sample_index/$l_sample_total, case $l_case_number/$l_case_count): $l_case_description"
 
 	case "$l_case" in
 	chain_local)
@@ -562,17 +644,21 @@ zxfer_perf_run_case_sample() {
 }
 
 zxfer_perf_run_cases() {
-	for l_case in $ZXFER_PERF_CASES; do
-		l_i=1
-		while [ "$l_i" -le "$ZXFER_PERF_WARMUPS" ]; do
-			zxfer_perf_run_case_sample "$l_case" warmup "$l_i"
-			l_i=$((l_i + 1))
+	l_perf_case_count=$(zxfer_perf_count_words "$ZXFER_PERF_CASES")
+	l_perf_case_number=1
+
+	for l_perf_run_case in $ZXFER_PERF_CASES; do
+		l_perf_warmup_index=1
+		while [ "$l_perf_warmup_index" -le "$ZXFER_PERF_WARMUPS" ]; do
+			zxfer_perf_run_case_sample "$l_perf_run_case" warmup "$l_perf_warmup_index" "$l_perf_case_number" "$l_perf_case_count"
+			l_perf_warmup_index=$((l_perf_warmup_index + 1))
 		done
-		l_i=1
-		while [ "$l_i" -le "$ZXFER_PERF_SAMPLES" ]; do
-			zxfer_perf_run_case_sample "$l_case" sample "$l_i"
-			l_i=$((l_i + 1))
+		l_perf_sample_index=1
+		while [ "$l_perf_sample_index" -le "$ZXFER_PERF_SAMPLES" ]; do
+			zxfer_perf_run_case_sample "$l_perf_run_case" sample "$l_perf_sample_index" "$l_perf_case_number" "$l_perf_case_count"
+			l_perf_sample_index=$((l_perf_sample_index + 1))
 		done
+		l_perf_case_number=$((l_perf_case_number + 1))
 	done
 }
 
@@ -665,6 +751,7 @@ zxfer_perf_main() {
 	zxfer_perf_apply_profile_defaults
 	zxfer_perf_confirm_once
 	zxfer_perf_setup_output_dir
+	zxfer_perf_log_configuration
 	zxfer_perf_setup_pools
 	zxfer_perf_run_cases
 	zxfer_perf_render_summary

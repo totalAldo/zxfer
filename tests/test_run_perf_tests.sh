@@ -124,6 +124,57 @@ test_perf_build_mock_secure_path_preserves_configured_append_dirs() {
 		"$result" ":/usr/local/zfs/bin:/opt/zfs/bin"
 }
 
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_run_cases_uses_isolated_loop_state() {
+	ZXFER_PERF_CASES="chain_local fanout_local_j1_props"
+	ZXFER_PERF_WARMUPS=1
+	ZXFER_PERF_SAMPLES=1
+	ZXFER_PERF_TEST_RUN_LOG="$TEST_TMPDIR/perf-run-cases.log"
+	: >"$ZXFER_PERF_TEST_RUN_LOG"
+	ZXFER_PERF_TEST_RUN_COUNT=0
+
+	zxfer_perf_run_case_sample() {
+		l_stub_case=$1
+		l_stub_kind=$2
+		l_stub_index=$3
+		l_stub_case_number=$4
+		l_stub_case_count=$5
+		ZXFER_PERF_TEST_RUN_COUNT=$((ZXFER_PERF_TEST_RUN_COUNT + 1))
+		printf '%s:%s:%s:%s/%s\n' \
+			"$l_stub_case" "$l_stub_kind" "$l_stub_index" "$l_stub_case_number" "$l_stub_case_count" >>"$ZXFER_PERF_TEST_RUN_LOG"
+		if [ "$ZXFER_PERF_TEST_RUN_COUNT" -gt 4 ]; then
+			l_i=99
+		else
+			l_i=0
+		fi
+	}
+
+	zxfer_perf_run_cases
+
+	assertEquals "Perf case iteration should not be clobbered by sourced integration helpers that reuse l_i." \
+		4 "$ZXFER_PERF_TEST_RUN_COUNT"
+	assertContains "The first case should run a warmup and measured sample with case position metadata." \
+		"$(cat "$ZXFER_PERF_TEST_RUN_LOG")" "chain_local:warmup:1:1/2"
+	assertContains "The second case should still run after the first sample clobbers l_i." \
+		"$(cat "$ZXFER_PERF_TEST_RUN_LOG")" "fanout_local_j1_props:sample:1:2/2"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_run_case_sample_logs_case_description_and_sample_position() {
+	ZXFER_PERF_OUTPUT_DIR="$TEST_TMPDIR/perf-output"
+	ZXFER_PERF_SAMPLES=3
+	ZXFER_PERF_WARMUPS=1
+	mkdir -p "$ZXFER_PERF_OUTPUT_DIR"
+	zxfer_perf_run_chain_case() { :; }
+
+	output=$(zxfer_perf_run_case_sample chain_remote_mock sample 2 4 5)
+
+	assertContains "Perf stream output should identify the sample position and total case count." \
+		"$output" "Starting perf case chain_remote_mock (sample 2/3, case 4/5)"
+	assertContains "Perf stream output should explain what the selected case exercises." \
+		"$output" "mock-remote chain replication"
+}
+
 # shellcheck disable=SC2329  # Invoked by shunit2 test functions.
 write_sample_perf_rows() {
 	l_samples_file=$1

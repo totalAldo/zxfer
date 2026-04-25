@@ -745,11 +745,31 @@ test_vm_guest_prepare_script_skips_integration_packages_for_ubuntu_shunit2() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_prepare_script_installs_zfs_tools_for_ubuntu_perf() {
+	script_body=$(zxfer_vm_guest_prepare_script ubuntu qemu perf)
+
+	assertContains "Ubuntu perf guest preparation should install OpenZFS tooling." \
+		"$script_body" "apt-get install -y csh zfsutils-linux parallel zstd"
+	assertContains "Ubuntu perf guest preparation should load the ZFS module before running sparse-pool fixtures." \
+		"$script_body" "modprobe zfs"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_guest_prepare_script_installs_bash_for_freebsd_shunit2() {
 	script_body=$(zxfer_vm_guest_prepare_script freebsd qemu shunit2)
 
 	assertContains "FreeBSD shunit2 guest preparation should install bash for the coverage fallback suite." \
 		"$script_body" "pkg install -y bash"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_prepare_script_installs_perf_tools_for_freebsd_perf() {
+	script_body=$(zxfer_vm_guest_prepare_script freebsd qemu perf)
+
+	assertContains "FreeBSD perf guest preparation should install parallel and zstd for perf fixtures." \
+		"$script_body" "pkg install -y parallel zstd"
+	assertContains "FreeBSD perf guest preparation should load the ZFS module when needed." \
+		"$script_body" "kldload zfs || true"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
