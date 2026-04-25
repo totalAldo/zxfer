@@ -155,9 +155,33 @@ list_child_pids_for_parent() {
 	'
 }
 
+signal_number_for_name() {
+	case "$1" in
+	0)
+		printf '%s\n' 0
+		;;
+	HUP | hup)
+		printf '%s\n' 1
+		;;
+	INT | int)
+		printf '%s\n' 2
+		;;
+	KILL | kill)
+		printf '%s\n' 9
+		;;
+	TERM | term)
+		printf '%s\n' 15
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
 send_signal_to_pid() {
 	l_send_signal_to_pid_signal=$1
 	l_send_signal_to_pid_pid=$2
+	l_send_signal_to_pid_number=
 
 	case "$l_send_signal_to_pid_pid" in
 	'' | *[!0-9]*)
@@ -166,10 +190,59 @@ send_signal_to_pid() {
 	esac
 
 	# Some illumos/Solaris shells have historically been less consistent
-	# about the POSIX `kill -s NAME` form; keep `kill -NAME` as a fallback.
+	# about symbolic signal forms; keep numeric signals as the final fallback.
 	kill -s "$l_send_signal_to_pid_signal" "$l_send_signal_to_pid_pid" >/dev/null 2>&1 && return 0
 	kill "-$l_send_signal_to_pid_signal" "$l_send_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	l_send_signal_to_pid_number=$(signal_number_for_name "$l_send_signal_to_pid_signal" 2>/dev/null || true)
+	if [ -n "$l_send_signal_to_pid_number" ]; then
+		kill "-$l_send_signal_to_pid_number" "$l_send_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	fi
 	return 1
+}
+
+process_state_for_pid() {
+	l_process_state_for_pid_pid=$1
+	l_process_state_for_pid_state=
+
+	l_process_state_for_pid_state=$(ps -o stat= -p "$l_process_state_for_pid_pid" 2>/dev/null |
+		awk '
+			$1 == "STAT" || $1 == "STATE" { next }
+			$1 != "" { print $1; exit }
+		')
+	if [ -z "$l_process_state_for_pid_state" ]; then
+		l_process_state_for_pid_state=$(ps -o state= -p "$l_process_state_for_pid_pid" 2>/dev/null |
+			awk '
+				$1 == "S" || $1 == "STAT" || $1 == "STATE" { next }
+				$1 != "" { print $1; exit }
+			')
+	fi
+	if [ -z "$l_process_state_for_pid_state" ]; then
+		l_process_state_for_pid_state=$(ps -o s= -p "$l_process_state_for_pid_pid" 2>/dev/null |
+			awk '
+				$1 == "S" || $1 == "STAT" || $1 == "STATE" { next }
+				$1 != "" { print $1; exit }
+			')
+	fi
+
+	printf '%s\n' "$l_process_state_for_pid_state"
+}
+
+process_running_p() {
+	l_process_running_p_pid=$1
+	l_process_running_p_state=
+
+	if ! send_signal_to_pid 0 "$l_process_running_p_pid"; then
+		return 1
+	fi
+
+	l_process_running_p_state=$(process_state_for_pid "$l_process_running_p_pid")
+	case "$l_process_running_p_state" in
+	Z* | z* | *zombie* | *defunct*)
+		return 1
+		;;
+	esac
+
+	return 0
 }
 
 signal_process_descendants() {
@@ -372,7 +445,7 @@ foreground_suite_running_p() {
 		;;
 	esac
 
-	if send_signal_to_pid 0 "$RUNNER_FOREGROUND_SUITE_PID"; then
+	if process_running_p "$RUNNER_FOREGROUND_SUITE_PID"; then
 		return 0
 	fi
 	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
@@ -381,7 +454,7 @@ foreground_suite_running_p() {
 	case "$l_child_pid" in
 	'' | *[!0-9]*) ;;
 	*)
-		if send_signal_to_pid 0 "$l_child_pid"; then
+		if process_running_p "$l_child_pid"; then
 			return 0
 		fi
 		;;
@@ -501,7 +574,7 @@ launch_suite_worker() {
 				return 1
 				;;
 			esac
-			if send_signal_to_pid 0 "$l_suite_pid"; then
+			if process_running_p "$l_suite_pid"; then
 				return 0
 			fi
 			return 1
@@ -641,7 +714,7 @@ wait_for_next_worker_completion() {
 				continue
 				;;
 			esac
-			if ! send_signal_to_pid 0 "$l_pid"; then
+			if ! process_running_p "$l_pid"; then
 				: >"$l_ready_file"
 				RUNNER_INFLIGHT_COUNT=$((RUNNER_INFLIGHT_COUNT - 1))
 				return 0
@@ -720,7 +793,7 @@ pending_worker_pids_running_p() {
 				continue
 				;;
 			esac
-			if send_signal_to_pid 0 "$l_pid"; then
+			if process_running_p "$l_pid"; then
 				return 0
 			fi
 		done

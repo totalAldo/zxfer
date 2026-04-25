@@ -148,6 +148,13 @@ process_state_for_pid() {
 			$1 != "" { print $1; exit }
 		')
 	if [ -z "$l_state" ]; then
+		l_state=$(ps -o state= -p "$l_pid" 2>/dev/null |
+			awk '
+				$1 == "S" || $1 == "STAT" || $1 == "STATE" { next }
+				$1 != "" { print $1; exit }
+			')
+	fi
+	if [ -z "$l_state" ]; then
 		l_state=$(ps -o s= -p "$l_pid" 2>/dev/null |
 			awk '
 				$1 == "S" || $1 == "STAT" || $1 == "STATE" { next }
@@ -159,9 +166,34 @@ process_state_for_pid() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+signal_number_for_name() {
+	case "$1" in
+	0)
+		printf '%s\n' 0
+		;;
+	HUP | hup)
+		printf '%s\n' 1
+		;;
+	INT | int)
+		printf '%s\n' 2
+		;;
+	KILL | kill)
+		printf '%s\n' 9
+		;;
+	TERM | term)
+		printf '%s\n' 15
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 send_test_signal_to_pid() {
 	l_test_signal_to_pid_signal=$1
 	l_test_signal_to_pid_pid=$2
+	l_test_signal_to_pid_number=
 
 	case "$l_test_signal_to_pid_pid" in
 	'' | *[!0-9]*)
@@ -171,6 +203,10 @@ send_test_signal_to_pid() {
 
 	kill -s "$l_test_signal_to_pid_signal" "$l_test_signal_to_pid_pid" >/dev/null 2>&1 && return 0
 	kill "-$l_test_signal_to_pid_signal" "$l_test_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	l_test_signal_to_pid_number=$(signal_number_for_name "$l_test_signal_to_pid_signal" 2>/dev/null || true)
+	if [ -n "$l_test_signal_to_pid_number" ]; then
+		kill "-$l_test_signal_to_pid_number" "$l_test_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	fi
 	return 1
 }
 
@@ -323,10 +359,33 @@ test_process_state_for_pid_ignores_omnios_headers_before_zombie_state() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_process_state_for_pid_uses_state_column_when_stat_is_unavailable() {
+	result=$(
+		ps() {
+			if [ "$1:$2:$3:$4" = "-o:stat=:-p:123" ]; then
+				return 1
+			elif [ "$1:$2:$3:$4" = "-o:state=:-p:123" ]; then
+				printf '%s\n' "STATE"
+				printf '%s\n' "Z"
+				return 0
+			fi
+			return 1
+		}
+
+		process_state_for_pid 123
+	)
+
+	assertEquals "Process-state parsing should use the state column when stat is unavailable." \
+		"Z" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_process_state_for_pid_falls_back_to_short_state_column() {
 	result=$(
 		ps() {
 			if [ "$1:$2:$3:$4" = "-o:stat=:-p:123" ]; then
+				return 1
+			elif [ "$1:$2:$3:$4" = "-o:state=:-p:123" ]; then
 				return 1
 			elif [ "$1:$2:$3:$4" = "-o:s=:-p:123" ]; then
 				printf '%s\n' "S"
@@ -341,6 +400,29 @@ test_process_state_for_pid_falls_back_to_short_state_column() {
 
 	assertEquals "Process-state parsing should use the short state column when stat is unavailable." \
 		"Z" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_send_test_signal_to_pid_uses_numeric_signal_fallback() {
+	result=$(
+		kill() {
+			if [ "$1:$2" = "-s:KILL" ] || [ "$1:$2" = "-KILL:123" ]; then
+				return 1
+			elif [ "$1:$2" = "-9:123" ]; then
+				return 0
+			fi
+			return 1
+		}
+
+		if send_test_signal_to_pid KILL 123; then
+			printf '%s\n' "ok"
+		else
+			printf '%s\n' "failed"
+		fi
+	)
+
+	assertEquals "Signal helpers should fall back to numeric KILL for shell kill variants that reject symbolic forms." \
+		"ok" "$result"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
