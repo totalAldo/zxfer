@@ -436,6 +436,29 @@ signal_foreground_suite() {
 	esac
 }
 
+signal_foreground_suite_child() {
+	l_signal=$1
+	l_child_pid=""
+
+	case "${RUNNER_FOREGROUND_SUITE_PID:-}" in
+	'' | *[!0-9]*)
+		return 0
+		;;
+	esac
+
+	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
+		l_child_pid=$(cat "$RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE" 2>/dev/null || true)
+	fi
+	case "$l_child_pid" in
+	'' | *[!0-9]*)
+		signal_process_descendants "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID"
+		;;
+	*)
+		signal_pid_and_descendants "$l_signal" "$l_child_pid"
+		;;
+	esac
+}
+
 foreground_suite_running_p() {
 	l_child_pid=""
 
@@ -781,6 +804,23 @@ signal_pending_workers() {
 	done
 }
 
+signal_pending_worker_children() {
+	l_signal=$1
+
+	for l_worker_id in $RUNNER_PENDING_WORKERS; do
+		l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
+		if [ -r "$l_pid_file" ]; then
+			l_pid=$(cat "$l_pid_file" 2>/dev/null || true)
+			case "$l_pid" in
+			'' | *[!0-9]*) ;;
+			*)
+				signal_pid_and_descendants "$l_signal" "$l_pid"
+				;;
+			esac
+		fi
+	done
+}
+
 pending_worker_pids_running_p() {
 	for l_worker_id in $RUNNER_PENDING_WORKERS; do
 		for l_pid_file in \
@@ -889,9 +929,16 @@ handle_runner_signal() {
 	signal_foreground_suite TERM
 	signal_pending_workers TERM
 	if ! wait_for_runner_tracked_shutdown; then
-		signal_foreground_suite KILL
-		signal_pending_workers KILL
-		wait_for_runner_tracked_shutdown || :
+		# Kill the suite payloads first and give their wrappers a chance to
+		# reap them. Killing wrapper shells at the same time can leave stale
+		# zombie children visible longer on illumos/OmniOS.
+		signal_foreground_suite_child KILL
+		signal_pending_worker_children KILL
+		if ! wait_for_runner_tracked_shutdown; then
+			signal_foreground_suite KILL
+			signal_pending_workers KILL
+			wait_for_runner_tracked_shutdown || :
+		fi
 	fi
 	wait_for_runner_tracked_processes
 	cleanup_runner_state
