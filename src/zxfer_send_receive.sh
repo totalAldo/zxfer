@@ -647,6 +647,10 @@ zxfer_profile_record_send_receive_pipeline_metrics() {
 		return 0
 	fi
 
+	if [ "${g_zxfer_profile_startup_latency_recorded:-0}" -eq 0 ]; then
+		zxfer_profile_add_elapsed_ms g_zxfer_profile_startup_latency_ms "${g_zxfer_profile_start_ms:-}"
+		g_zxfer_profile_startup_latency_recorded=1
+	fi
 	zxfer_profile_increment_counter g_zxfer_profile_source_zfs_calls
 	zxfer_profile_increment_counter g_zxfer_profile_destination_zfs_calls
 	zxfer_profile_increment_counter g_zxfer_profile_zfs_send_calls

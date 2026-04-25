@@ -4525,6 +4525,8 @@ test_trap_exit_emits_profile_summary_once_in_very_verbose_mode() {
 			g_zxfer_profile_has_data=1
 			g_zxfer_profile_summary_emitted=0
 			g_zxfer_profile_start_epoch=$(($(date +%s) - 3))
+			g_zxfer_profile_startup_latency_ms=99
+			g_zxfer_profile_cleanup_ms=55
 			g_zxfer_profile_ssh_setup_ms=111
 			g_zxfer_profile_source_snapshot_listing_ms=222
 			g_zxfer_profile_destination_snapshot_listing_ms=333
@@ -4562,6 +4564,10 @@ test_trap_exit_emits_profile_summary_once_in_very_verbose_mode() {
 	assertEquals "zxfer_trap_exit should preserve success when only emitting profiling output." 0 "$status"
 	assertContains "Very-verbose exits should emit the source zfs profile counter." \
 		"$output" "zxfer profile: source_zfs_calls=3"
+	assertContains "Very-verbose exits should emit startup latency timing." \
+		"$output" "zxfer profile: startup_latency_ms=99"
+	assertContains "Very-verbose exits should emit cleanup timing." \
+		"$output" "zxfer profile: cleanup_ms="
 	assertContains "Very-verbose exits should emit the accumulated ssh setup stage timing." \
 		"$output" "zxfer profile: ssh_setup_ms=111"
 	assertContains "Very-verbose exits should emit the accumulated snapshot diff/sort stage timing." \

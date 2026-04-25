@@ -370,6 +370,43 @@ test_zxfer_reset_send_receive_state_clears_queue_and_progress_scratch() {
 		"" "$g_zxfer_progress_bar_command_result"
 }
 
+test_profile_record_send_receive_pipeline_metrics_records_startup_latency_once() {
+	output=$(
+		(
+			g_option_V_very_verbose=1
+			g_option_n_dryrun=0
+			g_option_O_origin_host=""
+			g_option_T_target_host=""
+			g_zxfer_profile_has_data=0
+			g_zxfer_profile_start_ms=1000
+			g_zxfer_profile_startup_latency_ms=0
+			g_zxfer_profile_startup_latency_recorded=0
+			g_zxfer_profile_source_zfs_calls=0
+			g_zxfer_profile_destination_zfs_calls=0
+			g_zxfer_profile_zfs_send_calls=0
+			g_zxfer_profile_zfs_receive_calls=0
+			zxfer_profile_now_ms() {
+				printf '%s\n' 1250
+			}
+			zxfer_profile_record_send_receive_pipeline_metrics
+			zxfer_profile_now_ms() {
+				printf '%s\n' 2000
+			}
+			zxfer_profile_record_send_receive_pipeline_metrics
+			printf 'latency=%s\n' "$g_zxfer_profile_startup_latency_ms"
+			printf 'recorded=%s\n' "$g_zxfer_profile_startup_latency_recorded"
+			printf 'send_calls=%s\n' "$g_zxfer_profile_zfs_send_calls"
+		)
+	)
+
+	assertContains "The first live send/receive pipeline should record startup latency." \
+		"$output" "latency=250"
+	assertContains "Startup latency should only be recorded once per zxfer run." \
+		"$output" "recorded=1"
+	assertContains "The existing send-call counter should still be incremented for each pipeline." \
+		"$output" "send_calls=2"
+}
+
 test_zxfer_read_progress_estimate_capture_file_trims_trailing_newlines_and_handles_blank_paths() {
 	capture_file="$TEST_TMPDIR/progress_estimate_capture.txt"
 	printf '%s\n' "size	4096" >"$capture_file"

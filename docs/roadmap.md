@@ -68,17 +68,17 @@ supported-platform set or upstream OpenZFS support policy changes.
 
 ## Performance Validation
 
-- Add repeatable performance tests that can detect throughput regressions and
-  quantify the cost or benefit of changes such as `mbuffer`, send options,
-  concurrency tuning, and property-logic refactors.
-- Define a small set of representative fixtures: large snapshot chains, many
-  sibling datasets, local runs, remote runs, and compression-enabled runs.
-- Capture both wall-clock and behavioral metrics such as startup latency,
-  replication throughput, cleanup time, and remote round-trip counts where
-  practical.
-- Keep performance testing informative first. It does not need to become a
-  hard CI gate immediately, but it should be reliable enough to support manual
-  regression checks and future automation.
+- Keep the new `tests/run_perf_tests.sh` harness informative first: baseline
+  comparisons should warn on throughput, startup, or cleanup regressions
+  without becoming a hard CI gate.
+- Expand fixtures deliberately when a change needs them, such as `mbuffer`
+  experiments, send-option variants, larger compression cases, or additional
+  concurrency/property-logic profiles.
+- Preserve VM-backed optional execution through
+  `tests/run_vm_matrix.sh --test-layer perf` so agents and contributors can
+  collect comparable measurements inside disposable guests.
+- Promote a subset to automation only after the fixtures are stable enough to
+  avoid noisy host-specific failures.
 
 ## Known-Issue Burn-Down
 

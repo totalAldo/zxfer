@@ -125,6 +125,28 @@ What to inspect:
   failures during trap cleanup as collateral and focus on the earlier
   dataset-specific failure instead
 
+## Performance Harness Results
+
+`tests/run_perf_tests.sh` is informative first. Baseline regressions write
+warnings and `compare.tsv`, but they do not fail the run. A non-zero harness
+exit means setup, zxfer execution, cleanup, or replication correctness failed.
+
+What to inspect:
+
+- `summary.md` for the readable per-case average
+- `summary.tsv` for the machine-readable baseline to preserve with a PR or
+  local benchmark note
+- `samples.tsv` for each warmup and measured sample
+- `raw/<case>/*.stderr` for `zxfer profile: key=value` lines and structured
+  failure reports
+- `raw/<case>/*.mock_ssh.log` when a remote-mock case changes round-trip
+  counts
+
+If `startup_latency_ms` is `0`, zxfer did not dispatch a live send/receive
+pipeline for that sample. If `cleanup_ms` increases unexpectedly, inspect the
+same stderr log for trap-time cleanup warnings before treating the sample as a
+pure throughput regression.
+
 ## Backup Metadata Restore Failures
 
 Example:

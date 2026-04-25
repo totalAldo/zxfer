@@ -20,7 +20,7 @@ oneTimeTearDown() {
 }
 
 setUp() {
-	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER
+	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE
 	# shellcheck source=tests/vm/lib.sh
 	. "$VM_MATRIX_LIB"
 	zxfer_vm_reset_state
@@ -60,6 +60,14 @@ test_vm_parse_args_accepts_shunit2_test_layer() {
 
 	assertEquals "The VM runner should accept an opt-in shunit2 guest test layer." \
 		"shunit2" "$ZXFER_VM_TEST_LAYER"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_parse_args_accepts_perf_test_layer() {
+	zxfer_vm_parse_args --test-layer perf
+
+	assertEquals "The VM runner should accept an opt-in performance test layer." \
+		"perf" "$ZXFER_VM_TEST_LAYER"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -113,6 +121,22 @@ test_vm_validate_options_rejects_unknown_test_layer() {
 	assertEquals "Unknown VM test layers should fail closed." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Unknown test-layer validation should identify the bad value." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Unsupported test layer: nosuchlayer"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_validate_options_rejects_unknown_perf_profile() {
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		ZXFER_VM_TEST_LAYER=perf
+		ZXFER_VM_PERF_PROFILE=fast
+		zxfer_vm_validate_options
+	"
+
+	assertEquals "Unknown VM perf profiles should fail before rendering guest shell." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The validation error should identify the unsupported perf profile." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Unsupported VM performance profile: fast"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -678,6 +702,21 @@ test_vm_render_guest_test_script_uses_shunit2_runner_when_requested() {
 	assertContains "Opt-in shunit2 guest runs should invoke the shunit2 suite runner." \
 		"$script_body" "./tests/run_shunit_tests.sh --jobs 4"
 	assertNotContains "Opt-in shunit2 guest runs should not invoke the integration harness." \
+		"$script_body" "./tests/run_integration_zxfer.sh"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_render_guest_test_script_uses_perf_runner_when_requested() {
+	ZXFER_VM_TEST_LAYER=perf
+	ZXFER_VM_PERF_PROFILE=standard
+
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertContains "Opt-in performance guest runs should invoke the perf runner." \
+		"$script_body" "./tests/run_perf_tests.sh --yes --profile \"standard\""
+	assertContains "Performance guest runs should keep artifacts under the guest temp root." \
+		"$script_body" "ZXFER_PERF_OUTPUT_DIR=\"/var/tmp/zxfer-vm-matrix/perf-artifacts\""
+	assertNotContains "Opt-in performance guest runs should not invoke the integration harness." \
 		"$script_body" "./tests/run_integration_zxfer.sh"
 }
 

@@ -118,6 +118,22 @@ Important packaging note:
 - `zpool` is a test-harness dependency, not an installed-command runtime
   dependency.
 
+## Manual Performance Harness Dependencies
+
+These tools are used by [run_perf_tests.sh](../tests/run_perf_tests.sh), not by
+the installed `zxfer` command. The performance harness sources the direct
+integration harness in source-only mode, so it inherits the direct integration
+harness dependencies above.
+
+| Tool | Why it is needed |
+| --- | --- |
+| `dd` | write deterministic payload files into the temporary test datasets |
+| `awk`, `date` | summarize timing samples, throughput, and baseline comparisons |
+| mock `ssh` and passthrough `zstd` helpers | exercise remote and compressed remote cases without leaving the temporary host or guest |
+
+Perf dependencies are local QA dependencies only. They should not become
+installed-command runtime dependencies.
+
 ## VM Matrix Host Dependencies
 
 These tools are used by [run_vm_matrix.sh](../tests/run_vm_matrix.sh) on the

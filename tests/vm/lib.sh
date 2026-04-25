@@ -44,6 +44,7 @@ zxfer_vm_reset_state() {
 	ZXFER_VM_STREAM_GUEST_OUTPUT=${ZXFER_VM_STREAM_GUEST_OUTPUT:-0}
 	ZXFER_VM_FAILED_TESTS_ONLY=${ZXFER_VM_FAILED_TESTS_ONLY:-0}
 	ZXFER_VM_ONLY_TESTS=${ZXFER_VM_ONLY_TESTS:-}
+	ZXFER_VM_PERF_PROFILE=${ZXFER_VM_PERF_PROFILE:-smoke}
 }
 
 zxfer_vm_print_usage() {
@@ -55,7 +56,7 @@ Run zxfer guest-backed test workflows inside disposable VM guests.
 Options:
   --profile name         guest profile to run: smoke, local, full, ci
   --backend name         backend to use: auto, qemu, ci-managed
-  --test-layer name      guest test layer to run: integration, shunit2
+  --test-layer name      guest test layer to run: integration, shunit2, perf
   --guest name           select a specific guest; repeat to choose multiple guests
   --jobs count           run up to count guests at once (default: 1)
   --artifacts-dir path   override the host artifact root
@@ -84,6 +85,8 @@ Environment:
   ZXFER_VM_FAILED_TESTS_ONLY=1
                           suppress passing integration-test chatter inside guests
                           and imply live guest output streaming
+  ZXFER_VM_PERF_PROFILE   performance profile for --test-layer perf: smoke,
+                          standard (default: smoke)
   ZXFER_VM_QEMU_AARCH64_EFI
                           override the detected aarch64 UEFI firmware path
   ZXFER_VM_CI_MANAGED_GUEST
@@ -161,9 +164,18 @@ zxfer_vm_parse_args() {
 	done
 }
 
+zxfer_vm_validate_perf_profile_value() {
+	case "${1:-}" in
+	smoke | standard) ;;
+	*)
+		zxfer_vm_die "Unsupported VM performance profile: ${1:-}"
+		;;
+	esac
+}
+
 zxfer_vm_validate_options() {
 	case "$ZXFER_VM_TEST_LAYER" in
-	integration | shunit2) ;;
+	integration | shunit2 | perf) ;;
 	*)
 		zxfer_vm_die "Unsupported test layer: $ZXFER_VM_TEST_LAYER"
 		;;
@@ -183,6 +195,10 @@ zxfer_vm_validate_options() {
 			zxfer_vm_die "--only-test is only supported with --test-layer integration"
 		;;
 	esac
+
+	if [ "$ZXFER_VM_TEST_LAYER" = "perf" ]; then
+		zxfer_vm_validate_perf_profile_value "${ZXFER_VM_PERF_PROFILE:-smoke}"
+	fi
 }
 
 zxfer_vm_append_test_names() {
@@ -225,6 +241,9 @@ zxfer_vm_test_layer_log_label() {
 	shunit2)
 		printf '%s\n' "shunit2"
 		;;
+	perf)
+		printf '%s\n' "perf"
+		;;
 	*)
 		return 1
 		;;
@@ -238,6 +257,9 @@ zxfer_vm_test_layer_run_label() {
 		;;
 	shunit2)
 		printf '%s\n' "shunit2 runner"
+		;;
+	perf)
+		printf '%s\n' "performance runner"
 		;;
 	*)
 		return 1
@@ -361,6 +383,7 @@ zxfer_vm_render_guest_test_script() {
 	l_guest_shell=
 	l_integration_args=
 	l_shunit_jobs=
+	l_perf_profile=${ZXFER_VM_PERF_PROFILE:-smoke}
 
 	case "$l_test_layer" in
 	integration)
@@ -399,6 +422,18 @@ env TMPDIR="$l_tmpdir" ./tests/run_shunit_tests.sh --jobs $l_shunit_jobs
 EOF
 			;;
 		esac
+		;;
+	perf)
+		l_guest_shell=$(zxfer_vm_guest_qemu_shell "$l_guest") ||
+			zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
+		zxfer_vm_validate_perf_profile_value "$l_perf_profile"
+		cat <<EOF
+mkdir -p "$l_tmpdir"
+cd "$l_repo_dir"
+env TMPDIR="$l_tmpdir" \\
+	ZXFER_PERF_OUTPUT_DIR="$l_tmpdir/perf-artifacts" \\
+	$l_guest_shell ./tests/run_perf_tests.sh --yes --profile "$l_perf_profile"
+EOF
 		;;
 	*)
 		zxfer_vm_die "Unsupported test layer: $l_test_layer"

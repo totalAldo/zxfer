@@ -62,13 +62,19 @@ Push to a remote destination:
 ./zxfer -V -R tank/data backup/data
 ```
 
-This end-of-run profile now includes stage timings plus contention and reuse
-counters for ssh control-socket waits, remote-capability cache waits,
+This end-of-run profile now includes startup latency before the first live
+send/receive pipeline, trap-cleanup timing, stage timings, and contention and
+reuse counters for ssh control-socket waits, remote-capability cache waits,
 capability-bootstrap sources (`live`, `cache`, `memory`), and any remaining
 direct remote helper probes. While the run is active, `-V` also prints
 prefixed remote ssh commands, remote probe commands, and ssh control-socket
 check/open commands so a slow remote bootstrap shows the exact in-flight
 command.
+
+The manual performance runner in `tests/run_perf_tests.sh` consumes these
+profile lines when producing sample and summary artifacts. Prefer
+`tests/run_vm_matrix.sh --profile smoke --test-layer perf` when you want that
+measurement inside a disposable guest.
 
 ### `-n` Dry-run preview
 

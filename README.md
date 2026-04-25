@@ -104,7 +104,8 @@ Use remote compression:
   so parent and child datasets do not receive concurrently. Local-origin runs
   require GNU `parallel`; remote-origin runs require a resolved origin-host
   `parallel` helper
-- `-V`: enable very verbose debug output and end-of-run profiling counters
+- `-V`: enable very verbose debug output and end-of-run profiling counters,
+  including startup latency and trap-cleanup timing
 - `-x pattern`: exclude datasets from recursive replication
 - `-Y`: repeat replication until no sends or destroys are performed, or until
   the built-in iteration cap is reached
@@ -204,19 +205,25 @@ For unattended integration coverage on a disposable guest boundary, prefer:
 ./tests/run_vm_matrix.sh --profile smoke
 ```
 
+For manual, non-gating throughput checks inside a disposable guest, use:
+
+```sh
+./tests/run_vm_matrix.sh --profile smoke --test-layer perf
+```
+
 Use [tests/run_integration_zxfer.sh](./tests/run_integration_zxfer.sh)
 directly only when you explicitly want the manual host-side harness on a
 disposable ZFS-capable system.
 
-Full test-layer guidance, safety notes, coverage details, and CI workflows live
-in [docs/testing.md](./docs/testing.md).
+Full test-layer guidance, performance-harness usage, safety notes, coverage
+details, and CI workflows live in [docs/testing.md](./docs/testing.md).
 
 ## Documentation
 
 - [docs/README.md](./docs/README.md): documentation index
 - [docs/whats-new-since-v1.1.7.md](./docs/whats-new-since-v1.1.7.md): operator-focused upgrade guide from the legacy 2019 release
 - [docs/platforms.md](./docs/platforms.md): platform support and compatibility notes
-- [docs/testing.md](./docs/testing.md): unit, coverage, and integration workflows
+- [docs/testing.md](./docs/testing.md): unit, coverage, integration, and manual performance workflows
 - [docs/troubleshooting.md](./docs/troubleshooting.md): common failures and debugging hints
 - [docs/architecture.md](./docs/architecture.md): module layout and replication flow
 - [examples/README.md](./examples/README.md): runnable command templates
