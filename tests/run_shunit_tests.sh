@@ -18,6 +18,8 @@ RUNNER_NEXT_WORKER_ID=1
 RUNNER_DEFER_SIGNALS=0
 RUNNER_DEFERRED_SIGNAL=""
 RUNNER_FOREGROUND_SUITE_PID=""
+RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=""
+RUNNER_FOREGROUND_SUITE_STATUS_FILE=""
 RUNNER_SHUTTING_DOWN=0
 RUNNER_SIGNAL_SHUTDOWN_GRACE_SECONDS=2
 
@@ -121,12 +123,21 @@ resolve_test_shell_runner() {
 list_child_pids_for_parent() {
 	l_parent_pid=$1
 	l_ps_output=
+	l_pgrep_output=
 
 	case "$l_parent_pid" in
 	'' | *[!0-9]*)
 		return 1
 		;;
 	esac
+
+	if command -v pgrep >/dev/null 2>&1; then
+		l_pgrep_output=$(pgrep -P "$l_parent_pid" 2>/dev/null || true)
+		if [ -n "$l_pgrep_output" ]; then
+			printf '%s\n' "$l_pgrep_output"
+			return 0
+		fi
+	fi
 
 	if l_ps_output=$(ps -eo pid= -o ppid= 2>/dev/null); then
 		:
@@ -145,13 +156,112 @@ list_child_pids_for_parent() {
 	'
 }
 
-signal_process_descendants() {
-	l_signal=$1
-	l_parent_pid=$2
+signal_number_for_name() {
+	case "$1" in
+	0)
+		printf '%s\n' 0
+		;;
+	HUP | hup)
+		printf '%s\n' 1
+		;;
+	INT | int)
+		printf '%s\n' 2
+		;;
+	KILL | kill)
+		printf '%s\n' 9
+		;;
+	TERM | term)
+		printf '%s\n' 15
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
 
-	for l_child_pid in $(list_child_pids_for_parent "$l_parent_pid"); do
-		signal_process_descendants "$l_signal" "$l_child_pid"
-		kill -s "$l_signal" "$l_child_pid" >/dev/null 2>&1 || true
+send_signal_to_pid() {
+	l_send_signal_to_pid_signal=$1
+	l_send_signal_to_pid_pid=$2
+	l_send_signal_to_pid_number=
+
+	case "$l_send_signal_to_pid_pid" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+
+	# Some illumos/Solaris shells have historically been less consistent
+	# about symbolic signal forms; keep numeric signals as the final fallback.
+	kill -s "$l_send_signal_to_pid_signal" "$l_send_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	kill "-$l_send_signal_to_pid_signal" "$l_send_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	l_send_signal_to_pid_number=$(signal_number_for_name "$l_send_signal_to_pid_signal" 2>/dev/null || true)
+	if [ -n "$l_send_signal_to_pid_number" ]; then
+		kill "-$l_send_signal_to_pid_number" "$l_send_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	fi
+	return 1
+}
+
+process_state_for_pid() {
+	l_process_state_for_pid_pid=$1
+	l_process_state_for_pid_state=
+
+	l_process_state_for_pid_state=$(ps -o stat= -p "$l_process_state_for_pid_pid" 2>/dev/null |
+		awk '
+			$1 == "STAT" || $1 == "STATE" { next }
+			$1 != "" { print $1; exit }
+		')
+	if [ -z "$l_process_state_for_pid_state" ]; then
+		l_process_state_for_pid_state=$(ps -o state= -p "$l_process_state_for_pid_pid" 2>/dev/null |
+			awk '
+				$1 == "S" || $1 == "STAT" || $1 == "STATE" { next }
+				$1 != "" { print $1; exit }
+			')
+	fi
+	if [ -z "$l_process_state_for_pid_state" ]; then
+		l_process_state_for_pid_state=$(ps -o s= -p "$l_process_state_for_pid_pid" 2>/dev/null |
+			awk '
+				$1 == "S" || $1 == "STAT" || $1 == "STATE" { next }
+				$1 != "" { print $1; exit }
+			')
+	fi
+
+	printf '%s\n' "$l_process_state_for_pid_state"
+}
+
+process_running_p() {
+	l_process_running_p_pid=$1
+	l_process_running_p_state=
+
+	if ! send_signal_to_pid 0 "$l_process_running_p_pid"; then
+		return 1
+	fi
+
+	l_process_running_p_state=$(process_state_for_pid "$l_process_running_p_pid")
+	case "$l_process_running_p_state" in
+	Z* | z* | *zombie* | *defunct*)
+		return 1
+		;;
+	esac
+
+	return 0
+}
+
+signal_process_descendants() {
+	l_signal_process_descendants_signal=$1
+	l_signal_process_descendants_pending=$2
+	l_signal_process_descendants_next=
+	l_signal_process_descendants_parent=
+	l_signal_process_descendants_child=
+
+	while [ -n "$l_signal_process_descendants_pending" ]; do
+		l_signal_process_descendants_next=
+		for l_signal_process_descendants_parent in $l_signal_process_descendants_pending; do
+			for l_signal_process_descendants_child in $(list_child_pids_for_parent "$l_signal_process_descendants_parent"); do
+				send_signal_to_pid "$l_signal_process_descendants_signal" "$l_signal_process_descendants_child" || true
+				l_signal_process_descendants_next="${l_signal_process_descendants_next}${l_signal_process_descendants_next:+ }$l_signal_process_descendants_child"
+			done
+		done
+		l_signal_process_descendants_pending=$l_signal_process_descendants_next
 	done
 }
 
@@ -166,7 +276,7 @@ signal_pid_and_descendants() {
 	esac
 
 	signal_process_descendants "$l_signal" "$l_pid"
-	kill -s "$l_signal" "$l_pid" >/dev/null 2>&1 || true
+	send_signal_to_pid "$l_signal" "$l_pid" || true
 }
 
 count_runnable_suites() {
@@ -261,6 +371,8 @@ cleanup_runner_state() {
 	RUNNER_PENDING_WORKERS=""
 	RUNNER_INFLIGHT_COUNT=0
 	RUNNER_FOREGROUND_SUITE_PID=""
+	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=""
+	RUNNER_FOREGROUND_SUITE_STATUS_FILE=""
 }
 
 append_worker_id() {
@@ -304,6 +416,7 @@ consume_deferred_runner_signal() {
 
 signal_foreground_suite() {
 	l_signal=$1
+	l_child_pid=""
 
 	case "${RUNNER_FOREGROUND_SUITE_PID:-}" in
 	'' | *[!0-9]*)
@@ -311,43 +424,143 @@ signal_foreground_suite() {
 		;;
 	esac
 
-	signal_pid_and_descendants "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID"
+	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
+		l_child_pid=$(cat "$RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE" 2>/dev/null || true)
+	fi
+	case "$l_child_pid" in
+	'' | *[!0-9]*)
+		signal_pid_and_descendants "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID"
+		;;
+	*)
+		signal_pid_and_descendants "$l_signal" "$l_child_pid"
+		send_signal_to_pid "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" || true
+		;;
+	esac
+}
+
+signal_foreground_suite_child() {
+	l_signal=$1
+	l_child_pid=""
+
+	case "${RUNNER_FOREGROUND_SUITE_PID:-}" in
+	'' | *[!0-9]*)
+		return 0
+		;;
+	esac
+
+	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
+		l_child_pid=$(cat "$RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE" 2>/dev/null || true)
+	fi
+	case "$l_child_pid" in
+	'' | *[!0-9]*)
+		signal_process_descendants "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID"
+		;;
+	*)
+		signal_pid_and_descendants "$l_signal" "$l_child_pid"
+		;;
+	esac
 }
 
 foreground_suite_running_p() {
+	l_child_pid=""
+
 	case "${RUNNER_FOREGROUND_SUITE_PID:-}" in
 	'' | *[!0-9]*)
 		return 1
 		;;
 	esac
 
-	if kill -s 0 "$RUNNER_FOREGROUND_SUITE_PID" >/dev/null 2>&1; then
+	# A readable status file is written only after the foreground wrapper has
+	# reaped its suite child. Do not keep consulting a stale child PID after
+	# that point; illumos/OmniOS can keep recently reaped PIDs observable long
+	# enough to confuse signal-cleanup polling.
+	if [ -r "${RUNNER_FOREGROUND_SUITE_STATUS_FILE:-}" ]; then
+		return 1
+	fi
+
+	if process_running_p "$RUNNER_FOREGROUND_SUITE_PID"; then
 		return 0
 	fi
+	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
+		l_child_pid=$(cat "$RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE" 2>/dev/null || true)
+	fi
+	case "$l_child_pid" in
+	'' | *[!0-9]*) ;;
+	*)
+		if process_running_p "$l_child_pid"; then
+			return 0
+		fi
+		;;
+	esac
 
 	return 1
 }
 
 run_suite_foreground() {
 	l_suite_path=$1
+	l_status_file=
+	l_child_pid_file=
+	l_wait_status=0
 
 	emit_suite_banner "$l_suite_path"
-	RUNNER_DEFER_SIGNALS=1
-	if [ -n "${TEST_SHELL_RUNNER:-}" ]; then
-		"$TEST_SHELL_RUNNER" "$l_suite_path" &
-	else
-		"$l_suite_path" &
+	if ! ensure_runner_state_dir; then
+		overall_status=1
+		failed_count=$((failed_count + 1))
+		return 0
 	fi
+	l_status_file="$RUNNER_STATE_DIR/foreground.status"
+	l_child_pid_file="$RUNNER_STATE_DIR/foreground.child.pid"
+	rm -f "$l_status_file"
+	rm -f "$l_child_pid_file"
+	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=$l_child_pid_file
+	RUNNER_FOREGROUND_SUITE_STATUS_FILE=$l_status_file
+
+	# macOS /bin/sh can defer traps while blocked in wait, so serial mode
+	# polls this wrapper's status file instead of waiting directly on the suite.
+	RUNNER_DEFER_SIGNALS=1
+	(
+		set +e
+		trap - HUP INT TERM
+		if [ -n "${TEST_SHELL_RUNNER:-}" ]; then
+			"$TEST_SHELL_RUNNER" "$l_suite_path" &
+		else
+			"$l_suite_path" &
+		fi
+		l_suite_pid=$!
+		printf '%s\n' "$l_suite_pid" >"$l_child_pid_file" 2>/dev/null || :
+		wait "$l_suite_pid"
+		l_status=$?
+		printf '%s\n' "$l_status" >"$l_status_file" 2>/dev/null || :
+		exit "$l_status"
+	) &
 	RUNNER_FOREGROUND_SUITE_PID=$!
 	RUNNER_DEFER_SIGNALS=0
 	consume_deferred_runner_signal
 
+	while [ ! -r "$l_status_file" ]; do
+		if ! foreground_suite_running_p; then
+			break
+		fi
+		# OmniOS /bin/sh can let errexit win over a pending trap when a
+		# foreground sleep is interrupted by TERM. Keep polling sleeps non-fatal
+		# so signal traps still run cleanup.
+		sleep 1 || true
+	done
+
 	if wait "$RUNNER_FOREGROUND_SUITE_PID"; then
-		l_status=0
+		l_wait_status=0
 	else
-		l_status=$?
+		l_wait_status=$?
 	fi
 	RUNNER_FOREGROUND_SUITE_PID=""
+	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=""
+	RUNNER_FOREGROUND_SUITE_STATUS_FILE=""
+
+	l_status=$l_wait_status
+	if [ -r "$l_status_file" ]; then
+		l_status=$(cat "$l_status_file" 2>/dev/null || printf '%s\n' "$l_wait_status")
+	fi
+	rm -f "$l_status_file" "$l_child_pid_file"
 
 	if [ "$l_status" -eq 0 ]; then
 		passed_count=$((passed_count + 1))
@@ -399,7 +612,7 @@ launch_suite_worker() {
 				return 1
 				;;
 			esac
-			if kill -s 0 "$l_suite_pid" >/dev/null 2>&1; then
+			if process_running_p "$l_suite_pid"; then
 				return 0
 			fi
 			return 1
@@ -410,7 +623,7 @@ launch_suite_worker() {
 				if ! runner_suite_child_running_p; then
 					return 0
 				fi
-				sleep 1
+				sleep 1 || true
 				l_remaining=$((l_remaining - 1))
 			done
 			if ! runner_suite_child_running_p; then
@@ -539,13 +752,13 @@ wait_for_next_worker_completion() {
 				continue
 				;;
 			esac
-			if ! kill -s 0 "$l_pid" >/dev/null 2>&1; then
+			if ! process_running_p "$l_pid"; then
 				: >"$l_ready_file"
 				RUNNER_INFLIGHT_COUNT=$((RUNNER_INFLIGHT_COUNT - 1))
 				return 0
 			fi
 		done
-		sleep 1
+		sleep 1 || true
 	done
 
 	return 0
@@ -606,8 +819,29 @@ signal_pending_workers() {
 	done
 }
 
+signal_pending_worker_children() {
+	l_signal=$1
+
+	for l_worker_id in $RUNNER_PENDING_WORKERS; do
+		l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
+		if [ -r "$l_pid_file" ]; then
+			l_pid=$(cat "$l_pid_file" 2>/dev/null || true)
+			case "$l_pid" in
+			'' | *[!0-9]*) ;;
+			*)
+				signal_pid_and_descendants "$l_signal" "$l_pid"
+				;;
+			esac
+		fi
+	done
+}
+
 pending_worker_pids_running_p() {
 	for l_worker_id in $RUNNER_PENDING_WORKERS; do
+		l_status_file="$RUNNER_STATE_DIR/$l_worker_id.status"
+		if [ -r "$l_status_file" ]; then
+			continue
+		fi
 		for l_pid_file in \
 			"$RUNNER_STATE_DIR/$l_worker_id.child.pid" \
 			"$RUNNER_STATE_DIR/$l_worker_id.pid"; do
@@ -618,7 +852,7 @@ pending_worker_pids_running_p() {
 				continue
 				;;
 			esac
-			if kill -s 0 "$l_pid" >/dev/null 2>&1; then
+			if process_running_p "$l_pid"; then
 				return 0
 			fi
 		done
@@ -646,7 +880,7 @@ wait_for_runner_tracked_shutdown() {
 		if ! runner_tracked_processes_running_p; then
 			return 0
 		fi
-		sleep 1
+		sleep 1 || true
 		l_remaining=$((l_remaining - 1))
 	done
 
@@ -711,11 +945,23 @@ handle_runner_signal() {
 
 	RUNNER_SHUTTING_DOWN=1
 	trap - HUP INT TERM
-	signal_foreground_suite TERM
-	signal_pending_workers TERM
+	# Keep wrapper shells alive while payload suites are terminated so they can
+	# reap children before the runner exits. This avoids persistent suite PIDs
+	# on illumos/OmniOS when a suite ignores TERM.
+	signal_foreground_suite_child TERM
+	signal_pending_worker_children TERM
 	if ! wait_for_runner_tracked_shutdown; then
-		signal_foreground_suite KILL
-		signal_pending_workers KILL
+		signal_foreground_suite_child KILL
+		signal_pending_worker_children KILL
+		if ! wait_for_runner_tracked_shutdown; then
+			signal_foreground_suite TERM
+			signal_pending_workers TERM
+			if ! wait_for_runner_tracked_shutdown; then
+				signal_foreground_suite KILL
+				signal_pending_workers KILL
+				wait_for_runner_tracked_shutdown || :
+			fi
+		fi
 	fi
 	wait_for_runner_tracked_processes
 	cleanup_runner_state

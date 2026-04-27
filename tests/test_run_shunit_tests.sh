@@ -22,9 +22,49 @@ setUp() {
 	FAKE_TEST_SHELL_LOG="$TEST_TMPDIR/fake-test-shell.log"
 	FAKE_SUITE_STARTED="$TEST_TMPDIR/fake-suite.started"
 	FAKE_SUITE_RELEASE="$TEST_TMPDIR/fake-suite.release"
+	RUN_SHUNIT_TESTS_WAIT_LIMIT=${ZXFER_RUN_SHUNIT_TESTS_WAIT_LIMIT:-15}
+	RUN_SHUNIT_TESTS_WATCHDOG_SECONDS=${ZXFER_RUN_SHUNIT_TESTS_WATCHDOG_SECONDS:-20}
 	: >"$FAKE_SUITE_LOG"
 	: >"$FAKE_TEST_SHELL_LOG"
 	rm -f "$FAKE_SUITE_STARTED" "$FAKE_SUITE_RELEASE"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+find_runner_ancestor_for_suite_pid() {
+	l_pid=$1
+	l_expected_runner_pid=${2:-}
+	l_current_test_pid=$$
+	l_runner_pid=
+	l_cmd=
+	l_runner_basename=$(basename "$RUN_SHUNIT_TESTS_BIN")
+
+	while :; do
+		case "$l_pid" in
+		'' | *[!0-9]* | 0 | 1)
+			break
+			;;
+		esac
+
+		if [ "$l_pid" = "$l_current_test_pid" ]; then
+			break
+		fi
+
+		l_cmd=$(process_command_for_pid "$l_pid")
+		case "$l_cmd" in
+		*"$RUN_SHUNIT_TESTS_BIN"* | *"$l_runner_basename"*)
+			l_runner_pid=$l_pid
+			;;
+		esac
+
+		if [ -n "$l_expected_runner_pid" ] && [ "$l_pid" = "$l_expected_runner_pid" ]; then
+			printf '%s\n' "$l_runner_pid"
+			return 0
+		fi
+
+		l_pid=$(process_parent_pid "$l_pid")
+	done
+
+	printf '%s\n' "$l_runner_pid"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -55,15 +95,44 @@ EOF
 	chmod +x "$l_fake_shell_path"
 }
 
+# Coverage wrappers can obscure command lines and ancestry. The cleanup tests
+# need the exact nested runner PID they intentionally signal, not a ps guess.
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+write_fake_runner_pid_wrapper() {
+	l_fake_runner_path=$1
+	cat >"$l_fake_runner_path" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$$" >"${FAKE_RUNNER_PID_FILE:?}" || exit 125
+exec "${FAKE_RUNNER_TARGET:?}" "$@"
+EOF
+	chmod +x "$l_fake_runner_path"
+}
+
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 process_command_for_pid() {
 	l_pid=$1
 	l_cmd=
 
-	l_cmd=$(ps -o args= -p "$l_pid" 2>/dev/null | sed -n '1p')
+	if command -v pargs >/dev/null 2>&1; then
+		l_cmd=$(pargs -l "$l_pid" 2>/dev/null | sed -n '1p')
+	fi
+	l_cmd=$(printf '%s\n' "$l_cmd" | sed -n '1p')
+	if [ -z "$l_cmd" ]; then
+		l_cmd=$(ps -o args= -p "$l_pid" 2>/dev/null | sed -n '1p')
+	fi
+	case "$(printf '%s\n' "$l_cmd" | tr -d '[:space:]')" in
+	ARGS | COMMAND | CMD)
+		l_cmd=
+		;;
+	esac
 	if [ -z "$l_cmd" ]; then
 		l_cmd=$(ps -o command= -p "$l_pid" 2>/dev/null | sed -n '1p')
 	fi
+	case "$(printf '%s\n' "$l_cmd" | tr -d '[:space:]')" in
+	ARGS | COMMAND | CMD)
+		l_cmd=
+		;;
+	esac
 
 	printf '%s\n' "$l_cmd"
 }
@@ -73,12 +142,87 @@ process_parent_pid() {
 	l_pid=$1
 	l_ppid=
 
-	l_ppid=$(ps -o ppid= -p "$l_pid" 2>/dev/null | tr -d '[:space:]')
+	l_ppid=$(ps -o ppid= -p "$l_pid" 2>/dev/null |
+		awk '$1 ~ /^[0-9]+$/ { print $1; exit }')
 	if [ -z "$l_ppid" ]; then
-		l_ppid=$(ps -o ppid -p "$l_pid" 2>/dev/null | sed -n '2p' | tr -d '[:space:]')
+		l_ppid=$(ps -o ppid -p "$l_pid" 2>/dev/null |
+			awk '$1 ~ /^[0-9]+$/ { value = $1 } END { if (value != "") print value }')
 	fi
 
 	printf '%s\n' "$l_ppid"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+process_state_for_pid() {
+	l_pid=$1
+	l_state=
+
+	l_state=$(ps -o stat= -p "$l_pid" 2>/dev/null |
+		awk '
+			$1 == "STAT" || $1 == "STATE" { next }
+			$1 != "" { print $1; exit }
+		')
+	if [ -z "$l_state" ]; then
+		l_state=$(ps -o state= -p "$l_pid" 2>/dev/null |
+			awk '
+				$1 == "S" || $1 == "STAT" || $1 == "STATE" { next }
+				$1 != "" { print $1; exit }
+			')
+	fi
+	if [ -z "$l_state" ]; then
+		l_state=$(ps -o s= -p "$l_pid" 2>/dev/null |
+			awk '
+				$1 == "S" || $1 == "STAT" || $1 == "STATE" { next }
+				$1 != "" { print $1; exit }
+			')
+	fi
+
+	printf '%s\n' "$l_state"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+signal_number_for_name() {
+	case "$1" in
+	0)
+		printf '%s\n' 0
+		;;
+	HUP | hup)
+		printf '%s\n' 1
+		;;
+	INT | int)
+		printf '%s\n' 2
+		;;
+	KILL | kill)
+		printf '%s\n' 9
+		;;
+	TERM | term)
+		printf '%s\n' 15
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+send_test_signal_to_pid() {
+	l_test_signal_to_pid_signal=$1
+	l_test_signal_to_pid_pid=$2
+	l_test_signal_to_pid_number=
+
+	case "$l_test_signal_to_pid_pid" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+
+	kill -s "$l_test_signal_to_pid_signal" "$l_test_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	kill "-$l_test_signal_to_pid_signal" "$l_test_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	l_test_signal_to_pid_number=$(signal_number_for_name "$l_test_signal_to_pid_signal" 2>/dev/null || true)
+	if [ -n "$l_test_signal_to_pid_number" ]; then
+		kill "-$l_test_signal_to_pid_number" "$l_test_signal_to_pid_pid" >/dev/null 2>&1 && return 0
+	fi
+	return 1
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -114,26 +258,21 @@ fake_suite_process_running_p() {
 	l_state=
 	l_cmd=
 
-	if ! kill -s 0 "$l_pid" >/dev/null 2>&1; then
+	if ! send_test_signal_to_pid 0 "$l_pid"; then
 		return 1
 	fi
 
 	if [ -n "$l_expected_marker" ]; then
 		l_cmd=$(process_command_for_pid "$l_pid")
-		if [ -n "$l_cmd" ]; then
-			case "$l_cmd" in
-			*"$l_expected_marker"*) ;;
-			*)
-				return 1
-				;;
-			esac
-		fi
+		case "$l_cmd" in
+		*"$l_expected_marker"*) ;;
+		*)
+			return 1
+			;;
+		esac
 	fi
 
-	l_state=$(ps -o stat= -p "$l_pid" 2>/dev/null | tr -d '[:space:]')
-	if [ -z "$l_state" ]; then
-		l_state=$(ps -o s= -p "$l_pid" 2>/dev/null | tr -d '[:space:]')
-	fi
+	l_state=$(process_state_for_pid "$l_pid")
 	case "$l_state" in
 	Z* | z* | *zombie* | *defunct*)
 		return 1
@@ -141,6 +280,260 @@ fake_suite_process_running_p() {
 	esac
 
 	return 0
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_find_runner_ancestor_does_not_select_outer_runner_when_expected_pid_is_missing() {
+	result=$(
+		l_current_pid=$$
+		process_parent_pid() {
+			if [ "$1" = "$l_current_pid" ]; then
+				printf '%s\n' 300
+				return 0
+			fi
+			if [ "$1" = 100 ]; then
+				printf '%s\n' 200
+			elif [ "$1" = 200 ]; then
+				printf '%s\n' "$l_current_pid"
+			elif [ "$1" = 300 ]; then
+				printf '%s\n' 1
+			else
+				printf '%s\n' ""
+			fi
+		}
+		process_command_for_pid() {
+			if [ "$1" = 300 ]; then
+				printf '%s\n' "$RUN_SHUNIT_TESTS_BIN --jobs 1 tests/test_run_shunit_tests.sh"
+			else
+				printf '%s\n' "unrelated-process"
+			fi
+		}
+
+		find_runner_ancestor_for_suite_pid 100 999
+	)
+
+	assertEquals "When the expected nested runner PID is not in the process tree, the helper must not fall back to an outer shunit runner ancestor." \
+		"" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_find_runner_ancestor_uses_nearest_nested_runner_before_current_test_shell() {
+	result=$(
+		l_current_pid=$$
+		process_parent_pid() {
+			if [ "$1" = "$l_current_pid" ]; then
+				printf '%s\n' 300
+				return 0
+			fi
+			if [ "$1" = 100 ]; then
+				printf '%s\n' 200
+			elif [ "$1" = 200 ]; then
+				printf '%s\n' "$l_current_pid"
+			elif [ "$1" = 300 ]; then
+				printf '%s\n' 1
+			else
+				printf '%s\n' ""
+			fi
+		}
+		process_command_for_pid() {
+			if [ "$1" = 200 ]; then
+				printf '%s\n' "$RUN_SHUNIT_TESTS_BIN --jobs 1 nested-suite.sh"
+			elif [ "$1" = 300 ]; then
+				printf '%s\n' "$RUN_SHUNIT_TESTS_BIN --jobs 1 tests/test_run_shunit_tests.sh"
+			else
+				printf '%s\n' "unrelated-process"
+			fi
+		}
+
+		find_runner_ancestor_for_suite_pid 100 999
+	)
+
+	assertEquals "When shell wrappers hide the original background PID, the helper should still signal the nearest nested runner and stop before the outer runner." \
+		200 "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_find_runner_ancestor_prefers_top_level_runner_before_expected_launcher() {
+	result=$(
+		l_current_pid=$$
+		process_parent_pid() {
+			if [ "$1" = "$l_current_pid" ]; then
+				printf '%s\n' 400
+				return 0
+			fi
+			if [ "$1" = 100 ]; then
+				printf '%s\n' 200
+			elif [ "$1" = 200 ]; then
+				printf '%s\n' 250
+			elif [ "$1" = 250 ]; then
+				printf '%s\n' 300
+			elif [ "$1" = 300 ]; then
+				printf '%s\n' "$l_current_pid"
+			elif [ "$1" = 400 ]; then
+				printf '%s\n' 1
+			else
+				printf '%s\n' ""
+			fi
+		}
+		process_command_for_pid() {
+			if [ "$1" = 200 ]; then
+				printf '%s\n' "/bin/sh $RUN_SHUNIT_TESTS_BIN --jobs 1 foreground-wrapper"
+			elif [ "$1" = 250 ]; then
+				printf '%s\n' "/bin/sh $RUN_SHUNIT_TESTS_BIN --jobs 1 nested-suite.sh"
+			elif [ "$1" = 300 ]; then
+				printf '%s\n' "bash launcher"
+			else
+				printf '%s\n' "unrelated-process"
+			fi
+		}
+
+		find_runner_ancestor_for_suite_pid 100 300
+	)
+
+	assertEquals "When wrapper processes share the runner command line, the helper should signal the top-level nested runner below the launcher." \
+		250 "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_process_command_for_pid_prefers_full_pargs_output() {
+	result=$(
+		command() {
+			if [ "$1:$2" = "-v:pargs" ]; then
+				printf '%s\n' "pargs"
+				return 0
+			fi
+			"$@"
+		}
+		pargs() {
+			if [ "$1:$2" = "-l:123" ]; then
+				printf '%s\n' "/bin/sh /very/long/path/term-resistant-serial-suite.sh"
+				return 0
+			fi
+			return 1
+		}
+		ps() {
+			if [ "$1:$2:$3:$4" = "-o:args=:-p:123" ]; then
+				printf '%s\n' "/bin/sh /very/long/path/term-resistant-s"
+				return 0
+			fi
+			return 1
+		}
+
+		process_command_for_pid 123
+	)
+
+	assertEquals "OmniOS command matching should prefer pargs so truncated ps output does not hide live term-resistant suites." \
+		"/bin/sh /very/long/path/term-resistant-serial-suite.sh" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_process_state_for_pid_ignores_omnios_headers_before_zombie_state() {
+	result=$(
+		ps() {
+			if [ "$1:$2:$3:$4" = "-o:stat=:-p:123" ]; then
+				printf '%s\n' "STAT"
+				printf '%s\n' "Z"
+				return 0
+			fi
+			return 1
+		}
+
+		process_state_for_pid 123
+	)
+
+	assertEquals "Process-state parsing should ignore OmniOS-style headers before checking for zombie processes." \
+		"Z" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_process_state_for_pid_uses_state_column_when_stat_is_unavailable() {
+	result=$(
+		ps() {
+			if [ "$1:$2:$3:$4" = "-o:stat=:-p:123" ]; then
+				return 1
+			elif [ "$1:$2:$3:$4" = "-o:state=:-p:123" ]; then
+				printf '%s\n' "STATE"
+				printf '%s\n' "Z"
+				return 0
+			fi
+			return 1
+		}
+
+		process_state_for_pid 123
+	)
+
+	assertEquals "Process-state parsing should use the state column when stat is unavailable." \
+		"Z" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_process_state_for_pid_falls_back_to_short_state_column() {
+	result=$(
+		ps() {
+			if [ "$1:$2:$3:$4" = "-o:stat=:-p:123" ]; then
+				return 1
+			elif [ "$1:$2:$3:$4" = "-o:state=:-p:123" ]; then
+				return 1
+			elif [ "$1:$2:$3:$4" = "-o:s=:-p:123" ]; then
+				printf '%s\n' "S"
+				printf '%s\n' "Z"
+				return 0
+			fi
+			return 1
+		}
+
+		process_state_for_pid 123
+	)
+
+	assertEquals "Process-state parsing should use the short state column when stat is unavailable." \
+		"Z" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_send_test_signal_to_pid_uses_numeric_signal_fallback() {
+	result=$(
+		kill() {
+			if [ "$1:$2" = "-s:KILL" ] || [ "$1:$2" = "-KILL:123" ]; then
+				return 1
+			elif [ "$1:$2" = "-9:123" ]; then
+				return 0
+			fi
+			return 1
+		}
+
+		if send_test_signal_to_pid KILL 123; then
+			printf '%s\n' "ok"
+		else
+			printf '%s\n' "failed"
+		fi
+	)
+
+	assertEquals "Signal helpers should fall back to numeric KILL for shell kill variants that reject symbolic forms." \
+		"ok" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_fake_suite_process_running_requires_expected_marker() {
+	result=$(
+		send_test_signal_to_pid() {
+			return 0
+		}
+		process_command_for_pid() {
+			printf '%s\n' ""
+		}
+		process_state_for_pid() {
+			printf '%s\n' ""
+		}
+
+		if fake_suite_process_running_p 123 "term-resistant-suite.sh"; then
+			printf '%s\n' "running"
+		else
+			printf '%s\n' "gone"
+		fi
+	)
+
+	assertEquals "A stale or reused PID without the fake-suite marker should not be reported as the term-resistant suite." \
+		"gone" "$result"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -341,6 +734,7 @@ test_run_shunit_tests_streams_serial_output_when_jobs_is_one() {
 	l_suite_path="$TEST_TMPDIR/serial-stream-suite.sh"
 	l_output_path="$TEST_TMPDIR/serial-stream.output"
 	l_status_path="$TEST_TMPDIR/serial-stream.status"
+	l_restore_errexit=0
 
 	write_fake_suite_with_body "$l_suite_path" <<'EOF'
 #!/bin/sh
@@ -369,7 +763,7 @@ EOF
 
 	l_saw_live_output=1
 	l_wait_count=0
-	while [ "$l_wait_count" -lt 5 ]; do
+	while [ "$l_wait_count" -lt "$RUN_SHUNIT_TESTS_WAIT_LIMIT" ]; do
 		if [ -f "$FAKE_SUITE_STARTED" ]; then
 			case "$(cat "$l_output_path" 2>/dev/null || true)" in
 			*"serial-start"*)
@@ -386,7 +780,14 @@ EOF
 		0 "$l_saw_live_output"
 
 	: >"$FAKE_SUITE_RELEASE"
-	wait "$l_runner_pid"
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	wait "$l_runner_pid" >/dev/null 2>&1
+	[ "$l_restore_errexit" = "1" ] && set -e
 
 	assertEquals "Serial execution should still complete successfully after streaming live output." \
 		0 "$(cat "$l_status_path")"
@@ -399,10 +800,13 @@ EOF
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_signal_cleanup_kills_term_resistant_serial_suite() {
 	l_suite_path="$TEST_TMPDIR/term-resistant-serial-suite.sh"
+	l_runner_wrapper_path="$TEST_TMPDIR/term-resistant-serial-runner-wrapper.sh"
 	l_output_path="$TEST_TMPDIR/term-resistant-serial.output"
 	l_started_path="$TEST_TMPDIR/term-resistant-serial.started"
 	l_suite_pid_path="$TEST_TMPDIR/term-resistant-serial.pid"
-	rm -f "$l_output_path" "$l_started_path" "$l_suite_pid_path"
+	l_runner_pid_path="$TEST_TMPDIR/term-resistant-serial-runner.pid"
+	rm -f "$l_output_path" "$l_started_path" "$l_suite_pid_path" "$l_runner_pid_path"
+	write_fake_runner_pid_wrapper "$l_runner_wrapper_path"
 
 	write_fake_suite_with_body "$l_suite_path" <<'EOF'
 #!/bin/sh
@@ -425,7 +829,9 @@ EOF
 	set +e
 	FAKE_SUITE_LOG="$l_suite_pid_path" \
 		FAKE_SUITE_STARTED="$l_started_path" \
-		"$RUN_SHUNIT_TESTS_BIN" --jobs 1 "$l_suite_path" >"$l_output_path" 2>&1 &
+		FAKE_RUNNER_PID_FILE="$l_runner_pid_path" \
+		FAKE_RUNNER_TARGET="$RUN_SHUNIT_TESTS_BIN" \
+		"$l_runner_wrapper_path" --jobs 1 "$l_suite_path" >"$l_output_path" 2>&1 &
 	l_runner_pid=$!
 	[ "$l_restore_errexit" = "1" ] && set -e
 
@@ -441,28 +847,36 @@ EOF
 	done
 
 	if [ "$l_started" -ne 0 ]; then
-		kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_runner_pid" || :
 		wait "$l_runner_pid" >/dev/null 2>&1 || :
 		fail "The term-resistant suite never started under the serial runner."
 		return 0
 	fi
 
 	l_suite_pid=$(cat "$l_suite_pid_path")
-	l_runner_signal_pid=$(find_process_ancestor_by_marker \
-		"$l_suite_pid" "$(basename "$RUN_SHUNIT_TESTS_BIN")" 2>/dev/null || true)
+	l_runner_signal_pid=$(cat "$l_runner_pid_path" 2>/dev/null || true)
 	case "$l_runner_signal_pid" in
 	'' | *[!0-9]*)
-		l_runner_signal_pid=$l_runner_pid
+		l_runner_signal_pid=$(find_runner_ancestor_for_suite_pid "$l_suite_pid" "$l_runner_pid")
+		case "$l_runner_signal_pid" in
+		'' | *[!0-9]*)
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
+			wait "$l_runner_pid" >/dev/null 2>&1 || :
+			send_test_signal_to_pid KILL "$l_suite_pid" || :
+			fail "The serial cleanup test could not identify the nested shunit runner to signal."
+			return 0
+			;;
+		esac
 		;;
 	esac
-	kill -s TERM "$l_runner_signal_pid" >/dev/null 2>&1 || :
+	send_test_signal_to_pid TERM "$l_runner_signal_pid" || :
 	(
-		sleep 5
-		kill -s KILL "$l_runner_signal_pid" >/dev/null 2>&1 || :
+		sleep "$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS"
+		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
 		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
 		*)
-			kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
 			;;
 		esac
 	) &
@@ -500,14 +914,14 @@ EOF
 	done
 
 	if [ "$l_suite_gone" -ne 0 ]; then
-		kill -s KILL "$l_suite_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_suite_pid" || :
 	fi
 	if [ "$l_runner_gone" -ne 0 ]; then
-		kill -s KILL "$l_runner_signal_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
 		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
 		*)
-			kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
 			;;
 		esac
 	fi
@@ -524,10 +938,13 @@ EOF
 test_run_shunit_tests_signal_cleanup_kills_term_resistant_workers() {
 	l_suite_path="$TEST_TMPDIR/term-resistant-suite.sh"
 	l_second_suite_path="$TEST_TMPDIR/term-resistant-support-suite.sh"
+	l_runner_wrapper_path="$TEST_TMPDIR/term-resistant-runner-wrapper.sh"
 	l_output_path="$TEST_TMPDIR/term-resistant.output"
 	l_started_path="$TEST_TMPDIR/term-resistant.started"
 	l_suite_pid_path="$TEST_TMPDIR/term-resistant.pid"
-	rm -f "$l_output_path" "$l_started_path" "$l_suite_pid_path"
+	l_runner_pid_path="$TEST_TMPDIR/term-resistant-runner.pid"
+	rm -f "$l_output_path" "$l_started_path" "$l_suite_pid_path" "$l_runner_pid_path"
+	write_fake_runner_pid_wrapper "$l_runner_wrapper_path"
 
 	write_fake_suite_with_body "$l_suite_path" <<'EOF'
 #!/bin/sh
@@ -556,7 +973,9 @@ EOF
 	set +e
 	FAKE_SUITE_LOG="$l_suite_pid_path" \
 		FAKE_SUITE_STARTED="$l_started_path" \
-		"$RUN_SHUNIT_TESTS_BIN" --jobs 2 "$l_suite_path" "$l_second_suite_path" >"$l_output_path" 2>&1 &
+		FAKE_RUNNER_PID_FILE="$l_runner_pid_path" \
+		FAKE_RUNNER_TARGET="$RUN_SHUNIT_TESTS_BIN" \
+		"$l_runner_wrapper_path" --jobs 2 "$l_suite_path" "$l_second_suite_path" >"$l_output_path" 2>&1 &
 	l_runner_pid=$!
 	[ "$l_restore_errexit" = "1" ] && set -e
 
@@ -572,29 +991,37 @@ EOF
 	done
 
 	if [ "$l_started" -ne 0 ]; then
-		kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_runner_pid" || :
 		wait "$l_runner_pid" >/dev/null 2>&1 || :
 		fail "The term-resistant suite never started under the parallel runner."
 		return 0
 	fi
 
 	l_suite_pid=$(cat "$l_suite_pid_path")
-	l_runner_signal_pid=$(find_process_ancestor_by_marker \
-		"$l_suite_pid" "$(basename "$RUN_SHUNIT_TESTS_BIN")" 2>/dev/null || true)
+	l_runner_signal_pid=$(cat "$l_runner_pid_path" 2>/dev/null || true)
 	case "$l_runner_signal_pid" in
 	'' | *[!0-9]*)
-		l_runner_signal_pid=$l_runner_pid
+		l_runner_signal_pid=$(find_runner_ancestor_for_suite_pid "$l_suite_pid" "$l_runner_pid")
+		case "$l_runner_signal_pid" in
+		'' | *[!0-9]*)
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
+			wait "$l_runner_pid" >/dev/null 2>&1 || :
+			send_test_signal_to_pid KILL "$l_suite_pid" || :
+			fail "The parallel cleanup test could not identify the nested shunit runner to signal."
+			return 0
+			;;
+		esac
 		;;
 	esac
 
-	kill -s TERM "$l_runner_signal_pid" >/dev/null 2>&1 || :
+	send_test_signal_to_pid TERM "$l_runner_signal_pid" || :
 	(
-		sleep 5
-		kill -s KILL "$l_runner_signal_pid" >/dev/null 2>&1 || :
+		sleep "$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS"
+		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
 		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
 		*)
-			kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
 			;;
 		esac
 	) &
@@ -632,14 +1059,14 @@ EOF
 	done
 
 	if [ "$l_suite_gone" -ne 0 ]; then
-		kill -s KILL "$l_suite_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_suite_pid" || :
 	fi
 	if [ "$l_runner_gone" -ne 0 ]; then
-		kill -s KILL "$l_runner_signal_pid" >/dev/null 2>&1 || :
+		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
 		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
 		*)
-			kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
 			;;
 		esac
 	fi
@@ -679,7 +1106,7 @@ case "$1" in
 	printf '%s\n' "$$" >"${FAKE_SUITE_LOG:?}"
 	: >"${FAKE_SUITE_STARTED:?}"
 	trap '' TERM
-	kill -s TERM "$PPID"
+	kill -TERM "$PPID"
 	while :; do
 		sleep 1
 	done
@@ -717,7 +1144,7 @@ EOF
 	l_suite_gone=1
 	l_wait_count=0
 	while [ "$l_wait_count" -lt 5 ]; do
-		if ! kill -s 0 "$l_suite_pid" >/dev/null 2>&1; then
+		if ! send_test_signal_to_pid 0 "$l_suite_pid"; then
 			l_suite_gone=0
 			break
 		fi

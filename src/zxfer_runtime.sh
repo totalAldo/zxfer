@@ -1726,8 +1726,14 @@ zxfer_init_runtime_state_defaults() {
 	fi
 	zxfer_reset_runtime_artifact_state
 	g_zxfer_profile_start_epoch=$(date '+%s' 2>/dev/null || :)
+	if ! g_zxfer_profile_start_ms=$(zxfer_profile_now_ms 2>/dev/null); then
+		g_zxfer_profile_start_ms=""
+	fi
 	g_zxfer_profile_has_data=0
 	g_zxfer_profile_summary_emitted=0
+	g_zxfer_profile_startup_latency_ms=0
+	g_zxfer_profile_startup_latency_recorded=0
+	g_zxfer_profile_cleanup_ms=0
 	g_zxfer_profile_ssh_setup_ms=0
 	g_zxfer_profile_source_snapshot_listing_ms=0
 	g_zxfer_profile_destination_snapshot_listing_ms=0
@@ -1904,6 +1910,7 @@ zxfer_init_globals() {
 zxfer_trap_exit() {
 	# get the exit status of the last command
 	l_exit_status=$?
+	l_cleanup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
 
 	# Only terminate zxfer-owned background processes. Killing every direct child
 	# of the shell is too broad and can clobber coverage helpers or command
@@ -1995,6 +2002,7 @@ zxfer_trap_exit() {
 		fi
 	fi
 
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_cleanup_ms "$l_cleanup_start_ms"
 	zxfer_echoV "zxfer exiting with status $l_exit_status"
 	zxfer_profile_emit_summary
 	zxfer_emit_failure_report "$l_exit_status"

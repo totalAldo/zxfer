@@ -2,11 +2,12 @@
 
 ## Test Layers
 
-The project currently uses three practical layers of validation:
+The project currently uses four practical layers of validation:
 
 - shunit2 unit tests
 - shell coverage reporting
 - file-backed ZFS integration tests
+- manual, non-gating performance tests
 
 ## Recommended Paths
 
@@ -16,6 +17,9 @@ Use the layers this way:
 - Prefer [../tests/run_vm_matrix.sh](../tests/run_vm_matrix.sh) for unattended
   integration coverage and for routine end-to-end validation on a disposable
   guest boundary.
+- Use [../tests/run_perf_tests.sh](../tests/run_perf_tests.sh) for manual
+  throughput and startup/cleanup regression checks, preferably through the VM
+  matrix `perf` layer unless you are on a disposable ZFS-capable host.
 - Use [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   directly only when you explicitly want an interactive host-side harness run
   on a disposable ZFS-capable system.
@@ -40,7 +44,9 @@ flowchart TD
     G -->|yes| H["Prefer tests/run_vm_matrix.sh"]
     H --> I["Default guest test layer: integration"]
     H --> J["Optional guest test layer: shunit2"]
-    G -->|no| K{"Do you explicitly want the expert host-side harness on a disposable ZFS-capable system?"}
+    G -->|no| N{"Need manual performance regression signal?"}
+    N -->|yes| O["Run tests/run_vm_matrix.sh --test-layer perf, or tests/run_perf_tests.sh manually on a disposable host"]
+    N -->|no| K{"Do you explicitly want the expert host-side harness on a disposable ZFS-capable system?"}
     K -->|yes| L["Run tests/run_integration_zxfer.sh manually"]
     K -->|no| M["Stay on the guest-backed VM path"]
 ```
@@ -49,7 +55,9 @@ The safe default is still:
 
 - local shell validation for unit-scale changes
 - [../tests/run_vm_matrix.sh](../tests/run_vm_matrix.sh) for unattended
-  integration or guest-side shunit2 runs
+  integration, guest-side shunit2, or guest-side performance runs
+- [../tests/run_perf_tests.sh](../tests/run_perf_tests.sh) for explicit
+  manual performance comparisons on disposable ZFS-capable hosts
 - [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   only for explicit manual host-side harness work
 
@@ -136,6 +144,7 @@ The test layout broadly follows the source layout:
 - `test_ci_vmactions_integration.sh`
 - `test_run_shunit_tests.sh`
 - `test_run_integration_zxfer.sh`
+- `test_run_perf_tests.sh`
 - `test_run_vm_matrix.sh`
 - `test_zxfer_launcher.sh`
 - `test_zxfer_locking.sh`
@@ -267,7 +276,7 @@ ZXFER_COVERAGE_MODE=kcov ./tests/run_coverage.sh
 
 The VM matrix is a host wrapper around guest execution. The host runner
 prepares the VM backend, boots or reuses guests, then asks the guest to run
-either the integration harness or the shunit2 layer.
+the integration harness, the shunit2 layer, or the manual performance layer.
 
 ```mermaid
 sequenceDiagram
@@ -286,6 +295,9 @@ sequenceDiagram
     else shunit2 test layer
         Matrix->>Layer: run guest shunit2 workflow
         Layer->>Guest: execute tests/run_shunit_tests.sh inside the guest
+    else perf test layer
+        Matrix->>Layer: run guest performance workflow
+        Layer->>Guest: execute tests/run_perf_tests.sh --yes inside the guest
     end
     Guest-->>Matrix: return guest logs and exit status
     Matrix-->>Host: summarize results and clean host-side runner state
@@ -315,6 +327,18 @@ VM path on integration:
 
 ```sh
 ./tests/run_vm_matrix.sh --profile local --test-layer shunit2
+```
+
+Run the smoke performance profile inside a disposable guest:
+
+```sh
+./tests/run_vm_matrix.sh --profile smoke --test-layer perf
+```
+
+Run the larger performance profile inside the same guest layer:
+
+```sh
+ZXFER_VM_PERF_PROFILE=standard ./tests/run_vm_matrix.sh --profile smoke --test-layer perf
 ```
 
 Run the same profile with live guest stdout/stderr mirrored to the console:
@@ -382,13 +406,13 @@ Execution defaults:
   runs and switches to `ci-managed` only when `ZXFER_VM_CI_MANAGED_GUEST`
   pins one guest in an already-in-guest CI environment
 - guest execution is serial by default (`--jobs 1`)
-- guest test-layer selection defaults to `integration`; `--test-layer shunit2` opts in to guest shunit2 runs
+- guest test-layer selection defaults to `integration`; `--test-layer shunit2` opts in to guest shunit2 runs, and `--test-layer perf` opts in to guest performance runs
 - guest stdout/stderr is written to per-guest artifact files by default
 - `--stream-guest-output` mirrors guest logs live to the console
 - `--list-profiles` and `--list-guests` print the current supported choices
   and exit without touching a guest
-- `--only-test name[,name...]` narrows the in-guest integration harness to one or more named tests and can be repeated; it is not used by the shunit2 layer
-- `--failed-tests-only` suppresses passing integration-test chatter inside the guest harness, automatically enables live guest output streaming, prints a compact `[N/TOTAL] PASS test_name` or `[N/TOTAL] SKIP test_name` line for each non-failing test, and replays the full labeled stdout/stderr for each failing test; it is not used by the shunit2 layer
+- `--only-test name[,name...]` narrows the in-guest integration harness to one or more named tests and can be repeated; it is not used by the shunit2 or perf layers
+- `--failed-tests-only` suppresses passing integration-test chatter inside the guest harness, automatically enables live guest output streaming, prints a compact `[N/TOTAL] PASS test_name` or `[N/TOTAL] SKIP test_name` line for each non-failing test, and replays the full labeled stdout/stderr for each failing test; it is not used by the shunit2 or perf layers
 - `--jobs N` allows multiple selected guests to run in parallel
 
 Profiles:
@@ -433,10 +457,14 @@ copies the current checkout into the guest, and then runs the selected guest
 test layer. By default that layer is the existing
 `tests/run_integration_zxfer.sh --yes --keep-going` harness; add
 `--test-layer shunit2` to run `tests/run_shunit_tests.sh` inside the guest
-instead. Logs and preserved workdirs still land under the configured artifact
-root. Even without live guest-output streaming, the runner now logs each major
-phase so local runs do not appear idle while a guest boots, installs
-prerequisites, or runs the selected guest test layer.
+instead, or add `--test-layer perf` to run
+`tests/run_perf_tests.sh --yes --profile "${ZXFER_VM_PERF_PROFILE:-smoke}"`
+inside the guest. Perf artifacts land under the guest temp/artifact tree and
+are copied back with the rest of the VM artifacts. Logs and preserved workdirs
+still land under the configured artifact root. Even without live guest-output
+streaming, the runner now logs each major phase so local runs do not appear
+idle while a guest boots, installs prerequisites, or runs the selected guest
+test layer.
 
 Useful VM-runner environment variables:
 
@@ -448,9 +476,79 @@ Useful VM-runner environment variables:
 - `ZXFER_VM_ONLY_TESTS`: whitespace- or comma-delimited in-guest integration
   test names to pass through to `--only-test`
 - `ZXFER_VM_FAILED_TESTS_ONLY=1`: default to the failure-only integration view
+- `ZXFER_VM_PERF_PROFILE`: performance profile for `--test-layer perf`;
+  supported values are `smoke` and `standard`
 - `ZXFER_VM_QEMU_AARCH64_EFI`: override the detected aarch64 QEMU UEFI path
 - `ZXFER_VM_CI_MANAGED_GUEST`: make `--backend auto` select the `ci-managed`
   backend for one named guest
+
+## Performance Harness
+
+`tests/run_perf_tests.sh` is a manual, non-gating performance runner. It
+sources the integration harness in source-only mode and reuses the existing
+file-backed sparse-pool, safety, mock-ssh, and passthrough-zstd helpers instead
+of maintaining a second ZFS fixture layer.
+
+Prefer the VM-backed path for unattended measurements:
+
+```sh
+./tests/run_vm_matrix.sh --profile smoke --test-layer perf
+```
+
+Run the direct harness only on a disposable ZFS-capable host. Without `--yes`,
+it asks for one explicit confirmation before creating and destroying
+file-backed pools:
+
+```sh
+./tests/run_perf_tests.sh
+```
+
+Use `--yes` only inside a disposable guest or trusted throwaway host so command
+confirmation does not pollute timing samples:
+
+```sh
+./tests/run_perf_tests.sh --yes --profile smoke --output-dir /tmp/zxfer-perf
+```
+
+Compare a current run against a previous `summary.tsv` without turning
+regressions into hard failures:
+
+```sh
+./tests/run_perf_tests.sh --yes --profile standard --case chain_local,fanout_local_j4_props --baseline /tmp/zxfer-perf/summary.tsv
+```
+
+Profiles:
+
+- `smoke`: 0 warmups, 1 sample, about 6 chain snapshots, 8 sibling datasets,
+  and 512 MB sparse pool files
+- `standard`: 1 warmup, 3 samples, about 32 chain snapshots, 48 sibling
+  datasets, and 2048 MB sparse pool files
+
+Initial cases:
+
+- `chain_local`
+- `fanout_local_j1_props`
+- `fanout_local_j4_props`
+- `chain_remote_mock`
+- `chain_remote_mock_compressed`
+
+Artifacts:
+
+- `samples.tsv`: one row per warmup or measured sample, including wall-clock
+  time, estimated send bytes, throughput, startup latency, cleanup time,
+  selected `-V` counters, mock-ssh invocation counts, zxfer status, and raw log
+  paths
+- `summary.tsv`: averages for measured samples only; warmups are retained in
+  `samples.tsv` but excluded from the summary
+- `summary.md`: human-readable summary table
+- `compare.tsv`: optional baseline comparison, written when `--baseline` is
+  provided
+- `raw/`: per-sample stdout, stderr, and mock-ssh logs
+
+Baseline comparisons currently warn when average wall time, startup latency, or
+cleanup time rises by more than 10%, or throughput falls by more than 10%.
+Those warnings do not fail the run; setup failures, zxfer failures, and
+replication-correctness failures still fail immediately.
 
 ## Direct Host Harness
 

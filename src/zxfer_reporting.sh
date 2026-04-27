@@ -570,6 +570,8 @@ zxfer_profile_emit_summary() {
 	esac
 
 	zxfer_warn_stderr "zxfer profile: elapsed_seconds=$l_elapsed"
+	zxfer_warn_stderr "zxfer profile: startup_latency_ms=${g_zxfer_profile_startup_latency_ms:-0}"
+	zxfer_warn_stderr "zxfer profile: cleanup_ms=${g_zxfer_profile_cleanup_ms:-0}"
 	zxfer_warn_stderr "zxfer profile: ssh_setup_ms=${g_zxfer_profile_ssh_setup_ms:-0}"
 	zxfer_warn_stderr "zxfer profile: source_snapshot_listing_ms=${g_zxfer_profile_source_snapshot_listing_ms:-0}"
 	zxfer_warn_stderr "zxfer profile: destination_snapshot_listing_ms=${g_zxfer_profile_destination_snapshot_listing_ms:-0}"
