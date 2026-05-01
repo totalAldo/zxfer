@@ -75,8 +75,9 @@ supported-platform set or upstream OpenZFS support policy changes.
   experiments, send-option variants, larger compression cases, or additional
   concurrency/property-logic profiles.
 - Preserve VM-backed optional execution through
-  `tests/run_vm_matrix.sh --test-layer perf` so agents and contributors can
-  collect comparable measurements inside disposable guests.
+  `tests/run_vm_matrix.sh --test-layer perf` and
+  `tests/run_vm_matrix.sh --test-layer perf-compare` so agents and contributors
+  can collect comparable measurements inside disposable guests.
 - Promote a subset to automation only after the fixtures are stable enough to
   avoid noisy host-specific failures.
 

@@ -20,7 +20,7 @@ oneTimeTearDown() {
 }
 
 setUp() {
-	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE
+	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE ZXFER_VM_PERF_BASELINE_REF
 	# shellcheck source=tests/vm/lib.sh
 	. "$VM_MATRIX_LIB"
 	zxfer_vm_reset_state
@@ -68,6 +68,22 @@ test_vm_parse_args_accepts_perf_test_layer() {
 
 	assertEquals "The VM runner should accept an opt-in performance test layer." \
 		"perf" "$ZXFER_VM_TEST_LAYER"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_parse_args_accepts_perf_compare_test_layer() {
+	zxfer_vm_parse_args --test-layer perf-compare
+
+	assertEquals "The VM runner should accept the performance comparison test layer." \
+		"perf-compare" "$ZXFER_VM_TEST_LAYER"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_shell_quote_preserves_single_shell_argument() {
+	quoted=$(zxfer_vm_shell_quote "feature/has'quote")
+
+	assertEquals "The VM shell quoting helper should preserve embedded single quotes." \
+		"'feature/has'\\''quote'" "$quoted"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -137,6 +153,37 @@ test_vm_validate_options_rejects_unknown_perf_profile() {
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "The validation error should identify the unsupported perf profile." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Unsupported VM performance profile: fast"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_backend_validate_selection_rejects_ci_managed_perf_compare() {
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		ZXFER_VM_BACKEND=ci-managed
+		ZXFER_VM_TEST_LAYER=perf-compare
+		ZXFER_VM_SELECTED_GUESTS=ubuntu
+		zxfer_vm_backend_validate_selection
+	"
+
+	assertEquals "perf-compare should require the qemu backend because qemu exports the baseline ref." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The validation error should explain the backend requirement." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "perf-compare test layer currently requires the qemu backend"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_ref_archive_rejects_unknown_perf_baseline_ref() {
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		zxfer_vm_qemu_write_ref_archive refs/heads/zxfer-nosuch-perf-baseline-ref >/dev/null
+	"
+
+	assertEquals "The qemu backend should validate the baseline ref on the host before guest copy." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The validation error should name ZXFER_VM_PERF_BASELINE_REF." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ZXFER_VM_PERF_BASELINE_REF does not name a tree"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -721,6 +768,38 @@ test_vm_render_guest_test_script_uses_perf_runner_when_requested() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_render_guest_test_script_uses_perf_compare_runner_when_requested() {
+	ZXFER_VM_TEST_LAYER=perf-compare
+	ZXFER_VM_PERF_PROFILE=standard
+	ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final
+
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertContains "Performance comparison guest runs should invoke the comparator." \
+		"$script_body" "./tests/run_perf_compare.sh --yes --profile \"standard\""
+	assertContains "Performance comparison guest runs should use the archived baseline checkout beside the candidate." \
+		"$script_body" "--baseline-bin \"/root/zxfer-baseline/zxfer\""
+	assertContains "Performance comparison guest runs should label the baseline ref." \
+		"$script_body" "--baseline-label 'upstream-compat-final'"
+	assertContains "Performance comparison guest runs should measure the current checkout as candidate." \
+		"$script_body" "--candidate-bin \"/root/zxfer/zxfer\""
+	assertNotContains "Performance comparison guest runs should not rely on git inside the guest." \
+		"$script_body" "git "
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_render_guest_test_script_shell_quotes_perf_compare_baseline_label() {
+	ZXFER_VM_TEST_LAYER=perf-compare
+	ZXFER_VM_PERF_PROFILE=smoke
+	ZXFER_VM_PERF_BASELINE_REF="feature/has'quote"
+
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertContains "Performance comparison guest scripts should shell-quote the baseline label." \
+		"$script_body" "--baseline-label 'feature/has'\\''quote'"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_render_guest_test_script_wraps_omnios_shunit2_with_bash_posix() {
 	ZXFER_VM_TEST_LAYER=shunit2
 
@@ -751,6 +830,16 @@ test_vm_guest_prepare_script_installs_zfs_tools_for_ubuntu_perf() {
 	assertContains "Ubuntu perf guest preparation should install OpenZFS tooling." \
 		"$script_body" "apt-get install -y csh zfsutils-linux parallel zstd"
 	assertContains "Ubuntu perf guest preparation should load the ZFS module before running sparse-pool fixtures." \
+		"$script_body" "modprobe zfs"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_prepare_script_installs_zfs_tools_for_ubuntu_perf_compare() {
+	script_body=$(zxfer_vm_guest_prepare_script ubuntu qemu perf-compare)
+
+	assertContains "Ubuntu perf-compare guest preparation should install OpenZFS tooling." \
+		"$script_body" "apt-get install -y csh zfsutils-linux parallel zstd"
+	assertContains "Ubuntu perf-compare guest preparation should load the ZFS module before running sparse-pool fixtures." \
 		"$script_body" "modprobe zfs"
 }
 

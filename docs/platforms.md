@@ -173,7 +173,8 @@ Current platform-specific testing guidance:
   integration coverage and for low-risk local validation on Linux, macOS, and
   WSL2 hosts. That runner keeps `integration` as its default guest test layer
   and can opt into guest shunit2 coverage with `--test-layer shunit2` or
-  guest-side performance checks with `--test-layer perf`.
+  guest-side performance checks with `--test-layer perf` or
+  `--test-layer perf-compare`.
 - Keep [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   for manual, interactive runs on a disposable ZFS-capable host or VM when you
   explicitly want to exercise the harness outside the guest wrapper.

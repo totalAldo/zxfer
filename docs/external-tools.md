@@ -150,6 +150,7 @@ host that orchestrates disposable guests:
 | `python3` | serve NoCloud metadata and allocate local ephemeral TCP ports |
 | `ssh`, `ssh-keygen`, `ssh-keyscan` | provision guests, copy the checkout, and collect artifacts |
 | `tar` | transfer the current checkout into guests and stream guest artifacts back out |
+| `git` | validate and archive `ZXFER_VM_PERF_BASELINE_REF` for the optional `perf-compare` guest layer |
 | `xz` | decompress the pinned FreeBSD cloud image |
 | `zstd` | future-proof `.zst` guest image support when a selected guest ships one |
 

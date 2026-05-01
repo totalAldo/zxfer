@@ -251,7 +251,7 @@ zxfer_vm_guest_prepare_script() {
 	l_test_layer=$3
 
 	case "$l_test_layer/$l_backend/$l_guest" in
-	integration/ci-managed/ubuntu | perf/ci-managed/ubuntu)
+	integration/ci-managed/ubuntu | perf/ci-managed/ubuntu | perf-compare/ci-managed/ubuntu)
 		cat <<'EOF'
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 apt-get update
@@ -261,18 +261,18 @@ zfs version
 zpool version
 EOF
 		;;
-	integration/ci-managed/freebsd | perf/ci-managed/freebsd)
+	integration/ci-managed/freebsd | perf/ci-managed/freebsd | perf-compare/ci-managed/freebsd)
 		cat <<'EOF'
 pkg install -y parallel zstd
 kldload zfs || true
 EOF
 		;;
-	integration/ci-managed/omnios | perf/ci-managed/omnios)
+	integration/ci-managed/omnios | perf/ci-managed/omnios | perf-compare/ci-managed/omnios)
 		cat <<'EOF'
 PKG_SUCCESS_ON_NOP=1 pkg install zstd
 EOF
 		;;
-	integration/qemu/ubuntu | perf/qemu/ubuntu)
+	integration/qemu/ubuntu | perf/qemu/ubuntu | perf-compare/qemu/ubuntu)
 		cat <<'EOF'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -280,14 +280,14 @@ apt-get install -y csh zfsutils-linux parallel zstd
 modprobe zfs
 EOF
 		;;
-	integration/qemu/freebsd | perf/qemu/freebsd)
+	integration/qemu/freebsd | perf/qemu/freebsd | perf-compare/qemu/freebsd)
 		cat <<'EOF'
 ASSUME_ALWAYS_YES=yes pkg bootstrap -f
 pkg install -y parallel zstd
 kldload zfs || true
 EOF
 		;;
-	integration/qemu/omnios | perf/qemu/omnios)
+	integration/qemu/omnios | perf/qemu/omnios | perf-compare/qemu/omnios)
 		cat <<'EOF'
 PKG_SUCCESS_ON_NOP=1 pkg install zstd
 EOF

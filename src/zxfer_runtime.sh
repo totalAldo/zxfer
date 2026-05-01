@@ -851,6 +851,7 @@ zxfer_cleanup_runtime_artifact_path() {
 	if rm -rf "$l_artifact_path" 2>/dev/null ||
 		{ [ ! -e "$l_artifact_path" ] && [ ! -L "$l_artifact_path" ] && [ ! -h "$l_artifact_path" ]; }; then
 		zxfer_unregister_runtime_artifact_path "$l_artifact_path"
+		zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_paths_cleaned
 		return 0
 	fi
 
@@ -917,6 +918,7 @@ zxfer_cleanup_registered_runtime_artifacts() {
 		[ -n "$l_artifact_path" ] || continue
 		if rm -rf "$l_artifact_path" 2>/dev/null ||
 			{ [ ! -e "$l_artifact_path" ] && [ ! -L "$l_artifact_path" ] && [ ! -h "$l_artifact_path" ]; }; then
+			zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_paths_cleaned
 			continue
 		fi
 		if [ -n "$l_remaining_paths" ]; then
@@ -952,6 +954,7 @@ zxfer_create_runtime_artifact_dir() {
 		return "$l_status"
 	fi
 	zxfer_register_runtime_artifact_path "$l_artifact_dir"
+	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_dirs_created
 	g_zxfer_runtime_artifact_path_result=$l_artifact_dir
 	printf '%s\n' "$l_artifact_dir"
 }
@@ -975,6 +978,7 @@ zxfer_create_runtime_artifact_file() {
 		return "$l_status"
 	fi
 	zxfer_register_runtime_artifact_path "$l_artifact_file"
+	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_files_created
 	g_zxfer_runtime_artifact_path_result=$l_artifact_file
 	printf '%s\n' "$l_artifact_file"
 }
@@ -999,6 +1003,7 @@ zxfer_create_runtime_artifact_file_in_parent() {
 		return "$l_status"
 	fi
 	zxfer_register_runtime_artifact_path "$l_artifact_file"
+	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_files_created
 	g_zxfer_runtime_artifact_path_result=$l_artifact_file
 	printf '%s\n' "$l_artifact_file"
 }
@@ -1400,6 +1405,7 @@ zxfer_create_cache_object_stage_dir_in_parent() {
 	[ "$l_stage_status" -eq 0 ] || return "$l_stage_status"
 
 	zxfer_register_runtime_artifact_path "$l_stage_dir"
+	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_dirs_created
 	g_zxfer_runtime_artifact_path_result=$l_stage_dir
 	printf '%s\n' "$l_stage_dir"
 }
@@ -1581,6 +1587,7 @@ EOF
 	g_zxfer_cache_object_kind_result=$l_object_kind
 	g_zxfer_cache_object_metadata_result=$l_object_metadata
 	g_zxfer_cache_object_payload_result=$l_object_payload
+	zxfer_profile_increment_counter g_zxfer_profile_runtime_cache_object_readbacks
 	printf '%s\n' "$l_object_payload"
 }
 
@@ -1646,6 +1653,7 @@ zxfer_write_cache_object_file_atomically() {
 		return "$l_status"
 	fi
 	chmod 600 "$l_cache_target_path" 2>/dev/null || :
+	zxfer_profile_increment_counter g_zxfer_profile_runtime_cache_object_writes
 	zxfer_cleanup_cache_object_stage_dir "$l_cache_stage_dir"
 	return 0
 }
@@ -1940,6 +1948,13 @@ zxfer_init_runtime_state_defaults() {
 	g_zxfer_profile_bucket_destination_inspection=0
 	g_zxfer_profile_bucket_property_reconciliation=0
 	g_zxfer_profile_bucket_send_receive_setup=0
+	g_zxfer_profile_runtime_artifact_files_created=0
+	g_zxfer_profile_runtime_artifact_dirs_created=0
+	g_zxfer_profile_runtime_artifact_paths_cleaned=0
+	g_zxfer_profile_runtime_cache_object_writes=0
+	g_zxfer_profile_runtime_cache_object_readbacks=0
+	g_zxfer_profile_command_render_calls=0
+	g_zxfer_profile_live_destination_snapshot_rechecks=0
 	zxfer_reset_cache_object_result_state
 	g_destination=""
 	zxfer_refresh_backup_storage_root

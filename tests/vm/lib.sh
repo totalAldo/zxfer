@@ -45,6 +45,7 @@ zxfer_vm_reset_state() {
 	ZXFER_VM_FAILED_TESTS_ONLY=${ZXFER_VM_FAILED_TESTS_ONLY:-0}
 	ZXFER_VM_ONLY_TESTS=${ZXFER_VM_ONLY_TESTS:-}
 	ZXFER_VM_PERF_PROFILE=${ZXFER_VM_PERF_PROFILE:-smoke}
+	ZXFER_VM_PERF_BASELINE_REF=${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final}
 }
 
 zxfer_vm_print_usage() {
@@ -56,7 +57,8 @@ Run zxfer guest-backed test workflows inside disposable VM guests.
 Options:
   --profile name         guest profile to run: smoke, local, full, ci
   --backend name         backend to use: auto, qemu, ci-managed
-  --test-layer name      guest test layer to run: integration, shunit2, perf
+  --test-layer name      guest test layer to run: integration, shunit2, perf,
+                         perf-compare
   --guest name           select a specific guest; repeat to choose multiple guests
   --jobs count           run up to count guests at once (default: 1)
   --artifacts-dir path   override the host artifact root
@@ -85,8 +87,11 @@ Environment:
   ZXFER_VM_FAILED_TESTS_ONLY=1
                           suppress passing integration-test chatter inside guests
                           and imply live guest output streaming
-  ZXFER_VM_PERF_PROFILE   performance profile for --test-layer perf: smoke,
-                          standard (default: smoke)
+  ZXFER_VM_PERF_PROFILE   performance profile for --test-layer perf or
+                          perf-compare: smoke, standard (default: smoke)
+  ZXFER_VM_PERF_BASELINE_REF
+                          git ref exported by the qemu backend for
+                          --test-layer perf-compare
   ZXFER_VM_QEMU_AARCH64_EFI
                           override the detected aarch64 UEFI firmware path
   ZXFER_VM_CI_MANAGED_GUEST
@@ -175,7 +180,7 @@ zxfer_vm_validate_perf_profile_value() {
 
 zxfer_vm_validate_options() {
 	case "$ZXFER_VM_TEST_LAYER" in
-	integration | shunit2 | perf) ;;
+	integration | shunit2 | perf | perf-compare) ;;
 	*)
 		zxfer_vm_die "Unsupported test layer: $ZXFER_VM_TEST_LAYER"
 		;;
@@ -196,9 +201,11 @@ zxfer_vm_validate_options() {
 		;;
 	esac
 
-	if [ "$ZXFER_VM_TEST_LAYER" = "perf" ]; then
+	case "$ZXFER_VM_TEST_LAYER" in
+	perf | perf-compare)
 		zxfer_vm_validate_perf_profile_value "${ZXFER_VM_PERF_PROFILE:-smoke}"
-	fi
+		;;
+	esac
 }
 
 zxfer_vm_append_test_names() {
@@ -244,6 +251,9 @@ zxfer_vm_test_layer_log_label() {
 	perf)
 		printf '%s\n' "perf"
 		;;
+	perf-compare)
+		printf '%s\n' "perf-compare"
+		;;
 	*)
 		return 1
 		;;
@@ -260,6 +270,9 @@ zxfer_vm_test_layer_run_label() {
 		;;
 	perf)
 		printf '%s\n' "performance runner"
+		;;
+	perf-compare)
+		printf '%s\n' "performance comparator"
 		;;
 	*)
 		return 1
@@ -325,6 +338,8 @@ zxfer_vm_backend_validate_selection() {
 	ci-managed)
 		[ "$(zxfer_vm_count_words "$ZXFER_VM_SELECTED_GUESTS")" -eq 1 ] ||
 			zxfer_vm_die "The ci-managed backend can only run one guest at a time"
+		[ "$ZXFER_VM_TEST_LAYER" != "perf-compare" ] ||
+			zxfer_vm_die "The perf-compare test layer currently requires the qemu backend"
 		;;
 	esac
 }
@@ -384,6 +399,9 @@ zxfer_vm_render_guest_test_script() {
 	l_integration_args=
 	l_shunit_jobs=
 	l_perf_profile=${ZXFER_VM_PERF_PROFILE:-smoke}
+	l_perf_baseline_ref=${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final}
+	l_perf_baseline_label_arg=
+	l_perf_baseline_dir="$l_repo_dir-baseline"
 
 	case "$l_test_layer" in
 	integration)
@@ -433,6 +451,23 @@ cd "$l_repo_dir"
 env TMPDIR="$l_tmpdir" \\
 	ZXFER_PERF_OUTPUT_DIR="$l_tmpdir/perf-artifacts" \\
 	$l_guest_shell ./tests/run_perf_tests.sh --yes --profile "$l_perf_profile"
+EOF
+		;;
+	perf-compare)
+		l_guest_shell=$(zxfer_vm_guest_qemu_shell "$l_guest") ||
+			zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
+		zxfer_vm_validate_perf_profile_value "$l_perf_profile"
+		l_perf_baseline_label_arg=$(zxfer_vm_shell_quote "$l_perf_baseline_ref")
+		cat <<EOF
+mkdir -p "$l_tmpdir"
+cd "$l_repo_dir"
+env TMPDIR="$l_tmpdir" \\
+	$l_guest_shell ./tests/run_perf_compare.sh --yes --profile "$l_perf_profile" \\
+	--baseline-bin "$l_perf_baseline_dir/zxfer" \\
+	--candidate-bin "$l_repo_dir/zxfer" \\
+	--baseline-label $l_perf_baseline_label_arg \\
+	--candidate-label "candidate" \\
+	--output-dir "$l_tmpdir/perf-artifacts"
 EOF
 		;;
 	*)

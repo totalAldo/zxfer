@@ -24,19 +24,22 @@ setUp() {
 	# shellcheck source=tests/run_perf_tests.sh
 	. "$PERF_RUNNER"
 	ZXFER_PERF_PROFILE=smoke
+	ZXFER_PERF_LABEL=current
 	ZXFER_PERF_CASES=""
 	ZXFER_PERF_SAMPLES=""
 	ZXFER_PERF_WARMUPS=""
 	ZXFER_PERF_OUTPUT_DIR=""
 	ZXFER_PERF_BASELINE=""
+	ZXFER_PERF_REGRESSION_THRESHOLD_PCT=10
 	ZXFER_PERF_YES=0
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_perf_parse_args_accepts_profile_cases_and_counts() {
-	zxfer_perf_parse_args --yes --profile standard --case chain_local,chain_remote_mock --samples 5 --warmups 2 --output-dir "$TEST_TMPDIR/out" --baseline "$TEST_TMPDIR/base.tsv"
+test_perf_parse_args_accepts_profile_label_cases_and_counts() {
+	zxfer_perf_parse_args --yes --label candidate --profile standard --case chain_local,chain_remote_mock --samples 5 --warmups 2 --output-dir "$TEST_TMPDIR/out" --baseline "$TEST_TMPDIR/base.tsv"
 
 	assertEquals "The perf runner should parse --yes." "1" "$ZXFER_PERF_YES"
+	assertEquals "The perf runner should parse run labels." "candidate" "$ZXFER_PERF_LABEL"
 	assertEquals "The perf runner should parse the requested profile." "standard" "$ZXFER_PERF_PROFILE"
 	assertEquals "The perf runner should parse comma-delimited case selectors." \
 		"chain_local chain_remote_mock" "$ZXFER_PERF_CASES"
@@ -176,15 +179,64 @@ test_perf_run_case_sample_logs_case_description_and_sample_position() {
 }
 
 # shellcheck disable=SC2329  # Invoked by shunit2 test functions.
+write_sample_perf_row() {
+	l_label=$1
+	l_case=$2
+	l_kind=$3
+	l_index=$4
+	l_status=$5
+	l_wall_ms=$6
+	l_bytes=$7
+	l_throughput=$8
+	l_startup_ms=$9
+	shift 9
+	l_cleanup_ms=$1
+	l_elapsed_seconds=$2
+	l_mock_ssh=$3
+	l_stdout=$4
+	l_stderr=$5
+
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+		"$l_label" "$l_case" "$l_kind" "$l_index" "$l_status" "$l_wall_ms" "$l_bytes" "$l_throughput"
+	for l_metric in $ZXFER_PERF_PROFILE_METRICS; do
+		case "$l_metric" in
+		startup_latency_ms)
+			l_value=$l_startup_ms
+			;;
+		cleanup_ms)
+			l_value=$l_cleanup_ms
+			;;
+		elapsed_seconds)
+			l_value=$l_elapsed_seconds
+			;;
+		zfs_send_calls | zfs_receive_calls)
+			l_value=$l_index
+			;;
+		ssh_shell_invocations)
+			l_value=0
+			;;
+		send_receive_pipeline_commands)
+			l_value=$((l_index + 1))
+			;;
+		*)
+			l_value=0
+			;;
+		esac
+		printf '\t%s' "$l_value"
+	done
+	printf '\t%s\t%s\t%s\n' "$l_mock_ssh" "$l_stdout" "$l_stderr"
+}
+
+# shellcheck disable=SC2329  # Invoked by shunit2 test functions.
 write_sample_perf_rows() {
 	l_samples_file=$1
 
 	{
-		printf '%s\n' "case	sample_kind	sample_index	status	wall_ms	estimated_send_bytes	throughput_bytes_per_sec	startup_latency_ms	cleanup_ms	elapsed_seconds	ssh_setup_ms	source_snapshot_listing_ms	destination_snapshot_listing_ms	snapshot_diff_sort_ms	zfs_send_calls	zfs_receive_calls	ssh_shell_invocations	send_receive_pipeline_commands	send_receive_background_pipeline_commands	mock_ssh_invocations	stdout	stderr"
-		printf '%s\n' "chain_local	sample	1	0	1000	2000	2000.00	100	10	1	0	0	0	0	1	1	0	2	0	0	out1	err1"
-		printf '%s\n' "chain_local	sample	2	0	3000	6000	2000.00	300	30	3	0	0	0	0	3	3	0	4	0	0	out2	err2"
-		printf '%s\n' "chain_local	warmup	1	0	9999	9999	1.00	999	999	9	0	0	0	0	9	9	9	9	9	9	outw	errw"
-		printf '%s\n' "fanout_local_j1_props	sample	1	0	500	1000	2000.00	50	5	1	0	0	0	0	1	1	0	2	0	0	out3	err3"
+		zxfer_perf_print_sample_header
+		write_sample_perf_row "candidate" "chain_local" "sample" 1 0 1000 2000 "2000.00" 100 10 1 0 out1 err1
+		write_sample_perf_row "candidate" "chain_local" "sample" 2 0 3000 6000 "2000.00" 300 30 3 0 out2 err2
+		write_sample_perf_row "candidate" "chain_local" "warmup" 1 0 9999 9999 "1.00" 999 999 9 9 outw errw
+		write_sample_perf_row "candidate" "fanout_local_j1_props" "sample" 1 0 500 1000 "2000.00" 50 5 1 0 out3 err3
 	} >"$l_samples_file"
 }
 
@@ -204,11 +256,134 @@ test_perf_render_summary_aggregates_measured_samples_only() {
 	assertNotContains "Warmup rows should not contribute to the summary." \
 		"$(cat "$ZXFER_PERF_SUMMARY_FILE")" "9999"
 	assertEquals "Summary rows should preserve first-seen measured case order." \
-		"chain_local" "$(awk -F '\t' 'NR == 2 { print $1 }' "$ZXFER_PERF_SUMMARY_FILE")"
+		"chain_local" "$(awk -F '\t' 'NR == 2 { print $2 }' "$ZXFER_PERF_SUMMARY_FILE")"
 	assertEquals "Summary rows should not depend on awk associative-array ordering." \
-		"fanout_local_j1_props" "$(awk -F '\t' 'NR == 3 { print $1 }' "$ZXFER_PERF_SUMMARY_FILE")"
+		"fanout_local_j1_props" "$(awk -F '\t' 'NR == 3 { print $2 }' "$ZXFER_PERF_SUMMARY_FILE")"
 	assertContains "The markdown report should render a table row for the case." \
 		"$(cat "$ZXFER_PERF_MARKDOWN_FILE")" "| \`chain_local\` |"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_record_sample_preserves_missing_profile_counters_as_empty() {
+	ZXFER_PERF_LABEL=older-upstream
+	ZXFER_PERF_SAMPLES_FILE="$TEST_TMPDIR/samples-missing-counters.tsv"
+	stdout_file="$TEST_TMPDIR/sample.stdout"
+	stderr_file="$TEST_TMPDIR/sample.stderr"
+	: >"$stdout_file"
+	printf '%s\n' "zxfer profile: startup_latency_ms=77" >"$stderr_file"
+	zxfer_perf_print_sample_header >"$ZXFER_PERF_SAMPLES_FILE"
+
+	zxfer_perf_record_sample chain_local sample 1 0 100 1000 "$stdout_file" "$stderr_file" ""
+
+	result=$(awk -F '\t' '
+		NR == 1 {
+			for (i = 1; i <= NF; i++) col[$i] = i
+			next
+		}
+		NR == 2 {
+			printf "label=%s startup=%s cleanup=<%s> runtime_files=<%s>\n", $1, $(col["startup_latency_ms"]), $(col["cleanup_ms"]), $(col["runtime_artifact_files_created"])
+		}
+	' "$ZXFER_PERF_SAMPLES_FILE")
+
+	assertContains "Sample rows should include the run label." \
+		"$result" "label=older-upstream"
+	assertContains "Present -V counters should be recorded." \
+		"$result" "startup=77"
+	assertContains "Missing -V counters should stay empty rather than becoming zero." \
+		"$result" "cleanup=<>"
+	assertContains "New counters missing from older output should stay empty." \
+		"$result" "runtime_files=<>"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_record_sample_sanitizes_freeform_tsv_fields() {
+	ZXFER_PERF_LABEL=$(printf 'candidate\tlabel\nnext')
+	ZXFER_PERF_SAMPLES_FILE="$TEST_TMPDIR/samples-sanitized.tsv"
+	stdout_file=$(printf 'stdout\tpath\nnext')
+	stderr_file=$(printf 'stderr\tpath\nnext')
+	zxfer_perf_print_sample_header >"$ZXFER_PERF_SAMPLES_FILE"
+
+	zxfer_perf_record_sample chain_local sample 1 0 100 1000 "$stdout_file" "$stderr_file" ""
+
+	line_count=$(wc -l <"$ZXFER_PERF_SAMPLES_FILE" | awk '{ print $1 }')
+	result=$(awk -F '\t' '
+		NR == 1 {
+			expected_nf = NF
+			for (i = 1; i <= NF; i++) col[$i] = i
+			next
+		}
+		NR == 2 {
+			printf "same_nf=%s label=<%s> stdout=<%s> stderr=<%s>\n", (NF == expected_nf ? "yes" : "no"), $(col["run_label"]), $(col["stdout"]), $(col["stderr"])
+		}
+	' "$ZXFER_PERF_SAMPLES_FILE")
+
+	assertEquals "TSV free-form fields should not introduce extra rows." \
+		"2" "$line_count"
+	assertContains "TSV free-form fields should not introduce extra columns." \
+		"$result" "same_nf=yes"
+	assertContains "The run label should be tab/newline sanitized." \
+		"$result" "label=<candidate label next>"
+	assertContains "The stdout path should be tab/newline sanitized." \
+		"$result" "stdout=<stdout path next>"
+	assertContains "The stderr path should be tab/newline sanitized." \
+		"$result" "stderr=<stderr path next>"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_run_case_sample_dispatches_noop_cases() {
+	ZXFER_PERF_OUTPUT_DIR="$TEST_TMPDIR/perf-noop-dispatch"
+	ZXFER_PERF_SAMPLES=1
+	ZXFER_PERF_WARMUPS=0
+	dispatch_log="$TEST_TMPDIR/noop-dispatch.log"
+	mkdir -p "$ZXFER_PERF_OUTPUT_DIR"
+	: >"$dispatch_log"
+
+	zxfer_perf_run_chain_case() {
+		printf 'chain:%s:%s:%s\n' "$1" "$4" "${6:-0}" >>"$dispatch_log"
+	}
+	zxfer_perf_run_fanout_case() {
+		printf 'fanout:%s:%s:%s\n' "$1" "$4" "${5:-0}" >>"$dispatch_log"
+	}
+
+	zxfer_perf_run_case_sample chain_local_noop sample 1 1 3
+	zxfer_perf_run_case_sample fanout_local_j4_props_noop sample 1 2 3
+	zxfer_perf_run_case_sample chain_remote_mock_noop sample 1 3 3
+
+	output=$(cat "$dispatch_log")
+	assertContains "Local chain no-op should set the no-op flag." \
+		"$output" "chain:chain_local_noop:0:1"
+	assertContains "Fanout no-op should keep j4 and set the no-op flag." \
+		"$output" "fanout:fanout_local_j4_props_noop:4:1"
+	assertContains "Remote mock no-op should keep the remote flag and set the no-op flag." \
+		"$output" "chain:chain_remote_mock_noop:1:1"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_write_run_info_records_label_versions_and_fixture_sizes() {
+	ZXFER_PERF_RUN_INFO_FILE="$TEST_TMPDIR/run-info.tsv"
+	ZXFER_PERF_LABEL=baseline-ref
+	ZXFER_PERF_PROFILE=smoke
+	ZXFER_PERF_CASES="chain_local"
+	ZXFER_PERF_SAMPLES=2
+	ZXFER_PERF_WARMUPS=1
+	ZXFER_PERF_SPARSE_SIZE_MB=512
+	ZXFER_PERF_CHAIN_SNAPSHOTS=6
+	ZXFER_PERF_FANOUT_DATASETS=8
+	ZXFER_PERF_PAYLOAD_MB=1
+	ZXFER_BIN="$TEST_TMPDIR/zxfer"
+	printf '%s\n' "#!/bin/sh" "exit 0" >"$ZXFER_BIN"
+	chmod 700 "$ZXFER_BIN"
+	zfs() { printf '%s\n' "zfs-test-version"; }
+	zpool() { printf '%s\n' "zpool-test-version"; }
+
+	zxfer_perf_write_run_info
+
+	output=$(cat "$ZXFER_PERF_RUN_INFO_FILE")
+	assertContains "Run info should record the run label." "$output" "label	baseline-ref"
+	assertContains "Run info should record the case list." "$output" "cases	chain_local"
+	assertContains "Run info should record zfs versions." "$output" "zfs_version	zfs-test-version"
+	assertContains "Run info should record zpool versions." "$output" "zpool_version	zpool-test-version"
+	assertContains "Run info should record fixture sizes." "$output" "fixture_chain_snapshots	6"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

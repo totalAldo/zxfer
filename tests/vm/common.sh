@@ -228,6 +228,12 @@ zxfer_vm_count_words() {
 	printf '%s\n' "$#"
 }
 
+zxfer_vm_shell_quote() {
+	printf "'"
+	printf '%s' "$1" | sed "s/'/'\\\\''/g"
+	printf "'\n"
+}
+
 zxfer_vm_sha256_file() {
 	l_file=$1
 

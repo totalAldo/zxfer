@@ -223,6 +223,7 @@ zxfer_quote_token_stream() {
 		return
 	fi
 
+	zxfer_profile_increment_counter g_zxfer_profile_command_render_calls
 	l_output=""
 	while IFS= read -r l_token || [ -n "$l_token" ]; do
 		[ "$l_token" = "" ] && continue
@@ -243,6 +244,7 @@ EOF
 # Usage: Called during command rendering, ssh wrapping, and ZFS execution
 # before other helpers consume the assembled value.
 zxfer_build_shell_command_from_argv() {
+	zxfer_profile_increment_counter g_zxfer_profile_command_render_calls
 	l_output=""
 	for l_arg in "$@"; do
 		l_safe_arg=$(zxfer_escape_for_single_quotes "$l_arg")

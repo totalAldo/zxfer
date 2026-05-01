@@ -609,6 +609,13 @@ zxfer_profile_emit_summary() {
 	zxfer_warn_stderr "zxfer profile: bucket_destination_inspection=${g_zxfer_profile_bucket_destination_inspection:-0}"
 	zxfer_warn_stderr "zxfer profile: bucket_property_reconciliation=${g_zxfer_profile_bucket_property_reconciliation:-0}"
 	zxfer_warn_stderr "zxfer profile: bucket_send_receive_setup=${g_zxfer_profile_bucket_send_receive_setup:-0}"
+	zxfer_warn_stderr "zxfer profile: runtime_artifact_files_created=${g_zxfer_profile_runtime_artifact_files_created:-0}"
+	zxfer_warn_stderr "zxfer profile: runtime_artifact_dirs_created=${g_zxfer_profile_runtime_artifact_dirs_created:-0}"
+	zxfer_warn_stderr "zxfer profile: runtime_artifact_paths_cleaned=${g_zxfer_profile_runtime_artifact_paths_cleaned:-0}"
+	zxfer_warn_stderr "zxfer profile: runtime_cache_object_writes=${g_zxfer_profile_runtime_cache_object_writes:-0}"
+	zxfer_warn_stderr "zxfer profile: runtime_cache_object_readbacks=${g_zxfer_profile_runtime_cache_object_readbacks:-0}"
+	zxfer_warn_stderr "zxfer profile: command_render_calls=${g_zxfer_profile_command_render_calls:-0}"
+	zxfer_warn_stderr "zxfer profile: live_destination_snapshot_rechecks=${g_zxfer_profile_live_destination_snapshot_rechecks:-0}"
 }
 
 # Purpose: Emit the usage to stderr in the operator-facing format owned by this

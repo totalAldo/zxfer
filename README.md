@@ -224,6 +224,13 @@ For manual, non-gating throughput checks inside a disposable guest, use:
 ./tests/run_vm_matrix.sh --profile smoke --test-layer perf
 ```
 
+To compare the current checkout against `upstream-compat-final` before
+performance work, keep the run VM-backed:
+
+```sh
+ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final ./tests/run_vm_matrix.sh --profile smoke --test-layer perf-compare
+```
+
 Use [tests/run_integration_zxfer.sh](./tests/run_integration_zxfer.sh)
 directly only when you explicitly want the manual host-side harness on a
 disposable ZFS-capable system.

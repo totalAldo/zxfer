@@ -18,6 +18,9 @@ zxfer_vm_backend_qemu_check_host() {
 	zxfer_vm_require_command ssh-keygen
 	zxfer_vm_require_command ssh-keyscan
 	zxfer_vm_require_command tar
+	if [ "$ZXFER_VM_TEST_LAYER" = "perf-compare" ]; then
+		zxfer_vm_require_command git
+	fi
 
 	l_required_qemu_commands=
 	for l_guest in $ZXFER_VM_SELECTED_GUESTS; do
@@ -538,6 +541,15 @@ zxfer_vm_qemu_write_repo_archive() {
 	fi
 }
 
+zxfer_vm_qemu_write_ref_archive() {
+	l_ref=$1
+
+	git -C "$ZXFER_ROOT" rev-parse --verify "$l_ref^{tree}" >/dev/null 2>&1 ||
+		zxfer_vm_die "ZXFER_VM_PERF_BASELINE_REF does not name a tree in this repository: $l_ref"
+	git -C "$ZXFER_ROOT" archive --format=tar "$l_ref" ||
+		zxfer_vm_die "Failed to archive ZXFER_VM_PERF_BASELINE_REF: $l_ref"
+}
+
 zxfer_vm_qemu_log_cached_download_state() {
 	l_log_prefix=$1
 	l_subject=$2
@@ -588,6 +600,24 @@ zxfer_vm_qemu_copy_repo_to_guest() {
 			-p "$l_port" \
 			root@127.0.0.1 "rm -rf '$l_remote_dir' && mkdir -p '$l_remote_dir' && tar xf - -C '$l_remote_dir'" ||
 		zxfer_vm_die "Failed to copy repository contents into the guest"
+}
+
+zxfer_vm_qemu_copy_ref_to_guest() {
+	l_port=$1
+	l_known_hosts=$2
+	l_identity=$3
+	l_remote_dir=$4
+	l_ref=$5
+
+	zxfer_vm_qemu_write_ref_archive "$l_ref" |
+		ssh -i "$l_identity" \
+			-o BatchMode=yes \
+			-o IdentitiesOnly=yes \
+			-o StrictHostKeyChecking=yes \
+			-o UserKnownHostsFile="$l_known_hosts" \
+			-p "$l_port" \
+			root@127.0.0.1 "rm -rf '$l_remote_dir' && mkdir -p '$l_remote_dir' && tar xf - -C '$l_remote_dir'" ||
+		zxfer_vm_die "Failed to copy baseline ref [$l_ref] into the guest"
 }
 
 zxfer_vm_qemu_run_remote_script() {
@@ -665,6 +695,7 @@ zxfer_vm_backend_qemu_run_guest() {
 	l_test_script=
 	l_prepare_script=
 	l_remote_dir=/root/zxfer
+	l_remote_baseline_dir=/root/zxfer-baseline
 	l_remote_artifact_dir=/var/tmp/zxfer-vm-matrix
 	l_ssh_ready_probe_count=1
 	l_status=0
@@ -792,6 +823,19 @@ zxfer_vm_backend_qemu_run_guest() {
 		"$l_guest_label/$l_guest_arch" "copying the repository" ||
 		zxfer_vm_die "Failed to refresh the guest SSH host key before copying the repository for [$l_guest]"
 	zxfer_vm_qemu_copy_repo_to_guest "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" "$l_remote_dir"
+	if [ "$ZXFER_VM_TEST_LAYER" = "perf-compare" ]; then
+		zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] copying baseline ref ${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final} into guest"
+		zxfer_vm_qemu_prepare_remote_ssh_step \
+			127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
+			"$l_guest_label/$l_guest_arch" "copying the performance baseline" ||
+			zxfer_vm_die "Failed to refresh the guest SSH host key before copying the performance baseline for [$l_guest]"
+		zxfer_vm_qemu_copy_ref_to_guest \
+			"$l_ssh_port" \
+			"$l_state_dir/known_hosts" \
+			"$l_identity_path" \
+			"$l_remote_baseline_dir" \
+			"${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final}"
+	fi
 	if [ "$ZXFER_VM_STREAM_GUEST_OUTPUT" != "1" ]; then
 		zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] guest logs: $l_artifact_dir/prepare.stdout, $l_artifact_dir/prepare.stderr, $l_artifact_dir/harness.stdout, $l_artifact_dir/harness.stderr"
 	fi

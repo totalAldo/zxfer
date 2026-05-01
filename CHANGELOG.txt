@@ -1,6 +1,10 @@
 CHANGELOG
 =========
 
+2026.05.01
+-Add an informative VM-backed performance baseline framework: `tests/run_perf_tests.sh` now records labeled `run-info.tsv`, dynamic `-V` counter columns with missing older counters left empty, advisory all-metric comparisons, and no-op cases; `tests/run_perf_compare.sh` compares two zxfer binaries without failing on regressions; and `tests/run_vm_matrix.sh --test-layer perf-compare` exports `ZXFER_VM_PERF_BASELINE_REF` with host-side `git archive` so disposable QEMU guests can compare the current checkout against `upstream-compat-final` without relying on guest `.git` metadata.
+-Extend `-V` profiling with runtime artifact, cache-object, command-rendering, and live destination snapshot recheck counters for performance measurement while keeping default output unchanged.
+
 2026.04.29
 -Normalize destination snapshot records by rewriting only the leading destination dataset prefix, so descendant names that repeat the destination root no longer corrupt common-snapshot or delete planning.
 -Force `--ensure-writable` by rewriting only actual `readonly=on` property entries, and trim property-filter worklists with literal name matching so user property values or names containing regex metacharacters no longer corrupt property reconciliation.

@@ -169,6 +169,8 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 # orchestration when sibling helpers need the same lookup without duplicating
 # module logic.
 zxfer_get_live_destination_snapshots() {
+	zxfer_profile_increment_counter g_zxfer_profile_live_destination_snapshot_rechecks
+
 	if ! l_snapshot_records=$(zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$g_actual_dest"); then
 		printf '%s\n' "$l_snapshot_records"
 		return 1

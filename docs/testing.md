@@ -20,6 +20,9 @@ Use the layers this way:
 - Use [../tests/run_perf_tests.sh](../tests/run_perf_tests.sh) for manual
   throughput and startup/cleanup regression checks, preferably through the VM
   matrix `perf` layer unless you are on a disposable ZFS-capable host.
+- Use [../tests/run_perf_compare.sh](../tests/run_perf_compare.sh), preferably
+  through the VM matrix `perf-compare` layer, when comparing two zxfer
+  binaries such as the current checkout against `upstream-compat-final`.
 - Use [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   directly only when you explicitly want an interactive host-side harness run
   on a disposable ZFS-capable system.
@@ -45,7 +48,7 @@ flowchart TD
     H --> I["Default guest test layer: integration"]
     H --> J["Optional guest test layer: shunit2"]
     G -->|no| N{"Need manual performance regression signal?"}
-    N -->|yes| O["Run tests/run_vm_matrix.sh --test-layer perf, or tests/run_perf_tests.sh manually on a disposable host"]
+    N -->|yes| O["Run tests/run_vm_matrix.sh --test-layer perf or perf-compare"]
     N -->|no| K{"Do you explicitly want the expert host-side harness on a disposable ZFS-capable system?"}
     K -->|yes| L["Run tests/run_integration_zxfer.sh manually"]
     K -->|no| M["Stay on the guest-backed VM path"]
@@ -58,6 +61,9 @@ The safe default is still:
   integration, guest-side shunit2, or guest-side performance runs
 - [../tests/run_perf_tests.sh](../tests/run_perf_tests.sh) for explicit
   manual performance comparisons on disposable ZFS-capable hosts
+- [../tests/run_perf_compare.sh](../tests/run_perf_compare.sh) for
+  informative two-binary comparisons when both binaries are already available
+  on a disposable ZFS-capable host
 - [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   only for explicit manual host-side harness work
 
@@ -145,6 +151,7 @@ The test layout broadly follows the source layout:
 - `test_run_shunit_tests.sh`
 - `test_run_integration_zxfer.sh`
 - `test_run_perf_tests.sh`
+- `test_run_perf_compare.sh`
 - `test_run_vm_matrix.sh`
 - `test_zxfer_launcher.sh`
 - `test_zxfer_locking.sh`
@@ -298,6 +305,9 @@ sequenceDiagram
     else perf test layer
         Matrix->>Layer: run guest performance workflow
         Layer->>Guest: execute tests/run_perf_tests.sh --yes inside the guest
+    else perf-compare test layer
+        Matrix->>Layer: export baseline ref beside candidate checkout
+        Layer->>Guest: execute tests/run_perf_compare.sh --yes inside the guest
     end
     Guest-->>Matrix: return guest logs and exit status
     Matrix-->>Host: summarize results and clean host-side runner state
@@ -339,6 +349,12 @@ Run the larger performance profile inside the same guest layer:
 
 ```sh
 ZXFER_VM_PERF_PROFILE=standard ./tests/run_vm_matrix.sh --profile smoke --test-layer perf
+```
+
+Compare the current checkout against `upstream-compat-final` inside the guest:
+
+```sh
+ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final ./tests/run_vm_matrix.sh --profile smoke --test-layer perf-compare
 ```
 
 Run the same profile with live guest stdout/stderr mirrored to the console:
@@ -406,13 +422,16 @@ Execution defaults:
   runs and switches to `ci-managed` only when `ZXFER_VM_CI_MANAGED_GUEST`
   pins one guest in an already-in-guest CI environment
 - guest execution is serial by default (`--jobs 1`)
-- guest test-layer selection defaults to `integration`; `--test-layer shunit2` opts in to guest shunit2 runs, and `--test-layer perf` opts in to guest performance runs
+- guest test-layer selection defaults to `integration`; `--test-layer shunit2`
+  opts in to guest shunit2 runs, `--test-layer perf` opts in to guest
+  performance runs, and `--test-layer perf-compare` opts in to a two-binary
+  performance comparison
 - guest stdout/stderr is written to per-guest artifact files by default
 - `--stream-guest-output` mirrors guest logs live to the console
 - `--list-profiles` and `--list-guests` print the current supported choices
   and exit without touching a guest
-- `--only-test name[,name...]` narrows the in-guest integration harness to one or more named tests and can be repeated; it is not used by the shunit2 or perf layers
-- `--failed-tests-only` suppresses passing integration-test chatter inside the guest harness, automatically enables live guest output streaming, prints a compact `[N/TOTAL] PASS test_name` or `[N/TOTAL] SKIP test_name` line for each non-failing test, and replays the full labeled stdout/stderr for each failing test; it is not used by the shunit2 or perf layers
+- `--only-test name[,name...]` narrows the in-guest integration harness to one or more named tests and can be repeated; it is not used by the shunit2, perf, or perf-compare layers
+- `--failed-tests-only` suppresses passing integration-test chatter inside the guest harness, automatically enables live guest output streaming, prints a compact `[N/TOTAL] PASS test_name` or `[N/TOTAL] SKIP test_name` line for each non-failing test, and replays the full labeled stdout/stderr for each failing test; it is not used by the shunit2, perf, or perf-compare layers
 - `--jobs N` allows multiple selected guests to run in parallel
 
 Profiles:
@@ -459,12 +478,15 @@ test layer. By default that layer is the existing
 `--test-layer shunit2` to run `tests/run_shunit_tests.sh` inside the guest
 instead, or add `--test-layer perf` to run
 `tests/run_perf_tests.sh --yes --profile "${ZXFER_VM_PERF_PROFILE:-smoke}"`
-inside the guest. Perf artifacts land under the guest temp/artifact tree and
-are copied back with the rest of the VM artifacts. Logs and preserved workdirs
-still land under the configured artifact root. Even without live guest-output
-streaming, the runner now logs each major phase so local runs do not appear
-idle while a guest boots, installs prerequisites, or runs the selected guest
-test layer.
+inside the guest. Add `--test-layer perf-compare` to export
+`${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final}` with host-side
+`git archive`, copy it beside the current checkout in the guest, and run
+`tests/run_perf_compare.sh` from the candidate checkout. Perf artifacts land
+under the guest temp/artifact tree and are copied back with the rest of the VM
+artifacts. Logs and preserved workdirs still land under the configured artifact
+root. Even without live guest-output streaming, the runner now logs each major
+phase so local runs do not appear idle while a guest boots, installs
+prerequisites, or runs the selected guest test layer.
 
 Useful VM-runner environment variables:
 
@@ -476,8 +498,10 @@ Useful VM-runner environment variables:
 - `ZXFER_VM_ONLY_TESTS`: whitespace- or comma-delimited in-guest integration
   test names to pass through to `--only-test`
 - `ZXFER_VM_FAILED_TESTS_ONLY=1`: default to the failure-only integration view
-- `ZXFER_VM_PERF_PROFILE`: performance profile for `--test-layer perf`;
-  supported values are `smoke` and `standard`
+- `ZXFER_VM_PERF_PROFILE`: performance profile for `--test-layer perf` and
+  `--test-layer perf-compare`; supported values are `smoke` and `standard`
+- `ZXFER_VM_PERF_BASELINE_REF`: host git ref archived by the QEMU backend for
+  `--test-layer perf-compare`; defaults to `upstream-compat-final`
 - `ZXFER_VM_QEMU_AARCH64_EFI`: override the detected aarch64 QEMU UEFI path
 - `ZXFER_VM_CI_MANAGED_GUEST`: make `--backend auto` select the `ci-managed`
   backend for one named guest
@@ -514,7 +538,19 @@ Compare a current run against a previous `summary.tsv` without turning
 regressions into hard failures:
 
 ```sh
-./tests/run_perf_tests.sh --yes --profile standard --case chain_local,fanout_local_j4_props --baseline /tmp/zxfer-perf/summary.tsv
+./tests/run_perf_tests.sh --yes --label candidate --profile standard --case chain_local,fanout_local_j4_props --baseline /tmp/zxfer-perf/summary.tsv
+```
+
+Compare two already-built zxfer executables on a disposable ZFS-capable host:
+
+```sh
+./tests/run_perf_compare.sh --yes \
+  --baseline-bin /tmp/zxfer-baseline/zxfer \
+  --candidate-bin ./zxfer \
+  --baseline-label upstream-compat-final \
+  --candidate-label candidate \
+  --profile smoke \
+  --output-dir /tmp/zxfer-perf-compare
 ```
 
 Profiles:
@@ -523,6 +559,26 @@ Profiles:
   and 512 MB sparse pool files
 - `standard`: 1 warmup, 3 samples, about 32 chain snapshots, 48 sibling
   datasets, and 2048 MB sparse pool files
+
+Artifacts:
+
+- `run-info.tsv`: run label, profile, selected cases, sample counts, platform,
+  `ZXFER_BIN`, `zfs` / `zpool` version lines, timestamp, and fixture sizes
+- `samples.tsv`: one raw row per warmup or measured sample, including all
+  known `-V` profile counters; missing counters from older binaries are empty,
+  not zero
+- `summary.tsv` and `summary.md`: measured-sample averages only
+- `compare.tsv`: advisory deltas for common numeric metrics when a baseline is
+  supplied
+
+No-op cases seed the destination first and measure the second run:
+`chain_local_noop`, `fanout_local_j4_props_noop`, and
+`chain_remote_mock_noop`.
+
+`tests/run_perf_compare.sh` writes `baseline/`, `candidate/`, top-level
+`compare.tsv`, and top-level `compare.md`. It fails only when argument
+validation or a sample run fails; performance regressions are annotations, not
+CI gates.
 
 Initial cases:
 
