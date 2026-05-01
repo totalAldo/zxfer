@@ -366,16 +366,16 @@ test_zxfer_get_error_log_fallback_lock_dir_uses_system_tmp_fallback_chain() {
 			esac
 			return 1
 		}
-		zxfer_error_log_lock_key() {
-			printf "%s\n" "kfallback"
+		zxfer_prepare_error_log_fallback_lock_dir() {
+			printf "%s\n" "/tmp/.zxfer-error-log.lock.d/prepared/lock"
 		}
 		zxfer_get_error_log_fallback_lock_dir "/tmp/failure.log"
 	'
 
 	assertEquals "Fallback lock-dir lookup should succeed when /tmp is the first safe system tmpdir candidate." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Fallback lock-dir lookup should use the derived lock key under the first safe tmpdir candidate." \
-		"/tmp/.zxfer-error-log.lock.kfallback" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "Fallback lock-dir lookup should use the prepared exact lock path under the first safe tmpdir candidate." \
+		"/tmp/.zxfer-error-log.lock.d/prepared/lock" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
 test_zxfer_get_error_log_fallback_lock_dir_uses_dev_shm_fallback_when_available() {
@@ -385,16 +385,17 @@ test_zxfer_get_error_log_fallback_lock_dir_uses_dev_shm_fallback_when_available(
 			l_result_var=$1
 			l_helper_name=$2
 			l_helper_arg=$3
-			case "$l_helper_name:$l_helper_arg" in
-			"zxfer_validate_temp_root_candidate:/unsafe-tmpdir")
+			l_helper_arg_two=${4:-}
+			case "$l_helper_name:$l_helper_arg:$l_helper_arg_two" in
+			"zxfer_validate_temp_root_candidate:/unsafe-tmpdir:")
 				return 1
 				;;
-			"zxfer_validate_temp_root_candidate:/dev/shm")
+			"zxfer_validate_temp_root_candidate:/dev/shm:")
 				eval "$l_result_var=/dev/shm"
 				return 0
 				;;
-			"zxfer_error_log_lock_key:/tmp/failure.log")
-				eval "$l_result_var=kdevshm"
+			"zxfer_prepare_error_log_fallback_lock_dir:/dev/shm:/tmp/failure.log")
+				eval "$l_result_var=/dev/shm/.zxfer-error-log.lock.d/prepared/lock"
 				return 0
 				;;
 			esac
@@ -405,8 +406,8 @@ test_zxfer_get_error_log_fallback_lock_dir_uses_dev_shm_fallback_when_available(
 
 	assertEquals "Fallback lock-dir lookup should succeed when /dev/shm is the first safe system tmpdir candidate." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Fallback lock-dir lookup should use the derived lock key under /dev/shm when that candidate validates." \
-		"/dev/shm/.zxfer-error-log.lock.kdevshm" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "Fallback lock-dir lookup should use the prepared exact lock path under /dev/shm when that candidate validates." \
+		"/dev/shm/.zxfer-error-log.lock.d/prepared/lock" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
 test_zxfer_get_error_log_fallback_lock_dir_uses_run_shm_fallback_when_dev_shm_is_unavailable() {
@@ -416,17 +417,18 @@ test_zxfer_get_error_log_fallback_lock_dir_uses_run_shm_fallback_when_dev_shm_is
 			l_result_var=$1
 			l_helper_name=$2
 			l_helper_arg=$3
-			case "$l_helper_name:$l_helper_arg" in
-			"zxfer_validate_temp_root_candidate:/unsafe-tmpdir"|\
-			"zxfer_validate_temp_root_candidate:/dev/shm")
+			l_helper_arg_two=${4:-}
+			case "$l_helper_name:$l_helper_arg:$l_helper_arg_two" in
+			"zxfer_validate_temp_root_candidate:/unsafe-tmpdir:"|\
+			"zxfer_validate_temp_root_candidate:/dev/shm:")
 				return 1
 				;;
-			"zxfer_validate_temp_root_candidate:/run/shm")
+			"zxfer_validate_temp_root_candidate:/run/shm:")
 				eval "$l_result_var=/run/shm"
 				return 0
 				;;
-			"zxfer_error_log_lock_key:/tmp/failure.log")
-				eval "$l_result_var=krunshm"
+			"zxfer_prepare_error_log_fallback_lock_dir:/run/shm:/tmp/failure.log")
+				eval "$l_result_var=/run/shm/.zxfer-error-log.lock.d/prepared/lock"
 				return 0
 				;;
 			esac
@@ -437,8 +439,8 @@ test_zxfer_get_error_log_fallback_lock_dir_uses_run_shm_fallback_when_dev_shm_is
 
 	assertEquals "Fallback lock-dir lookup should succeed when /run/shm is the first safe system tmpdir candidate." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Fallback lock-dir lookup should use the derived lock key under /run/shm when /dev/shm is unavailable." \
-		"/run/shm/.zxfer-error-log.lock.krunshm" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "Fallback lock-dir lookup should use the prepared exact lock path under /run/shm when /dev/shm is unavailable." \
+		"/run/shm/.zxfer-error-log.lock.d/prepared/lock" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
 test_zxfer_get_error_log_fallback_lock_dir_returns_failure_when_no_safe_tmpdir_exists() {
@@ -456,66 +458,64 @@ test_zxfer_get_error_log_fallback_lock_dir_returns_failure_when_no_safe_tmpdir_e
 		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
-test_zxfer_get_error_log_fallback_lock_dir_returns_failure_when_lock_key_lookup_fails() {
+test_zxfer_get_error_log_fallback_lock_dir_returns_failure_when_lock_path_prepare_fails() {
 	zxfer_test_capture_subshell '
 		TMPDIR="/safe-tmpdir"
 		zxfer_validate_temp_root_candidate() {
 			printf "%s\n" "/safe-tmpdir"
 		}
-		zxfer_error_log_lock_key() {
+		zxfer_prepare_error_log_fallback_lock_dir() {
 			return 1
 		}
 		zxfer_get_error_log_fallback_lock_dir "/tmp/failure.log"
 	'
 
-	assertEquals "Fallback lock-dir lookup should fail when the lock key cannot be derived." \
+	assertEquals "Fallback lock-dir lookup should fail when the exact lock path cannot be prepared." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertEquals "Failed fallback lock-dir lookups should not emit a partial path." \
 		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
-test_zxfer_error_log_lock_key_falls_back_to_hex_and_zero_key_when_cksum_is_unusable() {
+test_zxfer_error_log_lock_identity_hex_fails_when_hex_encoding_is_empty() {
 	output=$(
 		(
 			set +e
-			cksum() {
-				return 1
-			}
 			od() {
-				printf ' 61 62 63 64 \n'
+				:
 			}
-			printf 'hex=%s\n' "$(zxfer_error_log_lock_key '/tmp/failure.log')"
-			od() {
-				printf '\n'
-			}
-			printf 'zero=%s\n' "$(zxfer_error_log_lock_key '/tmp/failure.log')"
+			zxfer_error_log_lock_identity_hex "/tmp/failure.log" >/dev/null
+			printf 'status=%s\n' "$?"
 		)
 	)
 
-	assertContains "Error-log lock keys should fall back to a hex digest when cksum is unusable." \
-		"$output" "hex=k61626364"
-	assertContains "Error-log lock keys should fall back to k00 when both cksum and hex derivation are unusable." \
-		"$output" "zero=k00"
+	assertContains "Error-log lock identity derivation should fail closed when exact hex encoding produces no output." \
+		"$output" "status=1"
 }
 
-test_zxfer_error_log_lock_key_falls_back_to_hex_and_zero_key_in_current_shell() {
-	cksum() {
-		return 1
-	}
+test_zxfer_error_log_lock_identity_hex_uses_exact_hex_in_current_shell() {
 	od() {
 		printf ' 66 6f 6f 0a \n'
 	}
-	hex_key=$(zxfer_error_log_lock_key "/tmp/failure.log")
-	od() {
-		printf '\n'
-	}
-	zero_key=$(zxfer_error_log_lock_key "/tmp/failure.log")
-	unset -f cksum od
+	identity_hex=$(zxfer_error_log_lock_identity_hex "/tmp/failure.log")
+	unset -f od
 
-	assertEquals "Current-shell error-log lock keys should fall back to a hex digest when cksum is unusable." \
-		"k666f6f0a" "$hex_key"
-	assertEquals "Current-shell error-log lock keys should fall back to k00 when both cksum and hex derivation are unusable." \
-		"k00" "$zero_key"
+	assertEquals "Current-shell error-log lock identity should use exact lowercase hex from od." \
+		"666f6f0a" "$identity_hex"
+}
+
+test_zxfer_prepare_error_log_fallback_lock_dir_distinguishes_known_legacy_cksum_collision_paths() {
+	path_one="/var/log/zxfer-3kzpfymt.log"
+	path_two="/var/log/zxfer-amu2x4ex.log"
+
+	lock_one=$(zxfer_prepare_error_log_fallback_lock_dir "$TEST_TMPDIR" "$path_one") ||
+		fail "Expected fallback lock preparation to succeed for the first legacy collision path."
+	lock_two=$(zxfer_prepare_error_log_fallback_lock_dir "$TEST_TMPDIR" "$path_two") ||
+		fail "Expected fallback lock preparation to succeed for the second legacy collision path."
+
+	assertNotEquals "Fallback error-log lock paths should not collapse known legacy cksum-collision log paths." \
+		"$lock_one" "$lock_two"
+	assertTrue "Fallback lock preparation should create the exact lock parent directory." \
+		"[ -d \"${lock_one%/lock}\" ]"
 }
 
 test_zxfer_capture_reporting_helper_output_preserves_readback_failures_and_cleans_up() {
@@ -614,6 +614,34 @@ test_zxfer_acquire_error_log_lock_fails_closed_when_stale_reap_errors() {
 
 	assertEquals "Error-log lock acquisition should fail closed when stale-lock reaping errors." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
+}
+
+test_zxfer_acquire_error_log_lock_covers_stale_reap_error_in_current_shell() {
+	lock_dir="$TEST_TMPDIR/reap_error_current.lock"
+	mkdir -p "$lock_dir" || fail "Unable to create stale error-log lock directory."
+	g_test_sleep_calls=0
+
+	zxfer_create_owned_lock_dir() {
+		return 1
+	}
+	zxfer_try_reap_stale_owned_lock_dir() {
+		return 1
+	}
+	sleep() {
+		g_test_sleep_calls=$((g_test_sleep_calls + 1))
+		return 0
+	}
+
+	zxfer_acquire_error_log_lock "$lock_dir"
+	status=$?
+	sleep_calls=$g_test_sleep_calls
+	unset -f zxfer_create_owned_lock_dir zxfer_try_reap_stale_owned_lock_dir sleep
+	zxfer_source_runtime_modules_through "zxfer_runtime.sh"
+
+	assertEquals "Current-shell error-log lock acquisition should fail closed when stale-lock reaping errors." \
+		1 "$status"
+	assertEquals "Current-shell error-log lock acquisition should not retry hard stale-lock reap errors." \
+		0 "$sleep_calls"
 }
 
 test_zxfer_release_error_log_lock_warn_only_warns_and_returns_success() {
@@ -815,19 +843,20 @@ test_zxfer_cleanup_error_log_stage_dir_falls_back_without_runtime_cleanup_helper
 	setUp
 }
 
-test_zxfer_get_error_log_fallback_lock_dir_reports_lock_key_capture_failures_in_current_shell() {
+test_zxfer_get_error_log_fallback_lock_dir_reports_lock_prepare_capture_failures_in_current_shell() {
 	TMPDIR="$TEST_TMPDIR"
 
 	zxfer_capture_reporting_helper_output() {
 		l_result_var=$1
 		l_helper_name=$2
 		l_helper_arg=$3
-		case "$l_helper_name:$l_helper_arg" in
-		"zxfer_validate_temp_root_candidate:$TEST_TMPDIR")
+		l_helper_arg_two=${4:-}
+		case "$l_helper_name:$l_helper_arg:$l_helper_arg_two" in
+		"zxfer_validate_temp_root_candidate:$TEST_TMPDIR:")
 			eval "$l_result_var=\$TEST_TMPDIR"
 			return 0
 			;;
-		"zxfer_error_log_lock_key:/tmp/failure.log")
+		"zxfer_prepare_error_log_fallback_lock_dir:$TEST_TMPDIR:/tmp/failure.log")
 			return 1
 			;;
 		esac
@@ -840,7 +869,7 @@ test_zxfer_get_error_log_fallback_lock_dir_reports_lock_key_capture_failures_in_
 	set -e
 	unset -f zxfer_capture_reporting_helper_output
 
-	assertEquals "Current-shell fallback lock-dir lookup should fail closed when the derived lock key cannot be captured." \
+	assertEquals "Current-shell fallback lock-dir lookup should fail closed when exact lock path preparation cannot be captured." \
 		1 "$status"
 }
 

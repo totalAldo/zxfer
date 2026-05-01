@@ -64,26 +64,14 @@ zxfer_capture_snapshot_records_for_dataset() {
 	l_dataset=$2
 
 	g_zxfer_snapshot_record_capture_result=""
-	l_capture_status=0
-	zxfer_create_runtime_artifact_file "zxfer-snapshot-records" >/dev/null || l_capture_status=$?
-	if [ "$l_capture_status" -ne 0 ]; then
-		return "$l_capture_status"
-	fi
-	l_capture_file=$g_zxfer_runtime_artifact_path_result
-	if zxfer_get_snapshot_records_for_dataset "$l_side" "$l_dataset" >"$l_capture_file"; then
+	if zxfer_capture_runtime_artifact_command_output \
+		"zxfer-snapshot-records" \
+		zxfer_get_snapshot_records_for_dataset "$l_side" "$l_dataset"; then
 		:
 	else
 		l_capture_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
 		return "$l_capture_status"
 	fi
-	l_capture_status=0
-	zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null || l_capture_status=$?
-	if [ "$l_capture_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
-		return "$l_capture_status"
-	fi
-	zxfer_cleanup_runtime_artifact_path "$l_capture_file"
 
 	g_zxfer_snapshot_record_capture_result=$g_zxfer_runtime_artifact_read_result
 	case "$g_zxfer_snapshot_record_capture_result" in
@@ -274,43 +262,40 @@ EOF
 	fi
 	l_normalized_dest_snaps=$g_zxfer_runtime_artifact_read_result
 
-	if zxfer_get_temp_file >/dev/null; then
-		:
-	else
-		l_status=$?
+	l_status=0
+	zxfer_create_temp_file_group 2 >/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
 		return "$l_status"
 	fi
-	l_dest_identity_file=$g_zxfer_temp_file_result
-	if zxfer_get_temp_file >/dev/null; then
-		:
-	else
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_dest_identity_file"
-		return "$l_status"
-	fi
-	l_source_snapshot_file=$g_zxfer_temp_file_result
+	l_last_common_stage_files=$g_zxfer_temp_file_group_result
+	{
+		IFS= read -r l_dest_identity_file
+		IFS= read -r l_source_snapshot_file
+	} <<-EOF
+		$l_last_common_stage_files
+	EOF
 
 	if zxfer_write_snapshot_identities_to_file "$l_normalized_dest_snaps" "$l_dest_identity_file"; then
 		:
 	else
 		l_status=$?
-		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
-		return "$l_status"
+		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_last_common_stage_files"
+		return "$?"
 	fi
 	if zxfer_read_normalized_snapshot_record_list "$l_zfs_source_snaps" >/dev/null; then
 		:
 	else
 		l_status=$?
-		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
-		return "$l_status"
+		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_last_common_stage_files"
+		return "$?"
 	fi
 	if zxfer_write_runtime_artifact_file \
 		"$l_source_snapshot_file" "$g_zxfer_runtime_artifact_read_result"; then
 		:
 	else
 		l_status=$?
-		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
-		return "$l_status"
+		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_last_common_stage_files"
+		return "$?"
 	fi
 
 	if l_last_common_snap=$("${g_cmd_awk:-awk}" "$l_common_snapshot_awk" \
@@ -318,10 +303,10 @@ EOF
 		:
 	else
 		l_status=$?
-		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
-		return "$l_status"
+		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_last_common_stage_files"
+		return "$?"
 	fi
-	zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
+	zxfer_cleanup_runtime_artifact_path_list "$l_last_common_stage_files"
 
 	if [ -n "$l_last_common_snap" ]; then
 		zxfer_echoV "Found last common snapshot: $l_last_common_snap."
@@ -723,6 +708,7 @@ zxfer_delete_snaps() {
 	if [ "$l_destroy_status" -ne 0 ]; then
 		zxfer_throw_error "Error when executing command." "$l_destroy_status"
 	fi
+	zxfer_invalidate_destination_snapshot_record_cache
 
 	# set the flag to indicate that a destroy command was sent
 	# shellcheck disable=SC2034

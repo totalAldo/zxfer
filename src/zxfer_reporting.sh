@@ -778,28 +778,82 @@ zxfer_get_error_log_lock_purpose() {
 	printf '%s\n' "error-log-lock"
 }
 
-# Purpose: Build the per-log lock key used to serialize `ZXFER_ERROR_LOG`
-# appends.
+# Purpose: Render the error-log path identity as lowercase hex.
 # Usage: Called during failure reporting, profiling, and verbose operator
-# output before lock directories are created or reused for one error-log file.
-zxfer_error_log_lock_key() {
+# output before fallback lock directories are created or reused for one
+# error-log file.
+zxfer_error_log_lock_identity_hex() {
 	l_key_path=$1
 
-	if l_key_cksum=$(printf '%s' "$l_key_path" | cksum 2>/dev/null); then
-		# shellcheck disable=SC2086
-		set -- $l_key_cksum
-		if [ $# -ge 1 ] && [ -n "$1" ]; then
-			printf 'k%s\n' "$1"
-			return 0
+	l_key_hex=$(printf '%s' "$l_key_path" |
+		LC_ALL=C od -An -tx1 -v | tr -d ' \n')
+	[ -n "$l_key_hex" ] || return 1
+
+	printf '%s\n' "$l_key_hex"
+}
+
+# Purpose: Ensure an error-log fallback lock component directory is private
+# and owned by the current user.
+# Usage: Called during failure reporting, profiling, and verbose operator
+# output while preparing exact fallback lock paths under a validated temp root.
+zxfer_ensure_error_log_fallback_lock_component_dir() {
+	l_component_dir=$1
+	l_old_umask=$(umask)
+
+	[ -n "$l_component_dir" ] || return 1
+	if [ -L "$l_component_dir" ] || [ -h "$l_component_dir" ]; then
+		return 1
+	fi
+	if [ ! -e "$l_component_dir" ]; then
+		umask 077
+		if ! mkdir "$l_component_dir" 2>/dev/null; then
+			umask "$l_old_umask"
+			[ -d "$l_component_dir" ] || return 1
+		else
+			umask "$l_old_umask"
 		fi
+	else
+		umask "$l_old_umask"
 	fi
 
-	l_key_hex=$(printf '%s' "$l_key_path" |
-		LC_ALL=C od -An -tx1 -v | tr -d ' \n' | cut -c 1-16)
-	if [ "$l_key_hex" = "" ]; then
-		l_key_hex="00"
+	zxfer_validate_owned_lock_container_dir "$l_component_dir"
+}
+
+# Purpose: Prepare the exact fallback lock directory path for `ZXFER_ERROR_LOG`.
+# Usage: Called during failure reporting, profiling, and verbose operator
+# output when the real log parent is trusted but not writable, forcing lock
+# state under the validated temp root instead.
+zxfer_prepare_error_log_fallback_lock_dir() {
+	l_fallback_tmpdir=$1
+	l_fallback_log_path=$2
+
+	if ! l_fallback_identity_hex=$(zxfer_error_log_lock_identity_hex "$l_fallback_log_path"); then
+		return 1
 	fi
-	printf 'k%s\n' "$l_key_hex"
+	l_fallback_identity_hex_len=${#l_fallback_identity_hex}
+	l_fallback_identity_byte_len=$((l_fallback_identity_hex_len / 2))
+	l_fallback_parent_dir=$l_fallback_tmpdir/.zxfer-error-log.lock.d
+
+	if ! zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir"; then
+		return 1
+	fi
+	l_fallback_parent_dir=$l_fallback_parent_dir/h$l_fallback_identity_byte_len
+	if ! zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir"; then
+		return 1
+	fi
+
+	l_fallback_remaining_hex=$l_fallback_identity_hex
+	while [ -n "$l_fallback_remaining_hex" ]; do
+		l_fallback_chunk=$(printf '%s' "$l_fallback_remaining_hex" | cut -c 1-96)
+		l_fallback_remaining_hex=$(printf '%s' "$l_fallback_remaining_hex" | cut -c 97-)
+		[ -n "$l_fallback_chunk" ] || return 1
+		l_fallback_parent_dir=$l_fallback_parent_dir/$l_fallback_chunk
+		if ! zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir"; then
+			return 1
+		fi
+	done
+
+	printf '%s/lock\n' "$l_fallback_parent_dir"
 }
 
 # Purpose: Capture the reporting helper output into staged state or module
@@ -812,23 +866,12 @@ zxfer_capture_reporting_helper_output() {
 	shift
 
 	g_zxfer_reporting_capture_result=""
-	if ! zxfer_create_runtime_artifact_file "zxfer-reporting" >/dev/null; then
-		return 1
-	fi
-	l_capture_file=$g_zxfer_runtime_artifact_path_result
-	if ! "$@" >"$l_capture_file"; then
-		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
-		return 1
-	fi
-
-	if zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null; then
-		:
-	else
+	l_capture_status=0
+	zxfer_capture_runtime_artifact_command_output "zxfer-reporting" "$@" ||
 		l_capture_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
+	if [ "$l_capture_status" -ne 0 ]; then
 		return "$l_capture_status"
 	fi
-	zxfer_cleanup_runtime_artifact_path "$l_capture_file"
 
 	g_zxfer_reporting_capture_result=$g_zxfer_runtime_artifact_read_result
 	case "$g_zxfer_reporting_capture_result" in
@@ -862,11 +905,13 @@ zxfer_get_error_log_fallback_lock_dir() {
 	else
 		return 1
 	fi
-	if ! zxfer_capture_reporting_helper_output l_fallback_key zxfer_error_log_lock_key "$l_fallback_log_path"; then
+	if ! zxfer_capture_reporting_helper_output l_fallback_lock_dir \
+		zxfer_prepare_error_log_fallback_lock_dir \
+		"$l_fallback_tmpdir" "$l_fallback_log_path"; then
 		return 1
 	fi
 
-	printf '%s/.zxfer-error-log.lock.%s\n' "$l_fallback_tmpdir" "$l_fallback_key"
+	printf '%s\n' "$l_fallback_lock_dir"
 }
 
 # Purpose: Acquire the error log lock so concurrent zxfer work does not reuse
@@ -884,11 +929,12 @@ zxfer_acquire_error_log_lock() {
 			return 1
 		fi
 		if [ -d "$l_lock_dir_path" ]; then
-			if zxfer_try_reap_stale_owned_lock_dir \
-				"$l_lock_dir_path" 1 lock "$(zxfer_get_error_log_lock_purpose)" >/dev/null; then
+			zxfer_try_reap_stale_owned_lock_dir \
+				"$l_lock_dir_path" 1 lock "$(zxfer_get_error_log_lock_purpose)" >/dev/null
+			l_reap_status=$?
+			if [ "$l_reap_status" -eq 0 ]; then
 				continue
 			fi
-			l_reap_status=$?
 			if [ "$l_reap_status" -eq 1 ]; then
 				return 1
 			fi

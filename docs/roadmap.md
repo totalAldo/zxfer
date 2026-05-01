@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-04-21
+Last reviewed: 2026-04-29
 
 This document tracks the main feature additions, refactors, and compatibility
 decisions that remain after the current reliability and maintainability work.
@@ -20,15 +20,15 @@ supported-platform set or upstream OpenZFS support policy changes.
 
 ## Platform And Version Floor
 
-- Revisit the minimum supported OpenZFS generation and move the project to a
-  modern baseline shared by currently supported platforms, with an OpenZFS
-  2.3+ feature floor as the current working target for Linux, FreeBSD, and
-  OpenZFS on macOS, pending validation against the oldest still-supported
-  platform in the matrix.
-- Confirm the final floor against the upstream OpenZFS release policy before
-  enforcement. OpenZFS currently maintains one LTS branch and one current
-  branch, so zxfer should prefer actively maintained release lines rather than
-  historical version compatibility for its own sake.
+- Keep the minimum supported OpenZFS generation on the project-wide 2.0+
+  baseline shared by currently supported Linux, FreeBSD, OmniOS/illumos, and
+  OpenZFS-on-macOS workflows.
+- For FreeBSD, follow maintained upstream branches. For releases published
+  after 2026-05-01, the supported FreeBSD baseline is 14.x and 15.x; FreeBSD
+  13.x, stable/13, and older end-of-life branches are not guaranteed.
+- Prefer actively maintained release lines rather than historical version
+  compatibility for its own sake; do not add transition paths for pre-2.0
+  OpenZFS behavior.
 - Stop carrying compatibility paths whose only purpose is to support operating
   systems or OpenZFS release lines that have already reached end of support.
 - For illumos and OmniOS, define the effective compatibility floor by the
@@ -54,17 +54,17 @@ supported-platform set or upstream OpenZFS support policy changes.
   capability detection and which deserve explicit CLI controls because they can
   affect interoperability, debugging, or throughput tuning.
 
-## Property Logic Refactor
+## Property Logic Follow-Ups
 
-- Refactor property discovery, filtering, backup, and reconciliation around the
-  modern OpenZFS floor instead of keeping branches that only exist for older
-  unsupported behavior.
-- Simplify unsupported-property handling once older platform and OpenZFS
-  combinations are intentionally dropped.
-- Revisit the property backup and restore flow so the implementation model is
-  easier to reason about and less dependent on compatibility-era exceptions.
-- Add or tighten focused tests around inheritance, ignore lists, skip logic,
-  and cross-platform property differences after the refactor lands.
+- Keep property discovery, filtering, backup, and reconciliation aligned with
+  the OpenZFS 2.0+ support floor; do not reintroduce transition paths for
+  older unsupported behavior.
+- Preserve the v2 backup metadata model as the current fail-closed schema:
+  source-root-relative rows under explicit source and destination roots, with
+  no v1 or mountpoint-local fallback probes.
+- Continue tightening focused tests around inheritance, ignore lists,
+  dataset-type-specific `-U` skip logic, post-seed reconciliation, and
+  cross-platform property differences as supported OpenZFS behavior changes.
 
 ## Performance Validation
 
@@ -82,16 +82,13 @@ supported-platform set or upstream OpenZFS support policy changes.
 
 ## Known-Issue Burn-Down
 
-- Work through the remaining items in [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md)
-  as planned engineering work rather than leaving them as indefinite backlog.
-- Prioritize the concrete remaining issues already tracked there: the
-  OpenZFS-on-macOS property-reconciliation gap, remote `-O ... -j > 1`
-  upfront GNU Parallel validation, and the recursive `-o` inheritance
-  flattening behavior.
+- Keep [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) reserved for concrete open
+  failures that still affect current releases, and move resolved remediation
+  themes back into changelog, architecture, or testing documentation.
 - The earlier architectural backlog around lock and lease lifecycle handling,
   PID ownership validation, exact-status propagation, and literal token
   parsing has largely been retired on the current branch; prefer follow-on
-  work that removes the remaining platform-specific gaps and behavior
+  work that removes newly confirmed platform-specific gaps and behavior
   exceptions instead of reopening those resolved classes.
 - Prefer centralized fixes that retire classes of issues over one-off patches
   at individual call sites.
@@ -108,5 +105,7 @@ supported-platform set or upstream OpenZFS support policy changes.
   current release train and release notes.
 - [OpenZFS documentation](https://openzfs.github.io/openzfs-docs/index.html):
   upstream user and developer documentation.
+- [FreeBSD release information](https://www.freebsd.org/releases/):
+  official supported release list and links to branch end-of-life dates.
 - [OmniOS release schedule](https://omnios.org/schedule.html):
   official supported-train and end-of-support dates for OmniOS.

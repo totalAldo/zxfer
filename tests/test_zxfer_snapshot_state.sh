@@ -289,6 +289,70 @@ test_zxfer_snapshot_record_cache_file_for_side_reports_expected_paths() {
 		1 "$status"
 }
 
+test_zxfer_invalidate_destination_snapshot_record_cache_clears_destination_state_only() {
+	destination_cache_file="$TEST_TMPDIR/destination_snapshot_cache_to_invalidate.raw"
+	printf '%s\n' "backup/dst@snap1	111" >"$destination_cache_file"
+	g_zxfer_destination_snapshot_record_cache_file=$destination_cache_file
+	g_rzfs_list_hr_snap="backup/dst@snap1	111"
+
+	zxfer_build_snapshot_record_index source "tank/src@snap1	111" >/dev/null ||
+		fail "Expected source snapshot index fixture to build."
+	zxfer_build_snapshot_record_index destination "backup/dst@snap1	111" >/dev/null ||
+		fail "Expected destination snapshot index fixture to build."
+
+	zxfer_invalidate_destination_snapshot_record_cache
+
+	assertEquals "Destination snapshot invalidation should preserve the source snapshot index." \
+		1 "${g_zxfer_source_snapshot_record_index_ready:-0}"
+	assertEquals "Destination snapshot invalidation should clear the destination snapshot index." \
+		0 "${g_zxfer_destination_snapshot_record_index_ready:-0}"
+	assertEquals "Destination snapshot invalidation should clear the cached destination snapshot list." \
+		"" "${g_rzfs_list_hr_snap:-}"
+	assertEquals "Destination snapshot invalidation should clear the destination snapshot cache-file path." \
+		"" "${g_zxfer_destination_snapshot_record_cache_file:-}"
+	if [ -e "$destination_cache_file" ]; then
+		fail "Destination snapshot invalidation should remove the stale destination snapshot cache file."
+	fi
+}
+
+test_zxfer_note_destination_receive_completed_clears_missing_subtree_assumption() {
+	zxfer_mark_destination_root_missing_in_cache "backup/dst"
+	zxfer_note_destination_receive_completed "backup/dst"
+
+	root_state=$(zxfer_get_destination_existence_cache_entry "backup/dst")
+	set +e
+	child_state=$(zxfer_get_destination_existence_cache_entry "backup/dst/child")
+	child_status=$?
+	set -e
+
+	assertEquals "Receive completion should mark the receive target as present." \
+		1 "$root_state"
+	assertEquals "Receive completion should clear stale missing-subtree defaults so descendants are live-probed." \
+		1 "$child_status"
+	assertEquals "Receive completion should not publish an absent descendant cache value after clearing the root-complete marker." \
+		"" "$child_state"
+}
+
+test_zxfer_build_snapshot_record_index_core_rejects_invalid_input_kind() {
+	set +e
+	output=$(
+		(
+			zxfer_build_snapshot_record_index_core source invalid "tank/src@snap1" >/dev/null
+			printf 'status=%s\n' "$?"
+			printf 'index_dir=%s\n' "${g_zxfer_snapshot_index_dir:-}"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Invalid snapshot-index input-kind checks should not abort the test shell." \
+		0 "$status"
+	assertContains "Invalid snapshot-index input kinds should fail closed." \
+		"$output" "status=1"
+	assertContains "Invalid snapshot-index input kinds should not allocate index state." \
+		"$output" "index_dir="
+}
+
 test_zxfer_validate_snapshot_record_index_manifest_file_rejects_duplicate_dataset_rows() {
 	index_dir="$TEST_TMPDIR/manifest-duplicate-dataset-index"
 	manifest_path="$index_dir/manifest.tsv"
@@ -2464,7 +2528,7 @@ test_zxfer_snapshot_record_read_helpers_preserve_tempfile_and_reverse_readback_f
 	set +e
 	normalized_output=$(
 		(
-			zxfer_get_temp_file() {
+			zxfer_create_runtime_artifact_file() {
 				return 61
 			}
 			zxfer_read_normalized_snapshot_record_list "tank/src@snap1 tank/src@snap2" >/dev/null
@@ -2473,7 +2537,7 @@ test_zxfer_snapshot_record_read_helpers_preserve_tempfile_and_reverse_readback_f
 	)
 	reversed_output=$(
 		(
-			zxfer_get_temp_file() {
+			zxfer_create_runtime_artifact_file() {
 				return 62
 			}
 			zxfer_read_reversed_snapshot_record_list "$(printf '%s\n' "tank/src@snap1" "tank/src@snap2")" >/dev/null
@@ -2506,13 +2570,37 @@ test_zxfer_snapshot_record_read_helpers_preserve_tempfile_and_reverse_readback_f
 		"$source_identity_output" "status=63"
 }
 
+test_zxfer_snapshot_record_transform_read_helper_rejects_invalid_modes() {
+	g_zxfer_runtime_artifact_read_result="stale"
+
+	set +e
+	output=$(
+		(
+			g_zxfer_runtime_artifact_read_result="stale"
+			zxfer_read_transformed_snapshot_record_list "tank/src@snap1" invalid >/dev/null
+			printf 'status=%s\n' "$?"
+			printf 'scratch=%s\n' "$g_zxfer_runtime_artifact_read_result"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Invalid snapshot-record transform modes should not abort the test shell." \
+		0 "$status"
+	assertContains "Invalid snapshot-record transform modes should fail closed." \
+		"$output" "status=1"
+	assertContains "Invalid snapshot-record transform modes should clear read scratch." \
+		"$output" "scratch="
+}
+
 test_zxfer_snapshot_record_read_helpers_preserve_readback_and_reverse_stage_failures() {
 	set +e
 	normalized_read_output=$(
 		(
 			normalized_tmp_file="$TEST_TMPDIR/normalized-readback-failure.records"
-			zxfer_get_temp_file() {
-				g_zxfer_temp_file_result=$normalized_tmp_file
+			zxfer_create_runtime_artifact_file() {
+				: >"$normalized_tmp_file"
+				g_zxfer_runtime_artifact_path_result=$normalized_tmp_file
 				return 0
 			}
 			zxfer_read_runtime_artifact_file() {
@@ -2526,8 +2614,9 @@ test_zxfer_snapshot_record_read_helpers_preserve_readback_and_reverse_stage_fail
 	reversed_stage_output=$(
 		(
 			reversed_stage_tmp_file="$TEST_TMPDIR/reversed-stage-failure.records"
-			zxfer_get_temp_file() {
-				g_zxfer_temp_file_result=$reversed_stage_tmp_file
+			zxfer_create_runtime_artifact_file() {
+				: >"$reversed_stage_tmp_file"
+				g_zxfer_runtime_artifact_path_result=$reversed_stage_tmp_file
 				return 0
 			}
 			zxfer_reverse_snapshot_record_list() {
@@ -2541,8 +2630,9 @@ test_zxfer_snapshot_record_read_helpers_preserve_readback_and_reverse_stage_fail
 	reversed_read_output=$(
 		(
 			reversed_read_tmp_file="$TEST_TMPDIR/reversed-readback-failure.records"
-			zxfer_get_temp_file() {
-				g_zxfer_temp_file_result=$reversed_read_tmp_file
+			zxfer_create_runtime_artifact_file() {
+				: >"$reversed_read_tmp_file"
+				g_zxfer_runtime_artifact_path_result=$reversed_read_tmp_file
 				return 0
 			}
 			zxfer_read_runtime_artifact_file() {

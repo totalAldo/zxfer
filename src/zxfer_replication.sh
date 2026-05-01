@@ -70,18 +70,12 @@ zxfer_read_replication_stage_file() {
 	l_stage_file=$1
 
 	g_zxfer_replication_file_read_result=""
-	if zxfer_read_runtime_artifact_file "$l_stage_file" >/dev/null; then
+	if zxfer_read_runtime_artifact_file_trimmed "$l_stage_file" >/dev/null; then
 		l_stage_contents=$g_zxfer_runtime_artifact_read_result
 	else
 		l_read_status=$?
 		return "$l_read_status"
 	fi
-	case "$l_stage_contents" in
-	*'
-')
-		l_stage_contents=${l_stage_contents%?}
-		;;
-	esac
 
 	g_zxfer_replication_file_read_result=$l_stage_contents
 	printf '%s\n' "$l_stage_contents"
@@ -164,6 +158,7 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 	if ! zxfer_run_destination_zfs_cmd rollback -r "$l_dest_snapshot"; then
 		zxfer_throw_error "Failed to roll back destination [$g_actual_dest] to $l_dest_snapshot after deleting snapshots."
 	fi
+	zxfer_invalidate_destination_snapshot_record_cache
 
 	g_did_delete_dest_snapshots=0
 }
@@ -198,6 +193,15 @@ zxfer_get_live_destination_snapshots() {
 # orchestration when sibling helpers need the same lookup without duplicating
 # module logic.
 zxfer_get_snapshot_transfer_bounds() {
+	zxfer_get_snapshot_record_list_bounds "${g_src_snapshot_transfer_list:-}"
+}
+
+# Purpose: Return snapshot record-list bounds for a caller-provided list.
+# Usage: Called during live destination reconciliation and copy planning when
+# helpers need to reason about a snapshot range without assuming it is already
+# published as the active transfer list.
+zxfer_get_snapshot_record_list_bounds() {
+	l_snapshot_records=$1
 	l_first_snapshot=""
 	l_final_snapshot=""
 
@@ -206,12 +210,96 @@ zxfer_get_snapshot_transfer_bounds() {
 		[ -z "$l_first_snapshot" ] && l_first_snapshot=$l_snapshot
 		l_final_snapshot=$l_snapshot
 	done <<-EOF
-		$(zxfer_normalize_snapshot_record_list "$g_src_snapshot_transfer_list")
+		$(zxfer_normalize_snapshot_record_list "$l_snapshot_records")
 	EOF
 
 	[ -n "$l_final_snapshot" ] || return 1
 
 	printf '%s\n%s\n' "$l_first_snapshot" "$l_final_snapshot"
+}
+
+# Purpose: Check whether a snapshot record list contains a snapshot path.
+# Usage: Called during live destination reconciliation so the cached common
+# snapshot can be folded into the recheck range exactly once.
+zxfer_snapshot_record_list_contains_path() {
+	l_snapshot_records=$1
+	l_snapshot_path=$2
+
+	[ -n "$l_snapshot_path" ] || return 1
+
+	while IFS= read -r l_snapshot_record; do
+		[ -n "$l_snapshot_record" ] || continue
+		if [ "$(zxfer_extract_snapshot_path "$l_snapshot_record")" = "$l_snapshot_path" ]; then
+			return 0
+		fi
+	done <<-EOF
+		$(zxfer_normalize_snapshot_record_list "$l_snapshot_records")
+	EOF
+
+	return 1
+}
+
+# Purpose: Return the source records that must be considered during a live
+# destination recheck.
+# Usage: Called before send planning so stale "already common" anchors are
+# validated together with the queued source tail.
+zxfer_get_live_recheck_source_snapshot_records() {
+	l_live_recheck_source_records=""
+	l_last_common_path=$(zxfer_extract_snapshot_path "${g_last_common_snap:-}")
+
+	if [ -n "${g_last_common_snap:-}" ] &&
+		! zxfer_snapshot_record_list_contains_path "${g_src_snapshot_transfer_list:-}" "$l_last_common_path"; then
+		l_live_recheck_source_records=$g_last_common_snap
+	fi
+
+	while IFS= read -r l_snapshot_record; do
+		[ -n "$l_snapshot_record" ] || continue
+		if [ -n "$l_live_recheck_source_records" ]; then
+			l_live_recheck_source_records="$l_live_recheck_source_records
+$l_snapshot_record"
+		else
+			l_live_recheck_source_records=$l_snapshot_record
+		fi
+	done <<-EOF
+		$(zxfer_normalize_snapshot_record_list "${g_src_snapshot_transfer_list:-}")
+	EOF
+
+	[ -n "$l_live_recheck_source_records" ] || return 1
+
+	printf '%s\n' "$l_live_recheck_source_records"
+}
+
+# Purpose: Publish live recheck state when no common destination snapshot
+# remains.
+# Usage: Called by live destination reconciliation before later seed logic
+# decides whether a full receive is safe.
+zxfer_clear_live_destination_common_snapshot_state() {
+	l_recheck_source_records=$1
+	l_destination_has_snapshots=$2
+
+	g_last_common_snap=""
+	g_src_snapshot_transfer_list=$l_recheck_source_records
+	g_dest_has_snapshots=$l_destination_has_snapshots
+}
+
+# Purpose: Return the destination existence state to use before seeding.
+# Usage: Called during destination bootstrap so a cached-missing initial root is
+# live-probed once more before zxfer chooses the missing-dataset receive path.
+zxfer_get_destination_existence_for_seed() {
+	if ! l_seed_dest_exists=$(zxfer_exists_destination "$g_actual_dest"); then
+		printf '%s\n' "$l_seed_dest_exists"
+		return 1
+	fi
+
+	if [ "$l_seed_dest_exists" -eq 0 ] && zxfer_current_destination_is_initial_source_dataset; then
+		if ! l_seed_live_dest_exists=$(zxfer_exists_destination "$g_actual_dest" live); then
+			printf '%s\n' "$l_seed_live_dest_exists"
+			return 1
+		fi
+		l_seed_dest_exists=$l_seed_live_dest_exists
+	fi
+
+	printf '%s\n' "$l_seed_dest_exists"
 }
 
 # Purpose: Seed the destination for snapshot transfer so incremental work can
@@ -223,7 +311,7 @@ zxfer_seed_destination_for_snapshot_transfer() {
 	l_first_snapshot=$1
 	l_first_snapshot_path=$2
 
-	if ! l_dest_exists=$(zxfer_exists_destination "$g_actual_dest"); then
+	if ! l_dest_exists=$(zxfer_get_destination_existence_for_seed); then
 		zxfer_throw_error "$l_dest_exists"
 	fi
 	if [ "$l_dest_exists" -eq 1 ] &&
@@ -346,24 +434,7 @@ zxfer_copy_snapshots() {
 # verify whether the destination already has a common snapshot so we do not try
 # to receive a full stream into an existing filesystem.
 zxfer_reconcile_live_destination_snapshot_state() {
-	if ! l_snapshot_transfer_bounds=$(zxfer_get_snapshot_transfer_bounds); then
-		return 0
-	fi
-	{
-		IFS= read -r l_first_snapshot
-		IFS= read -r l_final_snapshot
-	} <<-EOF
-		$l_snapshot_transfer_bounds
-	EOF
-	l_final_snapshot_path=$(zxfer_extract_snapshot_path "$l_final_snapshot")
-	l_last_common_path=$(zxfer_extract_snapshot_path "$g_last_common_snap")
-
-	# Re-check the live destination whenever the cached plan still intends to
-	# send snapshots. The staged recursive discovery results can lag behind the
-	# actual destination tip, especially on long-running or remote runs, and we
-	# want to collapse the transfer list back to the newest live common snapshot
-	# before deciding whether any send is still necessary.
-	if [ -n "$l_last_common_path" ] && [ "$l_last_common_path" = "$l_final_snapshot_path" ]; then
+	if ! l_reconcile_source_records=$(zxfer_get_live_recheck_source_snapshot_records); then
 		return 0
 	fi
 
@@ -373,9 +444,8 @@ zxfer_reconcile_live_destination_snapshot_state() {
 
 	# When snapshot discovery already proved the initial destination subtree is
 	# absent, do not insist on a second live existence probe before the first
-	# root bootstrap send. illumos/OpenZFS can surface that second probe as a
-	# bare failure even though the cached "missing" result is authoritative for
-	# the initial root dataset. Child datasets still recheck live state because a
+	# root snapshot recheck. The seed helper still live-probes before choosing
+	# the missing-dataset receive path; child datasets recheck here because a
 	# recursive parent receive may have created them earlier in the iteration.
 	if [ "$l_dest_exists" -eq 0 ] && zxfer_current_destination_is_initial_source_dataset; then
 		return
@@ -392,7 +462,7 @@ zxfer_reconcile_live_destination_snapshot_state() {
 		zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
 	fi
 	if [ -z "$l_live_dest_snaps" ]; then
-		g_dest_has_snapshots=0
+		zxfer_clear_live_destination_common_snapshot_state "$l_reconcile_source_records" 0
 		return 0
 	fi
 	g_dest_has_snapshots=1
@@ -400,20 +470,19 @@ zxfer_reconcile_live_destination_snapshot_state() {
 	# Build a destination identity set once, then scan the source records in
 	# order so we keep the newest matching snapshot and the remaining tail after
 	# it without repeated large shell-string membership checks.
-	l_reconcile_source_records=$g_src_snapshot_transfer_list
-	if zxfer_snapshot_record_lists_share_snapshot_name "$g_src_snapshot_transfer_list" "$l_live_dest_snaps"; then
-		if ! zxfer_snapshot_record_list_contains_guid "$g_src_snapshot_transfer_list"; then
+	if zxfer_snapshot_record_lists_share_snapshot_name "$l_reconcile_source_records" "$l_live_dest_snaps"; then
+		if ! zxfer_snapshot_record_list_contains_guid "$l_reconcile_source_records"; then
 			l_reconcile_source_dataset=""
 			while IFS= read -r l_reconcile_source_record; do
 				[ -n "$l_reconcile_source_record" ] || continue
 				l_reconcile_source_dataset=$(zxfer_extract_snapshot_dataset "$l_reconcile_source_record")
 				[ -n "$l_reconcile_source_dataset" ] && break
 			done <<-EOF
-				$(zxfer_normalize_snapshot_record_list "$g_src_snapshot_transfer_list")
+				$(zxfer_normalize_snapshot_record_list "$l_reconcile_source_records")
 			EOF
 
 			if [ -n "$l_reconcile_source_dataset" ]; then
-				if ! l_reconcile_source_records=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_reconcile_source_dataset" "$g_src_snapshot_transfer_list"); then
+				if ! l_reconcile_source_records=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_reconcile_source_dataset" "$l_reconcile_source_records"); then
 					zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_reconcile_source_dataset]."
 				fi
 			fi
@@ -497,7 +566,10 @@ $l_reconcile_line"
 		$(printf '%s\n' "$l_reconcile_result")
 	EOF
 
-	[ -n "$l_confirmed_common_snap" ] || return
+	if [ -z "$l_confirmed_common_snap" ]; then
+		zxfer_clear_live_destination_common_snapshot_state "$l_reconcile_source_records" 1
+		return 0
+	fi
 
 	g_dest_has_snapshots=1
 	g_last_common_snap=$l_confirmed_common_snap
@@ -745,37 +817,31 @@ zxfer_build_replication_iteration_list() {
 	l_property_pass_required=$1
 	g_zxfer_replication_iteration_list_result=""
 
-	if ! zxfer_get_temp_file >/dev/null; then
+	if ! zxfer_create_temp_file_group 3 >/dev/null; then
 		return 1
 	fi
-	l_iteration_input_file=$g_zxfer_temp_file_result
-	if ! zxfer_get_temp_file >/dev/null; then
-		zxfer_cleanup_runtime_artifact_path "$l_iteration_input_file"
-		return 1
-	fi
-	l_iteration_filtered_file=$g_zxfer_temp_file_result
-	if ! zxfer_get_temp_file >/dev/null; then
-		zxfer_cleanup_runtime_artifact_paths "$l_iteration_input_file" "$l_iteration_filtered_file"
-		return 1
-	fi
-	l_iteration_sorted_file=$g_zxfer_temp_file_result
+	l_iteration_stage_files=$g_zxfer_temp_file_group_result
+	{
+		IFS= read -r l_iteration_input_file
+		IFS= read -r l_iteration_filtered_file
+		IFS= read -r l_iteration_sorted_file
+	} <<-EOF
+		$l_iteration_stage_files
+	EOF
 
 	if ! zxfer_write_runtime_artifact_file "$l_iteration_input_file" ""; then
-		zxfer_cleanup_runtime_artifact_paths \
-			"$l_iteration_input_file" "$l_iteration_filtered_file" "$l_iteration_sorted_file"
+		zxfer_cleanup_runtime_artifact_path_list "$l_iteration_stage_files"
 		return 1
 	fi
 
 	if ! printf '%s\n' "$g_recursive_source_list" >>"$l_iteration_input_file"; then
-		zxfer_cleanup_runtime_artifact_paths \
-			"$l_iteration_input_file" "$l_iteration_filtered_file" "$l_iteration_sorted_file"
+		zxfer_cleanup_runtime_artifact_path_list "$l_iteration_stage_files"
 		return 1
 	fi
 
 	if [ "$g_option_R_recursive" != "" ] && [ "$l_property_pass_required" -eq 1 ]; then
 		if ! printf '%s\n' "$g_recursive_source_dataset_list" >>"$l_iteration_input_file"; then
-			zxfer_cleanup_runtime_artifact_paths \
-				"$l_iteration_input_file" "$l_iteration_filtered_file" "$l_iteration_sorted_file"
+			zxfer_cleanup_runtime_artifact_path_list "$l_iteration_stage_files"
 			return 1
 		fi
 	fi
@@ -783,8 +849,7 @@ zxfer_build_replication_iteration_list() {
 	if [ "$g_option_d_delete_destination_snapshots" -eq 1 ] &&
 		[ -n "${g_recursive_destination_extra_dataset_list:-}" ]; then
 		if ! printf '%s\n' "$g_recursive_destination_extra_dataset_list" >>"$l_iteration_input_file"; then
-			zxfer_cleanup_runtime_artifact_paths \
-				"$l_iteration_input_file" "$l_iteration_filtered_file" "$l_iteration_sorted_file"
+			zxfer_cleanup_runtime_artifact_path_list "$l_iteration_stage_files"
 			return 1
 		fi
 	fi
@@ -794,8 +859,7 @@ zxfer_build_replication_iteration_list() {
 	case "$l_filter_status" in
 	0 | 1) ;;
 	*)
-		zxfer_cleanup_runtime_artifact_paths \
-			"$l_iteration_input_file" "$l_iteration_filtered_file" "$l_iteration_sorted_file"
+		zxfer_cleanup_runtime_artifact_path_list "$l_iteration_stage_files"
 		return "$l_filter_status"
 		;;
 	esac
@@ -806,22 +870,19 @@ zxfer_build_replication_iteration_list() {
 		"$l_iteration_input_file"
 	l_sort_status=$?
 	if [ "$l_sort_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_paths \
-			"$l_iteration_input_file" "$l_iteration_filtered_file" "$l_iteration_sorted_file"
+		zxfer_cleanup_runtime_artifact_path_list "$l_iteration_stage_files"
 		return "$l_sort_status"
 	fi
 
 	zxfer_read_replication_stage_file "$l_iteration_sorted_file" >/dev/null
 	l_read_status=$?
 	if [ "$l_read_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_paths \
-			"$l_iteration_input_file" "$l_iteration_filtered_file" "$l_iteration_sorted_file"
+		zxfer_cleanup_runtime_artifact_path_list "$l_iteration_stage_files"
 		return "$l_read_status"
 	fi
 	g_zxfer_replication_iteration_list_result=$g_zxfer_replication_file_read_result
 
-	zxfer_cleanup_runtime_artifact_paths \
-		"$l_iteration_input_file" "$l_iteration_filtered_file" "$l_iteration_sorted_file"
+	zxfer_cleanup_runtime_artifact_path_list "$l_iteration_stage_files"
 	return 0
 }
 
@@ -850,22 +911,23 @@ zxfer_collect_post_seed_property_sources() {
 	[ -n "$l_post_seed_property_sources_file" ] || return 0
 	[ -s "$l_post_seed_property_sources_file" ] || return 0
 
-	if ! zxfer_get_temp_file >/dev/null; then
+	if ! zxfer_create_temp_file_group 2 >/dev/null; then
 		return 1
 	fi
-	l_filtered_sources_file=$g_zxfer_temp_file_result
-	if ! zxfer_get_temp_file >/dev/null; then
-		zxfer_cleanup_runtime_artifact_path "$l_filtered_sources_file"
-		return 1
-	fi
-	l_sorted_sources_file=$g_zxfer_temp_file_result
+	l_post_seed_stage_files=$g_zxfer_temp_file_group_result
+	{
+		IFS= read -r l_filtered_sources_file
+		IFS= read -r l_sorted_sources_file
+	} <<-EOF
+		$l_post_seed_stage_files
+	EOF
 
 	grep -v '^[[:space:]]*$' "$l_post_seed_property_sources_file" >"$l_filtered_sources_file"
 	l_filter_status=$?
 	case "$l_filter_status" in
 	0 | 1) ;;
 	*)
-		zxfer_cleanup_runtime_artifact_paths "$l_filtered_sources_file" "$l_sorted_sources_file"
+		zxfer_cleanup_runtime_artifact_path_list "$l_post_seed_stage_files"
 		return "$l_filter_status"
 		;;
 	esac
@@ -873,19 +935,19 @@ zxfer_collect_post_seed_property_sources() {
 	sort -u "$l_filtered_sources_file" >"$l_sorted_sources_file"
 	l_sort_status=$?
 	if [ "$l_sort_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_paths "$l_filtered_sources_file" "$l_sorted_sources_file"
+		zxfer_cleanup_runtime_artifact_path_list "$l_post_seed_stage_files"
 		return "$l_sort_status"
 	fi
 
 	zxfer_read_replication_stage_file "$l_sorted_sources_file" >/dev/null
 	l_read_status=$?
 	if [ "$l_read_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_paths "$l_filtered_sources_file" "$l_sorted_sources_file"
+		zxfer_cleanup_runtime_artifact_path_list "$l_post_seed_stage_files"
 		return "$l_read_status"
 	fi
 	g_zxfer_post_seed_property_sources_result=$g_zxfer_replication_file_read_result
 
-	zxfer_cleanup_runtime_artifact_paths "$l_filtered_sources_file" "$l_sorted_sources_file"
+	zxfer_cleanup_runtime_artifact_path_list "$l_post_seed_stage_files"
 	return 0
 }
 
@@ -923,7 +985,7 @@ zxfer_process_source_dataset() {
 	if [ "$l_property_pass_required" -eq 1 ] &&
 		[ "${g_dest_seed_requires_property_reconcile:-0}" -eq 1 ] &&
 		[ "$g_option_n_dryrun" -eq 0 ]; then
-		zxfer_defer_buffered_backup_metadata_record "$l_source" "$g_actual_dest" "$g_zxfer_source_pvs_raw"
+		zxfer_defer_buffered_backup_metadata_record "$l_source"
 		zxfer_note_destination_dataset_exists "$g_actual_dest"
 		if ! zxfer_append_post_seed_property_source "$l_post_seed_property_sources_file" "$l_source"; then
 			zxfer_throw_error "Failed to queue post-seed property reconcile source [$l_source]."
@@ -946,7 +1008,7 @@ zxfer_run_post_seed_property_reconcile() {
 		[ -n "$l_source" ] || continue
 		zxfer_set_actual_dest "$l_source"
 		zxfer_transfer_properties "$l_source" 1
-		zxfer_finalize_deferred_backup_metadata_record "$l_source" "$g_actual_dest" "$g_zxfer_source_pvs_raw"
+		zxfer_finalize_deferred_backup_metadata_record "$l_source"
 	done <<-EOF
 		$l_post_seed_property_sources
 	EOF
@@ -1092,8 +1154,9 @@ zxfer_check_backup_storage_dir_if_needed() {
 			zxfer_echov "Dry run: umask 077; $l_backup_dir_cmd; $l_backup_dir_mode_cmd"
 		else
 			l_remote_backup_dir_cmd=$(zxfer_build_remote_backup_dir_prepare_cmd "$g_backup_storage_root" "$g_option_T_target_host" 99)
-			l_remote_backup_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_backup_dir_cmd")
-			l_remote_backup_display_cmd=$(zxfer_build_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_backup_shell_cmd")
+			zxfer_render_remote_backup_dry_run_shell_command "$g_option_T_target_host" "$l_remote_backup_dir_cmd" ||
+				return "$?"
+			l_remote_backup_display_cmd=$g_zxfer_remote_backup_dry_run_shell_command_result
 			zxfer_echov "Dry run: $l_remote_backup_display_cmd"
 		fi
 		return

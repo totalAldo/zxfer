@@ -1,5 +1,5 @@
 Name:           zxfer
-Version:        2.0.0-20260423
+Version:        2.0.0-20260430
 Release:        0.1%{?dist}
 Summary:        Optimized ZFS snapshot replication script
 
@@ -14,13 +14,13 @@ BuildArch:      noarch
 # requirements for distro-specific package names or virtual provides.
 Requires:       /bin/sh
 Requires:       /usr/bin/awk
-Requires:       /usr/bin/ssh
 Requires:       zfs
 
-# Optional feature helpers (GNU parallel for local `-j > 1` discovery, a
-# resolved remote `parallel` helper for remote-origin `-O ... -j ...` runs, and
-# zstd for -z compression plus remote snapshot-discovery metadata compression
-# when ssh compression is active)
+# Optional feature helpers (ssh for `-O` / `-T` remote transport, `parallel`
+# for local `-j > 1` discovery, a resolved remote `parallel` helper for
+# remote-origin `-O ... -j ...` runs, and zstd for -z compression plus remote
+# snapshot-discovery metadata compression when ssh compression is active)
+Recommends:     /usr/bin/ssh
 Recommends:     parallel
 Recommends:     zstd
 
@@ -28,11 +28,15 @@ Recommends:     zstd
 zxfer is a maintained release of the long-standing zxfer utility. It adds
 high-performance ZFS replication, dataset property synchronization, and
 additional safety checks while retaining the original one-command workflow.
-Optional features use GNU parallel for local `-j > 1` snapshot discovery, a
-resolved remote `parallel` helper for remote-origin `-O ... -j ...` snapshot
-discovery, and zstd for `-z` / `-Z` compressed ssh streams, including remote
-snapshot-discovery metadata compression when that ssh-compression path is
-active.
+Optional features use ssh for remote `-O` / `-T` transports, `parallel` for
+local `-j > 1` snapshot discovery, a resolved remote `parallel` helper for
+remote-origin `-O ... -j ...` snapshot discovery, and zstd for `-z` / `-Z`
+compressed ssh streams, including remote snapshot-discovery metadata
+compression when that ssh-compression path is active. zxfer intentionally
+checks only that `parallel` resolves; packages should depend on an
+implementation compatible with the GNU Parallel-style options used by zxfer's
+rendered source-discovery pipeline when they want to guarantee `-j > 1`
+support.
 
 %prep
 %autosetup
@@ -73,6 +77,6 @@ install -Dm0644 man/zxfer.8 %{buildroot}%{_mandir}/man8/zxfer.8
 %{_mandir}/man8/zxfer.8*
 
 %changelog
-* Thu Apr 23 2026 Aldo Gonzalez - 2.0.0-20260423-0.1
-- Track zxfer 2.0.0-20260423 release and modernize Source URL (see CHANGELOG.txt for upstream details).
-- Make platform/security docs clearer about remote helper hardening and macOS caveats, and loosen the RPM spec away from a path-locked `/sbin/zfs` dependency so downstream packagers can adapt it more easily.
+* Thu Apr 30 2026 Aldo Gonzalez - 2.0.0-20260430-0.1
+- Track zxfer 2.0.0-20260430 release and modernize Source URL (see CHANGELOG.txt for upstream details).
+- Make platform/security docs clearer about remote helper hardening and macOS caveats, loosen the RPM spec away from a path-locked `/sbin/zfs` dependency, and make local ssh a weak dependency for remote features so downstream packagers can adapt it more easily.

@@ -90,13 +90,64 @@ test_integration_build_requested_test_sequence_rejects_unknown_test_names() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_integration_harness_declares_remote_parallel_probe_failure_case() {
+test_integration_harness_declares_remote_parallel_rendered_failure_case() {
 	harness_contents=$(cat "$INTEGRATION_HARNESS")
 
 	assertContains "The integration harness should define the rendered remote parallel failure integration case." \
-		"$harness_contents" "remote_parallel_functional_probe_failure_origin_test()"
+		"$harness_contents" "remote_parallel_rendered_failure_origin_test()"
 	assertContains "The integration harness should keep the rendered remote parallel failure case in the declared test sequence." \
-		"$harness_contents" "remote_parallel_functional_probe_failure_origin_test \\"
+		"$harness_contents" "remote_parallel_rendered_failure_origin_test \\"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_harness_does_not_skip_child_property_assertions_on_darwin() {
+	harness_contents=$(cat "$INTEGRATION_HARNESS")
+
+	assertContains "The integration harness should still assert inherited child atime after initial replication." \
+		"$harness_contents" "Expected atime=off on \$dest_child, got \$child_atime."
+	assertContains "The integration harness should still assert child atime after an explicit property pass." \
+		"$harness_contents" "Expected atime=off to be set on \$dest_child after property pass."
+	assertNotContains "Darwin should not bypass supported child property reconciliation assertions." \
+		"$harness_contents" "Skipping child atime assertion on Darwin"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_find_backup_metadata_file_for_exact_pair_matches_v2_root_headers_and_row() {
+	backup_root="$WORKDIR/v2_lookup"
+	backup_dir="$backup_root/tank/src"
+	backup_file="$backup_dir/.zxfer_backup_info.src.kcurrent"
+	mkdir -p "$backup_dir"
+	printf '%s\n%s\n%s\n%s\n%s\n' \
+		"#zxfer property backup file" \
+		"#format_version:2" \
+		"#source_root:tank/src" \
+		"#destination_root:backup/dst/src" \
+		".	compression=lz4=local" >"$backup_file"
+
+	result=$(find_backup_metadata_file_for_exact_pair "$backup_root" "tank/src" "backup/dst/src")
+	wrong_destination_result=$(find_backup_metadata_file_for_exact_pair "$backup_root" "tank/src" "backup/dst")
+
+	assertEquals "The integration harness should locate current v2 metadata by source_root, destination_root, and relative root row." \
+		"$backup_file" "$result"
+	assertEquals "The v2 metadata lookup should not match stale destination roots." \
+		"" "$wrong_destination_result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_find_backup_metadata_file_for_exact_pair_ignores_v1_body_rows() {
+	backup_root="$WORKDIR/v1_lookup"
+	backup_dir="$backup_root/tank/src"
+	backup_file="$backup_dir/.zxfer_backup_info.src.klegacy"
+	mkdir -p "$backup_dir"
+	printf '%s\n%s\n%s\n' \
+		"#zxfer property backup file" \
+		"#format_version:1" \
+		"tank/src,backup/dst/src,compression=lz4=local" >"$backup_file"
+
+	result=$(find_backup_metadata_file_for_exact_pair "$backup_root" "tank/src" "backup/dst/src")
+
+	assertEquals "The integration harness should not locate retired v1 source,destination,properties body rows." \
+		"" "$result"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

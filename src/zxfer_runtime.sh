@@ -785,6 +785,8 @@ zxfer_reset_runtime_artifact_state() {
 	fi
 	g_zxfer_runtime_artifact_path_result=""
 	g_zxfer_runtime_artifact_read_result=""
+	g_zxfer_temp_file_group_result=""
+	g_zxfer_temp_file_group_allocated_count=0
 	return "$l_cleanup_status"
 }
 
@@ -870,6 +872,38 @@ zxfer_cleanup_runtime_artifact_paths() {
 	done
 
 	return "$l_cleanup_status"
+}
+
+# Purpose: Clean up the newline-delimited runtime artifact path list that this
+# module created or tracks.
+# Usage: Called during runtime bootstrap, staging, and trap cleanup when a
+# caller allocated a dynamic group of artifacts and wants one cleanup call.
+zxfer_cleanup_runtime_artifact_path_list() {
+	l_artifact_path_list=$1
+	l_cleanup_status=0
+
+	while IFS= read -r l_artifact_path || [ -n "$l_artifact_path" ]; do
+		[ -n "$l_artifact_path" ] || continue
+		if ! zxfer_cleanup_runtime_artifact_path "$l_artifact_path"; then
+			l_cleanup_status=1
+		fi
+	done <<-EOF
+		$l_artifact_path_list
+	EOF
+
+	return "$l_cleanup_status"
+}
+
+# Purpose: Clean up the newline-delimited runtime artifact path list and return
+# the caller's original status.
+# Usage: Called during runtime bootstrap, staging, and trap cleanup on error
+# paths that must preserve the lower-level failure status after cleanup.
+zxfer_cleanup_runtime_artifact_path_list_and_return() {
+	l_return_status=$1
+	l_artifact_path_list=$2
+
+	zxfer_cleanup_runtime_artifact_path_list "$l_artifact_path_list" >/dev/null 2>&1 || :
+	return "$l_return_status"
 }
 
 # Purpose: Clean up the registered runtime artifacts that this module created
@@ -1044,6 +1078,101 @@ zxfer_read_runtime_artifact_file() {
 	printf '%s' "$l_artifact_contents"
 }
 
+# Purpose: Read the runtime artifact file and trim one trailing newline from
+# the result for callers whose staged text format is line-oriented.
+# Usage: Called during runtime bootstrap, staging, and trap cleanup when a
+# module previously wrapped readback only to normalize a final newline.
+zxfer_read_runtime_artifact_file_trimmed() {
+	l_artifact_path=$1
+
+	zxfer_read_runtime_artifact_file "$l_artifact_path" >/dev/null ||
+		return "$?"
+	case "$g_zxfer_runtime_artifact_read_result" in
+	*'
+')
+		g_zxfer_runtime_artifact_read_result=${g_zxfer_runtime_artifact_read_result%?}
+		;;
+	esac
+	printf '%s\n' "$g_zxfer_runtime_artifact_read_result"
+}
+
+# Purpose: Capture command stdout through a runtime artifact and checked
+# readback.
+# Usage: Called by modules that need a command's output in current-shell scratch
+# without repeating temp allocation, readback, and cleanup ladders.
+# Side effects: Publishes captured output in $g_zxfer_runtime_artifact_read_result.
+zxfer_capture_runtime_artifact_command_output() {
+	l_artifact_prefix=$1
+	shift
+
+	g_zxfer_runtime_artifact_read_result=""
+	[ -n "$l_artifact_prefix" ] || return 1
+	[ "$#" -gt 0 ] || return 1
+
+	l_capture_status=0
+	zxfer_create_runtime_artifact_file "$l_artifact_prefix" >/dev/null ||
+		l_capture_status=$?
+	if [ "$l_capture_status" -ne 0 ]; then
+		return "$l_capture_status"
+	fi
+	l_capture_file=$g_zxfer_runtime_artifact_path_result
+
+	l_capture_status=0
+	"$@" >"$l_capture_file" || l_capture_status=$?
+	if [ "$l_capture_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
+		return "$l_capture_status"
+	fi
+
+	l_capture_status=0
+	zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null ||
+		l_capture_status=$?
+	if [ "$l_capture_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
+		return "$l_capture_status"
+	fi
+
+	zxfer_cleanup_runtime_artifact_path "$l_capture_file"
+	return 0
+}
+
+# Purpose: Capture command stdout and stderr through a runtime artifact while
+# preserving the command status after checked readback.
+# Usage: Called by modules that need diagnostic output from commands that may
+# fail normally, without repeating temp allocation, readback, and cleanup
+# ladders.
+# Side effects: Publishes captured output in $g_zxfer_runtime_artifact_read_result.
+zxfer_capture_runtime_artifact_combined_command_output() {
+	l_artifact_prefix=$1
+	shift
+
+	g_zxfer_runtime_artifact_read_result=""
+	[ -n "$l_artifact_prefix" ] || return 1
+	[ "$#" -gt 0 ] || return 1
+
+	l_capture_status=0
+	zxfer_create_runtime_artifact_file "$l_artifact_prefix" >/dev/null ||
+		l_capture_status=$?
+	if [ "$l_capture_status" -ne 0 ]; then
+		return "$l_capture_status"
+	fi
+	l_capture_file=$g_zxfer_runtime_artifact_path_result
+
+	l_command_status=0
+	"$@" >"$l_capture_file" 2>&1 || l_command_status=$?
+
+	l_read_status=0
+	zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null ||
+		l_read_status=$?
+	if [ "$l_read_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
+		return "$l_read_status"
+	fi
+
+	zxfer_cleanup_runtime_artifact_path "$l_capture_file"
+	return "$l_command_status"
+}
+
 # Purpose: Publish the runtime artifact file from staged state to its live
 # destination.
 # Usage: Called during runtime bootstrap, staging, and trap cleanup after
@@ -1146,6 +1275,46 @@ zxfer_get_temp_file() {
 
 	# return the temp file name
 	echo "$g_zxfer_temp_file_result"
+}
+
+# Purpose: Allocate a group of temp files and publish their paths as one
+# newline-delimited result.
+# Usage: Called during runtime bootstrap, staging, and trap cleanup when a
+# multi-stage operation needs several files and must clean up partial
+# allocation on failure.
+zxfer_create_temp_file_group() {
+	l_temp_file_count=$1
+	l_temp_file_index=0
+	l_temp_file_group_paths=""
+
+	g_zxfer_temp_file_group_result=""
+	g_zxfer_temp_file_group_allocated_count=0
+	case "$l_temp_file_count" in
+	'' | *[!0-9]* | 0)
+		return 1
+		;;
+	esac
+
+	while [ "$l_temp_file_index" -lt "$l_temp_file_count" ]; do
+		l_temp_file_status=0
+		zxfer_get_temp_file >/dev/null || l_temp_file_status=$?
+		if [ "$l_temp_file_status" -ne 0 ]; then
+			g_zxfer_temp_file_group_allocated_count=$l_temp_file_index
+			zxfer_cleanup_runtime_artifact_path_list "$l_temp_file_group_paths" >/dev/null 2>&1 || :
+			return "$l_temp_file_status"
+		fi
+		if [ -n "$l_temp_file_group_paths" ]; then
+			l_temp_file_group_paths=$l_temp_file_group_paths'
+'$g_zxfer_temp_file_result
+		else
+			l_temp_file_group_paths=$g_zxfer_temp_file_result
+		fi
+		l_temp_file_index=$((l_temp_file_index + 1))
+		g_zxfer_temp_file_group_allocated_count=$l_temp_file_index
+	done
+
+	g_zxfer_temp_file_group_result=$l_temp_file_group_paths
+	printf '%s\n' "$l_temp_file_group_paths"
 }
 
 # Purpose: Reset the cache object result state so the next runtime pass starts
@@ -1559,7 +1728,7 @@ zxfer_get_max_yield_iterations() {
 # bootstrap so downstream code sees consistent defaults and runtime state.
 zxfer_init_runtime_metadata() {
 	# zxfer version
-	g_zxfer_version="2.0.0-20260423"
+	g_zxfer_version="2.0.0-20260430"
 }
 
 # Purpose: Initialize the option defaults before later helpers depend on it.
@@ -1627,7 +1796,7 @@ zxfer_init_dependency_tool_defaults() {
 	g_cmd_parallel=$(PATH=$g_zxfer_dependency_path command -v parallel 2>/dev/null || :)
 	if [ "$g_cmd_parallel" != "" ]; then
 		l_dependency_status=0
-		g_cmd_parallel=$(zxfer_validate_resolved_tool_path "$g_cmd_parallel" "GNU parallel") ||
+		g_cmd_parallel=$(zxfer_validate_resolved_tool_path "$g_cmd_parallel" "parallel") ||
 			l_dependency_status=$?
 		if [ "$l_dependency_status" -ne 0 ]; then
 			g_zxfer_failure_class=dependency

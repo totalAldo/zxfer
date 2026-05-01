@@ -80,6 +80,19 @@ test_zxfer_property_cache_capture_and_read_helpers_cover_success_paths_in_curren
 		"compression=lz4=local" "$g_zxfer_property_cache_read_result"
 }
 
+test_zxfer_serialize_property_records_preserves_line_feed_values() {
+	output=$(
+		printf 'user:note\tline1\nline2\tlocal\ncompression\tlz4\tlocal\n' |
+			zxfer_serialize_property_records_from_stdin
+	)
+	status=$?
+
+	assertEquals "Serialized property records should accept logical property values that span physical zfs-get output lines." \
+		"0" "$status"
+	assertEquals "Serialized property records should encode embedded line feeds inside the property value." \
+		"user:note=line1%0Aline2=local,compression=lz4=local" "$output"
+}
+
 test_zxfer_capture_serialized_property_records_reports_tempfile_failures_in_current_shell() {
 	zxfer_get_temp_file() {
 		return 1
@@ -298,6 +311,25 @@ EOF
 	assertEquals "Recursive property grouping should retain dataset order and merge encoded property records per dataset." \
 		"tank/src	compression=lz4=local,readonly=off=local
 tank/src/child	compression=gzip=inherited,readonly=off=inherited" "$(cat "$output_file")"
+}
+
+test_zxfer_group_recursive_property_tree_by_dataset_preserves_line_feed_values() {
+	filter_file="$TEST_TMPDIR/property-filter-linefeed.list"
+	tree_file="$TEST_TMPDIR/property-tree-linefeed.tsv"
+	output_file="$TEST_TMPDIR/property-grouped-linefeed.tsv"
+
+	printf '%s\n' "tank/src" >"$filter_file"
+	printf 'tank/src\tuser:note\tline1\nline2\tlocal\n' >"$tree_file"
+	printf 'tank/src\tcompression\tlz4\tlocal\n' >>"$tree_file"
+	printf 'tank/skip\tuser:note\tignored\nvalue\tlocal\n' >>"$tree_file"
+
+	zxfer_group_recursive_property_tree_by_dataset "$filter_file" "$tree_file" >"$output_file"
+	status=$?
+
+	assertEquals "Recursive property grouping should accept logical property records split across physical lines." \
+		"0" "$status"
+	assertEquals "Recursive property grouping should encode embedded line feeds before storing grouped cache records." \
+		"tank/src	user:note=line1%0Aline2=local,compression=lz4=local" "$(cat "$output_file")"
 }
 
 test_zxfer_prefetch_recursive_normalized_properties_source_success_in_current_shell() {
@@ -548,6 +580,35 @@ test_zxfer_prefetch_recursive_normalized_properties_preserves_grouped_read_failu
 		"27" "$status"
 	assertEquals "Grouped artifact read failures should disable source prefetch for the iteration." \
 		"2" "${g_zxfer_source_property_tree_prefetch_state:-0}"
+}
+
+test_zxfer_prefetch_recursive_normalized_properties_skips_malformed_grouped_rows() {
+	g_zxfer_source_property_tree_prefetch_root="tank/src"
+	g_zxfer_source_property_tree_prefetch_zfs_cmd="/sbin/zfs"
+	g_zxfer_source_property_tree_prefetch_state=0
+	g_recursive_source_dataset_list="tank/src"
+
+	zxfer_run_zfs_cmd_for_spec() {
+		case "$4" in
+		-Hpo | -Ho)
+			printf '%s\n' "tank/src	compression	lz4	local"
+			return 0
+			;;
+		esac
+		return 1
+	}
+	zxfer_read_runtime_artifact_file() {
+		g_zxfer_runtime_artifact_read_result="malformed-grouped-row-without-tabs"
+		return 0
+	}
+
+	zxfer_prefetch_recursive_normalized_properties source >/dev/null 2>&1
+	status=$?
+
+	assertEquals "Malformed grouped cache rows should be ignored without disabling recursive source prefetch." \
+		"0" "$status"
+	assertEquals "Successful prefetch with only skipped grouped rows should still mark source prefetch ready." \
+		"1" "${g_zxfer_source_property_tree_prefetch_state:-0}"
 }
 
 test_zxfer_maybe_prefetch_recursive_normalized_properties_covers_success_and_failure_paths_in_current_shell() {

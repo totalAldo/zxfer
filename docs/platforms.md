@@ -2,15 +2,25 @@
 
 ## Supported Platforms
 
-zxfer is intended to work with:
+zxfer is intended to work with current OpenZFS 2.0+ environments:
 
-- FreeBSD with OpenZFS
+- FreeBSD 14.x and 15.x maintained branches with OpenZFS
 - Linux with OpenZFS
-- illumos / Solaris-family systems
-- OpenZFS on macOS, with known property-reconciliation caveats
+- current OmniOS / illumos systems
+- current OpenZFS on macOS workflows
+
+For releases published after 2026-05-01, zxfer follows maintained FreeBSD
+branches. FreeBSD 13.5 and the stable/13 branch reach end of life on
+2026-04-30, so this codebase does not guarantee support for FreeBSD 13.x or
+other end-of-life FreeBSD branches. Reports from EOL systems can still be
+useful historical context, but fixes are prioritized only when the issue also
+affects a maintained branch.
 
 The project targets POSIX `/bin/sh`, so portability depends more on shell and
 tool behavior than on GNU-specific scripting features.
+Pre-OpenZFS 2.0 behavior, Solaris Express-era property profiles, and older
+backup metadata layouts are intentionally outside the supported platform
+surface.
 
 ## Integration Test Hosts
 
@@ -91,18 +101,23 @@ matters especially when:
 - restore mode (`-e`) needs a remote `cat` on the origin, and remote backup
   writes for `-k` use `cat` on the target
 - `-j` uses explicit per-dataset source discovery on the executing origin host
-  whenever `jobs > 1`. Local-origin runs require GNU `parallel`; remote-origin
-  runs through `-O` require that the remote host resolve a `parallel` helper.
-  zxfer fails closed if the required helper is missing instead of silently
-  falling back to the serial recursive listing. Source discovery uses tracked
-  background PID cleanup and staged stderr, while send/receive workers run
-  under the shared supervisor rather than bare wrapper-shell PID cleanup
+  whenever `jobs > 1`. Local-origin and remote-origin runs require a resolved
+  `parallel` helper on that host. zxfer intentionally validates only helper
+  existence through the secure-PATH model and assumes the operator or package
+  supplied an implementation compatible with the GNU Parallel-style options
+  used by the rendered pipeline. zxfer fails closed if the required helper is
+  missing, while incompatible helpers fail through source discovery instead of
+  silently falling back to the serial recursive listing. Source discovery uses
+  tracked background PID cleanup and staged stderr, while send/receive workers
+  run under the shared supervisor rather than bare wrapper-shell PID cleanup
 - custom `-Z` compression commands or default `zstd` helpers must be resolved
   per host instead of assuming one shared absolute path
-- the per-host remote-capability cache is keyed by the trusted dependency
-  path, ssh transport policy, and the requested optional tool set, so repeated
-  helper discovery inside one zxfer run can safely reuse matching handshake
-  results without sharing stale helper-path data across different run shapes
+- the per-host remote-capability cache is keyed from the host spec, trusted
+  dependency path, ssh transport policy, and the requested optional tool set;
+  cache files store the full encoded identity and reads reject mismatches,
+  so repeated helper discovery inside one zxfer run can safely reuse matching
+  handshake results without sharing stale helper-path data across different run
+  shapes
 
 Current releases also coordinate shared ssh control sockets, per-process ssh
 leases, and remote capability-cache fills through one metadata-bearing
@@ -166,5 +181,6 @@ Current platform-specific testing guidance:
   as `arm64`, but OmniOS remains an `amd64` guest and therefore a best-effort
   TCG lane rather than the project's strict isolation gate on those hosts.
 - Hosted macOS CI remains a unit and shell-portability lane, not a required ZFS
-  integration gate, because Darwin/OpenZFS property behavior is still less
-  deterministic than the FreeBSD and Linux certification path.
+  integration gate, because the hosted runner does not install or exercise
+  OpenZFS pools. Use the VM matrix or a disposable local OpenZFS-on-macOS host
+  when macOS ZFS behavior needs end-to-end validation.

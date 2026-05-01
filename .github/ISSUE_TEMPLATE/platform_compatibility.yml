@@ -19,7 +19,7 @@ body:
     id: os_release
     attributes:
       label: OS release
-      placeholder: FreeBSD 14.2-RELEASE, Debian 13, OmniOS r151050, macOS 15.4
+      placeholder: FreeBSD 14.4-RELEASE, Debian 13, OmniOS r151056, macOS 15.4
     validations:
       required: true
   - type: input

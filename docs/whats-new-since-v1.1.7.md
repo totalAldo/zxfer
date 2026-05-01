@@ -21,8 +21,8 @@ Compared with `v1.1.7`, current zxfer is:
   property backup metadata, and failure reporting have all been hardened.
 - Better at large recursive replications. Concurrency, snapshot discovery,
   property reconciliation, and delete planning have all been reworked.
-- Better documented and better tested across FreeBSD, Linux, illumos/Solaris,
-  and OpenZFS on macOS.
+- Better documented and better tested across current OpenZFS 2.0+ workflows on
+  FreeBSD, Linux, OmniOS/illumos, and OpenZFS on macOS.
 
 ## Breaking Changes And Removed Behavior
 
@@ -58,7 +58,7 @@ Current behavior:
 - `-k` writes hardened backup metadata under `ZXFER_BACKUP_DIR`
 - `-e` restores only from the current keyed, versioned metadata layout
 - current metadata writes use the versioned root markers
-  `#format_version`, `#source_root`, and `#destination_root`
+  `#format_version:2`, `#source_root`, and `#destination_root`
 - older or unversioned restore metadata layouts are no longer supported
 
 This is one of the biggest upgrade breaks for long-lived installs.
@@ -170,10 +170,12 @@ These are the biggest user-visible additions since the 2019 release.
 ### New CLI options and behaviors
 
 - `-j jobs`: concurrent send/receive execution with explicit per-dataset
-  source discovery when `jobs > 1`; local-origin runs require GNU
-  `parallel`, while remote-origin runs resolve an origin-host `parallel`
-  helper. Source discovery uses tracked background PID cleanup, and
-  long-lived send/receive workers use supervisor-backed teardown instead of
+  source discovery when `jobs > 1`; local-origin and remote-origin runs
+  require a resolved `parallel` helper on the executing origin host. zxfer
+  checks helper existence through the secure-PATH model and intentionally
+  leaves GNU Parallel-style compatibility to operators and packages. Source
+  discovery uses tracked background PID cleanup,
+  and long-lived send/receive workers use supervisor-backed teardown instead of
   bare wrapper-shell PID cleanup
 - `-V`: very verbose debug output plus profiling counters
 - `-w`: raw `zfs send`

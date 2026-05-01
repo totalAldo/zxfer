@@ -381,7 +381,7 @@ test_background_job_runner_main_handles_output_only_and_no_output_paths_without_
 	fake_bin_dir="$TEST_TMPDIR/runner_output_variants_bin"
 	real_sh=$(command -v sh)
 	mkdir -p "$control_dir" "$fake_bin_dir"
-	for l_tool in sh date sed mv chmod rm; do
+	for l_tool in sh date sed mv chmod rm printf; do
 		l_real_tool=$(command -v "$l_tool") || fail "Unable to resolve [$l_tool] for the no-setsid PATH fixture."
 		ln -s "$l_real_tool" "$fake_bin_dir/$l_tool" ||
 			fail "Unable to publish [$l_tool] into the no-setsid PATH fixture."

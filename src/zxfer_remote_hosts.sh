@@ -1614,12 +1614,11 @@ zxfer_render_remote_capability_cache_identity() {
 	zxfer_render_remote_capability_cache_identity_for_host "${1:-}" "${2:-}"
 }
 
-# Purpose: Manage remote capability cache key for the remote-host management
-# flow.
+# Purpose: Render the full remote capability cache artifact identity for host.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when remote bootstrap or capability logic needs one shared
-# helper for this state.
-zxfer_remote_capability_cache_key() {
+# socket management so path keys and cache-object metadata use the same
+# host-scoped identity.
+zxfer_render_remote_capability_cache_artifact_identity_for_host() {
 	l_host_spec=$1
 	l_requested_tools=${2:-}
 	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
@@ -1627,21 +1626,62 @@ zxfer_remote_capability_cache_key() {
 		[ "$l_cache_identity" = "" ] || printf '%s\n' "$l_cache_identity"
 		return 1
 	fi
-	l_identity=$(printf '%s\n%s' "$l_host_spec" "$l_cache_identity")
-	if l_key_cksum=$(printf '%s' "$l_identity" | cksum 2>/dev/null); then
-		# shellcheck disable=SC2086
-		set -- $l_key_cksum
-		if [ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
-			printf '%s.%s\n' "$1" "$2"
-			return 0
-		fi
+
+	printf '%s\n%s\n' "$l_host_spec" "$l_cache_identity"
+}
+
+# Purpose: Return the remote capability cache artifact identity as hex.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when cache paths or metadata need a newline-safe exact
+# identity for later verification.
+zxfer_remote_capability_cache_identity_hex_for_host() {
+	l_host_spec=$1
+	l_requested_tools=${2:-}
+
+	if ! l_identity=$(zxfer_render_remote_capability_cache_artifact_identity_for_host \
+		"$l_host_spec" "$l_requested_tools"); then
+		[ "$l_identity" = "" ] || printf '%s\n' "$l_identity"
+		return 1
 	fi
-	l_key_hex=$(printf '%s' "$l_identity" |
-		LC_ALL=C od -An -tx1 -v | tr -d ' \n' | cut -c 1-32)
-	if [ "$l_key_hex" = "" ]; then
-		l_key_hex="00"
+
+	l_identity_hex=$(printf '%s' "$l_identity" |
+		LC_ALL=C od -An -tx1 -v | tr -d ' \n')
+	[ -n "$l_identity_hex" ] || return 1
+
+	printf '%s\n' "$l_identity_hex"
+}
+
+# Purpose: Return a bounded remote capability cache key for the remote-host
+# management flow.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when remote bootstrap or capability logic needs one shared
+# helper for this state.
+zxfer_remote_capability_cache_key() {
+	l_host_spec=$1
+	l_requested_tools=${2:-}
+
+	if ! l_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
+		"$l_host_spec" "$l_requested_tools"); then
+		[ "$l_identity_hex" = "" ] || printf '%s\n' "$l_identity_hex"
+		return 1
 	fi
-	printf '%s\n' "$l_key_hex"
+
+	l_identity_hex_len=${#l_identity_hex}
+	l_identity_byte_len=$((l_identity_hex_len / 2))
+	if [ "$l_identity_hex_len" -le 180 ]; then
+		printf 'h%s.%s\n' "$l_identity_byte_len" "$l_identity_hex"
+		return 0
+	fi
+
+	l_key_head=$(printf '%s' "$l_identity_hex" | cut -c 1-64)
+	l_key_tail=$l_identity_hex
+	while [ "${#l_key_tail}" -gt 64 ]; do
+		l_key_tail=${l_key_tail#?}
+	done
+	[ -n "$l_key_head" ] || return 1
+	[ -n "$l_key_tail" ] || return 1
+
+	printf 'h%s.%s.%s\n' "$l_identity_byte_len" "$l_key_head" "$l_key_tail"
 }
 
 # Purpose: Ensure the remote capability cache directory exists and is ready
@@ -2526,6 +2566,10 @@ zxfer_read_remote_capability_cache_file() {
 		"$l_host_spec" "$l_requested_tools"); then
 		return 1
 	fi
+	if ! l_expected_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
+		"$l_host_spec" "$l_requested_tools"); then
+		return 1
+	fi
 	[ -f "$l_cache_path" ] || return 1
 	[ ! -L "$l_cache_path" ] || return 1
 	[ ! -h "$l_cache_path" ] || return 1
@@ -2550,6 +2594,11 @@ zxfer_read_remote_capability_cache_file() {
 		"$g_zxfer_cache_object_metadata_result" created_epoch); then
 		return 1
 	fi
+	if ! l_cache_identity_hex=$(zxfer_get_cache_object_metadata_value \
+		"$g_zxfer_cache_object_metadata_result" identity_hex); then
+		return 1
+	fi
+	[ "$l_cache_identity_hex" = "$l_expected_identity_hex" ] || return 1
 
 	case "$l_cache_epoch" in
 	'' | *[!0-9]*)
@@ -2584,6 +2633,10 @@ zxfer_write_remote_capability_cache_file() {
 		"$l_host_spec" "$l_requested_tools"); then
 		return 1
 	fi
+	if ! l_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
+		"$l_host_spec" "$l_requested_tools"); then
+		return 1
+	fi
 	[ ! -L "$l_cache_path" ] || return 1
 	[ ! -h "$l_cache_path" ] || return 1
 	if [ -e "$l_cache_path" ]; then
@@ -2600,7 +2653,8 @@ zxfer_write_remote_capability_cache_file() {
 	zxfer_write_cache_object_file_atomically \
 		"$l_cache_path" \
 		"$ZXFER_REMOTE_CAPABILITY_CACHE_OBJECT_KIND" \
-		"created_epoch=$l_now" \
+		"created_epoch=$l_now
+identity_hex=$l_identity_hex" \
 		"$l_response"
 }
 
@@ -3089,9 +3143,7 @@ zxfer_resolve_remote_required_tool() {
 # duplicating module logic.
 #
 # Probe the full `--version` output for a resolved remote helper path using only
-# shell builtins, so signature checks do not depend on the remote PATH. Some
-# helpers, including GNU parallel, can emit citation or warning text before the
-# canonical version banner.
+# shell builtins, so version checks do not depend on the remote PATH.
 zxfer_get_remote_resolved_tool_version_output() {
 	l_host=$1
 	l_tool_path=$2
@@ -3102,30 +3154,11 @@ zxfer_get_remote_resolved_tool_version_output() {
 	[ -n "$l_tool_path" ] || return 1
 
 	l_tool_path_single=$(zxfer_escape_for_single_quotes "$l_tool_path")
-	case "$l_label" in
-	"GNU parallel")
-		l_remote_probe="l_tool='$l_tool_path_single'
-if l_output=\$(\"\$l_tool\" --will-cite --version 2>&1); then
-	case \"\$l_output\" in
-	*[Gg][Nn][Uu]\ [Pp][Aa][Rr][Aa][Ll][Ll][Ee][Ll]*)
-		printf '%s\n' \"\$l_output\"
-		exit 0
-		;;
-	esac
-fi
+	l_remote_probe="l_tool='$l_tool_path_single'
 if ! l_output=\$(\"\$l_tool\" --version 2>&1); then
 	exit 11
 fi
 printf '%s\n' \"\$l_output\""
-		;;
-	*)
-		l_remote_probe="l_tool='$l_tool_path_single'
-if ! l_output=\$(\"\$l_tool\" --version 2>&1); then
-	exit 11
-fi
-printf '%s\n' \"\$l_output\""
-		;;
-	esac
 	l_remote_probe_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_probe")
 	if ! zxfer_capture_remote_probe_output "$l_host" "$l_remote_probe_cmd" "$l_profile_side"; then
 		zxfer_emit_remote_probe_failure_message \
@@ -3411,170 +3444,215 @@ zxfer_setup_ssh_control_socket() {
 	fi
 }
 
+# Purpose: Load the SSH control socket role state into shared scratch globals.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management so role-driven helpers can avoid origin/target branches in
+# their main control flow.
+zxfer_get_ssh_control_socket_role_state() {
+	l_role=$1
+
+	g_zxfer_ssh_control_socket_role_host=""
+	g_zxfer_ssh_control_socket_role_socket=""
+	g_zxfer_ssh_control_socket_role_dir=""
+	g_zxfer_ssh_control_socket_role_lease_file=""
+	case "$l_role" in
+	origin)
+		g_zxfer_ssh_control_socket_role_host=${g_option_O_origin_host:-}
+		g_zxfer_ssh_control_socket_role_socket=${g_ssh_origin_control_socket:-}
+		g_zxfer_ssh_control_socket_role_dir=${g_ssh_origin_control_socket_dir:-}
+		g_zxfer_ssh_control_socket_role_lease_file=${g_ssh_origin_control_socket_lease_file:-}
+		;;
+	target)
+		g_zxfer_ssh_control_socket_role_host=${g_option_T_target_host:-}
+		g_zxfer_ssh_control_socket_role_socket=${g_ssh_target_control_socket:-}
+		g_zxfer_ssh_control_socket_role_dir=${g_ssh_target_control_socket_dir:-}
+		g_zxfer_ssh_control_socket_role_lease_file=${g_ssh_target_control_socket_lease_file:-}
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+# Purpose: Restore the role's SSH control socket lease after a close/check
+# failure while preserving the existing socket and directory state.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management when the last-lease close path fails and zxfer must leave
+# the shared socket protected for later cleanup or retry.
+zxfer_restore_ssh_control_socket_lease_for_role() {
+	l_role=$1
+	l_socket_path=$2
+	l_entry_dir=$3
+
+	zxfer_create_ssh_control_socket_lease_file "$l_entry_dir" >/dev/null ||
+		return "$?"
+	zxfer_set_ssh_control_socket_role_state \
+		"$l_role" "$l_socket_path" "$l_entry_dir" "$g_zxfer_runtime_artifact_path_result"
+}
+
+# Purpose: Clean up the SSH control socket entry directory for one role.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management after a live socket is closed or found stale.
+zxfer_cleanup_ssh_control_socket_entry_dir_for_role() {
+	l_role=$1
+	l_entry_dir=$2
+	l_lock_dir=${3:-}
+
+	l_cleanup_status=0
+	zxfer_cleanup_ssh_control_socket_entry_dir "$l_entry_dir" ||
+		l_cleanup_status=$?
+	if [ "$l_cleanup_status" -eq 0 ]; then
+		return 0
+	fi
+	if [ -n "$l_lock_dir" ]; then
+		zxfer_release_ssh_control_socket_lock_with_precedence \
+			"$l_role" "$l_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
+	fi
+	printf '%s\n' "Error removing ssh control socket cache directory for $l_role host." >&2
+	return "$l_cleanup_status"
+}
+
+# Purpose: Close one role's SSH control socket and release related handles or
+# state.
+# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# socket management after protected work finishes or cleanup takes over.
+zxfer_close_ssh_control_socket_for_role() {
+	l_role=$1
+
+	zxfer_get_ssh_control_socket_role_state "$l_role" || return 1
+	l_host=$g_zxfer_ssh_control_socket_role_host
+	l_control_socket=$g_zxfer_ssh_control_socket_role_socket
+	l_control_dir=$g_zxfer_ssh_control_socket_role_dir
+	l_lease_file=$g_zxfer_ssh_control_socket_role_lease_file
+	if [ "$l_host" = "" ] || [ "$l_control_socket" = "" ]; then
+		return
+	fi
+
+	if [ "$l_lease_file" != "" ]; then
+		if zxfer_acquire_ssh_control_socket_lock "$l_control_dir" >/dev/null; then
+			l_ssh_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
+		else
+			zxfer_emit_ssh_control_socket_lock_failure_message \
+				"Error acquiring ssh control socket lock for $l_role host." >&2
+			return 1
+		fi
+		l_cleanup_status=0
+		zxfer_release_ssh_control_socket_lease_file "$l_lease_file" ||
+			l_cleanup_status=$?
+		if [ "$l_cleanup_status" -ne 0 ]; then
+			zxfer_release_ssh_control_socket_lock_with_precedence \
+				"$l_role" "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
+			printf '%s\n' "Error removing ssh control socket lease for $l_role host." >&2
+			return "$l_cleanup_status"
+		fi
+		zxfer_prune_stale_ssh_control_socket_leases "$l_control_dir"
+		l_prune_status=$?
+		if [ "$l_prune_status" -ne 0 ]; then
+			zxfer_release_ssh_control_socket_lock_with_precedence \
+				"$l_role" "$l_ssh_lock_dir" "$l_prune_status" >/dev/null 2>&1 || :
+			zxfer_emit_ssh_control_socket_lock_failure_message \
+				"Error pruning ssh control socket lease entries for $l_role host." >&2
+			return "$l_prune_status"
+		fi
+		zxfer_count_ssh_control_socket_leases "$l_control_dir" >/dev/null
+		l_count_status=$?
+		if [ "$l_count_status" -ne 0 ]; then
+			zxfer_release_ssh_control_socket_lock_with_precedence \
+				"$l_role" "$l_ssh_lock_dir" "$l_count_status" >/dev/null 2>&1 || :
+			zxfer_emit_ssh_control_socket_lock_failure_message \
+				"Error counting ssh control socket lease entries for $l_role host." >&2
+			return "$l_count_status"
+		fi
+		l_remaining_leases=$g_zxfer_ssh_control_socket_lease_count_result
+		if [ "$l_remaining_leases" -ne 0 ]; then
+			zxfer_clear_ssh_control_socket_role_state "$l_role"
+			if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
+				zxfer_emit_ssh_control_socket_lock_failure_message \
+					"Error releasing ssh control socket lock for $l_role host." >&2
+				return 1
+			fi
+			return 0
+		fi
+
+		if zxfer_check_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
+			zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+			if zxfer_run_ssh_control_socket_action_for_host "$l_host" "$l_control_socket" exit; then
+				zxfer_cleanup_ssh_control_socket_entry_dir_for_role \
+					"$l_role" "$l_control_dir" "$l_ssh_lock_dir" ||
+					return "$?"
+			elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
+				zxfer_cleanup_ssh_control_socket_entry_dir_for_role \
+					"$l_role" "$l_control_dir" "$l_ssh_lock_dir" ||
+					return "$?"
+			else
+				if zxfer_restore_ssh_control_socket_lease_for_role \
+					"$l_role" "$l_control_socket" "$l_control_dir"; then
+					zxfer_release_ssh_control_socket_lock_with_precedence \
+						"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
+					zxfer_emit_ssh_control_socket_action_failure_message \
+						"Error closing $l_role ssh control socket." >&2
+					return 1
+				fi
+				zxfer_release_ssh_control_socket_lock_with_precedence \
+					"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
+				zxfer_emit_ssh_control_socket_action_failure_message \
+					"Error closing $l_role ssh control socket." >&2
+				printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
+				return 1
+			fi
+		elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ] &&
+			[ "$l_control_dir" != "" ] &&
+			[ -d "$l_control_dir" ]; then
+			zxfer_cleanup_ssh_control_socket_entry_dir_for_role \
+				"$l_role" "$l_control_dir" "$l_ssh_lock_dir" ||
+				return "$?"
+		else
+			if zxfer_restore_ssh_control_socket_lease_for_role \
+				"$l_role" "$l_control_socket" "$l_control_dir"; then
+				zxfer_release_ssh_control_socket_lock_with_precedence \
+					"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
+				zxfer_emit_ssh_control_socket_action_failure_message \
+					"Error checking $l_role ssh control socket." >&2
+				return 1
+			fi
+			zxfer_release_ssh_control_socket_lock_with_precedence \
+				"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
+			zxfer_emit_ssh_control_socket_action_failure_message \
+				"Error checking $l_role ssh control socket." >&2
+			printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
+			return 1
+		fi
+		if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
+			zxfer_clear_ssh_control_socket_role_state "$l_role"
+			zxfer_emit_ssh_control_socket_lock_failure_message \
+				"Error releasing ssh control socket lock for $l_role host." >&2
+			return 1
+		fi
+	else
+		if zxfer_run_ssh_control_socket_action_for_host "$l_host" "$l_control_socket" exit; then
+			zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+			zxfer_cleanup_ssh_control_socket_entry_dir_for_role "$l_role" "$l_control_dir" ||
+				return "$?"
+		elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
+			zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+			zxfer_cleanup_ssh_control_socket_entry_dir_for_role "$l_role" "$l_control_dir" ||
+				return "$?"
+		else
+			zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+			zxfer_emit_ssh_control_socket_action_failure_message \
+				"Error closing $l_role ssh control socket." >&2
+			return 1
+		fi
+	fi
+	zxfer_clear_ssh_control_socket_role_state "$l_role"
+}
+
 # Purpose: Close the origin SSH control socket and release the related handles
 # or state.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
 # socket management after the protected work finishes or cleanup takes over.
 zxfer_close_origin_ssh_control_socket() {
-	if [ "$g_option_O_origin_host" = "" ] || [ "$g_ssh_origin_control_socket" = "" ]; then
-		return
-	fi
-
-	if [ "$g_ssh_origin_control_socket_lease_file" != "" ]; then
-		if zxfer_acquire_ssh_control_socket_lock "$g_ssh_origin_control_socket_dir" >/dev/null; then
-			l_ssh_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
-			if zxfer_release_ssh_control_socket_lease_file \
-				"$g_ssh_origin_control_socket_lease_file"; then
-				:
-			else
-				l_cleanup_status=$?
-				zxfer_release_ssh_control_socket_lock_with_precedence \
-					origin "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
-				printf '%s\n' "Error removing ssh control socket lease for origin host." >&2
-				return "$l_cleanup_status"
-			fi
-			zxfer_prune_stale_ssh_control_socket_leases "$g_ssh_origin_control_socket_dir"
-			l_prune_status=$?
-			if [ "$l_prune_status" -ne 0 ]; then
-				zxfer_release_ssh_control_socket_lock_with_precedence \
-					origin "$l_ssh_lock_dir" "$l_prune_status" >/dev/null 2>&1 || :
-				zxfer_emit_ssh_control_socket_lock_failure_message \
-					"Error pruning ssh control socket lease entries for origin host." >&2
-				return "$l_prune_status"
-			fi
-			zxfer_count_ssh_control_socket_leases \
-				"$g_ssh_origin_control_socket_dir" >/dev/null
-			l_count_status=$?
-			if [ "$l_count_status" -ne 0 ]; then
-				zxfer_release_ssh_control_socket_lock_with_precedence \
-					origin "$l_ssh_lock_dir" "$l_count_status" >/dev/null 2>&1 || :
-				zxfer_emit_ssh_control_socket_lock_failure_message \
-					"Error counting ssh control socket lease entries for origin host." >&2
-				return "$l_count_status"
-			fi
-			l_remaining_leases=$g_zxfer_ssh_control_socket_lease_count_result
-		else
-			zxfer_emit_ssh_control_socket_lock_failure_message \
-				"Error acquiring ssh control socket lock for origin host." >&2
-			return 1
-		fi
-		if [ "$l_remaining_leases" -eq 0 ]; then
-			if zxfer_check_ssh_control_socket_for_host "$g_option_O_origin_host" "$g_ssh_origin_control_socket"; then
-				zxfer_echoV "Closing origin ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-				if zxfer_run_ssh_control_socket_action_for_host \
-					"$g_option_O_origin_host" "$g_ssh_origin_control_socket" exit; then
-					if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_origin_control_socket_dir"; then
-						:
-					else
-						l_cleanup_status=$?
-						zxfer_release_ssh_control_socket_lock_with_precedence \
-							origin "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
-						printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
-						return "$l_cleanup_status"
-					fi
-				elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
-					if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_origin_control_socket_dir"; then
-						:
-					else
-						l_cleanup_status=$?
-						zxfer_release_ssh_control_socket_lock_with_precedence \
-							origin "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
-						printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
-						return "$l_cleanup_status"
-					fi
-				else
-					zxfer_create_ssh_control_socket_lease_file \
-						"$g_ssh_origin_control_socket_dir" >/dev/null
-					l_restore_status=$?
-					if [ "$l_restore_status" -eq 0 ]; then
-						g_ssh_origin_control_socket_lease_file=$g_zxfer_runtime_artifact_path_result
-						zxfer_release_ssh_control_socket_lock_with_precedence \
-							origin "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-						zxfer_emit_ssh_control_socket_action_failure_message \
-							"Error closing origin ssh control socket." >&2
-						return 1
-					fi
-					zxfer_release_ssh_control_socket_lock_with_precedence \
-						origin "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-					zxfer_emit_ssh_control_socket_action_failure_message \
-						"Error closing origin ssh control socket." >&2
-					printf '%s\n' "Error restoring ssh control socket lease for origin host." >&2
-					return 1
-				fi
-			elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ] &&
-				[ "$g_ssh_origin_control_socket_dir" != "" ] &&
-				[ -d "$g_ssh_origin_control_socket_dir" ]; then
-				if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_origin_control_socket_dir"; then
-					:
-				else
-					l_cleanup_status=$?
-					zxfer_release_ssh_control_socket_lock_with_precedence \
-						origin "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
-					printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
-					return "$l_cleanup_status"
-				fi
-			else
-				zxfer_create_ssh_control_socket_lease_file \
-					"$g_ssh_origin_control_socket_dir" >/dev/null
-				l_restore_status=$?
-				if [ "$l_restore_status" -eq 0 ]; then
-					g_ssh_origin_control_socket_lease_file=$g_zxfer_runtime_artifact_path_result
-					zxfer_release_ssh_control_socket_lock_with_precedence \
-						origin "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-					zxfer_emit_ssh_control_socket_action_failure_message \
-						"Error checking origin ssh control socket." >&2
-					return 1
-				fi
-				zxfer_release_ssh_control_socket_lock_with_precedence \
-					origin "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-				zxfer_emit_ssh_control_socket_action_failure_message \
-					"Error checking origin ssh control socket." >&2
-				printf '%s\n' "Error restoring ssh control socket lease for origin host." >&2
-				return 1
-			fi
-			if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
-				zxfer_clear_ssh_control_socket_role_state origin
-				zxfer_emit_ssh_control_socket_lock_failure_message \
-					"Error releasing ssh control socket lock for origin host." >&2
-				return 1
-			fi
-		else
-			zxfer_clear_ssh_control_socket_role_state origin
-			if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
-				zxfer_emit_ssh_control_socket_lock_failure_message \
-					"Error releasing ssh control socket lock for origin host." >&2
-				return 1
-			fi
-			return 0
-		fi
-	else
-		if zxfer_run_ssh_control_socket_action_for_host \
-			"$g_option_O_origin_host" "$g_ssh_origin_control_socket" exit; then
-			zxfer_echoV "Closing origin ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-			if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_origin_control_socket_dir"; then
-				:
-			else
-				l_cleanup_status=$?
-				printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
-				return "$l_cleanup_status"
-			fi
-		elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
-			zxfer_echoV "Closing origin ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-			if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_origin_control_socket_dir"; then
-				:
-			else
-				l_cleanup_status=$?
-				printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
-				return "$l_cleanup_status"
-			fi
-		else
-			zxfer_echoV "Closing origin ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-			zxfer_emit_ssh_control_socket_action_failure_message \
-				"Error closing origin ssh control socket." >&2
-			return 1
-		fi
-	fi
-	zxfer_clear_ssh_control_socket_role_state origin
+	zxfer_close_ssh_control_socket_for_role origin
 }
 
 # Purpose: Close the target SSH control socket and release the related handles
@@ -3582,165 +3660,7 @@ zxfer_close_origin_ssh_control_socket() {
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
 # socket management after the protected work finishes or cleanup takes over.
 zxfer_close_target_ssh_control_socket() {
-	if [ "$g_option_T_target_host" = "" ] || [ "$g_ssh_target_control_socket" = "" ]; then
-		return
-	fi
-
-	if [ "$g_ssh_target_control_socket_lease_file" != "" ]; then
-		if zxfer_acquire_ssh_control_socket_lock "$g_ssh_target_control_socket_dir" >/dev/null; then
-			l_ssh_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
-			if zxfer_release_ssh_control_socket_lease_file \
-				"$g_ssh_target_control_socket_lease_file"; then
-				:
-			else
-				l_cleanup_status=$?
-				zxfer_release_ssh_control_socket_lock_with_precedence \
-					target "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
-				printf '%s\n' "Error removing ssh control socket lease for target host." >&2
-				return "$l_cleanup_status"
-			fi
-			zxfer_prune_stale_ssh_control_socket_leases "$g_ssh_target_control_socket_dir"
-			l_prune_status=$?
-			if [ "$l_prune_status" -ne 0 ]; then
-				zxfer_release_ssh_control_socket_lock_with_precedence \
-					target "$l_ssh_lock_dir" "$l_prune_status" >/dev/null 2>&1 || :
-				zxfer_emit_ssh_control_socket_lock_failure_message \
-					"Error pruning ssh control socket lease entries for target host." >&2
-				return "$l_prune_status"
-			fi
-			zxfer_count_ssh_control_socket_leases \
-				"$g_ssh_target_control_socket_dir" >/dev/null
-			l_count_status=$?
-			if [ "$l_count_status" -ne 0 ]; then
-				zxfer_release_ssh_control_socket_lock_with_precedence \
-					target "$l_ssh_lock_dir" "$l_count_status" >/dev/null 2>&1 || :
-				zxfer_emit_ssh_control_socket_lock_failure_message \
-					"Error counting ssh control socket lease entries for target host." >&2
-				return "$l_count_status"
-			fi
-			l_remaining_leases=$g_zxfer_ssh_control_socket_lease_count_result
-		else
-			zxfer_emit_ssh_control_socket_lock_failure_message \
-				"Error acquiring ssh control socket lock for target host." >&2
-			return 1
-		fi
-		if [ "$l_remaining_leases" -eq 0 ]; then
-			if zxfer_check_ssh_control_socket_for_host "$g_option_T_target_host" "$g_ssh_target_control_socket"; then
-				zxfer_echoV "Closing target ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-				if zxfer_run_ssh_control_socket_action_for_host \
-					"$g_option_T_target_host" "$g_ssh_target_control_socket" exit; then
-					if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_target_control_socket_dir"; then
-						:
-					else
-						l_cleanup_status=$?
-						zxfer_release_ssh_control_socket_lock_with_precedence \
-							target "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
-						printf '%s\n' "Error removing ssh control socket cache directory for target host." >&2
-						return "$l_cleanup_status"
-					fi
-				elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
-					if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_target_control_socket_dir"; then
-						:
-					else
-						l_cleanup_status=$?
-						zxfer_release_ssh_control_socket_lock_with_precedence \
-							target "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
-						printf '%s\n' "Error removing ssh control socket cache directory for target host." >&2
-						return "$l_cleanup_status"
-					fi
-				else
-					zxfer_create_ssh_control_socket_lease_file \
-						"$g_ssh_target_control_socket_dir" >/dev/null
-					l_restore_status=$?
-					if [ "$l_restore_status" -eq 0 ]; then
-						g_ssh_target_control_socket_lease_file=$g_zxfer_runtime_artifact_path_result
-						zxfer_release_ssh_control_socket_lock_with_precedence \
-							target "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-						zxfer_emit_ssh_control_socket_action_failure_message \
-							"Error closing target ssh control socket." >&2
-						return 1
-					fi
-					zxfer_release_ssh_control_socket_lock_with_precedence \
-						target "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-					zxfer_emit_ssh_control_socket_action_failure_message \
-						"Error closing target ssh control socket." >&2
-					printf '%s\n' "Error restoring ssh control socket lease for target host." >&2
-					return 1
-				fi
-			elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ] &&
-				[ "$g_ssh_target_control_socket_dir" != "" ] &&
-				[ -d "$g_ssh_target_control_socket_dir" ]; then
-				if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_target_control_socket_dir"; then
-					:
-				else
-					l_cleanup_status=$?
-					zxfer_release_ssh_control_socket_lock_with_precedence \
-						target "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
-					printf '%s\n' "Error removing ssh control socket cache directory for target host." >&2
-					return "$l_cleanup_status"
-				fi
-			else
-				zxfer_create_ssh_control_socket_lease_file \
-					"$g_ssh_target_control_socket_dir" >/dev/null
-				l_restore_status=$?
-				if [ "$l_restore_status" -eq 0 ]; then
-					g_ssh_target_control_socket_lease_file=$g_zxfer_runtime_artifact_path_result
-					zxfer_release_ssh_control_socket_lock_with_precedence \
-						target "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-					zxfer_emit_ssh_control_socket_action_failure_message \
-						"Error checking target ssh control socket." >&2
-					return 1
-				fi
-				zxfer_release_ssh_control_socket_lock_with_precedence \
-					target "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-				zxfer_emit_ssh_control_socket_action_failure_message \
-					"Error checking target ssh control socket." >&2
-				printf '%s\n' "Error restoring ssh control socket lease for target host." >&2
-				return 1
-			fi
-			if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
-				zxfer_clear_ssh_control_socket_role_state target
-				zxfer_emit_ssh_control_socket_lock_failure_message \
-					"Error releasing ssh control socket lock for target host." >&2
-				return 1
-			fi
-		else
-			zxfer_clear_ssh_control_socket_role_state target
-			if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
-				zxfer_emit_ssh_control_socket_lock_failure_message \
-					"Error releasing ssh control socket lock for target host." >&2
-				return 1
-			fi
-			return 0
-		fi
-	else
-		if zxfer_run_ssh_control_socket_action_for_host \
-			"$g_option_T_target_host" "$g_ssh_target_control_socket" exit; then
-			zxfer_echoV "Closing target ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-			if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_target_control_socket_dir"; then
-				:
-			else
-				l_cleanup_status=$?
-				printf '%s\n' "Error removing ssh control socket cache directory for target host." >&2
-				return "$l_cleanup_status"
-			fi
-		elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
-			zxfer_echoV "Closing target ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-			if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_target_control_socket_dir"; then
-				:
-			else
-				l_cleanup_status=$?
-				printf '%s\n' "Error removing ssh control socket cache directory for target host." >&2
-				return "$l_cleanup_status"
-			fi
-		else
-			zxfer_echoV "Closing target ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-			zxfer_emit_ssh_control_socket_action_failure_message \
-				"Error closing target ssh control socket." >&2
-			return 1
-		fi
-	fi
-	zxfer_clear_ssh_control_socket_role_state target
+	zxfer_close_ssh_control_socket_for_role target
 }
 
 # Purpose: Close the all SSH control sockets and release the related handles or

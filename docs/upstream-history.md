@@ -39,8 +39,10 @@ The legacy rsync mode (`-S`) from the older upstream project has been removed.
 This fork focuses on ZFS-native replication only.
 
 Legacy backup-metadata restore compatibility has also been removed. Current
-`-e` restores require the hardened source-dataset-relative keyed files written
-by current `-k` runs under `ZXFER_BACKUP_DIR`.
+`-e` restores require hardened source-dataset-relative v2 files under
+`ZXFER_BACKUP_DIR`; current chunked lossless-keyed metadata paths are preferred,
+and the retired checksum-keyed v2 filename is accepted only as a read-only
+fallback.
 
 If you depended on rsync-style behavior, use an older release or another tool.
 Within this repository, `upstream-compat-final` is the closest branch-level

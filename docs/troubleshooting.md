@@ -65,8 +65,8 @@ Failed to retrieve snapshots from the source
 What it usually means:
 
 - remote `zfs list` failed
-- remote `parallel` or `zstd` was missing or misresolved, so the rendered
-  snapshot-list command could not execute
+- remote `parallel` or `zstd` was missing, incompatible, or misresolved,
+  so the rendered snapshot-list command could not execute
 - source dataset naming or quoting was wrong on the remote side
 - the tracked background helper could not launch, complete, or publish readable
   source snapshot output and stderr
@@ -163,9 +163,10 @@ Or:
 
 What it usually means:
 
-- `ZXFER_BACKUP_DIR` does not contain the expected exact keyed file
-- the keyed file exists but does not contain one exact current-format
-  `source,destination,properties` row for the requested pair
+- `ZXFER_BACKUP_DIR` does not contain the expected current chunked
+  lossless-keyed metadata path or the retired checksum-keyed v2 fallback file
+- the keyed file exists but does not contain a current-format v2 relative row
+  for the requested source under `#source_root` / `#destination_root`
 - secure file ownership / mode checks rejected the metadata
 - the only available metadata is in an older unsupported layout
 
@@ -174,10 +175,10 @@ What to inspect:
 - `ZXFER_BACKUP_DIR`
 - whether `ZXFER_BACKUP_DIR` is set to an absolute path
 - the source-dataset-relative tree under `ZXFER_BACKUP_DIR`
-- the exact source/destination pair that was backed up with `-k`
+- the exact source/destination roots that were backed up with `-k`
 - ownership and permissions of `.zxfer_backup_info.*`
-- whether the backup file contains exactly one current-format row for the
-  intended source/destination pair
+- whether the backup file contains exactly one current-format relative row for
+  the intended dataset
 
 ## Failure Report Logging And Email Alerts
 
@@ -205,12 +206,14 @@ last_command: '/sbin/zfs' 'send' ...
 zxfer: failure report end
 ```
 
-zxfer serializes those appends through a sibling metadata-bearing lock
-directory that records owner PID, process-start identity, hostname, purpose,
-and creation time. Stale owners are reaped automatically after validation. If
-a successful append cannot release that lock cleanly, the append helper now
-fails closed and emits a warning; trap-time failure reporting still preserves
-the original zxfer exit status while surfacing the warning on `stderr`.
+zxfer serializes those appends through a metadata-bearing lock directory that
+records owner PID, process-start identity, hostname, purpose, and creation
+time. Writable log parents use a sibling lock; existing logs under trusted but
+non-writable parents use an exact log-path fallback lock under a validated temp
+root. Stale owners are reaped automatically after validation. If a successful
+append cannot release that lock cleanly, the append helper now fails closed and
+emits a warning; trap-time failure reporting still preserves the original zxfer
+exit status while surfacing the warning on `stderr`.
 
 The same owned-directory format now also backs shared ssh control-socket locks
 and leases plus remote capability-cache locks under the validated temp root.

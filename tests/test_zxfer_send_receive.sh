@@ -325,6 +325,48 @@ test_wrap_command_with_ssh_rethrows_host_spec_split_failures() {
 		"$output" "invalid host spec"
 }
 
+test_wrap_command_with_ssh_rethrows_compressed_host_spec_split_failures() {
+	set +e
+	send_output=$(
+		(
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n' "invalid send host"
+				return 75
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "origin.example pfexec" 1 send
+		)
+	)
+	send_status=$?
+	receive_output=$(
+		(
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n' "invalid receive host"
+				return 76
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_wrap_command_with_ssh "zfs receive tank/dst" "target.example doas" 1 receive
+		)
+	)
+	receive_status=$?
+	set -e
+
+	assertEquals "Compressed send wrapping should fail closed when host-spec token splitting fails." \
+		1 "$send_status"
+	assertContains "Compressed send wrapping should preserve the host-spec split diagnostic." \
+		"$send_output" "invalid send host"
+	assertEquals "Compressed receive wrapping should fail closed when host-spec token splitting fails." \
+		1 "$receive_status"
+	assertContains "Compressed receive wrapping should preserve the host-spec split diagnostic." \
+		"$receive_output" "invalid receive host"
+}
+
 test_zxfer_reset_send_receive_state_clears_queue_and_progress_scratch() {
 	g_count_zfs_send_jobs=3
 	g_zfs_send_job_pids="111 222"
@@ -954,9 +996,17 @@ test_setup_progress_dialog_substitutes_estimate_and_snapshot_title_in_current_sh
 }
 
 test_zxfer_capture_progress_estimate_probe_output_preserves_readback_failure_status() {
+	capture_file="$TEST_TMPDIR/progress-estimate-readback-failure.out"
+
 	set +e
 	(
-		zxfer_read_progress_estimate_capture_file() {
+		zxfer_create_runtime_artifact_file() {
+			: >"$capture_file"
+			g_zxfer_runtime_artifact_path_result=$capture_file
+			return 0
+		}
+		zxfer_read_runtime_artifact_file() {
+			g_zxfer_runtime_artifact_read_result=""
 			return 23
 		}
 		zxfer_capture_progress_estimate_probe_output sh -c "printf '%s\n' 'size\t4096'"
@@ -970,7 +1020,7 @@ test_zxfer_capture_progress_estimate_probe_output_preserves_readback_failure_sta
 test_zxfer_capture_progress_estimate_probe_output_preserves_tempfile_allocation_failures() {
 	set +e
 	(
-		zxfer_get_temp_file() {
+		zxfer_create_runtime_artifact_file() {
 			return 37
 		}
 		zxfer_capture_progress_estimate_probe_output sh -c "printf '%s\n' 'size\t4096'"
@@ -979,6 +1029,27 @@ test_zxfer_capture_progress_estimate_probe_output_preserves_tempfile_allocation_
 
 	assertEquals "Progress-estimate capture should preserve temp-file allocation failures exactly." \
 		37 "$status"
+}
+
+test_zxfer_capture_progress_estimate_probe_output_preserves_failed_probe_output() {
+	set +e
+	output=$(
+		(
+			zxfer_capture_progress_estimate_probe_output sh -c "printf '%s\n' 'stdout-size'; printf '%s\n' 'stderr-detail' >&2; exit 41"
+			status=$?
+			printf 'status=%s\n' "$status"
+			printf 'result=<%s>\n' "$g_zxfer_progress_probe_output_result"
+			exit "$status"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Progress-estimate capture should preserve the probe command status after readback." \
+		41 "$status"
+	assertContains "Progress-estimate capture should publish stdout and stderr for failed probes." \
+		"$output" "result=<stdout-size
+stderr-detail>"
 }
 
 test_zxfer_read_progress_estimate_capture_file_preserves_runtime_readback_failures() {
@@ -1461,6 +1532,9 @@ test_supervised_send_job_helpers_track_metadata_conflicts_and_render_context() {
 		"job-1" "$g_zxfer_send_job_conflict_job_id"
 	assertEquals "Destination-ancestry conflict detection should expose the conflicting active destination dataset." \
 		"backup/dst" "$g_zxfer_send_job_conflict_dest_dataset"
+	if ! zxfer_dataset_paths_conflict_by_ancestry "backup/dst/child" "backup/dst"; then
+		fail "Expected descendant and ancestor destination datasets to conflict regardless of argument order."
+	fi
 
 	if zxfer_supervised_send_job_conflicts_with_destination "" "backup/unrelated"; then
 		fail "Unrelated local destination datasets should not conflict."
@@ -2631,8 +2705,11 @@ test_zxfer_wait_for_next_supervised_zfs_send_job_completion_succeeds_for_the_las
 			zxfer_note_destination_dataset_exists() {
 				printf 'noted=%s\n' "$1"
 			}
-			zxfer_invalidate_destination_property_cache() {
-				printf 'invalidated=%s\n' "$1"
+			zxfer_invalidate_destination_property_mutation_cache() {
+				printf 'properties=%s\n' "$1"
+			}
+			zxfer_invalidate_destination_snapshot_record_cache() {
+				printf 'snapshots=invalidated\n'
 			}
 			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
 			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
@@ -2644,8 +2721,10 @@ test_zxfer_wait_for_next_supervised_zfs_send_job_completion_succeeds_for_the_las
 
 	assertContains "Successful supervised rolling waits should repair the destination-existence cache for the completed destination dataset." \
 		"$output" "noted=backup/dst"
-	assertContains "Successful supervised rolling waits should invalidate the destination property cache for the completed destination dataset." \
-		"$output" "invalidated=backup/dst"
+	assertContains "Successful supervised rolling waits should invalidate destination property caches for the completed destination dataset." \
+		"$output" "properties=backup/dst"
+	assertContains "Successful supervised rolling waits should invalidate destination snapshot caches after receive completion." \
+		"$output" "snapshots=invalidated"
 	assertContains "Supervised rolling waits should decrement the tracked job count after a successful completion." \
 		"$output" "count=0"
 	assertContains "Supervised rolling waits should clear the tracked runner pid list after the last job completes." \
@@ -2669,8 +2748,11 @@ test_zxfer_wait_for_supervised_zfs_send_jobs_batch_repairs_destination_state_on_
 			zxfer_note_destination_dataset_exists() {
 				printf 'noted=%s\n' "$1"
 			}
-			zxfer_invalidate_destination_property_cache() {
-				printf 'invalidated=%s\n' "$1"
+			zxfer_invalidate_destination_property_mutation_cache() {
+				printf 'properties=%s\n' "$1"
+			}
+			zxfer_invalidate_destination_snapshot_record_cache() {
+				printf 'snapshots=invalidated\n'
 			}
 			zxfer_wait_for_supervised_zfs_send_jobs_batch
 			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
@@ -2681,8 +2763,10 @@ test_zxfer_wait_for_supervised_zfs_send_jobs_batch_repairs_destination_state_on_
 
 	assertContains "Successful supervised batch waits should repair the destination-existence cache for the completed destination dataset." \
 		"$output" "noted=backup/dst"
-	assertContains "Successful supervised batch waits should invalidate the destination property cache for the completed destination dataset." \
-		"$output" "invalidated=backup/dst"
+	assertContains "Successful supervised batch waits should invalidate destination property caches for the completed destination dataset." \
+		"$output" "properties=backup/dst"
+	assertContains "Successful supervised batch waits should invalidate destination snapshot caches after receive completion." \
+		"$output" "snapshots=invalidated"
 	assertContains "Successful supervised batch waits should clear the tracked job count after draining the batch." \
 		"$output" "count=0"
 	assertContains "Successful supervised batch waits should clear the tracked runner pid list after draining the batch." \
@@ -4174,15 +4258,19 @@ test_zfs_send_receive_invalidates_destination_cache_after_live_receive() {
 		zxfer_execute_command() {
 			printf 'exec=%s\n' "$1" >>"$EXEC_LOG"
 		}
-		zxfer_invalidate_destination_property_cache() {
-			printf 'invalidate=%s\n' "$1" >>"$EXEC_LOG"
+		zxfer_invalidate_destination_property_mutation_cache() {
+			printf 'properties=%s\n' "$1" >>"$EXEC_LOG"
+		}
+		zxfer_invalidate_destination_snapshot_record_cache() {
+			printf 'snapshots=invalidated\n' >>"$EXEC_LOG"
 		}
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 	)
 
-	assertEquals "Successful live send/receive should invalidate the destination property cache for the receive dataset." \
+	assertEquals "Successful live send/receive should invalidate destination mutation caches for the receive dataset." \
 		"exec=sendcmd | recvcmd
-invalidate=backup/dst" "$(cat "$log")"
+properties=backup/dst
+snapshots=invalidated" "$(cat "$log")"
 }
 
 test_zfs_send_receive_marks_destination_hierarchy_exists_after_foreground_receive() {
@@ -4199,7 +4287,10 @@ test_zfs_send_receive_marks_destination_hierarchy_exists_after_foreground_receiv
 			printf 'root=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup")"
 			printf 'parent=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst")"
 			printf 'child=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst/child")"
-			printf 'sibling=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/other")"
+			sibling_status=0
+			sibling_state=$(zxfer_get_destination_existence_cache_entry "backup/other") ||
+				sibling_status=$?
+			printf 'sibling=%s status=%s\n' "$sibling_state" "$sibling_status"
 		)
 	)
 
@@ -4209,8 +4300,8 @@ test_zfs_send_receive_marks_destination_hierarchy_exists_after_foreground_receiv
 		"$output" "parent=1"
 	assertContains "Foreground receives should mark the receive dataset as existing after success." \
 		"$output" "child=1"
-	assertContains "Unrelated descendants under the authoritative root should still be inferred missing." \
-		"$output" "sibling=0"
+	assertContains "Foreground receives should clear stale missing-root assumptions so unrelated descendants are live-probed." \
+		"$output" "sibling= status=1"
 }
 
 test_zfs_send_receive_tracks_profile_counters_when_very_verbose() {
@@ -4441,6 +4532,15 @@ test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
 			g_zxfer_background_job_last_id="job-1"
 			g_zxfer_background_job_last_runner_pid=111
 		}
+		zxfer_note_destination_receive_completed() {
+			printf 'note=%s\n' "$1" >>"$EXEC_LOG"
+		}
+		zxfer_invalidate_destination_property_mutation_cache() {
+			printf 'properties=%s\n' "$1" >>"$EXEC_LOG"
+		}
+		zxfer_invalidate_destination_snapshot_record_cache() {
+			printf 'snapshots=invalidated\n' >>"$EXEC_LOG"
+		}
 		g_option_j_jobs=3
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
 		{
@@ -4458,6 +4558,10 @@ test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
 		"$(cat "$log")" "pids=111"
 	assertContains "Background send/receive should track the supervised job id alongside dataset metadata for later conflict checks and failure reporting." \
 		"$(cat "$log")" "records=job-1:111:tank/src@snap2:backup/dst:"
+	assertNotContains "Background send/receive should wait for completion before publishing destination receive mutation state." \
+		"$(cat "$log")" "properties=backup/dst"
+	assertNotContains "Background send/receive should wait for completion before invalidating destination snapshot caches." \
+		"$(cat "$log")" "snapshots=invalidated"
 }
 
 test_zfs_send_receive_passes_queue_notify_fd_to_supervised_background_job_when_rolling_pool_is_open() {

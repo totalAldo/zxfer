@@ -37,7 +37,7 @@
 ################################################################################
 
 # Module contract:
-# owns globals: per-iteration property cache paths, recursive prefetch state, and per-call lookup/result channels such as g_zxfer_normalized_dataset_properties, g_zxfer_required_properties_result, g_zxfer_required_property_probe_result, g_zxfer_serialized_property_records_result, g_zxfer_destination_pvs_raw, g_zxfer_property_cache_path, g_zxfer_property_cache_key, and g_zxfer_property_cache_read_result.
+# owns globals: per-iteration property cache paths, recursive prefetch state, and per-call lookup/result channels such as g_zxfer_normalized_dataset_properties, g_zxfer_required_properties_result, g_zxfer_required_property_probe_result, g_zxfer_serialized_property_records_result, g_zxfer_serialized_property_records_parse_failed, g_zxfer_decoded_property_assignment_result, g_zxfer_destination_pvs_raw, g_zxfer_property_cache_path, g_zxfer_property_cache_key, and g_zxfer_property_cache_read_result.
 # reads globals: g_LZFS/g_RZFS, g_cmd_awk, temp-root helpers, and current dataset context.
 # mutates caches: on-disk property cache entries and recursive prefetch state.
 # returns via stdout: serialized property records, decoded assignments, and normalized property payloads.
@@ -56,6 +56,8 @@ zxfer_reset_property_lookup_results() {
 	g_zxfer_required_properties_result=""
 	g_zxfer_required_property_probe_result=""
 	g_zxfer_serialized_property_records_result=""
+	g_zxfer_serialized_property_records_parse_failed=0
+	g_zxfer_decoded_property_assignment_result=""
 	g_zxfer_destination_pvs_raw=""
 	g_zxfer_property_cache_read_result=""
 }
@@ -90,12 +92,60 @@ function encode_value(value) {
 	gsub(/;/, "%3B", value)
 	gsub(/\t/, "%09", value)
 	gsub(/\r/, "%0D", value)
+	gsub(/\n/, "%0A", value)
 	return value
 }
-NF >= 3 {
-	output = append_csv(output, $1 "=" encode_value($2) "=" $3)
+function valid_property_name(name) {
+	return name ~ /^[A-Za-z0-9_.:@-][A-Za-z0-9_.:@-]*$/
+}
+function valid_source(source) {
+	return source == "-" ||
+		source == "local" ||
+		source == "default" ||
+		source == "temporary" ||
+		source == "received" ||
+		source == "inherited" ||
+		source == "none" ||
+		source ~ /^inherited from [^	]+$/
+}
+function record_is_complete(record, fields, field_count) {
+	field_count = split(record, fields, "[	]")
+	return field_count >= 3 && valid_source(fields[field_count])
+}
+function line_starts_property_record(line, fields, field_count) {
+	field_count = split(line, fields, "[	]")
+	return field_count >= 2 && valid_property_name(fields[1])
+}
+function flush_record(record, fields, field_count, value, i, property_name, property_source) {
+	field_count = split(record, fields, "[	]")
+	property_name = fields[1]
+	property_source = fields[field_count]
+	if (field_count < 3 || !valid_property_name(property_name) || !valid_source(property_source)) {
+		parse_failed = 1
+		return
+	}
+	value = fields[2]
+	for (i = 3; i < field_count; i++)
+		value = value "\t" fields[i]
+	output = append_csv(output, property_name "=" encode_value(value) "=" property_source)
+}
+{
+	if (current_record == "") {
+		current_record = $0
+		next
+	}
+	if (record_is_complete(current_record) && line_starts_property_record($0)) {
+		flush_record(current_record)
+		current_record = $0
+		next
+	}
+	current_record = current_record "\n" $0
 }
 END {
+	if (current_record != "")
+		flush_record(current_record)
+	if (parse_failed)
+		exit 1
 	print output
 }'
 }
@@ -109,6 +159,7 @@ zxfer_capture_serialized_property_records() {
 	l_property_records=$1
 
 	g_zxfer_serialized_property_records_result=""
+	g_zxfer_serialized_property_records_parse_failed=0
 
 	l_status=0
 	zxfer_get_temp_file >/dev/null || l_status=$?
@@ -122,6 +173,9 @@ zxfer_capture_serialized_property_records() {
 $l_property_records
 EOF
 	if [ "$l_serialize_status" -ne 0 ]; then
+		if [ "$l_serialize_status" -eq 1 ]; then
+			g_zxfer_serialized_property_records_parse_failed=1
+		fi
 		zxfer_cleanup_runtime_artifact_path "$l_serialized_output_file"
 		return "$l_serialize_status"
 	fi
@@ -157,6 +211,7 @@ zxfer_emit_decoded_property_assignments() {
 	"${g_cmd_awk:-awk}" -v property_list="$l_property_list" '
 function decode_value(value) {
 	gsub(/%0D/, "\r", value)
+	gsub(/%0A/, "\n", value)
 	gsub(/%09/, "\t", value)
 	gsub(/%3B/, ";", value)
 	gsub(/%3D/, "=", value)
@@ -177,6 +232,41 @@ BEGIN {
 }'
 }
 
+# Purpose: Decode one serialized property assignment while preserving trailing
+# line feeds in the decoded value.
+# Usage: Called before building `zfs create` or `zfs set` argv entries so one
+# encoded property item becomes exactly one shell argument.
+zxfer_decode_serialized_property_assignment() {
+	l_property_item=$1
+
+	g_zxfer_decoded_property_assignment_result=""
+	l_decode_sentinel=$(printf '\001')
+	l_decoded_assignment=$("${g_cmd_awk:-awk}" \
+		-v property_item="$l_property_item" \
+		-v sentinel="$l_decode_sentinel" '
+function decode_value(value) {
+	gsub(/%0D/, "\r", value)
+	gsub(/%0A/, "\n", value)
+	gsub(/%09/, "\t", value)
+	gsub(/%3B/, ";", value)
+	gsub(/%3D/, "=", value)
+	gsub(/%2C/, ",", value)
+	gsub(/%25/, "%", value)
+	return value
+}
+BEGIN {
+	split(property_item, property_fields, "=")
+	property_name = property_fields[1]
+	property_value = substr(property_item, length(property_name) + 2)
+	printf "%s=%s%s", property_name, decode_value(property_value), sentinel
+}')
+	l_decode_status=$?
+	[ "$l_decode_status" -eq 0 ] || return "$l_decode_status"
+
+	g_zxfer_decoded_property_assignment_result=${l_decoded_assignment%"$l_decode_sentinel"}
+	printf '%s\n' "$g_zxfer_decoded_property_assignment_result"
+}
+
 # Purpose: Decode a serialized property list into the operator-facing form used
 # by reports and debugging output.
 # Usage: Called during property prefetch, cache staging, and normalized
@@ -193,6 +283,7 @@ function append_csv(current, value) {
 }
 function decode_value(value) {
 	gsub(/%0D/, "\r", value)
+	gsub(/%0A/, "\n", value)
 	gsub(/%09/, "\t", value)
 	gsub(/%3B/, ";", value)
 	gsub(/%3D/, "=", value)
@@ -496,6 +587,15 @@ zxfer_reset_destination_property_iteration_cache() {
 	g_zxfer_destination_property_tree_prefetch_state=0
 }
 
+# Purpose: Invalidate destination property caches after a live destination
+# mutation.
+# Usage: Called after receives, creates, sets, and inherits so descendant
+# inherited-property and required-property lookups cannot reuse old state.
+zxfer_invalidate_destination_property_mutation_cache() {
+	[ -n "${1:-}" ] || return 0
+	zxfer_reset_destination_property_iteration_cache
+}
+
 # Purpose: Return the property tree prefetch dataset list in the form expected
 # by later helpers.
 # Usage: Called during property prefetch, cache staging, and normalized
@@ -548,7 +648,52 @@ function encode_value(value) {
 	gsub(/;/, "%3B", value)
 	gsub(/\t/, "%09", value)
 	gsub(/\r/, "%0D", value)
+	gsub(/\n/, "%0A", value)
 	return value
+}
+function valid_property_name(name) {
+	return name ~ /^[A-Za-z0-9_.:@-][A-Za-z0-9_.:@-]*$/
+}
+function valid_source(source) {
+	return source == "-" ||
+		source == "local" ||
+		source == "default" ||
+		source == "temporary" ||
+		source == "received" ||
+		source == "inherited" ||
+		source == "none" ||
+		source ~ /^inherited from [^	]+$/
+}
+function record_is_complete(record, fields, field_count) {
+	field_count = split(record, fields, "[	]")
+	return field_count >= 4 && valid_source(fields[field_count])
+}
+function line_starts_property_record(line, fields, field_count) {
+	field_count = split(line, fields, "[	]")
+	return field_count >= 3 && fields[1] != "" && valid_property_name(fields[2])
+}
+function flush_record(record, fields, field_count, value, i, dataset, property_name, property_source, line) {
+	field_count = split(record, fields, "[	]")
+	dataset = fields[1]
+	property_name = fields[2]
+	property_source = fields[field_count]
+	if (field_count < 4 || dataset == "" || !valid_property_name(property_name) || !valid_source(property_source)) {
+		parse_failed = 1
+		return
+	}
+	if (!(dataset in wanted))
+		return
+	if (!seen_dataset[dataset]++) {
+		order[++count] = dataset
+	}
+	value = fields[3]
+	for (i = 4; i < field_count; i++)
+		value = value "\t" fields[i]
+	line = property_name "=" encode_value(value) "=" property_source
+	if (grouped[dataset] != "")
+		grouped[dataset] = grouped[dataset] "," line
+	else
+		grouped[dataset] = line
 }
 NR == FNR {
 	if ($0 != "" && !seen_filter[$0]++)
@@ -556,19 +701,22 @@ NR == FNR {
 	next
 }
 {
-	dataset = $1
-	if (!(dataset in wanted))
+	if (current_record == "") {
+		current_record = $0
 		next
-	if (!seen_dataset[dataset]++) {
-		order[++count] = dataset
 	}
-	line = $2 "=" encode_value($3) "=" $4
-	if (grouped[dataset] != "")
-		grouped[dataset] = grouped[dataset] "," line
-	else
-		grouped[dataset] = line
+	if (record_is_complete(current_record) && line_starts_property_record($0)) {
+		flush_record(current_record)
+		current_record = $0
+		next
+	}
+	current_record = current_record "\n" $0
 }
 END {
+	if (current_record != "")
+		flush_record(current_record)
+	if (parse_failed)
+		exit 1
 	for (i = 1; i <= count; i++)
 		printf "%s\t%s\n", order[i], grouped[order[i]]
 }' "$l_dataset_filter_file" "$l_property_tree_file"
@@ -599,6 +747,22 @@ zxfer_mark_recursive_property_prefetch_failed() {
 		g_zxfer_destination_property_tree_prefetch_state=2
 		;;
 	esac
+}
+
+# Purpose: Clean up active recursive property prefetch staging and publish the
+# failed-state marker with the original status.
+# Usage: Called during property prefetch failure paths so cleanup and state
+# marking stay in one module-owned path.
+zxfer_abort_recursive_property_prefetch() {
+	l_side=$1
+	l_stage_files=$2
+	l_status=$3
+
+	if [ -n "$l_stage_files" ]; then
+		zxfer_cleanup_runtime_artifact_path_list "$l_stage_files"
+	fi
+	zxfer_mark_recursive_property_prefetch_failed "$l_side"
+	return "$l_status"
 }
 
 # Purpose: Prefetch the recursive normalized properties so later lookups can
@@ -667,70 +831,30 @@ zxfer_prefetch_recursive_normalized_properties() {
 	l_combined_grouped_file=""
 	l_tree_err_file=""
 	l_stage_status=0
-	zxfer_get_temp_file >/dev/null || l_stage_status=$?
+	zxfer_create_temp_file_group 7 >/dev/null || l_stage_status=$?
 	if [ "$l_stage_status" -ne 0 ]; then
 		zxfer_mark_recursive_property_prefetch_failed "$l_side"
 		return "$l_stage_status"
 	fi
-	l_dataset_filter_file=$g_zxfer_temp_file_result
-	l_stage_status=0
-	zxfer_get_temp_file >/dev/null || l_stage_status=$?
-	if [ "$l_stage_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_stage_status"
-	fi
-	l_machine_tree_file=$g_zxfer_temp_file_result
-	l_stage_status=0
-	zxfer_get_temp_file >/dev/null || l_stage_status=$?
-	if [ "$l_stage_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_stage_status"
-	fi
-	l_human_tree_file=$g_zxfer_temp_file_result
-	l_stage_status=0
-	zxfer_get_temp_file >/dev/null || l_stage_status=$?
-	if [ "$l_stage_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_stage_status"
-	fi
-	l_machine_grouped_file=$g_zxfer_temp_file_result
-	l_stage_status=0
-	zxfer_get_temp_file >/dev/null || l_stage_status=$?
-	if [ "$l_stage_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" "$l_machine_grouped_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_stage_status"
-	fi
-	l_human_grouped_file=$g_zxfer_temp_file_result
-	l_stage_status=0
-	zxfer_get_temp_file >/dev/null || l_stage_status=$?
-	if [ "$l_stage_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" "$l_machine_grouped_file" "$l_human_grouped_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_stage_status"
-	fi
-	l_combined_grouped_file=$g_zxfer_temp_file_result
-	l_stage_status=0
-	zxfer_get_temp_file >/dev/null || l_stage_status=$?
-	if [ "$l_stage_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" "$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_stage_status"
-	fi
-	l_tree_err_file=$g_zxfer_temp_file_result
+	l_prefetch_stage_files=$g_zxfer_temp_file_group_result
+	{
+		IFS= read -r l_dataset_filter_file
+		IFS= read -r l_machine_tree_file
+		IFS= read -r l_human_tree_file
+		IFS= read -r l_machine_grouped_file
+		IFS= read -r l_human_grouped_file
+		IFS= read -r l_combined_grouped_file
+		IFS= read -r l_tree_err_file
+	} <<-EOF
+		$l_prefetch_stage_files
+	EOF
 
 	# shellcheck disable=SC2016
 	printf '%s\n' "$l_dataset_list" | grep -v '^[[:space:]]*$' |
 		"${g_cmd_awk:-awk}" '!seen[$0]++' >"$l_dataset_filter_file"
 	if [ ! -s "$l_dataset_filter_file" ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
-			"$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file" \
-			"$l_tree_err_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return 1
+		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" 1
+		return "$?"
 	fi
 
 	zxfer_profile_increment_counter "$l_profile_counter"
@@ -738,42 +862,30 @@ zxfer_prefetch_recursive_normalized_properties() {
 	zxfer_run_zfs_cmd_for_spec "$l_zfs_cmd" get -r -Hpo name,property,value,source all "$l_root_dataset" >"$l_machine_tree_file" 2>"$l_tree_err_file" ||
 		l_tree_status=$?
 	if [ "$l_tree_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
-			"$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file" \
-			"$l_tree_err_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_tree_status"
+		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" "$l_tree_status"
+		return "$?"
 	fi
 	l_tree_status=0
 	zxfer_run_zfs_cmd_for_spec "$l_zfs_cmd" get -r -Ho name,property,value,source all "$l_root_dataset" >"$l_human_tree_file" 2>"$l_tree_err_file" ||
 		l_tree_status=$?
 	if [ "$l_tree_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
-			"$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file" \
-			"$l_tree_err_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_tree_status"
+		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" "$l_tree_status"
+		return "$?"
 	fi
 
 	l_group_status=0
 	zxfer_group_recursive_property_tree_by_dataset "$l_dataset_filter_file" "$l_machine_tree_file" >"$l_machine_grouped_file" ||
 		l_group_status=$?
 	if [ "$l_group_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
-			"$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file" \
-			"$l_tree_err_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_group_status"
+		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" "$l_group_status"
+		return "$?"
 	fi
 	l_group_status=0
 	zxfer_group_recursive_property_tree_by_dataset "$l_dataset_filter_file" "$l_human_tree_file" >"$l_human_grouped_file" ||
 		l_group_status=$?
 	if [ "$l_group_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
-			"$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file" \
-			"$l_tree_err_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_group_status"
+		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" "$l_group_status"
+		return "$?"
 	fi
 
 	# shellcheck disable=SC2016
@@ -797,11 +909,8 @@ END {
 }' "$l_machine_grouped_file" "$l_human_grouped_file" >"$l_combined_grouped_file"
 	l_group_merge_status=$?
 	if [ "$l_group_merge_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
-			"$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file" \
-			"$l_tree_err_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_group_merge_status"
+		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" "$l_group_merge_status"
+		return "$?"
 	fi
 
 	l_tab='	'
@@ -847,19 +956,15 @@ EOF
 	fi
 
 	if [ "$l_grouped_read_status" -ne 0 ] || [ "$l_grouped_apply_status" -ne 0 ]; then
-		zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
-			"$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file" \
-			"$l_tree_err_file"
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
 		if [ "$l_grouped_read_status" -ne 0 ]; then
-			return "$l_grouped_read_status"
+			zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" "$l_grouped_read_status"
+			return "$?"
 		fi
-		return "$l_grouped_apply_status"
+		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" "$l_grouped_apply_status"
+		return "$?"
 	fi
 
-	zxfer_cleanup_recursive_property_prefetch_stage_files "$l_dataset_filter_file" "$l_machine_tree_file" "$l_human_tree_file" \
-		"$l_machine_grouped_file" "$l_human_grouped_file" "$l_combined_grouped_file" \
-		"$l_tree_err_file"
+	zxfer_cleanup_runtime_artifact_path_list "$l_prefetch_stage_files"
 
 	case "$l_side" in
 	source) g_zxfer_source_property_tree_prefetch_state=1 ;;
@@ -1050,6 +1155,15 @@ zxfer_get_required_property_probe() {
 		l_status=0
 		zxfer_capture_serialized_property_records "$l_explicit_probe_output" || l_status=$?
 		if [ "$l_status" -ne 0 ]; then
+			if [ "${g_zxfer_serialized_property_records_parse_failed:-0}" -eq 1 ]; then
+				case "$l_explicit_probe_output" in
+				"$l_required_property	"*)
+					g_zxfer_required_properties_result="Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
+					printf '%s\n' "$g_zxfer_required_properties_result"
+					return 1
+					;;
+				esac
+			fi
 			return "$l_status"
 		fi
 		l_explicit_property=$g_zxfer_serialized_property_records_result

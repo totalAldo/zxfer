@@ -903,38 +903,36 @@ test_get_backup_storage_dir_for_dataset_tree_treats_rootlike_inputs_as_dataset_p
 		"$g_backup_storage_root/dataset" "$(cat "$blank_output")"
 }
 
-test_zxfer_backup_metadata_file_key_uses_hex_fallback_in_current_shell() {
+test_zxfer_backup_metadata_file_key_fails_when_identity_hex_is_empty_in_current_shell() {
 	output_file="$TEST_TMPDIR/backup_metadata_file_key_current_shell.out"
+	status_file="$TEST_TMPDIR/backup_metadata_file_key_current_shell.status"
 
 	(
-		cksum() {
-			return 1
-		}
 		od() {
 			:
 		}
 		zxfer_backup_metadata_file_key "tank/src" "backup/dst" >"$output_file"
+		printf '%s\n' "$?" >"$status_file"
 	)
 
-	assertEquals "Backup metadata keys should fall back to the sentinel hex key when both cksum and od-derived output are unavailable." \
-		"k00" "$(cat "$output_file")"
+	assertEquals "Backup metadata keys should fail closed when the lossless identity hex cannot be derived." \
+		1 "$(cat "$status_file")"
+	assertEquals "Failed backup metadata key derivation should not emit a placeholder key." \
+		"" "$(cat "$output_file")"
 }
 
-test_zxfer_backup_metadata_file_key_uses_od_hex_output_when_cksum_fails() {
+test_zxfer_backup_metadata_file_key_uses_identity_hex_output() {
 	output_file="$TEST_TMPDIR/backup_metadata_file_key_od_hex.out"
 
 	(
-		cksum() {
-			return 1
-		}
 		od() {
 			printf ' 61 62 63 64\n'
 		}
 		zxfer_backup_metadata_file_key "tank/src" "backup/dst" >"$output_file"
 	)
 
-	assertEquals "Backup metadata keys should fall back to the od-derived hex prefix when cksum is unavailable but od still produces data." \
-		"k61626364" "$(cat "$output_file")"
+	assertEquals "Backup metadata keys should use the exact od-derived identity hex." \
+		"h/61626364" "$(cat "$output_file")"
 }
 
 test_zxfer_get_backup_metadata_filename_propagates_key_lookup_failures() {
@@ -1594,7 +1592,7 @@ $result
 EOF
 
 	assertEquals "Override list should reflect -o values with override sources." "compression=lzjb=override" "$override_pvs"
-	assertEquals "Creation list should stay empty when only -o is supplied." "" "$creation_pvs"
+	assertEquals "Creation list should keep explicit overrides for source-local properties." "compression=lzjb=override" "$creation_pvs"
 }
 
 test_derive_override_lists_includes_local_props_for_creation() {
@@ -1611,7 +1609,8 @@ EOF
 
 	expected_override="compression=lz4=local,quota=8G=override,refreservation=4G=received"
 	assertEquals "Overrides should include source properties with user overrides applied." "$(sort_property_list "$expected_override")" "$(sort_property_list "$override_pvs")"
-	assertEquals "Creation list should keep local props and zvol refreservation even if not local." "compression=lz4=local,refreservation=4G=received" "$creation_pvs"
+	expected_creation="compression=lz4=local,quota=8G=override,refreservation=4G=received"
+	assertEquals "Creation list should keep local props, explicit local overrides, and zvol refreservation even if not local." "$(sort_property_list "$expected_creation")" "$(sort_property_list "$creation_pvs")"
 }
 
 test_diff_properties_separates_set_and_inherit_lists() {
@@ -2404,6 +2403,37 @@ test_exists_destination_parent_recursive_listing_treats_missing_parent_as_missin
 		"0" "$output"
 }
 
+test_exists_destination_parent_recursive_listing_treats_silent_missing_parent_as_missing_child_when_ancestor_confirms_absence() {
+	output=$(
+		(
+			g_destination_operating_system="SunOS"
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "backup/dst/src/child" ]; then
+					return 1
+				fi
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-r" ] &&
+					[ "$4" = "-o" ] && [ "$5" = "name" ] && [ "$6" = "backup/dst/src" ]; then
+					return 1
+				fi
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-r" ] &&
+					[ "$4" = "-o" ] && [ "$5" = "name" ] && [ "$6" = "backup/dst" ]; then
+					printf '%s\n' "backup/dst"
+					return 0
+				fi
+				printf '%s\n' "unexpected command: $*"
+				return 1
+			}
+			zxfer_exists_destination "backup/dst/src/child" live
+		)
+	)
+	status=$?
+
+	assertEquals "A silent SunOS parent-listing failure should map to missing only when an ancestor listing proves the parent is absent." \
+		0 "$status"
+	assertEquals "Confirmed silent missing-parent fallback should report the child as absent." \
+		"0" "$output"
+}
+
 test_exists_destination_reports_silent_parent_recursive_listing_failures_for_ambiguous_omnios_child_probe() {
 	set +e
 	output=$(
@@ -2415,6 +2445,10 @@ test_exists_destination_reports_silent_parent_recursive_listing_failures_for_amb
 				fi
 				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-r" ] &&
 					[ "$4" = "-o" ] && [ "$5" = "name" ] && [ "$6" = "backup/dst/src" ]; then
+					return 1
+				fi
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-r" ] &&
+					[ "$4" = "-o" ] && [ "$5" = "name" ] && [ "$6" = "backup/dst" ]; then
 					return 1
 				fi
 				printf '%s\n' "unexpected command: $*"
@@ -2478,7 +2512,7 @@ test_write_backup_properties_treats_backup_data_as_literal() {
 
 	sentinel_file="$TEST_TMPDIR/sentinel_touch"
 	rm -f "$sentinel_file"
-	g_backup_file_contents=";$g_initial_source,$g_destination,user:note=\$(touch $sentinel_file)"
+	g_backup_file_contents=$(zxfer_test_backup_metadata_row "." "user:note=\$(touch $sentinel_file)")
 
 	zxfer_write_backup_properties
 
@@ -2916,15 +2950,21 @@ test_resolve_remote_required_tool_rejects_relative_remote_path() {
 test_resolve_remote_required_tool_uses_fresh_capability_cache_file_before_ssh() {
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_zxfer_dependency_path="/opt/openzfs/bin:/usr/sbin"
+	requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool parallel)
 	if ! cache_path=$(zxfer_remote_capability_cache_path \
 		"backup@example.com" \
-		"$(zxfer_get_remote_capability_requested_tools_for_tool parallel)"); then
+		"$requested_tools"); then
 		fail "Expected a cache path for remote capability caching."
+	fi
+	if ! cache_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
+		"backup@example.com" "$requested_tools"); then
+		fail "Expected a remote capability cache identity for fixture metadata."
 	fi
 	zxfer_write_cache_object_file_atomically \
 		"$cache_path" \
 		"$ZXFER_REMOTE_CAPABILITY_CACHE_OBJECT_KIND" \
-		"created_epoch=$(date '+%s')" \
+		"created_epoch=$(date '+%s')
+identity_hex=$cache_identity_hex" \
 		"$(fake_remote_capability_response)" >/dev/null ||
 		fail "Expected a writable remote capability cache fixture."
 	FAKE_SSH_EXIT_STATUS=255
@@ -3983,7 +4023,7 @@ test_derive_override_lists_with_transfer_all_preserves_sources() {
 $result
 EOF
 	assertEquals "compression=lz4=override,atime=off=local" "$override_line"
-	assertEquals "atime=off=local" "$creation_line"
+	assertEquals "compression=lz4=override,atime=off=local" "$creation_line"
 }
 
 test_derive_override_lists_without_transfer_all_uses_overrides_only() {
@@ -3995,7 +4035,7 @@ test_derive_override_lists_without_transfer_all_uses_overrides_only() {
 $result
 EOF
 	assertEquals "atime=off=override" "$override_line"
-	assertEquals "" "$creation_line"
+	assertEquals "atime=off=override" "$creation_line"
 }
 
 test_sanitize_property_list_removes_readonly_and_ignored_sets() {
@@ -4007,7 +4047,6 @@ test_sanitize_property_list_removes_readonly_and_ignored_sets() {
 }
 
 test_strip_unsupported_properties_removes_matching_entries() {
-	g_unsupported_properties="checksum"
 	result=$(zxfer_strip_unsupported_properties "compression=lz4=local,checksum=sha256=local" "checksum")
 	assertEquals "compression=lz4=local" "$result"
 }
@@ -5242,6 +5281,148 @@ printf '%s\n' \"\$l_value\"")
 		"$(cat "$log_file")" "backup@example.com"
 	assertContains "Remote sh -c builders should keep the entire multiline script inside the single -c payload." \
 		"$(cat "$log_file")" "l_value=ok"
+}
+
+test_prepare_remote_shell_command_for_host_wraps_only_wrapper_hosts() {
+	zxfer_prepare_remote_shell_command_for_host "backup@example.com" "zfs list tank/src"
+	simple_status=$?
+	simple_result=$g_zxfer_remote_shell_command_for_host_result
+
+	zxfer_prepare_remote_shell_command_for_host "backup@example.com pfexec -p 2222" "zfs list tank/src"
+	wrapped_status=$?
+	wrapped_result=$g_zxfer_remote_shell_command_for_host_result
+
+	assertEquals "Simple host specs should prepare without an extra remote shell wrapper." \
+		0 "$simple_status"
+	assertEquals "Simple host specs should preserve the original remote command." \
+		"zfs list tank/src" "$simple_result"
+	assertEquals "Wrapper host specs should prepare successfully." \
+		0 "$wrapped_status"
+	assertContains "Wrapper host specs should render a remote sh command." \
+		"$wrapped_result" "'sh' '-c'"
+	assertContains "Wrapper host specs should preserve the remote command inside the sh payload." \
+		"$wrapped_result" "zfs list tank/src"
+}
+
+test_prepare_remote_shell_command_for_host_preserves_split_and_wrapper_failures() {
+	output=$(
+		(
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n' "invalid host spec"
+				return 41
+			}
+			zxfer_prepare_remote_shell_command_for_host "bad host" "zfs list" >/dev/null
+			printf 'split_status=%s\n' "$?"
+			printf 'split_result=<%s>\n' "$g_zxfer_remote_shell_command_for_host_result"
+		)
+		(
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n%s\n' "backup@example.com" "pfexec"
+			}
+			zxfer_build_remote_sh_c_command() {
+				return 42
+			}
+			zxfer_prepare_remote_shell_command_for_host "backup@example.com pfexec" "zfs list" >/dev/null
+			printf 'wrapper_status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Remote shell preparation should preserve host-token split failures." \
+		"$output" "split_status=41"
+	assertContains "Remote shell preparation should expose host-token split diagnostics to current-shell callers." \
+		"$output" "split_result=<invalid host spec>"
+	assertContains "Remote shell preparation should preserve remote sh builder failures." \
+		"$output" "wrapper_status=42"
+}
+
+test_prepare_ssh_shell_command_context_extracts_host_and_wrapper_command() {
+	zxfer_prepare_ssh_shell_command_context "backup@example.com pfexec -u root" "'sh' '-c' 'zfs list tank/src'"
+	status=$?
+
+	assertEquals "SSH shell context preparation should succeed for wrapper host specs." \
+		0 "$status"
+	assertEquals "SSH shell context preparation should publish the first host-spec token as the ssh host." \
+		"backup@example.com" "$g_zxfer_ssh_shell_host_result"
+	assertEquals "SSH shell context preparation should prefix the remote command with safely quoted wrapper tokens." \
+		"'pfexec' '-u' 'root' 'sh' '-c' 'zfs list tank/src'" "$g_zxfer_ssh_shell_full_remote_command_result"
+}
+
+test_build_prepared_ssh_shell_command_for_host_centralizes_prepare_and_render() {
+	output=$(
+		(
+			zxfer_prepare_remote_shell_command_for_host() {
+				g_zxfer_remote_shell_command_for_host_result="'sh' '-c' '$2'"
+				return 0
+			}
+			zxfer_build_ssh_shell_command_for_host() {
+				printf 'host=<%s> cmd=<%s>' "$1" "$2"
+			}
+			zxfer_build_prepared_ssh_shell_command_for_host "backup@example.com pfexec" "zfs list tank/src"
+			printf '\nresult=<%s>\n' "$g_zxfer_prepared_ssh_shell_command_result"
+		)
+	)
+
+	assertContains "Prepared SSH shell rendering should pass the host spec to the final SSH renderer." \
+		"$output" "host=<backup@example.com pfexec>"
+	assertContains "Prepared SSH shell rendering should pass the prepared remote command to the final SSH renderer." \
+		"$output" "cmd=<'sh' '-c' 'zfs list tank/src'>"
+	assertContains "Prepared SSH shell rendering should publish the rendered shell command for current-shell callers." \
+		"$output" "result=<host=<backup@example.com pfexec> cmd=<'sh' '-c' 'zfs list tank/src'>>"
+}
+
+test_ssh_shell_context_callers_preserve_empty_context_failures() {
+	output=$(
+		(
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "/usr/bin/ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				g_zxfer_ssh_shell_context_error_result=""
+				return 47
+			}
+			zxfer_build_ssh_shell_command_for_host "backup@example.com" "zfs list tank/src" >/dev/null
+			printf 'build_status=%s\n' "$?"
+		)
+		(
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "/usr/bin/ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				g_zxfer_ssh_shell_context_error_result=""
+				return 48
+			}
+			zxfer_invoke_ssh_shell_command_for_host "backup@example.com" "zfs list tank/src" source >/dev/null
+			printf 'invoke_status=%s\n' "$?"
+		)
+	)
+
+	assertContains "SSH shell rendering should preserve context-preparation failures even without diagnostics." \
+		"$output" "build_status=47"
+	assertContains "SSH shell invocation should preserve context-preparation failures even without diagnostics." \
+		"$output" "invoke_status=48"
+}
+
+test_build_prepared_ssh_shell_command_for_host_preserves_render_diagnostics() {
+	output=$(
+		(
+			zxfer_prepare_remote_shell_command_for_host() {
+				g_zxfer_remote_shell_command_for_host_result="'sh' '-c' '$2'"
+				return 0
+			}
+			zxfer_build_ssh_shell_command_for_host() {
+				printf '%s\n' "render diagnostic"
+				return 43
+			}
+			zxfer_build_prepared_ssh_shell_command_for_host "backup@example.com" "zfs list tank/src" >/dev/null
+			printf 'status=%s\n' "$?"
+			printf 'error=<%s>\n' "$g_zxfer_prepared_ssh_shell_command_error_result"
+		)
+	)
+
+	assertContains "Prepared SSH shell rendering should preserve final renderer status." \
+		"$output" "status=43"
+	assertContains "Prepared SSH shell rendering should publish final renderer diagnostics for callers that rethrow outside command substitutions." \
+		"$output" "error=<render diagnostic>"
 }
 
 test_build_ssh_shell_command_for_host_honors_explicit_ambient_policy_opt_out() {

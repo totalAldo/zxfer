@@ -64,6 +64,104 @@ test_get_temp_file_creates_unique_paths() {
 	assertTrue "The second temp file should exist." '[ -f "$file_two" ]'
 }
 
+test_zxfer_create_temp_file_group_publishes_requested_paths() {
+	group_output_file="$TEST_TMPDIR/runtime-temp-group.out"
+
+	zxfer_create_temp_file_group 3 >"$group_output_file"
+	group_status=$?
+	group_count=$(printf '%s\n' "$g_zxfer_temp_file_group_result" | awk 'NF {count++} END {print count + 0}')
+	missing_count=0
+	while IFS= read -r group_path || [ -n "$group_path" ]; do
+		[ -n "$group_path" ] || continue
+		if [ ! -f "$group_path" ]; then
+			missing_count=$((missing_count + 1))
+		fi
+	done <<EOF
+$g_zxfer_temp_file_group_result
+EOF
+
+	assertEquals "Temp-file group allocation should succeed for a valid count." \
+		0 "$group_status"
+	assertEquals "Temp-file group allocation should publish one path per requested file." \
+		3 "$group_count"
+	assertEquals "Temp-file group allocation should track the number of allocated files." \
+		3 "$g_zxfer_temp_file_group_allocated_count"
+	assertEquals "Temp-file group allocation should print the same newline-delimited paths it stores." \
+		"$g_zxfer_temp_file_group_result" "$(cat "$group_output_file")"
+	assertEquals "Temp-file group allocation should create every published file." \
+		0 "$missing_count"
+}
+
+test_zxfer_create_temp_file_group_cleans_partial_allocations_on_failure() {
+	first_path="$TEST_TMPDIR/runtime-temp-group-partial-one"
+	second_path="$TEST_TMPDIR/runtime-temp-group-partial-two"
+	call_count=0
+
+	zxfer_get_temp_file() {
+		call_count=$((call_count + 1))
+		case "$call_count" in
+		1)
+			g_zxfer_temp_file_result=$first_path
+			: >"$g_zxfer_temp_file_result"
+			return 0
+			;;
+		2)
+			g_zxfer_temp_file_result=$second_path
+			: >"$g_zxfer_temp_file_result"
+			return 0
+			;;
+		esac
+		return 73
+	}
+
+	set +e
+	zxfer_create_temp_file_group 4 >/dev/null
+	group_status=$?
+	allocated_count=$g_zxfer_temp_file_group_allocated_count
+	group_result=$g_zxfer_temp_file_group_result
+	if [ -e "$first_path" ]; then
+		first_exists=yes
+	else
+		first_exists=no
+	fi
+	if [ -e "$second_path" ]; then
+		second_exists=yes
+	else
+		second_exists=no
+	fi
+
+	unset -f zxfer_get_temp_file
+	zxfer_source_runtime_modules_through "zxfer_replication.sh"
+	setUp
+
+	assertEquals "Temp-file group allocation should preserve the failed allocation status." \
+		73 "$group_status"
+	assertEquals "Temp-file group allocation should report how many files were allocated before failure." \
+		2 "$allocated_count"
+	assertEquals "Temp-file group allocation should not publish a complete group on failure." \
+		"" "$group_result"
+	assertFalse "Temp-file group allocation should clean the first partial file on failure." \
+		"[ \"$first_exists\" = yes ]"
+	assertFalse "Temp-file group allocation should clean the second partial file on failure." \
+		"[ \"$second_exists\" = yes ]"
+}
+
+test_zxfer_create_temp_file_group_rejects_invalid_counts() {
+	g_zxfer_temp_file_group_result="stale-group"
+	g_zxfer_temp_file_group_allocated_count=9
+
+	set +e
+	zxfer_create_temp_file_group 0 >/dev/null
+	group_status=$?
+
+	assertEquals "Temp-file group allocation should reject zero as an invalid group size." \
+		1 "$group_status"
+	assertEquals "Temp-file group allocation should clear stale group results on invalid input." \
+		"" "$g_zxfer_temp_file_group_result"
+	assertEquals "Temp-file group allocation should reset the allocated count on invalid input." \
+		0 "$g_zxfer_temp_file_group_allocated_count"
+}
+
 test_zxfer_cleanup_pid_helpers_cover_current_shell_paths() {
 	sleep 30 &
 	first_pid=$!
@@ -876,7 +974,7 @@ test_runtime_init_default_helpers_cover_current_shell_paths() {
 	)
 
 	assertContains "Runtime metadata initialization should set the current zxfer version string." \
-		"$output" "version=2.0.0-20260423"
+		"$output" "version=2.0.0-20260430"
 	assertContains "Option default initialization should restore the single-job default." \
 		"$output" "jobs=1"
 	assertContains "Transport runtime defaults should clear cached remote capability payloads." \
@@ -1478,6 +1576,41 @@ test_zxfer_cleanup_runtime_artifact_paths_preserves_failures_when_one_path_canno
 		"$output" "status=1"
 }
 
+test_zxfer_cleanup_runtime_artifact_path_list_removes_newline_delimited_paths() {
+	zxfer_create_runtime_artifact_file "runtime-cleanup-list-file" >/dev/null
+	file_path=$g_zxfer_runtime_artifact_path_result
+	zxfer_create_runtime_artifact_dir "runtime-cleanup-list-dir" >/dev/null
+	dir_path=$g_zxfer_runtime_artifact_path_result
+	path_list=$(printf '%s\n%s\n' "$file_path" "$dir_path")
+
+	zxfer_cleanup_runtime_artifact_path_list "$path_list"
+	cleanup_status=$?
+
+	assertEquals "List-based runtime artifact cleanup should succeed when every listed artifact is removed." \
+		0 "$cleanup_status"
+	assertFalse "List-based runtime artifact cleanup should remove listed files." \
+		"[ -e \"$file_path\" ]"
+	assertFalse "List-based runtime artifact cleanup should remove listed directories." \
+		"[ -e \"$dir_path\" ]"
+	assertNotContains "List-based runtime artifact cleanup should unregister listed files." \
+		"$g_zxfer_runtime_artifact_cleanup_paths" "$file_path"
+	assertNotContains "List-based runtime artifact cleanup should unregister listed directories." \
+		"$g_zxfer_runtime_artifact_cleanup_paths" "$dir_path"
+}
+
+test_zxfer_cleanup_runtime_artifact_path_list_and_return_preserves_original_status() {
+	zxfer_create_runtime_artifact_file "runtime-cleanup-list-return" >/dev/null
+	file_path=$g_zxfer_runtime_artifact_path_result
+
+	zxfer_cleanup_runtime_artifact_path_list_and_return 37 "$file_path"
+	cleanup_status=$?
+
+	assertEquals "List cleanup return helper should preserve the caller's original status." \
+		37 "$cleanup_status"
+	assertFalse "List cleanup return helper should still remove listed artifacts." \
+		"[ -e \"$file_path\" ]"
+}
+
 test_zxfer_write_and_read_runtime_artifact_file_preserve_multiline_payloads() {
 	read_output_file="$TEST_TMPDIR/runtime-readback.out"
 	zxfer_create_runtime_artifact_file "runtime-readback" >/dev/null
@@ -1545,6 +1678,190 @@ test_zxfer_read_runtime_artifact_file_preserves_nonzero_status_and_clears_scratc
 		"$output" "status=26"
 	assertContains "Runtime artifact readback failures should clear the shared readback scratch state." \
 		"$output" "scratch=<>"
+}
+
+test_zxfer_read_runtime_artifact_file_trimmed_strips_one_trailing_newline_from_scratch() {
+	read_output_file="$TEST_TMPDIR/runtime-readback-trimmed.out"
+	scratch_output_file="$TEST_TMPDIR/runtime-readback-trimmed.scratch"
+	expected_stdout_hex="6c696e65206f6e650a0a0a"
+	expected_scratch_hex="6c696e65206f6e650a0a"
+	zxfer_create_runtime_artifact_file "runtime-readback-trimmed" >/dev/null
+	artifact_path=$g_zxfer_runtime_artifact_path_result
+	printf 'line one\n\n\n' >"$artifact_path"
+
+	zxfer_read_runtime_artifact_file_trimmed "$artifact_path" >"$read_output_file"
+	read_status=$?
+	printf '%s' "$g_zxfer_runtime_artifact_read_result" >"$scratch_output_file"
+	read_output_hex=$(od -An -tx1 -v "$read_output_file" | tr -d ' \n')
+	scratch_output_hex=$(od -An -tx1 -v "$scratch_output_file" | tr -d ' \n')
+
+	assertEquals "Trimmed runtime artifact reads should preserve a successful status." \
+		0 "$read_status"
+	assertEquals "Trimmed runtime artifact reads should emit the trimmed payload plus the helper's output newline." \
+		"$expected_stdout_hex" "$read_output_hex"
+	assertEquals "Trimmed runtime artifact reads should strip exactly one trailing newline in shared scratch state." \
+		"$expected_scratch_hex" "$scratch_output_hex"
+}
+
+test_zxfer_read_runtime_artifact_file_trimmed_preserves_read_failures() {
+	artifact_path="$TEST_TMPDIR/runtime-readback-trimmed-failure"
+	: >"$artifact_path"
+
+	output=$(
+		(
+			g_zxfer_runtime_artifact_read_result="stale-runtime-readback"
+			zxfer_read_runtime_artifact_file() {
+				g_zxfer_runtime_artifact_read_result=""
+				return 29
+			}
+			zxfer_read_runtime_artifact_file_trimmed "$artifact_path" >/dev/null
+			status=$?
+			printf 'status=%s\n' "$status"
+			printf 'scratch=<%s>\n' "$g_zxfer_runtime_artifact_read_result"
+		)
+	)
+
+	assertContains "Trimmed runtime artifact reads should preserve lower-level read failures." \
+		"$output" "status=29"
+	assertContains "Trimmed runtime artifact reads should leave the lower-level failure scratch state intact." \
+		"$output" "scratch=<>"
+}
+
+test_zxfer_capture_runtime_artifact_command_output_reads_and_cleans_capture_file() {
+	capture_file="$TEST_TMPDIR/runtime-capture-command.out"
+
+	output=$(
+		(
+			zxfer_create_runtime_artifact_file() {
+				: >"$capture_file"
+				g_zxfer_runtime_artifact_path_result=$capture_file
+				return 0
+			}
+			zxfer_emit_runtime_capture_fixture() {
+				printf '%s\n%s\n' "line one" "line two"
+			}
+			zxfer_capture_runtime_artifact_command_output "runtime-capture" zxfer_emit_runtime_capture_fixture
+			printf 'status=%s\n' "$?"
+			printf 'scratch=<%s>\n' "$g_zxfer_runtime_artifact_read_result"
+			printf 'exists=%s\n' "$([ -e "$capture_file" ] && printf yes || printf no)"
+		)
+	)
+
+	assertContains "Runtime command captures should preserve successful command output in readback scratch." \
+		"$output" "scratch=<line one
+line two>"
+	assertContains "Runtime command captures should return success for successful commands and readbacks." \
+		"$output" "status=0"
+	assertContains "Runtime command captures should remove the temporary capture file after readback." \
+		"$output" "exists=no"
+}
+
+test_zxfer_capture_runtime_artifact_command_output_preserves_command_and_read_failures() {
+	capture_file="$TEST_TMPDIR/runtime-capture-command-failure.out"
+
+	output=$(
+		(
+			zxfer_create_runtime_artifact_file() {
+				: >"$capture_file"
+				g_zxfer_runtime_artifact_path_result=$capture_file
+				return 0
+			}
+			zxfer_failing_runtime_capture_fixture() {
+				printf '%s\n' "partial"
+				return 37
+			}
+			g_zxfer_runtime_artifact_read_result="stale"
+			zxfer_capture_runtime_artifact_command_output "runtime-capture" zxfer_failing_runtime_capture_fixture
+			printf 'command_status=%s\n' "$?"
+			printf 'command_scratch=<%s>\n' "$g_zxfer_runtime_artifact_read_result"
+			printf 'command_exists=%s\n' "$([ -e "$capture_file" ] && printf yes || printf no)"
+		)
+		(
+			zxfer_create_runtime_artifact_file() {
+				: >"$capture_file"
+				g_zxfer_runtime_artifact_path_result=$capture_file
+				return 0
+			}
+			zxfer_read_runtime_artifact_file() {
+				g_zxfer_runtime_artifact_read_result=""
+				return 38
+			}
+			zxfer_capture_runtime_artifact_command_output "runtime-capture" printf '%s\n' "captured"
+			printf 'read_status=%s\n' "$?"
+			printf 'read_exists=%s\n' "$([ -e "$capture_file" ] && printf yes || printf no)"
+		)
+	)
+
+	assertContains "Runtime command captures should preserve command failures." \
+		"$output" "command_status=37"
+	assertContains "Runtime command captures should not publish partial command output after command failures." \
+		"$output" "command_scratch=<>"
+	assertContains "Runtime command captures should remove temp files after command failures." \
+		"$output" "command_exists=no"
+	assertContains "Runtime command captures should preserve readback failures." \
+		"$output" "read_status=38"
+	assertContains "Runtime command captures should remove temp files after readback failures." \
+		"$output" "read_exists=no"
+}
+
+test_zxfer_capture_runtime_artifact_combined_command_output_preserves_status_after_readback() {
+	capture_file="$TEST_TMPDIR/runtime-capture-combined-command.out"
+
+	output=$(
+		(
+			zxfer_create_runtime_artifact_file() {
+				: >"$capture_file"
+				g_zxfer_runtime_artifact_path_result=$capture_file
+				return 0
+			}
+			zxfer_failing_runtime_combined_capture_fixture() {
+				printf '%s\n' "stdout-line"
+				printf '%s\n' "stderr-line" >&2
+				return 43
+			}
+			zxfer_capture_runtime_artifact_combined_command_output "runtime-combined" zxfer_failing_runtime_combined_capture_fixture
+			printf 'status=%s\n' "$?"
+			printf 'scratch=<%s>\n' "$g_zxfer_runtime_artifact_read_result"
+			printf 'exists=%s\n' "$([ -e "$capture_file" ] && printf yes || printf no)"
+		)
+	)
+
+	assertContains "Combined runtime command captures should preserve the command status after successful readback." \
+		"$output" "status=43"
+	assertContains "Combined runtime command captures should publish stdout and stderr after command failures." \
+		"$output" "scratch=<stdout-line
+stderr-line>"
+	assertContains "Combined runtime command captures should remove temp files after readback." \
+		"$output" "exists=no"
+}
+
+test_zxfer_capture_runtime_artifact_combined_command_output_preserves_readback_failures() {
+	capture_file="$TEST_TMPDIR/runtime-capture-combined-read-failure.out"
+
+	output=$(
+		(
+			zxfer_create_runtime_artifact_file() {
+				: >"$capture_file"
+				g_zxfer_runtime_artifact_path_result=$capture_file
+				return 0
+			}
+			zxfer_read_runtime_artifact_file() {
+				g_zxfer_runtime_artifact_read_result=""
+				return 44
+			}
+			zxfer_capture_runtime_artifact_combined_command_output "runtime-combined" printf '%s\n' "captured"
+			printf 'status=%s\n' "$?"
+			printf 'scratch=<%s>\n' "$g_zxfer_runtime_artifact_read_result"
+			printf 'exists=%s\n' "$([ -e "$capture_file" ] && printf yes || printf no)"
+		)
+	)
+
+	assertContains "Combined runtime command captures should preserve readback failures." \
+		"$output" "status=44"
+	assertContains "Combined runtime command captures should leave failed readback scratch empty." \
+		"$output" "scratch=<>"
+	assertContains "Combined runtime command captures should remove temp files after readback failures." \
+		"$output" "exists=no"
 }
 
 test_zxfer_write_runtime_artifact_file_creates_empty_files_without_caller_truncation() {
@@ -2205,7 +2522,6 @@ test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 			g_zxfer_property_stage_file_read_result="stale-stage-read"
 			g_zxfer_remote_probe_capture_failed=1
 			g_zxfer_destination_property_tree_prefetch_state=2
-			g_unsupported_properties="compression"
 			g_zxfer_unsupported_filesystem_properties="compression"
 			g_zxfer_unsupported_volume_properties="volblocksize"
 
@@ -2221,7 +2537,6 @@ test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 			printf 'remote_capture_failed=%s\n' "${g_zxfer_remote_probe_capture_failed:-0}"
 			printf 'cache_dir=<%s>\n' "$g_zxfer_property_cache_dir"
 			printf 'prefetch_state=%s\n' "$g_zxfer_destination_property_tree_prefetch_state"
-			printf 'unsupported=<%s>\n' "$g_unsupported_properties"
 			printf 'unsupported_fs=<%s>\n' "$g_zxfer_unsupported_filesystem_properties"
 			printf 'unsupported_vol=<%s>\n' "$g_zxfer_unsupported_volume_properties"
 			if [ -d "$stale_cache_dir" ]; then
@@ -2252,8 +2567,6 @@ test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 		"$output" "cache_dir=<>"
 	assertContains "Re-running zxfer_init_globals should rearm destination property prefetch state." \
 		"$output" "prefetch_state=0"
-	assertContains "Re-running zxfer_init_globals should clear run-wide unsupported-property scratch state." \
-		"$output" "unsupported=<>"
 	assertContains "Re-running zxfer_init_globals should clear filesystem unsupported-property cache state." \
 		"$output" "unsupported_fs=<>"
 	assertContains "Re-running zxfer_init_globals should clear volume unsupported-property cache state." \

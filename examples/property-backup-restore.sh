@@ -1,6 +1,7 @@
 #!/bin/sh
 
 # Template: replace the dataset names and backup directory before use.
+# The -k/-e flow uses current-format v2 backup metadata only.
 
 set -eu
 

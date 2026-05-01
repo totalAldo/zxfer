@@ -34,11 +34,11 @@ GREEN=$(printf '\033[32m')
 YELLOW=$(printf '\033[33m')
 RESET=$(printf '\033[0m')
 
-has_gnu_parallel() {
+has_parallel() {
 	if ! command -v parallel >/dev/null 2>&1; then
 		return 1
 	fi
-	parallel --version 2>&1 | grep -Eq "GNU parallel|GNU Parallel"
+	return 0
 }
 
 require_cmd() {
@@ -965,16 +965,32 @@ find_backup_metadata_file_for_exact_pair() {
 
 	find "$l_backup_root" -type f -name '.zxfer_backup_info.*' 2>/dev/null |
 		while IFS= read -r l_backup_file || [ -n "$l_backup_file" ]; do
-			if awk -v dataset_pair="$l_source_dataset,$l_destination_dataset," '
+			if awk -v source_root="$l_source_dataset" \
+				-v destination_root="$l_destination_dataset" '
 				BEGIN {
-					found = 0
+					format_seen = 0
+					source_seen = 0
+					destination_seen = 0
+					root_row_seen = 0
 				}
-				index($0, dataset_pair) == 1 {
-					found = 1
-					exit
+				$0 == "#format_version:2" {
+					format_seen = 1
+					next
+				}
+				$0 == "#source_root:" source_root {
+					source_seen = 1
+					next
+				}
+				$0 == "#destination_root:" destination_root {
+					destination_seen = 1
+					next
+				}
+				index($0, ".\t") == 1 {
+					root_row_seen = 1
+					next
 				}
 				END {
-					exit(found ? 0 : 1)
+					exit(format_seen && source_seen && destination_seen && root_row_seen ? 0 : 1)
 				}
 			' "$l_backup_file" >/dev/null 2>&1; then
 				printf '%s\n' "$l_backup_file"
@@ -1747,7 +1763,7 @@ EOF
 }
 
 missing_parallel_error_test() {
-	log "Starting missing GNU parallel failure test"
+	log "Starting missing parallel failure test"
 
 	mock_path="$WORKDIR/mock_no_parallel"
 	prepare_mock_bin_dir "$mock_path" \
@@ -1774,23 +1790,23 @@ missing_parallel_error_test() {
 	set -e
 
 	if [ "$status" -eq 0 ]; then
-		fail "Local -j run without GNU parallel should fail closed. Output: $output"
+		fail "Local -j run without parallel should fail closed. Output: $output"
 	fi
 	assert_dataset_absent "$dest_dataset"
-	if ! printf '%s\n' "$output" | grep -q "requires GNU parallel but it was not found in PATH on the local host"; then
-		fail "Missing local GNU parallel error not found. Output: $output"
+	if ! printf '%s\n' "$output" | grep -q "requires parallel but it was not found in PATH on the local host"; then
+		fail "Missing local parallel error not found. Output: $output"
 	fi
 
 	safe_rm_rf "$mock_path"
 
-	log "Missing GNU parallel failure test passed"
+	log "Missing parallel failure test passed"
 }
 
 remote_missing_parallel_origin_test() {
-	log "Starting remote missing GNU parallel origin test"
+	log "Starting remote missing parallel origin test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping remote missing GNU parallel origin test (local GNU parallel not available)"
+	if ! has_parallel; then
+		log "Skipping remote missing parallel origin test (local parallel not available)"
 		return
 	fi
 
@@ -1799,7 +1815,7 @@ remote_missing_parallel_origin_test() {
 	write_mock_ssh_script "$mock_path/ssh"
 	real_parallel=$(resolve_host_command parallel)
 	if [ "$real_parallel" = "" ]; then
-		fail "GNU parallel not found on host after availability probe."
+		fail "parallel not found on host after availability probe."
 	fi
 	ln -s "$real_parallel" "$mock_path/parallel"
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
@@ -1829,7 +1845,7 @@ remote_missing_parallel_origin_test() {
 	set -e
 
 	if [ "$status" -eq 0 ]; then
-		fail "Remote origin without GNU parallel should fail closed when -j is requested. Output: $output"
+		fail "Remote origin without parallel should fail closed when -j is requested. Output: $output"
 	fi
 	assert_dataset_absent "$dest_root/${src_dataset##*/}"
 	if ! printf '%s\n' "$output" | grep -q "parallel not found on origin host localhost but -j 2 was requested"; then
@@ -1838,13 +1854,13 @@ remote_missing_parallel_origin_test() {
 
 	safe_rm_rf "$mock_path" "$tmpdir"
 
-	log "Remote missing GNU parallel origin test passed"
+	log "Remote missing parallel origin test passed"
 }
 
-remote_non_gnu_parallel_origin_test() {
+remote_incompatible_parallel_origin_test() {
 	log "Starting remote incompatible parallel origin test"
 
-	mock_path="$WORKDIR/mock_remote_non_gnu_parallel"
+	mock_path="$WORKDIR/mock_remote_incompatible_parallel"
 	prepare_mock_bin_dir "$mock_path" ssh
 	write_mock_ssh_script "$mock_path/ssh"
 	cat >"$mock_path/parallel" <<'EOF'
@@ -1856,15 +1872,15 @@ if [ "$1" = "--version" ]; then
 	printf '%s\n' "parallel from elsewhere"
 	exit 0
 fi
-	printf '%s\n' "non-GNU parallel mock cannot execute GNU parallel workloads" >&2
+	printf '%s\n' "incompatible parallel mock cannot execute zxfer workloads" >&2
 exit 64
 EOF
 	chmod +x "$mock_path/parallel"
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	tmpdir="$WORKDIR/remote_non_gnu_parallel_tmp"
+	tmpdir="$WORKDIR/remote_incompatible_parallel_tmp"
 
-	src_dataset="$SRC_POOL/remote_non_gnu_parallel_src"
-	dest_root="$DEST_POOL/remote_non_gnu_parallel_dest"
+	src_dataset="$SRC_POOL/remote_incompatible_parallel_src"
+	dest_root="$DEST_POOL/remote_incompatible_parallel_dest"
 
 	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
 	safe_rm_rf "$tmpdir"
@@ -1885,17 +1901,20 @@ EOF
 	set -e
 
 	if [ "$status" -eq 0 ]; then
-		fail "Remote origin with an incompatible parallel implementation should fail once the rendered origin-host listing runs. Output: $output"
+		fail "Remote origin with an incompatible parallel implementation should fail during source snapshot discovery. Output: $output"
 	fi
 	assert_dataset_absent "$dest_root/${src_dataset##*/}"
-	if ! printf '%s\n' "$output" | grep -q "Failed to retrieve snapshots from the source"; then
+	if ! printf '%s\n' "$output" | grep -q "incompatible parallel mock cannot execute zxfer workloads"; then
+		fail "Remote incompatible parallel diagnostics should be preserved from the rendered source snapshot pipeline. Output: $output"
+	fi
+	if ! printf '%s\n' "$output" | grep -q "Failed to retrieve snapshots from the source:"; then
 		fail "Remote incompatible parallel implementations should fail through the rendered source snapshot pipeline. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -q "non-GNU parallel mock cannot execute GNU parallel workloads"; then
-		fail "Remote incompatible parallel implementations should surface the rendered origin-host pipeline failure. Output: $output"
+	if printf '%s\n' "$output" | grep -q "requires GNU parallel"; then
+		fail "Remote incompatible parallel implementations should not be rejected by an upfront GNU validation check. Output: $output"
 	fi
-	if printf '%s\n' "$output" | grep -q "requires GNU parallel on origin host localhost"; then
-		fail "Remote incompatible parallel implementations should no longer be rejected during upfront GNU validation. Output: $output"
+	if printf '%s\n' "$output" | grep -q "is not GNU parallel"; then
+		fail "Remote incompatible parallel implementations should not be misreported as upfront GNU validation failures. Output: $output"
 	fi
 	if printf '%s\n' "$output" | grep -q "Falling back to serial source snapshot listing."; then
 		fail "Remote incompatible parallel implementations should not fall back to serial once the helper resolves. Output: $output"
@@ -1906,10 +1925,10 @@ EOF
 	log "Remote incompatible parallel origin test passed"
 }
 
-remote_parallel_functional_probe_failure_origin_test() {
+remote_parallel_rendered_failure_origin_test() {
 	log "Starting remote rendered parallel failure origin test"
 
-	mock_path="$WORKDIR/mock_remote_probe_failure_parallel"
+	mock_path="$WORKDIR/mock_remote_rendered_failure_parallel"
 	prepare_mock_bin_dir "$mock_path" ssh
 	write_mock_ssh_script "$mock_path/ssh"
 	cat >"$mock_path/parallel" <<'EOF'
@@ -1918,18 +1937,18 @@ if [ "$1" = "--will-cite" ]; then
 	shift
 fi
 if [ "$1" = "--version" ]; then
-	printf '%s\n' "parallel release 20260122"
+	printf '%s\n' "GNU parallel 20260122"
 	exit 0
 fi
-printf '%s\n' "ssh timeout during remote GNU parallel probe" >&2
+printf '%s\n' "remote parallel command failed during source listing" >&2
 exit 124
 EOF
 	chmod +x "$mock_path/parallel"
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	tmpdir="$WORKDIR/remote_probe_failure_parallel_tmp"
+	tmpdir="$WORKDIR/remote_rendered_failure_parallel_tmp"
 
-	src_dataset="$SRC_POOL/remote_probe_failure_parallel_src"
-	dest_root="$DEST_POOL/remote_probe_failure_parallel_dest"
+	src_dataset="$SRC_POOL/remote_rendered_failure_parallel_src"
+	dest_root="$DEST_POOL/remote_rendered_failure_parallel_dest"
 
 	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
 	safe_rm_rf "$tmpdir"
@@ -1953,8 +1972,11 @@ EOF
 		fail "Remote origin should fail closed when the rendered parallel listing command fails. Output: $output"
 	fi
 	assert_dataset_absent "$dest_root/${src_dataset##*/}"
-	if ! printf '%s\n' "$output" | grep -q "ssh timeout during remote GNU parallel probe"; then
+	if ! printf '%s\n' "$output" | grep -q "remote parallel command failed during source listing"; then
 		fail "Expected the rendered remote parallel failure diagnostic to be preserved. Output: $output"
+	fi
+	if printf '%s\n' "$output" | grep -q "requires GNU parallel"; then
+		fail "Rendered remote parallel failures should no longer be rejected by upfront GNU validation. Output: $output"
 	fi
 	if printf '%s\n' "$output" | grep -q "is not GNU parallel"; then
 		fail "Rendered remote parallel failures should no longer be misreported as upfront GNU validation failures. Output: $output"
@@ -2601,8 +2623,8 @@ exclude_filter_test() {
 parallel_jobs_listing_test() {
 	log "Starting parallel jobs listing test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping parallel jobs listing test (GNU parallel not available)"
+	if ! has_parallel; then
+		log "Skipping parallel jobs listing test (parallel not available)"
 		return
 	fi
 
@@ -2626,7 +2648,7 @@ parallel_jobs_listing_test() {
 	set -e
 
 	if [ "$status" -ne 0 ]; then
-		log "Skipping parallel jobs listing test due to zxfer failure (possibly missing GNU parallel support in ZFS list pipeline). Output: $output"
+		log "Skipping parallel jobs listing test due to zxfer failure (possibly incompatible parallel support in ZFS list pipeline). Output: $output"
 		return
 	fi
 
@@ -2639,8 +2661,8 @@ parallel_jobs_listing_test() {
 progress_wrapper_test() {
 	log "Starting progress wrapper test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping progress wrapper test (GNU parallel not available)"
+	if ! has_parallel; then
+		log "Skipping progress wrapper test (parallel not available)"
 		return
 	fi
 
@@ -2711,8 +2733,8 @@ progress_placeholder_passthrough_test() {
 job_limit_enforcement_test() {
 	log "Starting job limit enforcement test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping job limit enforcement test (GNU parallel not available)"
+	if ! has_parallel; then
+		log "Skipping job limit enforcement test (parallel not available)"
 		return
 	fi
 
@@ -2756,8 +2778,8 @@ job_limit_enforcement_test() {
 background_receive_ancestry_serialization_test() {
 	log "Starting background receive ancestry serialization test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping background receive ancestry serialization test (GNU parallel not available)"
+	if ! has_parallel; then
+		log "Skipping background receive ancestry serialization test (parallel not available)"
 		return
 	fi
 
@@ -2917,7 +2939,7 @@ invalid_override_property_test() {
 	if [ "$status" -ne 2 ]; then
 		fail "Invalid override property should exit with status 2, got $status. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -F "Invalid option property - check -o list for syntax errors." >/dev/null 2>&1; then
+	if ! printf '%s\n' "$output" | grep -F "Missing source property for -o override: definitelynotaproperty." >/dev/null 2>&1; then
 		fail "Invalid override property error message missing. Output: $output"
 	fi
 
@@ -3327,18 +3349,18 @@ property_backup_restore_test() {
 
 	backup_file=$(find_backup_metadata_file_for_exact_pair "$backup_dir" "$src_dataset" "$dest_dataset")
 	if [ "$backup_file" = "" ]; then
-		fail "Exact-pair backup metadata file was not written under $backup_dir."
+		fail "Current backup metadata file was not written under $backup_dir."
 	fi
 	if ! grep -q "^#zxfer property backup file" "$backup_file"; then
 		fail "Backup metadata missing expected header."
 	fi
-	if ! grep -q "^#format_version:1$" "$backup_file"; then
+	if ! grep -q "^#format_version:2$" "$backup_file"; then
 		fail "Backup metadata missing expected format-version marker."
 	fi
 	if ! grep -q "^#source_root:$src_dataset$" "$backup_file"; then
 		fail "Backup metadata missing the expected full source_root header."
 	fi
-	if ! grep -q "^#destination_root:$dest_root$" "$backup_file"; then
+	if ! grep -q "^#destination_root:$dest_dataset$" "$backup_file"; then
 		fail "Backup metadata missing the expected full destination_root header."
 	fi
 
@@ -3430,19 +3452,19 @@ remote_property_backup_restore_test() {
 
 	remote_backup_file=$(find_backup_metadata_file_for_exact_pair "$backup_dir" "$src_dataset" "$dest_remote_dataset")
 	if [ "$remote_backup_file" = "" ]; then
-		fail "Exact-pair remote backup metadata file not created under $backup_dir."
+		fail "Current remote backup metadata file not created under $backup_dir."
 	fi
 	remote_mode=$(get_file_mode_octal "$remote_backup_file" 2>/dev/null || echo "")
 	if [ "$remote_mode" != "600" ]; then
 		fail "Remote backup metadata permissions expected 600, got $remote_mode."
 	fi
-	if ! grep -q "^#format_version:1$" "$remote_backup_file"; then
+	if ! grep -q "^#format_version:2$" "$remote_backup_file"; then
 		fail "Remote backup metadata missing expected format-version marker."
 	fi
 	if ! grep -q "^#source_root:$src_dataset$" "$remote_backup_file"; then
 		fail "Remote backup metadata missing the expected full source_root header."
 	fi
-	if ! grep -q "^#destination_root:$dest_remote_root$" "$remote_backup_file"; then
+	if ! grep -q "^#destination_root:$dest_remote_dataset$" "$remote_backup_file"; then
 		fail "Remote backup metadata missing the expected full destination_root header."
 	fi
 
@@ -3733,7 +3755,7 @@ unsupported_backup_format_version_rejected_test() {
 		BEGIN {
 			rewritten = 0
 		}
-		/^#format_version:1$/ {
+		/^#format_version:2$/ {
 			print "#format_version:999"
 			rewritten = 1
 			next
@@ -3760,7 +3782,7 @@ unsupported_backup_format_version_rejected_test() {
 	if [ "$status" -eq 0 ]; then
 		fail "Restore with unsupported backup metadata format version should fail closed. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -q "does not declare supported zxfer backup metadata format version #format_version:1" >/dev/null 2>&1; then
+	if ! printf '%s\n' "$output" | grep -q "does not declare supported zxfer backup metadata format version #format_version:2" >/dev/null 2>&1; then
 		fail "Expected unsupported format-version failure. Output: $output"
 	fi
 	if zfs list "$restore_dataset" >/dev/null 2>&1; then
@@ -3833,8 +3855,8 @@ remote_legacy_backup_layout_rejected_test() {
 background_send_failure_test() {
 	log "Starting background send failure test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping background send failure test (GNU parallel not available)"
+	if ! has_parallel; then
+		log "Skipping background send failure test (parallel not available)"
 		return
 	fi
 
@@ -4146,8 +4168,8 @@ snapshot_name_prefix_collision_deletion_test() {
 remote_origin_target_uncompressed_test() {
 	log "Starting remote uncompressed origin/target test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping remote uncompressed test (GNU parallel not available for -j>1 remote listings)"
+	if ! has_parallel; then
+		log "Skipping remote uncompressed test (parallel not available for -j>1 remote listings)"
 		return
 	fi
 
@@ -4519,8 +4541,8 @@ target_capability_control_whitespace_path_falls_back_to_direct_probe_test() {
 remote_compression_pipeline_test() {
 	log "Starting remote compression pipeline test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping remote compression pipeline test (GNU parallel not available)"
+	if ! has_parallel; then
+		log "Skipping remote compression pipeline test (parallel not available)"
 		return
 	fi
 
@@ -4595,8 +4617,8 @@ target_only_remote_compression_test() {
 remote_csh_origin_snapshot_listing_test() {
 	log "Starting remote csh origin snapshot listing test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping remote csh origin snapshot listing test (GNU parallel not available)"
+	if ! has_parallel; then
+		log "Skipping remote csh origin snapshot listing test (parallel not available)"
 		return
 	fi
 
@@ -4646,8 +4668,8 @@ remote_csh_origin_snapshot_listing_test() {
 remote_wrapped_host_spec_test() {
 	log "Starting remote wrapped host spec test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping remote wrapped host spec test (GNU parallel not available)"
+	if ! has_parallel; then
+		log "Skipping remote wrapped host spec test (parallel not available)"
 		return
 	fi
 
@@ -4876,8 +4898,8 @@ malformed_target_capability_response_falls_back_to_direct_probe_test() {
 trap_exit_cleanup_test() {
 	log "Starting trap exit cleanup test"
 
-	if ! has_gnu_parallel; then
-		log "Skipping trap exit cleanup test (GNU parallel not available for supervised background jobs)"
+	if ! has_parallel; then
+		log "Skipping trap exit cleanup test (parallel not available for supervised background jobs)"
 		return
 	fi
 
@@ -5103,11 +5125,7 @@ property_creation_with_zvol_test() {
 
 	child_atime=$(zfs get -H -o value atime "$dest_child")
 	if [ "$child_atime" != "off" ]; then
-		if [ "$OS_NAME" = "Darwin" ]; then
-			log "Skipping child atime assertion on Darwin; observed atime=$child_atime on $dest_child"
-		else
-			fail "Expected atime=off on $dest_child, got $child_atime."
-		fi
+		fail "Expected atime=off on $dest_child, got $child_atime."
 	fi
 
 	src_volsize=$(zfs get -H -o value volsize "$src_zvol")
@@ -5152,7 +5170,7 @@ property_override_and_ignore_test() {
 	zfs set atime=on "$dest_child"
 	zfs set checksum=fletcher4 "$dest_child"
 
-	ZXFER_SECURE_PATH='' run_zxfer -v -P -o "quota=32M" -I "mountpoint,compression" -R "$src_dataset" "$dest_root"
+	ZXFER_SECURE_PATH='' run_zxfer -v -P -o "quota=32M,checksum=sha256" -I "mountpoint,compression" -R "$src_dataset" "$dest_root"
 
 	dest_compression_after=$(zfs get -H -o value compression "$dest_dataset")
 	if [ "$dest_compression_after" != "off" ]; then
@@ -5166,11 +5184,7 @@ property_override_and_ignore_test() {
 
 	child_atime_after=$(zfs get -H -o value atime "$dest_child")
 	if [ "$child_atime_after" != "off" ]; then
-		if [ "$OS_NAME" = "Darwin" ]; then
-			log "Skipping child atime assertion on Darwin after property pass; observed atime=$child_atime_after on $dest_child"
-		else
-			fail "Expected atime=off to be set on $dest_child after property pass."
-		fi
+		fail "Expected atime=off to be set on $dest_child after property pass."
 	fi
 
 	child_checksum_after=$(zfs get -H -o value checksum "$dest_child")
@@ -5182,6 +5196,14 @@ property_override_and_ignore_test() {
 	child_quota=$(zfs get -H -o value quota "$dest_child")
 	if [ "$parent_quota" != "32M" ] || [ "$child_quota" != "32M" ]; then
 		fail "Override quota not applied to parent/child: parent=$parent_quota child=$child_quota."
+	fi
+	child_quota_source=$(zfs get -H -o source quota "$dest_child")
+	if [ "$child_quota_source" != "local" ]; then
+		fail "Non-inheritable override quota on $dest_child should remain local, got source=$child_quota_source."
+	fi
+	child_checksum_source=$(zfs get -H -o source checksum "$dest_child")
+	if [ "$child_checksum_source" = "local" ]; then
+		fail "Inheritable override checksum on $dest_child should inherit from the replicated parent, not remain local."
 	fi
 
 	parent_snap_count=$(list_exact_snapshot_names_for_dataset "$dest_dataset" | wc -l | tr -d ' ')
@@ -5740,8 +5762,8 @@ property_creation_with_zvol_test \
 	trap_exit_cleanup_test \
 	missing_parallel_error_test \
 	remote_missing_parallel_origin_test \
-	remote_non_gnu_parallel_origin_test \
-	remote_parallel_functional_probe_failure_origin_test \
+	remote_incompatible_parallel_origin_test \
+	remote_parallel_rendered_failure_origin_test \
 	managed_ssh_policy_test \
 	parallel_jobs_listing_test \
 	migration_service_success_test \

@@ -109,7 +109,7 @@ zxfer_usage() {
 }
 
 zxfer_test_render_current_backup_metadata_contents() {
-	l_format_version=${ZXFER_BACKUP_METADATA_FORMAT_VERSION:-1}
+	l_format_version=${ZXFER_BACKUP_METADATA_FORMAT_VERSION:-2}
 	l_header_line=${ZXFER_BACKUP_METADATA_HEADER_LINE:-#zxfer property backup file}
 	l_source_root=${ZXFER_TEST_BACKUP_SOURCE_ROOT:-}
 	l_destination_root=${ZXFER_TEST_BACKUP_DESTINATION_ROOT:-}
@@ -123,13 +123,27 @@ zxfer_test_render_current_backup_metadata_contents() {
 
 	if [ -n "$l_first_row" ]; then
 		if [ -z "$l_source_root" ]; then
-			l_source_root=${l_first_row%%,*}
+			case "$l_first_row" in
+			*,*)
+				l_source_root=${l_first_row%%,*}
+				;;
+			*)
+				l_source_root=${g_initial_source:-}
+				;;
+			esac
 		fi
 		if [ -z "$l_destination_root" ]; then
-			l_row_remainder=${l_first_row#*,}
-			if [ "$l_row_remainder" != "$l_first_row" ]; then
-				l_destination_root=${l_row_remainder%%,*}
-			fi
+			case "$l_first_row" in
+			*,*)
+				l_row_remainder=${l_first_row#*,}
+				if [ "$l_row_remainder" != "$l_first_row" ]; then
+					l_destination_root=${l_row_remainder%%,*}
+				fi
+				;;
+			*)
+				l_destination_root=${g_destination:-}
+				;;
+			esac
 		fi
 	fi
 
@@ -154,6 +168,13 @@ zxfer_test_render_current_backup_metadata_contents() {
 		[ -n "$l_line" ] || continue
 		printf '%s\n' "$l_line"
 	done
+}
+
+zxfer_test_backup_metadata_row() {
+	l_relative_path=$1
+	l_properties=$2
+
+	printf '%s\t%s\n' "$l_relative_path" "$l_properties"
 }
 
 oneTimeSetUp() {

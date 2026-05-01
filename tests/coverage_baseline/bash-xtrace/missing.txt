@@ -1,71 +1,84 @@
 src/zxfer_background_job_runner.sh
-  192:	zxfer_background_job_runner_main "$@"
-  193:	exit $?
+  324:			sh -c "$l_exec_cmd" >"$l_output_file" 2>"$l_error_file" &
+  346:	if ! zxfer_background_job_runner_write_launch \
+  358:		if ! zxfer_background_job_runner_abort_worker_scope \
 
 src/zxfer_background_jobs.sh
-  242:	done <<-EOF || l_read_status=$?
-  243:		$g_zxfer_runtime_artifact_read_result
-  244:	EOF
-  267:	done <<-EOF || l_read_status=$?
-  268:		$g_zxfer_runtime_artifact_read_result
-  269:	EOF
-  287:		return 1
-  521:			$l_record
-  522:		EOF
-  550:				zxfer_unregister_background_job_record "$l_job_id"
-  551:				zxfer_cleanup_runtime_artifact_path "$g_zxfer_background_job_record_control_dir" >/dev/null 2>&1 || :
-  552:				return 0
+  253:	done <<-EOF || l_read_status=$?
+  254:		$g_zxfer_runtime_artifact_read_result
+  255:	EOF
+  302:	done <<-EOF || l_read_status=$?
+  303:		$g_zxfer_runtime_artifact_read_result
+  304:	EOF
+  307:		return "$l_read_status"
+  380:		zxfer_teardown_unregistered_background_runner \
+  392:	zxfer_register_background_job_record \
+  402:		zxfer_teardown_unregistered_background_runner \
+  638:		l_signal_current_shell_pgid_status=$?
+  640:		l_signal_current_shell_pgid=$(printf '%s\n' "$l_signal_current_shell_pgid_raw" |
+  642:			l_signal_current_shell_pgid_status=$?
+  644:		l_signal_current_shell_pgid=""
+  656:			zxfer_background_job_snapshot_has_pid_with_parent \
+  660:			zxfer_background_job_snapshot_has_pid_with_pgid \
+  674:		zxfer_get_background_job_pid_set \
+  730:		zxfer_cleanup_completed_background_job \
+  740:			zxfer_cleanup_completed_background_job \
+  750:	zxfer_background_job_runner_matches \
+  762:			zxfer_cleanup_completed_background_job \
+  773:			zxfer_cleanup_completed_background_job \
+  784:	zxfer_signal_validated_background_job_scope \
+  792:		zxfer_cleanup_completed_background_job \
+  802:			zxfer_cleanup_completed_background_job \
+  813:	zxfer_background_job_runner_matches \
+  825:			zxfer_cleanup_completed_background_job \
+  836:			zxfer_cleanup_completed_background_job \
+  858:		return "$l_finish_escalation_status"
+  897:	if ! zxfer_background_job_snapshot_has_pid_with_parent \
+  906:		zxfer_background_job_runner_matches \
+  922:	zxfer_signal_validated_background_job_scope \
+  933:		zxfer_background_job_snapshot_has_pid_with_parent \
+  941:		zxfer_background_job_snapshot_has_pid_with_parent \
+  945:		zxfer_signal_validated_background_job_scope \
+  967:			$l_record
+  968:		EOF
+  998:				zxfer_cleanup_completed_background_job \
+  1023:			zxfer_cleanup_completed_background_job \
+  1038:		}; then
+  1040:			zxfer_cleanup_completed_background_job \
+  1050:	zxfer_background_job_runner_matches \
+  1061:			zxfer_cleanup_completed_background_job \
+  1072:			zxfer_cleanup_completed_background_job \
+  1083:	zxfer_signal_validated_background_job_scope \
+  1090:	zxfer_finish_signaled_background_job_abort \
 
 src/zxfer_backup_metadata.sh
-  111:	if ! l_updated_records=$(printf '%s' "$l_existing_records" |
-  112:		ZXFER_BACKUP_METADATA_SOURCE=$l_source \
-  193:	if ! l_rekeyed_records=$(printf '%s' "$l_existing_records" |
-  278:	if l_record_properties=$(printf '%s' "$l_existing_records" |
-  279:		ZXFER_BACKUP_METADATA_SOURCE=$l_source \
-  363:	if ! l_filtered_records=$(printf '%s' "$l_existing_records" |
-  364:		ZXFER_BACKUP_METADATA_SOURCE=$l_source \
-  648:	g_zxfer_rendered_backup_metadata_contents=$(zxfer_render_backup_metadata_contents_for_roots \
-  663:	g_zxfer_rendered_backup_metadata_contents=$(zxfer_render_backup_metadata_contents_for_roots \
-  702:	l_key_hex=$(printf '%s' "$l_identity" |
-  749:			break
-  760:			l_forwarded_properties=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
-  1161:	if (
-  1164:	); then
-  1246:				zxfer_remove_local_backup_metadata_path_if_present "$l_rollback_file" >/dev/null 2>&1 || :
-  1378:		zxfer_cleanup_runtime_artifact_path "$l_stage_dir"
-  1379:		zxfer_throw_error "Error creating temporary file."
-  1477:		l_status=$?
-  1478:		zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
-  1479:		zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
-  1480:		return "$l_status"
-  1657:		return "$l_link_status"
-  1771:		return "$l_remote_capture_status"
-  1968:		return 5
-  2118:		l_remote_write_status=0
-  2175:			zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
-  2177:		return 0
-  2197:		zxfer_throw_remote_backup_capture_error "$g_option_T_target_host" "writing backup metadata $l_primary_backup_file_path"
+  107:		return 1
+  121:	return 1
+  132:		zxfer_throw_error "Backup metadata source dataset [$l_source] is outside source root [$l_metadata_source_root]."
+  152:	if ! l_updated_records=$(printf '%s\n' "$l_existing_records" |
+  153:		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
+  228:	if ! l_validated_records=$(printf '%s\n' "$l_existing_records" |
+  297:	if l_record_properties=$(printf '%s\n' "$l_existing_records" |
+  298:		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
+  375:	if ! l_filtered_records=$(printf '%s\n' "$l_existing_records" |
+  376:		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
+  640:	g_zxfer_rendered_backup_metadata_contents=$(zxfer_render_backup_metadata_contents_for_roots \
+  655:	g_zxfer_rendered_backup_metadata_contents=$(zxfer_render_backup_metadata_contents_for_roots \
+  694:	l_key_hex=$(printf '%s' "$l_identity" |
+  752:			l_forwarded_properties=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
+  1153:	if (
+  1156:	); then
+  1238:				zxfer_remove_local_backup_metadata_path_if_present "$l_rollback_file" >/dev/null 2>&1 || :
+  1377:	if zxfer_invoke_ssh_shell_command_for_host \
+  1452:		zxfer_register_backup_metadata_runtime_artifact_path \
+  1457:		zxfer_register_backup_metadata_runtime_artifact_path \
+  2339:		return 0
 
 src/zxfer_exec.sh
-  103:		return 1
-  115:				g_last_background_pid=""
-  116:				return 1
-  491:	l_command_context=$(zxfer_get_remote_command_context_label \
+  538:	l_command_context=$(zxfer_get_remote_command_context_label \
 
 src/zxfer_locking.sh
   233:	l_normalized_value=$(printf '%s\n' "$l_field_value" |
-  267:	l_proc_stat=$(cat "/proc/$l_pid/stat" 2>/dev/null || :)
-  268:	[ -n "$l_proc_stat" ] || return 1
-  269:	l_proc_rest=$(printf '%s\n' "$l_proc_stat" | sed 's/^[0-9][0-9]* (.*) //')
-  270:	[ "$l_proc_rest" != "$l_proc_stat" ] || return 1
-  271:	l_proc_start=$(printf '%s\n' "$l_proc_rest" | awk '{ print $20 }')
-  274:		return 1
-  278:	l_boot_identity=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || :)
-  279:	if ! l_boot_identity=$(zxfer_normalize_owned_lock_text_field "$l_boot_identity"); then
-  280:		l_boot_identity=$(LC_ALL=C awk '/^btime / { print $2; exit }' /proc/stat 2>/dev/null || :)
-  281:		if ! l_boot_identity=$(zxfer_normalize_owned_lock_text_field "$l_boot_identity"); then
-  282:			l_boot_identity=unknown
-  286:	printf 'procfs:%s:%s\n' "$l_boot_identity" "$l_proc_start"
   390:$ZXFER_LOCK_METADATA_HEADER
   391:kind	$l_kind
   392:purpose	$l_purpose
@@ -75,443 +88,415 @@ src/zxfer_locking.sh
   396:created_at	$l_created_at
   397:EOF
   478:	done <"$l_metadata_path"
+  656:		zxfer_load_owned_lock_metadata_for_kind_and_purpose \
+  664:		zxfer_owned_lock_owner_is_live \
+  706:		if ! zxfer_load_owned_lock_metadata_for_kind_and_purpose \
+  734:	if ! zxfer_current_process_owns_owned_lock_dir \
 
 src/zxfer_path_security.sh
   310:		return 1
   322:		l_ls_path=./$l_ls_path
+  371:		return 1
   393:		l_ls_path=./$l_ls_path
 
 src/zxfer_property_cache.sh
-  119:$l_property_records
-  120:EOF
-  772:				continue
-  840:	destination)
-  852:	*)
+  122:$l_property_records
+  123:EOF
+  851:	destination)
+  863:	*)
 
 src/zxfer_property_reconcile.sh
-  110:		l_effective_readonly_properties=$(printf '%s' ",$l_effective_readonly_properties," |
-  218:				l_mc_property_list=$(echo "$l_mc_property_list" | tr -s "," "\n" |
-  458:			l_read_status=$?
-  459:			zxfer_cleanup_runtime_artifact_path "$l_source_props_tmp"
-  460:			return "$l_read_status"
-  470:		l_read_status=$?
-  471:		zxfer_cleanup_runtime_artifact_path "$l_source_props_tmp"
-  472:		return "$l_read_status"
-  491:				zxfer_throw_usage_error "Failed to validate the restored backup metadata for the filesystem $l_source and destination $l_destination"
-  495:		g_zxfer_source_pvs_effective=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
-  507:			zxfer_throw_usage_error "Failed to parse the restored properties for the filesystem $l_source and destination $l_destination"
-  1088:			zxfer_throw_error "$l_dest_probe_dataset"
-  1091:			zxfer_throw_error "$l_dest_probe_dataset_type"
-  1098:			zxfer_cleanup_runtime_artifact_path "$l_source_props_tmp"
-  1099:			zxfer_throw_error "Failed to stage source property list for unsupported-property scan [$l_scan_source]."
-  1114:				continue
-  1129:					zxfer_append_unsupported_property_for_dataset_type "$l_scan_source_type" "$s_p"
-  1130:					l_resolved_source_property_type_pairs="${l_resolved_source_property_type_pairs}${l_seen_key},"
-  1265:			zxfer_render_command_for_report "" "$g_cmd_zfs" "$l_subcommand" "$@"
-  1507:			l_read_status=$?
-  1508:			zxfer_cleanup_runtime_artifact_path "$l_diff_tmp"
-  1509:			return "$l_read_status"
-  1512:$g_zxfer_property_stage_file_read_result
-  1513:EOF
-  1608:		l_read_status=$?
-  1609:		zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
-  1610:		return "$l_read_status"
-  1829:				l_read_status=$?
-  1830:				zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-  1831:				return "$l_read_status"
-  1840:			l_read_status=$?
-  1841:			zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-  1842:			return "$l_read_status"
-  1849:				l_read_status=$?
-  1850:				zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-  1851:				return "$l_read_status"
-  1860:			l_read_status=$?
-  1861:			zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-  1862:			return "$l_read_status"
-  1918:		l_read_status=$?
-  1919:		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-  1920:		return "$l_read_status"
-  1927:			l_read_status=$?
-  1928:			zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-  1929:			return "$l_read_status"
-  1938:		l_read_status=$?
-  1939:		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-  1940:		return "$l_read_status"
-  1950:		zxfer_cleanup_runtime_artifact_path "$l_diff_properties_tmp"
-  1951:		zxfer_throw_error "Failed to calculate property reconciliation changes for destination [$g_actual_dest]."
-  1956:		l_read_status=$?
-  1957:		zxfer_cleanup_runtime_artifact_path "$l_diff_properties_tmp"
-  1958:		return "$l_read_status"
-  1975:			zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]."
+  89:		l_effective_readonly_properties=$(printf '%s' ",$l_effective_readonly_properties," |
+  219:				l_mc_property_list=$(echo "$l_mc_property_list" | tr -s "," "\n" |
+  507:		g_zxfer_source_pvs_effective=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
+  1127:			zxfer_throw_error "Failed to allocate source property staging for unsupported-property scan [$l_scan_source]." "$l_source_props_tmp_status"
+  1535:$g_zxfer_property_stage_file_read_result
+  1536:EOF
 
 src/zxfer_remote_hosts.sh
-  179:	l_key_hex=$(printf '%s' "$l_identity" |
-  329:		return 1
-  339:			return 1
-  359:		return 1
-  416:			return 1
-  426:				return 1
-  429:				return 1
-  433:				return 1
-  442:					return 1
-  448:				return 1
-  451:				return 1
-  455:				return 1
-  462:			return 1
-  467:				return 1
-  470:				return 1
-  474:				return 1
-  483:					return 1
-  489:				return 1
-  492:				return 1
-  496:				return 1
-  514:			return 1
-  640:		zxfer_note_ssh_control_socket_lock_error \
-  642:		return 1
-  744:		return 1
-  837:			[ ! -h "$l_lease_path" ]; then
-  838:			continue
-  858:		zxfer_note_ssh_control_socket_lock_error \
-  860:		return 1
-  891:			[ ! -h "$l_lease_path" ]; then
-  892:			continue
-  908:			continue
-  914:		zxfer_note_ssh_control_socket_lock_error \
-  916:		return 1
-  933:	if ! l_lease_dir=$(zxfer_create_owned_lock_dir_in_parent \
-  1006:	*"Control socket connect("*"): No such file or directory"* | \
-  1076:		return 1
-  1181:		zxfer_throw_error "$l_transport_tokens"
-  1312:				return 1
-  1511:	if l_host_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
-  1573:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  1587:	l_key_hex=$(printf '%s' "$l_identity" |
-  1608:		return 1
-  1618:			return 1
-  1638:		return 1
-  1693:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-  1747:	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
-  1784:		return 2
-  1820:		"${l_root_prefix}.s."[0-9]*.d | \
-  1828:	zxfer.*.s.[0-9]*.d | \
-  1858:		{ [ ! -e "$l_cache_dir" ] && [ ! -L "$l_cache_dir" ] && [ ! -h "$l_cache_dir" ]; }; then
-  1861:	return 1
-  1881:				[ ! -h "$l_lock_path" ]; then
-  1882:				continue
-  1898:			[ ! -h "$l_lease_path" ]; then
-  1899:			continue
-  2001:		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-  2015:		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-  2043:	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
-  2111:				$l_line
-  2112:			EOF
-  2119:				return 1
-  2137:				return 1
-  2141:				return 1
-  2291:	l_command_context=$(zxfer_get_remote_command_context_label \
-  2334:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2367:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2388:			[ "${g_target_remote_capabilities_host:-}" != "$l_host_spec" ]; then
-  2426:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2446:			[ "$l_cache_identity" = "${g_target_remote_capabilities_cache_identity:-}" ]; }; } ||
-  2466:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-  2474:		return 1
-  2477:		return 1
-  2481:		return 1
-  2490:	if ! l_cache_epoch=$(zxfer_get_cache_object_metadata_value \
-  2492:		return 1
-  2524:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-  2533:			return 1
-  2536:			return 1
-  2609:		return 1
-  2611:	l_requested_tool_tokens=$(zxfer_quote_token_stream \
-  2630:	if ! l_remote_probe=$(zxfer_build_remote_capability_probe_script \
-  2632:		return 1
-  2660:	if l_cached_response=$(zxfer_get_cached_remote_capability_response_for_host \
-  2672:	if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-  2685:	l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
-  2691:			return 1
-  2694:			if l_cached_response=$(zxfer_wait_for_remote_capability_cache_fill \
-  2707:				return 1
-  2709:			l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
-  2721:					return 1
-  2776:	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
-  2825:	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
-  2910:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
-  2915:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
-  2935:		l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
-  2944:			if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
-  2946:				printf '%s\n' "$l_fallback_path"
-  2947:				return 0
-  3036:	if ! l_output=$(zxfer_get_remote_resolved_tool_version_output \
-  3101:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
-  3111:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
-  3121:	l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
-  3177:	elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
-  3178:		:
-  3180:		zxfer_emit_ssh_control_socket_action_failure_message \
-  3182:		return 1
-  3218:			zxfer_throw_error "Error closing ssh control socket for target host."
-  3256:			zxfer_release_ssh_control_socket_lock_with_precedence \
-  3258:			zxfer_emit_ssh_control_socket_action_failure_message \
-  3260:			zxfer_throw_error "Error creating ssh control socket for $l_role host."
-  3316:				zxfer_release_ssh_control_socket_lock_with_precedence \
-  3318:				zxfer_emit_ssh_control_socket_lock_failure_message \
-  3320:				return "$l_prune_status"
-  3353:					if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_origin_control_socket_dir"; then
-  3354:						:
-  3356:						l_cleanup_status=$?
-  3357:						zxfer_release_ssh_control_socket_lock_with_precedence \
-  3359:						printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
-  3360:						return "$l_cleanup_status"
-  3374:					zxfer_release_ssh_control_socket_lock_with_precedence \
-  3376:					zxfer_emit_ssh_control_socket_action_failure_message \
-  3378:					printf '%s\n' "Error restoring ssh control socket lease for origin host." >&2
-  3379:					return 1
-  3387:					l_cleanup_status=$?
-  3388:					zxfer_release_ssh_control_socket_lock_with_precedence \
-  3390:					printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
-  3391:					return "$l_cleanup_status"
-  3394:				zxfer_create_ssh_control_socket_lease_file \
-  3396:				l_restore_status=$?
-  3397:				if [ "$l_restore_status" -eq 0 ]; then
-  3398:					g_ssh_origin_control_socket_lease_file=$g_zxfer_runtime_artifact_path_result
-  3399:					zxfer_release_ssh_control_socket_lock_with_precedence \
-  3401:					zxfer_emit_ssh_control_socket_action_failure_message \
-  3403:					return 1
-  3405:				zxfer_release_ssh_control_socket_lock_with_precedence \
-  3407:				zxfer_emit_ssh_control_socket_action_failure_message \
-  3409:				printf '%s\n' "Error restoring ssh control socket lease for origin host." >&2
-  3410:				return 1
-  3413:				zxfer_clear_ssh_control_socket_role_state origin
-  3414:				zxfer_emit_ssh_control_socket_lock_failure_message \
-  3416:				return 1
-  3434:				l_cleanup_status=$?
-  3435:				printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
-  3436:				return "$l_cleanup_status"
-  3439:			zxfer_echoV "Closing origin ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-  3440:			if zxfer_cleanup_ssh_control_socket_entry_dir "$g_ssh_origin_control_socket_dir"; then
-  3441:				:
-  3443:				l_cleanup_status=$?
-  3444:				printf '%s\n' "Error removing ssh control socket cache directory for origin host." >&2
-  3445:				return "$l_cleanup_status"
-  3482:				zxfer_release_ssh_control_socket_lock_with_precedence \
-  3484:				zxfer_emit_ssh_control_socket_lock_failure_message \
-  3486:				return "$l_prune_status"
-  3520:						:
-  3540:					zxfer_release_ssh_control_socket_lock_with_precedence \
-  3542:					zxfer_emit_ssh_control_socket_action_failure_message \
-  3544:					printf '%s\n' "Error restoring ssh control socket lease for target host." >&2
-  3545:					return 1
-  3553:					l_cleanup_status=$?
-  3554:					zxfer_release_ssh_control_socket_lock_with_precedence \
-  3556:					printf '%s\n' "Error removing ssh control socket cache directory for target host." >&2
-  3557:					return "$l_cleanup_status"
-  3571:				zxfer_release_ssh_control_socket_lock_with_precedence \
-  3573:				zxfer_emit_ssh_control_socket_action_failure_message \
-  3575:				printf '%s\n' "Error restoring ssh control socket lease for target host." >&2
-  3576:				return 1
-  3600:				l_cleanup_status=$?
-  3601:				printf '%s\n' "Error removing ssh control socket cache directory for target host." >&2
-  3602:				return "$l_cleanup_status"
-  3607:				:
+  216:	l_key_hex=$(printf '%s' "$l_identity" |
+  526:				return 1
+  576:			zxfer_note_ssh_control_socket_lock_error \
+  621:			zxfer_note_ssh_control_socket_lock_error \
+  643:		zxfer_note_ssh_control_socket_lock_error \
+  648:		zxfer_note_ssh_control_socket_lock_error \
+  652:	if zxfer_load_owned_lock_metadata_for_kind_and_purpose \
+  660:		zxfer_note_ssh_control_socket_lock_error \
+  664:		zxfer_note_ssh_control_socket_lock_error \
+  679:		zxfer_note_ssh_control_socket_lock_error \
+  684:		zxfer_note_ssh_control_socket_lock_error \
+  689:		zxfer_note_ssh_control_socket_lock_error \
+  694:		zxfer_note_ssh_control_socket_lock_error \
+  699:		zxfer_note_ssh_control_socket_lock_error \
+  704:		zxfer_note_ssh_control_socket_lock_error \
+  714:	zxfer_note_ssh_control_socket_lock_error \
+  730:	zxfer_note_ssh_control_socket_lock_error \
+  743:	if ! zxfer_create_owned_lock_dir \
+  786:		zxfer_note_ssh_control_socket_lock_error \
+  790:	zxfer_try_reap_stale_owned_lock_dir \
+  800:	zxfer_note_ssh_control_socket_lock_error \
+  813:	if zxfer_release_owned_lock_dir \
+  817:	zxfer_note_ssh_control_socket_lock_error \
+  830:	zxfer_emit_ssh_control_socket_lock_failure_message \
+  876:			[ ! -h "$l_lease_path" ]; then
+  877:			continue
+  880:			zxfer_note_ssh_control_socket_lock_error \
+  885:			zxfer_note_ssh_control_socket_lock_error \
+  889:		zxfer_try_reap_stale_owned_lock_dir \
+  897:		zxfer_note_ssh_control_socket_lock_error \
+  930:			[ ! -h "$l_lease_path" ]; then
+  931:			continue
+  934:			zxfer_note_ssh_control_socket_lock_error \
+  939:			zxfer_note_ssh_control_socket_lock_error \
+  943:		zxfer_try_reap_stale_owned_lock_dir \
+  953:		zxfer_note_ssh_control_socket_lock_error \
+  972:	if ! l_lease_dir=$(zxfer_create_owned_lock_dir_in_parent \
+  990:	zxfer_release_owned_lock_dir \
+  1045:	*"Control socket connect("*"): No such file or directory"* | \
+  1149:		zxfer_echoV_ssh_control_socket_command_for_host \
+  1189:	if zxfer_ssh_control_socket_failure_is_stale_master \
+  1251:	zxfer_echoV_ssh_control_socket_command_for_host \
+  1360:				return 1
+  1563:	if l_host_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
+  1599:	if ! zxfer_resolve_remote_capability_requested_tools_for_host \
+  1625:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  1639:	l_key_hex=$(printf '%s' "$l_identity" |
+  1690:		return 1
+  1745:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
+  1759:	zxfer_load_owned_lock_metadata_for_kind_and_purpose \
+  1771:	if ! zxfer_create_owned_lock_dir \
+  1786:	zxfer_warn_stderr \
+  1799:	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
+  1819:		zxfer_try_reap_stale_owned_lock_dir \
+  1823:		zxfer_try_reap_stale_owned_lock_dir \
+  1836:		return 2
+  1854:	zxfer_release_owned_lock_dir \
+  1872:		"${l_root_prefix}.s."[0-9]*.d | \
+  1880:	zxfer.*.s.[0-9]*.d | \
+  1910:		{ [ ! -e "$l_cache_dir" ] && [ ! -L "$l_cache_dir" ] && [ ! -h "$l_cache_dir" ]; }; then
+  1913:	return 1
+  1933:				[ ! -h "$l_lock_path" ]; then
+  1934:				continue
+  1950:			[ ! -h "$l_lease_path" ]; then
+  1951:			continue
+  2053:		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
+  2067:		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
+  2095:	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
+  2104:	zxfer_try_reap_stale_owned_lock_dir \
+  2163:				$l_line
+  2164:			EOF
+  2171:				return 1
+  2191:			if ! zxfer_append_remote_capability_tool_record \
+  2346:	l_command_context=$(zxfer_get_remote_command_context_label \
+  2350:	if zxfer_invoke_ssh_shell_command_for_host \
+  2389:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  2422:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  2444:			[ "${g_target_remote_capabilities_host:-}" != "$l_host_spec" ]; then
+  2485:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  2525:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
+  2533:		return 1
+  2536:		return 1
+  2540:		return 1
+  2544:	if ! zxfer_read_cache_object_file \
+  2549:	if ! l_cache_epoch=$(zxfer_get_cache_object_metadata_value \
+  2583:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
+  2592:			return 1
+  2595:			return 1
+  2600:	zxfer_write_cache_object_file_atomically \
+  2628:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  2657:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  2702:	zxfer_warn_remote_capability_cache_lock_release_failure \
+  2720:	if ! zxfer_resolve_remote_capability_requested_tools_for_host \
+  2722:		return 1
+  2724:	l_requested_tool_tokens=$(zxfer_quote_token_stream \
+  2743:	if ! l_remote_probe=$(zxfer_build_remote_capability_probe_script \
+  2745:		return 1
+  2773:	if l_cached_response=$(zxfer_get_cached_remote_capability_response_for_host \
+  2776:			zxfer_note_remote_capability_bootstrap_source_for_host \
+  2785:	if l_cached_response=$(zxfer_read_remote_capability_cache_file \
+  2787:		zxfer_store_cached_remote_capability_response_for_host \
+  2789:		zxfer_note_remote_capability_bootstrap_source_for_host \
+  2798:	l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
+  2804:			return 1
+  2807:			if l_cached_response=$(zxfer_wait_for_remote_capability_cache_fill \
+  2809:				zxfer_store_cached_remote_capability_response_for_host \
+  2811:				zxfer_note_remote_capability_bootstrap_source_for_host \
+  2818:			if ! zxfer_reap_stale_pidless_remote_capability_cache_lock \
+  2822:			l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
+  2834:					return 1
+  2845:	if zxfer_fetch_remote_host_capabilities_live \
+  2851:			zxfer_release_remote_capability_cache_lock_with_precedence \
+  2859:	zxfer_store_cached_remote_capability_response_for_host \
+  2861:	zxfer_note_remote_capability_bootstrap_source_for_host \
+  2864:	if ! zxfer_remote_capability_cache_write_is_unavailable_for_host \
+  2866:		if zxfer_write_remote_capability_cache_file \
+  2871:			zxfer_note_remote_capability_cache_write_unavailable_for_host \
+  2873:			zxfer_warn_remote_capability_cache_write_failure \
+  2878:		zxfer_release_remote_capability_cache_lock_with_precedence \
+  2894:	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
+  2901:		zxfer_ensure_remote_host_capabilities \
+  2907:	zxfer_ensure_remote_host_capabilities \
+  2945:	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
+  3005:		zxfer_validate_resolved_tool_path \
+  3030:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+  3035:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
+  3055:		l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
+  3064:			if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
+  3066:				printf '%s\n' "$l_fallback_path"
+  3067:				return 0
+  3131:		zxfer_emit_remote_probe_failure_message \
+  3156:	if ! l_output=$(zxfer_get_remote_resolved_tool_version_output \
+  3205:		zxfer_emit_remote_probe_failure_message \
+  3221:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+  3231:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
+  3241:	l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
+  3297:	if zxfer_run_ssh_control_socket_action_for_host \
+  3303:		zxfer_emit_ssh_control_socket_action_failure_message \
+  3341:			zxfer_throw_error "Error closing ssh control socket for target host."
+  3359:			zxfer_throw_error \
+  3367:		zxfer_release_ssh_control_socket_lock_with_precedence \
+  3369:		zxfer_emit_ssh_control_socket_lock_failure_message \
+  3379:			zxfer_release_ssh_control_socket_lock_with_precedence \
+  3381:			zxfer_emit_ssh_control_socket_action_failure_message \
+  3387:			zxfer_release_ssh_control_socket_lock_with_precedence \
+  3398:			zxfer_try_cleanup_opened_ssh_control_socket_after_lease_failure \
+  3401:		zxfer_release_ssh_control_socket_lock_with_precedence \
+  3408:		zxfer_emit_ssh_control_socket_lock_failure_message \
+  3439:		return 1
+  3455:		return "$?"
+  3456:	zxfer_set_ssh_control_socket_role_state \
+  3475:		zxfer_release_ssh_control_socket_lock_with_precedence \
+  3502:			zxfer_emit_ssh_control_socket_lock_failure_message \
+  3510:			zxfer_release_ssh_control_socket_lock_with_precedence \
+  3518:			zxfer_release_ssh_control_socket_lock_with_precedence \
+  3520:			zxfer_emit_ssh_control_socket_lock_failure_message \
+  3522:			return "$l_prune_status"
+  3527:			zxfer_release_ssh_control_socket_lock_with_precedence \
+  3529:			zxfer_emit_ssh_control_socket_lock_failure_message \
+  3537:				zxfer_emit_ssh_control_socket_lock_failure_message \
+  3547:				zxfer_cleanup_ssh_control_socket_entry_dir_for_role \
+  3551:				zxfer_cleanup_ssh_control_socket_entry_dir_for_role \
+  3555:				if zxfer_restore_ssh_control_socket_lease_for_role \
+  3557:					zxfer_release_ssh_control_socket_lock_with_precedence \
+  3559:					zxfer_emit_ssh_control_socket_action_failure_message \
+  3563:				zxfer_release_ssh_control_socket_lock_with_precedence \
+  3565:				zxfer_emit_ssh_control_socket_action_failure_message \
+  3567:				printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
+  3568:				return 1
+  3573:			zxfer_cleanup_ssh_control_socket_entry_dir_for_role \
+  3575:				return "$?"
+  3577:			if zxfer_restore_ssh_control_socket_lease_for_role \
+  3579:				zxfer_release_ssh_control_socket_lock_with_precedence \
+  3581:				zxfer_emit_ssh_control_socket_action_failure_message \
+  3585:			zxfer_release_ssh_control_socket_lock_with_precedence \
+  3587:			zxfer_emit_ssh_control_socket_action_failure_message \
+  3589:			printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
+  3590:			return 1
+  3594:			zxfer_emit_ssh_control_socket_lock_failure_message \
+  3602:				return "$?"
+  3609:			zxfer_emit_ssh_control_socket_action_failure_message \
+  3678:			zxfer_throw_usage_error "$g_option_T_target_host_safe" 2
+  3714:				g_zxfer_failure_class=dependency
+  3715:				zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
 
 src/zxfer_replication.sh
-  386:			zxfer_throw_error "$l_dest_exists"
-  530:				zxfer_relaunch
-  531:				zxfer_throw_error "Could not disable service $service."
-  724:		zxfer_cleanup_runtime_artifact_paths \
-  726:		return 1
-  730:		zxfer_cleanup_runtime_artifact_paths \
-  732:		return 1
-  737:			zxfer_cleanup_runtime_artifact_paths \
-  739:			return 1
-  746:			zxfer_cleanup_runtime_artifact_paths \
-  748:			return 1
-  811:		return 1
-  935:		zxfer_cleanup_runtime_artifact_path "$l_post_seed_property_sources_file"
-  936:		zxfer_throw_error "Error creating temporary file."
-  1177:$g_option_c_services
-  1178:EOF
+  380:			zxfer_throw_error "$l_dest_exists"
+  524:				zxfer_relaunch
+  525:				zxfer_throw_error "Could not disable service $service."
+  789:	zxfer_sort_replication_iteration_file \
+  1205:$g_option_c_services
+  1206:EOF
 
 src/zxfer_reporting.sh
-  794:	l_key_hex=$(printf '%s' "$l_key_path" |
-  795:		LC_ALL=C od -An -tx1 -v | tr -d ' \n' | cut -c 1-16)
-  796:	if [ "$l_key_hex" = "" ]; then
-  797:		l_key_hex="00"
-  799:	printf 'k%s\n' "$l_key_hex"
-  824:		l_capture_status=$?
-  825:		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
-  826:		return "$l_capture_status"
-  854:		:
-  856:		:
-  863:		return 1
-  881:			return 1
-  884:			if zxfer_try_reap_stale_owned_lock_dir \
-  886:				continue
-  888:			l_reap_status=$?
-  889:			if [ "$l_reap_status" -eq 1 ]; then
-  890:				return 1
-  957:	rm -f "$l_cleanup_stage_dir/log.snapshot" "$l_cleanup_stage_dir/log.write" 2>/dev/null || true
-  958:	rmdir "$l_cleanup_stage_dir" 2>/dev/null || true
-  988:		return 1
-  993:	if ! (
-  996:	); then
-  997:		zxfer_cleanup_error_log_stage_dir "$l_create_stage_dir"
-  998:		return 1
-  1001:		zxfer_cleanup_error_log_stage_dir "$l_create_stage_dir"
-  1002:		return 1
-  1294:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
-  1295:	if [ "$l_speaker_km_loaded" = "0" ]; then
-  1296:		if ! kldload "speaker" >/dev/null 2>&1; then
-  1297:			zxfer_echoV "Unable to load speaker module; skipping beep."
-  1298:			return
-  1303:	if [ "$l_exit_status" -eq 0 ]; then
-  1304:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
-  1305:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
-  1306:				zxfer_echoV "Success beep failed; skipping."
-  1309:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
-  1310:			zxfer_echoV "Failure beep failed; skipping."
+  797:	l_key_hex=$(printf '%s' "$l_key_path" |
+  870:	while ! zxfer_create_owned_lock_dir \
+  876:			zxfer_try_reap_stale_owned_lock_dir \
+  901:	zxfer_release_owned_lock_dir \
+  986:	if ! (
+  989:	); then
+  1287:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
+  1288:	if [ "$l_speaker_km_loaded" = "0" ]; then
+  1289:		if ! kldload "speaker" >/dev/null 2>&1; then
+  1290:			zxfer_echoV "Unable to load speaker module; skipping beep."
+  1291:			return
+  1296:	if [ "$l_exit_status" -eq 0 ]; then
+  1297:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
+  1298:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
+  1299:				zxfer_echoV "Success beep failed; skipping."
+  1302:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
+  1303:			zxfer_echoV "Failure beep failed; skipping."
 
 src/zxfer_runtime.sh
-  141:	l_cleanup_read_pgid_value=$("${g_cmd_ps:-ps}" -o pgid= -p "$l_cleanup_read_pgid_pid" 2>/dev/null |
-  214:			return 0
-  294:		return 1
-  315:		return 1
-  414:		return 0
-  420:		return 1
-  423:		return 0
-  434:			return 0
-  450:			return 0
-  475:		return 0
-  498:		g_zxfer_cleanup_pid_abort_failure_message="Failed to inspect the process table for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
-  499:		return 1
-  502:	l_cleanup_abort_current_shell_pgid=$("${g_cmd_ps:-ps}" -o pgid= -p "$$" 2>/dev/null |
-  506:		l_cleanup_abort_use_process_group=0
-  542:			g_zxfer_cleanup_pid_abort_failure_message="Failed to derive the owned child set for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
-  543:			return 1
-  558:			zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
-  559:			return 0
-  562:			g_zxfer_cleanup_pid_abort_failure_message="Failed to validate ownership for cleanup helper [$g_zxfer_cleanup_pid_record_purpose] (PID $l_cleanup_abort_pid)."
-  563:			return 1
-  922:	if (
-  924:	) 2>/dev/null; then
-  1190:	if ! {
-  1197:	} >"$l_object_path"; then
-  1337:		return 1
-  1684:			l_status=$?
-  1685:			zxfer_cleanup_runtime_artifact_paths \
-  1687:			return "$l_status"
-  1697:			l_status=$?
-  1698:			zxfer_cleanup_runtime_artifact_paths \
-  1701:			return "$l_status"
-  1821:				continue
+  143:		l_cleanup_read_pgid_status=$?
+  146:	l_cleanup_read_pgid_value=$(printf '%s\n' "$l_cleanup_read_pgid_raw" |
+  148:		l_cleanup_read_pgid_status=$?
+  222:			return 0
+  231:			return 0
+  323:		return 1
+  344:		return 1
+  401:		l_cleanup_pid_set_status=$?
+  464:	if ! zxfer_cleanup_pid_snapshot_has_pid_with_parent \
+  475:	zxfer_get_cleanup_pid_set \
+  513:		return 0
+  517:	zxfer_owned_lock_owner_is_live \
+  545:		l_cleanup_abort_current_shell_pgid_status=$?
+  547:		l_cleanup_abort_current_shell_pgid=$(printf '%s\n' "$l_cleanup_abort_current_shell_pgid_raw" |
+  549:			l_cleanup_abort_current_shell_pgid_status=$?
+  551:		l_cleanup_abort_current_shell_pgid=""
+  562:			zxfer_cleanup_pid_snapshot_has_pid_with_pgid \
+  575:		zxfer_get_cleanup_pid_set \
+  581:			zxfer_owned_lock_owner_is_live \
+  606:		zxfer_owned_lock_owner_is_live \
+  888:			l_cleanup_status=1
+  1033:	if (
+  1035:	) 2>/dev/null; then
+  1609:		return "$l_status"
+  1617:	zxfer_create_cache_object_stage_dir_for_path \
+  1626:	zxfer_write_cache_object_contents_to_path \
+  1636:	zxfer_read_cache_object_file \
+  1899:		g_zxfer_profile_start_ms=""
+  1996:			zxfer_cleanup_runtime_artifact_paths \
+  2009:			zxfer_cleanup_runtime_artifact_paths \
+  2148:				continue
+  2221:					l_source_context_status=$?
+  2223:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
+  2258:		g_zxfer_failure_class=dependency
+  2259:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
+  2277:					l_destination_context_status=$?
+  2279:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
+  2314:		g_zxfer_failure_class=dependency
+  2315:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
+  2355:		g_zxfer_failure_class=dependency
+  2356:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
 
 src/zxfer_send_receive.sh
-  116:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |
-  301:	l_progress_dialog=$(echo "$g_option_D_display_progress_bar" |
-  302:		sed "s#%%size%%#$l_size_est#g" |
-  1133:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
-  1140:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
-  1152:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
-  1158:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
-  1164:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
-  1170:			zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
-  1187:				zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
-  1195:				zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
-  1201:				zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
-  1207:				zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}"
-  1300:			$l_completed_record
-  1301:		EOF
-  1324:			zxfer_throw_send_job_cleanup_failure
-  1333:			zxfer_throw_send_job_cleanup_failure
-  1339:			zxfer_throw_send_job_cleanup_failure
-  1351:			zxfer_throw_send_job_cleanup_failure
-  1359:		zxfer_throw_error "Failed to report zfs send/receive background completion (PID $l_pid, exit $l_wait_status)."
-  1364:			zxfer_throw_send_job_cleanup_failure
-  1401:				zxfer_throw_send_job_cleanup_failure
-  1411:				zxfer_throw_send_job_cleanup_failure
-  1425:				zxfer_throw_send_job_cleanup_failure
+  126:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |
+  270:		zxfer_capture_progress_estimate_probe_output \
+  276:		zxfer_capture_progress_estimate_probe_output \
+  309:	l_progress_dialog=$(echo "$g_option_D_display_progress_bar" |
+  310:		sed "s#%%size%%#$l_size_est#g" |
+  1082:		return 1
+  1089:		l_context="[$g_zxfer_send_job_record_dest_dataset]"
+  1105:		return 0
+  1315:		zxfer_throw_supervised_send_job_error_after_cleanup \
+  1323:		zxfer_throw_supervised_send_job_error_after_cleanup \
+  1332:		zxfer_throw_supervised_send_job_error_after_cleanup \
+  1347:		zxfer_throw_supervised_send_job_error_after_cleanup \
+  1351:		zxfer_throw_supervised_send_job_error_after_cleanup \
+  1355:		zxfer_throw_supervised_send_job_error_after_cleanup \
+  1359:		zxfer_throw_supervised_send_job_error_after_cleanup \
+  1379:			zxfer_throw_supervised_send_job_error_after_cleanup \
+  1389:			zxfer_throw_supervised_send_job_error_after_cleanup \
+  1393:			zxfer_throw_supervised_send_job_error_after_cleanup \
+  1397:			zxfer_throw_supervised_send_job_error_after_cleanup \
+  1489:			$l_completed_record
+  1490:		EOF
+  1504:		zxfer_throw_send_job_error_after_cleanup \
+  1513:		zxfer_throw_send_job_error_after_cleanup \
+  1520:		zxfer_throw_send_job_error_after_cleanup \
+  1527:		zxfer_throw_send_job_error_after_cleanup \
+  1537:		zxfer_throw_send_job_error_after_cleanup \
+  1541:		zxfer_throw_send_job_error_after_cleanup \
+  1546:		zxfer_throw_send_job_error_after_cleanup \
+  1571:				zxfer_throw_send_job_error_after_cleanup \
+  1584:			zxfer_throw_send_job_error_after_cleanup \
+  1592:			zxfer_throw_send_job_error_after_cleanup \
+  1597:			zxfer_throw_send_job_error_after_cleanup \
+  1602:			zxfer_throw_send_job_error_after_cleanup \
+  1787:		zxfer_spawn_supervised_background_job \
+  1794:		zxfer_register_supervised_send_job \
 
 src/zxfer_snapshot_discovery.sh
-  160:	l_normalized_output=$(printf '%s' "$l_output" |
-  161:		tr '[:upper:]' '[:lower:]' |
-  316:		l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
-  319:		l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
-  339:	l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec \
-  594:			zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
-  596:			zxfer_throw_error "Failed to stage empty already-changed recursive dataset list for snapshot identity validation."
-  601:		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
-  603:		zxfer_throw_error "Failed to derive recursive candidate dataset list for snapshot identity validation."
-  624:		zxfer_cleanup_runtime_artifact_paths "$l_common_datasets_tmp_file" "$l_already_changed_datasets_tmp_file" \
-  626:		zxfer_throw_error "Failed to read staged recursive candidate dataset list for snapshot identity validation."
-  799:			zxfer_throw_error "Failed to stage empty destination snapshot list."
-  910:		l_status=$?
-  911:		return "$l_status"
-  951:		l_status=$?
-  952:		return "$l_status"
-  1237:		return "$l_status"
-  1434:				l_dest_pool=$g_destination
-  1445:			zxfer_cleanup_runtime_artifact_paths "$l_dest_list_tmp_file" "$l_dest_list_err_file"
-  1446:			zxfer_throw_usage_error "Failed to retrieve list of datasets from the destination"
-  1454:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
-  1455:		return "$l_status"
-  1461:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  1463:		return "$l_status"
-  1484:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-  1486:			zxfer_cleanup_snapshot_record_cache_files
-  1487:			zxfer_throw_error "Failed to read source snapshot discovery completion metadata."
-  1498:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-  1500:		zxfer_cleanup_snapshot_record_cache_files
-  1501:		zxfer_throw_error "Failed to publish source snapshot discovery completion."
-  1520:			l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
-  1553:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-  1557:		zxfer_cleanup_snapshot_record_cache_files
-  1558:		zxfer_throw_error "Failed to stage source snapshot record cache."
+  196:	l_normalized_output=$(printf '%s' "$l_output" |
+  197:		tr '[:upper:]' '[:lower:]' |
+  246:		l_version_status=$?
+  252:			l_version_status=$?
+  371:			l_status=$?
+  372:			return "$l_status"
+  374:		if l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
+  382:		if l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
+  404:			l_status=$?
+  405:			return "$l_status"
+  428:	if l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec \
+  432:		l_status=$?
+  433:		return "$l_status"
+  545:		l_status=$?
+  546:		return "$l_status"
+  653:				l_already_changed_datasets=$g_recursive_destination_extra_dataset_list
+  680:		l_status=$?
+  682:		zxfer_cleanup_runtime_artifact_path_list "$l_refine_stage_files"
+  683:		zxfer_throw_error "Failed to derive recursive candidate dataset list for snapshot identity validation." "$l_status"
+  711:		zxfer_cleanup_runtime_artifact_path_list "$l_refine_stage_files"
+  712:		zxfer_throw_error "Failed to read staged recursive candidate dataset list for snapshot identity validation." "$l_status"
+  931:			zxfer_throw_error "Failed to stage empty destination snapshot list." "$l_status"
+  937:		l_status=$?
+  939:		return "$l_status"
+  1000:		return 1
+  1050:		l_status=$?
+  1051:		return "$l_status"
+  1092:		l_status=$?
+  1093:		return "$l_status"
+  1350:		return "$l_status"
+  1516:		l_status=$?
+  1518:		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_source_snapshot_stage_files"
+  1519:		return "$?"
+  1571:				l_dest_pool=$g_destination
+  1585:			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
+  1586:			zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_inventory_status"
+  1594:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
+  1595:		return "$l_status"
+  1601:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  1603:		return "$l_status"
+  1610:		l_status=$?
+  1612:		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  1614:		zxfer_cleanup_snapshot_record_cache_files
+  1615:		return "$l_status"
+  1636:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+  1638:			zxfer_cleanup_snapshot_record_cache_files
+  1639:			zxfer_throw_error "Failed to read source snapshot discovery completion metadata." "$l_wait_helper_status"
+  1646:		wait "$g_source_snapshot_list_pid" || l_source_snapshot_wait_status=$?
+  1647:		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
+  1648:		g_source_snapshot_list_pid=""
+  1682:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
 
 src/zxfer_snapshot_reconcile.sh
-  79:		l_capture_status=$?
-  80:		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
-  81:		return "$l_capture_status"
-  147:	$0 != "" { record = $0; tab_pos = index(record, "\t"); snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record); snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : ""); at_pos = index(snapshot_path, "@"); if (at_pos > 0) { snapshot_identity = substr(snapshot_path, at_pos + 1); if (snapshot_guid != "") snapshot_identity = snapshot_identity "\t" snapshot_guid; if (snapshot_identity in delete_identities) print snapshot_path } }' "$l_identity_file" - <<-EOF
-  148:		$g_zxfer_runtime_artifact_read_result
-  149:	EOF
-  297:		l_status=$?
-  298:		zxfer_cleanup_runtime_artifact_paths "$l_dest_identity_file" "$l_source_snapshot_file"
-  299:		return "$l_status"
-  310:	if l_last_common_snap=$("${g_cmd_awk:-awk}" "$l_common_snapshot_awk" \
+  67:	if zxfer_capture_runtime_artifact_command_output \
+  137:	"${g_cmd_awk:-awk}" 'NR == FNR { if ($0 != "") delete_identities[$0] = 1; next }
+  139:		$g_zxfer_runtime_artifact_read_result
+  140:	EOF
+  292:	if zxfer_write_runtime_artifact_file \
+  301:	if l_last_common_snap=$("${g_cmd_awk:-awk}" "$l_common_snapshot_awk" \
 
 src/zxfer_snapshot_state.sh
-  281:	if ! l_manifest_name=$(zxfer_get_cache_object_metadata_value \
-  286:	if ! l_entry_count_expected=$(zxfer_get_cache_object_metadata_value \
-  295:	if ! l_meta_side=$(zxfer_get_cache_object_metadata_value \
-  432:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  433:			return 1
-  436:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  437:			return 1
-  478:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  479:		return 1
-  481:	if ! l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
-  492:		"ready"; then
-  497:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  498:		return 1
-  505:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  506:		return 1
-  511:		zxfer_cleanup_runtime_artifact_path "$l_published_index_dir"
-  512:		return 1
-  593:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  594:			return 1
-  597:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  598:			return 1
-  616:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  617:			return 1
-  639:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  640:		return 1
-  642:	if ! l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
-  653:		"ready"; then
-  666:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  667:		return 1
-  672:		zxfer_cleanup_runtime_artifact_path "$l_published_index_dir"
-  673:		return 1
-  996:	*)
+  233:		zxfer_read_cache_object_file \
+  283:	zxfer_read_cache_object_file \
+  291:	l_manifest_name=$(zxfer_get_cache_object_metadata_value \
+  299:	l_entry_count_expected=$(zxfer_get_cache_object_metadata_value \
+  311:	l_meta_side=$(zxfer_get_cache_object_metadata_value \
+  319:	zxfer_validate_snapshot_record_index_manifest_file \
+  424:	zxfer_create_cache_object_stage_dir_in_parent \
+  467:		l_stage_map=$("${g_cmd_awk:-awk}" -v index_dir="$l_stage_dir" \
+  472:		l_stage_map=$(printf '%s\n' "$l_snapshot_records_input" |
+  485:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
+  486:			return 1
+  500:		zxfer_write_cache_object_contents_to_path \
+  509:		zxfer_read_cache_object_file \
+  540:		l_build_status=$?
+  542:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
+  543:		return "$l_build_status"
+  546:	l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
+  554:	zxfer_write_cache_object_contents_to_path \
+  560:		"ready" ||
+  586:	zxfer_set_snapshot_record_index_state_for_side \
+  677:				l_status=$?
+  742:		l_lookup_status=$?
+  744:		return "$l_lookup_status"
+  751:			zxfer_read_cache_object_file \
+  777:	if zxfer_get_indexed_snapshot_records_for_dataset \
+  782:		if zxfer_get_indexed_snapshot_records_for_dataset \
+  790:		zxfer_filter_snapshot_record_file_for_dataset \
+  792:			l_status=$?
+  953:	*)
+  1110:		zxfer_capture_runtime_artifact_command_output \
+  1115:		zxfer_capture_runtime_artifact_command_output \
 

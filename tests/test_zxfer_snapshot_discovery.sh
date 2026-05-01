@@ -16,37 +16,11 @@ create_parallel_bin() {
 	l_version_line=$2
 	cat >"$l_path" <<EOF
 #!/bin/sh
-if [ "\$1" = "--will-cite" ]; then
-	shift
-fi
 if [ "\$1" = "--version" ]; then
 	printf '%s\n' "$l_version_line"
 	exit 0
 fi
 exit 0
-EOF
-	chmod +x "$l_path"
-}
-
-create_functional_gnu_parallel_bin() {
-	l_path=$1
-	l_version_line=$2
-	cat >"$l_path" <<EOF
-#!/bin/sh
-if [ "\$1" = "--will-cite" ]; then
-	shift
-fi
-if [ "\$1" = "--version" ]; then
-	printf '%s\n' "$l_version_line"
-	exit 0
-fi
-if [ "\$1" = "-j" ] && [ "\$2" = "1" ] && [ "\$3" = "--line-buffer" ] && [ "\$4" = "--" ]; then
-	while IFS= read -r l_line || [ -n "\$l_line" ]; do
-		printf '%s\n' "\$l_line"
-	done
-	exit 0
-fi
-exit 1
 EOF
 	chmod +x "$l_path"
 }
@@ -97,11 +71,11 @@ EOF
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_get_list"
-	GNU_PARALLEL_BIN="$TEST_TMPDIR/gnu_parallel"
-	NONGNU_PARALLEL_BIN="$TEST_TMPDIR/non_gnu_parallel"
+	PARALLEL_BIN="$TEST_TMPDIR/parallel"
+	ALT_PARALLEL_BIN="$TEST_TMPDIR/alt_parallel"
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
-	create_parallel_bin "$GNU_PARALLEL_BIN" "GNU parallel (fake)"
-	create_parallel_bin "$NONGNU_PARALLEL_BIN" "parallel from elsewhere"
+	create_parallel_bin "$PARALLEL_BIN" "parallel (fake)"
+	create_parallel_bin "$ALT_PARALLEL_BIN" "parallel from elsewhere"
 	create_fake_ssh_bin "$FAKE_SSH_BIN"
 }
 
@@ -130,7 +104,7 @@ setUp() {
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
-	g_cmd_parallel="$GNU_PARALLEL_BIN"
+	g_cmd_parallel="$PARALLEL_BIN"
 	g_origin_parallel_cmd=""
 	g_origin_parallel_cmd_host=""
 	g_cmd_ssh="$FAKE_SSH_BIN"
@@ -313,14 +287,14 @@ test_build_source_snapshot_list_cmd_reports_parallel_helper_failures_in_current_
 	generic_status=$?
 	generic_output=$(cat "$output_file")
 
-	assertEquals "Parallel source snapshot command construction should fail when GNU parallel setup fails." \
+	assertEquals "Parallel source snapshot command construction should fail when parallel setup fails." \
 		1 "$reason_status"
-	assertContains "Parallel source snapshot command construction should preserve the staged GNU parallel failure reason." \
+	assertContains "Parallel source snapshot command construction should preserve the staged parallel failure reason." \
 		"$reason_output" "parallel unavailable"
-	assertEquals "Parallel source snapshot command construction should still fail when no staged GNU parallel reason is available." \
+	assertEquals "Parallel source snapshot command construction should still fail when no staged parallel reason is available." \
 		1 "$generic_status"
-	assertContains "Parallel source snapshot command construction should emit a generic GNU parallel setup error when no staged reason exists." \
-		"$generic_output" "Failed to prepare GNU parallel source discovery."
+	assertContains "Parallel source snapshot command construction should emit a generic parallel setup error when no staged reason exists." \
+		"$generic_output" "Failed to prepare parallel source discovery."
 }
 
 test_ensure_parallel_available_for_source_jobs_requires_local_parallel() {
@@ -334,53 +308,24 @@ test_ensure_parallel_available_for_source_jobs_requires_local_parallel() {
 	)
 	status=$?
 
-	assertEquals "Parallel listing should fail fast when GNU parallel is missing locally." 1 "$status"
-	assertContains "The local-missing error should mention GNU parallel and the local host." \
-		"$output" "requires GNU parallel but it was not found in PATH on the local host"
+	assertEquals "Parallel listing should fail fast when parallel is missing locally." 1 "$status"
+	assertContains "The local-missing error should mention parallel and the local host." \
+		"$output" "requires parallel but it was not found in PATH on the local host"
 }
 
-test_ensure_parallel_available_for_source_jobs_rejects_non_gnu_parallel() {
+test_ensure_parallel_available_for_source_jobs_trusts_available_local_parallel() {
 	set +e
 	output=$(
 		(
 			g_option_j_jobs=2
-			g_cmd_parallel="$NONGNU_PARALLEL_BIN"
+			g_cmd_parallel="$ALT_PARALLEL_BIN"
 			zxfer_ensure_parallel_available_for_source_jobs
 		)
 	)
 	status=$?
 
-	assertEquals "Parallel listing should fail when the local binary is not GNU parallel." 1 "$status"
-	assertContains "The validation error should mention the non-GNU binary path." \
-		"$output" "\"$NONGNU_PARALLEL_BIN\" is not GNU parallel"
-}
-
-test_ensure_parallel_available_for_source_jobs_accepts_multiline_local_gnu_parallel_output() {
-	citation_parallel_bin="$TEST_TMPDIR/citation_gnu_parallel"
-	cat >"$citation_parallel_bin" <<'EOF'
-#!/bin/sh
-if [ "$1" = "--will-cite" ]; then
-	shift
-fi
-if [ "$1" = "--version" ]; then
-	cat <<'INNER_EOF'
-Academic tradition requires you to cite works you base your article on.
-GNU Parallel 20260122 ('Maduro').
-INNER_EOF
-	exit 0
-fi
-exit 0
-EOF
-	chmod +x "$citation_parallel_bin"
-
-	g_option_j_jobs=2
-	g_cmd_parallel="$citation_parallel_bin"
-
-	zxfer_ensure_parallel_available_for_source_jobs
-	status=$?
-
-	assertEquals "Parallel listing should accept GNU parallel even when citation text precedes the canonical banner." \
-		0 "$status"
+	assertEquals "Parallel listing should trust an available local parallel helper without version probing." 0 "$status"
+	assertEquals "Trusted local parallel setup should not print validation output." "" "$output"
 }
 
 test_ensure_parallel_available_for_source_jobs_reports_missing_remote_parallel_in_current_shell() {
@@ -417,7 +362,7 @@ test_ensure_parallel_available_for_source_jobs_returns_success_when_parallel_is_
 	zxfer_ensure_parallel_available_for_source_jobs
 	status=$?
 
-	assertEquals "Serial snapshot listing should not require GNU parallel." 0 "$status"
+	assertEquals "Serial snapshot listing should not require parallel." 0 "$status"
 	assertEquals "Serial snapshot listing should leave the remote parallel path unset." "" "$g_origin_parallel_cmd"
 }
 
@@ -426,6 +371,7 @@ test_ensure_parallel_available_for_source_jobs_skips_local_parallel_for_remote_r
 	g_cmd_parallel=""
 	g_option_O_origin_host="origin.example"
 	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_origin_parallel_cmd_host="origin.example"
 
 	zxfer_resolve_remote_required_tool() {
 		printf '%s\n' "/opt/bin/parallel"
@@ -434,7 +380,7 @@ test_ensure_parallel_available_for_source_jobs_skips_local_parallel_for_remote_r
 	zxfer_ensure_parallel_available_for_source_jobs
 	status=$?
 
-	assertEquals "Remote source-job setup should not require a local GNU parallel binary when only the origin-host branch will execute it." \
+	assertEquals "Remote source-job setup should not require a local parallel binary when only the origin-host branch will execute it." \
 		0 "$status"
 }
 
@@ -462,6 +408,8 @@ test_ensure_parallel_available_for_source_jobs_accepts_resolved_remote_parallel_
 		0 "$status"
 	assertContains "Remote source-job setup should still resolve the helper on the origin host." \
 		"$(cat "$log_file")" "resolve:origin.example"
+	assertNotContains "Remote source-job setup should not version-probe the resolved origin-host helper before publishing it." \
+		"$(cat "$log_file")" "version:"
 }
 
 test_ensure_parallel_available_for_source_jobs_reuses_cached_remote_parallel_path_for_same_host_and_path() {
@@ -489,8 +437,41 @@ test_ensure_parallel_available_for_source_jobs_reuses_cached_remote_parallel_pat
 
 	assertEquals "Remote source-job setup should succeed when it reuses a previously resolved origin-host parallel helper." \
 		0 "$status"
-	assertEquals "Remote source-job setup should skip re-resolving the helper once the same host/path is cached." \
+	assertEquals "Remote source-job setup should skip re-resolving or revalidating the helper once the same host/path is cached." \
 		"resolve:origin.example" "$(cat "$log_file")"
+}
+
+test_ensure_parallel_available_for_source_jobs_trusts_resolved_remote_parallel_without_banner_probe() {
+	set +e
+	output=$(
+		(
+			zxfer_resolve_remote_required_tool() {
+				printf '%s\n' "/opt/bin/parallel"
+			}
+			zxfer_get_remote_resolved_tool_version_output() {
+				printf '%s\n' "unexpected version probe"
+				return 42
+			}
+			g_option_j_jobs=2
+			g_option_O_origin_host="origin.example"
+			g_cmd_parallel=""
+			g_origin_parallel_cmd=""
+
+			zxfer_ensure_parallel_available_for_source_jobs
+			l_status=$?
+			printf 'kind=%s\n' "${g_zxfer_parallel_source_job_check_kind:-}"
+			printf 'cached=%s\n' "${g_origin_parallel_cmd:-}"
+			exit "$l_status"
+		)
+	)
+	status=$?
+
+	assertEquals "Remote source-job setup should trust a resolved origin-host parallel helper without probing its version banner." \
+		0 "$status"
+	assertContains "Trusted remote parallel setup should cache the resolved helper for command rendering." \
+		"$output" "cached=/opt/bin/parallel"
+	assertContains "Trusted remote parallel setup should not publish a validation failure kind." \
+		"$output" "kind="
 }
 
 test_ensure_parallel_available_for_source_jobs_preserves_remote_parallel_resolution_failures() {
@@ -520,46 +501,6 @@ test_ensure_parallel_available_for_source_jobs_preserves_remote_parallel_resolut
 		"$output" 'Failed to query dependency "parallel" on host origin.example.'
 	assertContains "Remote parallel resolution failures should classify the rejection as a probe failure." \
 		"$output" "kind=origin_probe_failed"
-}
-
-test_ensure_parallel_available_for_source_jobs_accepts_local_gnu_parallel_with_will_cite_version_probe() {
-	will_cite_parallel_bin="$TEST_TMPDIR/gnu_parallel_will_cite"
-	cat >"$will_cite_parallel_bin" <<'EOF'
-#!/bin/sh
-if [ "$1" = "--will-cite" ] && [ "$2" = "--version" ]; then
-	printf '%s\n' "GNU parallel (fake)"
-	exit 0
-fi
-if [ "$1" = "--version" ]; then
-	printf '%s\n' "Academic tradition requires you to cite works you base your article on."
-	exit 0
-fi
-exit 0
-EOF
-	chmod +x "$will_cite_parallel_bin"
-
-	g_option_j_jobs=2
-	g_cmd_parallel="$will_cite_parallel_bin"
-
-	zxfer_ensure_parallel_available_for_source_jobs
-	status=$?
-
-	assertEquals "Local source-job setup should accept GNU parallel when --will-cite returns the canonical version banner." \
-		0 "$status"
-}
-
-test_ensure_parallel_available_for_source_jobs_accepts_local_gnu_parallel_when_version_banner_is_nonstandard_but_functional_probe_matches() {
-	functional_probe_parallel_bin="$TEST_TMPDIR/gnu_parallel_functional_probe"
-	create_functional_gnu_parallel_bin "$functional_probe_parallel_bin" "parallel release 20260122"
-
-	g_option_j_jobs=2
-	g_cmd_parallel="$functional_probe_parallel_bin"
-
-	zxfer_ensure_parallel_available_for_source_jobs
-	status=$?
-
-	assertEquals "Local source-job setup should accept GNU parallel when the version banner is nonstandard but the GNU placeholder runner behaves correctly." \
-		0 "$status"
 }
 
 test_ensure_parallel_available_for_source_jobs_refreshes_remote_parallel_path_when_origin_host_changes() {
@@ -602,6 +543,8 @@ test_ensure_parallel_available_for_source_jobs_refreshes_remote_parallel_path_wh
 		"$(cat "$result_file")" "second=/usr/local/bin/parallel"
 	assertContains "Remote source-job setup should re-resolve the helper for the new origin host." \
 		"$(cat "$log_file")" "resolve:origin-b.example"
+	assertNotContains "Remote source-job setup should not validate the helper for the new origin host." \
+		"$(cat "$log_file")" "version:"
 }
 
 test_build_source_snapshot_list_cmd_fails_closed_when_local_parallel_is_unavailable() {
@@ -616,9 +559,9 @@ test_build_source_snapshot_list_cmd_fails_closed_when_local_parallel_is_unavaila
 	)
 	status=$?
 
-	assertEquals "Local -j runs should fail closed when GNU parallel is unavailable." \
+	assertEquals "Local -j runs should fail closed when parallel is unavailable." \
 		1 "$status"
-	assertContains "Local failure should explain that GNU parallel was not found." \
+	assertContains "Local failure should explain that parallel was not found." \
 		"$result" "not found in PATH on the local host"
 	assertNotContains "Local -j failures should not silently render the serial source snapshot listing." \
 		"$result" "'$g_LZFS' 'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'"
@@ -656,7 +599,7 @@ test_build_source_snapshot_list_cmd_preserves_serial_render_status() {
 
 test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 	g_option_j_jobs=2
-	g_cmd_parallel="$GNU_PARALLEL_BIN"
+	g_cmd_parallel="$PARALLEL_BIN"
 	g_option_O_origin_host=""
 
 	result=$(
@@ -667,7 +610,7 @@ test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 
 	assertContains "Local -j discovery should enumerate source datasets directly instead of using the serial snapshot list." \
 		"$result" "'$g_LZFS' 'list' '-Hr' '-t' 'filesystem,volume' '-o' 'name' '$g_initial_source'"
-	assertContains "Local -j discovery should use GNU parallel with the requested job count." \
+	assertContains "Local -j discovery should use parallel with the requested job count." \
 		"$result" "'$g_cmd_parallel' -j 2 --line-buffer"
 	assertContains "Local -j discovery should preserve the per-dataset snapshot runner." \
 		"$result" "'$g_LZFS' 'list' '-H' '-o' 'name,guid' '-s' 'creation' '-d' '1' '-t' 'snapshot' '{}'"
@@ -677,7 +620,7 @@ test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 
 test_build_source_snapshot_list_cmd_preserves_local_parallel_builder_statuses() {
 	g_option_j_jobs=2
-	g_cmd_parallel="$GNU_PARALLEL_BIN"
+	g_cmd_parallel="$PARALLEL_BIN"
 	g_option_O_origin_host=""
 
 	set +e
@@ -738,9 +681,9 @@ test_build_source_snapshot_list_cmd_preserves_local_parallel_builder_statuses() 
 		68 "$runner_status"
 	assertEquals "Local parallel source snapshot planning should not emit a partial command when runner rendering fails." \
 		"" "$runner_output"
-	assertEquals "Local parallel source snapshot planning should preserve GNU parallel shell-render failures." \
+	assertEquals "Local parallel source snapshot planning should preserve parallel shell-render failures." \
 		69 "$parallel_status"
-	assertEquals "Local parallel source snapshot planning should not emit a partial command when GNU parallel shell rendering fails." \
+	assertEquals "Local parallel source snapshot planning should not emit a partial command when parallel shell rendering fails." \
 		"" "$parallel_output"
 	assertEquals "Local parallel source snapshot planning should preserve dataset-input render failures." \
 		70 "$dataset_status"
@@ -754,6 +697,7 @@ test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_metadata
 	g_option_z_compress=1
 	g_cmd_parallel=""
 	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_origin_parallel_cmd_host="origin.example"
 	g_origin_cmd_zfs="/remote/bin/zfs"
 	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
 	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-T0' '-9'"
@@ -767,7 +711,7 @@ test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_metadata
 
 	assertContains "Remote -j discovery should stream the origin dataset inventory directly." \
 		"$result" "/remote/bin/zfs"
-	assertContains "Remote -j discovery should use GNU parallel on the origin host." \
+	assertContains "Remote -j discovery should use parallel on the origin host." \
 		"$result" "/opt/bin/parallel"
 	assertContains "Remote -j discovery should append the resolved remote metadata compressor." \
 		"$result" "/remote/bin/zstd"
@@ -1203,7 +1147,7 @@ test_write_source_snapshot_list_to_file_skips_execution_in_dry_run() {
 
 	assertNotContains "Dry-run source snapshot discovery should not invoke the background execution helper." \
 		"$(cat "$log")" "execute-background-called"
-	assertNotContains "Dry-run source snapshot discovery should not enter GNU parallel command planning." \
+	assertNotContains "Dry-run source snapshot discovery should not enter parallel command planning." \
 		"$(cat "$log")" "build-source-command-called"
 	assertContains "Dry-run source snapshot discovery should render the skipped command." \
 		"$(cat "$log")" "'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' 'tank/src'"
@@ -1480,6 +1424,43 @@ EOF
 		"status=37" "$output"
 }
 
+test_zxfer_should_use_linear_reverse_for_file_rejects_malformed_line_counts() {
+	input_file="$TEST_TMPDIR/reverse_malformed_count_input.txt"
+	malformed_awk="$TEST_TMPDIR/reverse_count_awk_malformed"
+	printf '%s\n' "tank/src@snap-a" >"$input_file"
+	cat >"$malformed_awk" <<'EOF'
+#!/bin/sh
+printf '%s\n' "not-a-number"
+EOF
+	chmod +x "$malformed_awk"
+
+	output=$(
+		(
+			g_cmd_awk=$malformed_awk
+			zxfer_should_use_linear_reverse_for_file "$input_file"
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertEquals "Malformed line-count helper output should disable the linear awk fast path." \
+		"status=1" "$output"
+}
+
+test_reverse_numbered_line_stream_reports_tempfile_allocation_failures() {
+	output=$(
+		(
+			zxfer_get_temp_file() {
+				return 44
+			}
+			printf '%s\n' "     1	tank/src@snap-a" | zxfer_reverse_numbered_line_stream
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertEquals "zxfer_reverse_numbered_line_stream should preserve temp-file allocation failures." \
+		"status=44" "$output"
+}
+
 test_reverse_numbered_line_stream_returns_failure_when_buffering_fails() {
 	output=$(
 		(
@@ -1513,6 +1494,24 @@ EOF
 	assertEquals "Reversing numbered snapshot lines should use the current-shell temp-file result instead of stdout." \
 		"tank/src@snap-b
 tank/src@snap-a" "$output"
+}
+
+test_zxfer_reverse_plain_file_lines_with_sort_reports_tempfile_allocation_failures() {
+	input_file="$TEST_TMPDIR/reverse_sort_temp_failure_input.txt"
+	printf '%s\n' "tank/src@snap-a" >"$input_file"
+
+	output=$(
+		(
+			zxfer_get_temp_file() {
+				return 45
+			}
+			zxfer_reverse_plain_file_lines_with_sort "$input_file"
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertEquals "zxfer_reverse_plain_file_lines_with_sort should preserve temp-file allocation failures." \
+		"status=45" "$output"
 }
 
 test_zxfer_reverse_plain_file_lines_with_sort_returns_failure_when_numbering_fails() {
@@ -1758,6 +1757,42 @@ test_normalize_destination_snapshot_list_treats_temp_paths_as_literal() {
 		"tank/src@a
 tank/src@b" "$(cat "$output_file")"
 	assertFalse "Normalization should not execute command substitutions embedded in temp file paths." "[ -e '$marker' ]"
+}
+
+test_normalize_destination_snapshot_list_rewrites_only_leading_destination_prefix() {
+	input_file="$TEST_TMPDIR/dest_repeated_prefix_input.txt"
+	output_file="$TEST_TMPDIR/dest_repeated_prefix_output.txt"
+	g_initial_source_had_trailing_slash=0
+	g_initial_source="tank/src"
+	{
+		printf '%s\t%s\n' "backup/dst/backup/dst/child@snap2" "222"
+		printf '%s\t%s\n' "backup/dst@snap1" "111"
+	} >"$input_file"
+
+	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+
+	expected=$(printf '%s\t%s\n%s\t%s' \
+		"tank/src/backup/dst/child@snap2" "222" \
+		"tank/src@snap1" "111")
+	assertEquals "Destination normalization should rewrite only the leading destination root prefix." \
+		"$expected" "$(cat "$output_file")"
+}
+
+test_normalize_destination_snapshot_list_does_not_rewrite_similar_dataset_prefixes() {
+	input_file="$TEST_TMPDIR/dest_similar_prefix_input.txt"
+	output_file="$TEST_TMPDIR/dest_similar_prefix_output.txt"
+	g_initial_source_had_trailing_slash=0
+	g_initial_source="tank/src"
+	cat <<'EOF' >"$input_file"
+backup/dst-old@snap1
+backup/dst@snap1
+EOF
+
+	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+
+	expected=$(printf '%s\n%s' "backup/dst-old@snap1" "tank/src@snap1")
+	assertEquals "Destination normalization should not rewrite datasets that only share a text prefix." \
+		"$expected" "$(cat "$output_file")"
 }
 
 test_set_g_recursive_source_list_logs_when_no_new_snapshots_exist() {
@@ -3707,12 +3742,12 @@ test_zxfer_check_parallel_source_jobs_in_current_shell_preserves_nested_validati
 		"$output" "kind=<>"
 }
 
-test_zxfer_check_parallel_source_jobs_in_current_shell_preserves_current_shell_fallback_reason_when_nested_validation_reuses_generic_scratch() {
+test_zxfer_check_parallel_source_jobs_in_current_shell_preserves_current_shell_reason_when_nested_validation_reuses_generic_scratch() {
 	output=$(
 		(
 			zxfer_ensure_parallel_available_for_source_jobs() {
 				# Nested POSIX shell helpers share one variable namespace, so this
-				# intentionally reuses a generic scratch name that remote-probe
+				# intentionally reuses a generic scratch name that remote-helper
 				# helpers also use in production.
 				l_capture_path="$TEST_TMPDIR/nested-remote-probe-stderr"
 				g_zxfer_parallel_source_job_check_result="nested remote validation failed"
@@ -3731,11 +3766,11 @@ test_zxfer_check_parallel_source_jobs_in_current_shell_preserves_current_shell_f
 		)
 	)
 
-	assertContains "Current-shell parallel validation should preserve the original non-GNU fallback reason even when nested helpers reuse generic scratch variable names." \
+	assertContains "Current-shell parallel validation should preserve the nested availability-check status even when nested helpers reuse generic scratch variable names." \
 		"$output" "status=1"
-	assertContains "Current-shell parallel validation should preserve the nested fallback reason directly from current-shell globals even when nested helpers reuse generic scratch variable names." \
+	assertContains "Current-shell parallel validation should preserve the nested failure reason directly from current-shell globals even when nested helpers reuse generic scratch variable names." \
 		"$output" "result=<nested remote validation failed"
-	assertContains "Current-shell parallel validation should preserve the machine-readable fallback kind from the nested availability check." \
+	assertContains "Current-shell parallel validation should preserve the machine-readable reason kind from the nested availability check." \
 		"$output" "kind=<origin_probe_failed>"
 }
 
@@ -3779,44 +3814,6 @@ test_zxfer_check_parallel_source_jobs_in_current_shell_avoids_tempfile_allocatio
 		"$output" "cleanup=<>"
 }
 
-test_zxfer_version_output_reports_gnu_parallel_normalizes_case_and_whitespace() {
-	if ! zxfer_version_output_reports_gnu_parallel "$(printf '%s\n%s\t%s\n' "Citation text" "GNU" "Parallel 20260122")"; then
-		fail "GNU parallel version detection should normalize case and whitespace before matching the signature."
-	fi
-}
-
-test_zxfer_version_output_reports_gnu_parallel_rejects_non_gnu_output() {
-	if zxfer_version_output_reports_gnu_parallel "$(printf '%s\n' "parallel release 20260122")"; then
-		fail "GNU parallel version detection should reject non-GNU version banners after normalization."
-	fi
-}
-
-test_zxfer_local_parallel_functional_probe_reports_gnu_preserves_probe_status() {
-	probe_helper="$TEST_TMPDIR/non_gnu_parallel_status.sh"
-	cat >"$probe_helper" <<'EOF'
-#!/bin/sh
-exit 74
-EOF
-	chmod 755 "$probe_helper"
-
-	set +e
-	zxfer_local_parallel_functional_probe_reports_gnu "$probe_helper" >/dev/null 2>&1
-	status=$?
-
-	assertEquals "GNU parallel functional probing should preserve the exact helper exit status." \
-		74 "$status"
-}
-
-test_zxfer_local_parallel_functional_probe_reports_gnu_rejects_blank_paths() {
-	set +e
-	zxfer_local_parallel_functional_probe_reports_gnu "" >/dev/null 2>&1
-	status=$?
-	set -e
-
-	assertEquals "GNU parallel functional probing should fail closed when no helper path is provided." \
-		1 "$status"
-}
-
 test_build_source_snapshot_list_cmd_preserves_remote_parallel_resolution_from_current_shell() {
 	output=$(
 		(
@@ -3847,7 +3844,7 @@ test_build_source_snapshot_list_cmd_preserves_remote_parallel_resolution_from_cu
 		"$output" "/opt/bin/parallel -j 4 --line-buffer"
 	assertContains "Remote source snapshot planning should preserve the direct remote dataset enumeration command." \
 		"$output" "/remote/bin/zfs list -Hr -t filesystem,volume -o name tank/src"
-	assertContains "Remote source snapshot planning should preserve the resolved origin-host GNU parallel helper after command rendering." \
+	assertContains "Remote source snapshot planning should preserve the resolved origin-host parallel helper after command rendering." \
 		"$output" "resolved=/opt/bin/parallel"
 }
 
@@ -4015,6 +4012,19 @@ test_capture_recursive_dataset_list_from_snapshot_file_reports_line_capture_fail
 		1 "$status"
 	assertEquals "Recursive dataset-list capture from snapshot files should not emit output for recursive line-capture failures." \
 		"" "$output"
+}
+
+test_write_recursive_dataset_list_result_to_file_writes_empty_results() {
+	output_file="$TEST_TMPDIR/recursive_dataset_list_empty.txt"
+	g_zxfer_recursive_dataset_list_result=""
+
+	zxfer_write_recursive_dataset_list_result_to_file "$output_file"
+	status=$?
+
+	assertEquals "Recursive dataset-list result writes should succeed for an empty list." \
+		0 "$status"
+	assertEquals "Recursive dataset-list result writes should create an empty file for an empty list." \
+		"" "$(cat "$output_file")"
 }
 
 test_filter_recursive_dataset_list_with_excludes_passthrough_without_patterns_in_current_shell() {
@@ -4217,6 +4227,45 @@ test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_alr
 		1 "$status"
 	assertContains "Already-changed dataset staging failures should report the recursive identity-validation context." \
 		"$output" "Failed to stage already-changed recursive dataset list for snapshot identity validation."
+}
+
+test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_empty_already_changed_stage_failures() {
+	source_tmp="$TEST_TMPDIR/refine_empty_already_changed_stage_source.txt"
+	dest_tmp="$TEST_TMPDIR/refine_empty_already_changed_stage_dest.txt"
+	printf '%s\n' "tank/src@same" >"$source_tmp"
+	printf '%s\n' "tank/src@same" >"$dest_tmp"
+	g_recursive_source_list=""
+	g_recursive_destination_extra_dataset_list=""
+
+	set +e
+	output=$(
+		(
+			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
+				g_zxfer_recursive_dataset_list_result="tank/src"
+				return 0
+			}
+			zxfer_write_recursive_dataset_list_result_to_file() {
+				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
+			}
+			zxfer_write_runtime_artifact_file() {
+				return 42
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				printf 'status=%s\n' "$2"
+				exit 1
+			}
+			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
+		)
+	)
+	status=$?
+
+	assertEquals "Lazy identity refinement should fail closed when staging an empty already-changed dataset list fails." \
+		1 "$status"
+	assertContains "Empty already-changed dataset staging failures should report the recursive identity-validation context." \
+		"$output" "Failed to stage empty already-changed recursive dataset list for snapshot identity validation."
+	assertContains "Empty already-changed dataset staging failures should preserve the runtime artifact write status." \
+		"$output" "status=42"
 }
 
 test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_candidate_dataset_load_failures_when_filtering() {

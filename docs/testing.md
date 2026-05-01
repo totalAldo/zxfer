@@ -713,10 +713,12 @@ and target (`-T`) remote startup paths so receive-side helper resolution is
 exercised as well.
 
 The backup-metadata integration cases are also current-format only. Positive
-`-k` / `-e` restore scenarios first create the exact keyed metadata file
-through live zxfer runs, then mutate that file for security or corruption
-checks. Legacy mountpoint-local `.zxfer_backup_info.*` files are covered only
-as fail-closed negative tests.
+`-k` / `-e` restore scenarios first create the current chunked lossless-keyed
+v2 metadata path through live zxfer runs, then mutate that file for security or
+corruption checks. The unit suites cover read-only restore fallback for the
+retired checksum-keyed v2 filename. Legacy mountpoint-local
+`.zxfer_backup_info.*`, v1, and older layouts are covered only as fail-closed
+negative tests.
 
 The OmniOS unit and integration lanes still do not use the exact same shell
 entry point. The OmniOS integration flow runs the harness under
@@ -744,13 +746,12 @@ enough to enforce no-regression coverage policy in CI and on local developer
 machines.
 
 The macOS GitHub-hosted runner is currently used for `/bin/sh` and BSD-userland
-unit coverage only. It is not a required hosted ZFS integration gate because
-Darwin/OpenZFS property behavior remains less deterministic than
-FreeBSD/Linux for some inherited child-dataset property assertions.
-The macOS shunit2 job intentionally does not install ZFS; it is meant to catch
-shell and userland portability regressions in the mock-heavy unit suites.
-Local macOS hosts can still use `tests/run_vm_matrix.sh` through QEMU, but that
-is a local-orchestration path rather than a hosted macOS integration gate.
+unit coverage only. The macOS shunit2 job intentionally does not install ZFS;
+it is meant to catch shell and userland portability regressions in the
+mock-heavy unit suites, not to act as a hosted OpenZFS integration gate. Local
+macOS hosts can still use `tests/run_vm_matrix.sh` through QEMU, or a
+disposable OpenZFS-on-macOS host can run the integration harness manually when
+native macOS ZFS behavior needs end-to-end validation.
 On Apple Silicon, that local path now prefers official `arm64` Ubuntu and
 FreeBSD guests for `smoke` and `local`, while OmniOS remains an `amd64`
 best-effort lane.

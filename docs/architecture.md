@@ -183,9 +183,9 @@ ownership check.
    Parallel send/receive scheduling also serializes conflicting
    ancestor/descendant destination datasets on the same target before it
    spends another background slot.
-9. Optionally transfer or restore properties, including exact-keyed backup
-   metadata reads and deferred post-seed reconciliation for datasets that were
-   seeded into empty destinations.
+9. Optionally transfer or restore properties, including exact-keyed v2 backup
+   metadata reads, source-root-relative restore rows, and deferred post-seed
+   reconciliation for datasets that were seeded into empty destinations.
 10. Repeat when `-Y` is enabled.
 11. Emit structured failure reporting on non-zero exit.
 
@@ -406,23 +406,25 @@ an empty destination.
 
 ```mermaid
 flowchart LR
-    A["Enter zxfer_transfer_properties()"] --> B["Collect live source properties and validate create metadata"]
+    A["Enter zxfer_transfer_properties()"] --> B["Collect raw live source properties and validate source create metadata"]
     B --> C{"-e restore mode?"}
-    C -- "yes" --> D["Replace the effective source property view with the exact backup metadata row"]
-    C -- "no" --> E["Use live effective properties plus overrides, ignore lists, and unsupported-property filters"]
-    D --> F["Derive creation and override property sets"]
+    C -- "yes" --> D["Replace the effective source property view with the exact v2 relative backup row"]
+    C -- "no" --> E["Keep the live effective source property view"]
+    D --> F["Backfill required creation-time properties"]
     E --> F
-    F --> G{"Did zxfer create the destination during this property pass?"}
-    G -- "yes" --> H["Return after creation and buffer -k metadata when enabled"]
-    G -- "no" --> I["Collect destination properties, diff them, and apply zfs set or inherit changes"]
-    I --> J{"-k backup mode?"}
-    J -- "no" --> K["Property phase complete"]
-    J -- "yes" --> L["Buffer source property metadata row in memory"]
-    H --> M{"Later, did a seed receive require post-seed reconcile?"}
-    L --> M
-    M -- "yes" --> N["After send jobs finish, orchestration reruns property reconcile with backup capture disabled, then finalizes the deferred row"]
-    M -- "no" --> K
-    N --> K
+    F --> G["Derive creation and override property sets"]
+    G --> H["Apply readonly, -I ignore, dataset-type -U filters, and parent-matching inheritance for inheritable child overrides"]
+    H --> I{"Did zxfer create the destination during this property pass?"}
+    I -- "yes" --> J["Return after creation and buffer the raw live source -k metadata row when enabled"]
+    I -- "no" --> K["Collect destination properties, diff them, adjust child inheritance, and apply zfs set or inherit changes"]
+    K --> L{"-k backup mode?"}
+    L -- "no" --> M["Property phase complete"]
+    L -- "yes" --> N["Buffer the raw live source property metadata row in memory"]
+    J --> O{"Later, did a seed receive require post-seed reconcile?"}
+    N --> O
+    O -- "yes" --> P["After send jobs finish, orchestration reruns property reconcile with backup capture disabled, then finalizes the deferred row"]
+    O -- "no" --> M
+    P --> M
 ```
 
 ## Design Priorities

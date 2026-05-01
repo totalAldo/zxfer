@@ -12,7 +12,7 @@ For an option-by-option CLI cookbook that covers the full current flag set, see
 - [local-recursive-replication.sh](./local-recursive-replication.sh): local recursive send/receive
 - [remote-pull-origin.sh](./remote-pull-origin.sh): pull from a remote origin with `-O`
 - [remote-push-target-compressed.sh](./remote-push-target-compressed.sh): push to a remote target with `-T -z`
-- [property-backup-restore.sh](./property-backup-restore.sh): capture and later restore property metadata with `-k` and `-e`
+- [property-backup-restore.sh](./property-backup-restore.sh): capture and later restore current-format v2 property metadata with `-k` and `-e`
 - [error-log-email-notify.sh](./error-log-email-notify.sh): mirror structured failure reports into `ZXFER_ERROR_LOG` and email the current failure report captured from stderr with `mailx`, BSD `mail`, or `sendmail`
 
 ## Choose A Starting Template

@@ -34,7 +34,6 @@ setUp() {
 	g_source_operating_system=""
 	g_test_base_readonly_properties="readonly,mountpoint"
 	g_test_freebsd_readonly_properties="aclmode"
-	g_test_solexp_readonly_properties="jailed"
 	g_RZFS="/sbin/zfs"
 	g_LZFS="/sbin/zfs"
 	g_actual_dest="backup/dst"
@@ -68,7 +67,6 @@ setUp() {
 	g_zxfer_profile_parent_destination_property_reads=0
 	g_initial_source="tank/src"
 	g_initial_source_had_trailing_slash=0
-	g_unsupported_properties=""
 	g_zxfer_unsupported_filesystem_properties=""
 	g_zxfer_unsupported_volume_properties=""
 	g_zxfer_property_stage_file_read_result=""
@@ -77,9 +75,6 @@ setUp() {
 	}
 	zxfer_get_freebsd_readonly_properties() {
 		printf '%s\n' "$g_test_freebsd_readonly_properties"
-	}
-	zxfer_get_solexp_readonly_properties() {
-		printf '%s\n' "$g_test_solexp_readonly_properties"
 	}
 	zxfer_reset_failure_context "unit"
 }
@@ -91,16 +86,15 @@ test_readonly_property_constant_getters_return_source_constants() {
 			. "$TESTS_DIR/../src/zxfer_property_reconcile.sh"
 			printf 'base=%s\n' "$(zxfer_get_base_readonly_properties)"
 			printf 'freebsd=%s\n' "$(zxfer_get_freebsd_readonly_properties)"
-			printf 'solexp=%s\n' "$(zxfer_get_solexp_readonly_properties)"
-		)
+		) 2>&1
 	)
 
 	assertContains "The base readonly getter should return the source-time constant list." \
 		"$result" "base=type,creation,used,available"
 	assertContains "The FreeBSD readonly getter should return the platform constant list." \
 		"$result" "freebsd=aclmode,aclinherit,devices,nbmand,shareiscsi,vscan,xattr,dnodesize"
-	assertContains "The Solaris Express readonly getter should return the compatibility constant list." \
-		"$result" "solexp=jailed,aclmode,shareiscsi"
+	assertNotContains "The readonly profile stack should no longer expose the retired Solaris Express compatibility list." \
+		"$result" "solexp="
 }
 
 test_get_effective_readonly_properties_removes_mountpoint_during_migration() {
@@ -150,7 +144,7 @@ test_get_effective_readonly_properties_uses_freebsd_list_when_base_is_empty() {
 		"aclmode,aclinherit,devices,nbmand,shareiscsi,vscan,xattr,dnodesize" "$result"
 }
 
-test_get_effective_readonly_properties_uses_solexp_list_when_base_is_empty() {
+test_get_effective_readonly_properties_uses_base_list_for_sunos_without_platform_delta_when_base_is_empty() {
 	result=$(
 		(
 			g_destination_operating_system="SunOS"
@@ -164,8 +158,8 @@ test_get_effective_readonly_properties_uses_solexp_list_when_base_is_empty() {
 		)
 	)
 
-	assertEquals "An empty base list should still allow the Solaris Express compatibility list to become the full effective list." \
-		"jailed,aclmode,shareiscsi" "$result"
+	assertEquals "SunOS destinations should not add an extra readonly-property delta on the OpenZFS 2+ floor." \
+		"" "$result"
 }
 
 test_zxfer_property_reconcile_state_helpers_cover_current_shell_paths() {
@@ -173,7 +167,6 @@ test_zxfer_property_reconcile_state_helpers_cover_current_shell_paths() {
 	stage_read_output_file="$TEST_TMPDIR/property_reconcile_stage_read.out"
 	printf '%s\n' "compression=lz4=local" >"$stage_file"
 
-	g_unsupported_properties="compression"
 	g_zxfer_unsupported_filesystem_properties="compression"
 	g_zxfer_unsupported_volume_properties="volblocksize"
 	zxfer_reset_property_runtime_state
@@ -193,8 +186,6 @@ test_zxfer_property_reconcile_state_helpers_cover_current_shell_paths() {
 	zxfer_read_property_reconcile_stage_file "$stage_file" >"$stage_read_output_file"
 	read_output=$(cat "$stage_read_output_file")
 
-	assertEquals "Resetting property runtime state should clear the merged unsupported-property list." \
-		"" "$g_unsupported_properties"
 	assertEquals "Resetting property runtime state should clear the filesystem unsupported-property cache." \
 		"" "$g_zxfer_unsupported_filesystem_properties"
 	assertEquals "Resetting property runtime state should clear the volume unsupported-property cache." \
@@ -257,10 +248,10 @@ test_get_effective_readonly_properties_appends_platform_lists_when_base_is_nonem
 		)
 	)
 
-	assertContains "Effective readonly-property resolution should append the FreeBSD compatibility list to the base list when the base list is already populated." \
+	assertContains "Effective readonly-property resolution should append the FreeBSD platform list to the base list when the base list is already populated." \
 		"$freebsd_result" "readonly,mountpoint,aclmode"
-	assertContains "Effective readonly-property resolution should append the Solaris Express compatibility list to the base list when the base list is already populated." \
-		"$sunos_result" "readonly,mountpoint,jailed"
+	assertEquals "SunOS destinations should use the shared OpenZFS 2+ readonly-property list when the base list is populated." \
+		"readonly,mountpoint" "$sunos_result"
 }
 
 test_unsupported_property_probe_helpers_cover_current_shell_paths() {
@@ -283,14 +274,14 @@ test_unsupported_property_probe_helpers_cover_current_shell_paths() {
 			zxfer_append_unsupported_property_for_dataset_type filesystem "compression"
 			zxfer_append_unsupported_property_for_dataset_type filesystem "compression"
 			zxfer_append_unsupported_property_for_dataset_type volume "volblocksize"
-			zxfer_select_unsupported_properties_for_dataset_type filesystem
+			selected=$(zxfer_select_unsupported_properties_for_dataset_type filesystem)
 			printf 'destination=%s\n' "$probe_destination"
 			printf 'dataset=%s\n' "$probe_dataset"
 			printf 'type=%s\n' "$probe_type"
 			printf 'filesystem=%s\n' "$g_zxfer_unsupported_filesystem_properties"
 			printf 'volume=%s\n' "$g_zxfer_unsupported_volume_properties"
-			printf 'selected=%s\n' "$g_unsupported_properties"
-		)
+			printf 'selected=%s\n' "$selected"
+		) 2>&1
 	)
 
 	assertContains "Unsupported-property probe destination mapping should preserve the source-relative destination path for descendants." \
@@ -327,6 +318,16 @@ test_select_mc_trims_remaining_filter_list_after_match_in_current_shell() {
 		"compression=lz4=local,quota=1G=local" "$g_zxfer_new_mc_pvs"
 }
 
+test_select_mc_trims_remaining_filter_list_with_literal_property_names() {
+	l_oldifs=$IFS
+	IFS=","
+	zxfer_select_mc "user:a.b=one=local,user:axb=two=local,user:a.b=three=local" "user:a.b,user:axb"
+	IFS=$l_oldifs
+
+	assertEquals "Must-create selection should not treat property names as regular expressions while trimming matched filters." \
+		"user:a.b=one=local,user:axb=two=local" "$g_zxfer_new_mc_pvs"
+}
+
 test_remove_properties_preserves_override_entries() {
 	l_oldifs=$IFS
 	IFS=","
@@ -337,18 +338,53 @@ test_remove_properties_preserves_override_entries() {
 		"readonly=off=override,compression=lz4=local" "$g_zxfer_new_rmv_pvs"
 }
 
+test_remove_properties_trims_remaining_filter_list_with_literal_property_names() {
+	l_oldifs=$IFS
+	IFS=","
+	zxfer_remove_properties "user:a.b=one=local,user:axb=two=local,compression=lz4=local" "user:a.b,user:axb"
+	IFS=$l_oldifs
+
+	assertEquals "Property removal should not treat property names as regular expressions while trimming matched filters." \
+		"compression=lz4=local" "$g_zxfer_new_rmv_pvs"
+}
+
 test_run_zfs_create_with_properties_executes_live_create() {
 	result=$(
 		(
 			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' "$*"
 			}
-			zxfer_run_zfs_create_with_properties yes volume 10G "compression=lz4,atime=off" "backup/dst"
+			zxfer_run_zfs_create_with_properties no volume 10G "compression=lz4,atime=off" "backup/dst"
 		)
 	)
 
 	assertEquals "Live zfs create should pass each argument separately." \
-		"create -p -V 10G -o compression=lz4 -o atime=off backup/dst" "$result"
+		"create -V 10G -o compression=lz4 -o atime=off backup/dst" "$result"
+}
+
+test_run_zfs_create_with_properties_allows_parent_create_without_properties() {
+	result=$(
+		(
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "$*"
+			}
+			zxfer_run_zfs_create_with_properties yes filesystem "" "" "backup/dst"
+		)
+	)
+
+	assertEquals "Parent hierarchy creates without properties should still use -p." \
+		"create -p backup/dst" "$result"
+}
+
+test_run_zfs_create_with_properties_rejects_parent_create_with_properties() {
+	set +e
+	output=$(zxfer_run_zfs_create_with_properties yes filesystem "" "compression=lz4" "backup/dst" 2>&1)
+	status=$?
+	set -e
+
+	assertEquals "Parent hierarchy creates must fail closed instead of rendering zfs create -p with -o properties." \
+		1 "$status"
+	assertEquals "Rejected unsafe parent-property creates should not render a partial command." "" "$output"
 }
 
 test_run_zfs_create_with_properties_renders_dry_run_command() {
@@ -416,6 +452,20 @@ test_get_normalized_dataset_properties_escapes_delimiter_heavy_values() {
 
 	assertEquals "Normalized property lookup should escape delimiter-heavy values in the internal serialized form." \
 		"user:note=value%2C%3D%3B mix=local" "$result"
+}
+
+test_get_normalized_dataset_properties_escapes_line_feed_values() {
+	result=$(
+		(
+			zxfer_run_zfs_cmd_for_spec() {
+				printf 'user:note\tline1\nline2\tlocal\n'
+			}
+			zxfer_get_normalized_dataset_properties "tank/src" "/sbin/zfs"
+		)
+	)
+
+	assertEquals "Normalized property lookup should encode embedded line feeds instead of dropping the property." \
+		"user:note=line1%0Aline2=local" "$result"
 }
 
 test_get_normalized_dataset_properties_tracks_profile_counters_by_lookup_side() {
@@ -945,6 +995,29 @@ test_zxfer_invalidate_destination_property_cache_removes_encoded_cache_entries()
 		"[ -e \"$l_normalized_cache_path\" ]"
 	assertFalse "Destination cache invalidation should remove encoded required-property cache entries." \
 		"[ -e \"$l_required_cache_path\" ]"
+}
+
+test_zxfer_invalidate_destination_property_mutation_cache_resets_descendant_destination_entries() {
+	l_parent_dataset="backup/dst"
+	l_child_dataset="backup/dst/child"
+
+	zxfer_property_cache_dataset_path normalized destination "$l_child_dataset" >/dev/null
+	l_child_normalized_cache_path=$g_zxfer_property_cache_path
+	zxfer_property_cache_property_path required destination "$l_child_dataset" "casesensitivity" >/dev/null
+	l_child_required_cache_path=$g_zxfer_property_cache_path
+	mkdir -p "${l_child_normalized_cache_path%/*}" "${l_child_required_cache_path%/*}"
+	printf '%s\n' "compression=gzip=inherited" >"$l_child_normalized_cache_path"
+	printf '%s\n' "casesensitivity=sensitive=local" >"$l_child_required_cache_path"
+	g_zxfer_destination_property_tree_prefetch_state=1
+
+	zxfer_invalidate_destination_property_mutation_cache "$l_parent_dataset"
+
+	assertFalse "Destination property mutation invalidation should remove cached descendant normalized properties." \
+		"[ -e \"$l_child_normalized_cache_path\" ]"
+	assertFalse "Destination property mutation invalidation should remove cached descendant required-property probes." \
+		"[ -e \"$l_child_required_cache_path\" ]"
+	assertEquals "Destination property mutation invalidation should reset recursive destination prefetch state." \
+		0 "${g_zxfer_destination_property_tree_prefetch_state:-0}"
 }
 
 test_zxfer_reset_property_iteration_caches_removes_cache_dir_and_resets_state() {
@@ -2188,6 +2261,14 @@ test_force_readonly_off_handles_empty_and_rewrites_property() {
 		"$(zxfer_force_readonly_off "readonly=on=local,compression=lz4=local")"
 }
 
+test_force_readonly_off_rewrites_only_readonly_property_entries() {
+	input="user:note=readonly=on=local,readonly=on=local,user:other=prefix-readonly=on=local,readonly=on"
+	expected="user:note=readonly=on=local,readonly=off=local,user:other=prefix-readonly=on=local,readonly=off"
+
+	assertEquals "Writable-mode forcing should not rewrite user-property values that merely contain readonly=on." \
+		"$expected" "$(zxfer_force_readonly_off "$input")"
+}
+
 test_collect_source_props_uses_backup_restore_and_force_writable() {
 	output_file="$TEST_TMPDIR/collect_source_restore.out"
 
@@ -2196,8 +2277,10 @@ test_collect_source_props_uses_backup_restore_and_force_writable() {
 			printf '%s\n' "compression=lz4=local,readonly=on=local"
 		}
 		g_option_e_restore_property_mode=1
+		ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
+		ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
 		g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
-			"tank/src,backup/dst,readonly=on=local,compression=lz4=local")
+			"$(zxfer_test_backup_metadata_row "." "readonly=on=local,compression=lz4=local")")
 		zxfer_collect_source_props "tank/src" "backup/dst" 1 ""
 		printf 'raw=%s\n' "$g_zxfer_source_pvs_raw" >"$output_file"
 		printf 'effective=%s\n' "$g_zxfer_source_pvs_effective" >>"$output_file"
@@ -2222,9 +2305,10 @@ test_collect_source_props_restore_mode_requires_exact_destination_match() {
 				exit 2
 			}
 			g_option_e_restore_property_mode=1
+			ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
+			ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/other"
 			g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
-				"tank/src,backup/other,compression=off=local" \
-				"backup/other,tank/src,compression=off=local")
+				"$(zxfer_test_backup_metadata_row "." "compression=off=local")")
 			zxfer_collect_source_props "tank/src" "backup/dst" 0 ""
 		)
 	)
@@ -2298,9 +2382,9 @@ test_collect_source_props_restore_mode_requires_backup_metadata_header_first() {
 			g_restored_backup_file_contents=$(printf '%s\n%s\n%s\n%s\n%s\n' \
 				"#legacy comment" \
 				"#zxfer property backup file" \
-				"#format_version:1" \
+				"#format_version:2" \
 				"#version:test-version" \
-				"tank/src,backup/dst,compression=off=local")
+				"$(zxfer_test_backup_metadata_row "." "compression=off=local")")
 			zxfer_collect_source_props "tank/src" "backup/dst" 0 ""
 		)
 	)
@@ -2328,7 +2412,7 @@ test_collect_source_props_restore_mode_rejects_unknown_backup_metadata_format_ve
 				"#zxfer property backup file" \
 				"#format_version:999" \
 				"#version:test-version" \
-				"tank/src,backup/dst,compression=off=local")
+				"$(zxfer_test_backup_metadata_row "." "compression=off=local")")
 			zxfer_collect_source_props "tank/src" "backup/dst" 0 ""
 		)
 	)
@@ -2337,7 +2421,7 @@ test_collect_source_props_restore_mode_rejects_unknown_backup_metadata_format_ve
 	assertEquals "Restore-mode source collection should fail closed on unsupported backup metadata schema versions." \
 		2 "$status"
 	assertContains "Unknown-format restore failures should identify the expected schema marker." \
-		"$output" "Restored properties for the filesystem tank/src and destination backup/dst do not declare supported zxfer backup metadata format version #format_version:1"
+		"$output" "Restored properties for the filesystem tank/src and destination backup/dst do not declare supported zxfer backup metadata format version #format_version:2"
 }
 
 test_collect_source_props_propagates_normalized_property_lookup_failures() {
@@ -2533,15 +2617,17 @@ test_collect_source_props_rejects_ambiguous_restore_entries_for_exact_pair() {
 				exit 2
 			}
 			g_option_e_restore_property_mode=1
+			ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
+			ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
 			g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
-				"tank/src,backup/dst,compression=lz4=local" \
-				"tank/src,backup/dst,compression=off=local")
+				"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
+				"$(zxfer_test_backup_metadata_row "." "compression=off=local")")
 			zxfer_collect_source_props "tank/src" "backup/dst" 0 ""
 		)
 	)
 	status=$?
 
-	assertEquals "Restore-mode source collection should reject duplicate exact source/destination backup rows." \
+	assertEquals "Restore-mode source collection should reject duplicate v2 relative backup rows." \
 		2 "$status"
 	assertContains "Ambiguous restore failures should identify both the source and destination datasets." \
 		"$output" "Multiple restored property entries matched filesystem tank/src and destination backup/dst"
@@ -2555,10 +2641,12 @@ test_collect_source_props_restore_mode_matches_exact_awkward_dataset_tails() {
 			printf '%s\n' "compression=off=local"
 		}
 		g_option_e_restore_property_mode=1
+		ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
+		ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
 		g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
-			"tank/src/child.tail-010,backup/dst,user:note=value%2Cwith%2Ccommas=local" \
-			"tank/src/child.tail-01,backup/dst,user:note=value%3Dwith%3Dequals%3Band%3Bsemicolon=local")
-		zxfer_collect_source_props "tank/src/child.tail-01" "backup/dst" 0 ""
+			"$(zxfer_test_backup_metadata_row "child.tail-010" "user:note=value%2Cwith%2Ccommas=local")" \
+			"$(zxfer_test_backup_metadata_row "child.tail-01" "user:note=value%3Dwith%3Dequals%3Band%3Bsemicolon=local")")
+		zxfer_collect_source_props "tank/src/child.tail-01" "backup/dst/child.tail-01" 0 ""
 		printf '%s\n' "$g_zxfer_source_pvs_effective" >"$output_file"
 	)
 
@@ -2571,9 +2659,13 @@ test_collect_source_props_restore_mode_uses_exact_backup_entry_in_current_shell(
 		printf '%s\n' "compression=lz4=local"
 	}
 	g_option_e_restore_property_mode=1
+	ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
+	ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
 	g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
-		"tank/src,backup/dst,compression=off=local" \
-		"tank/src,backup/other,compression=on=local")
+		"$(zxfer_test_backup_metadata_row "." "compression=off=local")" \
+		"$(zxfer_test_backup_metadata_row "other" "compression=on=local")")
+	unset ZXFER_TEST_BACKUP_SOURCE_ROOT
+	unset ZXFER_TEST_BACKUP_DESTINATION_ROOT
 
 	# shellcheck disable=SC2218
 	zxfer_collect_source_props "tank/src" "backup/dst" 0 ""
@@ -2587,7 +2679,7 @@ test_collect_source_props_restore_mode_uses_exact_backup_entry_in_current_shell(
 
 	assertEquals "Restore-mode source collection should keep the live source property list as the raw property set." \
 		"compression=lz4=local" "$raw_result"
-	assertEquals "Restore-mode source collection should extract the exact source/destination backup row into the effective property set." \
+	assertEquals "Restore-mode source collection should extract the v2 relative backup row into the effective property set." \
 		"compression=off=local" "$effective_result"
 }
 
@@ -2613,8 +2705,8 @@ test_validate_override_properties_rejects_missing_source_property() {
 
 	assertEquals "Override validation should fail when -o references a property absent from the source set." \
 		"1" "$status"
-	assertContains "Override validation failures should preserve the current usage-error message." \
-		"$output" "Invalid option property"
+	assertContains "Override validation failures should identify missing source properties separately from malformed -o syntax." \
+		"$output" "Missing source property for -o override: quota."
 }
 
 test_validate_override_properties_accepts_escaped_commas_in_current_shell() {
@@ -2651,8 +2743,68 @@ test_derive_override_lists_preserves_override_only_mode_order() {
 
 	assertEquals "Override-only derivation should emit the requested override list in option order." \
 		"compression=lz4=override,quota=1G=override" "$(sed -n '1p' "$output_file")"
-	assertEquals "Override-only derivation should leave the creation-property list empty." \
-		"" "$(sed -n '2p' "$output_file")"
+	assertEquals "Override-only derivation should use the requested override list as the missing-dataset creation plan." \
+		"compression=lz4=override,quota=1G=override" "$(sed -n '2p' "$output_file")"
+}
+
+test_derive_override_lists_preserves_required_create_props_when_transfer_all_disabled() {
+	output_file="$TEST_TMPDIR/derive_override_required_create.out"
+
+	zxfer_derive_override_lists \
+		"compression=off=local,casesensitivity=sensitive=local,normalization=formD=local,utf8only=on=local,quota=1G=local" \
+		"compression=lz4" \
+		"0" \
+		"filesystem" >"$output_file"
+
+	assertEquals "Override-only derivation should preserve requested overrides and add required create properties to the apply list." \
+		"compression=lz4=override,casesensitivity=sensitive=local,normalization=formD=local,utf8only=on=local" "$(sed -n '1p' "$output_file")"
+	assertEquals "Override-only derivation should keep explicit overrides plus source must-create properties for missing-dataset creation." \
+		"compression=lz4=override,casesensitivity=sensitive=local,normalization=formD=local,utf8only=on=local" "$(sed -n '2p' "$output_file")"
+}
+
+test_derive_override_lists_uses_required_create_override_for_creation() {
+	output_file="$TEST_TMPDIR/derive_override_required_create_override.out"
+
+	zxfer_derive_override_lists \
+		"casesensitivity=sensitive=local,compression=off=local" \
+		"casesensitivity=insensitive" \
+		"0" \
+		"filesystem" >"$output_file"
+
+	assertEquals "Override-only derivation should keep the user override in the apply list." \
+		"casesensitivity=insensitive=override" "$(sed -n '1p' "$output_file")"
+	assertEquals "Missing-dataset creation should use the override value when a required create property is explicitly overridden." \
+		"casesensitivity=insensitive=override" "$(sed -n '2p' "$output_file")"
+}
+
+test_derive_override_lists_uses_explicit_override_for_inherited_creation() {
+	output_file="$TEST_TMPDIR/derive_override_inherited_create_override.out"
+
+	zxfer_derive_override_lists \
+		"compression=off=local,atime=on=inherited" \
+		"atime=off" \
+		"0" \
+		"filesystem" >"$output_file"
+
+	assertEquals "Override-only derivation should keep explicit inherited-property overrides in the apply list." \
+		"atime=off=override" "$(sed -n '1p' "$output_file")"
+	assertEquals "Missing-dataset creation should keep explicit overrides even when the source property was inherited." \
+		"atime=off=override" "$(sed -n '2p' "$output_file")"
+}
+
+test_derive_override_lists_uses_explicit_override_absent_from_source_for_creation() {
+	output_file="$TEST_TMPDIR/derive_override_absent_create_override.out"
+
+	zxfer_derive_override_lists \
+		"compression=off=local" \
+		"user:note=replicated" \
+		"0" \
+		"filesystem" >"$output_file"
+
+	assertEquals "Override-only derivation should keep explicit overrides even when this source dataset omits the property." \
+		"user:note=replicated=override" "$(sed -n '1p' "$output_file")"
+	assertEquals "Missing-dataset creation should still carry explicit overrides that are absent from the current source dataset." \
+		"user:note=replicated=override" "$(sed -n '2p' "$output_file")"
 }
 
 test_derive_override_lists_prefers_first_matching_override_when_transferring_all_properties() {
@@ -2666,8 +2818,8 @@ test_derive_override_lists_prefers_first_matching_override_when_transferring_all
 
 	assertEquals "Transfer-all derivation should keep source order and apply only the first matching override for a property." \
 		"compression=gzip-9=override,quota=1G=inherited,refreservation=8G=received" "$(sed -n '1p' "$output_file")"
-	assertEquals "Transfer-all derivation should still keep zvol refreservation in the creation-property set even when it is not local." \
-		"refreservation=8G=received" "$(sed -n '2p' "$output_file")"
+	assertEquals "Transfer-all derivation should keep overridden local properties and zvol refreservation in the creation-property set." \
+		"compression=gzip-9=override,refreservation=8G=received" "$(sed -n '2p' "$output_file")"
 }
 
 test_derive_override_lists_escapes_override_values_after_first_equals() {
@@ -2677,8 +2829,8 @@ test_derive_override_lists_escapes_override_values_after_first_equals() {
 
 	assertEquals "Override derivation should preserve the full override value by escaping internal delimiters after the first equals sign." \
 		"user:note=value%3Dwith%3Dequals%3Bsemi=override" "$(sed -n '1p' "$output_file")"
-	assertEquals "Override-only derivation should still leave the creation-property list empty for delimiter-heavy values." \
-		"" "$(sed -n '2p' "$output_file")"
+	assertEquals "Override-only derivation should preserve delimiter-heavy values in the creation-property list." \
+		"user:note=value%3Dwith%3Dequals%3Bsemi=override" "$(sed -n '2p' "$output_file")"
 }
 
 test_derive_override_lists_escapes_literal_commas_inside_override_values() {
@@ -2688,8 +2840,8 @@ test_derive_override_lists_escapes_literal_commas_inside_override_values() {
 
 	assertEquals "Override derivation should decode escaped commas before storing the internal encoded value." \
 		"user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi=override" "$(sed -n '1p' "$output_file")"
-	assertEquals "Override-only derivation should still leave the creation-property list empty when a value contains escaped commas." \
-		"" "$(sed -n '2p' "$output_file")"
+	assertEquals "Override-only derivation should preserve escaped-comma values in the creation-property list." \
+		"user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi=override" "$(sed -n '2p' "$output_file")"
 }
 
 test_derive_override_lists_preserves_literal_backslashes() {
@@ -2699,8 +2851,8 @@ test_derive_override_lists_preserves_literal_backslashes() {
 
 	assertEquals "Override derivation should not collapse literal backslashes that are not escaping commas." \
 		'user:path=C:\\temp\\logs=override' "$(sed -n '1p' "$output_file")"
-	assertEquals "Backslash-only values should still leave the creation-property list empty in override-only mode." \
-		"" "$(sed -n '2p' "$output_file")"
+	assertEquals "Backslash-only values should be preserved in the creation-property list in override-only mode." \
+		'user:path=C:\\temp\\logs=override' "$(sed -n '2p' "$output_file")"
 }
 
 test_derive_override_lists_skips_volume_only_properties_for_filesystems() {
@@ -2791,18 +2943,14 @@ test_strip_unsupported_properties_returns_input_when_no_unsupported_properties()
 }
 
 test_strip_unsupported_properties_honors_explicit_unsupported_list_argument() {
-	g_unsupported_properties="compression"
-
-	assertEquals "Unsupported-property stripping should honor the explicit unsupported list it is passed instead of the run-global scratch state." \
+	assertEquals "Unsupported-property stripping should honor the explicit unsupported list it is passed." \
 		"compression=lz4=local" "$(zxfer_strip_unsupported_properties "compression=lz4=local,quota=1G=local" "quota")"
 }
 
 test_remove_unsupported_properties_honors_explicit_unsupported_list_argument() {
-	g_unsupported_properties="compression"
-
 	zxfer_remove_unsupported_properties "compression=lz4=local,quota=1G=local" "quota"
 
-	assertEquals "Unsupported-property filtering should honor the explicit unsupported list it is passed instead of the run-global scratch state." \
+	assertEquals "Unsupported-property filtering should honor the explicit unsupported list it is passed." \
 		"compression=lz4=local" "$g_zxfer_only_supported_properties"
 }
 
@@ -2828,13 +2976,40 @@ test_remove_unsupported_properties_rethrows_tempfile_allocation_failures() {
 		"Error creating temporary file." "$output"
 }
 
+test_remove_unsupported_properties_preserves_nonthrowing_tempfile_status() {
+	set +e
+	output=$(
+		(
+			g_zxfer_only_supported_properties="stale"
+			g_zxfer_property_reconcile_stage_file_result="stale-stage"
+			zxfer_get_temp_file() {
+				return 37
+			}
+			zxfer_remove_unsupported_properties "compression=lz4=local,quota=1G=local" "quota"
+			l_status=$?
+			printf 'status=%s\n' "$l_status"
+			printf 'result=%s\n' "$g_zxfer_only_supported_properties"
+			printf 'stage=%s\n' "$g_zxfer_property_reconcile_stage_file_result"
+			exit "$l_status"
+		)
+	)
+	status=$?
+
+	assertEquals "Unsupported-property filtering should preserve non-throwing temp allocation statuses." \
+		37 "$status"
+	assertEquals "Unsupported-property filtering should clear stale output and stage-file allocation results on failure." \
+		"status=37
+result=
+stage=" "$output"
+}
+
 test_strip_unsupported_properties_keeps_stdout_clean_when_verbose() {
 	stdout_log="$TEST_TMPDIR/unsupported_stdout.log"
 	stderr_log="$TEST_TMPDIR/unsupported_stderr.log"
-	g_unsupported_properties="compression"
+	unsupported_properties="compression"
 	g_option_v_verbose=1
 
-	zxfer_strip_unsupported_properties "compression=lz4=local,quota=1G=local" "$g_unsupported_properties" >"$stdout_log" 2>"$stderr_log"
+	zxfer_strip_unsupported_properties "compression=lz4=local,quota=1G=local" "$unsupported_properties" >"$stdout_log" 2>"$stderr_log"
 
 	assertEquals "Unsupported-property filtering should return only supported properties on stdout." \
 		"quota=1G=local" "$(cat "$stdout_log")"
@@ -2845,10 +3020,10 @@ test_strip_unsupported_properties_keeps_stdout_clean_when_verbose() {
 test_strip_unsupported_properties_decodes_verbose_delimiter_heavy_values() {
 	stdout_log="$TEST_TMPDIR/unsupported_encoded_stdout.log"
 	stderr_log="$TEST_TMPDIR/unsupported_encoded_stderr.log"
-	g_unsupported_properties="user:note"
+	unsupported_properties="user:note"
 	g_option_v_verbose=1
 
-	zxfer_strip_unsupported_properties "user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi=local" "$g_unsupported_properties" >"$stdout_log" 2>"$stderr_log"
+	zxfer_strip_unsupported_properties "user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi=local" "$unsupported_properties" >"$stdout_log" 2>"$stderr_log"
 
 	assertEquals "Unsupported-property filtering should still remove encoded delimiter-heavy properties from stdout." \
 		"" "$(cat "$stdout_log")"
@@ -2862,7 +3037,7 @@ test_strip_unsupported_properties_reports_awk_failures() {
 	output=$(
 		(
 			g_cmd_awk="false"
-			g_unsupported_properties="compression"
+			unsupported_properties="compression"
 			zxfer_get_temp_file() {
 				g_zxfer_temp_file_result="$TEST_TMPDIR/unsupported_awk_failure.tmp"
 				: >"$g_zxfer_temp_file_result"
@@ -2872,7 +3047,7 @@ test_strip_unsupported_properties_reports_awk_failures() {
 				printf '%s\n' "$1" >&2
 				exit 1
 			}
-			zxfer_strip_unsupported_properties "compression=lz4=local" "$g_unsupported_properties"
+			zxfer_strip_unsupported_properties "compression=lz4=local" "$unsupported_properties"
 		) 2>&1
 	)
 	status=$?
@@ -2960,7 +3135,7 @@ test_calculate_unsupported_properties_uses_direct_destination_property_probes() 
 			esac
 		}
 		zxfer_calculate_unsupported_properties
-		printf '%s\n' "$g_unsupported_properties"
+		zxfer_select_unsupported_properties_for_dataset_type filesystem
 	) >"$TEST_TMPDIR/unsupported_props.out"
 
 	assertEquals "Direct destination property probes should only mark properties unsupported when the destination rejects that specific property name." \
@@ -2994,17 +3169,16 @@ test_calculate_unsupported_properties_falls_back_to_destination_pool_when_root_i
 			esac
 		}
 		zxfer_run_source_zfs_cmd() {
-			case "$*" in
-			"get -Hpo value type tank/src")
+			if [ "$*" = "get -Hpo value type tank/src" ]; then
 				printf 'filesystem\n'
-				;;
-			"get -Hpo property all tank/src")
+				return 0
+			fi
+			if [ "$*" = "get -Hpo property all tank/src" ]; then
 				printf 'compression\n'
-				;;
-			esac
+			fi
 		}
 		zxfer_calculate_unsupported_properties
-		printf '%s\n' "$g_unsupported_properties"
+		zxfer_select_unsupported_properties_for_dataset_type filesystem
 	) >"$TEST_TMPDIR/unsupported_pool_props.out"
 
 	assertEquals "Missing destination roots should fall back to the destination pool for unsupported-property probes." \
@@ -3013,7 +3187,7 @@ test_calculate_unsupported_properties_falls_back_to_destination_pool_when_root_i
 		"$(cat "$probe_log")" "get -Hpo property,value,source compression backup"
 }
 
-test_calculate_unsupported_properties_treats_blank_pool_fallback_probe_failures_as_unsupported_when_destination_is_still_queryable() {
+test_calculate_unsupported_properties_reports_blank_pool_fallback_probe_failures() {
 	g_initial_source="tank/src"
 	g_initial_source_had_trailing_slash=1
 	g_recursive_source_list="tank/src"
@@ -3021,41 +3195,42 @@ test_calculate_unsupported_properties_treats_blank_pool_fallback_probe_failures_
 	probe_log="$TEST_TMPDIR/unsupported_blank_pool_probe.log"
 	: >"$probe_log"
 
-	(
-		PROBE_LOG="$probe_log"
-		zxfer_exists_destination() {
-			printf '0\n'
-		}
-		zxfer_run_destination_zfs_cmd() {
-			printf '%s\n' "$*" >>"$PROBE_LOG"
-			if [ "$*" = "get -Hpo value type backup" ]; then
-				printf 'filesystem\n'
-				return 0
-			fi
-			if [ "$*" = "get -Hpo property,value,source compression backup" ]; then
-				return 1
-			fi
-			if [ "$*" = "get -Hpo property all backup" ]; then
-				printf 'available\n'
-			fi
-		}
-		zxfer_run_source_zfs_cmd() {
-			case "$*" in
-			"get -Hpo value type tank/src")
-				printf 'filesystem\n'
-				;;
-			"get -Hpo property all tank/src")
-				printf 'compression\n'
-				;;
-			esac
-		}
-		zxfer_calculate_unsupported_properties
-		printf '%s\n' "$g_unsupported_properties"
-	) >"$TEST_TMPDIR/unsupported_blank_pool_props.out"
+	set +e
+	output=$(
+		(
+			PROBE_LOG="$probe_log"
+			zxfer_exists_destination() {
+				printf '0\n'
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "$*" >>"$PROBE_LOG"
+				if [ "$*" = "get -Hpo value type backup" ]; then
+					printf 'filesystem\n'
+					return 0
+				fi
+				if [ "$*" = "get -Hpo property,value,source compression backup" ]; then
+					return 1
+				fi
+			}
+			zxfer_run_source_zfs_cmd() {
+				if [ "$*" = "get -Hpo value type tank/src" ]; then
+					printf 'filesystem\n'
+					return 0
+				fi
+				if [ "$*" = "get -Hpo property all tank/src" ]; then
+					printf 'compression\n'
+				fi
+			}
+			zxfer_calculate_unsupported_properties
+		) 2>&1
+	)
+	status=$?
 
-	assertEquals "Blank pool-root property probe failures should still classify the property as unsupported when the destination dataset remains queryable." \
-		"compression" "$(cat "$TEST_TMPDIR/unsupported_blank_pool_props.out")"
-	assertContains "Blank pool-root probe failures should confirm the destination dataset is otherwise queryable before downgrading to unsupported." \
+	assertEquals "Blank pool-root property probe failures should fail closed on the OpenZFS 2+ floor instead of using the legacy illumos fallback." \
+		"1" "$status"
+	assertContains "Blank pool-root property probe failures should be reported as ambiguous probe failures." \
+		"$output" "Failed to probe destination support for property [compression] on [backup]: probe exited nonzero without stdout/stderr"
+	assertNotContains "Blank pool-root probe failures should not run the removed legacy queryability probe." \
 		"$(cat "$probe_log")" "get -Hpo property all backup"
 }
 
@@ -3204,7 +3379,7 @@ test_append_unsupported_property_for_dataset_type_appends_without_duplicates() {
 		"compression,quota" "$g_zxfer_unsupported_filesystem_properties"
 }
 
-test_calculate_unsupported_properties_combines_filesystem_and_volume_unsupported_lists_into_union() {
+test_calculate_unsupported_properties_keeps_dataset_type_caches_without_compatibility_union() {
 	g_initial_source="tank/src"
 	g_initial_source_had_trailing_slash=1
 	g_recursive_source_list="tank/src tank/src/vol"
@@ -3253,11 +3428,13 @@ test_calculate_unsupported_properties_combines_filesystem_and_volume_unsupported
 			esac
 		}
 		zxfer_calculate_unsupported_properties
-		printf '%s\n' "$g_unsupported_properties"
+		printf 'filesystem=%s\n' "$(zxfer_select_unsupported_properties_for_dataset_type filesystem)"
+		printf 'volume=%s\n' "$(zxfer_select_unsupported_properties_for_dataset_type volume)"
 	) >"$TEST_TMPDIR/unsupported_union_props.out"
 
-	assertEquals "Unsupported-property calculation should preserve both filesystem and volume entries in the compatibility union." \
-		"recordsize,volblocksize" "$(cat "$TEST_TMPDIR/unsupported_union_props.out")"
+	assertEquals "Unsupported-property calculation should cache filesystem and volume entries without publishing a merged active list." \
+		"filesystem=recordsize
+volume=volblocksize" "$(cat "$TEST_TMPDIR/unsupported_union_props.out")"
 }
 
 test_calculate_unsupported_properties_scans_recursive_children_and_caches_by_dataset_type() {
@@ -3315,16 +3492,12 @@ test_calculate_unsupported_properties_scans_recursive_children_and_caches_by_dat
 			esac
 		}
 		zxfer_calculate_unsupported_properties
-		printf 'union=%s\n' "$g_unsupported_properties"
-		zxfer_select_unsupported_properties_for_dataset_type filesystem
-		printf 'filesystem=%s\n' "$g_unsupported_properties"
-		zxfer_select_unsupported_properties_for_dataset_type volume
-		printf 'volume=%s\n' "$g_unsupported_properties"
+		printf 'filesystem=%s\n' "$(zxfer_select_unsupported_properties_for_dataset_type filesystem)"
+		printf 'volume=%s\n' "$(zxfer_select_unsupported_properties_for_dataset_type volume)"
 	) >"$TEST_TMPDIR/unsupported_recursive_props.out"
 
-	assertEquals "Recursive unsupported-property scans should include child dataset properties and keep the union for compatibility." \
-		"union=volblocksize
-filesystem=
+	assertEquals "Recursive unsupported-property scans should include child dataset properties and keep only dataset-type caches active." \
+		"filesystem=
 volume=volblocksize" "$(cat "$TEST_TMPDIR/unsupported_recursive_props.out")"
 	assertContains "Recursive unsupported-property scans should probe child-dataset properties that are absent from the initial source dataset." \
 		"$(cat "$probe_log")" "get -Hpo property,value,source volblocksize backup/dst/vol"
@@ -3369,14 +3542,11 @@ test_calculate_unsupported_properties_does_not_mark_volume_properties_unsupporte
 			esac
 		}
 		zxfer_calculate_unsupported_properties
-		printf 'union=%s\n' "$g_unsupported_properties"
-		zxfer_select_unsupported_properties_for_dataset_type volume
-		printf 'volume=%s\n' "$g_unsupported_properties"
+		printf 'volume=%s\n' "$(zxfer_select_unsupported_properties_for_dataset_type volume)"
 	) >"$TEST_TMPDIR/unsupported_volume_fallback.out"
 
 	assertEquals "Pool-root fallback probes should not mark valid volume-only properties unsupported just because the fallback dataset type is filesystem." \
-		"union=
-volume=" "$(cat "$TEST_TMPDIR/unsupported_volume_fallback.out")"
+		"volume=" "$(cat "$TEST_TMPDIR/unsupported_volume_fallback.out")"
 	assertContains "Pool-root fallback probes should still inspect volume-only property names before treating the result as inconclusive." \
 		"$(cat "$probe_log")" "get -Hpo property,value,source volblocksize backup"
 }
@@ -3440,14 +3610,11 @@ test_calculate_unsupported_properties_uses_existing_child_destination_probe_data
 			esac
 		}
 		zxfer_calculate_unsupported_properties
-		printf 'union=%s\n' "$g_unsupported_properties"
-		zxfer_select_unsupported_properties_for_dataset_type volume
-		printf 'volume=%s\n' "$g_unsupported_properties"
+		printf 'volume=%s\n' "$(zxfer_select_unsupported_properties_for_dataset_type volume)"
 	) >"$TEST_TMPDIR/unsupported_child_destination_probe.out"
 
 	assertEquals "Recursive unsupported-property scans should probe against an existing child destination dataset when its type differs from the destination root." \
-		"union=volblocksize
-volume=volblocksize" "$(cat "$TEST_TMPDIR/unsupported_child_destination_probe.out")"
+		"volume=volblocksize" "$(cat "$TEST_TMPDIR/unsupported_child_destination_probe.out")"
 	assertContains "Existing child destination datasets should be used as the unsupported-property probe target for matching source datasets." \
 		"$(cat "$probe_log")" "get -Hpo property,value,source volblocksize backup/dst/childvol"
 }
@@ -3502,14 +3669,11 @@ test_calculate_unsupported_properties_retries_inconclusive_probes_until_one_is_a
 			esac
 		}
 		zxfer_calculate_unsupported_properties
-		printf 'union=%s\n' "$g_unsupported_properties"
-		zxfer_select_unsupported_properties_for_dataset_type volume
-		printf 'volume=%s\n' "$g_unsupported_properties"
+		printf 'volume=%s\n' "$(zxfer_select_unsupported_properties_for_dataset_type volume)"
 	) >"$TEST_TMPDIR/unsupported_inconclusive_retry.out"
 
 	assertEquals "Inconclusive unsupported-property probes should not prevent a later authoritative probe for the same dataset type and property." \
-		"union=volblocksize
-volume=volblocksize" "$(cat "$TEST_TMPDIR/unsupported_inconclusive_retry.out")"
+		"volume=volblocksize" "$(cat "$TEST_TMPDIR/unsupported_inconclusive_retry.out")"
 	assertContains "Later matching-type destinations should still be probed after an earlier pool-root fallback was inconclusive." \
 		"$(cat "$probe_log")" "get -Hpo property,value,source volblocksize backup/dst/vol-existing"
 }
@@ -3556,7 +3720,7 @@ test_calculate_unsupported_properties_skips_duplicate_property_type_pairs_after_
 			esac
 		}
 		zxfer_calculate_unsupported_properties
-		printf '%s\n' "$g_unsupported_properties"
+		zxfer_select_unsupported_properties_for_dataset_type filesystem
 	) >"$TEST_TMPDIR/unsupported_duplicate_pair_props.out"
 
 	assertEquals "Repeated source datasets with the same type/property pair should reuse the first authoritative destination probe result." \
@@ -3610,14 +3774,11 @@ test_calculate_unsupported_properties_treats_matching_type_inconclusive_probes_a
 			esac
 		}
 		zxfer_calculate_unsupported_properties
-		printf 'union=%s\n' "$g_unsupported_properties"
-		zxfer_select_unsupported_properties_for_dataset_type volume
-		printf 'volume=%s\n' "$g_unsupported_properties"
+		printf 'volume=%s\n' "$(zxfer_select_unsupported_properties_for_dataset_type volume)"
 	) >"$TEST_TMPDIR/unsupported_matching_type_inconclusive.out"
 
 	assertEquals "Matching-type inconclusive destination probes should still classify the property as unsupported." \
-		"union=volblocksize
-volume=volblocksize" "$(cat "$TEST_TMPDIR/unsupported_matching_type_inconclusive.out")"
+		"volume=volblocksize" "$(cat "$TEST_TMPDIR/unsupported_matching_type_inconclusive.out")"
 	assertContains "Matching-type inconclusive probes should use the existing child destination dataset as the probe target." \
 		"$(cat "$probe_log")" "get -Hpo property,value,source volblocksize backup/dst/childvol"
 }
@@ -4347,8 +4508,9 @@ test_ensure_destination_exists_initial_source_adds_parents_when_missing() {
 		)
 	)
 
-	assertEquals "Initial-source creation should add parents when the parent dataset is missing." \
-		"yes|filesystem||compression=lz4,atime=off|backup/dst/child" "$result"
+	assertEquals "Initial-source creation should create missing parents separately before applying target properties without -p." \
+		"yes|filesystem|||backup/dst
+no|filesystem||compression=lz4,atime=off|backup/dst/child" "$result"
 }
 
 test_ensure_destination_exists_reports_parent_probe_failures() {
@@ -4376,6 +4538,9 @@ test_ensure_destination_exists_reports_parent_probe_failures() {
 test_ensure_destination_exists_child_uses_creation_properties() {
 	result=$(
 		(
+			zxfer_exists_destination() {
+				printf '1\n'
+			}
 			create_runner() {
 				printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5"
 			}
@@ -4384,8 +4549,46 @@ test_ensure_destination_exists_child_uses_creation_properties() {
 		)
 	)
 
-	assertEquals "Child dataset creation should use the supplied readonly list, filtered creation properties, and always create parents." \
-		"yes|filesystem||compression=lz4|backup/dst/child" "$result"
+	assertEquals "Child dataset creation should use the supplied readonly list and filtered creation properties without -p when the parent exists." \
+		"no|filesystem||compression=lz4|backup/dst/child" "$result"
+}
+
+test_ensure_destination_exists_child_omits_parent_matching_override_creation_properties() {
+	result=$(
+		(
+			zxfer_exists_destination() {
+				printf '1\n'
+			}
+			zxfer_collect_destination_props() {
+				printf '%s\n' "quota=32M=local,checksum=sha256=local,compression=lz4=local"
+			}
+			create_runner() {
+				printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5"
+			}
+			zxfer_ensure_destination_exists 0 0 "" "quota=32M=override,checksum=sha256=override,compression=gzip=override,casesensitivity=sensitive=local" filesystem "" "backup/dst/child" "" create_runner
+		)
+	)
+
+	assertEquals "Missing child creates should inherit parent-matching recursive overrides only when the property can inherit." \
+		"no|filesystem||quota=32M,compression=gzip,casesensitivity=sensitive|backup/dst/child" "$result"
+}
+
+test_ensure_destination_exists_child_precreates_missing_parent_before_property_create() {
+	result=$(
+		(
+			zxfer_exists_destination() {
+				printf '0\n'
+			}
+			create_runner() {
+				printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5"
+			}
+			zxfer_ensure_destination_exists 0 0 "" "casesensitivity=sensitive=local,compression=lz4=local" filesystem "" "backup/dst/child" "" create_runner
+		)
+	)
+
+	assertEquals "Missing child creates with properties should create parent hierarchy first, then create the target without -p so create-time properties are honored." \
+		"yes|filesystem|||backup/dst
+no|filesystem||casesensitivity=sensitive,compression=lz4|backup/dst/child" "$result"
 }
 
 test_ensure_destination_exists_reports_create_failures() {
@@ -4417,6 +4620,9 @@ test_ensure_destination_exists_uses_default_runner_when_unspecified_in_current_s
 	zxfer_run_zfs_create_with_properties() {
 		printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" >"$log"
 	}
+	zxfer_exists_destination() {
+		printf '1\n'
+	}
 	g_test_base_readonly_properties=""
 	g_option_I_ignore_properties=""
 
@@ -4424,10 +4630,11 @@ test_ensure_destination_exists_uses_default_runner_when_unspecified_in_current_s
 	status=$?
 
 	unset -f zxfer_run_zfs_create_with_properties
+	unset -f zxfer_exists_destination
 
 	assertEquals "Blank create-runner arguments should fall back to the default zfs create helper." 0 "$status"
 	assertEquals "Default create-runner selection should sanitize creation properties using the supplied readonly list before invocation." \
-		"yes|filesystem||compression=lz4|backup/dst/child" "$(cat "$log")"
+		"no|filesystem||compression=lz4|backup/dst/child" "$(cat "$log")"
 }
 
 test_ensure_destination_exists_marks_created_hierarchy_in_cache() {
@@ -4454,8 +4661,9 @@ test_ensure_destination_exists_marks_created_hierarchy_in_cache() {
 		"$output" "child=1"
 	assertContains "Uncreated siblings should still be inferred missing under the authoritative root cache." \
 		"$output" "sibling=0"
-	assertContains "Successful destination creates should append the created dataset to the in-memory recursive destination list." \
-		"$output" "dests=backup/dst/child"
+	assertContains "Successful destination creates should append separately-created parents and the created dataset to the in-memory recursive destination list." \
+		"$output" "dests=backup/dst
+backup/dst/child"
 }
 
 test_ensure_destination_exists_appends_created_dataset_without_whitespace_prefix_when_root_already_tracked() {
@@ -4556,14 +4764,81 @@ test_ensure_destination_exists_invalidates_destination_cache_after_live_create()
 		create_runner() {
 			return 0
 		}
-		zxfer_invalidate_destination_property_cache() {
+		zxfer_invalidate_destination_property_mutation_cache() {
 			printf '%s\n' "$1" >>"$log"
 		}
 		zxfer_ensure_destination_exists 0 1 "compression=lz4=local" "" filesystem "" "backup/dst" "$g_test_base_readonly_properties" create_runner
 	)
 
-	assertEquals "Successful live destination creation should invalidate the destination property cache for that dataset." \
+	assertEquals "Successful live destination creation should invalidate destination property mutation caches for that dataset." \
 		"backup/dst" "$(cat "$log")"
+}
+
+test_try_property_transfer_destination_create_live_probes_unlisted_existing_child() {
+	log="$TEST_TMPDIR/property_create_live_probe_existing_child.log"
+	: >"$log"
+	g_actual_dest="backup/dst/child"
+	g_recursive_dest_list="backup/dst"
+
+	zxfer_exists_destination() {
+		printf 'probe=%s mode=%s\n' "$1" "${2:-}" >>"$log"
+		printf '%s\n' 1
+	}
+	zxfer_note_destination_dataset_exists() {
+		printf 'noted=%s\n' "$1" >>"$log"
+	}
+	zxfer_ensure_destination_exists() {
+		printf 'ensure=%s\n' "$1" >>"$log"
+		return 1
+	}
+
+	set +e
+	zxfer_try_property_transfer_destination_create \
+		"tank/src/child" 0 0 "compression=lz4=local" "compression=lz4=local" \
+		filesystem "" "$g_test_base_readonly_properties"
+	status=$?
+	set -e
+
+	assertEquals "Existing but unlisted destination children should continue into property diffing instead of create." \
+		1 "$status"
+	assertEquals "Property create planning should live-probe children missing from the recursive destination list and record existing results." \
+		"probe=backup/dst/child mode=live
+noted=backup/dst/child
+ensure=1" "$(cat "$log")"
+
+	unset -f zxfer_exists_destination
+	unset -f zxfer_note_destination_dataset_exists
+	unset -f zxfer_ensure_destination_exists
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
+}
+
+test_try_property_transfer_destination_create_rethrows_live_probe_failures() {
+	g_actual_dest="backup/dst/child"
+	g_recursive_dest_list="backup/dst"
+
+	set +e
+	output=$(
+		(
+			zxfer_exists_destination() {
+				printf '%s\n' "probe failed"
+				return 42
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1" >&2
+				exit "${2:-1}"
+			}
+			zxfer_try_property_transfer_destination_create \
+				"tank/src/child" 0 0 "compression=lz4=local" "compression=lz4=local" \
+				filesystem "" "$g_test_base_readonly_properties"
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Destination live-probe failures should preserve the probe status." \
+		42 "$status"
+	assertContains "Destination live-probe failures should surface the probe diagnostic." \
+		"$output" "probe failed"
 }
 
 test_zxfer_run_zfs_set_property_handles_dry_run_and_failures() {
@@ -4594,6 +4869,46 @@ test_zxfer_run_zfs_set_property_handles_dry_run_and_failures() {
 		"$output" "Error when setting properties on destination filesystem."
 }
 
+test_zxfer_run_zfs_set_property_invalidates_only_after_live_success() {
+	log="$TEST_TMPDIR/set_property_no_false_invalidation.log"
+	: >"$log"
+
+	(
+		zxfer_invalidate_destination_property_mutation_cache() {
+			printf 'invalidated=%s\n' "$1" >>"$log"
+		}
+		g_option_n_dryrun=1
+		zxfer_run_zfs_set_property quota 1G backup/dst >/dev/null
+	)
+	assertEquals "Dry-run property sets should not invalidate destination mutation caches." \
+		"" "$(cat "$log")"
+
+	set +e
+	output=$(
+		(
+			zxfer_run_destination_zfs_cmd() {
+				return 37
+			}
+			zxfer_invalidate_destination_property_mutation_cache() {
+				printf '%s\n' "invalidated"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			g_option_n_dryrun=0
+			zxfer_run_zfs_set_property quota 1G backup/dst
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Failed live property sets should preserve the set status." \
+		37 "$status"
+	assertNotContains "Failed live property sets should not invalidate destination mutation caches as if the mutation succeeded." \
+		"$output" "invalidated"
+}
+
 test_zxfer_run_zfs_set_property_preserves_literal_assignment_for_local_exec() {
 	log="$TEST_TMPDIR/set_property_local.log"
 	l_property="user:test\$\\\`\"\\\\"
@@ -4622,7 +4937,7 @@ test_zxfer_run_zfs_set_property_invalidates_destination_cache_after_live_set() {
 		zxfer_run_destination_zfs_cmd() {
 			return 0
 		}
-		zxfer_invalidate_destination_property_cache() {
+		zxfer_invalidate_destination_property_mutation_cache() {
 			printf '%s\n' "$1" >>"$log"
 		}
 
@@ -4630,7 +4945,7 @@ test_zxfer_run_zfs_set_property_invalidates_destination_cache_after_live_set() {
 		zxfer_run_zfs_set_property quota 1G "backup/dst"
 	)
 
-	assertEquals "Successful live property sets should invalidate the destination property cache for that dataset." \
+	assertEquals "Successful live property sets should invalidate destination property mutation caches for that dataset." \
 		"backup/dst" "$(cat "$log")"
 }
 
@@ -4669,7 +4984,7 @@ test_zxfer_run_zfs_set_properties_invalidates_destination_cache_once_after_live_
 		zxfer_run_destination_zfs_cmd() {
 			return 0
 		}
-		zxfer_invalidate_destination_property_cache() {
+		zxfer_invalidate_destination_property_mutation_cache() {
 			printf '%s\n' "$1" >>"$log"
 		}
 
@@ -4677,7 +4992,7 @@ test_zxfer_run_zfs_set_properties_invalidates_destination_cache_once_after_live_
 		zxfer_run_zfs_set_properties "compression=lz4,atime=off" "backup/dst"
 	)
 
-	assertEquals "Successful live batched property sets should invalidate the destination property cache once for the dataset." \
+	assertEquals "Successful live batched property sets should invalidate destination property mutation caches once for the dataset." \
 		"backup/dst" "$(cat "$log")"
 }
 
@@ -5103,6 +5418,24 @@ test_zxfer_run_zfs_set_properties_decodes_delimiter_heavy_assignments_for_local_
 	unset -f zxfer_run_destination_zfs_cmd
 }
 
+test_zxfer_run_zfs_set_properties_keeps_decoded_line_feed_value_in_one_argument() {
+	log="$TEST_TMPDIR/set_properties_local_linefeed.log"
+
+	zxfer_run_destination_zfs_cmd() {
+		printf 'argc=%s\n' "$#" >"$log"
+		printf 'assignment=%s\n' "$2" >>"$log"
+	}
+
+	g_option_n_dryrun=0
+	g_option_T_target_host=""
+	zxfer_run_zfs_set_properties "user:note=line1%0Aline2" "backup/dst"
+
+	assertEquals "Batched property sets should decode line-feed values without splitting one assignment into multiple argv entries." \
+		"$(printf 'argc=3\nassignment=user:note=line1\nline2')" "$(cat "$log")"
+
+	unset -f zxfer_run_destination_zfs_cmd
+}
+
 test_zxfer_run_zfs_inherit_property_handles_dry_run_and_failures() {
 	g_option_n_dryrun=1
 	g_RZFS="/remote/zfs"
@@ -5139,7 +5472,7 @@ test_zxfer_run_zfs_inherit_property_invalidates_destination_cache_after_live_inh
 		zxfer_run_destination_zfs_cmd() {
 			return 0
 		}
-		zxfer_invalidate_destination_property_cache() {
+		zxfer_invalidate_destination_property_mutation_cache() {
 			printf '%s\n' "$1" >>"$log"
 		}
 
@@ -5147,7 +5480,7 @@ test_zxfer_run_zfs_inherit_property_invalidates_destination_cache_after_live_inh
 		zxfer_run_zfs_inherit_property quota "backup/dst"
 	)
 
-	assertEquals "Successful live property inheritance should invalidate the destination property cache for that dataset." \
+	assertEquals "Successful live property inheritance should invalidate destination property mutation caches for that dataset." \
 		"backup/dst" "$(cat "$log")"
 }
 
@@ -5314,39 +5647,92 @@ test_diff_properties_inherits_value_when_destination_is_local_but_source_is_not(
 		"compression=lz4" "$(sed -n '3p' "$outfile")"
 }
 
-test_diff_properties_treats_overrides_as_local_sets() {
+test_diff_properties_treats_overrides_as_parent_sets() {
 	outfile="$TEST_TMPDIR/diff_override_local.out"
 
-	zxfer_diff_properties "quota=32M=override" "quota=32M=local" "" >"$outfile"
+	zxfer_diff_properties "checksum=sha256=override" "checksum=sha256=local" "" >"$outfile"
 
 	assertEquals "Matching local override values should not request any additional root-level set." \
 		"" "$(sed -n '1p' "$outfile")"
-	assertEquals "Matching local override values should not request a child set." \
+	assertEquals "Matching local override values should not request a child set when the child can inherit from a matching parent." \
 		"" "$(sed -n '2p' "$outfile")"
-	assertEquals "Matching local override values must not be converted into inheritance requests." \
+	assertEquals "Matching local override values should request child inheritance so recursive overrides do not remain stamped locally on descendants." \
+		"checksum=sha256" "$(sed -n '3p' "$outfile")"
+
+	zxfer_diff_properties "checksum=sha256=override" "checksum=fletcher4=local" "" >"$outfile"
+
+	assertEquals "Changed inheritable override values should still appear in the root set list." \
+		"checksum=sha256" "$(sed -n '1p' "$outfile")"
+	assertEquals "Changed inheritable override values should not be stamped locally on child datasets by default." \
+		"" "$(sed -n '2p' "$outfile")"
+	assertEquals "Changed inheritable override values should request child inheritance so the parent value remains authoritative." \
+		"checksum=sha256" "$(sed -n '3p' "$outfile")"
+
+	zxfer_diff_properties "quota=32M=override" "quota=32M=local" "" >"$outfile"
+
+	assertEquals "Matching non-inheritable override values should not request a root-level set." \
+		"" "$(sed -n '1p' "$outfile")"
+	assertEquals "Matching non-inheritable override values should not request a child set when the child is already local." \
+		"" "$(sed -n '2p' "$outfile")"
+	assertEquals "Matching non-inheritable override values must not be converted into inheritance requests." \
 		"" "$(sed -n '3p' "$outfile")"
 
 	zxfer_diff_properties "quota=32M=override" "quota=none=local" "" >"$outfile"
 
-	assertEquals "Changed override values should still appear in the root set list." \
+	assertEquals "Changed non-inheritable override values should still appear in the root set list." \
 		"quota=32M" "$(sed -n '1p' "$outfile")"
-	assertEquals "Changed override values should be set locally on child datasets." \
+	assertEquals "Changed non-inheritable override values should be set locally on child datasets." \
 		"quota=32M" "$(sed -n '2p' "$outfile")"
-	assertEquals "Changed override values must not be converted into inheritance requests." \
+	assertEquals "Changed non-inheritable override values must not be converted into inheritance requests." \
 		"" "$(sed -n '3p' "$outfile")"
 }
 
-test_diff_properties_sets_missing_override_properties_locally() {
+test_diff_properties_does_not_stamp_matching_default_noninheritable_values() {
+	outfile="$TEST_TMPDIR/diff_noninherit_default.out"
+
+	zxfer_diff_properties "quota=none=default" "quota=none=default" "" >"$outfile"
+
+	assertEquals "Matching default non-inheritable values should not request a root-level local set." \
+		"" "$(sed -n '1p' "$outfile")"
+	assertEquals "Matching default non-inheritable values should not request a child local set." \
+		"" "$(sed -n '2p' "$outfile")"
+	assertEquals "Matching default non-inheritable values must not be converted into inheritance requests." \
+		"" "$(sed -n '3p' "$outfile")"
+
+	zxfer_diff_properties "quota=none=default" "quota=none=local" "" >"$outfile"
+
+	assertEquals "Matching effective non-inheritable values should not be restamped locally when the source is not local." \
+		"" "$(sed -n '1p' "$outfile")"
+	assertEquals "Matching effective non-inheritable child values should not be restamped locally when the source is not local." \
+		"" "$(sed -n '2p' "$outfile")"
+	assertEquals "Matching effective non-inheritable values must not be inherited from a local destination." \
+		"" "$(sed -n '3p' "$outfile")"
+}
+
+test_diff_properties_sets_changed_noninheritable_values_locally() {
+	outfile="$TEST_TMPDIR/diff_noninherit_changed.out"
+
+	zxfer_diff_properties "quota=none=default" "quota=32M=local" "" >"$outfile"
+
+	assertEquals "Changed non-inheritable values should request a root-level set even when the source is default." \
+		"quota=none" "$(sed -n '1p' "$outfile")"
+	assertEquals "Changed non-inheritable values should request a child local set because inheritance cannot preserve them." \
+		"quota=none" "$(sed -n '2p' "$outfile")"
+	assertEquals "Changed non-inheritable values must not be converted into inheritance requests." \
+		"" "$(sed -n '3p' "$outfile")"
+}
+
+test_diff_properties_inherits_missing_inheritable_override_properties() {
 	outfile="$TEST_TMPDIR/diff_override_missing_dest.out"
 
 	zxfer_diff_properties "user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi=override" "compression=lz4=local" "" >"$outfile"
 
 	assertEquals "Destination properties missing an override-managed property should still request a root-level local set." \
 		"user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi" "$(sed -n '1p' "$outfile")"
-	assertEquals "Destination properties missing an override-managed property should still request a child local set." \
-		"user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi" "$(sed -n '2p' "$outfile")"
-	assertEquals "Missing override-managed properties must not be converted into inheritance requests." \
-		"" "$(sed -n '3p' "$outfile")"
+	assertEquals "Missing inheritable override-managed properties should not be stamped locally on child datasets by default." \
+		"" "$(sed -n '2p' "$outfile")"
+	assertEquals "Missing inheritable override-managed properties should request child inheritance from the converged parent." \
+		"user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi" "$(sed -n '3p' "$outfile")"
 }
 
 test_diff_properties_reports_awk_failures() {
@@ -5459,6 +5845,30 @@ test_diff_properties_rethrows_tempfile_allocation_failures() {
 		"Error creating temporary file." "$output"
 }
 
+test_diff_properties_preserves_nonthrowing_tempfile_status() {
+	set +e
+	output=$(
+		(
+			g_zxfer_property_reconcile_stage_file_result="stale-stage"
+			zxfer_get_temp_file() {
+				return 38
+			}
+			zxfer_diff_properties "compression=lz4=local" "compression=lz4=local" ""
+			l_status=$?
+			printf 'status=%s\n' "$l_status"
+			printf 'stage=%s\n' "$g_zxfer_property_reconcile_stage_file_result"
+			exit "$l_status"
+		)
+	)
+	status=$?
+
+	assertEquals "Property diffing should preserve non-throwing temp allocation statuses." \
+		38 "$status"
+	assertEquals "Property diffing should clear stale stage-file allocation results on failure." \
+		"status=38
+stage=" "$output"
+}
+
 test_adjust_child_inherit_to_match_parent_promotes_mismatched_parent_values_to_sets() {
 	outfile="$TEST_TMPDIR/adjust_child_inherit.out"
 
@@ -5534,6 +5944,58 @@ test_adjust_child_inherit_to_match_parent_moves_inherited_source_properties_out_
 	assertEquals "Inherited source properties should be removed from the child set list when the parent already provides the same value." \
 		"compression=lz4" "$(sed -n '1p' "$outfile")"
 	assertEquals "Inherited source properties whose parent already matches should be converted back into inherit operations." \
+		"checksum=sha256" "$(sed -n '2p' "$outfile")"
+}
+
+test_adjust_child_inherit_to_match_parent_moves_matching_override_properties_out_of_set_list() {
+	outfile="$TEST_TMPDIR/adjust_child_override_inherit_demote.out"
+
+	(
+		zxfer_exists_destination() {
+			printf '1\n'
+		}
+		zxfer_collect_destination_props() {
+			printf '%s\n' "quota=32M=local,checksum=sha256=local,compression=lz4=local"
+		}
+		zxfer_sanitize_property_list() {
+			printf '%s\n' "$1"
+		}
+		zxfer_adjust_child_inherit_to_match_parent "backup/dst/child" \
+			"quota=32M=override,checksum=sha256=override,compression=lz4=override" \
+			"quota=32M,checksum=sha256,compression=gzip" \
+			"" \
+			"$g_test_base_readonly_properties"
+	) >"$outfile"
+
+	assertEquals "Only inheritable recursive overrides whose parent already provides the requested value should be removed from the child set list." \
+		"quota=32M,compression=gzip" "$(sed -n '1p' "$outfile")"
+	assertEquals "Matching inheritable recursive overrides should become inherit operations for existing descendants." \
+		"checksum=sha256" "$(sed -n '2p' "$outfile")"
+}
+
+test_adjust_child_inherit_to_match_parent_preserves_matching_override_inherit_without_parent_match() {
+	outfile="$TEST_TMPDIR/adjust_child_override_inherit_stale_parent.out"
+
+	(
+		zxfer_exists_destination() {
+			printf '1\n'
+		}
+		zxfer_collect_destination_props() {
+			printf '%s\n' "checksum=fletcher4=local,atime=on=local"
+		}
+		zxfer_sanitize_property_list() {
+			printf '%s\n' "$1"
+		}
+		zxfer_adjust_child_inherit_to_match_parent "backup/dst/child" \
+			"checksum=sha256=override,atime=off=inherited" \
+			"" \
+			"checksum=sha256,atime=off" \
+			"$g_test_base_readonly_properties"
+	) >"$outfile"
+
+	assertEquals "Non-override inherited properties should still require the live parent value to match." \
+		"atime=off" "$(sed -n '1p' "$outfile")"
+	assertEquals "Matching inheritable recursive overrides should remain inheritance requests even when the parent probe has not observed the just-planned parent override." \
 		"checksum=sha256" "$(sed -n '2p' "$outfile")"
 }
 
@@ -5759,6 +6221,37 @@ test_adjust_child_inherit_to_match_parent_rethrows_tempfile_allocation_failures(
 		"Error creating temporary file." "$output"
 }
 
+test_adjust_child_inherit_to_match_parent_preserves_nonthrowing_tempfile_status() {
+	set +e
+	output=$(
+		(
+			g_zxfer_property_reconcile_stage_file_result="stale-stage"
+			zxfer_exists_destination() {
+				printf '1\n'
+			}
+			zxfer_get_temp_file() {
+				return 39
+			}
+			zxfer_adjust_child_inherit_to_match_parent "backup/dst/child" \
+				"compression=lz4=inherited" \
+				"" \
+				"compression=lz4" \
+				""
+			l_status=$?
+			printf 'status=%s\n' "$l_status"
+			printf 'stage=%s\n' "$g_zxfer_property_reconcile_stage_file_result"
+			exit "$l_status"
+		)
+	)
+	status=$?
+
+	assertEquals "Child-inherit reconciliation should preserve non-throwing temp allocation statuses." \
+		39 "$status"
+	assertEquals "Child-inherit reconciliation should clear stale stage-file allocation results on failure." \
+		"status=39
+stage=" "$output"
+}
+
 test_adjust_child_inherit_to_match_parent_reports_awk_failures() {
 	set +e
 	output=$(
@@ -5945,8 +6438,11 @@ test_transfer_properties_marks_created_destinations_and_records_backup() {
 			printf 'ensure %s\n' "$2" >>"$LOG_FILE"
 			return 0
 		}
+		zxfer_exists_destination() {
+			printf '%s\n' 0
+		}
 		zxfer_append_backup_metadata_record() {
-			printf 'backup_append %s %s %s\n' "$1" "$2" "$3" >>"$LOG_FILE"
+			printf 'backup_append %s %s\n' "$1" "$2" >>"$LOG_FILE"
 			g_backup_file_contents="helper-owned"
 		}
 		zxfer_write_backup_properties() {
@@ -5966,7 +6462,7 @@ test_transfer_properties_marks_created_destinations_and_records_backup() {
 	assertContains "Successful destination creation should mark the dataset as zxfer-created." \
 		"$result" "created=1"
 	assertContains "Backup mode should append raw source properties through the backup-metadata owner helper." \
-		"$result" "backup_append tank/src backup/dst compression=lz4=local"
+		"$result" "backup_append tank/src compression=lz4=local"
 	assertNotContains "Property reconciliation should not flush backup metadata directly; replication orchestration owns the live write timing." \
 		"$result" "unexpected backup_write"
 	assertContains "Backup accumulation state should remain helper-owned." \
@@ -6014,7 +6510,7 @@ test_transfer_properties_does_not_capture_backup_metadata_before_success() {
 				return 1
 			}
 			zxfer_append_backup_metadata_record() {
-				printf 'append %s %s %s\n' "$1" "$2" "$3" >>"$append_log"
+				printf 'append %s %s\n' "$1" "$2" >>"$append_log"
 			}
 			zxfer_write_backup_properties() {
 				printf 'unexpected write %s\n' "$g_backup_file_contents" >>"$append_log"
@@ -6128,13 +6624,16 @@ test_transfer_properties_selects_unsupported_properties_for_current_dataset_type
 		g_option_U_skip_unsupported_properties=1
 		g_initial_source="tank/vol"
 		g_actual_dest="backup/vol"
+		g_recursive_dest_list="backup/vol"
 		g_zxfer_unsupported_filesystem_properties="compression"
 		g_zxfer_unsupported_volume_properties="volblocksize"
 		zxfer_transfer_properties "tank/vol"
 	)
 
-	assertEquals "Property transfer should pass the dataset-type-specific unsupported-property list into stripping." \
-		"strip volblocksize=16K=local || volblocksize" "$(cat "$log")"
+	assertContains "Property transfer should pass the dataset-type-specific unsupported-property list into apply-list stripping." \
+		"$(cat "$log")" "strip volblocksize=16K=local || volblocksize"
+	assertContains "Property transfer should also pass the dataset-type-specific unsupported-property list into create-list stripping." \
+		"$(cat "$log")" "strip  || volblocksize"
 }
 
 test_transfer_properties_diffs_existing_destinations_and_applies_changes() {
@@ -6265,6 +6764,231 @@ test_transfer_properties_queries_missing_must_create_properties_before_diffing()
 		"$result" "casesensitivity,normalization,utf8only"
 }
 
+test_transfer_properties_backfills_required_create_props_after_restore_replacement() {
+	log="$TEST_TMPDIR/transfer_restore_required_create_props.log"
+	: >"$log"
+
+	(
+		LOG_FILE="$log"
+		g_option_e_restore_property_mode=1
+		g_initial_source="tank/src"
+		g_actual_dest="backup/dst"
+		g_recursive_dest_list=""
+
+		zxfer_collect_source_props() {
+			g_zxfer_source_pvs_raw="compression=live=local"
+			g_zxfer_source_pvs_effective="compression=restored=local"
+		}
+		zxfer_run_source_zfs_cmd() {
+			if [ "$4" = "type" ]; then
+				printf '%s\n' "filesystem"
+			else
+				printf '%s\n' "-"
+			fi
+		}
+		zxfer_ensure_required_properties_present() {
+			printf 'ensure-required %s %s %s\n' "$1" "$2" "$4" >>"$LOG_FILE"
+			case "$2" in
+			compression=live=local)
+				printf '%s\n' "compression=live=local,casesensitivity=sensitive=local"
+				;;
+			compression=restored=local)
+				printf '%s\n' "compression=restored=local,casesensitivity=sensitive=local"
+				;;
+			*)
+				printf '%s\n' "$2"
+				;;
+			esac
+		}
+		zxfer_validate_override_properties() {
+			:
+		}
+		zxfer_derive_override_lists() {
+			printf 'derive %s\n' "$1" >>"$LOG_FILE"
+			g_zxfer_override_pvs_result=$1
+			g_zxfer_creation_pvs_result="casesensitivity=sensitive=local"
+		}
+		zxfer_sanitize_property_list() {
+			printf '%s\n' "$1"
+		}
+		zxfer_strip_unsupported_properties() {
+			printf '%s\n' "$1"
+		}
+		zxfer_ensure_destination_exists() {
+			printf 'create override=%s creation=%s\n' "$3" "$4" >>"$LOG_FILE"
+			return 0
+		}
+		zxfer_exists_destination() {
+			printf '%s\n' 0
+		}
+		zxfer_capture_backup_metadata_for_completed_transfer() {
+			printf 'backup %s\n' "$2" >>"$LOG_FILE"
+		}
+
+		zxfer_transfer_properties "tank/src"
+	)
+
+	result=$(cat "$log")
+	assertContains "Restore-mode transfers should still backfill required create-time properties on the live raw source payload." \
+		"$result" "ensure-required tank/src compression=live=local casesensitivity,normalization,utf8only"
+	assertContains "Restore-mode transfers should backfill required create-time properties after replacing the effective set from backup metadata." \
+		"$result" "ensure-required tank/src compression=restored=local casesensitivity,normalization,utf8only"
+	assertContains "Override derivation should receive the restored and backfilled effective source properties." \
+		"$result" "derive compression=restored=local,casesensitivity=sensitive=local"
+	assertContains "Destination creation should use restored and backfilled effective properties." \
+		"$result" "create override=compression=restored=local,casesensitivity=sensitive=local creation=casesensitivity=sensitive=local"
+	assertContains "Backup capture should preserve the live raw source payload after source-side required-property discovery, not the restored effective set." \
+		"$result" "backup compression=live=local,casesensitivity=sensitive=local"
+}
+
+test_transfer_properties_preserves_required_create_props_when_transfer_all_disabled() {
+	log="$TEST_TMPDIR/transfer_override_only_required_create_props.log"
+	: >"$log"
+
+	(
+		LOG_FILE="$log"
+		g_option_P_transfer_property=0
+		g_option_o_override_property="compression=lz4,atime=off"
+		g_initial_source="tank/src"
+		g_actual_dest="backup/dst"
+		g_recursive_dest_list=""
+
+		zxfer_collect_source_props() {
+			g_zxfer_source_pvs_raw="compression=off=local,atime=on=inherited,casesensitivity=sensitive=local,normalization=formD=local,utf8only=on=local"
+			g_zxfer_source_pvs_effective=$g_zxfer_source_pvs_raw
+		}
+		zxfer_run_source_zfs_cmd() {
+			if [ "$4" = "type" ]; then
+				printf '%s\n' "filesystem"
+			else
+				printf '%s\n' "-"
+			fi
+		}
+		zxfer_ensure_required_properties_present() {
+			printf '%s\n' "$2"
+		}
+		zxfer_exists_destination() {
+			printf '%s\n' 0
+		}
+		zxfer_ensure_destination_exists() {
+			printf 'override=%s\n' "$3" >>"$LOG_FILE"
+			printf 'creation=%s\n' "$4" >>"$LOG_FILE"
+			return 0
+		}
+		zxfer_capture_backup_metadata_for_completed_transfer() {
+			:
+		}
+
+		zxfer_transfer_properties "tank/src"
+	)
+
+	result=$(cat "$log")
+	assertContains "Override-only missing root creates should keep required source create properties in the root create/apply list." \
+		"$result" "override=compression=lz4=override,atime=off=override,casesensitivity=sensitive=local,normalization=formD=local,utf8only=on=local"
+	assertContains "Override-only creation context should carry explicit overrides and required source create properties before child create planning filters parent-matching overrides." \
+		"$result" "creation=compression=lz4=override,atime=off=override,casesensitivity=sensitive=local,normalization=formD=local,utf8only=on=local"
+}
+
+test_transfer_properties_preserves_child_override_absent_from_source_on_create() {
+	log="$TEST_TMPDIR/transfer_child_absent_override_create.log"
+	: >"$log"
+
+	(
+		LOG_FILE="$log"
+		g_option_P_transfer_property=0
+		g_option_o_override_property="user:note=replicated"
+		g_initial_source="tank/src"
+		g_actual_dest="backup/dst/child"
+		g_recursive_dest_list=""
+
+		zxfer_collect_source_props() {
+			g_zxfer_source_pvs_raw="compression=off=local,casesensitivity=sensitive=local"
+			g_zxfer_source_pvs_effective=$g_zxfer_source_pvs_raw
+		}
+		zxfer_run_source_zfs_cmd() {
+			if [ "$4" = "type" ]; then
+				printf '%s\n' "filesystem"
+			else
+				printf '%s\n' "-"
+			fi
+		}
+		zxfer_ensure_required_properties_present() {
+			printf '%s\n' "$2"
+		}
+		zxfer_exists_destination() {
+			printf '%s\n' 0
+		}
+		zxfer_ensure_destination_exists() {
+			printf 'override=%s\n' "$3" >>"$LOG_FILE"
+			printf 'creation=%s\n' "$4" >>"$LOG_FILE"
+			return 0
+		}
+		zxfer_capture_backup_metadata_for_completed_transfer() {
+			:
+		}
+
+		zxfer_transfer_properties "tank/src/child"
+	)
+
+	result=$(cat "$log")
+	assertContains "Override-only child creates should keep explicit overrides that are absent from the child source list." \
+		"$result" "override=user:note=replicated=override,casesensitivity=sensitive=local"
+	assertContains "Creation context should retain absent explicit overrides before child create planning decides whether a parent can supply them by inheritance." \
+		"$result" "creation=user:note=replicated=override,casesensitivity=sensitive=local"
+}
+
+test_transfer_properties_strips_unsupported_creation_props_when_requested() {
+	log="$TEST_TMPDIR/transfer_creation_skip_unsupported.log"
+	: >"$log"
+
+	(
+		LOG_FILE="$log"
+		g_option_P_transfer_property=0
+		g_option_U_skip_unsupported_properties=1
+		g_option_o_override_property="compression=lz4"
+		g_initial_source="tank/src"
+		g_actual_dest="backup/dst"
+		g_recursive_dest_list=""
+		g_zxfer_unsupported_filesystem_properties="casesensitivity"
+
+		zxfer_collect_source_props() {
+			g_zxfer_source_pvs_raw="compression=off=local,casesensitivity=sensitive=local"
+			g_zxfer_source_pvs_effective=$g_zxfer_source_pvs_raw
+		}
+		zxfer_run_source_zfs_cmd() {
+			if [ "$4" = "type" ]; then
+				printf '%s\n' "filesystem"
+			else
+				printf '%s\n' "-"
+			fi
+		}
+		zxfer_ensure_required_properties_present() {
+			printf '%s\n' "$2"
+		}
+		zxfer_exists_destination() {
+			printf '%s\n' 0
+		}
+		zxfer_ensure_destination_exists() {
+			printf 'override=%s\n' "$3" >>"$LOG_FILE"
+			printf 'creation=%s\n' "$4" >>"$LOG_FILE"
+			return 0
+		}
+		zxfer_capture_backup_metadata_for_completed_transfer() {
+			:
+		}
+
+		zxfer_transfer_properties "tank/src"
+	)
+
+	result=$(cat "$log")
+	assertContains "Unsupported properties should be stripped from the apply plan when -U is active." \
+		"$result" "override=compression=lz4=override"
+	assertContains "Unsupported properties should be stripped from the missing-dataset create plan when -U is active." \
+		"$result" "creation=compression=lz4=override"
+	assertNotContains "Unsupported create-time properties should not survive in either property plan." \
+		"$result" "casesensitivity=sensitive"
+}
+
 test_transfer_properties_propagates_must_create_diff_failures() {
 	set +e
 	output=$(
@@ -6356,6 +7080,57 @@ test_transfer_properties_rethrows_tempfile_allocation_failures() {
 		1 "$status"
 	assertEquals "Property transfer should preserve the temp-file allocation failure." \
 		"Error creating temporary file." "$output"
+}
+
+test_property_transfer_stage_helpers_preserve_stage_allocation_statuses() {
+	set +e
+	output=$(
+		(
+			zxfer_collect_source_props() {
+				g_zxfer_source_pvs_raw="compression=lz4=local"
+				g_zxfer_source_pvs_effective="compression=lz4=local"
+			}
+			zxfer_get_validated_source_dataset_create_metadata() {
+				printf '%s\n%s\n' "filesystem" ""
+			}
+			zxfer_create_property_reconcile_stage_file() {
+				return 74
+			}
+			zxfer_prepare_property_transfer_source_context "tank/src" >/dev/null
+			printf 'source_status=%s\n' "$?"
+		)
+		(
+			zxfer_create_property_reconcile_stage_file() {
+				return 75
+			}
+			zxfer_collect_source_props "tank/src" "backup/dst" 0 "mock_zfs" >/dev/null
+			printf 'collect_source_status=%s\n' "$?"
+		)
+		(
+			zxfer_create_property_reconcile_stage_file() {
+				return 76
+			}
+			zxfer_collect_property_transfer_destination_context "creation" "" >/dev/null
+			printf 'destination_status=%s\n' "$?"
+		)
+		(
+			zxfer_create_property_reconcile_stage_file() {
+				return 77
+			}
+			zxfer_diff_property_transfer_changes 1 "" "" "creation" "" >/dev/null
+			printf 'diff_status=%s\n' "$?"
+		)
+	)
+	set -e
+
+	assertContains "Source property context should preserve stage allocation failures." \
+		"$output" "source_status=74"
+	assertContains "Source property collection should preserve stage allocation failures." \
+		"$output" "collect_source_status=75"
+	assertContains "Destination property context should preserve stage allocation failures." \
+		"$output" "destination_status=76"
+	assertContains "Property diff context should preserve stage allocation failures." \
+		"$output" "diff_status=77"
 }
 
 test_transfer_properties_fails_when_source_required_property_probe_fails() {
@@ -7211,6 +7986,7 @@ test_transfer_properties_skips_filesystem_only_required_property_probes_for_volu
 		}
 		g_initial_source="tank/vol"
 		g_actual_dest="backup/vol"
+		g_recursive_dest_list="backup/vol"
 		zxfer_transfer_properties "tank/vol"
 		printf 'created=%s\n' "$g_dest_created_by_zxfer" >>"$LOG_FILE"
 	)
@@ -7358,8 +8134,11 @@ test_transfer_properties_forces_readonly_overrides_in_current_shell() {
 	zxfer_ensure_destination_exists() {
 		return 0
 	}
+	zxfer_exists_destination() {
+		printf '%s\n' 0
+	}
 	zxfer_append_backup_metadata_record() {
-		printf 'backup_append %s %s %s\n' "$1" "$2" "$3" >>"$append_log"
+		printf 'backup_append %s %s\n' "$1" "$2" >>"$append_log"
 		g_backup_file_contents="helper-owned"
 	}
 	zxfer_write_backup_properties() {
@@ -7375,13 +8154,15 @@ test_transfer_properties_forces_readonly_overrides_in_current_shell() {
 	unset -f zxfer_sanitize_property_list
 	unset -f zxfer_strip_unsupported_properties
 	unset -f zxfer_ensure_destination_exists
+	unset -f zxfer_exists_destination
 	unset -f zxfer_append_backup_metadata_record
 	unset -f zxfer_write_backup_properties
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
 	assertContains "Writable-mode transfers should validate overrides after forcing readonly=off." \
 		"$(cat "$log")" "validate readonly=off"
 	assertContains "Writable-mode backup capture should preserve the raw source properties for restore mode through the owner helper." \
-		"$(cat "$append_log")" "backup_append tank/src backup/dst readonly=on=local,compression=lz4=local"
+		"$(cat "$append_log")" "backup_append tank/src readonly=on=local,compression=lz4=local"
 	assertNotContains "Writable-mode property reconciliation should not flush backup metadata directly." \
 		"$(cat "$append_log")" "unexpected backup_write"
 	assertEquals "Writable-mode backup accumulation state should remain helper-owned." \
@@ -7497,12 +8278,15 @@ test_transfer_properties_prefers_forwarded_backup_provenance_for_chained_backup_
 	zxfer_ensure_destination_exists() {
 		return 0
 	}
+	zxfer_exists_destination() {
+		printf '%s\n' 0
+	}
 	zxfer_get_forwarded_backup_properties_for_source() {
 		g_forwarded_backup_properties="compression=lz4=local"
 		printf '%s\n' "$g_forwarded_backup_properties"
 	}
 	zxfer_append_backup_metadata_record() {
-		printf 'backup_append %s %s %s\n' "$1" "$2" "$3" >>"$append_log"
+		printf 'backup_append %s %s\n' "$1" "$2" >>"$append_log"
 	}
 
 	zxfer_transfer_properties "backup/intermediate/src"
@@ -7515,11 +8299,13 @@ test_transfer_properties_prefers_forwarded_backup_provenance_for_chained_backup_
 	unset -f zxfer_strip_unsupported_properties
 	unset -f zxfer_ensure_required_properties_present
 	unset -f zxfer_ensure_destination_exists
+	unset -f zxfer_exists_destination
 	unset -f zxfer_get_forwarded_backup_properties_for_source
 	unset -f zxfer_append_backup_metadata_record
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
 	assertContains "Chained backup capture should prefer forwarded provenance from the intermediate backup metadata over the intermediate dataset's live properties." \
-		"$(cat "$append_log")" "backup_append backup/intermediate/src backup/final/src compression=lz4=local"
+		"$(cat "$append_log")" "backup_append backup/intermediate/src compression=lz4=local"
 }
 
 test_transfer_properties_skip_backup_capture_preserves_existing_backup_contents() {
@@ -7560,8 +8346,11 @@ test_transfer_properties_skip_backup_capture_preserves_existing_backup_contents(
 	zxfer_ensure_destination_exists() {
 		return 0
 	}
+	zxfer_exists_destination() {
+		printf '%s\n' 0
+	}
 	zxfer_append_backup_metadata_record() {
-		printf 'unexpected %s %s %s\n' "$1" "$2" "$3" >>"$append_log"
+		printf 'unexpected %s %s\n' "$1" "$2" >>"$append_log"
 	}
 
 	zxfer_transfer_properties "tank/src" 1
@@ -7573,7 +8362,9 @@ test_transfer_properties_skip_backup_capture_preserves_existing_backup_contents(
 	unset -f zxfer_sanitize_property_list
 	unset -f zxfer_strip_unsupported_properties
 	unset -f zxfer_ensure_destination_exists
+	unset -f zxfer_exists_destination
 	unset -f zxfer_append_backup_metadata_record
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
 	assertEquals "Post-seed reconciliation should not duplicate -k backup metadata." \
 		"existing" "$g_backup_file_contents"
@@ -7780,6 +8571,129 @@ backup/dst/child"
 		"$(cat "$log")" "apply backup/dst/child 0   checksum=sha256"
 }
 
+test_transfer_properties_inherits_matching_recursive_overrides_for_existing_children() {
+	log="$TEST_TMPDIR/transfer_child_override_inherit.log"
+	: >"$log"
+	(
+		g_initial_source="tank/src"
+		g_actual_dest="backup/dst/child"
+		g_recursive_dest_list="backup/dst
+backup/dst/child"
+		g_option_P_transfer_property=0
+		g_option_o_override_property="quota=32M,checksum=sha256"
+
+		zxfer_collect_source_props() {
+			g_zxfer_source_pvs_raw="compression=lz4=local"
+			g_zxfer_source_pvs_effective="$g_zxfer_source_pvs_raw"
+		}
+		zxfer_run_source_zfs_cmd() {
+			if [ "$4" = "type" ]; then
+				printf '%s\n' "filesystem"
+			else
+				printf '%s\n' "-"
+			fi
+		}
+		zxfer_ensure_required_properties_present() {
+			printf '%s\n' "$2"
+		}
+		zxfer_sanitize_property_list() {
+			printf '%s\n' "$1"
+		}
+		zxfer_strip_unsupported_properties() {
+			printf '%s\n' "$1"
+		}
+		zxfer_exists_destination() {
+			printf '1\n'
+		}
+		zxfer_collect_destination_props() {
+			case "$1" in
+			backup/dst/child) printf '%s\n' "quota=32M=local,checksum=sha256=local" ;;
+			backup/dst) printf '%s\n' "quota=32M=local,checksum=sha256=local" ;;
+			*)
+				printf '%s\n' "unexpected dataset $1"
+				return 1
+				;;
+			esac
+		}
+		zxfer_apply_property_changes() {
+			printf 'apply %s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" >>"$log"
+		}
+		zxfer_capture_backup_metadata_for_completed_transfer() {
+			:
+		}
+
+		zxfer_transfer_properties "tank/src/child"
+	) >"$log" 2>&1
+
+	assertContains "Existing descendants should inherit matching recursive -o overrides instead of keeping a local child property." \
+		"$(cat "$log")" "apply backup/dst/child 0   checksum=sha256"
+	assertNotContains "Existing descendants should not inherit non-inheritable recursive -o overrides." \
+		"$(cat "$log")" "quota=32M"
+}
+
+test_transfer_properties_inherits_changed_recursive_overrides_for_existing_children() {
+	log="$TEST_TMPDIR/transfer_child_override_changed_inherit.log"
+	: >"$log"
+	(
+		g_initial_source="tank/src"
+		g_actual_dest="backup/dst/child"
+		g_recursive_dest_list="backup/dst
+backup/dst/child"
+		g_option_P_transfer_property=1
+		g_option_o_override_property="quota=32M,checksum=sha256"
+		g_option_I_ignore_properties="mountpoint,compression"
+
+		zxfer_collect_source_props() {
+			g_zxfer_source_pvs_raw="quota=none=default,checksum=sha256=inherited,compression=lz4=inherited,atime=off=local"
+			g_zxfer_source_pvs_effective="$g_zxfer_source_pvs_raw"
+		}
+		zxfer_run_source_zfs_cmd() {
+			if [ "$4" = "type" ]; then
+				printf '%s\n' "filesystem"
+			else
+				printf '%s\n' "-"
+			fi
+		}
+		zxfer_ensure_required_properties_present() {
+			printf '%s\n' "$2"
+		}
+		zxfer_exists_destination() {
+			printf '1\n'
+		}
+		zxfer_collect_destination_props() {
+			case "$1" in
+			backup/dst/child) printf '%s\n' "quota=none=default,checksum=fletcher4=local,compression=off=local,atime=on=local" ;;
+			backup/dst) printf '%s\n' "quota=32M=local,checksum=sha256=local,compression=off=local,atime=off=local" ;;
+			*)
+				printf '%s\n' "unexpected dataset $1"
+				return 1
+				;;
+			esac
+		}
+		zxfer_apply_property_changes() {
+			{
+				printf 'apply destination=%s\n' "$1"
+				printf 'apply is_initial=%s\n' "$2"
+				printf 'apply initial=%s\n' "$3"
+				printf 'apply child=%s\n' "$4"
+				printf 'apply inherit=%s\n' "$5"
+			} >>"$log"
+		}
+		zxfer_capture_backup_metadata_for_completed_transfer() {
+			:
+		}
+
+		zxfer_transfer_properties "tank/src/child"
+	) >"$log" 2>&1
+
+	assertContains "Changed inheritable recursive -o overrides should inherit from a matching parent on existing descendants." \
+		"$(cat "$log")" "apply inherit=checksum=sha256"
+	assertContains "Local source and non-inheritable override properties should remain in the child set list." \
+		"$(cat "$log")" "apply child=quota=32M,atime=off"
+	assertNotContains "Changed inheritable recursive -o overrides should not stay in the local child set list when the parent matches." \
+		"$(cat "$log")" "apply child=quota=32M,checksum=sha256"
+}
+
 test_transfer_properties_uses_freebsd_readonly_properties_without_mutating_global_state() {
 	log="$TEST_TMPDIR/transfer_freebsd_readonly.log"
 	: >"$log"
@@ -7789,7 +8703,7 @@ test_transfer_properties_uses_freebsd_readonly_properties_without_mutating_globa
 	g_test_freebsd_readonly_properties="aclmode"
 	g_initial_source="tank/src"
 	g_actual_dest="backup/dst"
-	g_recursive_dest_list=""
+	g_recursive_dest_list="backup/dst"
 	zxfer_collect_source_props() {
 		g_zxfer_source_pvs_raw="compression=lz4=local"
 		g_zxfer_source_pvs_effective="compression=lz4=local"
@@ -7837,19 +8751,20 @@ test_transfer_properties_uses_freebsd_readonly_properties_without_mutating_globa
 		"readonly" "$(zxfer_get_base_readonly_properties)"
 	assertEquals "Repeated transfers should reuse the same effective FreeBSD readonly list instead of appending duplicates." \
 		"readonly,aclmode
+readonly,aclmode
+readonly,aclmode
 readonly,aclmode" "$(cat "$log")"
 }
 
-test_transfer_properties_uses_solexp_readonly_properties_without_mutating_global_state() {
-	log="$TEST_TMPDIR/transfer_solexp_readonly.log"
+test_transfer_properties_uses_shared_sunos_readonly_properties_without_extra_delta() {
+	log="$TEST_TMPDIR/transfer_sunos_readonly.log"
 	: >"$log"
 	g_destination_operating_system="SunOS"
 	g_source_operating_system="FreeBSD"
 	g_test_base_readonly_properties="readonly"
-	g_test_solexp_readonly_properties="jailed"
 	g_initial_source="tank/src"
 	g_actual_dest="backup/dst"
-	g_recursive_dest_list=""
+	g_recursive_dest_list="backup/dst"
 	zxfer_collect_source_props() {
 		g_zxfer_source_pvs_raw="compression=lz4=local"
 		g_zxfer_source_pvs_effective="compression=lz4=local"
@@ -7893,11 +8808,13 @@ test_transfer_properties_uses_solexp_readonly_properties_without_mutating_global
 	unset -f zxfer_strip_unsupported_properties
 	unset -f zxfer_ensure_destination_exists
 
-	assertEquals "SunOS-specific readonly properties should be applied per transfer without mutating the global base list." \
+	assertEquals "SunOS transfers should not mutate the global base readonly list." \
 		"readonly" "$(zxfer_get_base_readonly_properties)"
-	assertEquals "Repeated FreeBSD-to-SunOS transfers should reuse the same effective readonly list instead of appending duplicates." \
-		"readonly,jailed
-readonly,jailed" "$(cat "$log")"
+	assertEquals "Repeated FreeBSD-to-SunOS transfers should use the shared readonly list without appending an extra SunOS delta." \
+		"readonly
+readonly
+readonly
+readonly" "$(cat "$log")"
 }
 
 # shellcheck source=tests/shunit2/shunit2

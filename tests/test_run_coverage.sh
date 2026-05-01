@@ -29,6 +29,24 @@ run_coverage_helper() {
 		/bin/sh -c ". \"$RUN_COVERAGE_BIN\"; $l_command"
 }
 
+# shellcheck disable=SC2016,SC2317,SC2329  # Invoked indirectly by shunit2; command expands inside the helper shell.
+test_run_coverage_default_suite_resolution_includes_coverage_overlays() {
+	output=$(run_coverage_helper 'ZXFER_ROOT=$(cd "$(dirname "$RUN_COVERAGE_BIN")/.." && pwd); TEST_DIR="$ZXFER_ROOT/tests"; resolve_suites | while IFS= read -r suite; do case "$suite" in "$ZXFER_ROOT"/*) printf "%s\n" "${suite#$ZXFER_ROOT/}" ;; *) printf "%s\n" "$suite" ;; esac; done')
+
+	assertContains "The default coverage run should include the background job coverage suite that protects the committed baseline." \
+		"$output" "tests/test_zxfer_background_jobs.sh"
+	assertContains "The default coverage run should include the background job runner coverage suite that protects the committed baseline." \
+		"$output" "tests/test_zxfer_background_job_runner.sh"
+	assertContains "The default coverage run should include the remote host overlay suite that protects the committed baseline." \
+		"$output" "tests/test_zxfer_remote_hosts_coverage.sh"
+	assertContains "The default coverage run should include the property cache overlay suite that exercises DRY cleanup helpers." \
+		"$output" "tests/test_zxfer_property_cache_coverage.sh"
+	assertContains "The default coverage run should include the snapshot state suite that protects transform readback coverage." \
+		"$output" "tests/test_zxfer_snapshot_state.sh"
+	assertNotContains "The default coverage run should not execute shared test scaffolding as a suite." \
+		"$output" "tests/test_helper.sh"
+}
+
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_coverage_capture_bash_xtrace_to_file_survives_fd_9_closure() {
 	l_bash_bin=${ZXFER_COVERAGE_BASH_BIN:-}

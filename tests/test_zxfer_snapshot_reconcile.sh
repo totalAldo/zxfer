@@ -93,6 +93,27 @@ snap2	222" "$(cat "$identity_output_file")"
 backup/dst@snap2" "$(cat "$path_output_file")"
 }
 
+test_invalidate_destination_snapshot_record_cache_resets_creation_cache_when_loaded() {
+	destination_cache_file="$TEST_TMPDIR/destination_snapshot_cache_with_creation.raw"
+	printf '%s\n' "backup/dst@snap1	111" >"$destination_cache_file"
+	g_zxfer_destination_snapshot_record_cache_file=$destination_cache_file
+	g_rzfs_list_hr_snap="backup/dst@snap1	111"
+	g_destination_snapshot_creation_cache="backup/dst@snap1	111"
+
+	zxfer_build_snapshot_record_index destination "backup/dst@snap1	111" >/dev/null ||
+		fail "Expected destination snapshot index fixture to build."
+	zxfer_invalidate_destination_snapshot_record_cache
+
+	assertEquals "Destination snapshot invalidation should clear destination snapshot creation cache when snapshot reconcile is loaded." \
+		"" "${g_destination_snapshot_creation_cache:-}"
+	assertEquals "Destination snapshot invalidation should clear destination snapshot index readiness." \
+		0 "${g_zxfer_destination_snapshot_record_index_ready:-0}"
+	assertEquals "Destination snapshot invalidation should clear the destination snapshot cache-file path." \
+		"" "${g_zxfer_destination_snapshot_record_cache_file:-}"
+	assertFalse "Destination snapshot invalidation should remove the stale snapshot cache file." \
+		"[ -e \"$destination_cache_file\" ]"
+}
+
 test_delete_snaps_returns_when_nothing_needs_deletion() {
 	log_file="$TEST_TMPDIR/delete_none.log"
 	: >"$log_file"
@@ -121,6 +142,27 @@ test_delete_snaps_dry_run_prints_destroy_command() {
 		"$output" "Dry run: '/sbin/zfs' 'destroy' 'tank/fs@snap3'"
 }
 
+test_delete_snaps_invalidates_destination_snapshot_cache_after_live_destroy() {
+	log_file="$TEST_TMPDIR/delete_invalidate_snapshot_cache.log"
+	: >"$log_file"
+	source_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+	dest_list=$(printf '%s\n%s\n%s' "tank/fs@snap1" "tank/fs@snap2" "tank/fs@snap3")
+
+	zxfer_run_destination_zfs_cmd() {
+		printf 'destroy=%s %s\n' "$1" "$2" >>"$log_file"
+		return 0
+	}
+	zxfer_invalidate_destination_snapshot_record_cache() {
+		printf 'invalidated=snapshots\n' >>"$log_file"
+	}
+
+	zxfer_delete_snaps "$source_list" "$dest_list"
+
+	assertEquals "Successful destination snapshot destroys should invalidate destination snapshot caches after the live mutation." \
+		"destroy=destroy tank/fs@snap3
+invalidated=snapshots" "$(cat "$log_file")"
+}
+
 test_delete_snaps_throws_when_destroy_fails() {
 	source_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
 	dest_list=$(printf '%s\n%s\n%s' "tank/fs@snap1" "tank/fs@snap2" "tank/fs@snap3")
@@ -135,6 +177,9 @@ test_delete_snaps_throws_when_destroy_fails() {
 				printf '%s\n' "$1"
 				exit "${2:-1}"
 			}
+			zxfer_invalidate_destination_snapshot_record_cache() {
+				printf '%s\n' "invalidated"
+			}
 			zxfer_delete_snaps "$source_list" "$dest_list"
 		)
 	)
@@ -143,6 +188,8 @@ test_delete_snaps_throws_when_destroy_fails() {
 	assertEquals "Failed destination destroys should preserve the destroy status." 37 "$status"
 	assertContains "Failed destination destroys should use the generic execution error." \
 		"$output" "Error when executing command."
+	assertNotContains "Failed destination destroys should not invalidate snapshot caches as if the mutation succeeded." \
+		"$output" "invalidated"
 }
 
 test_grandfather_test_reports_detailed_context_for_old_snapshots() {
@@ -325,7 +372,7 @@ test_get_last_common_snapshot_preserves_source_normalization_failures() {
 		g_test_normalize_call_count=0
 		zxfer_read_normalized_snapshot_record_list() {
 			g_test_normalize_call_count=$((g_test_normalize_call_count + 1))
-			if [ "$g_test_normalize_call_count" -eq 1 ]; then
+			if [ "$g_test_normalize_call_count" -le 2 ]; then
 				g_zxfer_runtime_artifact_read_result="backup/dst@snap1"
 				return 0
 			fi
@@ -339,6 +386,31 @@ test_get_last_common_snapshot_preserves_source_normalization_failures() {
 	assertEquals "Last-common snapshot lookup should preserve source normalization failures." \
 		47 "$status"
 	assertEquals "Last-common snapshot lookup should not publish a fallback snapshot when source normalization fails." \
+		"" "$(cat "$output_file")"
+}
+
+test_get_last_common_snapshot_preserves_destination_identity_stage_failures() {
+	output_file="$TEST_TMPDIR/last_common_identity_stage_failure.out"
+
+	set +e
+	(
+		g_test_normalize_call_count=0
+		zxfer_read_normalized_snapshot_record_list() {
+			g_test_normalize_call_count=$((g_test_normalize_call_count + 1))
+			if [ "$g_test_normalize_call_count" -eq 1 ]; then
+				g_zxfer_runtime_artifact_read_result="backup/dst@snap1"
+				return 0
+			fi
+			return 48
+		}
+		zxfer_get_last_common_snapshot "tank/src@snap1" "backup/dst@snap1" >"$output_file"
+	)
+	status=$?
+	set -e
+
+	assertEquals "Last-common snapshot lookup should preserve destination identity staging failures." \
+		48 "$status"
+	assertEquals "Last-common snapshot lookup should not publish a fallback snapshot when identity staging fails." \
 		"" "$(cat "$output_file")"
 }
 

@@ -191,21 +191,19 @@ backup file mentioned in the previous option.
 A word of warning:
 In order to allow the restoration of filesystems within the hierarchy,
 .Nm
-will begin at the level you specify, and traverse the filesystem hierarchy back
-to the pool level, checking the current keyed
-.Pa .zxfer_backup_info.<tail>.<id>
-file in each hardened metadata directory
+will check the exact current keyed metadata path
+.Pa .zxfer_backup_info.v2/h/<id-chunks>/.zxfer_backup_info.v2
+in the hardened metadata directory
 .Pq Pa ZXFER_BACKUP_DIR/source/dataset/path/
-until it finds one that contains an exact current-format
-.Dq source,destination,properties
-row for the requested source and destination, or fails. The keyed file must
-also carry the
+for the requested source and destination roots. The current lossless-key path is
+checked first with a read-only fallback to the retired checksum-keyed v2
+filename when it is absent. The metadata must also carry the
 .Dq #zxfer property backup file
 header and a supported
-.Dq #format_version
+.Dq #format_version:2
 marker before
 .Nm
-will consume any restore rows. Older, unversioned, or otherwise unsupported
+will consume any v2 source-root-relative restore rows. Older, unversioned, or otherwise unsupported
 backup metadata layouts are not supported; restore the properties only from
 files stored in the hardened directory (which defaults to
 .Pa /var/db/zxfer
@@ -215,26 +213,30 @@ and can be changed by exporting
 Prints (h)elp.
 .It Fl k
 Bac(k)up property mode. This backs up the original filesystem property settings
-to a file
-.Pa .zxfer_backup_info.<tail>.<id>
+to the current keyed metadata path
+.Pa .zxfer_backup_info.v2/h/<id-chunks>/.zxfer_backup_info.v2
 stored inside the hardened metadata directory
 .Pq Pa ZXFER_BACKUP_DIR/source/dataset/path/.
 This file lives outside the dataset mountpoints so unprivileged users cannot
 pre-create symlinks. The
 .Dq #zxfer property backup file
 header and
-.Dq #format_version
+.Dq #format_version:2
 marker are written automatically so future restore runs can validate the
-metadata format before consuming exact source/destination rows. The
-.Aq id
-suffix is derived from the full source and destination pair so distinct
-replication runs do not overwrite each other just because they share the same
-source tail. The metadata header also records the full
+metadata format before consuming v2 source-root-relative rows. The
+.Aq id-chunks
+path components are a lossless identity derived from the full source and
+destination pair, split into bounded chunks so long dataset names do not exceed
+per-component filesystem limits and distinct replication runs do not overwrite
+each other just because they share the same source tail. Restore still
+recognizes the retired checksum-keyed v2 filename as a read-only fallback when
+the current lossless-key path is absent. The metadata
+header also records the full
 .Dq source_root
 and
 .Dq destination_root
-dataset identifiers for the backup run, while the body rows retain the exact
-source/destination pairs later consumed by
+dataset identifiers for the backup run, while the body rows retain
+source-root-relative dataset paths later consumed by
 .Fl e .
 Current-format files emit only those versioned root markers; the older
 compatibility alias lines are no longer written.
@@ -244,8 +246,8 @@ and you keep the default
 .Ev ZXFER_BACKUP_DIR
 of
 .Pa /var/db/zxfer ,
-the file
-.Pa /var/db/zxfer/tank/src/.zxfer_backup_info.src.k1234567890.8
+the metadata path
+.Pa /var/db/zxfer/tank/src/.zxfer_backup_info.v2/h/74616e6b2f7372630a6261636b75702f647374/.zxfer_backup_info.v2
 would hold all the information about the original values of the filesystem
 properties, and some other useful info. Set
 .Ev ZXFER_BACKUP_DIR
@@ -319,12 +321,13 @@ for example
 For example,
 .Fl o Ar compression=lzjb
 will cause all destination filesystems to be set to lzjb compression. If using
-recursive mode, current releases apply the override across the replicated tree
-so descendant filesystems may also be
-.Cm set
-explicitly when needed to preserve the requested effective value; they do not
-currently remain inherited-only from the root filesystem. Note that this
-option will also override any values that would otherwise be
+recursive mode,
+.Nm
+sets the override on the replicated root and leaves descendants inherited when
+the property can inherit and their parent already provides the requested value;
+non-inheritable overrides, such as quotas and reservations, remain local on
+descendants.
+Note that this option will also override any values that would otherwise be
 .Cm set
 by "-P". Invoking this option will also create the destination filesystem(s)
 if they do not already exist.
@@ -522,12 +525,15 @@ or properties that are not supported on the destination.
 Run up to this many zfs send/receive jobs concurrently and use the explicit
 per-dataset source snapshot-discovery path when determining the work queue.
 When jobs is greater than 1, zxfer uses a direct per-dataset source listing
-pipeline instead of the single recursive snapshot list. Local-origin runs
-require GNU parallel on the executing origin host; remote-origin runs through
+pipeline instead of the single recursive snapshot list. Local-origin and
+remote-origin runs through
 .Fl O
-require that the resolved origin-host
+require a resolved
 .Sy parallel
-helper exists and assume it is compatible with the rendered pipeline.
+helper on the executing origin host. zxfer intentionally validates only helper
+existence through the secure-PATH model, then assumes the operator or package
+supplied an implementation compatible with the GNU Parallel-style options used
+by the rendered source-discovery pipeline.
 zxfer does not silently fall back to the serial recursive listing once
 .Fl j
 is greater than 1. The default is 1, which disables background sends and keeps
@@ -597,8 +603,11 @@ and so does your local machine if
 .Op Fl T
 is not also used.
 .Pp
-This fork is exercised across FreeBSD, Linux with OpenZFS, illumos/Solaris,
-and OpenZFS on macOS. Remote helper resolution is designed to tolerate
+This fork is exercised across current OpenZFS 2.0+ environments on maintained
+FreeBSD branches, Linux with OpenZFS, OmniOS/illumos, and OpenZFS on macOS.
+For releases published after 2026-05-01, the FreeBSD support baseline is
+FreeBSD 14.x and 15.x; FreeBSD 13.x and other end-of-life branches are not
+guaranteed. Remote helper resolution is designed to tolerate
 different absolute
 .Xr zfs 8
 paths on each host, but property support can still differ across operating
@@ -703,10 +712,11 @@ Like
 .Op Fl O ,
 .It Fl U
 Skip replicating any properties that are not supported by the destination.
-Before replication begins, a list of supported properties is fetched from the
-destination and any properties not on that list are removed from the list of
-properties to be replicated.
-This allows replicating from newer versions of OpenZFS to older versions.
+Before replication begins, zxfer probes the current destination within the
+OpenZFS 2.0+ support floor and removes source properties that the destination
+does not accept for the current dataset type.
+This is a current-platform skip mechanism, not a compatibility bridge for
+pre-OpenZFS 2.0 destinations.
 .It Fl v
 (v) verbose mode
 .It Fl V
@@ -1097,11 +1107,14 @@ on non-zero exits. The parent directory must already exist, be owned by root
 or the effective UID, and not be writable by other users unless the sticky bit
 is set. Any symlinked path component is refused, existing log files must be
 owned by root or the effective UID and already use mode 0600, and zxfer stages
-appends through a sibling temporary file before the final rename. Appends are
-coordinated through a sibling metadata-bearing lock directory that records PID,
-process-start identity, hostname, purpose, and creation time, and stale owners
-are reaped after validation. If zxfer cannot append the report, or if a
-successful append cannot release that lock cleanly, it emits a warning to
+appends through a sibling temporary file before the final rename when the
+parent is writable. Appends are coordinated through a metadata-bearing lock
+directory that records PID, process-start identity, hostname, purpose, and
+creation time. Writable log parents use a sibling lock; existing logs under
+trusted but non-writable parents use an exact log-path fallback lock under a
+validated temp root. Stale owners are reaped after validation. If zxfer cannot
+append the report, or if a successful append cannot release that lock cleanly,
+it emits a warning to
 .Dv stderr ;
 when that happens during trap-time failure reporting, zxfer still preserves the
 original exit status.
@@ -1203,10 +1216,14 @@ exit 1.
 .Xr zpool 1
 .Sh COMPATIBILITY
 .Nm
-targets FreeBSD, Linux with OpenZFS, illumos/Solaris systems, and OpenZFS on
-macOS. Cross-version and cross-platform replication can still expose property
-or helper-path differences, so mixed-environment deployments should validate
-their exact send/receive and property behavior before production use.
+targets current OpenZFS 2.0+ environments on maintained FreeBSD branches,
+Linux with OpenZFS, OmniOS/illumos, and OpenZFS on macOS. For releases
+published after 2026-05-01, the FreeBSD support baseline is FreeBSD 14.x and
+15.x; FreeBSD 13.x and other end-of-life branches are not guaranteed.
+Cross-version and cross-platform
+replication can still expose property or helper-path differences, so
+mixed-environment deployments should validate their exact send/receive and
+property behavior before production use.
 .Sh THANKS
 Thanks to Constantin Gonzalez for his constant collaboration, guidance, and
 his
@@ -1250,8 +1267,8 @@ section for details on this.
 There are several properties that are skipped over when transferring
 or setting properties when testing has shown that creating or setting
 them would fail on one or more supported platforms. If certain newer ZFS
-properties are not being transferred, they may have been added to that
-compatibility filter. See the
+properties are not being transferred, they may have been added to that current
+platform filter. See the
 .Op Fl P
 documentation for current platform-specific limitations.
 .Pp

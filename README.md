@@ -6,10 +6,10 @@ across local and remote hosts. This maintained fork focuses on safer
 replication behavior, better portability, stronger failure reporting, and
 faster handling of large dataset trees.
 
-It targets FreeBSD, Linux/OpenZFS, illumos/Solaris, and current
-OpenZFS-on-macOS workflows. The command is meant for production administrators,
-so CLI behavior, operator-visible output, and replication semantics are treated
-as public interfaces.
+It targets current OpenZFS 2.0+ workflows on maintained FreeBSD branches,
+Linux/OpenZFS, OmniOS/illumos, and OpenZFS-on-macOS. The command is meant for
+production administrators, so CLI behavior, operator-visible output, and
+replication semantics are treated as public interfaces.
 
 Before using it against production data, validate the exact command line on
 throwaway datasets, sparse-file pools, or a disposable VM. Options such as
@@ -78,9 +78,11 @@ Use remote compression:
 - Wrapper-style remote host specs such as `user@host pfexec` or `user@host doas`
 - Concurrent send/receive jobs with explicit per-dataset source discovery and
   supervised long-lived cleanup via `-j`
-- Property replication, overrides, and unsupported-property skipping
+- Property replication, overrides, and unsupported-property skipping for the
+  current OpenZFS 2.0+ support floor
 - Property backup and restore with `-k` and `-e`, using hardened metadata
-  storage outside dataset mountpoints
+  storage outside dataset mountpoints and the current `#format_version:2`
+  schema
 - Optional raw sends with `-w`
 - Optional `zstd` compression with `-z` or a custom `zstd` compressor command
   with `-Z`
@@ -101,9 +103,12 @@ Use remote compression:
   through validated process-group or owned-child-set cleanup instead of
   signaling a bare wrapper PID. zxfer also serializes conflicting ancestor/descendant
   destination receives on the same target, even when spare job slots remain,
-  so parent and child datasets do not receive concurrently. Local-origin runs
-  require GNU `parallel`; remote-origin runs require a resolved origin-host
-  `parallel` helper
+  so parent and child datasets do not receive concurrently. Local-origin and
+  remote-origin runs require a resolved `parallel` helper on the executing
+  origin host; zxfer intentionally checks only that the helper exists through
+  the secure-PATH model, so operators and packages must provide an
+  implementation compatible with the GNU Parallel-style options used by the
+  rendered source-discovery pipeline
 - `-V`: enable very verbose debug output and end-of-run profiling counters,
   including startup latency and trap-cleanup timing
 - `-x pattern`: exclude datasets from recursive replication
@@ -123,12 +128,18 @@ full option set and additional workflows.
 
 ## Supported Platforms
 
-zxfer is intended to work with:
+zxfer is intended to work with current OpenZFS 2.0+ environments:
 
-- FreeBSD with OpenZFS
+- FreeBSD 14.x and 15.x maintained branches with OpenZFS
 - Linux with OpenZFS
-- illumos / Solaris-family systems
-- OpenZFS on macOS
+- current OmniOS / illumos systems
+- current OpenZFS on macOS workflows
+
+For releases published after 2026-05-01, zxfer follows maintained FreeBSD
+branches and does not guarantee support for FreeBSD 13.x or other
+end-of-life FreeBSD branches. Pre-OpenZFS 2.0 behavior, Solaris Express-era
+property profiles, and older backup metadata layouts are intentionally
+unsupported.
 
 It also supports VM-backed validation from Linux, macOS, and WSL2 hosts through
 [tests/run_vm_matrix.sh](./tests/run_vm_matrix.sh).
@@ -142,6 +153,8 @@ zxfer rebuilds `PATH` from a trusted allowlist and resolves required helpers to
 absolute paths. Remote `zfs`, `cat`, `parallel` for `-j > 1`, and compression
 helpers are resolved per host instead of assuming the same binary path exists
 everywhere.
+Local-only runs do not resolve `ssh`; it is required when `-O` or `-T` needs a
+remote transport.
 
 zxfer-managed ssh connections default to `BatchMode=yes` and
 `StrictHostKeyChecking=yes`. Use `ZXFER_SSH_USER_KNOWN_HOSTS_FILE` to pin an

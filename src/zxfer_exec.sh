@@ -36,7 +36,7 @@
 ################################################################################
 
 # Module contract:
-# owns globals: g_last_background_pid.
+# owns globals: g_last_background_pid and SSH/remote shell command preparation scratch.
 # reads globals: g_option_* verbosity/dry-run flags, g_cmd_ssh, g_LZFS/g_RZFS, and current dataset context.
 # mutates caches: destination-existence cache and cleanup PID tracking through shared helpers.
 # returns via stdout: quoted tokens, rendered commands, remote outputs, and destination probes.
@@ -600,28 +600,28 @@ EOF
 	"$@"
 }
 
-# Purpose: Build the SSH shell command for host for the next execution or
-# comparison step.
-# Usage: Called during command rendering, ssh wrapping, and ZFS execution
-# before other helpers consume the assembled value.
-#
-# Build a shell-ready local ssh command string while preserving any wrapper
-# tokens embedded in the -O/-T host spec (for example "host pfexec"). The
-# remote command must already be quoted for execution by the remote shell.
-zxfer_build_ssh_shell_command_for_host() {
+# Purpose: Prepare the parsed SSH host and wrapped remote command for one host
+# spec.
+# Usage: Called before SSH command rendering or invocation so wrapper tokens
+# embedded in -O/-T host specs are decomposed in one place.
+# Side effects: Publishes the host and full remote command in
+# $g_zxfer_ssh_shell_host_result and
+# $g_zxfer_ssh_shell_full_remote_command_result.
+zxfer_prepare_ssh_shell_command_context() {
 	l_host_spec=$1
 	l_remote_shell_cmd=$2
 
+	g_zxfer_ssh_shell_host_result=""
+	g_zxfer_ssh_shell_full_remote_command_result=""
+	g_zxfer_ssh_shell_context_error_result=""
 	[ "$l_remote_shell_cmd" = "" ] && return 1
 
-	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
-		:
-	else
-		l_transport_status=$?
-		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
-	fi
-	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec"); then
-		zxfer_throw_error "$l_host_tokens"
+	l_context_status=0
+	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec") ||
+		l_context_status=$?
+	if [ "$l_context_status" -ne 0 ]; then
+		g_zxfer_ssh_shell_context_error_result=$l_host_tokens
+		return "$l_context_status"
 	fi
 	[ "$l_host_tokens" != "" ] || return 1
 
@@ -649,7 +649,42 @@ EOF
 		l_full_remote_cmd="$l_wrapper_cmd $l_remote_shell_cmd"
 	fi
 
-	l_command_tokens=$(printf '%s\n%s\n%s\n' "$l_transport_tokens" "$l_ssh_host" "$l_full_remote_cmd")
+	g_zxfer_ssh_shell_host_result=$l_ssh_host
+	g_zxfer_ssh_shell_full_remote_command_result=$l_full_remote_cmd
+	return 0
+}
+
+# Purpose: Build the SSH shell command for host for the next execution or
+# comparison step.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution
+# before other helpers consume the assembled value.
+#
+# Build a shell-ready local ssh command string while preserving any wrapper
+# tokens embedded in the -O/-T host spec (for example "host pfexec"). The
+# remote command must already be quoted for execution by the remote shell.
+zxfer_build_ssh_shell_command_for_host() {
+	l_host_spec=$1
+	l_remote_shell_cmd=$2
+
+	[ "$l_remote_shell_cmd" = "" ] && return 1
+
+	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+		:
+	else
+		l_transport_status=$?
+		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
+	fi
+	if zxfer_prepare_ssh_shell_command_context "$l_host_spec" "$l_remote_shell_cmd"; then
+		:
+	else
+		l_context_status=$?
+		if [ "$g_zxfer_ssh_shell_context_error_result" != "" ]; then
+			zxfer_throw_error "$g_zxfer_ssh_shell_context_error_result"
+		fi
+		return "$l_context_status"
+	fi
+
+	l_command_tokens=$(printf '%s\n%s\n%s\n' "$l_transport_tokens" "$g_zxfer_ssh_shell_host_result" "$g_zxfer_ssh_shell_full_remote_command_result")
 	zxfer_quote_token_stream "$l_command_tokens"
 }
 
@@ -675,33 +710,14 @@ zxfer_invoke_ssh_shell_command_for_host() {
 		l_transport_status=$?
 		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
 	fi
-	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec"); then
-		zxfer_throw_error "$l_host_tokens"
-	fi
-	[ "$l_host_tokens" != "" ] || return 1
-
-	l_ssh_host=""
-	l_wrapper_tokens=""
-	while IFS= read -r l_token || [ -n "$l_token" ]; do
-		[ "$l_token" = "" ] && continue
-		if [ "$l_ssh_host" = "" ]; then
-			l_ssh_host=$l_token
-		elif [ "$l_wrapper_tokens" = "" ]; then
-			l_wrapper_tokens=$l_token
-		else
-			l_wrapper_tokens="$l_wrapper_tokens
-$l_token"
+	if zxfer_prepare_ssh_shell_command_context "$l_host_spec" "$l_remote_shell_cmd"; then
+		:
+	else
+		l_context_status=$?
+		if [ "$g_zxfer_ssh_shell_context_error_result" != "" ]; then
+			zxfer_throw_error "$g_zxfer_ssh_shell_context_error_result"
 		fi
-	done <<EOF
-$l_host_tokens
-EOF
-
-	[ "$l_ssh_host" != "" ] || return 1
-
-	l_full_remote_cmd=$l_remote_shell_cmd
-	if [ "$l_wrapper_tokens" != "" ]; then
-		l_wrapper_cmd=$(zxfer_quote_token_stream "$l_wrapper_tokens")
-		l_full_remote_cmd="$l_wrapper_cmd $l_remote_shell_cmd"
+		return "$l_context_status"
 	fi
 
 	set --
@@ -713,7 +729,7 @@ EOF
 $l_transport_tokens
 EOF
 	fi
-	set -- "$@" "$l_ssh_host" "$l_full_remote_cmd"
+	set -- "$@" "$g_zxfer_ssh_shell_host_result" "$g_zxfer_ssh_shell_full_remote_command_result"
 
 	zxfer_record_last_command_argv "$@"
 	zxfer_echoV_remote_command_for_host "$l_host_spec" "$l_profile_side" "$@"
@@ -727,6 +743,102 @@ EOF
 zxfer_build_remote_sh_c_command() {
 	l_remote_script=$1
 	zxfer_build_shell_command_from_argv "sh" "-c" "$l_remote_script"
+}
+
+# Purpose: Prepare a shell-ready remote command for one host spec.
+# Usage: Called during command rendering before ssh wrapping so wrapper-style
+# host specs consistently receive an explicit remote `sh -c` command.
+# Side effects: Publishes the prepared command in
+# $g_zxfer_remote_shell_command_for_host_result.
+zxfer_prepare_remote_shell_command_for_host() {
+	l_host_spec=$1
+	l_remote_shell_cmd=$2
+
+	g_zxfer_remote_shell_command_for_host_result=""
+	[ "$l_remote_shell_cmd" != "" ] || return 1
+
+	l_prepare_status=0
+	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec") ||
+		l_prepare_status=$?
+	if [ "$l_prepare_status" -ne 0 ]; then
+		g_zxfer_remote_shell_command_for_host_result=$l_host_tokens
+		return "$l_prepare_status"
+	fi
+
+	l_host_token_count=0
+	if [ "$l_host_tokens" != "" ]; then
+		while IFS= read -r l_token || [ -n "$l_token" ]; do
+			[ "$l_token" = "" ] && continue
+			l_host_token_count=$((l_host_token_count + 1))
+		done <<EOF
+$l_host_tokens
+EOF
+	fi
+
+	if [ "$l_host_token_count" -gt 1 ]; then
+		l_prepared_remote_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_shell_cmd") ||
+			return "$?"
+		g_zxfer_remote_shell_command_for_host_result=$l_prepared_remote_cmd
+	else
+		g_zxfer_remote_shell_command_for_host_result=$l_remote_shell_cmd
+	fi
+	return 0
+}
+
+# Purpose: Build an SSH shell command after preparing the remote command for
+# wrapper-style host specs.
+# Usage: Called by send/receive and dry-run renderers so host-token diagnostics,
+# wrapper `sh -c` handling, and SSH rendering stay centralized.
+# Side effects: Publishes the rendered command in
+# $g_zxfer_prepared_ssh_shell_command_result or the diagnostic in
+# $g_zxfer_prepared_ssh_shell_command_error_result.
+zxfer_build_prepared_ssh_shell_command_for_host() {
+	l_host_spec=$1
+	l_remote_shell_cmd=$2
+
+	g_zxfer_prepared_ssh_shell_command_result=""
+	g_zxfer_prepared_ssh_shell_command_error_result=""
+	if zxfer_prepare_remote_shell_command_for_host "$l_host_spec" "$l_remote_shell_cmd"; then
+		:
+	else
+		l_prepare_status=$?
+		if [ "$g_zxfer_remote_shell_command_for_host_result" != "" ]; then
+			g_zxfer_prepared_ssh_shell_command_error_result=$g_zxfer_remote_shell_command_for_host_result
+		fi
+		return "$l_prepare_status"
+	fi
+
+	l_build_status=0
+	l_rendered_command=$(zxfer_build_ssh_shell_command_for_host "$l_host_spec" "$g_zxfer_remote_shell_command_for_host_result") ||
+		l_build_status=$?
+	if [ "$l_build_status" -ne 0 ]; then
+		if [ "$l_rendered_command" != "" ]; then
+			g_zxfer_prepared_ssh_shell_command_error_result=$l_rendered_command
+		fi
+		return "$l_build_status"
+	fi
+	g_zxfer_prepared_ssh_shell_command_result=$l_rendered_command
+	printf '%s' "$g_zxfer_prepared_ssh_shell_command_result"
+}
+
+# Purpose: Publish a prepared SSH shell command or rethrow the captured
+# diagnostic outside command substitutions.
+# Usage: Called by modules that need the rendered command in
+# $g_zxfer_prepared_ssh_shell_command_result while preserving failure text.
+# Side effects: Publishes the rendered command or exits through zxfer_throw_error.
+zxfer_publish_prepared_ssh_shell_command_for_host_or_throw() {
+	l_host_spec=$1
+	l_remote_shell_cmd=$2
+
+	zxfer_build_prepared_ssh_shell_command_for_host "$l_host_spec" "$l_remote_shell_cmd" >/dev/null
+	l_prepare_status=$?
+	if [ "$l_prepare_status" -eq 0 ]; then
+		return 0
+	fi
+	if [ "$g_zxfer_prepared_ssh_shell_command_error_result" != "" ]; then
+		zxfer_throw_error "$g_zxfer_prepared_ssh_shell_command_error_result" "$l_prepare_status"
+	fi
+	return "$l_prepare_status"
 }
 
 # Purpose: Run the source ZFS command through the controlled execution path
@@ -936,6 +1048,47 @@ zxfer_destination_probe_is_ambiguous() {
 	return 0
 }
 
+# Purpose: Confirm whether an ambiguous SunOS parent-listing failure means the
+# requested parent is absent.
+# Usage: Called during destination existence fallback when OmniOS/SunOS returns
+# no diagnostic text for a failed recursive listing of a missing parent.
+zxfer_destination_parent_missing_confirmed_by_ancestor_listing() {
+	l_missing_dataset=$1
+	l_original_missing_dataset=$1
+
+	while :; do
+		l_ancestor_dataset=${l_missing_dataset%/*}
+		[ "$l_ancestor_dataset" != "$l_missing_dataset" ] || return 1
+
+		l_cmd=$(zxfer_render_destination_zfs_command list -H -r -o name "$l_ancestor_dataset")
+		zxfer_echoV "Parent recursive destination probe was ambiguous on SunOS; checking ancestor recursively: $l_cmd"
+
+		if l_ancestor_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_ancestor_dataset" 2>&1); then
+			if printf '%s\n' "$l_ancestor_listing" | grep -F -x "$l_missing_dataset" >/dev/null 2>&1; then
+				return 1
+			fi
+
+			if printf '%s\n' "$l_ancestor_listing" | grep -F -x "$l_ancestor_dataset" >/dev/null 2>&1; then
+				zxfer_mark_destination_hierarchy_exists "$l_ancestor_dataset"
+				zxfer_set_destination_existence_cache_entry "$l_missing_dataset" 0
+				zxfer_set_destination_existence_cache_entry "$l_original_missing_dataset" 0
+				return 0
+			fi
+
+			return 1
+		fi
+
+		if zxfer_destination_probe_reports_missing "$l_ancestor_listing"; then
+			zxfer_set_destination_existence_cache_entry "$l_missing_dataset" 0
+			zxfer_set_destination_existence_cache_entry "$l_original_missing_dataset" 0
+			return 0
+		fi
+
+		zxfer_destination_probe_is_ambiguous "$l_ancestor_listing" || return 1
+		l_missing_dataset=$l_ancestor_dataset
+	done
+}
+
 # Purpose: Check whether the destination via parent recursive listing exists.
 # Usage: Called during command rendering, ssh wrapping, and ZFS execution
 # before later create, seed, or delete decisions depend on presence or absence.
@@ -975,6 +1128,14 @@ zxfer_exists_destination_via_parent_recursive_listing() {
 	fi
 
 	if zxfer_destination_probe_reports_missing "$l_parent_listing"; then
+		zxfer_set_destination_existence_cache_entry "$l_parent_dataset" 0
+		zxfer_set_destination_existence_cache_entry "$l_dest" 0
+		printf '%s\n' 0
+		return 0
+	fi
+
+	if zxfer_destination_probe_is_ambiguous "$l_parent_listing" &&
+		zxfer_destination_parent_missing_confirmed_by_ancestor_listing "$l_parent_dataset"; then
 		zxfer_set_destination_existence_cache_entry "$l_dest" 0
 		printf '%s\n' 0
 		return 0

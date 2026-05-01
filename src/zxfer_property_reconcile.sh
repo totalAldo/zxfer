@@ -37,7 +37,7 @@
 ################################################################################
 
 # Module contract:
-# owns globals: run-wide property filter state plus per-call property reconciliation scratch/result globals such as g_unsupported_properties, g_zxfer_new_rmvs_pv, g_zxfer_new_rmv_pvs, g_zxfer_new_mc_pvs, g_zxfer_only_supported_properties, g_zxfer_adjusted_set_list, g_zxfer_adjusted_inherit_list, g_zxfer_source_pvs_raw, g_zxfer_source_pvs_effective, g_zxfer_override_pvs_result, g_zxfer_creation_pvs_result, and g_zxfer_property_stage_file_read_result.
+# owns globals: run-wide property filter state plus per-call property reconciliation scratch/result globals such as g_zxfer_new_rmvs_pv, g_zxfer_new_rmv_pvs, g_zxfer_new_mc_pvs, g_zxfer_only_supported_properties, g_zxfer_adjusted_set_list, g_zxfer_adjusted_inherit_list, g_zxfer_source_pvs_raw, g_zxfer_source_pvs_effective, g_zxfer_override_pvs_result, g_zxfer_creation_pvs_result, and g_zxfer_property_stage_file_read_result.
 # reads globals: g_LZFS/g_RZFS, g_actual_dest, migration/platform state, and restore/backup mode state.
 # mutates caches: destination property cache through create/set/inherit helpers.
 # returns via stdout: filtered property lists, diff results, and dataset-create metadata.
@@ -51,7 +51,7 @@ filesystem_count,snapshot_count,clones,defer_destroy,receive_resume_token,\
 userrefs,objsetid"
 ZXFER_FREEBSD_READONLY_PROPERTIES="aclmode,aclinherit,devices,nbmand,shareiscsi,vscan,\
 xattr,dnodesize"
-ZXFER_SOLEXP_READONLY_PROPERTIES="jailed,aclmode,shareiscsi"
+ZXFER_NONINHERITABLE_PROPERTIES="quota,reservation,canmount,refquota,refreservation"
 
 # Purpose: Return the base readonly properties in the form expected by later
 # helpers.
@@ -69,12 +69,12 @@ zxfer_get_freebsd_readonly_properties() {
 	printf '%s\n' "$ZXFER_FREEBSD_READONLY_PROPERTIES"
 }
 
-# Purpose: Return the Solaris export readonly properties in the form expected
-# by later helpers.
-# Usage: Called during property filtering, diffing, and apply when sibling
-# helpers need the same lookup without duplicating module logic.
-zxfer_get_solexp_readonly_properties() {
-	printf '%s\n' "$ZXFER_SOLEXP_READONLY_PROPERTIES"
+# Purpose: Return properties whose effective values cannot be preserved through
+# child inheritance.
+# Usage: Called by property reconciliation before converting child set/create
+# work into inherit operations.
+zxfer_get_noninheritable_properties() {
+	printf '%s\n' "${g_test_noninheritable_properties:-$ZXFER_NONINHERITABLE_PROPERTIES}"
 }
 
 # Purpose: Return the effective readonly properties in the form expected by
@@ -94,18 +94,6 @@ zxfer_get_effective_readonly_properties() {
 			fi
 		fi
 	fi
-	if [ "${g_destination_operating_system:-}" = "SunOS" ] &&
-		[ "${g_source_operating_system:-}" = "FreeBSD" ]; then
-		l_platform_readonly_properties=$(zxfer_get_solexp_readonly_properties)
-		if [ -n "$l_platform_readonly_properties" ]; then
-			if [ -n "$l_effective_readonly_properties" ]; then
-				l_effective_readonly_properties="$l_effective_readonly_properties,$l_platform_readonly_properties"
-			else
-				l_effective_readonly_properties=$l_platform_readonly_properties
-			fi
-		fi
-	fi
-
 	if [ "${g_option_m_migrate:-0}" -eq 1 ] && [ -n "$l_effective_readonly_properties" ]; then
 		l_effective_readonly_properties=$(printf '%s' ",$l_effective_readonly_properties," |
 			sed -e 's/,mountpoint,/,/g' -e 's/^,//' -e 's/,$//')
@@ -119,7 +107,6 @@ zxfer_get_effective_readonly_properties() {
 # Usage: Called during property filtering, diffing, and apply before this
 # module reuses mutable scratch globals or cached decisions.
 zxfer_reset_property_runtime_state() {
-	g_unsupported_properties=""
 	g_zxfer_unsupported_filesystem_properties=""
 	g_zxfer_unsupported_volume_properties=""
 }
@@ -139,7 +126,20 @@ zxfer_reset_property_reconcile_state() {
 	g_zxfer_source_pvs_effective=""
 	g_zxfer_override_pvs_result=""
 	g_zxfer_creation_pvs_result=""
+	g_zxfer_property_reconcile_stage_file_result=""
 	g_zxfer_property_stage_file_read_result=""
+	g_zxfer_required_property_backfill_result=""
+	g_zxfer_property_transfer_is_initial_source=0
+	g_zxfer_property_transfer_source_dstype=""
+	g_zxfer_property_transfer_source_volsize=""
+	g_zxfer_property_transfer_must_create_properties=""
+	g_zxfer_property_transfer_source_pvs=""
+	g_zxfer_property_transfer_override_pvs=""
+	g_zxfer_property_transfer_creation_pvs=""
+	g_zxfer_property_transfer_dest_pvs=""
+	g_zxfer_property_transfer_initial_set_list=""
+	g_zxfer_property_transfer_child_set_list=""
+	g_zxfer_property_transfer_inherit_list=""
 }
 
 # Purpose: Read the property reconcile stage file from staged state into the
@@ -150,19 +150,29 @@ zxfer_read_property_reconcile_stage_file() {
 	l_stage_file=$1
 
 	g_zxfer_property_stage_file_read_result=""
-	if zxfer_read_runtime_artifact_file "$l_stage_file" >/dev/null; then
+	if zxfer_read_runtime_artifact_file_trimmed "$l_stage_file" >/dev/null; then
 		g_zxfer_property_stage_file_read_result=$g_zxfer_runtime_artifact_read_result
 	else
 		l_read_status=$?
 		return "$l_read_status"
 	fi
-	case "$g_zxfer_property_stage_file_read_result" in
-	*'
-')
-		g_zxfer_property_stage_file_read_result=${g_zxfer_property_stage_file_read_result%?}
-		;;
-	esac
 	printf '%s\n' "$g_zxfer_property_stage_file_read_result"
+}
+
+# Purpose: Allocate a property-reconcile stage file and preserve allocation
+# failures without assuming the lower-level temp helper throws.
+# Usage: Called during property filtering, diffing, and apply when a helper
+# needs one scratch file owned by runtime cleanup.
+# Side effects: Publishes the allocated path in
+# $g_zxfer_property_reconcile_stage_file_result.
+zxfer_create_property_reconcile_stage_file() {
+	g_zxfer_property_reconcile_stage_file_result=""
+	l_stage_file_status=0
+	zxfer_get_temp_file >/dev/null || l_stage_file_status=$?
+	if [ "$l_stage_file_status" -ne 0 ]; then
+		return "$l_stage_file_status"
+	fi
+	g_zxfer_property_reconcile_stage_file_result=$g_zxfer_temp_file_result
 }
 
 ################################################################################
@@ -190,6 +200,32 @@ zxfer_remove_sources() {
 	g_zxfer_new_rmvs_pv=${g_zxfer_new_rmvs_pv%,}
 }
 
+# Purpose: Remove one literal property name from a comma-separated property-name
+# list.
+# Usage: Called during property filtering when a matched property should be
+# removed from a remaining worklist without treating the property name as a
+# regular expression.
+zxfer_remove_property_name_from_list() {
+	l_property_name_list=$1
+	l_property_name_to_remove=$2
+	l_filtered_property_name_list=""
+
+	l_oldifs=$IFS
+	IFS=","
+	for l_property_name in $l_property_name_list; do
+		[ -n "$l_property_name" ] || continue
+		[ "$l_property_name" = "$l_property_name_to_remove" ] && continue
+		if [ -n "$l_filtered_property_name_list" ]; then
+			l_filtered_property_name_list="$l_filtered_property_name_list,$l_property_name"
+		else
+			l_filtered_property_name_list=$l_property_name
+		fi
+	done
+	IFS=$l_oldifs
+
+	printf '%s\n' "$l_filtered_property_name_list"
+}
+
 # Purpose: Select only the must-create property entries that belong in the
 # destination creation set.
 # Usage: Called during property filtering, diffing, and apply when zxfer builds
@@ -215,8 +251,7 @@ zxfer_select_mc() {
 				l_found_mc=1
 				# Remove matched properties from the remaining filter list so
 				# later iterations do not rescan them unnecessarily.
-				l_mc_property_list=$(echo "$l_mc_property_list" | tr -s "," "\n" |
-					grep -v ^"$l_property"$ | tr -s "\n" ",")
+				l_mc_property_list=$(zxfer_remove_property_name_from_list "$l_mc_property_list" "$l_property")
 				break
 			fi
 		done
@@ -257,8 +292,7 @@ zxfer_remove_properties() {
 				l_found_readonly=1
 				# Since the property was matched, remove it from the remaining
 				# filter list so later iterations do not rescan it unnecessarily.
-				l_remove_list=$(echo "$l_remove_list" | tr -s "," "\n" | grep -v ^"$l_property"$)
-				l_remove_list=$(echo "$l_remove_list" | tr -s "\n" ",")
+				l_remove_list=$(zxfer_remove_property_name_from_list "$l_remove_list" "$l_property")
 				break
 			fi
 		done
@@ -280,9 +314,11 @@ zxfer_remove_properties() {
 zxfer_remove_unsupported_properties() {
 	l_orig_set_list=$1 # the list of properties=values=sources,...
 	l_unsupported_list=$2
-	zxfer_get_temp_file >/dev/null
-	l_filter_tmp=$g_zxfer_temp_file_result
 	g_zxfer_only_supported_properties=""
+
+	zxfer_create_property_reconcile_stage_file ||
+		return "$?"
+	l_filter_tmp=$g_zxfer_property_reconcile_stage_file_result
 
 	if ! "${g_cmd_awk:-awk}" -v input_list="$l_orig_set_list" \
 		-v unsupported_list="$l_unsupported_list" \
@@ -294,6 +330,7 @@ function append_csv(current, value) {
 }
 function decode_value(value) {
 	gsub(/%0D/, "\r", value)
+	gsub(/%0A/, "\n", value)
 	gsub(/%09/, "\t", value)
 	gsub(/%3B/, ";", value)
 	gsub(/%3D/, "=", value)
@@ -358,7 +395,8 @@ EOF
 #
 # Build and execute a "zfs create" command while safely passing property=value
 # assignments as individual arguments, avoiding eval so property data cannot be
-# treated as shell syntax.
+# treated as shell syntax. Parent hierarchy creation with -p must be issued
+# without properties because OpenZFS ignores -o arguments on that path.
 # $1: "yes" to include -p (create parent datasets), anything else skips it
 # $2: dataset type (volume/filesystem) to decide whether -V is required
 # $3: volume size (only used when type=volume)
@@ -372,6 +410,10 @@ zxfer_run_zfs_create_with_properties() {
 	l_destination=$5
 
 	if [ "$l_dataset_type" = "volume" ] && [ -z "$l_volume_size" ]; then
+		return 1
+	fi
+
+	if [ "$l_with_parents" = "yes" ] && zxfer_property_list_has_entries "$l_property_list"; then
 		return 1
 	fi
 
@@ -390,8 +432,11 @@ zxfer_run_zfs_create_with_properties() {
 		IFS=","
 		for l_prop_value in $l_property_list; do
 			if [ "$l_prop_value" != "" ]; then
-				l_decoded_assignment=$(zxfer_emit_decoded_property_assignments "$l_prop_value")
-				set -- "$@" "-o" "$l_decoded_assignment"
+				IFS=$l_cmd_ifs
+				zxfer_decode_serialized_property_assignment "$l_prop_value" >/dev/null ||
+					exit "$?"
+				set -- "$@" "-o" "$g_zxfer_decoded_property_assignment_result"
+				IFS=","
 			fi
 		done
 		IFS=$l_cmd_ifs
@@ -407,7 +452,7 @@ zxfer_run_zfs_create_with_properties() {
 }
 
 # Purpose: Clear readonly properties from the live apply set while preserving
-# the module's compatibility rules.
+# the module's property-application rules.
 # Usage: Called during property filtering, diffing, and apply before `zfs set`
 # or `zfs inherit` would otherwise try to modify properties the destination
 # cannot accept.
@@ -421,7 +466,36 @@ zxfer_force_readonly_off() {
 		return
 	fi
 
-	printf '%s\n' "$(echo "$1" | sed -e 's/readonly=on/readonly=off/g')"
+	l_forced_property_list=""
+	l_oldifs=$IFS
+	IFS=","
+	for l_property_entry in $1; do
+		if [ -z "$l_property_entry" ]; then
+			continue
+		fi
+		l_forced_property_entry=$l_property_entry
+		l_property_name=${l_property_entry%%=*}
+		l_property_remainder=${l_property_entry#*=}
+		if [ "$l_property_name" = "readonly" ]; then
+			case $l_property_remainder in
+			on)
+				l_forced_property_entry="readonly=off"
+				;;
+			on=*)
+				l_property_source=${l_property_remainder#*=}
+				l_forced_property_entry="readonly=off=$l_property_source"
+				;;
+			esac
+		fi
+		if [ -n "$l_forced_property_list" ]; then
+			l_forced_property_list="$l_forced_property_list,$l_forced_property_entry"
+		else
+			l_forced_property_list=$l_forced_property_entry
+		fi
+	done
+	IFS=$l_oldifs
+
+	printf '%s\n' "$l_forced_property_list"
 }
 
 # Purpose: Collect the source props into the module-owned format used by later
@@ -449,12 +523,9 @@ zxfer_collect_source_props() {
 
 	g_zxfer_source_pvs_raw=""
 	g_zxfer_source_pvs_effective=""
-	l_source_props_tmp_status=0
-	zxfer_get_temp_file >/dev/null || l_source_props_tmp_status=$?
-	if [ "$l_source_props_tmp_status" -ne 0 ]; then
-		return "$l_source_props_tmp_status"
-	fi
-	l_source_props_tmp=$g_zxfer_temp_file_result
+	zxfer_create_property_reconcile_stage_file ||
+		return "$?"
+	l_source_props_tmp=$g_zxfer_property_reconcile_stage_file_result
 	l_source_props_status=0
 	zxfer_get_normalized_dataset_properties "$l_source" "$l_zfs_cmd" source >"$l_source_props_tmp" ||
 		l_source_props_status=$?
@@ -500,6 +571,9 @@ zxfer_collect_source_props() {
 				;;
 			esac
 		fi
+		if [ -z "$g_restored_backup_file_contents" ]; then
+			zxfer_throw_usage_error "Can't find the properties for the filesystem $l_source and destination $l_destination"
+		fi
 		l_restore_status=0
 		g_zxfer_source_pvs_effective=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
 			"$g_restored_backup_file_contents" "$l_source" "$l_destination") ||
@@ -527,7 +601,8 @@ zxfer_collect_source_props() {
 # Usage: Called during property filtering, diffing, and apply to fail closed on
 # malformed, unsafe, or stale input.
 #
-# Validate that every override property supplied via -o exists on the source.
+# Validate that every override property supplied via -o exists on the source,
+# while keeping syntax and missing-property diagnostics distinct.
 # Literal commas inside one override value must be escaped as \,.
 # $1: comma-separated override list (property=value)
 # $2: comma-separated source property/value/source list
@@ -603,8 +678,17 @@ BEGIN {
 	}'
 	) || l_status=$?
 
-	if [ "$l_status" -eq 1 ] && [ -n "$l_validation_result" ]; then
-		zxfer_throw_usage_error "Invalid option property - check -o list for syntax errors."
+	if [ "$l_status" -eq 1 ]; then
+		case "$l_validation_result" in
+		"__ZXFER_OVERRIDE_SYNTAX__" | "")
+			zxfer_throw_usage_error "Invalid option property - check -o list for syntax errors."
+			;;
+		*)
+			l_validation_display_property=$(zxfer_escape_report_value "$l_validation_result") ||
+				l_validation_display_property="[unprintable]"
+			zxfer_throw_usage_error "Missing source property for -o override: $l_validation_display_property."
+			;;
+		esac
 	elif [ "$l_status" -ne 0 ]; then
 		zxfer_throw_error "Failed to validate override properties."
 	fi
@@ -626,6 +710,7 @@ zxfer_derive_override_lists() {
 	l_override_options=$2
 	l_transfer_all_flag=$3
 	l_source_dstype=$4
+	l_required_creation_properties=$(zxfer_get_required_creation_properties_for_dataset_type "$l_source_dstype")
 	g_zxfer_override_pvs_result=""
 	g_zxfer_creation_pvs_result=""
 
@@ -636,11 +721,18 @@ zxfer_derive_override_lists() {
 		ZXFER_AWK_OVERRIDE_OPTIONS=$l_override_options "${g_cmd_awk:-awk}" \
 			-v source_pvs="$l_source_pvs" \
 			-v transfer_all_flag="$l_transfer_all_flag" \
-			-v source_dstype="$l_source_dstype" '
+			-v source_dstype="$l_source_dstype" \
+			-v required_creation_properties="$l_required_creation_properties" '
 function append_csv(current, value) {
 	if (current == "")
 		return value
 	return current "," value
+}
+function append_creation(property, value, source) {
+	if (!(property in creation_property_seen)) {
+		creation_output = append_csv(creation_output, property "=" value "=" source)
+		creation_property_seen[property] = 1
+	}
 }
 function split_override_csv(input, output, field_count, i, character, next_character, field_value) {
 	delete output
@@ -693,16 +785,21 @@ BEGIN {
 		gsub(/;/, "%3B", override_fields[2])
 		gsub(/\t/, "%09", override_fields[2])
 		gsub(/\r/, "%0D", override_fields[2])
+		gsub(/\n/, "%0A", override_fields[2])
 		if (transfer_all_flag == 0)
 			override_output = append_csv(override_output, override_fields[1] "=" override_fields[2] "=override")
-		if (!(override_fields[1] in override_value))
+		if (!(override_fields[1] in override_value)) {
 			override_value[override_fields[1]] = override_fields[2]
+			if (transfer_all_flag == 0)
+				append_creation(override_fields[1], override_fields[2], "override")
+		}
 	}
 
-	if (transfer_all_flag == 0) {
-		print override_output
-		print creation_output
-		exit 0
+	required_count = split(required_creation_properties, required_items, ",")
+	for (i = 1; i <= required_count; i++) {
+		if (required_items[i] == "")
+			continue
+		required_create[required_items[i]] = 1
 	}
 
 	source_count = split(source_pvs, source_items, ",")
@@ -721,14 +818,22 @@ BEGIN {
 			(source_property == "volblocksize" || source_property == "volthreading"))
 			continue
 
+		source_is_creation = (source_source == "local" ||
+			(source_dstype == "volume" && source_property == "refreservation") ||
+			(source_property in required_create))
+
 		if (source_property in override_value) {
-			override_output = append_csv(override_output, source_property "=" override_value[source_property] "=override")
+			if (transfer_all_flag != 0)
+				override_output = append_csv(override_output, source_property "=" override_value[source_property] "=override")
+			if (source_is_creation)
+				append_creation(source_property, override_value[source_property], "override")
 			continue
 		}
 
-		override_output = append_csv(override_output, source_property "=" source_value "=" source_source)
-		if (source_source == "local" || (source_dstype == "volume" && source_property == "refreservation"))
-			creation_output = append_csv(creation_output, source_property "=" source_value "=" source_source)
+		if (transfer_all_flag != 0 || (source_property in required_create))
+			override_output = append_csv(override_output, source_property "=" source_value "=" source_source)
+		if (source_is_creation && (transfer_all_flag != 0 || (source_property in required_create)))
+			append_creation(source_property, source_value, source_source)
 	}
 
 	print override_output
@@ -914,15 +1019,6 @@ zxfer_destination_property_probe_is_inconclusive() {
 	return 1
 }
 
-# Purpose: Check whether the destination property probe dataset is queryable.
-# Usage: Called during property filtering, diffing, and apply when later
-# helpers need a boolean answer about the destination property probe dataset.
-zxfer_destination_property_probe_dataset_is_queryable() {
-	l_probe_dataset=$1
-
-	zxfer_run_destination_zfs_cmd get -Hpo property all "$l_probe_dataset" >/dev/null 2>&1
-}
-
 # Purpose: Format the destination property probe failure detail for display or
 # serialized output.
 # Usage: Called during property filtering, diffing, and apply when operators or
@@ -1066,15 +1162,17 @@ zxfer_append_unsupported_property_for_dataset_type() {
 # available input set.
 # Usage: Called during property filtering, diffing, and apply when only a
 # subset should flow into later comparison or apply steps.
+# Returns: Comma-separated unsupported-property names for the requested dataset
+# type.
 zxfer_select_unsupported_properties_for_dataset_type() {
 	l_source_dataset_type=$1
 
 	case "$l_source_dataset_type" in
 	volume)
-		g_unsupported_properties=${g_zxfer_unsupported_volume_properties:-}
+		printf '%s\n' "${g_zxfer_unsupported_volume_properties:-}"
 		;;
 	*)
-		g_unsupported_properties=${g_zxfer_unsupported_filesystem_properties:-}
+		printf '%s\n' "${g_zxfer_unsupported_filesystem_properties:-}"
 		;;
 	esac
 }
@@ -1089,10 +1187,9 @@ zxfer_select_unsupported_properties_for_dataset_type() {
 # of inferring support from pool-root property presence. Unsupported results are
 # cached per source dataset type so recursive trees with mixed filesystems and
 # volumes do not treat one probe context as authoritative for every dataset.
-# The union is stored in g_unsupported_properties for compatibility, while
-# dataset-type-specific results live in g_zxfer_unsupported_*_properties.
+# Dataset-type-specific results live in g_zxfer_unsupported_*_properties and
+# callers select the current dataset type before filtering.
 zxfer_calculate_unsupported_properties() {
-	g_unsupported_properties=""
 	g_zxfer_unsupported_filesystem_properties=""
 	g_zxfer_unsupported_volume_properties=""
 	l_resolved_source_property_type_pairs=""
@@ -1127,11 +1224,11 @@ zxfer_calculate_unsupported_properties() {
 		fi
 
 		l_source_props_tmp_status=0
-		zxfer_get_temp_file >/dev/null || l_source_props_tmp_status=$?
+		zxfer_create_property_reconcile_stage_file || l_source_props_tmp_status=$?
 		if [ "$l_source_props_tmp_status" -ne 0 ]; then
 			zxfer_throw_error "Failed to allocate source property staging for unsupported-property scan [$l_scan_source]." "$l_source_props_tmp_status"
 		fi
-		l_source_props_tmp=$g_zxfer_temp_file_result
+		l_source_props_tmp=$g_zxfer_property_reconcile_stage_file_result
 		l_source_stage_status=0
 		zxfer_write_runtime_artifact_file "$l_source_props_tmp" "$l_source_property_list
 " || l_source_stage_status=$?
@@ -1176,18 +1273,6 @@ zxfer_calculate_unsupported_properties() {
 				fi
 				continue
 			fi
-			# Some illumos/OpenZFS builds reject unsupported property-name probes on
-			# pool-root fallback datasets with a nonzero status and no stderr. When a
-			# generic property listing still succeeds on that dataset, treat the blank
-			# property-specific rejection like the existing inconclusive path.
-			if zxfer_destination_probe_is_ambiguous "$l_dest_property_probe" &&
-				zxfer_destination_property_probe_dataset_is_queryable "$l_dest_probe_dataset"; then
-				if [ "$l_dest_probe_dataset_type" = "$l_scan_source_type" ]; then
-					zxfer_append_unsupported_property_for_dataset_type "$l_scan_source_type" "$s_p"
-					l_resolved_source_property_type_pairs="${l_resolved_source_property_type_pairs}${l_seen_key},"
-				fi
-				continue
-			fi
 			l_dest_property_probe=$(zxfer_format_destination_property_probe_failure_detail "$l_dest_property_probe")
 			l_probe_error="Failed to probe destination support for property [$s_p] on [$l_dest_probe_dataset]: $l_dest_property_probe"
 			l_probe_error_status=$l_dest_property_probe_status
@@ -1199,29 +1284,152 @@ EOF
 			zxfer_throw_error "$l_probe_error" "$l_probe_error_status"
 		fi
 	done
-
-	g_unsupported_properties=${g_zxfer_unsupported_filesystem_properties:-}
-	l_oldifs=$IFS
-	IFS=","
-	for l_unsupported_property in ${g_zxfer_unsupported_volume_properties:-}; do
-		[ -n "$l_unsupported_property" ] || continue
-		case ",$g_unsupported_properties," in
-		*,"$l_unsupported_property",*) ;;
-		*)
-			if [ -n "$g_unsupported_properties" ]; then
-				g_unsupported_properties="${g_unsupported_properties},$l_unsupported_property"
-			else
-				g_unsupported_properties=$l_unsupported_property
-			fi
-			;;
-		esac
-	done
-	IFS=$l_oldifs
 }
 
 ################################################################################
 # DESTINATION CREATE / APPLY HELPERS
 ################################################################################
+
+# Purpose: Report whether a comma-separated property list has entries.
+# Usage: Called before destination create planning so parent-creation handling
+# can avoid combining `zfs create -p` with create-time properties.
+zxfer_property_list_has_entries() {
+	l_property_list=$1
+
+	l_has_entries=1
+	l_property_list_oldifs=$IFS
+	IFS=","
+	for l_property_entry in $l_property_list; do
+		if [ -n "$l_property_entry" ]; then
+			l_has_entries=0
+			break
+		fi
+	done
+	IFS=$l_property_list_oldifs
+
+	return "$l_has_entries"
+}
+
+# Purpose: Report whether a property=value=source list contains explicit
+# override entries.
+# Usage: Called during destination create planning before zxfer decides whether
+# parent properties need to be inspected for child inheritance cleanup.
+zxfer_property_list_has_override_sources() {
+	l_property_list=$1
+
+	l_override_sources_status=1
+	l_override_sources_oldifs=$IFS
+	IFS=","
+	for l_property_entry in $l_property_list; do
+		case "$l_property_entry" in
+		*=override)
+			l_override_sources_status=0
+			break
+			;;
+		esac
+	done
+	IFS=$l_override_sources_oldifs
+
+	return "$l_override_sources_status"
+}
+
+# Purpose: Remove child create overrides that the parent already supplies.
+# Usage: Called during destination create planning so recursive -o overrides
+# for inheritable properties can remain inherited on descendants when the
+# parent has already been converged to the requested value.
+zxfer_filter_child_creation_overrides_for_parent() {
+	l_creation_pvs=$1
+	l_parent_pvs=$2
+	l_noninheritable_properties=$(zxfer_get_noninheritable_properties)
+
+	"${g_cmd_awk:-awk}" \
+		-v creation_pvs="$l_creation_pvs" \
+		-v parent_pvs="$l_parent_pvs" \
+		-v noninheritable_properties="$l_noninheritable_properties" '
+function append_csv(current, value) {
+	if (current == "")
+		return value
+	return current "," value
+}
+BEGIN {
+	noninheritable_count = split(noninheritable_properties, noninheritable_items, ",")
+	for (i = 1; i <= noninheritable_count; i++) {
+		if (noninheritable_items[i] == "")
+			continue
+		noninheritable[noninheritable_items[i]] = 1
+	}
+
+	parent_count = split(parent_pvs, parent_items, ",")
+	for (i = 1; i <= parent_count; i++) {
+		if (parent_items[i] == "")
+			continue
+		split(parent_items[i], parent_fields, "=")
+		if (!(parent_fields[1] in parent_value))
+			parent_value[parent_fields[1]] = parent_fields[2]
+	}
+
+	creation_count = split(creation_pvs, creation_items, ",")
+	for (i = 1; i <= creation_count; i++) {
+		if (creation_items[i] == "")
+			continue
+		split(creation_items[i], creation_fields, "=")
+		if (creation_fields[3] == "override" &&
+			!(creation_fields[1] in noninheritable) &&
+			(creation_fields[1] in parent_value) &&
+			parent_value[creation_fields[1]] == creation_fields[2])
+			continue
+		filtered_creation = append_csv(filtered_creation, creation_items[i])
+	}
+
+	print filtered_creation
+}'
+}
+
+# Purpose: Check whether the destination is already present in the recursive
+# destination inventory.
+# Usage: Called before create-path planning so zxfer distinguishes a complete
+# inventory hit from a destination that needs a live existence probe.
+zxfer_property_destination_is_recorded() {
+	l_destination=$1
+	l_destinations=$(printf '%s\n' "${g_recursive_dest_list:-}" | tr ' ' '\n')
+
+	while IFS= read -r l_recorded_destination || [ -n "$l_recorded_destination" ]; do
+		[ -n "$l_recorded_destination" ] || continue
+		[ "$l_recorded_destination" = "$l_destination" ] && return 0
+	done <<-EOF
+		$l_destinations
+	EOF
+
+	return 1
+}
+
+# Purpose: Return the destination existence flag used by create-path planning.
+# Usage: Called during property reconciliation when stale or incomplete
+# recursive destination lists need a live probe before zxfer chooses `zfs
+# create`.
+zxfer_get_property_transfer_destination_exist_flag() {
+	l_destination=$1
+
+	if zxfer_property_destination_is_recorded "$l_destination"; then
+		printf '%s\n' 1
+		return 0
+	fi
+
+	l_dest_exist_status=0
+	l_dest_exist=$(zxfer_exists_destination "$l_destination" live) ||
+		l_dest_exist_status=$?
+	if [ "$l_dest_exist_status" -ne 0 ]; then
+		printf '%s\n' "$l_dest_exist"
+		return "$l_dest_exist_status"
+	fi
+	if [ "$l_dest_exist" -ne 0 ]; then
+		zxfer_note_destination_dataset_exists "$l_destination"
+		printf '%s\n' 1
+		return 0
+	fi
+
+	printf '%s\n' 0
+}
 
 # Purpose: Ensure the destination exists exists and is ready before the flow
 # continues.
@@ -1261,31 +1469,84 @@ zxfer_ensure_destination_exists() {
 
 	zxfer_echov "Creating destination filesystem \"$l_destination\" with specified properties."
 
-	l_oldifs=$IFS
-	IFS=","
+	l_parent_exists=""
+	l_parent_dataset=${l_destination%/*}
+	if [ "$l_parent_dataset" != "$l_destination" ]; then
+		l_parent_exists_status=0
+		l_parent_exists=$(zxfer_exists_destination "$l_parent_dataset") ||
+			l_parent_exists_status=$?
+		if [ "$l_parent_exists_status" -ne 0 ]; then
+			zxfer_throw_error "$l_parent_exists" "$l_parent_exists_status"
+		fi
+	fi
+
 	if [ "$l_is_initial_source" -eq 1 ]; then
+		l_oldifs=$IFS
+		IFS=","
 		zxfer_remove_sources "$l_override_pvs"
+		IFS=$l_oldifs
 		l_property_list="$g_zxfer_new_rmvs_pv"
-		l_with_parents="no"
-		l_parent_dataset=${l_destination%/*}
-		if [ "$l_parent_dataset" != "$l_destination" ]; then
-			l_parent_exists_status=0
-			l_parent_exists=$(zxfer_exists_destination "$l_parent_dataset") ||
-				l_parent_exists_status=$?
-			if [ "$l_parent_exists_status" -ne 0 ]; then
-				zxfer_throw_error "$l_parent_exists" "$l_parent_exists_status"
+	else
+		l_filtered_creation=$(zxfer_sanitize_property_list "$l_creation_pvs" "$l_readonly_properties" "$g_option_I_ignore_properties")
+		if [ "$l_parent_exists" = "1" ] &&
+			zxfer_property_list_has_override_sources "$l_filtered_creation"; then
+			l_parent_stage_status=0
+			zxfer_create_property_reconcile_stage_file ||
+				l_parent_stage_status=$?
+			if [ "$l_parent_stage_status" -ne 0 ]; then
+				zxfer_throw_error "Failed to allocate parent destination property staging for child override inheritance." "$l_parent_stage_status"
 			fi
-			if [ "$l_parent_exists" -eq 0 ]; then
+			l_parent_dest_tmp=$g_zxfer_property_reconcile_stage_file_result
+			l_parent_dest_status=0
+			zxfer_collect_destination_props "$l_parent_dataset" "$g_RZFS" >"$l_parent_dest_tmp" ||
+				l_parent_dest_status=$?
+			if [ "$l_parent_dest_status" -ne 0 ]; then
+				zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
+				zxfer_throw_error "Failed to retrieve parent destination properties for [$l_parent_dataset]." "$l_parent_dest_status"
+			fi
+			if zxfer_read_property_reconcile_stage_file "$l_parent_dest_tmp" >/dev/null; then
+				:
+			else
+				l_read_status=$?
+				zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
+				zxfer_throw_error "Failed to read parent destination properties for child override inheritance." "$l_read_status"
+			fi
+			l_parent_dest_pvs=$g_zxfer_property_stage_file_read_result
+			zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
+			l_parent_dest_pvs=$(zxfer_sanitize_property_list "$l_parent_dest_pvs" "$l_readonly_properties" "$g_option_I_ignore_properties")
+			l_filter_creation_status=0
+			l_filtered_creation=$(zxfer_filter_child_creation_overrides_for_parent "$l_filtered_creation" "$l_parent_dest_pvs") ||
+				l_filter_creation_status=$?
+			if [ "$l_filter_creation_status" -ne 0 ]; then
+				zxfer_throw_error "Failed to filter child creation override properties." "$l_filter_creation_status"
+			fi
+		fi
+		l_oldifs=$IFS
+		IFS=","
+		zxfer_remove_sources "$l_filtered_creation"
+		IFS=$l_oldifs
+		l_property_list="$g_zxfer_new_rmvs_pv"
+	fi
+
+	l_with_parents="no"
+	if [ "$l_parent_dataset" != "$l_destination" ]; then
+		if [ "$l_parent_exists" -eq 0 ]; then
+			if zxfer_property_list_has_entries "$l_property_list"; then
+				l_parent_create_status=0
+				$l_create_runner "yes" "filesystem" "" "" "$l_parent_dataset" ||
+					l_parent_create_status=$?
+				if [ "$l_parent_create_status" -ne 0 ]; then
+					zxfer_throw_error "Error when creating destination filesystem." "$l_parent_create_status"
+				fi
+				if [ "$g_option_n_dryrun" -eq 0 ]; then
+					zxfer_note_destination_dataset_exists "$l_parent_dataset"
+					zxfer_invalidate_destination_property_mutation_cache "$l_parent_dataset"
+				fi
+			else
 				l_with_parents="yes"
 			fi
 		fi
-	else
-		l_filtered_creation=$(zxfer_sanitize_property_list "$l_creation_pvs" "$l_readonly_properties" "$g_option_I_ignore_properties")
-		zxfer_remove_sources "$l_filtered_creation"
-		l_property_list="$g_zxfer_new_rmvs_pv"
-		l_with_parents="yes"
 	fi
-	IFS=$l_oldifs
 
 	l_create_status=0
 	$l_create_runner "$l_with_parents" "$l_source_dstype" "$l_source_volsize" "$l_property_list" "$l_destination" ||
@@ -1296,7 +1557,7 @@ zxfer_ensure_destination_exists() {
 
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
 		zxfer_note_destination_dataset_exists "$l_destination"
-		zxfer_invalidate_destination_property_cache "$l_destination"
+		zxfer_invalidate_destination_property_mutation_cache "$l_destination"
 	fi
 
 	return 0
@@ -1377,7 +1638,7 @@ zxfer_run_zfs_set_assignments() {
 		if [ "$l_set_status" -ne 0 ]; then
 			zxfer_throw_error "Error when setting properties on destination filesystem." "$l_set_status"
 		fi
-		zxfer_invalidate_destination_property_cache "$l_destination"
+		zxfer_invalidate_destination_property_mutation_cache "$l_destination"
 	else
 		echo "$l_display_cmd"
 	fi
@@ -1398,12 +1659,17 @@ zxfer_run_zfs_set_properties() {
 	[ -n "$l_property_list" ] || return 0
 
 	set --
-	while IFS= read -r l_assignment || [ -n "$l_assignment" ]; do
-		[ -n "$l_assignment" ] || continue
-		set -- "$@" "$l_assignment"
-	done <<EOF
-$(zxfer_emit_decoded_property_assignments "$l_property_list")
-EOF
+	l_set_props_ifs=$IFS
+	IFS=","
+	for l_prop_value in $l_property_list; do
+		[ -n "$l_prop_value" ] || continue
+		IFS=$l_set_props_ifs
+		zxfer_decode_serialized_property_assignment "$l_prop_value" >/dev/null ||
+			return "$?"
+		set -- "$@" "$g_zxfer_decoded_property_assignment_result"
+		IFS=","
+	done
+	IFS=$l_set_props_ifs
 
 	zxfer_run_zfs_set_assignments "$l_destination" "$@"
 }
@@ -1446,7 +1712,7 @@ zxfer_run_zfs_inherit_property() {
 		if [ "$l_inherit_status" -ne 0 ]; then
 			zxfer_throw_error "Error when inheriting properties on destination filesystem." "$l_inherit_status"
 		fi
-		zxfer_invalidate_destination_property_cache "$l_destination"
+		zxfer_invalidate_destination_property_mutation_cache "$l_destination"
 	else
 		echo "$l_display_cmd"
 	fi
@@ -1468,20 +1734,39 @@ zxfer_diff_properties() {
 	l_dest_pvs=$2
 	l_must_create_properties=$3
 
-	zxfer_get_temp_file >/dev/null
-	l_diff_tmp=$g_zxfer_temp_file_result
+	zxfer_create_property_reconcile_stage_file ||
+		return "$?"
+	l_diff_tmp=$g_zxfer_property_reconcile_stage_file_result
+	l_noninheritable_properties=$(zxfer_get_noninheritable_properties)
 	"${g_cmd_awk:-awk}" -v override_pvs="$l_override_pvs" \
 		-v dest_pvs="$l_dest_pvs" \
-		-v must_create_properties="$l_must_create_properties" '
+		-v must_create_properties="$l_must_create_properties" \
+		-v noninheritable_properties="$l_noninheritable_properties" '
 function append_csv(current, value) {
 	if (current == "")
 		return value
 	return current "," value
 }
 function source_requires_local_set(source_value) {
+	return (source_value == "local")
+}
+function source_requires_initial_set(source_value) {
 	return (source_value == "local" || source_value == "override")
 }
+function property_blocks_inherit(property_name) {
+	return (property_name in noninheritable)
+}
+function source_can_inherit_on_child(property_name, source_value) {
+	return (source_value != "local" && !(property_name in noninheritable))
+}
 BEGIN {
+	noninheritable_count = split(noninheritable_properties, noninheritable_items, ",")
+	for (i = 1; i <= noninheritable_count; i++) {
+		if (noninheritable_items[i] == "")
+			continue
+		noninheritable[noninheritable_items[i]] = 1
+	}
+
 	must_create_count = split(must_create_properties, must_create_items, ",")
 	for (i = 1; i <= must_create_count; i++) {
 		if (must_create_items[i] == "")
@@ -1519,31 +1804,36 @@ BEGIN {
 	}
 
 	print "__ZXFER_DIFF_OK__"
-		for (i = 1; i <= override_count; i++) {
-			if (override_property[i] == "" || (override_property[i] in must_create))
-				continue
-			if (!(override_property[i] in dest_available)) {
-				if (source_requires_local_set(override_source[i])) {
-					initial_set_list = append_csv(initial_set_list, override_property[i] "=" override_value[i])
-					child_set_list = append_csv(child_set_list, override_property[i] "=" override_value[i])
-				}
-				continue
-			}
-
-			if (dest_value[override_property[i]] != override_value[i] ||
-				dest_source[override_property[i]] != "local") {
+	for (i = 1; i <= override_count; i++) {
+		if (override_property[i] == "" || (override_property[i] in must_create))
+			continue
+		if (!(override_property[i] in dest_available)) {
+			if (source_requires_initial_set(override_source[i]))
 				initial_set_list = append_csv(initial_set_list, override_property[i] "=" override_value[i])
-			}
+			if (source_requires_local_set(override_source[i]) ||
+				property_blocks_inherit(override_property[i]))
+				child_set_list = append_csv(child_set_list, override_property[i] "=" override_value[i])
+			else if (source_can_inherit_on_child(override_property[i], override_source[i]))
+				inherit_list = append_csv(inherit_list, override_property[i] "=" override_value[i])
+			continue
+		}
+
+		if (dest_value[override_property[i]] != override_value[i] ||
+			(source_requires_initial_set(override_source[i]) &&
+			dest_source[override_property[i]] != "local")) {
+			initial_set_list = append_csv(initial_set_list, override_property[i] "=" override_value[i])
+		}
 
 		if (override_value[i] != dest_value[override_property[i]]) {
-			if (source_requires_local_set(override_source[i]))
+			if (source_requires_local_set(override_source[i]) ||
+				property_blocks_inherit(override_property[i]))
 				child_set_list = append_csv(child_set_list, override_property[i] "=" override_value[i])
 			else
 				inherit_list = append_csv(inherit_list, override_property[i] "=" override_value[i])
 		} else if (source_requires_local_set(override_source[i]) &&
 			dest_source[override_property[i]] != "local") {
 			child_set_list = append_csv(child_set_list, override_property[i] "=" override_value[i])
-		} else if (!source_requires_local_set(override_source[i]) &&
+		} else if (source_can_inherit_on_child(override_property[i], override_source[i]) &&
 			dest_source[override_property[i]] == "local") {
 			inherit_list = append_csv(inherit_list, override_property[i] "=" override_value[i])
 		}
@@ -1652,8 +1942,9 @@ zxfer_adjust_child_inherit_to_match_parent() {
 		return
 	fi
 
-	zxfer_get_temp_file >/dev/null
-	l_parent_dest_tmp=$g_zxfer_temp_file_result
+	zxfer_create_property_reconcile_stage_file ||
+		return "$?"
+	l_parent_dest_tmp=$g_zxfer_property_reconcile_stage_file_result
 	l_parent_dest_status=0
 	zxfer_collect_destination_props "$l_parent_dataset" "$g_RZFS" >"$l_parent_dest_tmp" ||
 		l_parent_dest_status=$?
@@ -1675,22 +1966,37 @@ zxfer_adjust_child_inherit_to_match_parent() {
 	zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
 	l_parent_dest_pvs=$(zxfer_sanitize_property_list "$l_parent_dest_pvs" "$l_readonly_properties" "$g_option_I_ignore_properties")
 
+	l_noninheritable_properties=$(zxfer_get_noninheritable_properties)
 	l_status=0
 	l_adjusted_lists=$(
 		"${g_cmd_awk:-awk}" \
 			-v override_pvs="$l_override_pvs" \
 			-v parent_pvs="$l_parent_dest_pvs" \
 			-v current_set_list="$l_set_list" \
-			-v inherit_list="$l_inherit_list" '
+			-v inherit_list="$l_inherit_list" \
+			-v noninheritable_properties="$l_noninheritable_properties" '
 function append_csv(current, value) {
 	if (current == "")
 		return value
 	return current "," value
 }
-function source_requires_local_set(source_value) {
-	return (source_value == "local" || source_value == "override")
+function source_requires_local_set(property_name, source_value) {
+	return (source_value == "local" || (property_name in noninheritable))
+}
+function matches_inheritable_override(property_name, property_value) {
+	return ((property_name in override_source) &&
+		override_source[property_name] == "override" &&
+		!(property_name in noninheritable) &&
+		override_value[property_name] == property_value)
 }
 BEGIN {
+	noninheritable_count = split(noninheritable_properties, noninheritable_items, ",")
+	for (i = 1; i <= noninheritable_count; i++) {
+		if (noninheritable_items[i] == "")
+			continue
+		noninheritable[noninheritable_items[i]] = 1
+	}
+
 	override_count = split(override_pvs, override_items, ",")
 	for (i = 1; i <= override_count; i++) {
 		if (override_items[i] == "")
@@ -1718,8 +2024,13 @@ BEGIN {
 		set_value = set_fields[2]
 
 		if (!(set_property in override_source) ||
-			source_requires_local_set(override_source[set_property])) {
+			source_requires_local_set(set_property, override_source[set_property])) {
 			new_set_list = append_csv(new_set_list, set_items[i])
+			continue
+		}
+
+		if (matches_inheritable_override(set_property, set_value)) {
+			new_inherit_list = append_csv(new_inherit_list, set_items[i])
 			continue
 		}
 
@@ -1738,6 +2049,16 @@ BEGIN {
 		split(inherit_items[i], inherit_fields, "=")
 		inherit_property = inherit_fields[1]
 		inherit_value = inherit_fields[2]
+
+		if (inherit_property in noninheritable) {
+			new_set_list = append_csv(new_set_list, inherit_property "=" inherit_value)
+			continue
+		}
+
+		if (matches_inheritable_override(inherit_property, inherit_value)) {
+			new_inherit_list = append_csv(new_inherit_list, inherit_items[i])
+			continue
+		}
 
 		if ((inherit_property in parent_value) &&
 			parent_value[inherit_property] == inherit_value) {
@@ -1834,6 +2155,283 @@ zxfer_apply_property_changes() {
 	IFS=$l_oldifs
 }
 
+# Purpose: Backfill required creation-time properties through a caller-owned
+# stage file.
+# Usage: Called by property-transfer stages that need the same readback,
+# failure propagation, and cleanup behavior for source and destination payloads.
+#
+# Result is stored in g_zxfer_required_property_backfill_result.
+# $1: dataset name
+# $2: existing property list
+# $3: zfs command used to query properties
+# $4: comma-separated list of required property names
+# $5: source/destination side label
+# $6: caller-owned stage file
+zxfer_backfill_required_properties_for_transfer() {
+	l_backfill_dataset=$1
+	l_backfill_pvs=$2
+	l_backfill_zfs_cmd=$3
+	l_backfill_must_create_properties=$4
+	l_backfill_side=$5
+	l_backfill_stage_file=$6
+
+	g_zxfer_required_property_backfill_result=""
+	l_backfill_status=0
+	zxfer_ensure_required_properties_present "$l_backfill_dataset" "$l_backfill_pvs" "$l_backfill_zfs_cmd" "$l_backfill_must_create_properties" "$l_backfill_side" >"$l_backfill_stage_file" ||
+		l_backfill_status=$?
+	if [ "$l_backfill_status" -ne 0 ]; then
+		if zxfer_read_property_reconcile_stage_file "$l_backfill_stage_file" >/dev/null; then
+			:
+		else
+			l_read_status=$?
+			zxfer_cleanup_runtime_artifact_path "$l_backfill_stage_file"
+			return "$l_read_status"
+		fi
+		g_zxfer_required_property_backfill_result=$g_zxfer_property_stage_file_read_result
+		zxfer_cleanup_runtime_artifact_path "$l_backfill_stage_file"
+		zxfer_throw_error "$g_zxfer_required_property_backfill_result" "$l_backfill_status"
+	fi
+
+	if zxfer_read_property_reconcile_stage_file "$l_backfill_stage_file" >/dev/null; then
+		:
+	else
+		l_read_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_backfill_stage_file"
+		return "$l_read_status"
+	fi
+	g_zxfer_required_property_backfill_result=$g_zxfer_property_stage_file_read_result
+}
+
+# Purpose: Collect and normalize the source-side context for a property
+# transfer.
+# Usage: First stage of zxfer_transfer_properties.
+#
+# Populates g_zxfer_property_transfer_is_initial_source,
+# g_zxfer_property_transfer_source_dstype,
+# g_zxfer_property_transfer_source_volsize,
+# g_zxfer_property_transfer_must_create_properties, and
+# g_zxfer_property_transfer_source_pvs.
+zxfer_prepare_property_transfer_source_context() {
+	l_property_source=$1
+
+	if [ "$g_initial_source" = "$l_property_source" ]; then
+		g_zxfer_property_transfer_is_initial_source=1
+	else
+		g_zxfer_property_transfer_is_initial_source=0
+	fi
+
+	l_collect_source_status=0
+	zxfer_collect_source_props "$l_property_source" "$g_actual_dest" "$g_ensure_writable" "$g_LZFS" ||
+		l_collect_source_status=$?
+	if [ "$l_collect_source_status" -ne 0 ]; then
+		zxfer_throw_error "${g_zxfer_source_pvs_raw:-Failed to retrieve source properties for [$l_property_source].}" "$l_collect_source_status"
+	fi
+
+	l_source_create_metadata_status=0
+	l_source_create_metadata=$(zxfer_get_validated_source_dataset_create_metadata "$l_property_source") ||
+		l_source_create_metadata_status=$?
+	if [ "$l_source_create_metadata_status" -ne 0 ]; then
+		zxfer_throw_error "$l_source_create_metadata" "$l_source_create_metadata_status"
+	fi
+	{
+		IFS= read -r g_zxfer_property_transfer_source_dstype
+		IFS= read -r g_zxfer_property_transfer_source_volsize
+	} <<EOF
+$l_source_create_metadata
+EOF
+	g_zxfer_property_transfer_must_create_properties=$(zxfer_get_required_creation_properties_for_dataset_type "$g_zxfer_property_transfer_source_dstype")
+
+	zxfer_create_property_reconcile_stage_file ||
+		return "$?"
+	l_required_props_tmp=$g_zxfer_property_reconcile_stage_file_result
+
+	zxfer_backfill_required_properties_for_transfer "$l_property_source" "$g_zxfer_source_pvs_raw" "$g_LZFS" "$g_zxfer_property_transfer_must_create_properties" source "$l_required_props_tmp" ||
+		return "$?"
+	g_zxfer_source_pvs_raw=$g_zxfer_required_property_backfill_result
+
+	zxfer_backfill_required_properties_for_transfer "$l_property_source" "$g_zxfer_source_pvs_effective" "$g_LZFS" "$g_zxfer_property_transfer_must_create_properties" source "$l_required_props_tmp" ||
+		return "$?"
+	g_zxfer_source_pvs_effective=$g_zxfer_required_property_backfill_result
+	zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
+
+	g_zxfer_property_transfer_source_pvs=$g_zxfer_source_pvs_effective
+}
+
+# Purpose: Derive the transfer override and create-time property lists.
+# Usage: Called after source context is available and before destination create
+# or diff planning.
+#
+# Populates g_zxfer_property_transfer_override_pvs and
+# g_zxfer_property_transfer_creation_pvs.
+zxfer_prepare_property_transfer_override_context() {
+	l_property_is_initial_source=$1
+	l_property_source_pvs=$2
+	l_property_source_dstype=$3
+	l_property_effective_readonly_properties=$4
+	l_override_property_pv=$g_option_o_override_property
+
+	if [ "$g_ensure_writable" -eq 1 ]; then
+		l_override_property_pv=$(zxfer_force_readonly_off "$l_override_property_pv")
+	fi
+
+	if [ "$l_property_is_initial_source" -eq 1 ]; then
+		zxfer_validate_override_properties "$l_override_property_pv" "$l_property_source_pvs"
+	fi
+
+	l_derive_override_status=0
+	zxfer_derive_override_lists "$l_property_source_pvs" "$l_override_property_pv" "$g_option_P_transfer_property" "$l_property_source_dstype" >/dev/null ||
+		l_derive_override_status=$?
+	[ "$l_derive_override_status" -eq 0 ] || return "$l_derive_override_status"
+
+	g_zxfer_property_transfer_override_pvs=$g_zxfer_override_pvs_result
+	g_zxfer_property_transfer_creation_pvs=$g_zxfer_creation_pvs_result
+	g_zxfer_property_transfer_override_pvs=$(zxfer_sanitize_property_list "$g_zxfer_property_transfer_override_pvs" "$l_property_effective_readonly_properties" "$g_option_I_ignore_properties")
+	g_zxfer_property_transfer_creation_pvs=$(zxfer_sanitize_property_list "$g_zxfer_property_transfer_creation_pvs" "$l_property_effective_readonly_properties" "$g_option_I_ignore_properties")
+
+	if [ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ]; then
+		l_unsupported_properties=$(zxfer_select_unsupported_properties_for_dataset_type "$l_property_source_dstype")
+	else
+		l_unsupported_properties=""
+	fi
+	g_zxfer_property_transfer_override_pvs=$(zxfer_strip_unsupported_properties "$g_zxfer_property_transfer_override_pvs" "$l_unsupported_properties")
+	g_zxfer_property_transfer_creation_pvs=$(zxfer_strip_unsupported_properties "$g_zxfer_property_transfer_creation_pvs" "$l_unsupported_properties")
+	zxfer_echoV "zxfer_transfer_properties override_pvs: $g_zxfer_property_transfer_override_pvs"
+	zxfer_echoV "zxfer_transfer_properties creation_pvs: $g_zxfer_property_transfer_creation_pvs"
+}
+
+# Purpose: Try the create-path part of property transfer.
+# Usage: Called before destination property diffing; returns 0 when the
+# destination was created and the caller should stop, or 1 when diffing should
+# continue against an existing destination.
+zxfer_try_property_transfer_destination_create() {
+	l_property_source=$1
+	l_property_skip_backup_capture=$2
+	l_property_is_initial_source=$3
+	l_property_override_pvs=$4
+	l_property_creation_pvs=$5
+	l_property_source_dstype=$6
+	l_property_source_volsize=$7
+	l_property_effective_readonly_properties=$8
+
+	l_dest_exist_status=0
+	l_dest_exist=$(zxfer_get_property_transfer_destination_exist_flag "$g_actual_dest") ||
+		l_dest_exist_status=$?
+	if [ "$l_dest_exist_status" -ne 0 ]; then
+		zxfer_throw_error "$l_dest_exist" "$l_dest_exist_status"
+		return "$l_dest_exist_status"
+	fi
+
+	# Track when zxfer created the destination during this property pass so the
+	# seed receive can safely use -F on an empty dataset.
+	# shellcheck disable=SC2034
+	g_dest_created_by_zxfer=0
+	if zxfer_ensure_destination_exists "$l_dest_exist" "$l_property_is_initial_source" "$l_property_override_pvs" "$l_property_creation_pvs" "$l_property_source_dstype" "$l_property_source_volsize" "$g_actual_dest" "$l_property_effective_readonly_properties" ""; then
+		# shellcheck disable=SC2034
+		g_dest_created_by_zxfer=1
+		zxfer_capture_backup_metadata_for_completed_transfer "$l_property_source" "$g_zxfer_source_pvs_raw" "$l_property_skip_backup_capture"
+		return 0
+	fi
+
+	return 1
+}
+
+# Purpose: Collect and normalize destination-side properties for diffing.
+# Usage: Called after destination creation is ruled out.
+#
+# Populates g_zxfer_property_transfer_dest_pvs.
+zxfer_collect_property_transfer_destination_context() {
+	l_property_must_create_properties=$1
+	l_property_effective_readonly_properties=$2
+
+	zxfer_create_property_reconcile_stage_file ||
+		return "$?"
+	l_dest_pvs_tmp=$g_zxfer_property_reconcile_stage_file_result
+
+	l_dest_pvs_status=0
+	zxfer_collect_destination_props "$g_actual_dest" "$g_RZFS" >"$l_dest_pvs_tmp" ||
+		l_dest_pvs_status=$?
+	if [ "$l_dest_pvs_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
+		zxfer_throw_error "Failed to retrieve destination properties for [$g_actual_dest]." "$l_dest_pvs_status"
+	fi
+	if zxfer_read_property_reconcile_stage_file "$l_dest_pvs_tmp" >/dev/null; then
+		:
+	else
+		l_read_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
+		return "$l_read_status"
+	fi
+	l_dest_pvs=$g_zxfer_property_stage_file_read_result
+
+	zxfer_backfill_required_properties_for_transfer "$g_actual_dest" "$l_dest_pvs" "$g_RZFS" "$l_property_must_create_properties" destination "$l_dest_pvs_tmp" ||
+		return "$?"
+	l_dest_pvs=$g_zxfer_required_property_backfill_result
+	zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
+
+	g_zxfer_property_transfer_dest_pvs=$(zxfer_sanitize_property_list "$l_dest_pvs" "$l_property_effective_readonly_properties" "$g_option_I_ignore_properties")
+	zxfer_echoV "zxfer_transfer_properties dest_pvs: $g_zxfer_property_transfer_dest_pvs"
+}
+
+# Purpose: Diff destination property state and adjust child inheritance where
+# needed.
+# Usage: Called after source override and destination property contexts exist.
+#
+# Populates g_zxfer_property_transfer_initial_set_list,
+# g_zxfer_property_transfer_child_set_list, and
+# g_zxfer_property_transfer_inherit_list.
+zxfer_diff_property_transfer_changes() {
+	l_property_is_initial_source=$1
+	l_property_override_pvs=$2
+	l_property_dest_pvs=$3
+	l_property_must_create_properties=$4
+	l_property_effective_readonly_properties=$5
+
+	zxfer_create_property_reconcile_stage_file ||
+		return "$?"
+	l_diff_properties_tmp=$g_zxfer_property_reconcile_stage_file_result
+
+	l_diff_properties_status=0
+	zxfer_diff_properties "$l_property_override_pvs" "$l_property_dest_pvs" "$l_property_must_create_properties" >"$l_diff_properties_tmp" ||
+		l_diff_properties_status=$?
+	if [ "$l_diff_properties_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_diff_properties_tmp"
+		zxfer_throw_error "Failed to calculate property reconciliation changes for destination [$g_actual_dest]." "$l_diff_properties_status"
+	fi
+	if zxfer_read_property_reconcile_stage_file "$l_diff_properties_tmp" >/dev/null; then
+		:
+	else
+		l_read_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_diff_properties_tmp"
+		return "$l_read_status"
+	fi
+	{
+		IFS= read -r g_zxfer_property_transfer_initial_set_list
+		IFS= read -r g_zxfer_property_transfer_child_set_list
+		IFS= read -r g_zxfer_property_transfer_inherit_list
+	} <<EOF
+$g_zxfer_property_stage_file_read_result
+EOF
+	zxfer_cleanup_runtime_artifact_path "$l_diff_properties_tmp"
+
+	zxfer_echoV "zxfer_transfer_properties init_set: $g_zxfer_property_transfer_initial_set_list"
+	zxfer_echoV "zxfer_transfer_properties child_set: $g_zxfer_property_transfer_child_set_list"
+	zxfer_echoV "zxfer_transfer_properties inherit: $g_zxfer_property_transfer_inherit_list"
+
+	if [ "$l_property_is_initial_source" -eq 0 ] &&
+		{ [ "$g_zxfer_property_transfer_child_set_list" != "" ] || [ "$g_zxfer_property_transfer_inherit_list" != "" ]; }; then
+		l_adjust_status=0
+		zxfer_adjust_child_inherit_to_match_parent "$g_actual_dest" "$l_property_override_pvs" "$g_zxfer_property_transfer_child_set_list" "$g_zxfer_property_transfer_inherit_list" "$l_property_effective_readonly_properties" >/dev/null ||
+			l_adjust_status=$?
+		if [ "$l_adjust_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]." "$l_adjust_status"
+		fi
+		g_zxfer_property_transfer_child_set_list=$g_zxfer_adjusted_set_list
+		g_zxfer_property_transfer_inherit_list=$g_zxfer_adjusted_inherit_list
+		zxfer_echoV "zxfer_transfer_properties adjusted child_set: $g_zxfer_property_transfer_child_set_list"
+		zxfer_echoV "zxfer_transfer_properties adjusted inherit: $g_zxfer_property_transfer_inherit_list"
+	fi
+}
+
 ################################################################################
 # TOP-LEVEL PROPERTY TRANSFER
 ################################################################################
@@ -1857,228 +2455,28 @@ zxfer_transfer_properties() {
 	zxfer_echoV "initial_source: $g_initial_source"
 	zxfer_reset_property_reconcile_state
 
-	l_source=$1
-	l_skip_backup_capture=${2:-0}
+	l_property_transfer_source=$1
+	l_property_transfer_skip_backup_capture=${2:-0}
 	l_effective_readonly_properties=$(zxfer_get_effective_readonly_properties)
 
-	if [ "$g_initial_source" = "$l_source" ]; then
-		l_is_initial_source=1
-	else
-		l_is_initial_source=0
-	fi
+	zxfer_prepare_property_transfer_source_context "$l_property_transfer_source" ||
+		return "$?"
+	zxfer_prepare_property_transfer_override_context "$g_zxfer_property_transfer_is_initial_source" "$g_zxfer_property_transfer_source_pvs" "$g_zxfer_property_transfer_source_dstype" "$l_effective_readonly_properties" ||
+		return "$?"
 
-	l_collect_source_status=0
-	zxfer_collect_source_props "$l_source" "$g_actual_dest" "$g_ensure_writable" "$g_LZFS" ||
-		l_collect_source_status=$?
-	if [ "$l_collect_source_status" -ne 0 ]; then
-		zxfer_throw_error "${g_zxfer_source_pvs_raw:-Failed to retrieve source properties for [$l_source].}" "$l_collect_source_status"
-	fi
-	l_source_create_metadata_status=0
-	l_source_create_metadata=$(zxfer_get_validated_source_dataset_create_metadata "$l_source") ||
-		l_source_create_metadata_status=$?
-	if [ "$l_source_create_metadata_status" -ne 0 ]; then
-		zxfer_throw_error "$l_source_create_metadata" "$l_source_create_metadata_status"
-	fi
-	{
-		IFS= read -r l_source_dstype
-		IFS= read -r l_source_volsize
-	} <<EOF
-$l_source_create_metadata
-EOF
-	l_must_create_properties=$(zxfer_get_required_creation_properties_for_dataset_type "$l_source_dstype")
-
-	if [ "$g_option_e_restore_property_mode" -eq 0 ]; then
-		l_required_props_tmp_status=0
-		zxfer_get_temp_file >/dev/null || l_required_props_tmp_status=$?
-		if [ "$l_required_props_tmp_status" -ne 0 ]; then
-			return "$l_required_props_tmp_status"
-		fi
-		l_required_props_tmp=$g_zxfer_temp_file_result
-		l_required_props_status=0
-		zxfer_ensure_required_properties_present "$l_source" "$g_zxfer_source_pvs_raw" "$g_LZFS" "$l_must_create_properties" source >"$l_required_props_tmp" ||
-			l_required_props_status=$?
-		if [ "$l_required_props_status" -ne 0 ]; then
-			if zxfer_read_property_reconcile_stage_file "$l_required_props_tmp" >/dev/null; then
-				:
-			else
-				l_read_status=$?
-				zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-				return "$l_read_status"
-			fi
-			g_zxfer_source_pvs_raw=$g_zxfer_property_stage_file_read_result
-			zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-			zxfer_throw_error "$g_zxfer_source_pvs_raw" "$l_required_props_status"
-		fi
-		if zxfer_read_property_reconcile_stage_file "$l_required_props_tmp" >/dev/null; then
-			:
-		else
-			l_read_status=$?
-			zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-			return "$l_read_status"
-		fi
-		g_zxfer_source_pvs_raw=$g_zxfer_property_stage_file_read_result
-		l_required_props_status=0
-		zxfer_ensure_required_properties_present "$l_source" "$g_zxfer_source_pvs_effective" "$g_LZFS" "$l_must_create_properties" source >"$l_required_props_tmp" ||
-			l_required_props_status=$?
-		if [ "$l_required_props_status" -ne 0 ]; then
-			if zxfer_read_property_reconcile_stage_file "$l_required_props_tmp" >/dev/null; then
-				:
-			else
-				l_read_status=$?
-				zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-				return "$l_read_status"
-			fi
-			g_zxfer_source_pvs_effective=$g_zxfer_property_stage_file_read_result
-			zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-			zxfer_throw_error "$g_zxfer_source_pvs_effective" "$l_required_props_status"
-		fi
-		if zxfer_read_property_reconcile_stage_file "$l_required_props_tmp" >/dev/null; then
-			:
-		else
-			l_read_status=$?
-			zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-			return "$l_read_status"
-		fi
-		g_zxfer_source_pvs_effective=$g_zxfer_property_stage_file_read_result
-		zxfer_cleanup_runtime_artifact_path "$l_required_props_tmp"
-	fi
-
-	l_source_pvs=$g_zxfer_source_pvs_effective
-
-	l_override_property_pv=$g_option_o_override_property
-
-	if [ "$g_ensure_writable" -eq 1 ]; then
-		l_override_property_pv=$(zxfer_force_readonly_off "$l_override_property_pv")
-	fi
-
-	if [ $l_is_initial_source -eq 1 ]; then
-		zxfer_validate_override_properties "$l_override_property_pv" "$l_source_pvs"
-	fi
-
-	l_derive_override_status=0
-	zxfer_derive_override_lists "$l_source_pvs" "$l_override_property_pv" "$g_option_P_transfer_property" "$l_source_dstype" >/dev/null ||
-		l_derive_override_status=$?
-	[ "$l_derive_override_status" -eq 0 ] || return "$l_derive_override_status"
-	l_override_pvs=$g_zxfer_override_pvs_result
-	l_creation_pvs=$g_zxfer_creation_pvs_result
-
-	l_override_pvs=$(zxfer_sanitize_property_list "$l_override_pvs" "$l_effective_readonly_properties" "$g_option_I_ignore_properties")
-	if [ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ]; then
-		zxfer_select_unsupported_properties_for_dataset_type "$l_source_dstype"
-	else
-		g_unsupported_properties=""
-	fi
-	l_override_pvs=$(zxfer_strip_unsupported_properties "$l_override_pvs" "$g_unsupported_properties")
-	zxfer_echoV "zxfer_transfer_properties override_pvs: $l_override_pvs"
-
-	l_dest_regex=$(printf '%s\n' "$g_actual_dest" | sed 's/[].[^$\\*]/\\&/g')
-	l_dest_exist=$(printf '%s\n' "${g_recursive_dest_list:-}" | grep -c "^$l_dest_regex$")
-
-	# Track when zxfer created the destination during this property pass so the
-	# seed receive can safely use -F on an empty dataset.
-	# shellcheck disable=SC2034
-	g_dest_created_by_zxfer=0
-	if zxfer_ensure_destination_exists "$l_dest_exist" "$l_is_initial_source" "$l_override_pvs" "$l_creation_pvs" "$l_source_dstype" "$l_source_volsize" "$g_actual_dest" "$l_effective_readonly_properties" ""; then
-		# shellcheck disable=SC2034
-		g_dest_created_by_zxfer=1
-		zxfer_capture_backup_metadata_for_completed_transfer "$l_source" "$g_actual_dest" "$g_zxfer_source_pvs_raw" "$l_skip_backup_capture"
+	l_property_transfer_create_status=0
+	zxfer_try_property_transfer_destination_create "$l_property_transfer_source" "$l_property_transfer_skip_backup_capture" "$g_zxfer_property_transfer_is_initial_source" "$g_zxfer_property_transfer_override_pvs" "$g_zxfer_property_transfer_creation_pvs" "$g_zxfer_property_transfer_source_dstype" "$g_zxfer_property_transfer_source_volsize" "$l_effective_readonly_properties" ||
+		l_property_transfer_create_status=$?
+	if [ "$l_property_transfer_create_status" -eq 0 ]; then
 		return
 	fi
+	[ "$l_property_transfer_create_status" -eq 1 ] ||
+		return "$l_property_transfer_create_status"
 
-	l_dest_pvs_tmp_status=0
-	zxfer_get_temp_file >/dev/null || l_dest_pvs_tmp_status=$?
-	if [ "$l_dest_pvs_tmp_status" -ne 0 ]; then
-		return "$l_dest_pvs_tmp_status"
-	fi
-	l_dest_pvs_tmp=$g_zxfer_temp_file_result
-	l_dest_pvs_status=0
-	zxfer_collect_destination_props "$g_actual_dest" "$g_RZFS" >"$l_dest_pvs_tmp" ||
-		l_dest_pvs_status=$?
-	if [ "$l_dest_pvs_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-		zxfer_throw_error "Failed to retrieve destination properties for [$g_actual_dest]." "$l_dest_pvs_status"
-	fi
-	if zxfer_read_property_reconcile_stage_file "$l_dest_pvs_tmp" >/dev/null; then
-		:
-	else
-		l_read_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-		return "$l_read_status"
-	fi
-	l_dest_pvs=$g_zxfer_property_stage_file_read_result
-	l_dest_required_status=0
-	zxfer_ensure_required_properties_present "$g_actual_dest" "$l_dest_pvs" "$g_RZFS" "$l_must_create_properties" destination >"$l_dest_pvs_tmp" ||
-		l_dest_required_status=$?
-	if [ "$l_dest_required_status" -ne 0 ]; then
-		if zxfer_read_property_reconcile_stage_file "$l_dest_pvs_tmp" >/dev/null; then
-			:
-		else
-			l_read_status=$?
-			zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-			return "$l_read_status"
-		fi
-		l_dest_pvs=$g_zxfer_property_stage_file_read_result
-		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-		zxfer_throw_error "$l_dest_pvs" "$l_dest_required_status"
-	fi
-	if zxfer_read_property_reconcile_stage_file "$l_dest_pvs_tmp" >/dev/null; then
-		:
-	else
-		l_read_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-		return "$l_read_status"
-	fi
-	l_dest_pvs=$g_zxfer_property_stage_file_read_result
-	zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-	l_dest_pvs=$(zxfer_sanitize_property_list "$l_dest_pvs" "$l_effective_readonly_properties" "$g_option_I_ignore_properties")
-	zxfer_echoV "zxfer_transfer_properties dest_pvs: $l_dest_pvs"
-
-	l_diff_properties_tmp_status=0
-	zxfer_get_temp_file >/dev/null || l_diff_properties_tmp_status=$?
-	if [ "$l_diff_properties_tmp_status" -ne 0 ]; then
-		return "$l_diff_properties_tmp_status"
-	fi
-	l_diff_properties_tmp=$g_zxfer_temp_file_result
-	l_diff_properties_status=0
-	zxfer_diff_properties "$l_override_pvs" "$l_dest_pvs" "$l_must_create_properties" >"$l_diff_properties_tmp" ||
-		l_diff_properties_status=$?
-	if [ "$l_diff_properties_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_diff_properties_tmp"
-		zxfer_throw_error "Failed to calculate property reconciliation changes for destination [$g_actual_dest]." "$l_diff_properties_status"
-	fi
-	if zxfer_read_property_reconcile_stage_file "$l_diff_properties_tmp" >/dev/null; then
-		:
-	else
-		l_read_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_diff_properties_tmp"
-		return "$l_read_status"
-	fi
-	{
-		IFS= read -r l_ov_initsrc_set_list
-		IFS= read -r l_ov_set_list
-		IFS= read -r l_ov_inherit_list
-	} <<EOF
-$g_zxfer_property_stage_file_read_result
-EOF
-	zxfer_cleanup_runtime_artifact_path "$l_diff_properties_tmp"
-	zxfer_echoV "zxfer_transfer_properties init_set: $l_ov_initsrc_set_list"
-	zxfer_echoV "zxfer_transfer_properties child_set: $l_ov_set_list"
-	zxfer_echoV "zxfer_transfer_properties inherit: $l_ov_inherit_list"
-
-	if [ "$l_is_initial_source" -eq 0 ] &&
-		{ [ "$l_ov_set_list" != "" ] || [ "$l_ov_inherit_list" != "" ]; }; then
-		l_adjust_status=0
-		zxfer_adjust_child_inherit_to_match_parent "$g_actual_dest" "$l_override_pvs" "$l_ov_set_list" "$l_ov_inherit_list" "$l_effective_readonly_properties" >/dev/null ||
-			l_adjust_status=$?
-		if [ "$l_adjust_status" -ne 0 ]; then
-			zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]." "$l_adjust_status"
-		fi
-		l_ov_set_list=$g_zxfer_adjusted_set_list
-		l_ov_inherit_list=$g_zxfer_adjusted_inherit_list
-		zxfer_echoV "zxfer_transfer_properties adjusted child_set: $l_ov_set_list"
-		zxfer_echoV "zxfer_transfer_properties adjusted inherit: $l_ov_inherit_list"
-	fi
-
-	zxfer_apply_property_changes "$g_actual_dest" "$l_is_initial_source" "$l_ov_initsrc_set_list" "$l_ov_set_list" "$l_ov_inherit_list" "" ""
-	zxfer_capture_backup_metadata_for_completed_transfer "$l_source" "$g_actual_dest" "$g_zxfer_source_pvs_raw" "$l_skip_backup_capture"
+	zxfer_collect_property_transfer_destination_context "$g_zxfer_property_transfer_must_create_properties" "$l_effective_readonly_properties" ||
+		return "$?"
+	zxfer_diff_property_transfer_changes "$g_zxfer_property_transfer_is_initial_source" "$g_zxfer_property_transfer_override_pvs" "$g_zxfer_property_transfer_dest_pvs" "$g_zxfer_property_transfer_must_create_properties" "$l_effective_readonly_properties" ||
+		return "$?"
+	zxfer_apply_property_changes "$g_actual_dest" "$g_zxfer_property_transfer_is_initial_source" "$g_zxfer_property_transfer_initial_set_list" "$g_zxfer_property_transfer_child_set_list" "$g_zxfer_property_transfer_inherit_list" "" ""
+	zxfer_capture_backup_metadata_for_completed_transfer "$l_property_transfer_source" "$g_zxfer_source_pvs_raw" "$l_property_transfer_skip_backup_capture"
 }

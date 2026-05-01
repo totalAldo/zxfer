@@ -153,18 +153,12 @@ zxfer_read_progress_estimate_capture_file() {
 	g_zxfer_progress_probe_output_result=""
 	[ -n "$l_capture_path" ] || return 0
 
-	if zxfer_read_runtime_artifact_file "$l_capture_path" >/dev/null; then
+	if zxfer_read_runtime_artifact_file_trimmed "$l_capture_path" >/dev/null; then
 		l_capture_result=$g_zxfer_runtime_artifact_read_result
 	else
 		l_status=$?
 		return "$l_status"
 	fi
-	case "$l_capture_result" in
-	*'
-')
-		l_capture_result=${l_capture_result%?}
-		;;
-	esac
 
 	g_zxfer_progress_probe_output_result=$l_capture_result
 	return 0
@@ -179,24 +173,20 @@ zxfer_capture_progress_estimate_probe_output() {
 	g_zxfer_progress_probe_output_result=""
 
 	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
+	zxfer_capture_runtime_artifact_combined_command_output "zxfer-progress-estimate" "$@" ||
+		l_status=$?
+	l_capture_result=$g_zxfer_runtime_artifact_read_result
+	case "$l_capture_result" in
+	*'
+')
+		l_capture_result=${l_capture_result%?}
+		;;
+	esac
+	g_zxfer_progress_probe_output_result=$l_capture_result
 	if [ "$l_status" -ne 0 ]; then
 		return "$l_status"
 	fi
-	l_capture_file=$g_zxfer_temp_file_result
-
-	l_probe_status=0
-	"$@" >"$l_capture_file" 2>&1 || l_probe_status=$?
-
-	l_status=0
-	zxfer_read_progress_estimate_capture_file "$l_capture_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
-		return "$l_status"
-	fi
-
-	zxfer_cleanup_runtime_artifact_path "$l_capture_file"
-	return "$l_probe_status"
+	return 0
 }
 
 # Purpose: Calculate the fast full size estimate from the active configuration
@@ -541,22 +531,6 @@ zxfer_wrap_command_with_ssh() {
 	l_remote_compress_safe=${g_cmd_compress_safe:-}
 	l_remote_decompress_safe=${g_cmd_decompress_safe:-}
 
-	l_wrap_status=0
-	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_option") ||
-		l_wrap_status=$?
-	if [ "$l_wrap_status" -ne 0 ]; then
-		zxfer_throw_error "$l_host_tokens" "$l_wrap_status"
-	fi
-	l_host_token_count=0
-	if [ "$l_host_tokens" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			[ "$l_token" = "" ] && continue
-			l_host_token_count=$((l_host_token_count + 1))
-		done <<EOF
-$l_host_tokens
-EOF
-	fi
-
 	if [ "$l_option" = "${g_option_O_origin_host:-}" ]; then
 		l_remote_compress_safe=${g_origin_cmd_compress_safe:-$l_remote_compress_safe}
 		l_remote_decompress_safe=${g_origin_cmd_decompress_safe:-$l_remote_decompress_safe}
@@ -566,17 +540,9 @@ EOF
 	fi
 
 	if [ "$l_is_compress" -eq 0 ]; then
-		if [ "$l_host_token_count" -gt 1 ]; then
-			if l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_cmd"); then
-				:
-			else
-				l_status=$?
-				return "$l_status"
-			fi
-			zxfer_build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd"
-		else
-			zxfer_build_ssh_shell_command_for_host "$l_option" "$l_cmd"
-		fi
+		zxfer_publish_prepared_ssh_shell_command_for_host_or_throw "$l_option" "$l_cmd" ||
+			return "$?"
+		printf '%s' "$g_zxfer_prepared_ssh_shell_command_result"
 	else
 		if [ "$g_cmd_compress_safe" = "" ] || [ "$g_cmd_decompress_safe" = "" ] ||
 			[ "$l_remote_compress_safe" = "" ] || [ "$l_remote_decompress_safe" = "" ]; then
@@ -585,54 +551,16 @@ EOF
 		# when compression is enabled, send and receive are wrapped differently
 		if [ "$l_direction" = "send" ]; then
 			l_remote_cmd="$l_cmd | $l_remote_compress_safe"
-			if [ "$l_host_token_count" -gt 1 ]; then
-				if l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_cmd"); then
-					:
-				else
-					l_status=$?
-					return "$l_status"
-				fi
-				if l_wrapped_remote_cmd=$(zxfer_build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd"); then
-					:
-				else
-					l_status=$?
-					return "$l_status"
-				fi
-				echo "$l_wrapped_remote_cmd | $g_cmd_decompress_safe"
-			else
-				if l_wrapped_remote_cmd=$(zxfer_build_ssh_shell_command_for_host "$l_option" "$l_remote_cmd"); then
-					:
-				else
-					l_status=$?
-					return "$l_status"
-				fi
-				echo "$l_wrapped_remote_cmd | $g_cmd_decompress_safe"
-			fi
+			zxfer_publish_prepared_ssh_shell_command_for_host_or_throw "$l_option" "$l_remote_cmd" ||
+				return "$?"
+			l_wrapped_remote_cmd=$g_zxfer_prepared_ssh_shell_command_result
+			echo "$l_wrapped_remote_cmd | $g_cmd_decompress_safe"
 		else
 			l_remote_cmd="$l_remote_decompress_safe | $l_cmd"
-			if [ "$l_host_token_count" -gt 1 ]; then
-				if l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_cmd"); then
-					:
-				else
-					l_status=$?
-					return "$l_status"
-				fi
-				if l_wrapped_remote_cmd=$(zxfer_build_ssh_shell_command_for_host "$l_option" "$l_remote_shell_cmd"); then
-					:
-				else
-					l_status=$?
-					return "$l_status"
-				fi
-				echo "$g_cmd_compress_safe | $l_wrapped_remote_cmd"
-			else
-				if l_wrapped_remote_cmd=$(zxfer_build_ssh_shell_command_for_host "$l_option" "$l_remote_cmd"); then
-					:
-				else
-					l_status=$?
-					return "$l_status"
-				fi
-				echo "$g_cmd_compress_safe | $l_wrapped_remote_cmd"
-			fi
+			zxfer_publish_prepared_ssh_shell_command_for_host_or_throw "$l_option" "$l_remote_cmd" ||
+				return "$?"
+			l_wrapped_remote_cmd=$g_zxfer_prepared_ssh_shell_command_result
+			echo "$g_cmd_compress_safe | $l_wrapped_remote_cmd"
 		fi
 	fi
 }
@@ -1178,8 +1106,9 @@ zxfer_finalize_supervised_send_job_success() {
 	fi
 	[ -n "${g_zxfer_send_job_record_dest_dataset:-}" ] || return 0
 
-	zxfer_note_destination_dataset_exists "$g_zxfer_send_job_record_dest_dataset"
-	zxfer_invalidate_destination_property_cache "$g_zxfer_send_job_record_dest_dataset"
+	zxfer_note_destination_receive_completed "$g_zxfer_send_job_record_dest_dataset"
+	zxfer_invalidate_destination_property_mutation_cache "$g_zxfer_send_job_record_dest_dataset"
+	zxfer_invalidate_destination_snapshot_record_cache
 	return 0
 }
 
@@ -1316,6 +1245,45 @@ zxfer_throw_supervised_send_job_cleanup_failure() {
 	zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}" "$l_cleanup_status"
 }
 
+# Purpose: Terminate remaining legacy send jobs, then throw the requested
+# operator-facing error unless cleanup itself must take precedence.
+# Usage: Called during send/receive command setup, progress handling, and job
+# coordination on failure paths so cleanup-precedence rules stay in one place.
+zxfer_throw_send_job_error_after_cleanup() {
+	l_error_message=$1
+	l_error_status=${2:-}
+	l_cleanup_status=0
+
+	zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
+	if [ "$l_cleanup_status" -ne 0 ]; then
+		zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
+	fi
+	if [ "$#" -ge 2 ]; then
+		zxfer_throw_error "$l_error_message" "$l_error_status"
+	fi
+	zxfer_throw_error "$l_error_message"
+}
+
+# Purpose: Terminate remaining supervised send jobs, then throw the requested
+# operator-facing error unless cleanup itself must take precedence.
+# Usage: Called during send/receive command setup, progress handling, and job
+# coordination on supervised failure paths so cleanup-precedence rules stay in
+# one place.
+zxfer_throw_supervised_send_job_error_after_cleanup() {
+	l_error_message=$1
+	l_error_status=${2:-}
+	l_cleanup_status=0
+
+	zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
+	if [ "$l_cleanup_status" -ne 0 ]; then
+		zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
+	fi
+	if [ "$#" -ge 2 ]; then
+		zxfer_throw_error "$l_error_message" "$l_error_status"
+	fi
+	zxfer_throw_error "$l_error_message"
+}
+
 zxfer_wait_for_next_supervised_zfs_send_job_completion() {
 	l_reason=$1
 	l_completed_record=""
@@ -1345,24 +1313,16 @@ zxfer_wait_for_next_supervised_zfs_send_job_completion() {
 		;;
 	esac
 	if [ "${g_zxfer_background_job_queue_record_job_id:-}" = "" ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to parse a completed zfs send/receive job notification."
+		zxfer_throw_supervised_send_job_error_after_cleanup \
+			"Failed to parse a completed zfs send/receive job notification."
 	fi
 
 	l_pid_lookup_status=0
 	l_pid=$(zxfer_find_supervised_send_job_pid_by_job_id "$g_zxfer_background_job_queue_record_job_id") ||
 		l_pid_lookup_status=$?
 	if [ "$l_pid_lookup_status" -ne 0 ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to match a completed zfs send/receive job to a tracked PID." "$l_pid_lookup_status"
+		zxfer_throw_supervised_send_job_error_after_cleanup \
+			"Failed to match a completed zfs send/receive job to a tracked PID." "$l_pid_lookup_status"
 	fi
 	l_job_context=$(zxfer_get_supervised_send_job_error_context "$g_zxfer_background_job_queue_record_job_id" || printf '[job %s]' "$g_zxfer_background_job_queue_record_job_id")
 
@@ -1370,12 +1330,8 @@ zxfer_wait_for_next_supervised_zfs_send_job_completion() {
 	zxfer_wait_for_background_job "$g_zxfer_background_job_queue_record_job_id" ||
 		l_wait_helper_status=$?
 	if [ "$l_wait_helper_status" -ne 0 ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to read zfs send/receive completion metadata for $l_job_context." "$l_wait_helper_status"
+		zxfer_throw_supervised_send_job_error_after_cleanup \
+			"Failed to read zfs send/receive completion metadata for $l_job_context." "$l_wait_helper_status"
 	fi
 	l_pid_status=$g_zxfer_background_job_wait_exit_status
 	if [ "${g_zxfer_background_job_queue_record_type:-}" != "completion_write_failed" ] &&
@@ -1389,36 +1345,20 @@ zxfer_wait_for_next_supervised_zfs_send_job_completion() {
 	fi
 
 	if [ "${g_zxfer_background_job_queue_record_type:-}" = "completion_write_failed" ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to record zfs send/receive background completion for $l_job_context (PID $l_pid, exit ${g_zxfer_background_job_queue_record_status:-125})." "${g_zxfer_background_job_queue_record_status:-125}"
+		zxfer_throw_supervised_send_job_error_after_cleanup \
+			"Failed to record zfs send/receive background completion for $l_job_context (PID $l_pid, exit ${g_zxfer_background_job_queue_record_status:-125})." "${g_zxfer_background_job_queue_record_status:-125}"
 	fi
 	if [ "${g_zxfer_background_job_wait_report_failure:-}" = "queue_write" ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to publish zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+		zxfer_throw_supervised_send_job_error_after_cleanup \
+			"Failed to publish zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 	fi
 	if [ "${g_zxfer_background_job_wait_report_failure:-}" = "completion_write" ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to report zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+		zxfer_throw_supervised_send_job_error_after_cleanup \
+			"Failed to report zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 	fi
 	if [ "$l_pid_status" -ne 0 ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "zfs send/receive job failed for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+		zxfer_throw_supervised_send_job_error_after_cleanup \
+			"zfs send/receive job failed for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 	fi
 }
 
@@ -1437,12 +1377,8 @@ zxfer_wait_for_supervised_zfs_send_jobs_batch() {
 		l_wait_helper_status=0
 		zxfer_wait_for_background_job "$l_job_id" || l_wait_helper_status=$?
 		if [ "$l_wait_helper_status" -ne 0 ]; then
-			l_cleanup_status=0
-			zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-			if [ "$l_cleanup_status" -ne 0 ]; then
-				zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-			fi
-			zxfer_throw_error "Failed to read zfs send/receive completion metadata for $l_job_context." "$l_wait_helper_status"
+			zxfer_throw_supervised_send_job_error_after_cleanup \
+				"Failed to read zfs send/receive completion metadata for $l_job_context." "$l_wait_helper_status"
 		fi
 		l_pid_status=$g_zxfer_background_job_wait_exit_status
 		if [ "${g_zxfer_background_job_wait_report_failure:-}" = "" ] &&
@@ -1451,28 +1387,16 @@ zxfer_wait_for_supervised_zfs_send_jobs_batch() {
 		fi
 		zxfer_unregister_supervised_send_job "$l_job_id"
 		if [ "${g_zxfer_background_job_wait_report_failure:-}" = "queue_write" ]; then
-			l_cleanup_status=0
-			zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-			if [ "$l_cleanup_status" -ne 0 ]; then
-				zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-			fi
-			zxfer_throw_error "Failed to publish zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+			zxfer_throw_supervised_send_job_error_after_cleanup \
+				"Failed to publish zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 		fi
 		if [ "${g_zxfer_background_job_wait_report_failure:-}" = "completion_write" ]; then
-			l_cleanup_status=0
-			zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-			if [ "$l_cleanup_status" -ne 0 ]; then
-				zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-			fi
-			zxfer_throw_error "Failed to report zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+			zxfer_throw_supervised_send_job_error_after_cleanup \
+				"Failed to report zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 		fi
 		if [ "$l_pid_status" -ne 0 ]; then
-			l_cleanup_status=0
-			zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-			if [ "$l_cleanup_status" -ne 0 ]; then
-				zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
-			fi
-			zxfer_throw_error "zfs send/receive job failed for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+			zxfer_throw_supervised_send_job_error_after_cleanup \
+				"zfs send/receive job failed for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 		fi
 	done <<-EOF
 		$l_job_ids
@@ -1578,12 +1502,8 @@ zxfer_wait_for_next_zfs_send_job_completion() {
 	esac
 
 	if [ "$l_completed_status_file" = "" ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to parse a completed zfs send/receive job notification."
+		zxfer_throw_send_job_error_after_cleanup \
+			"Failed to parse a completed zfs send/receive job notification."
 	fi
 
 	l_pid_lookup_status=0
@@ -1591,34 +1511,22 @@ zxfer_wait_for_next_zfs_send_job_completion() {
 		l_pid_lookup_status=$?
 	if [ "$l_pid_lookup_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_completed_status_file"
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to match a completed zfs send/receive job to a tracked PID." "$l_pid_lookup_status"
+		zxfer_throw_send_job_error_after_cleanup \
+			"Failed to match a completed zfs send/receive job to a tracked PID." "$l_pid_lookup_status"
 	fi
 
 	wait "$l_pid" 2>/dev/null || l_wait_status=$?
 	if [ "$l_record_type" = "status_write_failed" ]; then
 		zxfer_unregister_send_job "$l_pid"
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to record zfs send/receive background status (PID $l_pid, exit $l_record_status)." "$l_record_status"
+		zxfer_throw_send_job_error_after_cleanup \
+			"Failed to record zfs send/receive background status (PID $l_pid, exit $l_record_status)." "$l_record_status"
 	fi
 	l_completion_status=0
 	zxfer_get_send_job_completion_status "$l_completed_status_file" "$l_wait_status" ||
 		l_completion_status=$?
 	if [ "$l_completion_status" -ne 0 ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to read zfs send/receive job status file [$l_completed_status_file]." "$l_completion_status"
+		zxfer_throw_send_job_error_after_cleanup \
+			"Failed to read zfs send/receive job status file [$l_completed_status_file]." "$l_completion_status"
 	fi
 	l_pid_status=$g_zxfer_send_job_status_file_exit_status
 
@@ -1627,29 +1535,17 @@ zxfer_wait_for_next_zfs_send_job_completion() {
 		zxfer_close_send_job_completion_queue
 	fi
 	if [ "${g_zxfer_send_job_status_file_report_failure:-}" = "queue_write" ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to publish zfs send/receive background completion (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+		zxfer_throw_send_job_error_after_cleanup \
+			"Failed to publish zfs send/receive background completion (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 	fi
 	if [ "${g_zxfer_send_job_status_file_report_failure:-}" = "completion_write" ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "Failed to report zfs send/receive background completion (PID $l_pid, exit $l_wait_status)." "$l_pid_status"
+		zxfer_throw_send_job_error_after_cleanup \
+			"Failed to report zfs send/receive background completion (PID $l_pid, exit $l_wait_status)." "$l_pid_status"
 	fi
 
 	if [ "$l_pid_status" -ne 0 ]; then
-		l_cleanup_status=0
-		zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-		fi
-		zxfer_throw_error "zfs send/receive job failed (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+		zxfer_throw_send_job_error_after_cleanup \
+			"zfs send/receive job failed (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 	fi
 }
 
@@ -1673,12 +1569,8 @@ zxfer_wait_for_zfs_send_jobs_legacy() {
 				l_status_file=$g_zxfer_runtime_artifact_read_result
 			else
 				zxfer_unregister_send_job "$l_pid"
-				l_cleanup_status=0
-				zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-				if [ "$l_cleanup_status" -ne 0 ]; then
-					zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-				fi
-				zxfer_throw_error "Failed to match a tracked zfs send/receive job PID to a status file."
+				zxfer_throw_send_job_error_after_cleanup \
+					"Failed to match a tracked zfs send/receive job PID to a status file."
 			fi
 		fi
 		l_pid_status=0
@@ -1690,42 +1582,26 @@ zxfer_wait_for_zfs_send_jobs_legacy() {
 		fi
 		if [ "$l_completion_status" -ne 0 ]; then
 			zxfer_unregister_send_job "$l_pid"
-			l_cleanup_status=0
-			zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-			if [ "$l_cleanup_status" -ne 0 ]; then
-				zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-			fi
-			zxfer_throw_error "Failed to read zfs send/receive job status file [$l_status_file]." "$l_completion_status"
+			zxfer_throw_send_job_error_after_cleanup \
+				"Failed to read zfs send/receive job status file [$l_status_file]." "$l_completion_status"
 		fi
 		if [ "$l_status_file" != "" ]; then
 			l_pid_status=$g_zxfer_send_job_status_file_exit_status
 		fi
 		if [ "$l_status_file" != "" ] && [ "${g_zxfer_send_job_status_file_report_failure:-}" = "queue_write" ]; then
 			zxfer_unregister_send_job "$l_pid"
-			l_cleanup_status=0
-			zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-			if [ "$l_cleanup_status" -ne 0 ]; then
-				zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-			fi
-			zxfer_throw_error "Failed to publish zfs send/receive background completion (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+			zxfer_throw_send_job_error_after_cleanup \
+				"Failed to publish zfs send/receive background completion (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 		fi
 		if [ "$l_status_file" != "" ] && [ "${g_zxfer_send_job_status_file_report_failure:-}" = "completion_write" ]; then
 			zxfer_unregister_send_job "$l_pid"
-			l_cleanup_status=0
-			zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-			if [ "$l_cleanup_status" -ne 0 ]; then
-				zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-			fi
-			zxfer_throw_error "Failed to report zfs send/receive background completion (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+			zxfer_throw_send_job_error_after_cleanup \
+				"Failed to report zfs send/receive background completion (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 		fi
 		zxfer_unregister_send_job "$l_pid"
 		if [ "$l_pid_status" -ne 0 ]; then
-			l_cleanup_status=0
-			zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
-			if [ "$l_cleanup_status" -ne 0 ]; then
-				zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
-			fi
-			zxfer_throw_error "zfs send/receive job failed (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+			zxfer_throw_send_job_error_after_cleanup \
+				"zfs send/receive job failed (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 		fi
 	done
 
@@ -1927,9 +1803,10 @@ zxfer_zfs_send_receive() {
 	fi
 	if [ "$g_option_n_dryrun" -ne 1 ]; then
 		if [ "$l_did_run_in_background" -eq 0 ]; then
-			zxfer_note_destination_dataset_exists "$l_dest"
+			zxfer_note_destination_receive_completed "$l_dest"
+			zxfer_invalidate_destination_property_mutation_cache "$l_dest"
+			zxfer_invalidate_destination_snapshot_record_cache
 		fi
-		zxfer_invalidate_destination_property_cache "$l_dest"
 		# shellcheck disable=SC2034
 		g_is_performed_send_destroy=1
 	fi

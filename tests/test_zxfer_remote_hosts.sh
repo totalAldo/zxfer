@@ -106,11 +106,18 @@ write_remote_capability_cache_fixture() {
 	l_cache_path=$1
 	l_cache_epoch=${2:-$(date '+%s')}
 	l_cache_payload=${3:-$(fake_remote_capability_response)}
+	l_cache_host_spec=${4:-origin.example}
+	l_cache_requested_tools=${5:-}
+
+	l_cache_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
+		"$l_cache_host_spec" "$l_cache_requested_tools") ||
+		fail "Unable to derive remote capability cache fixture identity."
 
 	zxfer_write_cache_object_contents_to_path \
 		"$l_cache_path" \
 		"$ZXFER_REMOTE_CAPABILITY_CACHE_OBJECT_KIND" \
-		"created_epoch=$l_cache_epoch" \
+		"created_epoch=$l_cache_epoch
+identity_hex=$l_cache_identity_hex" \
 		"$l_cache_payload" >/dev/null ||
 		fail "Unable to write remote capability cache fixture."
 	chmod 600 "$l_cache_path"
@@ -1543,7 +1550,7 @@ test_zxfer_parse_remote_capability_response_extracts_fields() {
 
 	assertContains "The parser should extract the remote operating system." "$result" "os=RemoteOS"
 	assertContains "The parser should extract the remote zfs helper path." "$result" "zfs=0:/remote/bin/zfs"
-	assertContains "The parser should extract the remote GNU parallel helper path." "$result" "parallel=0:/opt/bin/parallel"
+	assertContains "The parser should extract the remote parallel helper path." "$result" "parallel=0:/opt/bin/parallel"
 	assertContains "The parser should extract the remote cat helper path." "$result" "cat=0:/remote/bin/cat"
 }
 
@@ -1560,9 +1567,9 @@ tool	cat	1	-"
 		)
 	)
 
-	assertContains "The parser should preserve missing GNU parallel status codes." \
+	assertContains "The parser should preserve missing parallel status codes." \
 		"$result" "parallel=1:"
-	assertContains "The parser should clear the GNU parallel path when the tool is missing." \
+	assertContains "The parser should clear the parallel path when the tool is missing." \
 		"$result" "parallel=1:"
 	assertContains "The parser should preserve missing cat status codes." \
 		"$result" "cat=1:"
@@ -1663,7 +1670,7 @@ test_zxfer_render_remote_capability_cache_identity_includes_requested_tool_set_f
 
 	assertContains "Origin-side capability-cache identities should include the required zfs helper." \
 		"$origin_identity" "zfs"
-	assertContains "Origin-side capability-cache identities should include GNU parallel when remote source jobs are enabled." \
+	assertContains "Origin-side capability-cache identities should include parallel when remote source jobs are enabled." \
 		"$origin_identity" "parallel"
 	assertContains "Origin-side capability-cache identities should include cat when restore-property mode needs it." \
 		"$origin_identity" "cat"
@@ -1673,7 +1680,7 @@ test_zxfer_render_remote_capability_cache_identity_includes_requested_tool_set_f
 		"$target_identity" "cat"
 	assertContains "Target-side capability-cache identities should include the remote decompression command head for -z/-Z runs." \
 		"$target_identity" "zstd"
-	assertNotContains "Target-side capability-cache identities should not include GNU parallel when only the origin host uses source-job fan-out." \
+	assertNotContains "Target-side capability-cache identities should not include parallel when only the origin host uses source-job fan-out." \
 		"$target_identity" "parallel"
 	assertNotEquals "Capability-cache identities should change when the requested tool set differs by host role." \
 		"$origin_identity" "$target_identity"
@@ -1692,7 +1699,7 @@ test_zxfer_render_remote_capability_cache_identity_accepts_explicit_requested_to
 
 	assertContains "Explicit capability-cache scopes should still include zfs." \
 		"$minimal_identity" "zfs"
-	assertNotContains "Minimal startup capability scopes should not preload GNU parallel." \
+	assertNotContains "Minimal startup capability scopes should not preload parallel." \
 		"$minimal_identity" "parallel"
 	assertNotContains "Minimal startup capability scopes should not preload restore-property helpers." \
 		"$minimal_identity" "cat"
@@ -1700,7 +1707,7 @@ test_zxfer_render_remote_capability_cache_identity_accepts_explicit_requested_to
 		"$minimal_identity" "zstd"
 	assertContains "Tool-specific capability scopes should include the requested helper." \
 		"$parallel_identity" "parallel"
-	assertNotEquals "Minimal startup scopes should key capability caches differently from later GNU parallel lookups." \
+	assertNotEquals "Minimal startup scopes should key capability caches differently from later parallel lookups." \
 		"$minimal_identity" "$parallel_identity"
 }
 
@@ -4656,6 +4663,30 @@ os	RemoteOS"
 	assertEquals "Malformed remote capability cache payloads should not produce a payload." "" "$output"
 }
 
+test_zxfer_read_remote_capability_cache_file_rejects_identity_mismatches() {
+	cache_path=$(zxfer_remote_capability_cache_path "origin.example")
+	wrong_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host "other.example") ||
+		fail "Unable to derive alternate remote capability cache identity."
+	zxfer_write_cache_object_contents_to_path \
+		"$cache_path" \
+		"$ZXFER_REMOTE_CAPABILITY_CACHE_OBJECT_KIND" \
+		"created_epoch=$(date '+%s')
+identity_hex=$wrong_identity_hex" \
+		"$(fake_remote_capability_response)" >/dev/null ||
+		fail "Unable to write identity-mismatched remote capability cache fixture."
+	chmod 600 "$cache_path"
+
+	set +e
+	output=$(zxfer_read_remote_capability_cache_file "origin.example")
+	status=$?
+	set -e
+
+	assertEquals "Remote capability cache reads should reject cache objects whose embedded identity does not match the requested host." \
+		1 "$status"
+	assertEquals "Identity-mismatched remote capability cache files should not produce a payload." \
+		"" "$output"
+}
+
 test_zxfer_read_remote_capability_cache_file_rejects_insecure_permissions() {
 	cache_path=$(zxfer_remote_capability_cache_path "origin.example")
 	write_remote_capability_cache_fixture "$cache_path"
@@ -4870,6 +4901,18 @@ test_zxfer_write_remote_capability_cache_file_writes_timestamped_payload() {
 		;;
 	created_epoch=*[!0-9]*)
 		fail "Capability cache writes should persist a numeric created_epoch metadata field."
+		;;
+	esac
+	case "$(sed -n '4p' "$cache_path")" in
+	identity_hex=)
+		fail "Capability cache writes should persist a non-empty identity_hex metadata field."
+		;;
+	identity_hex=*[!0123456789abcdef]*)
+		fail "Capability cache writes should persist identity_hex as lowercase hex."
+		;;
+	identity_hex=*) ;;
+	*)
+		fail "Capability cache writes should persist identity_hex metadata on line four."
 		;;
 	esac
 	zxfer_read_cache_object_file "$cache_path" "$ZXFER_REMOTE_CAPABILITY_CACHE_OBJECT_KIND" >/dev/null
@@ -5136,7 +5179,7 @@ test_zxfer_preload_remote_host_capabilities_delegates_to_ensure() {
 		"$(cat "$log")" "host=origin.example side=source"
 	assertContains "Capability preloading should warm zfs for remote origin discovery." \
 		"$(cat "$tools_file")" "zfs"
-	assertContains "Capability preloading should include GNU parallel when -j requests origin-side source fan-out." \
+	assertContains "Capability preloading should include parallel when -j requests origin-side source fan-out." \
 		"$(cat "$tools_file")" "parallel"
 	assertContains "Capability preloading should include origin-side property-restore helpers when requested." \
 		"$(cat "$tools_file")" "cat"
@@ -5280,7 +5323,7 @@ test_zxfer_get_remote_host_operating_system_requests_minimal_capabilities() {
 		"RemoteOS" "$output"
 	assertContains "Remote OS lookups should request the minimum zfs capability scope." \
 		"$(cat "$log")" "zfs"
-	assertNotContains "Remote OS lookups should not preload GNU parallel." \
+	assertNotContains "Remote OS lookups should not preload parallel." \
 		"$(cat "$log")" "parallel"
 }
 
@@ -5858,51 +5901,46 @@ test_zxfer_remote_capability_cache_key_propagates_identity_render_failures() {
 		"$output" "output=identity refresh failed"
 }
 
-test_zxfer_remote_capability_cache_key_falls_back_when_hex_encoding_is_empty() {
-	result=$(
+test_zxfer_remote_capability_cache_key_fails_when_hex_encoding_is_empty() {
+	set +e
+	output=$(
 		(
-			cksum() {
-				return 1
-			}
 			od() {
 				:
 			}
-			zxfer_remote_capability_cache_key "origin.example"
+			zxfer_remote_capability_cache_key "origin.example" >/dev/null
+			printf 'status=%s\n' "$?"
 		)
 	)
+	status=$?
+	set -e
 
-	assertEquals "Capability cache keys should fall back to a sentinel value when hex encoding produces no output." \
-		"00" "$result"
+	assertEquals "Capability cache key empty-hex tests should complete the subshell cleanly." \
+		0 "$status"
+	assertContains "Capability cache key derivation should fail closed when exact identity hex encoding produces no output." \
+		"$output" "status=1"
 }
 
-test_zxfer_remote_capability_cache_key_uses_hex_fallback_in_current_shell() {
+test_zxfer_remote_capability_cache_key_uses_bounded_hex_identity_in_current_shell() {
 	output_file="$TEST_TMPDIR/remote_capability_cache_key.out"
 
 	(
-		cksum() {
-			return 1
-		}
 		od() {
 			printf '%s\n' " 61 62 63 64"
 		}
 		zxfer_remote_capability_cache_key "origin.example" >"$output_file"
 	)
 
-	assertEquals "Capability cache keys should be derived from the rendered hex fallback when od succeeds." \
-		"61626364" "$(cat "$output_file")"
+	assertEquals "Capability cache keys should be derived from the rendered identity hex when od succeeds." \
+		"h4.61626364" "$(cat "$output_file")"
 }
 
-test_zxfer_remote_capability_cache_key_uses_path_shadowed_hex_fallback_in_current_shell() {
+test_zxfer_remote_capability_cache_key_uses_path_shadowed_hex_identity_in_current_shell() {
 	fake_bin_dir="$TEST_TMPDIR/remote_capability_cache_key_bin"
 	output_file="$TEST_TMPDIR/remote_capability_cache_key_shadowed.out"
 	original_path=${PATH:-}
 
 	mkdir -p "$fake_bin_dir"
-	cat >"$fake_bin_dir/cksum" <<'EOF'
-#!/bin/sh
-exit 1
-EOF
-	chmod +x "$fake_bin_dir/cksum"
 	cat >"$fake_bin_dir/od" <<'EOF'
 #!/bin/sh
 printf '%s\n' " 61 62 63 64"
@@ -5913,8 +5951,8 @@ EOF
 	zxfer_remote_capability_cache_key "origin.example" >"$output_file"
 	PATH=$original_path
 
-	assertEquals "Capability cache keys should exercise the rendered hex fallback in the current shell when od is shadowed through PATH." \
-		"61626364" "$(cat "$output_file")"
+	assertEquals "Capability cache keys should exercise the rendered identity hex in the current shell when od is shadowed through PATH." \
+		"h4.61626364" "$(cat "$output_file")"
 }
 
 test_zxfer_remote_capability_cache_key_refreshes_secure_path_from_environment() {
@@ -5922,9 +5960,6 @@ test_zxfer_remote_capability_cache_key_refreshes_secure_path_from_environment() 
 	input_file="$TEST_TMPDIR/remote_capability_cache_key_env.input"
 
 	(
-		cksum() {
-			return 1
-		}
 		od() {
 			cat >"$input_file"
 			printf '%s\n' " 61"
@@ -5936,9 +5971,31 @@ test_zxfer_remote_capability_cache_key_refreshes_secure_path_from_environment() 
 	)
 
 	assertEquals "Capability cache keys should refresh from ZXFER_SECURE_PATH instead of a stale cached dependency path." \
-		"61" "$(cat "$output_file")"
+		"h1.61" "$(cat "$output_file")"
 	assertEquals "Capability cache keys should render the current secure dependency path, ssh transport policy, and requested tool set into the cache identity." \
 		"$(printf '%s\n%s\n%s\n%s' "origin.example" "/fresh/secure/path:/usr/bin" "ambient" "zfs")" "$(cat "$input_file")"
+}
+
+test_zxfer_remote_capability_cache_key_distinguishes_known_legacy_cksum_collision_hosts() {
+	key_one=$(
+		(
+			zxfer_render_remote_capability_cache_identity_for_host() {
+				printf '%s\n' "fixed-cache-identity"
+			}
+			zxfer_remote_capability_cache_key "host-e00sy5"
+		)
+	)
+	key_two=$(
+		(
+			zxfer_render_remote_capability_cache_identity_for_host() {
+				printf '%s\n' "fixed-cache-identity"
+			}
+			zxfer_remote_capability_cache_key "host-entjr8"
+		)
+	)
+
+	assertNotEquals "Capability cache keys should not collapse known legacy cksum-collision host identities." \
+		"$key_one" "$key_two"
 }
 
 test_zxfer_remote_capability_cache_key_tracks_ssh_transport_policy() {
@@ -6099,20 +6156,20 @@ test_resolve_remote_required_tool_requests_scoped_capabilities_for_parallel() {
 				printf '%s\n' "${3:-}" >"$LOG_PATH"
 				fake_remote_capability_response
 			}
-			zxfer_resolve_remote_required_tool "origin.example" parallel "GNU parallel" source
+			zxfer_resolve_remote_required_tool "origin.example" parallel "parallel" source
 		)
 	)
 	status=$?
 
-	assertEquals "Remote GNU parallel resolution should still succeed through the capability handshake." \
+	assertEquals "Remote parallel resolution should still succeed through the capability handshake." \
 		0 "$status"
-	assertEquals "Remote GNU parallel resolution should return the parsed helper path." \
+	assertEquals "Remote parallel resolution should return the parsed helper path." \
 		"/opt/bin/parallel" "$output"
-	assertContains "Remote GNU parallel resolution should request a scoped capability payload that includes zfs." \
+	assertContains "Remote parallel resolution should request a scoped capability payload that includes zfs." \
 		"$(cat "$log")" "zfs"
-	assertContains "Remote GNU parallel resolution should request GNU parallel on demand." \
+	assertContains "Remote parallel resolution should request parallel on demand." \
 		"$(cat "$log")" "parallel"
-	assertNotContains "Remote GNU parallel resolution should not preload unrelated helpers." \
+	assertNotContains "Remote parallel resolution should not preload unrelated helpers." \
 		"$(cat "$log")" "cat"
 }
 
@@ -6130,20 +6187,20 @@ test_resolve_remote_required_tool_prefers_prewarmed_host_scope_for_parallel() {
 				printf '%s\n' "${3:-}" >"$LOG_PATH"
 				fake_remote_capability_response
 			}
-			zxfer_resolve_remote_required_tool "origin.example" parallel "GNU parallel" source
+			zxfer_resolve_remote_required_tool "origin.example" parallel "parallel" source
 		)
 	)
 	status=$?
 
-	assertEquals "Remote GNU parallel resolution should still succeed when the broader host scope is reused." \
+	assertEquals "Remote parallel resolution should still succeed when the broader host scope is reused." \
 		0 "$status"
-	assertEquals "Remote GNU parallel resolution should still return the parsed helper path from the broader host scope." \
+	assertEquals "Remote parallel resolution should still return the parsed helper path from the broader host scope." \
 		"/opt/bin/parallel" "$output"
-	assertContains "Remote GNU parallel resolution should reuse the host-scoped preload identity when it already includes zfs." \
+	assertContains "Remote parallel resolution should reuse the host-scoped preload identity when it already includes zfs." \
 		"$(cat "$log")" "zfs"
-	assertContains "Remote GNU parallel resolution should reuse the broader host-scoped preload identity for cat when restore-property mode is active." \
+	assertContains "Remote parallel resolution should reuse the broader host-scoped preload identity for cat when restore-property mode is active." \
 		"$(cat "$log")" "cat"
-	assertContains "Remote GNU parallel resolution should reuse the broader host-scoped preload identity for compression helpers when -z is active." \
+	assertContains "Remote parallel resolution should reuse the broader host-scoped preload identity for compression helpers when -z is active." \
 		"$(cat "$log")" "zstd"
 }
 
@@ -6278,7 +6335,7 @@ EOF
 		"$(cat "$log")" "zfs"
 	assertContains "Generic remote helper resolution should request the generic helper on demand." \
 		"$(cat "$log")" "zstd"
-	assertNotContains "Generic remote helper resolution should not preload GNU parallel when it is unrelated." \
+	assertNotContains "Generic remote helper resolution should not preload parallel when it is unrelated." \
 		"$(cat "$log")" "parallel"
 }
 
@@ -6380,10 +6437,10 @@ test_zxfer_get_remote_resolved_tool_version_output_returns_full_output() {
 				} >>"$LOG_FILE"
 				cat <<'EOF'
 Academic tradition requires you to cite works you base your article on.
-GNU Parallel 20260122 ('Maduro').
+parallel 20260122 ('Maduro').
 EOF
 			}
-			zxfer_get_remote_resolved_tool_version_output "origin.example" "/opt/bin/parallel" "GNU parallel" source
+			zxfer_get_remote_resolved_tool_version_output "origin.example" "/opt/bin/parallel" "parallel" source
 		)
 	)
 	status=$?
@@ -6391,7 +6448,7 @@ EOF
 	assertEquals "Resolved remote tool version probes should succeed when ssh returns multiline output." 0 "$status"
 	assertEquals "Resolved remote tool version probes should preserve the full remote version output." \
 		"Academic tradition requires you to cite works you base your article on.
-GNU Parallel 20260122 ('Maduro')." "$output"
+parallel 20260122 ('Maduro')." "$output"
 	assertContains "Resolved remote tool version probes should target the requested host." \
 		"$(cat "$log_file")" "host=origin.example"
 	assertContains "Resolved remote tool version probes should include the resolved helper path in the remote command." \
@@ -6402,19 +6459,15 @@ GNU Parallel 20260122 ('Maduro')." "$output"
 		"$(cat "$log_file")" "side=source"
 }
 
-test_zxfer_get_remote_resolved_tool_version_output_falls_back_when_will_cite_output_lacks_gnu_signature() {
-	log_file="$TEST_TMPDIR/remote_tool_version_fallback.log"
-	remote_parallel_bin="$TEST_TMPDIR/remote_parallel_version_fallback"
+test_zxfer_get_remote_resolved_tool_version_output_uses_plain_version_only() {
+	log_file="$TEST_TMPDIR/remote_tool_version_plain.log"
+	remote_parallel_bin="$TEST_TMPDIR/remote_parallel_version_plain"
 	: >"$log_file"
 	cat >"$remote_parallel_bin" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >>"$log_file"
-if [ "\$1" = "--will-cite" ] && [ "\$2" = "--version" ]; then
-	printf '%s\n' "Academic tradition requires you to cite works you base your article on."
-	exit 0
-fi
 if [ "\$1" = "--version" ]; then
-	printf '%s\n' "GNU parallel 20260122 ('Maduro')."
+	printf '%s\n' "parallel 20260122 ('Maduro')."
 	exit 0
 fi
 exit 1
@@ -6430,19 +6483,19 @@ EOF
 				sh -c "$2"
 			}
 			zxfer_get_remote_resolved_tool_version_output \
-				"origin.example" "$remote_parallel_bin" "GNU parallel" source
+				"origin.example" "$remote_parallel_bin" "parallel" source
 		)
 	)
 	status=$?
 
-	assertEquals "Resolved remote GNU parallel probes should fall back to plain --version when the --will-cite output lacks the GNU signature." \
+	assertEquals "Resolved remote tool version probes should use the plain --version form." \
 		0 "$status"
-	assertEquals "Resolved remote GNU parallel probes should return the fallback --version output when it carries the GNU banner." \
-		"GNU parallel 20260122 ('Maduro')." "$output"
-	assertContains "Resolved remote GNU parallel probes should try the --will-cite form first." \
-		"$(cat "$log_file")" "--will-cite --version"
-	assertContains "Resolved remote GNU parallel probes should retry plain --version after a non-GNU --will-cite banner." \
+	assertEquals "Resolved remote tool version probes should return the plain --version output." \
+		"parallel 20260122 ('Maduro')." "$output"
+	assertContains "Resolved remote tool version probes should request plain --version." \
 		"$(cat "$log_file")" "--version"
+	assertNotContains "Resolved remote tool version probes should not use a GNU-specific --will-cite check." \
+		"$(cat "$log_file")" "--will-cite"
 }
 
 test_zxfer_get_remote_resolved_tool_version_line_returns_first_line() {
@@ -6460,10 +6513,10 @@ test_zxfer_get_remote_resolved_tool_version_line_returns_first_line() {
 				} >>"$LOG_FILE"
 				cat <<'EOF'
 Academic tradition requires you to cite works you base your article on.
-GNU Parallel 20260122 ('Maduro').
+parallel 20260122 ('Maduro').
 EOF
 			}
-			zxfer_get_remote_resolved_tool_version_line "origin.example" "/opt/bin/parallel" "GNU parallel" source
+			zxfer_get_remote_resolved_tool_version_line "origin.example" "/opt/bin/parallel" "parallel" source
 		)
 	)
 	status=$?
@@ -6507,14 +6560,14 @@ test_zxfer_get_remote_resolved_tool_version_line_reports_probe_failures() {
 			zxfer_invoke_ssh_shell_command_for_host() {
 				return 255
 			}
-			zxfer_get_remote_resolved_tool_version_line "origin.example" "/opt/bin/parallel" "GNU parallel" source
+			zxfer_get_remote_resolved_tool_version_line "origin.example" "/opt/bin/parallel" "parallel" source
 		)
 	)
 	status=$?
 
 	assertEquals "Resolved remote tool version probes should fail when ssh cannot execute the remote probe." 1 "$status"
 	assertEquals "Resolved remote tool version probe failures should surface the generic dependency query error." \
-		"Failed to query dependency \"GNU parallel\" on host origin.example." "$output"
+		"Failed to query dependency \"parallel\" on host origin.example." "$output"
 }
 
 test_zxfer_get_remote_resolved_tool_version_output_preserves_transport_diagnostic() {
@@ -6525,7 +6578,7 @@ test_zxfer_get_remote_resolved_tool_version_output_preserves_transport_diagnosti
 				printf '%s\n' "Host key verification failed." >&2
 				return 255
 			}
-			zxfer_get_remote_resolved_tool_version_output "origin.example" "/opt/bin/parallel" "GNU parallel" source
+			zxfer_get_remote_resolved_tool_version_output "origin.example" "/opt/bin/parallel" "parallel" source
 		) 2>&1
 	)
 	status=$?
@@ -6543,14 +6596,14 @@ test_zxfer_get_remote_resolved_tool_version_output_ignores_stdout_only_probe_noi
 				printf '%s\n' "wrapper startup noise"
 				return 255
 			}
-			zxfer_get_remote_resolved_tool_version_output "origin.example" "/opt/bin/parallel" "GNU parallel" source
+			zxfer_get_remote_resolved_tool_version_output "origin.example" "/opt/bin/parallel" "parallel" source
 		)
 	)
 	status=$?
 
 	assertEquals "Resolved remote tool version probes should fail when the remote probe returns only stdout noise." 1 "$status"
 	assertEquals "Stdout-only remote tool probe noise should not replace the generic dependency query failure." \
-		"Failed to query dependency \"GNU parallel\" on host origin.example." "$output"
+		"Failed to query dependency \"parallel\" on host origin.example." "$output"
 }
 
 test_init_globals_initializes_defaults_and_temp_files() {
@@ -6969,7 +7022,7 @@ test_init_globals_rejects_control_whitespace_in_optional_parallel_path() {
 	mkdir -p "$parallel_dir"
 	cat >"$parallel_dir/parallel" <<'EOF'
 #!/bin/sh
-printf '%s\n' "GNU parallel (fake)"
+printf '%s\n' "parallel (fake)"
 exit 0
 EOF
 	chmod +x "$parallel_dir/parallel"
@@ -7002,7 +7055,7 @@ EOF
 	)
 	status=$?
 
-	assertEquals "zxfer_init_globals should fail when optional GNU parallel resolves to a path with control whitespace." 1 "$status"
+	assertEquals "zxfer_init_globals should fail when optional parallel resolves to a path with control whitespace." 1 "$status"
 	assertContains "Invalid optional parallel resolutions should be classified as dependency failures." \
 		"$output" "class=dependency"
 	assertContains "Invalid optional parallel resolutions should explain the path validation failure." \
@@ -7757,7 +7810,7 @@ EOF
 		0 "$status"
 	assertEquals "Generic remote CLI tool resolution should return the parsed helper path from the broader host scope." \
 		"/remote/bin/zstd" "$(cat "$result_file")"
-	assertContains "Generic remote CLI tool resolution should reuse the broader host-scoped preload identity for GNU parallel when -j is active." \
+	assertContains "Generic remote CLI tool resolution should reuse the broader host-scoped preload identity for parallel when -j is active." \
 		"$(cat "$log_file")" "parallel"
 	assertContains "Generic remote CLI tool resolution should reuse the broader host-scoped preload identity for cat when restore-property mode is active." \
 		"$(cat "$log_file")" "cat"
@@ -10956,20 +11009,21 @@ test_get_backup_storage_dir_for_dataset_tree_runs_in_current_shell() {
 		"$g_backup_storage_root/dataset" "$(cat "$output_file")"
 }
 
-test_backup_storage_helpers_cover_fallback_encoding_failures_in_current_shell() {
+test_backup_storage_helpers_cover_identity_encoding_failures_in_current_shell() {
 	output_file="$TEST_TMPDIR/backup_helper_fallback.out"
+	status_file="$TEST_TMPDIR/backup_helper_fallback.status"
 
 	(
-		cksum() {
-			:
-		}
 		od() {
 			:
 		}
 		zxfer_backup_metadata_file_key "tank/src" "backup/dst" >"$output_file"
+		printf '%s\n' "$?" >"$status_file"
 	)
-	assertEquals "Backup metadata file keys should fall back to k00 in the current shell when hex encoding produces no output." \
-		"k00" "$(cat "$output_file")"
+	assertEquals "Backup metadata file keys should fail closed in the current shell when exact identity hex encoding produces no output." \
+		1 "$(cat "$status_file")"
+	assertEquals "Failed exact identity key derivation should not emit a placeholder key." \
+		"" "$(cat "$output_file")"
 }
 
 test_zxfer_get_backup_metadata_filename_runs_in_current_shell() {
@@ -10979,64 +11033,91 @@ test_zxfer_get_backup_metadata_filename_runs_in_current_shell() {
 	zxfer_get_backup_metadata_filename "tank/src" "backup/dst" >"$output_file"
 
 	assertContains "Backup metadata filename rendering should run in the current shell." \
-		"$(cat "$output_file")" ".zxfer_backup_info.src.k"
+		"$(cat "$output_file")" ".zxfer_backup_info.v2/h/"
+	assertContains "Backup metadata filename rendering should use the fixed v2 leaf name." \
+		"$(cat "$output_file")" "/.zxfer_backup_info.v2"
 }
 
-test_backup_metadata_matches_source_accepts_only_exact_modern_pairs() {
-	assertEquals "Backup metadata matching should accept the modern source,destination,properties record order." \
+test_backup_metadata_matches_source_accepts_only_v2_relative_rows() {
+	ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
+	ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
+	current_contents=$(zxfer_test_render_current_backup_metadata_contents \
+		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")")
+	legacy_contents=$(zxfer_test_render_current_backup_metadata_contents \
+		"tank/src,backup/dst,compression=lz4")
+	unset ZXFER_TEST_BACKUP_SOURCE_ROOT
+	unset ZXFER_TEST_BACKUP_DESTINATION_ROOT
+
+	assertEquals "Backup metadata matching should accept current v2 relative rows." \
 		0 "$(
 			(
-				zxfer_backup_metadata_matches_source "tank/src,backup/dst,compression=lz4" "tank/src" "backup/dst"
+				zxfer_backup_metadata_matches_source "$current_contents" "tank/src" "backup/dst"
 				printf '%s\n' "$?"
 			)
 		)"
-	assertEquals "Backup metadata matching should reject the legacy destination,source,properties record order." \
-		1 "$(
+	assertEquals "Backup metadata matching should reject legacy exact-pair rows in v2 files." \
+		3 "$(
 			(
-				zxfer_backup_metadata_matches_source "backup/dst,tank/src,compression=lz4" "tank/src" "backup/dst"
+				zxfer_backup_metadata_matches_source "$legacy_contents" "tank/src" "backup/dst"
 				printf '%s\n' "$?"
 			)
 		)"
 }
 
-test_backup_metadata_matches_source_rejects_wrong_destination_and_ambiguous_pairs() {
-	assertEquals "Backup metadata matching should reject rows for the requested source dataset when the recorded destination does not match." \
+test_backup_metadata_matches_source_rejects_wrong_destination_and_ambiguous_relative_rows() {
+	ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
+	ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/other"
+	wrong_destination_contents=$(zxfer_test_render_current_backup_metadata_contents \
+		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")")
+	ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
+	ambiguous_contents=$(zxfer_test_render_current_backup_metadata_contents \
+		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
+		"$(zxfer_test_backup_metadata_row "." "compression=off=local")")
+	unset ZXFER_TEST_BACKUP_SOURCE_ROOT
+	unset ZXFER_TEST_BACKUP_DESTINATION_ROOT
+
+	assertEquals "Backup metadata matching should reject rows for the requested source dataset when the destination root does not match." \
 		1 "$(
 			(
-				zxfer_backup_metadata_matches_source "tank/src,backup/other,compression=lz4" "tank/src" "backup/dst"
+				zxfer_backup_metadata_matches_source "$wrong_destination_contents" "tank/src" "backup/dst"
 				printf '%s\n' "$?"
 			)
 		)"
-	assertEquals "Backup metadata matching should reject files that contain multiple exact matches for the same source/destination pair." \
+	assertEquals "Backup metadata matching should reject files that contain multiple relative rows for the same source/destination root." \
 		2 "$(
 			(
-				zxfer_backup_metadata_matches_source "$(printf '%s\n%s\n' \
-					'tank/src,backup/dst,compression=lz4' \
-					'tank/src,backup/dst,compression=off')" "tank/src" "backup/dst"
+				zxfer_backup_metadata_matches_source "$ambiguous_contents" "tank/src" "backup/dst"
 				printf '%s\n' "$?"
 			)
 		)"
 }
 
 test_backup_metadata_matches_source_rejects_malformed_current_format_rows() {
-	assertEquals "Backup metadata matching should reject rows that do not contain the current source,destination,properties format." \
+	ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
+	ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
+	missing_tab_contents=$(zxfer_test_render_current_backup_metadata_contents "broken-row")
+	extra_comma_contents=$(zxfer_test_render_current_backup_metadata_contents "broken,legacy,row")
+	unset ZXFER_TEST_BACKUP_SOURCE_ROOT
+	unset ZXFER_TEST_BACKUP_DESTINATION_ROOT
+
+	assertEquals "Backup metadata matching should reject rows that do not contain the current relative-path/properties format." \
 		3 "$(
 			(
-				zxfer_backup_metadata_matches_source "tank/src,backup/dst" "tank/src" "backup/dst"
+				zxfer_backup_metadata_matches_source "$missing_tab_contents" "tank/src" "backup/dst"
 				printf '%s\n' "$?"
 			)
 		)"
 	assertEquals "Backup metadata matching should reject rows that contain extra raw field delimiters." \
 		3 "$(
 			(
-				zxfer_backup_metadata_matches_source "tank/src,backup/dst,compression=lz4,extra" "tank/src" "backup/dst"
+				zxfer_backup_metadata_matches_source "$extra_comma_contents" "tank/src" "backup/dst"
 				printf '%s\n' "$?"
 			)
 		)"
 }
 
 test_zxfer_try_backup_restore_candidate_returns_missing_for_missing_local_candidate() {
-	assertEquals "Missing local backup candidates should return the candidate-missing sentinel so ancestor lookup can continue." \
+	assertEquals "Missing local backup candidates should return the candidate-missing sentinel." \
 		1 "$(
 			(
 				zxfer_read_local_backup_file() {
@@ -11049,7 +11130,7 @@ test_zxfer_try_backup_restore_candidate_returns_missing_for_missing_local_candid
 }
 
 test_zxfer_try_backup_restore_candidate_returns_missing_for_missing_remote_candidate() {
-	assertEquals "Missing remote backup candidates should return the candidate-missing sentinel so ancestor lookup can continue." \
+	assertEquals "Missing remote backup candidates should return the candidate-missing sentinel." \
 		1 "$(
 			(
 				zxfer_read_remote_backup_file() {
@@ -11086,25 +11167,24 @@ test_zxfer_get_backup_metadata_filename_uses_source_and_destination_identity() {
 	second_name=$(zxfer_get_backup_metadata_filename "tank/b/src" "backup/one")
 	third_name=$(zxfer_get_backup_metadata_filename "tank/a/src" "backup/two")
 
-	assertContains "Backup metadata filenames should keep the readable source tail." \
-		"$first_name" ".zxfer_backup_info.src.k"
+	assertContains "Backup metadata filenames should use the current chunked v2 identity path." \
+		"$first_name" ".zxfer_backup_info.v2/h/"
 	assertNotEquals "Distinct source datasets that share the same tail should produce different backup metadata filenames." \
 		"$first_name" "$second_name"
 	assertNotEquals "Distinct destination roots for the same source should produce different backup metadata filenames." \
 		"$first_name" "$third_name"
 }
 
-test_zxfer_backup_metadata_file_key_falls_back_when_hex_encoding_is_empty() {
+test_zxfer_backup_metadata_file_key_fails_when_hex_encoding_is_empty() {
 	(
-		cksum() {
-			:
-		}
 		od() {
 			:
 		}
 
-		assertEquals "Backup metadata file keys should fall back to a deterministic placeholder when hex encoding produces no output." \
-			"k00" "$(zxfer_backup_metadata_file_key "tank/src" "backup/dst")"
+		zxfer_backup_metadata_file_key "tank/src" "backup/dst" >/dev/null
+		status=$?
+		assertEquals "Backup metadata file keys should fail closed when exact identity hex encoding produces no output." \
+			1 "$status"
 	)
 }
 

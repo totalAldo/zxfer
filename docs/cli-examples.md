@@ -127,9 +127,14 @@ Replicates only `tank/apps/api`.
 
 `-j` still controls the send/receive job ceiling. When `jobs > 1`, zxfer also
 uses the explicit per-dataset source-discovery path on the executing origin
-host instead of the serial recursive listing. Local-origin runs require GNU
-`parallel`; remote-origin runs through `-O` require a resolved origin-host
-`parallel` helper, and zxfer fails closed if that helper is missing. The
+host instead of the serial recursive listing. Local-origin and remote-origin
+runs require a resolved `parallel` helper on the executing origin host. zxfer
+intentionally validates only that the helper exists through the secure-PATH
+model, then assumes the operator or package supplied an implementation
+compatible with the GNU Parallel-style options used by the rendered pipeline.
+If the helper is missing, zxfer fails closed during setup; if it is
+incompatible, the source-discovery pipeline fails instead of silently falling
+back to serial discovery. The
 source-discovery helper is still tracked for cleanup by PID, while long-lived
 send/receive workers run under the shared background-job supervisor, so abort
 cleanup validates the tracked process group or owned child set instead of
@@ -183,6 +188,11 @@ the most recent snapshot that matches the stream.
 ./zxfer -v -o 'compression=lz4,atime=off' -R tank/data backup/data
 ```
 
+In recursive runs, zxfer sets the override on the replicated root and leaves
+descendants inherited when the property can inherit and the parent already
+provides the requested value. Non-inheritable overrides, such as quotas and
+reservations, remain local on descendants.
+
 Quote the full `-o` argument when one value needs a literal comma, and escape
 that comma as `\,`:
 
@@ -199,11 +209,11 @@ that comma as `\,`:
 ### `-U` Skip properties unsupported by the destination
 
 ```sh
-./zxfer -v -P -U -T old-backup@example.com -R tank/data backup/data
+./zxfer -v -P -U -T backup@example.com -R tank/data backup/data
 ```
 
-Useful when replicating to an older OpenZFS host that does not understand every
-property supported by the source.
+Useful when the current destination platform does not support every property
+reported by the source within the OpenZFS 2+ support floor.
 
 ### `-k` Back up source properties before overriding them
 
@@ -215,8 +225,8 @@ ZXFER_BACKUP_DIR=/var/db/zxfer \
 `-k` also enables property transfer so the destination still receives the live
 source property set after the backup metadata is captured. `ZXFER_BACKUP_DIR`
 must be an absolute path. Current-format backup files write the
-`#format_version`, `#source_root`, and `#destination_root` header markers
-before the exact source/destination property rows.
+`#format_version:2`, `#source_root`, and `#destination_root` header markers
+before v2 source-root-relative property rows.
 
 ### `-e` Restore properties from a prior `-k` backup
 
@@ -225,12 +235,14 @@ ZXFER_BACKUP_DIR=/var/db/zxfer \
 ./zxfer -v -e -R tank/data backup/restore-data
 ```
 
-This looks up the exact keyed backup metadata file beneath the current
-source-dataset-relative tree under `ZXFER_BACKUP_DIR`.
-`-e` also flows through the property-transfer path during the restore.
+This looks up the current chunked lossless-keyed backup metadata path beneath
+the source-dataset-relative tree under `ZXFER_BACKUP_DIR`, falls back read-only
+to the retired checksum-keyed v2 filename when the current path is absent,
+validates `#format_version:2`, then restores the matching source-root-relative
+row. `-e` also flows through the property-transfer path during the restore.
 Older mountpoint-local `.zxfer_backup_info.*` files and other legacy metadata
-layouts are intentionally unsupported. `ZXFER_BACKUP_DIR` must be an absolute
-path.
+layouts are intentionally unsupported.
+`ZXFER_BACKUP_DIR` must be an absolute path.
 
 ## Remote Replication And Stream Options
 
@@ -360,7 +372,7 @@ ZXFER_BACKUP_DIR=/var/db/zxfer \
 ### Recursive property transfer while skipping incompatible destination properties
 
 ```sh
-./zxfer -v -P -U -I 'quota,reservation' -T old-backup.example.com \
+./zxfer -v -P -U -I 'quota,reservation' -T backup-omnios.example.com \
 	-R tank/home backup/home
 ```
 

@@ -1999,7 +1999,7 @@ test_zxfer_remote_host_supervisor_related_branches_cover_current_shell_paths() {
 		"$output" "lease_owner_status=1"
 	assertContains "SSH identity write failures should remain covered." \
 		"$output" "identity_write_status=1"
-	assertContains "Remote capability cache-key fallback should remain covered." \
+	assertContains "Remote capability cache-key derivation should remain covered." \
 		"$output" "remote_key_status=0"
 	assertContains "Remote capability cache-dir effective uid failures should remain covered." \
 		"$output" "remote_cache_uid_status=1"
