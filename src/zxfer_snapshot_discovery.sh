@@ -1185,6 +1185,41 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 	fi
 }
 
+# Purpose: Collect and publish destination dataset inventory through the local
+# destination execution path.
+# Usage: Called after snapshot diffing when later work has proven it can
+# consume the recursive destination existence cache.
+zxfer_collect_local_destination_dataset_inventory() {
+	l_status=0
+	zxfer_create_temp_file_group 2 >/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
+	fi
+	l_destination_inventory_stage_files=$g_zxfer_temp_file_group_result
+	{
+		IFS= read -r l_dest_list_tmp_file
+		IFS= read -r l_dest_list_err_file
+	} <<-EOF
+		$l_destination_inventory_stage_files
+	EOF
+
+	l_cmd=$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")
+	zxfer_echoV "Running command: $l_cmd"
+	zxfer_record_last_command_string "$l_cmd"
+	l_dest_inventory_status=0
+	zxfer_run_destination_zfs_cmd list -t filesystem,volume -Hr -o name "$g_destination" >"$l_dest_list_tmp_file" 2>"$l_dest_list_err_file" ||
+		l_dest_inventory_status=$?
+
+	l_status=0
+	zxfer_publish_destination_dataset_inventory_from_stage \
+		"$l_dest_list_tmp_file" \
+		"$l_dest_list_err_file" \
+		"$l_dest_inventory_status" ||
+		l_status=$?
+	zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
+	return "$l_status"
+}
+
 # Purpose: Write the snapshot identity file from records in the normalized form
 # later zxfer steps expect.
 # Usage: Called during source and destination snapshot discovery when the
@@ -1936,6 +1971,25 @@ zxfer_filter_recursive_dataset_list_with_excludes() {
 	return 0
 }
 
+# Purpose: Decide whether recursive source dataset inventory must be derived
+# from the full source snapshot list.
+# Usage: Called during recursive diff planning so no-op runs without property
+# work can avoid an otherwise unused whole-tree dataset extraction.
+zxfer_snapshot_discovery_needs_source_dataset_inventory() {
+	if [ "${g_option_R_recursive:-}" = "" ]; then
+		return 0
+	fi
+	if [ "${g_option_P_transfer_property:-0}" -eq 1 ] ||
+		[ -n "${g_option_o_override_property:-}" ]; then
+		return 0
+	fi
+	if [ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ]; then
+		return 0
+	fi
+
+	return 1
+}
+
 # Purpose: Update the g recursive source list in the shared runtime state.
 # Usage: Called during source and destination snapshot discovery after a probe
 # or planning step changes the active context that later helpers should use.
@@ -1999,13 +2053,17 @@ zxfer_set_g_recursive_source_list() {
 	else
 		g_recursive_destination_extra_dataset_list=""
 	fi
-	l_status=0
-	zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_source_snaps_sorted_tmp_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-		zxfer_throw_error "Failed to derive recursive source dataset inventory." "$l_status"
+	if zxfer_snapshot_discovery_needs_source_dataset_inventory; then
+		l_status=0
+		zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_source_snaps_sorted_tmp_file" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+			zxfer_throw_error "Failed to derive recursive source dataset inventory." "$l_status"
+		fi
+		g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
+	else
+		g_recursive_source_dataset_list=""
 	fi
-	g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
 
 	# if excluding datasets, remove them from the list
 	if [ "$g_option_x_exclude_datasets" != "" ]; then
@@ -2023,13 +2081,15 @@ zxfer_set_g_recursive_source_list() {
 			zxfer_throw_error "Failed to filter recursive destination dataset delete list against exclude patterns." "$l_status"
 		fi
 		g_recursive_destination_extra_dataset_list=$g_zxfer_recursive_dataset_list_result
-		l_status=0
-		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_dataset_list" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-			zxfer_throw_error "Failed to filter recursive source dataset inventory against exclude patterns." "$l_status"
+		if zxfer_snapshot_discovery_needs_source_dataset_inventory; then
+			l_status=0
+			zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_dataset_list" || l_status=$?
+			if [ "$l_status" -ne 0 ]; then
+				zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+				zxfer_throw_error "Failed to filter recursive source dataset inventory against exclude patterns." "$l_status"
+			fi
+			g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
 		fi
-		g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
 	fi
 
 	# debugging
@@ -2060,6 +2120,53 @@ zxfer_set_g_recursive_source_list() {
 	fi
 
 	zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+}
+
+# Purpose: Decide whether snapshot discovery must keep per-dataset record
+# caches for later replication work.
+# Usage: Called after recursive snapshot diffing has populated the dataset
+# work lists, before discovery decides whether to carry large snapshot
+# inventories forward.
+zxfer_snapshot_discovery_needs_record_caches() {
+	if [ "${g_option_R_recursive:-}" = "" ]; then
+		return 0
+	fi
+	if [ -n "${g_recursive_source_list:-}" ]; then
+		return 0
+	fi
+	if [ "${g_option_d_delete_destination_snapshots:-0}" -eq 1 ] &&
+		[ -n "${g_recursive_destination_extra_dataset_list:-}" ]; then
+		return 0
+	fi
+	if [ "${g_option_P_transfer_property:-0}" -eq 1 ] ||
+		[ -n "${g_option_o_override_property:-}" ]; then
+		return 0
+	fi
+
+	return 1
+}
+
+# Purpose: Decide whether local recursive destination dataset inventory should
+# be collected after snapshot diffing.
+# Usage: Called after recursive snapshot deltas are known so no-op runs avoid
+# building a destination existence cache that no later stage can consume.
+zxfer_snapshot_discovery_needs_destination_dataset_inventory() {
+	if [ -n "${g_option_T_target_host:-}" ]; then
+		return 1
+	fi
+	if [ -n "${g_recursive_source_list:-}" ]; then
+		return 0
+	fi
+	if [ "${g_option_d_delete_destination_snapshots:-0}" -eq 1 ] &&
+		[ -n "${g_recursive_destination_extra_dataset_list:-}" ]; then
+		return 0
+	fi
+	if [ "${g_option_P_transfer_property:-0}" -eq 1 ] ||
+		[ -n "${g_option_o_override_property:-}" ]; then
+		return 0
+	fi
+
+	return 1
 }
 
 # Purpose: Build the source and destination snapshot inventories that the rest
@@ -2122,29 +2229,12 @@ zxfer_get_zfs_list() {
 	# Run as many commands prior to the wait command as possible.
 	#
 
-	# get a list of all destination datasets recursively
 	l_destination_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	l_destination_inventory_attempted=0
 	l_destination_dataset=$(zxfer_get_destination_snapshot_root_dataset)
-	l_cmd=$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")
-	zxfer_echoV "Running command: $l_cmd"
-	zxfer_record_last_command_string "$l_cmd"
-	l_status=0
-	zxfer_create_temp_file_group 2 >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path_list "$l_source_snapshot_stage_files"
-		return "$l_status"
-	fi
-	l_destination_inventory_stage_files=$g_zxfer_temp_file_group_result
-	{
-		IFS= read -r l_dest_list_tmp_file
-		IFS= read -r l_dest_list_err_file
-	} <<-EOF
-		$l_destination_inventory_stage_files
-	EOF
 	l_status=0
 	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
 		return "$l_status"
 	fi
@@ -2152,7 +2242,6 @@ zxfer_get_zfs_list() {
 	l_status=0
 	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 			"$l_rzfs_list_hr_snap_tmp_file"
 		return "$l_status"
@@ -2160,6 +2249,23 @@ zxfer_get_zfs_list() {
 	l_dest_snaps_stripped_sorted_tmp_file=$g_zxfer_temp_file_result
 
 	if [ -n "${g_option_T_target_host:-}" ]; then
+		l_status=0
+		zxfer_create_temp_file_group 2 >/dev/null || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+			return "$l_status"
+		fi
+		l_destination_inventory_stage_files=$g_zxfer_temp_file_group_result
+		{
+			IFS= read -r l_dest_list_tmp_file
+			IFS= read -r l_dest_list_err_file
+		} <<-EOF
+			$l_destination_inventory_stage_files
+		EOF
+		l_cmd=$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")
+		zxfer_echoV "Running command: $l_cmd"
+		zxfer_record_last_command_string "$l_cmd"
 		l_rzfs_list_hr_snap_err_tmp_file=""
 		l_status=0
 		zxfer_get_temp_file >/dev/null || l_status=$?
@@ -2187,6 +2293,7 @@ zxfer_get_zfs_list() {
 			"$l_dest_list_err_file" \
 			"$l_dest_inventory_status" \
 			"${g_zxfer_destination_discovery_batch_pool_status:-}"
+		l_destination_inventory_attempted=1
 		if [ "${g_zxfer_destination_discovery_batch_snapshot_status:-0}" -ne 0 ]; then
 			l_snapshot_stderr_read_status=0
 			zxfer_read_snapshot_discovery_capture_file "$l_rzfs_list_hr_snap_err_tmp_file" ||
@@ -2216,15 +2323,6 @@ zxfer_get_zfs_list() {
 		fi
 		zxfer_cleanup_runtime_artifact_path "$l_rzfs_list_hr_snap_err_tmp_file"
 	else
-		l_dest_inventory_status=0
-		zxfer_run_destination_zfs_cmd list -t filesystem,volume -Hr -o name "$g_destination" >"$l_dest_list_tmp_file" 2>"$l_dest_list_err_file" ||
-			l_dest_inventory_status=$?
-		zxfer_publish_destination_dataset_inventory_from_stage \
-			"$l_dest_list_tmp_file" \
-			"$l_dest_list_err_file" \
-			"$l_dest_inventory_status"
-		zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-
 		# this function writes to both files passed as parameters
 		l_status=0
 		zxfer_write_destination_snapshot_list_to_files "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
@@ -2238,16 +2336,6 @@ zxfer_get_zfs_list() {
 	fi
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_destination_snapshot_listing_ms "$l_destination_snapshot_stage_start_ms"
 
-	l_status=0
-	zxfer_read_snapshot_discovery_capture_file "$l_rzfs_list_hr_snap_tmp_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-			"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
-		zxfer_throw_error "Failed to read staged destination snapshot list." "$l_status"
-	fi
-	g_rzfs_list_hr_snap=$g_zxfer_snapshot_discovery_file_read_result
-	g_zxfer_destination_snapshot_record_cache_file=$l_rzfs_list_hr_snap_tmp_file
-
 	zxfer_echoV "Waiting for background processes to finish."
 	l_source_snapshot_wait_status=0
 	l_source_snapshot_wait_report_failure=""
@@ -2256,7 +2344,7 @@ zxfer_get_zfs_list() {
 		zxfer_wait_for_background_job "$g_source_snapshot_list_job_id" || l_wait_helper_status=$?
 		if [ "$l_wait_helper_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-				"$l_dest_snaps_stripped_sorted_tmp_file"
+				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			zxfer_throw_error "Failed to read source snapshot discovery completion metadata." "$l_wait_helper_status"
 		fi
@@ -2274,13 +2362,13 @@ zxfer_get_zfs_list() {
 	case $l_source_snapshot_wait_report_failure in
 	queue_write)
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-			"$l_dest_snaps_stripped_sorted_tmp_file"
+			"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 		zxfer_cleanup_snapshot_record_cache_files
 		zxfer_throw_error "Failed to publish source snapshot discovery completion."
 		;;
 	completion_write)
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-			"$l_dest_snaps_stripped_sorted_tmp_file"
+			"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 		zxfer_cleanup_snapshot_record_cache_files
 		zxfer_throw_error "Failed to report source snapshot discovery completion."
 		;;
@@ -2288,7 +2376,7 @@ zxfer_get_zfs_list() {
 
 	if [ "$l_source_snapshot_wait_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-			"$l_dest_snaps_stripped_sorted_tmp_file"
+			"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 		zxfer_cleanup_snapshot_record_cache_files
 		if [ -n "${g_source_snapshot_list_cmd:-}" ]; then
 			zxfer_record_last_command_string "$g_source_snapshot_list_cmd"
@@ -2309,41 +2397,13 @@ zxfer_get_zfs_list() {
 		fi
 		zxfer_throw_error "Failed to retrieve snapshots from the source" "$l_source_snapshot_wait_status"
 	fi
-	l_status=0
-	zxfer_read_snapshot_discovery_capture_file "$l_lzfs_list_hr_s_snap_tmp_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
+	zxfer_echoV "Background processes finished."
+
+	if [ ! -s "$l_lzfs_list_hr_s_snap_tmp_file" ]; then
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 			"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
-		zxfer_cleanup_snapshot_record_cache_files
-		zxfer_throw_error "Failed to read staged source snapshot list." "$l_status"
+		zxfer_throw_error "Failed to retrieve snapshots from the source"
 	fi
-	g_lzfs_list_hr_snap=$g_zxfer_snapshot_discovery_file_read_result
-	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-			"$l_lzfs_list_hr_s_snap_err_tmp_file" \
-			"$l_dest_snaps_stripped_sorted_tmp_file"
-		zxfer_cleanup_snapshot_record_cache_files
-		return "$l_status"
-	fi
-	l_source_snapshot_record_cache_file=$g_zxfer_temp_file_result
-	l_cmd=$(zxfer_render_command_for_report "" zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file")
-	zxfer_echoV "Running command: $l_cmd > $(zxfer_quote_token_for_report "$l_source_snapshot_record_cache_file")"
-	zxfer_record_last_command_string "$l_cmd > $(zxfer_quote_token_for_report "$l_source_snapshot_record_cache_file")"
-	l_status=0
-	zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snapshot_record_cache_file" ||
-		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-			"$l_lzfs_list_hr_s_snap_err_tmp_file" \
-			"$l_dest_snaps_stripped_sorted_tmp_file" \
-			"$l_source_snapshot_record_cache_file"
-		zxfer_cleanup_snapshot_record_cache_files
-		zxfer_throw_error "Failed to stage source snapshot record cache." "$l_status"
-	fi
-	g_zxfer_source_snapshot_record_cache_file=$l_source_snapshot_record_cache_file
-	zxfer_echoV "Background processes finished."
 
 	#
 	# END background process
@@ -2353,24 +2413,82 @@ zxfer_get_zfs_list() {
 	zxfer_set_g_recursive_source_list "$l_lzfs_list_hr_s_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
 		l_status=$?
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms "$l_snapshot_diff_sort_stage_start_ms"
-	zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-		"$l_dest_snaps_stripped_sorted_tmp_file"
+	zxfer_cleanup_runtime_artifact_paths "$l_dest_snaps_stripped_sorted_tmp_file"
 	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_err_tmp_file"
+		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+			"$l_rzfs_list_hr_snap_tmp_file"
 		zxfer_cleanup_snapshot_record_cache_files
 		return "$l_status"
 	fi
+
+	if zxfer_snapshot_discovery_needs_destination_dataset_inventory; then
+		l_status=0
+		zxfer_collect_local_destination_dataset_inventory || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+				"$l_rzfs_list_hr_snap_tmp_file"
+			zxfer_cleanup_snapshot_record_cache_files
+			return "$l_status"
+		fi
+		l_destination_inventory_attempted=1
+	fi
+
+	if zxfer_snapshot_discovery_needs_record_caches; then
+		g_zxfer_destination_snapshot_record_cache_file=$l_rzfs_list_hr_snap_tmp_file
+		l_status=0
+		zxfer_read_snapshot_discovery_capture_file "$l_rzfs_list_hr_snap_tmp_file" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+				"$l_lzfs_list_hr_s_snap_err_tmp_file"
+			zxfer_cleanup_snapshot_record_cache_files
+			zxfer_throw_error "Failed to read staged destination snapshot list." "$l_status"
+		fi
+		g_rzfs_list_hr_snap=$g_zxfer_snapshot_discovery_file_read_result
+
+		l_status=0
+		zxfer_read_snapshot_discovery_capture_file "$l_lzfs_list_hr_s_snap_tmp_file" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+				"$l_lzfs_list_hr_s_snap_err_tmp_file"
+			zxfer_cleanup_snapshot_record_cache_files
+			zxfer_throw_error "Failed to read staged source snapshot list." "$l_status"
+		fi
+		g_lzfs_list_hr_snap=$g_zxfer_snapshot_discovery_file_read_result
+		l_status=0
+		zxfer_get_temp_file >/dev/null || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+				"$l_lzfs_list_hr_s_snap_err_tmp_file"
+			zxfer_cleanup_snapshot_record_cache_files
+			return "$l_status"
+		fi
+		l_source_snapshot_record_cache_file=$g_zxfer_temp_file_result
+		l_cmd=$(zxfer_render_command_for_report "" zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file")
+		zxfer_echoV "Running command: $l_cmd > $(zxfer_quote_token_for_report "$l_source_snapshot_record_cache_file")"
+		zxfer_record_last_command_string "$l_cmd > $(zxfer_quote_token_for_report "$l_source_snapshot_record_cache_file")"
+		l_status=0
+		zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snapshot_record_cache_file" ||
+			l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+				"$l_source_snapshot_record_cache_file"
+			zxfer_cleanup_snapshot_record_cache_files
+			zxfer_throw_error "Failed to stage source snapshot record cache." "$l_status"
+		fi
+		g_zxfer_source_snapshot_record_cache_file=$l_source_snapshot_record_cache_file
+		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_tmp_file"
+	else
+		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+			"$l_rzfs_list_hr_snap_tmp_file"
+	fi
+
 	zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_err_tmp_file"
 
 	#
 	# Errors
 	#
 
-	if [ "$g_lzfs_list_hr_snap" = "" ]; then
-		zxfer_throw_error "Failed to retrieve snapshots from the source"
-	fi
-
-	if [ "$g_recursive_dest_list" = "" ]; then
+	if [ "$l_destination_inventory_attempted" -eq 1 ] && [ "$g_recursive_dest_list" = "" ]; then
 		zxfer_echoV "Destination dataset list is empty; assuming no existing datasets under \"$g_destination\""
 	fi
 

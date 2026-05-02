@@ -2533,8 +2533,8 @@ test_get_zfs_list_seeds_destination_existence_cache_from_recursive_dataset_list(
 				: >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_reverse_file_lines() {
 				cat "$1"
@@ -2576,8 +2576,8 @@ test_get_zfs_list_reports_destination_inventory_readback_failures() {
 				: >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2616,6 +2616,14 @@ test_get_zfs_list_reports_destination_inventory_stderr_readback_failures() {
 			PROBE_LOG="$probe_log"
 			zxfer_write_source_snapshot_list_to_file() {
 				printf '%s\n' "tank/src@snapA" >"$1"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				return 1
@@ -2656,8 +2664,8 @@ test_get_zfs_list_reports_empty_destination_inventory_readbacks() {
 				: >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2701,8 +2709,8 @@ test_get_zfs_list_reports_destination_snapshot_list_readback_failures() {
 				: >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2754,8 +2762,8 @@ test_get_zfs_list_reports_source_snapshot_list_readback_failures() {
 				: >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2812,8 +2820,8 @@ test_get_zfs_list_preserves_source_snapshot_record_cache_tempfile_failures() {
 				printf '%s\n' "tank/src@snapA" >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2876,8 +2884,8 @@ test_get_zfs_list_reports_source_snapshot_record_cache_stage_failures() {
 				printf '%s\n' "tank/src@snapA" >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2937,13 +2945,76 @@ test_get_zfs_list_reports_source_snapshot_record_cache_stage_failures() {
 	assertContains "Source snapshot record-cache staging failures should clean up the staged source snapshot stderr file." \
 		"$output" "get-zfs-source-cache-stage-2.tmp"
 	assertContains "Source snapshot record-cache staging failures should clean up the staged destination snapshot diff file." \
-		"$output" "get-zfs-source-cache-stage-6.tmp"
+		"$output" "get-zfs-source-cache-stage-4.tmp"
 	assertContains "Source snapshot record-cache staging failures should clean up the staged source snapshot-record cache file." \
 		"$output" "get-zfs-source-cache-stage-7.tmp"
 	assertContains "Source snapshot record-cache staging failures should run the snapshot-record cache cleanup helper." \
 		"$output" "cache_cleanup=cache-cleanup"
 	assertContains "Source snapshot record-cache staging failures should report the staged source-cache context." \
 		"$output" "msg=Failed to stage source snapshot record cache."
+}
+
+test_get_zfs_list_skips_snapshot_record_caches_for_recursive_noop_without_later_work() {
+	inventory_log="$TEST_TMPDIR/recursive_noop_destination_inventory.log"
+	: >"$inventory_log"
+
+	output=$(
+		(
+			INVENTORY_LOG="$inventory_log"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_R_recursive="tank/src"
+			g_option_d_delete_destination_snapshots=1
+			g_option_P_transfer_property=0
+			g_option_o_override_property=""
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\t%s\n' "tank/src@snapA" "guidA" >"$1"
+				: >"$2"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				printf '%s\t%s\n' "backup/dst/src@snapA" "guidA" >"$1"
+				printf '%s\t%s\n' "tank/src@snapA" "guidA" >"$2"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
+					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
+					[ "$7" = "backup/dst" ]; then
+					printf '%s\n' "inventory" >>"$INVENTORY_LOG"
+					printf '%s\n' "backup/dst"
+					printf '%s\n' "backup/dst/src"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_get_zfs_list
+			# shellcheck disable=SC2031
+			printf 'source_list=<%s>\n' "${g_recursive_source_list:-}"
+			# shellcheck disable=SC2031
+			printf 'source_datasets=<%s>\n' "${g_recursive_source_dataset_list:-}"
+			printf 'dest_extra=<%s>\n' "${g_recursive_destination_extra_dataset_list:-}"
+			printf 'source_raw=<%s>\n' "${g_lzfs_list_hr_snap:-}"
+			printf 'dest_raw=<%s>\n' "${g_rzfs_list_hr_snap:-}"
+			printf 'source_cache=<%s>\n' "${g_zxfer_source_snapshot_record_cache_file:-}"
+			printf 'dest_cache=<%s>\n' "${g_zxfer_destination_snapshot_record_cache_file:-}"
+		)
+	)
+
+	assertContains "Recursive no-op discovery should prove that there are no source snapshot deltas." \
+		"$output" "source_list=<>"
+	assertContains "Recursive no-op discovery should skip the source dataset inventory when no later property work can consume it." \
+		"$output" "source_datasets=<>"
+	assertContains "Recursive no-op discovery should prove that there are no destination delete deltas." \
+		"$output" "dest_extra=<>"
+	assertContains "Recursive no-op discovery should not load the full source snapshot list into shell state when no later work can consume it." \
+		"$output" "source_raw=<>"
+	assertContains "Recursive no-op discovery should not load the full destination snapshot list into shell state when no later work can consume it." \
+		"$output" "dest_raw=<>"
+	assertContains "Recursive no-op discovery should skip the source snapshot-record cache when no later work can consume it." \
+		"$output" "source_cache=<>"
+	assertContains "Recursive no-op discovery should skip the destination snapshot-record cache when no later work can consume it." \
+		"$output" "dest_cache=<>"
+	assertEquals "Recursive no-op discovery should skip recursive destination dataset inventory when no later work can consume it." \
+		"" "$(cat "$inventory_log")"
 }
 
 test_get_zfs_list_uses_file_backed_snapshot_records_without_building_indexes() {
@@ -3060,7 +3131,7 @@ test_get_zfs_list_remote_target_batches_destination_discovery() {
 			}
 			zxfer_set_g_recursive_source_list() {
 				printf 'normalized=%s\n' "$(cat "$2")"
-				g_recursive_source_list=""
+				g_recursive_source_list="tank/src"
 				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_get_zfs_list
@@ -4040,6 +4111,10 @@ test_get_zfs_list_local_destination_discovery_does_not_use_remote_batch() {
 			}
 			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' "$*" >>"$ZFS_LOG"
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "backup/dst/src" ]; then
+					printf '%s\n' "backup/dst/src"
+					return 0
+				fi
 				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
 					printf '%s\n' "backup/dst"
 					printf '%s\n' "backup/dst/src"
@@ -4052,7 +4127,7 @@ test_get_zfs_list_local_destination_discovery_does_not_use_remote_batch() {
 				return 99
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
+				g_recursive_source_list="tank/src"
 				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_get_zfs_list
@@ -4476,14 +4551,6 @@ test_get_zfs_list_reports_source_stderr_readback_failures_after_background_failu
 			}
 			zxfer_read_snapshot_discovery_capture_file() {
 				l_read_count=$((l_read_count + 1))
-				if [ "$l_read_count" -eq 1 ]; then
-					g_zxfer_snapshot_discovery_file_read_result="backup/dst"
-					return 0
-				fi
-				if [ "$l_read_count" -eq 2 ]; then
-					g_zxfer_snapshot_discovery_file_read_result="backup/dst@snapA"
-					return 0
-				fi
 				return 31
 			}
 			zxfer_throw_error() {
