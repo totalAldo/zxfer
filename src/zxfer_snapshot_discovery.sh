@@ -577,7 +577,7 @@ zxfer_build_remote_destination_discovery_batch_script() {
 		l_destination_pool='$l_destination_pool_single'
 
 		zxfer_cleanup_destination_discovery_batch() {
-			for l_cleanup_file in "\$l_inventory_stdout_file" "\$l_inventory_stderr_file" "\$l_pool_stderr_file" "\$l_snapshot_stdout_file" "\$l_snapshot_stderr_file"; do
+			for l_cleanup_file in "\$l_inventory_stdout_file" "\$l_inventory_stderr_file" "\$l_pool_stderr_file" "\$l_snapshot_stderr_file"; do
 				[ "\$l_cleanup_file" != "" ] || continue
 				rm -f "\$l_cleanup_file" 2>/dev/null || :
 			done
@@ -609,7 +609,6 @@ zxfer_build_remote_destination_discovery_batch_script() {
 		l_inventory_stdout_file=''
 		l_inventory_stderr_file=''
 		l_pool_stderr_file=''
-		l_snapshot_stdout_file=''
 		l_snapshot_stderr_file=''
 		trap 'zxfer_cleanup_destination_discovery_batch' 0
 		trap 'zxfer_cleanup_destination_discovery_batch; exit 1' HUP INT TERM QUIT
@@ -627,7 +626,6 @@ zxfer_build_remote_destination_discovery_batch_script() {
 		l_inventory_stdout_file=\$(mktemp "\$l_tmpdir/zxfer.destination-discovery.inventory.XXXXXX" 2>/dev/null) || exit \$?
 		l_inventory_stderr_file=\$(mktemp "\$l_tmpdir/zxfer.destination-discovery.inventory-stderr.XXXXXX" 2>/dev/null) || exit \$?
 		l_pool_stderr_file=\$(mktemp "\$l_tmpdir/zxfer.destination-discovery.pool-stderr.XXXXXX" 2>/dev/null) || exit \$?
-		l_snapshot_stdout_file=\$(mktemp "\$l_tmpdir/zxfer.destination-discovery.snapshots.XXXXXX" 2>/dev/null) || exit \$?
 		l_snapshot_stderr_file=\$(mktemp "\$l_tmpdir/zxfer.destination-discovery.snapshots-stderr.XXXXXX" 2>/dev/null) || exit \$?
 
 		"\$l_zfs_cmd" list -t filesystem,volume -Hr -o name "\$l_destination_root_dataset" >"\$l_inventory_stdout_file" 2>"\$l_inventory_stderr_file"
@@ -635,6 +633,7 @@ zxfer_build_remote_destination_discovery_batch_script() {
 		l_pool_status=''
 		l_snapshot_status=0
 		l_snapshot_ran=0
+		l_destination_snapshot_dataset_found=0
 
 		if [ "\$l_inventory_status" -ne 0 ]; then
 			if zxfer_destination_discovery_stderr_reports_missing "\$l_inventory_stderr_file"; then
@@ -644,12 +643,12 @@ zxfer_build_remote_destination_discovery_batch_script() {
 		fi
 
 		if [ "\$l_inventory_status" -eq 0 ]; then
-			l_destination_snapshot_dataset_found=0
 			grep -F -x -e "\$l_destination_snapshot_dataset" "\$l_inventory_stdout_file" >/dev/null 2>&1
 			l_grep_status=\$?
 			case "\$l_grep_status" in
 			0)
 				l_destination_snapshot_dataset_found=1
+				l_snapshot_ran=1
 				;;
 			1)
 				:
@@ -659,218 +658,294 @@ zxfer_build_remote_destination_discovery_batch_script() {
 				printf 'Failed to scan destination dataset inventory for %s.\n' "\$l_destination_snapshot_dataset" >"\$l_inventory_stderr_file"
 				;;
 			esac
-			if [ "\$l_destination_snapshot_dataset_found" -eq 1 ]; then
-				l_snapshot_ran=1
-				"\$l_zfs_cmd" list -Hr -o name,guid -t snapshot "\$l_destination_snapshot_dataset" >"\$l_snapshot_stdout_file" 2>"\$l_snapshot_stderr_file"
-				l_snapshot_status=\$?
-			fi
 		fi
 
 		printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
 		printf '%s\t%s\t%s\n' 'STATUS' 'inventory' "\$l_inventory_status"
 		printf '%s\t%s\t%s\n' 'STATUS' 'pool' "\$l_pool_status"
-		printf '%s\t%s\t%s\n' 'STATUS' 'snapshot' "\$l_snapshot_status"
 		printf '%s\t%s\t%s\n' 'STATUS' 'snapshot_ran' "\$l_snapshot_ran"
 		zxfer_emit_destination_discovery_section_file inventory_stdout "\$l_inventory_stdout_file" || exit \$?
 		zxfer_emit_destination_discovery_section_file inventory_stderr "\$l_inventory_stderr_file" || exit \$?
 		zxfer_emit_destination_discovery_section_file pool_stderr "\$l_pool_stderr_file" || exit \$?
-		zxfer_emit_destination_discovery_section_file snapshot_stdout "\$l_snapshot_stdout_file" || exit \$?
+		printf '%s\t%s\n' 'BEGIN' 'snapshot_stdout'
+		if [ "\$l_destination_snapshot_dataset_found" -eq 1 ]; then
+			"\$l_zfs_cmd" list -Hr -o name,guid -t snapshot "\$l_destination_snapshot_dataset" 2>"\$l_snapshot_stderr_file"
+			l_snapshot_status=\$?
+		fi
+		printf '%s\t%s\n' 'END' 'snapshot_stdout'
+		printf '%s\t%s\t%s\n' 'STATUS' 'snapshot' "\$l_snapshot_status"
 		zxfer_emit_destination_discovery_section_file snapshot_stderr "\$l_snapshot_stderr_file" || exit \$?
 		printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
 	EOF
 }
 
-# Purpose: Store one destination discovery batch data line in the staged output
-# file owned by the matching section.
-# Usage: Called while parsing the target-side batch payload so later discovery
-# code can consume the same files as the local path.
-zxfer_append_destination_discovery_batch_section_line() {
-	l_section=$1
-	l_line=$2
-	l_dest_list_tmp_file=$3
-	l_dest_list_err_file=$4
-	l_rzfs_list_hr_snap_tmp_file=$5
-	l_rzfs_list_hr_snap_err_tmp_file=$6
-
-	case "$l_section" in
-	inventory_stdout)
-		printf '%s\n' "$l_line" >>"$l_dest_list_tmp_file"
-		;;
-	inventory_stderr)
-		printf '%s\n' "$l_line" >>"$l_dest_list_err_file"
-		;;
-	snapshot_stdout)
-		printf '%s\n' "$l_line" >>"$l_rzfs_list_hr_snap_tmp_file"
-		;;
-	snapshot_stderr)
-		printf '%s\n' "$l_line" >>"$l_rzfs_list_hr_snap_err_tmp_file"
-		;;
-	pool_stderr)
-		# Pool stderr is carried for validation. Existing destination discovery
-		# reports a stable high-level pool lookup message on this branch.
-		:
-		;;
-	*)
-		return 1
-		;;
-	esac
-}
-
-# Purpose: Parse target-side destination discovery output into staged files and
-# status globals.
-# Usage: Called after one remote destination discovery SSH invocation so the
-# existing local discovery flow can process inventory and snapshot files.
-zxfer_parse_remote_destination_discovery_batch_output() {
-	l_batch_output=$1
-	l_dest_list_tmp_file=$2
-	l_dest_list_err_file=$3
-	l_rzfs_list_hr_snap_tmp_file=$4
-	l_rzfs_list_hr_snap_err_tmp_file=$5
+# Purpose: Load the compact status sidecar from destination discovery parsing.
+# Usage: Called after the batch output file has been split into staged payload
+# files without replaying large snapshot lists through a shell loop.
+zxfer_load_destination_discovery_batch_status_file() {
+	l_status_file=$1
 	l_tab='	'
 
 	zxfer_reset_destination_discovery_batch_state
 
-	zxfer_write_runtime_artifact_file "$l_dest_list_tmp_file" "" || return "$?"
-	zxfer_write_runtime_artifact_file "$l_dest_list_err_file" "" || return "$?"
-	zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" "" || return "$?"
-	zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_err_tmp_file" "" || return "$?"
-
-	l_seen_header=0
-	l_seen_end=0
-	l_current_section=""
 	l_seen_inventory_status=0
 	l_seen_pool_status=0
 	l_seen_snapshot_status=0
 	l_seen_snapshot_ran_status=0
-	l_seen_inventory_stdout=0
-	l_seen_inventory_stderr=0
-	l_seen_pool_stderr=0
-	l_seen_snapshot_stdout=0
-	l_seen_snapshot_stderr=0
 
-	while IFS= read -r l_batch_line || [ -n "$l_batch_line" ]; do
-		if [ "$l_seen_header" -eq 0 ]; then
-			[ "$l_batch_line" = "ZXFER_DESTINATION_DISCOVERY_BATCH_V1" ] || return 1
-			l_seen_header=1
-			continue
-		fi
-
-		if [ "$l_batch_line" = "ZXFER_DESTINATION_DISCOVERY_BATCH_END" ]; then
-			[ -z "$l_current_section" ] || return 1
-			l_seen_end=1
-			continue
-		fi
-		if [ "$l_seen_end" -ne 0 ]; then
-			[ -z "$l_batch_line" ] || return 1
-			continue
-		fi
-
-		case "$l_batch_line" in
-		"STATUS$l_tab"*)
-			[ -z "$l_current_section" ] || return 1
-			l_status_record=${l_batch_line#STATUS"$l_tab"}
-			case "$l_status_record" in
-			*"$l_tab"*)
-				l_status_name=${l_status_record%%"$l_tab"*}
-				l_status_value=${l_status_record#*"$l_tab"}
-				;;
-			*)
-				return 1
-				;;
-			esac
-			case "$l_status_name" in
-			inventory)
-				[ "$l_seen_inventory_status" -eq 0 ] || return 1
-				g_zxfer_destination_discovery_batch_inventory_status=$l_status_value
-				l_seen_inventory_status=1
-				;;
-			pool)
-				[ "$l_seen_pool_status" -eq 0 ] || return 1
-				g_zxfer_destination_discovery_batch_pool_status=$l_status_value
-				l_seen_pool_status=1
-				;;
-			snapshot)
-				[ "$l_seen_snapshot_status" -eq 0 ] || return 1
-				g_zxfer_destination_discovery_batch_snapshot_status=$l_status_value
-				l_seen_snapshot_status=1
-				;;
-			snapshot_ran)
-				[ "$l_seen_snapshot_ran_status" -eq 0 ] || return 1
-				g_zxfer_destination_discovery_batch_snapshot_ran=$l_status_value
-				l_seen_snapshot_ran_status=1
-				;;
-			*)
-				return 1
-				;;
-			esac
-			;;
-		"BEGIN$l_tab"*)
-			[ -z "$l_current_section" ] || return 1
-			l_current_section=${l_batch_line#BEGIN"$l_tab"}
-			case "$l_current_section" in
-			inventory_stdout)
-				[ "$l_seen_inventory_stdout" -eq 0 ] || return 1
-				l_seen_inventory_stdout=1
-				;;
-			inventory_stderr)
-				[ "$l_seen_inventory_stderr" -eq 0 ] || return 1
-				l_seen_inventory_stderr=1
-				;;
-			pool_stderr)
-				[ "$l_seen_pool_stderr" -eq 0 ] || return 1
-				l_seen_pool_stderr=1
-				;;
-			snapshot_stdout)
-				[ "$l_seen_snapshot_stdout" -eq 0 ] || return 1
-				l_seen_snapshot_stdout=1
-				;;
-			snapshot_stderr)
-				[ "$l_seen_snapshot_stderr" -eq 0 ] || return 1
-				l_seen_snapshot_stderr=1
-				;;
-			*)
-				return 1
-				;;
-			esac
-			;;
-		"END$l_tab"*)
-			[ -n "$l_current_section" ] || return 1
-			[ "${l_batch_line#END"$l_tab"}" = "$l_current_section" ] || return 1
-			l_current_section=""
+	while IFS= read -r l_status_line || [ -n "$l_status_line" ]; do
+		case "$l_status_line" in
+		*"$l_tab"*)
+			l_status_name=${l_status_line%%"$l_tab"*}
+			l_status_value=${l_status_line#*"$l_tab"}
 			;;
 		*)
-			[ -n "$l_current_section" ] || return 1
-			zxfer_append_destination_discovery_batch_section_line \
-				"$l_current_section" \
-				"$l_batch_line" \
-				"$l_dest_list_tmp_file" \
-				"$l_dest_list_err_file" \
-				"$l_rzfs_list_hr_snap_tmp_file" \
-				"$l_rzfs_list_hr_snap_err_tmp_file" || return "$?"
+			return 1
 			;;
 		esac
-	done <<-EOF
-		$l_batch_output
-	EOF
+		case "$l_status_name" in
+		inventory)
+			[ "$l_seen_inventory_status" -eq 0 ] || return 1
+			g_zxfer_destination_discovery_batch_inventory_status=$l_status_value
+			l_seen_inventory_status=1
+			;;
+		pool)
+			[ "$l_seen_pool_status" -eq 0 ] || return 1
+			g_zxfer_destination_discovery_batch_pool_status=$l_status_value
+			l_seen_pool_status=1
+			;;
+		snapshot)
+			[ "$l_seen_snapshot_status" -eq 0 ] || return 1
+			g_zxfer_destination_discovery_batch_snapshot_status=$l_status_value
+			l_seen_snapshot_status=1
+			;;
+		snapshot_ran)
+			[ "$l_seen_snapshot_ran_status" -eq 0 ] || return 1
+			g_zxfer_destination_discovery_batch_snapshot_ran=$l_status_value
+			l_seen_snapshot_ran_status=1
+			;;
+		*)
+			return 1
+			;;
+		esac
+	done <"$l_status_file"
 
-	[ "$l_seen_header" -eq 1 ] || return 1
-	[ "$l_seen_end" -eq 1 ] || return 1
-	[ -z "$l_current_section" ] || return 1
 	[ "$l_seen_inventory_status" -eq 1 ] || return 1
 	[ "$l_seen_pool_status" -eq 1 ] || return 1
 	[ "$l_seen_snapshot_status" -eq 1 ] || return 1
 	[ "$l_seen_snapshot_ran_status" -eq 1 ] || return 1
-	[ "$l_seen_inventory_stdout" -eq 1 ] || return 1
-	[ "$l_seen_inventory_stderr" -eq 1 ] || return 1
-	[ "$l_seen_pool_stderr" -eq 1 ] || return 1
-	[ "$l_seen_snapshot_stdout" -eq 1 ] || return 1
-	[ "$l_seen_snapshot_stderr" -eq 1 ] || return 1
 	zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_inventory_status" || return 1
 	zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_snapshot_status" || return 1
 	zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_snapshot_ran" || return 1
 	if [ -n "$g_zxfer_destination_discovery_batch_pool_status" ]; then
 		zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_pool_status" || return 1
 	fi
+}
+
+# Purpose: Parse target-side destination discovery output into staged files and
+# compact status state.
+# Usage: Called after one remote destination discovery SSH invocation so large
+# snapshot sections stay in file-backed bulk I/O instead of shell variables.
+zxfer_parse_remote_destination_discovery_batch_output_file() {
+	l_batch_output_file=$1
+	l_dest_list_tmp_file=$2
+	l_dest_list_err_file=$3
+	l_rzfs_list_hr_snap_tmp_file=$4
+	l_rzfs_list_hr_snap_err_tmp_file=$5
+	l_batch_status_file=""
+
+	zxfer_reset_destination_discovery_batch_state
+	zxfer_write_runtime_artifact_file "$l_dest_list_tmp_file" "" || return "$?"
+	zxfer_write_runtime_artifact_file "$l_dest_list_err_file" "" || return "$?"
+	zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" "" || return "$?"
+	zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_err_tmp_file" "" || return "$?"
+
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
+	fi
+	l_batch_status_file=$g_zxfer_temp_file_result
+	zxfer_write_runtime_artifact_file "$l_batch_status_file" "" || {
+		l_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_batch_status_file"
+		return "$l_status"
+	}
+
+	l_status=0
+	# shellcheck disable=SC2016  # awk program should see literal $0.
+	"${g_cmd_awk:-awk}" \
+		-v dest_out="$l_dest_list_tmp_file" \
+		-v dest_err="$l_dest_list_err_file" \
+		-v snap_out="$l_rzfs_list_hr_snap_tmp_file" \
+		-v snap_err="$l_rzfs_list_hr_snap_err_tmp_file" \
+		-v status_out="$l_batch_status_file" '
+		function fail() {
+			bad = 1
+			exit 1
+		}
+		function record_status(name, value) {
+			if (name == "inventory") {
+				if (seen_inventory_status != 0) {
+					fail()
+				}
+				inventory_status = value
+				seen_inventory_status = 1
+			} else if (name == "pool") {
+				if (seen_pool_status != 0) {
+					fail()
+				}
+				pool_status = value
+				seen_pool_status = 1
+			} else if (name == "snapshot") {
+				if (seen_snapshot_status != 0) {
+					fail()
+				}
+				snapshot_status = value
+				seen_snapshot_status = 1
+			} else if (name == "snapshot_ran") {
+				if (seen_snapshot_ran_status != 0) {
+					fail()
+				}
+				snapshot_ran_status = value
+				seen_snapshot_ran_status = 1
+			} else {
+				fail()
+			}
+		}
+		function begin_section(name) {
+			if (current_section != "") {
+				fail()
+			}
+			if (name == "inventory_stdout") {
+				if (seen_inventory_stdout != 0) {
+					fail()
+				}
+				current_output = dest_out
+				seen_inventory_stdout = 1
+			} else if (name == "inventory_stderr") {
+				if (seen_inventory_stderr != 0) {
+					fail()
+				}
+				current_output = dest_err
+				seen_inventory_stderr = 1
+			} else if (name == "pool_stderr") {
+				if (seen_pool_stderr != 0) {
+					fail()
+				}
+				current_output = ""
+				seen_pool_stderr = 1
+			} else if (name == "snapshot_stdout") {
+				if (seen_snapshot_stdout != 0) {
+					fail()
+				}
+				current_output = snap_out
+				seen_snapshot_stdout = 1
+			} else if (name == "snapshot_stderr") {
+				if (seen_snapshot_stderr != 0) {
+					fail()
+				}
+				current_output = snap_err
+				seen_snapshot_stderr = 1
+			} else {
+				fail()
+			}
+			current_section = name
+		}
+		function append_section_line(line) {
+			if (current_output != "") {
+				print line >> current_output
+			}
+		}
+		BEGIN {
+			tab = sprintf("%c", 9)
+			current_section = ""
+			current_output = ""
+		}
+		{
+			if (seen_header == 0) {
+				if ($0 != "ZXFER_DESTINATION_DISCOVERY_BATCH_V1") {
+					fail()
+				}
+				seen_header = 1
+				next
+			}
+			if ($0 == "ZXFER_DESTINATION_DISCOVERY_BATCH_END") {
+				if (current_section != "") {
+					fail()
+				}
+				seen_end = 1
+				next
+			}
+			if (seen_end != 0) {
+				if ($0 != "") {
+					fail()
+				}
+				next
+			}
+			if (index($0, "STATUS" tab) == 1) {
+				if (current_section != "") {
+					fail()
+				}
+				status_record = substr($0, 8)
+				status_separator = index(status_record, tab)
+				if (status_separator == 0) {
+					fail()
+				}
+				record_status(substr(status_record, 1, status_separator - 1), substr(status_record, status_separator + 1))
+				next
+			}
+			if (index($0, "BEGIN" tab) == 1) {
+				begin_section(substr($0, 7))
+				next
+			}
+			if (index($0, "END" tab) == 1) {
+				section_name = substr($0, 5)
+				if (current_section == "" || section_name != current_section) {
+					fail()
+				}
+				current_section = ""
+				current_output = ""
+				next
+			}
+			if (current_section == "") {
+				fail()
+			}
+			append_section_line($0)
+		}
+		END {
+			if (bad != 0) {
+				exit 1
+			}
+			if (seen_header != 1 || seen_end != 1 || current_section != "") {
+				exit 1
+			}
+			if (seen_inventory_status != 1 || seen_pool_status != 1 || seen_snapshot_status != 1 || seen_snapshot_ran_status != 1) {
+				exit 1
+			}
+			if (seen_inventory_stdout != 1 || seen_inventory_stderr != 1 || seen_pool_stderr != 1 || seen_snapshot_stdout != 1 || seen_snapshot_stderr != 1) {
+				exit 1
+			}
+			print "inventory" tab inventory_status > status_out
+			print "pool" tab pool_status > status_out
+			print "snapshot" tab snapshot_status > status_out
+			print "snapshot_ran" tab snapshot_ran_status > status_out
+			close(status_out)
+			close(dest_out)
+			close(dest_err)
+			close(snap_out)
+			close(snap_err)
+		}
+	' "$l_batch_output_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_batch_status_file"
+		return "$l_status"
+	fi
+
+	l_status=0
+	zxfer_load_destination_discovery_batch_status_file "$l_batch_status_file" || l_status=$?
+	zxfer_cleanup_runtime_artifact_path "$l_batch_status_file"
+	return "$l_status"
 }
 
 # Purpose: Record profile counters for the ZFS commands represented by one
@@ -937,19 +1012,13 @@ zxfer_run_remote_destination_discovery_batch_to_files() {
 	fi
 
 	l_status=0
-	zxfer_read_snapshot_discovery_capture_file "$l_batch_output_file" || l_status=$?
-	zxfer_cleanup_runtime_artifact_path "$l_batch_output_file"
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-
-	l_status=0
-	zxfer_parse_remote_destination_discovery_batch_output \
-		"$g_zxfer_snapshot_discovery_file_read_result" \
+	zxfer_parse_remote_destination_discovery_batch_output_file \
+		"$l_batch_output_file" \
 		"$l_dest_list_tmp_file" \
 		"$l_dest_list_err_file" \
 		"$l_rzfs_list_hr_snap_tmp_file" \
 		"$l_rzfs_list_hr_snap_err_tmp_file" || l_status=$?
+	zxfer_cleanup_runtime_artifact_path "$l_batch_output_file"
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_throw_error "Malformed destination discovery batch response." "$l_status"
 	fi

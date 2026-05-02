@@ -3092,7 +3092,7 @@ backup/dst/src"
 		"$output" "normalized=tank/src@snapA	guidA"
 }
 
-test_build_remote_destination_discovery_batch_script_streams_target_sections_from_files() {
+test_build_remote_destination_discovery_batch_script_streams_snapshot_stdout_directly() {
 	fake_zfs="$TEST_TMPDIR/remote_batch_stream_zfs"
 	zfs_log="$TEST_TMPDIR/remote_batch_stream_zfs.log"
 	: >"$zfs_log"
@@ -3125,10 +3125,14 @@ EOF
 		"$script" "l_snapshot_stdout=\$("
 	assertContains "Remote batch should stage destination inventory stdout in a target-side temp file." \
 		"$script" 'zxfer.destination-discovery.inventory.XXXXXX'
-	assertContains "Remote batch should stage destination snapshot stdout in a target-side temp file." \
+	assertNotContains "Remote batch should not stage destination snapshot stdout in a target-side temp file." \
 		"$script" 'zxfer.destination-discovery.snapshots.XXXXXX'
+	assertContains "Remote batch should still stage compact destination snapshot stderr diagnostics." \
+		"$script" 'zxfer.destination-discovery.snapshots-stderr.XXXXXX'
 	assertContains "Remote batch should stream staged section bodies instead of expanding payload variables." \
 		"$script" "cat \"\$l_section_file\""
+	assertContains "Remote batch should stream snapshot stdout directly from zfs." \
+		"$script" "\"\$l_zfs_cmd\" list -Hr -o name,guid -t snapshot \"\$l_destination_snapshot_dataset\" 2>\"\$l_snapshot_stderr_file\""
 	assertContains "Remote batch should clean target-side temp files on shell exit." \
 		"$script" "trap 'zxfer_cleanup_destination_discovery_batch' 0"
 	assertContains "Remote batch should use an exact fixed-string scan for the destination snapshot dataset." \
@@ -3149,10 +3153,136 @@ EOF
 		"$output" "backup/dst/src@snapA	guidA"
 	assertContains "Generated remote batch should report that snapshot listing ran." \
 		"$output" "$(printf 'STATUS\tsnapshot_ran\t1')"
+	assertContains "Generated remote batch should report snapshot status after streaming stdout." \
+		"$output" "$(printf 'STATUS\tsnapshot\t0')"
 	assertEquals "Generated remote batch should run inventory and snapshot zfs lists without a pool fallback." \
 		"2" "$(wc -l <"$zfs_log" | tr -d '[:space:]')"
 	assertEquals "Generated remote batch should remove its target-side temp files." \
 		"" "$(find "$TEST_TMPDIR" -name 'zxfer.destination-discovery.*' -print)"
+}
+
+test_parse_remote_destination_discovery_batch_output_file_splits_sections_in_bulk() {
+	batch_file="$TEST_TMPDIR/remote_batch_parse.out"
+	dest_file="$TEST_TMPDIR/remote_batch_parse.dest"
+	dest_err_file="$TEST_TMPDIR/remote_batch_parse.dest.err"
+	snap_file="$TEST_TMPDIR/remote_batch_parse.snap"
+	snap_err_file="$TEST_TMPDIR/remote_batch_parse.snap.err"
+	{
+		printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+		printf 'STATUS\tinventory\t0\n'
+		printf 'STATUS\tpool\t\n'
+		printf 'STATUS\tsnapshot_ran\t1\n'
+		printf 'BEGIN\tinventory_stdout\n'
+		printf '%s\n' 'backup/dst'
+		printf '%s\n' 'backup/dst/src'
+		printf 'END\tinventory_stdout\n'
+		printf 'BEGIN\tinventory_stderr\n'
+		printf 'END\tinventory_stderr\n'
+		printf 'BEGIN\tpool_stderr\n'
+		printf 'END\tpool_stderr\n'
+		printf 'BEGIN\tsnapshot_stdout\n'
+		printf 'backup/dst/src@snapA\tguidA\n'
+		printf 'backup/dst/src@snapB\tguidB\n'
+		printf 'END\tsnapshot_stdout\n'
+		printf 'STATUS\tsnapshot\t0\n'
+		printf 'BEGIN\tsnapshot_stderr\n'
+		printf 'END\tsnapshot_stderr\n'
+		printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+	} >"$batch_file"
+	: >"$dest_file"
+	: >"$dest_err_file"
+	: >"$snap_file"
+	: >"$snap_err_file"
+	parse_output=$(
+		(
+			zxfer_read_snapshot_discovery_capture_file() {
+				return 99
+			}
+			zxfer_parse_remote_destination_discovery_batch_output_file \
+				"$batch_file" \
+				"$dest_file" \
+				"$dest_err_file" \
+				"$snap_file" \
+				"$snap_err_file"
+			printf 'inventory_status=%s\n' "$g_zxfer_destination_discovery_batch_inventory_status"
+			printf 'snapshot_status=%s\n' "$g_zxfer_destination_discovery_batch_snapshot_status"
+			printf 'snapshot_ran=%s\n' "$g_zxfer_destination_discovery_batch_snapshot_ran"
+		)
+	)
+
+	assertEquals "Batch parser should split inventory stdout into the destination inventory stage." \
+		"backup/dst
+backup/dst/src" "$(cat "$dest_file")"
+	assertEquals "Batch parser should split snapshot stdout into the destination snapshot stage." \
+		"backup/dst/src@snapA	guidA
+backup/dst/src@snapB	guidB" "$(cat "$snap_file")"
+	assertEquals "Batch parser should leave empty inventory stderr empty." \
+		"" "$(cat "$dest_err_file")"
+	assertEquals "Batch parser should leave empty snapshot stderr empty." \
+		"" "$(cat "$snap_err_file")"
+	assertEquals "Batch parser should load inventory status from the compact sidecar." \
+		"inventory_status=0" "$(printf '%s\n' "$parse_output" | sed -n '/^inventory_status=/p')"
+	assertEquals "Batch parser should load delayed snapshot status from the compact sidecar." \
+		"snapshot_status=0" "$(printf '%s\n' "$parse_output" | sed -n '/^snapshot_status=/p')"
+	assertEquals "Batch parser should load snapshot_ran status from the compact sidecar." \
+		"snapshot_ran=1" "$(printf '%s\n' "$parse_output" | sed -n '/^snapshot_ran=/p')"
+}
+
+test_destination_discovery_batch_status_loader_rejects_malformed_sidecars() {
+	status_file="$TEST_TMPDIR/remote_batch_status_bad.out"
+
+	printf '%s\n' "not-tab-separated" >"$status_file"
+	set +e
+	zxfer_load_destination_discovery_batch_status_file "$status_file" >/dev/null 2>&1
+	status=$?
+	set -e
+	assertEquals "Status sidecars without tab-separated fields should fail closed." \
+		1 "$status"
+
+	{
+		printf 'inventory\t0\n'
+		printf 'pool\t\n'
+		printf 'snapshot\t0\n'
+		printf 'unexpected\t0\n'
+	} >"$status_file"
+	set +e
+	zxfer_load_destination_discovery_batch_status_file "$status_file" >/dev/null 2>&1
+	status=$?
+	set -e
+	assertEquals "Status sidecars with unknown status names should fail closed." \
+		1 "$status"
+}
+
+test_parse_remote_destination_discovery_batch_output_file_preserves_status_tempfile_failures() {
+	batch_file="$TEST_TMPDIR/remote_batch_parse_temp_failure.out"
+	dest_file="$TEST_TMPDIR/remote_batch_parse_temp_failure.dest"
+	dest_err_file="$TEST_TMPDIR/remote_batch_parse_temp_failure.dest.err"
+	snap_file="$TEST_TMPDIR/remote_batch_parse_temp_failure.snap"
+	snap_err_file="$TEST_TMPDIR/remote_batch_parse_temp_failure.snap.err"
+	: >"$batch_file"
+	: >"$dest_file"
+	: >"$dest_err_file"
+	: >"$snap_file"
+	: >"$snap_err_file"
+
+	status=$(
+		(
+			set +e
+			zxfer_get_temp_file() {
+				return 42
+			}
+			zxfer_parse_remote_destination_discovery_batch_output_file \
+				"$batch_file" \
+				"$dest_file" \
+				"$dest_err_file" \
+				"$snap_file" \
+				"$snap_err_file"
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Batch parser should preserve compact status tempfile allocation failures." \
+		"42" "$status"
 }
 
 test_get_zfs_list_remote_target_batches_missing_destination_root_fallback() {
@@ -3473,7 +3603,7 @@ test_run_remote_destination_discovery_batch_preserves_setup_and_transport_failur
 			g_destination="backup/dst"
 			g_option_T_target_host="target.example"
 			zxfer_get_temp_file() {
-				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_read.out"
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_parse.out"
 				: >"$g_zxfer_temp_file_result"
 			}
 			zxfer_build_remote_destination_discovery_batch_script() {
@@ -3485,16 +3615,17 @@ test_run_remote_destination_discovery_batch_preserves_setup_and_transport_failur
 			zxfer_invoke_ssh_shell_command_for_host() {
 				printf '%s\n' "ZXFER_DESTINATION_DISCOVERY_BATCH_V1"
 			}
-			zxfer_read_snapshot_discovery_capture_file() {
-				return 35
+			zxfer_throw_error() {
+				printf 'parse_error=%s\n' "$1"
+				exit "${2:-1}"
 			}
 			zxfer_cleanup_runtime_artifact_path() {
-				printf 'read_cleanup=%s\n' "$1"
+				printf 'parse_cleanup=%s\n' "$1"
 				rm -f "$1"
 			}
 			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
 		)
-		printf 'read=%s\n' "$?"
+		printf 'parse=%s\n' "$?"
 	)
 
 	assertContains "Remote batch temp allocation failures should preserve status." \
@@ -3505,16 +3636,18 @@ test_run_remote_destination_discovery_batch_preserves_setup_and_transport_failur
 		"$output" "command=33"
 	assertContains "Remote batch SSH failures should preserve transport status." \
 		"$output" "ssh=34"
-	assertContains "Remote batch readback failures should preserve staged-read status." \
-		"$output" "read=35"
+	assertContains "Remote batch parse failures should report malformed batch context." \
+		"$output" "parse_error=Malformed destination discovery batch response."
+	assertContains "Remote batch parse failures should preserve parser status." \
+		"$output" "parse=1"
 	assertContains "Remote batch script render failures should clean their batch output file." \
 		"$output" "build_cleanup=$TEST_TMPDIR/remote_batch_build.out"
 	assertContains "Remote batch command render failures should clean their batch output file." \
 		"$output" "command_cleanup=$TEST_TMPDIR/remote_batch_command.out"
 	assertContains "Remote batch SSH failures should clean their batch output file." \
 		"$output" "ssh_cleanup=$TEST_TMPDIR/remote_batch_ssh.out"
-	assertContains "Remote batch readback failures should clean their batch output file." \
-		"$output" "read_cleanup=$TEST_TMPDIR/remote_batch_read.out"
+	assertContains "Remote batch parse failures should clean their batch output file." \
+		"$output" "parse_cleanup=$TEST_TMPDIR/remote_batch_parse.out"
 }
 
 test_get_zfs_list_local_destination_discovery_does_not_use_remote_batch() {
