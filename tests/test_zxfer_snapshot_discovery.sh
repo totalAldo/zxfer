@@ -112,6 +112,7 @@ setUp() {
 	g_RZFS="/sbin/zfs"
 	g_LZFS="/sbin/zfs"
 	g_cmd_zfs="/sbin/zfs"
+	g_target_cmd_zfs=""
 	g_recursive_source_list=""
 	g_recursive_source_dataset_list=""
 	g_lzfs_list_hr_snap=""
@@ -3015,6 +3016,561 @@ backup/dst@legacy1"
 		"$output" "source_ready_after=1"
 	assertContains "The destination per-dataset index should be built lazily on first lookup." \
 		"$output" "dest_ready_after=1"
+}
+
+test_get_zfs_list_remote_target_batches_destination_discovery() {
+	ssh_log="$TEST_TMPDIR/get_zfs_remote_batch_success.ssh"
+	: >"$ssh_log"
+
+	output=$(
+		(
+			SSH_LOG="$ssh_log"
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\t%s\n' "tank/src@snapA" "guidA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf 'host=%s side=%s\n' "$1" "$3" >>"$SSH_LOG"
+				printf 'cmd=%s\n' "$2" >>"$SSH_LOG"
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t0\n'
+				printf 'STATUS\tpool\t\n'
+				printf 'STATUS\tsnapshot\t0\n'
+				printf 'STATUS\tsnapshot_ran\t1\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf '%s\n' "backup/dst"
+				printf '%s\n' "backup/dst/src"
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf '%s\t%s\n' "backup/dst/src@snapA" "guidA"
+				printf 'END\tsnapshot_stdout\n'
+				printf 'BEGIN\tsnapshot_stderr\n'
+				printf 'END\tsnapshot_stderr\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "unexpected-destination-zfs" >>"$SSH_LOG"
+				return 99
+			}
+			zxfer_set_g_recursive_source_list() {
+				printf 'normalized=%s\n' "$(cat "$2")"
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list="tank/src"
+			}
+			zxfer_get_zfs_list
+			printf 'dest=%s\n' "$g_recursive_dest_list"
+			printf 'root_cache=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst")"
+			printf 'snapshot_dataset_cache=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst/src")"
+			printf 'raw=%s\n' "$g_rzfs_list_hr_snap"
+		)
+	)
+
+	assertEquals "Remote destination discovery should use one target SSH invocation." \
+		"1" "$(grep -c '^host=target.example side=destination$' "$ssh_log")"
+	assertContains "Remote destination discovery should render dataset inventory in the batch script." \
+		"$(cat "$ssh_log")" "filesystem,volume"
+	assertContains "Remote destination discovery should render snapshot listing in the batch script." \
+		"$(cat "$ssh_log")" "name,guid"
+	assertNotContains "Remote destination discovery should not fall back to separate destination zfs helper calls." \
+		"$(cat "$ssh_log")" "unexpected-destination-zfs"
+	assertContains "Remote destination discovery should publish the recursive destination inventory." \
+		"$output" "dest=backup/dst
+backup/dst/src"
+	assertContains "Remote destination discovery should seed the destination root existence cache." \
+		"$output" "root_cache=1"
+	assertContains "Remote destination discovery should seed the destination snapshot dataset existence cache." \
+		"$output" "snapshot_dataset_cache=1"
+	assertContains "Remote destination discovery should preserve the raw destination snapshot cache." \
+		"$output" "raw=backup/dst/src@snapA	guidA"
+	assertContains "Remote destination discovery should normalize destination snapshot paths for source-side diffing." \
+		"$output" "normalized=tank/src@snapA	guidA"
+}
+
+test_build_remote_destination_discovery_batch_script_streams_target_sections_from_files() {
+	fake_zfs="$TEST_TMPDIR/remote_batch_stream_zfs"
+	zfs_log="$TEST_TMPDIR/remote_batch_stream_zfs.log"
+	: >"$zfs_log"
+	cat >"$fake_zfs" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$ZXFER_FAKE_ZFS_LOG"
+case "$*" in
+"list -t filesystem,volume -Hr -o name backup/dst")
+	printf '%s\n' "backup/dst"
+	printf '%s\n' "backup/dst/src"
+	printf '%s\n' "backup/dst/other"
+	;;
+"list -Hr -o name,guid -t snapshot backup/dst/src")
+	printf '%s\t%s\n' "backup/dst/src@snapA" "guidA"
+	;;
+*)
+	printf 'unexpected zfs args: %s\n' "$*" >&2
+	exit 99
+	;;
+esac
+EOF
+	chmod +x "$fake_zfs"
+	g_target_cmd_zfs=$fake_zfs
+
+	script=$(zxfer_build_remote_destination_discovery_batch_script "backup/dst" "backup/dst/src" "backup")
+
+	assertNotContains "Remote batch should not buffer recursive destination inventory stdout in a shell variable." \
+		"$script" "l_inventory_stdout=\$("
+	assertNotContains "Remote batch should not buffer destination snapshot stdout in a shell variable." \
+		"$script" "l_snapshot_stdout=\$("
+	assertContains "Remote batch should stage destination inventory stdout in a target-side temp file." \
+		"$script" 'zxfer.destination-discovery.inventory.XXXXXX'
+	assertContains "Remote batch should stage destination snapshot stdout in a target-side temp file." \
+		"$script" 'zxfer.destination-discovery.snapshots.XXXXXX'
+	assertContains "Remote batch should stream staged section bodies instead of expanding payload variables." \
+		"$script" "cat \"\$l_section_file\""
+	assertContains "Remote batch should clean target-side temp files on shell exit." \
+		"$script" "trap 'zxfer_cleanup_destination_discovery_batch' 0"
+	assertContains "Remote batch should use an exact fixed-string scan for the destination snapshot dataset." \
+		"$script" "grep -F -x -e \"\$l_destination_snapshot_dataset\" \"\$l_inventory_stdout_file\""
+
+	set +e
+	output=$(ZXFER_FAKE_ZFS_LOG="$zfs_log" TMPDIR="$TEST_TMPDIR" sh -c "$script" 2>&1)
+	status=$?
+	set -e
+
+	assertEquals "Generated remote batch script should execute successfully with target-side temp files." \
+		0 "$status"
+	assertContains "Generated remote batch should emit the destination inventory section." \
+		"$output" "$(printf 'BEGIN\tinventory_stdout')"
+	assertContains "Generated remote batch should stream destination inventory rows." \
+		"$output" "backup/dst/src"
+	assertContains "Generated remote batch should stream destination snapshot rows." \
+		"$output" "backup/dst/src@snapA	guidA"
+	assertContains "Generated remote batch should report that snapshot listing ran." \
+		"$output" "$(printf 'STATUS\tsnapshot_ran\t1')"
+	assertEquals "Generated remote batch should run inventory and snapshot zfs lists without a pool fallback." \
+		"2" "$(wc -l <"$zfs_log" | tr -d '[:space:]')"
+	assertEquals "Generated remote batch should remove its target-side temp files." \
+		"" "$(find "$TEST_TMPDIR" -name 'zxfer.destination-discovery.*' -print)"
+}
+
+test_get_zfs_list_remote_target_batches_missing_destination_root_fallback() {
+	ssh_log="$TEST_TMPDIR/get_zfs_remote_batch_missing.ssh"
+	: >"$ssh_log"
+
+	output=$(
+		(
+			SSH_LOG="$ssh_log"
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf 'host=%s side=%s\n' "$1" "$3" >>"$SSH_LOG"
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t1\n'
+				printf 'STATUS\tpool\t0\n'
+				printf 'STATUS\tsnapshot\t0\n'
+				printf 'STATUS\tsnapshot_ran\t0\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf '%s\n' "cannot open 'backup/dst': no such pool or dataset"
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf 'END\tsnapshot_stdout\n'
+				printf 'BEGIN\tsnapshot_stderr\n'
+				printf 'END\tsnapshot_stderr\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "unexpected-pool-probe" >>"$SSH_LOG"
+				return 99
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
+			}
+			zxfer_get_zfs_list
+			printf 'dest=<%s>\n' "$g_recursive_dest_list"
+			printf 'root_cache=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst")"
+			printf 'child_cache=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst/src")"
+			printf 'raw=<%s>\n' "$g_rzfs_list_hr_snap"
+		)
+	)
+
+	assertEquals "Missing-root remote discovery should still use one target SSH invocation." \
+		"1" "$(grep -c '^host=target.example side=destination$' "$ssh_log")"
+	assertNotContains "Remote missing-root fallback should use the batch pool status instead of a second local destination helper probe." \
+		"$(cat "$ssh_log")" "unexpected-pool-probe"
+	assertContains "Remote missing-root fallback should treat the recursive destination inventory as empty." \
+		"$output" "dest=<>"
+	assertContains "Remote missing-root fallback should mark the destination root missing." \
+		"$output" "root_cache=0"
+	assertContains "Remote missing-root fallback should infer descendants under the missing root as absent." \
+		"$output" "child_cache=0"
+	assertContains "Remote missing-root fallback should stage an empty destination snapshot list." \
+		"$output" "raw=<>"
+}
+
+test_get_zfs_list_remote_target_batches_inventory_failures() {
+	set +e
+	output=$(
+		(
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t13\n'
+				printf 'STATUS\tpool\t\n'
+				printf 'STATUS\tsnapshot\t0\n'
+				printf 'STATUS\tsnapshot_ran\t0\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf '%s\n' "permission denied"
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf 'END\tsnapshot_stdout\n'
+				printf 'BEGIN\tsnapshot_stderr\n'
+				printf 'END\tsnapshot_stderr\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Remote destination inventory failures should preserve the target-side status." \
+		13 "$status"
+	assertContains "Remote destination inventory failures should preserve the existing inventory failure message." \
+		"$output" "Failed to retrieve list of datasets from the destination"
+}
+
+test_get_zfs_list_remote_target_batches_snapshot_failures() {
+	set +e
+	output=$(
+		(
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t0\n'
+				printf 'STATUS\tpool\t\n'
+				printf 'STATUS\tsnapshot\t17\n'
+				printf 'STATUS\tsnapshot_ran\t1\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf '%s\n' "backup/dst"
+				printf '%s\n' "backup/dst/src"
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf 'END\tsnapshot_stdout\n'
+				printf 'BEGIN\tsnapshot_stderr\n'
+				printf '%s\n' "snapshot list failed"
+				printf 'END\tsnapshot_stderr\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Remote destination snapshot failures should preserve the target-side status." \
+		17 "$status"
+	assertContains "Remote destination snapshot failures should preserve the existing snapshot-list failure message." \
+		"$output" "Failed to retrieve snapshot list from the destination."
+	assertContains "Remote destination snapshot failures should preserve target-side stderr diagnostics." \
+		"$output" "snapshot list failed"
+}
+
+test_get_zfs_list_remote_target_batches_malformed_payloads_fail_closed() {
+	set +e
+	output=$(
+		(
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t0\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf '%s\n' "backup/dst"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Malformed remote destination discovery batches should fail closed." \
+		1 "$status"
+	assertContains "Malformed remote destination discovery batches should report the malformed batch context." \
+		"$output" "Malformed destination discovery batch response."
+
+	set +e
+	output=$(
+		(
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t0\n'
+				printf 'STATUS\tpool\t\n'
+				printf 'STATUS\tsnapshot\t0\n'
+				printf 'STATUS\tsnapshot_ran\t1\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf '%s\n' "backup/dst"
+				printf '%s\n' "backup/dst/src"
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf '%s\n' "backup/dst/src@snapA	101"
+				printf 'END\tsnapshot_stdout\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Remote destination discovery batches with missing sections should fail closed." \
+		1 "$status"
+	assertContains "Missing remote batch sections should report the malformed batch context." \
+		"$output" "Malformed destination discovery batch response."
+}
+
+test_run_remote_destination_discovery_batch_preserves_setup_and_transport_failures() {
+	output=$(
+		set +e
+		dest_file="$TEST_TMPDIR/remote_batch_failure.dest"
+		err_file="$TEST_TMPDIR/remote_batch_failure.err"
+		snap_file="$TEST_TMPDIR/remote_batch_failure.snap"
+		snap_err_file="$TEST_TMPDIR/remote_batch_failure.snap.err"
+		: >"$dest_file"
+		: >"$err_file"
+		: >"$snap_file"
+		: >"$snap_err_file"
+
+		(
+			g_destination="backup"
+			zxfer_get_temp_file() {
+				return 31
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'temp=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			zxfer_get_temp_file() {
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_build.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				return 32
+			}
+			zxfer_cleanup_runtime_artifact_path() {
+				printf 'build_cleanup=%s\n' "$1"
+				rm -f "$1"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'build=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			zxfer_get_temp_file() {
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_command.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				return 33
+			}
+			zxfer_cleanup_runtime_artifact_path() {
+				printf 'command_cleanup=%s\n' "$1"
+				rm -f "$1"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'command=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_get_temp_file() {
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_ssh.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				return 34
+			}
+			zxfer_cleanup_runtime_artifact_path() {
+				printf 'ssh_cleanup=%s\n' "$1"
+				rm -f "$1"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'ssh=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_get_temp_file() {
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_read.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' "ZXFER_DESTINATION_DISCOVERY_BATCH_V1"
+			}
+			zxfer_read_snapshot_discovery_capture_file() {
+				return 35
+			}
+			zxfer_cleanup_runtime_artifact_path() {
+				printf 'read_cleanup=%s\n' "$1"
+				rm -f "$1"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'read=%s\n' "$?"
+	)
+
+	assertContains "Remote batch temp allocation failures should preserve status." \
+		"$output" "temp=31"
+	assertContains "Remote batch script render failures should preserve status." \
+		"$output" "build=32"
+	assertContains "Remote batch command render failures should preserve status." \
+		"$output" "command=33"
+	assertContains "Remote batch SSH failures should preserve transport status." \
+		"$output" "ssh=34"
+	assertContains "Remote batch readback failures should preserve staged-read status." \
+		"$output" "read=35"
+	assertContains "Remote batch script render failures should clean their batch output file." \
+		"$output" "build_cleanup=$TEST_TMPDIR/remote_batch_build.out"
+	assertContains "Remote batch command render failures should clean their batch output file." \
+		"$output" "command_cleanup=$TEST_TMPDIR/remote_batch_command.out"
+	assertContains "Remote batch SSH failures should clean their batch output file." \
+		"$output" "ssh_cleanup=$TEST_TMPDIR/remote_batch_ssh.out"
+	assertContains "Remote batch readback failures should clean their batch output file." \
+		"$output" "read_cleanup=$TEST_TMPDIR/remote_batch_read.out"
+}
+
+test_get_zfs_list_local_destination_discovery_does_not_use_remote_batch() {
+	ssh_log="$TEST_TMPDIR/get_zfs_local_batch_guard.ssh"
+	zfs_log="$TEST_TMPDIR/get_zfs_local_batch_guard.zfs"
+	: >"$ssh_log"
+	: >"$zfs_log"
+
+	output=$(
+		(
+			SSH_LOG="$ssh_log"
+			ZFS_LOG="$zfs_log"
+			g_option_T_target_host=""
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' "unexpected-ssh" >>"$SSH_LOG"
+				return 99
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "$*" >>"$ZFS_LOG"
+				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
+					printf '%s\n' "backup/dst"
+					printf '%s\n' "backup/dst/src"
+					return 0
+				fi
+				if [ "$1" = "list" ] && [ "$2" = "-Hr" ]; then
+					printf '%s\n' "backup/dst/src@snapA"
+					return 0
+				fi
+				return 99
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list="tank/src"
+			}
+			zxfer_get_zfs_list
+			printf 'dest=%s\n' "$g_recursive_dest_list"
+			printf 'raw=%s\n' "$g_rzfs_list_hr_snap"
+		)
+	)
+
+	assertEquals "Local destination discovery should not invoke the remote batch path." \
+		"" "$(cat "$ssh_log")"
+	assertContains "Local destination discovery should keep using the direct recursive dataset inventory command." \
+		"$(cat "$zfs_log")" "list -t filesystem,volume -Hr -o name backup/dst"
+	assertContains "Local destination discovery should keep using the direct destination snapshot command." \
+		"$(cat "$zfs_log")" "list -Hr -o name,guid -t snapshot backup/dst/src"
+	assertContains "Local destination discovery should still publish the recursive destination inventory." \
+		"$output" "dest=backup/dst
+backup/dst/src"
+	assertContains "Local destination discovery should still publish the raw destination snapshot cache." \
+		"$output" "raw=backup/dst/src@snapA"
 }
 
 test_get_zfs_list_tracks_stage_timings_when_very_verbose() {

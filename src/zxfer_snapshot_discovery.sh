@@ -36,8 +36,8 @@
 ################################################################################
 
 # Module contract:
-# owns globals: recursive snapshot-discovery state, current-shell staged-file and recursive dataset-list scratch, and metadata-compression state.
-# reads globals: g_option_j_jobs, g_option_O_origin_host, g_option_z_compress, g_LZFS/g_RZFS, and remote helper paths.
+# owns globals: recursive snapshot-discovery state, current-shell staged-file and recursive dataset-list scratch, destination-discovery batch scratch, and metadata-compression state.
+# reads globals: g_option_j_jobs, g_option_O_origin_host, g_option_T_target_host, g_option_z_compress, g_LZFS/g_RZFS, and remote helper paths.
 # mutates caches: destination-existence and snapshot-record indexes through shared helpers.
 # returns via stdout: rendered discovery commands, normalized snapshot lists, and diffed dataset streams.
 
@@ -76,6 +76,10 @@ zxfer_reset_snapshot_discovery_state() {
 	g_zxfer_parallel_source_job_check_result=""
 	g_zxfer_parallel_source_job_check_kind=""
 	g_zxfer_recursive_dataset_list_result=""
+	g_zxfer_destination_discovery_batch_inventory_status=""
+	g_zxfer_destination_discovery_batch_pool_status=""
+	g_zxfer_destination_discovery_batch_snapshot_status=""
+	g_zxfer_destination_discovery_batch_snapshot_ran=""
 	g_lzfs_list_hr_snap=""
 	g_lzfs_list_hr_S_snap=""
 	g_rzfs_list_hr_snap=""
@@ -520,6 +524,491 @@ zxfer_normalize_destination_snapshot_list() {
 	fi
 }
 
+# Purpose: Return whether a status value from the destination discovery batch
+# is numeric.
+# Usage: Called while parsing target-side destination discovery output before
+# zxfer trusts a remote command status for local failure handling.
+zxfer_destination_discovery_batch_status_is_numeric() {
+	case "${1:-}" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+
+	return 0
+}
+
+# Purpose: Reset the remote destination discovery batch scratch state.
+# Usage: Called before parsing a target-side batch payload so stale statuses
+# cannot leak into the current discovery result.
+zxfer_reset_destination_discovery_batch_state() {
+	g_zxfer_destination_discovery_batch_inventory_status=""
+	g_zxfer_destination_discovery_batch_pool_status=""
+	g_zxfer_destination_discovery_batch_snapshot_status=""
+	g_zxfer_destination_discovery_batch_snapshot_ran=""
+}
+
+# Purpose: Build the target-side destination discovery script for the next
+# remote batch execution.
+# Usage: Called by the remote destination discovery path so dataset inventory,
+# missing-root pool probing, and snapshot listing share one SSH round trip while
+# keeping the same portable ZFS command shapes.
+# Returns: A POSIX sh script suitable for `sh -c` on the target host.
+zxfer_build_remote_destination_discovery_batch_script() {
+	l_destination_root_dataset=$1
+	l_destination_snapshot_dataset=$2
+	l_destination_pool=$3
+	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
+
+	l_destination_root_dataset_single=$(zxfer_escape_for_single_quotes "$l_destination_root_dataset")
+	l_destination_snapshot_dataset_single=$(zxfer_escape_for_single_quotes "$l_destination_snapshot_dataset")
+	l_destination_pool_single=$(zxfer_escape_for_single_quotes "$l_destination_pool")
+	l_target_zfs_cmd_single=$(zxfer_escape_for_single_quotes "$l_target_zfs_cmd")
+	l_dependency_path=$(zxfer_get_effective_dependency_path)
+	l_dependency_path_single=$(zxfer_escape_for_single_quotes "$l_dependency_path")
+
+	cat <<-EOF
+		PATH='$l_dependency_path_single'
+		export PATH
+
+		l_zfs_cmd='$l_target_zfs_cmd_single'
+		l_destination_root_dataset='$l_destination_root_dataset_single'
+		l_destination_snapshot_dataset='$l_destination_snapshot_dataset_single'
+		l_destination_pool='$l_destination_pool_single'
+
+		zxfer_cleanup_destination_discovery_batch() {
+			for l_cleanup_file in "\$l_inventory_stdout_file" "\$l_inventory_stderr_file" "\$l_pool_stderr_file" "\$l_snapshot_stdout_file" "\$l_snapshot_stderr_file"; do
+				[ "\$l_cleanup_file" != "" ] || continue
+				rm -f "\$l_cleanup_file" 2>/dev/null || :
+			done
+		}
+
+		zxfer_emit_destination_discovery_section_file() {
+			l_section_name=\$1
+			l_section_file=\$2
+
+			printf '%s\t%s\n' 'BEGIN' "\$l_section_name"
+			if [ -f "\$l_section_file" ]; then
+				cat "\$l_section_file" || return \$?
+			fi
+			printf '%s\t%s\n' 'END' "\$l_section_name"
+		}
+
+		zxfer_destination_discovery_stderr_reports_missing() {
+			l_stderr_file=\$1
+			grep -F \
+				-e 'dataset does not exist' \
+				-e 'Dataset does not exist' \
+				-e 'no such dataset' \
+				-e 'No such dataset' \
+				-e 'no such pool or dataset' \
+				-e 'No such pool or dataset' \
+				"\$l_stderr_file" >/dev/null 2>&1
+		}
+
+		l_inventory_stdout_file=''
+		l_inventory_stderr_file=''
+		l_pool_stderr_file=''
+		l_snapshot_stdout_file=''
+		l_snapshot_stderr_file=''
+		trap 'zxfer_cleanup_destination_discovery_batch' 0
+		trap 'zxfer_cleanup_destination_discovery_batch; exit 1' HUP INT TERM QUIT
+
+		l_tmpdir=\${TMPDIR:-/tmp}
+		case "\$l_tmpdir" in
+		/*)
+			:
+			;;
+		*)
+			l_tmpdir=/tmp
+			;;
+		esac
+		umask 077
+		l_inventory_stdout_file=\$(mktemp "\$l_tmpdir/zxfer.destination-discovery.inventory.XXXXXX" 2>/dev/null) || exit \$?
+		l_inventory_stderr_file=\$(mktemp "\$l_tmpdir/zxfer.destination-discovery.inventory-stderr.XXXXXX" 2>/dev/null) || exit \$?
+		l_pool_stderr_file=\$(mktemp "\$l_tmpdir/zxfer.destination-discovery.pool-stderr.XXXXXX" 2>/dev/null) || exit \$?
+		l_snapshot_stdout_file=\$(mktemp "\$l_tmpdir/zxfer.destination-discovery.snapshots.XXXXXX" 2>/dev/null) || exit \$?
+		l_snapshot_stderr_file=\$(mktemp "\$l_tmpdir/zxfer.destination-discovery.snapshots-stderr.XXXXXX" 2>/dev/null) || exit \$?
+
+		"\$l_zfs_cmd" list -t filesystem,volume -Hr -o name "\$l_destination_root_dataset" >"\$l_inventory_stdout_file" 2>"\$l_inventory_stderr_file"
+		l_inventory_status=\$?
+		l_pool_status=''
+		l_snapshot_status=0
+		l_snapshot_ran=0
+
+		if [ "\$l_inventory_status" -ne 0 ]; then
+			if zxfer_destination_discovery_stderr_reports_missing "\$l_inventory_stderr_file"; then
+				"\$l_zfs_cmd" list -H -o name "\$l_destination_pool" >/dev/null 2>"\$l_pool_stderr_file"
+				l_pool_status=\$?
+			fi
+		fi
+
+		if [ "\$l_inventory_status" -eq 0 ]; then
+			l_destination_snapshot_dataset_found=0
+			grep -F -x -e "\$l_destination_snapshot_dataset" "\$l_inventory_stdout_file" >/dev/null 2>&1
+			l_grep_status=\$?
+			case "\$l_grep_status" in
+			0)
+				l_destination_snapshot_dataset_found=1
+				;;
+			1)
+				:
+				;;
+			*)
+				l_inventory_status=\$l_grep_status
+				printf 'Failed to scan destination dataset inventory for %s.\n' "\$l_destination_snapshot_dataset" >"\$l_inventory_stderr_file"
+				;;
+			esac
+			if [ "\$l_destination_snapshot_dataset_found" -eq 1 ]; then
+				l_snapshot_ran=1
+				"\$l_zfs_cmd" list -Hr -o name,guid -t snapshot "\$l_destination_snapshot_dataset" >"\$l_snapshot_stdout_file" 2>"\$l_snapshot_stderr_file"
+				l_snapshot_status=\$?
+			fi
+		fi
+
+		printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+		printf '%s\t%s\t%s\n' 'STATUS' 'inventory' "\$l_inventory_status"
+		printf '%s\t%s\t%s\n' 'STATUS' 'pool' "\$l_pool_status"
+		printf '%s\t%s\t%s\n' 'STATUS' 'snapshot' "\$l_snapshot_status"
+		printf '%s\t%s\t%s\n' 'STATUS' 'snapshot_ran' "\$l_snapshot_ran"
+		zxfer_emit_destination_discovery_section_file inventory_stdout "\$l_inventory_stdout_file" || exit \$?
+		zxfer_emit_destination_discovery_section_file inventory_stderr "\$l_inventory_stderr_file" || exit \$?
+		zxfer_emit_destination_discovery_section_file pool_stderr "\$l_pool_stderr_file" || exit \$?
+		zxfer_emit_destination_discovery_section_file snapshot_stdout "\$l_snapshot_stdout_file" || exit \$?
+		zxfer_emit_destination_discovery_section_file snapshot_stderr "\$l_snapshot_stderr_file" || exit \$?
+		printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+	EOF
+}
+
+# Purpose: Store one destination discovery batch data line in the staged output
+# file owned by the matching section.
+# Usage: Called while parsing the target-side batch payload so later discovery
+# code can consume the same files as the local path.
+zxfer_append_destination_discovery_batch_section_line() {
+	l_section=$1
+	l_line=$2
+	l_dest_list_tmp_file=$3
+	l_dest_list_err_file=$4
+	l_rzfs_list_hr_snap_tmp_file=$5
+	l_rzfs_list_hr_snap_err_tmp_file=$6
+
+	case "$l_section" in
+	inventory_stdout)
+		printf '%s\n' "$l_line" >>"$l_dest_list_tmp_file"
+		;;
+	inventory_stderr)
+		printf '%s\n' "$l_line" >>"$l_dest_list_err_file"
+		;;
+	snapshot_stdout)
+		printf '%s\n' "$l_line" >>"$l_rzfs_list_hr_snap_tmp_file"
+		;;
+	snapshot_stderr)
+		printf '%s\n' "$l_line" >>"$l_rzfs_list_hr_snap_err_tmp_file"
+		;;
+	pool_stderr)
+		# Pool stderr is carried for validation. Existing destination discovery
+		# reports a stable high-level pool lookup message on this branch.
+		:
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+# Purpose: Parse target-side destination discovery output into staged files and
+# status globals.
+# Usage: Called after one remote destination discovery SSH invocation so the
+# existing local discovery flow can process inventory and snapshot files.
+zxfer_parse_remote_destination_discovery_batch_output() {
+	l_batch_output=$1
+	l_dest_list_tmp_file=$2
+	l_dest_list_err_file=$3
+	l_rzfs_list_hr_snap_tmp_file=$4
+	l_rzfs_list_hr_snap_err_tmp_file=$5
+	l_tab='	'
+
+	zxfer_reset_destination_discovery_batch_state
+
+	zxfer_write_runtime_artifact_file "$l_dest_list_tmp_file" "" || return "$?"
+	zxfer_write_runtime_artifact_file "$l_dest_list_err_file" "" || return "$?"
+	zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" "" || return "$?"
+	zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_err_tmp_file" "" || return "$?"
+
+	l_seen_header=0
+	l_seen_end=0
+	l_current_section=""
+	l_seen_inventory_status=0
+	l_seen_pool_status=0
+	l_seen_snapshot_status=0
+	l_seen_snapshot_ran_status=0
+	l_seen_inventory_stdout=0
+	l_seen_inventory_stderr=0
+	l_seen_pool_stderr=0
+	l_seen_snapshot_stdout=0
+	l_seen_snapshot_stderr=0
+
+	while IFS= read -r l_batch_line || [ -n "$l_batch_line" ]; do
+		if [ "$l_seen_header" -eq 0 ]; then
+			[ "$l_batch_line" = "ZXFER_DESTINATION_DISCOVERY_BATCH_V1" ] || return 1
+			l_seen_header=1
+			continue
+		fi
+
+		if [ "$l_batch_line" = "ZXFER_DESTINATION_DISCOVERY_BATCH_END" ]; then
+			[ -z "$l_current_section" ] || return 1
+			l_seen_end=1
+			continue
+		fi
+		if [ "$l_seen_end" -ne 0 ]; then
+			[ -z "$l_batch_line" ] || return 1
+			continue
+		fi
+
+		case "$l_batch_line" in
+		"STATUS$l_tab"*)
+			[ -z "$l_current_section" ] || return 1
+			l_status_record=${l_batch_line#STATUS"$l_tab"}
+			case "$l_status_record" in
+			*"$l_tab"*)
+				l_status_name=${l_status_record%%"$l_tab"*}
+				l_status_value=${l_status_record#*"$l_tab"}
+				;;
+			*)
+				return 1
+				;;
+			esac
+			case "$l_status_name" in
+			inventory)
+				[ "$l_seen_inventory_status" -eq 0 ] || return 1
+				g_zxfer_destination_discovery_batch_inventory_status=$l_status_value
+				l_seen_inventory_status=1
+				;;
+			pool)
+				[ "$l_seen_pool_status" -eq 0 ] || return 1
+				g_zxfer_destination_discovery_batch_pool_status=$l_status_value
+				l_seen_pool_status=1
+				;;
+			snapshot)
+				[ "$l_seen_snapshot_status" -eq 0 ] || return 1
+				g_zxfer_destination_discovery_batch_snapshot_status=$l_status_value
+				l_seen_snapshot_status=1
+				;;
+			snapshot_ran)
+				[ "$l_seen_snapshot_ran_status" -eq 0 ] || return 1
+				g_zxfer_destination_discovery_batch_snapshot_ran=$l_status_value
+				l_seen_snapshot_ran_status=1
+				;;
+			*)
+				return 1
+				;;
+			esac
+			;;
+		"BEGIN$l_tab"*)
+			[ -z "$l_current_section" ] || return 1
+			l_current_section=${l_batch_line#BEGIN"$l_tab"}
+			case "$l_current_section" in
+			inventory_stdout)
+				[ "$l_seen_inventory_stdout" -eq 0 ] || return 1
+				l_seen_inventory_stdout=1
+				;;
+			inventory_stderr)
+				[ "$l_seen_inventory_stderr" -eq 0 ] || return 1
+				l_seen_inventory_stderr=1
+				;;
+			pool_stderr)
+				[ "$l_seen_pool_stderr" -eq 0 ] || return 1
+				l_seen_pool_stderr=1
+				;;
+			snapshot_stdout)
+				[ "$l_seen_snapshot_stdout" -eq 0 ] || return 1
+				l_seen_snapshot_stdout=1
+				;;
+			snapshot_stderr)
+				[ "$l_seen_snapshot_stderr" -eq 0 ] || return 1
+				l_seen_snapshot_stderr=1
+				;;
+			*)
+				return 1
+				;;
+			esac
+			;;
+		"END$l_tab"*)
+			[ -n "$l_current_section" ] || return 1
+			[ "${l_batch_line#END"$l_tab"}" = "$l_current_section" ] || return 1
+			l_current_section=""
+			;;
+		*)
+			[ -n "$l_current_section" ] || return 1
+			zxfer_append_destination_discovery_batch_section_line \
+				"$l_current_section" \
+				"$l_batch_line" \
+				"$l_dest_list_tmp_file" \
+				"$l_dest_list_err_file" \
+				"$l_rzfs_list_hr_snap_tmp_file" \
+				"$l_rzfs_list_hr_snap_err_tmp_file" || return "$?"
+			;;
+		esac
+	done <<-EOF
+		$l_batch_output
+	EOF
+
+	[ "$l_seen_header" -eq 1 ] || return 1
+	[ "$l_seen_end" -eq 1 ] || return 1
+	[ -z "$l_current_section" ] || return 1
+	[ "$l_seen_inventory_status" -eq 1 ] || return 1
+	[ "$l_seen_pool_status" -eq 1 ] || return 1
+	[ "$l_seen_snapshot_status" -eq 1 ] || return 1
+	[ "$l_seen_snapshot_ran_status" -eq 1 ] || return 1
+	[ "$l_seen_inventory_stdout" -eq 1 ] || return 1
+	[ "$l_seen_inventory_stderr" -eq 1 ] || return 1
+	[ "$l_seen_pool_stderr" -eq 1 ] || return 1
+	[ "$l_seen_snapshot_stdout" -eq 1 ] || return 1
+	[ "$l_seen_snapshot_stderr" -eq 1 ] || return 1
+	zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_inventory_status" || return 1
+	zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_snapshot_status" || return 1
+	zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_snapshot_ran" || return 1
+	if [ -n "$g_zxfer_destination_discovery_batch_pool_status" ]; then
+		zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_pool_status" || return 1
+	fi
+}
+
+# Purpose: Record profile counters for the ZFS commands represented by one
+# destination discovery batch.
+# Usage: Called after parsing target-side batch status lines so `-V` output
+# keeps destination `zfs list` accounting comparable with the non-batched path.
+zxfer_record_remote_destination_discovery_batch_zfs_profile() {
+	zxfer_profile_record_zfs_call destination list
+	if [ -n "${g_zxfer_destination_discovery_batch_pool_status:-}" ]; then
+		zxfer_profile_record_zfs_call destination list
+	fi
+	if [ "${g_zxfer_destination_discovery_batch_snapshot_ran:-0}" -eq 1 ]; then
+		zxfer_profile_record_zfs_call destination list
+	fi
+}
+
+# Purpose: Run target-side destination discovery through one remote SSH shell
+# invocation and stage its results.
+# Usage: Called by snapshot discovery when `-T` is active to avoid separate
+# target SSH round trips for destination dataset inventory and snapshot listing.
+zxfer_run_remote_destination_discovery_batch_to_files() {
+	l_destination_dataset=$1
+	l_dest_list_tmp_file=$2
+	l_dest_list_err_file=$3
+	l_rzfs_list_hr_snap_tmp_file=$4
+	l_rzfs_list_hr_snap_err_tmp_file=$5
+	l_destination_pool=${g_destination%%/*}
+	l_batch_output_file=""
+
+	zxfer_reset_destination_discovery_batch_state
+
+	if [ "$l_destination_pool" = "" ]; then
+		l_destination_pool=$g_destination
+	fi
+
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
+	fi
+	l_batch_output_file=$g_zxfer_temp_file_result
+
+	l_remote_script=$(zxfer_build_remote_destination_discovery_batch_script \
+		"$g_destination" "$l_destination_dataset" "$l_destination_pool") ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_batch_output_file"
+		return "$l_status"
+	fi
+	l_remote_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_script") ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_batch_output_file"
+		return "$l_status"
+	fi
+
+	zxfer_echoV "Running remote destination discovery batch for $g_destination."
+	l_batch_status=0
+	zxfer_invoke_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd" destination >"$l_batch_output_file" 2>"$l_dest_list_err_file" ||
+		l_batch_status=$?
+	if [ "$l_batch_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_batch_output_file"
+		return "$l_batch_status"
+	fi
+
+	l_status=0
+	zxfer_read_snapshot_discovery_capture_file "$l_batch_output_file" || l_status=$?
+	zxfer_cleanup_runtime_artifact_path "$l_batch_output_file"
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
+	fi
+
+	l_status=0
+	zxfer_parse_remote_destination_discovery_batch_output \
+		"$g_zxfer_snapshot_discovery_file_read_result" \
+		"$l_dest_list_tmp_file" \
+		"$l_dest_list_err_file" \
+		"$l_rzfs_list_hr_snap_tmp_file" \
+		"$l_rzfs_list_hr_snap_err_tmp_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_throw_error "Malformed destination discovery batch response." "$l_status"
+	fi
+	zxfer_record_remote_destination_discovery_batch_zfs_profile
+}
+
+# Purpose: Publish destination dataset inventory from staged files into the
+# shared discovery state.
+# Usage: Called by local and remote destination discovery after inventory
+# commands have completed so missing-root bootstrap and failure handling stay
+# identical.
+zxfer_publish_destination_dataset_inventory_from_stage() {
+	l_dest_list_tmp_file=$1
+	l_dest_list_err_file=$2
+	l_dest_inventory_status=$3
+	l_dest_pool_status=${4:-}
+
+	if [ "$l_dest_inventory_status" -eq 0 ]; then
+		l_status=0
+		zxfer_read_snapshot_discovery_capture_file "$l_dest_list_tmp_file" || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to read staged destination dataset inventory." "$l_status"
+		fi
+		g_recursive_dest_list=$g_zxfer_snapshot_discovery_file_read_result
+		[ -n "$g_recursive_dest_list" ] || {
+			zxfer_throw_error "Staged destination dataset inventory was empty."
+		}
+		zxfer_seed_destination_existence_cache_from_recursive_list "$g_destination" "$g_recursive_dest_list"
+		return
+	fi
+
+	l_status=0
+	zxfer_read_snapshot_discovery_capture_file "$l_dest_list_err_file" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to read staged destination dataset inventory stderr." "$l_status"
+	fi
+	l_dest_err=$g_zxfer_snapshot_discovery_file_read_result
+	if zxfer_destination_probe_reports_missing "$l_dest_err"; then
+		if [ -z "$l_dest_pool_status" ]; then
+			l_dest_pool=${g_destination%%/*}
+			if [ "$l_dest_pool" = "" ]; then
+				l_dest_pool=$g_destination
+			fi
+			l_dest_pool_status=0
+			zxfer_run_destination_zfs_cmd list -H -o name "$l_dest_pool" >/dev/null 2>&1 ||
+				l_dest_pool_status=$?
+		fi
+		if [ "$l_dest_pool_status" -eq 0 ]; then
+			g_recursive_dest_list=""
+			zxfer_mark_destination_root_missing_in_cache "$g_destination"
+			zxfer_echoV "Destination dataset missing; treating as empty list for bootstrap."
+		else
+			zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_pool_status"
+		fi
+	else
+		zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_inventory_status"
+	fi
+}
+
 # Purpose: Write the snapshot identity file from records in the normalized form
 # later zxfer steps expect.
 # Usage: Called during source and destination snapshot discovery when the
@@ -807,17 +1296,7 @@ zxfer_write_destination_snapshot_list_to_files() {
 	l_rzfs_list_hr_snap_tmp_file=$1
 	l_dest_snaps_stripped_sorted_tmp_file=$2
 
-	# determine the last dataset in $g_initial_source. This will be the last
-	# dataset after a forward slash "/" or if no forward slash exists, then
-	# is is the name of the dataset itself.
-	l_source_dataset=$(echo "$g_initial_source" | awk -F'/' '{print $NF}')
-
-	if [ "$g_initial_source_had_trailing_slash" -eq 1 ]; then
-		# Trailing slash replicates directly into $g_destination (no child dataset)
-		l_destination_dataset="$g_destination"
-	else
-		l_destination_dataset="$g_destination/$l_source_dataset"
-	fi
+	l_destination_dataset=$(zxfer_get_destination_snapshot_root_dataset)
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
 		l_status=0
@@ -1469,6 +1948,7 @@ zxfer_get_zfs_list() {
 
 	# get a list of all destination datasets recursively
 	l_destination_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	l_destination_dataset=$(zxfer_get_destination_snapshot_root_dataset)
 	l_cmd=$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")
 	zxfer_echoV "Running command: $l_cmd"
 	zxfer_record_last_command_string "$l_cmd"
@@ -1485,56 +1965,10 @@ zxfer_get_zfs_list() {
 	} <<-EOF
 		$l_destination_inventory_stage_files
 	EOF
-	l_dest_inventory_status=0
-	zxfer_run_destination_zfs_cmd list -t filesystem,volume -Hr -o name "$g_destination" >"$l_dest_list_tmp_file" 2>"$l_dest_list_err_file" ||
-		l_dest_inventory_status=$?
-	if [ "$l_dest_inventory_status" -eq 0 ]; then
-		l_status=0
-		zxfer_read_snapshot_discovery_capture_file "$l_dest_list_tmp_file" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-			zxfer_throw_error "Failed to read staged destination dataset inventory." "$l_status"
-		fi
-		g_recursive_dest_list=$g_zxfer_snapshot_discovery_file_read_result
-		[ -n "$g_recursive_dest_list" ] || {
-			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-			zxfer_throw_error "Staged destination dataset inventory was empty."
-		}
-		zxfer_seed_destination_existence_cache_from_recursive_list "$g_destination" "$g_recursive_dest_list"
-	else
-		l_status=0
-		zxfer_read_snapshot_discovery_capture_file "$l_dest_list_err_file" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-			zxfer_throw_error "Failed to read staged destination dataset inventory stderr." "$l_status"
-		fi
-		l_dest_err=$g_zxfer_snapshot_discovery_file_read_result
-		if zxfer_destination_probe_reports_missing "$l_dest_err"; then
-			l_dest_pool=${g_destination%%/*}
-			if [ "$l_dest_pool" = "" ]; then
-				l_dest_pool=$g_destination
-			fi
-			l_dest_pool_status=0
-			zxfer_run_destination_zfs_cmd list -H -o name "$l_dest_pool" >/dev/null 2>&1 ||
-				l_dest_pool_status=$?
-			if [ "$l_dest_pool_status" -eq 0 ]; then
-				g_recursive_dest_list=""
-				zxfer_mark_destination_root_missing_in_cache "$g_destination"
-				zxfer_echoV "Destination dataset missing; treating as empty list for bootstrap."
-			else
-				zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-				zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_pool_status"
-			fi
-		else
-			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-			zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_inventory_status"
-		fi
-	fi
-	zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-
 	l_status=0
 	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
 		return "$l_status"
 	fi
@@ -1542,21 +1976,89 @@ zxfer_get_zfs_list() {
 	l_status=0
 	zxfer_get_temp_file >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 			"$l_rzfs_list_hr_snap_tmp_file"
 		return "$l_status"
 	fi
 	l_dest_snaps_stripped_sorted_tmp_file=$g_zxfer_temp_file_result
 
-	# this function writes to both files passed as parameters
-	l_status=0
-	zxfer_write_destination_snapshot_list_to_files "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
-		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-			"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
-		zxfer_cleanup_snapshot_record_cache_files
-		return "$l_status"
+	if [ -n "${g_option_T_target_host:-}" ]; then
+		l_rzfs_list_hr_snap_err_tmp_file=""
+		l_status=0
+		zxfer_get_temp_file >/dev/null || l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+			return "$l_status"
+		fi
+		l_rzfs_list_hr_snap_err_tmp_file=$g_zxfer_temp_file_result
+
+		l_dest_inventory_status=0
+		zxfer_run_remote_destination_discovery_batch_to_files \
+			"$l_destination_dataset" \
+			"$l_dest_list_tmp_file" \
+			"$l_dest_list_err_file" \
+			"$l_rzfs_list_hr_snap_tmp_file" \
+			"$l_rzfs_list_hr_snap_err_tmp_file" ||
+			l_dest_inventory_status=$?
+		if [ "$l_dest_inventory_status" -eq 0 ]; then
+			l_dest_inventory_status=$g_zxfer_destination_discovery_batch_inventory_status
+		fi
+		zxfer_publish_destination_dataset_inventory_from_stage \
+			"$l_dest_list_tmp_file" \
+			"$l_dest_list_err_file" \
+			"$l_dest_inventory_status" \
+			"${g_zxfer_destination_discovery_batch_pool_status:-}"
+		if [ "${g_zxfer_destination_discovery_batch_snapshot_status:-0}" -ne 0 ]; then
+			l_snapshot_stderr_read_status=0
+			zxfer_read_snapshot_discovery_capture_file "$l_rzfs_list_hr_snap_err_tmp_file" ||
+				l_snapshot_stderr_read_status=$?
+			l_snapshot_stderr=$g_zxfer_snapshot_discovery_file_read_result
+			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "$l_rzfs_list_hr_snap_err_tmp_file"
+			zxfer_cleanup_snapshot_record_cache_files
+			if [ "$l_snapshot_stderr_read_status" -ne 0 ]; then
+				zxfer_throw_error "Failed to read staged destination snapshot stderr." "$l_snapshot_stderr_read_status"
+			fi
+			if [ "$l_snapshot_stderr" != "" ]; then
+				zxfer_warn_stderr "$l_snapshot_stderr"
+			fi
+			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$g_zxfer_destination_discovery_batch_snapshot_status"
+		fi
+		zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
+		l_status=0
+		zxfer_normalize_destination_snapshot_list "$l_destination_dataset" "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
+			l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "$l_rzfs_list_hr_snap_err_tmp_file"
+			zxfer_cleanup_snapshot_record_cache_files
+			return "$l_status"
+		fi
+		zxfer_cleanup_runtime_artifact_path "$l_rzfs_list_hr_snap_err_tmp_file"
+	else
+		l_dest_inventory_status=0
+		zxfer_run_destination_zfs_cmd list -t filesystem,volume -Hr -o name "$g_destination" >"$l_dest_list_tmp_file" 2>"$l_dest_list_err_file" ||
+			l_dest_inventory_status=$?
+		zxfer_publish_destination_dataset_inventory_from_stage \
+			"$l_dest_list_tmp_file" \
+			"$l_dest_list_err_file" \
+			"$l_dest_inventory_status"
+		zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
+
+		# this function writes to both files passed as parameters
+		l_status=0
+		zxfer_write_destination_snapshot_list_to_files "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
+			l_status=$?
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
+			zxfer_cleanup_snapshot_record_cache_files
+			return "$l_status"
+		fi
 	fi
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_destination_snapshot_listing_ms "$l_destination_snapshot_stage_start_ms"
 

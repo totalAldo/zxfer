@@ -169,26 +169,32 @@ printf '%s\n' block
 } <<EOF
 payload
 EOF
+cat <<EOF >/dev/null
+cat payload
+EOF
 printf '%s\n' done
 SCRIPT
 	printf '%s\n' "$l_source_file" >"$l_target_list_file"
 	cat >"$l_trace_file" <<TRACE
 +$l_source_file:3: printf '%s\n' one
 +$l_source_file:13: printf '%s\n' block
-+$l_source_file:17: printf '%s\n' done
++$l_source_file:17: cat
++$l_source_file:20: printf '%s\n' done
 TRACE
 
 	output=$(run_coverage_helper \
 		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\")\"")
 
 	assertContains "The bash-xtrace fallback should ignore case labels, heredoc bodies, grouping parens, and multiline string bodies when counting coverable lines." \
-		"$output" "75.00	4	3	1	src/fake.sh"
+		"$output" "80.00	5	4	1	src/fake.sh"
 	assertContains "Only the truly uncovered executable line should remain in the missing-line report." \
 		"$output" "  7:printf '%s"
 	assertNotContains "Case labels should not be treated as missing executable lines." \
 		"$output" "foo)"
 	assertNotContains "Here-doc bodies should not be treated as missing executable lines." \
 		"$output" "payload"
+	assertNotContains "Command here-doc bodies should not be treated as missing executable lines." \
+		"$output" "cat payload"
 	assertNotContains "Multiline string bodies should not be treated as missing executable lines." \
 		"$output" "line two"
 }
