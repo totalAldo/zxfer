@@ -1471,7 +1471,7 @@ test_zxfer_get_snapshot_record_helpers_handle_missing_files_and_invalid_sides() 
 	assertEquals "Rejected snapshot-record retrieval should not produce a payload." "" "$output"
 }
 
-test_zxfer_get_snapshot_records_for_dataset_lazily_builds_snapshot_indexes() {
+test_zxfer_get_snapshot_records_for_dataset_filters_global_records_without_building_indexes() {
 	output=$(
 		(
 			source_root_file="$TEST_TMPDIR/lazy_source_root.records"
@@ -1497,23 +1497,23 @@ test_zxfer_get_snapshot_records_for_dataset_lazily_builds_snapshot_indexes() {
 		)
 	)
 
-	assertContains "Lazy snapshot indexing should leave the source index unset until a lookup occurs." \
+	assertContains "Snapshot-record lookup should leave the source index unset before direct filtering." \
 		"$output" "source_ready_before=0"
-	assertContains "Lazy snapshot indexing should leave the destination index unset until a lookup occurs." \
+	assertContains "Snapshot-record lookup should leave the destination index unset before direct filtering." \
 		"$output" "dest_ready_before=0"
-	assertContains "Lazy source indexing should not precompute the reversed source cache." \
+	assertContains "Source record filtering should not precompute the reversed source cache before lookup." \
 		"$output" "source_reversed_before="
-	assertContains "Lazy source indexing should still return newest-first source records once requested." \
+	assertContains "Source record filtering should still return newest-first source records once requested." \
 		"$output" "source_root=tank/src@snap2
 tank/src@snap1"
-	assertContains "Lazy destination indexing should still return the live destination records once requested." \
+	assertContains "Destination record filtering should still return the live destination records once requested." \
 		"$output" "dest_root=backup/dst@snap2
 backup/dst@legacy1"
-	assertContains "Lazy snapshot indexing should mark the source index ready after the first lookup." \
-		"$output" "source_ready_after=1"
-	assertContains "Lazy snapshot indexing should mark the destination index ready after the first lookup." \
-		"$output" "dest_ready_after=1"
-	assertContains "Lazy source indexing should populate the reversed cache only after a consumer requests source records." \
+	assertContains "Source record filtering should avoid building the heavy source snapshot index after lookup." \
+		"$output" "source_ready_after=0"
+	assertContains "Destination record filtering should avoid building the heavy destination snapshot index after lookup." \
+		"$output" "dest_ready_after=0"
+	assertContains "Source record filtering should populate the reversed cache only after a consumer requests source records." \
 		"$output" "source_reversed_after=tank/src@snap2
 tank/src/child@child1
 tank/src@snap1"

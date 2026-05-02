@@ -795,12 +795,9 @@ zxfer_get_snapshot_records_for_dataset() {
 		"$l_snapshot_lookup_side" "$l_snapshot_lookup_dataset"; then
 		return 0
 	fi
-	if zxfer_ensure_snapshot_record_index_for_side "$l_snapshot_lookup_side"; then
-		if zxfer_get_indexed_snapshot_records_for_dataset \
-			"$l_snapshot_lookup_side" "$l_snapshot_lookup_dataset"; then
-			return 0
-		fi
-	fi
+	# The discovery phase already stages whole-tree snapshot cache files. For
+	# no-op/delete-only runs, direct filtering avoids building thousands of
+	# small index cache objects before any dataset mutation is needed.
 	if l_snapshot_record_cache_file=$(zxfer_snapshot_record_cache_file_for_side "$l_snapshot_lookup_side") &&
 		[ -r "$l_snapshot_record_cache_file" ]; then
 		l_status=0

@@ -2946,7 +2946,7 @@ test_get_zfs_list_reports_source_snapshot_record_cache_stage_failures() {
 		"$output" "msg=Failed to stage source snapshot record cache."
 }
 
-test_get_zfs_list_lazily_builds_per_dataset_snapshot_indexes() {
+test_get_zfs_list_uses_file_backed_snapshot_records_without_building_indexes() {
 	output=$(
 		(
 			source_root_file="$TEST_TMPDIR/get_zfs_lazy_source_root.records"
@@ -2998,9 +2998,9 @@ EOF
 		)
 	)
 
-	assertContains "Snapshot discovery should leave the source per-dataset index unset until a consumer needs it." \
+	assertContains "Snapshot discovery should leave the source per-dataset index unset after staging cache files." \
 		"$output" "source_ready_before=0"
-	assertContains "Snapshot discovery should leave the destination per-dataset index unset until a consumer needs it." \
+	assertContains "Snapshot discovery should leave the destination per-dataset index unset after staging cache files." \
 		"$output" "dest_ready_before=0"
 	assertContains "Snapshot discovery should cache newest-first source snapshots for the root dataset." \
 		"$output" "source_root=tank/src@snap2
@@ -3012,10 +3012,10 @@ tank/src@snap1"
 backup/dst@legacy1"
 	assertContains "Snapshot discovery should cache destination child snapshots separately." \
 		"$output" "dest_child=backup/dst/child@child1"
-	assertContains "The source per-dataset index should be built lazily on first lookup." \
-		"$output" "source_ready_after=1"
-	assertContains "The destination per-dataset index should be built lazily on first lookup." \
-		"$output" "dest_ready_after=1"
+	assertContains "File-backed source snapshot lookups should avoid building the heavy per-dataset index on the hot path." \
+		"$output" "source_ready_after=0"
+	assertContains "File-backed destination snapshot lookups should avoid building the heavy per-dataset index on the hot path." \
+		"$output" "dest_ready_after=0"
 }
 
 test_get_zfs_list_remote_target_batches_destination_discovery() {

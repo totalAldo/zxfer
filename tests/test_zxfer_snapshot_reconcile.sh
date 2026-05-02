@@ -1706,7 +1706,7 @@ EOF
 		1 "$g_dest_has_snapshots"
 }
 
-test_inspect_delete_snap_preserves_snapshot_index_state_in_current_shell() {
+test_inspect_delete_snap_uses_global_snapshot_records_without_building_index() {
 	output=$(
 		(
 			g_actual_dest="backup/dst"
@@ -1729,16 +1729,16 @@ test_inspect_delete_snap_preserves_snapshot_index_state_in_current_shell() {
 	)
 	status=$?
 
-	assertEquals "Delete planning should keep running when snapshot-record lookups now preserve current-shell index state." \
+	assertEquals "Delete planning should keep running with cache-backed snapshot-record lookups." \
 		0 "$status"
-	assertContains "Delete planning should preserve the snapshot-index temp root in current-shell state so trap cleanup can reap it later." \
-		"$output" "index_dir=</"
-	assertContains "Delete planning should build the snapshot-index temp root in the current shell." \
-		"$output" "index_dir_exists=yes"
-	assertContains "Delete planning should leave the source snapshot-index marked ready in current-shell state." \
-		"$output" "source_ready=1"
-	assertContains "Delete planning should leave the destination snapshot-index marked ready in current-shell state." \
-		"$output" "dest_ready=1"
+	assertContains "Delete planning should avoid building the heavy snapshot-index temp root on the hot path." \
+		"$output" "index_dir=<>"
+	assertContains "Delete planning should leave no snapshot-index directory to clean up when global records are sufficient." \
+		"$output" "index_dir_exists=no"
+	assertContains "Delete planning should leave the source snapshot-index unbuilt when direct record filtering is sufficient." \
+		"$output" "source_ready=0"
+	assertContains "Delete planning should leave the destination snapshot-index unbuilt when direct record filtering is sufficient." \
+		"$output" "dest_ready=0"
 }
 
 test_format_snapshot_creation_epoch_for_display_rejects_nonnumeric_input() {

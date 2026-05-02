@@ -1949,7 +1949,7 @@ EOF
 		"" "$(cat "$output_file")"
 }
 
-test_zxfer_get_snapshot_records_for_dataset_rebuilds_after_missing_record_object() {
+test_zxfer_get_snapshot_records_for_dataset_uses_global_records_after_missing_index_object() {
 	g_lzfs_list_hr_snap=$(printf '%s\n' \
 		"tank/src@snap1" \
 		"tank/src@snap2")
@@ -1958,22 +1958,24 @@ test_zxfer_get_snapshot_records_for_dataset_rebuilds_after_missing_record_object
 
 	zxfer_get_snapshot_records_for_dataset source "tank/src" >"$first_output_file"
 	first_dir=$g_zxfer_source_snapshot_record_index_dir
-	rm -f "$g_zxfer_source_snapshot_record_index_dir/records/1.records"
+	if [ -n "${g_zxfer_source_snapshot_record_index_dir:-}" ]; then
+		rm -f "$g_zxfer_source_snapshot_record_index_dir/records/1.records"
+	fi
 
 	zxfer_get_snapshot_records_for_dataset source "tank/src" >"$second_output_file"
 	first_output=$(cat "$first_output_file")
 	second_output=$(cat "$second_output_file")
 
-	assertEquals "Initial indexed source lookups should still return the expected records." \
+	assertEquals "Initial source lookups should still return the expected records without requiring an index build." \
 		"tank/src@snap2
 tank/src@snap1" "$first_output"
-	assertEquals "Missing record-object files should trigger a rebuild and still return the requested records." \
+	assertEquals "Missing record-object files should fall back to the in-memory source list and still return the requested records." \
 		"tank/src@snap2
 tank/src@snap1" "$second_output"
-	assertEquals "Rebuilt source indexes should still leave the side marked ready." \
-		1 "${g_zxfer_source_snapshot_record_index_ready:-0}"
-	assertNotEquals "Rebuilding after a missing record object should publish a fresh generation directory." \
-		"$first_dir" "$g_zxfer_source_snapshot_record_index_dir"
+	assertEquals "Source snapshot-record lookups should not build the heavy snapshot index automatically." \
+		0 "${g_zxfer_source_snapshot_record_index_ready:-0}"
+	assertEquals "Source snapshot-record lookups should not publish a snapshot-index directory on the hot path." \
+		"$first_dir" "${g_zxfer_source_snapshot_record_index_dir:-}"
 }
 
 test_zxfer_get_indexed_snapshot_records_for_dataset_clears_ready_state_when_record_object_read_fails() {
@@ -2174,13 +2176,18 @@ EOF
 			g_lzfs_list_hr_snap=$(printf '%s\n' \
 				"tank/src/early@snap1" \
 				"tank/src/late@snap1")
+			log_file="$TEST_TMPDIR/source_snapshot_record_cache_lookup.log"
 			zxfer_get_indexed_snapshot_records_for_dataset() {
 				return 1
 			}
 			zxfer_ensure_snapshot_record_index_for_side() {
+				printf 'unexpected index build\n' >>"$log_file"
 				return 1
 			}
 			zxfer_get_snapshot_records_for_dataset source "tank/src/late"
+			if [ -s "$log_file" ]; then
+				cat "$log_file"
+			fi
 		)
 	)
 
