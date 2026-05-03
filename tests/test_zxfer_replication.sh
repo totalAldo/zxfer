@@ -2948,6 +2948,39 @@ tank/src/child2"
 		"wait final sync" "$(cat "$log")"
 }
 
+test_copy_filesystems_shortcuts_clean_recursive_noop_before_iteration_staging() {
+	g_option_d_delete_destination_snapshots=1
+	g_option_R_recursive="tank/src"
+	g_initial_source="tank/src"
+	g_recursive_source_list=""
+	g_recursive_source_dataset_list=""
+	g_recursive_destination_extra_dataset_list=""
+	log="$TEST_TMPDIR/clean_recursive_noop_shortcut.log"
+	rm -f "$log"
+
+	(
+		COPY_FS_LOG="$log"
+		zxfer_build_replication_iteration_list() {
+			printf 'unexpected-build\n' >>"$COPY_FS_LOG"
+			return 1
+		}
+		zxfer_get_temp_file() {
+			printf 'unexpected-temp\n' >>"$COPY_FS_LOG"
+			return 1
+		}
+		zxfer_prepare_ssh_control_sockets_for_active_hosts() {
+			printf 'unexpected-ssh-setup\n' >>"$COPY_FS_LOG"
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait %s\n' "$1" >>"$COPY_FS_LOG"
+		}
+		zxfer_copy_filesystems
+	)
+
+	assertEquals "Clean recursive no-op runs should bypass iteration staging and deferred SSH socket setup." \
+		"wait final sync" "$(cat "$log")"
+}
+
 test_copy_filesystems_inspects_only_datasets_with_recursive_delete_deltas() {
 	g_option_d_delete_destination_snapshots=1
 	g_option_R_recursive="tank/src"
@@ -2984,6 +3017,44 @@ inspect 1 tank/src/child2
 copy tank/src/child2"
 	assertEquals "Recursive -d runs should inspect only datasets with source or destination snapshot deltas." \
 		"$expected" "$(cat "$log")"
+}
+
+test_copy_filesystems_defers_remote_control_socket_setup_until_work_exists() {
+	log="$TEST_TMPDIR/deferred_remote_socket_setup.log"
+	rm -f "$log"
+
+	(
+		COPY_FS_LOG="$log"
+		g_option_R_recursive="tank/src"
+		g_option_O_origin_host="origin.example"
+		g_initial_source="tank/src"
+		g_recursive_source_list="tank/src"
+		g_recursive_source_dataset_list="tank/src"
+		zxfer_prepare_ssh_control_sockets_for_active_hosts() {
+			printf 'prepare-ssh\n' >>"$COPY_FS_LOG"
+		}
+		zxfer_set_actual_dest() {
+			g_actual_dest=$1
+			printf 'set %s\n' "$1" >>"$COPY_FS_LOG"
+		}
+		zxfer_inspect_delete_snap() {
+			printf 'inspect %s %s\n' "$1" "$2" >>"$COPY_FS_LOG"
+		}
+		zxfer_copy_snapshots() {
+			printf 'copy %s\n' "$g_actual_dest" >>"$COPY_FS_LOG"
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait %s\n' "$1" >>"$COPY_FS_LOG"
+		}
+		zxfer_copy_filesystems
+	)
+
+	assertEquals "Remote SSH control sockets should be prepared only after the iteration list proves there is work." \
+		"prepare-ssh
+set tank/src
+inspect 0 tank/src
+copy tank/src
+wait final sync" "$(cat "$log")"
 }
 
 test_copy_snapshots_seeds_existing_destination_into_snapshot() {

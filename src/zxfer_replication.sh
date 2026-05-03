@@ -1030,10 +1030,24 @@ zxfer_copy_filesystems() {
 	if zxfer_property_pass_is_required; then
 		l_property_pass_required=1
 	fi
+	if [ "$l_property_pass_required" -eq 0 ] &&
+		[ -z "${g_recursive_source_list:-}" ] &&
+		{ [ "$g_option_d_delete_destination_snapshots" -ne 1 ] ||
+			[ -z "${g_recursive_destination_extra_dataset_list:-}" ]; }; then
+		zxfer_wait_for_zfs_send_jobs "final sync"
+		zxfer_echoV "End zxfer_copy_filesystems()"
+		return
+	fi
 	if ! zxfer_build_replication_iteration_list "$l_property_pass_required"; then
 		zxfer_throw_error "Failed to prepare replication dataset iteration list."
 	fi
 	l_iteration_list=$g_zxfer_replication_iteration_list_result
+	if [ -z "$l_iteration_list" ] && [ "$l_property_pass_required" -eq 0 ]; then
+		zxfer_wait_for_zfs_send_jobs "final sync"
+		zxfer_echoV "End zxfer_copy_filesystems()"
+		return
+	fi
+	zxfer_prepare_ssh_control_sockets_for_active_hosts
 	if ! zxfer_get_temp_file >/dev/null; then
 		zxfer_throw_error "Error creating temporary file."
 	fi

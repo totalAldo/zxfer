@@ -1511,6 +1511,40 @@ zxfer_remote_capability_host_matches_target_role() {
 	[ "$l_host_spec" = "$g_option_T_target_host" ]
 }
 
+# Purpose: Decide whether the clean recursive no-op proof can defer origin
+# parallel resolution.
+# Usage: Called while building the active remote capability scope. This mirrors
+# the proof eligibility checks in snapshot discovery because this module is
+# sourced earlier and cannot call that helper directly.
+zxfer_remote_capability_origin_can_defer_parallel_for_fast_noop_proof() {
+	[ "${g_option_O_origin_host:-}" != "" ] || return 1
+	[ "${g_option_T_target_host:-}" = "" ] || return 1
+	[ "${g_option_R_recursive:-}" != "" ] || return 1
+	[ "${g_option_s_make_snapshot:-0}" -eq 0 ] || return 1
+	[ "${g_option_m_migrate:-0}" -eq 0 ] || return 1
+	[ "${g_option_P_transfer_property:-0}" -eq 0 ] || return 1
+	[ -z "${g_option_o_override_property:-}" ] || return 1
+	[ "${g_option_U_skip_unsupported_properties:-0}" -eq 0 ] || return 1
+	[ "${g_option_e_restore_property_mode:-0}" -eq 0 ] || return 1
+	[ "${g_option_k_backup_property_mode:-0}" -eq 0 ] || return 1
+	[ -z "${g_option_g_grandfather_protection:-}" ] || return 1
+
+	return 0
+}
+
+# Purpose: Decide whether origin capability preloading should include parallel.
+# Usage: Called while building the active remote capability scope. Changed-
+# source discovery still honors `-j`, but the fast recursive no-op proof uses
+# one recursive source stream, so clean no-op startup can defer parallel until a
+# fallback path actually needs it.
+zxfer_remote_capability_origin_should_preload_parallel() {
+	[ "${g_option_j_jobs:-1}" -gt 1 ] || return 1
+	if zxfer_remote_capability_origin_can_defer_parallel_for_fast_noop_proof; then
+		return 1
+	fi
+	return 0
+}
+
 # Purpose: Return the remote capability requested tools for host in the form
 # expected by later helpers.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
@@ -1523,7 +1557,7 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 	zxfer_append_remote_capability_requested_tool zfs
 
 	if zxfer_remote_capability_host_matches_origin_role "$l_host_spec"; then
-		if [ "${g_option_j_jobs:-1}" -gt 1 ]; then
+		if zxfer_remote_capability_origin_should_preload_parallel; then
 			zxfer_append_remote_capability_requested_tool parallel
 		fi
 		if [ "${g_option_e_restore_property_mode:-0}" -eq 1 ]; then
@@ -1740,7 +1774,7 @@ zxfer_ensure_remote_capability_cache_dir() {
 # Purpose: Return the remote-capability cache directory path for one temporary
 # root.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before zxfer creates or validates the per-run remote-
+# socket management before zxfer creates or validates the per-user remote-
 # capability cache directory.
 zxfer_remote_capability_cache_dir_path_for_tmpdir() {
 	l_tmpdir=$1
@@ -1749,12 +1783,8 @@ zxfer_remote_capability_cache_dir_path_for_tmpdir() {
 	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
 		return 1
 	fi
-	if ! l_root_prefix=$(zxfer_get_remote_host_cache_root_prefix); then
-		return 1
-	fi
 
-	printf '%s/%s.remote-capabilities.%s.d\n' \
-		"$l_tmpdir" "$l_root_prefix" "$l_effective_uid"
+	printf '%s/zxfer.remote-capabilities.%s.d\n' "$l_tmpdir" "$l_effective_uid"
 }
 
 # Purpose: Manage remote capability cache path for the remote-host management
@@ -1918,7 +1948,25 @@ zxfer_is_remote_host_cache_root_path() {
 
 	case "$l_cache_basename" in
 	zxfer.*.s.[0-9]*.d | \
-		zxfer.*.remote-capabilities.[0-9]*.d)
+		zxfer.*.remote-capabilities.[0-9]*.d | \
+		zxfer.remote-capabilities.[0-9]*.d)
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# Purpose: Match the stable per-user remote-capability cache root.
+# Usage: Called during trap cleanup so short-lived run-owned SSH state is
+# removed while useful helper-discovery cache entries survive concurrent and
+# near-future zxfer invocations.
+zxfer_is_stable_remote_capability_cache_root_path() {
+	l_cache_dir=$1
+
+	[ -n "$l_cache_dir" ] || return 1
+	l_cache_basename=${l_cache_dir##*/}
+	case "$l_cache_basename" in
+	zxfer.remote-capabilities.[0-9]*.d)
 		return 0
 		;;
 	esac
@@ -2026,6 +2074,10 @@ zxfer_cleanup_remote_host_cache_root() {
 	l_cache_dir=$1
 
 	[ -n "$l_cache_dir" ] || return 0
+	if zxfer_is_stable_remote_capability_cache_root_path "$l_cache_dir"; then
+		zxfer_cleanup_empty_remote_host_cache_root "$l_cache_dir" >/dev/null 2>&1 || :
+		return 0
+	fi
 	if zxfer_remote_host_cache_cleanup_conflicts_with_path "$l_cache_dir"; then
 		zxfer_cleanup_empty_remote_host_cache_root "$l_cache_dir" >/dev/null 2>&1 || :
 		return 0
@@ -2061,6 +2113,50 @@ zxfer_cleanup_remote_host_cache_roots() {
 			zxfer_cleanup_remote_host_cache_root "$l_capability_cache_dir"
 		fi
 	fi
+}
+
+# Purpose: Prepare SSH control sockets only when replication work can use them.
+# Usage: Called after snapshot discovery has identified send/delete/property
+# work, avoiding an extra SSH master setup on clean no-op runs.
+zxfer_prepare_ssh_control_sockets_for_active_hosts() {
+	l_ssh_setup_start_ms=""
+
+	if [ "$g_option_O_origin_host" = "" ] && [ "$g_option_T_target_host" = "" ]; then
+		return
+	fi
+	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
+		return
+	fi
+
+	l_ssh_setup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	if [ -z "${g_cmd_ssh:-}" ]; then
+		if ! zxfer_ensure_local_ssh_command; then
+			g_zxfer_failure_class=dependency
+			zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
+		fi
+	fi
+	zxfer_refresh_ssh_control_socket_support_state
+
+	if [ "$g_option_O_origin_host" != "" ]; then
+		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
+			[ -n "${g_ssh_origin_control_socket:-}" ] ||
+				zxfer_setup_ssh_control_socket "$g_option_O_origin_host" "origin"
+		else
+			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for origin host."
+		fi
+	fi
+
+	if [ "$g_option_T_target_host" != "" ]; then
+		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
+			[ -n "${g_ssh_target_control_socket:-}" ] ||
+				zxfer_setup_ssh_control_socket "$g_option_T_target_host" "target"
+		else
+			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for target host."
+		fi
+	fi
+
+	zxfer_refresh_remote_zfs_commands
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_ssh_setup_ms "$l_ssh_setup_start_ms"
 }
 
 # Purpose: Wait for the for remote capability cache fill to reach the state
@@ -3719,11 +3815,11 @@ zxfer_refresh_remote_zfs_commands() {
 	fi
 }
 
-# Purpose: Prepare the remote host connections before the surrounding flow uses
+# Purpose: Prepare remote host capability state before the surrounding flow uses
 # it.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management once prerequisites are known but before live work depends
-# on the prepared state.
+# socket management once prerequisites are known. SSH control sockets are
+# opened later only when replication work exists.
 zxfer_prepare_remote_host_connections() {
 	l_ssh_setup_start_ms=""
 
@@ -3754,20 +3850,10 @@ zxfer_prepare_remote_host_connections() {
 	fi
 
 	if [ "$g_option_O_origin_host" != "" ]; then
-		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
-			zxfer_setup_ssh_control_socket "$g_option_O_origin_host" "origin"
-		else
-			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for origin host."
-		fi
 		zxfer_preload_remote_host_capabilities "$g_option_O_origin_host" source || :
 	fi
 
 	if [ "$g_option_T_target_host" != "" ]; then
-		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
-			zxfer_setup_ssh_control_socket "$g_option_T_target_host" "target"
-		else
-			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for target host."
-		fi
 		zxfer_preload_remote_host_capabilities "$g_option_T_target_host" destination || :
 	fi
 

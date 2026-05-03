@@ -101,23 +101,26 @@ matters especially when:
 - restore mode (`-e`) needs a remote `cat` on the origin, and remote backup
   writes for `-k` use `cat` on the target
 - `-j` uses explicit per-dataset source discovery on the executing origin host
-  whenever `jobs > 1`. Local-origin and remote-origin runs require a resolved
-  `parallel` helper on that host. zxfer intentionally validates only helper
-  existence through the secure-PATH model and assumes the operator or package
-  supplied an implementation compatible with the GNU Parallel-style options
-  used by the rendered pipeline. zxfer fails closed if the required helper is
-  missing, while incompatible helpers fail through source discovery instead of
-  silently falling back to the serial recursive listing. Source discovery uses
-  tracked background PID cleanup and staged stderr, while send/receive workers
-  run under the shared supervisor rather than bare wrapper-shell PID cleanup
+  in the changed-source/full discovery path whenever `jobs > 1`. The clean
+  recursive no-op proof uses one recursive name-only source stream and defers
+  `parallel` until that heavier path is needed. Local-origin and remote-origin
+  full discovery runs require a resolved `parallel` helper on that host. zxfer
+  intentionally validates only helper existence through the secure-PATH model
+  and assumes the operator or package supplied an implementation compatible
+  with the GNU Parallel-style options used by the rendered pipeline. zxfer fails
+  closed if the required helper is missing, while incompatible helpers fail
+  through source discovery instead of silently falling back to the serial
+  recursive listing. Source discovery uses tracked background PID cleanup and
+  staged stderr, while send/receive workers run under the shared supervisor
+  rather than bare wrapper-shell PID cleanup
 - custom `-Z` compression commands or default `zstd` helpers must be resolved
   per host instead of assuming one shared absolute path
 - the per-host remote-capability cache is keyed from the host spec, trusted
   dependency path, ssh transport policy, and the requested optional tool set;
   cache files store the full encoded identity and reads reject mismatches,
-  so repeated helper discovery inside one zxfer run can safely reuse matching
-  handshake results without sharing stale helper-path data across different run
-  shapes
+  so concurrent or near-future zxfer invocations by the same user can safely
+  reuse matching helper-discovery handshakes without sharing stale helper-path
+  data across different run shapes
 
 Current releases also coordinate shared ssh control sockets, per-process ssh
 leases, and remote capability-cache fills through one metadata-bearing

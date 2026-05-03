@@ -235,6 +235,11 @@ setUp() {
 	g_option_g_grandfather_protection=""
 	g_option_j_jobs=1
 	g_option_m_migrate=0
+	g_option_o_override_property=""
+	g_option_P_transfer_property=0
+	g_option_R_recursive=""
+	g_option_s_make_snapshot=0
+	g_option_U_skip_unsupported_properties=0
 	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
 	g_cmd_zfs="/sbin/zfs"
 	g_cmd_ssh="$FAKE_SSH_BIN"
@@ -1684,6 +1689,31 @@ test_zxfer_render_remote_capability_cache_identity_includes_requested_tool_set_f
 		"$target_identity" "parallel"
 	assertNotEquals "Capability-cache identities should change when the requested tool set differs by host role." \
 		"$origin_identity" "$target_identity"
+}
+
+test_zxfer_remote_capability_requested_tools_defer_parallel_for_fast_noop_scope() {
+	g_option_O_origin_host="origin.example"
+	g_option_T_target_host=""
+	g_option_R_recursive="tank/src"
+	g_option_j_jobs=4
+	g_option_s_make_snapshot=0
+	g_option_m_migrate=0
+	g_option_P_transfer_property=0
+	g_option_o_override_property=""
+	g_option_U_skip_unsupported_properties=0
+	g_option_e_restore_property_mode=0
+	g_option_k_backup_property_mode=0
+	g_option_g_grandfather_protection=""
+
+	host_tools=$(zxfer_get_remote_capability_requested_tools_for_host "origin.example")
+	parallel_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool "origin.example" parallel)
+
+	assertContains "Fast recursive no-op startup scopes should still preload zfs." \
+		"$host_tools" "zfs"
+	assertNotContains "Fast recursive no-op startup scopes should defer parallel because the no-op proof uses one source stream." \
+		"$host_tools" "parallel"
+	assertContains "On-demand parallel resolution should still request parallel explicitly." \
+		"$parallel_tools" "parallel"
 }
 
 test_zxfer_render_remote_capability_cache_identity_accepts_explicit_requested_tool_scope_for_host() {
@@ -5187,6 +5217,38 @@ test_zxfer_preload_remote_host_capabilities_delegates_to_ensure() {
 		"$(cat "$tools_file")" "zstd"
 }
 
+test_zxfer_preload_remote_host_capabilities_defers_parallel_for_fast_noop_scope() {
+	log="$TEST_TMPDIR/preload_remote_caps_fast_noop.log"
+	: >"$log"
+	tools_file="$TEST_TMPDIR/preload_remote_caps_fast_noop.tools"
+	g_option_O_origin_host="origin.example"
+	g_option_T_target_host=""
+	g_option_R_recursive="tank/src"
+	g_option_j_jobs=4
+	g_option_s_make_snapshot=0
+	g_option_m_migrate=0
+	g_option_P_transfer_property=0
+	g_option_o_override_property=""
+	g_option_U_skip_unsupported_properties=0
+	g_option_e_restore_property_mode=0
+	g_option_k_backup_property_mode=0
+	g_option_g_grandfather_protection=""
+
+	(
+		zxfer_ensure_remote_host_capabilities() {
+			printf 'ensure host=%s side=%s\n' \
+				"$1" "${2:-}" >>"$log"
+			printf '%s\n' "${3:-}" >"$tools_file"
+		}
+		zxfer_preload_remote_host_capabilities "origin.example" source
+	)
+
+	assertContains "Fast no-op capability preloading should still warm zfs for remote origin discovery." \
+		"$(cat "$tools_file")" "zfs"
+	assertNotContains "Fast no-op capability preloading should defer parallel because the no-op proof uses one source stream." \
+		"$(cat "$tools_file")" "parallel"
+}
+
 test_zxfer_preload_remote_host_capabilities_suppresses_failures_without_verbose() {
 	set +e
 	output=$(
@@ -6727,7 +6789,7 @@ test_prepare_remote_host_connections_resolves_ssh_on_demand() {
 		"$result" "ssh=$FAKE_SSH_BIN"
 	assertContains "Remote preparation should refresh control-socket capability after lazy ssh resolution." \
 		"$result" "control=1"
-	assertContains "Origin control-socket setup should still run after lazy ssh resolution." \
+	assertNotContains "Remote capability preparation should not open an SSH control socket before replication work exists." \
 		"$(cat "$log")" "setup origin.example pfexec origin"
 	assertContains "Origin capability preload should still run after lazy ssh resolution." \
 		"$(cat "$log")" "preload origin.example pfexec source"
@@ -7337,7 +7399,7 @@ test_zxfer_refresh_remote_zfs_commands_rejects_shell_quoted_host_specs() {
 		"$output" "Host spec (-O/-T) must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
 }
 
-test_prepare_remote_host_connections_sets_up_control_sockets_after_validation() {
+test_prepare_remote_host_connections_preloads_capabilities_without_opening_control_sockets() {
 	log="$TEST_TMPDIR/prepare_remote_hosts.log"
 	now_counter_file="$TEST_TMPDIR/prepare_remote_hosts.now.counter"
 	: >"$log"
@@ -7381,13 +7443,13 @@ test_prepare_remote_host_connections_sets_up_control_sockets_after_validation() 
 		)
 	)
 
-	assertContains "Origin control socket setup should happen during remote preparation." \
+	assertNotContains "Origin control socket setup should be deferred until replication work exists." \
 		"$(cat "$log")" "setup origin.example pfexec origin"
-	assertContains "Target control socket setup should happen during remote preparation." \
+	assertNotContains "Target control socket setup should be deferred until replication work exists." \
 		"$(cat "$log")" "setup target.example doas target"
-	assertContains "Origin capability discovery should be preloaded once sockets are ready." \
+	assertContains "Origin capability discovery should be preloaded during remote preparation." \
 		"$(cat "$log")" "preload origin.example pfexec source"
-	assertContains "Target capability discovery should be preloaded once sockets are ready." \
+	assertContains "Target capability discovery should be preloaded during remote preparation." \
 		"$(cat "$log")" "preload target.example doas destination"
 	assertContains "Origin zfs spec should refresh to the resolved origin helper path." \
 		"$result" "lzfs=/remote/origin/zfs"
@@ -7397,7 +7459,65 @@ test_prepare_remote_host_connections_sets_up_control_sockets_after_validation() 
 		"$result" "ssh_setup_ms=250"
 }
 
-test_prepare_remote_host_connections_logs_when_control_sockets_are_unavailable() {
+test_prepare_ssh_control_sockets_for_active_hosts_sets_up_control_sockets_after_validation() {
+	log="$TEST_TMPDIR/prepare_active_control_sockets.log"
+	now_counter_file="$TEST_TMPDIR/prepare_active_control_sockets.now.counter"
+	: >"$log"
+	printf '%s\n' 0 >"$now_counter_file"
+
+	result=$(
+		(
+			zxfer_ssh_supports_control_sockets() {
+				return 0
+			}
+			zxfer_setup_ssh_control_socket() {
+				printf 'setup %s %s\n' "$1" "$2" >>"$log"
+				if [ "$2" = "origin" ]; then
+					g_ssh_origin_control_socket="/tmp/origin.sock"
+				elif [ "$2" = "target" ]; then
+					g_ssh_target_control_socket="/tmp/target.sock"
+				fi
+			}
+			zxfer_profile_now_ms() {
+				idx=$(cat "$now_counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$now_counter_file"
+				if [ "$idx" = "1" ]; then
+					printf '%s\n' 2000
+				elif [ "$idx" = "2" ]; then
+					printf '%s\n' 2250
+				fi
+			}
+			g_option_O_origin_host="origin.example pfexec"
+			g_option_T_target_host="target.example doas"
+			g_option_V_very_verbose=1
+			g_cmd_zfs="/sbin/zfs"
+			g_origin_cmd_zfs="/remote/origin/zfs"
+			g_target_cmd_zfs="/remote/target/zfs"
+			g_ssh_supports_control_sockets=1
+			zxfer_prepare_ssh_control_sockets_for_active_hosts
+			zxfer_prepare_ssh_control_sockets_for_active_hosts
+			printf 'lzfs=%s\n' "$g_LZFS"
+			printf 'rzfs=%s\n' "$g_RZFS"
+			printf 'ssh_setup_ms=%s\n' "${g_zxfer_profile_ssh_setup_ms:-0}"
+		)
+	)
+
+	assertContains "Origin control socket setup should happen once replication work exists." \
+		"$(cat "$log")" "setup origin.example pfexec origin"
+	assertContains "Target control socket setup should happen once replication work exists." \
+		"$(cat "$log")" "setup target.example doas target"
+	assertEquals "Active control-socket preparation should not replace sockets that are already ready." \
+		"2" "$(wc -l <"$log" | tr -d '[:space:]')"
+	assertContains "Origin zfs spec should refresh after deferred socket setup." \
+		"$result" "lzfs=/remote/origin/zfs"
+	assertContains "Target zfs spec should refresh after deferred socket setup." \
+		"$result" "rzfs=/remote/target/zfs"
+	assertContains "Very-verbose deferred socket preparation should accumulate ssh setup timing." \
+		"$result" "ssh_setup_ms=250"
+}
+
+test_prepare_ssh_control_sockets_for_active_hosts_logs_when_control_sockets_are_unavailable() {
 	log="$TEST_TMPDIR/prepare_remote_hosts_no_mux.log"
 	: >"$log"
 
@@ -7421,20 +7541,17 @@ test_prepare_remote_host_connections_logs_when_control_sockets_are_unavailable()
 			g_origin_cmd_zfs="/remote/origin/zfs"
 			g_target_cmd_zfs="/remote/target/zfs"
 			g_ssh_supports_control_sockets=0
-			zxfer_prepare_remote_host_connections
+			zxfer_prepare_ssh_control_sockets_for_active_hosts
 			printf 'lzfs=%s\n' "$g_LZFS"
 			printf 'rzfs=%s\n' "$g_RZFS"
 		)
 	)
 
-	assertContains "Origin preparation should explain when ssh control sockets are unavailable." \
+	assertContains "Origin active socket preparation should explain when ssh control sockets are unavailable." \
 		"$output" "ssh client does not support control sockets; continuing without connection reuse for origin host."
-	assertContains "Target preparation should explain when ssh control sockets are unavailable." \
+	assertContains "Target active socket preparation should explain when ssh control sockets are unavailable." \
 		"$output" "ssh client does not support control sockets; continuing without connection reuse for target host."
-	assertContains "Origin capability discovery should still be preloaded without control sockets." \
-		"$(cat "$log")" "preload origin.example pfexec source"
-	assertContains "Target capability discovery should still be preloaded without control sockets." \
-		"$(cat "$log")" "preload target.example doas destination"
+	assertEquals "Deferred socket setup should not preload remote capabilities." "" "$(cat "$log")"
 	assertContains "Remote zfs specs should still refresh even without control socket support." \
 		"$output" "lzfs=/remote/origin/zfs"
 	assertContains "Remote zfs specs should still refresh target commands even without control socket support." \
@@ -8618,7 +8735,7 @@ test_zxfer_ensure_ssh_control_socket_cache_dir_creates_secure_directory() {
 		"700" "$(zxfer_get_path_mode_octal "$cache_dir")"
 }
 
-test_zxfer_remote_host_cache_dir_paths_are_run_unique() {
+test_zxfer_remote_host_cache_dir_paths_separate_run_owned_sockets_from_shared_capabilities() {
 	original_prefix=${g_zxfer_temp_prefix:-}
 	g_zxfer_temp_prefix="zxfer.run-one"
 	first_socket_dir=$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$TEST_TMPDIR")
@@ -8630,7 +8747,7 @@ test_zxfer_remote_host_cache_dir_paths_are_run_unique() {
 
 	assertNotEquals "ssh control-socket cache roots should differ across distinct run temp prefixes." \
 		"$first_socket_dir" "$second_socket_dir"
-	assertNotEquals "Remote capability cache roots should differ across distinct run temp prefixes." \
+	assertEquals "Remote capability cache roots should be shared across run temp prefixes so concurrent zxfer processes can reuse helper discovery." \
 		"$first_capability_dir" "$second_capability_dir"
 }
 
@@ -9095,7 +9212,7 @@ test_trap_exit_removes_temp_files_and_iteration_cache_dirs() {
 	assertFalse "zxfer_trap_exit should remove the property cache directory." "[ -d '$TEST_TMPDIR/property-cache' ]"
 	assertFalse "zxfer_trap_exit should remove the snapshot index directory." "[ -d '$TEST_TMPDIR/snapshot-index' ]"
 	assertFalse "zxfer_trap_exit should remove the current run ssh control-socket cache root even when it still contains entry state." "[ -d '$socket_cache_root' ]"
-	assertFalse "zxfer_trap_exit should remove the current run remote capability cache root even when it still contains cache files." "[ -d '$remote_capability_cache_root' ]"
+	assertTrue "zxfer_trap_exit should preserve the shared remote capability cache root when it still contains reusable cache files." "[ -d '$remote_capability_cache_root' ]"
 }
 
 test_trap_exit_preserves_remote_host_cache_roots_with_unsupported_entries() {
@@ -9134,7 +9251,7 @@ test_trap_exit_preserves_remote_host_cache_roots_with_unsupported_entries() {
 		0 "$status"
 	assertTrue "zxfer_trap_exit should preserve the current run ssh control-socket cache root when it contains an unsupported plain-file lease entry." \
 		"[ -d '$socket_cache_root' ]"
-	assertTrue "zxfer_trap_exit should preserve the current run remote capability cache root when it contains an unsupported pid-file lock layout." \
+	assertTrue "zxfer_trap_exit should preserve the shared remote capability cache root when it contains an unsupported pid-file lock layout." \
 		"[ -d '$remote_capability_cache_root' ]"
 }
 

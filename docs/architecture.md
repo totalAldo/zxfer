@@ -217,8 +217,8 @@ flowchart TD
     C --> D["Register zxfer_trap_exit() and run zxfer_init_globals()"]
     D --> E["Parse flags with zxfer_read_command_line_switches()"]
     E --> F["Validate combinations with zxfer_consistency_check()"]
-    F --> G["Resolve local and needed remote helper paths with zxfer_init_variables()"]
-    G --> H["Remote runtime helpers open control sockets or fill capability caches only as needed"]
+    F --> G["Preload remote capability cache state when -O or -T is configured"]
+    G --> H["Resolve local and needed remote helper paths with zxfer_init_variables()"]
     H --> I["Enter zxfer_run_zfs_mode_loop()"]
     I --> J["Start one pass in zxfer_run_zfs_mode()"]
     J --> K["Resolve source and destination, normalize paths, validate preconditions"]
@@ -336,13 +336,18 @@ sequenceDiagram
 
     Operator->>Launcher: run zxfer -v -O user@origin -R zroot backup/zroot -j8 -z
     Launcher->>Launcher: initialize local state and determine the needed remote helper scope
-    Launcher->>Origin: open or join the metadata-coordinated ssh control socket when a remote command first needs it
     Launcher->>Origin: resolve remote helper capabilities under a metadata-coordinated cache lock keyed by PATH, transport policy, and requested helper scope
     Launcher->>Launcher: reuse matching remote capability state for zfs, parallel, and compression/helper heads when needed
-    Launcher->>Origin: build the source dataset inventory with remote zfs list
-    Launcher->>Origin: fan out per-dataset snapshot listing via the resolved origin-host parallel helper
     Launcher->>Local: list destination datasets and snapshots
-    Launcher->>Launcher: build the iteration list and allow up to 8 background send or receive jobs
+    Launcher->>Origin: for eligible no-snapshot recursive pulls, list source snapshot names with serial or -j parallel discovery
+    alt source and destination names match after excludes
+        Launcher->>Launcher: return clean no-op before creation-order discovery
+    else names differ or fast proof is not eligible
+        Launcher->>Origin: build the source dataset inventory with remote zfs list
+        Launcher->>Origin: fan out per-dataset snapshot listing via the resolved origin-host parallel helper
+    end
+    Launcher->>Launcher: build the iteration list; clean no-op runs return before SSH control-socket setup
+    Launcher->>Origin: open or join the metadata-coordinated ssh control socket only when send/delete/property work exists
     loop queue datasets while job slots remain and no destination ancestor or descendant conflicts remain
         Launcher->>Origin: start remote zfs send ... | remote compression helper
         Origin-->>Launcher: compressed replication stream over ssh

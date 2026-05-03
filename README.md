@@ -170,7 +170,10 @@ ssh `.lock` paths, ssh `leases/lease.*`, remote capability `<cache>.lock`, and
 validates and reaps stale or corrupt owners before reuse, checks release
 operations instead of silently suppressing failures, and warns during trap
 cleanup if a registered owned lock or lease cannot be released while
-preserving the original zxfer exit status. Pre-metadata cache artifacts from
+preserving the original zxfer exit status. Remote capability cache entries are
+short-lived and identity-checked, and can be reused by concurrent invocations
+from the same user when the host spec, secure PATH, ssh policy, and requested
+helper set match. Pre-metadata cache artifacts from
 older releases are no longer supported: if a reused cache root still contains
 plain ssh `leases/lease.*` files or pid-only `.lock` directories, remove the
 stale entry or cache root before rerunning zxfer.

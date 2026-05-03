@@ -51,6 +51,70 @@ disposable guest is available. Direct host runs remain human-only.
 - Remote operating-system detection now warms the full active host capability
   scope, so `-O -j -z` startup does not probe once for `zfs` and then probe
   again for the immediately required `parallel` and compression helpers.
+- The launcher now preloads remote helper capabilities before runtime helper
+  resolution, but SSH control-socket masters are deferred until snapshot
+  discovery proves there is replication work. Clean recursive no-op runs no
+  longer pay for opening, checking, and closing an SSH master that would only
+  carry a single source snapshot-list command.
+- Remote helper capability cache files now live in a stable per-user temp-root
+  directory instead of a run-unique directory. Concurrent zxfer processes with
+  the same host, secure PATH, SSH policy, and requested helper set can reuse the
+  same short-lived capability handshake instead of each probing `uname`,
+  `zfs`, `parallel`, and compression helpers separately.
+- Remote source snapshot-list metadata now uses the same configured compressor
+  as send/receive streams instead of silently strengthening the default from
+  `zstd -3` to `zstd -9`. This avoids an unmeasured CPU-heavy metadata path on
+  clean no-op runs while still honoring operator-supplied `-Z` choices.
+- Destination snapshot normalization now streams prefix rewriting directly into
+  `sort` while preserving separate awk and sort failure detection, avoiding one
+  full intermediate destination snapshot-list write on large no-op trees.
+- Local destination snapshot discovery now stays on unsorted `zfs list -o name`
+  output and uses zxfer's streamed prefix-rewrite plus external `sort`. This
+  matches upstream's lower-cost local ZFS query shape and avoids pushing a
+  potentially expensive name sort into local ZFS during highly concurrent
+  no-op runs. The remote-target batch keeps the same canonical local sort after
+  its one-round-trip transport so diff ordering stays identical.
+- Source snapshot discovery now creates a sorted sidecar inside the existing
+  background source-list job. The raw creation-order file remains available for
+  later send ordering, but recursive diff planning no longer waits to start the
+  source sort only after destination discovery has completed.
+- Recursive delta planning now checks for exact sorted source/destination
+  equality with `cmp -s` before running the heavier split-diff path. Exact
+  no-op runs skip the `comm -3` splitter and its temporary combined-delta file.
+- Exclude patterns are now applied to sorted snapshot records before recursive
+  delta comparison. Runs such as `-x replica` can now still hit the exact no-op
+  `cmp -s` shortcut when the only source/destination differences are excluded
+  datasets, instead of paying for full diff splitting and later filtering.
+- The source snapshot-list background job now streams through `tee | sort` so
+  the raw creation-order capture and sorted sidecar are produced in one pass.
+  That removes the previous second read of the full source snapshot file after
+  source listing completed, while preserving source, tee, and sort exit-status
+  checks.
+- Recursive replication now short-circuits clean no-op copy orchestration before
+  building the per-dataset iteration list, allocating post-seed staging files,
+  refreshing property prefetch state, or preparing deferred SSH control sockets.
+- Recursive source no-op discovery now has a name-only proof path for `-O`
+  with a local destination and no property/migration work. Serial proof uses
+  one recursive name-only ZFS query even when `-j` is configured. The proof
+  intentionally avoids source-side GNU `parallel` fanout because highly
+  concurrent wrapper scripts can multiply per-dataset `zfs list` startup cost
+  before zxfer knows there is work to transfer. Changed-source fallback still
+  honors `-j` for the full creation-order discovery path.
+- Fast recursive no-op startup now defers remote `parallel` capability probing
+  when the no-op proof is eligible. The active host preload still warms `zfs`
+  and compression helpers, while parallel is resolved lazily only if the proof
+  misses and full source discovery actually needs fanout.
+- Fast recursive destination no-op discovery keeps the cheap unsorted
+  destination snapshot query and streams prefix/exclude normalization directly
+  into the same `LC_ALL=C sort` order used by the source proof. A trial
+  `zfs list -s name` shape was rejected because ZFS name ordering is not a
+  byte-for-byte substitute for the existing `cmp`/`comm` order and can force
+  clean no-op runs to fall back into full discovery.
+- The fast recursive no-op proof now compares source and destination sorted
+  snapshot-name streams through private FIFOs. Exact no-op runs no longer write
+  both final sorted lists to local temp files and then read them again for
+  `cmp`; mismatch and compare-failure paths terminate both producers and fall
+  back to full discovery or fail closed as before.
 
 ## Priority Roadmap
 
@@ -1280,12 +1344,13 @@ Measure:
 
 ## Other Candidate Opportunities
 
-- Tune serial versus GNU `parallel` source snapshot discovery. `-j` currently
-  forces the parallel listing shape, which can lose on small trees because
-  `parallel` startup and per-dataset command setup dominate. Avoid a remote
-  dataset-count prepass, but consider a cheap local threshold, a user-visible
+- Tune serial versus GNU `parallel` source snapshot discovery for changed-source
+  fallback. Clean no-op proof now always uses one recursive name-only list and
+  defers `parallel`; the heavier creation-order path still honors `-j`. Fanout
+  can lose on small remote trees because `parallel` startup and per-dataset
+  command setup dominate, so consider a cheap local threshold, a user-visible
   tuning knob, or reuse of already-needed dataset inventory to pick the cheaper
-  path.
+  path after the proof misses.
 - Replace the destination existence cache's shell-string rewrite path with a
   generation table or file-backed map. Rewriting a newline string on every
   create or live update scales poorly in runs with many destination datasets.

@@ -2738,6 +2738,7 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 	g_origin_cmd_zfs="/opt/openzfs/bin/zfs"
 	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
 	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-T0' '-9'"
+	g_cmd_compress="zstd -T0 -9"
 	g_initial_source="tank/src"
 	g_option_j_jobs=8
 	g_cmd_parallel="$FAKE_PARALLEL_BIN"
@@ -3456,6 +3457,7 @@ test_read_command_line_switches_skips_control_socket_when_ssh_lacks_support() {
 test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	g_option_j_jobs=4
 	g_option_z_compress=1
+	g_cmd_compress="zstd -9"
 	g_cmd_parallel="$FAKE_PARALLEL_BIN"
 	g_origin_parallel_cmd="/opt/bin/parallel"
 	g_cmd_zfs="/usr/sbin/zfs"
@@ -3556,6 +3558,7 @@ EOF
 
 	g_option_j_jobs=2
 	g_option_z_compress=1
+	g_cmd_compress="zstd -9"
 	g_cmd_parallel="$fake_parallel"
 	g_origin_parallel_cmd="$fake_parallel"
 	g_cmd_zfs="$fake_remote_zfs"
@@ -3687,6 +3690,7 @@ EOF
 
 	g_option_j_jobs=4
 	g_option_z_compress=1
+	g_cmd_compress="zstd -9"
 	g_cmd_parallel="$FAKE_PARALLEL_BIN"
 	g_origin_parallel_cmd="$FAKE_PARALLEL_BIN"
 	g_cmd_zfs="$fake_remote_zfs"

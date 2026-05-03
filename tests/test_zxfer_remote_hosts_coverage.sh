@@ -1079,8 +1079,8 @@ test_zxfer_remote_capability_cache_helper_failures_cover_current_shell_direct() 
 		"$cache_key_output" "identity render failed"
 	assertEquals "Remote capability cache-dir path derivation should fail closed when the effective uid lookup fails in the current shell." \
 		1 "$path_uid_status"
-	assertEquals "Remote capability cache-dir path derivation should fail closed when the remote-host cache root prefix cannot be derived in the current shell." \
-		1 "$path_prefix_status"
+	assertEquals "Remote capability cache-dir path derivation should no longer depend on the run-unique remote-host cache root prefix." \
+		0 "$path_prefix_status"
 	assertEquals "Remote capability cache-dir setup should fail closed when cache-dir path derivation fails in the current shell." \
 		1 "$ensure_path_status"
 	assertEquals "Remote capability cache-dir setup should fail closed when an existing cache-dir owner lookup fails in the current shell." \
