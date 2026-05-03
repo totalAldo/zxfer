@@ -4,9 +4,10 @@ This file tracks performance opportunities for the current branch after a
 static comparison with `upstream-compat-final`. That upstream branch is faster
 because it does less work overall: remote setup is simpler, temp-file handling
 is lighter, background jobs are direct, and it does not perform the same live
-destination rechecks or cache integrity checks. It also uses mostly name-only
-snapshot discovery, but this document no longer treats that difference as a
-standalone optimization target without measurements.
+destination rechecks or cache integrity checks. Earlier current-branch builds
+also carried GUID-bearing whole-tree snapshot records through initial
+discovery; the active implementation now restores name-only initial discovery
+and leaves GUID identity checks to the existing per-dataset reconcile path.
 
 The optimization goal is to recover throughput and no-op speed without
 reintroducing the older safety and injection risks. Items below are candidates,
@@ -21,11 +22,10 @@ disposable guest is available. Direct host runs remain human-only.
 ## Baseline Differences
 
 - `upstream-compat-final` lists snapshots by `name` for initial source and
-  destination inventory. The current branch frequently carries `name,guid`
-  records through discovery, sort, diff, cache, and validation paths. This is a
-  branch difference worth measuring, but it is not currently treated as a
-  concrete optimization target because the extra GUID column alone is unlikely
-  to explain a large speed gap without workload-specific evidence.
+  destination inventory. The current branch has been adjusted back to that
+  initial discovery shape for no-op speed; per-dataset send/delete reconcile
+  still fetches `name,guid` records lazily when common snapshot identity is
+  needed before mutation.
 - `upstream-compat-final` performs fewer destination probes. The current branch
   rechecks live destination state before receive planning and full-send seeding
   so concurrent destination changes fail closed.
@@ -39,15 +39,18 @@ disposable guest is available. Direct host runs remain human-only.
   current branch normalizes machine and human property values, caches per
   dataset, and preserves newline-bearing property values.
 
-## Not Current Optimization Targets
+## Recently Applied Optimizations
 
-`zfs list -o name,guid` versus `zfs list -o name` should not be assumed to be a
-meaningful optimization by itself. GUID-bearing snapshot records are important
-for identity checks, and the incremental cost of the extra column is likely
-small compared with extra `zfs` invocations, SSH setup, temp/cache fanout,
-property reads, live destination rechecks, and cleanup bookkeeping. Revisit this
-only if profiling shows GUID payload size, sort input width, or remote metadata
-bytes are material on a real workload.
+- Initial recursive source and destination snapshot discovery now uses
+  `zfs list -o name` again. GUID-bearing `name,guid` records remain in the
+  per-dataset identity paths that run before send/delete decisions, so true
+  no-op runs avoid whole-tree GUID payloads without weakening the mutation path.
+- Recursive snapshot delta planning now uses one file-backed `comm -3` pass to
+  split source-missing and destination-extra records. This removes two large
+  shell command substitutions and one full sorted-list scan from no-op planning.
+- Remote operating-system detection now warms the full active host capability
+  scope, so `-O -j -z` startup does not probe once for `zfs` and then probe
+  again for the immediately required `parallel` and compression helpers.
 
 ## Priority Roadmap
 

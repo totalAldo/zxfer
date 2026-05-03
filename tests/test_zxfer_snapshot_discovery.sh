@@ -565,7 +565,7 @@ test_build_source_snapshot_list_cmd_fails_closed_when_local_parallel_is_unavaila
 	assertContains "Local failure should explain that parallel was not found." \
 		"$result" "not found in PATH on the local host"
 	assertNotContains "Local -j failures should not silently render the serial source snapshot listing." \
-		"$result" "'$g_LZFS' 'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'"
+		"$result" "'$g_LZFS' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'"
 }
 
 test_build_source_snapshot_list_cmd_uses_serial_local_discovery_when_parallel_jobs_are_disabled() {
@@ -575,7 +575,7 @@ test_build_source_snapshot_list_cmd_uses_serial_local_discovery_when_parallel_jo
 	result=$(zxfer_build_source_snapshot_list_cmd)
 
 	assertEquals "Source snapshot discovery should use the direct serial listing command when parallel jobs are disabled." \
-		"'$g_LZFS' 'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'" "$result"
+		"'$g_LZFS' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'" "$result"
 	assertEquals "Source snapshot discovery should leave the parallel marker cleared when -j is disabled." \
 		0 "$g_source_snapshot_list_uses_parallel"
 }
@@ -614,7 +614,7 @@ test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 	assertContains "Local -j discovery should use parallel with the requested job count." \
 		"$result" "'$g_cmd_parallel' -j 2 --line-buffer"
 	assertContains "Local -j discovery should preserve the per-dataset snapshot runner." \
-		"$result" "'$g_LZFS' 'list' '-H' '-o' 'name,guid' '-s' 'creation' '-d' '1' '-t' 'snapshot' '{}'"
+		"$result" "'$g_LZFS' 'list' '-H' '-o' 'name' '-s' 'creation' '-d' '1' '-t' 'snapshot' '{}'"
 	assertNotContains "Local -j discovery should not inline a prefetched dataset list." \
 		"$result" "'printf'"
 }
@@ -813,7 +813,7 @@ test_build_source_snapshot_list_cmd_preserves_remote_parallel_builder_statuses()
 					return 0
 				fi
 				if [ "$1" = "/remote/bin/zfs" ] && [ "$3" = "-H" ]; then
-					printf '%s\n' "/remote/bin/zfs list -H -o name,guid -s creation -d 1 -t snapshot {}"
+					printf '%s\n' "/remote/bin/zfs list -H -o name -s creation -d 1 -t snapshot {}"
 					return 0
 				fi
 				if [ "$1" = "/remote/bin/zfs" ] && [ "$3" = "-Hr" ]; then
@@ -1151,7 +1151,7 @@ test_write_source_snapshot_list_to_file_skips_execution_in_dry_run() {
 	assertNotContains "Dry-run source snapshot discovery should not enter parallel command planning." \
 		"$(cat "$log")" "build-source-command-called"
 	assertContains "Dry-run source snapshot discovery should render the skipped command." \
-		"$(cat "$log")" "'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' 'tank/src'"
+		"$(cat "$log")" "'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' 'tank/src'"
 	assertContains "Dry-run source snapshot discovery should leave the background PID unset." \
 		"$output" "pid="
 	assertContains "Dry-run source snapshot discovery should create the snapshot tempfile placeholder." \
@@ -1294,6 +1294,147 @@ test_diff_snapshot_lists_rejects_unknown_mode() {
 	assertEquals "Unknown diff modes should abort." 1 "$status"
 	assertContains "Unknown diff modes should include the requested mode." \
 		"$output" "Unknown snapshot diff mode: unknown_mode"
+}
+
+test_write_snapshot_delta_files_splits_both_diff_directions() {
+	source_file="$TEST_TMPDIR/source_delta_split.txt"
+	dest_file="$TEST_TMPDIR/dest_delta_split.txt"
+	missing_file="$TEST_TMPDIR/source_delta_missing.txt"
+	extra_file="$TEST_TMPDIR/destination_delta_extra.txt"
+	cat <<'EOF' >"$source_file"
+tank/src@same	111
+tank/src@source-only	222
+EOF
+	cat <<'EOF' >"$dest_file"
+tank/src@dest-only	333
+tank/src@same	999
+EOF
+	sort "$source_file" -o "$source_file"
+	sort "$dest_file" -o "$dest_file"
+
+	zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file"
+
+	assertEquals "Single-pass recursive diff should preserve source-only and GUID-divergent source records." \
+		"tank/src@same	111
+tank/src@source-only	222" "$(cat "$missing_file")"
+	assertEquals "Single-pass recursive diff should strip only the comm prefix from destination-only records." \
+		"tank/src@dest-only	333
+tank/src@same	999" "$(cat "$extra_file")"
+}
+
+test_write_snapshot_delta_files_preserves_tempfile_failures() {
+	source_file="$TEST_TMPDIR/source_delta_tempfail.txt"
+	dest_file="$TEST_TMPDIR/dest_delta_tempfail.txt"
+	missing_file="$TEST_TMPDIR/source_delta_tempfail_missing.txt"
+	extra_file="$TEST_TMPDIR/destination_delta_tempfail_extra.txt"
+	: >"$source_file"
+	: >"$dest_file"
+
+	set +e
+	output=$(
+		(
+			zxfer_get_temp_file() {
+				return 12
+			}
+			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file"
+		)
+	)
+	status=$?
+
+	assertEquals "Single-pass recursive diff should preserve combined-delta tempfile allocation failures." \
+		12 "$status"
+	assertEquals "Single-pass recursive diff tempfile failures should not emit stdout noise." \
+		"" "$output"
+}
+
+test_write_snapshot_delta_files_preserves_source_stage_failures() {
+	source_file="$TEST_TMPDIR/source_delta_source_stage.txt"
+	dest_file="$TEST_TMPDIR/dest_delta_source_stage.txt"
+	missing_file="$TEST_TMPDIR/source_delta_source_stage_missing.txt"
+	extra_file="$TEST_TMPDIR/destination_delta_source_stage_extra.txt"
+	: >"$source_file"
+	: >"$dest_file"
+
+	set +e
+	output=$(
+		(
+			zxfer_write_runtime_artifact_file() {
+				return 13
+			}
+			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file"
+		)
+	)
+	status=$?
+
+	assertEquals "Single-pass recursive diff should preserve source-delta staging failures." \
+		13 "$status"
+	assertEquals "Source-delta staging failures should not emit stdout noise." \
+		"" "$output"
+}
+
+test_write_snapshot_delta_files_preserves_destination_stage_failures() {
+	source_file="$TEST_TMPDIR/source_delta_destination_stage.txt"
+	dest_file="$TEST_TMPDIR/dest_delta_destination_stage.txt"
+	missing_file="$TEST_TMPDIR/source_delta_destination_stage_missing.txt"
+	extra_file="$TEST_TMPDIR/destination_delta_destination_stage_extra.txt"
+	: >"$source_file"
+	: >"$dest_file"
+
+	set +e
+	output=$(
+		(
+			write_call_count=0
+			zxfer_write_runtime_artifact_file() {
+				write_call_count=$((write_call_count + 1))
+				if [ "$write_call_count" -eq 2 ]; then
+					return 14
+				fi
+				: >"$1"
+			}
+			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file"
+		)
+	)
+	status=$?
+
+	assertEquals "Single-pass recursive diff should preserve destination-delta staging failures." \
+		14 "$status"
+	assertEquals "Destination-delta staging failures should not emit stdout noise." \
+		"" "$output"
+}
+
+test_write_snapshot_delta_files_preserves_splitter_failures() {
+	source_file="$TEST_TMPDIR/source_delta_splitter_fail.txt"
+	dest_file="$TEST_TMPDIR/dest_delta_splitter_fail.txt"
+	missing_file="$TEST_TMPDIR/source_delta_splitter_fail_missing.txt"
+	extra_file="$TEST_TMPDIR/destination_delta_splitter_fail_extra.txt"
+	fake_awk="$TEST_TMPDIR/delta_splitter_awk_fail.sh"
+	printf '%s\n' "tank/src@source-only" >"$source_file"
+	: >"$dest_file"
+	cat >"$fake_awk" <<'EOF'
+#!/bin/sh
+printf '%s\n' "awk failed" >&2
+exit 15
+EOF
+	chmod +x "$fake_awk"
+
+	set +e
+	output=$(
+		(
+			zxfer_get_temp_file() {
+				g_zxfer_temp_file_result="$TEST_TMPDIR/delta_splitter_combined.tmp"
+				: >"$g_zxfer_temp_file_result"
+				printf '%s\n' "$TEST_TMPDIR/stdout-only-delta-splitter.tmp"
+			}
+			g_cmd_awk="$fake_awk"
+			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file"
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Single-pass recursive diff should preserve splitter failures." \
+		15 "$status"
+	assertContains "Splitter failures should preserve awk diagnostics." \
+		"$output" "awk failed"
 }
 
 test_reverse_numbered_line_stream_preserves_full_payload_for_seven_digit_line_numbers() {
@@ -2165,11 +2306,11 @@ test_set_g_recursive_source_list_reports_recursive_snapshot_diff_failures() {
 	set +e
 	output=$(
 		(
-			zxfer_diff_snapshot_lists() {
-				if [ "$3" = "source_minus_destination" ]; then
+			comm() {
+				if [ "$1" = "-3" ]; then
 					return 6
 				fi
-				return 0
+				command comm "$@"
 			}
 
 			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
@@ -2180,7 +2321,7 @@ test_set_g_recursive_source_list_reports_recursive_snapshot_diff_failures() {
 	assertEquals "Recursive delta planning should fail closed when the source-minus-destination diff fails." \
 		6 "$status"
 	assertContains "Recursive delta planning should preserve a specific transfer-planning diff error." \
-		"$output" "Failed to diff source and destination snapshots for recursive transfer planning."
+		"$output" "Failed to diff source and destination snapshots for recursive delta planning."
 }
 
 test_set_g_recursive_source_list_reports_recursive_source_dataset_transfer_awk_failures() {
@@ -3098,7 +3239,7 @@ test_get_zfs_list_remote_target_batches_destination_discovery() {
 			SSH_LOG="$ssh_log"
 			g_option_T_target_host="target.example"
 			zxfer_write_source_snapshot_list_to_file() {
-				printf '%s\t%s\n' "tank/src@snapA" "guidA" >"$1"
+				printf '%s\n' "tank/src@snapA" >"$1"
 				: >"$2"
 				g_source_snapshot_list_pid=""
 			}
@@ -3119,7 +3260,7 @@ test_get_zfs_list_remote_target_batches_destination_discovery() {
 				printf 'BEGIN\tpool_stderr\n'
 				printf 'END\tpool_stderr\n'
 				printf 'BEGIN\tsnapshot_stdout\n'
-				printf '%s\t%s\n' "backup/dst/src@snapA" "guidA"
+				printf '%s\n' "backup/dst/src@snapA"
 				printf 'END\tsnapshot_stdout\n'
 				printf 'BEGIN\tsnapshot_stderr\n'
 				printf 'END\tsnapshot_stderr\n'
@@ -3147,7 +3288,7 @@ test_get_zfs_list_remote_target_batches_destination_discovery() {
 	assertContains "Remote destination discovery should render dataset inventory in the batch script." \
 		"$(cat "$ssh_log")" "filesystem,volume"
 	assertContains "Remote destination discovery should render snapshot listing in the batch script." \
-		"$(cat "$ssh_log")" "name,guid"
+		"$(cat "$ssh_log")" "list -Hr -o name -t snapshot"
 	assertNotContains "Remote destination discovery should not fall back to separate destination zfs helper calls." \
 		"$(cat "$ssh_log")" "unexpected-destination-zfs"
 	assertContains "Remote destination discovery should publish the recursive destination inventory." \
@@ -3158,9 +3299,9 @@ backup/dst/src"
 	assertContains "Remote destination discovery should seed the destination snapshot dataset existence cache." \
 		"$output" "snapshot_dataset_cache=1"
 	assertContains "Remote destination discovery should preserve the raw destination snapshot cache." \
-		"$output" "raw=backup/dst/src@snapA	guidA"
+		"$output" "raw=backup/dst/src@snapA"
 	assertContains "Remote destination discovery should normalize destination snapshot paths for source-side diffing." \
-		"$output" "normalized=tank/src@snapA	guidA"
+		"$output" "normalized=tank/src@snapA"
 }
 
 test_build_remote_destination_discovery_batch_script_streams_snapshot_stdout_directly() {
@@ -3176,8 +3317,8 @@ case "$*" in
 	printf '%s\n' "backup/dst/src"
 	printf '%s\n' "backup/dst/other"
 	;;
-"list -Hr -o name,guid -t snapshot backup/dst/src")
-	printf '%s\t%s\n' "backup/dst/src@snapA" "guidA"
+"list -Hr -o name -t snapshot backup/dst/src")
+	printf '%s\n' "backup/dst/src@snapA"
 	;;
 *)
 	printf 'unexpected zfs args: %s\n' "$*" >&2
@@ -3203,7 +3344,7 @@ EOF
 	assertContains "Remote batch should stream staged section bodies instead of expanding payload variables." \
 		"$script" "cat \"\$l_section_file\""
 	assertContains "Remote batch should stream snapshot stdout directly from zfs." \
-		"$script" "\"\$l_zfs_cmd\" list -Hr -o name,guid -t snapshot \"\$l_destination_snapshot_dataset\" 2>\"\$l_snapshot_stderr_file\""
+		"$script" "\"\$l_zfs_cmd\" list -Hr -o name -t snapshot \"\$l_destination_snapshot_dataset\" 2>\"\$l_snapshot_stderr_file\""
 	assertContains "Remote batch should clean target-side temp files on shell exit." \
 		"$script" "trap 'zxfer_cleanup_destination_discovery_batch' 0"
 	assertContains "Remote batch should use an exact fixed-string scan for the destination snapshot dataset." \
@@ -3221,7 +3362,7 @@ EOF
 	assertContains "Generated remote batch should stream destination inventory rows." \
 		"$output" "backup/dst/src"
 	assertContains "Generated remote batch should stream destination snapshot rows." \
-		"$output" "backup/dst/src@snapA	guidA"
+		"$output" "backup/dst/src@snapA"
 	assertContains "Generated remote batch should report that snapshot listing ran." \
 		"$output" "$(printf 'STATUS\tsnapshot_ran\t1')"
 	assertContains "Generated remote batch should report snapshot status after streaming stdout." \
@@ -4141,7 +4282,7 @@ test_get_zfs_list_local_destination_discovery_does_not_use_remote_batch() {
 	assertContains "Local destination discovery should keep using the direct recursive dataset inventory command." \
 		"$(cat "$zfs_log")" "list -t filesystem,volume -Hr -o name backup/dst"
 	assertContains "Local destination discovery should keep using the direct destination snapshot command." \
-		"$(cat "$zfs_log")" "list -Hr -o name,guid -t snapshot backup/dst/src"
+		"$(cat "$zfs_log")" "list -Hr -o name -t snapshot backup/dst/src"
 	assertContains "Local destination discovery should still publish the recursive destination inventory." \
 		"$output" "dest=backup/dst
 backup/dst/src"
@@ -6074,11 +6215,11 @@ test_set_g_recursive_source_list_reports_recursive_delete_diff_failures() {
 	set +e
 	output=$(
 		(
-			zxfer_diff_snapshot_lists() {
-				if [ "$3" = "destination_minus_source" ]; then
+			comm() {
+				if [ "$1" = "-3" ]; then
 					return 7
 				fi
-				return 0
+				command comm "$@"
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
@@ -6092,7 +6233,7 @@ test_set_g_recursive_source_list_reports_recursive_delete_diff_failures() {
 	assertEquals "Recursive delta planning should fail closed when the destination-minus-source diff fails." \
 		1 "$status"
 	assertContains "Recursive delta planning should report the recursive delete diff failure context." \
-		"$output" "Failed to diff destination and source snapshots for recursive delete planning."
+		"$output" "Failed to diff source and destination snapshots for recursive delta planning."
 }
 
 test_set_g_recursive_source_list_reports_recursive_destination_exclude_failures() {

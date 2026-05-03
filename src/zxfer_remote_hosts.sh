@@ -2994,7 +2994,9 @@ zxfer_get_remote_host_operating_system_direct() {
 zxfer_get_remote_host_operating_system() {
 	l_host_spec=$1
 	l_profile_side=${2:-}
-	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host "$l_host_spec"); then
+		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+	fi
 
 	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
 		"$l_host_spec" "$l_profile_side" "$l_requested_tools"); then

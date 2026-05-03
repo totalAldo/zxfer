@@ -5327,6 +5327,37 @@ test_zxfer_get_remote_host_operating_system_requests_minimal_capabilities() {
 		"$(cat "$log")" "parallel"
 }
 
+test_zxfer_get_remote_host_operating_system_reuses_active_host_capability_scope() {
+	log="$TEST_TMPDIR/remote_os_active_scope.log"
+	g_option_O_origin_host="origin.example"
+	g_option_j_jobs=4
+	g_option_z_compress=1
+	g_cmd_compress="zstd -9"
+
+	output=$(
+		(
+			LOG_PATH="$log"
+			zxfer_ensure_remote_host_capabilities() {
+				printf '%s\n' "${3:-}" >"$LOG_PATH"
+				fake_remote_capability_response
+			}
+			zxfer_get_remote_host_operating_system "origin.example" source
+		)
+	)
+	status=$?
+
+	assertEquals "Remote OS lookups should still succeed through the full active-host capability handshake." \
+		0 "$status"
+	assertEquals "Remote OS lookups should return the capability payload OS." \
+		"RemoteOS" "$output"
+	assertContains "Active origin OS lookups should warm the zfs helper needed later in startup." \
+		"$(cat "$log")" "zfs"
+	assertContains "Active origin OS lookups should warm parallel when source fan-out is enabled." \
+		"$(cat "$log")" "parallel"
+	assertContains "Active origin OS lookups should warm the compression helper when metadata compression is enabled." \
+		"$(cat "$log")" "zstd"
+}
+
 test_zxfer_get_remote_host_operating_system_falls_back_to_direct_probe_when_capability_payload_is_malformed() {
 	output=$(
 		(

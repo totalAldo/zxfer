@@ -259,7 +259,7 @@ zxfer_ensure_parallel_available_for_source_jobs() {
 zxfer_build_source_snapshot_list_cmd() {
 	g_source_snapshot_list_uses_parallel=0
 	g_source_snapshot_list_uses_metadata_compression=0
-	if l_local_serial_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$g_initial_source"); then
+	if l_local_serial_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$g_initial_source"); then
 		:
 	else
 		l_status=$?
@@ -297,7 +297,7 @@ zxfer_build_source_snapshot_list_cmd() {
 			return "$l_status"
 		fi
 		if l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
-			"$l_remote_zfs_cmd" list -H -o name,guid -s creation -d 1 -t snapshot "{}"); then
+			"$l_remote_zfs_cmd" list -H -o name -s creation -d 1 -t snapshot "{}"); then
 			:
 		else
 			l_status=$?
@@ -337,7 +337,7 @@ zxfer_build_source_snapshot_list_cmd() {
 	fi
 
 	l_parallel_path=$g_cmd_parallel
-	if l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name,guid -s creation -d 1 -t snapshot "{}"); then
+	if l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name -s creation -d 1 -t snapshot "{}"); then
 		:
 	else
 		l_status=$?
@@ -369,7 +369,7 @@ zxfer_build_source_snapshot_list_cmd() {
 # Dry-run snapshot discovery must stay render-only, so use the simple serial
 # listing shape instead of resolving parallel helpers during preview-only runs.
 zxfer_render_source_snapshot_list_preview_cmd() {
-	zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$g_initial_source"
+	zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$g_initial_source"
 }
 
 # Purpose: Write the source snapshot list to file in the normalized form later
@@ -641,7 +641,7 @@ zxfer_build_remote_destination_discovery_batch_script() {
 
 		printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
 		printf '%s\t%s\n' 'BEGIN' 'snapshot_stdout'
-		"\$l_zfs_cmd" list -Hr -o name,guid -t snapshot "\$l_destination_snapshot_dataset" 2>"\$l_snapshot_stderr_file"
+		"\$l_zfs_cmd" list -Hr -o name -t snapshot "\$l_destination_snapshot_dataset" 2>"\$l_snapshot_stderr_file"
 		l_snapshot_status=\$?
 		printf '%s\t%s\n' 'END' 'snapshot_stdout'
 
@@ -1511,7 +1511,7 @@ zxfer_write_destination_snapshot_list_to_files() {
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
 		l_status=0
-		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset") ||
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset") ||
 			l_status=$?
 		if [ "$l_status" -ne 0 ]; then
 			zxfer_throw_error "${l_cmd:-Failed to render dry-run destination snapshot discovery command.}" "$l_status"
@@ -1544,13 +1544,13 @@ zxfer_write_destination_snapshot_list_to_files() {
 		# dataset exists
 		# Keep destination-side snapshot listing serial here. The older parallel
 		# variant added complexity and was not a net win once metadata was cached.
-		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset")
 		zxfer_echoV "Running command: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
 		# make sure to eval and then pipe the contents to the file in case
 		# the command uses ssh
 		l_status=0
-		zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file" ||
+		zxfer_run_destination_zfs_cmd list -Hr -o name -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file" ||
 			l_status=$?
 		if [ "$l_status" -ne 0 ]; then
 			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$l_status"
@@ -1604,6 +1604,70 @@ zxfer_diff_snapshot_lists() {
 		zxfer_throw_error "Unknown snapshot diff mode: $l_mode"
 		;;
 	esac
+}
+
+# Purpose: Write both recursive snapshot delta directions in one sorted-list
+# pass.
+# Usage: Called after source and destination snapshot lists have been sorted
+# and normalized, before recursive dataset work queues are derived.
+zxfer_write_snapshot_delta_files() {
+	l_source_sorted_file=$1
+	l_destination_sorted_file=$2
+	l_source_missing_file=$3
+	l_destination_extra_file=$4
+
+	l_status=0
+	zxfer_get_temp_file >/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
+	fi
+	l_combined_delta_file=$g_zxfer_temp_file_result
+
+	l_status=0
+	zxfer_write_runtime_artifact_file "$l_source_missing_file" "" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_combined_delta_file"
+		return "$l_status"
+	fi
+	l_status=0
+	zxfer_write_runtime_artifact_file "$l_destination_extra_file" "" || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_combined_delta_file"
+		return "$l_status"
+	fi
+
+	l_status=0
+	LC_ALL=C comm -3 "$l_source_sorted_file" "$l_destination_sorted_file" >"$l_combined_delta_file" ||
+		l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_combined_delta_file"
+		return "$l_status"
+	fi
+
+	# `comm -3` prefixes destination-only records with one tab. Snapshot names
+	# cannot begin with tabs, while GUID records may contain tabs after the
+	# name, so removing exactly one leading tab preserves the serialized record.
+	l_status=0
+	# shellcheck disable=SC2016  # awk script should see literal $0.
+	"${g_cmd_awk:-awk}" \
+		-v source_file="$l_source_missing_file" \
+		-v destination_file="$l_destination_extra_file" '
+		substr($0, 1, 1) == "\t" {
+			print substr($0, 2) >> destination_file
+			next
+		}
+		{
+			print $0 >> source_file
+		}
+		END {
+			close(source_file)
+			close(destination_file)
+		}
+	' "$l_combined_delta_file" ||
+		l_status=$?
+
+	zxfer_cleanup_runtime_artifact_path "$l_combined_delta_file"
+	return "$l_status"
 }
 
 # Purpose: Check whether zxfer should use linear reverse for file.
@@ -1998,11 +2062,18 @@ zxfer_set_g_recursive_source_list() {
 	l_dest_snaps_stripped_sorted_tmp_file=$2
 
 	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
+	zxfer_create_temp_file_group 3 >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		return "$l_status"
 	fi
-	l_source_snaps_sorted_tmp_file=$g_zxfer_temp_file_result
+	l_delta_stage_files=$g_zxfer_temp_file_group_result
+	{
+		IFS= read -r l_source_snaps_sorted_tmp_file
+		IFS= read -r l_missing_snapshots_tmp_file
+		IFS= read -r l_destination_extra_snapshots_tmp_file
+	} <<-EOF
+		$l_delta_stage_files
+	EOF
 
 	# sort the source snapshots for use with comm
 	# wait until background processes are finished before attempting to sort
@@ -2013,40 +2084,37 @@ zxfer_set_g_recursive_source_list() {
 	LC_ALL=C sort "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snaps_sorted_tmp_file" ||
 		l_status=$?
 	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+		zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 		zxfer_throw_error "Failed to sort source snapshots for recursive delta planning." "$l_status"
 	fi
 
 	l_status=0
-	l_missing_snapshots=$(zxfer_diff_snapshot_lists "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "source_minus_destination") ||
+	zxfer_write_snapshot_delta_files \
+		"$l_source_snaps_sorted_tmp_file" \
+		"$l_dest_snaps_stripped_sorted_tmp_file" \
+		"$l_missing_snapshots_tmp_file" \
+		"$l_destination_extra_snapshots_tmp_file" ||
 		l_status=$?
 	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-		zxfer_throw_error "Failed to diff source and destination snapshots for recursive transfer planning." "$l_status"
+		zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
+		zxfer_throw_error "Failed to diff source and destination snapshots for recursive delta planning." "$l_status"
 	fi
-	l_status=0
-	l_destination_extra_snapshots=$(zxfer_diff_snapshot_lists "$l_source_snaps_sorted_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "destination_minus_source") ||
-		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
-		zxfer_throw_error "Failed to diff destination and source snapshots for recursive delete planning." "$l_status"
-	fi
-	if [ "$l_missing_snapshots" != "" ]; then
+	if [ -s "$l_missing_snapshots_tmp_file" ]; then
 		l_status=0
-		zxfer_capture_recursive_dataset_list_from_snapshot_records "$l_missing_snapshots" || l_status=$?
+		zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_missing_snapshots_tmp_file" || l_status=$?
 		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to derive recursive source dataset transfer list." "$l_status"
 		fi
 		g_recursive_source_list=$g_zxfer_recursive_dataset_list_result
 	else
 		g_recursive_source_list=""
 	fi
-	if [ "$l_destination_extra_snapshots" != "" ]; then
+	if [ -s "$l_destination_extra_snapshots_tmp_file" ]; then
 		l_status=0
-		zxfer_capture_recursive_dataset_list_from_snapshot_records "$l_destination_extra_snapshots" || l_status=$?
+		zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_destination_extra_snapshots_tmp_file" || l_status=$?
 		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to derive recursive destination dataset delete list." "$l_status"
 		fi
 		g_recursive_destination_extra_dataset_list=$g_zxfer_recursive_dataset_list_result
@@ -2057,7 +2125,7 @@ zxfer_set_g_recursive_source_list() {
 		l_status=0
 		zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_source_snaps_sorted_tmp_file" || l_status=$?
 		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to derive recursive source dataset inventory." "$l_status"
 		fi
 		g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
@@ -2070,14 +2138,14 @@ zxfer_set_g_recursive_source_list() {
 		l_status=0
 		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_list" || l_status=$?
 		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns." "$l_status"
 		fi
 		g_recursive_source_list=$g_zxfer_recursive_dataset_list_result
 		l_status=0
 		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_destination_extra_dataset_list" || l_status=$?
 		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to filter recursive destination dataset delete list against exclude patterns." "$l_status"
 		fi
 		g_recursive_destination_extra_dataset_list=$g_zxfer_recursive_dataset_list_result
@@ -2085,7 +2153,7 @@ zxfer_set_g_recursive_source_list() {
 			l_status=0
 			zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_dataset_list" || l_status=$?
 			if [ "$l_status" -ne 0 ]; then
-				zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+				zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 				zxfer_throw_error "Failed to filter recursive source dataset inventory against exclude patterns." "$l_status"
 			fi
 			g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
@@ -2096,8 +2164,8 @@ zxfer_set_g_recursive_source_list() {
 	if [ "$g_option_V_very_verbose" -eq 1 ]; then
 		echo "====================================================================="
 		echo "====== Snapshots present in source but missing in destination ======"
-		if [ "$l_missing_snapshots" != "" ]; then
-			printf '%s\n' "$l_missing_snapshots"
+		if [ -s "$l_missing_snapshots_tmp_file" ]; then
+			cat "$l_missing_snapshots_tmp_file"
 		fi
 		echo "====== Source datasets that differ from destination ======"
 		echo "g_recursive_source_list:"
@@ -2105,8 +2173,8 @@ zxfer_set_g_recursive_source_list() {
 		echo "Source dataset count: $(echo "$g_recursive_source_list" | grep -cve '^\s*$')"
 		echo "====================================================================="
 		echo "====== Extra Destination snapshots not in source ======"
-		if [ "$l_destination_extra_snapshots" != "" ]; then
-			printf '%s\n' "$l_destination_extra_snapshots"
+		if [ -s "$l_destination_extra_snapshots_tmp_file" ]; then
+			cat "$l_destination_extra_snapshots_tmp_file"
 		fi
 		echo "====== Destination datasets with extra snapshots not in source ======"
 		if [ "$g_recursive_destination_extra_dataset_list" != "" ]; then
@@ -2119,7 +2187,7 @@ zxfer_set_g_recursive_source_list() {
 		zxfer_echov "No new snapshots to transfer."
 	fi
 
-	zxfer_cleanup_runtime_artifact_path "$l_source_snaps_sorted_tmp_file"
+	zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 }
 
 # Purpose: Decide whether snapshot discovery must keep per-dataset record
@@ -2178,12 +2246,11 @@ zxfer_snapshot_discovery_needs_destination_dataset_inventory() {
 # Build the source and destination snapshot caches used by replication.
 # zxfer relies on `zfs list` in machine-readable mode (`-H`), recursive dataset
 # traversal (`-r`) where needed, name-only output during initial discovery
-# (`-o name,guid`),
-# snapshot-only listing (`-t snapshot`), and creation-order sorting for
-# per-dataset snapshot discovery on the source side. Carrying GUIDs in the
-# initial diff lets same-name/different-snapshot divergence become part of the
-# recursive work queue without restoring a whole-tree per-dataset validation
-# pass on the no-op path.
+# (`-o name`), snapshot-only listing (`-t snapshot`), and creation-order sorting
+# for per-dataset snapshot discovery on the source side. Per-dataset reconcile
+# code fetches GUIDs lazily before send/delete decisions that need snapshot
+# identity, which keeps recursive no-op discovery from carrying whole-tree GUID
+# payloads through remote compression, normalization, sort, and diff.
 zxfer_get_zfs_list() {
 	zxfer_set_failure_stage "snapshot discovery"
 	zxfer_echoV "Begin zxfer_get_zfs_list()"
