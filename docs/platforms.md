@@ -102,7 +102,7 @@ matters especially when:
   writes for `-k` use `cat` on the target
 - `-j` uses explicit per-dataset source discovery on the executing origin host
   in the changed-source/full discovery path whenever `jobs > 1`. The clean
-  recursive no-op proof uses one recursive name-only source stream and defers
+  recursive no-op proof uses one recursive `name,guid` source stream and defers
   `parallel` until that heavier path is needed. Local-origin and remote-origin
   full discovery runs require a resolved `parallel` helper on that host. zxfer
   intentionally validates only helper existence through the secure-PATH model
@@ -137,6 +137,14 @@ backup-metadata guard/staging scripts run, so their auxiliary
 `stat`/`ls`/`id`/`awk` lookups do not fall back to the remote login shell's
 ambient `PATH`.
 
+Remote target (`-T`) destination discovery also runs under that validated
+target-side `PATH`. Current discovery batches the recursive destination dataset
+inventory, the missing-root pool probe, and `name,guid` destination snapshot
+listing into one target-side POSIX `sh -c` payload. The large snapshot section
+is streamed back over ssh, compact statuses and stderr are staged separately,
+and malformed or truncated section payloads fail closed. Local destination
+discovery deliberately remains on the direct local `zfs` path.
+
 zxfer-managed ssh transports also now force `BatchMode=yes` and
 `StrictHostKeyChecking=yes` by default. They still rely on the local ssh
 configuration's known-hosts sources unless `ZXFER_SSH_USER_KNOWN_HOSTS_FILE`
@@ -154,9 +162,10 @@ flowchart TD
     B --> F["Remote cat when -e reads backup metadata from the origin"]
 
     G["Target role via -T"] --> H["Remote destination-side helpers"]
-    H --> I["zfs receive and destination-side property work"]
-    H --> J["Remote decompression helper when -z or -Z is active"]
-    H --> K["Remote backup-directory and backup-write helpers for -k, including cat-based metadata writes"]
+    H --> I["Batched destination discovery: datasets, pool fallback, and name,guid snapshots"]
+    H --> J["zfs receive and destination-side property work"]
+    H --> K["Remote decompression helper when -z or -Z is active"]
+    H --> L["Remote backup-directory and backup-write helpers for -k, including cat-based metadata writes"]
 ```
 
 ## Service Management

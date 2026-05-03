@@ -259,7 +259,7 @@ zxfer_ensure_parallel_available_for_source_jobs() {
 	return 0
 }
 
-# Purpose: Decide whether remote recursive discovery may use the name-only
+# Purpose: Decide whether remote recursive discovery may use the identity-aware
 # no-op proof before the full creation-order source listing.
 # Usage: Called by snapshot discovery before launching the heavier source
 # discovery path.
@@ -315,26 +315,27 @@ zxfer_get_snapshot_exclude_filter_awk_program() {
 	printf '%s\n' "{ snapshot_path = \$0; if (substr(snapshot_path, 1, 1) == \"\\t\") { snapshot_path = substr(snapshot_path, 2) }; tab_pos = index(snapshot_path, \"\\t\"); if (tab_pos > 0) { snapshot_path = substr(snapshot_path, 1, tab_pos - 1) }; at_pos = index(snapshot_path, \"@\"); snapshot_dataset = snapshot_path; if (at_pos > 0) { snapshot_dataset = substr(snapshot_path, 1, at_pos - 1) }; if (snapshot_dataset !~ exclude_pattern) { print } }"
 }
 
-# Purpose: Build the source name-only snapshot list command used by the
+# Purpose: Build the source snapshot-identity list command used by the
 # recursive no-op proof.
 # Usage: Called before the full creation-order source discovery so clean no-op
-# runs can avoid creation-order source discovery. When -j is configured, the
-# proof deliberately uses one recursive name-only source stream even when `-j`
-# is configured. The full changed-source discovery path still honors `-j`; the
-# proof avoids multiplying GNU parallel and per-dataset `zfs list` startup cost
-# before it knows there is work to do.
+# runs can avoid creation-order source discovery. The proof deliberately uses
+# one recursive source stream even when `-j` is configured. The full
+# changed-source discovery path still honors `-j`; the proof avoids multiplying
+# GNU parallel and per-dataset `zfs list` startup cost before it knows there is
+# work to do. Keep GUIDs here so exact-name snapshot divergence cannot be
+# treated as a no-op.
 zxfer_build_source_snapshot_name_list_cmd() {
 	g_source_snapshot_list_uses_parallel=0
 	g_source_snapshot_list_uses_metadata_compression=0
 
 	if [ "$g_option_O_origin_host" = "" ]; then
-		zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -t snapshot "$g_initial_source"
+		zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -t snapshot "$g_initial_source"
 		return
 	fi
 
 	l_remote_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
 	l_remote_pipeline=$(zxfer_build_shell_command_from_argv \
-		"$l_remote_zfs_cmd" list -Hr -o name -t snapshot "$g_initial_source") ||
+		"$l_remote_zfs_cmd" list -Hr -o name,guid -t snapshot "$g_initial_source") ||
 		return "$?"
 	if [ "${g_option_z_compress:-0}" -eq 1 ]; then
 		g_source_snapshot_list_uses_metadata_compression=1
@@ -354,8 +355,8 @@ zxfer_build_source_snapshot_name_list_cmd() {
 }
 # Purpose: Launch a source snapshot command and sort its output in the
 # background without preserving a creation-order sidecar.
-# Usage: Called by the recursive no-op proof where only name-sorted comparison
-# data is needed.
+# Usage: Called by the recursive no-op proof where only sorted identity
+# comparison data is needed.
 # Side effects: When a count-file path is passed as the fourth argument, writes
 # 1 when at least one post-filter snapshot reached sort, otherwise 0.
 zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
@@ -483,7 +484,7 @@ zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
 zxfer_build_source_snapshot_list_cmd() {
 	g_source_snapshot_list_uses_parallel=0
 	g_source_snapshot_list_uses_metadata_compression=0
-	if l_local_serial_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$g_initial_source"); then
+	if l_local_serial_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$g_initial_source"); then
 		:
 	else
 		l_status=$?
@@ -521,7 +522,7 @@ zxfer_build_source_snapshot_list_cmd() {
 			return "$l_status"
 		fi
 		if l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
-			"$l_remote_zfs_cmd" list -H -o name -s creation -d 1 -t snapshot "{}"); then
+			"$l_remote_zfs_cmd" list -H -o name,guid -s creation -d 1 -t snapshot "{}"); then
 			:
 		else
 			l_status=$?
@@ -562,7 +563,7 @@ zxfer_build_source_snapshot_list_cmd() {
 	fi
 
 	l_parallel_path=$g_cmd_parallel
-	if l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name -s creation -d 1 -t snapshot "{}"); then
+	if l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name,guid -s creation -d 1 -t snapshot "{}"); then
 		:
 	else
 		l_status=$?
@@ -594,7 +595,7 @@ zxfer_build_source_snapshot_list_cmd() {
 # Dry-run snapshot discovery must stay render-only, so use the simple serial
 # listing shape instead of resolving parallel helpers during preview-only runs.
 zxfer_render_source_snapshot_list_preview_cmd() {
-	zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name -s creation -t snapshot "$g_initial_source"
+	zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$g_initial_source"
 }
 
 # Purpose: Launch source snapshot discovery and sort its output inside the
@@ -1208,7 +1209,7 @@ zxfer_build_remote_destination_discovery_batch_script() {
 
 		printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
 		printf '%s\t%s\n' 'BEGIN' 'snapshot_stdout'
-		"\$l_zfs_cmd" list -Hr -o name -t snapshot "\$l_destination_snapshot_dataset" 2>"\$l_snapshot_stderr_file"
+		"\$l_zfs_cmd" list -Hr -o name,guid -t snapshot "\$l_destination_snapshot_dataset" 2>"\$l_snapshot_stderr_file"
 		l_snapshot_status=\$?
 		printf '%s\t%s\n' 'END' 'snapshot_stdout'
 
@@ -1451,10 +1452,19 @@ zxfer_split_remote_destination_discovery_batch_stream_to_files() {
 				}
 				next
 			}
-			if (index($0, "STATUS" tab) == 1) {
-				if (current_section != "") {
-					fail()
+			if (current_section != "") {
+				if (index($0, "END" tab) == 1) {
+					section_name = substr($0, 5)
+					if (section_name == current_section) {
+						current_section = ""
+						current_output = ""
+						next
+					}
 				}
+				append_section_line($0)
+				next
+			}
+			if (index($0, "STATUS" tab) == 1) {
 				status_record = substr($0, 8)
 				status_separator = index(status_record, tab)
 				if (status_separator == 0) {
@@ -1468,18 +1478,10 @@ zxfer_split_remote_destination_discovery_batch_stream_to_files() {
 				next
 			}
 			if (index($0, "END" tab) == 1) {
-				section_name = substr($0, 5)
-				if (current_section == "" || section_name != current_section) {
-					fail()
-				}
-				current_section = ""
-				current_output = ""
+				fail()
 				next
 			}
-			if (current_section == "") {
-				fail()
-			}
-			append_section_line($0)
+			fail()
 		}
 		END {
 			if (bad != 0) {
@@ -2071,7 +2073,7 @@ zxfer_write_destination_snapshot_list_to_files() {
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
 		l_status=0
-		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset") ||
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset") ||
 			l_status=$?
 		if [ "$l_status" -ne 0 ]; then
 			zxfer_throw_error "${l_cmd:-Failed to render dry-run destination snapshot discovery command.}" "$l_status"
@@ -2104,13 +2106,13 @@ zxfer_write_destination_snapshot_list_to_files() {
 		# dataset exists
 		# Keep destination-side snapshot listing serial here. The older parallel
 		# variant added complexity and was not a net win once metadata was cached.
-		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset")
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
 		zxfer_echoV "Running command: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
 		# make sure to eval and then pipe the contents to the file in case
 		# the command uses ssh
 		l_status=0
-		zxfer_run_destination_zfs_cmd list -Hr -o name -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file" ||
+		zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file" ||
 			l_status=$?
 		if [ "$l_status" -ne 0 ]; then
 			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$l_status"
@@ -2136,7 +2138,7 @@ zxfer_write_destination_snapshot_list_to_files() {
 
 # Purpose: Create the private FIFO pair used by the recursive no-op proof.
 # Usage: Called only by zxfer_try_fast_recursive_noop_discovery so source and
-# destination sorted-name streams can be compared without materializing both
+# destination identity-sorted streams can be compared without materializing both
 # final sorted lists on local disk.
 # Side effects: Publishes FIFO paths in g_zxfer_fast_noop_source_fifo_result,
 # g_zxfer_fast_noop_destination_fifo_result, and
@@ -2178,7 +2180,7 @@ zxfer_create_fast_noop_fifo_pair() {
 # Purpose: Launch destination snapshot normalization and canonical sort into a
 # FIFO.
 # Usage: Called by the recursive no-op proof after the matching source producer
-# is started, so cmp can read both name-sorted streams directly.
+# is started, so cmp can read both identity-sorted streams directly.
 # Side effects: Publishes the background helper pid in g_last_background_pid
 # and writes compact status sidecars supplied by the caller.
 zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
@@ -2189,14 +2191,14 @@ zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 	l_dest_stream_status_file=$5
 
 	l_destination_dataset=$(zxfer_get_destination_snapshot_root_dataset)
-	l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset")
+	l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
 	l_normalize_cmd=$(zxfer_render_command_for_report "" "zxfer_normalize_destination_snapshot_stream_for_noop_proof" "$l_destination_dataset")
 	zxfer_echoV "Running command in the background: $l_cmd"
 	zxfer_record_last_command_string "$l_cmd | $l_normalize_cmd | LC_ALL=C sort > $(zxfer_quote_token_for_report "$l_destination_fifo")"
 
 	(
 		{
-			zxfer_run_destination_zfs_cmd list -Hr -o name -t snapshot "$l_destination_dataset" 2>"$l_dest_snapshot_err_file"
+			zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" 2>"$l_dest_snapshot_err_file"
 			printf '%s\n' "$?" >"$l_dest_snapshot_status_file" 2>/dev/null || :
 		} | {
 			zxfer_normalize_destination_snapshot_stream_for_noop_proof "$l_destination_dataset"
@@ -2274,12 +2276,12 @@ zxfer_write_destination_snapshot_name_sorted_list_to_files() {
 
 	l_missing_destination=0
 	l_list_status=0
-	l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name -t snapshot "$l_destination_dataset")
+	l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
 	l_normalize_cmd=$(zxfer_render_command_for_report "" "zxfer_normalize_destination_snapshot_stream_for_noop_proof" "$l_destination_dataset")
 	zxfer_echoV "Running command: $l_cmd"
 	zxfer_record_last_command_string "$l_cmd | $l_normalize_cmd | LC_ALL=C sort > $(zxfer_quote_token_for_report "$l_dest_snaps_stripped_sorted_tmp_file")"
 	{
-		zxfer_run_destination_zfs_cmd list -Hr -o name -t snapshot "$l_destination_dataset" 2>"$l_dest_snapshot_err_file"
+		zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" 2>"$l_dest_snapshot_err_file"
 		printf '%s\n' "$?" >"$l_dest_snapshot_status_file" 2>/dev/null || :
 	} | {
 		zxfer_normalize_destination_snapshot_stream_for_noop_proof "$l_destination_dataset"
@@ -3118,7 +3120,7 @@ zxfer_snapshot_discovery_needs_destination_dataset_inventory() {
 	return 1
 }
 
-# Purpose: Try to prove a clean remote recursive no-op with name-only source
+# Purpose: Try to prove a clean remote recursive no-op with identity-aware source
 # discovery before paying for the full creation-order source listing.
 # Usage: Called by zxfer_get_zfs_list; returns 0 when no-op was proven and the
 # caller can return, returns 1 when the normal discovery path should continue.
@@ -3383,12 +3385,12 @@ zxfer_try_fast_recursive_noop_discovery() {
 #
 # Build the source and destination snapshot caches used by replication.
 # zxfer relies on `zfs list` in machine-readable mode (`-H`), recursive dataset
-# traversal (`-r`) where needed, name-only output during initial discovery
-# (`-o name`), snapshot-only listing (`-t snapshot`), and creation-order sorting
-# for per-dataset snapshot discovery on the source side. Per-dataset reconcile
-# code fetches GUIDs lazily before send/delete decisions that need snapshot
-# identity, which keeps recursive no-op discovery from carrying whole-tree GUID
-# payloads through remote compression, normalization, sort, and diff.
+# traversal (`-r`) where needed, identity-aware output during initial discovery
+# (`-o name,guid`), snapshot-only listing (`-t snapshot`), and creation-order
+# sorting for per-dataset snapshot discovery on the source side. The fast
+# recursive no-op proof uses the same identity-aware records without the
+# creation-order sort so equal snapshot names with different GUIDs fall back to
+# full discovery instead of being treated as clean.
 zxfer_get_zfs_list() {
 	zxfer_set_failure_stage "snapshot discovery"
 	zxfer_echoV "Begin zxfer_get_zfs_list()"

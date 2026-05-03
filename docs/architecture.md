@@ -170,7 +170,10 @@ ownership check.
    explicit init flow.
 3. Parse CLI options, validate combinations, and resolve source and
    destination execution context.
-4. Build dataset and snapshot lists.
+4. Build identity-aware dataset and snapshot lists. Eligible remote-origin
+   recursive no-op runs first try the fast `name,guid` proof, and remote-target
+   `-T` destination discovery batches inventory, missing-root pool probing, and
+   snapshot listing into one target-side ssh shell invocation.
 5. Inspect source versus destination state.
 6. Optionally delete destination-only snapshots.
 7. Transfer snapshots through explicit stage helpers:
@@ -244,6 +247,59 @@ flowchart TD
     AA --> AB["zxfer_trap_exit(): abort supervised long-lived background jobs, close ssh control sockets, release registered owned locks or leases, clean runtime artifacts, emit profiling and structured failure report"]
 ```
 
+### Snapshot Discovery And No-Op Proof
+
+`zxfer_get_zfs_list()` owns the initial source and destination view used by
+later delete, seed, send, and property decisions. Snapshot records stay
+identity-aware at this layer: source and destination snapshot lists use
+`zfs list -Hr -o name,guid -t snapshot`, and destination records are normalized
+by rewriting only the leading destination dataset prefix.
+
+For eligible recursive remote-origin pulls, `zxfer_try_fast_recursive_noop_discovery()`
+attempts a clean no-op proof before the heavier creation-order source
+discovery path. Eligibility is intentionally narrow: `-O` and `-R` must be
+active, `-T` must be absent, and snapshot creation, migration, property
+transfer or restore, backup metadata, unsupported-property filtering, property
+overrides, and grandfather protection must be inactive. The proof starts one
+recursive source `name,guid` producer even when `-j` is configured, starts one
+normalized destination `name,guid` producer, sorts both streams through private
+FIFOs, and uses `cmp -s` to prove equality. A mismatch, missing destination,
+excluded-dataset uncertainty, or stream failure falls back to full discovery or
+fails through the same staged stderr paths used by the normal discovery flow.
+
+Remote target discovery has a separate `-T` optimization in
+`zxfer_run_remote_destination_discovery_batch_to_files()`. The target-side
+script uses the resolved target `zfs` path and validated dependency `PATH`,
+starts recursive dataset inventory in the background, streams the large
+destination snapshot stdout section directly back over ssh as `name,guid`
+records, captures stderr and compact statuses in target-side temp files, and
+runs the pool-exists fallback only when the destination root appears missing.
+The local splitter writes the same staged inventory, stderr, and raw snapshot
+files that the non-batched path expects, then the existing destination snapshot
+normalization helper produces the normalized diff input. Protocol markers are
+interpreted only outside section bodies, malformed or truncated payloads fail
+closed, and snapshot-list stderr is preserved before the existing `Failed to
+retrieve snapshot list from the destination.` context is reported.
+
+```mermaid
+flowchart TD
+    A["zxfer_get_zfs_list()"] --> B{"Fast recursive no-op proof eligible?"}
+    B -- "yes" --> C["Start one source name,guid snapshot producer"]
+    C --> D["Start normalized destination name,guid snapshot producer"]
+    D --> E["Sort both streams through private FIFOs"]
+    E --> F{"cmp -s proves identical identity records?"}
+    F -- "yes" --> G["Return clean no-op before full discovery"]
+    F -- "no or uncertain" --> H["Fall back to full snapshot discovery"]
+    B -- "no" --> H
+    H --> I{"Remote target -T?"}
+    I -- "yes" --> J["Run one target-side destination discovery batch"]
+    J --> K["Split streamed sections into staged files and status sidecar"]
+    I -- "no" --> L["Use direct destination zfs inventory and snapshot commands"]
+    K --> M["Normalize destination snapshot prefixes and diff identity records"]
+    L --> M
+    M --> N["Publish source/destination lists, caches, and record indexes"]
+```
+
 ### Per-Dataset Replication Lifecycle
 
 Each dataset in the iteration list flows through one orchestration pass in
@@ -307,8 +363,8 @@ sequenceDiagram
     Launcher->>Launcher: init, parse, validate, resolve helpers
     Launcher->>Discovery: zxfer_get_zfs_list()
     Discovery->>ZFS: list source snapshots recursively
-    Discovery->>ZFS: list destination datasets and snapshots
-    Discovery-->>Launcher: recursive source list and snapshot caches
+    Discovery->>ZFS: list destination datasets and name,guid snapshots
+    Discovery-->>Launcher: recursive source list and identity-aware snapshot caches
     Launcher->>Repl: zxfer_copy_filesystems()
     loop each dataset in the iteration list
         Repl->>ZFS: inspect common snapshots and delete plan
@@ -339,10 +395,10 @@ sequenceDiagram
     Launcher->>Origin: resolve remote helper capabilities under a metadata-coordinated cache lock keyed by PATH, transport policy, and requested helper scope
     Launcher->>Launcher: reuse matching remote capability state for zfs, parallel, and compression/helper heads when needed
     Launcher->>Local: list destination datasets and snapshots
-    Launcher->>Origin: for eligible no-snapshot recursive pulls, list source snapshot names with serial or -j parallel discovery
-    alt source and destination names match after excludes
+    Launcher->>Origin: for eligible no-snapshot recursive pulls, list source snapshot identity records with one recursive stream
+    alt source and destination identity records match after excludes
         Launcher->>Launcher: return clean no-op before creation-order discovery
-    else names differ or fast proof is not eligible
+    else identity records differ or fast proof is not eligible
         Launcher->>Origin: build the source dataset inventory with remote zfs list
         Launcher->>Origin: fan out per-dataset snapshot listing via the resolved origin-host parallel helper
     end
@@ -355,6 +411,36 @@ sequenceDiagram
     end
     Launcher->>Launcher: wait for remaining background jobs and deferred property work
     Launcher->>Origin: close the control socket during trap cleanup after releasing the last validated lease
+    Launcher-->>Operator: success or structured failure report
+```
+
+### Example: Remote Push To A Target Host
+
+This shows the destination-side lifecycle for a command shape such as
+`./zxfer -v -T backup@example.com -R tank/src backup/dst -z`. The source is
+local, so destination discovery and receive work execute through the target
+transport.
+
+```mermaid
+sequenceDiagram
+    actor Operator
+    participant Launcher as zxfer launcher
+    participant Local as local source
+    participant Target as target host
+
+    Operator->>Launcher: run zxfer -v -T backup@example.com -R tank/src backup/dst -z
+    Launcher->>Launcher: initialize local state and resolve local helper scope
+    Launcher->>Target: resolve target helper capabilities under the metadata-bearing capability cache
+    Launcher->>Local: list source datasets and name,guid snapshots
+    Launcher->>Target: run one destination discovery batch through sh -c
+    Target-->>Launcher: stream snapshot_stdout and return inventory/status/stderr sections
+    Launcher->>Launcher: split batch sections, normalize destination prefixes, and build identity diffs
+    loop queue datasets while no destination ancestor or descendant conflict remains
+        Launcher->>Local: zfs send ... | local compression helper
+        Local-->>Launcher: compressed replication stream
+        Launcher->>Target: remote decompressor | zfs receive ...
+    end
+    Launcher->>Launcher: wait for supervised jobs and deferred property work
     Launcher-->>Operator: success or structured failure report
 ```
 

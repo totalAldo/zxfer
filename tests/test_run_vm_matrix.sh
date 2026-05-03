@@ -187,6 +187,20 @@ test_vm_qemu_ref_archive_rejects_unknown_perf_baseline_ref() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_ref_archive_rejects_option_like_perf_baseline_ref() {
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		zxfer_vm_qemu_write_ref_archive --output=/tmp/zxfer-perf-baseline.tar >/dev/null
+	"
+
+	assertEquals "The qemu backend should reject option-like baseline refs before invoking git." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The validation error should reject option-like ZXFER_VM_PERF_BASELINE_REF values." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "must not begin with '-'"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_validate_options_rejects_only_test_outside_integration_layer() {
 	zxfer_test_capture_subshell "
 		. \"$VM_MATRIX_LIB\"

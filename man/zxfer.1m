@@ -690,9 +690,10 @@ pre-OpenZFS 2.0 destinations.
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
 profiling counters plus startup latency, trap-cleanup timing, and accumulated
 stage timings for ssh setup, snapshot listing, and diff/sort hot paths, along
-with ssh control-socket wait, remote-capability cache wait,
-capability-bootstrap source, and direct remote helper-probe counters. While
-the run is active it also prints prefixed live
+with runtime artifact/cache-object counts, command-rendering counts, live
+destination snapshot recheck counts, ssh control-socket wait,
+remote-capability cache wait, capability-bootstrap source, and direct remote
+helper-probe counters. While the run is active it also prints prefixed live
 remote ssh commands, remote probe commands, and any ssh control-socket
 check/open commands before each execution so slow startup or remote-probe phases are
 visible in real time.

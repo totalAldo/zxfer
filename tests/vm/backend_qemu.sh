@@ -544,6 +544,12 @@ zxfer_vm_qemu_write_repo_archive() {
 zxfer_vm_qemu_write_ref_archive() {
 	l_ref=$1
 
+	case "$l_ref" in
+	'' | -* | *'
+'*)
+		zxfer_vm_die "ZXFER_VM_PERF_BASELINE_REF must be a non-empty ref name, tag, or commit and must not begin with '-' or contain newlines: $l_ref"
+		;;
+	esac
 	git -C "$ZXFER_ROOT" rev-parse --verify "$l_ref^{tree}" >/dev/null 2>&1 ||
 		zxfer_vm_die "ZXFER_VM_PERF_BASELINE_REF does not name a tree in this repository: $l_ref"
 	git -C "$ZXFER_ROOT" archive --format=tar "$l_ref" ||

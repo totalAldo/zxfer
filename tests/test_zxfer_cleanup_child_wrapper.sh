@@ -168,7 +168,7 @@ EOF
 
 	wait_tries=0
 	while [ ! -s "$child_pid_file" ] && [ "$wait_tries" -lt 50 ]; do
-		sleep 0.1
+		sleep 1
 		wait_tries=$((wait_tries + 1))
 	done
 

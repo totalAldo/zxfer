@@ -4,10 +4,10 @@ This file tracks performance opportunities for the current branch after a
 static comparison with `upstream-compat-final`. That upstream branch is faster
 because it does less work overall: remote setup is simpler, temp-file handling
 is lighter, background jobs are direct, and it does not perform the same live
-destination rechecks or cache integrity checks. Earlier current-branch builds
-also carried GUID-bearing whole-tree snapshot records through initial
-discovery; the active implementation now restores name-only initial discovery
-and leaves GUID identity checks to the existing per-dataset reconcile path.
+destination rechecks or cache integrity checks. Snapshot discovery remains
+identity-aware with `name,guid` records, including the fast no-op proof, because
+name-only comparison can incorrectly treat same-name snapshots with different
+GUIDs as clean.
 
 The optimization goal is to recover throughput and no-op speed without
 reintroducing the older safety and injection risks. Items below are candidates,
@@ -22,10 +22,9 @@ disposable guest is available. Direct host runs remain human-only.
 ## Baseline Differences
 
 - `upstream-compat-final` lists snapshots by `name` for initial source and
-  destination inventory. The current branch has been adjusted back to that
-  initial discovery shape for no-op speed; per-dataset send/delete reconcile
-  still fetches `name,guid` records lazily when common snapshot identity is
-  needed before mutation.
+  destination inventory. The current branch keeps `name,guid` records in initial
+  discovery and the fast no-op proof so same-name GUID divergence is detected
+  before zxfer can declare a clean no-op.
 - `upstream-compat-final` performs fewer destination probes. The current branch
   rechecks live destination state before receive planning and full-send seeding
   so concurrent destination changes fail closed.
@@ -42,9 +41,9 @@ disposable guest is available. Direct host runs remain human-only.
 ## Recently Applied Optimizations
 
 - Initial recursive source and destination snapshot discovery now uses
-  `zfs list -o name` again. GUID-bearing `name,guid` records remain in the
-  per-dataset identity paths that run before send/delete decisions, so true
-  no-op runs avoid whole-tree GUID payloads without weakening the mutation path.
+  `zfs list -o name,guid` consistently. This preserves safe same-name divergence
+  detection while keeping the fast no-op proof to one recursive source stream
+  and one normalized destination stream.
 - Recursive snapshot delta planning now uses one file-backed `comm -3` pass to
   split source-missing and destination-extra records. This removes two large
   shell command substitutions and one full sorted-list scan from no-op planning.
@@ -93,9 +92,9 @@ disposable guest is available. Direct host runs remain human-only.
 - Recursive replication now short-circuits clean no-op copy orchestration before
   building the per-dataset iteration list, allocating post-seed staging files,
   refreshing property prefetch state, or preparing deferred SSH control sockets.
-- Recursive source no-op discovery now has a name-only proof path for `-O`
+- Recursive source no-op discovery now has an identity-aware proof path for `-O`
   with a local destination and no property/migration work. Serial proof uses
-  one recursive name-only ZFS query even when `-j` is configured. The proof
+  one recursive `name,guid` ZFS query even when `-j` is configured. The proof
   intentionally avoids source-side GNU `parallel` fanout because highly
   concurrent wrapper scripts can multiply per-dataset `zfs list` startup cost
   before zxfer knows there is work to transfer. Changed-source fallback still
@@ -1345,7 +1344,7 @@ Measure:
 ## Other Candidate Opportunities
 
 - Tune serial versus GNU `parallel` source snapshot discovery for changed-source
-  fallback. Clean no-op proof now always uses one recursive name-only list and
+  fallback. Clean no-op proof now always uses one recursive `name,guid` list and
   defers `parallel`; the heavier creation-order path still honors `-j`. Fanout
   can lose on small remote trees because `parallel` startup and per-dataset
   command setup dominate, so consider a cheap local threshold, a user-visible

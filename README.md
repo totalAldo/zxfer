@@ -92,6 +92,11 @@ Use remote compression:
 - Metadata-bearing lock and lease coordination for ssh control sockets, remote
   capability caches, and `ZXFER_ERROR_LOG` appends, with validated stale-owner
   reaping and checked release semantics
+- Identity-aware recursive snapshot discovery with `name,guid` records, plus a
+  fast clean-no-op proof for eligible remote-origin pulls
+- Batched remote-target destination discovery for `-T`, so destination dataset
+  inventory, missing-root pool probing, and destination snapshot listing share
+  one target-side ssh shell invocation
 
 ## Useful Options
 
@@ -110,7 +115,8 @@ Use remote compression:
   implementation compatible with the GNU Parallel-style options used by the
   rendered source-discovery pipeline
 - `-V`: enable very verbose debug output and end-of-run profiling counters,
-  including startup latency and trap-cleanup timing
+  including startup latency, trap-cleanup timing, runtime artifact/cache-object
+  counts, command-rendering counts, and live destination snapshot recheck counts
 - `-x pattern`: exclude datasets from recursive replication
 - `-Y`: repeat replication until no sends or destroys are performed, or until
   the built-in iteration cap is reached
@@ -196,6 +202,22 @@ destination datasets on the same target as mutually exclusive. zxfer now waits
 for the conflicting receive to finish before launching the next transfer, so
 recursive parent/child destination trees no longer race each other and degrade
 later into truncated-stream collateral failures.
+
+Recursive snapshot discovery remains identity-aware: initial source and
+destination snapshot records carry `name,guid` so a same-name snapshot with a
+different GUID cannot be treated as a clean match. For eligible `-O -R` pulls
+with a local destination and no snapshot creation, property, migration,
+restore, backup, target-host, or grandfather work, zxfer first tries a fast
+no-op proof. That proof compares one recursive source `name,guid` stream with
+one normalized destination `name,guid` stream and falls back to full discovery
+when the streams differ or the destination is missing.
+
+When `-T` is used, destination discovery runs a structured target-side batch:
+recursive destination dataset inventory, the missing-root pool fallback probe,
+and destination snapshot listing are issued inside one remote `sh -c` payload.
+Large snapshot stdout is streamed back as `name,guid` records, while status and
+stderr sections are staged and parsed locally. The local destination path keeps
+the direct `zfs` command flow.
 
 Short-lived local background helpers that still need shell wrappers, such as
 progress dialogs and delete-planning identity writers, now publish validated

@@ -158,10 +158,10 @@ test_get_background_job_completion_status_marks_missing_completion_after_zero_ex
 test_get_background_job_completion_status_preserves_explicit_worker_exit_125_without_completion_write_marker() {
 	control_dir="$TEST_TMPDIR/background_job_completion_exit_125"
 	mkdir -p "$control_dir"
-	cat >"$control_dir/completion.tsv" <<'EOF'
-status	125
-report_failure	
-EOF
+	{
+		printf '%s\t%s\n' status 125
+		printf '%s\t\n' report_failure
+	} >"$control_dir/completion.tsv"
 
 	zxfer_get_background_job_completion_status "$control_dir" 125
 	status=$?
@@ -177,10 +177,10 @@ EOF
 test_get_background_job_completion_status_fails_closed_for_invalid_recorded_statuses() {
 	control_dir="$TEST_TMPDIR/background_job_completion_invalid"
 	mkdir -p "$control_dir"
-	cat >"$control_dir/completion.tsv" <<'EOF'
-status	bad
-report_failure	
-EOF
+	{
+		printf '%s\t%s\n' status bad
+		printf '%s\t\n' report_failure
+	} >"$control_dir/completion.tsv"
 
 	zxfer_get_background_job_completion_status "$control_dir" 125
 	status=$?
@@ -192,9 +192,7 @@ EOF
 test_get_background_job_completion_status_fails_closed_when_status_is_missing() {
 	control_dir="$TEST_TMPDIR/background_job_completion_missing_status"
 	mkdir -p "$control_dir"
-	cat >"$control_dir/completion.tsv" <<'EOF'
-report_failure	
-EOF
+	printf '%s\t\n' report_failure >"$control_dir/completion.tsv"
 
 	zxfer_get_background_job_completion_status "$control_dir" 0
 	status=$?

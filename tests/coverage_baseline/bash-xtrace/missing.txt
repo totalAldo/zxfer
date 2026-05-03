@@ -499,4 +499,3 @@ src/zxfer_snapshot_state.sh
   953:	*)
   1110:		zxfer_capture_runtime_artifact_command_output \
   1115:		zxfer_capture_runtime_artifact_command_output \
-

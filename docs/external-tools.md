@@ -99,6 +99,11 @@ Current runtime inventory:
 On FreeBSD, these are expected from base and usually do not belong in
 `RUN_DEPENDS`.
 
+Remote helper scripts assume the same kind of base userland on the executing
+remote host. For example, the `-T` destination discovery batch uses target-side
+POSIX `sh`, `mktemp`, `grep`, `cat`, and `rm` around the resolved target
+`zfs` command, all under the validated remote dependency `PATH`.
+
 ## Direct Integration Harness Dependencies
 
 These tools are used by [run_integration_zxfer.sh](../tests/run_integration_zxfer.sh),

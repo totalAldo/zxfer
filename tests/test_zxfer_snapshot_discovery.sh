@@ -623,7 +623,7 @@ test_build_source_snapshot_list_cmd_fails_closed_when_local_parallel_is_unavaila
 	assertContains "Local failure should explain that parallel was not found." \
 		"$result" "not found in PATH on the local host"
 	assertNotContains "Local -j failures should not silently render the serial source snapshot listing." \
-		"$result" "'$g_LZFS' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'"
+		"$result" "'$g_LZFS' 'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'"
 }
 
 test_build_source_snapshot_list_cmd_uses_serial_local_discovery_when_parallel_jobs_are_disabled() {
@@ -633,7 +633,7 @@ test_build_source_snapshot_list_cmd_uses_serial_local_discovery_when_parallel_jo
 	result=$(zxfer_build_source_snapshot_list_cmd)
 
 	assertEquals "Source snapshot discovery should use the direct serial listing command when parallel jobs are disabled." \
-		"'$g_LZFS' 'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'" "$result"
+		"'$g_LZFS' 'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' '$g_initial_source'" "$result"
 	assertEquals "Source snapshot discovery should leave the parallel marker cleared when -j is disabled." \
 		0 "$g_source_snapshot_list_uses_parallel"
 }
@@ -672,7 +672,7 @@ test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 	assertContains "Local -j discovery should use parallel with the requested job count." \
 		"$result" "'$g_cmd_parallel' -j 2 --line-buffer"
 	assertContains "Local -j discovery should preserve the per-dataset snapshot runner." \
-		"$result" "'$g_LZFS' 'list' '-H' '-o' 'name' '-s' 'creation' '-d' '1' '-t' 'snapshot' '{}'"
+		"$result" "'$g_LZFS' 'list' '-H' '-o' 'name,guid' '-s' 'creation' '-d' '1' '-t' 'snapshot' '{}'"
 	assertNotContains "Local -j discovery should not inline a prefetched dataset list." \
 		"$result" "'printf'"
 }
@@ -859,41 +859,41 @@ test_build_source_snapshot_name_list_cmd_covers_local_and_remote_rendering() {
 		)
 	)
 
-	assertContains "Local name-only no-op proof discovery should render a direct source snapshot list." \
-		"$local_result" "'$g_LZFS' 'list' '-Hr' '-o' 'name' '-t' 'snapshot' '$g_initial_source'"
-	assertNotContains "Local name-only no-op proof discovery should not fan out through parallel before work is proven." \
+	assertContains "Local identity-aware no-op proof discovery should render a direct source snapshot list." \
+		"$local_result" "'$g_LZFS' 'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$g_initial_source'"
+	assertNotContains "Local identity-aware no-op proof discovery should not fan out through parallel before work is proven." \
 		"$local_result" "$PARALLEL_BIN"
-	assertContains "Local name-only no-op proof discovery should record that source fanout was not used." \
+	assertContains "Local identity-aware no-op proof discovery should record that source fanout was not used." \
 		"$local_result" "parallel=0"
-	assertContains "Local name-only discovery should leave the metadata compression marker cleared." \
+	assertContains "Local identity-aware discovery should leave the metadata compression marker cleared." \
 		"$local_result" "compressed=0"
-	assertContains "Remote name-only no-op proof discovery should render the resolved remote zfs path." \
+	assertContains "Remote identity-aware no-op proof discovery should render the resolved remote zfs path." \
 		"$remote_result" "/remote/bin/zfs"
-	assertContains "Remote name-only discovery should use ssh for the origin host." \
+	assertContains "Remote identity-aware discovery should use ssh for the origin host." \
 		"$remote_result" "origin.example"
-	assertContains "Remote serial name-only discovery should request recursive source snapshots." \
+	assertContains "Remote serial identity-aware discovery should request recursive source snapshots." \
 		"$remote_result" "-Hr"
-	assertNotContains "Remote name-only no-op proof discovery should not fan out through origin-host GNU parallel before work is proven." \
+	assertNotContains "Remote identity-aware no-op proof discovery should not fan out through origin-host GNU parallel before work is proven." \
 		"$remote_result" "/opt/bin/parallel"
-	assertNotContains "Remote name-only no-op proof discovery should not feed a recursive dataset inventory into parallel." \
+	assertNotContains "Remote identity-aware no-op proof discovery should not feed a recursive dataset inventory into parallel." \
 		"$remote_result" "filesystem,volume"
-	assertNotContains "Remote name-only no-op proof discovery should not render per-dataset snapshot commands." \
+	assertNotContains "Remote identity-aware no-op proof discovery should not render per-dataset snapshot commands." \
 		"$remote_result" "-d"
-	assertNotContains "Remote name-only discovery should not pay for creation-order sorting on the origin." \
+	assertNotContains "Remote identity-aware discovery should not pay for creation-order sorting on the origin." \
 		"$remote_result" "creation"
-	assertContains "Remote name-only no-op proof discovery should record that source fanout was not used." \
+	assertContains "Remote identity-aware no-op proof discovery should record that source fanout was not used." \
 		"$remote_result" "parallel=0"
-	assertContains "Uncompressed remote name-only discovery should leave the compression marker cleared." \
+	assertContains "Uncompressed remote identity-aware discovery should leave the compression marker cleared." \
 		"$remote_result" "compressed=0"
-	assertContains "Compressed remote name-only discovery should use the resolved metadata compressor." \
+	assertContains "Compressed remote identity-aware discovery should use the resolved metadata compressor." \
 		"$compressed_result" "/remote/bin/zstd"
-	assertContains "Compressed remote name-only discovery should preserve the configured metadata compression level." \
+	assertContains "Compressed remote identity-aware discovery should preserve the configured metadata compression level." \
 		"$compressed_result" "-3"
-	assertContains "Compressed remote name-only discovery should append the local decompressor." \
+	assertContains "Compressed remote identity-aware discovery should append the local decompressor." \
 		"$compressed_result" "/local/bin/zstd"
-	assertNotContains "Compressed remote name-only discovery should still defer parallel fanout." \
+	assertNotContains "Compressed remote identity-aware discovery should still defer parallel fanout." \
 		"$compressed_result" "/opt/bin/parallel"
-	assertContains "Compressed remote name-only discovery should record the metadata compression marker." \
+	assertContains "Compressed remote identity-aware discovery should record the metadata compression marker." \
 		"$compressed_result" "compressed=1"
 }
 
@@ -1061,7 +1061,7 @@ test_build_source_snapshot_name_list_cmd_does_not_require_remote_awk_for_exclude
 
 	assertContains "Remote no-op proof discovery should render the recursive source snapshot query without remote awk." \
 		"$output" "/remote/bin/zfs"
-	assertNotContains "Remote no-op proof discovery should not use source-side fanout for the name-only proof." \
+	assertNotContains "Remote no-op proof discovery should not use source-side fanout for the identity-aware proof." \
 		"$output" "/opt/bin/parallel"
 	assertNotContains "Remote no-op proof discovery should not resolve remote awk for source exclude filtering." \
 		"$output" "unexpected-remote-awk"
@@ -1126,9 +1126,9 @@ test_build_source_snapshot_name_list_cmd_preserves_local_recursive_render_failur
 	)
 	status=$?
 
-	assertEquals "Local name-only no-op proof should preserve recursive snapshot-list render failures when -j was requested." \
+	assertEquals "Local identity-aware no-op proof should preserve recursive snapshot-list render failures when -j was requested." \
 		41 "$status"
-	assertEquals "Local name-only no-op proof should not emit a partial command when recursive rendering fails." \
+	assertEquals "Local identity-aware no-op proof should not emit a partial command when recursive rendering fails." \
 		"" "$output"
 }
 
@@ -1221,7 +1221,7 @@ test_build_source_snapshot_list_cmd_preserves_remote_parallel_builder_statuses()
 					return 0
 				fi
 				if [ "$1" = "/remote/bin/zfs" ] && [ "$3" = "-H" ]; then
-					printf '%s\n' "/remote/bin/zfs list -H -o name -s creation -d 1 -t snapshot {}"
+					printf '%s\n' "/remote/bin/zfs list -H -o name,guid -s creation -d 1 -t snapshot {}"
 					return 0
 				fi
 				if [ "$1" = "/remote/bin/zfs" ] && [ "$3" = "-Hr" ]; then
@@ -1598,7 +1598,7 @@ test_write_source_snapshot_list_to_file_skips_execution_in_dry_run() {
 	assertNotContains "Dry-run source snapshot discovery should not enter parallel command planning." \
 		"$(cat "$log")" "build-source-command-called"
 	assertContains "Dry-run source snapshot discovery should render the skipped command." \
-		"$(cat "$log")" "'list' '-Hr' '-o' 'name' '-s' 'creation' '-t' 'snapshot' 'tank/src'"
+		"$(cat "$log")" "'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' 'tank/src'"
 	assertContains "Dry-run source snapshot discovery should leave the background PID unset." \
 		"$output" "pid="
 	assertContains "Dry-run source snapshot discovery should create the snapshot tempfile placeholder." \
@@ -2098,9 +2098,9 @@ test_execute_source_snapshot_name_list_background_sort_cmd_runs_without_error_fi
 	)
 	status=$?
 
-	assertEquals "Name-only background sort should complete successfully without a stderr capture file." \
+	assertEquals "Identity-aware background sort should complete successfully without a stderr capture file." \
 		0 "$status"
-	assertEquals "Name-only background sort should write sorted source snapshot names." \
+	assertEquals "Identity-aware background sort should write sorted source snapshot records." \
 		"alpha
 zeta" "$(cat "$sorted_file")"
 }
@@ -2912,8 +2912,8 @@ test_write_destination_snapshot_name_sorted_list_to_files_uses_canonical_destina
 		zxfer_write_destination_snapshot_name_sorted_list_to_files "$full_file" "$norm_file"
 	)
 
-	assertContains "Fast no-op destination discovery should keep the cheap unsorted snapshot query." \
-		"$(cat "$cmd_file")" "list -Hr -o name -t snapshot backup/dst/src"
+	assertContains "Fast no-op destination discovery should keep the identity-aware unsorted snapshot query." \
+		"$(cat "$cmd_file")" "list -Hr -o name,guid -t snapshot backup/dst/src"
 	assertEquals "Fast no-op destination discovery should not stage the full raw destination list." \
 		"" "$(cat "$full_file")"
 	assertEquals "Fast no-op destination discovery should rewrite and byte-sort the destination list for cmp/comm." \
@@ -3179,8 +3179,8 @@ test_start_destination_snapshot_name_sorted_fifo_producer_streams_statuses_and_h
 
 	assertEquals "Destination FIFO producer should complete successfully." 0 "$producer_status"
 	assertEquals "Destination FIFO reader should complete successfully." 0 "$reader_status"
-	assertContains "Destination FIFO producer should keep the cheap unsorted snapshot query." \
-		"$(cat "$TEST_TMPDIR/dest_fifo.cmd")" "list -Hr -o name -t snapshot backup/dst/src"
+	assertContains "Destination FIFO producer should keep the identity-aware unsorted snapshot query." \
+		"$(cat "$TEST_TMPDIR/dest_fifo.cmd")" "list -Hr -o name,guid -t snapshot backup/dst/src"
 	assertEquals "Destination FIFO producer should normalize and byte-sort destination paths." \
 		"tank/src/child@snapB
 tank/src@snapA" "$(cat "$output_file")"
@@ -4910,14 +4910,14 @@ test_get_zfs_list_fast_remote_recursive_noop_skips_creation_order_discovery() {
 			g_option_V_very_verbose=1
 			zxfer_build_source_snapshot_name_list_cmd() {
 				g_source_snapshot_list_uses_parallel=0
-				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'guid-a'"
 			}
 			zxfer_write_source_snapshot_list_to_file() {
 				printf '%s\n' "unexpected-full-source-discovery" >>"$FULL_DISCOVERY_LOG"
 				return 99
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
-				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapA" "guid-a")
 				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
 			}
 			zxfer_get_zfs_list
@@ -4963,10 +4963,10 @@ test_get_zfs_list_fast_remote_recursive_noop_shortcuts_exact_match_without_exclu
 			g_option_d_delete_destination_snapshots=1
 			g_option_x_exclude_datasets=""
 			zxfer_build_source_snapshot_name_list_cmd() {
-				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'guid-a'"
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
-				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapA" "guid-a")
 				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
 			}
 			zxfer_filter_snapshot_file_with_excludes() {
@@ -5010,7 +5010,7 @@ test_get_zfs_list_fast_remote_recursive_noop_falls_back_when_snapshot_names_diff
 			g_option_d_delete_destination_snapshots=1
 			g_option_x_exclude_datasets=""
 			zxfer_build_source_snapshot_name_list_cmd() {
-				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'guid-a'"
 			}
 			zxfer_write_source_snapshot_list_to_file() {
 				printf '%s\n' "full-source-discovery" >>"$FULL_DISCOVERY_LOG"
@@ -5020,7 +5020,7 @@ test_get_zfs_list_fast_remote_recursive_noop_falls_back_when_snapshot_names_diff
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 				printf '%s\n' "destination-discovery" >>"$DESTINATION_CALL_LOG"
-				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapB"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapB" "guid-b")
 				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
 			}
 			zxfer_write_destination_snapshot_list_to_files() {
@@ -5058,6 +5058,76 @@ full-diff-planning" "$(cat "$full_discovery_log")"
 		"$output" "fast_attempted=1"
 	assertContains "Fallback discovery should publish the normal recursive work list." \
 		"$output" "source_list=<tank/src>"
+}
+
+test_get_zfs_list_fast_remote_recursive_noop_falls_back_when_snapshot_guids_differ() {
+	full_discovery_log="$TEST_TMPDIR/fast_remote_noop_guid_fallback.log"
+	destination_call_log="$TEST_TMPDIR/fast_remote_noop_guid_destination.log"
+	: >"$full_discovery_log"
+	: >"$destination_call_log"
+
+	output=$(
+		(
+			FULL_DISCOVERY_LOG="$full_discovery_log"
+			DESTINATION_CALL_LOG="$destination_call_log"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			g_option_d_delete_destination_snapshots=1
+			g_option_x_exclude_datasets=""
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'source-guid'"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "full-source-discovery" >>"$FULL_DISCOVERY_LOG"
+				printf '%s\t%s\n' "tank/src@snapA" "source-guid" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				printf '%s\n' "destination-discovery" >>"$DESTINATION_CALL_LOG"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapA" "destination-guid")
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				printf '%s\n' "destination-discovery" >>"$DESTINATION_CALL_LOG"
+				printf '%s\t%s\n' "backup/dst/src@snapA" "destination-guid" >"$1"
+				printf '%s\t%s\n' "tank/src@snapA" "destination-guid" >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				printf '%s\n' "full-diff-planning" >>"$FULL_DISCOVERY_LOG"
+				g_recursive_source_list="tank/src"
+				g_recursive_destination_extra_dataset_list="tank/src"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
+					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
+					[ "$7" = "backup/dst" ]; then
+					printf '%s\n' "backup/dst"
+					printf '%s\n' "backup/dst/src"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_get_zfs_list
+			printf 'fast_attempted=%s\n' "${g_source_snapshot_fast_noop_attempted:-0}"
+			printf 'source_list=<%s>\n' "${g_recursive_source_list:-}"
+			printf 'dest_extra=<%s>\n' "${g_recursive_destination_extra_dataset_list:-}"
+		)
+	)
+
+	assertEquals "A same-name GUID mismatch should fall back to full source discovery and full diff planning." \
+		"full-source-discovery
+full-diff-planning" "$(cat "$full_discovery_log")"
+	assertEquals "Destination discovery should run once for the identity proof and once again for the full fallback path." \
+		"2" "$(wc -l <"$destination_call_log" | tr -d '[:space:]')"
+	assertContains "Fast remote recursive no-op proof should record that it attempted before GUID fallback." \
+		"$output" "fast_attempted=1"
+	assertContains "Fallback discovery should queue the source dataset after GUID divergence." \
+		"$output" "source_list=<tank/src>"
+	assertContains "Fallback discovery should preserve destination-side divergence for delete/common-snapshot inspection." \
+		"$output" "dest_extra=<tank/src>"
 }
 
 test_get_zfs_list_fast_remote_recursive_noop_falls_back_when_excludes_filter_all_source_snapshots() {
@@ -5310,11 +5380,11 @@ test_try_fast_recursive_noop_discovery_reports_source_failures() {
 		) 2>&1
 	) || stderr_read_status=$?
 
-	assertContains "Fast no-op proof should preserve source snapshot stderr when the name-only source command fails." \
+	assertContains "Fast no-op proof should preserve source snapshot stderr when the identity-aware source command fails." \
 		"$source_error_output" "throw:Failed to retrieve snapshots from the source: denied:17"
 	assertEquals "Fast no-op proof should return the source command status when source discovery fails." \
 		17 "$source_error_status"
-	assertContains "Fast no-op proof should fail closed when the name-only source discovery returns no snapshots." \
+	assertContains "Fast no-op proof should fail closed when the identity-aware source discovery returns no snapshots." \
 		"$empty_source_output" "throw:Failed to retrieve snapshots from the source:1"
 	assertEquals "Fast no-op proof should return failure for an empty source snapshot list." \
 		1 "$empty_source_status"
@@ -5710,8 +5780,8 @@ test_get_zfs_list_remote_target_batches_destination_discovery() {
 				printf 'BEGIN\tpool_stderr\n'
 				printf 'END\tpool_stderr\n'
 				printf 'BEGIN\tsnapshot_stdout\n'
-				printf '%s\n' "backup/dst/src@snapA"
-				printf '%s\n' "backup/dst/src/child@snapB"
+				printf '%s\t%s\n' "backup/dst/src@snapA" "guid-a"
+				printf '%s\t%s\n' "backup/dst/src/child@snapB" "guid-b"
 				printf 'END\tsnapshot_stdout\n'
 				printf 'BEGIN\tsnapshot_stderr\n'
 				printf 'END\tsnapshot_stderr\n'
@@ -5739,7 +5809,7 @@ test_get_zfs_list_remote_target_batches_destination_discovery() {
 	assertContains "Remote destination discovery should render dataset inventory in the batch script." \
 		"$(cat "$ssh_log")" "filesystem,volume"
 	assertContains "Remote destination discovery should render snapshot listing in the batch script." \
-		"$(cat "$ssh_log")" "list -Hr -o name -t snapshot"
+		"$(cat "$ssh_log")" "list -Hr -o name,guid -t snapshot"
 	assertNotContains "Remote destination discovery should not fall back to separate destination zfs helper calls." \
 		"$(cat "$ssh_log")" "unexpected-destination-zfs"
 	assertContains "Remote destination discovery should publish the recursive destination inventory." \
@@ -5750,11 +5820,11 @@ backup/dst/src"
 	assertContains "Remote destination discovery should seed the destination snapshot dataset existence cache." \
 		"$output" "snapshot_dataset_cache=1"
 	assertContains "Remote destination discovery should preserve the raw destination snapshot cache." \
-		"$output" "raw=backup/dst/src@snapA
-backup/dst/src/child@snapB"
+		"$output" "raw=backup/dst/src@snapA	guid-a
+backup/dst/src/child@snapB	guid-b"
 	assertContains "Remote destination discovery should normalize and byte-sort destination snapshot paths for source-side diffing." \
-		"$output" "normalized=tank/src/child@snapB
-tank/src@snapA"
+		"$output" "normalized=tank/src/child@snapB	guid-b
+tank/src@snapA	guid-a"
 }
 
 test_build_remote_destination_discovery_batch_script_streams_snapshot_stdout_directly() {
@@ -5770,8 +5840,8 @@ case "$*" in
 	printf '%s\n' "backup/dst/src"
 	printf '%s\n' "backup/dst/other"
 	;;
-"list -Hr -o name -t snapshot backup/dst/src")
-	printf '%s\n' "backup/dst/src@snapA"
+"list -Hr -o name,guid -t snapshot backup/dst/src")
+	printf '%s\t%s\n' "backup/dst/src@snapA" "guid-a"
 	;;
 *)
 	printf 'unexpected zfs args: %s\n' "$*" >&2
@@ -5797,7 +5867,7 @@ EOF
 	assertContains "Remote batch should stream staged section bodies instead of expanding payload variables." \
 		"$script" "cat \"\$l_section_file\""
 	assertContains "Remote batch should stream snapshot stdout directly from zfs." \
-		"$script" "\"\$l_zfs_cmd\" list -Hr -o name -t snapshot \"\$l_destination_snapshot_dataset\" 2>\"\$l_snapshot_stderr_file\""
+		"$script" "\"\$l_zfs_cmd\" list -Hr -o name,guid -t snapshot \"\$l_destination_snapshot_dataset\" 2>\"\$l_snapshot_stderr_file\""
 	assertContains "Remote batch should clean target-side temp files on shell exit." \
 		"$script" "trap 'zxfer_cleanup_destination_discovery_batch' 0"
 	assertContains "Remote batch should use an exact fixed-string scan for the destination snapshot dataset." \
@@ -5815,7 +5885,7 @@ EOF
 	assertContains "Generated remote batch should stream destination inventory rows." \
 		"$output" "backup/dst/src"
 	assertContains "Generated remote batch should stream destination snapshot rows." \
-		"$output" "backup/dst/src@snapA"
+		"$output" "backup/dst/src@snapA	guid-a"
 	assertContains "Generated remote batch should report that snapshot listing ran." \
 		"$output" "$(printf 'STATUS\tsnapshot_ran\t1')"
 	assertContains "Generated remote batch should report snapshot status after streaming stdout." \
@@ -5891,6 +5961,66 @@ backup/dst/src@snapB	guidB" "$(cat "$snap_file")"
 		"snapshot_status=0" "$(printf '%s\n' "$parse_output" | sed -n '/^snapshot_status=/p')"
 	assertEquals "Batch parser should load snapshot_ran status from the compact sidecar." \
 		"snapshot_ran=1" "$(printf '%s\n' "$parse_output" | sed -n '/^snapshot_ran=/p')"
+}
+
+test_parse_remote_destination_discovery_batch_output_file_treats_section_bodies_as_opaque() {
+	batch_file="$TEST_TMPDIR/remote_batch_parse_opaque.out"
+	dest_file="$TEST_TMPDIR/remote_batch_parse_opaque.dest"
+	dest_err_file="$TEST_TMPDIR/remote_batch_parse_opaque.dest.err"
+	snap_file="$TEST_TMPDIR/remote_batch_parse_opaque.snap"
+	snap_err_file="$TEST_TMPDIR/remote_batch_parse_opaque.snap.err"
+	{
+		printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+		printf 'STATUS\tinventory\t0\n'
+		printf 'STATUS\tpool\t\n'
+		printf 'STATUS\tsnapshot_ran\t1\n'
+		printf 'BEGIN\tinventory_stdout\n'
+		printf '%s\n' 'backup/dst'
+		printf '%s\n' 'backup/dst/src'
+		printf 'END\tinventory_stdout\n'
+		printf 'BEGIN\tinventory_stderr\n'
+		printf 'STATUS\tthis is target stderr, not a batch status\n'
+		printf 'BEGIN\tthis is target stderr, not a nested section\n'
+		printf 'END\tnot_inventory_stderr\n'
+		printf 'END\tinventory_stderr\n'
+		printf 'BEGIN\tpool_stderr\n'
+		printf 'END\tpool_stderr\n'
+		printf 'BEGIN\tsnapshot_stdout\n'
+		printf 'END\tsnapshot_stdout\n'
+		printf 'STATUS\tsnapshot\t17\n'
+		printf 'BEGIN\tsnapshot_stderr\n'
+		printf 'STATUS\tpermission denied by target zfs\n'
+		printf 'BEGIN\tplatform-specific diagnostic\n'
+		printf 'END\tnot_snapshot_stderr\n'
+		printf 'END\tsnapshot_stderr\n'
+		printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+	} >"$batch_file"
+	: >"$dest_file"
+	: >"$dest_err_file"
+	: >"$snap_file"
+	: >"$snap_err_file"
+
+	zxfer_parse_remote_destination_discovery_batch_output_file \
+		"$batch_file" \
+		"$dest_file" \
+		"$dest_err_file" \
+		"$snap_file" \
+		"$snap_err_file"
+
+	assertContains "Batch parser should preserve inventory stderr lines that resemble status markers." \
+		"$(cat "$dest_err_file")" "STATUS	this is target stderr, not a batch status"
+	assertContains "Batch parser should preserve inventory stderr lines that resemble section markers." \
+		"$(cat "$dest_err_file")" "BEGIN	this is target stderr, not a nested section"
+	assertContains "Batch parser should preserve non-matching END marker text inside inventory stderr." \
+		"$(cat "$dest_err_file")" "END	not_inventory_stderr"
+	assertContains "Batch parser should preserve snapshot stderr lines that resemble status markers." \
+		"$(cat "$snap_err_file")" "STATUS	permission denied by target zfs"
+	assertContains "Batch parser should preserve snapshot stderr lines that resemble section markers." \
+		"$(cat "$snap_err_file")" "BEGIN	platform-specific diagnostic"
+	assertContains "Batch parser should preserve non-matching END marker text inside snapshot stderr." \
+		"$(cat "$snap_err_file")" "END	not_snapshot_stderr"
+	assertEquals "Batch parser should still load the delayed snapshot status." \
+		17 "$g_zxfer_destination_discovery_batch_snapshot_status"
 }
 
 test_destination_discovery_batch_status_loader_rejects_malformed_sidecars() {
@@ -6780,7 +6910,7 @@ test_get_zfs_list_local_destination_discovery_does_not_use_remote_batch() {
 					return 0
 				fi
 				if [ "$1" = "list" ] && [ "$2" = "-Hr" ]; then
-					printf '%s\n' "backup/dst/src@snapA"
+					printf '%s\t%s\n' "backup/dst/src@snapA" "guid-a"
 					return 0
 				fi
 				return 99
@@ -6800,12 +6930,12 @@ test_get_zfs_list_local_destination_discovery_does_not_use_remote_batch() {
 	assertContains "Local destination discovery should keep using the direct recursive dataset inventory command." \
 		"$(cat "$zfs_log")" "list -t filesystem,volume -Hr -o name backup/dst"
 	assertContains "Local destination discovery should keep using the direct unsorted destination snapshot command." \
-		"$(cat "$zfs_log")" "list -Hr -o name -t snapshot backup/dst/src"
+		"$(cat "$zfs_log")" "list -Hr -o name,guid -t snapshot backup/dst/src"
 	assertContains "Local destination discovery should still publish the recursive destination inventory." \
 		"$output" "dest=backup/dst
 backup/dst/src"
 	assertContains "Local destination discovery should still publish the raw destination snapshot cache." \
-		"$output" "raw=backup/dst/src@snapA"
+		"$output" "raw=backup/dst/src@snapA	guid-a"
 }
 
 test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
@@ -8842,7 +8972,7 @@ test_set_g_recursive_source_list_does_not_call_whole_tree_identity_validation() 
 
 	assertEquals "Recursive delta planning should skip the whole-tree identity validation pass on name-identical inputs." \
 		0 "$status"
-	assertEquals "Recursive delta planning should not emit identity-validation output when no snapshot names differ." \
+	assertEquals "Recursive delta planning should not emit identity-validation output when no snapshot identity records differ." \
 		"" "$output"
 }
 

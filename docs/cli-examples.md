@@ -65,8 +65,10 @@ Push to a remote destination:
 This end-of-run profile now includes startup latency before the first live
 send/receive pipeline, trap-cleanup timing, stage timings, and contention and
 reuse counters for ssh control-socket waits, remote-capability cache waits,
-capability-bootstrap sources (`live`, `cache`, `memory`), and any remaining
-direct remote helper probes. While the run is active, `-V` also prints
+capability-bootstrap sources (`live`, `cache`, `memory`), runtime
+artifact/cache-object churn, command rendering, live destination snapshot
+rechecks, and any remaining direct remote helper probes. While the run is
+active, `-V` also prints
 prefixed remote ssh commands, remote probe commands, and ssh control-socket
 check/open commands so a slow remote bootstrap shows the exact in-flight
 command.
