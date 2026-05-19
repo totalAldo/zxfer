@@ -554,11 +554,26 @@ write_backup_properties() {
     # Construct the command to write the backup file
     l_backup_file_cmd="echo \"$g_backup_file_contents\" | tr \";\" \"\n\" > $l_backup_file_dir/$g_backup_file_extension.$l_is_tail"
 
-    # Execute the command
+    # Execute the command. Local destinations must not go through ssh: when
+    # -T is unset, the old path tried to run ssh with an empty host while
+    # writing the backup metadata and failed before reaching local sh.
     if [ "$g_option_n_dryrun" -eq 0 ]; then
-        echo "$l_backup_file_cmd" | "$g_cmd_ssh $g_option_T_target_host" sh ||
-            throw_error "Error writing backup file. Is filesystem mounted?"
+        if [ -n "$g_option_T_target_host" ]; then
+            # Keep $g_cmd_ssh and $g_option_T_target_host word-split here
+            # because this compatibility branch stores ssh options and optional
+            # remote command prefixes, such as -T "user@host pfexec", in those
+            # scalars before appending the command to run.
+            printf '%s\n' "$l_backup_file_cmd" | $g_cmd_ssh $g_option_T_target_host sh ||
+                throw_error "Error writing backup file. Is filesystem mounted?"
+        else
+            printf '%s\n' "$l_backup_file_cmd" | sh ||
+                throw_error "Error writing backup file. Is filesystem mounted?"
+        fi
     else
-        echo "echo \"$l_backup_file_cmd\" | \"$g_cmd_ssh $g_option_T_target_host\" sh"
+        if [ -n "$g_option_T_target_host" ]; then
+            echo "echo \"$l_backup_file_cmd\" | $g_cmd_ssh $g_option_T_target_host sh"
+        else
+            echo "echo \"$l_backup_file_cmd\" | sh"
+        fi
     fi
 }
