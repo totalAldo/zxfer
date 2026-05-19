@@ -140,7 +140,10 @@ back to serial discovery. The
 source-discovery helper is still tracked for cleanup by PID, while long-lived
 send/receive workers run under the shared background-job supervisor, so abort
 cleanup validates the tracked process group or owned child set instead of
-signaling a bare wrapper-shell PID.
+signaling a bare wrapper-shell PID. The send/receive scheduler treats
+ancestor/descendant destination receives on the same target as mutually
+exclusive, but it skips blocked descendants and starts later independent
+datasets while job slots remain.
 
 ### `-x pattern` Exclude datasets from a recursive run
 

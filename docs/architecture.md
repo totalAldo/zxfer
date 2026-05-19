@@ -184,8 +184,9 @@ ownership check.
    supervisor, wait by `job_id`, and abort remaining supervised jobs through
    validated process-group or owned-child-set cleanup on the first failure.
    Parallel send/receive scheduling also serializes conflicting
-   ancestor/descendant destination datasets on the same target before it
-   spends another background slot.
+   ancestor/descendant destination datasets on the same target while a
+   ready-queue pass skips blocked descendants and starts later independent
+   datasets before waiting.
 9. Optionally transfer or restore properties, including exact-keyed v2 backup
    metadata reads, source-root-relative restore rows, and deferred post-seed
    reconciliation for datasets that were seeded into empty destinations.
@@ -237,7 +238,7 @@ flowchart TD
     S --> T["Optional grandfather deletion checks via -g"]
     T --> U["Run zxfer_copy_filesystems()"]
     N --> V{"Repeat pass?"}
-    U --> W["Spawn send/receive jobs through the supervisor, but wait first when an active destination ancestor or descendant is still running"]
+    U --> W["Fill a ready queue with supervised send/receive jobs, skipping blocked destination descendants while independent work exists"]
     W --> X["Wait for supervised background send jobs by job_id and run deferred post-seed property reconcile"]
     X --> Y["Relaunch services after -m if needed"]
     Y --> V
@@ -404,7 +405,7 @@ sequenceDiagram
     end
     Launcher->>Launcher: build the iteration list; clean no-op runs return before SSH control-socket setup
     Launcher->>Origin: open or join the metadata-coordinated ssh control socket only when send/delete/property work exists
-    loop queue datasets while job slots remain and no destination ancestor or descendant conflicts remain
+    loop fill ready queue while job slots remain
         Launcher->>Origin: start remote zfs send ... | remote compression helper
         Origin-->>Launcher: compressed replication stream over ssh
         Launcher->>Local: local decompressor | zfs receive ...
@@ -435,7 +436,7 @@ sequenceDiagram
     Launcher->>Target: run one destination discovery batch through sh -c
     Target-->>Launcher: stream snapshot_stdout and return inventory/status/stderr sections
     Launcher->>Launcher: split batch sections, normalize destination prefixes, and build identity diffs
-    loop queue datasets while no destination ancestor or descendant conflict remains
+    loop choose non-conflicting ready datasets before waiting
         Launcher->>Local: zfs send ... | local compression helper
         Local-->>Launcher: compressed replication stream
         Launcher->>Target: remote decompressor | zfs receive ...

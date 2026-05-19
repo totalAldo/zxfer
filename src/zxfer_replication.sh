@@ -1016,6 +1016,134 @@ zxfer_run_post_seed_property_reconcile() {
 	EOF
 }
 
+# Purpose: Return the normalized background send job limit for this replication
+# pass.
+# Usage: Called by the ready-queue scheduler so it matches send/receive's safe
+# fallback for unset or invalid job counts.
+# Returns: Positive integer job limit on stdout.
+zxfer_get_replication_background_send_job_limit() {
+	l_job_limit=${g_option_j_jobs:-1}
+
+	case $l_job_limit in
+	'' | *[!0-9]*) l_job_limit=1 ;;
+	esac
+
+	printf '%s\n' "$l_job_limit"
+}
+
+# Purpose: Check whether the dependency-aware replication ready queue should
+# gate dataset processing.
+# Usage: Called before selecting pending datasets so dry-run and single-job
+# executions keep the simple linear path.
+zxfer_replication_ready_queue_is_active() {
+	l_job_limit=$(zxfer_get_replication_background_send_job_limit)
+
+	[ "$l_job_limit" -gt 1 ] || return 1
+	[ "${g_option_n_dryrun:-0}" -eq 0 ] || return 1
+
+	return 0
+}
+
+# Purpose: Check whether another background send/receive job can be started.
+# Usage: Called by the replication ready queue before it spends work on a
+# dataset that may schedule a transfer.
+zxfer_replication_background_send_has_capacity() {
+	l_job_limit=$(zxfer_get_replication_background_send_job_limit)
+
+	[ "${g_count_zfs_send_jobs:-0}" -lt "$l_job_limit" ]
+}
+
+# Purpose: Check whether one pending source can be processed without waiting
+# for active background receives.
+# Usage: Called by the replication ready queue so blocked descendants can be
+# deferred while unrelated datasets continue to fill available job slots.
+zxfer_replication_source_is_ready_to_process() {
+	l_source=$1
+
+	if ! zxfer_replication_ready_queue_is_active; then
+		return 0
+	fi
+	if ! zxfer_replication_background_send_has_capacity; then
+		return 1
+	fi
+	[ -n "${g_zfs_send_job_supervisor_records:-}" ] || return 0
+
+	l_candidate_dest=$(zxfer_compute_actual_dest_for_source "$l_source")
+	if zxfer_supervised_send_job_conflicts_with_destination "${g_option_T_target_host:-}" "$l_candidate_dest"; then
+		return 1
+	fi
+
+	return 0
+}
+
+# Purpose: Append one still-pending source to the next ready-queue pass.
+# Usage: Called while rebuilding the pending dataset list after a scheduler
+# scan defers blocked work.
+zxfer_append_replication_pending_source() {
+	l_pending_sources=$1
+	l_source=$2
+
+	if [ -n "$l_pending_sources" ]; then
+		printf '%s\n%s\n' "$l_pending_sources" "$l_source"
+	else
+		printf '%s\n' "$l_source"
+	fi
+}
+
+# Purpose: Wait until a pending replication source may become ready.
+# Usage: Called when every pending source is blocked by either the configured
+# job limit or destination ancestry conflicts.
+zxfer_wait_for_replication_ready_queue_progress() {
+	l_wait_reason="destination ancestry"
+
+	if ! zxfer_replication_background_send_has_capacity; then
+		l_wait_reason="job limit"
+	fi
+	if [ "${g_zfs_send_job_queue_open:-0}" -eq 1 ]; then
+		zxfer_wait_for_next_zfs_send_job_completion "$l_wait_reason"
+	else
+		zxfer_wait_for_zfs_send_jobs "$l_wait_reason"
+	fi
+}
+
+# Purpose: Process replication datasets through a dependency-aware ready queue.
+# Usage: Called by the top-level replication loop so destination descendants
+# blocked by active parent receives do not stop later independent datasets from
+# starting.
+zxfer_process_replication_ready_queue() {
+	l_pending_sources=$1
+	l_property_pass_required=$2
+	l_post_seed_property_sources_file=$3
+
+	while [ -n "$l_pending_sources" ]; do
+		l_next_pending_sources=""
+		l_processed_source=0
+
+		while IFS= read -r l_source || [ -n "$l_source" ]; do
+			[ -n "$l_source" ] || continue
+			if zxfer_replication_source_is_ready_to_process "$l_source"; then
+				zxfer_process_source_dataset "$l_source" "$l_property_pass_required" "$l_post_seed_property_sources_file"
+				l_processed_source=1
+				continue
+			fi
+			l_next_pending_sources=$(zxfer_append_replication_pending_source "$l_next_pending_sources" "$l_source")
+		done <<-EOF
+			$l_pending_sources
+		EOF
+
+		l_pending_sources=$l_next_pending_sources
+		[ -n "$l_pending_sources" ] || return 0
+		[ "$l_processed_source" -eq 1 ] && continue
+
+		if [ -n "${g_zfs_send_job_pids:-}" ]; then
+			zxfer_wait_for_replication_ready_queue_progress
+			continue
+		fi
+
+		zxfer_throw_error "Failed to select a ready replication dataset while no send/receive jobs are active."
+	done
+}
+
 # Purpose: Copy the filesystems through the replication path owned by this
 # module.
 # Usage: Called during top-level dataset iteration and replication
@@ -1059,9 +1187,7 @@ zxfer_copy_filesystems() {
 
 	zxfer_refresh_property_tree_prefetch_context
 
-	for l_source in $l_iteration_list; do
-		zxfer_process_source_dataset "$l_source" "$l_property_pass_required" "$l_post_seed_property_sources_file"
-	done
+	zxfer_process_replication_ready_queue "$l_iteration_list" "$l_property_pass_required" "$l_post_seed_property_sources_file"
 
 	l_has_post_seed_property_sources=0
 	if [ -s "$l_post_seed_property_sources_file" ]; then

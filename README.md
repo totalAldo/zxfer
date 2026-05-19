@@ -107,8 +107,9 @@ Use remote compression:
   under a shared supervisor that records launch/completion metadata and aborts
   through validated process-group or owned-child-set cleanup instead of
   signaling a bare wrapper PID. zxfer also serializes conflicting ancestor/descendant
-  destination receives on the same target, even when spare job slots remain,
-  so parent and child datasets do not receive concurrently. Local-origin and
+  destination receives on the same target so parent and child datasets do not
+  receive concurrently, and its ready queue skips blocked descendants to start
+  later independent datasets while job slots remain. Local-origin and
   remote-origin runs require a resolved `parallel` helper on the executing
   origin host; zxfer intentionally checks only that the helper exists through
   the secure-PATH model, so operators and packages must provide an
@@ -198,10 +199,11 @@ cleanup: if zxfer cannot close a managed socket after otherwise successful
 work, it exits nonzero instead of reporting a clean run.
 
 For `-j` send/receive work, the scheduler also treats ancestor/descendant
-destination datasets on the same target as mutually exclusive. zxfer now waits
-for the conflicting receive to finish before launching the next transfer, so
-recursive parent/child destination trees no longer race each other and degrade
-later into truncated-stream collateral failures.
+destination datasets on the same target as mutually exclusive. zxfer skips
+blocked descendants and starts later independent datasets while job slots
+remain, waiting for a conflicting receive only when no pending dataset is ready
+to run. Recursive parent/child destination trees therefore no longer race each
+other and degrade later into truncated-stream collateral failures.
 
 Recursive snapshot discovery remains identity-aware: initial source and
 destination snapshot records carry `name,guid` so a same-name snapshot with a

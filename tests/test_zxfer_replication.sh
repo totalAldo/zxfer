@@ -3570,6 +3570,62 @@ tank/src/jails/mail/root
 tank/src/jails/proxy/root" "$g_zxfer_replication_iteration_list_result"
 }
 
+test_copy_filesystems_ready_queue_skips_blocked_descendant_for_independent_work() {
+	g_option_R_recursive="tank/src"
+	g_option_j_jobs=3
+	g_option_n_dryrun=0
+	g_initial_source="tank/src"
+	g_destination="backup"
+	g_recursive_source_list="tank/src/app/root
+tank/src/db/root"
+	g_recursive_source_dataset_list=""
+	g_recursive_destination_extra_dataset_list=""
+	g_zfs_send_job_pids=""
+	g_zfs_send_job_supervisor_records=""
+	g_count_zfs_send_jobs=0
+	g_zfs_send_job_queue_open=1
+	log="$TEST_TMPDIR/ready_queue.log"
+	rm -f "$log"
+
+	(
+		READY_LOG="$log"
+		zxfer_prepare_ssh_control_sockets_for_active_hosts() {
+			:
+		}
+		zxfer_refresh_property_tree_prefetch_context() {
+			printf 'refresh\n' >>"$READY_LOG"
+		}
+		zxfer_process_source_dataset() {
+			l_ready_source=$1
+			l_ready_dest=$(zxfer_compute_actual_dest_for_source "$l_ready_source")
+			printf 'process:%s dest=%s\n' "$l_ready_source" "$l_ready_dest" >>"$READY_LOG"
+			if [ "$l_ready_source" = "tank/src/db/root" ]; then
+				zxfer_register_supervised_send_job "job-db-root" 202 "$l_ready_source@snap" "$l_ready_dest" ""
+			fi
+		}
+		zxfer_wait_for_next_zfs_send_job_completion() {
+			printf 'wait_next:%s\n' "$1" >>"$READY_LOG"
+			zxfer_unregister_supervised_send_job "job-app"
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait_all:%s\n' "$1" >>"$READY_LOG"
+			g_zfs_send_job_pids=""
+			g_zfs_send_job_supervisor_records=""
+			g_count_zfs_send_jobs=0
+		}
+
+		zxfer_register_supervised_send_job "job-app" 101 "tank/src/app@snap" "backup/src/app" ""
+		zxfer_copy_filesystems
+	)
+
+	assertEquals "The ready queue should skip a blocked descendant, start later independent work, then wait only when no pending source is ready." \
+		"refresh
+process:tank/src/db/root dest=backup/src/db/root
+wait_next:destination ancestry
+process:tank/src/app/root dest=backup/src/app/root
+wait_all:final sync" "$(cat "$log")"
+}
+
 test_copy_filesystems_merges_iteration_sources_and_deduplicates_post_seed_reconcile_in_current_shell() {
 	g_option_P_transfer_property=1
 	g_option_R_recursive="tank/src"

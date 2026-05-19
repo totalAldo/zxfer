@@ -112,7 +112,10 @@ matters especially when:
   through source discovery instead of silently falling back to the serial
   recursive listing. Source discovery uses tracked background PID cleanup and
   staged stderr, while send/receive workers run under the shared supervisor
-  rather than bare wrapper-shell PID cleanup
+  rather than bare wrapper-shell PID cleanup. The send/receive ready queue
+  serializes active parent/child destination receives on the same target but can
+  skip blocked descendants and start later independent datasets while job slots
+  remain
 - custom `-Z` compression commands or default `zstd` helpers must be resolved
   per host instead of assuming one shared absolute path
 - the per-host remote-capability cache is keyed from the host spec, trusted

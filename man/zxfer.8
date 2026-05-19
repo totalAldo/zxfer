@@ -545,8 +545,9 @@ send/receive workers launched for this path run under a shared supervisor that
 records launch/completion metadata and tears them down through validated
 process-group or owned-child-set cleanup instead of signaling a bare
 wrapper-shell PID. zxfer also serializes conflicting ancestor/descendant
-destination receives on the same target, even when spare job slots remain, so
-parent and child datasets do not receive concurrently.
+destination receives on the same target so parent and child datasets do not
+receive concurrently, and its ready queue skips blocked descendants to start
+later independent datasets while job slots remain.
 .It Fl m
 After sending all snapshots, (m)igrate the source to the destination filesystem by
 unmounting the source filesystem and changing the new filesystem's

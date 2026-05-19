@@ -670,9 +670,33 @@ zxfer_open_send_job_completion_queue() {
 # resource.
 zxfer_open_send_job_completion_queue_fd() {
 	l_queue_path=$1
+	l_open_reader_pid=""
+	l_open_reader_status=0
 
-	if ! zxfer_open_send_job_completion_queue_writer_fd "$l_queue_path"; then
+	# POSIX leaves read/write opens on FIFOs undefined. Use a short-lived
+	# reader helper to let the parent open its write-only queue fd first, then
+	# open the parent reader while that writer is held.
+	(: <"$l_queue_path") &
+	l_open_reader_pid=$!
+	if ! zxfer_register_cleanup_pid "$l_open_reader_pid" "rolling send/receive completion queue open helper"; then
+		l_abort_status=0
+		zxfer_abort_direct_child_pid "$l_open_reader_pid" TERM "rolling send/receive completion queue open helper" ||
+			l_abort_status=$?
+		wait "$l_open_reader_pid" 2>/dev/null || :
+		[ "$l_abort_status" -eq 0 ] || return "$l_abort_status"
 		return 1
+	fi
+	if ! zxfer_open_send_job_completion_queue_writer_fd "$l_queue_path"; then
+		zxfer_unregister_cleanup_pid "$l_open_reader_pid"
+		zxfer_abort_direct_child_pid "$l_open_reader_pid" TERM "rolling send/receive completion queue open helper" >/dev/null 2>&1 || :
+		wait "$l_open_reader_pid" 2>/dev/null || :
+		return 1
+	fi
+	wait "$l_open_reader_pid" 2>/dev/null || l_open_reader_status=$?
+	zxfer_unregister_cleanup_pid "$l_open_reader_pid"
+	if [ "$l_open_reader_status" -ne 0 ]; then
+		exec 9>&- 2>/dev/null || true
+		return "$l_open_reader_status"
 	fi
 	if ! zxfer_open_send_job_completion_queue_reader_fd "$l_queue_path"; then
 		exec 9>&- 2>/dev/null || true
@@ -688,7 +712,7 @@ zxfer_open_send_job_completion_queue_fd() {
 # coordination before asynchronous work starts using the shared coordination
 # resource.
 zxfer_open_send_job_completion_queue_writer_fd() {
-	exec 9<>"$1"
+	exec 9>"$1"
 }
 
 # Purpose: Open the send job completion queue reader file descriptor and

@@ -974,7 +974,7 @@ test_runtime_init_default_helpers_cover_current_shell_paths() {
 	)
 
 	assertContains "Runtime metadata initialization should set the current zxfer version string." \
-		"$output" "version=2.0.0-20260430"
+		"$output" "version=2.0.0-20260519"
 	assertContains "Option default initialization should restore the single-job default." \
 		"$output" "jobs=1"
 	assertContains "Transport runtime defaults should clear cached remote capability payloads." \

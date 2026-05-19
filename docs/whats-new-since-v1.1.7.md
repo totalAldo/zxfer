@@ -174,9 +174,11 @@ These are the biggest user-visible additions since the 2019 release.
   require a resolved `parallel` helper on the executing origin host. zxfer
   checks helper existence through the secure-PATH model and intentionally
   leaves GNU Parallel-style compatibility to operators and packages. Source
-  discovery uses tracked background PID cleanup,
-  and long-lived send/receive workers use supervisor-backed teardown instead of
-  bare wrapper-shell PID cleanup
+  discovery uses tracked background PID cleanup, and long-lived send/receive
+  workers use supervisor-backed teardown instead of bare wrapper-shell PID
+  cleanup. The scheduler serializes active parent/child destination receives on
+  the same target, but skips blocked descendants and starts later independent
+  datasets while job slots remain
 - `-V`: very verbose debug output plus profiling counters
 - `-w`: raw `zfs send`
 - `-x pattern`: exclude matching datasets from recursive replication

@@ -1327,6 +1327,65 @@ test_zxfer_open_send_job_completion_queue_fd_returns_failure_when_writer_open_fa
 		1 "$status"
 }
 
+test_zxfer_open_send_job_completion_queue_fd_preserves_reader_helper_failure() {
+	missing_queue="$TEST_TMPDIR/missing-open-helper/queue"
+
+	set +e
+	(
+		zxfer_open_send_job_completion_queue_writer_fd() {
+			return 0
+		}
+		zxfer_open_send_job_completion_queue_reader_fd() {
+			return 0
+		}
+		zxfer_open_send_job_completion_queue_fd "$missing_queue" 2>/dev/null
+	)
+	status=$?
+
+	assertNotEquals "Opening the rolling queue should fail when the FIFO reader helper cannot open the queue path." \
+		0 "$status"
+}
+
+test_zxfer_open_send_job_completion_queue_writer_fd_opens_write_only() {
+	queue_file="$TEST_TMPDIR/open_queue_writer_mode"
+	printf '%s\n' "existing" >"$queue_file"
+
+	(
+		zxfer_open_send_job_completion_queue_writer_fd "$queue_file" || exit 1
+		if cat <&9 >/dev/null 2>/dev/null; then
+			exit 2
+		fi
+		printf '%s\n' "written" >&9 || exit 3
+		exec 9>&-
+	)
+	status=$?
+
+	assertEquals "The rolling queue writer fd must be write-only, not read/write." \
+		0 "$status"
+	assertEquals "The write-only helper should still publish bytes through fd 9." \
+		"written" "$(cat "$queue_file")"
+}
+
+test_zxfer_open_send_job_completion_queue_fd_round_trips_fifo_notification() {
+	queue_dir="$TEST_TMPDIR/open_queue_fifo"
+	queue_fifo="$queue_dir/queue"
+	mkdir "$queue_dir"
+	mkfifo "$queue_fifo"
+
+	(
+		zxfer_open_send_job_completion_queue_fd "$queue_fifo" || exit 1
+		printf '%s\n' "job-1" >&9 || exit 2
+		IFS= read -r line <&8 || exit 3
+		[ "$line" = "job-1" ] || exit 4
+		exec 9>&-
+		exec 8<&-
+	)
+	status=$?
+
+	assertEquals "The rolling queue should open a FIFO portably and pass notifications between fd 9 and fd 8." \
+		0 "$status"
+}
+
 test_zxfer_close_send_job_completion_queue_cleans_orphaned_queue_paths() {
 	queue_path="$TEST_TMPDIR/orphaned-queue"
 	: >"$queue_path"

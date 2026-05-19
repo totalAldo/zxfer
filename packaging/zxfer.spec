@@ -1,5 +1,5 @@
 Name:           zxfer
-Version:        2.0.0-20260430
+Version:        2.0.0-20260519
 Release:        0.1%{?dist}
 Summary:        Optimized ZFS snapshot replication script
 
@@ -77,6 +77,6 @@ install -Dm0644 man/zxfer.8 %{buildroot}%{_mandir}/man8/zxfer.8
 %{_mandir}/man8/zxfer.8*
 
 %changelog
-* Thu Apr 30 2026 Aldo Gonzalez - 2.0.0-20260430-0.1
-- Track zxfer 2.0.0-20260430 release and modernize Source URL (see CHANGELOG.txt for upstream details).
+* Thu Apr 30 2026 Aldo Gonzalez - 2.0.0-20260519-0.1
+- Track zxfer 2.0.0-20260519 release and modernize Source URL (see CHANGELOG.txt for upstream details).
 - Make platform/security docs clearer about remote helper hardening and macOS caveats, loosen the RPM spec away from a path-locked `/sbin/zfs` dependency, and make local ssh a weak dependency for remote features so downstream packagers can adapt it more easily.

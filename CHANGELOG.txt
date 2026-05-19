@@ -1,6 +1,10 @@
 CHANGELOG
 =========
 
+2026.05.19
+-Open the rolling `-j` send/receive completion queue without POSIX-undefined read/write FIFO descriptors, using separate FIFO reader/writer opens with helper cleanup so FreeBSD, illumos, macOS, and Linux shells keep the fast rolling wait path or fall back to batch waits consistently.
+-Schedule recursive `-j` send/receive work through a dependency-aware ready queue that skips descendants blocked by active parent/child destination receives and starts later independent datasets before waiting, preserving receive safety while recovering more parallel throughput.
+
 2026.05.01
 -Add an informative VM-backed performance baseline framework: `tests/run_perf_tests.sh` now records labeled `run-info.tsv`, dynamic `-V` counter columns with missing older counters left empty, advisory all-metric comparisons, and no-op cases; `tests/run_perf_compare.sh` compares two zxfer binaries without failing on regressions; and `tests/run_vm_matrix.sh --test-layer perf-compare` exports `ZXFER_VM_PERF_BASELINE_REF` with host-side `git archive` so disposable QEMU guests can compare the current checkout against `upstream-compat-final` without relying on guest `.git` metadata.
 -Extend `-V` profiling with runtime artifact, cache-object, command-rendering, and live destination snapshot recheck counters for performance measurement while keeping default output unchanged.
