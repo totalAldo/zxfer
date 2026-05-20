@@ -1,6 +1,9 @@
 CHANGELOG
 =========
 
+2026.05.20
+-Report the specific destination inventory stderr, and distinguish a missing destination dataset from a missing or inaccessible destination pool during recursive snapshot discovery, so operators can see whether bootstrap failed because the destination pool itself is unavailable.
+
 2026.05.19
 -Open the rolling `-j` send/receive completion queue without POSIX-undefined read/write FIFO descriptors, using separate FIFO reader/writer opens with helper cleanup so FreeBSD, illumos, macOS, and Linux shells keep the fast rolling wait path or fall back to batch waits consistently.
 -Schedule recursive `-j` send/receive work through a dependency-aware ready queue that skips descendants blocked by active parent/child destination receives and starts later independent datasets before waiting, preserving receive safety while recovering more parallel throughput.

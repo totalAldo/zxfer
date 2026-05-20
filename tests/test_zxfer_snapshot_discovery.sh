@@ -4332,8 +4332,8 @@ test_get_zfs_list_reports_pool_lookup_failure_when_destination_root_has_no_slash
 	status=$?
 
 	assertEquals "Missing destination roots without a slash should still fail closed when the pool lookup fails." 1 "$status"
-	assertContains "Destination-root lookup failures should preserve the documented dataset-list message." \
-		"$output" "Failed to retrieve list of datasets from the destination"
+	assertContains "Destination-root lookup failures should report the missing destination and failed pool probe." \
+		"$output" "Destination dataset [backup] is missing and destination pool [backup] could not be listed: pool lookup failed"
 }
 
 test_publish_destination_dataset_inventory_bootstraps_rootless_missing_destination() {
@@ -6276,8 +6276,8 @@ test_get_zfs_list_remote_target_batches_inventory_failures() {
 
 	assertEquals "Remote destination inventory failures should preserve the target-side status." \
 		13 "$status"
-	assertContains "Remote destination inventory failures should preserve the existing inventory failure message." \
-		"$output" "Failed to retrieve list of datasets from the destination"
+	assertContains "Remote destination inventory failures should include the target-side diagnostic." \
+		"$output" "Failed to retrieve list of datasets from the destination: permission denied"
 }
 
 test_get_zfs_list_remote_target_batches_snapshot_failures() {

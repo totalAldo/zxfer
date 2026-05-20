@@ -1730,17 +1730,28 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 		if [ -z "$l_dest_pool_status" ]; then
 			l_dest_pool=${g_destination%%/*}
 			l_dest_pool_status=0
-			zxfer_run_destination_zfs_cmd list -H -o name "$l_dest_pool" >/dev/null 2>&1 ||
+			l_dest_pool_err=$(zxfer_run_destination_zfs_cmd list -H -o name "$l_dest_pool" 2>&1 >/dev/null) ||
 				l_dest_pool_status=$?
+		else
+			l_dest_pool=${g_destination%%/*}
+			l_dest_pool_err=""
 		fi
 		if [ "$l_dest_pool_status" -eq 0 ]; then
 			g_recursive_dest_list=""
 			zxfer_mark_destination_root_missing_in_cache "$g_destination"
 			zxfer_echoV "Destination dataset missing; treating as empty list for bootstrap."
 		else
-			zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_pool_status"
+			l_dest_pool_err=$(zxfer_limit_snapshot_discovery_capture_lines "$l_dest_pool_err" 5)
+			if [ -n "$l_dest_pool_err" ]; then
+				zxfer_throw_error "Destination dataset [$g_destination] is missing and destination pool [$l_dest_pool] could not be listed: $l_dest_pool_err" "$l_dest_pool_status"
+			fi
+			zxfer_throw_error "Destination dataset [$g_destination] is missing and destination pool [$l_dest_pool] could not be listed." "$l_dest_pool_status"
 		fi
 	else
+		l_dest_err=$(zxfer_limit_snapshot_discovery_capture_lines "$l_dest_err" 5)
+		if [ -n "$l_dest_err" ]; then
+			zxfer_throw_error "Failed to retrieve list of datasets from the destination: $l_dest_err" "$l_dest_inventory_status"
+		fi
 		zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_inventory_status"
 	fi
 }
