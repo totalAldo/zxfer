@@ -1700,17 +1700,17 @@ test_zxfer_remote_capability_requested_tools_defer_parallel_for_fast_noop_scope(
 	g_option_m_migrate=0
 	g_option_P_transfer_property=0
 	g_option_o_override_property=""
-	g_option_U_skip_unsupported_properties=0
+	g_option_U_skip_unsupported_properties=1
 	g_option_e_restore_property_mode=0
 	g_option_k_backup_property_mode=0
-	g_option_g_grandfather_protection=""
+	g_option_g_grandfather_protection="enabled"
 
 	host_tools=$(zxfer_get_remote_capability_requested_tools_for_host "origin.example")
 	parallel_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool "origin.example" parallel)
 
 	assertContains "Fast recursive no-op startup scopes should still preload zfs." \
 		"$host_tools" "zfs"
-	assertNotContains "Fast recursive no-op startup scopes should defer parallel because the no-op proof uses one source stream." \
+	assertNotContains "Fast recursive no-op startup scopes should defer parallel because -U and -g cannot be consumed until the proof finds work." \
 		"$host_tools" "parallel"
 	assertContains "On-demand parallel resolution should still request parallel explicitly." \
 		"$parallel_tools" "parallel"
@@ -5229,10 +5229,10 @@ test_zxfer_preload_remote_host_capabilities_defers_parallel_for_fast_noop_scope(
 	g_option_m_migrate=0
 	g_option_P_transfer_property=0
 	g_option_o_override_property=""
-	g_option_U_skip_unsupported_properties=0
+	g_option_U_skip_unsupported_properties=1
 	g_option_e_restore_property_mode=0
 	g_option_k_backup_property_mode=0
-	g_option_g_grandfather_protection=""
+	g_option_g_grandfather_protection="enabled"
 
 	(
 		zxfer_ensure_remote_host_capabilities() {
@@ -5245,7 +5245,7 @@ test_zxfer_preload_remote_host_capabilities_defers_parallel_for_fast_noop_scope(
 
 	assertContains "Fast no-op capability preloading should still warm zfs for remote origin discovery." \
 		"$(cat "$tools_file")" "zfs"
-	assertNotContains "Fast no-op capability preloading should defer parallel because the no-op proof uses one source stream." \
+	assertNotContains "Fast no-op capability preloading should defer parallel because -U and -g cannot be consumed until the proof finds work." \
 		"$(cat "$tools_file")" "parallel"
 }
 

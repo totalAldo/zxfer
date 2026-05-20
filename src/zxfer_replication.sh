@@ -771,6 +771,28 @@ zxfer_property_pass_is_required() {
 	[ "$g_option_P_transfer_property" -eq 1 ] || [ "$g_option_o_override_property" != "" ]
 }
 
+# Purpose: Check whether -U must probe destination property support.
+# Usage: Called after snapshot discovery has populated recursive source work
+# lists so clean recursive no-op runs do not pay property-probe cost that no
+# later create or property path can consume.
+zxfer_unsupported_property_scan_is_required() {
+	[ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ] || return 1
+
+	if zxfer_property_pass_is_required; then
+		return 0
+	fi
+	if [ "${g_option_e_restore_property_mode:-0}" -eq 1 ] ||
+		[ "${g_option_k_backup_property_mode:-0}" -eq 1 ]; then
+		return 0
+	fi
+	if [ "${g_option_R_recursive:-}" = "" ]; then
+		return 0
+	fi
+	[ -n "${g_recursive_source_list:-}" ] || return 1
+
+	return 0
+}
+
 # Purpose: Sort replication iteration work breadth-first by dataset ancestry.
 # Usage: Called while building the dataset iteration list so recursive parent
 # receives are scheduled before descendants, without clustering each child
@@ -1346,7 +1368,7 @@ zxfer_initialize_replication_context() {
 	# an opportunity to exit if the source is not present
 	zxfer_get_zfs_list
 
-	if [ "$g_option_U_skip_unsupported_properties" -eq 1 ]; then
+	if zxfer_unsupported_property_scan_is_required; then
 		zxfer_calculate_unsupported_properties
 	fi
 

@@ -3516,8 +3516,12 @@ test_snapshot_discovery_need_helpers_cover_recursive_shortcuts() {
 			printf 'source_props=%s\n' "$?"
 			g_option_P_transfer_property=0
 			g_option_U_skip_unsupported_properties=1
+			g_recursive_source_list=""
 			zxfer_snapshot_discovery_needs_source_dataset_inventory
-			printf 'source_unsupported=%s\n' "$?"
+			printf 'source_unsupported_noop=%s\n' "$?"
+			g_recursive_source_list="tank/src"
+			zxfer_snapshot_discovery_needs_source_dataset_inventory
+			printf 'source_unsupported_work=%s\n' "$?"
 			g_option_U_skip_unsupported_properties=0
 
 			g_recursive_source_list="tank/src"
@@ -3553,8 +3557,10 @@ test_snapshot_discovery_need_helpers_cover_recursive_shortcuts() {
 
 	assertContains "Property transfer should require source dataset inventory." \
 		"$output" "source_props=0"
-	assertContains "Unsupported-property scanning should require source dataset inventory." \
-		"$output" "source_unsupported=0"
+	assertContains "Unsupported-property scanning should not require source dataset inventory after recursive no-op discovery." \
+		"$output" "source_unsupported_noop=1"
+	assertContains "Unsupported-property scanning should require source dataset inventory when source work may need create filtering." \
+		"$output" "source_unsupported_work=0"
 	assertContains "Pending transfers should retain snapshot record caches." \
 		"$output" "record_source=0"
 	assertContains "Pending delete inspection should retain snapshot record caches." \
@@ -4946,6 +4952,55 @@ test_get_zfs_list_fast_remote_recursive_noop_skips_creation_order_discovery() {
 	assertContains "Fast no-op proof should not load full destination records into shell state." \
 		"$output" "dest_raw=<>"
 	assertContains "Fast remote recursive no-op proof should not account source parallel fanout before work is proven." \
+		"$output" "parallel_profile=0"
+}
+
+test_get_zfs_list_fast_remote_recursive_noop_allows_noop_safe_property_and_delete_flags() {
+	full_discovery_log="$TEST_TMPDIR/fast_remote_noop_safe_flags_full_discovery.log"
+	: >"$full_discovery_log"
+
+	output=$(
+		(
+			FULL_DISCOVERY_LOG="$full_discovery_log"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			g_option_j_jobs=6
+			g_option_U_skip_unsupported_properties=1
+			g_option_g_grandfather_protection="enabled"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_source_snapshot_list_uses_parallel=0
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'guid-a'"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "unexpected-full-source-discovery" >>"$FULL_DISCOVERY_LOG"
+				return 99
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapA" "guid-a")
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_get_zfs_list
+			printf 'fast_attempted=%s\n' "${g_source_snapshot_fast_noop_attempted:-0}"
+			printf 'source_list=<%s>\n' "${g_recursive_source_list:-}"
+			printf 'source_datasets=<%s>\n' "${g_recursive_source_dataset_list:-}"
+			printf 'dest_extra=<%s>\n' "${g_recursive_destination_extra_dataset_list:-}"
+			printf 'parallel_profile=%s\n' "${g_zxfer_profile_source_snapshot_list_parallel_commands:-0}"
+		)
+	)
+
+	assertEquals "Fast no-op proof should not force full discovery only because -U or -g are enabled." \
+		"" "$(cat "$full_discovery_log")"
+	assertContains "Fast no-op proof should run when -U cannot be consumed by later no-op work." \
+		"$output" "fast_attempted=1"
+	assertContains "Fast no-op proof should leave no source transfer queue for grandfather checks." \
+		"$output" "source_list=<>"
+	assertContains "Fast no-op proof should leave no source dataset inventory for unsupported-property scans." \
+		"$output" "source_datasets=<>"
+	assertContains "Fast no-op proof should leave no destination delete queue for grandfather checks." \
+		"$output" "dest_extra=<>"
+	assertContains "Fast no-op proof should still defer full parallel source discovery under -U and -g." \
 		"$output" "parallel_profile=0"
 }
 

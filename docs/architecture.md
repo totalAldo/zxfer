@@ -233,7 +233,7 @@ flowchart TD
     O --> P["Optional -e restore metadata load before discovery"]
     P --> Q["Run zxfer_get_zfs_list() to cache source and destination state"]
     Q --> Q1["Source snapshot listing runs as a tracked background helper and later waits by PID"]
-    Q1 --> R["Optional unsupported-property probing when -U is enabled"]
+    Q1 --> R["Optional unsupported-property probing when -U has later work to filter"]
     R --> S["Optional preflight snapshot via -s or migration prep via -m"]
     S --> T["Optional grandfather deletion checks via -g"]
     T --> U["Run zxfer_copy_filesystems()"]
@@ -260,13 +260,16 @@ For eligible recursive remote-origin pulls, `zxfer_try_fast_recursive_noop_disco
 attempts a clean no-op proof before the heavier creation-order source
 discovery path. Eligibility is intentionally narrow: `-O` and `-R` must be
 active, `-T` must be absent, and snapshot creation, migration, property
-transfer or restore, backup metadata, unsupported-property filtering, property
-overrides, and grandfather protection must be inactive. The proof starts one
-recursive source `name,guid` producer even when `-j` is configured, starts one
-normalized destination `name,guid` producer, sorts both streams through private
-FIFOs, and uses `cmp -s` to prove equality. A mismatch, missing destination,
-excluded-dataset uncertainty, or stream failure falls back to full discovery or
-fails through the same staged stderr paths used by the normal discovery flow.
+transfer or restore, backup metadata, and property overrides must be inactive.
+The proof starts one recursive source `name,guid` producer even when `-j` is
+configured, starts one normalized destination `name,guid` producer, sorts both
+streams through private FIFOs, and uses `cmp -s` to prove equality. `-U`
+unsupported-property filtering and `-g` grandfather protection can remain
+enabled because a proven no-op leaves no source transfer queue, destination
+delete queue, or property/create work to consume those checks. A mismatch,
+missing destination, excluded-dataset uncertainty, or stream failure falls back
+to full discovery or fails through the same staged stderr paths used by the
+normal discovery flow.
 
 Remote target discovery has a separate `-T` optimization in
 `zxfer_run_remote_destination_discovery_batch_to_files()`. The target-side

@@ -2573,6 +2573,69 @@ unsupported
 recursive=tank/src" "$(cat "$log")"
 }
 
+test_initialize_replication_context_skips_unsupported_scan_for_recursive_noop_without_property_work() {
+	log="$TEST_TMPDIR/init_context_recursive_noop_u.log"
+	: >"$log"
+	g_initial_source="tank/src"
+
+	(
+		CTX_LOG="$log"
+		zxfer_get_zfs_list() {
+			printf 'list\n' >>"$CTX_LOG"
+			g_recursive_source_list=""
+			g_recursive_source_dataset_list=""
+			g_recursive_destination_extra_dataset_list=""
+		}
+		zxfer_calculate_unsupported_properties() {
+			printf 'unsupported\n' >>"$CTX_LOG"
+		}
+		g_option_R_recursive="tank/src"
+		g_option_U_skip_unsupported_properties=1
+		g_option_P_transfer_property=0
+		g_option_o_override_property=""
+		g_option_e_restore_property_mode=0
+		g_option_k_backup_property_mode=0
+		zxfer_initialize_replication_context
+		printf 'recursive=%s\n' "$g_recursive_source_list" >>"$CTX_LOG"
+	)
+
+	assertEquals "Recursive -U initialization should skip unsupported-property probes when discovery found no source work and no property mode can consume the result." \
+		"list
+recursive=" "$(cat "$log")"
+}
+
+test_initialize_replication_context_runs_unsupported_scan_for_recursive_send_work_without_property_pass() {
+	log="$TEST_TMPDIR/init_context_recursive_send_u.log"
+	: >"$log"
+	g_initial_source="tank/src"
+
+	(
+		CTX_LOG="$log"
+		zxfer_get_zfs_list() {
+			printf 'list\n' >>"$CTX_LOG"
+			g_recursive_source_list="tank/src/child"
+			g_recursive_source_dataset_list=""
+			g_recursive_destination_extra_dataset_list=""
+		}
+		zxfer_calculate_unsupported_properties() {
+			printf 'unsupported\n' >>"$CTX_LOG"
+		}
+		g_option_R_recursive="tank/src"
+		g_option_U_skip_unsupported_properties=1
+		g_option_P_transfer_property=0
+		g_option_o_override_property=""
+		g_option_e_restore_property_mode=0
+		g_option_k_backup_property_mode=0
+		zxfer_initialize_replication_context
+		printf 'recursive=%s\n' "$g_recursive_source_list" >>"$CTX_LOG"
+	)
+
+	assertEquals "Recursive -U initialization should still probe unsupported properties when source snapshot work may need missing-dataset create options filtered." \
+		"list
+unsupported
+recursive=tank/src/child" "$(cat "$log")"
+}
+
 test_initialize_replication_context_skips_live_validation_in_dry_run() {
 	log="$TEST_TMPDIR/init_context_dry_run.log"
 	: >"$log"
@@ -3125,6 +3188,52 @@ inspect 0 tank/src/child
 props tank/src/child
 copy tank/src/child"
 	assertEquals "Property transfer in recursive mode should force iteration over every dataset." \
+		"$expected" "$(cat "$log")"
+}
+
+test_copy_filesystems_property_no_snapshot_delta_does_not_send() {
+	g_option_P_transfer_property=1
+	g_option_R_recursive="tank/src"
+	g_initial_source="tank/src"
+	g_recursive_source_list=""
+	g_recursive_source_dataset_list="tank/src"
+	log="$TEST_TMPDIR/property_no_snapshot_delta.log"
+	rm -f "$log"
+
+	(
+		ITER_LOG="$log"
+		zxfer_set_actual_dest() {
+			g_actual_dest="backup/target/src"
+			printf 'set %s\n' "$1" >>"$ITER_LOG"
+		}
+		zxfer_inspect_delete_snap() {
+			g_dest_has_snapshots=1
+			g_last_common_snap="tank/src@autosnap_2026-05-19_18:15:01_frequently	1815"
+			g_src_snapshot_transfer_list=""
+			printf 'inspect %s %s\n' "$1" "$2" >>"$ITER_LOG"
+		}
+		zxfer_transfer_properties() {
+			printf 'props %s\n' "$1" >>"$ITER_LOG"
+		}
+		zxfer_reconcile_live_destination_snapshot_state() {
+			printf 'recheck %s\n' "$g_actual_dest" >>"$ITER_LOG"
+		}
+		zxfer_zfs_send_receive() {
+			printf 'unexpected-send %s %s %s %s\n' "$1" "$2" "$3" "$4" >>"$ITER_LOG"
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait %s\n' "$1" >>"$ITER_LOG"
+		}
+
+		zxfer_copy_filesystems
+	)
+
+	expected="set tank/src
+inspect 0 tank/src
+props tank/src
+recheck backup/target/src
+wait final sync"
+	assertEquals "Property-only recursive iterations with no per-dataset snapshot delta must not start a send." \
 		"$expected" "$(cat "$log")"
 }
 

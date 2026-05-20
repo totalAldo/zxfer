@@ -93,9 +93,11 @@ disposable guest is available. Direct host runs remain human-only.
   building the per-dataset iteration list, allocating post-seed staging files,
   refreshing property prefetch state, or preparing deferred SSH control sockets.
 - Recursive source no-op discovery now has an identity-aware proof path for `-O`
-  with a local destination and no property/migration work. Serial proof uses
-  one recursive `name,guid` ZFS query even when `-j` is configured. The proof
-  intentionally avoids source-side GNU `parallel` fanout because highly
+  with a local destination and no property/migration work. `-U` and `-g` remain
+  eligible because a proven no-op leaves no source transfer queue, destination
+  delete queue, or property/create work to consume those checks. Serial proof
+  uses one recursive `name,guid` ZFS query even when `-j` is configured. The
+  proof intentionally avoids source-side GNU `parallel` fanout because highly
   concurrent wrapper scripts can multiply per-dataset `zfs list` startup cost
   before zxfer knows there is work to transfer. Changed-source fallback still
   honors `-j` for the full creation-order discovery path.

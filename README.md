@@ -209,10 +209,13 @@ Recursive snapshot discovery remains identity-aware: initial source and
 destination snapshot records carry `name,guid` so a same-name snapshot with a
 different GUID cannot be treated as a clean match. For eligible `-O -R` pulls
 with a local destination and no snapshot creation, property, migration,
-restore, backup, target-host, or grandfather work, zxfer first tries a fast
-no-op proof. That proof compares one recursive source `name,guid` stream with
-one normalized destination `name,guid` stream and falls back to full discovery
-when the streams differ or the destination is missing.
+restore, backup, or target-host work, zxfer first tries a fast no-op proof.
+That proof compares one recursive source `name,guid` stream with one
+normalized destination `name,guid` stream and falls back to full discovery when
+the streams differ or the destination is missing. `-U` and `-g` can remain
+enabled on this proof path because exact no-op discovery leaves no source
+transfer queue, destination delete queue, or property/create work to consume
+those checks.
 
 When `-T` is used, destination discovery runs a structured target-side batch:
 recursive destination dataset inventory, the missing-root pool fallback probe,

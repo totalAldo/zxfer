@@ -271,10 +271,8 @@ zxfer_fast_recursive_noop_discovery_is_eligible() {
 	[ "${g_option_m_migrate:-0}" -eq 0 ] || return 1
 	[ "${g_option_P_transfer_property:-0}" -eq 0 ] || return 1
 	[ -z "${g_option_o_override_property:-}" ] || return 1
-	[ "${g_option_U_skip_unsupported_properties:-0}" -eq 0 ] || return 1
 	[ "${g_option_e_restore_property_mode:-0}" -eq 0 ] || return 1
 	[ "${g_option_k_backup_property_mode:-0}" -eq 0 ] || return 1
-	[ -z "${g_option_g_grandfather_protection:-}" ] || return 1
 
 	return 0
 }
@@ -2870,7 +2868,8 @@ zxfer_snapshot_discovery_needs_source_dataset_inventory() {
 		[ -n "${g_option_o_override_property:-}" ]; then
 		return 0
 	fi
-	if [ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ]; then
+	if [ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ] &&
+		[ -n "${g_recursive_source_list:-}" ]; then
 		return 0
 	fi
 
