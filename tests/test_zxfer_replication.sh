@@ -1812,7 +1812,7 @@ EOF
 				fi
 				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
 					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
-					[ "$7" = "backup/target/src/child" ]; then
+					[ "$9" = "backup/target/src/child" ]; then
 					printf '%s\n' "backup/target/src/child@base	111"
 					return 0
 				fi
