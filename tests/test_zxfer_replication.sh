@@ -4463,7 +4463,7 @@ props tank/src created=0 skip=1 dest_present=1"
 		"$expected" "$(cat "$log")"
 }
 
-test_copy_filesystems_resets_destination_property_cache_before_next_dataset_when_background_receives_are_active() {
+test_copy_filesystems_keeps_destination_property_cache_across_datasets_when_background_receives_are_active() {
 	g_option_P_transfer_property=1
 	g_option_R_recursive="tank/src"
 	g_option_n_dryrun=0
@@ -4503,17 +4503,21 @@ tank/src/child"
 		zxfer_copy_filesystems
 	)
 
+	# In-flight background receives cannot mutate the next dataset's destination
+	# state (the ready-queue ancestry gate defers conflicting datasets, and
+	# completed jobs invalidate their own subtree), so processing the next
+	# dataset must reuse the shared destination property cache instead of
+	# resetting it tree-wide.
 	expected="set tank/src
 inspect 0 tank/src
 props tank/src
 copy tank/src
 set tank/src/child
-reset-destination-cache
 inspect 0 tank/src/child
 props tank/src/child
 copy tank/src/child
 wait final sync"
-	assertEquals "When background receives are still active, zxfer should clear destination-side property caches before processing the next dataset so later property reads do not reuse stale destination state." \
+	assertEquals "When background receives are still active, the next dataset should reuse destination-side property caches; scoped invalidation happens at job completion." \
 		"$expected" "$(cat "$log")"
 }
 

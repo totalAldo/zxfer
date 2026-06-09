@@ -192,6 +192,117 @@ test_delete_snaps_throws_when_destroy_fails() {
 		"$output" "invalidated"
 }
 
+test_delete_snaps_skips_full_wipe_when_live_source_recheck_shows_snapshots() {
+	log_file="$TEST_TMPDIR/delete_guard_skip.log"
+	warn_file="$TEST_TMPDIR/delete_guard_skip_warn.log"
+	: >"$log_file"
+	: >"$warn_file"
+	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+
+	(
+		zxfer_run_source_zfs_cmd() {
+			printf 'source_probe=%s\n' "$*" >>"$log_file"
+			printf '%s\n' "tank/fs@snap1"
+		}
+		zxfer_run_destination_zfs_cmd() {
+			printf 'destination=%s\n' "$*" >>"$log_file"
+		}
+		zxfer_warn_stderr() {
+			printf '%s\n' "$1" >>"$warn_file"
+		}
+		zxfer_delete_snaps "" "$dest_list" "tank/fs"
+	)
+	status=$?
+
+	assertEquals "Skipping a suspicious full wipe should not be an error." 0 "$status"
+	assertContains "An empty cached source list must trigger a live source snapshot re-check before a full destination wipe." \
+		"$(cat "$log_file")" "source_probe=list -H -d 1 -o name -t snapshot tank/fs"
+	assertNotContains "No destination destroy may run when the live source re-check still shows snapshots." \
+		"$(cat "$log_file")" "destroy"
+	assertContains "Skipping the deletion should warn the operator about the incomplete cached listing." \
+		"$(cat "$warn_file")" "skipping destination snapshot deletion for [tank/fs]"
+}
+
+test_delete_snaps_proceeds_with_full_wipe_when_live_source_recheck_confirms_empty() {
+	log_file="$TEST_TMPDIR/delete_guard_proceed.log"
+	: >"$log_file"
+	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+
+	zxfer_run_source_zfs_cmd() {
+		printf 'source_probe=%s\n' "$*" >>"$log_file"
+		printf '%s' ""
+	}
+	zxfer_run_destination_zfs_cmd() {
+		printf 'destination=%s %s\n' "$1" "$2" >>"$log_file"
+		return 0
+	}
+	zxfer_invalidate_destination_snapshot_record_cache() {
+		:
+	}
+
+	zxfer_delete_snaps "" "$dest_list" "tank/fs"
+
+	assertContains "A genuinely snapshot-less source should still be re-checked live before a full destination wipe." \
+		"$(cat "$log_file")" "source_probe=list -H -d 1 -o name -t snapshot tank/fs"
+	assertContains "A live-confirmed empty source should preserve the existing delete-everything semantics." \
+		"$(cat "$log_file")" "destination=destroy tank/fs@snap2,snap1"
+}
+
+test_delete_snaps_fails_closed_when_live_source_recheck_fails() {
+	log_file="$TEST_TMPDIR/delete_guard_fail.log"
+	: >"$log_file"
+	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+
+	set +e
+	output=$(
+		(
+			zxfer_run_source_zfs_cmd() {
+				printf '%s\n' "ssh timeout"
+				return 43
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf 'destination=%s\n' "$*" >>"$log_file"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_delete_snaps "" "$dest_list" "tank/fs"
+		)
+	)
+	status=$?
+
+	assertEquals "A failed live source re-check must fail closed with the probe status." 43 "$status"
+	assertContains "A failed live source re-check should explain what was being verified." \
+		"$output" "Failed to re-verify source snapshots for [tank/fs] before deleting all destination snapshots"
+	assertNotContains "No destination destroy may run when the live source re-check fails." \
+		"$(cat "$log_file")" "destroy"
+}
+
+test_delete_snaps_full_wipe_without_source_dataset_keeps_legacy_behavior() {
+	log_file="$TEST_TMPDIR/delete_guard_legacy.log"
+	: >"$log_file"
+	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+
+	zxfer_run_source_zfs_cmd() {
+		printf 'source_probe=%s\n' "$*" >>"$log_file"
+	}
+	zxfer_run_destination_zfs_cmd() {
+		printf 'destination=%s %s\n' "$1" "$2" >>"$log_file"
+		return 0
+	}
+	zxfer_invalidate_destination_snapshot_record_cache() {
+		:
+	}
+
+	zxfer_delete_snaps "" "$dest_list"
+
+	assertNotContains "Callers that do not provide the source dataset should not trigger a live source probe." \
+		"$(cat "$log_file")" "source_probe"
+	assertContains "Legacy two-argument callers should keep the existing delete-everything semantics." \
+		"$(cat "$log_file")" "destination=destroy tank/fs@snap2,snap1"
+}
+
 test_grandfather_test_reports_detailed_context_for_old_snapshots() {
 	g_option_g_grandfather_protection=1
 	current_epoch=$(date +%s)

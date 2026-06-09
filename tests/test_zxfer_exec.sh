@@ -3490,7 +3490,10 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 	remote_log="$TEST_TMPDIR/remote_snapshot_list.log"
 	: >"$remote_log"
 	FAKE_SSH_LOG="$remote_log"
-	FAKE_SSH_STDOUT_OVERRIDE="payload"
+	# The canned remote output must end with the discovery success sentinel:
+	# the local pipeline strips it and fails the listing when it is missing.
+	FAKE_SSH_STDOUT_OVERRIDE="payload
+$(zxfer_get_source_discovery_sentinel_line)"
 	FAKE_SSH_SUPPRESS_STDOUT=1
 	export FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE FAKE_SSH_SUPPRESS_STDOUT
 

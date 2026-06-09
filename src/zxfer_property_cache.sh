@@ -591,9 +591,41 @@ zxfer_reset_destination_property_iteration_cache() {
 # mutation.
 # Usage: Called after receives, creates, sets, and inherits so descendant
 # inherited-property and required-property lookups cannot reuse old state.
+#
+# A mutation on one destination dataset can only change cached properties for
+# that dataset and its descendants (through inheritance), so invalidation is
+# scoped to that subtree. Resetting the whole destination cache here forced a
+# full re-derivation of every other dataset's properties after every receive
+# or set — with parallel jobs (-j) that turned each background job completion
+# into a tree-wide cache wipe and dominated wall-clock time. The full reset is
+# kept as the fallback when no authoritative destination dataset list exists
+# to enumerate descendants from.
 zxfer_invalidate_destination_property_mutation_cache() {
-	[ -n "${1:-}" ] || return 0
-	zxfer_reset_destination_property_iteration_cache
+	l_mutated_dataset=${1:-}
+
+	if [ -z "$l_mutated_dataset" ]; then
+		zxfer_reset_destination_property_iteration_cache
+		return 0
+	fi
+
+	l_known_dest_datasets=$(zxfer_get_property_tree_prefetch_dataset_list destination 2>/dev/null) ||
+		l_known_dest_datasets=""
+	if [ -z "$l_known_dest_datasets" ]; then
+		zxfer_reset_destination_property_iteration_cache
+		return 0
+	fi
+
+	zxfer_invalidate_destination_property_cache "$l_mutated_dataset"
+	while IFS= read -r l_candidate_dataset; do
+		[ -n "$l_candidate_dataset" ] || continue
+		case $l_candidate_dataset in
+		"$l_mutated_dataset"/*)
+			zxfer_invalidate_destination_property_cache "$l_candidate_dataset"
+			;;
+		esac
+	done <<-EOF
+		$l_known_dest_datasets
+	EOF
 }
 
 # Purpose: Return the property tree prefetch dataset list in the form expected

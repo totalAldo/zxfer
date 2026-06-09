@@ -25,6 +25,73 @@ EOF
 	chmod +x "$l_path"
 }
 
+create_functional_parallel_bin() {
+	l_path=$1
+	cat >"$l_path" <<'EOF'
+#!/bin/sh
+# Minimal GNU-parallel stand-in: runs the command after -- once per input
+# line (replacing {}), serially, and exits nonzero when any job fails.
+while [ $# -gt 0 ]; do
+	case $1 in
+	--)
+		shift
+		break
+		;;
+	*)
+		shift
+		;;
+	esac
+done
+l_runner=$1
+l_worst=0
+while IFS= read -r l_line; do
+	[ -n "$l_line" ] || continue
+	l_expanded=$(printf '%s' "$l_runner" | sed "s|{}|$l_line|g")
+	sh -c "$l_expanded" || l_worst=1
+done
+exit $l_worst
+EOF
+	chmod +x "$l_path"
+}
+
+create_discovery_fake_zfs_bin() {
+	l_path=$1
+	cat >"$l_path" <<'EOF'
+#!/bin/sh
+# Enumeration: zfs list -Hr -t filesystem,volume -o name SRC
+if [ "$2" = "-Hr" ]; then
+	if [ -n "${FAKE_ZFS_FAIL_ENUMERATION:-}" ]; then
+		printf '%s\n' "cannot open source" >&2
+		exit 1
+	fi
+	printf 'tank/src\ntank/src/a\ntank/src/b\n'
+	exit 0
+fi
+# Per-dataset: zfs list -H -o name,guid -s creation -d 1 -t snapshot DS
+l_dataset=${11}
+case $l_dataset in
+tank/src)
+	printf 'tank/src@s1\t111\n'
+	exit 0
+	;;
+tank/src/a)
+	if [ -n "${FAKE_ZFS_FAIL_SUBLISTING:-}" ]; then
+		printf '%s\n' "cannot open tank/src/a" >&2
+		exit 1
+	fi
+	printf 'tank/src/a@s1\t222\n'
+	exit 0
+	;;
+tank/src/b)
+	printf 'tank/src/b@s1\t333\n'
+	exit 0
+	;;
+esac
+exit 1
+EOF
+	chmod +x "$l_path"
+}
+
 create_selective_awk_failure_bin() {
 	l_path=$1
 	l_exit_status=$2
@@ -675,6 +742,168 @@ test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 		"$result" "'$g_LZFS' 'list' '-H' '-o' 'name,guid' '-s' 'creation' '-d' '1' '-t' 'snapshot' '{}'"
 	assertNotContains "Local -j discovery should not inline a prefetched dataset list." \
 		"$result" "'printf'"
+}
+
+test_build_source_snapshot_list_cmd_guards_local_parallel_discovery_with_sentinel() {
+	g_option_j_jobs=2
+	g_cmd_parallel="$PARALLEL_BIN"
+	g_option_O_origin_host=""
+
+	result=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	assertContains "Local -j discovery should capture enumeration failures instead of masking them in the pipeline." \
+		"$result" "|| exit 70"
+	assertContains "Local -j discovery should only emit the success sentinel when parallel reports success." \
+		"$result" "&& printf"
+	assertContains "Local -j discovery should reference the success sentinel constant." \
+		"$result" "$(zxfer_get_source_discovery_sentinel_line)"
+	assertContains "Local -j discovery should verify and strip the sentinel with the local filter." \
+		"$result" "sentinel_line="
+	assertContains "Local -j discovery should fail the pipeline when the sentinel is missing." \
+		"$result" "exit 65"
+}
+
+test_build_source_snapshot_list_cmd_guards_remote_parallel_discovery_with_sentinel() {
+	g_option_j_jobs=3
+	g_option_O_origin_host="origin.example"
+	g_origin_cmd_zfs="/remote/bin/zfs"
+	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_origin_parallel_cmd_host="origin.example"
+
+	g_option_z_compress=0
+	uncompressed_result=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	g_option_z_compress=1
+	g_cmd_compress="zstd -3"
+	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-3'"
+	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
+	compressed_result=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	assertContains "Remote -j discovery should capture remote enumeration failures explicitly." \
+		"$uncompressed_result" "|| exit 70"
+	assertContains "Remote -j discovery should gate the success sentinel on parallel success." \
+		"$uncompressed_result" "&& printf"
+	assertContains "Remote -j discovery should append the local sentinel filter." \
+		"$uncompressed_result" "sentinel_line="
+	assertContains "Compressed remote -j discovery should keep the sentinel inside the compressed stream." \
+		"$compressed_result" "/remote/bin/zstd"
+	assertContains "Compressed remote -j discovery should place the sentinel filter after local decompression." \
+		"$compressed_result" "'/local/bin/zstd' '-d' | "
+	assertContains "Compressed remote -j discovery should still append the local sentinel filter." \
+		"$compressed_result" "sentinel_line="
+}
+
+test_local_parallel_discovery_pipeline_strips_sentinel_on_success() {
+	fake_zfs="$TEST_TMPDIR/discovery_fake_zfs"
+	functional_parallel="$TEST_TMPDIR/discovery_functional_parallel"
+	create_discovery_fake_zfs_bin "$fake_zfs"
+	create_functional_parallel_bin "$functional_parallel"
+
+	g_option_j_jobs=2
+	g_cmd_parallel="$functional_parallel"
+	g_option_O_origin_host=""
+	g_LZFS="$fake_zfs"
+	g_cmd_zfs="$fake_zfs"
+
+	built_cmd=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	set +e
+	output=$(
+		(
+			eval "$built_cmd"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "A fully successful parallel discovery pipeline should exit zero." \
+		0 "$status"
+	assertEquals "A successful parallel discovery pipeline should emit exactly the snapshot records with the sentinel stripped." \
+		"tank/src@s1	111
+tank/src/a@s1	222
+tank/src/b@s1	333" "$output"
+}
+
+test_local_parallel_discovery_pipeline_fails_when_sub_listing_fails() {
+	fake_zfs="$TEST_TMPDIR/discovery_fake_zfs"
+	functional_parallel="$TEST_TMPDIR/discovery_functional_parallel"
+	create_discovery_fake_zfs_bin "$fake_zfs"
+	create_functional_parallel_bin "$functional_parallel"
+
+	g_option_j_jobs=2
+	g_cmd_parallel="$functional_parallel"
+	g_option_O_origin_host=""
+	g_LZFS="$fake_zfs"
+	g_cmd_zfs="$fake_zfs"
+
+	built_cmd=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	set +e
+	output=$(
+		(
+			FAKE_ZFS_FAIL_SUBLISTING=1
+			export FAKE_ZFS_FAIL_SUBLISTING
+			eval "$built_cmd"
+		) 2>/dev/null
+	)
+	status=$?
+	set -e
+
+	assertEquals "A failed per-dataset sub-listing must fail the discovery pipeline instead of passing a partial list." \
+		65 "$status"
+}
+
+test_local_parallel_discovery_pipeline_fails_when_enumeration_fails() {
+	fake_zfs="$TEST_TMPDIR/discovery_fake_zfs"
+	functional_parallel="$TEST_TMPDIR/discovery_functional_parallel"
+	create_discovery_fake_zfs_bin "$fake_zfs"
+	create_functional_parallel_bin "$functional_parallel"
+
+	g_option_j_jobs=2
+	g_cmd_parallel="$functional_parallel"
+	g_option_O_origin_host=""
+	g_LZFS="$fake_zfs"
+	g_cmd_zfs="$fake_zfs"
+
+	built_cmd=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	set +e
+	output=$(
+		(
+			FAKE_ZFS_FAIL_ENUMERATION=1
+			export FAKE_ZFS_FAIL_ENUMERATION
+			eval "$built_cmd"
+		) 2>/dev/null
+	)
+	status=$?
+	set -e
+
+	assertEquals "A failed source dataset enumeration must fail the discovery pipeline immediately." \
+		70 "$status"
 }
 
 test_build_source_snapshot_list_cmd_preserves_local_parallel_builder_statuses() {

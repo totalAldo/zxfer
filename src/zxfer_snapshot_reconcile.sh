@@ -633,6 +633,10 @@ zxfer_delete_snaps() {
 	zxfer_echoV "Begin zxfer_delete_snaps()"
 	l_zfs_source_snaps=$1
 	l_zfs_dest_snaps=$2
+	# Optional: the source dataset backing $1. When provided, an empty source
+	# snapshot list is re-verified live before the planned deletion removes
+	# every destination snapshot for the dataset.
+	l_delete_source_dataset=${3:-}
 
 	if l_snaps_to_delete=$(zxfer_get_dest_snapshots_to_delete_per_dataset "$l_zfs_source_snaps" "$l_zfs_dest_snaps"); then
 		:
@@ -645,6 +649,31 @@ zxfer_delete_snaps() {
 	if [ "$l_snaps_to_delete" = "" ]; then
 		zxfer_echoV "No snapshots to delete."
 		return
+	fi
+
+	# An empty source snapshot list plans the deletion of EVERY destination
+	# snapshot for this dataset. A truly snapshot-less source is legitimate,
+	# but an incomplete cached source listing must never be allowed to wipe
+	# the destination's history, so re-verify the source live (one round-trip,
+	# only in this suspicious case) and fail closed when the probe errors.
+	if [ -n "$l_delete_source_dataset" ]; then
+		case ${l_zfs_source_snaps:-} in
+		*[![:space:]]*) ;;
+		*)
+			l_live_source_status=0
+			l_live_source_snaps=$(zxfer_run_source_zfs_cmd list -H -d 1 -o name -t snapshot "$l_delete_source_dataset" 2>&1) ||
+				l_live_source_status=$?
+			if [ "$l_live_source_status" -ne 0 ]; then
+				zxfer_throw_error "Failed to re-verify source snapshots for [$l_delete_source_dataset] before deleting all destination snapshots: $l_live_source_snaps" "$l_live_source_status"
+			fi
+			case $l_live_source_snaps in
+			*[![:space:]]*)
+				zxfer_warn_stderr "WARNING: skipping destination snapshot deletion for [$l_delete_source_dataset]: the plan would delete every destination snapshot, but a live source re-check still shows snapshots. The cached source listing was likely incomplete."
+				return 0
+				;;
+			esac
+			;;
+		esac
 	fi
 
 	zxfer_reset_destination_snapshot_creation_cache
@@ -825,7 +854,7 @@ zxfer_inspect_delete_snap() {
 
 	# Deletes non-common snaps on destination if asked to.
 	if [ "$l_is_delete_snap" -eq 1 ]; then
-		zxfer_delete_snaps "$l_identity_source_snaps" "$l_identity_dest_snaps"
+		zxfer_delete_snaps "$l_identity_source_snaps" "$l_identity_dest_snaps" "$l_source"
 	fi
 
 	# Create a list of source snapshots to transfer, beginning with the

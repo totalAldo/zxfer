@@ -471,6 +471,33 @@ zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
 	return 0
 }
 
+# Purpose: Return the sentinel line appended to parallel discovery output on
+# success so a partially failed listing can never be mistaken for a complete
+# one.
+# Usage: Called by the parallel discovery command builders and the sentinel
+# filter so both sides agree on one constant.
+zxfer_get_source_discovery_sentinel_line() {
+	printf '%s\n' '@@ZXFER_SOURCE_SNAPSHOT_DISCOVERY_COMPLETE@@'
+}
+
+# Purpose: Build the local filter that verifies and strips the parallel
+# discovery success sentinel.
+# Usage: Appended as the final local stage of parallel discovery pipelines.
+# The filter removes the trailing sentinel line from the stream and exits 65
+# when it is absent, which the discovery wait path reports as a fatal
+# incomplete-listing error. Without this, a failed per-dataset sub-listing
+# inside `parallel` is masked by later pipeline stages (zstd or the remote
+# shell's last-command status) and zxfer would silently plan against a partial
+# snapshot list.
+zxfer_build_discovery_sentinel_filter_cmd() {
+	l_sentinel_line=$(zxfer_get_source_discovery_sentinel_line)
+
+	# shellcheck disable=SC2016  # awk program must see literal $0.
+	zxfer_build_shell_command_from_argv "${g_cmd_awk:-awk}" \
+		-v sentinel_line="$l_sentinel_line" \
+		'NR > 1 { print prev_line } { prev_line = $0 } END { if (NR == 0 || prev_line != sentinel_line) exit 65 }'
+}
+
 # Purpose: Build the source snapshot list command for the next execution or
 # comparison step.
 # Usage: Called during source and destination snapshot discovery before other
@@ -479,6 +506,12 @@ zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
 # Build the ZFS list command used to enumerate source snapshots based on the
 # current CLI state. Separating this from execution allows tests to assert on
 # the constructed pipeline without invoking ZFS.
+#
+# Parallel variants stage their pipelines so every failure is observable:
+# the dataset enumeration is captured first (exit 70 on failure), and the
+# per-dataset `parallel` listing must succeed before the success sentinel is
+# emitted. The local sentinel filter then strips the sentinel and fails the
+# whole discovery when it is missing.
 zxfer_build_source_snapshot_list_cmd() {
 	g_source_snapshot_list_uses_parallel=0
 	g_source_snapshot_list_uses_metadata_compression=0
@@ -534,7 +567,12 @@ zxfer_build_source_snapshot_list_cmd() {
 			l_status=$?
 			return "$l_status"
 		fi
-		l_remote_pipeline="$l_remote_dataset_input_cmd | $l_remote_parallel_cmd"
+		l_sentinel_line=$(zxfer_get_source_discovery_sentinel_line)
+		# Capture the dataset enumeration before fanning out so its failure is
+		# never masked by the pipeline (the remote sh has no pipefail), and only
+		# emit the success sentinel when `parallel` reports every sub-listing
+		# succeeded.
+		l_remote_pipeline="zxfer_discovery_datasets=\$($l_remote_dataset_input_cmd) || exit 70; { printf '%s\n' \"\$zxfer_discovery_datasets\" | $l_remote_parallel_cmd && printf '%s\n' '$l_sentinel_line'; }"
 		if [ "$g_option_z_compress" -eq 1 ]; then
 			g_source_snapshot_list_uses_metadata_compression=1
 			l_remote_compress_safe=$(zxfer_get_origin_metadata_compress_safe) ||
@@ -556,6 +594,13 @@ zxfer_build_source_snapshot_list_cmd() {
 		if [ "${g_source_snapshot_list_uses_metadata_compression:-0}" -eq 1 ]; then
 			l_cmd="$l_cmd | $g_cmd_decompress_safe"
 		fi
+		if l_sentinel_filter_cmd=$(zxfer_build_discovery_sentinel_filter_cmd); then
+			:
+		else
+			l_status=$?
+			return "$l_status"
+		fi
+		l_cmd="$l_cmd | $l_sentinel_filter_cmd"
 		printf '%s\n' "$l_cmd"
 		return
 	fi
@@ -581,7 +626,18 @@ zxfer_build_source_snapshot_list_cmd() {
 		l_status=$?
 		return "$l_status"
 	fi
-	l_cmd="$l_dataset_input_cmd | $l_parallel_cmd"
+	l_sentinel_line=$(zxfer_get_source_discovery_sentinel_line)
+	if l_sentinel_filter_cmd=$(zxfer_build_discovery_sentinel_filter_cmd); then
+		:
+	else
+		l_status=$?
+		return "$l_status"
+	fi
+	# Same staging as the remote variant: enumeration failures exit 70 instead
+	# of being masked by the pipeline, and the sentinel is only emitted (and
+	# then verified/stripped by the filter) when every parallel sub-listing
+	# succeeded.
+	l_cmd="zxfer_discovery_datasets=\$($l_dataset_input_cmd) || exit 70; { printf '%s\n' \"\$zxfer_discovery_datasets\" | $l_parallel_cmd && printf '%s\n' '$l_sentinel_line'; } | $l_sentinel_filter_cmd"
 	printf '%s\n' "$l_cmd"
 }
 

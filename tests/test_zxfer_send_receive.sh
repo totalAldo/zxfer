@@ -2782,7 +2782,7 @@ test_zxfer_wait_for_next_supervised_zfs_send_job_completion_succeeds_for_the_las
 		"$output" "noted=backup/dst"
 	assertContains "Successful supervised rolling waits should invalidate destination property caches for the completed destination dataset." \
 		"$output" "properties=backup/dst"
-	assertContains "Successful supervised rolling waits should invalidate destination snapshot caches after receive completion." \
+	assertNotContains "Successful supervised rolling waits must not wipe the whole-tree destination snapshot record cache; the completed receive only changed its own dataset's records and later datasets still need the shared cache." \
 		"$output" "snapshots=invalidated"
 	assertContains "Supervised rolling waits should decrement the tracked job count after a successful completion." \
 		"$output" "count=0"
@@ -2824,7 +2824,7 @@ test_zxfer_wait_for_supervised_zfs_send_jobs_batch_repairs_destination_state_on_
 		"$output" "noted=backup/dst"
 	assertContains "Successful supervised batch waits should invalidate destination property caches for the completed destination dataset." \
 		"$output" "properties=backup/dst"
-	assertContains "Successful supervised batch waits should invalidate destination snapshot caches after receive completion." \
+	assertNotContains "Successful supervised batch waits must not wipe the whole-tree destination snapshot record cache; the completed receive only changed its own dataset's records and later datasets still need the shared cache." \
 		"$output" "snapshots=invalidated"
 	assertContains "Successful supervised batch waits should clear the tracked job count after draining the batch." \
 		"$output" "count=0"

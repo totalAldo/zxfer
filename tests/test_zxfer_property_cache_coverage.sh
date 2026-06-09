@@ -976,5 +976,52 @@ test_zxfer_load_normalized_dataset_properties_preserves_live_probe_statuses() {
 		"human probe failed" "$human_output"
 }
 
+test_invalidate_destination_property_mutation_cache_scopes_to_mutated_subtree() {
+	output=$(
+		(
+			g_recursive_dest_list="backup/dst
+backup/dst/child
+backup/other"
+			zxfer_invalidate_destination_property_cache() {
+				printf 'invalidate=%s\n' "$1"
+			}
+			zxfer_reset_destination_property_iteration_cache() {
+				printf 'full-reset\n'
+			}
+			zxfer_invalidate_destination_property_mutation_cache "backup/dst"
+		)
+	)
+
+	assertContains "A destination mutation should invalidate the mutated dataset's property cache entry." \
+		"$output" "invalidate=backup/dst"
+	assertContains "A destination mutation should invalidate descendant property cache entries because inherited values may have changed." \
+		"$output" "invalidate=backup/dst/child"
+	assertNotContains "A destination mutation must not invalidate unrelated sibling datasets' property cache entries." \
+		"$output" "invalidate=backup/other"
+	assertNotContains "A destination mutation with a known dataset list must not fall back to the tree-wide property cache reset." \
+		"$output" "full-reset"
+}
+
+test_invalidate_destination_property_mutation_cache_falls_back_to_full_reset_without_dataset_list() {
+	output=$(
+		(
+			g_recursive_dest_list=""
+			zxfer_invalidate_destination_property_cache() {
+				printf 'invalidate=%s\n' "$1"
+			}
+			zxfer_reset_destination_property_iteration_cache() {
+				printf 'full-reset\n'
+			}
+			zxfer_invalidate_destination_property_mutation_cache "backup/dst"
+			zxfer_invalidate_destination_property_mutation_cache ""
+		)
+	)
+
+	assertContains "Without an authoritative destination dataset list, mutation invalidation should fall back to the tree-wide reset." \
+		"$output" "full-reset"
+	assertNotContains "Without an authoritative destination dataset list, no scoped invalidation should be attempted." \
+		"$output" "invalidate="
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

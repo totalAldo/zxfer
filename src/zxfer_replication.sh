@@ -990,9 +990,14 @@ zxfer_process_source_dataset() {
 	l_post_seed_property_sources_file=${3:-}
 
 	zxfer_set_actual_dest "$l_source"
-	if [ -n "${g_zfs_send_job_pids:-}" ]; then
-		zxfer_reset_destination_property_iteration_cache
-	fi
+	# In-flight background receives cannot affect this dataset's cached
+	# destination state: the ready-queue ancestry gate defers any dataset whose
+	# destination conflicts with an active job, completed jobs invalidate their
+	# own subtree via zxfer_finalize_supervised_send_job_success, and the live
+	# destination recheck re-probes before any send. The blanket destination
+	# property cache reset that used to run here whenever jobs were in flight
+	# forced a tree-wide property re-derivation for nearly every dataset under
+	# -j and was the parallel-mode performance regression.
 	# Reset per-dataset state derived from zxfer_transfer_properties().
 	# shellcheck disable=SC2034
 	g_dest_created_by_zxfer=0

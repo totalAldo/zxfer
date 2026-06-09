@@ -1132,7 +1132,15 @@ zxfer_finalize_supervised_send_job_success() {
 
 	zxfer_note_destination_receive_completed "$g_zxfer_send_job_record_dest_dataset"
 	zxfer_invalidate_destination_property_mutation_cache "$g_zxfer_send_job_record_dest_dataset"
-	zxfer_invalidate_destination_snapshot_record_cache
+	# The completed receive only changed the completed dataset's own snapshot
+	# records, and those have no same-iteration consumers: planning for the
+	# dataset already finished, other datasets filter the shared records to
+	# their own paths, every send/seed decision is preceded by a live
+	# destination recheck, and -Y iterations rebuild discovery state from
+	# scratch. Invalidating the whole-tree destination snapshot record cache
+	# here forced every later dataset to fall back to slower lookups once the
+	# first background job completed, without fixing any staleness that
+	# mattered.
 	return 0
 }
 
