@@ -1837,7 +1837,13 @@ zxfer_zfs_send_receive() {
 		if [ "$l_did_run_in_background" -eq 0 ]; then
 			zxfer_note_destination_receive_completed "$l_dest"
 			zxfer_invalidate_destination_property_mutation_cache "$l_dest"
-			zxfer_invalidate_destination_snapshot_record_cache
+			# Do not wipe the whole-tree destination snapshot record cache
+			# here: the receive only changed this dataset's own snapshots,
+			# planning for it already finished, and every later send/seed is
+			# preceded by a live destination recheck. The wipe also cleared
+			# the in-memory fallback list, so -d delete planning for every
+			# dataset after the first receive saw an empty destination and
+			# silently skipped its deletions.
 		fi
 		# shellcheck disable=SC2034
 		g_is_performed_send_destroy=1

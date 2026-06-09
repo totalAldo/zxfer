@@ -666,12 +666,25 @@ zxfer_delete_snaps() {
 			if [ "$l_live_source_status" -ne 0 ]; then
 				zxfer_throw_error "Failed to re-verify source snapshots for [$l_delete_source_dataset] before deleting all destination snapshots: $l_live_source_snaps" "$l_live_source_status"
 			fi
-			case $l_live_source_snaps in
-			*[![:space:]]*)
+			# The capture merges stderr so probe failures can report transport
+			# errors, but the snapshot-presence decision must only count real
+			# snapshot lines: over ssh, benign stderr (host-key notices, locale
+			# warnings, -V command echoes) lands in the same capture and must
+			# not make a genuinely empty source look populated.
+			l_live_source_has_snapshots=0
+			while IFS= read -r l_live_source_line; do
+				case $l_live_source_line in
+				"$l_delete_source_dataset@"*)
+					l_live_source_has_snapshots=1
+					;;
+				esac
+			done <<-EOF
+				$l_live_source_snaps
+			EOF
+			if [ "$l_live_source_has_snapshots" -eq 1 ]; then
 				zxfer_warn_stderr "WARNING: skipping destination snapshot deletion for [$l_delete_source_dataset]: the plan would delete every destination snapshot, but a live source re-check still shows snapshots. The cached source listing was likely incomplete."
 				return 0
-				;;
-			esac
+			fi
 			;;
 		esac
 	fi
@@ -737,7 +750,11 @@ zxfer_delete_snaps() {
 	if [ "$l_destroy_status" -ne 0 ]; then
 		zxfer_throw_error "Error when executing command." "$l_destroy_status"
 	fi
-	zxfer_invalidate_destination_snapshot_record_cache
+	# Do not wipe the whole-tree destination snapshot record cache here: the
+	# destroy only removed this dataset's own snapshots, the copy planning that
+	# follows re-probes the destination live, and the wipe also cleared the
+	# in-memory fallback list so -d delete planning for every later dataset saw
+	# an empty destination and silently skipped its deletions.
 
 	# set the flag to indicate that a destroy command was sent
 	# shellcheck disable=SC2034

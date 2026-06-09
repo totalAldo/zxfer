@@ -158,7 +158,10 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 	if ! zxfer_run_destination_zfs_cmd rollback -r "$l_dest_snapshot"; then
 		zxfer_throw_error "Failed to roll back destination [$g_actual_dest] to $l_dest_snapshot after deleting snapshots."
 	fi
-	zxfer_invalidate_destination_snapshot_record_cache
+	# Do not wipe the whole-tree destination snapshot record cache here: the
+	# rollback only changed this dataset's own snapshots, the send that follows
+	# is planned from the live recheck, and the wipe also cleared the in-memory
+	# fallback list, silently emptying -d delete planning for later datasets.
 
 	g_did_delete_dest_snapshots=0
 }

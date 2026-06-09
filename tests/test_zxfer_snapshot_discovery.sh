@@ -805,6 +805,30 @@ test_build_source_snapshot_list_cmd_guards_remote_parallel_discovery_with_sentin
 		"$compressed_result" "sentinel_line="
 }
 
+test_build_source_snapshot_name_list_cmd_guards_compressed_remote_listing_with_sentinel() {
+	g_option_O_origin_host="origin.example"
+	g_origin_cmd_zfs="/remote/bin/zfs"
+	g_option_j_jobs=1
+
+	g_option_z_compress=0
+	uncompressed_result=$(zxfer_build_source_snapshot_name_list_cmd)
+
+	g_option_z_compress=1
+	g_cmd_compress="zstd -3"
+	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-3'"
+	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
+	compressed_result=$(zxfer_build_source_snapshot_name_list_cmd)
+
+	assertNotContains "Uncompressed remote no-op proof listings propagate the zfs exit through ssh and need no sentinel." \
+		"$uncompressed_result" "$(zxfer_get_source_discovery_sentinel_line)"
+	assertContains "Compressed remote no-op proof listings must gate a success sentinel on the listing because zstd masks its exit status." \
+		"$compressed_result" "$(zxfer_get_source_discovery_sentinel_line)"
+	assertContains "Compressed remote no-op proof listings must verify and strip the sentinel locally." \
+		"$compressed_result" "sentinel_line="
+	assertContains "The sentinel filter must run after local decompression." \
+		"$compressed_result" "'/local/bin/zstd' '-d' | "
+}
+
 test_local_parallel_discovery_pipeline_strips_sentinel_on_success() {
 	fake_zfs="$TEST_TMPDIR/discovery_fake_zfs"
 	functional_parallel="$TEST_TMPDIR/discovery_functional_parallel"

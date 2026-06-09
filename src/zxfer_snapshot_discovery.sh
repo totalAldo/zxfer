@@ -339,14 +339,22 @@ zxfer_build_source_snapshot_name_list_cmd() {
 		g_source_snapshot_list_uses_metadata_compression=1
 		l_remote_compress_safe=$(zxfer_get_origin_metadata_compress_safe) ||
 			return "$?"
-		l_remote_pipeline="$l_remote_pipeline | $l_remote_compress_safe"
+		# The remote compressor masks the listing's exit status (no pipefail
+		# in the remote sh), so gate a success sentinel on the listing and
+		# verify/strip it locally — otherwise a listing that died mid-stream
+		# would surface as a truncated-but-successful result and could let the
+		# fast no-op proof falsely conclude nothing needs to transfer.
+		l_sentinel_line=$(zxfer_get_source_discovery_sentinel_line)
+		l_remote_pipeline="{ $l_remote_pipeline && printf '%s\n' '$l_sentinel_line'; } | $l_remote_compress_safe"
 	fi
 	l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_pipeline") ||
 		return "$?"
 	l_cmd=$(zxfer_build_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_shell_cmd") ||
 		return "$?"
 	if [ "${g_source_snapshot_list_uses_metadata_compression:-0}" -eq 1 ]; then
-		l_cmd="$l_cmd | $g_cmd_decompress_safe"
+		l_sentinel_filter_cmd=$(zxfer_build_discovery_sentinel_filter_cmd) ||
+			return "$?"
+		l_cmd="$l_cmd | $g_cmd_decompress_safe | $l_sentinel_filter_cmd"
 	fi
 
 	printf '%s\n' "$l_cmd"
@@ -568,10 +576,14 @@ zxfer_build_source_snapshot_list_cmd() {
 			return "$l_status"
 		fi
 		l_sentinel_line=$(zxfer_get_source_discovery_sentinel_line)
-		# Capture the dataset enumeration before fanning out so its failure is
-		# never masked by the pipeline (the remote sh has no pipefail), and only
-		# emit the success sentinel when `parallel` reports every sub-listing
-		# succeeded.
+		# Capture the dataset enumeration before fanning out: piped directly
+		# into `parallel`, a failed enumeration would look like an empty
+		# dataset list, parallel would succeed, and the sentinel would falsely
+		# mark the listing complete. Note the remote exit codes (70, or
+		# parallel's own status) are masked locally by the later pipeline
+		# stages (no pipefail); the failure reliably surfaces as the missing
+		# sentinel (filter exit 65) plus the remote stderr captured for the
+		# discovery error report.
 		l_remote_pipeline="zxfer_discovery_datasets=\$($l_remote_dataset_input_cmd) || exit 70; { printf '%s\n' \"\$zxfer_discovery_datasets\" | $l_remote_parallel_cmd && printf '%s\n' '$l_sentinel_line'; }"
 		if [ "$g_option_z_compress" -eq 1 ]; then
 			g_source_snapshot_list_uses_metadata_compression=1
@@ -633,10 +645,10 @@ zxfer_build_source_snapshot_list_cmd() {
 		l_status=$?
 		return "$l_status"
 	fi
-	# Same staging as the remote variant: enumeration failures exit 70 instead
-	# of being masked by the pipeline, and the sentinel is only emitted (and
-	# then verified/stripped by the filter) when every parallel sub-listing
-	# succeeded.
+	# Same staging as the remote variant. Locally the wrapper shell runs this
+	# command list directly, so enumeration failures surface as exit 70, and a
+	# failed parallel sub-listing withholds the sentinel so the filter fails
+	# the pipeline with exit 65.
 	l_cmd="zxfer_discovery_datasets=\$($l_dataset_input_cmd) || exit 70; { printf '%s\n' \"\$zxfer_discovery_datasets\" | $l_parallel_cmd && printf '%s\n' '$l_sentinel_line'; } | $l_sentinel_filter_cmd"
 	printf '%s\n' "$l_cmd"
 }

@@ -1164,9 +1164,10 @@ test_rollback_destination_to_last_common_snapshot_rolls_back_and_clears_flag() {
 		)
 	)
 
-	assertEquals "Rollback should target the destination snapshot matching the last common snapshot." \
-		"rollback -r backup/target/src@snap1
-invalidated=snapshots" "$(cat "$log")"
+	# The rollback only changed this dataset's own snapshots; the whole-tree
+	# snapshot record cache must survive for later datasets' delete planning.
+	assertEquals "Rollback should target the destination snapshot matching the last common snapshot without wiping the whole-tree snapshot record cache." \
+		"rollback -r backup/target/src@snap1" "$(cat "$log")"
 	assertContains "Successful rollback should clear the delete marker." "$output" "flag=0"
 }
 

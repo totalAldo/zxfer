@@ -4326,10 +4326,13 @@ test_zfs_send_receive_invalidates_destination_cache_after_live_receive() {
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 	)
 
-	assertEquals "Successful live send/receive should invalidate destination mutation caches for the receive dataset." \
+	# The receive only changed the destination dataset's own snapshots, so
+	# property caches are invalidated for that dataset but the whole-tree
+	# snapshot record cache (and its in-memory fallback) must survive for the
+	# remaining datasets' -d delete planning.
+	assertEquals "Successful live send/receive should invalidate destination property caches for the receive dataset without wiping the whole-tree snapshot record cache." \
 		"exec=sendcmd | recvcmd
-properties=backup/dst
-snapshots=invalidated" "$(cat "$log")"
+properties=backup/dst" "$(cat "$log")"
 }
 
 test_zfs_send_receive_marks_destination_hierarchy_exists_after_foreground_receive() {

@@ -142,7 +142,7 @@ test_delete_snaps_dry_run_prints_destroy_command() {
 		"$output" "Dry run: '/sbin/zfs' 'destroy' 'tank/fs@snap3'"
 }
 
-test_delete_snaps_invalidates_destination_snapshot_cache_after_live_destroy() {
+test_delete_snaps_does_not_wipe_destination_snapshot_cache_after_live_destroy() {
 	log_file="$TEST_TMPDIR/delete_invalidate_snapshot_cache.log"
 	: >"$log_file"
 	source_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
@@ -158,9 +158,11 @@ test_delete_snaps_invalidates_destination_snapshot_cache_after_live_destroy() {
 
 	zxfer_delete_snaps "$source_list" "$dest_list"
 
-	assertEquals "Successful destination snapshot destroys should invalidate destination snapshot caches after the live mutation." \
-		"destroy=destroy tank/fs@snap3
-invalidated=snapshots" "$(cat "$log_file")"
+	# The destroy only removed this dataset's own snapshots; wiping the
+	# whole-tree snapshot record cache (and its in-memory fallback) made -d
+	# delete planning for every later dataset see an empty destination.
+	assertEquals "Successful destination snapshot destroys must not wipe the whole-tree destination snapshot record cache." \
+		"destroy=destroy tank/fs@snap3" "$(cat "$log_file")"
 }
 
 test_delete_snaps_throws_when_destroy_fails() {
@@ -277,6 +279,37 @@ test_delete_snaps_fails_closed_when_live_source_recheck_fails() {
 		"$output" "Failed to re-verify source snapshots for [tank/fs] before deleting all destination snapshots"
 	assertNotContains "No destination destroy may run when the live source re-check fails." \
 		"$(cat "$log_file")" "destroy"
+}
+
+test_delete_snaps_ignores_probe_stderr_noise_when_deciding_full_wipe() {
+	log_file="$TEST_TMPDIR/delete_guard_noise.log"
+	: >"$log_file"
+	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+
+	# The production capture merges stderr (2>&1): over ssh, benign noise such
+	# as host-key notices or -V command echoes lands in the captured value on
+	# a SUCCESSFUL probe of a genuinely snapshot-less source. Only lines that
+	# are actually snapshots of the dataset may block the deletion.
+	zxfer_run_source_zfs_cmd() {
+		printf 'source_probe=%s\n' "$*" >>"$log_file"
+		printf '%s\n' "Warning: Permanently added 'src' (ED25519) to the list of known hosts."
+		printf '%s\n' "Running remote command [source aldo@src]: zfs list"
+		return 0
+	}
+	zxfer_run_destination_zfs_cmd() {
+		printf 'destination=%s %s\n' "$1" "$2" >>"$log_file"
+		return 0
+	}
+	zxfer_invalidate_destination_snapshot_record_cache() {
+		:
+	}
+
+	zxfer_delete_snaps "" "$dest_list" "tank/fs"
+
+	assertContains "The guard should still live-probe the source before a full destination wipe." \
+		"$(cat "$log_file")" "source_probe=list -H -d 1 -o name -t snapshot tank/fs"
+	assertContains "Benign transport noise in the probe capture must not block a legitimate full deletion of destination snapshots." \
+		"$(cat "$log_file")" "destination=destroy tank/fs@snap2,snap1"
 }
 
 test_delete_snaps_full_wipe_without_source_dataset_keeps_legacy_behavior() {
