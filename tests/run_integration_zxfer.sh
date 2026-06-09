@@ -2909,7 +2909,7 @@ missing_destination_error_test() {
 	if [ "$status" -ne 1 ]; then
 		fail "Missing destination list should preserve the destination lookup status 1, got $status. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -F "Failed to retrieve list of datasets from the destination" >/dev/null 2>&1; then
+	if ! printf '%s\n' "$output" | grep -F "Destination dataset [nosuchdestpool/target] is missing and destination pool [nosuchdestpool] could not be listed" >/dev/null 2>&1; then
 		fail "Missing destination error message missing. Output: $output"
 	fi
 
