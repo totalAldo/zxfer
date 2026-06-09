@@ -1,6 +1,9 @@
 CHANGELOG
 =========
 
+2026.06.09
+-perf: list destination snapshots at depth 1 in live recheck
+
 2026.05.20
 -Report the specific destination inventory stderr, and distinguish a missing destination dataset from a missing or inaccessible destination pool during recursive snapshot discovery, so operators can see whether bootstrap failed because the destination pool itself is unavailable.
 

@@ -1303,7 +1303,11 @@ zxfer_get_source_snapshot_identity_records_for_dataset() {
 zxfer_get_destination_snapshot_identity_records_for_dataset() {
 	l_dataset=$1
 
-	if l_snapshot_records=$(zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_dataset"); then
+	# Filtered to "$l_dataset"@* below, so list at depth 1 rather than
+	# recursively (mirrors the source side in
+	# zxfer_get_source_snapshot_identity_records_for_dataset). Avoids pulling the
+	# whole destination subtree just to drop the descendant snapshots.
+	if l_snapshot_records=$(zxfer_run_destination_zfs_cmd list -H -d 1 -o name,guid -t snapshot "$l_dataset"); then
 		:
 	else
 		l_status=$?

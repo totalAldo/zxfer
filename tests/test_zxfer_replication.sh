@@ -1479,9 +1479,9 @@ test_copy_snapshots_rechecks_live_destination_snapshots_before_reseeding() {
 				printf '1\n'
 			}
 			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-					[ "$7" = "backup/target/src" ]; then
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+					[ "$9" = "backup/target/src" ]; then
 					printf '%s\n' "backup/target/src@base	111"
 					return 0
 				fi
@@ -1576,9 +1576,9 @@ test_copy_snapshots_uses_existing_empty_initial_root_when_cached_missing_state_i
 				printf 'probe %s\n' "$*" >>"$PROBE_LOG"
 				return 0
 			fi
-			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-				[ "$7" = "backup/target/src" ]; then
+			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+				[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+				[ "$9" = "backup/target/src" ]; then
 				return 0
 			fi
 			printf 'unexpected %s\n' "$*" >>"$PROBE_LOG"
@@ -1616,9 +1616,9 @@ EOF
 				printf '1\n'
 			}
 			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-					[ "$7" = "backup/target/src" ]; then
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+					[ "$9" = "backup/target/src" ]; then
 					cat <<'EOF'
 backup/target/src@snap1	111
 backup/target/src@snap3	333
@@ -1662,9 +1662,9 @@ EOF
 				printf '1\n'
 			}
 			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-					[ "$7" = "backup/target/src" ]; then
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+					[ "$9" = "backup/target/src" ]; then
 					cat <<'EOF'
 backup/target/src@snap1	111
 backup/target/src@snap3	333
@@ -1719,9 +1719,9 @@ EOF
 				printf '1\n'
 			}
 			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-					[ "$7" = "backup/target/src" ]; then
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+					[ "$9" = "backup/target/src" ]; then
 					printf '%s\n' "backup/target/src@snap4	444"
 					return 0
 				fi
@@ -1760,9 +1760,9 @@ EOF
 				printf '1\n'
 			}
 			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-					[ "$7" = "backup/target/src" ]; then
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+					[ "$9" = "backup/target/src" ]; then
 					printf '%s\n' "backup/target/src@unrelated	999"
 					return 0
 				fi
@@ -1810,8 +1810,8 @@ EOF
 					printf '%s\n' "$*" >>"$PROBE_LOG"
 					return 0
 				fi
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
 					[ "$7" = "backup/target/src/child" ]; then
 					printf '%s\n' "backup/target/src/child@base	111"
 					return 0
@@ -1854,9 +1854,9 @@ EOF
 				printf '1\n'
 			}
 			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-					[ "$7" = "backup/target/src" ]; then
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+					[ "$9" = "backup/target/src" ]; then
 					printf '%s\n' "backup/target/src@snap1	111"
 					return 0
 				fi
@@ -1898,9 +1898,9 @@ test_copy_snapshots_live_recheck_requires_matching_guid() {
 				printf '1\n'
 			}
 			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-					[ "$7" = "backup/target/src" ]; then
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+					[ "$9" = "backup/target/src" ]; then
 					printf '%s\n' "backup/target/src@base	999"
 					return 0
 				fi
@@ -1949,9 +1949,9 @@ EOF
 				printf '1\n'
 			}
 			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-					[ "$7" = "backup/target/src" ]; then
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+					[ "$9" = "backup/target/src" ]; then
 					printf '%s\n' "backup/target/src@snap4	444"
 					return 0
 				fi
@@ -1993,9 +1993,9 @@ test_copy_snapshots_live_rechecks_empty_cached_transfer_list_before_skipping() {
 			printf '1\n'
 		}
 		zxfer_run_destination_zfs_cmd() {
-			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-				[ "$7" = "backup/target/src" ]; then
+			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+				[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+				[ "$9" = "backup/target/src" ]; then
 				printf 'live-list\n' >>"$COPY_LOG"
 				return 0
 			fi
@@ -2031,9 +2031,9 @@ test_copy_snapshots_live_rechecks_already_final_state_before_skipping() {
 			printf '1\n'
 		}
 		zxfer_run_destination_zfs_cmd() {
-			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-				[ "$7" = "backup/target/src" ]; then
+			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+				[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+				[ "$9" = "backup/target/src" ]; then
 				printf 'live-list\n' >>"$COPY_LOG"
 				return 0
 			fi
@@ -2076,9 +2076,9 @@ test_copy_snapshots_seeds_existing_destination_when_live_probe_confirms_no_snaps
 			printf '1\n'
 		}
 		zxfer_run_destination_zfs_cmd() {
-			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-				[ "$7" = "backup/target/src" ]; then
+			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+				[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+				[ "$9" = "backup/target/src" ]; then
 				return 0
 			fi
 			printf '%s\n' "$*" >>"$COPY_LOG"
@@ -2118,9 +2118,9 @@ test_copy_snapshots_reports_existing_empty_destination_seed_message_to_stdout() 
 				printf '1\n'
 			}
 			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-					[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-					[ "$7" = "backup/target/src" ]; then
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+					[ "$9" = "backup/target/src" ]; then
 					return 0
 				fi
 				return 1
@@ -2160,9 +2160,9 @@ test_copy_snapshots_ignores_descendant_snapshots_when_rechecking_parent_dataset(
 			printf '1\n'
 		}
 		zxfer_run_destination_zfs_cmd() {
-			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-				[ "$7" = "backup/target/src" ]; then
+			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+				[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+				[ "$9" = "backup/target/src" ]; then
 				printf '%s\n' "backup/target/src/child@base	999"
 				return 0
 			fi
@@ -2263,9 +2263,9 @@ test_copy_snapshots_skips_when_last_common_matches_final_snapshot() {
 			printf '1\n'
 		}
 		zxfer_run_destination_zfs_cmd() {
-			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-				[ "$7" = "backup/target/src" ]; then
+			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+				[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+				[ "$9" = "backup/target/src" ]; then
 				printf '%s\n' "backup/target/src@snap2"
 				return 0
 			fi
@@ -2297,9 +2297,9 @@ test_copy_snapshots_skips_rollback_when_deletions_left_no_new_sends() {
 			printf '1\n'
 		}
 		zxfer_run_destination_zfs_cmd() {
-			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-				[ "$7" = "backup/target/src" ]; then
+			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+				[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+				[ "$9" = "backup/target/src" ]; then
 				printf '%s\n' "backup/target/src@base"
 				return 0
 			fi
@@ -2332,9 +2332,9 @@ test_copy_snapshots_does_not_pre_rollback_after_deletions_without_force_flag() {
 			printf '1\n'
 		}
 		zxfer_run_destination_zfs_cmd() {
-			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-				[ "$7" = "backup/target/src" ]; then
+			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+				[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+				[ "$9" = "backup/target/src" ]; then
 				printf '%s\n' "backup/target/src@snap1	111"
 				return 0
 			fi
@@ -2368,9 +2368,9 @@ test_copy_snapshots_does_not_pre_rollback_after_older_snapshot_deletions() {
 			printf '1\n'
 		}
 		zxfer_run_destination_zfs_cmd() {
-			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "name,guid" ] && [ "$5" = "-t" ] && [ "$6" = "snapshot" ] &&
-				[ "$7" = "backup/target/src" ]; then
+			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
+				[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
+				[ "$9" = "backup/target/src" ]; then
 				printf '%s\n' "backup/target/src@snap1	111"
 				return 0
 			fi

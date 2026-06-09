@@ -171,7 +171,12 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 zxfer_get_live_destination_snapshots() {
 	zxfer_profile_increment_counter g_zxfer_profile_live_destination_snapshot_rechecks
 
-	if ! l_snapshot_records=$(zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$g_actual_dest"); then
+	# Only this dataset's own snapshots are kept below, so list at depth 1
+	# instead of recursively: a recursive listing pulls (and, for -T, ships over
+	# ssh) every descendant snapshot just to discard them. -d 1 matches the
+	# source identity listing in zxfer_snapshot_state.sh and returns exactly
+	# "$g_actual_dest"@* for the -t snapshot filter.
+	if ! l_snapshot_records=$(zxfer_run_destination_zfs_cmd list -H -d 1 -o name,guid -t snapshot "$g_actual_dest"); then
 		printf '%s\n' "$l_snapshot_records"
 		return 1
 	fi
