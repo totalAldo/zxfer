@@ -755,6 +755,13 @@ zxfer_perf_run_fanout_case() {
 		zxfer_perf_write_payload_mb "$l_child" "payload.bin" "$ZXFER_PERF_PAYLOAD_MB"
 		l_perf_fanout_dataset_index=$((l_perf_fanout_dataset_index + 1))
 	done
+	if [ "$l_incr" -eq 1 ]; then
+		# Seed incremental fixtures with a base snapshot so baseline binaries
+		# whose planner mishandles single-snapshot datasets (for example
+		# upstream-compat-final re-sending @s1 incrementally from itself) can
+		# still seed the destination before the measured @s1->@s2 increment.
+		zfs snap -r "$l_src_parent@s0"
+	fi
 	zfs snap -r "$l_src_parent@s1"
 
 	l_perf_fanout_estimate_index=1
