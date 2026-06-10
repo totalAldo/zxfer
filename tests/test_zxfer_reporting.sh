@@ -1237,6 +1237,46 @@ test_zxfer_profile_add_elapsed_ms_ignores_empty_counter_names_and_invalid_end_va
 has_data=0" "$output"
 }
 
+test_zxfer_profile_recorders_always_return_success() {
+	# Regression: profiling recorders are often the final statement of a
+	# caller, so a non-zero recorder status leaks into replication control
+	# flow. With -V active, zxfer_profile_record_zfs_call previously returned
+	# 1 for destination-side calls because a trailing "[ side = source ] &&"
+	# guard failed; that aborted batched -T destination discovery.
+	l_failures=""
+	for l_verbose in 0 1; do
+		g_option_V_very_verbose=$l_verbose
+		for l_stage in "" "snapshot discovery" "send/receive" "property transfer"; do
+			g_zxfer_failure_stage=$l_stage
+			for l_side in source destination other; do
+				for l_verb in list get send receive; do
+					if ! zxfer_profile_record_zfs_call "$l_side" "$l_verb"; then
+						l_failures="$l_failures zfs_call:$l_verbose:$l_stage:$l_side:$l_verb"
+					fi
+				done
+			done
+		done
+		for l_bucket in source_inspection destination_inspection unknown_bucket; do
+			if ! zxfer_profile_record_bucket "$l_bucket"; then
+				l_failures="$l_failures bucket:$l_verbose:$l_bucket"
+			fi
+		done
+		for l_bootstrap in live cache memory unknown_source; do
+			if ! zxfer_profile_record_remote_capability_bootstrap_source "$l_bootstrap"; then
+				l_failures="$l_failures bootstrap:$l_verbose:$l_bootstrap"
+			fi
+		done
+		if ! zxfer_profile_record_ssh_invocation "user@host" ""; then
+			l_failures="$l_failures ssh:$l_verbose"
+		fi
+	done
+	g_zxfer_failure_stage=""
+	g_option_V_very_verbose=0
+
+	assertEquals "Profiling recorders must never return a non-zero status." \
+		"" "$l_failures"
+}
+
 test_throw_usage_error_writes_message_and_usage_to_stderr() {
 	stdout_file="$TEST_TMPDIR/throw_usage.stdout"
 	stderr_file="$TEST_TMPDIR/throw_usage.stderr"

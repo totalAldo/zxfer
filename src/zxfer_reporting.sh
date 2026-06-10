@@ -420,6 +420,8 @@ zxfer_profile_record_bucket() {
 		zxfer_profile_increment_counter g_zxfer_profile_bucket_send_receive_setup
 		;;
 	esac
+
+	return 0
 }
 
 # Purpose: Record or emit the record ZFS call for end-of-run profiling.
@@ -469,24 +471,37 @@ zxfer_profile_record_zfs_call() {
 			zxfer_profile_record_bucket send_receive_setup
 			;;
 		list | get)
-			[ "$l_side" = "destination" ] && zxfer_profile_record_bucket destination_inspection
-			[ "$l_side" = "source" ] && zxfer_profile_record_bucket source_inspection
+			if [ "$l_side" = "destination" ]; then
+				zxfer_profile_record_bucket destination_inspection
+			elif [ "$l_side" = "source" ]; then
+				zxfer_profile_record_bucket source_inspection
+			fi
 			;;
 		esac
 		;;
 	"snapshot discovery")
-		[ "$l_side" = "destination" ] && zxfer_profile_record_bucket destination_inspection
-		[ "$l_side" = "source" ] && zxfer_profile_record_bucket source_inspection
+		if [ "$l_side" = "destination" ]; then
+			zxfer_profile_record_bucket destination_inspection
+		elif [ "$l_side" = "source" ]; then
+			zxfer_profile_record_bucket source_inspection
+		fi
 		;;
 	*)
 		case "$l_verb" in
 		list | get)
-			[ "$l_side" = "destination" ] && zxfer_profile_record_bucket destination_inspection
-			[ "$l_side" = "source" ] && zxfer_profile_record_bucket source_inspection
+			if [ "$l_side" = "destination" ]; then
+				zxfer_profile_record_bucket destination_inspection
+			elif [ "$l_side" = "source" ]; then
+				zxfer_profile_record_bucket source_inspection
+			fi
 			;;
 		esac
 		;;
 	esac
+
+	# Profiling must never alter caller control flow; callers may invoke a
+	# recorder as their final statement and propagate its status.
+	return 0
 }
 
 # Purpose: Record or emit the record SSH invocation for end-of-run profiling.
@@ -523,6 +538,8 @@ zxfer_profile_record_ssh_invocation() {
 	else
 		zxfer_profile_increment_counter g_zxfer_profile_other_ssh_shell_invocations
 	fi
+
+	return 0
 }
 
 # Purpose: Record or emit the record remote capability bootstrap source for
@@ -544,6 +561,8 @@ zxfer_profile_record_remote_capability_bootstrap_source() {
 		zxfer_profile_increment_counter g_zxfer_profile_remote_capability_bootstrap_memory
 		;;
 	esac
+
+	return 0
 }
 
 # Purpose: Record or emit the emit summary for end-of-run profiling.

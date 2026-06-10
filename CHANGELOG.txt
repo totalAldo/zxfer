@@ -1,6 +1,9 @@
 CHANGELOG
 =========
 
+2026.06.10
+-Fix `-V` aborting batched `-T` destination discovery: profiling recorders could return a non-zero status from a trailing side-classification guard, and the batch helper propagated that status as a discovery failure ("Failed to retrieve list of datasets from the destination"). Profiling recorders now always return success, with regression coverage pinning that `-V` never changes replication outcomes.
+
 2026.06.09
 -perf: list destination snapshots at depth 1 in live recheck
 

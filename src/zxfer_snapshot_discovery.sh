@@ -1628,6 +1628,8 @@ zxfer_record_remote_destination_discovery_batch_zfs_profile() {
 	if [ "${g_zxfer_destination_discovery_batch_snapshot_ran:-0}" -eq 1 ]; then
 		zxfer_profile_record_zfs_call destination list
 	fi
+
+	return 0
 }
 
 # Purpose: Run target-side destination discovery through one remote SSH shell

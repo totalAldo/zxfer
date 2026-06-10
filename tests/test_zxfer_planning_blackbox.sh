@@ -456,4 +456,29 @@ test_delete_option_live_destroys_only_extra_destination_snapshot() {
 		"grep -q '^get -H -o name,value -p creation $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@' '$ZFS_LOG'"
 }
 
+# Invariant: -V must not change replication outcomes. Regression for the
+# batched -T destination discovery aborting under -V because a profiling
+# recorder's non-zero status leaked into the batch function's return value
+# (zxfer_profile_record_zfs_call returned 1 for destination-side calls).
+test_remote_target_batch_discovery_succeeds_with_very_verbose() {
+	planning_setup_env
+	zxfer_mockbin_write_minimal_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write minimal mock ssh."
+	SSH_LOG="$CASE_DIR/ssh.log"
+	export MOCK_SSH_LOG="$SSH_LOG"
+
+	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
+		planning_run_zxfer "$FIXTURE_DIR/noop" -V -O localhost -T localhost -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_remote_noop_status=$?
+	unset MOCK_SSH_LOG
+
+	assertEquals "-V remote no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_remote_noop_status"
+	assertTrue "the batched -T destination discovery must have run" \
+		"grep -q 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1' '$SSH_LOG'"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+}
+
 . "$SHUNIT2_BIN"

@@ -222,6 +222,34 @@ zxfer_mockbin_write_counting_wrapper() {
 	chmod +x "$l_mockbin_wrapper_path"
 }
 
+# Purpose: Write a minimal mock ssh with real-ssh command semantics: option
+# tokens are skipped, the host token is dropped, and the remaining arguments
+# are joined with spaces and executed locally through `sh -c`, so commands
+# resolve helpers (including the canned zfs) from the inherited PATH.
+# Usage: zxfer_mockbin_write_minimal_ssh <path>. The generated script appends
+# each invocation's argv to $MOCK_SSH_LOG when set. Drive zxfer with
+# PATH/ZXFER_SECURE_PATH pointing at the mock dir first so "remote" commands
+# stay inside the mock toolchain.
+zxfer_mockbin_write_minimal_ssh() {
+	l_mockbin_ssh_path=$1
+
+	cat >"$l_mockbin_ssh_path" <<'EOF'
+#!/bin/sh
+[ -n "${MOCK_SSH_LOG:-}" ] && printf '%s\n' "$*" >>"$MOCK_SSH_LOG"
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-o) shift 2 ;;
+	-*) shift ;;
+	*) break ;;
+	esac
+done
+shift
+[ $# -gt 0 ] || exit 0
+exec sh -c "$*"
+EOF
+	chmod +x "$l_mockbin_ssh_path"
+}
+
 # Purpose: Emit name<TAB>guid snapshot records for the fixture tree with
 # deterministic 19-digit guids derived from dataset and snapshot indexes.
 # Usage: Internal generator shared by the fixture-state writer. Arguments:

@@ -23,14 +23,14 @@ lines	src/zxfer_property_cache.sh	1411
 lines	src/zxfer_property_reconcile.sh	2482
 lines	src/zxfer_remote_hosts.sh	3860
 lines	src/zxfer_replication.sh	1630
-lines	src/zxfer_reporting.sh	1368
+lines	src/zxfer_reporting.sh	1387
 lines	src/zxfer_runtime.sh	2393
 lines	src/zxfer_send_receive.sh	1853
-lines	src/zxfer_snapshot_discovery.sh	3804
+lines	src/zxfer_snapshot_discovery.sh	3806
 lines	src/zxfer_snapshot_reconcile.sh	880
 lines	src/zxfer_snapshot_state.sh	1386
 lines	zxfer	211
-lines	TOTAL	28706
+lines	TOTAL	28727
 functions	src/zxfer_background_job_runner.sh	15
 functions	src/zxfer_background_jobs.sh	28
 functions	src/zxfer_backup_metadata.sh	87
