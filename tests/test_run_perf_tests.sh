@@ -93,6 +93,22 @@ test_perf_apply_profile_defaults_rejects_unknown_cases() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_case_list_registers_incremental_and_pull_noop_cases() {
+	assertEquals "The case registry should pin the full scenario matrix in stable order." \
+		"chain_local chain_local_noop chain_local_incr fanout_local_j1_props fanout_local_j1_incr fanout_local_j4_props fanout_local_j4_props_noop chain_remote_mock chain_remote_mock_noop chain_remote_mock_pull_noop chain_remote_mock_compressed" \
+		"$ZXFER_PERF_CASE_LIST"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_case_descriptions_cover_all_registered_cases() {
+	for l_case_name in $ZXFER_PERF_CASE_LIST; do
+		l_description=$(zxfer_perf_case_description "$l_case_name")
+		assertNotEquals "Registered perf case $l_case_name should have a case-specific description." \
+			"custom performance case" "$l_description"
+	done
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_estimate_send_bytes_uses_first_full_send_plus_incrementals() {
 	zfs() {
 		case "$*" in
@@ -113,6 +129,26 @@ test_perf_estimate_send_bytes_uses_first_full_send_plus_incrementals() {
 
 	assertEquals "Chain fixtures should estimate full first snapshot plus incremental range." \
 		"1000" "$result"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_estimate_incremental_send_bytes_uses_incremental_range_only() {
+	zfs() {
+		case "$*" in
+		"send -nP -I pool/src@s5 pool/src@s6")
+			printf '%s\n' "size	250"
+			;;
+		*)
+			printf '%s\n' "unexpected zfs args: $*" >&2
+			return 1
+			;;
+		esac
+	}
+
+	result=$(zxfer_perf_estimate_incremental_send_bytes "pool/src@s5" "pool/src@s6")
+
+	assertEquals "Incremental fixtures should estimate only the newest snapshot increment." \
+		"250" "$result"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -356,6 +392,55 @@ test_perf_run_case_sample_dispatches_noop_cases() {
 		"$output" "fanout:fanout_local_j4_props_noop:4:1"
 	assertContains "Remote mock no-op should keep the remote flag and set the no-op flag." \
 		"$output" "chain:chain_remote_mock_noop:1:1"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_run_case_sample_dispatches_incremental_and_pull_cases() {
+	ZXFER_PERF_OUTPUT_DIR="$TEST_TMPDIR/perf-incr-dispatch"
+	ZXFER_PERF_SAMPLES=1
+	ZXFER_PERF_WARMUPS=0
+	dispatch_log="$TEST_TMPDIR/incr-dispatch.log"
+	mkdir -p "$ZXFER_PERF_OUTPUT_DIR"
+	: >"$dispatch_log"
+
+	zxfer_perf_run_chain_case() {
+		printf 'chain:%s:%s:%s:%s\n' "$1" "$4" "${6:-0}" "${7:-0}" >>"$dispatch_log"
+	}
+	zxfer_perf_run_fanout_case() {
+		printf 'fanout:%s:%s:%s:%s\n' "$1" "$4" "${5:-0}" "${6:-0}" >>"$dispatch_log"
+	}
+
+	zxfer_perf_run_case_sample chain_local_incr sample 1 1 3
+	zxfer_perf_run_case_sample fanout_local_j1_incr sample 1 2 3
+	zxfer_perf_run_case_sample chain_remote_mock_pull_noop sample 1 3 3
+
+	output=$(cat "$dispatch_log")
+	assertContains "Local chain incremental should stay local and set the incremental flag." \
+		"$output" "chain:chain_local_incr:0:0:1"
+	assertContains "Fanout incremental should keep one job and set the incremental flag." \
+		"$output" "fanout:fanout_local_j1_incr:1:0:1"
+	assertContains "Remote pull no-op should use the pull mock-remote mode and set only the no-op flag." \
+		"$output" "chain:chain_remote_mock_pull_noop:2:1:0"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_invoke_chain_replication_pull_mode_uses_remote_origin_only() {
+	ZXFER_BIN="$TEST_TMPDIR/zxfer-args-echo"
+	printf '%s\n' "#!/bin/sh" 'printf "%s\n" "$*"' >"$ZXFER_BIN"
+	chmod 700 "$ZXFER_BIN"
+	stdout_file="$TEST_TMPDIR/pull-invoke.stdout"
+	stderr_file="$TEST_TMPDIR/pull-invoke.stderr"
+
+	zxfer_perf_invoke_chain_replication 2 0 "pool/src" "pool/dest" \
+		"$stdout_file" "$stderr_file" "$TEST_TMPDIR/pull-invoke.mock_ssh.log" "$TEST_TMPDIR/mock-bin:/usr/bin"
+
+	output=$(cat "$stdout_file")
+	assertContains "Pull mode should use a mock remote origin." \
+		"$output" "-O localhost"
+	assertNotContains "Pull mode should not pass a remote target." \
+		"$output" "-T localhost"
+	assertContains "Pull mode should replicate the requested chain to the local destination." \
+		"$output" "-R pool/src pool/dest"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

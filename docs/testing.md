@@ -572,20 +572,33 @@ Artifacts:
   supplied
 
 No-op cases seed the destination first and measure the second run:
-`chain_local_noop`, `fanout_local_j4_props_noop`, and
-`chain_remote_mock_noop`.
+`chain_local_noop`, `fanout_local_j4_props_noop`, `chain_remote_mock_noop`,
+and `chain_remote_mock_pull_noop`. The pull variant uses `-O localhost` only
+(mock ssh origin, local destination) so it exercises the remote-origin fast
+no-op proof path.
+
+Incremental cases seed the destination first, then create one newer snapshot
+and measure the run that sends only that increment: `chain_local_incr`
+(exactly one increment on the chain) and `fanout_local_j1_incr` (one increment
+per sibling dataset with one job).
 
 `tests/run_perf_compare.sh` writes `baseline/`, `candidate/`, top-level
 `compare.tsv`, and top-level `compare.md`. It fails only when argument
 validation or a sample run fails; performance regressions are annotations, not
 CI gates.
 
-Initial cases:
+Cases:
 
 - `chain_local`
+- `chain_local_noop`
+- `chain_local_incr`
 - `fanout_local_j1_props`
+- `fanout_local_j1_incr`
 - `fanout_local_j4_props`
+- `fanout_local_j4_props_noop`
 - `chain_remote_mock`
+- `chain_remote_mock_noop`
+- `chain_remote_mock_pull_noop`
 - `chain_remote_mock_compressed`
 
 Artifacts:

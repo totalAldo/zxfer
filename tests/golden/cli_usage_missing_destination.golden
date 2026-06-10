@@ -1,0 +1,32 @@
+exit_status: 2
+=== stdout ===
+=== stderr ===
+Error: Need a destination.
+usage:
+     zxfer [-b | -B] [-c FMRI|pattern[ FMRI|pattern]...] [-d] [-D 'progress dialog options']
+           [-e | -k] [-F] [-g days] [-I properties,to,ignore] [-j #jobs] [-m] [-n]
+           {-N path/to/src | -R path/to/src} [-o option1=value1,option2=value2...]
+           [-O user@host] [-P] [-s] [-T user@host] [-U] [-v] [-V] [-w]
+           [-x pattern] [-Y] [-z] [-Z "full zstd compression command"]
+           destination
+     zxfer [-h]
+
+           Where destination is a ZFS filesystem e.g.  poolname/fsname
+
+zxfer has a man page that explains each of the options in detail, along with
+usage examples. To access the man page, type:
+$ man zxfer
+
+zxfer: failure report begin
+timestamp: [normalized]
+hostname: [normalized]
+zxfer_version: [normalized]
+exit_status: 2
+failure_class: usage
+failure_stage: cli parse
+message: Need a destination.
+dry_run: 0
+mode: recursive
+yield_iterations: 1
+invocation: [redacted]
+zxfer: failure report end

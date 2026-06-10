@@ -1,0 +1,60 @@
+# zxfer anti-rebloat budget policy (TAB-separated).
+# Checked by tests/run_budget_check.sh (lint target: budget).
+# Ratchet-down-only: lowering a MAX is routine maintenance; raising ANY value
+# requires explicit justification in the PR that edits it.
+# Record kinds:
+#   lines <src/FILE|zxfer|TOTAL> MAX -- max wc -l line count
+#   functions <src/FILE|zxfer|TOTAL> MAX -- max top-level function definitions
+#   callers SYMBOL MAX [ALLOWED_FILES] -- max grep -rnF match lines for the
+#     literal SYMBOL across src/ + zxfer; the optional comma-separated
+#     ALLOWED_FILES list pins which files may contain matches at all.
+# Refresh current values with: tests/run_budget_check.sh --list
+lines	src/zxfer_background_job_runner.sh	391
+lines	src/zxfer_background_jobs.sh	1136
+lines	src/zxfer_backup_metadata.sh	2615
+lines	src/zxfer_cleanup_child_wrapper.sh	110
+lines	src/zxfer_cli.sh	258
+lines	src/zxfer_dependencies.sh	360
+lines	src/zxfer_exec.sh	1213
+lines	src/zxfer_locking.sh	743
+lines	src/zxfer_modules.sh	103
+lines	src/zxfer_path_security.sh	499
+lines	src/zxfer_property_cache.sh	1411
+lines	src/zxfer_property_reconcile.sh	2482
+lines	src/zxfer_remote_hosts.sh	3860
+lines	src/zxfer_replication.sh	1630
+lines	src/zxfer_reporting.sh	1368
+lines	src/zxfer_runtime.sh	2393
+lines	src/zxfer_send_receive.sh	1853
+lines	src/zxfer_snapshot_discovery.sh	3804
+lines	src/zxfer_snapshot_reconcile.sh	880
+lines	src/zxfer_snapshot_state.sh	1386
+lines	zxfer	211
+lines	TOTAL	28706
+functions	src/zxfer_background_job_runner.sh	15
+functions	src/zxfer_background_jobs.sh	28
+functions	src/zxfer_backup_metadata.sh	87
+functions	src/zxfer_cleanup_child_wrapper.sh	4
+functions	src/zxfer_cli.sh	3
+functions	src/zxfer_dependencies.sh	12
+functions	src/zxfer_exec.sh	41
+functions	src/zxfer_locking.sh	29
+functions	src/zxfer_modules.sh	1
+functions	src/zxfer_path_security.sh	14
+functions	src/zxfer_property_cache.sh	35
+functions	src/zxfer_property_reconcile.sh	55
+functions	src/zxfer_remote_hosts.sh	126
+functions	src/zxfer_replication.sh	56
+functions	src/zxfer_reporting.sh	55
+functions	src/zxfer_runtime.sh	75
+functions	src/zxfer_send_receive.sh	50
+functions	src/zxfer_snapshot_discovery.sh	65
+functions	src/zxfer_snapshot_reconcile.sh	19
+functions	src/zxfer_snapshot_state.sh	41
+functions	zxfer	5
+functions	TOTAL	816
+callers	zxfer_profile_now_ms	15	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
+callers	zxfer_escape_for_single_quotes	27
+callers	eval 	13
+callers	$(date	26
+callers	mktemp	25
