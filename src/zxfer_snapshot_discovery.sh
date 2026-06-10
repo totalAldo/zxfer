@@ -3239,7 +3239,10 @@ zxfer_try_fast_recursive_noop_discovery() {
 		$l_fast_stage_files
 	EOF
 
-	l_source_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	l_source_snapshot_stage_start_ms=""
+	if zxfer_profile_metrics_enabled; then
+		l_source_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	fi
 	l_status=0
 	zxfer_build_source_snapshot_name_list_cmd >"$l_source_cmd_tmp_file" || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
@@ -3291,7 +3294,10 @@ zxfer_try_fast_recursive_noop_discovery() {
 	fi
 	l_source_snapshot_pid=$g_last_background_pid
 
-	l_destination_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	l_destination_snapshot_stage_start_ms=""
+	if zxfer_profile_metrics_enabled; then
+		l_destination_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	fi
 	l_status=0
 	zxfer_start_destination_snapshot_name_sorted_fifo_producer \
 		"$l_destination_fifo" \
@@ -3311,7 +3317,10 @@ zxfer_try_fast_recursive_noop_discovery() {
 	fi
 	l_destination_snapshot_pid=$g_last_background_pid
 
-	l_snapshot_diff_sort_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	l_snapshot_diff_sort_stage_start_ms=""
+	if zxfer_profile_metrics_enabled; then
+		l_snapshot_diff_sort_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	fi
 	l_cmp_status=0
 	cmp -s "$l_source_fifo" "$l_destination_fifo" ||
 		l_cmp_status=$?
@@ -3514,7 +3523,10 @@ zxfer_get_zfs_list() {
 	g_source_snapshot_list_pid=""
 	g_source_snapshot_list_job_id=""
 	l_lzfs_list_hr_s_snap_sorted_tmp_file=""
-	l_source_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	l_source_snapshot_stage_start_ms=""
+	if zxfer_profile_metrics_enabled; then
+		l_source_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	fi
 	l_status=0
 	g_source_snapshot_list_background_sort_requested=1
 	zxfer_write_source_snapshot_list_to_file "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" ||
@@ -3532,7 +3544,10 @@ zxfer_get_zfs_list() {
 	# Run as many commands prior to the wait command as possible.
 	#
 
-	l_destination_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	l_destination_snapshot_stage_start_ms=""
+	if zxfer_profile_metrics_enabled; then
+		l_destination_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	fi
 	l_destination_inventory_attempted=0
 	l_destination_dataset=$(zxfer_get_destination_snapshot_root_dataset)
 	l_status=0
@@ -3716,7 +3731,10 @@ zxfer_get_zfs_list() {
 	#
 	# END background process
 	#
-	l_snapshot_diff_sort_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	l_snapshot_diff_sort_stage_start_ms=""
+	if zxfer_profile_metrics_enabled; then
+		l_snapshot_diff_sort_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	fi
 	l_status=0
 	zxfer_set_g_recursive_source_list "$l_lzfs_list_hr_s_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "$l_lzfs_list_hr_s_snap_sorted_tmp_file" ||
 		l_status=$?

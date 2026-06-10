@@ -592,7 +592,9 @@ zxfer_acquire_ssh_control_socket_lock() {
 
 		if [ "$l_waited" -eq 0 ]; then
 			l_waited=1
-			l_wait_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+			if zxfer_profile_metrics_enabled; then
+				l_wait_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+			fi
 		fi
 
 		case "$l_fast_retries" in
@@ -2126,7 +2128,10 @@ zxfer_prepare_ssh_control_sockets_for_active_hosts() {
 		return
 	fi
 
-	l_ssh_setup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	l_ssh_setup_start_ms=""
+	if zxfer_profile_metrics_enabled; then
+		l_ssh_setup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	fi
 	if [ -z "${g_cmd_ssh:-}" ]; then
 		if ! zxfer_ensure_local_ssh_command; then
 			g_zxfer_failure_class=dependency
@@ -2192,7 +2197,9 @@ zxfer_wait_for_remote_capability_cache_fill() {
 		fi
 		if [ "$l_waited" -eq 0 ]; then
 			l_waited=1
-			l_wait_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+			if zxfer_profile_metrics_enabled; then
+				l_wait_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+			fi
 		fi
 		l_fast_retries=$((l_fast_retries - 1))
 	done
@@ -2206,7 +2213,9 @@ zxfer_wait_for_remote_capability_cache_fill() {
 		fi
 		if [ "$l_waited" -eq 0 ]; then
 			l_waited=1
-			l_wait_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+			if zxfer_profile_metrics_enabled; then
+				l_wait_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+			fi
 		fi
 		l_wait_count=$((l_wait_count + 1))
 		[ "$l_wait_count" -lt "$l_wait_retries" ] || break
@@ -3821,7 +3830,8 @@ zxfer_refresh_remote_zfs_commands() {
 zxfer_prepare_remote_host_connections() {
 	l_ssh_setup_start_ms=""
 
-	if [ "$g_option_O_origin_host" != "" ] || [ "$g_option_T_target_host" != "" ]; then
+	if { [ "$g_option_O_origin_host" != "" ] || [ "$g_option_T_target_host" != "" ]; } &&
+		zxfer_profile_metrics_enabled; then
 		l_ssh_setup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
 	fi
 

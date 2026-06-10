@@ -29,9 +29,9 @@
 # ps/od/tr=0, all structural profile counters 0).
 #
 # Never budget advisory:* rows (wall time is timing noise, not a contract).
-noop	TOTAL	203
-noop	sed	50
-noop	awk	40
+noop	TOTAL	161
+noop	sed	13
+noop	awk	35
 noop	date	20
 noop	ps	4
 noop	od	0
@@ -47,9 +47,9 @@ noop	profile:zfs_receive_calls	0
 noop	profile:send_receive_pipeline_commands	0
 noop	profile:live_destination_snapshot_rechecks	0
 noop	profile:exists_destination_calls	0
-dryrun_incr	TOTAL	44
-dryrun_incr	sed	7
-dryrun_incr	awk	11
+dryrun_incr	TOTAL	33
+dryrun_incr	sed	0
+dryrun_incr	awk	6
 dryrun_incr	date	6
 dryrun_incr	ps	0
 dryrun_incr	od	0
@@ -65,9 +65,9 @@ dryrun_incr	profile:zfs_receive_calls	0
 dryrun_incr	profile:send_receive_pipeline_commands	0
 dryrun_incr	profile:live_destination_snapshot_rechecks	0
 dryrun_incr	profile:exists_destination_calls	0
-noop_small	TOTAL	203
-noop_small	sed	50
-noop_small	awk	40
+noop_small	TOTAL	161
+noop_small	sed	13
+noop_small	awk	35
 noop_small	date	20
 noop_small	ps	4
 noop_small	od	0
@@ -83,9 +83,9 @@ noop_small	profile:zfs_receive_calls	0
 noop_small	profile:send_receive_pipeline_commands	0
 noop_small	profile:live_destination_snapshot_rechecks	0
 noop_small	profile:exists_destination_calls	0
-dryrun_incr_small	TOTAL	44
-dryrun_incr_small	sed	7
-dryrun_incr_small	awk	11
+dryrun_incr_small	TOTAL	33
+dryrun_incr_small	sed	0
+dryrun_incr_small	awk	6
 dryrun_incr_small	date	6
 dryrun_incr_small	ps	0
 dryrun_incr_small	od	0

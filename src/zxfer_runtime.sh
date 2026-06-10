@@ -2094,7 +2094,11 @@ zxfer_init_globals() {
 zxfer_trap_exit() {
 	# get the exit status of the last command
 	l_exit_status=$?
-	l_cleanup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	l_cleanup_start_ms=""
+	if command -v zxfer_profile_metrics_enabled >/dev/null 2>&1 &&
+		zxfer_profile_metrics_enabled; then
+		l_cleanup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	fi
 
 	# Only terminate zxfer-owned background processes. Killing every direct child
 	# of the shell is too broad and can clobber coverage helpers or command

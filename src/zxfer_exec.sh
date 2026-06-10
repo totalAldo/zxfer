@@ -128,9 +128,33 @@ zxfer_execute_background_cmd() {
 # payloads.
 #
 # Escape characters for a single-quoted context by closing and reopening quotes
-# around embedded apostrophes.
+# around embedded apostrophes. Pure shell: this runs for every rendered token,
+# so quote-free values return without spawning a subprocess and quote-bearing
+# values are rewritten with parameter expansion instead of sed.
 zxfer_escape_for_single_quotes() {
-	printf '%s' "$1" | sed "s/'/'\\\\''/g"
+	case $1 in
+	*\'*) ;;
+	*)
+		printf '%s' "$1"
+		return 0
+		;;
+	esac
+
+	l_escape_rest=$1
+	l_escape_out=""
+	while :; do
+		case $l_escape_rest in
+		*\'*)
+			l_escape_out="$l_escape_out${l_escape_rest%%\'*}'\\''"
+			l_escape_rest=${l_escape_rest#*\'}
+			;;
+		*)
+			l_escape_out="$l_escape_out$l_escape_rest"
+			break
+			;;
+		esac
+	done
+	printf '%s' "$l_escape_out"
 }
 
 # Purpose: Split the tokens on whitespace into the token stream expected by
@@ -140,7 +164,9 @@ zxfer_escape_for_single_quotes() {
 #
 # Split whitespace-delimited arguments into separate lines without invoking the
 # shell parser. This intentionally ignores quoting so callers must escape
-# metacharacters themselves, preventing shell injection attacks.
+# metacharacters themselves, preventing shell injection attacks. Pure shell:
+# metacharacter normalization and field splitting previously spawned one sed
+# plus one awk per call on every rendered command.
 zxfer_split_tokens_on_whitespace() {
 	l_input=$1
 	if [ "$l_input" = "" ]; then
@@ -150,17 +176,59 @@ zxfer_split_tokens_on_whitespace() {
 	# Ensure shell metacharacters such as ';', '|', and '&' break tokens even
 	# when users omit the following whitespace, so injected commands remain
 	# literal arguments instead of spawning new pipelines.
-	l_normalized_input=$(printf '%s' "$l_input" | sed 's/[;|&]/& /g')
+	case $l_input in
+	*\;* | *\|* | *\&*)
+		l_split_rest=$l_input
+		l_normalized_input=""
+		while :; do
+			l_split_head=${l_split_rest%%[;\|\&]*}
+			if [ "$l_split_head" = "$l_split_rest" ]; then
+				l_normalized_input="$l_normalized_input$l_split_rest"
+				break
+			fi
+			l_split_rest=${l_split_rest#"$l_split_head"}
+			l_split_char=${l_split_rest%"${l_split_rest#?}"}
+			l_split_rest=${l_split_rest#?}
+			l_normalized_input="$l_normalized_input$l_split_head$l_split_char "
+		done
+		;;
+	*)
+		l_normalized_input=$l_input
+		;;
+	esac
 
-	l_awk_cmd=${g_cmd_awk:-$(command -v awk 2>/dev/null || echo awk)}
-	# shellcheck disable=SC2016
-	# $i references belong to awk, not the shell.
-	printf '%s\n' "$l_normalized_input" | "$l_awk_cmd" '
-	{
-		for (i = 1; i <= NF; i++) {
-			print $i
-		}
-	}'
+	# Field-split on default IFS whitespace with globbing disabled so glob
+	# characters in user input stay literal tokens. IFS is restored exactly,
+	# including the unset case, because callers may hold a modified IFS.
+	case $- in
+	*f*)
+		l_split_restore_glob=0
+		;;
+	*)
+		l_split_restore_glob=1
+		set -f
+		;;
+	esac
+	if [ "${IFS+set}" = "set" ]; then
+		l_split_saved_ifs_set=1
+		l_split_saved_ifs=$IFS
+	else
+		l_split_saved_ifs_set=0
+		l_split_saved_ifs=""
+	fi
+	unset IFS
+	# shellcheck disable=SC2086  # Intentional field splitting of normalized input.
+	set -- $l_normalized_input
+	if [ "$l_split_saved_ifs_set" -eq 1 ]; then
+		IFS=$l_split_saved_ifs
+	fi
+	if [ "$l_split_restore_glob" -eq 1 ]; then
+		set +f
+	fi
+
+	for l_split_token in "$@"; do
+		printf '%s\n' "$l_split_token"
+	done
 }
 
 # Purpose: Reject token strings that would require shell parsing semantics
