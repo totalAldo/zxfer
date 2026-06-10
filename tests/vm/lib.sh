@@ -92,6 +92,10 @@ Environment:
   ZXFER_VM_PERF_BASELINE_REF
                           git ref exported by the qemu backend for
                           --test-layer perf-compare
+  ZXFER_VM_PERF_CASES     whitespace-delimited perf case names forwarded to the
+                          in-guest perf runner or comparator through --case;
+                          use this to compare only cases a baseline binary can
+                          execute
   ZXFER_VM_QEMU_AARCH64_EFI
                           override the detected aarch64 UEFI firmware path
   ZXFER_VM_CI_MANAGED_GUEST
@@ -402,6 +406,11 @@ zxfer_vm_render_guest_test_script() {
 	l_perf_baseline_ref=${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final}
 	l_perf_baseline_label_arg=
 	l_perf_baseline_dir="$l_repo_dir-baseline"
+	l_perf_cases=${ZXFER_VM_PERF_CASES:-}
+	l_perf_cases_arg=
+	if [ -n "$l_perf_cases" ]; then
+		l_perf_cases_arg=$(zxfer_vm_shell_quote "$l_perf_cases")
+	fi
 
 	case "$l_test_layer" in
 	integration)
@@ -450,7 +459,7 @@ mkdir -p "$l_tmpdir"
 cd "$l_repo_dir"
 env TMPDIR="$l_tmpdir" \\
 	ZXFER_PERF_OUTPUT_DIR="$l_tmpdir/perf-artifacts" \\
-	$l_guest_shell ./tests/run_perf_tests.sh --yes --profile "$l_perf_profile"
+	$l_guest_shell ./tests/run_perf_tests.sh --yes --profile "$l_perf_profile"${l_perf_cases_arg:+ --case $l_perf_cases_arg}
 EOF
 		;;
 	perf-compare)
@@ -467,7 +476,8 @@ env TMPDIR="$l_tmpdir" \\
 	--candidate-bin "$l_repo_dir/zxfer" \\
 	--baseline-label $l_perf_baseline_label_arg \\
 	--candidate-label "candidate" \\
-	--output-dir "$l_tmpdir/perf-artifacts"
+	--output-dir "$l_tmpdir/perf-artifacts"${l_perf_cases_arg:+ \\
+	--case $l_perf_cases_arg}
 EOF
 		;;
 	*)

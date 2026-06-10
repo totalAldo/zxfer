@@ -444,6 +444,46 @@ test_perf_invoke_chain_replication_pull_mode_uses_remote_origin_only() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_invoke_chain_replication_remote_modes_export_mock_path() {
+	ZXFER_BIN="$TEST_TMPDIR/zxfer-path-echo"
+	# shellcheck disable=SC2016  # $PATH must expand inside the stub, not here.
+	printf '%s\n' "#!/bin/sh" 'printf "PATH=%s\n" "$PATH"' >"$ZXFER_BIN"
+	chmod 700 "$ZXFER_BIN"
+	stdout_file="$TEST_TMPDIR/path-invoke.stdout"
+	stderr_file="$TEST_TMPDIR/path-invoke.stderr"
+
+	zxfer_perf_invoke_chain_replication 2 0 "pool/src" "pool/dest" \
+		"$stdout_file" "$stderr_file" "$TEST_TMPDIR/path-invoke.mock_ssh.log" "$TEST_TMPDIR/mock-bin:/usr/bin"
+
+	output=$(cat "$stdout_file")
+	assertContains "Remote modes should export the mock secure path as PATH so baseline binaries without the secure-PATH model resolve mock helpers." \
+		"$output" "PATH=$TEST_TMPDIR/mock-bin:/usr/bin"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_invoke_fanout_replication_props_mode_controls_property_flag() {
+	ZXFER_BIN="$TEST_TMPDIR/zxfer-args-echo"
+	printf '%s\n' "#!/bin/sh" 'printf "%s\n" "$*"' >"$ZXFER_BIN"
+	chmod 700 "$ZXFER_BIN"
+	stdout_file="$TEST_TMPDIR/fanout-invoke.stdout"
+	stderr_file="$TEST_TMPDIR/fanout-invoke.stderr"
+
+	zxfer_perf_invoke_fanout_replication 1 "pool/src" "pool/dest" \
+		"$stdout_file" "$stderr_file"
+	output=$(cat "$stdout_file")
+	assertContains "Default fanout invocations should keep property transfer." \
+		"$output" "-P"
+
+	zxfer_perf_invoke_fanout_replication 1 "pool/src" "pool/dest" \
+		"$stdout_file" "$stderr_file" 0
+	output=$(cat "$stdout_file")
+	assertNotContains "No-props fanout invocations should omit -P so incremental sync stays baseline-comparable." \
+		"$output" "-P"
+	assertContains "No-props fanout invocations should keep the job and recursion arguments." \
+		"$output" "-j 1 -R pool/src pool/dest"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_write_run_info_records_label_versions_and_fixture_sizes() {
 	ZXFER_PERF_RUN_INFO_FILE="$TEST_TMPDIR/run-info.tsv"
 	ZXFER_PERF_LABEL=baseline-ref

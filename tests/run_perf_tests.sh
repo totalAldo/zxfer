@@ -221,7 +221,7 @@ zxfer_perf_case_description() {
 		printf '%s\n' "local fanout replication with one job; measures sibling dataset/property reconciliation without concurrency"
 		;;
 	fanout_local_j1_incr)
-		printf '%s\n' "local fanout incremental replication with one job; seeds the @s1 fixture first, then measures sending one increment per sibling dataset"
+		printf '%s\n' "local fanout incremental replication with one job and no property transfer; seeds the @s1 fixture first, then measures sending one increment per sibling dataset"
 		;;
 	fanout_local_j4_props)
 		printf '%s\n' "local fanout replication with four jobs; measures sibling dataset/property reconciliation with concurrency"
@@ -590,14 +590,17 @@ zxfer_perf_invoke_chain_replication() {
 	l_ssh_log=${7:-}
 	l_secure_path=${8:-}
 
+	# Export PATH alongside ZXFER_SECURE_PATH so baseline binaries that do not
+	# implement the secure-PATH model (e.g. upstream-compat-final) still resolve
+	# the mock ssh/zstd helpers first instead of reaching real transports.
 	if [ "$l_remote" -eq 2 ]; then
-		MOCK_SSH_LOG="$l_ssh_log" ZXFER_SECURE_PATH="$l_secure_path" \
+		MOCK_SSH_LOG="$l_ssh_log" ZXFER_SECURE_PATH="$l_secure_path" PATH="$l_secure_path" \
 			"$ZXFER_BIN" -V -O localhost -R "$l_src_dataset" "$l_dest_root" >"$l_stdout_file" 2>"$l_stderr_file"
 	elif [ "$l_remote" -eq 1 ] && [ "$l_compressed" -eq 1 ]; then
-		MOCK_SSH_LOG="$l_ssh_log" ZXFER_SECURE_PATH="$l_secure_path" \
+		MOCK_SSH_LOG="$l_ssh_log" ZXFER_SECURE_PATH="$l_secure_path" PATH="$l_secure_path" \
 			"$ZXFER_BIN" -V -z -O localhost -T localhost -R "$l_src_dataset" "$l_dest_root" >"$l_stdout_file" 2>"$l_stderr_file"
 	elif [ "$l_remote" -eq 1 ]; then
-		MOCK_SSH_LOG="$l_ssh_log" ZXFER_SECURE_PATH="$l_secure_path" \
+		MOCK_SSH_LOG="$l_ssh_log" ZXFER_SECURE_PATH="$l_secure_path" PATH="$l_secure_path" \
 			"$ZXFER_BIN" -V -O localhost -T localhost -R "$l_src_dataset" "$l_dest_root" >"$l_stdout_file" 2>"$l_stderr_file"
 	else
 		"$ZXFER_BIN" -V -R "$l_src_dataset" "$l_dest_root" >"$l_stdout_file" 2>"$l_stderr_file"
@@ -702,8 +705,18 @@ zxfer_perf_invoke_fanout_replication() {
 	l_dest_root=$3
 	l_stdout_file=$4
 	l_stderr_file=$5
+	l_with_props=${6:-1}
 
-	"$ZXFER_BIN" -V -P -j "$l_jobs" -R "$l_src_parent" "$l_dest_root" >"$l_stdout_file" 2>"$l_stderr_file"
+	# The props cases measure property reconciliation and keep -P. The
+	# incremental fanout case measures many-dataset sync throughput and runs
+	# without -P so it stays comparable against baseline binaries whose legacy
+	# property transfer cannot create datasets on current OpenZFS (for example
+	# upstream-compat-final forwarding pbkdf2iters to zfs create).
+	if [ "$l_with_props" -eq 1 ]; then
+		"$ZXFER_BIN" -V -P -j "$l_jobs" -R "$l_src_parent" "$l_dest_root" >"$l_stdout_file" 2>"$l_stderr_file"
+	else
+		"$ZXFER_BIN" -V -j "$l_jobs" -R "$l_src_parent" "$l_dest_root" >"$l_stdout_file" 2>"$l_stderr_file"
+	fi
 }
 
 zxfer_perf_run_fanout_case() {
@@ -721,9 +734,11 @@ zxfer_perf_run_fanout_case() {
 	l_stderr_file="$ZXFER_PERF_CURRENT_CASE_DIR/${l_sample_kind}_${l_sample_index}.stderr"
 	l_estimated=0
 	l_expected_fanout_snapshot=s1
+	l_with_props=1
 
 	if [ "$l_incr" -eq 1 ]; then
 		l_expected_fanout_snapshot=s2
+		l_with_props=0
 	fi
 
 	log_summary "Preparing fanout fixture for $l_case: datasets=$ZXFER_PERF_FANOUT_DATASETS jobs=$l_jobs payload_mb_per_dataset=$ZXFER_PERF_PAYLOAD_MB source_parent=$l_src_parent destination_root=$l_dest_root"
@@ -762,7 +777,7 @@ zxfer_perf_run_fanout_case() {
 		l_setup_stderr_file="$ZXFER_PERF_CURRENT_CASE_DIR/${l_sample_kind}_${l_sample_index}.setup.stderr"
 		log_summary "Seeding $l_seed_purpose fixture for $l_case ($l_sample_kind $l_sample_index): setup_stdout=$l_setup_stdout_file setup_stderr=$l_setup_stderr_file"
 		set +e
-		zxfer_perf_invoke_fanout_replication "$l_jobs" "$l_src_parent" "$l_dest_root" "$l_setup_stdout_file" "$l_setup_stderr_file"
+		zxfer_perf_invoke_fanout_replication "$l_jobs" "$l_src_parent" "$l_dest_root" "$l_setup_stdout_file" "$l_setup_stderr_file" "$l_with_props"
 		l_setup_status=$?
 		set -e
 		if [ "$l_setup_status" -ne 0 ]; then
@@ -794,7 +809,7 @@ zxfer_perf_run_fanout_case() {
 	log_summary "Measuring $l_case ($l_sample_kind $l_sample_index): invoking zxfer with jobs=$l_jobs; raw_stdout=$l_stdout_file raw_stderr=$l_stderr_file"
 	l_start_ms=$(zxfer_perf_now_ms)
 	set +e
-	zxfer_perf_invoke_fanout_replication "$l_jobs" "$l_src_parent" "$l_dest_root" "$l_stdout_file" "$l_stderr_file"
+	zxfer_perf_invoke_fanout_replication "$l_jobs" "$l_src_parent" "$l_dest_root" "$l_stdout_file" "$l_stderr_file" "$l_with_props"
 	l_status=$?
 	set -e
 	l_end_ms=$(zxfer_perf_now_ms)

@@ -20,7 +20,7 @@ oneTimeTearDown() {
 }
 
 setUp() {
-	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE ZXFER_VM_PERF_BASELINE_REF
+	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE ZXFER_VM_PERF_BASELINE_REF ZXFER_VM_PERF_CASES
 	# shellcheck source=tests/vm/lib.sh
 	. "$VM_MATRIX_LIB"
 	zxfer_vm_reset_state
@@ -811,6 +811,37 @@ test_vm_render_guest_test_script_shell_quotes_perf_compare_baseline_label() {
 
 	assertContains "Performance comparison guest scripts should shell-quote the baseline label." \
 		"$script_body" "--baseline-label 'feature/has'\\''quote'"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_render_guest_test_script_forwards_perf_case_selection() {
+	ZXFER_VM_TEST_LAYER=perf-compare
+	ZXFER_VM_PERF_PROFILE=smoke
+	ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final
+	ZXFER_VM_PERF_CASES="chain_local chain_local_noop"
+
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertContains "Perf-compare guest scripts should forward the case selection through --case." \
+		"$script_body" "--case 'chain_local chain_local_noop'"
+
+	ZXFER_VM_TEST_LAYER=perf
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertContains "Perf guest scripts should forward the case selection through --case." \
+		"$script_body" "--case 'chain_local chain_local_noop'"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_render_guest_test_script_omits_case_flag_without_perf_case_selection() {
+	ZXFER_VM_TEST_LAYER=perf-compare
+	ZXFER_VM_PERF_PROFILE=smoke
+	ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final
+
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertNotContains "Perf-compare guest scripts should omit --case when no selection is configured." \
+		"$script_body" "--case"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

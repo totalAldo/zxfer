@@ -357,6 +357,19 @@ Compare the current checkout against `upstream-compat-final` inside the guest:
 ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final ./tests/run_vm_matrix.sh --profile smoke --test-layer perf-compare
 ```
 
+Older baseline binaries cannot execute every case. `upstream-compat-final`
+requires a BSD-userland guest (its `mktemp -t` template is rejected by GNU
+coreutils, so use the FreeBSD guest from the `local` profile) and fails the
+property-transfer fanout cases on current OpenZFS because its legacy `-P`
+path forwards read-only properties such as `pbkdf2iters` to `zfs create`.
+Use `ZXFER_VM_PERF_CASES` to compare only the cases the baseline can run:
+
+```sh
+ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final \
+	ZXFER_VM_PERF_CASES="chain_local chain_local_noop chain_local_incr fanout_local_j1_incr chain_remote_mock chain_remote_mock_noop chain_remote_mock_pull_noop chain_remote_mock_compressed" \
+	./tests/run_vm_matrix.sh --profile local --guest freebsd --test-layer perf-compare
+```
+
 Run the same profile with live guest stdout/stderr mirrored to the console:
 
 ```sh
@@ -502,6 +515,9 @@ Useful VM-runner environment variables:
   `--test-layer perf-compare`; supported values are `smoke` and `standard`
 - `ZXFER_VM_PERF_BASELINE_REF`: host git ref archived by the QEMU backend for
   `--test-layer perf-compare`; defaults to `upstream-compat-final`
+- `ZXFER_VM_PERF_CASES`: whitespace-delimited perf case names forwarded to the
+  in-guest perf runner or comparator through `--case`; use this to restrict a
+  comparison to cases the selected baseline binary can execute
 - `ZXFER_VM_QEMU_AARCH64_EFI`: override the detected aarch64 QEMU UEFI path
 - `ZXFER_VM_CI_MANAGED_GUEST`: make `--backend auto` select the `ci-managed`
   backend for one named guest
