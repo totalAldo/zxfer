@@ -2668,7 +2668,7 @@ test_initialize_replication_context_skips_live_validation_in_dry_run() {
 			g_rzfs_list_hr_snap="stale-dest@snap"
 			g_source_snapshot_list_cmd="stale-command"
 			g_destination_existence_cache_root="stale-root"
-			g_zxfer_source_snapshot_record_index_ready=1
+			g_lzfs_list_hr_S_snap="stale-source@snap"
 			zxfer_initialize_replication_context
 			{
 				printf 'recursive=%s\n' "$g_recursive_source_list"
@@ -2679,7 +2679,7 @@ test_initialize_replication_context_skips_live_validation_in_dry_run() {
 				printf 'dest_snaps=%s\n' "${g_rzfs_list_hr_snap:-}"
 				printf 'source_cmd=%s\n' "${g_source_snapshot_list_cmd:-}"
 				printf 'dest_cache_root=%s\n' "${g_destination_existence_cache_root:-}"
-				printf 'source_index_ready=%s\n' "${g_zxfer_source_snapshot_record_index_ready:-}"
+				printf 'source_reversed=%s\n' "${g_lzfs_list_hr_S_snap:-}"
 			} >>"$CTX_LOG"
 		)
 	)
@@ -2693,7 +2693,7 @@ source_snaps=
 dest_snaps=
 source_cmd=
 dest_cache_root=
-source_index_ready=0" "$(cat "$log")"
+source_reversed=" "$(cat "$log")"
 	assertContains "Dry-run initialization should explain that the live validation stages are skipped." \
 		"$output" "Dry run: skipping live backup-restore validation, snapshot discovery, and unsupported-property detection."
 }
@@ -2801,7 +2801,7 @@ test_preview_zfs_mode_dry_run_overwrites_stale_recursive_state() {
 			g_rzfs_list_hr_snap="stale-dest@snap"
 			g_source_snapshot_list_cmd="stale-command"
 			g_destination_existence_cache_root="stale-root"
-			g_zxfer_source_snapshot_record_index_ready=1
+			g_lzfs_list_hr_S_snap="stale-source@snap"
 			zxfer_preview_zfs_mode_dry_run
 			printf 'after_list=<%s>\n' "$g_recursive_source_list"
 			printf 'after_datasets=<%s>\n' "$g_recursive_source_dataset_list"
@@ -2811,7 +2811,7 @@ test_preview_zfs_mode_dry_run_overwrites_stale_recursive_state() {
 			printf 'after_dest_snaps=<%s>\n' "${g_rzfs_list_hr_snap:-}"
 			printf 'after_source_cmd=<%s>\n' "${g_source_snapshot_list_cmd:-}"
 			printf 'after_dest_cache_root=<%s>\n' "${g_destination_existence_cache_root:-}"
-			printf 'after_source_index_ready=<%s>\n' "${g_zxfer_source_snapshot_record_index_ready:-}"
+			printf 'after_source_reversed=<%s>\n' "${g_lzfs_list_hr_S_snap:-}"
 		)
 	)
 
@@ -2843,8 +2843,8 @@ test_preview_zfs_mode_dry_run_overwrites_stale_recursive_state() {
 		"$output" "after_source_cmd=<>"
 	assertContains "Strict dry-run preview should clear the destination existence cache root." \
 		"$output" "after_dest_cache_root=<>"
-	assertContains "Strict dry-run preview should reset snapshot-record index readiness." \
-		"$output" "after_source_index_ready=<0>"
+	assertContains "Strict dry-run preview should clear the stale derived reversed source record list." \
+		"$output" "after_source_reversed=<>"
 }
 
 test_zxfer_preview_zfs_mode_dry_run_emits_restore_and_unsupported_property_notices() {

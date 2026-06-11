@@ -65,6 +65,7 @@ src/zxfer_path_security.sh
   310:		return 1
   322:		l_ls_path=./$l_ls_path
   393:		l_ls_path=./$l_ls_path
+  407:		return 1
 
 src/zxfer_property_cache.sh
   209:	l_property_list=$1
@@ -260,19 +261,22 @@ src/zxfer_runtime.sh
   889:			l_cleanup_status=1
   1038:	if (
   1040:	) 2>/dev/null; then
+  1396:		return "$l_status"
   1616:		return "$l_status"
+  1696:	zxfer_unregister_runtime_artifact_path "$l_stage_dir"
+  1697:	return 0
   1907:		g_zxfer_profile_start_ms=""
   2167:				continue
-  2240:					l_source_context_status=$?
-  2242:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
-  2277:		g_zxfer_failure_class=dependency
-  2278:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
-  2296:					l_destination_context_status=$?
-  2298:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
-  2333:		g_zxfer_failure_class=dependency
-  2334:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
-  2374:		g_zxfer_failure_class=dependency
-  2375:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
+  2237:					l_source_context_status=$?
+  2239:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
+  2274:		g_zxfer_failure_class=dependency
+  2275:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
+  2293:					l_destination_context_status=$?
+  2295:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
+  2330:		g_zxfer_failure_class=dependency
+  2331:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
+  2371:		g_zxfer_failure_class=dependency
+  2372:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
 
 src/zxfer_send_receive.sh
   126:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |
@@ -407,32 +411,6 @@ src/zxfer_snapshot_reconcile.sh
   301:	if l_last_common_snap=$("${g_cmd_awk:-awk}" "$l_common_snapshot_awk" \
 
 src/zxfer_snapshot_state.sh
-  308:	l_manifest_name=$(zxfer_get_cache_object_metadata_value \
-  316:	l_entry_count_expected=$(zxfer_get_cache_object_metadata_value \
-  328:	l_meta_side=$(zxfer_get_cache_object_metadata_value \
-  484:		l_stage_map=$("${g_cmd_awk:-awk}" -v index_dir="$l_stage_dir" \
-  489:		l_stage_map=$(printf '%s\n' "$l_snapshot_records_input" |
-  502:			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  503:			return 1
-  557:		l_build_status=$?
-  559:		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-  560:		return "$l_build_status"
-  563:	l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
-  577:		"ready" ||
-  678:			:
-  683:		l_snapshot_records=$g_lzfs_list_hr_S_snap
-  690:		if l_snapshot_record_cache_file=$(zxfer_snapshot_record_cache_file_for_side "$l_side") &&
-  691:			[ -r "$l_snapshot_record_cache_file" ]; then
-  692:			l_status=0
-  693:			zxfer_build_snapshot_record_index_from_file "$l_side" "$l_snapshot_record_cache_file" ||
-  694:				l_status=$?
-  695:			return "$l_status"
-  697:		l_snapshot_records=${g_rzfs_list_hr_snap:-}
-  700:		return 1
-  704:	[ -n "$l_snapshot_records" ] || return 1
-  706:	zxfer_build_snapshot_record_index "$l_side" "$l_snapshot_records"
-  759:		l_lookup_status=$?
-  761:		return "$l_lookup_status"
-  806:			l_status=$?
-  967:	*)
+  160:			l_lookup_status=$?
+  318:	*)
 

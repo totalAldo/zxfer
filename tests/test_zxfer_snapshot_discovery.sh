@@ -5892,7 +5892,7 @@ test_get_zfs_list_preserves_fast_noop_hard_failure_status() {
 		58 "$status"
 }
 
-test_get_zfs_list_uses_file_backed_snapshot_records_without_building_indexes() {
+test_get_zfs_list_stages_file_backed_snapshot_record_lookups() {
 	output=$(
 		(
 			source_root_file="$TEST_TMPDIR/get_zfs_lazy_source_root.records"
@@ -5929,8 +5929,8 @@ EOF
 				return 1
 			}
 			zxfer_get_zfs_list
-			printf 'source_ready_before=%s\n' "${g_zxfer_source_snapshot_record_index_ready:-0}"
-			printf 'dest_ready_before=%s\n' "${g_zxfer_destination_snapshot_record_index_ready:-0}"
+			printf 'source_file_staged=%s\n' "$([ -n "${g_zxfer_source_snapshot_record_cache_file:-}" ] && [ -r "$g_zxfer_source_snapshot_record_cache_file" ] && printf '%s' yes || printf '%s' no)"
+			printf 'dest_file_staged=%s\n' "$([ -n "${g_zxfer_destination_snapshot_record_cache_file:-}" ] && [ -r "$g_zxfer_destination_snapshot_record_cache_file" ] && printf '%s' yes || printf '%s' no)"
 			zxfer_get_snapshot_records_for_dataset source "tank/src" >"$source_root_file"
 			zxfer_get_snapshot_records_for_dataset source "tank/src/child" >"$source_child_file"
 			zxfer_get_snapshot_records_for_dataset destination "backup/dst" >"$dest_root_file"
@@ -5939,15 +5939,13 @@ EOF
 			printf 'source_child=%s\n' "$(cat "$source_child_file")"
 			printf 'dest_root=%s\n' "$(cat "$dest_root_file")"
 			printf 'dest_child=%s\n' "$(cat "$dest_child_file")"
-			printf 'source_ready_after=%s\n' "${g_zxfer_source_snapshot_record_index_ready:-0}"
-			printf 'dest_ready_after=%s\n' "${g_zxfer_destination_snapshot_record_index_ready:-0}"
 		)
 	)
 
-	assertContains "Snapshot discovery should leave the source per-dataset index unset after staging cache files." \
-		"$output" "source_ready_before=0"
-	assertContains "Snapshot discovery should leave the destination per-dataset index unset after staging cache files." \
-		"$output" "dest_ready_before=0"
+	assertContains "Snapshot discovery should stage the flat source snapshot record file for later lookups." \
+		"$output" "source_file_staged=yes"
+	assertContains "Snapshot discovery should stage the flat destination snapshot record file for later lookups." \
+		"$output" "dest_file_staged=yes"
 	assertContains "Snapshot discovery should cache newest-first source snapshots for the root dataset." \
 		"$output" "source_root=tank/src@snap2
 tank/src@snap1"
@@ -5958,10 +5956,6 @@ tank/src@snap1"
 backup/dst@legacy1"
 	assertContains "Snapshot discovery should cache destination child snapshots separately." \
 		"$output" "dest_child=backup/dst/child@child1"
-	assertContains "File-backed source snapshot lookups should avoid building the heavy per-dataset index on the hot path." \
-		"$output" "source_ready_after=0"
-	assertContains "File-backed destination snapshot lookups should avoid building the heavy per-dataset index on the hot path." \
-		"$output" "dest_ready_after=0"
 }
 
 test_get_zfs_list_remote_target_batches_destination_discovery() {
@@ -7204,9 +7198,6 @@ test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
 			}
 			zxfer_reverse_file_lines() {
 				cat "$1"
-			}
-			zxfer_build_snapshot_record_index() {
-				:
 			}
 			g_option_V_very_verbose=1
 			zxfer_run_destination_zfs_cmd() {

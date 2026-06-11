@@ -2172,9 +2172,6 @@ zxfer_trap_exit() {
 	if [ -n "${g_zxfer_property_cache_dir:-}" ] && [ -d "$g_zxfer_property_cache_dir" ]; then
 		rm -rf "$g_zxfer_property_cache_dir"
 	fi
-	if [ -n "${g_zxfer_snapshot_index_dir:-}" ] && [ -d "$g_zxfer_snapshot_index_dir" ]; then
-		rm -rf "$g_zxfer_snapshot_index_dir"
-	fi
 	if command -v zxfer_cleanup_remote_host_cache_roots >/dev/null 2>&1; then
 		zxfer_cleanup_remote_host_cache_roots >/dev/null 2>&1 || :
 	fi

@@ -24,13 +24,13 @@ lines	src/zxfer_property_reconcile.sh	2475
 lines	src/zxfer_remote_hosts.sh	3869
 lines	src/zxfer_replication.sh	1630
 lines	src/zxfer_reporting.sh	1378
-lines	src/zxfer_runtime.sh	2397
+lines	src/zxfer_runtime.sh	2394
 lines	src/zxfer_send_receive.sh	1853
 lines	src/zxfer_snapshot_discovery.sh	3737
 lines	src/zxfer_snapshot_reconcile.sh	879
-lines	src/zxfer_snapshot_state.sh	1386
+lines	src/zxfer_snapshot_state.sh	733
 lines	zxfer	211
-lines	TOTAL	28646
+lines	TOTAL	27990
 functions	src/zxfer_background_job_runner.sh	15
 functions	src/zxfer_background_jobs.sh	28
 functions	src/zxfer_backup_metadata.sh	87
@@ -50,9 +50,9 @@ functions	src/zxfer_runtime.sh	75
 functions	src/zxfer_send_receive.sh	50
 functions	src/zxfer_snapshot_discovery.sh	64
 functions	src/zxfer_snapshot_reconcile.sh	19
-functions	src/zxfer_snapshot_state.sh	41
+functions	src/zxfer_snapshot_state.sh	29
 functions	zxfer	5
-functions	TOTAL	811
+functions	TOTAL	799
 callers	zxfer_profile_now_ms	15	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	27
 callers	eval 	13

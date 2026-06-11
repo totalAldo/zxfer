@@ -100,14 +100,10 @@ test_invalidate_destination_snapshot_record_cache_resets_creation_cache_when_loa
 	g_rzfs_list_hr_snap="backup/dst@snap1	111"
 	g_destination_snapshot_creation_cache="backup/dst@snap1	111"
 
-	zxfer_build_snapshot_record_index destination "backup/dst@snap1	111" >/dev/null ||
-		fail "Expected destination snapshot index fixture to build."
 	zxfer_invalidate_destination_snapshot_record_cache
 
 	assertEquals "Destination snapshot invalidation should clear destination snapshot creation cache when snapshot reconcile is loaded." \
 		"" "${g_destination_snapshot_creation_cache:-}"
-	assertEquals "Destination snapshot invalidation should clear destination snapshot index readiness." \
-		0 "${g_zxfer_destination_snapshot_record_index_ready:-0}"
 	assertEquals "Destination snapshot invalidation should clear the destination snapshot cache-file path." \
 		"" "${g_zxfer_destination_snapshot_record_cache_file:-}"
 	assertFalse "Destination snapshot invalidation should remove the stale snapshot cache file." \
@@ -1821,36 +1817,35 @@ backup/dst@zxfer_1	111
 backup/dst@old_only	999"
 }
 
-test_inspect_delete_snap_uses_indexed_snapshot_records_when_available() {
+test_inspect_delete_snap_uses_staged_record_files_when_available() {
 	g_lzfs_list_hr_S_snap=""
 	g_rzfs_list_hr_snap=""
 	g_actual_dest="backup/dst"
-
-	zxfer_build_snapshot_record_index source "$(
-		cat <<'EOF'
+	source_record_file="$TEST_TMPDIR/inspect_delete_source.records"
+	destination_record_file="$TEST_TMPDIR/inspect_delete_destination.records"
+	cat >"$source_record_file" <<'EOF'
 tank/src@zxfer_3	333
 tank/src@zxfer_2	222
 tank/src@zxfer_1	111
 EOF
-	)"
-	zxfer_build_snapshot_record_index destination "$(
-		cat <<'EOF'
+	cat >"$destination_record_file" <<'EOF'
 backup/dst@zxfer_2	222
 backup/dst@zxfer_1	111
 EOF
-	)"
+	g_zxfer_source_snapshot_record_cache_file=$source_record_file
+	g_zxfer_destination_snapshot_record_cache_file=$destination_record_file
 
 	zxfer_inspect_delete_snap 0 "tank/src"
 
-	assertEquals "Indexed source/destination snapshot records should still drive common-snapshot detection when the legacy global lists are unavailable." \
+	assertEquals "Staged source/destination snapshot record files should still drive common-snapshot detection when the legacy global lists are unavailable." \
 		"tank/src@zxfer_2	222" "$g_last_common_snap"
-	assertEquals "Indexed snapshot records should still produce the correct transfer list." \
+	assertEquals "Staged snapshot record files should still produce the correct transfer list." \
 		"tank/src@zxfer_3	333" "$g_src_snapshot_transfer_list"
-	assertEquals "Indexed destination snapshot records should still mark the destination as having snapshots." \
+	assertEquals "Staged destination snapshot record files should still mark the destination as having snapshots." \
 		1 "$g_dest_has_snapshots"
 }
 
-test_inspect_delete_snap_uses_global_snapshot_records_without_building_index() {
+test_inspect_delete_snap_uses_global_snapshot_records_without_staged_files() {
 	output=$(
 		(
 			g_actual_dest="backup/dst"
@@ -1861,28 +1856,18 @@ test_inspect_delete_snap_uses_global_snapshot_records_without_building_index() {
 				"backup/dst@zxfer_1	111")
 
 			zxfer_inspect_delete_snap 0 "tank/src" || exit $?
-			printf 'index_dir=<%s>\n' "${g_zxfer_snapshot_index_dir:-}"
-			if [ -n "${g_zxfer_snapshot_index_dir:-}" ] && [ -d "$g_zxfer_snapshot_index_dir" ]; then
-				printf 'index_dir_exists=yes\n'
-			else
-				printf 'index_dir_exists=no\n'
-			fi
-			printf 'source_ready=%s\n' "${g_zxfer_source_snapshot_record_index_ready:-0}"
-			printf 'dest_ready=%s\n' "${g_zxfer_destination_snapshot_record_index_ready:-0}"
+			printf 'last_common=<%s>\n' "${g_last_common_snap:-}"
+			printf 'transfer=<%s>\n' "${g_src_snapshot_transfer_list:-}"
 		)
 	)
 	status=$?
 
-	assertEquals "Delete planning should keep running with cache-backed snapshot-record lookups." \
+	assertEquals "Delete planning should keep running with in-memory snapshot-record lookups when no record files are staged." \
 		0 "$status"
-	assertContains "Delete planning should avoid building the heavy snapshot-index temp root on the hot path." \
-		"$output" "index_dir=<>"
-	assertContains "Delete planning should leave no snapshot-index directory to clean up when global records are sufficient." \
-		"$output" "index_dir_exists=no"
-	assertContains "Delete planning should leave the source snapshot-index unbuilt when direct record filtering is sufficient." \
-		"$output" "source_ready=0"
-	assertContains "Delete planning should leave the destination snapshot-index unbuilt when direct record filtering is sufficient." \
-		"$output" "dest_ready=0"
+	assertContains "Delete planning should detect the common snapshot from the in-memory record lists." \
+		"$output" "last_common=<tank/src@zxfer_1	111>"
+	assertContains "Delete planning should build the transfer list from the in-memory record lists." \
+		"$output" "transfer=<tank/src@zxfer_2	222>"
 }
 
 test_format_snapshot_creation_epoch_for_display_rejects_nonnumeric_input() {
