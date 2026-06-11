@@ -3115,6 +3115,7 @@ test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing
 	g_destination="backup/dst"
 
 	(
+		g_option_V_very_verbose=1
 		zxfer_exists_destination() {
 			printf '%s\n' "$1" >"$arg_file"
 			printf '%s\n' 1
@@ -3128,7 +3129,7 @@ test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing
 			printf '%s\n' "backup/dst/child@snap2" "backup/dst@snap1"
 		}
 		g_RZFS="fake_rzfs"
-		zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
+		zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file" 2>/dev/null
 	)
 
 	assertEquals "Trailing-slash replication should probe the destination root dataset directly." \
@@ -3151,6 +3152,7 @@ test_write_destination_snapshot_name_sorted_list_to_files_uses_canonical_destina
 	g_destination="backup/dst"
 
 	(
+		g_option_V_very_verbose=1
 		zxfer_exists_destination() {
 			printf '%s\n' "unexpected-probe" >&2
 			return 99
@@ -3162,7 +3164,7 @@ test_write_destination_snapshot_name_sorted_list_to_files_uses_canonical_destina
 			printf '%s\n' "$*" >"$cmd_file"
 			printf '%s\n' "backup/dst/src@a" "backup/dst/src/child@b"
 		}
-		zxfer_write_destination_snapshot_name_sorted_list_to_files "$full_file" "$norm_file"
+		zxfer_write_destination_snapshot_name_sorted_list_to_files "$full_file" "$norm_file" 2>/dev/null
 	)
 
 	assertContains "Fast no-op destination discovery should keep the identity-aware unsorted snapshot query." \
@@ -3392,8 +3394,11 @@ test_start_destination_snapshot_name_sorted_fifo_producer_streams_statuses_and_h
 		printf '%s\n' "backup/dst/src@snapA"
 		printf '%s\n' "backup/dst/src/child@snapB"
 	}
+	# Run very-verbose so the lazily gated display render path is exercised.
+	g_option_V_very_verbose=1
 	zxfer_start_destination_snapshot_name_sorted_fifo_producer \
-		"$destination_fifo" "$err_file" "$list_status_file" "$normalize_status_file" "$sort_status_file"
+		"$destination_fifo" "$err_file" "$list_status_file" "$normalize_status_file" "$sort_status_file" 2>/dev/null
+	g_option_V_very_verbose=0
 	producer_pid=$g_last_background_pid
 	cat "$destination_fifo" >"$output_file" &
 	reader_pid=$!
@@ -3487,7 +3492,9 @@ backup/dst/child@snap2
 backup/dst@snap1
 EOF
 
-	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+	# Run very-verbose so the lazily gated display render path is exercised.
+	g_option_V_very_verbose=1
+	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file" 2>/dev/null
 
 	assertEquals "Trailing-slash destinations should be sorted without source-prefix rewriting." \
 		"backup/dst/child@snap2
@@ -3521,7 +3528,9 @@ test_normalize_destination_snapshot_list_rewrites_only_leading_destination_prefi
 		printf '%s\t%s\n' "backup/dst@snap1" "111"
 	} >"$input_file"
 
-	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+	# Run very-verbose so the lazily gated display render path is exercised.
+	g_option_V_very_verbose=1
+	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file" 2>/dev/null
 
 	expected=$(printf '%s\t%s\n%s\t%s' \
 		"tank/src/backup/dst/child@snap2" "222" \
@@ -3567,110 +3576,6 @@ test_normalize_destination_snapshot_list_preserves_status_tempfile_failures() {
 
 	assertEquals "Destination normalization should preserve status-tempfile allocation failures." \
 		63 "$status"
-}
-
-test_normalize_destination_snapshot_list_for_noop_proof_filters_excluded_after_prefix_rewrite() {
-	input_file="$TEST_TMPDIR/dest_noop_normalize_exclude_input.txt"
-	output_file="$TEST_TMPDIR/dest_noop_normalize_exclude_output.txt"
-	g_initial_source_had_trailing_slash=0
-	g_initial_source="tank/src"
-	g_option_x_exclude_datasets='/replica$'
-	cat <<'EOF' >"$input_file"
-backup/dst/src/replica@snap2
-backup/dst/src/app@snap2
-backup/dst/src/app@snap1
-EOF
-
-	zxfer_normalize_destination_snapshot_list_for_noop_proof "backup/dst/src" "$input_file" "$output_file"
-
-	assertEquals "Fast no-op destination normalization should rewrite before filtering so source-rooted exclude patterns apply." \
-		"tank/src/app@snap1
-tank/src/app@snap2" "$(cat "$output_file")"
-}
-
-test_normalize_destination_snapshot_list_for_noop_proof_filters_trailing_slash_excludes() {
-	input_file="$TEST_TMPDIR/dest_noop_normalize_trailing_exclude_input.txt"
-	output_file="$TEST_TMPDIR/dest_noop_normalize_trailing_exclude_output.txt"
-	g_initial_source_had_trailing_slash=1
-	g_option_x_exclude_datasets='/replica$'
-	cat <<'EOF' >"$input_file"
-backup/dst/replica@snap2
-backup/dst/app@snap2
-backup/dst/app@snap1
-EOF
-
-	zxfer_normalize_destination_snapshot_list_for_noop_proof "backup/dst" "$input_file" "$output_file"
-
-	assertEquals "Trailing-slash fast no-op normalization should filter excluded destination datasets before sorting." \
-		"backup/dst/app@snap1
-backup/dst/app@snap2" "$(cat "$output_file")"
-}
-
-test_normalize_destination_snapshot_list_for_noop_proof_reports_trailing_slash_filter_failures() {
-	input_file="$TEST_TMPDIR/dest_noop_normalize_trailing_filter_error_input.txt"
-	output_file="$TEST_TMPDIR/dest_noop_normalize_trailing_filter_error_output.txt"
-	g_initial_source_had_trailing_slash=1
-	g_option_x_exclude_datasets='['
-	printf '%s\n' "backup/dst/app@snap1" >"$input_file"
-
-	status=0
-	zxfer_normalize_destination_snapshot_list_for_noop_proof "backup/dst" "$input_file" "$output_file" >/dev/null 2>&1 ||
-		status=$?
-
-	assertNotEquals "Trailing-slash fast no-op normalization should preserve awk exclude-filter failures." \
-		0 "$status"
-}
-
-test_normalize_destination_snapshot_list_for_noop_proof_reports_rewrite_filter_failures() {
-	input_file="$TEST_TMPDIR/dest_noop_normalize_rewrite_filter_error_input.txt"
-	output_file="$TEST_TMPDIR/dest_noop_normalize_rewrite_filter_error_output.txt"
-	g_initial_source_had_trailing_slash=0
-	g_initial_source="tank/src"
-	g_option_x_exclude_datasets='['
-	printf '%s\n' "backup/dst/src/app@snap1" >"$input_file"
-
-	status=0
-	zxfer_normalize_destination_snapshot_list_for_noop_proof "backup/dst/src" "$input_file" "$output_file" >/dev/null 2>&1 ||
-		status=$?
-
-	assertNotEquals "Rewriting fast no-op normalization should preserve awk exclude-filter failures." \
-		0 "$status"
-}
-
-test_normalize_destination_snapshot_list_for_noop_proof_preserves_status_tempfile_failures() {
-	input_file="$TEST_TMPDIR/dest_noop_normalize_status_failure_input.txt"
-	output_file="$TEST_TMPDIR/dest_noop_normalize_status_failure_output.txt"
-	g_option_x_exclude_datasets="replica"
-	printf '%s\n' "backup/dst/app@snap1" >"$input_file"
-
-	trailing_status=$(
-		(
-			g_initial_source_had_trailing_slash=1
-			zxfer_get_temp_file() {
-				return 64
-			}
-			set +e
-			zxfer_normalize_destination_snapshot_list_for_noop_proof "backup/dst" "$input_file" "$output_file"
-			printf '%s\n' "$?"
-		)
-	)
-	rewritten_status=$(
-		(
-			g_initial_source_had_trailing_slash=0
-			g_initial_source="tank/src"
-			zxfer_get_temp_file() {
-				return 65
-			}
-			set +e
-			zxfer_normalize_destination_snapshot_list_for_noop_proof "backup/dst" "$input_file" "$output_file"
-			printf '%s\n' "$?"
-		)
-	)
-
-	assertEquals "Trailing-slash fast no-op normalization should preserve status-tempfile allocation failures." \
-		64 "$trailing_status"
-	assertEquals "Rewriting fast no-op normalization should preserve status-tempfile allocation failures." \
-		65 "$rewritten_status"
 }
 
 test_normalize_destination_snapshot_stream_for_noop_proof_rewrites_and_filters() {
@@ -4633,6 +4538,7 @@ test_collect_local_destination_dataset_inventory_preserves_setup_and_publish_fai
 		(
 			l_one="$TEST_TMPDIR/local_dest_inventory_publish.one"
 			l_two="$TEST_TMPDIR/local_dest_inventory_publish.two"
+			g_option_V_very_verbose=1
 			zxfer_create_temp_file_group() {
 				: >"$l_one"
 				: >"$l_two"
@@ -4646,7 +4552,7 @@ test_collect_local_destination_dataset_inventory_preserves_setup_and_publish_fai
 				return 67
 			}
 			set +e
-			zxfer_collect_local_destination_dataset_inventory
+			zxfer_collect_local_destination_dataset_inventory 2>/dev/null
 			printf '%s\n' "$?"
 		)
 	)
@@ -6433,6 +6339,7 @@ test_get_zfs_list_remote_target_batches_missing_destination_root_fallback() {
 		(
 			SSH_LOG="$ssh_log"
 			g_option_T_target_host="target.example"
+			g_option_V_very_verbose=1
 			zxfer_write_source_snapshot_list_to_file() {
 				printf '%s\n' "tank/src@snapA" >"$1"
 				: >"$2"

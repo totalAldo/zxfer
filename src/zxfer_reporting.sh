@@ -192,6 +192,27 @@ zxfer_get_failure_report_redaction_marker() {
 	printf '%s\n' "[redacted]"
 }
 
+# Purpose: Check whether an operator-facing command rendering has any consumer.
+# Usage: Called before display-only command rendering so quiet runs perform
+# zero renders; verbose output (-v/-V) and unsafe failure-report command
+# fields are the only consumers of rendered command strings.
+zxfer_command_display_render_enabled() {
+	[ "${g_option_v_verbose:-0}" -eq 1 ] && return 0
+	[ "${g_option_V_very_verbose:-0}" -eq 1 ] && return 0
+	zxfer_failure_report_uses_unsafe_command_fields
+}
+
+# Purpose: Record the redacted failure-context marker without rendering the
+# command.
+# Usage: Called on quiet paths instead of zxfer_record_last_command_string so
+# skipped display renders still leave the same redacted last_command field.
+zxfer_record_last_command_opaque() {
+	zxfer_init_failure_context_defaults
+	# Assign the marker inline so hot exec paths skip a command substitution;
+	# must match zxfer_get_failure_report_redaction_marker.
+	g_zxfer_failure_last_command="[redacted]"
+}
+
 # Purpose: Render the command for report as a stable shell-safe or operator-
 # facing string.
 # Usage: Called during failure reporting, profiling, and verbose operator
@@ -257,12 +278,10 @@ zxfer_record_last_command_string() {
 	zxfer_init_failure_context_defaults
 	if [ $# -eq 0 ] || [ "$1" = "" ]; then
 		g_zxfer_failure_last_command=""
-		return
-	fi
-	if zxfer_failure_report_uses_unsafe_command_fields; then
+	elif zxfer_failure_report_uses_unsafe_command_fields; then
 		g_zxfer_failure_last_command=$(zxfer_escape_report_value "$1")
 	else
-		g_zxfer_failure_last_command=$(zxfer_get_failure_report_redaction_marker)
+		zxfer_record_last_command_opaque
 	fi
 }
 
@@ -275,12 +294,10 @@ zxfer_record_last_command_argv() {
 	zxfer_init_failure_context_defaults
 	if [ $# -eq 0 ]; then
 		g_zxfer_failure_last_command=""
-		return
-	fi
-	if zxfer_failure_report_uses_unsafe_command_fields; then
+	elif zxfer_failure_report_uses_unsafe_command_fields; then
 		g_zxfer_failure_last_command=$(zxfer_quote_command_argv "$@")
 	else
-		g_zxfer_failure_last_command=$(zxfer_get_failure_report_redaction_marker)
+		zxfer_record_last_command_opaque
 	fi
 }
 
@@ -744,15 +761,6 @@ zxfer_render_failure_report() {
 	printf 'zxfer: failure report end\n'
 }
 
-# Purpose: Return the error log parent directory in the form expected by later
-# helpers.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_error_log_parent_dir() {
-	zxfer_get_path_parent_dir "$1"
-}
-
 # Purpose: Validate the existing error log file before zxfer relies on it.
 # Usage: Called during failure reporting, profiling, and verbose operator
 # output to fail closed on malformed, unsafe, or stale input.
@@ -785,23 +793,6 @@ zxfer_validate_existing_error_log_file() {
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_display_path\" because its permissions ($l_validate_mode) are not 0600."
 		return 1
 	fi
-}
-
-# Purpose: Return the error log lock directory in the form expected by later
-# helpers.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_error_log_lock_dir() {
-	l_lock_log_path=$1
-	l_lock_log_parent=$2
-	l_lock_log_name=${l_lock_log_path##*/}
-
-	printf '%s/.zxfer-error-log.lock.%s\n' "$l_lock_log_parent" "$l_lock_log_name"
-}
-
-zxfer_get_error_log_lock_purpose() {
-	printf '%s\n' "error-log-lock"
 }
 
 # Purpose: Render the error-log path identity as lowercase hex.
@@ -950,13 +941,13 @@ zxfer_acquire_error_log_lock() {
 	l_lock_attempts=0
 
 	while ! zxfer_create_owned_lock_dir \
-		"$l_lock_dir_path" lock "$(zxfer_get_error_log_lock_purpose)" >/dev/null; do
+		"$l_lock_dir_path" lock "error-log-lock" >/dev/null; do
 		if [ -L "$l_lock_dir_path" ] || [ -h "$l_lock_dir_path" ]; then
 			return 1
 		fi
 		if [ -d "$l_lock_dir_path" ]; then
 			zxfer_try_reap_stale_owned_lock_dir \
-				"$l_lock_dir_path" 1 lock "$(zxfer_get_error_log_lock_purpose)" >/dev/null
+				"$l_lock_dir_path" 1 lock "error-log-lock" >/dev/null
 			l_reap_status=$?
 			if [ "$l_reap_status" -eq 0 ]; then
 				continue
@@ -981,7 +972,7 @@ zxfer_release_error_log_lock() {
 	l_release_lock_dir=$1
 
 	zxfer_release_owned_lock_dir \
-		"$l_release_lock_dir" lock "$(zxfer_get_error_log_lock_purpose)"
+		"$l_release_lock_dir" lock "error-log-lock"
 }
 
 zxfer_warn_error_log_lock_release_failure() {
@@ -1112,7 +1103,7 @@ zxfer_append_failure_report_to_log() {
 		return 1
 	fi
 
-	l_log_parent=$(zxfer_get_error_log_parent_dir "$l_log_path")
+	l_log_parent=$(zxfer_get_path_parent_dir "$l_log_path")
 	if [ ! -d "$l_log_parent" ]; then
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_log_path\" because parent directory \"$l_log_parent\" does not exist."
 		return 1
@@ -1142,7 +1133,7 @@ zxfer_append_failure_report_to_log() {
 			return 1
 		fi
 	else
-		l_lock_dir=$(zxfer_get_error_log_lock_dir "$l_log_path" "$l_trusted_log_parent")
+		l_lock_dir="$l_trusted_log_parent/.zxfer-error-log.lock.${l_log_path##*/}"
 	fi
 	if ! zxfer_acquire_error_log_lock "$l_lock_dir"; then
 		zxfer_warn_stderr "zxfer: warning: unable to acquire ZXFER_ERROR_LOG lock for \"$l_log_path\"."

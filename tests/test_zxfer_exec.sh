@@ -1012,27 +1012,7 @@ test_ensure_local_backup_dir_creates_secure_directory() {
 	assertEquals "Backup directory must be chmod 700." "700" "$perms"
 }
 
-test_invoke_ssh_command_for_host_preserves_argument_boundaries() {
-	host_spec="backup@example.com pfexec doas"
-	log_file="$TEST_TMPDIR/invoke_cmd.log"
-	: >"$log_file"
-	FAKE_SSH_LOG="$log_file"
-	FAKE_SSH_SUPPRESS_STDOUT=1
-	export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
-	g_cmd_ssh="$FAKE_SSH_BIN"
-	g_option_O_origin_host="$host_spec"
-	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
-
-	zxfer_invoke_ssh_command_for_host "$host_spec" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup"
-
-	unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
-	expected=$(printf '%s\n' "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=yes" "-S" "$TEST_TMPDIR/origin.sock" "backup@example.com" "pfexec" "doas" "--" "cmd arg" "with spaces" "umask 077; cat > /tmp/backup")
-	result=$(cat "$log_file")
-
-	assertEquals "ssh helper should keep control-socket, multi-word host specs, and remote commands intact." "$expected" "$result"
-}
-
-test_invoke_ssh_command_for_host_emits_very_verbose_remote_prefix() {
+test_invoke_ssh_shell_command_for_host_emits_very_verbose_remote_prefix() {
 	log_file="$TEST_TMPDIR/invoke_cmd_verbose.log"
 	stderr_file="$TEST_TMPDIR/invoke_cmd_verbose.err"
 	: >"$log_file"
@@ -1044,33 +1024,52 @@ test_invoke_ssh_command_for_host_emits_very_verbose_remote_prefix() {
 	g_option_O_origin_host="backup@example.com pfexec"
 	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
 
-	zxfer_invoke_ssh_command_for_host "backup@example.com pfexec" /sbin/zfs list -H tank/src \
+	zxfer_invoke_ssh_shell_command_for_host "backup@example.com pfexec" "zfs list -H tank/src" \
 		>/dev/null 2>"$stderr_file"
 
 	unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
 	expected_verbose_command=$(zxfer_render_command_for_report "" \
 		"$FAKE_SSH_BIN" "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=yes" \
-		"-S" "$TEST_TMPDIR/origin.sock" "backup@example.com" "pfexec" \
-		"/sbin/zfs" "list" "-H" "tank/src")
+		"-S" "$TEST_TMPDIR/origin.sock" "backup@example.com" \
+		"'pfexec' zfs list -H tank/src")
 
-	assertContains "Very-verbose ssh argv execution should prefix origin-host remote commands." \
+	assertContains "Very-verbose ssh shell execution should prefix origin-host remote commands." \
 		"$(cat "$stderr_file")" "Running remote command [origin: backup@example.com pfexec]:"
-	assertContains "Very-verbose ssh argv execution should print the full rendered ssh command." \
+	assertContains "Very-verbose ssh shell execution should print the full rendered ssh command." \
 		"$(cat "$stderr_file")" "$expected_verbose_command"
 }
 
-test_invoke_ssh_command_for_host_runs_without_remote_args() {
-	outfile="$TEST_TMPDIR/invoke_ssh_noargs.out"
-	g_cmd_ssh="$FAKE_SSH_BIN"
+test_invoke_ssh_shell_command_for_host_skips_remote_render_when_quiet() {
+	log_file="$TEST_TMPDIR/invoke_cmd_quiet.log"
+	stderr_file="$TEST_TMPDIR/invoke_cmd_quiet.err"
+	render_count_file="$TEST_TMPDIR/invoke_cmd_quiet.renders"
+	: >"$log_file"
+	printf '%s\n' 0 >"$render_count_file"
 
-	zxfer_invoke_ssh_command_for_host "" >"$outfile"
+	(
+		FAKE_SSH_LOG="$log_file"
+		FAKE_SSH_SUPPRESS_STDOUT=1
+		export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
+		RENDER_COUNT_FILE="$render_count_file"
+		zxfer_render_command_for_report() {
+			printf '%s\n' 1 >>"$RENDER_COUNT_FILE"
+			printf '%s\n' "rendered"
+		}
+		g_option_v_verbose=0
+		g_option_V_very_verbose=0
+		g_cmd_ssh="$FAKE_SSH_BIN"
+		g_option_O_origin_host="backup@example.com"
+		g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
+		zxfer_invoke_ssh_shell_command_for_host "backup@example.com" "zfs list -H tank/src" \
+			>/dev/null 2>"$stderr_file"
+	)
 
-	assertEquals "ssh helpers should still invoke the base command when no host or remote argv is provided." \
-		"$FAKE_SSH_BIN
--o
-BatchMode=yes
--o
-StrictHostKeyChecking=yes" "$(cat "$outfile")"
+	assertEquals "Quiet ssh shell execution should not render the remote command for display." \
+		"0" "$(cat "$render_count_file")"
+	assertEquals "Quiet ssh shell execution should emit no very-verbose output." \
+		"" "$(cat "$stderr_file")"
+	assertContains "Quiet ssh shell execution should still invoke the remote command." \
+		"$(cat "$log_file")" "zfs list -H tank/src"
 }
 
 test_get_ssh_base_transport_tokens_preserves_local_ssh_resolution_failures() {
@@ -1095,29 +1094,7 @@ test_get_ssh_base_transport_tokens_preserves_local_ssh_resolution_failures() {
 		"ssh lookup failed" "$output"
 }
 
-test_invoke_ssh_command_for_host_includes_explicit_known_hosts_override() {
-	log_file="$TEST_TMPDIR/invoke_cmd_known_hosts.log"
-	: >"$log_file"
-	FAKE_SSH_LOG="$log_file"
-	FAKE_SSH_SUPPRESS_STDOUT=1
-	export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
-	g_cmd_ssh="$FAKE_SSH_BIN"
-	ZXFER_SSH_USER_KNOWN_HOSTS_FILE="$TEST_TMPDIR/known_hosts"
-
-	zxfer_invoke_ssh_command_for_host "backup.example" "/bin/true"
-
-	unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
-	expected=$(printf '%s\n' \
-		"-o" "BatchMode=yes" \
-		"-o" "StrictHostKeyChecking=yes" \
-		"-o" "UserKnownHostsFile=$TEST_TMPDIR/known_hosts" \
-		"backup.example" "/bin/true")
-
-	assertEquals "ssh invocation helpers should pass the explicit managed known-hosts override through the live argv path." \
-		"$expected" "$(cat "$log_file")"
-}
-
-test_invoke_ssh_command_for_host_honors_explicit_ambient_policy_opt_out() {
+test_invoke_ssh_shell_command_for_host_honors_explicit_ambient_policy_opt_out() {
 	log_file="$TEST_TMPDIR/invoke_cmd_ambient.log"
 	: >"$log_file"
 	FAKE_SSH_LOG="$log_file"
@@ -1129,68 +1106,13 @@ test_invoke_ssh_command_for_host_honors_explicit_ambient_policy_opt_out() {
 	ZXFER_SSH_USE_AMBIENT_CONFIG=1
 	ZXFER_SSH_USER_KNOWN_HOSTS_FILE="$TEST_TMPDIR/known_hosts"
 
-	zxfer_invoke_ssh_command_for_host "backup.example" "/bin/true"
+	zxfer_invoke_ssh_shell_command_for_host "backup.example" "/bin/true"
 
 	unset FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
 	expected=$(printf '%s\n' "-S" "$TEST_TMPDIR/origin.sock" "backup.example" "/bin/true")
 
 	assertEquals "Ambient-policy opt-out should suppress zxfer-managed ssh -o options on the live invocation path while preserving control-socket reuse." \
 		"$expected" "$(cat "$log_file")"
-}
-
-test_get_ssh_cmd_for_host_adds_managed_transport_policy_by_default() {
-	g_cmd_ssh="$FAKE_SSH_BIN"
-	g_option_O_origin_host="origin.example"
-	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
-
-	assertEquals "Managed ssh transports should enforce batch mode and strict host-key checks before the control socket." \
-		"'$FAKE_SSH_BIN' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' '-S' '$TEST_TMPDIR/origin.sock'" \
-		"$(zxfer_get_ssh_cmd_for_host "origin.example")"
-}
-
-test_get_ssh_cmd_for_host_allows_explicit_known_hosts_file_override() {
-	g_cmd_ssh="$FAKE_SSH_BIN"
-	ZXFER_SSH_USER_KNOWN_HOSTS_FILE="$TEST_TMPDIR/known_hosts"
-
-	assertEquals "Managed ssh transports should allow pinning a specific known-hosts file." \
-		"'$FAKE_SSH_BIN' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' '-o' 'UserKnownHostsFile=$TEST_TMPDIR/known_hosts'" \
-		"$(zxfer_get_ssh_cmd_for_host "backup.example")"
-}
-
-test_get_ssh_cmd_for_host_allows_explicit_ambient_policy_opt_out() {
-	g_cmd_ssh="$FAKE_SSH_BIN"
-	g_option_O_origin_host="origin.example"
-	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
-	ZXFER_SSH_USE_AMBIENT_CONFIG=1
-
-	assertEquals "Ambient-policy opt-out should suppress zxfer-managed ssh -o transport flags." \
-		"'$FAKE_SSH_BIN' '-S' '$TEST_TMPDIR/origin.sock'" \
-		"$(zxfer_get_ssh_cmd_for_host "origin.example")"
-}
-
-test_get_ssh_cmd_for_host_rejects_relative_known_hosts_override() {
-	set +e
-	output=$(
-		(
-			exec 8</dev/null
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			g_cmd_ssh="$FAKE_SSH_BIN"
-			ZXFER_SSH_USER_KNOWN_HOSTS_FILE="relative-known-hosts"
-			zxfer_get_ssh_cmd_for_host "backup.example"
-		)
-	)
-	status=$?
-
-	assertEquals "Relative known-hosts overrides should fail closed before ssh command rendering." 1 "$status"
-	assertContains "Rejected known-hosts overrides should explain the absolute-path requirement." \
-		"$output" "ZXFER_SSH_USER_KNOWN_HOSTS_FILE must be an absolute path."
-	assertNotContains "Rejected known-hosts overrides should not leak partial ssh argv tokens into the diagnostic." \
-		"$output" "$FAKE_SSH_BIN"
-	assertNotContains "Rejected known-hosts overrides should not leak the internal managed-policy identity prefix into the diagnostic." \
-		"$output" "managed"
 }
 
 test_zxfer_get_managed_ssh_option_tokens_rejects_invalid_batch_mode() {
@@ -1215,23 +1137,6 @@ test_zxfer_get_managed_ssh_option_tokens_rejects_invalid_strict_host_key_checkin
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Malformed ZXFER_SSH_STRICT_HOST_KEY_CHECKING values should preserve the specific validation message." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "ZXFER_SSH_STRICT_HOST_KEY_CHECKING must be a single-line non-empty value."
-}
-
-test_invoke_ssh_command_for_host_rethrows_transport_policy_validation_failures() {
-	zxfer_test_capture_subshell "
-		g_cmd_ssh='$FAKE_SSH_BIN'
-		ZXFER_SSH_USER_KNOWN_HOSTS_FILE='relative-known-hosts'
-		zxfer_throw_error() {
-			printf '%s\n' \"\$1\"
-			exit 1
-		}
-		zxfer_invoke_ssh_command_for_host 'backup.example' '/bin/true'
-	"
-
-	assertEquals "ssh argv execution helpers should fail closed when managed ssh policy validation fails." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "ssh argv execution helpers should rethrow the known-hosts validation failure." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ZXFER_SSH_USER_KNOWN_HOSTS_FILE must be an absolute path."
 }
 
 test_build_ssh_shell_command_for_host_rethrows_transport_policy_validation_failures() {
@@ -1271,22 +1176,6 @@ test_build_ssh_shell_command_for_host_preserves_transport_token_status() {
 }
 
 test_ssh_host_spec_helpers_reject_invalid_literal_token_strings() {
-	zxfer_test_capture_subshell "
-		zxfer_throw_error() {
-			printf '%s\n' \"\$1\"
-			exit 1
-		}
-		zxfer_get_ssh_transport_tokens_for_host() {
-			printf '%s\n' '/usr/bin/ssh'
-		}
-		zxfer_invoke_ssh_command_for_host 'backup.example \"pfexec -u zfs\"' '/bin/true'
-	"
-
-	assertEquals "ssh argv execution helpers should reject host specs that rely on shell quoting." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "ssh argv execution helpers should preserve the host-spec literal-token validation message." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "Host spec (-O/-T) must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
-
 	zxfer_test_capture_subshell "
 		zxfer_throw_error() {
 			printf '%s\n' \"\$1\"
@@ -2123,6 +2012,99 @@ test_exists_destination_returns_one_on_success() {
 	g_RZFS=$old_g_RZFS
 }
 
+test_destination_parent_missing_confirmed_by_ancestor_listing_covers_listing_outcomes() {
+	present_status=$(
+		(
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "backup/dst/src"
+				return 0
+			}
+			set +e
+			zxfer_destination_parent_missing_confirmed_by_ancestor_listing "backup/dst/src"
+			printf '%s\n' "$?"
+		)
+	)
+	unrelated_status=$(
+		(
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "unrelated/dataset"
+				return 0
+			}
+			set +e
+			zxfer_destination_parent_missing_confirmed_by_ancestor_listing "backup/dst/src"
+			printf '%s\n' "$?"
+		)
+	)
+	missing_output=$(
+		(
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "cannot open 'backup/dst': dataset does not exist" >&2
+				return 1
+			}
+			set +e
+			zxfer_destination_parent_missing_confirmed_by_ancestor_listing "backup/dst/src"
+			printf 'status=%s\n' "$?"
+			printf 'cached=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst/src")"
+		)
+	)
+
+	assertEquals "Ancestor listings that still contain the missing dataset should not confirm absence." \
+		"1" "$present_status"
+	assertEquals "Ancestor listings that lack both datasets should not confirm absence." \
+		"1" "$unrelated_status"
+	assertContains "Ancestor listings that report a missing ancestor should confirm absence." \
+		"$missing_output" "status=0"
+	assertContains "Confirmed missing parents should seed the destination existence cache as absent." \
+		"$missing_output" "cached=0"
+}
+
+test_exists_destination_skips_probe_render_when_quiet() {
+	render_count_file="$TEST_TMPDIR/exists_quiet.renders"
+	printf '%s\n' 0 >"$render_count_file"
+
+	result=$(
+		(
+			RENDER_COUNT_FILE="$render_count_file"
+			zxfer_render_destination_zfs_command() {
+				printf '%s\n' 1 >>"$RENDER_COUNT_FILE"
+				printf '%s\n' "rendered"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				return 0
+			}
+			g_option_v_verbose=0
+			g_option_V_very_verbose=0
+			zxfer_exists_destination "pool/fs" live
+		)
+	)
+
+	assertEquals "Quiet destination probes should still report existence." "1" "$result"
+	assertEquals "Quiet destination probes should not render the probe command for display." \
+		"0" "$(cat "$render_count_file")"
+}
+
+test_exists_destination_renders_probe_display_when_very_verbose() {
+	stderr_file="$TEST_TMPDIR/exists_verbose.err"
+
+	result=$(
+		(
+			zxfer_run_destination_zfs_cmd() {
+				return 0
+			}
+			g_option_T_target_host=""
+			g_cmd_zfs="/sbin/zfs"
+			g_RZFS="/sbin/zfs"
+			g_option_V_very_verbose=1
+			zxfer_exists_destination "pool/fs" live 2>"$stderr_file"
+		)
+	)
+
+	assertEquals "Very-verbose destination probes should still report existence." "1" "$result"
+	assertEquals "Very-verbose destination probes should keep the current operator line text." \
+		"Checking if destination exists: '/sbin/zfs' 'list' '-H' 'pool/fs'" \
+		"$(cat "$stderr_file")"
+}
+
 test_exists_destination_returns_zero_when_dataset_is_missing() {
 	result=$(
 		(
@@ -2270,6 +2252,7 @@ test_exists_destination_uses_parent_recursive_listing_for_ambiguous_omnios_child
 	output=$(
 		(
 			g_destination_operating_system="SunOS"
+			g_option_V_very_verbose=1
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "backup/dst/src/child" ]; then
 					return 1
@@ -2407,6 +2390,7 @@ test_exists_destination_parent_recursive_listing_treats_silent_missing_parent_as
 	output=$(
 		(
 			g_destination_operating_system="SunOS"
+			g_option_V_very_verbose=1
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "backup/dst/src/child" ]; then
 					return 1
@@ -5135,17 +5119,17 @@ test_run_source_zfs_cmd_records_local_command_in_unsafe_mode() {
 		"'/bin/echo' 'list' '-H' 'tank/src'" "$g_zxfer_failure_last_command"
 }
 
-test_invoke_ssh_command_for_host_records_remote_command_in_unsafe_mode() {
+test_invoke_ssh_shell_command_for_host_records_remote_command_in_unsafe_mode() {
 	FAKE_SSH_STDOUT_OVERRIDE="ok"
 	g_cmd_ssh="$FAKE_SSH_BIN"
-	g_option_O_origin_host="backup@example.com pfexec"
+	g_option_O_origin_host="backup@example.com"
 	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
 	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 
-	zxfer_invoke_ssh_command_for_host "backup@example.com pfexec" /sbin/zfs list -H tank/src >/dev/null
+	zxfer_invoke_ssh_shell_command_for_host "backup@example.com" "zfs list -H tank/src" >/dev/null
 
 	assertEquals "Unsafe SSH command recording should preserve every token boundary." \
-		"'$FAKE_SSH_BIN' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' '-S' '$TEST_TMPDIR/origin.sock' 'backup@example.com' 'pfexec' '/sbin/zfs' 'list' '-H' 'tank/src'" \
+		"'$FAKE_SSH_BIN' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' '-S' '$TEST_TMPDIR/origin.sock' 'backup@example.com' 'zfs list -H tank/src'" \
 		"$g_zxfer_failure_last_command"
 }
 
@@ -5159,6 +5143,7 @@ test_zxfer_remote_command_context_helpers_cover_remaining_role_labels() {
 			g_option_O_origin_host="origin.example"
 			g_option_T_target_host="target.example"
 			printf 'target=%s\n' "$(zxfer_get_remote_command_context_label "target.example")"
+			g_option_V_very_verbose=1
 			zxfer_echoV() {
 				printf '%s\n' "$*"
 			}
@@ -5168,6 +5153,8 @@ test_zxfer_remote_command_context_helpers_cover_remaining_role_labels() {
 
 	assertContains "Remote command context labels should render the explicit other profile side as remote." \
 		"$output" "other=remote: other.example"
+	assertEquals "Remote command context labels should fall back to a bare remote label when no host is provided." \
+		"remote" "$(zxfer_get_remote_command_context_label "")"
 	assertContains "Remote command context labels should render shared origin and target hosts as origin/target." \
 		"$output" "shared=origin/target: shared.example"
 	assertContains "Remote command context labels should infer the target role when only the target host matches." \
@@ -5182,6 +5169,7 @@ test_zxfer_echoV_remote_command_for_host_covers_current_shell_render_path() {
 	(
 		g_option_O_origin_host="origin.example"
 		g_option_T_target_host="target.example doas"
+		g_option_V_very_verbose=1
 		zxfer_echoV() {
 			printf '%s\n' "$*" >"$trace_file"
 		}
@@ -5532,7 +5520,6 @@ test_read_remote_backup_file_rejects_insecure_remote_owner() {
 	set +e
 	output=$(
 		(
-			zxfer_get_ssh_cmd_for_host() { printf '%s\n' "/usr/bin/ssh"; }
 			zxfer_invoke_ssh_shell_command_for_host() { return 95; }
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
@@ -5552,7 +5539,6 @@ test_read_remote_backup_file_rejects_insecure_remote_mode() {
 	set +e
 	output=$(
 		(
-			zxfer_get_ssh_cmd_for_host() { printf '%s\n' "/usr/bin/ssh"; }
 			zxfer_invoke_ssh_shell_command_for_host() { return 96; }
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
@@ -5572,7 +5558,6 @@ test_read_remote_backup_file_rejects_unknown_remote_security_metadata() {
 	set +e
 	output=$(
 		(
-			zxfer_get_ssh_cmd_for_host() { printf '%s\n' "/usr/bin/ssh"; }
 			zxfer_invoke_ssh_shell_command_for_host() { return 97; }
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
@@ -5693,11 +5678,11 @@ test_execute_command_continue_on_fail_reports_noncritical_error() {
 		"$output" "Non-critical error when executing command. Continuing."
 }
 
-test_zxfer_get_error_log_parent_dir_handles_root_and_relative_inputs() {
+test_zxfer_get_path_parent_dir_handles_root_and_relative_inputs() {
 	assertEquals "Absolute paths should return their containing directory." \
-		"/var/log" "$(zxfer_get_error_log_parent_dir "/var/log/zxfer.log")"
+		"/var/log" "$(zxfer_get_path_parent_dir "/var/log/zxfer.log")"
 	assertEquals "Paths without a slash should fall back to root for parent-dir validation." \
-		"/" "$(zxfer_get_error_log_parent_dir "zxfer.log")"
+		"/" "$(zxfer_get_path_parent_dir "zxfer.log")"
 }
 
 test_run_source_zfs_cmd_uses_local_wrapper_command_when_configured() {

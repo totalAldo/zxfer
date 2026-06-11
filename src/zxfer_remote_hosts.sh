@@ -1088,13 +1088,12 @@ zxfer_cleanup_ssh_control_socket_entry_dir() {
 # socket management when zxfer wants low-level debug output that should stay
 # hidden in normal verbose mode.
 zxfer_echoV_ssh_control_socket_command_for_host() {
+	[ "${g_option_V_very_verbose:-0}" -eq 1 ] || return 0
 	l_host=$1
 	l_action_label=$2
 	shift 2
 
-	l_command_context=$(zxfer_get_remote_command_context_label "$l_host")
-	l_rendered_command=$(zxfer_render_command_for_report "" "$@")
-	zxfer_echoV "$l_action_label [$l_command_context]: $l_rendered_command"
+	zxfer_echoV "$l_action_label [$(zxfer_get_remote_command_context_label "$l_host")]: $(zxfer_render_command_for_report "" "$@")"
 }
 
 # Purpose: Run the SSH control socket action for host through the controlled
@@ -2486,9 +2485,9 @@ zxfer_capture_remote_probe_output() {
 	l_capture_dir=$g_zxfer_runtime_artifact_path_result
 	l_stdout_path="$l_capture_dir/stdout"
 	l_stderr_path="$l_capture_dir/stderr"
-	l_command_context=$(zxfer_get_remote_command_context_label \
-		"$l_host_spec" "$l_profile_side")
-	zxfer_echoV "Running remote probe [$l_command_context]: $l_remote_probe_cmd"
+	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
+		zxfer_echoV "Running remote probe [$(zxfer_get_remote_command_context_label "$l_host_spec" "$l_profile_side")]: $l_remote_probe_cmd"
+	fi
 
 	if zxfer_invoke_ssh_shell_command_for_host \
 		"$l_host_spec" "$l_remote_probe_cmd" "$l_profile_side" >"$l_stdout_path" 2>"$l_stderr_path"; then

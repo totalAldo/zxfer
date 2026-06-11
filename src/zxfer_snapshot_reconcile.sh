@@ -738,9 +738,8 @@ zxfer_delete_snaps() {
 
 	# build the destroy command
 	l_destroy_target="$l_zfs_dest_dataset@$l_unprotected_snaps_to_delete"
-	l_cmd=$(zxfer_render_destination_zfs_command destroy "$l_destroy_target")
 	if [ "$g_option_n_dryrun" -eq 1 ]; then
-		zxfer_echov "Dry run: $l_cmd"
+		zxfer_echov "Dry run: $(zxfer_render_destination_zfs_command destroy "$l_destroy_target")"
 		return
 	fi
 

@@ -79,6 +79,56 @@ test_zxfer_record_last_command_helpers_preserve_empty_input_semantics_by_default
 		"" "$g_zxfer_failure_last_command"
 }
 
+test_zxfer_record_last_command_opaque_matches_redaction_marker() {
+	g_zxfer_failure_last_command=""
+
+	zxfer_record_last_command_opaque
+
+	assertEquals "Opaque last-command tracking should store the shared redaction marker." \
+		"$(zxfer_get_failure_report_redaction_marker)" "$g_zxfer_failure_last_command"
+}
+
+test_zxfer_command_display_render_enabled_tracks_display_consumers() {
+	quiet_status=$(
+		(
+			g_option_v_verbose=0
+			g_option_V_very_verbose=0
+			zxfer_command_display_render_enabled
+			printf '%s\n' "$?"
+		)
+	)
+	verbose_status=$(
+		(
+			g_option_v_verbose=1
+			g_option_V_very_verbose=0
+			zxfer_command_display_render_enabled
+			printf '%s\n' "$?"
+		)
+	)
+	very_verbose_status=$(
+		(
+			g_option_v_verbose=0
+			g_option_V_very_verbose=1
+			zxfer_command_display_render_enabled
+			printf '%s\n' "$?"
+		)
+	)
+	unsafe_status=$(
+		(
+			g_option_v_verbose=0
+			g_option_V_very_verbose=0
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
+			zxfer_command_display_render_enabled
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Quiet runs should skip display command rendering." "1" "$quiet_status"
+	assertEquals "Verbose (-v) runs should render display commands." "0" "$verbose_status"
+	assertEquals "Very-verbose (-V) runs should render display commands." "0" "$very_verbose_status"
+	assertEquals "Unsafe failure-report mode should render commands for failure context." "0" "$unsafe_status"
+}
+
 test_zxfer_render_failure_report_preserves_command_fields_in_unsafe_mode() {
 	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 	zxfer_set_failure_roots "tank/src" "backup/dst"

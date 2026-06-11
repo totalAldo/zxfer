@@ -4753,6 +4753,82 @@ test_zxfer_build_destination_zfs_command_uses_local_zfs_path_when_rzfs_matches_c
 		"$(zxfer_build_destination_zfs_command set quota=1G backup/dst)"
 }
 
+test_zxfer_build_destination_zfs_command_routes_remote_targets_through_ssh() {
+	rendered=$(
+		(
+			g_option_T_target_host="backup@example.com"
+			g_target_cmd_zfs="/remote/bin/zfs"
+			zxfer_build_destination_zfs_command set quota=1G backup/dst
+		)
+	)
+
+	assertContains "Remote destination command rendering should route through ssh." \
+		"$rendered" "backup@example.com"
+	assertContains "Remote destination command rendering should use the resolved remote zfs path." \
+		"$rendered" "/remote/bin/zfs"
+	assertContains "Remote destination command rendering should keep the property assignment quoted." \
+		"$rendered" "'quota=1G'"
+}
+
+test_zxfer_run_zfs_set_assignments_and_inherit_render_display_lines_when_verbose() {
+	set_output=$(
+		(
+			g_option_n_dryrun=0
+			g_option_v_verbose=1
+			g_option_T_target_host=""
+			g_cmd_zfs="/sbin/zfs"
+			g_RZFS=$g_cmd_zfs
+			zxfer_run_destination_zfs_cmd() {
+				:
+			}
+			zxfer_invalidate_destination_property_mutation_cache() {
+				:
+			}
+			zxfer_run_zfs_set_assignments backup/dst quota=1G
+		)
+	)
+	inherit_output=$(
+		(
+			g_option_n_dryrun=0
+			g_option_v_verbose=1
+			g_option_T_target_host=""
+			g_cmd_zfs="/sbin/zfs"
+			g_RZFS=$g_cmd_zfs
+			zxfer_run_destination_zfs_cmd() {
+				:
+			}
+			zxfer_invalidate_destination_property_mutation_cache() {
+				:
+			}
+			zxfer_run_zfs_inherit_property quota backup/dst
+		)
+	)
+
+	assertEquals "Verbose live property sets should keep the current operator line text." \
+		"'/sbin/zfs' 'set' 'quota=1G' 'backup/dst'" "$set_output"
+	assertEquals "Verbose live property inherits should keep the current operator line text." \
+		"'/sbin/zfs' 'inherit' 'quota' 'backup/dst'" "$inherit_output"
+}
+
+test_zxfer_run_zfs_set_and_inherit_dry_run_emit_newline_terminated_remote_lines() {
+	output=$(
+		(
+			g_option_n_dryrun=1
+			g_option_T_target_host="backup@example.com"
+			g_target_cmd_zfs="/remote/bin/zfs"
+			zxfer_run_zfs_set_assignments backup/dst quota=1G
+			zxfer_run_zfs_inherit_property quota backup/dst
+		)
+	)
+
+	assertEquals "Remote dry-run set and inherit previews must stay newline-separated instead of concatenating." \
+		2 "$(printf '%s\n' "$output" | grep -c "backup@example.com")"
+	assertContains "Remote dry-run previews should emit the set command on the first line." \
+		"$(printf '%s\n' "$output" | sed -n 1p)" "quota=1G"
+	assertContains "Remote dry-run previews should emit the inherit command on the second line." \
+		"$(printf '%s\n' "$output" | sed -n 2p)" "inherit"
+}
+
 test_ensure_destination_exists_invalidates_destination_cache_after_live_create() {
 	log="$TEST_TMPDIR/create_invalidation.log"
 	: >"$log"

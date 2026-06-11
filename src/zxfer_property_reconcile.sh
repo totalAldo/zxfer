@@ -1589,14 +1589,6 @@ zxfer_build_destination_zfs_command() {
 	zxfer_build_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd"
 }
 
-# Purpose: Build the destination ZFS property command for the next execution or
-# comparison step.
-# Usage: Called during property filtering, diffing, and apply before other
-# helpers consume the assembled value.
-zxfer_build_destination_zfs_property_command() {
-	zxfer_build_destination_zfs_command "$@"
-}
-
 # Purpose: Run the destination ZFS property command through the controlled
 # execution path owned by this module.
 # Usage: Called during property filtering, diffing, and apply once planning is
@@ -1629,10 +1621,10 @@ zxfer_run_zfs_set_assignments() {
 
 	[ "$#" -gt 0 ] || return 0
 
-	l_display_cmd=$(zxfer_build_destination_zfs_property_command set "$@" "$l_destination")
-
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		zxfer_echov "$l_display_cmd"
+		if zxfer_command_display_render_enabled; then
+			zxfer_echov "$(zxfer_build_destination_zfs_command set "$@" "$l_destination")"
+		fi
 		l_set_status=0
 		zxfer_run_destination_zfs_property_command set "$@" "$l_destination" || l_set_status=$?
 		if [ "$l_set_status" -ne 0 ]; then
@@ -1640,7 +1632,7 @@ zxfer_run_zfs_set_assignments() {
 		fi
 		zxfer_invalidate_destination_property_mutation_cache "$l_destination"
 	else
-		echo "$l_display_cmd"
+		printf '%s\n' "$(zxfer_build_destination_zfs_command set "$@" "$l_destination")"
 	fi
 }
 
@@ -1702,10 +1694,11 @@ zxfer_run_zfs_set_property() {
 zxfer_run_zfs_inherit_property() {
 	l_property=$1
 	l_destination=$2
-	l_display_cmd=$(zxfer_build_destination_zfs_property_command inherit "$l_property" "$l_destination")
 
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		zxfer_echov "$l_display_cmd"
+		if zxfer_command_display_render_enabled; then
+			zxfer_echov "$(zxfer_build_destination_zfs_command inherit "$l_property" "$l_destination")"
+		fi
 		l_inherit_status=0
 		zxfer_run_destination_zfs_property_command inherit "$l_property" "$l_destination" ||
 			l_inherit_status=$?
@@ -1714,7 +1707,7 @@ zxfer_run_zfs_inherit_property() {
 		fi
 		zxfer_invalidate_destination_property_mutation_cache "$l_destination"
 	else
-		echo "$l_display_cmd"
+		printf '%s\n' "$(zxfer_build_destination_zfs_command inherit "$l_property" "$l_destination")"
 	fi
 }
 

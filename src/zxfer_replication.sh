@@ -728,32 +728,32 @@ zxfer_relaunch() {
 zxfer_newsnap() {
 	l_initial_source=$1
 
-	# We snapshot from the base of the initial source
-	# Extract the filesystem name from the initial source snapshot by removing the '@' and everything after it
+	# We snapshot from the base of the initial source, so strip the '@' and
+	# everything after it to extract the filesystem name.
 	l_sourcefs="${l_initial_source%@*}"
-
 	l_snap=$g_zxfer_new_snapshot_name
 
 	if [ "$g_option_R_recursive" != "" ]; then
 		zxfer_echov "Creating recursive snapshot $l_sourcefs@$l_snap."
-		cmd=$(zxfer_render_source_zfs_command snapshot -r "$l_sourcefs@$l_snap")
+		set -- snapshot -r "$l_sourcefs@$l_snap"
 	else
 		zxfer_echov "Creating snapshot $l_sourcefs@$l_snap."
-		cmd=$(zxfer_render_source_zfs_command snapshot "$l_sourcefs@$l_snap")
+		set -- snapshot "$l_sourcefs@$l_snap"
 	fi
 
-	zxfer_record_last_command_string "$cmd"
+	cmd=""
+	if zxfer_command_display_render_enabled; then
+		cmd=$(zxfer_render_source_zfs_command "$@")
+		zxfer_record_last_command_string "$cmd"
+	else
+		zxfer_record_last_command_opaque
+	fi
 	if [ "$g_option_n_dryrun" -eq 1 ]; then
 		zxfer_echov "Dry run: $cmd"
 		return
 	fi
-
 	zxfer_echov "$cmd"
-	if [ "$g_option_R_recursive" != "" ]; then
-		zxfer_run_source_zfs_cmd snapshot -r "$l_sourcefs@$l_snap" || zxfer_throw_error "Error when executing command."
-	else
-		zxfer_run_source_zfs_cmd snapshot "$l_sourcefs@$l_snap" || zxfer_throw_error "Error when executing command."
-	fi
+	zxfer_run_source_zfs_cmd "$@" || zxfer_throw_error "Error when executing command."
 }
 
 # Purpose: Check the snapshot using the fail-closed rules owned by this module.
@@ -1429,14 +1429,14 @@ zxfer_maybe_capture_preflight_snapshot() {
 # orchestration on dry-run paths where zxfer still needs the exact command or
 # action shape.
 zxfer_preview_migration_services_dry_run() {
-	if [ -n "$g_option_c_services" ]; then
-		zxfer_preview_service_disable_commands "$g_option_c_services"
-		zxfer_record_services_for_relaunch "$g_option_c_services"
-	fi
+	zxfer_preview_service_disable_commands "$g_option_c_services"
+	zxfer_record_services_for_relaunch "$g_option_c_services"
 
-	for l_source in $g_recursive_source_list; do
-		zxfer_echov "Dry run: $(zxfer_render_source_zfs_command unmount "$l_source")"
-	done
+	if zxfer_command_display_render_enabled; then
+		for l_source in $g_recursive_source_list; do
+			zxfer_echov "Dry run: $(zxfer_render_source_zfs_command unmount "$l_source")"
+		done
+	fi
 
 	zxfer_newsnap "$g_initial_source"
 }

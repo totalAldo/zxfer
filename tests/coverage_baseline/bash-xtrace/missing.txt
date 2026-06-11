@@ -44,12 +44,6 @@ src/zxfer_exec.sh
   205:		l_split_restore_glob=0
   216:		l_split_saved_ifs_set=0
   217:		l_split_saved_ifs=""
-  608:	l_command_context=$(zxfer_get_remote_command_context_label \
-  1138:				return 1
-  1148:			return 1
-  1152:			zxfer_set_destination_existence_cache_entry "$l_missing_dataset" 0
-  1153:			zxfer_set_destination_existence_cache_entry "$l_original_missing_dataset" 0
-  1154:			return 0
 
 src/zxfer_locking.sh
   233:	l_normalized_value=$(printf '%s\n' "$l_field_value" |
@@ -101,9 +95,9 @@ src/zxfer_property_reconcile.sh
   1546:				l_with_parents="yes"
   1553:		l_create_status=$?
   1555:		zxfer_throw_error "Error when creating destination filesystem." "$l_create_status"
-  1668:			return "$?"
-  2321:		return "$l_dest_exist_status"
-  2474:		return "$l_property_transfer_create_status"
+  1660:			return "$?"
+  2314:		return "$l_dest_exist_status"
+  2467:		return "$l_property_transfer_create_status"
 
 src/zxfer_remote_hosts.sh
   216:	l_key_hex=$(printf '%s' "$l_identity" |
@@ -114,99 +108,98 @@ src/zxfer_remote_hosts.sh
   933:			continue
   974:	if ! l_lease_dir=$(zxfer_create_owned_lock_dir_in_parent \
   1047:	*"Control socket connect("*"): No such file or directory"* | \
-  1362:				return 1
-  1597:	if l_host_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
-  1658:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  1675:	if ! l_identity=$(zxfer_render_remote_capability_cache_artifact_identity_for_host \
-  1681:	l_identity_hex=$(printf '%s' "$l_identity" |
-  1697:	if ! l_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
-  1764:		return 1
-  1815:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-  1869:	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
-  1906:		return 2
-  1942:		"${l_root_prefix}.s."[0-9]*.d | \
-  1950:	zxfer.*.s.[0-9]*.d | \
-  1998:		{ [ ! -e "$l_cache_dir" ] && [ ! -L "$l_cache_dir" ] && [ ! -h "$l_cache_dir" ]; }; then
-  2001:	return 1
-  2021:				[ ! -h "$l_lock_path" ]; then
-  2022:				continue
-  2025:				zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_path"; then
-  2026:				return 0
-  2038:			[ ! -h "$l_lease_path" ]; then
-  2039:			continue
-  2128:		return
-  2136:		if ! zxfer_ensure_local_ssh_command; then
-  2137:			g_zxfer_failure_class=dependency
-  2138:			zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
-  2192:		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-  2208:		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-  2238:	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
-  2314:				return 1
-  2489:	l_command_context=$(zxfer_get_remote_command_context_label \
-  2532:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2565:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2587:			[ "${g_target_remote_capabilities_host:-}" != "$l_host_spec" ]; then
-  2628:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2668:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-  2672:	if ! l_expected_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
-  2674:		return 1
-  2680:		return 1
-  2683:		return 1
-  2687:		return 1
-  2696:	if ! l_cache_epoch=$(zxfer_get_cache_object_metadata_value \
-  2700:	if ! l_cache_identity_hex=$(zxfer_get_cache_object_metadata_value \
-  2702:		return 1
-  2735:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-  2739:	if ! l_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
-  2741:		return 1
-  2748:			return 1
-  2751:			return 1
-  2761:		"$l_response"
-  2785:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2814:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2879:		return 1
-  2881:	l_requested_tool_tokens=$(zxfer_quote_token_stream \
-  2900:	if ! l_remote_probe=$(zxfer_build_remote_capability_probe_script \
-  2902:		return 1
-  2930:	if l_cached_response=$(zxfer_get_cached_remote_capability_response_for_host \
-  2942:	if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-  2955:	l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
-  2961:			return 1
-  2964:			if l_cached_response=$(zxfer_wait_for_remote_capability_cache_fill \
-  2979:			l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
-  2991:					return 1
-  3051:	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
-  3101:		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
-  3104:	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
-  3189:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
-  3194:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
-  3214:		l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
-  3223:			if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
-  3225:				printf '%s\n' "$l_fallback_path"
-  3226:				return 0
-  3294:	if ! l_output=$(zxfer_get_remote_resolved_tool_version_output \
-  3359:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
-  3369:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
-  3379:	l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
-  3479:			zxfer_throw_error "Error closing ssh control socket for target host."
-  3577:		return 1
-  3593:		return "$?"
-  3656:			zxfer_release_ssh_control_socket_lock_with_precedence \
-  3658:			zxfer_emit_ssh_control_socket_lock_failure_message \
-  3660:			return "$l_prune_status"
-  3701:				zxfer_release_ssh_control_socket_lock_with_precedence \
-  3703:				zxfer_emit_ssh_control_socket_action_failure_message \
-  3705:				printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
-  3706:				return 1
-  3713:				return "$?"
-  3723:			zxfer_release_ssh_control_socket_lock_with_precedence \
-  3725:			zxfer_emit_ssh_control_socket_action_failure_message \
-  3727:			printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
-  3728:			return 1
-  3740:				return "$?"
-  3816:			zxfer_throw_usage_error "$g_option_T_target_host_safe" 2
-  3853:				g_zxfer_failure_class=dependency
-  3854:				zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
+  1361:				return 1
+  1596:	if l_host_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
+  1657:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  1674:	if ! l_identity=$(zxfer_render_remote_capability_cache_artifact_identity_for_host \
+  1680:	l_identity_hex=$(printf '%s' "$l_identity" |
+  1696:	if ! l_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
+  1763:		return 1
+  1814:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
+  1868:	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
+  1905:		return 2
+  1941:		"${l_root_prefix}.s."[0-9]*.d | \
+  1949:	zxfer.*.s.[0-9]*.d | \
+  1997:		{ [ ! -e "$l_cache_dir" ] && [ ! -L "$l_cache_dir" ] && [ ! -h "$l_cache_dir" ]; }; then
+  2000:	return 1
+  2020:				[ ! -h "$l_lock_path" ]; then
+  2021:				continue
+  2024:				zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_path"; then
+  2025:				return 0
+  2037:			[ ! -h "$l_lease_path" ]; then
+  2038:			continue
+  2127:		return
+  2135:		if ! zxfer_ensure_local_ssh_command; then
+  2136:			g_zxfer_failure_class=dependency
+  2137:			zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
+  2191:		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
+  2207:		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
+  2237:	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
+  2313:				return 1
+  2531:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  2564:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  2586:			[ "${g_target_remote_capabilities_host:-}" != "$l_host_spec" ]; then
+  2627:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  2667:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
+  2671:	if ! l_expected_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
+  2673:		return 1
+  2679:		return 1
+  2682:		return 1
+  2686:		return 1
+  2695:	if ! l_cache_epoch=$(zxfer_get_cache_object_metadata_value \
+  2699:	if ! l_cache_identity_hex=$(zxfer_get_cache_object_metadata_value \
+  2701:		return 1
+  2734:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
+  2738:	if ! l_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
+  2740:		return 1
+  2747:			return 1
+  2750:			return 1
+  2760:		"$l_response"
+  2784:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  2813:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  2878:		return 1
+  2880:	l_requested_tool_tokens=$(zxfer_quote_token_stream \
+  2899:	if ! l_remote_probe=$(zxfer_build_remote_capability_probe_script \
+  2901:		return 1
+  2929:	if l_cached_response=$(zxfer_get_cached_remote_capability_response_for_host \
+  2941:	if l_cached_response=$(zxfer_read_remote_capability_cache_file \
+  2954:	l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
+  2960:			return 1
+  2963:			if l_cached_response=$(zxfer_wait_for_remote_capability_cache_fill \
+  2978:			l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
+  2990:					return 1
+  3050:	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
+  3100:		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+  3103:	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
+  3188:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+  3193:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
+  3213:		l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
+  3222:			if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
+  3224:				printf '%s\n' "$l_fallback_path"
+  3225:				return 0
+  3293:	if ! l_output=$(zxfer_get_remote_resolved_tool_version_output \
+  3358:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+  3368:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
+  3378:	l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
+  3478:			zxfer_throw_error "Error closing ssh control socket for target host."
+  3576:		return 1
+  3592:		return "$?"
+  3655:			zxfer_release_ssh_control_socket_lock_with_precedence \
+  3657:			zxfer_emit_ssh_control_socket_lock_failure_message \
+  3659:			return "$l_prune_status"
+  3700:				zxfer_release_ssh_control_socket_lock_with_precedence \
+  3702:				zxfer_emit_ssh_control_socket_action_failure_message \
+  3704:				printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
+  3705:				return 1
+  3712:				return "$?"
+  3722:			zxfer_release_ssh_control_socket_lock_with_precedence \
+  3724:			zxfer_emit_ssh_control_socket_action_failure_message \
+  3726:			printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
+  3727:			return 1
+  3739:				return "$?"
+  3815:			zxfer_throw_usage_error "$g_option_T_target_host_safe" 2
+  3852:				g_zxfer_failure_class=dependency
+  3853:				zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
 
 src/zxfer_replication.sh
   306:			printf '%s\n' "$l_seed_live_dest_exists"
@@ -216,6 +209,7 @@ src/zxfer_replication.sh
   466:			zxfer_throw_error "$l_dest_exists"
   612:				zxfer_relaunch
   613:				zxfer_throw_error "Could not disable service $service."
+  749:		zxfer_record_last_command_opaque
   790:		return 0
   797:		return 0
   1063:	'' | *[!0-9]*) l_job_limit=1 ;;
@@ -229,27 +223,27 @@ src/zxfer_replication.sh
   1211:		return
 
 src/zxfer_reporting.sh
-  814:	l_key_hex=$(printf '%s' "$l_key_path" |
-  831:		return 1
-  836:			umask "$l_old_umask"
-  837:			[ -d "$l_component_dir" ] || return 1
-  857:		return 1
-  864:		return 1
-  868:		return 1
-  878:			return 1
-  1068:	if ! (
-  1071:	); then
-  1369:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
-  1370:	if [ "$l_speaker_km_loaded" = "0" ]; then
-  1371:		if ! kldload "speaker" >/dev/null 2>&1; then
-  1372:			zxfer_echoV "Unable to load speaker module; skipping beep."
-  1373:			return
-  1378:	if [ "$l_exit_status" -eq 0 ]; then
-  1379:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
-  1380:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
-  1381:				zxfer_echoV "Success beep failed; skipping."
-  1384:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
-  1385:			zxfer_echoV "Failure beep failed; skipping."
+  805:	l_key_hex=$(printf '%s' "$l_key_path" |
+  822:		return 1
+  827:			umask "$l_old_umask"
+  828:			[ -d "$l_component_dir" ] || return 1
+  848:		return 1
+  855:		return 1
+  859:		return 1
+  869:			return 1
+  1059:	if ! (
+  1062:	); then
+  1360:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
+  1361:	if [ "$l_speaker_km_loaded" = "0" ]; then
+  1362:		if ! kldload "speaker" >/dev/null 2>&1; then
+  1363:			zxfer_echoV "Unable to load speaker module; skipping beep."
+  1364:			return
+  1369:	if [ "$l_exit_status" -eq 0 ]; then
+  1370:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
+  1371:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
+  1372:				zxfer_echoV "Success beep failed; skipping."
+  1375:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
+  1376:			zxfer_echoV "Failure beep failed; skipping."
 
 src/zxfer_runtime.sh
   146:	l_cleanup_read_pgid_value=$(printf '%s\n' "$l_cleanup_read_pgid_raw" |
@@ -332,88 +326,81 @@ src/zxfer_snapshot_discovery.sh
   730:				g_last_background_pid=""
   731:				return 1
   798:				return "$?"
-  904:		l_cmd=$(zxfer_render_command_for_report "" "${g_cmd_awk:-awk}" \
-  934:			return 1
-  938:			return "$l_awk_status"
-  953:		zxfer_normalize_destination_snapshot_list "$l_destination_dataset" "$l_input_file" "$l_output_file"
-  954:		return "$?"
-  959:		l_cmd=$(zxfer_render_command_for_report "" "${g_cmd_awk:-awk}" \
-  987:			return 1
-  1023:	l_cmd=$(zxfer_render_command_for_report "" "${g_cmd_awk:-awk}" \
-  1055:		return 1
-  1377:	done <"$l_status_file"
-  1609:		zxfer_cleanup_runtime_artifact_path "$l_batch_status_file"
-  1610:		return "$l_status"
-  1653:	l_remote_script=$(zxfer_build_remote_destination_discovery_batch_script \
-  1818:			zxfer_throw_error "Destination dataset [$g_destination] is missing and destination pool [$l_dest_pool] could not be listed." "$l_dest_pool_status"
-  1825:		zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_inventory_status"
-  1938:				l_already_changed_datasets=$g_recursive_destination_extra_dataset_list
-  1965:		l_status=$?
-  1967:		zxfer_cleanup_runtime_artifact_path_list "$l_refine_stage_files"
-  1968:		zxfer_throw_error "Failed to derive recursive candidate dataset list for snapshot identity validation." "$l_status"
-  1996:		zxfer_cleanup_runtime_artifact_path_list "$l_refine_stage_files"
-  1997:		zxfer_throw_error "Failed to read staged recursive candidate dataset list for snapshot identity validation." "$l_status"
-  2212:		l_status=$?
-  2214:		return "$l_status"
-  2234:		return 1
-  2282:		} | {
-  2289:	) &
-  2345:		return "$l_status"
-  2365:	} | {
-  2383:		zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-  2384:		return 1
-  2436:		zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-  2437:		return "$l_stream_status"
-  2971:		return "$l_status"
-  3023:			l_status=$?
-  3025:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
-  3026:			zxfer_throw_error "Failed to filter destination snapshots against exclude patterns for recursive delta planning." "$l_status"
-  3036:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
-  3037:			zxfer_throw_error "Failed to stage empty recursive source snapshot delta." "$l_status"
-  3042:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
-  3043:			zxfer_throw_error "Failed to stage empty recursive destination snapshot delta." "$l_status"
-  3048:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
-  3049:			zxfer_throw_error "Failed to compare source and destination snapshots for recursive delta planning." "$l_cmp_status"
-  3104:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
-  3105:			zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns." "$l_status"
-  3264:		l_source_name_list_uses_parallel=1
-  3269:		zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_parallel_commands
-  3424:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
-  3431:		zxfer_throw_error "Failed to retrieve snapshots from the source" "$l_source_snapshot_wait_status"
-  3436:		l_source_count_status=$?
-  3533:		l_status=$?
-  3537:		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_sorted_tmp_file"
-  3538:		g_source_snapshot_list_sorted_file=""
-  3539:		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_source_snapshot_stage_files"
-  3540:		return "$?"
-  3575:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  3577:			zxfer_cleanup_snapshot_record_cache_files
-  3578:			return "$l_status"
-  3594:			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-  3595:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  3597:			zxfer_cleanup_snapshot_record_cache_files
-  3598:			return "$l_status"
-  3609:			l_dest_inventory_status=$?
-  3622:				l_snapshot_stderr_read_status=$?
-  3629:				zxfer_throw_error "Failed to read staged destination snapshot stderr." "$l_snapshot_stderr_read_status"
-  3639:			l_status=$?
-  3641:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  3643:			zxfer_cleanup_snapshot_record_cache_files
-  3644:			return "$l_status"
-  3651:			l_status=$?
-  3653:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  3655:			zxfer_cleanup_snapshot_record_cache_files
-  3656:			return "$l_status"
-  3668:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-  3670:			zxfer_cleanup_snapshot_record_cache_files
-  3671:			zxfer_throw_error "Failed to read source snapshot discovery completion metadata." "$l_wait_helper_status"
-  3678:		wait "$g_source_snapshot_list_pid" || l_source_snapshot_wait_status=$?
-  3679:		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
-  3680:		g_source_snapshot_list_pid=""
-  3714:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
-  3756:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  3758:			zxfer_cleanup_snapshot_record_cache_files
-  3759:			return "$l_status"
+  941:			return 1
+  945:			return "$l_awk_status"
+  1264:	done <"$l_status_file"
+  1496:		zxfer_cleanup_runtime_artifact_path "$l_batch_status_file"
+  1497:		return "$l_status"
+  1540:	l_remote_script=$(zxfer_build_remote_destination_discovery_batch_script \
+  1705:			zxfer_throw_error "Destination dataset [$g_destination] is missing and destination pool [$l_dest_pool] could not be listed." "$l_dest_pool_status"
+  1712:		zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_inventory_status"
+  1829:				l_already_changed_datasets=$g_recursive_destination_extra_dataset_list
+  1856:		l_status=$?
+  1858:		zxfer_cleanup_runtime_artifact_path_list "$l_refine_stage_files"
+  1859:		zxfer_throw_error "Failed to derive recursive candidate dataset list for snapshot identity validation." "$l_status"
+  1887:		zxfer_cleanup_runtime_artifact_path_list "$l_refine_stage_files"
+  1888:		zxfer_throw_error "Failed to read staged recursive candidate dataset list for snapshot identity validation." "$l_status"
+  2107:		l_status=$?
+  2109:		return "$l_status"
+  2129:		return 1
+  2180:		} | {
+  2187:	) &
+  2243:		return "$l_status"
+  2266:	} | {
+  2284:		zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
+  2285:		return 1
+  2337:		zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
+  2338:		return "$l_stream_status"
+  2872:		return "$l_status"
+  2928:			l_status=$?
+  2930:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
+  2931:			zxfer_throw_error "Failed to filter destination snapshots against exclude patterns for recursive delta planning." "$l_status"
+  2941:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
+  2942:			zxfer_throw_error "Failed to stage empty recursive source snapshot delta." "$l_status"
+  2947:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
+  2948:			zxfer_throw_error "Failed to stage empty recursive destination snapshot delta." "$l_status"
+  2953:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
+  2954:			zxfer_throw_error "Failed to compare source and destination snapshots for recursive delta planning." "$l_cmp_status"
+  3009:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
+  3010:			zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns." "$l_status"
+  3169:		l_source_name_list_uses_parallel=1
+  3174:		zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_parallel_commands
+  3329:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
+  3336:		zxfer_throw_error "Failed to retrieve snapshots from the source" "$l_source_snapshot_wait_status"
+  3341:		l_source_count_status=$?
+  3438:		l_status=$?
+  3442:		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_sorted_tmp_file"
+  3443:		g_source_snapshot_list_sorted_file=""
+  3444:		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_source_snapshot_stage_files"
+  3445:		return "$?"
+  3480:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  3482:			zxfer_cleanup_snapshot_record_cache_files
+  3483:			return "$l_status"
+  3503:			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
+  3504:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  3506:			zxfer_cleanup_snapshot_record_cache_files
+  3507:			return "$l_status"
+  3518:			l_dest_inventory_status=$?
+  3531:				l_snapshot_stderr_read_status=$?
+  3538:				zxfer_throw_error "Failed to read staged destination snapshot stderr." "$l_snapshot_stderr_read_status"
+  3548:			l_status=$?
+  3550:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  3552:			zxfer_cleanup_snapshot_record_cache_files
+  3553:			return "$l_status"
+  3560:			l_status=$?
+  3562:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  3564:			zxfer_cleanup_snapshot_record_cache_files
+  3565:			return "$l_status"
+  3577:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+  3579:			zxfer_cleanup_snapshot_record_cache_files
+  3580:			zxfer_throw_error "Failed to read source snapshot discovery completion metadata." "$l_wait_helper_status"
+  3587:		wait "$g_source_snapshot_list_pid" || l_source_snapshot_wait_status=$?
+  3588:		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
+  3589:		g_source_snapshot_list_pid=""
+  3623:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
+  3665:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  3667:			zxfer_cleanup_snapshot_record_cache_files
+  3668:			return "$l_status"
 
 src/zxfer_snapshot_reconcile.sh
   138:	$0 != "" { record = $0; tab_pos = index(record, "\t"); snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record); snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : ""); at_pos = index(snapshot_path, "@"); if (at_pos > 0) { snapshot_identity = substr(snapshot_path, at_pos + 1); if (snapshot_guid != "") snapshot_identity = snapshot_identity "\t" snapshot_guid; if (snapshot_identity in delete_identities) print snapshot_path } }' "$l_identity_file" - <<-EOF

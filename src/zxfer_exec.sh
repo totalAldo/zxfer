@@ -536,24 +536,6 @@ zxfer_get_ssh_transport_tokens_for_host() {
 	fi
 }
 
-# Purpose: Return the SSH command for host in the form expected by later
-# helpers.
-# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
-# sibling helpers need the same lookup without duplicating module logic.
-#
-# Render the local ssh transport command used for a host spec. This is a
-# display helper only; execution paths should use the argv-based helpers below.
-zxfer_get_ssh_cmd_for_host() {
-	l_host=$1
-	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host"); then
-		:
-	else
-		l_transport_status=$?
-		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
-	fi
-	zxfer_quote_token_stream "$l_transport_tokens"
-}
-
 # Purpose: Return the remote command context label in the form expected by
 # later helpers.
 # Usage: Called during command rendering, ssh wrapping, and ZFS execution when
@@ -599,75 +581,14 @@ zxfer_get_remote_command_context_label() {
 # Purpose: Emit very-verbose diagnostic output for `-V` runs.
 # Usage: Called during command rendering, ssh wrapping, and ZFS execution when
 # zxfer wants low-level debug output that should stay hidden in normal verbose
-# mode.
+# mode. Returns before rendering anything when `-V` is off.
 zxfer_echoV_remote_command_for_host() {
+	[ "${g_option_V_very_verbose:-0}" -eq 1 ] || return 0
 	l_host_spec=$1
 	l_profile_side=${2:-}
 	shift 2
 
-	l_command_context=$(zxfer_get_remote_command_context_label \
-		"$l_host_spec" "$l_profile_side")
-	l_rendered_command=$(zxfer_render_command_for_report "" "$@")
-	zxfer_echoV "Running remote command [$l_command_context]: $l_rendered_command"
-}
-
-# Purpose: Run the SSH command for host through the controlled execution path
-# owned by this module.
-# Usage: Called during command rendering, ssh wrapping, and ZFS execution once
-# planning is complete and zxfer is ready to execute the action.
-#
-# Expand the ssh transport and host spec into discrete arguments before
-# executing the remote command so multi-token -O/-T inputs (like "host pfexec")
-# are preserved without reparsing a shell string. STDIN/STDOUT/STDERR are
-# passed through to the invoked ssh process.
-zxfer_invoke_ssh_command_for_host() {
-	l_host_spec=$1
-	shift
-
-	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
-		:
-	else
-		l_transport_status=$?
-		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
-	fi
-	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec"); then
-		zxfer_throw_error "$l_host_tokens"
-	fi
-	l_remote_args_stream=""
-	if [ $# -gt 0 ]; then
-		l_remote_args_stream=$(printf '%s\n' "$@")
-	fi
-
-	set --
-	if [ "$l_transport_tokens" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			[ "$l_token" = "" ] && continue
-			set -- "$@" "$l_token"
-		done <<EOF
-$l_transport_tokens
-EOF
-	fi
-
-	if [ "$l_host_tokens" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			[ "$l_token" = "" ] && continue
-			set -- "$@" "$l_token"
-		done <<EOF
-$l_host_tokens
-EOF
-	fi
-
-	if [ "$l_remote_args_stream" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			set -- "$@" "$l_token"
-		done <<EOF
-$l_remote_args_stream
-EOF
-	fi
-
-	zxfer_record_last_command_argv "$@"
-	zxfer_echoV_remote_command_for_host "$l_host_spec" "" "$@"
-	"$@"
+	zxfer_echoV "Running remote command [$(zxfer_get_remote_command_context_label "$l_host_spec" "$l_profile_side")]: $(zxfer_render_command_for_report "" "$@")"
 }
 
 # Purpose: Prepare the parsed SSH host and wrapped remote command for one host
@@ -1130,8 +1051,9 @@ zxfer_destination_parent_missing_confirmed_by_ancestor_listing() {
 		l_ancestor_dataset=${l_missing_dataset%/*}
 		[ "$l_ancestor_dataset" != "$l_missing_dataset" ] || return 1
 
-		l_cmd=$(zxfer_render_destination_zfs_command list -H -r -o name "$l_ancestor_dataset")
-		zxfer_echoV "Parent recursive destination probe was ambiguous on SunOS; checking ancestor recursively: $l_cmd"
+		if zxfer_command_display_render_enabled; then
+			zxfer_echoV "Parent recursive destination probe was ambiguous on SunOS; checking ancestor recursively: $(zxfer_render_destination_zfs_command list -H -r -o name "$l_ancestor_dataset")"
+		fi
 
 		if l_ancestor_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_ancestor_dataset" 2>&1); then
 			if printf '%s\n' "$l_ancestor_listing" | grep -F -x "$l_missing_dataset" >/dev/null 2>&1; then
@@ -1175,8 +1097,9 @@ zxfer_exists_destination_via_parent_recursive_listing() {
 
 	[ "$l_parent_dataset" != "$l_dest" ] || return 2
 
-	l_cmd=$(zxfer_render_destination_zfs_command list -H -r -o name "$l_parent_dataset")
-	zxfer_echoV "Exact destination probe was ambiguous on SunOS; checking parent recursively: $l_cmd"
+	if zxfer_command_display_render_enabled; then
+		zxfer_echoV "Exact destination probe was ambiguous on SunOS; checking parent recursively: $(zxfer_render_destination_zfs_command list -H -r -o name "$l_parent_dataset")"
+	fi
 
 	if l_parent_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_parent_dataset" 2>&1); then
 		if printf '%s\n' "$l_parent_listing" | grep -F -x "$l_dest" >/dev/null 2>&1; then
@@ -1242,8 +1165,9 @@ zxfer_exists_destination() {
 
 	zxfer_profile_increment_counter g_zxfer_profile_exists_destination_calls
 
-	l_cmd=$(zxfer_render_destination_zfs_command list -H "$l_dest")
-	zxfer_echoV "Checking if destination exists: $l_cmd"
+	if zxfer_command_display_render_enabled; then
+		zxfer_echoV "Checking if destination exists: $(zxfer_render_destination_zfs_command list -H "$l_dest")"
+	fi
 
 	if l_probe_output=$(zxfer_run_destination_zfs_cmd list -H "$l_dest" 2>&1); then
 		zxfer_set_destination_existence_cache_entry "$l_dest" 1

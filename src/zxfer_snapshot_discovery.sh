@@ -884,9 +884,13 @@ zxfer_normalize_destination_snapshot_list() {
 	l_output_file=$3
 
 	if [ "$g_initial_source_had_trailing_slash" -eq 1 ]; then
-		l_cmd=$(zxfer_render_command_for_report "LC_ALL=C" sort "$l_input_file")
-		zxfer_echoV "Running command: $l_cmd > $(zxfer_quote_token_for_report "$l_output_file")"
-		zxfer_record_last_command_string "$l_cmd > $(zxfer_quote_token_for_report "$l_output_file")"
+		if zxfer_command_display_render_enabled; then
+			l_cmd="$(zxfer_render_command_for_report "LC_ALL=C" sort "$l_input_file") > $(zxfer_quote_token_for_report "$l_output_file")"
+			zxfer_echoV "Running command: $l_cmd"
+			zxfer_record_last_command_string "$l_cmd"
+		else
+			zxfer_record_last_command_opaque
+		fi
 		LC_ALL=C sort "$l_input_file" >"$l_output_file"
 	else
 		# shellcheck disable=SC2016  # awk program should see literal $0.
@@ -901,14 +905,17 @@ zxfer_normalize_destination_snapshot_list() {
 	}
 	print
 }'
-		l_cmd=$(zxfer_render_command_for_report "" "${g_cmd_awk:-awk}" \
-			-v "destination_dataset=$l_destination_dataset" \
-			-v "initial_source=$g_initial_source" \
-			"$l_prefix_rewrite_program" \
-			"$l_input_file")
-		l_sort_cmd=$(zxfer_render_command_for_report "LC_ALL=C" sort)
-		zxfer_echoV "Running command: $l_cmd | $l_sort_cmd > $(zxfer_quote_token_for_report "$l_output_file")"
-		zxfer_record_last_command_string "$l_cmd | $l_sort_cmd > $(zxfer_quote_token_for_report "$l_output_file")"
+		if zxfer_command_display_render_enabled; then
+			l_cmd="$(zxfer_render_command_for_report "" "${g_cmd_awk:-awk}" \
+				-v "destination_dataset=$l_destination_dataset" \
+				-v "initial_source=$g_initial_source" \
+				"$l_prefix_rewrite_program" \
+				"$l_input_file") | $(zxfer_render_command_for_report "LC_ALL=C" sort) > $(zxfer_quote_token_for_report "$l_output_file")"
+			zxfer_echoV "Running command: $l_cmd"
+			zxfer_record_last_command_string "$l_cmd"
+		else
+			zxfer_record_last_command_opaque
+		fi
 		l_status=0
 		zxfer_get_temp_file >/dev/null || l_status=$?
 		if [ "$l_status" -ne 0 ]; then
@@ -939,126 +946,6 @@ zxfer_normalize_destination_snapshot_list() {
 		fi
 		return "$l_sort_status"
 	fi
-}
-
-# Purpose: Normalize destination snapshots for the fast no-op proof.
-# Usage: Called only by zxfer_write_destination_snapshot_name_sorted_list_to_files
-# so excluded datasets are removed before the expensive sort/compare path.
-zxfer_normalize_destination_snapshot_list_for_noop_proof() {
-	l_destination_dataset=$1
-	l_input_file=$2
-	l_output_file=$3
-
-	if [ -z "${g_option_x_exclude_datasets:-}" ]; then
-		zxfer_normalize_destination_snapshot_list "$l_destination_dataset" "$l_input_file" "$l_output_file"
-		return "$?"
-	fi
-
-	if [ "$g_initial_source_had_trailing_slash" -eq 1 ]; then
-		l_filter_program=$(zxfer_get_snapshot_exclude_filter_awk_program)
-		l_cmd=$(zxfer_render_command_for_report "" "${g_cmd_awk:-awk}" \
-			-v "exclude_pattern=$g_option_x_exclude_datasets" \
-			"$l_filter_program" \
-			"$l_input_file")
-		l_sort_cmd=$(zxfer_render_command_for_report "LC_ALL=C" sort)
-		zxfer_echoV "Running command: $l_cmd | $l_sort_cmd > $(zxfer_quote_token_for_report "$l_output_file")"
-		zxfer_record_last_command_string "$l_cmd | $l_sort_cmd > $(zxfer_quote_token_for_report "$l_output_file")"
-		l_status=0
-		zxfer_get_temp_file >/dev/null || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			return "$l_status"
-		fi
-		l_awk_status_file=$g_zxfer_temp_file_result
-		{
-			"${g_cmd_awk:-awk}" \
-				-v "exclude_pattern=$g_option_x_exclude_datasets" \
-				"$l_filter_program" \
-				"$l_input_file"
-			printf '%s\n' "$?" >"$l_awk_status_file" 2>/dev/null || :
-		} | LC_ALL=C sort >"$l_output_file"
-		l_sort_status=$?
-		l_awk_status=1
-		if [ -f "$l_awk_status_file" ]; then
-			IFS= read -r l_awk_status <"$l_awk_status_file" || l_awk_status=1
-		fi
-		zxfer_cleanup_runtime_artifact_path "$l_awk_status_file"
-		case "$l_awk_status" in
-		'' | *[!0-9]*)
-			return 1
-			;;
-		esac
-		if [ "$l_awk_status" -ne 0 ]; then
-			return "$l_awk_status"
-		fi
-		return "$l_sort_status"
-	fi
-
-	# shellcheck disable=SC2016  # awk program should see literal $0.
-	l_prefix_rewrite_program='
-{
-	if (index($0, destination_dataset) == 1) {
-		suffix = substr($0, length(destination_dataset) + 1)
-		if (substr(suffix, 1, 1) == "@" || substr(suffix, 1, 1) == "/") {
-			snapshot_path = initial_source suffix
-		} else {
-			snapshot_path = $0
-		}
-	} else {
-		snapshot_path = $0
-	}
-	filter_path = snapshot_path
-	tab_pos = index(filter_path, "\t")
-	if (tab_pos > 0) {
-		filter_path = substr(filter_path, 1, tab_pos - 1)
-	}
-	at_pos = index(filter_path, "@")
-	snapshot_dataset = filter_path
-	if (at_pos > 0) {
-		snapshot_dataset = substr(filter_path, 1, at_pos - 1)
-	}
-	if (snapshot_dataset !~ exclude_pattern) {
-		print snapshot_path
-	}
-}'
-	l_cmd=$(zxfer_render_command_for_report "" "${g_cmd_awk:-awk}" \
-		-v "destination_dataset=$l_destination_dataset" \
-		-v "initial_source=$g_initial_source" \
-		-v "exclude_pattern=$g_option_x_exclude_datasets" \
-		"$l_prefix_rewrite_program" \
-		"$l_input_file")
-	l_sort_cmd=$(zxfer_render_command_for_report "LC_ALL=C" sort)
-	zxfer_echoV "Running command: $l_cmd | $l_sort_cmd > $(zxfer_quote_token_for_report "$l_output_file")"
-	zxfer_record_last_command_string "$l_cmd | $l_sort_cmd > $(zxfer_quote_token_for_report "$l_output_file")"
-	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	l_awk_status_file=$g_zxfer_temp_file_result
-	{
-		"${g_cmd_awk:-awk}" \
-			-v "destination_dataset=$l_destination_dataset" \
-			-v "initial_source=$g_initial_source" \
-			-v "exclude_pattern=$g_option_x_exclude_datasets" \
-			"$l_prefix_rewrite_program" \
-			"$l_input_file"
-		printf '%s\n' "$?" >"$l_awk_status_file" 2>/dev/null || :
-	} | LC_ALL=C sort >"$l_output_file"
-	l_sort_status=$?
-	l_awk_status=1
-	if [ -f "$l_awk_status_file" ]; then
-		IFS= read -r l_awk_status <"$l_awk_status_file" || l_awk_status=1
-	fi
-	zxfer_cleanup_runtime_artifact_path "$l_awk_status_file"
-	case "$l_awk_status" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-	if [ "$l_awk_status" -ne 0 ]; then
-		return "$l_awk_status"
-	fi
-	return "$l_sort_status"
 }
 
 # Purpose: Normalize destination snapshots from stdin for the fast no-op proof.
@@ -1844,9 +1731,13 @@ zxfer_collect_local_destination_dataset_inventory() {
 		$l_destination_inventory_stage_files
 	EOF
 
-	l_cmd=$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")
-	zxfer_echoV "Running command: $l_cmd"
-	zxfer_record_last_command_string "$l_cmd"
+	if zxfer_command_display_render_enabled; then
+		l_cmd=$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")
+		zxfer_echoV "Running command: $l_cmd"
+		zxfer_record_last_command_string "$l_cmd"
+	else
+		zxfer_record_last_command_opaque
+	fi
 	l_dest_inventory_status=0
 	zxfer_run_destination_zfs_cmd list -t filesystem,volume -Hr -o name "$g_destination" >"$l_dest_list_tmp_file" 2>"$l_dest_list_err_file" ||
 		l_dest_inventory_status=$?
@@ -2185,9 +2076,13 @@ zxfer_write_destination_snapshot_list_to_files() {
 		# dataset exists
 		# Keep destination-side snapshot listing serial here. The older parallel
 		# variant added complexity and was not a net win once metadata was cached.
-		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
-		zxfer_echoV "Running command: $l_cmd"
-		zxfer_record_last_command_string "$l_cmd"
+		if zxfer_command_display_render_enabled; then
+			l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
+			zxfer_echoV "Running command: $l_cmd"
+			zxfer_record_last_command_string "$l_cmd"
+		else
+			zxfer_record_last_command_opaque
+		fi
 		# make sure to eval and then pipe the contents to the file in case
 		# the command uses ssh
 		l_status=0
@@ -2270,10 +2165,13 @@ zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 	l_dest_stream_status_file=$5
 
 	l_destination_dataset=$(zxfer_get_destination_snapshot_root_dataset)
-	l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
-	l_normalize_cmd=$(zxfer_render_command_for_report "" "zxfer_normalize_destination_snapshot_stream_for_noop_proof" "$l_destination_dataset")
-	zxfer_echoV "Running command in the background: $l_cmd"
-	zxfer_record_last_command_string "$l_cmd | $l_normalize_cmd | LC_ALL=C sort > $(zxfer_quote_token_for_report "$l_destination_fifo")"
+	if zxfer_command_display_render_enabled; then
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
+		zxfer_echoV "Running command in the background: $l_cmd"
+		zxfer_record_last_command_string "$l_cmd | $(zxfer_render_command_for_report "" "zxfer_normalize_destination_snapshot_stream_for_noop_proof" "$l_destination_dataset") | LC_ALL=C sort > $(zxfer_quote_token_for_report "$l_destination_fifo")"
+	else
+		zxfer_record_last_command_opaque
+	fi
 
 	(
 		{
@@ -2355,10 +2253,13 @@ zxfer_write_destination_snapshot_name_sorted_list_to_files() {
 
 	l_missing_destination=0
 	l_list_status=0
-	l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
-	l_normalize_cmd=$(zxfer_render_command_for_report "" "zxfer_normalize_destination_snapshot_stream_for_noop_proof" "$l_destination_dataset")
-	zxfer_echoV "Running command: $l_cmd"
-	zxfer_record_last_command_string "$l_cmd | $l_normalize_cmd | LC_ALL=C sort > $(zxfer_quote_token_for_report "$l_dest_snaps_stripped_sorted_tmp_file")"
+	if zxfer_command_display_render_enabled; then
+		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
+		zxfer_echoV "Running command: $l_cmd"
+		zxfer_record_last_command_string "$l_cmd | $(zxfer_render_command_for_report "" "zxfer_normalize_destination_snapshot_stream_for_noop_proof" "$l_destination_dataset") | LC_ALL=C sort > $(zxfer_quote_token_for_report "$l_dest_snaps_stripped_sorted_tmp_file")"
+	else
+		zxfer_record_last_command_opaque
+	fi
 	{
 		zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" 2>"$l_dest_snapshot_err_file"
 		printf '%s\n' "$?" >"$l_dest_snapshot_status_file" 2>/dev/null || :
@@ -2992,9 +2893,13 @@ zxfer_set_g_recursive_source_list() {
 		l_source_snaps_sorted_input_file=$l_source_snaps_sorted_tmp_file
 		# sort the source snapshots for use with comm
 		# wait until background processes are finished before attempting to sort
-		l_cmd=$(zxfer_render_command_for_report "LC_ALL=C" sort "$l_lzfs_list_hr_s_snap_tmp_file")
-		zxfer_echoV "Running command: $l_cmd > $(zxfer_quote_token_for_report "$l_source_snaps_sorted_tmp_file")"
-		zxfer_record_last_command_string "$l_cmd > $(zxfer_quote_token_for_report "$l_source_snaps_sorted_tmp_file")"
+		if zxfer_command_display_render_enabled; then
+			l_cmd="$(zxfer_render_command_for_report "LC_ALL=C" sort "$l_lzfs_list_hr_s_snap_tmp_file") > $(zxfer_quote_token_for_report "$l_source_snaps_sorted_tmp_file")"
+			zxfer_echoV "Running command: $l_cmd"
+			zxfer_record_last_command_string "$l_cmd"
+		else
+			zxfer_record_last_command_opaque
+		fi
 		l_status=0
 		LC_ALL=C sort "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snaps_sorted_tmp_file" ||
 			l_status=$?
@@ -3584,9 +3489,13 @@ zxfer_get_zfs_list() {
 		} <<-EOF
 			$l_destination_inventory_stage_files
 		EOF
-		l_cmd=$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")
-		zxfer_echoV "Running command: $l_cmd"
-		zxfer_record_last_command_string "$l_cmd"
+		if zxfer_command_display_render_enabled; then
+			l_cmd=$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")
+			zxfer_echoV "Running command: $l_cmd"
+			zxfer_record_last_command_string "$l_cmd"
+		else
+			zxfer_record_last_command_opaque
+		fi
 		l_rzfs_list_hr_snap_err_tmp_file=""
 		l_status=0
 		zxfer_get_temp_file >/dev/null || l_status=$?
@@ -3791,9 +3700,13 @@ zxfer_get_zfs_list() {
 			return "$l_status"
 		fi
 		l_source_snapshot_record_cache_file=$g_zxfer_temp_file_result
-		l_cmd=$(zxfer_render_command_for_report "" zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file")
-		zxfer_echoV "Running command: $l_cmd > $(zxfer_quote_token_for_report "$l_source_snapshot_record_cache_file")"
-		zxfer_record_last_command_string "$l_cmd > $(zxfer_quote_token_for_report "$l_source_snapshot_record_cache_file")"
+		if zxfer_command_display_render_enabled; then
+			l_cmd="$(zxfer_render_command_for_report "" zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file") > $(zxfer_quote_token_for_report "$l_source_snapshot_record_cache_file")"
+			zxfer_echoV "Running command: $l_cmd"
+			zxfer_record_last_command_string "$l_cmd"
+		else
+			zxfer_record_last_command_opaque
+		fi
 		l_status=0
 		zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snapshot_record_cache_file" ||
 			l_status=$?

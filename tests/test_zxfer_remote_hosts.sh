@@ -7334,9 +7334,6 @@ test_read_command_line_switches_sets_options_and_remote_paths() {
 	: >"$log"
 	result=$(
 		(
-			zxfer_get_ssh_cmd_for_host() {
-				printf '%s\n' "/usr/bin/ssh"
-			}
 			zxfer_refresh_compression_commands() {
 				printf 'refresh\n' >>"$log"
 				g_cmd_compress_safe="zstd -9"
@@ -7415,9 +7412,6 @@ test_prepare_remote_host_connections_preloads_capabilities_without_opening_contr
 			}
 			zxfer_preload_remote_host_capabilities() {
 				printf 'preload %s %s\n' "$1" "$2" >>"$log"
-			}
-			zxfer_get_ssh_cmd_for_host() {
-				printf '%s\n' "/usr/bin/ssh"
 			}
 			zxfer_profile_now_ms() {
 				idx=$(cat "$now_counter_file")
@@ -7531,9 +7525,6 @@ test_prepare_ssh_control_sockets_for_active_hosts_logs_when_control_sockets_are_
 			}
 			zxfer_preload_remote_host_capabilities() {
 				printf 'preload %s %s\n' "$1" "$2" >>"$log"
-			}
-			zxfer_get_ssh_cmd_for_host() {
-				printf '%s\n' "/usr/bin/ssh"
 			}
 			g_option_O_origin_host="origin.example pfexec"
 			g_option_T_target_host="target.example doas"
@@ -8908,19 +8899,51 @@ test_zxfer_ensure_remote_capability_cache_dir_uses_effective_tmpdir_in_current_s
 		"$(zxfer_remote_capability_cache_dir_path_for_tmpdir "$cache_root")" "$cache_dir"
 }
 
-test_get_ssh_cmd_for_host_prefers_matching_control_socket() {
+test_get_ssh_transport_tokens_for_host_prefers_matching_control_socket() {
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_option_O_origin_host="origin.example"
 	g_option_T_target_host="target.example"
 	g_ssh_origin_control_socket="$TEST_TMPDIR/origin.sock"
 	g_ssh_target_control_socket="$TEST_TMPDIR/target.sock"
 
-	assertEquals "Origin host ssh command should reuse the origin control socket." \
-		"'$FAKE_SSH_BIN' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' '-S' '$TEST_TMPDIR/origin.sock'" "$(zxfer_get_ssh_cmd_for_host "origin.example")"
-	assertEquals "Target host ssh command should reuse the target control socket." \
-		"'$FAKE_SSH_BIN' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' '-S' '$TEST_TMPDIR/target.sock'" "$(zxfer_get_ssh_cmd_for_host "target.example")"
-	assertEquals "Unmatched hosts should use the base ssh command." \
-		"'$FAKE_SSH_BIN' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes'" "$(zxfer_get_ssh_cmd_for_host "other.example")"
+	assertEquals "Origin host ssh transport tokens should reuse the origin control socket." \
+		"$(printf '%s\n' "$FAKE_SSH_BIN" -o BatchMode=yes -o StrictHostKeyChecking=yes -S "$TEST_TMPDIR/origin.sock")" \
+		"$(zxfer_get_ssh_transport_tokens_for_host "origin.example")"
+	assertEquals "Target host ssh transport tokens should reuse the target control socket." \
+		"$(printf '%s\n' "$FAKE_SSH_BIN" -o BatchMode=yes -o StrictHostKeyChecking=yes -S "$TEST_TMPDIR/target.sock")" \
+		"$(zxfer_get_ssh_transport_tokens_for_host "target.example")"
+	assertEquals "Unmatched hosts should use the base ssh transport tokens." \
+		"$(printf '%s\n' "$FAKE_SSH_BIN" -o BatchMode=yes -o StrictHostKeyChecking=yes)" \
+		"$(zxfer_get_ssh_transport_tokens_for_host "other.example")"
+}
+
+test_echoV_ssh_control_socket_command_for_host_renders_only_when_very_verbose() {
+	quiet_output=$(
+		(
+			g_option_V_very_verbose=0
+			zxfer_echoV() {
+				printf '%s\n' "$*"
+			}
+			zxfer_echoV_ssh_control_socket_command_for_host \
+				"other.example" "Checking ssh control socket" /bin/echo probe
+		)
+	)
+	verbose_output=$(
+		(
+			g_option_V_very_verbose=1
+			zxfer_echoV() {
+				printf '%s\n' "$*"
+			}
+			zxfer_echoV_ssh_control_socket_command_for_host \
+				"other.example" "Checking ssh control socket" /bin/echo probe
+		)
+	)
+
+	assertEquals "Quiet runs should not render ssh control socket commands for display." \
+		"" "$quiet_output"
+	assertEquals "Very-verbose runs should keep the current control-socket operator line text." \
+		"Checking ssh control socket [remote: other.example]: '/bin/echo' 'probe'" \
+		"$verbose_output"
 }
 
 test_zxfer_ssh_control_socket_cache_key_tracks_transport_policy() {
@@ -11386,11 +11409,12 @@ test_get_path_owner_uid_and_mode_return_failure_for_missing_paths() {
 	assertEquals "Mode lookups should fail cleanly for missing paths." 1 "$mode_status"
 }
 
-test_get_ssh_cmd_for_host_returns_base_command_for_empty_host() {
+test_get_ssh_transport_tokens_for_host_returns_base_tokens_for_empty_host() {
 	g_cmd_ssh="/usr/bin/ssh"
 
-	assertEquals "Hosts omitted from wrapper lookups should return the base ssh command." \
-		"'/usr/bin/ssh' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes'" "$(zxfer_get_ssh_cmd_for_host "")"
+	assertEquals "Hosts omitted from wrapper lookups should return the base ssh transport tokens." \
+		"$(printf '%s\n' /usr/bin/ssh -o BatchMode=yes -o StrictHostKeyChecking=yes)" \
+		"$(zxfer_get_ssh_transport_tokens_for_host "")"
 }
 
 test_get_effective_user_uid_returns_failure_when_id_is_unavailable() {
@@ -11660,9 +11684,6 @@ test_ensure_remote_backup_dir_skips_without_host_and_reports_ssh_failures() {
 	set +e
 	ssh_failure_output=$(
 		(
-			zxfer_get_ssh_cmd_for_host() {
-				printf '%s\n' "/usr/bin/ssh"
-			}
 			zxfer_invoke_ssh_shell_command_for_host() {
 				return 1
 			}
