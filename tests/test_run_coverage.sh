@@ -39,8 +39,8 @@ test_run_coverage_default_suite_resolution_includes_coverage_overlays() {
 		"$output" "tests/test_zxfer_background_job_runner.sh"
 	assertContains "The default coverage run should include the remote host overlay suite that protects the committed baseline." \
 		"$output" "tests/test_zxfer_remote_hosts_coverage.sh"
-	assertContains "The default coverage run should include the property cache overlay suite that exercises DRY cleanup helpers." \
-		"$output" "tests/test_zxfer_property_cache_coverage.sh"
+	assertContains "The default coverage run should include the property reconcile suite that exercises the in-memory property tables." \
+		"$output" "tests/test_zxfer_property_reconcile.sh"
 	assertContains "The default coverage run should include the snapshot state suite that protects transform readback coverage." \
 		"$output" "tests/test_zxfer_snapshot_state.sh"
 	assertNotContains "The default coverage run should not execute shared test scaffolding as a suite." \

@@ -10,7 +10,6 @@ src/zxfer_exec.sh	98.50
 src/zxfer_locking.sh	91.00
 src/zxfer_modules.sh	99.00
 src/zxfer_path_security.sh	90.50
-src/zxfer_property_cache.sh	92.00
 src/zxfer_property_reconcile.sh	92.00
 src/zxfer_remote_hosts.sh	81.50
 src/zxfer_replication.sh	94.50

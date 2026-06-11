@@ -1,6 +1,7 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_property_cache.sh and zxfer_property_reconcile.sh helpers.
+# shunit2 tests for zxfer_property_reconcile.sh helpers, including the
+# in-memory property tables and recursive property-tree prefetch flow.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2317,SC2329
 
@@ -52,8 +53,6 @@ setUp() {
 	unset ZXFER_REMOTE_ZFS_LOG
 	zxfer_reset_destination_existence_cache
 	zxfer_reset_property_iteration_caches
-	g_zxfer_property_cache_dir=""
-	g_zxfer_property_cache_unavailable=0
 	g_zxfer_source_property_tree_prefetch_root=""
 	g_zxfer_source_property_tree_prefetch_zfs_cmd=""
 	g_zxfer_source_property_tree_prefetch_state=0
@@ -583,20 +582,22 @@ test_get_normalized_dataset_properties_does_not_cache_failed_reads() {
 
 	l_mode="success"
 	zxfer_get_normalized_dataset_properties "tank/src" "/sbin/zfs" source >"$out_log"
-	zxfer_property_cache_dataset_path normalized source "tank/src" >/dev/null
-	cache_path=$g_zxfer_property_cache_path
+	table_hit=0
+	if zxfer_property_table_find_dataset source "tank/src"; then
+		table_hit=1
+	fi
 
 	unset -f zxfer_run_zfs_cmd_for_spec
 
 	assertEquals "Failed normalized-property reads should return a non-zero status." 1 "$status"
 	assertEquals "Failed normalized-property reads should surface the underlying zfs error." \
 		"permission denied" "$(cat "$err_log")"
-	assertEquals "A later successful lookup for the same dataset should still execute the full normalized read instead of reusing a poisoned cache entry." \
+	assertEquals "A later successful lookup for the same dataset should still execute the full normalized read instead of reusing a poisoned table row." \
 		"compression=lz4=local" "$(cat "$out_log")"
-	assertEquals "A failed normalized lookup should not create a cache entry before the later successful read stores one." \
+	assertEquals "A failed normalized lookup should not create a property table row before the later successful read stores one." \
 		"3" "$(awk 'END {print NR + 0}' "$calls_log")"
-	assertTrue "Successful normalized lookups after a failure should still populate the cache." \
-		"[ -f \"$cache_path\" ]"
+	assertEquals "Successful normalized lookups after a failure should still populate the in-memory property table." \
+		"1" "$table_hit"
 }
 
 test_get_normalized_dataset_properties_reports_machine_serializer_failures_without_caching() {
@@ -617,8 +618,10 @@ test_get_normalized_dataset_properties_reports_machine_serializer_failures_witho
 	set +e
 	zxfer_get_normalized_dataset_properties "tank/src" "/sbin/zfs" source >"$err_log" 2>&1
 	status=$?
-	zxfer_property_cache_dataset_path normalized source "tank/src" >/dev/null
-	cache_path=$g_zxfer_property_cache_path
+	table_hit=0
+	if zxfer_property_table_find_dataset source "tank/src"; then
+		table_hit=1
+	fi
 
 	unset -f zxfer_run_zfs_cmd_for_spec
 	unset -f zxfer_serialize_property_records_from_stdin
@@ -630,8 +633,8 @@ test_get_normalized_dataset_properties_reports_machine_serializer_failures_witho
 		"machine serializer failed" "$(cat "$err_log")"
 	assertEquals "Machine-side serializer failures should stop before the human probe runs." \
 		"1" "$(awk 'END {print NR + 0}' "$calls_log")"
-	assertFalse "Machine-side serializer failures should not populate the normalized-property cache." \
-		"[ -e \"$cache_path\" ]"
+	assertEquals "Machine-side serializer failures should not populate the in-memory property table." \
+		"0" "$table_hit"
 }
 
 test_get_normalized_dataset_properties_reports_machine_serializer_readback_failures_without_caching() {
@@ -662,8 +665,10 @@ test_get_normalized_dataset_properties_reports_machine_serializer_readback_failu
 	set +e
 	zxfer_get_normalized_dataset_properties "tank/src" "/sbin/zfs" source >"$err_log" 2>&1
 	status=$?
-	zxfer_property_cache_dataset_path normalized source "tank/src" >/dev/null
-	cache_path=$g_zxfer_property_cache_path
+	table_hit=0
+	if zxfer_property_table_find_dataset source "tank/src"; then
+		table_hit=1
+	fi
 
 	unset -f zxfer_get_temp_file
 	unset -f zxfer_run_zfs_cmd_for_spec
@@ -676,8 +681,8 @@ test_get_normalized_dataset_properties_reports_machine_serializer_readback_failu
 		"machine serializer readback failed" "$(cat "$err_log")"
 	assertEquals "Machine-side serializer readback failures should stop before the human probe runs." \
 		"1" "$(awk 'END {print NR + 0}' "$calls_log")"
-	assertFalse "Machine-side serializer readback failures should not populate the normalized-property cache." \
-		"[ -e \"$cache_path\" ]"
+	assertEquals "Machine-side serializer readback failures should not populate the in-memory property table." \
+		"0" "$table_hit"
 }
 
 test_get_normalized_dataset_properties_reports_human_probe_failures_without_caching() {
@@ -698,8 +703,10 @@ test_get_normalized_dataset_properties_reports_human_probe_failures_without_cach
 	set +e
 	zxfer_get_normalized_dataset_properties "tank/src" "/sbin/zfs" source >"$err_log" 2>&1
 	status=$?
-	zxfer_property_cache_dataset_path normalized source "tank/src" >/dev/null
-	cache_path=$g_zxfer_property_cache_path
+	table_hit=0
+	if zxfer_property_table_find_dataset source "tank/src"; then
+		table_hit=1
+	fi
 
 	unset -f zxfer_run_zfs_cmd_for_spec
 
@@ -709,8 +716,8 @@ test_get_normalized_dataset_properties_reports_human_probe_failures_without_cach
 		"ssh timeout" "$(cat "$err_log")"
 	assertEquals "Human normalized-property probe failures should still execute both normalized probes before failing." \
 		"2" "$(awk 'END {print NR + 0}' "$calls_log")"
-	assertFalse "Human normalized-property probe failures should not populate the cache." \
-		"[ -e \"$cache_path\" ]"
+	assertEquals "Human normalized-property probe failures should not populate the in-memory property table." \
+		"0" "$table_hit"
 }
 
 test_get_normalized_dataset_properties_reports_human_serializer_failures_without_caching() {
@@ -736,8 +743,10 @@ test_get_normalized_dataset_properties_reports_human_serializer_failures_without
 	set +e
 	zxfer_get_normalized_dataset_properties "tank/src" "/sbin/zfs" source >"$err_log" 2>&1
 	status=$?
-	zxfer_property_cache_dataset_path normalized source "tank/src" >/dev/null
-	cache_path=$g_zxfer_property_cache_path
+	table_hit=0
+	if zxfer_property_table_find_dataset source "tank/src"; then
+		table_hit=1
+	fi
 
 	unset -f zxfer_run_zfs_cmd_for_spec
 	unset -f zxfer_serialize_property_records_from_stdin
@@ -749,29 +758,19 @@ test_get_normalized_dataset_properties_reports_human_serializer_failures_without
 		"human serializer failed" "$(cat "$err_log")"
 	assertEquals "Human-side serializer failures should still execute both normalized-property probes." \
 		"2" "$(awk 'END {print NR + 0}' "$calls_log")"
-	assertFalse "Human-side serializer failures should not populate the normalized-property cache." \
-		"[ -e \"$cache_path\" ]"
+	assertEquals "Human-side serializer failures should not populate the in-memory property table." \
+		"0" "$table_hit"
 }
 
-test_load_normalized_dataset_properties_uses_prefetched_cache_entry_when_available() {
-	calls_log="$TEST_TMPDIR/normalized_prefetch_cache.calls"
-	cache_path="$TEST_TMPDIR/normalized_prefetch_cache.entry"
+test_load_normalized_dataset_properties_uses_prefetched_table_row_when_available() {
+	calls_log="$TEST_TMPDIR/normalized_prefetch_table.calls"
 	: >"$calls_log"
 	output=$(
 		(
 			CALLS_LOG="$calls_log"
-			CACHE_PATH="$cache_path"
-			zxfer_property_cache_dataset_path() {
-				g_zxfer_property_cache_path=$CACHE_PATH
-				printf '%s\n' "$g_zxfer_property_cache_path"
-			}
 			zxfer_maybe_prefetch_recursive_normalized_properties() {
-				zxfer_write_cache_object_file_atomically \
-					"$CACHE_PATH" \
-					"$ZXFER_PROPERTY_CACHE_OBJECT_KIND_NORMALIZED" \
-					"" \
-					"compression=lz4=local" >/dev/null || return 1
-				return 0
+				zxfer_property_table_append_dataset "$3" "$1" "compression=lz4=local"
+				zxfer_property_table_find_dataset "$3" "$1"
 			}
 			zxfer_run_zfs_cmd_for_spec() {
 				printf 'call\n' >>"$CALLS_LOG"
@@ -786,127 +785,20 @@ test_load_normalized_dataset_properties_uses_prefetched_cache_entry_when_availab
 		)
 	)
 
-	assertEquals "Normalized-property loads should reuse a prefetched cache entry when recursive prefetch materializes the dataset." \
+	assertEquals "Normalized-property loads should reuse a prefetched table row when recursive prefetch materializes the dataset." \
 		"props=compression=lz4=local
 cache_hit=1
 calls=0" "$output"
 }
 
-test_load_normalized_dataset_properties_falls_back_to_live_probe_when_cache_read_fails() {
-	calls_log="$TEST_TMPDIR/normalized_cache_read_failure.calls"
-	cache_path="$TEST_TMPDIR/normalized_cache_read_failure.entry"
-	: >"$calls_log"
-	printf '%s\n' "compression=stale=local" >"$cache_path"
-
-	output=$(
-		(
-			CALLS_LOG="$calls_log"
-			CACHE_PATH="$cache_path"
-			zxfer_property_cache_dataset_path() {
-				g_zxfer_property_cache_path=$CACHE_PATH
-				printf '%s\n' "$g_zxfer_property_cache_path"
-			}
-			zxfer_read_property_cache_file() {
-				return 1
-			}
-			zxfer_run_zfs_cmd_for_spec() {
-				printf 'call\n' >>"$CALLS_LOG"
-				printf 'compression\tlz4\tlocal\n'
-			}
-			zxfer_load_normalized_dataset_properties "tank/src" "/sbin/zfs" source || exit $?
-			printf 'props=%s\ncache_hit=%s\ncalls=%s\n' \
-				"$g_zxfer_normalized_dataset_properties" \
-				"${g_zxfer_normalized_dataset_properties_cache_hit:-0}" \
-				"$(awk 'END {print NR + 0}' "$CALLS_LOG")"
-		)
-	)
-
-	assertEquals "Unreadable normalized-property cache entries should be treated as cache misses and retried live." \
-		"props=compression=lz4=local
-cache_hit=0
-calls=2" "$output"
-}
-
-test_zxfer_read_property_cache_file_rejects_truncated_cache_objects() {
-	cache_path="$TEST_TMPDIR/property_cache_partial_read.entry"
-	cat >"$cache_path" <<-EOF
-		$ZXFER_CACHE_OBJECT_HEADER_LINE
-		kind=$ZXFER_PROPERTY_CACHE_OBJECT_KIND_NORMALIZED
-
-		compression=partial=local
-	EOF
-
-	set +e
-	output=$(
-		(
-			CACHE_PATH="$cache_path"
-			zxfer_read_property_cache_file \
-				"$CACHE_PATH" "$ZXFER_PROPERTY_CACHE_OBJECT_KIND_NORMALIZED"
-			l_status=$?
-			printf 'status=%s\n' "$l_status"
-			printf 'result=<%s>\n' "${g_zxfer_property_cache_read_result:-}"
-		)
-	)
-	status=$?
-
-	assertEquals "Direct property-cache read tests should complete the subshell cleanly." \
-		0 "$status"
-	assertEquals "Property-cache reads should fail closed when the cache object is truncated." \
-		"status=1
-result=<>" "$output"
-}
-
-test_load_normalized_dataset_properties_falls_back_to_live_probe_when_cache_read_returns_partial_failure() {
-	calls_log="$TEST_TMPDIR/normalized_cache_partial_read_failure.calls"
-	cache_path="$TEST_TMPDIR/normalized_cache_partial_read_failure.entry"
-	: >"$calls_log"
-	printf '%s\n' "compression=stale=local" >"$cache_path"
-
-	output=$(
-		(
-			CALLS_LOG="$calls_log"
-			CACHE_PATH="$cache_path"
-			zxfer_property_cache_dataset_path() {
-				g_zxfer_property_cache_path=$CACHE_PATH
-				printf '%s\n' "$g_zxfer_property_cache_path"
-			}
-			zxfer_read_property_cache_file() {
-				g_zxfer_property_cache_read_result="compression=stale=local"
-				return 9
-			}
-			zxfer_run_zfs_cmd_for_spec() {
-				printf 'call\n' >>"$CALLS_LOG"
-				printf 'compression\tlz4\tlocal\n'
-			}
-			zxfer_load_normalized_dataset_properties "tank/src" "/sbin/zfs" source || exit $?
-			printf 'props=%s\ncache_hit=%s\ncalls=%s\n' \
-				"$g_zxfer_normalized_dataset_properties" \
-				"${g_zxfer_normalized_dataset_properties_cache_hit:-0}" \
-				"$(awk 'END {print NR + 0}' "$CALLS_LOG")"
-		)
-	)
-
-	assertEquals "Partial normalized-property cache reads that fail nonzero should still be treated as cache misses and retried live." \
-		"props=compression=lz4=local
-cache_hit=0
-calls=2" "$output"
-}
-
-test_load_normalized_dataset_properties_falls_back_to_live_probe_when_prefetched_cache_entry_is_empty() {
-	calls_log="$TEST_TMPDIR/normalized_prefetch_empty_cache.calls"
-	cache_path="$TEST_TMPDIR/normalized_prefetch_empty_cache.entry"
+test_load_normalized_dataset_properties_falls_back_to_live_probe_when_prefetch_does_not_materialize_row() {
+	calls_log="$TEST_TMPDIR/normalized_prefetch_empty_table.calls"
 	: >"$calls_log"
 
 	output=$(
 		(
 			CALLS_LOG="$calls_log"
-			CACHE_PATH="$cache_path"
-			zxfer_property_cache_dataset_path() {
-				g_zxfer_property_cache_path=$CACHE_PATH
-				printf '%s\n' "$g_zxfer_property_cache_path"
-			}
 			zxfer_maybe_prefetch_recursive_normalized_properties() {
-				: >"$CACHE_PATH"
 				return 0
 			}
 			zxfer_run_zfs_cmd_for_spec() {
@@ -921,269 +813,212 @@ test_load_normalized_dataset_properties_falls_back_to_live_probe_when_prefetched
 		)
 	)
 
-	assertEquals "Empty prefetched normalized-property cache entries should be treated as cache misses and retried live." \
+	assertEquals "Prefetch passes that do not materialize the requested dataset's table row should be treated as misses and retried live." \
 		"props=compression=lz4=local
 cache_hit=0
 calls=2" "$output"
 }
 
-test_load_normalized_dataset_properties_disables_cache_when_live_store_fails() {
-	cache_dir="$TEST_TMPDIR/normalized_live_store_failure.cache"
-	mkdir -p "$cache_dir"
-
-	output=$(
-		(
-			CACHE_DIR="$cache_dir"
-			g_zxfer_property_cache_dir=$CACHE_DIR
-			zxfer_property_cache_store() {
-				return 1
-			}
-			zxfer_run_zfs_cmd_for_spec() {
-				printf 'compression\tlz4\tlocal\n'
-			}
-			zxfer_load_normalized_dataset_properties "tank/src" "/sbin/zfs" source || exit $?
-			printf 'props=%s\ncache_hit=%s\nunavailable=%s\ndir=%s\n' \
-				"$g_zxfer_normalized_dataset_properties" \
-				"${g_zxfer_normalized_dataset_properties_cache_hit:-0}" \
-				"${g_zxfer_property_cache_unavailable:-0}" \
-				"${g_zxfer_property_cache_dir:-}"
-		)
-	)
-
-	assertEquals "Live normalized-property reads should still succeed when cache publication fails." \
-		"props=compression=lz4=local
-cache_hit=0
-unavailable=1
-dir=" "$output"
-	assertFalse "Live normalized-property cache store failures should remove the unhealthy per-iteration cache directory." \
-		"[ -d \"$cache_dir\" ]"
-}
-
-test_zxfer_property_cache_dataset_path_encodes_dataset_name_safely() {
-	l_dataset="../unsafe path:/child"
-	l_expected_key=$(printf '%s' "$l_dataset" | LC_ALL=C od -An -tx1 | tr -d ' \n')
-
-	zxfer_property_cache_dataset_path normalized destination "$l_dataset" >/dev/null
-
-	assertEquals "Dataset cache paths should encode dataset names instead of treating them as filesystem structure." \
-		"${g_zxfer_property_cache_dir}/normalized/destination/${l_expected_key}" "$g_zxfer_property_cache_path"
-}
-
-test_zxfer_property_cache_encode_key_does_not_collapse_repeated_od_lines() {
-	l_dataset="pool/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	l_encoded_key=$(zxfer_property_cache_encode_key "$l_dataset")
-
-	assertFalse "Cache-key encoding should not emit BSD od repetition markers for long repeated dataset names." \
-		"printf '%s' \"$l_encoded_key\" | grep -F '\\*' >/dev/null"
-}
-
-test_zxfer_invalidate_destination_property_cache_removes_encoded_cache_entries() {
+test_zxfer_property_table_round_trips_hostile_dataset_names() {
 	l_dataset="../unsafe path:/child"
 
-	zxfer_property_cache_dataset_path normalized destination "$l_dataset" >/dev/null
-	l_normalized_cache_path=$g_zxfer_property_cache_path
-	zxfer_property_cache_property_path required destination "$l_dataset" "casesensitivity" >/dev/null
-	l_required_cache_path=$g_zxfer_property_cache_path
-	mkdir -p "${l_normalized_cache_path%/*}"
-	mkdir -p "${l_required_cache_path%/*}"
-	printf 'compression=lz4=local\n' >"$l_normalized_cache_path"
-	printf 'casesensitivity=sensitive=local\n' >"$l_required_cache_path"
+	zxfer_property_table_append_dataset destination "$l_dataset" "user:note=line1%0Aline2=local"
+	zxfer_property_table_append_dataset destination "backup/other" "compression=lz4=local"
+
+	found=0
+	if zxfer_property_table_find_dataset destination "$l_dataset"; then
+		found=1
+	fi
+	payload=$g_zxfer_property_table_lookup_result
 
 	zxfer_invalidate_destination_property_cache "$l_dataset"
 
-	assertFalse "Destination cache invalidation should remove encoded normalized-property cache entries." \
-		"[ -e \"$l_normalized_cache_path\" ]"
-	assertFalse "Destination cache invalidation should remove encoded required-property cache entries." \
-		"[ -e \"$l_required_cache_path\" ]"
+	stale=0
+	if zxfer_property_table_find_dataset destination "$l_dataset"; then
+		stale=1
+	fi
+	survivor=0
+	if zxfer_property_table_find_dataset destination "backup/other"; then
+		survivor=1
+	fi
+
+	assertEquals "Hostile dataset names should round-trip through the in-memory property table." \
+		"1" "$found"
+	assertEquals "Hostile dataset rows should preserve their encoded property payload exactly." \
+		"user:note=line1%0Aline2=local" "$payload"
+	assertEquals "Destination table invalidation should remove rows keyed by hostile dataset names." \
+		"0" "$stale"
+	assertEquals "Destination table invalidation must not remove unrelated rows when stripping hostile dataset names." \
+		"1" "$survivor"
 }
 
-test_zxfer_invalidate_destination_property_mutation_cache_resets_descendant_destination_entries() {
-	l_parent_dataset="backup/dst"
-	l_child_dataset="backup/dst/child"
-
-	zxfer_property_cache_dataset_path normalized destination "$l_child_dataset" >/dev/null
-	l_child_normalized_cache_path=$g_zxfer_property_cache_path
-	zxfer_property_cache_property_path required destination "$l_child_dataset" "casesensitivity" >/dev/null
-	l_child_required_cache_path=$g_zxfer_property_cache_path
-	mkdir -p "${l_child_normalized_cache_path%/*}" "${l_child_required_cache_path%/*}"
-	printf '%s\n' "compression=gzip=inherited" >"$l_child_normalized_cache_path"
-	printf '%s\n' "casesensitivity=sensitive=local" >"$l_child_required_cache_path"
+test_zxfer_invalidate_destination_property_mutation_cache_strips_descendants_and_keeps_siblings() {
+	zxfer_property_table_append_dataset destination "backup/dst" "compression=lz4=local"
+	zxfer_property_table_append_dataset destination "backup/dst/child" "compression=gzip=inherited"
+	zxfer_property_table_append_dataset destination "backup/dst2" "atime=off=local"
+	zxfer_required_property_table_append destination "backup/dst/child" "casesensitivity" "casesensitivity=sensitive=local"
+	zxfer_required_property_table_append destination "backup/dst2" "casesensitivity" "casesensitivity=sensitive=local"
 	g_zxfer_destination_property_tree_prefetch_state=1
 
-	zxfer_invalidate_destination_property_mutation_cache "$l_parent_dataset"
+	zxfer_invalidate_destination_property_mutation_cache "backup/dst"
 
-	assertFalse "Destination property mutation invalidation should remove cached descendant normalized properties." \
-		"[ -e \"$l_child_normalized_cache_path\" ]"
-	assertFalse "Destination property mutation invalidation should remove cached descendant required-property probes." \
-		"[ -e \"$l_child_required_cache_path\" ]"
-	assertEquals "Destination property mutation invalidation should reset recursive destination prefetch state." \
-		0 "${g_zxfer_destination_property_tree_prefetch_state:-0}"
+	mutated=0
+	if zxfer_property_table_find_dataset destination "backup/dst"; then
+		mutated=1
+	fi
+	child=0
+	if zxfer_property_table_find_dataset destination "backup/dst/child"; then
+		child=1
+	fi
+	sibling=0
+	if zxfer_property_table_find_dataset destination "backup/dst2"; then
+		sibling=1
+	fi
+	child_required=0
+	if zxfer_required_property_table_find destination "backup/dst/child" "casesensitivity"; then
+		child_required=1
+	fi
+	sibling_required=0
+	if zxfer_required_property_table_find destination "backup/dst2" "casesensitivity"; then
+		sibling_required=1
+	fi
+
+	assertEquals "A destination mutation should invalidate the mutated dataset's normalized table row." \
+		"0" "$mutated"
+	assertEquals "A destination mutation should invalidate descendant normalized table rows because inherited values may have changed." \
+		"0" "$child"
+	assertEquals "A destination mutation must not invalidate unrelated sibling datasets' normalized table rows." \
+		"1" "$sibling"
+	assertEquals "A destination mutation should invalidate descendant required-property probe rows." \
+		"0" "$child_required"
+	assertEquals "A destination mutation must not invalidate unrelated sibling required-property probe rows." \
+		"1" "$sibling_required"
+	assertEquals "Targeted destination mutation invalidation must keep the prefetched destination tree warm for unaffected datasets." \
+		"1" "${g_zxfer_destination_property_tree_prefetch_state:-0}"
 }
 
-test_zxfer_reset_property_iteration_caches_removes_cache_dir_and_resets_state() {
-	cache_dir="$TEST_TMPDIR/property-cache-reset"
-	mkdir -p "$cache_dir/normalized/source"
-	printf '%s\n' "compression=lz4=local" >"$cache_dir/normalized/source/cache"
-	g_zxfer_property_cache_dir=$cache_dir
-	g_zxfer_property_cache_unavailable=1
+test_zxfer_invalidate_destination_property_mutation_cache_without_dataset_resets_destination_tables() {
+	zxfer_property_table_append_dataset destination "backup/dst" "compression=lz4=local"
+	zxfer_property_table_append_dataset source "tank/src" "compression=lz4=local"
+	g_zxfer_destination_property_tree_prefetch_state=1
+
+	zxfer_invalidate_destination_property_mutation_cache ""
+
+	destination_row=0
+	if zxfer_property_table_find_dataset destination "backup/dst"; then
+		destination_row=1
+	fi
+	source_row=0
+	if zxfer_property_table_find_dataset source "tank/src"; then
+		source_row=1
+	fi
+
+	assertEquals "Mutation invalidation without a dataset should fall back to the full destination table reset." \
+		"0" "$destination_row"
+	assertEquals "The full destination table reset should preserve source table rows." \
+		"1" "$source_row"
+	assertEquals "The full destination table reset should rearm destination property-tree prefetch." \
+		"0" "${g_zxfer_destination_property_tree_prefetch_state:-1}"
+}
+
+test_zxfer_reset_property_iteration_caches_clears_tables_memo_and_prefetch_state() {
+	zxfer_property_table_append_dataset source "tank/src" "compression=lz4=local"
+	zxfer_property_table_append_dataset destination "backup/dst" "compression=lz4=local"
+	zxfer_required_property_table_append source "tank/src" "casesensitivity" "casesensitivity=sensitive=local"
+	zxfer_required_property_table_append destination "backup/dst" "casesensitivity" "casesensitivity=sensitive=local"
 	g_zxfer_source_property_tree_prefetch_root="tank/src"
 	g_zxfer_source_property_tree_prefetch_zfs_cmd="/source/zfs"
 	g_zxfer_source_property_tree_prefetch_state=1
 	g_zxfer_destination_property_tree_prefetch_root="backup/dst"
 	g_zxfer_destination_property_tree_prefetch_zfs_cmd="/dest/zfs"
 	g_zxfer_destination_property_tree_prefetch_state=1
-	g_zxfer_property_cache_read_result="stale-cache-read"
+	g_zxfer_property_table_lookup_result="stale-lookup"
 
 	zxfer_reset_property_iteration_caches
 
-	assertFalse "Resetting property caches should remove the per-iteration cache directory." \
-		"[ -d \"$cache_dir\" ]"
-	assertEquals "Resetting property caches should clear the cache-directory pointer." \
-		"" "${g_zxfer_property_cache_dir:-}"
-	assertEquals "Resetting property caches should make cache creation eligible again." \
-		"0" "${g_zxfer_property_cache_unavailable:-1}"
-	assertEquals "Resetting property caches should clear the source recursive property-tree root." \
+	assertEquals "Resetting property iteration caches should clear the source normalized table." \
+		"" "${g_zxfer_source_property_table:-}"
+	assertEquals "Resetting property iteration caches should clear the destination normalized table." \
+		"" "${g_zxfer_destination_property_table:-}"
+	assertEquals "Resetting property iteration caches should clear the source required-property table." \
+		"" "${g_zxfer_source_required_property_table:-}"
+	assertEquals "Resetting property iteration caches should clear the destination required-property table." \
+		"" "${g_zxfer_destination_required_property_table:-}"
+	assertEquals "Resetting property iteration caches should clear the last-dataset memo." \
+		"" "${g_zxfer_property_table_memo_dataset:-}"
+	assertEquals "Resetting property iteration caches should clear the source recursive property-tree root." \
 		"" "${g_zxfer_source_property_tree_prefetch_root:-}"
-	assertEquals "Resetting property caches should clear the destination recursive property-tree root." \
+	assertEquals "Resetting property iteration caches should clear the destination recursive property-tree root." \
 		"" "${g_zxfer_destination_property_tree_prefetch_root:-}"
-	assertEquals "Resetting property caches should reset the source recursive property-tree state." \
+	assertEquals "Resetting property iteration caches should reset the source recursive property-tree state." \
 		"0" "${g_zxfer_source_property_tree_prefetch_state:-1}"
-	assertEquals "Resetting property caches should reset the destination recursive property-tree state." \
+	assertEquals "Resetting property iteration caches should reset the destination recursive property-tree state." \
 		"0" "${g_zxfer_destination_property_tree_prefetch_state:-1}"
-	assertEquals "Resetting property caches should clear cache-file read scratch state." \
-		"" "${g_zxfer_property_cache_read_result:-}"
+	assertEquals "Resetting property iteration caches should clear table lookup scratch state." \
+		"" "${g_zxfer_property_table_lookup_result:-}"
 }
 
-test_zxfer_ensure_property_cache_dir_reuses_existing_directory() {
-	cache_dir="$TEST_TMPDIR/property-cache-existing"
-	mkdir -p "$cache_dir"
-	g_zxfer_property_cache_dir=$cache_dir
+test_zxfer_invalidate_dataset_property_cache_removes_exact_source_rows_only() {
+	zxfer_property_table_append_dataset source "tank/src" "compression=lz4=local"
+	zxfer_property_table_append_dataset source "tank/src/child" "compression=gzip=inherited"
+	zxfer_required_property_table_append source "tank/src" "casesensitivity" "casesensitivity=sensitive=local"
 
-	zxfer_ensure_property_cache_dir
-	status=$?
+	zxfer_invalidate_dataset_property_cache source "tank/src"
 
-	assertEquals "Existing cache directories should be reused instead of creating a new one." \
-		"0" "$status"
-	assertEquals "Reused cache directories should remain unchanged." \
-		"$cache_dir" "$g_zxfer_property_cache_dir"
+	exact=0
+	if zxfer_property_table_find_dataset source "tank/src"; then
+		exact=1
+	fi
+	child=0
+	if zxfer_property_table_find_dataset source "tank/src/child"; then
+		child=1
+	fi
+	required=0
+	if zxfer_required_property_table_find source "tank/src" "casesensitivity"; then
+		required=1
+	fi
+
+	assertEquals "Generic dataset invalidation should remove the exact source normalized table row." \
+		"0" "$exact"
+	assertEquals "Generic dataset invalidation should keep descendant rows when no descendant scope was requested." \
+		"1" "$child"
+	assertEquals "Generic dataset invalidation should remove the dataset's required-property probe rows." \
+		"0" "$required"
 }
 
-test_zxfer_ensure_property_cache_dir_uses_effective_tmpdir_in_current_shell() {
-	cache_root="$TEST_TMPDIR/property-cache-effective-root"
-	mkdir -p "$cache_root"
-
-	output=$(
-		(
-			zxfer_try_get_effective_tmpdir() {
-				printf '%s\n' "$cache_root"
-			}
-
-			zxfer_ensure_property_cache_dir || exit $?
-			printf 'dir=%s\n' "$g_zxfer_property_cache_dir"
-		)
-	)
-	status=$?
-
-	assertEquals "Property cache directory creation should succeed when the validated effective temp root is available." \
-		"0" "$status"
-	assertContains "Property cache directories should be created under the effective temp root instead of raw TMPDIR." \
-		"$output" "dir=$cache_root/zxfer-property-cache."
-}
-
-test_zxfer_ensure_property_cache_dir_marks_cache_unavailable_when_effective_tmpdir_lookup_fails() {
-	set +e
-	output=$(
-		(
-			zxfer_try_get_effective_tmpdir() {
-				return 1
-			}
-
-			zxfer_ensure_property_cache_dir >/dev/null 2>&1 || {
-				printf 'unavailable=%s\n' "${g_zxfer_property_cache_unavailable:-0}"
-				printf 'dir=%s\n' "${g_zxfer_property_cache_dir:-}"
-				return 1
-			}
-		)
-	)
-	status=$?
-
-	assertEquals "Effective temp-root lookup failures should disable the property cache for the rest of the iteration." \
-		"1" "$status"
-	assertContains "Effective temp-root lookup failures should mark the property cache as unavailable." \
-		"$output" "unavailable=1"
-	assertContains "Effective temp-root lookup failures should leave the cache directory unset." \
-		"$output" "dir="
-}
-
-test_zxfer_ensure_property_cache_dir_marks_cache_unavailable_when_mktemp_fails() {
-	mktemp() {
-		return 1
-	}
-
-	set +e
-	zxfer_ensure_property_cache_dir >/dev/null 2>&1
-	status=$?
-
-	unset -f mktemp
-
-	assertEquals "mktemp failures should disable the property cache for the rest of the iteration." \
-		"1" "$status"
-	assertEquals "mktemp failures should mark the property cache as unavailable." \
-		"1" "${g_zxfer_property_cache_unavailable:-0}"
-	assertEquals "mktemp failures should leave the cache directory unset." \
-		"" "${g_zxfer_property_cache_dir:-}"
-}
-
-test_zxfer_invalidate_dataset_property_cache_removes_source_side_entries() {
-	l_dataset="../unsafe path:/child"
-
-	zxfer_property_cache_dataset_path normalized source "$l_dataset" >/dev/null
-	l_normalized_cache_path=$g_zxfer_property_cache_path
-	zxfer_property_cache_property_path required source "$l_dataset" "casesensitivity" >/dev/null
-	l_required_cache_path=$g_zxfer_property_cache_path
-	mkdir -p "${l_normalized_cache_path%/*}"
-	mkdir -p "${l_required_cache_path%/*}"
-	printf 'compression=lz4=local\n' >"$l_normalized_cache_path"
-	printf 'casesensitivity=sensitive=local\n' >"$l_required_cache_path"
-
-	zxfer_invalidate_dataset_property_cache source "$l_dataset"
-
-	assertFalse "Generic dataset cache invalidation should remove source normalized-property cache entries." \
-		"[ -e \"$l_normalized_cache_path\" ]"
-	assertFalse "Generic dataset cache invalidation should remove source required-property cache entries." \
-		"[ -e \"$l_required_cache_path\" ]"
-}
-
-test_zxfer_reset_destination_property_iteration_cache_preserves_source_cache_entries() {
-	l_dataset="tank/src"
-
-	zxfer_property_cache_dataset_path normalized source "$l_dataset" >/dev/null
-	l_source_normalized_cache_path=$g_zxfer_property_cache_path
-	zxfer_property_cache_property_path required source "$l_dataset" "casesensitivity" >/dev/null
-	l_source_required_cache_path=$g_zxfer_property_cache_path
-	zxfer_property_cache_dataset_path normalized destination "$l_dataset" >/dev/null
-	l_destination_normalized_cache_path=$g_zxfer_property_cache_path
-	zxfer_property_cache_property_path required destination "$l_dataset" "casesensitivity" >/dev/null
-	l_destination_required_cache_path=$g_zxfer_property_cache_path
-	mkdir -p "${l_source_normalized_cache_path%/*}"
-	mkdir -p "${l_source_required_cache_path%/*}"
-	mkdir -p "${l_destination_normalized_cache_path%/*}"
-	mkdir -p "${l_destination_required_cache_path%/*}"
-	printf 'compression=lz4=local\n' >"$l_source_normalized_cache_path"
-	printf 'casesensitivity=sensitive=local\n' >"$l_source_required_cache_path"
-	printf 'compression=lz4=local\n' >"$l_destination_normalized_cache_path"
-	printf 'casesensitivity=sensitive=local\n' >"$l_destination_required_cache_path"
+test_zxfer_reset_destination_property_iteration_cache_preserves_source_table_rows() {
+	zxfer_property_table_append_dataset source "tank/src" "compression=lz4=local"
+	zxfer_required_property_table_append source "tank/src" "casesensitivity" "casesensitivity=sensitive=local"
+	zxfer_property_table_append_dataset destination "backup/dst" "compression=lz4=local"
+	zxfer_required_property_table_append destination "backup/dst" "casesensitivity" "casesensitivity=sensitive=local"
 
 	zxfer_reset_destination_property_iteration_cache
 
-	assertTrue "Destination-cache resets should preserve source normalized-property cache entries." \
-		"[ -e \"$l_source_normalized_cache_path\" ]"
-	assertTrue "Destination-cache resets should preserve source required-property cache entries." \
-		"[ -e \"$l_source_required_cache_path\" ]"
-	assertFalse "Destination-cache resets should remove destination normalized-property cache entries." \
-		"[ -e \"$l_destination_normalized_cache_path\" ]"
-	assertFalse "Destination-cache resets should remove destination required-property cache entries." \
-		"[ -e \"$l_destination_required_cache_path\" ]"
+	source_row=0
+	if zxfer_property_table_find_dataset source "tank/src"; then
+		source_row=1
+	fi
+	source_required=0
+	if zxfer_required_property_table_find source "tank/src" "casesensitivity"; then
+		source_required=1
+	fi
+	destination_row=0
+	if zxfer_property_table_find_dataset destination "backup/dst"; then
+		destination_row=1
+	fi
+	destination_required=0
+	if zxfer_required_property_table_find destination "backup/dst" "casesensitivity"; then
+		destination_required=1
+	fi
+
+	assertEquals "Destination-table resets should preserve source normalized table rows." \
+		"1" "$source_row"
+	assertEquals "Destination-table resets should preserve source required-property probe rows." \
+		"1" "$source_required"
+	assertEquals "Destination-table resets should clear destination normalized table rows." \
+		"0" "$destination_row"
+	assertEquals "Destination-table resets should clear destination required-property probe rows." \
+		"0" "$destination_required"
 }
 
 test_zxfer_reset_destination_property_iteration_cache_rearms_destination_tree_prefetch() {
@@ -1257,39 +1092,6 @@ test_zxfer_refresh_property_tree_prefetch_context_clears_state_when_prefetch_is_
 		"" "${g_zxfer_source_property_tree_prefetch_root:-}"
 	assertEquals "Recursive runs without property transfer work should also clear destination prefetch state." \
 		"" "${g_zxfer_destination_property_tree_prefetch_root:-}"
-}
-
-test_zxfer_ensure_property_cache_dir_returns_failure_when_marked_unavailable() {
-	g_zxfer_property_cache_unavailable=1
-
-	set +e
-	zxfer_ensure_property_cache_dir >/dev/null 2>&1
-	status=$?
-
-	assertEquals "An unavailable property cache should fail immediately without creating a directory." \
-		"1" "$status"
-}
-
-test_zxfer_property_cache_helpers_cover_empty_encoding_and_failure_paths() {
-	od() {
-		:
-	}
-	assertEquals "Empty key encodings should fall back to 00 so cache helpers still produce safe file names." \
-		"00" "$(zxfer_property_cache_encode_key "tank/src")"
-	unset -f od
-
-	g_zxfer_property_cache_unavailable=1
-	set +e
-	zxfer_property_cache_dataset_path normalized source "tank/src" >/dev/null 2>&1
-	dataset_status=$?
-	zxfer_property_cache_property_path required source "tank/src" "casesensitivity" >/dev/null 2>&1
-	property_status=$?
-	g_zxfer_property_cache_unavailable=0
-
-	assertEquals "Dataset cache-path lookups should fail when the property cache is unavailable." \
-		"1" "$dataset_status"
-	assertEquals "Per-property cache-path lookups should fail when the property cache is unavailable." \
-		"1" "$property_status"
 }
 
 test_zxfer_get_property_tree_prefetch_dataset_list_uses_source_and_destination_fallbacks() {
@@ -1769,8 +1571,6 @@ EOF
 	set +e
 	zxfer_prefetch_recursive_normalized_properties source >"$err_log" 2>&1
 	prefetch_status=$?
-	zxfer_property_cache_dataset_path normalized source "tank/src" >/dev/null
-	cache_path=$g_zxfer_property_cache_path
 
 	unset -f zxfer_run_zfs_cmd_for_spec
 	unset -f zxfer_group_recursive_property_tree_by_dataset
@@ -1783,15 +1583,15 @@ EOF
 		"group merge failed" "$(cat "$err_log")"
 	assertEquals "Grouped machine/human merge failures should disable source-side prefetch for the rest of the iteration." \
 		"2" "${g_zxfer_source_property_tree_prefetch_state:-0}"
-	assertFalse "Grouped machine/human merge failures should not populate prefetched cache entries." \
-		"[ -e \"$cache_path\" ]"
+	assertEquals "Grouped machine/human merge failures should not populate the in-memory source property table." \
+		"" "${g_zxfer_source_property_table:-}"
 
 	if [ "$had_errexit" -eq 1 ]; then
 		set -e
 	fi
 }
 
-test_zxfer_maybe_prefetch_recursive_normalized_properties_handles_mismatches_and_missing_cache_entries() {
+test_zxfer_maybe_prefetch_recursive_normalized_properties_handles_mismatches_and_missing_table_rows() {
 	g_zxfer_source_property_tree_prefetch_root="tank/src"
 	g_zxfer_source_property_tree_prefetch_zfs_cmd="/source/zfs"
 	g_recursive_source_dataset_list="tank/src"
@@ -1820,83 +1620,23 @@ test_zxfer_maybe_prefetch_recursive_normalized_properties_handles_mismatches_and
 		"1" "$missing_source_status"
 	assertEquals "Datasets outside the recursive destination tree should bypass destination-side property-tree prefetch." \
 		"1" "$missing_dest_status"
-	assertEquals "A prefetch pass that does not materialize the requested dataset cache entry should still fall back to exact live reads." \
+	assertEquals "A prefetch pass that does not materialize the requested dataset table row should still fall back to exact live reads." \
 		"1" "$missing_cache_status"
 }
 
-test_zxfer_property_cache_path_helpers_fail_cleanly_when_key_encoding_fails() {
-	output_file="$TEST_TMPDIR/property_cache_path_failures.out"
+test_zxfer_property_table_invalidation_clears_tables_when_strip_command_fails() {
+	zxfer_property_table_append_dataset destination "backup/dst" "compression=lz4=local"
+	zxfer_property_table_append_dataset destination "backup/other" "atime=off=local"
 
-	zxfer_property_cache_encode_key() {
-		case "${1:-}" in
-		tank/src | compression)
-			return 1
-			;;
-		esac
-		printf '%s\n' "encoded"
-	}
-	zxfer_ensure_property_cache_dir() {
-		g_zxfer_property_cache_dir="$TEST_TMPDIR/property-cache"
-		mkdir -p "$g_zxfer_property_cache_dir/normalized/source"
-	}
-
-	set +e
-	zxfer_property_cache_dataset_path normalized source "tank/src" >/dev/null 2>&1
-	dataset_status=$?
-	zxfer_property_cache_property_path required source "tank/src" "compression" >/dev/null 2>&1
-	property_status=$?
-	set -e
-
-	unset -f zxfer_property_cache_encode_key
-	unset -f zxfer_ensure_property_cache_dir
-	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
-
-	{
-		printf 'dataset=%s\n' "$dataset_status"
-		printf 'property=%s\n' "$property_status"
-	} >"$output_file"
-
-	assertEquals "Property-cache path helpers should fail cleanly when dataset or property key encoding fails." \
-		"dataset=1
-property=1" "$(cat "$output_file")"
-}
-
-test_zxfer_property_cache_store_fails_when_parent_directory_cannot_be_created() {
-	set +e
-	output=$(
-		(
-			mkdir() {
-				return 1
-			}
-			zxfer_property_cache_store \
-				"$TEST_TMPDIR/missing/normalized/cache-entry" "value"
-		)
-	)
-	status=$?
-
-	assertEquals "Property-cache stores should fail cleanly when their parent directory cannot be created." \
-		1 "$status"
-	assertEquals "Failed property-cache stores should not emit a payload." "" "$output"
-}
-
-test_zxfer_invalidate_dataset_property_cache_ignores_key_encoding_failures() {
-	g_zxfer_property_cache_dir="$TEST_TMPDIR/cache-invalidate"
-	mkdir -p "$g_zxfer_property_cache_dir/normalized/source" \
-		"$g_zxfer_property_cache_dir/required/source"
-	: >"$g_zxfer_property_cache_dir/normalized/source/stale"
-	: >"$g_zxfer_property_cache_dir/required/source/stale"
-
-	zxfer_property_cache_encode_key() {
+	zxfer_property_table_strip_dataset_rows() {
 		return 1
 	}
-	zxfer_invalidate_dataset_property_cache source "tank/src"
-	unset -f zxfer_property_cache_encode_key
+	zxfer_invalidate_destination_property_cache "backup/dst"
+	unset -f zxfer_property_table_strip_dataset_rows
 	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
-	assertTrue "Dataset-cache invalidation should return quietly when key encoding fails and leave unrelated cache files untouched." \
-		"[ -f '$g_zxfer_property_cache_dir/normalized/source/stale' ]"
-	assertTrue "Dataset-cache invalidation should not remove required-property cache entries when key encoding fails." \
-		"[ -f '$g_zxfer_property_cache_dir/required/source/stale' ]"
+	assertEquals "Failed table strips must fail toward the empty table so no stale row can survive an invalidation." \
+		"" "${g_zxfer_destination_property_table:-}"
 }
 
 test_zxfer_prefetch_recursive_normalized_properties_disables_human_tree_read_failures() {
@@ -1938,46 +1678,7 @@ test_zxfer_prefetch_recursive_normalized_properties_disables_human_tree_read_fai
 state=2" "$(cat "$output_file")"
 }
 
-test_zxfer_prefetch_recursive_normalized_properties_disables_cache_apply_failures() {
-	g_zxfer_source_property_tree_prefetch_root="tank/src"
-	g_zxfer_source_property_tree_prefetch_zfs_cmd="/sbin/zfs"
-	g_zxfer_source_property_tree_prefetch_state=0
-	g_recursive_source_dataset_list="tank/src"
-	output_file="$TEST_TMPDIR/prefetch_cache_apply_failure.out"
-
-	zxfer_run_zfs_cmd_for_spec() {
-		case "$4" in
-		-Hpo | -Ho)
-			printf '%s\t%s\t%s\t%s\n' "tank/src" "compression" "lz4" "local"
-			return 0
-			;;
-		esac
-		return 1
-	}
-	zxfer_property_cache_store() {
-		return 1
-	}
-
-	set +e
-	zxfer_prefetch_recursive_normalized_properties source >/dev/null 2>&1
-	prefetch_status=$?
-	set -e
-
-	unset -f zxfer_run_zfs_cmd_for_spec
-	unset -f zxfer_property_cache_store
-	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
-
-	{
-		printf 'status=%s\n' "$prefetch_status"
-		printf 'state=%s\n' "${g_zxfer_source_property_tree_prefetch_state:-0}"
-	} >"$output_file"
-
-	assertEquals "Recursive source property prefetch should fail closed when grouped cache entries cannot be published." \
-		"status=1
-state=2" "$(cat "$output_file")"
-}
-
-test_zxfer_maybe_prefetch_recursive_normalized_properties_fails_when_prefetch_or_cache_path_creation_fails() {
+test_zxfer_maybe_prefetch_recursive_normalized_properties_fails_when_prefetch_pass_fails() {
 	output_file="$TEST_TMPDIR/maybe_prefetch_failure.out"
 
 	g_zxfer_destination_property_tree_prefetch_root="backup/dst"
@@ -1990,30 +1691,17 @@ test_zxfer_maybe_prefetch_recursive_normalized_properties_fails_when_prefetch_or
 	set +e
 	zxfer_maybe_prefetch_recursive_normalized_properties "backup/dst" "/dest/zfs" destination >/dev/null 2>&1
 	prefetch_status=$?
-	unset -f zxfer_prefetch_recursive_normalized_properties
-
-	zxfer_prefetch_recursive_normalized_properties() {
-		return 0
-	}
-	zxfer_property_cache_dataset_path() {
-		return 1
-	}
-	zxfer_maybe_prefetch_recursive_normalized_properties "backup/dst" "/dest/zfs" destination >/dev/null 2>&1
-	cache_path_status=$?
 	set -e
 
 	unset -f zxfer_prefetch_recursive_normalized_properties
-	unset -f zxfer_property_cache_dataset_path
 	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
 	{
 		printf 'prefetch=%s\n' "$prefetch_status"
-		printf 'cache_path=%s\n' "$cache_path_status"
 	} >"$output_file"
 
-	assertEquals "Destination prefetch lookups should fail cleanly when the prefetch pass fails or the cache path cannot be derived." \
-		"prefetch=1
-cache_path=1" "$(cat "$output_file")"
+	assertEquals "Destination prefetch lookups should fail cleanly when the prefetch pass itself fails." \
+		"prefetch=1" "$(cat "$output_file")"
 }
 
 test_zxfer_get_required_property_probe_defaults_to_local_zfs_command_when_unspecified() {
@@ -2056,8 +1744,10 @@ test_zxfer_get_required_property_probe_reports_serializer_failures_without_cachi
 	set +e
 	zxfer_get_required_property_probe "tank/src" "casesensitivity" "/sbin/zfs" source >"$err_log" 2>&1
 	status=$?
-	zxfer_property_cache_property_path required source "tank/src" "casesensitivity" >/dev/null
-	cache_path=$g_zxfer_property_cache_path
+	table_hit=0
+	if zxfer_required_property_table_find source "tank/src" "casesensitivity"; then
+		table_hit=1
+	fi
 
 	unset -f zxfer_run_zfs_cmd_for_spec
 	unset -f zxfer_serialize_property_records_from_stdin
@@ -2073,8 +1763,8 @@ test_zxfer_get_required_property_probe_reports_serializer_failures_without_cachi
 		"$(cat "$err_log")" "Failed to parse required creation-time property"
 	assertEquals "Required-property serializer failures should not execute extra zfs probes." \
 		"1" "$(awk 'END {print NR + 0}' "$calls_log")"
-	assertFalse "Required-property serializer failures should not populate the required-property cache." \
-		"[ -e \"$cache_path\" ]"
+	assertEquals "Required-property serializer failures should not populate the required-property table." \
+		"0" "$table_hit"
 }
 
 test_zxfer_get_required_property_probe_reports_serializer_readback_failures_without_caching() {
@@ -2105,8 +1795,10 @@ test_zxfer_get_required_property_probe_reports_serializer_readback_failures_with
 	set +e
 	zxfer_get_required_property_probe "tank/src" "casesensitivity" "/sbin/zfs" source >"$err_log" 2>&1
 	status=$?
-	zxfer_property_cache_property_path required source "tank/src" "casesensitivity" >/dev/null
-	cache_path=$g_zxfer_property_cache_path
+	table_hit=0
+	if zxfer_required_property_table_find source "tank/src" "casesensitivity"; then
+		table_hit=1
+	fi
 
 	unset -f zxfer_get_temp_file
 	unset -f zxfer_run_zfs_cmd_for_spec
@@ -2123,135 +1815,274 @@ test_zxfer_get_required_property_probe_reports_serializer_readback_failures_with
 		"$(cat "$err_log")" "Failed to parse required creation-time property"
 	assertEquals "Required-property serializer readback failures should not execute extra zfs probes." \
 		"1" "$(awk 'END {print NR + 0}' "$calls_log")"
-	assertFalse "Required-property serializer readback failures should not populate the required-property cache." \
-		"[ -e \"$cache_path\" ]"
+	assertEquals "Required-property serializer readback failures should not populate the required-property table." \
+		"0" "$table_hit"
 }
 
-test_zxfer_get_required_property_probe_falls_back_to_live_probe_when_cache_read_fails() {
-	calls_log="$TEST_TMPDIR/required_probe_cache_read_failure.calls"
-	cache_path="$TEST_TMPDIR/required_probe_cache_read_failure.entry"
-	: >"$calls_log"
-	printf '%s\n' "__ZXFER_REQUIRED_PROPERTY_UNSUPPORTED__" >"$cache_path"
+test_zxfer_capture_serialized_property_records_reports_tempfile_failures_in_current_shell() {
+	zxfer_get_temp_file() {
+		return 1
+	}
 
-	output=$(
+	set +e
+	zxfer_capture_serialized_property_records "compression	lz4	local" >/dev/null 2>&1
+	status=$?
+	set -e
+
+	unset -f zxfer_get_temp_file
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
+
+	assertEquals "Serialized property capture should fail closed when it cannot allocate a staging file." \
+		"1" "$status"
+}
+
+test_zxfer_capture_serialized_property_records_reports_readback_failures_in_current_shell() {
+	serialized_output_file="$TEST_TMPDIR/serialized_property_readback_failure.out"
+	err_log="$TEST_TMPDIR/serialized_property_readback_failure.err"
+	g_zxfer_serialized_property_records_result="stale-serialized"
+
+	zxfer_get_temp_file() {
+		g_zxfer_temp_file_result="$serialized_output_file"
+		: >"$g_zxfer_temp_file_result"
+	}
+
+	cat() {
+		if [ "$1" = "$serialized_output_file" ]; then
+			printf '%s\n' "serialized readback failed" >&2
+			printf '%s\n' "compression=lz4=local"
+			return 26
+		fi
+		command cat "$@"
+	}
+
+	set +e
+	zxfer_capture_serialized_property_records "compression	lz4	local" >/dev/null 2>"$err_log"
+	status=$?
+	set -e
+
+	unset -f zxfer_get_temp_file
+	unset -f cat
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
+
+	assertEquals "Serialized property capture should fail closed when the staged serializer output cannot be read back." \
+		"26" "$status"
+	assertEquals "Serialized property capture should not publish stale or partial serializer scratch after a readback failure." \
+		"" "$g_zxfer_serialized_property_records_result"
+	assertEquals "Serialized property capture should preserve the staged readback diagnostic." \
+		"serialized readback failed" "$(cat "$err_log")"
+}
+
+test_zxfer_group_recursive_property_tree_by_dataset_groups_filtered_datasets_in_order() {
+	filter_file="$TEST_TMPDIR/property-filter.list"
+	tree_file="$TEST_TMPDIR/property-tree.tsv"
+	output_file="$TEST_TMPDIR/property-grouped.tsv"
+
+	printf '%s\n' "tank/src" "tank/src/child" >"$filter_file"
+	cat >"$tree_file" <<'EOF'
+tank/src	compression	lz4	local
+tank/src	readonly	off	local
+tank/src/child	compression	gzip	inherited
+tank/src/child	readonly	off	inherited
+tank/skip	compression	off	local
+EOF
+
+	zxfer_group_recursive_property_tree_by_dataset "$filter_file" "$tree_file" >"$output_file"
+	status=$?
+
+	assertEquals "Recursive property grouping should succeed for filtered property trees." \
+		"0" "$status"
+	assertEquals "Recursive property grouping should retain dataset order and merge encoded property records per dataset." \
+		"tank/src	compression=lz4=local,readonly=off=local
+tank/src/child	compression=gzip=inherited,readonly=off=inherited" "$(cat "$output_file")"
+}
+
+test_zxfer_group_recursive_property_tree_by_dataset_preserves_line_feed_values() {
+	filter_file="$TEST_TMPDIR/property-filter-linefeed.list"
+	tree_file="$TEST_TMPDIR/property-tree-linefeed.tsv"
+	output_file="$TEST_TMPDIR/property-grouped-linefeed.tsv"
+
+	printf '%s\n' "tank/src" >"$filter_file"
+	printf 'tank/src\tuser:note\tline1\nline2\tlocal\n' >"$tree_file"
+	printf 'tank/src\tcompression\tlz4\tlocal\n' >>"$tree_file"
+	printf 'tank/skip\tuser:note\tignored\nvalue\tlocal\n' >>"$tree_file"
+
+	zxfer_group_recursive_property_tree_by_dataset "$filter_file" "$tree_file" >"$output_file"
+	status=$?
+
+	assertEquals "Recursive property grouping should accept logical property records split across physical lines." \
+		"0" "$status"
+	assertEquals "Recursive property grouping should encode embedded line feeds before storing grouped table records." \
+		"tank/src	user:note=line1%0Aline2=local,compression=lz4=local" "$(cat "$output_file")"
+}
+
+test_zxfer_prefetch_recursive_normalized_properties_preserves_grouped_read_failures() {
+	g_zxfer_source_property_tree_prefetch_root="tank/src"
+	g_zxfer_source_property_tree_prefetch_zfs_cmd="/sbin/zfs"
+	g_zxfer_source_property_tree_prefetch_state=0
+	g_recursive_source_dataset_list="tank/src"
+
+	zxfer_run_zfs_cmd_for_spec() {
+		case "$4" in
+		-Hpo | -Ho)
+			printf '%s\n' "tank/src	compression	lz4	local"
+			return 0
+			;;
+		esac
+		return 1
+	}
+	zxfer_read_runtime_artifact_file() {
+		return 27
+	}
+
+	set +e
+	zxfer_prefetch_recursive_normalized_properties source >/dev/null 2>&1
+	status=$?
+	set -e
+
+	unset -f zxfer_run_zfs_cmd_for_spec
+	unset -f zxfer_read_runtime_artifact_file
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
+
+	assertEquals "Recursive property-tree prefetch should preserve grouped artifact read failures." \
+		"27" "$status"
+	assertEquals "Grouped artifact read failures should disable source prefetch for the iteration." \
+		"2" "${g_zxfer_source_property_tree_prefetch_state:-0}"
+}
+
+test_zxfer_prefetch_recursive_normalized_properties_skips_malformed_grouped_rows() {
+	g_zxfer_source_property_tree_prefetch_root="tank/src"
+	g_zxfer_source_property_tree_prefetch_zfs_cmd="/sbin/zfs"
+	g_zxfer_source_property_tree_prefetch_state=0
+	g_recursive_source_dataset_list="tank/src"
+
+	zxfer_run_zfs_cmd_for_spec() {
+		case "$4" in
+		-Hpo | -Ho)
+			printf '%s\n' "tank/src	compression	lz4	local"
+			return 0
+			;;
+		esac
+		return 1
+	}
+	zxfer_read_runtime_artifact_file() {
+		g_zxfer_runtime_artifact_read_result="malformed-grouped-row-without-tabs"
+		return 0
+	}
+
+	zxfer_prefetch_recursive_normalized_properties source >/dev/null 2>&1
+	status=$?
+
+	unset -f zxfer_run_zfs_cmd_for_spec
+	unset -f zxfer_read_runtime_artifact_file
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
+
+	assertEquals "Malformed grouped rows should be ignored without disabling recursive source prefetch." \
+		"0" "$status"
+	assertEquals "Successful prefetch with only skipped grouped rows should still mark source prefetch ready." \
+		"1" "${g_zxfer_source_property_tree_prefetch_state:-0}"
+	assertEquals "Malformed grouped rows must not leak into the in-memory source property table." \
+		"" "${g_zxfer_source_property_table:-}"
+}
+
+test_zxfer_property_wrapper_helpers_preserve_exact_failure_statuses() {
+	set +e
+	populate_output=$(
 		(
-			CALLS_LOG="$calls_log"
-			CACHE_PATH="$cache_path"
-			zxfer_property_cache_property_path() {
-				g_zxfer_property_cache_path=$CACHE_PATH
-				printf '%s\n' "$g_zxfer_property_cache_path"
+			zxfer_get_required_property_probe() {
+				printf '%s\n' "populate failed"
+				return 5
 			}
-			zxfer_read_property_cache_file() {
-				return 1
-			}
-			zxfer_run_zfs_cmd_for_spec() {
-				printf 'call\n' >>"$CALLS_LOG"
-				printf 'casesensitivity\tsensitive\tlocal\n'
-			}
-			zxfer_get_required_property_probe "tank/src" "casesensitivity" "/sbin/zfs" source || exit $?
-			printf 'result=%s\ncalls=%s\n' \
-				"$g_zxfer_required_property_probe_result" \
-				"$(awk 'END {print NR + 0}' "$CALLS_LOG")"
+			zxfer_populate_required_properties_present \
+				"tank/src" "compression=lz4=local" "/sbin/zfs" "casesensitivity" source
 		)
 	)
-
-	assertEquals "Unreadable required-property cache entries should be treated as cache misses and retried live." \
-		"result=casesensitivity=sensitive=local
-calls=1" "$output"
-}
-
-test_zxfer_get_required_property_probe_falls_back_to_live_probe_when_cache_read_returns_partial_failure() {
-	calls_log="$TEST_TMPDIR/required_probe_cache_partial_read_failure.calls"
-	cache_path="$TEST_TMPDIR/required_probe_cache_partial_read_failure.entry"
-	: >"$calls_log"
-	printf '%s\n' "__ZXFER_REQUIRED_PROPERTY_UNSUPPORTED__" >"$cache_path"
-
-	output=$(
+	populate_status=$?
+	load_output=$(
 		(
-			CALLS_LOG="$calls_log"
-			CACHE_PATH="$cache_path"
-			zxfer_property_cache_property_path() {
-				g_zxfer_property_cache_path=$CACHE_PATH
-				printf '%s\n' "$g_zxfer_property_cache_path"
+			zxfer_load_normalized_dataset_properties() {
+				printf '%s\n' "normalized failed"
+				return 7
 			}
-			zxfer_read_property_cache_file() {
-				g_zxfer_property_cache_read_result="__ZXFER_REQUIRED_PROPERTY_UNSUPPORTED__"
+			zxfer_load_destination_props "backup/dst" ""
+		)
+	)
+	load_status=$?
+	collect_output=$(
+		(
+			zxfer_load_destination_props() {
+				printf '%s\n' "collect failed"
 				return 9
 			}
-			zxfer_run_zfs_cmd_for_spec() {
-				printf 'call\n' >>"$CALLS_LOG"
-				printf 'casesensitivity\tsensitive\tlocal\n'
-			}
-			zxfer_get_required_property_probe "tank/src" "casesensitivity" "/sbin/zfs" source || exit $?
-			printf 'result=%s\ncalls=%s\n' \
-				"$g_zxfer_required_property_probe_result" \
-				"$(awk 'END {print NR + 0}' "$CALLS_LOG")"
+			zxfer_collect_destination_props "backup/dst" ""
 		)
 	)
+	collect_status=$?
+	required_output=$(
+		(
+			zxfer_populate_required_properties_present() {
+				printf '%s\n' "required failed"
+				return 11
+			}
+			zxfer_ensure_required_properties_present \
+				"tank/src" "compression=lz4=local" "/sbin/zfs" "casesensitivity" source
+		)
+	)
+	required_status=$?
 
-	assertEquals "Partial required-property cache reads that fail nonzero should still be treated as cache misses and retried live." \
-		"result=casesensitivity=sensitive=local
-calls=1" "$output"
+	assertEquals "Required-property population should preserve the exact failure status from required-property probes." \
+		5 "$populate_status"
+	assertEquals "Required-property population should preserve required-property probe failure output." \
+		"populate failed" "$populate_output"
+	assertEquals "Destination property loading should preserve the exact failure status from normalized-property loading." \
+		7 "$load_status"
+	assertEquals "Destination property loading should preserve normalized-property failure output." \
+		"normalized failed" "$load_output"
+	assertEquals "Destination property collection should preserve the exact failure status from destination-property loading." \
+		9 "$collect_status"
+	assertEquals "Destination property collection should preserve destination-property loader failure output." \
+		"collect failed" "$collect_output"
+	assertEquals "Required-property wrapper helpers should preserve the exact failure status from required-property population." \
+		11 "$required_status"
+	assertEquals "Required-property wrapper helpers should preserve required-property population failure output." \
+		"required failed" "$required_output"
 }
 
-test_zxfer_get_required_property_probe_falls_back_to_live_probe_when_cache_entry_is_empty() {
-	calls_log="$TEST_TMPDIR/required_probe_empty_cache.calls"
-	cache_path="$TEST_TMPDIR/required_probe_empty_cache.entry"
-	: >"$calls_log"
-	: >"$cache_path"
-
-	output=$(
+test_zxfer_load_normalized_dataset_properties_preserves_live_probe_statuses() {
+	set +e
+	machine_output=$(
 		(
-			CALLS_LOG="$calls_log"
-			CACHE_PATH="$cache_path"
-			zxfer_property_cache_property_path() {
-				g_zxfer_property_cache_path=$CACHE_PATH
-				printf '%s\n' "$g_zxfer_property_cache_path"
-			}
 			zxfer_run_zfs_cmd_for_spec() {
-				printf 'call\n' >>"$CALLS_LOG"
-				printf 'casesensitivity\tsensitive\tlocal\n'
+				printf '%s\n' "machine probe failed"
+				return 23
 			}
-			zxfer_get_required_property_probe "tank/src" "casesensitivity" "/sbin/zfs" source || exit $?
-			printf 'result=%s\ncalls=%s\n' \
-				"$g_zxfer_required_property_probe_result" \
-				"$(awk 'END {print NR + 0}' "$CALLS_LOG")"
+			zxfer_load_normalized_dataset_properties "tank/src" "/sbin/zfs" source
 		)
 	)
-
-	assertEquals "Empty required-property cache entries should be treated as cache misses and retried live." \
-		"result=casesensitivity=sensitive=local
-calls=1" "$output"
-}
-
-test_zxfer_get_required_property_probe_disables_cache_when_live_store_fails() {
-	cache_dir="$TEST_TMPDIR/required_probe_live_store_failure.cache"
-	mkdir -p "$cache_dir"
-
-	output=$(
+	machine_status=$?
+	human_output=$(
 		(
-			CACHE_DIR="$cache_dir"
-			g_zxfer_property_cache_dir=$CACHE_DIR
-			zxfer_property_cache_store() {
-				return 1
-			}
 			zxfer_run_zfs_cmd_for_spec() {
-				printf 'casesensitivity\tsensitive\tlocal\n'
+				if [ "$3" = "-Hpo" ]; then
+					printf '%s\n' "compression	lz4	local"
+					return 0
+				fi
+				printf '%s\n' "human probe failed"
+				return 24
 			}
-			zxfer_get_required_property_probe "tank/src" "casesensitivity" "/sbin/zfs" source || exit $?
-			printf 'result=%s\nunavailable=%s\ndir=%s\n' \
-				"$g_zxfer_required_property_probe_result" \
-				"${g_zxfer_property_cache_unavailable:-0}" \
-				"${g_zxfer_property_cache_dir:-}"
+			zxfer_load_normalized_dataset_properties "tank/src" "/sbin/zfs" source
 		)
 	)
+	human_status=$?
+	set -e
 
-	assertEquals "Live required-property probes should still succeed when cache publication fails." \
-		"result=casesensitivity=sensitive=local
-unavailable=1
-dir=" "$output"
-	assertFalse "Live required-property cache store failures should remove the unhealthy per-iteration cache directory." \
-		"[ -d \"$cache_dir\" ]"
+	assertEquals "Normalized-property live machine probes should preserve exact zfs status." \
+		23 "$machine_status"
+	assertEquals "Normalized-property live machine probes should preserve failure output." \
+		"machine probe failed" "$machine_output"
+	assertEquals "Normalized-property live human probes should preserve exact zfs status." \
+		24 "$human_status"
+	assertEquals "Normalized-property live human probes should preserve failure output." \
+		"human probe failed" "$human_output"
 }
 
 test_force_readonly_off_handles_empty_and_rewrites_property() {
@@ -2672,8 +2503,6 @@ test_collect_source_props_restore_mode_uses_exact_backup_entry_in_current_shell(
 	raw_result=$g_zxfer_source_pvs_raw
 	effective_result=$g_zxfer_source_pvs_effective
 
-	# shellcheck source=src/zxfer_property_cache.sh
-	. "$ZXFER_ROOT/src/zxfer_property_cache.sh"
 	# shellcheck source=src/zxfer_property_reconcile.sh
 	. "$ZXFER_ROOT/src/zxfer_property_reconcile.sh"
 
@@ -4695,8 +4524,6 @@ test_collect_destination_props_defaults_to_g_rzfs() {
 	}
 	g_RZFS="/remote/zfs"
 	zxfer_collect_destination_props "backup/dst" "" >"$output_file"
-	# shellcheck source=src/zxfer_property_cache.sh
-	. "$ZXFER_ROOT/src/zxfer_property_cache.sh"
 	# shellcheck source=src/zxfer_property_reconcile.sh
 	. "$ZXFER_ROOT/src/zxfer_property_reconcile.sh"
 
@@ -4714,8 +4541,6 @@ test_load_destination_props_defaults_to_g_rzfs_and_records_raw_props() {
 	g_RZFS="/remote/zfs"
 	zxfer_load_destination_props "backup/dst" ""
 	printf 'raw=%s\n' "$g_zxfer_destination_pvs_raw" >>"$output_file"
-	# shellcheck source=src/zxfer_property_cache.sh
-	. "$ZXFER_ROOT/src/zxfer_property_cache.sh"
 	# shellcheck source=src/zxfer_property_reconcile.sh
 	. "$ZXFER_ROOT/src/zxfer_property_reconcile.sh"
 

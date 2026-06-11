@@ -49,12 +49,11 @@ responsibility boundary.
   record parsing, normalization, and cached snapshot index state
 - [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh): backup
   metadata accumulation, path derivation, and secure exact-keyed lookup/read/write flows
-- [../src/zxfer_property_cache.sh](../src/zxfer_property_cache.sh): normalized
-  property caching, prefetch state, startup/iteration cache reset helpers
 - [../src/zxfer_property_reconcile.sh](../src/zxfer_property_reconcile.sh):
   readonly-property defaults, unsupported-property derivation, property
-  diffing, filtering, override planning, per-call scratch resets, and apply
-  logic
+  diffing, filtering, override planning, per-call scratch resets, apply
+  logic, and the per-iteration in-memory normalized-property tables with
+  recursive prefetch and targeted destination invalidation
 - [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh):
   source and destination dataset / snapshot discovery
 - [../src/zxfer_send_receive.sh](../src/zxfer_send_receive.sh): send /
@@ -79,8 +78,7 @@ The startup path is intentionally explicit:
    [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh),
    [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh),
    [../src/zxfer_send_receive.sh](../src/zxfer_send_receive.sh),
-   [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh),
-   [../src/zxfer_property_cache.sh](../src/zxfer_property_cache.sh), and
+   [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh), and
    [../src/zxfer_property_reconcile.sh](../src/zxfer_property_reconcile.sh).
 4. `zxfer_init_variables()` resolves local/remote execution context, helper
    paths, and platform-specific bootstrap details.

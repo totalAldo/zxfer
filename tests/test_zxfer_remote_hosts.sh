@@ -6428,7 +6428,7 @@ test_init_globals_initializes_defaults_and_temp_files() {
 			counter_file="$TEST_TMPDIR/zxfer_init_globals.counter"
 			printf '%s\n' 0 >"$counter_file"
 			g_zxfer_services_to_restart="stale-service"
-			g_zxfer_property_cache_path="/tmp/stale-cache"
+			g_zxfer_property_table_lookup_result="stale-lookup"
 			zxfer_get_temp_file() {
 				temp_index=$(cat "$counter_file")
 				temp_index=$((temp_index + 1))
@@ -6457,7 +6457,7 @@ test_init_globals_initializes_defaults_and_temp_files() {
 			printf 'tmp2=%s\n' "$g_delete_dest_tmp_file"
 			printf 'tmp3=%s\n' "$g_delete_snapshots_to_delete_tmp_file"
 			printf 'restart=<%s>\n' "$g_zxfer_services_to_restart"
-			printf 'cache_path=<%s>\n' "$g_zxfer_property_cache_path"
+			printf 'table_lookup=<%s>\n' "$g_zxfer_property_table_lookup_result"
 		)
 	)
 
@@ -6471,7 +6471,7 @@ test_init_globals_initializes_defaults_and_temp_files() {
 	assertContains "Delete destination temp file path should stay empty until delete planning needs it." "$result" "tmp2="
 	assertContains "Delete diff temp file path should stay empty until delete planning needs it." "$result" "tmp3="
 	assertContains "Runtime init should clear stale service restart state." "$result" "restart=<>"
-	assertContains "Runtime init should clear stale property-cache path state." "$result" "cache_path=<>"
+	assertContains "Runtime init should clear stale property-table lookup state." "$result" "table_lookup=<>"
 }
 
 test_prepare_remote_host_connections_resolves_ssh_on_demand() {
@@ -8929,9 +8929,7 @@ test_trap_exit_removes_temp_files_and_iteration_cache_dirs() {
 			: >"$TEST_TMPDIR/trap-cleanup.stale"
 			mkdir -p "$TEST_TMPDIR/trap-cleanup.dir/subdir"
 			: >"$TEST_TMPDIR/trap-cleanup.dir/subdir/stale"
-			g_zxfer_property_cache_dir="$TEST_TMPDIR/property-cache"
 			mkdir -p \
-				"$g_zxfer_property_cache_dir" \
 				"$socket_cache_root/active-entry" \
 				"$remote_capability_cache_root/active-entry"
 			zxfer_close_all_ssh_control_sockets() {
@@ -8952,7 +8950,6 @@ test_trap_exit_removes_temp_files_and_iteration_cache_dirs() {
 	assertFalse "zxfer_trap_exit should remove the delete-diff temp file." "[ -e '$TEST_TMPDIR/delete-diff.tmp' ]"
 	assertFalse "zxfer_trap_exit should remove prefixed tmpdir scratch files for the current run." "[ -e '$TEST_TMPDIR/trap-cleanup.stale' ]"
 	assertFalse "zxfer_trap_exit should remove prefixed tmpdir scratch directories for the current run." "[ -d '$TEST_TMPDIR/trap-cleanup.dir' ]"
-	assertFalse "zxfer_trap_exit should remove the property cache directory." "[ -d '$TEST_TMPDIR/property-cache' ]"
 	assertFalse "zxfer_trap_exit should remove the current run ssh control-socket cache root even when it still contains entry state." "[ -d '$socket_cache_root' ]"
 	assertTrue "zxfer_trap_exit should preserve the shared remote capability cache root when it still contains reusable cache files." "[ -d '$remote_capability_cache_root' ]"
 }

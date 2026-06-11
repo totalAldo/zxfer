@@ -13,32 +13,31 @@ src/zxfer_backup_metadata.sh
   108:		return 1
   122:	return 1
   133:		zxfer_throw_error "Backup metadata source dataset [$l_source] is outside source root [$l_metadata_source_root]."
-  153:	if ! l_updated_records=$(printf '%s\n' "$l_existing_records" |
-  154:		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
-  229:	if ! l_validated_records=$(printf '%s\n' "$l_existing_records" |
-  298:	if l_record_properties=$(printf '%s\n' "$l_existing_records" |
-  299:		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
-  376:	if ! l_filtered_records=$(printf '%s\n' "$l_existing_records" |
-  377:		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
-  641:	g_zxfer_rendered_backup_metadata_contents=$(zxfer_render_backup_metadata_contents_for_roots \
-  656:	g_zxfer_rendered_backup_metadata_contents=$(zxfer_render_backup_metadata_contents_for_roots \
-  688:	l_key_hex=$(printf '%s' "$l_identity" |
-  694:		l_key_hex="00"
-  727:	l_key_hex=$(printf '%s' "$l_identity" |
-  728:		LC_ALL=C od -An -tx1 -v | tr -d ' \n' | cut -c 1-16)
-  729:	if [ "$l_key_hex" = "" ]; then
-  730:		l_key_hex="00"
-  732:	printf 'k%s\n' "$l_key_hex"
-  761:		return 1
-  798:			l_forwarded_properties=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
-  1202:	if (
-  1205:	); then
-  1290:				zxfer_remove_local_backup_metadata_path_if_present "$l_rollback_file" >/dev/null 2>&1 || :
-  2259:		return 1
-  2262:		return 1
-  2442:		return 0
-  2562:		zxfer_throw_error "Failed to derive backup metadata directory for $l_backup_file_path."
-  2575:		zxfer_throw_error "Failed to derive forwarded backup metadata directory for $l_forwarded_backup_file_path."
+  152:	if ! l_validated_records=$(printf '%s\n' "$l_existing_records" |
+  213:		zxfer_throw_error "Backup metadata source dataset [$l_source] is outside source root [${g_initial_source:-$l_source}]."
+  256:	if l_record_properties=$(printf '%s\n' "$l_existing_records" |
+  257:		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
+  331:	if ! l_filtered_records=$(printf '%s\n' "$l_existing_records" |
+  332:		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
+  590:	g_zxfer_rendered_backup_metadata_contents=$(zxfer_render_backup_metadata_contents_for_roots \
+  605:	g_zxfer_rendered_backup_metadata_contents=$(zxfer_render_backup_metadata_contents_for_roots \
+  637:	l_key_hex=$(printf '%s' "$l_identity" |
+  643:		l_key_hex="00"
+  676:	l_key_hex=$(printf '%s' "$l_identity" |
+  677:		LC_ALL=C od -An -tx1 -v | tr -d ' \n' | cut -c 1-16)
+  678:	if [ "$l_key_hex" = "" ]; then
+  679:		l_key_hex="00"
+  681:	printf 'k%s\n' "$l_key_hex"
+  710:		return 1
+  747:			l_forwarded_properties=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
+  1151:	if (
+  1154:	); then
+  1239:				zxfer_remove_local_backup_metadata_path_if_present "$l_rollback_file" >/dev/null 2>&1 || :
+  2208:		return 1
+  2211:		return 1
+  2391:		return 0
+  2520:		zxfer_throw_error "Failed to derive backup metadata directory for $l_backup_file_path."
+  2533:		zxfer_throw_error "Failed to derive forwarded backup metadata directory for $l_forwarded_backup_file_path."
 
 src/zxfer_exec.sh
   205:		l_split_restore_glob=0
@@ -67,15 +66,6 @@ src/zxfer_path_security.sh
   393:		l_ls_path=./$l_ls_path
   407:		return 1
 
-src/zxfer_property_cache.sh
-  209:	l_property_list=$1
-  244:	l_decoded_assignment=$("${g_cmd_awk:-awk}" \
-  1031:	destination)
-  1043:	*)
-  1205:			g_zxfer_required_properties_result="Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
-  1206:			printf '%s\n' "$g_zxfer_required_properties_result"
-  1207:			return 1
-
 src/zxfer_property_reconcile.sh
   98:		l_effective_readonly_properties=$(printf '%s' ",$l_effective_readonly_properties," |
   437:					exit "$?"
@@ -99,6 +89,23 @@ src/zxfer_property_reconcile.sh
   1660:			return "$?"
   2314:		return "$l_dest_exist_status"
   2467:		return "$l_property_transfer_create_status"
+  2645:	l_decoded_assignment=$("${g_cmd_awk:-awk}" \
+  2796:		return 1
+  2885:$l_strip_table
+  2886:EOF
+  2910:		return 0
+  2916:		l_invalidate_table=$(zxfer_property_table_strip_dataset_rows \
+  2925:		l_invalidate_required_table=$(zxfer_property_table_strip_dataset_rows \
+  2927:			l_strip_status=$?
+  2929:			l_invalidate_required_table=""
+  3425:			g_zxfer_source_property_table=$l_prefetched_table$l_nl$g_zxfer_source_property_table
+  3433:			g_zxfer_destination_property_table=$l_prefetched_table$l_nl$g_zxfer_destination_property_table
+  3466:	destination)
+  3478:	*)
+  3479:		return 1
+  3628:			g_zxfer_required_properties_result="Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
+  3629:			printf '%s\n' "$g_zxfer_required_properties_result"
+  3630:			return 1
 
 src/zxfer_remote_hosts.sh
   216:	l_key_hex=$(printf '%s' "$l_identity" |
@@ -263,20 +270,21 @@ src/zxfer_runtime.sh
   1040:	) 2>/dev/null; then
   1396:		return "$l_status"
   1616:		return "$l_status"
+  1621:		return "$l_status"
   1696:	zxfer_unregister_runtime_artifact_path "$l_stage_dir"
   1697:	return 0
   1907:		g_zxfer_profile_start_ms=""
   2167:				continue
-  2237:					l_source_context_status=$?
-  2239:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
-  2274:		g_zxfer_failure_class=dependency
-  2275:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
-  2293:					l_destination_context_status=$?
-  2295:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
-  2330:		g_zxfer_failure_class=dependency
-  2331:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
-  2371:		g_zxfer_failure_class=dependency
-  2372:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
+  2234:					l_source_context_status=$?
+  2236:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
+  2271:		g_zxfer_failure_class=dependency
+  2272:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
+  2290:					l_destination_context_status=$?
+  2292:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
+  2327:		g_zxfer_failure_class=dependency
+  2328:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
+  2368:		g_zxfer_failure_class=dependency
+  2369:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
 
 src/zxfer_send_receive.sh
   126:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |
@@ -412,5 +420,5 @@ src/zxfer_snapshot_reconcile.sh
 
 src/zxfer_snapshot_state.sh
   160:			l_lookup_status=$?
-  318:	*)
+  317:	*)
 

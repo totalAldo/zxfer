@@ -135,107 +135,22 @@ zxfer_get_backup_metadata_record_key_for_source() {
 	printf '%s\n' "$l_record_key"
 }
 
-# Purpose: Update the backup metadata record list to reflect the latest module
-# state.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows after upstream inputs or staged data change.
+# Purpose: Validate, deduplicate, and return the backup metadata record list.
+# Usage: Called once per write boundary (and for forwarded-provenance
+# rendering) before rows are published under a current v2 metadata header.
 #
-# Keep backup metadata buffered as one source-root-relative row per dataset so
-# repeated property passes replace stale data instead of accumulating ambiguous
-# duplicates.
-zxfer_update_backup_metadata_record_list() {
-	l_existing_records=$1
-	l_source=$2
-	l_properties=$3
-	l_record_key=$(zxfer_get_backup_metadata_record_key_for_source "$l_source")
-
-	# shellcheck disable=SC2016  # awk program should see literal field references.
-	if ! l_updated_records=$(printf '%s\n' "$l_existing_records" |
-		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
-			ZXFER_BACKUP_METADATA_PROPERTIES=$l_properties \
-			"${g_cmd_awk:-awk}" '
-function append_line(line) {
-	if (line == "")
-		return
-	if (output == "")
-		output = line
-	else
-		output = output "\n" line
-}
-function validate_properties(properties, item_count, i, field_count) {
-	if (properties == "")
-		return 0
-	item_count = split(properties, prop_items, ",")
-	for (i = 1; i <= item_count; i++) {
-		if (prop_items[i] == "")
-			return 0
-		field_count = split(prop_items[i], prop_fields, "=")
-		if (field_count < 2 || prop_fields[1] == "" || prop_fields[field_count] == "")
-			return 0
-	}
-	return 1
-}
-BEGIN {
-	record_key = ENVIRON["ZXFER_BACKUP_METADATA_RECORD_KEY"]
-	properties = ENVIRON["ZXFER_BACKUP_METADATA_PROPERTIES"]
-	if (record_key == "" || !validate_properties(properties))
-		exit 3
-	replacement = record_key "\t" properties
-}
-{
-	if ($0 == "")
-		next
-	tab = index($0, "\t")
-	if (tab <= 0) {
-		malformed = 1
-		next
-	}
-	current_key = substr($0, 1, tab - 1)
-	current_properties = substr($0, tab + 1)
-	if (current_key == "" || !validate_properties(current_properties)) {
-		malformed = 1
-		next
-	}
-	if (current_key == record_key) {
-		if (!replaced) {
-			append_line(replacement)
-			replaced = 1
-		}
-		next
-	}
-	append_line($0)
-}
-END {
-	if (malformed)
-		exit 3
-	if (!replaced)
-		append_line(replacement)
-	printf "%s", output
-}'); then
-		zxfer_throw_error "Failed to update buffered backup metadata records."
-	fi
-
-	g_zxfer_backup_metadata_record_list_result=$l_updated_records
-	printf '%s\n' "$l_updated_records"
-}
-
-# Purpose: Validate and return the backup metadata record list.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows before rendering rows under a current v2 metadata header.
+# Buffered appends are plain O(1) string appends, so this single pass is where
+# every buffered row is format-checked and where duplicate keys from repeated
+# property passes collapse newest-row-wins in first-appearance order. That
+# reproduces the row order and values the retired per-append replacement
+# produced, while validating each row once per write instead of once per
+# append.
 zxfer_validate_backup_metadata_record_list() {
 	l_existing_records=$1
 
 	# shellcheck disable=SC2016  # awk program should see literal field references.
 	if ! l_validated_records=$(printf '%s\n' "$l_existing_records" |
 		"${g_cmd_awk:-awk}" '
-function append_line(line) {
-	if (line == "")
-		return
-	if (output == "")
-		output = line
-	else
-		output = output "\n" line
-}
 function validate_properties(properties, item_count, i, field_count) {
 	if (properties == "")
 		return 0
@@ -259,9 +174,20 @@ function validate_properties(properties, item_count, i, field_count) {
 	current_properties = substr($0, tab + 1)
 	if (current_key == "" || !validate_properties(current_properties))
 		exit 3
-	append_line($0)
+	if (!(current_key in row_properties)) {
+		row_count++
+		row_keys[row_count] = current_key
+	}
+	row_properties[current_key] = current_properties
 }
 END {
+	for (row_index = 1; row_index <= row_count; row_index++) {
+		line = row_keys[row_index] "\t" row_properties[row_keys[row_index]]
+		if (output == "")
+			output = line
+		else
+			output = output "\n" line
+	}
 	printf "%s", output
 }'); then
 		zxfer_throw_error "Failed to validate buffered backup metadata records for chained backup provenance."
@@ -271,16 +197,44 @@ END {
 	printf '%s\n' "$l_validated_records"
 }
 
+# Purpose: Append the v2 row for a source dataset to a buffered record list.
+# Usage: Called by the append, defer, and finalize buffering helpers; the
+# extended list is returned through the record-list result scratch channel.
+#
+# This is a plain O(1) string append. Duplicate keys are legitimate transient
+# buffer state; they collapse newest-row-wins inside
+# zxfer_validate_backup_metadata_record_list at the write boundary.
+zxfer_append_backup_metadata_row_to_record_list() {
+	l_existing_records=$1
+	l_source=$2
+	l_properties=$3
+
+	l_record_key=$(zxfer_get_backup_metadata_record_key_for_source "$l_source") ||
+		zxfer_throw_error "Backup metadata source dataset [$l_source] is outside source root [${g_initial_source:-$l_source}]."
+
+	if [ -n "$l_existing_records" ]; then
+		g_zxfer_backup_metadata_record_list_result="$l_existing_records
+$l_record_key	$l_properties"
+	else
+		g_zxfer_backup_metadata_record_list_result="$l_record_key	$l_properties"
+	fi
+	return 0
+}
+
 # Purpose: Append the backup metadata record to the module-owned accumulator.
 # Usage: Called during backup-metadata capture, readback, and atomic publish
 # flows when later helpers need one shared place to extend staged or in-memory
 # state.
+#
+# Buffering stays O(1) per row; full row validation runs once per write
+# boundary, so a malformed buffered row surfaces when the metadata file is
+# written instead of on the append that follows it.
 zxfer_append_backup_metadata_record() {
 	l_source=$1
 	l_properties=$2
 
-	zxfer_update_backup_metadata_record_list "${g_backup_file_contents:-}" \
-		"$l_source" "$l_properties" >/dev/null
+	zxfer_append_backup_metadata_row_to_record_list "${g_backup_file_contents:-}" \
+		"$l_source" "$l_properties"
 	g_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
 }
 
@@ -289,6 +243,10 @@ zxfer_append_backup_metadata_record() {
 # Usage: Called during backup-metadata capture, readback, and atomic publish
 # flows when sibling helpers need the same lookup without duplicating module
 # logic.
+#
+# Buffered rows are plain appends, so duplicate keys are legitimate transient
+# state: the newest buffered row for a key wins, mirroring the newest-row-wins
+# collapse the write boundary applies.
 zxfer_get_buffered_backup_metadata_record_properties() {
 	l_existing_records=$1
 	l_source=$2
@@ -336,19 +294,16 @@ BEGIN {
 END {
 	if (malformed)
 		exit 3
-	if (match_count == 1) {
-		print match_properties
-		exit 0
-	}
 	if (match_count == 0)
 		exit 1
-	exit 2
+	print match_properties
+	exit 0
 }'); then
 		:
 	else
 		l_status=$?
 		case $l_status in
-		1 | 2 | 3)
+		1 | 3)
 			g_zxfer_backup_metadata_record_properties_result=""
 			return "$l_status"
 			;;
@@ -430,9 +385,6 @@ zxfer_defer_buffered_backup_metadata_record() {
 		1)
 			zxfer_throw_error "Buffered backup metadata row for source dataset [$l_source] is missing."
 			;;
-		2)
-			zxfer_throw_error "Buffered backup metadata rows for source dataset [$l_source] are ambiguous."
-			;;
 		3)
 			zxfer_throw_error "Buffered backup metadata rows are malformed while deferring source dataset [$l_source]."
 			;;
@@ -445,8 +397,8 @@ zxfer_defer_buffered_backup_metadata_record() {
 
 	zxfer_remove_backup_metadata_record_list "${g_backup_file_contents:-}" "$l_source" >/dev/null
 	l_next_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
-	zxfer_update_backup_metadata_record_list "${g_pending_backup_file_contents:-}" \
-		"$l_source" "$l_buffered_properties" >/dev/null
+	zxfer_append_backup_metadata_row_to_record_list "${g_pending_backup_file_contents:-}" \
+		"$l_source" "$l_buffered_properties"
 	l_next_pending_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
 
 	g_backup_file_contents=$l_next_backup_file_contents
@@ -473,9 +425,6 @@ zxfer_finalize_deferred_backup_metadata_record() {
 		1)
 			zxfer_throw_error "Deferred backup metadata row for source dataset [$l_source] is missing."
 			;;
-		2)
-			zxfer_throw_error "Deferred backup metadata rows for source dataset [$l_source] are ambiguous."
-			;;
 		3)
 			zxfer_throw_error "Deferred backup metadata rows are malformed while finalizing source dataset [$l_source]."
 			;;
@@ -488,8 +437,8 @@ zxfer_finalize_deferred_backup_metadata_record() {
 
 	zxfer_remove_backup_metadata_record_list "${g_pending_backup_file_contents:-}" "$l_source" >/dev/null
 	l_next_pending_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
-	zxfer_update_backup_metadata_record_list "${g_backup_file_contents:-}" \
-		"$l_source" "$l_deferred_properties" >/dev/null
+	zxfer_append_backup_metadata_row_to_record_list "${g_backup_file_contents:-}" \
+		"$l_source" "$l_deferred_properties"
 	l_next_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
 
 	g_pending_backup_file_contents=$l_next_pending_backup_file_contents
@@ -2554,6 +2503,15 @@ zxfer_write_backup_properties() {
 		zxfer_echov "No property data collected; skipping backup write."
 		return
 	fi
+
+	# Validate-once boundary: appends buffer rows without per-row awk passes,
+	# so every buffered row is format-checked here and duplicate keys collapse
+	# newest-row-wins before anything is rendered or published. The buffer is
+	# replaced by its canonical equivalent so later flushes and deferred-row
+	# lookups start from the compacted list.
+	zxfer_validate_backup_metadata_record_list "$g_backup_file_contents" >/dev/null
+	g_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
+
 	zxfer_refresh_backup_storage_root
 	l_backup_file_name=$(zxfer_get_backup_metadata_filename "$g_initial_source" "$g_destination")
 	l_backup_file_dir=$(zxfer_get_backup_storage_dir_for_dataset_tree "$g_initial_source")

@@ -165,7 +165,6 @@ The test layout broadly follows the source layout:
 - `test_zxfer_cli.sh`
 - `test_zxfer_snapshot_state.sh`
 - `test_zxfer_backup_metadata.sh`
-- `test_zxfer_property_cache_coverage.sh`
 - `test_zxfer_remote_hosts.sh`
 - `test_zxfer_remote_hosts_coverage.sh`
 - `test_zxfer_snapshot_discovery.sh`
@@ -174,10 +173,7 @@ The test layout broadly follows the source layout:
 - `test_zxfer_replication.sh`
 - `test_zxfer_send_receive.sh`
 
-Some support modules are still covered inside adjacent suites. For example,
-`src/zxfer_property_cache.sh` is exercised mainly by
-`test_zxfer_property_reconcile.sh`, with supplemental edge-path coverage in
-`test_zxfer_property_cache_coverage.sh`.
+Some support modules are still covered inside adjacent suites.
 `src/zxfer_backup_metadata.sh` now has a dedicated peer suite in
 `test_zxfer_backup_metadata.sh`, with a smaller number of cross-module backup
 restore and remote-helper expectations still covered in the property and

@@ -2122,7 +2122,7 @@ test_init_globals_initializes_dependency_state_and_temp_files() {
 			g_zfs_send_job_pids="123 456"
 			g_zxfer_background_job_records="stale-job	kind	111	/tmp/bg	/runner	token"
 			g_zxfer_background_job_wait_job_id="stale-job"
-			g_zxfer_property_cache_path="/tmp/stale-cache"
+			g_zxfer_property_table_lookup_result="stale-lookup"
 			g_zxfer_source_pvs_raw="stale=property=local"
 			g_zxfer_property_stage_file_read_result="stale-stage-read"
 			zxfer_assign_required_tool() {
@@ -2154,7 +2154,7 @@ test_init_globals_initializes_dependency_state_and_temp_files() {
 			printf 'send_pids=<%s>\n' "$g_zfs_send_job_pids"
 			printf 'background_records=<%s>\n' "$g_zxfer_background_job_records"
 			printf 'background_wait_job=<%s>\n' "$g_zxfer_background_job_wait_job_id"
-			printf 'cache_path=<%s>\n' "$g_zxfer_property_cache_path"
+			printf 'table_lookup=<%s>\n' "$g_zxfer_property_table_lookup_result"
 			printf 'source_pvs=<%s>\n' "$g_zxfer_source_pvs_raw"
 			printf 'property_stage_read=<%s>\n' "$g_zxfer_property_stage_file_read_result"
 		)
@@ -2198,8 +2198,8 @@ test_init_globals_initializes_dependency_state_and_temp_files() {
 		"$output" "background_records=<>"
 	assertContains "zxfer_init_globals should reset supervised background-job wait scratch state." \
 		"$output" "background_wait_job=<>"
-	assertContains "zxfer_init_globals should reset property-cache path scratch state." \
-		"$output" "cache_path=<>"
+	assertContains "zxfer_init_globals should reset property-table lookup scratch state." \
+		"$output" "table_lookup=<>"
 	assertContains "zxfer_init_globals should reset property-reconcile source scratch state." \
 		"$output" "source_pvs=<>"
 	assertContains "zxfer_init_globals should reset staged property-file read scratch state." \
@@ -2509,12 +2509,12 @@ test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 
 			zxfer_init_globals
 
-			stale_cache_dir="$TEST_TMPDIR/stale-property-cache"
-			mkdir -p "$stale_cache_dir/normalized/source"
-			: >"$stale_cache_dir/normalized/source/entry"
-			g_zxfer_property_cache_dir=$stale_cache_dir
+			g_zxfer_source_property_table="tank/src	compression=stale=local"
+			g_zxfer_destination_property_table="backup/dst	compression=stale=local"
+			g_zxfer_property_table_memo_side="source"
+			g_zxfer_property_table_memo_dataset="tank/src"
+			g_zxfer_property_table_memo_payload="compression=stale=local"
 			g_zxfer_required_properties_result="stale-required"
-			g_zxfer_property_cache_key="stale-key"
 			g_zxfer_adjusted_set_list="compression=lz4"
 			g_zxfer_adjusted_inherit_list="mountpoint"
 			g_zxfer_override_pvs_result="compression=lz4=local"
@@ -2528,29 +2528,29 @@ test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 			zxfer_init_globals
 
 			printf 'required=<%s>\n' "$g_zxfer_required_properties_result"
-			printf 'cache_key=<%s>\n' "$g_zxfer_property_cache_key"
+			printf 'source_table=<%s>\n' "${g_zxfer_source_property_table:-}"
+			printf 'destination_table=<%s>\n' "${g_zxfer_destination_property_table:-}"
+			printf 'memo_dataset=<%s>\n' "${g_zxfer_property_table_memo_dataset:-}"
 			printf 'adjusted_set=<%s>\n' "$g_zxfer_adjusted_set_list"
 			printf 'adjusted_inherit=<%s>\n' "$g_zxfer_adjusted_inherit_list"
 			printf 'override_result=<%s>\n' "$g_zxfer_override_pvs_result"
 			printf 'creation_result=<%s>\n' "$g_zxfer_creation_pvs_result"
 			printf 'property_stage_read=<%s>\n' "$g_zxfer_property_stage_file_read_result"
 			printf 'remote_capture_failed=%s\n' "${g_zxfer_remote_probe_capture_failed:-0}"
-			printf 'cache_dir=<%s>\n' "$g_zxfer_property_cache_dir"
 			printf 'prefetch_state=%s\n' "$g_zxfer_destination_property_tree_prefetch_state"
 			printf 'unsupported_fs=<%s>\n' "$g_zxfer_unsupported_filesystem_properties"
 			printf 'unsupported_vol=<%s>\n' "$g_zxfer_unsupported_volume_properties"
-			if [ -d "$stale_cache_dir" ]; then
-				printf 'stale_dir_exists=1\n'
-			else
-				printf 'stale_dir_exists=0\n'
-			fi
 		)
 	)
 
 	assertContains "Re-running zxfer_init_globals should clear required-property scratch results." \
 		"$output" "required=<>"
-	assertContains "Re-running zxfer_init_globals should clear property-cache key scratch state." \
-		"$output" "cache_key=<>"
+	assertContains "Re-running zxfer_init_globals should clear the in-memory source property table." \
+		"$output" "source_table=<>"
+	assertContains "Re-running zxfer_init_globals should clear the in-memory destination property table." \
+		"$output" "destination_table=<>"
+	assertContains "Re-running zxfer_init_globals should clear the property-table memo." \
+		"$output" "memo_dataset=<>"
 	assertContains "Re-running zxfer_init_globals should clear adjusted set scratch state." \
 		"$output" "adjusted_set=<>"
 	assertContains "Re-running zxfer_init_globals should clear adjusted inherit scratch state." \
@@ -2563,16 +2563,12 @@ test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 		"$output" "property_stage_read=<>"
 	assertContains "Re-running zxfer_init_globals should clear remote probe capture-failure scratch state." \
 		"$output" "remote_capture_failed=0"
-	assertContains "Re-running zxfer_init_globals should reset the cache directory pointer." \
-		"$output" "cache_dir=<>"
 	assertContains "Re-running zxfer_init_globals should rearm destination property prefetch state." \
 		"$output" "prefetch_state=0"
 	assertContains "Re-running zxfer_init_globals should clear filesystem unsupported-property cache state." \
 		"$output" "unsupported_fs=<>"
 	assertContains "Re-running zxfer_init_globals should clear volume unsupported-property cache state." \
 		"$output" "unsupported_vol=<>"
-	assertContains "Re-running zxfer_init_globals should remove stale property cache directories." \
-		"$output" "stale_dir_exists=0"
 }
 
 test_zxfer_cache_object_file_round_trip_preserves_metadata_and_payload() {

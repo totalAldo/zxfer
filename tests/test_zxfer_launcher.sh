@@ -37,7 +37,6 @@ zxfer_initialize_dependency_defaults
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_cli.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_snapshot_state.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_backup_metadata.sh"
-. "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_property_cache.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_property_reconcile.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_snapshot_discovery.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_send_receive.sh"
@@ -113,10 +112,6 @@ zxfer_read_command_line_switches() {
 zxfer_consistency_check() {
 	:
 }
-EOF
-
-	cat >"$l_fixture_dir/src/zxfer_property_cache.sh" <<'EOF'
-#!/bin/sh
 EOF
 
 	cat >"$l_fixture_dir/src/zxfer_snapshot_state.sh" <<'EOF'

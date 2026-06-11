@@ -84,9 +84,6 @@ zxfer_source_module zxfer_snapshot_state.sh
 zxfer_source_module zxfer_backup_metadata.sh
 [ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_backup_metadata.sh" ] && return 0
 
-zxfer_source_module zxfer_property_cache.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_property_cache.sh" ] && return 0
-
 zxfer_source_module zxfer_property_reconcile.sh
 [ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_property_reconcile.sh" ] && return 0
 

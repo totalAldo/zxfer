@@ -11,26 +11,28 @@
 # Refresh current values with: tests/run_budget_check.sh --list
 lines	src/zxfer_background_job_runner.sh	391
 lines	src/zxfer_background_jobs.sh	1136
-lines	src/zxfer_backup_metadata.sh	2615
+lines	src/zxfer_backup_metadata.sh	2573
 lines	src/zxfer_cleanup_child_wrapper.sh	110
 lines	src/zxfer_cli.sh	258
 lines	src/zxfer_dependencies.sh	360
 lines	src/zxfer_exec.sh	1205
 lines	src/zxfer_locking.sh	743
-lines	src/zxfer_modules.sh	103
+lines	src/zxfer_modules.sh	100
 lines	src/zxfer_path_security.sh	499
-lines	src/zxfer_property_cache.sh	1411
-lines	src/zxfer_property_reconcile.sh	2475
+# zxfer_property_reconcile.sh absorbed the ~1.4k-line zxfer_property_cache.sh
+# survivors (serialize/decode, prefetch, in-memory property tables) when the
+# per-dataset file cache was deleted; the TOTAL row still ratchets down.
+lines	src/zxfer_property_reconcile.sh	3825
 lines	src/zxfer_remote_hosts.sh	3869
 lines	src/zxfer_replication.sh	1630
 lines	src/zxfer_reporting.sh	1378
-lines	src/zxfer_runtime.sh	2394
+lines	src/zxfer_runtime.sh	2391
 lines	src/zxfer_send_receive.sh	1853
 lines	src/zxfer_snapshot_discovery.sh	3737
 lines	src/zxfer_snapshot_reconcile.sh	879
-lines	src/zxfer_snapshot_state.sh	733
+lines	src/zxfer_snapshot_state.sh	732
 lines	zxfer	211
-lines	TOTAL	27990
+lines	TOTAL	27880
 functions	src/zxfer_background_job_runner.sh	15
 functions	src/zxfer_background_jobs.sh	28
 functions	src/zxfer_backup_metadata.sh	87
@@ -41,8 +43,7 @@ functions	src/zxfer_exec.sh	39
 functions	src/zxfer_locking.sh	29
 functions	src/zxfer_modules.sh	1
 functions	src/zxfer_path_security.sh	14
-functions	src/zxfer_property_cache.sh	35
-functions	src/zxfer_property_reconcile.sh	54
+functions	src/zxfer_property_reconcile.sh	86
 functions	src/zxfer_remote_hosts.sh	126
 functions	src/zxfer_replication.sh	56
 functions	src/zxfer_reporting.sh	54
@@ -52,7 +53,7 @@ functions	src/zxfer_snapshot_discovery.sh	64
 functions	src/zxfer_snapshot_reconcile.sh	19
 functions	src/zxfer_snapshot_state.sh	29
 functions	zxfer	5
-functions	TOTAL	799
+functions	TOTAL	796
 callers	zxfer_profile_now_ms	15	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	27
 callers	eval 	13

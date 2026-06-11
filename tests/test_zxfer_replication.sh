@@ -3404,7 +3404,11 @@ test_copy_filesystems_defers_backup_metadata_flush_until_post_seed_reconcile_fin
 		}
 		zxfer_transfer_properties() {
 			g_zxfer_source_pvs_raw="compression=lz4=local"
-			g_backup_file_contents=$root_backup_row
+			# Mirror the real capture flow: post-seed reconcile passes run
+			# with skip-backup-capture set and never buffer a new row.
+			if [ "${2:-0}" -eq 0 ]; then
+				g_backup_file_contents=$root_backup_row
+			fi
 			printf 'props %s skip=%s\n' "$1" "${2:-0}" >>"$FLUSH_LOG"
 		}
 		zxfer_copy_snapshots() {
@@ -4121,8 +4125,8 @@ props skip=1" "$(cat "$log")"
 	assertContains "The real destination-cache helper should note the newly seeded dataset before the second pass." \
 		"$g_recursive_dest_list" "backup/target/src"
 
-	# shellcheck source=src/zxfer_property_cache.sh
-	. "$ZXFER_ROOT/src/zxfer_property_cache.sh"
+	# shellcheck source=src/zxfer_property_reconcile.sh
+	. "$ZXFER_ROOT/src/zxfer_property_reconcile.sh"
 	# shellcheck source=src/zxfer_replication.sh
 	. "$ZXFER_ROOT/src/zxfer_replication.sh"
 }
@@ -4738,7 +4742,7 @@ reset
 run 2" "$(cat "$log")"
 }
 
-test_run_zfs_mode_loop_keeps_backup_metadata_unique_across_iterations() {
+test_run_zfs_mode_loop_collapses_repeated_iteration_backup_rows_at_write_boundary() {
 	g_option_Y_yield_iterations=4
 	g_test_max_yield_iterations=8
 	g_option_k_backup_property_mode=1
@@ -4758,12 +4762,14 @@ test_run_zfs_mode_loop_keeps_backup_metadata_unique_across_iterations() {
 				fi
 			}
 			zxfer_run_zfs_mode_loop
-			printf 'backup=%s\n' "$g_backup_file_contents"
+			printf 'backup=%s\n' "$(zxfer_validate_backup_metadata_record_list "$g_backup_file_contents")"
 		)
 	)
 
-	assertContains "Repeated -Y iterations should keep one v2 backup-metadata row per relative dataset path." \
+	assertContains "Repeated -Y iterations should publish one v2 backup-metadata row per relative dataset path with the newest row winning." \
 		"$output" "backup=$(zxfer_test_backup_metadata_row "." "readonly=on=local")"
+	assertNotContains "Write-boundary validation should drop rows shadowed by later -Y iterations." \
+		"$output" "compression=lz4=local"
 }
 
 test_run_zfs_mode_loop_logs_hint_when_hard_iteration_limit_is_reached() {

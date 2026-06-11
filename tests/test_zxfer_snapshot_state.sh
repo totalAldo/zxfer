@@ -34,7 +34,7 @@ setUp() {
 }
 
 test_zxfer_reset_destination_existence_cache_clears_root_and_completion_state() {
-	g_destination_existence_cache="backup/dst	1"
+	g_destination_existence_cache="1	backup/dst"
 	g_destination_existence_cache_root="backup/dst"
 	g_destination_existence_cache_root_complete=1
 
@@ -501,15 +501,40 @@ test_zxfer_get_destination_existence_cache_entry_misses_outside_complete_root() 
 		"" "$outside_state"
 }
 
-test_zxfer_set_destination_existence_cache_entry_replaces_existing_entries() {
+test_zxfer_set_destination_existence_cache_entry_newest_entry_shadows_older_entries() {
 	zxfer_set_destination_existence_cache_entry "backup/dst" 0
 	zxfer_set_destination_existence_cache_entry "backup/dst/child" 1
 	zxfer_set_destination_existence_cache_entry "backup/dst" 1
 
-	assertEquals "Updating an existence cache entry should replace the previous state for the same dataset." \
+	assertEquals "The newest existence cache entry for a dataset should shadow its older entries." \
 		1 "$(zxfer_get_destination_existence_cache_entry "backup/dst")"
 	assertEquals "Updating an existence cache entry should preserve unrelated cached datasets." \
 		1 "$(zxfer_get_destination_existence_cache_entry "backup/dst/child")"
+
+	zxfer_set_destination_existence_cache_entry "backup/dst" 0
+
+	assertEquals "A still-newer existence cache entry should shadow every earlier state for the dataset." \
+		0 "$(zxfer_get_destination_existence_cache_entry "backup/dst")"
+}
+
+test_zxfer_get_destination_existence_cache_entry_misses_unknown_and_prefix_sibling_datasets() {
+	zxfer_set_destination_existence_cache_entry "backup/dst/ab" 1
+
+	set +e
+	unknown_state=$(zxfer_get_destination_existence_cache_entry "backup/dst/other")
+	unknown_status=$?
+	suffix_state=$(zxfer_get_destination_existence_cache_entry "b")
+	suffix_status=$?
+	set -e
+
+	assertEquals "Unknown datasets should miss the existence cache so callers live-probe." \
+		1 "$unknown_status"
+	assertEquals "Existence cache misses for unknown datasets should not publish a state value." \
+		"" "$unknown_state"
+	assertEquals "Dataset-name suffixes of cached datasets should never match a cached row." \
+		1 "$suffix_status"
+	assertEquals "Existence cache misses for suffix lookups should not publish a state value." \
+		"" "$suffix_state"
 }
 
 test_zxfer_note_destination_dataset_exists_appends_missing_dataset_to_recursive_list() {

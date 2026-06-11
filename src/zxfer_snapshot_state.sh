@@ -184,29 +184,20 @@ zxfer_get_snapshot_records_for_dataset() {
 # Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks after a probe or planning step changes the active context that later
 # helpers should use.
+#
+# The cache is a prepend-only newline list of "state<TAB>dataset" rows: a
+# mutation is one O(1) string prepend, and the newest row for a dataset
+# shadows older rows, so invalidation just prepends authoritative entries.
 zxfer_set_destination_existence_cache_entry() {
 	l_dataset=$1
 	l_exists_state=$2
-	l_updated_cache=""
 
-	while IFS='	' read -r l_cached_dataset l_cached_state || [ -n "${l_cached_dataset}${l_cached_state}" ]; do
-		[ -n "$l_cached_dataset" ] || continue
-		[ "$l_cached_dataset" = "$l_dataset" ] && continue
-		if [ -n "$l_updated_cache" ]; then
-			l_updated_cache="$l_updated_cache
-$l_cached_dataset	$l_cached_state"
-		else
-			l_updated_cache="$l_cached_dataset	$l_cached_state"
-		fi
-	done <<-EOF
-		${g_destination_existence_cache:-}
-	EOF
-
-	if [ -n "$l_updated_cache" ]; then
-		g_destination_existence_cache="$l_updated_cache
-$l_dataset	$l_exists_state"
+	[ -n "$l_dataset" ] || return 0
+	if [ -n "${g_destination_existence_cache:-}" ]; then
+		g_destination_existence_cache="$l_exists_state	$l_dataset
+$g_destination_existence_cache"
 	else
-		g_destination_existence_cache="$l_dataset	$l_exists_state"
+		g_destination_existence_cache="$l_exists_state	$l_dataset"
 	fi
 }
 
@@ -215,18 +206,26 @@ $l_dataset	$l_exists_state"
 # Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when sibling helpers need the same lookup without duplicating module
 # logic.
+#
+# First match scanning top-down wins: rows are prepended, so the earliest
+# "<TAB>dataset<NL>" needle hit (dataset names cannot contain tab/newline)
+# is the newest shadowing row, and the text between the preceding newline
+# and that tab is its state. Misses return 1 so callers live-probe.
 zxfer_get_destination_existence_cache_entry() {
 	l_dataset=$1
+	l_nl='
+'
 
-	while IFS='	' read -r l_cached_dataset l_cached_state || [ -n "${l_cached_dataset}${l_cached_state}" ]; do
-		[ -n "$l_cached_dataset" ] || continue
-		if [ "$l_cached_dataset" = "$l_dataset" ]; then
-			printf '%s\n' "$l_cached_state"
+	if [ -n "$l_dataset" ] && [ -n "${g_destination_existence_cache:-}" ]; then
+		l_cache_scan="$g_destination_existence_cache$l_nl"
+		case "$l_cache_scan" in
+		*"	$l_dataset$l_nl"*)
+			l_preceding=${l_cache_scan%%"	$l_dataset$l_nl"*}
+			printf '%s\n' "${l_preceding##*"$l_nl"}"
 			return 0
-		fi
-	done <<-EOF
-		${g_destination_existence_cache:-}
-	EOF
+			;;
+		esac
+	fi
 
 	if [ "${g_destination_existence_cache_root_complete:-0}" -eq 1 ] &&
 		[ -n "${g_destination_existence_cache_root:-}" ]; then
