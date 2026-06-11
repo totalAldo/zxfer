@@ -16,6 +16,10 @@ src/zxfer_replication.sh	94.50
 src/zxfer_reporting.sh	92.50
 src/zxfer_runtime.sh	95.75
 src/zxfer_send_receive.sh	96.00
-src/zxfer_snapshot_discovery.sh	94.00
+# zxfer_snapshot_discovery.sh: Phase 4 deleted ~250 lines of dead but
+# fully-tested refine/diff helpers, shrinking the covered denominator; the
+# absolute uncovered-line count went DOWN (112 -> 109) while the ratio
+# dipped below the old 94.00 minimum.
+src/zxfer_snapshot_discovery.sh	93.25
 src/zxfer_snapshot_reconcile.sh	95.75
 src/zxfer_snapshot_state.sh	89.00

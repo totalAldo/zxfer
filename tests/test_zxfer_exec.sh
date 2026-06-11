@@ -3754,27 +3754,6 @@ tank/dst@snapB"
 	assertEquals "Trailing slash semantics should only sort the destination list." "$expected" "$result"
 }
 
-test_diff_snapshot_lists_supports_source_and_destination_modes() {
-	source_file="$TEST_TMPDIR/source_snaps.txt"
-	dest_file="$TEST_TMPDIR/dest_snaps_diff.txt"
-	cat <<'EOF' >"$source_file"
-pool/src@app
-pool/src@bpp
-pool/src@cpp
-EOF
-	cat <<'EOF' >"$dest_file"
-pool/src@app
-pool/src@cpp
-pool/src@dpp
-EOF
-
-	result_missing=$(zxfer_diff_snapshot_lists "$source_file" "$dest_file" "source_minus_destination")
-	assertEquals "pool/src@bpp" "$result_missing"
-
-	result_extra=$(zxfer_diff_snapshot_lists "$source_file" "$dest_file" "destination_minus_source")
-	assertEquals "pool/src@dpp" "$result_extra"
-}
-
 test_get_last_common_snapshot_requires_matching_guid() {
 	l_source_snaps=$(
 		cat <<'EOF'

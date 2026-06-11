@@ -22,17 +22,23 @@ lines	src/zxfer_path_security.sh	499
 # zxfer_property_reconcile.sh absorbed the ~1.4k-line zxfer_property_cache.sh
 # survivors (serialize/decode, prefetch, in-memory property tables) when the
 # per-dataset file cache was deleted; the TOTAL row still ratchets down.
-lines	src/zxfer_property_reconcile.sh	3825
+lines	src/zxfer_property_reconcile.sh	3815
 lines	src/zxfer_remote_hosts.sh	3869
-lines	src/zxfer_replication.sh	1630
+# zxfer_replication.sh, zxfer_snapshot_state.sh, and
+# zxfer_snapshot_reconcile.sh grew by the Phase 4 generation-gated live
+# destination view (ensure/refresh/bump helpers, the -Y pass-boundary
+# invalidate helper plus its loop call site, and the destroy-site generation
+# bump with its comment); the rise is paid for by deleting dead discovery
+# refine/diff helpers, so the TOTAL row still ratchets down.
+lines	src/zxfer_replication.sh	1686
 lines	src/zxfer_reporting.sh	1378
 lines	src/zxfer_runtime.sh	2391
 lines	src/zxfer_send_receive.sh	1853
-lines	src/zxfer_snapshot_discovery.sh	3737
-lines	src/zxfer_snapshot_reconcile.sh	879
-lines	src/zxfer_snapshot_state.sh	732
+lines	src/zxfer_snapshot_discovery.sh	3381
+lines	src/zxfer_snapshot_reconcile.sh	882
+lines	src/zxfer_snapshot_state.sh	796
 lines	zxfer	211
-lines	TOTAL	27880
+lines	TOTAL	27637
 functions	src/zxfer_background_job_runner.sh	15
 functions	src/zxfer_background_jobs.sh	28
 functions	src/zxfer_backup_metadata.sh	87
@@ -43,17 +49,20 @@ functions	src/zxfer_exec.sh	39
 functions	src/zxfer_locking.sh	29
 functions	src/zxfer_modules.sh	1
 functions	src/zxfer_path_security.sh	14
-functions	src/zxfer_property_reconcile.sh	86
+functions	src/zxfer_property_reconcile.sh	84
 functions	src/zxfer_remote_hosts.sh	126
-functions	src/zxfer_replication.sh	56
+functions	src/zxfer_replication.sh	57
 functions	src/zxfer_reporting.sh	54
 functions	src/zxfer_runtime.sh	75
 functions	src/zxfer_send_receive.sh	50
-functions	src/zxfer_snapshot_discovery.sh	64
+functions	src/zxfer_snapshot_discovery.sh	59
 functions	src/zxfer_snapshot_reconcile.sh	19
-functions	src/zxfer_snapshot_state.sh	29
+# zxfer_snapshot_state.sh gained the Phase 4 -Y pass-boundary
+# zxfer_invalidate_live_destination_view helper; the functions TOTAL still
+# ratchets down against the pre-Phase 4 baseline.
+functions	src/zxfer_snapshot_state.sh	31
 functions	zxfer	5
-functions	TOTAL	796
+functions	TOTAL	792
 callers	zxfer_profile_now_ms	15	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	27
 callers	eval 	13

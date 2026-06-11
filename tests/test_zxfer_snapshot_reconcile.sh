@@ -93,23 +93,6 @@ snap2	222" "$(cat "$identity_output_file")"
 backup/dst@snap2" "$(cat "$path_output_file")"
 }
 
-test_invalidate_destination_snapshot_record_cache_resets_creation_cache_when_loaded() {
-	destination_cache_file="$TEST_TMPDIR/destination_snapshot_cache_with_creation.raw"
-	printf '%s\n' "backup/dst@snap1	111" >"$destination_cache_file"
-	g_zxfer_destination_snapshot_record_cache_file=$destination_cache_file
-	g_rzfs_list_hr_snap="backup/dst@snap1	111"
-	g_destination_snapshot_creation_cache="backup/dst@snap1	111"
-
-	zxfer_invalidate_destination_snapshot_record_cache
-
-	assertEquals "Destination snapshot invalidation should clear destination snapshot creation cache when snapshot reconcile is loaded." \
-		"" "${g_destination_snapshot_creation_cache:-}"
-	assertEquals "Destination snapshot invalidation should clear the destination snapshot cache-file path." \
-		"" "${g_zxfer_destination_snapshot_record_cache_file:-}"
-	assertFalse "Destination snapshot invalidation should remove the stale snapshot cache file." \
-		"[ -e \"$destination_cache_file\" ]"
-}
-
 test_delete_snaps_returns_when_nothing_needs_deletion() {
 	log_file="$TEST_TMPDIR/delete_none.log"
 	: >"$log_file"
@@ -148,9 +131,7 @@ test_delete_snaps_does_not_wipe_destination_snapshot_cache_after_live_destroy() 
 		printf 'destroy=%s %s\n' "$1" "$2" >>"$log_file"
 		return 0
 	}
-	zxfer_invalidate_destination_snapshot_record_cache() {
-		printf 'invalidated=snapshots\n' >>"$log_file"
-	}
+	g_zxfer_destination_mutation_generation=0
 
 	zxfer_delete_snaps "$source_list" "$dest_list"
 
@@ -159,6 +140,8 @@ test_delete_snaps_does_not_wipe_destination_snapshot_cache_after_live_destroy() 
 	# delete planning for every later dataset see an empty destination.
 	assertEquals "Successful destination snapshot destroys must not wipe the whole-tree destination snapshot record cache." \
 		"destroy=destroy tank/fs@snap3" "$(cat "$log_file")"
+	assertEquals "Successful destination snapshot destroys must bump the destination mutation generation so stale live views are refreshed." \
+		1 "${g_zxfer_destination_mutation_generation:-0}"
 }
 
 test_delete_snaps_throws_when_destroy_fails() {
@@ -173,11 +156,10 @@ test_delete_snaps_throws_when_destroy_fails() {
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
+				printf 'generation=%s\n' "${g_zxfer_destination_mutation_generation:-0}"
 				exit "${2:-1}"
 			}
-			zxfer_invalidate_destination_snapshot_record_cache() {
-				printf '%s\n' "invalidated"
-			}
+			g_zxfer_destination_mutation_generation=0
 			zxfer_delete_snaps "$source_list" "$dest_list"
 		)
 	)
@@ -186,8 +168,8 @@ test_delete_snaps_throws_when_destroy_fails() {
 	assertEquals "Failed destination destroys should preserve the destroy status." 37 "$status"
 	assertContains "Failed destination destroys should use the generic execution error." \
 		"$output" "Error when executing command."
-	assertNotContains "Failed destination destroys should not invalidate snapshot caches as if the mutation succeeded." \
-		"$output" "invalidated"
+	assertContains "Failed destination destroys should not bump the destination mutation generation as if the mutation succeeded." \
+		"$output" "generation=0"
 }
 
 test_delete_snaps_skips_full_wipe_when_live_source_recheck_shows_snapshots() {
@@ -234,10 +216,6 @@ test_delete_snaps_proceeds_with_full_wipe_when_live_source_recheck_confirms_empt
 		printf 'destination=%s %s\n' "$1" "$2" >>"$log_file"
 		return 0
 	}
-	zxfer_invalidate_destination_snapshot_record_cache() {
-		:
-	}
-
 	zxfer_delete_snaps "" "$dest_list" "tank/fs"
 
 	assertContains "A genuinely snapshot-less source should still be re-checked live before a full destination wipe." \
@@ -296,10 +274,6 @@ test_delete_snaps_ignores_probe_stderr_noise_when_deciding_full_wipe() {
 		printf 'destination=%s %s\n' "$1" "$2" >>"$log_file"
 		return 0
 	}
-	zxfer_invalidate_destination_snapshot_record_cache() {
-		:
-	}
-
 	zxfer_delete_snaps "" "$dest_list" "tank/fs"
 
 	assertContains "The guard should still live-probe the source before a full destination wipe." \
@@ -320,10 +294,6 @@ test_delete_snaps_full_wipe_without_source_dataset_keeps_legacy_behavior() {
 		printf 'destination=%s %s\n' "$1" "$2" >>"$log_file"
 		return 0
 	}
-	zxfer_invalidate_destination_snapshot_record_cache() {
-		:
-	}
-
 	zxfer_delete_snaps "" "$dest_list"
 
 	assertNotContains "Callers that do not provide the source dataset should not trigger a live source probe." \

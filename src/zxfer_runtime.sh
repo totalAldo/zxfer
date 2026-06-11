@@ -1736,7 +1736,7 @@ zxfer_get_max_yield_iterations() {
 # bootstrap so downstream code sees consistent defaults and runtime state.
 zxfer_init_runtime_metadata() {
 	# zxfer version
-	g_zxfer_version="2.0.0-20260519"
+	g_zxfer_version="2.0.0-20260611"
 }
 
 # Purpose: Initialize the option defaults before later helpers depend on it.

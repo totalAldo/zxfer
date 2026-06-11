@@ -320,8 +320,9 @@ zxfer_mockbin_write_fixture_state_dir() {
 		done
 	} >"$l_mockbin_state_dir/dst_datasets.list"
 
-	# Per-dataset depth-1 snapshot listings answer the live recheck zxfer
-	# issues immediately before each send/receive pair.
+	# Per-dataset depth-1 snapshot listings answer non-recursive (-N) batched
+	# view listings and fallback rechecks for datasets outside the batched
+	# view root; -R runs serve rechecks from the recursive listing above.
 	l_mockbin_state_index=0
 	while [ "$l_mockbin_state_index" -le "$l_mockbin_state_datasets" ]; do
 		if [ "$l_mockbin_state_index" -eq 0 ]; then

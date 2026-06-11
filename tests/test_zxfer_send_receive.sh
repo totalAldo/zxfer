@@ -2767,9 +2767,6 @@ test_zxfer_wait_for_next_supervised_zfs_send_job_completion_succeeds_for_the_las
 			zxfer_invalidate_destination_property_mutation_cache() {
 				printf 'properties=%s\n' "$1"
 			}
-			zxfer_invalidate_destination_snapshot_record_cache() {
-				printf 'snapshots=invalidated\n'
-			}
 			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
 			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
 			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
@@ -2782,8 +2779,6 @@ test_zxfer_wait_for_next_supervised_zfs_send_job_completion_succeeds_for_the_las
 		"$output" "noted=backup/dst"
 	assertContains "Successful supervised rolling waits should invalidate destination property caches for the completed destination dataset." \
 		"$output" "properties=backup/dst"
-	assertNotContains "Successful supervised rolling waits must not wipe the whole-tree destination snapshot record cache; the completed receive only changed its own dataset's records and later datasets still need the shared cache." \
-		"$output" "snapshots=invalidated"
 	assertContains "Supervised rolling waits should decrement the tracked job count after a successful completion." \
 		"$output" "count=0"
 	assertContains "Supervised rolling waits should clear the tracked runner pid list after the last job completes." \
@@ -2810,9 +2805,6 @@ test_zxfer_wait_for_supervised_zfs_send_jobs_batch_repairs_destination_state_on_
 			zxfer_invalidate_destination_property_mutation_cache() {
 				printf 'properties=%s\n' "$1"
 			}
-			zxfer_invalidate_destination_snapshot_record_cache() {
-				printf 'snapshots=invalidated\n'
-			}
 			zxfer_wait_for_supervised_zfs_send_jobs_batch
 			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
 			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
@@ -2824,8 +2816,6 @@ test_zxfer_wait_for_supervised_zfs_send_jobs_batch_repairs_destination_state_on_
 		"$output" "noted=backup/dst"
 	assertContains "Successful supervised batch waits should invalidate destination property caches for the completed destination dataset." \
 		"$output" "properties=backup/dst"
-	assertNotContains "Successful supervised batch waits must not wipe the whole-tree destination snapshot record cache; the completed receive only changed its own dataset's records and later datasets still need the shared cache." \
-		"$output" "snapshots=invalidated"
 	assertContains "Successful supervised batch waits should clear the tracked job count after draining the batch." \
 		"$output" "count=0"
 	assertContains "Successful supervised batch waits should clear the tracked runner pid list after draining the batch." \
@@ -4320,9 +4310,6 @@ test_zfs_send_receive_invalidates_destination_cache_after_live_receive() {
 		zxfer_invalidate_destination_property_mutation_cache() {
 			printf 'properties=%s\n' "$1" >>"$EXEC_LOG"
 		}
-		zxfer_invalidate_destination_snapshot_record_cache() {
-			printf 'snapshots=invalidated\n' >>"$EXEC_LOG"
-		}
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 	)
 
@@ -4600,9 +4587,6 @@ test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
 		zxfer_invalidate_destination_property_mutation_cache() {
 			printf 'properties=%s\n' "$1" >>"$EXEC_LOG"
 		}
-		zxfer_invalidate_destination_snapshot_record_cache() {
-			printf 'snapshots=invalidated\n' >>"$EXEC_LOG"
-		}
 		g_option_j_jobs=3
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
 		{
@@ -4622,8 +4606,6 @@ test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
 		"$(cat "$log")" "records=job-1:111:tank/src@snap2:backup/dst:"
 	assertNotContains "Background send/receive should wait for completion before publishing destination receive mutation state." \
 		"$(cat "$log")" "properties=backup/dst"
-	assertNotContains "Background send/receive should wait for completion before invalidating destination snapshot caches." \
-		"$(cat "$log")" "snapshots=invalidated"
 }
 
 test_zfs_send_receive_passes_queue_notify_fd_to_supervised_background_job_when_rolling_pool_is_open() {

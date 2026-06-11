@@ -831,7 +831,7 @@ test_zxfer_property_table_round_trips_hostile_dataset_names() {
 	fi
 	payload=$g_zxfer_property_table_lookup_result
 
-	zxfer_invalidate_destination_property_cache "$l_dataset"
+	zxfer_property_table_invalidate_dataset destination "$l_dataset" 0
 
 	stale=0
 	if zxfer_property_table_find_dataset destination "$l_dataset"; then
@@ -958,12 +958,12 @@ test_zxfer_reset_property_iteration_caches_clears_tables_memo_and_prefetch_state
 		"" "${g_zxfer_property_table_lookup_result:-}"
 }
 
-test_zxfer_invalidate_dataset_property_cache_removes_exact_source_rows_only() {
+test_zxfer_property_table_invalidate_dataset_removes_exact_source_rows_only() {
 	zxfer_property_table_append_dataset source "tank/src" "compression=lz4=local"
 	zxfer_property_table_append_dataset source "tank/src/child" "compression=gzip=inherited"
 	zxfer_required_property_table_append source "tank/src" "casesensitivity" "casesensitivity=sensitive=local"
 
-	zxfer_invalidate_dataset_property_cache source "tank/src"
+	zxfer_property_table_invalidate_dataset source "tank/src" 0
 
 	exact=0
 	if zxfer_property_table_find_dataset source "tank/src"; then
@@ -1631,7 +1631,7 @@ test_zxfer_property_table_invalidation_clears_tables_when_strip_command_fails() 
 	zxfer_property_table_strip_dataset_rows() {
 		return 1
 	}
-	zxfer_invalidate_destination_property_cache "backup/dst"
+	zxfer_property_table_invalidate_dataset destination "backup/dst" 0
 	unset -f zxfer_property_table_strip_dataset_rows
 	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_property_reconcile.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 

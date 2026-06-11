@@ -39,9 +39,12 @@
 #       → fail closed with the zfs exit status preserved.
 #
 #   dst missing newest guid, live
-#       test_live_recheck_runs_after_discovery_and_before_first_receive
-#       → the depth-1 destination recheck lands after discovery and before
-#         that dataset's send/receive pipeline starts.
+#       test_live_recheck_batched_view_is_generation_gated
+#       → live rechecks are served from ONE batched recursive destination
+#         listing per destination-mutation generation: the batched listing
+#         lands after discovery and before the first receive, and each
+#         receive forces a fresh batched listing before the next dataset's
+#         receive.
 #
 #   same snapshot NAME on dst, different guid
 #       test_same_name_divergent_guid_replans_incremental_send_not_noop
@@ -168,6 +171,14 @@ planning_assert_no_send_receive() {
 # avoids prefix collisions such as "receive .../data" vs ".../data/child1".
 planning_log_line_number() {
 	awk -v needle="$1" '$0 == needle { print NR; exit }' "$ZFS_LOG"
+}
+
+# Print the 1-based line number of the Nth exact-match occurrence of the
+# given argv line, or nothing when fewer occurrences exist. Needed because
+# discovery and the batched live destination view share one argv shape.
+planning_log_nth_line_number() {
+	awk -v needle="$1" -v n="$2" \
+		'$0 == needle { c++; if (c == n) { print NR; exit } }' "$ZFS_LOG"
 }
 
 # Assert the structured stderr failure report is present with the expected
@@ -322,13 +333,17 @@ test_destination_snapshot_listing_failure_fails_closed() {
 		"Failed to retrieve snapshot list from the destination."
 }
 
-# Invariant: immediately before mutating a dataset, zxfer re-checks that
-# dataset's destination snapshots at depth 1. In the argv log the recheck
-# must land AFTER all discovery listings and BEFORE that dataset's
-# send/receive pipeline starts. Discovery log order is nondeterministic
-# (background jobs), so ordering is asserted per line number, never
-# positionally against the whole file.
-test_live_recheck_runs_after_discovery_and_before_first_receive() {
+# Invariant: live rechecks are generation-gated. Planning is served from ONE
+# batched recursive destination snapshot listing (same argv shape as
+# discovery, so occurrences are counted) that is captured after discovery and
+# refreshed only after this run mutates the destination: the first batched
+# listing lands after discovery and before the first receive, each completed
+# receive forces exactly one fresh batched listing before the next dataset's
+# receive, no batched listing follows the final receive, and the old
+# per-dataset depth-1 recheck never runs for covered datasets. Discovery log
+# order is nondeterministic (background jobs), so ordering is asserted per
+# line number, never positionally against the whole file.
+test_live_recheck_batched_view_is_generation_gated() {
 	planning_setup_env
 
 	planning_run_zxfer "$FIXTURE_DIR/incremental" -R \
@@ -337,43 +352,42 @@ test_live_recheck_runs_after_discovery_and_before_first_receive() {
 		0 $?
 	planning_assert_no_mutations
 
+	l_view_key="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
 	l_src_discovery=$(planning_log_line_number \
 		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT")
 	l_dst_exists=$(planning_log_line_number \
 		"list -H $ZXFER_MOCKBIN_DEST_MAPPED_ROOT")
-	l_dst_discovery=$(planning_log_line_number \
-		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT")
 	assertNotNull "source discovery missing from log" "$l_src_discovery"
 	assertNotNull "destination existence check missing from log" "$l_dst_exists"
-	assertNotNull "destination discovery missing from log" "$l_dst_discovery"
 	l_src_discovery=${l_src_discovery:-99999}
 	l_dst_exists=${l_dst_exists:-99999}
-	l_dst_discovery=${l_dst_discovery:-99999}
 
+	assertFalse "covered datasets must be served from the batched view, never per-dataset depth-1 rechecks" \
+		"grep -q '^list -H -d 1 ' '$ZFS_LOG'"
+	assertEquals "exactly one batched destination listing for discovery plus one per consumed destination mutation generation" \
+		4 "$(grep -cFx "$l_view_key" "$ZFS_LOG")"
+
+	l_prev_receive=0
+	l_view_occurrence=1
 	for l_dataset_suffix in "" /child1 /child2; do
-		l_recheck=$(planning_log_line_number \
-			"list -H -d 1 -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_dataset_suffix")
-		l_send=$(planning_log_line_number \
-			"send -I $ZXFER_MOCKBIN_SOURCE_ROOT$l_dataset_suffix@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT$l_dataset_suffix@snap3")
+		l_view_occurrence=$((l_view_occurrence + 1))
+		l_view=$(planning_log_nth_line_number "$l_view_key" "$l_view_occurrence")
 		l_receive=$(planning_log_line_number \
 			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_dataset_suffix")
-		assertNotNull "live recheck missing for [$l_dataset_suffix]" "$l_recheck"
-		assertNotNull "send missing for [$l_dataset_suffix]" "$l_send"
+		assertNotNull "batched view listing $l_view_occurrence missing for [$l_dataset_suffix]" "$l_view"
 		assertNotNull "receive missing for [$l_dataset_suffix]" "$l_receive"
-		l_recheck=${l_recheck:-0}
-		l_send=${l_send:-0}
-		l_receive=${l_receive:-0}
+		l_view=${l_view:-0}
+		l_receive=${l_receive:-99999}
 
-		assertTrue "recheck for [$l_dataset_suffix] must follow source discovery" \
-			"[ $l_recheck -gt $l_src_discovery ]"
-		assertTrue "recheck for [$l_dataset_suffix] must follow destination existence check" \
-			"[ $l_recheck -gt $l_dst_exists ]"
-		assertTrue "recheck for [$l_dataset_suffix] must follow destination discovery" \
-			"[ $l_recheck -gt $l_dst_discovery ]"
-		assertTrue "recheck for [$l_dataset_suffix] must precede its send" \
-			"[ $l_recheck -lt $l_send ]"
-		assertTrue "recheck for [$l_dataset_suffix] must precede its receive" \
-			"[ $l_recheck -lt $l_receive ]"
+		assertTrue "view listing for [$l_dataset_suffix] must follow source discovery" \
+			"[ $l_view -gt $l_src_discovery ]"
+		assertTrue "view listing for [$l_dataset_suffix] must follow the destination existence check" \
+			"[ $l_view -gt $l_dst_exists ]"
+		assertTrue "view listing for [$l_dataset_suffix] must follow the previous dataset's receive: a self-mutation invalidates the view" \
+			"[ $l_view -gt $l_prev_receive ]"
+		assertTrue "view listing for [$l_dataset_suffix] must precede its own receive" \
+			"[ $l_view -lt $l_receive ]"
+		l_prev_receive=$l_receive
 	done
 }
 

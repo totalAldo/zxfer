@@ -2947,22 +2947,6 @@ zxfer_property_table_invalidate_dataset() {
 	return 0
 }
 
-# Purpose: Invalidate the dataset's rows in one side's property tables so later
-# helpers re-probe it live.
-# Usage: Called during property table maintenance when a prior table row is no
-# longer safe to trust.
-zxfer_invalidate_dataset_property_cache() {
-	zxfer_property_table_invalidate_dataset "$1" "$2" 0
-}
-
-# Purpose: Invalidate the destination property table rows for one dataset so
-# later helpers re-probe it live.
-# Usage: Called during property table maintenance when a prior destination
-# table row is no longer safe to trust.
-zxfer_invalidate_destination_property_cache() {
-	zxfer_invalidate_dataset_property_cache destination "$1"
-}
-
 # Purpose: Reset the destination property tables so the next destination
 # property pass starts from a clean state.
 # Usage: Called before the post-seed property reconcile pass so freshly seeded
@@ -2989,6 +2973,12 @@ zxfer_reset_destination_property_iteration_cache() {
 # while every other prefetched row stays warm.
 zxfer_invalidate_destination_property_mutation_cache() {
 	l_mutated_dataset=${1:-}
+
+	# This is the shared choke point for receive completions (including -j
+	# reap time), dataset creates, and property set/inherit: every caller
+	# just mutated the destination, so stale batched live snapshot views
+	# must be refreshed before the next recheck-driven decision.
+	zxfer_bump_destination_mutation_generation
 
 	if [ -z "$l_mutated_dataset" ]; then
 		zxfer_reset_destination_property_iteration_cache

@@ -36,9 +36,9 @@
 ################################################################################
 
 # Module contract:
-# owns globals: destination-existence cache and derived snapshot-record lookup state.
+# owns globals: destination-existence cache, derived snapshot-record lookup state, and the generation-gated live destination view (g_zxfer_destination_mutation_generation plus the g_zxfer_live_destination_view_* stamp/root/file trio).
 # reads globals: g_cmd_awk and the flat per-run snapshot record files staged by discovery.
-# mutates caches: in-memory destination-existence state and the derived reversed source record list.
+# mutates caches: in-memory destination-existence state, the derived reversed source record list, and the batched live destination view file.
 # returns via stdout: parsed snapshot identities, per-dataset record lookups, and cache-backed existence probes.
 
 # Snapshot discovery stages at most one flat, sorted snapshot record file per
@@ -71,20 +71,84 @@ zxfer_reset_snapshot_record_indexes() {
 	g_lzfs_list_hr_S_snap=""
 }
 
-# Purpose: Invalidate destination snapshot-record caches after destination
-# snapshot state changes.
-# Usage: Called after receives, snapshot destroys, and rollbacks so later
-# planning cannot reuse stale destination snapshot lists.
-zxfer_invalidate_destination_snapshot_record_cache() {
-	if [ -n "${g_zxfer_destination_snapshot_record_cache_file:-}" ]; then
-		zxfer_cleanup_runtime_artifact_path "$g_zxfer_destination_snapshot_record_cache_file"
+# Generation-gated live destination view (approved trade-off): a live view of
+# the destination is valid until THIS RUN mutates the destination, and never
+# across a -Y pass boundary — each replication pass starts from a fresh
+# batched listing because -Y exists to converge under concurrent drift. Every
+# destination mutation this run performs (receive completion including -j
+# reap time, dataset create, property set/inherit, snapshot destroy, and
+# rollback) bumps g_zxfer_destination_mutation_generation in the main shell.
+# Live rechecks are then served from ONE batched snapshot listing of the
+# run's destination root, captured lazily into
+# g_zxfer_live_destination_view_file and stamped with the generation it was
+# captured under; a stale stamp forces a fresh listing before the next
+# recheck-driven decision. Fail closed: a failed or partial capture never
+# stamps the view, so it can never be served as fresh.
+
+# Purpose: Record that this run mutated the destination so live views older
+# than the mutation are refreshed before the next recheck-driven decision.
+# Usage: Called from the destination mutation choke points (receive
+# completion including -j reap time in the main shell, dataset create,
+# property set/inherit, snapshot destroy, and rollback).
+zxfer_bump_destination_mutation_generation() {
+	g_zxfer_destination_mutation_generation=$((${g_zxfer_destination_mutation_generation:-0} + 1))
+	return 0
+}
+
+# Purpose: Drop the batched live destination view stamp so the next recheck
+# must capture a fresh listing regardless of the mutation generation.
+# Usage: Called in the main shell at the top of every -Y replication pass.
+# View validity is bounded by a single pass: when a pass's last refresh
+# postdates its last destination mutation, the stamp still matches the
+# generation at the pass boundary, and without this reset the next pass would
+# serve its first rechecks from the previous pass's listing.
+zxfer_invalidate_live_destination_view() {
+	g_zxfer_live_destination_view_generation=""
+	g_zxfer_live_destination_view_root=""
+	return 0
+}
+
+# Purpose: Capture one batched live destination snapshot listing for the view
+# root and stamp it with the current destination mutation generation.
+# Usage: Called by zxfer_ensure_live_destination_snapshot_view when the view
+# is missing or older than this run's last destination mutation. Returns
+# non-zero without stamping when the listing cannot be captured, so callers
+# fail closed instead of serving a stale or partial view as fresh.
+zxfer_refresh_live_destination_view() {
+	l_view_refresh_root=$1
+
+	# Semantic change with the batched view: this counter now counts batched
+	# view refreshes (plus per-dataset fallback listings) instead of
+	# per-dataset live rechecks. The counter key is unchanged.
+	zxfer_profile_increment_counter g_zxfer_profile_live_destination_snapshot_rechecks
+
+	# Drop the stamp before listing so a failed or partial capture can never
+	# be mistaken for a fresh view.
+	g_zxfer_live_destination_view_generation=""
+	if [ -z "${g_zxfer_live_destination_view_file:-}" ]; then
+		l_view_file_prefix="${g_zxfer_temp_prefix:-zxfer.$$}.live-dest-view"
+		if ! zxfer_create_runtime_artifact_file "$l_view_file_prefix" >/dev/null; then
+			return 1
+		fi
+		g_zxfer_live_destination_view_file=$g_zxfer_runtime_artifact_path_result
 	fi
 
-	g_rzfs_list_hr_snap=""
-	g_zxfer_destination_snapshot_record_cache_file=""
-	if command -v zxfer_reset_destination_snapshot_creation_cache >/dev/null 2>&1; then
-		zxfer_reset_destination_snapshot_creation_cache
+	# Non-recursive runs replicate exactly one dataset, so their batched view
+	# is the same depth-1 listing the per-dataset recheck used.
+	if [ "${g_option_R_recursive:-}" != "" ]; then
+		set -- -Hr
+	else
+		set -- -H -d 1
 	fi
+	l_view_capture_generation=${g_zxfer_destination_mutation_generation:-0}
+	if ! zxfer_run_destination_zfs_cmd list "$@" -o name,guid -t snapshot "$l_view_refresh_root" \
+		>"$g_zxfer_live_destination_view_file"; then
+		return 1
+	fi
+
+	g_zxfer_live_destination_view_root=$l_view_refresh_root
+	g_zxfer_live_destination_view_generation=$l_view_capture_generation
+	return 0
 }
 
 # Purpose: Ensure the source snapshot record cache exists and is ready before

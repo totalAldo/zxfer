@@ -58,46 +58,6 @@ tank/src@snap1"
 		"" "${g_lzfs_list_hr_S_snap:-}"
 }
 
-test_zxfer_invalidate_destination_snapshot_record_cache_clears_destination_state_only() {
-	destination_cache_file="$TEST_TMPDIR/destination_snapshot_cache_to_invalidate.raw"
-	source_cache_file="$TEST_TMPDIR/source_snapshot_cache_to_preserve.raw"
-	printf '%s\n' "backup/dst@snap1	111" >"$destination_cache_file"
-	printf '%s\n' "tank/src@snap1	111" >"$source_cache_file"
-	g_zxfer_destination_snapshot_record_cache_file=$destination_cache_file
-	g_zxfer_source_snapshot_record_cache_file=$source_cache_file
-	g_rzfs_list_hr_snap="backup/dst@snap1	111"
-	g_lzfs_list_hr_snap="tank/src@snap1	111"
-
-	zxfer_invalidate_destination_snapshot_record_cache
-
-	assertEquals "Destination snapshot invalidation should preserve the staged source snapshot record file path." \
-		"$source_cache_file" "${g_zxfer_source_snapshot_record_cache_file:-}"
-	if [ ! -e "$source_cache_file" ]; then
-		fail "Destination snapshot invalidation should preserve the staged source snapshot record file."
-	fi
-	assertEquals "Destination snapshot invalidation should preserve the cached source snapshot list." \
-		"tank/src@snap1	111" "${g_lzfs_list_hr_snap:-}"
-	assertEquals "Destination snapshot invalidation should clear the cached destination snapshot list." \
-		"" "${g_rzfs_list_hr_snap:-}"
-	assertEquals "Destination snapshot invalidation should clear the destination snapshot cache-file path." \
-		"" "${g_zxfer_destination_snapshot_record_cache_file:-}"
-	if [ -e "$destination_cache_file" ]; then
-		fail "Destination snapshot invalidation should remove the stale destination snapshot cache file."
-	fi
-}
-
-test_zxfer_invalidate_destination_snapshot_record_cache_tolerates_unstaged_cache_file() {
-	g_zxfer_destination_snapshot_record_cache_file=""
-	g_rzfs_list_hr_snap="backup/dst@snap1	111"
-
-	zxfer_invalidate_destination_snapshot_record_cache
-
-	assertEquals "Destination snapshot invalidation should clear the cached destination snapshot list even when no record file is staged." \
-		"" "${g_rzfs_list_hr_snap:-}"
-	assertEquals "Destination snapshot invalidation should keep the destination snapshot cache-file path empty." \
-		"" "${g_zxfer_destination_snapshot_record_cache_file:-}"
-}
-
 test_zxfer_note_destination_receive_completed_clears_missing_subtree_assumption() {
 	zxfer_mark_destination_root_missing_in_cache "backup/dst"
 	zxfer_note_destination_receive_completed "backup/dst"

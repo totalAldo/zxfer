@@ -113,6 +113,11 @@ setUp() {
 	g_recursive_dest_list=""
 	g_zxfer_source_snapshot_record_cache_file=""
 	g_zxfer_destination_snapshot_record_cache_file=""
+	g_zxfer_destination_mutation_generation=0
+	g_zxfer_live_destination_view_generation=""
+	g_zxfer_live_destination_view_root=""
+	g_zxfer_live_destination_view_file=""
+	g_zxfer_live_destination_view_serves_current_dataset=0
 	g_did_delete_dest_snapshots=0
 	g_last_common_snap=""
 	g_dest_has_snapshots=0
@@ -1156,19 +1161,17 @@ test_rollback_destination_to_last_common_snapshot_rolls_back_and_clears_flag() {
 				printf '%s %s %s\n' "$1" "$2" "$3" >>"$ROLLBACK_LOG"
 				return 0
 			}
-			zxfer_invalidate_destination_snapshot_record_cache() {
-				printf '%s\n' "invalidated=snapshots" >>"$ROLLBACK_LOG"
-			}
 			zxfer_rollback_destination_to_last_common_snapshot
 			printf 'flag=%s\n' "$g_did_delete_dest_snapshots"
+			printf 'generation=%s\n' "${g_zxfer_destination_mutation_generation:-0}"
 		)
 	)
 
-	# The rollback only changed this dataset's own snapshots; the whole-tree
-	# snapshot record cache must survive for later datasets' delete planning.
-	assertEquals "Rollback should target the destination snapshot matching the last common snapshot without wiping the whole-tree snapshot record cache." \
+	assertEquals "Rollback should target the destination snapshot matching the last common snapshot." \
 		"rollback -r backup/target/src@snap1" "$(cat "$log")"
 	assertContains "Successful rollback should clear the delete marker." "$output" "flag=0"
+	assertContains "Successful rollback should bump the destination mutation generation so stale live views are refreshed." \
+		"$output" "generation=1"
 }
 
 test_rollback_destination_to_last_common_snapshot_skips_when_not_needed() {
@@ -1311,9 +1314,6 @@ test_rollback_destination_to_last_common_snapshot_reports_probe_failures() {
 				printf '%s\n' "$1"
 				exit 1
 			}
-			zxfer_invalidate_destination_snapshot_record_cache() {
-				printf '%s\n' "invalidated"
-			}
 			zxfer_rollback_destination_to_last_common_snapshot
 		)
 	)
@@ -1342,6 +1342,7 @@ test_rollback_destination_to_last_common_snapshot_reports_rollback_failures() {
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
+				printf 'generation=%s\n' "${g_zxfer_destination_mutation_generation:-0}"
 				exit 1
 			}
 			zxfer_rollback_destination_to_last_common_snapshot
@@ -1352,8 +1353,8 @@ test_rollback_destination_to_last_common_snapshot_reports_rollback_failures() {
 	assertEquals "Rollback failures should abort instead of silently continuing." 1 "$status"
 	assertContains "Rollback failures should identify the destination snapshot that could not be rolled back." \
 		"$output" "Failed to roll back destination [backup/target/src] to backup/target/src@snap1 after deleting snapshots."
-	assertNotContains "Rollback failures should not invalidate snapshot caches as if the mutation succeeded." \
-		"$output" "invalidated"
+	assertContains "Rollback failures should not bump the destination mutation generation as if the mutation succeeded." \
+		"$output" "generation=0"
 }
 
 test_copy_snapshots_skips_when_no_pending_snapshots() {
@@ -1791,6 +1792,7 @@ test_reconcile_live_destination_snapshot_state_live_rechecks_cached_missing_chil
 	g_initial_source="tank/src"
 	g_destination="backup/target"
 	g_initial_source_had_trailing_slash=0
+	g_option_R_recursive="tank/src"
 	g_actual_dest="backup/target/src/child"
 	g_dest_has_snapshots=0
 	g_last_common_snap=""
@@ -1811,9 +1813,8 @@ EOF
 					printf '%s\n' "$*" >>"$PROBE_LOG"
 					return 0
 				fi
-				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
-					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
-					[ "$9" = "backup/target/src/child" ]; then
+				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
+					[ "$5" = "-t" ] && [ "$6" = "snapshot" ] && [ "$7" = "backup/target/src" ]; then
 					printf '%s\n' "backup/target/src/child@base	111"
 					return 0
 				fi
@@ -1829,12 +1830,221 @@ EOF
 
 	assertEquals "Cached-missing child datasets should still perform a live existence probe because a recursive parent receive may have created them earlier in the iteration." \
 		"list -H backup/target/src/child" "$(cat "$probe_log")"
-	assertContains "A successful live child recheck should still promote the matching snapshot to the last common anchor." \
+	assertContains "A successful live child recheck served from the batched view should still promote the matching snapshot to the last common anchor." \
 		"$output" "last=tank/src/child@base	111"
 	assertContains "A successful live child recheck should clear the remaining transfer list once the destination already has the seed snapshot." \
 		"$output" "remaining="
 	assertContains "A successful live child recheck should still mark the destination as snapshotted." \
 		"$output" "dest_has=1"
+}
+
+# The next five tests pin the generation-gated live destination view: one
+# batched listing of the run's destination root serves every covered
+# dataset's recheck until THIS RUN mutates the destination, every
+# self-mutation forces a fresh listing, a failed batched listing aborts, and
+# a -Y pass boundary always forces a fresh listing.
+
+test_live_destination_view_one_batched_listing_serves_multiple_datasets() {
+	g_initial_source="tank/src"
+	g_destination="backup/target"
+	g_initial_source_had_trailing_slash=0
+	g_option_R_recursive="tank/src"
+	view_log="$TEST_TMPDIR/live_view_shared.log"
+	: >"$view_log"
+
+	output=$(
+		(
+			VIEW_LOG="$view_log"
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
+					[ "$5" = "-t" ] && [ "$6" = "snapshot" ] && [ "$7" = "backup/target/src" ]; then
+					printf 'view\n' >>"$VIEW_LOG"
+					printf 'backup/target/src@snap1\t111\nbackup/target/src/child@snap1\t211\n'
+					return 0
+				fi
+				printf 'unexpected %s\n' "$*" >>"$VIEW_LOG"
+				return 1
+			}
+
+			g_actual_dest="backup/target/src"
+			zxfer_ensure_live_destination_snapshot_view
+			printf 'root=<%s>\n' "$(zxfer_get_live_destination_snapshots 2>&1)"
+			g_actual_dest="backup/target/src/child"
+			zxfer_ensure_live_destination_snapshot_view
+			printf 'child=<%s>\n' "$(zxfer_get_live_destination_snapshots 2>&1)"
+		)
+	)
+
+	assertEquals "Two covered datasets with no destination mutation between them must be served from exactly one batched listing." \
+		"view" "$(cat "$view_log")"
+	assertContains "The batched view must serve the root dataset exactly its own records." \
+		"$output" "root=<backup/target/src@snap1	111>"
+	assertContains "The batched view must serve the child dataset exactly its own records." \
+		"$output" "child=<backup/target/src/child@snap1	211>"
+}
+
+test_live_destination_view_refreshes_after_destination_mutation_bump() {
+	g_initial_source="tank/src"
+	g_destination="backup/target"
+	g_initial_source_had_trailing_slash=0
+	g_option_R_recursive="tank/src"
+	view_log="$TEST_TMPDIR/live_view_bump.log"
+	: >"$view_log"
+
+	(
+		VIEW_LOG="$view_log"
+		zxfer_run_destination_zfs_cmd() {
+			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
+				[ "$5" = "-t" ] && [ "$6" = "snapshot" ] && [ "$7" = "backup/target/src" ]; then
+				printf 'view\n' >>"$VIEW_LOG"
+				return 0
+			fi
+			printf 'unexpected %s\n' "$*" >>"$VIEW_LOG"
+			return 1
+		}
+
+		g_actual_dest="backup/target/src"
+		zxfer_ensure_live_destination_snapshot_view
+		zxfer_get_live_destination_snapshots >/dev/null 2>&1
+		zxfer_bump_destination_mutation_generation
+		g_actual_dest="backup/target/src/child"
+		zxfer_ensure_live_destination_snapshot_view
+		zxfer_get_live_destination_snapshots >/dev/null 2>&1
+	)
+
+	assertEquals "A destination mutation between two rechecks must force exactly one fresh batched listing for the second dataset." \
+		"view
+view" "$(cat "$view_log")"
+}
+
+test_live_destination_view_listing_failure_fails_closed() {
+	g_initial_source="tank/src"
+	g_destination="backup/target"
+	g_initial_source_had_trailing_slash=0
+	g_option_R_recursive="tank/src"
+	g_actual_dest="backup/target/src"
+	g_dest_has_snapshots=0
+	g_last_common_snap=""
+	g_src_snapshot_transfer_list="tank/src@base	111"
+	send_log="$TEST_TMPDIR/live_view_failure_send.log"
+	: >"$send_log"
+
+	set +e
+	output=$(
+		(
+			SEND_LOG="$send_log"
+			zxfer_exists_destination() {
+				printf '1\n'
+			}
+			zxfer_run_destination_zfs_cmd() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_zfs_send_receive() {
+				printf 'send\n' >>"$SEND_LOG"
+			}
+
+			zxfer_copy_snapshots
+		)
+	)
+	status=$?
+
+	assertEquals "A failed batched live view listing must abort instead of serving stale or empty state as fresh." \
+		1 "$status"
+	assertContains "The batched view refresh failure should identify the dataset and view root." \
+		"$output" "Failed to refresh the batched live destination snapshot view for [backup/target/src] from [backup/target/src]."
+	assertEquals "No send may be planned after a failed batched live view listing." \
+		"" "$(cat "$send_log")"
+}
+
+test_live_destination_view_reap_time_property_invalidation_bumps_generation() {
+	g_initial_source="tank/src"
+	g_destination="backup/target"
+	g_initial_source_had_trailing_slash=0
+	g_option_R_recursive="tank/src"
+	view_log="$TEST_TMPDIR/live_view_reap.log"
+	: >"$view_log"
+
+	(
+		VIEW_LOG="$view_log"
+		zxfer_run_destination_zfs_cmd() {
+			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
+				[ "$5" = "-t" ] && [ "$6" = "snapshot" ] && [ "$7" = "backup/target/src" ]; then
+				printf 'view\n' >>"$VIEW_LOG"
+				return 0
+			fi
+			return 1
+		}
+
+		g_actual_dest="backup/target/src"
+		zxfer_ensure_live_destination_snapshot_view
+		# Reap-time receive completion runs this choke point in the main
+		# shell (zxfer_finalize_supervised_send_job_success); it must bump
+		# the generation so the next dataset's recheck refreshes the view.
+		zxfer_invalidate_destination_property_mutation_cache "backup/target/src"
+		g_actual_dest="backup/target/src/child"
+		zxfer_ensure_live_destination_snapshot_view
+	)
+
+	assertEquals "The shared mutation choke point used at -j reap time must invalidate the batched view for the next recheck." \
+		"view
+view" "$(cat "$view_log")"
+}
+
+test_live_destination_view_pass_boundary_forces_fresh_batched_listing() {
+	g_option_Y_yield_iterations=4
+	g_test_max_yield_iterations=8
+	g_initial_source="tank/src"
+	g_destination="backup/target"
+	g_initial_source_had_trailing_slash=0
+	g_option_R_recursive="tank/src"
+	view_log="$TEST_TMPDIR/live_view_pass_boundary.log"
+	: >"$view_log"
+
+	(
+		VIEW_LOG="$view_log"
+		zxfer_run_destination_zfs_cmd() {
+			if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
+				[ "$5" = "-t" ] && [ "$6" = "snapshot" ] && [ "$7" = "backup/target/src" ]; then
+				printf 'view\n' >>"$VIEW_LOG"
+				return 0
+			fi
+			printf 'unexpected %s\n' "$*" >>"$VIEW_LOG"
+			return 1
+		}
+		iteration=0
+		zxfer_run_zfs_mode() {
+			iteration=$((iteration + 1))
+			printf 'pass %s\n' "$iteration" >>"$VIEW_LOG"
+			# Pass shape whose last refresh postdates its last destination
+			# mutation: dataset A's receive completes (bump), then a trailing
+			# in-sync dataset B's recheck refreshes the view, so the stamp
+			# matches the generation when the pass ends. Only the pass
+			# boundary can force the next pass's fresh listing here.
+			g_actual_dest="backup/target/src"
+			zxfer_ensure_live_destination_snapshot_view
+			zxfer_bump_destination_mutation_generation
+			g_actual_dest="backup/target/src/child"
+			zxfer_ensure_live_destination_snapshot_view
+			if [ "$iteration" -ge 2 ]; then
+				g_is_performed_send_destroy=0
+			else
+				g_is_performed_send_destroy=1
+			fi
+		}
+		zxfer_run_zfs_mode_loop
+	)
+
+	assertEquals "A -Y pass boundary must invalidate the batched live view so the next pass's first recheck captures a fresh listing even when the previous pass ended with stamp == generation." \
+		"pass 1
+view
+view
+pass 2
+view
+view" "$(cat "$view_log")"
 }
 
 test_reconcile_live_destination_snapshot_state_reports_source_identity_lookup_failures() {

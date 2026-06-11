@@ -316,9 +316,11 @@ test_zxfer_incremental_live_sends_per_dataset_increments() {
 			"send -I $ZXFER_MOCKBIN_SOURCE_ROOT$l_dataset_suffix@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT$l_dataset_suffix@snap3"
 		mocktest_assert_log_has_line \
 			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_dataset_suffix"
-		mocktest_assert_log_has_line \
-			"list -H -d 1 -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_dataset_suffix"
 	done
+	# -R live rechecks are served from the batched recursive view listing
+	# (same argv shape as discovery), so it answers from the manifest too.
+	mocktest_assert_log_has_line \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
 	mocktest_assert_log_has_line \
 		"list -t filesystem,volume -Hr -o name $ZXFER_MOCKBIN_DEST_ROOT"
 }

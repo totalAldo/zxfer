@@ -749,6 +749,9 @@ zxfer_delete_snaps() {
 	if [ "$l_destroy_status" -ne 0 ]; then
 		zxfer_throw_error "Error when executing command." "$l_destroy_status"
 	fi
+	# The destroy mutated this run's destination: stale batched live views
+	# must be refreshed before the next recheck-driven decision.
+	zxfer_bump_destination_mutation_generation
 	# Do not wipe the whole-tree destination snapshot record cache here: the
 	# destroy only removed this dataset's own snapshots, the copy planning that
 	# follows re-probes the destination live, and the wipe also cleared the

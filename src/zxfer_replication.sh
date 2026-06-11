@@ -158,6 +158,9 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 	if ! zxfer_run_destination_zfs_cmd rollback -r "$l_dest_snapshot"; then
 		zxfer_throw_error "Failed to roll back destination [$g_actual_dest] to $l_dest_snapshot after deleting snapshots."
 	fi
+	# The rollback mutated this run's destination: stale live views must be
+	# refreshed before the next recheck-driven decision.
+	zxfer_bump_destination_mutation_generation
 	# Do not wipe the whole-tree destination snapshot record cache here: the
 	# rollback only changed this dataset's own snapshots, the send that follows
 	# is planned from the live recheck, and the wipe also cleared the in-memory
@@ -166,19 +169,61 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 	g_did_delete_dest_snapshots=0
 }
 
+# Purpose: Ensure the batched live destination view is fresh for the current
+# dataset and publish whether it can serve the dataset's recheck.
+# Usage: Called in the main shell right before each captured live recheck so
+# the refresh's generation stamp and view file survive the caller's command
+# substitution, and again inside zxfer_get_live_destination_snapshots as a
+# subshell-safe backstop. Aborts when a required refresh fails (fail closed).
+zxfer_ensure_live_destination_snapshot_view() {
+	g_zxfer_live_destination_view_serves_current_dataset=0
+
+	[ -n "${g_initial_source:-}" ] || return 0
+	l_live_view_root=$(zxfer_get_destination_snapshot_root_dataset)
+	[ -n "$l_live_view_root" ] || return 0
+	case "$g_actual_dest" in
+	"$l_live_view_root" | "$l_live_view_root"/*) ;;
+	*)
+		return 0
+		;;
+	esac
+
+	if [ "${g_zxfer_live_destination_view_generation:-}" != "${g_zxfer_destination_mutation_generation:-0}" ] ||
+		[ "${g_zxfer_live_destination_view_root:-}" != "$l_live_view_root" ]; then
+		if ! zxfer_refresh_live_destination_view "$l_live_view_root"; then
+			zxfer_throw_error "Failed to refresh the batched live destination snapshot view for [$g_actual_dest] from [$l_live_view_root]."
+		fi
+	fi
+	g_zxfer_live_destination_view_serves_current_dataset=1
+	return 0
+}
+
 # Purpose: Return the live destination snapshots in the form expected by later
 # helpers.
 # Usage: Called during top-level dataset iteration and replication
 # orchestration when sibling helpers need the same lookup without duplicating
 # module logic.
+#
+# Datasets under the run's destination root are served from the batched,
+# generation-stamped live view (one listing per destination mutation this run
+# performs) filtered with the exact-prefix record lookup. Datasets outside
+# the batched root keep the original per-dataset depth-1 live listing.
 zxfer_get_live_destination_snapshots() {
+	zxfer_ensure_live_destination_snapshot_view
+	if [ "${g_zxfer_live_destination_view_serves_current_dataset:-0}" -eq 1 ]; then
+		l_live_lookup_status=0
+		zxfer_filter_snapshot_record_file_for_dataset \
+			"$g_zxfer_live_destination_view_file" "$g_actual_dest" ||
+			l_live_lookup_status=$?
+		return "$l_live_lookup_status"
+	fi
+
 	zxfer_profile_increment_counter g_zxfer_profile_live_destination_snapshot_rechecks
 
 	# Only this dataset's own snapshots are kept below, so list at depth 1
-	# instead of recursively: a recursive listing pulls (and, for -T, ships over
-	# ssh) every descendant snapshot just to discard them. -d 1 matches the
-	# source identity listing in zxfer_snapshot_state.sh and returns exactly
-	# "$g_actual_dest"@* for the -t snapshot filter.
+	# instead of recursively: -d 1 matches the source identity listing in
+	# zxfer_snapshot_state.sh and returns exactly "$g_actual_dest"@* for the
+	# -t snapshot filter.
 	if ! l_snapshot_records=$(zxfer_run_destination_zfs_cmd list -H -d 1 -o name,guid -t snapshot "$g_actual_dest"); then
 		printf '%s\n' "$l_snapshot_records"
 		return 1
@@ -327,6 +372,9 @@ zxfer_seed_destination_for_snapshot_transfer() {
 	if [ "$l_dest_exists" -eq 1 ] &&
 		[ "${g_last_common_snap:-}" = "" ] &&
 		[ "$g_dest_has_snapshots" -eq 1 ]; then
+		# Refresh the batched view in this shell so the generation stamp
+		# survives the captured recheck below.
+		zxfer_ensure_live_destination_snapshot_view
 		if ! l_live_dest_snaps=$(zxfer_get_live_destination_snapshots 2>&1); then
 			zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
 		fi
@@ -468,6 +516,9 @@ zxfer_reconcile_live_destination_snapshot_state() {
 	fi
 	[ "$l_dest_exists" -eq 1 ] || return
 
+	# Refresh the batched view in this shell so the generation stamp and view
+	# file path survive the captured recheck below.
+	zxfer_ensure_live_destination_snapshot_view
 	if ! l_live_dest_snaps=$(zxfer_get_live_destination_snapshots 2>&1); then
 		zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
 	fi
@@ -1602,6 +1653,11 @@ zxfer_run_zfs_mode_loop() {
 		g_is_performed_send_destroy=0
 
 		zxfer_reset_property_iteration_caches
+		# -Y passes exist to converge under concurrent drift, so a batched
+		# live destination view is never valid across a pass boundary: every
+		# pass must capture a fresh listing even when the previous pass's
+		# last refresh postdates its last destination mutation.
+		zxfer_invalidate_live_destination_view
 
 		l_num_iterations=$((l_num_iterations + 1))
 		if [ "$g_option_Y_yield_iterations" -gt 1 ]; then
