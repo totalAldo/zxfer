@@ -652,6 +652,7 @@ zxfer_profile_emit_summary() {
 	zxfer_warn_stderr "zxfer profile: runtime_cache_object_readbacks=${g_zxfer_profile_runtime_cache_object_readbacks:-0}"
 	zxfer_warn_stderr "zxfer profile: command_render_calls=${g_zxfer_profile_command_render_calls:-0}"
 	zxfer_warn_stderr "zxfer profile: live_destination_snapshot_rechecks=${g_zxfer_profile_live_destination_snapshot_rechecks:-0}"
+	zxfer_warn_stderr "zxfer profile: diverged_snapshot_warnings=${g_zxfer_profile_diverged_snapshot_warnings:-0}"
 }
 
 # Purpose: Emit the usage to stderr in the operator-facing format owned by this

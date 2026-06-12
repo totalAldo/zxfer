@@ -8,10 +8,10 @@
 97.29	1441	1402	39	src/zxfer_property_reconcile.sh
 94.81	828	785	43	src/zxfer_remote_hosts.sh
 96.77	650	629	21	src/zxfer_replication.sh
-96.46	594	573	21	src/zxfer_reporting.sh
+96.47	595	574	21	src/zxfer_reporting.sh
 96.22	1374	1322	52	src/zxfer_runtime.sh
-98.72	938	926	12	src/zxfer_send_receive.sh
+98.51	942	928	14	src/zxfer_send_receive.sh
 93.50	1676	1567	109	src/zxfer_snapshot_discovery.sh
-99.44	355	353	2	src/zxfer_snapshot_reconcile.sh
+96.73	459	444	15	src/zxfer_snapshot_reconcile.sh
 98.05	205	201	4	src/zxfer_snapshot_state.sh
-96.70	10241	9903	338	TOTAL
+96.59	10350	9997	353	TOTAL

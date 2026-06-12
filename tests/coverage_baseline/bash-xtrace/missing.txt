@@ -149,27 +149,27 @@ src/zxfer_replication.sh
   1262:		return
 
 src/zxfer_reporting.sh
-  805:	l_key_hex=$(printf '%s' "$l_key_path" |
-  822:		return 1
-  827:			umask "$l_old_umask"
-  828:			[ -d "$l_component_dir" ] || return 1
-  848:		return 1
-  855:		return 1
-  859:		return 1
-  869:			return 1
-  1075:	if ! (
-  1078:	); then
-  1383:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
-  1384:	if [ "$l_speaker_km_loaded" = "0" ]; then
-  1385:		if ! kldload "speaker" >/dev/null 2>&1; then
-  1386:			zxfer_echoV "Unable to load speaker module; skipping beep."
-  1387:			return
-  1392:	if [ "$l_exit_status" -eq 0 ]; then
-  1393:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
-  1394:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
-  1395:				zxfer_echoV "Success beep failed; skipping."
-  1398:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
-  1399:			zxfer_echoV "Failure beep failed; skipping."
+  806:	l_key_hex=$(printf '%s' "$l_key_path" |
+  823:		return 1
+  828:			umask "$l_old_umask"
+  829:			[ -d "$l_component_dir" ] || return 1
+  849:		return 1
+  856:		return 1
+  860:		return 1
+  870:			return 1
+  1076:	if ! (
+  1079:	); then
+  1384:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
+  1385:	if [ "$l_speaker_km_loaded" = "0" ]; then
+  1386:		if ! kldload "speaker" >/dev/null 2>&1; then
+  1387:			zxfer_echoV "Unable to load speaker module; skipping beep."
+  1388:			return
+  1393:	if [ "$l_exit_status" -eq 0 ]; then
+  1394:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
+  1395:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
+  1396:				zxfer_echoV "Success beep failed; skipping."
+  1399:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
+  1400:			zxfer_echoV "Failure beep failed; skipping."
 
 src/zxfer_runtime.sh
   357:		return 1
@@ -235,9 +235,11 @@ src/zxfer_send_receive.sh
   685:		wait "$l_open_reader_pid" 2>/dev/null || :
   686:		[ "$l_abort_status" -eq 0 ] || return "$l_abort_status"
   687:		return 1
-  1106:		return 1
-  1113:		l_context="[$g_zxfer_send_job_record_dest_dataset]"
-  1129:		return 0
+  1114:		return 1
+  1121:		l_context="[$g_zxfer_send_job_record_dest_dataset]"
+  1137:		return 0
+  1149:		zxfer_verify_converged_destination_after_receive "$g_zxfer_send_job_record_dest_dataset"
+  1862:				zxfer_verify_converged_destination_after_receive "$l_dest"
 
 src/zxfer_snapshot_discovery.sh
   335:	l_remote_pipeline=$(zxfer_build_shell_command_from_argv \
@@ -351,8 +353,21 @@ src/zxfer_snapshot_discovery.sh
   3312:			return "$l_status"
 
 src/zxfer_snapshot_reconcile.sh
-  138:	$0 != "" { record = $0; tab_pos = index(record, "\t"); snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record); snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : ""); at_pos = index(snapshot_path, "@"); if (at_pos > 0) { snapshot_identity = substr(snapshot_path, at_pos + 1); if (snapshot_guid != "") snapshot_identity = snapshot_identity "\t" snapshot_guid; if (snapshot_identity in delete_identities) print snapshot_path } }' "$l_identity_file" - <<-EOF
-  301:	if l_last_common_snap=$("${g_cmd_awk:-awk}" "$l_common_snapshot_awk" \
+  148:	$0 != "" { record = $0; tab_pos = index(record, "\t"); snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record); snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : ""); at_pos = index(snapshot_path, "@"); if (at_pos > 0) { snapshot_identity = substr(snapshot_path, at_pos + 1); if (snapshot_guid != "") snapshot_identity = snapshot_identity "\t" snapshot_guid; if (snapshot_identity in delete_identities) print snapshot_path } }' "$l_identity_file" - <<-EOF
+  311:	if l_last_common_snap=$("${g_cmd_awk:-awk}" "$l_common_snapshot_awk" \
+  1043:		return 0
+  1049:		l_verify_records_status=$?
+  1051:		zxfer_throw_error "Failed to retrieve source snapshot records for [$l_verify_source] during post-receive divergence verification." "$l_verify_records_status"
+  1056:		l_verify_identity_status=0
+  1057:		l_verify_source_snaps=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_verify_source" "$l_verify_source_snaps") ||
+  1058:			l_verify_identity_status=$?
+  1059:		if [ "$l_verify_identity_status" -ne 0 ]; then
+  1060:			zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_verify_source] during post-receive divergence verification." "$l_verify_identity_status"
+  1072:		l_verify_dest_status=$?
+  1075:		zxfer_throw_error "Failed to retrieve live destination snapshots for [$l_verify_dest] during post-receive divergence verification: $l_verify_dest_snaps"
+  1078:	l_verify_diverged_records=$(zxfer_scan_snapshot_record_lists_for_divergence \
+  1137:	l_diverged_snapshot_records=$(zxfer_scan_snapshot_record_lists_for_divergence \
+  1165:			l_diverged_snapshot_records=$(zxfer_scan_snapshot_record_lists_for_divergence \
 
 src/zxfer_snapshot_state.sh
   131:			return 1

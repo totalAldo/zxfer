@@ -48,18 +48,32 @@ lines	src/zxfer_remote_hosts.sh	1964
 # bump with its comment); the rise is paid for by deleting dead discovery
 # refine/diff helpers, so the TOTAL row still ratchets down.
 lines	src/zxfer_replication.sh	1686
-lines	src/zxfer_reporting.sh	1401
+# zxfer_reporting.sh: +1 line for the diverged_snapshot_warnings -V profile
+# summary key (approved 2026-06-12 divergence-contract feature).
+lines	src/zxfer_reporting.sh	1402
 # zxfer_runtime.sh absorbed src/zxfer_path_security.sh (502) and
 # src/zxfer_locking.sh (477) verbatim in Phase 8 (their rows above were
 # deleted); the lines moved between rows and the TOTAL row still ratchets
 # down because the two duplicated BSD license headers disappeared.
 lines	src/zxfer_runtime.sh	2986
-lines	src/zxfer_send_receive.sh	1853
+# zxfer_send_receive.sh: +16 lines for the post-receive divergence
+# verification hooks at the two receive finalize choke points (approved
+# 2026-06-12 divergence-contract feature) and +8 comment lines documenting
+# the rolling-queue stderr-sink fix (exec 2>/dev/null removed).
+lines	src/zxfer_send_receive.sh	1877
 lines	src/zxfer_snapshot_discovery.sh	3381
-lines	src/zxfer_snapshot_reconcile.sh	882
+# zxfer_snapshot_reconcile.sh grew by the approved 2026-06-12 divergence
+# contract: the single-pass name-match/guid-mismatch classifier (replacing
+# the shared-name awk in zxfer_inspect_delete_snap, so in-sync planning
+# spawns are unchanged), the always-on warning + -d/-F authorization gate,
+# the converged-dataset marker helpers, and the post-receive verification.
+lines	src/zxfer_snapshot_reconcile.sh	1192
 lines	src/zxfer_snapshot_state.sh	796
 lines	zxfer	211
-lines	TOTAL	24302
+# TOTAL rises by the net addition of the approved divergence-contract
+# feature (classifier, gate, warning, post-receive verification, -V key)
+# plus the rolling-queue stderr-sink fix comments.
+lines	TOTAL	24636
 functions	src/zxfer_background_jobs.sh	15
 functions	src/zxfer_backup_metadata.sh	87
 functions	src/zxfer_cleanup_child_wrapper.sh	4
@@ -77,13 +91,17 @@ functions	src/zxfer_reporting.sh	54
 functions	src/zxfer_runtime.sh	100
 functions	src/zxfer_send_receive.sh	50
 functions	src/zxfer_snapshot_discovery.sh	59
-functions	src/zxfer_snapshot_reconcile.sh	19
+# zxfer_snapshot_reconcile.sh gained the seven divergence-contract helpers
+# (scan, record, marker find/unmark, example renderer, contract gate, and
+# post-receive verification) in the approved 2026-06-12 feature.
+functions	src/zxfer_snapshot_reconcile.sh	26
 # zxfer_snapshot_state.sh gained the Phase 4 -Y pass-boundary
 # zxfer_invalidate_live_destination_view helper; the functions TOTAL still
 # ratchets down against the pre-Phase 4 baseline.
 functions	src/zxfer_snapshot_state.sh	31
 functions	zxfer	5
-functions	TOTAL	686
+# functions TOTAL rises by the seven divergence-contract helpers above.
+functions	TOTAL	693
 callers	zxfer_profile_now_ms	12	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	27
 callers	eval 	11

@@ -1383,6 +1383,30 @@ test_zxfer_open_send_job_completion_queue_fd_round_trips_fifo_notification() {
 		0 "$status"
 }
 
+# Regression: closing the rolling-queue descriptors must never redirect the
+# main shell's stderr. The old `exec 9>&- 2>/dev/null` applied BOTH
+# redirections to the shell permanently, so from the first rolling wait on,
+# every later warning and failure report in a -j run vanished into /dev/null
+# (including the post-receive divergence verification error).
+test_zxfer_close_send_job_completion_queue_fds_keeps_shell_stderr_attached() {
+	stderr_probe_file="$TEST_TMPDIR/queue_close_stderr_probe.out"
+
+	(
+		exec 9>/dev/null 8</dev/null
+		g_zfs_send_job_queue_writer_open=1
+		g_zfs_send_job_queue_open=1
+		g_zfs_send_job_queue_dir=""
+		g_zfs_send_job_queue_path=""
+
+		zxfer_close_send_job_completion_queue
+
+		printf 'stderr-still-attached\n' >&2
+	) 2>"$stderr_probe_file"
+
+	assertEquals "Closing the rolling-queue reader and writer descriptors must leave the shell's stderr attached." \
+		"stderr-still-attached" "$(cat "$stderr_probe_file")"
+}
+
 test_zxfer_close_send_job_completion_queue_cleans_orphaned_queue_paths() {
 	queue_path="$TEST_TMPDIR/orphaned-queue"
 	: >"$queue_path"

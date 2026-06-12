@@ -180,6 +180,13 @@ survive even after newer monthly or daily snapshots are removed at the source.
 Use this when the destination may have diverged and should be rolled back to
 the most recent snapshot that matches the stream.
 
+When destination snapshots share source snapshot names but carry different
+GUIDs (diverged data under identical names), zxfer always warns on stderr and
+converges destructively (destroy the diverged destination snapshots, roll
+back, resend) only when BOTH `-d` and `-F` are active; without both flags the
+run fails closed for the diverged dataset. See `docs/troubleshooting.md` for
+diagnosis commands.
+
 ## Property Handling
 
 ### `-P` Transfer source properties

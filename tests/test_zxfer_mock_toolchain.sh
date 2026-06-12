@@ -173,6 +173,35 @@ test_canned_zfs_answers_read_only_commands_from_manifest() {
 		"grep -Fxq 'get -H -o value compression tank' '$CASE_DIR/zfs.log'"
 }
 
+# Pin the consumable-rule extension: a rule whose 4th field is "once" answers
+# exactly one matching lookup, is dropped from the manifest, and later lookups
+# for the same argv fall through to the next matching rule. This is what lets
+# a stateless canned zfs answer the same listing differently before and after
+# a receive (e.g. diverged guids healed by convergence).
+test_canned_zfs_consumes_once_manifest_rules() {
+	mkdir -p "$CASE_DIR/fix"
+	printf 'first-answer\n' >"$CASE_DIR/fix/first.out"
+	printf 'second-answer\n' >"$CASE_DIR/fix/second.out"
+	{
+		printf 'list -H tank\tfirst.out\t0\tonce\n'
+		printf 'list -H tank\tsecond.out\t0\n'
+	} >"$CASE_DIR/fix/manifest"
+	zxfer_mockbin_write_canned_zfs "$CASE_DIR/zfs"
+
+	l_output=$(MOCK_ZFS_FIXTURE_DIR="$CASE_DIR/fix" "$CASE_DIR/zfs" list -H tank)
+	assertEquals "the consumable rule should answer its first lookup" \
+		"first-answer" "$l_output"
+	assertFalse "the consumed rule must be dropped from the manifest" \
+		"grep -q 'first.out' '$CASE_DIR/fix/manifest'"
+
+	l_output=$(MOCK_ZFS_FIXTURE_DIR="$CASE_DIR/fix" "$CASE_DIR/zfs" list -H tank)
+	assertEquals "the next lookup should fall through to the later rule" \
+		"second-answer" "$l_output"
+	l_output=$(MOCK_ZFS_FIXTURE_DIR="$CASE_DIR/fix" "$CASE_DIR/zfs" list -H tank)
+	assertEquals "rules without the once flag stay permanent" \
+		"second-answer" "$l_output"
+}
+
 test_canned_zfs_flags_mutating_commands() {
 	mkdir -p "$CASE_DIR/fix"
 	printf 'destroy tank@locked\t-\t1\n' >"$CASE_DIR/fix/manifest"

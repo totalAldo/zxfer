@@ -87,6 +87,63 @@ What to inspect:
 - temp-root permissions if the failure points at launching the background
   helper or registering the cleanup PID rather than the `zfs list` itself
 
+## Destination Divergence Warnings And Failures
+
+Example:
+
+```text
+WARNING: destination dataset [backup/pool/data] has 2 snapshot(s) whose names
+match source dataset [pool/data] but whose guids differ ...
+```
+
+or, without both `-d` and `-F`:
+
+```text
+Destination dataset [backup/pool/data] has diverged from source dataset
+[pool/data]: ... Re-run with BOTH -d and -F to converge destructively ...
+```
+
+What it usually means:
+
+- the destination dataset received writes outside this replication chain
+  (another tool, another zxfer invocation against a different source, or a
+  manual `zfs receive`/`zfs rollback`) and then re-created snapshots whose
+  NAMES match the source while their data (GUIDs) differ
+- a snapshot-management tool on the destination is regenerating snapshots
+  under the same naming scheme as the source
+- the source was rolled back or rebuilt after the destination had already
+  received the original snapshots
+
+Step 0 — confirm the divergence yourself before authorizing destruction.
+Compare both sides' GUIDs for the named dataset (run the second command on
+the destination host when replicating remotely):
+
+```sh
+zfs list -H -d 1 -o name,guid -s creation -t snapshot pool/data
+zfs list -H -d 1 -o name,guid -s creation -t snapshot backup/pool/data
+```
+
+Same snapshot name with a different GUID on the two sides is exactly what the
+warning is reporting. The newest name with a MATCHING GUID is the last common
+snapshot zxfer will keep and roll back to.
+
+What to do:
+
+- if the destination copies of the diverged snapshots are disposable, re-run
+  with BOTH `-d` and `-F`: zxfer destroys the diverged destination snapshots,
+  rolls back to the last GUID-matching common snapshot, and resends the
+  source range over them (this is destructive on the destination side)
+- if the destination data must be preserved, reconcile manually first: rename
+  the diverged destination snapshots out of the way, `zfs clone` what you
+  need to keep, or replicate the destination dataset elsewhere, then re-run
+- if a run with `-d -F` fails with `re-diverged after convergence`, an
+  external writer is re-creating diverged snapshots while zxfer converges the
+  dataset; stop that writer (look for snapshot tools or other replication
+  jobs on the destination host) before re-running
+- with `-V`, planning prints `Last common snapshot: ...; diverged destination
+  snapshots: N.` per planned dataset and the profile summary reports
+  `diverged_snapshot_warnings` so unattended runs can be audited
+
 ## Background Completion Failures
 
 Examples:

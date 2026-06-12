@@ -695,11 +695,14 @@ zxfer_open_send_job_completion_queue_fd() {
 	wait "$l_open_reader_pid" 2>/dev/null || l_open_reader_status=$?
 	zxfer_unregister_cleanup_pid "$l_open_reader_pid"
 	if [ "$l_open_reader_status" -ne 0 ]; then
-		exec 9>&- 2>/dev/null || true
+		# Never add 2>/dev/null to a bare exec redirection: it permanently
+		# redirects the MAIN SHELL's stderr to /dev/null, silently swallowing
+		# every later warning and failure report in the run.
+		exec 9>&- || true
 		return "$l_open_reader_status"
 	fi
 	if ! zxfer_open_send_job_completion_queue_reader_fd "$l_queue_path"; then
-		exec 9>&- 2>/dev/null || true
+		exec 9>&- || true
 		return 1
 	fi
 
@@ -730,7 +733,11 @@ zxfer_open_send_job_completion_queue_reader_fd() {
 # coordination after the protected work finishes or cleanup takes over.
 zxfer_close_send_job_completion_queue_writer_fd() {
 	if [ "${g_zfs_send_job_queue_writer_open:-0}" -eq 1 ]; then
-		exec 9>&- 2>/dev/null || true
+		# The old `exec 9>&- 2>/dev/null` permanently redirected the main
+		# shell's stderr to /dev/null from the first rolling-queue wait on,
+		# silently swallowing every later warning and failure report in -j
+		# runs (including the post-receive divergence verification error).
+		exec 9>&- || true
 	fi
 	g_zfs_send_job_queue_writer_open=0
 }
@@ -742,7 +749,8 @@ zxfer_close_send_job_completion_queue_writer_fd() {
 zxfer_close_send_job_completion_queue() {
 	zxfer_close_send_job_completion_queue_writer_fd
 	if [ "${g_zfs_send_job_queue_open:-0}" -eq 1 ]; then
-		exec 8<&- 2>/dev/null || true
+		# See the writer-fd close above: never 2>/dev/null a bare exec.
+		exec 8<&- || true
 	fi
 	g_zfs_send_job_queue_open=0
 	if [ -n "${g_zfs_send_job_queue_dir:-}" ]; then
@@ -1132,6 +1140,14 @@ zxfer_finalize_supervised_send_job_success() {
 
 	zxfer_note_destination_receive_completed "$g_zxfer_send_job_record_dest_dataset"
 	zxfer_invalidate_destination_property_mutation_cache "$g_zxfer_send_job_record_dest_dataset"
+	# Post-receive divergence verification (reap-time finalize side): a
+	# dataset that was diverged and converged this run must come out of its
+	# receive without any remaining name-match/guid-mismatch snapshot. The
+	# helper is defined in zxfer_snapshot_reconcile.sh, which loads after
+	# this module; guard for suites that source modules only through here.
+	if command -v zxfer_verify_converged_destination_after_receive >/dev/null 2>&1; then
+		zxfer_verify_converged_destination_after_receive "$g_zxfer_send_job_record_dest_dataset"
+	fi
 	# The completed receive only changed the completed dataset's own snapshot
 	# records, and those have no same-iteration consumers: planning for the
 	# dataset already finished, other datasets filter the shared records to
@@ -1837,6 +1853,14 @@ zxfer_zfs_send_receive() {
 		if [ "$l_did_run_in_background" -eq 0 ]; then
 			zxfer_note_destination_receive_completed "$l_dest"
 			zxfer_invalidate_destination_property_mutation_cache "$l_dest"
+			# Post-receive divergence verification (foreground completion
+			# side): the invalidation above bumped the destination mutation
+			# generation, so the verification re-captures a fresh live view.
+			# Guarded for suites that source modules only through this one;
+			# zxfer_snapshot_reconcile.sh loads after it.
+			if command -v zxfer_verify_converged_destination_after_receive >/dev/null 2>&1; then
+				zxfer_verify_converged_destination_after_receive "$l_dest"
+			fi
 			# Do not wipe the whole-tree destination snapshot record cache
 			# here: the receive only changed this dataset's own snapshots,
 			# planning for it already finished, and every later send/seed is

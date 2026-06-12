@@ -486,6 +486,26 @@ so the destination side will roll back to the most recent snapshot that
 matches the stream. This forcibly destroys any newer snapshots or data that
 only exist on the destination and allows incremental sends to proceed when
 the target has diverged.
+.Pp
+Divergence contract: when a destination snapshot shares a source snapshot's
+name but carries a different GUID, the destination holds diverged data under
+an identical name.
+.Nm
+always warns on stderr, naming the dataset, the diverged-snapshot count, and
+up to three example snapshots with both GUIDs. The destructive convergence
+(destroy the diverged destination snapshots, roll back to the last
+GUID-matching common snapshot, and resend the source range) proceeds only when
+BOTH
+.Fl d
+and
+.Fl F
+are active; otherwise the run fails closed with a structured error and plans
+no deletes or sends for the diverged dataset. After a converged dataset's
+receive completes,
+.Nm
+re-checks the live destination listing and aborts with an error naming the
+snapshot if any name-match/GUID-mismatch remains, so an external writer
+re-diverging the destination cannot cause a silent destroy-and-resend loop.
 .It Fl g
 (g)randfather protection. Specify a number of days old (relative to the system
 date) at and above which snapshots on the destination won't be deleted. For use

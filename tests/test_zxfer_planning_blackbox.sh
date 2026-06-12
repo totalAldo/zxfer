@@ -51,11 +51,21 @@
 #         receive forces a fresh batched listing before the next dataset's
 #         receive.
 #
-#   same snapshot NAME on dst, different guid
-#       test_same_name_divergent_guid_replans_incremental_send_not_noop
-#       → NOT reported as a clean no-op: the divergent snapshot is treated
-#         as absent and an incremental send is replanned from the newest
-#         guid-matching ancestor.
+#   same snapshot NAME on dst, different guid (divergence contract, 2026-06)
+#       test_same_name_divergent_guid_fails_closed_without_d_and_f
+#       → without BOTH -d and -F the diverged dataset fails closed with a
+#         structured error and ZERO mutating/send argv; -d alone and -F
+#         alone fail the same way.
+#       test_divergence_with_d_and_f_warns_and_converges
+#       → with -d -F the always-on stderr warning names the dataset, the
+#         count, and both guids, then converges: destroy the diverged
+#         destination snapshot, rollback to the last guid-matching common
+#         snapshot, resend; post-receive verification passes once the live
+#         listing heals ('once' manifest rules).
+#       test_divergence_still_present_after_receive_fails_closed
+#       → if the post-receive live listing STILL shows a name-match/guid-
+#         mismatch snapshot, the run aborts with a structured "re-diverged
+#         after convergence" error naming the snapshot.
 #
 #   dst-only snapshot, -d -n
 #       test_delete_option_dryrun_issues_zero_zfs_argv
@@ -425,45 +435,184 @@ test_live_recheck_batched_view_is_generation_gated() {
 	done
 }
 
-# Invariant (observed and pinned 2026-06): a destination snapshot that shares
-# the source snapshot NAME but carries a different guid is NOT a clean no-op.
-# Current zxfer treats the divergent snapshot as absent (guid identity) and
-# replans an incremental send from the newest guid-matching ancestor
-# (@snap2 -> @snap3) for that dataset only. It does NOT destroy the
-# name-colliding destination snapshot first; on a real pool the collision
-# would surface as a receive-time error. Untouched child datasets stay no-op.
-test_same_name_divergent_guid_replans_incremental_send_not_noop() {
-	planning_setup_env
-	planning_clone_state "$FIXTURE_DIR/noop" guiddiv
-
-	# Same name, different guid for the root dataset's newest snapshot, in
-	# both the recursive listing and the depth-1 live recheck answer.
-	for l_guiddiv_fixture in dst_snapshots.list dst_d1_0.list; do
+# Diverge the destination root's newest snapshot guid in the cloned STATE_DIR
+# (same name @snap3, guid 9999900003000000007) in both the recursive listing
+# and the depth-1 live recheck answer, and add the creation-time rule that -d
+# deletion planning issues for the diverged destroy candidate plus the
+# last-common rollback anchor.
+planning_make_destination_diverged() {
+	for l_diverge_fixture in dst_snapshots.list dst_d1_0.list; do
 		awk -F'\t' 'BEGIN { OFS = "\t" }
 			$1 == "dstpool/back/data@snap3" { $2 = "9999900003000000007" }
 			{ print }
-		' "$FIXTURE_DIR/noop/$l_guiddiv_fixture" \
-			>"$STATE_DIR/$l_guiddiv_fixture" ||
-			fail "Unable to rewrite $l_guiddiv_fixture with divergent guid."
+		' "$FIXTURE_DIR/noop/$l_diverge_fixture" \
+			>"$STATE_DIR/$l_diverge_fixture" ||
+			fail "Unable to rewrite $l_diverge_fixture with divergent guid."
 	done
+	printf '%s@snap2\t1700000002\n%s@snap3\t1700000003\n' \
+		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
+		>"$STATE_DIR/dst_creation.list" ||
+		fail "Unable to write creation-time fixture."
+	printf 'get -H -o name,value -p creation %s@*\tdst_creation.list\t0\n' \
+		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" >>"$STATE_DIR/manifest" ||
+		fail "Unable to append creation-time manifest rule."
+}
 
-	planning_run_zxfer "$STATE_DIR" -R \
+# Heal variant: planning-time recursive destination listings answer DIVERGED
+# while the post-receive verification observes the healed (aligned) listing.
+# The diverged answer is staged as a separate fixture served by consumable
+# 'once' manifest rules for the exact pre-receive lookups of that argv shape
+# (1: fast no-op proof identity listing, 2: discovery, 3: pre-send live view
+# refresh), after which lookups fall through to the original aligned fixture
+# the convergence receive would have produced.
+planning_make_destination_diverged_until_receive() {
+	planning_make_destination_diverged
+	mv "$STATE_DIR/dst_snapshots.list" "$STATE_DIR/dst_snapshots_diverged.list" ||
+		fail "Unable to stage the diverged destination listing fixture."
+	cp "$FIXTURE_DIR/noop/dst_snapshots.list" "$STATE_DIR/dst_snapshots.list" ||
+		fail "Unable to restore the aligned destination listing fixture."
+	awk -F'\t' -v key="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" '
+		BEGIN { OFS = "\t" }
+		$1 == key {
+			print key, "dst_snapshots_diverged.list", 0, "once"
+			print key, "dst_snapshots_diverged.list", 0, "once"
+			print key, "dst_snapshots_diverged.list", 0, "once"
+		}
+		{ print }
+	' "$STATE_DIR/manifest" >"$STATE_DIR/manifest.new" ||
+		fail "Unable to stage the consumable diverged listing rules."
+	mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
+		fail "Unable to install the consumable diverged listing rules."
+}
+
+# Divergence contract (2026-06): a destination snapshot that shares the source
+# snapshot NAME but carries a different guid is diverged data, and acting on
+# it is destructive. Without BOTH -d and -F the dataset fails closed with a
+# structured error and ZERO partial actions; -d alone and -F alone fail the
+# same way. Before this contract, zxfer silently treated the divergent
+# snapshot as absent and replanned an incremental send over it every run.
+test_same_name_divergent_guid_fails_closed_without_d_and_f() {
+	planning_setup_env
+
+	for l_guiddiv_flags in "" "-d" "-F"; do
+		: >"$ZFS_LOG"
+		planning_clone_state "$FIXTURE_DIR/noop" "guiddiv${l_guiddiv_flags#-}"
+		planning_make_destination_diverged
+
+		# shellcheck disable=SC2086  # flag word is intentionally unquoted
+		planning_run_zxfer "$STATE_DIR" $l_guiddiv_flags -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		assertEquals "divergence without both -d and -F must fail closed [flags:$l_guiddiv_flags]" \
+			1 $?
+
+		# The fast no-op proof must detect the guid divergence and fall back
+		# to full creation-order discovery instead of declaring a clean no-op.
+		planning_assert_log_has_line \
+			"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
+		planning_assert_no_mutations
+		planning_assert_no_send_receive
+		planning_assert_failure_report "divergence reconciliation" \
+			"Destination dataset [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT] has diverged from source dataset [$ZXFER_MOCKBIN_SOURCE_ROOT]"
+		assertTrue "the fail-closed error should state the -d -F remediation [flags:$l_guiddiv_flags]" \
+			"grep -Fq 'Re-run with BOTH -d and -F' '$CASE_DIR/zxfer.stderr'"
+	done
+}
+
+# Divergence contract: with BOTH -d and -F active the run warns on stderr
+# (always-on, no -v/-V needed), then converges the diverged dataset: destroy
+# the name-colliding destination snapshot, roll back to the last guid-matching
+# common snapshot, and resend the range over it. The post-receive verification
+# re-checks the live destination listing (healed here via 'once' rules) and
+# the run completes cleanly. Untouched child datasets stay no-op.
+test_divergence_with_d_and_f_warns_and_converges() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" guiddiv_converge
+	planning_make_destination_diverged_until_receive
+
+	planning_run_zxfer "$STATE_DIR" -d -F -R \
 		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	assertEquals "divergent-guid run should exit 0 against the canned zfs; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+	assertEquals "diverged -d -F run should converge and exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
 		0 $?
 
-	# The fast no-op proof must detect the guid divergence and fall back to
-	# full creation-order discovery instead of declaring a clean no-op.
+	assertTrue "the always-on divergence warning must name the diverged dataset and count" \
+		"grep -q 'WARNING: destination dataset \[$ZXFER_MOCKBIN_DEST_MAPPED_ROOT\] has 1 snapshot' '$CASE_DIR/zxfer.stderr'"
+	assertTrue "the divergence warning must show both guids for the example snapshot" \
+		"grep -Fq '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap3: source guid 1000000003000000007 vs destination guid 9999900003000000007' '$CASE_DIR/zxfer.stderr'"
+	assertTrue "the divergence warning must state the convergence action" \
+		"grep -Fq 'converging: destroy + rollback + resend' '$CASE_DIR/zxfer.stderr'"
+
 	planning_assert_log_has_line \
-		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
-	# Work is planned for the diverged root dataset: NOT a clean no-op.
+		"MUTATE destroy $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap3"
+	planning_assert_log_has_line \
+		"MUTATE rollback -r $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap2"
+	assertEquals "convergence performs exactly the destroy and the rollback" 2 \
+		"$(grep -c '^MUTATE ' "$ZFS_LOG")"
 	planning_assert_log_has_line \
 		"send -I $ZXFER_MOCKBIN_SOURCE_ROOT@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT@snap3"
-	planning_assert_log_has_line "receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	planning_assert_log_has_line "receive -F $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
 	assertEquals "only the diverged dataset should be re-sent" 1 \
 		"$(grep -c '^send ' "$ZFS_LOG")"
-	# No destroy of the name-colliding snapshot is attempted today.
-	planning_assert_no_mutations
+}
+
+# Divergence contract: -V planning transparency. Each PLANNED dataset gets
+# one "Last common snapshot ...; diverged destination snapshots: N." line
+# (datasets proven in sync are never planned, so they get no line) and the
+# profile summary carries the diverged_snapshot_warnings counter.
+test_divergence_very_verbose_reports_transparency_line_and_counter() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" guiddiv_verbose
+	planning_make_destination_diverged_until_receive
+
+	planning_run_zxfer "$STATE_DIR" -V -d -F -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "-V diverged -d -F run should still exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 $?
+
+	assertTrue "-V planning should report the diverged dataset's transparency line" \
+		"grep -Fq '; diverged destination snapshots: 1.' '$CASE_DIR/zxfer.stderr'"
+	assertTrue "the -V profile summary should count the warned dataset" \
+		"grep -Fq 'zxfer profile: diverged_snapshot_warnings=1' '$CASE_DIR/zxfer.stderr'"
+
+	# Planned-but-not-diverged datasets report a zero diverged count: the
+	# incremental fixture plans every dataset (each misses @snap3) and none
+	# of them carries a name-match/guid-mismatch snapshot.
+	planning_run_zxfer "$FIXTURE_DIR/incremental" -V -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "-V incremental run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 $?
+	assertEquals "every planned in-sync dataset should report a zero diverged count" \
+		3 "$(grep -cF '; diverged destination snapshots: 0.' "$CASE_DIR/zxfer.stderr")"
+	assertTrue "an unwarned run should report a zero diverged counter" \
+		"grep -Fq 'zxfer profile: diverged_snapshot_warnings=0' '$CASE_DIR/zxfer.stderr'"
+}
+
+# Divergence contract: if the post-receive live listing STILL shows the
+# name-match/guid-mismatch snapshot (an external writer keeps re-diverging
+# the destination), the run must abort with a structured error naming the
+# snapshot instead of silently looping destroy + resend forever. The
+# unconditional diverged listing rule models the external writer.
+test_divergence_still_present_after_receive_fails_closed() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" guiddiv_rediverge
+	planning_make_destination_diverged
+
+	planning_run_zxfer "$STATE_DIR" -d -F -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "a still-diverged post-receive listing must abort the run" 1 $?
+
+	# Convergence itself ran: destroy, rollback, and the resend all happened
+	# before the verification caught the re-divergence.
+	planning_assert_log_has_line \
+		"MUTATE destroy $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap3"
+	planning_assert_log_has_line \
+		"MUTATE rollback -r $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap2"
+	planning_assert_log_has_line "receive -F $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	planning_assert_failure_report "post-receive divergence verification" \
+		"Destination dataset [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT] re-diverged after convergence"
+	assertTrue "the re-divergence error should name the snapshot and both guids" \
+		"grep -Fq '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap3: source guid 1000000003000000007 vs destination guid 9999900003000000007' '$CASE_DIR/zxfer.stderr'"
+	assertTrue "the re-divergence error should blame an external writer" \
+		"grep -Fq 'An external writer is modifying the destination' '$CASE_DIR/zxfer.stderr'"
 }
 
 # Invariant (current dry-run contract, pinned 2026-06): -d under -n issues

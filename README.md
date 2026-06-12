@@ -222,6 +222,23 @@ enabled on this proof path because exact no-op discovery leaves no source
 transfer queue, destination delete queue, or property/create work to consume
 those checks.
 
+When a destination snapshot shares a source snapshot's name but carries a
+different GUID, the destination has diverged under identical names and
+converging it is destructive. zxfer always prints a warning on stderr (not
+gated on `-v`/`-V`) naming the dataset, the diverged-snapshot count, and up to
+three example snapshots with both GUIDs. The destructive convergence —
+destroying the diverged destination snapshots, rolling back to the last
+GUID-matching common snapshot, and resending the source range over them — runs
+only when BOTH `-d` and `-F` are active. Without both flags the run fails
+closed with a structured error naming the diverged dataset, and zero deletes
+or sends are planned for it. After a converged dataset's receive completes,
+zxfer re-checks the live destination listing and aborts with a precise error
+naming the snapshot if any name-match/GUID-mismatch remains, so an external
+writer re-diverging the destination surfaces as an explicit failure instead of
+a silent destroy-and-resend loop. With `-V`, planning prints one
+`Last common snapshot: ...; diverged destination snapshots: N.` line per
+planned dataset and the profile summary reports `diverged_snapshot_warnings`.
+
 When `-T` is used, destination discovery runs a structured target-side batch:
 recursive destination dataset inventory, the missing-root pool fallback probe,
 and destination snapshot listing are issued inside one remote `sh -c` payload.

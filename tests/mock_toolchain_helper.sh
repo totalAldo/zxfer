@@ -21,7 +21,7 @@
 #                           (default 1).
 #
 # Manifest format ($MOCK_ZFS_FIXTURE_DIR/manifest), one rule per line:
-#   <glob-pattern><TAB><fixture-file><TAB><exit-status>
+#   <glob-pattern><TAB><fixture-file><TAB><exit-status>[<TAB>once]
 # The pattern is matched (sh case glob, first match wins) against the argv
 # key: all zfs arguments joined with single spaces, e.g.
 #   "list -Hr -o name,guid -s creation -t snapshot srcpool/data".
@@ -29,6 +29,13 @@
 # <exit-status> defaults to 0 when omitted. Lines starting with "#" and
 # blank lines are skipped. "|" alternation is not supported; use one
 # pattern per line.
+# The optional 4th field "once" marks a consumable rule: after its first
+# match the mock rewrites the manifest without that line, so the next lookup
+# for the same argv falls through to a later rule. This is the only stateful
+# manifest feature (the manifest lives in the per-case scratch state dir, so
+# the rewrite is safe); use it to answer the same query differently before
+# and after a mutation, e.g. a diverged-guid listing healed by a receive.
+# Consumable rules are not safe under concurrent mock invocations.
 #
 # Counting wrapper runtime environment:
 #   MOCK_SPAWN_LOG          append-only spawn log; one tool name per line.
@@ -118,12 +125,17 @@ mock_log_line() {
 }
 
 # First manifest rule whose glob pattern matches the space-joined argv wins.
+# A matching rule whose optional 4th field is "once" is consumed: the
+# manifest is rewritten without that line before returning, so the next
+# lookup for the same argv falls through to a later rule.
 mock_manifest_lookup() {
 	[ -n "${MOCK_ZFS_FIXTURE_DIR:-}" ] || return 1
 	mock_manifest="$MOCK_ZFS_FIXTURE_DIR/manifest"
 	[ -r "$mock_manifest" ] || return 1
 	mock_tab=$(printf '\t')
-	while IFS=$mock_tab read -r mock_pattern mock_rule_fixture mock_rule_status; do
+	mock_line_no=0
+	while IFS=$mock_tab read -r mock_pattern mock_rule_fixture mock_rule_status mock_rule_flag; do
+		mock_line_no=$((mock_line_no + 1))
 		case "$mock_pattern" in
 		'' | '#'*)
 			continue
@@ -134,6 +146,11 @@ mock_manifest_lookup() {
 		$mock_pattern)
 			mock_fixture=$mock_rule_fixture
 			mock_status=${mock_rule_status:-0}
+			if [ "$mock_rule_flag" = "once" ]; then
+				awk -v consumed_line="$mock_line_no" 'NR != consumed_line' \
+					"$mock_manifest" >"$mock_manifest.consumed" &&
+					mv "$mock_manifest.consumed" "$mock_manifest"
+			fi
 			return 0
 			;;
 		esac
