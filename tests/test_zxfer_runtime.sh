@@ -1136,30 +1136,6 @@ test_zxfer_trap_exit_fails_closed_when_validated_cleanup_helper_abort_fails() {
 		"$output" "message=validated cleanup helper abort failed"
 }
 
-test_zxfer_trap_exit_releases_registered_owned_locks() {
-	lock_dir="$TEST_TMPDIR/trap-owned.lock"
-	zxfer_create_owned_lock_dir "$lock_dir" lock "trap-owned-lock" >/dev/null
-	zxfer_register_owned_lock_path "$lock_dir"
-
-	output=$(
-		(
-			zxfer_close_all_ssh_control_sockets() {
-				:
-			}
-			true
-			zxfer_trap_exit
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "zxfer_trap_exit should preserve success after releasing registered owned locks." \
-		0 "$status"
-	assertEquals "zxfer_trap_exit should keep stderr clean when registered owned locks release cleanly." \
-		"" "$output"
-	assertFalse "zxfer_trap_exit should remove registered owned lock directories." \
-		"[ -e \"$lock_dir\" ]"
-}
-
 test_zxfer_trap_exit_fails_closed_when_ssh_socket_cleanup_fails_after_success() {
 	registered_file="$TEST_TMPDIR/trap-close-failure-artifact"
 	: >"$registered_file"
@@ -1211,43 +1187,6 @@ test_zxfer_trap_exit_fails_closed_when_ssh_socket_cleanup_fails_after_success() 
 		"$output" "message=Failed to close one or more ssh control sockets during exit."
 	assertFalse "zxfer_trap_exit should continue removing registered runtime artifacts after ssh socket cleanup failures." \
 		"[ -e \"$registered_file\" ]"
-}
-
-test_zxfer_trap_exit_preserves_failed_owned_lock_cleanup_paths_under_temp_prefix() {
-	g_zxfer_temp_prefix="zxfer.trap-owned"
-	cache_root=$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$TEST_TMPDIR") ||
-		fail "Unable to derive the shared remote-host cache root."
-	lock_dir="$cache_root/repro.lock"
-
-	mkdir -p "$lock_dir" || fail "Unable to create the owned-lock cleanup fixture."
-	chmod 700 "$lock_dir" || fail "Unable to chmod the owned-lock cleanup fixture."
-	{
-		printf '%s\n' "$ZXFER_LOCK_METADATA_HEADER"
-		printf 'pid\t%s\n' "$$"
-		printf 'start_token\tlstart:not-the-current-process\n'
-	} >"$lock_dir/metadata"
-	chmod 600 "$lock_dir/metadata" || fail "Unable to chmod the owned-lock cleanup fixture metadata."
-	zxfer_register_owned_lock_path "$lock_dir"
-
-	output=$(
-		(
-			zxfer_close_all_ssh_control_sockets() {
-				:
-			}
-			true
-			zxfer_trap_exit
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "zxfer_trap_exit should preserve the original success status when a later owned-lock release only produces cleanup warnings." \
-		0 "$status"
-	assertContains "zxfer_trap_exit should warn when a registered owned lock cannot be released during cleanup." \
-		"$output" "unable to release owned lock or lease"
-	assertTrue "zxfer_trap_exit should preserve the failed owned lock directory for later inspection instead of deleting it through generic temp-prefix cleanup." \
-		"[ -d \"$lock_dir\" ]"
-	assertTrue "zxfer_trap_exit should preserve the enclosing remote-host cache root when it still contains a failed owned-lock cleanup path." \
-		"[ -d \"$cache_root\" ]"
 }
 
 test_zxfer_cleanup_runtime_artifact_path_preserves_registration_when_delete_fails() {

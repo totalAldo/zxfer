@@ -36,13 +36,12 @@
 ################################################################################
 
 # Module contract:
-# owns globals: owned-lock metadata scratch, the memoized own-process start
-#   token, and run-owned long-lived lock/lease cleanup registrations.
-# reads globals: none directly, but later runtime helpers may call into the
-#   registration helpers.
-# mutates caches: local lock and lease directories.
+# owns globals: owned-lock metadata scratch and the memoized own-process start
+#   token.
+# reads globals: none directly.
+# mutates caches: local lock directories.
 # returns via stdout: normalized process-start tokens, metadata paths, and
-#   created lock/lease paths.
+#   created lock paths.
 #
 # Lock identity is owner pid + process start token ONLY. Earlier metadata
 # formats (V1: kind/purpose/hostname/created_at fields) parse as corrupt
@@ -65,166 +64,8 @@ zxfer_reset_owned_lock_metadata_result() {
 # Usage: Called during runtime bootstrap before this module reuses mutable
 # scratch globals or cached decisions.
 zxfer_reset_owned_lock_tracking() {
-	g_zxfer_owned_lock_cleanup_paths=""
 	g_zxfer_own_process_start_token=""
 	zxfer_reset_owned_lock_metadata_result
-}
-
-# Purpose: Register the long-lived owned lock or lease path for trap cleanup.
-# Usage: Called after acquiring a lock/lease that must not outlive this run.
-zxfer_register_owned_lock_path() {
-	l_lock_path=$1
-
-	[ -n "$l_lock_path" ] || return 0
-
-	while IFS= read -r l_existing_path || [ -n "$l_existing_path" ]; do
-		[ -n "$l_existing_path" ] || continue
-		[ "$l_existing_path" = "$l_lock_path" ] && return 0
-	done <<EOF
-${g_zxfer_owned_lock_cleanup_paths:-}
-EOF
-
-	if [ -n "${g_zxfer_owned_lock_cleanup_paths:-}" ]; then
-		g_zxfer_owned_lock_cleanup_paths=$g_zxfer_owned_lock_cleanup_paths'
-'$l_lock_path
-	else
-		g_zxfer_owned_lock_cleanup_paths=$l_lock_path
-	fi
-}
-
-# Purpose: Remove the owned lock or lease path from the trap-cleanup tracking.
-# Usage: Called after a registered lock/lease has been released.
-zxfer_unregister_owned_lock_path() {
-	l_lock_path=$1
-	l_remaining_paths=""
-
-	[ -n "$l_lock_path" ] || return 0
-
-	while IFS= read -r l_existing_path || [ -n "$l_existing_path" ]; do
-		[ -n "$l_existing_path" ] || continue
-		[ "$l_existing_path" = "$l_lock_path" ] && continue
-		if [ -n "$l_remaining_paths" ]; then
-			l_remaining_paths=$l_remaining_paths'
-'$l_existing_path
-		else
-			l_remaining_paths=$l_existing_path
-		fi
-	done <<EOF
-${g_zxfer_owned_lock_cleanup_paths:-}
-EOF
-
-	g_zxfer_owned_lock_cleanup_paths=$l_remaining_paths
-}
-
-# Purpose: Normalize one registered lock path to its physical parent spelling
-# so overlap checks compare like with like.
-# Usage: Called by zxfer_owned_lock_cleanup_conflicts_with_path.
-zxfer_normalize_owned_lock_cleanup_path() {
-	l_lock_path=$1
-
-	[ -n "$l_lock_path" ] || return 1
-	case "$l_lock_path" in
-	/*) ;;
-	*)
-		printf '%s\n' "$l_lock_path"
-		return 0
-		;;
-	esac
-
-	if ! l_parent_dir=$(zxfer_get_path_parent_dir "$l_lock_path"); then
-		return 1
-	fi
-	if [ "$l_parent_dir" = "/" ]; then
-		l_physical_parent=/
-	else
-		if ! l_physical_parent=$(CDPATH='' cd -P "$l_parent_dir" 2>/dev/null && pwd); then
-			return 1
-		fi
-	fi
-	l_lock_name=${l_lock_path##*/}
-	if [ "$l_physical_parent" = "/" ]; then
-		printf '/%s\n' "$l_lock_name"
-		return 0
-	fi
-	printf '%s/%s\n' "$l_physical_parent" "$l_lock_name"
-}
-
-# Purpose: Check whether one cleanup candidate path overlaps a registered
-# owned lock or lease path that must be preserved for checked release.
-# Usage: Called by the remote-host cache-root teardown before it removes a
-# cache directory tree.
-zxfer_owned_lock_cleanup_conflicts_with_path() {
-	l_cleanup_path=$1
-
-	[ -n "$l_cleanup_path" ] || return 1
-	if ! l_cleanup_path=$(zxfer_normalize_owned_lock_cleanup_path "$l_cleanup_path"); then
-		return 1
-	fi
-
-	while IFS= read -r l_lock_path || [ -n "$l_lock_path" ]; do
-		[ -n "$l_lock_path" ] || continue
-		if ! l_lock_path=$(zxfer_normalize_owned_lock_cleanup_path "$l_lock_path"); then
-			continue
-		fi
-		case "$l_cleanup_path" in
-		"$l_lock_path" | "$l_lock_path"/*)
-			return 0
-			;;
-		esac
-		case "$l_lock_path" in
-		"$l_cleanup_path" | "$l_cleanup_path"/*)
-			return 0
-			;;
-		esac
-	done <<EOF
-${g_zxfer_owned_lock_cleanup_paths:-}
-EOF
-
-	return 1
-}
-
-# Purpose: Warn the operator when a registered owned lock cannot be released
-# during cleanup.
-# Usage: Called from zxfer_release_registered_owned_locks failure handling.
-zxfer_warn_owned_lock_cleanup_failure() {
-	l_lock_path=$1
-	l_status=$2
-
-	if command -v zxfer_warn_stderr >/dev/null 2>&1; then
-		zxfer_warn_stderr "zxfer: warning: unable to release owned lock or lease \"$l_lock_path\" during cleanup (status $l_status)."
-	else
-		printf '%s\n' "zxfer: warning: unable to release owned lock or lease \"$l_lock_path\" during cleanup (status $l_status)." >&2
-	fi
-}
-
-# Purpose: Release every still-registered owned lock or lease during shutdown.
-# Usage: Called from zxfer_trap_exit; failures warn and keep the path
-# registered for later inspection instead of failing the run.
-zxfer_release_registered_owned_locks() {
-	l_remaining_paths=""
-	l_cleanup_status=0
-
-	while IFS= read -r l_lock_path || [ -n "$l_lock_path" ]; do
-		[ -n "$l_lock_path" ] || continue
-		zxfer_release_owned_lock_dir "$l_lock_path"
-		l_release_status=$?
-		if [ "$l_release_status" -eq 0 ]; then
-			continue
-		fi
-		zxfer_warn_owned_lock_cleanup_failure "$l_lock_path" "$l_release_status"
-		l_cleanup_status=1
-		if [ -n "$l_remaining_paths" ]; then
-			l_remaining_paths=$l_remaining_paths'
-'$l_lock_path
-		else
-			l_remaining_paths=$l_lock_path
-		fi
-	done <<EOF
-${g_zxfer_owned_lock_cleanup_paths:-}
-EOF
-
-	g_zxfer_owned_lock_cleanup_paths=$l_remaining_paths
-	return "$l_cleanup_status"
 }
 
 # Purpose: Return the metadata file path inside one owned lock directory.
@@ -477,15 +318,6 @@ zxfer_load_owned_lock_metadata_from_dir() {
 	return 0
 }
 
-# Purpose: Compatibility wrapper retained for consumers that still pass
-# kind/purpose labels; lock identity is owner pid + start token only, so the
-# labels are accepted and ignored.
-# Usage: zxfer_load_owned_lock_metadata_for_kind_and_purpose <dir> [kind] [purpose]
-# Returns: the zxfer_load_owned_lock_metadata_from_dir status codes.
-zxfer_load_owned_lock_metadata_for_kind_and_purpose() {
-	zxfer_load_owned_lock_metadata_from_dir "$1"
-}
-
 # Purpose: Decide whether the recorded lock owner is still the same live
 # process (pid alive AND start token unchanged).
 # Usage: Called before stale locks are reaped.
@@ -552,47 +384,6 @@ zxfer_create_owned_lock_dir() {
 
 	printf '%s\n' "$l_lock_dir"
 	return 0
-}
-
-# Purpose: Acquire one uniquely named lease under a validated private parent
-# directory with owner pid + start-token metadata.
-# Usage: zxfer_create_owned_lock_dir_in_parent <parent> <prefix> [kind]
-# [purpose] -- the trailing labels are accepted for caller compatibility and
-# ignored. The entry name embeds this PID, so live sibling processes can never
-# collide; a taken attempt is either an earlier live lease of this process or
-# debris from a dead PID reuse, so creation steps to the next slot.
-zxfer_create_owned_lock_dir_in_parent() {
-	l_parent_dir=$1
-	l_prefix=$2
-
-	[ -n "$l_prefix" ] || return 1
-	if ! zxfer_validate_owned_lock_container_dir "$l_parent_dir"; then
-		return 1
-	fi
-
-	l_attempt=0
-	while [ "$l_attempt" -lt 8 ]; do
-		l_attempt=$((l_attempt + 1))
-		l_lock_dir="$l_parent_dir/$l_prefix.$$.$l_attempt"
-		if ! mkdir -m 700 "$l_lock_dir" 2>/dev/null; then
-			if [ -e "$l_lock_dir" ] || [ -L "$l_lock_dir" ]; then
-				continue
-			fi
-			return 1
-		fi
-		if ! zxfer_validate_owned_lock_container_dir "$l_lock_dir"; then
-			zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
-			return 1
-		fi
-		if ! zxfer_write_owned_lock_metadata_file "$l_lock_dir"; then
-			zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
-			return 1
-		fi
-		printf '%s\n' "$l_lock_dir"
-		return 0
-	done
-
-	return 1
 }
 
 # Purpose: Reap one lock directory when its owner is provably stale, or when
@@ -674,7 +465,6 @@ zxfer_release_owned_lock_dir() {
 
 	[ -n "$l_lock_dir" ] || return 0
 	if [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; then
-		zxfer_unregister_owned_lock_path "$l_lock_dir"
 		return 0
 	fi
 	if ! zxfer_current_process_owns_owned_lock_dir "$l_lock_dir"; then
@@ -683,6 +473,5 @@ zxfer_release_owned_lock_dir() {
 	if ! zxfer_cleanup_owned_lock_dir "$l_lock_dir"; then
 		return 1
 	fi
-	zxfer_unregister_owned_lock_path "$l_lock_dir"
 	return 0
 }

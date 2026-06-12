@@ -607,4 +607,128 @@ test_remote_target_batch_discovery_succeeds_with_very_verbose() {
 	planning_assert_no_send_receive
 }
 
+# Write a mock ssh that models real control-master semantics: `-M` creates
+# the `-S` socket file, `-O check` answers from socket existence, `-O exit`
+# removes it, and any remaining command runs locally through `sh -c` so
+# helpers resolve from the inherited mock PATH. Argv is logged to
+# $MOCK_SSH_LOG one invocation per line.
+planning_write_socket_mock_ssh() {
+	l_ssh_path=$1
+
+	cat >"$l_ssh_path" <<'EOF'
+#!/bin/sh
+[ -n "${MOCK_SSH_LOG:-}" ] && printf '%s\n' "$*" >>"$MOCK_SSH_LOG"
+mock_socket=""
+mock_op=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-M) shift ;;
+	-S)
+		mock_socket=$2
+		shift 2
+		;;
+	-O)
+		mock_op=$2
+		shift 2
+		;;
+	-o) shift 2 ;;
+	-*) shift ;;
+	*) break ;;
+	esac
+done
+if [ $# -gt 0 ]; then
+	shift
+fi
+case "$mock_op" in
+check)
+	if [ -e "$mock_socket" ]; then
+		exit 0
+	fi
+	printf 'Control socket connect(%s): No such file or directory\n' "$mock_socket" >&2
+	exit 255
+	;;
+exit)
+	rm -f "$mock_socket" 2>/dev/null
+	exit 0
+	;;
+esac
+if [ -n "$mock_socket" ] && [ ! -e "$mock_socket" ]; then
+	: >"$mock_socket" 2>/dev/null || exit 255
+fi
+[ $# -gt 0 ] || exit 0
+exec sh -c "$*"
+EOF
+	chmod +x "$l_ssh_path"
+}
+
+# Invariant: a clean remote-origin pull no-op never opens an ssh control
+# master (deferred-socket behavior) and costs exactly ONE capability probe
+# round trip for the origin host. The minimal mock ssh cannot service a
+# master open, so this pin also fails loudly if a master is ever attempted.
+test_remote_origin_pull_noop_defers_control_socket_and_probes_once() {
+	planning_setup_env
+	zxfer_mockbin_write_minimal_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write minimal mock ssh."
+	SSH_LOG="$CASE_DIR/ssh_pull_noop.log"
+	: >"$SSH_LOG"
+	export MOCK_SSH_LOG="$SSH_LOG"
+
+	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
+		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_pull_noop_status=$?
+	unset MOCK_SSH_LOG
+
+	assertEquals "-O pull no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_pull_noop_status"
+	assertTrue "the pull no-op must have used the mock ssh transport" \
+		"[ -s '$SSH_LOG' ]"
+	assertFalse "a clean pull no-op must never open an ssh control master" \
+		"grep -q -- ' -M ' '$SSH_LOG'"
+	assertFalse "a clean pull no-op must never multiplex over a control socket" \
+		"grep -q -- ' -S ' '$SSH_LOG'"
+	assertEquals "a warmed origin host must cost exactly one capability probe round trip" \
+		1 "$(grep -c 'ZXFER_REMOTE_CAPS_V2' "$SSH_LOG")"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+}
+
+# Invariant: an incremental remote-origin pull opens the per-run ssh control
+# master exactly ONCE, multiplexes later remote commands over that one
+# socket, probes capabilities exactly once, and closes the master once at
+# exit -- no per-command reconnect or per-command handshake regression.
+test_remote_origin_pull_incremental_opens_master_once() {
+	planning_setup_env
+	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write socket-aware mock ssh."
+	SSH_LOG="$CASE_DIR/ssh_pull_incr.log"
+	: >"$SSH_LOG"
+	export MOCK_SSH_LOG="$SSH_LOG"
+
+	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
+		planning_run_zxfer "$FIXTURE_DIR/incremental" -O localhost -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_pull_incr_status=$?
+	unset MOCK_SSH_LOG
+
+	assertEquals "-O pull incremental must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_pull_incr_status"
+	for l_pull_suffix in "" /child1 /child2; do
+		planning_assert_log_has_line \
+			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_pull_suffix"
+	done
+	assertEquals "an incremental pull must open the ssh control master exactly once" \
+		1 "$(grep -c -- ' -M ' "$SSH_LOG")"
+	assertEquals "a warmed origin host must cost exactly one capability probe round trip" \
+		1 "$(grep -c 'ZXFER_REMOTE_CAPS_V2' "$SSH_LOG")"
+	assertEquals "the per-run ssh control master must be closed exactly once at exit" \
+		1 "$(grep -c -- ' -O exit ' "$SSH_LOG")"
+	l_master_socket=$(awk '/ -M /{for (i=1;i<NF;i++) if ($i=="-S") {print $(i+1); exit}}' "$SSH_LOG")
+	assertNotNull "the master open must carry a -S control socket path" "$l_master_socket"
+	l_multiplexed=$(grep -c -- "-S $l_master_socket" "$SSH_LOG")
+	assertTrue "remote send commands must multiplex over the one opened master socket" \
+		"[ ${l_multiplexed:-0} -ge 2 ]"
+	planning_assert_no_mutations
+}
+
 . "$SHUNIT2_BIN"

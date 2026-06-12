@@ -766,7 +766,7 @@ Measure:
 - Control files written per transfer.
 - Cleanup time after interrupted transfers.
 
-### 11. Cache SSH Transport Rendering And Reduce Control-Socket Probes
+### 11. Cache SSH Transport Rendering And Reduce Control-Socket Probes (DONE: per-role memos + per-run sockets)
 
 Current hot path:
 

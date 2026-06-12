@@ -36,12 +36,19 @@ src/zxfer_exec.sh
   205:		l_split_restore_glob=0
   216:		l_split_saved_ifs_set=0
   217:		l_split_saved_ifs=""
+  553:		if l_role_tokens=$(zxfer_render_ssh_transport_tokens_for_host \
+  569:		if l_role_tokens=$(zxfer_render_ssh_transport_tokens_for_host \
 
 src/zxfer_locking.sh
-  374:	if ! (
-  379:	) 2>/dev/null; then
-  415:				return 1
-  445:	done <"$l_metadata_path"
+  162:		return 1
+  165:		return 1
+  169:		return 1
+  215:	if ! (
+  220:	) 2>/dev/null; then
+  256:				return 1
+  286:	done <"$l_metadata_path"
+  313:		return 1
+  418:		return 1
 
 src/zxfer_path_security.sh
   337:		return 1
@@ -91,106 +98,49 @@ src/zxfer_property_reconcile.sh
   3620:			return 1
 
 src/zxfer_remote_hosts.sh
-  216:	l_key_hex=$(printf '%s' "$l_identity" |
-  526:				return 1
-  878:			[ ! -h "$l_lease_path" ]; then
-  879:			continue
-  932:			[ ! -h "$l_lease_path" ]; then
-  933:			continue
-  974:	if ! l_lease_dir=$(zxfer_create_owned_lock_dir_in_parent \
-  1047:	*"Control socket connect("*"): No such file or directory"* | \
-  1361:				return 1
-  1596:	if l_host_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
-  1657:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  1674:	if ! l_identity=$(zxfer_render_remote_capability_cache_artifact_identity_for_host \
-  1680:	l_identity_hex=$(printf '%s' "$l_identity" |
-  1696:	if ! l_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
-  1763:		return 1
-  1814:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-  1868:	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
-  1905:		return 2
-  1941:		"${l_root_prefix}.s."[0-9]*.d | \
-  1949:	zxfer.*.s.[0-9]*.d | \
-  1997:		{ [ ! -e "$l_cache_dir" ] && [ ! -L "$l_cache_dir" ] && [ ! -h "$l_cache_dir" ]; }; then
-  2000:	return 1
-  2020:				[ ! -h "$l_lock_path" ]; then
-  2021:				continue
-  2024:				zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_path"; then
-  2025:				return 0
-  2037:			[ ! -h "$l_lease_path" ]; then
-  2038:			continue
-  2127:		return
-  2135:		if ! zxfer_ensure_local_ssh_command; then
-  2136:			g_zxfer_failure_class=dependency
-  2137:			zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
-  2191:		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-  2207:		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-  2237:	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
-  2313:				return 1
-  2531:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2564:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2586:			[ "${g_target_remote_capabilities_host:-}" != "$l_host_spec" ]; then
-  2627:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2667:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-  2671:	if ! l_expected_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
-  2673:		return 1
-  2679:		return 1
-  2682:		return 1
-  2686:		return 1
-  2695:	if ! l_cache_epoch=$(zxfer_get_cache_object_metadata_value \
-  2699:	if ! l_cache_identity_hex=$(zxfer_get_cache_object_metadata_value \
-  2701:		return 1
-  2734:	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-  2738:	if ! l_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
-  2740:		return 1
-  2747:			return 1
-  2750:			return 1
-  2760:		"$l_response"
-  2784:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2813:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-  2878:		return 1
-  2880:	l_requested_tool_tokens=$(zxfer_quote_token_stream \
-  2899:	if ! l_remote_probe=$(zxfer_build_remote_capability_probe_script \
-  2901:		return 1
-  2929:	if l_cached_response=$(zxfer_get_cached_remote_capability_response_for_host \
-  2941:	if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-  2954:	l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
-  2960:			return 1
-  2963:			if l_cached_response=$(zxfer_wait_for_remote_capability_cache_fill \
-  2978:			l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
-  2990:					return 1
-  3050:	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
-  3100:		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
-  3103:	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
-  3188:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
-  3193:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
-  3213:		l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
-  3222:			if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
-  3224:				printf '%s\n' "$l_fallback_path"
-  3225:				return 0
-  3293:	if ! l_output=$(zxfer_get_remote_resolved_tool_version_output \
-  3358:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
-  3368:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
-  3378:	l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
-  3478:			zxfer_throw_error "Error closing ssh control socket for target host."
-  3576:		return 1
-  3592:		return "$?"
-  3655:			zxfer_release_ssh_control_socket_lock_with_precedence \
-  3657:			zxfer_emit_ssh_control_socket_lock_failure_message \
-  3659:			return "$l_prune_status"
-  3700:				zxfer_release_ssh_control_socket_lock_with_precedence \
-  3702:				zxfer_emit_ssh_control_socket_action_failure_message \
-  3704:				printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
-  3705:				return 1
-  3712:				return "$?"
-  3722:			zxfer_release_ssh_control_socket_lock_with_precedence \
-  3724:			zxfer_emit_ssh_control_socket_action_failure_message \
-  3726:			printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
-  3727:			return 1
-  3739:				return "$?"
-  3815:			zxfer_throw_usage_error "$g_option_T_target_host_safe" 2
-  3852:				g_zxfer_failure_class=dependency
-  3853:				zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
+  144:	if ! l_socket_dir=$(zxfer_create_unpredictable_staging_entry \
+  146:		return 1
+  228:	*"Control socket connect("*"): No such file or directory"* | \
+  289:		g_zxfer_ssh_control_socket_action_result="error"
+  290:		g_zxfer_ssh_control_socket_action_stderr=$l_transport_tokens
+  291:		return 1
+  527:				return 1
+  762:	if l_host_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
+  860:				return 1
+  1078:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  1111:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  1132:			[ "${g_target_remote_capabilities_host:-}" != "$l_host_spec" ]; then
+  1170:	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+  1211:		return 1
+  1213:	l_requested_tool_tokens=$(zxfer_quote_token_stream \
+  1232:	if ! l_remote_probe=$(zxfer_build_remote_capability_probe_script \
+  1234:		return 1
+  1264:	if l_cached_response=$(zxfer_get_cached_remote_capability_response_for_host \
+  1301:	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
+  1351:		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+  1354:	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
+  1439:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+  1444:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
+  1464:		l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
+  1473:			if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
+  1475:				printf '%s\n' "$l_fallback_path"
+  1476:				return 0
+  1544:	if ! l_output=$(zxfer_get_remote_resolved_tool_version_output \
+  1609:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+  1619:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
+  1629:	l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
+  1692:			! zxfer_close_origin_ssh_control_socket; then
+  1693:			zxfer_throw_error "Error closing ssh control socket for origin host."
+  1708:		zxfer_throw_error "Error creating ssh control socket for $l_role host."
+  1726:			rm -f "$l_control_socket"
+  1761:		return 1
+  1844:		return
+  1852:		if ! zxfer_ensure_local_ssh_command; then
+  1853:			g_zxfer_failure_class=dependency
+  1854:			zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
+  1905:			zxfer_throw_usage_error "$g_option_T_target_host_safe" 2
+  1942:				g_zxfer_failure_class=dependency
+  1943:				zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
 
 src/zxfer_replication.sh
   187:		return 0
@@ -245,23 +195,39 @@ src/zxfer_runtime.sh
   267:	return 1
   294:		zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
   295:		return 0
+  388:			printf '%s\n' "$l_requested_tmpdir"
+  389:			return 0
   636:			l_cleanup_status=1
+  795:	zxfer_create_runtime_artifact_file_in_parent "$l_parent_dir" ".$l_prefix"
   807:	if (
   809:	) 2>/dev/null; then
+  956:	l_stage_file=$1
+  957:	l_target_path=$2
+  959:	[ -n "$l_stage_file" ] || return 1
+  960:	[ -n "$l_target_path" ] || return 1
+  961:	l_status=0
+  962:	mv -f "$l_stage_file" "$l_target_path" 2>/dev/null || l_status=$?
+  963:	if [ "$l_status" -ne 0 ]; then
+  964:		return "$l_status"
+  966:	zxfer_unregister_runtime_artifact_path "$l_stage_file"
+  967:	return 0
+  1089:			printf '%s\n' "${l_line#"$l_key"=}"
+  1090:			return 0
   1113:		return "$l_status"
+  1327:		[ -f "$l_cache_target_path" ] || return 1
   1333:		return "$l_status"
   1338:		return "$l_status"
-  1586:		g_zxfer_profile_start_ms=""
-  1913:					l_source_context_status=$?
-  1915:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
-  1950:		g_zxfer_failure_class=dependency
-  1951:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
-  1969:					l_destination_context_status=$?
-  1971:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
-  2006:		g_zxfer_failure_class=dependency
-  2007:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
-  2047:		g_zxfer_failure_class=dependency
-  2048:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
+  1590:		g_zxfer_profile_start_ms=""
+  1909:					l_source_context_status=$?
+  1911:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
+  1946:		g_zxfer_failure_class=dependency
+  1947:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
+  1965:					l_destination_context_status=$?
+  1967:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
+  2002:		g_zxfer_failure_class=dependency
+  2003:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
+  2043:		g_zxfer_failure_class=dependency
+  2044:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
 
 src/zxfer_send_receive.sh
   126:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |

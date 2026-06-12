@@ -1518,13 +1518,11 @@ zxfer_init_transport_remote_defaults() {
 	g_origin_remote_capabilities_cache_identity=""
 	g_origin_remote_capabilities_response=""
 	g_origin_remote_capabilities_bootstrap_source=""
-	g_origin_remote_capabilities_cache_write_unavailable=0
 	g_target_remote_capabilities_host=""
 	g_target_remote_capabilities_dependency_path=""
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
-	g_target_remote_capabilities_cache_write_unavailable=0
 	g_zxfer_remote_capability_response_result=""
 	g_zxfer_remote_capability_tool_records=""
 	g_zxfer_remote_capability_tool_status_result=""
@@ -1537,24 +1535,30 @@ zxfer_init_transport_remote_defaults() {
 	g_zxfer_ssh_control_socket_action_result=""
 	g_zxfer_ssh_control_socket_action_stderr=""
 	g_zxfer_ssh_control_socket_action_command=""
-	g_zxfer_ssh_control_socket_lock_dir_result=""
-	g_zxfer_ssh_control_socket_lock_error=""
-	g_zxfer_ssh_control_socket_lease_count_result=""
-	g_zxfer_remote_capability_cache_ttl=15
-	g_zxfer_remote_capability_cache_wait_retries=5
 	g_source_operating_system=""
 	g_destination_operating_system=""
 	g_origin_parallel_cmd=""
 	g_origin_parallel_cmd_host=""
 	g_zxfer_parallel_source_job_check_kind=""
 
-	# ssh control sockets used for origin (-O) and target (-T) hosts
+	# per-run ssh control sockets used for origin (-O) and target (-T) hosts
 	g_ssh_origin_control_socket=""
-	g_ssh_origin_control_socket_dir=""
-	g_ssh_origin_control_socket_lease_file=""
 	g_ssh_target_control_socket=""
-	g_ssh_target_control_socket_dir=""
-	g_ssh_target_control_socket_lease_file=""
+	g_zxfer_ssh_control_socket_dir_result=""
+
+	# per-role rendered transport-token and host-spec parse memos
+	g_zxfer_ssh_transport_tokens_origin=""
+	g_zxfer_ssh_transport_tokens_origin_socket=""
+	g_zxfer_ssh_transport_tokens_origin_set=0
+	g_zxfer_ssh_transport_tokens_target=""
+	g_zxfer_ssh_transport_tokens_target_socket=""
+	g_zxfer_ssh_transport_tokens_target_set=0
+	g_zxfer_ssh_shell_context_memo_origin_spec=""
+	g_zxfer_ssh_shell_context_memo_origin_host=""
+	g_zxfer_ssh_shell_context_memo_origin_wrapper=""
+	g_zxfer_ssh_shell_context_memo_target_spec=""
+	g_zxfer_ssh_shell_context_memo_target_host=""
+	g_zxfer_ssh_shell_context_memo_target_wrapper=""
 	zxfer_refresh_ssh_control_socket_support_state
 
 	# default zfs commands, can be overridden by -O or -T
@@ -1825,10 +1829,6 @@ zxfer_trap_exit() {
 			fi
 		fi
 	fi
-	if command -v zxfer_release_registered_owned_locks >/dev/null 2>&1; then
-		zxfer_release_registered_owned_locks || :
-	fi
-
 	# Every per-run transient lives under the one private temp root; one
 	# rm -rf replaces per-artifact bookkeeping. Registered path-adjacent
 	# staging debris is reaped first because it lives outside the root.
@@ -1843,10 +1843,6 @@ zxfer_trap_exit() {
 			g_zxfer_failure_message="Failed to remove one or more runtime temp artifacts during exit."
 		fi
 	fi
-	if command -v zxfer_cleanup_remote_host_cache_roots >/dev/null 2>&1; then
-		zxfer_cleanup_remote_host_cache_roots >/dev/null 2>&1 || :
-	fi
-
 	if [ "${g_services_need_relaunch:-0}" -eq 1 ]; then
 		if [ "${g_services_relaunch_in_progress:-0}" -eq 1 ]; then
 			zxfer_echoV "zxfer exiting with services still stopped after a failed zxfer_relaunch attempt."

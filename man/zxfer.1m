@@ -1082,15 +1082,15 @@ otherwise zxfer prefers a validated memory-backed temporary directory such as
 \fB/dev/shm\fR or \fB/run/shm\fR when available and falls back to the system
 temporary directory.
 .PP
-Current releases coordinate shared ssh control-socket locks, per-process ssh
-leases, remote capability-cache locks, and \fBZXFER_ERROR_LOG\fR appends
-through metadata-bearing owned directories rather than bare PID files. Native
-\fB.lock\fR and \fBlease.*\fR paths therefore appear as directories with owner
-metadata; zxfer validates and reaps stale or corrupt owners before reuse and
-checks release failures instead of ignoring them. Older plain ssh lease files
-and pid-only \fB.lock\fR directories from pre-metadata releases are
-unsupported; clear the stale entry or cache root before rerunning a current
-release.
+Current releases keep ssh control sockets and remote capability state per
+run: each invocation opens at most one control master per remote role under
+its private per-run temp directory, probes each remote host's capabilities
+once, holds the answer in memory, and removes everything on exit. Nothing is
+cached or coordinated across concurrent or consecutive invocations. Only
+\fBZXFER_ERROR_LOG\fR appends still coordinate through a metadata-bearing
+owned lock directory rather than a bare PID file; zxfer validates and reaps
+stale or corrupt owners before reuse and checks release failures instead of
+ignoring them.
 .PP
 The repository includes \fBexamples/error-log-email-notify.sh\fR, which shows
 how to set \fBZXFER_ERROR_LOG\fR, capture the current run's failure report from

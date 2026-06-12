@@ -266,8 +266,7 @@ test_zxfer_create_and_load_owned_lock_metadata_round_trip() {
 			else
 				printf 'metadata=no\n'
 			fi
-			zxfer_load_owned_lock_metadata_for_kind_and_purpose \
-				"$lock_dir" lock "roundtrip-lock"
+			zxfer_load_owned_lock_metadata_from_dir "$lock_dir"
 			printf 'load=%s\n' "$?"
 			printf 'pid=<%s>\n' "$g_zxfer_owned_lock_pid_result"
 			printf 'start_token=<%s>\n' "$g_zxfer_owned_lock_start_token_result"
@@ -719,137 +718,6 @@ test_zxfer_create_owned_lock_dir_failure_paths_clean_up_partial_directories() {
 		"$write_output" "exists=no"
 }
 
-test_zxfer_create_owned_lock_dir_in_parent_and_release_owned_locks_cover_success_and_failures() {
-	parent_dir="$TEST_TMPDIR/parent-owned"
-	insecure_parent_dir="$TEST_TMPDIR/insecure-parent-owned"
-	mkdir "$parent_dir" "$insecure_parent_dir" || fail "Unable to create owned lock parent directories."
-	chmod 700 "$parent_dir" || fail "Unable to chmod owned lock parent directory."
-	chmod 755 "$insecure_parent_dir" || fail "Unable to chmod insecure owned lock parent directory."
-
-	success_output=$(
-		(
-			set +e
-			lock_dir=$(zxfer_create_owned_lock_dir_in_parent \
-				"$parent_dir" "lease" lease "lease-purpose")
-			printf 'create=%s\n' "$?"
-			zxfer_current_process_owns_owned_lock_dir "$lock_dir" lease "lease-purpose"
-			printf 'owns=%s\n' "$?"
-			zxfer_register_owned_lock_path "$lock_dir"
-			zxfer_release_owned_lock_dir "$lock_dir" lease "lease-purpose" >/dev/null
-			printf 'release=%s\n' "$?"
-			if [ -e "$lock_dir" ]; then
-				printf 'exists=yes\n'
-			else
-				printf 'exists=no\n'
-			fi
-			printf 'registered=<%s>\n' "${g_zxfer_owned_lock_cleanup_paths:-}"
-		)
-	)
-	collision_output=$(
-		(
-			set +e
-			mkdir -p "$parent_dir/lease.$$.1" || exit 1
-			chmod 700 "$parent_dir/lease.$$.1" || exit 1
-			lock_dir=$(zxfer_create_owned_lock_dir_in_parent \
-				"$parent_dir" "lease" lease "lease-purpose")
-			printf 'create=%s\n' "$?"
-			printf 'lock_dir=<%s>\n' "$lock_dir"
-			printf 'taken_preserved=%s\n' "$([ -d "$parent_dir/lease.$$.1" ] && printf yes || printf no)"
-		)
-	)
-	exhausted_output=$(
-		(
-			set +e
-			l_attempt=0
-			while [ "$l_attempt" -lt 8 ]; do
-				l_attempt=$((l_attempt + 1))
-				mkdir -p "$parent_dir/full.$$.$l_attempt" || exit 1
-			done
-			zxfer_create_owned_lock_dir_in_parent \
-				"$parent_dir" "full" lease "lease-purpose" >/dev/null
-			printf 'exhausted=%s\n' "$?"
-		)
-	)
-	missing_release_output=$(
-		(
-			set +e
-			zxfer_release_owned_lock_dir "$TEST_TMPDIR/missing-release.lock" >/dev/null
-			printf 'missing=%s\n' "$?"
-		)
-	)
-	parent_fail_output=$(
-		(
-			set +e
-			zxfer_create_owned_lock_dir_in_parent \
-				"$insecure_parent_dir" "lease" lease "lease-purpose" >/dev/null
-			printf 'parent=%s\n' "$?"
-		)
-	)
-	mkdir_fail_output=$(
-		(
-			set +e
-			mkdir() {
-				return 1
-			}
-			zxfer_create_owned_lock_dir_in_parent \
-				"$parent_dir" "lease" lease "lease-purpose" >/dev/null
-			printf 'mkdir=%s\n' "$?"
-		)
-	)
-	validate_child_output=$(
-		(
-			set +e
-			zxfer_validate_owned_lock_container_dir() {
-				[ "$1" = "$parent_dir" ] && return 0
-				return 1
-			}
-			zxfer_create_owned_lock_dir_in_parent \
-				"$parent_dir" "lease" lease "lease-purpose" >/dev/null
-			printf 'validate=%s\n' "$?"
-		)
-	)
-	write_child_output=$(
-		(
-			set +e
-			zxfer_write_owned_lock_metadata_file() {
-				return 1
-			}
-			zxfer_create_owned_lock_dir_in_parent \
-				"$parent_dir" "lease" lease "lease-purpose" >/dev/null
-			printf 'write=%s\n' "$?"
-		)
-	)
-
-	assertContains "Parent-scoped owned lock creation should succeed for validated parents." \
-		"$success_output" "create=0"
-	assertContains "Current-process ownership checks should accept freshly created owned locks." \
-		"$success_output" "owns=0"
-	assertContains "Owned lock release should remove directories owned by the current process." \
-		"$success_output" "release=0"
-	assertContains "Successful owned lock release should remove the owned directory." \
-		"$success_output" "exists=no"
-	assertContains "Successful owned lock release should unregister cleanup state." \
-		"$success_output" "registered=<>"
-	assertContains "Parent-scoped owned lock creation should step past taken slot names instead of failing or reaping them." \
-		"$collision_output" "create=0"
-	assertContains "Parent-scoped owned lock creation should pick the next free slot when the first is taken." \
-		"$collision_output" "lock_dir=<$parent_dir/lease.$$.2>"
-	assertContains "Parent-scoped owned lock creation should preserve the taken slot directory." \
-		"$collision_output" "taken_preserved=yes"
-	assertContains "Parent-scoped owned lock creation should fail closed when every slot name is taken." \
-		"$exhausted_output" "exhausted=1"
-	assertContains "Releasing missing owned locks should succeed after unregistering the path." \
-		"$missing_release_output" "missing=0"
-	assertContains "Parent-scoped owned lock creation should reject insecure parents." \
-		"$parent_fail_output" "parent=1"
-	assertContains "Parent-scoped owned lock creation should fail closed when mkdir cannot allocate a directory." \
-		"$mkdir_fail_output" "mkdir=1"
-	assertContains "Parent-scoped owned lock creation should fail closed when the created child directory cannot be validated." \
-		"$validate_child_output" "validate=1"
-	assertContains "Parent-scoped owned lock creation should fail closed when metadata publication fails." \
-		"$write_child_output" "write=1"
-}
-
 test_zxfer_try_reap_stale_owned_lock_dir_propagates_unknown_states_and_cleanup_failures() {
 	liveness_dir="$TEST_TMPDIR/reap-liveness.lock"
 	cleanup_dir="$TEST_TMPDIR/reap-cleanup.lock"
@@ -940,124 +808,11 @@ test_zxfer_release_owned_lock_dir_never_releases_live_foreign_pids() {
 		"$output" "exists=yes"
 }
 
-test_zxfer_warn_owned_lock_cleanup_failure_falls_back_to_stderr_without_warning_helper() {
-	warnings=$(
-		(
-			unset zxfer_warn_stderr >/dev/null 2>&1 || :
-			zxfer_warn_owned_lock_cleanup_failure "$TEST_TMPDIR/fallback.lock" 9
-		) 2>&1
-	)
-
-	assertContains "Owned lock cleanup warnings should fall back to direct stderr output when reporting helpers are unavailable." \
-		"$warnings" "status 9"
-}
-
-test_zxfer_release_registered_owned_locks_warns_and_preserves_remaining_paths() {
-	cleanup_paths=$(printf '%s\n%s\n' \
-		"$TEST_TMPDIR/first.lock" "$TEST_TMPDIR/second.lock")
-	stdout_file="$TEST_TMPDIR/owned_lock_release.stdout"
-	stderr_file="$TEST_TMPDIR/owned_lock_release.stderr"
-
-	(
-		set +e
-		g_zxfer_owned_lock_cleanup_paths=$cleanup_paths
-		zxfer_release_owned_lock_dir() {
-			case "$1" in
-			"$TEST_TMPDIR/first.lock")
-				return 0
-				;;
-			esac
-			return 23
-		}
-		zxfer_release_registered_owned_locks
-		printf 'status=%s\n' "$?"
-		printf 'remaining=<%s>\n' "$g_zxfer_owned_lock_cleanup_paths"
-	) >"$stdout_file" 2>"$stderr_file"
-	output=$(cat "$stdout_file")
-	warnings=$(cat "$stderr_file")
-
-	assertContains "Registered owned-lock cleanup should fail closed when one release fails." \
-		"$output" "status=1"
-	assertContains "Registered owned-lock cleanup should warn with the release status for failed paths." \
-		"$warnings" "status 23"
-	assertContains "Registered owned-lock cleanup should keep failed paths registered for later cleanup." \
-		"$output" "remaining=<$TEST_TMPDIR/second.lock>"
-}
-
-test_zxfer_owned_lock_cleanup_conflicts_with_path_normalizes_parent_aliases() {
-	physical_root="$TEST_TMPDIR/owned-lock-path-physical"
-	alias_root="$TEST_TMPDIR/owned-lock-path-alias"
-	registered_lock_path="$alias_root/entry/lease.lock"
-	physical_entry_dir="$physical_root/entry"
-
-	mkdir -p "$physical_entry_dir" || fail "Unable to create the physical owned-lock cleanup alias fixture."
-	ln -s "$physical_root" "$alias_root" ||
-		fail "Unable to create the owned-lock cleanup alias symlink."
-
-	output=$(
-		(
-			g_zxfer_owned_lock_cleanup_paths=$registered_lock_path
-			zxfer_owned_lock_cleanup_conflicts_with_path "$physical_entry_dir" >/dev/null
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Owned-lock cleanup conflict checks should resolve parent-directory aliases before deciding whether a cleanup target overlaps a registered owned lock." \
-		"$output" "status=0"
-}
-
-test_zxfer_owned_lock_cleanup_path_helpers_cover_relative_root_and_failure_paths() {
-	relative_output=$(zxfer_normalize_owned_lock_cleanup_path "relative/path")
-	root_output=$(zxfer_normalize_owned_lock_cleanup_path "/root-lock")
-
-	mkdir -p "$TEST_TMPDIR/owned-lock-conflict-root" ||
-		fail "Unable to create the owned-lock conflict fixture root."
-	output=$(
-		(
-			set +e
-			g_zxfer_owned_lock_cleanup_paths=$(printf '%s\n%s\n' \
-				"$TEST_TMPDIR/missing-parent/lease.lock" \
-				"$TEST_TMPDIR/owned-lock-conflict-root/lease.lock")
-			zxfer_owned_lock_cleanup_conflicts_with_path \
-				"$TEST_TMPDIR/owned-lock-conflict-root" >/dev/null
-			printf 'ancestor=%s\n' "$?"
-			g_zxfer_owned_lock_cleanup_paths="$TEST_TMPDIR/owned-lock-conflict-exact"
-			zxfer_owned_lock_cleanup_conflicts_with_path \
-				"$TEST_TMPDIR/owned-lock-conflict-exact" >/dev/null
-			printf 'exact=%s\n' "$?"
-			zxfer_owned_lock_cleanup_conflicts_with_path \
-				"$TEST_TMPDIR/missing-parent/candidate" >/dev/null
-			printf 'missing=%s\n' "$?"
-		)
-	)
-
-	assertEquals "Owned-lock cleanup path normalization should preserve relative paths as-is." \
-		"relative/path" "$relative_output"
-	assertEquals "Owned-lock cleanup path normalization should preserve absolute paths under root after normalization." \
-		"/root-lock" "$root_output"
-	assertContains "Owned-lock cleanup conflict checks should skip registered paths whose parents can no longer be normalized and still detect ancestor conflicts." \
-		"$output" "ancestor=0"
-	assertContains "Owned-lock cleanup conflict checks should treat exact path matches as conflicts." \
-		"$output" "exact=0"
-	assertContains "Owned-lock cleanup conflict checks should fail closed when the cleanup candidate path cannot be normalized." \
-		"$output" "missing=1"
-}
-
 test_owned_lock_validation_and_release_helpers_cover_lookup_failures() {
 	lock_dir="$TEST_TMPDIR/lookup-fail.lock"
 	metadata_path="$lock_dir/metadata"
 	write_owned_lock_metadata_fixture "$lock_dir"
 
-	normalize_output=$(
-		(
-			set +e
-			zxfer_get_path_parent_dir() {
-				return 1
-			}
-			zxfer_normalize_owned_lock_cleanup_path "$lock_dir" >/dev/null
-			printf 'normalize=%s\n' "$?"
-		)
-	)
 	uid_output=$(
 		(
 			set +e
@@ -1109,18 +864,14 @@ test_owned_lock_validation_and_release_helpers_cover_lookup_failures() {
 	release_output=$(
 		(
 			set +e
-			g_zxfer_owned_lock_cleanup_paths=$lock_dir
 			zxfer_cleanup_owned_lock_dir() {
 				return 1
 			}
 			zxfer_release_owned_lock_dir "$lock_dir" lock "lookup-fail" >/dev/null
 			printf 'release=%s\n' "$?"
-			printf 'remaining=%s\n' "$g_zxfer_owned_lock_cleanup_paths"
 		)
 	)
 
-	assertContains "Owned-lock cleanup path normalization should fail closed when parent lookup fails." \
-		"$normalize_output" "normalize=1"
 	assertContains "Owned lock metadata validation should fail closed when effective-uid lookup fails." \
 		"$uid_output" "uid=1"
 	assertContains "Owned lock metadata validation should fail closed when owner lookup fails." \
@@ -1133,8 +884,6 @@ test_owned_lock_validation_and_release_helpers_cover_lookup_failures() {
 		"$load_failure_output" "load=1"
 	assertContains "Owned lock release should fail closed when directory cleanup fails after ownership validation succeeds." \
 		"$release_output" "release=1"
-	assertContains "Owned lock release should preserve the registered cleanup path when cleanup fails." \
-		"$release_output" "remaining=$lock_dir"
 }
 
 # shellcheck source=tests/shunit2/shunit2

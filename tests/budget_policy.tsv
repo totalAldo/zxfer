@@ -24,15 +24,29 @@ lines	src/zxfer_cleanup_child_wrapper.sh	113
 # still sits ~1,200 lines below the pre-Phase 6 baseline.
 lines	src/zxfer_cli.sh	261
 lines	src/zxfer_dependencies.sh	360
-lines	src/zxfer_exec.sh	1205
-lines	src/zxfer_locking.sh	688
+# zxfer_exec.sh grew by the Phase 7 per-role transport-token and host-spec
+# parse memos (OPTIMIZATION 11): rendered ssh transport argv and the parsed
+# host/wrapper split are computed once per role and replayed per command.
+# The growth is paid for many times over by the ~1,900-line remote_hosts
+# deletion in the same change; the TOTAL row drops by ~2,000 lines.
+lines	src/zxfer_exec.sh	1314
+# zxfer_locking.sh shrank in Phase 7: the remote-host lock/lease consumers
+# were deleted, orphaning the registration tracking, the in-parent lease
+# creator, and the kind/purpose compatibility wrapper. The error-log lock in
+# zxfer_reporting.sh is the module's only remaining consumer.
+lines	src/zxfer_locking.sh	477
 lines	src/zxfer_modules.sh	100
 lines	src/zxfer_path_security.sh	502
 # zxfer_property_reconcile.sh absorbed the ~1.4k-line zxfer_property_cache.sh
 # survivors (serialize/decode, prefetch, in-memory property tables) when the
 # per-dataset file cache was deleted; the TOTAL row still ratchets down.
 lines	src/zxfer_property_reconcile.sh	3815
-lines	src/zxfer_remote_hosts.sh	3869
+# zxfer_remote_hosts.sh halved in Phase 7: capability state is one live ssh
+# probe per host per run held in memory (no cache files, TTL, identity hex,
+# lock dirs, or wait loops) and ssh control sockets are per-run paths under
+# the private run temp root (no socket locks, leases, identity files, or
+# foreign-socket reaping).
+lines	src/zxfer_remote_hosts.sh	1964
 # zxfer_replication.sh, zxfer_snapshot_state.sh, and
 # zxfer_snapshot_reconcile.sh grew by the Phase 4 generation-gated live
 # destination view (ensure/refresh/bump helpers, the -Y pass-boundary
@@ -41,20 +55,20 @@ lines	src/zxfer_remote_hosts.sh	3869
 # refine/diff helpers, so the TOTAL row still ratchets down.
 lines	src/zxfer_replication.sh	1686
 lines	src/zxfer_reporting.sh	1401
-lines	src/zxfer_runtime.sh	2072
+lines	src/zxfer_runtime.sh	2066
 lines	src/zxfer_send_receive.sh	1853
 lines	src/zxfer_snapshot_discovery.sh	3381
 lines	src/zxfer_snapshot_reconcile.sh	882
 lines	src/zxfer_snapshot_state.sh	796
 lines	zxfer	211
-lines	TOTAL	26377
+lines	TOTAL	24363
 functions	src/zxfer_background_jobs.sh	15
 functions	src/zxfer_backup_metadata.sh	87
 functions	src/zxfer_cleanup_child_wrapper.sh	4
 functions	src/zxfer_cli.sh	3
 functions	src/zxfer_dependencies.sh	12
-functions	src/zxfer_exec.sh	39
-functions	src/zxfer_locking.sh	25
+functions	src/zxfer_exec.sh	41
+functions	src/zxfer_locking.sh	17
 functions	src/zxfer_modules.sh	1
 # zxfer_path_security.sh gained the shared randomized staging-name helper
 # (zxfer_create_unpredictable_staging_entry) and zxfer_runtime.sh gained the
@@ -63,7 +77,7 @@ functions	src/zxfer_modules.sh	1
 # pre-Phase 6 baseline.
 functions	src/zxfer_path_security.sh	15
 functions	src/zxfer_property_reconcile.sh	84
-functions	src/zxfer_remote_hosts.sh	126
+functions	src/zxfer_remote_hosts.sh	64
 functions	src/zxfer_replication.sh	57
 functions	src/zxfer_reporting.sh	54
 functions	src/zxfer_runtime.sh	68
@@ -75,11 +89,11 @@ functions	src/zxfer_snapshot_reconcile.sh	19
 # ratchets down against the pre-Phase 4 baseline.
 functions	src/zxfer_snapshot_state.sh	31
 functions	zxfer	5
-functions	TOTAL	754
-callers	zxfer_profile_now_ms	15	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
+functions	TOTAL	686
+callers	zxfer_profile_now_ms	12	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	27
 callers	eval 	11
-callers	$(date	20
+callers	$(date	16
 # mktemp callers after Phase 6 are the single per-run temp-root allocation in
 # zxfer_runtime.sh, the shared randomized staging-name helper in
 # zxfer_path_security.sh (path-adjacent staging parents can be shared sticky

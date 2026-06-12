@@ -390,12 +390,9 @@ setUp() {
 	g_RZFS=""
 	g_option_z_compress=0
 	g_ssh_origin_control_socket=""
-	g_ssh_origin_control_socket_lease_file=""
+	g_zxfer_ssh_control_socket_dir_result=""
 	zxfer_reset_destination_existence_cache
-	g_ssh_origin_control_socket_dir=""
 	g_ssh_target_control_socket=""
-	g_ssh_target_control_socket_lease_file=""
-	g_ssh_target_control_socket_dir=""
 	g_zxfer_original_invocation=""
 	g_option_Y_yield_iterations=1
 	zxfer_reset_cleanup_pid_tracking
@@ -1280,7 +1277,6 @@ test_run_source_zfs_cmd_uses_remote_ssh_when_origin_specified() {
 	g_origin_cmd_zfs="/usr/sbin/zfs"
 	g_option_O_origin_host="backup@example.com pfexec -p 2222"
 	g_ssh_origin_control_socket=""
-	g_ssh_origin_control_socket_dir=""
 
 	remote_log="$TEST_TMPDIR/zxfer_run_source_zfs_cmd.log"
 	: >"$remote_log"
@@ -1340,7 +1336,6 @@ test_run_destination_zfs_cmd_uses_remote_ssh_when_target_specified() {
 	g_target_cmd_zfs="/usr/sbin/zfs"
 	g_option_T_target_host="target@example.com doas"
 	g_ssh_target_control_socket=""
-	g_ssh_target_control_socket_dir=""
 
 	remote_log="$TEST_TMPDIR/zxfer_run_destination_zfs_cmd.log"
 	: >"$remote_log"
@@ -2924,37 +2919,6 @@ test_resolve_remote_required_tool_rejects_relative_remote_path() {
 		"$result"
 }
 
-test_resolve_remote_required_tool_uses_fresh_capability_cache_file_before_ssh() {
-	g_cmd_ssh="$FAKE_SSH_BIN"
-	g_zxfer_dependency_path="/opt/openzfs/bin:/usr/sbin"
-	requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool parallel)
-	if ! cache_path=$(zxfer_remote_capability_cache_path \
-		"backup@example.com" \
-		"$requested_tools"); then
-		fail "Expected a cache path for remote capability caching."
-	fi
-	if ! cache_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
-		"backup@example.com" "$requested_tools"); then
-		fail "Expected a remote capability cache identity for fixture metadata."
-	fi
-	zxfer_write_cache_object_file_atomically \
-		"$cache_path" \
-		"$ZXFER_REMOTE_CAPABILITY_CACHE_OBJECT_KIND" \
-		"created_epoch=$(date '+%s')
-identity_hex=$cache_identity_hex" \
-		"$(fake_remote_capability_response)" >/dev/null ||
-		fail "Expected a writable remote capability cache fixture."
-	FAKE_SSH_EXIT_STATUS=255
-	export FAKE_SSH_EXIT_STATUS
-
-	result=$(zxfer_resolve_remote_required_tool "backup@example.com" parallel "GNU parallel")
-
-	unset FAKE_SSH_EXIT_STATUS
-
-	assertEquals "Fresh remote capability cache files should satisfy later remote helper lookups without ssh." \
-		"/opt/bin/parallel" "$result"
-}
-
 test_resolve_remote_required_tool_supports_remote_cat_from_handshake() {
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response)
@@ -3122,7 +3086,6 @@ test_ensure_parallel_remote_fetches_remote_parallel_path() {
 		g_origin_parallel_cmd=""
 		g_cmd_ssh="$FAKE_SSH_BIN"
 		g_ssh_origin_control_socket="$socket_path"
-		g_ssh_origin_control_socket_dir="$TEST_TMPDIR/origin.sock.d"
 
 		FAKE_SSH_LOG="$remote_log"
 		FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response)
@@ -3413,7 +3376,6 @@ test_read_command_line_switches_skips_control_socket_when_ssh_lacks_support() {
 		g_cmd_zfs="/sbin/zfs"
 		g_ssh_supports_control_sockets=0
 		g_ssh_origin_control_socket=""
-		g_ssh_origin_control_socket_dir=""
 		zxfer_read_command_line_switches -O "backup@example.com"
 		printf 'origin=%s\n' "$g_option_O_origin_host"
 		printf 'socket=%s\n' "$g_ssh_origin_control_socket"
@@ -6360,6 +6322,71 @@ test_zxfer_create_private_temp_dir_returns_failure_when_effective_tmpdir_lookup_
 
 	assertEquals "Private temp directory creation should fail when the effective temp root cannot be determined." \
 		1 "$status"
+}
+
+test_zxfer_render_ssh_transport_policy_identity_covers_ambient_and_invalid_options() {
+	output=$(
+		(
+			set +e
+			ZXFER_SSH_USE_AMBIENT_CONFIG=1
+			identity=$(zxfer_render_ssh_transport_policy_identity)
+			printf 'ambient_status=%s\n' "$?"
+			printf 'ambient=%s\n' "$identity"
+		)
+		(
+			set +e
+			ZXFER_SSH_BATCH_MODE="bad
+value"
+			zxfer_render_ssh_transport_policy_identity >/dev/null
+			printf 'invalid_status=%s\n' "$?"
+			invalid_message=$(zxfer_render_ssh_transport_policy_identity)
+			printf 'invalid_message=%s\n' "$invalid_message"
+		)
+	)
+
+	assertContains "Ambient ssh policy identity rendering should succeed." \
+		"$output" "ambient_status=0"
+	assertContains "Ambient ssh policy identity should render as the ambient marker." \
+		"$output" "ambient=ambient"
+	assertContains "Invalid managed ssh options should fail policy identity rendering closed." \
+		"$output" "invalid_status=1"
+	assertContains "Invalid managed ssh options should surface the validation diagnostic." \
+		"$output" "invalid_message=ZXFER_SSH_BATCH_MODE must be a single-line non-empty value."
+}
+
+test_zxfer_get_ssh_transport_tokens_for_host_serves_warm_target_memo() {
+	output=$(
+		(
+			set +e
+			g_cmd_ssh="$FAKE_SSH_BIN"
+			g_option_O_origin_host="origin.example"
+			g_option_T_target_host="target.example"
+			g_ssh_origin_control_socket=""
+			g_ssh_target_control_socket=""
+			zxfer_refresh_ssh_transport_tokens_for_role target
+			printf 'target_set=%s\n' "${g_zxfer_ssh_transport_tokens_target_set:-0}"
+			rendered=$(zxfer_render_ssh_transport_tokens_for_host "target.example")
+			memo=$(zxfer_get_ssh_transport_tokens_for_host "target.example")
+			if [ "$memo" = "$rendered" ]; then
+				printf 'memo_matches_render=yes\n'
+			else
+				printf 'memo_matches_render=no\n'
+			fi
+			zxfer_render_ssh_transport_tokens_for_host() {
+				printf 'fresh-after-socket-change\n'
+			}
+			g_ssh_target_control_socket="$TEST_TMPDIR/target-memo.sock"
+			stale=$(zxfer_get_ssh_transport_tokens_for_host "target.example")
+			printf 'stale=%s\n' "$stale"
+		)
+	)
+
+	assertContains "Refreshing the target role should warm the target transport memo." \
+		"$output" "target_set=1"
+	assertContains "A warm target memo must replay the rendered transport tokens byte for byte." \
+		"$output" "memo_matches_render=yes"
+	assertContains "A target control-socket change must bypass the stale target memo." \
+		"$output" "stale=fresh-after-socket-change"
 }
 
 # shellcheck source=tests/shunit2/shunit2

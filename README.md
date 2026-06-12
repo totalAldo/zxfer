@@ -89,9 +89,10 @@ Use remote compression:
 - Structured stderr failure reports with default command-field redaction,
   optional `ZXFER_ERROR_LOG` mirroring, and an explicit
   `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1` local-debug override
-- Metadata-bearing lock and lease coordination for ssh control sockets, remote
-  capability caches, and `ZXFER_ERROR_LOG` appends, with validated stale-owner
-  reaping and checked release semantics
+- Per-run ssh control sockets and one in-memory remote capability probe per
+  host per run, with metadata-bearing lock coordination retained for
+  `ZXFER_ERROR_LOG` appends (validated stale-owner reaping and checked
+  release semantics)
 - Identity-aware recursive snapshot discovery with `name,guid` records, plus a
   fast clean-no-op proof for eligible remote-origin pulls
 - Batched remote-target destination discovery for `-T`, so destination dataset
@@ -168,22 +169,18 @@ zxfer-managed ssh connections default to `BatchMode=yes` and
 absolute known-hosts file, or `ZXFER_SSH_USE_AMBIENT_CONFIG=1` if you need to
 fall back to the ambient local ssh policy.
 
-Shared ssh control sockets, remote capability caches, and `ZXFER_ERROR_LOG`
-appends are coordinated through metadata-bearing lock or lease directories that
-record owner PID, process-start identity, hostname, purpose, and creation
-time. The current native format is directory-based rather than plain pid files:
-ssh `.lock` paths, ssh `leases/lease.*`, remote capability `<cache>.lock`, and
-`ZXFER_ERROR_LOG` lock paths all carry validated owner metadata. zxfer
-validates and reaps stale or corrupt owners before reuse, checks release
-operations instead of silently suppressing failures, and warns during trap
-cleanup if a registered owned lock or lease cannot be released while
-preserving the original zxfer exit status. Remote capability cache entries are
-short-lived and identity-checked, and can be reused by concurrent invocations
-from the same user when the host spec, secure PATH, ssh policy, and requested
-helper set match. Pre-metadata cache artifacts from
-older releases are no longer supported: if a reused cache root still contains
-plain ssh `leases/lease.*` files or pid-only `.lock` directories, remove the
-stale entry or cache root before rerunning zxfer.
+SSH control sockets and remote capability state are per-run only. Each
+invocation opens at most one control master per remote role under its private
+per-run temp directory, multiplexes its own remote commands over that socket,
+and closes it on exit; clean no-op runs never open a master at all. Remote
+helper discovery costs one capability probe round trip per host per run, held
+in memory and identity-checked against the host spec, secure PATH, ssh
+policy, and requested helper set -- nothing is shared between concurrent or
+consecutive zxfer invocations, matching upstream zxfer behavior. Only
+`ZXFER_ERROR_LOG` appends still coordinate through a metadata-bearing lock
+directory that records the owner PID and process-start identity; zxfer
+validates and reaps stale or corrupt owners before reuse and checks release
+operations instead of silently suppressing failures.
 
 Long-lived parallel send/receive work runs under private supervisor control
 directories beneath the runtime temp root. Each job records launch and

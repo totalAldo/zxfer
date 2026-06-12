@@ -11,13 +11,6 @@ TESTS_DIR=$(dirname "$0")
 
 zxfer_source_runtime_modules_through "zxfer_property_reconcile.sh"
 
-tearDown() {
-	if effective_uid=$(zxfer_get_effective_user_uid 2>/dev/null); then
-		rm -rf "$TEST_TMPDIR"/*.remote-capabilities."$effective_uid".d
-		rm -rf "$TEST_TMPDIR"/*.s."$effective_uid".d
-	fi
-}
-
 create_fake_ssh_bin() {
 	cat >"$FAKE_SSH_BIN" <<'EOF'
 #!/bin/sh
@@ -101,11 +94,8 @@ setUp() {
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
 	g_ssh_origin_control_socket=""
-	g_ssh_origin_control_socket_dir=""
-	g_ssh_origin_control_socket_lease_file=""
+	g_zxfer_ssh_control_socket_dir_result=""
 	g_ssh_target_control_socket=""
-	g_ssh_target_control_socket_dir=""
-	g_ssh_target_control_socket_lease_file=""
 	g_ssh_supports_control_sockets=0
 	g_zxfer_remote_capability_cache_wait_retries=5
 	g_zxfer_effective_tmpdir=""

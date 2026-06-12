@@ -506,14 +506,14 @@ zxfer_get_ssh_base_transport_tokens() {
 	fi
 }
 
-# Purpose: Return the SSH transport tokens for host in the form expected by
-# later helpers.
-# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
-# sibling helpers need the same lookup without duplicating module logic.
+# Purpose: Render the SSH transport tokens for host from the current managed
+# option policy and control-socket state without consulting the per-role memo.
+# Usage: Called by zxfer_get_ssh_transport_tokens_for_host on memo misses and
+# by zxfer_refresh_ssh_transport_tokens_for_role to fill the memo.
 #
 # Render the ssh transport argv for a given host, including any control socket,
 # as a newline-delimited token stream that can be safely re-quoted or executed.
-zxfer_get_ssh_transport_tokens_for_host() {
+zxfer_render_ssh_transport_tokens_for_host() {
 	l_host=$1
 
 	if ! l_base_transport_tokens=$(zxfer_get_ssh_base_transport_tokens); then
@@ -534,6 +534,77 @@ zxfer_get_ssh_transport_tokens_for_host() {
 	if [ "$l_host" = "$g_option_T_target_host" ] && [ "$g_ssh_target_control_socket" != "" ]; then
 		printf '%s\n%s\n' "-S" "$g_ssh_target_control_socket"
 	fi
+}
+
+# Purpose: Refresh the per-role rendered SSH transport-token memo from the
+# current managed-option policy and control-socket state.
+# Usage: Called in the main shell after CLI validation and whenever a role's
+# control-socket state changes, so per-command transport rendering becomes one
+# memo read instead of re-validating managed ssh options every time.
+zxfer_refresh_ssh_transport_tokens_for_role() {
+	l_role=$1
+
+	case "$l_role" in
+	origin)
+		g_zxfer_ssh_transport_tokens_origin_set=0
+		g_zxfer_ssh_transport_tokens_origin=""
+		g_zxfer_ssh_transport_tokens_origin_socket=""
+		[ -n "${g_option_O_origin_host:-}" ] || return 0
+		if l_role_tokens=$(zxfer_render_ssh_transport_tokens_for_host \
+			"$g_option_O_origin_host"); then
+			g_zxfer_ssh_transport_tokens_origin=$l_role_tokens
+			g_zxfer_ssh_transport_tokens_origin_socket=${g_ssh_origin_control_socket:-}
+			g_zxfer_ssh_transport_tokens_origin_set=1
+		fi
+		;;
+	target)
+		g_zxfer_ssh_transport_tokens_target_set=0
+		g_zxfer_ssh_transport_tokens_target=""
+		g_zxfer_ssh_transport_tokens_target_socket=""
+		[ -n "${g_option_T_target_host:-}" ] || return 0
+		# A target spec equal to the origin spec renders origin-socket
+		# tokens, so the origin memo already covers it; skip a target memo
+		# whose staleness could not be keyed on the target socket.
+		[ "${g_option_T_target_host}" != "${g_option_O_origin_host:-}" ] || return 0
+		if l_role_tokens=$(zxfer_render_ssh_transport_tokens_for_host \
+			"$g_option_T_target_host"); then
+			g_zxfer_ssh_transport_tokens_target=$l_role_tokens
+			g_zxfer_ssh_transport_tokens_target_socket=${g_ssh_target_control_socket:-}
+			g_zxfer_ssh_transport_tokens_target_set=1
+		fi
+		;;
+	esac
+	return 0
+}
+
+# Purpose: Return the SSH transport tokens for host in the form expected by
+# later helpers.
+# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
+# sibling helpers need the same lookup without duplicating module logic.
+#
+# The per-role memo answers -O/-T hosts when the recorded control-socket state
+# still matches; anything else falls through to a fresh render so correctness
+# never depends on the memo being warm.
+zxfer_get_ssh_transport_tokens_for_host() {
+	l_host=$1
+
+	if [ -n "$l_host" ]; then
+		if [ "$l_host" = "${g_option_O_origin_host:-}" ] &&
+			[ "${g_zxfer_ssh_transport_tokens_origin_set:-0}" -eq 1 ] &&
+			[ "${g_zxfer_ssh_transport_tokens_origin_socket:-}" = "${g_ssh_origin_control_socket:-}" ]; then
+			printf '%s\n' "$g_zxfer_ssh_transport_tokens_origin"
+			return 0
+		fi
+		if [ "$l_host" = "${g_option_T_target_host:-}" ] &&
+			[ "$l_host" != "${g_option_O_origin_host:-}" ] &&
+			[ "${g_zxfer_ssh_transport_tokens_target_set:-0}" -eq 1 ] &&
+			[ "${g_zxfer_ssh_transport_tokens_target_socket:-}" = "${g_ssh_target_control_socket:-}" ]; then
+			printf '%s\n' "$g_zxfer_ssh_transport_tokens_target"
+			return 0
+		fi
+	fi
+
+	zxfer_render_ssh_transport_tokens_for_host "$l_host"
 }
 
 # Purpose: Return the remote command context label in the form expected by
@@ -607,6 +678,31 @@ zxfer_prepare_ssh_shell_command_context() {
 	g_zxfer_ssh_shell_context_error_result=""
 	[ "$l_remote_shell_cmd" = "" ] && return 1
 
+	# Per-role parse memo: -O/-T host specs are fixed after CLI validation,
+	# so the host/wrapper split renders once per spec string and later remote
+	# commands reuse it. Keyed on the exact spec text, so a memo hit always
+	# replays a validated parse of the identical input.
+	if [ -n "$l_host_spec" ]; then
+		if [ "${g_zxfer_ssh_shell_context_memo_origin_spec:-}" = "$l_host_spec" ]; then
+			g_zxfer_ssh_shell_host_result=$g_zxfer_ssh_shell_context_memo_origin_host
+			if [ "${g_zxfer_ssh_shell_context_memo_origin_wrapper:-}" != "" ]; then
+				g_zxfer_ssh_shell_full_remote_command_result="$g_zxfer_ssh_shell_context_memo_origin_wrapper $l_remote_shell_cmd"
+			else
+				g_zxfer_ssh_shell_full_remote_command_result=$l_remote_shell_cmd
+			fi
+			return 0
+		fi
+		if [ "${g_zxfer_ssh_shell_context_memo_target_spec:-}" = "$l_host_spec" ]; then
+			g_zxfer_ssh_shell_host_result=$g_zxfer_ssh_shell_context_memo_target_host
+			if [ "${g_zxfer_ssh_shell_context_memo_target_wrapper:-}" != "" ]; then
+				g_zxfer_ssh_shell_full_remote_command_result="$g_zxfer_ssh_shell_context_memo_target_wrapper $l_remote_shell_cmd"
+			else
+				g_zxfer_ssh_shell_full_remote_command_result=$l_remote_shell_cmd
+			fi
+			return 0
+		fi
+	fi
+
 	l_context_status=0
 	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec") ||
 		l_context_status=$?
@@ -635,6 +731,7 @@ EOF
 	[ "$l_ssh_host" != "" ] || return 1
 
 	l_full_remote_cmd=$l_remote_shell_cmd
+	l_wrapper_cmd=""
 	if [ "$l_wrapper_tokens" != "" ]; then
 		l_wrapper_cmd=$(zxfer_quote_token_stream "$l_wrapper_tokens")
 		l_full_remote_cmd="$l_wrapper_cmd $l_remote_shell_cmd"
@@ -642,6 +739,18 @@ EOF
 
 	g_zxfer_ssh_shell_host_result=$l_ssh_host
 	g_zxfer_ssh_shell_full_remote_command_result=$l_full_remote_cmd
+	# Memoize role specs only; plain calls from the invoke path persist the
+	# memo in the main shell, command-substituted callers just recompute.
+	if [ "$l_host_spec" = "${g_option_O_origin_host:-}" ] && [ -n "$l_host_spec" ]; then
+		g_zxfer_ssh_shell_context_memo_origin_spec=$l_host_spec
+		g_zxfer_ssh_shell_context_memo_origin_host=$l_ssh_host
+		g_zxfer_ssh_shell_context_memo_origin_wrapper=$l_wrapper_cmd
+	fi
+	if [ "$l_host_spec" = "${g_option_T_target_host:-}" ] && [ -n "$l_host_spec" ]; then
+		g_zxfer_ssh_shell_context_memo_target_spec=$l_host_spec
+		g_zxfer_ssh_shell_context_memo_target_host=$l_ssh_host
+		g_zxfer_ssh_shell_context_memo_target_wrapper=$l_wrapper_cmd
+	fi
 	return 0
 }
 
