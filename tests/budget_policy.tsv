@@ -9,6 +9,13 @@
 #     literal SYMBOL across src/ + zxfer; the optional comma-separated
 #     ALLOWED_FILES list pins which files may contain matches at all.
 # Refresh current values with: tests/run_budget_check.sh --list
+# Round 2 P2 (2026-06-12) duplicate-pair parameterization: the audited
+# local/remote, set/inherit, reverse-file, discovery-read, and collect-props
+# families resolved to pinned test seams or disjoint per-side bodies after
+# P0/P1; the one live single-caller wrapper
+# (zxfer_capture_recursive_dataset_list_from_snapshot_record_file) was
+# inlined into its only caller, so snapshot_discovery and both TOTALs
+# ratchet down.
 # Round 2 P1 (2026-06-12) mechanical ceremony pass: status ladders collapsed
 # to status-preserving one-liners/blocks across nine modules, plus one-caller
 # pass-through and constant-getter inlining (backup-metadata format/header/
@@ -72,7 +79,7 @@ lines	src/zxfer_runtime.sh	2444
 # 2026-06-12 divergence-contract feature) and +8 comment lines documenting
 # the rolling-queue stderr-sink fix (exec 2>/dev/null removed).
 lines	src/zxfer_send_receive.sh	1713
-lines	src/zxfer_snapshot_discovery.sh	2876
+lines	src/zxfer_snapshot_discovery.sh	2867
 # zxfer_snapshot_reconcile.sh grew by the approved 2026-06-12 divergence
 # contract: the single-pass name-match/guid-mismatch classifier (replacing
 # the shared-name awk in zxfer_inspect_delete_snap, so in-sync planning
@@ -84,7 +91,7 @@ lines	zxfer	211
 # TOTAL rises by the net addition of the approved divergence-contract
 # feature (classifier, gate, warning, post-receive verification, -V key)
 # plus the rolling-queue stderr-sink fix comments.
-lines	TOTAL	22906
+lines	TOTAL	22897
 functions	src/zxfer_background_jobs.sh	15
 functions	src/zxfer_backup_metadata.sh	84
 functions	src/zxfer_cleanup_child_wrapper.sh	4
@@ -101,7 +108,7 @@ functions	src/zxfer_reporting.sh	54
 # above were removed and the functions TOTAL is unchanged by the move.
 functions	src/zxfer_runtime.sh	88
 functions	src/zxfer_send_receive.sh	44
-functions	src/zxfer_snapshot_discovery.sh	51
+functions	src/zxfer_snapshot_discovery.sh	50
 # zxfer_snapshot_reconcile.sh gained the seven divergence-contract helpers
 # (scan, record, marker find/unmark, example renderer, contract gate, and
 # post-receive verification) in the approved 2026-06-12 feature.
@@ -112,7 +119,7 @@ functions	src/zxfer_snapshot_reconcile.sh	26
 functions	src/zxfer_snapshot_state.sh	31
 functions	zxfer	5
 # functions TOTAL rises by the seven divergence-contract helpers above.
-functions	TOTAL	654
+functions	TOTAL	653
 callers	zxfer_profile_now_ms	12	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	26
 callers	eval 	10

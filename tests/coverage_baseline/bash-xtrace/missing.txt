@@ -244,51 +244,51 @@ src/zxfer_snapshot_discovery.sh
   1623:		return "$?"
   1689:		} | {
   1696:	) &
-  2186:			l_status=$?
-  2187:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
-  2188:			zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns." "$l_status"
-  2339:		l_source_name_list_uses_parallel=1
-  2344:		zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_parallel_commands
-  2489:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
-  2496:		zxfer_throw_error "Failed to retrieve snapshots from the source" "$l_source_snapshot_wait_status"
-  2501:		l_source_count_status=$?
-  2594:		l_status=$?
-  2598:		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_sorted_tmp_file"
-  2599:		g_source_snapshot_list_sorted_file=""
-  2600:		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_source_snapshot_stage_files"
-  2601:		return "$?"
-  2632:			l_status=$?
-  2633:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  2635:			zxfer_cleanup_snapshot_record_cache_files
-  2636:			return "$l_status"
-  2654:			l_status=$?
-  2655:			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-  2656:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  2658:			zxfer_cleanup_snapshot_record_cache_files
-  2659:			return "$l_status"
-  2670:			l_dest_inventory_status=$?
-  2683:				l_snapshot_stderr_read_status=$?
-  2690:				zxfer_throw_error "Failed to read staged destination snapshot stderr." "$l_snapshot_stderr_read_status"
-  2699:			l_status=$?
-  2700:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  2702:			zxfer_cleanup_snapshot_record_cache_files
-  2703:			return "$l_status"
-  2709:			l_status=$?
-  2710:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  2712:			zxfer_cleanup_snapshot_record_cache_files
-  2713:			return "$l_status"
-  2723:			l_wait_helper_status=$?
-  2724:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-  2726:			zxfer_cleanup_snapshot_record_cache_files
-  2727:			zxfer_throw_error "Failed to read source snapshot discovery completion metadata." "$l_wait_helper_status"
-  2734:		wait "$g_source_snapshot_list_pid" || l_source_snapshot_wait_status=$?
-  2735:		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
-  2736:		g_source_snapshot_list_pid=""
-  2768:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
-  2808:			l_status=$?
-  2809:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  2811:			zxfer_cleanup_snapshot_record_cache_files
-  2812:			return "$l_status"
+  2177:			l_status=$?
+  2178:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
+  2179:			zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns." "$l_status"
+  2330:		l_source_name_list_uses_parallel=1
+  2335:		zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_parallel_commands
+  2480:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
+  2487:		zxfer_throw_error "Failed to retrieve snapshots from the source" "$l_source_snapshot_wait_status"
+  2492:		l_source_count_status=$?
+  2585:		l_status=$?
+  2589:		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_sorted_tmp_file"
+  2590:		g_source_snapshot_list_sorted_file=""
+  2591:		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_source_snapshot_stage_files"
+  2592:		return "$?"
+  2623:			l_status=$?
+  2624:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  2626:			zxfer_cleanup_snapshot_record_cache_files
+  2627:			return "$l_status"
+  2645:			l_status=$?
+  2646:			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
+  2647:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  2649:			zxfer_cleanup_snapshot_record_cache_files
+  2650:			return "$l_status"
+  2661:			l_dest_inventory_status=$?
+  2674:				l_snapshot_stderr_read_status=$?
+  2681:				zxfer_throw_error "Failed to read staged destination snapshot stderr." "$l_snapshot_stderr_read_status"
+  2690:			l_status=$?
+  2691:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  2693:			zxfer_cleanup_snapshot_record_cache_files
+  2694:			return "$l_status"
+  2700:			l_status=$?
+  2701:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  2703:			zxfer_cleanup_snapshot_record_cache_files
+  2704:			return "$l_status"
+  2714:			l_wait_helper_status=$?
+  2715:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+  2717:			zxfer_cleanup_snapshot_record_cache_files
+  2718:			zxfer_throw_error "Failed to read source snapshot discovery completion metadata." "$l_wait_helper_status"
+  2725:		wait "$g_source_snapshot_list_pid" || l_source_snapshot_wait_status=$?
+  2726:		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
+  2727:		g_source_snapshot_list_pid=""
+  2759:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
+  2799:			l_status=$?
+  2800:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  2802:			zxfer_cleanup_snapshot_record_cache_files
+  2803:			return "$l_status"
 
 src/zxfer_snapshot_reconcile.sh
   148:	$0 != "" { record = $0; tab_pos = index(record, "\t"); snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record); snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : ""); at_pos = index(snapshot_path, "@"); if (at_pos > 0) { snapshot_identity = substr(snapshot_path, at_pos + 1); if (snapshot_guid != "") snapshot_identity = snapshot_identity "\t" snapshot_guid; if (snapshot_identity in delete_identities) print snapshot_path } }' "$l_identity_file" - <<-EOF

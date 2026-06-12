@@ -1938,11 +1938,16 @@ zxfer_capture_recursive_dataset_list_from_lines_file() {
 	return 0
 }
 
-# Purpose: Capture the recursive dataset list from a snapshot-record file.
-# Usage: Called by in-memory and file-backed snapshot discovery paths so they
-# share dataset-line staging, recursive capture, and cleanup behavior.
-zxfer_capture_recursive_dataset_list_from_snapshot_record_file() {
+# Purpose: Capture the recursive dataset list from snapshot file into staged
+# state or module globals for later use.
+# Usage: Called during source and destination snapshot discovery when later
+# helpers need a checked snapshot of command output or computed state.
+zxfer_capture_recursive_dataset_list_from_snapshot_file() {
 	l_snapshot_records_file=$1
+
+	g_zxfer_recursive_dataset_list_result=""
+	[ -n "$l_snapshot_records_file" ] || return 0
+	[ -f "$l_snapshot_records_file" ] || return 0
 
 	zxfer_get_temp_file >/dev/null || return "$?"
 	l_dataset_lines_file=$g_zxfer_temp_file_result
@@ -1963,20 +1968,6 @@ zxfer_capture_recursive_dataset_list_from_snapshot_record_file() {
 
 	zxfer_cleanup_runtime_artifact_path "$l_dataset_lines_file"
 	return 0
-}
-
-# Purpose: Capture the recursive dataset list from snapshot file into staged
-# state or module globals for later use.
-# Usage: Called during source and destination snapshot discovery when later
-# helpers need a checked snapshot of command output or computed state.
-zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-	l_snapshot_records_file=$1
-
-	g_zxfer_recursive_dataset_list_result=""
-	[ -n "$l_snapshot_records_file" ] || return 0
-	[ -f "$l_snapshot_records_file" ] || return 0
-
-	zxfer_capture_recursive_dataset_list_from_snapshot_record_file "$l_snapshot_records_file"
 }
 
 # Purpose: Filter the recursive dataset list with excludes down to the subset
