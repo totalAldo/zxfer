@@ -13,11 +13,16 @@
 #   discovery argv shape
 #       test_recursive_discovery_pins_guid_identity_listings
 #       → source and destination snapshot listings request "-o name,guid":
-#         snapshot identity is decided by guid, never by name alone.
+#         snapshot identity is decided by guid, never by name alone. Pinned
+#         against the incremental fixture so the proof falls back and the
+#         full creation-order discovery shape stays covered.
 #
 #   src guid set == dst guid set
 #       test_identical_source_and_destination_is_a_proven_noop
-#       → proven no-op: exit 0, zero MUTATE / send / receive argv.
+#       → proven no-op via the fast recursive proof (local sources included
+#         since Phase 8): exit 0, exactly the two sorted-FIFO identity
+#         listings, no creation-order listing, no existence check, zero
+#         MUTATE / send / receive argv.
 #
 #   dst missing newest guid, -n
 #       test_incremental_dryrun_issues_zero_zfs_argv_and_renders_no_plan
@@ -222,14 +227,19 @@ planning_add_extra_destination_snapshot() {
 
 # Invariant: snapshot identity is guid-based. Both the source and the
 # destination snapshot discovery listings must request "-o name,guid".
+# Driven against the incremental fixture: the fast no-op proof attempts
+# first (its identity listing also requests name,guid), mismatches, and the
+# full creation-order discovery shape stays pinned on the fallback.
 test_recursive_discovery_pins_guid_identity_listings() {
 	planning_setup_env
 
-	planning_run_zxfer "$FIXTURE_DIR/noop" -R \
+	planning_run_zxfer "$FIXTURE_DIR/incremental" -R \
 		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	assertEquals "recursive run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
 		0 $?
 
+	planning_assert_log_has_line \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
 	planning_assert_log_has_line \
 		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
 	planning_assert_log_has_line \
@@ -237,7 +247,11 @@ test_recursive_discovery_pins_guid_identity_listings() {
 }
 
 # Invariant: identical source/destination guid sets are a proven no-op —
-# exit 0 with zero mutating, send, or receive argv.
+# exit 0 with zero mutating, send, or receive argv. Since Phase 8 the fast
+# recursive proof covers local sources too: a clean no-op is proven from the
+# two sorted identity listings alone (one source, one destination) and never
+# pays for the creation-order source listing or the destination existence
+# check.
 test_identical_source_and_destination_is_a_proven_noop() {
 	planning_setup_env
 
@@ -247,6 +261,16 @@ test_identical_source_and_destination_is_a_proven_noop() {
 		0 $?
 
 	assertTrue "no-op run must still have performed discovery" "[ -s '$ZFS_LOG' ]"
+	planning_assert_log_has_line \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
+	planning_assert_log_has_line \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	assertEquals "a proven clean no-op costs exactly the two proof identity listings" \
+		2 "$(wc -l <"$ZFS_LOG" | tr -d ' ')"
+	assertFalse "a proven clean no-op must skip the creation-order source listing" \
+		"grep -q -- '-s creation' '$ZFS_LOG'"
+	assertFalse "a proven clean no-op must skip the destination existence check" \
+		"grep -Fxq 'list -H $ZXFER_MOCKBIN_DEST_MAPPED_ROOT' '$ZFS_LOG'"
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
 }
@@ -279,10 +303,15 @@ test_incremental_dryrun_issues_zero_zfs_argv_and_renders_no_plan() {
 
 # Invariant: a failing source snapshot listing fails closed — the zfs exit
 # status is preserved, a structured failure report lands on stderr, and no
-# mutating argv is ever issued.
+# mutating argv is ever issued. Both source listing shapes are forced to
+# fail: the proof's identity listing failure surfaces as a stream mismatch
+# and falls back to full discovery, whose creation-order listing failure
+# then fails the run closed.
 test_source_snapshot_listing_failure_fails_closed() {
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/noop" srcfail
+	planning_force_manifest_failure \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT" 2
 	planning_force_manifest_failure \
 		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT" 2
 
@@ -299,9 +328,11 @@ test_source_snapshot_listing_failure_fails_closed() {
 # Invariant: an operational destination existence-check failure (non-zero
 # exit WITHOUT a "dataset does not exist" diagnostic) is not misread as a
 # missing dataset — zxfer fails closed instead of creating or sending.
+# Cloned from the incremental fixture: the existence check only runs in full
+# discovery, which a clean no-op would short-circuit via the proof path.
 test_destination_existence_check_operational_failure_fails_closed() {
 	planning_setup_env
-	planning_clone_state "$FIXTURE_DIR/noop" dstexistfail
+	planning_clone_state "$FIXTURE_DIR/incremental" dstexistfail
 	planning_force_manifest_failure "list -H $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" 2
 
 	planning_run_zxfer "$STATE_DIR" -R \
@@ -364,11 +395,14 @@ test_live_recheck_batched_view_is_generation_gated() {
 
 	assertFalse "covered datasets must be served from the batched view, never per-dataset depth-1 rechecks" \
 		"grep -q '^list -H -d 1 ' '$ZFS_LOG'"
-	assertEquals "exactly one batched destination listing for discovery plus one per consumed destination mutation generation" \
-		4 "$(grep -cFx "$l_view_key" "$ZFS_LOG")"
+	# Occurrence 1 is the fast no-op proof's destination identity listing
+	# (it mismatches and falls back), occurrence 2 is discovery, then one
+	# batched view per consumed destination mutation generation.
+	assertEquals "one proof listing plus one discovery listing plus one batched view per consumed destination mutation generation" \
+		5 "$(grep -cFx "$l_view_key" "$ZFS_LOG")"
 
 	l_prev_receive=0
-	l_view_occurrence=1
+	l_view_occurrence=2
 	for l_dataset_suffix in "" /child1 /child2; do
 		l_view_occurrence=$((l_view_occurrence + 1))
 		l_view=$(planning_log_nth_line_number "$l_view_key" "$l_view_occurrence")
@@ -418,6 +452,10 @@ test_same_name_divergent_guid_replans_incremental_send_not_noop() {
 	assertEquals "divergent-guid run should exit 0 against the canned zfs; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
 		0 $?
 
+	# The fast no-op proof must detect the guid divergence and fall back to
+	# full creation-order discovery instead of declaring a clean no-op.
+	planning_assert_log_has_line \
+		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
 	# Work is planned for the diverged root dataset: NOT a clean no-op.
 	planning_assert_log_has_line \
 		"send -I $ZXFER_MOCKBIN_SOURCE_ROOT@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT@snap3"

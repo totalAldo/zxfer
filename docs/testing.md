@@ -183,17 +183,16 @@ through the broader peer suite alone.
 
 The top-level launcher and `tests/test_helper.sh` both source
 `src/zxfer_modules.sh`, so runtime module order is defined in one place rather
-than being duplicated across test fixtures, including the owned-locking layer
-that now sits ahead of reporting and remote-host helpers and the supervised
-background-job layer that now sits between runtime and the higher-level
-replication modules.
+than being duplicated across test fixtures. The path-security and owned-lock
+helpers live as sections of `src/zxfer_runtime.sh` (Phase 8 merge), and the
+supervision-lite background-job layer sits between runtime and the
+higher-level replication modules.
 
-`test_zxfer_locking.sh` owns the shared lock/lease primitive itself:
-metadata render/parse, owner-identity capture, stale-owner reaping, checked
-release mismatches, and trap-time owned-lock cleanup helpers. The remote-host,
-reporting, and runtime suites then cover the subsystem adapters that apply
-that shared metadata-bearing format to ssh control-socket locks and leases,
-remote capability-cache locks, and `ZXFER_ERROR_LOG` locking.
+`test_zxfer_locking.sh` owns the owned-lock primitive itself (now defined in
+`src/zxfer_runtime.sh` and sourced through that module): pid+start-token
+metadata render/parse, owner-identity capture, stale-owner reaping, and
+checked release mismatches. The reporting suite covers the
+`ZXFER_ERROR_LOG` lock, the primitive's only cross-process consumer.
 
 Focused tests that exercise `zxfer_init_globals()` should source through at
 least the property-reconcile boundary, or anything later in
@@ -580,8 +579,9 @@ Artifacts:
 No-op cases seed the destination first and measure the second run:
 `chain_local_noop`, `fanout_local_j4_props_noop`, `chain_remote_mock_noop`,
 and `chain_remote_mock_pull_noop`. The pull variant uses `-O localhost` only
-(mock ssh origin, local destination) so it exercises the remote-origin fast
-no-op proof path.
+(mock ssh origin, local destination). Since Phase 8 the fast recursive no-op
+proof covers both the local and the pull no-op cases; only `-T` runs and
+gated option combinations still take full discovery on a clean no-op.
 
 Incremental cases seed the destination first, then create one newer snapshot
 and measure the run that sends only that increment: `chain_local_incr`

@@ -39,23 +39,6 @@ src/zxfer_exec.sh
   553:		if l_role_tokens=$(zxfer_render_ssh_transport_tokens_for_host \
   569:		if l_role_tokens=$(zxfer_render_ssh_transport_tokens_for_host \
 
-src/zxfer_locking.sh
-  162:		return 1
-  165:		return 1
-  169:		return 1
-  215:	if ! (
-  220:	) 2>/dev/null; then
-  256:				return 1
-  286:	done <"$l_metadata_path"
-  313:		return 1
-  418:		return 1
-
-src/zxfer_path_security.sh
-  337:		return 1
-  349:		l_ls_path=./$l_ls_path
-  399:		l_ls_path=./$l_ls_path
-  465:		return 1
-
 src/zxfer_property_reconcile.sh
   98:		l_effective_readonly_properties=$(printf '%s' ",$l_effective_readonly_properties," |
   437:					exit "$?"
@@ -189,45 +172,58 @@ src/zxfer_reporting.sh
   1399:			zxfer_echoV "Failure beep failed; skipping."
 
 src/zxfer_runtime.sh
-  263:	if ! kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null; then
-  264:		return 0
-  266:	g_zxfer_cleanup_pid_abort_failure_message="Failed to signal cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid)."
-  267:	return 1
-  294:		zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
-  295:		return 0
-  388:			printf '%s\n' "$l_requested_tmpdir"
-  389:			return 0
-  636:			l_cleanup_status=1
-  795:	zxfer_create_runtime_artifact_file_in_parent "$l_parent_dir" ".$l_prefix"
-  807:	if (
-  809:	) 2>/dev/null; then
-  956:	l_stage_file=$1
-  957:	l_target_path=$2
-  959:	[ -n "$l_stage_file" ] || return 1
-  960:	[ -n "$l_target_path" ] || return 1
-  961:	l_status=0
-  962:	mv -f "$l_stage_file" "$l_target_path" 2>/dev/null || l_status=$?
-  963:	if [ "$l_status" -ne 0 ]; then
-  964:		return "$l_status"
-  966:	zxfer_unregister_runtime_artifact_path "$l_stage_file"
-  967:	return 0
-  1089:			printf '%s\n' "${l_line#"$l_key"=}"
-  1090:			return 0
-  1113:		return "$l_status"
-  1327:		[ -f "$l_cache_target_path" ] || return 1
-  1333:		return "$l_status"
-  1338:		return "$l_status"
-  1590:		g_zxfer_profile_start_ms=""
-  1909:					l_source_context_status=$?
-  1911:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
-  1946:		g_zxfer_failure_class=dependency
-  1947:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
-  1965:					l_destination_context_status=$?
-  1967:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
-  2002:		g_zxfer_failure_class=dependency
-  2003:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
-  2043:		g_zxfer_failure_class=dependency
-  2044:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
+  357:		return 1
+  369:		l_ls_path=./$l_ls_path
+  419:		l_ls_path=./$l_ls_path
+  485:		return 1
+  651:		return 1
+  654:		return 1
+  658:		return 1
+  704:	if ! (
+  709:	) 2>/dev/null; then
+  745:				return 1
+  775:	done <"$l_metadata_path"
+  802:		return 1
+  907:		return 1
+  1183:	if ! kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null; then
+  1184:		return 0
+  1186:	g_zxfer_cleanup_pid_abort_failure_message="Failed to signal cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid)."
+  1187:	return 1
+  1214:		zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
+  1215:		return 0
+  1308:			printf '%s\n' "$l_requested_tmpdir"
+  1309:			return 0
+  1556:			l_cleanup_status=1
+  1715:	zxfer_create_runtime_artifact_file_in_parent "$l_parent_dir" ".$l_prefix"
+  1727:	if (
+  1729:	) 2>/dev/null; then
+  1876:	l_stage_file=$1
+  1877:	l_target_path=$2
+  1879:	[ -n "$l_stage_file" ] || return 1
+  1880:	[ -n "$l_target_path" ] || return 1
+  1881:	l_status=0
+  1882:	mv -f "$l_stage_file" "$l_target_path" 2>/dev/null || l_status=$?
+  1883:	if [ "$l_status" -ne 0 ]; then
+  1884:		return "$l_status"
+  1886:	zxfer_unregister_runtime_artifact_path "$l_stage_file"
+  1887:	return 0
+  2009:			printf '%s\n' "${l_line#"$l_key"=}"
+  2010:			return 0
+  2033:		return "$l_status"
+  2247:		[ -f "$l_cache_target_path" ] || return 1
+  2253:		return "$l_status"
+  2258:		return "$l_status"
+  2510:		g_zxfer_profile_start_ms=""
+  2829:					l_source_context_status=$?
+  2831:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
+  2866:		g_zxfer_failure_class=dependency
+  2867:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
+  2885:					l_destination_context_status=$?
+  2887:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
+  2922:		g_zxfer_failure_class=dependency
+  2923:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
+  2963:		g_zxfer_failure_class=dependency
+  2964:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
 
 src/zxfer_send_receive.sh
   126:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |

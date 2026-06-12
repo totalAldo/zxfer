@@ -26,8 +26,6 @@ create_minimal_launcher_fixture() {
 
 	cat >"$l_fixture_dir/src/zxfer_modules.sh" <<'EOF'
 #!/bin/sh
-. "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_path_security.sh"
-. "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_locking.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_reporting.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_exec.sh"
 . "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_dependencies.sh"
@@ -61,10 +59,6 @@ zxfer_beep() {
 }
 EOF
 
-	cat >"$l_fixture_dir/src/zxfer_locking.sh" <<'EOF'
-#!/bin/sh
-EOF
-
 	cat >"$l_fixture_dir/src/zxfer_exec.sh" <<'EOF'
 #!/bin/sh
 EOF
@@ -87,10 +81,6 @@ zxfer_register_runtime_traps() {
 zxfer_init_variables() {
 	printf '%s\n' "zxfer_init_variables" >>"${ZXFER_TEST_LOG:?}"
 }
-EOF
-
-	cat >"$l_fixture_dir/src/zxfer_path_security.sh" <<'EOF'
-#!/bin/sh
 EOF
 
 	cat >"$l_fixture_dir/src/zxfer_remote_hosts.sh" <<'EOF'

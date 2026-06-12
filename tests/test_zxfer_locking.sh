@@ -1,6 +1,7 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_locking.sh helpers.
+# shunit2 tests for the owned-lock helpers (the OWNED LOCK / LEASE
+# COORDINATION section of src/zxfer_runtime.sh, formerly zxfer_locking.sh).
 #
 # Lock metadata is owner pid + process start token only (V2). These tests pin
 # pid+start-token liveness, stale reaping, checked release, and the
@@ -13,7 +14,7 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-zxfer_source_runtime_modules_through "zxfer_locking.sh"
+zxfer_source_runtime_modules_through "zxfer_runtime.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_locking"
@@ -189,7 +190,7 @@ test_zxfer_owned_lock_create_and_release_memoize_one_main_shell_ps_capture() {
 	capture_count=$(cat "$capture_count_file")
 
 	unset -f zxfer_get_process_start_token
-	zxfer_source_runtime_modules_through "zxfer_locking.sh"
+	zxfer_source_runtime_modules_through "zxfer_runtime.sh"
 	setUp
 
 	assertEquals "Owned lock creation should succeed with the mocked start-token probe." \

@@ -301,6 +301,11 @@ zxfer_mockbin_write_fixture_state_dir() {
 	zxfer_mockbin_emit_snapshot_records "$ZXFER_MOCKBIN_SOURCE_ROOT" \
 		"$l_mockbin_state_datasets" "$l_mockbin_state_src_snaps" creation \
 		>"$l_mockbin_state_dir/src_snapshots.list" || return 1
+	# Plain `zfs list -r -t snapshot` (no -s creation) groups dataset-major;
+	# this answers the fast recursive no-op proof's source identity listing.
+	zxfer_mockbin_emit_snapshot_records "$ZXFER_MOCKBIN_SOURCE_ROOT" \
+		"$l_mockbin_state_datasets" "$l_mockbin_state_src_snaps" dataset \
+		>"$l_mockbin_state_dir/src_snapshots_dataset.list" || return 1
 	zxfer_mockbin_emit_snapshot_records "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
 		"$l_mockbin_state_datasets" "$l_mockbin_state_dst_snaps" dataset \
 		>"$l_mockbin_state_dir/dst_snapshots.list" || return 1
@@ -342,6 +347,9 @@ zxfer_mockbin_write_fixture_state_dir() {
 		printf '%s\t%s\t%s\n' \
 			"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT" \
 			src_snapshots.list 0
+		printf '%s\t%s\t%s\n' \
+			"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT" \
+			src_snapshots_dataset.list 0
 		printf '%s\t%s\t%s\n' \
 			"list -H $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" dst_exists.list 0
 		printf '%s\t%s\t%s\n' \

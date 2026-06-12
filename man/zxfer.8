@@ -540,10 +540,11 @@ is greater than 1. The default is 1, which disables background sends and keeps
 source snapshot discovery on the serial recursive listing path. Raising this
 value can hide WAN latency or speed up large replications, but will also
 increase memory, CPU and I/O load. Source listing runs as a tracked background
-helper with staged stderr and registered PID cleanup. The long-lived
-send/receive workers launched for this path run under a shared supervisor that
-records launch/completion metadata and tears them down through validated
-process-group or owned-child-set cleanup instead of signaling a bare
+helper with staged stderr and PID cleanup. The long-lived
+send/receive workers launched for this path run supervision-lite: each job is
+one backgrounded job shell that records its own exit status to a per-run
+status file, and teardown signals the job's setsid process group or its
+tracked direct children instead of a bare
 wrapper-shell PID. zxfer also serializes conflicting ancestor/descendant
 destination receives on the same target so parent and child datasets do not
 receive concurrently, and its ready queue skips blocked descendants to start
@@ -724,10 +725,11 @@ pre-OpenZFS 2.0 destinations.
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
 profiling counters plus startup latency, trap-cleanup timing, and accumulated
 stage timings for ssh setup, snapshot listing, and diff/sort hot paths, along
-with runtime artifact/cache-object counts, command-rendering counts, live
-destination snapshot recheck counts, ssh control-socket wait,
-remote-capability cache wait, capability-bootstrap source, and direct remote
-helper-probe counters. While the run is active it also prints prefixed live
+with runtime temp-file counts, command-rendering counts, live destination
+snapshot recheck counts, ssh/zfs invocation counts by role, and direct remote
+helper-probe counters. Counter keys are stable across releases; counters for
+machinery that no longer exists (capability cache waits, cache-object writes,
+socket lock waits) still emit and always read 0. While the run is active it also prints prefixed live
 remote ssh commands, remote probe commands, and any ssh control-socket
 check/open commands before each execution so slow startup or remote-probe phases are
 visible in real time.

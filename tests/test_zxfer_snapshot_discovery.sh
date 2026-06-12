@@ -4727,6 +4727,13 @@ test_get_zfs_list_skips_snapshot_record_caches_for_recursive_noop_without_later_
 			g_option_d_delete_destination_snapshots=1
 			g_option_P_transfer_property=0
 			g_option_o_override_property=""
+			# Local recursive runs are proof-eligible since Phase 8; force
+			# the fallback so this test keeps pinning the full-discovery
+			# no-op record-cache skips.
+			zxfer_try_fast_recursive_noop_discovery() {
+				g_source_snapshot_fast_noop_attempted=1
+				return 1
+			}
 			zxfer_write_source_snapshot_list_to_file() {
 				printf '%s\t%s\n' "tank/src@snapA" "guidA" >"$1"
 				: >"$2"
@@ -5110,6 +5117,57 @@ full-diff-planning" "$(cat "$full_discovery_log")"
 		"$output" "fast_attempted=1"
 	assertContains "Fallback discovery should be allowed to prove the all-excluded no-op." \
 		"$output" "source_list=<>"
+}
+
+# Probe zxfer_fast_recursive_noop_discovery_is_eligible with a clean option
+# state plus the supplied overrides; prints the helper's exit status.
+# Errexit-safe so the suite's set -e tests cannot abort the caller.
+zxfer_test_noop_proof_eligibility_status() {
+	l_eligibility_status=0
+	(
+		g_option_O_origin_host=""
+		g_option_T_target_host=""
+		g_option_R_recursive="tank/src"
+		g_option_s_make_snapshot=0
+		g_option_m_migrate=0
+		g_option_P_transfer_property=0
+		g_option_o_override_property=""
+		g_option_e_restore_property_mode=0
+		g_option_k_backup_property_mode=0
+		for l_eligibility_override in "$@"; do
+			eval "$l_eligibility_override"
+		done
+		zxfer_fast_recursive_noop_discovery_is_eligible
+	) || l_eligibility_status=$?
+	printf '%s\n' "$l_eligibility_status"
+	return 0
+}
+
+test_fast_recursive_noop_discovery_eligibility_gates() {
+	# Local sources are eligible since Phase 8: -O is no longer consulted.
+	# Every other gate stays: -R required, -T absent, and the no-op-unsafe
+	# options (-s/-m/-P/-o/-e/-k) must all be off.
+	assertEquals "A plain local recursive run must be proof-eligible." \
+		0 "$(zxfer_test_noop_proof_eligibility_status)"
+	assertEquals "A remote-origin recursive run must stay proof-eligible." \
+		0 "$(zxfer_test_noop_proof_eligibility_status \
+			"g_option_O_origin_host=origin.example")"
+	assertEquals "Non-recursive runs must stay ineligible." \
+		1 "$(zxfer_test_noop_proof_eligibility_status \
+			"g_option_R_recursive=")"
+	assertEquals "-T target-host runs must stay ineligible." \
+		1 "$(zxfer_test_noop_proof_eligibility_status \
+			"g_option_T_target_host=target.example")"
+	for l_eligibility_gate in \
+		"g_option_s_make_snapshot=1" \
+		"g_option_m_migrate=1" \
+		"g_option_P_transfer_property=1" \
+		"g_option_o_override_property=copies=2" \
+		"g_option_e_restore_property_mode=1" \
+		"g_option_k_backup_property_mode=1"; do
+		assertEquals "Runs with $l_eligibility_gate must stay ineligible for the no-op proof." \
+			1 "$(zxfer_test_noop_proof_eligibility_status "$l_eligibility_gate")"
+	done
 }
 
 test_try_fast_recursive_noop_discovery_preserves_setup_failures() {

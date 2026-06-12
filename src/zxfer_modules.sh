@@ -47,13 +47,9 @@ zxfer_source_module() {
 	. "$ZXFER_SOURCE_MODULES_ROOT/src/$l_module"
 }
 
-# Foundation: path validation, reporting, command rendering, and local dependency resolution.
-zxfer_source_module zxfer_path_security.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_path_security.sh" ] && return 0
-
-zxfer_source_module zxfer_locking.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_locking.sh" ] && return 0
-
+# Foundation: reporting, command rendering, and local dependency resolution.
+# Path-security and owned-lock helpers live in zxfer_runtime.sh (merged in
+# Phase 8); every consumer invokes them at call time, after all modules load.
 zxfer_source_module zxfer_reporting.sh
 [ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_reporting.sh" ] && return 0
 

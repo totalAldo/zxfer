@@ -259,12 +259,12 @@ zxfer_ensure_parallel_available_for_source_jobs() {
 	return 0
 }
 
-# Purpose: Decide whether remote recursive discovery may use the identity-aware
-# no-op proof before the full creation-order source listing.
+# Purpose: Decide whether recursive discovery may use the identity-aware
+# no-op proof before the full creation-order source listing. Local and
+# remote-origin (-O) sources are both eligible; -T target-host runs are not.
 # Usage: Called by snapshot discovery before launching the heavier source
 # discovery path.
 zxfer_fast_recursive_noop_discovery_is_eligible() {
-	[ "${g_option_O_origin_host:-}" != "" ] || return 1
 	[ "${g_option_T_target_host:-}" = "" ] || return 1
 	[ "${g_option_R_recursive:-}" != "" ] || return 1
 	[ "${g_option_s_make_snapshot:-0}" -eq 0 ] || return 1
@@ -2749,8 +2749,8 @@ zxfer_snapshot_discovery_needs_destination_dataset_inventory() {
 	return 1
 }
 
-# Purpose: Try to prove a clean remote recursive no-op with identity-aware source
-# discovery before paying for the full creation-order source listing.
+# Purpose: Try to prove a clean recursive no-op (local or remote-origin source)
+# with identity-aware discovery before the full creation-order source listing.
 # Usage: Called by zxfer_get_zfs_list; returns 0 when no-op was proven and the
 # caller can return, returns 1 when the normal discovery path should continue.
 zxfer_try_fast_recursive_noop_discovery() {

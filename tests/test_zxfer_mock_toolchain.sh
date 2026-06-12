@@ -221,8 +221,8 @@ test_build_fixture_tree_layout_and_guids() {
 		"$(wc -l <"$CASE_DIR/fixtures/incremental/dst_snapshots.list" | tr -d '[:space:]')"
 	assertEquals "incremental depth-1 root rows" 2 \
 		"$(wc -l <"$CASE_DIR/fixtures/incremental/dst_d1_0.list" | tr -d '[:space:]')"
-	# 4 discovery rules + 3 per-dataset depth-1 rules.
-	assertEquals "manifest rule count" 7 \
+	# 5 discovery rules + 3 per-dataset depth-1 rules.
+	assertEquals "manifest rule count" 8 \
 		"$(wc -l <"$CASE_DIR/fixtures/noop/manifest" | tr -d '[:space:]')"
 
 	assertTrue "every record needs a deterministic 19-digit guid" \
@@ -267,12 +267,18 @@ test_zxfer_noop_recursive_completes_without_mutation() {
 	assertFalse "no-op run should not receive" "grep -q '^receive ' '$ZFS_LOG'"
 
 	# Discovery shapes the current ./zxfer issues (log order is
-	# nondeterministic because discovery runs in background jobs).
+	# nondeterministic because discovery runs in background jobs). A clean
+	# recursive no-op is proven by the fast identity proof: one sorted
+	# source listing plus one sorted destination listing, with no
+	# creation-order listing and no destination existence check.
 	mocktest_assert_log_has_line \
-		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
-	mocktest_assert_log_has_line "list -H $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
 	mocktest_assert_log_has_line \
 		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	assertFalse "a proven clean no-op must skip the creation-order source listing" \
+		"grep -q -- '-s creation' '$ZFS_LOG'"
+	assertFalse "a proven clean no-op must skip the destination existence check" \
+		"grep -Fxq 'list -H $ZXFER_MOCKBIN_DEST_MAPPED_ROOT' '$ZFS_LOG'"
 }
 
 # Scenario (b) with -n: the current dry-run contract is that zxfer issues

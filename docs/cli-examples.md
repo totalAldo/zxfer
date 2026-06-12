@@ -63,11 +63,12 @@ Push to a remote destination:
 ```
 
 This end-of-run profile now includes startup latency before the first live
-send/receive pipeline, trap-cleanup timing, stage timings, and contention and
-reuse counters for ssh control-socket waits, remote-capability cache waits,
-capability-bootstrap sources (`live`, `cache`, `memory`), runtime
-artifact/cache-object churn, command rendering, live destination snapshot
-rechecks, and any remaining direct remote helper probes. While the run is
+send/receive pipeline, trap-cleanup timing, stage timings, ssh/zfs invocation
+counts by role, runtime temp-file churn, command rendering, live destination
+snapshot rechecks, and any remaining direct remote helper probes. Counter
+keys are stable across releases: counters for deleted machinery (capability
+cache waits, cache-object writes, socket lock waits) still emit and always
+read 0. While the run is
 active, `-V` also prints
 prefixed remote ssh commands, remote probe commands, and ssh control-socket
 check/open commands so a slow remote bootstrap shows the exact in-flight
@@ -138,9 +139,9 @@ If the helper is missing, zxfer fails closed during setup; if it is
 incompatible, the source-discovery pipeline fails instead of silently falling
 back to serial discovery. The
 source-discovery helper is still tracked for cleanup by PID, while long-lived
-send/receive workers run under the shared background-job supervisor, so abort
-cleanup validates the tracked process group or owned child set instead of
-signaling a bare wrapper-shell PID. The send/receive scheduler treats
+send/receive workers run supervision-lite, so abort cleanup signals the job's
+setsid process group or its tracked direct children instead of a bare
+wrapper-shell PID. The send/receive scheduler treats
 ancestor/descendant destination receives on the same target as mutually
 exclusive, but it skips blocked descendants and starts later independent
 datasets while job slots remain.

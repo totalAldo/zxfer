@@ -17,11 +17,6 @@ responsibility boundary.
 
 - [../src/zxfer_modules.sh](../src/zxfer_modules.sh): canonical loader and
   source-order entry point for the runtime modules
-- [../src/zxfer_path_security.sh](../src/zxfer_path_security.sh): filesystem
-  ownership/mode checks, secure-path validation, symlink-aware path guards
-- [../src/zxfer_locking.sh](../src/zxfer_locking.sh): shared owned-lock and
-  lease metadata, owner-identity capture, stale-owner validation/reaping,
-  checked release, and trap-time owned-lock cleanup registration helpers
 - [../src/zxfer_reporting.sh](../src/zxfer_reporting.sh): structured failure
   reporting, verbose output helpers, usage errors, and operator-facing status
 - [../src/zxfer_exec.sh](../src/zxfer_exec.sh): shell-safe token handling,
@@ -29,21 +24,24 @@ responsibility boundary.
 - [../src/zxfer_dependencies.sh](../src/zxfer_dependencies.sh): secure PATH
   computation, required-tool lookup, and local dependency validation
 - [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh): runtime/session
-  initialization, shared per-run defaults, validated temp-root selection,
-  runtime-artifact allocation/readback/cleanup, runtime-owned cache staging,
-  and trap handling
+  initialization, shared per-run defaults, the validated per-run temp root and
+  its child allocators, trap handling, and two merged sections (Phase 8):
+  the path-security helpers (filesystem ownership/mode checks, symlink-aware
+  path guards, secure staging) and the owned-lock helpers (pid+start-token
+  lock metadata, stale-owner validation/reaping, checked release)
 - [../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh):
   supervision-lite long-lived background jobs: an in-memory job registry,
   per-job status files written by the job shell itself, rolling completion
   queue notifications, and process-group (setsid) or cleanup-wrapper teardown
 - [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh): remote helper
-  resolution, scoped requested-tool capability handshakes and caches, ssh
-  control-socket management, and subsystem-specific adapters around the shared
-  owned-locking layer
+  resolution, one fail-closed per-run capability probe per host parsed into
+  in-memory state, and per-run per-role ssh control-socket management under
+  the private temp root
 - [../src/zxfer_cli.sh](../src/zxfer_cli.sh): CLI parsing, option validation,
   and compression command interpretation
 - [../src/zxfer_snapshot_state.sh](../src/zxfer_snapshot_state.sh): snapshot
-  record parsing, normalization, and cached snapshot index state
+  record parsing, normalization, flat per-run snapshot record files, and the
+  generation-gated live destination view
 - [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh): backup
   metadata accumulation, path derivation, and secure exact-keyed lookup/read/write flows
 - [../src/zxfer_property_reconcile.sh](../src/zxfer_property_reconcile.sh):
@@ -85,15 +83,16 @@ effects or generic catch-all modules.
 
 ## Runtime Artifact Layer
 
-The runtime layer owns transient artifacts that live under the validated
-runtime temp root: temp files, temp directories, staged command or probe
-captures, staged payload files, and runtime-owned cache objects.
-
-Callers should allocate those artifacts through
-[../src/zxfer_runtime.sh](../src/zxfer_runtime.sh), reload staged contents
-through the shared readback helper, and let `zxfer_trap_exit()` clean up the
-registered paths. This keeps partial payloads out of shared `g_*` scratch
-state and preserves exact nonzero readback failures for the caller.
+All run-private transient state lives under one per-run 0700 temp root,
+created with a single `mktemp -d` after TMPDIR is validated once (single-pass
+physical resolution plus owner/mode checks). Allocators in
+[../src/zxfer_runtime.sh](../src/zxfer_runtime.sh) hand out
+`<prefix>.<counter>` children by redirection or `mkdir`; there is no per-file
+registration, unregistration, or readback ceremony. `zxfer_trap_exit()`
+removes the whole root with one `rm -rf` after background jobs, ssh control
+sockets, and owned locks have been torn down. Staged contents reload through
+the shared readback helper, which keeps partial payloads out of shared `g_*`
+scratch state and preserves exact nonzero readback failures for the caller.
 
 Not every staging flow belongs in that layer. Modules that intentionally stage
 files beside the final target to preserve same-directory atomic rename and
@@ -133,24 +132,23 @@ which traps TERM and reaps its descendant set before exiting. That keeps the
 remaining local helper paths on validated ownership tracking instead of bare
 wrapper-shell PID teardown.
 
-## Owned Lock And Lease Layer
+## Owned Lock Layer
 
-Long-lived coordination state no longer lives in ad hoc pid files or empty
-lock directories. [../src/zxfer_locking.sh](../src/zxfer_locking.sh) owns one
-metadata-bearing directory format for:
-
-- ssh control-socket lock directories
-- per-process ssh lease entries under `leases/`
-- remote capability-cache lock directories
-- `ZXFER_ERROR_LOG` append locks
-
-Each native owned entry records owner PID, process-start identity, hostname,
-purpose, and creation time inside the directory, validates that metadata
-before trusting an existing owner, reaps stale or corrupt owners only after
-validation, and treats release as a checked operation. Runtime trap cleanup
-tracks those owned paths separately from generic temp files and directories so
-zxfer can warn on release failures without deleting an entry that failed its
-ownership check.
+Cross-process coordination is now a single concern: the `ZXFER_ERROR_LOG`
+append lock. The generic owned-lock helpers live in the OWNED LOCK / LEASE
+COORDINATION section of [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh)
+(merged from the former locking module in Phase 8) and are also used by the
+runtime staging reap path. Lock identity is deliberately slim: a
+mode-0700 lock directory whose metadata file records only the owner pid and
+one memoized `ps` process-start token. Helpers validate that metadata before
+trusting an existing owner, treat missing or corrupt metadata as busy on
+first sighting (corrupt-reaping only after a sleep-and-recheck round so a
+concurrent winner inside its mkdir-to-publish window is never reaped), and
+treat release as a checked owner-match operation. The older lease entries,
+hostname/purpose/created-at metadata fields, ssh socket locks, and
+capability-cache locks were deleted with the machinery they coordinated:
+ssh control sockets and remote capability state are per-run now and need no
+cross-process locking.
 
 ## High-Level Replication Flow
 
@@ -160,19 +158,20 @@ ownership check.
    explicit init flow.
 3. Parse CLI options, validate combinations, and resolve source and
    destination execution context.
-4. Build identity-aware dataset and snapshot lists. Eligible remote-origin
-   recursive no-op runs first try the fast `name,guid` proof, and remote-target
-   `-T` destination discovery batches inventory, missing-root pool probing, and
-   snapshot listing into one target-side ssh shell invocation.
+4. Build identity-aware dataset and snapshot lists. Eligible recursive no-op
+   runs (local sources and `-O` pulls alike) first try the fast `name,guid`
+   proof, and remote-target `-T` destination discovery batches inventory,
+   missing-root pool probing, and snapshot listing into one target-side ssh
+   shell invocation.
 5. Inspect source versus destination state.
 6. Optionally delete destination-only snapshots.
 7. Transfer snapshots through explicit stage helpers:
    live recheck, seed decision, then final send/receive range. Seed-only
    receive `-F` is passed as an internal execution flag without mutating the
    parsed `g_option_*` state.
-8. For long-lived background work, spawn through the shared background-job
-   supervisor, wait by `job_id`, and abort remaining supervised jobs through
-   validated process-group or owned-child-set cleanup on the first failure.
+8. For long-lived background work, spawn supervision-lite jobs through the
+   background-job layer, wait by `job_id`, and abort remaining jobs through
+   process-group or tracked-child cleanup on the first failure.
    Parallel send/receive scheduling also serializes conflicting
    ancestor/descendant destination datasets on the same target while a
    ready-queue pass skips blocked descendants and starts later independent
@@ -210,7 +209,7 @@ flowchart TD
     C --> D["Register zxfer_trap_exit() and run zxfer_init_globals()"]
     D --> E["Parse flags with zxfer_read_command_line_switches()"]
     E --> F["Validate combinations with zxfer_consistency_check()"]
-    F --> G["Preload remote capability cache state when -O or -T is configured"]
+    F --> G["Probe remote capabilities once per host into in-memory state when -O or -T is configured"]
     G --> H["Resolve local and needed remote helper paths with zxfer_init_variables()"]
     H --> I["Enter zxfer_run_zfs_mode_loop()"]
     I --> J["Start one pass in zxfer_run_zfs_mode()"]
@@ -227,14 +226,14 @@ flowchart TD
     S --> T["Optional grandfather deletion checks via -g"]
     T --> U["Run zxfer_copy_filesystems()"]
     N --> V{"Repeat pass?"}
-    U --> W["Fill a ready queue with supervised send/receive jobs, skipping blocked destination descendants while independent work exists"]
-    W --> X["Wait for supervised background send jobs by job_id and run deferred post-seed property reconcile"]
+    U --> W["Fill a ready queue with background send/receive jobs, skipping blocked destination descendants while independent work exists"]
+    W --> X["Wait for background send jobs by job_id and run deferred post-seed property reconcile"]
     X --> Y["Relaunch services after -m if needed"]
     Y --> V
     V -- "yes: -Y and send/destroy work occurred" --> J
     V -- "no" --> Z["Invoke final -k backup metadata write or dry-run preview hook"]
     Z --> AA["Normal exit path"]
-    AA --> AB["zxfer_trap_exit(): abort supervised long-lived background jobs, close ssh control sockets, release registered owned locks or leases, clean runtime artifacts, emit profiling and structured failure report"]
+    AA --> AB["zxfer_trap_exit(): abort remaining background jobs, close the per-run ssh control sockets, release any held owned lock, remove the per-run temp root, emit profiling and structured failure report"]
 ```
 
 ### Snapshot Discovery And No-Op Proof
@@ -245,11 +244,12 @@ identity-aware at this layer: source and destination snapshot lists use
 `zfs list -Hr -o name,guid -t snapshot`, and destination records are normalized
 by rewriting only the leading destination dataset prefix.
 
-For eligible recursive remote-origin pulls, `zxfer_try_fast_recursive_noop_discovery()`
-attempts a clean no-op proof before the heavier creation-order source
-discovery path. Eligibility is intentionally narrow: `-O` and `-R` must be
-active, `-T` must be absent, and snapshot creation, migration, property
-transfer or restore, backup metadata, and property overrides must be inactive.
+For eligible recursive runs — local sources and remote-origin `-O` pulls
+alike since Phase 8 — `zxfer_try_fast_recursive_noop_discovery()` attempts a
+clean no-op proof before the heavier creation-order source discovery path.
+Eligibility is intentionally narrow: `-R` must be active, `-T` must be
+absent, and snapshot creation, migration, property transfer or restore,
+backup metadata, and property overrides must be inactive.
 The proof starts one recursive source `name,guid` producer even when `-j` is
 configured, starts one normalized destination `name,guid` producer, sorts both
 streams through private FIFOs, and uses `cmp -s` to prove equality. `-U`
@@ -258,7 +258,8 @@ enabled because a proven no-op leaves no source transfer queue, destination
 delete queue, or property/create work to consume those checks. A mismatch,
 missing destination, excluded-dataset uncertainty, or stream failure falls back
 to full discovery or fails through the same staged stderr paths used by the
-normal discovery flow.
+normal discovery flow. A proven clean no-op never runs the destination
+existence check or the creation-order source listing at all.
 
 Remote target discovery has a separate `-T` optimization in
 `zxfer_run_remote_destination_discovery_batch_to_files()`. The target-side
@@ -322,9 +323,9 @@ flowchart TD
     O -- "yes" --> P
     O -- "no" --> Q["Seed already satisfies transfer range"]
     P --> R{"Background send/receive allowed?"}
-    R -- "yes" --> S["Wait for any active destination ancestor or descendant on the same target before spawning the supervised receive"]
+    R -- "yes" --> S["Wait for any active destination ancestor or descendant on the same target before spawning the background receive"]
     R -- "no" --> T["Run the send/receive in the foreground"]
-    S --> U["Spawn the supervised send/receive job"]
+    S --> U["Spawn the supervision-lite send/receive job"]
     T --> V{"Seed created a deferred property follow-up?"}
     U --> V
     Q --> V
@@ -385,8 +386,8 @@ sequenceDiagram
 
     Operator->>Launcher: run zxfer -v -O user@origin -R zroot backup/zroot -j8 -z
     Launcher->>Launcher: initialize local state and determine the needed remote helper scope
-    Launcher->>Origin: resolve remote helper capabilities under a metadata-coordinated cache lock keyed by PATH, transport policy, and requested helper scope
-    Launcher->>Launcher: reuse matching remote capability state for zfs, parallel, and compression/helper heads when needed
+    Launcher->>Origin: probe remote helper capabilities once with one fail-closed ssh round trip
+    Launcher->>Launcher: serve later zfs, parallel, and compression helper lookups from the per-run in-memory capability state
     Launcher->>Local: list destination datasets and snapshots
     Launcher->>Origin: for eligible no-snapshot recursive pulls, list source snapshot identity records with one recursive stream
     alt source and destination identity records match after excludes
@@ -396,14 +397,14 @@ sequenceDiagram
         Launcher->>Origin: fan out per-dataset snapshot listing via the resolved origin-host parallel helper
     end
     Launcher->>Launcher: build the iteration list; clean no-op runs return before SSH control-socket setup
-    Launcher->>Origin: open or join the metadata-coordinated ssh control socket only when send/delete/property work exists
+    Launcher->>Origin: open the per-run ssh control master (-M -S under the private temp root) only when send/delete/property work exists
     loop fill ready queue while job slots remain
         Launcher->>Origin: start remote zfs send ... | remote compression helper
         Origin-->>Launcher: compressed replication stream over ssh
         Launcher->>Local: local decompressor | zfs receive ...
     end
     Launcher->>Launcher: wait for remaining background jobs and deferred property work
-    Launcher->>Origin: close the control socket during trap cleanup after releasing the last validated lease
+    Launcher->>Origin: close the per-run control master once (-O exit) during trap cleanup
     Launcher-->>Operator: success or structured failure report
 ```
 
@@ -423,7 +424,7 @@ sequenceDiagram
 
     Operator->>Launcher: run zxfer -v -T backup@example.com -R tank/src backup/dst -z
     Launcher->>Launcher: initialize local state and resolve local helper scope
-    Launcher->>Target: resolve target helper capabilities under the metadata-bearing capability cache
+    Launcher->>Target: probe target helper capabilities once with one fail-closed ssh round trip
     Launcher->>Local: list source datasets and name,guid snapshots
     Launcher->>Target: run one destination discovery batch through sh -c
     Target-->>Launcher: stream snapshot_stdout and return inventory/status/stderr sections
@@ -433,19 +434,17 @@ sequenceDiagram
         Local-->>Launcher: compressed replication stream
         Launcher->>Target: remote decompressor | zfs receive ...
     end
-    Launcher->>Launcher: wait for supervised jobs and deferred property work
+    Launcher->>Launcher: wait for background jobs and deferred property work
     Launcher-->>Operator: success or structured failure report
 ```
 
-The ssh control-socket lock, per-process lease entries, and the per-host remote
-capability cache lock now share one metadata-bearing owned-directory format.
-Native `.lock` and `lease.*` paths are therefore directories with owner
-metadata rather than bare pid files. That lets sibling zxfer processes
-validate owner identity, reap stale or corrupt entries, and fail closed on
-mismatched release attempts instead of open-coding separate pid-file and
-bare-directory conventions. Older plain-file or pid-directory cache artifacts
-are no longer supported; if a reused cache root still contains them, operators
-must clear the stale entries before rerunning a current release.
+SSH control sockets and remote capability state are strictly per-run: the
+socket is a short `ssh-<role>.sock` path under the private per-run temp root
+(with a short-socket-root fallback for long TMPDIR paths), and capability
+answers live only in this process's memory. Nothing remote-related is shared
+between concurrent zxfer processes, so no socket locks, leases, or cache
+files exist to coordinate or clean up; trap cleanup closes each opened
+master once with `-O exit` before the temp root is removed.
 
 ### Example: Diverged Destination With `-d`, `-F`, And `-Y`
 

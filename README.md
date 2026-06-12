@@ -77,7 +77,8 @@ Use remote compression:
 - Local and remote replication with `-O` and `-T`
 - Wrapper-style remote host specs such as `user@host pfexec` or `user@host doas`
 - Concurrent send/receive jobs with explicit per-dataset source discovery and
-  supervised long-lived cleanup via `-j`
+  supervision-lite job teardown (process-group signaling plus per-job status
+  files) via `-j`
 - Property replication, overrides, and unsupported-property skipping for the
   current OpenZFS 2.0+ support floor
 - Property backup and restore with `-k` and `-e`, using hardened metadata
@@ -90,11 +91,13 @@ Use remote compression:
   optional `ZXFER_ERROR_LOG` mirroring, and an explicit
   `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1` local-debug override
 - Per-run ssh control sockets and one in-memory remote capability probe per
-  host per run, with metadata-bearing lock coordination retained for
-  `ZXFER_ERROR_LOG` appends (validated stale-owner reaping and checked
-  release semantics)
+  host per run; all run-private temp state lives under one 0700 per-run temp
+  root removed in one pass at exit. The only cross-process lock left is the
+  `ZXFER_ERROR_LOG` append lock (slim pid+start-token metadata, validated
+  stale-owner reaping, checked release)
 - Identity-aware recursive snapshot discovery with `name,guid` records, plus a
-  fast clean-no-op proof for eligible remote-origin pulls
+  fast clean-no-op proof for eligible recursive runs — local sources and
+  remote-origin pulls alike
 - Batched remote-target destination discovery for `-T`, so destination dataset
   inventory, missing-root pool probing, and destination snapshot listing share
   one target-side ssh shell invocation
@@ -103,11 +106,12 @@ Use remote compression:
 
 - `-j jobs`: run concurrent send/receive jobs; when `jobs > 1`, zxfer uses
   explicit per-dataset source discovery instead of the serial recursive
-  listing. Source discovery runs as a tracked background helper with staged
-  stderr and registered PID cleanup, while long-lived send/receive workers run
-  under a shared supervisor that records launch/completion metadata and aborts
-  through validated process-group or owned-child-set cleanup instead of
-  signaling a bare wrapper PID. zxfer also serializes conflicting ancestor/descendant
+  listing (the clean no-op proof still runs one serial recursive stream
+  first). Source discovery runs as a tracked background helper with staged
+  stderr and PID cleanup, while send/receive workers run supervision-lite:
+  each job is one backgrounded job shell that writes its own status file,
+  and aborts signal the job's setsid process group (or its tracked child
+  set) instead of a bare wrapper PID. zxfer also serializes conflicting ancestor/descendant
   destination receives on the same target so parent and child datasets do not
   receive concurrently, and its ready queue skips blocked descendants to start
   later independent datasets while job slots remain. Local-origin and
@@ -117,8 +121,10 @@ Use remote compression:
   implementation compatible with the GNU Parallel-style options used by the
   rendered source-discovery pipeline
 - `-V`: enable very verbose debug output and end-of-run profiling counters,
-  including startup latency, trap-cleanup timing, runtime artifact/cache-object
-  counts, command-rendering counts, and live destination snapshot recheck counts
+  including startup latency, trap-cleanup timing, per-phase listing times,
+  ssh/zfs invocation counts, runtime temp-file counts, and live destination
+  snapshot recheck counts (counter keys are stable; counters for deleted
+  machinery read 0)
 - `-x pattern`: exclude datasets from recursive replication
 - `-Y`: repeat replication until no sends or destroys are performed, or until
   the built-in iteration cap is reached
@@ -182,18 +188,18 @@ directory that records the owner PID and process-start identity; zxfer
 validates and reaps stale or corrupt owners before reuse and checks release
 operations instead of silently suppressing failures.
 
-Long-lived parallel send/receive work runs under private supervisor control
-directories beneath the runtime temp root. Each job records launch and
-completion metadata, and trap-time abort validates the recorded process group
-or owned child set before signaling it. Abort cleanup is completion-aware: if
-`completion.tsv` is already present, or a failed signal is followed by a
-refreshed process snapshot that no longer shows the runner, zxfer treats the
-job as already finished and continues cleanup. It fails closed only when a
-refreshed snapshot still shows a live owned runner that cannot be validated or
-signaled, or when the completion record itself cannot be persisted. The same
-checked-cleanup rule now applies to ssh control-socket teardown during trap
-cleanup: if zxfer cannot close a managed socket after otherwise successful
-work, it exits nonzero instead of reporting a clean run.
+Long-lived parallel send/receive work runs supervision-lite: each job is one
+backgrounded job shell (in its own `setsid` process group when the host
+provides it) that writes its own exit status to a per-run status file and
+notifies the rolling completion queue itself. Trap-time abort signals the
+job's process group or its tracked direct children — never a bare wrapper
+PID — waits briefly, escalates once with KILL, and only then reaps; an
+un-reaped child's PID/PGID cannot be recycled, so the signal cannot reach an
+unrelated process. A missing or non-numeric status file at wait time is
+reported as a job failure. The same checked-cleanup rule applies to ssh
+control-socket teardown during trap cleanup: if zxfer cannot close a managed
+socket after otherwise successful work, it exits nonzero instead of
+reporting a clean run.
 
 For `-j` send/receive work, the scheduler also treats ancestor/descendant
 destination datasets on the same target as mutually exclusive. zxfer skips
@@ -204,12 +210,14 @@ other and degrade later into truncated-stream collateral failures.
 
 Recursive snapshot discovery remains identity-aware: initial source and
 destination snapshot records carry `name,guid` so a same-name snapshot with a
-different GUID cannot be treated as a clean match. For eligible `-O -R` pulls
-with a local destination and no snapshot creation, property, migration,
-restore, backup, or target-host work, zxfer first tries a fast no-op proof.
-That proof compares one recursive source `name,guid` stream with one
-normalized destination `name,guid` stream and falls back to full discovery when
-the streams differ or the destination is missing. `-U` and `-g` can remain
+different GUID cannot be treated as a clean match. For eligible `-R` runs —
+local sources and `-O` pulls alike — with a local destination and no snapshot
+creation, property, migration, restore, backup, or target-host work, zxfer
+first tries a fast no-op proof. That proof compares one recursive source
+`name,guid` stream with one normalized destination `name,guid` stream through
+private FIFOs and falls back to full discovery when the streams differ or the
+destination is missing; a proven clean no-op skips the creation-order source
+listing and the destination existence check entirely. `-U` and `-g` can remain
 enabled on this proof path because exact no-op discovery leaves no source
 transfer queue, destination delete queue, or property/create work to consume
 those checks.
@@ -222,10 +230,10 @@ stderr sections are staged and parsed locally. The local destination path keeps
 the direct `zfs` command flow.
 
 Short-lived local background helpers that still need shell wrappers, such as
-progress dialogs and delete-planning identity writers, now publish validated
-cleanup metadata through the shared runtime registry. The remaining local
-wrapper-style helpers run under a small TERM-aware child wrapper so early-exit
-cleanup no longer falls back to signaling a bare wrapper-shell PID.
+progress dialogs and delete-planning identity writers, register their PIDs
+with the in-memory runtime cleanup tracker. The remaining local wrapper-style
+helpers run under a small TERM-aware child wrapper so early-exit cleanup no
+longer falls back to signaling a bare wrapper-shell PID.
 
 Current runtime caveats are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 

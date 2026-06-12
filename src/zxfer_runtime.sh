@@ -36,14 +36,934 @@
 ################################################################################
 
 # Module contract:
-# owns globals: per-run option/default state, temp-root selection, runtime-artifact allocation/readback/cleanup state, cleanup PID state, transport/bootstrap defaults, and reporting/profile session state.
+# owns globals: per-run option/default state, temp-root selection, runtime-artifact allocation/readback/cleanup state, cleanup PID state, transport/bootstrap defaults, reporting/profile session state, secure-staging result scratch, and owned-lock metadata scratch (sections below).
 # reads globals: TMPDIR, ZXFER_BACKUP_DIR, g_option_* cleanup flags, and resolved helper paths.
-# mutates caches: reporting, destination-existence, property, and snapshot-index state through reset helpers.
-# returns via stdout: temp-file/temp-dir paths, source-to-destination dataset mappings, and OS detection results.
+# mutates caches: reporting, destination-existence, property, and snapshot-index state through reset helpers; local lock directories.
+# returns via stdout: temp-file/temp-dir paths, source-to-destination dataset mappings, OS detection results, owner/mode/symlink probes, and process-start tokens.
+#
+# The SECURE PATH / OWNER / MODE HELPERS and OWNED LOCK / LEASE COORDINATION
+# sections below were merged verbatim from src/zxfer_path_security.sh and
+# src/zxfer_locking.sh (Phase 8). All of their consumers (reporting's
+# ZXFER_ERROR_LOG lock, backup-metadata path checks, remote-host staging, and
+# this module's temp/staging helpers) call them at call time only, so the
+# definitions are source-order safe anywhere before main() runs.
 
 ZXFER_MAX_YIELD_ITERATIONS=8
 ZXFER_CACHE_OBJECT_HEADER_LINE="ZXFER_CACHE_OBJECT_V1"
 ZXFER_CACHE_OBJECT_END_LINE="ZXFER_CACHE_OBJECT_END"
+
+################################################################################
+# SECURE PATH / OWNER / MODE HELPERS
+################################################################################
+
+# Section contract:
+# owns globals: secure-staging result scratch.
+# reads globals: none.
+# mutates caches: none.
+# returns via stdout: owner/mode probes, symlink probes, and validated temp-root paths.
+# Temp roots validate once per run via the single-pass physical resolution in
+# zxfer_validate_temp_root_candidate; the component-walk symlink scanner only
+# serves the cold backup-metadata and ZXFER_ERROR_LOG checks whose
+# "path component ... is a symlink" errors are pinned public output.
+
+# Purpose: Return the path owner UID in the form expected by later helpers.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# sibling helpers need the same lookup without duplicating module logic.
+zxfer_get_path_owner_uid() {
+	l_path=$1
+
+	if [ ! -e "$l_path" ]; then
+		return 1
+	fi
+
+	if command -v stat >/dev/null 2>&1; then
+		if l_uid=$(stat -c '%u' "$l_path" 2>/dev/null); then
+			case "$l_uid" in
+			'' | *[!0-9]*) ;;
+			*)
+				printf '%s\n' "$l_uid"
+				return 0
+				;;
+			esac
+		fi
+		if l_uid=$(stat -f '%u' "$l_path" 2>/dev/null); then
+			case "$l_uid" in
+			'' | *[!0-9]*) ;;
+			*)
+				printf '%s\n' "$l_uid"
+				return 0
+				;;
+			esac
+		fi
+	fi
+
+	l_ls_path=$l_path
+	case "$l_ls_path" in
+	-*)
+		l_ls_path=./$l_ls_path
+		;;
+	esac
+	if l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
+		# Field-split the ls -ldn line in pure shell; field 3 is the owner UID.
+		set -f
+		# shellcheck disable=SC2086
+		set -- $l_ls_output
+		set +f
+		if [ "$#" -ge 3 ] && [ "$3" != "" ]; then
+			printf '%s\n' "$3"
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+# Purpose: Return the path mode octal in the form expected by later helpers.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# sibling helpers need the same lookup without duplicating module logic.
+zxfer_get_path_mode_octal() {
+	l_path=$1
+
+	if [ ! -e "$l_path" ]; then
+		return 1
+	fi
+
+	if command -v stat >/dev/null 2>&1; then
+		if l_mode=$(stat -c '%a' "$l_path" 2>/dev/null); then
+			case "$l_mode" in
+			'' | *[!0-9]*) ;;
+			*)
+				printf '%s\n' "$l_mode"
+				return 0
+				;;
+			esac
+		fi
+		if l_mode=$(stat -f '%OLp' "$l_path" 2>/dev/null); then
+			case "$l_mode" in
+			'' | *[!0-9]*) ;;
+			*)
+				printf '%s\n' "$l_mode"
+				return 0
+				;;
+			esac
+		fi
+	fi
+
+	l_ls_path=$l_path
+	case "$l_ls_path" in
+	-*)
+		l_ls_path=./$l_ls_path
+		;;
+	esac
+	if l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
+		l_perm_str=${l_ls_output%% *}
+		if [ "$l_perm_str" = "-rw-------" ]; then
+			printf '600\n'
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+# Purpose: Check that one ls -l permission string describes a directory that is
+# safe to share: well-formed and either free of group/other write bits or
+# protected by the sticky bit.
+# Usage: Called by the temp-root and trusted-symlink validators in place of the
+# old '| cut -c N' subshell chains; pure parameter expansion, no spawns.
+zxfer_validate_shared_dir_permission_string() {
+	l_perm_str=$1
+
+	case "$l_perm_str" in
+	??????????*) ;;
+	*)
+		return 1
+		;;
+	esac
+	# Single-character slices via parameter expansion: strip N leading
+	# characters, then keep only the first character of the remainder.
+	l_perm_tail=${l_perm_str#?????}
+	l_group_write=${l_perm_tail%"${l_perm_tail#?}"}
+	l_perm_tail=${l_perm_str#????????}
+	l_other_write=${l_perm_tail%"${l_perm_tail#?}"}
+	l_perm_tail=${l_perm_str#?????????}
+	l_sticky_char=${l_perm_tail%"${l_perm_tail#?}"}
+	case "$l_group_write$l_other_write" in
+	*w*)
+		case "$l_sticky_char" in
+		t | T) ;;
+		*)
+			return 1
+			;;
+		esac
+		;;
+	esac
+
+	return 0
+}
+
+# Purpose: Return the effective user UID in the form expected by later helpers.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# sibling helpers need the same lookup without duplicating module logic.
+zxfer_get_effective_user_uid() {
+	if command -v id >/dev/null 2>&1; then
+		if l_uid=$(id -u 2>/dev/null); then
+			printf '%s\n' "$l_uid"
+			return 0
+		fi
+	fi
+	return 1
+}
+
+# Purpose: Check whether the backup owner UID is allowed.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# later helpers need a boolean answer about the backup owner UID.
+zxfer_backup_owner_uid_is_allowed() {
+	l_owner_uid=$1
+
+	if [ "$l_owner_uid" = "0" ]; then
+		return 0
+	fi
+
+	if l_effective_uid=$(zxfer_get_effective_user_uid); then
+		if [ "$l_owner_uid" = "$l_effective_uid" ]; then
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+# Purpose: Describe the expected backup owner in operator-facing text.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# validation or reporting logic needs one canonical explanation string.
+zxfer_describe_expected_backup_owner() {
+	l_desc="root (UID 0)"
+
+	if l_effective_uid=$(zxfer_get_effective_user_uid); then
+		if [ "$l_effective_uid" != "0" ]; then
+			l_desc="$l_desc or UID $l_effective_uid"
+		fi
+	fi
+
+	printf '%s\n' "$l_desc"
+}
+
+# Purpose: Reject the backup metadata path with the validation failure owned by
+# this module.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when a
+# path or input should fail closed with one consistent error path.
+zxfer_reject_backup_metadata_path() {
+	l_msg=$1
+
+	printf '%s\n' "$l_msg" >&2
+	return 1
+}
+
+# Purpose: Require the backup metadata path without symlinks before the
+# surrounding flow continues.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# later helpers should stop immediately if the precondition is not met.
+zxfer_require_backup_metadata_path_without_symlinks() {
+	l_path=$1
+
+	if l_symlink_component=$(zxfer_find_symlink_path_component "$l_path"); then
+		if [ "$l_symlink_component" = "$l_path" ]; then
+			zxfer_reject_backup_metadata_path "Refusing to use backup metadata $l_path because it is a symlink."
+		fi
+		zxfer_reject_backup_metadata_path "Refusing to use backup metadata $l_path because path component $l_symlink_component is a symlink."
+	fi
+}
+
+# Purpose: Find the symlink path component in the tracked state owned by this
+# module.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# later helpers need an existing record instead of rebuilding one.
+zxfer_find_symlink_path_component() {
+	l_path=$1
+
+	[ -n "$l_path" ] || return 1
+
+	l_remaining=$l_path
+	l_candidate_path=""
+	while [ -n "$l_remaining" ]; do
+		case "$l_remaining" in
+		/*)
+			if [ "$l_candidate_path" = "" ]; then
+				l_candidate_path="/"
+				l_remaining=${l_remaining#/}
+				continue
+			fi
+			;;
+		esac
+
+		l_component=${l_remaining%%/*}
+		if [ "$l_component" = "$l_remaining" ]; then
+			l_remaining=""
+		else
+			l_remaining=${l_remaining#*/}
+		fi
+		[ -n "$l_component" ] || continue
+
+		case "$l_candidate_path" in
+		"")
+			l_candidate_path=$l_component
+			;;
+		/)
+			l_candidate_path="/$l_component"
+			;;
+		*)
+			l_candidate_path="$l_candidate_path/$l_component"
+			;;
+		esac
+
+		if [ -L "$l_candidate_path" ] || [ -h "$l_candidate_path" ]; then
+			if zxfer_is_trusted_symlink_path_component "$l_candidate_path"; then
+				continue
+			fi
+			printf '%s\n' "$l_candidate_path"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+# Purpose: Check whether the symlink path component is trusted.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# later helpers need a boolean answer about a validated or trusted state.
+zxfer_is_trusted_symlink_path_component() {
+	l_path=$1
+
+	case "$l_path" in
+	/*) ;;
+	*)
+		return 1
+		;;
+	esac
+	[ -L "$l_path" ] || [ -h "$l_path" ] || return 1
+
+	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_path" 2>/dev/null); then
+		return 1
+	fi
+	[ "$l_owner_uid" = "0" ] || return 1
+
+	case "$l_path" in
+	*/*)
+		l_parent=${l_path%/*}
+		[ -n "$l_parent" ] || l_parent="/"
+		;;
+	*)
+		return 1
+		;;
+	esac
+	if ! l_parent_owner_uid=$(zxfer_get_path_owner_uid "$l_parent" 2>/dev/null); then
+		return 1
+	fi
+	[ "$l_parent_owner_uid" = "0" ] || return 1
+	[ "$l_parent" = "/" ] || return 1
+
+	l_ls_path=$l_parent
+	case "$l_ls_path" in
+	-*)
+		l_ls_path=./$l_ls_path
+		;;
+	esac
+	if ! l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
+		return 1
+	fi
+	zxfer_validate_shared_dir_permission_string "${l_ls_output%% *}"
+}
+
+# Purpose: Validate the temp root candidate before zxfer relies on it.
+# Usage: Called once per requested temp root (the result is memoized by
+# zxfer_try_get_effective_tmpdir) before zxfer trusts temp-root or
+# backup-metadata parents; fails closed on malformed, unsafe, or stale input.
+# The single-pass 'cd -P && pwd' resolution below replaces the old
+# per-component symlink walk: an unsafe symlink target fails the owner/mode
+# checks on the resolved physical directory.
+zxfer_validate_temp_root_candidate() {
+	l_candidate=$1
+
+	[ -n "$l_candidate" ] || return 1
+	case "$l_candidate" in
+	/*) ;;
+	*)
+		return 1
+		;;
+	esac
+
+	if ! l_physical_dir=$(CDPATH='' cd -P "$l_candidate" 2>/dev/null && pwd); then
+		return 1
+	fi
+	case "$l_physical_dir" in
+	/*) ;;
+	*)
+		return 1
+		;;
+	esac
+	[ -d "$l_physical_dir" ] || return 1
+
+	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_physical_dir"); then
+		return 1
+	fi
+	if [ "$l_owner_uid" != "0" ]; then
+		if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
+			return 1
+		fi
+		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
+	fi
+	l_ls_path=$l_physical_dir
+	case "$l_ls_path" in
+	-*)
+		l_ls_path=./$l_ls_path
+		;;
+	esac
+	if ! l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
+		return 1
+	fi
+	if ! zxfer_validate_shared_dir_permission_string "${l_ls_output%% *}"; then
+		return 1
+	fi
+
+	printf '%s\n' "$l_physical_dir"
+}
+
+# Purpose: Return the path parent directory in the form expected by later
+# helpers.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# sibling helpers need the same lookup without duplicating module logic.
+zxfer_get_path_parent_dir() {
+	l_path=$1
+
+	l_parent=${l_path%/*}
+	if [ "$l_parent" = "$l_path" ] || [ "$l_parent" = "" ]; then
+		l_parent=/
+	fi
+
+	printf '%s\n' "$l_parent"
+}
+
+# Purpose: Create one unpredictably named staging entry (file or directory)
+# from a randomized temp-name template under a caller-validated parent.
+# Usage: zxfer_create_unpredictable_staging_entry <template> <file|dir>.
+# Validated staging parents may still be shared sticky directories (a
+# /tmp-style ZXFER_ERROR_LOG parent), where predictable pid+attempt slot names
+# would let a local process-table reader pre-create every slot and deny
+# staging; the randomized names close that squat window and the forced 077
+# umask keeps entries 0600 (files) or 0700 (directories).
+zxfer_create_unpredictable_staging_entry() {
+	l_template=$1
+	l_entry_kind=$2
+
+	l_dir_flag=""
+	if [ "$l_entry_kind" = "dir" ]; then
+		l_dir_flag="-d"
+	fi
+	# l_dir_flag intentionally expands unquoted: empty means no extra word.
+	# shellcheck disable=SC2086
+	(umask 077 && exec mktemp $l_dir_flag "$l_template") 2>/dev/null
+}
+
+# Purpose: Create the secure staging directory for path using the safety checks
+# owned by this module.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
+# zxfer needs a fresh staged resource or persistent helper state.
+zxfer_create_secure_staging_dir_for_path() {
+	l_path=$1
+	l_prefix=${2:-zxfer.stage}
+
+	g_zxfer_secure_staging_dir_result=""
+	if ! l_parent=$(zxfer_get_path_parent_dir "$l_path"); then
+		return 1
+	fi
+	if ! l_parent=$(zxfer_validate_temp_root_candidate "$l_parent"); then
+		return 1
+	fi
+
+	if ! l_stage_dir=$(zxfer_create_unpredictable_staging_entry "$l_parent/.$l_prefix.XXXXXX" dir); then
+		return 1
+	fi
+	# Register same-directory staging so trap cleanup reaps it on aborts.
+	if command -v zxfer_register_runtime_artifact_path >/dev/null 2>&1; then
+		zxfer_register_runtime_artifact_path "$l_stage_dir"
+	fi
+	g_zxfer_secure_staging_dir_result=$l_stage_dir
+	printf '%s\n' "$l_stage_dir"
+	return 0
+}
+
+# Purpose: Check the secure backup file using the fail-closed rules owned by
+# this module.
+# Usage: Called before zxfer trusts temp-root or backup-metadata paths before
+# later helpers act on a result that must be validated first.
+zxfer_check_secure_backup_file() {
+	l_check_path=$1
+	l_check_display_path=${2:-$l_check_path}
+
+	if ! l_check_owner_uid=$(zxfer_get_path_owner_uid "$l_check_path"); then
+		printf '%s\n' "Cannot determine the owner of backup metadata $l_check_display_path."
+		return 1
+	fi
+	if ! zxfer_backup_owner_uid_is_allowed "$l_check_owner_uid"; then
+		l_check_expected_owner_desc=$(zxfer_describe_expected_backup_owner)
+		printf '%s\n' "Refusing to use backup metadata $l_check_display_path because it is owned by UID $l_check_owner_uid instead of $l_check_expected_owner_desc."
+		return 1
+	fi
+	if ! l_check_mode=$(zxfer_get_path_mode_octal "$l_check_path"); then
+		printf '%s\n' "Cannot determine the permissions for backup metadata $l_check_display_path."
+		return 1
+	fi
+	if [ "$l_check_mode" != "600" ]; then
+		printf '%s\n' "Refusing to use backup metadata $l_check_display_path because its permissions ($l_check_mode) are not 0600."
+		return 1
+	fi
+}
+
+################################################################################
+# OWNED LOCK / LEASE COORDINATION
+################################################################################
+
+# Section contract:
+# owns globals: owned-lock metadata scratch and the memoized own-process start
+#   token.
+# reads globals: none directly.
+# mutates caches: local lock directories.
+# returns via stdout: normalized process-start tokens, metadata paths, and
+#   created lock paths.
+#
+# Lock identity is owner pid + process start token ONLY. Earlier metadata
+# formats (V1: kind/purpose/hostname/created_at fields) parse as corrupt
+# (status 2) and are reaped through the existing corrupt-metadata policy
+# instead of crashing; locks are seconds-lived so no cross-version
+# compatibility is required.
+
+ZXFER_LOCK_METADATA_HEADER="ZXFER_LOCK_METADATA_V2"
+
+# Purpose: Reset the owned-lock metadata scratch results so the next lookup
+# starts from a clean state.
+# Usage: Called before metadata loads and during owned-lock tracking resets.
+zxfer_reset_owned_lock_metadata_result() {
+	g_zxfer_owned_lock_pid_result=""
+	g_zxfer_owned_lock_start_token_result=""
+}
+
+# Purpose: Reset the owned-lock tracking state so the next runtime pass starts
+# from a clean state.
+# Usage: Called during runtime bootstrap before this module reuses mutable
+# scratch globals or cached decisions.
+zxfer_reset_owned_lock_tracking() {
+	g_zxfer_own_process_start_token=""
+	zxfer_reset_owned_lock_metadata_result
+}
+
+# Purpose: Return the metadata file path inside one owned lock directory.
+# Usage: Called by the metadata read/write helpers and layout probes.
+zxfer_get_owned_lock_metadata_path() {
+	l_lock_dir=$1
+	printf '%s/metadata\n' "$l_lock_dir"
+}
+
+# Purpose: Normalize one free-form text field to a single-line, single-spaced
+# value using field splitting only (no tr/sed spawns).
+# Usage: Called by callers that embed operator-facing labels in messages;
+# returns non-zero when the field normalizes to empty.
+zxfer_normalize_owned_lock_text_field() {
+	l_field_value=$1
+
+	# Field splitting collapses every whitespace run (spaces, tabs, newlines)
+	# and trims the ends; set -f keeps glob characters literal.
+	set -f
+	# shellcheck disable=SC2086
+	set -- $l_field_value
+	set +f
+	l_normalized_value=$*
+	[ -n "$l_normalized_value" ] || return 1
+
+	printf '%s\n' "$l_normalized_value"
+}
+
+# Purpose: Return a stable start-of-process token for one PID so pid reuse can
+# be told apart from the original lock owner.
+# Usage: Called when writing lock metadata and when checking owner liveness.
+# One ps call covers the supported platforms; stime is the fallback selector
+# for ps implementations without the long-form lstart column, and the selector
+# name is embedded so tokens from different selectors never compare equal.
+zxfer_get_process_start_token() {
+	l_pid=$1
+
+	case "$l_pid" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+
+	# Normalize whitespace in pure shell: field-split and rejoin with single
+	# spaces (set -f keeps glob characters in ps output literal).
+	l_token_field=lstart
+	l_raw_token=$(LC_ALL=C ps -p "$l_pid" -o lstart= 2>/dev/null || :)
+	set -f
+	# shellcheck disable=SC2086
+	set -- $l_raw_token
+	set +f
+	if [ "$#" -eq 0 ]; then
+		l_token_field=stime
+		l_raw_token=$(LC_ALL=C ps -p "$l_pid" -o stime= 2>/dev/null || :)
+		set -f
+		# shellcheck disable=SC2086
+		set -- $l_raw_token
+		set +f
+	fi
+	[ "$#" -gt 0 ] || return 1
+	printf '%s:%s\n' "$l_token_field" "$*"
+}
+
+# Purpose: Return the memoized start token of the current process, capturing
+# it with one ps call on first need.
+# Usage: Called when creating lock metadata and checking lock ownership so
+# repeated lock operations never re-spawn ps for the same answer.
+# Side effects: Publishes the token in $g_zxfer_own_process_start_token; module
+# call sites read that global after a plain (non-command-substitution) call so
+# the memo actually persists in the calling shell.
+zxfer_get_own_process_start_token() {
+	if [ -n "${g_zxfer_own_process_start_token:-}" ]; then
+		printf '%s\n' "$g_zxfer_own_process_start_token"
+		return 0
+	fi
+
+	if ! l_own_start_token=$(zxfer_get_process_start_token "$$"); then
+		return 1
+	fi
+	g_zxfer_own_process_start_token=$l_own_start_token
+	printf '%s\n' "$l_own_start_token"
+}
+
+# Purpose: Validate that one lock/lease container directory is a private,
+# owner-held, mode-0700 real directory before trusting anything inside it.
+# Usage: Called before lock metadata is read or written.
+zxfer_validate_owned_lock_container_dir() {
+	l_dir_path=$1
+
+	[ -d "$l_dir_path" ] || return 1
+	[ ! -L "$l_dir_path" ] || return 1
+	[ ! -h "$l_dir_path" ] || return 1
+	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
+		return 1
+	fi
+	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_dir_path"); then
+		return 1
+	fi
+	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
+	if ! l_mode=$(zxfer_get_path_mode_octal "$l_dir_path"); then
+		return 1
+	fi
+	[ "$l_mode" = "700" ] || return 1
+}
+
+# Purpose: Validate that one lock metadata file is a private, owner-held,
+# mode-0600 regular file before parsing it.
+# Usage: Called by zxfer_load_owned_lock_metadata_from_dir.
+zxfer_validate_owned_lock_metadata_file() {
+	l_metadata_path=$1
+
+	[ -f "$l_metadata_path" ] || return 1
+	[ ! -L "$l_metadata_path" ] || return 1
+	[ ! -h "$l_metadata_path" ] || return 1
+	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
+		return 1
+	fi
+	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_metadata_path"); then
+		return 1
+	fi
+	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
+	if ! l_mode=$(zxfer_get_path_mode_octal "$l_metadata_path"); then
+		return 1
+	fi
+	[ "$l_mode" = "600" ] || return 1
+}
+
+# Purpose: Write the owner pid + start-token metadata file into a lock
+# directory this process just created.
+# Usage: Called by the lock-dir creation helpers after mkdir succeeds.
+zxfer_write_owned_lock_metadata_file() {
+	l_lock_dir=$1
+	l_metadata_path=$(zxfer_get_owned_lock_metadata_path "$l_lock_dir")
+	l_stage_metadata_path="$l_lock_dir/.metadata.stage"
+
+	# Plain call (no command substitution) so the first ps capture memoizes in
+	# this shell instead of a throwaway subshell.
+	if ! zxfer_get_own_process_start_token >/dev/null; then
+		return 1
+	fi
+	l_start_token=$g_zxfer_own_process_start_token
+
+	# Stage with a fixed name (this process exclusively owns the just-created
+	# 0700 lock dir) and publish with one atomic rename so readers only ever
+	# see missing or complete metadata, never a partial file. The subshell
+	# keeps redirection-open failures as a plain nonzero status.
+	if ! (
+		umask 077
+		printf '%s\npid\t%s\nstart_token\t%s\n' \
+			"$ZXFER_LOCK_METADATA_HEADER" "$$" "$l_start_token" \
+			>"$l_stage_metadata_path"
+	) 2>/dev/null; then
+		rm -f "$l_stage_metadata_path" 2>/dev/null || :
+		return 1
+	fi
+	chmod 600 "$l_stage_metadata_path" 2>/dev/null || :
+	if ! mv -f "$l_stage_metadata_path" "$l_metadata_path" 2>/dev/null; then
+		rm -f "$l_stage_metadata_path" 2>/dev/null || :
+		return 1
+	fi
+	chmod 600 "$l_metadata_path" 2>/dev/null || :
+	return 0
+}
+
+# Purpose: Parse one pid + start-token lock metadata file into the module
+# scratch results.
+# Usage: Called by zxfer_load_owned_lock_metadata_from_dir; any deviation from
+# the exact three-line format fails so the caller treats the file as corrupt.
+zxfer_parse_owned_lock_metadata_file() {
+	l_metadata_path=$1
+	l_tab=$(printf '\t')
+	l_line_number=0
+
+	zxfer_reset_owned_lock_metadata_result
+
+	while IFS= read -r l_line || [ -n "$l_line" ]; do
+		l_line_number=$((l_line_number + 1))
+		case "$l_line_number" in
+		1)
+			[ "$l_line" = "$ZXFER_LOCK_METADATA_HEADER" ] || return 1
+			;;
+		2)
+			case "$l_line" in
+			"pid$l_tab"*)
+				l_value=${l_line#"pid$l_tab"}
+				;;
+			*)
+				return 1
+				;;
+			esac
+			case "$l_value" in
+			'' | *[!0-9]*)
+				return 1
+				;;
+			esac
+			g_zxfer_owned_lock_pid_result=$l_value
+			;;
+		3)
+			case "$l_line" in
+			"start_token$l_tab"*)
+				l_value=${l_line#"start_token$l_tab"}
+				;;
+			*)
+				return 1
+				;;
+			esac
+			case "$l_value" in
+			'' | *"$l_tab"*)
+				return 1
+				;;
+			esac
+			g_zxfer_owned_lock_start_token_result=$l_value
+			;;
+		*)
+			return 1
+			;;
+		esac
+	done <"$l_metadata_path"
+
+	[ "$l_line_number" -eq 3 ] || return 1
+	[ -n "$g_zxfer_owned_lock_pid_result" ] || return 1
+	[ -n "$g_zxfer_owned_lock_start_token_result" ] || return 1
+	return 0
+}
+
+# Purpose: Load and validate the owner metadata of one lock directory.
+# Usage: Called before liveness, ownership, and reap decisions.
+# Return codes:
+# 0 = secure directory plus valid metadata loaded
+# 1 = hard validation failure
+# 2 = corrupt or missing metadata (including pre-V2 metadata formats)
+zxfer_load_owned_lock_metadata_from_dir() {
+	l_lock_dir=$1
+	l_metadata_path=$(zxfer_get_owned_lock_metadata_path "$l_lock_dir")
+
+	zxfer_reset_owned_lock_metadata_result
+
+	if ! zxfer_validate_owned_lock_container_dir "$l_lock_dir"; then
+		return 1
+	fi
+	if [ ! -e "$l_metadata_path" ]; then
+		return 2
+	fi
+	if ! zxfer_validate_owned_lock_metadata_file "$l_metadata_path"; then
+		return 1
+	fi
+	if ! zxfer_parse_owned_lock_metadata_file "$l_metadata_path"; then
+		return 2
+	fi
+	return 0
+}
+
+# Purpose: Decide whether the recorded lock owner is still the same live
+# process (pid alive AND start token unchanged).
+# Usage: Called before stale locks are reaped.
+# Return codes:
+# 0 = owner is still live
+# 1 = owner is stale
+# 2 = owner liveness could not be determined safely
+zxfer_owned_lock_owner_is_live() {
+	l_pid=$1
+	l_start_token=$2
+
+	if ! kill -s 0 "$l_pid" 2>/dev/null; then
+		return 1
+	fi
+	if ! l_current_start_token=$(zxfer_get_process_start_token "$l_pid"); then
+		return 2
+	fi
+	if [ "$l_current_start_token" = "$l_start_token" ]; then
+		return 0
+	fi
+	return 1
+}
+
+# Purpose: Remove one owned lock directory after the caller has proven it is
+# safe to delete (owned, stale, or corrupt per policy).
+# Usage: Called from release and reap flows; symlinked paths fail closed.
+zxfer_cleanup_owned_lock_dir() {
+	l_lock_dir=$1
+
+	[ -n "$l_lock_dir" ] || return 0
+	if [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; then
+		return 0
+	fi
+	[ ! -L "$l_lock_dir" ] || return 1
+	[ ! -h "$l_lock_dir" ] || return 1
+	[ -d "$l_lock_dir" ] || return 1
+	if rm -rf "$l_lock_dir" 2>/dev/null ||
+		{ [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; }; then
+		return 0
+	fi
+	return 1
+}
+
+# Purpose: Acquire one lock by creating the exact directory path with owner
+# pid + start-token metadata; mkdir is the atomic acquisition step.
+# Usage: zxfer_create_owned_lock_dir <dir> [kind] [purpose] -- the trailing
+# labels are accepted for caller compatibility and ignored.
+zxfer_create_owned_lock_dir() {
+	l_lock_dir=$1
+
+	[ -n "$l_lock_dir" ] || return 1
+	if ! mkdir -m 700 "$l_lock_dir" 2>/dev/null; then
+		return 1
+	fi
+
+	if ! zxfer_validate_owned_lock_container_dir "$l_lock_dir"; then
+		zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
+		return 1
+	fi
+	if ! zxfer_write_owned_lock_metadata_file "$l_lock_dir"; then
+		zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
+		return 1
+	fi
+
+	printf '%s\n' "$l_lock_dir"
+	return 0
+}
+
+# Purpose: Reap one lock directory when its owner is provably stale, or when
+# its metadata is corrupt/missing and the caller policy allows corrupt reaps.
+# Usage: zxfer_try_reap_stale_owned_lock_dir <dir> [allow-corrupt] [kind]
+# [purpose] -- the trailing labels are accepted for caller compatibility and
+# ignored.
+# Return codes:
+# 0 = stale or corrupt entry was reaped
+# 1 = hard failure
+# 2 = entry is still busy or not yet reapable under the caller policy
+zxfer_try_reap_stale_owned_lock_dir() {
+	l_lock_dir=$1
+	l_allow_corrupt_reap=${2:-0}
+
+	zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir"
+	l_load_status=$?
+	case "$l_load_status" in
+	0)
+		zxfer_owned_lock_owner_is_live \
+			"$g_zxfer_owned_lock_pid_result" \
+			"$g_zxfer_owned_lock_start_token_result"
+		l_live_status=$?
+		if [ "$l_live_status" -eq 0 ]; then
+			return 2
+		fi
+		if [ "$l_live_status" -eq 2 ]; then
+			return 1
+		fi
+		;;
+	1)
+		return 1
+		;;
+	2)
+		case "$l_allow_corrupt_reap" in
+		1 | [Yy][Ee][Ss] | [Tt][Rr][Uu][Ee] | [Oo][Nn])
+			:
+			;;
+		*)
+			return 2
+			;;
+		esac
+		;;
+	*)
+		return 1
+		;;
+	esac
+
+	if ! zxfer_cleanup_owned_lock_dir "$l_lock_dir"; then
+		return 1
+	fi
+	return 0
+}
+
+# Purpose: Check whether the current process is the recorded owner of one lock
+# directory (pid match AND start-token match).
+# Usage: Called by the checked release path so only the owner ever releases.
+zxfer_current_process_owns_owned_lock_dir() {
+	l_lock_dir=$1
+
+	if ! zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir"; then
+		return 1
+	fi
+	[ "$g_zxfer_owned_lock_pid_result" = "$$" ] || return 1
+	# Plain call (no command substitution) so the first ps capture memoizes in
+	# this shell instead of a throwaway subshell.
+	if ! zxfer_get_own_process_start_token >/dev/null; then
+		return 1
+	fi
+	[ "$g_zxfer_owned_lock_start_token_result" = "$g_zxfer_own_process_start_token" ]
+}
+
+# Purpose: Release one owned lock directory with a checked owner match so this
+# process never deletes a lock held by a live sibling.
+# Usage: zxfer_release_owned_lock_dir <dir> [kind] [purpose] -- the trailing
+# labels are accepted for caller compatibility and ignored.
+zxfer_release_owned_lock_dir() {
+	l_lock_dir=$1
+
+	[ -n "$l_lock_dir" ] || return 0
+	if [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; then
+		return 0
+	fi
+	if ! zxfer_current_process_owns_owned_lock_dir "$l_lock_dir"; then
+		return 1
+	fi
+	if ! zxfer_cleanup_owned_lock_dir "$l_lock_dir"; then
+		return 1
+	fi
+	return 0
+}
 
 # Purpose: Refresh the backup storage root from the current configuration and
 # runtime state.
