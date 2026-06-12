@@ -160,7 +160,6 @@ The test layout broadly follows the source layout:
 - `test_zxfer_dependencies.sh`
 - `test_zxfer_runtime.sh`
 - `test_zxfer_background_jobs.sh`
-- `test_zxfer_background_job_runner.sh`
 - `test_zxfer_cleanup_child_wrapper.sh`
 - `test_zxfer_cli.sh`
 - `test_zxfer_snapshot_state.sh`
@@ -202,25 +201,20 @@ least the property-reconcile boundary, or anything later in
 the property modules' public reset helpers rather than carrying a duplicated
 copy of that reset inventory inside `zxfer_runtime.sh`.
 
-`test_zxfer_background_jobs.sh` owns the supervisor-specific metadata and
-abort-path coverage: launch/completion parsing, queue-record normalization,
-completion-aware cleanup shortcuts when `completion.tsv` already exists,
-refreshed post-signal revalidation when a runner disappears during teardown,
-validated process-group cleanup, owned-child-set fallback, and PID-reuse
-rejection when the tracked runner no longer matches the recorded helper
-identity. The send/receive and snapshot-discovery suites then focus on how
-their modules consume the shared supervisor contract.
+`test_zxfer_background_jobs.sh` owns the supervision-lite background-job
+coverage: status-file propagation (success, failure, missing-status-file and
+non-numeric-status fail-closed paths), queue-record normalization and FIFO
+notification ordering, abort teardown of the whole pipeline on both the setsid
+process-group path and the cleanup-wrapper fallback, trap-style abort-all
+teardown, and the spawn failure paths. The send/receive and
+snapshot-discovery suites then focus on how their modules consume the shared
+spawn/wait/abort contract.
 
-`test_zxfer_background_job_runner.sh` owns the standalone runner entry point:
-launch/completion file publication, completion queue notifications, fail-closed
-queue/completion rewrite paths, optional `setsid` process-group isolation, and
-the script's direct-exec behavior when it is invoked as a helper instead of
-sourced for tests.
-
-`test_zxfer_cleanup_child_wrapper.sh` owns the short-lived cleanup wrapper
-entry point: direct-exec argument validation, exit-status passthrough for the
-wrapped command, and descendant teardown when the wrapper is interrupted during
-abort cleanup.
+`test_zxfer_cleanup_child_wrapper.sh` owns the cleanup wrapper entry point
+(used both by short-lived helpers and as the no-setsid background-job spawn
+fallback): direct-exec argument validation, exit-status passthrough for the
+wrapped command, and descendant teardown when the wrapper is interrupted
+during abort cleanup.
 
 The suites also use `tests/test_helper.sh` for the shared shunit2 scaffolding:
 default no-op lifecycle hooks, temporary-directory setup helpers, and common

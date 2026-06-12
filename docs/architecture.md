@@ -33,12 +33,9 @@ responsibility boundary.
   runtime-artifact allocation/readback/cleanup, runtime-owned cache staging,
   and trap handling
 - [../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh):
-  supervised long-lived background-job registry state, launch/completion
-  metadata, validated process-group or child-set teardown, and shared
-  spawn/wait/abort helpers
-- [../src/zxfer_background_job_runner.sh](../src/zxfer_background_job_runner.sh):
-  standalone supervisor runner entry point that launches one long-lived worker,
-  records launch/completion metadata, and publishes queue notifications
+  supervision-lite long-lived background jobs: an in-memory job registry,
+  per-job status files written by the job shell itself, rolling completion
+  queue notifications, and process-group (setsid) or cleanup-wrapper teardown
 - [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh): remote helper
   resolution, scoped requested-tool capability handshakes and caches, ssh
   control-socket management, and subsystem-specific adapters around the shared
@@ -104,34 +101,29 @@ trusted-parent checks, such as backup publish or rollback paths, continue to
 own that path-adjacent secure staging locally.
 
 Long-lived background work now layers on top of the runtime temp root through
-[../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh). Each
-supervised job gets a private control directory containing:
+[../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh) using a
+supervision-lite model: there is no per-job supervisor process. Spawn runs the
+job pipeline directly in one backgrounded job shell, and the per-job state is
+one in-memory registry row (`job_id`, kind, pid, teardown mode, status file).
+The job shell itself appends `status<TAB>N` to a per-run temp status file
+after the pipeline finishes and then publishes its `job_id` to the rolling
+completion queue when one is open, so a queue reader always finds the status
+already recorded. A missing or non-numeric status file at wait time means the
+job shell died abnormally and is reported as a failure.
 
-- `launch.tsv` for runner identity, worker pid/pgid, teardown mode, and start time
-- `completion.tsv` for normalized exit status, completion-write or queue-write
-  failure markers, and completion time
-
-That keeps long-lived cleanup and wait logic on structured `job_id` records
-instead of wrapper-shell bare PIDs or caller-owned status files.
-
-The parent runtime does not write those records directly. It spawns the
-standalone helper
-[../src/zxfer_background_job_runner.sh](../src/zxfer_background_job_runner.sh),
-which launches the worker, records the validated launch metadata from inside
-the runner process, and then publishes structured completion state after the
-worker exits. When `setsid` is available the runner prefers a dedicated process
-group and falls back to owned-child-set teardown otherwise. Trap-time transport
-cleanup follows the same checked-cleanup contract: a managed ssh control-socket
-close failure now upgrades an otherwise successful exit into a runtime cleanup
-failure instead of being treated as warning-only success.
-
-Supervisor abort is also completion-aware. If `completion.tsv` already exists,
-zxfer treats the job as finished even when a later process-table read or live
-runner revalidation fails during trap cleanup. If a teardown signal reports
-failure, zxfer rereads the process snapshot before revalidating the runner; if
-the runner disappeared in that race, cleanup succeeds. Only a refreshed
-snapshot that still shows a live owned runner and still cannot be validated or
-signaled is treated as a fatal abort-path failure.
+When `setsid` works (feature-tested once per process, requiring the spawned
+child to lead its own process group), abort signals the whole pipeline with
+one process-group TERM, a brief bounded wait, and a single KILL escalation
+before reaping. Without `setsid` the job runs through
+[../src/zxfer_cleanup_child_wrapper.sh](../src/zxfer_cleanup_child_wrapper.sh),
+whose TERM trap reaps the job's descendants. The safety argument that replaced
+the old start-token revalidation and process-table snapshots: zxfer only ever
+signals process groups created by its own setsid child or direct children it
+has not waited on yet, and POSIX keeps an un-reaped child's PID/PGID from
+being recycled, so the signal cannot reach an unrelated process. Trap-time
+transport cleanup follows the same checked-cleanup contract: a managed ssh
+control-socket close failure now upgrades an otherwise successful exit into a
+runtime cleanup failure instead of being treated as warning-only success.
 
 Short-lived background helpers still go through the shared runtime cleanup
 registry in [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh). Helpers that
@@ -199,7 +191,6 @@ function boundaries so operators and contributors can line the diagrams up with
 [`../zxfer`](../zxfer),
 [`../src/zxfer_runtime.sh`](../src/zxfer_runtime.sh),
 [`../src/zxfer_background_jobs.sh`](../src/zxfer_background_jobs.sh),
-[`../src/zxfer_background_job_runner.sh`](../src/zxfer_background_job_runner.sh),
 [`../src/zxfer_remote_hosts.sh`](../src/zxfer_remote_hosts.sh),
 [`../src/zxfer_snapshot_discovery.sh`](../src/zxfer_snapshot_discovery.sh),
 [`../src/zxfer_snapshot_reconcile.sh`](../src/zxfer_snapshot_reconcile.sh),

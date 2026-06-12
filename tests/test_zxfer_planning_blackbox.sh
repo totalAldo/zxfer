@@ -470,6 +470,118 @@ test_delete_option_live_destroys_only_extra_destination_snapshot() {
 		"grep -q '^get -H -o name,value -p creation $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@' '$ZFS_LOG'"
 }
 
+# Write a minimal GNU-parallel stand-in: skip options through "--", then run
+# the single command argument once per stdin line with every {} replaced by
+# the line. Sequential execution is a valid serialization of parallel's
+# interleaving, so the canned-zfs fixtures stay deterministic.
+planning_write_mock_parallel() {
+	l_parallel_path=$1
+
+	cat >"$l_parallel_path" <<'EOF'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--)
+		shift
+		break
+		;;
+	*)
+		shift
+		;;
+	esac
+done
+mock_parallel_cmd=$*
+mock_parallel_status=0
+while IFS= read -r mock_parallel_line || [ -n "$mock_parallel_line" ]; do
+	[ -n "$mock_parallel_line" ] || continue
+	mock_parallel_rest=$mock_parallel_cmd
+	mock_parallel_run=""
+	while :; do
+		case "$mock_parallel_rest" in
+		*"{}"*)
+			mock_parallel_run="$mock_parallel_run${mock_parallel_rest%%"{}"*}$mock_parallel_line"
+			mock_parallel_rest=${mock_parallel_rest#*"{}"}
+			;;
+		*)
+			mock_parallel_run="$mock_parallel_run$mock_parallel_rest"
+			break
+			;;
+		esac
+	done
+	sh -c "$mock_parallel_run" || mock_parallel_status=$?
+done
+exit $mock_parallel_status
+EOF
+	chmod +x "$l_parallel_path"
+}
+
+# Extend a cloned fixture state with the parallel source-discovery answers a
+# -j run issues: the dataset enumeration plus one depth-1 creation-ordered
+# snapshot listing per source dataset.
+planning_add_parallel_source_discovery_fixtures() {
+	{
+		printf '%s\n' "$ZXFER_MOCKBIN_SOURCE_ROOT"
+		printf '%s/child1\n' "$ZXFER_MOCKBIN_SOURCE_ROOT"
+		printf '%s/child2\n' "$ZXFER_MOCKBIN_SOURCE_ROOT"
+	} >"$STATE_DIR/src_datasets.list" ||
+		fail "Unable to write the source dataset enumeration fixture."
+	printf 'list -Hr -t filesystem,volume -o name %s\tsrc_datasets.list\t0\n' \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" >>"$STATE_DIR/manifest" ||
+		fail "Unable to append the source dataset enumeration manifest rule."
+
+	l_parfix_index=0
+	for l_parfix_suffix in "" /child1 /child2; do
+		l_parfix_dataset="$ZXFER_MOCKBIN_SOURCE_ROOT$l_parfix_suffix"
+		grep "^$l_parfix_dataset@" "$STATE_DIR/src_snapshots.list" \
+			>"$STATE_DIR/src_d1_$l_parfix_index.list" ||
+			fail "Unable to derive the depth-1 source listing for $l_parfix_dataset."
+		printf 'list -H -o name,guid -s creation -d 1 -t snapshot %s\tsrc_d1_%s.list\t0\n' \
+			"$l_parfix_dataset" "$l_parfix_index" >>"$STATE_DIR/manifest" ||
+			fail "Unable to append the depth-1 source manifest rule for $l_parfix_dataset."
+		l_parfix_index=$((l_parfix_index + 1))
+	done
+}
+
+# Invariant: a -j 2 incremental run through the supervision-lite background
+# job layer completes every per-dataset receive, exits 0, and leaves neither
+# job processes nor per-job control files behind. The scheduling order itself
+# (destination-ancestry serialization) is pinned by the send/receive unit
+# suite; this pins the externally observable outcome.
+test_parallel_jobs_incremental_completes_all_receives_without_leftovers() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" paralleljobs
+	planning_add_parallel_source_discovery_fixtures
+	planning_write_mock_parallel "$MOCKBIN_DIR/parallel" ||
+		fail "Unable to write the mock parallel helper."
+
+	job_tmp_dir="$CASE_DIR/jobtmp"
+	mkdir -p "$job_tmp_dir" || fail "Unable to create the per-run temp root."
+	chmod 700 "$job_tmp_dir" || fail "Unable to restrict the per-run temp root."
+
+	TMPDIR="$job_tmp_dir" planning_run_zxfer "$STATE_DIR" -j 2 -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "-j 2 incremental replication should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 $?
+	planning_assert_no_mutations
+
+	for l_parjobs_suffix in "" /child1 /child2; do
+		planning_assert_log_has_line \
+			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_parjobs_suffix"
+	done
+	assertEquals "every dataset missing the newest snapshot should be sent exactly once" \
+		3 "$(grep -c '^send ' "$ZFS_LOG")"
+
+	leftover_files=$(find "$job_tmp_dir" -mindepth 1 2>/dev/null || :)
+	assertEquals "the per-run temp root must hold no leftover background-job control files after exit" \
+		"" "$leftover_files"
+	# shellcheck disable=SC2009  # the assertion is about the raw process table
+	leftover_processes=$(ps -axo command= 2>/dev/null |
+		grep -F "$MOCKBIN_DIR/zfs" | grep -v grep || :)
+	assertEquals "no canned-zfs job processes may survive the run" \
+		"" "$leftover_processes"
+	return 0
+}
+
 # Invariant: -V must not change replication outcomes. Regression for the
 # batched -T destination discovery aborting under -V because a profiling
 # recorder's non-zero status leaked into the batch function's return value

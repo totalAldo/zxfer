@@ -1,13 +1,6 @@
 src/zxfer_background_jobs.sh
-  253:	done <<-EOF || l_read_status=$?
-  302:	done <<-EOF || l_read_status=$?
-  307:		return "$l_read_status"
-  638:		l_signal_current_shell_pgid_status=$?
-  640:		l_signal_current_shell_pgid=$(printf '%s\n' "$l_signal_current_shell_pgid_raw" |
-  642:			l_signal_current_shell_pgid_status=$?
-  644:		l_signal_current_shell_pgid=""
-  858:		return "$l_finish_escalation_status"
-  1038:		}; then
+  400:	done <<-EOF || l_read_status=$?
+  405:		return "$l_read_status"
 
 src/zxfer_backup_metadata.sh
   108:		return 1
@@ -46,6 +39,7 @@ src/zxfer_exec.sh
 
 src/zxfer_locking.sh
   233:	l_normalized_value=$(printf '%s\n' "$l_field_value" |
+  266:	[ -r "/proc/$l_pid/stat" ] || return 1
   267:	l_proc_stat=$(cat "/proc/$l_pid/stat" 2>/dev/null || :)
   268:	[ -n "$l_proc_stat" ] || return 1
   269:	l_proc_rest=$(printf '%s\n' "$l_proc_stat" | sed 's/^[0-9][0-9]* (.*) //')
@@ -256,37 +250,32 @@ src/zxfer_reporting.sh
   1376:			zxfer_echoV "Failure beep failed; skipping."
 
 src/zxfer_runtime.sh
-  146:	l_cleanup_read_pgid_value=$(printf '%s\n' "$l_cleanup_read_pgid_raw" |
-  148:		l_cleanup_read_pgid_status=$?
-  231:			return 0
-  323:		return 1
-  344:		return 1
-  401:		l_cleanup_pid_set_status=$?
-  513:		return 0
-  545:		l_cleanup_abort_current_shell_pgid_status=$?
-  547:		l_cleanup_abort_current_shell_pgid=$(printf '%s\n' "$l_cleanup_abort_current_shell_pgid_raw" |
-  549:			l_cleanup_abort_current_shell_pgid_status=$?
-  551:		l_cleanup_abort_current_shell_pgid=""
-  889:			l_cleanup_status=1
-  1038:	if (
-  1040:	) 2>/dev/null; then
-  1396:		return "$l_status"
-  1616:		return "$l_status"
-  1621:		return "$l_status"
-  1696:	zxfer_unregister_runtime_artifact_path "$l_stage_dir"
-  1697:	return 0
-  1907:		g_zxfer_profile_start_ms=""
-  2167:				continue
-  2234:					l_source_context_status=$?
-  2236:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
-  2271:		g_zxfer_failure_class=dependency
-  2272:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
-  2290:					l_destination_context_status=$?
-  2292:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
-  2327:		g_zxfer_failure_class=dependency
-  2328:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
-  2368:		g_zxfer_failure_class=dependency
-  2369:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
+  263:	if ! kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null; then
+  264:		return 0
+  266:	g_zxfer_cleanup_pid_abort_failure_message="Failed to signal cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid)."
+  267:	return 1
+  294:		zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
+  295:		return 0
+  561:			l_cleanup_status=1
+  710:	if (
+  712:	) 2>/dev/null; then
+  1068:		return "$l_status"
+  1288:		return "$l_status"
+  1293:		return "$l_status"
+  1368:	zxfer_unregister_runtime_artifact_path "$l_stage_dir"
+  1369:	return 0
+  1579:		g_zxfer_profile_start_ms=""
+  1839:				continue
+  1906:					l_source_context_status=$?
+  1908:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
+  1943:		g_zxfer_failure_class=dependency
+  1944:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
+  1962:					l_destination_context_status=$?
+  1964:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
+  1999:		g_zxfer_failure_class=dependency
+  2000:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
+  2040:		g_zxfer_failure_class=dependency
+  2041:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
 
 src/zxfer_send_receive.sh
   126:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |

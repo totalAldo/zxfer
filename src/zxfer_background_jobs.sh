@@ -32,83 +32,129 @@
 # shellcheck shell=sh disable=SC2034,SC2154
 
 ################################################################################
-# BACKGROUND JOB SUPERVISION
+# BACKGROUND JOB SUPERVISION (supervision-lite)
 ################################################################################
 
 # Module contract:
-# owns globals: background-job registry state, launch/completion parse scratch,
-# and trap-abort result scratch for supervised long-lived workers.
-# reads globals: g_cmd_ps, g_zxfer_temp_prefix, process-start identity helpers,
-# and runtime artifact helpers.
+# owns globals: the in-memory background-job registry (one row per job:
+# job_id, kind, pid, teardown mode, status file), spawn/wait/abort scratch,
+# and the cached setsid capability flag.
+# reads globals: runtime artifact and temp-file helpers plus the cleanup
+# child wrapper path helper from zxfer_runtime.sh.
 # mutates caches: runtime artifact tracking through shared temp helpers.
-# returns via stdout: supervisor job ids, runner script paths, and validated
-# process-id sets for teardown.
+# returns via stdout: background job ids.
+#
+# Supervision-lite model (no per-job supervisor process):
+# - Spawn runs the job pipeline directly in ONE backgrounded job shell. With
+#   a working setsid(1) the job shell leads its own session and process
+#   group (pid == pgid), so abort can signal the entire pipeline with one
+#   process-group kill. Without setsid the job runs through the cleanup
+#   child wrapper, whose TERM trap reaps its descendants.
+# - The job shell itself writes the pipeline exit status to a per-run temp
+#   status file ("status<TAB>N") after the pipeline finishes, then publishes
+#   the job id to the rolling completion queue fd when one is open (the
+#   per-stage exit captures inside the caller's command string are
+#   untouched). A missing or non-numeric status file at wait time means the
+#   job shell died abnormally and is reported as a failure.
+# - SAFETY INVARIANT (replaces the deleted start-token revalidation and
+#   process-table snapshots): abort only ever signals (i) the process group
+#   created by our own setsid job shell or (ii) a direct child this shell
+#   has not waited on yet. POSIX keeps an un-reaped child's PID -- and the
+#   process group that PID leads -- from being recycled, so the signal
+#   cannot reach an unrelated process. All abort signalling therefore
+#   happens BEFORE wait() reaps the job shell.
 
-ZXFER_BACKGROUND_JOB_METADATA_VERSION=1
-
+# Purpose: Reset the background-job registry and scratch state so the next
+# runtime pass starts from a clean state.
+# Usage: Called during runtime bootstrap and from suites before this module
+# reuses mutable scratch globals or cached decisions.
 zxfer_reset_background_job_state() {
 	g_zxfer_background_job_records=""
 	g_zxfer_background_job_sequence=0
 	g_zxfer_background_job_last_id=""
 	g_zxfer_background_job_last_runner_pid=""
-	g_zxfer_background_job_last_control_dir=""
+	g_zxfer_background_job_last_status_file=""
 	g_zxfer_background_job_record_kind=""
-	g_zxfer_background_job_record_runner_pid=""
-	g_zxfer_background_job_record_control_dir=""
-	g_zxfer_background_job_record_runner_script=""
-	g_zxfer_background_job_record_runner_token=""
-	g_zxfer_background_job_record_runner_start_token=""
-	g_zxfer_background_job_launch_job_id=""
-	g_zxfer_background_job_launch_kind=""
-	g_zxfer_background_job_launch_runner_pid=""
-	g_zxfer_background_job_launch_runner_script=""
-	g_zxfer_background_job_launch_runner_token=""
-	g_zxfer_background_job_launch_worker_pid=""
-	g_zxfer_background_job_launch_worker_pgid=""
-	g_zxfer_background_job_launch_teardown_mode=""
-	g_zxfer_background_job_launch_started_epoch=""
+	g_zxfer_background_job_record_pid=""
+	g_zxfer_background_job_record_teardown=""
+	g_zxfer_background_job_record_status_file=""
 	g_zxfer_background_job_completion_exit_status=""
 	g_zxfer_background_job_completion_report_failure=""
 	g_zxfer_background_job_wait_exit_status=""
 	g_zxfer_background_job_wait_report_failure=""
 	g_zxfer_background_job_wait_job_id=""
 	g_zxfer_background_job_wait_runner_pid=""
-	g_zxfer_background_job_wait_control_dir=""
 	g_zxfer_background_job_abort_failure_message=""
-	g_zxfer_background_job_process_snapshot_result=""
-	g_zxfer_background_job_pid_set_result=""
 	g_zxfer_background_job_queue_record_type=""
 	g_zxfer_background_job_queue_record_job_id=""
 	g_zxfer_background_job_queue_record_status=""
+	# Abort grace and the setsid capability survive resets: the grace window
+	# is an environment-independent policy knob and the capability is a fact
+	# about the host, probed at most once per process.
+	g_zxfer_background_job_abort_grace_seconds=${g_zxfer_background_job_abort_grace_seconds:-1}
+	g_zxfer_background_job_use_setsid=${g_zxfer_background_job_use_setsid:-}
 }
 
-zxfer_get_background_job_runner_script_path() {
-	l_runner_script="${ZXFER_SOURCE_MODULES_ROOT:-.}/src/zxfer_background_job_runner.sh"
-	[ -r "$l_runner_script" ] || return 1
-	printf '%s\n' "$l_runner_script"
-}
-
+# Purpose: Allocate the next unique background job id for this process.
+# Usage: Called during spawn; publishes the id in
+# $g_zxfer_background_job_last_id and echoes it for capture-style callers.
 zxfer_next_background_job_id() {
 	g_zxfer_background_job_sequence=$((g_zxfer_background_job_sequence + 1))
 	g_zxfer_background_job_last_id="bgjob.$$.$g_zxfer_background_job_sequence"
 	printf '%s\n' "$g_zxfer_background_job_last_id"
 }
 
+# Purpose: Feature-test setsid once per process and cache whether spawned job
+# shells lead their own process group (pid == pgid).
+# Usage: Called lazily by the first spawn (memoized through
+# $g_zxfer_background_job_use_setsid); suites may pre-set the flag to force
+# either spawn path.
+zxfer_init_background_job_spawn_support() {
+	if [ -n "${g_zxfer_background_job_use_setsid:-}" ]; then
+		return 0
+	fi
+	g_zxfer_background_job_use_setsid=0
+	if ! command -v setsid >/dev/null 2>&1; then
+		return 0
+	fi
+	# The probe child prints its own pid and pgid; requiring them to match
+	# pins the invariant the process-group teardown relies on. A setsid that
+	# forks (or fails) yields a mismatch and falls back to the wrapper path.
+	l_spawn_probe=$(setsid sh -c 'printf "%s " "$$"; ps -o pgid= -p "$$"' 2>/dev/null) ||
+		return 0
+	# shellcheck disable=SC2086  # probe output is two space-separated fields
+	set -- $l_spawn_probe
+	if [ "$#" -ne 2 ]; then
+		return 0
+	fi
+	case "$1$2" in
+	*[!0-9]*)
+		return 0
+		;;
+	esac
+	if [ "$1" = "$2" ]; then
+		g_zxfer_background_job_use_setsid=1
+	fi
+	return 0
+}
+
+# Purpose: Register one background job with the in-memory registry owned by
+# this module.
+# Usage: Called during spawn so wait/abort and trap cleanup can find the live
+# job. One tab-separated row per job: job_id, kind, pid, teardown mode
+# (process_group | wrapper), status file path.
 zxfer_register_background_job_record() {
 	l_job_id=$1
 	l_kind=$2
-	l_runner_pid=$3
-	l_control_dir=$4
-	l_runner_script=$5
-	l_runner_token=$6
-	l_runner_start_token=$7
+	l_pid=$3
+	l_teardown=$4
+	l_status_file=$5
 
 	[ -n "$l_job_id" ] || return 1
-	[ -n "$l_runner_pid" ] || return 1
-	[ -n "$l_control_dir" ] || return 1
-	[ -n "$l_runner_start_token" ] || return 1
+	[ -n "$l_pid" ] || return 1
+	[ -n "$l_status_file" ] || return 1
 
-	while IFS='	' read -r l_existing_job_id l_existing_kind l_existing_runner_pid l_existing_control_dir l_existing_runner_script l_existing_runner_token l_existing_runner_start_token || [ -n "${l_existing_job_id}${l_existing_kind}${l_existing_runner_pid}${l_existing_control_dir}${l_existing_runner_script}${l_existing_runner_token}${l_existing_runner_start_token}" ]; do
+	while IFS='	' read -r l_existing_job_id l_existing_kind l_existing_pid l_existing_teardown l_existing_status_file || [ -n "${l_existing_job_id}${l_existing_kind}${l_existing_pid}${l_existing_teardown}${l_existing_status_file}" ]; do
 		[ -n "$l_existing_job_id" ] || continue
 		[ "$l_existing_job_id" = "$l_job_id" ] && return 0
 	done <<-EOF
@@ -117,33 +163,32 @@ zxfer_register_background_job_record() {
 
 	if [ -n "${g_zxfer_background_job_records:-}" ]; then
 		g_zxfer_background_job_records=$g_zxfer_background_job_records"
-	$l_job_id	$l_kind	$l_runner_pid	$l_control_dir	$l_runner_script	$l_runner_token	$l_runner_start_token"
+$l_job_id	$l_kind	$l_pid	$l_teardown	$l_status_file"
 	else
-		g_zxfer_background_job_records="$l_job_id	$l_kind	$l_runner_pid	$l_control_dir	$l_runner_script	$l_runner_token	$l_runner_start_token"
+		g_zxfer_background_job_records="$l_job_id	$l_kind	$l_pid	$l_teardown	$l_status_file"
 	fi
 
 	return 0
 }
 
+# Purpose: Find one tracked background job record by job id.
+# Usage: Called during wait and abort; publishes the row fields in the
+# g_zxfer_background_job_record_* scratch globals.
 zxfer_find_background_job_record() {
 	l_job_id=$1
 
 	g_zxfer_background_job_record_kind=""
-	g_zxfer_background_job_record_runner_pid=""
-	g_zxfer_background_job_record_control_dir=""
-	g_zxfer_background_job_record_runner_script=""
-	g_zxfer_background_job_record_runner_token=""
-	g_zxfer_background_job_record_runner_start_token=""
+	g_zxfer_background_job_record_pid=""
+	g_zxfer_background_job_record_teardown=""
+	g_zxfer_background_job_record_status_file=""
 
-	while IFS='	' read -r l_existing_job_id l_existing_kind l_existing_runner_pid l_existing_control_dir l_existing_runner_script l_existing_runner_token l_existing_runner_start_token || [ -n "${l_existing_job_id}${l_existing_kind}${l_existing_runner_pid}${l_existing_control_dir}${l_existing_runner_script}${l_existing_runner_token}${l_existing_runner_start_token}" ]; do
+	while IFS='	' read -r l_existing_job_id l_existing_kind l_existing_pid l_existing_teardown l_existing_status_file || [ -n "${l_existing_job_id}${l_existing_kind}${l_existing_pid}${l_existing_teardown}${l_existing_status_file}" ]; do
 		[ -n "$l_existing_job_id" ] || continue
 		[ "$l_existing_job_id" = "$l_job_id" ] || continue
 		g_zxfer_background_job_record_kind=$l_existing_kind
-		g_zxfer_background_job_record_runner_pid=$l_existing_runner_pid
-		g_zxfer_background_job_record_control_dir=$l_existing_control_dir
-		g_zxfer_background_job_record_runner_script=$l_existing_runner_script
-		g_zxfer_background_job_record_runner_token=$l_existing_runner_token
-		g_zxfer_background_job_record_runner_start_token=$l_existing_runner_start_token
+		g_zxfer_background_job_record_pid=$l_existing_pid
+		g_zxfer_background_job_record_teardown=$l_existing_teardown
+		g_zxfer_background_job_record_status_file=$l_existing_status_file
 		return 0
 	done <<-EOF
 		${g_zxfer_background_job_records:-}
@@ -152,18 +197,20 @@ zxfer_find_background_job_record() {
 	return 1
 }
 
+# Purpose: Remove one background job from the in-memory registry.
+# Usage: Called after a job has been waited on or aborted.
 zxfer_unregister_background_job_record() {
 	l_job_id=$1
 	l_remaining_records=""
 
-	while IFS='	' read -r l_existing_job_id l_existing_kind l_existing_runner_pid l_existing_control_dir l_existing_runner_script l_existing_runner_token l_existing_runner_start_token || [ -n "${l_existing_job_id}${l_existing_kind}${l_existing_runner_pid}${l_existing_control_dir}${l_existing_runner_script}${l_existing_runner_token}${l_existing_runner_start_token}" ]; do
+	while IFS='	' read -r l_existing_job_id l_existing_kind l_existing_pid l_existing_teardown l_existing_status_file || [ -n "${l_existing_job_id}${l_existing_kind}${l_existing_pid}${l_existing_teardown}${l_existing_status_file}" ]; do
 		[ -n "$l_existing_job_id" ] || continue
 		[ "$l_existing_job_id" = "$l_job_id" ] && continue
 		if [ -n "$l_remaining_records" ]; then
 			l_remaining_records=$l_remaining_records"
-	$l_existing_job_id	$l_existing_kind	$l_existing_runner_pid	$l_existing_control_dir	$l_existing_runner_script	$l_existing_runner_token	$l_existing_runner_start_token"
+$l_existing_job_id	$l_existing_kind	$l_existing_pid	$l_existing_teardown	$l_existing_status_file"
 		else
-			l_remaining_records="$l_existing_job_id	$l_existing_kind	$l_existing_runner_pid	$l_existing_control_dir	$l_existing_runner_script	$l_existing_runner_token	$l_existing_runner_start_token"
+			l_remaining_records="$l_existing_job_id	$l_existing_kind	$l_existing_pid	$l_existing_teardown	$l_existing_status_file"
 		fi
 	done <<-EOF
 		${g_zxfer_background_job_records:-}
@@ -172,94 +219,146 @@ zxfer_unregister_background_job_record() {
 	g_zxfer_background_job_records=$l_remaining_records
 }
 
-zxfer_write_background_job_launch_file() {
-	l_control_dir=$1
-	l_job_id=$2
-	l_kind=$3
-	l_runner_pid=$4
-	l_runner_script=$5
-	l_runner_token=$6
-	l_worker_pid=$7
-	l_worker_pgid=$8
-	l_teardown_mode=$9
-	l_started_epoch=${10:-}
-	l_launch_path=$l_control_dir/launch.tsv
+# Purpose: Spawn one supervised background job that runs the caller's command
+# string, records its exit status, and optionally notifies the rolling
+# completion queue.
+# Usage: Called during send/receive job scheduling (and any future background
+# consumers) with: kind, exec command, display command (carried by the
+# caller's own records; accepted for call-site compatibility), optional
+# stdout capture file, optional stderr capture file, optional notify fd.
+# Side effects: Publishes the job id, job-shell pid, and status file in
+# $g_zxfer_background_job_last_id, $g_zxfer_background_job_last_runner_pid,
+# and $g_zxfer_background_job_last_status_file.
+zxfer_spawn_supervised_background_job() {
+	l_kind=$1
+	l_exec_cmd=$2
+	l_display_cmd=$3
+	l_output_file=${4:-}
+	l_error_file=${5:-}
+	l_notify_fd=${6:-}
 
-	l_payload="version	$ZXFER_BACKGROUND_JOB_METADATA_VERSION
-job_id	$l_job_id
-kind	$l_kind
-runner_pid	$l_runner_pid
-runner_script	$l_runner_script
-runner_token	$l_runner_token
-worker_pid	$l_worker_pid
-worker_pgid	$l_worker_pgid
-teardown_mode	$l_teardown_mode
-started_epoch	$l_started_epoch"
+	g_zxfer_background_job_last_id=""
+	g_zxfer_background_job_last_runner_pid=""
+	g_zxfer_background_job_last_status_file=""
 
-	zxfer_write_runtime_cache_file_atomically "$l_launch_path" "$l_payload" "zxfer-bgjob-launch"
-}
+	zxfer_init_background_job_spawn_support
+	zxfer_next_background_job_id >/dev/null
+	l_job_id=$g_zxfer_background_job_last_id
+	zxfer_get_temp_file >/dev/null
+	l_status_file=$g_zxfer_temp_file_result
 
-zxfer_read_background_job_launch_file() {
-	l_control_dir=$1
-	l_launch_path=$l_control_dir/launch.tsv
-	l_read_status=0
-
-	g_zxfer_background_job_launch_job_id=""
-	g_zxfer_background_job_launch_kind=""
-	g_zxfer_background_job_launch_runner_pid=""
-	g_zxfer_background_job_launch_runner_script=""
-	g_zxfer_background_job_launch_runner_token=""
-	g_zxfer_background_job_launch_worker_pid=""
-	g_zxfer_background_job_launch_worker_pgid=""
-	g_zxfer_background_job_launch_teardown_mode=""
-	g_zxfer_background_job_launch_started_epoch=""
-
-	l_read_status=0
-	zxfer_read_runtime_artifact_file "$l_launch_path" >/dev/null ||
-		l_read_status=$?
-	if [ "$l_read_status" -ne 0 ]; then
-		return "$l_read_status"
+	l_spawn_status=0
+	l_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_status_file") ||
+		l_spawn_status=$?
+	if [ "$l_spawn_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
+		zxfer_throw_error "Failed to quote the background job [$l_job_id] status file path." "$l_spawn_status"
 	fi
-	while IFS='	' read -r l_key l_value || [ -n "${l_key}${l_value}" ]; do
-		case $l_key in
-		job_id)
-			g_zxfer_background_job_launch_job_id=$l_value
-			;;
-		kind)
-			g_zxfer_background_job_launch_kind=$l_value
-			;;
-		runner_pid)
-			g_zxfer_background_job_launch_runner_pid=$l_value
-			;;
-		runner_script)
-			g_zxfer_background_job_launch_runner_script=$l_value
-			;;
-		runner_token)
-			g_zxfer_background_job_launch_runner_token=$l_value
-			;;
-		worker_pid)
-			g_zxfer_background_job_launch_worker_pid=$l_value
-			;;
-		worker_pgid)
-			g_zxfer_background_job_launch_worker_pgid=$l_value
-			;;
-		teardown_mode)
-			g_zxfer_background_job_launch_teardown_mode=$l_value
-			;;
-		started_epoch)
-			g_zxfer_background_job_launch_started_epoch=$l_value
-			;;
-		esac
-	done <<-EOF || l_read_status=$?
-		$g_zxfer_runtime_artifact_read_result
-	EOF
 
-	[ "$l_read_status" -eq 0 ]
+	l_redirections=""
+	if [ -n "$l_output_file" ]; then
+		l_spawn_status=0
+		l_output_file_safe=$(zxfer_build_shell_command_from_argv "$l_output_file") ||
+			l_spawn_status=$?
+		if [ "$l_spawn_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
+			zxfer_throw_error "Failed to quote the background job [$l_job_id] output file path." "$l_spawn_status"
+		fi
+		l_redirections=" > $l_output_file_safe"
+	fi
+	if [ -n "$l_error_file" ]; then
+		l_spawn_status=0
+		l_error_file_safe=$(zxfer_build_shell_command_from_argv "$l_error_file") ||
+			l_spawn_status=$?
+		if [ "$l_spawn_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
+			zxfer_throw_error "Failed to quote the background job [$l_job_id] error file path." "$l_spawn_status"
+		fi
+		l_redirections="$l_redirections 2> $l_error_file_safe"
+	fi
+
+	# The job shell records its own completion: pipeline first (per-stage
+	# exit captures inside $l_exec_cmd stay untouched), then the status-file
+	# write, then the queue notification -- in that order, so a queue reader
+	# always finds the status file already written.
+	l_notify_cmds=""
+	l_notify_write_failed_cmd=""
+	case "$l_notify_fd" in
+	'' | *[!0-9]*) ;;
+	*)
+		l_notify_write_failed_cmd="printf 'completion_write_failed\t%s\t%s\n' '$l_job_id' \"\$l_zxfer_job_status\" >&$l_notify_fd 2>/dev/null || :
+	"
+		l_notify_cmds="
+if ! printf '%s\n' '$l_job_id' >&$l_notify_fd 2>/dev/null; then
+	if ! printf 'report_failure\tqueue_write\n' >> $l_status_file_safe 2>/dev/null; then
+		rm -f $l_status_file_safe 2>/dev/null || :
+	fi
+	printf '%s\n' 'Failed to publish background job completion for [$l_job_id].' >&2
+	exit 125
+fi"
+		;;
+	esac
+	# The pipeline runs in a subshell so an "exit N" inside the caller's
+	# command string (per-stage exit captures) ends the pipeline, not the
+	# job shell, and the status write below still happens.
+	l_job_cmd="l_zxfer_job_status=0
+(
+$l_exec_cmd
+)$l_redirections || l_zxfer_job_status=\$?
+if ! printf 'status\t%s\n' \"\$l_zxfer_job_status\" > $l_status_file_safe 2>/dev/null; then
+	printf '%s\n' 'Failed to record background job [$l_job_id] status.' >&2
+	${l_notify_write_failed_cmd}exit 125
+fi$l_notify_cmds
+exit \"\$l_zxfer_job_status\""
+
+	if [ "${g_zxfer_background_job_use_setsid:-0}" = "1" ]; then
+		l_teardown=process_group
+		setsid sh -c "$l_job_cmd" &
+	else
+		l_spawn_status=0
+		l_wrapper_script=$(zxfer_get_cleanup_child_wrapper_script_path) ||
+			l_spawn_status=$?
+		if [ "$l_spawn_status" -ne 0 ]; then
+			zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
+			zxfer_throw_error "Failed to locate the background job cleanup wrapper." "$l_spawn_status"
+		fi
+		l_teardown=wrapper
+		/bin/sh "$l_wrapper_script" "$l_job_cmd" &
+	fi
+	l_job_pid=$!
+
+	l_spawn_status=0
+	zxfer_register_background_job_record \
+		"$l_job_id" \
+		"$l_kind" \
+		"$l_job_pid" \
+		"$l_teardown" \
+		"$l_status_file" ||
+		l_spawn_status=$?
+	if [ "$l_spawn_status" -ne 0 ]; then
+		# The job shell is still our un-reaped child here, so the teardown
+		# signals cannot reach an unrelated process.
+		zxfer_signal_background_job_scope "$l_job_pid" "$l_teardown" TERM
+		zxfer_background_job_abort_grace_wait
+		zxfer_signal_background_job_scope "$l_job_pid" "$l_teardown" KILL
+		wait "$l_job_pid" 2>/dev/null || :
+		zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
+		zxfer_throw_error "Failed to register background job [$l_job_id]." "$l_spawn_status"
+	fi
+
+	g_zxfer_background_job_last_id=$l_job_id
+	g_zxfer_background_job_last_runner_pid=$l_job_pid
+	g_zxfer_background_job_last_status_file=$l_status_file
+	return 0
 }
 
-zxfer_read_background_job_completion_file() {
-	l_control_dir=$1
-	l_completion_path=$l_control_dir/completion.tsv
+# Purpose: Read one background job status file from staged state into the
+# current shell, failing closed on malformed contents.
+# Usage: Called by the completion-status helper; publishes the parsed fields
+# in $g_zxfer_background_job_completion_exit_status and
+# $g_zxfer_background_job_completion_report_failure.
+zxfer_read_background_job_status_file() {
+	l_status_file=$1
 	l_read_status=0
 	l_status_seen=0
 	l_report_failure_seen=0
@@ -267,8 +366,7 @@ zxfer_read_background_job_completion_file() {
 	g_zxfer_background_job_completion_exit_status=""
 	g_zxfer_background_job_completion_report_failure=""
 
-	l_read_status=0
-	zxfer_read_runtime_artifact_file "$l_completion_path" >/dev/null ||
+	zxfer_read_runtime_artifact_file "$l_status_file" >/dev/null ||
 		l_read_status=$?
 	if [ "$l_read_status" -ne 0 ]; then
 		return "$l_read_status"
@@ -309,20 +407,26 @@ zxfer_read_background_job_completion_file() {
 	[ "$l_status_seen" -eq 1 ]
 }
 
+# Purpose: Return the background job completion status in the form expected by
+# wait callers.
+# Usage: Called after the job shell has been reaped, with the status file path
+# and the wait(1) status. A missing status file means the job shell died
+# before its status write -- abnormal death -- and is reported through the
+# completion_write failure marker with the waited status preserved.
 zxfer_get_background_job_completion_status() {
-	l_control_dir=$1
+	l_status_file=$1
 	l_wait_status=$2
-	l_completion_path=$l_control_dir/completion.tsv
 
 	g_zxfer_background_job_completion_exit_status=$l_wait_status
 	g_zxfer_background_job_completion_report_failure=""
 
-	if [ ! -f "$l_completion_path" ]; then
+	if [ ! -f "$l_status_file" ]; then
 		g_zxfer_background_job_completion_report_failure=completion_write
 		return 0
 	fi
 	l_completion_read_status=0
-	zxfer_read_background_job_completion_file "$l_control_dir" || l_completion_read_status=$?
+	zxfer_read_background_job_status_file "$l_status_file" ||
+		l_completion_read_status=$?
 	if [ "$l_completion_read_status" -ne 0 ]; then
 		return "$l_completion_read_status"
 	fi
@@ -330,92 +434,11 @@ zxfer_get_background_job_completion_status() {
 	return 0
 }
 
-zxfer_spawn_supervised_background_job() {
-	l_kind=$1
-	l_exec_cmd=$2
-	l_display_cmd=$3
-	l_output_file=${4:-}
-	l_error_file=${5:-}
-	l_notify_fd=${6:-}
-
-	g_zxfer_background_job_last_id=""
-	g_zxfer_background_job_last_runner_pid=""
-	g_zxfer_background_job_last_control_dir=""
-
-	l_spawn_status=0
-	l_runner_script=$(zxfer_get_background_job_runner_script_path) ||
-		l_spawn_status=$?
-	if [ "$l_spawn_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to locate the background job runner helper." "$l_spawn_status"
-	fi
-	l_spawn_status=0
-	l_job_id=$(zxfer_next_background_job_id) ||
-		l_spawn_status=$?
-	if [ "$l_spawn_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to allocate a background job id." "$l_spawn_status"
-	fi
-	l_temp_prefix="${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}.$l_job_id"
-	l_spawn_status=0
-	l_control_dir=$(zxfer_create_private_temp_dir "$l_temp_prefix") ||
-		l_spawn_status=$?
-	if [ "$l_spawn_status" -ne 0 ]; then
-		zxfer_throw_error "Error creating temporary file." "$l_spawn_status"
-	fi
-	l_runner_token="$l_job_id.$(date +%s)"
-	ZXFER_BACKGROUND_JOB_NOTIFY_FD=$l_notify_fd \
-		/bin/sh "$l_runner_script" \
-		"$l_runner_token" \
-		"$l_job_id" \
-		"$l_kind" \
-		"$l_control_dir" \
-		"$l_exec_cmd" \
-		"$l_display_cmd" \
-		"$l_output_file" \
-		"$l_error_file" &
-	l_runner_pid=$!
-	l_spawn_status=0
-	l_runner_start_token=$(zxfer_get_process_start_token "$l_runner_pid") ||
-		l_spawn_status=$?
-	if [ "$l_spawn_status" -ne 0 ]; then
-		zxfer_teardown_unregistered_background_runner \
-			"$l_job_id" \
-			"$l_runner_pid" \
-			"$l_control_dir" \
-			"$l_runner_script" \
-			"$l_runner_token" \
-			"" \
-			"TERM" >/dev/null 2>&1 || :
-		zxfer_throw_error "Failed to validate background job [$l_job_id] runner identity." "$l_spawn_status"
-	fi
-
-	l_spawn_status=0
-	zxfer_register_background_job_record \
-		"$l_job_id" \
-		"$l_kind" \
-		"$l_runner_pid" \
-		"$l_control_dir" \
-		"$l_runner_script" \
-		"$l_runner_token" \
-		"$l_runner_start_token" ||
-		l_spawn_status=$?
-	if [ "$l_spawn_status" -ne 0 ]; then
-		zxfer_teardown_unregistered_background_runner \
-			"$l_job_id" \
-			"$l_runner_pid" \
-			"$l_control_dir" \
-			"$l_runner_script" \
-			"$l_runner_token" \
-			"$l_runner_start_token" \
-			"TERM" >/dev/null 2>&1 || :
-		zxfer_throw_error "Failed to register background job [$l_job_id]." "$l_spawn_status"
-	fi
-
-	g_zxfer_background_job_last_id=$l_job_id
-	g_zxfer_background_job_last_runner_pid=$l_runner_pid
-	g_zxfer_background_job_last_control_dir=$l_control_dir
-	return 0
-}
-
+# Purpose: Wait for one tracked background job, reap it, and publish its
+# recorded completion status.
+# Usage: Called during send/receive job coordination; publishes results in the
+# g_zxfer_background_job_wait_* globals and removes the registry row plus the
+# status file. Returns non-zero for unknown jobs or malformed status files.
 zxfer_wait_for_background_job() {
 	l_job_id=$1
 	l_wait_status=0
@@ -424,536 +447,82 @@ zxfer_wait_for_background_job() {
 	g_zxfer_background_job_wait_report_failure=""
 	g_zxfer_background_job_wait_job_id=""
 	g_zxfer_background_job_wait_runner_pid=""
-	g_zxfer_background_job_wait_control_dir=""
 
 	if ! zxfer_find_background_job_record "$l_job_id"; then
 		return 1
 	fi
 
-	wait "$g_zxfer_background_job_record_runner_pid" 2>/dev/null || l_wait_status=$?
+	wait "$g_zxfer_background_job_record_pid" 2>/dev/null || l_wait_status=$?
 	l_completion_status=0
-	zxfer_get_background_job_completion_status "$g_zxfer_background_job_record_control_dir" "$l_wait_status" ||
+	zxfer_get_background_job_completion_status \
+		"$g_zxfer_background_job_record_status_file" \
+		"$l_wait_status" ||
 		l_completion_status=$?
 	if [ "$l_completion_status" -ne 0 ]; then
 		zxfer_unregister_background_job_record "$l_job_id"
-		zxfer_cleanup_runtime_artifact_path "$g_zxfer_background_job_record_control_dir" >/dev/null 2>&1 || :
+		zxfer_cleanup_runtime_artifact_path "$g_zxfer_background_job_record_status_file" >/dev/null 2>&1 || :
 		return "$l_completion_status"
 	fi
 
 	g_zxfer_background_job_wait_exit_status=$g_zxfer_background_job_completion_exit_status
 	g_zxfer_background_job_wait_report_failure=$g_zxfer_background_job_completion_report_failure
 	g_zxfer_background_job_wait_job_id=$l_job_id
-	g_zxfer_background_job_wait_runner_pid=$g_zxfer_background_job_record_runner_pid
-	g_zxfer_background_job_wait_control_dir=$g_zxfer_background_job_record_control_dir
+	g_zxfer_background_job_wait_runner_pid=$g_zxfer_background_job_record_pid
 
 	zxfer_unregister_background_job_record "$l_job_id"
-	zxfer_cleanup_runtime_artifact_path "$g_zxfer_background_job_wait_control_dir" >/dev/null 2>&1 || :
+	zxfer_cleanup_runtime_artifact_path "$g_zxfer_background_job_record_status_file" >/dev/null 2>&1 || :
 	return 0
 }
 
-zxfer_read_background_job_process_snapshot() {
-	g_zxfer_background_job_process_snapshot_result=""
-	l_snapshot_status=0
-	l_snapshot=$("$g_cmd_ps" -o pid= -o ppid= -o pgid= 2>/dev/null) || l_snapshot_status=$?
-	[ "$l_snapshot_status" -eq 0 ] || return "$l_snapshot_status"
-	g_zxfer_background_job_process_snapshot_result=$l_snapshot
-	printf '%s\n' "$l_snapshot"
-}
+# Purpose: Signal one background job's teardown scope.
+# Usage: Called during abort with the job-shell pid, the recorded teardown
+# mode, and the signal name. Signal delivery failures are expected for jobs
+# that already exited and are ignored.
+# SAFETY: the pid is always an un-reaped direct child of this shell (and on
+# the process_group path, the group leader our setsid child created), so per
+# the module safety invariant the signal cannot reach an unrelated process.
+zxfer_signal_background_job_scope() {
+	l_scope_pid=$1
+	l_scope_teardown=$2
+	l_scope_signal=$3
 
-zxfer_background_job_snapshot_has_pid() {
-	l_snapshot=$1
-	l_pid=$2
-
-	case "$l_pid" in
+	case "$l_scope_pid" in
 	'' | *[!0-9]*)
-		return 1
+		return 0
 		;;
 	esac
 
-	# shellcheck disable=SC2016
-	printf '%s\n' "$l_snapshot" | "${g_cmd_awk:-awk}" -v want_pid="$l_pid" '
-	$1 == want_pid {
-		found = 1
-	}
-	END {
-		exit(found ? 0 : 1)
-	}'
-}
-
-zxfer_background_job_runner_matches() {
-	l_snapshot=$1
-	l_runner_pid=$2
-	l_runner_start_token=$3
-
-	case "$l_runner_pid" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-
-	if ! zxfer_background_job_snapshot_has_pid "$l_snapshot" "$l_runner_pid"; then
-		return 1
+	if [ "$l_scope_teardown" = "process_group" ]; then
+		kill "-$l_scope_signal" "-$l_scope_pid" 2>/dev/null || :
+	else
+		kill -s "$l_scope_signal" "$l_scope_pid" 2>/dev/null || :
 	fi
-	if ! l_current_start_token=$(zxfer_get_process_start_token "$l_runner_pid" 2>/dev/null); then
-		return 2
-	fi
-	[ "$l_current_start_token" = "$l_runner_start_token" ] || return 3
 	return 0
 }
 
-zxfer_background_job_snapshot_has_pid_with_pgid() {
-	l_snapshot=$1
-	l_pid=$2
-	l_pgid=$3
-
-	case "$l_pid" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-	case "$l_pgid" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-
-	# shellcheck disable=SC2016
-	printf '%s\n' "$l_snapshot" | "${g_cmd_awk:-awk}" -v want_pid="$l_pid" -v want_pgid="$l_pgid" '
-	$1 == want_pid && $3 == want_pgid {
-		found = 1
-	}
-	END {
-		exit(found ? 0 : 1)
-	}'
-}
-
-zxfer_background_job_snapshot_has_pid_with_parent() {
-	l_snapshot=$1
-	l_pid=$2
-	l_parent_pid=$3
-
-	case "$l_pid" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-	case "$l_parent_pid" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-
-	# shellcheck disable=SC2016
-	printf '%s\n' "$l_snapshot" | "${g_cmd_awk:-awk}" -v want_pid="$l_pid" -v want_parent_pid="$l_parent_pid" '
-	$1 == want_pid && $2 == want_parent_pid {
-		found = 1
-	}
-	END {
-		exit(found ? 0 : 1)
-	}'
-}
-
-zxfer_get_background_job_pid_set() {
-	l_snapshot=$1
-	l_root_pid=$2
-
-	g_zxfer_background_job_pid_set_result=""
-	l_pid_set_status=0
-	# shellcheck disable=SC2016
-	l_pid_set_raw=$(printf '%s\n' "$l_snapshot" | "${g_cmd_awk:-awk}" -v root="$l_root_pid" '
-	{
-		pid = $1
-		ppid = $2
-		if (pid != "") {
-			parent[pid] = ppid
-			seen[pid] = 1
-		}
-	}
-	END {
-		if (root == "") {
-			exit 1
-		}
-		target[root] = 1
-		changed = 1
-		while (changed) {
-			changed = 0
-			for (pid in seen) {
-				if ((parent[pid] in target) && !(pid in target)) {
-					target[pid] = 1
-					changed = 1
-				}
-			}
-		}
-		for (pid in target) {
-			print pid
-		}
-	}') || l_pid_set_status=$?
-	[ "$l_pid_set_status" -eq 0 ] || return "$l_pid_set_status"
-	l_pid_set_status=0
-	l_pid_set=$(printf '%s\n' "$l_pid_set_raw" | LC_ALL=C sort -n) ||
-		l_pid_set_status=$?
-	[ "$l_pid_set_status" -eq 0 ] || return "$l_pid_set_status"
-	g_zxfer_background_job_pid_set_result=$l_pid_set
-	printf '%s\n' "$l_pid_set"
-}
-
-zxfer_signal_background_job_pid_set() {
-	l_pid_set=$1
-	l_signal=$2
-	l_status=0
-
-	while IFS= read -r l_pid || [ -n "$l_pid" ]; do
-		[ -n "$l_pid" ] || continue
-		kill "-$l_signal" "$l_pid" 2>/dev/null || l_status=1
-	done <<-EOF
-		$l_pid_set
-	EOF
-
-	return "$l_status"
-}
-
-zxfer_signal_background_job_process_group() {
-	l_pgid=$1
-	l_signal=$2
-
-	case "$l_pgid" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-
-	kill "-$l_signal" "-$l_pgid" 2>/dev/null
-}
-
-zxfer_signal_validated_background_job_scope() {
-	l_signal_job_id=$1
-	l_signal_runner_pid=$2
-	l_signal_have_launch_metadata=$3
-	l_signal_name=$4
-	l_signal_status=0
-	l_signal_target_pid_set=""
-
-	l_signal_current_shell_pgid_status=0
-	l_signal_current_shell_pgid_raw=$("$g_cmd_ps" -o pgid= -p "$$" 2>/dev/null) ||
-		l_signal_current_shell_pgid_status=$?
-	if [ "$l_signal_current_shell_pgid_status" -eq 0 ]; then
-		l_signal_current_shell_pgid=$(printf '%s\n' "$l_signal_current_shell_pgid_raw" |
-			sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed -n '1p') ||
-			l_signal_current_shell_pgid_status=$?
-	else
-		l_signal_current_shell_pgid=""
-	fi
-	[ "$l_signal_current_shell_pgid_status" -eq 0 ] || l_signal_current_shell_pgid=""
-	case ${g_zxfer_background_job_launch_worker_pgid:-} in
-	'' | *[!0-9]*)
-		l_signal_use_process_group=0
-		;;
-	*)
-		l_signal_use_process_group=0
-		if [ "$l_signal_have_launch_metadata" -eq 1 ] &&
-			[ "${g_zxfer_background_job_launch_teardown_mode:-}" = "process_group" ] &&
-			[ "$g_zxfer_background_job_launch_worker_pgid" != "${l_signal_current_shell_pgid:-}" ] &&
-			zxfer_background_job_snapshot_has_pid_with_parent \
-				"$g_zxfer_background_job_process_snapshot_result" \
-				"$g_zxfer_background_job_launch_worker_pid" \
-				"$l_signal_runner_pid" &&
-			zxfer_background_job_snapshot_has_pid_with_pgid \
-				"$g_zxfer_background_job_process_snapshot_result" \
-				"$g_zxfer_background_job_launch_worker_pid" \
-				"$g_zxfer_background_job_launch_worker_pgid"; then
-			l_signal_use_process_group=1
-		fi
-		;;
-	esac
-
-	if [ "$l_signal_use_process_group" -eq 1 ]; then
-		zxfer_signal_background_job_process_group "$g_zxfer_background_job_launch_worker_pgid" "$l_signal_name" || l_signal_status=1
-		kill "-$l_signal_name" "$l_signal_runner_pid" 2>/dev/null || l_signal_status=1
-	else
-		l_signal_pid_set_status=0
-		zxfer_get_background_job_pid_set \
-			"$g_zxfer_background_job_process_snapshot_result" \
-			"$l_signal_runner_pid" >/dev/null ||
-			l_signal_pid_set_status=$?
-		if [ "$l_signal_pid_set_status" -ne 0 ]; then
-			g_zxfer_background_job_abort_failure_message="Failed to derive the owned child set for background job [$l_signal_job_id] cleanup."
-			return "$l_signal_pid_set_status"
-		fi
-		l_signal_target_pid_set=$g_zxfer_background_job_pid_set_result
-		[ -n "$l_signal_target_pid_set" ] || l_signal_target_pid_set=$l_signal_runner_pid
-		zxfer_signal_background_job_pid_set "$l_signal_target_pid_set" "$l_signal_name" || l_signal_status=1
-	fi
-
-	return "$l_signal_status"
-}
-
-zxfer_cleanup_completed_background_job() {
-	l_job_id=$1
-	l_runner_pid=$2
-	l_control_dir=$3
-
-	case "$l_runner_pid" in
-	'' | *[!0-9]*)
+# Purpose: Give a signaled background job a brief bounded window to exit
+# before the single KILL escalation.
+# Usage: Called between the TERM pass and the KILL pass during aborts; suites
+# set $g_zxfer_background_job_abort_grace_seconds to 0 to skip the wait.
+zxfer_background_job_abort_grace_wait() {
+	case "${g_zxfer_background_job_abort_grace_seconds:-1}" in
+	0)
 		:
 		;;
-	*)
-		wait "$l_runner_pid" 2>/dev/null || :
-		;;
-	esac
-
-	zxfer_unregister_background_job_record "$l_job_id"
-	zxfer_cleanup_runtime_artifact_path "$l_control_dir" >/dev/null 2>&1 || :
-	return 0
-}
-
-zxfer_cleanup_aborted_background_job() {
-	l_job_id=$1
-	l_control_dir=$2
-
-	zxfer_unregister_background_job_record "$l_job_id"
-	zxfer_cleanup_runtime_artifact_path "$l_control_dir" >/dev/null 2>&1 || :
-	return 0
-}
-
-zxfer_finish_signaled_background_job_abort() {
-	l_finish_job_id=$1
-	l_finish_runner_pid=$2
-	l_finish_control_dir=$3
-	l_finish_runner_start_token=$4
-	l_finish_have_launch_metadata=$5
-	l_finish_signal_status=${6:-0}
-	l_finish_completion_path=$l_finish_control_dir/completion.tsv
-	l_finish_runner_match_status=0
-	l_finish_escalation_status=0
-
-	if [ -f "$l_finish_completion_path" ]; then
-		zxfer_cleanup_completed_background_job \
-			"$l_finish_job_id" \
-			"$l_finish_runner_pid" \
-			"$l_finish_control_dir"
-		return 0
-	fi
-	l_finish_snapshot_status=0
-	zxfer_read_background_job_process_snapshot >/dev/null || l_finish_snapshot_status=$?
-	if [ "$l_finish_snapshot_status" -ne 0 ]; then
-		if [ -f "$l_finish_completion_path" ]; then
-			zxfer_cleanup_completed_background_job \
-				"$l_finish_job_id" \
-				"$l_finish_runner_pid" \
-				"$l_finish_control_dir"
-			return 0
-		fi
-		g_zxfer_background_job_abort_failure_message="Failed to inspect the process table for background job [$l_finish_job_id] cleanup."
-		return "$l_finish_snapshot_status"
-	fi
-
-	zxfer_background_job_runner_matches \
-		"$g_zxfer_background_job_process_snapshot_result" \
-		"$l_finish_runner_pid" \
-		"$l_finish_runner_start_token" ||
-		l_finish_runner_match_status=$?
-	case "$l_finish_runner_match_status" in
-	1)
-		zxfer_cleanup_aborted_background_job "$l_finish_job_id" "$l_finish_control_dir"
-		return 0
-		;;
-	2)
-		if [ -f "$l_finish_completion_path" ]; then
-			zxfer_cleanup_completed_background_job \
-				"$l_finish_job_id" \
-				"$l_finish_runner_pid" \
-				"$l_finish_control_dir"
-			return 0
-		fi
-		g_zxfer_background_job_abort_failure_message="Failed to validate the live runner identity for background job [$l_finish_job_id]."
-		return 1
-		;;
-	3)
-		if [ -f "$l_finish_completion_path" ]; then
-			zxfer_cleanup_completed_background_job \
-				"$l_finish_job_id" \
-				"$l_finish_runner_pid" \
-				"$l_finish_control_dir"
-			return 0
-		fi
-		g_zxfer_background_job_abort_failure_message="Refusing to tear down background job [$l_finish_job_id] because the tracked runner PID [$l_finish_runner_pid] no longer matches the recorded helper identity."
-		return 1
-		;;
-	esac
-
-	zxfer_signal_validated_background_job_scope \
-		"$l_finish_job_id" \
-		"$l_finish_runner_pid" \
-		"$l_finish_have_launch_metadata" \
-		"KILL" ||
-		l_finish_escalation_status=$?
-
-	if [ -f "$l_finish_completion_path" ]; then
-		zxfer_cleanup_completed_background_job \
-			"$l_finish_job_id" \
-			"$l_finish_runner_pid" \
-			"$l_finish_control_dir"
-		return 0
-	fi
-	l_finish_snapshot_status=0
-	zxfer_read_background_job_process_snapshot >/dev/null || l_finish_snapshot_status=$?
-	if [ "$l_finish_snapshot_status" -ne 0 ]; then
-		if [ -f "$l_finish_completion_path" ]; then
-			zxfer_cleanup_completed_background_job \
-				"$l_finish_job_id" \
-				"$l_finish_runner_pid" \
-				"$l_finish_control_dir"
-			return 0
-		fi
-		g_zxfer_background_job_abort_failure_message="Failed to inspect the process table for background job [$l_finish_job_id] cleanup."
-		return "$l_finish_snapshot_status"
-	fi
-
-	l_finish_runner_match_status=0
-	zxfer_background_job_runner_matches \
-		"$g_zxfer_background_job_process_snapshot_result" \
-		"$l_finish_runner_pid" \
-		"$l_finish_runner_start_token" ||
-		l_finish_runner_match_status=$?
-	case "$l_finish_runner_match_status" in
-	1)
-		zxfer_cleanup_aborted_background_job "$l_finish_job_id" "$l_finish_control_dir"
-		return 0
-		;;
-	2)
-		if [ -f "$l_finish_completion_path" ]; then
-			zxfer_cleanup_completed_background_job \
-				"$l_finish_job_id" \
-				"$l_finish_runner_pid" \
-				"$l_finish_control_dir"
-			return 0
-		fi
-		g_zxfer_background_job_abort_failure_message="Failed to validate the live runner identity for background job [$l_finish_job_id]."
-		return 1
-		;;
-	3)
-		if [ -f "$l_finish_completion_path" ]; then
-			zxfer_cleanup_completed_background_job \
-				"$l_finish_job_id" \
-				"$l_finish_runner_pid" \
-				"$l_finish_control_dir"
-			return 0
-		fi
-		g_zxfer_background_job_abort_failure_message="Refusing to tear down background job [$l_finish_job_id] because the tracked runner PID [$l_finish_runner_pid] no longer matches the recorded helper identity."
-		return 1
-		;;
-	esac
-
-	if [ "$l_finish_escalation_status" -ne 0 ] && [ -n "${g_zxfer_background_job_abort_failure_message:-}" ]; then
-		:
-	elif [ "$l_finish_signal_status" -ne 0 ] || [ "$l_finish_escalation_status" -ne 0 ]; then
-		g_zxfer_background_job_abort_failure_message="Failed to signal the validated teardown target for background job [$l_finish_job_id]."
-	else
-		g_zxfer_background_job_abort_failure_message="Refusing to remove background job [$l_finish_job_id] state because the validated runner PID [$l_finish_runner_pid] is still live after abort cleanup signaling."
-	fi
-	if [ "$l_finish_signal_status" -ne 0 ]; then
-		return "$l_finish_signal_status"
-	fi
-	if [ "$l_finish_escalation_status" -ne 0 ]; then
-		return "$l_finish_escalation_status"
-	fi
-	return 1
-}
-
-zxfer_teardown_unregistered_background_runner() {
-	l_unregistered_job_id=$1
-	l_unregistered_runner_pid=$2
-	l_unregistered_control_dir=$3
-	l_unregistered_runner_script=$4
-	l_unregistered_runner_token=$5
-	l_unregistered_runner_start_token=${6:-}
-	l_unregistered_signal=${7:-TERM}
-	l_unregistered_have_launch_metadata=0
-	l_unregistered_signal_status=0
-	l_unregistered_runner_match_status=0
-
-	case "$l_unregistered_runner_pid" in
 	'' | *[!0-9]*)
-		zxfer_cleanup_runtime_artifact_path "$l_unregistered_control_dir" >/dev/null 2>&1 || :
-		return 0
+		sleep 1
+		;;
+	*)
+		sleep "$g_zxfer_background_job_abort_grace_seconds"
 		;;
 	esac
-
-	if [ -f "$l_unregistered_control_dir/launch.tsv" ] &&
-		zxfer_read_background_job_launch_file "$l_unregistered_control_dir" &&
-		[ "${g_zxfer_background_job_launch_job_id:-}" = "$l_unregistered_job_id" ] &&
-		[ "${g_zxfer_background_job_launch_runner_pid:-}" = "$l_unregistered_runner_pid" ] &&
-		[ "${g_zxfer_background_job_launch_runner_script:-}" = "$l_unregistered_runner_script" ] &&
-		[ "${g_zxfer_background_job_launch_runner_token:-}" = "$l_unregistered_runner_token" ]; then
-		l_unregistered_have_launch_metadata=1
-	fi
-
-	l_unregistered_snapshot_status=0
-	zxfer_read_background_job_process_snapshot >/dev/null || l_unregistered_snapshot_status=$?
-	if [ "$l_unregistered_snapshot_status" -ne 0 ]; then
-		g_zxfer_background_job_abort_failure_message="Failed to inspect the process table for background job [$l_unregistered_job_id] cleanup."
-		return "$l_unregistered_snapshot_status"
-	fi
-	if ! zxfer_background_job_snapshot_has_pid_with_parent \
-		"$g_zxfer_background_job_process_snapshot_result" \
-		"$l_unregistered_runner_pid" \
-		"$$"; then
-		wait "$l_unregistered_runner_pid" 2>/dev/null || :
-		zxfer_cleanup_runtime_artifact_path "$l_unregistered_control_dir" >/dev/null 2>&1 || :
-		return 0
-	fi
-	if [ -n "$l_unregistered_runner_start_token" ]; then
-		zxfer_background_job_runner_matches \
-			"$g_zxfer_background_job_process_snapshot_result" \
-			"$l_unregistered_runner_pid" \
-			"$l_unregistered_runner_start_token" ||
-			l_unregistered_runner_match_status=$?
-		case "$l_unregistered_runner_match_status" in
-		0)
-			:
-			;;
-		*)
-			g_zxfer_background_job_abort_failure_message="Refusing to tear down background job [$l_unregistered_job_id] because the tracked runner PID [$l_unregistered_runner_pid] no longer matches the recorded helper identity."
-			return 1
-			;;
-		esac
-	fi
-
-	zxfer_signal_validated_background_job_scope \
-		"$l_unregistered_job_id" \
-		"$l_unregistered_runner_pid" \
-		"$l_unregistered_have_launch_metadata" \
-		"$l_unregistered_signal" ||
-		l_unregistered_signal_status=$?
-	if [ "$l_unregistered_signal_status" -ne 0 ] &&
-		! zxfer_read_background_job_process_snapshot >/dev/null; then
-		return 1
-	fi
-	if [ "$l_unregistered_signal_status" -ne 0 ] &&
-		zxfer_background_job_snapshot_has_pid_with_parent \
-			"$g_zxfer_background_job_process_snapshot_result" \
-			"$l_unregistered_runner_pid" \
-			"$$"; then
-		return 1
-	fi
-
-	if zxfer_read_background_job_process_snapshot >/dev/null &&
-		zxfer_background_job_snapshot_has_pid_with_parent \
-			"$g_zxfer_background_job_process_snapshot_result" \
-			"$l_unregistered_runner_pid" \
-			"$$"; then
-		zxfer_signal_validated_background_job_scope \
-			"$l_unregistered_job_id" \
-			"$l_unregistered_runner_pid" \
-			"$l_unregistered_have_launch_metadata" \
-			"KILL" >/dev/null 2>&1 || :
-	fi
-
-	wait "$l_unregistered_runner_pid" 2>/dev/null || :
-	zxfer_cleanup_runtime_artifact_path "$l_unregistered_control_dir" >/dev/null 2>&1 || :
 	return 0
 }
 
+# Purpose: Parse one record read from the background job completion queue.
+# Usage: Called during send/receive rolling waits; publishes the record type,
+# job id, and optional status in the g_zxfer_background_job_queue_record_*
+# globals.
 zxfer_parse_background_job_queue_record() {
 	l_record=$1
 
@@ -974,163 +543,67 @@ zxfer_parse_background_job_queue_record() {
 	esac
 }
 
+# Purpose: Abort one tracked background job: TERM its teardown scope, wait
+# briefly, escalate once with KILL, then reap and clean up.
+# Usage: Called during send/receive failure handling and shutdown. Unknown
+# jobs return success. All signalling happens before wait() per the module
+# safety invariant.
 zxfer_abort_background_job() {
 	l_job_id=$1
 	l_signal=${2:-TERM}
-	l_launch_path=""
-	l_completion_path=""
-	l_have_launch_metadata=0
-	l_signal_status=0
 
 	g_zxfer_background_job_abort_failure_message=""
 	if ! zxfer_find_background_job_record "$l_job_id"; then
 		return 0
 	fi
+	l_abort_pid=$g_zxfer_background_job_record_pid
+	l_abort_teardown=$g_zxfer_background_job_record_teardown
+	l_abort_status_file=$g_zxfer_background_job_record_status_file
 
-	l_launch_path=$g_zxfer_background_job_record_control_dir/launch.tsv
-	l_completion_path=$g_zxfer_background_job_record_control_dir/completion.tsv
-	if [ -f "$l_launch_path" ]; then
-		l_launch_read_status=0
-		zxfer_read_background_job_launch_file "$g_zxfer_background_job_record_control_dir" ||
-			l_launch_read_status=$?
-		if [ "$l_launch_read_status" -ne 0 ]; then
-			if [ -f "$l_completion_path" ]; then
-				zxfer_cleanup_completed_background_job \
-					"$l_job_id" \
-					"$g_zxfer_background_job_record_runner_pid" \
-					"$g_zxfer_background_job_record_control_dir"
-				return 0
-			fi
-			g_zxfer_background_job_abort_failure_message="Failed to read launch metadata for background job [$l_job_id]."
-			return "$l_launch_read_status"
-		fi
-		l_have_launch_metadata=1
-	else
-		g_zxfer_background_job_launch_job_id=""
-		g_zxfer_background_job_launch_kind=""
-		g_zxfer_background_job_launch_runner_pid=""
-		g_zxfer_background_job_launch_runner_script=""
-		g_zxfer_background_job_launch_runner_token=""
-		g_zxfer_background_job_launch_worker_pid=""
-		g_zxfer_background_job_launch_worker_pgid=""
-		g_zxfer_background_job_launch_teardown_mode=""
-		g_zxfer_background_job_launch_started_epoch=""
-	fi
-	l_abort_snapshot_status=0
-	zxfer_read_background_job_process_snapshot >/dev/null || l_abort_snapshot_status=$?
-	if [ "$l_abort_snapshot_status" -ne 0 ]; then
-		if [ -f "$l_completion_path" ]; then
-			zxfer_cleanup_completed_background_job \
-				"$l_job_id" \
-				"$g_zxfer_background_job_record_runner_pid" \
-				"$g_zxfer_background_job_record_control_dir"
-			return 0
-		fi
-		g_zxfer_background_job_abort_failure_message="Failed to inspect the process table for background job [$l_job_id] cleanup."
-		return "$l_abort_snapshot_status"
-	fi
-	if [ "$l_have_launch_metadata" -eq 1 ] &&
-		{
-			[ "${g_zxfer_background_job_launch_job_id:-}" != "$l_job_id" ] ||
-				[ "${g_zxfer_background_job_launch_runner_pid:-}" != "$g_zxfer_background_job_record_runner_pid" ] ||
-				[ "${g_zxfer_background_job_launch_runner_script:-}" != "$g_zxfer_background_job_record_runner_script" ] ||
-				[ "${g_zxfer_background_job_launch_runner_token:-}" != "$g_zxfer_background_job_record_runner_token" ]
-		}; then
-		if [ -f "$l_completion_path" ]; then
-			zxfer_cleanup_completed_background_job \
-				"$l_job_id" \
-				"$g_zxfer_background_job_record_runner_pid" \
-				"$g_zxfer_background_job_record_control_dir"
-			return 0
-		fi
-		g_zxfer_background_job_abort_failure_message="Refusing to tear down background job [$l_job_id] because the recorded launch metadata no longer matches the tracked runner identity."
-		return 1
-	fi
-	l_runner_match_status=0
-	zxfer_background_job_runner_matches \
-		"$g_zxfer_background_job_process_snapshot_result" \
-		"$g_zxfer_background_job_record_runner_pid" \
-		"$g_zxfer_background_job_record_runner_start_token" ||
-		l_runner_match_status=$?
-	case "$l_runner_match_status" in
-	0)
-		:
-		;;
-	1 | 3)
-		if [ -f "$l_completion_path" ]; then
-			zxfer_cleanup_completed_background_job \
-				"$l_job_id" \
-				"$g_zxfer_background_job_record_runner_pid" \
-				"$g_zxfer_background_job_record_control_dir"
-			return 0
-		fi
-		g_zxfer_background_job_abort_failure_message="Refusing to tear down background job [$l_job_id] because the tracked runner PID [$g_zxfer_background_job_record_runner_pid] no longer matches the recorded helper identity."
-		return 1
-		;;
-	*)
-		if [ -f "$l_completion_path" ]; then
-			zxfer_cleanup_completed_background_job \
-				"$l_job_id" \
-				"$g_zxfer_background_job_record_runner_pid" \
-				"$g_zxfer_background_job_record_control_dir"
-			return 0
-		fi
-		g_zxfer_background_job_abort_failure_message="Failed to validate the live runner identity for background job [$l_job_id]."
-		return 1
-		;;
-	esac
+	zxfer_signal_background_job_scope "$l_abort_pid" "$l_abort_teardown" "$l_signal"
+	zxfer_background_job_abort_grace_wait
+	zxfer_signal_background_job_scope "$l_abort_pid" "$l_abort_teardown" KILL
+	wait "$l_abort_pid" 2>/dev/null || :
 
-	zxfer_signal_validated_background_job_scope \
-		"$l_job_id" \
-		"$g_zxfer_background_job_record_runner_pid" \
-		"$l_have_launch_metadata" \
-		"$l_signal" ||
-		l_signal_status=$?
-
-	zxfer_finish_signaled_background_job_abort \
-		"$l_job_id" \
-		"$g_zxfer_background_job_record_runner_pid" \
-		"$g_zxfer_background_job_record_control_dir" \
-		"$g_zxfer_background_job_record_runner_start_token" \
-		"$l_have_launch_metadata" \
-		"$l_signal_status"
+	zxfer_unregister_background_job_record "$l_job_id"
+	zxfer_cleanup_runtime_artifact_path "$l_abort_status_file" >/dev/null 2>&1 || :
+	return 0
 }
 
+# Purpose: Abort every tracked background job with one shared grace window:
+# TERM all scopes, wait once, KILL all scopes, then reap and clean up.
+# Usage: Called from the trap-exit path before the short-lived cleanup-PID
+# registry teardown so long-lived pipelines stop first.
 zxfer_abort_all_background_jobs() {
-	l_job_ids=""
-	l_abort_failure=0
-	l_first_failure_message=""
-
-	while IFS='	' read -r l_job_id l_kind l_runner_pid l_control_dir l_runner_script l_runner_token l_runner_start_token || [ -n "${l_job_id}${l_kind}${l_runner_pid}${l_control_dir}${l_runner_script}${l_runner_token}${l_runner_start_token}" ]; do
-		[ -n "$l_job_id" ] || continue
-		if [ -n "$l_job_ids" ]; then
-			l_job_ids=$l_job_ids"
-$l_job_id"
-		else
-			l_job_ids=$l_job_id
-		fi
-	done <<-EOF
-		${g_zxfer_background_job_records:-}
-	EOF
-
-	while IFS= read -r l_job_id || [ -n "$l_job_id" ]; do
-		[ -n "$l_job_id" ] || continue
-		l_abort_status=0
-		zxfer_abort_background_job "$l_job_id" TERM || l_abort_status=$?
-		if [ "$l_abort_status" -ne 0 ]; then
-			if [ "$l_abort_failure" -eq 0 ]; then
-				l_abort_failure=$l_abort_status
-				l_first_failure_message=${g_zxfer_background_job_abort_failure_message:-}
-			fi
-		fi
-	done <<-EOF
-		$l_job_ids
-	EOF
-
-	if [ "$l_abort_failure" -ne 0 ]; then
-		g_zxfer_background_job_abort_failure_message=$l_first_failure_message
-		return "$l_abort_failure"
+	if [ -z "${g_zxfer_background_job_records:-}" ]; then
+		return 0
 	fi
+	l_abort_all_records=$g_zxfer_background_job_records
+
+	while IFS='	' read -r l_job_id l_kind l_pid l_teardown l_status_file || [ -n "${l_job_id}${l_kind}${l_pid}${l_teardown}${l_status_file}" ]; do
+		[ -n "$l_job_id" ] || continue
+		zxfer_signal_background_job_scope "$l_pid" "$l_teardown" TERM
+	done <<-EOF
+		$l_abort_all_records
+	EOF
+
+	zxfer_background_job_abort_grace_wait
+
+	while IFS='	' read -r l_job_id l_kind l_pid l_teardown l_status_file || [ -n "${l_job_id}${l_kind}${l_pid}${l_teardown}${l_status_file}" ]; do
+		[ -n "$l_job_id" ] || continue
+		zxfer_signal_background_job_scope "$l_pid" "$l_teardown" KILL
+	done <<-EOF
+		$l_abort_all_records
+	EOF
+
+	while IFS='	' read -r l_job_id l_kind l_pid l_teardown l_status_file || [ -n "${l_job_id}${l_kind}${l_pid}${l_teardown}${l_status_file}" ]; do
+		[ -n "$l_job_id" ] || continue
+		wait "$l_pid" 2>/dev/null || :
+		zxfer_unregister_background_job_record "$l_job_id"
+		zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
+	done <<-EOF
+		$l_abort_all_records
+	EOF
 
 	return 0
 }

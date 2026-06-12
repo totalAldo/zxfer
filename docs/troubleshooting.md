@@ -99,15 +99,12 @@ Failed to report zfs send/receive background completion for [tank/src@snap2 -> b
 
 What it usually means:
 
-- the long-lived background worker finished, but the supervisor could not write
-  or reload `completion.tsv`
+- the background job shell finished, but its per-job status file could not be
+  written or reloaded (a missing or malformed status file at wait time means
+  the job shell died before recording its status)
 - the completion queue notification could not be published back to the parent
   process
-- the runtime temp root or the per-job control directory became unreadable,
-  unwritable, or was removed mid-run
-- a true cleanup failure usually means zxfer still saw a live owned runner
-  after refreshing the process snapshot; completed jobs and runners that exit
-  during the teardown-signal race are now treated as already finished instead
+- the runtime temp root became unreadable, unwritable, or was removed mid-run
 
 What to inspect:
 
@@ -117,13 +114,8 @@ What to inspect:
   stderr, because later `zstd: unexpected end of file` or `cannot receive:
   failed to read from stream` messages are often collateral after zxfer aborts
   sibling background jobs on the first real failure
-- whether the corresponding supervisor control directory still contains
-  `launch.tsv` and `completion.tsv`
 - whether the failure is isolated to queue publication (`publish`) or
-  completion-file persistence/readback (`read` / `report`)
-- if `completion.tsv` is already present, treat later process-table read
-  failures during trap cleanup as collateral and focus on the earlier
-  dataset-specific failure instead
+  status-file persistence/readback (`read` / `report`)
 
 ## Performance Harness Results
 

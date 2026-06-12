@@ -199,728 +199,202 @@ test_zxfer_cleanup_pid_helpers_cover_current_shell_paths() {
 		"$output" "registered=<$first_pid $second_pid>"
 	assertContains "Cleanup PID unregistration should remove only the requested helper PID." \
 		"$output" "after_unregister=<$second_pid>"
-	assertContains "Cleanup PID teardown should delegate validated teardown for the remaining helper PID." \
+	assertContains "Cleanup PID teardown should delegate teardown for the remaining helper PID." \
 		"$output" "abort:$second_pid"
-	assertContains "Cleanup PID teardown should clear the registered helper PID list after delegated validated teardown." \
+	assertContains "Cleanup PID teardown should clear the registered helper PID list after delegated teardown." \
 		"$output" "after_kill=<>"
 }
 
-test_zxfer_abort_cleanup_pid_untracks_stale_start_token_mismatches() {
+test_zxfer_register_cleanup_pid_tracks_direct_children_without_identity_captures() {
 	sleep 30 &
 	tracked_pid=$!
 
 	zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
+	register_status=$?
 	zxfer_find_cleanup_pid_record "$tracked_pid"
-	g_zxfer_cleanup_pid_records="$tracked_pid	unit cleanup helper	bogus-start-token	$g_zxfer_cleanup_pid_record_hostname	$g_zxfer_cleanup_pid_record_pgid	$g_zxfer_cleanup_pid_record_teardown_mode"
-
-	zxfer_abort_cleanup_pid "$tracked_pid" TERM
-	status=$?
-
-	assertEquals "Validated cleanup teardown should treat a start-token mismatch as a stale record and return success." \
-		0 "$status"
-	assertEquals "Validated cleanup teardown should keep the abort-failure message empty when a tracked helper record is stale." \
-		"" "$g_zxfer_cleanup_pid_abort_failure_message"
-	assertTrue "Validated cleanup teardown should leave the live helper running when the tracked record is stale and no longer validated for teardown." \
-		"kill -s 0 \"$tracked_pid\" >/dev/null 2>&1"
-	assertEquals "Validated cleanup teardown should unregister stale helper records once ownership validation fails cleanly." \
-		"" "$g_zxfer_cleanup_pids"
+	find_status=$?
 
 	kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
 	wait "$tracked_pid" 2>/dev/null || true
+
+	assertEquals "Registering a live direct child should succeed." 0 "$register_status"
+	assertEquals "Registered helpers should be findable by PID." 0 "$find_status"
+	assertEquals "Registered rows should carry only the PID and purpose." \
+		"$tracked_pid	unit cleanup helper" "$g_zxfer_cleanup_pid_records"
+	assertEquals "Record lookups should publish the stored purpose." \
+		"unit cleanup helper" "$g_zxfer_cleanup_pid_record_purpose"
 }
 
-test_zxfer_abort_cleanup_pid_fails_closed_when_ownership_validation_errors() {
-	output=$(
-		(
-			sleep 30 &
-			tracked_pid=$!
-			zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
-			zxfer_owned_lock_owner_is_live() {
-				return 2
-			}
-			zxfer_abort_cleanup_pid "$tracked_pid" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "$g_zxfer_cleanup_pid_abort_failure_message"
-			printf 'pids=<%s>\n' "$g_zxfer_cleanup_pids"
-			kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
-			wait "$tracked_pid" 2>/dev/null || true
-		)
-	)
+test_zxfer_register_cleanup_pid_rejects_invalid_self_and_dead_pids() {
+	zxfer_register_cleanup_pid "not-a-pid" "unit cleanup helper"
+	invalid_status=$?
+	zxfer_register_cleanup_pid "$$" "current shell"
+	self_status=$?
+	sh -c 'exit 0' &
+	dead_pid=$!
+	wait "$dead_pid" 2>/dev/null
+	zxfer_register_cleanup_pid "$dead_pid" "already exited helper"
+	dead_status=$?
 
-	assertContains "Validated cleanup teardown should fail closed when ownership validation returns an internal error." \
-		"$output" "status=1"
-	assertContains "Validated cleanup teardown should preserve the ownership-validation failure message when validation errors out." \
-		"$output" "message=Failed to validate ownership for cleanup helper [unit cleanup helper] (PID "
-	assertContains "Validated cleanup teardown should preserve the tracked PID list after an ownership-validation error." \
-		"$output" "pids=<"
-	assertNotContains "Validated cleanup teardown should not clear the tracked PID list after an ownership-validation error." \
-		"$output" "pids=<>"
+	assertEquals "Non-numeric PIDs should be ignored without error." 0 "$invalid_status"
+	assertEquals "The current shell PID should be ignored without error." 0 "$self_status"
+	assertEquals "Already-exited helpers should be ignored without error." 0 "$dead_status"
+	assertEquals "No registry rows should exist after rejected registrations." \
+		"" "$g_zxfer_cleanup_pid_records"
+	assertEquals "No tracked PIDs should exist after rejected registrations." \
+		"" "$g_zxfer_cleanup_pids"
 }
 
-test_zxfer_cleanup_pid_low_level_helpers_cover_validation_paths() {
+test_zxfer_register_cleanup_pid_fails_closed_when_purpose_normalization_fails() {
 	zxfer_test_capture_subshell '
-		set +e
-		fake_ps() {
-			if [ "$1" = "-o" ] && [ "$2" = "pgid=" ] && [ "$3" = "-p" ]; then
-				case "$4" in
-				4242)
-					printf "%s\n" " 900 "
-					;;
-				5050)
-					printf "%s\n" "not-a-pgid"
-					;;
-				*)
-					return 1
-					;;
-				esac
-				return 0
-			fi
-			if [ "$1" = "-o" ] && [ "$2" = "pid=" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "ppid=" ] && [ "$5" = "-o" ] && [ "$6" = "pgid=" ]; then
-				printf "%s\n" "4242 1 900"
-				printf "%s\n" "4243 4242 900"
-				return 0
-			fi
+		sleep 30 &
+		tracked_pid=$!
+		zxfer_normalize_owned_lock_text_field() {
 			return 1
 		}
+		zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
+		printf "status=%s\n" "$?"
+		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
+		kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
+		wait "$tracked_pid" 2>/dev/null || true
+	'
+	output=$ZXFER_TEST_CAPTURE_OUTPUT
+
+	assertContains "Registration should fail closed when purpose normalization fails." \
+		"$output" "status=1"
+	assertContains "Failed registrations should not leave registry rows behind." \
+		"$output" "records=<>"
+}
+
+test_zxfer_abort_cleanup_pid_signals_and_unregisters_live_tracked_children() {
+	sleep 30 &
+	tracked_pid=$!
+
+	zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
+	zxfer_abort_cleanup_pid "$tracked_pid" TERM
+	abort_status=$?
+	wait "$tracked_pid" 2>/dev/null
+	reaped_status=$?
+
+	assertEquals "Aborting a live tracked helper should succeed." 0 "$abort_status"
+	assertEquals "Aborting should leave no failure message." \
+		"" "$g_zxfer_cleanup_pid_abort_failure_message"
+	assertEquals "Aborting should remove the registry row." "" "$g_zxfer_cleanup_pid_records"
+	assertEquals "Aborting should remove the tracked PID." "" "$g_zxfer_cleanup_pids"
+	assertEquals "The aborted helper should have died from the TERM signal." \
+		143 "$reaped_status"
+}
+
+test_zxfer_abort_cleanup_pid_handles_untracked_and_already_exited_helpers() {
+	zxfer_abort_cleanup_pid 99999 TERM
+	untracked_status=$?
+
+	sh -c 'exit 0' &
+	dead_pid=$!
+	g_zxfer_cleanup_pid_records="$dead_pid	already exited helper"
+	g_zxfer_cleanup_pids=$dead_pid
+	wait "$dead_pid" 2>/dev/null
+	zxfer_abort_cleanup_pid "$dead_pid" TERM
+	dead_status=$?
+
+	assertEquals "Aborting an untracked PID should be a no-op success." 0 "$untracked_status"
+	assertEquals "Aborting a tracked helper that already exited should succeed." 0 "$dead_status"
+	assertEquals "Already-exited helpers should be unregistered during abort." \
+		"" "$g_zxfer_cleanup_pid_records"
+	assertEquals "Already-exited helpers should leave no failure message." \
+		"" "$g_zxfer_cleanup_pid_abort_failure_message"
+}
+
+test_zxfer_abort_cleanup_pid_fails_closed_when_signalling_a_live_helper_fails() {
+	zxfer_test_capture_subshell '
+		sleep 30 &
+		tracked_pid=$!
+		zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
 		kill() {
-			case "$1:$2" in
-			-TERM:4242 | -TERM:4243 | -TERM:-900)
-				return 0
+			case "$2" in
+			0)
+				command kill -0 "$3" 2>/dev/null
+				return $?
 				;;
 			esac
 			return 1
 		}
-
-		g_cmd_ps=fake_ps
-		g_zxfer_cleanup_pid_records="4242	unit cleanup helper	start-token	unit-host	900	process_group"
-		zxfer_validate_cleanup_pid_teardown_mode child_set
-		printf "mode_child=%s\n" "$?"
-		zxfer_validate_cleanup_pid_teardown_mode process_group
-		printf "mode_group=%s\n" "$?"
-		zxfer_validate_cleanup_pid_teardown_mode invalid
-		printf "mode_invalid=%s\n" "$?"
-		printf "pgid_ok=%s\n" "$(zxfer_read_cleanup_pid_process_group 4242)"
-		zxfer_read_cleanup_pid_process_group 5050 >/dev/null 2>&1
-		printf "pgid_bad=%s\n" "$?"
-		zxfer_find_cleanup_pid_record 4242
-		printf "find_hit=%s:%s:%s\n" "$?" \
-			"$g_zxfer_cleanup_pid_record_purpose" \
-			"$g_zxfer_cleanup_pid_record_teardown_mode"
-		zxfer_find_cleanup_pid_record 9999 >/dev/null 2>&1
-		printf "find_miss=%s:<%s>\n" "$?" "$g_zxfer_cleanup_pid_record_purpose"
-		snapshot_read=$(zxfer_read_cleanup_pid_process_snapshot)
-		printf "snapshot_read_status=%s\n" "$?"
-		printf "snapshot_read=<%s>\n" "$(printf "%s" "$snapshot_read" | tr "\n" ";")"
-		g_cmd_ps=false
-		zxfer_read_cleanup_pid_process_snapshot >/dev/null 2>&1
-		printf "snapshot_read_fail=%s\n" "$?"
-		g_cmd_ps=fake_ps
-		l_snapshot=$(printf "%s\n%s\n" "4242 1 900" "4243 4242 900")
-		zxfer_cleanup_pid_snapshot_has_pid_with_pgid "$l_snapshot" 4242 900
-		printf "has_pgid=%s\n" "$?"
-		zxfer_cleanup_pid_snapshot_has_pid_with_pgid "$l_snapshot" bad 900 >/dev/null 2>&1
-		printf "has_pgid_bad=%s\n" "$?"
-		zxfer_cleanup_pid_snapshot_has_pid_with_parent "$l_snapshot" 4243 4242
-		printf "has_parent=%s\n" "$?"
-		zxfer_cleanup_pid_snapshot_has_pid_with_parent "$l_snapshot" 4243 bad >/dev/null 2>&1
-		printf "has_parent_bad=%s\n" "$?"
-		l_pid_set=$(zxfer_get_cleanup_pid_set "$l_snapshot" 4242)
-		printf "pid_set_status=%s\n" "$?"
-		printf "pid_set=<%s>\n" "$(printf "%s" "$l_pid_set" | tr "\n" " " | sed "s/[[:space:]]*$//")"
-		zxfer_get_cleanup_pid_set "$l_snapshot" "" >/dev/null 2>&1
-		printf "pid_set_blank=%s\n" "$?"
-		l_signal_input=$(printf "%s\n%s\n" "4242" "4243")
-		zxfer_signal_cleanup_pid_set "$l_signal_input" TERM
-		printf "signal_set=%s\n" "$?"
-		zxfer_signal_cleanup_process_group 900 TERM
-		printf "signal_group=%s\n" "$?"
-		zxfer_signal_cleanup_process_group bad TERM >/dev/null 2>&1
-		printf "signal_group_bad=%s\n" "$?"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Validated cleanup-helper mode validation should accept child-set teardown." \
-		"$output" "mode_child=0"
-	assertContains "Validated cleanup-helper mode validation should accept process-group teardown." \
-		"$output" "mode_group=0"
-	assertContains "Validated cleanup-helper mode validation should reject unknown teardown modes." \
-		"$output" "mode_invalid=1"
-	assertContains "Validated cleanup-helper process-group reads should trim whitespace around numeric pgids." \
-		"$output" "pgid_ok=900"
-	assertContains "Validated cleanup-helper process-group reads should reject nonnumeric pgids." \
-		"$output" "pgid_bad=1"
-	assertContains "Validated cleanup-helper record lookup should publish the stored purpose and teardown mode for matching PIDs." \
-		"$output" "find_hit=0:unit cleanup helper:process_group"
-	assertContains "Validated cleanup-helper record lookup should clear the published record fields after a miss." \
-		"$output" "find_miss=1:<>"
-	assertContains "Validated cleanup-helper snapshot reads should preserve the ps output in current-shell scratch state." \
-		"$output" "snapshot_read_status=0"
-	assertContains "Validated cleanup-helper snapshot reads should fail closed when ps cannot be queried." \
-		"$output" "snapshot_read_fail=1"
-	assertContains "Validated cleanup-helper snapshot scans should detect matching pgids." \
-		"$output" "has_pgid=0"
-	assertContains "Validated cleanup-helper snapshot scans should reject malformed pgid probes." \
-		"$output" "has_pgid_bad=1"
-	assertContains "Validated cleanup-helper snapshot scans should detect matching parent-child ownership." \
-		"$output" "has_parent=0"
-	assertContains "Validated cleanup-helper snapshot scans should reject malformed parent probes." \
-		"$output" "has_parent_bad=1"
-	assertContains "Validated cleanup-helper child-set derivation should return the owned root and descendants." \
-		"$output" "pid_set=<4242 4243>"
-	assertContains "Validated cleanup-helper child-set derivation should fail closed when the root pid is blank." \
-		"$output" "pid_set_blank=1"
-	assertContains "Validated cleanup-helper child-set signaling should return success when every tracked pid is signaled." \
-		"$output" "signal_set=0"
-	assertContains "Validated cleanup-helper process-group signaling should return success for numeric pgids." \
-		"$output" "signal_group=0"
-	assertContains "Validated cleanup-helper process-group signaling should reject malformed pgids." \
-		"$output" "signal_group_bad=1"
-}
-
-test_zxfer_register_cleanup_pid_covers_validation_and_transient_lookup_paths() {
-	zxfer_test_capture_subshell '
-		set +e
-		kill() {
-			[ "$1" = "-s" ] && [ "$2" = "0" ] || return 1
-			[ "$3" = "${live_pid:-}" ]
-		}
-		zxfer_normalize_owned_lock_text_field() {
-			[ "${normalize_fail:-0}" -eq 1 ] && return 1
-			printf "%s\n" "$1"
-		}
-		zxfer_get_process_start_token() {
-			[ "${start_fail:-0}" -eq 1 ] && return 1
-			printf "start-%s\n" "$1"
-		}
-		zxfer_get_owned_lock_hostname() {
-			[ "${hostname_fail:-0}" -eq 1 ] && return 1
-			printf "%s\n" "unit-host"
-		}
-		zxfer_read_cleanup_pid_process_group() {
-			printf "%s\n" "900"
-		}
-
-		live_pid=101
-		normalize_fail=1
-		zxfer_register_cleanup_pid 101 "unit cleanup helper" child_set
-		printf "normalize=%s\n" "$?"
-		normalize_fail=0
-
-		live_pid=102
-		zxfer_register_cleanup_pid 102 "unit cleanup helper" invalid
-		printf "mode=%s\n" "$?"
-
-		start_fail=1
-		live_pid=""
-		zxfer_register_cleanup_pid 103 "unit cleanup helper" child_set
-		printf "start_gone=%s\n" "$?"
-
-		live_pid=104
-		zxfer_register_cleanup_pid 104 "unit cleanup helper" child_set
-		printf "start_live=%s\n" "$?"
-		start_fail=0
-
-		hostname_fail=1
-		live_pid=""
-		zxfer_register_cleanup_pid 105 "unit cleanup helper" child_set
-		printf "host_gone=%s\n" "$?"
-
-		live_pid=106
-		zxfer_register_cleanup_pid 106 "unit cleanup helper" child_set
-		printf "host_live=%s\n" "$?"
-		hostname_fail=0
-
-		live_pid=107
-		zxfer_register_cleanup_pid 107 "unit cleanup helper" process_group
-		printf "success=%s\n" "$?"
-		printf "pids=<%s>\n" "$g_zxfer_cleanup_pids"
-		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Cleanup-helper registration should fail closed when purpose normalization fails." \
-		"$output" "normalize=1"
-	assertContains "Cleanup-helper registration should fail closed when teardown mode validation fails." \
-		"$output" "mode=1"
-	assertContains "Cleanup-helper registration should treat disappearing helpers as already gone when start-token lookup races with exit." \
-		"$output" "start_gone=0"
-	assertContains "Cleanup-helper registration should fail closed when start-token lookup fails for a still-live helper." \
-		"$output" "start_live=1"
-	assertContains "Cleanup-helper registration should treat disappearing helpers as already gone when hostname lookup races with exit." \
-		"$output" "host_gone=0"
-	assertContains "Cleanup-helper registration should fail closed when hostname lookup fails for a still-live helper." \
-		"$output" "host_live=1"
-	assertContains "Cleanup-helper registration should preserve the success path for validated process-group helpers." \
-		"$output" "success=0"
-	assertContains "Cleanup-helper registration should only track helpers that published validated metadata successfully." \
-		"$output" "pids=<107>"
-	assertContains "Cleanup-helper registration should store the requested teardown mode in the validated record set." \
-		"$output" "records=<107	unit cleanup helper	start-107	unit-host	900	process_group>"
-}
-
-test_zxfer_register_cleanup_pid_replaces_stale_records_when_numeric_pids_are_reused() {
-	zxfer_test_capture_subshell '
-		set +e
-		kill() {
-			[ "$1" = "-s" ] && [ "$2" = "0" ] || return 1
-			[ "$3" = "108" ]
-		}
-		zxfer_normalize_owned_lock_text_field() {
-			printf "%s\n" "$1"
-		}
-		zxfer_get_process_start_token() {
-			printf "start-108-new\n"
-		}
-		zxfer_get_owned_lock_hostname() {
-			printf "%s\n" "unit-host"
-		}
-		zxfer_read_cleanup_pid_process_group() {
-			printf "%s\n" "901"
-		}
-
-		g_zxfer_cleanup_pids="108"
-		g_zxfer_cleanup_pid_records="108	stale cleanup helper	start-108-old	unit-host	700	child_set"
-
-		zxfer_register_cleanup_pid 108 "replacement cleanup helper" process_group
-		printf "status=%s\n" "$?"
-		printf "pids=<%s>\n" "$g_zxfer_cleanup_pids"
-		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Cleanup-helper registration should accept a reused numeric pid when the live helper has a different validated start token." \
-		"$output" "status=0"
-	assertContains "Cleanup-helper registration should preserve only one tracked pid after replacing a stale record for a reused numeric pid." \
-		"$output" "pids=<108>"
-	assertContains "Cleanup-helper registration should replace stale reused-pid metadata with the current validated helper identity." \
-		"$output" "records=<108	replacement cleanup helper	start-108-new	unit-host	901	process_group>"
-	assertNotContains "Cleanup-helper registration should discard the stale reused-pid metadata once the live helper has been revalidated." \
-		"$output" "start-108-old"
-}
-
-test_zxfer_abort_direct_child_pid_reports_lookup_and_ownership_failures() {
-	zxfer_test_capture_subshell '
-		set +e
-		kill() {
-			[ "$1" = "-s" ] && [ "$2" = "0" ] && [ "$3" = "201" ]
-		}
-		zxfer_normalize_owned_lock_text_field() {
-			printf "%s\n" "$1"
-		}
-
-			zxfer_read_cleanup_pid_process_snapshot() {
-				return 23
-			}
-			zxfer_abort_direct_child_pid 201 TERM "unit cleanup helper"
-			printf "snapshot=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-
-		zxfer_read_cleanup_pid_process_snapshot() {
-			g_zxfer_cleanup_pid_process_snapshot_result="201 999 700"
-			printf "%s\n" "$g_zxfer_cleanup_pid_process_snapshot_result"
-		}
-		zxfer_abort_direct_child_pid 201 TERM "unit cleanup helper"
-		printf "ownership=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-
-		zxfer_read_cleanup_pid_process_snapshot() {
-			g_zxfer_cleanup_pid_process_snapshot_result="201 $$ 700"
-			printf "%s\n" "$g_zxfer_cleanup_pid_process_snapshot_result"
-		}
-		zxfer_get_cleanup_pid_set() {
-			return 1
-		}
-		zxfer_abort_direct_child_pid 201 TERM "unit cleanup helper"
-		printf "pidset=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Validated direct-child abort should fail closed when the process table cannot be inspected." \
-		"$output" "snapshot=23:Failed to inspect the process table for cleanup helper [unit cleanup helper] (PID 201)."
-	assertContains "Validated direct-child abort should refuse to tear down helpers that are no longer direct children of the current zxfer process." \
-		"$output" "ownership=1:Refusing to tear down cleanup helper [unit cleanup helper] (PID 201) because it is no longer an owned child of the current zxfer process."
-	assertContains "Validated direct-child abort should fail closed when it cannot derive the owned child set." \
-		"$output" "pidset=1:Failed to derive the owned child set for cleanup helper [unit cleanup helper] (PID 201)."
-}
-
-test_zxfer_abort_direct_child_pid_signals_owned_child_sets_and_reports_signal_failures() {
-	zxfer_test_capture_subshell '
-		set +e
-		kill() {
-			if [ "$1" = "-s" ] && [ "$2" = "0" ] && [ "$3" = "202" ]; then
-				return 0
-			fi
-			if [ "$1" = "-TERM" ]; then
-				printf "signal:%s\n" "$2"
-				[ "${signal_fail:-0}" -eq 0 ]
-				return $?
-			fi
-			return 1
-		}
-		zxfer_normalize_owned_lock_text_field() {
-			printf "%s\n" "$1"
-		}
-		zxfer_read_cleanup_pid_process_snapshot() {
-			g_zxfer_cleanup_pid_process_snapshot_result=$(printf "%s\n%s\n" "202 $$ 700" "203 202 700")
-			printf "%s\n" "$g_zxfer_cleanup_pid_process_snapshot_result"
-		}
-
-		signal_fail=0
-		zxfer_abort_direct_child_pid 202 TERM "unit cleanup helper"
-		printf "success=%s\n" "$?"
-
-		signal_fail=1
-		zxfer_abort_direct_child_pid 202 TERM "unit cleanup helper"
-		printf "signal_failure=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Validated direct-child abort should signal the owned root helper pid." \
-		"$output" "signal:202"
-	assertContains "Validated direct-child abort should signal owned descendants as part of the derived child set." \
-		"$output" "signal:203"
-	assertContains "Validated direct-child abort should return success when the owned child set is signaled successfully." \
-		"$output" "success=0"
-	assertContains "Validated direct-child abort should fail closed when signaling the derived child set fails while the helper is still live." \
-		"$output" "signal_failure=1:Failed to signal the owned child set for cleanup helper [unit cleanup helper] (PID 202)."
-}
-
-test_zxfer_abort_direct_child_pid_current_shell_shortcuts_cover_remaining_paths() {
-	zxfer_abort_direct_child_pid "" TERM "unit cleanup helper" >/dev/null 2>&1
-	l_invalid_status=$?
-
-	zxfer_abort_direct_child_pid "$$" TERM "unit cleanup helper" >/dev/null 2>&1
-	l_self_status=$?
-
-	zxfer_normalize_owned_lock_text_field() {
-		return 1
-	}
-	zxfer_abort_direct_child_pid 201 TERM "unit cleanup helper" >/dev/null 2>&1
-	l_normalize_status=$?
-
-	zxfer_normalize_owned_lock_text_field() {
-		printf '%s\n' "$1"
-	}
-	kill() {
-		if [ "$1" = "-s" ] && [ "$2" = "0" ]; then
-			return 1
-		fi
-		return 1
-	}
-	zxfer_abort_direct_child_pid 202 TERM "unit cleanup helper" >/dev/null 2>&1
-	l_gone_status=$?
-
-	l_kill_probe_calls=0
-	kill() {
-		if [ "$1" = "-s" ] && [ "$2" = "0" ]; then
-			l_kill_probe_calls=$((l_kill_probe_calls + 1))
-			[ "$l_kill_probe_calls" -eq 1 ] && return 0
-			return 1
-		fi
-		return 1
-	}
-	zxfer_normalize_owned_lock_text_field() {
-		printf '%s\n' "$1"
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		g_zxfer_cleanup_pid_process_snapshot_result="203 999 700"
-		printf '%s\n' "$g_zxfer_cleanup_pid_process_snapshot_result"
-	}
-	zxfer_abort_direct_child_pid 203 TERM "unit cleanup helper" >/dev/null 2>&1
-	l_orphan_gone_status=$?
-
-	l_kill_probe_calls=0
-	kill() {
-		if [ "$1" = "-s" ] && [ "$2" = "0" ]; then
-			l_kill_probe_calls=$((l_kill_probe_calls + 1))
-			[ "$l_kill_probe_calls" -eq 1 ] && return 0
-			return 1
-		fi
-		if [ "$1" = "-TERM" ]; then
-			return 1
-		fi
-		return 1
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		g_zxfer_cleanup_pid_process_snapshot_result=$(printf '%s\n%s\n' "204 $$ 700" "205 204 700")
-		printf '%s\n' "$g_zxfer_cleanup_pid_process_snapshot_result"
-	}
-	zxfer_abort_direct_child_pid 204 TERM "unit cleanup helper" >/dev/null 2>&1
-	l_signal_gone_status=$?
-
-	zxfer_source_runtime_modules_through "zxfer_replication.sh"
-	setUp
-
-	assertEquals "Validated direct-child abort should treat blank pid inputs as already handled." \
-		0 "$l_invalid_status"
-	assertEquals "Validated direct-child abort should refuse to target the current shell pid." \
-		1 "$l_self_status"
-	assertEquals "Validated direct-child abort should fail closed when purpose normalization fails in the current shell." \
-		1 "$l_normalize_status"
-	assertEquals "Validated direct-child abort should treat already-exited helpers as already gone before any ownership checks." \
-		0 "$l_gone_status"
-	assertEquals "Validated direct-child abort should return success when an unowned helper exits before the ownership failure is reported." \
-		0 "$l_orphan_gone_status"
-	assertEquals "Validated direct-child abort should return success when signal delivery races with helper exit after the owned child set has been derived." \
-		0 "$l_signal_gone_status"
-}
-
-test_zxfer_abort_cleanup_pid_rejects_missing_records_and_uses_process_group_teardown() {
-	zxfer_test_capture_subshell '
-		set +e
-		fake_ps() {
-			if [ "$1" = "-o" ] && [ "$2" = "pid=" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "ppid=" ] && [ "$5" = "-o" ] && [ "$6" = "pgid=" ]; then
-				printf "%s\n" "301 1 900"
-				return 0
-			fi
-			if [ "$1" = "-o" ] && [ "$2" = "pgid=" ] && [ "$3" = "-p" ] &&
-				[ "$4" = "$$" ]; then
-				printf "%s\n" "700"
-				return 0
-			fi
-			return 1
-		}
-
-		g_zxfer_cleanup_pids="301"
-		zxfer_abort_cleanup_pid 301 TERM
-		printf "missing=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-
-		g_cmd_ps=fake_ps
-		g_zxfer_cleanup_pids="301"
-		g_zxfer_cleanup_pid_records="301	unit cleanup helper	start-token	unit-host	900	process_group"
-		zxfer_owned_lock_owner_is_live() {
-			return 0
-		}
-		zxfer_signal_cleanup_process_group() {
-			printf "process_group:%s:%s\n" "$1" "$2"
-			return 0
-		}
-		zxfer_abort_cleanup_pid 301 TERM
-		printf "process_group_status=%s\n" "$?"
-		printf "remaining=<%s>\n" "$g_zxfer_cleanup_pids"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Validated cleanup abort should refuse teardown when a tracked pid has no matching validated ownership record." \
-		"$output" "missing=1:Refusing to tear down cleanup helper [PID 301] because no validated ownership record was found."
-	assertContains "Validated cleanup abort should prefer process-group teardown when the helper record requested it and the pgid remains isolated from the current shell." \
-		"$output" "process_group:900:TERM"
-	assertContains "Validated cleanup abort should return success after process-group teardown succeeds." \
-		"$output" "process_group_status=0"
-	assertContains "Validated cleanup abort should unregister helpers that were torn down successfully." \
-		"$output" "remaining=<>"
-}
-
-test_zxfer_abort_cleanup_pid_current_shell_revalidation_paths_cover_remaining_branches() {
-	l_saved_cmd_ps=${g_cmd_ps:-ps}
-	l_tab=$(printf '\t')
-
-	g_zxfer_cleanup_pids="301"
-	g_zxfer_cleanup_pid_records="301${l_tab}unit cleanup helper${l_tab}start-token${l_tab}unit-host${l_tab}900${l_tab}process_group"
-	zxfer_owned_lock_owner_is_live() {
-		return 0
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		return 29
-	}
-	zxfer_abort_cleanup_pid 301 TERM >/dev/null 2>&1
-	l_snapshot_status=$?
-	l_snapshot_message=$g_zxfer_cleanup_pid_abort_failure_message
-
-	fake_ps() {
-		if [ "$1" = "-o" ] && [ "$2" = "pgid=" ] && [ "$3" = "-p" ] && [ "$4" = "$$" ]; then
-			printf '%s\n' "700"
-			return 0
-		fi
-		return 1
-	}
-	g_cmd_ps=fake_ps
-	g_zxfer_cleanup_pids="302"
-	g_zxfer_cleanup_pid_records="302${l_tab}unit cleanup helper${l_tab}start-token${l_tab}unit-host${l_tab}bad${l_tab}child_set"
-	zxfer_owned_lock_owner_is_live() {
-		return 0
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		g_zxfer_cleanup_pid_process_snapshot_result="302 1 700"
-		printf '%s\n' "$g_zxfer_cleanup_pid_process_snapshot_result"
-	}
-	zxfer_get_cleanup_pid_set() {
-		return 1
-	}
-	zxfer_abort_cleanup_pid 302 TERM >/dev/null 2>&1
-	l_child_set_status=$?
-	l_child_set_message=$g_zxfer_cleanup_pid_abort_failure_message
-
-	l_recheck_calls=0
-	g_zxfer_cleanup_pids="303"
-	g_zxfer_cleanup_pid_records="303${l_tab}unit cleanup helper${l_tab}start-token${l_tab}unit-host${l_tab}bad${l_tab}child_set"
-	zxfer_owned_lock_owner_is_live() {
-		l_recheck_calls=$((l_recheck_calls + 1))
-		if [ "$l_recheck_calls" -eq 1 ]; then
-			return 0
-		fi
-		return 1
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		g_zxfer_cleanup_pid_process_snapshot_result="303 1 700"
-		printf '%s\n' "$g_zxfer_cleanup_pid_process_snapshot_result"
-	}
-	zxfer_get_cleanup_pid_set() {
-		g_zxfer_cleanup_pid_set_result="303"
-		return 0
-	}
-	zxfer_signal_cleanup_pid_set() {
-		return 1
-	}
-	zxfer_abort_cleanup_pid 303 TERM >/dev/null 2>&1
-	l_stale_signal_status=$?
-	l_stale_signal_remaining=$g_zxfer_cleanup_pids
-
-	l_recheck_calls=0
-	g_zxfer_cleanup_pids="304"
-	g_zxfer_cleanup_pid_records="304${l_tab}unit cleanup helper${l_tab}start-token${l_tab}unit-host${l_tab}bad${l_tab}child_set"
-	zxfer_owned_lock_owner_is_live() {
-		l_recheck_calls=$((l_recheck_calls + 1))
-		if [ "$l_recheck_calls" -eq 1 ]; then
-			return 0
-		fi
-		return 2
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		g_zxfer_cleanup_pid_process_snapshot_result="304 1 700"
-		printf '%s\n' "$g_zxfer_cleanup_pid_process_snapshot_result"
-	}
-	zxfer_get_cleanup_pid_set() {
-		g_zxfer_cleanup_pid_set_result="304"
-		return 0
-	}
-	zxfer_signal_cleanup_pid_set() {
-		return 1
-	}
-	zxfer_abort_cleanup_pid 304 TERM >/dev/null 2>&1
-	l_validation_status=$?
-	l_validation_message=$g_zxfer_cleanup_pid_abort_failure_message
-
-	zxfer_source_runtime_modules_through "zxfer_replication.sh"
-	setUp
-	g_cmd_ps=$l_saved_cmd_ps
-
-	assertEquals "Validated cleanup abort should fail closed when the process table cannot be inspected after ownership validation succeeds." \
-		29 "$l_snapshot_status"
-	assertEquals "Validated cleanup abort should preserve the process-table failure message in the current shell." \
-		"Failed to inspect the process table for cleanup helper [unit cleanup helper] (PID 301)." "$l_snapshot_message"
-	assertEquals "Validated cleanup abort should fail closed when child-set derivation fails for a still-live helper on the child-set path." \
-		1 "$l_child_set_status"
-	assertEquals "Validated cleanup abort should preserve the child-set derivation failure message on the child-set fallback path." \
-		"Failed to derive the owned child set for cleanup helper [unit cleanup helper] (PID 302)." "$l_child_set_message"
-	assertEquals "Validated cleanup abort should treat a signal-delivery failure as success when the helper exits before revalidation completes." \
-		0 "$l_stale_signal_status"
-	assertEquals "Validated cleanup abort should unregister helpers that exit before post-signal revalidation completes." \
-		"" "$l_stale_signal_remaining"
-	assertEquals "Validated cleanup abort should fail closed when post-signal ownership revalidation errors." \
-		1 "$l_validation_status"
-	assertEquals "Validated cleanup abort should preserve the ownership-validation failure message when post-signal revalidation errors." \
-		"Failed to validate ownership for cleanup helper [unit cleanup helper] (PID 304)." "$l_validation_message"
-}
-
-test_zxfer_abort_cleanup_pid_handles_child_set_revalidation_and_signal_failures() {
-	zxfer_test_capture_subshell '
-		set +e
-		zxfer_read_cleanup_pid_process_snapshot() {
-			g_zxfer_cleanup_pid_process_snapshot_result="302 1 700"
-			printf "%s\n" "$g_zxfer_cleanup_pid_process_snapshot_result"
-		}
-		zxfer_get_cleanup_pid_set() {
-			if [ "${case_name:-}" = "signal_failure" ]; then
-				g_zxfer_cleanup_pid_set_result=$(printf "%s\n%s\n" "304" "305")
-				return 0
-			fi
-			return 1
-		}
-		zxfer_signal_cleanup_pid_set() {
-			return 1
-		}
-
-		case_name=stale
-		recheck_calls=0
-		g_zxfer_cleanup_pids="302"
-		g_zxfer_cleanup_pid_records="302	unit cleanup helper	start-token	unit-host	700	child_set"
-		zxfer_owned_lock_owner_is_live() {
-			recheck_calls=$((recheck_calls + 1))
-			if [ "$recheck_calls" -eq 1 ]; then
-				return 0
-			fi
-			return 1
-		}
-		zxfer_abort_cleanup_pid 302 TERM
-		printf "stale=%s:<%s>\n" "$?" "$g_zxfer_cleanup_pids"
-
-		case_name=recheck_error
-		recheck_calls=0
-		g_zxfer_cleanup_pids="303"
-		g_zxfer_cleanup_pid_records="303	unit cleanup helper	start-token	unit-host	700	child_set"
-		zxfer_owned_lock_owner_is_live() {
-			recheck_calls=$((recheck_calls + 1))
-			if [ "$recheck_calls" -eq 1 ]; then
-				return 0
-			fi
-			return 2
-		}
-		zxfer_abort_cleanup_pid 303 TERM
-		printf "recheck_error=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-
-		case_name=signal_failure
-		g_zxfer_cleanup_pids="304"
-		g_zxfer_cleanup_pid_records="304	unit cleanup helper	start-token	unit-host	700	child_set"
-		zxfer_owned_lock_owner_is_live() {
-			return 0
-		}
-		zxfer_abort_cleanup_pid 304 TERM
-		printf "signal_failure=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Validated cleanup abort should treat a failed child-set derivation as a stale record when ownership revalidation says the helper has already exited." \
-		"$output" "stale=0:<>"
-	assertContains "Validated cleanup abort should fail closed when ownership revalidation errors while recovering from a child-set derivation failure." \
-		"$output" "recheck_error=1:Failed to validate ownership for cleanup helper [unit cleanup helper] (PID 303)."
-	assertContains "Validated cleanup abort should fail closed when signaling a derived child set fails and the helper still validates as live." \
-		"$output" "signal_failure=1:Failed to signal the validated teardown target for cleanup helper [unit cleanup helper] (PID 304)."
-}
-
-test_zxfer_abort_cleanup_pid_fails_closed_when_child_set_revalidation_errors_immediately() {
-	zxfer_test_capture_subshell '
-		set +e
-		zxfer_read_cleanup_pid_process_snapshot() {
-			g_zxfer_cleanup_pid_process_snapshot_result="306 1 700"
-			printf "%s\n" "$g_zxfer_cleanup_pid_process_snapshot_result"
-		}
-		zxfer_get_cleanup_pid_set() {
-			return 1
-		}
-		g_zxfer_cleanup_pids="306"
-		g_zxfer_cleanup_pid_records="306	unit cleanup helper	start-token	unit-host	700	child_set"
-		zxfer_owned_lock_owner_is_live() {
-			return 2
-		}
-		zxfer_abort_cleanup_pid 306 TERM
+		zxfer_abort_cleanup_pid "$tracked_pid" TERM
 		printf "status=%s\n" "$?"
 		printf "message=%s\n" "$g_zxfer_cleanup_pid_abort_failure_message"
+		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
+		unset -f kill
+		kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
+		wait "$tracked_pid" 2>/dev/null || true
 	'
 	output=$ZXFER_TEST_CAPTURE_OUTPUT
 
-	assertContains "Validated cleanup abort should fail closed when ownership revalidation errors immediately after child-set derivation fails." \
+	assertContains "Aborting should fail closed when the signal cannot be delivered to a live helper." \
 		"$output" "status=1"
-	assertContains "Validated cleanup abort should preserve the ownership-validation failure message when revalidation errors immediately after child-set derivation fails." \
-		"$output" "message=Failed to validate ownership for cleanup helper [unit cleanup helper] (PID 306)."
+	assertContains "Failed aborts should explain which helper could not be signalled." \
+		"$output" "message=Failed to signal cleanup helper [unit cleanup helper] (PID "
+	assertNotContains "Failed aborts should preserve the registry row for a later retry." \
+		"$output" "records=<>"
+}
+
+test_zxfer_abort_direct_child_pid_signals_unreaped_direct_children() {
+	sleep 30 &
+	child_pid=$!
+
+	zxfer_abort_direct_child_pid "$child_pid" TERM "unit direct helper"
+	abort_status=$?
+	wait "$child_pid" 2>/dev/null
+	reaped_status=$?
+
+	assertEquals "Signalling a live direct child should succeed." 0 "$abort_status"
+	assertEquals "Signalling should leave no failure message." \
+		"" "$g_zxfer_cleanup_pid_abort_failure_message"
+	assertEquals "The signalled child should have died from the TERM signal." \
+		143 "$reaped_status"
+}
+
+test_zxfer_abort_direct_child_pid_rejects_invalid_self_and_dead_pids() {
+	zxfer_abort_direct_child_pid "" TERM "unit direct helper"
+	empty_status=$?
+	zxfer_abort_direct_child_pid "not-a-pid" TERM "unit direct helper"
+	invalid_status=$?
+	zxfer_abort_direct_child_pid "$$" TERM "unit direct helper"
+	self_status=$?
+	sh -c 'exit 0' &
+	dead_pid=$!
+	wait "$dead_pid" 2>/dev/null
+	zxfer_abort_direct_child_pid "$dead_pid" TERM "unit direct helper"
+	dead_status=$?
+
+	assertEquals "Empty PIDs should be a no-op success." 0 "$empty_status"
+	assertEquals "Non-numeric PIDs should be a no-op success." 0 "$invalid_status"
+	assertEquals "The current shell PID must be refused." 1 "$self_status"
+	assertEquals "Already-exited children should be a no-op success." 0 "$dead_status"
+}
+
+test_zxfer_abort_direct_child_pid_fails_closed_when_purpose_normalization_fails() {
+	zxfer_test_capture_subshell '
+		sleep 30 &
+		child_pid=$!
+		zxfer_normalize_owned_lock_text_field() {
+			return 1
+		}
+		zxfer_abort_direct_child_pid "$child_pid" TERM "unit direct helper"
+		printf "status=%s\n" "$?"
+		kill -s TERM "$child_pid" >/dev/null 2>&1 || true
+		wait "$child_pid" 2>/dev/null || true
+	'
+
+	assertContains "Direct-child aborts should fail closed when purpose normalization fails." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=1"
 }
 
 test_zxfer_kill_registered_cleanup_pids_preserves_first_failure_message_and_rebuilds_tracked_pids() {
 	zxfer_test_capture_subshell '
 		set +e
 		g_zxfer_cleanup_pids="401 402"
-		g_zxfer_cleanup_pid_records="401	first helper	start-one	host-a	700	child_set
-402	second helper	start-two	host-a	700	child_set"
+		g_zxfer_cleanup_pid_records="401	first helper
+402	second helper"
 		zxfer_abort_cleanup_pid() {
 			if [ "$1" = "401" ]; then
 				g_zxfer_cleanup_pid_abort_failure_message="first cleanup abort failed"
@@ -936,11 +410,11 @@ test_zxfer_kill_registered_cleanup_pids_preserves_first_failure_message_and_rebu
 	'
 	output=$ZXFER_TEST_CAPTURE_OUTPUT
 
-	assertContains "Validated cleanup-helper shutdown should preserve the first abort failure status." \
+	assertContains "Cleanup-helper shutdown should preserve the first abort failure status." \
 		"$output" "status=1"
-	assertContains "Validated cleanup-helper shutdown should preserve the first abort failure message." \
+	assertContains "Cleanup-helper shutdown should preserve the first abort failure message." \
 		"$output" "message=first cleanup abort failed"
-	assertContains "Validated cleanup-helper shutdown should rebuild the tracked pid list from the remaining validated records after a failed aggregate pass." \
+	assertContains "Cleanup-helper shutdown should rebuild the tracked pid list from the remaining records after a failed aggregate pass." \
 		"$output" "remaining=<401 402>"
 }
 

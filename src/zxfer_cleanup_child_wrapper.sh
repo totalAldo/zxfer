@@ -33,7 +33,10 @@
 
 zxfer_cleanup_child_wrapper_list_descendants() {
 	l_cleanup_wrapper_snapshot_status=0
-	l_cleanup_wrapper_snapshot=$(ps -o pid= -o ppid= 2>/dev/null) || l_cleanup_wrapper_snapshot_status=$?
+	# -A is required: without it ps only lists same-terminal processes, so a
+	# wrapper running without a controlling terminal (cron, CI, supervised
+	# background jobs) would miss its own descendants and leak them on TERM.
+	l_cleanup_wrapper_snapshot=$(ps -A -o pid= -o ppid= 2>/dev/null) || l_cleanup_wrapper_snapshot_status=$?
 	[ "$l_cleanup_wrapper_snapshot_status" -eq 0 ] || return "$l_cleanup_wrapper_snapshot_status"
 
 	printf '%s\n' "$l_cleanup_wrapper_snapshot" | awk -v root="$$" '

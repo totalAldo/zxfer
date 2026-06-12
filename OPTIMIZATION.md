@@ -708,22 +708,23 @@ Measure:
 - Cache object write time.
 - Temp-file count in snapshot and property phases.
 
-### 10. Optimize Supervised Background Job Overhead
+### 10. Optimize Supervised Background Job Overhead (DONE: supervision-lite)
 
 Current hot path:
 
 - `src/zxfer_background_jobs.sh`
-- `src/zxfer_background_job_runner.sh`
 - `src/zxfer_send_receive.sh`
 - `zxfer_zfs_send_receive`
 
-Opportunity:
+Opportunity (implemented):
 
-Supervised jobs add control directories, launch records, completion records, and
-process start-token checks. This is appropriate for long-running send/receive
-pipelines, but the per-job setup can still be optimized. Reuse per-run control
-state, write fewer metadata files on the success path, and avoid process-token
-lookups where the runner can report an equivalent identity safely.
+Supervised jobs used to add a standalone runner process, control directories,
+launch records, completion records, and process start-token checks per job.
+The supervision-lite model replaced that with one backgrounded job shell per
+job (setsid process group when available, cleanup-wrapper fallback otherwise),
+one in-memory registry row, and one per-run temp status file written by the
+job shell itself; the un-reaped-child PID/PGID guarantee replaced the identity
+revalidation.
 
 Safety requirements:
 

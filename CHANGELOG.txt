@@ -1,6 +1,10 @@
 CHANGELOG
 =========
 
+2026.06.11
+-perf: replace per-job background supervision (standalone runner process, launch/completion metadata files, process-table snapshots, and start-token revalidation) with supervision-lite jobs: one backgrounded job shell per send/receive job that records its own exit status to a per-run temp status file and notifies the rolling `-j` completion queue itself. Abort signals the job's setsid process group (or the cleanup-wrapper fallback when setsid is unavailable), waits briefly, escalates once with KILL, and only then reaps -- safe because an un-reaped child's PID/PGID cannot be recycled. The short-lived cleanup-PID registry likewise tracks plain (pid, purpose) rows for direct children instead of per-registration ps/hostname/process-group captures. Status semantics, the rolling queue's hardened FIFO open ordering, ready-queue destination-ancestry scheduling, and dry-run behavior are unchanged.
+-Fix the cleanup child wrapper's descendant reaper to list processes with `ps -A`: without it, a wrapper running with no controlling terminal (cron, CI, supervised background jobs) could miss its own descendants on TERM and leak the wrapped pipeline.
+
 2026.06.10
 -Fix `-V` aborting batched `-T` destination discovery: profiling recorders could return a non-zero status from a trailing side-classification guard, and the batch helper propagated that status as a discovery failure ("Failed to retrieve list of datasets from the destination"). Profiling recorders now always return success, with regression coverage pinning that `-V` never changes replication outcomes.
 

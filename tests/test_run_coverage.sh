@@ -35,8 +35,6 @@ test_run_coverage_default_suite_resolution_includes_coverage_overlays() {
 
 	assertContains "The default coverage run should include the background job coverage suite that protects the committed baseline." \
 		"$output" "tests/test_zxfer_background_jobs.sh"
-	assertContains "The default coverage run should include the background job runner coverage suite that protects the committed baseline." \
-		"$output" "tests/test_zxfer_background_job_runner.sh"
 	assertContains "The default coverage run should include the remote host overlay suite that protects the committed baseline." \
 		"$output" "tests/test_zxfer_remote_hosts_coverage.sh"
 	assertContains "The default coverage run should include the property reconcile suite that exercises the in-memory property tables." \
