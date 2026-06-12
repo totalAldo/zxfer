@@ -38,27 +38,16 @@ src/zxfer_exec.sh
   217:		l_split_saved_ifs=""
 
 src/zxfer_locking.sh
-  233:	l_normalized_value=$(printf '%s\n' "$l_field_value" |
-  266:	[ -r "/proc/$l_pid/stat" ] || return 1
-  267:	l_proc_stat=$(cat "/proc/$l_pid/stat" 2>/dev/null || :)
-  268:	[ -n "$l_proc_stat" ] || return 1
-  269:	l_proc_rest=$(printf '%s\n' "$l_proc_stat" | sed 's/^[0-9][0-9]* (.*) //')
-  270:	[ "$l_proc_rest" != "$l_proc_stat" ] || return 1
-  271:	l_proc_start=$(printf '%s\n' "$l_proc_rest" | awk '{ print $20 }')
-  274:		return 1
-  278:	l_boot_identity=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || :)
-  279:	if ! l_boot_identity=$(zxfer_normalize_owned_lock_text_field "$l_boot_identity"); then
-  280:		l_boot_identity=$(LC_ALL=C awk '/^btime / { print $2; exit }' /proc/stat 2>/dev/null || :)
-  281:		if ! l_boot_identity=$(zxfer_normalize_owned_lock_text_field "$l_boot_identity"); then
-  282:			l_boot_identity=unknown
-  286:	printf 'procfs:%s:%s\n' "$l_boot_identity" "$l_proc_start"
-  478:	done <"$l_metadata_path"
+  374:	if ! (
+  379:	) 2>/dev/null; then
+  415:				return 1
+  445:	done <"$l_metadata_path"
 
 src/zxfer_path_security.sh
-  310:		return 1
-  322:		l_ls_path=./$l_ls_path
-  393:		l_ls_path=./$l_ls_path
-  407:		return 1
+  337:		return 1
+  349:		l_ls_path=./$l_ls_path
+  399:		l_ls_path=./$l_ls_path
+  465:		return 1
 
 src/zxfer_property_reconcile.sh
   98:		l_effective_readonly_properties=$(printf '%s' ",$l_effective_readonly_properties," |
@@ -235,19 +224,19 @@ src/zxfer_reporting.sh
   855:		return 1
   859:		return 1
   869:			return 1
-  1059:	if ! (
-  1062:	); then
-  1360:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
-  1361:	if [ "$l_speaker_km_loaded" = "0" ]; then
-  1362:		if ! kldload "speaker" >/dev/null 2>&1; then
-  1363:			zxfer_echoV "Unable to load speaker module; skipping beep."
-  1364:			return
-  1369:	if [ "$l_exit_status" -eq 0 ]; then
-  1370:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
-  1371:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
-  1372:				zxfer_echoV "Success beep failed; skipping."
-  1375:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
-  1376:			zxfer_echoV "Failure beep failed; skipping."
+  1075:	if ! (
+  1078:	); then
+  1383:	l_speaker_km_loaded=$(kldstat | grep -c speaker.ko)
+  1384:	if [ "$l_speaker_km_loaded" = "0" ]; then
+  1385:		if ! kldload "speaker" >/dev/null 2>&1; then
+  1386:			zxfer_echoV "Unable to load speaker module; skipping beep."
+  1387:			return
+  1392:	if [ "$l_exit_status" -eq 0 ]; then
+  1393:		if [ "$g_option_B_beep_on_success" -eq 1 ]; then
+  1394:			echo "T255CCMLEG~EG..." >/dev/speaker 2>/dev/null ||
+  1395:				zxfer_echoV "Success beep failed; skipping."
+  1398:		echo "T150A<C.." >/dev/speaker 2>/dev/null ||
+  1399:			zxfer_echoV "Failure beep failed; skipping."
 
 src/zxfer_runtime.sh
   263:	if ! kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null; then
@@ -256,26 +245,23 @@ src/zxfer_runtime.sh
   267:	return 1
   294:		zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
   295:		return 0
-  561:			l_cleanup_status=1
-  710:	if (
-  712:	) 2>/dev/null; then
-  1068:		return "$l_status"
-  1288:		return "$l_status"
-  1293:		return "$l_status"
-  1368:	zxfer_unregister_runtime_artifact_path "$l_stage_dir"
-  1369:	return 0
-  1579:		g_zxfer_profile_start_ms=""
-  1839:				continue
-  1906:					l_source_context_status=$?
-  1908:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
-  1943:		g_zxfer_failure_class=dependency
-  1944:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
-  1962:					l_destination_context_status=$?
-  1964:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
-  1999:		g_zxfer_failure_class=dependency
-  2000:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
-  2040:		g_zxfer_failure_class=dependency
-  2041:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
+  636:			l_cleanup_status=1
+  807:	if (
+  809:	) 2>/dev/null; then
+  1113:		return "$l_status"
+  1333:		return "$l_status"
+  1338:		return "$l_status"
+  1586:		g_zxfer_profile_start_ms=""
+  1913:					l_source_context_status=$?
+  1915:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
+  1950:		g_zxfer_failure_class=dependency
+  1951:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
+  1969:					l_destination_context_status=$?
+  1971:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
+  2006:		g_zxfer_failure_class=dependency
+  2007:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
+  2047:		g_zxfer_failure_class=dependency
+  2048:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
 
 src/zxfer_send_receive.sh
   126:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |

@@ -38,9 +38,13 @@
 
 # Module contract:
 # owns globals: secure-staging result scratch.
-# reads globals: g_cmd_awk.
+# reads globals: none.
 # mutates caches: none.
 # returns via stdout: owner/mode probes, symlink probes, and validated temp-root paths.
+# Temp roots validate once per run via the single-pass physical resolution in
+# zxfer_validate_temp_root_candidate; the component-walk symlink scanner only
+# serves the cold backup-metadata and ZXFER_ERROR_LOG checks whose
+# "path component ... is a symlink" errors are pinned public output.
 
 # Purpose: Return the path owner UID in the form expected by later helpers.
 # Usage: Called before zxfer trusts temp-root or backup-metadata paths when
@@ -80,11 +84,13 @@ zxfer_get_path_owner_uid() {
 		;;
 	esac
 	if l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
-		# shellcheck disable=SC2016
-		# awk needs literal $3.
-		l_uid=$(printf '%s\n' "$l_ls_output" | ${g_cmd_awk:-awk} '{print $3}')
-		if [ "$l_uid" != "" ]; then
-			printf '%s\n' "$l_uid"
+		# Field-split the ls -ldn line in pure shell; field 3 is the owner UID.
+		set -f
+		# shellcheck disable=SC2086
+		set -- $l_ls_output
+		set +f
+		if [ "$#" -ge 3 ] && [ "$3" != "" ]; then
+			printf '%s\n' "$3"
 			return 0
 		fi
 	fi
@@ -130,9 +136,7 @@ zxfer_get_path_mode_octal() {
 		;;
 	esac
 	if l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
-		# shellcheck disable=SC2016
-		# awk needs literal $1.
-		l_perm_str=$(printf '%s\n' "$l_ls_output" | ${g_cmd_awk:-awk} '{print $1}')
+		l_perm_str=${l_ls_output%% *}
 		if [ "$l_perm_str" = "-rw-------" ]; then
 			printf '600\n'
 			return 0
@@ -140,6 +144,42 @@ zxfer_get_path_mode_octal() {
 	fi
 
 	return 1
+}
+
+# Purpose: Check that one ls -l permission string describes a directory that is
+# safe to share: well-formed and either free of group/other write bits or
+# protected by the sticky bit.
+# Usage: Called by the temp-root and trusted-symlink validators in place of the
+# old '| cut -c N' subshell chains; pure parameter expansion, no spawns.
+zxfer_validate_shared_dir_permission_string() {
+	l_perm_str=$1
+
+	case "$l_perm_str" in
+	??????????*) ;;
+	*)
+		return 1
+		;;
+	esac
+	# Single-character slices via parameter expansion: strip N leading
+	# characters, then keep only the first character of the remainder.
+	l_perm_tail=${l_perm_str#?????}
+	l_group_write=${l_perm_tail%"${l_perm_tail#?}"}
+	l_perm_tail=${l_perm_str#????????}
+	l_other_write=${l_perm_tail%"${l_perm_tail#?}"}
+	l_perm_tail=${l_perm_str#?????????}
+	l_sticky_char=${l_perm_tail%"${l_perm_tail#?}"}
+	case "$l_group_write$l_other_write" in
+	*w*)
+		case "$l_sticky_char" in
+		t | T) ;;
+		*)
+			return 1
+			;;
+		esac
+		;;
+	esac
+
+	return 0
 }
 
 # Purpose: Return the effective user UID in the form expected by later helpers.
@@ -187,19 +227,6 @@ zxfer_describe_expected_backup_owner() {
 	fi
 
 	printf '%s\n' "$l_desc"
-}
-
-# Purpose: Require the secure backup file before the surrounding flow
-# continues.
-# Usage: Called before zxfer trusts temp-root or backup-metadata paths when
-# later helpers should stop immediately if the precondition is not met.
-zxfer_require_secure_backup_file() {
-	l_path=$1
-	l_display_path=${2:-$l_path}
-
-	if ! l_error=$(zxfer_check_secure_backup_file "$l_path" "$l_display_path"); then
-		zxfer_throw_error "$l_error"
-	fi
 }
 
 # Purpose: Reject the backup metadata path with the validation failure owned by
@@ -325,37 +352,16 @@ zxfer_is_trusted_symlink_path_component() {
 	if ! l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
 		return 1
 	fi
-	# shellcheck disable=SC2016
-	# awk needs literal $1.
-	l_perm_str=$(printf '%s\n' "$l_ls_output" | ${g_cmd_awk:-awk} '{print $1}')
-	case "$l_perm_str" in
-	??????????*)
-		:
-		;;
-	*)
-		return 1
-		;;
-	esac
-	l_group_write=$(printf '%s' "$l_perm_str" | cut -c 6)
-	l_other_write=$(printf '%s' "$l_perm_str" | cut -c 9)
-	l_sticky_char=$(printf '%s' "$l_perm_str" | cut -c 10)
-	case "$l_group_write$l_other_write" in
-	*w*)
-		case "$l_sticky_char" in
-		t | T) ;;
-		*)
-			return 1
-			;;
-		esac
-		;;
-	esac
-
-	return 0
+	zxfer_validate_shared_dir_permission_string "${l_ls_output%% *}"
 }
 
 # Purpose: Validate the temp root candidate before zxfer relies on it.
-# Usage: Called before zxfer trusts temp-root or backup-metadata paths to fail
-# closed on malformed, unsafe, or stale input.
+# Usage: Called once per requested temp root (the result is memoized by
+# zxfer_try_get_effective_tmpdir) before zxfer trusts temp-root or
+# backup-metadata parents; fails closed on malformed, unsafe, or stale input.
+# The single-pass 'cd -P && pwd' resolution below replaces the old
+# per-component symlink walk: an unsafe symlink target fails the owner/mode
+# checks on the resolved physical directory.
 zxfer_validate_temp_root_candidate() {
 	l_candidate=$1
 
@@ -396,30 +402,9 @@ zxfer_validate_temp_root_candidate() {
 	if ! l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
 		return 1
 	fi
-	# shellcheck disable=SC2016
-	# awk needs literal $1.
-	l_perm_str=$(printf '%s\n' "$l_ls_output" | ${g_cmd_awk:-awk} '{print $1}')
-	case "$l_perm_str" in
-	??????????*)
-		:
-		;;
-	*)
+	if ! zxfer_validate_shared_dir_permission_string "${l_ls_output%% *}"; then
 		return 1
-		;;
-	esac
-	l_group_write=$(printf '%s' "$l_perm_str" | cut -c 6)
-	l_other_write=$(printf '%s' "$l_perm_str" | cut -c 9)
-	l_sticky_char=$(printf '%s' "$l_perm_str" | cut -c 10)
-	case "$l_group_write$l_other_write" in
-	*w*)
-		case "$l_sticky_char" in
-		t | T) ;;
-		*)
-			return 1
-			;;
-		esac
-		;;
-	esac
+	fi
 
 	printf '%s\n' "$l_physical_dir"
 }
@@ -439,6 +424,27 @@ zxfer_get_path_parent_dir() {
 	printf '%s\n' "$l_parent"
 }
 
+# Purpose: Create one unpredictably named staging entry (file or directory)
+# from a randomized temp-name template under a caller-validated parent.
+# Usage: zxfer_create_unpredictable_staging_entry <template> <file|dir>.
+# Validated staging parents may still be shared sticky directories (a
+# /tmp-style ZXFER_ERROR_LOG parent), where predictable pid+attempt slot names
+# would let a local process-table reader pre-create every slot and deny
+# staging; the randomized names close that squat window and the forced 077
+# umask keeps entries 0600 (files) or 0700 (directories).
+zxfer_create_unpredictable_staging_entry() {
+	l_template=$1
+	l_entry_kind=$2
+
+	l_dir_flag=""
+	if [ "$l_entry_kind" = "dir" ]; then
+		l_dir_flag="-d"
+	fi
+	# l_dir_flag intentionally expands unquoted: empty means no extra word.
+	# shellcheck disable=SC2086
+	(umask 077 && exec mktemp $l_dir_flag "$l_template") 2>/dev/null
+}
+
 # Purpose: Create the secure staging directory for path using the safety checks
 # owned by this module.
 # Usage: Called before zxfer trusts temp-root or backup-metadata paths when
@@ -455,20 +461,16 @@ zxfer_create_secure_staging_dir_for_path() {
 		return 1
 	fi
 
-	l_old_umask=$(umask)
-	umask 077
-	l_stage_dir=$(mktemp -d "$l_parent/.$l_prefix.XXXXXX" 2>/dev/null)
-	l_stage_status=$?
-	umask "$l_old_umask"
-	[ $l_stage_status -eq 0 ] || return 1
-
-	# Register same-directory staging so trap cleanup can reap it on aborts.
+	if ! l_stage_dir=$(zxfer_create_unpredictable_staging_entry "$l_parent/.$l_prefix.XXXXXX" dir); then
+		return 1
+	fi
+	# Register same-directory staging so trap cleanup reaps it on aborts.
 	if command -v zxfer_register_runtime_artifact_path >/dev/null 2>&1; then
 		zxfer_register_runtime_artifact_path "$l_stage_dir"
 	fi
-
 	g_zxfer_secure_staging_dir_result=$l_stage_dir
 	printf '%s\n' "$l_stage_dir"
+	return 0
 }
 
 # Purpose: Check the secure backup file using the fail-closed rules owned by

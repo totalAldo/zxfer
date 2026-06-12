@@ -401,6 +401,38 @@ test_zxfer_append_failure_report_to_log_appends_existing_file_when_parent_is_not
 		"$(cat "$log_path")" "message: appended-report"
 }
 
+test_zxfer_append_failure_report_to_log_rechecks_existence_under_lock_before_creating() {
+	# A concurrent winner can create the log while this run waits on the
+	# error-log lock; the stale pre-lock existence answer must not route the
+	# waiting run onto the create path, which would clobber the winner's
+	# freshly published report with an empty staged file.
+	log_path="$TEST_TMPDIR/recheck-under-lock.log"
+	rm -f "$log_path"
+
+	output=$(
+		(
+			ZXFER_ERROR_LOG="$log_path"
+			zxfer_acquire_error_log_lock() {
+				# Simulate the concurrent winner publishing the log while
+				# this run was blocked on lock acquisition.
+				printf 'winner: report-kept\n' >"$log_path"
+				chmod 600 "$log_path"
+				return 0
+			}
+			set +e
+			zxfer_append_failure_report_to_log "loser: report-appended"
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Appending after a lock wait should still succeed." \
+		"$output" "status=0"
+	assertContains "The concurrent winner's report must survive the recheck (no create-path clobber)." \
+		"$(cat "$log_path")" "winner: report-kept"
+	assertContains "The waiting run's report must append behind the winner's content." \
+		"$(cat "$log_path")" "loser: report-appended"
+}
+
 test_zxfer_get_error_log_fallback_lock_dir_uses_system_tmp_fallback_chain() {
 	zxfer_test_capture_subshell '
 		TMPDIR="/unsafe-tmpdir"
@@ -647,6 +679,40 @@ test_zxfer_acquire_error_log_lock_reaps_stale_lock_and_retries_successfully() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "creates=2"
 	assertContains "Error-log lock acquisition should attempt exactly one stale-lock reap in this path." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "reaps=1"
+}
+
+test_zxfer_acquire_error_log_lock_defers_corrupt_reap_until_recheck_round() {
+	# A 0700 lock dir without metadata models a live winner inside its
+	# mkdir-to-metadata publish window: the first sighting must be treated as
+	# busy (lock preserved across the sleep) and the corrupt reap may only
+	# happen after the recheck still reports corrupt metadata.
+	lock_dir="$TEST_TMPDIR/midpublish.lock"
+	mkdir -m 700 "$lock_dir" || fail "Unable to create the mid-publish lock fixture."
+	g_test_sleep_calls=0
+	g_test_lock_present_at_sleep=no
+	sleep() {
+		g_test_sleep_calls=$((g_test_sleep_calls + 1))
+		if [ -d "$lock_dir" ]; then
+			g_test_lock_present_at_sleep=yes
+		fi
+		return 0
+	}
+
+	zxfer_acquire_error_log_lock "$lock_dir"
+	status=$?
+	unset -f sleep
+
+	assertEquals "Acquisition should still succeed after the corrupt recheck round reaps the metadata-less lock." \
+		0 "$status"
+	assertEquals "The metadata-less lock must survive the first sighting (treated as busy, not reaped)." \
+		yes "$g_test_lock_present_at_sleep"
+	assertEquals "Exactly one recheck sleep should separate the corrupt sighting from the corrupt reap." \
+		1 "$g_test_sleep_calls"
+	assertTrue "The acquired lock should carry this process's published metadata." \
+		"[ -f \"$lock_dir/metadata\" ]"
+
+	zxfer_release_error_log_lock "$lock_dir" ||
+		fail "Unable to release the acquired error-log lock fixture."
 }
 
 test_zxfer_acquire_error_log_lock_fails_closed_when_stale_reap_errors() {

@@ -123,14 +123,12 @@ identity_hex=$l_cache_identity_hex" \
 	chmod 600 "$l_cache_path"
 }
 
+# Lock metadata is owner pid + start token only (V2); the legacy kind/purpose
+# arguments are accepted so existing call sites stay unchanged and ignored.
 write_owned_lock_metadata_fixture() {
 	l_lock_dir=$1
-	l_kind=$2
-	l_purpose=$3
 	l_pid=${4:-$$}
 	l_start_token=${5:-}
-	l_hostname=${6:-}
-	l_created_at=${7:-}
 
 	mkdir -p "$l_lock_dir" || fail "Unable to create owned lock fixture directory."
 	chmod 700 "$l_lock_dir" || fail "Unable to chmod owned lock fixture directory."
@@ -138,23 +136,11 @@ write_owned_lock_metadata_fixture() {
 		l_start_token=$(zxfer_get_process_start_token "$$" 2>/dev/null) ||
 			fail "Unable to derive an owned lock fixture start token."
 	fi
-	if [ -z "$l_hostname" ]; then
-		l_hostname=$(zxfer_get_owned_lock_hostname 2>/dev/null) ||
-			fail "Unable to derive an owned lock fixture hostname."
-	fi
-	if [ -z "$l_created_at" ]; then
-		l_created_at=$(zxfer_get_owned_lock_created_at 2>/dev/null) ||
-			fail "Unable to derive an owned lock fixture creation timestamp."
-	fi
 
 	cat >"$l_lock_dir/metadata" <<EOF
 $ZXFER_LOCK_METADATA_HEADER
-kind	$l_kind
-purpose	$l_purpose
 pid	$l_pid
 start_token	$l_start_token
-hostname	$l_hostname
-created_at	$l_created_at
 EOF
 	chmod 600 "$l_lock_dir/metadata" || fail "Unable to chmod owned lock fixture metadata."
 }
@@ -962,19 +948,32 @@ test_zxfer_create_ssh_control_socket_lease_file_returns_failure_when_shared_crea
 		"$output" "result="
 }
 
-test_zxfer_validate_remote_capability_cache_lock_dir_helpers_cover_metadata_purpose_paths() {
-	lock_dir="$TEST_TMPDIR/remote_caps_wrong_purpose"
-	write_owned_lock_metadata_fixture "$lock_dir" lock "ssh-control-socket-lock"
+test_zxfer_validate_remote_capability_cache_lock_dir_helpers_cover_metadata_paths() {
+	# Lock identity is owner pid + start token only; pre-V2 metadata with the
+	# old kind/purpose fields must report as corrupt instead of crashing.
+	lock_dir="$TEST_TMPDIR/remote_caps_old_format"
+	mkdir -p "$lock_dir" || fail "Unable to create old-format remote capability lock fixture."
+	chmod 700 "$lock_dir" || fail "Unable to chmod old-format remote capability lock fixture."
+	cat >"$lock_dir/metadata" <<EOF
+ZXFER_LOCK_METADATA_V1
+kind	lock
+purpose	remote-capability-cache-lock
+pid	$$
+start_token	lstart:old-format
+hostname	old-host
+created_at	2026-04-13T00:00:00+0000
+EOF
+	chmod 600 "$lock_dir/metadata" || fail "Unable to chmod old-format remote capability lock metadata."
 
 	output=$(
 		(
 			set +e
 			zxfer_validate_remote_capability_cache_lock_dir "$lock_dir" >/dev/null
-			printf 'wrong=%s\n' "$?"
+			printf 'old_format=%s\n' "$?"
 		)
 	)
-	assertContains "Remote capability lock validation should reject owned locks written for another purpose." \
-		"$output" "wrong=2"
+	assertContains "Remote capability lock validation should report pre-V2 metadata as corrupt." \
+		"$output" "old_format=2"
 
 	lock_dir="$TEST_TMPDIR/remote_caps_valid"
 	write_owned_lock_metadata_fixture \
@@ -987,7 +986,7 @@ test_zxfer_validate_remote_capability_cache_lock_dir_helpers_cover_metadata_purp
 			printf 'valid=%s\n' "$?"
 		)
 	)
-	assertContains "Remote capability lock validation should accept owned locks written with the remote capability cache purpose." \
+	assertContains "Remote capability lock validation should accept owned locks written by the current process." \
 		"$output" "valid=0"
 }
 
@@ -2728,23 +2727,23 @@ test_zxfer_write_ssh_control_socket_entry_identity_file_reports_render_failure_i
 		"[ -f \"$identity_path\" ]"
 }
 
-test_zxfer_write_ssh_control_socket_entry_identity_file_reports_mktemp_failure_in_current_shell_direct() {
+test_zxfer_write_ssh_control_socket_entry_identity_file_reports_staging_failure_in_current_shell_direct() {
 	entry_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "origin.example")
 	identity_path="$entry_dir/id"
 
 	rm -f "$identity_path"
 
 	set +e
-	mktemp() {
+	zxfer_stage_runtime_artifact_file_for_path() {
 		return 4
 	}
 	zxfer_write_ssh_control_socket_entry_identity_file "$entry_dir" "origin.example" >/dev/null 2>&1
 	status=$?
-	unset -f mktemp
+	unset -f zxfer_stage_runtime_artifact_file_for_path
 	# shellcheck source=src/zxfer_modules.sh
 	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_backup_metadata.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
-	assertEquals "Shared ssh control socket identity writes should fail when temporary-file creation fails in the current shell." \
+	assertEquals "Shared ssh control socket identity writes should fail when staged-file creation fails in the current shell." \
 		1 "$status"
 }
 
@@ -4740,17 +4739,19 @@ test_zxfer_write_remote_capability_cache_file_rejects_symlink_target() {
 	assertEquals "Capability cache writes should fail closed when the target path is a symlink." 1 "$status"
 }
 
-test_zxfer_write_remote_capability_cache_file_returns_failure_when_mktemp_fails() {
-	mktemp() {
+test_zxfer_write_remote_capability_cache_file_returns_failure_when_stage_dir_creation_fails() {
+	zxfer_create_cache_object_stage_dir_in_parent() {
 		return 4
 	}
 
 	set +e
 	zxfer_write_remote_capability_cache_file "origin.example" "$(fake_remote_capability_response)"
 	status=$?
-	unset -f mktemp
+	unset -f zxfer_create_cache_object_stage_dir_in_parent
+	# shellcheck source=src/zxfer_modules.sh
+	ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT ZXFER_SOURCE_MODULES_THROUGH=zxfer_backup_metadata.sh . "$ZXFER_ROOT/src/zxfer_modules.sh"
 
-	assertEquals "Capability cache writes should preserve mktemp failure status." 4 "$status"
+	assertEquals "Capability cache writes should preserve stage-dir creation failure status." 4 "$status"
 }
 
 test_zxfer_write_remote_capability_cache_file_returns_failure_when_path_resolution_fails() {
@@ -8440,8 +8441,11 @@ test_ssh_supports_control_sockets_reflects_ssh_status() {
 test_zxfer_ensure_ssh_control_socket_cache_dir_creates_secure_directory() {
 	cache_dir=$(zxfer_ensure_ssh_control_socket_cache_dir)
 
-	assertEquals "Shared ssh control socket cache directories should be created under TMPDIR for the current run." \
-		"$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$TEST_TMPDIR")" "$cache_dir"
+	# The socket-cache tmpdir resolves through the single-pass physical
+	# validation, so a symlinked TMPDIR (macOS /var -> /private/var) yields
+	# the physical spelling.
+	assertEquals "Shared ssh control socket cache directories should be created under the resolved TMPDIR for the current run." \
+		"$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$TEST_TMPDIR_PHYSICAL")" "$cache_dir"
 	assertTrue "Shared ssh control socket cache directories should exist after creation." \
 		"[ -d '$cache_dir' ]"
 	assertEquals "Shared ssh control socket cache directories should be mode 0700." \
@@ -8909,6 +8913,7 @@ test_trap_exit_removes_temp_files_and_iteration_cache_dirs() {
 	g_zxfer_temp_prefix="trap-cleanup"
 	socket_cache_root=$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$TEST_TMPDIR")
 	remote_capability_cache_root=$(zxfer_remote_capability_cache_dir_path_for_tmpdir "$TEST_TMPDIR")
+	trap_paths_file="$TEST_TMPDIR/trap-cleanup-paths"
 
 	output=$(
 		(
@@ -8919,16 +8924,14 @@ test_trap_exit_removes_temp_files_and_iteration_cache_dirs() {
 			g_option_b_beep_always=0
 			g_option_B_beep_on_success=0
 			g_services_need_relaunch=0
-			g_delete_source_tmp_file="$TEST_TMPDIR/delete-source.tmp"
-			g_delete_dest_tmp_file="$TEST_TMPDIR/delete-dest.tmp"
-			g_delete_snapshots_to_delete_tmp_file="$TEST_TMPDIR/delete-diff.tmp"
-			: >"$g_delete_source_tmp_file"
-			: >"$g_delete_dest_tmp_file"
-			: >"$g_delete_snapshots_to_delete_tmp_file"
-			g_zxfer_temp_prefix="trap-cleanup"
-			: >"$TEST_TMPDIR/trap-cleanup.stale"
-			mkdir -p "$TEST_TMPDIR/trap-cleanup.dir/subdir"
-			: >"$TEST_TMPDIR/trap-cleanup.dir/subdir/stale"
+			# Delete-list temp files now live under the one per-run temp root.
+			zxfer_reset_delete_temp_artifacts
+			zxfer_ensure_snapshot_delete_temp_artifacts || exit 90
+			printf '%s\n%s\n%s\n%s\n' \
+				"$g_zxfer_run_tmp_root" \
+				"$g_delete_source_tmp_file" \
+				"$g_delete_dest_tmp_file" \
+				"$g_delete_snapshots_to_delete_tmp_file" >"$trap_paths_file"
 			mkdir -p \
 				"$socket_cache_root/active-entry" \
 				"$remote_capability_cache_root/active-entry"
@@ -8943,13 +8946,18 @@ test_trap_exit_removes_temp_files_and_iteration_cache_dirs() {
 		)
 	)
 	status=$?
+	run_tmp_root=$(sed -n '1p' "$trap_paths_file")
+	delete_source_tmp_file=$(sed -n '2p' "$trap_paths_file")
+	delete_dest_tmp_file=$(sed -n '3p' "$trap_paths_file")
+	delete_diff_tmp_file=$(sed -n '4p' "$trap_paths_file")
 
 	assertEquals "zxfer_trap_exit should preserve a successful exit status after cleaning temp files and cache directories." 0 "$status"
-	assertFalse "zxfer_trap_exit should remove the delete-source temp file." "[ -e '$TEST_TMPDIR/delete-source.tmp' ]"
-	assertFalse "zxfer_trap_exit should remove the delete-destination temp file." "[ -e '$TEST_TMPDIR/delete-dest.tmp' ]"
-	assertFalse "zxfer_trap_exit should remove the delete-diff temp file." "[ -e '$TEST_TMPDIR/delete-diff.tmp' ]"
-	assertFalse "zxfer_trap_exit should remove prefixed tmpdir scratch files for the current run." "[ -e '$TEST_TMPDIR/trap-cleanup.stale' ]"
-	assertFalse "zxfer_trap_exit should remove prefixed tmpdir scratch directories for the current run." "[ -d '$TEST_TMPDIR/trap-cleanup.dir' ]"
+	assertContains "Delete-list temp files should be allocated under the per-run temp root." \
+		"$delete_source_tmp_file" "$run_tmp_root/"
+	assertFalse "zxfer_trap_exit should remove the per-run temp root." "[ -e '$run_tmp_root' ]"
+	assertFalse "zxfer_trap_exit should remove the delete-source temp file." "[ -e '$delete_source_tmp_file' ]"
+	assertFalse "zxfer_trap_exit should remove the delete-destination temp file." "[ -e '$delete_dest_tmp_file' ]"
+	assertFalse "zxfer_trap_exit should remove the delete-diff temp file." "[ -e '$delete_diff_tmp_file' ]"
 	assertFalse "zxfer_trap_exit should remove the current run ssh control-socket cache root even when it still contains entry state." "[ -d '$socket_cache_root' ]"
 	assertTrue "zxfer_trap_exit should preserve the shared remote capability cache root when it still contains reusable cache files." "[ -d '$remote_capability_cache_root' ]"
 }
@@ -8994,9 +9002,9 @@ test_trap_exit_preserves_remote_host_cache_roots_with_unsupported_entries() {
 		"[ -d '$remote_capability_cache_root' ]"
 }
 
-test_trap_exit_removes_non_remote_host_temp_dirs_with_legacy_like_entries() {
+test_trap_exit_removes_run_root_dirs_with_legacy_like_entries() {
 	g_zxfer_temp_prefix="zxfer.trap-cleanup"
-	fake_root="$TEST_TMPDIR/zxfer.trap-cleanup.fake-root"
+	trap_root_file="$TEST_TMPDIR/trap-cleanup-run-root"
 
 	output=$(
 		(
@@ -9007,6 +9015,9 @@ test_trap_exit_removes_non_remote_host_temp_dirs_with_legacy_like_entries() {
 			g_option_b_beep_always=0
 			g_option_B_beep_on_success=0
 			g_services_need_relaunch=0
+			zxfer_ensure_run_tmp_root || exit 90
+			printf '%s\n' "$g_zxfer_run_tmp_root" >"$trap_root_file"
+			fake_root="$g_zxfer_run_tmp_root/fake-root"
 			mkdir -p "$fake_root/entry/leases" "$fake_root/cache.lock" || exit 91
 			chmod 700 "$fake_root/cache.lock" || exit 92
 			printf '%s\n' "$$" >"$fake_root/cache.lock/pid" || exit 93
@@ -9023,11 +9034,12 @@ test_trap_exit_removes_non_remote_host_temp_dirs_with_legacy_like_entries() {
 		)
 	)
 	status=$?
+	run_tmp_root=$(cat "$trap_root_file")
 
-	assertEquals "zxfer_trap_exit should preserve a successful exit status while removing non-cache temp directories with legacy-like child names." \
+	assertEquals "zxfer_trap_exit should preserve a successful exit status while removing run-root directories with legacy-like child names." \
 		0 "$status"
-	assertFalse "zxfer_trap_exit should not preserve arbitrary current-run temp directories just because they contain lease-like or pid-lock-like names." \
-		"[ -e '$fake_root' ]"
+	assertFalse "zxfer_trap_exit should remove everything under the per-run temp root even when entries contain lease-like or pid-lock-like names." \
+		"[ -e '$run_tmp_root' ]"
 }
 
 test_setup_ssh_control_socket_replaces_existing_target_socket_state() {
@@ -10227,6 +10239,8 @@ test_close_origin_ssh_control_socket_restores_last_lease_on_transport_failure() 
 	set +e
 	zxfer_close_origin_ssh_control_socket >"$TEST_TMPDIR/close_origin_shared_transport.out" 2>"$errlog"
 	status=$?
+	zxfer_current_process_owns_owned_lock_dir "$g_ssh_origin_control_socket_lease_file"
+	lease_owned=$?
 	set -e
 
 	unset FAKE_SSH_EXIT_STATUS FAKE_SSH_STDERR
@@ -10248,8 +10262,8 @@ test_close_origin_ssh_control_socket_restores_last_lease_on_transport_failure() 
 		1 "$entry_dir_exists"
 	assertEquals "Last shared origin-socket lease failures should restore an active lease directory for retry." \
 		1 "$lease_exists"
-	assertNotEquals "Restored origin-socket leases should not reuse the removed lease path." \
-		"$lease_file" "$g_ssh_origin_control_socket_lease_file"
+	assertEquals "Restored origin-socket leases should be live owned leases for retry." \
+		0 "$lease_owned"
 	assertEquals "Last shared origin-socket lease failures should preserve the in-process socket path." \
 		"$entry_dir/s" "$g_ssh_origin_control_socket"
 }
@@ -10285,8 +10299,8 @@ test_close_origin_ssh_control_socket_restores_last_lease_on_capture_failure() {
 				"$([ -d "$entry_dir" ] && printf yes || printf no)"
 			printf 'lease_exists=%s\n' \
 				"$([ -d "$g_ssh_origin_control_socket_lease_file" ] && printf yes || printf no)"
-			printf 'lease_reused=%s\n' \
-				"$([ "$lease_file" = "$g_ssh_origin_control_socket_lease_file" ] && printf yes || printf no)"
+			printf 'lease_owned=%s\n' \
+				"$(zxfer_current_process_owns_owned_lock_dir "$g_ssh_origin_control_socket_lease_file" && printf yes || printf no)"
 			printf 'socket_empty=%s\n' \
 				"$([ -n "$g_ssh_origin_control_socket" ] && printf no || printf yes)"
 		)
@@ -10303,8 +10317,8 @@ test_close_origin_ssh_control_socket_restores_last_lease_on_capture_failure() {
 		"$output" "dir_exists=yes"
 	assertContains "Last shared origin-socket capture failures should restore an active lease directory for retry." \
 		"$output" "lease_exists=yes"
-	assertContains "Restored origin-socket leases should not reuse the removed lease path after capture failures." \
-		"$output" "lease_reused=no"
+	assertContains "Restored origin-socket leases should be live owned leases after capture failures." \
+		"$output" "lease_owned=yes"
 	assertContains "Last shared origin-socket capture failures should preserve the in-process socket path." \
 		"$output" "socket_empty=no"
 }
@@ -10333,8 +10347,8 @@ test_close_origin_ssh_control_socket_restores_last_lease_on_transport_token_fail
 			printf 'lease=%s\n' "$g_ssh_origin_control_socket_lease_file"
 			printf 'lease_exists=%s\n' \
 				"$([ -d "$g_ssh_origin_control_socket_lease_file" ] && printf yes || printf no)"
-			printf 'lease_reused=%s\n' \
-				"$([ "$lease_file" = "$g_ssh_origin_control_socket_lease_file" ] && printf yes || printf no)"
+			printf 'lease_owned=%s\n' \
+				"$(zxfer_current_process_owns_owned_lock_dir "$g_ssh_origin_control_socket_lease_file" && printf yes || printf no)"
 		)
 	)
 	status=$?
@@ -10347,8 +10361,8 @@ test_close_origin_ssh_control_socket_restores_last_lease_on_transport_token_fail
 		"$output" "status=1"
 	assertContains "Transport-token validation failures should restore an active lease directory for retry." \
 		"$output" "lease_exists=yes"
-	assertContains "Restored origin-socket leases should not reuse the removed lease path after transport token failures." \
-		"$output" "lease_reused=no"
+	assertContains "Restored origin-socket leases should be live owned leases after transport token failures." \
+		"$output" "lease_owned=yes"
 }
 
 test_close_origin_ssh_control_socket_removes_stale_shared_entry_when_socket_is_not_live() {
@@ -10430,6 +10444,8 @@ test_close_target_ssh_control_socket_restores_last_lease_on_transport_failure() 
 	set +e
 	zxfer_close_target_ssh_control_socket >"$TEST_TMPDIR/close_target_shared_transport.out" 2>"$errlog"
 	status=$?
+	zxfer_current_process_owns_owned_lock_dir "$g_ssh_target_control_socket_lease_file"
+	lease_owned=$?
 	set -e
 
 	if [ -d "$entry_dir" ]; then
@@ -10450,8 +10466,8 @@ test_close_target_ssh_control_socket_restores_last_lease_on_transport_failure() 
 		1 "$entry_dir_exists"
 	assertEquals "Last shared target-socket lease failures should restore an active lease directory for retry." \
 		1 "$lease_exists"
-	assertNotEquals "Restored target-socket leases should not reuse the removed lease path." \
-		"$lease_file" "$g_ssh_target_control_socket_lease_file"
+	assertEquals "Restored target-socket leases should be live owned leases for retry." \
+		0 "$lease_owned"
 	assertEquals "Last shared target-socket lease failures should preserve the in-process socket path." \
 		"$entry_dir/s" "$g_ssh_target_control_socket"
 }
@@ -10487,8 +10503,8 @@ test_close_target_ssh_control_socket_restores_last_lease_on_capture_failure() {
 				"$([ -d "$entry_dir" ] && printf yes || printf no)"
 			printf 'lease_exists=%s\n' \
 				"$([ -d "$g_ssh_target_control_socket_lease_file" ] && printf yes || printf no)"
-			printf 'lease_reused=%s\n' \
-				"$([ "$lease_file" = "$g_ssh_target_control_socket_lease_file" ] && printf yes || printf no)"
+			printf 'lease_owned=%s\n' \
+				"$(zxfer_current_process_owns_owned_lock_dir "$g_ssh_target_control_socket_lease_file" && printf yes || printf no)"
 			printf 'socket_empty=%s\n' \
 				"$([ -n "$g_ssh_target_control_socket" ] && printf no || printf yes)"
 		)
@@ -10505,8 +10521,8 @@ test_close_target_ssh_control_socket_restores_last_lease_on_capture_failure() {
 		"$output" "dir_exists=yes"
 	assertContains "Last shared target-socket capture failures should restore an active lease directory for retry." \
 		"$output" "lease_exists=yes"
-	assertContains "Restored target-socket leases should not reuse the removed lease path after capture failures." \
-		"$output" "lease_reused=no"
+	assertContains "Restored target-socket leases should be live owned leases after capture failures." \
+		"$output" "lease_owned=yes"
 	assertContains "Last shared target-socket capture failures should preserve the in-process socket path." \
 		"$output" "socket_empty=no"
 }
@@ -10538,8 +10554,8 @@ test_close_target_ssh_control_socket_restores_last_lease_on_transport_token_fail
 			printf 'lease=%s\n' "$g_ssh_target_control_socket_lease_file"
 			printf 'lease_exists=%s\n' \
 				"$([ -d "$g_ssh_target_control_socket_lease_file" ] && printf yes || printf no)"
-			printf 'lease_reused=%s\n' \
-				"$([ "$lease_file" = "$g_ssh_target_control_socket_lease_file" ] && printf yes || printf no)"
+			printf 'lease_owned=%s\n' \
+				"$(zxfer_current_process_owns_owned_lock_dir "$g_ssh_target_control_socket_lease_file" && printf yes || printf no)"
 		)
 	)
 	status=$?
@@ -10552,8 +10568,8 @@ test_close_target_ssh_control_socket_restores_last_lease_on_transport_token_fail
 		"$output" "status=1"
 	assertContains "Target transport-token validation failures should restore an active lease directory for retry." \
 		"$output" "lease_exists=yes"
-	assertContains "Restored target-socket leases should not reuse the removed lease path after transport token failures." \
-		"$output" "lease_reused=no"
+	assertContains "Restored target-socket leases should be live owned leases after transport token failures." \
+		"$output" "lease_owned=yes"
 }
 
 test_close_target_ssh_control_socket_preserves_stale_cleanup_failures_for_last_lease() {

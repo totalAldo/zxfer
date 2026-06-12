@@ -349,9 +349,7 @@ zxfer_kill_registered_cleanup_pids() {
 # Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
 # needs a canonical candidate list instead of rebuilding it ad hoc.
 zxfer_list_default_tmpdir_candidates() {
-	printf '%s\n' "/dev/shm"
-	printf '%s\n' "/run/shm"
-	printf '%s\n' "/tmp"
+	printf '%s\n' "/dev/shm" "/run/shm" "/tmp"
 }
 
 # Purpose: Try to resolve or create the get default temporary directory without
@@ -383,17 +381,13 @@ zxfer_try_get_socket_cache_tmpdir() {
 
 	if [ -n "$l_requested_tmpdir" ] &&
 		l_effective_tmpdir=$(zxfer_validate_temp_root_candidate "$l_requested_tmpdir"); then
-		case "$l_requested_tmpdir" in
-		*/./* | */../* | */. | */..)
-			:
-			;;
-		*)
-			if ! zxfer_find_symlink_path_component "$l_requested_tmpdir" >/dev/null 2>&1; then
-				printf '%s\n' "$l_requested_tmpdir"
-				return 0
-			fi
-			;;
-		esac
+		# Keep the literal TMPDIR spelling only when the single-pass cd -P
+		# resolution proves no symlink or dot segment changes its meaning;
+		# otherwise fall through to the validated physical path.
+		if [ "$l_effective_tmpdir" = "$l_requested_tmpdir" ]; then
+			printf '%s\n' "$l_requested_tmpdir"
+			return 0
+		fi
 	fi
 
 	zxfer_try_get_effective_tmpdir
@@ -422,7 +416,12 @@ zxfer_try_get_effective_tmpdir() {
 		if l_effective_tmpdir=$(zxfer_validate_temp_root_candidate "$l_requested_tmpdir"); then
 			:
 		elif l_effective_tmpdir=$(zxfer_try_get_default_tmpdir); then
-			zxfer_echoV "Ignoring unsafe TMPDIR $l_requested_tmpdir; using $l_effective_tmpdir instead."
+			# The fallback decision can run before option parsing (the eager
+			# run temp root in zxfer_init_globals), so hold the advisory and
+			# let zxfer_emit_pending_tmpdir_fallback_note replay it once -V
+			# state is known; when -V is already live it emits immediately.
+			g_zxfer_tmpdir_fallback_note="Ignoring unsafe TMPDIR $l_requested_tmpdir; using $l_effective_tmpdir instead."
+			zxfer_emit_pending_tmpdir_fallback_note
 		else
 			l_effective_tmpdir_status=$?
 			g_zxfer_effective_tmpdir_requested=$l_request_key
@@ -445,6 +444,20 @@ zxfer_try_get_effective_tmpdir() {
 	printf '%s\n' "$g_zxfer_effective_tmpdir"
 }
 
+# Purpose: Emit the held unsafe-TMPDIR fallback advisory under -V once option
+# parsing has made the verbosity state known.
+# Usage: Called by zxfer_try_get_effective_tmpdir at decision time and once
+# after zxfer_read_command_line_switches; a no-op when no fallback happened or
+# -V is off.
+zxfer_emit_pending_tmpdir_fallback_note() {
+	[ -n "${g_zxfer_tmpdir_fallback_note:-}" ] || return 0
+	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
+		zxfer_echoV "$g_zxfer_tmpdir_fallback_note"
+		g_zxfer_tmpdir_fallback_note=""
+	fi
+	return 0
+}
+
 # Purpose: Reset the runtime artifact state so the next runtime pass starts
 # from a clean state.
 # Usage: Called during runtime bootstrap, staging, and trap cleanup before this
@@ -455,6 +468,10 @@ zxfer_reset_runtime_artifact_state() {
 	else
 		l_cleanup_status=$?
 	fi
+	if ! zxfer_remove_run_tmp_root; then
+		l_cleanup_status=1
+	fi
+	g_zxfer_run_tmp_counter=0
 	g_zxfer_runtime_artifact_path_result=""
 	g_zxfer_runtime_artifact_read_result=""
 	g_zxfer_temp_file_group_result=""
@@ -462,10 +479,68 @@ zxfer_reset_runtime_artifact_state() {
 	return "$l_cleanup_status"
 }
 
+# Purpose: Create the one per-run private temp root on first need and reuse it
+# for every later runtime artifact allocation.
+# Usage: Called from zxfer_init_globals after TMPDIR validation and by the
+# runtime artifact allocators before they build child paths.
+# SAFETY: the root is created mode 0700 (umask 077 + mktemp -d) under the
+# validated effective temp directory, so the predictable <prefix>.<counter>
+# child names inside it are safe: no other user can traverse, pre-create, or
+# replace entries under a private root this process just created.
+zxfer_ensure_run_tmp_root() {
+	if [ -n "${g_zxfer_run_tmp_root:-}" ] && [ -d "$g_zxfer_run_tmp_root" ] &&
+		[ ! -L "$g_zxfer_run_tmp_root" ]; then
+		return 0
+	fi
+
+	# Plain call (no command substitution) so the once-per-run validation
+	# memoizes in this shell and a held unsafe-TMPDIR fallback advisory
+	# survives until option parsing can emit it.
+	l_status=0
+	zxfer_try_get_effective_tmpdir >/dev/null || l_status=$?
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
+	fi
+	l_effective_tmpdir=$g_zxfer_effective_tmpdir
+
+	l_old_umask=$(umask)
+	umask 077
+	l_status=0
+	l_run_tmp_root=$(mktemp -d "$l_effective_tmpdir/zxfer.$$.XXXXXX" 2>/dev/null) ||
+		l_status=$?
+	umask "$l_old_umask"
+	if [ "$l_status" -ne 0 ]; then
+		return "$l_status"
+	fi
+
+	g_zxfer_run_tmp_root=$l_run_tmp_root
+	g_zxfer_run_tmp_counter=0
+	return 0
+}
+
+# Purpose: Remove the per-run temp root and every runtime artifact below it.
+# Usage: Called from runtime state resets and zxfer_trap_exit so one rm -rf
+# covers success and failure paths.
+zxfer_remove_run_tmp_root() {
+	l_run_tmp_root=${g_zxfer_run_tmp_root:-}
+
+	[ -n "$l_run_tmp_root" ] || return 0
+	if rm -rf "$l_run_tmp_root" 2>/dev/null ||
+		{ [ ! -e "$l_run_tmp_root" ] && [ ! -L "$l_run_tmp_root" ]; }; then
+		g_zxfer_run_tmp_root=""
+		zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_paths_cleaned
+		return 0
+	fi
+
+	return 1
+}
+
 # Purpose: Register the runtime artifact path with the tracking state owned by
 # this module.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup so cleanup
-# and later lookups can find the live resource.
+# Usage: Called for path-adjacent staging artifacts (cache and log staging
+# outside the per-run temp root) so trap cleanup can reap them on aborts.
+# Artifacts under $g_zxfer_run_tmp_root never register; the root removal in
+# zxfer_trap_exit already covers them.
 zxfer_register_runtime_artifact_path() {
 	l_artifact_path=$1
 
@@ -607,58 +682,76 @@ EOF
 	[ -z "$l_remaining_paths" ]
 }
 
-# Purpose: Create the runtime artifact directory using the safety checks owned
-# by this module.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# needs a fresh staged resource or persistent helper state.
+# Purpose: Create the runtime artifact directory under the per-run temp root.
+# Usage: Called when zxfer needs a fresh scratch directory. Never registered
+# for cleanup; the run-root removal already covers it.
 zxfer_create_runtime_artifact_dir() {
-	l_prefix=$1
+	l_prefix=${1:-zxfer-temp-dir}
 
 	g_zxfer_runtime_artifact_path_result=""
 	l_status=0
-	l_tmpdir=$(zxfer_try_get_effective_tmpdir) || l_status=$?
+	zxfer_ensure_run_tmp_root || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		return "$l_status"
 	fi
-	l_status=0
-	l_artifact_dir=$(mktemp -d "$l_tmpdir/$l_prefix.XXXXXX" 2>/dev/null) || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	zxfer_register_runtime_artifact_path "$l_artifact_dir"
+
+	# A taken name means an earlier allocation ran in a subshell and its
+	# counter bump never reached this shell; skip ahead to a free name.
+	while :; do
+		g_zxfer_run_tmp_counter=$((g_zxfer_run_tmp_counter + 1))
+		l_artifact_dir="$g_zxfer_run_tmp_root/$l_prefix.$g_zxfer_run_tmp_counter"
+		if mkdir -m 700 "$l_artifact_dir" 2>/dev/null; then
+			break
+		fi
+		if [ -e "$l_artifact_dir" ] || [ -L "$l_artifact_dir" ]; then
+			continue
+		fi
+		return 1
+	done
 	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_dirs_created
 	g_zxfer_runtime_artifact_path_result=$l_artifact_dir
 	printf '%s\n' "$l_artifact_dir"
 }
 
-# Purpose: Create the runtime artifact file using the safety checks owned by
-# this module.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# needs a fresh staged resource or persistent helper state.
+# Purpose: Create the runtime artifact file under the per-run temp root.
+# Usage: Called when zxfer needs a fresh scratch file. Never registered for
+# cleanup; the run-root removal already covers it.
 zxfer_create_runtime_artifact_file() {
-	l_prefix=$1
+	l_prefix=${1:-zxfer-temp}
 
 	g_zxfer_runtime_artifact_path_result=""
 	l_status=0
-	l_tmpdir=$(zxfer_try_get_effective_tmpdir) || l_status=$?
+	zxfer_ensure_run_tmp_root || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		return "$l_status"
 	fi
-	l_status=0
-	l_artifact_file=$(mktemp "$l_tmpdir/$l_prefix.XXXXXX" 2>/dev/null) || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	zxfer_register_runtime_artifact_path "$l_artifact_file"
+
+	# A taken name means an earlier allocation ran in a subshell and its
+	# counter bump never reached this shell. The noclobber redirection in a
+	# subshell is the exclusive 0600 creation step (run umask untouched,
+	# failures as a plain nonzero status); a failed create whose name turns
+	# out to exist steps ahead to the next free name instead of failing.
+	while :; do
+		g_zxfer_run_tmp_counter=$((g_zxfer_run_tmp_counter + 1))
+		l_artifact_file="$g_zxfer_run_tmp_root/$l_prefix.$g_zxfer_run_tmp_counter"
+		if (umask 077 && set -C && : >"$l_artifact_file") 2>/dev/null; then
+			break
+		fi
+		if [ -e "$l_artifact_file" ] || [ -L "$l_artifact_file" ]; then
+			continue
+		fi
+		return 1
+	done
 	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_files_created
 	g_zxfer_runtime_artifact_path_result=$l_artifact_file
 	printf '%s\n' "$l_artifact_file"
 }
 
-# Purpose: Create the runtime artifact file in parent using the safety checks
-# owned by this module.
+# Purpose: Create the runtime artifact file next to a caller-validated parent
+# directory for path-adjacent staging (same-filesystem atomic publish).
 # Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# needs a fresh staged resource or persistent helper state.
+# needs a fresh staged resource or persistent helper state. The staged file
+# registers for trap cleanup because it lives outside the per-run temp root.
 zxfer_create_runtime_artifact_file_in_parent() {
 	l_parent_dir=$1
 	l_prefix=${2:-zxfer-runtime-artifact}
@@ -669,15 +762,19 @@ zxfer_create_runtime_artifact_file_in_parent() {
 	if [ "$l_status" -ne 0 ]; then
 		return "$l_status"
 	fi
-	l_status=0
-	l_artifact_file=$(mktemp "$l_parent_dir/$l_prefix.XXXXXX" 2>/dev/null) || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
+
+	# Validated parents may still be shared sticky directories, so the staged
+	# name comes from a randomized temp-name template: predictable pid+attempt
+	# slots would let a local process-table reader pre-create every candidate
+	# and deny staging.
+	if ! l_artifact_file=$(zxfer_create_unpredictable_staging_entry "$l_parent_dir/$l_prefix.XXXXXX" file); then
+		return 1
 	fi
 	zxfer_register_runtime_artifact_path "$l_artifact_file"
 	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_files_created
 	g_zxfer_runtime_artifact_path_result=$l_artifact_file
 	printf '%s\n' "$l_artifact_file"
+	return 0
 }
 
 # Purpose: Stage the runtime artifact file for path in temporary state before
@@ -870,55 +967,6 @@ zxfer_publish_runtime_artifact_file() {
 	return 0
 }
 
-# Purpose: Write the runtime cache file atomically in the normalized form later
-# zxfer steps expect.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when the
-# module needs a stable staged file or emitted stream for downstream use.
-zxfer_write_runtime_cache_file_atomically() {
-	l_target_path=$1
-	l_cache_payload=$2
-	l_prefix=${3:-zxfer-runtime-cache}
-
-	[ -n "$l_target_path" ] || return 1
-	[ ! -L "$l_target_path" ] || return 1
-	[ ! -h "$l_target_path" ] || return 1
-	if [ -e "$l_target_path" ]; then
-		[ -f "$l_target_path" ] || return 1
-	fi
-
-	l_status=0
-	l_parent_dir=$(zxfer_get_path_parent_dir "$l_target_path") || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	if [ ! -d "$l_parent_dir" ]; then
-		return 1
-	fi
-	l_status=0
-	zxfer_stage_runtime_artifact_file_for_path "$l_target_path" "$l_prefix" >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	l_stage_file=$g_zxfer_runtime_artifact_path_result
-
-	l_status=0
-	zxfer_write_runtime_artifact_file "$l_stage_file" "$l_cache_payload" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_stage_file"
-		return "$l_status"
-	fi
-
-	chmod 600 "$l_stage_file" 2>/dev/null || :
-	l_status=0
-	zxfer_publish_runtime_artifact_file "$l_stage_file" "$l_target_path" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_stage_file"
-		return "$l_status"
-	fi
-	chmod 600 "$l_target_path" 2>/dev/null || :
-	return 0
-}
-
 # Purpose: Create the private temp directory using the safety checks owned by
 # this module.
 # Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
@@ -940,17 +988,13 @@ zxfer_create_private_temp_dir() {
 # sibling helpers need the same lookup without duplicating module logic.
 zxfer_get_temp_file() {
 	g_zxfer_temp_file_result=""
-	# On GNU mktemp the template must include X, so build the template ourselves.
-	l_prefix=${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}
 	l_status=0
-	zxfer_create_runtime_artifact_file "$l_prefix" >/dev/null || l_status=$?
+	zxfer_create_runtime_artifact_file "zxfer-temp" >/dev/null || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_throw_error "Error creating temporary file." "$l_status"
 	fi
 	zxfer_echoV "New temporary file: $g_zxfer_runtime_artifact_path_result"
 	g_zxfer_temp_file_result=$g_zxfer_runtime_artifact_path_result
-
-	# return the temp file name
 	echo "$g_zxfer_temp_file_result"
 }
 
@@ -1056,7 +1100,8 @@ zxfer_get_cache_object_metadata_value() {
 # Purpose: Create the cache object stage directory in parent using the safety
 # checks owned by this module.
 # Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# needs a fresh staged resource or persistent helper state.
+# needs a fresh staged resource or persistent helper state. The staged dir
+# registers for trap cleanup because it lives outside the per-run temp root.
 zxfer_create_cache_object_stage_dir_in_parent() {
 	l_parent_dir=$1
 	l_prefix=${2:-zxfer-cache-object}
@@ -1068,18 +1113,18 @@ zxfer_create_cache_object_stage_dir_in_parent() {
 		return "$l_status"
 	fi
 
-	l_old_umask=$(umask)
-	umask 077
-	l_stage_status=0
-	l_stage_dir=$(mktemp -d "$l_parent_dir/.$l_prefix.XXXXXX" 2>/dev/null) ||
-		l_stage_status=$?
-	umask "$l_old_umask"
-	[ "$l_stage_status" -eq 0 ] || return "$l_stage_status"
-
+	# Validated parents may still be shared sticky directories, so the staged
+	# name comes from a randomized temp-name template: predictable pid+attempt
+	# slots would let a local process-table reader pre-create every candidate
+	# and deny staging.
+	if ! l_stage_dir=$(zxfer_create_unpredictable_staging_entry "$l_parent_dir/.$l_prefix.XXXXXX" dir); then
+		return 1
+	fi
 	zxfer_register_runtime_artifact_path "$l_stage_dir"
 	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_dirs_created
 	g_zxfer_runtime_artifact_path_result=$l_stage_dir
 	printf '%s\n' "$l_stage_dir"
+	return 0
 }
 
 # Purpose: Create the cache object stage directory for path using the safety
@@ -1330,45 +1375,6 @@ zxfer_write_cache_object_file_atomically() {
 	return 0
 }
 
-# Purpose: Publish the cache object directory from staged state to its live
-# destination.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup after
-# staged validation succeeds and the result is ready to replace the live
-# object.
-zxfer_publish_cache_object_directory() {
-	l_stage_dir=$1
-	l_object_dir=$2
-
-	[ -n "$l_stage_dir" ] || return 1
-	[ -d "$l_stage_dir" ] || return 1
-	[ ! -L "$l_stage_dir" ] || return 1
-	[ ! -h "$l_stage_dir" ] || return 1
-	[ -n "$l_object_dir" ] || return 1
-	[ ! -e "$l_object_dir" ] || return 1
-
-	l_status=0
-	l_parent_dir=$(zxfer_get_path_parent_dir "$l_object_dir") || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	if [ ! -d "$l_parent_dir" ]; then
-		return 1
-	fi
-	l_status=0
-	l_parent_dir=$(zxfer_validate_temp_root_candidate "$l_parent_dir") || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-
-	l_status=0
-	mv "$l_stage_dir" "$l_object_dir" 2>/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	zxfer_unregister_runtime_artifact_path "$l_stage_dir"
-	return 0
-}
-
 # Purpose: Return the operating system in the form expected by later helpers.
 # Usage: Called during runtime bootstrap, staging, and trap cleanup when
 # sibling helpers need the same lookup without duplicating module logic.
@@ -1569,6 +1575,7 @@ zxfer_init_runtime_state_defaults() {
 	zxfer_reset_cleanup_pid_tracking
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
+	g_zxfer_tmpdir_fallback_note=""
 	g_zxfer_temp_file_result=""
 	if command -v zxfer_reset_owned_lock_tracking >/dev/null 2>&1; then
 		zxfer_reset_owned_lock_tracking
@@ -1756,6 +1763,11 @@ zxfer_init_globals() {
 	zxfer_init_transport_remote_defaults
 	zxfer_init_temp_artifacts
 	zxfer_apply_secure_path
+	# Create the per-run temp root eagerly in this shell (after the secure
+	# PATH is live so mktemp resolves through it) so subshell allocators share
+	# one root the already-registered exit trap removes. Failure stays
+	# non-fatal; the first allocation that needs the root reports it.
+	zxfer_ensure_run_tmp_root || :
 }
 
 # Purpose: Run the centralized shutdown path that cleans up runtime artifacts,
@@ -1817,29 +1829,19 @@ zxfer_trap_exit() {
 		zxfer_release_registered_owned_locks || :
 	fi
 
-	zxfer_cleanup_registered_runtime_artifacts
-
-	# Remove temporary files if they exist
-	for l_temp_file in "$g_delete_source_tmp_file" \
-		"$g_delete_dest_tmp_file" \
-		"$g_delete_snapshots_to_delete_tmp_file"; do
-		if [ -f "$l_temp_file" ]; then
-			rm "$l_temp_file"
+	# Every per-run transient lives under the one private temp root; one
+	# rm -rf replaces per-artifact bookkeeping. Registered path-adjacent
+	# staging debris is reaped first because it lives outside the root.
+	l_artifact_cleanup_failed=0
+	zxfer_cleanup_registered_runtime_artifacts || l_artifact_cleanup_failed=1
+	zxfer_remove_run_tmp_root || l_artifact_cleanup_failed=1
+	if [ "$l_artifact_cleanup_failed" -ne 0 ]; then
+		[ "$l_exit_status" -eq 0 ] && l_exit_status=1
+		if [ -z "${g_zxfer_failure_message:-}" ]; then
+			g_zxfer_failure_class=runtime
+			g_zxfer_failure_stage="trap cleanup"
+			g_zxfer_failure_message="Failed to remove one or more runtime temp artifacts during exit."
 		fi
-	done
-	if l_tmpdir=$(zxfer_try_get_effective_tmpdir 2>/dev/null); then
-		for l_temp_file in "$l_tmpdir/${g_zxfer_temp_prefix:-zxfer.unset}".*; do
-			[ -e "$l_temp_file" ] || continue
-			if command -v zxfer_remote_host_cache_cleanup_conflicts_with_path >/dev/null 2>&1 &&
-				zxfer_remote_host_cache_cleanup_conflicts_with_path "$l_temp_file"; then
-				continue
-			fi
-			if command -v zxfer_owned_lock_cleanup_conflicts_with_path >/dev/null 2>&1 &&
-				zxfer_owned_lock_cleanup_conflicts_with_path "$l_temp_file"; then
-				continue
-			fi
-			rm -rf "$l_temp_file"
-		done
 	fi
 	if command -v zxfer_cleanup_remote_host_cache_roots >/dev/null 2>&1; then
 		zxfer_cleanup_remote_host_cache_roots >/dev/null 2>&1 || :
@@ -1860,6 +1862,11 @@ zxfer_trap_exit() {
 	zxfer_echoV "zxfer exiting with status $l_exit_status"
 	zxfer_profile_emit_summary
 	zxfer_emit_failure_report "$l_exit_status"
+
+	# Failure reporting may lazily recreate the run temp root or stage log
+	# files (ZXFER_ERROR_LOG mirroring); sweep again so nothing survives exit.
+	zxfer_cleanup_registered_runtime_artifacts >/dev/null 2>&1 || :
+	zxfer_remove_run_tmp_root >/dev/null 2>&1 || :
 
 	# exit this script
 	exit $l_exit_status

@@ -971,33 +971,25 @@ test_describe_expected_backup_owner_includes_effective_uid_when_non_root() {
 	assertEquals "root (UID 0) or UID 9999" "$result"
 }
 
-test_require_secure_backup_file_rejects_non_0600_permissions() {
+test_check_secure_backup_file_rejects_non_0600_permissions() {
 	tmp_file="$TEST_TMPDIR/insecure_backup"
 	: >"$tmp_file"
 	(
-		zxfer_throw_error() {
-			printf 'ERROR:%s' "$1"
-			exit "${2:-1}"
-		}
 		zxfer_get_path_owner_uid() { printf '%s\n' 0; }
 		zxfer_get_path_mode_octal() { printf '%s\n' 644; }
-		zxfer_require_secure_backup_file "$tmp_file"
+		zxfer_check_secure_backup_file "$tmp_file"
 	) >/dev/null 2>&1
 	status=$?
 	assertEquals "Insecure permissions should trigger an error." 1 "$status"
 }
 
-test_require_secure_backup_file_accepts_secure_metadata() {
+test_check_secure_backup_file_accepts_secure_metadata() {
 	tmp_file="$TEST_TMPDIR/secure_backup"
 	: >"$tmp_file"
 	(
-		zxfer_throw_error() {
-			echo "unexpected"
-			exit "${2:-1}"
-		}
 		zxfer_get_path_owner_uid() { printf '%s\n' 0; }
 		zxfer_get_path_mode_octal() { printf '%s\n' 600; }
-		zxfer_require_secure_backup_file "$tmp_file"
+		zxfer_check_secure_backup_file "$tmp_file"
 	)
 	status=$?
 	assertEquals "Secure metadata should pass validation." 0 "$status"
@@ -6108,6 +6100,62 @@ test_zxfer_try_get_effective_tmpdir_falls_back_to_preferred_default_candidate_wh
 		"$output" "result=$ram_tmp"
 }
 
+test_zxfer_unsafe_tmpdir_fallback_note_is_held_until_option_parsing_emits_it() {
+	# The eager run temp root decides TMPDIR safety in zxfer_init_globals,
+	# BEFORE -V parsing; the advisory must be held and replayed once option
+	# parsing knows the verbosity state instead of being silently dropped.
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	insecure_tmp="$physical_tmpdir/effective_tmp_note_insecure"
+	safe_tmp="$physical_tmpdir/effective_tmp_note_safe"
+	mkdir -p "$insecure_tmp" "$safe_tmp"
+	chmod 0777 "$insecure_tmp"
+	pre_parse_stderr="$TEST_TMPDIR/tmpdir_note_pre_parse.stderr"
+	post_parse_stderr="$TEST_TMPDIR/tmpdir_note_post_parse.stderr"
+	immediate_stderr="$TEST_TMPDIR/tmpdir_note_immediate.stderr"
+	(
+		TMPDIR="$insecure_tmp"
+		g_option_V_very_verbose=0
+		g_zxfer_effective_tmpdir=""
+		g_zxfer_effective_tmpdir_requested=""
+		g_zxfer_tmpdir_fallback_note=""
+		zxfer_list_default_tmpdir_candidates() {
+			printf '%s\n' "$safe_tmp"
+		}
+		zxfer_try_get_effective_tmpdir >/dev/null 2>"$pre_parse_stderr" || exit $?
+		g_option_V_very_verbose=1
+		zxfer_emit_pending_tmpdir_fallback_note 2>"$post_parse_stderr"
+		# A second replay must stay silent: the note is consumed on emission.
+		zxfer_emit_pending_tmpdir_fallback_note 2>>"$post_parse_stderr"
+	)
+	held_status=$?
+	(
+		TMPDIR="$insecure_tmp"
+		g_option_V_very_verbose=1
+		g_zxfer_effective_tmpdir=""
+		g_zxfer_effective_tmpdir_requested=""
+		g_zxfer_tmpdir_fallback_note=""
+		zxfer_list_default_tmpdir_candidates() {
+			printf '%s\n' "$safe_tmp"
+		}
+		zxfer_try_get_effective_tmpdir >/dev/null 2>"$immediate_stderr" || exit $?
+	)
+	immediate_status=$?
+	chmod 0700 "$insecure_tmp"
+
+	assertEquals "The held-advisory fallback path should still resolve the temp root cleanly." \
+		0 "$held_status"
+	assertEquals "No advisory should print while -V state is still unknown." \
+		"" "$(cat "$pre_parse_stderr")"
+	assertEquals "The held advisory should replay exactly once under -V after option parsing." \
+		"Ignoring unsafe TMPDIR $insecure_tmp; using $safe_tmp instead." \
+		"$(cat "$post_parse_stderr")"
+	assertEquals "The immediate-advisory fallback path should still resolve the temp root cleanly." \
+		0 "$immediate_status"
+	assertEquals "The advisory should print at decision time when -V is already live." \
+		"Ignoring unsafe TMPDIR $insecure_tmp; using $safe_tmp instead." \
+		"$(cat "$immediate_stderr")"
+}
+
 test_zxfer_try_get_effective_tmpdir_rejects_non_sticky_world_writable_tmpdir() {
 	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
 	insecure_tmp="$physical_tmpdir/effective_tmp_insecure"
@@ -6231,6 +6279,42 @@ test_zxfer_create_secure_staging_dir_for_path_returns_failure_when_parent_valida
 
 	assertEquals "Secure same-directory staging should fail closed when the parent directory is not a trusted temp-root candidate." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
+}
+
+test_zxfer_create_secure_staging_dir_for_path_uses_unpredictable_mktemp_names() {
+	# Staging parents may be shared sticky directories, so the staged name
+	# must be mktemp-randomized: predictable pid+attempt slots are squat-able
+	# by a local process-table reader.
+	stage_root=$(cd -P "$TEST_TMPDIR" && pwd)/create_secure_staging_random
+	stage_path="$stage_root/backup.meta"
+	mkdir -p "$stage_root"
+
+	zxfer_create_secure_staging_dir_for_path "$stage_path" >/dev/null
+	stage_status=$?
+	stage_dir=$g_zxfer_secure_staging_dir_result
+	zxfer_create_secure_staging_dir_for_path "$stage_path" >/dev/null
+	second_stage_dir=$g_zxfer_secure_staging_dir_result
+
+	case "${stage_dir##*/}" in
+	".zxfer.stage.$$."*)
+		stage_name_randomized=no
+		;;
+	.zxfer.stage.??????)
+		stage_name_randomized=yes
+		;;
+	*)
+		stage_name_randomized=no
+		;;
+	esac
+
+	assertEquals "Secure same-directory staging should succeed under a validated parent." \
+		0 "$stage_status"
+	assertEquals "Secure same-directory staging should use the randomized mktemp template, not pid+attempt slots." \
+		yes "$stage_name_randomized"
+	assertTrue "Secure same-directory staging should create the staged directory." \
+		"[ -d \"$stage_dir\" ]"
+	assertNotEquals "Consecutive staging directories should never reuse a name." \
+		"$stage_dir" "$second_stage_dir"
 }
 
 test_zxfer_try_get_effective_tmpdir_reuses_cached_value_in_current_shell() {

@@ -36,27 +36,42 @@
 ################################################################################
 
 # Module contract:
-# owns globals: owned-lock metadata scratch and run-owned long-lived lock/lease cleanup registrations.
-# reads globals: none directly, but later runtime helpers may call into the registration helpers.
-# mutates caches: metadata-bearing local lock and lease directories.
-# returns via stdout: normalized process-start tokens, metadata paths, and created lock/lease paths.
+# owns globals: owned-lock metadata scratch, the memoized own-process start
+#   token, and run-owned long-lived lock/lease cleanup registrations.
+# reads globals: none directly, but later runtime helpers may call into the
+#   registration helpers.
+# mutates caches: local lock and lease directories.
+# returns via stdout: normalized process-start tokens, metadata paths, and
+#   created lock/lease paths.
+#
+# Lock identity is owner pid + process start token ONLY. Earlier metadata
+# formats (V1: kind/purpose/hostname/created_at fields) parse as corrupt
+# (status 2) and are reaped through the existing corrupt-metadata policy
+# instead of crashing; locks are seconds-lived so no cross-version
+# compatibility is required.
 
-ZXFER_LOCK_METADATA_HEADER="ZXFER_LOCK_METADATA_V1"
+ZXFER_LOCK_METADATA_HEADER="ZXFER_LOCK_METADATA_V2"
 
+# Purpose: Reset the owned-lock metadata scratch results so the next lookup
+# starts from a clean state.
+# Usage: Called before metadata loads and during owned-lock tracking resets.
 zxfer_reset_owned_lock_metadata_result() {
-	g_zxfer_owned_lock_kind_result=""
-	g_zxfer_owned_lock_purpose_result=""
 	g_zxfer_owned_lock_pid_result=""
 	g_zxfer_owned_lock_start_token_result=""
-	g_zxfer_owned_lock_hostname_result=""
-	g_zxfer_owned_lock_created_at_result=""
 }
 
+# Purpose: Reset the owned-lock tracking state so the next runtime pass starts
+# from a clean state.
+# Usage: Called during runtime bootstrap before this module reuses mutable
+# scratch globals or cached decisions.
 zxfer_reset_owned_lock_tracking() {
 	g_zxfer_owned_lock_cleanup_paths=""
+	g_zxfer_own_process_start_token=""
 	zxfer_reset_owned_lock_metadata_result
 }
 
+# Purpose: Register the long-lived owned lock or lease path for trap cleanup.
+# Usage: Called after acquiring a lock/lease that must not outlive this run.
 zxfer_register_owned_lock_path() {
 	l_lock_path=$1
 
@@ -77,6 +92,8 @@ EOF
 	fi
 }
 
+# Purpose: Remove the owned lock or lease path from the trap-cleanup tracking.
+# Usage: Called after a registered lock/lease has been released.
 zxfer_unregister_owned_lock_path() {
 	l_lock_path=$1
 	l_remaining_paths=""
@@ -99,6 +116,9 @@ EOF
 	g_zxfer_owned_lock_cleanup_paths=$l_remaining_paths
 }
 
+# Purpose: Normalize one registered lock path to its physical parent spelling
+# so overlap checks compare like with like.
+# Usage: Called by zxfer_owned_lock_cleanup_conflicts_with_path.
 zxfer_normalize_owned_lock_cleanup_path() {
 	l_lock_path=$1
 
@@ -129,6 +149,10 @@ zxfer_normalize_owned_lock_cleanup_path() {
 	printf '%s/%s\n' "$l_physical_parent" "$l_lock_name"
 }
 
+# Purpose: Check whether one cleanup candidate path overlaps a registered
+# owned lock or lease path that must be preserved for checked release.
+# Usage: Called by the remote-host cache-root teardown before it removes a
+# cache directory tree.
 zxfer_owned_lock_cleanup_conflicts_with_path() {
 	l_cleanup_path=$1
 
@@ -159,6 +183,9 @@ EOF
 	return 1
 }
 
+# Purpose: Warn the operator when a registered owned lock cannot be released
+# during cleanup.
+# Usage: Called from zxfer_release_registered_owned_locks failure handling.
 zxfer_warn_owned_lock_cleanup_failure() {
 	l_lock_path=$1
 	l_status=$2
@@ -170,6 +197,9 @@ zxfer_warn_owned_lock_cleanup_failure() {
 	fi
 }
 
+# Purpose: Release every still-registered owned lock or lease during shutdown.
+# Usage: Called from zxfer_trap_exit; failures warn and keep the path
+# registered for later inspection instead of failing the run.
 zxfer_release_registered_owned_locks() {
 	l_remaining_paths=""
 	l_cleanup_status=0
@@ -197,99 +227,38 @@ EOF
 	return "$l_cleanup_status"
 }
 
+# Purpose: Return the metadata file path inside one owned lock directory.
+# Usage: Called by the metadata read/write helpers and layout probes.
 zxfer_get_owned_lock_metadata_path() {
 	l_lock_dir=$1
 	printf '%s/metadata\n' "$l_lock_dir"
 }
 
-zxfer_validate_owned_lock_kind() {
-	case "$1" in
-	lock | lease)
-		return 0
-		;;
-	esac
-
-	return 1
-}
-
-zxfer_validate_owned_lock_text_field() {
-	l_field_value=$1
-	l_tab=$(printf '\t')
-	l_lf='
-'
-
-	case "$l_field_value" in
-	'' | *"$l_tab"* | *"$l_lf"*)
-		return 1
-		;;
-	esac
-
-	return 0
-}
-
+# Purpose: Normalize one free-form text field to a single-line, single-spaced
+# value using field splitting only (no tr/sed spawns).
+# Usage: Called by callers that embed operator-facing labels in messages;
+# returns non-zero when the field normalizes to empty.
 zxfer_normalize_owned_lock_text_field() {
 	l_field_value=$1
 
-	l_normalized_value=$(printf '%s\n' "$l_field_value" |
-		tr '\t' ' ' | tr -s ' ' | sed 's/^ *//; s/ *$//')
-	if ! zxfer_validate_owned_lock_text_field "$l_normalized_value"; then
-		return 1
-	fi
+	# Field splitting collapses every whitespace run (spaces, tabs, newlines)
+	# and trims the ends; set -f keeps glob characters literal.
+	set -f
+	# shellcheck disable=SC2086
+	set -- $l_field_value
+	set +f
+	l_normalized_value=$*
+	[ -n "$l_normalized_value" ] || return 1
 
 	printf '%s\n' "$l_normalized_value"
 }
 
-zxfer_get_owned_lock_hostname() {
-	l_hostname=$(uname -n 2>/dev/null || hostname 2>/dev/null || printf '%s\n' unknown)
-	if ! l_hostname=$(zxfer_normalize_owned_lock_text_field "$l_hostname"); then
-		return 1
-	fi
-	printf '%s\n' "$l_hostname"
-}
-
-zxfer_get_owned_lock_created_at() {
-	l_created_at=$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || :)
-	if ! zxfer_validate_owned_lock_text_field "$l_created_at"; then
-		return 1
-	fi
-	printf '%s\n' "$l_created_at"
-}
-
-zxfer_get_process_start_token_from_procfs() {
-	l_pid=$1
-
-	case "$l_pid" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-	[ -r "/proc/$l_pid/stat" ] || return 1
-	l_proc_stat=$(cat "/proc/$l_pid/stat" 2>/dev/null || :)
-	[ -n "$l_proc_stat" ] || return 1
-	l_proc_rest=$(printf '%s\n' "$l_proc_stat" | sed 's/^[0-9][0-9]* (.*) //')
-	[ "$l_proc_rest" != "$l_proc_stat" ] || return 1
-	l_proc_start=$(printf '%s\n' "$l_proc_rest" | awk '{ print $20 }')
-	case "$l_proc_start" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-
-	l_boot_identity=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || :)
-	if ! l_boot_identity=$(zxfer_normalize_owned_lock_text_field "$l_boot_identity"); then
-		l_boot_identity=$(LC_ALL=C awk '/^btime / { print $2; exit }' /proc/stat 2>/dev/null || :)
-		if ! l_boot_identity=$(zxfer_normalize_owned_lock_text_field "$l_boot_identity"); then
-			l_boot_identity=unknown
-		fi
-	fi
-
-	printf 'procfs:%s:%s\n' "$l_boot_identity" "$l_proc_start"
-}
-
-#
-# Prefer `lstart`, then shorter `start` / `stime` fallbacks for supported
-# platforms that do not expose the long-form start time selector.
-#
+# Purpose: Return a stable start-of-process token for one PID so pid reuse can
+# be told apart from the original lock owner.
+# Usage: Called when writing lock metadata and when checking owner liveness.
+# One ps call covers the supported platforms; stime is the fallback selector
+# for ps implementations without the long-form lstart column, and the selector
+# name is embedded so tokens from different selectors never compare equal.
 zxfer_get_process_start_token() {
 	l_pid=$1
 
@@ -299,24 +268,49 @@ zxfer_get_process_start_token() {
 		;;
 	esac
 
-	for l_field in lstart start stime; do
-		l_raw_token=$(LC_ALL=C ps -p "$l_pid" -o "$l_field=" 2>/dev/null || :)
-		[ -n "$l_raw_token" ] || continue
-		if ! l_normalized_token=$(zxfer_normalize_owned_lock_text_field "$l_raw_token"); then
-			continue
-		fi
-		printf '%s:%s\n' "$l_field" "$l_normalized_token"
-		return 0
-	done
+	# Normalize whitespace in pure shell: field-split and rejoin with single
+	# spaces (set -f keeps glob characters in ps output literal).
+	l_token_field=lstart
+	l_raw_token=$(LC_ALL=C ps -p "$l_pid" -o lstart= 2>/dev/null || :)
+	set -f
+	# shellcheck disable=SC2086
+	set -- $l_raw_token
+	set +f
+	if [ "$#" -eq 0 ]; then
+		l_token_field=stime
+		l_raw_token=$(LC_ALL=C ps -p "$l_pid" -o stime= 2>/dev/null || :)
+		set -f
+		# shellcheck disable=SC2086
+		set -- $l_raw_token
+		set +f
+	fi
+	[ "$#" -gt 0 ] || return 1
+	printf '%s:%s\n' "$l_token_field" "$*"
+}
 
-	if l_procfs_token=$(zxfer_get_process_start_token_from_procfs "$l_pid"); then
-		printf '%s\n' "$l_procfs_token"
+# Purpose: Return the memoized start token of the current process, capturing
+# it with one ps call on first need.
+# Usage: Called when creating lock metadata and checking lock ownership so
+# repeated lock operations never re-spawn ps for the same answer.
+# Side effects: Publishes the token in $g_zxfer_own_process_start_token; module
+# call sites read that global after a plain (non-command-substitution) call so
+# the memo actually persists in the calling shell.
+zxfer_get_own_process_start_token() {
+	if [ -n "${g_zxfer_own_process_start_token:-}" ]; then
+		printf '%s\n' "$g_zxfer_own_process_start_token"
 		return 0
 	fi
 
-	return 1
+	if ! l_own_start_token=$(zxfer_get_process_start_token "$$"); then
+		return 1
+	fi
+	g_zxfer_own_process_start_token=$l_own_start_token
+	printf '%s\n' "$l_own_start_token"
 }
 
+# Purpose: Validate that one lock/lease container directory is a private,
+# owner-held, mode-0700 real directory before trusting anything inside it.
+# Usage: Called before lock metadata is read or written.
 zxfer_validate_owned_lock_container_dir() {
 	l_dir_path=$1
 
@@ -336,6 +330,9 @@ zxfer_validate_owned_lock_container_dir() {
 	[ "$l_mode" = "700" ] || return 1
 }
 
+# Purpose: Validate that one lock metadata file is a private, owner-held,
+# mode-0600 regular file before parsing it.
+# Usage: Called by zxfer_load_owned_lock_metadata_from_dir.
 zxfer_validate_owned_lock_metadata_file() {
 	l_metadata_path=$1
 
@@ -355,58 +352,47 @@ zxfer_validate_owned_lock_metadata_file() {
 	[ "$l_mode" = "600" ] || return 1
 }
 
+# Purpose: Write the owner pid + start-token metadata file into a lock
+# directory this process just created.
+# Usage: Called by the lock-dir creation helpers after mkdir succeeds.
 zxfer_write_owned_lock_metadata_file() {
 	l_lock_dir=$1
-	l_kind=$2
-	l_purpose=$3
 	l_metadata_path=$(zxfer_get_owned_lock_metadata_path "$l_lock_dir")
+	l_stage_metadata_path="$l_lock_dir/.metadata.stage"
 
-	if ! zxfer_validate_owned_lock_kind "$l_kind"; then
+	# Plain call (no command substitution) so the first ps capture memoizes in
+	# this shell instead of a throwaway subshell.
+	if ! zxfer_get_own_process_start_token >/dev/null; then
 		return 1
 	fi
-	if ! l_purpose=$(zxfer_normalize_owned_lock_text_field "$l_purpose"); then
-		return 1
-	fi
-	if ! l_start_token=$(zxfer_get_process_start_token "$$"); then
-		return 1
-	fi
-	if ! l_hostname=$(zxfer_get_owned_lock_hostname); then
-		return 1
-	fi
-	if ! l_created_at=$(zxfer_get_owned_lock_created_at); then
-		return 1
-	fi
-	if ! l_tmp_metadata_path=$(mktemp "$l_lock_dir/.metadata.XXXXXX" 2>/dev/null); then
-		return 1
-	fi
-	if ! touch "$l_tmp_metadata_path" 2>/dev/null; then
-		rm -f "$l_tmp_metadata_path" 2>/dev/null || :
-		return 1
-	fi
+	l_start_token=$g_zxfer_own_process_start_token
 
-	# Write through a child shell so open-time redirection failures on the staged
-	# file return a normal nonzero status instead of leaking past the parent.
-	if ! /bin/sh -c 'cat >"$1"' sh "$l_tmp_metadata_path" 2>/dev/null <<EOF; then
-$ZXFER_LOCK_METADATA_HEADER
-kind	$l_kind
-purpose	$l_purpose
-pid	$$
-start_token	$l_start_token
-hostname	$l_hostname
-created_at	$l_created_at
-EOF
-		rm -f "$l_tmp_metadata_path" 2>/dev/null || :
+	# Stage with a fixed name (this process exclusively owns the just-created
+	# 0700 lock dir) and publish with one atomic rename so readers only ever
+	# see missing or complete metadata, never a partial file. The subshell
+	# keeps redirection-open failures as a plain nonzero status.
+	if ! (
+		umask 077
+		printf '%s\npid\t%s\nstart_token\t%s\n' \
+			"$ZXFER_LOCK_METADATA_HEADER" "$$" "$l_start_token" \
+			>"$l_stage_metadata_path"
+	) 2>/dev/null; then
+		rm -f "$l_stage_metadata_path" 2>/dev/null || :
 		return 1
 	fi
-	chmod 600 "$l_tmp_metadata_path" 2>/dev/null || :
-	if ! mv -f "$l_tmp_metadata_path" "$l_metadata_path" 2>/dev/null; then
-		rm -f "$l_tmp_metadata_path" 2>/dev/null || :
+	chmod 600 "$l_stage_metadata_path" 2>/dev/null || :
+	if ! mv -f "$l_stage_metadata_path" "$l_metadata_path" 2>/dev/null; then
+		rm -f "$l_stage_metadata_path" 2>/dev/null || :
 		return 1
 	fi
 	chmod 600 "$l_metadata_path" 2>/dev/null || :
 	return 0
 }
 
+# Purpose: Parse one pid + start-token lock metadata file into the module
+# scratch results.
+# Usage: Called by zxfer_load_owned_lock_metadata_from_dir; any deviation from
+# the exact three-line format fails so the caller treats the file as corrupt.
 zxfer_parse_owned_lock_metadata_file() {
 	l_metadata_path=$1
 	l_tab=$(printf '\t')
@@ -420,56 +406,37 @@ zxfer_parse_owned_lock_metadata_file() {
 		1)
 			[ "$l_line" = "$ZXFER_LOCK_METADATA_HEADER" ] || return 1
 			;;
-		2 | 3 | 4 | 5 | 6 | 7)
+		2)
 			case "$l_line" in
-			*"$l_tab"*)
-				l_key=${l_line%%"$l_tab"*}
-				l_value=${l_line#*"$l_tab"}
-				[ "$l_value" != "$l_line" ] || return 1
+			"pid$l_tab"*)
+				l_value=${l_line#"pid$l_tab"}
 				;;
 			*)
 				return 1
 				;;
 			esac
 			case "$l_value" in
-			*"$l_tab"*)
+			'' | *[!0-9]*)
 				return 1
 				;;
 			esac
-
-			case "$l_line_number:$l_key" in
-			2:kind)
-				zxfer_validate_owned_lock_kind "$l_value" || return 1
-				g_zxfer_owned_lock_kind_result=$l_value
-				;;
-			3:purpose)
-				zxfer_validate_owned_lock_text_field "$l_value" || return 1
-				g_zxfer_owned_lock_purpose_result=$l_value
-				;;
-			4:pid)
-				case "$l_value" in
-				'' | *[!0-9]*)
-					return 1
-					;;
-				esac
-				g_zxfer_owned_lock_pid_result=$l_value
-				;;
-			5:start_token)
-				zxfer_validate_owned_lock_text_field "$l_value" || return 1
-				g_zxfer_owned_lock_start_token_result=$l_value
-				;;
-			6:hostname)
-				zxfer_validate_owned_lock_text_field "$l_value" || return 1
-				g_zxfer_owned_lock_hostname_result=$l_value
-				;;
-			7:created_at)
-				zxfer_validate_owned_lock_text_field "$l_value" || return 1
-				g_zxfer_owned_lock_created_at_result=$l_value
+			g_zxfer_owned_lock_pid_result=$l_value
+			;;
+		3)
+			case "$l_line" in
+			"start_token$l_tab"*)
+				l_value=${l_line#"start_token$l_tab"}
 				;;
 			*)
 				return 1
 				;;
 			esac
+			case "$l_value" in
+			'' | *"$l_tab"*)
+				return 1
+				;;
+			esac
+			g_zxfer_owned_lock_start_token_result=$l_value
 			;;
 		*)
 			return 1
@@ -477,22 +444,18 @@ zxfer_parse_owned_lock_metadata_file() {
 		esac
 	done <"$l_metadata_path"
 
-	[ "$l_line_number" -eq 7 ] || return 1
-	[ -n "$g_zxfer_owned_lock_kind_result" ] || return 1
-	[ -n "$g_zxfer_owned_lock_purpose_result" ] || return 1
+	[ "$l_line_number" -eq 3 ] || return 1
 	[ -n "$g_zxfer_owned_lock_pid_result" ] || return 1
 	[ -n "$g_zxfer_owned_lock_start_token_result" ] || return 1
-	[ -n "$g_zxfer_owned_lock_hostname_result" ] || return 1
-	[ -n "$g_zxfer_owned_lock_created_at_result" ] || return 1
 	return 0
 }
 
-#
+# Purpose: Load and validate the owner metadata of one lock directory.
+# Usage: Called before liveness, ownership, and reap decisions.
 # Return codes:
 # 0 = secure directory plus valid metadata loaded
 # 1 = hard validation failure
-# 2 = corrupt or missing metadata
-#
+# 2 = corrupt or missing metadata (including pre-V2 metadata formats)
 zxfer_load_owned_lock_metadata_from_dir() {
 	l_lock_dir=$1
 	l_metadata_path=$(zxfer_get_owned_lock_metadata_path "$l_lock_dir")
@@ -514,43 +477,26 @@ zxfer_load_owned_lock_metadata_from_dir() {
 	return 0
 }
 
+# Purpose: Compatibility wrapper retained for consumers that still pass
+# kind/purpose labels; lock identity is owner pid + start token only, so the
+# labels are accepted and ignored.
+# Usage: zxfer_load_owned_lock_metadata_for_kind_and_purpose <dir> [kind] [purpose]
+# Returns: the zxfer_load_owned_lock_metadata_from_dir status codes.
 zxfer_load_owned_lock_metadata_for_kind_and_purpose() {
-	l_lock_dir=$1
-	l_kind=$2
-	l_purpose=$3
-
-	if ! l_purpose=$(zxfer_normalize_owned_lock_text_field "$l_purpose"); then
-		return 1
-	fi
-	zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir"
-	l_load_status=$?
-	case "$l_load_status" in
-	0)
-		[ "$g_zxfer_owned_lock_kind_result" = "$l_kind" ] || return 2
-		[ "$g_zxfer_owned_lock_purpose_result" = "$l_purpose" ] || return 2
-		return 0
-		;;
-	esac
-	return "$l_load_status"
+	zxfer_load_owned_lock_metadata_from_dir "$1"
 }
 
-#
+# Purpose: Decide whether the recorded lock owner is still the same live
+# process (pid alive AND start token unchanged).
+# Usage: Called before stale locks are reaped.
 # Return codes:
 # 0 = owner is still live
 # 1 = owner is stale
 # 2 = owner liveness could not be determined safely
-#
 zxfer_owned_lock_owner_is_live() {
 	l_pid=$1
 	l_start_token=$2
-	l_hostname=$3
 
-	if ! l_current_hostname=$(zxfer_get_owned_lock_hostname); then
-		return 2
-	fi
-	if [ "$l_hostname" != "$l_current_hostname" ]; then
-		return 1
-	fi
 	if ! kill -s 0 "$l_pid" 2>/dev/null; then
 		return 1
 	fi
@@ -563,6 +509,9 @@ zxfer_owned_lock_owner_is_live() {
 	return 1
 }
 
+# Purpose: Remove one owned lock directory after the caller has proven it is
+# safe to delete (owned, stale, or corrupt per policy).
+# Usage: Called from release and reap flows; symlinked paths fail closed.
 zxfer_cleanup_owned_lock_dir() {
 	l_lock_dir=$1
 
@@ -580,32 +529,23 @@ zxfer_cleanup_owned_lock_dir() {
 	return 1
 }
 
+# Purpose: Acquire one lock by creating the exact directory path with owner
+# pid + start-token metadata; mkdir is the atomic acquisition step.
+# Usage: zxfer_create_owned_lock_dir <dir> [kind] [purpose] -- the trailing
+# labels are accepted for caller compatibility and ignored.
 zxfer_create_owned_lock_dir() {
 	l_lock_dir=$1
-	l_kind=$2
-	l_purpose=$3
-	l_old_umask=$(umask)
 
 	[ -n "$l_lock_dir" ] || return 1
-	if ! zxfer_validate_owned_lock_kind "$l_kind"; then
+	if ! mkdir -m 700 "$l_lock_dir" 2>/dev/null; then
 		return 1
 	fi
-	if ! l_purpose=$(zxfer_normalize_owned_lock_text_field "$l_purpose"); then
-		return 1
-	fi
-
-	umask 077
-	if ! mkdir "$l_lock_dir" 2>/dev/null; then
-		umask "$l_old_umask"
-		return 1
-	fi
-	umask "$l_old_umask"
 
 	if ! zxfer_validate_owned_lock_container_dir "$l_lock_dir"; then
 		zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
 		return 1
 	fi
-	if ! zxfer_write_owned_lock_metadata_file "$l_lock_dir" "$l_kind" "$l_purpose"; then
+	if ! zxfer_write_owned_lock_metadata_file "$l_lock_dir"; then
 		zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
 		return 1
 	fi
@@ -614,57 +554,67 @@ zxfer_create_owned_lock_dir() {
 	return 0
 }
 
+# Purpose: Acquire one uniquely named lease under a validated private parent
+# directory with owner pid + start-token metadata.
+# Usage: zxfer_create_owned_lock_dir_in_parent <parent> <prefix> [kind]
+# [purpose] -- the trailing labels are accepted for caller compatibility and
+# ignored. The entry name embeds this PID, so live sibling processes can never
+# collide; a taken attempt is either an earlier live lease of this process or
+# debris from a dead PID reuse, so creation steps to the next slot.
 zxfer_create_owned_lock_dir_in_parent() {
 	l_parent_dir=$1
 	l_prefix=$2
-	l_kind=$3
-	l_purpose=$4
 
 	[ -n "$l_prefix" ] || return 1
 	if ! zxfer_validate_owned_lock_container_dir "$l_parent_dir"; then
 		return 1
 	fi
-	if ! l_lock_dir=$(mktemp -d "$l_parent_dir/$l_prefix.XXXXXX" 2>/dev/null); then
-		return 1
-	fi
-	if ! zxfer_validate_owned_lock_container_dir "$l_lock_dir"; then
-		zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
-		return 1
-	fi
-	if ! zxfer_write_owned_lock_metadata_file "$l_lock_dir" "$l_kind" "$l_purpose"; then
-		zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
-		return 1
-	fi
 
-	printf '%s\n' "$l_lock_dir"
-	return 0
+	l_attempt=0
+	while [ "$l_attempt" -lt 8 ]; do
+		l_attempt=$((l_attempt + 1))
+		l_lock_dir="$l_parent_dir/$l_prefix.$$.$l_attempt"
+		if ! mkdir -m 700 "$l_lock_dir" 2>/dev/null; then
+			if [ -e "$l_lock_dir" ] || [ -L "$l_lock_dir" ]; then
+				continue
+			fi
+			return 1
+		fi
+		if ! zxfer_validate_owned_lock_container_dir "$l_lock_dir"; then
+			zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
+			return 1
+		fi
+		if ! zxfer_write_owned_lock_metadata_file "$l_lock_dir"; then
+			zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
+			return 1
+		fi
+		printf '%s\n' "$l_lock_dir"
+		return 0
+	done
+
+	return 1
 }
 
-#
+# Purpose: Reap one lock directory when its owner is provably stale, or when
+# its metadata is corrupt/missing and the caller policy allows corrupt reaps.
+# Usage: zxfer_try_reap_stale_owned_lock_dir <dir> [allow-corrupt] [kind]
+# [purpose] -- the trailing labels are accepted for caller compatibility and
+# ignored.
 # Return codes:
 # 0 = stale or corrupt entry was reaped
 # 1 = hard failure
 # 2 = entry is still busy or not yet reapable under the caller policy
-#
 zxfer_try_reap_stale_owned_lock_dir() {
 	l_lock_dir=$1
 	l_allow_corrupt_reap=${2:-0}
-	l_kind=${3:-}
-	l_purpose=${4:-}
 
-	if [ -n "$l_kind" ] || [ -n "$l_purpose" ]; then
-		zxfer_load_owned_lock_metadata_for_kind_and_purpose \
-			"$l_lock_dir" "$l_kind" "$l_purpose"
-	else
-		zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir"
-	fi
+	zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir"
 	l_load_status=$?
 	case "$l_load_status" in
 	0)
 		zxfer_owned_lock_owner_is_live \
 			"$g_zxfer_owned_lock_pid_result" \
-			"$g_zxfer_owned_lock_start_token_result" \
-			"$g_zxfer_owned_lock_hostname_result"
+			"$g_zxfer_owned_lock_start_token_result"
 		l_live_status=$?
 		if [ "$l_live_status" -eq 0 ]; then
 			return 2
@@ -697,42 +647,37 @@ zxfer_try_reap_stale_owned_lock_dir() {
 	return 0
 }
 
+# Purpose: Check whether the current process is the recorded owner of one lock
+# directory (pid match AND start-token match).
+# Usage: Called by the checked release path so only the owner ever releases.
 zxfer_current_process_owns_owned_lock_dir() {
 	l_lock_dir=$1
-	l_kind=${2:-}
-	l_purpose=${3:-}
 
-	if [ -n "$l_kind" ] || [ -n "$l_purpose" ]; then
-		if ! zxfer_load_owned_lock_metadata_for_kind_and_purpose \
-			"$l_lock_dir" "$l_kind" "$l_purpose"; then
-			return 1
-		fi
-	elif ! zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir"; then
+	if ! zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir"; then
 		return 1
 	fi
 	[ "$g_zxfer_owned_lock_pid_result" = "$$" ] || return 1
-	if ! l_current_hostname=$(zxfer_get_owned_lock_hostname); then
+	# Plain call (no command substitution) so the first ps capture memoizes in
+	# this shell instead of a throwaway subshell.
+	if ! zxfer_get_own_process_start_token >/dev/null; then
 		return 1
 	fi
-	[ "$g_zxfer_owned_lock_hostname_result" = "$l_current_hostname" ] || return 1
-	if ! l_current_start_token=$(zxfer_get_process_start_token "$$"); then
-		return 1
-	fi
-	[ "$g_zxfer_owned_lock_start_token_result" = "$l_current_start_token" ]
+	[ "$g_zxfer_owned_lock_start_token_result" = "$g_zxfer_own_process_start_token" ]
 }
 
+# Purpose: Release one owned lock directory with a checked owner match so this
+# process never deletes a lock held by a live sibling.
+# Usage: zxfer_release_owned_lock_dir <dir> [kind] [purpose] -- the trailing
+# labels are accepted for caller compatibility and ignored.
 zxfer_release_owned_lock_dir() {
 	l_lock_dir=$1
-	l_kind=${2:-}
-	l_purpose=${3:-}
 
 	[ -n "$l_lock_dir" ] || return 0
 	if [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; then
 		zxfer_unregister_owned_lock_path "$l_lock_dir"
 		return 0
 	fi
-	if ! zxfer_current_process_owns_owned_lock_dir \
-		"$l_lock_dir" "$l_kind" "$l_purpose"; then
+	if ! zxfer_current_process_owns_owned_lock_dir "$l_lock_dir"; then
 		return 1
 	fi
 	if ! zxfer_cleanup_owned_lock_dir "$l_lock_dir"; then

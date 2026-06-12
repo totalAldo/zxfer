@@ -4038,9 +4038,6 @@ test_zxfer_progress_passthrough_falls_back_when_mkfifo_fails() {
 			zxfer_echoV() {
 				printf '%s\n' "$1" >>"$log"
 			}
-			mktemp() {
-				printf '%s\n' "$TEST_TMPDIR/progress_fifo"
-			}
 			mkfifo() {
 				return 1
 			}
@@ -4062,11 +4059,8 @@ test_zxfer_progress_passthrough_falls_back_when_chmod_fails() {
 			zxfer_echoV() {
 				printf '%s\n' "$1" >>"$log"
 			}
-			mktemp() {
-				printf '%s\n' "$TEST_TMPDIR/progress_fifo"
-			}
 			mkfifo() {
-				: >"$TEST_TMPDIR/progress_fifo"
+				: >"$1"
 			}
 			chmod() {
 				return 1

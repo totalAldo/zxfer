@@ -939,6 +939,7 @@ zxfer_get_error_log_fallback_lock_dir() {
 zxfer_acquire_error_log_lock() {
 	l_lock_dir_path=$1
 	l_lock_attempts=0
+	l_corrupt_metadata_sightings=0
 
 	while ! zxfer_create_owned_lock_dir \
 		"$l_lock_dir_path" lock "error-log-lock" >/dev/null; do
@@ -946,8 +947,22 @@ zxfer_acquire_error_log_lock() {
 			return 1
 		fi
 		if [ -d "$l_lock_dir_path" ]; then
+			# Missing or corrupt metadata can be a live winner inside its
+			# mkdir-to-metadata publish window, so the first sighting is
+			# treated as busy; the corrupt reap is allowed only when a
+			# sleep-and-recheck round still reports corrupt metadata. The
+			# stale-owner reap policy itself is unchanged.
+			l_allow_corrupt_reap=0
+			zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir_path"
+			l_lock_metadata_status=$?
+			if [ "$l_lock_metadata_status" -eq 2 ]; then
+				l_corrupt_metadata_sightings=$((l_corrupt_metadata_sightings + 1))
+				if [ "$l_corrupt_metadata_sightings" -ge 2 ]; then
+					l_allow_corrupt_reap=1
+				fi
+			fi
 			zxfer_try_reap_stale_owned_lock_dir \
-				"$l_lock_dir_path" 1 lock "error-log-lock" >/dev/null
+				"$l_lock_dir_path" "$l_allow_corrupt_reap" lock "error-log-lock" >/dev/null
 			l_reap_status=$?
 			if [ "$l_reap_status" -eq 0 ]; then
 				continue
@@ -962,6 +977,7 @@ zxfer_acquire_error_log_lock() {
 		fi
 		sleep 1
 	done
+	return 0
 }
 
 # Purpose: Release the error log lock after the protected work finishes.
@@ -1138,6 +1154,13 @@ zxfer_append_failure_report_to_log() {
 	if ! zxfer_acquire_error_log_lock "$l_lock_dir"; then
 		zxfer_warn_stderr "zxfer: warning: unable to acquire ZXFER_ERROR_LOG lock for \"$l_log_path\"."
 		return 1
+	fi
+
+	# A concurrent holder may have created the log while this run waited on
+	# the lock; recheck existence under the lock so the create path cannot
+	# clobber a freshly published log with an empty staged file.
+	if [ "$l_log_exists" -eq 0 ] && [ -e "$l_log_path" ]; then
+		l_log_exists=1
 	fi
 
 	if [ "$l_log_exists" -eq 1 ]; then

@@ -15,12 +15,19 @@ lines	src/zxfer_backup_metadata.sh	2573
 # descendant reaper must list every process, not just same-terminal ones);
 # the runner-module deletion pays for it many times over in the TOTAL row.
 lines	src/zxfer_cleanup_child_wrapper.sh	113
-lines	src/zxfer_cli.sh	258
+# zxfer_cli.sh, zxfer_locking.sh, zxfer_path_security.sh, zxfer_reporting.sh,
+# and zxfer_runtime.sh rose slightly when the Phase 6 adversarial review
+# landed safety fixes: the deferred corrupt-metadata reap recheck in error-log
+# lock acquisition, the held unsafe-TMPDIR fallback advisory replayed after
+# option parsing, main-shell start-token memoization comments, and the
+# randomized staging-name helper for shared sticky parents. The TOTAL row
+# still sits ~1,200 lines below the pre-Phase 6 baseline.
+lines	src/zxfer_cli.sh	261
 lines	src/zxfer_dependencies.sh	360
 lines	src/zxfer_exec.sh	1205
-lines	src/zxfer_locking.sh	743
+lines	src/zxfer_locking.sh	688
 lines	src/zxfer_modules.sh	100
-lines	src/zxfer_path_security.sh	499
+lines	src/zxfer_path_security.sh	502
 # zxfer_property_reconcile.sh absorbed the ~1.4k-line zxfer_property_cache.sh
 # survivors (serialize/decode, prefetch, in-memory property tables) when the
 # per-dataset file cache was deleted; the TOTAL row still ratchets down.
@@ -33,28 +40,33 @@ lines	src/zxfer_remote_hosts.sh	3869
 # bump with its comment); the rise is paid for by deleting dead discovery
 # refine/diff helpers, so the TOTAL row still ratchets down.
 lines	src/zxfer_replication.sh	1686
-lines	src/zxfer_reporting.sh	1378
-lines	src/zxfer_runtime.sh	2063
+lines	src/zxfer_reporting.sh	1401
+lines	src/zxfer_runtime.sh	2072
 lines	src/zxfer_send_receive.sh	1853
 lines	src/zxfer_snapshot_discovery.sh	3381
 lines	src/zxfer_snapshot_reconcile.sh	882
 lines	src/zxfer_snapshot_state.sh	796
 lines	zxfer	211
-lines	TOTAL	26394
+lines	TOTAL	26377
 functions	src/zxfer_background_jobs.sh	15
 functions	src/zxfer_backup_metadata.sh	87
 functions	src/zxfer_cleanup_child_wrapper.sh	4
 functions	src/zxfer_cli.sh	3
 functions	src/zxfer_dependencies.sh	12
 functions	src/zxfer_exec.sh	39
-functions	src/zxfer_locking.sh	29
+functions	src/zxfer_locking.sh	25
 functions	src/zxfer_modules.sh	1
-functions	src/zxfer_path_security.sh	14
+# zxfer_path_security.sh gained the shared randomized staging-name helper
+# (zxfer_create_unpredictable_staging_entry) and zxfer_runtime.sh gained the
+# held unsafe-TMPDIR advisory emitter; both are adversarial-review safety
+# fixes for Phase 6 and the functions TOTAL still ratchets down against the
+# pre-Phase 6 baseline.
+functions	src/zxfer_path_security.sh	15
 functions	src/zxfer_property_reconcile.sh	84
 functions	src/zxfer_remote_hosts.sh	126
 functions	src/zxfer_replication.sh	57
 functions	src/zxfer_reporting.sh	54
-functions	src/zxfer_runtime.sh	67
+functions	src/zxfer_runtime.sh	68
 functions	src/zxfer_send_receive.sh	50
 functions	src/zxfer_snapshot_discovery.sh	59
 functions	src/zxfer_snapshot_reconcile.sh	19
@@ -63,9 +75,16 @@ functions	src/zxfer_snapshot_reconcile.sh	19
 # ratchets down against the pre-Phase 4 baseline.
 functions	src/zxfer_snapshot_state.sh	31
 functions	zxfer	5
-functions	TOTAL	756
+functions	TOTAL	754
 callers	zxfer_profile_now_ms	15	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	27
 callers	eval 	11
-callers	$(date	22
-callers	mktemp	25
+callers	$(date	20
+# mktemp callers after Phase 6 are the single per-run temp-root allocation in
+# zxfer_runtime.sh, the shared randomized staging-name helper in
+# zxfer_path_security.sh (path-adjacent staging parents can be shared sticky
+# directories where predictable pid+attempt slots are squat-able), plus
+# backup_metadata's path-adjacent staging (its module owns same-directory
+# atomic rename and stays untouched) and remote-side helper scripts that run
+# mktemp on the remote host.
+callers	mktemp	21

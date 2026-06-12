@@ -137,8 +137,9 @@ The project priority order still applies:
   `zxfer_create_runtime_artifact_dir`,
   `zxfer_write_runtime_artifact_file`,
   `zxfer_read_runtime_artifact_file`,
-  `zxfer_write_runtime_cache_file_atomically`,
   `zxfer_cleanup_runtime_artifact_path`.
+  They allocate under the one per-run 0700 temp root that trap exit removes
+  with a single `rm -rf`.
 - Do not add new ad hoc runtime-temp-root `mktemp` calls, hard-coded `/tmp`
   scratch paths, raw `: >"$file"` truncation, unchecked `cat "$file"`
   readbacks, or unguarded `while ... done <"$file"` loops for staged payloads,

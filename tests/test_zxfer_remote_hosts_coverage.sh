@@ -106,14 +106,12 @@ setUp() {
 	create_fake_ssh_bin
 }
 
+# Lock metadata is owner pid + start token only (V2); the legacy kind/purpose
+# arguments are accepted so existing call sites stay unchanged and ignored.
 write_owned_lock_metadata_fixture() {
 	l_lock_dir=$1
-	l_kind=$2
-	l_purpose=$3
 	l_pid=${4:-$$}
 	l_start_token=${5:-}
-	l_hostname=${6:-}
-	l_created_at=${7:-}
 
 	mkdir -p "$l_lock_dir" || fail "Unable to create owned lock fixture directory."
 	chmod 700 "$l_lock_dir" || fail "Unable to chmod owned lock fixture directory."
@@ -121,23 +119,11 @@ write_owned_lock_metadata_fixture() {
 		l_start_token=$(zxfer_get_process_start_token "$$" 2>/dev/null) ||
 			fail "Unable to derive an owned lock fixture start token."
 	fi
-	if [ -z "$l_hostname" ]; then
-		l_hostname=$(zxfer_get_owned_lock_hostname 2>/dev/null) ||
-			fail "Unable to derive an owned lock fixture hostname."
-	fi
-	if [ -z "$l_created_at" ]; then
-		l_created_at=$(zxfer_get_owned_lock_created_at 2>/dev/null) ||
-			fail "Unable to derive an owned lock fixture creation timestamp."
-	fi
 
 	cat >"$l_lock_dir/metadata" <<EOF
 $ZXFER_LOCK_METADATA_HEADER
-kind	$l_kind
-purpose	$l_purpose
 pid	$l_pid
 start_token	$l_start_token
-hostname	$l_hostname
-created_at	$l_created_at
 EOF
 	chmod 600 "$l_lock_dir/metadata" || fail "Unable to chmod owned lock fixture metadata."
 }
@@ -807,15 +793,28 @@ test_zxfer_create_ssh_control_socket_lease_file_returns_failure_when_shared_crea
 		"$output" "result="
 }
 
-test_zxfer_validate_remote_capability_cache_lock_dir_rejects_wrong_metadata_purpose() {
-	lock_dir="$TEST_TMPDIR/remote_caps_wrong_purpose"
-	write_owned_lock_metadata_fixture "$lock_dir" lock "ssh-control-socket-lock"
+test_zxfer_validate_remote_capability_cache_lock_dir_treats_old_format_metadata_as_corrupt() {
+	lock_dir="$TEST_TMPDIR/remote_caps_old_format"
+	mkdir -p "$lock_dir" || fail "Unable to create old-format remote capability lock fixture."
+	chmod 700 "$lock_dir" || fail "Unable to chmod old-format remote capability lock fixture."
+	# Pre-V2 metadata (kind/purpose/hostname/created_at fields) must parse as
+	# corrupt so the existing corrupt-reap policy applies instead of crashing.
+	cat >"$lock_dir/metadata" <<EOF
+ZXFER_LOCK_METADATA_V1
+kind	lock
+purpose	remote-capability-cache-lock
+pid	$$
+start_token	lstart:old-format
+hostname	old-host
+created_at	2026-04-13T00:00:00+0000
+EOF
+	chmod 600 "$lock_dir/metadata" || fail "Unable to chmod old-format remote capability lock metadata."
 
 	set +e
 	zxfer_validate_remote_capability_cache_lock_dir "$lock_dir" >/dev/null
 	status=$?
 
-	assertEquals "Remote capability lock validation should reject owned locks written for another purpose." \
+	assertEquals "Remote capability lock validation should report pre-V2 metadata as corrupt." \
 		2 "$status"
 }
 

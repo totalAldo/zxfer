@@ -3148,7 +3148,7 @@ test_get_backup_properties_reports_missing_backup_file() {
 		"$output" "Cannot find backup property file. Ensure that it"
 }
 
-test_require_secure_backup_file_reports_unknown_owner_and_mode() {
+test_check_secure_backup_file_reports_unknown_owner_and_mode() {
 	backup_file="$TEST_TMPDIR/secure_meta"
 	printf '%s\n' "payload" >"$backup_file"
 	chmod 600 "$backup_file"
@@ -3159,11 +3159,7 @@ test_require_secure_backup_file_reports_unknown_owner_and_mode() {
 			zxfer_get_path_owner_uid() {
 				return 1
 			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_require_secure_backup_file "$backup_file"
+			zxfer_check_secure_backup_file "$backup_file"
 		)
 	)
 	owner_status=$?
@@ -3176,11 +3172,7 @@ test_require_secure_backup_file_reports_unknown_owner_and_mode() {
 			zxfer_get_path_mode_octal() {
 				return 1
 			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_require_secure_backup_file "$backup_file"
+			zxfer_check_secure_backup_file "$backup_file"
 		)
 	)
 	mode_status=$?
@@ -3193,21 +3185,13 @@ test_require_secure_backup_file_reports_unknown_owner_and_mode() {
 		"$mode_output" "Cannot determine the permissions for backup metadata $backup_file."
 }
 
-test_require_secure_backup_file_rejects_non_0600_permissions() {
+test_check_secure_backup_file_rejects_non_0600_permissions() {
 	backup_file="$TEST_TMPDIR/insecure_meta"
 	printf '%s\n' "payload" >"$backup_file"
 	chmod 644 "$backup_file"
 
 	set +e
-	output=$(
-		(
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_require_secure_backup_file "$backup_file"
-		)
-	)
+	output=$(zxfer_check_secure_backup_file "$backup_file")
 	status=$?
 
 	assertEquals "Non-0600 backup metadata should be rejected." 1 "$status"

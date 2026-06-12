@@ -116,6 +116,31 @@ disposable guest is available. Direct host runs remain human-only.
   both final sorted lists to local temp files and then read them again for
   `cmp`; mismatch and compare-failure paths terminate both producers and fall
   back to full discovery or fail closed as before.
+- Runtime temp state now lives under one per-run 0700 temp root created with a
+  single `mktemp -d` after TMPDIR is validated once (single-pass `cd -P`
+  resolution plus owner/mode checks). Allocators hand out `<prefix>.<counter>`
+  children by redirection or `mkdir` with no per-file mktemp, registration, or
+  readback ceremony, and trap exit removes everything with one `rm -rf` after
+  jobs, sockets, and owned locks are torn down. Path-adjacent staging outside
+  the root (error-log and cache-object staging) keeps mktemp-randomized names
+  because its validated parents may be shared sticky directories where
+  predictable pid+attempt slots are squat-able. Permission-string parsing in
+  path security is pure parameter expansion (no `cut`/`awk` spawns), and lock
+  metadata slimmed to owner pid plus one `ps` start token memoized in the
+  main shell (lock create/release call sites consume the memo global directly
+  so the capture is not lost to command-substitution subshells). Error-log
+  lock acquisition treats missing/corrupt lock metadata as busy on first
+  sighting and corrupt-reaps only after a sleep-and-recheck round, so a
+  concurrent winner inside its mkdir-to-metadata publish window is never
+  reaped; the log-existence answer is rechecked under the lock so a run that
+  waited cannot clobber a log a concurrent winner just created (two
+  simultaneous failing runs deterministically append both reports). The
+  no-op micro-bench helper-spawn TOTAL dropped from 135 to 43
+  (cut 57 to 0, mktemp 14 to 1, awk 29 to 10); `-V` keeps emitting every
+  `runtime_artifact_*` counter key, with `runtime_artifact_paths_cleaned` now
+  counting explicit cleanup calls plus the final root removal. The
+  unsafe-TMPDIR fallback advisory is held across the eager pre-parse
+  temp-root creation and replayed under `-V` after option parsing.
 
 ## Priority Roadmap
 
@@ -669,7 +694,7 @@ Measure:
 - Remote setup time.
 - Property cache path construction time.
 
-### 9. Slim Runtime Artifact Bookkeeping
+### 9. Slim Runtime Artifact Bookkeeping (DONE: per-run temp root)
 
 Current hot path:
 

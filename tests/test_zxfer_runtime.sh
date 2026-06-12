@@ -591,7 +591,7 @@ test_runtime_execution_context_init_helpers_cover_local_and_dry_run_remote_paths
 		"$output" "remote_cat=cat"
 }
 
-test_runtime_artifact_allocators_use_validated_temp_root_for_files_and_dirs() {
+test_runtime_artifact_allocators_use_the_per_run_temp_root_for_files_and_dirs() {
 	zxfer_create_runtime_artifact_file "runtime-file" >/dev/null
 	file_status=$?
 	file_path=$g_zxfer_runtime_artifact_path_result
@@ -599,22 +599,154 @@ test_runtime_artifact_allocators_use_validated_temp_root_for_files_and_dirs() {
 	dir_status=$?
 	dir_path=$g_zxfer_runtime_artifact_path_result
 
-	assertEquals "Runtime artifact file allocation should succeed under the validated temp root." \
+	assertEquals "Runtime artifact file allocation should succeed under the per-run temp root." \
 		0 "$file_status"
-	assertEquals "Runtime artifact directory allocation should succeed under the validated temp root." \
+	assertEquals "Runtime artifact directory allocation should succeed under the per-run temp root." \
 		0 "$dir_status"
-	assertContains "Runtime artifact files should be allocated under the validated temp root." \
-		"$file_path" "$TEST_TMPDIR/"
-	assertContains "Runtime artifact directories should be allocated under the validated temp root." \
-		"$dir_path" "$TEST_TMPDIR/"
+	assertNotEquals "Runtime artifact allocation should publish the per-run temp root." \
+		"" "$g_zxfer_run_tmp_root"
+	assertContains "The per-run temp root should live under the validated temp root." \
+		"$g_zxfer_run_tmp_root" "$TEST_TMPDIR/"
+	assertEquals "The per-run temp root should be private to the current user (0700)." \
+		"700" "$(zxfer_get_path_mode_octal "$g_zxfer_run_tmp_root")"
+	assertContains "Runtime artifact files should be allocated under the per-run temp root." \
+		"$file_path" "$g_zxfer_run_tmp_root/"
+	assertContains "Runtime artifact directories should be allocated under the per-run temp root." \
+		"$dir_path" "$g_zxfer_run_tmp_root/"
 	assertTrue "Runtime artifact file allocation should create the requested file." \
 		"[ -f \"$file_path\" ]"
+	assertEquals "Runtime artifact files should be created owner-only (0600)." \
+		"600" "$(zxfer_get_path_mode_octal "$file_path")"
 	assertTrue "Runtime artifact directory allocation should create the requested directory." \
 		"[ -d \"$dir_path\" ]"
-	assertContains "Runtime artifact allocation should register the created file for cleanup." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$file_path"
-	assertContains "Runtime artifact allocation should register the created directory for cleanup." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$dir_path"
+	assertEquals "Runtime artifact directories should be created owner-only (0700)." \
+		"700" "$(zxfer_get_path_mode_octal "$dir_path")"
+	assertEquals "Per-run-root allocations should not register per-file cleanup bookkeeping." \
+		"" "${g_zxfer_runtime_artifact_cleanup_paths:-}"
+}
+
+test_runtime_artifact_allocators_skip_pre_seeded_counter_names_in_current_shell() {
+	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
+	g_zxfer_run_tmp_counter=0
+	: >"$g_zxfer_run_tmp_root/skip-file.1"
+	zxfer_create_runtime_artifact_file "skip-file" >/dev/null
+	file_status=$?
+	file_path=$g_zxfer_runtime_artifact_path_result
+	mkdir -m 700 "$g_zxfer_run_tmp_root/skip-dir.3"
+	zxfer_create_runtime_artifact_dir "skip-dir" >/dev/null
+	dir_status=$?
+	dir_path=$g_zxfer_runtime_artifact_path_result
+
+	assertEquals "File allocation should succeed after skipping a taken counter name." \
+		0 "$file_status"
+	assertEquals "File allocation should advance past the taken counter name." \
+		"$g_zxfer_run_tmp_root/skip-file.2" "$file_path"
+	assertEquals "Directory allocation should succeed after skipping a taken counter name." \
+		0 "$dir_status"
+	assertEquals "Directory allocation should advance past the taken counter name." \
+		"$g_zxfer_run_tmp_root/skip-dir.4" "$dir_path"
+}
+
+test_runtime_in_parent_allocators_use_unpredictable_mktemp_names() {
+	# The allocators publish paths under the validated physical parent.
+	# Staging parents may be shared sticky directories, so the names must be
+	# mktemp-randomized: predictable pid+attempt slots are squat-able by a
+	# local process-table reader.
+	parent_dir=$(cd -P "$TEST_TMPDIR" && pwd)/runtime-parent-staging
+	mkdir -p "$parent_dir"
+
+	zxfer_create_runtime_artifact_file_in_parent "$parent_dir" "stage-file" >/dev/null
+	file_status=$?
+	file_path=$g_zxfer_runtime_artifact_path_result
+	zxfer_create_runtime_artifact_file_in_parent "$parent_dir" "stage-file" >/dev/null
+	second_file_path=$g_zxfer_runtime_artifact_path_result
+	zxfer_create_cache_object_stage_dir_in_parent "$parent_dir" "stage-dir" >/dev/null
+	stage_status=$?
+	stage_path=$g_zxfer_runtime_artifact_path_result
+
+	case "${file_path##*/}" in
+	"stage-file.$$."*)
+		file_name_randomized=no
+		;;
+	stage-file.??????)
+		file_name_randomized=yes
+		;;
+	*)
+		file_name_randomized=no
+		;;
+	esac
+	case "${stage_path##*/}" in
+	".stage-dir.$$."*)
+		stage_name_randomized=no
+		;;
+	.stage-dir.??????)
+		stage_name_randomized=yes
+		;;
+	*)
+		stage_name_randomized=no
+		;;
+	esac
+
+	assertEquals "Path-adjacent file staging should succeed under a validated parent." \
+		0 "$file_status"
+	assertEquals "Path-adjacent file staging should use the randomized mktemp template, not pid+attempt slots." \
+		yes "$file_name_randomized"
+	assertTrue "Path-adjacent file staging should create the staged file." \
+		"[ -f \"$file_path\" ]"
+	assertNotEquals "Consecutive staged files should never reuse a name." \
+		"$file_path" "$second_file_path"
+	assertEquals "Cache-object stage dirs should succeed under a validated parent." \
+		0 "$stage_status"
+	assertEquals "Cache-object stage dirs should use the randomized mktemp template, not pid+attempt slots." \
+		yes "$stage_name_randomized"
+	assertTrue "Cache-object stage dirs should create the staged directory." \
+		"[ -d \"$stage_path\" ]"
+	assertContains "Cache-object stage dirs should register for trap cleanup." \
+		"$g_zxfer_runtime_artifact_cleanup_paths" "$stage_path"
+}
+
+test_runtime_artifact_allocators_fail_closed_when_the_target_dir_is_unwritable() {
+	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
+	# Owner-only without write: passes safety validation, rejects creation.
+	chmod 500 "$g_zxfer_run_tmp_root"
+	zxfer_create_runtime_artifact_file "unwritable-file" >/dev/null 2>&1
+	file_status=$?
+	zxfer_create_runtime_artifact_dir "unwritable-dir" >/dev/null 2>&1
+	dir_status=$?
+	chmod 700 "$g_zxfer_run_tmp_root"
+
+	parent_dir=$(cd -P "$TEST_TMPDIR" && pwd)/runtime-unwritable-parent
+	mkdir -p "$parent_dir"
+	chmod 500 "$parent_dir"
+	zxfer_create_runtime_artifact_file_in_parent "$parent_dir" "unwritable" >/dev/null 2>&1
+	parent_file_status=$?
+	zxfer_create_cache_object_stage_dir_in_parent "$parent_dir" "unwritable" >/dev/null 2>&1
+	stage_dir_status=$?
+	chmod 700 "$parent_dir"
+
+	assertEquals "File allocation should fail closed when the run root rejects writes." \
+		1 "$file_status"
+	assertEquals "Directory allocation should fail closed when the run root rejects writes." \
+		1 "$dir_status"
+	assertEquals "Path-adjacent file staging should fail closed when the parent rejects writes." \
+		1 "$parent_file_status"
+	assertEquals "Cache-object stage dirs should fail closed when the parent rejects writes." \
+		1 "$stage_dir_status"
+}
+
+test_runtime_artifact_allocators_skip_taken_names_after_subshell_allocations() {
+	# Allocate through command substitutions so the counter bumps never reach
+	# this shell; the allocator must still hand out unique, existing paths.
+	first_path=$(zxfer_get_temp_file)
+	printf 'first payload\n' >"$first_path"
+	second_path=$(zxfer_get_temp_file)
+
+	assertNotEquals "Subshell allocations should never reuse a taken temp path." \
+		"$first_path" "$second_path"
+	assertEquals "Subshell allocations should never truncate earlier allocations." \
+		"first payload" "$(cat "$first_path")"
+	assertTrue "Subshell allocations should create the later temp file." \
+		"[ -f \"$second_path\" ]"
 }
 
 test_runtime_artifact_file_allocator_in_parent_uses_validated_parent_and_registers_path() {
@@ -662,6 +794,7 @@ test_zxfer_reset_runtime_artifact_state_preserves_failed_cleanup_registrations()
 	output=$(
 		(
 			zxfer_register_runtime_artifact_path "$artifact_path"
+			zxfer_ensure_run_tmp_root || exit 90
 			g_zxfer_runtime_artifact_path_result="stale-path"
 			g_zxfer_runtime_artifact_read_result="stale-read"
 			rm() {
@@ -673,6 +806,7 @@ test_zxfer_reset_runtime_artifact_state_preserves_failed_cleanup_registrations()
 			printf 'registered=<%s>\n' "$g_zxfer_runtime_artifact_cleanup_paths"
 			printf 'path_result=<%s>\n' "$g_zxfer_runtime_artifact_path_result"
 			printf 'read_result=<%s>\n' "$g_zxfer_runtime_artifact_read_result"
+			printf 'root_retained=<%s>\n' "$([ -n "$g_zxfer_run_tmp_root" ] && printf yes || printf no)"
 		)
 	)
 
@@ -686,6 +820,8 @@ test_zxfer_reset_runtime_artifact_state_preserves_failed_cleanup_registrations()
 		"$output" "read_result=<>"
 	assertTrue "Resetting runtime artifact state should leave undeleted artifacts in place when cleanup fails." \
 		"[ -e \"$artifact_path\" ]"
+	assertContains "Resetting runtime artifact state should keep the undeleted run root tracked for later cleanup." \
+		"$output" "root_retained=<yes>"
 }
 
 test_zxfer_trap_exit_cleans_registered_runtime_artifacts() {
@@ -719,6 +855,149 @@ test_zxfer_trap_exit_cleans_registered_runtime_artifacts() {
 		"[ -e \"$registered_file\" ]"
 	assertFalse "zxfer_trap_exit should remove registered runtime directories." \
 		"[ -e \"$registered_dir\" ]"
+}
+
+test_zxfer_trap_exit_removes_the_per_run_temp_root_on_success_and_failure_paths() {
+	success_output=$(
+		(
+			zxfer_close_all_ssh_control_sockets() {
+				:
+			}
+			zxfer_echoV() {
+				:
+			}
+			zxfer_get_temp_file >/dev/null
+			printf 'root=%s\n' "$g_zxfer_run_tmp_root" >&2
+			true
+			zxfer_trap_exit
+		) 2>&1
+	)
+	success_status=$?
+	success_root=${success_output#root=}
+
+	assertEquals "zxfer_trap_exit should preserve success after removing the per-run temp root." \
+		0 "$success_status"
+	assertNotEquals "The per-run temp root should exist before the trap runs." \
+		"" "$success_root"
+	assertFalse "zxfer_trap_exit should remove the per-run temp root and everything below it." \
+		"[ -e \"$success_root\" ]"
+
+	failure_root_file="$TEST_TMPDIR/trap-failure-root.path"
+	(
+		zxfer_close_all_ssh_control_sockets() {
+			:
+		}
+		zxfer_echoV() {
+			:
+		}
+		zxfer_get_temp_file >/dev/null
+		printf '%s\n' "$g_zxfer_run_tmp_root" >"$failure_root_file"
+		false
+		zxfer_trap_exit
+	) 2>/dev/null
+	failure_status=$?
+	failure_root=$(cat "$failure_root_file")
+
+	assertEquals "zxfer_trap_exit should preserve the failing exit status while removing the per-run temp root." \
+		1 "$failure_status"
+	assertFalse "zxfer_trap_exit should remove the per-run temp root on failure paths too." \
+		"[ -e \"$failure_root\" ]"
+}
+
+test_zxfer_trap_exit_surfaces_failed_run_tmp_root_removal_as_trap_cleanup_failure() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	output=$(
+		(
+			zxfer_close_all_ssh_control_sockets() {
+				:
+			}
+			zxfer_echoV() {
+				:
+			}
+			zxfer_profile_emit_summary() {
+				:
+			}
+			zxfer_emit_failure_report() {
+				printf 'status=%s\n' "$1"
+				printf 'class=%s\n' "${g_zxfer_failure_class:-}"
+				printf 'stage=%s\n' "${g_zxfer_failure_stage:-}"
+				printf 'message=%s\n' "${g_zxfer_failure_message:-}"
+			}
+			zxfer_get_temp_file >/dev/null
+			rm() {
+				return 1
+			}
+			true
+			zxfer_trap_exit
+		) 2>&1
+	)
+	status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "zxfer_trap_exit should fail closed when the per-run temp root cannot be removed." \
+		1 "$status"
+	assertContains "Failed run-root removal should surface as a runtime trap-cleanup failure." \
+		"$output" "class=runtime"
+	assertContains "Failed run-root removal should mark the trap-cleanup stage." \
+		"$output" "stage=trap cleanup"
+	assertContains "Failed run-root removal should report the runtime temp-artifact cleanup message." \
+		"$output" "message=Failed to remove one or more runtime temp artifacts during exit."
+}
+
+test_run_tmp_root_is_removed_when_the_process_is_terminated_mid_run() {
+	leak_tmpdir="$TEST_TMPDIR/sigterm-leak-tmp"
+	ready_flag="$TEST_TMPDIR/sigterm-child.ready"
+	child_script="$TEST_TMPDIR/sigterm-child.sh"
+	child_stderr="$TEST_TMPDIR/sigterm-child.stderr"
+	rm -rf "$leak_tmpdir" "$ready_flag"
+	mkdir -p "$leak_tmpdir"
+
+	cat >"$child_script" <<EOF
+#!/bin/sh
+ZXFER_SOURCE_MODULES_ROOT="$ZXFER_ROOT" \\
+	ZXFER_SOURCE_MODULES_THROUGH=zxfer_replication.sh \\
+	. "$ZXFER_ROOT/src/zxfer_modules.sh"
+TMPDIR="$leak_tmpdir"
+export TMPDIR
+zxfer_reset_failure_context "sigterm-test"
+zxfer_reset_runtime_artifact_state
+zxfer_reset_background_job_state
+zxfer_reset_cleanup_pid_tracking
+zxfer_reset_owned_lock_tracking
+g_option_Y_yield_iterations=1
+zxfer_register_runtime_traps
+zxfer_get_temp_file >/dev/null
+: >"$ready_flag"
+# An interruptible wait so the TERM trap runs promptly.
+sleep 30 &
+wait \$!
+EOF
+
+	/bin/sh "$child_script" >/dev/null 2>"$child_stderr" &
+	child_pid=$!
+	wait_count=0
+	while [ ! -e "$ready_flag" ] && [ "$wait_count" -lt 100 ]; do
+		wait_count=$((wait_count + 1))
+		sleep 0.1 2>/dev/null || sleep 1
+	done
+	assertTrue "The SIGTERM fixture child should reach its ready state." \
+		"[ -e \"$ready_flag\" ]"
+	assertNotEquals "The SIGTERM fixture child should allocate under the per-run temp root before the signal." \
+		"" "$(ls -A "$leak_tmpdir")"
+
+	kill -s TERM "$child_pid" 2>/dev/null
+	wait "$child_pid" 2>/dev/null
+
+	assertEquals "A SIGTERM mid-run must not leak any temp state into TMPDIR." \
+		"" "$(ls -A "$leak_tmpdir")"
 }
 
 test_zxfer_trap_exit_aborts_supervised_background_jobs_before_legacy_pid_cleanup() {
@@ -939,21 +1218,13 @@ test_zxfer_trap_exit_preserves_failed_owned_lock_cleanup_paths_under_temp_prefix
 	cache_root=$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$TEST_TMPDIR") ||
 		fail "Unable to derive the shared remote-host cache root."
 	lock_dir="$cache_root/repro.lock"
-	current_hostname=$(zxfer_get_owned_lock_hostname) ||
-		fail "Unable to derive the current hostname for the owned-lock fixture."
-	created_at=$(zxfer_get_owned_lock_created_at) ||
-		fail "Unable to derive the creation timestamp for the owned-lock fixture."
 
 	mkdir -p "$lock_dir" || fail "Unable to create the owned-lock cleanup fixture."
 	chmod 700 "$lock_dir" || fail "Unable to chmod the owned-lock cleanup fixture."
 	{
 		printf '%s\n' "$ZXFER_LOCK_METADATA_HEADER"
-		printf 'kind\tlock\n'
-		printf 'purpose\ttrap-owned-lock\n'
 		printf 'pid\t%s\n' "$$"
 		printf 'start_token\tlstart:not-the-current-process\n'
-		printf 'hostname\t%s\n' "$current_hostname"
-		printf 'created_at\t%s\n' "$created_at"
 	} >"$lock_dir/metadata"
 	chmod 600 "$lock_dir/metadata" || fail "Unable to chmod the owned-lock cleanup fixture metadata."
 	zxfer_register_owned_lock_path "$lock_dir"
@@ -1407,162 +1678,26 @@ test_zxfer_write_runtime_artifact_file_preserves_non_redirection_failure_status(
 		"$output" "status=7"
 }
 
-test_zxfer_write_runtime_cache_file_atomically_cleans_up_on_write_and_publish_failures() {
-	stage_root="$TEST_TMPDIR/runtime-cache-stage-cleanup"
-	write_target="$stage_root/write-failure.entry"
-	publish_target="$stage_root/publish-failure.entry"
-	mkdir -p "$stage_root" || fail "Unable to create runtime cache stage root."
-
-	set +e
-	(
-		zxfer_write_runtime_artifact_file() {
-			return 1
-		}
-		zxfer_write_runtime_cache_file_atomically \
-			"$write_target" "payload" "zxfer-runtime-cache-test"
-	)
-	write_status=$?
-	set -- "$stage_root"/.zxfer-runtime-cache-test.*
-	if [ -e "$1" ]; then
-		write_stage_count=$#
-	else
-		write_stage_count=0
-	fi
-
-	set +e
-	(
-		zxfer_publish_runtime_artifact_file() {
-			return 1
-		}
-		zxfer_write_runtime_cache_file_atomically \
-			"$publish_target" "payload" "zxfer-runtime-cache-test"
-	)
-	publish_status=$?
-	set -- "$stage_root"/.zxfer-runtime-cache-test.*
-	if [ -e "$1" ]; then
-		publish_stage_count=$#
-	else
-		publish_stage_count=0
-	fi
-
-	assertEquals "Atomic runtime cache writes should fail closed when the staged payload cannot be written." \
-		1 "$write_status"
-	assertFalse "Failed runtime cache writes should not leave a published cache target behind." \
-		"[ -e \"$write_target\" ]"
-	assertEquals "Failed runtime cache writes should clean up their staged artifact files." \
-		0 "$write_stage_count"
-	assertEquals "Atomic runtime cache writes should fail closed when the staged payload cannot be published." \
-		1 "$publish_status"
-	assertFalse "Failed runtime cache publishes should not leave a published cache target behind." \
-		"[ -e \"$publish_target\" ]"
-	assertEquals "Failed runtime cache publishes should clean up their staged artifact files." \
-		0 "$publish_stage_count"
-}
-
-test_zxfer_write_runtime_cache_and_cache_object_helpers_cover_success_and_redirection_failures() {
-	cache_target="$TEST_TMPDIR/runtime-cache-success.entry"
+test_zxfer_write_cache_object_contents_to_path_rejects_symlinked_targets() {
 	object_path="$TEST_TMPDIR/cache-object-open-failure"
 	object_target_dir="$TEST_TMPDIR/cache-object-target-dir"
-	stage_dir="$TEST_TMPDIR/cache-object-publish-stage"
-	missing_parent_target="$TEST_TMPDIR/missing-cache-parent/object.dir"
-	published_target="$TEST_TMPDIR/runtime-cache-object.dir"
-	mkdir -p "$object_target_dir" "$stage_dir" || fail "Unable to create the runtime helper fixture directories."
+	mkdir -p "$object_target_dir" || fail "Unable to create the cache-object fixture directory."
 	ln -s "$object_target_dir" "$object_path" || fail "Unable to create the cache-object redirection failure fixture."
-
-	zxfer_write_runtime_cache_file_atomically "$cache_target" "payload" "zxfer-runtime-cache-test"
-	cache_status=$?
-	cache_mode=$(zxfer_get_path_mode_octal "$cache_target")
 
 	set +e
 	zxfer_write_cache_object_contents_to_path "$object_path" "demo-kind" "" "payload" >/dev/null 2>&1
 	object_write_status=$?
+	set -e
 	if [ -e "$object_path" ] && [ ! -L "$object_path" ]; then
 		object_partial_exists=yes
 	else
 		object_partial_exists=no
 	fi
-	zxfer_publish_cache_object_directory "$stage_dir" "$missing_parent_target" >/dev/null 2>&1
-	missing_parent_status=$?
-	publish_move_output=$(
-		(
-			set +e
-			mv() {
-				return 1
-			}
-			zxfer_publish_cache_object_directory "$stage_dir" "$published_target" >/dev/null 2>&1
-			printf 'status=%s\n' "$?"
-		)
-	)
-	publish_move_status=$(printf '%s\n' "$publish_move_output" | awk -F= '/^status=/{print $2; exit}')
-	set -e
 
-	assertEquals "Atomic runtime cache writes should succeed on the direct helper success path." \
-		0 "$cache_status"
-	assertEquals "Successful atomic runtime cache writes should leave the published target mode at 0600." \
-		600 "$cache_mode"
 	assertEquals "Cache-object content writes should fail closed when the destination path cannot be opened for writing." \
 		1 "$object_write_status"
 	assertEquals "Failed cache-object content writes should not leave a partially published target behind." \
 		no "$object_partial_exists"
-	assertEquals "Publishing cache-object directories should fail closed when the target parent directory is missing." \
-		1 "$missing_parent_status"
-	assertEquals "Publishing cache-object directories should preserve move failures from the live publish step." \
-		1 "$publish_move_status"
-}
-
-test_zxfer_write_runtime_cache_file_atomically_requires_existing_parent_dir() {
-	missing_parent="$TEST_TMPDIR/runtime-cache-missing-parent"
-	target_path="$missing_parent/cache.entry"
-
-	set +e
-	zxfer_write_runtime_cache_file_atomically "$target_path" "payload" "zxfer-runtime-cache-test"
-	status=$?
-
-	assertEquals "Atomic runtime cache writes should fail closed when the target parent directory is missing." \
-		1 "$status"
-	assertFalse "Atomic runtime cache writes should not create a missing parent directory implicitly." \
-		"[ -d \"$missing_parent\" ]"
-	assertFalse "Atomic runtime cache writes should not leave a published cache target behind when the parent is missing." \
-		"[ -e \"$target_path\" ]"
-}
-
-test_zxfer_write_runtime_cache_file_atomically_rejects_non_file_targets_and_parent_lookup_failures() {
-	dir_target="$TEST_TMPDIR/runtime-cache-dir-target"
-	parent_lookup_target="$TEST_TMPDIR/runtime-cache-parent-lookup.entry"
-	stage_failure_target="$TEST_TMPDIR/runtime-cache-stage-failure.entry"
-	mkdir -p "$dir_target" || fail "Unable to create runtime cache directory target fixture."
-
-	set +e
-	zxfer_write_runtime_cache_file_atomically "$dir_target" "payload" "zxfer-runtime-cache-test" >/dev/null 2>&1
-	dir_status=$?
-	parent_lookup_output=$(
-		(
-			zxfer_get_path_parent_dir() {
-				return 1
-			}
-			zxfer_write_runtime_cache_file_atomically \
-				"$parent_lookup_target" "payload" "zxfer-runtime-cache-test" >/dev/null 2>&1
-			printf 'status=%s\n' "$?"
-		)
-	)
-	stage_failure_output=$(
-		(
-			zxfer_stage_runtime_artifact_file_for_path() {
-				return 1
-			}
-			zxfer_write_runtime_cache_file_atomically \
-				"$stage_failure_target" "payload" "zxfer-runtime-cache-test" >/dev/null 2>&1
-			printf 'status=%s\n' "$?"
-		)
-	)
-	set -e
-
-	assertEquals "Atomic runtime cache writes should fail closed when the existing target path is not a regular file." \
-		1 "$dir_status"
-	assertContains "Atomic runtime cache writes should preserve target-parent lookup failures exactly." \
-		"$parent_lookup_output" "status=1"
-	assertContains "Atomic runtime cache writes should fail closed when the staging helper cannot allocate the private artifact path." \
-		"$stage_failure_output" "status=1"
 }
 
 test_get_os_handles_local_and_remote_invocations() {
@@ -2341,7 +2476,7 @@ test_zxfer_write_cache_object_file_atomically_cleans_up_stage_dirs_when_rmdir_wo
 		0 "$stage_count"
 }
 
-test_zxfer_write_cache_object_file_atomically_reports_stage_dir_creation_failures_and_publish_dir_rejections() {
+test_zxfer_write_cache_object_file_atomically_reports_stage_dir_creation_failures() {
 	set +e
 	stage_output=$(
 		(
@@ -2353,27 +2488,10 @@ test_zxfer_write_cache_object_file_atomically_reports_stage_dir_creation_failure
 			printf 'status=%s\n' "$?"
 		)
 	)
-	publish_output=$(
-		(
-			stage_dir="$TEST_TMPDIR/publish-cache-object-stage"
-			mkdir -p "$stage_dir" || exit 1
-			relative_parent="relative-publish-parent"
-			rm -rf "$relative_parent"
-			mkdir -p "$relative_parent" || exit 1
-			set +e
-			zxfer_publish_cache_object_directory "$stage_dir" "$relative_parent/object-dir" >/dev/null 2>&1
-			status=$?
-			rm -rf "$relative_parent"
-			set -e
-			printf 'status=%s\n' "$status"
-		)
-	)
 	set -e
 
-	assertContains "Atomic cache-object writes should fail closed when the stage directory cannot be allocated." \
-		"$stage_output" "status=1"
-	assertContains "Publishing cache-object directories should reject existing relative parents that are outside the validated temp-root rules." \
-		"$publish_output" "status=1"
+	assertEquals "Atomic cache-object writes should fail closed when the stage directory cannot be allocated." \
+		"status=1" "$stage_output"
 }
 
 test_zxfer_create_cache_object_stage_dir_for_path_preserves_parent_lookup_failures() {
@@ -2425,26 +2543,6 @@ test_zxfer_write_cache_object_file_atomically_registers_stage_dirs_in_current_sh
 		"$(cat "$trace_file")" "/.zxfer-cache-object."
 	assertEquals "Atomic cache-object writes should still clean up their private stage directory after helper failures." \
 		0 "$stage_count"
-}
-
-test_zxfer_publish_cache_object_directory_preserves_parent_lookup_failures() {
-	stage_dir="$TEST_TMPDIR/cache-object-parent-lookup-stage"
-	target_path="$TEST_TMPDIR/cache-object-parent-lookup-target/object.dir"
-	mkdir -p "$stage_dir" || fail "Unable to create the staged cache-object directory."
-
-	output=$(
-		(
-			zxfer_get_path_parent_dir() {
-				return 1
-			}
-			set +e
-			zxfer_publish_cache_object_directory "$stage_dir" "$target_path" >/dev/null
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Publishing cache-object directories should preserve target-parent lookup failures." \
-		"$output" "status=1"
 }
 
 test_zxfer_write_cache_object_contents_to_path_rejects_invalid_metadata_and_failed_writes() {

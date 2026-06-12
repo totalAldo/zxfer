@@ -29,13 +29,23 @@
 # ps/od/tr=0, all structural profile counters 0).
 #
 # Never budget advisory:* rows (wall time is timing noise, not a contract).
-noop	TOTAL	159
-noop	sed	12
-noop	awk	34
+#
+# Re-ratcheted 2026-06-11 after Phase 6 (per-run temp root + pure-shell
+# permission parsing + slim pid+start-token locks): observed noop TOTAL=43
+# (sed=9 awk=10 date=17 cut=0 tr=0 ps=0 mktemp=1) and dryrun_incr TOTAL=9
+# (date=5 mktemp=1, everything else 0) on the macOS baseline host, identical
+# across both fixture sizes. mktemp=1 is the single per-run temp-root
+# allocation; cut stays a hard zero now that permission strings parse with
+# parameter expansion.
+noop	TOTAL	50
+noop	sed	11
+noop	awk	12
 noop	date	20
-noop	ps	4
+noop	ps	0
 noop	od	0
-noop	tr	3
+noop	cut	0
+noop	mktemp	2
+noop	tr	0
 noop	profile:command_render_calls	0
 noop	profile:runtime_artifact_files_created	17
 noop	profile:runtime_artifact_dirs_created	0
@@ -47,12 +57,14 @@ noop	profile:zfs_receive_calls	0
 noop	profile:send_receive_pipeline_commands	0
 noop	profile:live_destination_snapshot_rechecks	0
 noop	profile:exists_destination_calls	0
-dryrun_incr	TOTAL	33
+dryrun_incr	TOTAL	11
 dryrun_incr	sed	0
-dryrun_incr	awk	6
+dryrun_incr	awk	0
 dryrun_incr	date	6
 dryrun_incr	ps	0
 dryrun_incr	od	0
+dryrun_incr	cut	0
+dryrun_incr	mktemp	2
 dryrun_incr	tr	0
 dryrun_incr	profile:command_render_calls	0
 dryrun_incr	profile:runtime_artifact_files_created	0
@@ -65,13 +77,15 @@ dryrun_incr	profile:zfs_receive_calls	0
 dryrun_incr	profile:send_receive_pipeline_commands	0
 dryrun_incr	profile:live_destination_snapshot_rechecks	0
 dryrun_incr	profile:exists_destination_calls	0
-noop_small	TOTAL	159
-noop_small	sed	12
-noop_small	awk	34
+noop_small	TOTAL	50
+noop_small	sed	11
+noop_small	awk	12
 noop_small	date	20
-noop_small	ps	4
+noop_small	ps	0
 noop_small	od	0
-noop_small	tr	3
+noop_small	cut	0
+noop_small	mktemp	2
+noop_small	tr	0
 noop_small	profile:command_render_calls	0
 noop_small	profile:runtime_artifact_files_created	17
 noop_small	profile:runtime_artifact_dirs_created	0
@@ -83,12 +97,14 @@ noop_small	profile:zfs_receive_calls	0
 noop_small	profile:send_receive_pipeline_commands	0
 noop_small	profile:live_destination_snapshot_rechecks	0
 noop_small	profile:exists_destination_calls	0
-dryrun_incr_small	TOTAL	33
+dryrun_incr_small	TOTAL	11
 dryrun_incr_small	sed	0
-dryrun_incr_small	awk	6
+dryrun_incr_small	awk	0
 dryrun_incr_small	date	6
 dryrun_incr_small	ps	0
 dryrun_incr_small	od	0
+dryrun_incr_small	cut	0
+dryrun_incr_small	mktemp	2
 dryrun_incr_small	tr	0
 dryrun_incr_small	profile:command_render_calls	0
 dryrun_incr_small	profile:runtime_artifact_files_created	0
