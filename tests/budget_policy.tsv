@@ -52,7 +52,7 @@ lines	src/zxfer_modules.sh	96
 # zxfer_property_reconcile.sh absorbed the ~1.4k-line zxfer_property_cache.sh
 # survivors (serialize/decode, prefetch, in-memory property tables) when the
 # per-dataset file cache was deleted; the TOTAL row still ratchets down.
-lines	src/zxfer_property_reconcile.sh	3608
+lines	src/zxfer_property_reconcile.sh	3562
 # zxfer_remote_hosts.sh halved in Phase 7: capability state is one live ssh
 # probe per host per run held in memory (no cache files, TTL, identity hex,
 # lock dirs, or wait loops) and ssh control sockets are per-run paths under
@@ -91,7 +91,7 @@ lines	zxfer	211
 # TOTAL rises by the net addition of the approved divergence-contract
 # feature (classifier, gate, warning, post-receive verification, -V key)
 # plus the rolling-queue stderr-sink fix comments.
-lines	TOTAL	22897
+lines	TOTAL	22851
 functions	src/zxfer_background_jobs.sh	15
 functions	src/zxfer_backup_metadata.sh	84
 functions	src/zxfer_cleanup_child_wrapper.sh	4
@@ -99,7 +99,7 @@ functions	src/zxfer_cli.sh	3
 functions	src/zxfer_dependencies.sh	11
 functions	src/zxfer_exec.sh	41
 functions	src/zxfer_modules.sh	1
-functions	src/zxfer_property_reconcile.sh	80
+functions	src/zxfer_property_reconcile.sh	77
 functions	src/zxfer_remote_hosts.sh	61
 functions	src/zxfer_replication.sh	55
 functions	src/zxfer_reporting.sh	54
@@ -119,7 +119,7 @@ functions	src/zxfer_snapshot_reconcile.sh	26
 functions	src/zxfer_snapshot_state.sh	31
 functions	zxfer	5
 # functions TOTAL rises by the seven divergence-contract helpers above.
-functions	TOTAL	653
+functions	TOTAL	650
 callers	zxfer_profile_now_ms	12	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	26
 callers	eval 	10

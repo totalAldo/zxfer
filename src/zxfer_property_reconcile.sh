@@ -1503,26 +1503,45 @@ zxfer_run_destination_zfs_property_command() {
 	zxfer_invoke_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd" destination
 }
 
+# Purpose: Run one destination property verb (set/inherit) through the
+# controlled execution path owned by this module: render the verbose display
+# line, execute live (raising the verb-specific error message on failure),
+# and invalidate the mutated destination's cached rows, or print the rendered
+# command instead on dry runs.
+# Usage: Called by zxfer_run_zfs_set_assignments and
+# zxfer_run_zfs_inherit_property once planning is complete and zxfer is ready
+# to execute the action.
+zxfer_run_destination_property_verb() {
+	l_verb=$1
+	l_verb_error_message=$2
+	l_destination=$3
+	shift 3
+
+	if [ "$g_option_n_dryrun" -eq 0 ]; then
+		if zxfer_command_display_render_enabled; then
+			zxfer_echov "$(zxfer_build_destination_zfs_command "$l_verb" "$@" "$l_destination")"
+		fi
+		zxfer_run_destination_zfs_property_command "$l_verb" "$@" "$l_destination" ||
+			zxfer_throw_error "$l_verb_error_message" "$?"
+		zxfer_invalidate_destination_property_mutation_cache "$l_destination"
+	else
+		printf '%s\n' "$(zxfer_build_destination_zfs_command "$l_verb" "$@" "$l_destination")"
+	fi
+}
+
 # Purpose: Run the ZFS set assignments through the controlled execution path
 # owned by this module.
 # Usage: Called during property filtering, diffing, and apply once planning is
 # complete and zxfer is ready to execute the action.
 zxfer_run_zfs_set_assignments() {
-	l_destination=$1
+	l_set_destination=$1
 	shift
 
 	[ "$#" -gt 0 ] || return 0
 
-	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		if zxfer_command_display_render_enabled; then
-			zxfer_echov "$(zxfer_build_destination_zfs_command set "$@" "$l_destination")"
-		fi
-		zxfer_run_destination_zfs_property_command set "$@" "$l_destination" ||
-			zxfer_throw_error "Error when setting properties on destination filesystem." "$?"
-		zxfer_invalidate_destination_property_mutation_cache "$l_destination"
-	else
-		printf '%s\n' "$(zxfer_build_destination_zfs_command set "$@" "$l_destination")"
-	fi
+	zxfer_run_destination_property_verb set \
+		"Error when setting properties on destination filesystem." \
+		"$l_set_destination" "$@"
 }
 
 # Purpose: Run the ZFS set properties through the controlled execution path
@@ -1564,19 +1583,9 @@ zxfer_run_zfs_set_properties() {
 # $1: property name
 # $2: destination dataset
 zxfer_run_zfs_inherit_property() {
-	l_property=$1
-	l_destination=$2
-
-	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		if zxfer_command_display_render_enabled; then
-			zxfer_echov "$(zxfer_build_destination_zfs_command inherit "$l_property" "$l_destination")"
-		fi
-		zxfer_run_destination_zfs_property_command inherit "$l_property" "$l_destination" ||
-			zxfer_throw_error "Error when inheriting properties on destination filesystem." "$?"
-		zxfer_invalidate_destination_property_mutation_cache "$l_destination"
-	else
-		printf '%s\n' "$(zxfer_build_destination_zfs_command inherit "$l_property" "$l_destination")"
-	fi
+	zxfer_run_destination_property_verb inherit \
+		"Error when inheriting properties on destination filesystem." \
+		"$2" "$1"
 }
 
 # Purpose: Diff the properties so later helpers act on exact deltas.
@@ -2317,23 +2326,6 @@ zxfer_transfer_properties() {
 
 ZXFER_REQUIRED_PROPERTY_UNSUPPORTED_SENTINEL="__ZXFER_REQUIRED_PROPERTY_UNSUPPORTED__"
 
-# Purpose: Reset the property lookup results so the next property lookup pass
-# starts from a clean state.
-# Usage: Called during property prefetch, table maintenance, and normalized
-# property lookup before this module reuses mutable scratch globals or cached
-# decisions.
-zxfer_reset_property_lookup_results() {
-	g_zxfer_normalized_dataset_properties=""
-	g_zxfer_normalized_dataset_properties_cache_hit=0
-	g_zxfer_required_properties_result=""
-	g_zxfer_required_property_probe_result=""
-	g_zxfer_serialized_property_records_result=""
-	g_zxfer_serialized_property_records_parse_failed=0
-	g_zxfer_decoded_property_assignment_result=""
-	g_zxfer_destination_pvs_raw=""
-	g_zxfer_property_table_lookup_result=""
-}
-
 # Purpose: Serialize property records from stdin into zxfer's stable property
 # record encoding.
 # Usage: Called during property prefetch and normalized property lookup before
@@ -2543,12 +2535,20 @@ zxfer_property_table_clear_memo() {
 	g_zxfer_property_table_memo_payload=""
 }
 
-# Purpose: Reset the per-iteration property tables so the next property pass
-# starts from a clean state.
+# Purpose: Reset the per-iteration property tables and the per-lookup scratch
+# result globals so the next property pass starts from a clean state.
 # Usage: Called during runtime startup and at the top of every replication
 # iteration before this module reuses the in-memory property tables.
 zxfer_reset_property_iteration_caches() {
-	zxfer_reset_property_lookup_results
+	g_zxfer_normalized_dataset_properties=""
+	g_zxfer_normalized_dataset_properties_cache_hit=0
+	g_zxfer_required_properties_result=""
+	g_zxfer_required_property_probe_result=""
+	g_zxfer_serialized_property_records_result=""
+	g_zxfer_serialized_property_records_parse_failed=0
+	g_zxfer_decoded_property_assignment_result=""
+	g_zxfer_destination_pvs_raw=""
+	g_zxfer_property_table_lookup_result=""
 	zxfer_property_table_clear_memo
 	g_zxfer_source_property_table=""
 	g_zxfer_destination_property_table=""
@@ -2596,22 +2596,35 @@ zxfer_refresh_property_tree_prefetch_context() {
 	g_zxfer_destination_property_tree_prefetch_state=0
 }
 
-# Purpose: Find one dataset's payload row in the requested side's normalized
-# property table.
-# Usage: Called during normalized property lookup; publishes the payload in
-# g_zxfer_property_table_lookup_result and returns non-zero when the dataset
-# has no usable row.
+# Purpose: Find one payload row in the requested side's in-memory property
+# tables: the dataset-keyed normalized-property table when $3 is empty, or the
+# dataset+property-keyed required-property probe table when $3 names a
+# required property.
+# Usage: Called during normalized property lookup
+# (zxfer_load_normalized_dataset_properties,
+# zxfer_maybe_prefetch_recursive_normalized_properties) and required-property
+# backfill (zxfer_get_required_property_probe); publishes the payload in
+# g_zxfer_property_table_lookup_result and returns non-zero on a miss.
 zxfer_property_table_find_dataset() {
 	l_find_side=$1
 	l_find_dataset=$2
+	l_find_property=${3:-}
 
 	g_zxfer_property_table_lookup_result=""
 	case "$l_find_side" in
 	source)
-		l_find_table=${g_zxfer_source_property_table:-}
+		if [ -n "$l_find_property" ]; then
+			l_find_table=${g_zxfer_source_required_property_table:-}
+		else
+			l_find_table=${g_zxfer_source_property_table:-}
+		fi
 		;;
 	destination)
-		l_find_table=${g_zxfer_destination_property_table:-}
+		if [ -n "$l_find_property" ]; then
+			l_find_table=${g_zxfer_destination_required_property_table:-}
+		else
+			l_find_table=${g_zxfer_destination_property_table:-}
+		fi
 		;;
 	*)
 		return 1
@@ -2622,15 +2635,19 @@ zxfer_property_table_find_dataset() {
 	l_find_tab='	'
 	l_find_nl='
 '
+	l_find_key=$l_find_nl$l_find_dataset$l_find_tab
+	if [ -n "$l_find_property" ]; then
+		l_find_key=$l_find_key$l_find_property$l_find_tab
+	fi
 	l_find_wrapped=$l_find_nl$l_find_table$l_find_nl
 	case "$l_find_wrapped" in
-	*"$l_find_nl$l_find_dataset$l_find_tab"*) ;;
+	*"$l_find_key"*) ;;
 	*)
 		return 1
 		;;
 	esac
 
-	l_find_payload=${l_find_wrapped#*"$l_find_nl$l_find_dataset$l_find_tab"}
+	l_find_payload=${l_find_wrapped#*"$l_find_key"}
 	l_find_payload=${l_find_payload%%"$l_find_nl"*}
 	[ -n "$l_find_payload" ] || return 1
 
@@ -2638,22 +2655,40 @@ zxfer_property_table_find_dataset() {
 	return 0
 }
 
-# Purpose: Append one dataset payload row to the requested side's normalized
-# property table and refresh the last-dataset memo.
-# Usage: Called after live normalized property reads so repeated lookups in the
-# same iteration reuse the in-memory row instead of re-probing zfs.
+# Purpose: Append one payload row to the requested side's in-memory property
+# tables: the dataset-keyed normalized-property table (refreshing the
+# last-dataset memo) when $4 is empty, or the dataset+property-keyed
+# required-property probe table (no memo; the payload may be the
+# unsupported-property sentinel) when $4 names a required property.
+# Usage: Called after live normalized property reads
+# (zxfer_load_normalized_dataset_properties) and live required-property probes
+# (zxfer_get_required_property_probe) so repeated lookups in the same
+# iteration reuse the in-memory row instead of re-probing zfs.
 zxfer_property_table_append_dataset() {
 	l_append_side=$1
 	l_append_dataset=$2
 	l_append_payload=$3
+	l_append_property=${4:-}
 
 	[ -n "$l_append_payload" ] || return 0
 
 	l_append_nl='
 '
-	l_append_row="$l_append_dataset	$l_append_payload"
+	if [ -n "$l_append_property" ]; then
+		l_append_row="$l_append_dataset	$l_append_property	$l_append_payload"
+	else
+		l_append_row="$l_append_dataset	$l_append_payload"
+	fi
 	case "$l_append_side" in
 	source)
+		if [ -n "$l_append_property" ]; then
+			if [ -n "${g_zxfer_source_required_property_table:-}" ]; then
+				g_zxfer_source_required_property_table=$g_zxfer_source_required_property_table$l_append_nl$l_append_row
+			else
+				g_zxfer_source_required_property_table=$l_append_row
+			fi
+			return 0
+		fi
 		if [ -n "${g_zxfer_source_property_table:-}" ]; then
 			g_zxfer_source_property_table=$g_zxfer_source_property_table$l_append_nl$l_append_row
 		else
@@ -2661,6 +2696,14 @@ zxfer_property_table_append_dataset() {
 		fi
 		;;
 	destination)
+		if [ -n "$l_append_property" ]; then
+			if [ -n "${g_zxfer_destination_required_property_table:-}" ]; then
+				g_zxfer_destination_required_property_table=$g_zxfer_destination_required_property_table$l_append_nl$l_append_row
+			else
+				g_zxfer_destination_required_property_table=$l_append_row
+			fi
+			return 0
+		fi
 		if [ -n "${g_zxfer_destination_property_table:-}" ]; then
 			g_zxfer_destination_property_table=$g_zxfer_destination_property_table$l_append_nl$l_append_row
 		else
@@ -2809,83 +2852,6 @@ zxfer_invalidate_destination_property_mutation_cache() {
 	zxfer_property_table_invalidate_dataset destination "$l_mutated_dataset" 1
 }
 
-# Purpose: Find one cached required-property probe payload for a side, dataset,
-# and property triple.
-# Usage: Called during required-property backfill; publishes the payload in
-# g_zxfer_property_table_lookup_result and returns non-zero on a miss.
-zxfer_required_property_table_find() {
-	l_find_side=$1
-	l_find_dataset=$2
-	l_find_property=$3
-
-	g_zxfer_property_table_lookup_result=""
-	case "$l_find_side" in
-	source)
-		l_find_table=${g_zxfer_source_required_property_table:-}
-		;;
-	destination)
-		l_find_table=${g_zxfer_destination_required_property_table:-}
-		;;
-	*)
-		return 1
-		;;
-	esac
-	[ -n "$l_find_table" ] || return 1
-
-	l_find_tab='	'
-	l_find_nl='
-'
-	l_find_wrapped=$l_find_nl$l_find_table$l_find_nl
-	case "$l_find_wrapped" in
-	*"$l_find_nl$l_find_dataset$l_find_tab$l_find_property$l_find_tab"*) ;;
-	*)
-		return 1
-		;;
-	esac
-
-	l_find_payload=${l_find_wrapped#*"$l_find_nl$l_find_dataset$l_find_tab$l_find_property$l_find_tab"}
-	l_find_payload=${l_find_payload%%"$l_find_nl"*}
-	[ -n "$l_find_payload" ] || return 1
-
-	g_zxfer_property_table_lookup_result=$l_find_payload
-	return 0
-}
-
-# Purpose: Append one required-property probe payload row to the requested
-# side's required-property table.
-# Usage: Called after live required-property probes so repeated backfills in
-# the same iteration reuse the probe result, including the
-# unsupported-property sentinel.
-zxfer_required_property_table_append() {
-	l_append_side=$1
-	l_append_dataset=$2
-	l_append_property=$3
-	l_append_payload=$4
-
-	[ -n "$l_append_payload" ] || return 0
-
-	l_append_nl='
-'
-	l_append_row="$l_append_dataset	$l_append_property	$l_append_payload"
-	case "$l_append_side" in
-	source)
-		if [ -n "${g_zxfer_source_required_property_table:-}" ]; then
-			g_zxfer_source_required_property_table=$g_zxfer_source_required_property_table$l_append_nl$l_append_row
-		else
-			g_zxfer_source_required_property_table=$l_append_row
-		fi
-		;;
-	destination)
-		if [ -n "${g_zxfer_destination_required_property_table:-}" ]; then
-			g_zxfer_destination_required_property_table=$g_zxfer_destination_required_property_table$l_append_nl$l_append_row
-		else
-			g_zxfer_destination_required_property_table=$l_append_row
-		fi
-		;;
-	esac
-	return 0
-}
-
 # Purpose: Return the property tree prefetch dataset list in the form expected
 # by later helpers.
 # Usage: Called during property prefetch when sibling helpers need the same
@@ -3010,27 +2976,11 @@ END {
 }' "$l_dataset_filter_file" "$l_property_tree_file"
 }
 
-# Purpose: Mark the recursive property prefetch failed in the module-owned
-# state.
-# Usage: Called during property prefetch failure paths so later helpers can
-# make decisions from one shared marker instead of re-deriving it.
-zxfer_mark_recursive_property_prefetch_failed() {
-	l_side=$1
-
-	case "$l_side" in
-	source)
-		g_zxfer_source_property_tree_prefetch_state=2
-		;;
-	destination)
-		g_zxfer_destination_property_tree_prefetch_state=2
-		;;
-	esac
-}
-
-# Purpose: Clean up active recursive property prefetch staging and publish the
-# failed-state marker with the original status.
-# Usage: Called during property prefetch failure paths so cleanup and state
-# marking stay in one module-owned path.
+# Purpose: Mark one side's recursive property prefetch failed, clean up any
+# active staging files, and return the original failure status.
+# Usage: Called from every zxfer_prefetch_recursive_normalized_properties
+# failure path (with an empty stage-file list before staging exists) so
+# cleanup and state marking stay in one module-owned path.
 zxfer_abort_recursive_property_prefetch() {
 	l_side=$1
 	l_stage_files=$2
@@ -3039,7 +2989,14 @@ zxfer_abort_recursive_property_prefetch() {
 	if [ -n "$l_stage_files" ]; then
 		zxfer_cleanup_runtime_artifact_path_list "$l_stage_files"
 	fi
-	zxfer_mark_recursive_property_prefetch_failed "$l_side"
+	case "$l_side" in
+	source)
+		g_zxfer_source_property_tree_prefetch_state=2
+		;;
+	destination)
+		g_zxfer_destination_property_tree_prefetch_state=2
+		;;
+	esac
 	return "$l_status"
 }
 
@@ -3081,18 +3038,14 @@ zxfer_prefetch_recursive_normalized_properties() {
 	l_dataset_list=$(zxfer_get_property_tree_prefetch_dataset_list "$l_side") ||
 		l_dataset_list_status=$?
 	if [ "$l_dataset_list_status" -ne 0 ]; then
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_dataset_list_status"
+		zxfer_abort_recursive_property_prefetch "$l_side" "" "$l_dataset_list_status"
+		return "$?"
 	fi
 
-	[ -n "$l_root_dataset" ] || {
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return 1
-	}
-	[ -n "$l_zfs_cmd" ] || {
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return 1
-	}
+	if [ -z "$l_root_dataset" ] || [ -z "$l_zfs_cmd" ]; then
+		zxfer_abort_recursive_property_prefetch "$l_side" "" 1
+		return "$?"
+	fi
 
 	l_dataset_filter_file=""
 	l_machine_tree_file=""
@@ -3104,8 +3057,8 @@ zxfer_prefetch_recursive_normalized_properties() {
 	l_stage_status=0
 	zxfer_create_temp_file_group 7 >/dev/null || l_stage_status=$?
 	if [ "$l_stage_status" -ne 0 ]; then
-		zxfer_mark_recursive_property_prefetch_failed "$l_side"
-		return "$l_stage_status"
+		zxfer_abort_recursive_property_prefetch "$l_side" "" "$l_stage_status"
+		return "$?"
 	fi
 	l_prefetch_stage_files=$g_zxfer_temp_file_group_result
 	{
@@ -3396,7 +3349,7 @@ zxfer_get_required_property_probe() {
 	g_zxfer_required_properties_result=""
 	g_zxfer_required_property_probe_result=""
 
-	if zxfer_required_property_table_find "$l_lookup_side" "$l_dataset" "$l_required_property"; then
+	if zxfer_property_table_find_dataset "$l_lookup_side" "$l_dataset" "$l_required_property"; then
 		g_zxfer_required_property_probe_result=$g_zxfer_property_table_lookup_result
 		return 0
 	fi
@@ -3443,7 +3396,8 @@ zxfer_get_required_property_probe() {
 		esac
 	fi
 
-	zxfer_required_property_table_append "$l_lookup_side" "$l_dataset" "$l_required_property" "$g_zxfer_required_property_probe_result"
+	zxfer_property_table_append_dataset "$l_lookup_side" "$l_dataset" \
+		"$g_zxfer_required_property_probe_result" "$l_required_property"
 
 	return 0
 }

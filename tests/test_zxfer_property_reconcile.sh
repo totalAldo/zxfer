@@ -812,8 +812,8 @@ test_zxfer_invalidate_destination_property_mutation_cache_strips_descendants_and
 	zxfer_property_table_append_dataset destination "backup/dst" "compression=lz4=local"
 	zxfer_property_table_append_dataset destination "backup/dst/child" "compression=gzip=inherited"
 	zxfer_property_table_append_dataset destination "backup/dst2" "atime=off=local"
-	zxfer_required_property_table_append destination "backup/dst/child" "casesensitivity" "casesensitivity=sensitive=local"
-	zxfer_required_property_table_append destination "backup/dst2" "casesensitivity" "casesensitivity=sensitive=local"
+	zxfer_property_table_append_dataset destination "backup/dst/child" "casesensitivity=sensitive=local" "casesensitivity"
+	zxfer_property_table_append_dataset destination "backup/dst2" "casesensitivity=sensitive=local" "casesensitivity"
 	g_zxfer_destination_property_tree_prefetch_state=1
 
 	zxfer_invalidate_destination_property_mutation_cache "backup/dst"
@@ -831,11 +831,11 @@ test_zxfer_invalidate_destination_property_mutation_cache_strips_descendants_and
 		sibling=1
 	fi
 	child_required=0
-	if zxfer_required_property_table_find destination "backup/dst/child" "casesensitivity"; then
+	if zxfer_property_table_find_dataset destination "backup/dst/child" "casesensitivity"; then
 		child_required=1
 	fi
 	sibling_required=0
-	if zxfer_required_property_table_find destination "backup/dst2" "casesensitivity"; then
+	if zxfer_property_table_find_dataset destination "backup/dst2" "casesensitivity"; then
 		sibling_required=1
 	fi
 
@@ -880,8 +880,8 @@ test_zxfer_invalidate_destination_property_mutation_cache_without_dataset_resets
 test_zxfer_reset_property_iteration_caches_clears_tables_memo_and_prefetch_state() {
 	zxfer_property_table_append_dataset source "tank/src" "compression=lz4=local"
 	zxfer_property_table_append_dataset destination "backup/dst" "compression=lz4=local"
-	zxfer_required_property_table_append source "tank/src" "casesensitivity" "casesensitivity=sensitive=local"
-	zxfer_required_property_table_append destination "backup/dst" "casesensitivity" "casesensitivity=sensitive=local"
+	zxfer_property_table_append_dataset source "tank/src" "casesensitivity=sensitive=local" "casesensitivity"
+	zxfer_property_table_append_dataset destination "backup/dst" "casesensitivity=sensitive=local" "casesensitivity"
 	g_zxfer_source_property_tree_prefetch_root="tank/src"
 	g_zxfer_source_property_tree_prefetch_zfs_cmd="/source/zfs"
 	g_zxfer_source_property_tree_prefetch_state=1
@@ -917,7 +917,7 @@ test_zxfer_reset_property_iteration_caches_clears_tables_memo_and_prefetch_state
 test_zxfer_property_table_invalidate_dataset_removes_exact_source_rows_only() {
 	zxfer_property_table_append_dataset source "tank/src" "compression=lz4=local"
 	zxfer_property_table_append_dataset source "tank/src/child" "compression=gzip=inherited"
-	zxfer_required_property_table_append source "tank/src" "casesensitivity" "casesensitivity=sensitive=local"
+	zxfer_property_table_append_dataset source "tank/src" "casesensitivity=sensitive=local" "casesensitivity"
 
 	zxfer_property_table_invalidate_dataset source "tank/src" 0
 
@@ -930,7 +930,7 @@ test_zxfer_property_table_invalidate_dataset_removes_exact_source_rows_only() {
 		child=1
 	fi
 	required=0
-	if zxfer_required_property_table_find source "tank/src" "casesensitivity"; then
+	if zxfer_property_table_find_dataset source "tank/src" "casesensitivity"; then
 		required=1
 	fi
 
@@ -944,9 +944,9 @@ test_zxfer_property_table_invalidate_dataset_removes_exact_source_rows_only() {
 
 test_zxfer_reset_destination_property_iteration_cache_preserves_source_table_rows() {
 	zxfer_property_table_append_dataset source "tank/src" "compression=lz4=local"
-	zxfer_required_property_table_append source "tank/src" "casesensitivity" "casesensitivity=sensitive=local"
+	zxfer_property_table_append_dataset source "tank/src" "casesensitivity=sensitive=local" "casesensitivity"
 	zxfer_property_table_append_dataset destination "backup/dst" "compression=lz4=local"
-	zxfer_required_property_table_append destination "backup/dst" "casesensitivity" "casesensitivity=sensitive=local"
+	zxfer_property_table_append_dataset destination "backup/dst" "casesensitivity=sensitive=local" "casesensitivity"
 
 	zxfer_reset_destination_property_iteration_cache
 
@@ -955,7 +955,7 @@ test_zxfer_reset_destination_property_iteration_cache_preserves_source_table_row
 		source_row=1
 	fi
 	source_required=0
-	if zxfer_required_property_table_find source "tank/src" "casesensitivity"; then
+	if zxfer_property_table_find_dataset source "tank/src" "casesensitivity"; then
 		source_required=1
 	fi
 	destination_row=0
@@ -963,7 +963,7 @@ test_zxfer_reset_destination_property_iteration_cache_preserves_source_table_row
 		destination_row=1
 	fi
 	destination_required=0
-	if zxfer_required_property_table_find destination "backup/dst" "casesensitivity"; then
+	if zxfer_property_table_find_dataset destination "backup/dst" "casesensitivity"; then
 		destination_required=1
 	fi
 
@@ -1701,7 +1701,7 @@ test_zxfer_get_required_property_probe_reports_serializer_failures_without_cachi
 	zxfer_get_required_property_probe "tank/src" "casesensitivity" "/sbin/zfs" source >"$err_log" 2>&1
 	status=$?
 	table_hit=0
-	if zxfer_required_property_table_find source "tank/src" "casesensitivity"; then
+	if zxfer_property_table_find_dataset source "tank/src" "casesensitivity"; then
 		table_hit=1
 	fi
 
@@ -1752,7 +1752,7 @@ test_zxfer_get_required_property_probe_reports_serializer_readback_failures_with
 	zxfer_get_required_property_probe "tank/src" "casesensitivity" "/sbin/zfs" source >"$err_log" 2>&1
 	status=$?
 	table_hit=0
-	if zxfer_required_property_table_find source "tank/src" "casesensitivity"; then
+	if zxfer_property_table_find_dataset source "tank/src" "casesensitivity"; then
 		table_hit=1
 	fi
 

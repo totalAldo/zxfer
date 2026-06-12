@@ -56,26 +56,25 @@ src/zxfer_property_reconcile.sh
   1422:				zxfer_throw_error "Failed to filter child creation override properties." "$?"
   1442:				l_with_parents="yes"
   1448:		zxfer_throw_error "Error when creating destination filesystem." "$?"
-  1549:			return "$?"
-  2159:		return "$l_dest_exist_status"
-  2294:		return "$l_property_transfer_create_status"
-  2466:	l_decoded_assignment=$("${g_cmd_awk:-awk}" \
-  2617:		return 1
-  2706:$l_strip_table
-  2707:EOF
-  2731:		return 0
-  2737:		l_invalidate_table=$(zxfer_property_table_strip_dataset_rows \
-  2746:		l_invalidate_required_table=$(zxfer_property_table_strip_dataset_rows \
-  2748:			l_strip_status=$?
-  2750:			l_invalidate_required_table=""
-  3236:			g_zxfer_source_property_table=$l_prefetched_table$l_nl$g_zxfer_source_property_table
-  3244:			g_zxfer_destination_property_table=$l_prefetched_table$l_nl$g_zxfer_destination_property_table
-  3277:	destination)
-  3289:	*)
-  3290:		return 1
-  3427:			g_zxfer_required_properties_result="Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
-  3428:			printf '%s\n' "$g_zxfer_required_properties_result"
-  3429:			return 1
+  1568:			return "$?"
+  2168:		return "$l_dest_exist_status"
+  2303:		return "$l_property_transfer_create_status"
+  2458:	l_decoded_assignment=$("${g_cmd_awk:-awk}" \
+  2749:$l_strip_table
+  2750:EOF
+  2774:		return 0
+  2780:		l_invalidate_table=$(zxfer_property_table_strip_dataset_rows \
+  2789:		l_invalidate_required_table=$(zxfer_property_table_strip_dataset_rows \
+  2791:			l_strip_status=$?
+  2793:			l_invalidate_required_table=""
+  3189:			g_zxfer_source_property_table=$l_prefetched_table$l_nl$g_zxfer_source_property_table
+  3197:			g_zxfer_destination_property_table=$l_prefetched_table$l_nl$g_zxfer_destination_property_table
+  3230:	destination)
+  3242:	*)
+  3243:		return 1
+  3380:			g_zxfer_required_properties_result="Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
+  3381:			printf '%s\n' "$g_zxfer_required_properties_result"
+  3382:			return 1
 
 src/zxfer_remote_hosts.sh
   128:	if ! l_socket_dir=$(zxfer_create_unpredictable_staging_entry \
