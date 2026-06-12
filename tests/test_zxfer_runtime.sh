@@ -84,8 +84,6 @@ EOF
 		0 "$group_status"
 	assertEquals "Temp-file group allocation should publish one path per requested file." \
 		3 "$group_count"
-	assertEquals "Temp-file group allocation should track the number of allocated files." \
-		3 "$g_zxfer_temp_file_group_allocated_count"
 	assertEquals "Temp-file group allocation should print the same newline-delimited paths it stores." \
 		"$g_zxfer_temp_file_group_result" "$(cat "$group_output_file")"
 	assertEquals "Temp-file group allocation should create every published file." \
@@ -117,7 +115,6 @@ test_zxfer_create_temp_file_group_cleans_partial_allocations_on_failure() {
 	set +e
 	zxfer_create_temp_file_group 4 >/dev/null
 	group_status=$?
-	allocated_count=$g_zxfer_temp_file_group_allocated_count
 	group_result=$g_zxfer_temp_file_group_result
 	if [ -e "$first_path" ]; then
 		first_exists=yes
@@ -136,8 +133,6 @@ test_zxfer_create_temp_file_group_cleans_partial_allocations_on_failure() {
 
 	assertEquals "Temp-file group allocation should preserve the failed allocation status." \
 		73 "$group_status"
-	assertEquals "Temp-file group allocation should report how many files were allocated before failure." \
-		2 "$allocated_count"
 	assertEquals "Temp-file group allocation should not publish a complete group on failure." \
 		"" "$group_result"
 	assertFalse "Temp-file group allocation should clean the first partial file on failure." \
@@ -148,7 +143,6 @@ test_zxfer_create_temp_file_group_cleans_partial_allocations_on_failure() {
 
 test_zxfer_create_temp_file_group_rejects_invalid_counts() {
 	g_zxfer_temp_file_group_result="stale-group"
-	g_zxfer_temp_file_group_allocated_count=9
 
 	set +e
 	zxfer_create_temp_file_group 0 >/dev/null
@@ -158,8 +152,6 @@ test_zxfer_create_temp_file_group_rejects_invalid_counts() {
 		1 "$group_status"
 	assertEquals "Temp-file group allocation should clear stale group results on invalid input." \
 		"" "$g_zxfer_temp_file_group_result"
-	assertEquals "Temp-file group allocation should reset the allocated count on invalid input." \
-		0 "$g_zxfer_temp_file_group_allocated_count"
 }
 
 test_zxfer_cleanup_pid_helpers_cover_current_shell_paths() {
@@ -647,64 +639,6 @@ test_runtime_artifact_allocators_skip_pre_seeded_counter_names_in_current_shell(
 		"$g_zxfer_run_tmp_root/skip-dir.4" "$dir_path"
 }
 
-test_runtime_in_parent_allocators_use_unpredictable_mktemp_names() {
-	# The allocators publish paths under the validated physical parent.
-	# Staging parents may be shared sticky directories, so the names must be
-	# mktemp-randomized: predictable pid+attempt slots are squat-able by a
-	# local process-table reader.
-	parent_dir=$(cd -P "$TEST_TMPDIR" && pwd)/runtime-parent-staging
-	mkdir -p "$parent_dir"
-
-	zxfer_create_runtime_artifact_file_in_parent "$parent_dir" "stage-file" >/dev/null
-	file_status=$?
-	file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_runtime_artifact_file_in_parent "$parent_dir" "stage-file" >/dev/null
-	second_file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_cache_object_stage_dir_in_parent "$parent_dir" "stage-dir" >/dev/null
-	stage_status=$?
-	stage_path=$g_zxfer_runtime_artifact_path_result
-
-	case "${file_path##*/}" in
-	"stage-file.$$."*)
-		file_name_randomized=no
-		;;
-	stage-file.??????)
-		file_name_randomized=yes
-		;;
-	*)
-		file_name_randomized=no
-		;;
-	esac
-	case "${stage_path##*/}" in
-	".stage-dir.$$."*)
-		stage_name_randomized=no
-		;;
-	.stage-dir.??????)
-		stage_name_randomized=yes
-		;;
-	*)
-		stage_name_randomized=no
-		;;
-	esac
-
-	assertEquals "Path-adjacent file staging should succeed under a validated parent." \
-		0 "$file_status"
-	assertEquals "Path-adjacent file staging should use the randomized mktemp template, not pid+attempt slots." \
-		yes "$file_name_randomized"
-	assertTrue "Path-adjacent file staging should create the staged file." \
-		"[ -f \"$file_path\" ]"
-	assertNotEquals "Consecutive staged files should never reuse a name." \
-		"$file_path" "$second_file_path"
-	assertEquals "Cache-object stage dirs should succeed under a validated parent." \
-		0 "$stage_status"
-	assertEquals "Cache-object stage dirs should use the randomized mktemp template, not pid+attempt slots." \
-		yes "$stage_name_randomized"
-	assertTrue "Cache-object stage dirs should create the staged directory." \
-		"[ -d \"$stage_path\" ]"
-	assertContains "Cache-object stage dirs should register for trap cleanup." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$stage_path"
-}
-
 test_runtime_artifact_allocators_fail_closed_when_the_target_dir_is_unwritable() {
 	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
 	# Owner-only without write: passes safety validation, rejects creation.
@@ -715,23 +649,10 @@ test_runtime_artifact_allocators_fail_closed_when_the_target_dir_is_unwritable()
 	dir_status=$?
 	chmod 700 "$g_zxfer_run_tmp_root"
 
-	parent_dir=$(cd -P "$TEST_TMPDIR" && pwd)/runtime-unwritable-parent
-	mkdir -p "$parent_dir"
-	chmod 500 "$parent_dir"
-	zxfer_create_runtime_artifact_file_in_parent "$parent_dir" "unwritable" >/dev/null 2>&1
-	parent_file_status=$?
-	zxfer_create_cache_object_stage_dir_in_parent "$parent_dir" "unwritable" >/dev/null 2>&1
-	stage_dir_status=$?
-	chmod 700 "$parent_dir"
-
 	assertEquals "File allocation should fail closed when the run root rejects writes." \
 		1 "$file_status"
 	assertEquals "Directory allocation should fail closed when the run root rejects writes." \
 		1 "$dir_status"
-	assertEquals "Path-adjacent file staging should fail closed when the parent rejects writes." \
-		1 "$parent_file_status"
-	assertEquals "Cache-object stage dirs should fail closed when the parent rejects writes." \
-		1 "$stage_dir_status"
 }
 
 test_runtime_artifact_allocators_skip_taken_names_after_subshell_allocations() {
@@ -747,24 +668,6 @@ test_runtime_artifact_allocators_skip_taken_names_after_subshell_allocations() {
 		"first payload" "$(cat "$first_path")"
 	assertTrue "Subshell allocations should create the later temp file." \
 		"[ -f \"$second_path\" ]"
-}
-
-test_runtime_artifact_file_allocator_in_parent_uses_validated_parent_and_registers_path() {
-	parent_dir="$TEST_TMPDIR/runtime-parent"
-	mkdir -p "$parent_dir"
-
-	zxfer_create_runtime_artifact_file_in_parent "$parent_dir" "runtime-parent-file" >/dev/null
-	status=$?
-	file_path=$g_zxfer_runtime_artifact_path_result
-
-	assertEquals "Parent-scoped runtime artifact allocation should succeed for validated directories." \
-		0 "$status"
-	assertContains "Parent-scoped runtime artifact allocation should create files in the requested directory." \
-		"$file_path" "$parent_dir/"
-	assertTrue "Parent-scoped runtime artifact allocation should create the requested file." \
-		"[ -f \"$file_path\" ]"
-	assertContains "Parent-scoped runtime artifact allocation should register the file for cleanup." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$file_path"
 }
 
 test_zxfer_reset_runtime_artifact_state_cleans_registered_artifacts() {
@@ -1576,27 +1479,6 @@ test_zxfer_write_runtime_artifact_file_suppresses_shell_redirection_stderr() {
 		"status=1" "$output"
 }
 
-test_runtime_artifact_parent_and_stage_helpers_reject_invalid_parent_contexts() {
-	set +e
-	zxfer_create_runtime_artifact_file_in_parent "relative-parent" "runtime-parent-file" >/dev/null 2>&1
-	parent_status=$?
-	stage_output=$(
-		(
-			zxfer_get_path_parent_dir() {
-				return 1
-			}
-			zxfer_stage_runtime_artifact_file_for_path "$TEST_TMPDIR/runtime-target" >/dev/null 2>&1
-			printf 'stage_status=%s\n' "$?"
-		)
-	)
-	set -e
-
-	assertEquals "Runtime artifact files staged in explicit parents should reject unvalidated parent directories." \
-		1 "$parent_status"
-	assertContains "Runtime artifact staging should preserve parent-directory lookup failures." \
-		"$stage_output" "stage_status=1"
-}
-
 test_zxfer_write_runtime_artifact_file_preserves_non_redirection_failure_status() {
 	artifact_path="$TEST_TMPDIR/runtime-nonredirection-failure"
 
@@ -1615,28 +1497,6 @@ test_zxfer_write_runtime_artifact_file_preserves_non_redirection_failure_status(
 
 	assertContains "Runtime artifact writes should preserve non-redirection shell failures from the payload writer." \
 		"$output" "status=7"
-}
-
-test_zxfer_write_cache_object_contents_to_path_rejects_symlinked_targets() {
-	object_path="$TEST_TMPDIR/cache-object-open-failure"
-	object_target_dir="$TEST_TMPDIR/cache-object-target-dir"
-	mkdir -p "$object_target_dir" || fail "Unable to create the cache-object fixture directory."
-	ln -s "$object_target_dir" "$object_path" || fail "Unable to create the cache-object redirection failure fixture."
-
-	set +e
-	zxfer_write_cache_object_contents_to_path "$object_path" "demo-kind" "" "payload" >/dev/null 2>&1
-	object_write_status=$?
-	set -e
-	if [ -e "$object_path" ] && [ ! -L "$object_path" ]; then
-		object_partial_exists=yes
-	else
-		object_partial_exists=no
-	fi
-
-	assertEquals "Cache-object content writes should fail closed when the destination path cannot be opened for writing." \
-		1 "$object_write_status"
-	assertEquals "Failed cache-object content writes should not leave a partially published target behind." \
-		no "$object_partial_exists"
 }
 
 test_get_os_handles_local_and_remote_invocations() {
@@ -1669,7 +1529,7 @@ test_init_globals_initializes_dependency_state_and_temp_files() {
 			g_last_common_snap="stale@snap"
 			g_zfs_send_job_pids="123 456"
 			g_zxfer_background_job_records="stale-job	kind	111	/tmp/bg	/runner	token"
-			g_zxfer_background_job_wait_job_id="stale-job"
+			g_zxfer_background_job_wait_exit_status="stale-status"
 			g_zxfer_property_table_lookup_result="stale-lookup"
 			g_zxfer_source_pvs_raw="stale=property=local"
 			g_zxfer_property_stage_file_read_result="stale-stage-read"
@@ -1701,7 +1561,7 @@ test_init_globals_initializes_dependency_state_and_temp_files() {
 			printf 'last_common=<%s>\n' "$g_last_common_snap"
 			printf 'send_pids=<%s>\n' "$g_zfs_send_job_pids"
 			printf 'background_records=<%s>\n' "$g_zxfer_background_job_records"
-			printf 'background_wait_job=<%s>\n' "$g_zxfer_background_job_wait_job_id"
+			printf 'background_wait_status=<%s>\n' "$g_zxfer_background_job_wait_exit_status"
 			printf 'table_lookup=<%s>\n' "$g_zxfer_property_table_lookup_result"
 			printf 'source_pvs=<%s>\n' "$g_zxfer_source_pvs_raw"
 			printf 'property_stage_read=<%s>\n' "$g_zxfer_property_stage_file_read_result"
@@ -1745,7 +1605,7 @@ test_init_globals_initializes_dependency_state_and_temp_files() {
 	assertContains "zxfer_init_globals should reset supervised background-job registry state." \
 		"$output" "background_records=<>"
 	assertContains "zxfer_init_globals should reset supervised background-job wait scratch state." \
-		"$output" "background_wait_job=<>"
+		"$output" "background_wait_status=<>"
 	assertContains "zxfer_init_globals should reset property-table lookup scratch state." \
 		"$output" "table_lookup=<>"
 	assertContains "zxfer_init_globals should reset property-reconcile source scratch state." \
@@ -2117,400 +1977,6 @@ test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 		"$output" "unsupported_fs=<>"
 	assertContains "Re-running zxfer_init_globals should clear volume unsupported-property cache state." \
 		"$output" "unsupported_vol=<>"
-}
-
-test_zxfer_cache_object_file_round_trip_preserves_metadata_and_payload() {
-	object_path="$TEST_TMPDIR/cache-object-round-trip.entry"
-	output_file="$TEST_TMPDIR/cache-object-round-trip.out"
-	metadata=$(printf '%s\n' \
-		"created_epoch=123" \
-		"side=source")
-	payload=$(printf '%s\n' \
-		"line one" \
-		"line two")
-
-	zxfer_write_cache_object_file_atomically \
-		"$object_path" "demo-kind" "$metadata" "$payload" >/dev/null
-	write_status=$?
-	zxfer_read_cache_object_file "$object_path" "demo-kind" >"$output_file"
-	read_status=$?
-
-	assertEquals "Atomic cache-object writes should publish a readable cache object." \
-		0 "$write_status"
-	assertEquals "Cache-object reads should succeed for valid published objects." \
-		0 "$read_status"
-	assertEquals "Valid cache-object reads should reproduce the original payload on stdout." \
-		"$payload" "$(cat "$output_file")"
-	assertEquals "Valid cache-object reads should publish the parsed object kind in shared scratch state." \
-		"demo-kind" "$g_zxfer_cache_object_kind_result"
-	assertEquals "Valid cache-object reads should preserve metadata lines in shared scratch state." \
-		"$metadata" "$g_zxfer_cache_object_metadata_result"
-	assertEquals "Valid cache-object reads should preserve the full payload in shared scratch state." \
-		"$payload" "$g_zxfer_cache_object_payload_result"
-}
-
-test_cache_object_metadata_helpers_cover_invalid_lines_missing_keys_and_max_yield_constant() {
-	set +e
-	zxfer_validate_cache_object_metadata_lines "broken-metadata-line" >/dev/null 2>&1
-	metadata_status=$?
-	zxfer_get_cache_object_metadata_value "kind=demo" "missing" >/dev/null 2>&1
-	missing_key_status=$?
-	set -e
-	max_yield=$(zxfer_get_max_yield_iterations)
-
-	assertEquals "Cache-object metadata validation should fail closed on lines without key separators." \
-		1 "$metadata_status"
-	assertEquals "Cache-object metadata lookup should fail when the requested key is absent." \
-		1 "$missing_key_status"
-	assertEquals "Runtime max-yield helpers should return the exported runtime constant." \
-		"$ZXFER_MAX_YIELD_ITERATIONS" "$max_yield"
-}
-
-test_zxfer_read_cache_object_file_rejects_missing_end_marker() {
-	object_path="$TEST_TMPDIR/cache-object-missing-end.entry"
-	output_file="$TEST_TMPDIR/cache-object-missing-end.out"
-
-	cat >"$object_path" <<-EOF
-		$ZXFER_CACHE_OBJECT_HEADER_LINE
-		kind=demo-kind
-
-		payload
-	EOF
-
-	g_zxfer_cache_object_kind_result="stale-kind"
-	g_zxfer_cache_object_metadata_result="stale=metadata"
-	g_zxfer_cache_object_payload_result="stale-payload"
-	set +e
-	zxfer_read_cache_object_file "$object_path" "demo-kind" >"$output_file"
-	status=$?
-
-	assertEquals "Cache-object reads should fail closed when the end marker is missing." \
-		1 "$status"
-	assertEquals "Rejected cache objects should not emit a payload." \
-		"" "$(cat "$output_file")"
-	assertEquals "Rejected cache objects should clear the kind scratch result." \
-		"" "$g_zxfer_cache_object_kind_result"
-	assertEquals "Rejected cache objects should clear the metadata scratch result." \
-		"" "$g_zxfer_cache_object_metadata_result"
-	assertEquals "Rejected cache objects should clear the payload scratch result." \
-		"" "$g_zxfer_cache_object_payload_result"
-}
-
-test_zxfer_read_cache_object_file_rejects_wrong_kind() {
-	object_path="$TEST_TMPDIR/cache-object-wrong-kind.entry"
-	output_file="$TEST_TMPDIR/cache-object-wrong-kind.out"
-
-	zxfer_write_cache_object_file_atomically \
-		"$object_path" "actual-kind" "" "payload" >/dev/null ||
-		fail "Unable to create a valid cache object fixture."
-
-	g_zxfer_cache_object_kind_result="stale-kind"
-	g_zxfer_cache_object_payload_result="stale-payload"
-	set +e
-	zxfer_read_cache_object_file "$object_path" "expected-kind" >"$output_file"
-	status=$?
-
-	assertEquals "Cache-object reads should fail closed when the published object kind does not match the expected kind." \
-		1 "$status"
-	assertEquals "Wrong-kind cache objects should not emit a payload." \
-		"" "$(cat "$output_file")"
-	assertEquals "Wrong-kind cache objects should clear the cached kind scratch state." \
-		"" "$g_zxfer_cache_object_kind_result"
-	assertEquals "Wrong-kind cache objects should clear the cached payload scratch state." \
-		"" "$g_zxfer_cache_object_payload_result"
-}
-
-test_zxfer_read_cache_object_file_rejects_runtime_read_failures() {
-	unreadable_path="$TEST_TMPDIR/cache-object-unreadable.entry"
-	unreadable_output="$TEST_TMPDIR/cache-object-unreadable.out"
-	output=$(
-		(
-			zxfer_write_cache_object_file_atomically \
-				"$unreadable_path" "demo-kind" "" "payload" >/dev/null ||
-				fail "Unable to create a cache object fixture for readback failure coverage."
-
-			zxfer_read_runtime_artifact_file() {
-				g_zxfer_runtime_artifact_read_result="stale-runtime-read"
-				return 1
-			}
-
-			g_zxfer_cache_object_kind_result="stale-kind"
-			g_zxfer_cache_object_metadata_result="stale=metadata"
-			g_zxfer_cache_object_payload_result="stale-payload"
-			set +e
-			zxfer_read_cache_object_file "$unreadable_path" "demo-kind" >"$unreadable_output"
-			unreadable_status=$?
-			set -e
-
-			printf 'status=%s\n' "$unreadable_status"
-			printf 'payload=<%s>\n' "$(cat "$unreadable_output")"
-			printf 'kind=<%s>\n' "$g_zxfer_cache_object_kind_result"
-			printf 'metadata=<%s>\n' "$g_zxfer_cache_object_metadata_result"
-			printf 'cache_payload=<%s>\n' "$g_zxfer_cache_object_payload_result"
-		)
-	)
-
-	assertContains "Cache-object reads should fail closed when the staged runtime read helper fails." \
-		"$output" "status=1"
-	assertContains "Runtime read failures should not emit a payload." \
-		"$output" "payload=<>"
-	assertContains "Runtime read failures should clear the cached kind scratch state." \
-		"$output" "kind=<>"
-	assertContains "Runtime read failures should clear the cached metadata scratch state." \
-		"$output" "metadata=<>"
-	assertContains "Runtime read failures should clear the cached payload scratch state." \
-		"$output" "cache_payload=<>"
-}
-
-test_zxfer_read_cache_object_file_rejects_invalid_kind_and_metadata_lines() {
-	invalid_kind_path="$TEST_TMPDIR/cache-object-invalid-kind"
-	invalid_metadata_path="$TEST_TMPDIR/cache-object-invalid-metadata"
-	printf '%s\n%s\n\npayload\n%s\n' \
-		"$ZXFER_CACHE_OBJECT_HEADER_LINE" \
-		"broken" \
-		"$ZXFER_CACHE_OBJECT_END_LINE" >"$invalid_kind_path"
-	printf '%s\n%s\n%s\n\npayload\n%s\n' \
-		"$ZXFER_CACHE_OBJECT_HEADER_LINE" \
-		"kind=demo-kind" \
-		"broken-metadata-line" \
-		"$ZXFER_CACHE_OBJECT_END_LINE" >"$invalid_metadata_path"
-
-	set +e
-	zxfer_read_cache_object_file "$invalid_kind_path" "demo-kind" >/dev/null 2>&1
-	invalid_kind_status=$?
-	zxfer_read_cache_object_file "$invalid_metadata_path" "demo-kind" >/dev/null 2>&1
-	invalid_metadata_status=$?
-	set -e
-
-	assertEquals "Cache-object reads should fail closed when the kind header is malformed." \
-		1 "$invalid_kind_status"
-	assertEquals "Cache-object reads should fail closed when metadata lines are malformed." \
-		1 "$invalid_metadata_status"
-}
-
-test_zxfer_read_cache_object_file_rejects_empty_payloads() {
-	empty_path="$TEST_TMPDIR/cache-object-empty.entry"
-	empty_output="$TEST_TMPDIR/cache-object-empty.out"
-
-	cat >"$empty_path" <<-EOF
-		$ZXFER_CACHE_OBJECT_HEADER_LINE
-		kind=demo-kind
-
-		$ZXFER_CACHE_OBJECT_END_LINE
-	EOF
-
-	set +e
-	zxfer_read_cache_object_file "$empty_path" "demo-kind" >"$empty_output"
-	empty_status=$?
-
-	assertEquals "Cache-object reads should fail closed when the published payload is empty." \
-		1 "$empty_status"
-	assertEquals "Empty-payload cache objects should not emit a payload." \
-		"" "$(cat "$empty_output")"
-}
-
-test_zxfer_write_cache_object_file_atomically_cleans_up_stage_dirs_on_write_readback_and_rename_failures() {
-	stage_root="$TEST_TMPDIR/cache-object-stage-cleanup"
-	write_target="$stage_root/write-failure.entry"
-	readback_target="$stage_root/readback-failure.entry"
-	rename_target="$stage_root/rename-failure.entry"
-	mkdir -p "$stage_root" || fail "Unable to create cache-object stage root."
-
-	set +e
-	(
-		zxfer_write_cache_object_contents_to_path() {
-			return 1
-		}
-		zxfer_write_cache_object_file_atomically \
-			"$write_target" "demo-kind" "" "payload"
-	)
-	write_status=$?
-	set -- "$stage_root"/.zxfer-cache-object.*
-	if [ -e "$1" ]; then
-		write_stage_count=$#
-	else
-		write_stage_count=0
-	fi
-
-	set +e
-	(
-		mv() {
-			return 1
-		}
-		zxfer_write_cache_object_file_atomically \
-			"$rename_target" "demo-kind" "" "payload"
-	)
-	rename_status=$?
-	set -- "$stage_root"/.zxfer-cache-object.*
-	if [ -e "$1" ]; then
-		rename_stage_count=$#
-	else
-		rename_stage_count=0
-	fi
-
-	assertEquals "Atomic cache-object writes should fail closed when the staged payload cannot be written." \
-		1 "$write_status"
-	assertFalse "Failed staged payload writes should not leave a published cache object behind." \
-		"[ -e \"$write_target\" ]"
-	assertEquals "Failed staged payload writes should clean up their private stage directory." \
-		0 "$write_stage_count"
-
-	set +e
-	(
-		zxfer_read_cache_object_file() {
-			return 1
-		}
-		zxfer_write_cache_object_file_atomically \
-			"$readback_target" "demo-kind" "" "payload"
-	)
-	readback_status=$?
-	set -- "$stage_root"/.zxfer-cache-object.*
-	if [ -e "$1" ]; then
-		readback_stage_count=$#
-	else
-		readback_stage_count=0
-	fi
-
-	assertEquals "Atomic cache-object writes should fail closed when the staged object cannot be read back for validation." \
-		1 "$readback_status"
-	assertFalse "Failed staged readback validation should not leave a published cache object behind." \
-		"[ -e \"$readback_target\" ]"
-	assertEquals "Failed staged readback validation should clean up their private stage directory." \
-		0 "$readback_stage_count"
-
-	assertEquals "Atomic cache-object writes should fail closed when the staged object cannot be renamed into place." \
-		1 "$rename_status"
-	assertFalse "Failed cache-object renames should not leave a published cache object behind." \
-		"[ -e \"$rename_target\" ]"
-	assertEquals "Failed cache-object renames should clean up their private stage directory." \
-		0 "$rename_stage_count"
-}
-
-test_zxfer_write_cache_object_file_atomically_cleans_up_stage_dirs_when_rmdir_would_fail() {
-	stage_root="$TEST_TMPDIR/cache-object-stage-rmdir-failure"
-	target_path="$stage_root/published.entry"
-	mkdir -p "$stage_root" || fail "Unable to create cache-object publish root."
-
-	set +e
-	(
-		rmdir() {
-			return 1
-		}
-		zxfer_write_cache_object_file_atomically \
-			"$target_path" "demo-kind" "" "payload"
-	)
-	status=$?
-	set -- "$stage_root"/.zxfer-cache-object.*
-	if [ -e "$1" ]; then
-		stage_count=$#
-	else
-		stage_count=0
-	fi
-
-	assertEquals "Successful cache-object publishes should not depend on a direct rmdir cleanup path." \
-		0 "$status"
-	assertTrue "Successful cache-object publishes should still create the published target." \
-		"[ -f \"$target_path\" ]"
-	assertEquals "Successful cache-object publishes should clean up their private stage directory even when rmdir would fail." \
-		0 "$stage_count"
-}
-
-test_zxfer_write_cache_object_file_atomically_reports_stage_dir_creation_failures() {
-	set +e
-	stage_output=$(
-		(
-			zxfer_create_cache_object_stage_dir_for_path() {
-				return 1
-			}
-			zxfer_write_cache_object_file_atomically \
-				"$TEST_TMPDIR/cache-object-stage-dir-failure" "demo-kind" "" "payload" >/dev/null 2>&1
-			printf 'status=%s\n' "$?"
-		)
-	)
-	set -e
-
-	assertEquals "Atomic cache-object writes should fail closed when the stage directory cannot be allocated." \
-		"status=1" "$stage_output"
-}
-
-test_zxfer_create_cache_object_stage_dir_for_path_preserves_parent_lookup_failures() {
-	output=$(
-		(
-			zxfer_get_path_parent_dir() {
-				return 1
-			}
-			set +e
-			zxfer_create_cache_object_stage_dir_for_path "$TEST_TMPDIR/cache-object-parent-lookup" >/dev/null
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Cache-object stage-dir creation should preserve target-parent lookup failures." \
-		"$output" "status=1"
-}
-
-test_zxfer_write_cache_object_file_atomically_registers_stage_dirs_in_current_shell_before_failures() {
-	stage_root="$TEST_TMPDIR/cache-object-stage-current-shell"
-	target_path="$stage_root/published.entry"
-	trace_file="$TEST_TMPDIR/cache-object-stage-current-shell.trace"
-	mkdir -p "$stage_root" || fail "Unable to create the cache-object stage root."
-
-	output=$(
-		(
-			zxfer_write_cache_object_contents_to_path() {
-				printf 'registered=<%s>\n' "${g_zxfer_runtime_artifact_cleanup_paths:-}" >"$trace_file"
-				return 1
-			}
-			set +e
-			zxfer_write_cache_object_file_atomically \
-				"$target_path" "demo-kind" "" "payload" >/dev/null
-			status=$?
-			set -e
-			printf 'status=%s\n' "$status"
-		)
-	)
-	set -- "$stage_root"/.zxfer-cache-object.*
-	if [ -e "$1" ]; then
-		stage_count=$#
-	else
-		stage_count=0
-	fi
-
-	assertContains "Atomic cache-object writes should still fail closed when the staged payload helper fails." \
-		"$output" "status=1"
-	assertContains "Atomic cache-object writes should register their private stage dir in current-shell cleanup state before helper failures." \
-		"$(cat "$trace_file")" "/.zxfer-cache-object."
-	assertEquals "Atomic cache-object writes should still clean up their private stage directory after helper failures." \
-		0 "$stage_count"
-}
-
-test_zxfer_write_cache_object_contents_to_path_rejects_invalid_metadata_and_failed_writes() {
-	write_failure_target="$TEST_TMPDIR/cache-object-write-failure.entry"
-
-	set +e
-	zxfer_write_cache_object_contents_to_path \
-		"$TEST_TMPDIR/cache-object-invalid-metadata.entry" \
-		"demo-kind" "broken-metadata-line" "payload" >/dev/null 2>&1
-	metadata_status=$?
-	write_failure_output=$(
-		(
-			printf() {
-				return 1
-			}
-			set +e
-			zxfer_write_cache_object_contents_to_path \
-				"$write_failure_target" \
-				"demo-kind" "kind=demo" "payload" >/dev/null 2>&1
-			command printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertEquals "Cache-object content writes should fail closed when metadata lines are malformed." \
-		1 "$metadata_status"
-	assertContains "Cache-object content writes should fail closed when the staged write operation fails." \
-		"$write_failure_output" "status=1"
-	assertFalse "Failed cache-object content writes should not create the destination path when the staged write operation fails." \
-		"[ -e \"$write_failure_target\" ]"
 }
 
 test_try_get_effective_tmpdir_fails_cleanly_when_no_safe_default_exists() {

@@ -53,8 +53,6 @@ zxfer_reset_replication_runtime_state() {
 	g_initial_source=""
 	g_initial_source_had_trailing_slash=0
 	g_actual_dest=""
-	g_pending_receive_create_opts=""
-	g_pending_receive_create_dest=""
 	g_dest_seed_requires_property_reconcile=0
 	g_zxfer_post_seed_property_sources_result=""
 	g_zxfer_replication_iteration_list_result=""
@@ -97,9 +95,7 @@ zxfer_compute_actual_dest_for_source() {
 # orchestration when later helpers need a boolean answer about the current
 # destination.
 zxfer_current_destination_is_initial_source_dataset() {
-	if ! l_initial_dest=$(zxfer_compute_actual_dest_for_source "$g_initial_source"); then
-		return 1
-	fi
+	l_initial_dest=$(zxfer_compute_actual_dest_for_source "$g_initial_source") || return 1
 
 	[ "$g_actual_dest" = "$l_initial_dest" ]
 }
@@ -240,15 +236,6 @@ zxfer_get_live_destination_snapshots() {
 	done <<-EOF
 		$(zxfer_normalize_snapshot_record_list "$l_snapshot_records")
 	EOF
-}
-
-# Purpose: Return the snapshot transfer bounds in the form expected by later
-# helpers.
-# Usage: Called during top-level dataset iteration and replication
-# orchestration when sibling helpers need the same lookup without duplicating
-# module logic.
-zxfer_get_snapshot_transfer_bounds() {
-	zxfer_get_snapshot_record_list_bounds "${g_src_snapshot_transfer_list:-}"
 }
 
 # Purpose: Return snapshot record-list bounds for a caller-provided list.
@@ -418,18 +405,6 @@ zxfer_snapshot_transfer_is_complete() {
 	return 1
 }
 
-# Purpose: Send the snapshot transfer range through the active replication
-# pipeline.
-# Usage: Called during top-level dataset iteration and replication
-# orchestration after planning has chosen the exact source range and
-# destination for the transfer.
-zxfer_send_snapshot_transfer_range() {
-	l_final_snapshot_path=$1
-
-	zxfer_echoV "Final snapshot: $l_final_snapshot_path"
-	zxfer_zfs_send_receive "$(zxfer_extract_snapshot_path "$g_last_common_snap")" "$l_final_snapshot_path" "$g_actual_dest" "1"
-}
-
 # Purpose: Copy the snapshots through the replication path owned by this
 # module.
 # Usage: Called during top-level dataset iteration and replication
@@ -446,7 +421,7 @@ zxfer_copy_snapshots() {
 
 	zxfer_reconcile_live_destination_snapshot_state
 
-	if ! l_snapshot_transfer_bounds=$(zxfer_get_snapshot_transfer_bounds); then
+	if ! l_snapshot_transfer_bounds=$(zxfer_get_snapshot_record_list_bounds "${g_src_snapshot_transfer_list:-}"); then
 		zxfer_echoV "No snapshots to copy, skipping destination dataset: $g_actual_dest."
 		return
 	fi
@@ -478,7 +453,10 @@ zxfer_copy_snapshots() {
 		return
 	fi
 
-	zxfer_send_snapshot_transfer_range "$l_final_snapshot_path"
+	zxfer_echoV "Final snapshot: $l_final_snapshot_path"
+	# Re-extract the last common snapshot here: the rollback/seed steps above
+	# can update g_last_common_snap before the incremental send starts.
+	zxfer_zfs_send_receive "$(zxfer_extract_snapshot_path "$g_last_common_snap")" "$l_final_snapshot_path" "$g_actual_dest" "1"
 }
 
 # Purpose: Recheck live destination snapshot state and reconcile delete or seed
@@ -492,9 +470,7 @@ zxfer_copy_snapshots() {
 # verify whether the destination already has a common snapshot so we do not try
 # to receive a full stream into an existing filesystem.
 zxfer_reconcile_live_destination_snapshot_state() {
-	if ! l_reconcile_source_records=$(zxfer_get_live_recheck_source_snapshot_records); then
-		return 0
-	fi
+	l_reconcile_source_records=$(zxfer_get_live_recheck_source_snapshot_records) || return 0
 
 	if ! l_dest_exists=$(zxfer_exists_destination "$g_actual_dest"); then
 		zxfer_throw_error "$l_dest_exists"
@@ -900,9 +876,7 @@ zxfer_build_replication_iteration_list() {
 	l_property_pass_required=$1
 	g_zxfer_replication_iteration_list_result=""
 
-	if ! zxfer_create_temp_file_group 3 >/dev/null; then
-		return 1
-	fi
+	zxfer_create_temp_file_group 3 >/dev/null || return 1
 	l_iteration_stage_files=$g_zxfer_temp_file_group_result
 	{
 		IFS= read -r l_iteration_input_file
@@ -994,9 +968,7 @@ zxfer_collect_post_seed_property_sources() {
 	[ -n "$l_post_seed_property_sources_file" ] || return 0
 	[ -s "$l_post_seed_property_sources_file" ] || return 0
 
-	if ! zxfer_create_temp_file_group 2 >/dev/null; then
-		return 1
-	fi
+	zxfer_create_temp_file_group 2 >/dev/null || return 1
 	l_post_seed_stage_files=$g_zxfer_temp_file_group_result
 	{
 		IFS= read -r l_filtered_sources_file
@@ -1052,9 +1024,6 @@ zxfer_process_source_dataset() {
 	# property cache reset that used to run here whenever jobs were in flight
 	# forced a tree-wide property re-derivation for nearly every dataset under
 	# -j and was the parallel-mode performance regression.
-	# Reset per-dataset state derived from zxfer_transfer_properties().
-	# shellcheck disable=SC2034
-	g_dest_created_by_zxfer=0
 
 	zxfer_inspect_delete_snap "$g_option_d_delete_destination_snapshots" "$l_source"
 
@@ -1146,12 +1115,8 @@ zxfer_replication_background_send_has_capacity() {
 zxfer_replication_source_is_ready_to_process() {
 	l_source=$1
 
-	if ! zxfer_replication_ready_queue_is_active; then
-		return 0
-	fi
-	if ! zxfer_replication_background_send_has_capacity; then
-		return 1
-	fi
+	zxfer_replication_ready_queue_is_active || return 0
+	zxfer_replication_background_send_has_capacity || return 1
 	[ -n "${g_zfs_send_job_supervisor_records:-}" ] || return 0
 
 	l_candidate_dest=$(zxfer_compute_actual_dest_for_source "$l_source")

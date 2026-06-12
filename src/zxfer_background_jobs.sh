@@ -74,7 +74,6 @@ zxfer_reset_background_job_state() {
 	g_zxfer_background_job_last_id=""
 	g_zxfer_background_job_last_runner_pid=""
 	g_zxfer_background_job_last_status_file=""
-	g_zxfer_background_job_record_kind=""
 	g_zxfer_background_job_record_pid=""
 	g_zxfer_background_job_record_teardown=""
 	g_zxfer_background_job_record_status_file=""
@@ -82,8 +81,6 @@ zxfer_reset_background_job_state() {
 	g_zxfer_background_job_completion_report_failure=""
 	g_zxfer_background_job_wait_exit_status=""
 	g_zxfer_background_job_wait_report_failure=""
-	g_zxfer_background_job_wait_job_id=""
-	g_zxfer_background_job_wait_runner_pid=""
 	g_zxfer_background_job_abort_failure_message=""
 	g_zxfer_background_job_queue_record_type=""
 	g_zxfer_background_job_queue_record_job_id=""
@@ -114,9 +111,7 @@ zxfer_init_background_job_spawn_support() {
 		return 0
 	fi
 	g_zxfer_background_job_use_setsid=0
-	if ! command -v setsid >/dev/null 2>&1; then
-		return 0
-	fi
+	command -v setsid >/dev/null 2>&1 || return 0
 	# The probe child prints its own pid and pgid; requiring them to match
 	# pins the invariant the process-group teardown relies on. A setsid that
 	# forks (or fails) yields a mismatch and falls back to the wrapper path.
@@ -177,7 +172,6 @@ $l_job_id	$l_kind	$l_pid	$l_teardown	$l_status_file"
 zxfer_find_background_job_record() {
 	l_job_id=$1
 
-	g_zxfer_background_job_record_kind=""
 	g_zxfer_background_job_record_pid=""
 	g_zxfer_background_job_record_teardown=""
 	g_zxfer_background_job_record_status_file=""
@@ -185,7 +179,6 @@ zxfer_find_background_job_record() {
 	while IFS='	' read -r l_existing_job_id l_existing_kind l_existing_pid l_existing_teardown l_existing_status_file || [ -n "${l_existing_job_id}${l_existing_kind}${l_existing_pid}${l_existing_teardown}${l_existing_status_file}" ]; do
 		[ -n "$l_existing_job_id" ] || continue
 		[ "$l_existing_job_id" = "$l_job_id" ] || continue
-		g_zxfer_background_job_record_kind=$l_existing_kind
 		g_zxfer_background_job_record_pid=$l_existing_pid
 		g_zxfer_background_job_record_teardown=$l_existing_teardown
 		g_zxfer_background_job_record_status_file=$l_existing_status_file
@@ -247,33 +240,27 @@ zxfer_spawn_supervised_background_job() {
 	zxfer_get_temp_file >/dev/null
 	l_status_file=$g_zxfer_temp_file_result
 
-	l_spawn_status=0
-	l_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_status_file") ||
+	l_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_status_file") || {
 		l_spawn_status=$?
-	if [ "$l_spawn_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
 		zxfer_throw_error "Failed to quote the background job [$l_job_id] status file path." "$l_spawn_status"
-	fi
+	}
 
 	l_redirections=""
 	if [ -n "$l_output_file" ]; then
-		l_spawn_status=0
-		l_output_file_safe=$(zxfer_build_shell_command_from_argv "$l_output_file") ||
+		l_output_file_safe=$(zxfer_build_shell_command_from_argv "$l_output_file") || {
 			l_spawn_status=$?
-		if [ "$l_spawn_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
 			zxfer_throw_error "Failed to quote the background job [$l_job_id] output file path." "$l_spawn_status"
-		fi
+		}
 		l_redirections=" > $l_output_file_safe"
 	fi
 	if [ -n "$l_error_file" ]; then
-		l_spawn_status=0
-		l_error_file_safe=$(zxfer_build_shell_command_from_argv "$l_error_file") ||
+		l_error_file_safe=$(zxfer_build_shell_command_from_argv "$l_error_file") || {
 			l_spawn_status=$?
-		if [ "$l_spawn_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
 			zxfer_throw_error "Failed to quote the background job [$l_job_id] error file path." "$l_spawn_status"
-		fi
+		}
 		l_redirections="$l_redirections 2> $l_error_file_safe"
 	fi
 
@@ -315,13 +302,11 @@ exit \"\$l_zxfer_job_status\""
 		l_teardown=process_group
 		setsid sh -c "$l_job_cmd" &
 	else
-		l_spawn_status=0
-		l_wrapper_script=$(zxfer_get_cleanup_child_wrapper_script_path) ||
+		l_wrapper_script=$(zxfer_get_cleanup_child_wrapper_script_path) || {
 			l_spawn_status=$?
-		if [ "$l_spawn_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
 			zxfer_throw_error "Failed to locate the background job cleanup wrapper." "$l_spawn_status"
-		fi
+		}
 		l_teardown=wrapper
 		/bin/sh "$l_wrapper_script" "$l_job_cmd" &
 	fi
@@ -424,12 +409,8 @@ zxfer_get_background_job_completion_status() {
 		g_zxfer_background_job_completion_report_failure=completion_write
 		return 0
 	fi
-	l_completion_read_status=0
 	zxfer_read_background_job_status_file "$l_status_file" ||
-		l_completion_read_status=$?
-	if [ "$l_completion_read_status" -ne 0 ]; then
-		return "$l_completion_read_status"
-	fi
+		return "$?"
 
 	return 0
 }
@@ -445,12 +426,8 @@ zxfer_wait_for_background_job() {
 
 	g_zxfer_background_job_wait_exit_status=""
 	g_zxfer_background_job_wait_report_failure=""
-	g_zxfer_background_job_wait_job_id=""
-	g_zxfer_background_job_wait_runner_pid=""
 
-	if ! zxfer_find_background_job_record "$l_job_id"; then
-		return 1
-	fi
+	zxfer_find_background_job_record "$l_job_id" || return 1
 
 	wait "$g_zxfer_background_job_record_pid" 2>/dev/null || l_wait_status=$?
 	l_completion_status=0
@@ -466,8 +443,6 @@ zxfer_wait_for_background_job() {
 
 	g_zxfer_background_job_wait_exit_status=$g_zxfer_background_job_completion_exit_status
 	g_zxfer_background_job_wait_report_failure=$g_zxfer_background_job_completion_report_failure
-	g_zxfer_background_job_wait_job_id=$l_job_id
-	g_zxfer_background_job_wait_runner_pid=$g_zxfer_background_job_record_pid
 
 	zxfer_unregister_background_job_record "$l_job_id"
 	zxfer_cleanup_runtime_artifact_path "$g_zxfer_background_job_record_status_file" >/dev/null 2>&1 || :
@@ -553,9 +528,7 @@ zxfer_abort_background_job() {
 	l_signal=${2:-TERM}
 
 	g_zxfer_background_job_abort_failure_message=""
-	if ! zxfer_find_background_job_record "$l_job_id"; then
-		return 0
-	fi
+	zxfer_find_background_job_record "$l_job_id" || return 0
 	l_abort_pid=$g_zxfer_background_job_record_pid
 	l_abort_teardown=$g_zxfer_background_job_record_teardown
 	l_abort_status_file=$g_zxfer_background_job_record_status_file

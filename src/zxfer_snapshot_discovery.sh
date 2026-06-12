@@ -104,12 +104,8 @@ zxfer_read_snapshot_discovery_capture_file() {
 	l_capture_path=$1
 
 	g_zxfer_snapshot_discovery_file_read_result=""
-	if zxfer_read_runtime_artifact_file "$l_capture_path" >/dev/null; then
-		g_zxfer_snapshot_discovery_file_read_result=$g_zxfer_runtime_artifact_read_result
-	else
-		l_read_status=$?
-		return "$l_read_status"
-	fi
+	zxfer_read_runtime_artifact_file "$l_capture_path" >/dev/null || return "$?"
+	g_zxfer_snapshot_discovery_file_read_result=$g_zxfer_runtime_artifact_read_result
 
 	return 0
 }
@@ -191,13 +187,7 @@ zxfer_check_parallel_source_jobs_in_current_shell() {
 	g_zxfer_parallel_source_job_check_result=""
 	g_zxfer_parallel_source_job_check_kind=""
 
-	if zxfer_ensure_parallel_available_for_source_jobs >/dev/null 2>&1; then
-		l_status=0
-	else
-		l_status=$?
-	fi
-
-	return "$l_status"
+	zxfer_ensure_parallel_available_for_source_jobs >/dev/null 2>&1
 }
 
 # Purpose: Ensure the parallel available for source jobs exists and is ready
@@ -277,26 +267,19 @@ zxfer_fast_recursive_noop_discovery_is_eligible() {
 	return 0
 }
 
-# Purpose: Return the compression command to use for remote metadata streams.
-# Usage: Called while rendering source snapshot discovery so snapshot-list
-# metadata uses the same operator-selected compression cost as send/receive
-# streams.
-zxfer_get_source_metadata_compress_command() {
-	printf '%s\n' "$g_cmd_compress"
-}
-
 # Purpose: Return the shell-safe remote metadata compression command.
 # Usage: Called by remote source snapshot discovery after the origin host has
 # already been initialized or preloaded, preserving secure helper resolution.
+# Snapshot-list metadata reuses the operator-selected send/receive compressor
+# so both streams pay the same compression cost.
 zxfer_get_origin_metadata_compress_safe() {
 	if [ "${g_option_z_compress:-0}" -ne 1 ]; then
 		return 1
 	fi
-	l_metadata_compress_cmd=$(zxfer_get_source_metadata_compress_command)
+	l_metadata_compress_cmd=${g_cmd_compress:-}
 	[ -n "$l_metadata_compress_cmd" ] || return 1
 
-	if [ "$l_metadata_compress_cmd" = "${g_cmd_compress:-}" ] &&
-		[ -n "${g_origin_cmd_compress_safe:-}" ]; then
+	if [ -n "${g_origin_cmd_compress_safe:-}" ]; then
 		printf '%s\n' "$g_origin_cmd_compress_safe"
 		return 0
 	fi
@@ -371,67 +354,51 @@ zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
 	l_error_file=${3:-}
 	l_count_file=${4:-}
 
-	if ! l_cleanup_wrapper_script=$(zxfer_get_cleanup_child_wrapper_script_path); then
-		return 1
-	fi
+	l_cleanup_wrapper_script=$(zxfer_get_cleanup_child_wrapper_script_path) || return 1
 	l_sorted_output_file_safe=$(zxfer_build_shell_command_from_argv "$l_sorted_output_file") ||
 		return "$?"
-	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_get_temp_file >/dev/null || return "$?"
 	l_source_status_file=$g_zxfer_temp_file_result
-	l_status=0
-	l_source_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_source_status_file") ||
+	l_source_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_source_status_file") || {
 		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_source_status_file"
 		return "$l_status"
-	fi
+	}
 	l_count_status_file=""
 	l_count_file_safe=""
 	l_count_status_file_safe=""
 	l_count_stage_cmd=""
 	if [ -n "$l_count_file" ]; then
-		l_status=0
-		l_count_file_safe=$(zxfer_build_shell_command_from_argv "$l_count_file") ||
+		l_count_file_safe=$(zxfer_build_shell_command_from_argv "$l_count_file") || {
 			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_source_status_file"
 			return "$l_status"
-		fi
-		l_status=0
-		zxfer_get_temp_file >/dev/null || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		}
+		zxfer_get_temp_file >/dev/null || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_path "$l_source_status_file"
 			return "$l_status"
-		fi
+		}
 		l_count_status_file=$g_zxfer_temp_file_result
-		l_status=0
-		l_count_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_count_status_file") ||
+		l_count_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_count_status_file") || {
 			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_count_status_file"
 			return "$l_status"
-		fi
+		}
 		l_count_stage_cmd="{ l_count_status=0; if IFS= read -r l_first_snapshot; then printf '%s\n' 1 > $l_count_file_safe || l_count_status=\$?; printf '%s\n' \"\$l_first_snapshot\" || l_count_status=\$?; cat || l_count_status=\$?; else printf '%s\n' 0 > $l_count_file_safe || l_count_status=\$?; fi; printf '%s\n' \"\$l_count_status\" > $l_count_status_file_safe; exit \"\$l_count_status\"; }"
 	fi
 	if [ -n "${g_option_x_exclude_datasets:-}" ]; then
-		l_status=0
-		zxfer_get_temp_file >/dev/null || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_get_temp_file >/dev/null || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_count_status_file"
 			return "$l_status"
-		fi
+		}
 		l_filter_status_file=$g_zxfer_temp_file_result
-		l_status=0
-		l_filter_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_filter_status_file") ||
+		l_filter_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_filter_status_file") || {
 			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_filter_status_file" "$l_count_status_file"
 			return "$l_status"
-		fi
+		}
 		l_filter_program=$(zxfer_get_snapshot_exclude_filter_awk_program)
 		l_filter_cmd=$(zxfer_build_shell_command_from_argv \
 			"${g_cmd_awk:-awk}" \
@@ -523,12 +490,8 @@ zxfer_build_discovery_sentinel_filter_cmd() {
 zxfer_build_source_snapshot_list_cmd() {
 	g_source_snapshot_list_uses_parallel=0
 	g_source_snapshot_list_uses_metadata_compression=0
-	if l_local_serial_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$g_initial_source"); then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
+	l_local_serial_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$g_initial_source") ||
+		return "$?"
 
 	if [ "$g_option_j_jobs" -le 1 ]; then
 		printf '%s\n' "$l_local_serial_cmd"
@@ -554,12 +517,7 @@ zxfer_build_source_snapshot_list_cmd() {
 	if [ ! "$g_option_O_origin_host" = "" ]; then
 		l_parallel_path=$g_origin_parallel_cmd
 		l_remote_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
-		if l_parallel_cmd=$(zxfer_build_shell_command_from_argv "$l_parallel_path"); then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
+		l_parallel_cmd=$(zxfer_build_shell_command_from_argv "$l_parallel_path") || return "$?"
 		if l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
 			"$l_remote_zfs_cmd" list -H -o name,guid -s creation -d 1 -t snapshot "{}"); then
 			:
@@ -591,45 +549,22 @@ zxfer_build_source_snapshot_list_cmd() {
 				return "$?"
 			l_remote_pipeline="$l_remote_pipeline | $l_remote_compress_safe"
 		fi
-		if l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_pipeline"); then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
-		if l_cmd=$(zxfer_build_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_shell_cmd"); then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
+		l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_pipeline") || return "$?"
+		l_cmd=$(zxfer_build_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_shell_cmd") ||
+			return "$?"
 		if [ "${g_source_snapshot_list_uses_metadata_compression:-0}" -eq 1 ]; then
 			l_cmd="$l_cmd | $g_cmd_decompress_safe"
 		fi
-		if l_sentinel_filter_cmd=$(zxfer_build_discovery_sentinel_filter_cmd); then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
+		l_sentinel_filter_cmd=$(zxfer_build_discovery_sentinel_filter_cmd) || return "$?"
 		l_cmd="$l_cmd | $l_sentinel_filter_cmd"
 		printf '%s\n' "$l_cmd"
 		return
 	fi
 
 	l_parallel_path=$g_cmd_parallel
-	if l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name,guid -s creation -d 1 -t snapshot "{}"); then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
-	if l_parallel_cmd=$(zxfer_build_shell_command_from_argv "$l_parallel_path"); then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
+	l_runner_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -H -o name,guid -s creation -d 1 -t snapshot "{}") ||
+		return "$?"
+	l_parallel_cmd=$(zxfer_build_shell_command_from_argv "$l_parallel_path") || return "$?"
 	l_parallel_cmd="$l_parallel_cmd -j $g_option_j_jobs --line-buffer -- \"$l_runner_cmd\""
 	if l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec \
 		"$g_LZFS" list -Hr -t filesystem,volume -o name "$g_initial_source"); then
@@ -639,12 +574,7 @@ zxfer_build_source_snapshot_list_cmd() {
 		return "$l_status"
 	fi
 	l_sentinel_line=$(zxfer_get_source_discovery_sentinel_line)
-	if l_sentinel_filter_cmd=$(zxfer_build_discovery_sentinel_filter_cmd); then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
+	l_sentinel_filter_cmd=$(zxfer_build_discovery_sentinel_filter_cmd) || return "$?"
 	# Same staging as the remote variant. Locally the wrapper shell runs this
 	# command list directly, so enumeration failures surface as exit 70, and a
 	# failed parallel sub-listing withholds the sentinel so the filter fails
@@ -680,18 +610,12 @@ zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 		return "$?"
 	fi
 
-	if ! l_cleanup_wrapper_script=$(zxfer_get_cleanup_child_wrapper_script_path); then
-		return 1
-	fi
+	l_cleanup_wrapper_script=$(zxfer_get_cleanup_child_wrapper_script_path) || return 1
 	l_output_file_safe=$(zxfer_build_shell_command_from_argv "$l_output_file") ||
 		return "$?"
 	l_sorted_output_file_safe=$(zxfer_build_shell_command_from_argv "$l_sorted_output_file") ||
 		return "$?"
-	l_status=0
-	zxfer_create_temp_file_group 2 >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_create_temp_file_group 2 >/dev/null || return "$?"
 	l_sort_status_stage_files=$g_zxfer_temp_file_group_result
 	{
 		IFS= read -r l_source_status_file
@@ -699,20 +623,16 @@ zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 	} <<-EOF
 		$l_sort_status_stage_files
 	EOF
-	l_status=0
-	l_source_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_source_status_file") ||
+	l_source_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_source_status_file") || {
 		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path_list "$l_sort_status_stage_files"
 		return "$l_status"
-	fi
-	l_status=0
-	l_tee_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_tee_status_file") ||
+	}
+	l_tee_status_file_safe=$(zxfer_build_shell_command_from_argv "$l_tee_status_file") || {
 		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path_list "$l_sort_status_stage_files"
 		return "$l_status"
-	fi
+	}
 	l_managed_cmd="{ ( $l_cmd ); printf '%s\n' \"\$?\" > $l_source_status_file_safe; } | { tee $l_output_file_safe; printf '%s\n' \"\$?\" > $l_tee_status_file_safe; } | LC_ALL=C sort > $l_sorted_output_file_safe; l_sort_status=\$?; l_source_status=1; l_tee_status=1; if [ -f $l_source_status_file_safe ]; then IFS= read -r l_source_status < $l_source_status_file_safe || l_source_status=1; fi; if [ -f $l_tee_status_file_safe ]; then IFS= read -r l_tee_status < $l_tee_status_file_safe || l_tee_status=1; fi; rm -f $l_source_status_file_safe $l_tee_status_file_safe; case \"\$l_source_status:\$l_tee_status:\$l_sort_status\" in *[!0-9:]*) exit 1 ;; esac; [ \"\$l_source_status\" -eq 0 ] || exit \"\$l_source_status\"; [ \"\$l_tee_status\" -eq 0 ] || exit \"\$l_tee_status\"; exit \"\$l_sort_status\""
 
 	zxfer_echoV "Executing command in the background: $l_managed_cmd"
@@ -765,34 +685,17 @@ zxfer_write_source_snapshot_list_to_file() {
 	g_source_snapshot_list_uses_metadata_compression=0
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
-		l_status=0
-		l_cmd=$(zxfer_render_source_snapshot_list_preview_cmd) || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_throw_error "${l_cmd:-Failed to render dry-run source snapshot discovery command.}" "$l_status"
-		fi
+		l_cmd=$(zxfer_render_source_snapshot_list_preview_cmd) ||
+			zxfer_throw_error "${l_cmd:-Failed to render dry-run source snapshot discovery command.}" "$?"
 		g_source_snapshot_list_cmd=$l_cmd
 		zxfer_echoV "Dry run: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
-		if zxfer_write_runtime_artifact_file "$l_outfile" ""; then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
+		zxfer_write_runtime_artifact_file "$l_outfile" "" || return "$?"
 		if [ -n "$l_errfile" ]; then
-			if zxfer_write_runtime_artifact_file "$l_errfile" ""; then
-				:
-			else
-				l_status=$?
-				return "$l_status"
-			fi
+			zxfer_write_runtime_artifact_file "$l_errfile" "" || return "$?"
 		fi
 		if [ "${g_source_snapshot_list_background_sort_requested:-0}" -eq 1 ]; then
-			l_status=0
-			zxfer_get_temp_file >/dev/null || l_status=$?
-			if [ "$l_status" -ne 0 ]; then
-				return "$l_status"
-			fi
+			zxfer_get_temp_file >/dev/null || return "$?"
 			g_source_snapshot_list_sorted_file=$g_zxfer_temp_file_result
 			zxfer_write_runtime_artifact_file "$g_source_snapshot_list_sorted_file" "" ||
 				return "$?"
@@ -802,32 +705,25 @@ zxfer_write_source_snapshot_list_to_file() {
 		return 0
 	fi
 
-	if zxfer_get_temp_file >/dev/null; then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
+	zxfer_get_temp_file >/dev/null || return "$?"
 	l_cmd_tmp_file=$g_zxfer_temp_file_result
 	l_status=0
 	zxfer_build_source_snapshot_list_cmd >"$l_cmd_tmp_file" || l_status=$?
 	if [ "$l_status" -ne 0 ]; then
-		l_read_status=0
-		zxfer_read_source_snapshot_discovery_command_file "$l_cmd_tmp_file" || l_read_status=$?
-		if [ "$l_read_status" -ne 0 ]; then
+		zxfer_read_source_snapshot_discovery_command_file "$l_cmd_tmp_file" || {
+			l_read_status=$?
 			zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
 			zxfer_throw_error "Failed to read staged source snapshot discovery command after build failure." "$l_read_status"
-		fi
+		}
 		l_cmd=$g_zxfer_snapshot_discovery_file_read_result
 		zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
 		zxfer_throw_error "${l_cmd:-Failed to build source snapshot discovery command.}" "$l_status"
 	fi
-	l_status=0
-	zxfer_read_source_snapshot_discovery_command_file "$l_cmd_tmp_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
+	zxfer_read_source_snapshot_discovery_command_file "$l_cmd_tmp_file" || {
+		l_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
 		zxfer_throw_error "Failed to read staged source snapshot discovery command." "$l_status"
-	fi
+	}
 	l_cmd=$g_zxfer_snapshot_discovery_file_read_result
 	zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
 	[ -n "$l_cmd" ] || zxfer_throw_error "Staged source snapshot discovery command was empty."
@@ -842,11 +738,7 @@ zxfer_write_source_snapshot_list_to_file() {
 	zxfer_echoV "Running command in the background: $l_cmd"
 	zxfer_record_last_command_string "$l_cmd"
 	if [ "${g_source_snapshot_list_background_sort_requested:-0}" -eq 1 ]; then
-		l_status=0
-		zxfer_get_temp_file >/dev/null || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			return "$l_status"
-		fi
+		zxfer_get_temp_file >/dev/null || return "$?"
 		l_sorted_outfile=$g_zxfer_temp_file_result
 		g_source_snapshot_list_sorted_file=$l_sorted_outfile
 		if zxfer_execute_source_snapshot_list_background_cmd_with_sort \
@@ -859,12 +751,7 @@ zxfer_write_source_snapshot_list_to_file() {
 			return "$l_status"
 		fi
 	else
-		if zxfer_execute_background_cmd "$l_cmd" "$l_outfile" "$l_errfile"; then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
+		zxfer_execute_background_cmd "$l_cmd" "$l_outfile" "$l_errfile" || return "$?"
 	fi
 	g_source_snapshot_list_pid=$g_last_background_pid
 	g_source_snapshot_list_job_id=""
@@ -916,11 +803,7 @@ zxfer_normalize_destination_snapshot_list() {
 		else
 			zxfer_record_last_command_opaque
 		fi
-		l_status=0
-		zxfer_get_temp_file >/dev/null || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			return "$l_status"
-		fi
+		zxfer_get_temp_file >/dev/null || return "$?"
 		l_awk_status_file=$g_zxfer_temp_file_result
 		{
 			"${g_cmd_awk:-awk}" \
@@ -1292,7 +1175,6 @@ zxfer_split_remote_destination_discovery_batch_stream_to_files() {
 	zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_err_tmp_file" "" || return "$?"
 	zxfer_write_runtime_artifact_file "$l_batch_status_file" "" || return "$?"
 
-	l_status=0
 	# shellcheck disable=SC2016  # awk program should see literal $0.
 	"${g_cmd_awk:-awk}" \
 		-v dest_out="$l_dest_list_tmp_file" \
@@ -1459,48 +1341,7 @@ zxfer_split_remote_destination_discovery_batch_stream_to_files() {
 			close(snap_out)
 			close(snap_err)
 		}
-	' || l_status=$?
-	return "$l_status"
-}
-
-# Purpose: Parse target-side destination discovery output into staged files and
-# compact status state.
-# Usage: Called by tests and fallback file-backed paths; live remote discovery
-# uses the streaming splitter directly to avoid a full local post-processing
-# pass over large snapshot lists.
-zxfer_parse_remote_destination_discovery_batch_output_file() {
-	l_batch_output_file=$1
-	l_dest_list_tmp_file=$2
-	l_dest_list_err_file=$3
-	l_rzfs_list_hr_snap_tmp_file=$4
-	l_rzfs_list_hr_snap_err_tmp_file=$5
-	l_batch_status_file=""
-
-	zxfer_reset_destination_discovery_batch_state
-
-	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	l_batch_status_file=$g_zxfer_temp_file_result
-
-	l_status=0
-	zxfer_split_remote_destination_discovery_batch_stream_to_files \
-		"$l_batch_status_file" \
-		"$l_dest_list_tmp_file" \
-		"$l_dest_list_err_file" \
-		"$l_rzfs_list_hr_snap_tmp_file" \
-		"$l_rzfs_list_hr_snap_err_tmp_file" <"$l_batch_output_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_batch_status_file"
-		return "$l_status"
-	fi
-
-	l_status=0
-	zxfer_load_destination_discovery_batch_status_file "$l_batch_status_file" || l_status=$?
-	zxfer_cleanup_runtime_artifact_path "$l_batch_status_file"
-	return "$l_status"
+	'
 }
 
 # Purpose: Record profile counters for the ZFS commands represented by one
@@ -1536,25 +1377,13 @@ zxfer_run_remote_destination_discovery_batch_to_files() {
 
 	zxfer_reset_destination_discovery_batch_state
 
-	l_status=0
 	l_remote_script=$(zxfer_build_remote_destination_discovery_batch_script \
 		"$g_destination" "$l_destination_dataset" "$l_destination_pool") ||
-		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	l_status=0
+		return "$?"
 	l_remote_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_script") ||
-		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	l_status=0
+		return "$?"
 	l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$g_option_T_target_host") ||
-		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_throw_error "$l_transport_tokens" "$l_status"
-	fi
+		zxfer_throw_error "$l_transport_tokens" "$?"
 	# Prevalidate wrapper-style host specs outside the streaming pipeline so
 	# setup failures still exit through the parent shell's reporting path.
 	if zxfer_prepare_ssh_shell_command_context "$g_option_T_target_host" "$l_remote_cmd"; then
@@ -1567,25 +1396,19 @@ zxfer_run_remote_destination_discovery_batch_to_files() {
 		return "$l_status"
 	fi
 
-	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_get_temp_file >/dev/null || return "$?"
 	l_transport_status_file=$g_zxfer_temp_file_result
-	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
+	zxfer_get_temp_file >/dev/null || {
+		l_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_transport_status_file"
 		return "$l_status"
-	fi
+	}
 	l_transport_stderr_file=$g_zxfer_temp_file_result
-	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
+	zxfer_get_temp_file >/dev/null || {
+		l_status=$?
 		zxfer_cleanup_runtime_artifact_paths "$l_transport_status_file" "$l_transport_stderr_file"
 		return "$l_status"
-	fi
+	}
 	l_batch_status_file=$g_zxfer_temp_file_result
 
 	zxfer_echoV "Running remote destination discovery batch for $g_destination."
@@ -1602,12 +1425,11 @@ zxfer_run_remote_destination_discovery_batch_to_files() {
 		"$l_rzfs_list_hr_snap_tmp_file" \
 		"$l_rzfs_list_hr_snap_err_tmp_file" || l_parse_status=$?
 
-	l_status=0
-	zxfer_read_snapshot_discovery_capture_file "$l_transport_status_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
+	zxfer_read_snapshot_discovery_capture_file "$l_transport_status_file" || {
+		l_status=$?
 		zxfer_cleanup_runtime_artifact_paths "$l_transport_status_file" "$l_transport_stderr_file" "$l_batch_status_file"
 		return "$l_status"
-	fi
+	}
 	l_batch_status=$g_zxfer_snapshot_discovery_file_read_result
 	case "$l_batch_status" in
 	*'
@@ -1622,12 +1444,11 @@ zxfer_run_remote_destination_discovery_batch_to_files() {
 		;;
 	esac
 	if [ "$l_batch_status" -ne 0 ]; then
-		l_status=0
-		zxfer_read_snapshot_discovery_capture_file "$l_transport_stderr_file" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_read_snapshot_discovery_capture_file "$l_transport_stderr_file" || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_paths "$l_transport_status_file" "$l_transport_stderr_file" "$l_batch_status_file"
 			return "$l_status"
-		fi
+		}
 		l_transport_stderr=$g_zxfer_snapshot_discovery_file_read_result
 		l_status=0
 		zxfer_write_runtime_artifact_file "$l_dest_list_err_file" "$l_transport_stderr" || l_status=$?
@@ -1664,11 +1485,8 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 	l_dest_pool_status=${4:-}
 
 	if [ "$l_dest_inventory_status" -eq 0 ]; then
-		l_status=0
-		zxfer_read_snapshot_discovery_capture_file "$l_dest_list_tmp_file" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_throw_error "Failed to read staged destination dataset inventory." "$l_status"
-		fi
+		zxfer_read_snapshot_discovery_capture_file "$l_dest_list_tmp_file" ||
+			zxfer_throw_error "Failed to read staged destination dataset inventory." "$?"
 		g_recursive_dest_list=$g_zxfer_snapshot_discovery_file_read_result
 		[ -n "$g_recursive_dest_list" ] || {
 			zxfer_throw_error "Staged destination dataset inventory was empty."
@@ -1677,11 +1495,8 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 		return
 	fi
 
-	l_status=0
-	zxfer_read_snapshot_discovery_capture_file "$l_dest_list_err_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to read staged destination dataset inventory stderr." "$l_status"
-	fi
+	zxfer_read_snapshot_discovery_capture_file "$l_dest_list_err_file" ||
+		zxfer_throw_error "Failed to read staged destination dataset inventory stderr." "$?"
 	l_dest_err=$g_zxfer_snapshot_discovery_file_read_result
 	if zxfer_destination_probe_reports_missing "$l_dest_err"; then
 		if [ -z "$l_dest_pool_status" ]; then
@@ -1718,11 +1533,7 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 # Usage: Called after snapshot diffing when later work has proven it can
 # consume the recursive destination existence cache.
 zxfer_collect_local_destination_dataset_inventory() {
-	l_status=0
-	zxfer_create_temp_file_group 2 >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_create_temp_file_group 2 >/dev/null || return "$?"
 	l_destination_inventory_stage_files=$g_zxfer_temp_file_group_result
 	{
 		IFS= read -r l_dest_list_tmp_file
@@ -1772,35 +1583,18 @@ zxfer_write_destination_snapshot_list_to_files() {
 	l_destination_dataset=$(zxfer_get_destination_snapshot_root_dataset)
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
-		l_status=0
 		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset") ||
-			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_throw_error "${l_cmd:-Failed to render dry-run destination snapshot discovery command.}" "$l_status"
-		fi
+			zxfer_throw_error "${l_cmd:-Failed to render dry-run destination snapshot discovery command.}" "$?"
 		zxfer_echoV "Dry run: $l_cmd"
 		zxfer_record_last_command_string "$l_cmd"
-		if zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" ""; then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
-		if zxfer_write_runtime_artifact_file "$l_dest_snaps_stripped_sorted_tmp_file" ""; then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
+		zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" "" || return "$?"
+		zxfer_write_runtime_artifact_file "$l_dest_snaps_stripped_sorted_tmp_file" "" || return "$?"
 		return
 	fi
 
 	# check if the destination zfs dataset exists before listing snapshots
-	l_status=0
-	l_destination_exists=$(zxfer_exists_destination "$l_destination_dataset") || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_throw_error "$l_destination_exists" "$l_status"
-	fi
+	l_destination_exists=$(zxfer_exists_destination "$l_destination_dataset") ||
+		zxfer_throw_error "$l_destination_exists" "$?"
 
 	if [ "$l_destination_exists" -eq 1 ]; then
 		# dataset exists
@@ -1815,29 +1609,18 @@ zxfer_write_destination_snapshot_list_to_files() {
 		fi
 		# make sure to eval and then pipe the contents to the file in case
 		# the command uses ssh
-		l_status=0
 		zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" >"$l_rzfs_list_hr_snap_tmp_file" ||
-			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$l_status"
-		fi
+			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$?"
 
 	else
 		# dataset does not exist
 		zxfer_echoV "Destination dataset does not exist: $l_destination_dataset"
-		l_status=0
-		zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" "" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_throw_error "Failed to stage empty destination snapshot list." "$l_status"
-		fi
+		zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" "" ||
+			zxfer_throw_error "Failed to stage empty destination snapshot list." "$?"
 	fi
 
-	l_status=0
 	zxfer_normalize_destination_snapshot_list "$l_destination_dataset" "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
-		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+		return "$?"
 }
 
 # Purpose: Create the private FIFO pair used by the recursive no-op proof.
@@ -1853,11 +1636,7 @@ zxfer_create_fast_noop_fifo_pair() {
 	g_zxfer_fast_noop_fifo_dir_result=""
 
 	l_temp_prefix="${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}.fast-noop"
-	l_status=0
-	zxfer_create_private_temp_dir "$l_temp_prefix" >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return 1
-	fi
+	zxfer_create_private_temp_dir "$l_temp_prefix" >/dev/null || return 1
 	l_fifo_dir=$g_zxfer_runtime_artifact_path_result
 	l_source_fifo=$l_fifo_dir/source
 	l_destination_fifo=$l_fifo_dir/destination
@@ -1956,121 +1735,6 @@ zxfer_abort_fast_noop_background_pid() {
 	return 0
 }
 
-# Purpose: Write destination snapshots in normalized byte-sorted order for the
-# recursive no-op proof.
-# Usage: Called only by zxfer_try_fast_recursive_noop_discovery. It keeps the
-# cheap destination ZFS query shape and applies the same canonical local sort as
-# the source proof.
-zxfer_write_destination_snapshot_name_sorted_list_to_files() {
-	l_rzfs_list_hr_snap_tmp_file=$1
-	l_dest_snaps_stripped_sorted_tmp_file=$2
-
-	l_destination_dataset=$(zxfer_get_destination_snapshot_root_dataset)
-
-	l_status=0
-	zxfer_create_temp_file_group 3 >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	l_dest_snapshot_stage_files=$g_zxfer_temp_file_group_result
-	{
-		IFS= read -r l_dest_snapshot_err_file
-		IFS= read -r l_dest_snapshot_status_file
-		IFS= read -r l_dest_normalize_status_file
-	} <<-EOF
-		$l_dest_snapshot_stage_files
-	EOF
-
-	l_missing_destination=0
-	l_list_status=0
-	if zxfer_command_display_render_enabled; then
-		l_cmd=$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_destination_dataset")
-		zxfer_echoV "Running command: $l_cmd"
-		zxfer_record_last_command_string "$l_cmd | $(zxfer_render_command_for_report "" "zxfer_normalize_destination_snapshot_stream_for_noop_proof" "$l_destination_dataset") | LC_ALL=C sort > $(zxfer_quote_token_for_report "$l_dest_snaps_stripped_sorted_tmp_file")"
-	else
-		zxfer_record_last_command_opaque
-	fi
-	{
-		zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_destination_dataset" 2>"$l_dest_snapshot_err_file"
-		printf '%s\n' "$?" >"$l_dest_snapshot_status_file" 2>/dev/null || :
-	} | {
-		zxfer_normalize_destination_snapshot_stream_for_noop_proof "$l_destination_dataset"
-		l_normalize_stream_status=$?
-		printf '%s\n' "$l_normalize_stream_status" >"$l_dest_normalize_status_file" 2>/dev/null || :
-		exit "$l_normalize_stream_status"
-	} | LC_ALL=C sort >"$l_dest_snaps_stripped_sorted_tmp_file"
-	l_stream_status=$?
-
-	l_list_status=1
-	if [ -f "$l_dest_snapshot_status_file" ]; then
-		IFS= read -r l_list_status <"$l_dest_snapshot_status_file" || l_list_status=1
-	fi
-	l_normalize_status=1
-	if [ -f "$l_dest_normalize_status_file" ]; then
-		IFS= read -r l_normalize_status <"$l_dest_normalize_status_file" || l_normalize_status=1
-	fi
-	case "$l_list_status:$l_normalize_status:$l_stream_status" in
-	*[!0-9:]*)
-		zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-		return 1
-		;;
-	esac
-
-	if [ "$l_list_status" -ne 0 ]; then
-		l_read_status=0
-		zxfer_read_snapshot_discovery_capture_file "$l_dest_snapshot_err_file" ||
-			l_read_status=$?
-		if [ "$l_read_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-			zxfer_throw_error "Failed to read staged destination snapshot stderr." "$l_read_status"
-		fi
-		l_dest_snapshot_err=$g_zxfer_snapshot_discovery_file_read_result
-		if zxfer_destination_probe_reports_missing "$l_dest_snapshot_err"; then
-			l_missing_destination=1
-		else
-			if [ -n "$l_dest_snapshot_err" ]; then
-				printf '%s\n' "$l_dest_snapshot_err" >&2
-			fi
-			zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$l_list_status"
-		fi
-	fi
-
-	if [ "$l_missing_destination" -eq 1 ]; then
-		zxfer_echoV "Destination dataset does not exist: $l_destination_dataset"
-		l_status=0
-		zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" "" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-			zxfer_throw_error "Failed to stage empty destination snapshot list." "$l_status"
-		fi
-		l_status=0
-		zxfer_write_runtime_artifact_file "$l_dest_snaps_stripped_sorted_tmp_file" "" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-			return "$l_status"
-		fi
-	else
-		l_status=0
-		zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" "" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-			return "$l_status"
-		fi
-	fi
-
-	if [ "$l_normalize_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-		return "$l_normalize_status"
-	fi
-	if [ "$l_stream_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-		return "$l_stream_status"
-	fi
-
-	zxfer_cleanup_runtime_artifact_path_list "$l_dest_snapshot_stage_files"
-}
-
 # Purpose: Write both recursive snapshot delta directions in one sorted-list
 # pass.
 # Usage: Called after source and destination snapshot lists have been sorted
@@ -2081,33 +1745,25 @@ zxfer_write_snapshot_delta_files() {
 	l_source_missing_file=$3
 	l_destination_extra_file=$4
 
-	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_get_temp_file >/dev/null || return "$?"
 	l_combined_delta_file=$g_zxfer_temp_file_result
 
-	l_status=0
-	zxfer_write_runtime_artifact_file "$l_source_missing_file" "" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_combined_delta_file"
-		return "$l_status"
-	fi
-	l_status=0
-	zxfer_write_runtime_artifact_file "$l_destination_extra_file" "" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_combined_delta_file"
-		return "$l_status"
-	fi
-
-	l_status=0
-	LC_ALL=C comm -3 "$l_source_sorted_file" "$l_destination_sorted_file" >"$l_combined_delta_file" ||
+	zxfer_write_runtime_artifact_file "$l_source_missing_file" "" || {
 		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_combined_delta_file"
 		return "$l_status"
-	fi
+	}
+	zxfer_write_runtime_artifact_file "$l_destination_extra_file" "" || {
+		l_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_combined_delta_file"
+		return "$l_status"
+	}
+
+	LC_ALL=C comm -3 "$l_source_sorted_file" "$l_destination_sorted_file" >"$l_combined_delta_file" || {
+		l_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_combined_delta_file"
+		return "$l_status"
+	}
 
 	# `comm -3` prefixes destination-only records with one tab. Snapshot names
 	# cannot begin with tabs, while GUID records may contain tabs after the
@@ -2203,71 +1859,6 @@ zxfer_should_use_linear_reverse_for_file() {
 	[ "$l_line_count" -le "$l_max_lines" ]
 }
 
-# Purpose: Reverse the numbered file lines with awk while preserving the record
-# structure later helpers rely on.
-# Usage: Called during source and destination snapshot discovery when
-# comparison or replay logic needs the same data in the opposite order.
-zxfer_reverse_numbered_file_lines_with_awk() {
-	l_input_file=$1
-
-	# shellcheck disable=SC2016  # awk program should see literal $0/NR.
-	"${g_cmd_awk:-awk}" '{ l_line = $0; l_tab = index(l_line, "\t"); if (l_tab > 0) l_line = substr(l_line, l_tab + 1); l_lines[NR] = l_line } END { for (l_i = NR; l_i >= 1; l_i--) print l_lines[l_i] }' "$l_input_file"
-}
-
-# Purpose: Check whether the numbered file is strictly increasing.
-# Usage: Called during source and destination snapshot discovery when later
-# helpers need a boolean answer about the numbered file.
-zxfer_numbered_file_is_strictly_increasing() {
-	l_input_file=$1
-
-	# shellcheck disable=SC2016  # awk program should see literal $0/NR.
-	"${g_cmd_awk:-awk}" 'BEGIN { l_prev = -1 } { l_tab = index($0, "\t"); if (l_tab <= 1) exit 1; l_number = substr($0, 1, l_tab - 1); gsub(/^[[:space:]]+/, "", l_number); gsub(/[[:space:]]+$/, "", l_number); if (l_number == "" || l_number ~ /[^0-9]/) exit 1; if (NR > 1 && (l_number + 0) <= l_prev) exit 1; l_prev = l_number + 0 }' "$l_input_file"
-}
-
-# Purpose: Reverse the numbered file lines with sort while preserving the
-# record structure later helpers rely on.
-# Usage: Called during source and destination snapshot discovery when
-# comparison or replay logic needs the same data in the opposite order.
-zxfer_reverse_numbered_file_lines_with_sort() {
-	l_input_file=$1
-
-	LC_ALL=C sort -nr "$l_input_file" | cut -f2-
-}
-
-# Purpose: Reverse the numbered line stream while preserving the record
-# structure later helpers rely on.
-# Usage: Called during source and destination snapshot discovery when
-# comparison or replay logic needs the same data in the opposite order.
-#
-# Reverse a numbered line stream produced by `cat -n`. Strip the line number by
-# tab-delimited field rather than a fixed character offset so large line counts
-# do not truncate the first character of the payload.
-zxfer_reverse_numbered_line_stream() {
-	if zxfer_get_temp_file >/dev/null; then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
-	l_input_tmp_file=$g_zxfer_temp_file_result
-	cat >"$l_input_tmp_file" || {
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_input_tmp_file"
-		return "$l_status"
-	}
-
-	if zxfer_should_use_linear_reverse_for_file "$l_input_tmp_file" &&
-		zxfer_numbered_file_is_strictly_increasing "$l_input_tmp_file"; then
-		l_status=0
-		zxfer_reverse_numbered_file_lines_with_awk "$l_input_tmp_file" || l_status=$?
-	else
-		l_status=0
-		zxfer_reverse_numbered_file_lines_with_sort "$l_input_tmp_file" || l_status=$?
-	fi
-	zxfer_cleanup_runtime_artifact_path "$l_input_tmp_file"
-	return "$l_status"
-}
-
 # Purpose: Reverse the plain file lines with awk while preserving the record
 # structure later helpers rely on.
 # Usage: Called during source and destination snapshot discovery when
@@ -2285,24 +1876,18 @@ zxfer_reverse_plain_file_lines_with_awk() {
 # comparison or replay logic needs the same data in the opposite order.
 zxfer_reverse_plain_file_lines_with_sort() {
 	l_input_file=$1
-	if zxfer_get_temp_file >/dev/null; then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
+	zxfer_get_temp_file >/dev/null || return "$?"
 	l_numbered_tmp_file=$g_zxfer_temp_file_result
 
-	if cat -n "$l_input_file" >"$l_numbered_tmp_file"; then
-		:
-	else
+	cat -n "$l_input_file" >"$l_numbered_tmp_file" || {
 		l_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_numbered_tmp_file"
 		return "$l_status"
-	fi
+	}
 
 	l_status=0
-	zxfer_reverse_numbered_file_lines_with_sort "$l_numbered_tmp_file" || l_status=$?
+	# Reverse by the cat -n line numbers, then strip the number column.
+	LC_ALL=C sort -nr "$l_numbered_tmp_file" | cut -f2- || l_status=$?
 	zxfer_cleanup_runtime_artifact_path "$l_numbered_tmp_file"
 	return "$l_status"
 }
@@ -2332,45 +1917,25 @@ zxfer_capture_recursive_dataset_list_from_lines_file() {
 	[ -n "$l_dataset_lines_file" ] || return 0
 	[ -f "$l_dataset_lines_file" ] || return 0
 
-	if zxfer_get_temp_file >/dev/null; then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
+	zxfer_get_temp_file >/dev/null || return "$?"
 	l_dataset_list_sorted_file=$g_zxfer_temp_file_result
 
-	if LC_ALL=C sort -u "$l_dataset_lines_file" >"$l_dataset_list_sorted_file"; then
-		:
-	else
+	LC_ALL=C sort -u "$l_dataset_lines_file" >"$l_dataset_list_sorted_file" || {
 		l_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_dataset_list_sorted_file"
 		return "$l_status"
-	fi
+	}
 
-	if zxfer_read_snapshot_discovery_capture_file "$l_dataset_list_sorted_file"; then
-		:
-	else
+	zxfer_read_snapshot_discovery_capture_file "$l_dataset_list_sorted_file" || {
 		l_read_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_dataset_list_sorted_file"
 		return "$l_read_status"
-	fi
+	}
 
 	zxfer_publish_recursive_dataset_list_from_snapshot_discovery_read_result
 
 	zxfer_cleanup_runtime_artifact_path "$l_dataset_list_sorted_file"
 	return 0
-}
-
-# Purpose: Write dataset names extracted from snapshot records to a staged file.
-# Usage: Called during source and destination snapshot discovery before
-# recursive dataset-list helpers sort, deduplicate, and publish dataset state.
-zxfer_write_recursive_dataset_lines_from_snapshot_file() {
-	l_snapshot_records_file=$1
-	l_dataset_lines_file=$2
-
-	# shellcheck disable=SC2016  # awk script should see literal $1.
-	"$g_cmd_awk" -F@ '{print $1}' "$l_snapshot_records_file" >"$l_dataset_lines_file"
 }
 
 # Purpose: Capture the recursive dataset list from a snapshot-record file.
@@ -2379,29 +1944,22 @@ zxfer_write_recursive_dataset_lines_from_snapshot_file() {
 zxfer_capture_recursive_dataset_list_from_snapshot_record_file() {
 	l_snapshot_records_file=$1
 
-	if zxfer_get_temp_file >/dev/null; then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
+	zxfer_get_temp_file >/dev/null || return "$?"
 	l_dataset_lines_file=$g_zxfer_temp_file_result
 
-	if zxfer_write_recursive_dataset_lines_from_snapshot_file "$l_snapshot_records_file" "$l_dataset_lines_file"; then
-		:
-	else
+	# Stage the dataset name (everything before @) of every snapshot record.
+	# shellcheck disable=SC2016  # awk script should see literal $1.
+	"$g_cmd_awk" -F@ '{print $1}' "$l_snapshot_records_file" >"$l_dataset_lines_file" || {
 		l_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_dataset_lines_file"
 		return "$l_status"
-	fi
+	}
 
-	if zxfer_capture_recursive_dataset_list_from_lines_file "$l_dataset_lines_file"; then
-		:
-	else
+	zxfer_capture_recursive_dataset_list_from_lines_file "$l_dataset_lines_file" || {
 		l_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_dataset_lines_file"
 		return "$l_status"
-	fi
+	}
 
 	zxfer_cleanup_runtime_artifact_path "$l_dataset_lines_file"
 	return 0
@@ -2435,11 +1993,7 @@ zxfer_filter_recursive_dataset_list_with_excludes() {
 		return 0
 	}
 
-	l_status=0
-	zxfer_create_temp_file_group 2 >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_create_temp_file_group 2 >/dev/null || return "$?"
 	l_filter_stage_files=$g_zxfer_temp_file_group_result
 	{
 		IFS= read -r l_dataset_list_input_file
@@ -2468,13 +2022,11 @@ zxfer_filter_recursive_dataset_list_with_excludes() {
 		;;
 	esac
 
-	if zxfer_read_snapshot_discovery_capture_file "$l_dataset_list_filtered_file"; then
-		:
-	else
+	zxfer_read_snapshot_discovery_capture_file "$l_dataset_list_filtered_file" || {
 		l_read_status=$?
 		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_read_status" "$l_filter_stage_files"
 		return "$?"
-	fi
+	}
 
 	zxfer_publish_recursive_dataset_list_from_snapshot_discovery_read_result
 
@@ -2510,11 +2062,7 @@ zxfer_set_g_recursive_source_list() {
 	l_dest_snaps_stripped_sorted_tmp_file=$2
 	l_presorted_source_snaps_tmp_file=${3:-}
 
-	l_status=0
-	zxfer_create_temp_file_group 5 >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_create_temp_file_group 5 >/dev/null || return "$?"
 	l_delta_stage_files=$g_zxfer_temp_file_group_result
 	{
 		IFS= read -r l_source_snaps_sorted_tmp_file
@@ -2544,53 +2092,45 @@ zxfer_set_g_recursive_source_list() {
 		else
 			zxfer_record_last_command_opaque
 		fi
-		l_status=0
-		LC_ALL=C sort "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snaps_sorted_tmp_file" ||
+		LC_ALL=C sort "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snaps_sorted_tmp_file" || {
 			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to sort source snapshots for recursive delta planning." "$l_status"
-		fi
+		}
 	fi
 
 	l_source_snaps_diff_input_file=$l_source_snaps_sorted_input_file
 	l_dest_snaps_diff_input_file=$l_dest_snaps_stripped_sorted_tmp_file
 	if [ "$g_option_x_exclude_datasets" != "" ]; then
-		l_status=0
 		zxfer_filter_snapshot_file_with_excludes \
 			"$l_source_snaps_sorted_input_file" \
-			"$l_source_snaps_filtered_tmp_file" ||
+			"$l_source_snaps_filtered_tmp_file" || {
 			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to filter source snapshots against exclude patterns for recursive delta planning." "$l_status"
-		fi
-		l_status=0
+		}
 		zxfer_filter_snapshot_file_with_excludes \
 			"$l_dest_snaps_stripped_sorted_tmp_file" \
-			"$l_destination_snaps_filtered_tmp_file" ||
+			"$l_destination_snaps_filtered_tmp_file" || {
 			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to filter destination snapshots against exclude patterns for recursive delta planning." "$l_status"
-		fi
+		}
 		l_source_snaps_diff_input_file=$l_source_snaps_filtered_tmp_file
 		l_dest_snaps_diff_input_file=$l_destination_snaps_filtered_tmp_file
 	fi
 
 	if cmp -s "$l_source_snaps_diff_input_file" "$l_dest_snaps_diff_input_file"; then
-		l_status=0
-		zxfer_write_runtime_artifact_file "$l_missing_snapshots_tmp_file" "" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_write_runtime_artifact_file "$l_missing_snapshots_tmp_file" "" || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to stage empty recursive source snapshot delta." "$l_status"
-		fi
-		l_status=0
-		zxfer_write_runtime_artifact_file "$l_destination_extra_snapshots_tmp_file" "" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		}
+		zxfer_write_runtime_artifact_file "$l_destination_extra_snapshots_tmp_file" "" || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to stage empty recursive destination snapshot delta." "$l_status"
-		fi
+		}
 	else
 		l_cmp_status=$?
 		if [ "$l_cmp_status" -gt 1 ]; then
@@ -2598,48 +2138,43 @@ zxfer_set_g_recursive_source_list() {
 			zxfer_throw_error "Failed to compare source and destination snapshots for recursive delta planning." "$l_cmp_status"
 		fi
 
-		l_status=0
 		zxfer_write_snapshot_delta_files \
 			"$l_source_snaps_diff_input_file" \
 			"$l_dest_snaps_diff_input_file" \
 			"$l_missing_snapshots_tmp_file" \
-			"$l_destination_extra_snapshots_tmp_file" ||
+			"$l_destination_extra_snapshots_tmp_file" || {
 			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to diff source and destination snapshots for recursive delta planning." "$l_status"
-		fi
+		}
 	fi
 
 	if [ -s "$l_missing_snapshots_tmp_file" ]; then
-		l_status=0
-		zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_missing_snapshots_tmp_file" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_missing_snapshots_tmp_file" || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to derive recursive source dataset transfer list." "$l_status"
-		fi
+		}
 		g_recursive_source_list=$g_zxfer_recursive_dataset_list_result
 	else
 		g_recursive_source_list=""
 	fi
 	if [ -s "$l_destination_extra_snapshots_tmp_file" ]; then
-		l_status=0
-		zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_destination_extra_snapshots_tmp_file" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_destination_extra_snapshots_tmp_file" || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to derive recursive destination dataset delete list." "$l_status"
-		fi
+		}
 		g_recursive_destination_extra_dataset_list=$g_zxfer_recursive_dataset_list_result
 	else
 		g_recursive_destination_extra_dataset_list=""
 	fi
 	if zxfer_snapshot_discovery_needs_source_dataset_inventory; then
-		l_status=0
-		zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_source_snaps_diff_input_file" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_capture_recursive_dataset_list_from_snapshot_file "$l_source_snaps_diff_input_file" || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to derive recursive source dataset inventory." "$l_status"
-		fi
+		}
 		g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
 	else
 		g_recursive_source_dataset_list=""
@@ -2647,27 +2182,24 @@ zxfer_set_g_recursive_source_list() {
 
 	# if excluding datasets, remove them from the list
 	if [ "$g_option_x_exclude_datasets" != "" ]; then
-		l_status=0
-		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_list" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_list" || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns." "$l_status"
-		fi
+		}
 		g_recursive_source_list=$g_zxfer_recursive_dataset_list_result
-		l_status=0
-		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_destination_extra_dataset_list" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_destination_extra_dataset_list" || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 			zxfer_throw_error "Failed to filter recursive destination dataset delete list against exclude patterns." "$l_status"
-		fi
+		}
 		g_recursive_destination_extra_dataset_list=$g_zxfer_recursive_dataset_list_result
 		if zxfer_snapshot_discovery_needs_source_dataset_inventory; then
-			l_status=0
-			zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_dataset_list" || l_status=$?
-			if [ "$l_status" -ne 0 ]; then
+			zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_dataset_list" || {
+				l_status=$?
 				zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
 				zxfer_throw_error "Failed to filter recursive source dataset inventory against exclude patterns." "$l_status"
-			fi
+			}
 			g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
 		fi
 	fi
@@ -2770,11 +2302,7 @@ zxfer_try_fast_recursive_noop_discovery() {
 	l_source_name_list_uses_parallel=0
 	l_fast_stage_files=""
 
-	l_status=0
-	zxfer_create_temp_file_group 7 >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_create_temp_file_group 7 >/dev/null || return "$?"
 	l_fast_stage_files=$g_zxfer_temp_file_group_result
 	{
 		IFS= read -r l_source_err_file
@@ -2792,18 +2320,16 @@ zxfer_try_fast_recursive_noop_discovery() {
 	if zxfer_profile_metrics_enabled; then
 		l_source_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
 	fi
-	l_status=0
-	zxfer_build_source_snapshot_name_list_cmd >"$l_source_cmd_tmp_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
+	zxfer_build_source_snapshot_name_list_cmd >"$l_source_cmd_tmp_file" || {
+		l_status=$?
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		return "$l_status"
-	fi
-	l_status=0
-	zxfer_read_source_snapshot_discovery_command_file "$l_source_cmd_tmp_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
+	}
+	zxfer_read_source_snapshot_discovery_command_file "$l_source_cmd_tmp_file" || {
+		l_status=$?
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		return "$l_status"
-	fi
+	}
 	l_cmd=$g_zxfer_snapshot_discovery_file_read_result
 	if [ -z "$l_cmd" ]; then
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
@@ -2821,41 +2347,35 @@ zxfer_try_fast_recursive_noop_discovery() {
 		zxfer_profile_record_ssh_invocation "$g_option_O_origin_host" source
 	fi
 
-	l_status=0
-	zxfer_create_fast_noop_fifo_pair || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
+	zxfer_create_fast_noop_fifo_pair || {
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		zxfer_reset_destination_existence_cache
 		return 1
-	fi
+	}
 	l_source_fifo=$g_zxfer_fast_noop_source_fifo_result
 	l_destination_fifo=$g_zxfer_fast_noop_destination_fifo_result
 	l_fifo_dir=$g_zxfer_fast_noop_fifo_dir_result
 
-	l_status=0
 	zxfer_execute_source_snapshot_name_list_background_sort_cmd \
-		"$l_cmd" "$l_source_fifo" "$l_source_err_file" "$l_source_count_file" ||
+		"$l_cmd" "$l_source_fifo" "$l_source_err_file" "$l_source_count_file" || {
 		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		return "$l_status"
-	fi
+	}
 	l_source_snapshot_pid=$g_last_background_pid
 
 	l_destination_snapshot_stage_start_ms=""
 	if zxfer_profile_metrics_enabled; then
 		l_destination_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
 	fi
-	l_status=0
 	zxfer_start_destination_snapshot_name_sorted_fifo_producer \
 		"$l_destination_fifo" \
 		"$l_dest_snapshot_err_file" \
 		"$l_dest_snapshot_status_file" \
 		"$l_dest_normalize_status_file" \
-		"$l_dest_stream_status_file" ||
+		"$l_dest_stream_status_file" || {
 		l_status=$?
-	if [ "$l_status" -ne 0 ]; then
 		zxfer_abort_fast_noop_background_pid "$l_source_snapshot_pid" "background source snapshot no-op proof helper"
 		wait "$l_source_snapshot_pid" 2>/dev/null || :
 		zxfer_unregister_cleanup_pid "$l_source_snapshot_pid"
@@ -2863,7 +2383,7 @@ zxfer_try_fast_recursive_noop_discovery() {
 		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		return "$l_status"
-	fi
+	}
 	l_destination_snapshot_pid=$g_last_background_pid
 
 	l_snapshot_diff_sort_stage_start_ms=""
@@ -2921,14 +2441,12 @@ zxfer_try_fast_recursive_noop_discovery() {
 	fi
 	l_missing_destination=0
 	if [ "$l_list_status" -ne 0 ]; then
-		l_read_status=0
-		zxfer_read_snapshot_discovery_capture_file "$l_dest_snapshot_err_file" ||
+		zxfer_read_snapshot_discovery_capture_file "$l_dest_snapshot_err_file" || {
 			l_read_status=$?
-		if [ "$l_read_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 			zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 			zxfer_throw_error "Failed to read staged destination snapshot stderr." "$l_read_status"
-		fi
+		}
 		l_dest_snapshot_err=$g_zxfer_snapshot_discovery_file_read_result
 		if zxfer_destination_probe_reports_missing "$l_dest_snapshot_err"; then
 			l_missing_destination=1
@@ -2961,14 +2479,12 @@ zxfer_try_fast_recursive_noop_discovery() {
 		if [ -n "${g_source_snapshot_list_cmd:-}" ]; then
 			zxfer_record_last_command_string "$g_source_snapshot_list_cmd"
 		fi
-		l_source_stderr_read_status=0
-		zxfer_read_snapshot_discovery_capture_file "$l_source_err_file" ||
+		zxfer_read_snapshot_discovery_capture_file "$l_source_err_file" || {
 			l_source_stderr_read_status=$?
-		if [ "$l_source_stderr_read_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 			zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 			zxfer_throw_error "Failed to read staged source snapshot stderr." "$l_source_stderr_read_status"
-		fi
+		}
 		l_source_snapshot_err=$g_zxfer_snapshot_discovery_file_read_result
 		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
 			"$l_source_snapshot_err" 10)
@@ -3053,11 +2569,7 @@ zxfer_get_zfs_list() {
 	fi
 
 	# create temporary files used by the background processes
-	l_status=0
-	zxfer_create_temp_file_group 2 >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_create_temp_file_group 2 >/dev/null || return "$?"
 	l_source_snapshot_stage_files=$g_zxfer_temp_file_group_result
 	{
 		IFS= read -r l_lzfs_list_hr_s_snap_tmp_file
@@ -3099,33 +2611,30 @@ zxfer_get_zfs_list() {
 	fi
 	l_destination_inventory_attempted=0
 	l_destination_dataset=$(zxfer_get_destination_snapshot_root_dataset)
-	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
+	zxfer_get_temp_file >/dev/null || {
+		l_status=$?
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file"
 		zxfer_cleanup_snapshot_record_cache_files
 		return "$l_status"
-	fi
+	}
 	l_rzfs_list_hr_snap_tmp_file=$g_zxfer_temp_file_result
-	l_status=0
-	zxfer_get_temp_file >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
+	zxfer_get_temp_file >/dev/null || {
+		l_status=$?
 		zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 			"$l_rzfs_list_hr_snap_tmp_file"
 		zxfer_cleanup_snapshot_record_cache_files
 		return "$l_status"
-	fi
+	}
 	l_dest_snaps_stripped_sorted_tmp_file=$g_zxfer_temp_file_result
 
 	if [ -n "${g_option_T_target_host:-}" ]; then
-		l_status=0
-		zxfer_create_temp_file_group 2 >/dev/null || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_create_temp_file_group 2 >/dev/null || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			return "$l_status"
-		fi
+		}
 		l_destination_inventory_stage_files=$g_zxfer_temp_file_group_result
 		{
 			IFS= read -r l_dest_list_tmp_file
@@ -3141,15 +2650,14 @@ zxfer_get_zfs_list() {
 			zxfer_record_last_command_opaque
 		fi
 		l_rzfs_list_hr_snap_err_tmp_file=""
-		l_status=0
-		zxfer_get_temp_file >/dev/null || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_get_temp_file >/dev/null || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			return "$l_status"
-		fi
+		}
 		l_rzfs_list_hr_snap_err_tmp_file=$g_zxfer_temp_file_result
 
 		l_dest_inventory_status=0
@@ -3187,27 +2695,23 @@ zxfer_get_zfs_list() {
 			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$g_zxfer_destination_discovery_batch_snapshot_status"
 		fi
 		zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-		l_status=0
-		zxfer_normalize_destination_snapshot_list "$l_destination_dataset" "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
+		zxfer_normalize_destination_snapshot_list "$l_destination_dataset" "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" || {
 			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" "$l_rzfs_list_hr_snap_err_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			return "$l_status"
-		fi
+		}
 		zxfer_cleanup_runtime_artifact_path "$l_rzfs_list_hr_snap_err_tmp_file"
 	else
 		# this function writes to both files passed as parameters
-		l_status=0
-		zxfer_write_destination_snapshot_list_to_files "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" ||
+		zxfer_write_destination_snapshot_list_to_files "$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file" || {
 			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			return "$l_status"
-		fi
+		}
 	fi
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_destination_snapshot_listing_ms "$l_destination_snapshot_stage_start_ms"
 
@@ -3215,14 +2719,13 @@ zxfer_get_zfs_list() {
 	l_source_snapshot_wait_status=0
 	l_source_snapshot_wait_report_failure=""
 	if [ -n "${g_source_snapshot_list_job_id:-}" ]; then
-		l_wait_helper_status=0
-		zxfer_wait_for_background_job "$g_source_snapshot_list_job_id" || l_wait_helper_status=$?
-		if [ "$l_wait_helper_status" -ne 0 ]; then
+		zxfer_wait_for_background_job "$g_source_snapshot_list_job_id" || {
+			l_wait_helper_status=$?
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
 				"$l_rzfs_list_hr_snap_tmp_file" "$l_dest_snaps_stripped_sorted_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			zxfer_throw_error "Failed to read source snapshot discovery completion metadata." "$l_wait_helper_status"
-		fi
+		}
 		l_source_snapshot_wait_status=$g_zxfer_background_job_wait_exit_status
 		l_source_snapshot_wait_report_failure=${g_zxfer_background_job_wait_report_failure:-}
 		g_source_snapshot_list_pid=""
@@ -3256,13 +2759,11 @@ zxfer_get_zfs_list() {
 		if [ -n "${g_source_snapshot_list_cmd:-}" ]; then
 			zxfer_record_last_command_string "$g_source_snapshot_list_cmd"
 		fi
-		l_source_stderr_read_status=0
-		zxfer_read_snapshot_discovery_capture_file "$l_lzfs_list_hr_s_snap_err_tmp_file" ||
+		zxfer_read_snapshot_discovery_capture_file "$l_lzfs_list_hr_s_snap_err_tmp_file" || {
 			l_source_stderr_read_status=$?
-		if [ "$l_source_stderr_read_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_err_tmp_file"
 			zxfer_throw_error "Failed to read staged source snapshot stderr." "$l_source_stderr_read_status"
-		fi
+		}
 		l_source_snapshot_err=$g_zxfer_snapshot_discovery_file_read_result
 		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
 			"$l_source_snapshot_err" 10)
@@ -3303,46 +2804,42 @@ zxfer_get_zfs_list() {
 	fi
 
 	if zxfer_snapshot_discovery_needs_destination_dataset_inventory; then
-		l_status=0
-		zxfer_collect_local_destination_dataset_inventory || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_collect_local_destination_dataset_inventory || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 				"$l_rzfs_list_hr_snap_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			return "$l_status"
-		fi
+		}
 		l_destination_inventory_attempted=1
 	fi
 
 	if zxfer_snapshot_discovery_needs_record_caches; then
 		g_zxfer_destination_snapshot_record_cache_file=$l_rzfs_list_hr_snap_tmp_file
-		l_status=0
-		zxfer_read_snapshot_discovery_capture_file "$l_rzfs_list_hr_snap_tmp_file" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_read_snapshot_discovery_capture_file "$l_rzfs_list_hr_snap_tmp_file" || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
 				"$l_lzfs_list_hr_s_snap_err_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			zxfer_throw_error "Failed to read staged destination snapshot list." "$l_status"
-		fi
+		}
 		g_rzfs_list_hr_snap=$g_zxfer_snapshot_discovery_file_read_result
 
-		l_status=0
-		zxfer_read_snapshot_discovery_capture_file "$l_lzfs_list_hr_s_snap_tmp_file" || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_read_snapshot_discovery_capture_file "$l_lzfs_list_hr_s_snap_tmp_file" || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
 				"$l_lzfs_list_hr_s_snap_err_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			zxfer_throw_error "Failed to read staged source snapshot list." "$l_status"
-		fi
+		}
 		g_lzfs_list_hr_snap=$g_zxfer_snapshot_discovery_file_read_result
-		l_status=0
-		zxfer_get_temp_file >/dev/null || l_status=$?
-		if [ "$l_status" -ne 0 ]; then
+		zxfer_get_temp_file >/dev/null || {
+			l_status=$?
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
 				"$l_lzfs_list_hr_s_snap_err_tmp_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			return "$l_status"
-		fi
+		}
 		l_source_snapshot_record_cache_file=$g_zxfer_temp_file_result
 		if zxfer_command_display_render_enabled; then
 			l_cmd="$(zxfer_render_command_for_report "" zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file") > $(zxfer_quote_token_for_report "$l_source_snapshot_record_cache_file")"
@@ -3351,15 +2848,13 @@ zxfer_get_zfs_list() {
 		else
 			zxfer_record_last_command_opaque
 		fi
-		l_status=0
-		zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snapshot_record_cache_file" ||
+		zxfer_reverse_file_lines "$l_lzfs_list_hr_s_snap_tmp_file" >"$l_source_snapshot_record_cache_file" || {
 			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
 			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
 				"$l_source_snapshot_record_cache_file"
 			zxfer_cleanup_snapshot_record_cache_files
 			zxfer_throw_error "Failed to stage source snapshot record cache." "$l_status"
-		fi
+		}
 		g_zxfer_source_snapshot_record_cache_file=$l_source_snapshot_record_cache_file
 		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_tmp_file"
 	else

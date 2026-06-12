@@ -84,12 +84,10 @@ setUp() {
 	g_cmd_zfs="/sbin/zfs"
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_origin_remote_capabilities_host=""
-	g_origin_remote_capabilities_dependency_path=""
 	g_origin_remote_capabilities_cache_identity=""
 	g_origin_remote_capabilities_response=""
 	g_origin_remote_capabilities_bootstrap_source=""
 	g_target_remote_capabilities_host=""
-	g_target_remote_capabilities_dependency_path=""
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
@@ -158,14 +156,14 @@ test_reset_backup_metadata_state_clears_accumulator_and_restore_cache() {
 		"" "$g_restored_backup_file_contents"
 }
 
-test_backup_metadata_constant_getters_return_source_constants() {
+test_backup_metadata_constants_pin_source_values() {
 	result=$(
 		(
 			# shellcheck source=src/zxfer_backup_metadata.sh
 			. "$TESTS_DIR/../src/zxfer_backup_metadata.sh"
-			printf 'header=%s\n' "$(zxfer_get_backup_metadata_header_line)"
-			printf 'format=%s\n' "$(zxfer_get_backup_metadata_format_version)"
-			printf 'split=%s\n' "$(zxfer_get_backup_metadata_pair_split_line)"
+			printf 'header=%s\n' "$ZXFER_BACKUP_METADATA_HEADER_LINE"
+			printf 'format=%s\n' "$ZXFER_BACKUP_METADATA_FORMAT_VERSION"
+			printf 'split=%s\n' "$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE"
 		)
 	)
 
@@ -5588,7 +5586,7 @@ test_write_backup_metadata_pair_contents_to_store_runs_remote_helper_with_split_
 	helper_side_file="$TEST_TMPDIR/remote_pair_success_helper_side.txt"
 	payload_file="$TEST_TMPDIR/remote_pair_success_payload.txt"
 	capture_file="$TEST_TMPDIR/remote_pair_success_capture.txt"
-	pair_split_line=$(zxfer_get_backup_metadata_pair_split_line)
+	pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
 	: >"$dir_log"
 
 	(
@@ -5650,7 +5648,7 @@ test_build_remote_backup_pair_write_cmd_rolls_back_forwarded_after_primary_resto
 	forwarded_file="$forwarded_dir/.zxfer_backup_info.src"
 	fake_bin="$TEST_TMPDIR/remote_pair_primary_restore_fail_bin"
 	mv_log="$TEST_TMPDIR/remote_pair_primary_restore_fail_mv.log"
-	pair_split_line=$(zxfer_get_backup_metadata_pair_split_line)
+	pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
 	real_mv=$(command -v mv)
 
 	mkdir -p "$primary_dir" "$forwarded_dir" "$fake_bin"

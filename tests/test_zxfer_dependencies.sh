@@ -74,12 +74,6 @@ test_zxfer_get_effective_dependency_path_falls_back_to_cached_secure_path_and_de
 		"$result" "default=$ZXFER_DEFAULT_SECURE_PATH"
 }
 
-test_merge_path_allowlists_deduplicates_entries() {
-	assertEquals "Merged allowlists should preserve order while deduplicating entries." \
-		"/sbin:/bin:/usr/bin" \
-		"$(zxfer_merge_path_allowlists "/sbin:/bin" "/bin:/usr/bin")"
-}
-
 test_zxfer_apply_secure_path_keeps_runtime_path_equal_to_secure_allowlist() {
 	result=$(
 		(

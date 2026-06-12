@@ -363,11 +363,9 @@ setUp() {
 	g_zxfer_secure_path=$ZXFER_DEFAULT_SECURE_PATH
 	g_zxfer_dependency_path=$ZXFER_DEFAULT_SECURE_PATH
 	g_origin_remote_capabilities_host=""
-	g_origin_remote_capabilities_dependency_path=""
 	g_origin_remote_capabilities_cache_identity=""
 	g_origin_remote_capabilities_response=""
 	g_target_remote_capabilities_host=""
-	g_target_remote_capabilities_dependency_path=""
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	create_fake_ssh_bin
@@ -2724,9 +2722,6 @@ test_build_source_snapshot_list_cmd_remote_with_compression_sets_ssh_pipeline() 
 			zxfer_resolve_remote_required_tool() {
 				printf '%s\n' "/opt/bin/parallel"
 			}
-			zxfer_get_remote_resolved_tool_version_output() {
-				printf '%s\n' "GNU parallel (fake)"
-			}
 			zxfer_build_source_snapshot_list_cmd
 		)
 	)
@@ -3080,9 +3075,6 @@ test_ensure_parallel_remote_fetches_remote_parallel_path() {
 	: >"$socket_path"
 
 	(
-		zxfer_get_remote_resolved_tool_version_output() {
-			printf '%s\n' "GNU parallel (fake)"
-		}
 		g_origin_parallel_cmd=""
 		g_cmd_ssh="$FAKE_SSH_BIN"
 		g_ssh_origin_control_socket="$socket_path"
@@ -3418,9 +3410,6 @@ test_remote_snapshot_listing_pipeline_handles_cli_flow() {
 			zxfer_resolve_remote_required_tool() {
 				printf '%s\n' "/opt/bin/parallel"
 			}
-			zxfer_get_remote_resolved_tool_version_output() {
-				printf '%s\n' "GNU parallel (fake)"
-			}
 			zxfer_build_source_snapshot_list_cmd
 		)
 	)
@@ -3520,9 +3509,6 @@ EOF
 		(
 			zxfer_resolve_remote_required_tool() {
 				printf '%s\n' "$fake_parallel"
-			}
-			zxfer_get_remote_resolved_tool_version_output() {
-				printf '%s\n' "GNU parallel (fake)"
 			}
 			zxfer_build_source_snapshot_list_cmd
 		)
@@ -3652,9 +3638,6 @@ EOF
 		(
 			zxfer_resolve_remote_required_tool() {
 				printf '%s\n' "$FAKE_PARALLEL_BIN"
-			}
-			zxfer_get_remote_resolved_tool_version_output() {
-				printf '%s\n' "GNU parallel (fake)"
 			}
 			zxfer_build_source_snapshot_list_cmd
 		)

@@ -343,9 +343,7 @@ zxfer_is_trusted_symlink_path_component() {
 	esac
 	[ -L "$l_path" ] || [ -h "$l_path" ] || return 1
 
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_path" 2>/dev/null); then
-		return 1
-	fi
+	l_owner_uid=$(zxfer_get_path_owner_uid "$l_path" 2>/dev/null) || return 1
 	[ "$l_owner_uid" = "0" ] || return 1
 
 	case "$l_path" in
@@ -357,9 +355,7 @@ zxfer_is_trusted_symlink_path_component() {
 		return 1
 		;;
 	esac
-	if ! l_parent_owner_uid=$(zxfer_get_path_owner_uid "$l_parent" 2>/dev/null); then
-		return 1
-	fi
+	l_parent_owner_uid=$(zxfer_get_path_owner_uid "$l_parent" 2>/dev/null) || return 1
 	[ "$l_parent_owner_uid" = "0" ] || return 1
 	[ "$l_parent" = "/" ] || return 1
 
@@ -369,9 +365,7 @@ zxfer_is_trusted_symlink_path_component() {
 		l_ls_path=./$l_ls_path
 		;;
 	esac
-	if ! l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
-		return 1
-	fi
+	l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null) || return 1
 	zxfer_validate_shared_dir_permission_string "${l_ls_output%% *}"
 }
 
@@ -393,9 +387,7 @@ zxfer_validate_temp_root_candidate() {
 		;;
 	esac
 
-	if ! l_physical_dir=$(CDPATH='' cd -P "$l_candidate" 2>/dev/null && pwd); then
-		return 1
-	fi
+	l_physical_dir=$(CDPATH='' cd -P "$l_candidate" 2>/dev/null && pwd) || return 1
 	case "$l_physical_dir" in
 	/*) ;;
 	*)
@@ -404,13 +396,9 @@ zxfer_validate_temp_root_candidate() {
 	esac
 	[ -d "$l_physical_dir" ] || return 1
 
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_physical_dir"); then
-		return 1
-	fi
+	l_owner_uid=$(zxfer_get_path_owner_uid "$l_physical_dir") || return 1
 	if [ "$l_owner_uid" != "0" ]; then
-		if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-			return 1
-		fi
+		l_effective_uid=$(zxfer_get_effective_user_uid) || return 1
 		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
 	fi
 	l_ls_path=$l_physical_dir
@@ -419,12 +407,8 @@ zxfer_validate_temp_root_candidate() {
 		l_ls_path=./$l_ls_path
 		;;
 	esac
-	if ! l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
-		return 1
-	fi
-	if ! zxfer_validate_shared_dir_permission_string "${l_ls_output%% *}"; then
-		return 1
-	fi
+	l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null) || return 1
+	zxfer_validate_shared_dir_permission_string "${l_ls_output%% *}" || return 1
 
 	printf '%s\n' "$l_physical_dir"
 }
@@ -474,16 +458,10 @@ zxfer_create_secure_staging_dir_for_path() {
 	l_prefix=${2:-zxfer.stage}
 
 	g_zxfer_secure_staging_dir_result=""
-	if ! l_parent=$(zxfer_get_path_parent_dir "$l_path"); then
-		return 1
-	fi
-	if ! l_parent=$(zxfer_validate_temp_root_candidate "$l_parent"); then
-		return 1
-	fi
+	l_parent=$(zxfer_get_path_parent_dir "$l_path") || return 1
+	l_parent=$(zxfer_validate_temp_root_candidate "$l_parent") || return 1
 
-	if ! l_stage_dir=$(zxfer_create_unpredictable_staging_entry "$l_parent/.$l_prefix.XXXXXX" dir); then
-		return 1
-	fi
+	l_stage_dir=$(zxfer_create_unpredictable_staging_entry "$l_parent/.$l_prefix.XXXXXX" dir) || return 1
 	# Register same-directory staging so trap cleanup reaps it on aborts.
 	if command -v zxfer_register_runtime_artifact_path >/dev/null 2>&1; then
 		zxfer_register_runtime_artifact_path "$l_stage_dir"
@@ -631,9 +609,7 @@ zxfer_get_own_process_start_token() {
 		return 0
 	fi
 
-	if ! l_own_start_token=$(zxfer_get_process_start_token "$$"); then
-		return 1
-	fi
+	l_own_start_token=$(zxfer_get_process_start_token "$$") || return 1
 	g_zxfer_own_process_start_token=$l_own_start_token
 	printf '%s\n' "$l_own_start_token"
 }
@@ -647,16 +623,10 @@ zxfer_validate_owned_lock_container_dir() {
 	[ -d "$l_dir_path" ] || return 1
 	[ ! -L "$l_dir_path" ] || return 1
 	[ ! -h "$l_dir_path" ] || return 1
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_dir_path"); then
-		return 1
-	fi
+	l_effective_uid=$(zxfer_get_effective_user_uid) || return 1
+	l_owner_uid=$(zxfer_get_path_owner_uid "$l_dir_path") || return 1
 	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_dir_path"); then
-		return 1
-	fi
+	l_mode=$(zxfer_get_path_mode_octal "$l_dir_path") || return 1
 	[ "$l_mode" = "700" ] || return 1
 }
 
@@ -669,16 +639,10 @@ zxfer_validate_owned_lock_metadata_file() {
 	[ -f "$l_metadata_path" ] || return 1
 	[ ! -L "$l_metadata_path" ] || return 1
 	[ ! -h "$l_metadata_path" ] || return 1
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_metadata_path"); then
-		return 1
-	fi
+	l_effective_uid=$(zxfer_get_effective_user_uid) || return 1
+	l_owner_uid=$(zxfer_get_path_owner_uid "$l_metadata_path") || return 1
 	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_metadata_path"); then
-		return 1
-	fi
+	l_mode=$(zxfer_get_path_mode_octal "$l_metadata_path") || return 1
 	[ "$l_mode" = "600" ] || return 1
 }
 
@@ -692,9 +656,7 @@ zxfer_write_owned_lock_metadata_file() {
 
 	# Plain call (no command substitution) so the first ps capture memoizes in
 	# this shell instead of a throwaway subshell.
-	if ! zxfer_get_own_process_start_token >/dev/null; then
-		return 1
-	fi
+	zxfer_get_own_process_start_token >/dev/null || return 1
 	l_start_token=$g_zxfer_own_process_start_token
 
 	# Stage with a fixed name (this process exclusively owns the just-created
@@ -792,18 +754,12 @@ zxfer_load_owned_lock_metadata_from_dir() {
 
 	zxfer_reset_owned_lock_metadata_result
 
-	if ! zxfer_validate_owned_lock_container_dir "$l_lock_dir"; then
-		return 1
-	fi
+	zxfer_validate_owned_lock_container_dir "$l_lock_dir" || return 1
 	if [ ! -e "$l_metadata_path" ]; then
 		return 2
 	fi
-	if ! zxfer_validate_owned_lock_metadata_file "$l_metadata_path"; then
-		return 1
-	fi
-	if ! zxfer_parse_owned_lock_metadata_file "$l_metadata_path"; then
-		return 2
-	fi
+	zxfer_validate_owned_lock_metadata_file "$l_metadata_path" || return 1
+	zxfer_parse_owned_lock_metadata_file "$l_metadata_path" || return 2
 	return 0
 }
 
@@ -818,12 +774,8 @@ zxfer_owned_lock_owner_is_live() {
 	l_pid=$1
 	l_start_token=$2
 
-	if ! kill -s 0 "$l_pid" 2>/dev/null; then
-		return 1
-	fi
-	if ! l_current_start_token=$(zxfer_get_process_start_token "$l_pid"); then
-		return 2
-	fi
+	kill -s 0 "$l_pid" 2>/dev/null || return 1
+	l_current_start_token=$(zxfer_get_process_start_token "$l_pid") || return 2
 	if [ "$l_current_start_token" = "$l_start_token" ]; then
 		return 0
 	fi
@@ -858,9 +810,7 @@ zxfer_create_owned_lock_dir() {
 	l_lock_dir=$1
 
 	[ -n "$l_lock_dir" ] || return 1
-	if ! mkdir -m 700 "$l_lock_dir" 2>/dev/null; then
-		return 1
-	fi
+	mkdir -m 700 "$l_lock_dir" 2>/dev/null || return 1
 
 	if ! zxfer_validate_owned_lock_container_dir "$l_lock_dir"; then
 		zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
@@ -921,9 +871,7 @@ zxfer_try_reap_stale_owned_lock_dir() {
 		;;
 	esac
 
-	if ! zxfer_cleanup_owned_lock_dir "$l_lock_dir"; then
-		return 1
-	fi
+	zxfer_cleanup_owned_lock_dir "$l_lock_dir" || return 1
 	return 0
 }
 
@@ -933,15 +881,11 @@ zxfer_try_reap_stale_owned_lock_dir() {
 zxfer_current_process_owns_owned_lock_dir() {
 	l_lock_dir=$1
 
-	if ! zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir"; then
-		return 1
-	fi
+	zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir" || return 1
 	[ "$g_zxfer_owned_lock_pid_result" = "$$" ] || return 1
 	# Plain call (no command substitution) so the first ps capture memoizes in
 	# this shell instead of a throwaway subshell.
-	if ! zxfer_get_own_process_start_token >/dev/null; then
-		return 1
-	fi
+	zxfer_get_own_process_start_token >/dev/null || return 1
 	[ "$g_zxfer_owned_lock_start_token_result" = "$g_zxfer_own_process_start_token" ]
 }
 
@@ -956,12 +900,8 @@ zxfer_release_owned_lock_dir() {
 	if [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; then
 		return 0
 	fi
-	if ! zxfer_current_process_owns_owned_lock_dir "$l_lock_dir"; then
-		return 1
-	fi
-	if ! zxfer_cleanup_owned_lock_dir "$l_lock_dir"; then
-		return 1
-	fi
+	zxfer_current_process_owns_owned_lock_dir "$l_lock_dir" || return 1
+	zxfer_cleanup_owned_lock_dir "$l_lock_dir" || return 1
 	return 0
 }
 
@@ -1080,18 +1020,12 @@ zxfer_register_cleanup_pid() {
 	esac
 	[ "$l_cleanup_register_pid" = "$$" ] && return 0
 
-	l_cleanup_register_status=0
 	l_cleanup_register_purpose=$(zxfer_normalize_owned_lock_text_field "$l_cleanup_register_purpose") ||
-		l_cleanup_register_status=$?
-	if [ "$l_cleanup_register_status" -ne 0 ]; then
-		return "$l_cleanup_register_status"
-	fi
+		return "$?"
 	if zxfer_find_cleanup_pid_record "$l_cleanup_register_pid"; then
 		return 0
 	fi
-	if ! kill -s 0 "$l_cleanup_register_pid" 2>/dev/null; then
-		return 0
-	fi
+	kill -s 0 "$l_cleanup_register_pid" 2>/dev/null || return 0
 
 	if [ -n "${g_zxfer_cleanup_pid_records:-}" ]; then
 		g_zxfer_cleanup_pid_records=$g_zxfer_cleanup_pid_records"
@@ -1168,21 +1102,13 @@ zxfer_abort_direct_child_pid() {
 	esac
 	[ "$l_cleanup_direct_abort_pid" = "$$" ] && return 1
 
-	l_cleanup_direct_abort_status=0
 	l_cleanup_direct_abort_purpose=$(zxfer_normalize_owned_lock_text_field "$l_cleanup_direct_abort_purpose") ||
-		l_cleanup_direct_abort_status=$?
-	if [ "$l_cleanup_direct_abort_status" -ne 0 ]; then
-		return "$l_cleanup_direct_abort_status"
-	fi
-	if ! kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null; then
-		return 0
-	fi
+		return "$?"
+	kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null || return 0
 	if kill -s "$l_cleanup_direct_abort_signal" "$l_cleanup_direct_abort_pid" 2>/dev/null; then
 		return 0
 	fi
-	if ! kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null; then
-		return 0
-	fi
+	kill -s 0 "$l_cleanup_direct_abort_pid" 2>/dev/null || return 0
 	g_zxfer_cleanup_pid_abort_failure_message="Failed to signal cleanup helper [$l_cleanup_direct_abort_purpose] (PID $l_cleanup_direct_abort_pid)."
 	return 1
 }
@@ -1198,9 +1124,7 @@ zxfer_abort_cleanup_pid() {
 	l_cleanup_abort_signal=${2:-TERM}
 
 	g_zxfer_cleanup_pid_abort_failure_message=""
-	if ! zxfer_find_cleanup_pid_record "$l_cleanup_abort_pid"; then
-		return 0
-	fi
+	zxfer_find_cleanup_pid_record "$l_cleanup_abort_pid" || return 0
 
 	if ! kill -s 0 "$l_cleanup_abort_pid" 2>/dev/null; then
 		zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
@@ -1395,7 +1319,6 @@ zxfer_reset_runtime_artifact_state() {
 	g_zxfer_runtime_artifact_path_result=""
 	g_zxfer_runtime_artifact_read_result=""
 	g_zxfer_temp_file_group_result=""
-	g_zxfer_temp_file_group_allocated_count=0
 	return "$l_cleanup_status"
 }
 
@@ -1416,11 +1339,7 @@ zxfer_ensure_run_tmp_root() {
 	# Plain call (no command substitution) so the once-per-run validation
 	# memoizes in this shell and a held unsafe-TMPDIR fallback advisory
 	# survives until option parsing can emit it.
-	l_status=0
-	zxfer_try_get_effective_tmpdir >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_try_get_effective_tmpdir >/dev/null || return "$?"
 	l_effective_tmpdir=$g_zxfer_effective_tmpdir
 
 	l_old_umask=$(umask)
@@ -1609,11 +1528,7 @@ zxfer_create_runtime_artifact_dir() {
 	l_prefix=${1:-zxfer-temp-dir}
 
 	g_zxfer_runtime_artifact_path_result=""
-	l_status=0
-	zxfer_ensure_run_tmp_root || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_ensure_run_tmp_root || return "$?"
 
 	# A taken name means an earlier allocation ran in a subshell and its
 	# counter bump never reached this shell; skip ahead to a free name.
@@ -1640,11 +1555,7 @@ zxfer_create_runtime_artifact_file() {
 	l_prefix=${1:-zxfer-temp}
 
 	g_zxfer_runtime_artifact_path_result=""
-	l_status=0
-	zxfer_ensure_run_tmp_root || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_ensure_run_tmp_root || return "$?"
 
 	# A taken name means an earlier allocation ran in a subshell and its
 	# counter bump never reached this shell. The noclobber redirection in a
@@ -1665,54 +1576,6 @@ zxfer_create_runtime_artifact_file() {
 	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_files_created
 	g_zxfer_runtime_artifact_path_result=$l_artifact_file
 	printf '%s\n' "$l_artifact_file"
-}
-
-# Purpose: Create the runtime artifact file next to a caller-validated parent
-# directory for path-adjacent staging (same-filesystem atomic publish).
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# needs a fresh staged resource or persistent helper state. The staged file
-# registers for trap cleanup because it lives outside the per-run temp root.
-zxfer_create_runtime_artifact_file_in_parent() {
-	l_parent_dir=$1
-	l_prefix=${2:-zxfer-runtime-artifact}
-
-	g_zxfer_runtime_artifact_path_result=""
-	l_status=0
-	l_parent_dir=$(zxfer_validate_temp_root_candidate "$l_parent_dir") || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-
-	# Validated parents may still be shared sticky directories, so the staged
-	# name comes from a randomized temp-name template: predictable pid+attempt
-	# slots would let a local process-table reader pre-create every candidate
-	# and deny staging.
-	if ! l_artifact_file=$(zxfer_create_unpredictable_staging_entry "$l_parent_dir/$l_prefix.XXXXXX" file); then
-		return 1
-	fi
-	zxfer_register_runtime_artifact_path "$l_artifact_file"
-	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_files_created
-	g_zxfer_runtime_artifact_path_result=$l_artifact_file
-	printf '%s\n' "$l_artifact_file"
-	return 0
-}
-
-# Purpose: Stage the runtime artifact file for path in temporary state before
-# it becomes live.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when the
-# module needs a same-run scratch artifact or pre-commit staging path.
-zxfer_stage_runtime_artifact_file_for_path() {
-	l_target_path=$1
-	l_prefix=${2:-zxfer-runtime-stage}
-
-	g_zxfer_runtime_artifact_path_result=""
-	l_status=0
-	l_parent_dir=$(zxfer_get_path_parent_dir "$l_target_path") || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-
-	zxfer_create_runtime_artifact_file_in_parent "$l_parent_dir" ".$l_prefix"
 }
 
 # Purpose: Write the runtime artifact file in the normalized form later zxfer
@@ -1803,28 +1666,21 @@ zxfer_capture_runtime_artifact_command_output() {
 	[ -n "$l_artifact_prefix" ] || return 1
 	[ "$#" -gt 0 ] || return 1
 
-	l_capture_status=0
 	zxfer_create_runtime_artifact_file "$l_artifact_prefix" >/dev/null ||
-		l_capture_status=$?
-	if [ "$l_capture_status" -ne 0 ]; then
-		return "$l_capture_status"
-	fi
+		return "$?"
 	l_capture_file=$g_zxfer_runtime_artifact_path_result
 
-	l_capture_status=0
-	"$@" >"$l_capture_file" || l_capture_status=$?
-	if [ "$l_capture_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
-		return "$l_capture_status"
-	fi
-
-	l_capture_status=0
-	zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null ||
+	"$@" >"$l_capture_file" || {
 		l_capture_status=$?
-	if [ "$l_capture_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
 		return "$l_capture_status"
-	fi
+	}
+
+	zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null || {
+		l_capture_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
+		return "$l_capture_status"
+	}
 
 	zxfer_cleanup_runtime_artifact_path "$l_capture_file"
 	return 0
@@ -1844,47 +1700,21 @@ zxfer_capture_runtime_artifact_combined_command_output() {
 	[ -n "$l_artifact_prefix" ] || return 1
 	[ "$#" -gt 0 ] || return 1
 
-	l_capture_status=0
 	zxfer_create_runtime_artifact_file "$l_artifact_prefix" >/dev/null ||
-		l_capture_status=$?
-	if [ "$l_capture_status" -ne 0 ]; then
-		return "$l_capture_status"
-	fi
+		return "$?"
 	l_capture_file=$g_zxfer_runtime_artifact_path_result
 
 	l_command_status=0
 	"$@" >"$l_capture_file" 2>&1 || l_command_status=$?
 
-	l_read_status=0
-	zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null ||
+	zxfer_read_runtime_artifact_file "$l_capture_file" >/dev/null || {
 		l_read_status=$?
-	if [ "$l_read_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$l_capture_file"
 		return "$l_read_status"
-	fi
+	}
 
 	zxfer_cleanup_runtime_artifact_path "$l_capture_file"
 	return "$l_command_status"
-}
-
-# Purpose: Publish the runtime artifact file from staged state to its live
-# destination.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup after
-# staged validation succeeds and the result is ready to replace the live
-# object.
-zxfer_publish_runtime_artifact_file() {
-	l_stage_file=$1
-	l_target_path=$2
-
-	[ -n "$l_stage_file" ] || return 1
-	[ -n "$l_target_path" ] || return 1
-	l_status=0
-	mv -f "$l_stage_file" "$l_target_path" 2>/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	zxfer_unregister_runtime_artifact_path "$l_stage_file"
-	return 0
 }
 
 # Purpose: Create the private temp directory using the safety checks owned by
@@ -1894,11 +1724,7 @@ zxfer_publish_runtime_artifact_file() {
 zxfer_create_private_temp_dir() {
 	l_prefix=$1
 
-	l_status=0
-	zxfer_create_runtime_artifact_dir "$l_prefix" >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
+	zxfer_create_runtime_artifact_dir "$l_prefix" >/dev/null || return "$?"
 
 	printf '%s\n' "$g_zxfer_runtime_artifact_path_result"
 }
@@ -1908,11 +1734,8 @@ zxfer_create_private_temp_dir() {
 # sibling helpers need the same lookup without duplicating module logic.
 zxfer_get_temp_file() {
 	g_zxfer_temp_file_result=""
-	l_status=0
-	zxfer_create_runtime_artifact_file "zxfer-temp" >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_throw_error "Error creating temporary file." "$l_status"
-	fi
+	zxfer_create_runtime_artifact_file "zxfer-temp" >/dev/null ||
+		zxfer_throw_error "Error creating temporary file." "$?"
 	zxfer_echoV "New temporary file: $g_zxfer_runtime_artifact_path_result"
 	g_zxfer_temp_file_result=$g_zxfer_runtime_artifact_path_result
 	echo "$g_zxfer_temp_file_result"
@@ -1929,7 +1752,6 @@ zxfer_create_temp_file_group() {
 	l_temp_file_group_paths=""
 
 	g_zxfer_temp_file_group_result=""
-	g_zxfer_temp_file_group_allocated_count=0
 	case "$l_temp_file_count" in
 	'' | *[!0-9]* | 0)
 		return 1
@@ -1937,13 +1759,11 @@ zxfer_create_temp_file_group() {
 	esac
 
 	while [ "$l_temp_file_index" -lt "$l_temp_file_count" ]; do
-		l_temp_file_status=0
-		zxfer_get_temp_file >/dev/null || l_temp_file_status=$?
-		if [ "$l_temp_file_status" -ne 0 ]; then
-			g_zxfer_temp_file_group_allocated_count=$l_temp_file_index
+		zxfer_get_temp_file >/dev/null || {
+			l_temp_file_status=$?
 			zxfer_cleanup_runtime_artifact_path_list "$l_temp_file_group_paths" >/dev/null 2>&1 || :
 			return "$l_temp_file_status"
-		fi
+		}
 		if [ -n "$l_temp_file_group_paths" ]; then
 			l_temp_file_group_paths=$l_temp_file_group_paths'
 '$g_zxfer_temp_file_result
@@ -1951,348 +1771,10 @@ zxfer_create_temp_file_group() {
 			l_temp_file_group_paths=$g_zxfer_temp_file_result
 		fi
 		l_temp_file_index=$((l_temp_file_index + 1))
-		g_zxfer_temp_file_group_allocated_count=$l_temp_file_index
 	done
 
 	g_zxfer_temp_file_group_result=$l_temp_file_group_paths
 	printf '%s\n' "$l_temp_file_group_paths"
-}
-
-# Purpose: Reset the cache object result state so the next runtime pass starts
-# from a clean state.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup before this
-# module reuses mutable scratch globals or cached decisions.
-zxfer_reset_cache_object_result_state() {
-	g_zxfer_cache_object_kind_result=""
-	g_zxfer_cache_object_metadata_result=""
-	g_zxfer_cache_object_payload_result=""
-}
-
-# Purpose: Validate the cache object metadata lines before zxfer relies on it.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup to fail
-# closed on malformed, unsafe, or stale input.
-zxfer_validate_cache_object_metadata_lines() {
-	l_metadata=$1
-
-	[ -n "$l_metadata" ] || return 0
-
-	while IFS= read -r l_line || [ -n "$l_line" ]; do
-		case "$l_line" in
-		*=*)
-			[ -n "${l_line%%=*}" ] || return 1
-			;;
-		*)
-			return 1
-			;;
-		esac
-	done <<-EOF
-		$l_metadata
-	EOF
-
-	return 0
-}
-
-# Purpose: Return the cache object metadata value in the form expected by later
-# helpers.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when
-# sibling helpers need the same lookup without duplicating module logic.
-zxfer_get_cache_object_metadata_value() {
-	l_metadata=$1
-	l_key=$2
-
-	[ -n "$l_key" ] || return 1
-	[ -n "$l_metadata" ] || return 1
-
-	while IFS= read -r l_line || [ -n "$l_line" ]; do
-		case "$l_line" in
-		"$l_key"=*)
-			printf '%s\n' "${l_line#"$l_key"=}"
-			return 0
-			;;
-		esac
-	done <<-EOF
-		$l_metadata
-	EOF
-
-	return 1
-}
-
-# Purpose: Create the cache object stage directory in parent using the safety
-# checks owned by this module.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# needs a fresh staged resource or persistent helper state. The staged dir
-# registers for trap cleanup because it lives outside the per-run temp root.
-zxfer_create_cache_object_stage_dir_in_parent() {
-	l_parent_dir=$1
-	l_prefix=${2:-zxfer-cache-object}
-
-	g_zxfer_runtime_artifact_path_result=""
-	l_status=0
-	l_parent_dir=$(zxfer_validate_temp_root_candidate "$l_parent_dir") || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-
-	# Validated parents may still be shared sticky directories, so the staged
-	# name comes from a randomized temp-name template: predictable pid+attempt
-	# slots would let a local process-table reader pre-create every candidate
-	# and deny staging.
-	if ! l_stage_dir=$(zxfer_create_unpredictable_staging_entry "$l_parent_dir/.$l_prefix.XXXXXX" dir); then
-		return 1
-	fi
-	zxfer_register_runtime_artifact_path "$l_stage_dir"
-	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_dirs_created
-	g_zxfer_runtime_artifact_path_result=$l_stage_dir
-	printf '%s\n' "$l_stage_dir"
-	return 0
-}
-
-# Purpose: Create the cache object stage directory for path using the safety
-# checks owned by this module.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# needs a fresh staged resource or persistent helper state.
-zxfer_create_cache_object_stage_dir_for_path() {
-	l_object_path=$1
-	l_prefix=${2:-zxfer-cache-object}
-
-	l_status=0
-	l_parent_dir=$(zxfer_get_path_parent_dir "$l_object_path") || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-
-	zxfer_create_cache_object_stage_dir_in_parent "$l_parent_dir" "$l_prefix"
-}
-
-# Purpose: Clean up the cache object stage directory that this module created
-# or tracks.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup on success
-# and failure paths so temporary state does not linger.
-zxfer_cleanup_cache_object_stage_dir() {
-	l_stage_dir=$1
-
-	zxfer_cleanup_runtime_artifact_path "$l_stage_dir"
-}
-
-# Purpose: Write the cache object contents to path in the normalized form later
-# zxfer steps expect.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when the
-# module needs a stable staged file or emitted stream for downstream use.
-zxfer_write_cache_object_contents_to_path() {
-	l_object_path=$1
-	l_object_kind=$2
-	l_object_metadata=$3
-	l_object_payload=$4
-
-	[ -n "$l_object_path" ] || return 1
-	[ ! -L "$l_object_path" ] || return 1
-	[ ! -h "$l_object_path" ] || return 1
-	[ -n "$l_object_kind" ] || return 1
-	[ -n "$l_object_payload" ] || return 1
-	l_object_write_status=0
-	zxfer_validate_cache_object_metadata_lines "$l_object_metadata" ||
-		l_object_write_status=$?
-	if [ "$l_object_write_status" -ne 0 ]; then
-		return "$l_object_write_status"
-	fi
-
-	l_old_umask=$(umask)
-	umask 077
-	l_object_write_status=0
-	{
-		printf '%s\n' "$ZXFER_CACHE_OBJECT_HEADER_LINE"
-		printf 'kind=%s\n' "$l_object_kind"
-		[ -z "$l_object_metadata" ] || printf '%s\n' "$l_object_metadata"
-		printf '\n'
-		printf '%s' "$l_object_payload"
-		printf '\n%s\n' "$ZXFER_CACHE_OBJECT_END_LINE"
-	} >"$l_object_path" || l_object_write_status=$?
-	if [ "$l_object_write_status" -ne 0 ]; then
-		umask "$l_old_umask"
-		rm -f "$l_object_path" 2>/dev/null || :
-		return "$l_object_write_status"
-	fi
-	umask "$l_old_umask"
-
-	chmod 600 "$l_object_path" 2>/dev/null || :
-	return 0
-}
-
-# Purpose: Read the cache object file from staged state into the current shell.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when later
-# helpers need a checked reload instead of ad hoc file reads.
-zxfer_read_cache_object_file() {
-	l_object_path=$1
-	l_expected_kind=$2
-	l_object_contents=""
-
-	zxfer_reset_cache_object_result_state
-
-	[ -f "$l_object_path" ] || return 1
-	[ ! -L "$l_object_path" ] || return 1
-	[ ! -h "$l_object_path" ] || return 1
-	if zxfer_read_runtime_artifact_file "$l_object_path" >/dev/null; then
-		l_object_contents=$g_zxfer_runtime_artifact_read_result
-	else
-		l_read_status=$?
-		return "$l_read_status"
-	fi
-	case "$l_object_contents" in
-	*'
-')
-		l_object_contents=${l_object_contents%?}
-		;;
-	esac
-
-	l_line_number=0
-	l_separator_seen=0
-	l_object_kind=""
-	l_object_metadata=""
-	l_object_payload=""
-	l_object_payload_has_lines=0
-	l_previous_payload_line=""
-	l_previous_payload_line_set=0
-
-	while IFS= read -r l_line || [ -n "$l_line" ]; do
-		l_line_number=$((l_line_number + 1))
-		case "$l_line_number" in
-		1)
-			[ "$l_line" = "$ZXFER_CACHE_OBJECT_HEADER_LINE" ] || return 1
-			continue
-			;;
-		2)
-			case "$l_line" in
-			kind=*)
-				l_object_kind=${l_line#kind=}
-				;;
-			*)
-				return 1
-				;;
-			esac
-			[ -n "$l_object_kind" ] || return 1
-			[ -z "$l_expected_kind" ] || [ "$l_object_kind" = "$l_expected_kind" ] || return 1
-			continue
-			;;
-		esac
-
-		if [ "$l_separator_seen" -eq 0 ]; then
-			if [ "$l_line" = "" ]; then
-				l_separator_seen=1
-				continue
-			fi
-
-			case "$l_line" in
-			*=*)
-				[ -n "${l_line%%=*}" ] || return 1
-				if [ -n "$l_object_metadata" ]; then
-					l_object_metadata="$l_object_metadata
-$l_line"
-				else
-					l_object_metadata=$l_line
-				fi
-				;;
-			*)
-				return 1
-				;;
-			esac
-			continue
-		fi
-
-		if [ "$l_previous_payload_line_set" -eq 1 ]; then
-			if [ "$l_object_payload_has_lines" -eq 1 ]; then
-				l_object_payload="$l_object_payload
-$l_previous_payload_line"
-			else
-				l_object_payload=$l_previous_payload_line
-				l_object_payload_has_lines=1
-			fi
-		fi
-
-		l_previous_payload_line=$l_line
-		l_previous_payload_line_set=1
-	done <<EOF
-$l_object_contents
-EOF
-
-	[ "$l_line_number" -ge 5 ] || return 1
-	[ "$l_separator_seen" -eq 1 ] || return 1
-	[ "$l_previous_payload_line_set" -eq 1 ] || return 1
-	[ "$l_previous_payload_line" = "$ZXFER_CACHE_OBJECT_END_LINE" ] || return 1
-	[ "$l_object_payload_has_lines" -eq 1 ] || return 1
-	[ -n "$l_object_payload" ] || return 1
-
-	g_zxfer_cache_object_kind_result=$l_object_kind
-	g_zxfer_cache_object_metadata_result=$l_object_metadata
-	g_zxfer_cache_object_payload_result=$l_object_payload
-	zxfer_profile_increment_counter g_zxfer_profile_runtime_cache_object_readbacks
-	printf '%s\n' "$l_object_payload"
-}
-
-# Purpose: Write the cache object file atomically in the normalized form later
-# zxfer steps expect.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when the
-# module needs a stable staged file or emitted stream for downstream use.
-zxfer_write_cache_object_file_atomically() {
-	l_cache_target_path=$1
-	l_cache_object_kind=$2
-	l_cache_object_metadata=$3
-	l_cache_object_payload=$4
-	l_cache_stage_dir=""
-	l_cache_stage_file=""
-
-	[ -n "$l_cache_target_path" ] || return 1
-	[ ! -L "$l_cache_target_path" ] || return 1
-	[ ! -h "$l_cache_target_path" ] || return 1
-	if [ -e "$l_cache_target_path" ]; then
-		[ -f "$l_cache_target_path" ] || return 1
-	fi
-
-	l_status=0
-	l_cache_parent_dir=$(zxfer_get_path_parent_dir "$l_cache_target_path") || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	l_status=0
-	mkdir -p "$l_cache_parent_dir" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	l_status=0
-	zxfer_create_cache_object_stage_dir_for_path \
-		"$l_cache_target_path" "zxfer-cache-object" >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
-	fi
-	l_cache_stage_dir=$g_zxfer_runtime_artifact_path_result
-	l_cache_stage_file="$l_cache_stage_dir/object"
-
-	l_status=0
-	zxfer_write_cache_object_contents_to_path \
-		"$l_cache_stage_file" \
-		"$l_cache_object_kind" \
-		"$l_cache_object_metadata" \
-		"$l_cache_object_payload" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_cache_stage_dir"
-		return "$l_status"
-	fi
-	l_status=0
-	zxfer_read_cache_object_file \
-		"$l_cache_stage_file" "$l_cache_object_kind" >/dev/null 2>&1 || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_cache_stage_dir"
-		return "$l_status"
-	fi
-	l_status=0
-	mv -f "$l_cache_stage_file" "$l_cache_target_path" 2>/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_cache_stage_dir"
-		return "$l_status"
-	fi
-	chmod 600 "$l_cache_target_path" 2>/dev/null || :
-	zxfer_profile_increment_counter g_zxfer_profile_runtime_cache_object_writes
-	zxfer_cleanup_cache_object_stage_dir "$l_cache_stage_dir"
-	return 0
 }
 
 # Purpose: Return the operating system in the form expected by later helpers.
@@ -2310,12 +1792,8 @@ zxfer_get_os() {
 	if [ "$l_host_spec" = "" ]; then
 		l_output_os=$(uname)
 	else
-		l_os_status=0
 		l_output_os=$(zxfer_get_remote_host_operating_system "$l_host_spec" "$l_profile_side") ||
-			l_os_status=$?
-		if [ "$l_os_status" -ne 0 ]; then
-			return "$l_os_status"
-		fi
+			return "$?"
 	fi
 
 	echo "$l_output_os"
@@ -2434,12 +1912,10 @@ zxfer_refresh_ssh_control_socket_support_state() {
 # bootstrap so downstream code sees consistent defaults and runtime state.
 zxfer_init_transport_remote_defaults() {
 	g_origin_remote_capabilities_host=""
-	g_origin_remote_capabilities_dependency_path=""
 	g_origin_remote_capabilities_cache_identity=""
 	g_origin_remote_capabilities_response=""
 	g_origin_remote_capabilities_bootstrap_source=""
 	g_target_remote_capabilities_host=""
-	g_target_remote_capabilities_dependency_path=""
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
@@ -2558,7 +2034,6 @@ zxfer_init_runtime_state_defaults() {
 	g_zxfer_profile_runtime_cache_object_readbacks=0
 	g_zxfer_profile_command_render_calls=0
 	g_zxfer_profile_live_destination_snapshot_rechecks=0
-	zxfer_reset_cache_object_result_state
 	g_destination=""
 	zxfer_refresh_backup_storage_root
 
@@ -2596,39 +2071,30 @@ zxfer_ensure_snapshot_delete_temp_artifacts() {
 	l_new_delete_dest_tmp_file=""
 
 	if [ -z "$l_delete_source_tmp_file" ]; then
-		if zxfer_get_temp_file >/dev/null; then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
+		zxfer_get_temp_file >/dev/null || return "$?"
 		l_delete_source_tmp_file=$g_zxfer_temp_file_result
 		l_new_delete_source_tmp_file=$l_delete_source_tmp_file
 	fi
 
 	if [ -z "$l_delete_dest_tmp_file" ]; then
-		if zxfer_get_temp_file >/dev/null; then
-			:
-		else
+		zxfer_get_temp_file >/dev/null || {
 			l_status=$?
 			zxfer_cleanup_runtime_artifact_paths \
 				"$l_new_delete_source_tmp_file"
 			return "$l_status"
-		fi
+		}
 		l_delete_dest_tmp_file=$g_zxfer_temp_file_result
 		l_new_delete_dest_tmp_file=$l_delete_dest_tmp_file
 	fi
 
 	if [ -z "$l_delete_snapshots_to_delete_tmp_file" ]; then
-		if zxfer_get_temp_file >/dev/null; then
-			:
-		else
+		zxfer_get_temp_file >/dev/null || {
 			l_status=$?
 			zxfer_cleanup_runtime_artifact_paths \
 				"$l_new_delete_source_tmp_file" \
 				"$l_new_delete_dest_tmp_file"
 			return "$l_status"
-		fi
+		}
 		l_delete_snapshots_to_delete_tmp_file=$g_zxfer_temp_file_result
 	fi
 
@@ -2824,12 +2290,8 @@ zxfer_init_source_execution_context() {
 			g_origin_cmd_zfs=${g_origin_cmd_zfs:-$g_cmd_zfs}
 			if [ "$g_option_z_compress" -eq 1 ] &&
 				[ -z "${g_origin_cmd_compress_safe:-}" ]; then
-				l_source_context_status=0
 				g_origin_cmd_compress_safe=$(zxfer_quote_cli_tokens "$g_cmd_compress" "compression command") ||
-					l_source_context_status=$?
-				if [ "$l_source_context_status" -ne 0 ]; then
-					zxfer_throw_error "$g_origin_cmd_compress_safe" "$l_source_context_status"
-				fi
+					zxfer_throw_error "$g_origin_cmd_compress_safe" "$?"
 			fi
 			zxfer_echoV "Dry run: skipping live remote source helper validation."
 			return
@@ -2880,12 +2342,8 @@ zxfer_init_destination_execution_context() {
 			g_target_cmd_zfs=${g_target_cmd_zfs:-$g_cmd_zfs}
 			if [ "$g_option_z_compress" -eq 1 ] &&
 				[ -z "${g_target_cmd_decompress_safe:-}" ]; then
-				l_destination_context_status=0
 				g_target_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress" "decompression command") ||
-					l_destination_context_status=$?
-				if [ "$l_destination_context_status" -ne 0 ]; then
-					zxfer_throw_error "$g_target_cmd_decompress_safe" "$l_destination_context_status"
-				fi
+					zxfer_throw_error "$g_target_cmd_decompress_safe" "$?"
 			fi
 			zxfer_echoV "Dry run: skipping live remote destination helper validation."
 			return

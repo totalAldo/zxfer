@@ -115,34 +115,6 @@ zxfer_get_effective_dependency_path() {
 	printf '%s\n' "$ZXFER_DEFAULT_SECURE_PATH"
 }
 
-# Purpose: Merge the path allowlists while preserving zxfer's precedence rules.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# when multiple configuration sources contribute to one effective value.
-zxfer_merge_path_allowlists() {
-	l_primary=$1
-	l_secondary=$2
-
-	OLDIFS=$IFS
-	IFS=":"
-	l_merged=""
-	for l_entry in $l_primary $l_secondary; do
-		[ -n "$l_entry" ] || continue
-		case ":$l_merged:" in
-		*:"$l_entry":*)
-			continue
-			;;
-		esac
-		if [ "$l_merged" = "" ]; then
-			l_merged=$l_entry
-		else
-			l_merged=$l_merged:$l_entry
-		fi
-	done
-	IFS=$OLDIFS
-
-	printf '%s\n' "$l_merged"
-}
-
 # Purpose: Refresh the secure path state from the current configuration and
 # runtime state.
 # Usage: Called during secure-PATH bootstrap and local dependency resolution

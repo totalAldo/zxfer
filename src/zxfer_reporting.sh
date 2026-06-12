@@ -389,9 +389,7 @@ zxfer_profile_add_elapsed_ms() {
 	esac
 
 	if [ -z "$l_end_ms" ]; then
-		if ! l_end_ms=$(zxfer_profile_now_ms); then
-			return 0
-		fi
+		l_end_ms=$(zxfer_profile_now_ms) || return 0
 	fi
 
 	case "$l_end_ms" in
@@ -845,20 +843,14 @@ zxfer_prepare_error_log_fallback_lock_dir() {
 	l_fallback_tmpdir=$1
 	l_fallback_log_path=$2
 
-	if ! l_fallback_identity_hex=$(zxfer_error_log_lock_identity_hex "$l_fallback_log_path"); then
-		return 1
-	fi
+	l_fallback_identity_hex=$(zxfer_error_log_lock_identity_hex "$l_fallback_log_path") || return 1
 	l_fallback_identity_hex_len=${#l_fallback_identity_hex}
 	l_fallback_identity_byte_len=$((l_fallback_identity_hex_len / 2))
 	l_fallback_parent_dir=$l_fallback_tmpdir/.zxfer-error-log.lock.d
 
-	if ! zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir"; then
-		return 1
-	fi
+	zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir" || return 1
 	l_fallback_parent_dir=$l_fallback_parent_dir/h$l_fallback_identity_byte_len
-	if ! zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir"; then
-		return 1
-	fi
+	zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir" || return 1
 
 	l_fallback_remaining_hex=$l_fallback_identity_hex
 	while [ -n "$l_fallback_remaining_hex" ]; do
@@ -866,9 +858,7 @@ zxfer_prepare_error_log_fallback_lock_dir() {
 		l_fallback_remaining_hex=$(printf '%s' "$l_fallback_remaining_hex" | cut -c 97-)
 		[ -n "$l_fallback_chunk" ] || return 1
 		l_fallback_parent_dir=$l_fallback_parent_dir/$l_fallback_chunk
-		if ! zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir"; then
-			return 1
-		fi
+		zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir" || return 1
 	done
 
 	printf '%s/lock\n' "$l_fallback_parent_dir"
@@ -884,12 +874,8 @@ zxfer_capture_reporting_helper_output() {
 	shift
 
 	g_zxfer_reporting_capture_result=""
-	l_capture_status=0
 	zxfer_capture_runtime_artifact_command_output "zxfer-reporting" "$@" ||
-		l_capture_status=$?
-	if [ "$l_capture_status" -ne 0 ]; then
-		return "$l_capture_status"
-	fi
+		return "$?"
 
 	g_zxfer_reporting_capture_result=$g_zxfer_runtime_artifact_read_result
 	case "$g_zxfer_reporting_capture_result" in
@@ -1067,9 +1053,7 @@ zxfer_error_log_parent_is_writable() {
 zxfer_create_error_log_file() {
 	l_create_log_path=$1
 
-	if ! zxfer_create_secure_staging_dir_for_path "$l_create_log_path" "zxfer-error-log" >/dev/null; then
-		return 1
-	fi
+	zxfer_create_secure_staging_dir_for_path "$l_create_log_path" "zxfer-error-log" >/dev/null || return 1
 	l_create_stage_dir=$g_zxfer_secure_staging_dir_result
 	l_create_stage_file="$l_create_stage_dir/log.write"
 

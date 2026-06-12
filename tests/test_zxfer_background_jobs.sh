@@ -61,8 +61,6 @@ test_background_job_record_helpers_track_and_remove_jobs() {
 
 	assertEquals "Tracked background jobs should be discoverable by job id." \
 		0 "$find_status"
-	assertEquals "Tracked background jobs should preserve the recorded kind." \
-		"source_snapshot_list" "$g_zxfer_background_job_record_kind"
 	assertEquals "Tracked background jobs should preserve the recorded job-shell pid." \
 		"202" "$g_zxfer_background_job_record_pid"
 	assertEquals "Tracked background jobs should preserve the recorded teardown mode." \
@@ -278,8 +276,6 @@ test_spawn_and_wait_round_trips_success_status_and_output_capture() {
 		0 "${g_zxfer_background_job_wait_exit_status:-}"
 	assertEquals "Background waits should not mark a report failure when the status write succeeds." \
 		"" "${g_zxfer_background_job_wait_report_failure:-}"
-	assertEquals "Background waits should publish the completed job id." \
-		"$job_id" "${g_zxfer_background_job_wait_job_id:-}"
 	assertEquals "Background jobs should write the requested stdout capture." \
 		"payload" "$(tr -d '\n' <"$outfile")"
 	assertEquals "Background jobs should leave the stderr capture empty when the job is quiet." \

@@ -81,20 +81,6 @@ zxfer_ensure_local_ssh_command() {
 	return 0
 }
 
-# Purpose: Return the resolved local ssh helper in the form expected by later
-# helpers.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when remote transport is actually needed so local-only runs
-# do not hard-require ssh during startup.
-zxfer_get_resolved_local_ssh_command() {
-	if ! zxfer_ensure_local_ssh_command; then
-		printf '%s\n' "$g_zxfer_resolved_local_ssh_command_result"
-		return 1
-	fi
-
-	printf '%s\n' "$g_zxfer_resolved_local_ssh_command_result"
-}
-
 # Purpose: Check whether one SSH control-socket path stays within the platform
 # sun_path limit once ssh appends its temporary listener suffix.
 # Usage: Called during remote bootstrap and ssh control-socket management
@@ -121,9 +107,7 @@ zxfer_ensure_ssh_control_socket_dir() {
 	fi
 	g_zxfer_ssh_control_socket_dir_result=""
 
-	if ! zxfer_ensure_run_tmp_root; then
-		return 1
-	fi
+	zxfer_ensure_run_tmp_root || return 1
 	if zxfer_is_ssh_control_socket_path_short_enough \
 		"$g_zxfer_run_tmp_root/ssh-target.sock"; then
 		g_zxfer_ssh_control_socket_dir_result=$g_zxfer_run_tmp_root
@@ -389,12 +373,8 @@ zxfer_open_ssh_control_socket_for_host() {
 	[ -n "$l_host" ] || return 1
 	[ -n "$l_socket_path" ] || return 1
 
-	if l_transport_tokens=$(zxfer_get_ssh_base_transport_tokens); then
-		:
-	else
-		l_transport_status=$?
-		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
-	fi
+	l_transport_tokens=$(zxfer_get_ssh_base_transport_tokens) ||
+		zxfer_throw_error "$l_transport_tokens" "$?"
 	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host"); then
 		zxfer_throw_error "$l_host_tokens"
 	fi
@@ -474,11 +454,6 @@ zxfer_clear_ssh_control_socket_role_state() {
 zxfer_reset_remote_capability_parse_state() {
 	g_zxfer_remote_capability_os=""
 	g_zxfer_remote_capability_zfs_status=""
-	g_zxfer_remote_capability_zfs_path=""
-	g_zxfer_remote_capability_parallel_status=""
-	g_zxfer_remote_capability_parallel_path=""
-	g_zxfer_remote_capability_cat_status=""
-	g_zxfer_remote_capability_cat_path=""
 	g_zxfer_remote_capability_tool_records=""
 	g_zxfer_remote_capability_tool_status_result=""
 	g_zxfer_remote_capability_tool_path_result=""
@@ -885,27 +860,6 @@ zxfer_parse_remote_capability_response() {
 			case "$l_record_tool" in
 			zfs)
 				g_zxfer_remote_capability_zfs_status=$l_record_status
-				if [ "$l_record_status" -eq 0 ]; then
-					g_zxfer_remote_capability_zfs_path=$l_record_path
-				else
-					g_zxfer_remote_capability_zfs_path=""
-				fi
-				;;
-			parallel)
-				g_zxfer_remote_capability_parallel_status=$l_record_status
-				if [ "$l_record_status" -eq 0 ]; then
-					g_zxfer_remote_capability_parallel_path=$l_record_path
-				else
-					g_zxfer_remote_capability_parallel_path=""
-				fi
-				;;
-			cat)
-				g_zxfer_remote_capability_cat_status=$l_record_status
-				if [ "$l_record_status" -eq 0 ]; then
-					g_zxfer_remote_capability_cat_path=$l_record_path
-				else
-					g_zxfer_remote_capability_cat_path=""
-				fi
 				;;
 			esac
 			l_tool_count=$((l_tool_count + 1))
@@ -1107,7 +1061,6 @@ zxfer_store_cached_remote_capability_response_for_host() {
 	l_response=$2
 	l_requested_tools=${3:-}
 	l_stored=0
-	l_dependency_path=$(zxfer_get_effective_dependency_path)
 	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
 		"$l_host_spec" "$l_requested_tools"); then
 		l_cache_identity=""
@@ -1120,7 +1073,6 @@ zxfer_store_cached_remote_capability_response_for_host() {
 			g_origin_remote_capabilities_bootstrap_source=""
 		fi
 		g_origin_remote_capabilities_host=$l_host_spec
-		g_origin_remote_capabilities_dependency_path=$l_dependency_path
 		g_origin_remote_capabilities_cache_identity=$l_cache_identity
 		g_origin_remote_capabilities_response=$l_response
 		l_stored=1
@@ -1133,7 +1085,6 @@ zxfer_store_cached_remote_capability_response_for_host() {
 			g_target_remote_capabilities_bootstrap_source=""
 		fi
 		g_target_remote_capabilities_host=$l_host_spec
-		g_target_remote_capabilities_dependency_path=$l_dependency_path
 		g_target_remote_capabilities_cache_identity=$l_cache_identity
 		g_target_remote_capabilities_response=$l_response
 		l_stored=1
@@ -1142,7 +1093,6 @@ zxfer_store_cached_remote_capability_response_for_host() {
 	if [ "$l_stored" -eq 0 ] &&
 		[ "${g_origin_remote_capabilities_host:-}" = "" ]; then
 		g_origin_remote_capabilities_host=$l_host_spec
-		g_origin_remote_capabilities_dependency_path=$l_dependency_path
 		g_origin_remote_capabilities_cache_identity=$l_cache_identity
 		g_origin_remote_capabilities_response=$l_response
 		g_origin_remote_capabilities_bootstrap_source=""
@@ -1151,7 +1101,6 @@ zxfer_store_cached_remote_capability_response_for_host() {
 
 	if [ "$l_stored" -eq 0 ]; then
 		g_target_remote_capabilities_host=$l_host_spec
-		g_target_remote_capabilities_dependency_path=$l_dependency_path
 		g_target_remote_capabilities_cache_identity=$l_cache_identity
 		g_target_remote_capabilities_response=$l_response
 		g_target_remote_capabilities_bootstrap_source=""
@@ -1405,9 +1354,7 @@ zxfer_resolve_remote_tool_from_parsed_capabilities() {
 	[ -n "$l_host" ] || return 1
 	[ -n "$l_tool" ] || return 1
 
-	if ! zxfer_get_parsed_remote_capability_tool_record "$l_tool"; then
-		return 2
-	fi
+	zxfer_get_parsed_remote_capability_tool_record "$l_tool" || return 2
 
 	case "$g_zxfer_remote_capability_tool_status_result" in
 	0)
@@ -1489,73 +1436,6 @@ zxfer_resolve_remote_required_tool() {
 		return 1
 		;;
 	esac
-}
-
-# Purpose: Return the remote resolved tool version output in the form expected
-# by later helpers.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when sibling helpers need the same lookup without
-# duplicating module logic.
-#
-# Probe the full `--version` output for a resolved remote helper path using only
-# shell builtins, so version checks do not depend on the remote PATH.
-zxfer_get_remote_resolved_tool_version_output() {
-	l_host=$1
-	l_tool_path=$2
-	l_label=${3:-tool}
-	l_profile_side=${4:-}
-
-	[ -n "$l_host" ] || return 1
-	[ -n "$l_tool_path" ] || return 1
-
-	l_tool_path_single=$(zxfer_escape_for_single_quotes "$l_tool_path")
-	l_remote_probe="l_tool='$l_tool_path_single'
-if ! l_output=\$(\"\$l_tool\" --version 2>&1); then
-	exit 11
-fi
-printf '%s\n' \"\$l_output\""
-	l_remote_probe_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_probe")
-	if ! zxfer_capture_remote_probe_output "$l_host" "$l_remote_probe_cmd" "$l_profile_side"; then
-		zxfer_emit_remote_probe_failure_message \
-			"Failed to query dependency \"$l_label\" on host $l_host."
-		return 1
-	fi
-
-	printf '%s\n' "$g_zxfer_remote_probe_stdout"
-}
-
-# Purpose: Return the remote resolved tool version line in the form expected by
-# later helpers.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when sibling helpers need the same lookup without
-# duplicating module logic.
-#
-# Probe the first `--version` line for a resolved remote helper path using only
-# shell builtins, so signature checks do not depend on the remote PATH.
-zxfer_get_remote_resolved_tool_version_line() {
-	l_host=$1
-	l_tool_path=$2
-	l_label=${3:-tool}
-	l_profile_side=${4:-}
-
-	[ -n "$l_host" ] || return 1
-	[ -n "$l_tool_path" ] || return 1
-
-	if ! l_output=$(zxfer_get_remote_resolved_tool_version_output \
-		"$l_host" "$l_tool_path" "$l_label" "$l_profile_side"); then
-		[ "$l_output" = "" ] || printf '%s\n' "$l_output"
-		return 1
-	fi
-
-	l_oldifs=$IFS
-	IFS='
-'
-	set -f
-	# shellcheck disable=SC2086 # Intentional newline-only splitting to keep the first output line.
-	set -- $l_output
-	IFS=$l_oldifs
-
-	printf '%s\n' "$1"
 }
 
 # Purpose: Resolve the effective remote CLI tool direct that zxfer should use.

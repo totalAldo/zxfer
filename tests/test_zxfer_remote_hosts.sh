@@ -152,12 +152,10 @@ setUp() {
 	g_cmd_zfs="/sbin/zfs"
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_origin_remote_capabilities_host=""
-	g_origin_remote_capabilities_dependency_path=""
 	g_origin_remote_capabilities_cache_identity=""
 	g_origin_remote_capabilities_response=""
 	g_origin_remote_capabilities_bootstrap_source=""
 	g_target_remote_capabilities_host=""
-	g_target_remote_capabilities_dependency_path=""
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
@@ -313,9 +311,12 @@ test_zxfer_parse_remote_capability_response_extracts_fields() {
 		(
 			zxfer_parse_remote_capability_response "$(fake_remote_capability_response)"
 			printf 'os=%s\n' "$g_zxfer_remote_capability_os"
-			printf 'zfs=%s:%s\n' "$g_zxfer_remote_capability_zfs_status" "$g_zxfer_remote_capability_zfs_path"
-			printf 'parallel=%s:%s\n' "$g_zxfer_remote_capability_parallel_status" "$g_zxfer_remote_capability_parallel_path"
-			printf 'cat=%s:%s\n' "$g_zxfer_remote_capability_cat_status" "$g_zxfer_remote_capability_cat_path"
+			zxfer_get_parsed_remote_capability_tool_record zfs
+			printf 'zfs=%s:%s\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
+			zxfer_get_parsed_remote_capability_tool_record parallel
+			printf 'parallel=%s:%s\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
+			zxfer_get_parsed_remote_capability_tool_record cat
+			printf 'cat=%s:%s\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
 		)
 	)
 
@@ -333,8 +334,10 @@ os	RemoteOS
 tool	zfs	0	/remote/bin/zfs
 tool	parallel	1	-
 tool	cat	1	-"
-			printf 'parallel=%s:%s\n' "$g_zxfer_remote_capability_parallel_status" "$g_zxfer_remote_capability_parallel_path"
-			printf 'cat=%s:%s\n' "$g_zxfer_remote_capability_cat_status" "$g_zxfer_remote_capability_cat_path"
+			zxfer_get_parsed_remote_capability_tool_record parallel
+			printf 'parallel=%s:%s\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
+			zxfer_get_parsed_remote_capability_tool_record cat
+			printf 'cat=%s:%s\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
 		)
 	)
 
@@ -407,7 +410,8 @@ tool	zfs	0	/remote/bin/zfs
 tool	weirdtool	0	/remote/bin/weirdtool
 tool	cat	0	/remote/bin/cat"
 			printf 'zfs_status=%s\n' "$g_zxfer_remote_capability_zfs_status"
-			printf 'cat_path=%s\n' "$g_zxfer_remote_capability_cat_path"
+			zxfer_get_parsed_remote_capability_tool_record cat
+			printf 'cat_path=%s\n' "$g_zxfer_remote_capability_tool_path_result"
 			zxfer_get_parsed_remote_capability_tool_record weirdtool
 			printf 'weirdtool_status=%s\n' "$g_zxfer_remote_capability_tool_status_result"
 			printf 'weirdtool_path=%s\n' "$g_zxfer_remote_capability_tool_path_result"
@@ -626,8 +630,6 @@ test_zxfer_store_cached_remote_capability_response_for_host_updates_target_slot(
 
 	assertEquals "Target-side host caching should update the target cache slot." \
 		"target.example" "$g_target_remote_capabilities_host"
-	assertEquals "Target-side host caching should key the cache slot by the active secure dependency path." \
-		"$ZXFER_DEFAULT_SECURE_PATH" "$g_target_remote_capabilities_dependency_path"
 	assertEquals "Target-side host caching should also key the cache slot by the active capability-cache identity." \
 		"$(zxfer_render_remote_capability_cache_identity_for_host "" "")" "$g_target_remote_capabilities_cache_identity"
 	assertContains "Target-side host caching should store the capability payload." \
@@ -641,8 +643,6 @@ test_zxfer_store_cached_remote_capability_response_for_host_updates_origin_slot(
 
 	assertEquals "Origin-side host caching should update the origin cache slot." \
 		"origin.example" "$g_origin_remote_capabilities_host"
-	assertEquals "Origin-side host caching should key the cache slot by the active secure dependency path." \
-		"$ZXFER_DEFAULT_SECURE_PATH" "$g_origin_remote_capabilities_dependency_path"
 	assertEquals "Origin-side host caching should also key the cache slot by the active capability-cache identity." \
 		"$(zxfer_render_remote_capability_cache_identity_for_host "" "")" "$g_origin_remote_capabilities_cache_identity"
 	assertContains "Origin-side host caching should store the capability payload." \
@@ -680,7 +680,6 @@ test_zxfer_store_cached_remote_capability_response_for_host_resets_target_bootst
 
 test_zxfer_get_cached_remote_capability_response_for_host_reads_origin_slot() {
 	g_origin_remote_capabilities_host="origin.example"
-	g_origin_remote_capabilities_dependency_path=$ZXFER_DEFAULT_SECURE_PATH
 	g_origin_remote_capabilities_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host "" "")
 	g_origin_remote_capabilities_response=$(fake_remote_capability_response)
 
@@ -692,7 +691,6 @@ test_zxfer_get_cached_remote_capability_response_for_host_reads_origin_slot() {
 
 test_zxfer_get_cached_remote_capability_response_for_host_reads_target_slot() {
 	g_target_remote_capabilities_host="target.example"
-	g_target_remote_capabilities_dependency_path=$ZXFER_DEFAULT_SECURE_PATH
 	g_target_remote_capabilities_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host "" "")
 	g_target_remote_capabilities_response=$(fake_remote_capability_response)
 
@@ -704,7 +702,6 @@ test_zxfer_get_cached_remote_capability_response_for_host_reads_target_slot() {
 
 test_zxfer_get_cached_remote_capability_response_for_host_rejects_mismatched_requested_tool_identity() {
 	g_origin_remote_capabilities_host="origin.example"
-	g_origin_remote_capabilities_dependency_path=$ZXFER_DEFAULT_SECURE_PATH
 	g_origin_remote_capabilities_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
 		"origin.example" "zfs")
 	g_origin_remote_capabilities_response=$(fake_remote_capability_response)
@@ -720,7 +717,6 @@ test_zxfer_get_cached_remote_capability_response_for_host_rejects_mismatched_req
 
 test_zxfer_get_cached_remote_capability_response_for_host_ignores_stale_dependency_path_entries() {
 	g_target_remote_capabilities_host="target.example"
-	g_target_remote_capabilities_dependency_path="/stale/secure/path"
 	g_target_remote_capabilities_cache_identity=$(printf '%s\n%s' "/stale/secure/path" "$(zxfer_render_ssh_transport_policy_identity)")
 	g_target_remote_capabilities_response=$(fake_remote_capability_response)
 	ZXFER_SECURE_PATH="/fresh/secure/path:/usr/bin"
@@ -736,7 +732,6 @@ test_zxfer_get_cached_remote_capability_response_for_host_ignores_stale_dependen
 
 test_zxfer_get_cached_remote_capability_response_for_host_ignores_stale_ssh_transport_policy_entries() {
 	g_target_remote_capabilities_host="target.example"
-	g_target_remote_capabilities_dependency_path=$ZXFER_DEFAULT_SECURE_PATH
 	g_target_remote_capabilities_cache_identity=$(printf '%s\n%s' "$ZXFER_DEFAULT_SECURE_PATH" "ambient")
 	g_target_remote_capabilities_response=$(fake_remote_capability_response)
 
@@ -777,7 +772,6 @@ test_zxfer_store_cached_remote_capability_response_for_host_falls_back_to_origin
 
 test_zxfer_store_cached_remote_capability_response_for_host_falls_back_to_target_slot_after_origin() {
 	g_origin_remote_capabilities_host="origin.example"
-	g_origin_remote_capabilities_dependency_path=$ZXFER_DEFAULT_SECURE_PATH
 	g_origin_remote_capabilities_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host "" "")
 	g_origin_remote_capabilities_response=$(fake_remote_capability_response)
 
@@ -789,7 +783,6 @@ test_zxfer_store_cached_remote_capability_response_for_host_falls_back_to_target
 
 test_zxfer_ensure_remote_host_capabilities_prefers_memory_cache() {
 	g_origin_remote_capabilities_host="origin.example"
-	g_origin_remote_capabilities_dependency_path=$ZXFER_DEFAULT_SECURE_PATH
 	g_origin_remote_capabilities_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host "" "")
 	g_origin_remote_capabilities_response=$(fake_remote_capability_response)
 	g_origin_remote_capabilities_bootstrap_source="cache"
@@ -2052,190 +2045,6 @@ test_zxfer_resolve_remote_cli_tool_falls_back_to_direct_probe_for_malformed_hand
 		"/remote/bin/zstd" "$output"
 }
 
-test_zxfer_get_remote_resolved_tool_version_output_returns_full_output() {
-	log_file="$TEST_TMPDIR/remote_tool_version_output.log"
-	: >"$log_file"
-
-	output=$(
-		(
-			LOG_FILE="$log_file"
-			zxfer_invoke_ssh_shell_command_for_host() {
-				{
-					printf 'host=%s\n' "$1"
-					printf 'cmd=%s\n' "$2"
-					printf 'side=%s\n' "$3"
-				} >>"$LOG_FILE"
-				cat <<'EOF'
-Academic tradition requires you to cite works you base your article on.
-parallel 20260122 ('Maduro').
-EOF
-			}
-			zxfer_get_remote_resolved_tool_version_output "origin.example" "/opt/bin/parallel" "parallel" source
-		)
-	)
-	status=$?
-
-	assertEquals "Resolved remote tool version probes should succeed when ssh returns multiline output." 0 "$status"
-	assertEquals "Resolved remote tool version probes should preserve the full remote version output." \
-		"Academic tradition requires you to cite works you base your article on.
-parallel 20260122 ('Maduro')." "$output"
-	assertContains "Resolved remote tool version probes should target the requested host." \
-		"$(cat "$log_file")" "host=origin.example"
-	assertContains "Resolved remote tool version probes should include the resolved helper path in the remote command." \
-		"$(cat "$log_file")" "/opt/bin/parallel"
-	assertContains "Resolved remote tool version probes should request --version from the resolved helper." \
-		"$(cat "$log_file")" "--version"
-	assertContains "Resolved remote tool version probes should preserve the source-side profile tag." \
-		"$(cat "$log_file")" "side=source"
-}
-
-test_zxfer_get_remote_resolved_tool_version_output_uses_plain_version_only() {
-	log_file="$TEST_TMPDIR/remote_tool_version_plain.log"
-	remote_parallel_bin="$TEST_TMPDIR/remote_parallel_version_plain"
-	: >"$log_file"
-	cat >"$remote_parallel_bin" <<EOF
-#!/bin/sh
-printf '%s\n' "\$*" >>"$log_file"
-if [ "\$1" = "--version" ]; then
-	printf '%s\n' "parallel 20260122 ('Maduro')."
-	exit 0
-fi
-exit 1
-EOF
-	chmod +x "$remote_parallel_bin"
-
-	output=$(
-		(
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "$1"
-			}
-			zxfer_invoke_ssh_shell_command_for_host() {
-				sh -c "$2"
-			}
-			zxfer_get_remote_resolved_tool_version_output \
-				"origin.example" "$remote_parallel_bin" "parallel" source
-		)
-	)
-	status=$?
-
-	assertEquals "Resolved remote tool version probes should use the plain --version form." \
-		0 "$status"
-	assertEquals "Resolved remote tool version probes should return the plain --version output." \
-		"parallel 20260122 ('Maduro')." "$output"
-	assertContains "Resolved remote tool version probes should request plain --version." \
-		"$(cat "$log_file")" "--version"
-	assertNotContains "Resolved remote tool version probes should not use a GNU-specific --will-cite check." \
-		"$(cat "$log_file")" "--will-cite"
-}
-
-test_zxfer_get_remote_resolved_tool_version_line_returns_first_line() {
-	log_file="$TEST_TMPDIR/remote_tool_version.log"
-	: >"$log_file"
-
-	output=$(
-		(
-			LOG_FILE="$log_file"
-			zxfer_invoke_ssh_shell_command_for_host() {
-				{
-					printf 'host=%s\n' "$1"
-					printf 'cmd=%s\n' "$2"
-					printf 'side=%s\n' "$3"
-				} >>"$LOG_FILE"
-				cat <<'EOF'
-Academic tradition requires you to cite works you base your article on.
-parallel 20260122 ('Maduro').
-EOF
-			}
-			zxfer_get_remote_resolved_tool_version_line "origin.example" "/opt/bin/parallel" "parallel" source
-		)
-	)
-	status=$?
-
-	assertEquals "Resolved remote tool version probes should succeed when ssh returns a version line." 0 "$status"
-	assertEquals "Resolved remote tool version probes should return the remote version line." \
-		"Academic tradition requires you to cite works you base your article on." "$output"
-	assertContains "Resolved remote tool version probes should target the requested host." \
-		"$(cat "$log_file")" "host=origin.example"
-	assertContains "Resolved remote tool version probes should include the resolved helper path in the remote command." \
-		"$(cat "$log_file")" "/opt/bin/parallel"
-	assertContains "Resolved remote tool version probes should request --version from the resolved helper." \
-		"$(cat "$log_file")" "--version"
-	assertContains "Resolved remote tool version probes should preserve the source-side profile tag." \
-		"$(cat "$log_file")" "side=source"
-}
-
-test_zxfer_get_remote_resolved_tool_version_line_preserves_nonempty_probe_failure_output() {
-	set +e
-	output=$(
-		(
-			zxfer_get_remote_resolved_tool_version_output() {
-				printf '%s\n' "remote version probe failed"
-				return 1
-			}
-			zxfer_get_remote_resolved_tool_version_line "origin.example" "/remote/bin/tool" "tool" source
-		)
-	)
-	status=$?
-
-	assertEquals "Resolved remote tool version line probes should fail when the underlying version probe fails." \
-		1 "$status"
-	assertEquals "Resolved remote tool version line probes should preserve a non-empty underlying version-probe failure message." \
-		"remote version probe failed" "$output"
-}
-
-test_zxfer_get_remote_resolved_tool_version_line_reports_probe_failures() {
-	set +e
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() {
-				return 255
-			}
-			zxfer_get_remote_resolved_tool_version_line "origin.example" "/opt/bin/parallel" "parallel" source
-		)
-	)
-	status=$?
-
-	assertEquals "Resolved remote tool version probes should fail when ssh cannot execute the remote probe." 1 "$status"
-	assertEquals "Resolved remote tool version probe failures should surface the generic dependency query error." \
-		"Failed to query dependency \"parallel\" on host origin.example." "$output"
-}
-
-test_zxfer_get_remote_resolved_tool_version_output_preserves_transport_diagnostic() {
-	set +e
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' "Host key verification failed." >&2
-				return 255
-			}
-			zxfer_get_remote_resolved_tool_version_output "origin.example" "/opt/bin/parallel" "parallel" source
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Resolved remote tool version probes should fail when ssh transport setup fails." 1 "$status"
-	assertContains "Resolved remote tool version probes should preserve the underlying transport diagnostic." \
-		"$output" "Host key verification failed."
-}
-
-test_zxfer_get_remote_resolved_tool_version_output_ignores_stdout_only_probe_noise() {
-	set +e
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' "wrapper startup noise"
-				return 255
-			}
-			zxfer_get_remote_resolved_tool_version_output "origin.example" "/opt/bin/parallel" "parallel" source
-		)
-	)
-	status=$?
-
-	assertEquals "Resolved remote tool version probes should fail when the remote probe returns only stdout noise." 1 "$status"
-	assertEquals "Stdout-only remote tool probe noise should not replace the generic dependency query failure." \
-		"Failed to query dependency \"parallel\" on host origin.example." "$output"
-}
-
 test_init_globals_initializes_defaults_and_temp_files() {
 	real_awk=$(command -v awk 2>/dev/null || printf '%s\n' awk)
 	result=$(
@@ -2356,10 +2165,6 @@ test_zxfer_local_ssh_resolution_helpers_cover_success_and_failure_paths() {
 			}
 			zxfer_ensure_local_ssh_command
 			printf 'ensure_failure=%s:%s\n' "$?" "$g_zxfer_resolved_local_ssh_command_result"
-
-			g_cmd_ssh=""
-			zxfer_get_resolved_local_ssh_command
-			printf 'resolved_failure=%s\n' "$?"
 		)
 	)
 
@@ -2367,18 +2172,6 @@ test_zxfer_local_ssh_resolution_helpers_cover_success_and_failure_paths() {
 		"$output" "ensure_success=0:$FAKE_SSH_BIN:$FAKE_SSH_BIN"
 	assertContains "Lazy local ssh resolution should preserve the dependency diagnostic when ssh lookup fails." \
 		"$output" "ensure_failure=1:missing ssh"
-	assertContains "Resolved local ssh lookups should print the dependency diagnostic when ssh lookup fails." \
-		"$output" "missing ssh"
-	assertContains "Resolved local ssh lookups should fail closed when ssh lookup fails." \
-		"$output" "resolved_failure=1"
-}
-
-test_zxfer_get_resolved_local_ssh_command_returns_cached_value_in_current_shell() {
-	g_cmd_ssh="$FAKE_SSH_BIN"
-	g_zxfer_resolved_local_ssh_command_result="$FAKE_SSH_BIN"
-
-	assertEquals "Resolved local ssh lookups should return the cached helper path directly in the current shell." \
-		"$FAKE_SSH_BIN" "$(zxfer_get_resolved_local_ssh_command)"
 }
 
 test_init_globals_rejects_relative_backup_dir_override() {
@@ -4043,13 +3836,6 @@ test_get_path_mode_octal_falls_back_to_ls_for_dash_prefixed_paths() {
 	)
 
 	assertEquals "LS fallback should recover 0600 permissions for dash-prefixed paths." "600" "$result"
-}
-
-test_merge_path_allowlists_deduplicates_entries() {
-	result=$(zxfer_merge_path_allowlists "/sbin:/bin:/usr/bin" "/bin:/usr/local/bin:/usr/bin")
-
-	assertEquals "Merged PATH allowlists should keep first-seen ordering and drop duplicates." \
-		"/sbin:/bin:/usr/bin:/usr/local/bin" "$result"
 }
 
 test_zxfer_apply_secure_path_exports_runtime_path() {

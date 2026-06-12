@@ -131,14 +131,11 @@ setUp() {
 	g_zxfer_replication_file_read_result=""
 	g_zxfer_new_snapshot_name="zxfer_test_snapshot"
 	g_zxfer_source_pvs_raw=""
-	g_test_base_readonly_properties="type,mountpoint,creation"
+	ZXFER_BASE_READONLY_PROPERTIES="type,mountpoint,creation"
 	g_LZFS="mock_zfs_tool"
-	g_dest_created_by_zxfer=0
+	stub_dest_created_by_zxfer=0
 	g_dest_seed_requires_property_reconcile=0
 	g_test_max_yield_iterations=8
-	zxfer_get_base_readonly_properties() {
-		printf '%s\n' "$g_test_base_readonly_properties"
-	}
 	zxfer_get_max_yield_iterations() {
 		printf '%s\n' "$g_test_max_yield_iterations"
 	}
@@ -498,7 +495,7 @@ unmount tank/src/child" "$(cat "$STUB_ZFS_CMD_LOG")"
 		;;
 	esac
 	assertEquals "Migration should not mutate the base readonly-property defaults." \
-		"type,mountpoint,creation" "$(zxfer_get_base_readonly_properties)"
+		"type,mountpoint,creation" "$ZXFER_BASE_READONLY_PROPERTIES"
 }
 
 test_prepare_migration_services_dry_run_previews_without_mutating_state() {
@@ -529,7 +526,7 @@ test_prepare_migration_services_dry_run_previews_without_mutating_state() {
 		;;
 	esac
 	assertEquals "Dry-run migration should leave the base readonly-property defaults unchanged." \
-		"type,mountpoint,creation" "$(zxfer_get_base_readonly_properties)"
+		"type,mountpoint,creation" "$ZXFER_BASE_READONLY_PROPERTIES"
 	assertContains "Dry-run migration should still track which services would need zxfer_relaunch later." \
 		"$(cat "$state_log")" "restart= svc:/network/iscsi_target svc:/network/nfs/server"
 	assertContains "Dry-run migration should still flag zxfer_relaunch as required." \
@@ -547,14 +544,14 @@ test_prepare_migration_services_dry_run_uses_mountpoint_free_effective_readonly_
 	g_option_n_dryrun=1
 	g_initial_source="tank/src"
 	g_recursive_source_list="tank/src"
-	g_test_base_readonly_properties="type,mountpoint,creation"
+	ZXFER_BASE_READONLY_PROPERTIES="type,mountpoint,creation"
 
 	zxfer_prepare_migration_services
 
 	assertEquals "Dry-run migration should drop mountpoint from the effective readonly-property list." \
 		"type,creation" "$(zxfer_get_effective_readonly_properties)"
 	assertEquals "Dry-run migration should not mutate the base readonly-property defaults." \
-		"type,mountpoint,creation" "$(zxfer_get_base_readonly_properties)"
+		"type,mountpoint,creation" "$ZXFER_BASE_READONLY_PROPERTIES"
 }
 
 test_prepare_migration_services_preserves_service_restart_state_in_current_shell() {
@@ -3334,7 +3331,7 @@ wait final sync" "$(cat "$log")"
 test_copy_snapshots_seeds_existing_destination_into_snapshot() {
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=0
-	g_dest_created_by_zxfer=0
+	stub_dest_created_by_zxfer=0
 	g_src_snapshot_transfer_list="tank/src@seed1 tank/src@seed2"
 	log="$TEST_TMPDIR/seed_existing.log"
 	rm -f "$log"
@@ -3820,13 +3817,13 @@ tank/src/child"
 		}
 		zxfer_transfer_properties() {
 			l_dest_present=$(printf '%s\n' "${g_recursive_dest_list:-}" | grep -c "^$g_actual_dest$")
-			printf 'props %s created=%s skip=%s dest_present=%s\n' "$1" "${g_dest_created_by_zxfer:-0}" "${2:-0}" "$l_dest_present" >>"$REFRESH_LOG"
+			printf 'props %s created=%s skip=%s dest_present=%s\n' "$1" "${stub_dest_created_by_zxfer:-0}" "${2:-0}" "$l_dest_present" >>"$REFRESH_LOG"
 			if [ "$1" = "tank/src/child" ] && [ "${2:-0}" -eq 0 ]; then
-				g_dest_created_by_zxfer=1
+				stub_dest_created_by_zxfer=1
 			fi
 		}
 		zxfer_copy_snapshots() {
-			printf 'copy %s created=%s\n' "$g_actual_dest" "${g_dest_created_by_zxfer:-0}" >>"$REFRESH_LOG"
+			printf 'copy %s created=%s\n' "$g_actual_dest" "${stub_dest_created_by_zxfer:-0}" >>"$REFRESH_LOG"
 			if [ "$g_actual_dest" = "backup/target/src/child" ]; then
 				g_dest_seed_requires_property_reconcile=1
 			else
@@ -4223,10 +4220,10 @@ test_copy_filesystems_reconciles_seeded_empty_destinations_even_when_not_created
 		}
 		zxfer_transfer_properties() {
 			l_dest_present=$(printf '%s\n' "${g_recursive_dest_list:-}" | grep -c "^$g_actual_dest$")
-			printf 'props %s created=%s skip=%s dest_present=%s\n' "$1" "${g_dest_created_by_zxfer:-0}" "${2:-0}" "$l_dest_present" >>"$REFRESH_LOG"
+			printf 'props %s created=%s skip=%s dest_present=%s\n' "$1" "${stub_dest_created_by_zxfer:-0}" "${2:-0}" "$l_dest_present" >>"$REFRESH_LOG"
 		}
 		zxfer_copy_snapshots() {
-			printf 'copy %s created=%s\n' "$g_actual_dest" "${g_dest_created_by_zxfer:-0}" >>"$REFRESH_LOG"
+			printf 'copy %s created=%s\n' "$g_actual_dest" "${stub_dest_created_by_zxfer:-0}" >>"$REFRESH_LOG"
 			g_dest_seed_requires_property_reconcile=1
 		}
 		zxfer_wait_for_zfs_send_jobs() {
@@ -4269,10 +4266,10 @@ test_copy_filesystems_reconciles_seeded_destination_when_root_already_exists() {
 		}
 		zxfer_transfer_properties() {
 			l_dest_present=$(printf '%s\n' "${g_recursive_dest_list:-}" | grep -c "^$g_actual_dest$")
-			printf 'props %s created=%s skip=%s dest_present=%s\n' "$1" "${g_dest_created_by_zxfer:-0}" "${2:-0}" "$l_dest_present" >>"$REFRESH_LOG"
+			printf 'props %s created=%s skip=%s dest_present=%s\n' "$1" "${stub_dest_created_by_zxfer:-0}" "${2:-0}" "$l_dest_present" >>"$REFRESH_LOG"
 		}
 		zxfer_copy_snapshots() {
-			printf 'copy %s created=%s\n' "$g_actual_dest" "${g_dest_created_by_zxfer:-0}" >>"$REFRESH_LOG"
+			printf 'copy %s created=%s\n' "$g_actual_dest" "${stub_dest_created_by_zxfer:-0}" >>"$REFRESH_LOG"
 			g_dest_seed_requires_property_reconcile=1
 		}
 		zxfer_wait_for_zfs_send_jobs() {
@@ -4651,10 +4648,10 @@ test_copy_filesystems_resets_destination_property_cache_before_post_seed_reconci
 		}
 		zxfer_transfer_properties() {
 			l_dest_present=$(printf '%s\n' "${g_recursive_dest_list:-}" | grep -c "^$g_actual_dest$")
-			printf 'props %s created=%s skip=%s dest_present=%s\n' "$1" "${g_dest_created_by_zxfer:-0}" "${2:-0}" "$l_dest_present" >>"$REFRESH_LOG"
+			printf 'props %s created=%s skip=%s dest_present=%s\n' "$1" "${stub_dest_created_by_zxfer:-0}" "${2:-0}" "$l_dest_present" >>"$REFRESH_LOG"
 		}
 		zxfer_copy_snapshots() {
-			printf 'copy %s created=%s\n' "$g_actual_dest" "${g_dest_created_by_zxfer:-0}" >>"$REFRESH_LOG"
+			printf 'copy %s created=%s\n' "$g_actual_dest" "${stub_dest_created_by_zxfer:-0}" >>"$REFRESH_LOG"
 			g_dest_seed_requires_property_reconcile=1
 		}
 		zxfer_wait_for_zfs_send_jobs() {
@@ -4797,14 +4794,14 @@ test_prepare_migration_services_live_uses_mountpoint_free_effective_readonly_lis
 	g_option_m_migrate=1
 	g_initial_source="tank/src"
 	g_recursive_source_list="tank/src"
-	g_test_base_readonly_properties="type,mountpoint,creation"
+	ZXFER_BASE_READONLY_PROPERTIES="type,mountpoint,creation"
 
 	zxfer_prepare_migration_services
 
 	assertEquals "Live migration should drop mountpoint from the effective readonly-property list." \
 		"type,creation" "$(zxfer_get_effective_readonly_properties)"
 	assertEquals "Live migration should not mutate the base readonly-property defaults." \
-		"type,mountpoint,creation" "$(zxfer_get_base_readonly_properties)"
+		"type,mountpoint,creation" "$ZXFER_BASE_READONLY_PROPERTIES"
 }
 
 test_copy_filesystems_allows_post_unmount_migration_replication() {

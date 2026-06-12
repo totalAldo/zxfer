@@ -46,33 +46,6 @@ ZXFER_BACKUP_METADATA_HEADER_LINE="#zxfer property backup file"
 ZXFER_BACKUP_METADATA_FORMAT_VERSION="2"
 ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE="__ZXFER_BACKUP_METADATA_PAIR_SPLIT__"
 
-# Purpose: Return the backup metadata header line in the form expected by later
-# helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_backup_metadata_header_line() {
-	printf '%s\n' "$ZXFER_BACKUP_METADATA_HEADER_LINE"
-}
-
-# Purpose: Return the backup metadata format version in the form expected by
-# later helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_backup_metadata_format_version() {
-	printf '%s\n' "$ZXFER_BACKUP_METADATA_FORMAT_VERSION"
-}
-
-# Purpose: Return the backup metadata pair split line in the form expected by
-# later helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_backup_metadata_pair_split_line() {
-	printf '%s\n' "$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE"
-}
-
 # Purpose: Reset the backup metadata state so the next backup-metadata pass
 # starts from a clean state.
 # Usage: Called during backup-metadata capture, readback, and atomic publish
@@ -500,8 +473,8 @@ zxfer_flush_captured_backup_metadata_if_live() {
 # flows to fail closed on malformed, unsafe, or stale input.
 zxfer_validate_backup_metadata_format() {
 	l_backup_contents=$1
-	l_expected_header=$(zxfer_get_backup_metadata_header_line)
-	l_expected_format_version=$(zxfer_get_backup_metadata_format_version)
+	l_expected_header=$ZXFER_BACKUP_METADATA_HEADER_LINE
+	l_expected_format_version=$ZXFER_BACKUP_METADATA_FORMAT_VERSION
 
 	# shellcheck disable=SC2016
 	printf '%s\n' "$l_backup_contents" | "${g_cmd_awk:-awk}" \
@@ -566,8 +539,8 @@ zxfer_render_backup_metadata_contents_for_roots() {
 	l_backup_date=$(date)
 
 	{
-		printf '%s\n' "$(zxfer_get_backup_metadata_header_line)"
-		printf '%s\n' "#format_version:$(zxfer_get_backup_metadata_format_version)"
+		printf '%s\n' "$ZXFER_BACKUP_METADATA_HEADER_LINE"
+		printf '%s\n' "#format_version:$ZXFER_BACKUP_METADATA_FORMAT_VERSION"
 		printf '%s\n' "#version:$g_zxfer_version"
 		printf '%s\n' "#R options:$g_option_R_recursive"
 		printf '%s\n' "#N options:$g_option_N_nonrecursive"
@@ -689,9 +662,7 @@ zxfer_backup_metadata_legacy_file_key() {
 zxfer_get_backup_metadata_filename() {
 	l_source=$1
 	l_destination=$2
-	if ! l_key=$(zxfer_backup_metadata_file_key "$l_source" "$l_destination"); then
-		return 1
-	fi
+	l_key=$(zxfer_backup_metadata_file_key "$l_source" "$l_destination") || return 1
 	# Keep current exact-pair identities lossless without exceeding NAME_MAX on
 	# long pool/dataset names: the identity is chunked into directories and the
 	# leaf file has a fixed bounded name.
@@ -706,9 +677,7 @@ zxfer_get_legacy_backup_metadata_filename() {
 	l_source=$1
 	l_destination=$2
 	l_tail=${l_source##*/}
-	if ! l_key=$(zxfer_backup_metadata_legacy_file_key "$l_source" "$l_destination"); then
-		return 1
-	fi
+	l_key=$(zxfer_backup_metadata_legacy_file_key "$l_source" "$l_destination") || return 1
 	printf '%s.%s.%s\n' "$g_backup_file_extension" "$l_tail" "$l_key"
 }
 
@@ -790,7 +759,7 @@ zxfer_get_forwarded_backup_properties_for_source() {
 			;;
 		7)
 			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-			zxfer_throw_error "Forwarded backup property file $l_dataset_backup_file does not declare supported zxfer backup metadata format version #format_version:$(zxfer_get_backup_metadata_format_version)."
+			zxfer_throw_error "Forwarded backup property file $l_dataset_backup_file does not declare supported zxfer backup metadata format version #format_version:$ZXFER_BACKUP_METADATA_FORMAT_VERSION."
 			;;
 		*)
 			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
@@ -1068,12 +1037,7 @@ zxfer_create_backup_metadata_stage_dir_for_path() {
 	l_backup_stage_prefix=${2:-zxfer-backup-stage}
 
 	g_zxfer_backup_stage_dir_result=""
-	if l_backup_stage_parent=$(zxfer_get_path_parent_dir "$l_backup_stage_path"); then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
+	l_backup_stage_parent=$(zxfer_get_path_parent_dir "$l_backup_stage_path") || return "$?"
 	if [ ! -d "$l_backup_stage_parent" ]; then
 		return 1
 	fi
@@ -1101,12 +1065,8 @@ zxfer_create_backup_metadata_stage_dir_for_path() {
 zxfer_backup_metadata_path_uses_trusted_nonwritable_parent() {
 	l_backup_io_path=$1
 
-	if ! l_backup_io_parent=$(zxfer_get_path_parent_dir "$l_backup_io_path"); then
-		return 1
-	fi
-	if ! l_backup_io_parent=$(zxfer_validate_temp_root_candidate "$l_backup_io_parent"); then
-		return 1
-	fi
+	l_backup_io_parent=$(zxfer_get_path_parent_dir "$l_backup_io_path") || return 1
+	l_backup_io_parent=$(zxfer_validate_temp_root_candidate "$l_backup_io_parent") || return 1
 
 	[ ! -w "$l_backup_io_parent" ]
 }
@@ -1199,18 +1159,9 @@ zxfer_commit_local_backup_file_stage() {
 	l_rollback_file=""
 	if [ -e "$l_backup_file_path" ]; then
 		l_had_existing_target=1
-		if l_backup_parent=$(zxfer_get_path_parent_dir "$l_backup_file_path"); then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
-		if l_rollback_file=$(mktemp "$l_backup_parent/.zxfer-backup-rollback.XXXXXX" 2>/dev/null); then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
+		l_backup_parent=$(zxfer_get_path_parent_dir "$l_backup_file_path") || return "$?"
+		l_rollback_file=$(mktemp "$l_backup_parent/.zxfer-backup-rollback.XXXXXX" 2>/dev/null) ||
+			return "$?"
 		if zxfer_move_local_backup_metadata_path "$l_backup_file_path" "$l_rollback_file"; then
 			:
 		else
@@ -1260,18 +1211,8 @@ zxfer_rollback_local_backup_file_commit() {
 	l_rollback_file=$3
 
 	if [ "$l_had_existing_target" -eq 1 ] && [ -n "$l_rollback_file" ]; then
-		if zxfer_remove_local_backup_metadata_path_if_present "$l_backup_file_path"; then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
-		if zxfer_move_local_backup_metadata_path "$l_rollback_file" "$l_backup_file_path"; then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
+		zxfer_remove_local_backup_metadata_path_if_present "$l_backup_file_path" || return "$?"
+		zxfer_move_local_backup_metadata_path "$l_rollback_file" "$l_backup_file_path" || return "$?"
 		zxfer_unregister_backup_metadata_runtime_artifact_path "$l_rollback_file"
 		return 0
 	fi
@@ -1403,33 +1344,25 @@ zxfer_write_local_backup_file_pair_atomically() {
 	l_forwarded_backup_contents=$4
 
 	g_zxfer_backup_local_write_failure_result=""
-	if zxfer_prepare_local_backup_file_stage "$l_primary_backup_file_path" "$l_primary_rendered_backup_contents" >/dev/null; then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
+	zxfer_prepare_local_backup_file_stage "$l_primary_backup_file_path" "$l_primary_rendered_backup_contents" >/dev/null ||
+		return "$?"
 	l_primary_stage_dir=$g_zxfer_backup_stage_dir_result
 	l_primary_stage_file=$g_zxfer_backup_stage_file_result
 
-	if zxfer_prepare_local_backup_file_stage "$l_forwarded_backup_file_path" "$l_forwarded_backup_contents" >/dev/null; then
-		:
-	else
+	zxfer_prepare_local_backup_file_stage "$l_forwarded_backup_file_path" "$l_forwarded_backup_contents" >/dev/null || {
 		l_status=$?
 		zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
 		return "$l_status"
-	fi
+	}
 	l_forwarded_stage_dir=$g_zxfer_backup_stage_dir_result
 	l_forwarded_stage_file=$g_zxfer_backup_stage_file_result
 
-	if zxfer_commit_local_backup_file_stage "$l_forwarded_backup_file_path" "$l_forwarded_stage_file" >/dev/null; then
-		:
-	else
+	zxfer_commit_local_backup_file_stage "$l_forwarded_backup_file_path" "$l_forwarded_stage_file" >/dev/null || {
 		l_status=$?
 		zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
 		zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
 		return "$l_status"
-	fi
+	}
 	l_forwarded_had_existing_target=$g_zxfer_backup_commit_had_existing_target_result
 	l_forwarded_rollback_file=$g_zxfer_backup_commit_rollback_file_result
 
@@ -1459,22 +1392,18 @@ zxfer_write_local_backup_file_pair_atomically() {
 			"$l_primary_rollback_file"
 	fi
 
-	if zxfer_finalize_local_backup_file_commit "$l_forwarded_had_existing_target" "$l_forwarded_rollback_file"; then
-		:
-	else
+	zxfer_finalize_local_backup_file_commit "$l_forwarded_had_existing_target" "$l_forwarded_rollback_file" || {
 		l_status=$?
 		zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
 		zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
 		return "$l_status"
-	fi
-	if zxfer_finalize_local_backup_file_commit "$l_primary_had_existing_target" "$l_primary_rollback_file"; then
-		:
-	else
+	}
+	zxfer_finalize_local_backup_file_commit "$l_primary_had_existing_target" "$l_primary_rollback_file" || {
 		l_status=$?
 		zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
 		zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
 		return "$l_status"
-	fi
+	}
 	zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
 	zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
 }
@@ -1489,34 +1418,26 @@ zxfer_write_local_backup_file_atomically() {
 	l_rendered_backup_contents=$2
 
 	g_zxfer_backup_local_write_failure_result=""
-	if zxfer_prepare_local_backup_file_stage "$l_backup_file_path" "$l_rendered_backup_contents" >/dev/null; then
-		:
-	else
-		l_status=$?
-		return "$l_status"
-	fi
+	zxfer_prepare_local_backup_file_stage "$l_backup_file_path" "$l_rendered_backup_contents" >/dev/null ||
+		return "$?"
 	l_stage_dir=$g_zxfer_backup_stage_dir_result
 	l_stage_file=$g_zxfer_backup_stage_file_result
-	if zxfer_commit_local_backup_file_stage "$l_backup_file_path" "$l_stage_file" >/dev/null; then
-		:
-	else
+	zxfer_commit_local_backup_file_stage "$l_backup_file_path" "$l_stage_file" >/dev/null || {
 		l_status=$?
 		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
 		return "$l_status"
-	fi
+	}
 	l_had_existing_target=$g_zxfer_backup_commit_had_existing_target_result
 	l_rollback_file=$g_zxfer_backup_commit_rollback_file_result
 	if [ "$l_had_existing_target" -eq 1 ] && [ -n "$l_rollback_file" ]; then
 		# Rollback files only become disposable after the staged backup is live.
 		zxfer_register_backup_metadata_runtime_artifact_path "$l_rollback_file"
 	fi
-	if zxfer_finalize_local_backup_file_commit "$l_had_existing_target" "$l_rollback_file"; then
-		:
-	else
+	zxfer_finalize_local_backup_file_commit "$l_had_existing_target" "$l_rollback_file" || {
 		l_status=$?
 		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
 		return "$l_status"
-	fi
+	}
 	zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
 }
 
@@ -1695,7 +1616,7 @@ zxfer_build_remote_backup_pair_write_cmd() {
 	l_primary_backup_file_path_single=$(zxfer_escape_for_single_quotes "$l_primary_backup_file_path")
 	l_forwarded_backup_file_dir_single=$(zxfer_escape_for_single_quotes "$l_forwarded_backup_file_dir")
 	l_forwarded_backup_file_path_single=$(zxfer_escape_for_single_quotes "$l_forwarded_backup_file_path")
-	l_pair_split_line_single=$(zxfer_escape_for_single_quotes "$(zxfer_get_backup_metadata_pair_split_line)")
+	l_pair_split_line_single=$(zxfer_escape_for_single_quotes "$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE")
 	l_remote_dependency_check_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd "$l_host" "$l_remote_dependency_status" mktemp chmod mv rm rmdir awk)
 	l_remote_rollback_failure_status=98
 	l_cleanup_function_cmd=$(zxfer_render_remote_backup_pair_cleanup_function_cmd)
@@ -1729,12 +1650,7 @@ zxfer_read_local_backup_file() {
 		if ! l_error=$(zxfer_check_secure_backup_file "$l_path" "$l_path"); then
 			zxfer_throw_error "$l_error"
 		fi
-		if zxfer_read_runtime_artifact_file "$l_path" >/dev/null; then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
+		zxfer_read_runtime_artifact_file "$l_path" >/dev/null || return "$?"
 		l_backup_contents=$g_zxfer_runtime_artifact_read_result
 		g_zxfer_backup_file_read_result=$l_backup_contents
 		printf '%s' "$l_backup_contents"
@@ -2190,9 +2106,8 @@ zxfer_try_backup_restore_candidate_set() {
 	l_profile_side=${7:-}
 	g_zxfer_backup_restore_candidate_path_result=""
 
-	if ! l_current_backup_file_name=$(zxfer_get_backup_metadata_filename "$l_filename_source" "$l_filename_destination"); then
+	l_current_backup_file_name=$(zxfer_get_backup_metadata_filename "$l_filename_source" "$l_filename_destination") ||
 		return 11
-	fi
 	l_current_candidate=$l_candidate_dir/$l_current_backup_file_name
 	g_zxfer_backup_restore_candidate_path_result=$l_current_candidate
 	if zxfer_try_backup_restore_candidate "$l_current_candidate" "$l_expected_source" "$l_expected_destination" "$l_host" "$l_profile_side"; then
@@ -2204,9 +2119,8 @@ zxfer_try_backup_restore_candidate_set() {
 		return "$l_current_status"
 	fi
 
-	if ! l_legacy_backup_file_name=$(zxfer_get_legacy_backup_metadata_filename "$l_filename_source" "$l_filename_destination"); then
+	l_legacy_backup_file_name=$(zxfer_get_legacy_backup_metadata_filename "$l_filename_source" "$l_filename_destination") ||
 		return 1
-	fi
 	if [ "$l_legacy_backup_file_name" = "$l_current_backup_file_name" ]; then
 		return 1
 	fi
@@ -2266,7 +2180,7 @@ exists under the source-dataset-relative tree inside ZXFER_BACKUP_DIR."
 		zxfer_throw_error_with_usage "Backup property file $l_dataset_backup_file does not start with the required zxfer backup metadata header."
 		;;
 	7)
-		zxfer_throw_error_with_usage "Backup property file $l_dataset_backup_file does not declare supported zxfer backup metadata format version #format_version:$(zxfer_get_backup_metadata_format_version)."
+		zxfer_throw_error_with_usage "Backup property file $l_dataset_backup_file does not declare supported zxfer backup metadata format version #format_version:$ZXFER_BACKUP_METADATA_FORMAT_VERSION."
 		;;
 	8)
 		zxfer_throw_error "Failed to contact source host $g_option_O_origin_host while reading backup property file $l_dataset_backup_file. Review prior stderr for the transport or authentication error."
@@ -2400,7 +2314,7 @@ zxfer_write_backup_metadata_pair_contents_to_store() {
 	l_dependency_path=$(zxfer_get_remote_backup_helper_dependency_path)
 	l_remote_pair_write_cmd=$(zxfer_build_remote_backup_pair_write_cmd "$l_primary_backup_file_dir" "$l_primary_backup_file_path" "$l_forwarded_backup_file_dir" "$l_forwarded_backup_file_path" "$g_option_T_target_host" "$l_remote_dependency_status" "$l_remote_write_failure_status")
 	l_remote_pair_write_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_pair_write_cmd")
-	l_pair_split_line=$(zxfer_get_backup_metadata_pair_split_line)
+	l_pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
 	l_remote_pair_payload=$(printf '%s\n%s\n%s\n' "$l_primary_rendered_backup_contents" "$l_pair_split_line" "$l_forwarded_backup_contents")
 	if zxfer_run_remote_backup_helper_with_payload "$g_option_T_target_host" "$l_remote_pair_write_shell_cmd" "$l_remote_pair_payload" destination; then
 		l_remote_write_status=0
@@ -2442,7 +2356,7 @@ zxfer_write_backup_metadata_pair_contents_to_store() {
 zxfer_render_backup_metadata_pair_payload_command() {
 	l_primary_rendered_backup_contents=$1
 	l_forwarded_backup_contents=$2
-	l_pair_split_line=$(zxfer_get_backup_metadata_pair_split_line)
+	l_pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
 
 	zxfer_render_command_for_report "" printf '%s\\n%s\\n%s\\n' "$l_primary_rendered_backup_contents" "$l_pair_split_line" "$l_forwarded_backup_contents"
 }
