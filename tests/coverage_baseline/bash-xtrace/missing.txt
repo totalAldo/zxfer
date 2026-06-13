@@ -175,21 +175,21 @@ src/zxfer_runtime.sh
   1113:	return 1
   1138:		zxfer_unregister_cleanup_pid "$l_cleanup_abort_pid"
   1139:		return 0
-  1232:			printf '%s\n' "$l_requested_tmpdir"
-  1233:			return 0
-  1475:			l_cleanup_status=1
-  1590:	if (
-  1592:	) 2>/dev/null; then
-  1807:	printf '%s\n' "$ZXFER_MAX_YIELD_ITERATIONS"
-  1986:		g_zxfer_profile_start_ms=""
-  2294:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$?"
-  2328:		g_zxfer_failure_class=dependency
-  2329:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
-  2346:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$?"
-  2380:		g_zxfer_failure_class=dependency
-  2381:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
-  2421:		g_zxfer_failure_class=dependency
-  2422:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
+  1212:			printf '%s\n' "$l_requested_tmpdir"
+  1213:			return 0
+  1461:			l_cleanup_status=1
+  1579:	if (
+  1581:	) 2>/dev/null; then
+  1784:	printf '%s\n' "$ZXFER_MAX_YIELD_ITERATIONS"
+  1963:		g_zxfer_profile_start_ms=""
+  2265:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$?"
+  2299:		g_zxfer_failure_class=dependency
+  2300:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
+  2317:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$?"
+  2351:		g_zxfer_failure_class=dependency
+  2352:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
+  2392:		g_zxfer_failure_class=dependency
+  2393:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
 
 src/zxfer_send_receive.sh
   122:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |

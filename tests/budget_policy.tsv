@@ -73,7 +73,11 @@ lines	src/zxfer_reporting.sh	1386
 # src/zxfer_locking.sh (477) verbatim in Phase 8 (their rows above were
 # deleted); the lines moved between rows and the TOTAL row still ratchets
 # down because the two duplicated BSD license headers disappeared.
-lines	src/zxfer_runtime.sh	2444
+# R2-P3b folded the default-tmpdir candidate walk into
+# zxfer_try_get_effective_tmpdir, the dir allocator body into
+# zxfer_create_private_temp_dir, and the delete-scratch reset into
+# zxfer_init_temp_artifacts.
+lines	src/zxfer_runtime.sh	2415
 # zxfer_send_receive.sh: +16 lines for the post-receive divergence
 # verification hooks at the two receive finalize choke points (approved
 # 2026-06-12 divergence-contract feature) and +8 comment lines documenting
@@ -91,7 +95,7 @@ lines	zxfer	211
 # TOTAL rises by the net addition of the approved divergence-contract
 # feature (classifier, gate, warning, post-receive verification, -V key)
 # plus the rolling-queue stderr-sink fix comments.
-lines	TOTAL	22851
+lines	TOTAL	22822
 functions	src/zxfer_background_jobs.sh	15
 functions	src/zxfer_backup_metadata.sh	84
 functions	src/zxfer_cleanup_child_wrapper.sh	4
@@ -106,7 +110,10 @@ functions	src/zxfer_reporting.sh	54
 # zxfer_runtime.sh absorbed the 15 path-security and 17 owned-lock functions
 # in the Phase 8 module merge (68 + 15 + 17 = 100); the deleted modules' rows
 # above were removed and the functions TOTAL is unchanged by the move.
-functions	src/zxfer_runtime.sh	88
+# R2-P3b merged zxfer_try_get_default_tmpdir,
+# zxfer_create_runtime_artifact_dir, and zxfer_reset_delete_temp_artifacts
+# into their single callers.
+functions	src/zxfer_runtime.sh	85
 functions	src/zxfer_send_receive.sh	44
 functions	src/zxfer_snapshot_discovery.sh	50
 # zxfer_snapshot_reconcile.sh gained the seven divergence-contract helpers
@@ -119,7 +126,7 @@ functions	src/zxfer_snapshot_reconcile.sh	26
 functions	src/zxfer_snapshot_state.sh	31
 functions	zxfer	5
 # functions TOTAL rises by the seven divergence-contract helpers above.
-functions	TOTAL	650
+functions	TOTAL	647
 callers	zxfer_profile_now_ms	12	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	26
 callers	eval 	10

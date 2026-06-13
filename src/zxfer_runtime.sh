@@ -1190,30 +1190,10 @@ zxfer_kill_registered_cleanup_pids() {
 
 # Purpose: List the default temporary directory candidates in the stable order
 # or format later helpers expect.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# needs a canonical candidate list instead of rebuilding it ad hoc.
+# Usage: Called by the zxfer_try_get_effective_tmpdir fallback walk; tests
+# override it by name to steer candidate selection.
 zxfer_list_default_tmpdir_candidates() {
 	printf '%s\n' "/dev/shm" "/run/shm" "/tmp"
-}
-
-# Purpose: Try to resolve or create the get default temporary directory without
-# treating every miss as fatal.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# has an optional or fallback path that still needs one checked helper.
-zxfer_try_get_default_tmpdir() {
-	l_candidates=$(zxfer_list_default_tmpdir_candidates)
-
-	while IFS= read -r l_candidate || [ -n "$l_candidate" ]; do
-		[ -n "$l_candidate" ] || continue
-		if l_effective_tmpdir=$(zxfer_validate_temp_root_candidate "$l_candidate"); then
-			printf '%s\n' "$l_effective_tmpdir"
-			return 0
-		fi
-	done <<EOF
-$l_candidates
-EOF
-
-	return 1
 }
 
 # Purpose: Try to resolve or create the get socket cache temporary directory
@@ -1237,10 +1217,12 @@ zxfer_try_get_socket_cache_tmpdir() {
 	zxfer_try_get_effective_tmpdir
 }
 
-# Purpose: Try to resolve or create the get effective temporary directory
+# Purpose: Try to resolve the effective temporary directory once -- a safe
+# TMPDIR when one is requested, else the first safe default candidate --
 # without treating every miss as fatal.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# has an optional or fallback path that still needs one checked helper.
+# Usage: Called by zxfer_ensure_run_tmp_root and
+# zxfer_try_get_socket_cache_tmpdir; memoizes per requested TMPDIR in
+# current-shell state.
 zxfer_try_get_effective_tmpdir() {
 	if [ -n "${TMPDIR:-}" ]; then
 		l_requested_tmpdir=$TMPDIR
@@ -1256,30 +1238,34 @@ zxfer_try_get_effective_tmpdir() {
 		return 0
 	fi
 
+	l_effective_tmpdir=""
 	if [ -n "$l_requested_tmpdir" ]; then
-		if l_effective_tmpdir=$(zxfer_validate_temp_root_candidate "$l_requested_tmpdir"); then
-			:
-		elif l_effective_tmpdir=$(zxfer_try_get_default_tmpdir); then
+		l_effective_tmpdir=$(zxfer_validate_temp_root_candidate "$l_requested_tmpdir") ||
+			l_effective_tmpdir=""
+	fi
+	if [ -z "$l_effective_tmpdir" ]; then
+		l_candidates=$(zxfer_list_default_tmpdir_candidates)
+		while IFS= read -r l_candidate || [ -n "$l_candidate" ]; do
+			[ -n "$l_candidate" ] || continue
+			if l_effective_tmpdir=$(zxfer_validate_temp_root_candidate "$l_candidate"); then
+				break
+			fi
+			l_effective_tmpdir=""
+		done <<EOF
+$l_candidates
+EOF
+		if [ -z "$l_effective_tmpdir" ]; then
+			g_zxfer_effective_tmpdir_requested=$l_request_key
+			g_zxfer_effective_tmpdir=""
+			return 1
+		fi
+		if [ -n "$l_requested_tmpdir" ]; then
 			# The fallback decision can run before option parsing (the eager
 			# run temp root in zxfer_init_globals), so hold the advisory and
 			# let zxfer_emit_pending_tmpdir_fallback_note replay it once -V
 			# state is known; when -V is already live it emits immediately.
 			g_zxfer_tmpdir_fallback_note="Ignoring unsafe TMPDIR $l_requested_tmpdir; using $l_effective_tmpdir instead."
 			zxfer_emit_pending_tmpdir_fallback_note
-		else
-			l_effective_tmpdir_status=$?
-			g_zxfer_effective_tmpdir_requested=$l_request_key
-			g_zxfer_effective_tmpdir=""
-			return "$l_effective_tmpdir_status"
-		fi
-	else
-		l_effective_tmpdir_status=0
-		l_effective_tmpdir=$(zxfer_try_get_default_tmpdir) ||
-			l_effective_tmpdir_status=$?
-		if [ "$l_effective_tmpdir_status" -ne 0 ]; then
-			g_zxfer_effective_tmpdir_requested=$l_request_key
-			g_zxfer_effective_tmpdir=""
-			return "$l_effective_tmpdir_status"
 		fi
 	fi
 
@@ -1521,10 +1507,13 @@ EOF
 	[ -z "$l_remaining_paths" ]
 }
 
-# Purpose: Create the runtime artifact directory under the per-run temp root.
-# Usage: Called when zxfer needs a fresh scratch directory. Never registered
-# for cleanup; the run-root removal already covers it.
-zxfer_create_runtime_artifact_dir() {
+# Purpose: Create a private 0700 scratch directory under the per-run temp
+# root.
+# Usage: Called by send/receive progress and completion-queue staging,
+# snapshot-discovery fast no-op staging, remote-host probe staging, and backup
+# metadata helper staging when zxfer needs a fresh scratch directory. Never
+# registered for cleanup; the run-root removal already covers it.
+zxfer_create_private_temp_dir() {
 	l_prefix=${1:-zxfer-temp-dir}
 
 	g_zxfer_runtime_artifact_path_result=""
@@ -1715,18 +1704,6 @@ zxfer_capture_runtime_artifact_combined_command_output() {
 
 	zxfer_cleanup_runtime_artifact_path "$l_capture_file"
 	return "$l_command_status"
-}
-
-# Purpose: Create the private temp directory using the safety checks owned by
-# this module.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
-# needs a fresh staged resource or persistent helper state.
-zxfer_create_private_temp_dir() {
-	l_prefix=$1
-
-	zxfer_create_runtime_artifact_dir "$l_prefix" >/dev/null || return "$?"
-
-	printf '%s\n' "$g_zxfer_runtime_artifact_path_result"
 }
 
 # Purpose: Return the temp file in the form expected by later helpers.
@@ -2041,22 +2018,16 @@ zxfer_init_runtime_state_defaults() {
 	g_backup_file_extension=".zxfer_backup_info"
 }
 
-# Purpose: Reset the delete temp artifacts so the next runtime pass starts from
-# a clean state.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup before this
-# module reuses mutable scratch globals or cached decisions.
-zxfer_reset_delete_temp_artifacts() {
+# Purpose: Initialize the temp artifacts before later helpers depend on it.
+# Usage: Called by zxfer_init_globals during bootstrap so downstream code sees
+# consistent defaults and runtime state.
+zxfer_init_temp_artifacts() {
+	g_zxfer_temp_prefix="zxfer.$$.${g_option_Y_yield_iterations}.$(date +%s)"
+	# Delete-planning scratch paths stay empty until
+	# zxfer_ensure_snapshot_delete_temp_artifacts allocates them lazily.
 	g_delete_source_tmp_file=""
 	g_delete_dest_tmp_file=""
 	g_delete_snapshots_to_delete_tmp_file=""
-}
-
-# Purpose: Initialize the temp artifacts before later helpers depend on it.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup during
-# bootstrap so downstream code sees consistent defaults and runtime state.
-zxfer_init_temp_artifacts() {
-	g_zxfer_temp_prefix="zxfer.$$.${g_option_Y_yield_iterations}.$(date +%s)"
-	zxfer_reset_delete_temp_artifacts
 }
 
 # Purpose: Ensure the snapshot delete temp artifacts exists and is ready before

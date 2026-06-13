@@ -587,7 +587,7 @@ test_runtime_artifact_allocators_use_the_per_run_temp_root_for_files_and_dirs() 
 	zxfer_create_runtime_artifact_file "runtime-file" >/dev/null
 	file_status=$?
 	file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_runtime_artifact_dir "runtime-dir" >/dev/null
+	zxfer_create_private_temp_dir "runtime-dir" >/dev/null
 	dir_status=$?
 	dir_path=$g_zxfer_runtime_artifact_path_result
 
@@ -625,7 +625,7 @@ test_runtime_artifact_allocators_skip_pre_seeded_counter_names_in_current_shell(
 	file_status=$?
 	file_path=$g_zxfer_runtime_artifact_path_result
 	mkdir -m 700 "$g_zxfer_run_tmp_root/skip-dir.3"
-	zxfer_create_runtime_artifact_dir "skip-dir" >/dev/null
+	zxfer_create_private_temp_dir "skip-dir" >/dev/null
 	dir_status=$?
 	dir_path=$g_zxfer_runtime_artifact_path_result
 
@@ -645,7 +645,7 @@ test_runtime_artifact_allocators_fail_closed_when_the_target_dir_is_unwritable()
 	chmod 500 "$g_zxfer_run_tmp_root"
 	zxfer_create_runtime_artifact_file "unwritable-file" >/dev/null 2>&1
 	file_status=$?
-	zxfer_create_runtime_artifact_dir "unwritable-dir" >/dev/null 2>&1
+	zxfer_create_private_temp_dir "unwritable-dir" >/dev/null 2>&1
 	dir_status=$?
 	chmod 700 "$g_zxfer_run_tmp_root"
 
@@ -673,7 +673,7 @@ test_runtime_artifact_allocators_skip_taken_names_after_subshell_allocations() {
 test_zxfer_reset_runtime_artifact_state_cleans_registered_artifacts() {
 	zxfer_create_runtime_artifact_file "runtime-reset-file" >/dev/null
 	file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_runtime_artifact_dir "runtime-reset-dir" >/dev/null
+	zxfer_create_private_temp_dir "runtime-reset-dir" >/dev/null
 	dir_path=$g_zxfer_runtime_artifact_path_result
 
 	zxfer_reset_runtime_artifact_state
@@ -1120,7 +1120,7 @@ test_zxfer_cleanup_runtime_artifact_path_preserves_registration_when_delete_fail
 test_zxfer_cleanup_runtime_artifact_paths_removes_and_unregisters_multiple_paths() {
 	zxfer_create_runtime_artifact_file "runtime-cleanup-file" >/dev/null
 	file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_runtime_artifact_dir "runtime-cleanup-dir" >/dev/null
+	zxfer_create_private_temp_dir "runtime-cleanup-dir" >/dev/null
 	dir_path=$g_zxfer_runtime_artifact_path_result
 
 	zxfer_cleanup_runtime_artifact_paths "$file_path" "$dir_path"
@@ -1166,7 +1166,7 @@ test_zxfer_cleanup_runtime_artifact_paths_preserves_failures_when_one_path_canno
 test_zxfer_cleanup_runtime_artifact_path_list_removes_newline_delimited_paths() {
 	zxfer_create_runtime_artifact_file "runtime-cleanup-list-file" >/dev/null
 	file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_runtime_artifact_dir "runtime-cleanup-list-dir" >/dev/null
+	zxfer_create_private_temp_dir "runtime-cleanup-list-dir" >/dev/null
 	dir_path=$g_zxfer_runtime_artifact_path_result
 	path_list=$(printf '%s\n%s\n' "$file_path" "$dir_path")
 
@@ -1653,7 +1653,9 @@ test_ensure_snapshot_delete_temp_artifacts_allocates_paths_lazily_in_current_she
 	output=$(
 		(
 			counter=0
-			zxfer_reset_delete_temp_artifacts
+			g_delete_source_tmp_file=""
+			g_delete_dest_tmp_file=""
+			g_delete_snapshots_to_delete_tmp_file=""
 			zxfer_get_temp_file() {
 				counter=$((counter + 1))
 				g_zxfer_temp_file_result="$TEST_TMPDIR/delete.$counter"
@@ -1695,7 +1697,9 @@ test_ensure_snapshot_delete_temp_artifacts_allocates_paths_lazily_in_current_she
 test_ensure_snapshot_delete_temp_artifacts_preserves_allocation_failures_without_publishing_paths() {
 	output=$(
 		(
-			zxfer_reset_delete_temp_artifacts
+			g_delete_source_tmp_file=""
+			g_delete_dest_tmp_file=""
+			g_delete_snapshots_to_delete_tmp_file=""
 			zxfer_get_temp_file() {
 				return 71
 			}
@@ -1724,7 +1728,9 @@ test_ensure_snapshot_delete_temp_artifacts_preserves_allocation_failures_without
 
 test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_second_allocation_failure_in_current_shell() {
 	cleanup_log="$TEST_TMPDIR/delete_temp_cleanup_second.log"
-	zxfer_reset_delete_temp_artifacts
+	g_delete_source_tmp_file=""
+	g_delete_dest_tmp_file=""
+	g_delete_snapshots_to_delete_tmp_file=""
 	call_count=0
 
 	zxfer_get_temp_file() {
@@ -1772,7 +1778,9 @@ test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_second_allocation_fai
 
 test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_third_allocation_failure_in_current_shell() {
 	cleanup_log="$TEST_TMPDIR/delete_temp_cleanup_third.log"
-	zxfer_reset_delete_temp_artifacts
+	g_delete_source_tmp_file=""
+	g_delete_dest_tmp_file=""
+	g_delete_snapshots_to_delete_tmp_file=""
 	call_count=0
 
 	zxfer_get_temp_file() {
@@ -1985,8 +1993,9 @@ test_try_get_effective_tmpdir_fails_cleanly_when_no_safe_default_exists() {
 			unset TMPDIR
 			g_zxfer_effective_tmpdir=""
 			g_zxfer_effective_tmpdir_requested=""
-			zxfer_try_get_default_tmpdir() {
-				return 1
+			# A candidate list with no safe entry exhausts the fallback walk.
+			zxfer_list_default_tmpdir_candidates() {
+				printf '%s\n' "$TEST_TMPDIR/no-such-default-candidate"
 			}
 			set +e
 			zxfer_try_get_effective_tmpdir >/dev/null

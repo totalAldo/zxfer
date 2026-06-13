@@ -134,7 +134,7 @@ The project priority order still applies:
 - For runtime-temp-root artifacts, prefer the current-shell helpers in
   [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh):
   `zxfer_create_runtime_artifact_file`,
-  `zxfer_create_runtime_artifact_dir`,
+  `zxfer_create_private_temp_dir`,
   `zxfer_write_runtime_artifact_file`,
   `zxfer_read_runtime_artifact_file`,
   `zxfer_cleanup_runtime_artifact_path`.

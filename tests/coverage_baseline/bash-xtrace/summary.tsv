@@ -9,9 +9,9 @@
 94.57	773	731	42	src/zxfer_remote_hosts.sh
 96.87	638	618	20	src/zxfer_replication.sh
 97.10	586	569	17	src/zxfer_reporting.sh
-97.42	1085	1057	28	src/zxfer_runtime.sh
+97.40	1075	1047	28	src/zxfer_runtime.sh
 98.36	853	839	14	src/zxfer_send_receive.sh
 94.09	1353	1273	80	src/zxfer_snapshot_discovery.sh
 96.73	459	444	15	src/zxfer_snapshot_reconcile.sh
 98.05	205	201	4	src/zxfer_snapshot_state.sh
-96.90	9369	9079	290	TOTAL
+96.90	9359	9069	290	TOTAL
