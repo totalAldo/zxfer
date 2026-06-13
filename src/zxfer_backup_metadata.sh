@@ -1575,122 +1575,6 @@ zxfer_read_local_backup_file() {
 	zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
 }
 
-# Purpose: Render remote backup-read path setup and expected-user checks.
-# Usage: Called by the remote backup read builder before choosing whether to
-# stage a hard-linked snapshot beside the target file.
-zxfer_render_remote_backup_read_path_setup_cmd() {
-	l_path_single=$1
-	l_remote_unknown_status=$2
-
-	printf '%s' "l_target_path='$l_path_single'; \
-l_parent=\${l_target_path%/*}; \
-if [ \"\$l_parent\" = \"\$l_target_path\" ] || [ \"\$l_parent\" = '' ]; then l_parent=/; fi; \
-l_target_ls_path=\$l_target_path; \
-case \"\$l_target_ls_path\" in -*) l_target_ls_path=./\$l_target_ls_path ;; esac; \
-l_parent_ls_path=\$l_parent; \
-case \"\$l_parent_ls_path\" in -*) l_parent_ls_path=./\$l_parent_ls_path ;; esac; \
-l_expected_uid=''; \
-if command -v id >/dev/null 2>&1; then l_expected_uid=\$(id -u 2>/dev/null); fi; \
-if [ \"\$l_expected_uid\" = '' ] || printf '%s' \"\$l_expected_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then exit $l_remote_unknown_status; fi"
-}
-
-# Purpose: Render remote backup-read trusted-parent detection.
-# Usage: Called by the remote backup read builder so trusted non-writable
-# parents can be read directly while writable parents use same-directory staging.
-zxfer_render_remote_backup_read_parent_trust_cmd() {
-	l_remote_awk_cmd=$1
-
-	printf '%s' "l_use_stage_dir=1; \
-if [ ! -w \"\$l_parent\" ]; then \
-	l_parent_ls_line=\$(ls -ldn \"\$l_parent_ls_path\" 2>/dev/null) || l_parent_ls_line=''; \
-	if [ \"\$l_parent_ls_line\" != '' ]; then \
-		l_parent_uid=\$(printf '%s\n' \"\$l_parent_ls_line\" | $l_remote_awk_cmd '{print \$3}'); \
-		l_parent_perm=\$(printf '%s\n' \"\$l_parent_ls_line\" | $l_remote_awk_cmd '{print \$1}'); \
-		l_parent_trusted=0; \
-		case \"\$l_parent_perm\" in ??????????*) ;; *) l_parent_perm='' ;; esac; \
-		if [ \"\$l_parent_uid\" = '0' ] || [ \"\$l_parent_uid\" = \"\$l_expected_uid\" ]; then \
-			l_parent_trusted=1; \
-			if [ \"\$l_parent_perm\" = '' ]; then \
-				l_parent_trusted=0; \
-			else \
-				l_group_write=\$(printf '%s' \"\$l_parent_perm\" | cut -c 6); \
-				l_other_write=\$(printf '%s' \"\$l_parent_perm\" | cut -c 9); \
-				l_sticky_char=\$(printf '%s' \"\$l_parent_perm\" | cut -c 10); \
-				case \"\$l_group_write\$l_other_write\" in \
-				*w*) case \"\$l_sticky_char\" in t|T) ;; *) l_parent_trusted=0 ;; esac ;; \
-				esac; \
-			fi; \
-		fi; \
-		if [ \"\$l_parent_trusted\" = '1' ]; then l_use_stage_dir=0; fi; \
-	fi; \
-fi"
-}
-
-# Purpose: Render remote backup-read staging setup.
-# Usage: Called by the remote backup read builder when the target should be
-# hard-linked into a private sibling directory before validation and reading.
-zxfer_render_remote_backup_read_stage_setup_cmd() {
-	l_remote_stage_dependency_check_cmd=$1
-	l_remote_missing_status=$2
-	l_remote_unknown_status=$3
-
-	printf '%s' "if [ \"\$l_use_stage_dir\" = '1' ]; then \
-	$l_remote_stage_dependency_check_cmd; \
-	umask 077; \
-	l_stage_dir=\$(mktemp -d \"\$l_parent/.zxfer-backup-read.XXXXXX\" 2>/dev/null) || exit $l_remote_unknown_status; \
-	l_snapshot_path=\"\$l_stage_dir/backup.snapshot\"; \
-	if ! ln \"\$l_target_path\" \"\$l_snapshot_path\" 2>/dev/null; then if [ ! -f \"\$l_target_path\" ] || [ -h \"\$l_target_path\" ]; then rmdir \"\$l_stage_dir\" 2>/dev/null || true; exit $l_remote_missing_status; fi; rmdir \"\$l_stage_dir\" 2>/dev/null || true; exit $l_remote_unknown_status; fi; \
-	l_snapshot_ls_path=\$l_snapshot_path; \
-	case \"\$l_snapshot_ls_path\" in -*) l_snapshot_ls_path=./\$l_snapshot_ls_path ;; esac; \
-else \
-	l_snapshot_path=\$l_target_path; \
-	l_snapshot_ls_path=\$l_target_ls_path; \
-fi"
-}
-
-# Purpose: Render remote backup-read stage cleanup.
-# Usage: Called by remote backup-read validation and payload builders so each
-# failure path removes staged hard links and private stage directories the same
-# way.
-zxfer_render_remote_backup_read_stage_cleanup_cmd() {
-	printf '%s' "if [ \"\$l_use_stage_dir\" = '1' ]; then rm -f \"\$l_snapshot_path\"; rmdir \"\$l_stage_dir\" 2>/dev/null || true; fi"
-}
-
-# Purpose: Render remote backup-read owner and mode validation.
-# Usage: Called by the remote backup read builder before the remote cat helper
-# reads the staged snapshot path.
-zxfer_render_remote_backup_read_validation_cmd() {
-	l_remote_awk_cmd=$1
-	l_remote_unknown_status=$2
-	l_remote_insecure_owner_status=$3
-	l_remote_insecure_mode_status=$4
-	l_remote_read_cleanup_cmd=$5
-
-	printf '%s' "l_uid=''; \
-if command -v stat >/dev/null 2>&1; then l_uid=\$(stat -c '%u' \"\$l_snapshot_path\" 2>/dev/null); if [ \"\$l_uid\" = '' ] || printf '%s' \"\$l_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_uid=\$(stat -f '%u' \"\$l_snapshot_path\" 2>/dev/null); fi; fi; \
-if [ \"\$l_uid\" = '' ] || printf '%s' \"\$l_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_ls_line=\$(ls -ldn \"\$l_snapshot_ls_path\" 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_uid=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$3}'); fi; fi; \
-if [ \"\$l_uid\" = '' ]; then $l_remote_read_cleanup_cmd; exit $l_remote_unknown_status; fi; \
-if [ \"\$l_uid\" != '0' ] && [ \"\$l_uid\" != \"\$l_expected_uid\" ]; then $l_remote_read_cleanup_cmd; exit $l_remote_insecure_owner_status; fi; \
-l_mode=''; \
-if command -v stat >/dev/null 2>&1; then l_mode=\$(stat -c '%a' \"\$l_snapshot_path\" 2>/dev/null); if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_mode=\$(stat -f '%OLp' \"\$l_snapshot_path\" 2>/dev/null); fi; fi; \
-if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then if [ \"\$l_ls_line\" = '' ]; then l_ls_line=\$(ls -ldn \"\$l_snapshot_ls_path\" 2>/dev/null) || l_ls_line=''; fi; if [ \"\$l_ls_line\" != '' ]; then l_perm=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$1}'); if [ \"\$l_perm\" = '-rw-------' ]; then l_mode='600'; fi; fi; fi; \
-	if [ \"\$l_mode\" = '' ]; then $l_remote_read_cleanup_cmd; exit $l_remote_unknown_status; fi; \
-if [ \"\$l_mode\" != '600' ]; then $l_remote_read_cleanup_cmd; exit $l_remote_insecure_mode_status; fi"
-}
-
-# Purpose: Render remote backup-read payload emission and stage cleanup.
-# Usage: Called by the remote backup read builder after validation has selected
-# the snapshot path to read.
-zxfer_render_remote_backup_read_payload_cmd() {
-	l_remote_cat_helper_cmd=$1
-	l_remote_read_cleanup_cmd=$2
-
-	printf '%s' "$l_remote_cat_helper_cmd \"\$l_snapshot_path\"; \
-l_read_status=\$?; \
-$l_remote_read_cleanup_cmd; \
-exit \$l_read_status"
-}
-
 # Purpose: Read the remote backup file from staged state into the current
 # shell.
 # Usage: Called during backup-metadata capture, readback, and atomic publish
@@ -1716,12 +1600,67 @@ zxfer_read_remote_backup_file() {
 	l_remote_symlink_guard_cmd=$(zxfer_build_remote_backup_symlink_guard_cmd "$l_path_single" "$l_remote_symlink_status" metadata)
 	l_remote_dependency_check_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd "$l_host" "$l_remote_dependency_status" id grep ls awk cut)
 	l_remote_stage_dependency_check_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd "$l_host" "$l_remote_dependency_status" mktemp ln rm rmdir)
-	l_remote_path_setup_cmd=$(zxfer_render_remote_backup_read_path_setup_cmd "$l_path_single" "$l_remote_unknown_status")
-	l_remote_parent_trust_cmd=$(zxfer_render_remote_backup_read_parent_trust_cmd "$l_remote_awk_cmd")
-	l_remote_stage_setup_cmd=$(zxfer_render_remote_backup_read_stage_setup_cmd "$l_remote_stage_dependency_check_cmd" "$l_remote_missing_status" "$l_remote_unknown_status")
-	l_remote_read_cleanup_cmd=$(zxfer_render_remote_backup_read_stage_cleanup_cmd)
-	l_remote_validation_cmd=$(zxfer_render_remote_backup_read_validation_cmd "$l_remote_awk_cmd" "$l_remote_unknown_status" "$l_remote_insecure_owner_status" "$l_remote_insecure_mode_status" "$l_remote_read_cleanup_cmd")
-	l_remote_payload_cmd=$(zxfer_render_remote_backup_read_payload_cmd "$l_remote_cat_helper_cmd" "$l_remote_read_cleanup_cmd")
+	l_remote_path_setup_cmd="l_target_path='$l_path_single'; \
+l_parent=\${l_target_path%/*}; \
+if [ \"\$l_parent\" = \"\$l_target_path\" ] || [ \"\$l_parent\" = '' ]; then l_parent=/; fi; \
+l_target_ls_path=\$l_target_path; \
+case \"\$l_target_ls_path\" in -*) l_target_ls_path=./\$l_target_ls_path ;; esac; \
+l_parent_ls_path=\$l_parent; \
+case \"\$l_parent_ls_path\" in -*) l_parent_ls_path=./\$l_parent_ls_path ;; esac; \
+l_expected_uid=''; \
+if command -v id >/dev/null 2>&1; then l_expected_uid=\$(id -u 2>/dev/null); fi; \
+if [ \"\$l_expected_uid\" = '' ] || printf '%s' \"\$l_expected_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then exit $l_remote_unknown_status; fi"
+	l_remote_parent_trust_cmd="l_use_stage_dir=1; \
+if [ ! -w \"\$l_parent\" ]; then \
+	l_parent_ls_line=\$(ls -ldn \"\$l_parent_ls_path\" 2>/dev/null) || l_parent_ls_line=''; \
+	if [ \"\$l_parent_ls_line\" != '' ]; then \
+		l_parent_uid=\$(printf '%s\n' \"\$l_parent_ls_line\" | $l_remote_awk_cmd '{print \$3}'); \
+		l_parent_perm=\$(printf '%s\n' \"\$l_parent_ls_line\" | $l_remote_awk_cmd '{print \$1}'); \
+		l_parent_trusted=0; \
+		case \"\$l_parent_perm\" in ??????????*) ;; *) l_parent_perm='' ;; esac; \
+		if [ \"\$l_parent_uid\" = '0' ] || [ \"\$l_parent_uid\" = \"\$l_expected_uid\" ]; then \
+			l_parent_trusted=1; \
+			if [ \"\$l_parent_perm\" = '' ]; then \
+				l_parent_trusted=0; \
+			else \
+				l_group_write=\$(printf '%s' \"\$l_parent_perm\" | cut -c 6); \
+				l_other_write=\$(printf '%s' \"\$l_parent_perm\" | cut -c 9); \
+				l_sticky_char=\$(printf '%s' \"\$l_parent_perm\" | cut -c 10); \
+				case \"\$l_group_write\$l_other_write\" in \
+				*w*) case \"\$l_sticky_char\" in t|T) ;; *) l_parent_trusted=0 ;; esac ;; \
+				esac; \
+			fi; \
+		fi; \
+		if [ \"\$l_parent_trusted\" = '1' ]; then l_use_stage_dir=0; fi; \
+	fi; \
+fi"
+	l_remote_stage_setup_cmd="if [ \"\$l_use_stage_dir\" = '1' ]; then \
+	$l_remote_stage_dependency_check_cmd; \
+	umask 077; \
+	l_stage_dir=\$(mktemp -d \"\$l_parent/.zxfer-backup-read.XXXXXX\" 2>/dev/null) || exit $l_remote_unknown_status; \
+	l_snapshot_path=\"\$l_stage_dir/backup.snapshot\"; \
+	if ! ln \"\$l_target_path\" \"\$l_snapshot_path\" 2>/dev/null; then if [ ! -f \"\$l_target_path\" ] || [ -h \"\$l_target_path\" ]; then rmdir \"\$l_stage_dir\" 2>/dev/null || true; exit $l_remote_missing_status; fi; rmdir \"\$l_stage_dir\" 2>/dev/null || true; exit $l_remote_unknown_status; fi; \
+	l_snapshot_ls_path=\$l_snapshot_path; \
+	case \"\$l_snapshot_ls_path\" in -*) l_snapshot_ls_path=./\$l_snapshot_ls_path ;; esac; \
+else \
+	l_snapshot_path=\$l_target_path; \
+	l_snapshot_ls_path=\$l_target_ls_path; \
+fi"
+	l_remote_read_cleanup_cmd="if [ \"\$l_use_stage_dir\" = '1' ]; then rm -f \"\$l_snapshot_path\"; rmdir \"\$l_stage_dir\" 2>/dev/null || true; fi"
+	l_remote_validation_cmd="l_uid=''; \
+if command -v stat >/dev/null 2>&1; then l_uid=\$(stat -c '%u' \"\$l_snapshot_path\" 2>/dev/null); if [ \"\$l_uid\" = '' ] || printf '%s' \"\$l_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_uid=\$(stat -f '%u' \"\$l_snapshot_path\" 2>/dev/null); fi; fi; \
+if [ \"\$l_uid\" = '' ] || printf '%s' \"\$l_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_ls_line=\$(ls -ldn \"\$l_snapshot_ls_path\" 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_uid=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$3}'); fi; fi; \
+if [ \"\$l_uid\" = '' ]; then $l_remote_read_cleanup_cmd; exit $l_remote_unknown_status; fi; \
+if [ \"\$l_uid\" != '0' ] && [ \"\$l_uid\" != \"\$l_expected_uid\" ]; then $l_remote_read_cleanup_cmd; exit $l_remote_insecure_owner_status; fi; \
+l_mode=''; \
+if command -v stat >/dev/null 2>&1; then l_mode=\$(stat -c '%a' \"\$l_snapshot_path\" 2>/dev/null); if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_mode=\$(stat -f '%OLp' \"\$l_snapshot_path\" 2>/dev/null); fi; fi; \
+if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then if [ \"\$l_ls_line\" = '' ]; then l_ls_line=\$(ls -ldn \"\$l_snapshot_ls_path\" 2>/dev/null) || l_ls_line=''; fi; if [ \"\$l_ls_line\" != '' ]; then l_perm=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$1}'); if [ \"\$l_perm\" = '-rw-------' ]; then l_mode='600'; fi; fi; fi; \
+	if [ \"\$l_mode\" = '' ]; then $l_remote_read_cleanup_cmd; exit $l_remote_unknown_status; fi; \
+if [ \"\$l_mode\" != '600' ]; then $l_remote_read_cleanup_cmd; exit $l_remote_insecure_mode_status; fi"
+	l_remote_payload_cmd="$l_remote_cat_helper_cmd \"\$l_snapshot_path\"; \
+l_read_status=\$?; \
+$l_remote_read_cleanup_cmd; \
+exit \$l_read_status"
 	l_remote_secure_cat_cmd="$l_remote_dependency_check_cmd; $l_remote_symlink_guard_cmd; if [ ! -f '$l_path_single' ] || [ -h '$l_path_single' ]; then exit $l_remote_missing_status; fi; $l_remote_path_setup_cmd; $l_remote_parent_trust_cmd; $l_remote_stage_setup_cmd; $l_remote_validation_cmd; $l_remote_payload_cmd"
 	l_remote_secure_cat_cmd=$(zxfer_wrap_remote_backup_helper_with_secure_path "$l_remote_secure_cat_cmd")
 	l_remote_secure_cat_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_secure_cat_cmd")
