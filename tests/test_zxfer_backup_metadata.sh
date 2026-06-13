@@ -1018,6 +1018,18 @@ EOF
 		"$(cat "$ssh_log")" "backup.snapshot"
 }
 
+test_build_remote_backup_symlink_guard_cmd_rejects_unknown_kind() {
+	set +e
+	output=$(zxfer_build_remote_backup_symlink_guard_cmd "/var/db/zxfer/backup.meta" 98 unknown)
+	status=$?
+	set -e
+
+	assertEquals "Remote backup symlink guard rendering should reject unknown guard kinds." \
+		1 "$status"
+	assertEquals "Remote backup symlink guard rendering should not emit a partial command for unknown guard kinds." \
+		"" "$output"
+}
+
 test_write_backup_properties_renders_remote_dry_run_command() {
 	g_option_n_dryrun=1
 	g_option_T_target_host="target.example doas"
