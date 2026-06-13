@@ -583,17 +583,6 @@ zxfer_build_source_snapshot_list_cmd() {
 	printf '%s\n' "$l_cmd"
 }
 
-# Purpose: Render the source snapshot list preview command as a stable shell-
-# safe or operator-facing string.
-# Usage: Called during source and destination snapshot discovery when zxfer
-# needs to display or transport the value without reparsing it.
-#
-# Dry-run snapshot discovery must stay render-only, so use the simple serial
-# listing shape instead of resolving parallel helpers during preview-only runs.
-zxfer_render_source_snapshot_list_preview_cmd() {
-	zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$g_initial_source"
-}
-
 # Purpose: Launch source snapshot discovery and sort its output inside the
 # same background job.
 # Usage: Called by zxfer_write_source_snapshot_list_to_file when recursive
@@ -685,7 +674,7 @@ zxfer_write_source_snapshot_list_to_file() {
 	g_source_snapshot_list_uses_metadata_compression=0
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
-		l_cmd=$(zxfer_render_source_snapshot_list_preview_cmd) ||
+		l_cmd=$(zxfer_render_zfs_command_for_spec "$g_LZFS" list -Hr -o name,guid -s creation -t snapshot "$g_initial_source") ||
 			zxfer_throw_error "${l_cmd:-Failed to render dry-run source snapshot discovery command.}" "$?"
 		g_source_snapshot_list_cmd=$l_cmd
 		zxfer_echoV "Dry run: $l_cmd"
@@ -1344,22 +1333,6 @@ zxfer_split_remote_destination_discovery_batch_stream_to_files() {
 	'
 }
 
-# Purpose: Record profile counters for the ZFS commands represented by one
-# destination discovery batch.
-# Usage: Called after parsing target-side batch status lines so `-V` output
-# keeps destination `zfs list` accounting comparable with the non-batched path.
-zxfer_record_remote_destination_discovery_batch_zfs_profile() {
-	zxfer_profile_record_zfs_call destination list
-	if [ -n "${g_zxfer_destination_discovery_batch_pool_status:-}" ]; then
-		zxfer_profile_record_zfs_call destination list
-	fi
-	if [ "${g_zxfer_destination_discovery_batch_snapshot_ran:-0}" -eq 1 ]; then
-		zxfer_profile_record_zfs_call destination list
-	fi
-
-	return 0
-}
-
 # Purpose: Run target-side destination discovery through one remote SSH shell
 # invocation and stage its results.
 # Usage: Called by snapshot discovery when `-T` is active to avoid separate
@@ -1470,7 +1443,13 @@ zxfer_run_remote_destination_discovery_batch_to_files() {
 	if [ "$l_status" -ne 0 ]; then
 		zxfer_throw_error "Malformed destination discovery batch response." "$l_status"
 	fi
-	zxfer_record_remote_destination_discovery_batch_zfs_profile
+	zxfer_profile_record_zfs_call destination list
+	if [ -n "${g_zxfer_destination_discovery_batch_pool_status:-}" ]; then
+		zxfer_profile_record_zfs_call destination list
+	fi
+	if [ "${g_zxfer_destination_discovery_batch_snapshot_ran:-0}" -eq 1 ]; then
+		zxfer_profile_record_zfs_call destination list
+	fi
 }
 
 # Purpose: Publish destination dataset inventory from staged files into the
@@ -1859,17 +1838,6 @@ zxfer_should_use_linear_reverse_for_file() {
 	[ "$l_line_count" -le "$l_max_lines" ]
 }
 
-# Purpose: Reverse the plain file lines with awk while preserving the record
-# structure later helpers rely on.
-# Usage: Called during source and destination snapshot discovery when
-# comparison or replay logic needs the same data in the opposite order.
-zxfer_reverse_plain_file_lines_with_awk() {
-	l_input_file=$1
-
-	# shellcheck disable=SC2016  # awk program should see literal $0/NR.
-	"${g_cmd_awk:-awk}" '{ l_lines[NR] = $0 } END { for (l_i = NR; l_i >= 1; l_i--) print l_lines[l_i] }' "$l_input_file"
-}
-
 # Purpose: Reverse the plain file lines with sort while preserving the record
 # structure later helpers rely on.
 # Usage: Called during source and destination snapshot discovery when
@@ -1900,7 +1868,8 @@ zxfer_reverse_file_lines() {
 	l_input_file=$1
 
 	if zxfer_should_use_linear_reverse_for_file "$l_input_file"; then
-		zxfer_reverse_plain_file_lines_with_awk "$l_input_file"
+		# shellcheck disable=SC2016  # awk program should see literal $0/NR.
+		"${g_cmd_awk:-awk}" '{ l_lines[NR] = $0 } END { for (l_i = NR; l_i >= 1; l_i--) print l_lines[l_i] }' "$l_input_file"
 	else
 		zxfer_reverse_plain_file_lines_with_sort "$l_input_file"
 	fi

@@ -1849,7 +1849,7 @@ test_write_source_snapshot_list_to_file_reports_preview_render_failures_in_dry_r
 	errfile="$TEST_TMPDIR/source_dry_run_error.err"
 
 	zxfer_test_capture_subshell "
-		zxfer_render_source_snapshot_list_preview_cmd() {
+		zxfer_render_zfs_command_for_spec() {
 			printf '%s\n' 'preview render failed'
 			return 1
 		}

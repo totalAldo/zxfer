@@ -629,30 +629,6 @@ zxfer_extract_remote_cli_command_head() {
 	printf '%s\n' "$l_cli_head"
 }
 
-# Purpose: Check whether the remote capability host matches origin role.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later helpers need a boolean answer about the remote
-# capability host.
-zxfer_remote_capability_host_matches_origin_role() {
-	l_host_spec=$1
-
-	[ -n "${g_option_O_origin_host:-}" ] || return 1
-	[ -n "$l_host_spec" ] || return 0
-	[ "$l_host_spec" = "$g_option_O_origin_host" ]
-}
-
-# Purpose: Check whether the remote capability host matches target role.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later helpers need a boolean answer about the remote
-# capability host.
-zxfer_remote_capability_host_matches_target_role() {
-	l_host_spec=$1
-
-	[ -n "${g_option_T_target_host:-}" ] || return 1
-	[ -n "$l_host_spec" ] || return 0
-	[ "$l_host_spec" = "$g_option_T_target_host" ]
-}
-
 # Purpose: Decide whether the clean recursive no-op proof can defer origin
 # parallel resolution.
 # Usage: Called while building the active remote capability scope. This mirrors
@@ -696,7 +672,8 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 	g_zxfer_remote_capability_requested_tools_result=""
 	zxfer_append_remote_capability_requested_tool zfs
 
-	if zxfer_remote_capability_host_matches_origin_role "$l_host_spec"; then
+	if [ -n "${g_option_O_origin_host:-}" ] &&
+		{ [ -z "$l_host_spec" ] || [ "$l_host_spec" = "$g_option_O_origin_host" ]; }; then
 		if zxfer_remote_capability_origin_should_preload_parallel; then
 			zxfer_append_remote_capability_requested_tool parallel
 		fi
@@ -710,7 +687,8 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 		fi
 	fi
 
-	if zxfer_remote_capability_host_matches_target_role "$l_host_spec"; then
+	if [ -n "${g_option_T_target_host:-}" ] &&
+		{ [ -z "$l_host_spec" ] || [ "$l_host_spec" = "$g_option_T_target_host" ]; }; then
 		if [ "${g_option_k_backup_property_mode:-0}" -eq 1 ]; then
 			zxfer_append_remote_capability_requested_tool cat
 		fi
@@ -1619,31 +1597,6 @@ zxfer_setup_ssh_control_socket() {
 	zxfer_set_ssh_control_socket_role_state "$l_role" "$l_control_socket"
 }
 
-# Purpose: Load the SSH control socket role state into shared scratch globals.
-# Usage: Called during remote bootstrap and ssh control-socket management so
-# role-driven helpers can avoid origin/target branches in their main control
-# flow.
-zxfer_get_ssh_control_socket_role_state() {
-	l_role=$1
-
-	g_zxfer_ssh_control_socket_role_host=""
-	g_zxfer_ssh_control_socket_role_socket=""
-	case "$l_role" in
-	origin)
-		g_zxfer_ssh_control_socket_role_host=${g_option_O_origin_host:-}
-		g_zxfer_ssh_control_socket_role_socket=${g_ssh_origin_control_socket:-}
-		;;
-	target)
-		g_zxfer_ssh_control_socket_role_host=${g_option_T_target_host:-}
-		g_zxfer_ssh_control_socket_role_socket=${g_ssh_target_control_socket:-}
-		;;
-	*)
-		return 1
-		;;
-	esac
-	return 0
-}
-
 # Purpose: Close one role's SSH control socket and release the related state.
 # Usage: Called during remote bootstrap and ssh control-socket management
 # after protected work finishes or trap cleanup takes over. A close failure
@@ -1652,9 +1605,19 @@ zxfer_get_ssh_control_socket_role_state() {
 zxfer_close_ssh_control_socket_for_role() {
 	l_role=$1
 
-	zxfer_get_ssh_control_socket_role_state "$l_role" || return 1
-	l_host=$g_zxfer_ssh_control_socket_role_host
-	l_control_socket=$g_zxfer_ssh_control_socket_role_socket
+	case "$l_role" in
+	origin)
+		l_host=${g_option_O_origin_host:-}
+		l_control_socket=${g_ssh_origin_control_socket:-}
+		;;
+	target)
+		l_host=${g_option_T_target_host:-}
+		l_control_socket=${g_ssh_target_control_socket:-}
+		;;
+	*)
+		return 1
+		;;
+	esac
 	if [ "$l_host" = "" ] || [ "$l_control_socket" = "" ]; then
 		return 0
 	fi
