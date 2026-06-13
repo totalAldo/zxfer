@@ -928,47 +928,6 @@ zxfer_strip_unsupported_properties() {
 	printf '%s\n' "$g_zxfer_only_supported_properties"
 }
 
-# Purpose: Check whether the destination property probe is unsupported.
-# Usage: Called during property filtering, diffing, and apply when later
-# helpers need a boolean answer about the destination property probe.
-zxfer_destination_property_probe_is_unsupported() {
-	case "$1" in
-	*"invalid property"* | *"no such property"* | *"not supported"*)
-		return 0
-		;;
-	esac
-
-	return 1
-}
-
-# Purpose: Check whether the destination property probe is inconclusive.
-# Usage: Called during property filtering, diffing, and apply when later
-# helpers need a boolean answer about the destination property probe.
-zxfer_destination_property_probe_is_inconclusive() {
-	case "$1" in
-	*"does not apply"*)
-		return 0
-		;;
-	esac
-
-	return 1
-}
-
-# Purpose: Format the destination property probe failure detail for display or
-# serialized output.
-# Usage: Called during property filtering, diffing, and apply when operators or
-# downstream helpers need a stable presentation.
-zxfer_format_destination_property_probe_failure_detail() {
-	l_probe_output=$1
-
-	if zxfer_destination_probe_is_ambiguous "$l_probe_output"; then
-		printf '%s\n' "probe exited nonzero without stdout/stderr"
-		return 0
-	fi
-
-	printf '%s\n' "$l_probe_output"
-}
-
 # Purpose: Return the unsupported property probe dataset in the form expected
 # by later helpers.
 # Usage: Called during property filtering, diffing, and apply when sibling
@@ -1177,19 +1136,25 @@ zxfer_calculate_unsupported_properties() {
 				l_resolved_source_property_type_pairs="${l_resolved_source_property_type_pairs}${l_seen_key},"
 				continue
 			fi
-			if zxfer_destination_property_probe_is_unsupported "$l_dest_property_probe"; then
+			case "$l_dest_property_probe" in
+			*"invalid property"* | *"no such property"* | *"not supported"*)
 				zxfer_append_unsupported_property_for_dataset_type "$l_scan_source_type" "$s_p"
 				l_resolved_source_property_type_pairs="${l_resolved_source_property_type_pairs}${l_seen_key},"
 				continue
-			fi
-			if zxfer_destination_property_probe_is_inconclusive "$l_dest_property_probe"; then
+				;;
+			esac
+			case "$l_dest_property_probe" in
+			*"does not apply"*)
 				if [ "$l_dest_probe_dataset_type" = "$l_scan_source_type" ]; then
 					zxfer_append_unsupported_property_for_dataset_type "$l_scan_source_type" "$s_p"
 					l_resolved_source_property_type_pairs="${l_resolved_source_property_type_pairs}${l_seen_key},"
 				fi
 				continue
+				;;
+			esac
+			if zxfer_destination_probe_is_ambiguous "$l_dest_property_probe"; then
+				l_dest_property_probe="probe exited nonzero without stdout/stderr"
 			fi
-			l_dest_property_probe=$(zxfer_format_destination_property_probe_failure_detail "$l_dest_property_probe")
 			l_probe_error="Failed to probe destination support for property [$s_p] on [$l_dest_probe_dataset]: $l_dest_property_probe"
 			l_probe_error_status=$l_dest_property_probe_status
 			break
@@ -1299,52 +1264,6 @@ BEGIN {
 
 	print filtered_creation
 }'
-}
-
-# Purpose: Check whether the destination is already present in the recursive
-# destination inventory.
-# Usage: Called before create-path planning so zxfer distinguishes a complete
-# inventory hit from a destination that needs a live existence probe.
-zxfer_property_destination_is_recorded() {
-	l_destination=$1
-	l_destinations=$(printf '%s\n' "${g_recursive_dest_list:-}" | tr ' ' '\n')
-
-	while IFS= read -r l_recorded_destination || [ -n "$l_recorded_destination" ]; do
-		[ -n "$l_recorded_destination" ] || continue
-		[ "$l_recorded_destination" = "$l_destination" ] && return 0
-	done <<-EOF
-		$l_destinations
-	EOF
-
-	return 1
-}
-
-# Purpose: Return the destination existence flag used by create-path planning.
-# Usage: Called during property reconciliation when stale or incomplete
-# recursive destination lists need a live probe before zxfer chooses `zfs
-# create`.
-zxfer_get_property_transfer_destination_exist_flag() {
-	l_destination=$1
-
-	if zxfer_property_destination_is_recorded "$l_destination"; then
-		printf '%s\n' 1
-		return 0
-	fi
-
-	l_dest_exist_status=0
-	l_dest_exist=$(zxfer_exists_destination "$l_destination" live) ||
-		l_dest_exist_status=$?
-	if [ "$l_dest_exist_status" -ne 0 ]; then
-		printf '%s\n' "$l_dest_exist"
-		return "$l_dest_exist_status"
-	fi
-	if [ "$l_dest_exist" -ne 0 ]; then
-		zxfer_note_destination_dataset_exists "$l_destination"
-		printf '%s\n' 1
-		return 0
-	fi
-
-	printf '%s\n' 0
 }
 
 # Purpose: Ensure the destination exists exists and is ready before the flow
@@ -2160,12 +2079,29 @@ zxfer_try_property_transfer_destination_create() {
 	l_property_source_volsize=$7
 	l_property_effective_readonly_properties=$8
 
-	l_dest_exist_status=0
-	l_dest_exist=$(zxfer_get_property_transfer_destination_exist_flag "$g_actual_dest") ||
-		l_dest_exist_status=$?
-	if [ "$l_dest_exist_status" -ne 0 ]; then
-		zxfer_throw_error "$l_dest_exist" "$l_dest_exist_status"
-		return "$l_dest_exist_status"
+	l_dest_exist=0
+	l_destinations=$(printf '%s\n' "${g_recursive_dest_list:-}" | tr ' ' '\n')
+	while IFS= read -r l_recorded_destination || [ -n "$l_recorded_destination" ]; do
+		[ -n "$l_recorded_destination" ] || continue
+		if [ "$l_recorded_destination" = "$g_actual_dest" ]; then
+			l_dest_exist=1
+			break
+		fi
+	done <<-EOF
+		$l_destinations
+	EOF
+	if [ "$l_dest_exist" -eq 0 ]; then
+		l_dest_exist_status=0
+		l_live_dest_exist=$(zxfer_exists_destination "$g_actual_dest" live) ||
+			l_dest_exist_status=$?
+		if [ "$l_dest_exist_status" -ne 0 ]; then
+			zxfer_throw_error "$l_live_dest_exist" "$l_dest_exist_status"
+			return "$l_dest_exist_status"
+		fi
+		if [ "$l_live_dest_exist" -ne 0 ]; then
+			zxfer_note_destination_dataset_exists "$g_actual_dest"
+			l_dest_exist=1
+		fi
 	fi
 
 	if zxfer_ensure_destination_exists "$l_dest_exist" "$l_property_is_initial_source" "$l_property_override_pvs" "$l_property_creation_pvs" "$l_property_source_dstype" "$l_property_source_volsize" "$g_actual_dest" "$l_property_effective_readonly_properties" ""; then
