@@ -118,21 +118,18 @@ matters especially when:
   remain
 - custom `-Z` compression commands or default `zstd` helpers must be resolved
   per host instead of assuming one shared absolute path
-- the per-host remote-capability cache is keyed from the host spec, trusted
-  dependency path, ssh transport policy, and the requested optional tool set;
-  cache files store the full encoded identity and reads reject mismatches,
-  so concurrent or near-future zxfer invocations by the same user can safely
-  reuse matching helper-discovery handshakes without sharing stale helper-path
-  data across different run shapes
+- remote helper capability discovery runs once per host per invocation, keyed
+  in memory by the host spec, trusted dependency path, ssh transport policy,
+  and the requested optional tool set; no capability-cache files are reused
+  across concurrent or later zxfer invocations
 
-Current releases also coordinate shared ssh control sockets, per-process ssh
-leases, and remote capability-cache fills through one metadata-bearing
-directory format under the validated temp root. Native `.lock` and
-`leases/lease.*` paths therefore carry owner metadata instead of relying on
-plain pid files, zxfer validates and reaps stale or corrupt owners before
-reuse, and release failures are checked rather than silently ignored. Older
-plain ssh lease files and pid-only lock directories are no longer supported;
-clear stale reused cache roots before rerunning a current release.
+Current releases keep ssh control sockets and remote capability state
+strictly per-run. Each invocation creates its own short `ssh-<role>.sock`
+path under the private 0700 temp root, reuses that socket only for its own
+remote commands, and closes it before removing the temp root. There are no
+shared ssh lease directories or remote capability-cache locks to inspect or
+clear for current runs; only `ZXFER_ERROR_LOG` appends use the
+metadata-bearing owned-directory lock format.
 
 The same validated secure `PATH` is also exported before remote capability
 handshakes, helper-discovery probes, backup-directory prep, and remote

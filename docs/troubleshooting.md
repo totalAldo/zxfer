@@ -264,13 +264,13 @@ append cannot release that lock cleanly, the append helper now fails closed and
 emits a warning; trap-time failure reporting still preserves the original zxfer
 exit status while surfacing the warning on `stderr`.
 
-The same owned-directory format now also backs shared ssh control-socket locks
-and leases plus remote capability-cache locks under the validated temp root.
-If you inspect temp roots while debugging startup or cleanup, expect `.lock`
-paths and `leases/lease.*` entries to be directories with metadata files, not
-bare pid files. Older plain ssh lease files and pid-only lock directories from
-pre-metadata releases are unsupported; remove the stale entry or cache root if
-zxfer reuses one during a rollout.
+Current ssh control sockets and remote capability state are per-run instead of
+shared. If you inspect a live run's temp root while debugging startup or
+cleanup, expect at most short `ssh-<role>.sock` control sockets owned by that
+invocation; remote helper capabilities are held in memory and have no cache or
+lock files. Older shared ssh lease directories, pid-only socket locks, and
+remote capability-cache lock roots from pre-per-run branch builds are stale
+artifacts rather than current zxfer state.
 
 By default that block redacts `invocation` and `last_command` as `[redacted]`,
 so routine failure logs do not capture raw command lines. If you explicitly

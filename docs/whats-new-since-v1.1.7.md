@@ -193,11 +193,12 @@ These are the biggest user-visible additions since the 2019 release.
   `user@host doas` are supported and handled more safely
 - remote helper resolution is per-host instead of assuming the local helper
   path exists remotely
-- ssh control sockets can be reused within one run and across sibling zxfer
-  processes through a validated per-user cache
-- shared ssh control sockets and remote capability cache fills are coordinated
-  through metadata-bearing lock/lease directories instead of ad hoc pid files,
-  with stale-owner validation and checked release semantics
+- ssh control sockets are reused within one run through short per-role socket
+  paths under that invocation's private temp root; concurrent zxfer processes
+  do not share sockets
+- remote capability discovery is one fail-closed probe per host per run, held
+  in memory instead of persisted in cache files; `ZXFER_ERROR_LOG` appends are
+  still serialized through metadata-bearing owned lock directories
 
 ### Better property handling
 
@@ -226,19 +227,22 @@ These are not removals, but they are common upgrade surprises.
 If you parse stderr, expect different output than `v1.1.7`. Current zxfer
 surfaces more context on non-zero exits.
 
-### Lock and lease state under TMPDIR is no longer plain pid files
+### Runtime shared state under TMPDIR is narrower
 
 If you had automation that inspected or deleted zxfer runtime lock state
-directly, re-test it. Current native shared-state entries are metadata-bearing
-directories:
+directly, re-test it. Current zxfer no longer shares ssh sockets, ssh leases,
+or remote capability caches between processes:
 
-- ssh control-socket `.lock` paths are directories with owner metadata
-- ssh `leases/lease.*` entries are directories instead of plain files
-- remote capability `<cache>.lock` paths are metadata-bearing directories
+- ssh control sockets are short per-role files under the private per-run temp
+  root and are removed with that root at exit
+- remote capability results are held in memory for the current invocation
+- `ZXFER_ERROR_LOG` appends still use metadata-bearing owned lock directories
+  with owner validation and checked release semantics
 
-Older plain ssh lease files and pid-only `.lock` directories are no longer
-supported. Clear stale old cache roots before the first current-release run
-instead of relying on mixed-format upgrade compatibility.
+Older shared ssh lease files, pid-only socket locks, and remote capability
+cache roots from pre-per-run branch builds are no longer current zxfer state.
+Clear those stale roots if local rollout automation previously managed them
+directly.
 
 ### Large recursive runs behave differently
 
@@ -281,10 +285,10 @@ whether you still need it.
 ### 2026 current branch
 
 - broad fail-closed reliability work
-- stricter cache, temp-file, and metadata validation
+- stricter temp-file and metadata validation
 - better remote capability probing and diagnostics
-- metadata-bearing owned lock/lease coordination for shared ssh control
-  sockets, remote capability caches, and `ZXFER_ERROR_LOG` appends
+- per-run ssh control sockets, in-memory remote capability state, and
+  metadata-bearing owned lock coordination for `ZXFER_ERROR_LOG` appends
 - repository reorganization into `docs/`, `examples/`, `man/`, and
   `packaging/`, plus a much broader documentation set
 - stronger VM-backed validation and expanded CI coverage
