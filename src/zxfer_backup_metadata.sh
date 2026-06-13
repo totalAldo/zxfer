@@ -826,11 +826,11 @@ zxfer_build_remote_backup_symlink_guard_cmd() {
 	case "$l_guard_kind" in
 	directory)
 		l_exact_symlink_cmd="echo 'Refusing to use symlinked zxfer backup directory.' >&2"
-		l_component_symlink_cmd='echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2'
+		l_component_symlink_cmd="echo \"Refusing to use backup directory \$l_scan_path because path component \$l_scan_candidate is a symlink.\" >&2"
 		;;
 	metadata)
-		l_exact_symlink_cmd='echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2'
-		l_component_symlink_cmd='echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2'
+		l_exact_symlink_cmd="echo \"Refusing to use backup metadata \$l_scan_path because it is a symlink.\" >&2"
+		l_component_symlink_cmd="echo \"Refusing to use backup metadata \$l_scan_path because path component \$l_scan_candidate is a symlink.\" >&2"
 		;;
 	*) return 1 ;;
 	esac
@@ -1450,128 +1450,6 @@ zxfer_render_remote_backup_target_write_guard_cmd() {
 	printf '%s' "if [ -L '$l_backup_file_path_single' ] || [ -h '$l_backup_file_path_single' ]; then echo 'Refusing to write backup metadata because the target is a symlink.' >&2; exit $l_remote_write_failure_status; fi; if [ -e '$l_backup_file_path_single' ] && [ ! -f '$l_backup_file_path_single' ]; then echo 'Refusing to write backup metadata because the target is not a regular file.' >&2; exit $l_remote_write_failure_status; fi"
 }
 
-# Purpose: Render the remote staged target guard for backup metadata writes.
-# Usage: Called by the single-file write builder after staging so the target is
-# checked again immediately before the final rename.
-zxfer_render_remote_backup_staged_target_write_guard_cmd() {
-	l_backup_file_path_single=$1
-	l_remote_write_failure_status=$2
-	l_stage_cleanup_cmd=$3
-
-	printf '%s' "if [ -L '$l_backup_file_path_single' ] || [ -h '$l_backup_file_path_single' ]; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi; if [ -e '$l_backup_file_path_single' ] && [ ! -f '$l_backup_file_path_single' ]; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi"
-}
-
-# Purpose: Render the remote single-file backup stage cleanup fragment.
-# Usage: Called by the single-file write builder anywhere a staged write must
-# unwind before returning an error to the local side.
-zxfer_render_remote_backup_single_stage_cleanup_cmd() {
-	# shellcheck disable=SC2016  # Remote shell variables should remain literal.
-	printf '%s' 'rm -f "$l_stage_file"; rmdir "$l_stage_dir" 2>/dev/null || true'
-}
-
-# Purpose: Render remote single-file backup stage allocation.
-# Usage: Called by the single-file write builder after the target preflight
-# guard and before the payload helper writes into the stage file.
-zxfer_render_remote_backup_single_stage_setup_cmd() {
-	l_backup_file_dir_single=$1
-	l_remote_write_failure_status=$2
-
-	printf '%s' "l_stage_dir=\$(mktemp -d '$l_backup_file_dir_single/.zxfer-backup-write.XXXXXX' 2>/dev/null) || exit $l_remote_write_failure_status; l_stage_file=\"\$l_stage_dir/backup.write\""
-}
-
-# Purpose: Render the remote pair-write stage cleanup function.
-# Usage: Called by the transactional pair write builder before any branch can
-# need cleanup for primary or forwarded staged files.
-zxfer_render_remote_backup_pair_cleanup_function_cmd() {
-	# shellcheck disable=SC2016  # Remote shell variables should remain literal.
-	printf '%s' 'cleanup_stages() { rm -f "$l_primary_stage_file" "$l_forwarded_stage_file" 2>/dev/null || true; rmdir "$l_primary_stage_dir" "$l_forwarded_stage_dir" 2>/dev/null || true; }'
-}
-
-# Purpose: Render the remote rollback helper for the forwarded backup alias.
-# Usage: Called by the transactional pair write builder so all later primary
-# failure paths share the same forwarded-alias rollback behavior.
-zxfer_render_remote_backup_pair_forwarded_rollback_function_cmd() {
-	l_forwarded_backup_file_path_single=$1
-
-	printf '%s' "rollback_forwarded() { rm -f '$l_forwarded_backup_file_path_single' 2>/dev/null || true; if [ \"\${l_forwarded_had_existing:-0}\" -eq 1 ] && [ \"\${l_forwarded_rollback_file:-}\" != '' ]; then if ! mv -f \"\$l_forwarded_rollback_file\" '$l_forwarded_backup_file_path_single' 2>/dev/null; then return 1; fi; if [ -e \"\$l_forwarded_rollback_file\" ]; then rm -f \"\$l_forwarded_rollback_file\" 2>/dev/null || true; fi; fi; return 0; }"
-}
-
-# Purpose: Render target guards for both files in a remote pair write.
-# Usage: Called by the transactional pair write builder before allocating any
-# remote stage directories.
-zxfer_render_remote_backup_pair_target_guard_cmd() {
-	l_primary_backup_file_path_single=$1
-	l_forwarded_backup_file_path_single=$2
-	l_remote_write_failure_status=$3
-
-	l_primary_guard_cmd=$(zxfer_render_remote_backup_target_write_guard_cmd "$l_primary_backup_file_path_single" "$l_remote_write_failure_status")
-	l_forwarded_guard_cmd=$(zxfer_render_remote_backup_target_write_guard_cmd "$l_forwarded_backup_file_path_single" "$l_remote_write_failure_status")
-	printf '%s; %s' "$l_primary_guard_cmd" "$l_forwarded_guard_cmd"
-}
-
-# Purpose: Render remote pair-write stage allocation.
-# Usage: Called by the transactional pair write builder after both target paths
-# have passed preflight checks.
-zxfer_render_remote_backup_pair_stage_setup_cmd() {
-	l_primary_backup_file_dir_single=$1
-	l_forwarded_backup_file_dir_single=$2
-	l_remote_write_failure_status=$3
-
-	printf '%s' "l_primary_stage_dir=\$(mktemp -d '$l_primary_backup_file_dir_single/.zxfer-backup-write.XXXXXX' 2>/dev/null) || exit $l_remote_write_failure_status; l_primary_stage_file=\"\$l_primary_stage_dir/backup.write\"; l_forwarded_stage_dir=\$(mktemp -d '$l_forwarded_backup_file_dir_single/.zxfer-backup-write.XXXXXX' 2>/dev/null) || { cleanup_stages; exit $l_remote_write_failure_status; }; l_forwarded_stage_file=\"\$l_forwarded_stage_dir/backup.write\""
-}
-
-# Purpose: Render the remote pair payload splitter.
-# Usage: Called by the transactional pair write builder to split one stdin
-# payload into the primary and forwarded backup stage files.
-zxfer_render_remote_backup_pair_payload_split_cmd() {
-	l_pair_split_line_single=$1
-	l_remote_write_failure_status=$2
-
-	printf '%s' "if ! awk -v split_line='$l_pair_split_line_single' -v primary_file=\"\$l_primary_stage_file\" -v forwarded_file=\"\$l_forwarded_stage_file\" 'BEGIN { current = primary_file; saw_split = 0 } \$0 == split_line { current = forwarded_file; saw_split = 1; next } { print > current } END { if (!saw_split) exit 1 }'; then cleanup_stages; exit $l_remote_write_failure_status; fi"
-}
-
-# Purpose: Render the remote pair stage permission checks.
-# Usage: Called by the transactional pair write builder after both staged
-# payload files have been written.
-zxfer_render_remote_backup_pair_stage_chmod_cmd() {
-	l_remote_write_failure_status=$1
-
-	printf '%s' "if ! chmod 600 \"\$l_primary_stage_file\"; then cleanup_stages; exit $l_remote_write_failure_status; fi; if ! chmod 600 \"\$l_forwarded_stage_file\"; then cleanup_stages; exit $l_remote_write_failure_status; fi"
-}
-
-# Purpose: Render the forwarded side of a remote pair publish.
-# Usage: Called by the transactional pair write builder before the primary side
-# so a primary failure can roll the forwarded alias back first.
-zxfer_render_remote_backup_pair_forwarded_publish_cmd() {
-	l_forwarded_backup_file_dir_single=$1
-	l_forwarded_backup_file_path_single=$2
-	l_remote_write_failure_status=$3
-	l_remote_rollback_failure_status=$4
-	l_remote_indent='	'
-
-	printf '%s' "l_forwarded_had_existing=0; l_forwarded_rollback_file=''; if [ -e '$l_forwarded_backup_file_path_single' ]; then ${l_remote_indent}l_forwarded_had_existing=1; ${l_remote_indent}l_forwarded_rollback_file=\$(mktemp '$l_forwarded_backup_file_dir_single/.zxfer-backup-rollback.XXXXXX' 2>/dev/null) || { cleanup_stages; exit $l_remote_write_failure_status; }; ${l_remote_indent}if ! mv -f '$l_forwarded_backup_file_path_single' \"\$l_forwarded_rollback_file\"; then rm -f \"\$l_forwarded_rollback_file\" 2>/dev/null || true; cleanup_stages; exit $l_remote_write_failure_status; fi; fi; if ! mv -f \"\$l_forwarded_stage_file\" '$l_forwarded_backup_file_path_single'; then if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; cleanup_stages; exit $l_remote_write_failure_status; fi"
-}
-
-# Purpose: Render the primary side of a remote pair publish.
-# Usage: Called by the transactional pair write builder after the forwarded
-# alias is live, with rollback of both files on primary failure.
-zxfer_render_remote_backup_pair_primary_publish_cmd() {
-	l_primary_backup_file_dir_single=$1
-	l_primary_backup_file_path_single=$2
-	l_remote_write_failure_status=$3
-	l_remote_rollback_failure_status=$4
-	l_remote_indent='	'
-
-	printf '%s' "l_primary_had_existing=0; l_primary_rollback_file=''; if [ -e '$l_primary_backup_file_path_single' ]; then ${l_remote_indent}l_primary_had_existing=1; ${l_remote_indent}l_primary_rollback_file=\$(mktemp '$l_primary_backup_file_dir_single/.zxfer-backup-rollback.XXXXXX' 2>/dev/null) || { if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; cleanup_stages; exit $l_remote_write_failure_status; }; ${l_remote_indent}if ! mv -f '$l_primary_backup_file_path_single' \"\$l_primary_rollback_file\"; then rm -f \"\$l_primary_rollback_file\" 2>/dev/null || true; if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; cleanup_stages; exit $l_remote_write_failure_status; fi; fi; if ! mv -f \"\$l_primary_stage_file\" '$l_primary_backup_file_path_single'; then ${l_remote_indent}l_primary_restore_failed=0; ${l_remote_indent}if [ \"\$l_primary_had_existing\" -eq 1 ] && [ \"\$l_primary_rollback_file\" != '' ]; then if ! mv -f \"\$l_primary_rollback_file\" '$l_primary_backup_file_path_single' 2>/dev/null; then l_primary_restore_failed=1; else if [ -e \"\$l_primary_rollback_file\" ]; then rm -f \"\$l_primary_rollback_file\" 2>/dev/null || true; fi; fi; fi; ${l_remote_indent}if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; ${l_remote_indent}if [ \"\$l_primary_restore_failed\" -eq 1 ]; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; ${l_remote_indent}cleanup_stages; ${l_remote_indent}exit $l_remote_write_failure_status; fi"
-}
-
-# Purpose: Render successful remote pair-write rollback cleanup.
-# Usage: Called by the transactional pair write builder after both final backup
-# files are live and rollback files can be discarded.
-zxfer_render_remote_backup_pair_finish_cmd() {
-	printf '%s' "if [ \"\$l_forwarded_had_existing\" -eq 1 ] && [ \"\$l_forwarded_rollback_file\" != '' ]; then rm -f \"\$l_forwarded_rollback_file\" 2>/dev/null || true; fi; if [ \"\$l_primary_had_existing\" -eq 1 ] && [ \"\$l_primary_rollback_file\" != '' ]; then rm -f \"\$l_primary_rollback_file\" 2>/dev/null || true; fi; cleanup_stages"
-}
-
 # Purpose: Build the remote backup write command for the next execution or
 # comparison step.
 # Usage: Called during backup-metadata capture, readback, and atomic publish
@@ -1588,9 +1466,10 @@ zxfer_build_remote_backup_write_cmd() {
 	l_backup_file_path_single=$(zxfer_escape_for_single_quotes "$l_backup_file_path")
 	l_remote_dependency_check_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd "$l_host" "$l_remote_dependency_status" mktemp chmod mv rm rmdir)
 	l_target_guard_cmd=$(zxfer_render_remote_backup_target_write_guard_cmd "$l_backup_file_path_single" "$l_remote_write_failure_status")
-	l_stage_cleanup_cmd=$(zxfer_render_remote_backup_single_stage_cleanup_cmd)
-	l_stage_setup_cmd=$(zxfer_render_remote_backup_single_stage_setup_cmd "$l_backup_file_dir_single" "$l_remote_write_failure_status")
-	l_staged_target_guard_cmd=$(zxfer_render_remote_backup_staged_target_write_guard_cmd "$l_backup_file_path_single" "$l_remote_write_failure_status" "$l_stage_cleanup_cmd")
+	# shellcheck disable=SC2016  # Remote shell variables should remain literal.
+	l_stage_cleanup_cmd='rm -f "$l_stage_file"; rmdir "$l_stage_dir" 2>/dev/null || true'
+	l_stage_setup_cmd="l_stage_dir=\$(mktemp -d '$l_backup_file_dir_single/.zxfer-backup-write.XXXXXX' 2>/dev/null) || exit $l_remote_write_failure_status; l_stage_file=\"\$l_stage_dir/backup.write\""
+	l_staged_target_guard_cmd="if [ -L '$l_backup_file_path_single' ] || [ -h '$l_backup_file_path_single' ]; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi; if [ -e '$l_backup_file_path_single' ] && [ ! -f '$l_backup_file_path_single' ]; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi"
 	# Stage remote writes inside the secure backup directory so validation and
 	# the final rename operate on the same object.
 	l_remote_write_cmd="$l_remote_dependency_check_cmd; $l_target_guard_cmd; umask 077; $l_stage_setup_cmd; if ! $l_remote_write_helper_safe >\"\$l_stage_file\"; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi; if ! chmod 600 \"\$l_stage_file\"; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi; $l_staged_target_guard_cmd; if ! mv -f \"\$l_stage_file\" '$l_backup_file_path_single'; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi; rmdir \"\$l_stage_dir\" 2>/dev/null || true"
@@ -1618,15 +1497,19 @@ zxfer_build_remote_backup_pair_write_cmd() {
 	l_pair_split_line_single=$(zxfer_escape_for_single_quotes "$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE")
 	l_remote_dependency_check_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd "$l_host" "$l_remote_dependency_status" mktemp chmod mv rm rmdir awk)
 	l_remote_rollback_failure_status=98
-	l_cleanup_function_cmd=$(zxfer_render_remote_backup_pair_cleanup_function_cmd)
-	l_forwarded_rollback_function_cmd=$(zxfer_render_remote_backup_pair_forwarded_rollback_function_cmd "$l_forwarded_backup_file_path_single")
-	l_pair_target_guard_cmd=$(zxfer_render_remote_backup_pair_target_guard_cmd "$l_primary_backup_file_path_single" "$l_forwarded_backup_file_path_single" "$l_remote_write_failure_status")
-	l_pair_stage_setup_cmd=$(zxfer_render_remote_backup_pair_stage_setup_cmd "$l_primary_backup_file_dir_single" "$l_forwarded_backup_file_dir_single" "$l_remote_write_failure_status")
-	l_pair_payload_split_cmd=$(zxfer_render_remote_backup_pair_payload_split_cmd "$l_pair_split_line_single" "$l_remote_write_failure_status")
-	l_pair_stage_chmod_cmd=$(zxfer_render_remote_backup_pair_stage_chmod_cmd "$l_remote_write_failure_status")
-	l_forwarded_publish_cmd=$(zxfer_render_remote_backup_pair_forwarded_publish_cmd "$l_forwarded_backup_file_dir_single" "$l_forwarded_backup_file_path_single" "$l_remote_write_failure_status" "$l_remote_rollback_failure_status")
-	l_primary_publish_cmd=$(zxfer_render_remote_backup_pair_primary_publish_cmd "$l_primary_backup_file_dir_single" "$l_primary_backup_file_path_single" "$l_remote_write_failure_status" "$l_remote_rollback_failure_status")
-	l_pair_finish_cmd=$(zxfer_render_remote_backup_pair_finish_cmd)
+	l_remote_indent='	'
+	# shellcheck disable=SC2016  # Remote shell variables should remain literal.
+	l_cleanup_function_cmd='cleanup_stages() { rm -f "$l_primary_stage_file" "$l_forwarded_stage_file" 2>/dev/null || true; rmdir "$l_primary_stage_dir" "$l_forwarded_stage_dir" 2>/dev/null || true; }'
+	l_forwarded_rollback_function_cmd="rollback_forwarded() { rm -f '$l_forwarded_backup_file_path_single' 2>/dev/null || true; if [ \"\${l_forwarded_had_existing:-0}\" -eq 1 ] && [ \"\${l_forwarded_rollback_file:-}\" != '' ]; then if ! mv -f \"\$l_forwarded_rollback_file\" '$l_forwarded_backup_file_path_single' 2>/dev/null; then return 1; fi; if [ -e \"\$l_forwarded_rollback_file\" ]; then rm -f \"\$l_forwarded_rollback_file\" 2>/dev/null || true; fi; fi; return 0; }"
+	l_primary_guard_cmd=$(zxfer_render_remote_backup_target_write_guard_cmd "$l_primary_backup_file_path_single" "$l_remote_write_failure_status")
+	l_forwarded_guard_cmd=$(zxfer_render_remote_backup_target_write_guard_cmd "$l_forwarded_backup_file_path_single" "$l_remote_write_failure_status")
+	l_pair_target_guard_cmd="$l_primary_guard_cmd; $l_forwarded_guard_cmd"
+	l_pair_stage_setup_cmd="l_primary_stage_dir=\$(mktemp -d '$l_primary_backup_file_dir_single/.zxfer-backup-write.XXXXXX' 2>/dev/null) || exit $l_remote_write_failure_status; l_primary_stage_file=\"\$l_primary_stage_dir/backup.write\"; l_forwarded_stage_dir=\$(mktemp -d '$l_forwarded_backup_file_dir_single/.zxfer-backup-write.XXXXXX' 2>/dev/null) || { cleanup_stages; exit $l_remote_write_failure_status; }; l_forwarded_stage_file=\"\$l_forwarded_stage_dir/backup.write\""
+	l_pair_payload_split_cmd="if ! awk -v split_line='$l_pair_split_line_single' -v primary_file=\"\$l_primary_stage_file\" -v forwarded_file=\"\$l_forwarded_stage_file\" 'BEGIN { current = primary_file; saw_split = 0 } \$0 == split_line { current = forwarded_file; saw_split = 1; next } { print > current } END { if (!saw_split) exit 1 }'; then cleanup_stages; exit $l_remote_write_failure_status; fi"
+	l_pair_stage_chmod_cmd="if ! chmod 600 \"\$l_primary_stage_file\"; then cleanup_stages; exit $l_remote_write_failure_status; fi; if ! chmod 600 \"\$l_forwarded_stage_file\"; then cleanup_stages; exit $l_remote_write_failure_status; fi"
+	l_forwarded_publish_cmd="l_forwarded_had_existing=0; l_forwarded_rollback_file=''; if [ -e '$l_forwarded_backup_file_path_single' ]; then ${l_remote_indent}l_forwarded_had_existing=1; ${l_remote_indent}l_forwarded_rollback_file=\$(mktemp '$l_forwarded_backup_file_dir_single/.zxfer-backup-rollback.XXXXXX' 2>/dev/null) || { cleanup_stages; exit $l_remote_write_failure_status; }; ${l_remote_indent}if ! mv -f '$l_forwarded_backup_file_path_single' \"\$l_forwarded_rollback_file\"; then rm -f \"\$l_forwarded_rollback_file\" 2>/dev/null || true; cleanup_stages; exit $l_remote_write_failure_status; fi; fi; if ! mv -f \"\$l_forwarded_stage_file\" '$l_forwarded_backup_file_path_single'; then if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; cleanup_stages; exit $l_remote_write_failure_status; fi"
+	l_primary_publish_cmd="l_primary_had_existing=0; l_primary_rollback_file=''; if [ -e '$l_primary_backup_file_path_single' ]; then ${l_remote_indent}l_primary_had_existing=1; ${l_remote_indent}l_primary_rollback_file=\$(mktemp '$l_primary_backup_file_dir_single/.zxfer-backup-rollback.XXXXXX' 2>/dev/null) || { if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; cleanup_stages; exit $l_remote_write_failure_status; }; ${l_remote_indent}if ! mv -f '$l_primary_backup_file_path_single' \"\$l_primary_rollback_file\"; then rm -f \"\$l_primary_rollback_file\" 2>/dev/null || true; if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; cleanup_stages; exit $l_remote_write_failure_status; fi; fi; if ! mv -f \"\$l_primary_stage_file\" '$l_primary_backup_file_path_single'; then ${l_remote_indent}l_primary_restore_failed=0; ${l_remote_indent}if [ \"\$l_primary_had_existing\" -eq 1 ] && [ \"\$l_primary_rollback_file\" != '' ]; then if ! mv -f \"\$l_primary_rollback_file\" '$l_primary_backup_file_path_single' 2>/dev/null; then l_primary_restore_failed=1; else if [ -e \"\$l_primary_rollback_file\" ]; then rm -f \"\$l_primary_rollback_file\" 2>/dev/null || true; fi; fi; fi; ${l_remote_indent}if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; ${l_remote_indent}if [ \"\$l_primary_restore_failed\" -eq 1 ]; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; ${l_remote_indent}cleanup_stages; ${l_remote_indent}exit $l_remote_write_failure_status; fi"
+	l_pair_finish_cmd="if [ \"\$l_forwarded_had_existing\" -eq 1 ] && [ \"\$l_forwarded_rollback_file\" != '' ]; then rm -f \"\$l_forwarded_rollback_file\" 2>/dev/null || true; fi; if [ \"\$l_primary_had_existing\" -eq 1 ] && [ \"\$l_primary_rollback_file\" != '' ]; then rm -f \"\$l_primary_rollback_file\" 2>/dev/null || true; fi; cleanup_stages"
 	l_remote_pair_write_cmd="$l_remote_dependency_check_cmd; $l_cleanup_function_cmd; $l_forwarded_rollback_function_cmd; $l_pair_target_guard_cmd; umask 077; $l_pair_stage_setup_cmd; $l_pair_payload_split_cmd; $l_pair_stage_chmod_cmd; $l_forwarded_publish_cmd; $l_primary_publish_cmd; $l_pair_finish_cmd"
 
 	zxfer_wrap_remote_backup_helper_with_secure_path "$l_remote_pair_write_cmd"

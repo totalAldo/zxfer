@@ -30,7 +30,9 @@
 lines	src/zxfer_background_jobs.sh	582
 # R2-P4a replaced the duplicated remote backup-directory and backup-metadata
 # symlink guard renderers with one parameterized command builder.
-lines	src/zxfer_backup_metadata.sh	2486
+# R2-P4b inlined the single-use remote single-file and pair-write command
+# fragments into their builders while keeping the shared target guard.
+lines	src/zxfer_backup_metadata.sh	2369
 # zxfer_cleanup_child_wrapper.sh grew by the Phase 5 ps -A fix comment (the
 # descendant reaper must list every process, not just same-terminal ones);
 # the runner-module deletion pays for it many times over in the TOTAL row.
@@ -97,9 +99,9 @@ lines	zxfer	211
 # TOTAL rises by the net addition of the approved divergence-contract
 # feature (classifier, gate, warning, post-receive verification, -V key)
 # plus the rolling-queue stderr-sink fix comments.
-lines	TOTAL	22821
+lines	TOTAL	22704
 functions	src/zxfer_background_jobs.sh	15
-functions	src/zxfer_backup_metadata.sh	83
+functions	src/zxfer_backup_metadata.sh	71
 functions	src/zxfer_cleanup_child_wrapper.sh	4
 functions	src/zxfer_cli.sh	3
 functions	src/zxfer_dependencies.sh	11
@@ -128,7 +130,7 @@ functions	src/zxfer_snapshot_reconcile.sh	26
 functions	src/zxfer_snapshot_state.sh	31
 functions	zxfer	5
 # functions TOTAL rises by the seven divergence-contract helpers above.
-functions	TOTAL	646
+functions	TOTAL	634
 callers	zxfer_profile_now_ms	12	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	26
 callers	eval 	10
