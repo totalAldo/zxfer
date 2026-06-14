@@ -2503,18 +2503,9 @@ zxfer_reset_property_iteration_caches() {
 # Usage: Called during replication iteration setup after inputs change and
 # downstream helpers need the derived value rebuilt.
 zxfer_refresh_property_tree_prefetch_context() {
-	if [ "${g_option_R_recursive:-}" = "" ]; then
-		g_zxfer_source_property_tree_prefetch_root=""
-		g_zxfer_source_property_tree_prefetch_zfs_cmd=""
-		g_zxfer_source_property_tree_prefetch_state=0
-		g_zxfer_destination_property_tree_prefetch_root=""
-		g_zxfer_destination_property_tree_prefetch_zfs_cmd=""
-		g_zxfer_destination_property_tree_prefetch_state=0
-		return
-	fi
-
-	if [ "${g_option_P_transfer_property:-0}" -ne 1 ] &&
-		[ -z "${g_option_o_override_property:-}" ]; then
+	if [ "${g_option_R_recursive:-}" = "" ] ||
+		{ [ "${g_option_P_transfer_property:-0}" -ne 1 ] &&
+			[ -z "${g_option_o_override_property:-}" ]; }; then
 		g_zxfer_source_property_tree_prefetch_root=""
 		g_zxfer_source_property_tree_prefetch_zfs_cmd=""
 		g_zxfer_source_property_tree_prefetch_state=0
