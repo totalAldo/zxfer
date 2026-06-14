@@ -179,32 +179,6 @@ zxfer_remove_sources() {
 	g_zxfer_new_rmvs_pv=${g_zxfer_new_rmvs_pv%,}
 }
 
-# Purpose: Remove one literal property name from a comma-separated property-name
-# list.
-# Usage: Called during property filtering when a matched property should be
-# removed from a remaining worklist without treating the property name as a
-# regular expression.
-zxfer_remove_property_name_from_list() {
-	l_property_name_list=$1
-	l_property_name_to_remove=$2
-	l_filtered_property_name_list=""
-
-	l_oldifs=$IFS
-	IFS=","
-	for l_property_name in $l_property_name_list; do
-		[ -n "$l_property_name" ] || continue
-		[ "$l_property_name" = "$l_property_name_to_remove" ] && continue
-		if [ -n "$l_filtered_property_name_list" ]; then
-			l_filtered_property_name_list="$l_filtered_property_name_list,$l_property_name"
-		else
-			l_filtered_property_name_list=$l_property_name
-		fi
-	done
-	IFS=$l_oldifs
-
-	printf '%s\n' "$l_filtered_property_name_list"
-}
-
 # Purpose: Remove the properties from the current working set while preserving
 # the module's special-case rules.
 # Usage: Called during property filtering, diffing, and apply when filtering
@@ -233,7 +207,20 @@ zxfer_remove_properties() {
 				l_found_readonly=1
 				# Since the property was matched, remove it from the remaining
 				# filter list so later iterations do not rescan it unnecessarily.
-				l_remove_list=$(zxfer_remove_property_name_from_list "$l_remove_list" "$l_property")
+				l_filtered_remove_list=""
+				l_filter_oldifs=$IFS
+				IFS=","
+				for l_filter_property in $l_remove_list; do
+					[ -n "$l_filter_property" ] || continue
+					[ "$l_filter_property" = "$l_property" ] && continue
+					if [ -n "$l_filtered_remove_list" ]; then
+						l_filtered_remove_list="$l_filtered_remove_list,$l_filter_property"
+					else
+						l_filtered_remove_list=$l_filter_property
+					fi
+				done
+				IFS=$l_filter_oldifs
+				l_remove_list=$l_filtered_remove_list
 				break
 			fi
 		done
@@ -1191,29 +1178,6 @@ zxfer_property_list_has_entries() {
 	return "$l_has_entries"
 }
 
-# Purpose: Report whether a property=value=source list contains explicit
-# override entries.
-# Usage: Called during destination create planning before zxfer decides whether
-# parent properties need to be inspected for child inheritance cleanup.
-zxfer_property_list_has_override_sources() {
-	l_property_list=$1
-
-	l_override_sources_status=1
-	l_override_sources_oldifs=$IFS
-	IFS=","
-	for l_property_entry in $l_property_list; do
-		case "$l_property_entry" in
-		*=override)
-			l_override_sources_status=0
-			break
-			;;
-		esac
-	done
-	IFS=$l_override_sources_oldifs
-
-	return "$l_override_sources_status"
-}
-
 # Purpose: Remove child create overrides that the parent already supplies.
 # Usage: Called during destination create planning so recursive -o overrides
 # for inheritable properties can remain inherited on descendants when the
@@ -1319,8 +1283,19 @@ zxfer_ensure_destination_exists() {
 		l_property_list="$g_zxfer_new_rmvs_pv"
 	else
 		l_filtered_creation=$(zxfer_sanitize_property_list "$l_creation_pvs" "$l_readonly_properties" "$g_option_I_ignore_properties")
-		if [ "$l_parent_exists" = "1" ] &&
-			zxfer_property_list_has_override_sources "$l_filtered_creation"; then
+		l_child_creation_has_override_sources=1
+		l_override_sources_oldifs=$IFS
+		IFS=","
+		for l_property_entry in $l_filtered_creation; do
+			case "$l_property_entry" in
+			*=override)
+				l_child_creation_has_override_sources=0
+				break
+				;;
+			esac
+		done
+		IFS=$l_override_sources_oldifs
+		if [ "$l_parent_exists" = "1" ] && [ "$l_child_creation_has_override_sources" -eq 0 ]; then
 			zxfer_create_property_reconcile_stage_file ||
 				zxfer_throw_error "Failed to allocate parent destination property staging for child override inheritance." "$?"
 			l_parent_dest_tmp=$g_zxfer_property_reconcile_stage_file_result
