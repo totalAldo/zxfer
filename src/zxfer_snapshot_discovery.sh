@@ -2365,18 +2365,11 @@ zxfer_try_fast_recursive_noop_discovery() {
 			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$l_list_status"
 		fi
 	fi
-	if [ "$l_normalize_status" -ne 0 ]; then
+	for l_status in "$l_normalize_status" "$l_dest_stream_status" "$l_destination_snapshot_wait_status"; do
+		[ "$l_status" -eq 0 ] && continue
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
-		return "$l_normalize_status"
-	fi
-	if [ "$l_dest_stream_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
-		return "$l_dest_stream_status"
-	fi
-	if [ "$l_destination_snapshot_wait_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
-		return "$l_destination_snapshot_wait_status"
-	fi
+		return "$l_status"
+	done
 
 	if [ "$l_source_snapshot_wait_status" -ne 0 ]; then
 		if [ -n "${g_source_snapshot_list_cmd:-}" ]; then
