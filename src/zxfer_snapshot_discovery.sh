@@ -88,9 +88,6 @@ zxfer_reset_snapshot_discovery_state() {
 	g_zxfer_destination_discovery_batch_pool_status=""
 	g_zxfer_destination_discovery_batch_snapshot_status=""
 	g_zxfer_destination_discovery_batch_snapshot_ran=""
-	g_zxfer_fast_noop_source_fifo_result=""
-	g_zxfer_fast_noop_destination_fifo_result=""
-	g_zxfer_fast_noop_fifo_dir_result=""
 	g_lzfs_list_hr_snap=""
 	g_lzfs_list_hr_S_snap=""
 	g_rzfs_list_hr_snap=""
@@ -1602,47 +1599,10 @@ zxfer_write_destination_snapshot_list_to_files() {
 		return "$?"
 }
 
-# Purpose: Create the private FIFO pair used by the recursive no-op proof.
-# Usage: Called only by zxfer_try_fast_recursive_noop_discovery so source and
-# destination identity-sorted streams can be compared without materializing both
-# final sorted lists on local disk.
-# Side effects: Publishes FIFO paths in g_zxfer_fast_noop_source_fifo_result,
-# g_zxfer_fast_noop_destination_fifo_result, and
-# g_zxfer_fast_noop_fifo_dir_result.
-zxfer_create_fast_noop_fifo_pair() {
-	g_zxfer_fast_noop_source_fifo_result=""
-	g_zxfer_fast_noop_destination_fifo_result=""
-	g_zxfer_fast_noop_fifo_dir_result=""
-
-	l_temp_prefix="${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}.fast-noop"
-	zxfer_create_private_temp_dir "$l_temp_prefix" >/dev/null || return 1
-	l_fifo_dir=$g_zxfer_runtime_artifact_path_result
-	l_source_fifo=$l_fifo_dir/source
-	l_destination_fifo=$l_fifo_dir/destination
-
-	l_old_umask=$(umask)
-	umask 077
-	if ! mkfifo "$l_source_fifo" "$l_destination_fifo"; then
-		umask "$l_old_umask"
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
-		return 1
-	fi
-	umask "$l_old_umask"
-	if ! chmod 600 "$l_source_fifo" "$l_destination_fifo"; then
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
-		return 1
-	fi
-
-	g_zxfer_fast_noop_source_fifo_result=$l_source_fifo
-	g_zxfer_fast_noop_destination_fifo_result=$l_destination_fifo
-	g_zxfer_fast_noop_fifo_dir_result=$l_fifo_dir
-	return 0
-}
-
 # Purpose: Launch destination snapshot normalization and canonical sort into a
-# FIFO.
+# caller-provided output path.
 # Usage: Called by the recursive no-op proof after the matching source producer
-# is started, so cmp can read both identity-sorted streams directly.
+# is started, so the identity-sorted streams can be compared directly.
 # Side effects: Publishes the background helper pid in g_last_background_pid
 # and writes compact status sidecars supplied by the caller.
 zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
@@ -2251,7 +2211,6 @@ zxfer_try_fast_recursive_noop_discovery() {
 	g_source_snapshot_fast_noop_attempted=1
 	l_source_fifo=""
 	l_destination_fifo=""
-	l_fifo_dir=""
 	l_source_err_file=""
 	l_source_cmd_tmp_file=""
 	l_source_count_file=""
@@ -2259,12 +2218,15 @@ zxfer_try_fast_recursive_noop_discovery() {
 	l_dest_snapshot_status_file=""
 	l_dest_normalize_status_file=""
 	l_dest_stream_status_file=""
+	l_cmp_diff_file=""
 	l_source_name_list_uses_parallel=0
 	l_fast_stage_files=""
 
-	zxfer_create_temp_file_group 7 >/dev/null || return "$?"
+	zxfer_create_temp_file_group 9 >/dev/null || return "$?"
 	l_fast_stage_files=$g_zxfer_temp_file_group_result
 	{
+		IFS= read -r l_source_fifo
+		IFS= read -r l_destination_fifo
 		IFS= read -r l_source_err_file
 		IFS= read -r l_source_cmd_tmp_file
 		IFS= read -r l_source_count_file
@@ -2295,6 +2257,7 @@ zxfer_try_fast_recursive_noop_discovery() {
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		zxfer_throw_error "Staged source snapshot no-op proof command was empty."
 	fi
+	l_cmp_diff_file=$l_source_cmd_tmp_file
 	if [ "${g_source_snapshot_list_uses_parallel:-0}" -eq 1 ]; then
 		l_source_name_list_uses_parallel=1
 	fi
@@ -2307,19 +2270,11 @@ zxfer_try_fast_recursive_noop_discovery() {
 		zxfer_profile_record_ssh_invocation "$g_option_O_origin_host" source
 	fi
 
-	zxfer_create_fast_noop_fifo_pair || {
-		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
-		zxfer_reset_destination_existence_cache
-		return 1
-	}
-	l_source_fifo=$g_zxfer_fast_noop_source_fifo_result
-	l_destination_fifo=$g_zxfer_fast_noop_destination_fifo_result
-	l_fifo_dir=$g_zxfer_fast_noop_fifo_dir_result
-
+	# Stage into regular temp files. FIFO comparisons can strand a producer
+	# when the compare command exits or cannot open both streams.
 	zxfer_execute_source_snapshot_name_list_background_sort_cmd \
 		"$l_cmd" "$l_source_fifo" "$l_source_err_file" "$l_source_count_file" || {
 		l_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		return "$l_status"
 	}
@@ -2340,39 +2295,10 @@ zxfer_try_fast_recursive_noop_discovery() {
 		wait "$l_source_snapshot_pid" 2>/dev/null || :
 		zxfer_unregister_cleanup_pid "$l_source_snapshot_pid"
 		g_last_background_pid=""
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		return "$l_status"
 	}
 	l_destination_snapshot_pid=$g_last_background_pid
-
-	l_snapshot_diff_sort_stage_start_ms=""
-	if zxfer_profile_metrics_enabled; then
-		l_snapshot_diff_sort_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	fi
-	l_cmp_status=0
-	cmp -s "$l_source_fifo" "$l_destination_fifo" ||
-		l_cmp_status=$?
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms "$l_snapshot_diff_sort_stage_start_ms"
-
-	if [ "$l_cmp_status" -ne 0 ]; then
-		zxfer_abort_fast_noop_background_pid "$l_source_snapshot_pid" "background source snapshot no-op proof helper"
-		zxfer_abort_fast_noop_background_pid "$l_destination_snapshot_pid" "background destination snapshot no-op proof helper"
-		wait "$l_source_snapshot_pid" 2>/dev/null || :
-		wait "$l_destination_snapshot_pid" 2>/dev/null || :
-		zxfer_unregister_cleanup_pid "$l_source_snapshot_pid"
-		zxfer_unregister_cleanup_pid "$l_destination_snapshot_pid"
-		g_last_background_pid=""
-		zxfer_profile_add_elapsed_ms g_zxfer_profile_source_snapshot_listing_ms "$l_source_snapshot_stage_start_ms"
-		zxfer_profile_add_elapsed_ms g_zxfer_profile_destination_snapshot_listing_ms "$l_destination_snapshot_stage_start_ms"
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
-		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
-		if [ "$l_cmp_status" -eq 1 ]; then
-			zxfer_reset_destination_existence_cache
-			return 1
-		fi
-		zxfer_throw_error "Failed to compare source and destination snapshots for recursive no-op proof." "$l_cmp_status"
-	fi
 
 	l_source_snapshot_wait_status=0
 	wait "$l_source_snapshot_pid" || l_source_snapshot_wait_status=$?
@@ -2383,6 +2309,29 @@ zxfer_try_fast_recursive_noop_discovery() {
 	zxfer_unregister_cleanup_pid "$l_destination_snapshot_pid"
 	g_last_background_pid=""
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_destination_snapshot_listing_ms "$l_destination_snapshot_stage_start_ms"
+
+	l_snapshot_diff_sort_stage_start_ms=""
+	if zxfer_profile_metrics_enabled; then
+		l_snapshot_diff_sort_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	fi
+	l_cmp_status=0
+	if LC_ALL=C comm -3 "$l_source_fifo" "$l_destination_fifo" >"$l_cmp_diff_file"; then
+		if [ -s "$l_cmp_diff_file" ]; then
+			l_cmp_status=1
+		fi
+	else
+		l_cmp_status=$?
+	fi
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms "$l_snapshot_diff_sort_stage_start_ms"
+
+	if [ "$l_cmp_status" -ne 0 ]; then
+		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
+		if [ "$l_cmp_status" -eq 1 ]; then
+			zxfer_reset_destination_existence_cache
+			return 1
+		fi
+		zxfer_throw_error "Failed to compare source and destination snapshots for recursive no-op proof." "$l_cmp_status"
+	fi
 
 	l_destination_status_read_status=0
 	zxfer_read_snapshot_discovery_status_file "$l_dest_snapshot_status_file" 1 ||
@@ -2395,7 +2344,6 @@ zxfer_try_fast_recursive_noop_discovery() {
 		l_destination_status_read_status=$?
 	l_dest_stream_status=$g_zxfer_snapshot_discovery_status_file_result
 	if [ "$l_destination_status_read_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		zxfer_throw_error "Failed to validate destination snapshot status for recursive no-op proof." "$l_destination_status_read_status"
 	fi
@@ -2403,7 +2351,6 @@ zxfer_try_fast_recursive_noop_discovery() {
 	if [ "$l_list_status" -ne 0 ]; then
 		zxfer_read_snapshot_discovery_capture_file "$l_dest_snapshot_err_file" || {
 			l_read_status=$?
-			zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 			zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 			zxfer_throw_error "Failed to read staged destination snapshot stderr." "$l_read_status"
 		}
@@ -2414,23 +2361,19 @@ zxfer_try_fast_recursive_noop_discovery() {
 			if [ -n "$l_dest_snapshot_err" ]; then
 				printf '%s\n' "$l_dest_snapshot_err" >&2
 			fi
-			zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 			zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$l_list_status"
 		fi
 	fi
 	if [ "$l_normalize_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		return "$l_normalize_status"
 	fi
 	if [ "$l_dest_stream_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		return "$l_dest_stream_status"
 	fi
 	if [ "$l_destination_snapshot_wait_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		return "$l_destination_snapshot_wait_status"
 	fi
@@ -2441,14 +2384,12 @@ zxfer_try_fast_recursive_noop_discovery() {
 		fi
 		zxfer_read_snapshot_discovery_capture_file "$l_source_err_file" || {
 			l_source_stderr_read_status=$?
-			zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 			zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 			zxfer_throw_error "Failed to read staged source snapshot stderr." "$l_source_stderr_read_status"
 		}
 		l_source_snapshot_err=$g_zxfer_snapshot_discovery_file_read_result
 		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
 			"$l_source_snapshot_err" 10)
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		if [ "$l_source_snapshot_err" != "" ]; then
 			zxfer_throw_error "Failed to retrieve snapshots from the source: $l_source_snapshot_err" "$l_source_snapshot_wait_status"
@@ -2461,7 +2402,6 @@ zxfer_try_fast_recursive_noop_discovery() {
 		l_source_count_status=$?
 	l_source_snapshot_count=$g_zxfer_snapshot_discovery_status_file_result
 	if [ "$l_source_count_status" -ne 0 ] || [ "$l_source_snapshot_count" -ne 1 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		if [ -n "${g_option_x_exclude_datasets:-}" ]; then
 			zxfer_reset_destination_existence_cache
@@ -2472,7 +2412,6 @@ zxfer_try_fast_recursive_noop_discovery() {
 
 	if [ "$l_missing_destination" -eq 1 ]; then
 		zxfer_echoV "Destination dataset does not exist: $(zxfer_get_destination_snapshot_root_dataset)"
-		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 		zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 		zxfer_reset_destination_existence_cache
 		return 1
@@ -2485,7 +2424,6 @@ zxfer_try_fast_recursive_noop_discovery() {
 	g_lzfs_list_hr_snap=""
 	g_lzfs_list_hr_S_snap=""
 	g_rzfs_list_hr_snap=""
-	zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 	zxfer_cleanup_runtime_artifact_path_list "$l_fast_stage_files"
 	zxfer_echov "No new snapshots to transfer."
 	return 0

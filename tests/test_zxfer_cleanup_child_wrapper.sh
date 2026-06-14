@@ -128,6 +128,19 @@ test_cleanup_child_wrapper_main_preserves_worker_exit_status() {
 		7 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
+test_cleanup_child_wrapper_main_uses_absolute_shell_with_restricted_path() {
+	no_sh_path="$TEST_TMPDIR/no-sh-path"
+	mkdir -p "$no_sh_path"
+
+	zxfer_test_capture_subshell \
+		"PATH='$no_sh_path' /bin/sh '$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh' 'printf \"%s\\n\" wrapped'"
+
+	assertEquals "Cleanup child wrapper should not depend on PATH to launch the command shell." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Cleanup child wrapper should still run shell builtins through /bin/sh." \
+		"wrapped" "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
 test_cleanup_child_wrapper_main_preserves_worker_stdin_for_background_children() {
 	stdin_capture="$TEST_TMPDIR/cleanup_child_wrapper.stdin"
 	stdin_worker="$TEST_TMPDIR/cleanup_child_wrapper_stdin_worker.sh"

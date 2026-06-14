@@ -214,13 +214,13 @@ different GUID cannot be treated as a clean match. For eligible `-R` runs —
 local sources and `-O` pulls alike — with a local destination and no snapshot
 creation, property, migration, restore, backup, or target-host work, zxfer
 first tries a fast no-op proof. That proof compares one recursive source
-`name,guid` stream with one normalized destination `name,guid` stream through
-private FIFOs and falls back to full discovery when the streams differ or the
-destination is missing; a proven clean no-op skips the creation-order source
-listing and the destination existence check entirely. `-U` and `-g` can remain
-enabled on this proof path because exact no-op discovery leaves no source
-transfer queue, destination delete queue, or property/create work to consume
-those checks.
+`name,guid` stream with one normalized destination `name,guid` stream staged
+under the per-run temp root and falls back to full discovery when the streams
+differ or the destination is missing; a proven clean no-op skips the
+creation-order source listing and the destination existence check entirely.
+`-U` and `-g` can remain enabled on this proof path because exact no-op
+discovery leaves no source transfer queue, destination delete queue, or
+property/create work to consume those checks.
 
 When a destination snapshot shares a source snapshot's name but carries a
 different GUID, the destination has diverged under identical names and

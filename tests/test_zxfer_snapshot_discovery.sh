@@ -2996,49 +2996,9 @@ test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing
 backup/dst@snap1" "$(cat "$norm_file")"
 }
 
-test_create_fast_noop_fifo_pair_creates_private_fifos_and_reports_failures() {
-	zxfer_create_fast_noop_fifo_pair
-	status=$?
-	source_fifo=$g_zxfer_fast_noop_source_fifo_result
-	destination_fifo=$g_zxfer_fast_noop_destination_fifo_result
-	fifo_dir=$g_zxfer_fast_noop_fifo_dir_result
-
-	mkfifo_status=$(
-		(
-			mkfifo() {
-				return 1
-			}
-			set +e
-			zxfer_create_fast_noop_fifo_pair
-			printf '%s\n' "$?"
-		)
-	)
-	chmod_status=$(
-		(
-			chmod() {
-				return 1
-			}
-			set +e
-			zxfer_create_fast_noop_fifo_pair
-			printf '%s\n' "$?"
-		)
-	)
-
-	assertEquals "Fast no-op FIFO setup should succeed." 0 "$status"
-	assertTrue "Fast no-op source FIFO should be a FIFO." "[ -p '$source_fifo' ]"
-	assertTrue "Fast no-op destination FIFO should be a FIFO." "[ -p '$destination_fifo' ]"
-	assertTrue "Fast no-op FIFO directory should exist until cleanup." "[ -d '$fifo_dir' ]"
-	assertEquals "Fast no-op FIFO setup should fall back when mkfifo fails." \
-		1 "$mkfifo_status"
-	assertEquals "Fast no-op FIFO setup should fall back when chmod fails." \
-		1 "$chmod_status"
-	zxfer_cleanup_runtime_artifact_path "$fifo_dir"
-}
-
 test_start_destination_snapshot_name_sorted_fifo_producer_streams_statuses_and_handles_registration_failures() {
-	zxfer_create_fast_noop_fifo_pair || fail "fifo setup failed"
-	fifo_dir=$g_zxfer_fast_noop_fifo_dir_result
-	destination_fifo=$g_zxfer_fast_noop_destination_fifo_result
+	zxfer_get_temp_file >/dev/null || fail "temp output setup failed"
+	destination_output=$g_zxfer_temp_file_result
 	stage_files=$(printf '%s\n%s\n%s\n%s\n' \
 		"$TEST_TMPDIR/dest_fifo.err" \
 		"$TEST_TMPDIR/dest_fifo.list.status" \
@@ -3052,7 +3012,6 @@ test_start_destination_snapshot_name_sorted_fifo_producer_streams_statuses_and_h
 	} <<-EOF
 		$stage_files
 	EOF
-	output_file="$TEST_TMPDIR/dest_fifo.sorted"
 
 	zxfer_run_destination_zfs_cmd() {
 		printf '%s\n' "$*" >"$TEST_TMPDIR/dest_fifo.cmd"
@@ -3062,22 +3021,17 @@ test_start_destination_snapshot_name_sorted_fifo_producer_streams_statuses_and_h
 	# Run very-verbose so the lazily gated display render path is exercised.
 	g_option_V_very_verbose=1
 	zxfer_start_destination_snapshot_name_sorted_fifo_producer \
-		"$destination_fifo" "$err_file" "$list_status_file" "$normalize_status_file" "$sort_status_file" 2>/dev/null
+		"$destination_output" "$err_file" "$list_status_file" "$normalize_status_file" "$sort_status_file" 2>/dev/null
 	g_option_V_very_verbose=0
 	producer_pid=$g_last_background_pid
-	cat "$destination_fifo" >"$output_file" &
-	reader_pid=$!
 	wait "$producer_pid"
 	producer_status=$?
 	zxfer_unregister_cleanup_pid "$producer_pid"
-	wait "$reader_pid"
-	reader_status=$?
 
 	registration_status=$(
 		(
-			zxfer_create_fast_noop_fifo_pair || exit 1
-			test_fifo=$g_zxfer_fast_noop_destination_fifo_result
-			test_fifo_dir=$g_zxfer_fast_noop_fifo_dir_result
+			zxfer_get_temp_file >/dev/null || exit 1
+			test_output=$g_zxfer_temp_file_result
 			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' "backup/dst/src@snapA"
 			}
@@ -3090,23 +3044,21 @@ test_start_destination_snapshot_name_sorted_fifo_producer_streams_statuses_and_h
 			}
 			set +e
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer \
-				"$test_fifo" \
+				"$test_output" \
 				"$TEST_TMPDIR/dest_fifo_registration.err" \
 				"$TEST_TMPDIR/dest_fifo_registration.list.status" \
 				"$TEST_TMPDIR/dest_fifo_registration.normalize.status" \
 				"$TEST_TMPDIR/dest_fifo_registration.sort.status"
 			printf '%s\n' "$?"
-			zxfer_cleanup_runtime_artifact_path "$test_fifo_dir"
 		)
 	)
 
-	assertEquals "Destination FIFO producer should complete successfully." 0 "$producer_status"
-	assertEquals "Destination FIFO reader should complete successfully." 0 "$reader_status"
+	assertEquals "Destination snapshot producer should complete successfully." 0 "$producer_status"
 	assertContains "Destination FIFO producer should keep the identity-aware unsorted snapshot query." \
 		"$(cat "$TEST_TMPDIR/dest_fifo.cmd")" "list -Hr -o name,guid -t snapshot backup/dst/src"
 	assertEquals "Destination FIFO producer should normalize and byte-sort destination paths." \
 		"tank/src/child@snapB
-tank/src@snapA" "$(cat "$output_file")"
+tank/src@snapA" "$(cat "$destination_output")"
 	assertEquals "Destination FIFO producer should record the list status." \
 		0 "$(cat "$list_status_file")"
 	assertEquals "Destination FIFO producer should record the normalize status." \
@@ -3115,7 +3067,6 @@ tank/src@snapA" "$(cat "$output_file")"
 		0 "$(cat "$sort_status_file")"
 	assertEquals "Destination FIFO producer should fail closed when cleanup registration fails." \
 		1 "$registration_status"
-	zxfer_cleanup_runtime_artifact_path "$fifo_dir"
 }
 
 test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
@@ -3124,6 +3075,17 @@ test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
 	log="$TEST_TMPDIR/fast_noop_abort.log"
 	: >"$log"
 
+	(
+		LOG_FILE="$log"
+		zxfer_unregister_cleanup_pid() {
+			printf 'unregister=%s\n' "$1" >>"$LOG_FILE"
+			return 0
+		}
+		(exit 0) &
+		dead_pid=$!
+		wait "$dead_pid" 2>/dev/null || :
+		zxfer_abort_fast_noop_background_pid "$dead_pid" "finished proof helper"
+	)
 	(
 		LOG_FILE="$log"
 		zxfer_abort_cleanup_pid() {
@@ -3141,6 +3103,8 @@ test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
 	)
 
 	assertEquals "Invalid fast no-op abort pids should be ignored." 0 "$invalid_status"
+	assertContains "Fast no-op abort should unregister helpers that already exited." \
+		"$(cat "$log")" "unregister="
 	assertContains "Fast no-op abort should try the registered cleanup helper first." \
 		"$(cat "$log")" "cleanup="
 	assertContains "Fast no-op abort should fall back to direct-child cleanup before plain kill." \
@@ -4872,6 +4836,33 @@ test_fast_recursive_noop_discovery_eligibility_gates() {
 	done
 }
 
+test_try_fast_recursive_noop_discovery_records_parallel_source_profile_counter() {
+	output=$(
+		(
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_R_recursive="tank/src"
+			g_option_V_very_verbose=1
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_source_snapshot_list_uses_parallel=1
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'guid-a'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapA" "guid-a")
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_try_fast_recursive_noop_discovery
+			printf 'commands=%s\n' "${g_zxfer_profile_source_snapshot_list_commands:-0}"
+			printf 'parallel=%s\n' "${g_zxfer_profile_source_snapshot_list_parallel_commands:-0}"
+		)
+	)
+
+	assertContains "Fast no-op proof should profile each source snapshot listing command." \
+		"$output" "commands=1"
+	assertContains "Fast no-op proof should profile source commands that already used parallel fanout." \
+		"$output" "parallel=1"
+}
+
 test_try_fast_recursive_noop_discovery_preserves_setup_failures() {
 	temp_status=$(
 		(
@@ -4928,21 +4919,6 @@ test_try_fast_recursive_noop_discovery_preserves_setup_failures() {
 			zxfer_try_fast_recursive_noop_discovery
 		)
 	) || empty_command_status=$?
-	fifo_status=$(
-		(
-			g_option_O_origin_host="origin.example"
-			g_option_R_recursive="tank/src"
-			zxfer_build_source_snapshot_name_list_cmd() {
-				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
-			}
-			zxfer_create_fast_noop_fifo_pair() {
-				return 47
-			}
-			set +e
-			zxfer_try_fast_recursive_noop_discovery
-			printf '%s\n' "$?"
-		)
-	)
 	execute_status=$(
 		(
 			g_option_O_origin_host="origin.example"
@@ -4994,8 +4970,6 @@ test_try_fast_recursive_noop_discovery_preserves_setup_failures() {
 		"$empty_command_output" "throw:Staged source snapshot no-op proof command was empty.:1"
 	assertEquals "Fast no-op proof should return failure when staged source command readback is empty." \
 		1 "$empty_command_status"
-	assertEquals "Fast no-op proof should fail closed when FIFO setup fails." \
-		1 "$fifo_status"
 	assertEquals "Fast no-op proof should preserve background source launch failures." \
 		44 "$execute_status"
 	assertEquals "Fast no-op proof should preserve destination discovery failures and abort the background source proof." \
@@ -5023,6 +4997,26 @@ test_try_fast_recursive_noop_discovery_reports_source_failures() {
 			zxfer_try_fast_recursive_noop_discovery
 		) 2>&1
 	) || source_error_status=$?
+	empty_source_error_status=0
+	empty_source_error_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "sh -c 'exit 17'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=""
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		) 2>&1
+	) || empty_source_error_status=$?
 	empty_source_status=0
 	empty_source_output=$(
 		(
@@ -5077,6 +5071,10 @@ test_try_fast_recursive_noop_discovery_reports_source_failures() {
 		"$source_error_output" "throw:Failed to retrieve snapshots from the source: denied:17"
 	assertEquals "Fast no-op proof should return the source command status when source discovery fails." \
 		17 "$source_error_status"
+	assertContains "Fast no-op proof should use the generic source failure when the failed command has no stderr." \
+		"$empty_source_error_output" "throw:Failed to retrieve snapshots from the source:17"
+	assertEquals "Fast no-op proof should preserve source command status when stderr is empty." \
+		17 "$empty_source_error_status"
 	assertContains "Fast no-op proof should fail closed when the identity-aware source discovery returns no snapshots." \
 		"$empty_source_output" "throw:Failed to retrieve snapshots from the source:1"
 	assertEquals "Fast no-op proof should return failure for an empty source snapshot list." \
@@ -5322,15 +5320,6 @@ test_try_fast_recursive_noop_discovery_reports_compare_failures() {
 	compare_status=0
 	compare_output=$(
 		(
-			fakebin="$TEST_TMPDIR/fast-noop-compare-fakebin"
-			mkdir -p "$fakebin" || exit 1
-			{
-				printf '%s\n' '#!/bin/sh'
-				printf '%s\n' 'exit 2'
-			} >"$fakebin/cmp" || exit 1
-			chmod +x "$fakebin/cmp" || exit 1
-			PATH="$fakebin:$PATH"
-
 			g_option_O_origin_host="origin.example"
 			g_option_R_recursive="tank/src"
 			zxfer_build_source_snapshot_name_list_cmd() {
@@ -5339,6 +5328,13 @@ test_try_fast_recursive_noop_discovery_reports_compare_failures() {
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
 				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			comm() {
+				cat "$2" >/dev/null &
+				l_left_cat_pid=$!
+				cat "$3" >/dev/null
+				wait "$l_left_cat_pid" 2>/dev/null || :
+				return 2
 			}
 			zxfer_throw_error() {
 				printf 'throw:%s:%s\n' "$1" "${2:-1}"

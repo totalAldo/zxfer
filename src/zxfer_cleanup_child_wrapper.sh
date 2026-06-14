@@ -99,7 +99,7 @@ zxfer_cleanup_child_wrapper_main() {
 	# Preserve the wrapper's stdin for background children. Some /bin/sh
 	# implementations reattach asynchronous jobs to /dev/null unless stdin is
 	# duplicated onto a dedicated descriptor before the background launch.
-	sh -c "$l_cleanup_wrapper_exec_cmd" <&3 &
+	/bin/sh -c "$l_cleanup_wrapper_exec_cmd" <&3 &
 	l_cleanup_wrapper_child_pid=$!
 	l_cleanup_wrapper_status=0
 	wait "$l_cleanup_wrapper_child_pid" || l_cleanup_wrapper_status=$?

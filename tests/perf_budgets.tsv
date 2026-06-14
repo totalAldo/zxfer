@@ -40,15 +40,16 @@
 #
 # Re-ratcheted 2026-06-12 after Phase 8 (fast recursive no-op proof widened to
 # local sources): the clean -V no-op now takes the proof path -- TOTAL 43->30,
-# sed 9->3, awk 10->4, runtime_artifact_files_created 14->9, zfs_list_calls
-# 1->0 (the proof's two identity listings run inside rendered background
-# pipelines, outside the parent-shell counters). Two rows rise for structural,
-# documented reasons -- this is the proof path's shape, not rebloat:
-#   runtime_artifact_dirs_created 0->1   the proof's one private FIFO pair dir
-#   command_render_calls          0->1   the proof renders its source listing
-#                                        command in the parent shell (the full
-#                                        path rendered it inside a command
-#                                        substitution, invisible to counters)
+# sed 9->3, awk 10->4, zfs_list_calls 1->0 (the proof's two identity listings
+# run inside rendered background pipelines, outside the parent-shell counters).
+# command_render_calls rises 0->1 because the proof renders its source listing
+# command in the parent shell; the full path rendered it inside a command
+# substitution, invisible to counters.
+#
+# Re-ratcheted 2026-06-13 after replacing the proof's private FIFO pair with
+# regular files under the existing per-run temp root:
+# runtime_artifact_dirs_created 1->0. The file-artifact budget stays at 11 for
+# the staged source/destination identity streams and existing status sidecars.
 # dryrun_incr rows are unchanged. Values stay identical across fixture sizes.
 noop	TOTAL	35
 noop	sed	4
@@ -61,7 +62,7 @@ noop	mktemp	2
 noop	tr	0
 noop	profile:command_render_calls	1
 noop	profile:runtime_artifact_files_created	11
-noop	profile:runtime_artifact_dirs_created	1
+noop	profile:runtime_artifact_dirs_created	0
 noop	profile:runtime_cache_object_writes	0
 noop	profile:runtime_cache_object_readbacks	0
 noop	profile:zfs_list_calls	0
@@ -101,7 +102,7 @@ noop_small	mktemp	2
 noop_small	tr	0
 noop_small	profile:command_render_calls	1
 noop_small	profile:runtime_artifact_files_created	11
-noop_small	profile:runtime_artifact_dirs_created	1
+noop_small	profile:runtime_artifact_dirs_created	0
 noop_small	profile:runtime_cache_object_writes	0
 noop_small	profile:runtime_cache_object_readbacks	0
 noop_small	profile:zfs_list_calls	0

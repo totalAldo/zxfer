@@ -252,14 +252,15 @@ absent, and snapshot creation, migration, property transfer or restore,
 backup metadata, and property overrides must be inactive.
 The proof starts one recursive source `name,guid` producer even when `-j` is
 configured, starts one normalized destination `name,guid` producer, sorts both
-streams through private FIFOs, and uses `cmp -s` to prove equality. `-U`
-unsupported-property filtering and `-g` grandfather protection can remain
-enabled because a proven no-op leaves no source transfer queue, destination
-delete queue, or property/create work to consume those checks. A mismatch,
-missing destination, excluded-dataset uncertainty, or stream failure falls back
-to full discovery or fails through the same staged stderr paths used by the
-normal discovery flow. A proven clean no-op never runs the destination
-existence check or the creation-order source listing at all.
+streams into regular files under the per-run temp root, and treats a non-empty
+`comm -3` diff as a mismatch. `-U` unsupported-property filtering and `-g`
+grandfather protection can remain enabled because a proven no-op leaves no
+source transfer queue, destination delete queue, or property/create work to
+consume those checks. A mismatch, missing destination, excluded-dataset
+uncertainty, or stream failure falls back to full discovery or fails through the
+same staged stderr paths used by the normal discovery flow. A proven clean no-op
+never runs the destination existence check or the creation-order source listing
+at all.
 
 Remote target discovery has a separate `-T` optimization in
 `zxfer_run_remote_destination_discovery_batch_to_files()`. The target-side
@@ -280,8 +281,8 @@ flowchart TD
     A["zxfer_get_zfs_list()"] --> B{"Fast recursive no-op proof eligible?"}
     B -- "yes" --> C["Start one source name,guid snapshot producer"]
     C --> D["Start normalized destination name,guid snapshot producer"]
-    D --> E["Sort both streams through private FIFOs"]
-    E --> F{"cmp -s proves identical identity records?"}
+    D --> E["Sort both streams into per-run temp files"]
+    E --> F{"comm -3 finds no identity diff?"}
     F -- "yes" --> G["Return clean no-op before full discovery"]
     F -- "no or uncertain" --> H["Fall back to full snapshot discovery"]
     B -- "no" --> H
