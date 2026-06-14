@@ -1280,6 +1280,48 @@ zxfer_throw_remote_backup_capture_error() {
 	zxfer_throw_error "Failed to reload local remote helper capture while $l_action on host $l_host."
 }
 
+# Purpose: Raise remote backup write statuses through the shared backup
+# metadata reporting paths.
+# Usage: Called after single-file and pair remote metadata write helpers
+# return so both flows preserve the same stderr text and failure classes.
+zxfer_throw_remote_backup_write_status() {
+	l_remote_write_status=$1
+	l_remote_dependency_status=$2
+	l_remote_write_failure_status=$3
+	l_remote_rollback_failure_status=$4
+	l_host=$5
+	l_action=$6
+	l_dependency_path=$7
+
+	if [ "${g_zxfer_remote_probe_capture_failed:-0}" -eq 1 ]; then
+		zxfer_throw_remote_backup_capture_error "$l_host" "$l_action"
+	fi
+	if [ "$l_remote_write_status" -eq "$l_remote_dependency_status" ]; then
+		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
+			zxfer_emit_remote_probe_failure_message >&2
+		fi
+		g_zxfer_failure_class=dependency
+		zxfer_throw_error "Required remote backup-write helper dependency not found on host $l_host in secure PATH ($l_dependency_path). Review prior stderr for the missing tool name."
+	fi
+	if [ -n "$l_remote_rollback_failure_status" ] &&
+		[ "$l_remote_write_status" -eq "$l_remote_rollback_failure_status" ]; then
+		zxfer_throw_backup_write_rollback_error
+	fi
+	if [ "$l_remote_write_status" -eq "$l_remote_write_failure_status" ]; then
+		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
+			zxfer_emit_remote_probe_failure_message >&2
+		fi
+		zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
+	fi
+	if [ "$l_remote_write_status" -ne 0 ]; then
+		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
+			zxfer_throw_remote_backup_transport_error "$l_host" "$l_action"
+		fi
+		zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
+	fi
+	return 0
+}
+
 # Purpose: Run the remote backup helper with payload through the controlled
 # execution path owned by this module.
 # Usage: Called during backup-metadata capture, readback, and atomic publish
@@ -2067,28 +2109,10 @@ zxfer_write_backup_metadata_contents_to_store() {
 	else
 		l_remote_write_status=$?
 	fi
-	if [ "${g_zxfer_remote_probe_capture_failed:-0}" -eq 1 ]; then
-		zxfer_throw_remote_backup_capture_error "$g_option_T_target_host" "writing backup metadata $l_backup_file_path"
-	fi
-	if [ "$l_remote_write_status" -eq "$l_remote_dependency_status" ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		g_zxfer_failure_class=dependency
-		zxfer_throw_error "Required remote backup-write helper dependency not found on host $g_option_T_target_host in secure PATH ($l_dependency_path). Review prior stderr for the missing tool name."
-	fi
-	if [ "$l_remote_write_status" -eq "$l_remote_write_failure_status" ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
-	fi
-	if [ "$l_remote_write_status" -ne 0 ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_throw_remote_backup_transport_error "$g_option_T_target_host" "writing backup metadata $l_backup_file_path"
-		fi
-		zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
-	fi
+	zxfer_throw_remote_backup_write_status "$l_remote_write_status" \
+		"$l_remote_dependency_status" "$l_remote_write_failure_status" "" \
+		"$g_option_T_target_host" "writing backup metadata $l_backup_file_path" \
+		"$l_dependency_path"
 }
 
 # Purpose: Write the backup metadata pair contents to store in the normalized
@@ -2142,44 +2166,10 @@ zxfer_write_backup_metadata_pair_contents_to_store() {
 	else
 		l_remote_write_status=$?
 	fi
-	if [ "${g_zxfer_remote_probe_capture_failed:-0}" -eq 1 ]; then
-		zxfer_throw_remote_backup_capture_error "$g_option_T_target_host" "writing backup metadata $l_primary_backup_file_path"
-	fi
-	if [ "$l_remote_write_status" -eq "$l_remote_dependency_status" ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		g_zxfer_failure_class=dependency
-		zxfer_throw_error "Required remote backup-write helper dependency not found on host $g_option_T_target_host in secure PATH ($l_dependency_path). Review prior stderr for the missing tool name."
-	fi
-	if [ "$l_remote_write_status" -eq "$l_remote_rollback_failure_status" ]; then
-		zxfer_throw_backup_write_rollback_error
-	fi
-	if [ "$l_remote_write_status" -eq "$l_remote_write_failure_status" ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
-	fi
-	if [ "$l_remote_write_status" -ne 0 ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_throw_remote_backup_transport_error "$g_option_T_target_host" "writing backup metadata $l_primary_backup_file_path"
-		fi
-		zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
-	fi
-}
-
-# Purpose: Render the backup metadata pair payload command as a stable shell-
-# safe or operator-facing string.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when zxfer needs to display or transport the value without reparsing
-# it.
-zxfer_render_backup_metadata_pair_payload_command() {
-	l_primary_rendered_backup_contents=$1
-	l_forwarded_backup_contents=$2
-	l_pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
-
-	zxfer_render_command_for_report "" printf '%s\\n%s\\n%s\\n' "$l_primary_rendered_backup_contents" "$l_pair_split_line" "$l_forwarded_backup_contents"
+	zxfer_throw_remote_backup_write_status "$l_remote_write_status" \
+		"$l_remote_dependency_status" "$l_remote_write_failure_status" \
+		"$l_remote_rollback_failure_status" "$g_option_T_target_host" \
+		"writing backup metadata $l_primary_backup_file_path" "$l_dependency_path"
 }
 
 # Purpose: Render a remote backup write command as the ssh pipeline segment used
@@ -2288,7 +2278,8 @@ zxfer_write_backup_properties() {
 			if [ "$g_option_T_target_host" = "" ]; then
 				zxfer_render_local_backup_file_pair_write_command "$l_backup_file_parent" "$l_backup_file_path" "$l_rendered_backup_contents" "$l_forwarded_backup_file_parent" "$l_forwarded_backup_file_path" "$l_forwarded_backup_contents"
 			else
-				l_pair_backup_contents_cmd=$(zxfer_render_backup_metadata_pair_payload_command "$l_rendered_backup_contents" "$l_forwarded_backup_contents")
+				l_pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
+				l_pair_backup_contents_cmd=$(zxfer_render_command_for_report "" printf '%s\\n%s\\n%s\\n' "$l_rendered_backup_contents" "$l_pair_split_line" "$l_forwarded_backup_contents")
 				l_remote_pair_write_cmd=$(zxfer_build_remote_backup_pair_write_cmd "$l_backup_file_parent" "$l_backup_file_path" "$l_forwarded_backup_file_parent" "$l_forwarded_backup_file_path" "$g_option_T_target_host" 99)
 				zxfer_render_remote_backup_dry_run_shell_command "$g_option_T_target_host" "$l_remote_pair_write_cmd" ||
 					return "$?"
