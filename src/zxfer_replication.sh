@@ -1086,19 +1086,6 @@ zxfer_get_replication_background_send_job_limit() {
 	printf '%s\n' "$l_job_limit"
 }
 
-# Purpose: Check whether the dependency-aware replication ready queue should
-# gate dataset processing.
-# Usage: Called before selecting pending datasets so dry-run and single-job
-# executions keep the simple linear path.
-zxfer_replication_ready_queue_is_active() {
-	l_job_limit=$(zxfer_get_replication_background_send_job_limit)
-
-	[ "$l_job_limit" -gt 1 ] || return 1
-	[ "${g_option_n_dryrun:-0}" -eq 0 ] || return 1
-
-	return 0
-}
-
 # Purpose: Check whether another background send/receive job can be started.
 # Usage: Called by the replication ready queue before it spends work on a
 # dataset that may schedule a transfer.
@@ -1106,55 +1093,6 @@ zxfer_replication_background_send_has_capacity() {
 	l_job_limit=$(zxfer_get_replication_background_send_job_limit)
 
 	[ "${g_count_zfs_send_jobs:-0}" -lt "$l_job_limit" ]
-}
-
-# Purpose: Check whether one pending source can be processed without waiting
-# for active background receives.
-# Usage: Called by the replication ready queue so blocked descendants can be
-# deferred while unrelated datasets continue to fill available job slots.
-zxfer_replication_source_is_ready_to_process() {
-	l_source=$1
-
-	zxfer_replication_ready_queue_is_active || return 0
-	zxfer_replication_background_send_has_capacity || return 1
-	[ -n "${g_zfs_send_job_supervisor_records:-}" ] || return 0
-
-	l_candidate_dest=$(zxfer_compute_actual_dest_for_source "$l_source")
-	if zxfer_supervised_send_job_conflicts_with_destination "${g_option_T_target_host:-}" "$l_candidate_dest"; then
-		return 1
-	fi
-
-	return 0
-}
-
-# Purpose: Append one still-pending source to the next ready-queue pass.
-# Usage: Called while rebuilding the pending dataset list after a scheduler
-# scan defers blocked work.
-zxfer_append_replication_pending_source() {
-	l_pending_sources=$1
-	l_source=$2
-
-	if [ -n "$l_pending_sources" ]; then
-		printf '%s\n%s\n' "$l_pending_sources" "$l_source"
-	else
-		printf '%s\n' "$l_source"
-	fi
-}
-
-# Purpose: Wait until a pending replication source may become ready.
-# Usage: Called when every pending source is blocked by either the configured
-# job limit or destination ancestry conflicts.
-zxfer_wait_for_replication_ready_queue_progress() {
-	l_wait_reason="destination ancestry"
-
-	if ! zxfer_replication_background_send_has_capacity; then
-		l_wait_reason="job limit"
-	fi
-	if [ "${g_zfs_send_job_queue_open:-0}" -eq 1 ]; then
-		zxfer_wait_for_next_zfs_send_job_completion "$l_wait_reason"
-	else
-		zxfer_wait_for_zfs_send_jobs "$l_wait_reason"
-	fi
 }
 
 # Purpose: Process replication datasets through a dependency-aware ready queue.
@@ -1165,6 +1103,12 @@ zxfer_process_replication_ready_queue() {
 	l_pending_sources=$1
 	l_property_pass_required=$2
 	l_post_seed_property_sources_file=$3
+	l_ready_queue_active=0
+
+	l_job_limit=$(zxfer_get_replication_background_send_job_limit)
+	if [ "$l_job_limit" -gt 1 ] && [ "${g_option_n_dryrun:-0}" -eq 0 ]; then
+		l_ready_queue_active=1
+	fi
 
 	while [ -n "$l_pending_sources" ]; do
 		l_next_pending_sources=""
@@ -1172,12 +1116,28 @@ zxfer_process_replication_ready_queue() {
 
 		while IFS= read -r l_source || [ -n "$l_source" ]; do
 			[ -n "$l_source" ] || continue
-			if zxfer_replication_source_is_ready_to_process "$l_source"; then
+			l_source_is_ready=1
+			if [ "$l_ready_queue_active" -eq 1 ]; then
+				if ! zxfer_replication_background_send_has_capacity; then
+					l_source_is_ready=0
+				elif [ -n "${g_zfs_send_job_supervisor_records:-}" ]; then
+					l_candidate_dest=$(zxfer_compute_actual_dest_for_source "$l_source")
+					if zxfer_supervised_send_job_conflicts_with_destination "${g_option_T_target_host:-}" "$l_candidate_dest"; then
+						l_source_is_ready=0
+					fi
+				fi
+			fi
+			if [ "$l_source_is_ready" -eq 1 ]; then
 				zxfer_process_source_dataset "$l_source" "$l_property_pass_required" "$l_post_seed_property_sources_file"
 				l_processed_source=1
 				continue
 			fi
-			l_next_pending_sources=$(zxfer_append_replication_pending_source "$l_next_pending_sources" "$l_source")
+			if [ -n "$l_next_pending_sources" ]; then
+				l_next_pending_sources="$l_next_pending_sources
+$l_source"
+			else
+				l_next_pending_sources=$l_source
+			fi
 		done <<-EOF
 			$l_pending_sources
 		EOF
@@ -1187,7 +1147,15 @@ zxfer_process_replication_ready_queue() {
 		[ "$l_processed_source" -eq 1 ] && continue
 
 		if [ -n "${g_zfs_send_job_pids:-}" ]; then
-			zxfer_wait_for_replication_ready_queue_progress
+			l_wait_reason="destination ancestry"
+			if ! zxfer_replication_background_send_has_capacity; then
+				l_wait_reason="job limit"
+			fi
+			if [ "${g_zfs_send_job_queue_open:-0}" -eq 1 ]; then
+				zxfer_wait_for_next_zfs_send_job_completion "$l_wait_reason"
+			else
+				zxfer_wait_for_zfs_send_jobs "$l_wait_reason"
+			fi
 			continue
 		fi
 
