@@ -25,11 +25,10 @@ src/zxfer_backup_metadata.sh
   1110:	if (
   1113:	); then
   1189:				zxfer_remove_local_backup_metadata_path_if_present "$l_rollback_file" >/dev/null 2>&1 || :
-  1944:		return 1
-  1946:		return 1
-  2126:		return 0
-  2255:		zxfer_throw_error "Failed to derive backup metadata directory for $l_backup_file_path."
-  2268:		zxfer_throw_error "Failed to derive forwarded backup metadata directory for $l_forwarded_backup_file_path."
+  1986:		return 1
+  2150:		return 0
+  2220:		zxfer_throw_error "Failed to derive backup metadata directory for $l_backup_file_path."
+  2233:		zxfer_throw_error "Failed to derive forwarded backup metadata directory for $l_forwarded_backup_file_path."
 
 src/zxfer_exec.sh
   205:		l_split_restore_glob=0
@@ -40,41 +39,40 @@ src/zxfer_exec.sh
 
 src/zxfer_property_reconcile.sh
   82:		l_effective_readonly_properties=$(printf '%s' ",$l_effective_readonly_properties," |
-  198:			l_filtered_property_name_list="$l_filtered_property_name_list,$l_property_name"
-  376:					exit "$?"
-  413:			continue
-  513:		g_zxfer_source_pvs_effective=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
-  623:				l_validation_display_property="[unprintable]"
-  1105:			zxfer_throw_error "Failed to allocate source property staging for unsupported-property scan [$l_scan_source]." "$?"
-  1325:				zxfer_throw_error "Failed to allocate parent destination property staging for child override inheritance." "$?"
-  1328:				l_parent_dest_status=$?
-  1329:				zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
-  1330:				zxfer_throw_error "Failed to retrieve parent destination properties for [$l_parent_dataset]." "$l_parent_dest_status"
-  1333:				l_read_status=$?
-  1334:				zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
-  1335:				zxfer_throw_error "Failed to read parent destination properties for child override inheritance." "$l_read_status"
-  1341:				zxfer_throw_error "Failed to filter child creation override properties." "$?"
-  1361:				l_with_parents="yes"
-  1367:		zxfer_throw_error "Error when creating destination filesystem." "$?"
-  1487:			return "$?"
-  2099:			return "$l_dest_exist_status"
-  2239:		return "$l_property_transfer_create_status"
-  2394:	l_decoded_assignment=$("${g_cmd_awk:-awk}" \
-  2685:$l_strip_table
-  2686:EOF
-  2710:		return 0
-  2716:		l_invalidate_table=$(zxfer_property_table_strip_dataset_rows \
-  2725:		l_invalidate_required_table=$(zxfer_property_table_strip_dataset_rows \
-  2727:			l_strip_status=$?
-  2729:			l_invalidate_required_table=""
-  3125:			g_zxfer_source_property_table=$l_prefetched_table$l_nl$g_zxfer_source_property_table
-  3133:			g_zxfer_destination_property_table=$l_prefetched_table$l_nl$g_zxfer_destination_property_table
-  3166:	destination)
-  3178:	*)
-  3179:		return 1
-  3316:			g_zxfer_required_properties_result="Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
-  3317:			printf '%s\n' "$g_zxfer_required_properties_result"
-  3318:			return 1
+  217:						l_filtered_remove_list="$l_filtered_remove_list,$l_filter_property"
+  363:					exit "$?"
+  400:			continue
+  500:		g_zxfer_source_pvs_effective=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
+  610:				l_validation_display_property="[unprintable]"
+  1092:			zxfer_throw_error "Failed to allocate source property staging for unsupported-property scan [$l_scan_source]." "$?"
+  1300:				zxfer_throw_error "Failed to allocate parent destination property staging for child override inheritance." "$?"
+  1303:				l_parent_dest_status=$?
+  1304:				zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
+  1305:				zxfer_throw_error "Failed to retrieve parent destination properties for [$l_parent_dataset]." "$l_parent_dest_status"
+  1308:				l_read_status=$?
+  1309:				zxfer_cleanup_runtime_artifact_path "$l_parent_dest_tmp"
+  1310:				zxfer_throw_error "Failed to read parent destination properties for child override inheritance." "$l_read_status"
+  1316:				zxfer_throw_error "Failed to filter child creation override properties." "$?"
+  1336:				l_with_parents="yes"
+  1342:		zxfer_throw_error "Error when creating destination filesystem." "$?"
+  1462:			return "$?"
+  2074:			return "$l_dest_exist_status"
+  2214:		return "$l_property_transfer_create_status"
+  2369:	l_decoded_assignment=$("${g_cmd_awk:-awk}" \
+  2651:$l_strip_table
+  2652:EOF
+  2682:		l_invalidate_table=$(zxfer_property_table_strip_dataset_rows \
+  2691:		l_invalidate_required_table=$(zxfer_property_table_strip_dataset_rows \
+  2693:			l_strip_status=$?
+  2695:			l_invalidate_required_table=""
+  3091:			g_zxfer_source_property_table=$l_prefetched_table$l_nl$g_zxfer_source_property_table
+  3099:			g_zxfer_destination_property_table=$l_prefetched_table$l_nl$g_zxfer_destination_property_table
+  3132:	destination)
+  3144:	*)
+  3145:		return 1
+  3282:			g_zxfer_required_properties_result="Failed to parse required creation-time property [$l_required_property] for dataset [$l_dataset]: $l_explicit_probe_output"
+  3283:			printf '%s\n' "$g_zxfer_required_properties_result"
+  3284:			return 1
 
 src/zxfer_remote_hosts.sh
   128:	if ! l_socket_dir=$(zxfer_create_unpredictable_staging_entry \
@@ -96,29 +94,29 @@ src/zxfer_remote_hosts.sh
   1161:		return 1
   1191:	if l_cached_response=$(zxfer_get_cached_remote_capability_response_for_host \
   1228:	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
-  1278:		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
-  1281:	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
-  1364:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
-  1369:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
-  1389:		l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
-  1398:			if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
-  1400:				printf '%s\n' "$l_fallback_path"
-  1401:				return 0
-  1467:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
-  1477:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
-  1487:	l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
-  1550:			! zxfer_close_origin_ssh_control_socket; then
-  1551:			zxfer_throw_error "Error closing ssh control socket for origin host."
-  1566:		zxfer_throw_error "Error creating ssh control socket for $l_role host."
-  1584:			rm -f "$l_control_socket"
-  1618:		return 1
-  1687:		return
-  1695:		if ! zxfer_ensure_local_ssh_command; then
-  1696:			g_zxfer_failure_class=dependency
-  1697:			zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
-  1748:			zxfer_throw_usage_error "$g_option_T_target_host_safe" 2
-  1785:				g_zxfer_failure_class=dependency
-  1786:				zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
+  1276:		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+  1279:	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
+  1362:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+  1367:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
+  1387:		l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
+  1396:			if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
+  1398:				printf '%s\n' "$l_fallback_path"
+  1399:				return 0
+  1465:	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+  1475:	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
+  1485:	l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
+  1548:			! zxfer_close_origin_ssh_control_socket; then
+  1549:			zxfer_throw_error "Error closing ssh control socket for origin host."
+  1564:		zxfer_throw_error "Error creating ssh control socket for $l_role host."
+  1582:			rm -f "$l_control_socket"
+  1616:		return 1
+  1685:		return
+  1693:		if ! zxfer_ensure_local_ssh_command; then
+  1694:			g_zxfer_failure_class=dependency
+  1695:			zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
+  1746:			zxfer_throw_usage_error "$g_option_T_target_host_safe" 2
+  1783:				g_zxfer_failure_class=dependency
+  1784:				zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
 
 src/zxfer_replication.sh
   183:		return 0
@@ -134,13 +132,13 @@ src/zxfer_replication.sh
   817:		return 0
   824:		return 0
   1083:	'' | *[!0-9]*) l_job_limit=1 ;;
-  1138:		printf '%s\n%s\n' "$l_pending_sources" "$l_source"
-  1151:		l_wait_reason="job limit"
-  1156:		zxfer_wait_for_zfs_send_jobs "$l_wait_reason"
-  1194:		zxfer_throw_error "Failed to select a ready replication dataset while no send/receive jobs are active."
-  1225:		zxfer_wait_for_zfs_send_jobs "final sync"
-  1226:		zxfer_echoV "End zxfer_copy_filesystems()"
-  1227:		return
+  1122:					l_source_is_ready=0
+  1152:				l_wait_reason="job limit"
+  1157:				zxfer_wait_for_zfs_send_jobs "$l_wait_reason"
+  1162:		zxfer_throw_error "Failed to select a ready replication dataset while no send/receive jobs are active."
+  1193:		zxfer_wait_for_zfs_send_jobs "final sync"
+  1194:		zxfer_echoV "End zxfer_copy_filesystems()"
+  1195:		return
 
 src/zxfer_reporting.sh
   804:	l_key_hex=$(printf '%s' "$l_key_path" |
@@ -181,15 +179,15 @@ src/zxfer_runtime.sh
   1579:	if (
   1581:	) 2>/dev/null; then
   1784:	printf '%s\n' "$ZXFER_MAX_YIELD_ITERATIONS"
-  1963:		g_zxfer_profile_start_ms=""
-  2265:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$?"
-  2299:		g_zxfer_failure_class=dependency
-  2300:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
-  2317:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$?"
-  2351:		g_zxfer_failure_class=dependency
-  2352:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
-  2392:		g_zxfer_failure_class=dependency
-  2393:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
+  1913:		g_zxfer_profile_start_ms=""
+  2233:					zxfer_throw_error "$g_origin_cmd_compress_safe" "$?"
+  2267:		g_zxfer_failure_class=dependency
+  2268:		zxfer_throw_error "Failed to determine the local operating system." "$l_source_context_status"
+  2285:					zxfer_throw_error "$g_target_cmd_decompress_safe" "$?"
+  2319:		g_zxfer_failure_class=dependency
+  2320:		zxfer_throw_error "Failed to determine the local operating system." "$l_destination_context_status"
+  2360:		g_zxfer_failure_class=dependency
+  2361:		zxfer_throw_error "Failed to determine the local operating system." "$l_awk_compatibility_status"
 
 src/zxfer_send_receive.sh
   122:		l_estimate_value=$(printf '%s\n' "$l_estimate_output" |
@@ -208,86 +206,82 @@ src/zxfer_send_receive.sh
   1698:				zxfer_verify_converged_destination_after_receive "$l_dest"
 
 src/zxfer_snapshot_discovery.sh
-  318:	l_remote_pipeline=$(zxfer_build_shell_command_from_argv \
-  339:			return "$?"
-  384:			l_status=$?
-  385:			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_count_status_file"
-  386:			return "$l_status"
-  392:			l_status=$?
-  393:			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_count_status_file"
-  394:			return "$l_status"
-  398:			l_status=$?
-  399:			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_filter_status_file" "$l_count_status_file"
-  400:			return "$l_status"
-  403:		l_filter_cmd=$(zxfer_build_shell_command_from_argv \
-  407:			l_status=$?
-  409:			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_filter_status_file" "$l_count_status_file"
-  410:			return "$l_status"
-  437:				g_last_background_pid=""
-  438:				return 1
-  521:		if l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
-  529:		if l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
-  549:				return "$?"
-  554:			return "$?"
-  569:	if l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec \
-  632:		"$l_cleanup_wrapper_script" "$l_managed_cmd" >/dev/null &
-  639:				g_last_background_pid=""
-  640:				return 1
-  690:				return "$?"
-  813:			return 1
-  817:			return "$l_awk_status"
-  1136:	done <"$l_status_file"
-  1353:	l_remote_script=$(zxfer_build_remote_destination_discovery_batch_script \
-  1499:			zxfer_throw_error "Destination dataset [$g_destination] is missing and destination pool [$l_dest_pool] could not be listed." "$l_dest_pool_status"
-  1506:		zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_inventory_status"
-  1602:		return "$?"
-  1668:		} | {
-  1675:	) &
-  2146:			l_status=$?
-  2147:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
-  2148:			zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns." "$l_status"
-  2299:		l_source_name_list_uses_parallel=1
-  2304:		zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_parallel_commands
-  2449:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
-  2456:		zxfer_throw_error "Failed to retrieve snapshots from the source" "$l_source_snapshot_wait_status"
-  2461:		l_source_count_status=$?
-  2554:		l_status=$?
-  2558:		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_sorted_tmp_file"
-  2559:		g_source_snapshot_list_sorted_file=""
-  2560:		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_source_snapshot_stage_files"
-  2561:		return "$?"
-  2592:			l_status=$?
-  2593:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  2595:			zxfer_cleanup_snapshot_record_cache_files
-  2596:			return "$l_status"
-  2614:			l_status=$?
-  2615:			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-  2616:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  2618:			zxfer_cleanup_snapshot_record_cache_files
-  2619:			return "$l_status"
-  2630:			l_dest_inventory_status=$?
-  2643:				l_snapshot_stderr_read_status=$?
-  2650:				zxfer_throw_error "Failed to read staged destination snapshot stderr." "$l_snapshot_stderr_read_status"
-  2659:			l_status=$?
-  2660:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  2662:			zxfer_cleanup_snapshot_record_cache_files
-  2663:			return "$l_status"
-  2669:			l_status=$?
-  2670:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  2672:			zxfer_cleanup_snapshot_record_cache_files
-  2673:			return "$l_status"
-  2683:			l_wait_helper_status=$?
-  2684:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
-  2686:			zxfer_cleanup_snapshot_record_cache_files
-  2687:			zxfer_throw_error "Failed to read source snapshot discovery completion metadata." "$l_wait_helper_status"
-  2694:		wait "$g_source_snapshot_list_pid" || l_source_snapshot_wait_status=$?
-  2695:		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
-  2696:		g_source_snapshot_list_pid=""
-  2728:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
-  2768:			l_status=$?
-  2769:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
-  2771:			zxfer_cleanup_snapshot_record_cache_files
-  2772:			return "$l_status"
+  315:	l_remote_pipeline=$(zxfer_build_shell_command_from_argv \
+  336:			return "$?"
+  381:			l_status=$?
+  382:			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_count_status_file"
+  383:			return "$l_status"
+  389:			l_status=$?
+  390:			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_count_status_file"
+  391:			return "$l_status"
+  395:			l_status=$?
+  396:			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_filter_status_file" "$l_count_status_file"
+  397:			return "$l_status"
+  400:		l_filter_cmd=$(zxfer_build_shell_command_from_argv \
+  404:			l_status=$?
+  406:			zxfer_cleanup_runtime_artifact_paths "$l_source_status_file" "$l_filter_status_file" "$l_count_status_file"
+  407:			return "$l_status"
+  434:				g_last_background_pid=""
+  435:				return 1
+  518:		if l_remote_runner_cmd=$(zxfer_build_shell_command_from_argv \
+  526:		if l_remote_dataset_input_cmd=$(zxfer_build_shell_command_from_argv \
+  546:				return "$?"
+  551:			return "$?"
+  566:	if l_dataset_input_cmd=$(zxfer_render_zfs_command_for_spec \
+  629:		"$l_cleanup_wrapper_script" "$l_managed_cmd" >/dev/null &
+  636:				g_last_background_pid=""
+  637:				return 1
+  687:				return "$?"
+  806:			return 1
+  810:			return "$l_awk_status"
+  1129:	done <"$l_status_file"
+  1346:	l_remote_script=$(zxfer_build_remote_destination_discovery_batch_script \
+  1492:			zxfer_throw_error "Destination dataset [$g_destination] is missing and destination pool [$l_dest_pool] could not be listed." "$l_dest_pool_status"
+  1499:		zxfer_throw_error "Failed to retrieve list of datasets from the destination" "$l_dest_inventory_status"
+  1595:		return "$?"
+  1624:		} | {
+  1631:	) &
+  2102:			l_status=$?
+  2103:			zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
+  2104:			zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns." "$l_status"
+  2380:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
+  2481:		l_status=$?
+  2485:		zxfer_cleanup_runtime_artifact_path "$l_lzfs_list_hr_s_snap_sorted_tmp_file"
+  2486:		g_source_snapshot_list_sorted_file=""
+  2487:		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_source_snapshot_stage_files"
+  2488:		return "$?"
+  2519:			l_status=$?
+  2520:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  2522:			zxfer_cleanup_snapshot_record_cache_files
+  2523:			return "$l_status"
+  2541:			l_status=$?
+  2542:			zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
+  2543:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  2545:			zxfer_cleanup_snapshot_record_cache_files
+  2546:			return "$l_status"
+  2557:			l_dest_inventory_status=$?
+  2570:				l_snapshot_stderr_read_status=$?
+  2577:				zxfer_throw_error "Failed to read staged destination snapshot stderr." "$l_snapshot_stderr_read_status"
+  2586:			l_status=$?
+  2587:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  2589:			zxfer_cleanup_snapshot_record_cache_files
+  2590:			return "$l_status"
+  2596:			l_status=$?
+  2597:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  2599:			zxfer_cleanup_snapshot_record_cache_files
+  2600:			return "$l_status"
+  2610:			l_wait_helper_status=$?
+  2611:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" \
+  2613:			zxfer_cleanup_snapshot_record_cache_files
+  2614:			zxfer_throw_error "Failed to read source snapshot discovery completion metadata." "$l_wait_helper_status"
+  2621:		wait "$g_source_snapshot_list_pid" || l_source_snapshot_wait_status=$?
+  2622:		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
+  2623:		g_source_snapshot_list_pid=""
+  2655:		l_source_snapshot_err=$(zxfer_limit_snapshot_discovery_capture_lines \
+  2695:			l_status=$?
+  2696:			zxfer_cleanup_runtime_artifact_paths "$l_lzfs_list_hr_s_snap_tmp_file" "$l_lzfs_list_hr_s_snap_err_tmp_file" \
+  2698:			zxfer_cleanup_snapshot_record_cache_files
+  2699:			return "$l_status"
 
 src/zxfer_snapshot_reconcile.sh
   148:	$0 != "" { record = $0; tab_pos = index(record, "\t"); snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record); snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : ""); at_pos = index(snapshot_path, "@"); if (at_pos > 0) { snapshot_identity = substr(snapshot_path, at_pos + 1); if (snapshot_guid != "") snapshot_identity = snapshot_identity "\t" snapshot_guid; if (snapshot_identity in delete_identities) print snapshot_path } }' "$l_identity_file" - <<-EOF

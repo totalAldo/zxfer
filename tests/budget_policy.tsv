@@ -36,7 +36,8 @@ lines	src/zxfer_background_jobs.sh	582
 # staging cleanup, validation, and payload fragments into the read builder.
 # R2-P7 consolidated the duplicated remote backup-write status ladders and
 # inlined the remaining single-use pair payload renderer.
-lines	src/zxfer_backup_metadata.sh	2299
+# 2026-06-14 conservative sweep inlined remaining local render glue.
+lines	src/zxfer_backup_metadata.sh	2279
 # zxfer_cleanup_child_wrapper.sh grew by the Phase 5 ps -A fix comment (the
 # descendant reaper must list every process, not just same-terminal ones);
 # the runner-module deletion pays for it many times over in the TOTAL row.
@@ -64,7 +65,8 @@ lines	src/zxfer_modules.sh	96
 # formatting, recursive destination-record lookup, and destination-exists flag
 # plumbing while keeping the main transfer stage helpers intact.
 # R2-P7 merged duplicated property prefetch reset guards.
-lines	src/zxfer_property_reconcile.sh	3489
+# 2026-06-14 conservative sweep inlined tiny property list/override glue.
+lines	src/zxfer_property_reconcile.sh	3464
 # zxfer_remote_hosts.sh halved in Phase 7: capability state is one live ssh
 # probe per host per run held in memory (no cache files, TTL, identity hex,
 # lock dirs, or wait loops) and ssh control sockets are per-run paths under
@@ -81,7 +83,8 @@ lines	src/zxfer_remote_hosts.sh	1805
 # invalidate helper plus its loop call site, and the destroy-site generation
 # bump with its comment); the rise is paid for by deleting dead discovery
 # refine/diff helpers, so the TOTAL row still ratchets down.
-lines	src/zxfer_replication.sh	1651
+# 2026-06-14 conservative sweep collapsed ready-queue ceremony wrappers.
+lines	src/zxfer_replication.sh	1619
 # zxfer_reporting.sh: +1 line for the diverged_snapshot_warnings -V profile
 # summary key (approved 2026-06-12 divergence-contract feature).
 lines	src/zxfer_reporting.sh	1386
@@ -94,7 +97,8 @@ lines	src/zxfer_reporting.sh	1386
 # zxfer_create_private_temp_dir, and the delete-scratch reset into
 # zxfer_init_temp_artifacts.
 # R2-P7 removed a same-module owned-lock reset availability guard.
-lines	src/zxfer_runtime.sh	2413
+# 2026-06-14 conservative sweep flattened pure init assignment wrappers.
+lines	src/zxfer_runtime.sh	2386
 # zxfer_send_receive.sh: +16 lines for the post-receive divergence
 # verification hooks at the two receive finalize choke points (approved
 # 2026-06-12 divergence-contract feature) and +8 comment lines documenting
@@ -104,7 +108,8 @@ lines	src/zxfer_send_receive.sh	1713
 # and remote batch profile-counter recorder while keeping parser and batch
 # response boundaries intact.
 # R2-P7 collapsed adjacent fast-noop cleanup status checks.
-lines	src/zxfer_snapshot_discovery.sh	2767
+# 2026-06-14 conservative sweep merged staged source-command read cleanup.
+lines	src/zxfer_snapshot_discovery.sh	2763
 # zxfer_snapshot_reconcile.sh grew by the approved 2026-06-12 divergence
 # contract: the single-pass name-match/guid-mismatch classifier (replacing
 # the shared-name awk in zxfer_inspect_delete_snap, so in-sync planning
@@ -116,17 +121,17 @@ lines	zxfer	211
 # TOTAL rises by the net addition of the approved divergence-contract
 # feature (classifier, gate, warning, post-receive verification, -V key)
 # plus the rolling-queue stderr-sink fix comments.
-lines	TOTAL	22420
+lines	TOTAL	22312
 functions	src/zxfer_background_jobs.sh	15
-functions	src/zxfer_backup_metadata.sh	65
+functions	src/zxfer_backup_metadata.sh	64
 functions	src/zxfer_cleanup_child_wrapper.sh	4
 functions	src/zxfer_cli.sh	3
 functions	src/zxfer_dependencies.sh	11
 functions	src/zxfer_exec.sh	41
 functions	src/zxfer_modules.sh	1
-functions	src/zxfer_property_reconcile.sh	72
+functions	src/zxfer_property_reconcile.sh	70
 functions	src/zxfer_remote_hosts.sh	58
-functions	src/zxfer_replication.sh	55
+functions	src/zxfer_replication.sh	51
 functions	src/zxfer_reporting.sh	54
 # zxfer_runtime.sh absorbed the 15 path-security and 17 owned-lock functions
 # in the Phase 8 module merge (68 + 15 + 17 = 100); the deleted modules' rows
@@ -134,7 +139,7 @@ functions	src/zxfer_reporting.sh	54
 # R2-P3b merged zxfer_try_get_default_tmpdir,
 # zxfer_create_runtime_artifact_dir, and zxfer_reset_delete_temp_artifacts
 # into their single callers.
-functions	src/zxfer_runtime.sh	85
+functions	src/zxfer_runtime.sh	82
 functions	src/zxfer_send_receive.sh	44
 functions	src/zxfer_snapshot_discovery.sh	46
 # zxfer_snapshot_reconcile.sh gained the seven divergence-contract helpers
@@ -148,7 +153,7 @@ functions	src/zxfer_snapshot_state.sh	31
 functions	zxfer	5
 # functions TOTAL rises by the seven divergence-contract helpers above, then
 # ratchets down after the R2-P6 discovery wrapper inlining.
-functions	TOTAL	616
+functions	TOTAL	606
 callers	zxfer_profile_now_ms	12	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	26
 callers	eval 	10
