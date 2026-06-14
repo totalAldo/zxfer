@@ -2009,6 +2009,36 @@ test_get_forwarded_backup_properties_for_source_rejects_unexpected_forwarded_val
 		"saved-cache" "$g_restored_backup_file_contents"
 }
 
+test_try_backup_restore_candidate_set_stops_when_legacy_name_matches_current_name() {
+	output=$(
+		(
+			zxfer_get_backup_metadata_filename() {
+				printf '%s\n' "same-name"
+			}
+			zxfer_get_legacy_backup_metadata_filename() {
+				printf '%s\n' "same-name"
+			}
+			zxfer_try_backup_restore_candidate() {
+				printf 'probe=%s\n' "$1"
+				return 1
+			}
+
+			set +e
+			zxfer_try_backup_restore_candidate_set \
+				"/backup" "tank/src" "backup/dst" "tank/src" "backup/dst"
+			printf 'status=%s\n' "$?"
+			printf 'candidate=%s\n' "$g_zxfer_backup_restore_candidate_path_result"
+		)
+	)
+
+	assertContains "Restore-candidate fallback should probe the current filename before considering legacy aliases." \
+		"$output" "probe=/backup/same-name"
+	assertContains "Restore-candidate fallback should stop with a plain not-found status when the legacy filename is identical." \
+		"$output" "status=1"
+	assertContains "Restore-candidate fallback should leave the current candidate path selected when no distinct legacy alias exists." \
+		"$output" "candidate=/backup/same-name"
+}
+
 test_try_backup_restore_candidate_maps_remote_transport_failures_to_transport_status() {
 	set +e
 	output=$(

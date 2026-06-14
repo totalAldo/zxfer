@@ -942,6 +942,20 @@ test_zxfer_property_table_invalidate_dataset_removes_exact_source_rows_only() {
 		"0" "$required"
 }
 
+test_zxfer_property_table_invalidate_dataset_ignores_unknown_sides() {
+	zxfer_property_table_append_dataset source "tank/src" "compression=lz4=local"
+
+	zxfer_property_table_invalidate_dataset unknown "tank/src" 1
+
+	source_row=0
+	if zxfer_property_table_find_dataset source "tank/src"; then
+		source_row=1
+	fi
+
+	assertEquals "Unknown-side invalidation should be a no-op so callers can share cleanup paths safely." \
+		"1" "$source_row"
+}
+
 test_zxfer_reset_destination_property_iteration_cache_preserves_source_table_rows() {
 	zxfer_property_table_append_dataset source "tank/src" "compression=lz4=local"
 	zxfer_property_table_append_dataset source "tank/src" "casesensitivity=sensitive=local" "casesensitivity"

@@ -5066,6 +5066,33 @@ test_try_fast_recursive_noop_discovery_reports_source_failures() {
 			zxfer_try_fast_recursive_noop_discovery
 		) 2>&1
 	) || stderr_read_status=$?
+	count_read_status=0
+	count_read_output=$(
+		(
+			l_status_read_count=0
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_read_snapshot_discovery_status_file() {
+				l_status_read_count=$((l_status_read_count + 1))
+				g_zxfer_snapshot_discovery_status_file_result=0
+				[ "$l_status_read_count" -lt 4 ] && return 0
+				return 72
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		) 2>&1
+	) || count_read_status=$?
 
 	assertContains "Fast no-op proof should preserve source snapshot stderr when the identity-aware source command fails." \
 		"$source_error_output" "throw:Failed to retrieve snapshots from the source: denied:17"
@@ -5083,6 +5110,10 @@ test_try_fast_recursive_noop_discovery_reports_source_failures() {
 		"$stderr_read_output" "throw:Failed to read staged source snapshot stderr.:68"
 	assertEquals "Fast no-op proof should preserve staged stderr readback failure status." \
 		68 "$stderr_read_status"
+	assertContains "Fast no-op proof should fail closed when source snapshot count sidecar validation fails." \
+		"$count_read_output" "throw:Failed to retrieve snapshots from the source:1"
+	assertEquals "Fast no-op proof should use the generic source failure status for invalid source count sidecars." \
+		1 "$count_read_status"
 }
 
 test_try_fast_recursive_noop_discovery_reports_destination_fifo_status_failures() {
