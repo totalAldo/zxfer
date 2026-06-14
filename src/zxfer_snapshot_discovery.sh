@@ -695,23 +695,19 @@ zxfer_write_source_snapshot_list_to_file() {
 	l_cmd_tmp_file=$g_zxfer_temp_file_result
 	l_status=0
 	zxfer_build_source_snapshot_list_cmd >"$l_cmd_tmp_file" || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_read_source_snapshot_discovery_command_file "$l_cmd_tmp_file" || {
-			l_read_status=$?
-			zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
-			zxfer_throw_error "Failed to read staged source snapshot discovery command after build failure." "$l_read_status"
-		}
-		l_cmd=$g_zxfer_snapshot_discovery_file_read_result
-		zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
-		zxfer_throw_error "${l_cmd:-Failed to build source snapshot discovery command.}" "$l_status"
-	fi
-	zxfer_read_source_snapshot_discovery_command_file "$l_cmd_tmp_file" || {
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
-		zxfer_throw_error "Failed to read staged source snapshot discovery command." "$l_status"
-	}
+	l_read_status=0
+	zxfer_read_source_snapshot_discovery_command_file "$l_cmd_tmp_file" || l_read_status=$?
 	l_cmd=$g_zxfer_snapshot_discovery_file_read_result
 	zxfer_cleanup_runtime_artifact_path "$l_cmd_tmp_file"
+	if [ "$l_read_status" -ne 0 ]; then
+		if [ "$l_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to read staged source snapshot discovery command after build failure." "$l_read_status"
+		fi
+		zxfer_throw_error "Failed to read staged source snapshot discovery command." "$l_read_status"
+	fi
+	if [ "$l_status" -ne 0 ]; then
+		zxfer_throw_error "${l_cmd:-Failed to build source snapshot discovery command.}" "$l_status"
+	fi
 	[ -n "$l_cmd" ] || zxfer_throw_error "Staged source snapshot discovery command was empty."
 	g_source_snapshot_list_cmd=$l_cmd
 	if [ "$g_option_O_origin_host" != "" ]; then
