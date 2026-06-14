@@ -1784,54 +1784,6 @@ zxfer_get_max_yield_iterations() {
 	printf '%s\n' "$ZXFER_MAX_YIELD_ITERATIONS"
 }
 
-# Purpose: Initialize the runtime metadata before later helpers depend on it.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup during
-# bootstrap so downstream code sees consistent defaults and runtime state.
-zxfer_init_runtime_metadata() {
-	# zxfer version
-	g_zxfer_version="2.0.0-20260611"
-}
-
-# Purpose: Initialize the option defaults before later helpers depend on it.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup during
-# bootstrap so downstream code sees consistent defaults and runtime state.
-zxfer_init_option_defaults() {
-	# Default values
-	g_option_b_beep_always=0
-	g_option_B_beep_on_success=0
-	g_option_c_services=""
-	g_option_d_delete_destination_snapshots=0
-	g_option_D_display_progress_bar=""
-	g_option_e_restore_property_mode=0
-	g_option_F_force_rollback=""
-	g_option_g_grandfather_protection=""
-	g_option_I_ignore_properties=""
-	# number of parallel job processes to run when listing zfs snapshots
-	# in the source (default 1 does not use parallel).
-	# This also sets the maximum number of background zfs send processes
-	# that can run at the same time.
-	g_option_j_jobs=1
-	g_option_k_backup_property_mode=0
-	g_option_o_override_property=""
-	g_option_O_origin_host=""
-	g_option_O_origin_host_safe=""
-	g_option_P_transfer_property=0
-	g_option_R_recursive=""
-	g_option_m_migrate=0
-	g_option_n_dryrun=0
-	g_option_N_nonrecursive=""
-	g_option_s_make_snapshot=0
-	g_option_T_target_host=""
-	g_option_T_target_host_safe=""
-	g_option_U_skip_unsupported_properties=0
-	g_option_v_verbose=0
-	g_option_V_very_verbose=0
-	g_option_x_exclude_datasets=""
-	g_option_Y_yield_iterations=1
-	g_option_w_raw_send=0
-	g_option_z_compress=0
-}
-
 # Purpose: Initialize the dependency tool defaults before later helpers depend
 # on it.
 # Usage: Called during runtime bootstrap, staging, and trap cleanup during
@@ -2080,8 +2032,37 @@ zxfer_init_globals() {
 	zxfer_reset_failure_context "startup"
 	zxfer_refresh_secure_path_state
 
-	zxfer_init_runtime_metadata
-	zxfer_init_option_defaults
+	g_zxfer_version="2.0.0-20260611"
+	g_option_b_beep_always=0
+	g_option_B_beep_on_success=0
+	g_option_c_services=""
+	g_option_d_delete_destination_snapshots=0
+	g_option_D_display_progress_bar=""
+	g_option_e_restore_property_mode=0
+	g_option_F_force_rollback=""
+	g_option_g_grandfather_protection=""
+	g_option_I_ignore_properties=""
+	# Default 1 avoids parallel source listing and background send jobs.
+	g_option_j_jobs=1
+	g_option_k_backup_property_mode=0
+	g_option_o_override_property=""
+	g_option_O_origin_host=""
+	g_option_O_origin_host_safe=""
+	g_option_P_transfer_property=0
+	g_option_R_recursive=""
+	g_option_m_migrate=0
+	g_option_n_dryrun=0
+	g_option_N_nonrecursive=""
+	g_option_s_make_snapshot=0
+	g_option_T_target_host=""
+	g_option_T_target_host_safe=""
+	g_option_U_skip_unsupported_properties=0
+	g_option_v_verbose=0
+	g_option_V_very_verbose=0
+	g_option_x_exclude_datasets=""
+	g_option_Y_yield_iterations=1
+	g_option_w_raw_send=0
+	g_option_z_compress=0
 	zxfer_init_runtime_state_defaults
 	if command -v zxfer_reset_replication_runtime_state >/dev/null 2>&1; then
 		zxfer_reset_replication_runtime_state
@@ -2235,17 +2216,6 @@ zxfer_register_runtime_traps() {
 	# QUIT (Quit) 3 (Ctrl-\)
 	# EXIT (Exit) 0 (exit)
 	trap zxfer_trap_exit INT TERM HUP QUIT EXIT
-}
-
-# Purpose: Initialize the transfer command context before later helpers depend
-# on it.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup during
-# bootstrap so downstream code sees consistent defaults and runtime state.
-zxfer_init_transfer_command_context() {
-	g_origin_cmd_compress_safe=$g_cmd_compress_safe
-	g_origin_cmd_decompress_safe=$g_cmd_decompress_safe
-	g_target_cmd_compress_safe=$g_cmd_compress_safe
-	g_target_cmd_decompress_safe=$g_cmd_decompress_safe
 }
 
 # Purpose: Initialize the source execution context before later helpers depend
@@ -2404,7 +2374,10 @@ zxfer_init_local_awk_compatibility() {
 # Usage: Called during runtime bootstrap, staging, and trap cleanup during
 # bootstrap so downstream code sees consistent defaults and runtime state.
 zxfer_init_variables() {
-	zxfer_init_transfer_command_context
+	g_origin_cmd_compress_safe=$g_cmd_compress_safe
+	g_origin_cmd_decompress_safe=$g_cmd_decompress_safe
+	g_target_cmd_compress_safe=$g_cmd_compress_safe
+	g_target_cmd_decompress_safe=$g_cmd_decompress_safe
 	zxfer_init_source_execution_context
 	zxfer_init_destination_execution_context
 	zxfer_refresh_remote_zfs_commands

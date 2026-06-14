@@ -410,21 +410,28 @@ test_zxfer_kill_registered_cleanup_pids_preserves_first_failure_message_and_rebu
 		"$output" "remaining=<401 402>"
 }
 
-test_runtime_init_default_helpers_cover_current_shell_paths() {
+test_runtime_global_init_covers_default_assignments_in_current_shell() {
 	output=$(
 		(
 			zxfer_ssh_supports_control_sockets() {
 				return 0
 			}
+			zxfer_refresh_secure_path_state() {
+				:
+			}
+			zxfer_init_dependency_tool_defaults() {
+				g_cmd_zfs="/sbin/zfs"
+				g_cmd_compress_safe="gzip"
+				g_cmd_decompress_safe="gunzip"
+			}
+			zxfer_apply_secure_path() {
+				:
+			}
+			zxfer_ensure_run_tmp_root() {
+				:
+			}
 
-			g_cmd_zfs="/sbin/zfs"
-			g_cmd_compress_safe="gzip"
-			g_cmd_decompress_safe="gunzip"
-
-			zxfer_init_runtime_metadata
-			zxfer_init_option_defaults
-			zxfer_init_transport_remote_defaults
-			zxfer_init_runtime_state_defaults
+			zxfer_init_globals
 			zxfer_init_temp_artifacts
 
 			printf 'version=%s\n' "$g_zxfer_version"
@@ -531,9 +538,26 @@ test_runtime_execution_context_init_helpers_cover_local_and_dry_run_remote_paths
 			g_target_cmd_zfs=""
 			g_cmd_cat=""
 
-			zxfer_init_transfer_command_context
-			printf 'transfer_origin=%s\n' "$g_origin_cmd_compress_safe"
-			printf 'transfer_target=%s\n' "$g_target_cmd_decompress_safe"
+			(
+				zxfer_init_source_execution_context() {
+					:
+				}
+				zxfer_init_destination_execution_context() {
+					:
+				}
+				zxfer_refresh_remote_zfs_commands() {
+					:
+				}
+				zxfer_init_restore_property_helpers() {
+					:
+				}
+				zxfer_init_local_awk_compatibility() {
+					:
+				}
+				zxfer_init_variables
+				printf 'transfer_origin=%s\n' "$g_origin_cmd_compress_safe"
+				printf 'transfer_target=%s\n' "$g_target_cmd_decompress_safe"
+			)
 
 			g_option_e_restore_property_mode=1
 			g_option_O_origin_host=""
