@@ -1954,9 +1954,7 @@ zxfer_init_runtime_state_defaults() {
 	g_zxfer_effective_tmpdir_requested=""
 	g_zxfer_tmpdir_fallback_note=""
 	g_zxfer_temp_file_result=""
-	if command -v zxfer_reset_owned_lock_tracking >/dev/null 2>&1; then
-		zxfer_reset_owned_lock_tracking
-	fi
+	zxfer_reset_owned_lock_tracking
 	zxfer_reset_runtime_artifact_state
 	g_zxfer_profile_start_epoch=$(date '+%s' 2>/dev/null || :)
 	if ! g_zxfer_profile_start_ms=$(zxfer_profile_now_ms 2>/dev/null); then
