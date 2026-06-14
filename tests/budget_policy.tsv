@@ -34,7 +34,9 @@ lines	src/zxfer_background_jobs.sh	582
 # fragments into their builders while keeping the shared target guard.
 # R2-P4c inlined the single-use remote backup-read setup, parent-trust,
 # staging cleanup, validation, and payload fragments into the read builder.
-lines	src/zxfer_backup_metadata.sh	2308
+# R2-P7 consolidated the duplicated remote backup-write status ladders and
+# inlined the remaining single-use pair payload renderer.
+lines	src/zxfer_backup_metadata.sh	2299
 # zxfer_cleanup_child_wrapper.sh grew by the Phase 5 ps -A fix comment (the
 # descendant reaper must list every process, not just same-terminal ones);
 # the runner-module deletion pays for it many times over in the TOTAL row.
@@ -61,7 +63,8 @@ lines	src/zxfer_modules.sh	96
 # R2-P5 inlined tiny single-use destination probe classifiers, probe-detail
 # formatting, recursive destination-record lookup, and destination-exists flag
 # plumbing while keeping the main transfer stage helpers intact.
-lines	src/zxfer_property_reconcile.sh	3498
+# R2-P7 merged duplicated property prefetch reset guards.
+lines	src/zxfer_property_reconcile.sh	3489
 # zxfer_remote_hosts.sh halved in Phase 7: capability state is one live ssh
 # probe per host per run held in memory (no cache files, TTL, identity hex,
 # lock dirs, or wait loops) and ssh control sockets are per-run paths under
@@ -70,7 +73,8 @@ lines	src/zxfer_property_reconcile.sh	3498
 # R2-P6 inlined role-match predicates and the one-call SSH role-state getter
 # while preserving host-spec parsing, transport-token, and remote-probe
 # boundaries.
-lines	src/zxfer_remote_hosts.sh	1807
+# R2-P7 removed redundant remote-preload status scratch.
+lines	src/zxfer_remote_hosts.sh	1805
 # zxfer_replication.sh, zxfer_snapshot_state.sh, and
 # zxfer_snapshot_reconcile.sh grew by the Phase 4 generation-gated live
 # destination view (ensure/refresh/bump helpers, the -Y pass-boundary
@@ -89,7 +93,8 @@ lines	src/zxfer_reporting.sh	1386
 # zxfer_try_get_effective_tmpdir, the dir allocator body into
 # zxfer_create_private_temp_dir, and the delete-scratch reset into
 # zxfer_init_temp_artifacts.
-lines	src/zxfer_runtime.sh	2415
+# R2-P7 removed a same-module owned-lock reset availability guard.
+lines	src/zxfer_runtime.sh	2413
 # zxfer_send_receive.sh: +16 lines for the post-receive divergence
 # verification hooks at the two receive finalize choke points (approved
 # 2026-06-12 divergence-contract feature) and +8 comment lines documenting
@@ -98,7 +103,8 @@ lines	src/zxfer_send_receive.sh	1713
 # R2-P6 inlined the dry-run source preview renderer, the awk reverse wrapper,
 # and remote batch profile-counter recorder while keeping parser and batch
 # response boundaries intact.
-lines	src/zxfer_snapshot_discovery.sh	2836
+# R2-P7 collapsed adjacent fast-noop cleanup status checks.
+lines	src/zxfer_snapshot_discovery.sh	2767
 # zxfer_snapshot_reconcile.sh grew by the approved 2026-06-12 divergence
 # contract: the single-pass name-match/guid-mismatch classifier (replacing
 # the shared-name awk in zxfer_inspect_delete_snap, so in-sync planning
@@ -110,7 +116,7 @@ lines	zxfer	211
 # TOTAL rises by the net addition of the approved divergence-contract
 # feature (classifier, gate, warning, post-receive verification, -V key)
 # plus the rolling-queue stderr-sink fix comments.
-lines	TOTAL	22511
+lines	TOTAL	22420
 functions	src/zxfer_background_jobs.sh	15
 functions	src/zxfer_backup_metadata.sh	65
 functions	src/zxfer_cleanup_child_wrapper.sh	4
@@ -130,7 +136,7 @@ functions	src/zxfer_reporting.sh	54
 # into their single callers.
 functions	src/zxfer_runtime.sh	85
 functions	src/zxfer_send_receive.sh	44
-functions	src/zxfer_snapshot_discovery.sh	47
+functions	src/zxfer_snapshot_discovery.sh	46
 # zxfer_snapshot_reconcile.sh gained the seven divergence-contract helpers
 # (scan, record, marker find/unmark, example renderer, contract gate, and
 # post-receive verification) in the approved 2026-06-12 feature.
@@ -140,12 +146,13 @@ functions	src/zxfer_snapshot_reconcile.sh	26
 # ratchets down against the pre-Phase 4 baseline.
 functions	src/zxfer_snapshot_state.sh	31
 functions	zxfer	5
-# functions TOTAL rises by the seven divergence-contract helpers above.
-functions	TOTAL	617
+# functions TOTAL rises by the seven divergence-contract helpers above, then
+# ratchets down after the R2-P6 discovery wrapper inlining.
+functions	TOTAL	616
 callers	zxfer_profile_now_ms	12	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
 callers	zxfer_escape_for_single_quotes	26
 callers	eval 	10
-callers	$(date	16
+callers	$(date	15
 # mktemp callers after Phase 6 are the single per-run temp-root allocation
 # and the shared randomized staging-name helper, both in zxfer_runtime.sh
 # (path-adjacent staging parents can be shared sticky directories where
