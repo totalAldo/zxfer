@@ -2187,31 +2187,6 @@ zxfer_render_remote_backup_dry_run_shell_command() {
 	return 0
 }
 
-# Purpose: Render the local backup file pair write command as a stable shell-
-# safe or operator-facing string.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when zxfer needs to display or transport the value without reparsing
-# it.
-zxfer_render_local_backup_file_pair_write_command() {
-	l_primary_backup_file_dir=$1
-	l_primary_backup_file_path=$2
-	l_primary_rendered_backup_contents=$3
-	l_forwarded_backup_file_dir=$4
-	l_forwarded_backup_file_path=$5
-	l_forwarded_backup_contents=$6
-
-	l_primary_backup_contents_cmd=$(zxfer_render_command_for_report "" printf '%s' "$l_primary_rendered_backup_contents")
-	l_forwarded_backup_contents_cmd=$(zxfer_render_command_for_report "" printf '%s' "$l_forwarded_backup_contents")
-	l_primary_backup_stage_template_safe=$(zxfer_quote_token_for_report "$l_primary_backup_file_dir/.zxfer-backup-write.XXXXXX")
-	l_forwarded_backup_stage_template_safe=$(zxfer_quote_token_for_report "$l_forwarded_backup_file_dir/.zxfer-backup-write.XXXXXX")
-	l_primary_backup_rollback_template_safe=$(zxfer_quote_token_for_report "$l_primary_backup_file_dir/.zxfer-backup-rollback.XXXXXX")
-	l_forwarded_backup_rollback_template_safe=$(zxfer_quote_token_for_report "$l_forwarded_backup_file_dir/.zxfer-backup-rollback.XXXXXX")
-	l_primary_backup_file_path_safe=$(zxfer_quote_token_for_report "$l_primary_backup_file_path")
-	l_forwarded_backup_file_path_safe=$(zxfer_quote_token_for_report "$l_forwarded_backup_file_path")
-
-	printf '%s\n' "umask 077; l_primary_stage_dir=\$(mktemp -d $l_primary_backup_stage_template_safe) && l_forwarded_stage_dir=\$(mktemp -d $l_forwarded_backup_stage_template_safe) && $l_primary_backup_contents_cmd > \"\$l_primary_stage_dir/backup.write\" && $l_forwarded_backup_contents_cmd > \"\$l_forwarded_stage_dir/backup.write\" && chmod 600 \"\$l_primary_stage_dir/backup.write\" \"\$l_forwarded_stage_dir/backup.write\" && if [ -e $l_forwarded_backup_file_path_safe ]; then l_forwarded_rollback=\$(mktemp $l_forwarded_backup_rollback_template_safe) && mv -f $l_forwarded_backup_file_path_safe \"\$l_forwarded_rollback\"; else l_forwarded_rollback=''; fi && if ! mv -f \"\$l_forwarded_stage_dir/backup.write\" $l_forwarded_backup_file_path_safe; then rm -f $l_forwarded_backup_file_path_safe && if [ \"\$l_forwarded_rollback\" != '' ]; then mv -f \"\$l_forwarded_rollback\" $l_forwarded_backup_file_path_safe; fi; exit 1; fi && if [ -e $l_primary_backup_file_path_safe ]; then l_primary_rollback=\$(mktemp $l_primary_backup_rollback_template_safe) && mv -f $l_primary_backup_file_path_safe \"\$l_primary_rollback\"; else l_primary_rollback=''; fi && if ! mv -f \"\$l_primary_stage_dir/backup.write\" $l_primary_backup_file_path_safe; then rm -f $l_primary_backup_file_path_safe && if [ \"\$l_primary_rollback\" != '' ]; then mv -f \"\$l_primary_rollback\" $l_primary_backup_file_path_safe; fi; rm -f $l_forwarded_backup_file_path_safe && if [ \"\$l_forwarded_rollback\" != '' ]; then mv -f \"\$l_forwarded_rollback\" $l_forwarded_backup_file_path_safe; fi; exit 1; fi && rm -f \"\${l_forwarded_rollback:-}\" \"\${l_primary_rollback:-}\" && rmdir \"\$l_primary_stage_dir\" \"\$l_forwarded_stage_dir\""
-}
-
 # Purpose: Write the backup properties in the normalized form later zxfer steps
 # expect.
 # Usage: Called during backup-metadata capture, readback, and atomic publish
@@ -2276,7 +2251,12 @@ zxfer_write_backup_properties() {
 		l_backup_file_path_safe=$(zxfer_quote_token_for_report "$l_backup_file_path")
 		if [ "$l_has_forwarded_backup_alias" -eq 1 ]; then
 			if [ "$g_option_T_target_host" = "" ]; then
-				zxfer_render_local_backup_file_pair_write_command "$l_backup_file_parent" "$l_backup_file_path" "$l_rendered_backup_contents" "$l_forwarded_backup_file_parent" "$l_forwarded_backup_file_path" "$l_forwarded_backup_contents"
+				l_forwarded_backup_contents_cmd=$(zxfer_render_command_for_report "" printf '%s' "$l_forwarded_backup_contents")
+				l_forwarded_backup_stage_template_safe=$(zxfer_quote_token_for_report "$l_forwarded_backup_file_parent/.zxfer-backup-write.XXXXXX")
+				l_primary_backup_rollback_template_safe=$(zxfer_quote_token_for_report "$l_backup_file_parent/.zxfer-backup-rollback.XXXXXX")
+				l_forwarded_backup_rollback_template_safe=$(zxfer_quote_token_for_report "$l_forwarded_backup_file_parent/.zxfer-backup-rollback.XXXXXX")
+				l_forwarded_backup_file_path_safe=$(zxfer_quote_token_for_report "$l_forwarded_backup_file_path")
+				printf '%s\n' "umask 077; l_primary_stage_dir=\$(mktemp -d $l_backup_stage_template_safe) && l_forwarded_stage_dir=\$(mktemp -d $l_forwarded_backup_stage_template_safe) && $l_backup_contents_cmd > \"\$l_primary_stage_dir/backup.write\" && $l_forwarded_backup_contents_cmd > \"\$l_forwarded_stage_dir/backup.write\" && chmod 600 \"\$l_primary_stage_dir/backup.write\" \"\$l_forwarded_stage_dir/backup.write\" && if [ -e $l_forwarded_backup_file_path_safe ]; then l_forwarded_rollback=\$(mktemp $l_forwarded_backup_rollback_template_safe) && mv -f $l_forwarded_backup_file_path_safe \"\$l_forwarded_rollback\"; else l_forwarded_rollback=''; fi && if ! mv -f \"\$l_forwarded_stage_dir/backup.write\" $l_forwarded_backup_file_path_safe; then rm -f $l_forwarded_backup_file_path_safe && if [ \"\$l_forwarded_rollback\" != '' ]; then mv -f \"\$l_forwarded_rollback\" $l_forwarded_backup_file_path_safe; fi; exit 1; fi && if [ -e $l_backup_file_path_safe ]; then l_primary_rollback=\$(mktemp $l_primary_backup_rollback_template_safe) && mv -f $l_backup_file_path_safe \"\$l_primary_rollback\"; else l_primary_rollback=''; fi && if ! mv -f \"\$l_primary_stage_dir/backup.write\" $l_backup_file_path_safe; then rm -f $l_backup_file_path_safe && if [ \"\$l_primary_rollback\" != '' ]; then mv -f \"\$l_primary_rollback\" $l_backup_file_path_safe; fi; rm -f $l_forwarded_backup_file_path_safe && if [ \"\$l_forwarded_rollback\" != '' ]; then mv -f \"\$l_forwarded_rollback\" $l_forwarded_backup_file_path_safe; fi; exit 1; fi && rm -f \"\${l_forwarded_rollback:-}\" \"\${l_primary_rollback:-}\" && rmdir \"\$l_primary_stage_dir\" \"\$l_forwarded_stage_dir\""
 			else
 				l_pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
 				l_pair_backup_contents_cmd=$(zxfer_render_command_for_report "" printf '%s\\n%s\\n%s\\n' "$l_rendered_backup_contents" "$l_pair_split_line" "$l_forwarded_backup_contents")
