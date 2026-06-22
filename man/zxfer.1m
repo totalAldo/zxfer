@@ -416,7 +416,11 @@ finish removing the stale datasets.
 will pipe
 zfs(8)
 \fIsend\fR
-through the indicated command and parameters, to create a progress bar.
+through an internal passthrough helper that feeds a copy of the stream to the
+indicated command and parameters, to create a progress bar. The progress
+command must read stdin until EOF. Its stdout is discarded so helper output
+cannot duplicate or corrupt the receive stream; progress text should go to
+stderr.
 A number of macros will be replaced with values before the command is executed:
 .PP
 .RS 8n

@@ -799,6 +799,8 @@ test_handle_progress_bar_option_builds_passthrough_pipeline() {
 
 	assertContains "Progress handling should preserve the progress passthrough helper." \
 		"$result" "zxfer_progress_passthrough"
+	assertNotContains "Progress handling should not add lossy buffering commands ahead of the passthrough helper." \
+		"$result" "dd obs="
 	assertContains "Progress handling should substitute the snapshot title." \
 		"$result" "pv -s 4096 -N tank/src@snap2"
 }
@@ -3939,6 +3941,17 @@ test_zxfer_progress_passthrough_logs_progress_command_failures() {
 	assertEquals "Progress-command failures should preserve the send stream." "payload" "$output"
 	assertContains "Progress-command failures should be logged for operators." \
 		"$(cat "$log")" "Progress bar command exited with status 7"
+}
+
+test_zxfer_progress_passthrough_discards_progress_command_stdout() {
+	output=$(
+		printf 'payload\n' | zxfer_progress_passthrough "cat"
+	)
+	status=$?
+
+	assertEquals "Progress passthrough should preserve the primary send stream." 0 "$status"
+	assertEquals "Progress command stdout should not be allowed to duplicate or corrupt the receive stream." \
+		"payload" "$output"
 }
 
 test_zxfer_progress_passthrough_uses_private_fifo_dir_under_physical_tmpdir() {

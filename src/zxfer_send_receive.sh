@@ -326,7 +326,7 @@ zxfer_progress_passthrough() {
 		return "$l_passthrough_status"
 	fi
 
-	sh -c 'exec "$1" "$2" <"$3"' sh \
+	sh -c 'exec "$1" "$2" <"$3" >/dev/null' sh \
 		"$l_cleanup_wrapper_script" \
 		"$l_progress_dialog" \
 		"$l_fifo" &
@@ -397,9 +397,9 @@ zxfer_handle_progress_bar_option() {
 	fi
 	l_progress_dialog=$(zxfer_setup_progress_dialog "$l_size_est" "$l_snapshot")
 
-	# Modify the send command to include the progress dialog
+	# Modify the send command to include the progress dialog.
 	l_escaped_progress_dialog=$(zxfer_escape_for_single_quotes "$l_progress_dialog")
-	l_progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | zxfer_progress_passthrough '$l_escaped_progress_dialog'"
+	l_progress_bar_cmd="| zxfer_progress_passthrough '$l_escaped_progress_dialog'"
 	g_zxfer_progress_bar_command_result=$l_progress_bar_cmd
 
 	echo "$l_progress_bar_cmd"

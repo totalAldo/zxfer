@@ -492,6 +492,16 @@ root. Even without live guest-output streaming, the runner now logs each major
 phase so local runs do not appear idle while a guest boots, installs
 prerequisites, or runs the selected guest test layer.
 
+Ubuntu QEMU guests use a 16G per-run writable overlay so cloud-init can grow
+the root filesystem before `apt` metadata and OpenZFS package setup run. The
+cached upstream base image remains unchanged. FreeBSD and OmniOS overlays keep
+the upstream image size unless a guest-specific need is identified.
+
+FreeBSD QEMU guests require three consecutive SSH readiness probes before the
+runner starts copying files, and each later remote step rechecks that SSH can
+execute a command after refreshing the host key. This avoids first-boot
+`sshd` restart windows on the 15.1 cloud images.
+
 Useful VM-runner environment variables:
 
 - `ZXFER_VM_ARTIFACT_ROOT`: override the host artifact root

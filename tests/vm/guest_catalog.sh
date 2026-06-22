@@ -189,6 +189,23 @@ zxfer_vm_guest_qemu_base_format() {
 	esac
 }
 
+zxfer_vm_guest_qemu_min_disk_size() {
+	l_guest=$1
+	l_arch=${2:-$(zxfer_vm_guest_qemu_preferred_arch "$l_guest")} || return 1
+
+	case "$l_guest/$l_arch" in
+	ubuntu/amd64 | ubuntu/arm64)
+		printf '%s\n' "16G"
+		;;
+	freebsd/amd64 | freebsd/arm64 | omnios/amd64)
+		:
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
 zxfer_vm_guest_qemu_shell() {
 	case "$1" in
 	omnios)
@@ -219,10 +236,10 @@ zxfer_vm_guest_qemu_seed_transport() {
 
 zxfer_vm_guest_qemu_ssh_ready_probe_count() {
 	case "$1" in
-	omnios)
+	freebsd | omnios)
 		printf '%s\n' "3"
 		;;
-	ubuntu | freebsd)
+	ubuntu)
 		printf '%s\n' "1"
 		;;
 	*)

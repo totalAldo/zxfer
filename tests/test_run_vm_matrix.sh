@@ -380,8 +380,8 @@ test_vm_guest_qemu_ssh_ready_probe_count_uses_single_probe_for_supported_guests(
 		"3" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count omnios)"
 	assertEquals "Ubuntu qemu guests should keep the default one-probe SSH readiness threshold." \
 		"1" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count ubuntu)"
-	assertEquals "FreeBSD qemu guests should keep the default one-probe SSH readiness threshold." \
-		"1" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count freebsd)"
+	assertEquals "FreeBSD qemu guests should require several successful SSH probes while first-boot services settle." \
+		"3" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count freebsd)"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -495,6 +495,7 @@ test_vm_qemu_prepare_remote_ssh_step_retries_until_keyscan_recovers() {
 	mock_bin="$TEST_TMPDIR/mock-bin-prepare-step-retry"
 	known_hosts_file="$TEST_TMPDIR/known_hosts.prepare-step-retry"
 	keyscan_count_file="$TEST_TMPDIR/keyscan-count.prepare-step-retry"
+	ssh_count_file="$TEST_TMPDIR/ssh-count.prepare-step-retry"
 	mkdir -p "$mock_bin"
 
 	cat <<EOF >"$mock_bin/ssh-keyscan"
@@ -512,9 +513,15 @@ printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_B"
 EOF
 	chmod 700 "$mock_bin/ssh-keyscan"
 
-	cat <<'EOF' >"$mock_bin/ssh"
+	cat <<EOF >"$mock_bin/ssh"
 #!/bin/sh
-exit 1
+count=0
+if [ -r "$ssh_count_file" ]; then
+	count=\$(cat "$ssh_count_file")
+fi
+count=\$((count + 1))
+printf '%s\n' "\$count" >"$ssh_count_file"
+exit 0
 EOF
 	chmod 700 "$mock_bin/ssh"
 
@@ -530,16 +537,79 @@ EOF
 		zxfer_vm_reset_state
 		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.1/arm64' 'guest preparation' 15
 		printf 'keyscan-count=%s\n' \"\$(cat \"$keyscan_count_file\")\"
+		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
 	"
 
 	assertEquals "Step-level SSH preparation should retry until ssh-keyscan succeeds again." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "The helper should keep retrying transient keyscan failures." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "keyscan-count=2"
-	assertContains "Recovered keyscan retries should log that the host-key refresh succeeded before the remote step continues." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "SSH host-key refresh recovered for guest preparation"
+	assertContains "Recovered retries should log that the SSH readiness check succeeded before the remote step continues." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "SSH readiness recovered for guest preparation"
+	assertContains "The recovered refresh path should still prove the guest is reachable over SSH." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ssh-count=1"
 	assertContains "The recovered refresh should publish the new host key." \
 		"$(cat "$known_hosts_file")" "KEY_B"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_prepare_remote_ssh_step_requires_probe_after_keyscan_success() {
+	mock_bin="$TEST_TMPDIR/mock-bin-prepare-step-probe"
+	known_hosts_file="$TEST_TMPDIR/known_hosts.prepare-step-probe"
+	keyscan_count_file="$TEST_TMPDIR/keyscan-count.prepare-step-probe"
+	ssh_count_file="$TEST_TMPDIR/ssh-count.prepare-step-probe"
+	mkdir -p "$mock_bin"
+
+	cat <<EOF >"$mock_bin/ssh-keyscan"
+#!/bin/sh
+count=0
+if [ -r "$keyscan_count_file" ]; then
+	count=\$(cat "$keyscan_count_file")
+fi
+count=\$((count + 1))
+printf '%s\n' "\$count" >"$keyscan_count_file"
+printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_\$count"
+EOF
+	chmod 700 "$mock_bin/ssh-keyscan"
+
+	cat <<EOF >"$mock_bin/ssh"
+#!/bin/sh
+count=0
+if [ -r "$ssh_count_file" ]; then
+	count=\$(cat "$ssh_count_file")
+fi
+count=\$((count + 1))
+printf '%s\n' "\$count" >"$ssh_count_file"
+if [ "\$count" -eq 1 ]; then
+	exit 255
+fi
+exit 0
+EOF
+	chmod 700 "$mock_bin/ssh"
+
+	cat <<'EOF' >"$mock_bin/sleep"
+#!/bin/sh
+exit 0
+EOF
+	chmod 700 "$mock_bin/sleep"
+
+	zxfer_test_capture_subshell "
+		PATH=\"$mock_bin:\$PATH\"
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.1/arm64' 'guest preparation' 15
+		printf 'keyscan-count=%s\n' \"\$(cat \"$keyscan_count_file\")\"
+		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
+	"
+
+	assertEquals "A fresh keyscan is not enough; the remote step should wait until SSH can execute a command." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The helper should retry after a successful keyscan when the command probe still fails." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "keyscan-count=2"
+	assertContains "The helper should require a successful command probe before returning." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ssh-count=2"
+	assertContains "The final known_hosts file should reflect the host key from the successful probe attempt." \
+		"$(cat "$known_hosts_file")" "KEY_2"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -1113,6 +1183,76 @@ test_vm_qemu_aarch64_efi_prefers_explicit_override() {
 test_vm_qemu_machine_arg_keeps_highmem_enabled_for_arm64_guests() {
 	assertEquals "Apple Silicon arm64 guests should keep QEMU's default highmem layout enabled." \
 		"virt,accel=hvf" "$(zxfer_vm_qemu_machine_arg arm64 hvf)"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_qemu_min_disk_size_expands_ubuntu_overlays() {
+	assertEquals "Ubuntu guest overlays should be large enough for apt metadata and ZFS package setup." \
+		"16G" "$(zxfer_vm_guest_qemu_min_disk_size ubuntu arm64)"
+	assertEquals "FreeBSD guest overlays should keep the upstream image size unless a need is identified." \
+		"" "$(zxfer_vm_guest_qemu_min_disk_size freebsd arm64)"
+	assertEquals "OmniOS guest overlays should keep the upstream image size unless a need is identified." \
+		"" "$(zxfer_vm_guest_qemu_min_disk_size omnios amd64)"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_resize_overlay_if_needed_invokes_qemu_img_resize() {
+	fake_bin_dir="$TEST_TMPDIR/fake-bin-qemu-resize"
+	recorded_args="$TEST_TMPDIR/qemu-img-resize-args.txt"
+	mkdir -p "$fake_bin_dir"
+	cat <<EOF >"$fake_bin_dir/qemu-img"
+#!/bin/sh
+printf 'argc=%s\n' "\$#" >"$recorded_args"
+while [ "\$#" -gt 0 ]; do
+	printf '<%s>\n' "\$1" >>"$recorded_args"
+	shift
+done
+exit 0
+EOF
+	chmod +x "$fake_bin_dir/qemu-img"
+
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		PATH=\"$fake_bin_dir:/usr/bin:/bin\"
+		zxfer_vm_qemu_resize_overlay_if_needed 'Ubuntu 26.04/arm64' \"$TEST_TMPDIR/overlay.qcow2\" 16G
+	"
+
+	assertEquals "Overlay resizing should succeed when qemu-img resize succeeds." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The resize helper should report the requested guest overlay size." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "resizing writable overlay to 16G"
+	assertContains "The resize helper should call qemu-img resize." \
+		"$(cat "$recorded_args")" "<resize>"
+	assertContains "The resize helper should preserve the overlay path argument." \
+		"$(cat "$recorded_args")" "<$TEST_TMPDIR/overlay.qcow2>"
+	assertContains "The resize helper should preserve the requested size argument." \
+		"$(cat "$recorded_args")" "<16G>"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_resize_overlay_if_needed_skips_blank_size() {
+	fake_bin_dir="$TEST_TMPDIR/fake-bin-qemu-resize-skip"
+	recorded_args="$TEST_TMPDIR/qemu-img-resize-skip-args.txt"
+	mkdir -p "$fake_bin_dir"
+	cat <<EOF >"$fake_bin_dir/qemu-img"
+#!/bin/sh
+printf '%s\n' "unexpected qemu-img invocation" >"$recorded_args"
+exit 99
+EOF
+	chmod +x "$fake_bin_dir/qemu-img"
+
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		PATH=\"$fake_bin_dir:/usr/bin:/bin\"
+		zxfer_vm_qemu_resize_overlay_if_needed 'FreeBSD 15.1/arm64' \"$TEST_TMPDIR/overlay.qcow2\" ''
+	"
+
+	assertEquals "Guests without a minimum disk size should skip qemu-img resize." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertFalse "The resize helper should not invoke qemu-img for blank sizes." \
+		"[ -e \"$recorded_args\" ]"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

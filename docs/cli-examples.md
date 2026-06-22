@@ -309,9 +309,11 @@ rejected instead of being re-tokenized.
 ./zxfer -v -D 'pv -brt -s %%size%% -N %%title%%' -R tank/data backup/data
 ```
 
-The progress command must read from stdin and write the stream back to stdout.
-`%%size%%` expands to an estimated stream size and `%%title%%` expands to the
-source `dataset@snapshot` label.
+The progress command must read the copied stream from stdin until EOF. Its
+stdout is discarded so progress helpers such as `pv` cannot duplicate or
+corrupt the receive stream; progress text should go to stderr. `%%size%%`
+expands to an estimated stream size and `%%title%%` expands to the source
+`dataset@snapshot` label.
 
 ### `-w` Use raw `zfs send`
 
