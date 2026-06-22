@@ -3673,7 +3673,7 @@ tank/src/app@snap2"
 	assertEquals "Destination snapshot paths should be rewritten to match the source dataset." "$expected" "$result"
 }
 
-test_normalize_destination_snapshot_list_keeps_dataset_when_trailing_slash_requested() {
+test_normalize_destination_snapshot_list_keeps_already_aligned_trailing_slash_paths() {
 	input_file="$TEST_TMPDIR/dest_snaps_trailing.txt"
 	output_file="$TEST_TMPDIR/normalized_snaps_trailing.txt"
 	cat <<'EOF' >"$input_file"
@@ -3688,7 +3688,7 @@ EOF
 	result=$(cat "$output_file")
 	expected="tank/dst@snapA
 tank/dst@snapB"
-	assertEquals "Trailing slash semantics should only sort the destination list." "$expected" "$result"
+	assertEquals "Trailing-slash normalization should leave already source-aligned destination paths unchanged apart from sorting." "$expected" "$result"
 }
 
 test_get_last_common_snapshot_requires_matching_guid() {

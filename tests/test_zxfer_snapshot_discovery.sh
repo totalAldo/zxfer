@@ -2991,9 +2991,36 @@ test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing
 		"$(cat "$cmd_file")" "snapshot backup/dst"
 	assertNotContains "Trailing-slash replication should not append the source basename to the destination root." \
 		"$(cat "$cmd_file")" "backup/dst/src"
-	assertEquals "Trailing-slash replication should leave normalized destination snapshots rooted at the destination dataset." \
-		"backup/dst/child@snap2
-backup/dst@snap1" "$(cat "$norm_file")"
+	assertEquals "Trailing-slash replication should normalize destination snapshots into source-path form for recursive diffing." \
+		"tank/src/child@snap2
+tank/src@snap1" "$(cat "$norm_file")"
+}
+
+test_set_g_recursive_source_list_treats_trailing_slash_rewritten_destination_snapshots_as_common() {
+	source_tmp="$TEST_TMPDIR/source_trailing_common.txt"
+	dest_full_tmp="$TEST_TMPDIR/dest_trailing_common_full.txt"
+	dest_norm_tmp="$TEST_TMPDIR/dest_trailing_common_norm.txt"
+	g_initial_source_had_trailing_slash=1
+	g_initial_source="tank/src"
+	g_destination="backup/dst"
+	g_option_x_exclude_datasets=""
+	cat <<'EOF' >"$source_tmp"
+tank/src@snap1	111
+tank/src/child@snap2	222
+EOF
+	cat <<'EOF' >"$dest_full_tmp"
+backup/dst@snap1	111
+backup/dst/child@snap2	222
+EOF
+
+	zxfer_normalize_destination_snapshot_list "backup/dst" "$dest_full_tmp" "$dest_norm_tmp"
+	sort "$source_tmp" -o "$source_tmp"
+	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_norm_tmp" "$source_tmp"
+
+	assertEquals "Trailing-slash destination snapshots with matching GUIDs should not be queued as missing source work." \
+		"" "$g_recursive_source_list"
+	assertEquals "Trailing-slash destination snapshots with matching GUIDs should not be queued as destination-only deletes." \
+		"" "$g_recursive_destination_extra_dataset_list"
 }
 
 test_start_destination_snapshot_name_sorted_fifo_producer_streams_statuses_and_handles_registration_failures() {
@@ -3111,7 +3138,7 @@ test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
 		"$(cat "$log")" "direct="
 }
 
-test_normalize_destination_snapshot_list_preserves_destination_when_trailing_slash_requested() {
+test_normalize_destination_snapshot_list_rewrites_trailing_slash_destination_to_source_paths() {
 	input_file="$TEST_TMPDIR/dest_trailing_input.txt"
 	output_file="$TEST_TMPDIR/dest_trailing_output.txt"
 	g_initial_source_had_trailing_slash=1
@@ -3125,9 +3152,9 @@ EOF
 	g_option_V_very_verbose=1
 	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file" 2>/dev/null
 
-	assertEquals "Trailing-slash destinations should be sorted without source-prefix rewriting." \
-		"backup/dst/child@snap2
-backup/dst@snap1" "$(cat "$output_file")"
+	assertEquals "Trailing-slash destinations should be sorted after source-prefix rewriting." \
+		"tank/src/child@snap2
+tank/src@snap1" "$(cat "$output_file")"
 }
 
 test_normalize_destination_snapshot_list_treats_temp_paths_as_literal() {
@@ -3207,6 +3234,35 @@ test_normalize_destination_snapshot_list_preserves_status_tempfile_failures() {
 		63 "$status"
 }
 
+test_normalize_destination_snapshot_list_preserves_awk_failures() {
+	input_file="$TEST_TMPDIR/dest_normalize_awk_failure_input.txt"
+	output_file="$TEST_TMPDIR/dest_normalize_awk_failure_output.txt"
+	fake_awk="$TEST_TMPDIR/dest_normalize_awk_failure.sh"
+	g_initial_source_had_trailing_slash=0
+	g_initial_source="tank/src"
+	printf '%s\n' "backup/dst@snap1" >"$input_file"
+	cat >"$fake_awk" <<'EOF'
+#!/bin/sh
+printf '%s\n' "normalize awk failed" >&2
+exit 42
+EOF
+	chmod +x "$fake_awk"
+
+	output=$(
+		(
+			g_cmd_awk=$fake_awk
+			set +e
+			zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+			printf 'status=%s\n' "$?"
+		) 2>&1
+	)
+
+	assertContains "Destination normalization should preserve awk diagnostics." \
+		"$output" "normalize awk failed"
+	assertContains "Destination normalization should preserve awk exit status." \
+		"$output" "status=42"
+}
+
 test_normalize_destination_snapshot_stream_for_noop_proof_rewrites_and_filters() {
 	g_initial_source="tank/src"
 	g_initial_source_had_trailing_slash=0
@@ -3224,7 +3280,7 @@ test_normalize_destination_snapshot_stream_for_noop_proof_rewrites_and_filters()
 }
 
 test_normalize_destination_snapshot_stream_for_noop_proof_handles_trailing_slash_streams() {
-	g_initial_source="tank/src/"
+	g_initial_source="tank/src"
 	g_initial_source_had_trailing_slash=1
 	g_option_x_exclude_datasets=""
 
@@ -3238,10 +3294,10 @@ test_normalize_destination_snapshot_stream_for_noop_proof_handles_trailing_slash
 			zxfer_normalize_destination_snapshot_stream_for_noop_proof "backup/dst"
 	)
 
-	assertEquals "Trailing-slash stream normalization without excludes should pass names through." \
-		"backup/dst@snapA" "$pass_output"
-	assertEquals "Trailing-slash stream normalization should filter excluded datasets." \
-		"backup/dst@snapA" "$filter_output"
+	assertEquals "Trailing-slash stream normalization without excludes should rewrite into source-path form." \
+		"tank/src@snapA" "$pass_output"
+	assertEquals "Trailing-slash stream normalization should rewrite before filtering excluded datasets." \
+		"tank/src@snapA" "$filter_output"
 }
 
 test_filter_snapshot_file_with_excludes_filters_by_snapshot_dataset() {

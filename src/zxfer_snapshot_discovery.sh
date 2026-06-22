@@ -744,26 +744,17 @@ zxfer_write_source_snapshot_list_to_file() {
 # Usage: Called during source and destination snapshot discovery before
 # comparison, caching, or reporting depends on exact formatting.
 #
-# Normalize the destination snapshot list so it can be directly compared to the
-# source listing via comm. When the user provided a trailing slash on the
-# source, the destination dataset already aligns and only needs stable sorting.
+# Normalize the destination snapshot list into source-path form so it can be
+# directly compared to the source listing via comm. Trailing-slash replication
+# changes the destination root, but destination snapshot records still need the
+# same prefix rewrite before identity comparison.
 zxfer_normalize_destination_snapshot_list() {
 	l_destination_dataset=$1
 	l_input_file=$2
 	l_output_file=$3
 
-	if [ "$g_initial_source_had_trailing_slash" -eq 1 ]; then
-		if zxfer_command_display_render_enabled; then
-			l_cmd="$(zxfer_render_command_for_report "LC_ALL=C" sort "$l_input_file") > $(zxfer_quote_token_for_report "$l_output_file")"
-			zxfer_echoV "Running command: $l_cmd"
-			zxfer_record_last_command_string "$l_cmd"
-		else
-			zxfer_record_last_command_opaque
-		fi
-		LC_ALL=C sort "$l_input_file" >"$l_output_file"
-	else
-		# shellcheck disable=SC2016  # awk program should see literal $0.
-		l_prefix_rewrite_program='
+	# shellcheck disable=SC2016  # awk program should see literal $0.
+	l_prefix_rewrite_program='
 {
 	if (index($0, destination_dataset) == 1) {
 		suffix = substr($0, length(destination_dataset) + 1)
@@ -774,43 +765,42 @@ zxfer_normalize_destination_snapshot_list() {
 	}
 	print
 }'
-		if zxfer_command_display_render_enabled; then
-			l_cmd="$(zxfer_render_command_for_report "" "${g_cmd_awk:-awk}" \
-				-v "destination_dataset=$l_destination_dataset" \
-				-v "initial_source=$g_initial_source" \
-				"$l_prefix_rewrite_program" \
-				"$l_input_file") | $(zxfer_render_command_for_report "LC_ALL=C" sort) > $(zxfer_quote_token_for_report "$l_output_file")"
-			zxfer_echoV "Running command: $l_cmd"
-			zxfer_record_last_command_string "$l_cmd"
-		else
-			zxfer_record_last_command_opaque
-		fi
-		zxfer_get_temp_file >/dev/null || return "$?"
-		l_awk_status_file=$g_zxfer_temp_file_result
-		{
-			"${g_cmd_awk:-awk}" \
-				-v "destination_dataset=$l_destination_dataset" \
-				-v "initial_source=$g_initial_source" \
-				"$l_prefix_rewrite_program" \
-				"$l_input_file"
-			printf '%s\n' "$?" >"$l_awk_status_file" 2>/dev/null || :
-		} | LC_ALL=C sort >"$l_output_file"
-		l_sort_status=$?
-		l_awk_status=1
-		if [ -f "$l_awk_status_file" ]; then
-			IFS= read -r l_awk_status <"$l_awk_status_file" || l_awk_status=1
-		fi
-		zxfer_cleanup_runtime_artifact_path "$l_awk_status_file"
-		case "$l_awk_status" in
-		'' | *[!0-9]*)
-			return 1
-			;;
-		esac
-		if [ "$l_awk_status" -ne 0 ]; then
-			return "$l_awk_status"
-		fi
-		return "$l_sort_status"
+	if zxfer_command_display_render_enabled; then
+		l_cmd="$(zxfer_render_command_for_report "" "${g_cmd_awk:-awk}" \
+			-v "destination_dataset=$l_destination_dataset" \
+			-v "initial_source=$g_initial_source" \
+			"$l_prefix_rewrite_program" \
+			"$l_input_file") | $(zxfer_render_command_for_report "LC_ALL=C" sort) > $(zxfer_quote_token_for_report "$l_output_file")"
+		zxfer_echoV "Running command: $l_cmd"
+		zxfer_record_last_command_string "$l_cmd"
+	else
+		zxfer_record_last_command_opaque
 	fi
+	zxfer_get_temp_file >/dev/null || return "$?"
+	l_awk_status_file=$g_zxfer_temp_file_result
+	{
+		"${g_cmd_awk:-awk}" \
+			-v "destination_dataset=$l_destination_dataset" \
+			-v "initial_source=$g_initial_source" \
+			"$l_prefix_rewrite_program" \
+			"$l_input_file"
+		printf '%s\n' "$?" >"$l_awk_status_file" 2>/dev/null || :
+	} | LC_ALL=C sort >"$l_output_file"
+	l_sort_status=$?
+	l_awk_status=1
+	if [ -f "$l_awk_status_file" ]; then
+		IFS= read -r l_awk_status <"$l_awk_status_file" || l_awk_status=1
+	fi
+	zxfer_cleanup_runtime_artifact_path "$l_awk_status_file"
+	case "$l_awk_status" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	esac
+	if [ "$l_awk_status" -ne 0 ]; then
+		return "$l_awk_status"
+	fi
+	return "$l_sort_status"
 }
 
 # Purpose: Normalize destination snapshots from stdin for the fast no-op proof.
@@ -819,18 +809,6 @@ zxfer_normalize_destination_snapshot_list() {
 # file that the proof cannot reuse.
 zxfer_normalize_destination_snapshot_stream_for_noop_proof() {
 	l_destination_dataset=$1
-
-	if [ "$g_initial_source_had_trailing_slash" -eq 1 ]; then
-		if [ -z "${g_option_x_exclude_datasets:-}" ]; then
-			"${g_cmd_cat:-cat}"
-			return "$?"
-		fi
-		l_filter_program=$(zxfer_get_snapshot_exclude_filter_awk_program)
-		"${g_cmd_awk:-awk}" \
-			-v "exclude_pattern=$g_option_x_exclude_datasets" \
-			"$l_filter_program"
-		return "$?"
-	fi
 
 	if [ -z "${g_option_x_exclude_datasets:-}" ]; then
 		# shellcheck disable=SC2016  # awk program should see literal $0.
@@ -2122,7 +2100,12 @@ zxfer_set_g_recursive_source_list() {
 
 	# debugging
 	if [ "$g_option_V_very_verbose" -eq 1 ]; then
+		l_missing_snapshot_count=$("${g_cmd_awk:-awk}" 'END { print NR + 0 }' "$l_missing_snapshots_tmp_file")
+		l_destination_extra_snapshot_count=$("${g_cmd_awk:-awk}" 'END { print NR + 0 }' "$l_destination_extra_snapshots_tmp_file")
+		l_source_dataset_count=$(printf '%s\n' "$g_recursive_source_list" | "${g_cmd_awk:-awk}" 'NF { count++ } END { print count + 0 }')
+		l_destination_extra_dataset_count=$(printf '%s\n' "$g_recursive_destination_extra_dataset_list" | "${g_cmd_awk:-awk}" 'NF { count++ } END { print count + 0 }')
 		echo "====================================================================="
+		echo "Recursive snapshot delta summary: source_missing_snapshots=$l_missing_snapshot_count destination_extra_snapshots=$l_destination_extra_snapshot_count source_datasets=$l_source_dataset_count destination_extra_datasets=$l_destination_extra_dataset_count"
 		echo "====== Snapshots present in source but missing in destination ======"
 		if [ -s "$l_missing_snapshots_tmp_file" ]; then
 			cat "$l_missing_snapshots_tmp_file"
