@@ -162,7 +162,7 @@ Good pull requests explain:
 
 GitHub Actions also runs an Ubuntu portable-shell matrix for `dash`,
 `bash --posix`, and `busybox ash` on every push, plus a non-blocking `posh`
-lane on pushes to `main`, and a separate Docker-backed `kcov` coverage
-artifact job. Local development does not require `kcov`, but shell-
+lane on pushes to `main`, and a separate non-blocking Docker-backed `kcov`
+coverage artifact job. Local development does not require `kcov`, but shell-
 portability-sensitive changes should mention whether those CI lanes were
 considered.

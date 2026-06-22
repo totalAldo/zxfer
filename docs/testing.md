@@ -749,9 +749,10 @@ The project currently ships four GitHub Actions workflows:
   hygiene checks through the shared `tests/run_lint.sh` bootstrap with pinned
   tool versions and hashes
 - `coverage.yml`: shell coverage with both the bash-xtrace fallback and a
-  Docker-backed `kcov` pass, each uploaded as its own workflow artifact; the
-  bash-xtrace lane is the coverage-policy gate and publishes the current
-  `missing.txt` diff plus the policy report into the GitHub step summary
+  non-blocking Docker-backed `kcov` pass, each uploaded as its own workflow
+  artifact; the bash-xtrace lane is the coverage-policy gate and publishes the
+  current `missing.txt` diff plus the policy report into the GitHub step
+  summary
 - `tests.yml`: shunit2 unit tests on Ubuntu and macOS, plus an Ubuntu
   portable-shell matrix for `dash`, `bash --posix`, and `busybox ash` on every
   push, plus a non-blocking `posh` lane on pushes to `main` only so the slower
@@ -827,7 +828,10 @@ The `kcov` job runs on `ubuntu-26.04` and uses the official `kcov/kcov` Docker
 image pinned by digest instead of installing `kcov` from the runner package
 manager. That keeps the higher-fidelity coverage lane available even though
 current Ubuntu runner images do not consistently ship a native `kcov` package.
-The bash-xtrace job is kept alongside it because the line-oriented
+The Docker-backed `kcov` step is artifact-only and non-blocking because that
+instrumented container can diverge from the normal unit-test hosts in process,
+file-descriptor, and base-tool behavior. The bash-xtrace job is kept alongside
+it because the line-oriented
 `summary.tsv`, `policy_failures.tsv`, and `missing.txt` diff outputs are stable
 enough to enforce no-regression coverage policy in CI and on local developer
 machines.

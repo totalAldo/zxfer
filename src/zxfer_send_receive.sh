@@ -635,13 +635,11 @@ zxfer_open_send_job_completion_queue() {
 # resource.
 zxfer_open_send_job_completion_queue_fd() {
 	l_queue_path=$1
-	l_open_reader_pid=""
 	l_open_reader_status=0
 
-	# POSIX leaves read/write opens on FIFOs undefined. Use a short-lived
-	# reader helper to let the parent open its write-only queue fd first, then
-	# open the parent reader while that writer is held.
-	(: <"$l_queue_path") &
+	# POSIX leaves read/write FIFO opens undefined. Hold a short-lived
+	# reader so the parent can open its write-only fd before its reader fd.
+	(exec 7<"$l_queue_path") &
 	l_open_reader_pid=$!
 	if ! zxfer_register_cleanup_pid "$l_open_reader_pid" "rolling send/receive completion queue open helper"; then
 		l_abort_status=0
@@ -651,25 +649,26 @@ zxfer_open_send_job_completion_queue_fd() {
 		[ "$l_abort_status" -eq 0 ] || return "$l_abort_status"
 		return 1
 	fi
-	if ! zxfer_open_send_job_completion_queue_writer_fd "$l_queue_path"; then
+	zxfer_open_send_job_completion_queue_writer_fd "$l_queue_path" || {
+		l_open_reader_status=$?
 		zxfer_unregister_cleanup_pid "$l_open_reader_pid"
 		zxfer_abort_direct_child_pid "$l_open_reader_pid" TERM "rolling send/receive completion queue open helper" >/dev/null 2>&1 || :
 		wait "$l_open_reader_pid" 2>/dev/null || :
-		return 1
-	fi
+		return "$l_open_reader_status"
+	}
 	wait "$l_open_reader_pid" 2>/dev/null || l_open_reader_status=$?
 	zxfer_unregister_cleanup_pid "$l_open_reader_pid"
 	if [ "$l_open_reader_status" -ne 0 ]; then
-		# Never add 2>/dev/null to a bare exec redirection: it permanently
-		# redirects the MAIN SHELL's stderr to /dev/null, silently swallowing
-		# every later warning and failure report in the run.
+		# Never add 2>/dev/null to bare exec: it would redirect the
+		# main shell's stderr for every later warning and failure report.
 		exec 9>&- || true
 		return "$l_open_reader_status"
 	fi
-	if ! zxfer_open_send_job_completion_queue_reader_fd "$l_queue_path"; then
+	zxfer_open_send_job_completion_queue_reader_fd "$l_queue_path" || {
+		l_open_reader_status=$?
 		exec 9>&- || true
-		return 1
-	fi
+		return "$l_open_reader_status"
+	}
 
 	return 0
 }
@@ -680,6 +679,7 @@ zxfer_open_send_job_completion_queue_fd() {
 # coordination before asynchronous work starts using the shared coordination
 # resource.
 zxfer_open_send_job_completion_queue_writer_fd() {
+	exec 9>&- || true
 	exec 9>"$1"
 }
 

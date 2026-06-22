@@ -1306,19 +1306,19 @@ test_zxfer_open_send_job_completion_queue_fd_preserves_reader_helper_failure() {
 
 test_zxfer_open_send_job_completion_queue_writer_fd_opens_write_only() {
 	queue_file="$TEST_TMPDIR/open_queue_writer_mode"
+	writer_helper=$(sed -n '/^zxfer_open_send_job_completion_queue_writer_fd()/,/^}/p' "$ZXFER_ROOT/src/zxfer_send_receive.sh")
 	printf '%s\n' "existing" >"$queue_file"
 
 	(
 		zxfer_open_send_job_completion_queue_writer_fd "$queue_file" || exit 1
-		if cat <&9 >/dev/null 2>/dev/null; then
-			exit 2
-		fi
 		printf '%s\n' "written" >&9 || exit 3
 		exec 9>&-
 	)
 	status=$?
 
-	assertEquals "The rolling queue writer fd must be write-only, not read/write." \
+	assertContains "The rolling queue writer helper must use output-only redirection, not POSIX-undefined read/write FIFO opens." \
+		"$writer_helper" "exec 9>\"\$1\""
+	assertEquals "The rolling queue writer helper should open fd 9 successfully." \
 		0 "$status"
 	assertEquals "The write-only helper should still publish bytes through fd 9." \
 		"written" "$(cat "$queue_file")"
