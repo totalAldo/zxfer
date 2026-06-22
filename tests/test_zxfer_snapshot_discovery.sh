@@ -3561,6 +3561,36 @@ EOF
 		"$(cat "$output_file")" "dest=tank/src"
 }
 
+test_set_g_recursive_source_list_verbose_summarizes_dirty_recursive_delta() {
+	source_tmp="$TEST_TMPDIR/source_verbose_delta.txt"
+	dest_tmp="$TEST_TMPDIR/dest_verbose_delta.txt"
+	cat <<'EOF' >"$source_tmp"
+tank/src/app@snapA	111
+tank/src/db@snapB	222
+tank/src@snap0	000
+EOF
+	cat <<'EOF' >"$dest_tmp"
+tank/src/old@snapZ	999
+tank/src@snap0	000
+EOF
+	sort "$source_tmp" -o "$source_tmp"
+	sort "$dest_tmp" -o "$dest_tmp"
+	g_option_v_verbose=1
+	g_option_V_very_verbose=0
+	g_option_x_exclude_datasets=""
+
+	output=$(zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp" "$source_tmp")
+
+	assertContains "Verbose recursive delta output should show compact source/destination dirty counts." \
+		"$output" "Recursive snapshot delta summary: source_missing_snapshots=2 destination_extra_snapshots=1 source_datasets=2 destination_extra_datasets=1"
+	assertContains "Verbose recursive delta output should name source datasets queued for transfer." \
+		"$output" "  tank/src/app"
+	assertContains "Verbose recursive delta output should name every source-delta dataset." \
+		"$output" "  tank/src/db"
+	assertContains "Verbose recursive delta output should name destination-only datasets queued for delete inspection." \
+		"$output" "  tank/src/old"
+}
+
 test_set_g_recursive_source_list_treats_tmpdir_derived_paths_as_literal() {
 	old_tmpdir=${TMPDIR:-}
 	marker="$TEST_TMPDIR/source_sort_marker"

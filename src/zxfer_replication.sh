@@ -1104,11 +1104,10 @@ zxfer_process_replication_ready_queue() {
 	l_property_pass_required=$2
 	l_post_seed_property_sources_file=$3
 	l_ready_queue_active=0
-
+	l_processed_source_count=0
+	l_wait_count=0
 	l_job_limit=$(zxfer_get_replication_background_send_job_limit)
-	if [ "$l_job_limit" -gt 1 ] && [ "${g_option_n_dryrun:-0}" -eq 0 ]; then
-		l_ready_queue_active=1
-	fi
+	[ "$l_job_limit" -gt 1 ] && [ "${g_option_n_dryrun:-0}" -eq 0 ] && l_ready_queue_active=1
 
 	while [ -n "$l_pending_sources" ]; do
 		l_next_pending_sources=""
@@ -1130,20 +1129,20 @@ zxfer_process_replication_ready_queue() {
 			if [ "$l_source_is_ready" -eq 1 ]; then
 				zxfer_process_source_dataset "$l_source" "$l_property_pass_required" "$l_post_seed_property_sources_file"
 				l_processed_source=1
+				l_processed_source_count=$((l_processed_source_count + 1))
 				continue
 			fi
-			if [ -n "$l_next_pending_sources" ]; then
-				l_next_pending_sources="$l_next_pending_sources
-$l_source"
-			else
-				l_next_pending_sources=$l_source
-			fi
+			l_next_pending_sources=${l_next_pending_sources:+$l_next_pending_sources
+}$l_source
 		done <<-EOF
 			$l_pending_sources
 		EOF
 
 		l_pending_sources=$l_next_pending_sources
-		[ -n "$l_pending_sources" ] || return 0
+		[ -n "$l_pending_sources" ] || {
+			[ "$l_ready_queue_active" -eq 1 ] && zxfer_echov "Replication ready queue summary: queued_datasets=$(printf '%s\n' "$1" | "${g_cmd_awk:-awk}" 'NF { count++ } END { print count + 0 }') processed_datasets=$l_processed_source_count waits=$l_wait_count active_jobs=${g_count_zfs_send_jobs:-0}"
+			return 0
+		}
 		[ "$l_processed_source" -eq 1 ] && continue
 
 		if [ -n "${g_zfs_send_job_pids:-}" ]; then
@@ -1151,6 +1150,7 @@ $l_source"
 			if ! zxfer_replication_background_send_has_capacity; then
 				l_wait_reason="job limit"
 			fi
+			l_wait_count=$((l_wait_count + 1))
 			if [ "${g_zfs_send_job_queue_open:-0}" -eq 1 ]; then
 				zxfer_wait_for_next_zfs_send_job_completion "$l_wait_reason"
 			else

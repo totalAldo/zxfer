@@ -96,6 +96,9 @@ setUp() {
 	g_option_R_recursive=""
 	g_option_N_nonrecursive=""
 	g_option_n_dryrun=0
+	g_option_v_verbose=0
+	g_option_V_very_verbose=0
+	g_option_j_jobs=1
 	g_option_s_make_snapshot=0
 	g_option_m_migrate=0
 	g_option_c_services=""
@@ -1080,6 +1083,7 @@ test_newsnap_dry_run_previews_in_current_shell() {
 	log="$TEST_TMPDIR/newsnap_current_dry_run.log"
 	: >"$log"
 	g_option_n_dryrun=1
+	g_option_v_verbose=1
 	g_option_R_recursive="tank/src"
 	g_zxfer_new_snapshot_name="zxfer_current_dry_run"
 	g_LZFS="mock_zfs_tool"
@@ -3944,6 +3948,81 @@ tank/src/db/root"
 process:tank/src/db/root dest=backup/src/db/root
 wait_next:destination ancestry
 process:tank/src/app/root dest=backup/src/app/root
+wait_all:final sync" "$(cat "$log")"
+}
+
+test_copy_filesystems_ready_queue_drains_deferred_parent_child_work_in_one_run() {
+	g_option_R_recursive="tank"
+	g_option_j_jobs=2
+	g_option_n_dryrun=0
+	g_option_v_verbose=1
+	g_initial_source="tank"
+	g_destination="backup"
+	g_recursive_source_list="tank/iocage/jails/git
+tank/iocage/jails/sftp
+tank/iocage/jails/git/root
+tank/iocage/jails/sftp/root"
+	g_recursive_source_dataset_list=""
+	g_recursive_destination_extra_dataset_list=""
+	g_zfs_send_job_pids=""
+	g_zfs_send_job_supervisor_records=""
+	g_count_zfs_send_jobs=0
+	g_zfs_send_job_queue_open=1
+	log="$TEST_TMPDIR/ready_queue_parent_child.log"
+	rm -f "$log"
+
+	(
+		READY_LOG="$log"
+		JOB_SEQ=0
+		zxfer_prepare_ssh_control_sockets_for_active_hosts() {
+			:
+		}
+		zxfer_refresh_property_tree_prefetch_context() {
+			printf 'refresh\n' >>"$READY_LOG"
+		}
+		zxfer_process_source_dataset() {
+			l_ready_source=$1
+			l_ready_dest=$(zxfer_compute_actual_dest_for_source "$l_ready_source")
+			JOB_SEQ=$((JOB_SEQ + 1))
+			printf 'process:%s dest=%s\n' "$l_ready_source" "$l_ready_dest" >>"$READY_LOG"
+			zxfer_register_supervised_send_job \
+				"job-$JOB_SEQ" \
+				"$((200 + JOB_SEQ))" \
+				"$l_ready_source@snap" \
+				"$l_ready_dest" \
+				""
+		}
+		zxfer_wait_for_next_zfs_send_job_completion() {
+			printf 'wait_next:%s\n' "$1" >>"$READY_LOG"
+			l_ready_first_job=""
+			while IFS= read -r l_ready_job_id || [ -n "$l_ready_job_id" ]; do
+				[ -n "$l_ready_job_id" ] || continue
+				l_ready_first_job=$l_ready_job_id
+				break
+			done <<-EOF
+				$(zxfer_collect_supervised_send_job_ids)
+			EOF
+			zxfer_unregister_supervised_send_job "$l_ready_first_job"
+		}
+		zxfer_wait_for_zfs_send_jobs() {
+			printf 'wait_all:%s\n' "$1" >>"$READY_LOG"
+			g_zfs_send_job_pids=""
+			g_zfs_send_job_supervisor_records=""
+			g_count_zfs_send_jobs=0
+		}
+
+		zxfer_copy_filesystems >>"$READY_LOG"
+	)
+
+	assertEquals "Deferred descendants should be retried and processed before zxfer ends the same copy-filesystems pass." \
+		"refresh
+process:tank/iocage/jails/git dest=backup/tank/iocage/jails/git
+process:tank/iocage/jails/sftp dest=backup/tank/iocage/jails/sftp
+wait_next:job limit
+process:tank/iocage/jails/git/root dest=backup/tank/iocage/jails/git/root
+wait_next:job limit
+process:tank/iocage/jails/sftp/root dest=backup/tank/iocage/jails/sftp/root
+Replication ready queue summary: queued_datasets=4 processed_datasets=4 waits=2 active_jobs=2
 wait_all:final sync" "$(cat "$log")"
 }
 

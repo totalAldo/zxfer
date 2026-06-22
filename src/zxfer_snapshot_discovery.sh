@@ -2098,32 +2098,48 @@ zxfer_set_g_recursive_source_list() {
 		fi
 	fi
 
-	# debugging
-	if [ "$g_option_V_very_verbose" -eq 1 ]; then
+	if [ "${g_option_v_verbose:-0}" -eq 1 ] || [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
 		l_missing_snapshot_count=$("${g_cmd_awk:-awk}" 'END { print NR + 0 }' "$l_missing_snapshots_tmp_file")
 		l_destination_extra_snapshot_count=$("${g_cmd_awk:-awk}" 'END { print NR + 0 }' "$l_destination_extra_snapshots_tmp_file")
 		l_source_dataset_count=$(printf '%s\n' "$g_recursive_source_list" | "${g_cmd_awk:-awk}" 'NF { count++ } END { print count + 0 }')
 		l_destination_extra_dataset_count=$(printf '%s\n' "$g_recursive_destination_extra_dataset_list" | "${g_cmd_awk:-awk}" 'NF { count++ } END { print count + 0 }')
-		echo "====================================================================="
-		echo "Recursive snapshot delta summary: source_missing_snapshots=$l_missing_snapshot_count destination_extra_snapshots=$l_destination_extra_snapshot_count source_datasets=$l_source_dataset_count destination_extra_datasets=$l_destination_extra_dataset_count"
-		echo "====== Snapshots present in source but missing in destination ======"
-		if [ -s "$l_missing_snapshots_tmp_file" ]; then
-			cat "$l_missing_snapshots_tmp_file"
+
+		if [ "$l_missing_snapshot_count" -gt 0 ] || [ "$l_destination_extra_snapshot_count" -gt 0 ]; then
+			zxfer_echov "Recursive snapshot delta summary: source_missing_snapshots=$l_missing_snapshot_count destination_extra_snapshots=$l_destination_extra_snapshot_count source_datasets=$l_source_dataset_count destination_extra_datasets=$l_destination_extra_dataset_count"
+			if [ -n "$g_recursive_source_list" ]; then
+				zxfer_echov "Recursive source datasets queued for transfer:"
+				printf '%s\n' "$g_recursive_source_list" | while IFS= read -r l_verbose_source_dataset; do
+					[ -n "$l_verbose_source_dataset" ] || continue
+					zxfer_echov "  $l_verbose_source_dataset"
+				done
+			fi
+			if [ -n "$g_recursive_destination_extra_dataset_list" ]; then
+				zxfer_echov "Recursive destination datasets queued for delete inspection:"
+				printf '%s\n' "$g_recursive_destination_extra_dataset_list" | while IFS= read -r l_verbose_destination_dataset; do
+					[ -n "$l_verbose_destination_dataset" ] || continue
+					zxfer_echov "  $l_verbose_destination_dataset"
+				done
+			fi
 		fi
-		echo "====== Source datasets that differ from destination ======"
-		echo "g_recursive_source_list:"
-		echo "$g_recursive_source_list"
-		echo "Source dataset count: $(echo "$g_recursive_source_list" | grep -cve '^\s*$')"
-		echo "====================================================================="
-		echo "====== Extra Destination snapshots not in source ======"
-		if [ -s "$l_destination_extra_snapshots_tmp_file" ]; then
-			cat "$l_destination_extra_snapshots_tmp_file"
+
+		# debugging
+		if [ "$g_option_V_very_verbose" -eq 1 ]; then
+			echo "====================================================================="
+			echo "====== Snapshots present in source but missing in destination ======"
+			[ -s "$l_missing_snapshots_tmp_file" ] && cat "$l_missing_snapshots_tmp_file"
+			echo "====== Source datasets that differ from destination ======"
+			echo "g_recursive_source_list:"
+			echo "$g_recursive_source_list"
+			echo "Source dataset count: $l_source_dataset_count"
+			echo "====================================================================="
+			echo "====== Extra Destination snapshots not in source ======"
+			[ -s "$l_destination_extra_snapshots_tmp_file" ] && cat "$l_destination_extra_snapshots_tmp_file"
+			echo "====== Destination datasets with extra snapshots not in source ======"
+			if [ "$g_recursive_destination_extra_dataset_list" != "" ]; then
+				printf '%s\n' "$g_recursive_destination_extra_dataset_list"
+			fi
+			echo "====================================================================="
 		fi
-		echo "====== Destination datasets with extra snapshots not in source ======"
-		if [ "$g_recursive_destination_extra_dataset_list" != "" ]; then
-			printf '%s\n' "$g_recursive_destination_extra_dataset_list"
-		fi
-		echo "====================================================================="
 	fi
 
 	if [ "$g_recursive_source_list" = "" ]; then
