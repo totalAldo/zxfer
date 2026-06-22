@@ -52,6 +52,40 @@ wait_for_nonempty_file() {
 	[ -s "$l_wait_file" ]
 }
 
+open_background_job_test_fifo_writer_fd9() {
+	l_queue_path=$1
+	l_open_attempt=0
+	l_open_status=1
+
+	exec 9>&- || true
+	while [ "$l_open_attempt" -lt 8 ]; do
+		l_open_attempt=$((l_open_attempt + 1))
+		if { exec 9>&1; } >"$l_queue_path"; then
+			return 0
+		fi
+		l_open_status=$?
+	done
+
+	return "$l_open_status"
+}
+
+open_background_job_test_fifo_reader_fd8() {
+	l_queue_path=$1
+	l_open_attempt=0
+	l_open_status=1
+
+	exec 8<&- || true
+	while [ "$l_open_attempt" -lt 8 ]; do
+		l_open_attempt=$((l_open_attempt + 1))
+		if { exec 8<&0; } <"$l_queue_path"; then
+			return 0
+		fi
+		l_open_status=$?
+	done
+
+	return "$l_open_status"
+}
+
 test_background_job_record_helpers_track_and_remove_jobs() {
 	zxfer_register_background_job_record "job-1" "send_receive" 101 wrapper "$TEST_TMPDIR/job-1.status"
 	zxfer_register_background_job_record "job-2" "source_snapshot_list" 202 process_group "$TEST_TMPDIR/job-2.status"
@@ -462,9 +496,9 @@ test_fifo_notification_publishes_job_id_after_status_file_write() {
 		# while that writer is held (hardened for FreeBSD/illumos 2026.05.19).
 		(: <"$fifo_dir/queue") &
 		open_helper_pid=$!
-		exec 9>"$fifo_dir/queue"
+		open_background_job_test_fifo_writer_fd9 "$fifo_dir/queue" || exit 1
 		wait "$open_helper_pid"
-		exec 8<"$fifo_dir/queue"
+		open_background_job_test_fifo_reader_fd8 "$fifo_dir/queue" || exit 1
 
 		zxfer_spawn_supervised_background_job \
 			"unit_test" \
@@ -513,9 +547,9 @@ test_fifo_notification_reports_status_write_failures_as_completion_write_failed_
 		mkfifo "$fifo_dir/queue" || exit 1
 		(: <"$fifo_dir/queue") &
 		open_helper_pid=$!
-		exec 9>"$fifo_dir/queue"
+		open_background_job_test_fifo_writer_fd9 "$fifo_dir/queue" || exit 1
 		wait "$open_helper_pid"
-		exec 8<"$fifo_dir/queue"
+		open_background_job_test_fifo_reader_fd8 "$fifo_dir/queue" || exit 1
 
 		# Point the allocated status file into a read-only directory so the
 		# job shell's status write fails and the failure record is queued.

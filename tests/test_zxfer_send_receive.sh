@@ -1317,11 +1317,41 @@ test_zxfer_open_send_job_completion_queue_writer_fd_opens_write_only() {
 	status=$?
 
 	assertContains "The rolling queue writer helper must use output-only redirection, not POSIX-undefined read/write FIFO opens." \
-		"$writer_helper" "exec 9>\"\$1\""
+		"$writer_helper" "{ exec 9>&1; } >\"\$1\""
 	assertEquals "The rolling queue writer helper should open fd 9 successfully." \
 		0 "$status"
 	assertEquals "The write-only helper should still publish bytes through fd 9." \
 		"written" "$(cat "$queue_file")"
+}
+
+test_zxfer_open_send_job_completion_queue_writer_fd_returns_failure_without_exiting_shell() {
+	output=$(
+		(
+			zxfer_open_send_job_completion_queue_writer_fd "$TEST_TMPDIR/missing-writer/queue" 2>/dev/null
+			printf 'status=%s\n' "$?"
+			printf 'after=yes\n'
+		)
+	)
+
+	assertContains "Failed writer opens should return without exiting the shell." \
+		"$output" "after=yes"
+	assertNotContains "Failed writer opens should not report success." \
+		"$output" "status=0"
+}
+
+test_zxfer_open_send_job_completion_queue_reader_fd_returns_failure_without_exiting_shell() {
+	output=$(
+		(
+			zxfer_open_send_job_completion_queue_reader_fd "$TEST_TMPDIR/missing-reader/queue" 2>/dev/null
+			printf 'status=%s\n' "$?"
+			printf 'after=yes\n'
+		)
+	)
+
+	assertContains "Failed reader opens should return without exiting the shell." \
+		"$output" "after=yes"
+	assertNotContains "Failed reader opens should not report success." \
+		"$output" "status=0"
 }
 
 test_zxfer_open_send_job_completion_queue_fd_round_trips_fifo_notification() {

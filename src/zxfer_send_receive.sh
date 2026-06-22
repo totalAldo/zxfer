@@ -673,48 +673,46 @@ zxfer_open_send_job_completion_queue_fd() {
 	return 0
 }
 
-# Purpose: Open the send job completion queue writer file descriptor and
-# publish the handles or state later helpers need.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination before asynchronous work starts using the shared coordination
-# resource.
+# Purpose: Open the rolling completion queue writer fd.
+# Usage: Called before async send/receive work starts or reopens the queue.
 zxfer_open_send_job_completion_queue_writer_fd() {
 	exec 9>&- || true
-	exec 9>"$1"
+	for l_open_attempt in 1 2 3 4 5 6 7 8; do
+		{ exec 9>&1; } >"$1" && return 0
+		l_open_status=$?
+	done
+
+	return "$l_open_status"
 }
 
-# Purpose: Open the send job completion queue reader file descriptor and
-# publish the handles or state later helpers need.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination before asynchronous work starts using the shared coordination
-# resource.
+# Purpose: Open the rolling completion queue reader fd.
+# Usage: Called after the queue writer is held so completion waits can read.
 zxfer_open_send_job_completion_queue_reader_fd() {
-	exec 8<"$1"
+	exec 8<&- || true
+	for l_open_attempt in 1 2 3 4 5 6 7 8; do
+		{ exec 8<&0; } <"$1" && return 0
+		l_open_status=$?
+	done
+
+	return "$l_open_status"
 }
 
-# Purpose: Close the send job completion queue writer file descriptor and
-# release the related handles or state.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination after the protected work finishes or cleanup takes over.
+# Purpose: Close the rolling completion queue writer fd.
+# Usage: Called after work finishes or before waiting on queue notifications.
 zxfer_close_send_job_completion_queue_writer_fd() {
 	if [ "${g_zfs_send_job_queue_writer_open:-0}" -eq 1 ]; then
-		# The old `exec 9>&- 2>/dev/null` permanently redirected the main
-		# shell's stderr to /dev/null from the first rolling-queue wait on,
-		# silently swallowing every later warning and failure report in -j
-		# runs (including the post-receive divergence verification error).
+		# Never 2>/dev/null a bare exec; that can permanently redirect the
+		# main shell's stderr and hide later warnings or failure reports.
 		exec 9>&- || true
 	fi
 	g_zfs_send_job_queue_writer_open=0
 }
 
-# Purpose: Close the send job completion queue and release the related handles
-# or state.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination after the protected work finishes or cleanup takes over.
+# Purpose: Close the rolling completion queue and release related state.
+# Usage: Called after protected work finishes or cleanup takes over.
 zxfer_close_send_job_completion_queue() {
 	zxfer_close_send_job_completion_queue_writer_fd
 	if [ "${g_zfs_send_job_queue_open:-0}" -eq 1 ]; then
-		# See the writer-fd close above: never 2>/dev/null a bare exec.
 		exec 8<&- || true
 	fi
 	g_zfs_send_job_queue_open=0
