@@ -1127,7 +1127,7 @@ zxfer_process_replication_ready_queue() {
 				fi
 			fi
 			if [ "$l_source_is_ready" -eq 1 ]; then
-				zxfer_process_source_dataset "$l_source" "$l_property_pass_required" "$l_post_seed_property_sources_file"
+				zxfer_process_source_dataset "$l_source" "$l_property_pass_required" "$l_post_seed_property_sources_file" </dev/null
 				l_processed_source=1
 				l_processed_source_count=$((l_processed_source_count + 1))
 				continue

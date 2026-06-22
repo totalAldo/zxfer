@@ -4026,6 +4026,34 @@ Replication ready queue summary: queued_datasets=4 processed_datasets=4 waits=2 
 wait_all:final sync" "$(cat "$log")"
 }
 
+test_replication_ready_queue_preserves_pending_list_when_processing_reads_stdin() {
+	g_option_j_jobs=4
+	g_option_n_dryrun=0
+	log="$TEST_TMPDIR/ready_queue_stdin.log"
+	rm -f "$log"
+
+	(
+		READY_LOG="$log"
+		zxfer_process_source_dataset() {
+			printf 'process:%s\n' "$1" >>"$READY_LOG"
+			if IFS= read -r l_stolen_source; then
+				printf 'stole:%s\n' "$l_stolen_source" >>"$READY_LOG"
+			fi
+		}
+
+		zxfer_process_replication_ready_queue "tank/src/app
+tank/src/app/root
+tank/src/db
+tank/src/db/root" 0 "$TEST_TMPDIR/post_seed_sources"
+	)
+
+	assertEquals "Dataset processing must not inherit the ready queue reader, or ssh-like commands can consume deferred source names before the scheduler sees them." \
+		"process:tank/src/app
+process:tank/src/app/root
+process:tank/src/db
+process:tank/src/db/root" "$(cat "$log")"
+}
+
 test_copy_filesystems_merges_iteration_sources_and_deduplicates_post_seed_reconcile_in_current_shell() {
 	g_option_P_transfer_property=1
 	g_option_R_recursive="tank/src"
