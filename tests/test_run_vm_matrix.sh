@@ -45,19 +45,27 @@ test_vm_profile_full_includes_omnios() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_vm_guest_catalog_uses_current_ubuntu_and_freebsd_releases() {
+test_vm_guest_catalog_uses_current_guest_releases() {
 	assertEquals "The Linux VM guest label should track the current Ubuntu release." \
 		"Ubuntu 26.04" "$(zxfer_vm_guest_label ubuntu)"
 	assertEquals "The FreeBSD VM guest label should track the current FreeBSD release." \
 		"FreeBSD 15.1" "$(zxfer_vm_guest_label freebsd)"
+	assertEquals "The OmniOS VM guest label should track the current stable release." \
+		"OmniOS r151058" "$(zxfer_vm_guest_label omnios)"
 	assertEquals "The Ubuntu amd64 VM image should use the current cloud image name." \
 		"ubuntu-26.04-server-cloudimg-amd64.img" "$(zxfer_vm_guest_qemu_image_filename ubuntu amd64)"
 	assertEquals "The FreeBSD arm64 VM image should use the current cloud image name." \
 		"FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz" "$(zxfer_vm_guest_qemu_image_filename freebsd arm64)"
+	assertEquals "The OmniOS amd64 VM image should use the current stable cloud image name." \
+		"omnios-r151058.cloud.qcow2" "$(zxfer_vm_guest_qemu_image_filename omnios amd64)"
 	assertContains "The Ubuntu image URL should use the current released cloud-image directory." \
 		"$(zxfer_vm_guest_qemu_image_url ubuntu amd64)" "/releases/26.04/release/"
 	assertContains "The FreeBSD image URL should use the current release directory." \
 		"$(zxfer_vm_guest_qemu_image_url freebsd amd64)" "/15.1-RELEASE/"
+	assertContains "The OmniOS image URL should use the current stable cloud image." \
+		"$(zxfer_vm_guest_qemu_image_url omnios amd64)" "/stable/omnios-r151058.cloud.qcow2"
+	assertContains "The OmniOS checksum URL should use the matching current stable checksum." \
+		"$(zxfer_vm_guest_qemu_checksum_url omnios amd64)" "/stable/omnios-r151058.cloud.qcow2.sha256"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -430,7 +438,7 @@ EOF
 		PATH=\"$mock_bin:\$PATH\"
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 30 \"OmniOS r151056/amd64\" 2
+		zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 30 \"OmniOS r151058/amd64\" 2
 		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
 	"
 
@@ -790,7 +798,7 @@ test_vm_checksum_parser_supports_single_hash_files() {
 abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 EOF
 
-	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "omnios-r151056.cloud.qcow2")
+	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "omnios-r151058.cloud.qcow2")
 
 	assertEquals "The checksum parser should support one-line sha256 files." \
 		"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" "$result"

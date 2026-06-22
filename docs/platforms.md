@@ -38,7 +38,7 @@ Current guest targets for the VM matrix are:
 
 - Ubuntu 26.04
 - FreeBSD 15.1
-- OmniOS r151056
+- OmniOS r151058
 
 The local runner prefers the guest architecture that best matches the host. On
 Linux `amd64` hosts with KVM, and on Intel macOS hosts, the matrix uses the

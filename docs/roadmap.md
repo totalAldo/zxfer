@@ -33,9 +33,9 @@ supported-platform set or upstream OpenZFS support policy changes.
   systems or OpenZFS release lines that have already reached end of support.
 - For illumos and OmniOS, define the effective compatibility floor by the
   oldest currently supported OmniOS train instead of preserving behavior for
-  ended trains. As of 2026-04-11, the official OmniOS release schedule shows
-  `r151054` as the supported LTS train through 2028-05-01 and `r151056` as
-  the current supported stable train through 2026-11-02.
+  ended trains. As of 2026-06-22, the official OmniOS release schedule shows
+  `r151054` as the supported LTS train through 2028-05-01 and `r151058` as
+  the current supported stable train through 2027-05-03.
 - When the floor rises, follow through by removing old property, send/receive,
   and dependency-compatibility branches that only exist for legacy behavior.
 

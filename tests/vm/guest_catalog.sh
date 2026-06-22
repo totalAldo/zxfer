@@ -14,7 +14,7 @@ zxfer_vm_guest_label() {
 	case "$1" in
 	ubuntu) printf '%s\n' "Ubuntu 26.04" ;;
 	freebsd) printf '%s\n' "FreeBSD 15.1" ;;
-	omnios) printf '%s\n' "OmniOS r151056" ;;
+	omnios) printf '%s\n' "OmniOS r151058" ;;
 	*) return 1 ;;
 	esac
 }
@@ -81,7 +81,7 @@ zxfer_vm_guest_qemu_image_filename() {
 		printf '%s\n' "FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz"
 		;;
 	omnios/amd64)
-		printf '%s\n' "omnios-r151056.cloud.qcow2"
+		printf '%s\n' "omnios-r151058.cloud.qcow2"
 		;;
 	*)
 		return 1
@@ -128,7 +128,7 @@ zxfer_vm_guest_qemu_checksum_url() {
 		printf '%s\n' "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/aarch64/Latest/CHECKSUM.SHA256"
 		;;
 	omnios/amd64)
-		printf '%s\n' "https://downloads.omnios.org/media/stable/omnios-r151056.cloud.qcow2.sha256"
+		printf '%s\n' "https://downloads.omnios.org/media/stable/omnios-r151058.cloud.qcow2.sha256"
 		;;
 	*)
 		return 1

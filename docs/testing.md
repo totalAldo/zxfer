@@ -440,7 +440,7 @@ Profiles:
 
 - `smoke`: Ubuntu 26.04 guest
 - `local`: Ubuntu 26.04 plus FreeBSD 15.1 guests
-- `full`: Ubuntu 26.04, FreeBSD 15.1, and OmniOS r151056 guests
+- `full`: Ubuntu 26.04, FreeBSD 15.1, and OmniOS r151058 guests
 - `ci`: the same guest set as `full`, intended for workflow-driven selection
 
 The local QEMU backend prefers the guest architecture that best matches the
