@@ -57,9 +57,10 @@ policy format when ratcheting budgets down.
 
 If you prefer a prebuilt contributor environment, open the repository in the
 included `.devcontainer/` from GitHub Codespaces or VS Code. It preinstalls
-the Ubuntu 24.04 multi-shell, lint, and `kcov` tooling used for local lint,
-shunit2, and coverage work, but it does not replace a ZFS-capable host or
-disposable VM or QEMU-capable host for the integration runners.
+the same pinned multi-shell, lint, and `kcov` tooling used for local lint,
+shunit2, and coverage work on its Ubuntu 24.04 base, but it does not replace
+a ZFS-capable host, disposable VM, or QEMU-capable host for the integration
+runners.
 
 Run targeted suites when editing a specific area:
 

@@ -11,7 +11,7 @@ concurrency:
 jobs:
   zfs-integration:
     name: ZFS Integration
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -64,15 +64,16 @@ jobs:
 
   integration-freebsd:
     name: ZFS Integration (FreeBSD)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Run integration tests on FreeBSD
-        uses: vmactions/freebsd-vm@d1e65811565151536c0c894fff74f06351ed26e6 # v1.4.5
+        uses: vmactions/freebsd-vm@b84ab5559b5a1bb4b8ee2737d2506a16e1737636 # v1.4.8
         with:
+          release: "15.1"
           usesh: true
           run: |
             export TMPDIR="$GITHUB_WORKSPACE/ci-artifacts/integration-freebsd"
@@ -96,7 +97,7 @@ jobs:
 
   integration-omnios:
     name: ZFS Integration (OmniOS)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read

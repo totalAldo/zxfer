@@ -12,8 +12,8 @@ zxfer_vm_guest_exists() {
 
 zxfer_vm_guest_label() {
 	case "$1" in
-	ubuntu) printf '%s\n' "Ubuntu 24.04" ;;
-	freebsd) printf '%s\n' "FreeBSD 15.0" ;;
+	ubuntu) printf '%s\n' "Ubuntu 26.04" ;;
+	freebsd) printf '%s\n' "FreeBSD 15.1" ;;
 	omnios) printf '%s\n' "OmniOS r151056" ;;
 	*) return 1 ;;
 	esac
@@ -69,16 +69,16 @@ zxfer_vm_guest_qemu_image_filename() {
 
 	case "$l_guest/$l_arch" in
 	ubuntu/amd64)
-		printf '%s\n' "ubuntu-24.04-server-cloudimg-amd64.img"
+		printf '%s\n' "ubuntu-26.04-server-cloudimg-amd64.img"
 		;;
 	ubuntu/arm64)
-		printf '%s\n' "ubuntu-24.04-server-cloudimg-arm64.img"
+		printf '%s\n' "ubuntu-26.04-server-cloudimg-arm64.img"
 		;;
 	freebsd/amd64)
-		printf '%s\n' "FreeBSD-15.0-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz"
+		printf '%s\n' "FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz"
 		;;
 	freebsd/arm64)
-		printf '%s\n' "FreeBSD-15.0-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz"
+		printf '%s\n' "FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz"
 		;;
 	omnios/amd64)
 		printf '%s\n' "omnios-r151056.cloud.qcow2"
@@ -96,13 +96,13 @@ zxfer_vm_guest_qemu_image_url() {
 
 	case "$l_guest/$l_arch" in
 	ubuntu/amd64 | ubuntu/arm64)
-		printf '%s\n' "https://cloud-images.ubuntu.com/releases/noble/release/$l_file_name"
+		printf '%s\n' "https://cloud-images.ubuntu.com/releases/26.04/release/$l_file_name"
 		;;
 	freebsd/amd64)
-		printf '%s\n' "https://download.freebsd.org/releases/VM-IMAGES/15.0-RELEASE/amd64/Latest/$l_file_name"
+		printf '%s\n' "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/$l_file_name"
 		;;
 	freebsd/arm64)
-		printf '%s\n' "https://download.freebsd.org/releases/VM-IMAGES/15.0-RELEASE/aarch64/Latest/$l_file_name"
+		printf '%s\n' "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/aarch64/Latest/$l_file_name"
 		;;
 	omnios/amd64)
 		printf '%s\n' "https://downloads.omnios.org/media/stable/$l_file_name"
@@ -119,13 +119,13 @@ zxfer_vm_guest_qemu_checksum_url() {
 
 	case "$l_guest/$l_arch" in
 	ubuntu/amd64 | ubuntu/arm64)
-		printf '%s\n' "https://cloud-images.ubuntu.com/releases/noble/release/SHA256SUMS"
+		printf '%s\n' "https://cloud-images.ubuntu.com/releases/26.04/release/SHA256SUMS"
 		;;
 	freebsd/amd64)
-		printf '%s\n' "https://download.freebsd.org/releases/VM-IMAGES/15.0-RELEASE/amd64/Latest/CHECKSUM.SHA256"
+		printf '%s\n' "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/CHECKSUM.SHA256"
 		;;
 	freebsd/arm64)
-		printf '%s\n' "https://download.freebsd.org/releases/VM-IMAGES/15.0-RELEASE/aarch64/Latest/CHECKSUM.SHA256"
+		printf '%s\n' "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/aarch64/Latest/CHECKSUM.SHA256"
 		;;
 	omnios/amd64)
 		printf '%s\n' "https://downloads.omnios.org/media/stable/omnios-r151056.cloud.qcow2.sha256"

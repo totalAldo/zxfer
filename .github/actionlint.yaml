@@ -1,0 +1,6 @@
+paths:
+  .github/workflows/*.{yml,yaml}:
+    ignore:
+      # GitHub announced ubuntu-26.04 as a public-preview hosted runner after
+      # actionlint 1.7.12's runner-label table was cut.
+      - 'label "ubuntu-26\.04" is unknown'

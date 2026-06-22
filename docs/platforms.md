@@ -36,8 +36,8 @@ of the supported host surface.
 
 Current guest targets for the VM matrix are:
 
-- Ubuntu 24.04
-- FreeBSD 15.0
+- Ubuntu 26.04
+- FreeBSD 15.1
 - OmniOS r151056
 
 The local runner prefers the guest architecture that best matches the host. On

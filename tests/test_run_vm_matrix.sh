@@ -45,6 +45,22 @@ test_vm_profile_full_includes_omnios() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_catalog_uses_current_ubuntu_and_freebsd_releases() {
+	assertEquals "The Linux VM guest label should track the current Ubuntu release." \
+		"Ubuntu 26.04" "$(zxfer_vm_guest_label ubuntu)"
+	assertEquals "The FreeBSD VM guest label should track the current FreeBSD release." \
+		"FreeBSD 15.1" "$(zxfer_vm_guest_label freebsd)"
+	assertEquals "The Ubuntu amd64 VM image should use the current cloud image name." \
+		"ubuntu-26.04-server-cloudimg-amd64.img" "$(zxfer_vm_guest_qemu_image_filename ubuntu amd64)"
+	assertEquals "The FreeBSD arm64 VM image should use the current cloud image name." \
+		"FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz" "$(zxfer_vm_guest_qemu_image_filename freebsd arm64)"
+	assertContains "The Ubuntu image URL should use the current released cloud-image directory." \
+		"$(zxfer_vm_guest_qemu_image_url ubuntu amd64)" "/releases/26.04/release/"
+	assertContains "The FreeBSD image URL should use the current release directory." \
+		"$(zxfer_vm_guest_qemu_image_url freebsd amd64)" "/15.1-RELEASE/"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_parse_args_accepts_jobs_and_stream_guest_output() {
 	zxfer_vm_parse_args --jobs 2 --stream-guest-output
 
@@ -270,7 +286,7 @@ test_vm_refresh_cached_download_uses_cached_copy_when_refresh_fails() {
 	mock_bin="$TEST_TMPDIR/mock-bin-refresh-cached"
 	checksum_file="$TEST_TMPDIR/SHA256SUMS"
 	mkdir -p "$mock_bin"
-	printf '%s\n' "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 ubuntu-24.04-server-cloudimg-arm64.img" >"$checksum_file"
+	printf '%s\n' "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 ubuntu-26.04-server-cloudimg-arm64.img" >"$checksum_file"
 
 	cat <<'EOF' >"$mock_bin/curl"
 #!/bin/sh
@@ -282,7 +298,7 @@ EOF
 		PATH=\"$mock_bin:\$PATH\"
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_refresh_cached_download 'https://example.invalid/SHA256SUMS' \"$checksum_file\" 'Ubuntu 24.04/arm64' 'checksum manifest SHA256SUMS'
+		zxfer_vm_refresh_cached_download 'https://example.invalid/SHA256SUMS' \"$checksum_file\" 'Ubuntu 26.04/arm64' 'checksum manifest SHA256SUMS'
 		cat \"$checksum_file\"
 	"
 
@@ -291,7 +307,7 @@ EOF
 	assertContains "The refresh helper should warn when it reuses a cached manifest after a download failure." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "reusing cached copy"
 	assertContains "The refresh helper should preserve the existing manifest contents when it falls back to cache." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ubuntu-24.04-server-cloudimg-arm64.img"
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ubuntu-26.04-server-cloudimg-arm64.img"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -310,7 +326,7 @@ EOF
 		PATH=\"$mock_bin:\$PATH\"
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_refresh_cached_download 'https://example.invalid/SHA256SUMS' \"$checksum_file\" 'Ubuntu 24.04/arm64' 'checksum manifest SHA256SUMS'
+		zxfer_vm_refresh_cached_download 'https://example.invalid/SHA256SUMS' \"$checksum_file\" 'Ubuntu 26.04/arm64' 'checksum manifest SHA256SUMS'
 	"
 
 	assertEquals "Checksum refresh should still fail closed when no cached manifest exists." \
@@ -462,7 +478,7 @@ EOF
 		PATH=\"$mock_bin:\$PATH\"
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.0/arm64' 'the selected guest test layer' 15
+		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.1/arm64' 'the selected guest test layer' 15
 		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
 	"
 
@@ -512,7 +528,7 @@ EOF
 		PATH=\"$mock_bin:\$PATH\"
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.0/arm64' 'guest preparation' 15
+		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.1/arm64' 'guest preparation' 15
 		printf 'keyscan-count=%s\n' \"\$(cat \"$keyscan_count_file\")\"
 	"
 
@@ -542,7 +558,7 @@ EOF
 	zxfer_test_capture_subshell "
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_report_guest_command_failure 'FreeBSD 15.0/arm64' 'shunit2 runner' 1 \"$stdout_file\" \"$stderr_file\"
+		zxfer_vm_report_guest_command_failure 'FreeBSD 15.1/arm64' 'shunit2 runner' 1 \"$stdout_file\" \"$stderr_file\"
 	"
 
 	assertEquals "Guest command failure summaries should not fail the reporting helper itself." \
@@ -567,7 +583,7 @@ EOF
 	zxfer_test_capture_subshell "
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_report_guest_command_failure 'FreeBSD 15.0/arm64' 'shunit2 runner' 1 \"$stdout_file\" \"$stderr_file\"
+		zxfer_vm_report_guest_command_failure 'FreeBSD 15.1/arm64' 'shunit2 runner' 1 \"$stdout_file\" \"$stderr_file\"
 	"
 
 	assertEquals "Assertion-only harness failures should still render through the shared guest failure reporter." \
@@ -662,10 +678,10 @@ test_vm_detect_host_platform_marks_wsl2() {
 test_vm_checksum_parser_supports_bsd_format() {
 	checksum_file="$TEST_TMPDIR/freebsd.CHECKSUM.SHA256"
 	cat <<'EOF' >"$checksum_file"
-SHA256 (FreeBSD-15.0-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz) = abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+SHA256 (FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz) = abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 EOF
 
-	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "FreeBSD-15.0-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz")
+	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz")
 
 	assertEquals "The checksum parser should support FreeBSD-style SHA256 manifests." \
 		"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" "$result"
@@ -675,10 +691,10 @@ EOF
 test_vm_checksum_parser_supports_gnu_format() {
 	checksum_file="$TEST_TMPDIR/ubuntu.SHA256SUMS"
 	cat <<'EOF' >"$checksum_file"
-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 ubuntu-24.04-server-cloudimg-amd64.img
+abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 ubuntu-26.04-server-cloudimg-amd64.img
 EOF
 
-	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "ubuntu-24.04-server-cloudimg-amd64.img")
+	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "ubuntu-26.04-server-cloudimg-amd64.img")
 
 	assertEquals "The checksum parser should support GNU-style checksum manifests." \
 		"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" "$result"
@@ -688,10 +704,10 @@ EOF
 test_vm_checksum_parser_supports_gnu_binary_format() {
 	checksum_file="$TEST_TMPDIR/ubuntu-binary.SHA256SUMS"
 	cat <<'EOF' >"$checksum_file"
-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 *ubuntu-24.04-server-cloudimg-arm64.img
+abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 *ubuntu-26.04-server-cloudimg-arm64.img
 EOF
 
-	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "ubuntu-24.04-server-cloudimg-arm64.img")
+	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "ubuntu-26.04-server-cloudimg-arm64.img")
 
 	assertEquals "The checksum parser should support GNU binary-mode checksum manifests." \
 		"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" "$result"

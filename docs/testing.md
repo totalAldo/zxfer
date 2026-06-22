@@ -99,9 +99,9 @@ Run the local lint stack with the same pinned toolchain as CI:
 ```
 
 For a ready-made contributor environment, open the repository in the included
-VS Code / GitHub Codespaces devcontainer. It tracks the Ubuntu 24.04 CI host
-family closely enough for local lint, shunit2, and coverage work, and it
-preinstalls:
+VS Code / GitHub Codespaces devcontainer. It stays on the stable Ubuntu 24.04
+base while carrying the same pinned lint, shunit2, and coverage tooling used
+by CI, and it preinstalls:
 
 - `dash`
 - `bash-posix`
@@ -438,27 +438,29 @@ Execution defaults:
 
 Profiles:
 
-- `smoke`: Ubuntu 24.04 guest
-- `local`: Ubuntu 24.04 plus FreeBSD 15.0 guests
-- `full`: Ubuntu 24.04, FreeBSD 15.0, and OmniOS r151056 guests
+- `smoke`: Ubuntu 26.04 guest
+- `local`: Ubuntu 26.04 plus FreeBSD 15.1 guests
+- `full`: Ubuntu 26.04, FreeBSD 15.1, and OmniOS r151056 guests
 - `ci`: the same guest set as `full`, intended for workflow-driven selection
 
 The local QEMU backend prefers the guest architecture that best matches the
 host while keeping the guest matrix stable. On Linux `amd64` hosts with
 `/dev/kvm` access, and on Intel macOS hosts, the current guests run as
 hardware-virtualized `amd64` VMs. On Apple Silicon macOS hosts and other
-`arm64` hosts, the runner now prefers official `arm64` Ubuntu 24.04 and
-FreeBSD 15.0 images for the `smoke` and `local` profiles. That lets those
+`arm64` hosts, the runner now prefers official `arm64` Ubuntu 26.04 and
+FreeBSD 15.1 images for the `smoke` and `local` profiles. That lets those
 lanes use a hardware-virtualized ARM guest boundary when the local QEMU
 aarch64 UEFI firmware is available. OmniOS still ships only the pinned
 `amd64` cloud image in this matrix, so OmniOS on `arm64` hosts remains a
 best-effort TCG lane rather than the project's strict isolation gate.
 
 Use `smoke` or `local` for routine development on Apple Silicon and other
-`arm64` hosts. Treat the GitHub Actions `ubuntu-24.04` direct-host Linux lane
-as the project's strict automated Linux integration gate, and treat local
-TCG-backed OmniOS runs as development/debug coverage rather than the
-highest-confidence certification path.
+`arm64` hosts. Treat the GitHub Actions `ubuntu-26.04` direct-host Linux lane
+as the project's strict automated Linux integration gate. GitHub currently
+offers that runner as a public preview, so runner-image regressions should be
+triaged separately from zxfer integration failures. Treat local TCG-backed
+OmniOS runs as development/debug coverage rather than the highest-confidence
+certification path.
 
 Recommended host tools for the local `qemu` backend:
 
@@ -746,13 +748,13 @@ The project currently ships four GitHub Actions workflows:
   hosted-runner pass stays out of routine branch pushes; plus dedicated
   FreeBSD and OmniOS VM-backed unit jobs
 - `integration.yml`: integration tests with the direct-host Ubuntu harness on
-  `ubuntu-24.04`, plus FreeBSD and OmniOS guest-local `vmactions` lanes that
+  `ubuntu-26.04`, plus FreeBSD and OmniOS guest-local `vmactions` lanes that
   install their native prerequisites and run `tests/run_integration_zxfer.sh`
   inside the guest, each preserving failure artifacts in a host-appropriate
   location before a host-side status check restores the guest harness result
 
 The Linux integration lane now follows the same direct-host implementation as
-the repository's `main` branch: it runs on GitHub-hosted `ubuntu-24.04`,
+the repository's `main` branch: it runs on GitHub-hosted `ubuntu-26.04`,
 installs `zfsutils-linux`, loads the `zfs` module, and invokes
 `./tests/run_integration_zxfer.sh --yes --keep-going` through `sudo` with a
 preserved temporary workdir so failure artifacts can still be uploaded.
@@ -811,7 +813,7 @@ The CI workflows use GitHub Actions concurrency cancellation keyed by workflow
 name plus pushed ref, so stale branch runs are canceled when a new push
 supersedes them.
 
-The `kcov` job runs on `ubuntu-24.04` and uses the official `kcov/kcov` Docker
+The `kcov` job runs on `ubuntu-26.04` and uses the official `kcov/kcov` Docker
 image pinned by digest instead of installing `kcov` from the runner package
 manager. That keeps the higher-fidelity coverage lane available even though
 current Ubuntu runner images do not consistently ship a native `kcov` package.
