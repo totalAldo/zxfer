@@ -43,6 +43,38 @@ tearDown() {
 	export PATH
 }
 
+zxfer_runtime_wait_for_path() {
+	l_runtime_wait_path=$1
+	l_runtime_wait_tries=0
+
+	while [ "$l_runtime_wait_tries" -lt 50 ]; do
+		[ -e "$l_runtime_wait_path" ] && return 0
+		sleep 0.1 2>/dev/null || sleep 1
+		l_runtime_wait_tries=$((l_runtime_wait_tries + 1))
+	done
+
+	return 1
+}
+
+zxfer_runtime_spawn_term_trap_helper() {
+	l_runtime_ready_file=$1
+	l_runtime_marker_file=$2
+
+	rm -f "$l_runtime_ready_file" "$l_runtime_marker_file" || return 1
+	sh -c '
+		l_ready_file=$1
+		l_marker_file=$2
+		trap '"'"'printf "%s\n" "term" >"$l_marker_file"; exit 143'"'"' TERM
+		: >"$l_ready_file" || exit 1
+		while :; do
+			sleep 1
+		done
+	' zxfer-runtime-term-helper "$l_runtime_ready_file" "$l_runtime_marker_file" &
+	g_zxfer_runtime_term_helper_pid=$!
+
+	zxfer_runtime_wait_for_path "$l_runtime_ready_file"
+}
+
 test_refresh_backup_storage_root_rejects_relative_override() {
 	zxfer_test_capture_subshell '
 		ZXFER_BACKUP_DIR="relative-backups"
@@ -259,8 +291,11 @@ test_zxfer_register_cleanup_pid_fails_closed_when_purpose_normalization_fails() 
 }
 
 test_zxfer_abort_cleanup_pid_signals_and_unregisters_live_tracked_children() {
-	sleep 30 &
-	tracked_pid=$!
+	ready_file="$TEST_TMPDIR/abort_cleanup.ready"
+	marker_file="$TEST_TMPDIR/abort_cleanup.marker"
+	zxfer_runtime_spawn_term_trap_helper "$ready_file" "$marker_file" ||
+		fail "Unable to start TERM-aware cleanup helper."
+	tracked_pid=$g_zxfer_runtime_term_helper_pid
 
 	zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
 	zxfer_abort_cleanup_pid "$tracked_pid" TERM
@@ -273,8 +308,10 @@ test_zxfer_abort_cleanup_pid_signals_and_unregisters_live_tracked_children() {
 		"" "$g_zxfer_cleanup_pid_abort_failure_message"
 	assertEquals "Aborting should remove the registry row." "" "$g_zxfer_cleanup_pid_records"
 	assertEquals "Aborting should remove the tracked PID." "" "$g_zxfer_cleanup_pids"
-	assertEquals "The aborted helper should have died from the TERM signal." \
+	assertEquals "The aborted helper should have handled the TERM signal." \
 		143 "$reaped_status"
+	assertEquals "The aborted helper should have recorded its TERM trap." \
+		"term" "$(tr -d '[:space:]' <"$marker_file")"
 }
 
 test_zxfer_abort_cleanup_pid_handles_untracked_and_already_exited_helpers() {
@@ -330,8 +367,11 @@ test_zxfer_abort_cleanup_pid_fails_closed_when_signalling_a_live_helper_fails() 
 }
 
 test_zxfer_abort_direct_child_pid_signals_unreaped_direct_children() {
-	sleep 30 &
-	child_pid=$!
+	ready_file="$TEST_TMPDIR/abort_direct.ready"
+	marker_file="$TEST_TMPDIR/abort_direct.marker"
+	zxfer_runtime_spawn_term_trap_helper "$ready_file" "$marker_file" ||
+		fail "Unable to start TERM-aware direct child helper."
+	child_pid=$g_zxfer_runtime_term_helper_pid
 
 	zxfer_abort_direct_child_pid "$child_pid" TERM "unit direct helper"
 	abort_status=$?
@@ -341,8 +381,10 @@ test_zxfer_abort_direct_child_pid_signals_unreaped_direct_children() {
 	assertEquals "Signalling a live direct child should succeed." 0 "$abort_status"
 	assertEquals "Signalling should leave no failure message." \
 		"" "$g_zxfer_cleanup_pid_abort_failure_message"
-	assertEquals "The signalled child should have died from the TERM signal." \
+	assertEquals "The signalled child should have handled the TERM signal." \
 		143 "$reaped_status"
+	assertEquals "The signalled child should have recorded its TERM trap." \
+		"term" "$(tr -d '[:space:]' <"$marker_file")"
 }
 
 test_zxfer_abort_direct_child_pid_rejects_invalid_self_and_dead_pids() {

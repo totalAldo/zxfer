@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-04-29
+Last reviewed: 2026-06-23
 
 This document tracks the main feature additions, refactors, and compatibility
 decisions that remain after the current reliability and maintainability work.
@@ -24,8 +24,9 @@ supported-platform set or upstream OpenZFS support policy changes.
   baseline shared by currently supported Linux, FreeBSD, OmniOS/illumos, and
   OpenZFS-on-macOS workflows.
 - For FreeBSD, follow maintained upstream branches. For releases published
-  after 2026-05-01, the supported FreeBSD baseline is 14.x and 15.x; FreeBSD
-  13.x, stable/13, and older end-of-life branches are not guaranteed.
+  after 2026-05-01, the supported FreeBSD baseline is 14.4+ on stable/14 and
+  15.0+ on stable/15; FreeBSD 14.3, FreeBSD 13.x, stable/13, and older
+  end-of-life branches are not guaranteed.
 - Prefer actively maintained release lines rather than historical version
   compatibility for its own sake; do not add transition paths for pre-2.0
   OpenZFS behavior.
@@ -33,9 +34,10 @@ supported-platform set or upstream OpenZFS support policy changes.
   systems or OpenZFS release lines that have already reached end of support.
 - For illumos and OmniOS, define the effective compatibility floor by the
   oldest currently supported OmniOS train instead of preserving behavior for
-  ended trains. As of 2026-06-22, the official OmniOS release schedule shows
-  `r151054` as the supported LTS train through 2028-05-01 and `r151058` as
-  the current supported stable train through 2027-05-03.
+  ended trains. As of 2026-06-23, the official OmniOS release schedule shows
+  `r151054` as the supported LTS train through 2028-05-01, `r151056` as the
+  old stable train through 2026-11-02, and `r151058` as the current stable
+  train through 2027-05-03.
 - When the floor rises, follow through by removing old property, send/receive,
   and dependency-compatibility branches that only exist for legacy behavior.
 

@@ -630,10 +630,11 @@ and so does your local machine if
 is not also used.
 .Pp
 This fork is exercised across current OpenZFS 2.0+ environments on maintained
-FreeBSD branches, Linux with OpenZFS, OmniOS/illumos, and OpenZFS on macOS.
+FreeBSD branches, Linux with OpenZFS, supported OmniOS/illumos trains, and
+OpenZFS on macOS.
 For releases published after 2026-05-01, the FreeBSD support baseline is
-FreeBSD 14.x and 15.x; FreeBSD 13.x and other end-of-life branches are not
-guaranteed. Remote helper resolution is designed to tolerate
+FreeBSD 14.4+ and 15.0+; FreeBSD 14.3, FreeBSD 13.x, and other end-of-life
+branches are not guaranteed. Remote helper resolution is designed to tolerate
 different absolute
 .Xr zfs 8
 paths on each host, but property support can still differ across operating
@@ -1240,9 +1241,10 @@ exit 1.
 .Sh COMPATIBILITY
 .Nm
 targets current OpenZFS 2.0+ environments on maintained FreeBSD branches,
-Linux with OpenZFS, OmniOS/illumos, and OpenZFS on macOS. For releases
-published after 2026-05-01, the FreeBSD support baseline is FreeBSD 14.x and
-15.x; FreeBSD 13.x and other end-of-life branches are not guaranteed.
+Linux with OpenZFS, supported OmniOS/illumos trains, and OpenZFS on macOS.
+For releases published after 2026-05-01, the FreeBSD support baseline is
+FreeBSD 14.4+ and 15.0+; FreeBSD 14.3, FreeBSD 13.x, and other end-of-life
+branches are not guaranteed.
 Cross-version and cross-platform
 replication can still expose property or helper-path differences, so
 mixed-environment deployments should validate their exact send/receive and

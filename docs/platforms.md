@@ -4,17 +4,24 @@
 
 zxfer is intended to work with current OpenZFS 2.0+ environments:
 
-- FreeBSD 14.x and 15.x maintained branches with OpenZFS
+- FreeBSD 14.4+ and 15.0+ maintained branches with OpenZFS
 - Linux with OpenZFS
-- current OmniOS / illumos systems
+- currently supported OmniOS / illumos systems
 - current OpenZFS on macOS workflows
 
 For releases published after 2026-05-01, zxfer follows maintained FreeBSD
-branches. FreeBSD 13.5 and the stable/13 branch reach end of life on
-2026-04-30, so this codebase does not guarantee support for FreeBSD 13.x or
-other end-of-life FreeBSD branches. Reports from EOL systems can still be
-useful historical context, but fixes are prioritized only when the issue also
-affects a maintained branch.
+branches. The current FreeBSD baseline is 14.4+ on the stable/14 line and
+15.0+ on the stable/15 line. FreeBSD 13.5 and the stable/13 branch reached
+end of life on 2026-04-30, and FreeBSD 14.3 reaches upstream end of life on
+2026-06-30. This codebase does not guarantee support for FreeBSD 14.3,
+FreeBSD 13.x, or other end-of-life FreeBSD releases. Reports from EOL systems
+can still be useful historical context, but fixes are prioritized only when
+the issue also affects a maintained branch.
+
+As of 2026-06-23, the supported OmniOS trains are `r151054` LTS, `r151056`
+stable, and `r151058` stable. Older OmniOS trains are treated as historical
+compatibility context unless a reported issue also affects a currently
+supported train.
 
 The project targets POSIX `/bin/sh`, so portability depends more on shell and
 tool behavior than on GNU-specific scripting features.

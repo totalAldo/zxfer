@@ -144,16 +144,17 @@ full option set and additional workflows.
 
 zxfer is intended to work with current OpenZFS 2.0+ environments:
 
-- FreeBSD 14.x and 15.x maintained branches with OpenZFS
+- FreeBSD 14.4+ and 15.0+ maintained branches with OpenZFS
 - Linux with OpenZFS
-- current OmniOS / illumos systems
+- currently supported OmniOS / illumos systems
 - current OpenZFS on macOS workflows
 
 For releases published after 2026-05-01, zxfer follows maintained FreeBSD
-branches and does not guarantee support for FreeBSD 13.x or other
-end-of-life FreeBSD branches. Pre-OpenZFS 2.0 behavior, Solaris Express-era
-property profiles, and older backup metadata layouts are intentionally
-unsupported.
+branches. The current FreeBSD baseline is 14.4+ on the stable/14 line and
+15.0+ on the stable/15 line. FreeBSD 14.3 and older releases are outside this
+baseline; end-of-life FreeBSD releases are not supported. Pre-OpenZFS 2.0
+behavior, Solaris Express-era property profiles, and older backup metadata
+layouts are intentionally unsupported.
 
 It also supports VM-backed validation from Linux, macOS, and WSL2 hosts through
 [tests/run_vm_matrix.sh](./tests/run_vm_matrix.sh).
