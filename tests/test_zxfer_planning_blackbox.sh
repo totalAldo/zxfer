@@ -678,24 +678,19 @@ while [ $# -gt 0 ]; do
 	esac
 done
 mock_parallel_cmd=$*
-mock_parallel_placeholder='{}'
 mock_parallel_status=0
 while IFS= read -r mock_parallel_line || [ -n "$mock_parallel_line" ]; do
 	[ -n "$mock_parallel_line" ] || continue
-	mock_parallel_rest=$mock_parallel_cmd
-	mock_parallel_run=""
-	while :; do
-		case "$mock_parallel_rest" in
-		*"$mock_parallel_placeholder"*)
-			mock_parallel_run="$mock_parallel_run${mock_parallel_rest%%"$mock_parallel_placeholder"*}$mock_parallel_line"
-			mock_parallel_rest=${mock_parallel_rest#*"$mock_parallel_placeholder"}
-			;;
-		*)
-			mock_parallel_run="$mock_parallel_run$mock_parallel_rest"
-			break
-			;;
-		esac
-	done
+	mock_parallel_line_sed=$(printf '%s\n' "$mock_parallel_line" |
+		sed 's/[\\\/&]/\\&/g') || {
+		mock_parallel_status=$?
+		continue
+	}
+	mock_parallel_run=$(printf '%s\n' "$mock_parallel_cmd" |
+		sed "s/{}/$mock_parallel_line_sed/g") || {
+		mock_parallel_status=$?
+		continue
+	}
 	sh -c "$mock_parallel_run" || mock_parallel_status=$?
 done
 exit $mock_parallel_status

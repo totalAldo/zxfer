@@ -36,33 +36,20 @@
 ################################################################################
 
 # Module contract:
-# owns globals: the in-memory background-job registry (one row per job:
-# job_id, kind, pid, teardown mode, status file), spawn/wait/abort scratch,
-# and the cached setsid capability flag.
-# reads globals: runtime artifact and temp-file helpers plus the cleanup
-# child wrapper path helper from zxfer_runtime.sh.
+# owns globals: background-job registry, spawn/wait/abort scratch, setsid cache.
+# reads globals: runtime artifact/temp helpers and cleanup wrapper path lookup.
 # mutates caches: runtime artifact tracking through shared temp helpers.
 # returns via stdout: background job ids.
 #
-# Supervision-lite model (no per-job supervisor process):
-# - Spawn runs the job pipeline directly in ONE backgrounded job shell. With
-#   a working setsid(1) the job shell leads its own session and process
-#   group (pid == pgid), so abort can signal the entire pipeline with one
-#   process-group kill. Without setsid the job runs through the cleanup
-#   child wrapper, whose TERM trap reaps its descendants.
-# - The job shell itself writes the pipeline exit status to a per-run temp
-#   status file ("status<TAB>N") after the pipeline finishes, then publishes
-#   the job id to the rolling completion queue fd when one is open (the
-#   per-stage exit captures inside the caller's command string are
-#   untouched). A missing or non-numeric status file at wait time means the
-#   job shell died abnormally and is reported as a failure.
-# - SAFETY INVARIANT (replaces the deleted start-token revalidation and
-#   process-table snapshots): abort only ever signals (i) the process group
-#   created by our own setsid job shell or (ii) a direct child this shell
-#   has not waited on yet. POSIX keeps an un-reaped child's PID -- and the
-#   process group that PID leads -- from being recycled, so the signal
-#   cannot reach an unrelated process. All abort signalling therefore
-#   happens BEFORE wait() reaps the job shell.
+# Supervision-lite model: spawn runs the pipeline in one backgrounded job
+# shell. With setsid(1), that shell leads a process group; without setsid it
+# runs through the cleanup child wrapper, whose TERM trap reaps descendants.
+# - The job shell writes the pipeline exit status to a per-run temp
+#   status file before queue notification; missing or malformed status means
+#   the shell died abnormally.
+# - SAFETY INVARIANT: abort only signals a process group created by our
+#   setsid child or a direct child this shell has not waited on yet, before
+#   wait() makes pid reuse possible.
 
 # Purpose: Reset the background-job registry and scratch state so the next
 # runtime pass starts from a clean state.
@@ -449,13 +436,9 @@ zxfer_wait_for_background_job() {
 	return 0
 }
 
-# Purpose: Signal one background job's teardown scope.
-# Usage: Called during abort with the job-shell pid, the recorded teardown
-# mode, and the signal name. Signal delivery failures are expected for jobs
-# that already exited and are ignored.
-# SAFETY: the pid is always an un-reaped direct child of this shell (and on
-# the process_group path, the group leader our setsid child created), so per
-# the module safety invariant the signal cannot reach an unrelated process.
+# Purpose: Signal one background job's teardown scope during abort.
+# Usage: Called with an un-reaped direct child pid, teardown mode, and signal;
+# delivery failures for already-exited jobs are ignored.
 zxfer_signal_background_job_scope() {
 	l_scope_pid=$1
 	l_scope_teardown=$2
@@ -466,15 +449,32 @@ zxfer_signal_background_job_scope() {
 		return 0
 		;;
 	esac
-
 	if [ "$l_scope_teardown" = "process_group" ]; then
 		kill "-$l_scope_signal" "-$l_scope_pid" 2>/dev/null || :
 	else
+		if [ "$l_scope_signal" = "KILL" ]; then
+			kill -s STOP "$l_scope_pid" 2>/dev/null || :
+			ps -A -o pid= -o ppid= 2>/dev/null |
+				awk -v root="$l_scope_pid" '
+				{ parent[$1] = $2; seen[$1] = 1 }
+				END {
+					target[root] = 1
+					for (changed = 1; changed;) {
+						changed = 0
+						for (pid in seen)
+							if ((parent[pid] in target) && !(pid in target))
+								{ target[pid] = 1; changed = 1 }
+					}
+					for (pid in target) if (pid != root) print pid
+				}' |
+				while IFS= read -r l_scope_descendant_pid || [ -n "$l_scope_descendant_pid" ]; do
+					[ -n "$l_scope_descendant_pid" ] && kill -s KILL "$l_scope_descendant_pid" 2>/dev/null || :
+				done
+		fi
 		kill -s "$l_scope_signal" "$l_scope_pid" 2>/dev/null || :
 	fi
 	return 0
 }
-
 # Purpose: Give a signaled background job a brief bounded window to exit
 # before the single KILL escalation.
 # Usage: Called between the TERM pass and the KILL pass during aborts; suites

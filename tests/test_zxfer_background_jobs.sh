@@ -289,6 +289,33 @@ test_signal_scope_process_group_path_ignores_missing_groups() {
 		0 "$grace_status"
 }
 
+test_signal_scope_wrapper_kill_reaches_descendants_from_parent() {
+	output=$(
+		ps() {
+			printf '%s\n' '77 1'
+			printf '%s\n' '88 77'
+			printf '%s\n' '99 88'
+			printf '%s\n' '100 1'
+		}
+		kill() {
+			printf 'kill:%s:%s\n' "$2" "$3"
+			return 0
+		}
+		zxfer_signal_background_job_scope 77 wrapper KILL
+	)
+
+	assertContains "Wrapper KILL should freeze the wrapper before descendant discovery." \
+		"$output" "kill:STOP:77"
+	assertContains "Wrapper KILL should signal direct descendants from the parent shell." \
+		"$output" "kill:KILL:88"
+	assertContains "Wrapper KILL should signal nested descendants from the parent shell." \
+		"$output" "kill:KILL:99"
+	assertContains "Wrapper KILL should still signal the wrapper itself." \
+		"$output" "kill:KILL:77"
+	assertNotContains "Wrapper KILL must not signal unrelated processes." \
+		"$output" "kill:KILL:100"
+}
+
 test_spawn_and_wait_round_trips_success_status_and_output_capture() {
 	outfile="$TEST_TMPDIR/bg_spawn_success.out"
 	errfile="$TEST_TMPDIR/bg_spawn_success.err"

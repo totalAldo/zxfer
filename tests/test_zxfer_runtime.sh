@@ -447,7 +447,7 @@ test_runtime_global_init_covers_default_assignments_in_current_shell() {
 	)
 
 	assertContains "Runtime metadata initialization should set the current zxfer version string." \
-		"$output" "version=2.0.0-20260622"
+		"$output" "version=2.0.0-20260623"
 	assertContains "Option default initialization should restore the single-job default." \
 		"$output" "jobs=1"
 	assertContains "Transport runtime defaults should clear cached remote capability payloads." \
