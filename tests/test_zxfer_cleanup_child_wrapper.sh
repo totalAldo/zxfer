@@ -67,6 +67,26 @@ test_cleanup_child_wrapper_on_signal_returns_143() {
 		"aborted" "$(tr -d '[:space:]' <"$marker_file")"
 }
 
+test_cleanup_child_wrapper_on_signal_waits_for_wrapped_child() {
+	marker_file="$TEST_TMPDIR/cleanup_child_wrapper.on_signal_wait"
+	zxfer_test_capture_subshell '
+		zxfer_cleanup_child_wrapper_abort_descendants() {
+			:
+		}
+		wait() {
+			printf "%s\n" "waited:$1" >"'"$marker_file"'"
+			return 0
+		}
+		l_cleanup_wrapper_child_pid=4242
+		zxfer_cleanup_child_wrapper_on_signal
+	'
+
+	assertEquals "Cleanup child wrapper signal handling should keep the documented 143 exit status after waiting." \
+		143 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Cleanup child wrapper signal handling should wait for the direct wrapped child before exiting." \
+		"waited:4242" "$(tr -d '[:space:]' <"$marker_file")"
+}
+
 test_cleanup_child_wrapper_abort_descendants_preserves_listing_failures() {
 	zxfer_test_capture_subshell '
 		zxfer_cleanup_child_wrapper_list_descendants() {

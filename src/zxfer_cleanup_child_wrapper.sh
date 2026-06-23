@@ -84,12 +84,12 @@ zxfer_cleanup_child_wrapper_abort_descendants() {
 
 zxfer_cleanup_child_wrapper_on_signal() {
 	zxfer_cleanup_child_wrapper_abort_descendants >/dev/null 2>&1 || :
+	[ -z "${l_cleanup_wrapper_child_pid:-}" ] || wait "$l_cleanup_wrapper_child_pid" 2>/dev/null || :
 	exit 143
 }
 
 zxfer_cleanup_child_wrapper_main() {
 	l_cleanup_wrapper_exec_cmd=$1
-
 	[ -n "$l_cleanup_wrapper_exec_cmd" ] || return 1
 	trap 'zxfer_cleanup_child_wrapper_on_signal' TERM INT HUP
 	l_cleanup_wrapper_status=0

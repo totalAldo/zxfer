@@ -352,7 +352,7 @@ test_destination_existence_check_operational_failure_fails_closed() {
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
 	planning_assert_failure_report "snapshot discovery" \
-		"Failed to determine whether destination dataset [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT] exists."
+		"Failed to determine whether destination dataset [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT] exists"
 }
 
 # Invariant: a failing destination snapshot listing fails closed with the
@@ -678,6 +678,7 @@ while [ $# -gt 0 ]; do
 	esac
 done
 mock_parallel_cmd=$*
+mock_parallel_placeholder='{}'
 mock_parallel_status=0
 while IFS= read -r mock_parallel_line || [ -n "$mock_parallel_line" ]; do
 	[ -n "$mock_parallel_line" ] || continue
@@ -685,9 +686,9 @@ while IFS= read -r mock_parallel_line || [ -n "$mock_parallel_line" ]; do
 	mock_parallel_run=""
 	while :; do
 		case "$mock_parallel_rest" in
-		*"{}"*)
-			mock_parallel_run="$mock_parallel_run${mock_parallel_rest%%"{}"*}$mock_parallel_line"
-			mock_parallel_rest=${mock_parallel_rest#*"{}"}
+		*"$mock_parallel_placeholder"*)
+			mock_parallel_run="$mock_parallel_run${mock_parallel_rest%%"$mock_parallel_placeholder"*}$mock_parallel_line"
+			mock_parallel_rest=${mock_parallel_rest#*"$mock_parallel_placeholder"}
 			;;
 		*)
 			mock_parallel_run="$mock_parallel_run$mock_parallel_rest"
