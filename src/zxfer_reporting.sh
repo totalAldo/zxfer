@@ -192,6 +192,27 @@ zxfer_get_failure_report_redaction_marker() {
 	printf '%s\n' "[redacted]"
 }
 
+# Purpose: Check whether an operator-facing command rendering has any consumer.
+# Usage: Called before display-only command rendering so quiet runs perform
+# zero renders; verbose output (-v/-V) and unsafe failure-report command
+# fields are the only consumers of rendered command strings.
+zxfer_command_display_render_enabled() {
+	[ "${g_option_v_verbose:-0}" -eq 1 ] && return 0
+	[ "${g_option_V_very_verbose:-0}" -eq 1 ] && return 0
+	zxfer_failure_report_uses_unsafe_command_fields
+}
+
+# Purpose: Record the redacted failure-context marker without rendering the
+# command.
+# Usage: Called on quiet paths instead of zxfer_record_last_command_string so
+# skipped display renders still leave the same redacted last_command field.
+zxfer_record_last_command_opaque() {
+	zxfer_init_failure_context_defaults
+	# Assign the marker inline so hot exec paths skip a command substitution;
+	# must match zxfer_get_failure_report_redaction_marker.
+	g_zxfer_failure_last_command="[redacted]"
+}
+
 # Purpose: Render the command for report as a stable shell-safe or operator-
 # facing string.
 # Usage: Called during failure reporting, profiling, and verbose operator
@@ -257,12 +278,10 @@ zxfer_record_last_command_string() {
 	zxfer_init_failure_context_defaults
 	if [ $# -eq 0 ] || [ "$1" = "" ]; then
 		g_zxfer_failure_last_command=""
-		return
-	fi
-	if zxfer_failure_report_uses_unsafe_command_fields; then
+	elif zxfer_failure_report_uses_unsafe_command_fields; then
 		g_zxfer_failure_last_command=$(zxfer_escape_report_value "$1")
 	else
-		g_zxfer_failure_last_command=$(zxfer_get_failure_report_redaction_marker)
+		zxfer_record_last_command_opaque
 	fi
 }
 
@@ -275,12 +294,10 @@ zxfer_record_last_command_argv() {
 	zxfer_init_failure_context_defaults
 	if [ $# -eq 0 ]; then
 		g_zxfer_failure_last_command=""
-		return
-	fi
-	if zxfer_failure_report_uses_unsafe_command_fields; then
+	elif zxfer_failure_report_uses_unsafe_command_fields; then
 		g_zxfer_failure_last_command=$(zxfer_quote_command_argv "$@")
 	else
-		g_zxfer_failure_last_command=$(zxfer_get_failure_report_redaction_marker)
+		zxfer_record_last_command_opaque
 	fi
 }
 
@@ -372,9 +389,7 @@ zxfer_profile_add_elapsed_ms() {
 	esac
 
 	if [ -z "$l_end_ms" ]; then
-		if ! l_end_ms=$(zxfer_profile_now_ms); then
-			return 0
-		fi
+		l_end_ms=$(zxfer_profile_now_ms) || return 0
 	fi
 
 	case "$l_end_ms" in
@@ -420,6 +435,8 @@ zxfer_profile_record_bucket() {
 		zxfer_profile_increment_counter g_zxfer_profile_bucket_send_receive_setup
 		;;
 	esac
+
+	return 0
 }
 
 # Purpose: Record or emit the record ZFS call for end-of-run profiling.
@@ -469,24 +486,37 @@ zxfer_profile_record_zfs_call() {
 			zxfer_profile_record_bucket send_receive_setup
 			;;
 		list | get)
-			[ "$l_side" = "destination" ] && zxfer_profile_record_bucket destination_inspection
-			[ "$l_side" = "source" ] && zxfer_profile_record_bucket source_inspection
+			if [ "$l_side" = "destination" ]; then
+				zxfer_profile_record_bucket destination_inspection
+			elif [ "$l_side" = "source" ]; then
+				zxfer_profile_record_bucket source_inspection
+			fi
 			;;
 		esac
 		;;
 	"snapshot discovery")
-		[ "$l_side" = "destination" ] && zxfer_profile_record_bucket destination_inspection
-		[ "$l_side" = "source" ] && zxfer_profile_record_bucket source_inspection
+		if [ "$l_side" = "destination" ]; then
+			zxfer_profile_record_bucket destination_inspection
+		elif [ "$l_side" = "source" ]; then
+			zxfer_profile_record_bucket source_inspection
+		fi
 		;;
 	*)
 		case "$l_verb" in
 		list | get)
-			[ "$l_side" = "destination" ] && zxfer_profile_record_bucket destination_inspection
-			[ "$l_side" = "source" ] && zxfer_profile_record_bucket source_inspection
+			if [ "$l_side" = "destination" ]; then
+				zxfer_profile_record_bucket destination_inspection
+			elif [ "$l_side" = "source" ]; then
+				zxfer_profile_record_bucket source_inspection
+			fi
 			;;
 		esac
 		;;
 	esac
+
+	# Profiling must never alter caller control flow; callers may invoke a
+	# recorder as their final statement and propagate its status.
+	return 0
 }
 
 # Purpose: Record or emit the record SSH invocation for end-of-run profiling.
@@ -523,6 +553,8 @@ zxfer_profile_record_ssh_invocation() {
 	else
 		zxfer_profile_increment_counter g_zxfer_profile_other_ssh_shell_invocations
 	fi
+
+	return 0
 }
 
 # Purpose: Record or emit the record remote capability bootstrap source for
@@ -544,6 +576,8 @@ zxfer_profile_record_remote_capability_bootstrap_source() {
 		zxfer_profile_increment_counter g_zxfer_profile_remote_capability_bootstrap_memory
 		;;
 	esac
+
+	return 0
 }
 
 # Purpose: Record or emit the emit summary for end-of-run profiling.
@@ -609,6 +643,14 @@ zxfer_profile_emit_summary() {
 	zxfer_warn_stderr "zxfer profile: bucket_destination_inspection=${g_zxfer_profile_bucket_destination_inspection:-0}"
 	zxfer_warn_stderr "zxfer profile: bucket_property_reconciliation=${g_zxfer_profile_bucket_property_reconciliation:-0}"
 	zxfer_warn_stderr "zxfer profile: bucket_send_receive_setup=${g_zxfer_profile_bucket_send_receive_setup:-0}"
+	zxfer_warn_stderr "zxfer profile: runtime_artifact_files_created=${g_zxfer_profile_runtime_artifact_files_created:-0}"
+	zxfer_warn_stderr "zxfer profile: runtime_artifact_dirs_created=${g_zxfer_profile_runtime_artifact_dirs_created:-0}"
+	zxfer_warn_stderr "zxfer profile: runtime_artifact_paths_cleaned=${g_zxfer_profile_runtime_artifact_paths_cleaned:-0}"
+	zxfer_warn_stderr "zxfer profile: runtime_cache_object_writes=${g_zxfer_profile_runtime_cache_object_writes:-0}"
+	zxfer_warn_stderr "zxfer profile: runtime_cache_object_readbacks=${g_zxfer_profile_runtime_cache_object_readbacks:-0}"
+	zxfer_warn_stderr "zxfer profile: command_render_calls=${g_zxfer_profile_command_render_calls:-0}"
+	zxfer_warn_stderr "zxfer profile: live_destination_snapshot_rechecks=${g_zxfer_profile_live_destination_snapshot_rechecks:-0}"
+	zxfer_warn_stderr "zxfer profile: diverged_snapshot_warnings=${g_zxfer_profile_diverged_snapshot_warnings:-0}"
 }
 
 # Purpose: Emit the usage to stderr in the operator-facing format owned by this
@@ -718,15 +760,6 @@ zxfer_render_failure_report() {
 	printf 'zxfer: failure report end\n'
 }
 
-# Purpose: Return the error log parent directory in the form expected by later
-# helpers.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_error_log_parent_dir() {
-	zxfer_get_path_parent_dir "$1"
-}
-
 # Purpose: Validate the existing error log file before zxfer relies on it.
 # Usage: Called during failure reporting, profiling, and verbose operator
 # output to fail closed on malformed, unsafe, or stale input.
@@ -759,23 +792,6 @@ zxfer_validate_existing_error_log_file() {
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_display_path\" because its permissions ($l_validate_mode) are not 0600."
 		return 1
 	fi
-}
-
-# Purpose: Return the error log lock directory in the form expected by later
-# helpers.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_error_log_lock_dir() {
-	l_lock_log_path=$1
-	l_lock_log_parent=$2
-	l_lock_log_name=${l_lock_log_path##*/}
-
-	printf '%s/.zxfer-error-log.lock.%s\n' "$l_lock_log_parent" "$l_lock_log_name"
-}
-
-zxfer_get_error_log_lock_purpose() {
-	printf '%s\n' "error-log-lock"
 }
 
 # Purpose: Render the error-log path identity as lowercase hex.
@@ -827,20 +843,14 @@ zxfer_prepare_error_log_fallback_lock_dir() {
 	l_fallback_tmpdir=$1
 	l_fallback_log_path=$2
 
-	if ! l_fallback_identity_hex=$(zxfer_error_log_lock_identity_hex "$l_fallback_log_path"); then
-		return 1
-	fi
+	l_fallback_identity_hex=$(zxfer_error_log_lock_identity_hex "$l_fallback_log_path") || return 1
 	l_fallback_identity_hex_len=${#l_fallback_identity_hex}
 	l_fallback_identity_byte_len=$((l_fallback_identity_hex_len / 2))
 	l_fallback_parent_dir=$l_fallback_tmpdir/.zxfer-error-log.lock.d
 
-	if ! zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir"; then
-		return 1
-	fi
+	zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir" || return 1
 	l_fallback_parent_dir=$l_fallback_parent_dir/h$l_fallback_identity_byte_len
-	if ! zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir"; then
-		return 1
-	fi
+	zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir" || return 1
 
 	l_fallback_remaining_hex=$l_fallback_identity_hex
 	while [ -n "$l_fallback_remaining_hex" ]; do
@@ -848,9 +858,7 @@ zxfer_prepare_error_log_fallback_lock_dir() {
 		l_fallback_remaining_hex=$(printf '%s' "$l_fallback_remaining_hex" | cut -c 97-)
 		[ -n "$l_fallback_chunk" ] || return 1
 		l_fallback_parent_dir=$l_fallback_parent_dir/$l_fallback_chunk
-		if ! zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir"; then
-			return 1
-		fi
+		zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir" || return 1
 	done
 
 	printf '%s/lock\n' "$l_fallback_parent_dir"
@@ -866,12 +874,8 @@ zxfer_capture_reporting_helper_output() {
 	shift
 
 	g_zxfer_reporting_capture_result=""
-	l_capture_status=0
 	zxfer_capture_runtime_artifact_command_output "zxfer-reporting" "$@" ||
-		l_capture_status=$?
-	if [ "$l_capture_status" -ne 0 ]; then
-		return "$l_capture_status"
-	fi
+		return "$?"
 
 	g_zxfer_reporting_capture_result=$g_zxfer_runtime_artifact_read_result
 	case "$g_zxfer_reporting_capture_result" in
@@ -922,15 +926,30 @@ zxfer_get_error_log_fallback_lock_dir() {
 zxfer_acquire_error_log_lock() {
 	l_lock_dir_path=$1
 	l_lock_attempts=0
+	l_corrupt_metadata_sightings=0
 
 	while ! zxfer_create_owned_lock_dir \
-		"$l_lock_dir_path" lock "$(zxfer_get_error_log_lock_purpose)" >/dev/null; do
+		"$l_lock_dir_path" lock "error-log-lock" >/dev/null; do
 		if [ -L "$l_lock_dir_path" ] || [ -h "$l_lock_dir_path" ]; then
 			return 1
 		fi
 		if [ -d "$l_lock_dir_path" ]; then
+			# Missing or corrupt metadata can be a live winner inside its
+			# mkdir-to-metadata publish window, so the first sighting is
+			# treated as busy; the corrupt reap is allowed only when a
+			# sleep-and-recheck round still reports corrupt metadata. The
+			# stale-owner reap policy itself is unchanged.
+			l_allow_corrupt_reap=0
+			zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir_path"
+			l_lock_metadata_status=$?
+			if [ "$l_lock_metadata_status" -eq 2 ]; then
+				l_corrupt_metadata_sightings=$((l_corrupt_metadata_sightings + 1))
+				if [ "$l_corrupt_metadata_sightings" -ge 2 ]; then
+					l_allow_corrupt_reap=1
+				fi
+			fi
 			zxfer_try_reap_stale_owned_lock_dir \
-				"$l_lock_dir_path" 1 lock "$(zxfer_get_error_log_lock_purpose)" >/dev/null
+				"$l_lock_dir_path" "$l_allow_corrupt_reap" lock "error-log-lock" >/dev/null
 			l_reap_status=$?
 			if [ "$l_reap_status" -eq 0 ]; then
 				continue
@@ -945,6 +964,7 @@ zxfer_acquire_error_log_lock() {
 		fi
 		sleep 1
 	done
+	return 0
 }
 
 # Purpose: Release the error log lock after the protected work finishes.
@@ -955,7 +975,7 @@ zxfer_release_error_log_lock() {
 	l_release_lock_dir=$1
 
 	zxfer_release_owned_lock_dir \
-		"$l_release_lock_dir" lock "$(zxfer_get_error_log_lock_purpose)"
+		"$l_release_lock_dir" lock "error-log-lock"
 }
 
 zxfer_warn_error_log_lock_release_failure() {
@@ -1033,9 +1053,7 @@ zxfer_error_log_parent_is_writable() {
 zxfer_create_error_log_file() {
 	l_create_log_path=$1
 
-	if ! zxfer_create_secure_staging_dir_for_path "$l_create_log_path" "zxfer-error-log" >/dev/null; then
-		return 1
-	fi
+	zxfer_create_secure_staging_dir_for_path "$l_create_log_path" "zxfer-error-log" >/dev/null || return 1
 	l_create_stage_dir=$g_zxfer_secure_staging_dir_result
 	l_create_stage_file="$l_create_stage_dir/log.write"
 
@@ -1086,7 +1104,7 @@ zxfer_append_failure_report_to_log() {
 		return 1
 	fi
 
-	l_log_parent=$(zxfer_get_error_log_parent_dir "$l_log_path")
+	l_log_parent=$(zxfer_get_path_parent_dir "$l_log_path")
 	if [ ! -d "$l_log_parent" ]; then
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_log_path\" because parent directory \"$l_log_parent\" does not exist."
 		return 1
@@ -1116,11 +1134,18 @@ zxfer_append_failure_report_to_log() {
 			return 1
 		fi
 	else
-		l_lock_dir=$(zxfer_get_error_log_lock_dir "$l_log_path" "$l_trusted_log_parent")
+		l_lock_dir="$l_trusted_log_parent/.zxfer-error-log.lock.${l_log_path##*/}"
 	fi
 	if ! zxfer_acquire_error_log_lock "$l_lock_dir"; then
 		zxfer_warn_stderr "zxfer: warning: unable to acquire ZXFER_ERROR_LOG lock for \"$l_log_path\"."
 		return 1
+	fi
+
+	# A concurrent holder may have created the log while this run waited on
+	# the lock; recheck existence under the lock so the create path cannot
+	# clobber a freshly published log with an empty staged file.
+	if [ "$l_log_exists" -eq 0 ] && [ -e "$l_log_path" ]; then
+		l_log_exists=1
 	fi
 
 	if [ "$l_log_exists" -eq 1 ]; then

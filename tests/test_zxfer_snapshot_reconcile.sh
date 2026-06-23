@@ -42,6 +42,12 @@ setUp() {
 	g_deleted_dest_newer_snapshots=0
 	g_destination_snapshot_creation_cache=""
 	g_zxfer_snapshot_record_capture_result=""
+	g_option_d_delete_destination_snapshots=0
+	g_option_F_force_rollback=""
+	g_zxfer_diverged_snapshot_count=0
+	g_zxfer_diverged_snapshot_examples=""
+	g_zxfer_diverged_converged_datasets=""
+	g_zxfer_diverged_converged_marker_source=""
 	g_delete_source_tmp_file=$(mktemp "$TEST_TMPDIR/delete_source.XXXXXX")
 	g_delete_dest_tmp_file=$(mktemp "$TEST_TMPDIR/delete_dest.XXXXXX")
 	g_delete_snapshots_to_delete_tmp_file=$(mktemp "$TEST_TMPDIR/delete_diff.XXXXXX")
@@ -93,27 +99,6 @@ snap2	222" "$(cat "$identity_output_file")"
 backup/dst@snap2" "$(cat "$path_output_file")"
 }
 
-test_invalidate_destination_snapshot_record_cache_resets_creation_cache_when_loaded() {
-	destination_cache_file="$TEST_TMPDIR/destination_snapshot_cache_with_creation.raw"
-	printf '%s\n' "backup/dst@snap1	111" >"$destination_cache_file"
-	g_zxfer_destination_snapshot_record_cache_file=$destination_cache_file
-	g_rzfs_list_hr_snap="backup/dst@snap1	111"
-	g_destination_snapshot_creation_cache="backup/dst@snap1	111"
-
-	zxfer_build_snapshot_record_index destination "backup/dst@snap1	111" >/dev/null ||
-		fail "Expected destination snapshot index fixture to build."
-	zxfer_invalidate_destination_snapshot_record_cache
-
-	assertEquals "Destination snapshot invalidation should clear destination snapshot creation cache when snapshot reconcile is loaded." \
-		"" "${g_destination_snapshot_creation_cache:-}"
-	assertEquals "Destination snapshot invalidation should clear destination snapshot index readiness." \
-		0 "${g_zxfer_destination_snapshot_record_index_ready:-0}"
-	assertEquals "Destination snapshot invalidation should clear the destination snapshot cache-file path." \
-		"" "${g_zxfer_destination_snapshot_record_cache_file:-}"
-	assertFalse "Destination snapshot invalidation should remove the stale snapshot cache file." \
-		"[ -e \"$destination_cache_file\" ]"
-}
-
 test_delete_snaps_returns_when_nothing_needs_deletion() {
 	log_file="$TEST_TMPDIR/delete_none.log"
 	: >"$log_file"
@@ -142,7 +127,7 @@ test_delete_snaps_dry_run_prints_destroy_command() {
 		"$output" "Dry run: '/sbin/zfs' 'destroy' 'tank/fs@snap3'"
 }
 
-test_delete_snaps_invalidates_destination_snapshot_cache_after_live_destroy() {
+test_delete_snaps_does_not_wipe_destination_snapshot_cache_after_live_destroy() {
 	log_file="$TEST_TMPDIR/delete_invalidate_snapshot_cache.log"
 	: >"$log_file"
 	source_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
@@ -152,15 +137,17 @@ test_delete_snaps_invalidates_destination_snapshot_cache_after_live_destroy() {
 		printf 'destroy=%s %s\n' "$1" "$2" >>"$log_file"
 		return 0
 	}
-	zxfer_invalidate_destination_snapshot_record_cache() {
-		printf 'invalidated=snapshots\n' >>"$log_file"
-	}
+	g_zxfer_destination_mutation_generation=0
 
 	zxfer_delete_snaps "$source_list" "$dest_list"
 
-	assertEquals "Successful destination snapshot destroys should invalidate destination snapshot caches after the live mutation." \
-		"destroy=destroy tank/fs@snap3
-invalidated=snapshots" "$(cat "$log_file")"
+	# The destroy only removed this dataset's own snapshots; wiping the
+	# whole-tree snapshot record cache (and its in-memory fallback) made -d
+	# delete planning for every later dataset see an empty destination.
+	assertEquals "Successful destination snapshot destroys must not wipe the whole-tree destination snapshot record cache." \
+		"destroy=destroy tank/fs@snap3" "$(cat "$log_file")"
+	assertEquals "Successful destination snapshot destroys must bump the destination mutation generation so stale live views are refreshed." \
+		1 "${g_zxfer_destination_mutation_generation:-0}"
 }
 
 test_delete_snaps_throws_when_destroy_fails() {
@@ -175,11 +162,10 @@ test_delete_snaps_throws_when_destroy_fails() {
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
+				printf 'generation=%s\n' "${g_zxfer_destination_mutation_generation:-0}"
 				exit "${2:-1}"
 			}
-			zxfer_invalidate_destination_snapshot_record_cache() {
-				printf '%s\n' "invalidated"
-			}
+			g_zxfer_destination_mutation_generation=0
 			zxfer_delete_snaps "$source_list" "$dest_list"
 		)
 	)
@@ -188,8 +174,138 @@ test_delete_snaps_throws_when_destroy_fails() {
 	assertEquals "Failed destination destroys should preserve the destroy status." 37 "$status"
 	assertContains "Failed destination destroys should use the generic execution error." \
 		"$output" "Error when executing command."
-	assertNotContains "Failed destination destroys should not invalidate snapshot caches as if the mutation succeeded." \
-		"$output" "invalidated"
+	assertContains "Failed destination destroys should not bump the destination mutation generation as if the mutation succeeded." \
+		"$output" "generation=0"
+}
+
+test_delete_snaps_skips_full_wipe_when_live_source_recheck_shows_snapshots() {
+	log_file="$TEST_TMPDIR/delete_guard_skip.log"
+	warn_file="$TEST_TMPDIR/delete_guard_skip_warn.log"
+	: >"$log_file"
+	: >"$warn_file"
+	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+
+	(
+		zxfer_run_source_zfs_cmd() {
+			printf 'source_probe=%s\n' "$*" >>"$log_file"
+			printf '%s\n' "tank/fs@snap1"
+		}
+		zxfer_run_destination_zfs_cmd() {
+			printf 'destination=%s\n' "$*" >>"$log_file"
+		}
+		zxfer_warn_stderr() {
+			printf '%s\n' "$1" >>"$warn_file"
+		}
+		zxfer_delete_snaps "" "$dest_list" "tank/fs"
+	)
+	status=$?
+
+	assertEquals "Skipping a suspicious full wipe should not be an error." 0 "$status"
+	assertContains "An empty cached source list must trigger a live source snapshot re-check before a full destination wipe." \
+		"$(cat "$log_file")" "source_probe=list -H -d 1 -o name -t snapshot tank/fs"
+	assertNotContains "No destination destroy may run when the live source re-check still shows snapshots." \
+		"$(cat "$log_file")" "destroy"
+	assertContains "Skipping the deletion should warn the operator about the incomplete cached listing." \
+		"$(cat "$warn_file")" "skipping destination snapshot deletion for [tank/fs]"
+}
+
+test_delete_snaps_proceeds_with_full_wipe_when_live_source_recheck_confirms_empty() {
+	log_file="$TEST_TMPDIR/delete_guard_proceed.log"
+	: >"$log_file"
+	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+
+	zxfer_run_source_zfs_cmd() {
+		printf 'source_probe=%s\n' "$*" >>"$log_file"
+		printf '%s' ""
+	}
+	zxfer_run_destination_zfs_cmd() {
+		printf 'destination=%s %s\n' "$1" "$2" >>"$log_file"
+		return 0
+	}
+	zxfer_delete_snaps "" "$dest_list" "tank/fs"
+
+	assertContains "A genuinely snapshot-less source should still be re-checked live before a full destination wipe." \
+		"$(cat "$log_file")" "source_probe=list -H -d 1 -o name -t snapshot tank/fs"
+	assertContains "A live-confirmed empty source should preserve the existing delete-everything semantics." \
+		"$(cat "$log_file")" "destination=destroy tank/fs@snap2,snap1"
+}
+
+test_delete_snaps_fails_closed_when_live_source_recheck_fails() {
+	log_file="$TEST_TMPDIR/delete_guard_fail.log"
+	: >"$log_file"
+	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+
+	set +e
+	output=$(
+		(
+			zxfer_run_source_zfs_cmd() {
+				printf '%s\n' "ssh timeout"
+				return 43
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf 'destination=%s\n' "$*" >>"$log_file"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_delete_snaps "" "$dest_list" "tank/fs"
+		)
+	)
+	status=$?
+
+	assertEquals "A failed live source re-check must fail closed with the probe status." 43 "$status"
+	assertContains "A failed live source re-check should explain what was being verified." \
+		"$output" "Failed to re-verify source snapshots for [tank/fs] before deleting all destination snapshots"
+	assertNotContains "No destination destroy may run when the live source re-check fails." \
+		"$(cat "$log_file")" "destroy"
+}
+
+test_delete_snaps_ignores_probe_stderr_noise_when_deciding_full_wipe() {
+	log_file="$TEST_TMPDIR/delete_guard_noise.log"
+	: >"$log_file"
+	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+
+	# The production capture merges stderr (2>&1): over ssh, benign noise such
+	# as host-key notices or -V command echoes lands in the captured value on
+	# a SUCCESSFUL probe of a genuinely snapshot-less source. Only lines that
+	# are actually snapshots of the dataset may block the deletion.
+	zxfer_run_source_zfs_cmd() {
+		printf 'source_probe=%s\n' "$*" >>"$log_file"
+		printf '%s\n' "Warning: Permanently added 'src' (ED25519) to the list of known hosts."
+		printf '%s\n' "Running remote command [source aldo@src]: zfs list"
+		return 0
+	}
+	zxfer_run_destination_zfs_cmd() {
+		printf 'destination=%s %s\n' "$1" "$2" >>"$log_file"
+		return 0
+	}
+	zxfer_delete_snaps "" "$dest_list" "tank/fs"
+
+	assertContains "The guard should still live-probe the source before a full destination wipe." \
+		"$(cat "$log_file")" "source_probe=list -H -d 1 -o name -t snapshot tank/fs"
+	assertContains "Benign transport noise in the probe capture must not block a legitimate full deletion of destination snapshots." \
+		"$(cat "$log_file")" "destination=destroy tank/fs@snap2,snap1"
+}
+
+test_delete_snaps_full_wipe_without_source_dataset_keeps_legacy_behavior() {
+	log_file="$TEST_TMPDIR/delete_guard_legacy.log"
+	: >"$log_file"
+	dest_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
+
+	zxfer_run_source_zfs_cmd() {
+		printf 'source_probe=%s\n' "$*" >>"$log_file"
+	}
+	zxfer_run_destination_zfs_cmd() {
+		printf 'destination=%s %s\n' "$1" "$2" >>"$log_file"
+		return 0
+	}
+	zxfer_delete_snaps "" "$dest_list"
+
+	assertNotContains "Callers that do not provide the source dataset should not trigger a live source probe." \
+		"$(cat "$log_file")" "source_probe"
+	assertContains "Legacy two-argument callers should keep the existing delete-everything semantics." \
+		"$(cat "$log_file")" "destination=destroy tank/fs@snap2,snap1"
 }
 
 test_grandfather_test_reports_detailed_context_for_old_snapshots() {
@@ -1347,7 +1463,13 @@ EOF
 		"tank/src@zxfer_2	222" "$g_last_common_snap"
 }
 
+# Divergence contract: planning over a name-match/guid-mismatch destination
+# is only allowed to proceed when BOTH -d and -F are active; it must then
+# warn on stderr (not gated on -v/-V), keep guid-based common-base selection,
+# and mark the dataset for post-receive verification.
 test_inspect_delete_snap_requires_matching_guid_for_common_snapshot_detection() {
+	g_option_d_delete_destination_snapshots=1
+	g_option_F_force_rollback="-F"
 	g_lzfs_list_hr_S_snap=$(
 		cat <<'EOF'
 tank/src@zxfer_3	333
@@ -1363,13 +1485,60 @@ EOF
 	)
 	g_actual_dest="backup/dst"
 
-	zxfer_inspect_delete_snap 0 "tank/src"
+	divergence_warning_file="$TEST_TMPDIR/divergence_warning.err"
+	zxfer_inspect_delete_snap 0 "tank/src" 2>"$divergence_warning_file"
 
 	assertEquals "Same-named but unrelated destination snapshots should not be treated as the common base." \
 		"tank/src@zxfer_1	111" "$g_last_common_snap"
 	assertEquals "Transfer planning should keep the divergent source snapshot when the destination guid differs." \
 		"tank/src@zxfer_2	222
 tank/src@zxfer_3	333" "$g_src_snapshot_transfer_list"
+	assertTrue "The always-on divergence warning should name the diverged dataset." \
+		"grep -q 'destination dataset \[backup/dst\] has 1 snapshot' '$divergence_warning_file'"
+	assertTrue "The divergence warning should show both guids for the example snapshot." \
+		"grep -q 'backup/dst@zxfer_2: source guid 222 vs destination guid 999' '$divergence_warning_file'"
+	assertTrue "The divergence warning should state the convergence action." \
+		"grep -q 'converging: destroy + rollback + resend' '$divergence_warning_file'"
+	divergence_marker_status=0
+	zxfer_find_diverged_converged_marker backup/dst || divergence_marker_status=$?
+	assertEquals "The converged dataset should be marked for post-receive verification." \
+		0 "$divergence_marker_status"
+	assertEquals "The marker should remember the diverged dataset's source." \
+		"tank/src" "$g_zxfer_diverged_converged_marker_source"
+}
+
+# Divergence contract: without BOTH -d and -F the diverged dataset fails
+# closed via the structured error path before any delete or send is planned.
+test_inspect_delete_snap_fails_closed_on_divergence_without_both_d_and_f() {
+	g_lzfs_list_hr_S_snap=$(
+		cat <<'EOF'
+tank/src@zxfer_3	333
+tank/src@zxfer_2	222
+tank/src@zxfer_1	111
+EOF
+	)
+	g_rzfs_list_hr_snap=$(
+		cat <<'EOF'
+backup/dst@zxfer_2	999
+backup/dst@zxfer_1	111
+EOF
+	)
+	g_actual_dest="backup/dst"
+
+	for divergence_flag_combo in "0:" "1:" "0:-F"; do
+		g_option_d_delete_destination_snapshots=${divergence_flag_combo%%:*}
+		g_option_F_force_rollback=${divergence_flag_combo#*:}
+		divergence_status=0
+		divergence_output=$(
+			(zxfer_inspect_delete_snap "$g_option_d_delete_destination_snapshots" "tank/src") 2>&1
+		) || divergence_status=$?
+		assertEquals "Divergence without both -d and -F must abort the run [$divergence_flag_combo]." \
+			1 "$divergence_status"
+		assertContains "The fail-closed error should name the diverged dataset [$divergence_flag_combo]." \
+			"$divergence_output" "Destination dataset [backup/dst] has diverged from source dataset [tank/src]"
+		assertContains "The fail-closed error should state the -d -F remediation [$divergence_flag_combo]." \
+			"$divergence_output" "Re-run with BOTH -d and -F"
+	done
 }
 
 test_inspect_delete_snap_fetches_identity_records_when_name_only_lists_overlap() {
@@ -1390,6 +1559,10 @@ EOF
 
 	output=$(
 		(
+			# The refetched identity lists are diverged; allow convergence so
+			# the guid-validation planning assertions below stay reachable.
+			g_option_d_delete_destination_snapshots=1
+			g_option_F_force_rollback="-F"
 			zxfer_get_snapshot_identity_records_for_dataset() {
 				if [ "$1:$2" = "source:tank/src" ]; then
 					printf '%s\n' \
@@ -1407,7 +1580,7 @@ EOF
 				return 1
 			}
 
-			zxfer_inspect_delete_snap 0 "tank/src"
+			zxfer_inspect_delete_snap 0 "tank/src" 2>/dev/null
 			printf 'last=%s\n' "$g_last_common_snap"
 			printf 'transfer=%s\n' "$g_src_snapshot_transfer_list"
 		)
@@ -1677,36 +1850,35 @@ backup/dst@zxfer_1	111
 backup/dst@old_only	999"
 }
 
-test_inspect_delete_snap_uses_indexed_snapshot_records_when_available() {
+test_inspect_delete_snap_uses_staged_record_files_when_available() {
 	g_lzfs_list_hr_S_snap=""
 	g_rzfs_list_hr_snap=""
 	g_actual_dest="backup/dst"
-
-	zxfer_build_snapshot_record_index source "$(
-		cat <<'EOF'
+	source_record_file="$TEST_TMPDIR/inspect_delete_source.records"
+	destination_record_file="$TEST_TMPDIR/inspect_delete_destination.records"
+	cat >"$source_record_file" <<'EOF'
 tank/src@zxfer_3	333
 tank/src@zxfer_2	222
 tank/src@zxfer_1	111
 EOF
-	)"
-	zxfer_build_snapshot_record_index destination "$(
-		cat <<'EOF'
+	cat >"$destination_record_file" <<'EOF'
 backup/dst@zxfer_2	222
 backup/dst@zxfer_1	111
 EOF
-	)"
+	g_zxfer_source_snapshot_record_cache_file=$source_record_file
+	g_zxfer_destination_snapshot_record_cache_file=$destination_record_file
 
 	zxfer_inspect_delete_snap 0 "tank/src"
 
-	assertEquals "Indexed source/destination snapshot records should still drive common-snapshot detection when the legacy global lists are unavailable." \
+	assertEquals "Staged source/destination snapshot record files should still drive common-snapshot detection when the legacy global lists are unavailable." \
 		"tank/src@zxfer_2	222" "$g_last_common_snap"
-	assertEquals "Indexed snapshot records should still produce the correct transfer list." \
+	assertEquals "Staged snapshot record files should still produce the correct transfer list." \
 		"tank/src@zxfer_3	333" "$g_src_snapshot_transfer_list"
-	assertEquals "Indexed destination snapshot records should still mark the destination as having snapshots." \
+	assertEquals "Staged destination snapshot record files should still mark the destination as having snapshots." \
 		1 "$g_dest_has_snapshots"
 }
 
-test_inspect_delete_snap_preserves_snapshot_index_state_in_current_shell() {
+test_inspect_delete_snap_uses_global_snapshot_records_without_staged_files() {
 	output=$(
 		(
 			g_actual_dest="backup/dst"
@@ -1717,28 +1889,18 @@ test_inspect_delete_snap_preserves_snapshot_index_state_in_current_shell() {
 				"backup/dst@zxfer_1	111")
 
 			zxfer_inspect_delete_snap 0 "tank/src" || exit $?
-			printf 'index_dir=<%s>\n' "${g_zxfer_snapshot_index_dir:-}"
-			if [ -n "${g_zxfer_snapshot_index_dir:-}" ] && [ -d "$g_zxfer_snapshot_index_dir" ]; then
-				printf 'index_dir_exists=yes\n'
-			else
-				printf 'index_dir_exists=no\n'
-			fi
-			printf 'source_ready=%s\n' "${g_zxfer_source_snapshot_record_index_ready:-0}"
-			printf 'dest_ready=%s\n' "${g_zxfer_destination_snapshot_record_index_ready:-0}"
+			printf 'last_common=<%s>\n' "${g_last_common_snap:-}"
+			printf 'transfer=<%s>\n' "${g_src_snapshot_transfer_list:-}"
 		)
 	)
 	status=$?
 
-	assertEquals "Delete planning should keep running when snapshot-record lookups now preserve current-shell index state." \
+	assertEquals "Delete planning should keep running with in-memory snapshot-record lookups when no record files are staged." \
 		0 "$status"
-	assertContains "Delete planning should preserve the snapshot-index temp root in current-shell state so trap cleanup can reap it later." \
-		"$output" "index_dir=</"
-	assertContains "Delete planning should build the snapshot-index temp root in the current shell." \
-		"$output" "index_dir_exists=yes"
-	assertContains "Delete planning should leave the source snapshot-index marked ready in current-shell state." \
-		"$output" "source_ready=1"
-	assertContains "Delete planning should leave the destination snapshot-index marked ready in current-shell state." \
-		"$output" "dest_ready=1"
+	assertContains "Delete planning should detect the common snapshot from the in-memory record lists." \
+		"$output" "last_common=<tank/src@zxfer_1	111>"
+	assertContains "Delete planning should build the transfer list from the in-memory record lists." \
+		"$output" "transfer=<tank/src@zxfer_2	222>"
 }
 
 test_format_snapshot_creation_epoch_for_display_rejects_nonnumeric_input() {
@@ -1879,6 +2041,193 @@ test_delete_snaps_reports_rollback_eligibility_probe_failures() {
 		1 "$status"
 	assertContains "Snapshot deletion should report the rollback-eligibility creation-time failure." \
 		"$output" "Failed to query destination snapshot creation times while evaluating rollback eligibility."
+}
+
+test_divergence_scan_reports_each_name_match_guid_mismatch() {
+	source_records=$(
+		cat <<'EOF'
+tank/a/nested.b@autosnap_2026-06-12_06:00:02_frequently	2222000000000000001
+tank/a/nested.b@zxfer_81150_20260612000001	1111000000000000001
+tank/a/nested.b@hostile:colon-snap_%	3333000000000000001
+EOF
+	)
+	dest_records=$(
+		cat <<'EOF'
+backup/a/nested.b@autosnap_2026-06-12_06:00:02_frequently	9999000000000000001
+backup/a/nested.b@zxfer_81150_20260612000001	1111000000000000001
+backup/a/nested.b@hostile:colon-snap_%	9999000000000000002
+EOF
+	)
+
+	scan_status=0
+	scan_output=$(zxfer_scan_snapshot_record_lists_for_divergence \
+		"$source_records" "$dest_records") || scan_status=$?
+
+	assertEquals "Shared snapshot names should return status 0." 0 "$scan_status"
+	assertEquals "Every name-match/guid-mismatch pair should be reported with both guids; matching guids must not be." \
+		"autosnap_2026-06-12_06:00:02_frequently	2222000000000000001	9999000000000000001
+hostile:colon-snap_%	3333000000000000001	9999000000000000002" \
+		"$scan_output"
+}
+
+test_divergence_scan_handles_disjoint_and_guidless_lists() {
+	scan_status=0
+	scan_output=$(zxfer_scan_snapshot_record_lists_for_divergence \
+		"tank/src@only_on_source	111" "backup/dst@only_on_dest	222") || scan_status=$?
+	assertEquals "Disjoint snapshot names should return status 1." 1 "$scan_status"
+	assertEquals "Disjoint snapshot names should report no divergence." "" "$scan_output"
+
+	scan_status=0
+	scan_output=$(zxfer_scan_snapshot_record_lists_for_divergence \
+		"tank/src@snap1" "backup/dst@snap1") || scan_status=$?
+	assertEquals "Guid-less records still detect shared names." 0 "$scan_status"
+	assertEquals "Guid-less records can never be classified as diverged." "" "$scan_output"
+}
+
+test_record_diverged_destination_snapshots_caps_examples_at_three() {
+	diverged_records=$(
+		cat <<'EOF'
+snapA	1	9
+snapB	2	8
+snapC	3	7
+snapD	4	6
+EOF
+	)
+
+	zxfer_record_diverged_destination_snapshots "$diverged_records"
+
+	assertEquals "Every diverged snapshot should be counted." \
+		4 "$g_zxfer_diverged_snapshot_count"
+	assertEquals "Only the first three diverged snapshots should be kept as examples." \
+		"snapA	1	9
+snapB	2	8
+snapC	3	7" "$g_zxfer_diverged_snapshot_examples"
+
+	zxfer_record_diverged_destination_snapshots ""
+	assertEquals "An empty scan should reset the diverged count." \
+		0 "$g_zxfer_diverged_snapshot_count"
+	assertEquals "An empty scan should reset the diverged examples." \
+		"" "$g_zxfer_diverged_snapshot_examples"
+}
+
+test_diverged_converged_marker_find_and_unmark() {
+	g_zxfer_diverged_converged_datasets="backup/a	tank/a
+backup/a/nested	tank/a/nested"
+
+	marker_lookup_status=0
+	zxfer_find_diverged_converged_marker backup/a/nested || marker_lookup_status=$?
+	assertEquals "Marker lookup should match the exact destination dataset." \
+		0 "$marker_lookup_status"
+	assertEquals "Marker lookup should publish the marker's source dataset." \
+		"tank/a/nested" "$g_zxfer_diverged_converged_marker_source"
+	assertFalse "Marker lookup must not prefix-match destination datasets." \
+		"zxfer_find_diverged_converged_marker backup/a/nest"
+
+	zxfer_unmark_diverged_converged_dataset "backup/a"
+	assertEquals "Unmarking should drop only the named destination dataset." \
+		"backup/a/nested	tank/a/nested" "$g_zxfer_diverged_converged_datasets"
+	zxfer_unmark_diverged_converged_dataset "backup/a/nested"
+	assertEquals "Unmarking the last dataset should empty the marker list." \
+		"" "$g_zxfer_diverged_converged_datasets"
+}
+
+test_enforce_divergence_contract_emits_transparency_line_and_counts_once() {
+	g_option_V_very_verbose=1
+	g_option_d_delete_destination_snapshots=1
+	g_option_F_force_rollback="-F"
+	g_actual_dest="backup/dst"
+	g_last_common_snap="tank/src@zxfer_1	111"
+	zxfer_record_diverged_destination_snapshots "zxfer_2	222	999"
+	g_zxfer_profile_diverged_snapshot_warnings=0
+
+	contract_stderr_file="$TEST_TMPDIR/divergence_contract.err"
+	zxfer_enforce_destination_divergence_contract "tank/src" 2>"$contract_stderr_file"
+	contract_status=$?
+
+	assertEquals "The convergence branch should return 0." 0 "$contract_status"
+	assertTrue "The -V transparency line should name the last common snapshot and diverged count." \
+		"grep -q 'Last common snapshot: tank/src@zxfer_1	111; diverged destination snapshots: 1.' '$contract_stderr_file'"
+	assertEquals "The -V profile counter should count the warned dataset." \
+		1 "$g_zxfer_profile_diverged_snapshot_warnings"
+
+	# A second planning pass over the same dataset (e.g. the -g grandfather
+	# pre-pass plus the main pass) must not warn or count again.
+	zxfer_enforce_destination_divergence_contract "tank/src" 2>"$contract_stderr_file"
+	assertEquals "A re-inspected marked dataset must not be counted twice." \
+		1 "$g_zxfer_profile_diverged_snapshot_warnings"
+	assertFalse "A re-inspected marked dataset must not warn twice." \
+		"grep -q 'WARNING' '$contract_stderr_file'"
+
+	# In-sync datasets still get the transparency line and nothing else.
+	zxfer_record_diverged_destination_snapshots ""
+	g_actual_dest="backup/clean"
+	zxfer_enforce_destination_divergence_contract "tank/clean" 2>"$contract_stderr_file"
+	assertTrue "In-sync datasets should still emit the transparency line." \
+		"grep -q 'diverged destination snapshots: 0.' '$contract_stderr_file'"
+	assertEquals "In-sync datasets must not be counted." \
+		1 "$g_zxfer_profile_diverged_snapshot_warnings"
+	assertFalse "In-sync datasets must not warn." \
+		"grep -q 'WARNING' '$contract_stderr_file'"
+}
+
+test_verify_converged_destination_skips_unmarked_datasets() {
+	g_zxfer_diverged_converged_datasets=""
+	# No stubs installed: any capture or live-view call would fail loudly, so
+	# returning 0 proves the unmarked path is a pure string test.
+	zxfer_verify_converged_destination_after_receive "backup/dst"
+	assertEquals "Unmarked datasets must skip post-receive verification." 0 $?
+}
+
+test_verify_converged_destination_clears_marker_on_aligned_live_view() {
+	g_zxfer_diverged_converged_datasets="backup/dst	tank/src"
+
+	verify_output=$(
+		(
+			zxfer_capture_snapshot_records_for_dataset() {
+				g_zxfer_snapshot_record_capture_result="tank/src@zxfer_2	222
+tank/src@zxfer_1	111"
+				return 0
+			}
+			zxfer_ensure_live_destination_snapshot_view() { return 0; }
+			zxfer_get_live_destination_snapshots() {
+				printf '%s\n' "backup/dst@zxfer_2	222" "backup/dst@zxfer_1	111"
+			}
+			zxfer_verify_converged_destination_after_receive "backup/dst" &&
+				printf 'verified marker=[%s]\n' "$g_zxfer_diverged_converged_datasets"
+		)
+	)
+
+	assertContains "An aligned live view should verify and clear the marker." \
+		"$verify_output" "verified marker=[]"
+}
+
+test_verify_converged_destination_fails_on_remaining_divergence() {
+	g_zxfer_diverged_converged_datasets="backup/dst	tank/src"
+
+	verify_status=0
+	verify_output=$(
+		(
+			zxfer_capture_snapshot_records_for_dataset() {
+				g_zxfer_snapshot_record_capture_result="tank/src@zxfer_2	222
+tank/src@zxfer_1	111"
+				return 0
+			}
+			zxfer_ensure_live_destination_snapshot_view() { return 0; }
+			zxfer_get_live_destination_snapshots() {
+				printf '%s\n' "backup/dst@zxfer_2	999" "backup/dst@zxfer_1	111"
+			}
+			zxfer_verify_converged_destination_after_receive "backup/dst"
+		) 2>&1
+	) || verify_status=$?
+
+	assertEquals "Remaining divergence after convergence must abort the run." \
+		1 "$verify_status"
+	assertContains "The re-divergence error should name the dataset." \
+		"$verify_output" "Destination dataset [backup/dst] re-diverged after convergence"
+	assertContains "The re-divergence error should name the snapshot and both guids." \
+		"$verify_output" "backup/dst@zxfer_2: source guid 222 vs destination guid 999"
+	assertContains "The re-divergence error should blame an external writer." \
+		"$verify_output" "An external writer is modifying the destination"
 }
 
 # shellcheck source=tests/shunit2/shunit2

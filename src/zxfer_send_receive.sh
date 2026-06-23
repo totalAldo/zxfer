@@ -59,16 +59,12 @@ zxfer_reset_send_receive_state() {
 	g_zfs_send_job_queue_writer_open=0
 	g_zxfer_send_job_status_file_exit_status=""
 	g_zxfer_send_job_status_file_report_failure=""
-	g_zxfer_send_job_record_job_id=""
 	g_zxfer_send_job_record_runner_pid=""
 	g_zxfer_send_job_record_source_dataset=""
 	g_zxfer_send_job_record_source_snapshot=""
 	g_zxfer_send_job_record_dest_dataset=""
 	g_zxfer_send_job_record_target_host=""
-	g_zxfer_send_job_conflict_job_id=""
 	g_zxfer_send_job_conflict_dest_dataset=""
-	g_zxfer_send_job_conflict_target_host=""
-	g_zxfer_send_job_error_context_result=""
 	g_zxfer_progress_size_estimate_result=""
 	g_zxfer_progress_probe_output_result=""
 	g_zxfer_progress_bar_command_result=""
@@ -142,28 +138,6 @@ zxfer_extract_numeric_progress_estimate() {
 	printf '%s\n' "$l_estimate_value"
 }
 
-# Purpose: Read the progress estimate capture file from staged state into the
-# current shell.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination when later helpers need a checked reload instead of ad hoc file
-# reads.
-zxfer_read_progress_estimate_capture_file() {
-	l_capture_path=$1
-
-	g_zxfer_progress_probe_output_result=""
-	[ -n "$l_capture_path" ] || return 0
-
-	if zxfer_read_runtime_artifact_file_trimmed "$l_capture_path" >/dev/null; then
-		l_capture_result=$g_zxfer_runtime_artifact_read_result
-	else
-		l_status=$?
-		return "$l_status"
-	fi
-
-	g_zxfer_progress_probe_output_result=$l_capture_result
-	return 0
-}
-
 # Purpose: Capture the progress estimate probe output into staged state or
 # module globals for later use.
 # Usage: Called during send/receive command setup, progress handling, and job
@@ -197,12 +171,8 @@ zxfer_capture_progress_estimate_probe_output() {
 zxfer_calculate_fast_full_size_estimate() {
 	l_current_snapshot=$1
 
-	l_size_status=0
 	l_size_dataset=$(zxfer_run_source_zfs_cmd list -Hp -o referenced "$l_current_snapshot" 2>&1) ||
-		l_size_status=$?
-	if [ "$l_size_status" -ne 0 ]; then
-		return "$l_size_status"
-	fi
+		return "$?"
 
 	zxfer_extract_numeric_progress_estimate "$l_size_dataset"
 }
@@ -224,12 +194,8 @@ zxfer_calculate_fast_incremental_size_estimate() {
 		return 1
 	fi
 
-	l_size_status=0
 	l_size_dataset=$(zxfer_run_source_zfs_cmd get -Hpo value "written@$l_previous_snapshot_name" "$l_current_dataset" 2>&1) ||
-		l_size_status=$?
-	if [ "$l_size_status" -ne 0 ]; then
-		return "$l_size_status"
-	fi
+		return "$?"
 
 	zxfer_extract_numeric_progress_estimate "$l_size_dataset"
 }
@@ -360,18 +326,17 @@ zxfer_progress_passthrough() {
 		return "$l_passthrough_status"
 	fi
 
-	sh -c 'exec "$1" "$2" <"$3"' sh \
+	sh -c 'exec "$1" "$2" <"$3" >/dev/null' sh \
 		"$l_cleanup_wrapper_script" \
 		"$l_progress_dialog" \
 		"$l_fifo" &
 	l_progress_pid=$!
 	if ! zxfer_register_cleanup_pid "$l_progress_pid" "progress dialog helper"; then
-		l_abort_status=0
-		zxfer_abort_direct_child_pid "$l_progress_pid" TERM "progress dialog helper" || l_abort_status=$?
-		if [ "$l_abort_status" -ne 0 ]; then
+		zxfer_abort_direct_child_pid "$l_progress_pid" TERM "progress dialog helper" || {
+			l_abort_status=$?
 			zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
 			return "$l_abort_status"
-		fi
+		}
 		wait "$l_progress_pid" 2>/dev/null || :
 		zxfer_echoV "Unable to register validated cleanup metadata for the progress dialog; continuing without it."
 		zxfer_cleanup_runtime_artifact_path "$l_fifo_dir"
@@ -432,9 +397,9 @@ zxfer_handle_progress_bar_option() {
 	fi
 	l_progress_dialog=$(zxfer_setup_progress_dialog "$l_size_est" "$l_snapshot")
 
-	# Modify the send command to include the progress dialog
+	# Modify the send command to include the progress dialog.
 	l_escaped_progress_dialog=$(zxfer_escape_for_single_quotes "$l_progress_dialog")
-	l_progress_bar_cmd="| dd obs=1048576 | dd bs=1048576 | zxfer_progress_passthrough '$l_escaped_progress_dialog'"
+	l_progress_bar_cmd="| zxfer_progress_passthrough '$l_escaped_progress_dialog'"
 	g_zxfer_progress_bar_command_result=$l_progress_bar_cmd
 
 	echo "$l_progress_bar_cmd"
@@ -670,55 +635,85 @@ zxfer_open_send_job_completion_queue() {
 # resource.
 zxfer_open_send_job_completion_queue_fd() {
 	l_queue_path=$1
+	l_open_reader_status=0
 
-	if ! zxfer_open_send_job_completion_queue_writer_fd "$l_queue_path"; then
+	# POSIX leaves read/write FIFO opens undefined. Hold a short-lived
+	# reader so the parent can open its write-only fd before its reader fd.
+	(exec 7<"$l_queue_path") &
+	l_open_reader_pid=$!
+	if ! zxfer_register_cleanup_pid "$l_open_reader_pid" "rolling send/receive completion queue open helper"; then
+		l_abort_status=0
+		zxfer_abort_direct_child_pid "$l_open_reader_pid" TERM "rolling send/receive completion queue open helper" ||
+			l_abort_status=$?
+		wait "$l_open_reader_pid" 2>/dev/null || :
+		[ "$l_abort_status" -eq 0 ] || return "$l_abort_status"
 		return 1
 	fi
-	if ! zxfer_open_send_job_completion_queue_reader_fd "$l_queue_path"; then
-		exec 9>&- 2>/dev/null || true
-		return 1
+	zxfer_open_send_job_completion_queue_writer_fd "$l_queue_path" || {
+		l_open_reader_status=$?
+		zxfer_unregister_cleanup_pid "$l_open_reader_pid"
+		zxfer_abort_direct_child_pid "$l_open_reader_pid" TERM "rolling send/receive completion queue open helper" >/dev/null 2>&1 || :
+		wait "$l_open_reader_pid" 2>/dev/null || :
+		return "$l_open_reader_status"
+	}
+	wait "$l_open_reader_pid" 2>/dev/null || l_open_reader_status=$?
+	zxfer_unregister_cleanup_pid "$l_open_reader_pid"
+	if [ "$l_open_reader_status" -ne 0 ]; then
+		# Never add 2>/dev/null to bare exec: it would redirect the
+		# main shell's stderr for every later warning and failure report.
+		exec 9>&- || true
+		return "$l_open_reader_status"
 	fi
+	zxfer_open_send_job_completion_queue_reader_fd "$l_queue_path" || {
+		l_open_reader_status=$?
+		exec 9>&- || true
+		return "$l_open_reader_status"
+	}
 
 	return 0
 }
 
-# Purpose: Open the send job completion queue writer file descriptor and
-# publish the handles or state later helpers need.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination before asynchronous work starts using the shared coordination
-# resource.
+# Purpose: Open the rolling completion queue writer fd.
+# Usage: Called before async send/receive work starts or reopens the queue.
 zxfer_open_send_job_completion_queue_writer_fd() {
-	exec 9<>"$1"
+	exec 9>&- || true
+	for l_open_attempt in 1 2 3 4 5 6 7 8; do
+		{ exec 9>&1; } >"$1" && return 0
+		l_open_status=$?
+	done
+
+	return "$l_open_status"
 }
 
-# Purpose: Open the send job completion queue reader file descriptor and
-# publish the handles or state later helpers need.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination before asynchronous work starts using the shared coordination
-# resource.
+# Purpose: Open the rolling completion queue reader fd.
+# Usage: Called after the queue writer is held so completion waits can read.
 zxfer_open_send_job_completion_queue_reader_fd() {
-	exec 8<"$1"
+	exec 8<&- || true
+	for l_open_attempt in 1 2 3 4 5 6 7 8; do
+		{ exec 8<&0; } <"$1" && return 0
+		l_open_status=$?
+	done
+
+	return "$l_open_status"
 }
 
-# Purpose: Close the send job completion queue writer file descriptor and
-# release the related handles or state.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination after the protected work finishes or cleanup takes over.
+# Purpose: Close the rolling completion queue writer fd.
+# Usage: Called after work finishes or before waiting on queue notifications.
 zxfer_close_send_job_completion_queue_writer_fd() {
 	if [ "${g_zfs_send_job_queue_writer_open:-0}" -eq 1 ]; then
-		exec 9>&- 2>/dev/null || true
+		# Never 2>/dev/null a bare exec; that can permanently redirect the
+		# main shell's stderr and hide later warnings or failure reports.
+		exec 9>&- || true
 	fi
 	g_zfs_send_job_queue_writer_open=0
 }
 
-# Purpose: Close the send job completion queue and release the related handles
-# or state.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination after the protected work finishes or cleanup takes over.
+# Purpose: Close the rolling completion queue and release related state.
+# Usage: Called after protected work finishes or cleanup takes over.
 zxfer_close_send_job_completion_queue() {
 	zxfer_close_send_job_completion_queue_writer_fd
 	if [ "${g_zfs_send_job_queue_open:-0}" -eq 1 ]; then
-		exec 8<&- 2>/dev/null || true
+		exec 8<&- || true
 	fi
 	g_zfs_send_job_queue_open=0
 	if [ -n "${g_zfs_send_job_queue_dir:-}" ]; then
@@ -728,28 +723,6 @@ zxfer_close_send_job_completion_queue() {
 	fi
 	g_zfs_send_job_queue_path=""
 	g_zfs_send_job_queue_dir=""
-}
-
-# Purpose: Write the send job status file in the normalized form later zxfer
-# steps expect.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination when the module needs a stable staged file or emitted stream for
-# downstream use.
-zxfer_write_send_job_status_file() {
-	l_status_file=$1
-	l_job_status=$2
-	l_report_failure=${3:-}
-
-	if ! printf 'status\t%s\n' "$l_job_status" >"$l_status_file" 2>/dev/null; then
-		return 1
-	fi
-	if [ "$l_report_failure" != "" ]; then
-		if ! printf 'report_failure\t%s\n' "$l_report_failure" >>"$l_status_file" 2>/dev/null; then
-			return 1
-		fi
-	fi
-
-	return 0
 }
 
 # Purpose: Read the send job status file from staged state into the current
@@ -831,11 +804,7 @@ zxfer_get_send_job_completion_status() {
 		fi
 		return 0
 	fi
-	l_read_status=0
-	zxfer_read_send_job_status_file "$l_status_file" || l_read_status=$?
-	if [ "$l_read_status" -ne 0 ]; then
-		return "$l_read_status"
-	fi
+	zxfer_read_send_job_status_file "$l_status_file" || return "$?"
 	case ${g_zxfer_send_job_status_file_exit_status:-} in
 	'' | *[!0-9]*)
 		g_zxfer_send_job_status_file_exit_status=$l_wait_status
@@ -846,37 +815,6 @@ zxfer_get_send_job_completion_status() {
 		g_zxfer_send_job_status_file_report_failure=completion_write
 	fi
 
-	return 0
-}
-
-# Purpose: Register the send job with the tracking state owned by this module.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination so cleanup and later lookups can find the live resource.
-zxfer_register_send_job() {
-	l_pid=$1
-	l_status_file=$2
-
-	l_register_status=0
-	zxfer_register_cleanup_pid "$l_pid" "legacy zfs send/receive helper" ||
-		l_register_status=$?
-	if [ "$l_register_status" -ne 0 ]; then
-		return "$l_register_status"
-	fi
-
-	if [ -n "${g_zfs_send_job_pids:-}" ]; then
-		g_zfs_send_job_pids="$g_zfs_send_job_pids $l_pid"
-	else
-		g_zfs_send_job_pids=$l_pid
-	fi
-
-	if [ -n "${g_zfs_send_job_records:-}" ]; then
-		g_zfs_send_job_records="$g_zfs_send_job_records
-$l_pid	$l_status_file"
-	else
-		g_zfs_send_job_records="$l_pid	$l_status_file"
-	fi
-
-	g_count_zfs_send_jobs=$((g_count_zfs_send_jobs + 1))
 	return 0
 }
 
@@ -978,7 +916,6 @@ $l_job_id	$l_runner_pid	$l_source_snapshot	$l_dest_dataset	$l_target_host"
 zxfer_find_supervised_send_job_record() {
 	l_job_id=$1
 
-	g_zxfer_send_job_record_job_id=""
 	g_zxfer_send_job_record_runner_pid=""
 	g_zxfer_send_job_record_source_dataset=""
 	g_zxfer_send_job_record_source_snapshot=""
@@ -988,7 +925,6 @@ zxfer_find_supervised_send_job_record() {
 	while IFS='	' read -r l_record_job_id l_record_pid l_record_source_snapshot l_record_dest_dataset l_record_target_host || [ -n "${l_record_job_id}${l_record_pid}${l_record_source_snapshot}${l_record_dest_dataset}${l_record_target_host}" ]; do
 		[ -n "$l_record_job_id" ] || continue
 		[ "$l_record_job_id" = "$l_job_id" ] || continue
-		g_zxfer_send_job_record_job_id=$l_record_job_id
 		g_zxfer_send_job_record_runner_pid=$l_record_pid
 		g_zxfer_send_job_record_source_snapshot=$l_record_source_snapshot
 		g_zxfer_send_job_record_source_dataset=$(zxfer_extract_snapshot_dataset "$l_record_source_snapshot")
@@ -1008,9 +944,7 @@ zxfer_find_supervised_send_job_record() {
 zxfer_find_supervised_send_job_pid_by_job_id() {
 	l_job_id=$1
 
-	if ! zxfer_find_supervised_send_job_record "$l_job_id"; then
-		return 1
-	fi
+	zxfer_find_supervised_send_job_record "$l_job_id" || return 1
 
 	printf '%s\n' "$g_zxfer_send_job_record_runner_pid"
 	return 0
@@ -1049,9 +983,7 @@ zxfer_supervised_send_job_conflicts_with_destination() {
 	l_target_host=${1:-}
 	l_dest_dataset=$2
 
-	g_zxfer_send_job_conflict_job_id=""
 	g_zxfer_send_job_conflict_dest_dataset=""
-	g_zxfer_send_job_conflict_target_host=""
 
 	while IFS='	' read -r l_record_job_id l_record_pid l_record_source_snapshot l_record_dest_dataset l_record_target_host || [ -n "${l_record_job_id}${l_record_pid}${l_record_source_snapshot}${l_record_dest_dataset}${l_record_target_host}" ]; do
 		[ -n "$l_record_job_id" ] || continue
@@ -1059,9 +991,7 @@ zxfer_supervised_send_job_conflicts_with_destination() {
 		if ! zxfer_dataset_paths_conflict_by_ancestry "$l_record_dest_dataset" "$l_dest_dataset"; then
 			continue
 		fi
-		g_zxfer_send_job_conflict_job_id=$l_record_job_id
 		g_zxfer_send_job_conflict_dest_dataset=$l_record_dest_dataset
-		g_zxfer_send_job_conflict_target_host=$l_record_target_host
 		return 0
 	done <<-EOF
 		${g_zfs_send_job_supervisor_records:-}
@@ -1077,10 +1007,7 @@ zxfer_supervised_send_job_conflicts_with_destination() {
 zxfer_get_supervised_send_job_error_context() {
 	l_job_id=$1
 
-	g_zxfer_send_job_error_context_result=""
-	if ! zxfer_find_supervised_send_job_record "$l_job_id"; then
-		return 1
-	fi
+	zxfer_find_supervised_send_job_record "$l_job_id" || return 1
 
 	l_source_label=${g_zxfer_send_job_record_source_snapshot:-$g_zxfer_send_job_record_source_dataset}
 	if [ -n "$l_source_label" ] && [ -n "$g_zxfer_send_job_record_dest_dataset" ]; then
@@ -1094,21 +1021,34 @@ zxfer_get_supervised_send_job_error_context() {
 		l_context="$l_context on target [$g_zxfer_send_job_record_target_host]"
 	fi
 
-	g_zxfer_send_job_error_context_result=$l_context
 	printf '%s\n' "$l_context"
 }
 
 zxfer_finalize_supervised_send_job_success() {
 	l_job_id=$1
 
-	if ! zxfer_find_supervised_send_job_record "$l_job_id"; then
-		return 0
-	fi
+	zxfer_find_supervised_send_job_record "$l_job_id" || return 0
 	[ -n "${g_zxfer_send_job_record_dest_dataset:-}" ] || return 0
 
 	zxfer_note_destination_receive_completed "$g_zxfer_send_job_record_dest_dataset"
 	zxfer_invalidate_destination_property_mutation_cache "$g_zxfer_send_job_record_dest_dataset"
-	zxfer_invalidate_destination_snapshot_record_cache
+	# Post-receive divergence verification (reap-time finalize side): a
+	# dataset that was diverged and converged this run must come out of its
+	# receive without any remaining name-match/guid-mismatch snapshot. The
+	# helper is defined in zxfer_snapshot_reconcile.sh, which loads after
+	# this module; guard for suites that source modules only through here.
+	if command -v zxfer_verify_converged_destination_after_receive >/dev/null 2>&1; then
+		zxfer_verify_converged_destination_after_receive "$g_zxfer_send_job_record_dest_dataset"
+	fi
+	# The completed receive only changed the completed dataset's own snapshot
+	# records, and those have no same-iteration consumers: planning for the
+	# dataset already finished, other datasets filter the shared records to
+	# their own paths, every send/seed decision is preceded by a live
+	# destination recheck, and -Y iterations rebuild discovery state from
+	# scratch. Invalidating the whole-tree destination snapshot record cache
+	# here forced every later dataset to fall back to slower lookups once the
+	# first background job completed, without fixing any staleness that
+	# mattered.
 	return 0
 }
 
@@ -1173,11 +1113,7 @@ $l_record_job_id	$l_record_pid	$l_record_source_snapshot	$l_record_dest_dataset	
 # cleanly.
 zxfer_terminate_remaining_send_jobs() {
 	if [ -n "${g_zfs_send_job_supervisor_records:-}" ]; then
-		l_collect_status=0
-		zxfer_collect_supervised_send_job_ids >/dev/null || l_collect_status=$?
-		if [ "$l_collect_status" -ne 0 ]; then
-			return "$l_collect_status"
-		fi
+		zxfer_collect_supervised_send_job_ids >/dev/null || return "$?"
 		l_job_ids=$g_zxfer_runtime_artifact_read_result
 		l_abort_status=0
 		l_first_abort_failure_message=""
@@ -1235,16 +1171,6 @@ zxfer_terminate_remaining_send_jobs() {
 	return 0
 }
 
-zxfer_throw_send_job_cleanup_failure() {
-	l_cleanup_status=${1:-1}
-	zxfer_throw_error "${g_zxfer_cleanup_pid_abort_failure_message:-Failed to tear down validated zfs send/receive cleanup helpers.}" "$l_cleanup_status"
-}
-
-zxfer_throw_supervised_send_job_cleanup_failure() {
-	l_cleanup_status=${1:-1}
-	zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}" "$l_cleanup_status"
-}
-
 # Purpose: Terminate remaining legacy send jobs, then throw the requested
 # operator-facing error unless cleanup itself must take precedence.
 # Usage: Called during send/receive command setup, progress handling, and job
@@ -1256,7 +1182,7 @@ zxfer_throw_send_job_error_after_cleanup() {
 
 	zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
 	if [ "$l_cleanup_status" -ne 0 ]; then
-		zxfer_throw_send_job_cleanup_failure "$l_cleanup_status"
+		zxfer_throw_error "${g_zxfer_cleanup_pid_abort_failure_message:-Failed to tear down validated zfs send/receive cleanup helpers.}" "$l_cleanup_status"
 	fi
 	if [ "$#" -ge 2 ]; then
 		zxfer_throw_error "$l_error_message" "$l_error_status"
@@ -1276,7 +1202,7 @@ zxfer_throw_supervised_send_job_error_after_cleanup() {
 
 	zxfer_terminate_remaining_send_jobs || l_cleanup_status=$?
 	if [ "$l_cleanup_status" -ne 0 ]; then
-		zxfer_throw_supervised_send_job_cleanup_failure "$l_cleanup_status"
+		zxfer_throw_error "${g_zxfer_background_job_abort_failure_message:-Failed to tear down supervised send/receive jobs.}" "$l_cleanup_status"
 	fi
 	if [ "$#" -ge 2 ]; then
 		zxfer_throw_error "$l_error_message" "$l_error_status"
@@ -1363,11 +1289,8 @@ zxfer_wait_for_next_supervised_zfs_send_job_completion() {
 }
 
 zxfer_wait_for_supervised_zfs_send_jobs_batch() {
-	l_collect_status=0
-	zxfer_collect_supervised_send_job_ids >/dev/null || l_collect_status=$?
-	if [ "$l_collect_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to collect supervised send/receive job ids." "$l_collect_status"
-	fi
+	zxfer_collect_supervised_send_job_ids >/dev/null ||
+		zxfer_throw_error "Failed to collect supervised send/receive job ids." "$?"
 	l_job_ids=$g_zxfer_runtime_artifact_read_result
 
 	while IFS= read -r l_job_id || [ -n "$l_job_id" ]; do
@@ -1406,47 +1329,6 @@ zxfer_wait_for_supervised_zfs_send_jobs_batch() {
 	g_zfs_send_job_supervisor_records=""
 	g_count_zfs_send_jobs=0
 	zxfer_close_send_job_completion_queue
-}
-
-# Purpose: Run the background pipeline through the controlled execution path
-# owned by this module.
-# Usage: Called during send/receive command setup, progress handling, and job
-# coordination once planning is complete and zxfer is ready to execute the
-# action.
-zxfer_run_background_pipeline() {
-	l_exec_cmd=$1
-	l_display_cmd=$2
-	l_status_file=$3
-	l_job_status=0
-
-	zxfer_record_last_command_string "$l_exec_cmd"
-	if [ "$g_option_n_dryrun" -eq 1 ]; then
-		zxfer_echov "Dry run: $l_display_cmd"
-	else
-		zxfer_echov "$l_display_cmd"
-		l_job_status=0
-		eval "$l_exec_cmd" || l_job_status=$?
-	fi
-
-	if ! zxfer_write_send_job_status_file "$l_status_file" "$l_job_status"; then
-		printf '%s\n' "Failed to record zfs send/receive background status in [$l_status_file]." >&2
-		if [ "${g_zfs_send_job_queue_open:-0}" -eq 1 ]; then
-			printf 'status_write_failed\t%s\t%s\n' "$l_status_file" "$l_job_status" >&9 2>/dev/null || :
-		fi
-		return 125
-	fi
-	if [ "${g_zfs_send_job_queue_open:-0}" -eq 1 ]; then
-		if ! printf '%s\n' "$l_status_file" >&9 2>/dev/null; then
-			if ! zxfer_write_send_job_status_file "$l_status_file" "$l_job_status" "queue_write"; then
-				zxfer_cleanup_runtime_artifact_path "$l_status_file"
-				printf '%s\n' "Failed to record zfs send/receive completion notification failure in [$l_status_file]." >&2
-			fi
-			printf '%s\n' "Failed to publish zfs send/receive background completion for [$l_status_file]." >&2
-			return 125
-		fi
-	fi
-
-	return "$l_job_status"
 }
 
 # Purpose: Wait for the for next ZFS send job completion to reach the state
@@ -1805,7 +1687,21 @@ zxfer_zfs_send_receive() {
 		if [ "$l_did_run_in_background" -eq 0 ]; then
 			zxfer_note_destination_receive_completed "$l_dest"
 			zxfer_invalidate_destination_property_mutation_cache "$l_dest"
-			zxfer_invalidate_destination_snapshot_record_cache
+			# Post-receive divergence verification (foreground completion
+			# side): the invalidation above bumped the destination mutation
+			# generation, so the verification re-captures a fresh live view.
+			# Guarded for suites that source modules only through this one;
+			# zxfer_snapshot_reconcile.sh loads after it.
+			if command -v zxfer_verify_converged_destination_after_receive >/dev/null 2>&1; then
+				zxfer_verify_converged_destination_after_receive "$l_dest"
+			fi
+			# Do not wipe the whole-tree destination snapshot record cache
+			# here: the receive only changed this dataset's own snapshots,
+			# planning for it already finished, and every later send/seed is
+			# preceded by a live destination recheck. The wipe also cleared
+			# the in-memory fallback list, so -d delete planning for every
+			# dataset after the first receive saw an empty destination and
+			# silently skipped its deletions.
 		fi
 		# shellcheck disable=SC2034
 		g_is_performed_send_destroy=1

@@ -37,114 +37,16 @@
 ################################################################################
 
 # Module contract:
-# owns globals: per-host ssh control-socket state plus remote capability/tool resolution state such as g_ssh_origin_control_socket*, g_ssh_target_control_socket*, g_origin_remote_capabilities_*, g_target_remote_capabilities_*, and the resolved remote zfs helper selections.
+# owns globals: per-role ssh control-socket state plus remote capability/tool resolution state such as g_ssh_origin_control_socket, g_ssh_target_control_socket, g_origin_remote_capabilities_*, g_target_remote_capabilities_*, and the resolved remote zfs helper selections.
 # reads globals: g_cmd_ssh, g_option_O_*/g_option_T_*, local helper paths, and temp-root helpers.
-# mutates caches: remote capability cache files plus run-owned ssh control-socket and remote-capability cache directories.
+# mutates caches: in-memory per-run remote capability state and per-run ssh control sockets under the run temp root; nothing is shared across runs or processes.
 # returns via stdout: remote OS/tool paths, ssh argv renderings, and remote-safe command strings.
 
 ZXFER_SSH_CONTROL_SOCKET_PATH_MAX=104
 ZXFER_SSH_CONTROL_SOCKET_TEMP_SUFFIX_SAMPLE=".Mvij6x1tYLn6woxm"
-ZXFER_SSH_CONTROL_SOCKET_LOCK_FAST_RETRIES=20
-ZXFER_REMOTE_CAPABILITY_CACHE_WAIT_FAST_RETRIES=20
-
-# Purpose: Record the SSH control socket lock wait metrics for later
-# diagnostics or control decisions.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs the state preserved for follow-on helpers
-# or reporting.
-zxfer_record_ssh_control_socket_lock_wait_metrics() {
-	l_waited=$1
-	l_wait_start_ms=${2:-}
-
-	[ "$l_waited" -eq 1 ] || return 0
-	zxfer_profile_increment_counter g_zxfer_profile_ssh_control_socket_lock_wait_count
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_ssh_control_socket_lock_wait_ms "$l_wait_start_ms"
-}
-
-# Purpose: Record the remote capability cache wait metrics for later
-# diagnostics or control decisions.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs the state preserved for follow-on helpers
-# or reporting.
-zxfer_record_remote_capability_cache_wait_metrics() {
-	l_waited=$1
-	l_wait_start_ms=${2:-}
-
-	[ "$l_waited" -eq 1 ] || return 0
-	zxfer_profile_increment_counter g_zxfer_profile_remote_capability_cache_wait_count
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_remote_capability_cache_wait_ms "$l_wait_start_ms"
-}
-
-# Purpose: Reset the SSH control socket lock state so the next remote-host pass
-# starts from a clean state.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before this module reuses mutable scratch globals or cached
-# decisions.
-zxfer_reset_ssh_control_socket_lock_state() {
-	g_zxfer_ssh_control_socket_lock_dir_result=""
-	g_zxfer_ssh_control_socket_lock_error=""
-	g_zxfer_ssh_control_socket_lease_count_result=""
-}
-
-# Purpose: Record the SSH control socket lock error for later diagnostics or
-# control decisions.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs the state preserved for follow-on helpers
-# or reporting.
-zxfer_note_ssh_control_socket_lock_error() {
-	g_zxfer_ssh_control_socket_lock_error=$1
-}
-
-# Purpose: Emit the SSH control socket lock failure message in the operator-
-# facing format owned by this module.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs to surface status, warning, or diagnostic
-# text.
-zxfer_emit_ssh_control_socket_lock_failure_message() {
-	l_default_message=${1:-}
-
-	if [ -n "${g_zxfer_ssh_control_socket_lock_error:-}" ]; then
-		if [ -n "$l_default_message" ]; then
-			l_default_prefix=${l_default_message%.}
-			printf '%s: %s\n' "$l_default_prefix" \
-				"$g_zxfer_ssh_control_socket_lock_error"
-			return 0
-		fi
-		printf '%s\n' "$g_zxfer_ssh_control_socket_lock_error"
-		return 0
-	fi
-	[ -z "$l_default_message" ] || printf '%s\n' "$l_default_message"
-}
-
-zxfer_get_ssh_control_socket_lock_purpose() {
-	printf '%s\n' "ssh-control-socket-lock"
-}
-
-zxfer_get_ssh_control_socket_lease_purpose() {
-	printf '%s\n' "ssh-control-socket-lease"
-}
-
-zxfer_get_remote_capability_cache_lock_purpose() {
-	printf '%s\n' "remote-capability-cache-lock"
-}
-
-# Purpose: Return the remote host cache root prefix in the form expected by
-# later helpers.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when sibling helpers need the same lookup without
-# duplicating module logic.
-zxfer_get_remote_host_cache_root_prefix() {
-	if [ -n "${g_zxfer_temp_prefix:-}" ]; then
-		printf '%s\n' "$g_zxfer_temp_prefix"
-		return 0
-	fi
-
-	g_zxfer_temp_prefix="zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)"
-	printf '%s\n' "$g_zxfer_temp_prefix"
-}
 
 ################################################################################
-# SSH CONTROL SOCKET SUPPORT / CACHE KEYS
+# SSH CONTROL SOCKET SUPPORT / PER-RUN SOCKET PATHS
 ################################################################################
 
 # Purpose: Check whether the active SSH binary supports control sockets.
@@ -179,816 +81,81 @@ zxfer_ensure_local_ssh_command() {
 	return 0
 }
 
-# Purpose: Return the resolved local ssh helper in the form expected by later
-# helpers.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when remote transport is actually needed so local-only runs
-# do not hard-require ssh during startup.
-zxfer_get_resolved_local_ssh_command() {
-	if ! zxfer_ensure_local_ssh_command; then
-		printf '%s\n' "$g_zxfer_resolved_local_ssh_command_result"
-		return 1
-	fi
-
-	printf '%s\n' "$g_zxfer_resolved_local_ssh_command_result"
-}
-
-# Purpose: Manage SSH control socket cache key for remote transport
-# coordination.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management while zxfer sets up, validates, or tears down multiplexed
-# SSH state.
-zxfer_ssh_control_socket_cache_key() {
-	l_host_spec=$1
-	if ! l_policy_identity=$(zxfer_render_ssh_transport_policy_identity); then
-		[ "$l_policy_identity" = "" ] || printf '%s\n' "$l_policy_identity"
-		return 1
-	fi
-	l_identity=$(printf '%s\n%s\n%s\n' "${g_cmd_ssh:-ssh}" "$l_policy_identity" "$l_host_spec")
-	if l_key_cksum=$(printf '%s' "$l_identity" | cksum 2>/dev/null); then
-		# shellcheck disable=SC2086
-		set -- $l_key_cksum
-		if [ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
-			printf 'k%s.%s\n' "$1" "$2"
-			return 0
-		fi
-	fi
-	l_key_hex=$(printf '%s' "$l_identity" |
-		LC_ALL=C od -An -tx1 -v | tr -d ' \n' | cut -c 1-12)
-	if [ "$l_key_hex" = "" ]; then
-		l_key_hex="00"
-	fi
-	printf 'k%s\n' "$l_key_hex"
-}
-
-# Purpose: Render the SSH control socket entry identity as a stable shell-safe
-# or operator-facing string.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs to display or transport the value without
-# reparsing it.
-zxfer_render_ssh_control_socket_entry_identity() {
-	l_host_spec=$1
-	if ! l_policy_identity=$(zxfer_render_ssh_transport_policy_identity); then
-		[ "$l_policy_identity" = "" ] || printf '%s\n' "$l_policy_identity"
-		return 1
-	fi
-	printf '%s\n%s\n%s\n' "${g_cmd_ssh:-ssh}" "$l_policy_identity" "$l_host_spec"
-}
-
-# Purpose: Check whether the control socket entry path short enough is SSH.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later helpers need a boolean answer about a validated
-# or trusted state.
-zxfer_is_ssh_control_socket_entry_path_short_enough() {
-	l_entry_dir=$1
-	l_temp_listener_path="$l_entry_dir/s$ZXFER_SSH_CONTROL_SOCKET_TEMP_SUFFIX_SAMPLE"
+# Purpose: Check whether one SSH control-socket path stays within the platform
+# sun_path limit once ssh appends its temporary listener suffix.
+# Usage: Called during remote bootstrap and ssh control-socket management
+# before a socket path is handed to `ssh -M -S`.
+zxfer_is_ssh_control_socket_path_short_enough() {
+	l_socket_path=$1
+	l_temp_listener_path="$l_socket_path$ZXFER_SSH_CONTROL_SOCKET_TEMP_SUFFIX_SAMPLE"
 
 	[ "${#l_temp_listener_path}" -lt "$ZXFER_SSH_CONTROL_SOCKET_PATH_MAX" ]
 }
 
-# Purpose: Return the SSH control socket cache directory for key in the form
-# expected by later helpers.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when sibling helpers need the same lookup without
-# duplicating module logic.
-zxfer_get_ssh_control_socket_cache_dir_for_key() {
-	l_cache_key=$1
-
-	if ! l_cache_dir=$(zxfer_ensure_ssh_control_socket_cache_dir); then
-		return 1
+# Purpose: Ensure the per-run SSH control-socket directory exists before the
+# flow continues, preferring the private run temp root and falling back to a
+# short validated temp directory when the root would exceed sun_path limits.
+# Usage: Called from zxfer_setup_ssh_control_socket in the main shell so the
+# resolved directory memoizes in $g_zxfer_ssh_control_socket_dir_result for
+# the rest of the run.
+zxfer_ensure_ssh_control_socket_dir() {
+	if [ -n "${g_zxfer_ssh_control_socket_dir_result:-}" ] &&
+		[ -d "$g_zxfer_ssh_control_socket_dir_result" ] &&
+		[ ! -L "$g_zxfer_ssh_control_socket_dir_result" ]; then
+		printf '%s\n' "$g_zxfer_ssh_control_socket_dir_result"
+		return 0
 	fi
-	if zxfer_is_ssh_control_socket_entry_path_short_enough "$l_cache_dir/$l_cache_key"; then
-		printf '%s\n' "$l_cache_dir"
+	g_zxfer_ssh_control_socket_dir_result=""
+
+	zxfer_ensure_run_tmp_root || return 1
+	if zxfer_is_ssh_control_socket_path_short_enough \
+		"$g_zxfer_run_tmp_root/ssh-target.sock"; then
+		g_zxfer_ssh_control_socket_dir_result=$g_zxfer_run_tmp_root
+		printf '%s\n' "$g_zxfer_ssh_control_socket_dir_result"
 		return 0
 	fi
 
-	if ! l_short_cache_dir=$(
+	# A long TMPDIR pushes the run temp root past the ~104-byte sun_path
+	# limit, so sockets get one short-lived private 0700 directory under the
+	# default short temp root instead. It sits outside the run root, so it
+	# registers for trap cleanup, which runs after sockets are closed.
+	if ! l_short_tmpdir=$(
 		unset TMPDIR
-		zxfer_ensure_ssh_control_socket_cache_dir
+		zxfer_try_get_socket_cache_tmpdir
 	); then
 		return 1
 	fi
-	if [ "$l_short_cache_dir" = "$l_cache_dir" ]; then
+	if ! l_socket_dir=$(zxfer_create_unpredictable_staging_entry \
+		"$l_short_tmpdir/zxfer.ssh.XXXXXX" dir); then
 		return 1
 	fi
-	if ! zxfer_is_ssh_control_socket_entry_path_short_enough "$l_short_cache_dir/$l_cache_key"; then
+	if ! zxfer_is_ssh_control_socket_path_short_enough \
+		"$l_socket_dir/ssh-target.sock"; then
+		rmdir "$l_socket_dir" 2>/dev/null || :
 		return 1
 	fi
-
-	zxfer_echoV "Ignoring TMPDIR ${TMPDIR:-} for ssh control sockets; using shorter cache root $l_short_cache_dir."
-	printf '%s\n' "$l_short_cache_dir"
+	zxfer_register_runtime_artifact_path "$l_socket_dir"
+	zxfer_echoV "Ignoring TMPDIR ${TMPDIR:-} for ssh control sockets; using shorter socket root $l_socket_dir."
+	g_zxfer_ssh_control_socket_dir_result=$l_socket_dir
+	printf '%s\n' "$l_socket_dir"
 }
 
-# Purpose: Read the SSH control socket entry identity file from staged state
-# into the current shell.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later helpers need a checked reload instead of ad hoc
-# file reads.
-zxfer_read_ssh_control_socket_entry_identity_file() {
-	l_identity_path=$1
+# Purpose: Return the per-run SSH control-socket path for one role in the form
+# expected by later helpers.
+# Usage: Called during ssh control-socket setup after
+# zxfer_ensure_ssh_control_socket_dir has resolved the per-run directory.
+zxfer_get_ssh_control_socket_path_for_role() {
+	l_role=$1
 
-	[ -f "$l_identity_path" ] || return 1
-	[ ! -L "$l_identity_path" ] || return 1
-	[ ! -h "$l_identity_path" ] || return 1
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_identity_path"); then
-		return 1
-	fi
-	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_identity_path"); then
-		return 1
-	fi
-	[ "$l_mode" = "600" ] || return 1
-
-	zxfer_read_runtime_artifact_file "$l_identity_path" 2>/dev/null
-}
-
-# Purpose: Write the SSH control socket entry identity file in the normalized
-# form later zxfer steps expect.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when the module needs a stable staged file or emitted
-# stream for downstream use.
-zxfer_write_ssh_control_socket_entry_identity_file() {
-	l_entry_dir=$1
-	l_host_spec=$2
-	l_identity_path="$l_entry_dir/id"
-
-	[ ! -L "$l_identity_path" ] || return 1
-	[ ! -h "$l_identity_path" ] || return 1
-	if [ -e "$l_identity_path" ]; then
-		[ -f "$l_identity_path" ] || return 1
-		if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-			return 1
-		fi
-		if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_identity_path"); then
-			return 1
-		fi
-		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	fi
-	if ! zxfer_stage_runtime_artifact_file_for_path "$l_identity_path" "zxfer-ssh-control-id" >/dev/null; then
-		return 1
-	fi
-	l_tmp_identity_path=$g_zxfer_runtime_artifact_path_result
-
-	if ! l_identity_contents=$(zxfer_render_ssh_control_socket_entry_identity "$l_host_spec"); then
-		zxfer_cleanup_runtime_artifact_path "$l_tmp_identity_path"
-		return 1
-	fi
-
-	if ! zxfer_write_runtime_artifact_file "$l_tmp_identity_path" "$l_identity_contents"; then
-		zxfer_cleanup_runtime_artifact_path "$l_tmp_identity_path"
-		return 1
-	fi
-
-	if ! zxfer_publish_runtime_artifact_file "$l_tmp_identity_path" "$l_identity_path"; then
-		zxfer_cleanup_runtime_artifact_path "$l_tmp_identity_path"
-		return 1
-	fi
-	chmod 600 "$l_identity_path" 2>/dev/null || :
-	return 0
-}
-
-# Purpose: Ensure the SSH control socket cache directory exists and is ready
-# before the flow continues.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before later helpers assume the resource or cache is
-# available.
-zxfer_ensure_ssh_control_socket_cache_dir() {
-	if ! l_tmpdir=$(zxfer_try_get_socket_cache_tmpdir); then
-		return 1
-	fi
-	if ! l_cache_dir=$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$l_tmpdir"); then
-		return 1
-	fi
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-
-	if [ -L "$l_cache_dir" ] || [ -h "$l_cache_dir" ]; then
-		return 1
-	fi
-
-	if [ -e "$l_cache_dir" ]; then
-		[ -d "$l_cache_dir" ] || return 1
-		if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_dir"); then
-			return 1
-		fi
-		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-		if ! l_mode=$(zxfer_get_path_mode_octal "$l_cache_dir"); then
-			return 1
-		fi
-		[ "$l_mode" = "700" ] || return 1
-		printf '%s\n' "$l_cache_dir"
-		return 0
-	fi
-
-	l_old_umask=$(umask)
-	umask 077
-	if ! mkdir "$l_cache_dir" 2>/dev/null; then
-		umask "$l_old_umask"
-		return 1
-	fi
-	umask "$l_old_umask"
-
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_dir"); then
-		return 1
-	fi
-	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_cache_dir"); then
-		return 1
-	fi
-	[ "$l_mode" = "700" ] || return 1
-	printf '%s\n' "$l_cache_dir"
-}
-
-# Purpose: Return the SSH control-socket cache directory path for one temporary
-# root.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before zxfer creates or validates the per-run cache
-# directory for multiplexed SSH state.
-zxfer_ssh_control_socket_cache_dir_path_for_tmpdir() {
-	l_tmpdir=$1
-
-	[ -n "$l_tmpdir" ] || return 1
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-	if ! l_root_prefix=$(zxfer_get_remote_host_cache_root_prefix); then
-		return 1
-	fi
-
-	printf '%s/%s.s.%s.d\n' "$l_tmpdir" "$l_root_prefix" "$l_effective_uid"
-}
-
-# Purpose: Ensure the SSH control socket entry directory exists and is ready
-# before the flow continues.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before later helpers assume the resource or cache is
-# available.
-zxfer_ensure_ssh_control_socket_entry_dir() {
-	l_host_spec=$1
-
-	if ! l_cache_key=$(zxfer_ssh_control_socket_cache_key "$l_host_spec"); then
-		[ "$l_cache_key" = "" ] || printf '%s\n' "$l_cache_key"
-		return 1
-	fi
-	if ! l_cache_dir=$(zxfer_get_ssh_control_socket_cache_dir_for_key "$l_cache_key"); then
-		return 1
-	fi
-	if ! l_expected_identity=$(zxfer_render_ssh_control_socket_entry_identity "$l_host_spec"); then
-		[ "$l_expected_identity" = "" ] || printf '%s\n' "$l_expected_identity"
-		return 1
-	fi
-	l_suffix=0
-	while :; do
-		if [ "$l_suffix" -eq 0 ]; then
-			l_entry_dir="$l_cache_dir/$l_cache_key"
-		else
-			l_entry_dir="$l_cache_dir/$l_cache_key.$l_suffix"
-		fi
-
-		if ! zxfer_is_ssh_control_socket_entry_path_short_enough "$l_entry_dir"; then
-			return 1
-		fi
-
-		if [ -L "$l_entry_dir" ] || [ -h "$l_entry_dir" ]; then
-			return 1
-		fi
-
-		if [ -e "$l_entry_dir" ]; then
-			[ -d "$l_entry_dir" ] || return 1
-			if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_entry_dir"); then
-				return 1
-			fi
-			if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-				return 1
-			fi
-			[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-			if ! l_mode=$(zxfer_get_path_mode_octal "$l_entry_dir"); then
-				return 1
-			fi
-			[ "$l_mode" = "700" ] || return 1
-		else
-			l_old_umask=$(umask)
-			umask 077
-			if ! mkdir "$l_entry_dir" 2>/dev/null; then
-				umask "$l_old_umask"
-				if [ ! -d "$l_entry_dir" ]; then
-					return 1
-				fi
-			else
-				umask "$l_old_umask"
-			fi
-			if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_entry_dir"); then
-				return 1
-			fi
-			if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-				return 1
-			fi
-			[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-			if ! l_mode=$(zxfer_get_path_mode_octal "$l_entry_dir"); then
-				return 1
-			fi
-			[ "$l_mode" = "700" ] || return 1
-		fi
-
-		l_leases_dir="$l_entry_dir/leases"
-		if [ -L "$l_leases_dir" ] || [ -h "$l_leases_dir" ]; then
-			return 1
-		fi
-		if [ -e "$l_leases_dir" ]; then
-			[ -d "$l_leases_dir" ] || return 1
-			if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_leases_dir"); then
-				return 1
-			fi
-			if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-				return 1
-			fi
-			[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-			if ! l_mode=$(zxfer_get_path_mode_octal "$l_leases_dir"); then
-				return 1
-			fi
-			[ "$l_mode" = "700" ] || return 1
-		else
-			l_old_umask=$(umask)
-			umask 077
-			if ! mkdir "$l_leases_dir" 2>/dev/null; then
-				umask "$l_old_umask"
-				if [ ! -d "$l_leases_dir" ]; then
-					return 1
-				fi
-			else
-				umask "$l_old_umask"
-			fi
-			if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_leases_dir"); then
-				return 1
-			fi
-			if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-				return 1
-			fi
-			[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-			if ! l_mode=$(zxfer_get_path_mode_octal "$l_leases_dir"); then
-				return 1
-			fi
-			[ "$l_mode" = "700" ] || return 1
-		fi
-
-		l_identity_path="$l_entry_dir/id"
-		if [ -e "$l_identity_path" ]; then
-			if l_identity_contents=$(zxfer_read_ssh_control_socket_entry_identity_file "$l_identity_path"); then
-				if [ "$l_identity_contents" = "$l_expected_identity" ]; then
-					printf '%s\n' "$l_entry_dir"
-					return 0
-				fi
-			else
-				return 1
-			fi
-			l_suffix=$((l_suffix + 1))
-			continue
-		fi
-
-		if ! zxfer_write_ssh_control_socket_entry_identity_file "$l_entry_dir" "$l_host_spec"; then
-			return 1
-		fi
-		printf '%s\n' "$l_entry_dir"
-		return 0
-	done
-}
-
-# Purpose: Acquire the SSH control socket lock so concurrent zxfer work does
-# not reuse it unsafely.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before a shared cache, lock, or transport resource is used
-# by this run.
-zxfer_acquire_ssh_control_socket_lock() {
-	l_entry_dir=$1
-	l_lock_dir="$l_entry_dir.lock"
-	l_attempts=0
-	l_fast_retries=${ZXFER_SSH_CONTROL_SOCKET_LOCK_FAST_RETRIES:-20}
-	l_waited=0
-	l_wait_start_ms=""
-
-	zxfer_reset_ssh_control_socket_lock_state
-	while ! zxfer_create_ssh_control_socket_lock_dir "$l_lock_dir"; do
-		if [ -L "$l_lock_dir" ] || [ -h "$l_lock_dir" ]; then
-			zxfer_note_ssh_control_socket_lock_error \
-				"Refusing symlinked ssh control socket lock path \"$l_lock_dir\"."
-			zxfer_record_ssh_control_socket_lock_wait_metrics "$l_waited" "$l_wait_start_ms"
-			return 1
-		fi
-		if [ -d "$l_lock_dir" ]; then
-			zxfer_try_reap_stale_ssh_control_socket_lock_dir "$l_lock_dir" 0
-			l_reap_status=$?
-			if [ "$l_reap_status" -eq 0 ]; then
-				continue
-			fi
-			if [ "$l_reap_status" -eq 1 ]; then
-				zxfer_record_ssh_control_socket_lock_wait_metrics "$l_waited" "$l_wait_start_ms"
-				return 1
-			fi
-		fi
-
-		if [ "$l_waited" -eq 0 ]; then
-			l_waited=1
-			l_wait_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-		fi
-
-		case "$l_fast_retries" in
-		'' | *[!0-9]*)
-			l_fast_retries=0
-			;;
-		esac
-		if [ "$l_fast_retries" -gt 0 ]; then
-			l_fast_retries=$((l_fast_retries - 1))
-			continue
-		fi
-
-		l_attempts=$((l_attempts + 1))
-		if [ "$l_attempts" -ge 10 ]; then
-			if [ -d "$l_lock_dir" ]; then
-				zxfer_try_reap_stale_ssh_control_socket_lock_dir "$l_lock_dir" 1
-				l_reap_status=$?
-				if [ "$l_reap_status" -eq 0 ]; then
-					continue
-				fi
-				if [ "$l_reap_status" -eq 1 ]; then
-					zxfer_record_ssh_control_socket_lock_wait_metrics "$l_waited" "$l_wait_start_ms"
-					return 1
-				fi
-			fi
-			zxfer_note_ssh_control_socket_lock_error \
-				"Timed out waiting for ssh control socket lock path \"$l_lock_dir\"."
-			zxfer_record_ssh_control_socket_lock_wait_metrics "$l_waited" "$l_wait_start_ms"
-			return 1
-		fi
-		sleep 1
-	done
-
-	zxfer_reset_ssh_control_socket_lock_state
-	zxfer_record_ssh_control_socket_lock_wait_metrics "$l_waited" "$l_wait_start_ms"
-	g_zxfer_ssh_control_socket_lock_dir_result=$l_lock_dir
-	printf '%s\n' "$l_lock_dir"
-}
-
-# Purpose: Validate the SSH control socket lock directory before zxfer relies
-# on it.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management to fail closed on malformed, unsafe, or stale input.
-zxfer_validate_ssh_control_socket_lock_dir() {
-	l_lock_dir=$1
-
-	if [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock path \"$l_lock_dir\" is missing."
-		return 1
-	fi
-	if [ -L "$l_lock_dir" ] || [ -h "$l_lock_dir" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Refusing symlinked ssh control socket lock path \"$l_lock_dir\"."
-		return 1
-	fi
-	if zxfer_load_owned_lock_metadata_for_kind_and_purpose \
-		"$l_lock_dir" lock "$(zxfer_get_ssh_control_socket_lock_purpose)"; then
-		return 0
-	else
-		l_status=$?
-	fi
-	case "$l_status" in
-	2)
-		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock path \"$l_lock_dir\" has missing or invalid metadata."
-		;;
+	case "$l_role" in
+	origin | target) ;;
 	*)
-		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock path \"$l_lock_dir\" failed ownership, permission, or metadata validation."
+		return 1
 		;;
 	esac
-	return 1
-}
+	[ -n "${g_zxfer_ssh_control_socket_dir_result:-}" ] || return 1
 
-# Purpose: Validate the SSH control socket lock directory for reap before zxfer
-# relies on it.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management to fail closed on malformed, unsafe, or stale input.
-zxfer_validate_ssh_control_socket_lock_dir_for_reap() {
-	l_lock_dir=$1
-
-	if [ ! -d "$l_lock_dir" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock path \"$l_lock_dir\" is not a directory."
-		return 1
-	fi
-	if [ -L "$l_lock_dir" ] || [ -h "$l_lock_dir" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Refusing symlinked ssh control socket lock path \"$l_lock_dir\"."
-		return 1
-	fi
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to determine the effective uid for ssh control socket lock validation."
-		return 1
-	fi
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_lock_dir"); then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to determine the owner of ssh control socket lock path \"$l_lock_dir\"."
-		return 1
-	fi
-	if [ "$l_owner_uid" != "$l_effective_uid" ]; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock path \"$l_lock_dir\" is not owned by the effective uid."
-		return 1
-	fi
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_lock_dir"); then
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to determine permissions for ssh control socket lock path \"$l_lock_dir\"."
-		return 1
-	fi
-	case "$l_mode" in
-	7[0-5][0-5])
-		return 0
-		;;
-	esac
-
-	zxfer_note_ssh_control_socket_lock_error \
-		"Existing ssh control socket lock path \"$l_lock_dir\" has unsupported permissions ($l_mode). Remove the stale lock directory and retry."
-	return 1
-}
-
-# Purpose: Clean up the SSH control socket lock directory that this module
-# created or tracks.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management on success and failure paths so temporary state does not
-# linger.
-zxfer_cleanup_ssh_control_socket_lock_dir() {
-	l_lock_dir=$1
-
-	if zxfer_cleanup_owned_lock_dir "$l_lock_dir"; then
-		return 0
-	fi
-	zxfer_note_ssh_control_socket_lock_error \
-		"Unable to remove stale ssh control socket lock path \"$l_lock_dir\"."
-	return 1
-}
-
-# Purpose: Create the SSH control socket lock directory using the safety checks
-# owned by this module.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs a fresh staged resource or persistent
-# helper state.
-zxfer_create_ssh_control_socket_lock_dir() {
-	l_lock_dir=$1
-
-	if ! zxfer_create_owned_lock_dir \
-		"$l_lock_dir" lock "$(zxfer_get_ssh_control_socket_lock_purpose)" >/dev/null; then
-		if [ -e "$l_lock_dir" ] || [ -L "$l_lock_dir" ] || [ -h "$l_lock_dir" ]; then
-			zxfer_validate_ssh_control_socket_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
-		fi
-		return 1
-	fi
-	return 0
-}
-
-# Purpose: Detect retired pid-file lock directories so current releases fail
-# closed instead of reaping or trusting old owner state.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before a missing-metadata lock directory is treated as a
-# reap candidate.
-zxfer_owned_lock_dir_uses_unsupported_pid_file_layout() {
-	l_lock_dir=$1
-	l_metadata_path=$(zxfer_get_owned_lock_metadata_path "$l_lock_dir")
-	l_pid_path="$l_lock_dir/pid"
-
-	if [ -e "$l_metadata_path" ] || [ -L "$l_metadata_path" ] ||
-		[ -h "$l_metadata_path" ]; then
-		return 1
-	fi
-	if [ -e "$l_pid_path" ] || [ -L "$l_pid_path" ] || [ -h "$l_pid_path" ]; then
-		return 0
-	fi
-	return 1
-}
-
-# Purpose: Try to resolve or create the reap stale SSH control socket lock
-# directory without treating every miss as fatal.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer has an optional or fallback path that still
-# needs one checked helper.
-zxfer_try_reap_stale_ssh_control_socket_lock_dir() {
-	l_lock_dir=$1
-	l_allow_pidless_reap=${2:-0}
-
-	if ! zxfer_validate_ssh_control_socket_lock_dir_for_reap "$l_lock_dir"; then
-		return 1
-	fi
-	if zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_dir"; then
-		zxfer_note_ssh_control_socket_lock_error \
-			"ssh control socket lock path \"$l_lock_dir\" uses an unsupported pid-file layout. Remove the stale lock directory and retry."
-		return 1
-	fi
-	zxfer_try_reap_stale_owned_lock_dir \
-		"$l_lock_dir" "$l_allow_pidless_reap" \
-		lock "$(zxfer_get_ssh_control_socket_lock_purpose)"
-	l_reap_status=$?
-	if [ "$l_reap_status" -eq 0 ]; then
-		return 0
-	fi
-	if [ "$l_reap_status" -eq 2 ]; then
-		return 2
-	fi
-	zxfer_note_ssh_control_socket_lock_error \
-		"Unable to reap stale or corrupt ssh control socket lock path \"$l_lock_dir\"."
-	return 1
-}
-
-# Purpose: Release the SSH control socket lock after the protected work
-# finishes.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when a shared cache, lock, or transport resource should no
-# longer be held.
-zxfer_release_ssh_control_socket_lock() {
-	l_lock_dir=$1
-
-	if zxfer_release_owned_lock_dir \
-		"$l_lock_dir" lock "$(zxfer_get_ssh_control_socket_lock_purpose)"; then
-		return 0
-	fi
-	zxfer_note_ssh_control_socket_lock_error \
-		"Failed to release ssh control socket lock path \"$l_lock_dir\"."
-	return 1
-}
-
-# Purpose: Warn when the SSH control socket lock could not be released after a
-# primary failure already decided the caller's return status.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when lock release should be checked without suppressing the
-# original transport, cleanup, or lease failure.
-zxfer_warn_ssh_control_socket_lock_release_failure() {
-	l_role=$1
-
-	zxfer_emit_ssh_control_socket_lock_failure_message \
-		"Warning: Failed to release ssh control socket lock for $l_role host." >&2
-}
-
-# Purpose: Release the SSH control socket lock while preserving the caller's
-# primary failure when one already exists.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when lock release should be checked but must not suppress
-# an earlier lease, cleanup, or transport failure.
-zxfer_release_ssh_control_socket_lock_with_precedence() {
-	l_role=$1
-	l_lock_dir=$2
-	l_primary_status=${3:-0}
-
-	[ -n "$l_lock_dir" ] || return "$l_primary_status"
-
-	zxfer_release_ssh_control_socket_lock "$l_lock_dir" >/dev/null 2>&1
-	l_release_status=$?
-	if [ "$l_release_status" -eq 0 ]; then
-		return "$l_primary_status"
-	fi
-	zxfer_warn_ssh_control_socket_lock_release_failure "$l_role"
-	if [ "$l_primary_status" -ne 0 ]; then
-		return "$l_primary_status"
-	fi
-	return 1
-}
-
-# Purpose: Reap stale SSH control-socket lease entries that no longer belong to
-# a live process.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before lease counts or cleanup decisions rely on the
-# current lease directory contents.
-zxfer_prune_stale_ssh_control_socket_leases() {
-	l_entry_dir=$1
-	l_leases_dir="$l_entry_dir/leases"
-
-	[ -d "$l_leases_dir" ] || return 0
-
-	set -- "$l_leases_dir"/lease.*
-	if [ ! -e "$1" ] && [ ! -L "$1" ] && [ ! -h "$1" ]; then
-		return 0
-	fi
-
-	for l_lease_path in "$@"; do
-		if [ ! -e "$l_lease_path" ] && [ ! -L "$l_lease_path" ] &&
-			[ ! -h "$l_lease_path" ]; then
-			continue
-		fi
-		if [ -L "$l_lease_path" ] || [ -h "$l_lease_path" ]; then
-			zxfer_note_ssh_control_socket_lock_error \
-				"Refusing symlinked ssh control socket lease entry \"$l_lease_path\"."
-			return 1
-		fi
-		if [ ! -d "$l_lease_path" ]; then
-			zxfer_note_ssh_control_socket_lock_error \
-				"ssh control socket lease entry \"$l_lease_path\" is not a metadata-bearing directory. Remove the stale entry and retry."
-			return 1
-		fi
-		zxfer_try_reap_stale_owned_lock_dir \
-			"$l_lease_path" 0 lease "$(zxfer_get_ssh_control_socket_lease_purpose)" >/dev/null 2>&1
-		l_reap_status=$?
-		case "$l_reap_status" in
-		0 | 2)
-			continue
-			;;
-		esac
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to inspect ssh control socket lease entry \"$l_lease_path\"."
-		return 1
-	done
-
-	return 0
-}
-
-# Purpose: Count the SSH control socket leases for the surrounding remote-host
-# flow.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later helpers need a threshold or size decision.
-zxfer_count_ssh_control_socket_leases() {
-	l_entry_dir=$1
-	l_leases_dir="$l_entry_dir/leases"
-	l_count=0
-	g_zxfer_ssh_control_socket_lease_count_result=""
-
-	[ -d "$l_leases_dir" ] || {
-		g_zxfer_ssh_control_socket_lease_count_result=0
-		printf '%s\n' "0"
-		return 0
-	}
-
-	set -- "$l_leases_dir"/lease.*
-	if [ ! -e "$1" ] && [ ! -L "$1" ] && [ ! -h "$1" ]; then
-		g_zxfer_ssh_control_socket_lease_count_result=0
-		printf '%s\n' "0"
-		return 0
-	fi
-
-	for l_lease_path in "$@"; do
-		if [ ! -e "$l_lease_path" ] && [ ! -L "$l_lease_path" ] &&
-			[ ! -h "$l_lease_path" ]; then
-			continue
-		fi
-		if [ -L "$l_lease_path" ] || [ -h "$l_lease_path" ]; then
-			zxfer_note_ssh_control_socket_lock_error \
-				"Refusing symlinked ssh control socket lease entry \"$l_lease_path\"."
-			return 1
-		fi
-		if [ ! -d "$l_lease_path" ]; then
-			zxfer_note_ssh_control_socket_lock_error \
-				"ssh control socket lease entry \"$l_lease_path\" is not a metadata-bearing directory. Remove the stale entry and retry."
-			return 1
-		fi
-		zxfer_try_reap_stale_owned_lock_dir \
-			"$l_lease_path" 0 lease "$(zxfer_get_ssh_control_socket_lease_purpose)" >/dev/null 2>&1
-		l_reap_status=$?
-		if [ "$l_reap_status" -eq 0 ]; then
-			continue
-		fi
-		if [ "$l_reap_status" -eq 2 ]; then
-			l_count=$((l_count + 1))
-			continue
-		fi
-		zxfer_note_ssh_control_socket_lock_error \
-			"Unable to inspect ssh control socket lease entry \"$l_lease_path\"."
-		return 1
-	done
-	g_zxfer_ssh_control_socket_lease_count_result=$l_count
-	printf '%s\n' "$l_count"
-}
-
-# Purpose: Create the SSH control socket lease entry using the safety checks
-# owned by this module.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs a fresh staged resource or persistent
-# helper state.
-zxfer_create_ssh_control_socket_lease_file() {
-	l_entry_dir=$1
-	l_leases_dir="$l_entry_dir/leases"
-	l_timestamp=$(date +%s)
-
-	g_zxfer_runtime_artifact_path_result=""
-	if ! l_lease_dir=$(zxfer_create_owned_lock_dir_in_parent \
-		"$l_leases_dir" "lease.$$.${l_timestamp}" \
-		lease "$(zxfer_get_ssh_control_socket_lease_purpose)"); then
-		return 1
-	fi
-	zxfer_register_owned_lock_path "$l_lease_dir"
-	g_zxfer_runtime_artifact_path_result=$l_lease_dir
-	printf '%s\n' "$l_lease_dir"
-}
-
-# Purpose: Release the SSH control socket lease entry after the protected work
-# finishes.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer no longer needs to hold one process lease on a
-# shared control-socket entry.
-zxfer_release_ssh_control_socket_lease_file() {
-	l_lease_dir=$1
-
-	zxfer_release_owned_lock_dir \
-		"$l_lease_dir" lease "$(zxfer_get_ssh_control_socket_lease_purpose)"
+	printf '%s/ssh-%s.sock\n' "$g_zxfer_ssh_control_socket_dir_result" "$l_role"
 }
 
 # Purpose: Reset the SSH control socket action state so the next remote-host
@@ -1068,31 +235,17 @@ zxfer_emit_ssh_control_socket_action_failure_message() {
 	[ -z "$l_default_message" ] || printf '%s\n' "$l_default_message"
 }
 
-# Purpose: Clean up the SSH control socket entry directory that this module
-# created or tracks.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management on success and failure paths so temporary state does not
-# linger.
-zxfer_cleanup_ssh_control_socket_entry_dir() {
-	l_entry_dir=$1
-
-	[ -n "$l_entry_dir" ] || return 0
-	[ -d "$l_entry_dir" ] || return 0
-	rm -rf "$l_entry_dir" 2>/dev/null
-}
-
 # Purpose: Emit very-verbose diagnostic output for `-V` runs.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
 # socket management when zxfer wants low-level debug output that should stay
 # hidden in normal verbose mode.
 zxfer_echoV_ssh_control_socket_command_for_host() {
+	[ "${g_option_V_very_verbose:-0}" -eq 1 ] || return 0
 	l_host=$1
 	l_action_label=$2
 	shift 2
 
-	l_command_context=$(zxfer_get_remote_command_context_label "$l_host")
-	l_rendered_command=$(zxfer_render_command_for_report "" "$@")
-	zxfer_echoV "$l_action_label [$l_command_context]: $l_rendered_command"
+	zxfer_echoV "$l_action_label [$(zxfer_get_remote_command_context_label "$l_host")]: $(zxfer_render_command_for_report "" "$@")"
 }
 
 # Purpose: Run the SSH control socket action for host through the controlled
@@ -1220,12 +373,8 @@ zxfer_open_ssh_control_socket_for_host() {
 	[ -n "$l_host" ] || return 1
 	[ -n "$l_socket_path" ] || return 1
 
-	if l_transport_tokens=$(zxfer_get_ssh_base_transport_tokens); then
-		:
-	else
-		l_transport_status=$?
-		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
-	fi
+	l_transport_tokens=$(zxfer_get_ssh_base_transport_tokens) ||
+		zxfer_throw_error "$l_transport_tokens" "$?"
 	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host"); then
 		zxfer_throw_error "$l_host_tokens"
 	fi
@@ -1255,31 +404,29 @@ EOF
 
 # Purpose: Update the SSH control socket role state in the shared runtime
 # state.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# Usage: Called during remote bootstrap, capability probing, and ssh control-
 # socket management after a probe or planning step changes the active context
 # that later helpers should use.
 zxfer_set_ssh_control_socket_role_state() {
 	l_role=$1
 	l_socket_path=$2
-	l_entry_dir=$3
-	l_lease_file=$4
 
 	case "$l_role" in
 	origin)
 		g_ssh_origin_control_socket="$l_socket_path"
-		g_ssh_origin_control_socket_dir="$l_entry_dir"
-		g_ssh_origin_control_socket_lease_file="$l_lease_file"
 		;;
 	target)
 		g_ssh_target_control_socket="$l_socket_path"
-		g_ssh_target_control_socket_dir="$l_entry_dir"
-		g_ssh_target_control_socket_lease_file="$l_lease_file"
 		;;
 	esac
+	if command -v zxfer_refresh_ssh_transport_tokens_for_role >/dev/null 2>&1; then
+		zxfer_refresh_ssh_transport_tokens_for_role "$l_role"
+	fi
+	return 0
 }
 
 # Purpose: Clear the SSH control socket role state from the module-owned state.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
+# Usage: Called during remote bootstrap, capability probing, and ssh control-
 # socket management when later helpers must not see an old cached or role-
 # specific value.
 zxfer_clear_ssh_control_socket_role_state() {
@@ -1288,15 +435,15 @@ zxfer_clear_ssh_control_socket_role_state() {
 	case "$l_role" in
 	origin)
 		g_ssh_origin_control_socket=""
-		g_ssh_origin_control_socket_dir=""
-		g_ssh_origin_control_socket_lease_file=""
 		;;
 	target)
 		g_ssh_target_control_socket=""
-		g_ssh_target_control_socket_dir=""
-		g_ssh_target_control_socket_lease_file=""
 		;;
 	esac
+	if command -v zxfer_refresh_ssh_transport_tokens_for_role >/dev/null 2>&1; then
+		zxfer_refresh_ssh_transport_tokens_for_role "$l_role"
+	fi
+	return 0
 }
 
 # Purpose: Reset the remote capability parse state so the next remote-host pass
@@ -1307,11 +454,6 @@ zxfer_clear_ssh_control_socket_role_state() {
 zxfer_reset_remote_capability_parse_state() {
 	g_zxfer_remote_capability_os=""
 	g_zxfer_remote_capability_zfs_status=""
-	g_zxfer_remote_capability_zfs_path=""
-	g_zxfer_remote_capability_parallel_status=""
-	g_zxfer_remote_capability_parallel_path=""
-	g_zxfer_remote_capability_cat_status=""
-	g_zxfer_remote_capability_cat_path=""
 	g_zxfer_remote_capability_tool_records=""
 	g_zxfer_remote_capability_tool_status_result=""
 	g_zxfer_remote_capability_tool_path_result=""
@@ -1487,28 +629,36 @@ zxfer_extract_remote_cli_command_head() {
 	printf '%s\n' "$l_cli_head"
 }
 
-# Purpose: Check whether the remote capability host matches origin role.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later helpers need a boolean answer about the remote
-# capability host.
-zxfer_remote_capability_host_matches_origin_role() {
-	l_host_spec=$1
+# Purpose: Decide whether the clean recursive no-op proof can defer origin
+# parallel resolution.
+# Usage: Called while building the active remote capability scope. This mirrors
+# the proof eligibility checks in snapshot discovery because this module is
+# sourced earlier and cannot call that helper directly.
+zxfer_remote_capability_origin_can_defer_parallel_for_fast_noop_proof() {
+	[ "${g_option_O_origin_host:-}" != "" ] || return 1
+	[ "${g_option_T_target_host:-}" = "" ] || return 1
+	[ "${g_option_R_recursive:-}" != "" ] || return 1
+	[ "${g_option_s_make_snapshot:-0}" -eq 0 ] || return 1
+	[ "${g_option_m_migrate:-0}" -eq 0 ] || return 1
+	[ "${g_option_P_transfer_property:-0}" -eq 0 ] || return 1
+	[ -z "${g_option_o_override_property:-}" ] || return 1
+	[ "${g_option_e_restore_property_mode:-0}" -eq 0 ] || return 1
+	[ "${g_option_k_backup_property_mode:-0}" -eq 0 ] || return 1
 
-	[ -n "${g_option_O_origin_host:-}" ] || return 1
-	[ -n "$l_host_spec" ] || return 0
-	[ "$l_host_spec" = "$g_option_O_origin_host" ]
+	return 0
 }
 
-# Purpose: Check whether the remote capability host matches target role.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later helpers need a boolean answer about the remote
-# capability host.
-zxfer_remote_capability_host_matches_target_role() {
-	l_host_spec=$1
-
-	[ -n "${g_option_T_target_host:-}" ] || return 1
-	[ -n "$l_host_spec" ] || return 0
-	[ "$l_host_spec" = "$g_option_T_target_host" ]
+# Purpose: Decide whether origin capability preloading should include parallel.
+# Usage: Called while building the active remote capability scope. Changed-
+# source discovery still honors `-j`, but the fast recursive no-op proof uses
+# one recursive source stream, so clean no-op startup can defer parallel until a
+# fallback path actually needs it.
+zxfer_remote_capability_origin_should_preload_parallel() {
+	[ "${g_option_j_jobs:-1}" -gt 1 ] || return 1
+	if zxfer_remote_capability_origin_can_defer_parallel_for_fast_noop_proof; then
+		return 1
+	fi
+	return 0
 }
 
 # Purpose: Return the remote capability requested tools for host in the form
@@ -1522,8 +672,9 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 	g_zxfer_remote_capability_requested_tools_result=""
 	zxfer_append_remote_capability_requested_tool zfs
 
-	if zxfer_remote_capability_host_matches_origin_role "$l_host_spec"; then
-		if [ "${g_option_j_jobs:-1}" -gt 1 ]; then
+	if [ -n "${g_option_O_origin_host:-}" ] &&
+		{ [ -z "$l_host_spec" ] || [ "$l_host_spec" = "$g_option_O_origin_host" ]; }; then
+		if zxfer_remote_capability_origin_should_preload_parallel; then
 			zxfer_append_remote_capability_requested_tool parallel
 		fi
 		if [ "${g_option_e_restore_property_mode:-0}" -eq 1 ]; then
@@ -1536,7 +687,8 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 		fi
 	fi
 
-	if zxfer_remote_capability_host_matches_target_role "$l_host_spec"; then
+	if [ -n "${g_option_T_target_host:-}" ] &&
+		{ [ -z "$l_host_spec" ] || [ "$l_host_spec" = "$g_option_T_target_host" ]; }; then
 		if [ "${g_option_k_backup_property_mode:-0}" -eq 1 ]; then
 			zxfer_append_remote_capability_requested_tool cat
 		fi
@@ -1578,11 +730,8 @@ $l_tool
 }
 
 ################################################################################
-# REMOTE CAPABILITY CACHE / HANDSHAKE PARSING
+# PER-RUN REMOTE CAPABILITY STATE / HANDSHAKE PARSING
 ################################################################################
-
-ZXFER_REMOTE_CAPABILITY_CACHE_OBJECT_KIND="remote-capability"
-
 # Purpose: Render the remote capability cache identity for host as a stable
 # shell-safe or operator-facing string.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
@@ -1603,553 +752,6 @@ zxfer_render_remote_capability_cache_identity_for_host() {
 
 	printf '%s\n%s\n' "$l_dependency_path" "$l_transport_policy_identity"
 	printf '%s\n' "${g_zxfer_remote_capability_requested_tools_result:-zfs}"
-}
-
-# Purpose: Render the remote capability cache identity as a stable shell-safe
-# or operator-facing string.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs to display or transport the value without
-# reparsing it.
-zxfer_render_remote_capability_cache_identity() {
-	zxfer_render_remote_capability_cache_identity_for_host "${1:-}" "${2:-}"
-}
-
-# Purpose: Render the full remote capability cache artifact identity for host.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management so path keys and cache-object metadata use the same
-# host-scoped identity.
-zxfer_render_remote_capability_cache_artifact_identity_for_host() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-		"$l_host_spec" "$l_requested_tools"); then
-		[ "$l_cache_identity" = "" ] || printf '%s\n' "$l_cache_identity"
-		return 1
-	fi
-
-	printf '%s\n%s\n' "$l_host_spec" "$l_cache_identity"
-}
-
-# Purpose: Return the remote capability cache artifact identity as hex.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when cache paths or metadata need a newline-safe exact
-# identity for later verification.
-zxfer_remote_capability_cache_identity_hex_for_host() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-
-	if ! l_identity=$(zxfer_render_remote_capability_cache_artifact_identity_for_host \
-		"$l_host_spec" "$l_requested_tools"); then
-		[ "$l_identity" = "" ] || printf '%s\n' "$l_identity"
-		return 1
-	fi
-
-	l_identity_hex=$(printf '%s' "$l_identity" |
-		LC_ALL=C od -An -tx1 -v | tr -d ' \n')
-	[ -n "$l_identity_hex" ] || return 1
-
-	printf '%s\n' "$l_identity_hex"
-}
-
-# Purpose: Return a bounded remote capability cache key for the remote-host
-# management flow.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when remote bootstrap or capability logic needs one shared
-# helper for this state.
-zxfer_remote_capability_cache_key() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-
-	if ! l_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
-		"$l_host_spec" "$l_requested_tools"); then
-		[ "$l_identity_hex" = "" ] || printf '%s\n' "$l_identity_hex"
-		return 1
-	fi
-
-	l_identity_hex_len=${#l_identity_hex}
-	l_identity_byte_len=$((l_identity_hex_len / 2))
-	if [ "$l_identity_hex_len" -le 180 ]; then
-		printf 'h%s.%s\n' "$l_identity_byte_len" "$l_identity_hex"
-		return 0
-	fi
-
-	l_key_head=$(printf '%s' "$l_identity_hex" | cut -c 1-64)
-	l_key_tail=$l_identity_hex
-	while [ "${#l_key_tail}" -gt 64 ]; do
-		l_key_tail=${l_key_tail#?}
-	done
-	[ -n "$l_key_head" ] || return 1
-	[ -n "$l_key_tail" ] || return 1
-
-	printf 'h%s.%s.%s\n' "$l_identity_byte_len" "$l_key_head" "$l_key_tail"
-}
-
-# Purpose: Ensure the remote capability cache directory exists and is ready
-# before the flow continues.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before later helpers assume the resource or cache is
-# available.
-zxfer_ensure_remote_capability_cache_dir() {
-	if ! l_tmpdir=$(zxfer_try_get_effective_tmpdir); then
-		return 1
-	fi
-	if ! l_cache_dir=$(zxfer_remote_capability_cache_dir_path_for_tmpdir "$l_tmpdir"); then
-		return 1
-	fi
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-
-	if [ -L "$l_cache_dir" ] || [ -h "$l_cache_dir" ]; then
-		return 1
-	fi
-
-	if [ -e "$l_cache_dir" ]; then
-		[ -d "$l_cache_dir" ] || return 1
-		if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_dir"); then
-			return 1
-		fi
-		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-		if ! l_mode=$(zxfer_get_path_mode_octal "$l_cache_dir"); then
-			return 1
-		fi
-		[ "$l_mode" = "700" ] || return 1
-		printf '%s\n' "$l_cache_dir"
-		return 0
-	fi
-
-	l_old_umask=$(umask)
-	umask 077
-	if ! mkdir "$l_cache_dir" 2>/dev/null; then
-		umask "$l_old_umask"
-		return 1
-	fi
-	umask "$l_old_umask"
-
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_dir"); then
-		return 1
-	fi
-	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_cache_dir"); then
-		return 1
-	fi
-	[ "$l_mode" = "700" ] || return 1
-	printf '%s\n' "$l_cache_dir"
-}
-
-# Purpose: Return the remote-capability cache directory path for one temporary
-# root.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before zxfer creates or validates the per-run remote-
-# capability cache directory.
-zxfer_remote_capability_cache_dir_path_for_tmpdir() {
-	l_tmpdir=$1
-
-	[ -n "$l_tmpdir" ] || return 1
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-	if ! l_root_prefix=$(zxfer_get_remote_host_cache_root_prefix); then
-		return 1
-	fi
-
-	printf '%s/%s.remote-capabilities.%s.d\n' \
-		"$l_tmpdir" "$l_root_prefix" "$l_effective_uid"
-}
-
-# Purpose: Manage remote capability cache path for the remote-host management
-# flow.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when remote bootstrap or capability logic needs one shared
-# helper for this state.
-zxfer_remote_capability_cache_path() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-	if ! l_cache_dir=$(zxfer_ensure_remote_capability_cache_dir); then
-		return 1
-	fi
-	if ! l_cache_key=$(zxfer_remote_capability_cache_key "$l_host_spec" "$l_requested_tools"); then
-		return 1
-	fi
-	printf '%s\n' "$l_cache_dir/$l_cache_key"
-}
-
-# Purpose: Manage remote capability cache lock path for the remote-host
-# management flow.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when remote bootstrap or capability logic needs one shared
-# helper for this state.
-zxfer_remote_capability_cache_lock_path() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-		"$l_host_spec" "$l_requested_tools"); then
-		return 1
-	fi
-	printf '%s.lock\n' "$l_cache_path"
-}
-
-# Purpose: Validate the remote capability cache lock directory before zxfer
-# relies on it.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management to fail closed on malformed, unsafe, or stale input.
-zxfer_validate_remote_capability_cache_lock_dir() {
-	l_lock_dir=$1
-
-	zxfer_load_owned_lock_metadata_for_kind_and_purpose \
-		"$l_lock_dir" lock "$(zxfer_get_remote_capability_cache_lock_purpose)" >/dev/null 2>&1
-}
-
-# Purpose: Create the remote capability cache lock directory using the safety
-# checks owned by this module.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs a fresh staged resource or persistent
-# helper state.
-zxfer_create_remote_capability_cache_lock_dir() {
-	l_lock_dir=$1
-
-	if ! zxfer_create_owned_lock_dir \
-		"$l_lock_dir" lock "$(zxfer_get_remote_capability_cache_lock_purpose)" >/dev/null; then
-		return 1
-	fi
-	return 0
-}
-
-# Purpose: Surface an unsupported remote capability cache lock layout before
-# the caller reuses or destroys it.
-# Usage: Called during remote bootstrap and capability caching when current
-# releases encounter a pre-metadata pid-file lock directory that operators must
-# remove explicitly.
-zxfer_warn_unsupported_remote_capability_cache_lock_path() {
-	l_lock_dir=$1
-
-	zxfer_warn_stderr \
-		"Error: remote capability cache lock path \"$l_lock_dir\" uses an unsupported pid-file layout. Remove the stale lock directory and retry."
-}
-
-# Purpose: Try to resolve or create the acquire remote capability cache lock
-# without treating every miss as fatal.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer has an optional or fallback path that still
-# needs one checked helper.
-zxfer_try_acquire_remote_capability_cache_lock() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-
-	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
-		"$l_host_spec" "$l_requested_tools"); then
-		return 1
-	fi
-	[ ! -L "$l_lock_dir" ] || return 1
-	[ ! -h "$l_lock_dir" ] || return 1
-
-	if zxfer_create_remote_capability_cache_lock_dir "$l_lock_dir"; then
-		printf '%s\n' "$l_lock_dir"
-		return 0
-	fi
-
-	[ -d "$l_lock_dir" ] || return 1
-	if zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_dir"; then
-		zxfer_warn_unsupported_remote_capability_cache_lock_path "$l_lock_dir"
-		return 1
-	fi
-	l_metadata_path=$(zxfer_get_owned_lock_metadata_path "$l_lock_dir")
-	if [ ! -e "$l_metadata_path" ] && [ ! -L "$l_metadata_path" ] &&
-		[ ! -h "$l_metadata_path" ]; then
-		zxfer_try_reap_stale_owned_lock_dir \
-			"$l_lock_dir" 0 lock "$(zxfer_get_remote_capability_cache_lock_purpose)"
-		l_reap_status=$?
-	else
-		zxfer_try_reap_stale_owned_lock_dir \
-			"$l_lock_dir" 1 lock "$(zxfer_get_remote_capability_cache_lock_purpose)"
-		l_reap_status=$?
-	fi
-	if [ "$l_reap_status" -eq 0 ]; then
-		if zxfer_create_remote_capability_cache_lock_dir "$l_lock_dir"; then
-			printf '%s\n' "$l_lock_dir"
-			return 0
-		fi
-		[ -d "$l_lock_dir" ] || return 1
-		if ! zxfer_validate_remote_capability_cache_lock_dir "$l_lock_dir"; then
-			return 1
-		fi
-		return 2
-	fi
-	case "$l_reap_status" in
-	2)
-		return 2
-		;;
-	esac
-	return 1
-}
-
-# Purpose: Release the remote capability cache lock after the protected work
-# finishes.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when a shared cache, lock, or transport resource should no
-# longer be held.
-zxfer_release_remote_capability_cache_lock() {
-	l_lock_dir=$1
-
-	zxfer_release_owned_lock_dir \
-		"$l_lock_dir" lock "$(zxfer_get_remote_capability_cache_lock_purpose)"
-}
-
-# Purpose: Match only the current-format remote-host cache root paths that this
-# module owns so generic temp cleanup does not treat arbitrary scratch
-# directories as remote-host cache state.
-# Usage: Called during trap cleanup and explicit cache-root teardown before
-# unsupported old-format entries are allowed to block directory removal.
-zxfer_is_remote_host_cache_root_path() {
-	l_cache_dir=$1
-
-	[ -n "$l_cache_dir" ] || return 1
-	l_cache_basename=${l_cache_dir##*/}
-
-	if [ -n "${g_zxfer_temp_prefix:-}" ]; then
-		l_root_prefix=$g_zxfer_temp_prefix
-		case "$l_cache_basename" in
-		"${l_root_prefix}.s."[0-9]*.d | \
-			"${l_root_prefix}.remote-capabilities."[0-9]*.d)
-			return 0
-			;;
-		esac
-	fi
-
-	case "$l_cache_basename" in
-	zxfer.*.s.[0-9]*.d | \
-		zxfer.*.remote-capabilities.[0-9]*.d)
-		return 0
-		;;
-	esac
-	return 1
-}
-
-# Purpose: Clean up the empty remote host cache root that this module created
-# or tracks.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management on success and failure paths so temporary state does not
-# linger.
-zxfer_cleanup_empty_remote_host_cache_root() {
-	l_cache_dir=$1
-
-	[ -n "$l_cache_dir" ] || return 0
-	[ ! -L "$l_cache_dir" ] || return 1
-	[ ! -h "$l_cache_dir" ] || return 1
-	[ -e "$l_cache_dir" ] || return 0
-	[ -d "$l_cache_dir" ] || return 1
-
-	set -- "$l_cache_dir"/.[!.]* "$l_cache_dir"/..?* "$l_cache_dir"/*
-	for l_cache_entry in "$@"; do
-		if [ -e "$l_cache_entry" ] || [ -L "$l_cache_entry" ] || [ -h "$l_cache_entry" ]; then
-			return 0
-		fi
-	done
-
-	if rmdir "$l_cache_dir" >/dev/null 2>&1 ||
-		{ [ ! -e "$l_cache_dir" ] && [ ! -L "$l_cache_dir" ] && [ ! -h "$l_cache_dir" ]; }; then
-		return 0
-	fi
-	return 1
-}
-
-# Purpose: Detect remote-host cache roots that still contain unsupported
-# old-format lock or lease entries so cleanup does not silently delete them.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before trap or explicit cache-root cleanup removes a
-# current-run temp-prefix root.
-zxfer_remote_host_cache_root_contains_unsupported_entries() {
-	l_cache_dir=$1
-
-	[ -n "$l_cache_dir" ] || return 1
-	[ -d "$l_cache_dir" ] || return 1
-	[ ! -L "$l_cache_dir" ] || return 1
-	[ ! -h "$l_cache_dir" ] || return 1
-
-	set -- "$l_cache_dir"/*.lock
-	if [ -e "$1" ] || [ -L "$1" ] || [ -h "$1" ]; then
-		for l_lock_path in "$@"; do
-			if [ ! -e "$l_lock_path" ] && [ ! -L "$l_lock_path" ] &&
-				[ ! -h "$l_lock_path" ]; then
-				continue
-			fi
-			if [ -d "$l_lock_path" ] &&
-				zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_path"; then
-				return 0
-			fi
-		done
-	fi
-
-	set -- "$l_cache_dir"/*/leases/lease.*
-	if [ ! -e "$1" ] && [ ! -L "$1" ] && [ ! -h "$1" ]; then
-		return 1
-	fi
-
-	for l_lease_path in "$@"; do
-		if [ ! -e "$l_lease_path" ] && [ ! -L "$l_lease_path" ] &&
-			[ ! -h "$l_lease_path" ]; then
-			continue
-		fi
-		if [ -L "$l_lease_path" ] || [ -h "$l_lease_path" ] ||
-			[ ! -d "$l_lease_path" ]; then
-			return 0
-		fi
-	done
-
-	return 1
-}
-
-# Purpose: Detect remote-host cache cleanup conflicts before generic temp-root
-# cleanup or cache-root teardown removes a path.
-# Usage: Called during trap cleanup and explicit remote-host cache cleanup when
-# owned lock state or unsupported old-format entries must be preserved for
-# checked release or operator cleanup.
-zxfer_remote_host_cache_cleanup_conflicts_with_path() {
-	l_cache_dir=$1
-
-	if command -v zxfer_owned_lock_cleanup_conflicts_with_path >/dev/null 2>&1 &&
-		zxfer_owned_lock_cleanup_conflicts_with_path "$l_cache_dir"; then
-		return 0
-	fi
-	if ! zxfer_is_remote_host_cache_root_path "$l_cache_dir"; then
-		return 1
-	fi
-	zxfer_remote_host_cache_root_contains_unsupported_entries "$l_cache_dir"
-}
-
-# Purpose: Clean up the remote host cache root that this module created or
-# tracks.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management on success and failure paths so temporary state does not
-# linger.
-zxfer_cleanup_remote_host_cache_root() {
-	l_cache_dir=$1
-
-	[ -n "$l_cache_dir" ] || return 0
-	if zxfer_remote_host_cache_cleanup_conflicts_with_path "$l_cache_dir"; then
-		zxfer_cleanup_empty_remote_host_cache_root "$l_cache_dir" >/dev/null 2>&1 || :
-		return 0
-	fi
-	if [ -L "$l_cache_dir" ] || [ -h "$l_cache_dir" ]; then
-		rm -f "$l_cache_dir" 2>/dev/null || :
-		return 0
-	fi
-	rm -rf "$l_cache_dir" 2>/dev/null || :
-}
-
-# Purpose: Clean up the remote host cache roots that this module created or
-# tracks.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management on success and failure paths so temporary state does not
-# linger.
-zxfer_cleanup_remote_host_cache_roots() {
-	if l_socket_tmpdir=$(zxfer_try_get_socket_cache_tmpdir 2>/dev/null); then
-		if l_socket_cache_dir=$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$l_socket_tmpdir" 2>/dev/null); then
-			zxfer_cleanup_remote_host_cache_root "$l_socket_cache_dir"
-		fi
-	fi
-	if l_default_tmpdir=$(zxfer_try_get_default_tmpdir 2>/dev/null); then
-		if [ "${l_socket_tmpdir:-}" != "$l_default_tmpdir" ] &&
-			l_socket_cache_dir=$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$l_default_tmpdir" 2>/dev/null); then
-			zxfer_cleanup_remote_host_cache_root "$l_socket_cache_dir"
-		fi
-	fi
-	if l_capability_tmpdir=$(zxfer_try_get_effective_tmpdir 2>/dev/null); then
-		if l_capability_cache_dir=$(
-			zxfer_remote_capability_cache_dir_path_for_tmpdir "$l_capability_tmpdir" 2>/dev/null
-		); then
-			zxfer_cleanup_remote_host_cache_root "$l_capability_cache_dir"
-		fi
-	fi
-}
-
-# Purpose: Wait for the for remote capability cache fill to reach the state
-# this module expects.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later steps must block until background work or shared
-# state catches up.
-zxfer_wait_for_remote_capability_cache_fill() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-	l_wait_retries=${g_zxfer_remote_capability_cache_wait_retries:-5}
-	l_fast_retries=${ZXFER_REMOTE_CAPABILITY_CACHE_WAIT_FAST_RETRIES:-20}
-	l_wait_count=0
-	l_waited=0
-	l_wait_start_ms=""
-
-	case "$l_wait_retries" in
-	'' | *[!0-9]*)
-		l_wait_retries=5
-		;;
-	esac
-	[ "$l_wait_retries" -gt 0 ] || l_wait_retries=5
-	case "$l_fast_retries" in
-	'' | *[!0-9]*)
-		l_fast_retries=0
-		;;
-	esac
-
-	while [ "$l_fast_retries" -gt 0 ]; do
-		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-			"$l_host_spec" "$l_requested_tools"); then
-			zxfer_record_remote_capability_cache_wait_metrics "$l_waited" "$l_wait_start_ms"
-			printf '%s\n' "$l_cached_response"
-			return 0
-		fi
-		if [ "$l_waited" -eq 0 ]; then
-			l_waited=1
-			l_wait_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-		fi
-		l_fast_retries=$((l_fast_retries - 1))
-	done
-
-	while [ "$l_wait_count" -lt "$l_wait_retries" ]; do
-		if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-			"$l_host_spec" "$l_requested_tools"); then
-			zxfer_record_remote_capability_cache_wait_metrics "$l_waited" "$l_wait_start_ms"
-			printf '%s\n' "$l_cached_response"
-			return 0
-		fi
-		if [ "$l_waited" -eq 0 ]; then
-			l_waited=1
-			l_wait_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-		fi
-		l_wait_count=$((l_wait_count + 1))
-		[ "$l_wait_count" -lt "$l_wait_retries" ] || break
-		sleep 1
-	done
-
-	zxfer_record_remote_capability_cache_wait_metrics "$l_waited" "$l_wait_start_ms"
-	return 1
-}
-
-# Purpose: Reap stale the stale pidless remote capability cache lock left
-# behind by earlier runs or dead owners.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer can prove an old lock, cache entry, or transport
-# artifact is no longer live.
-zxfer_reap_stale_pidless_remote_capability_cache_lock() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-
-	if ! l_lock_dir=$(zxfer_remote_capability_cache_lock_path \
-		"$l_host_spec" "$l_requested_tools"); then
-		return 1
-	fi
-	[ -e "$l_lock_dir" ] || return 0
-	if zxfer_owned_lock_dir_uses_unsupported_pid_file_layout "$l_lock_dir"; then
-		zxfer_warn_unsupported_remote_capability_cache_lock_path "$l_lock_dir"
-		return 1
-	fi
-	zxfer_try_reap_stale_owned_lock_dir \
-		"$l_lock_dir" 1 lock "$(zxfer_get_remote_capability_cache_lock_purpose)"
-	l_reap_status=$?
-	case "$l_reap_status" in
-	0 | 2)
-		return 0
-		;;
-	esac
-	return 1
 }
 
 # Purpose: Parse one remote capability payload into the structured globals that
@@ -2236,27 +838,6 @@ zxfer_parse_remote_capability_response() {
 			case "$l_record_tool" in
 			zfs)
 				g_zxfer_remote_capability_zfs_status=$l_record_status
-				if [ "$l_record_status" -eq 0 ]; then
-					g_zxfer_remote_capability_zfs_path=$l_record_path
-				else
-					g_zxfer_remote_capability_zfs_path=""
-				fi
-				;;
-			parallel)
-				g_zxfer_remote_capability_parallel_status=$l_record_status
-				if [ "$l_record_status" -eq 0 ]; then
-					g_zxfer_remote_capability_parallel_path=$l_record_path
-				else
-					g_zxfer_remote_capability_parallel_path=""
-				fi
-				;;
-			cat)
-				g_zxfer_remote_capability_cat_status=$l_record_status
-				if [ "$l_record_status" -eq 0 ]; then
-					g_zxfer_remote_capability_cat_path=$l_record_path
-				else
-					g_zxfer_remote_capability_cat_path=""
-				fi
 				;;
 			esac
 			l_tool_count=$((l_tool_count + 1))
@@ -2383,9 +964,9 @@ zxfer_capture_remote_probe_output() {
 	l_capture_dir=$g_zxfer_runtime_artifact_path_result
 	l_stdout_path="$l_capture_dir/stdout"
 	l_stderr_path="$l_capture_dir/stderr"
-	l_command_context=$(zxfer_get_remote_command_context_label \
-		"$l_host_spec" "$l_profile_side")
-	zxfer_echoV "Running remote probe [$l_command_context]: $l_remote_probe_cmd"
+	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
+		zxfer_echoV "Running remote probe [$(zxfer_get_remote_command_context_label "$l_host_spec" "$l_profile_side")]: $l_remote_probe_cmd"
+	fi
 
 	if zxfer_invoke_ssh_shell_command_for_host \
 		"$l_host_spec" "$l_remote_probe_cmd" "$l_profile_side" >"$l_stdout_path" 2>"$l_stderr_path"; then
@@ -2458,7 +1039,6 @@ zxfer_store_cached_remote_capability_response_for_host() {
 	l_response=$2
 	l_requested_tools=${3:-}
 	l_stored=0
-	l_dependency_path=$(zxfer_get_effective_dependency_path)
 	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
 		"$l_host_spec" "$l_requested_tools"); then
 		l_cache_identity=""
@@ -2469,10 +1049,8 @@ zxfer_store_cached_remote_capability_response_for_host() {
 		if [ "${g_origin_remote_capabilities_cache_identity:-}" != "$l_cache_identity" ] ||
 			[ "${g_origin_remote_capabilities_host:-}" != "$l_host_spec" ]; then
 			g_origin_remote_capabilities_bootstrap_source=""
-			g_origin_remote_capabilities_cache_write_unavailable=0
 		fi
 		g_origin_remote_capabilities_host=$l_host_spec
-		g_origin_remote_capabilities_dependency_path=$l_dependency_path
 		g_origin_remote_capabilities_cache_identity=$l_cache_identity
 		g_origin_remote_capabilities_response=$l_response
 		l_stored=1
@@ -2483,10 +1061,8 @@ zxfer_store_cached_remote_capability_response_for_host() {
 		if [ "${g_target_remote_capabilities_cache_identity:-}" != "$l_cache_identity" ] ||
 			[ "${g_target_remote_capabilities_host:-}" != "$l_host_spec" ]; then
 			g_target_remote_capabilities_bootstrap_source=""
-			g_target_remote_capabilities_cache_write_unavailable=0
 		fi
 		g_target_remote_capabilities_host=$l_host_spec
-		g_target_remote_capabilities_dependency_path=$l_dependency_path
 		g_target_remote_capabilities_cache_identity=$l_cache_identity
 		g_target_remote_capabilities_response=$l_response
 		l_stored=1
@@ -2495,21 +1071,17 @@ zxfer_store_cached_remote_capability_response_for_host() {
 	if [ "$l_stored" -eq 0 ] &&
 		[ "${g_origin_remote_capabilities_host:-}" = "" ]; then
 		g_origin_remote_capabilities_host=$l_host_spec
-		g_origin_remote_capabilities_dependency_path=$l_dependency_path
 		g_origin_remote_capabilities_cache_identity=$l_cache_identity
 		g_origin_remote_capabilities_response=$l_response
 		g_origin_remote_capabilities_bootstrap_source=""
-		g_origin_remote_capabilities_cache_write_unavailable=0
 		return
 	fi
 
 	if [ "$l_stored" -eq 0 ]; then
 		g_target_remote_capabilities_host=$l_host_spec
-		g_target_remote_capabilities_dependency_path=$l_dependency_path
 		g_target_remote_capabilities_cache_identity=$l_cache_identity
 		g_target_remote_capabilities_response=$l_response
 		g_target_remote_capabilities_bootstrap_source=""
-		g_target_remote_capabilities_cache_write_unavailable=0
 	fi
 }
 
@@ -2549,216 +1121,6 @@ zxfer_note_remote_capability_bootstrap_source_for_host() {
 			g_target_remote_capabilities_bootstrap_source=$l_source
 		fi
 	fi
-}
-
-# Purpose: Read the remote capability cache file from staged state into the
-# current shell.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when later helpers need a checked reload instead of ad hoc
-# file reads.
-zxfer_read_remote_capability_cache_file() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-	l_now=$(date '+%s' 2>/dev/null || :)
-	[ -n "$l_now" ] || return 1
-
-	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-		"$l_host_spec" "$l_requested_tools"); then
-		return 1
-	fi
-	if ! l_expected_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
-		"$l_host_spec" "$l_requested_tools"); then
-		return 1
-	fi
-	[ -f "$l_cache_path" ] || return 1
-	[ ! -L "$l_cache_path" ] || return 1
-	[ ! -h "$l_cache_path" ] || return 1
-	if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-		return 1
-	fi
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_path"); then
-		return 1
-	fi
-	[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	if ! l_mode=$(zxfer_get_path_mode_octal "$l_cache_path"); then
-		return 1
-	fi
-	[ "$l_mode" = "600" ] || return 1
-
-	if ! zxfer_read_cache_object_file \
-		"$l_cache_path" "$ZXFER_REMOTE_CAPABILITY_CACHE_OBJECT_KIND" >/dev/null; then
-		return 1
-	fi
-	l_cached_response=$g_zxfer_cache_object_payload_result
-	if ! l_cache_epoch=$(zxfer_get_cache_object_metadata_value \
-		"$g_zxfer_cache_object_metadata_result" created_epoch); then
-		return 1
-	fi
-	if ! l_cache_identity_hex=$(zxfer_get_cache_object_metadata_value \
-		"$g_zxfer_cache_object_metadata_result" identity_hex); then
-		return 1
-	fi
-	[ "$l_cache_identity_hex" = "$l_expected_identity_hex" ] || return 1
-
-	case "$l_cache_epoch" in
-	'' | *[!0-9]*)
-		return 1
-		;;
-	esac
-
-	l_cache_age=$((l_now - l_cache_epoch))
-	[ "$l_cache_age" -ge 0 ] || return 1
-	[ "$l_cache_age" -le "${g_zxfer_remote_capability_cache_ttl:-15}" ] || return 1
-
-	if ! zxfer_parse_remote_capability_response "$l_cached_response"; then
-		return 1
-	fi
-
-	printf '%s\n' "$l_cached_response"
-}
-
-# Purpose: Write the remote capability cache file in the normalized form later
-# zxfer steps expect.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when the module needs a stable staged file or emitted
-# stream for downstream use.
-zxfer_write_remote_capability_cache_file() {
-	l_host_spec=$1
-	l_response=$2
-	l_requested_tools=${3:-}
-	l_now=$(date '+%s' 2>/dev/null || :)
-	[ -n "$l_now" ] || return 1
-
-	if ! l_cache_path=$(zxfer_remote_capability_cache_path \
-		"$l_host_spec" "$l_requested_tools"); then
-		return 1
-	fi
-	if ! l_identity_hex=$(zxfer_remote_capability_cache_identity_hex_for_host \
-		"$l_host_spec" "$l_requested_tools"); then
-		return 1
-	fi
-	[ ! -L "$l_cache_path" ] || return 1
-	[ ! -h "$l_cache_path" ] || return 1
-	if [ -e "$l_cache_path" ]; then
-		[ -f "$l_cache_path" ] || return 1
-		if ! l_effective_uid=$(zxfer_get_effective_user_uid); then
-			return 1
-		fi
-		if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_cache_path"); then
-			return 1
-		fi
-		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
-	fi
-
-	zxfer_write_cache_object_file_atomically \
-		"$l_cache_path" \
-		"$ZXFER_REMOTE_CAPABILITY_CACHE_OBJECT_KIND" \
-		"created_epoch=$l_now
-identity_hex=$l_identity_hex" \
-		"$l_response"
-}
-
-# Purpose: Emit the remote capability cache write failure in the operator-
-# facing format owned by this module.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs to surface status, warning, or diagnostic
-# text.
-zxfer_warn_remote_capability_cache_write_failure() {
-	l_host_spec=$1
-	l_status=$2
-
-	printf '%s\n' "Warning: Failed to write local remote capability cache for host $l_host_spec (status $l_status); disabling further local cache writes for this host during this run." >&2
-}
-
-# Purpose: Check whether local remote capability cache writes are unavailable
-# for host in this run.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before zxfer retries a local cache write that already
-# failed once for the same host/cache identity.
-zxfer_remote_capability_cache_write_is_unavailable_for_host() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-
-	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-		"$l_host_spec" "$l_requested_tools"); then
-		return 1
-	fi
-
-	if [ "$l_host_spec" = "${g_origin_remote_capabilities_host:-}" ] &&
-		[ "$l_cache_identity" = "${g_origin_remote_capabilities_cache_identity:-}" ] &&
-		[ "${g_origin_remote_capabilities_cache_write_unavailable:-0}" -eq 1 ]; then
-		return 0
-	fi
-
-	if [ "$l_host_spec" = "${g_target_remote_capabilities_host:-}" ] &&
-		[ "$l_cache_identity" = "${g_target_remote_capabilities_cache_identity:-}" ] &&
-		[ "${g_target_remote_capabilities_cache_write_unavailable:-0}" -eq 1 ]; then
-		return 0
-	fi
-
-	return 1
-}
-
-# Purpose: Mark local remote capability cache writes unavailable for host in
-# this run after a checked persistence failure.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs an explicit degraded cache state instead
-# of repeated best-effort writes.
-zxfer_note_remote_capability_cache_write_unavailable_for_host() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
-
-	if ! l_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-		"$l_host_spec" "$l_requested_tools"); then
-		return 0
-	fi
-
-	if [ "$l_host_spec" = "${g_origin_remote_capabilities_host:-}" ] &&
-		[ "$l_cache_identity" = "${g_origin_remote_capabilities_cache_identity:-}" ]; then
-		g_origin_remote_capabilities_cache_write_unavailable=1
-	fi
-
-	if [ "$l_host_spec" = "${g_target_remote_capabilities_host:-}" ] &&
-		[ "$l_cache_identity" = "${g_target_remote_capabilities_cache_identity:-}" ]; then
-		g_target_remote_capabilities_cache_write_unavailable=1
-	fi
-}
-
-# Purpose: Emit the remote capability cache lock release failure in the
-# operator-facing format owned by this module.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when zxfer needs to surface status, warning, or diagnostic
-# text.
-zxfer_warn_remote_capability_cache_lock_release_failure() {
-	l_host_spec=$1
-	l_status=$2
-
-	printf '%s\n' "Warning: Failed to release local remote capability cache lock for host $l_host_spec (status $l_status)." >&2
-}
-
-# Purpose: Release the remote capability cache lock while preserving the
-# caller's primary failure when one already exists.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when lock release should be checked but must not suppress
-# an earlier live-probe or cache-path failure.
-zxfer_release_remote_capability_cache_lock_with_precedence() {
-	l_host_spec=$1
-	l_lock_dir=$2
-	l_primary_status=${3:-0}
-
-	[ -n "$l_lock_dir" ] || return "$l_primary_status"
-
-	zxfer_release_remote_capability_cache_lock "$l_lock_dir" >/dev/null 2>&1
-	l_release_status=$?
-	if [ "$l_release_status" -eq 0 ]; then
-		return "$l_primary_status"
-	fi
-	zxfer_warn_remote_capability_cache_lock_release_failure \
-		"$l_host_spec" "$l_release_status"
-	if [ "$l_primary_status" -ne 0 ]; then
-		return "$l_primary_status"
-	fi
-	return 1
 }
 
 # Purpose: Build the remote capability probe script for the next execution or
@@ -2811,11 +1173,13 @@ zxfer_fetch_remote_host_capabilities_live() {
 	printf '%s\n' "$l_remote_output"
 }
 
-# Purpose: Ensure the remote host capabilities exists and is ready before the
+# Purpose: Ensure the remote host capabilities exist and are ready before the
 # flow continues.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before later helpers assume the resource or cache is
-# available.
+# Usage: Called during remote bootstrap, capability probing, and ssh control-
+# socket management before later helpers assume the capability payload is
+# available. Capability state is per-run only: one live probe per host fills
+# the in-memory tier and every later lookup in this run is answered from
+# memory.
 zxfer_ensure_remote_host_capabilities() {
 	l_host_spec=$1
 	l_profile_side=${2:-}
@@ -2836,76 +1200,11 @@ zxfer_ensure_remote_host_capabilities() {
 		fi
 	fi
 
-	if l_cached_response=$(zxfer_read_remote_capability_cache_file \
-		"$l_host_spec" "$l_requested_tools"); then
-		zxfer_store_cached_remote_capability_response_for_host \
-			"$l_host_spec" "$l_cached_response" "$l_requested_tools"
-		zxfer_note_remote_capability_bootstrap_source_for_host \
-			"$l_host_spec" cache "$l_requested_tools"
-		zxfer_profile_record_remote_capability_bootstrap_source cache
-		g_zxfer_remote_capability_response_result=$l_cached_response
-		printf '%s\n' "$l_cached_response"
-		return 0
-	fi
-
-	l_capability_lock_dir=""
-	l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
-		"$l_host_spec" "$l_requested_tools")
-	l_lock_status=$?
-	if [ "$l_lock_status" -ne 0 ]; then
-		case "$l_lock_status" in
-		1)
-			return 1
-			;;
-		2)
-			if l_cached_response=$(zxfer_wait_for_remote_capability_cache_fill \
-				"$l_host_spec" "$l_requested_tools"); then
-				zxfer_store_cached_remote_capability_response_for_host \
-					"$l_host_spec" "$l_cached_response" "$l_requested_tools"
-				zxfer_note_remote_capability_bootstrap_source_for_host \
-					"$l_host_spec" cache "$l_requested_tools"
-				zxfer_profile_record_remote_capability_bootstrap_source cache
-				g_zxfer_remote_capability_response_result=$l_cached_response
-				printf '%s\n' "$l_cached_response"
-				return 0
-			fi
-			if ! zxfer_reap_stale_pidless_remote_capability_cache_lock \
-				"$l_host_spec" "$l_requested_tools"; then
-				return 1
-			fi
-			l_capability_lock_dir=$(zxfer_try_acquire_remote_capability_cache_lock \
-				"$l_host_spec" "$l_requested_tools")
-			l_lock_status=$?
-			if [ "$l_lock_status" -ne 0 ]; then
-				case "$l_lock_status" in
-				1)
-					return 1
-					;;
-				2)
-					l_capability_lock_dir=""
-					;;
-				*)
-					return 1
-					;;
-				esac
-			fi
-			;;
-		*)
-			return 1
-			;;
-		esac
-	fi
-
 	if zxfer_fetch_remote_host_capabilities_live \
 		"$l_host_spec" "$l_profile_side" "$l_requested_tools" >/dev/null; then
 		:
 	else
 		l_live_status=$?
-		if [ -n "$l_capability_lock_dir" ]; then
-			zxfer_release_remote_capability_cache_lock_with_precedence \
-				"$l_host_spec" "$l_capability_lock_dir" "$l_live_status"
-			l_live_status=$?
-		fi
 		return "$l_live_status"
 	fi
 	l_live_response=$g_zxfer_remote_capability_response_result
@@ -2915,25 +1214,6 @@ zxfer_ensure_remote_host_capabilities() {
 	zxfer_note_remote_capability_bootstrap_source_for_host \
 		"$l_host_spec" live "$l_requested_tools"
 	zxfer_profile_record_remote_capability_bootstrap_source live
-	if ! zxfer_remote_capability_cache_write_is_unavailable_for_host \
-		"$l_host_spec" "$l_requested_tools"; then
-		if zxfer_write_remote_capability_cache_file \
-			"$l_host_spec" "$l_live_response" "$l_requested_tools" >/dev/null 2>&1; then
-			:
-		else
-			l_cache_write_status=$?
-			zxfer_note_remote_capability_cache_write_unavailable_for_host \
-				"$l_host_spec" "$l_requested_tools"
-			zxfer_warn_remote_capability_cache_write_failure \
-				"$l_host_spec" "$l_cache_write_status"
-		fi
-	fi
-	if [ -n "$l_capability_lock_dir" ]; then
-		zxfer_release_remote_capability_cache_lock_with_precedence \
-			"$l_host_spec" "$l_capability_lock_dir" 0
-		l_release_status=$?
-		[ "$l_release_status" -eq 0 ] || return "$l_release_status"
-	fi
 	g_zxfer_remote_capability_response_result=$l_live_response
 	printf '%s\n' "$l_live_response"
 }
@@ -2951,11 +1231,9 @@ zxfer_preload_remote_host_capabilities() {
 	fi
 
 	if [ "${g_option_v_verbose:-0}" -eq 1 ] || [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
-		l_preload_status=0
 		zxfer_ensure_remote_host_capabilities \
-			"$l_host_spec" "$l_profile_side" "$l_requested_tools" >/dev/null ||
-			l_preload_status=$?
-		return "$l_preload_status"
+			"$l_host_spec" "$l_profile_side" "$l_requested_tools" >/dev/null
+		return "$?"
 	fi
 
 	zxfer_ensure_remote_host_capabilities \
@@ -2994,7 +1272,9 @@ zxfer_get_remote_host_operating_system_direct() {
 zxfer_get_remote_host_operating_system() {
 	l_host_spec=$1
 	l_profile_side=${2:-}
-	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host "$l_host_spec"); then
+		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+	fi
 
 	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
 		"$l_host_spec" "$l_profile_side" "$l_requested_tools"); then
@@ -3050,9 +1330,7 @@ zxfer_resolve_remote_tool_from_parsed_capabilities() {
 	[ -n "$l_host" ] || return 1
 	[ -n "$l_tool" ] || return 1
 
-	if ! zxfer_get_parsed_remote_capability_tool_record "$l_tool"; then
-		return 2
-	fi
+	zxfer_get_parsed_remote_capability_tool_record "$l_tool" || return 2
 
 	case "$g_zxfer_remote_capability_tool_status_result" in
 	0)
@@ -3134,73 +1412,6 @@ zxfer_resolve_remote_required_tool() {
 		return 1
 		;;
 	esac
-}
-
-# Purpose: Return the remote resolved tool version output in the form expected
-# by later helpers.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when sibling helpers need the same lookup without
-# duplicating module logic.
-#
-# Probe the full `--version` output for a resolved remote helper path using only
-# shell builtins, so version checks do not depend on the remote PATH.
-zxfer_get_remote_resolved_tool_version_output() {
-	l_host=$1
-	l_tool_path=$2
-	l_label=${3:-tool}
-	l_profile_side=${4:-}
-
-	[ -n "$l_host" ] || return 1
-	[ -n "$l_tool_path" ] || return 1
-
-	l_tool_path_single=$(zxfer_escape_for_single_quotes "$l_tool_path")
-	l_remote_probe="l_tool='$l_tool_path_single'
-if ! l_output=\$(\"\$l_tool\" --version 2>&1); then
-	exit 11
-fi
-printf '%s\n' \"\$l_output\""
-	l_remote_probe_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_probe")
-	if ! zxfer_capture_remote_probe_output "$l_host" "$l_remote_probe_cmd" "$l_profile_side"; then
-		zxfer_emit_remote_probe_failure_message \
-			"Failed to query dependency \"$l_label\" on host $l_host."
-		return 1
-	fi
-
-	printf '%s\n' "$g_zxfer_remote_probe_stdout"
-}
-
-# Purpose: Return the remote resolved tool version line in the form expected by
-# later helpers.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when sibling helpers need the same lookup without
-# duplicating module logic.
-#
-# Probe the first `--version` line for a resolved remote helper path using only
-# shell builtins, so signature checks do not depend on the remote PATH.
-zxfer_get_remote_resolved_tool_version_line() {
-	l_host=$1
-	l_tool_path=$2
-	l_label=${3:-tool}
-	l_profile_side=${4:-}
-
-	[ -n "$l_host" ] || return 1
-	[ -n "$l_tool_path" ] || return 1
-
-	if ! l_output=$(zxfer_get_remote_resolved_tool_version_output \
-		"$l_host" "$l_tool_path" "$l_label" "$l_profile_side"); then
-		[ "$l_output" = "" ] || printf '%s\n' "$l_output"
-		return 1
-	fi
-
-	l_oldifs=$IFS
-	IFS='
-'
-	set -f
-	# shellcheck disable=SC2086 # Intentional newline-only splitting to keep the first output line.
-	set -- $l_output
-	IFS=$l_oldifs
-
-	printf '%s\n' "$1"
 }
 
 # Purpose: Resolve the effective remote CLI tool direct that zxfer should use.
@@ -3316,48 +1527,18 @@ zxfer_resolve_remote_cli_command_safe() {
 	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head" "$l_label"
 }
 
-# Purpose: Best-effort cleanup for a freshly opened SSH control socket when
-# setup fails before zxfer can publish the corresponding process lease.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management after lease creation fails for a newly opened master so the
-# untracked socket and cache directory do not leak.
-zxfer_try_cleanup_opened_ssh_control_socket_after_lease_failure() {
-	l_host=$1
-	l_role=$2
-	l_socket_path=$3
-	l_entry_dir=$4
+################################################################################
+# SSH CONTROL SOCKET SETUP / TEARDOWN
+################################################################################
 
-	if zxfer_run_ssh_control_socket_action_for_host \
-		"$l_host" "$l_socket_path" exit; then
-		:
-	elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
-		:
-	else
-		zxfer_emit_ssh_control_socket_action_failure_message \
-			"Warning: Failed to close ssh control socket for $l_role host after lease creation failure." >&2
-		return 1
-	fi
-	if [ -n "${g_zxfer_ssh_control_socket_action_command:-}" ]; then
-		zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-	fi
-	if zxfer_cleanup_ssh_control_socket_entry_dir "$l_entry_dir"; then
-		return 0
-	fi
-	printf '%s\n' "Warning: Failed to remove ssh control socket cache directory for $l_role host after lease creation failure." >&2
-	return 1
-}
-
-# Purpose: Set up the shared SSH control socket state for one remote role
-# without duplicating lock and cache handling.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management before remote probes or replication traffic reuse a
-# multiplexed transport.
+# Purpose: Set up the per-run SSH control socket for one remote role.
+# Usage: Called during remote bootstrap and ssh control-socket management
+# before remote probes or replication traffic reuse a multiplexed transport.
 #
 # setup an ssh control socket for the specified role (origin or target)
 zxfer_setup_ssh_control_socket() {
 	l_host=$1
 	l_role=$2
-	l_opened_control_socket=0
 
 	[ -z "$l_host" ] && return
 
@@ -3376,275 +1557,82 @@ zxfer_setup_ssh_control_socket() {
 		;;
 	esac
 
-	if ! l_control_dir=$(zxfer_ensure_ssh_control_socket_entry_dir "$l_host"); then
-		[ "$l_control_dir" = "" ] || zxfer_throw_error "$l_control_dir"
+	if ! zxfer_ensure_ssh_control_socket_dir >/dev/null; then
 		zxfer_throw_error "Error creating temporary directory for ssh control socket."
 	fi
-	l_control_socket="$l_control_dir/s"
+	if ! l_control_socket=$(zxfer_get_ssh_control_socket_path_for_role "$l_role"); then
+		zxfer_throw_error "Error creating ssh control socket for $l_role host."
+	fi
 	if ! l_transport_tokens=$(zxfer_get_ssh_base_transport_tokens); then
 		zxfer_throw_error "$l_transport_tokens"
 	fi
 
-	if zxfer_acquire_ssh_control_socket_lock "$l_control_dir" >/dev/null; then
-		l_ssh_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
-	else
-		if [ -n "${g_zxfer_ssh_control_socket_lock_error:-}" ]; then
-			zxfer_throw_error \
-				"Error creating ssh control socket for $l_role host: $g_zxfer_ssh_control_socket_lock_error"
+	# The socket lives under the private per-run directory, so it can only
+	# pre-exist when this run already opened a master for the role; the
+	# `-O check` gate keeps that reuse honest and reaps a stale leftover
+	# before a fresh master is opened.
+	if [ -e "$l_control_socket" ] || [ -L "$l_control_socket" ] ||
+		[ -h "$l_control_socket" ]; then
+		if zxfer_check_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
+			zxfer_set_ssh_control_socket_role_state "$l_role" "$l_control_socket"
+			return 0
 		fi
-		zxfer_throw_error "Error creating ssh control socket for $l_role host."
-	fi
-	zxfer_prune_stale_ssh_control_socket_leases "$l_control_dir"
-	l_prune_status=$?
-	if [ "$l_prune_status" -ne 0 ]; then
-		zxfer_release_ssh_control_socket_lock_with_precedence \
-			"$l_role" "$l_ssh_lock_dir" "$l_prune_status" >/dev/null 2>&1 || :
-		zxfer_emit_ssh_control_socket_lock_failure_message \
-			"Error pruning ssh control socket lease entries for $l_role host." >&2
-		zxfer_throw_error "Error creating ssh control socket for $l_role host."
-	fi
-	if ! zxfer_check_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
 		case "${g_zxfer_ssh_control_socket_action_result:-}" in
 		stale)
 			rm -f "$l_control_socket"
 			;;
 		*)
-			zxfer_release_ssh_control_socket_lock_with_precedence \
-				"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
 			zxfer_emit_ssh_control_socket_action_failure_message \
 				"Error checking ssh control socket for $l_role host." >&2
 			zxfer_throw_error "Error creating ssh control socket for $l_role host."
 			;;
 		esac
-		if ! zxfer_open_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
-			zxfer_release_ssh_control_socket_lock_with_precedence \
-				"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-			zxfer_throw_error "Error creating ssh control socket for $l_role host."
-		fi
-		l_opened_control_socket=1
 	fi
 
-	zxfer_create_ssh_control_socket_lease_file "$l_control_dir" >/dev/null
-	l_lease_status=$?
-	if [ "$l_lease_status" -ne 0 ]; then
-		if [ "$l_opened_control_socket" -eq 1 ]; then
-			zxfer_try_cleanup_opened_ssh_control_socket_after_lease_failure \
-				"$l_host" "$l_role" "$l_control_socket" "$l_control_dir" || :
-		fi
-		zxfer_release_ssh_control_socket_lock_with_precedence \
-			"$l_role" "$l_ssh_lock_dir" "$l_lease_status" >/dev/null 2>&1 || :
+	if ! zxfer_open_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
 		zxfer_throw_error "Error creating ssh control socket for $l_role host."
 	fi
-	l_lease_file=$g_zxfer_runtime_artifact_path_result
-	zxfer_set_ssh_control_socket_role_state "$l_role" "$l_control_socket" "$l_control_dir" "$l_lease_file"
-	if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
-		zxfer_emit_ssh_control_socket_lock_failure_message \
-			"Error releasing ssh control socket lock for $l_role host." >&2
-		zxfer_throw_error "Error creating ssh control socket for $l_role host."
-	fi
+	zxfer_set_ssh_control_socket_role_state "$l_role" "$l_control_socket"
 }
 
-# Purpose: Load the SSH control socket role state into shared scratch globals.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management so role-driven helpers can avoid origin/target branches in
-# their main control flow.
-zxfer_get_ssh_control_socket_role_state() {
+# Purpose: Close one role's SSH control socket and release the related state.
+# Usage: Called during remote bootstrap and ssh control-socket management
+# after protected work finishes or trap cleanup takes over. A close failure
+# keeps the role state so trap cleanup reports it instead of claiming a clean
+# run.
+zxfer_close_ssh_control_socket_for_role() {
 	l_role=$1
 
-	g_zxfer_ssh_control_socket_role_host=""
-	g_zxfer_ssh_control_socket_role_socket=""
-	g_zxfer_ssh_control_socket_role_dir=""
-	g_zxfer_ssh_control_socket_role_lease_file=""
 	case "$l_role" in
 	origin)
-		g_zxfer_ssh_control_socket_role_host=${g_option_O_origin_host:-}
-		g_zxfer_ssh_control_socket_role_socket=${g_ssh_origin_control_socket:-}
-		g_zxfer_ssh_control_socket_role_dir=${g_ssh_origin_control_socket_dir:-}
-		g_zxfer_ssh_control_socket_role_lease_file=${g_ssh_origin_control_socket_lease_file:-}
+		l_host=${g_option_O_origin_host:-}
+		l_control_socket=${g_ssh_origin_control_socket:-}
 		;;
 	target)
-		g_zxfer_ssh_control_socket_role_host=${g_option_T_target_host:-}
-		g_zxfer_ssh_control_socket_role_socket=${g_ssh_target_control_socket:-}
-		g_zxfer_ssh_control_socket_role_dir=${g_ssh_target_control_socket_dir:-}
-		g_zxfer_ssh_control_socket_role_lease_file=${g_ssh_target_control_socket_lease_file:-}
+		l_host=${g_option_T_target_host:-}
+		l_control_socket=${g_ssh_target_control_socket:-}
 		;;
 	*)
 		return 1
 		;;
 	esac
-}
-
-# Purpose: Restore the role's SSH control socket lease after a close/check
-# failure while preserving the existing socket and directory state.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management when the last-lease close path fails and zxfer must leave
-# the shared socket protected for later cleanup or retry.
-zxfer_restore_ssh_control_socket_lease_for_role() {
-	l_role=$1
-	l_socket_path=$2
-	l_entry_dir=$3
-
-	zxfer_create_ssh_control_socket_lease_file "$l_entry_dir" >/dev/null ||
-		return "$?"
-	zxfer_set_ssh_control_socket_role_state \
-		"$l_role" "$l_socket_path" "$l_entry_dir" "$g_zxfer_runtime_artifact_path_result"
-}
-
-# Purpose: Clean up the SSH control socket entry directory for one role.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management after a live socket is closed or found stale.
-zxfer_cleanup_ssh_control_socket_entry_dir_for_role() {
-	l_role=$1
-	l_entry_dir=$2
-	l_lock_dir=${3:-}
-
-	l_cleanup_status=0
-	zxfer_cleanup_ssh_control_socket_entry_dir "$l_entry_dir" ||
-		l_cleanup_status=$?
-	if [ "$l_cleanup_status" -eq 0 ]; then
+	if [ "$l_host" = "" ] || [ "$l_control_socket" = "" ]; then
 		return 0
 	fi
-	if [ -n "$l_lock_dir" ]; then
-		zxfer_release_ssh_control_socket_lock_with_precedence \
-			"$l_role" "$l_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
-	fi
-	printf '%s\n' "Error removing ssh control socket cache directory for $l_role host." >&2
-	return "$l_cleanup_status"
-}
 
-# Purpose: Close one role's SSH control socket and release related handles or
-# state.
-# Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management after protected work finishes or cleanup takes over.
-zxfer_close_ssh_control_socket_for_role() {
-	l_role=$1
-
-	zxfer_get_ssh_control_socket_role_state "$l_role" || return 1
-	l_host=$g_zxfer_ssh_control_socket_role_host
-	l_control_socket=$g_zxfer_ssh_control_socket_role_socket
-	l_control_dir=$g_zxfer_ssh_control_socket_role_dir
-	l_lease_file=$g_zxfer_ssh_control_socket_role_lease_file
-	if [ "$l_host" = "" ] || [ "$l_control_socket" = "" ]; then
-		return
-	fi
-
-	if [ "$l_lease_file" != "" ]; then
-		if zxfer_acquire_ssh_control_socket_lock "$l_control_dir" >/dev/null; then
-			l_ssh_lock_dir=$g_zxfer_ssh_control_socket_lock_dir_result
-		else
-			zxfer_emit_ssh_control_socket_lock_failure_message \
-				"Error acquiring ssh control socket lock for $l_role host." >&2
-			return 1
-		fi
-		l_cleanup_status=0
-		zxfer_release_ssh_control_socket_lease_file "$l_lease_file" ||
-			l_cleanup_status=$?
-		if [ "$l_cleanup_status" -ne 0 ]; then
-			zxfer_release_ssh_control_socket_lock_with_precedence \
-				"$l_role" "$l_ssh_lock_dir" "$l_cleanup_status" >/dev/null 2>&1 || :
-			printf '%s\n' "Error removing ssh control socket lease for $l_role host." >&2
-			return "$l_cleanup_status"
-		fi
-		zxfer_prune_stale_ssh_control_socket_leases "$l_control_dir"
-		l_prune_status=$?
-		if [ "$l_prune_status" -ne 0 ]; then
-			zxfer_release_ssh_control_socket_lock_with_precedence \
-				"$l_role" "$l_ssh_lock_dir" "$l_prune_status" >/dev/null 2>&1 || :
-			zxfer_emit_ssh_control_socket_lock_failure_message \
-				"Error pruning ssh control socket lease entries for $l_role host." >&2
-			return "$l_prune_status"
-		fi
-		zxfer_count_ssh_control_socket_leases "$l_control_dir" >/dev/null
-		l_count_status=$?
-		if [ "$l_count_status" -ne 0 ]; then
-			zxfer_release_ssh_control_socket_lock_with_precedence \
-				"$l_role" "$l_ssh_lock_dir" "$l_count_status" >/dev/null 2>&1 || :
-			zxfer_emit_ssh_control_socket_lock_failure_message \
-				"Error counting ssh control socket lease entries for $l_role host." >&2
-			return "$l_count_status"
-		fi
-		l_remaining_leases=$g_zxfer_ssh_control_socket_lease_count_result
-		if [ "$l_remaining_leases" -ne 0 ]; then
-			zxfer_clear_ssh_control_socket_role_state "$l_role"
-			if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
-				zxfer_emit_ssh_control_socket_lock_failure_message \
-					"Error releasing ssh control socket lock for $l_role host." >&2
-				return 1
-			fi
-			return 0
-		fi
-
-		if zxfer_check_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
-			zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-			if zxfer_run_ssh_control_socket_action_for_host "$l_host" "$l_control_socket" exit; then
-				zxfer_cleanup_ssh_control_socket_entry_dir_for_role \
-					"$l_role" "$l_control_dir" "$l_ssh_lock_dir" ||
-					return "$?"
-			elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
-				zxfer_cleanup_ssh_control_socket_entry_dir_for_role \
-					"$l_role" "$l_control_dir" "$l_ssh_lock_dir" ||
-					return "$?"
-			else
-				if zxfer_restore_ssh_control_socket_lease_for_role \
-					"$l_role" "$l_control_socket" "$l_control_dir"; then
-					zxfer_release_ssh_control_socket_lock_with_precedence \
-						"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-					zxfer_emit_ssh_control_socket_action_failure_message \
-						"Error closing $l_role ssh control socket." >&2
-					return 1
-				fi
-				zxfer_release_ssh_control_socket_lock_with_precedence \
-					"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-				zxfer_emit_ssh_control_socket_action_failure_message \
-					"Error closing $l_role ssh control socket." >&2
-				printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
-				return 1
-			fi
-		elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ] &&
-			[ "$l_control_dir" != "" ] &&
-			[ -d "$l_control_dir" ]; then
-			zxfer_cleanup_ssh_control_socket_entry_dir_for_role \
-				"$l_role" "$l_control_dir" "$l_ssh_lock_dir" ||
-				return "$?"
-		else
-			if zxfer_restore_ssh_control_socket_lease_for_role \
-				"$l_role" "$l_control_socket" "$l_control_dir"; then
-				zxfer_release_ssh_control_socket_lock_with_precedence \
-					"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-				zxfer_emit_ssh_control_socket_action_failure_message \
-					"Error checking $l_role ssh control socket." >&2
-				return 1
-			fi
-			zxfer_release_ssh_control_socket_lock_with_precedence \
-				"$l_role" "$l_ssh_lock_dir" 1 >/dev/null 2>&1 || :
-			zxfer_emit_ssh_control_socket_action_failure_message \
-				"Error checking $l_role ssh control socket." >&2
-			printf '%s\n' "Error restoring ssh control socket lease for $l_role host." >&2
-			return 1
-		fi
-		if ! zxfer_release_ssh_control_socket_lock "$l_ssh_lock_dir"; then
-			zxfer_clear_ssh_control_socket_role_state "$l_role"
-			zxfer_emit_ssh_control_socket_lock_failure_message \
-				"Error releasing ssh control socket lock for $l_role host." >&2
-			return 1
-		fi
+	if zxfer_run_ssh_control_socket_action_for_host "$l_host" "$l_control_socket" exit; then
+		zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+	elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
+		zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
 	else
-		if zxfer_run_ssh_control_socket_action_for_host "$l_host" "$l_control_socket" exit; then
-			zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-			zxfer_cleanup_ssh_control_socket_entry_dir_for_role "$l_role" "$l_control_dir" ||
-				return "$?"
-		elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
-			zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-			zxfer_cleanup_ssh_control_socket_entry_dir_for_role "$l_role" "$l_control_dir" ||
-				return "$?"
-		else
-			zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
-			zxfer_emit_ssh_control_socket_action_failure_message \
-				"Error closing $l_role ssh control socket." >&2
-			return 1
-		fi
+		zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+		zxfer_emit_ssh_control_socket_action_failure_message \
+			"Error closing $l_role ssh control socket." >&2
+		return 1
 	fi
+	rm -f "$l_control_socket" 2>/dev/null || :
 	zxfer_clear_ssh_control_socket_role_state "$l_role"
+	return 0
 }
 
 # Purpose: Close the origin SSH control socket and release the related handles
@@ -3684,6 +1672,53 @@ zxfer_close_all_ssh_control_sockets() {
 	return "$l_close_status"
 }
 
+# Purpose: Prepare SSH control sockets only when replication work can use them.
+# Usage: Called after snapshot discovery has identified send/delete/property
+# work, avoiding an extra SSH master setup on clean no-op runs.
+zxfer_prepare_ssh_control_sockets_for_active_hosts() {
+	l_ssh_setup_start_ms=""
+
+	if [ "$g_option_O_origin_host" = "" ] && [ "$g_option_T_target_host" = "" ]; then
+		return
+	fi
+	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
+		return
+	fi
+
+	l_ssh_setup_start_ms=""
+	if zxfer_profile_metrics_enabled; then
+		l_ssh_setup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
+	fi
+	if [ -z "${g_cmd_ssh:-}" ]; then
+		if ! zxfer_ensure_local_ssh_command; then
+			g_zxfer_failure_class=dependency
+			zxfer_throw_error "$g_zxfer_resolved_local_ssh_command_result"
+		fi
+	fi
+	zxfer_refresh_ssh_control_socket_support_state
+
+	if [ "$g_option_O_origin_host" != "" ]; then
+		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
+			[ -n "${g_ssh_origin_control_socket:-}" ] ||
+				zxfer_setup_ssh_control_socket "$g_option_O_origin_host" "origin"
+		else
+			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for origin host."
+		fi
+	fi
+
+	if [ "$g_option_T_target_host" != "" ]; then
+		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
+			[ -n "${g_ssh_target_control_socket:-}" ] ||
+				zxfer_setup_ssh_control_socket "$g_option_T_target_host" "target"
+		else
+			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for target host."
+		fi
+	fi
+
+	zxfer_refresh_remote_zfs_commands
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_ssh_setup_ms "$l_ssh_setup_start_ms"
+}
+
 ################################################################################
 # REMOTE CONNECTION BOOTSTRAP / ACTIVE COMMAND SELECTION
 ################################################################################
@@ -3717,15 +1752,16 @@ zxfer_refresh_remote_zfs_commands() {
 	fi
 }
 
-# Purpose: Prepare the remote host connections before the surrounding flow uses
+# Purpose: Prepare remote host capability state before the surrounding flow uses
 # it.
 # Usage: Called during remote bootstrap, capability caching, and ssh control-
-# socket management once prerequisites are known but before live work depends
-# on the prepared state.
+# socket management once prerequisites are known. SSH control sockets are
+# opened later only when replication work exists.
 zxfer_prepare_remote_host_connections() {
 	l_ssh_setup_start_ms=""
 
-	if [ "$g_option_O_origin_host" != "" ] || [ "$g_option_T_target_host" != "" ]; then
+	if { [ "$g_option_O_origin_host" != "" ] || [ "$g_option_T_target_host" != "" ]; } &&
+		zxfer_profile_metrics_enabled; then
 		l_ssh_setup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
 	fi
 
@@ -3752,23 +1788,18 @@ zxfer_prepare_remote_host_connections() {
 	fi
 
 	if [ "$g_option_O_origin_host" != "" ]; then
-		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
-			zxfer_setup_ssh_control_socket "$g_option_O_origin_host" "origin"
-		else
-			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for origin host."
-		fi
 		zxfer_preload_remote_host_capabilities "$g_option_O_origin_host" source || :
 	fi
 
 	if [ "$g_option_T_target_host" != "" ]; then
-		if [ "${g_ssh_supports_control_sockets:-0}" -eq 1 ]; then
-			zxfer_setup_ssh_control_socket "$g_option_T_target_host" "target"
-		else
-			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for target host."
-		fi
 		zxfer_preload_remote_host_capabilities "$g_option_T_target_host" destination || :
 	fi
 
 	zxfer_refresh_remote_zfs_commands
+	# Warm the per-role transport-token memo in the main shell once the host
+	# specs and managed ssh options are validated (OPTIMIZATION 11): later
+	# remote commands replay the rendered tokens instead of re-validating.
+	zxfer_refresh_ssh_transport_tokens_for_role origin
+	zxfer_refresh_ssh_transport_tokens_for_role target
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_ssh_setup_ms "$l_ssh_setup_start_ms"
 }

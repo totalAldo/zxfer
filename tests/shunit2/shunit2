@@ -1201,9 +1201,17 @@ _shunit_escapeCharInStr() {
   _shunit_c_=$1
   _shunit_s_=$2
 
-  # Escape the character.
-  # shellcheck disable=SC1003,SC2086
-  echo ''${_shunit_s_}'' |command sed 's/\'${_shunit_c_}'/\\\'${_shunit_c_}'/g'
+  # Escape the character. Keep this out of sed: BSD sed rejects the generated
+  # single-quote expression used by upstream shunit2.
+  printf '%s\n' "${_shunit_s_}" |awk -v c="${_shunit_c_}" '
+    {
+      out = ""
+      for (i = 1; i <= length($0); i++) {
+        ch = substr($0, i, 1)
+        out = out (ch == c ? "\\" ch : ch)
+      }
+      print out
+    }'
 
   unset _shunit_c_ _shunit_s_
 }

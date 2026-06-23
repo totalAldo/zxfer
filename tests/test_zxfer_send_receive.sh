@@ -49,16 +49,12 @@ setUp() {
 	g_zfs_send_job_queue_writer_open=0
 	g_zxfer_send_job_status_file_exit_status=""
 	g_zxfer_send_job_status_file_report_failure=""
-	g_zxfer_send_job_record_job_id=""
 	g_zxfer_send_job_record_runner_pid=""
 	g_zxfer_send_job_record_source_dataset=""
 	g_zxfer_send_job_record_source_snapshot=""
 	g_zxfer_send_job_record_dest_dataset=""
 	g_zxfer_send_job_record_target_host=""
-	g_zxfer_send_job_conflict_job_id=""
 	g_zxfer_send_job_conflict_dest_dataset=""
-	g_zxfer_send_job_conflict_target_host=""
-	g_zxfer_send_job_error_context_result=""
 	g_count_zfs_send_jobs=0
 	g_is_performed_send_destroy=0
 	g_zxfer_failure_last_command=""
@@ -66,11 +62,8 @@ setUp() {
 	g_delete_dest_tmp_file=""
 	g_delete_snapshots_to_delete_tmp_file=""
 	g_ssh_origin_control_socket=""
-	g_ssh_origin_control_socket_dir=""
-	g_ssh_origin_control_socket_lease_file=""
+	g_zxfer_ssh_control_socket_dir_result=""
 	g_ssh_target_control_socket=""
-	g_ssh_target_control_socket_dir=""
-	g_ssh_target_control_socket_lease_file=""
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
 	g_zxfer_progress_size_estimate_result=""
@@ -449,25 +442,6 @@ test_profile_record_send_receive_pipeline_metrics_records_startup_latency_once()
 		"$output" "send_calls=2"
 }
 
-test_zxfer_read_progress_estimate_capture_file_trims_trailing_newlines_and_handles_blank_paths() {
-	capture_file="$TEST_TMPDIR/progress_estimate_capture.txt"
-	printf '%s\n' "size	4096" >"$capture_file"
-
-	blank_output=$(zxfer_read_progress_estimate_capture_file "")
-	blank_status=$?
-	zxfer_read_progress_estimate_capture_file "$capture_file" >/dev/null
-	status=$?
-
-	assertEquals "Progress-estimate capture reads should accept blank paths as an empty no-op." \
-		0 "$blank_status"
-	assertEquals "Progress-estimate capture reads should keep stdout clean when no capture path is supplied." \
-		"" "$blank_output"
-	assertEquals "Progress-estimate capture reads should succeed for staged capture files." \
-		0 "$status"
-	assertEquals "Progress-estimate capture reads should trim the trailing newline from staged probe output." \
-		"size	4096" "$g_zxfer_progress_probe_output_result"
-}
-
 test_calculate_size_estimate_reports_incremental_probe_failures() {
 	l_stdout_file=$TEST_TMPDIR/size_estimate_incremental_probe.stdout
 	l_stderr_file=$TEST_TMPDIR/size_estimate_incremental_probe.stderr
@@ -825,6 +799,8 @@ test_handle_progress_bar_option_builds_passthrough_pipeline() {
 
 	assertContains "Progress handling should preserve the progress passthrough helper." \
 		"$result" "zxfer_progress_passthrough"
+	assertNotContains "Progress handling should not add lossy buffering commands ahead of the passthrough helper." \
+		"$result" "dd obs="
 	assertContains "Progress handling should substitute the snapshot title." \
 		"$result" "pv -s 4096 -N tank/src@snap2"
 }
@@ -1050,24 +1026,6 @@ test_zxfer_capture_progress_estimate_probe_output_preserves_failed_probe_output(
 	assertContains "Progress-estimate capture should publish stdout and stderr for failed probes." \
 		"$output" "result=<stdout-size
 stderr-detail>"
-}
-
-test_zxfer_read_progress_estimate_capture_file_preserves_runtime_readback_failures() {
-	capture_file="$TEST_TMPDIR/progress-estimate-capture.txt"
-	printf '%s\n' "size	4096" >"$capture_file"
-
-	set +e
-	(
-		g_zxfer_progress_probe_output_result="stale"
-		zxfer_read_runtime_artifact_file() {
-			return 29
-		}
-		zxfer_read_progress_estimate_capture_file "$capture_file"
-	)
-	status=$?
-
-	assertEquals "Progress-estimate capture-file reads should preserve runtime readback failures exactly." \
-		29 "$status"
 }
 
 test_get_send_command_display_includes_verbose_raw_flags_for_full_send() {
@@ -1327,6 +1285,119 @@ test_zxfer_open_send_job_completion_queue_fd_returns_failure_when_writer_open_fa
 		1 "$status"
 }
 
+test_zxfer_open_send_job_completion_queue_fd_preserves_reader_helper_failure() {
+	missing_queue="$TEST_TMPDIR/missing-open-helper/queue"
+
+	set +e
+	(
+		zxfer_open_send_job_completion_queue_writer_fd() {
+			return 0
+		}
+		zxfer_open_send_job_completion_queue_reader_fd() {
+			return 0
+		}
+		zxfer_open_send_job_completion_queue_fd "$missing_queue" 2>/dev/null
+	)
+	status=$?
+
+	assertNotEquals "Opening the rolling queue should fail when the FIFO reader helper cannot open the queue path." \
+		0 "$status"
+}
+
+test_zxfer_open_send_job_completion_queue_writer_fd_opens_write_only() {
+	queue_file="$TEST_TMPDIR/open_queue_writer_mode"
+	writer_helper=$(sed -n '/^zxfer_open_send_job_completion_queue_writer_fd()/,/^}/p' "$ZXFER_ROOT/src/zxfer_send_receive.sh")
+	printf '%s\n' "existing" >"$queue_file"
+
+	(
+		zxfer_open_send_job_completion_queue_writer_fd "$queue_file" || exit 1
+		printf '%s\n' "written" >&9 || exit 3
+		exec 9>&-
+	)
+	status=$?
+
+	assertContains "The rolling queue writer helper must use output-only redirection, not POSIX-undefined read/write FIFO opens." \
+		"$writer_helper" "{ exec 9>&1; } >\"\$1\""
+	assertEquals "The rolling queue writer helper should open fd 9 successfully." \
+		0 "$status"
+	assertEquals "The write-only helper should still publish bytes through fd 9." \
+		"written" "$(cat "$queue_file")"
+}
+
+test_zxfer_open_send_job_completion_queue_writer_fd_returns_failure_without_exiting_shell() {
+	output=$(
+		(
+			zxfer_open_send_job_completion_queue_writer_fd "$TEST_TMPDIR/missing-writer/queue" 2>/dev/null
+			printf 'status=%s\n' "$?"
+			printf 'after=yes\n'
+		)
+	)
+
+	assertContains "Failed writer opens should return without exiting the shell." \
+		"$output" "after=yes"
+	assertNotContains "Failed writer opens should not report success." \
+		"$output" "status=0"
+}
+
+test_zxfer_open_send_job_completion_queue_reader_fd_returns_failure_without_exiting_shell() {
+	output=$(
+		(
+			zxfer_open_send_job_completion_queue_reader_fd "$TEST_TMPDIR/missing-reader/queue" 2>/dev/null
+			printf 'status=%s\n' "$?"
+			printf 'after=yes\n'
+		)
+	)
+
+	assertContains "Failed reader opens should return without exiting the shell." \
+		"$output" "after=yes"
+	assertNotContains "Failed reader opens should not report success." \
+		"$output" "status=0"
+}
+
+test_zxfer_open_send_job_completion_queue_fd_round_trips_fifo_notification() {
+	queue_dir="$TEST_TMPDIR/open_queue_fifo"
+	queue_fifo="$queue_dir/queue"
+	mkdir "$queue_dir"
+	mkfifo "$queue_fifo"
+
+	(
+		zxfer_open_send_job_completion_queue_fd "$queue_fifo" || exit 1
+		printf '%s\n' "job-1" >&9 || exit 2
+		IFS= read -r line <&8 || exit 3
+		[ "$line" = "job-1" ] || exit 4
+		exec 9>&-
+		exec 8<&-
+	)
+	status=$?
+
+	assertEquals "The rolling queue should open a FIFO portably and pass notifications between fd 9 and fd 8." \
+		0 "$status"
+}
+
+# Regression: closing the rolling-queue descriptors must never redirect the
+# main shell's stderr. The old `exec 9>&- 2>/dev/null` applied BOTH
+# redirections to the shell permanently, so from the first rolling wait on,
+# every later warning and failure report in a -j run vanished into /dev/null
+# (including the post-receive divergence verification error).
+test_zxfer_close_send_job_completion_queue_fds_keeps_shell_stderr_attached() {
+	stderr_probe_file="$TEST_TMPDIR/queue_close_stderr_probe.out"
+
+	(
+		exec 9>/dev/null 8</dev/null
+		g_zfs_send_job_queue_writer_open=1
+		g_zfs_send_job_queue_open=1
+		g_zfs_send_job_queue_dir=""
+		g_zfs_send_job_queue_path=""
+
+		zxfer_close_send_job_completion_queue
+
+		printf 'stderr-still-attached\n' >&2
+	) 2>"$stderr_probe_file"
+
+	assertEquals "Closing the rolling-queue reader and writer descriptors must leave the shell's stderr attached." \
+		"stderr-still-attached" "$(cat "$stderr_probe_file")"
+}
+
 test_zxfer_close_send_job_completion_queue_cleans_orphaned_queue_paths() {
 	queue_path="$TEST_TMPDIR/orphaned-queue"
 	: >"$queue_path"
@@ -1340,65 +1411,6 @@ test_zxfer_close_send_job_completion_queue_cleans_orphaned_queue_paths() {
 		"[ -e '$queue_path' ]"
 	assertEquals "Closing remembered rolling queues should clear the stored queue path." \
 		"" "${g_zfs_send_job_queue_path:-}"
-}
-
-test_zxfer_register_send_job_tracks_legacy_pid_lists_and_lookup_records() {
-	status_one="$TEST_TMPDIR/legacy_job_status_one"
-	status_two="$TEST_TMPDIR/legacy_job_status_two"
-
-	output=$(
-		(
-			zxfer_register_cleanup_pid() {
-				printf 'cleanup:%s\n' "$1"
-			}
-			zxfer_register_send_job 101 "$status_one"
-			zxfer_register_send_job 202 "$status_two"
-			printf 'found=%s\n' "$(zxfer_find_send_job_pid_by_status_file "$status_two")"
-			printf 'count=%s\n' "$g_count_zfs_send_jobs"
-			printf 'pids=%s\n' "$g_zfs_send_job_pids"
-			printf 'records=%s\n' "$(printf '%s\n' "$g_zfs_send_job_records" | sed 's/	/:/g')"
-		)
-	)
-
-	assertContains "Registering legacy send jobs should register each PID for cleanup." \
-		"$output" "cleanup:101"
-	assertContains "Registering multiple legacy send jobs should register later PIDs for cleanup too." \
-		"$output" "cleanup:202"
-	assertContains "Legacy send-job lookup should resolve tracked status files back to their PID." \
-		"$output" "found=202"
-	assertContains "Registering legacy send jobs should increment the tracked job count." \
-		"$output" "count=2"
-	assertContains "Registering legacy send jobs should append to the tracked PID list." \
-		"$output" "pids=101 202"
-	assertContains "Registering legacy send jobs should preserve the PID-to-status-file registry." \
-		"$output" "records=101:$status_one
-202:$status_two"
-}
-
-test_zxfer_register_send_job_preserves_cleanup_registration_failures() {
-	status_file="$TEST_TMPDIR/legacy_job_status_fail"
-
-	output=$(
-		(
-			zxfer_register_cleanup_pid() {
-				return 1
-			}
-			zxfer_register_send_job 101 "$status_file"
-			printf 'status=%s\n' "$?"
-			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
-			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
-			printf 'records=<%s>\n' "${g_zfs_send_job_records:-}"
-		)
-	)
-
-	assertContains "Legacy send-job registration should fail closed when validated cleanup tracking cannot be published." \
-		"$output" "status=1"
-	assertContains "Legacy send-job registration failures should preserve the tracked job count." \
-		"$output" "count=0"
-	assertContains "Legacy send-job registration failures should leave the tracked PID list empty." \
-		"$output" "pids=<>"
-	assertContains "Legacy send-job registration failures should leave the PID-to-status-file registry empty." \
-		"$output" "records=<>"
 }
 
 test_zxfer_find_send_job_pid_by_status_file_returns_failure_for_unknown_status_files() {
@@ -1528,8 +1540,6 @@ test_supervised_send_job_helpers_track_metadata_conflicts_and_render_context() {
 	if ! zxfer_supervised_send_job_conflicts_with_destination "" "backup/dst/child"; then
 		fail "Expected ancestor and descendant destination datasets to conflict."
 	fi
-	assertEquals "Destination-ancestry conflict detection should identify the conflicting tracked job id." \
-		"job-1" "$g_zxfer_send_job_conflict_job_id"
 	assertEquals "Destination-ancestry conflict detection should expose the conflicting active destination dataset." \
 		"backup/dst" "$g_zxfer_send_job_conflict_dest_dataset"
 	if ! zxfer_dataset_paths_conflict_by_ancestry "backup/dst/child" "backup/dst"; then
@@ -1547,176 +1557,6 @@ test_supervised_send_job_helpers_track_metadata_conflicts_and_render_context() {
 		"[tank/src@snap2 -> backup/dst]" "$(zxfer_get_supervised_send_job_error_context "job-1")"
 	assertEquals "Dataset-aware send-job error contexts should include the target host when present." \
 		"[tank/other@snap9 -> backup/other] on target [target.example]" "$(zxfer_get_supervised_send_job_error_context "job-2")"
-}
-
-test_zxfer_run_background_pipeline_executes_command_and_reports_completion() {
-	status_file=$(mktemp "$TEST_TMPDIR/bg_status.XXXXXX")
-	queue_file=$(mktemp "$TEST_TMPDIR/bg_queue.XXXXXX")
-	runner_status_file=$(mktemp "$TEST_TMPDIR/bg_runner_status.XXXXXX")
-	log="$TEST_TMPDIR/bg_runner.log"
-	: >"$log"
-
-	(
-		exec 9>>"$queue_file"
-		g_zfs_send_job_queue_open=1
-		zxfer_echov() {
-			printf '%s\n' "$1" >>"$log"
-		}
-		zxfer_run_background_pipeline "printf 'runner-ok' >'$TEST_TMPDIR/bg_payload.txt'" "displaycmd" "$status_file"
-		printf '%s\n' "$?" >"$runner_status_file"
-	)
-	status=$(tr -d '\r\n' <"$runner_status_file")
-	completion_path=$(tr -d '\r\n' <"$queue_file")
-
-	assertEquals "Background pipeline helper should return the eval exit status." 0 "$status"
-	assertEquals "Background pipeline helper should write the child status to its status file." \
-		"status	0" "$(tr -d '\r' <"$status_file")"
-	assertEquals "Background pipeline helper should publish the completed status-file path into the queue." \
-		"$status_file" "$completion_path"
-	assertContains "Background pipeline helper should log the rendered display command." \
-		"$(cat "$log")" "displaycmd"
-	assertEquals "Background pipeline helper should execute the requested command body." \
-		"runner-ok" "$(cat "$TEST_TMPDIR/bg_payload.txt")"
-}
-
-test_zxfer_run_background_pipeline_dry_run_skips_eval_and_returns_success() {
-	status_file=$(mktemp "$TEST_TMPDIR/bg_dry_status.XXXXXX")
-	runner_status_file=$(mktemp "$TEST_TMPDIR/bg_dry_runner_status.XXXXXX")
-	log="$TEST_TMPDIR/bg_dry_runner.log"
-	: >"$log"
-
-	g_option_n_dryrun=1
-	(
-		zxfer_echov() {
-			printf '%s\n' "$1" >>"$log"
-		}
-		zxfer_run_background_pipeline "touch '$TEST_TMPDIR/bg_dry_payload.txt'" "dry-display" "$status_file"
-		printf '%s\n' "$?" >"$runner_status_file"
-	)
-	status=$(tr -d '\r\n' <"$runner_status_file")
-
-	assertEquals "Dry-run background helpers should exit successfully." 0 "$status"
-	assertEquals "Dry-run background helpers should still persist a zero status file." \
-		"status	0" "$(tr -d '\r' <"$status_file")"
-	assertFalse "Dry-run background helpers should not execute the eval command." \
-		"[ -e '$TEST_TMPDIR/bg_dry_payload.txt' ]"
-	assertContains "Dry-run background helpers should log the rendered dry-run command." \
-		"$(cat "$log")" "Dry run: dry-display"
-}
-
-test_zxfer_run_background_pipeline_reports_status_file_write_failures() {
-	status_file="$TEST_TMPDIR/bg_status_write_failed.txt"
-	queue_file="$TEST_TMPDIR/bg_status_write_failed.queue"
-	runner_status_file="$TEST_TMPDIR/bg_status_write_failed.status"
-	stderr_file="$TEST_TMPDIR/bg_status_write_failed.stderr"
-	: >"$queue_file"
-
-	(
-		exec 9>>"$queue_file"
-		g_zfs_send_job_queue_open=1
-		zxfer_write_send_job_status_file() {
-			return 1
-		}
-		zxfer_run_background_pipeline ":" "displaycmd" "$status_file"
-		printf '%s\n' "$?" >"$runner_status_file"
-	) 2>"$stderr_file"
-	status=$(tr -d '\r\n' <"$runner_status_file")
-
-	assertEquals "Background pipeline helpers should fail closed when the status file cannot be written." \
-		125 "$status"
-	assertEquals "Status-file write failures should publish an explicit queue failure record when queue mode is enabled." \
-		"status_write_failed	$status_file	0" "$(tr -d '\r\n' <"$queue_file")"
-	assertContains "Status-file write failures should emit a specific operator-visible error." \
-		"$(cat "$stderr_file")" "Failed to record zfs send/receive background status"
-}
-
-test_zxfer_run_background_pipeline_records_queue_write_failures_in_status_file() {
-	status_file="$TEST_TMPDIR/bg_queue_write_failed.txt"
-	runner_status_file="$TEST_TMPDIR/bg_queue_write_failed.status"
-	stderr_file="$TEST_TMPDIR/bg_queue_write_failed.stderr"
-
-	(
-		g_zfs_send_job_queue_open=1
-		exec 9>&-
-		zxfer_run_background_pipeline ":" "displaycmd" "$status_file"
-		printf '%s\n' "$?" >"$runner_status_file"
-	) 2>"$stderr_file"
-	status=$(tr -d '\r\n' <"$runner_status_file")
-
-	assertEquals "Queue write failures should fail closed instead of returning the child pipeline status." \
-		125 "$status"
-	assertEquals "Queue write failures should preserve the job exit status and notification failure marker in the status file." \
-		"status	0
-report_failure	queue_write" "$(tr -d '\r' <"$status_file")"
-	assertContains "Queue write failures should emit a specific operator-visible error." \
-		"$(cat "$stderr_file")" "Failed to publish zfs send/receive background completion"
-}
-
-test_zxfer_run_background_pipeline_removes_stale_status_files_when_queue_failure_marking_fails() {
-	status_file="$TEST_TMPDIR/bg_queue_write_marker_failed.txt"
-	runner_status_file="$TEST_TMPDIR/bg_queue_write_marker_failed.status"
-	stderr_file="$TEST_TMPDIR/bg_queue_write_marker_failed.stderr"
-
-	(
-		g_zfs_send_job_queue_open=1
-		exec 9>&-
-		zxfer_write_send_job_status_file() {
-			if [ "${3:-}" = "queue_write" ]; then
-				return 1
-			fi
-			printf 'status\t%s\n' "$2" >"$1"
-		}
-		zxfer_run_background_pipeline ":" "displaycmd" "$status_file"
-		printf '%s\n' "$?" >"$runner_status_file"
-	) 2>"$stderr_file"
-	status=$(tr -d '\r\n' <"$runner_status_file")
-
-	assertEquals "Queue write failures should still fail closed when the queue-failure marker cannot be written." \
-		125 "$status"
-	assertFalse "Queue write failures should remove stale success-only status files when the failure marker cannot be recorded." \
-		"[ -e '$status_file' ]"
-	assertContains "Queue write failures should surface the marker-write failure too." \
-		"$(cat "$stderr_file")" "Failed to record zfs send/receive completion notification failure"
-}
-
-test_zxfer_write_send_job_status_file_reports_second_write_failures() {
-	status_file="$TEST_TMPDIR/send_job_status_append_fail.txt"
-	mkdir -p "$status_file" || fail "Unable to create a directory-backed status-file path fixture."
-
-	set +e
-	zxfer_write_send_job_status_file "$status_file" 0 "queue_write"
-	status=$?
-
-	assertEquals "Send-job status writes should fail closed when the report-failure marker cannot be appended." \
-		1 "$status"
-}
-
-test_zxfer_write_send_job_status_file_preserves_append_failures_when_second_write_fails() {
-	status_file="$TEST_TMPDIR/send_job_status_append_fail_injected.txt"
-
-	output=$(
-		(
-			write_count=0
-			printf() {
-				write_count=$((write_count + 1))
-				if [ "$write_count" -eq 2 ]; then
-					return 1
-				fi
-				command printf "$@"
-			}
-			set +e
-			zxfer_write_send_job_status_file "$status_file" 0 "queue_write"
-			status=$?
-			set -e
-			command printf 'status=%s\n' "$status"
-			command printf 'contents=%s\n' "$(cat "$status_file")"
-		)
-	)
-
-	assertContains "Injected append failures should still fail the send-job status helper." \
-		"$output" "status=1"
-	assertContains "Injected append failures should leave the first status line intact for diagnostics." \
-		"$output" "contents=status	0"
 }
 
 test_zxfer_get_send_job_completion_status_preserves_readback_failures_and_completion_markers() {
@@ -2551,24 +2391,27 @@ test_zxfer_terminate_remaining_send_jobs_preserves_first_abort_failure() {
 		"$output" "records=<>"
 }
 
-test_zxfer_throw_send_job_cleanup_failure_uses_validated_abort_message() {
+test_zxfer_throw_send_job_error_after_cleanup_uses_validated_abort_message() {
 	set +e
 	output=$(
 		(
 			g_zxfer_cleanup_pid_abort_failure_message="validated cleanup abort failed"
+			zxfer_terminate_remaining_send_jobs() {
+				return 41
+			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit "${2:-1}"
 			}
-			zxfer_throw_send_job_cleanup_failure 41
+			zxfer_throw_send_job_error_after_cleanup "primary failure message"
 		)
 	)
 	status=$?
 	set -e
 
-	assertEquals "Validated send-job cleanup failure helper should preserve its cleanup status through zxfer_throw_error." \
+	assertEquals "Send-job cleanup failures should take precedence and preserve their cleanup status through zxfer_throw_error." \
 		41 "$status"
-	assertContains "Validated send-job cleanup failure helper should preserve the validated abort failure message." \
+	assertContains "Send-job cleanup failures should preserve the validated abort failure message." \
 		"$output" "validated cleanup abort failed"
 }
 
@@ -2708,9 +2551,6 @@ test_zxfer_wait_for_next_supervised_zfs_send_job_completion_succeeds_for_the_las
 			zxfer_invalidate_destination_property_mutation_cache() {
 				printf 'properties=%s\n' "$1"
 			}
-			zxfer_invalidate_destination_snapshot_record_cache() {
-				printf 'snapshots=invalidated\n'
-			}
 			zxfer_wait_for_next_supervised_zfs_send_job_completion "unit"
 			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
 			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
@@ -2723,8 +2563,6 @@ test_zxfer_wait_for_next_supervised_zfs_send_job_completion_succeeds_for_the_las
 		"$output" "noted=backup/dst"
 	assertContains "Successful supervised rolling waits should invalidate destination property caches for the completed destination dataset." \
 		"$output" "properties=backup/dst"
-	assertContains "Successful supervised rolling waits should invalidate destination snapshot caches after receive completion." \
-		"$output" "snapshots=invalidated"
 	assertContains "Supervised rolling waits should decrement the tracked job count after a successful completion." \
 		"$output" "count=0"
 	assertContains "Supervised rolling waits should clear the tracked runner pid list after the last job completes." \
@@ -2751,9 +2589,6 @@ test_zxfer_wait_for_supervised_zfs_send_jobs_batch_repairs_destination_state_on_
 			zxfer_invalidate_destination_property_mutation_cache() {
 				printf 'properties=%s\n' "$1"
 			}
-			zxfer_invalidate_destination_snapshot_record_cache() {
-				printf 'snapshots=invalidated\n'
-			}
 			zxfer_wait_for_supervised_zfs_send_jobs_batch
 			printf 'count=%s\n' "${g_count_zfs_send_jobs:-0}"
 			printf 'pids=<%s>\n' "${g_zfs_send_job_pids:-}"
@@ -2765,8 +2600,6 @@ test_zxfer_wait_for_supervised_zfs_send_jobs_batch_repairs_destination_state_on_
 		"$output" "noted=backup/dst"
 	assertContains "Successful supervised batch waits should invalidate destination property caches for the completed destination dataset." \
 		"$output" "properties=backup/dst"
-	assertContains "Successful supervised batch waits should invalidate destination snapshot caches after receive completion." \
-		"$output" "snapshots=invalidated"
 	assertContains "Successful supervised batch waits should clear the tracked job count after draining the batch." \
 		"$output" "count=0"
 	assertContains "Successful supervised batch waits should clear the tracked runner pid list after draining the batch." \
@@ -3989,9 +3822,6 @@ test_zxfer_progress_passthrough_falls_back_when_mkfifo_fails() {
 			zxfer_echoV() {
 				printf '%s\n' "$1" >>"$log"
 			}
-			mktemp() {
-				printf '%s\n' "$TEST_TMPDIR/progress_fifo"
-			}
 			mkfifo() {
 				return 1
 			}
@@ -4013,11 +3843,8 @@ test_zxfer_progress_passthrough_falls_back_when_chmod_fails() {
 			zxfer_echoV() {
 				printf '%s\n' "$1" >>"$log"
 			}
-			mktemp() {
-				printf '%s\n' "$TEST_TMPDIR/progress_fifo"
-			}
 			mkfifo() {
-				: >"$TEST_TMPDIR/progress_fifo"
+				: >"$1"
 			}
 			chmod() {
 				return 1
@@ -4146,6 +3973,17 @@ test_zxfer_progress_passthrough_logs_progress_command_failures() {
 		"$(cat "$log")" "Progress bar command exited with status 7"
 }
 
+test_zxfer_progress_passthrough_discards_progress_command_stdout() {
+	output=$(
+		printf 'payload\n' | zxfer_progress_passthrough "cat"
+	)
+	status=$?
+
+	assertEquals "Progress passthrough should preserve the primary send stream." 0 "$status"
+	assertEquals "Progress command stdout should not be allowed to duplicate or corrupt the receive stream." \
+		"payload" "$output"
+}
+
 test_zxfer_progress_passthrough_uses_private_fifo_dir_under_physical_tmpdir() {
 	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
 	real_tmp="$physical_tmpdir/progress_real_tmp"
@@ -4261,16 +4099,16 @@ test_zfs_send_receive_invalidates_destination_cache_after_live_receive() {
 		zxfer_invalidate_destination_property_mutation_cache() {
 			printf 'properties=%s\n' "$1" >>"$EXEC_LOG"
 		}
-		zxfer_invalidate_destination_snapshot_record_cache() {
-			printf 'snapshots=invalidated\n' >>"$EXEC_LOG"
-		}
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
 	)
 
-	assertEquals "Successful live send/receive should invalidate destination mutation caches for the receive dataset." \
+	# The receive only changed the destination dataset's own snapshots, so
+	# property caches are invalidated for that dataset but the whole-tree
+	# snapshot record cache (and its in-memory fallback) must survive for the
+	# remaining datasets' -d delete planning.
+	assertEquals "Successful live send/receive should invalidate destination property caches for the receive dataset without wiping the whole-tree snapshot record cache." \
 		"exec=sendcmd | recvcmd
-properties=backup/dst
-snapshots=invalidated" "$(cat "$log")"
+properties=backup/dst" "$(cat "$log")"
 }
 
 test_zfs_send_receive_marks_destination_hierarchy_exists_after_foreground_receive() {
@@ -4538,9 +4376,6 @@ test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
 		zxfer_invalidate_destination_property_mutation_cache() {
 			printf 'properties=%s\n' "$1" >>"$EXEC_LOG"
 		}
-		zxfer_invalidate_destination_snapshot_record_cache() {
-			printf 'snapshots=invalidated\n' >>"$EXEC_LOG"
-		}
 		g_option_j_jobs=3
 		zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "1"
 		{
@@ -4560,8 +4395,6 @@ test_zfs_send_receive_backgrounds_pipeline_when_parallel_jobs_available() {
 		"$(cat "$log")" "records=job-1:111:tank/src@snap2:backup/dst:"
 	assertNotContains "Background send/receive should wait for completion before publishing destination receive mutation state." \
 		"$(cat "$log")" "properties=backup/dst"
-	assertNotContains "Background send/receive should wait for completion before invalidating destination snapshot caches." \
-		"$(cat "$log")" "snapshots=invalidated"
 }
 
 test_zfs_send_receive_passes_queue_notify_fd_to_supervised_background_job_when_rolling_pool_is_open() {

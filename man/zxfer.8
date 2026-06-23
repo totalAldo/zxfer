@@ -448,7 +448,11 @@ will zxfer_relaunch the pending destroys on the next pass.
 will pipe
 .Xr zfs 8
 .Va send
-through the indicated command and parameters, to create a progress bar.
+through an internal passthrough helper that feeds a copy of the stream to the
+indicated command and parameters, to create a progress bar. The progress
+command must read stdin until EOF. Its stdout is discarded so helper output
+cannot duplicate or corrupt the receive stream; progress text should go to
+stderr.
 A number of macros will be replaced with values before the command is executed:
 .Bl -tag -width a
 .It %%size%%
@@ -486,6 +490,26 @@ so the destination side will roll back to the most recent snapshot that
 matches the stream. This forcibly destroys any newer snapshots or data that
 only exist on the destination and allows incremental sends to proceed when
 the target has diverged.
+.Pp
+Divergence contract: when a destination snapshot shares a source snapshot's
+name but carries a different GUID, the destination holds diverged data under
+an identical name.
+.Nm
+always warns on stderr, naming the dataset, the diverged-snapshot count, and
+up to three example snapshots with both GUIDs. The destructive convergence
+(destroy the diverged destination snapshots, roll back to the last
+GUID-matching common snapshot, and resend the source range) proceeds only when
+BOTH
+.Fl d
+and
+.Fl F
+are active; otherwise the run fails closed with a structured error and plans
+no deletes or sends for the diverged dataset. After a converged dataset's
+receive completes,
+.Nm
+re-checks the live destination listing and aborts with an error naming the
+snapshot if any name-match/GUID-mismatch remains, so an external writer
+re-diverging the destination cannot cause a silent destroy-and-resend loop.
 .It Fl g
 (g)randfather protection. Specify a number of days old (relative to the system
 date) at and above which snapshots on the destination won't be deleted. For use
@@ -540,13 +564,15 @@ is greater than 1. The default is 1, which disables background sends and keeps
 source snapshot discovery on the serial recursive listing path. Raising this
 value can hide WAN latency or speed up large replications, but will also
 increase memory, CPU and I/O load. Source listing runs as a tracked background
-helper with staged stderr and registered PID cleanup. The long-lived
-send/receive workers launched for this path run under a shared supervisor that
-records launch/completion metadata and tears them down through validated
-process-group or owned-child-set cleanup instead of signaling a bare
+helper with staged stderr and PID cleanup. The long-lived
+send/receive workers launched for this path run supervision-lite: each job is
+one backgrounded job shell that records its own exit status to a per-run
+status file, and teardown signals the job's setsid process group or its
+tracked direct children instead of a bare
 wrapper-shell PID. zxfer also serializes conflicting ancestor/descendant
-destination receives on the same target, even when spare job slots remain, so
-parent and child datasets do not receive concurrently.
+destination receives on the same target so parent and child datasets do not
+receive concurrently, and its ready queue skips blocked descendants to start
+later independent datasets while job slots remain.
 .It Fl m
 After sending all snapshots, (m)igrate the source to the destination filesystem by
 unmounting the source filesystem and changing the new filesystem's
@@ -604,10 +630,11 @@ and so does your local machine if
 is not also used.
 .Pp
 This fork is exercised across current OpenZFS 2.0+ environments on maintained
-FreeBSD branches, Linux with OpenZFS, OmniOS/illumos, and OpenZFS on macOS.
+FreeBSD branches, Linux with OpenZFS, supported OmniOS/illumos trains, and
+OpenZFS on macOS.
 For releases published after 2026-05-01, the FreeBSD support baseline is
-FreeBSD 14.x and 15.x; FreeBSD 13.x and other end-of-life branches are not
-guaranteed. Remote helper resolution is designed to tolerate
+FreeBSD 14.4+ and 15.0+; FreeBSD 14.3, FreeBSD 13.x, and other end-of-life
+branches are not guaranteed. Remote helper resolution is designed to tolerate
 different absolute
 .Xr zfs 8
 paths on each host, but property support can still differ across operating
@@ -723,9 +750,11 @@ pre-OpenZFS 2.0 destinations.
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
 profiling counters plus startup latency, trap-cleanup timing, and accumulated
 stage timings for ssh setup, snapshot listing, and diff/sort hot paths, along
-with ssh control-socket wait, remote-capability cache wait,
-capability-bootstrap source, and direct remote helper-probe counters. While
-the run is active it also prints prefixed live
+with runtime temp-file counts, command-rendering counts, live destination
+snapshot recheck counts, ssh/zfs invocation counts by role, and direct remote
+helper-probe counters. Counter keys are stable across releases; counters for
+machinery that no longer exists (capability cache waits, cache-object writes,
+socket lock waits) still emit and always read 0. While the run is active it also prints prefixed live
 remote ssh commands, remote probe commands, and any ssh control-socket
 check/open commands before each execution so slow startup or remote-probe phases are
 visible in real time.
@@ -1148,20 +1177,15 @@ or
 .Pa /run/shm
 when available and falls back to the system temporary directory.
 .Pp
-Current releases coordinate shared ssh control-socket locks, per-process ssh
-leases, remote capability-cache locks, and
+Current releases keep ssh control sockets and remote capability state per run:
+each invocation opens at most one control master per remote role under its
+private per-run temp directory, probes each remote host's capabilities once,
+holds the answer in memory, and removes everything on exit. Nothing is cached
+or coordinated across concurrent or consecutive invocations. Only
 .Ev ZXFER_ERROR_LOG
-appends through metadata-bearing owned directories rather than bare PID files.
-Native
-.Pa .lock
-and
-.Pa lease.*
-paths therefore appear as directories with owner metadata; zxfer validates and
-reaps stale or corrupt owners before reuse and checks release failures instead
-of ignoring them. Older plain ssh lease files and pid-only
-.Pa .lock
-directories from pre-metadata releases are unsupported; clear the stale entry
-or cache root before rerunning a current release.
+appends still coordinate through a metadata-bearing owned lock directory
+rather than a bare PID file; zxfer validates and reaps stale or corrupt owners
+before reuse and checks release failures instead of ignoring them.
 .Pp
 The repository includes
 .Pa examples/error-log-email-notify.sh ,
@@ -1217,9 +1241,10 @@ exit 1.
 .Sh COMPATIBILITY
 .Nm
 targets current OpenZFS 2.0+ environments on maintained FreeBSD branches,
-Linux with OpenZFS, OmniOS/illumos, and OpenZFS on macOS. For releases
-published after 2026-05-01, the FreeBSD support baseline is FreeBSD 14.x and
-15.x; FreeBSD 13.x and other end-of-life branches are not guaranteed.
+Linux with OpenZFS, supported OmniOS/illumos trains, and OpenZFS on macOS.
+For releases published after 2026-05-01, the FreeBSD support baseline is
+FreeBSD 14.4+ and 15.0+; FreeBSD 14.3, FreeBSD 13.x, and other end-of-life
+branches are not guaranteed.
 Cross-version and cross-platform
 replication can still expose property or helper-path differences, so
 mixed-environment deployments should validate their exact send/receive and

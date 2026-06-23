@@ -11,13 +11,6 @@ TESTS_DIR=$(dirname "$0")
 
 zxfer_source_runtime_modules_through "zxfer_property_reconcile.sh"
 
-tearDown() {
-	if effective_uid=$(zxfer_get_effective_user_uid 2>/dev/null); then
-		rm -rf "$TEST_TMPDIR"/*.remote-capabilities."$effective_uid".d
-		rm -rf "$TEST_TMPDIR"/*.s."$effective_uid".d
-	fi
-}
-
 create_fake_ssh_bin() {
 	cat >"$FAKE_SSH_BIN" <<'EOF'
 #!/bin/sh
@@ -91,21 +84,16 @@ setUp() {
 	g_cmd_zfs="/sbin/zfs"
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_origin_remote_capabilities_host=""
-	g_origin_remote_capabilities_dependency_path=""
 	g_origin_remote_capabilities_cache_identity=""
 	g_origin_remote_capabilities_response=""
 	g_origin_remote_capabilities_bootstrap_source=""
 	g_target_remote_capabilities_host=""
-	g_target_remote_capabilities_dependency_path=""
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
 	g_ssh_origin_control_socket=""
-	g_ssh_origin_control_socket_dir=""
-	g_ssh_origin_control_socket_lease_file=""
+	g_zxfer_ssh_control_socket_dir_result=""
 	g_ssh_target_control_socket=""
-	g_ssh_target_control_socket_dir=""
-	g_ssh_target_control_socket_lease_file=""
 	g_ssh_supports_control_sockets=0
 	g_zxfer_remote_capability_cache_wait_retries=5
 	g_zxfer_effective_tmpdir=""
@@ -168,14 +156,14 @@ test_reset_backup_metadata_state_clears_accumulator_and_restore_cache() {
 		"" "$g_restored_backup_file_contents"
 }
 
-test_backup_metadata_constant_getters_return_source_constants() {
+test_backup_metadata_constants_pin_source_values() {
 	result=$(
 		(
 			# shellcheck source=src/zxfer_backup_metadata.sh
 			. "$TESTS_DIR/../src/zxfer_backup_metadata.sh"
-			printf 'header=%s\n' "$(zxfer_get_backup_metadata_header_line)"
-			printf 'format=%s\n' "$(zxfer_get_backup_metadata_format_version)"
-			printf 'split=%s\n' "$(zxfer_get_backup_metadata_pair_split_line)"
+			printf 'header=%s\n' "$ZXFER_BACKUP_METADATA_HEADER_LINE"
+			printf 'format=%s\n' "$ZXFER_BACKUP_METADATA_FORMAT_VERSION"
+			printf 'split=%s\n' "$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE"
 		)
 	)
 
@@ -208,29 +196,37 @@ test_append_backup_metadata_record_preserves_existing_newline_rows() {
 		"$l_expected_rows" "$g_backup_file_contents"
 }
 
-test_append_backup_metadata_record_replaces_existing_relative_row() {
+test_append_backup_metadata_record_buffers_duplicate_rows_until_write_boundary() {
 	g_backup_file_contents=$(printf '%s\n%s\n' \
 		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
 		"$(zxfer_test_backup_metadata_row "other" "quota=1G=local")")
-	l_expected_rows=$(printf '%s\n%s' \
+	l_expected_buffered_rows=$(printf '%s\n%s\n%s' \
+		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
+		"$(zxfer_test_backup_metadata_row "other" "quota=1G=local")" \
+		"$(zxfer_test_backup_metadata_row "." "readonly=on=local")")
+	l_expected_validated_rows=$(printf '%s\n%s' \
 		"$(zxfer_test_backup_metadata_row "." "readonly=on=local")" \
 		"$(zxfer_test_backup_metadata_row "other" "quota=1G=local")")
 
 	zxfer_append_backup_metadata_record "tank/src" "readonly=on=local"
+	l_buffered_rows=$g_backup_file_contents
+	l_validated_rows=$(zxfer_validate_backup_metadata_record_list "$g_backup_file_contents")
 
-	assertEquals "Backup-metadata appends should replace an existing source-root-relative row instead of appending an ambiguous duplicate." \
-		"$l_expected_rows" "$g_backup_file_contents"
+	assertEquals "Backup-metadata appends should buffer duplicate keys as plain rows instead of rebuilding the buffer per append." \
+		"$l_expected_buffered_rows" "$l_buffered_rows"
+	assertEquals "Write-boundary validation should collapse duplicate keys newest-row-wins in first-appearance order." \
+		"$l_expected_validated_rows" "$l_validated_rows"
 }
 
-test_append_backup_metadata_record_deduplicates_existing_relative_rows() {
+test_validate_backup_metadata_record_list_collapses_preexisting_duplicate_rows_newest_wins() {
 	g_backup_file_contents=$(printf '%s\n%s\n' \
 		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
 		"$(zxfer_test_backup_metadata_row "." "readonly=off=local")")
 
 	zxfer_append_backup_metadata_record "tank/src" "readonly=on=local"
 
-	assertEquals "Backup-metadata appends should collapse pre-existing relative-path duplicates down to one updated row." \
-		".	readonly=on=local" "$g_backup_file_contents"
+	assertEquals "Write-boundary validation should collapse buffered relative-path duplicates down to the newest row." \
+		".	readonly=on=local" "$(zxfer_validate_backup_metadata_record_list "$g_backup_file_contents")"
 }
 
 test_append_backup_metadata_record_preserves_literal_backslashes() {
@@ -240,47 +236,43 @@ test_append_backup_metadata_record_preserves_literal_backslashes() {
 
 	zxfer_append_backup_metadata_record "tank/src" 'user:path=D:\\archive\\more=local'
 
-	assertEquals "Backup-metadata appends should preserve literal backslashes in both replacement rows and untouched existing rows." \
-		'.	user:path=D:\\archive\\more=local
-other	user:path=E:\\keep\\me=local' "$g_backup_file_contents"
+	l_expected_buffered_rows=$(printf '%s\n%s\n%s' \
+		'.	user:path=C:\\temp\\new=local' \
+		'other	user:path=E:\\keep\\me=local' \
+		'.	user:path=D:\\archive\\more=local')
+	l_expected_validated_rows=$(printf '%s\n%s' \
+		'.	user:path=D:\\archive\\more=local' \
+		'other	user:path=E:\\keep\\me=local')
+
+	assertEquals "Buffered appends should preserve literal backslashes in newly appended rows." \
+		"$l_expected_buffered_rows" "$g_backup_file_contents"
+	assertEquals "Write-boundary validation should preserve literal backslashes in both winning and untouched rows." \
+		"$l_expected_validated_rows" "$(zxfer_validate_backup_metadata_record_list "$g_backup_file_contents")"
 }
 
-test_append_backup_metadata_record_rejects_malformed_v2_rows() {
-	g_backup_file_contents="broken,row-without-properties"
-
+test_append_backup_metadata_record_defers_malformed_row_rejection_to_write_boundary() {
 	# shellcheck disable=SC2016
 	zxfer_test_capture_subshell '
 		g_backup_file_contents="broken,row-without-properties"
 		zxfer_throw_error() {
-			printf "%s\n" "$1"
-			exit 1
-		}
-		zxfer_append_backup_metadata_record "tank/src" "readonly=on=local"
-	'
-
-	assertEquals "Backup-metadata appends should reject malformed v2 rows instead of preserving legacy row fragments." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-}
-
-test_append_backup_metadata_record_rethrows_update_failures_without_clearing_existing_buffer() {
-	# shellcheck disable=SC2016
-	zxfer_test_capture_subshell '
-		g_backup_file_contents="existing"
-		g_cmd_awk=false
-		zxfer_throw_error() {
 			printf "%s\n" "$1" >&2
-			printf "backup=<%s>\n" "$g_backup_file_contents" >&2
 			exit 1
 		}
-		zxfer_append_backup_metadata_record "tank/src" "compression=lz4=local"
+		zxfer_append_backup_metadata_record "tank/src" "readonly=on=local" || exit 9
+		printf "buffered=<%s>\n" "$g_backup_file_contents" >&2
+		zxfer_validate_backup_metadata_record_list "$g_backup_file_contents" >/dev/null
 	'
 
-	assertEquals "Backup-metadata append helpers should fail closed when the inner record updater errors." \
+	l_expected_buffered=$(printf 'buffered=<%s\n%s>' \
+		"broken,row-without-properties" \
+		"$(zxfer_test_backup_metadata_row "." "readonly=on=local")")
+
+	assertEquals "A malformed buffered row should abort at the write boundary instead of on the append that follows it." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Backup-metadata append helpers should surface the buffered-update failure." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to update buffered backup metadata records."
-	assertContains "Backup-metadata append helpers should leave the existing buffered rows untouched on updater failure." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "backup=<existing>"
+	assertContains "Appends after a malformed buffered row should still buffer their own row before the write boundary." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "$l_expected_buffered"
+	assertContains "Malformed buffered rows should surface the write-boundary validation failure." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to validate buffered backup metadata records for chained backup provenance."
 }
 
 test_validate_backup_metadata_record_list_preserves_relative_rows() {
@@ -310,25 +302,6 @@ test_validate_backup_metadata_record_list_reports_awk_failures() {
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Forwarded-provenance validation should surface the buffered validation failure." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to validate buffered backup metadata records for chained backup provenance."
-}
-
-test_update_backup_metadata_record_list_reports_awk_failures() {
-	# shellcheck disable=SC2016
-	zxfer_test_capture_subshell '
-		g_cmd_awk=false
-		zxfer_throw_error() {
-			printf "%s\n" "$1"
-			exit 1
-		}
-		zxfer_update_backup_metadata_record_list \
-			".	compression=lz4=local" \
-			"tank/src" "readonly=on=local"
-	'
-
-	assertEquals "Backup-metadata record updates should fail closed when the awk helper errors." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Backup-metadata record updates should surface the buffered-update failure." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to update buffered backup metadata records."
 }
 
 test_remove_backup_metadata_record_list_reports_awk_failures() {
@@ -391,6 +364,23 @@ test_get_buffered_backup_metadata_record_properties_reports_awk_failures() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to inspect buffered backup metadata records."
 	assertContains "Buffered backup-metadata property lookups should not clobber the prior scratch channel before the failure is raised." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "scratch=<stale>"
+}
+
+test_get_buffered_backup_metadata_record_properties_returns_newest_duplicate_row() {
+	g_initial_source="tank/src"
+
+	result=$(zxfer_get_buffered_backup_metadata_record_properties \
+		"$(printf '%s\n%s\n%s' \
+			"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
+			"$(zxfer_test_backup_metadata_row "child" "quota=1G=local")" \
+			"$(zxfer_test_backup_metadata_row "." "readonly=on=local")")" \
+		"tank/src")
+	status=$?
+
+	assertEquals "Buffered backup-metadata property lookups should succeed when duplicate keys are buffered." \
+		0 "$status"
+	assertEquals "Buffered backup-metadata property lookups should return the newest buffered row for a duplicated key." \
+		"readonly=on=local" "$result"
 }
 
 test_capture_backup_metadata_for_completed_transfer_buffers_live_rows_without_flushing() {
@@ -622,34 +612,20 @@ test_defer_buffered_backup_metadata_record_rejects_missing_live_row() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "pending=<seed	readonly=on=local>"
 }
 
-test_defer_buffered_backup_metadata_record_rejects_ambiguous_live_rows() {
-	# shellcheck disable=SC2016
-	zxfer_test_capture_subshell '
-		g_option_k_backup_property_mode=1
-		g_option_n_dryrun=0
-		g_backup_file_contents=".	compression=lz4=local
-.	readonly=on=local"
-		g_pending_backup_file_contents="seed	readonly=on=local"
-		zxfer_get_buffered_backup_metadata_record_properties() {
-			return 2
-		}
-		zxfer_throw_error() {
-			printf "%s\n" "$1" >&2
-			printf "backup=<%s>\n" "$g_backup_file_contents" >&2
-			printf "pending=<%s>\n" "$g_pending_backup_file_contents" >&2
-			exit 1
-		}
-		zxfer_defer_buffered_backup_metadata_record "tank/src"
-	'
+test_defer_buffered_backup_metadata_record_moves_newest_duplicate_live_row() {
+	g_option_k_backup_property_mode=1
+	g_option_n_dryrun=0
+	g_backup_file_contents=$(printf '%s\n%s\n%s' \
+		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
+		"$(zxfer_test_backup_metadata_row "." "readonly=on=local")" \
+		"$(zxfer_test_backup_metadata_row "child" "quota=1G=local")")
 
-	assertEquals "Deferring buffered backup metadata should fail closed when the live buffered rows are ambiguous." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Ambiguous live buffered rows should identify the source dataset." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "Buffered backup metadata rows for source dataset [tank/src] are ambiguous."
-	assertContains "Ambiguous live buffered rows should leave the live buffer untouched." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "backup=<.	compression=lz4=local"
-	assertContains "Ambiguous live buffered rows should leave the pending buffer untouched." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "pending=<seed	readonly=on=local>"
+	zxfer_defer_buffered_backup_metadata_record "tank/src"
+
+	assertEquals "Deferring a dataset with buffered duplicate keys should remove every duplicate from the live buffer." \
+		"child	quota=1G=local" "$g_backup_file_contents"
+	assertEquals "Deferring a dataset with buffered duplicate keys should move the newest buffered row into the pending buffer." \
+		".	readonly=on=local" "$g_pending_backup_file_contents"
 }
 
 test_defer_buffered_backup_metadata_record_rejects_malformed_live_rows() {
@@ -712,73 +688,6 @@ child	quota=1G=local"
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "pending=<seed	readonly=on=local>"
 }
 
-test_defer_buffered_backup_metadata_record_rethrows_pending_update_failures_without_mutating_buffers() {
-	# shellcheck disable=SC2016
-	zxfer_test_capture_subshell '
-		g_option_k_backup_property_mode=1
-		g_option_n_dryrun=0
-		g_backup_file_contents=".	compression=lz4=local
-child	quota=1G=local"
-		g_pending_backup_file_contents="seed	readonly=on=local"
-		zxfer_remove_backup_metadata_record_list() {
-			g_zxfer_backup_metadata_record_list_result="child	quota=1G=local"
-			printf "%s\n" "$g_zxfer_backup_metadata_record_list_result"
-		}
-		zxfer_update_backup_metadata_record_list() {
-			zxfer_throw_error "pending update failed"
-		}
-		zxfer_throw_error() {
-			printf "%s\n" "$1" >&2
-			printf "backup=<%s>\n" "$g_backup_file_contents" >&2
-			printf "pending=<%s>\n" "$g_pending_backup_file_contents" >&2
-			exit 1
-		}
-		zxfer_defer_buffered_backup_metadata_record "tank/src"
-	'
-
-	assertEquals "Deferring buffered backup metadata should fail closed when the pending-buffer update errors." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Deferring buffered backup metadata should surface the pending-buffer update failure." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "pending update failed"
-	assertContains "Deferring buffered backup metadata should not partially remove the live row before the pending update succeeds." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "backup=<.	compression=lz4=local"
-	assertContains "Deferring buffered backup metadata should leave the pending buffer untouched on update failure." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "pending=<seed	readonly=on=local>"
-}
-
-test_finalize_deferred_backup_metadata_record_rethrows_live_buffer_update_failures_without_mutating_buffers() {
-	# shellcheck disable=SC2016
-	zxfer_test_capture_subshell '
-		g_option_k_backup_property_mode=1
-		g_option_n_dryrun=0
-		g_backup_file_contents="child	quota=1G=local"
-		g_pending_backup_file_contents=".	compression=lz4=local"
-		zxfer_remove_backup_metadata_record_list() {
-			g_zxfer_backup_metadata_record_list_result=""
-			printf "%s\n" "$g_zxfer_backup_metadata_record_list_result"
-		}
-		zxfer_update_backup_metadata_record_list() {
-			zxfer_throw_error "live buffer update failed"
-		}
-		zxfer_throw_error() {
-			printf "%s\n" "$1" >&2
-			printf "backup=<%s>\n" "$g_backup_file_contents" >&2
-			printf "pending=<%s>\n" "$g_pending_backup_file_contents" >&2
-			exit 1
-		}
-		zxfer_finalize_deferred_backup_metadata_record "tank/src"
-	'
-
-	assertEquals "Finalizing deferred backup metadata should fail closed when the live-buffer update errors." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Finalizing deferred backup metadata should surface the live-buffer update failure." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "live buffer update failed"
-	assertContains "Finalizing deferred backup metadata should leave the live buffer untouched on update failure." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "backup=<child	quota=1G=local>"
-	assertContains "Finalizing deferred backup metadata should not clear the pending row before the live update succeeds." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "pending=<.	compression=lz4=local>"
-}
-
 test_finalize_deferred_backup_metadata_record_rejects_missing_pending_row() {
 	# shellcheck disable=SC2016
 	zxfer_test_capture_subshell '
@@ -799,25 +708,23 @@ test_finalize_deferred_backup_metadata_record_rejects_missing_pending_row() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Deferred backup metadata row for source dataset [tank/src] is missing."
 }
 
-test_finalize_deferred_backup_metadata_record_rejects_ambiguous_pending_rows() {
-	# shellcheck disable=SC2016
-	zxfer_test_capture_subshell '
-		g_option_k_backup_property_mode=1
-		g_option_n_dryrun=0
-		g_backup_file_contents="child	quota=1G=local"
-		g_pending_backup_file_contents=".	compression=lz4=local
-.	readonly=on=local"
-		zxfer_throw_error() {
-			printf "%s\n" "$1"
-			exit 1
-		}
-		zxfer_finalize_deferred_backup_metadata_record "tank/src"
-	'
+test_finalize_deferred_backup_metadata_record_restores_newest_duplicate_pending_row() {
+	g_option_k_backup_property_mode=1
+	g_option_n_dryrun=0
+	g_backup_file_contents="child	quota=1G=local"
+	g_pending_backup_file_contents=$(printf '%s\n%s' \
+		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
+		"$(zxfer_test_backup_metadata_row "." "readonly=on=local")")
+	l_expected_live_rows=$(printf '%s\n%s' \
+		"$(zxfer_test_backup_metadata_row "child" "quota=1G=local")" \
+		"$(zxfer_test_backup_metadata_row "." "readonly=on=local")")
 
-	assertEquals "Finalizing deferred backup metadata should fail closed when the pending seeded rows are ambiguous." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Ambiguous deferred backup rows should identify the source dataset." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "Deferred backup metadata rows for source dataset [tank/src] are ambiguous."
+	zxfer_finalize_deferred_backup_metadata_record "tank/src"
+
+	assertEquals "Finalizing a dataset with duplicate pending keys should clear every pending duplicate." \
+		"" "$g_pending_backup_file_contents"
+	assertEquals "Finalizing a dataset with duplicate pending keys should restore the newest pending row into the live buffer." \
+		"$l_expected_live_rows" "$g_backup_file_contents"
 }
 
 test_finalize_deferred_backup_metadata_record_rejects_malformed_pending_rows() {
@@ -1109,6 +1016,18 @@ EOF
 		"$(cat "$ssh_log")" "-remote_backup_file"
 	assertContains "Dash-prefixed remote metadata reads should now validate and read through the staged snapshot path." \
 		"$(cat "$ssh_log")" "backup.snapshot"
+}
+
+test_build_remote_backup_symlink_guard_cmd_rejects_unknown_kind() {
+	set +e
+	output=$(zxfer_build_remote_backup_symlink_guard_cmd "/var/db/zxfer/backup.meta" 98 unknown)
+	status=$?
+	set -e
+
+	assertEquals "Remote backup symlink guard rendering should reject unknown guard kinds." \
+		1 "$status"
+	assertEquals "Remote backup symlink guard rendering should not emit a partial command for unknown guard kinds." \
+		"" "$output"
 }
 
 test_write_backup_properties_renders_remote_dry_run_command() {
@@ -1436,6 +1355,62 @@ test_write_backup_properties_preserves_encoded_delimiter_heavy_payloads() {
 		"$(cat "$written_file")" "#destination:"
 	assertContains "Backup-property writes should preserve encoded delimiter-heavy property payloads as one metadata row." \
 		"$(cat "$written_file")" ".	user:note=value%2Cwith%2Ccommas%3Dand%3Bsemi=local"
+}
+
+test_write_backup_properties_collapses_buffered_duplicate_rows_newest_wins() {
+	g_option_n_dryrun=0
+	g_option_T_target_host=""
+	g_destination="backup/dst"
+	g_actual_dest="$g_destination"
+	g_backup_file_extension=".zxfer_backup_info"
+	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/backup_store_write_duplicates"
+	g_zxfer_version="test-version"
+	g_backup_file_contents=$(printf '%s\n%s\n%s' \
+		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
+		"$(zxfer_test_backup_metadata_row "child" "quota=1G=local")" \
+		"$(zxfer_test_backup_metadata_row "." "readonly=on=local")")
+	g_initial_source="tank/src"
+	expected_name=$(zxfer_get_backup_metadata_filename "$g_initial_source" "$g_destination")
+
+	zxfer_write_backup_properties
+
+	written_file="$g_backup_storage_root/tank/src/$expected_name"
+
+	assertContains "Write-boundary validation should publish the newest buffered row for a duplicated key." \
+		"$(cat "$written_file")" ".	readonly=on=local"
+	assertNotContains "Write-boundary validation should not publish shadowed duplicate rows." \
+		"$(cat "$written_file")" ".	compression=lz4=local"
+	assertEquals "Write-boundary validation should compact the buffered rows to their canonical newest-wins equivalent." \
+		".	readonly=on=local
+child	quota=1G=local" "$g_backup_file_contents"
+}
+
+test_write_backup_properties_rejects_malformed_buffered_rows_before_writing_any_files() {
+	g_option_n_dryrun=0
+	g_option_T_target_host=""
+	g_destination="backup/dst"
+	g_actual_dest="$g_destination"
+	g_backup_file_extension=".zxfer_backup_info"
+	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/backup_store_write_malformed"
+	g_zxfer_version="test-version"
+	g_initial_source="tank/src"
+
+	# shellcheck disable=SC2016
+	zxfer_test_capture_subshell '
+		g_backup_file_contents=$(printf "%s\n%s" "broken,row-without-properties" ".	compression=lz4=local")
+		zxfer_throw_error() {
+			printf "%s\n" "$1" >&2
+			exit 1
+		}
+		zxfer_write_backup_properties
+	'
+
+	assertEquals "Backup-property writes should fail closed when a malformed buffered row reaches the write boundary." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Malformed buffered rows should surface the write-boundary validation error text." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to validate buffered backup metadata records for chained backup provenance."
+	assertTrue "Malformed buffered rows should stop the write before any metadata file is published." \
+		"[ ! -d \"$g_backup_storage_root\" ] || [ -z \"\$(find \"$g_backup_storage_root\" -type f 2>/dev/null)\" ]"
 }
 
 test_write_backup_properties_writes_forwarded_provenance_alias_for_actual_destination_tree() {
@@ -2032,6 +2007,36 @@ test_get_forwarded_backup_properties_for_source_rejects_unexpected_forwarded_val
 		"$output" "Failed to validate forwarded backup property file"
 	assertEquals "Unexpected forwarded provenance validation failures should restore the prior restored-backup scratch state." \
 		"saved-cache" "$g_restored_backup_file_contents"
+}
+
+test_try_backup_restore_candidate_set_stops_when_legacy_name_matches_current_name() {
+	output=$(
+		(
+			zxfer_get_backup_metadata_filename() {
+				printf '%s\n' "same-name"
+			}
+			zxfer_get_legacy_backup_metadata_filename() {
+				printf '%s\n' "same-name"
+			}
+			zxfer_try_backup_restore_candidate() {
+				printf 'probe=%s\n' "$1"
+				return 1
+			}
+
+			set +e
+			zxfer_try_backup_restore_candidate_set \
+				"/backup" "tank/src" "backup/dst" "tank/src" "backup/dst"
+			printf 'status=%s\n' "$?"
+			printf 'candidate=%s\n' "$g_zxfer_backup_restore_candidate_path_result"
+		)
+	)
+
+	assertContains "Restore-candidate fallback should probe the current filename before considering legacy aliases." \
+		"$output" "probe=/backup/same-name"
+	assertContains "Restore-candidate fallback should stop with a plain not-found status when the legacy filename is identical." \
+		"$output" "status=1"
+	assertContains "Restore-candidate fallback should leave the current candidate path selected when no distinct legacy alias exists." \
+		"$output" "candidate=/backup/same-name"
 }
 
 test_try_backup_restore_candidate_maps_remote_transport_failures_to_transport_status() {
@@ -3173,7 +3178,7 @@ test_get_backup_properties_reports_missing_backup_file() {
 		"$output" "Cannot find backup property file. Ensure that it"
 }
 
-test_require_secure_backup_file_reports_unknown_owner_and_mode() {
+test_check_secure_backup_file_reports_unknown_owner_and_mode() {
 	backup_file="$TEST_TMPDIR/secure_meta"
 	printf '%s\n' "payload" >"$backup_file"
 	chmod 600 "$backup_file"
@@ -3184,11 +3189,7 @@ test_require_secure_backup_file_reports_unknown_owner_and_mode() {
 			zxfer_get_path_owner_uid() {
 				return 1
 			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_require_secure_backup_file "$backup_file"
+			zxfer_check_secure_backup_file "$backup_file"
 		)
 	)
 	owner_status=$?
@@ -3201,11 +3202,7 @@ test_require_secure_backup_file_reports_unknown_owner_and_mode() {
 			zxfer_get_path_mode_octal() {
 				return 1
 			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_require_secure_backup_file "$backup_file"
+			zxfer_check_secure_backup_file "$backup_file"
 		)
 	)
 	mode_status=$?
@@ -3218,21 +3215,13 @@ test_require_secure_backup_file_reports_unknown_owner_and_mode() {
 		"$mode_output" "Cannot determine the permissions for backup metadata $backup_file."
 }
 
-test_require_secure_backup_file_rejects_non_0600_permissions() {
+test_check_secure_backup_file_rejects_non_0600_permissions() {
 	backup_file="$TEST_TMPDIR/insecure_meta"
 	printf '%s\n' "payload" >"$backup_file"
 	chmod 644 "$backup_file"
 
 	set +e
-	output=$(
-		(
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_require_secure_backup_file "$backup_file"
-		)
-	)
+	output=$(zxfer_check_secure_backup_file "$backup_file")
 	status=$?
 
 	assertEquals "Non-0600 backup metadata should be rejected." 1 "$status"
@@ -5639,7 +5628,7 @@ test_write_backup_metadata_pair_contents_to_store_runs_remote_helper_with_split_
 	helper_side_file="$TEST_TMPDIR/remote_pair_success_helper_side.txt"
 	payload_file="$TEST_TMPDIR/remote_pair_success_payload.txt"
 	capture_file="$TEST_TMPDIR/remote_pair_success_capture.txt"
-	pair_split_line=$(zxfer_get_backup_metadata_pair_split_line)
+	pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
 	: >"$dir_log"
 
 	(
@@ -5701,7 +5690,7 @@ test_build_remote_backup_pair_write_cmd_rolls_back_forwarded_after_primary_resto
 	forwarded_file="$forwarded_dir/.zxfer_backup_info.src"
 	fake_bin="$TEST_TMPDIR/remote_pair_primary_restore_fail_bin"
 	mv_log="$TEST_TMPDIR/remote_pair_primary_restore_fail_mv.log"
-	pair_split_line=$(zxfer_get_backup_metadata_pair_split_line)
+	pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
 	real_mv=$(command -v mv)
 
 	mkdir -p "$primary_dir" "$forwarded_dir" "$fake_bin"

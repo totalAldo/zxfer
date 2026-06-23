@@ -416,7 +416,11 @@ finish removing the stale datasets.
 will pipe
 zfs(8)
 \fIsend\fR
-through the indicated command and parameters, to create a progress bar.
+through an internal passthrough helper that feeds a copy of the stream to the
+indicated command and parameters, to create a progress bar. The progress
+command must read stdin until EOF. Its stdout is discarded so helper output
+cannot duplicate or corrupt the receive stream; progress text should go to
+stderr.
 A number of macros will be replaced with values before the command is executed:
 .PP
 .RS 8n
@@ -456,6 +460,20 @@ so the destination side will roll back to the most recent snapshot that
 matches the stream. This forcibly destroys any newer snapshots or data that
 only exist on the destination and allows incremental sends to proceed when
 the target has diverged.
+.sp
+Divergence contract: when a destination snapshot shares a source snapshot's
+name but carries a different GUID, the destination holds diverged data under
+an identical name. \fBzxfer\fR always warns on stderr, naming the dataset,
+the diverged-snapshot count, and up to three example snapshots with both
+GUIDs. The destructive convergence (destroy the diverged destination
+snapshots, roll back to the last GUID-matching common snapshot, and resend
+the source range) proceeds only when BOTH \fB\-d\fR and \fB\-F\fR are active;
+otherwise the run fails closed with a structured error and plans no deletes
+or sends for the diverged dataset. After a converged dataset's receive
+completes, \fBzxfer\fR re-checks the live destination listing and aborts with
+an error naming the snapshot if any name-match/GUID-mismatch remains, so an
+external writer re-diverging the destination cannot cause a silent
+destroy-and-resend loop.
 .TP 8n
 \fB\-g\fR
 (g)randfather protection. Specify a number of days old (relative to the system
@@ -515,8 +533,9 @@ workers launched for this path run under a shared supervisor that records
 launch/completion metadata and tears them down through validated process-group
 or owned-child-set cleanup instead of signaling a bare wrapper-shell PID.
 \fBzxfer\fR also serializes conflicting ancestor/descendant destination
-receives on the same target, even when spare job slots remain, so parent and
-child datasets do not receive concurrently.
+receives on the same target so parent and child datasets do not receive
+concurrently, and its ready queue skips blocked descendants to start later
+independent datasets while job slots remain.
 .TP 8n
 \fB\-m\fR
 After sending all snapshots, (m)igrate the source to the destination filesystem by
@@ -575,9 +594,10 @@ is not also used.
 .sp
 .sp
 This fork is exercised across current OpenZFS 2.0+ environments on maintained
-FreeBSD branches, Linux with OpenZFS, OmniOS/illumos, and OpenZFS on macOS. For
-releases published after 2026-05-01, the FreeBSD support baseline is FreeBSD
-14.x and 15.x; FreeBSD 13.x and other end-of-life branches are not guaranteed.
+FreeBSD branches, Linux with OpenZFS, supported OmniOS/illumos trains, and
+OpenZFS on macOS. For releases published after 2026-05-01, the FreeBSD support
+baseline is FreeBSD 14.4+ and 15.0+; FreeBSD 14.3, FreeBSD 13.x, and other
+end-of-life branches are not guaranteed.
 Remote helper resolution is designed to tolerate different absolute zfs(1)
 paths on each host, but property support can still differ across operating
 systems and ZFS versions. When mixing platforms or versions, validate property
@@ -690,9 +710,10 @@ pre-OpenZFS 2.0 destinations.
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
 profiling counters plus startup latency, trap-cleanup timing, and accumulated
 stage timings for ssh setup, snapshot listing, and diff/sort hot paths, along
-with ssh control-socket wait, remote-capability cache wait,
-capability-bootstrap source, and direct remote helper-probe counters. While
-the run is active it also prints prefixed live
+with runtime artifact/cache-object counts, command-rendering counts, live
+destination snapshot recheck counts, ssh control-socket wait,
+remote-capability cache wait, capability-bootstrap source, and direct remote
+helper-probe counters. While the run is active it also prints prefixed live
 remote ssh commands, remote probe commands, and any ssh control-socket
 check/open commands before each execution so slow startup or remote-probe phases are
 visible in real time.
@@ -1080,15 +1101,15 @@ otherwise zxfer prefers a validated memory-backed temporary directory such as
 \fB/dev/shm\fR or \fB/run/shm\fR when available and falls back to the system
 temporary directory.
 .PP
-Current releases coordinate shared ssh control-socket locks, per-process ssh
-leases, remote capability-cache locks, and \fBZXFER_ERROR_LOG\fR appends
-through metadata-bearing owned directories rather than bare PID files. Native
-\fB.lock\fR and \fBlease.*\fR paths therefore appear as directories with owner
-metadata; zxfer validates and reaps stale or corrupt owners before reuse and
-checks release failures instead of ignoring them. Older plain ssh lease files
-and pid-only \fB.lock\fR directories from pre-metadata releases are
-unsupported; clear the stale entry or cache root before rerunning a current
-release.
+Current releases keep ssh control sockets and remote capability state per
+run: each invocation opens at most one control master per remote role under
+its private per-run temp directory, probes each remote host's capabilities
+once, holds the answer in memory, and removes everything on exit. Nothing is
+cached or coordinated across concurrent or consecutive invocations. Only
+\fBZXFER_ERROR_LOG\fR appends still coordinate through a metadata-bearing
+owned lock directory rather than a bare PID file; zxfer validates and reaps
+stale or corrupt owners before reuse and checks release failures instead of
+ignoring them.
 .PP
 The repository includes \fBexamples/error-log-email-notify.sh\fR, which shows
 how to set \fBZXFER_ERROR_LOG\fR, capture the current run's failure report from
@@ -1123,9 +1144,10 @@ zpool(1)
 .SH "COMPATIBILITY"
 \fBzxfer\fR
 targets current OpenZFS 2.0+ environments on maintained FreeBSD branches,
-Linux with OpenZFS, OmniOS/illumos, and OpenZFS on macOS. For releases
-published after 2026-05-01, the FreeBSD support baseline is FreeBSD 14.x and
-15.x; FreeBSD 13.x and other end-of-life branches are not guaranteed.
+Linux with OpenZFS, supported OmniOS/illumos trains, and OpenZFS on macOS.
+For releases published after 2026-05-01, the FreeBSD support baseline is
+FreeBSD 14.4+ and 15.0+; FreeBSD 14.3, FreeBSD 13.x, and other end-of-life
+branches are not guaranteed.
 Cross-version and cross-platform replication can still expose property or
 helper-path differences, so mixed-environment deployments should validate
 their exact send/receive and property behavior before production use.

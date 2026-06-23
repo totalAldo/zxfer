@@ -2,7 +2,7 @@
 #
 # shunit2 tests for zxfer_snapshot_discovery.sh helpers.
 #
-# shellcheck disable=SC1090,SC2030,SC2034,SC2154,SC2317,SC2329
+# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
 
@@ -21,6 +21,73 @@ if [ "\$1" = "--version" ]; then
 	exit 0
 fi
 exit 0
+EOF
+	chmod +x "$l_path"
+}
+
+create_functional_parallel_bin() {
+	l_path=$1
+	cat >"$l_path" <<'EOF'
+#!/bin/sh
+# Minimal GNU-parallel stand-in: runs the command after -- once per input
+# line (replacing {}), serially, and exits nonzero when any job fails.
+while [ $# -gt 0 ]; do
+	case $1 in
+	--)
+		shift
+		break
+		;;
+	*)
+		shift
+		;;
+	esac
+done
+l_runner=$1
+l_worst=0
+while IFS= read -r l_line; do
+	[ -n "$l_line" ] || continue
+	l_expanded=$(printf '%s' "$l_runner" | sed "s|{}|$l_line|g")
+	sh -c "$l_expanded" || l_worst=1
+done
+exit $l_worst
+EOF
+	chmod +x "$l_path"
+}
+
+create_discovery_fake_zfs_bin() {
+	l_path=$1
+	cat >"$l_path" <<'EOF'
+#!/bin/sh
+# Enumeration: zfs list -Hr -t filesystem,volume -o name SRC
+if [ "$2" = "-Hr" ]; then
+	if [ -n "${FAKE_ZFS_FAIL_ENUMERATION:-}" ]; then
+		printf '%s\n' "cannot open source" >&2
+		exit 1
+	fi
+	printf 'tank/src\ntank/src/a\ntank/src/b\n'
+	exit 0
+fi
+# Per-dataset: zfs list -H -o name,guid -s creation -d 1 -t snapshot DS
+l_dataset=${11}
+case $l_dataset in
+tank/src)
+	printf 'tank/src@s1\t111\n'
+	exit 0
+	;;
+tank/src/a)
+	if [ -n "${FAKE_ZFS_FAIL_SUBLISTING:-}" ]; then
+		printf '%s\n' "cannot open tank/src/a" >&2
+		exit 1
+	fi
+	printf 'tank/src/a@s1\t222\n'
+	exit 0
+	;;
+tank/src/b)
+	printf 'tank/src/b@s1\t333\n'
+	exit 0
+	;;
+esac
+exit 1
 EOF
 	chmod +x "$l_path"
 }
@@ -69,6 +136,41 @@ EOF
 	chmod +x "$l_path"
 }
 
+zxfer_test_start_fast_noop_destination_fifo_producer() {
+	l_fifo=$1
+	l_err_file=$2
+	l_list_status_file=$3
+	l_normalize_status_file=$4
+	l_stream_status_file=$5
+	l_payload=${ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED-}
+	l_err_payload=${ZXFER_TEST_FAST_NOOP_DESTINATION_STDERR-}
+	l_list_status=${ZXFER_TEST_FAST_NOOP_DESTINATION_LIST_STATUS:-0}
+	l_normalize_status=${ZXFER_TEST_FAST_NOOP_DESTINATION_NORMALIZE_STATUS:-0}
+	l_stream_status=${ZXFER_TEST_FAST_NOOP_DESTINATION_STREAM_STATUS:-${ZXFER_TEST_FAST_NOOP_DESTINATION_SORT_STATUS:-0}}
+
+	if [ "${ZXFER_TEST_FAST_NOOP_DESTINATION_SETUP_STATUS:-0}" -ne 0 ]; then
+		return "$ZXFER_TEST_FAST_NOOP_DESTINATION_SETUP_STATUS"
+	fi
+
+	(
+		if [ -n "$l_payload" ]; then
+			printf '%s\n' "$l_payload" >"$l_fifo"
+		else
+			: >"$l_fifo"
+		fi
+		if [ -n "$l_err_payload" ]; then
+			printf '%s\n' "$l_err_payload" >"$l_err_file"
+		else
+			: >"$l_err_file"
+		fi
+		printf '%s\n' "$l_list_status" >"$l_list_status_file"
+		printf '%s\n' "$l_normalize_status" >"$l_normalize_status_file"
+		printf '%s\n' "$l_stream_status" >"$l_stream_status_file"
+	) &
+	g_last_background_pid=$!
+	zxfer_register_cleanup_pid "$g_last_background_pid" "test destination snapshot no-op proof helper"
+}
+
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_get_list"
 	PARALLEL_BIN="$TEST_TMPDIR/parallel"
@@ -90,28 +192,39 @@ setUp() {
 	g_option_V_very_verbose=0
 	g_option_j_jobs=1
 	g_option_O_origin_host=""
+	g_option_R_recursive=""
+	g_option_z_compress=0
 	g_option_x_exclude_datasets=""
+	g_option_P_transfer_property=0
+	g_option_o_override_property=""
+	g_option_U_skip_unsupported_properties=0
+	g_option_d_delete_destination_snapshots=0
 	g_initial_source_had_trailing_slash=0
 	g_initial_source="tank/src"
 	g_destination="backup/dst"
 	g_origin_remote_capabilities_host=""
-	g_origin_remote_capabilities_dependency_path=""
 	g_origin_remote_capabilities_cache_identity=""
 	g_origin_remote_capabilities_response=""
 	g_origin_remote_capabilities_bootstrap_source=""
 	g_target_remote_capabilities_host=""
-	g_target_remote_capabilities_dependency_path=""
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
 	g_cmd_parallel="$PARALLEL_BIN"
 	g_origin_parallel_cmd=""
 	g_origin_parallel_cmd_host=""
+	g_cmd_compress="zstd -3"
+	g_cmd_decompress="zstd -d"
+	g_cmd_compress_safe="'zstd' '-3'"
+	g_cmd_decompress_safe="'zstd' '-d'"
+	g_origin_cmd_compress_safe=""
+	g_origin_cmd_decompress_safe=""
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
 	g_RZFS="/sbin/zfs"
 	g_LZFS="/sbin/zfs"
 	g_cmd_zfs="/sbin/zfs"
+	g_target_cmd_zfs=""
 	g_recursive_source_list=""
 	g_recursive_source_dataset_list=""
 	g_lzfs_list_hr_snap=""
@@ -131,6 +244,8 @@ setUp() {
 	g_last_background_pid=""
 	g_source_snapshot_list_pid=""
 	g_source_snapshot_list_job_id=""
+	g_source_snapshot_list_background_sort_requested=0
+	g_source_snapshot_list_sorted_file=""
 	g_zxfer_temp_file_result=""
 	zxfer_reset_background_job_state
 	zxfer_reset_destination_existence_cache
@@ -146,8 +261,11 @@ test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_state() {
 	g_zxfer_recursive_dataset_list_result="tank/src"
 	g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/source_cache.raw"
 	g_zxfer_destination_snapshot_record_cache_file="$TEST_TMPDIR/destination_cache.raw"
+	g_source_snapshot_list_sorted_file="$TEST_TMPDIR/source_sorted.raw"
+	g_source_snapshot_list_background_sort_requested=1
 	printf '%s\n' "tank/src@snap1" >"$g_zxfer_source_snapshot_record_cache_file"
 	printf '%s\n' "backup/dst/src@snap1" >"$g_zxfer_destination_snapshot_record_cache_file"
+	printf '%s\n' "tank/src@snap1" >"$g_source_snapshot_list_sorted_file"
 
 	zxfer_reset_snapshot_discovery_state
 
@@ -165,10 +283,16 @@ test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_state() {
 		"" "${g_zxfer_source_snapshot_record_cache_file:-}"
 	assertEquals "Resetting snapshot discovery state should clear the staged destination snapshot-record cache file path." \
 		"" "${g_zxfer_destination_snapshot_record_cache_file:-}"
+	assertEquals "Resetting snapshot discovery state should clear the staged sorted source snapshot file path." \
+		"" "${g_source_snapshot_list_sorted_file:-}"
+	assertEquals "Resetting snapshot discovery state should clear the background source sort request flag." \
+		"0" "${g_source_snapshot_list_background_sort_requested:-0}"
 	assertFalse "Resetting snapshot discovery state should remove the staged source snapshot-record cache file." \
 		"[ -e '$TEST_TMPDIR/source_cache.raw' ]"
 	assertFalse "Resetting snapshot discovery state should remove the staged destination snapshot-record cache file." \
 		"[ -e '$TEST_TMPDIR/destination_cache.raw' ]"
+	assertFalse "Resetting snapshot discovery state should remove the staged sorted source snapshot file." \
+		"[ -e '$TEST_TMPDIR/source_sorted.raw' ]"
 }
 
 test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_reuse_across_discovery_passes() {
@@ -247,20 +371,6 @@ test_destination_snapshot_dataset_helpers_treat_regex_significant_source_names_a
 	g_initial_source_had_trailing_slash=1
 	assertEquals "Trailing-slash mapping should still preserve dotted child names as literal path components." \
 		"backup/dst/releases.2026" "$(zxfer_get_destination_dataset_for_source_dataset "tank/app.v1/releases.2026")"
-}
-
-test_zxfer_write_snapshot_identity_file_from_records_normalizes_and_sorts_identities() {
-	output_file="$TEST_TMPDIR/snapshot_identities.txt"
-
-	zxfer_write_snapshot_identity_file_from_records \
-		"tank/src@snap2	222
-tank/src@snap1	111
-tank/src@snap2	222" \
-		"$output_file"
-
-	assertEquals "Snapshot identity file generation should normalize, deduplicate, and sort the extracted identities." \
-		"snap1	111
-snap2	222" "$(cat "$output_file")"
 }
 
 test_build_source_snapshot_list_cmd_reports_parallel_helper_failures_in_current_shell() {
@@ -448,10 +558,6 @@ test_ensure_parallel_available_for_source_jobs_trusts_resolved_remote_parallel_w
 			zxfer_resolve_remote_required_tool() {
 				printf '%s\n' "/opt/bin/parallel"
 			}
-			zxfer_get_remote_resolved_tool_version_output() {
-				printf '%s\n' "unexpected version probe"
-				return 42
-			}
 			g_option_j_jobs=2
 			g_option_O_origin_host="origin.example"
 			g_cmd_parallel=""
@@ -618,6 +724,192 @@ test_build_source_snapshot_list_cmd_uses_parallel_local_discovery_directly() {
 		"$result" "'printf'"
 }
 
+test_build_source_snapshot_list_cmd_guards_local_parallel_discovery_with_sentinel() {
+	g_option_j_jobs=2
+	g_cmd_parallel="$PARALLEL_BIN"
+	g_option_O_origin_host=""
+
+	result=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	assertContains "Local -j discovery should capture enumeration failures instead of masking them in the pipeline." \
+		"$result" "|| exit 70"
+	assertContains "Local -j discovery should only emit the success sentinel when parallel reports success." \
+		"$result" "&& printf"
+	assertContains "Local -j discovery should reference the success sentinel constant." \
+		"$result" "$(zxfer_get_source_discovery_sentinel_line)"
+	assertContains "Local -j discovery should verify and strip the sentinel with the local filter." \
+		"$result" "sentinel_line="
+	assertContains "Local -j discovery should fail the pipeline when the sentinel is missing." \
+		"$result" "exit 65"
+}
+
+test_build_source_snapshot_list_cmd_guards_remote_parallel_discovery_with_sentinel() {
+	g_option_j_jobs=3
+	g_option_O_origin_host="origin.example"
+	g_origin_cmd_zfs="/remote/bin/zfs"
+	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_origin_parallel_cmd_host="origin.example"
+
+	g_option_z_compress=0
+	uncompressed_result=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	g_option_z_compress=1
+	g_cmd_compress="zstd -3"
+	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-3'"
+	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
+	compressed_result=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	assertContains "Remote -j discovery should capture remote enumeration failures explicitly." \
+		"$uncompressed_result" "|| exit 70"
+	assertContains "Remote -j discovery should gate the success sentinel on parallel success." \
+		"$uncompressed_result" "&& printf"
+	assertContains "Remote -j discovery should append the local sentinel filter." \
+		"$uncompressed_result" "sentinel_line="
+	assertContains "Compressed remote -j discovery should keep the sentinel inside the compressed stream." \
+		"$compressed_result" "/remote/bin/zstd"
+	assertContains "Compressed remote -j discovery should place the sentinel filter after local decompression." \
+		"$compressed_result" "'/local/bin/zstd' '-d' | "
+	assertContains "Compressed remote -j discovery should still append the local sentinel filter." \
+		"$compressed_result" "sentinel_line="
+}
+
+test_build_source_snapshot_name_list_cmd_guards_compressed_remote_listing_with_sentinel() {
+	g_option_O_origin_host="origin.example"
+	g_origin_cmd_zfs="/remote/bin/zfs"
+	g_option_j_jobs=1
+
+	g_option_z_compress=0
+	uncompressed_result=$(zxfer_build_source_snapshot_name_list_cmd)
+
+	g_option_z_compress=1
+	g_cmd_compress="zstd -3"
+	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-3'"
+	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
+	compressed_result=$(zxfer_build_source_snapshot_name_list_cmd)
+
+	assertNotContains "Uncompressed remote no-op proof listings propagate the zfs exit through ssh and need no sentinel." \
+		"$uncompressed_result" "$(zxfer_get_source_discovery_sentinel_line)"
+	assertContains "Compressed remote no-op proof listings must gate a success sentinel on the listing because zstd masks its exit status." \
+		"$compressed_result" "$(zxfer_get_source_discovery_sentinel_line)"
+	assertContains "Compressed remote no-op proof listings must verify and strip the sentinel locally." \
+		"$compressed_result" "sentinel_line="
+	assertContains "The sentinel filter must run after local decompression." \
+		"$compressed_result" "'/local/bin/zstd' '-d' | "
+}
+
+test_local_parallel_discovery_pipeline_strips_sentinel_on_success() {
+	fake_zfs="$TEST_TMPDIR/discovery_fake_zfs"
+	functional_parallel="$TEST_TMPDIR/discovery_functional_parallel"
+	create_discovery_fake_zfs_bin "$fake_zfs"
+	create_functional_parallel_bin "$functional_parallel"
+
+	g_option_j_jobs=2
+	g_cmd_parallel="$functional_parallel"
+	g_option_O_origin_host=""
+	g_LZFS="$fake_zfs"
+	g_cmd_zfs="$fake_zfs"
+
+	built_cmd=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	set +e
+	output=$(
+		(
+			eval "$built_cmd"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "A fully successful parallel discovery pipeline should exit zero." \
+		0 "$status"
+	assertEquals "A successful parallel discovery pipeline should emit exactly the snapshot records with the sentinel stripped." \
+		"tank/src@s1	111
+tank/src/a@s1	222
+tank/src/b@s1	333" "$output"
+}
+
+test_local_parallel_discovery_pipeline_fails_when_sub_listing_fails() {
+	fake_zfs="$TEST_TMPDIR/discovery_fake_zfs"
+	functional_parallel="$TEST_TMPDIR/discovery_functional_parallel"
+	create_discovery_fake_zfs_bin "$fake_zfs"
+	create_functional_parallel_bin "$functional_parallel"
+
+	g_option_j_jobs=2
+	g_cmd_parallel="$functional_parallel"
+	g_option_O_origin_host=""
+	g_LZFS="$fake_zfs"
+	g_cmd_zfs="$fake_zfs"
+
+	built_cmd=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	set +e
+	output=$(
+		(
+			FAKE_ZFS_FAIL_SUBLISTING=1
+			export FAKE_ZFS_FAIL_SUBLISTING
+			eval "$built_cmd"
+		) 2>/dev/null
+	)
+	status=$?
+	set -e
+
+	assertEquals "A failed per-dataset sub-listing must fail the discovery pipeline instead of passing a partial list." \
+		65 "$status"
+}
+
+test_local_parallel_discovery_pipeline_fails_when_enumeration_fails() {
+	fake_zfs="$TEST_TMPDIR/discovery_fake_zfs"
+	functional_parallel="$TEST_TMPDIR/discovery_functional_parallel"
+	create_discovery_fake_zfs_bin "$fake_zfs"
+	create_functional_parallel_bin "$functional_parallel"
+
+	g_option_j_jobs=2
+	g_cmd_parallel="$functional_parallel"
+	g_option_O_origin_host=""
+	g_LZFS="$fake_zfs"
+	g_cmd_zfs="$fake_zfs"
+
+	built_cmd=$(
+		(
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+
+	set +e
+	output=$(
+		(
+			FAKE_ZFS_FAIL_ENUMERATION=1
+			export FAKE_ZFS_FAIL_ENUMERATION
+			eval "$built_cmd"
+		) 2>/dev/null
+	)
+	status=$?
+	set -e
+
+	assertEquals "A failed source dataset enumeration must fail the discovery pipeline immediately." \
+		70 "$status"
+}
+
 test_build_source_snapshot_list_cmd_preserves_local_parallel_builder_statuses() {
 	g_option_j_jobs=2
 	g_cmd_parallel="$PARALLEL_BIN"
@@ -695,6 +987,7 @@ test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_metadata
 	g_option_j_jobs=2
 	g_option_O_origin_host="origin.example"
 	g_option_z_compress=1
+	g_cmd_compress="zstd -T0 -9"
 	g_cmd_parallel=""
 	g_origin_parallel_cmd="/opt/bin/parallel"
 	g_origin_parallel_cmd_host="origin.example"
@@ -721,6 +1014,355 @@ test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_metadata
 		"$result" "/remote/bin/zfs"
 	assertContains "Remote -j discovery should record that metadata compression was used." \
 		"$result" "meta=1"
+}
+
+test_get_origin_metadata_compress_safe_uses_configured_default_for_snapshot_metadata() {
+	g_option_z_compress=1
+	g_option_O_origin_host="origin.example"
+	g_cmd_compress="zstd -3"
+	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-3'"
+
+	result=$(zxfer_get_origin_metadata_compress_safe)
+
+	assertEquals "Remote snapshot-list metadata should use the configured compressor cost instead of silently strengthening it." \
+		"'/remote/bin/zstd' '-3'" "$result"
+}
+
+test_get_origin_metadata_compress_safe_covers_disabled_and_custom_resolution() {
+	output=$(
+		(
+			set +e
+			g_option_z_compress=0
+			zxfer_get_origin_metadata_compress_safe >/dev/null
+			printf 'disabled=%s\n' "$?"
+
+			g_option_z_compress=1
+			g_option_O_origin_host="origin.example"
+			g_cmd_compress="gzip -1"
+			g_origin_cmd_compress_safe=""
+			zxfer_resolve_remote_cli_command_safe() {
+				printf 'resolve:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4"
+			}
+			zxfer_get_origin_metadata_compress_safe
+		)
+	)
+
+	assertContains "Metadata compression lookup should fail closed when compression is disabled." \
+		"$output" "disabled=1"
+	assertContains "Custom metadata compression should resolve through the remote helper path." \
+		"$output" "resolve:origin.example:gzip -1:metadata compression command:source"
+}
+
+test_build_source_snapshot_name_list_cmd_covers_local_and_remote_rendering() {
+	local_result=$(
+		(
+			g_option_O_origin_host=""
+			g_option_j_jobs=4
+			zxfer_build_source_snapshot_name_list_cmd
+			printf 'parallel=%s\n' "${g_source_snapshot_list_uses_parallel:-unset}"
+			printf 'compressed=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-unset}"
+		)
+	)
+	remote_result=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_origin_cmd_zfs="/remote/bin/zfs"
+			g_origin_parallel_cmd="/opt/bin/parallel"
+			g_origin_parallel_cmd_host="origin.example"
+			g_option_j_jobs=6
+			g_option_z_compress=0
+			zxfer_build_source_snapshot_name_list_cmd
+			printf 'parallel=%s\n' "${g_source_snapshot_list_uses_parallel:-unset}"
+			printf 'compressed=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-unset}"
+		)
+	)
+	compressed_result=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_origin_cmd_zfs="/remote/bin/zfs"
+			g_origin_parallel_cmd="/opt/bin/parallel"
+			g_origin_parallel_cmd_host="origin.example"
+			g_option_j_jobs=6
+			g_option_z_compress=1
+			g_cmd_compress="zstd -3"
+			g_origin_cmd_compress_safe="'/remote/bin/zstd' '-3'"
+			g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
+			zxfer_build_source_snapshot_name_list_cmd
+			printf 'compressed=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-unset}"
+		)
+	)
+
+	assertContains "Local identity-aware no-op proof discovery should render a direct source snapshot list." \
+		"$local_result" "'$g_LZFS' 'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$g_initial_source'"
+	assertNotContains "Local identity-aware no-op proof discovery should not fan out through parallel before work is proven." \
+		"$local_result" "$PARALLEL_BIN"
+	assertContains "Local identity-aware no-op proof discovery should record that source fanout was not used." \
+		"$local_result" "parallel=0"
+	assertContains "Local identity-aware discovery should leave the metadata compression marker cleared." \
+		"$local_result" "compressed=0"
+	assertContains "Remote identity-aware no-op proof discovery should render the resolved remote zfs path." \
+		"$remote_result" "/remote/bin/zfs"
+	assertContains "Remote identity-aware discovery should use ssh for the origin host." \
+		"$remote_result" "origin.example"
+	assertContains "Remote serial identity-aware discovery should request recursive source snapshots." \
+		"$remote_result" "-Hr"
+	assertNotContains "Remote identity-aware no-op proof discovery should not fan out through origin-host GNU parallel before work is proven." \
+		"$remote_result" "/opt/bin/parallel"
+	assertNotContains "Remote identity-aware no-op proof discovery should not feed a recursive dataset inventory into parallel." \
+		"$remote_result" "filesystem,volume"
+	assertNotContains "Remote identity-aware no-op proof discovery should not render per-dataset snapshot commands." \
+		"$remote_result" "-d"
+	assertNotContains "Remote identity-aware discovery should not pay for creation-order sorting on the origin." \
+		"$remote_result" "creation"
+	assertContains "Remote identity-aware no-op proof discovery should record that source fanout was not used." \
+		"$remote_result" "parallel=0"
+	assertContains "Uncompressed remote identity-aware discovery should leave the compression marker cleared." \
+		"$remote_result" "compressed=0"
+	assertContains "Compressed remote identity-aware discovery should use the resolved metadata compressor." \
+		"$compressed_result" "/remote/bin/zstd"
+	assertContains "Compressed remote identity-aware discovery should preserve the configured metadata compression level." \
+		"$compressed_result" "-3"
+	assertContains "Compressed remote identity-aware discovery should append the local decompressor." \
+		"$compressed_result" "/local/bin/zstd"
+	assertNotContains "Compressed remote identity-aware discovery should still defer parallel fanout." \
+		"$compressed_result" "/opt/bin/parallel"
+	assertContains "Compressed remote identity-aware discovery should record the metadata compression marker." \
+		"$compressed_result" "compressed=1"
+}
+
+test_build_source_snapshot_name_list_cmd_covers_current_shell_success_paths() {
+	local_out="$TEST_TMPDIR/source_name_list_local_serial.out"
+	remote_serial_out="$TEST_TMPDIR/source_name_list_remote_serial.out"
+	remote_compressed_out="$TEST_TMPDIR/source_name_list_remote_compressed.out"
+
+	g_option_O_origin_host=""
+	g_option_j_jobs=3
+	g_cmd_parallel="$PARALLEL_BIN"
+	zxfer_build_source_snapshot_name_list_cmd >"$local_out"
+	local_status=$?
+
+	g_option_O_origin_host="origin.example"
+	g_origin_cmd_zfs="/remote/bin/zfs"
+	g_option_j_jobs=1
+	g_option_z_compress=0
+	zxfer_build_source_snapshot_name_list_cmd >"$remote_serial_out"
+	remote_serial_status=$?
+
+	g_option_j_jobs=3
+	g_origin_parallel_cmd="/opt/bin/parallel"
+	g_origin_parallel_cmd_host="origin.example"
+	g_option_z_compress=1
+	g_cmd_compress="zstd -3"
+	g_origin_cmd_compress_safe="'/remote/bin/zstd' '-3'"
+	g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
+	zxfer_build_source_snapshot_name_list_cmd >"$remote_compressed_out"
+	remote_compressed_status=$?
+
+	assertEquals "Local no-op proof rendering should succeed in the current shell." \
+		0 "$local_status"
+	assertContains "Local no-op proof rendering should use one recursive source snapshot query." \
+		"$(cat "$local_out")" "-Hr"
+	assertNotContains "Local no-op proof rendering should not use parallel when -j is set." \
+		"$(cat "$local_out")" "$PARALLEL_BIN"
+	assertEquals "Remote serial no-op proof rendering should succeed in the current shell." \
+		0 "$remote_serial_status"
+	assertContains "Remote serial no-op proof rendering should use a recursive source snapshot query." \
+		"$(cat "$remote_serial_out")" "-Hr"
+	assertEquals "Remote compressed no-op proof rendering should succeed in the current shell." \
+		0 "$remote_compressed_status"
+	assertNotContains "Remote compressed no-op proof rendering should not use parallel when -j is set." \
+		"$(cat "$remote_compressed_out")" "/opt/bin/parallel"
+	assertContains "Remote compressed no-op proof rendering should append metadata compression." \
+		"$(cat "$remote_compressed_out")" "/remote/bin/zstd"
+	assertContains "Remote compressed no-op proof rendering should append local decompression." \
+		"$(cat "$remote_compressed_out")" "/local/bin/zstd"
+}
+
+test_build_source_snapshot_name_list_cmd_keeps_source_side_excludes_local_when_jobs_are_configured() {
+	local_result=$(
+		(
+			g_option_O_origin_host=""
+			g_option_j_jobs=4
+			g_option_x_exclude_datasets='replica$'
+			g_cmd_parallel="$PARALLEL_BIN"
+			zxfer_build_source_snapshot_name_list_cmd
+		)
+	)
+	remote_result=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_origin_cmd_zfs="/remote/bin/zfs"
+			g_origin_parallel_cmd="/opt/bin/parallel"
+			g_origin_parallel_cmd_host="origin.example"
+			g_option_j_jobs=6
+			g_option_x_exclude_datasets='replica$'
+			g_option_z_compress=0
+			zxfer_resolve_remote_cli_tool() {
+				printf '%s\n' "unexpected-remote-awk"
+			}
+			zxfer_build_source_snapshot_name_list_cmd
+		)
+	)
+
+	assertContains "Local no-op proof discovery should use one recursive source snapshot query when excludes are configured." \
+		"$local_result" "-Hr"
+	assertNotContains "Local no-op proof discovery should not use parallel before work is proven when excludes are configured." \
+		"$local_result" "$PARALLEL_BIN"
+	assertNotContains "Local no-op proof discovery should leave exclude filtering to the local sort/filter wrapper." \
+		"$local_result" "exclude_pattern=replica$"
+	assertContains "Remote no-op proof discovery should use one recursive source snapshot query when excludes are configured." \
+		"$remote_result" "-Hr"
+	assertNotContains "Remote no-op proof discovery should not use parallel before work is proven when excludes are configured." \
+		"$remote_result" "/opt/bin/parallel"
+	assertNotContains "Remote no-op proof discovery should not feed fanout from the recursive source dataset list when excludes are configured." \
+		"$remote_result" "filesystem,volume"
+	assertNotContains "Remote no-op proof discovery should not resolve remote awk for the source-side proof filter." \
+		"$remote_result" "unexpected-remote-awk"
+}
+
+test_build_source_snapshot_name_list_cmd_preserves_render_failures() {
+	set +e
+	remote_zfs_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			zxfer_build_shell_command_from_argv() {
+				return 31
+			}
+			zxfer_build_source_snapshot_name_list_cmd >/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+	compress_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_z_compress=1
+			zxfer_get_origin_metadata_compress_safe() {
+				return 32
+			}
+			zxfer_build_source_snapshot_name_list_cmd >/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+	remote_shell_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			zxfer_build_remote_sh_c_command() {
+				return 33
+			}
+			zxfer_build_source_snapshot_name_list_cmd >/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+	ssh_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			zxfer_build_ssh_shell_command_for_host() {
+				return 34
+			}
+			zxfer_build_source_snapshot_name_list_cmd >/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Name-only remote snapshot command rendering should preserve remote zfs command render failures." \
+		31 "$remote_zfs_status"
+	assertEquals "Name-only remote snapshot command rendering should preserve metadata compression lookup failures." \
+		32 "$compress_status"
+	assertEquals "Name-only remote snapshot command rendering should preserve remote shell wrapping failures." \
+		33 "$remote_shell_status"
+	assertEquals "Name-only remote snapshot command rendering should preserve ssh wrapper failures." \
+		34 "$ssh_status"
+}
+
+test_build_source_snapshot_name_list_cmd_does_not_require_remote_awk_for_excludes() {
+	output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_origin_cmd_zfs="/remote/bin/zfs"
+			g_origin_parallel_cmd="/opt/bin/parallel"
+			g_origin_parallel_cmd_host="origin.example"
+			g_option_j_jobs=2
+			g_option_x_exclude_datasets='replica$'
+			g_option_z_compress=0
+			zxfer_resolve_remote_cli_tool() {
+				printf '%s\n' "unexpected-remote-awk"
+				return 35
+			}
+			zxfer_build_source_snapshot_name_list_cmd
+		)
+	)
+
+	assertContains "Remote no-op proof discovery should render the recursive source snapshot query without remote awk." \
+		"$output" "/remote/bin/zfs"
+	assertNotContains "Remote no-op proof discovery should not use source-side fanout for the identity-aware proof." \
+		"$output" "/opt/bin/parallel"
+	assertNotContains "Remote no-op proof discovery should not resolve remote awk for source exclude filtering." \
+		"$output" "unexpected-remote-awk"
+}
+
+test_build_source_snapshot_name_list_cmd_does_not_probe_parallel_before_work_is_proven() {
+	set +e
+	local_result=$(
+		(
+			g_option_j_jobs=2
+			g_option_O_origin_host=""
+			g_cmd_parallel=""
+			zxfer_check_parallel_source_jobs_in_current_shell() {
+				printf '%s\n' "unexpected-local-parallel-check"
+				return 5
+			}
+			zxfer_build_source_snapshot_name_list_cmd
+		)
+	)
+	local_status=$?
+	remote_result=$(
+		(
+			g_option_j_jobs=2
+			g_option_O_origin_host="origin.example"
+			g_origin_cmd_zfs="/remote/bin/zfs"
+			g_origin_parallel_cmd=""
+			zxfer_check_parallel_source_jobs_in_current_shell() {
+				printf '%s\n' "unexpected-remote-parallel-check"
+				return 1
+			}
+			zxfer_build_source_snapshot_name_list_cmd
+		)
+	)
+	remote_status=$?
+
+	assertEquals "Local fast no-op proof should not require parallel when -j is configured." \
+		0 "$local_status"
+	assertNotContains "Local fast no-op proof should not run the parallel setup check before work is proven." \
+		"$local_result" "unexpected-local-parallel-check"
+	assertEquals "Remote fast no-op proof should not require origin parallel when -j is configured." \
+		0 "$remote_status"
+	assertNotContains "Remote fast no-op proof should not run the origin parallel setup check before work is proven." \
+		"$remote_result" "unexpected-remote-parallel-check"
+}
+
+test_build_source_snapshot_name_list_cmd_preserves_local_recursive_render_failures_when_jobs_requested() {
+	g_option_j_jobs=2
+	g_option_O_origin_host=""
+	g_cmd_parallel="/usr/local/bin/parallel"
+
+	set +e
+	output=$(
+		(
+			zxfer_render_zfs_command_for_spec() {
+				if [ "$3" = "-Hr" ]; then
+					return 41
+				fi
+				printf '%s\n' "rendered:$*"
+			}
+			zxfer_build_source_snapshot_name_list_cmd
+		)
+	)
+	status=$?
+
+	assertEquals "Local identity-aware no-op proof should preserve recursive snapshot-list render failures when -j was requested." \
+		41 "$status"
+	assertEquals "Local identity-aware no-op proof should not emit a partial command when recursive rendering fails." \
+		"" "$output"
 }
 
 test_build_source_snapshot_list_cmd_fails_closed_when_remote_parallel_is_unavailable() {
@@ -852,6 +1494,45 @@ test_build_source_snapshot_list_cmd_preserves_remote_parallel_builder_statuses()
 		73 "$remote_shell_status"
 	assertEquals "Remote parallel source snapshot planning should not emit a partial command when remote sh -c wrapper rendering fails." \
 		"" "$remote_shell_output"
+}
+
+test_build_source_snapshot_list_cmd_preserves_local_parallel_dataset_input_render_failure() {
+	g_option_j_jobs=2
+	g_option_O_origin_host=""
+	g_cmd_parallel="/usr/local/bin/parallel"
+
+	set +e
+	output=$(
+		(
+			zxfer_check_parallel_source_jobs_in_current_shell() {
+				return 0
+			}
+			zxfer_render_zfs_command_for_spec() {
+				if [ "$3" = "-Hr" ] && [ "$4" = "-o" ]; then
+					printf '%s\n' "serial"
+					return 0
+				fi
+				if [ "$3" = "-H" ]; then
+					printf '%s\n' "runner"
+					return 0
+				fi
+				if [ "$3" = "-Hr" ] && [ "$4" = "-t" ]; then
+					return 41
+				fi
+				return 99
+			}
+			zxfer_build_shell_command_from_argv() {
+				printf '%s\n' "$1"
+			}
+			zxfer_build_source_snapshot_list_cmd
+		)
+	)
+	status=$?
+
+	assertEquals "Local parallel source command rendering should preserve dataset-input render failures." \
+		41 "$status"
+	assertEquals "Local parallel source command rendering should not emit a partial command when dataset input rendering fails." \
+		"" "$output"
 }
 
 test_write_source_snapshot_list_to_file_uses_direct_background_runner_when_serial() {
@@ -1168,7 +1849,7 @@ test_write_source_snapshot_list_to_file_reports_preview_render_failures_in_dry_r
 	errfile="$TEST_TMPDIR/source_dry_run_error.err"
 
 	zxfer_test_capture_subshell "
-		zxfer_render_source_snapshot_list_preview_cmd() {
+		zxfer_render_zfs_command_for_spec() {
 			printf '%s\n' 'preview render failed'
 			return 1
 		}
@@ -1247,6 +1928,140 @@ test_write_source_snapshot_list_to_file_preserves_errfile_stage_failures_in_dry_
 		"$output" "write=2:$errfile"
 }
 
+test_write_source_snapshot_list_to_file_stages_sorted_sidecar_in_dry_run_when_requested() {
+	outfile="$TEST_TMPDIR/source_dry_run_sorted.out"
+	errfile="$TEST_TMPDIR/source_dry_run_sorted.err"
+	temp_counter_file="$TEST_TMPDIR/source_dry_run_sorted.counter"
+	printf '%s\n' 0 >"$temp_counter_file"
+
+	output=$(
+		(
+			COUNTER_FILE="$temp_counter_file"
+			zxfer_get_temp_file() {
+				idx=$(cat "$COUNTER_FILE")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$COUNTER_FILE"
+				g_zxfer_temp_file_result="$TEST_TMPDIR/source_dry_run_sorted.$idx"
+				: >"$g_zxfer_temp_file_result"
+				printf '%s\n' "$TEST_TMPDIR/stdout-only-source-dry-run-sorted.$idx"
+			}
+			g_option_n_dryrun=1
+			g_source_snapshot_list_background_sort_requested=1
+			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
+			printf 'sorted=%s\n' "$g_source_snapshot_list_sorted_file"
+			printf 'sorted_size=%s\n' "$(wc -c <"$g_source_snapshot_list_sorted_file" 2>/dev/null | tr -d '[:space:]' || printf '%s' missing)"
+		)
+	)
+
+	assertContains "Dry-run source discovery should publish an empty sorted sidecar when the caller requested background sorting." \
+		"$output" "sorted=$TEST_TMPDIR/source_dry_run_sorted.1"
+	assertContains "Dry-run source discovery should keep the requested sorted sidecar empty." \
+		"$output" "sorted_size=0"
+}
+
+test_write_source_snapshot_list_to_file_reports_sorted_sidecar_temp_failures_in_dry_run() {
+	outfile="$TEST_TMPDIR/source_dry_run_sorted_tempfail.out"
+	errfile="$TEST_TMPDIR/source_dry_run_sorted_tempfail.err"
+
+	output=$(
+		(
+			g_option_n_dryrun=1
+			g_source_snapshot_list_background_sort_requested=1
+			zxfer_get_temp_file() {
+				return 31
+			}
+			set +e
+			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Dry-run source discovery should preserve sorted-sidecar tempfile allocation failures." \
+		"$output" "status=31"
+}
+
+test_write_source_snapshot_list_to_file_preserves_background_sort_setup_failures() {
+	outfile="$TEST_TMPDIR/source_background_sort_setup_failure.out"
+	errfile="$TEST_TMPDIR/source_background_sort_setup_failure.err"
+
+	output=$(
+		(
+			g_source_snapshot_list_background_sort_requested=1
+			zxfer_build_source_snapshot_list_cmd() {
+				printf '%s\n' "printf '%s\n' snap"
+			}
+			zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
+				return 32
+			}
+			set +e
+			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
+			printf 'status=%s\n' "$?"
+			printf 'sorted=%s\n' "${g_source_snapshot_list_sorted_file:-}"
+		)
+	)
+
+	assertContains "Source discovery should preserve background-sort setup failures." \
+		"$output" "status=32"
+	assertContains "Source discovery should clear the sorted sidecar path when background-sort setup fails." \
+		"$output" "sorted="
+}
+
+test_write_source_snapshot_list_to_file_preserves_background_sort_temp_failures() {
+	outfile="$TEST_TMPDIR/source_background_sort_temp_failure.out"
+	errfile="$TEST_TMPDIR/source_background_sort_temp_failure.err"
+
+	output=$(
+		(
+			temp_calls=0
+			g_source_snapshot_list_background_sort_requested=1
+			zxfer_get_temp_file() {
+				temp_calls=$((temp_calls + 1))
+				if [ "$temp_calls" -eq 1 ]; then
+					g_zxfer_temp_file_result="$TEST_TMPDIR/source_background_sort_temp_failure.cmd"
+					: >"$g_zxfer_temp_file_result"
+					printf '%s\n' "$TEST_TMPDIR/stdout-only-source-background-sort-temp-failure"
+					return 0
+				fi
+				return 33
+			}
+			zxfer_build_source_snapshot_list_cmd() {
+				printf '%s\n' "printf '%s\n' snap"
+			}
+			set +e
+			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
+			printf 'status=%s\n' "$?"
+			printf 'calls=%s\n' "$temp_calls"
+		)
+	)
+
+	assertContains "Source discovery should preserve sorted-sidecar tempfile failures before launching the background job." \
+		"$output" "status=33"
+	assertContains "Source discovery should attempt command and sorted-sidecar tempfile allocation." \
+		"$output" "calls=2"
+}
+
+test_write_source_snapshot_list_to_file_preserves_direct_background_execution_failures() {
+	outfile="$TEST_TMPDIR/source_background_direct_failure.out"
+	errfile="$TEST_TMPDIR/source_background_direct_failure.err"
+
+	output=$(
+		(
+			zxfer_build_source_snapshot_list_cmd() {
+				printf '%s\n' "printf '%s\n' snap"
+			}
+			zxfer_execute_background_cmd() {
+				return 34
+			}
+			set +e
+			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Source discovery should preserve direct background execution failures." \
+		"$output" "status=34"
+}
+
 test_write_source_snapshot_list_to_file_runs_serial_builder_output_when_jobs_remain_configured() {
 	g_option_j_jobs=2
 	outfile="$TEST_TMPDIR/source_parallel_fallback.out"
@@ -1272,81 +2087,525 @@ test_write_source_snapshot_list_to_file_runs_serial_builder_output_when_jobs_rem
 		"$output" "job="
 }
 
-test_diff_snapshot_lists_rejects_unknown_mode() {
-	source_file="$TEST_TMPDIR/source_diff.txt"
-	dest_file="$TEST_TMPDIR/dest_diff.txt"
+test_write_source_snapshot_list_to_file_can_sort_inside_background_job() {
+	outfile="$TEST_TMPDIR/source_background_sort.out"
+	errfile="$TEST_TMPDIR/source_background_sort.err"
+	sorted_path_file="$TEST_TMPDIR/source_background_sort.path"
+
+	(
+		g_source_snapshot_list_background_sort_requested=1
+		zxfer_build_source_snapshot_list_cmd() {
+			printf '%s\n' "printf '%s\n' tank/src@b tank/src@a"
+		}
+		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
+		wait "$g_source_snapshot_list_pid"
+		printf '%s\n' "$g_source_snapshot_list_sorted_file" >"$sorted_path_file"
+	)
+	status=$?
+	sorted_file=$(cat "$sorted_path_file")
+
+	assertEquals "Background source snapshot discovery with an internal sort should complete successfully." \
+		0 "$status"
+	assertEquals "Background source snapshot discovery should preserve the raw creation-order output." \
+		"tank/src@b
+tank/src@a" "$(cat "$outfile")"
+	assertEquals "Background source snapshot discovery should publish a sorted sidecar for recursive diff planning." \
+		"tank/src@a
+tank/src@b" "$(cat "$sorted_file")"
+	assertEquals "Background source snapshot discovery should leave stderr empty on success." \
+		"" "$(cat "$errfile")"
+	zxfer_cleanup_runtime_artifact_path "$sorted_file"
+}
+
+test_write_source_snapshot_list_to_file_preserves_source_failure_when_streaming_background_sort() {
+	outfile="$TEST_TMPDIR/source_background_sort_failure.out"
+	errfile="$TEST_TMPDIR/source_background_sort_failure.err"
+	sorted_path_file="$TEST_TMPDIR/source_background_sort_failure.path"
+
+	(
+		g_source_snapshot_list_background_sort_requested=1
+		zxfer_build_source_snapshot_list_cmd() {
+			printf '%s\n' "printf '%s\n' tank/src@partial; exit 37"
+		}
+		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
+		wait "$g_source_snapshot_list_pid"
+		printf 'status=%s\n' "$?" >"$sorted_path_file"
+		printf 'sorted=%s\n' "$g_source_snapshot_list_sorted_file" >>"$sorted_path_file"
+	)
+	result=$(cat "$sorted_path_file")
+	sorted_file=$(printf '%s\n' "$result" | sed -n 's/^sorted=//p')
+
+	assertContains "Streaming background sort should preserve the source-list command status." \
+		"$result" "status=37"
+	assertEquals "Streaming background sort should preserve partial raw output for diagnostics." \
+		"tank/src@partial" "$(cat "$outfile")"
+	zxfer_cleanup_runtime_artifact_path "$sorted_file"
+}
+
+test_execute_source_snapshot_list_background_cmd_with_sort_delegates_when_no_sorted_file_requested() {
+	log="$TEST_TMPDIR/source_background_sort_delegate.log"
+	outfile="$TEST_TMPDIR/source_background_sort_delegate.out"
+	errfile="$TEST_TMPDIR/source_background_sort_delegate.err"
+	: >"$log"
+
+	(
+		LOG_FILE="$log"
+		zxfer_execute_background_cmd() {
+			printf '%s|%s|%s\n' "$1" "$2" "$3" >"$LOG_FILE"
+			g_last_background_pid=7171
+			return 0
+		}
+		zxfer_execute_source_snapshot_list_background_cmd_with_sort \
+			"printf '%s\n' delegated" "$outfile" "$errfile" ""
+		printf 'pid=%s\n' "$g_last_background_pid" >>"$LOG_FILE"
+	)
+	status=$?
+
+	assertEquals "Background sort execution should delegate to the direct background helper when no sorted sidecar is requested." \
+		0 "$status"
+	assertEquals "Delegated background execution should preserve command and file arguments." \
+		"printf '%s\n' delegated|$outfile|$errfile
+pid=7171" "$(cat "$log")"
+}
+
+test_execute_source_snapshot_list_background_cmd_with_sort_preserves_setup_failures() {
+	outfile="$TEST_TMPDIR/source_background_sort_setup.out"
+	errfile="$TEST_TMPDIR/source_background_sort_setup.err"
+	sorted_file="$TEST_TMPDIR/source_background_sort_setup.sorted"
+	status_files="$TEST_TMPDIR/source_background_sort_setup.status1
+$TEST_TMPDIR/source_background_sort_setup.status2"
+
+	wrapper_status=$(
+		(
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				return 11
+			}
+			set +e
+			zxfer_execute_source_snapshot_list_background_cmd_with_sort "printf x" "$outfile" "$errfile" "$sorted_file"
+			printf '%s\n' "$?"
+		)
+	)
+	output_quote_status=$(
+		(
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "/bin/sh"
+			}
+			zxfer_build_shell_command_from_argv() {
+				return 12
+			}
+			set +e
+			zxfer_execute_source_snapshot_list_background_cmd_with_sort "printf x" "$outfile" "$errfile" "$sorted_file"
+			printf '%s\n' "$?"
+		)
+	)
+	sorted_quote_status=$(
+		(
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "/bin/sh"
+			}
+			zxfer_build_shell_command_from_argv() {
+				if [ "$1" = "$outfile" ]; then
+					printf '%s\n' "$outfile"
+					return 0
+				fi
+				return 13
+			}
+			set +e
+			zxfer_execute_source_snapshot_list_background_cmd_with_sort "printf x" "$outfile" "$errfile" "$sorted_file"
+			printf '%s\n' "$?"
+		)
+	)
+	group_status=$(
+		(
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "/bin/sh"
+			}
+			zxfer_create_temp_file_group() {
+				return 14
+			}
+			set +e
+			zxfer_execute_source_snapshot_list_background_cmd_with_sort "printf x" "$outfile" "$errfile" "$sorted_file"
+			printf '%s\n' "$?"
+		)
+	)
+	source_status_quote_status=$(
+		(
+			STATUS_FILES="$status_files"
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "/bin/sh"
+			}
+			zxfer_create_temp_file_group() {
+				g_zxfer_temp_file_group_result=$STATUS_FILES
+				return 0
+			}
+			zxfer_build_shell_command_from_argv() {
+				if [ "$1" = "$outfile" ] || [ "$1" = "$sorted_file" ]; then
+					printf '%s\n' "$1"
+					return 0
+				fi
+				return 15
+			}
+			set +e
+			zxfer_execute_source_snapshot_list_background_cmd_with_sort "printf x" "$outfile" "$errfile" "$sorted_file"
+			printf '%s\n' "$?"
+		)
+	)
+	tee_status_quote_status=$(
+		(
+			STATUS_FILES="$status_files"
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "/bin/sh"
+			}
+			zxfer_create_temp_file_group() {
+				g_zxfer_temp_file_group_result=$STATUS_FILES
+				return 0
+			}
+			zxfer_build_shell_command_from_argv() {
+				if [ "$1" = "$outfile" ] ||
+					[ "$1" = "$sorted_file" ] ||
+					[ "$1" = "$TEST_TMPDIR/source_background_sort_setup.status1" ]; then
+					printf '%s\n' "$1"
+					return 0
+				fi
+				return 16
+			}
+			set +e
+			zxfer_execute_source_snapshot_list_background_cmd_with_sort "printf x" "$outfile" "$errfile" "$sorted_file"
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Background sort setup should fail closed when cleanup-wrapper lookup fails." \
+		1 "$wrapper_status"
+	assertEquals "Background sort setup should preserve raw-output quote failures." \
+		12 "$output_quote_status"
+	assertEquals "Background sort setup should preserve sorted-output quote failures." \
+		13 "$sorted_quote_status"
+	assertEquals "Background sort setup should preserve status-tempfile allocation failures." \
+		14 "$group_status"
+	assertEquals "Background sort setup should preserve source-status quote failures." \
+		15 "$source_status_quote_status"
+	assertEquals "Background sort setup should preserve tee-status quote failures." \
+		16 "$tee_status_quote_status"
+}
+
+test_execute_source_snapshot_list_background_cmd_with_sort_aborts_child_when_registration_fails() {
+	outfile="$TEST_TMPDIR/source_background_sort_register.out"
+	errfile="$TEST_TMPDIR/source_background_sort_register.err"
+	sorted_file="$TEST_TMPDIR/source_background_sort_register.sorted"
+	log="$TEST_TMPDIR/source_background_sort_register.log"
+	: >"$log"
+
+	(
+		LOG_FILE="$log"
+		zxfer_register_cleanup_pid() {
+			printf 'register=%s:%s\n' "$1" "$2" >>"$LOG_FILE"
+			return 1
+		}
+		zxfer_abort_direct_child_pid() {
+			printf 'abort=%s:%s:%s\n' "$1" "$2" "$3" >>"$LOG_FILE"
+			kill "$1" 2>/dev/null || :
+			return 0
+		}
+		set +e
+		zxfer_execute_source_snapshot_list_background_cmd_with_sort \
+			"sleep 5" "$outfile" "$errfile" "$sorted_file"
+		printf 'status=%s\n' "$?" >>"$LOG_FILE"
+	)
+
+	assertContains "Background sort registration failures should attempt to abort the launched helper." \
+		"$(cat "$log")" "abort="
+	assertContains "Background sort registration failures should return failure." \
+		"$(cat "$log")" "status=1"
+}
+
+test_execute_source_snapshot_name_list_background_sort_cmd_runs_without_error_file() {
+	sorted_file="$TEST_TMPDIR/source_name_background_sort.sorted"
+
+	(
+		zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+			"printf '%s\n' zeta alpha" "$sorted_file" || exit "$?"
+		l_pid=$g_last_background_pid
+		wait "$l_pid" || exit "$?"
+		zxfer_unregister_cleanup_pid "$l_pid"
+	)
+	status=$?
+
+	assertEquals "Identity-aware background sort should complete successfully without a stderr capture file." \
+		0 "$status"
+	assertEquals "Identity-aware background sort should write sorted source snapshot records." \
+		"alpha
+zeta" "$(cat "$sorted_file")"
+}
+
+test_execute_source_snapshot_name_list_background_sort_cmd_filters_excluded_snapshots_before_sort() {
+	sorted_file="$TEST_TMPDIR/source_name_background_sort_filtered.sorted"
+
+	(
+		g_option_x_exclude_datasets='/replica$'
+		zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+			"printf '%s\n' tank/src/replica@snap2 tank/src/app@snap2 tank/src/app@snap1" \
+			"$sorted_file" || exit "$?"
+		l_pid=$g_last_background_pid
+		wait "$l_pid" || exit "$?"
+		zxfer_unregister_cleanup_pid "$l_pid"
+	)
+	status=$?
+
+	assertEquals "Name-only background sort should complete successfully when exclude filtering is active." \
+		0 "$status"
+	assertEquals "Name-only background sort should remove excluded datasets before sorting the no-op proof list." \
+		"tank/src/app@snap1
+tank/src/app@snap2" "$(cat "$sorted_file")"
+}
+
+test_execute_source_snapshot_name_list_background_sort_cmd_preserves_setup_failures() {
+	sorted_file="$TEST_TMPDIR/source_name_background_sort_setup.sorted"
+	status_file="$TEST_TMPDIR/source_name_background_sort_setup.status"
+
+	wrapper_status=$(
+		(
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				return 21
+			}
+			set +e
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				"printf x" "$sorted_file"
+			printf '%s\n' "$?"
+		)
+	)
+	output_quote_status=$(
+		(
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "/bin/sh"
+			}
+			zxfer_build_shell_command_from_argv() {
+				return 22
+			}
+			set +e
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				"printf x" "$sorted_file"
+			printf '%s\n' "$?"
+		)
+	)
+	temp_status=$(
+		(
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "/bin/sh"
+			}
+			zxfer_get_temp_file() {
+				return 23
+			}
+			set +e
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				"printf x" "$sorted_file"
+			printf '%s\n' "$?"
+		)
+	)
+	status_quote_status=$(
+		(
+			STATUS_FILE="$status_file"
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "/bin/sh"
+			}
+			zxfer_get_temp_file() {
+				g_zxfer_temp_file_result=$STATUS_FILE
+				: >"$STATUS_FILE"
+				return 0
+			}
+			zxfer_build_shell_command_from_argv() {
+				if [ "$1" = "$sorted_file" ]; then
+					printf '%s\n' "$1"
+					return 0
+				fi
+				return 24
+			}
+			set +e
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				"printf x" "$sorted_file"
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Name-only background sort setup should fail closed when cleanup-wrapper lookup fails." \
+		1 "$wrapper_status"
+	assertEquals "Name-only background sort setup should preserve sorted-output quote failures." \
+		22 "$output_quote_status"
+	assertEquals "Name-only background sort setup should preserve temp-file allocation failures." \
+		23 "$temp_status"
+	assertEquals "Name-only background sort setup should preserve status-file quote failures." \
+		24 "$status_quote_status"
+	assertFalse "Name-only background sort setup should clean up the status file after quote failures." \
+		"[ -e '$status_file' ]"
+}
+
+test_execute_source_snapshot_name_list_background_sort_cmd_aborts_child_when_registration_fails() {
+	sorted_file="$TEST_TMPDIR/source_name_background_sort_register.sorted"
+	log="$TEST_TMPDIR/source_name_background_sort_register.log"
+	: >"$log"
+
+	(
+		LOG_FILE="$log"
+		zxfer_register_cleanup_pid() {
+			printf 'register=%s:%s\n' "$1" "$2" >>"$LOG_FILE"
+			return 1
+		}
+		zxfer_abort_direct_child_pid() {
+			printf 'abort=%s:%s:%s\n' "$1" "$2" "$3" >>"$LOG_FILE"
+			kill "$1" 2>/dev/null || :
+			return 0
+		}
+		set +e
+		zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+			"sleep 5" "$sorted_file"
+		printf 'status=%s\n' "$?" >>"$LOG_FILE"
+	)
+
+	assertContains "Name-only background sort registration failures should abort the launched helper." \
+		"$(cat "$log")" "abort="
+	assertContains "Name-only background sort registration failures should return failure." \
+		"$(cat "$log")" "status=1"
+}
+
+test_write_snapshot_delta_files_splits_both_diff_directions() {
+	source_file="$TEST_TMPDIR/source_delta_split.txt"
+	dest_file="$TEST_TMPDIR/dest_delta_split.txt"
+	missing_file="$TEST_TMPDIR/source_delta_missing.txt"
+	extra_file="$TEST_TMPDIR/destination_delta_extra.txt"
+	cat <<'EOF' >"$source_file"
+tank/src@same	111
+tank/src@source-only	222
+EOF
+	cat <<'EOF' >"$dest_file"
+tank/src@dest-only	333
+tank/src@same	999
+EOF
+	sort "$source_file" -o "$source_file"
+	sort "$dest_file" -o "$dest_file"
+
+	zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file"
+
+	assertEquals "Single-pass recursive diff should preserve source-only and GUID-divergent source records." \
+		"tank/src@same	111
+tank/src@source-only	222" "$(cat "$missing_file")"
+	assertEquals "Single-pass recursive diff should strip only the comm prefix from destination-only records." \
+		"tank/src@dest-only	333
+tank/src@same	999" "$(cat "$extra_file")"
+}
+
+test_write_snapshot_delta_files_preserves_tempfile_failures() {
+	source_file="$TEST_TMPDIR/source_delta_tempfail.txt"
+	dest_file="$TEST_TMPDIR/dest_delta_tempfail.txt"
+	missing_file="$TEST_TMPDIR/source_delta_tempfail_missing.txt"
+	extra_file="$TEST_TMPDIR/destination_delta_tempfail_extra.txt"
 	: >"$source_file"
 	: >"$dest_file"
 
 	set +e
 	output=$(
 		(
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
+			zxfer_get_temp_file() {
+				return 12
 			}
-			zxfer_diff_snapshot_lists "$source_file" "$dest_file" "unknown_mode"
+			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file"
 		)
 	)
 	status=$?
 
-	assertEquals "Unknown diff modes should abort." 1 "$status"
-	assertContains "Unknown diff modes should include the requested mode." \
-		"$output" "Unknown snapshot diff mode: unknown_mode"
+	assertEquals "Single-pass recursive diff should preserve combined-delta tempfile allocation failures." \
+		12 "$status"
+	assertEquals "Single-pass recursive diff tempfile failures should not emit stdout noise." \
+		"" "$output"
 }
 
-test_reverse_numbered_line_stream_preserves_full_payload_for_seven_digit_line_numbers() {
-	output=$(
-		cat <<'EOF' | zxfer_reverse_numbered_line_stream
-     2	tank/src@snap-b
-1000000	tank/src@snap-million
-     1	tank/src@snap-a
-EOF
-	)
+test_write_snapshot_delta_files_preserves_source_stage_failures() {
+	source_file="$TEST_TMPDIR/source_delta_source_stage.txt"
+	dest_file="$TEST_TMPDIR/dest_delta_source_stage.txt"
+	missing_file="$TEST_TMPDIR/source_delta_source_stage_missing.txt"
+	extra_file="$TEST_TMPDIR/destination_delta_source_stage_extra.txt"
+	: >"$source_file"
+	: >"$dest_file"
 
-	assertEquals "Reversing numbered snapshot listings should preserve the full payload once line numbers grow past six digits." \
-		"tank/src@snap-million
-tank/src@snap-b
-tank/src@snap-a" "$output"
-}
-
-test_reverse_numbered_line_stream_uses_linear_reverse_for_monotonic_numbered_input() {
+	set +e
 	output=$(
 		(
-			zxfer_reverse_numbered_file_lines_with_sort() {
-				printf '%s\n' "sort-fallback-should-not-run"
-				return 23
+			zxfer_write_runtime_artifact_file() {
+				return 13
 			}
-			cat <<'EOF' | zxfer_reverse_numbered_line_stream
-     1	tank/src@snap-a
-     2	tank/src@snap-b
-1000000	tank/src@snap-million
-EOF
+			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file"
 		)
 	)
+	status=$?
 
-	assertEquals "Monotonic numbered input should use the linear reverse path instead of the sort fallback." \
-		"tank/src@snap-million
-tank/src@snap-b
-tank/src@snap-a" "$output"
+	assertEquals "Single-pass recursive diff should preserve source-delta staging failures." \
+		13 "$status"
+	assertEquals "Source-delta staging failures should not emit stdout noise." \
+		"" "$output"
 }
 
-test_reverse_numbered_line_stream_preserves_full_payload_when_falling_back_to_sort() {
+test_write_snapshot_delta_files_preserves_destination_stage_failures() {
+	source_file="$TEST_TMPDIR/source_delta_destination_stage.txt"
+	dest_file="$TEST_TMPDIR/dest_delta_destination_stage.txt"
+	missing_file="$TEST_TMPDIR/source_delta_destination_stage_missing.txt"
+	extra_file="$TEST_TMPDIR/destination_delta_destination_stage_extra.txt"
+	: >"$source_file"
+	: >"$dest_file"
+
+	set +e
 	output=$(
 		(
-			g_zxfer_linear_reverse_max_lines=1
-			cat <<'EOF' | zxfer_reverse_numbered_line_stream
-     2	tank/src@snap-b
-1000000	tank/src@snap-million
-     1	tank/src@snap-a
-EOF
+			write_call_count=0
+			zxfer_write_runtime_artifact_file() {
+				write_call_count=$((write_call_count + 1))
+				if [ "$write_call_count" -eq 2 ]; then
+					return 14
+				fi
+				: >"$1"
+			}
+			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file"
 		)
 	)
+	status=$?
 
-	assertEquals "The large-input fallback should preserve the full payload once line numbers grow past six digits." \
-		"tank/src@snap-million
-tank/src@snap-b
-tank/src@snap-a" "$output"
+	assertEquals "Single-pass recursive diff should preserve destination-delta staging failures." \
+		14 "$status"
+	assertEquals "Destination-delta staging failures should not emit stdout noise." \
+		"" "$output"
+}
+
+test_write_snapshot_delta_files_preserves_splitter_failures() {
+	source_file="$TEST_TMPDIR/source_delta_splitter_fail.txt"
+	dest_file="$TEST_TMPDIR/dest_delta_splitter_fail.txt"
+	missing_file="$TEST_TMPDIR/source_delta_splitter_fail_missing.txt"
+	extra_file="$TEST_TMPDIR/destination_delta_splitter_fail_extra.txt"
+	fake_awk="$TEST_TMPDIR/delta_splitter_awk_fail.sh"
+	printf '%s\n' "tank/src@source-only" >"$source_file"
+	: >"$dest_file"
+	cat >"$fake_awk" <<'EOF'
+#!/bin/sh
+printf '%s\n' "awk failed" >&2
+exit 15
+EOF
+	chmod +x "$fake_awk"
+
+	set +e
+	output=$(
+		(
+			zxfer_get_temp_file() {
+				g_zxfer_temp_file_result="$TEST_TMPDIR/delta_splitter_combined.tmp"
+				: >"$g_zxfer_temp_file_result"
+				printf '%s\n' "$TEST_TMPDIR/stdout-only-delta-splitter.tmp"
+			}
+			g_cmd_awk="$fake_awk"
+			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file"
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Single-pass recursive diff should preserve splitter failures." \
+		15 "$status"
+	assertContains "Splitter failures should preserve awk diagnostics." \
+		"$output" "awk failed"
 }
 
 test_reverse_file_lines_uses_linear_reverse_for_small_inputs() {
@@ -1444,56 +2703,6 @@ EOF
 
 	assertEquals "Malformed line-count helper output should disable the linear awk fast path." \
 		"status=1" "$output"
-}
-
-test_reverse_numbered_line_stream_reports_tempfile_allocation_failures() {
-	output=$(
-		(
-			zxfer_get_temp_file() {
-				return 44
-			}
-			printf '%s\n' "     1	tank/src@snap-a" | zxfer_reverse_numbered_line_stream
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertEquals "zxfer_reverse_numbered_line_stream should preserve temp-file allocation failures." \
-		"status=44" "$output"
-}
-
-test_reverse_numbered_line_stream_returns_failure_when_buffering_fails() {
-	output=$(
-		(
-			cat() {
-				return 1
-			}
-			printf '%s\n' "     1	tank/src@snap-a" | zxfer_reverse_numbered_line_stream
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertEquals "zxfer_reverse_numbered_line_stream should fail cleanly when it cannot buffer stdin." \
-		"status=1" "$output"
-}
-
-test_reverse_numbered_line_stream_uses_current_shell_temp_file_result() {
-	output=$(
-		(
-			zxfer_get_temp_file() {
-				g_zxfer_temp_file_result="$TEST_TMPDIR/reverse_numbered_current_shell.tmp"
-				: >"$g_zxfer_temp_file_result"
-				printf '%s\n' "$TEST_TMPDIR/stdout-only-reverse-numbered"
-			}
-			cat <<'EOF' | zxfer_reverse_numbered_line_stream
-     1	tank/src@snap-a
-     2	tank/src@snap-b
-EOF
-		)
-	)
-
-	assertEquals "Reversing numbered snapshot lines should use the current-shell temp-file result instead of stdout." \
-		"tank/src@snap-b
-tank/src@snap-a" "$output"
 }
 
 test_zxfer_reverse_plain_file_lines_with_sort_reports_tempfile_allocation_failures() {
@@ -1617,6 +2826,47 @@ EOF
 		"$output" "invalid option"
 }
 
+test_set_g_recursive_source_list_filters_excluded_snapshots_before_noop_compare() {
+	source_tmp="$TEST_TMPDIR/source_excluded_noop_snapshots.txt"
+	dest_tmp="$TEST_TMPDIR/dest_excluded_noop_snapshots.txt"
+	output_file="$TEST_TMPDIR/excluded_noop_output.txt"
+	cat <<'EOF' >"$source_tmp"
+tank/src/replica@source-only
+tank/src@a
+EOF
+	cat <<'EOF' >"$dest_tmp"
+tank/src/replica@destination-only
+tank/src@a
+EOF
+	sort "$dest_tmp" -o "$dest_tmp"
+	g_option_R_recursive="tank/src"
+	g_option_x_exclude_datasets='/replica$'
+
+	(
+		zxfer_write_snapshot_delta_files() {
+			printf '%s\n' "unexpected-diff"
+			return 99
+		}
+		zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+		printf 'source=%s\n' "$g_recursive_source_list"
+		printf 'dest=%s\n' "$g_recursive_destination_extra_dataset_list"
+		printf 'datasets=%s\n' "$g_recursive_source_dataset_list"
+	) >"$output_file"
+	status=$?
+	output=$(cat "$output_file")
+
+	assertEquals "Excluded source and destination snapshot rows should be removed before the exact no-op comparison." \
+		0 "$status"
+	assertNotContains "Excluded-only differences should not fall through to the full comm/splitter path." \
+		"$output" "unexpected-diff"
+	assertContains "Excluded-only differences should leave no source datasets queued for transfer." \
+		"$output" "source="
+	assertContains "Excluded-only differences should leave no destination datasets queued for deletion." \
+		"$output" "dest="
+	assertContains "Recursive no-op runs without property work should still avoid whole-tree source dataset inventory." \
+		"$output" "datasets="
+}
+
 test_write_destination_snapshot_list_to_files_outputs_empty_when_destination_missing() {
 	full_file="$TEST_TMPDIR/dest_missing_full.txt"
 	norm_file="$TEST_TMPDIR/dest_missing_norm.txt"
@@ -1688,6 +2938,26 @@ test_write_destination_snapshot_list_to_files_reports_snapshot_listing_failures(
 		"$output" "Failed to retrieve snapshot list from the destination."
 }
 
+test_write_destination_snapshot_list_to_files_reports_empty_stage_failures_when_destination_missing() {
+	full_file="$TEST_TMPDIR/dest_missing_stage_fail_full.txt"
+	norm_file="$TEST_TMPDIR/dest_missing_stage_fail_norm.txt"
+
+	zxfer_test_capture_subshell "
+		zxfer_exists_destination() {
+			printf '%s\n' 0
+		}
+		zxfer_write_runtime_artifact_file() {
+			return 42
+		}
+		zxfer_write_destination_snapshot_list_to_files '$full_file' '$norm_file'
+	"
+
+	assertEquals "Destination discovery should fail closed when staging an empty missing-destination snapshot list fails." \
+		42 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Missing destination staging failures should preserve the empty-list staging context." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to stage empty destination snapshot list."
+}
+
 test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing_slash_sources() {
 	full_file="$TEST_TMPDIR/dest_trailing_existing_full.txt"
 	norm_file="$TEST_TMPDIR/dest_trailing_existing_norm.txt"
@@ -1698,6 +2968,7 @@ test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing
 	g_destination="backup/dst"
 
 	(
+		g_option_V_very_verbose=1
 		zxfer_exists_destination() {
 			printf '%s\n' "$1" >"$arg_file"
 			printf '%s\n' 1
@@ -1711,7 +2982,7 @@ test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing
 			printf '%s\n' "backup/dst/child@snap2" "backup/dst@snap1"
 		}
 		g_RZFS="fake_rzfs"
-		zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
+		zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file" 2>/dev/null
 	)
 
 	assertEquals "Trailing-slash replication should probe the destination root dataset directly." \
@@ -1720,12 +2991,154 @@ test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing
 		"$(cat "$cmd_file")" "snapshot backup/dst"
 	assertNotContains "Trailing-slash replication should not append the source basename to the destination root." \
 		"$(cat "$cmd_file")" "backup/dst/src"
-	assertEquals "Trailing-slash replication should leave normalized destination snapshots rooted at the destination dataset." \
-		"backup/dst/child@snap2
-backup/dst@snap1" "$(cat "$norm_file")"
+	assertEquals "Trailing-slash replication should normalize destination snapshots into source-path form for recursive diffing." \
+		"tank/src/child@snap2
+tank/src@snap1" "$(cat "$norm_file")"
 }
 
-test_normalize_destination_snapshot_list_preserves_destination_when_trailing_slash_requested() {
+test_set_g_recursive_source_list_treats_trailing_slash_rewritten_destination_snapshots_as_common() {
+	source_tmp="$TEST_TMPDIR/source_trailing_common.txt"
+	dest_full_tmp="$TEST_TMPDIR/dest_trailing_common_full.txt"
+	dest_norm_tmp="$TEST_TMPDIR/dest_trailing_common_norm.txt"
+	g_initial_source_had_trailing_slash=1
+	g_initial_source="tank/src"
+	g_destination="backup/dst"
+	g_option_x_exclude_datasets=""
+	cat <<'EOF' >"$source_tmp"
+tank/src@snap1	111
+tank/src/child@snap2	222
+EOF
+	cat <<'EOF' >"$dest_full_tmp"
+backup/dst@snap1	111
+backup/dst/child@snap2	222
+EOF
+
+	zxfer_normalize_destination_snapshot_list "backup/dst" "$dest_full_tmp" "$dest_norm_tmp"
+	sort "$source_tmp" -o "$source_tmp"
+	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_norm_tmp" "$source_tmp"
+
+	assertEquals "Trailing-slash destination snapshots with matching GUIDs should not be queued as missing source work." \
+		"" "$g_recursive_source_list"
+	assertEquals "Trailing-slash destination snapshots with matching GUIDs should not be queued as destination-only deletes." \
+		"" "$g_recursive_destination_extra_dataset_list"
+}
+
+test_start_destination_snapshot_name_sorted_fifo_producer_streams_statuses_and_handles_registration_failures() {
+	zxfer_get_temp_file >/dev/null || fail "temp output setup failed"
+	destination_output=$g_zxfer_temp_file_result
+	stage_files=$(printf '%s\n%s\n%s\n%s\n' \
+		"$TEST_TMPDIR/dest_fifo.err" \
+		"$TEST_TMPDIR/dest_fifo.list.status" \
+		"$TEST_TMPDIR/dest_fifo.normalize.status" \
+		"$TEST_TMPDIR/dest_fifo.sort.status")
+	{
+		IFS= read -r err_file
+		IFS= read -r list_status_file
+		IFS= read -r normalize_status_file
+		IFS= read -r sort_status_file
+	} <<-EOF
+		$stage_files
+	EOF
+
+	zxfer_run_destination_zfs_cmd() {
+		printf '%s\n' "$*" >"$TEST_TMPDIR/dest_fifo.cmd"
+		printf '%s\n' "backup/dst/src@snapA"
+		printf '%s\n' "backup/dst/src/child@snapB"
+	}
+	# Run very-verbose so the lazily gated display render path is exercised.
+	g_option_V_very_verbose=1
+	zxfer_start_destination_snapshot_name_sorted_fifo_producer \
+		"$destination_output" "$err_file" "$list_status_file" "$normalize_status_file" "$sort_status_file" 2>/dev/null
+	g_option_V_very_verbose=0
+	producer_pid=$g_last_background_pid
+	wait "$producer_pid"
+	producer_status=$?
+	zxfer_unregister_cleanup_pid "$producer_pid"
+
+	registration_status=$(
+		(
+			zxfer_get_temp_file >/dev/null || exit 1
+			test_output=$g_zxfer_temp_file_result
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "backup/dst/src@snapA"
+			}
+			zxfer_register_cleanup_pid() {
+				return 1
+			}
+			zxfer_abort_fast_noop_background_pid() {
+				kill "$1" 2>/dev/null || :
+				return 0
+			}
+			set +e
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer \
+				"$test_output" \
+				"$TEST_TMPDIR/dest_fifo_registration.err" \
+				"$TEST_TMPDIR/dest_fifo_registration.list.status" \
+				"$TEST_TMPDIR/dest_fifo_registration.normalize.status" \
+				"$TEST_TMPDIR/dest_fifo_registration.sort.status"
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Destination snapshot producer should complete successfully." 0 "$producer_status"
+	assertContains "Destination FIFO producer should keep the identity-aware unsorted snapshot query." \
+		"$(cat "$TEST_TMPDIR/dest_fifo.cmd")" "list -Hr -o name,guid -t snapshot backup/dst/src"
+	assertEquals "Destination FIFO producer should normalize and byte-sort destination paths." \
+		"tank/src/child@snapB
+tank/src@snapA" "$(cat "$destination_output")"
+	assertEquals "Destination FIFO producer should record the list status." \
+		0 "$(cat "$list_status_file")"
+	assertEquals "Destination FIFO producer should record the normalize status." \
+		0 "$(cat "$normalize_status_file")"
+	assertEquals "Destination FIFO producer should record the destination stream status." \
+		0 "$(cat "$sort_status_file")"
+	assertEquals "Destination FIFO producer should fail closed when cleanup registration fails." \
+		1 "$registration_status"
+}
+
+test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
+	zxfer_abort_fast_noop_background_pid "" "invalid"
+	invalid_status=$?
+	log="$TEST_TMPDIR/fast_noop_abort.log"
+	: >"$log"
+
+	(
+		LOG_FILE="$log"
+		zxfer_unregister_cleanup_pid() {
+			printf 'unregister=%s\n' "$1" >>"$LOG_FILE"
+			return 0
+		}
+		(exit 0) &
+		dead_pid=$!
+		wait "$dead_pid" 2>/dev/null || :
+		zxfer_abort_fast_noop_background_pid "$dead_pid" "finished proof helper"
+	)
+	(
+		LOG_FILE="$log"
+		zxfer_abort_cleanup_pid() {
+			printf 'cleanup=%s\n' "$1" >>"$LOG_FILE"
+			return 1
+		}
+		zxfer_abort_direct_child_pid() {
+			printf 'direct=%s:%s\n' "$1" "$2" >>"$LOG_FILE"
+			return 1
+		}
+		sleep 5 &
+		child_pid=$!
+		zxfer_abort_fast_noop_background_pid "$child_pid" "test proof helper"
+		wait "$child_pid" 2>/dev/null || :
+	)
+
+	assertEquals "Invalid fast no-op abort pids should be ignored." 0 "$invalid_status"
+	assertContains "Fast no-op abort should unregister helpers that already exited." \
+		"$(cat "$log")" "unregister="
+	assertContains "Fast no-op abort should try the registered cleanup helper first." \
+		"$(cat "$log")" "cleanup="
+	assertContains "Fast no-op abort should fall back to direct-child cleanup before plain kill." \
+		"$(cat "$log")" "direct="
+}
+
+test_normalize_destination_snapshot_list_rewrites_trailing_slash_destination_to_source_paths() {
 	input_file="$TEST_TMPDIR/dest_trailing_input.txt"
 	output_file="$TEST_TMPDIR/dest_trailing_output.txt"
 	g_initial_source_had_trailing_slash=1
@@ -1735,11 +3148,13 @@ backup/dst/child@snap2
 backup/dst@snap1
 EOF
 
-	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+	# Run very-verbose so the lazily gated display render path is exercised.
+	g_option_V_very_verbose=1
+	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file" 2>/dev/null
 
-	assertEquals "Trailing-slash destinations should be sorted without source-prefix rewriting." \
-		"backup/dst/child@snap2
-backup/dst@snap1" "$(cat "$output_file")"
+	assertEquals "Trailing-slash destinations should be sorted after source-prefix rewriting." \
+		"tank/src/child@snap2
+tank/src@snap1" "$(cat "$output_file")"
 }
 
 test_normalize_destination_snapshot_list_treats_temp_paths_as_literal() {
@@ -1769,7 +3184,9 @@ test_normalize_destination_snapshot_list_rewrites_only_leading_destination_prefi
 		printf '%s\t%s\n' "backup/dst@snap1" "111"
 	} >"$input_file"
 
-	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+	# Run very-verbose so the lazily gated display render path is exercised.
+	g_option_V_very_verbose=1
+	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file" 2>/dev/null
 
 	expected=$(printf '%s\t%s\n%s\t%s' \
 		"tank/src/backup/dst/child@snap2" "222" \
@@ -1793,6 +3210,212 @@ EOF
 	expected=$(printf '%s\n%s' "backup/dst-old@snap1" "tank/src@snap1")
 	assertEquals "Destination normalization should not rewrite datasets that only share a text prefix." \
 		"$expected" "$(cat "$output_file")"
+}
+
+test_normalize_destination_snapshot_list_preserves_status_tempfile_failures() {
+	input_file="$TEST_TMPDIR/dest_normalize_temp_failure_input.txt"
+	output_file="$TEST_TMPDIR/dest_normalize_temp_failure_output.txt"
+	g_initial_source_had_trailing_slash=0
+	g_initial_source="tank/src"
+	printf '%s\n' "backup/dst@snap1" >"$input_file"
+
+	status=$(
+		(
+			zxfer_get_temp_file() {
+				return 63
+			}
+			set +e
+			zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Destination normalization should preserve status-tempfile allocation failures." \
+		63 "$status"
+}
+
+test_normalize_destination_snapshot_list_preserves_awk_failures() {
+	input_file="$TEST_TMPDIR/dest_normalize_awk_failure_input.txt"
+	output_file="$TEST_TMPDIR/dest_normalize_awk_failure_output.txt"
+	fake_awk="$TEST_TMPDIR/dest_normalize_awk_failure.sh"
+	g_initial_source_had_trailing_slash=0
+	g_initial_source="tank/src"
+	printf '%s\n' "backup/dst@snap1" >"$input_file"
+	cat >"$fake_awk" <<'EOF'
+#!/bin/sh
+printf '%s\n' "normalize awk failed" >&2
+exit 42
+EOF
+	chmod +x "$fake_awk"
+
+	output=$(
+		(
+			g_cmd_awk=$fake_awk
+			set +e
+			zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+			printf 'status=%s\n' "$?"
+		) 2>&1
+	)
+
+	assertContains "Destination normalization should preserve awk diagnostics." \
+		"$output" "normalize awk failed"
+	assertContains "Destination normalization should preserve awk exit status." \
+		"$output" "status=42"
+}
+
+test_normalize_destination_snapshot_stream_for_noop_proof_rewrites_and_filters() {
+	g_initial_source="tank/src"
+	g_initial_source_had_trailing_slash=0
+	g_option_x_exclude_datasets='/replica$'
+
+	output=$(
+		printf '%s\n' \
+			"backup/dst/src@snapA" \
+			"backup/dst/src/replica@snapB" |
+			zxfer_normalize_destination_snapshot_stream_for_noop_proof "backup/dst/src"
+	)
+
+	assertEquals "Streaming destination normalization should rewrite prefixes and filter excluded datasets." \
+		"tank/src@snapA" "$output"
+}
+
+test_normalize_destination_snapshot_stream_for_noop_proof_handles_trailing_slash_streams() {
+	g_initial_source="tank/src"
+	g_initial_source_had_trailing_slash=1
+	g_option_x_exclude_datasets=""
+
+	pass_output=$(
+		printf '%s\n' "backup/dst@snapA" |
+			zxfer_normalize_destination_snapshot_stream_for_noop_proof "backup/dst"
+	)
+	g_option_x_exclude_datasets='/replica$'
+	filter_output=$(
+		printf '%s\n' "backup/dst@snapA" "backup/dst/replica@snapB" |
+			zxfer_normalize_destination_snapshot_stream_for_noop_proof "backup/dst"
+	)
+
+	assertEquals "Trailing-slash stream normalization without excludes should rewrite into source-path form." \
+		"tank/src@snapA" "$pass_output"
+	assertEquals "Trailing-slash stream normalization should rewrite before filtering excluded datasets." \
+		"tank/src@snapA" "$filter_output"
+}
+
+test_filter_snapshot_file_with_excludes_filters_by_snapshot_dataset() {
+	input_file="$TEST_TMPDIR/snapshot_exclude_filter_input.txt"
+	output_file="$TEST_TMPDIR/snapshot_exclude_filter_output.txt"
+	cat <<'EOF' >"$input_file"
+tank/src/replica@snapA
+tank/src@snap-replica
+tank/src@snapA	guidA
+EOF
+	g_option_x_exclude_datasets='/replica$'
+
+	zxfer_filter_snapshot_file_with_excludes "$input_file" "$output_file"
+
+	assertEquals "Snapshot-list exclude filtering should match dataset names, not snapshot names or GUID fields." \
+		"tank/src@snap-replica
+tank/src@snapA	guidA" "$(cat "$output_file")"
+}
+
+test_filter_snapshot_file_with_excludes_handles_comm_destination_rows() {
+	input_file="$TEST_TMPDIR/snapshot_exclude_filter_comm_input.txt"
+	output_file="$TEST_TMPDIR/snapshot_exclude_filter_comm_output.txt"
+	{
+		printf '%s\n' "tank/src/replica@source-only"
+		printf '\t%s\n' "tank/src/replica@destination-only"
+		printf '\t%s\n' "tank/src@destination-only"
+	} >"$input_file"
+	g_option_x_exclude_datasets='/replica$'
+
+	zxfer_filter_snapshot_file_with_excludes "$input_file" "$output_file"
+
+	assertEquals "Snapshot-list exclude filtering should evaluate destination-only comm rows after their diff prefix." \
+		"	tank/src@destination-only" "$(cat "$output_file")"
+}
+
+test_filter_snapshot_file_with_excludes_copies_input_without_patterns() {
+	input_file="$TEST_TMPDIR/snapshot_exclude_passthrough_input.txt"
+	output_file="$TEST_TMPDIR/snapshot_exclude_passthrough_output.txt"
+	cat <<'EOF' >"$input_file"
+tank/src/app@snap2
+tank/src/app@snap1
+EOF
+	g_option_x_exclude_datasets=""
+
+	zxfer_filter_snapshot_file_with_excludes "$input_file" "$output_file"
+
+	assertEquals "Snapshot-list exclude filtering should copy records unchanged when no exclude pattern is configured." \
+		"tank/src/app@snap2
+tank/src/app@snap1" "$(cat "$output_file")"
+}
+
+test_snapshot_discovery_need_helpers_cover_recursive_shortcuts() {
+	output=$(
+		(
+			set +e
+			g_option_R_recursive="-R"
+			g_option_P_transfer_property=1
+			zxfer_snapshot_discovery_needs_source_dataset_inventory
+			printf 'source_props=%s\n' "$?"
+			g_option_P_transfer_property=0
+			g_option_U_skip_unsupported_properties=1
+			g_recursive_source_list=""
+			zxfer_snapshot_discovery_needs_source_dataset_inventory
+			printf 'source_unsupported_noop=%s\n' "$?"
+			g_recursive_source_list="tank/src"
+			zxfer_snapshot_discovery_needs_source_dataset_inventory
+			printf 'source_unsupported_work=%s\n' "$?"
+			g_option_U_skip_unsupported_properties=0
+
+			g_recursive_source_list="tank/src"
+			zxfer_snapshot_discovery_needs_record_caches
+			printf 'record_source=%s\n' "$?"
+			g_recursive_source_list=""
+			g_option_d_delete_destination_snapshots=1
+			g_recursive_destination_extra_dataset_list="tank/src"
+			zxfer_snapshot_discovery_needs_record_caches
+			printf 'record_delete=%s\n' "$?"
+			g_recursive_destination_extra_dataset_list=""
+			g_option_d_delete_destination_snapshots=0
+			g_option_o_override_property="compression=lz4"
+			zxfer_snapshot_discovery_needs_record_caches
+			printf 'record_props=%s\n' "$?"
+
+			g_recursive_source_list="tank/src"
+			zxfer_snapshot_discovery_needs_destination_dataset_inventory
+			printf 'dest_source=%s\n' "$?"
+			g_recursive_source_list=""
+			g_option_o_override_property=""
+			g_option_d_delete_destination_snapshots=1
+			g_recursive_destination_extra_dataset_list="tank/src"
+			zxfer_snapshot_discovery_needs_destination_dataset_inventory
+			printf 'dest_delete=%s\n' "$?"
+			g_recursive_destination_extra_dataset_list=""
+			g_option_d_delete_destination_snapshots=0
+			g_option_P_transfer_property=1
+			zxfer_snapshot_discovery_needs_destination_dataset_inventory
+			printf 'dest_props=%s\n' "$?"
+		)
+	)
+
+	assertContains "Property transfer should require source dataset inventory." \
+		"$output" "source_props=0"
+	assertContains "Unsupported-property scanning should not require source dataset inventory after recursive no-op discovery." \
+		"$output" "source_unsupported_noop=1"
+	assertContains "Unsupported-property scanning should require source dataset inventory when source work may need create filtering." \
+		"$output" "source_unsupported_work=0"
+	assertContains "Pending transfers should retain snapshot record caches." \
+		"$output" "record_source=0"
+	assertContains "Pending delete inspection should retain snapshot record caches." \
+		"$output" "record_delete=0"
+	assertContains "Property work should retain snapshot record caches." \
+		"$output" "record_props=0"
+	assertContains "Pending transfers should require destination dataset inventory." \
+		"$output" "dest_source=0"
+	assertContains "Pending destination deletes should require destination dataset inventory." \
+		"$output" "dest_delete=0"
+	assertContains "Property work should require destination dataset inventory." \
+		"$output" "dest_props=0"
 }
 
 test_set_g_recursive_source_list_logs_when_no_new_snapshots_exist() {
@@ -1842,6 +3465,41 @@ EOF
 		"$output" "$TEST_TMPDIR/zxfer."
 	assertContains "Verbose mode should explain when no new snapshots need transfer." \
 		"$(cat "$output_file")" "No new snapshots to transfer."
+}
+
+test_set_g_recursive_source_list_uses_existing_presorted_source_sidecar() {
+	source_tmp="$TEST_TMPDIR/source_presorted_unused_raw.txt"
+	presorted_tmp="$TEST_TMPDIR/source_presorted_existing.txt"
+	dest_tmp="$TEST_TMPDIR/dest_presorted_existing.txt"
+	cat <<'EOF' >"$presorted_tmp"
+tank/src@a
+tank/src@b
+EOF
+	cp "$presorted_tmp" "$dest_tmp"
+	rm -f "$source_tmp"
+
+	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp" "$presorted_tmp"
+
+	assertEquals "Recursive planning should use an existing sorted source sidecar without reading the raw source list." \
+		"" "$g_recursive_source_list"
+}
+
+test_set_g_recursive_source_list_reports_missing_presorted_source_sidecar() {
+	source_tmp="$TEST_TMPDIR/source_presorted_missing_raw.txt"
+	dest_tmp="$TEST_TMPDIR/dest_presorted_missing.txt"
+	presorted_tmp="$TEST_TMPDIR/source_presorted_missing.txt"
+	: >"$source_tmp"
+	: >"$dest_tmp"
+	rm -f "$presorted_tmp"
+
+	zxfer_test_capture_subshell "
+		zxfer_set_g_recursive_source_list '$source_tmp' '$dest_tmp' '$presorted_tmp'
+	"
+
+	assertEquals "Recursive planning should fail closed when the advertised sorted source sidecar is missing." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Missing sorted source sidecar failures should preserve recursive delta context." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to locate staged sorted source snapshots for recursive delta planning."
 }
 
 test_set_g_recursive_source_list_tracks_destination_only_snapshot_datasets() {
@@ -1903,233 +3561,34 @@ EOF
 		"$(cat "$output_file")" "dest=tank/src"
 }
 
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_updates_lists_in_current_shell() {
-	source_tmp="$TEST_TMPDIR/refine_guid_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_guid_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-	g_recursive_source_list=""
-	g_recursive_destination_extra_dataset_list=""
+test_set_g_recursive_source_list_verbose_summarizes_dirty_recursive_delta() {
+	source_tmp="$TEST_TMPDIR/source_verbose_delta.txt"
+	dest_tmp="$TEST_TMPDIR/dest_verbose_delta.txt"
+	cat <<'EOF' >"$source_tmp"
+tank/src/app@snapA	111
+tank/src/db@snapB	222
+tank/src@snap0	000
+EOF
+	cat <<'EOF' >"$dest_tmp"
+tank/src/old@snapZ	999
+tank/src@snap0	000
+EOF
+	sort "$source_tmp" -o "$source_tmp"
+	sort "$dest_tmp" -o "$dest_tmp"
+	g_option_v_verbose=1
+	g_option_V_very_verbose=0
+	g_option_x_exclude_datasets=""
 
-	zxfer_get_snapshot_identity_records_for_dataset() {
-		case "$1:$2" in
-		source:tank/src)
-			printf '%s\n' "tank/src@same	111"
-			;;
-		destination:backup/dst/src)
-			printf '%s\n' "backup/dst/src@same	999"
-			;;
-		*)
-			return 1
-			;;
-		esac
-	}
+	output=$(zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp" "$source_tmp")
 
-	zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-
-	assertEquals "Lazy identity refinement should add guid-divergent datasets back into the source-delta list in the current shell." \
-		"tank/src" "$g_recursive_source_list"
-	assertEquals "Lazy identity refinement should add guid-divergent datasets back into the destination-extra list in the current shell." \
-		"tank/src" "$g_recursive_destination_extra_dataset_list"
-	unset -f zxfer_get_snapshot_identity_records_for_dataset
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_identity_probe_failures() {
-	source_tmp="$TEST_TMPDIR/refine_guid_error_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_guid_error_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			zxfer_get_snapshot_identity_records_for_dataset() {
-				return 1
-			}
-
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when a source identity probe fails." 1 "$status"
-	assertContains "Source identity probe failures should surface the dataset that could not be validated." \
-		"$output" "Failed to retrieve source snapshot identities for [tank/src]."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_destination_identity_probe_failures() {
-	source_tmp="$TEST_TMPDIR/refine_guid_dest_error_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_guid_dest_error_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			zxfer_get_snapshot_identity_records_for_dataset() {
-				if [ "$1:$2" = "source:tank/src" ]; then
-					printf '%s\n' "tank/src@same	111"
-				elif [ "$1:$2" = "destination:backup/dst/src" ]; then
-					return 1
-				fi
-			}
-
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when a destination identity probe fails." 1 "$status"
-	assertContains "Destination identity probe failures should surface the mapped destination dataset." \
-		"$output" "Failed to retrieve destination snapshot identities for [backup/dst/src]."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_source_identity_diff_failures() {
-	source_tmp="$TEST_TMPDIR/refine_guid_source_diff_error_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_guid_source_diff_error_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			zxfer_get_snapshot_identity_records_for_dataset() {
-				if [ "$1:$2" = "source:tank/src" ]; then
-					printf '%s\n' "tank/src@same\t111"
-				elif [ "$1:$2" = "destination:backup/dst/src" ]; then
-					printf '%s\n' "backup/dst/src@same\t111"
-				fi
-			}
-			zxfer_diff_snapshot_lists() {
-				if [ "$3" = "source_minus_destination" ]; then
-					return 4
-				fi
-				return 0
-			}
-
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should preserve source-minus-destination identity diff failures." \
-		4 "$status"
-	assertContains "Source identity diff failures should surface the recursive dataset being validated." \
-		"$output" "Failed to diff source and destination snapshot identities for [tank/src]."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_destination_identity_diff_failures() {
-	source_tmp="$TEST_TMPDIR/refine_guid_destination_diff_error_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_guid_destination_diff_error_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			zxfer_get_snapshot_identity_records_for_dataset() {
-				if [ "$1:$2" = "source:tank/src" ]; then
-					printf '%s\n' "tank/src@same\t111"
-				elif [ "$1:$2" = "destination:backup/dst/src" ]; then
-					printf '%s\n' "backup/dst/src@same\t111"
-				fi
-			}
-			zxfer_diff_snapshot_lists() {
-				if [ "$3" = "destination_minus_source" ]; then
-					return 5
-				fi
-				return 0
-			}
-
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should preserve destination-minus-source identity diff failures." \
-		5 "$status"
-	assertContains "Destination identity diff failures should surface the recursive dataset being validated." \
-		"$output" "Failed to diff destination and source snapshot identities for [tank/src]."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_merges_existing_lists_in_current_shell() {
-	source_tmp="$TEST_TMPDIR/refine_guid_merge_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_guid_merge_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-	g_recursive_source_list="tank/already"
-	g_recursive_destination_extra_dataset_list="tank/extra"
-
-	zxfer_get_snapshot_identity_records_for_dataset() {
-		case "$1:$2" in
-		source:tank/src)
-			printf '%s\n' "tank/src@same	111"
-			;;
-		destination:backup/dst/src)
-			printf '%s\n' "backup/dst/src@same	999"
-			;;
-		*)
-			return 1
-			;;
-		esac
-	}
-
-	zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-
-	assertEquals "Guid-divergent datasets should be merged into the existing source-delta list." \
-		"tank/already
-tank/src" "$g_recursive_source_list"
-	assertEquals "Guid-divergent datasets should be merged into the existing destination-extra list." \
-		"tank/extra
-tank/src" "$g_recursive_destination_extra_dataset_list"
-	unset -f zxfer_get_snapshot_identity_records_for_dataset
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_common_dataset_derivation_awk_failures() {
-	source_tmp="$TEST_TMPDIR/refine_common_dataset_awk_error_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_common_dataset_awk_error_dest.txt"
-	fake_awk="$TEST_TMPDIR/refine_common_dataset_awk_fail.sh"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-	create_selective_awk_failure_bin "$fake_awk" 11
-
-	set +e
-	output=$(
-		(
-			g_cmd_awk="$fake_awk"
-
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should preserve common recursive dataset derivation failures." \
-		11 "$status"
-	assertContains "Common recursive dataset derivation failures should preserve the upstream awk failure." \
-		"$output" "awk failed"
-	assertContains "Common recursive dataset derivation failures should report a specific identity-validation error." \
-		"$output" "Failed to derive recursive common dataset list for snapshot identity validation."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_invalid_exclude_pattern_failures() {
-	source_tmp="$TEST_TMPDIR/refine_invalid_exclude_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_invalid_exclude_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-	g_option_x_exclude_datasets='['
-
-	set +e
-	output=$(
-		(
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should preserve invalid exclude-filter statuses." \
-		2 "$status"
-	assertContains "Identity-validation exclude filter failures should report the candidate-dataset context." \
-		"$output" "Failed to filter recursive candidate dataset list against exclude patterns during snapshot identity validation."
+	assertContains "Verbose recursive delta output should show compact source/destination dirty counts." \
+		"$output" "Recursive snapshot delta summary: source_missing_snapshots=2 destination_extra_snapshots=1 source_datasets=2 destination_extra_datasets=1"
+	assertContains "Verbose recursive delta output should name source datasets queued for transfer." \
+		"$output" "  tank/src/app"
+	assertContains "Verbose recursive delta output should name every source-delta dataset." \
+		"$output" "  tank/src/db"
+	assertContains "Verbose recursive delta output should name destination-only datasets queued for delete inspection." \
+		"$output" "  tank/src/old"
 }
 
 test_set_g_recursive_source_list_treats_tmpdir_derived_paths_as_literal() {
@@ -2164,11 +3623,11 @@ test_set_g_recursive_source_list_reports_recursive_snapshot_diff_failures() {
 	set +e
 	output=$(
 		(
-			zxfer_diff_snapshot_lists() {
-				if [ "$3" = "source_minus_destination" ]; then
+			comm() {
+				if [ "$1" = "-3" ]; then
 					return 6
 				fi
-				return 0
+				command comm "$@"
 			}
 
 			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
@@ -2179,7 +3638,7 @@ test_set_g_recursive_source_list_reports_recursive_snapshot_diff_failures() {
 	assertEquals "Recursive delta planning should fail closed when the source-minus-destination diff fails." \
 		6 "$status"
 	assertContains "Recursive delta planning should preserve a specific transfer-planning diff error." \
-		"$output" "Failed to diff source and destination snapshots for recursive transfer planning."
+		"$output" "Failed to diff source and destination snapshots for recursive delta planning."
 }
 
 test_set_g_recursive_source_list_reports_recursive_source_dataset_transfer_awk_failures() {
@@ -2194,9 +3653,6 @@ test_set_g_recursive_source_list_reports_recursive_source_dataset_transfer_awk_f
 	output=$(
 		(
 			g_cmd_awk="$fake_awk"
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation() {
-				return 0
-			}
 
 			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
 		) 2>&1
@@ -2223,9 +3679,6 @@ test_set_g_recursive_source_list_reports_recursive_destination_dataset_delete_aw
 	output=$(
 		(
 			g_cmd_awk="$fake_awk"
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation() {
-				return 0
-			}
 
 			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
 		) 2>&1
@@ -2249,12 +3702,6 @@ test_set_g_recursive_source_list_reports_recursive_source_dataset_inventory_fail
 	set +e
 	output=$(
 		(
-			zxfer_diff_snapshot_lists() {
-				return 0
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation() {
-				return 0
-			}
 			sort() {
 				if [ "$1" = "-u" ]; then
 					return 7
@@ -2285,9 +3732,6 @@ test_set_g_recursive_source_list_reports_recursive_source_dataset_inventory_awk_
 	output=$(
 		(
 			g_cmd_awk="$fake_awk"
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation() {
-				return 0
-			}
 
 			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
 		) 2>&1
@@ -2319,8 +3763,8 @@ test_set_g_recursive_source_list_reports_invalid_exclude_pattern_failures() {
 
 	assertEquals "Recursive delta planning should fail closed when exclude filtering uses an invalid pattern." \
 		2 "$status"
-	assertContains "Recursive delta planning should report the specific exclude-filter failure context." \
-		"$output" "Failed to filter recursive source dataset transfer list against exclude patterns."
+	assertContains "Recursive delta planning should report the specific pre-diff snapshot exclude-filter context." \
+		"$output" "Failed to filter source snapshots against exclude patterns for recursive delta planning."
 }
 
 test_set_g_recursive_source_list_fuzzes_tmpdir_derived_paths_with_odd_characters() {
@@ -2517,8 +3961,77 @@ test_get_zfs_list_reports_pool_lookup_failure_when_destination_root_has_no_slash
 	status=$?
 
 	assertEquals "Missing destination roots without a slash should still fail closed when the pool lookup fails." 1 "$status"
-	assertContains "Destination-root lookup failures should preserve the documented dataset-list message." \
-		"$output" "Failed to retrieve list of datasets from the destination"
+	assertContains "Destination-root lookup failures should report the missing destination and failed pool probe." \
+		"$output" "Destination dataset [backup] is missing and destination pool [backup] could not be listed: pool lookup failed"
+}
+
+test_publish_destination_dataset_inventory_bootstraps_rootless_missing_destination() {
+	dest_file="$TEST_TMPDIR/dest_inventory_rootless_missing.out"
+	err_file="$TEST_TMPDIR/dest_inventory_rootless_missing.err"
+	: >"$dest_file"
+	printf '%s\n' "dataset does not exist" >"$err_file"
+
+	output=$(
+		(
+			g_destination="backup"
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] &&
+					[ "$4" = "name" ] && [ "$5" = "backup" ]; then
+					printf '%s\n' "pool-probe:$5"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_publish_destination_dataset_inventory_from_stage "$dest_file" "$err_file" 1
+			printf 'dest=<%s>\n' "$g_recursive_dest_list"
+			printf 'missing=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup")"
+		)
+	)
+
+	assertContains "Rootless missing destinations should bootstrap as an empty inventory when the pool probe succeeds." \
+		"$output" "dest=<>"
+	assertContains "Rootless missing destinations should seed the destination existence cache as absent." \
+		"$output" "missing=0"
+}
+
+test_collect_local_destination_dataset_inventory_preserves_setup_and_publish_failures() {
+	temp_status=$(
+		(
+			zxfer_create_temp_file_group() {
+				return 66
+			}
+			set +e
+			zxfer_collect_local_destination_dataset_inventory
+			printf '%s\n' "$?"
+		)
+	)
+	publish_status=$(
+		(
+			l_one="$TEST_TMPDIR/local_dest_inventory_publish.one"
+			l_two="$TEST_TMPDIR/local_dest_inventory_publish.two"
+			g_option_V_very_verbose=1
+			zxfer_create_temp_file_group() {
+				: >"$l_one"
+				: >"$l_two"
+				g_zxfer_temp_file_group_result=$(printf '%s\n%s' "$l_one" "$l_two")
+				printf '%s\n' "$g_zxfer_temp_file_group_result"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				return 1
+			}
+			zxfer_publish_destination_dataset_inventory_from_stage() {
+				return 67
+			}
+			set +e
+			zxfer_collect_local_destination_dataset_inventory 2>/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Local destination inventory should preserve temp-file group allocation failures." \
+		66 "$temp_status"
+	assertEquals "Local destination inventory should preserve publish failures after cleanup." \
+		67 "$publish_status"
 }
 
 test_get_zfs_list_seeds_destination_existence_cache_from_recursive_dataset_list() {
@@ -2532,8 +4045,8 @@ test_get_zfs_list_seeds_destination_existence_cache_from_recursive_dataset_list(
 				: >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_reverse_file_lines() {
 				cat "$1"
@@ -2575,8 +4088,8 @@ test_get_zfs_list_reports_destination_inventory_readback_failures() {
 				: >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2615,6 +4128,14 @@ test_get_zfs_list_reports_destination_inventory_stderr_readback_failures() {
 			PROBE_LOG="$probe_log"
 			zxfer_write_source_snapshot_list_to_file() {
 				printf '%s\n' "tank/src@snapA" >"$1"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				return 1
@@ -2655,8 +4176,8 @@ test_get_zfs_list_reports_empty_destination_inventory_readbacks() {
 				: >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2700,8 +4221,8 @@ test_get_zfs_list_reports_destination_snapshot_list_readback_failures() {
 				: >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2753,8 +4274,8 @@ test_get_zfs_list_reports_source_snapshot_list_readback_failures() {
 				: >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2811,8 +4332,8 @@ test_get_zfs_list_preserves_source_snapshot_record_cache_tempfile_failures() {
 				printf '%s\n' "tank/src@snapA" >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2875,8 +4396,8 @@ test_get_zfs_list_reports_source_snapshot_record_cache_stage_failures() {
 				printf '%s\n' "tank/src@snapA" >"$2"
 			}
 			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list=""
-				g_recursive_source_dataset_list=""
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
 			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
@@ -2936,7 +4457,7 @@ test_get_zfs_list_reports_source_snapshot_record_cache_stage_failures() {
 	assertContains "Source snapshot record-cache staging failures should clean up the staged source snapshot stderr file." \
 		"$output" "get-zfs-source-cache-stage-2.tmp"
 	assertContains "Source snapshot record-cache staging failures should clean up the staged destination snapshot diff file." \
-		"$output" "get-zfs-source-cache-stage-6.tmp"
+		"$output" "get-zfs-source-cache-stage-4.tmp"
 	assertContains "Source snapshot record-cache staging failures should clean up the staged source snapshot-record cache file." \
 		"$output" "get-zfs-source-cache-stage-7.tmp"
 	assertContains "Source snapshot record-cache staging failures should run the snapshot-record cache cleanup helper." \
@@ -2945,7 +4466,1025 @@ test_get_zfs_list_reports_source_snapshot_record_cache_stage_failures() {
 		"$output" "msg=Failed to stage source snapshot record cache."
 }
 
-test_get_zfs_list_lazily_builds_per_dataset_snapshot_indexes() {
+test_get_zfs_list_skips_snapshot_record_caches_for_recursive_noop_without_later_work() {
+	inventory_log="$TEST_TMPDIR/recursive_noop_destination_inventory.log"
+	: >"$inventory_log"
+
+	output=$(
+		(
+			INVENTORY_LOG="$inventory_log"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_R_recursive="tank/src"
+			g_option_d_delete_destination_snapshots=1
+			g_option_P_transfer_property=0
+			g_option_o_override_property=""
+			# Local recursive runs are proof-eligible since Phase 8; force
+			# the fallback so this test keeps pinning the full-discovery
+			# no-op record-cache skips.
+			zxfer_try_fast_recursive_noop_discovery() {
+				g_source_snapshot_fast_noop_attempted=1
+				return 1
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\t%s\n' "tank/src@snapA" "guidA" >"$1"
+				: >"$2"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				printf '%s\t%s\n' "backup/dst/src@snapA" "guidA" >"$1"
+				printf '%s\t%s\n' "tank/src@snapA" "guidA" >"$2"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
+					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
+					[ "$7" = "backup/dst" ]; then
+					printf '%s\n' "inventory" >>"$INVENTORY_LOG"
+					printf '%s\n' "backup/dst"
+					printf '%s\n' "backup/dst/src"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_get_zfs_list
+			# shellcheck disable=SC2031
+			printf 'source_list=<%s>\n' "${g_recursive_source_list:-}"
+			# shellcheck disable=SC2031
+			printf 'source_datasets=<%s>\n' "${g_recursive_source_dataset_list:-}"
+			printf 'dest_extra=<%s>\n' "${g_recursive_destination_extra_dataset_list:-}"
+			printf 'source_raw=<%s>\n' "${g_lzfs_list_hr_snap:-}"
+			printf 'dest_raw=<%s>\n' "${g_rzfs_list_hr_snap:-}"
+			printf 'source_cache=<%s>\n' "${g_zxfer_source_snapshot_record_cache_file:-}"
+			printf 'dest_cache=<%s>\n' "${g_zxfer_destination_snapshot_record_cache_file:-}"
+		)
+	)
+
+	assertContains "Recursive no-op discovery should prove that there are no source snapshot deltas." \
+		"$output" "source_list=<>"
+	assertContains "Recursive no-op discovery should skip the source dataset inventory when no later property work can consume it." \
+		"$output" "source_datasets=<>"
+	assertContains "Recursive no-op discovery should prove that there are no destination delete deltas." \
+		"$output" "dest_extra=<>"
+	assertContains "Recursive no-op discovery should not load the full source snapshot list into shell state when no later work can consume it." \
+		"$output" "source_raw=<>"
+	assertContains "Recursive no-op discovery should not load the full destination snapshot list into shell state when no later work can consume it." \
+		"$output" "dest_raw=<>"
+	assertContains "Recursive no-op discovery should skip the source snapshot-record cache when no later work can consume it." \
+		"$output" "source_cache=<>"
+	assertContains "Recursive no-op discovery should skip the destination snapshot-record cache when no later work can consume it." \
+		"$output" "dest_cache=<>"
+	assertEquals "Recursive no-op discovery should skip recursive destination dataset inventory when no later work can consume it." \
+		"" "$(cat "$inventory_log")"
+}
+
+test_get_zfs_list_fast_remote_recursive_noop_skips_creation_order_discovery() {
+	full_discovery_log="$TEST_TMPDIR/fast_remote_noop_full_discovery.log"
+	: >"$full_discovery_log"
+
+	output=$(
+		(
+			FULL_DISCOVERY_LOG="$full_discovery_log"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			g_option_d_delete_destination_snapshots=1
+			g_option_x_exclude_datasets="replica"
+			g_option_j_jobs=6
+			g_option_V_very_verbose=1
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_source_snapshot_list_uses_parallel=0
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'guid-a'"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "unexpected-full-source-discovery" >>"$FULL_DISCOVERY_LOG"
+				return 99
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapA" "guid-a")
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_get_zfs_list
+			printf 'fast_attempted=%s\n' "${g_source_snapshot_fast_noop_attempted:-0}"
+			printf 'source_list=<%s>\n' "${g_recursive_source_list:-}"
+			printf 'source_datasets=<%s>\n' "${g_recursive_source_dataset_list:-}"
+			printf 'dest_extra=<%s>\n' "${g_recursive_destination_extra_dataset_list:-}"
+			printf 'source_raw=<%s>\n' "${g_lzfs_list_hr_snap:-}"
+			printf 'dest_raw=<%s>\n' "${g_rzfs_list_hr_snap:-}"
+			printf 'parallel_profile=%s\n' "${g_zxfer_profile_source_snapshot_list_parallel_commands:-0}"
+		)
+	)
+
+	assertEquals "Fast remote recursive no-op proof should avoid the full creation-order source discovery." \
+		"" "$(cat "$full_discovery_log")"
+	assertContains "Fast remote recursive no-op proof should record that the optimization ran." \
+		"$output" "fast_attempted=1"
+	assertContains "Pre-filtered excluded dataset differences should still allow the exact no-op proof to short-circuit." \
+		"$output" "source_list=<>"
+	assertContains "Fast no-op proof should not publish a source dataset inventory when no later work can consume it." \
+		"$output" "source_datasets=<>"
+	assertContains "Fast no-op proof should not queue destination deletes when only excluded datasets differ." \
+		"$output" "dest_extra=<>"
+	assertContains "Fast no-op proof should not load full source records into shell state." \
+		"$output" "source_raw=<>"
+	assertContains "Fast no-op proof should not load full destination records into shell state." \
+		"$output" "dest_raw=<>"
+	assertContains "Fast remote recursive no-op proof should not account source parallel fanout before work is proven." \
+		"$output" "parallel_profile=0"
+}
+
+test_get_zfs_list_fast_remote_recursive_noop_allows_noop_safe_property_and_delete_flags() {
+	full_discovery_log="$TEST_TMPDIR/fast_remote_noop_safe_flags_full_discovery.log"
+	: >"$full_discovery_log"
+
+	output=$(
+		(
+			FULL_DISCOVERY_LOG="$full_discovery_log"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			g_option_j_jobs=6
+			g_option_U_skip_unsupported_properties=1
+			g_option_g_grandfather_protection="enabled"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_source_snapshot_list_uses_parallel=0
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'guid-a'"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "unexpected-full-source-discovery" >>"$FULL_DISCOVERY_LOG"
+				return 99
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapA" "guid-a")
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_get_zfs_list
+			printf 'fast_attempted=%s\n' "${g_source_snapshot_fast_noop_attempted:-0}"
+			printf 'source_list=<%s>\n' "${g_recursive_source_list:-}"
+			printf 'source_datasets=<%s>\n' "${g_recursive_source_dataset_list:-}"
+			printf 'dest_extra=<%s>\n' "${g_recursive_destination_extra_dataset_list:-}"
+			printf 'parallel_profile=%s\n' "${g_zxfer_profile_source_snapshot_list_parallel_commands:-0}"
+		)
+	)
+
+	assertEquals "Fast no-op proof should not force full discovery only because -U or -g are enabled." \
+		"" "$(cat "$full_discovery_log")"
+	assertContains "Fast no-op proof should run when -U cannot be consumed by later no-op work." \
+		"$output" "fast_attempted=1"
+	assertContains "Fast no-op proof should leave no source transfer queue for grandfather checks." \
+		"$output" "source_list=<>"
+	assertContains "Fast no-op proof should leave no source dataset inventory for unsupported-property scans." \
+		"$output" "source_datasets=<>"
+	assertContains "Fast no-op proof should leave no destination delete queue for grandfather checks." \
+		"$output" "dest_extra=<>"
+	assertContains "Fast no-op proof should still defer full parallel source discovery under -U and -g." \
+		"$output" "parallel_profile=0"
+}
+
+test_get_zfs_list_fast_remote_recursive_noop_shortcuts_exact_match_without_exclude_filter() {
+	filter_log="$TEST_TMPDIR/fast_remote_exact_noop_filter.log"
+	: >"$filter_log"
+
+	output=$(
+		(
+			FILTER_LOG="$filter_log"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			g_option_d_delete_destination_snapshots=1
+			g_option_x_exclude_datasets=""
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'guid-a'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapA" "guid-a")
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_filter_snapshot_file_with_excludes() {
+				printf '%s\n' "unexpected-filter" >>"$FILTER_LOG"
+				return 99
+			}
+			zxfer_get_zfs_list
+			printf 'fast_attempted=%s\n' "${g_source_snapshot_fast_noop_attempted:-0}"
+			printf 'source_list=<%s>\n' "${g_recursive_source_list:-}"
+			printf 'dest_extra=<%s>\n' "${g_recursive_destination_extra_dataset_list:-}"
+			printf 'dest_raw=<%s>\n' "${g_rzfs_list_hr_snap:-}"
+		)
+	)
+
+	assertEquals "Exact fast no-op proofs should not run exclude filtering when no exclude is configured." \
+		"" "$(cat "$filter_log")"
+	assertContains "Exact fast no-op proof should record that it attempted." \
+		"$output" "fast_attempted=1"
+	assertContains "Exact fast no-op proof should not queue source transfers." \
+		"$output" "source_list=<>"
+	assertContains "Exact fast no-op proof should not queue destination deletes." \
+		"$output" "dest_extra=<>"
+	assertContains "Exact fast no-op proof should avoid loading destination records into shell state." \
+		"$output" "dest_raw=<>"
+}
+
+test_get_zfs_list_fast_remote_recursive_noop_falls_back_when_snapshot_names_differ() {
+	full_discovery_log="$TEST_TMPDIR/fast_remote_noop_fallback.log"
+	destination_call_log="$TEST_TMPDIR/fast_remote_noop_fallback_destination.log"
+	: >"$full_discovery_log"
+	: >"$destination_call_log"
+
+	output=$(
+		(
+			FULL_DISCOVERY_LOG="$full_discovery_log"
+			DESTINATION_CALL_LOG="$destination_call_log"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			g_option_d_delete_destination_snapshots=1
+			g_option_x_exclude_datasets=""
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'guid-a'"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "full-source-discovery" >>"$FULL_DISCOVERY_LOG"
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				printf '%s\n' "destination-discovery" >>"$DESTINATION_CALL_LOG"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapB" "guid-b")
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				printf '%s\n' "destination-discovery" >>"$DESTINATION_CALL_LOG"
+				printf '%s\n' "backup/dst/src@snapB" >"$1"
+				printf '%s\n' "tank/src@snapB" >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				printf '%s\n' "full-diff-planning" >>"$FULL_DISCOVERY_LOG"
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
+					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
+					[ "$7" = "backup/dst" ]; then
+					printf '%s\n' "backup/dst"
+					printf '%s\n' "backup/dst/src"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_get_zfs_list
+			printf 'fast_attempted=%s\n' "${g_source_snapshot_fast_noop_attempted:-0}"
+			printf 'source_list=<%s>\n' "${g_recursive_source_list:-}"
+		)
+	)
+
+	assertEquals "A non-no-op name comparison should fall back to full source discovery and full diff planning." \
+		"full-source-discovery
+full-diff-planning" "$(cat "$full_discovery_log")"
+	assertEquals "Destination discovery is expected once for the proof and once again for the full fallback path." \
+		"2" "$(wc -l <"$destination_call_log" | tr -d '[:space:]')"
+	assertContains "Fast remote recursive no-op proof should record that it attempted before falling back." \
+		"$output" "fast_attempted=1"
+	assertContains "Fallback discovery should publish the normal recursive work list." \
+		"$output" "source_list=<tank/src>"
+}
+
+test_get_zfs_list_fast_remote_recursive_noop_falls_back_when_snapshot_guids_differ() {
+	full_discovery_log="$TEST_TMPDIR/fast_remote_noop_guid_fallback.log"
+	destination_call_log="$TEST_TMPDIR/fast_remote_noop_guid_destination.log"
+	: >"$full_discovery_log"
+	: >"$destination_call_log"
+
+	output=$(
+		(
+			FULL_DISCOVERY_LOG="$full_discovery_log"
+			DESTINATION_CALL_LOG="$destination_call_log"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			g_option_d_delete_destination_snapshots=1
+			g_option_x_exclude_datasets=""
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'source-guid'"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "full-source-discovery" >>"$FULL_DISCOVERY_LOG"
+				printf '%s\t%s\n' "tank/src@snapA" "source-guid" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				printf '%s\n' "destination-discovery" >>"$DESTINATION_CALL_LOG"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapA" "destination-guid")
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				printf '%s\n' "destination-discovery" >>"$DESTINATION_CALL_LOG"
+				printf '%s\t%s\n' "backup/dst/src@snapA" "destination-guid" >"$1"
+				printf '%s\t%s\n' "tank/src@snapA" "destination-guid" >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				printf '%s\n' "full-diff-planning" >>"$FULL_DISCOVERY_LOG"
+				g_recursive_source_list="tank/src"
+				g_recursive_destination_extra_dataset_list="tank/src"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
+					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
+					[ "$7" = "backup/dst" ]; then
+					printf '%s\n' "backup/dst"
+					printf '%s\n' "backup/dst/src"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_get_zfs_list
+			printf 'fast_attempted=%s\n' "${g_source_snapshot_fast_noop_attempted:-0}"
+			printf 'source_list=<%s>\n' "${g_recursive_source_list:-}"
+			printf 'dest_extra=<%s>\n' "${g_recursive_destination_extra_dataset_list:-}"
+		)
+	)
+
+	assertEquals "A same-name GUID mismatch should fall back to full source discovery and full diff planning." \
+		"full-source-discovery
+full-diff-planning" "$(cat "$full_discovery_log")"
+	assertEquals "Destination discovery should run once for the identity proof and once again for the full fallback path." \
+		"2" "$(wc -l <"$destination_call_log" | tr -d '[:space:]')"
+	assertContains "Fast remote recursive no-op proof should record that it attempted before GUID fallback." \
+		"$output" "fast_attempted=1"
+	assertContains "Fallback discovery should queue the source dataset after GUID divergence." \
+		"$output" "source_list=<tank/src>"
+	assertContains "Fallback discovery should preserve destination-side divergence for delete/common-snapshot inspection." \
+		"$output" "dest_extra=<tank/src>"
+}
+
+test_get_zfs_list_fast_remote_recursive_noop_falls_back_when_excludes_filter_all_source_snapshots() {
+	full_discovery_log="$TEST_TMPDIR/fast_remote_noop_excluded_all_fallback.log"
+	: >"$full_discovery_log"
+
+	output=$(
+		(
+			FULL_DISCOVERY_LOG="$full_discovery_log"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			g_option_x_exclude_datasets='/replica$'
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src/replica@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=""
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "full-source-discovery" >>"$FULL_DISCOVERY_LOG"
+				printf '%s\n' "tank/src/replica@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				printf '%s\n' "full-diff-planning" >>"$FULL_DISCOVERY_LOG"
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			zxfer_get_zfs_list
+			printf 'fast_attempted=%s\n' "${g_source_snapshot_fast_noop_attempted:-0}"
+			printf 'source_list=<%s>\n' "${g_recursive_source_list:-}"
+		)
+	)
+
+	assertEquals "Fast no-op proof should fall back instead of treating an exclude-filtered empty source list as a source failure." \
+		"full-source-discovery
+full-diff-planning" "$(cat "$full_discovery_log")"
+	assertContains "Fast no-op proof should record the attempted optimization before fallback." \
+		"$output" "fast_attempted=1"
+	assertContains "Fallback discovery should be allowed to prove the all-excluded no-op." \
+		"$output" "source_list=<>"
+}
+
+# Probe zxfer_fast_recursive_noop_discovery_is_eligible with a clean option
+# state plus the supplied overrides; prints the helper's exit status.
+# Errexit-safe so the suite's set -e tests cannot abort the caller.
+zxfer_test_noop_proof_eligibility_status() {
+	l_eligibility_status=0
+	(
+		g_option_O_origin_host=""
+		g_option_T_target_host=""
+		g_option_R_recursive="tank/src"
+		g_option_s_make_snapshot=0
+		g_option_m_migrate=0
+		g_option_P_transfer_property=0
+		g_option_o_override_property=""
+		g_option_e_restore_property_mode=0
+		g_option_k_backup_property_mode=0
+		for l_eligibility_override in "$@"; do
+			eval "$l_eligibility_override"
+		done
+		zxfer_fast_recursive_noop_discovery_is_eligible
+	) || l_eligibility_status=$?
+	printf '%s\n' "$l_eligibility_status"
+	return 0
+}
+
+test_fast_recursive_noop_discovery_eligibility_gates() {
+	# Local sources are eligible since Phase 8: -O is no longer consulted.
+	# Every other gate stays: -R required, -T absent, and the no-op-unsafe
+	# options (-s/-m/-P/-o/-e/-k) must all be off.
+	assertEquals "A plain local recursive run must be proof-eligible." \
+		0 "$(zxfer_test_noop_proof_eligibility_status)"
+	assertEquals "A remote-origin recursive run must stay proof-eligible." \
+		0 "$(zxfer_test_noop_proof_eligibility_status \
+			"g_option_O_origin_host=origin.example")"
+	assertEquals "Non-recursive runs must stay ineligible." \
+		1 "$(zxfer_test_noop_proof_eligibility_status \
+			"g_option_R_recursive=")"
+	assertEquals "-T target-host runs must stay ineligible." \
+		1 "$(zxfer_test_noop_proof_eligibility_status \
+			"g_option_T_target_host=target.example")"
+	for l_eligibility_gate in \
+		"g_option_s_make_snapshot=1" \
+		"g_option_m_migrate=1" \
+		"g_option_P_transfer_property=1" \
+		"g_option_o_override_property=copies=2" \
+		"g_option_e_restore_property_mode=1" \
+		"g_option_k_backup_property_mode=1"; do
+		assertEquals "Runs with $l_eligibility_gate must stay ineligible for the no-op proof." \
+			1 "$(zxfer_test_noop_proof_eligibility_status "$l_eligibility_gate")"
+	done
+}
+
+test_try_fast_recursive_noop_discovery_records_parallel_source_profile_counter() {
+	output=$(
+		(
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_option_R_recursive="tank/src"
+			g_option_V_very_verbose=1
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_source_snapshot_list_uses_parallel=1
+				printf "%s\n" "printf '%s\t%s\n' 'tank/src@snapA' 'guid-a'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=$(printf '%s\t%s' "tank/src@snapA" "guid-a")
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_try_fast_recursive_noop_discovery
+			printf 'commands=%s\n' "${g_zxfer_profile_source_snapshot_list_commands:-0}"
+			printf 'parallel=%s\n' "${g_zxfer_profile_source_snapshot_list_parallel_commands:-0}"
+		)
+	)
+
+	assertContains "Fast no-op proof should profile each source snapshot listing command." \
+		"$output" "commands=1"
+	assertContains "Fast no-op proof should profile source commands that already used parallel fanout." \
+		"$output" "parallel=1"
+}
+
+test_try_fast_recursive_noop_discovery_preserves_setup_failures() {
+	temp_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_create_temp_file_group() {
+				return 42
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+			printf '%s\n' "$?"
+		)
+	)
+	build_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				return 43
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+			printf '%s\n' "$?"
+		)
+	)
+	command_read_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_read_source_snapshot_discovery_command_file() {
+				return 46
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+			printf '%s\n' "$?"
+		)
+	)
+	empty_command_status=0
+	empty_command_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				:
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		)
+	) || empty_command_status=$?
+	execute_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
+				return 44
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+			printf '%s\n' "$?"
+		)
+	)
+	destination_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
+				sleep 5 &
+				g_last_background_pid=$!
+				zxfer_register_cleanup_pid "$g_last_background_pid" "background source snapshot no-op proof helper" || :
+				return 0
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				return 45
+			}
+			zxfer_abort_direct_child_pid() {
+				kill "$1" 2>/dev/null || :
+				return 0
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Fast no-op proof should preserve temp-file allocation failures." \
+		42 "$temp_status"
+	assertEquals "Fast no-op proof should preserve source command render failures." \
+		43 "$build_status"
+	assertEquals "Fast no-op proof should preserve staged source command readback failures." \
+		46 "$command_read_status"
+	assertContains "Fast no-op proof should fail closed when staged source command readback is empty." \
+		"$empty_command_output" "throw:Staged source snapshot no-op proof command was empty.:1"
+	assertEquals "Fast no-op proof should return failure when staged source command readback is empty." \
+		1 "$empty_command_status"
+	assertEquals "Fast no-op proof should preserve background source launch failures." \
+		44 "$execute_status"
+	assertEquals "Fast no-op proof should preserve destination discovery failures and abort the background source proof." \
+		45 "$destination_status"
+}
+
+test_try_fast_recursive_noop_discovery_reports_source_failures() {
+	source_error_status=0
+	source_error_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "sh -c 'printf %s denied >&2; exit 17'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=""
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		) 2>&1
+	) || source_error_status=$?
+	empty_source_error_status=0
+	empty_source_error_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "sh -c 'exit 17'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=""
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		) 2>&1
+	) || empty_source_error_status=$?
+	empty_source_status=0
+	empty_source_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf '%s\n' ":"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=""
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		) 2>&1
+	) || empty_source_status=$?
+	stderr_read_status=0
+	stderr_read_output=$(
+		(
+			l_read_count=0
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "sh -c 'exit 17'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=""
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_read_snapshot_discovery_capture_file() {
+				l_read_count=$((l_read_count + 1))
+				if [ "$l_read_count" -eq 1 ]; then
+					g_zxfer_snapshot_discovery_file_read_result="sh -c 'exit 17'"
+					return 0
+				fi
+				return 68
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		) 2>&1
+	) || stderr_read_status=$?
+	count_read_status=0
+	count_read_output=$(
+		(
+			l_status_read_count=0
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_read_snapshot_discovery_status_file() {
+				l_status_read_count=$((l_status_read_count + 1))
+				g_zxfer_snapshot_discovery_status_file_result=0
+				[ "$l_status_read_count" -lt 4 ] && return 0
+				return 72
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		) 2>&1
+	) || count_read_status=$?
+
+	assertContains "Fast no-op proof should preserve source snapshot stderr when the identity-aware source command fails." \
+		"$source_error_output" "throw:Failed to retrieve snapshots from the source: denied:17"
+	assertEquals "Fast no-op proof should return the source command status when source discovery fails." \
+		17 "$source_error_status"
+	assertContains "Fast no-op proof should use the generic source failure when the failed command has no stderr." \
+		"$empty_source_error_output" "throw:Failed to retrieve snapshots from the source:17"
+	assertEquals "Fast no-op proof should preserve source command status when stderr is empty." \
+		17 "$empty_source_error_status"
+	assertContains "Fast no-op proof should fail closed when the identity-aware source discovery returns no snapshots." \
+		"$empty_source_output" "throw:Failed to retrieve snapshots from the source:1"
+	assertEquals "Fast no-op proof should return failure for an empty source snapshot list." \
+		1 "$empty_source_status"
+	assertContains "Fast no-op proof should report staged stderr readback failures before surfacing source failure context." \
+		"$stderr_read_output" "throw:Failed to read staged source snapshot stderr.:68"
+	assertEquals "Fast no-op proof should preserve staged stderr readback failure status." \
+		68 "$stderr_read_status"
+	assertContains "Fast no-op proof should fail closed when source snapshot count sidecar validation fails." \
+		"$count_read_output" "throw:Failed to retrieve snapshots from the source:1"
+	assertEquals "Fast no-op proof should use the generic source failure status for invalid source count sidecars." \
+		1 "$count_read_status"
+}
+
+test_try_fast_recursive_noop_discovery_reports_destination_fifo_status_failures() {
+	malformed_status=0
+	malformed_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_LIST_STATUS="bad"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		)
+	) || malformed_status=$?
+	malformed_normalize_status=0
+	malformed_normalize_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_NORMALIZE_STATUS="bad"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		)
+	) || malformed_normalize_status=$?
+	malformed_sort_status=0
+	malformed_sort_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORT_STATUS="bad"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		)
+	) || malformed_sort_status=$?
+	destination_error=0
+	destination_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_LIST_STATUS=17
+				ZXFER_TEST_FAST_NOOP_DESTINATION_STDERR="permission denied"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		) 2>&1
+	) || destination_error=$?
+	destination_stderr_read_status=0
+	destination_stderr_read_output=$(
+		(
+			l_read_count=0
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_LIST_STATUS=17
+				ZXFER_TEST_FAST_NOOP_DESTINATION_STDERR="permission denied"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_read_snapshot_discovery_capture_file() {
+				l_read_count=$((l_read_count + 1))
+				if [ "$l_read_count" -eq 1 ]; then
+					g_zxfer_snapshot_discovery_file_read_result="printf '%s\n' 'tank/src@snapA'"
+					return 0
+				fi
+				return 70
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		) 2>&1
+	) || destination_stderr_read_status=$?
+	normalize_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_NORMALIZE_STATUS=19
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery >/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+	sort_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_STREAM_STATUS=23
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery >/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+	destination_wait_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				l_fifo=$1
+				l_err_file=$2
+				l_list_status_file=$3
+				l_normalize_status_file=$4
+				l_stream_status_file=$5
+				(
+					printf '%s\n' "tank/src@snapA" >"$l_fifo"
+					: >"$l_err_file"
+					printf '%s\n' 0 >"$l_list_status_file"
+					printf '%s\n' 0 >"$l_normalize_status_file"
+					printf '%s\n' 0 >"$l_stream_status_file"
+					exit 31
+				) &
+				g_last_background_pid=$!
+				zxfer_register_cleanup_pid "$g_last_background_pid" "test destination snapshot no-op proof helper"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery >/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+	missing_status=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_LIST_STATUS=1
+				ZXFER_TEST_FAST_NOOP_DESTINATION_STDERR="cannot open 'backup/dst/src': dataset does not exist"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery >/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertContains "Fast no-op proof should fail closed on malformed destination status sidecars." \
+		"$malformed_output" "throw:Failed to validate destination snapshot status for recursive no-op proof.:1"
+	assertEquals "Fast no-op proof should return failure for malformed destination status sidecars." \
+		1 "$malformed_status"
+	assertContains "Fast no-op proof should fail closed on malformed destination normalize sidecars." \
+		"$malformed_normalize_output" "throw:Failed to validate destination snapshot status for recursive no-op proof.:1"
+	assertEquals "Fast no-op proof should return failure for malformed destination normalize sidecars." \
+		1 "$malformed_normalize_status"
+	assertContains "Fast no-op proof should fail closed on malformed destination stream sidecars." \
+		"$malformed_sort_output" "throw:Failed to validate destination snapshot status for recursive no-op proof.:1"
+	assertEquals "Fast no-op proof should return failure for malformed destination stream sidecars." \
+		1 "$malformed_sort_status"
+	assertContains "Fast no-op proof should preserve destination snapshot-list stderr." \
+		"$destination_output" "permission denied"
+	assertContains "Fast no-op proof should keep destination snapshot-list context." \
+		"$destination_output" "throw:Failed to retrieve snapshot list from the destination.:17"
+	assertEquals "Fast no-op proof should preserve destination snapshot-list status." \
+		17 "$destination_error"
+	assertContains "Fast no-op proof should report destination stderr readback failures before surfacing destination snapshot context." \
+		"$destination_stderr_read_output" "throw:Failed to read staged destination snapshot stderr.:70"
+	assertEquals "Fast no-op proof should preserve destination stderr readback failure status." \
+		70 "$destination_stderr_read_status"
+	assertEquals "Fast no-op proof should preserve destination normalization failures." \
+		19 "$normalize_status"
+	assertEquals "Fast no-op proof should preserve destination stream failures." \
+		23 "$sort_status"
+	assertEquals "Fast no-op proof should preserve destination producer wait failures." \
+		31 "$destination_wait_status"
+	assertEquals "Fast no-op proof should fall back when exact compare output conflicts with missing destination status." \
+		1 "$missing_status"
+}
+
+test_try_fast_recursive_noop_discovery_reports_compare_failures() {
+	compare_status=0
+	compare_output=$(
+		(
+			g_option_O_origin_host="origin.example"
+			g_option_R_recursive="tank/src"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				printf "%s\n" "printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			comm() {
+				cat "$2" >/dev/null &
+				l_left_cat_pid=$!
+				cat "$3" >/dev/null
+				wait "$l_left_cat_pid" 2>/dev/null || :
+				return 2
+			}
+			zxfer_throw_error() {
+				printf 'throw:%s:%s\n' "$1" "${2:-1}"
+				exit "${2:-1}"
+			}
+			set +e
+			zxfer_try_fast_recursive_noop_discovery
+		)
+	) || compare_status=$?
+
+	assertContains "Fast no-op proof should report compare failures with no-op proof context." \
+		"$compare_output" "throw:Failed to compare source and destination snapshots for recursive no-op proof.:2"
+	assertEquals "Fast no-op proof should preserve compare failure status." \
+		2 "$compare_status"
+}
+
+test_get_zfs_list_preserves_fast_noop_hard_failure_status() {
+	status=$(
+		(
+			zxfer_try_fast_recursive_noop_discovery() {
+				return 58
+			}
+			set +e
+			zxfer_get_zfs_list
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Snapshot discovery should return fast no-op proof hard failures without continuing into full discovery." \
+		58 "$status"
+}
+
+test_get_zfs_list_stages_file_backed_snapshot_record_lookups() {
 	output=$(
 		(
 			source_root_file="$TEST_TMPDIR/get_zfs_lazy_source_root.records"
@@ -2982,8 +5521,8 @@ EOF
 				return 1
 			}
 			zxfer_get_zfs_list
-			printf 'source_ready_before=%s\n' "${g_zxfer_source_snapshot_record_index_ready:-0}"
-			printf 'dest_ready_before=%s\n' "${g_zxfer_destination_snapshot_record_index_ready:-0}"
+			printf 'source_file_staged=%s\n' "$([ -n "${g_zxfer_source_snapshot_record_cache_file:-}" ] && [ -r "$g_zxfer_source_snapshot_record_cache_file" ] && printf '%s' yes || printf '%s' no)"
+			printf 'dest_file_staged=%s\n' "$([ -n "${g_zxfer_destination_snapshot_record_cache_file:-}" ] && [ -r "$g_zxfer_destination_snapshot_record_cache_file" ] && printf '%s' yes || printf '%s' no)"
 			zxfer_get_snapshot_records_for_dataset source "tank/src" >"$source_root_file"
 			zxfer_get_snapshot_records_for_dataset source "tank/src/child" >"$source_child_file"
 			zxfer_get_snapshot_records_for_dataset destination "backup/dst" >"$dest_root_file"
@@ -2992,15 +5531,13 @@ EOF
 			printf 'source_child=%s\n' "$(cat "$source_child_file")"
 			printf 'dest_root=%s\n' "$(cat "$dest_root_file")"
 			printf 'dest_child=%s\n' "$(cat "$dest_child_file")"
-			printf 'source_ready_after=%s\n' "${g_zxfer_source_snapshot_record_index_ready:-0}"
-			printf 'dest_ready_after=%s\n' "${g_zxfer_destination_snapshot_record_index_ready:-0}"
 		)
 	)
 
-	assertContains "Snapshot discovery should leave the source per-dataset index unset until a consumer needs it." \
-		"$output" "source_ready_before=0"
-	assertContains "Snapshot discovery should leave the destination per-dataset index unset until a consumer needs it." \
-		"$output" "dest_ready_before=0"
+	assertContains "Snapshot discovery should stage the flat source snapshot record file for later lookups." \
+		"$output" "source_file_staged=yes"
+	assertContains "Snapshot discovery should stage the flat destination snapshot record file for later lookups." \
+		"$output" "dest_file_staged=yes"
 	assertContains "Snapshot discovery should cache newest-first source snapshots for the root dataset." \
 		"$output" "source_root=tank/src@snap2
 tank/src@snap1"
@@ -3011,10 +5548,1036 @@ tank/src@snap1"
 backup/dst@legacy1"
 	assertContains "Snapshot discovery should cache destination child snapshots separately." \
 		"$output" "dest_child=backup/dst/child@child1"
-	assertContains "The source per-dataset index should be built lazily on first lookup." \
-		"$output" "source_ready_after=1"
-	assertContains "The destination per-dataset index should be built lazily on first lookup." \
-		"$output" "dest_ready_after=1"
+}
+
+test_get_zfs_list_remote_target_batches_destination_discovery() {
+	ssh_log="$TEST_TMPDIR/get_zfs_remote_batch_success.ssh"
+	: >"$ssh_log"
+
+	output=$(
+		(
+			SSH_LOG="$ssh_log"
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf 'host=%s side=%s\n' "$1" "$3" >>"$SSH_LOG"
+				printf 'cmd=%s\n' "$2" >>"$SSH_LOG"
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t0\n'
+				printf 'STATUS\tpool\t\n'
+				printf 'STATUS\tsnapshot\t0\n'
+				printf 'STATUS\tsnapshot_ran\t1\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf '%s\n' "backup/dst"
+				printf '%s\n' "backup/dst/src"
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf '%s\t%s\n' "backup/dst/src@snapA" "guid-a"
+				printf '%s\t%s\n' "backup/dst/src/child@snapB" "guid-b"
+				printf 'END\tsnapshot_stdout\n'
+				printf 'BEGIN\tsnapshot_stderr\n'
+				printf 'END\tsnapshot_stderr\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "unexpected-destination-zfs" >>"$SSH_LOG"
+				return 99
+			}
+			zxfer_set_g_recursive_source_list() {
+				printf 'normalized=%s\n' "$(cat "$2")"
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
+			}
+			zxfer_get_zfs_list
+			printf 'dest=%s\n' "$g_recursive_dest_list"
+			printf 'root_cache=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst")"
+			printf 'snapshot_dataset_cache=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst/src")"
+			printf 'raw=%s\n' "$g_rzfs_list_hr_snap"
+		)
+	)
+
+	assertEquals "Remote destination discovery should use one target SSH invocation." \
+		"1" "$(grep -c '^host=target.example side=destination$' "$ssh_log")"
+	assertContains "Remote destination discovery should render dataset inventory in the batch script." \
+		"$(cat "$ssh_log")" "filesystem,volume"
+	assertContains "Remote destination discovery should render snapshot listing in the batch script." \
+		"$(cat "$ssh_log")" "list -Hr -o name,guid -t snapshot"
+	assertNotContains "Remote destination discovery should not fall back to separate destination zfs helper calls." \
+		"$(cat "$ssh_log")" "unexpected-destination-zfs"
+	assertContains "Remote destination discovery should publish the recursive destination inventory." \
+		"$output" "dest=backup/dst
+backup/dst/src"
+	assertContains "Remote destination discovery should seed the destination root existence cache." \
+		"$output" "root_cache=1"
+	assertContains "Remote destination discovery should seed the destination snapshot dataset existence cache." \
+		"$output" "snapshot_dataset_cache=1"
+	assertContains "Remote destination discovery should preserve the raw destination snapshot cache." \
+		"$output" "raw=backup/dst/src@snapA	guid-a
+backup/dst/src/child@snapB	guid-b"
+	assertContains "Remote destination discovery should normalize and byte-sort destination snapshot paths for source-side diffing." \
+		"$output" "normalized=tank/src/child@snapB	guid-b
+tank/src@snapA	guid-a"
+}
+
+test_build_remote_destination_discovery_batch_script_streams_snapshot_stdout_directly() {
+	fake_zfs="$TEST_TMPDIR/remote_batch_stream_zfs"
+	zfs_log="$TEST_TMPDIR/remote_batch_stream_zfs.log"
+	: >"$zfs_log"
+	cat >"$fake_zfs" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$ZXFER_FAKE_ZFS_LOG"
+case "$*" in
+"list -t filesystem,volume -Hr -o name backup/dst")
+	printf '%s\n' "backup/dst"
+	printf '%s\n' "backup/dst/src"
+	printf '%s\n' "backup/dst/other"
+	;;
+"list -Hr -o name,guid -t snapshot backup/dst/src")
+	printf '%s\t%s\n' "backup/dst/src@snapA" "guid-a"
+	;;
+*)
+	printf 'unexpected zfs args: %s\n' "$*" >&2
+	exit 99
+	;;
+esac
+EOF
+	chmod +x "$fake_zfs"
+	g_target_cmd_zfs=$fake_zfs
+
+	script=$(zxfer_build_remote_destination_discovery_batch_script "backup/dst" "backup/dst/src" "backup")
+
+	assertNotContains "Remote batch should not buffer recursive destination inventory stdout in a shell variable." \
+		"$script" "l_inventory_stdout=\$("
+	assertNotContains "Remote batch should not buffer destination snapshot stdout in a shell variable." \
+		"$script" "l_snapshot_stdout=\$("
+	assertContains "Remote batch should stage destination inventory stdout in a target-side temp file." \
+		"$script" 'zxfer.destination-discovery.inventory.XXXXXX'
+	assertNotContains "Remote batch should not stage destination snapshot stdout in a target-side temp file." \
+		"$script" 'zxfer.destination-discovery.snapshots.XXXXXX'
+	assertContains "Remote batch should still stage compact destination snapshot stderr diagnostics." \
+		"$script" 'zxfer.destination-discovery.snapshots-stderr.XXXXXX'
+	assertContains "Remote batch should stream staged section bodies instead of expanding payload variables." \
+		"$script" "cat \"\$l_section_file\""
+	assertContains "Remote batch should stream snapshot stdout directly from zfs." \
+		"$script" "\"\$l_zfs_cmd\" list -Hr -o name,guid -t snapshot \"\$l_destination_snapshot_dataset\" 2>\"\$l_snapshot_stderr_file\""
+	assertContains "Remote batch should clean target-side temp files on shell exit." \
+		"$script" "trap 'zxfer_cleanup_destination_discovery_batch' 0"
+	assertContains "Remote batch should use an exact fixed-string scan for the destination snapshot dataset." \
+		"$script" "grep -F -x -e \"\$l_destination_snapshot_dataset\" \"\$l_inventory_stdout_file\""
+
+	set +e
+	output=$(ZXFER_FAKE_ZFS_LOG="$zfs_log" TMPDIR="$TEST_TMPDIR" sh -c "$script" 2>&1)
+	status=$?
+	set -e
+
+	assertEquals "Generated remote batch script should execute successfully with target-side temp files." \
+		0 "$status"
+	assertContains "Generated remote batch should emit the destination inventory section." \
+		"$output" "$(printf 'BEGIN\tinventory_stdout')"
+	assertContains "Generated remote batch should stream destination inventory rows." \
+		"$output" "backup/dst/src"
+	assertContains "Generated remote batch should stream destination snapshot rows." \
+		"$output" "backup/dst/src@snapA	guid-a"
+	assertContains "Generated remote batch should report that snapshot listing ran." \
+		"$output" "$(printf 'STATUS\tsnapshot_ran\t1')"
+	assertContains "Generated remote batch should report snapshot status after streaming stdout." \
+		"$output" "$(printf 'STATUS\tsnapshot\t0')"
+	assertEquals "Generated remote batch should run inventory and snapshot zfs lists without a pool fallback." \
+		"2" "$(wc -l <"$zfs_log" | tr -d '[:space:]')"
+	assertEquals "Generated remote batch should remove its target-side temp files." \
+		"" "$(find "$TEST_TMPDIR" -name 'zxfer.destination-discovery.*' -print)"
+}
+
+test_destination_discovery_batch_status_loader_rejects_malformed_sidecars() {
+	status_file="$TEST_TMPDIR/remote_batch_status_bad.out"
+
+	printf '%s\n' "not-tab-separated" >"$status_file"
+	set +e
+	zxfer_load_destination_discovery_batch_status_file "$status_file" >/dev/null 2>&1
+	status=$?
+	set -e
+	assertEquals "Status sidecars without tab-separated fields should fail closed." \
+		1 "$status"
+
+	{
+		printf 'inventory\t0\n'
+		printf 'pool\t\n'
+		printf 'snapshot\t0\n'
+		printf 'unexpected\t0\n'
+	} >"$status_file"
+	set +e
+	zxfer_load_destination_discovery_batch_status_file "$status_file" >/dev/null 2>&1
+	status=$?
+	set -e
+	assertEquals "Status sidecars with unknown status names should fail closed." \
+		1 "$status"
+}
+
+test_destination_discovery_batch_status_loader_accepts_complete_sidecars() {
+	status_file="$TEST_TMPDIR/remote_batch_status_good.out"
+	{
+		printf 'inventory\t0\n'
+		printf 'pool\t\n'
+		printf 'snapshot\t0\n'
+		printf 'snapshot_ran\t1\n'
+	} >"$status_file"
+
+	zxfer_load_destination_discovery_batch_status_file "$status_file"
+	invalid_status=0
+	zxfer_destination_discovery_batch_status_is_numeric "not-a-status" ||
+		invalid_status=$?
+
+	assertEquals "Complete batch status sidecars should publish the inventory status." \
+		0 "$g_zxfer_destination_discovery_batch_inventory_status"
+	assertEquals "Complete batch status sidecars should publish the snapshot status." \
+		0 "$g_zxfer_destination_discovery_batch_snapshot_status"
+	assertEquals "Complete batch status sidecars should publish the snapshot_ran marker." \
+		1 "$g_zxfer_destination_discovery_batch_snapshot_ran"
+	assertEquals "Non-numeric batch statuses should be rejected." \
+		1 "$invalid_status"
+}
+
+test_read_snapshot_discovery_status_file_defaults_empty_sidecars() {
+	status_file="$TEST_TMPDIR/snapshot_discovery_empty_status.out"
+	: >"$status_file"
+
+	zxfer_read_snapshot_discovery_status_file "$status_file" 37
+	status=$?
+
+	assertEquals "Empty snapshot discovery status files should be accepted as the supplied default." \
+		0 "$status"
+	assertEquals "Empty snapshot discovery status files should publish the supplied default." \
+		37 "$g_zxfer_snapshot_discovery_status_file_result"
+}
+
+test_get_zfs_list_remote_target_batches_missing_destination_root_fallback() {
+	ssh_log="$TEST_TMPDIR/get_zfs_remote_batch_missing.ssh"
+	: >"$ssh_log"
+
+	output=$(
+		(
+			SSH_LOG="$ssh_log"
+			g_option_T_target_host="target.example"
+			g_option_V_very_verbose=1
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf 'host=%s side=%s\n' "$1" "$3" >>"$SSH_LOG"
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t1\n'
+				printf 'STATUS\tpool\t0\n'
+				printf 'STATUS\tsnapshot\t0\n'
+				printf 'STATUS\tsnapshot_ran\t0\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf '%s\n' "cannot open 'backup/dst': no such pool or dataset"
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf 'END\tsnapshot_stdout\n'
+				printf 'BEGIN\tsnapshot_stderr\n'
+				printf 'END\tsnapshot_stderr\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "unexpected-pool-probe" >>"$SSH_LOG"
+				return 99
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
+			}
+			zxfer_get_zfs_list
+			printf 'dest=<%s>\n' "$g_recursive_dest_list"
+			printf 'root_cache=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst")"
+			printf 'child_cache=%s\n' "$(zxfer_get_destination_existence_cache_entry "backup/dst/src")"
+			printf 'raw=<%s>\n' "$g_rzfs_list_hr_snap"
+		)
+	)
+
+	assertEquals "Missing-root remote discovery should still use one target SSH invocation." \
+		"1" "$(grep -c '^host=target.example side=destination$' "$ssh_log")"
+	assertNotContains "Remote missing-root fallback should use the batch pool status instead of a second local destination helper probe." \
+		"$(cat "$ssh_log")" "unexpected-pool-probe"
+	assertContains "Remote missing-root fallback should treat the recursive destination inventory as empty." \
+		"$output" "dest=<>"
+	assertContains "Remote missing-root fallback should mark the destination root missing." \
+		"$output" "root_cache=0"
+	assertContains "Remote missing-root fallback should infer descendants under the missing root as absent." \
+		"$output" "child_cache=0"
+	assertContains "Remote missing-root fallback should stage an empty destination snapshot list." \
+		"$output" "raw=<>"
+}
+
+test_get_zfs_list_remote_target_batches_inventory_failures() {
+	set +e
+	output=$(
+		(
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t13\n'
+				printf 'STATUS\tpool\t\n'
+				printf 'STATUS\tsnapshot\t0\n'
+				printf 'STATUS\tsnapshot_ran\t0\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf '%s\n' "permission denied"
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf 'END\tsnapshot_stdout\n'
+				printf 'BEGIN\tsnapshot_stderr\n'
+				printf 'END\tsnapshot_stderr\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Remote destination inventory failures should preserve the target-side status." \
+		13 "$status"
+	assertContains "Remote destination inventory failures should include the target-side diagnostic." \
+		"$output" "Failed to retrieve list of datasets from the destination: permission denied"
+}
+
+test_get_zfs_list_remote_target_batches_snapshot_failures() {
+	set +e
+	output=$(
+		(
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t0\n'
+				printf 'STATUS\tpool\t\n'
+				printf 'STATUS\tsnapshot\t17\n'
+				printf 'STATUS\tsnapshot_ran\t1\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf '%s\n' "backup/dst"
+				printf '%s\n' "backup/dst/src"
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf 'END\tsnapshot_stdout\n'
+				printf 'BEGIN\tsnapshot_stderr\n'
+				printf '%s\n' "snapshot list failed"
+				printf 'END\tsnapshot_stderr\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Remote destination snapshot failures should preserve the target-side status." \
+		17 "$status"
+	assertContains "Remote destination snapshot failures should preserve the existing snapshot-list failure message." \
+		"$output" "Failed to retrieve snapshot list from the destination."
+	assertContains "Remote destination snapshot failures should preserve target-side stderr diagnostics." \
+		"$output" "snapshot list failed"
+}
+
+test_get_zfs_list_remote_target_batches_malformed_payloads_fail_closed() {
+	set +e
+	output=$(
+		(
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t0\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf '%s\n' "backup/dst"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Malformed remote destination discovery batches should fail closed." \
+		1 "$status"
+	assertContains "Malformed remote destination discovery batches should report the malformed batch context." \
+		"$output" "Malformed destination discovery batch response."
+
+	set +e
+	output=$(
+		(
+			g_option_T_target_host="target.example"
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t0\n'
+				printf 'STATUS\tpool\t\n'
+				printf 'STATUS\tsnapshot\t0\n'
+				printf 'STATUS\tsnapshot_ran\t1\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf '%s\n' "backup/dst"
+				printf '%s\n' "backup/dst/src"
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf '%s\n' "backup/dst/src@snapA	101"
+				printf 'END\tsnapshot_stdout\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Remote destination discovery batches with missing sections should fail closed." \
+		1 "$status"
+	assertContains "Missing remote batch sections should report the malformed batch context." \
+		"$output" "Malformed destination discovery batch response."
+}
+
+test_run_remote_destination_discovery_batch_preserves_setup_and_transport_failures() {
+	output=$(
+		set +e
+		dest_file="$TEST_TMPDIR/remote_batch_failure.dest"
+		err_file="$TEST_TMPDIR/remote_batch_failure.err"
+		snap_file="$TEST_TMPDIR/remote_batch_failure.snap"
+		snap_err_file="$TEST_TMPDIR/remote_batch_failure.snap.err"
+		: >"$dest_file"
+		: >"$err_file"
+		: >"$snap_file"
+		: >"$snap_err_file"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 0
+			}
+			zxfer_get_temp_file() {
+				return 31
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'temp=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			zxfer_build_remote_destination_discovery_batch_script() {
+				return 32
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'build=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				return 33
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'command=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "transport-policy-failed"
+				return 35
+			}
+			zxfer_throw_error() {
+				printf 'transport_error=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'transport=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				g_zxfer_ssh_shell_context_error_result="wrapper setup failed"
+				return 38
+			}
+			zxfer_throw_error() {
+				printf 'context_error=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'context=%s\n' "$?"
+
+		(
+			pool_log="$TEST_TMPDIR/remote_batch_rootless_pool.log"
+			g_destination="backup"
+			g_option_T_target_host="target.example"
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "$3" >"$pool_log"
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 39
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+			l_rootless_status=$?
+			printf 'rootless_pool=%s\n' "$(cat "$pool_log")"
+			exit "$l_rootless_status"
+		)
+		printf 'context_nomsg=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 0
+			}
+			zxfer_get_temp_file() {
+				if [ "${remote_batch_second_temp_count:-0}" = 1 ]; then
+					return 36
+				fi
+				remote_batch_second_temp_count=1
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_second_temp_$remote_batch_second_temp_count.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'second_temp=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 0
+			}
+			zxfer_get_temp_file() {
+				if [ "${remote_batch_third_temp_count:-0}" = 0 ]; then
+					remote_batch_third_temp_count=1
+				elif [ "$remote_batch_third_temp_count" = 1 ]; then
+					remote_batch_third_temp_count=2
+				else
+					return 37
+				fi
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_third_temp_$remote_batch_third_temp_count.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'third_temp=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_get_temp_file() {
+				if [ "${remote_batch_ssh_temp_count:-0}" = 0 ]; then
+					remote_batch_ssh_temp_count=1
+				elif [ "$remote_batch_ssh_temp_count" = 1 ]; then
+					remote_batch_ssh_temp_count=2
+				else
+					remote_batch_ssh_temp_count=3
+				fi
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_ssh_$remote_batch_ssh_temp_count.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 0
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				return 34
+			}
+			zxfer_cleanup_runtime_artifact_path() {
+				printf 'ssh_cleanup=%s\n' "$1"
+				rm -f "$1"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'ssh=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_get_temp_file() {
+				if [ "${remote_batch_status_read_temp_count:-0}" = 0 ]; then
+					remote_batch_status_read_temp_count=1
+				elif [ "$remote_batch_status_read_temp_count" = 1 ]; then
+					remote_batch_status_read_temp_count=2
+				else
+					remote_batch_status_read_temp_count=3
+				fi
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_status_read_$remote_batch_status_read_temp_count.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 0
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' "ZXFER_DESTINATION_DISCOVERY_BATCH_V1"
+			}
+			zxfer_read_snapshot_discovery_capture_file() {
+				return 41
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'status_read=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_get_temp_file() {
+				if [ "${remote_batch_malformed_status_temp_count:-0}" = 0 ]; then
+					remote_batch_malformed_status_temp_count=1
+				elif [ "$remote_batch_malformed_status_temp_count" = 1 ]; then
+					remote_batch_malformed_status_temp_count=2
+				else
+					remote_batch_malformed_status_temp_count=3
+				fi
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_malformed_status_$remote_batch_malformed_status_temp_count.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 0
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' "ZXFER_DESTINATION_DISCOVERY_BATCH_V1"
+			}
+			zxfer_read_snapshot_discovery_capture_file() {
+				g_zxfer_snapshot_discovery_file_read_result="not-a-number"
+				return 0
+			}
+			zxfer_throw_error() {
+				printf 'malformed_status_error=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'malformed_status=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_get_temp_file() {
+				if [ "${remote_batch_stderr_read_temp_count:-0}" = 0 ]; then
+					remote_batch_stderr_read_temp_count=1
+				elif [ "$remote_batch_stderr_read_temp_count" = 1 ]; then
+					remote_batch_stderr_read_temp_count=2
+				else
+					remote_batch_stderr_read_temp_count=3
+				fi
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_stderr_read_$remote_batch_stderr_read_temp_count.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 0
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				return 34
+			}
+			zxfer_read_snapshot_discovery_capture_file() {
+				if [ "$1" = "$TEST_TMPDIR/remote_batch_stderr_read_2.out" ]; then
+					return 42
+				fi
+				IFS= read -r g_zxfer_snapshot_discovery_file_read_result <"$1" || return "$?"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'stderr_read=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_get_temp_file() {
+				if [ "${remote_batch_err_write_temp_count:-0}" = 0 ]; then
+					remote_batch_err_write_temp_count=1
+				elif [ "$remote_batch_err_write_temp_count" = 1 ]; then
+					remote_batch_err_write_temp_count=2
+				else
+					remote_batch_err_write_temp_count=3
+				fi
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_err_write_$remote_batch_err_write_temp_count.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 0
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' "transport stderr" >&2
+				return 34
+			}
+			zxfer_write_runtime_artifact_file() {
+				if [ "$1" = "$err_file" ] && [ $# -gt 1 ] && [ "$2" != "" ]; then
+					return 43
+				fi
+				: >"$1" || return "$?"
+				if [ $# -gt 1 ]; then
+					printf '%s' "$2" >"$1"
+				fi
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'err_write=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_get_temp_file() {
+				if [ "${remote_batch_parse_temp_count:-0}" = 0 ]; then
+					remote_batch_parse_temp_count=1
+				elif [ "$remote_batch_parse_temp_count" = 1 ]; then
+					remote_batch_parse_temp_count=2
+				else
+					remote_batch_parse_temp_count=3
+				fi
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_parse_$remote_batch_parse_temp_count.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 0
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' "ZXFER_DESTINATION_DISCOVERY_BATCH_V1"
+			}
+			zxfer_throw_error() {
+				printf 'parse_error=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_cleanup_runtime_artifact_path() {
+				printf 'parse_cleanup=%s\n' "$1"
+				rm -f "$1"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'parse=%s\n' "$?"
+
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example"
+			zxfer_get_temp_file() {
+				if [ "${remote_batch_status_load_temp_count:-0}" = 0 ]; then
+					remote_batch_status_load_temp_count=1
+				elif [ "$remote_batch_status_load_temp_count" = 1 ]; then
+					remote_batch_status_load_temp_count=2
+				else
+					remote_batch_status_load_temp_count=3
+				fi
+				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_status_load_$remote_batch_status_load_temp_count.out"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch-script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "remote-cmd"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "ssh"
+			}
+			zxfer_prepare_ssh_shell_command_context() {
+				return 0
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'STATUS\tinventory\t0\n'
+				printf 'STATUS\tpool\t\n'
+				printf 'STATUS\tsnapshot\t0\n'
+				printf 'STATUS\tsnapshot_ran\t1\n'
+				printf 'BEGIN\tinventory_stdout\n'
+				printf '%s\n' "backup/dst"
+				printf 'END\tinventory_stdout\n'
+				printf 'BEGIN\tinventory_stderr\n'
+				printf 'END\tinventory_stderr\n'
+				printf 'BEGIN\tpool_stderr\n'
+				printf 'END\tpool_stderr\n'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf 'END\tsnapshot_stdout\n'
+				printf 'BEGIN\tsnapshot_stderr\n'
+				printf 'END\tsnapshot_stderr\n'
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+			}
+			zxfer_load_destination_discovery_batch_status_file() {
+				return 44
+			}
+			zxfer_throw_error() {
+				printf 'load_error=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+		)
+		printf 'load=%s\n' "$?"
+	)
+
+	assertContains "Remote batch temp allocation failures should preserve status." \
+		"$output" "temp=31"
+	assertContains "Remote batch script render failures should preserve status." \
+		"$output" "build=32"
+	assertContains "Remote batch command render failures should preserve status." \
+		"$output" "command=33"
+	assertContains "Remote batch transport token failures should preserve status." \
+		"$output" "transport=35"
+	assertContains "Remote batch transport token failures should preserve diagnostics." \
+		"$output" "transport_error=transport-policy-failed"
+	assertContains "Remote batch wrapper setup failures should preserve diagnostics." \
+		"$output" "context_error=wrapper setup failed"
+	assertContains "Remote batch wrapper setup failures without diagnostics should preserve status." \
+		"$output" "context_nomsg=39"
+	assertContains "Remote batch rootless destination roots should be passed through as the pool probe name." \
+		"$output" "rootless_pool=backup"
+	assertContains "Remote batch second temp allocation failures should preserve status." \
+		"$output" "second_temp=36"
+	assertContains "Remote batch third temp allocation failures should preserve status." \
+		"$output" "third_temp=37"
+	assertContains "Remote batch SSH failures should preserve transport status." \
+		"$output" "ssh=34"
+	assertContains "Remote batch transport status read failures should preserve status." \
+		"$output" "status_read=41"
+	assertContains "Remote batch malformed transport status should report context." \
+		"$output" "malformed_status_error=Malformed destination discovery transport status."
+	assertContains "Remote batch malformed transport status should fail closed." \
+		"$output" "malformed_status=1"
+	assertContains "Remote batch transport stderr read failures should preserve status." \
+		"$output" "stderr_read=42"
+	assertContains "Remote batch transport stderr stage failures should preserve status." \
+		"$output" "err_write=43"
+	assertContains "Remote batch parse failures should report malformed batch context." \
+		"$output" "parse_error=Malformed destination discovery batch response."
+	assertContains "Remote batch parse failures should preserve parser status." \
+		"$output" "parse=1"
+	assertContains "Remote batch status load failures should report malformed batch context." \
+		"$output" "load_error=Malformed destination discovery batch response."
+	assertContains "Remote batch status load failures should preserve status." \
+		"$output" "load=44"
+	assertContains "Remote batch SSH failures should clean the transport status sidecar." \
+		"$output" "ssh_cleanup=$TEST_TMPDIR/remote_batch_ssh_1.out"
+	assertContains "Remote batch SSH failures should clean the transport stderr sidecar." \
+		"$output" "ssh_cleanup=$TEST_TMPDIR/remote_batch_ssh_2.out"
+	assertContains "Remote batch SSH failures should clean the batch status sidecar." \
+		"$output" "ssh_cleanup=$TEST_TMPDIR/remote_batch_ssh_3.out"
+	assertContains "Remote batch parse failures should clean the transport status sidecar." \
+		"$output" "parse_cleanup=$TEST_TMPDIR/remote_batch_parse_1.out"
+	assertContains "Remote batch parse failures should clean the transport stderr sidecar." \
+		"$output" "parse_cleanup=$TEST_TMPDIR/remote_batch_parse_2.out"
+	assertContains "Remote batch parse failures should clean the batch status sidecar." \
+		"$output" "parse_cleanup=$TEST_TMPDIR/remote_batch_parse_3.out"
+}
+
+test_get_zfs_list_local_destination_discovery_does_not_use_remote_batch() {
+	ssh_log="$TEST_TMPDIR/get_zfs_local_batch_guard.ssh"
+	zfs_log="$TEST_TMPDIR/get_zfs_local_batch_guard.zfs"
+	: >"$ssh_log"
+	: >"$zfs_log"
+
+	output=$(
+		(
+			SSH_LOG="$ssh_log"
+			ZFS_LOG="$zfs_log"
+			g_option_T_target_host=""
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' "unexpected-ssh" >>"$SSH_LOG"
+				return 99
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "$*" >>"$ZFS_LOG"
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "backup/dst/src" ]; then
+					printf '%s\n' "backup/dst/src"
+					return 0
+				fi
+				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
+					printf '%s\n' "backup/dst"
+					printf '%s\n' "backup/dst/src"
+					return 0
+				fi
+				if [ "$1" = "list" ] && [ "$2" = "-Hr" ]; then
+					printf '%s\t%s\n' "backup/dst/src@snapA" "guid-a"
+					return 0
+				fi
+				return 99
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list="tank/src"
+				g_recursive_source_dataset_list="tank/src"
+			}
+			zxfer_get_zfs_list
+			printf 'dest=%s\n' "$g_recursive_dest_list"
+			printf 'raw=%s\n' "$g_rzfs_list_hr_snap"
+		)
+	)
+
+	assertEquals "Local destination discovery should not invoke the remote batch path." \
+		"" "$(cat "$ssh_log")"
+	assertContains "Local destination discovery should keep using the direct recursive dataset inventory command." \
+		"$(cat "$zfs_log")" "list -t filesystem,volume -Hr -o name backup/dst"
+	assertContains "Local destination discovery should keep using the direct unsorted destination snapshot command." \
+		"$(cat "$zfs_log")" "list -Hr -o name,guid -t snapshot backup/dst/src"
+	assertContains "Local destination discovery should still publish the recursive destination inventory." \
+		"$output" "dest=backup/dst
+backup/dst/src"
+	assertContains "Local destination discovery should still publish the raw destination snapshot cache." \
+		"$output" "raw=backup/dst/src@snapA	guid-a"
 }
 
 test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
@@ -3068,9 +6631,6 @@ test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
 			}
 			zxfer_reverse_file_lines() {
 				cat "$1"
-			}
-			zxfer_build_snapshot_record_index() {
-				:
 			}
 			g_option_V_very_verbose=1
 			zxfer_run_destination_zfs_cmd() {
@@ -3419,14 +6979,6 @@ test_get_zfs_list_reports_source_stderr_readback_failures_after_background_failu
 			}
 			zxfer_read_snapshot_discovery_capture_file() {
 				l_read_count=$((l_read_count + 1))
-				if [ "$l_read_count" -eq 1 ]; then
-					g_zxfer_snapshot_discovery_file_read_result="backup/dst"
-					return 0
-				fi
-				if [ "$l_read_count" -eq 2 ]; then
-					g_zxfer_snapshot_discovery_file_read_result="backup/dst@snapA"
-					return 0
-				fi
 				return 31
 			}
 			zxfer_throw_error() {
@@ -3919,64 +7471,6 @@ test_capture_recursive_dataset_list_from_lines_file_reports_staged_read_failures
 		"$output" "result=<>"
 }
 
-test_capture_recursive_dataset_list_from_snapshot_records_extracts_sorted_unique_datasets() {
-	zxfer_capture_recursive_dataset_list_from_snapshot_records "$(
-		cat <<'EOF'
-tank/src/child@snap2
-tank/src@snap1
-tank/src/child@snap3
-EOF
-	)"
-
-	# shellcheck disable=SC2031  # Current-shell scratch is asserted directly in tests.
-	assertEquals "Recursive dataset-list capture from snapshot records should extract, sort, and deduplicate dataset names." \
-		"tank/src
-tank/src/child" "$g_zxfer_recursive_dataset_list_result"
-}
-
-test_capture_recursive_dataset_list_from_snapshot_records_reports_second_tempfile_failures() {
-	set +e
-	output=$(
-		(
-			call_count=0
-			zxfer_get_temp_file() {
-				call_count=$((call_count + 1))
-				if [ "$call_count" -eq 1 ]; then
-					g_zxfer_temp_file_result="$TEST_TMPDIR/recursive_snapshot_records.tmp"
-					: >"$g_zxfer_temp_file_result"
-					return 0
-				fi
-				return 1
-			}
-			zxfer_capture_recursive_dataset_list_from_snapshot_records "tank/src@snap1"
-		)
-	)
-	status=$?
-
-	assertEquals "Recursive dataset-list capture from snapshot records should fail closed when the dataset-lines tempfile cannot be allocated." \
-		1 "$status"
-	assertEquals "Recursive dataset-list capture from snapshot records should not emit output for second-tempfile failures." \
-		"" "$output"
-}
-
-test_capture_recursive_dataset_list_from_snapshot_records_reports_line_capture_failures() {
-	set +e
-	output=$(
-		(
-			zxfer_capture_recursive_dataset_list_from_lines_file() {
-				return 1
-			}
-			zxfer_capture_recursive_dataset_list_from_snapshot_records "tank/src@snap1"
-		)
-	)
-	status=$?
-
-	assertEquals "Recursive dataset-list capture from snapshot records should fail closed when recursive line capture fails." \
-		1 "$status"
-	assertEquals "Recursive dataset-list capture from snapshot records should not emit output for recursive line-capture failures." \
-		"" "$output"
-}
-
 test_capture_recursive_dataset_list_from_snapshot_file_extracts_sorted_unique_datasets() {
 	snapshot_records_file="$TEST_TMPDIR/recursive_snapshot_file.txt"
 	cat >"$snapshot_records_file" <<'EOF'
@@ -4012,19 +7506,6 @@ test_capture_recursive_dataset_list_from_snapshot_file_reports_line_capture_fail
 		1 "$status"
 	assertEquals "Recursive dataset-list capture from snapshot files should not emit output for recursive line-capture failures." \
 		"" "$output"
-}
-
-test_write_recursive_dataset_list_result_to_file_writes_empty_results() {
-	output_file="$TEST_TMPDIR/recursive_dataset_list_empty.txt"
-	g_zxfer_recursive_dataset_list_result=""
-
-	zxfer_write_recursive_dataset_list_result_to_file "$output_file"
-	status=$?
-
-	assertEquals "Recursive dataset-list result writes should succeed for an empty list." \
-		0 "$status"
-	assertEquals "Recursive dataset-list result writes should create an empty file for an empty list." \
-		"" "$(cat "$output_file")"
 }
 
 test_filter_recursive_dataset_list_with_excludes_passthrough_without_patterns_in_current_shell() {
@@ -4126,520 +7607,6 @@ test_filter_recursive_dataset_list_with_excludes_reports_staged_read_failures() 
 		"$output" "result=<>"
 }
 
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_common_snapshot_comm_failures() {
-	source_tmp="$TEST_TMPDIR/refine_common_comm_error_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_common_comm_error_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			comm() {
-				return 9
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when deriving the common snapshot intersection fails." \
-		1 "$status"
-	assertContains "Common snapshot intersection failures should report the recursive identity-validation context." \
-		"$output" "Failed to derive recursive common snapshot list for snapshot identity validation."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_already_changed_dataset_derivation_failures() {
-	source_tmp="$TEST_TMPDIR/refine_already_changed_derivation_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_already_changed_derivation_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-	g_recursive_source_list="tank/already"
-
-	set +e
-	output=$(
-		(
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_capture_recursive_dataset_list_from_snapshot_records() {
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when deriving the already-changed dataset list fails." \
-		1 "$status"
-	assertContains "Already-changed dataset derivation failures should report the recursive identity-validation context." \
-		"$output" "Failed to derive already-changed recursive dataset list for snapshot identity validation."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_already_changed_dataset_stage_failures() {
-	source_tmp="$TEST_TMPDIR/refine_already_changed_stage_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_already_changed_stage_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-	g_recursive_source_list="tank/already"
-
-	set +e
-	output=$(
-		(
-			write_call_count=0
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_capture_recursive_dataset_list_from_snapshot_records() {
-				g_zxfer_recursive_dataset_list_result="tank/already"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				write_call_count=$((write_call_count + 1))
-				if [ "$write_call_count" -eq 2 ]; then
-					return 1
-				fi
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when staging the already-changed dataset list fails." \
-		1 "$status"
-	assertContains "Already-changed dataset staging failures should report the recursive identity-validation context." \
-		"$output" "Failed to stage already-changed recursive dataset list for snapshot identity validation."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_empty_already_changed_stage_failures() {
-	source_tmp="$TEST_TMPDIR/refine_empty_already_changed_stage_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_empty_already_changed_stage_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-	g_recursive_source_list=""
-	g_recursive_destination_extra_dataset_list=""
-
-	set +e
-	output=$(
-		(
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_write_runtime_artifact_file() {
-				return 42
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				printf 'status=%s\n' "$2"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when staging an empty already-changed dataset list fails." \
-		1 "$status"
-	assertContains "Empty already-changed dataset staging failures should report the recursive identity-validation context." \
-		"$output" "Failed to stage empty already-changed recursive dataset list for snapshot identity validation."
-	assertContains "Empty already-changed dataset staging failures should preserve the runtime artifact write status." \
-		"$output" "status=42"
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_candidate_dataset_load_failures_when_filtering() {
-	source_tmp="$TEST_TMPDIR/refine_candidate_load_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_candidate_load_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-	g_option_x_exclude_datasets='^tank/src/exclude$'
-
-	set +e
-	output=$(
-		(
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_capture_recursive_dataset_list_from_lines_file() {
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when loading candidate datasets for exclude filtering fails." \
-		1 "$status"
-	assertContains "Candidate dataset load failures should report the recursive identity-validation filtering context." \
-		"$output" "Failed to load recursive candidate dataset list for snapshot identity validation filtering."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_filtered_candidate_dataset_stage_failures() {
-	source_tmp="$TEST_TMPDIR/refine_candidate_stage_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_candidate_stage_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-	g_option_x_exclude_datasets='^tank/src/exclude$'
-
-	set +e
-	output=$(
-		(
-			write_call_count=0
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_capture_recursive_dataset_list_from_lines_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_filter_recursive_dataset_list_with_excludes() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				write_call_count=$((write_call_count + 1))
-				if [ "$write_call_count" -eq 2 ]; then
-					return 1
-				fi
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when staging the filtered candidate dataset list fails." \
-		1 "$status"
-	assertContains "Filtered candidate dataset staging failures should report the recursive identity-validation context." \
-		"$output" "Failed to stage filtered recursive candidate dataset list for snapshot identity validation."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_source_identity_stage_tempfile_failures() {
-	source_tmp="$TEST_TMPDIR/refine_source_identity_temp_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_source_identity_temp_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			call_count=0
-			zxfer_get_temp_file() {
-				call_count=$((call_count + 1))
-				if [ "$call_count" -le 4 ]; then
-					g_zxfer_temp_file_result="$TEST_TMPDIR/refine_source_identity_stage_$call_count.tmp"
-					: >"$g_zxfer_temp_file_result"
-					return 0
-				fi
-				return 1
-			}
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_get_snapshot_identity_records_for_dataset() {
-				if [ "$1:$2" = "source:tank/src" ]; then
-					printf '%s\n' "tank/src@same	111"
-				elif [ "$1:$2" = "destination:backup/dst/src" ]; then
-					printf '%s\n' "backup/dst/src@same	999"
-				else
-					return 1
-				fi
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when source identity staging cannot allocate a tempfile." \
-		1 "$status"
-	assertContains "Source identity staging tempfile failures should report the dataset being validated." \
-		"$output" "Failed to allocate source snapshot identity staging for [tank/src]."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_destination_identity_stage_tempfile_failures() {
-	source_tmp="$TEST_TMPDIR/refine_destination_identity_temp_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_destination_identity_temp_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			call_count=0
-			zxfer_get_temp_file() {
-				call_count=$((call_count + 1))
-				if [ "$call_count" -le 5 ]; then
-					g_zxfer_temp_file_result="$TEST_TMPDIR/refine_destination_identity_stage_$call_count.tmp"
-					: >"$g_zxfer_temp_file_result"
-					return 0
-				fi
-				return 1
-			}
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_get_snapshot_identity_records_for_dataset() {
-				if [ "$1:$2" = "source:tank/src" ]; then
-					printf '%s\n' "tank/src@same	111"
-				elif [ "$1:$2" = "destination:backup/dst/src" ]; then
-					printf '%s\n' "backup/dst/src@same	999"
-				else
-					return 1
-				fi
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when destination identity staging cannot allocate a tempfile." \
-		1 "$status"
-	assertContains "Destination identity staging tempfile failures should report the mapped destination dataset being validated." \
-		"$output" "Failed to allocate destination snapshot identity staging for [backup/dst/src]."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_source_identity_write_failures() {
-	source_tmp="$TEST_TMPDIR/refine_source_identity_write_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_source_identity_write_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_get_snapshot_identity_records_for_dataset() {
-				if [ "$1:$2" = "source:tank/src" ]; then
-					printf '%s\n' "tank/src@same	111"
-				elif [ "$1:$2" = "destination:backup/dst/src" ]; then
-					printf '%s\n' "backup/dst/src@same	999"
-				else
-					return 1
-				fi
-			}
-			zxfer_write_snapshot_identity_file_from_records() {
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when source identity staging writes fail." \
-		1 "$status"
-	assertContains "Source identity staging write failures should report the dataset being validated." \
-		"$output" "Failed to write source snapshot identities for [tank/src]."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_destination_identity_write_failures() {
-	source_tmp="$TEST_TMPDIR/refine_destination_identity_write_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_destination_identity_write_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			write_call_count=0
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_get_snapshot_identity_records_for_dataset() {
-				if [ "$1:$2" = "source:tank/src" ]; then
-					printf '%s\n' "tank/src@same	111"
-				elif [ "$1:$2" = "destination:backup/dst/src" ]; then
-					printf '%s\n' "backup/dst/src@same	999"
-				else
-					return 1
-				fi
-			}
-			zxfer_write_snapshot_identity_file_from_records() {
-				write_call_count=$((write_call_count + 1))
-				if [ "$write_call_count" -eq 1 ]; then
-					printf '%s\n' "same	111" >"$2"
-					return 0
-				fi
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when destination identity staging writes fail." \
-		1 "$status"
-	assertContains "Destination identity staging write failures should report the mapped destination dataset being validated." \
-		"$output" "Failed to write destination snapshot identities for [backup/dst/src]."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_recursive_source_merge_failures() {
-	source_tmp="$TEST_TMPDIR/refine_source_merge_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_source_merge_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_get_snapshot_identity_records_for_dataset() {
-				if [ "$1:$2" = "source:tank/src" ]; then
-					printf '%s\n' "tank/src@same	111"
-				elif [ "$1:$2" = "destination:backup/dst/src" ]; then
-					printf '%s\n' "backup/dst/src@same	999"
-				else
-					return 1
-				fi
-			}
-			zxfer_diff_snapshot_lists() {
-				if [ "$3" = "source_minus_destination" ]; then
-					printf '%s\n' "same	111"
-					return 0
-				fi
-				return 0
-			}
-			zxfer_capture_recursive_dataset_list_from_snapshot_records() {
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when merging the source-side recursive dataset list fails." \
-		1 "$status"
-	assertContains "Source-side recursive dataset merge failures should report the identity-validation merge context." \
-		"$output" "Failed to merge recursive source dataset list after snapshot identity validation."
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_recursive_destination_merge_failures() {
-	source_tmp="$TEST_TMPDIR/refine_destination_merge_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_destination_merge_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				printf '%s\n' "$g_zxfer_recursive_dataset_list_result" >"$1"
-			}
-			zxfer_get_snapshot_identity_records_for_dataset() {
-				if [ "$1:$2" = "source:tank/src" ]; then
-					printf '%s\n' "tank/src@same	111"
-				elif [ "$1:$2" = "destination:backup/dst/src" ]; then
-					printf '%s\n' "backup/dst/src@same	999"
-				else
-					return 1
-				fi
-			}
-			zxfer_diff_snapshot_lists() {
-				if [ "$3" = "destination_minus_source" ]; then
-					printf '%s\n' "same	999"
-					return 0
-				fi
-				return 0
-			}
-			zxfer_capture_recursive_dataset_list_from_snapshot_records() {
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when merging the destination-side recursive dataset list fails." \
-		1 "$status"
-	assertContains "Destination-side recursive dataset merge failures should report the identity-validation merge context." \
-		"$output" "Failed to merge recursive destination dataset list after snapshot identity validation."
-}
-
 test_write_source_snapshot_list_to_file_reports_tempfile_failures() {
 	outfile="$TEST_TMPDIR/source_tempfile_failure.out"
 	errfile="$TEST_TMPDIR/source_tempfile_failure.err"
@@ -4658,192 +7625,6 @@ test_write_source_snapshot_list_to_file_reports_tempfile_failures() {
 	assertEquals "Source snapshot discovery should preserve the exact tempfile allocation failure status when the staged command tempfile cannot be allocated." \
 		17 "$status"
 	assertEquals "Source snapshot discovery should not emit output for staged command tempfile failures." \
-		"" "$output"
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_first_tempfile_failures() {
-	source_tmp="$TEST_TMPDIR/refine_first_temp_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_first_temp_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			zxfer_get_temp_file() {
-				return 21
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should preserve the exact tempfile allocation failure status when the first staging tempfile cannot be allocated." \
-		21 "$status"
-	assertEquals "Lazy identity refinement should not emit output for first-tempfile failures." \
-		"" "$output"
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_second_tempfile_failures() {
-	source_tmp="$TEST_TMPDIR/refine_second_temp_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_second_temp_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			call_count=0
-			zxfer_get_temp_file() {
-				call_count=$((call_count + 1))
-				if [ "$call_count" -eq 1 ]; then
-					g_zxfer_temp_file_result="$TEST_TMPDIR/refine-second-temp-1.tmp"
-					: >"$g_zxfer_temp_file_result"
-					return 0
-				fi
-				return 22
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should preserve the exact tempfile allocation failure status when the second staging tempfile cannot be allocated." \
-		22 "$status"
-	assertEquals "Lazy identity refinement should not emit output for second-tempfile failures." \
-		"" "$output"
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_third_tempfile_failures() {
-	source_tmp="$TEST_TMPDIR/refine_third_temp_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_third_temp_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			call_count=0
-			zxfer_get_temp_file() {
-				call_count=$((call_count + 1))
-				if [ "$call_count" -le 2 ]; then
-					g_zxfer_temp_file_result="$TEST_TMPDIR/refine-third-temp-$call_count.tmp"
-					: >"$g_zxfer_temp_file_result"
-					return 0
-				fi
-				return 23
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should preserve the exact tempfile allocation failure status when the third staging tempfile cannot be allocated." \
-		23 "$status"
-	assertEquals "Lazy identity refinement should not emit output for third-tempfile failures." \
-		"" "$output"
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_fourth_tempfile_failures() {
-	source_tmp="$TEST_TMPDIR/refine_fourth_temp_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_fourth_temp_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			call_count=0
-			zxfer_get_temp_file() {
-				call_count=$((call_count + 1))
-				if [ "$call_count" -le 3 ]; then
-					g_zxfer_temp_file_result="$TEST_TMPDIR/refine-fourth-temp-$call_count.tmp"
-					: >"$g_zxfer_temp_file_result"
-					return 0
-				fi
-				return 24
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should preserve the exact tempfile allocation failure status when the fourth staging tempfile cannot be allocated." \
-		24 "$status"
-	assertEquals "Lazy identity refinement should not emit output for fourth-tempfile failures." \
-		"" "$output"
-}
-
-test_zxfer_refine_recursive_snapshot_deltas_with_identity_validation_reports_common_dataset_stage_failures() {
-	source_tmp="$TEST_TMPDIR/refine_common_stage_source.txt"
-	dest_tmp="$TEST_TMPDIR/refine_common_stage_dest.txt"
-	printf '%s\n' "tank/src@same" >"$source_tmp"
-	printf '%s\n' "tank/src@same" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-				g_zxfer_recursive_dataset_list_result="tank/src"
-				return 0
-			}
-			zxfer_write_recursive_dataset_list_result_to_file() {
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Lazy identity refinement should fail closed when staging the common dataset list fails." \
-		1 "$status"
-	assertContains "Common dataset staging failures should report the recursive identity-validation context." \
-		"$output" "Failed to stage recursive common dataset list for snapshot identity validation."
-}
-
-test_capture_recursive_dataset_list_from_snapshot_records_reports_initial_tempfile_failures() {
-	set +e
-	output=$(
-		(
-			zxfer_get_temp_file() {
-				return 1
-			}
-			zxfer_capture_recursive_dataset_list_from_snapshot_records "tank/src@snap1"
-		)
-	)
-	status=$?
-
-	assertEquals "Recursive dataset-list capture from snapshot records should fail closed when the first tempfile cannot be allocated." \
-		1 "$status"
-	assertEquals "Recursive dataset-list capture from snapshot records should not emit output for first-tempfile failures." \
-		"" "$output"
-}
-
-test_capture_recursive_dataset_list_from_snapshot_records_reports_snapshot_record_write_failures() {
-	set +e
-	output=$(
-		(
-			call_count=0
-			zxfer_get_temp_file() {
-				call_count=$((call_count + 1))
-				g_zxfer_temp_file_result="$TEST_TMPDIR/records-$call_count.tmp"
-				return 0
-			}
-			zxfer_write_runtime_artifact_file() {
-				return 73
-			}
-			zxfer_capture_recursive_dataset_list_from_snapshot_records "tank/src@snap1"
-		)
-	)
-	status=$?
-
-	assertEquals "Recursive dataset-list capture from snapshot records should fail closed when the snapshot-record staging file cannot be written." \
-		73 "$status"
-	assertEquals "Recursive dataset-list capture from snapshot records should not publish shell noise when the snapshot-record staging file cannot be written." \
 		"" "$output"
 }
 
@@ -4945,16 +7726,16 @@ test_set_g_recursive_source_list_reports_recursive_delete_diff_failures() {
 	source_tmp="$TEST_TMPDIR/delete_diff_failure_source.txt"
 	dest_tmp="$TEST_TMPDIR/delete_diff_failure_dest.txt"
 	printf '%s\n' "tank/src@snap1" >"$source_tmp"
-	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
+	: >"$dest_tmp"
 
 	set +e
 	output=$(
 		(
-			zxfer_diff_snapshot_lists() {
-				if [ "$3" = "destination_minus_source" ]; then
+			comm() {
+				if [ "$1" = "-3" ]; then
 					return 7
 				fi
-				return 0
+				command comm "$@"
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
@@ -4968,7 +7749,7 @@ test_set_g_recursive_source_list_reports_recursive_delete_diff_failures() {
 	assertEquals "Recursive delta planning should fail closed when the destination-minus-source diff fails." \
 		1 "$status"
 	assertContains "Recursive delta planning should report the recursive delete diff failure context." \
-		"$output" "Failed to diff destination and source snapshots for recursive delete planning."
+		"$output" "Failed to diff source and destination snapshots for recursive delta planning."
 }
 
 test_set_g_recursive_source_list_reports_recursive_destination_exclude_failures() {
@@ -5039,27 +7820,205 @@ test_set_g_recursive_source_list_reports_recursive_source_inventory_exclude_fail
 		"$output" "Failed to filter recursive source dataset inventory against exclude patterns."
 }
 
-test_set_g_recursive_source_list_does_not_call_whole_tree_identity_validation() {
-	source_tmp="$TEST_TMPDIR/no_identity_validation_source.txt"
-	dest_tmp="$TEST_TMPDIR/no_identity_validation_dest.txt"
+test_set_g_recursive_source_list_reports_destination_snapshot_exclude_filter_failures() {
+	source_tmp="$TEST_TMPDIR/destination_snap_filter_failure_source.txt"
+	dest_tmp="$TEST_TMPDIR/destination_snap_filter_failure_dest.txt"
 	printf '%s\n' "tank/src@snap1" >"$source_tmp"
 	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
+	g_option_x_exclude_datasets='exclude$'
 
 	set +e
 	output=$(
 		(
-			zxfer_refine_recursive_snapshot_deltas_with_identity_validation() {
-				printf '%s\n' "unexpected identity validation"
-				return 7
+			snapshot_filter_call_count=0
+			zxfer_filter_snapshot_file_with_excludes() {
+				snapshot_filter_call_count=$((snapshot_filter_call_count + 1))
+				if [ "$snapshot_filter_call_count" -eq 2 ]; then
+					return 1
+				fi
+				cat "$1" >"$2"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
 			}
 			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
 		)
 	)
 	status=$?
 
-	assertEquals "Recursive delta planning should skip the whole-tree identity validation pass on name-identical inputs." \
-		0 "$status"
-	assertEquals "Recursive delta planning should not emit identity-validation output when no snapshot names differ." \
+	assertEquals "Recursive delta planning should fail closed when filtering the destination snapshot file fails." \
+		1 "$status"
+	assertContains "Recursive delta planning should report the destination snapshot exclude-filter failure context." \
+		"$output" "Failed to filter destination snapshots against exclude patterns for recursive delta planning."
+}
+
+test_set_g_recursive_source_list_reports_empty_source_delta_stage_failures() {
+	source_tmp="$TEST_TMPDIR/empty_source_delta_failure_source.txt"
+	dest_tmp="$TEST_TMPDIR/empty_source_delta_failure_dest.txt"
+	printf '%s\n' "tank/src@snap1" >"$source_tmp"
+	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
+	g_option_x_exclude_datasets=""
+
+	set +e
+	output=$(
+		(
+			zxfer_write_runtime_artifact_file() {
+				return 77
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+		)
+	)
+	status=$?
+
+	assertEquals "Recursive delta planning should fail closed when staging the empty source delta fails." \
+		1 "$status"
+	assertContains "Recursive delta planning should report the empty source delta staging failure context." \
+		"$output" "Failed to stage empty recursive source snapshot delta."
+}
+
+test_set_g_recursive_source_list_reports_empty_destination_delta_stage_failures() {
+	source_tmp="$TEST_TMPDIR/empty_destination_delta_failure_source.txt"
+	dest_tmp="$TEST_TMPDIR/empty_destination_delta_failure_dest.txt"
+	printf '%s\n' "tank/src@snap1" >"$source_tmp"
+	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
+	g_option_x_exclude_datasets=""
+
+	set +e
+	output=$(
+		(
+			empty_delta_write_call_count=0
+			zxfer_write_runtime_artifact_file() {
+				empty_delta_write_call_count=$((empty_delta_write_call_count + 1))
+				if [ "$empty_delta_write_call_count" -ge 2 ]; then
+					return 78
+				fi
+				: >"$1"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+		)
+	)
+	status=$?
+
+	assertEquals "Recursive delta planning should fail closed when staging the empty destination delta fails." \
+		1 "$status"
+	assertContains "Recursive delta planning should report the empty destination delta staging failure context." \
+		"$output" "Failed to stage empty recursive destination snapshot delta."
+}
+
+test_set_g_recursive_source_list_reports_snapshot_compare_failures() {
+	source_tmp="$TEST_TMPDIR/snapshot_compare_failure_source.txt"
+	dest_tmp="$TEST_TMPDIR/snapshot_compare_failure_dest.txt"
+	printf '%s\n' "tank/src@snap1" >"$source_tmp"
+	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
+	g_option_x_exclude_datasets=""
+
+	set +e
+	output=$(
+		(
+			cmp() {
+				return 2
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+		)
+	)
+	status=$?
+
+	assertEquals "Recursive delta planning should fail closed when the snapshot list comparison itself fails." \
+		1 "$status"
+	assertContains "Recursive delta planning should report the snapshot comparison failure context." \
+		"$output" "Failed to compare source and destination snapshots for recursive delta planning."
+}
+
+test_filter_recursive_dataset_list_with_excludes_preserves_grep_hard_failures() {
+	# An invalid BRE makes the exclude grep itself fail (status 2) instead of
+	# merely matching nothing (status 1), which must fail closed.
+	g_option_x_exclude_datasets='\('
+
+	set +e
+	output=$(
+		(
+			zxfer_filter_recursive_dataset_list_with_excludes "tank/src"
+		) 2>/dev/null
+	)
+	status=$?
+
+	assertEquals "Recursive dataset-list filtering should preserve hard grep failures instead of treating them as no-match." \
+		2 "$status"
+	assertEquals "Recursive dataset-list filtering should not publish a dataset list when the exclude grep fails." \
+		"" "$output"
+}
+
+test_execute_source_snapshot_name_list_background_sort_cmd_preserves_count_file_quoting_failures() {
+	set +e
+	output=$(
+		(
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "$TEST_TMPDIR/cleanup-wrapper.sh"
+			}
+			# Command substitutions run the stub in subshells, so key the
+			# injected failure off the argument instead of a call counter.
+			zxfer_build_shell_command_from_argv() {
+				if [ "$1" = "$TEST_TMPDIR/count-quote.count" ]; then
+					return 53
+				fi
+				printf "'%s'\n" "$1"
+			}
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				"echo snapshots" \
+				"$TEST_TMPDIR/count-quote-sorted.out" \
+				"" \
+				"$TEST_TMPDIR/count-quote.count"
+		)
+	)
+	status=$?
+
+	assertEquals "The no-op proof source launcher should preserve count-file quoting failures exactly." \
+		53 "$status"
+	assertEquals "The no-op proof source launcher should not emit output for count-file quoting failures." \
+		"" "$output"
+}
+
+test_execute_source_snapshot_name_list_background_sort_cmd_preserves_count_status_tempfile_failures() {
+	set +e
+	output=$(
+		(
+			temp_call_count=0
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "$TEST_TMPDIR/cleanup-wrapper.sh"
+			}
+			zxfer_get_temp_file() {
+				temp_call_count=$((temp_call_count + 1))
+				if [ "$temp_call_count" -ge 2 ]; then
+					return 57
+				fi
+				g_zxfer_temp_file_result="$TEST_TMPDIR/count-temp-$temp_call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				"echo snapshots" \
+				"$TEST_TMPDIR/count-temp-sorted.out" \
+				"" \
+				"$TEST_TMPDIR/count-temp.count"
+		)
+	)
+	status=$?
+
+	assertEquals "The no-op proof source launcher should preserve count status-file allocation failures exactly." \
+		57 "$status"
+	assertEquals "The no-op proof source launcher should not emit output for count status-file allocation failures." \
 		"" "$output"
 }
 
@@ -5196,6 +8155,43 @@ test_get_zfs_list_propagates_recursive_source_list_failures() {
 		23 "$status"
 	assertEquals "Recursive source-list planning failures without their own diagnostic should not emit extra output." \
 		"" "$output"
+}
+
+# Shared proof for the collapsed status-ladder forms used across src/ modules:
+# 'cmd || return "$?"' and 'cmd || { l_status=$?; cleanup; return "$l_status"; }'
+# must both return the failed command's original status. The capture must
+# happen before the cleanup call because $? after cleanup reflects the cleanup
+# command, not the failure being propagated.
+test_collapsed_status_ladder_forms_preserve_original_failure_status() {
+	output=$(
+		(
+			fail_with_status_27() {
+				return 27
+			}
+			plain_collapse() {
+				fail_with_status_27 || return "$?"
+				echo "unreachable"
+			}
+			cleanup_collapse() {
+				fail_with_status_27 || {
+					l_status=$?
+					: cleanup that succeeds and would clobber a bare \$?
+					return "$l_status"
+				}
+				echo "unreachable"
+			}
+			set +e
+			plain_collapse
+			plain_status=$?
+			cleanup_collapse
+			cleanup_status=$?
+			set -e
+			printf 'plain=%s cleanup=%s\n' "$plain_status" "$cleanup_status"
+		)
+	)
+
+	assertEquals "The 'cmd || return \"\$?\"' collapse must propagate the failed command's exact status." \
+		"plain=27 cleanup=27" "$output"
 }
 
 # shellcheck source=tests/shunit2/shunit2

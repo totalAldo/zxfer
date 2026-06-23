@@ -67,6 +67,26 @@ test_cleanup_child_wrapper_on_signal_returns_143() {
 		"aborted" "$(tr -d '[:space:]' <"$marker_file")"
 }
 
+test_cleanup_child_wrapper_on_signal_waits_for_wrapped_child() {
+	marker_file="$TEST_TMPDIR/cleanup_child_wrapper.on_signal_wait"
+	zxfer_test_capture_subshell '
+		zxfer_cleanup_child_wrapper_abort_descendants() {
+			:
+		}
+		wait() {
+			printf "%s\n" "waited:$1" >"'"$marker_file"'"
+			return 0
+		}
+		l_cleanup_wrapper_child_pid=4242
+		zxfer_cleanup_child_wrapper_on_signal
+	'
+
+	assertEquals "Cleanup child wrapper signal handling should keep the documented 143 exit status after waiting." \
+		143 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Cleanup child wrapper signal handling should wait for the direct wrapped child before exiting." \
+		"waited:4242" "$(tr -d '[:space:]' <"$marker_file")"
+}
+
 test_cleanup_child_wrapper_abort_descendants_preserves_listing_failures() {
 	zxfer_test_capture_subshell '
 		zxfer_cleanup_child_wrapper_list_descendants() {
@@ -128,6 +148,19 @@ test_cleanup_child_wrapper_main_preserves_worker_exit_status() {
 		7 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
+test_cleanup_child_wrapper_main_uses_absolute_shell_with_restricted_path() {
+	no_sh_path="$TEST_TMPDIR/no-sh-path"
+	mkdir -p "$no_sh_path"
+
+	zxfer_test_capture_subshell \
+		"PATH='$no_sh_path' /bin/sh '$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh' 'printf \"%s\\n\" wrapped'"
+
+	assertEquals "Cleanup child wrapper should not depend on PATH to launch the command shell." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Cleanup child wrapper should still run shell builtins through /bin/sh." \
+		"wrapped" "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
 test_cleanup_child_wrapper_main_preserves_worker_stdin_for_background_children() {
 	stdin_capture="$TEST_TMPDIR/cleanup_child_wrapper.stdin"
 	stdin_worker="$TEST_TMPDIR/cleanup_child_wrapper_stdin_worker.sh"
@@ -168,7 +201,7 @@ EOF
 
 	wait_tries=0
 	while [ ! -s "$child_pid_file" ] && [ "$wait_tries" -lt 50 ]; do
-		sleep 0.1
+		sleep 1
 		wait_tries=$((wait_tries + 1))
 	done
 

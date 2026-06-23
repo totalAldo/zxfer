@@ -35,12 +35,10 @@ test_run_coverage_default_suite_resolution_includes_coverage_overlays() {
 
 	assertContains "The default coverage run should include the background job coverage suite that protects the committed baseline." \
 		"$output" "tests/test_zxfer_background_jobs.sh"
-	assertContains "The default coverage run should include the background job runner coverage suite that protects the committed baseline." \
-		"$output" "tests/test_zxfer_background_job_runner.sh"
 	assertContains "The default coverage run should include the remote host overlay suite that protects the committed baseline." \
 		"$output" "tests/test_zxfer_remote_hosts_coverage.sh"
-	assertContains "The default coverage run should include the property cache overlay suite that exercises DRY cleanup helpers." \
-		"$output" "tests/test_zxfer_property_cache_coverage.sh"
+	assertContains "The default coverage run should include the property reconcile suite that exercises the in-memory property tables." \
+		"$output" "tests/test_zxfer_property_reconcile.sh"
 	assertContains "The default coverage run should include the snapshot state suite that protects transform readback coverage." \
 		"$output" "tests/test_zxfer_snapshot_state.sh"
 	assertNotContains "The default coverage run should not execute shared test scaffolding as a suite." \
@@ -169,26 +167,32 @@ printf '%s\n' block
 } <<EOF
 payload
 EOF
+cat <<EOF >/dev/null
+cat payload
+EOF
 printf '%s\n' done
 SCRIPT
 	printf '%s\n' "$l_source_file" >"$l_target_list_file"
 	cat >"$l_trace_file" <<TRACE
 +$l_source_file:3: printf '%s\n' one
 +$l_source_file:13: printf '%s\n' block
-+$l_source_file:17: printf '%s\n' done
++$l_source_file:17: cat
++$l_source_file:20: printf '%s\n' done
 TRACE
 
 	output=$(run_coverage_helper \
 		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\")\"")
 
 	assertContains "The bash-xtrace fallback should ignore case labels, heredoc bodies, grouping parens, and multiline string bodies when counting coverable lines." \
-		"$output" "75.00	4	3	1	src/fake.sh"
+		"$output" "80.00	5	4	1	src/fake.sh"
 	assertContains "Only the truly uncovered executable line should remain in the missing-line report." \
 		"$output" "  7:printf '%s"
 	assertNotContains "Case labels should not be treated as missing executable lines." \
 		"$output" "foo)"
 	assertNotContains "Here-doc bodies should not be treated as missing executable lines." \
 		"$output" "payload"
+	assertNotContains "Command here-doc bodies should not be treated as missing executable lines." \
+		"$output" "cat payload"
 	assertNotContains "Multiline string bodies should not be treated as missing executable lines." \
 		"$output" "line two"
 }

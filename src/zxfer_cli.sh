@@ -201,6 +201,9 @@ zxfer_read_command_line_switches() {
 	done
 
 	zxfer_refresh_compression_commands
+	# The eager run temp root decided TMPDIR safety before -V was parsed;
+	# replay a held unsafe-TMPDIR fallback advisory now that -V is known.
+	zxfer_emit_pending_tmpdir_fallback_note
 }
 
 # Purpose: Reject malformed or incompatible CLI combinations before zxfer opens

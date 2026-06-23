@@ -390,10 +390,12 @@ function is_coverable_line(line, t, l_heredoc_delimiter) {
 	}
 	if (is_case_pattern_line(line)) return 0
 	l_heredoc_delimiter = heredoc_delimiter(line)
-	if (l_heredoc_delimiter != "" && t ~ /^(done|[{}])[[:space:]].*<<-?[[:space:]]*[A-Za-z_][A-Za-z0-9_]*$/) {
+	if (l_heredoc_delimiter != "") {
 		coverage_in_heredoc = 1
 		coverage_heredoc_delimiter = l_heredoc_delimiter
-		return 0
+		if (t ~ /^(done|[{}])[[:space:]].*<<-?[[:space:]]*[A-Za-z_][A-Za-z0-9_]*$/) {
+			return 0
+		}
 	}
 	if (has_unbalanced_double_quote(line)) {
 		coverage_in_multiline_double_quote = 1

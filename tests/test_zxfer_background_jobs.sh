@@ -1,8 +1,14 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_background_jobs.sh helpers.
+# shunit2 tests for zxfer_background_jobs.sh (supervision-lite model).
 #
-# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
+# Pins: status propagation (success, failure, missing status file, non-numeric
+# status), FIFO completion-queue notification ordering, abort teardown of the
+# whole job pipeline on both spawn paths (setsid process group and the
+# cleanup-child-wrapper fallback), trap-style abort-all teardown, and the
+# spawn failure paths.
+#
+# shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
 
@@ -21,39 +27,298 @@ oneTimeTearDown() {
 
 setUp() {
 	TMPDIR="$TEST_TMPDIR"
-	g_cmd_ps=${g_cmd_ps:-$(command -v ps 2>/dev/null || printf '%s\n' ps)}
-	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
 	g_zxfer_temp_prefix="zxfer.bgtest.$$"
 	g_option_Y_yield_iterations=1
 	zxfer_reset_runtime_artifact_state
+	g_zxfer_background_job_use_setsid=""
 	zxfer_reset_background_job_state
+	# Force the wrapper fallback by default so the suite behaves the same on
+	# hosts with and without setsid(1); setsid-specific tests opt back in.
+	g_zxfer_background_job_use_setsid=0
+	g_zxfer_background_job_abort_grace_seconds=1
 	zxfer_reset_failure_context "unit"
 }
 
+# Poll for a file to become non-empty so spawned-job races stay bounded.
+wait_for_nonempty_file() {
+	l_wait_file=$1
+	l_wait_tries=0
+
+	while [ "$l_wait_tries" -lt 100 ]; do
+		[ -s "$l_wait_file" ] && return 0
+		sleep 0.1 2>/dev/null || sleep 1
+		l_wait_tries=$((l_wait_tries + 1))
+	done
+	[ -s "$l_wait_file" ]
+}
+
+open_background_job_test_fifo_writer_fd9() {
+	l_queue_path=$1
+	l_open_attempt=0
+	l_open_status=1
+
+	exec 9>&- || true
+	while [ "$l_open_attempt" -lt 8 ]; do
+		l_open_attempt=$((l_open_attempt + 1))
+		if { exec 9>&1; } >"$l_queue_path"; then
+			return 0
+		fi
+		l_open_status=$?
+	done
+
+	return "$l_open_status"
+}
+
+open_background_job_test_fifo_reader_fd8() {
+	l_queue_path=$1
+	l_open_attempt=0
+	l_open_status=1
+
+	exec 8<&- || true
+	while [ "$l_open_attempt" -lt 8 ]; do
+		l_open_attempt=$((l_open_attempt + 1))
+		if { exec 8<&0; } <"$l_queue_path"; then
+			return 0
+		fi
+		l_open_status=$?
+	done
+
+	return "$l_open_status"
+}
+
 test_background_job_record_helpers_track_and_remove_jobs() {
-	zxfer_register_background_job_record "job-1" "send_receive" 101 "$TEST_TMPDIR/job-1" "/tmp/runner" "token-1" "start-1"
-	zxfer_register_background_job_record "job-2" "source_snapshot_list" 202 "$TEST_TMPDIR/job-2" "/tmp/runner" "token-2" "start-2"
+	zxfer_register_background_job_record "job-1" "send_receive" 101 wrapper "$TEST_TMPDIR/job-1.status"
+	zxfer_register_background_job_record "job-2" "source_snapshot_list" 202 process_group "$TEST_TMPDIR/job-2.status"
 	zxfer_find_background_job_record "job-2"
 	find_status=$?
 	zxfer_unregister_background_job_record "job-1"
 
 	assertEquals "Tracked background jobs should be discoverable by job id." \
 		0 "$find_status"
-	assertEquals "Tracked background jobs should preserve the recorded kind." \
-		"source_snapshot_list" "$g_zxfer_background_job_record_kind"
-	assertEquals "Tracked background jobs should preserve the recorded runner pid." \
-		"202" "$g_zxfer_background_job_record_runner_pid"
-	assertEquals "Tracked background jobs should preserve the recorded runner start token." \
-		"start-2" "$g_zxfer_background_job_record_runner_start_token"
+	assertEquals "Tracked background jobs should preserve the recorded job-shell pid." \
+		"202" "$g_zxfer_background_job_record_pid"
+	assertEquals "Tracked background jobs should preserve the recorded teardown mode." \
+		"process_group" "$g_zxfer_background_job_record_teardown"
+	assertEquals "Tracked background jobs should preserve the recorded status file." \
+		"$TEST_TMPDIR/job-2.status" "$g_zxfer_background_job_record_status_file"
 	assertNotContains "Unregistering one background job should leave later records intact." \
 		"$g_zxfer_background_job_records" "job-1"
 	assertContains "Unregistering one background job should preserve unrelated records." \
 		"$g_zxfer_background_job_records" "job-2"
 }
 
-test_spawn_and_wait_for_background_job_round_trips_metadata_and_output() {
-	outfile="$TEST_TMPDIR/background_job_spawn.out"
-	errfile="$TEST_TMPDIR/background_job_spawn.err"
+test_background_job_record_helpers_reject_incomplete_rows_and_duplicate_ids() {
+	zxfer_register_background_job_record "" "send_receive" 101 wrapper "$TEST_TMPDIR/f"
+	missing_id_status=$?
+	zxfer_register_background_job_record "job-3" "send_receive" "" wrapper "$TEST_TMPDIR/f"
+	missing_pid_status=$?
+	zxfer_register_background_job_record "job-3" "send_receive" 101 wrapper ""
+	missing_file_status=$?
+	zxfer_register_background_job_record "job-3" "send_receive" 101 wrapper "$TEST_TMPDIR/f"
+	zxfer_register_background_job_record "job-3" "send_receive" 999 wrapper "$TEST_TMPDIR/other"
+	duplicate_status=$?
+	zxfer_find_background_job_record "job-3"
+
+	assertEquals "Registration should reject rows without a job id." 1 "$missing_id_status"
+	assertEquals "Registration should reject rows without a pid." 1 "$missing_pid_status"
+	assertEquals "Registration should reject rows without a status file." 1 "$missing_file_status"
+	assertEquals "Duplicate job ids should be ignored without error." 0 "$duplicate_status"
+	assertEquals "Duplicate registrations should keep the first row's pid." \
+		"101" "$g_zxfer_background_job_record_pid"
+}
+
+test_init_background_job_spawn_support_respects_cached_flag_and_missing_setsid() {
+	g_zxfer_background_job_use_setsid=1
+	zxfer_init_background_job_spawn_support
+	cached_value=$g_zxfer_background_job_use_setsid
+
+	output=$(
+		g_zxfer_background_job_use_setsid=""
+		# shellcheck disable=SC2123  # hide setsid from the probe on purpose
+		PATH=""
+		zxfer_init_background_job_spawn_support
+		printf '%s' "$g_zxfer_background_job_use_setsid"
+	)
+
+	assertEquals "The spawn-support probe should respect a pre-set capability flag." \
+		1 "$cached_value"
+	assertEquals "The spawn-support probe should fall back to the wrapper path when setsid is unavailable." \
+		"0" "$output"
+}
+
+test_init_background_job_spawn_support_detects_working_setsid() {
+	if ! command -v setsid >/dev/null 2>&1; then
+		startSkipping
+		assertTrue "setsid not available on this host; setsid probe pin skipped." 0
+		endSkipping
+		return 0
+	fi
+
+	g_zxfer_background_job_use_setsid=""
+	zxfer_init_background_job_spawn_support
+
+	assertEquals "A working setsid should enable the process-group spawn path." \
+		1 "$g_zxfer_background_job_use_setsid"
+}
+
+test_init_background_job_spawn_support_parses_probe_output_through_a_mock_setsid() {
+	mock_dir=$(mktemp -d "$TEST_TMPDIR/setsidmock.XXXXXX") ||
+		fail "Unable to create the setsid mock directory."
+
+	# Each variant pins one parse branch of the pid==pgid probe.
+	output=$(
+		for variant in "123 123;1" "123 456;0" "abc def;0" "1 2 3;0" "fail;0"; do
+			probe_stdout=${variant%;*}
+			expected=${variant#*;}
+			if [ "$probe_stdout" = "fail" ]; then
+				printf '#!/bin/sh\nexit 1\n' >"$mock_dir/setsid"
+			else
+				printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$probe_stdout" >"$mock_dir/setsid"
+			fi
+			chmod +x "$mock_dir/setsid"
+			g_zxfer_background_job_use_setsid=""
+			PATH="$mock_dir:$PATH" zxfer_init_background_job_spawn_support
+			printf 'probe[%s]=%s expected=%s\n' "$probe_stdout" \
+				"$g_zxfer_background_job_use_setsid" "$expected"
+		done
+	)
+
+	assertContains "A pid==pgid probe answer should enable the setsid path." \
+		"$output" "probe[123 123]=1 expected=1"
+	assertContains "A pid!=pgid probe answer should keep the wrapper fallback." \
+		"$output" "probe[123 456]=0 expected=0"
+	assertContains "A non-numeric probe answer should keep the wrapper fallback." \
+		"$output" "probe[abc def]=0 expected=0"
+	assertContains "A probe answer with extra fields should keep the wrapper fallback." \
+		"$output" "probe[1 2 3]=0 expected=0"
+	assertContains "A failing probe should keep the wrapper fallback." \
+		"$output" "probe[fail]=0 expected=0"
+}
+
+test_spawn_uses_setsid_spawn_path_when_capability_flag_is_set() {
+	mock_dir=$(mktemp -d "$TEST_TMPDIR/setsidspawn.XXXXXX") ||
+		fail "Unable to create the setsid spawn mock directory."
+	# Pass-through mock: enough to drive the setsid spawn line without
+	# requiring a real session leader; teardown is not exercised here.
+	printf '#!/bin/sh\nexec "$@"\n' >"$mock_dir/setsid"
+	chmod +x "$mock_dir/setsid"
+
+	output=$(
+		PATH="$mock_dir:$PATH"
+		g_zxfer_background_job_use_setsid=1
+		zxfer_spawn_supervised_background_job \
+			"unit_test" \
+			"printf '%s\n' 'setsid-payload'" \
+			"display setsid spawn"
+		zxfer_find_background_job_record "$g_zxfer_background_job_last_id"
+		printf 'teardown=%s\n' "$g_zxfer_background_job_record_teardown"
+		zxfer_wait_for_background_job "$g_zxfer_background_job_last_id"
+		printf 'wait_status=%s exit_status=%s\n' "$?" "$g_zxfer_background_job_wait_exit_status"
+	)
+
+	assertContains "The setsid spawn path should record process-group teardown." \
+		"$output" "teardown=process_group"
+	assertContains "The setsid spawn path should complete and report the job status." \
+		"$output" "wait_status=0 exit_status=0"
+}
+
+test_spawn_reports_output_and_error_file_quoting_failures() {
+	zxfer_test_capture_subshell '
+		zxfer_build_shell_command_from_argv() {
+			case "$1" in
+			/tmp/quote-fail-out)
+				return 1
+				;;
+			esac
+			printf "%s" "$1"
+		}
+		zxfer_spawn_supervised_background_job "unit_test" "exit 0" "display" "/tmp/quote-fail-out"
+	'
+	output_file_status=$ZXFER_TEST_CAPTURE_STATUS
+	output_file_output=$ZXFER_TEST_CAPTURE_OUTPUT
+
+	zxfer_test_capture_subshell '
+		zxfer_build_shell_command_from_argv() {
+			case "$1" in
+			/tmp/quote-fail-err)
+				return 1
+				;;
+			esac
+			printf "%s" "$1"
+		}
+		zxfer_spawn_supervised_background_job "unit_test" "exit 0" "display" "/tmp/out" "/tmp/quote-fail-err"
+	'
+
+	assertEquals "Spawn should fail when the output file path cannot be quoted." \
+		1 "$output_file_status"
+	assertContains "Spawn should report the output-file quoting failure." \
+		"$output_file_output" "output file path"
+	assertEquals "Spawn should fail when the error file path cannot be quoted." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Spawn should report the error-file quoting failure." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "error file path"
+}
+
+test_read_background_job_status_file_preserves_readback_failures() {
+	status_file="$TEST_TMPDIR/readback_fail.status"
+	printf 'status\t0\n' >"$status_file"
+
+	output=$(
+		zxfer_read_runtime_artifact_file() {
+			return 9
+		}
+		zxfer_read_background_job_status_file "$status_file"
+		printf 'status=%s\n' "$?"
+	)
+
+	assertContains "Status-file reads should preserve runtime readback failure statuses." \
+		"$output" "status=9"
+}
+
+test_signal_scope_process_group_path_ignores_missing_groups() {
+	zxfer_signal_background_job_scope 99999 process_group TERM
+	group_status=$?
+	g_zxfer_background_job_abort_grace_seconds="bad"
+	zxfer_background_job_abort_grace_wait
+	grace_status=$?
+	g_zxfer_background_job_abort_grace_seconds=1
+
+	assertEquals "Signalling a vanished process group should be a no-op success." \
+		0 "$group_status"
+	assertEquals "A malformed grace window should fall back to the default wait." \
+		0 "$grace_status"
+}
+
+test_signal_scope_wrapper_kill_reaches_descendants_from_parent() {
+	output=$(
+		ps() {
+			printf '%s\n' '77 1'
+			printf '%s\n' '88 77'
+			printf '%s\n' '99 88'
+			printf '%s\n' '100 1'
+		}
+		kill() {
+			printf 'kill:%s:%s\n' "$2" "$3"
+			return 0
+		}
+		zxfer_signal_background_job_scope 77 wrapper KILL
+	)
+
+	assertContains "Wrapper KILL should freeze the wrapper before descendant discovery." \
+		"$output" "kill:STOP:77"
+	assertContains "Wrapper KILL should signal direct descendants from the parent shell." \
+		"$output" "kill:KILL:88"
+	assertContains "Wrapper KILL should signal nested descendants from the parent shell." \
+		"$output" "kill:KILL:99"
+	assertContains "Wrapper KILL should still signal the wrapper itself." \
+		"$output" "kill:KILL:77"
+	assertNotContains "Wrapper KILL must not signal unrelated processes." \
+		"$output" "kill:KILL:100"
+}
+
+test_spawn_and_wait_round_trips_success_status_and_output_capture() {
+	outfile="$TEST_TMPDIR/bg_spawn_success.out"
+	errfile="$TEST_TMPDIR/bg_spawn_success.err"
 
 	zxfer_spawn_supervised_background_job \
 		"unit_test" \
@@ -62,160 +327,169 @@ test_spawn_and_wait_for_background_job_round_trips_metadata_and_output() {
 		"$outfile" \
 		"$errfile"
 	job_id=$g_zxfer_background_job_last_id
-	control_dir=$g_zxfer_background_job_last_control_dir
+	status_file=$g_zxfer_background_job_last_status_file
 
 	zxfer_wait_for_background_job "$job_id"
 	wait_status=$?
 
-	assertEquals "Supervised background jobs should wait successfully when the worker exits cleanly." \
-		0 "$wait_status"
-	assertEquals "Supervised background waits should preserve the worker exit status." \
+	assertEquals "Waiting on a clean background job should succeed." 0 "$wait_status"
+	assertEquals "Background waits should preserve the job exit status." \
 		0 "${g_zxfer_background_job_wait_exit_status:-}"
-	assertEquals "Supervised background waits should not mark a completion-report failure when metadata writes succeed." \
+	assertEquals "Background waits should not mark a report failure when the status write succeeds." \
 		"" "${g_zxfer_background_job_wait_report_failure:-}"
-	assertEquals "Supervised background jobs should write the requested stdout capture." \
+	assertEquals "Background jobs should write the requested stdout capture." \
 		"payload" "$(tr -d '\n' <"$outfile")"
-	assertEquals "Supervised background jobs should leave the stderr capture empty when the worker is quiet." \
+	assertEquals "Background jobs should leave the stderr capture empty when the job is quiet." \
 		0 "$(wc -c <"$errfile" | tr -d '[:space:]')"
-	assertEquals "Waiting for a supervised background job should clear its registry entry." \
+	assertEquals "Waiting on a background job should clear its registry row." \
 		"" "${g_zxfer_background_job_records:-}"
-	assertFalse "Waiting for a supervised background job should remove its private control directory." \
-		"[ -d \"$control_dir\" ]"
+	assertFalse "Waiting on a background job should remove its status file." \
+		"[ -e \"$status_file\" ]"
 }
 
-test_cleanup_completed_background_job_waits_for_runner_before_removing_control_dir() {
-	control_dir="$TEST_TMPDIR/background_job_completed_cleanup_waits"
-	marker_file="$TEST_TMPDIR/background_job_completed_cleanup_waits.marker"
-	mkdir -p "$control_dir"
+test_spawn_and_wait_propagate_nonzero_job_exit_status() {
+	zxfer_spawn_supervised_background_job \
+		"unit_test" \
+		"exit 7" \
+		"display exit 7"
+	job_id=$g_zxfer_background_job_last_id
 
-	output=$(
-		(
-			MARKER_PATH=$marker_file \
-				sh -c 'sleep 1; printf "%s\n" "done" >"$MARKER_PATH"' &
-			runner_pid=$!
-			zxfer_register_background_job_record "job-cleanup-completed" "send_receive" "$runner_pid" "$control_dir" "/tmp/runner" "token-cleanup-completed" "start-cleanup-completed"
-			zxfer_cleanup_completed_background_job \
-				"job-cleanup-completed" \
-				"$runner_pid" \
-				"$control_dir"
-			printf 'status=%s\n' "$?"
-			if [ -f "$marker_file" ]; then
-				l_marker_exists=yes
-			else
-				l_marker_exists=no
-			fi
-			if [ -d "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'marker_exists=%s\n' "$l_marker_exists"
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-		)
-	)
+	zxfer_wait_for_background_job "$job_id"
+	wait_status=$?
 
-	assertContains "Completed-job cleanup should succeed when the tracked runner is still live." \
-		"$output" "status=0"
-	assertContains "Completed-job cleanup should wait for the runner to exit before returning." \
-		"$output" "marker_exists=yes"
-	assertContains "Completed-job cleanup should remove the private control directory after the runner exits." \
-		"$output" "dir_exists=no"
-	assertContains "Completed-job cleanup should unregister the tracked job record." \
-		"$output" "records=<>"
+	assertEquals "Waiting on a failed background job should still succeed as a wait." \
+		0 "$wait_status"
+	assertEquals "Background waits should propagate the recorded non-zero exit status." \
+		7 "${g_zxfer_background_job_wait_exit_status:-}"
+	assertEquals "A failed job that records its status is not a report failure." \
+		"" "${g_zxfer_background_job_wait_report_failure:-}"
 }
 
-test_get_background_job_completion_status_marks_missing_completion_after_125_as_completion_write() {
-	control_dir="$TEST_TMPDIR/background_job_completion_missing"
-	mkdir -p "$control_dir"
+test_wait_reports_missing_status_file_as_completion_write_failure() {
+	sh -c 'exit 3' &
+	job_pid=$!
+	zxfer_register_background_job_record "job-missing-status" "unit_test" "$job_pid" wrapper "$TEST_TMPDIR/never_written.status"
 
-	zxfer_get_background_job_completion_status "$control_dir" 125
-	status=$?
+	zxfer_wait_for_background_job "job-missing-status"
+	wait_status=$?
 
-	assertEquals "Missing completion metadata should still be readable as a checked completion-write failure when the runner exited 125." \
-		0 "$status"
-	assertEquals "Missing completion metadata after a 125 exit should preserve the waited status." \
-		125 "$g_zxfer_background_job_completion_exit_status"
-	assertEquals "Missing completion metadata after a 125 exit should report a completion-write failure marker." \
-		"completion_write" "$g_zxfer_background_job_completion_report_failure"
+	assertEquals "A missing status file should still produce a checked wait result." \
+		0 "$wait_status"
+	assertEquals "A missing status file should preserve the waited job-shell status." \
+		3 "${g_zxfer_background_job_wait_exit_status:-}"
+	assertEquals "A missing status file means the job shell died before its status write." \
+		"completion_write" "${g_zxfer_background_job_wait_report_failure:-}"
+	assertEquals "Waiting should clear the registry row even on abnormal death." \
+		"" "${g_zxfer_background_job_records:-}"
 }
 
-test_get_background_job_completion_status_marks_missing_completion_after_zero_exit_as_completion_write() {
-	control_dir="$TEST_TMPDIR/background_job_completion_missing_zero"
-	mkdir -p "$control_dir"
+test_wait_fails_closed_on_non_numeric_status_file() {
+	status_file="$TEST_TMPDIR/bad_status.status"
+	printf 'status\tbad\n' >"$status_file"
+	sh -c 'exit 0' &
+	job_pid=$!
+	zxfer_register_background_job_record "job-bad-status" "unit_test" "$job_pid" wrapper "$status_file"
 
-	zxfer_get_background_job_completion_status "$control_dir" 0
-	status=$?
+	zxfer_wait_for_background_job "job-bad-status"
+	wait_status=$?
 
-	assertEquals "Missing completion metadata should still be readable as a checked completion-write failure when the runner exited cleanly." \
-		0 "$status"
-	assertEquals "Missing completion metadata after a zero exit should preserve the waited status." \
-		0 "$g_zxfer_background_job_completion_exit_status"
-	assertEquals "Missing completion metadata after a zero exit should still report a completion-write failure marker." \
-		"completion_write" "$g_zxfer_background_job_completion_report_failure"
+	assertEquals "A non-numeric recorded status should fail the wait closed." \
+		1 "$wait_status"
+	assertEquals "Failing closed should still clear the registry row." \
+		"" "${g_zxfer_background_job_records:-}"
+	assertFalse "Failing closed should still remove the malformed status file." \
+		"[ -e \"$status_file\" ]"
 }
 
-test_get_background_job_completion_status_preserves_explicit_worker_exit_125_without_completion_write_marker() {
-	control_dir="$TEST_TMPDIR/background_job_completion_exit_125"
-	mkdir -p "$control_dir"
-	cat >"$control_dir/completion.tsv" <<'EOF'
-status	125
-report_failure	
-EOF
+test_wait_fails_closed_on_unknown_report_failure_marker() {
+	status_file="$TEST_TMPDIR/bad_marker.status"
+	printf 'status\t0\nreport_failure\tbad_marker\n' >"$status_file"
+	sh -c 'exit 0' &
+	job_pid=$!
+	zxfer_register_background_job_record "job-bad-marker" "unit_test" "$job_pid" wrapper "$status_file"
 
-	zxfer_get_background_job_completion_status "$control_dir" 125
-	status=$?
+	zxfer_wait_for_background_job "job-bad-marker"
+	wait_status=$?
 
-	assertEquals "A valid completion record should still be readable when the worker exits 125." \
-		0 "$status"
-	assertEquals "A valid completion record should preserve the recorded 125 worker exit status." \
-		125 "$g_zxfer_background_job_completion_exit_status"
-	assertEquals "A valid completion record should not be rewritten into a completion-write failure just because the worker exited 125." \
-		"" "$g_zxfer_background_job_completion_report_failure"
+	assertEquals "An unknown report-failure marker should fail the wait closed." \
+		1 "$wait_status"
 }
 
-test_get_background_job_completion_status_fails_closed_for_invalid_recorded_statuses() {
-	control_dir="$TEST_TMPDIR/background_job_completion_invalid"
-	mkdir -p "$control_dir"
-	cat >"$control_dir/completion.tsv" <<'EOF'
-status	bad
-report_failure	
-EOF
+test_wait_preserves_queue_write_report_failure_marker() {
+	status_file="$TEST_TMPDIR/queue_write.status"
+	printf 'status\t0\nreport_failure\tqueue_write\n' >"$status_file"
+	sh -c 'exit 125' &
+	job_pid=$!
+	zxfer_register_background_job_record "job-queue-write" "unit_test" "$job_pid" wrapper "$status_file"
 
-	zxfer_get_background_job_completion_status "$control_dir" 125
-	status=$?
+	zxfer_wait_for_background_job "job-queue-write"
+	wait_status=$?
 
-	assertEquals "Malformed completion statuses should fail closed instead of being normalized to the waited status." \
-		1 "$status"
+	assertEquals "A queue-write marker should still produce a checked wait result." \
+		0 "$wait_status"
+	assertEquals "A queue-write marker should preserve the recorded exit status." \
+		0 "${g_zxfer_background_job_wait_exit_status:-}"
+	assertEquals "A queue-write marker should surface through the wait report-failure scratch." \
+		"queue_write" "${g_zxfer_background_job_wait_report_failure:-}"
 }
 
-test_get_background_job_completion_status_fails_closed_when_status_is_missing() {
-	control_dir="$TEST_TMPDIR/background_job_completion_missing_status"
-	mkdir -p "$control_dir"
-	cat >"$control_dir/completion.tsv" <<'EOF'
-report_failure	
-EOF
-
-	zxfer_get_background_job_completion_status "$control_dir" 0
-	status=$?
-
-	assertEquals "Completion metadata without a required status field should fail closed." \
-		1 "$status"
+test_wait_for_unknown_job_fails() {
+	zxfer_wait_for_background_job "job-not-registered"
+	assertEquals "Waiting on an unknown job id should fail." 1 "$?"
 }
 
-test_get_background_job_completion_status_fails_closed_for_unknown_failure_markers() {
-	control_dir="$TEST_TMPDIR/background_job_completion_invalid_failure"
-	mkdir -p "$control_dir"
-	cat >"$control_dir/completion.tsv" <<'EOF'
-status	7
-report_failure	bad_marker
-EOF
+test_get_background_job_completion_status_pins_missing_and_malformed_files() {
+	missing_file="$TEST_TMPDIR/completion_missing.status"
+	rm -f "$missing_file"
 
-	zxfer_get_background_job_completion_status "$control_dir" 7
-	status=$?
+	zxfer_get_background_job_completion_status "$missing_file" 125
+	missing_125_status=$?
+	missing_125_exit=$g_zxfer_background_job_completion_exit_status
+	missing_125_marker=$g_zxfer_background_job_completion_report_failure
 
-	assertEquals "Completion metadata with an unknown failure marker should fail closed." \
-		1 "$status"
+	zxfer_get_background_job_completion_status "$missing_file" 0
+	missing_zero_status=$?
+	missing_zero_exit=$g_zxfer_background_job_completion_exit_status
+	missing_zero_marker=$g_zxfer_background_job_completion_report_failure
+
+	explicit_file="$TEST_TMPDIR/completion_exit_125.status"
+	printf 'status\t125\nreport_failure\t\n' >"$explicit_file"
+	zxfer_get_background_job_completion_status "$explicit_file" 125
+	explicit_status=$?
+	explicit_exit=$g_zxfer_background_job_completion_exit_status
+	explicit_marker=$g_zxfer_background_job_completion_report_failure
+
+	no_status_file="$TEST_TMPDIR/completion_no_status.status"
+	printf 'report_failure\t\n' >"$no_status_file"
+	zxfer_get_background_job_completion_status "$no_status_file" 0
+	no_status_status=$?
+
+	duplicate_file="$TEST_TMPDIR/completion_duplicate.status"
+	printf 'status\t0\nstatus\t1\n' >"$duplicate_file"
+	zxfer_get_background_job_completion_status "$duplicate_file" 0
+	duplicate_status=$?
+
+	assertEquals "Missing status files should be reported as checked completion-write failures." \
+		0 "$missing_125_status"
+	assertEquals "Missing status files should preserve the waited 125 status." \
+		125 "$missing_125_exit"
+	assertEquals "Missing status files should carry the completion-write marker." \
+		"completion_write" "$missing_125_marker"
+	assertEquals "Missing status files after a clean wait should still be checked results." \
+		0 "$missing_zero_status"
+	assertEquals "Missing status files after a clean wait should preserve the waited status." \
+		0 "$missing_zero_exit"
+	assertEquals "Missing status files after a clean wait should still carry the marker." \
+		"completion_write" "$missing_zero_marker"
+	assertEquals "An explicit recorded 125 should remain a readable completion." \
+		0 "$explicit_status"
+	assertEquals "An explicit recorded 125 should be preserved." 125 "$explicit_exit"
+	assertEquals "An explicit recorded 125 should not gain a completion-write marker." \
+		"" "$explicit_marker"
+	assertEquals "Status files without the required status row should fail closed." \
+		1 "$no_status_status"
+	assertEquals "Status files with duplicate status rows should fail closed." \
+		1 "$duplicate_status"
 }
 
 test_parse_background_job_queue_record_handles_completion_write_failures() {
@@ -240,2279 +514,440 @@ test_parse_background_job_queue_record_handles_plain_completion_notifications() 
 		"" "$g_zxfer_background_job_queue_record_status"
 }
 
-test_read_background_job_metadata_files_cover_current_shell_paths() {
-	control_dir="$TEST_TMPDIR/background_job_metadata_read"
-	mkdir -p "$control_dir"
-	cat >"$control_dir/launch.tsv" <<'EOF'
-version	1
-job_id	job-meta
-kind	send_receive
-runner_pid	101
-runner_script	/tmp/runner
-runner_token	token-meta
-worker_pid	102
-worker_pgid	777
-teardown_mode	process_group
-started_epoch	1234567890
-EOF
-	cat >"$control_dir/completion.tsv" <<'EOF'
-status	9
-report_failure	queue_write
-EOF
-
+test_fifo_notification_publishes_job_id_after_status_file_write() {
 	output=$(
-		(
-			set +e
-			zxfer_read_background_job_launch_file "$control_dir"
-			printf 'launch=%s\n' "$?"
-			printf 'job=<%s>\n' "$g_zxfer_background_job_launch_job_id"
-			printf 'worker_pgid=<%s>\n' "$g_zxfer_background_job_launch_worker_pgid"
-			zxfer_read_background_job_completion_file "$control_dir"
-			printf 'completion=%s\n' "$?"
-			printf 'status=<%s>\n' "$g_zxfer_background_job_completion_exit_status"
-			printf 'failure=<%s>\n' "$g_zxfer_background_job_completion_report_failure"
-		)
+		fifo_dir=$(mktemp -d "$TEST_TMPDIR/fifo.XXXXXX") || exit 1
+		mkfifo "$fifo_dir/queue" || exit 1
+		# Same POSIX open ordering the send/receive queue uses: a short-lived
+		# reader lets the writer fd open first, then the real reader opens
+		# while that writer is held (hardened for FreeBSD/illumos 2026.05.19).
+		(: <"$fifo_dir/queue") &
+		open_helper_pid=$!
+		open_background_job_test_fifo_writer_fd9 "$fifo_dir/queue" || exit 1
+		wait "$open_helper_pid"
+		open_background_job_test_fifo_reader_fd8 "$fifo_dir/queue" || exit 1
+
+		zxfer_spawn_supervised_background_job \
+			"unit_test" \
+			"printf '%s\n' 'queued-payload'" \
+			"display queued" \
+			"" \
+			"" \
+			9
+		job_id=$g_zxfer_background_job_last_id
+		status_file=$g_zxfer_background_job_last_status_file
+
+		IFS= read -r completed_record <&8
+		printf 'record=%s\n' "$completed_record"
+		# Ordering pin: by the time the queue record is readable the status
+		# file must already carry the recorded exit status.
+		if grep -q '^status	0$' "$status_file" 2>/dev/null; then
+			printf 'status_written_before_notify=yes\n'
+		else
+			printf 'status_written_before_notify=no\n'
+		fi
+		zxfer_parse_background_job_queue_record "$completed_record"
+		printf 'record_type=%s\n' "$g_zxfer_background_job_queue_record_type"
+		zxfer_wait_for_background_job "$g_zxfer_background_job_queue_record_job_id"
+		printf 'wait_status=%s\n' "$?"
+		printf 'exit_status=%s\n' "$g_zxfer_background_job_wait_exit_status"
+		printf 'expected_job=%s actual_job=%s\n' "$job_id" "$g_zxfer_background_job_queue_record_job_id"
+		exec 8<&- 2>/dev/null
+		exec 9>&- 2>/dev/null
 	)
 
-	assertContains "Background-job launch metadata reads should succeed on well-formed launch files." \
-		"$output" "launch=0"
-	assertContains "Background-job launch metadata reads should recover the queued job id." \
-		"$output" "job=<job-meta>"
-	assertContains "Background-job launch metadata reads should recover the queued worker process group." \
-		"$output" "worker_pgid=<777>"
-	assertContains "Background-job completion metadata reads should succeed on well-formed completion files." \
-		"$output" "completion=0"
-	assertContains "Background-job completion metadata reads should recover the recorded exit status." \
-		"$output" "status=<9>"
-	assertContains "Background-job completion metadata reads should recover the recorded failure marker." \
-		"$output" "failure=<queue_write>"
+	assertContains "Queue notifications should be plain completion records." \
+		"$output" "record_type=completion"
+	assertContains "The status file must be written before the queue notification." \
+		"$output" "status_written_before_notify=yes"
+	assertContains "Waiting on the notified job should succeed." \
+		"$output" "wait_status=0"
+	assertContains "Waiting on the notified job should read the recorded status." \
+		"$output" "exit_status=0"
+	assertContains "The notified job id should match the spawned job id." \
+		"$output" "record=bgjob.$$."
 }
 
-test_zxfer_read_background_job_launch_file_populates_globals_in_current_shell() {
-	control_dir="$TEST_TMPDIR/background_job_launch_read_current_shell"
-	mkdir -p "$control_dir"
-	cat >"$control_dir/launch.tsv" <<'EOF'
-version	1
-job_id	job-current
-kind	source_snapshot_list
-runner_pid	501
-runner_script	/tmp/current-runner
-runner_token	token-current
-worker_pid	502
-worker_pgid	6501
-teardown_mode	process_group
-started_epoch	2222222222
-EOF
-
-	zxfer_read_background_job_launch_file "$control_dir"
-	status=$?
-
-	assertEquals "Direct current-shell launch metadata reads should succeed on well-formed launch files." \
-		0 "$status"
-	assertEquals "Direct current-shell launch metadata reads should publish the queued job id." \
-		"job-current" "$g_zxfer_background_job_launch_job_id"
-	assertEquals "Direct current-shell launch metadata reads should publish the runner pid." \
-		"501" "$g_zxfer_background_job_launch_runner_pid"
-	assertEquals "Direct current-shell launch metadata reads should publish the worker process group." \
-		"6501" "$g_zxfer_background_job_launch_worker_pgid"
-	assertEquals "Direct current-shell launch metadata reads should publish the teardown mode." \
-		"process_group" "$g_zxfer_background_job_launch_teardown_mode"
-}
-
-test_zxfer_read_background_job_completion_file_populates_globals_in_current_shell() {
-	control_dir="$TEST_TMPDIR/background_job_completion_read_current_shell"
-	mkdir -p "$control_dir"
-	cat >"$control_dir/completion.tsv" <<'EOF'
-status	17
-report_failure	completion_write
-EOF
-
-	zxfer_read_background_job_completion_file "$control_dir"
-	status=$?
-
-	assertEquals "Direct current-shell completion metadata reads should succeed on well-formed completion files." \
-		0 "$status"
-	assertEquals "Direct current-shell completion metadata reads should publish the recorded exit status." \
-		"17" "$g_zxfer_background_job_completion_exit_status"
-	assertEquals "Direct current-shell completion metadata reads should publish the recorded failure marker." \
-		"completion_write" "$g_zxfer_background_job_completion_report_failure"
-}
-
-test_background_job_metadata_read_helpers_preserve_runtime_read_failures_in_current_shell() {
-	control_dir="$TEST_TMPDIR/background_job_metadata_runtime_read_failure"
-	mkdir -p "$control_dir"
-
+test_fifo_notification_reports_status_write_failures_as_completion_write_failed_records() {
 	output=$(
-		(
-			set +e
-			g_zxfer_background_job_launch_job_id=stale-launch
-			g_zxfer_background_job_completion_exit_status=99
-			zxfer_read_runtime_artifact_file() {
-				g_zxfer_runtime_artifact_read_result=""
-				return 23
-			}
-			zxfer_read_background_job_launch_file "$control_dir"
-			printf 'launch_status=%s\n' "$?"
-			printf 'launch_job=<%s>\n' "$g_zxfer_background_job_launch_job_id"
-			zxfer_read_background_job_completion_file "$control_dir"
-			printf 'completion_status=%s\n' "$?"
-			printf 'completion_exit=<%s>\n' "$g_zxfer_background_job_completion_exit_status"
-		)
+		fifo_dir=$(mktemp -d "$TEST_TMPDIR/fifofail.XXXXXX") || exit 1
+		mkfifo "$fifo_dir/queue" || exit 1
+		(: <"$fifo_dir/queue") &
+		open_helper_pid=$!
+		open_background_job_test_fifo_writer_fd9 "$fifo_dir/queue" || exit 1
+		wait "$open_helper_pid"
+		open_background_job_test_fifo_reader_fd8 "$fifo_dir/queue" || exit 1
+
+		# Point the allocated status file below a regular-file path component
+		# so the status write fails even when the FreeBSD guest runs as root.
+		status_blocker="$TEST_TMPDIR/status-blocker"
+		: >"$status_blocker"
+		zxfer_get_temp_file() {
+			g_zxfer_temp_file_result="$status_blocker/status"
+			printf '%s\n' "$g_zxfer_temp_file_result"
+		}
+
+		zxfer_spawn_supervised_background_job \
+			"unit_test" \
+			"exit 4" \
+			"display status write failure" \
+			"" \
+			"" \
+			9 2>/dev/null
+		job_id=$g_zxfer_background_job_last_id
+
+		IFS= read -r completed_record <&8
+		zxfer_parse_background_job_queue_record "$completed_record"
+		printf 'record_type=%s\n' "$g_zxfer_background_job_queue_record_type"
+		printf 'record_status=%s\n' "$g_zxfer_background_job_queue_record_status"
+		printf 'expected_job=%s actual_job=%s\n' "$job_id" "$g_zxfer_background_job_queue_record_job_id"
+		wait "$g_zxfer_background_job_last_runner_pid" 2>/dev/null
+		printf 'job_shell_status=%s\n' "$?"
+		exec 8<&- 2>/dev/null
+		exec 9>&- 2>/dev/null
 	)
 
-	assertContains "Launch metadata reads should preserve runtime readback failures." \
-		"$output" "launch_status=23"
-	assertContains "Failed launch metadata reads should clear stale launch scratch." \
-		"$output" "launch_job=<>"
-	assertContains "Completion metadata reads should preserve runtime readback failures." \
-		"$output" "completion_status=23"
-	assertContains "Failed completion metadata reads should clear stale completion scratch." \
-		"$output" "completion_exit=<>"
+	assertContains "Status-write failures should publish completion_write_failed queue records." \
+		"$output" "record_type=completion_write_failed"
+	assertContains "Status-write failure records should carry the captured pipeline status." \
+		"$output" "record_status=4"
+	assertContains "Status-write failures should exit the job shell with 125." \
+		"$output" "job_shell_status=125"
 }
 
-test_zxfer_get_background_job_pid_set_preserves_sort_failures_in_current_shell() {
-	fake_bin="$TEST_TMPDIR/background_job_pid_set_fake_bin"
-	mkdir -p "$fake_bin"
-	cat >"$fake_bin/sort" <<'EOF'
-#!/bin/sh
-exit 29
-EOF
-	chmod 700 "$fake_bin/sort" || fail "Unable to publish failing sort fixture."
-
+test_abort_kills_whole_pipeline_on_wrapper_fallback_path() {
 	output=$(
-		(
-			set +e
-			PATH=$fake_bin:$PATH
-			g_zxfer_background_job_pid_set_result=stale
-			zxfer_get_background_job_pid_set "101 1 101
-102 101 101" 101 >/dev/null
-			printf 'status=%s\n' "$?"
-			printf 'pid_set=<%s>\n' "$g_zxfer_background_job_pid_set_result"
-		)
+		pid_file_one="$TEST_TMPDIR/abort_wrapper_one.pid"
+		pid_file_two="$TEST_TMPDIR/abort_wrapper_two.pid"
+		rm -f "$pid_file_one" "$pid_file_two"
+
+		zxfer_spawn_supervised_background_job \
+			"unit_test" \
+			"sh -c 'echo \$\$ > $pid_file_one; exec sleep 300' | sh -c 'echo \$\$ > $pid_file_two; exec sleep 300'" \
+			"display abort pipeline"
+		job_id=$g_zxfer_background_job_last_id
+		status_file=$g_zxfer_background_job_last_status_file
+
+		wait_for_nonempty_file "$pid_file_one" || printf 'setup=stage-one-missing\n'
+		wait_for_nonempty_file "$pid_file_two" || printf 'setup=stage-two-missing\n'
+		stage_one_pid=$(cat "$pid_file_one" 2>/dev/null)
+		stage_two_pid=$(cat "$pid_file_two" 2>/dev/null)
+
+		zxfer_abort_background_job "$job_id" TERM
+		printf 'abort_status=%s\n' "$?"
+		if kill -s 0 "$stage_one_pid" 2>/dev/null; then
+			printf 'stage_one=alive\n'
+		else
+			printf 'stage_one=dead\n'
+		fi
+		if kill -s 0 "$stage_two_pid" 2>/dev/null; then
+			printf 'stage_two=alive\n'
+		else
+			printf 'stage_two=dead\n'
+		fi
+		printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
+		if [ -e "$status_file" ]; then
+			printf 'status_file=present\n'
+		else
+			printf 'status_file=removed\n'
+		fi
 	)
 
-	assertContains "PID-set derivation should preserve sort failures." \
-		"$output" "status=29"
-	assertContains "PID-set derivation should clear stale scratch when sorting fails." \
-		"$output" "pid_set=<>"
+	assertContains "Aborting a tracked job should succeed." "$output" "abort_status=0"
+	assertContains "Aborting through the wrapper should terminate the first pipeline stage." \
+		"$output" "stage_one=dead"
+	assertContains "Aborting through the wrapper should terminate the second pipeline stage." \
+		"$output" "stage_two=dead"
+	assertContains "Aborting should clear the registry row." "$output" "records=<>"
+	assertContains "Aborting should remove the job status file." "$output" "status_file=removed"
+	assertNotContains "The pipeline stages must have started before the abort." \
+		"$output" "setup="
 }
 
-test_get_background_job_completion_status_fails_closed_when_completion_read_fails() {
-	control_dir="$TEST_TMPDIR/background_job_completion_read_failure"
-	mkdir -p "$control_dir"
-	: >"$control_dir/completion.tsv"
-
-	output=$(
-		(
-			set +e
-			zxfer_read_background_job_completion_file() {
-				return 17
-			}
-			zxfer_get_background_job_completion_status "$control_dir" 7
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Background-job completion status lookups should fail closed when completion metadata cannot be read." \
-		"$output" "status=17"
-}
-
-test_abort_background_job_signals_validated_process_group_and_runner_without_ps_args_identity_checks() {
-	control_dir="$TEST_TMPDIR/background_job_abort_pgid"
-	fake_ps="$TEST_TMPDIR/fake_ps_pgid.sh"
-	mkdir -p "$control_dir"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o ppid= -o pgid=")
-    printf '%s\n' "1001 900 1001"
-    printf '%s\n' "1002 1001 4321"
-    ;;
-  "-o pgid= -p "*)
-    printf '%s\n' "900"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-
-	zxfer_write_background_job_launch_file \
-		"$control_dir" \
-		"job-1" \
-		"send_receive" \
-		1001 \
-		"/tmp/runner" \
-		"token-1" \
-		1002 \
-		4321 \
-		"process_group" \
-		"123"
-	zxfer_register_background_job_record "job-1" "send_receive" 1001 "$control_dir" "/tmp/runner" "token-1" "start-1"
-
-	output=$(
-		(
-			zxfer_get_process_start_token() {
-				printf '%s\n' "start-1"
-			}
-			kill() {
-				printf '%s %s\n' "$1" "$2"
-				[ "$2" = "1001" ] && printf '%s\n' "status	143" >"$control_dir/completion.tsv"
-				return 0
-			}
-			zxfer_abort_background_job "job-1" TERM
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Validated process-group cleanup should not require full ps args output before it signals the recorded worker process group." \
-		"$output" "-TERM -4321"
-	assertContains "Validated process-group cleanup should also signal the tracked runner pid." \
-		"$output" "-TERM 1001"
-	assertContains "Validated process-group cleanup should complete successfully." \
-		"$output" "status=0"
-}
-
-test_abort_background_job_rejects_reused_worker_pid_for_process_group_cleanup() {
-	control_dir="$TEST_TMPDIR/background_job_abort_reused_worker_pid"
-	fake_ps="$TEST_TMPDIR/fake_ps_reused_worker_pid.sh"
-	mkdir -p "$control_dir"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o args= -p 1101")
-    printf '%s\n' "1101 /tmp/runner token-reuse"
-    ;;
-  "-o pid= -o ppid= -o pgid=")
-    printf '%s\n' "1101 900 1101"
-    printf '%s\n' "1102 777 4321"
-    ;;
-  "-o pgid= -p "*)
-    printf '%s\n' "900"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-
-	zxfer_write_background_job_launch_file \
-		"$control_dir" \
-		"job-reuse" \
-		"send_receive" \
-		1101 \
-		"/tmp/runner" \
-		"token-reuse" \
-		1102 \
-		4321 \
-		"process_group" \
-		"123"
-	zxfer_register_background_job_record "job-reuse" "send_receive" 1101 "$control_dir" "/tmp/runner" "token-reuse" "start-reuse"
-
-	output=$(
-		(
-			zxfer_get_process_start_token() {
-				printf '%s\n' "start-reuse"
-			}
-			kill() {
-				printf '%s %s\n' "$1" "$2"
-				[ "$2" = "1101" ] && printf '%s\n' "status	143" >"$control_dir/completion.tsv"
-				return 0
-			}
-			zxfer_abort_background_job "job-reuse" TERM
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertNotContains "Validated background-job cleanup should not trust a recorded process group when the recorded worker pid has been reused outside the tracked runner ancestry." \
-		"$output" "-TERM -4321"
-	assertContains "Validated background-job cleanup should fall back to the tracked runner child set when the recorded worker pid is no longer a child of the runner." \
-		"$output" "-TERM 1101"
-	assertContains "Validated background-job cleanup should still complete successfully when it falls back from process-group cleanup to the runner child set." \
-		"$output" "status=0"
-}
-
-test_abort_background_job_falls_back_to_owned_child_set_when_process_group_is_unusable() {
-	control_dir="$TEST_TMPDIR/background_job_abort_child_set"
-	fake_ps="$TEST_TMPDIR/fake_ps_child_set.sh"
-	mkdir -p "$control_dir"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o args= -p 2001")
-    printf '%s\n' "2001 /tmp/runner token-2"
-    ;;
-  "-o pid= -o ppid= -o pgid=")
-    printf '%s\n' "2001 900 2001"
-    printf '%s\n' "2002 2001 2001"
-    printf '%s\n' "2003 2002 2001"
-    ;;
-  "-o pgid= -p "*)
-    printf '%s\n' "900"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-
-	zxfer_write_background_job_launch_file \
-		"$control_dir" \
-		"job-2" \
-		"source_snapshot_list" \
-		2001 \
-		"/tmp/runner" \
-		"token-2" \
-		2002 \
-		"" \
-		"child_set" \
-		"456"
-	zxfer_register_background_job_record "job-2" "source_snapshot_list" 2001 "$control_dir" "/tmp/runner" "token-2" "start-2"
-
-	output=$(
-		(
-			zxfer_get_process_start_token() {
-				printf '%s\n' "start-2"
-			}
-			kill() {
-				printf '%s %s\n' "$1" "$2"
-				[ "$2" = "2001" ] && printf '%s\n' "status	143" >"$control_dir/completion.tsv"
-				return 0
-			}
-			zxfer_abort_background_job "job-2" TERM
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Child-set fallback cleanup should signal the tracked runner pid." \
-		"$output" "-TERM 2001"
-	assertContains "Child-set fallback cleanup should signal direct owned children." \
-		"$output" "-TERM 2002"
-	assertContains "Child-set fallback cleanup should signal deeper owned descendants too." \
-		"$output" "-TERM 2003"
-	assertContains "Child-set fallback cleanup should complete successfully." \
-		"$output" "status=0"
-}
-
-test_abort_background_job_does_not_wait_indefinitely_after_successful_abort_signal() {
-	control_dir="$TEST_TMPDIR/background_job_abort_no_wait"
-	fake_ps="$TEST_TMPDIR/fake_ps_no_wait.sh"
-	state_file="$TEST_TMPDIR/background_job_abort_no_wait.state"
-	mkdir -p "$control_dir"
-	printf '%s\n' "live" >"$state_file"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o ppid= -o pgid=")
-    if [ "$(cat "$ZXFER_TEST_ABORT_STATE_FILE")" = "live" ]; then
-      printf '%s\n' "2101 900 2101"
-      printf '%s\n' "2102 2101 2101"
-    fi
-    ;;
-  "-o pgid= -p "*)
-    printf '%s\n' "900"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-	ZXFER_TEST_ABORT_STATE_FILE=$state_file
-	export ZXFER_TEST_ABORT_STATE_FILE
-	zxfer_register_background_job_record "job-no-wait" "send_receive" 2101 "$control_dir" "/tmp/runner" "token-no-wait" "start-no-wait"
-
-	output=$(
-		(
-			zxfer_get_process_start_token() {
-				printf '%s\n' "start-no-wait"
-			}
-			kill() {
-				printf 'kill:%s %s\n' "$1" "$2"
-				[ "$2" = "2101" ] && printf '%s\n' "gone" >"$state_file"
-				return 0
-			}
-			wait() {
-				printf 'wait:%s\n' "$1"
-				return 0
-			}
-			zxfer_abort_background_job "job-no-wait" TERM
-			printf 'status=%s\n' "$?"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-	unset ZXFER_TEST_ABORT_STATE_FILE
-
-	assertContains "Abort cleanup should signal the validated runner child set." \
-		"$output" "kill:-TERM 2101"
-	assertContains "Abort cleanup should succeed after revalidating that the runner disappeared." \
-		"$output" "status=0"
-	assertContains "Abort cleanup should unregister the job after a completed abort signal." \
-		"$output" "records=<>"
-	assertContains "Abort cleanup should remove the control directory after a completed abort signal." \
-		"$output" "dir_exists=no"
-	assertNotContains "Abort cleanup should not call the completed-job wait path when no completion record exists." \
-		"$output" "wait:"
-}
-
-test_abort_background_job_rejects_pid_reuse_when_runner_identity_changes() {
-	control_dir="$TEST_TMPDIR/background_job_abort_pid_reuse"
-	fake_ps="$TEST_TMPDIR/fake_ps_pid_reuse.sh"
-	mkdir -p "$control_dir"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o ppid= -o pgid=")
-    printf '%s\n' "3001 900 3001"
-    ;;
-  "-o pgid= -p "*)
-    printf '%s\n' "900"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-
-	zxfer_write_background_job_launch_file \
-		"$control_dir" \
-		"job-3" \
-		"send_receive" \
-		3001 \
-		"/tmp/runner" \
-		"token-3" \
-		3002 \
-		4321 \
-		"process_group" \
-		"789"
-	zxfer_register_background_job_record "job-3" "send_receive" 3001 "$control_dir" "/tmp/runner" "token-3" "start-3"
-
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	output=$(
-		(
-			zxfer_get_process_start_token() {
-				printf '%s\n' "start-current"
-			}
-			zxfer_abort_background_job "job-3" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
+test_abort_kills_whole_pipeline_process_group_on_setsid_path() {
+	if ! command -v setsid >/dev/null 2>&1; then
+		startSkipping
+		assertTrue "setsid not available on this host; process-group abort pin skipped." 0
+		endSkipping
+		return 0
+	fi
+	g_zxfer_background_job_use_setsid=""
+	zxfer_init_background_job_spawn_support
+	if [ "$g_zxfer_background_job_use_setsid" != "1" ]; then
+		startSkipping
+		assertTrue "setsid present but pid!=pgid probe failed; process-group abort pin skipped." 0
+		endSkipping
+		return 0
 	fi
 
-	assertContains "Abort cleanup should fail closed when the tracked runner pid no longer matches the recorded helper identity." \
-		"$output" "status=1"
-	assertContains "Abort cleanup should preserve the pid-reuse validation failure message." \
-		"$output" "no longer matches the recorded helper identity"
-}
-
-test_abort_background_job_rejects_launch_metadata_mismatches() {
-	control_dir="$TEST_TMPDIR/background_job_abort_launch_mismatch"
-	fake_ps="$TEST_TMPDIR/fake_ps_launch_mismatch.sh"
-	mkdir -p "$control_dir"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o ppid= -o pgid=")
-    printf '%s\n' "3051 900 3051"
-    printf '%s\n' "3052 3051 4321"
-    ;;
-  "-o pgid= -p "*)
-    printf '%s\n' "900"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-
-	zxfer_write_background_job_launch_file \
-		"$control_dir" \
-		"job-launch-mismatch" \
-		"send_receive" \
-		3051 \
-		"/tmp/runner" \
-		"token-launch" \
-		3052 \
-		4321 \
-		"process_group" \
-		"789"
-	zxfer_register_background_job_record "job-launch-mismatch" "send_receive" 3051 "$control_dir" "/tmp/runner" "token-record" "start-launch"
-
-	set +e
 	output=$(
-		(
-			zxfer_get_process_start_token() {
-				printf '%s\n' "start-launch"
-			}
-			zxfer_abort_background_job "job-launch-mismatch" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-	status=$?
-	set -e
+		pid_file_one="$TEST_TMPDIR/abort_setsid_one.pid"
+		pid_file_two="$TEST_TMPDIR/abort_setsid_two.pid"
+		rm -f "$pid_file_one" "$pid_file_two"
 
-	assertEquals "Abort cleanup should preserve launch-metadata mismatch failures in the current shell." \
-		0 "$status"
-	assertContains "Abort cleanup should fail closed when the runner-published launch metadata no longer matches the tracked record." \
-		"$output" "status=1"
-	assertContains "Launch-metadata mismatches should preserve the dedicated failure message." \
-		"$output" "recorded launch metadata no longer matches the tracked runner identity"
+		zxfer_spawn_supervised_background_job \
+			"unit_test" \
+			"sh -c 'echo \$\$ > $pid_file_one; exec sleep 300' | sh -c 'echo \$\$ > $pid_file_two; exec sleep 300'" \
+			"display abort process group"
+		job_id=$g_zxfer_background_job_last_id
+		job_pid=$g_zxfer_background_job_last_runner_pid
+
+		wait_for_nonempty_file "$pid_file_one" || printf 'setup=stage-one-missing\n'
+		wait_for_nonempty_file "$pid_file_two" || printf 'setup=stage-two-missing\n'
+		stage_one_pid=$(cat "$pid_file_one" 2>/dev/null)
+		stage_two_pid=$(cat "$pid_file_two" 2>/dev/null)
+		stage_one_pgid=$(ps -o pgid= -p "$stage_one_pid" 2>/dev/null | tr -d '[:space:]')
+		printf 'stage_one_leads_job_group=%s\n' "$([ "$stage_one_pgid" = "$job_pid" ] && echo yes || echo no)"
+
+		zxfer_abort_background_job "$job_id" TERM
+		printf 'abort_status=%s\n' "$?"
+		if kill -s 0 "$stage_one_pid" 2>/dev/null; then
+			printf 'stage_one=alive\n'
+		else
+			printf 'stage_one=dead\n'
+		fi
+		if kill -s 0 "$stage_two_pid" 2>/dev/null; then
+			printf 'stage_two=alive\n'
+		else
+			printf 'stage_two=dead\n'
+		fi
+		printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
+	)
+
+	assertContains "The setsid job shell must lead the pipeline's process group." \
+		"$output" "stage_one_leads_job_group=yes"
+	assertContains "Aborting a tracked job should succeed." "$output" "abort_status=0"
+	assertContains "The process-group abort should terminate the first pipeline stage." \
+		"$output" "stage_one=dead"
+	assertContains "The process-group abort should terminate the second pipeline stage." \
+		"$output" "stage_two=dead"
+	assertContains "Aborting should clear the registry row." "$output" "records=<>"
+	assertNotContains "The pipeline stages must have started before the abort." \
+		"$output" "setup="
 }
 
-test_abort_background_job_reports_live_runner_identity_validation_failures() {
-	control_dir="$TEST_TMPDIR/background_job_abort_identity_validation"
-	fake_ps="$TEST_TMPDIR/fake_ps_identity_validation.sh"
-	mkdir -p "$control_dir"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o ppid= -o pgid=")
-    printf '%s\n' "3061 900 3061"
-    ;;
-  "-o pgid= -p "*)
-    printf '%s\n' "900"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-
-	zxfer_write_background_job_launch_file \
-		"$control_dir" \
-		"job-identity-validate" \
-		"send_receive" \
-		3061 \
-		"/tmp/runner" \
-		"token-identity" \
-		3062 \
-		4321 \
-		"process_group" \
-		"789"
-	zxfer_register_background_job_record "job-identity-validate" "send_receive" 3061 "$control_dir" "/tmp/runner" "token-identity" "start-identity"
-
-	set +e
-	output=$(
-		(
-			zxfer_get_process_start_token() {
-				return 1
-			}
-			zxfer_abort_background_job "job-identity-validate" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-	status=$?
-	set -e
-
-	assertEquals "Abort cleanup should preserve live runner identity validation failures in the current shell." \
-		0 "$status"
-	assertContains "Abort cleanup should fail closed when the live runner identity cannot be revalidated." \
-		"$output" "status=1"
-	assertContains "Live runner identity validation failures should preserve the dedicated failure message." \
-		"$output" "Failed to validate the live runner identity for background job [job-identity-validate]."
-}
-
-test_wait_for_background_job_reports_missing_records_and_completion_read_failures() {
-	control_dir="$TEST_TMPDIR/background_job_wait_failure"
-	mkdir -p "$control_dir"
-	current_start_token=$(zxfer_get_process_start_token "$$") ||
-		fail "Unable to derive the current process start token for background job wait coverage."
-	zxfer_register_background_job_record "job-4" "send_receive" "$$" "$control_dir" "/tmp/runner" "token-4" "$current_start_token"
-
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	missing_output=$(
-		(
-			zxfer_wait_for_background_job "job-missing"
-			printf 'status=%s\n' "$?"
-		)
-	)
-	missing_status=$?
-	wait_failure_output=$(
-		(
-			wait() {
-				return 0
-			}
-			zxfer_get_background_job_completion_status() {
-				return 17
-			}
-			zxfer_wait_for_background_job "job-4"
-			printf 'status=%s\n' "$?"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-	wait_failure_status=$?
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
-	fi
-
-	assertEquals "Waiting for an unknown background job should fail in the current shell." \
-		0 "$missing_status"
-	assertContains "Waiting for an unknown background job should return a nonzero status." \
-		"$missing_output" "status=1"
-	assertEquals "Waiting for a tracked job should preserve completion-read failures in the current shell." \
-		0 "$wait_failure_status"
-	assertContains "Waiting for a tracked job should return the exact completion-read failure status." \
-		"$wait_failure_output" "status=17"
-	assertContains "Completion-read failures should unregister the tracked job record." \
-		"$wait_failure_output" "records=<>"
-	assertContains "Completion-read failures should remove the private control directory." \
-		"$wait_failure_output" "dir_exists=no"
-}
-
-test_spawn_supervised_background_job_reports_runner_lookup_and_tempdir_failures() {
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	lookup_output=$(
-		(
-			zxfer_get_background_job_runner_script_path() {
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_spawn_supervised_background_job "unit" ":" "display"
-		)
-	)
-	lookup_status=$?
-	tempdir_output=$(
-		(
-			zxfer_create_private_temp_dir() {
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_spawn_supervised_background_job "unit" ":" "display"
-		)
-	)
-	tempdir_status=$?
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
-	fi
-
-	assertEquals "Spawning supervised jobs should fail closed when the runner helper cannot be located." \
-		1 "$lookup_status"
-	assertContains "Runner lookup failures should preserve the dedicated operator-facing error." \
-		"$lookup_output" "Failed to locate the background job runner helper."
-	assertEquals "Spawning supervised jobs should fail closed when the private control directory cannot be created." \
-		1 "$tempdir_status"
-	assertContains "Control-directory setup failures should preserve the existing temp-file error." \
-		"$tempdir_output" "Error creating temporary file."
-}
-
-test_spawn_supervised_background_job_reports_runner_identity_capture_failures() {
-	identity_control_dir="$TEST_TMPDIR/background_job_spawn_failure_identity_control"
-	identity_cleanup_log="$TEST_TMPDIR/background_job_spawn_failure_identity_cleanup.log"
-	identity_teardown_log="$TEST_TMPDIR/background_job_spawn_failure_identity_teardown.log"
-	mkdir -p "$identity_control_dir"
-
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	output=$(
-		(
-			zxfer_create_private_temp_dir() {
-				printf '%s\n' "$identity_control_dir"
-			}
-			zxfer_get_process_start_token() {
-				return 1
-			}
-			zxfer_teardown_unregistered_background_runner() {
-				printf 'teardown:%s:%s:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" >>"$identity_teardown_log"
-				kill "$2" 2>/dev/null || :
-				wait "$2" 2>/dev/null || :
-				zxfer_cleanup_runtime_artifact_path "$3"
-			}
-			zxfer_cleanup_runtime_artifact_path() {
-				printf 'cleanup:%s\n' "$1" >>"$identity_cleanup_log"
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_spawn_supervised_background_job "unit" "sleep 1" "display"
-		)
-	)
-	status=$?
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
-	fi
-
-	assertEquals "Spawning supervised jobs should fail closed when the live runner identity cannot be captured." \
-		1 "$status"
-	assertContains "Runner-identity capture failures should use the validated unregistered-runner teardown helper." \
-		"$(cat "$identity_teardown_log")" "teardown:"
-	assertContains "Runner-identity capture failures should clean the private control directory." \
-		"$(cat "$identity_cleanup_log")" "cleanup:$identity_control_dir"
-	assertContains "Runner-identity capture failures should preserve the dedicated operator-facing error." \
-		"$output" "Failed to validate background job ["
-}
-
-test_spawn_supervised_background_job_reports_job_id_allocation_failures() {
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	output=$(
-		(
-			zxfer_next_background_job_id() {
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_spawn_supervised_background_job "unit" ":" "display"
-		)
-	)
-	status=$?
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
-	fi
-
-	assertEquals "Spawning supervised jobs should fail closed when a fresh job id cannot be allocated." \
-		1 "$status"
-	assertContains "Job-id allocation failures should preserve the dedicated operator-facing error." \
-		"$output" "Failed to allocate a background job id."
-}
-
-test_spawn_supervised_background_job_does_not_use_parent_launch_staging() {
-	outfile="$TEST_TMPDIR/background_job_parent_launch_stage.out"
-	errfile="$TEST_TMPDIR/background_job_parent_launch_stage.err"
-
-	output=$(
-		(
-			zxfer_write_background_job_launch_file() {
-				fail "Parent-side launch staging should not run during supervised spawn."
-			}
-
-			zxfer_spawn_supervised_background_job \
-				"unit_test" \
-				"printf '%s\n' 'payload'" \
-				"display payload" \
-				"$outfile" \
-				"$errfile"
-			job_id=$g_zxfer_background_job_last_id
-
-			zxfer_wait_for_background_job "$job_id"
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Supervised spawn should succeed even when the parent-shell launch staging helper is unavailable." \
-		"$output" "status=0"
-	assertEquals "The runner should still publish the worker output after supervised spawn." \
-		"payload" "$(tr -d '\n' <"$outfile")"
-}
-
-test_spawn_supervised_background_job_cleans_up_when_registration_fails() {
-	register_control_dir="$TEST_TMPDIR/background_job_spawn_failure_register_control"
-	register_cleanup_log="$TEST_TMPDIR/background_job_spawn_failure_register_cleanup.log"
-	register_teardown_log="$TEST_TMPDIR/background_job_spawn_failure_register_teardown.log"
-	mkdir -p "$register_control_dir"
-
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	register_output=$(
-		(
-			zxfer_create_private_temp_dir() {
-				printf '%s\n' "$register_control_dir"
-			}
-			zxfer_register_background_job_record() {
-				return 1
-			}
-			zxfer_teardown_unregistered_background_runner() {
-				printf 'teardown:%s:%s:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" >>"$register_teardown_log"
-				kill "$2" 2>/dev/null || :
-				wait "$2" 2>/dev/null || :
-				zxfer_cleanup_runtime_artifact_path "$3"
-			}
-			zxfer_cleanup_runtime_artifact_path() {
-				printf 'cleanup:%s\n' "$1" >>"$register_cleanup_log"
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_spawn_supervised_background_job "unit" "sleep 1" "display"
-		)
-	)
-	register_status=$?
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
-	fi
-
-	assertEquals "Spawn setup should fail closed when registry insertion fails." \
-		1 "$register_status"
-	assertContains "Registry insertion failures should use the validated unregistered-runner teardown helper." \
-		"$(cat "$register_teardown_log")" "teardown:"
-	assertContains "Registry insertion failures should clean the private control directory." \
-		"$(cat "$register_cleanup_log")" "cleanup:$register_control_dir"
-	assertContains "Registry insertion failures should preserve the operator-facing error." \
-		"$register_output" "Failed to register background job"
-}
-
-test_teardown_unregistered_background_runner_uses_launch_process_group_when_validated() {
-	control_dir="$TEST_TMPDIR/background_job_unregistered_teardown_pgid"
-	fake_ps="$TEST_TMPDIR/fake_ps_unregistered_teardown_pgid.sh"
-	state_file="$TEST_TMPDIR/background_job_unregistered_teardown_pgid.state"
-	mkdir -p "$control_dir"
-	printf '%s\n' "live" >"$state_file"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o ppid= -o pgid=")
-    if [ "$(cat "$ZXFER_TEST_UNREGISTERED_STATE_FILE")" = "live" ]; then
-      printf '%s\n' "7001 $ZXFER_TEST_PARENT_PID 7001"
-      printf '%s\n' "7002 7001 7700"
-    fi
-    ;;
-  "-o pgid= -p "*)
-    printf '%s\n' "900"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-	ZXFER_TEST_UNREGISTERED_STATE_FILE=$state_file
-	ZXFER_TEST_PARENT_PID=$$
-	export ZXFER_TEST_UNREGISTERED_STATE_FILE ZXFER_TEST_PARENT_PID
-	zxfer_write_background_job_launch_file \
-		"$control_dir" \
-		"job-unregistered-pgid" \
-		"send_receive" \
-		7001 \
-		"/tmp/runner" \
-		"token-unregistered-pgid" \
-		7002 \
-		7700 \
-		"process_group" \
-		"123"
-
-	output=$(
-		(
-			zxfer_get_process_start_token() {
-				printf '%s\n' "start-unregistered-pgid"
-			}
-			kill() {
-				printf 'kill:%s %s\n' "$1" "$2"
-				[ "$2" = "7001" ] && printf '%s\n' "gone" >"$state_file"
-				return 0
-			}
-			wait() {
-				printf 'wait:%s\n' "$1"
-				return 0
-			}
-			zxfer_teardown_unregistered_background_runner \
-				"job-unregistered-pgid" \
-				7001 \
-				"$control_dir" \
-				"/tmp/runner" \
-				"token-unregistered-pgid" \
-				"start-unregistered-pgid" \
-				"TERM"
-			printf 'status=%s\n' "$?"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-	unset ZXFER_TEST_UNREGISTERED_STATE_FILE ZXFER_TEST_PARENT_PID
-
-	assertContains "Unregistered-runner teardown should signal a validated worker process group when launch metadata is available." \
-		"$output" "kill:-TERM -7700"
-	assertContains "Unregistered-runner teardown should also signal the tracked runner pid." \
-		"$output" "kill:-TERM 7001"
-	assertContains "Unregistered-runner teardown should reap the runner after validated signaling." \
-		"$output" "wait:7001"
-	assertContains "Unregistered-runner teardown should clean the private control directory after reaping." \
-		"$output" "dir_exists=no"
-	assertContains "Unregistered-runner teardown should succeed after validated process-group cleanup." \
-		"$output" "status=0"
-}
-
-test_teardown_unregistered_background_runner_falls_back_to_direct_child_set_without_launch_metadata() {
-	control_dir="$TEST_TMPDIR/background_job_unregistered_teardown_child_set"
-	fake_ps="$TEST_TMPDIR/fake_ps_unregistered_teardown_child_set.sh"
-	state_file="$TEST_TMPDIR/background_job_unregistered_teardown_child_set.state"
-	mkdir -p "$control_dir"
-	printf '%s\n' "live" >"$state_file"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o ppid= -o pgid=")
-    if [ "$(cat "$ZXFER_TEST_UNREGISTERED_STATE_FILE")" = "live" ]; then
-      printf '%s\n' "7101 $ZXFER_TEST_PARENT_PID 7101"
-      printf '%s\n' "7102 7101 7101"
-    fi
-    ;;
-  "-o pgid= -p "*)
-    printf '%s\n' "900"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-	ZXFER_TEST_UNREGISTERED_STATE_FILE=$state_file
-	ZXFER_TEST_PARENT_PID=$$
-	export ZXFER_TEST_UNREGISTERED_STATE_FILE ZXFER_TEST_PARENT_PID
-
-	output=$(
-		(
-			kill() {
-				printf 'kill:%s %s\n' "$1" "$2"
-				[ "$2" = "7101" ] && printf '%s\n' "gone" >"$state_file"
-				return 0
-			}
-			wait() {
-				printf 'wait:%s\n' "$1"
-				return 0
-			}
-			zxfer_teardown_unregistered_background_runner \
-				"job-unregistered-child-set" \
-				7101 \
-				"$control_dir" \
-				"/tmp/runner" \
-				"token-unregistered-child-set" \
-				"" \
-				"TERM"
-			printf 'status=%s\n' "$?"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-	unset ZXFER_TEST_UNREGISTERED_STATE_FILE ZXFER_TEST_PARENT_PID
-
-	assertContains "Unregistered-runner teardown without launch metadata should signal the direct runner child." \
-		"$output" "kill:-TERM 7101"
-	assertContains "Unregistered-runner teardown without launch metadata should signal descendants from the owned child set." \
-		"$output" "kill:-TERM 7102"
-	assertNotContains "Unregistered-runner teardown without launch metadata should not use process-group signaling." \
-		"$output" "kill:-TERM -"
-	assertContains "Unregistered-runner teardown without launch metadata should reap the runner after validated signaling." \
-		"$output" "wait:7101"
-	assertContains "Unregistered-runner teardown without launch metadata should clean the private control directory." \
-		"$output" "dir_exists=no"
-	assertContains "Unregistered-runner teardown without launch metadata should succeed." \
-		"$output" "status=0"
-}
-
-test_finish_signaled_background_job_abort_covers_revalidation_failure_paths() {
-	control_dir="$TEST_TMPDIR/background_job_finish_abort_paths"
-	mkdir -p "$control_dir"
-
-	output=$(
-		(
-			set +e
-			zxfer_read_background_job_process_snapshot() {
-				return 1
-			}
-			zxfer_finish_signaled_background_job_abort "job-finish-snapshot" 7201 "$control_dir" "start" 0 0
-			printf 'snapshot_status=%s\n' "$?"
-			printf 'snapshot_message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-		(
-			set +e
-			rm -f "$control_dir/completion.tsv"
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="7202 1 7202"
-			}
-			zxfer_background_job_runner_matches() {
-				printf '%s\n' "status	0" >"$control_dir/completion.tsv"
-				return 3
-			}
-			zxfer_cleanup_completed_background_job() {
-				printf 'completed_after_match:%s\n' "$1"
-			}
-			zxfer_finish_signaled_background_job_abort "job-finish-complete-match" 7202 "$control_dir" "start" 0 0
-			printf 'complete_match_status=%s\n' "$?"
-		)
-		(
-			set +e
-			rm -f "$control_dir/completion.tsv"
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="7203 1 7203"
-			}
-			zxfer_background_job_runner_matches() {
-				return 0
-			}
-			zxfer_signal_validated_background_job_scope() {
-				printf '%s\n' "status	0" >"$control_dir/completion.tsv"
-				return 0
-			}
-			zxfer_cleanup_completed_background_job() {
-				printf 'completed_after_escalation:%s\n' "$1"
-			}
-			zxfer_finish_signaled_background_job_abort "job-finish-complete-escalation" 7203 "$control_dir" "start" 0 0
-			printf 'complete_escalation_status=%s\n' "$?"
-		)
-		(
-			set +e
-			rm -f "$control_dir/completion.tsv"
-			l_read_calls=0
-			zxfer_read_background_job_process_snapshot() {
-				l_read_calls=$((l_read_calls + 1))
-				if [ "$l_read_calls" -eq 1 ]; then
-					g_zxfer_background_job_process_snapshot_result="7204 1 7204"
-					return 0
-				fi
-				return 1
-			}
-			zxfer_background_job_runner_matches() {
-				return 0
-			}
-			zxfer_signal_validated_background_job_scope() {
-				return 0
-			}
-			zxfer_finish_signaled_background_job_abort "job-finish-second-snapshot" 7204 "$control_dir" "start" 0 0
-			printf 'second_snapshot_status=%s\n' "$?"
-			printf 'second_snapshot_message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-		(
-			set +e
-			rm -f "$control_dir/completion.tsv"
-			l_match_calls=0
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="7205 1 7205"
-			}
-			zxfer_background_job_runner_matches() {
-				l_match_calls=$((l_match_calls + 1))
-				[ "$l_match_calls" -eq 1 ] && return 0
-				return 1
-			}
-			zxfer_signal_validated_background_job_scope() {
-				return 0
-			}
-			zxfer_cleanup_aborted_background_job() {
-				printf 'aborted_after_second_match:%s:%s\n' "$1" "$2"
-			}
-			zxfer_finish_signaled_background_job_abort "job-finish-second-missing" 7205 "$control_dir" "start" 0 0
-			printf 'second_missing_status=%s\n' "$?"
-		)
-		(
-			set +e
-			rm -f "$control_dir/completion.tsv"
-			l_match_calls=0
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="7206 1 7206"
-			}
-			zxfer_background_job_runner_matches() {
-				l_match_calls=$((l_match_calls + 1))
-				[ "$l_match_calls" -eq 1 ] && return 0
-				return 2
-			}
-			zxfer_signal_validated_background_job_scope() {
-				return 0
-			}
-			zxfer_finish_signaled_background_job_abort "job-finish-second-validate" 7206 "$control_dir" "start" 0 0
-			printf 'second_validate_status=%s\n' "$?"
-			printf 'second_validate_message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-		(
-			set +e
-			rm -f "$control_dir/completion.tsv"
-			l_match_calls=0
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="7207 1 7207"
-			}
-			zxfer_background_job_runner_matches() {
-				l_match_calls=$((l_match_calls + 1))
-				[ "$l_match_calls" -eq 1 ] && return 0
-				return 3
-			}
-			zxfer_signal_validated_background_job_scope() {
-				return 0
-			}
-			zxfer_finish_signaled_background_job_abort "job-finish-second-mismatch" 7207 "$control_dir" "start" 0 0
-			printf 'second_mismatch_status=%s\n' "$?"
-			printf 'second_mismatch_message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-		(
-			set +e
-			rm -f "$control_dir/completion.tsv"
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="7208 1 7208"
-			}
-			zxfer_background_job_runner_matches() {
-				return 0
-			}
-			zxfer_signal_validated_background_job_scope() {
-				return 0
-			}
-			zxfer_finish_signaled_background_job_abort "job-finish-still-live" 7208 "$control_dir" "start" 0 0
-			printf 'still_live_status=%s\n' "$?"
-			printf 'still_live_message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-
-	assertContains "Abort finalization should fail closed when post-signal process snapshots cannot be read." \
-		"$output" "snapshot_status=1"
-	assertContains "Abort finalization should preserve the process-table failure message." \
-		"$output" "snapshot_message=Failed to inspect the process table"
-	assertContains "Abort finalization should accept a completion marker that appears during first identity revalidation." \
-		"$output" "completed_after_match:job-finish-complete-match"
-	assertContains "Abort finalization should accept a completion marker that appears during escalation." \
-		"$output" "completed_after_escalation:job-finish-complete-escalation"
-	assertContains "Abort finalization should fail closed when the second process snapshot cannot be read." \
-		"$output" "second_snapshot_status=1"
-	assertContains "Abort finalization should unregister and clean jobs whose runner disappears after escalation." \
-		"$output" "aborted_after_second_match:job-finish-second-missing:$control_dir"
-	assertContains "Abort finalization should report second-pass identity validation failures." \
-		"$output" "second_validate_message=Failed to validate the live runner identity"
-	assertContains "Abort finalization should report second-pass identity mismatches." \
-		"$output" "second_mismatch_message=Refusing to tear down background job [job-finish-second-mismatch]"
-	assertContains "Abort finalization should fail closed when the validated runner remains live after successful abort signaling." \
-		"$output" "still_live_status=1"
-	assertContains "Abort finalization should preserve the still-live runner message." \
-		"$output" "still_live_message=Refusing to remove background job [job-finish-still-live]"
-}
-
-test_teardown_unregistered_background_runner_covers_fail_closed_paths() {
-	control_dir="$TEST_TMPDIR/background_job_unregistered_teardown_failures"
-	mkdir -p "$control_dir"
-
-	output=$(
-		(
-			set +e
-			zxfer_cleanup_runtime_artifact_path() {
-				printf 'cleanup_invalid:%s\n' "$1"
-			}
-			zxfer_teardown_unregistered_background_runner "job-invalid" "bad" "$control_dir" "/tmp/runner" "token" "" "TERM"
-			printf 'invalid_status=%s\n' "$?"
-		)
-		(
-			set +e
-			zxfer_read_background_job_process_snapshot() {
-				return 37
-			}
-			zxfer_teardown_unregistered_background_runner "job-snapshot" 7301 "$control_dir" "/tmp/runner" "token" "" "TERM"
-			printf 'snapshot_status=%s\n' "$?"
-			printf 'snapshot_message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-		(
-			set +e
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="7302 9999 7302"
-			}
-			wait() {
-				printf 'wait_unowned:%s\n' "$1"
-			}
-			zxfer_cleanup_runtime_artifact_path() {
-				printf 'cleanup_unowned:%s\n' "$1"
-			}
-			zxfer_teardown_unregistered_background_runner "job-unowned" 7302 "$control_dir" "/tmp/runner" "token" "" "TERM"
-			printf 'unowned_status=%s\n' "$?"
-		)
-		(
-			set +e
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="7303 $$ 7303"
-			}
-			zxfer_background_job_runner_matches() {
-				return 3
-			}
-			zxfer_teardown_unregistered_background_runner "job-mismatch" 7303 "$control_dir" "/tmp/runner" "token" "start" "TERM"
-			printf 'mismatch_status=%s\n' "$?"
-			printf 'mismatch_message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-		(
-			set +e
-			l_read_calls=0
-			zxfer_read_background_job_process_snapshot() {
-				l_read_calls=$((l_read_calls + 1))
-				[ "$l_read_calls" -eq 1 ] && {
-					g_zxfer_background_job_process_snapshot_result="7304 $$ 7304"
-					return 0
-				}
-				return 1
-			}
-			zxfer_signal_validated_background_job_scope() {
-				return 1
-			}
-			zxfer_teardown_unregistered_background_runner "job-signal-reread" 7304 "$control_dir" "/tmp/runner" "token" "" "TERM"
-			printf 'signal_reread_status=%s\n' "$?"
-		)
-		(
-			set +e
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="7305 $$ 7305"
-			}
-			zxfer_signal_validated_background_job_scope() {
-				return 1
-			}
-			zxfer_teardown_unregistered_background_runner "job-signal-live" 7305 "$control_dir" "/tmp/runner" "token" "" "TERM"
-			printf 'signal_live_status=%s\n' "$?"
-		)
-		(
-			set +e
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="7306 $$ 7306"
-			}
-			zxfer_signal_validated_background_job_scope() {
-				printf 'signal_scope:%s\n' "$4"
-				return 0
-			}
-			wait() {
-				printf 'wait_kill:%s\n' "$1"
-			}
-			zxfer_cleanup_runtime_artifact_path() {
-				printf 'cleanup_kill:%s\n' "$1"
-			}
-			zxfer_teardown_unregistered_background_runner "job-kill" 7306 "$control_dir" "/tmp/runner" "token" "" "TERM"
-			printf 'kill_status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Unregistered-runner teardown should return success for invalid runner pids after cleanup." \
-		"$output" "invalid_status=0"
-	assertContains "Unregistered-runner teardown should fail closed when process snapshots cannot be read." \
-		"$output" "snapshot_status=37"
-	assertContains "Unregistered-runner teardown should report process-table failures." \
-		"$output" "snapshot_message=Failed to inspect the process table"
-	assertContains "Unregistered-runner teardown should reap and clean when the recorded runner is no longer an owned direct child." \
-		"$output" "wait_unowned:7302"
-	assertContains "Unregistered-runner teardown should reject start-token identity mismatches." \
-		"$output" "mismatch_status=1"
-	assertContains "Unregistered-runner teardown should fail when a failed signal cannot be revalidated." \
-		"$output" "signal_reread_status=1"
-	assertContains "Unregistered-runner teardown should fail when a failed signal leaves the runner live." \
-		"$output" "signal_live_status=1"
-	assertContains "Unregistered-runner teardown should reap after the escalation path." \
-		"$output" "wait_kill:7306"
-}
-
-test_background_job_signal_helpers_reject_invalid_inputs() {
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	output=$(
-		(
-			zxfer_background_job_runner_matches "1001 900 1001" "" "start-token"
-			printf 'runner_status=%s\n' "$?"
-			zxfer_background_job_snapshot_has_pid_with_pgid "1 2 3" "" "3"
-			printf 'pid_status=%s\n' "$?"
-			zxfer_background_job_snapshot_has_pid_with_pgid "1 2 3" "1" ""
-			printf 'pgid_status=%s\n' "$?"
-			zxfer_signal_background_job_process_group "" TERM
-			printf 'signal_status=%s\n' "$?"
-		)
-	)
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
-	fi
-
-	assertContains "Runner identity checks should reject invalid runner pid inputs." \
-		"$output" "runner_status=1"
-	assertContains "Process-snapshot validation should reject invalid pid inputs." \
-		"$output" "pid_status=1"
-	assertContains "Process-snapshot validation should reject invalid pgid inputs." \
-		"$output" "pgid_status=1"
-	assertContains "Process-group signaling should reject invalid pgid inputs." \
-		"$output" "signal_status=1"
-}
-
-test_background_job_snapshot_and_runner_match_helpers_cover_missing_pid_paths() {
-	output=$(
-		(
-			set +e
-			zxfer_background_job_snapshot_has_pid "1001 900 1001" ""
-			printf 'snapshot_status=%s\n' "$?"
-			zxfer_background_job_runner_matches "1002 900 1002" 1001 "start-token"
-			printf 'runner_status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Process-snapshot validation should reject blank pid inputs." \
-		"$output" "snapshot_status=1"
-	assertContains "Runner validation should return missing when the runner pid is absent from the snapshot." \
-		"$output" "runner_status=1"
-}
-
-test_background_job_snapshot_has_pid_with_parent_rejects_invalid_inputs() {
-	output=$(
-		(
-			set +e
-			zxfer_background_job_snapshot_has_pid_with_parent "1001 900 1001" "" 900
-			printf 'pid=%s\n' "$?"
-			zxfer_background_job_snapshot_has_pid_with_parent "1001 900 1001" 1001 ""
-			printf 'parent=%s\n' "$?"
-		)
-	)
-
-	assertContains "Parent-snapshot validation should reject blank pid inputs." \
-		"$output" "pid=1"
-	assertContains "Parent-snapshot validation should reject blank parent-pid inputs." \
-		"$output" "parent=1"
-}
-
-test_abort_background_job_treats_completed_jobs_as_already_finished_when_launch_or_identity_checks_fail() {
-	control_dir="$TEST_TMPDIR/background_job_abort_completed"
-	fake_ps="$TEST_TMPDIR/fake_ps_completed.sh"
-	mkdir -p "$control_dir"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o ppid= -o pgid=")
-    printf '%s\n' "4001 900 4001"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-
-	printf '%s\n' "status	0" >"$control_dir/completion.tsv"
-	zxfer_register_background_job_record "job-4" "send_receive" 4001 "$control_dir" "/tmp/runner" "token-4" "start-4"
-
-	output=$(
-		(
-			zxfer_get_process_start_token() {
-				printf '%s\n' "wrong-start"
-			}
-			zxfer_abort_background_job "job-4" TERM
-			printf 'status=%s\n' "$?"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-
-	assertContains "Abort cleanup should treat unreadable completed jobs as already finished." \
-		"$output" "status=0"
-	assertContains "Abort cleanup should unregister completed jobs whose runner identity no longer matches." \
-		"$output" "records=<>"
-	assertContains "Abort cleanup should remove the private control directory for completed jobs." \
-		"$output" "dir_exists=no"
-}
-
-test_abort_background_job_treats_completed_jobs_as_already_finished_when_launch_metadata_mismatches() {
-	control_dir="$TEST_TMPDIR/background_job_abort_completed_launch_mismatch"
-	mkdir -p "$control_dir"
-	cat >"$control_dir/launch.tsv" <<'EOF'
-version	1
-job_id	job-mismatch
-kind	send_receive
-runner_pid	4101
-runner_script	/tmp/runner
-runner_token	wrong-token
-worker_pid	4102
-worker_pgid	4102
-teardown_mode	process_group
-started_epoch	123
-EOF
-	printf '%s\n' "status	0" >"$control_dir/completion.tsv"
-	zxfer_register_background_job_record "job-mismatch" "send_receive" 4101 "$control_dir" "/tmp/runner" "token-mismatch" "start-mismatch"
-
-	output=$(
-		(
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="4101 1 4101"
-			}
-			zxfer_abort_background_job "job-mismatch" TERM
-			printf 'status=%s\n' "$?"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-
-	assertContains "Abort cleanup should treat completed jobs with mismatched launch metadata as already finished." \
-		"$output" "status=0"
-	assertContains "Abort cleanup should unregister completed jobs whose launch metadata no longer matches." \
-		"$output" "records=<>"
-	assertContains "Abort cleanup should remove the private control directory for completed jobs with mismatched launch metadata." \
-		"$output" "dir_exists=no"
-}
-
-test_abort_background_job_treats_completed_jobs_as_already_finished_when_launch_read_fails() {
-	control_dir="$TEST_TMPDIR/background_job_abort_completed_launch_read"
-	mkdir -p "$control_dir"
-	printf '%s\n' "version	1" >"$control_dir/launch.tsv"
-	printf '%s\n' "status	0" >"$control_dir/completion.tsv"
-	zxfer_register_background_job_record "job-launch-read" "send_receive" 4051 "$control_dir" "/tmp/runner" "token-launch-read" "start-launch-read"
-
-	output=$(
-		(
-			zxfer_read_background_job_launch_file() {
-				return 1
-			}
-			zxfer_abort_background_job "job-launch-read" TERM
-			printf 'status=%s\n' "$?"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-
-	assertContains "Abort cleanup should treat completed jobs with unreadable launch metadata as already finished." \
-		"$output" "status=0"
-	assertContains "Abort cleanup should unregister completed jobs whose launch metadata can no longer be read." \
-		"$output" "records=<>"
-	assertContains "Abort cleanup should remove the private control directory for completed jobs with unreadable launch metadata." \
-		"$output" "dir_exists=no"
-}
-
-test_abort_background_job_treats_completed_jobs_as_already_finished_when_live_identity_validation_fails() {
-	control_dir="$TEST_TMPDIR/background_job_abort_completed_identity_validate"
-	mkdir -p "$control_dir"
-	printf '%s\n' "status	0" >"$control_dir/completion.tsv"
-	zxfer_register_background_job_record "job-identity-completed" "send_receive" 4151 "$control_dir" "/tmp/runner" "token-identity-completed" "start-identity-completed"
-
-	output=$(
-		(
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="4151 1 4151"
-			}
-			zxfer_get_process_start_token() {
-				return 1
-			}
-			zxfer_abort_background_job "job-identity-completed" TERM
-			printf 'status=%s\n' "$?"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-
-	assertContains "Abort cleanup should treat completed jobs with unreadable live identity validation as already finished." \
-		"$output" "status=0"
-	assertContains "Abort cleanup should unregister completed jobs whose live identity cannot be revalidated." \
-		"$output" "records=<>"
-	assertContains "Abort cleanup should remove the private control directory for completed jobs whose live identity cannot be revalidated." \
-		"$output" "dir_exists=no"
-}
-
-test_abort_background_job_treats_completed_jobs_as_already_finished_when_process_snapshot_read_fails() {
-	control_dir="$TEST_TMPDIR/background_job_abort_completed_snapshot_read"
-	mkdir -p "$control_dir"
-	printf '%s\n' "status	0" >"$control_dir/completion.tsv"
-	zxfer_register_background_job_record "job-snapshot-completed" "send_receive" 4251 "$control_dir" "/tmp/runner" "token-snapshot-completed" "start-snapshot-completed"
-
-	output=$(
-		(
-			zxfer_read_background_job_process_snapshot() {
-				return 1
-			}
-			zxfer_abort_background_job "job-snapshot-completed" TERM
-			printf 'status=%s\n' "$?"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-
-	assertContains "Abort cleanup should treat completed jobs with unreadable process snapshots as already finished." \
-		"$output" "status=0"
-	assertContains "Abort cleanup should unregister completed jobs whose process snapshot can no longer be read." \
-		"$output" "records=<>"
-	assertContains "Abort cleanup should remove the private control directory for completed jobs whose process snapshot can no longer be read." \
-		"$output" "dir_exists=no"
-}
-
-test_abort_background_job_reports_snapshot_and_signal_failures() {
-	control_dir="$TEST_TMPDIR/background_job_abort_failures"
-	mkdir -p "$control_dir"
-	zxfer_write_background_job_launch_file \
-		"$control_dir" \
-		"job-5" \
-		"send_receive" \
-		5001 \
-		"/tmp/runner" \
-		"token-5" \
-		5002 \
-		5002 \
-		"process_group" \
-		"123"
-	zxfer_register_background_job_record "job-5" "send_receive" 5001 "$control_dir" "/tmp/runner" "token-5" "start-5"
-
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	snapshot_output=$(
-		(
-			zxfer_background_job_runner_matches() {
-				return 0
-			}
-			zxfer_read_background_job_process_snapshot() {
-				return 37
-			}
-			zxfer_abort_background_job "job-5" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-	snapshot_status=$?
-	signal_output=$(
-		(
-			zxfer_background_job_runner_matches() {
-				return 0
-			}
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="5001 1 5001
-5002 5001 5002"
-			}
-			zxfer_signal_background_job_process_group() {
-				return 1
-			}
-			kill() {
-				return 1
-			}
-			zxfer_abort_background_job "job-5" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-	signal_status=$?
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
-	fi
-
-	assertEquals "Abort cleanup should fail closed when the process snapshot cannot be collected." \
-		0 "$snapshot_status"
-	assertContains "Process-snapshot failures should preserve the cleanup error." \
-		"$snapshot_output" "status=37"
-	assertContains "Process-snapshot failures should preserve the dedicated failure message." \
-		"$snapshot_output" "Failed to inspect the process table"
-	assertEquals "Abort cleanup should fail closed when signaling the validated teardown target fails." \
-		0 "$signal_status"
-	assertContains "Signal failures should preserve the cleanup error." \
-		"$signal_output" "status=1"
-	assertContains "Signal failures should preserve the dedicated failure message." \
-		"$signal_output" "Failed to signal the validated teardown target"
-}
-
-test_abort_background_job_reports_post_signal_identity_validation_failures() {
-	identity_validate_control_dir="$TEST_TMPDIR/background_job_abort_post_signal_validate"
-	identity_mismatch_control_dir="$TEST_TMPDIR/background_job_abort_post_signal_mismatch"
-	mkdir -p "$identity_validate_control_dir" "$identity_mismatch_control_dir"
-	zxfer_register_background_job_record "job-post-validate" "send_receive" 6301 "$identity_validate_control_dir" "/tmp/runner" "token-post-validate" "start-post-validate"
-	zxfer_register_background_job_record "job-post-mismatch" "send_receive" 6401 "$identity_mismatch_control_dir" "/tmp/runner" "token-post-mismatch" "start-post-mismatch"
-
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	validate_output=$(
-		(
-			g_test_runner_match_calls=0
-			zxfer_background_job_runner_matches() {
-				g_test_runner_match_calls=$((g_test_runner_match_calls + 1))
-				if [ "$g_test_runner_match_calls" -eq 1 ]; then
-					return 0
-				fi
-				return 2
-			}
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="6301 1 6301"
-			}
-			zxfer_get_background_job_pid_set() {
-				g_zxfer_background_job_pid_set_result="6301"
-			}
-			zxfer_signal_background_job_pid_set() {
-				return 1
-			}
-			zxfer_abort_background_job "job-post-validate" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-	validate_status=$?
-	mismatch_output=$(
-		(
-			g_test_runner_match_calls=0
-			zxfer_background_job_runner_matches() {
-				g_test_runner_match_calls=$((g_test_runner_match_calls + 1))
-				if [ "$g_test_runner_match_calls" -eq 1 ]; then
-					return 0
-				fi
-				return 3
-			}
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="6401 1 6401"
-			}
-			zxfer_get_background_job_pid_set() {
-				g_zxfer_background_job_pid_set_result="6401"
-			}
-			zxfer_signal_background_job_pid_set() {
-				return 1
-			}
-			zxfer_abort_background_job "job-post-mismatch" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-	mismatch_status=$?
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
-	fi
-
-	assertEquals "Abort cleanup should fail closed when the runner identity cannot be revalidated after signal failure." \
-		0 "$validate_status"
-	assertContains "Post-signal validation failures should preserve the cleanup error." \
-		"$validate_output" "status=1"
-	assertContains "Post-signal validation failures should preserve the dedicated failure message." \
-		"$validate_output" "Failed to validate the live runner identity for background job [job-post-validate]."
-	assertEquals "Abort cleanup should fail closed when the runner identity changes after signal failure." \
-		0 "$mismatch_status"
-	assertContains "Post-signal identity mismatches should preserve the cleanup error." \
-		"$mismatch_output" "status=1"
-	assertContains "Post-signal identity mismatches should preserve the dedicated failure message." \
-		"$mismatch_output" "tracked runner PID [6401] no longer matches the recorded helper identity"
-}
-
-test_abort_background_job_treats_post_signal_runner_disappearance_as_success() {
-	control_dir="$TEST_TMPDIR/background_job_abort_post_signal_disappeared"
-	mkdir -p "$control_dir"
-	zxfer_register_background_job_record "job-post-disappeared" "send_receive" 6501 "$control_dir" "/tmp/runner" "token-post-disappeared" "start-post-disappeared"
-
-	output=$(
-		(
-			g_test_snapshot_calls=0
-			zxfer_background_job_runner_matches() {
-				if [ "$g_test_snapshot_calls" -eq 1 ]; then
-					return 0
-				fi
-				if [ "$g_test_snapshot_calls" -eq 2 ]; then
-					return 1
-				fi
-				return 2
-			}
-			zxfer_read_background_job_process_snapshot() {
-				g_test_snapshot_calls=$((g_test_snapshot_calls + 1))
-				if [ "$g_test_snapshot_calls" -eq 1 ]; then
-					g_zxfer_background_job_process_snapshot_result="6501 1 6501
-6502 6501 6502"
-					return 0
-				fi
-				if [ "$g_test_snapshot_calls" -eq 2 ]; then
-					g_zxfer_background_job_process_snapshot_result=""
-				fi
-			}
-			zxfer_get_background_job_pid_set() {
-				g_zxfer_background_job_pid_set_result="6501 6502"
-			}
-			zxfer_signal_background_job_pid_set() {
-				return 1
-			}
-			zxfer_abort_background_job "job-post-disappeared" TERM
-			printf 'status=%s\n' "$?"
-			printf 'snapshot_calls=%s\n' "$g_test_snapshot_calls"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-
-	assertContains "Abort cleanup should succeed when the runner disappears after a failed signal attempt." \
-		"$output" "status=0"
-	assertContains "Abort cleanup should reread the process snapshot before post-signal revalidation." \
-		"$output" "snapshot_calls=2"
-	assertContains "Abort cleanup should unregister jobs whose runner disappears after signal failure." \
-		"$output" "records=<>"
-	assertContains "Abort cleanup should remove the private control directory when the runner disappears after signal failure." \
-		"$output" "dir_exists=no"
-}
-
-test_abort_background_job_treats_post_signal_snapshot_read_failure_with_late_completion_as_success() {
-	control_dir="$TEST_TMPDIR/background_job_abort_post_signal_completion_snapshot"
-	mkdir -p "$control_dir"
-	zxfer_register_background_job_record "job-post-completion-snapshot" "send_receive" 6511 "$control_dir" "/tmp/runner" "token-post-completion-snapshot" "start-post-completion-snapshot"
-
-	output=$(
-		(
-			set +e
-			g_test_snapshot_calls=0
-			zxfer_background_job_runner_matches() {
-				return 0
-			}
-			zxfer_read_background_job_process_snapshot() {
-				g_test_snapshot_calls=$((g_test_snapshot_calls + 1))
-				if [ "$g_test_snapshot_calls" -eq 1 ]; then
-					g_zxfer_background_job_process_snapshot_result="6511 1 6511
-6512 6511 6512"
-					return 0
-				fi
-				printf '%s\n' "status	0" >"$control_dir/completion.tsv"
-				return 1
-			}
-			zxfer_get_background_job_pid_set() {
-				g_zxfer_background_job_pid_set_result="6511 6512"
-			}
-			zxfer_signal_background_job_pid_set() {
-				return 1
-			}
-			zxfer_abort_background_job "job-post-completion-snapshot" TERM
-			printf 'status=%s\n' "$?"
-			printf 'snapshot_calls=%s\n' "$g_test_snapshot_calls"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-
-	assertContains "Abort cleanup should succeed when completion is recorded before the post-signal snapshot reread fails." \
-		"$output" "status=0"
-	assertContains "Abort cleanup should still perform the post-signal snapshot reread before noticing the late completion marker." \
-		"$output" "snapshot_calls=2"
-	assertContains "Abort cleanup should unregister jobs whose completion marker appears before the post-signal snapshot reread failure." \
-		"$output" "records=<>"
-	assertContains "Abort cleanup should remove the private control directory when a late completion marker wins over the post-signal snapshot reread failure." \
-		"$output" "dir_exists=no"
-}
-
-test_abort_background_job_preserves_post_signal_snapshot_read_failures() {
-	control_dir="$TEST_TMPDIR/background_job_abort_post_signal_snapshot_failure"
-	mkdir -p "$control_dir"
-	zxfer_register_background_job_record "job-post-snapshot-failure" "send_receive" 6521 "$control_dir" "/tmp/runner" "token-post-snapshot-failure" "start-post-snapshot-failure"
-
-	output=$(
-		(
-			set +e
-			g_test_snapshot_calls=0
-			zxfer_background_job_runner_matches() {
-				return 0
-			}
-			zxfer_read_background_job_process_snapshot() {
-				g_test_snapshot_calls=$((g_test_snapshot_calls + 1))
-				if [ "$g_test_snapshot_calls" -eq 1 ]; then
-					g_zxfer_background_job_process_snapshot_result="6521 1 6521
-6522 6521 6522"
-					return 0
-				fi
-				return 38
-			}
-			zxfer_get_background_job_pid_set() {
-				g_zxfer_background_job_pid_set_result="6521 6522"
-			}
-			zxfer_signal_background_job_pid_set() {
-				return 1
-			}
-			zxfer_abort_background_job "job-post-snapshot-failure" TERM
-			printf 'status=%s\n' "$?"
-			printf 'snapshot_calls=%s\n' "$g_test_snapshot_calls"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-
-	assertContains "Abort cleanup should preserve exact post-signal process-snapshot read failures." \
-		"$output" "status=38"
-	assertContains "Abort cleanup should reread the process snapshot before reporting post-signal snapshot failures." \
-		"$output" "snapshot_calls=2"
-	assertContains "Post-signal process-snapshot failures should preserve the dedicated failure message." \
-		"$output" "Failed to inspect the process table"
-}
-
-test_abort_background_job_treats_post_signal_identity_validation_failure_with_late_completion_as_success() {
-	control_dir="$TEST_TMPDIR/background_job_abort_post_signal_completion_validate"
-	mkdir -p "$control_dir"
-	zxfer_register_background_job_record "job-post-completion-validate" "send_receive" 6521 "$control_dir" "/tmp/runner" "token-post-completion-validate" "start-post-completion-validate"
-
-	output=$(
-		(
-			g_test_snapshot_calls=0
-			g_test_runner_match_calls=0
-			zxfer_background_job_runner_matches() {
-				g_test_runner_match_calls=$((g_test_runner_match_calls + 1))
-				if [ "$g_test_runner_match_calls" -eq 1 ]; then
-					return 0
-				fi
-				printf '%s\n' "status	0" >"$control_dir/completion.tsv"
-				return 2
-			}
-			zxfer_read_background_job_process_snapshot() {
-				g_test_snapshot_calls=$((g_test_snapshot_calls + 1))
-				g_zxfer_background_job_process_snapshot_result="6521 1 6521
-6522 6521 6522"
-				return 0
-			}
-			zxfer_get_background_job_pid_set() {
-				g_zxfer_background_job_pid_set_result="6521 6522"
-			}
-			zxfer_signal_background_job_pid_set() {
-				return 1
-			}
-			zxfer_abort_background_job "job-post-completion-validate" TERM
-			printf 'status=%s\n' "$?"
-			printf 'runner_match_calls=%s\n' "$g_test_runner_match_calls"
-			printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
-			if [ -e "$control_dir" ]; then
-				l_dir_exists=yes
-			else
-				l_dir_exists=no
-			fi
-			printf 'dir_exists=%s\n' "$l_dir_exists"
-		)
-	)
-
-	assertContains "Abort cleanup should succeed when completion is recorded before post-signal identity validation would fail." \
-		"$output" "status=0"
-	assertContains "Abort cleanup should still perform refreshed identity validation before noticing the late completion marker." \
-		"$output" "runner_match_calls=2"
-	assertContains "Abort cleanup should unregister jobs whose completion marker appears before the post-signal identity validation failure is surfaced." \
-		"$output" "records=<>"
-	assertContains "Abort cleanup should remove the private control directory when a late completion marker wins over the post-signal identity validation failure." \
-		"$output" "dir_exists=no"
-}
-
-test_abort_background_job_falls_back_to_child_set_when_launch_metadata_is_not_published_yet() {
-	control_dir="$TEST_TMPDIR/background_job_abort_missing_launch"
-	fake_ps="$TEST_TMPDIR/fake_ps_missing_launch.sh"
-	mkdir -p "$control_dir"
-	cat >"$fake_ps" <<'EOF'
-#!/bin/sh
-case "$*" in
-  "-o pid= -o args= -p 6101")
-    printf '%s\n' "6101 /tmp/runner token-read"
-    ;;
-  "-o pid= -o ppid= -o pgid=")
-    printf '%s\n' "6101 900 6101"
-    printf '%s\n' "6102 6101 6102"
-    printf '%s\n' "6103 6102 6102"
-    ;;
-  "-o pgid= -p "*)
-    printf '%s\n' "900"
-    ;;
-esac
-EOF
-	chmod +x "$fake_ps"
-	g_cmd_ps="$fake_ps"
-	zxfer_register_background_job_record "job-read" "send_receive" 6101 "$control_dir" "/tmp/runner" "token-read" "start-read"
-
-	output=$(
-		(
-			zxfer_get_process_start_token() {
-				printf '%s\n' "start-read"
-			}
-			kill() {
-				printf '%s %s\n' "$1" "$2"
-				[ "$2" = "6101" ] && printf '%s\n' "status	143" >"$control_dir/completion.tsv"
-				return 0
-			}
-			zxfer_abort_background_job "job-read" TERM
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Abort cleanup should fall back to the validated child set when launch metadata has not been published yet." \
-		"$output" "-TERM 6101"
-	assertContains "Abort cleanup should still signal direct descendants when launch metadata is not available yet." \
-		"$output" "-TERM 6102"
-	assertContains "Abort cleanup should still signal deeper descendants when launch metadata is not available yet." \
-		"$output" "-TERM 6103"
-	assertContains "Abort cleanup should still complete successfully when launch metadata has not been published yet." \
-		"$output" "status=0"
-}
-
-test_abort_background_job_reports_launch_read_and_child_set_derivation_failures() {
-	read_control_dir="$TEST_TMPDIR/background_job_abort_launch_read_fail"
-	child_set_control_dir="$TEST_TMPDIR/background_job_abort_child_set_fail"
-	mkdir -p "$read_control_dir" "$child_set_control_dir"
-	printf '%s\n' "broken" >"$read_control_dir/launch.tsv"
-	zxfer_register_background_job_record "job-read" "send_receive" 6101 "$read_control_dir" "/tmp/runner" "token-read" "start-read"
-	zxfer_write_background_job_launch_file \
-		"$child_set_control_dir" \
-		"job-child" \
-		"send_receive" \
-		6201 \
-		"/tmp/runner" \
-		"token-child" \
-		6202 \
-		"" \
-		"child_set" \
-		"123"
-	zxfer_register_background_job_record "job-child" "send_receive" 6201 "$child_set_control_dir" "/tmp/runner" "token-child" "start-child"
-
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	read_output=$(
-		(
-			zxfer_read_background_job_launch_file() {
-				return 1
-			}
-			zxfer_abort_background_job "job-read" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-	read_status=$?
-	child_set_output=$(
-		(
-			zxfer_background_job_runner_matches() {
-				return 0
-			}
-			zxfer_read_background_job_process_snapshot() {
-				g_zxfer_background_job_process_snapshot_result="6201 1 6201"
-			}
-			zxfer_get_background_job_pid_set() {
-				return 1
-			}
-			zxfer_abort_background_job "job-child" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-	child_set_status=$?
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
-	fi
-
-	assertEquals "Abort cleanup should fail closed when launch metadata cannot be read for a live tracked job." \
-		0 "$read_status"
-	assertContains "Launch-metadata read failures should preserve the cleanup error." \
-		"$read_output" "status=1"
-	assertContains "Launch-metadata read failures should preserve the dedicated failure message." \
-		"$read_output" "Failed to read launch metadata for background job [job-read]."
-	assertEquals "Abort cleanup should fail closed when child-set derivation fails for a validated live job." \
-		0 "$child_set_status"
-	assertContains "Child-set derivation failures should preserve the cleanup error." \
-		"$child_set_output" "status=1"
-	assertContains "Child-set derivation failures should preserve the dedicated failure message." \
-		"$child_set_output" "Failed to derive the owned child set for background job [job-child] cleanup."
-}
-
-test_abort_background_job_returns_success_for_unknown_jobs() {
+test_abort_unknown_job_returns_success() {
 	zxfer_abort_background_job "job-unknown" TERM
 	status=$?
 
-	assertEquals "Abort cleanup should treat unknown jobs as already finished." \
-		0 "$status"
+	assertEquals "Aborting an unknown job id should be a no-op success." 0 "$status"
+	assertEquals "Aborting an unknown job id should leave no failure message." \
+		"" "${g_zxfer_background_job_abort_failure_message:-}"
 }
 
-test_abort_all_background_jobs_aborts_each_registered_job() {
-	zxfer_register_background_job_record "job-1" "send_receive" 101 "$TEST_TMPDIR/job-1" "/tmp/runner" "token-1" "start-1"
-	zxfer_register_background_job_record "job-2" "source_snapshot_list" 202 "$TEST_TMPDIR/job-2" "/tmp/runner" "token-2" "start-2"
-
+test_abort_completed_job_reaps_and_cleans_up() {
 	output=$(
-		(
-			zxfer_abort_background_job() {
-				printf 'abort:%s:%s\n' "$1" "$2"
-			}
-			zxfer_abort_all_background_jobs
-			printf 'status=%s\n' "$?"
-		)
+		g_zxfer_background_job_abort_grace_seconds=0
+		zxfer_spawn_supervised_background_job \
+			"unit_test" \
+			"exit 0" \
+			"display completed"
+		job_id=$g_zxfer_background_job_last_id
+		status_file=$g_zxfer_background_job_last_status_file
+		# Let the job finish before aborting it.
+		wait_for_nonempty_file "$status_file" || printf 'setup=status-missing\n'
+
+		zxfer_abort_background_job "$job_id" TERM
+		printf 'abort_status=%s\n' "$?"
+		printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
+		if [ -e "$status_file" ]; then
+			printf 'status_file=present\n'
+		else
+			printf 'status_file=removed\n'
+		fi
 	)
 
-	assertContains "Aborting all background jobs should visit the first tracked job id." \
-		"$output" "abort:job-1:TERM"
-	assertContains "Aborting all background jobs should visit later tracked job ids too." \
-		"$output" "abort:job-2:TERM"
-	assertContains "Aborting all background jobs should succeed when each tracked job abort succeeds." \
-		"$output" "status=0"
+	assertContains "Aborting a job that already completed should succeed." \
+		"$output" "abort_status=0"
+	assertContains "Aborting a completed job should clear the registry row." \
+		"$output" "records=<>"
+	assertContains "Aborting a completed job should remove the status file." \
+		"$output" "status_file=removed"
+	assertNotContains "The completed job must have written its status before the abort." \
+		"$output" "setup="
 }
 
-test_abort_all_background_jobs_preserves_abort_failures() {
-	zxfer_register_background_job_record "job-1" "send_receive" 101 "$TEST_TMPDIR/job-1" "/tmp/runner" "token-1" "start-1"
-
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
+test_abort_all_background_jobs_terminates_every_tracked_job() {
 	output=$(
-		(
-			zxfer_abort_background_job() {
-				return 1
-			}
-			zxfer_abort_all_background_jobs
-			printf 'status=%s\n' "$?"
-		)
+		pid_file_one="$TEST_TMPDIR/abort_all_one.pid"
+		pid_file_two="$TEST_TMPDIR/abort_all_two.pid"
+		rm -f "$pid_file_one" "$pid_file_two"
+
+		zxfer_spawn_supervised_background_job \
+			"unit_test" \
+			"sh -c 'echo \$\$ > $pid_file_one; exec sleep 300'" \
+			"display abort-all one"
+		first_status_file=$g_zxfer_background_job_last_status_file
+		zxfer_spawn_supervised_background_job \
+			"unit_test" \
+			"sh -c 'echo \$\$ > $pid_file_two; exec sleep 300'" \
+			"display abort-all two"
+		second_status_file=$g_zxfer_background_job_last_status_file
+
+		wait_for_nonempty_file "$pid_file_one" || printf 'setup=job-one-missing\n'
+		wait_for_nonempty_file "$pid_file_two" || printf 'setup=job-two-missing\n'
+		job_one_pid=$(cat "$pid_file_one" 2>/dev/null)
+		job_two_pid=$(cat "$pid_file_two" 2>/dev/null)
+
+		zxfer_abort_all_background_jobs
+		printf 'abort_all_status=%s\n' "$?"
+		if kill -s 0 "$job_one_pid" 2>/dev/null; then
+			printf 'job_one=alive\n'
+		else
+			printf 'job_one=dead\n'
+		fi
+		if kill -s 0 "$job_two_pid" 2>/dev/null; then
+			printf 'job_two=alive\n'
+		else
+			printf 'job_two=dead\n'
+		fi
+		printf 'records=<%s>\n' "${g_zxfer_background_job_records:-}"
+		if [ -e "$first_status_file" ] || [ -e "$second_status_file" ]; then
+			printf 'status_files=present\n'
+		else
+			printf 'status_files=removed\n'
+		fi
 	)
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
+
+	assertContains "Aborting all jobs should succeed." "$output" "abort_all_status=0"
+	assertContains "Trap-style abort-all should terminate the first tracked job." \
+		"$output" "job_one=dead"
+	assertContains "Trap-style abort-all should terminate the second tracked job." \
+		"$output" "job_two=dead"
+	assertContains "Trap-style abort-all should clear the registry." "$output" "records=<>"
+	assertContains "Trap-style abort-all should remove every status file." \
+		"$output" "status_files=removed"
+	assertNotContains "Both jobs must have started before the abort." "$output" "setup="
+}
+
+test_abort_all_background_jobs_without_tracked_jobs_is_a_noop() {
+	zxfer_abort_all_background_jobs
+	assertEquals "Aborting with an empty registry should succeed." 0 "$?"
+}
+
+test_term_mid_run_teardown_through_wrapper_trap_kills_descendants() {
+	# TERM delivered mid-run to the job shell's wrapper (the trap path the
+	# launcher's own TERM handling relies on) must reap the job's children.
+	output=$(
+		pid_file="$TEST_TMPDIR/term_mid_run.pid"
+		rm -f "$pid_file"
+
+		zxfer_spawn_supervised_background_job \
+			"unit_test" \
+			"sh -c 'echo \$\$ > $pid_file; exec sleep 300'" \
+			"display term mid-run"
+		job_pid=$g_zxfer_background_job_last_runner_pid
+		job_id=$g_zxfer_background_job_last_id
+		status_file=$g_zxfer_background_job_last_status_file
+
+		wait_for_nonempty_file "$pid_file" || printf 'setup=worker-missing\n'
+		worker_pid=$(cat "$pid_file" 2>/dev/null)
+
+		kill -s TERM "$job_pid" 2>/dev/null
+		wait "$job_pid" 2>/dev/null
+		printf 'job_shell_status=%s\n' "$?"
+		tries=0
+		while [ "$tries" -lt 100 ] && kill -s 0 "$worker_pid" 2>/dev/null; do
+			sleep 0.1 2>/dev/null || sleep 1
+			tries=$((tries + 1))
+		done
+		if kill -s 0 "$worker_pid" 2>/dev/null; then
+			printf 'worker=alive\n'
+		else
+			printf 'worker=dead\n'
+		fi
+		zxfer_unregister_background_job_record "$job_id"
+		zxfer_cleanup_runtime_artifact_path "$status_file" >/dev/null 2>&1
+	)
+
+	assertContains "TERM to the wrapper should report the signal exit." \
+		"$output" "job_shell_status=143"
+	assertContains "TERM mid-run must reap the job's descendants through the wrapper trap." \
+		"$output" "worker=dead"
+	assertNotContains "The worker must have started before the TERM." "$output" "setup="
+}
+
+test_spawn_reports_wrapper_lookup_failures() {
+	zxfer_test_capture_subshell '
+		g_zxfer_background_job_use_setsid=0
+		zxfer_get_cleanup_child_wrapper_script_path() {
+			return 1
+		}
+		zxfer_spawn_supervised_background_job "unit_test" "exit 0" "display"
+	'
+
+	assertEquals "Spawn should fail when the fallback wrapper cannot be resolved." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Spawn should report the wrapper lookup failure." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to locate the background job cleanup wrapper."
+}
+
+test_spawn_cleans_up_job_and_status_file_when_registration_fails() {
+	status_file_record="$TEST_TMPDIR/spawn_register_fail.statuspath"
+	rm -f "$status_file_record"
+	zxfer_test_capture_subshell '
+		g_zxfer_background_job_abort_grace_seconds=0
+		zxfer_register_background_job_record() {
+			printf "%s\n" "$5" >"'"$status_file_record"'"
+			return 1
+		}
+		zxfer_spawn_supervised_background_job "unit_test" "sleep 300" "display"
+	'
+	leaked_status_file=$(cat "$status_file_record" 2>/dev/null)
+
+	assertEquals "Spawn should fail when job registration fails." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Spawn should report the registration failure." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to register background job"
+	assertNotNull "The registration stub should have observed a status file path." \
+		"$leaked_status_file"
+	if [ -n "$leaked_status_file" ]; then
+		assertFalse "Spawn should remove the status file when registration fails." \
+			"[ -e \"$leaked_status_file\" ]"
 	fi
-
-	assertContains "Aborting all background jobs should preserve the first cleanup failure." \
-		"$output" "status=1"
 }
 
-test_abort_all_background_jobs_continues_after_failures_and_preserves_first_message() {
-	zxfer_register_background_job_record "job-1" "send_receive" 101 "$TEST_TMPDIR/job-1" "/tmp/runner" "token-1" "start-1"
-	zxfer_register_background_job_record "job-2" "source_snapshot_list" 202 "$TEST_TMPDIR/job-2" "/tmp/runner" "token-2" "start-2"
+test_spawn_reports_status_file_quoting_failures() {
+	zxfer_test_capture_subshell '
+		zxfer_build_shell_command_from_argv() {
+			return 1
+		}
+		zxfer_spawn_supervised_background_job "unit_test" "exit 0" "display"
+	'
 
-	l_restore_errexit=0
-	case $- in
-	*e*)
-		l_restore_errexit=1
-		;;
-	esac
-	set +e
-	output=$(
-		(
-			zxfer_abort_background_job() {
-				printf 'abort:%s:%s\n' "$1" "$2"
-				if [ "$1" = "job-1" ]; then
-					g_zxfer_background_job_abort_failure_message="job-1 failed"
-					return 1
-				fi
-				return 0
-			}
-			zxfer_abort_all_background_jobs
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "${g_zxfer_background_job_abort_failure_message:-}"
-		)
-	)
-	if [ "$l_restore_errexit" -eq 1 ]; then
-		set -e
-	fi
-
-	assertContains "Aborting all background jobs should still attempt later tracked jobs after an earlier failure." \
-		"$output" "abort:job-2:TERM"
-	assertContains "Aborting all background jobs should still return failure when any tracked job abort fails." \
-		"$output" "status=1"
-	assertContains "Aborting all background jobs should preserve the first abort failure message after continuing cleanup." \
-		"$output" "message=job-1 failed"
+	assertEquals "Spawn should fail when the status file path cannot be quoted." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Spawn should report the quoting failure." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "status file path"
 }
 
-test_background_job_abort_completion_races_cover_current_shell_paths() {
-	invalid_runner_control_dir="$TEST_TMPDIR/background_job_cleanup_invalid_runner"
-	second_snapshot_control_dir="$TEST_TMPDIR/background_job_finish_second_snapshot_completion"
-	second_validate_control_dir="$TEST_TMPDIR/background_job_finish_second_validate_completion"
-	second_mismatch_control_dir="$TEST_TMPDIR/background_job_finish_second_mismatch_completion"
-	launch_mismatch_control_dir="$TEST_TMPDIR/background_job_abort_launch_mismatch_completion"
-	mkdir -p \
-		"$invalid_runner_control_dir" \
-		"$second_snapshot_control_dir" \
-		"$second_validate_control_dir" \
-		"$second_mismatch_control_dir" \
-		"$launch_mismatch_control_dir"
-	output_file="$TEST_TMPDIR/background_job_abort_completion_races.log"
-	: >"$output_file"
+test_signal_scope_and_grace_helpers_reject_invalid_inputs() {
+	zxfer_signal_background_job_scope "" process_group TERM
+	empty_status=$?
+	zxfer_signal_background_job_scope "bad" wrapper TERM
+	bad_status=$?
+	g_zxfer_background_job_abort_grace_seconds=0
+	zxfer_background_job_abort_grace_wait
+	grace_zero_status=$?
+	g_zxfer_background_job_abort_grace_seconds=1
 
-	zxfer_register_background_job_record \
-		"job-invalid-runner" "send_receive" 101 \
-		"$invalid_runner_control_dir" "/tmp/runner" "token" "start"
-	zxfer_cleanup_completed_background_job \
-		"job-invalid-runner" "not-a-pid" "$invalid_runner_control_dir"
-	printf 'invalid_runner_cleanup=%s\n' "$?" >>"$output_file"
-	printf 'invalid_runner_records=<%s>\n' "${g_zxfer_background_job_records:-}" >>"$output_file"
+	assertEquals "Signalling an empty pid should be a no-op success." 0 "$empty_status"
+	assertEquals "Signalling a non-numeric pid should be a no-op success." 0 "$bad_status"
+	assertEquals "A zero grace window should return immediately." 0 "$grace_zero_status"
+}
 
-	l_read_calls=0
-	zxfer_read_background_job_process_snapshot() {
-		l_read_calls=$((l_read_calls + 1))
-		if [ "$l_read_calls" -eq 1 ]; then
-			g_zxfer_background_job_process_snapshot_result="7301 1 7301"
-			return 0
-		fi
-		printf '%s\n' "status	0" >"$second_snapshot_control_dir/completion.tsv"
-		return 1
-	}
-	zxfer_background_job_runner_matches() {
-		return 0
-	}
-	zxfer_signal_validated_background_job_scope() {
-		return 0
-	}
-	zxfer_cleanup_completed_background_job() {
-		printf 'completed_second_snapshot:%s:%s\n' "$1" "$2" >>"$output_file"
-		return 0
-	}
-	zxfer_finish_signaled_background_job_abort \
-		"job-finish-second-snapshot-complete" \
-		7301 \
-		"$second_snapshot_control_dir" \
-		"start" \
-		0 \
-		0
-	printf 'second_snapshot_completion_status=%s\n' "$?" >>"$output_file"
+test_reset_background_job_state_preserves_cached_spawn_capability() {
+	g_zxfer_background_job_use_setsid=1
+	g_zxfer_background_job_abort_grace_seconds=0
+	zxfer_reset_background_job_state
 
-	l_match_calls=0
-	zxfer_read_background_job_process_snapshot() {
-		g_zxfer_background_job_process_snapshot_result="7302 1 7302"
-		return 0
-	}
-	zxfer_background_job_runner_matches() {
-		l_match_calls=$((l_match_calls + 1))
-		if [ "$l_match_calls" -eq 1 ]; then
-			return 0
-		fi
-		printf '%s\n' "status	0" >"$second_validate_control_dir/completion.tsv"
-		return 2
-	}
-	zxfer_cleanup_completed_background_job() {
-		printf 'completed_second_validate:%s:%s\n' "$1" "$2" >>"$output_file"
-		return 0
-	}
-	zxfer_finish_signaled_background_job_abort \
-		"job-finish-second-validate-complete" \
-		7302 \
-		"$second_validate_control_dir" \
-		"start" \
-		0 \
-		0
-	printf 'second_validate_completion_status=%s\n' "$?" >>"$output_file"
-
-	l_match_calls=0
-	zxfer_read_background_job_process_snapshot() {
-		g_zxfer_background_job_process_snapshot_result="7303 1 7303"
-		return 0
-	}
-	zxfer_background_job_runner_matches() {
-		l_match_calls=$((l_match_calls + 1))
-		if [ "$l_match_calls" -eq 1 ]; then
-			return 0
-		fi
-		printf '%s\n' "status	0" >"$second_mismatch_control_dir/completion.tsv"
-		return 3
-	}
-	zxfer_cleanup_completed_background_job() {
-		printf 'completed_second_mismatch:%s:%s\n' "$1" "$2" >>"$output_file"
-		return 0
-	}
-	zxfer_finish_signaled_background_job_abort \
-		"job-finish-second-mismatch-complete" \
-		7303 \
-		"$second_mismatch_control_dir" \
-		"start" \
-		0 \
-		0
-	printf 'second_mismatch_completion_status=%s\n' "$?" >>"$output_file"
-
-	{
-		printf '%s\t%s\n' version 1
-		printf '%s\t%s\n' job_id job-launch-mismatch-complete
-		printf '%s\t%s\n' kind send_receive
-		printf '%s\t%s\n' runner_pid 7401
-		printf '%s\t%s\n' runner_script /tmp/runner
-		printf '%s\t%s\n' runner_token wrong-token
-		printf '%s\t%s\n' worker_pid 7402
-		printf '%s\t%s\n' worker_pgid 7402
-		printf '%s\t%s\n' teardown_mode process_group
-		printf '%s\t%s\n' started_epoch 123
-	} >"$launch_mismatch_control_dir/launch.tsv"
-	printf '%s\n' "status	0" >"$launch_mismatch_control_dir/completion.tsv"
-	zxfer_register_background_job_record \
-		"job-launch-mismatch-complete" \
-		"send_receive" \
-		7401 \
-		"$launch_mismatch_control_dir" \
-		"/tmp/runner" \
-		"token-launch-mismatch-complete" \
-		"start-launch-mismatch-complete"
-	zxfer_read_background_job_process_snapshot() {
-		g_zxfer_background_job_process_snapshot_result="7401 1 7401"
-		return 0
-	}
-	zxfer_cleanup_completed_background_job() {
-		printf 'completed_launch_mismatch:%s:%s\n' "$1" "$2" >>"$output_file"
-		return 0
-	}
-	zxfer_abort_background_job "job-launch-mismatch-complete" TERM
-	printf 'launch_mismatch_completion_status=%s\n' "$?" >>"$output_file"
-
-	output=$(cat "$output_file")
-
-	assertContains "Completed-job cleanup should tolerate nonnumeric runner ids." \
-		"$output" "invalid_runner_cleanup=0"
-	assertContains "Completed-job cleanup should unregister nonnumeric runner records." \
-		"$output" "invalid_runner_records=<>"
-	assertContains "Abort finalization should accept completion before a second process-table read failure is surfaced." \
-		"$output" "completed_second_snapshot:job-finish-second-snapshot-complete:7301"
-	assertContains "Abort finalization should return success for late completion before second process-table failure." \
-		"$output" "second_snapshot_completion_status=0"
-	assertContains "Abort finalization should accept completion before a second validation failure is surfaced." \
-		"$output" "completed_second_validate:job-finish-second-validate-complete:7302"
-	assertContains "Abort finalization should return success for late completion before second validation failure." \
-		"$output" "second_validate_completion_status=0"
-	assertContains "Abort finalization should accept completion before a second identity mismatch is surfaced." \
-		"$output" "completed_second_mismatch:job-finish-second-mismatch-complete:7303"
-	assertContains "Abort finalization should return success for late completion before second identity mismatch." \
-		"$output" "second_mismatch_completion_status=0"
-	assertContains "Abort cleanup should treat launch-metadata mismatches with completion as finished jobs." \
-		"$output" "completed_launch_mismatch:job-launch-mismatch-complete:7401"
-	assertContains "Abort cleanup should return success for launch-metadata mismatches with completion." \
-		"$output" "launch_mismatch_completion_status=0"
+	assertEquals "Resets should preserve the cached setsid capability flag." \
+		1 "$g_zxfer_background_job_use_setsid"
+	assertEquals "Resets should preserve the configured abort grace window." \
+		0 "$g_zxfer_background_job_abort_grace_seconds"
+	assertEquals "Resets should clear the registry." "" "$g_zxfer_background_job_records"
+	assertEquals "Resets should clear the wait scratch." "" "$g_zxfer_background_job_wait_exit_status"
+	g_zxfer_background_job_abort_grace_seconds=1
 }
 
 # shellcheck source=tests/shunit2/shunit2

@@ -36,7 +36,9 @@
 ################################################################################
 
 # Module contract:
-# owns globals: current-dataset delete/rollback scratch state such as g_last_common_snap.
+# owns globals: current-dataset delete/rollback scratch state such as g_last_common_snap,
+# plus the divergence-contract state (g_zxfer_diverged_snapshot_count,
+# g_zxfer_diverged_snapshot_examples, g_zxfer_diverged_converged_datasets).
 # reads globals: g_actual_dest, delete scratch temp files, and current dataset context.
 # mutates caches: none; updates current delete/rollback state for replication.
 # returns via stdout: last-common snapshot values, delete lists, and filtered snapshot identities.
@@ -52,6 +54,14 @@ zxfer_reset_snapshot_reconcile_state() {
 	g_deleted_dest_newer_snapshots=0
 	g_src_snapshot_transfer_list=""
 	g_zxfer_snapshot_record_capture_result=""
+	# Per-dataset divergence scratch (also reset per dataset by
+	# zxfer_record_diverged_destination_snapshots) and the run-level
+	# "diverged and converged this run" marker list consumed by the
+	# post-receive verification.
+	g_zxfer_diverged_snapshot_count=0
+	g_zxfer_diverged_snapshot_examples=""
+	g_zxfer_diverged_converged_datasets=""
+	g_zxfer_diverged_converged_marker_source=""
 	zxfer_reset_destination_snapshot_creation_cache
 }
 
@@ -633,6 +643,10 @@ zxfer_delete_snaps() {
 	zxfer_echoV "Begin zxfer_delete_snaps()"
 	l_zfs_source_snaps=$1
 	l_zfs_dest_snaps=$2
+	# Optional: the source dataset backing $1. When provided, an empty source
+	# snapshot list is re-verified live before the planned deletion removes
+	# every destination snapshot for the dataset.
+	l_delete_source_dataset=${3:-}
 
 	if l_snaps_to_delete=$(zxfer_get_dest_snapshots_to_delete_per_dataset "$l_zfs_source_snaps" "$l_zfs_dest_snaps"); then
 		:
@@ -645,6 +659,44 @@ zxfer_delete_snaps() {
 	if [ "$l_snaps_to_delete" = "" ]; then
 		zxfer_echoV "No snapshots to delete."
 		return
+	fi
+
+	# An empty source snapshot list plans the deletion of EVERY destination
+	# snapshot for this dataset. A truly snapshot-less source is legitimate,
+	# but an incomplete cached source listing must never be allowed to wipe
+	# the destination's history, so re-verify the source live (one round-trip,
+	# only in this suspicious case) and fail closed when the probe errors.
+	if [ -n "$l_delete_source_dataset" ]; then
+		case ${l_zfs_source_snaps:-} in
+		*[![:space:]]*) ;;
+		*)
+			l_live_source_status=0
+			l_live_source_snaps=$(zxfer_run_source_zfs_cmd list -H -d 1 -o name -t snapshot "$l_delete_source_dataset" 2>&1) ||
+				l_live_source_status=$?
+			if [ "$l_live_source_status" -ne 0 ]; then
+				zxfer_throw_error "Failed to re-verify source snapshots for [$l_delete_source_dataset] before deleting all destination snapshots: $l_live_source_snaps" "$l_live_source_status"
+			fi
+			# The capture merges stderr so probe failures can report transport
+			# errors, but the snapshot-presence decision must only count real
+			# snapshot lines: over ssh, benign stderr (host-key notices, locale
+			# warnings, -V command echoes) lands in the same capture and must
+			# not make a genuinely empty source look populated.
+			l_live_source_has_snapshots=0
+			while IFS= read -r l_live_source_line; do
+				case $l_live_source_line in
+				"$l_delete_source_dataset@"*)
+					l_live_source_has_snapshots=1
+					;;
+				esac
+			done <<-EOF
+				$l_live_source_snaps
+			EOF
+			if [ "$l_live_source_has_snapshots" -eq 1 ]; then
+				zxfer_warn_stderr "WARNING: skipping destination snapshot deletion for [$l_delete_source_dataset]: the plan would delete every destination snapshot, but a live source re-check still shows snapshots. The cached source listing was likely incomplete."
+				return 0
+			fi
+			;;
+		esac
 	fi
 
 	zxfer_reset_destination_snapshot_creation_cache
@@ -696,9 +748,8 @@ zxfer_delete_snaps() {
 
 	# build the destroy command
 	l_destroy_target="$l_zfs_dest_dataset@$l_unprotected_snaps_to_delete"
-	l_cmd=$(zxfer_render_destination_zfs_command destroy "$l_destroy_target")
 	if [ "$g_option_n_dryrun" -eq 1 ]; then
-		zxfer_echov "Dry run: $l_cmd"
+		zxfer_echov "Dry run: $(zxfer_render_destination_zfs_command destroy "$l_destroy_target")"
 		return
 	fi
 
@@ -708,7 +759,14 @@ zxfer_delete_snaps() {
 	if [ "$l_destroy_status" -ne 0 ]; then
 		zxfer_throw_error "Error when executing command." "$l_destroy_status"
 	fi
-	zxfer_invalidate_destination_snapshot_record_cache
+	# The destroy mutated this run's destination: stale batched live views
+	# must be refreshed before the next recheck-driven decision.
+	zxfer_bump_destination_mutation_generation
+	# Do not wipe the whole-tree destination snapshot record cache here: the
+	# destroy only removed this dataset's own snapshots, the copy planning that
+	# follows re-probes the destination live, and the wipe also cleared the
+	# in-memory fallback list so -d delete planning for every later dataset saw
+	# an empty destination and silently skipped its deletions.
 
 	# set the flag to indicate that a destroy command was sent
 	# shellcheck disable=SC2034
@@ -755,6 +813,283 @@ $g_src_snapshot_transfer_list"
 	EOF
 }
 
+# Purpose: Scan one dataset's source and destination snapshot record lists in
+# a single awk pass for shared snapshot names and guid divergence.
+# Usage: Called during delete planning and post-receive verification. Prints
+# one "name<TAB>source_guid<TAB>destination_guid" line per destination
+# snapshot whose name exists on the source with a DIFFERENT guid (diverged
+# data under an identical name). Returns 0 when at least one snapshot name is
+# shared between the two lists, 1 otherwise, so zxfer_inspect_delete_snap can
+# reuse this one pass as its shared-name gate without spawning a second awk
+# on in-sync planning paths. Records lacking guids cannot be classified and
+# never produce divergence lines.
+zxfer_scan_snapshot_record_lists_for_divergence() {
+	l_scan_source_records=$1
+	l_scan_dest_records=$2
+	l_section_break="@@ZXFER_DIVERGENCE_SET_BREAK@@"
+	l_divergence_scan_awk=$(
+		cat <<'EOF'
+BEGIN {
+	in_source = 0
+	shared = 0
+}
+$0 == section_break {
+	in_source = 1
+	next
+}
+!in_source {
+	if ($0 != "") {
+		record = $0
+		tab_pos = index(record, "\t")
+		snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record)
+		snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : "")
+		at_pos = index(snapshot_path, "@")
+		if (at_pos > 0)
+			dest_guids[substr(snapshot_path, at_pos + 1)] = snapshot_guid
+	}
+	next
+}
+$0 != "" {
+	record = $0
+	tab_pos = index(record, "\t")
+	snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record)
+	snapshot_guid = (tab_pos > 0 ? substr(record, tab_pos + 1) : "")
+	at_pos = index(snapshot_path, "@")
+	if (at_pos <= 0)
+		next
+	snapshot_name = substr(snapshot_path, at_pos + 1)
+	if (!(snapshot_name in dest_guids))
+		next
+	shared = 1
+	dest_guid = dest_guids[snapshot_name]
+	if (snapshot_guid != "" && dest_guid != "" && snapshot_guid != dest_guid)
+		printf "%s\t%s\t%s\n", snapshot_name, snapshot_guid, dest_guid
+}
+END { exit(shared ? 0 : 1) }
+EOF
+	)
+
+	{
+		zxfer_normalize_snapshot_record_list "$l_scan_dest_records"
+		printf '%s\n' "$l_section_break"
+		zxfer_normalize_snapshot_record_list "$l_scan_source_records"
+	} | "${g_cmd_awk:-awk}" -v section_break="$l_section_break" "$l_divergence_scan_awk"
+}
+
+# Purpose: Record the current dataset's diverged destination snapshots into
+# the per-dataset divergence scratch globals.
+# Usage: Called by zxfer_inspect_delete_snap with the divergence-scan output
+# before the divergence contract is enforced. Resets and repopulates
+# g_zxfer_diverged_snapshot_count and g_zxfer_diverged_snapshot_examples (up
+# to three "name<TAB>source_guid<TAB>destination_guid" example lines).
+zxfer_record_diverged_destination_snapshots() {
+	l_diverged_records=$1
+
+	g_zxfer_diverged_snapshot_count=0
+	g_zxfer_diverged_snapshot_examples=""
+	[ -n "$l_diverged_records" ] || return 0
+
+	while IFS= read -r l_diverged_record; do
+		[ -n "$l_diverged_record" ] || continue
+		g_zxfer_diverged_snapshot_count=$((g_zxfer_diverged_snapshot_count + 1))
+		[ "$g_zxfer_diverged_snapshot_count" -le 3 ] || continue
+		if [ -n "$g_zxfer_diverged_snapshot_examples" ]; then
+			g_zxfer_diverged_snapshot_examples="$g_zxfer_diverged_snapshot_examples
+$l_diverged_record"
+		else
+			g_zxfer_diverged_snapshot_examples=$l_diverged_record
+		fi
+	done <<-EOF
+		$l_diverged_records
+	EOF
+
+	return 0
+}
+
+# Purpose: Find the "diverged and converged this run" marker for a destination
+# dataset.
+# Usage: Called by the divergence contract gate (to deduplicate warnings when
+# planning inspects a dataset more than once per run) and by the post-receive
+# verification. Publishes the marker's source dataset in
+# g_zxfer_diverged_converged_marker_source and returns 0 on a hit, 1 on a miss.
+zxfer_find_diverged_converged_marker() {
+	l_marker_dest=$1
+
+	g_zxfer_diverged_converged_marker_source=""
+	[ -n "${g_zxfer_diverged_converged_datasets:-}" ] || return 1
+
+	while IFS='	' read -r l_marker_record_dest l_marker_record_source; do
+		[ -n "$l_marker_record_dest" ] || continue
+		if [ "$l_marker_record_dest" = "$l_marker_dest" ]; then
+			g_zxfer_diverged_converged_marker_source=$l_marker_record_source
+			return 0
+		fi
+	done <<-EOF
+		$g_zxfer_diverged_converged_datasets
+	EOF
+
+	return 1
+}
+
+# Purpose: Drop one destination dataset from the "diverged and converged this
+# run" marker list.
+# Usage: Called by the post-receive verification after the live destination
+# view confirms the dataset no longer carries name-match/guid-mismatch
+# snapshots.
+zxfer_unmark_diverged_converged_dataset() {
+	l_unmark_dest=$1
+	l_remaining_markers=""
+
+	while IFS='	' read -r l_marker_record_dest l_marker_record_source; do
+		[ -n "$l_marker_record_dest" ] || continue
+		[ "$l_marker_record_dest" = "$l_unmark_dest" ] && continue
+		if [ -n "$l_remaining_markers" ]; then
+			l_remaining_markers="$l_remaining_markers
+$l_marker_record_dest	$l_marker_record_source"
+		else
+			l_remaining_markers="$l_marker_record_dest	$l_marker_record_source"
+		fi
+	done <<-EOF
+		${g_zxfer_diverged_converged_datasets:-}
+	EOF
+
+	g_zxfer_diverged_converged_datasets=$l_remaining_markers
+	return 0
+}
+
+# Purpose: Render the recorded divergence examples as operator-facing lines
+# naming the destination snapshot and both guids.
+# Usage: Called while building the divergence warning and the fail-closed
+# divergence error so both surfaces show identical evidence.
+zxfer_render_diverged_snapshot_example_lines() {
+	l_example_dest_dataset=$1
+	l_example_lines=""
+
+	while IFS='	' read -r l_example_name l_example_src_guid l_example_dst_guid; do
+		[ -n "$l_example_name" ] || continue
+		l_example_line="  $l_example_dest_dataset@$l_example_name: source guid $l_example_src_guid vs destination guid $l_example_dst_guid"
+		if [ -n "$l_example_lines" ]; then
+			l_example_lines="$l_example_lines
+$l_example_line"
+		else
+			l_example_lines=$l_example_line
+		fi
+	done <<-EOF
+		${g_zxfer_diverged_snapshot_examples:-}
+	EOF
+
+	printf '%s\n' "$l_example_lines"
+}
+
+# Purpose: Enforce the destination divergence contract for the current dataset
+# before any delete, rollback, or send is planned for it.
+# Usage: Called by zxfer_inspect_delete_snap after the last common snapshot is
+# known and before zxfer_delete_snaps can mutate the destination. Emits the
+# per-dataset -V transparency line for every dataset. When name-match/guid-
+# mismatch snapshots were recorded: with BOTH -d and -F active it prints the
+# always-on convergence warning (stderr, not gated on -v/-V) and marks the
+# dataset for post-receive verification; otherwise it fails closed via
+# zxfer_throw_error so zero actions are taken for the diverged dataset.
+zxfer_enforce_destination_divergence_contract() {
+	l_divergence_source=$1
+
+	zxfer_echoV "Last common snapshot: ${g_last_common_snap:-none}; diverged destination snapshots: ${g_zxfer_diverged_snapshot_count:-0}."
+
+	[ "${g_zxfer_diverged_snapshot_count:-0}" -gt 0 ] || return 0
+	# Planning can inspect the same dataset more than once per run (the -g
+	# grandfather pre-pass runs zxfer_inspect_delete_snap before the main
+	# pass); warn and count each diverged dataset only once.
+	if zxfer_find_diverged_converged_marker "$g_actual_dest"; then
+		return 0
+	fi
+
+	zxfer_profile_increment_counter g_zxfer_profile_diverged_snapshot_warnings
+	l_diverged_example_lines=$(zxfer_render_diverged_snapshot_example_lines "$g_actual_dest")
+
+	if [ "${g_option_d_delete_destination_snapshots:-0}" -eq 1 ] &&
+		[ "${g_option_F_force_rollback:-}" != "" ]; then
+		zxfer_warn_stderr "WARNING: destination dataset [$g_actual_dest] has ${g_zxfer_diverged_snapshot_count} snapshot(s) whose names match source dataset [$l_divergence_source] but whose guids differ (the destination diverged under identical snapshot names), e.g.:
+$l_diverged_example_lines
+-d and -F are active; converging: destroy + rollback + resend (destroy the diverged destination snapshots, roll back to the last guid-matching common snapshot, and resend the source range over them)."
+		if [ -n "${g_zxfer_diverged_converged_datasets:-}" ]; then
+			g_zxfer_diverged_converged_datasets="$g_zxfer_diverged_converged_datasets
+$g_actual_dest	$l_divergence_source"
+		else
+			g_zxfer_diverged_converged_datasets="$g_actual_dest	$l_divergence_source"
+		fi
+		return 0
+	fi
+
+	zxfer_set_failure_stage "divergence reconciliation"
+	zxfer_throw_error "Destination dataset [$g_actual_dest] has diverged from source dataset [$l_divergence_source]: ${g_zxfer_diverged_snapshot_count} destination snapshot(s) share a source snapshot name but carry different guids, e.g.:
+$l_diverged_example_lines
+No deletes or sends were planned for this dataset. Re-run with BOTH -d and -F to converge destructively (destroy the diverged destination snapshots, roll back to the last guid-matching common snapshot, and resend), or reconcile the destination manually."
+}
+
+# Purpose: Verify that a destination dataset converged this run no longer
+# carries name-match/guid-mismatch snapshots after its receive completed.
+# Usage: Called from the receive finalize choke points (foreground completion
+# in zxfer_zfs_send_receive and -j reap-time finalize) with the received
+# destination dataset. The receive already bumped the destination mutation
+# generation, so the batched live view re-captures a fresh listing here. Any
+# remaining divergence is a structured failure: silent re-divergence loops
+# become a precise error naming the snapshot. No-ops for datasets that were
+# never marked, so in-sync runs pay one string test.
+zxfer_verify_converged_destination_after_receive() {
+	l_verify_dest=$1
+
+	[ -n "${g_zxfer_diverged_converged_datasets:-}" ] || return 0
+	if ! zxfer_find_diverged_converged_marker "$l_verify_dest"; then
+		return 0
+	fi
+	l_verify_source=$g_zxfer_diverged_converged_marker_source
+
+	l_verify_records_status=0
+	zxfer_capture_snapshot_records_for_dataset source "$l_verify_source" ||
+		l_verify_records_status=$?
+	if [ "$l_verify_records_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to retrieve source snapshot records for [$l_verify_source] during post-receive divergence verification." "$l_verify_records_status"
+	fi
+	l_verify_source_snaps=$g_zxfer_snapshot_record_capture_result
+	if [ -n "$l_verify_source_snaps" ] &&
+		! zxfer_snapshot_record_list_contains_guid "$l_verify_source_snaps"; then
+		l_verify_identity_status=0
+		l_verify_source_snaps=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_verify_source" "$l_verify_source_snaps") ||
+			l_verify_identity_status=$?
+		if [ "$l_verify_identity_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_verify_source] during post-receive divergence verification." "$l_verify_identity_status"
+		fi
+	fi
+
+	# The live destination view helpers key on g_actual_dest; at -j reap time
+	# the current dataset context may belong to another dataset, so swap it in
+	# only for the captured recheck and restore it before any other decision.
+	l_verify_saved_actual_dest=${g_actual_dest:-}
+	g_actual_dest=$l_verify_dest
+	zxfer_ensure_live_destination_snapshot_view
+	l_verify_dest_status=0
+	l_verify_dest_snaps=$(zxfer_get_live_destination_snapshots 2>&1) ||
+		l_verify_dest_status=$?
+	g_actual_dest=$l_verify_saved_actual_dest
+	if [ "$l_verify_dest_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to retrieve live destination snapshots for [$l_verify_dest] during post-receive divergence verification: $l_verify_dest_snaps"
+	fi
+
+	l_verify_diverged_records=$(zxfer_scan_snapshot_record_lists_for_divergence \
+		"$l_verify_source_snaps" "$l_verify_dest_snaps") || :
+	if [ -n "$l_verify_diverged_records" ]; then
+		zxfer_record_diverged_destination_snapshots "$l_verify_diverged_records"
+		l_verify_example_lines=$(zxfer_render_diverged_snapshot_example_lines "$l_verify_dest")
+		zxfer_set_failure_stage "post-receive divergence verification"
+		zxfer_throw_error "Destination dataset [$l_verify_dest] re-diverged after convergence: ${g_zxfer_diverged_snapshot_count} destination snapshot(s) still share a source snapshot name from [$l_verify_source] with a different guid, e.g.:
+$l_verify_example_lines
+An external writer is modifying the destination while zxfer converges it; stop that writer (or exclude this dataset) and re-run zxfer."
+	fi
+
+	zxfer_unmark_diverged_converged_dataset "$l_verify_dest"
+	return 0
+}
+
 # Purpose: Inspect the delete snap before later delete or rollback decisions.
 # Usage: Called during last-common-snapshot selection and delete planning when
 # zxfer needs one focused probe before it mutates live state.
@@ -795,7 +1130,14 @@ zxfer_inspect_delete_snap() {
 		g_dest_has_snapshots=0
 	fi
 
-	if zxfer_snapshot_record_lists_share_snapshot_name "$l_zfs_source_snaps" "$l_zfs_dest_snaps"; then
+	# One awk pass doubles as the shared-snapshot-name gate and the
+	# name-match/guid-mismatch divergence classifier, so in-sync planning
+	# paths spawn exactly what the old shared-name check spawned.
+	l_shared_snapshot_names_status=0
+	l_diverged_snapshot_records=$(zxfer_scan_snapshot_record_lists_for_divergence \
+		"$l_zfs_source_snaps" "$l_zfs_dest_snaps") || l_shared_snapshot_names_status=$?
+	if [ "$l_shared_snapshot_names_status" -eq 0 ]; then
+		l_identity_lists_refetched=0
 		if ! zxfer_snapshot_record_list_contains_guid "$l_zfs_source_snaps"; then
 			l_identity_source_status=0
 			l_identity_source_snaps=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_source" "$l_zfs_source_snaps") ||
@@ -803,6 +1145,7 @@ zxfer_inspect_delete_snap() {
 			if [ "$l_identity_source_status" -ne 0 ]; then
 				zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_source]." "$l_identity_source_status"
 			fi
+			l_identity_lists_refetched=1
 		fi
 
 		if ! zxfer_snapshot_record_list_contains_guid "$l_zfs_dest_snaps"; then
@@ -812,8 +1155,18 @@ zxfer_inspect_delete_snap() {
 			if [ "$l_identity_dest_status" -ne 0 ]; then
 				zxfer_throw_error "Failed to retrieve destination snapshot identities for [$g_actual_dest]." "$l_identity_dest_status"
 			fi
+			l_identity_lists_refetched=1
+		fi
+
+		# Guid-less raw records cannot be classified; once identities exist,
+		# classify the dataset on the refetched lists (rare path: it already
+		# paid for live identity listings).
+		if [ "$l_identity_lists_refetched" -eq 1 ]; then
+			l_diverged_snapshot_records=$(zxfer_scan_snapshot_record_lists_for_divergence \
+				"$l_identity_source_snaps" "$l_identity_dest_snaps") || :
 		fi
 	fi
+	zxfer_record_diverged_destination_snapshots "$l_diverged_snapshot_records"
 
 	# Find the most recent common snapshot on source and destination.
 	l_last_common_status=0
@@ -823,9 +1176,14 @@ zxfer_inspect_delete_snap() {
 		zxfer_throw_error "Failed to determine the last common snapshot for [$l_source] and [$g_actual_dest]." "$l_last_common_status"
 	fi
 
+	# Enforce the divergence contract BEFORE any destructive planning: with
+	# both -d and -F this warns and proceeds (converge); otherwise it fails
+	# closed with zero actions for the diverged dataset.
+	zxfer_enforce_destination_divergence_contract "$l_source"
+
 	# Deletes non-common snaps on destination if asked to.
 	if [ "$l_is_delete_snap" -eq 1 ]; then
-		zxfer_delete_snaps "$l_identity_source_snaps" "$l_identity_dest_snaps"
+		zxfer_delete_snaps "$l_identity_source_snaps" "$l_identity_dest_snaps" "$l_source"
 	fi
 
 	# Create a list of source snapshots to transfer, beginning with the

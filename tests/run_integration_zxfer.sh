@@ -2909,7 +2909,7 @@ missing_destination_error_test() {
 	if [ "$status" -ne 1 ]; then
 		fail "Missing destination list should preserve the destination lookup status 1, got $status. Output: $output"
 	fi
-	if ! printf '%s\n' "$output" | grep -F "Failed to retrieve list of datasets from the destination" >/dev/null 2>&1; then
+	if ! printf '%s\n' "$output" | grep -F "Destination dataset [nosuchdestpool/target] is missing and destination pool [nosuchdestpool] could not be listed" >/dev/null 2>&1; then
 		fail "Missing destination error message missing. Output: $output"
 	fi
 
@@ -4910,7 +4910,6 @@ trap_exit_cleanup_test() {
 	send_marker="$WORKDIR/mock_trap_exit_send_started"
 	send_shell_pid_file="$WORKDIR/mock_trap_exit_send_shell.pid"
 	send_sleep_pid_file="$WORKDIR/mock_trap_exit_send_sleep.pid"
-	runner_script=$(pwd)/src/zxfer_background_job_runner.sh
 	list_src_dataset="$SRC_POOL/trap_list_src"
 	list_dest_root="$DEST_POOL/trap_list_dest"
 	send_src_dataset="$SRC_POOL/trap_send_src"
@@ -5012,9 +5011,6 @@ EOF
 	if pgrep -f "$mock_path/zfs list .*${list_src_dataset}" >/dev/null 2>&1; then
 		fail "Background zfs list still running after zxfer_trap_exit handling."
 	fi
-	if pgrep -f "$runner_script" >/dev/null 2>&1; then
-		fail "Background job runner still running after snapshot discovery trap cleanup."
-	fi
 
 	set +e
 	ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -T localhost -R "$send_src_dataset" "$send_dest_root" >/dev/null 2>&1 &
@@ -5074,9 +5070,6 @@ EOF
 	fi
 	if pgrep -f "$mock_path/zfs send .*${send_src_dataset}" >/dev/null 2>&1; then
 		fail "Background zfs send still running after zxfer_trap_exit handling."
-	fi
-	if pgrep -f "$runner_script" >/dev/null 2>&1; then
-		fail "Background job runner still running after send trap cleanup."
 	fi
 
 	safe_rm_f \

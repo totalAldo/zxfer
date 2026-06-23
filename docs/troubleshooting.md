@@ -87,6 +87,63 @@ What to inspect:
 - temp-root permissions if the failure points at launching the background
   helper or registering the cleanup PID rather than the `zfs list` itself
 
+## Destination Divergence Warnings And Failures
+
+Example:
+
+```text
+WARNING: destination dataset [backup/pool/data] has 2 snapshot(s) whose names
+match source dataset [pool/data] but whose guids differ ...
+```
+
+or, without both `-d` and `-F`:
+
+```text
+Destination dataset [backup/pool/data] has diverged from source dataset
+[pool/data]: ... Re-run with BOTH -d and -F to converge destructively ...
+```
+
+What it usually means:
+
+- the destination dataset received writes outside this replication chain
+  (another tool, another zxfer invocation against a different source, or a
+  manual `zfs receive`/`zfs rollback`) and then re-created snapshots whose
+  NAMES match the source while their data (GUIDs) differ
+- a snapshot-management tool on the destination is regenerating snapshots
+  under the same naming scheme as the source
+- the source was rolled back or rebuilt after the destination had already
+  received the original snapshots
+
+Step 0 — confirm the divergence yourself before authorizing destruction.
+Compare both sides' GUIDs for the named dataset (run the second command on
+the destination host when replicating remotely):
+
+```sh
+zfs list -H -d 1 -o name,guid -s creation -t snapshot pool/data
+zfs list -H -d 1 -o name,guid -s creation -t snapshot backup/pool/data
+```
+
+Same snapshot name with a different GUID on the two sides is exactly what the
+warning is reporting. The newest name with a MATCHING GUID is the last common
+snapshot zxfer will keep and roll back to.
+
+What to do:
+
+- if the destination copies of the diverged snapshots are disposable, re-run
+  with BOTH `-d` and `-F`: zxfer destroys the diverged destination snapshots,
+  rolls back to the last GUID-matching common snapshot, and resends the
+  source range over them (this is destructive on the destination side)
+- if the destination data must be preserved, reconcile manually first: rename
+  the diverged destination snapshots out of the way, `zfs clone` what you
+  need to keep, or replicate the destination dataset elsewhere, then re-run
+- if a run with `-d -F` fails with `re-diverged after convergence`, an
+  external writer is re-creating diverged snapshots while zxfer converges the
+  dataset; stop that writer (look for snapshot tools or other replication
+  jobs on the destination host) before re-running
+- with `-V`, planning prints `Last common snapshot: ...; diverged destination
+  snapshots: N.` per planned dataset and the profile summary reports
+  `diverged_snapshot_warnings` so unattended runs can be audited
+
 ## Background Completion Failures
 
 Examples:
@@ -99,15 +156,12 @@ Failed to report zfs send/receive background completion for [tank/src@snap2 -> b
 
 What it usually means:
 
-- the long-lived background worker finished, but the supervisor could not write
-  or reload `completion.tsv`
+- the background job shell finished, but its per-job status file could not be
+  written or reloaded (a missing or malformed status file at wait time means
+  the job shell died before recording its status)
 - the completion queue notification could not be published back to the parent
   process
-- the runtime temp root or the per-job control directory became unreadable,
-  unwritable, or was removed mid-run
-- a true cleanup failure usually means zxfer still saw a live owned runner
-  after refreshing the process snapshot; completed jobs and runners that exit
-  during the teardown-signal race are now treated as already finished instead
+- the runtime temp root became unreadable, unwritable, or was removed mid-run
 
 What to inspect:
 
@@ -117,13 +171,8 @@ What to inspect:
   stderr, because later `zstd: unexpected end of file` or `cannot receive:
   failed to read from stream` messages are often collateral after zxfer aborts
   sibling background jobs on the first real failure
-- whether the corresponding supervisor control directory still contains
-  `launch.tsv` and `completion.tsv`
 - whether the failure is isolated to queue publication (`publish`) or
-  completion-file persistence/readback (`read` / `report`)
-- if `completion.tsv` is already present, treat later process-table read
-  failures during trap cleanup as collateral and focus on the earlier
-  dataset-specific failure instead
+  status-file persistence/readback (`read` / `report`)
 
 ## Performance Harness Results
 
@@ -215,13 +264,13 @@ append cannot release that lock cleanly, the append helper now fails closed and
 emits a warning; trap-time failure reporting still preserves the original zxfer
 exit status while surfacing the warning on `stderr`.
 
-The same owned-directory format now also backs shared ssh control-socket locks
-and leases plus remote capability-cache locks under the validated temp root.
-If you inspect temp roots while debugging startup or cleanup, expect `.lock`
-paths and `leases/lease.*` entries to be directories with metadata files, not
-bare pid files. Older plain ssh lease files and pid-only lock directories from
-pre-metadata releases are unsupported; remove the stale entry or cache root if
-zxfer reuses one during a rollout.
+Current ssh control sockets and remote capability state are per-run instead of
+shared. If you inspect a live run's temp root while debugging startup or
+cleanup, expect at most short `ssh-<role>.sock` control sockets owned by that
+invocation; remote helper capabilities are held in memory and have no cache or
+lock files. Older shared ssh lease directories, pid-only socket locks, and
+remote capability-cache lock roots from pre-per-run branch builds are stale
+artifacts rather than current zxfer state.
 
 By default that block redacts `invocation` and `last_command` as `[redacted]`,
 so routine failure logs do not capture raw command lines. If you explicitly

@@ -47,11 +47,20 @@ Run the pinned local lint stack:
 ./tests/run_lint.sh
 ```
 
+The lint stack includes the anti-rebloat budget gate
+(`./tests/run_lint.sh budget`), which checks the working tree against the
+ratchet-down-only size and caller budgets in `tests/budget_policy.tsv`.
+Lowering a budget is routine maintenance; raising any value requires explicit
+justification in the PR that edits it. Use
+`./tests/run_budget_check.sh --list` to print current measured values in
+policy format when ratcheting budgets down.
+
 If you prefer a prebuilt contributor environment, open the repository in the
 included `.devcontainer/` from GitHub Codespaces or VS Code. It preinstalls
-the Ubuntu 24.04 multi-shell, lint, and `kcov` tooling used for local lint,
-shunit2, and coverage work, but it does not replace a ZFS-capable host or
-disposable VM or QEMU-capable host for the integration runners.
+the same pinned multi-shell, lint, and `kcov` tooling used for local lint,
+shunit2, and coverage work on its Ubuntu 24.04 base, but it does not replace
+a ZFS-capable host, disposable VM, or QEMU-capable host for the integration
+runners.
 
 Run targeted suites when editing a specific area:
 
@@ -153,7 +162,7 @@ Good pull requests explain:
 
 GitHub Actions also runs an Ubuntu portable-shell matrix for `dash`,
 `bash --posix`, and `busybox ash` on every push, plus a non-blocking `posh`
-lane on pushes to `main`, and a separate Docker-backed `kcov` coverage
-artifact job. Local development does not require `kcov`, but shell-
+lane on pushes to `main`, and a separate non-blocking Docker-backed `kcov`
+coverage artifact job. Local development does not require `kcov`, but shell-
 portability-sensitive changes should mention whether those CI lanes were
 considered.

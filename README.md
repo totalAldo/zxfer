@@ -77,7 +77,8 @@ Use remote compression:
 - Local and remote replication with `-O` and `-T`
 - Wrapper-style remote host specs such as `user@host pfexec` or `user@host doas`
 - Concurrent send/receive jobs with explicit per-dataset source discovery and
-  supervised long-lived cleanup via `-j`
+  supervision-lite job teardown (process-group signaling plus per-job status
+  files) via `-j`
 - Property replication, overrides, and unsupported-property skipping for the
   current OpenZFS 2.0+ support floor
 - Property backup and restore with `-k` and `-e`, using hardened metadata
@@ -89,28 +90,41 @@ Use remote compression:
 - Structured stderr failure reports with default command-field redaction,
   optional `ZXFER_ERROR_LOG` mirroring, and an explicit
   `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1` local-debug override
-- Metadata-bearing lock and lease coordination for ssh control sockets, remote
-  capability caches, and `ZXFER_ERROR_LOG` appends, with validated stale-owner
-  reaping and checked release semantics
+- Per-run ssh control sockets and one in-memory remote capability probe per
+  host per run; all run-private temp state lives under one 0700 per-run temp
+  root removed in one pass at exit. The only cross-process lock left is the
+  `ZXFER_ERROR_LOG` append lock (slim pid+start-token metadata, validated
+  stale-owner reaping, checked release)
+- Identity-aware recursive snapshot discovery with `name,guid` records, plus a
+  fast clean-no-op proof for eligible recursive runs — local sources and
+  remote-origin pulls alike
+- Batched remote-target destination discovery for `-T`, so destination dataset
+  inventory, missing-root pool probing, and destination snapshot listing share
+  one target-side ssh shell invocation
 
 ## Useful Options
 
 - `-j jobs`: run concurrent send/receive jobs; when `jobs > 1`, zxfer uses
   explicit per-dataset source discovery instead of the serial recursive
-  listing. Source discovery runs as a tracked background helper with staged
-  stderr and registered PID cleanup, while long-lived send/receive workers run
-  under a shared supervisor that records launch/completion metadata and aborts
-  through validated process-group or owned-child-set cleanup instead of
-  signaling a bare wrapper PID. zxfer also serializes conflicting ancestor/descendant
-  destination receives on the same target, even when spare job slots remain,
-  so parent and child datasets do not receive concurrently. Local-origin and
+  listing (the clean no-op proof still runs one serial recursive stream
+  first). Source discovery runs as a tracked background helper with staged
+  stderr and PID cleanup, while send/receive workers run supervision-lite:
+  each job is one backgrounded job shell that writes its own status file,
+  and aborts signal the job's setsid process group (or its tracked child
+  set) instead of a bare wrapper PID. zxfer also serializes conflicting ancestor/descendant
+  destination receives on the same target so parent and child datasets do not
+  receive concurrently, and its ready queue skips blocked descendants to start
+  later independent datasets while job slots remain. Local-origin and
   remote-origin runs require a resolved `parallel` helper on the executing
   origin host; zxfer intentionally checks only that the helper exists through
   the secure-PATH model, so operators and packages must provide an
   implementation compatible with the GNU Parallel-style options used by the
   rendered source-discovery pipeline
 - `-V`: enable very verbose debug output and end-of-run profiling counters,
-  including startup latency and trap-cleanup timing
+  including startup latency, trap-cleanup timing, per-phase listing times,
+  ssh/zfs invocation counts, runtime temp-file counts, and live destination
+  snapshot recheck counts (counter keys are stable; counters for deleted
+  machinery read 0)
 - `-x pattern`: exclude datasets from recursive replication
 - `-Y`: repeat replication until no sends or destroys are performed, or until
   the built-in iteration cap is reached
@@ -130,16 +144,17 @@ full option set and additional workflows.
 
 zxfer is intended to work with current OpenZFS 2.0+ environments:
 
-- FreeBSD 14.x and 15.x maintained branches with OpenZFS
+- FreeBSD 14.4+ and 15.0+ maintained branches with OpenZFS
 - Linux with OpenZFS
-- current OmniOS / illumos systems
+- currently supported OmniOS / illumos systems
 - current OpenZFS on macOS workflows
 
 For releases published after 2026-05-01, zxfer follows maintained FreeBSD
-branches and does not guarantee support for FreeBSD 13.x or other
-end-of-life FreeBSD branches. Pre-OpenZFS 2.0 behavior, Solaris Express-era
-property profiles, and older backup metadata layouts are intentionally
-unsupported.
+branches. The current FreeBSD baseline is 14.4+ on the stable/14 line and
+15.0+ on the stable/15 line. FreeBSD 14.3 and older releases are outside this
+baseline; end-of-life FreeBSD releases are not supported. Pre-OpenZFS 2.0
+behavior, Solaris Express-era property profiles, and older backup metadata
+layouts are intentionally unsupported.
 
 It also supports VM-backed validation from Linux, macOS, and WSL2 hosts through
 [tests/run_vm_matrix.sh](./tests/run_vm_matrix.sh).
@@ -161,44 +176,82 @@ zxfer-managed ssh connections default to `BatchMode=yes` and
 absolute known-hosts file, or `ZXFER_SSH_USE_AMBIENT_CONFIG=1` if you need to
 fall back to the ambient local ssh policy.
 
-Shared ssh control sockets, remote capability caches, and `ZXFER_ERROR_LOG`
-appends are coordinated through metadata-bearing lock or lease directories that
-record owner PID, process-start identity, hostname, purpose, and creation
-time. The current native format is directory-based rather than plain pid files:
-ssh `.lock` paths, ssh `leases/lease.*`, remote capability `<cache>.lock`, and
-`ZXFER_ERROR_LOG` lock paths all carry validated owner metadata. zxfer
-validates and reaps stale or corrupt owners before reuse, checks release
-operations instead of silently suppressing failures, and warns during trap
-cleanup if a registered owned lock or lease cannot be released while
-preserving the original zxfer exit status. Pre-metadata cache artifacts from
-older releases are no longer supported: if a reused cache root still contains
-plain ssh `leases/lease.*` files or pid-only `.lock` directories, remove the
-stale entry or cache root before rerunning zxfer.
+SSH control sockets and remote capability state are per-run only. Each
+invocation opens at most one control master per remote role under its private
+per-run temp directory, multiplexes its own remote commands over that socket,
+and closes it on exit; clean no-op runs never open a master at all. Remote
+helper discovery costs one capability probe round trip per host per run, held
+in memory and identity-checked against the host spec, secure PATH, ssh
+policy, and requested helper set -- nothing is shared between concurrent or
+consecutive zxfer invocations, matching upstream zxfer behavior. Only
+`ZXFER_ERROR_LOG` appends still coordinate through a metadata-bearing lock
+directory that records the owner PID and process-start identity; zxfer
+validates and reaps stale or corrupt owners before reuse and checks release
+operations instead of silently suppressing failures.
 
-Long-lived parallel send/receive work runs under private supervisor control
-directories beneath the runtime temp root. Each job records launch and
-completion metadata, and trap-time abort validates the recorded process group
-or owned child set before signaling it. Abort cleanup is completion-aware: if
-`completion.tsv` is already present, or a failed signal is followed by a
-refreshed process snapshot that no longer shows the runner, zxfer treats the
-job as already finished and continues cleanup. It fails closed only when a
-refreshed snapshot still shows a live owned runner that cannot be validated or
-signaled, or when the completion record itself cannot be persisted. The same
-checked-cleanup rule now applies to ssh control-socket teardown during trap
-cleanup: if zxfer cannot close a managed socket after otherwise successful
-work, it exits nonzero instead of reporting a clean run.
+Long-lived parallel send/receive work runs supervision-lite: each job is one
+backgrounded job shell (in its own `setsid` process group when the host
+provides it) that writes its own exit status to a per-run status file and
+notifies the rolling completion queue itself. Trap-time abort signals the
+job's process group or its tracked direct children — never a bare wrapper
+PID — waits briefly, escalates once with KILL, and only then reaps; an
+un-reaped child's PID/PGID cannot be recycled, so the signal cannot reach an
+unrelated process. A missing or non-numeric status file at wait time is
+reported as a job failure. The same checked-cleanup rule applies to ssh
+control-socket teardown during trap cleanup: if zxfer cannot close a managed
+socket after otherwise successful work, it exits nonzero instead of
+reporting a clean run.
 
 For `-j` send/receive work, the scheduler also treats ancestor/descendant
-destination datasets on the same target as mutually exclusive. zxfer now waits
-for the conflicting receive to finish before launching the next transfer, so
-recursive parent/child destination trees no longer race each other and degrade
-later into truncated-stream collateral failures.
+destination datasets on the same target as mutually exclusive. zxfer skips
+blocked descendants and starts later independent datasets while job slots
+remain, waiting for a conflicting receive only when no pending dataset is ready
+to run. Recursive parent/child destination trees therefore no longer race each
+other and degrade later into truncated-stream collateral failures.
+
+Recursive snapshot discovery remains identity-aware: initial source and
+destination snapshot records carry `name,guid` so a same-name snapshot with a
+different GUID cannot be treated as a clean match. For eligible `-R` runs —
+local sources and `-O` pulls alike — with a local destination and no snapshot
+creation, property, migration, restore, backup, or target-host work, zxfer
+first tries a fast no-op proof. That proof compares one recursive source
+`name,guid` stream with one normalized destination `name,guid` stream staged
+under the per-run temp root and falls back to full discovery when the streams
+differ or the destination is missing; a proven clean no-op skips the
+creation-order source listing and the destination existence check entirely.
+`-U` and `-g` can remain enabled on this proof path because exact no-op
+discovery leaves no source transfer queue, destination delete queue, or
+property/create work to consume those checks.
+
+When a destination snapshot shares a source snapshot's name but carries a
+different GUID, the destination has diverged under identical names and
+converging it is destructive. zxfer always prints a warning on stderr (not
+gated on `-v`/`-V`) naming the dataset, the diverged-snapshot count, and up to
+three example snapshots with both GUIDs. The destructive convergence —
+destroying the diverged destination snapshots, rolling back to the last
+GUID-matching common snapshot, and resending the source range over them — runs
+only when BOTH `-d` and `-F` are active. Without both flags the run fails
+closed with a structured error naming the diverged dataset, and zero deletes
+or sends are planned for it. After a converged dataset's receive completes,
+zxfer re-checks the live destination listing and aborts with a precise error
+naming the snapshot if any name-match/GUID-mismatch remains, so an external
+writer re-diverging the destination surfaces as an explicit failure instead of
+a silent destroy-and-resend loop. With `-V`, planning prints one
+`Last common snapshot: ...; diverged destination snapshots: N.` line per
+planned dataset and the profile summary reports `diverged_snapshot_warnings`.
+
+When `-T` is used, destination discovery runs a structured target-side batch:
+recursive destination dataset inventory, the missing-root pool fallback probe,
+and destination snapshot listing are issued inside one remote `sh -c` payload.
+Large snapshot stdout is streamed back as `name,guid` records, while status and
+stderr sections are staged and parsed locally. The local destination path keeps
+the direct `zfs` command flow.
 
 Short-lived local background helpers that still need shell wrappers, such as
-progress dialogs and delete-planning identity writers, now publish validated
-cleanup metadata through the shared runtime registry. The remaining local
-wrapper-style helpers run under a small TERM-aware child wrapper so early-exit
-cleanup no longer falls back to signaling a bare wrapper-shell PID.
+progress dialogs and delete-planning identity writers, register their PIDs
+with the in-memory runtime cleanup tracker. The remaining local wrapper-style
+helpers run under a small TERM-aware child wrapper so early-exit cleanup no
+longer falls back to signaling a bare wrapper-shell PID.
 
 Current runtime caveats are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 
@@ -222,6 +275,13 @@ For manual, non-gating throughput checks inside a disposable guest, use:
 
 ```sh
 ./tests/run_vm_matrix.sh --profile smoke --test-layer perf
+```
+
+To compare the current checkout against `upstream-compat-final` before
+performance work, keep the run VM-backed:
+
+```sh
+ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final ./tests/run_vm_matrix.sh --profile smoke --test-layer perf-compare
 ```
 
 Use [tests/run_integration_zxfer.sh](./tests/run_integration_zxfer.sh)

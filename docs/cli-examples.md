@@ -63,10 +63,13 @@ Push to a remote destination:
 ```
 
 This end-of-run profile now includes startup latency before the first live
-send/receive pipeline, trap-cleanup timing, stage timings, and contention and
-reuse counters for ssh control-socket waits, remote-capability cache waits,
-capability-bootstrap sources (`live`, `cache`, `memory`), and any remaining
-direct remote helper probes. While the run is active, `-V` also prints
+send/receive pipeline, trap-cleanup timing, stage timings, ssh/zfs invocation
+counts by role, runtime temp-file churn, command rendering, live destination
+snapshot rechecks, and any remaining direct remote helper probes. Counter
+keys are stable across releases: counters for deleted machinery (capability
+cache waits, cache-object writes, socket lock waits) still emit and always
+read 0. While the run is
+active, `-V` also prints
 prefixed remote ssh commands, remote probe commands, and ssh control-socket
 check/open commands so a slow remote bootstrap shows the exact in-flight
 command.
@@ -136,9 +139,12 @@ If the helper is missing, zxfer fails closed during setup; if it is
 incompatible, the source-discovery pipeline fails instead of silently falling
 back to serial discovery. The
 source-discovery helper is still tracked for cleanup by PID, while long-lived
-send/receive workers run under the shared background-job supervisor, so abort
-cleanup validates the tracked process group or owned child set instead of
-signaling a bare wrapper-shell PID.
+send/receive workers run supervision-lite, so abort cleanup signals the job's
+setsid process group or its tracked direct children instead of a bare
+wrapper-shell PID. The send/receive scheduler treats
+ancestor/descendant destination receives on the same target as mutually
+exclusive, but it skips blocked descendants and starts later independent
+datasets while job slots remain.
 
 ### `-x pattern` Exclude datasets from a recursive run
 
@@ -173,6 +179,13 @@ survive even after newer monthly or daily snapshots are removed at the source.
 
 Use this when the destination may have diverged and should be rolled back to
 the most recent snapshot that matches the stream.
+
+When destination snapshots share source snapshot names but carry different
+GUIDs (diverged data under identical names), zxfer always warns on stderr and
+converges destructively (destroy the diverged destination snapshots, roll
+back, resend) only when BOTH `-d` and `-F` are active; without both flags the
+run fails closed for the diverged dataset. See `docs/troubleshooting.md` for
+diagnosis commands.
 
 ## Property Handling
 
@@ -296,9 +309,11 @@ rejected instead of being re-tokenized.
 ./zxfer -v -D 'pv -brt -s %%size%% -N %%title%%' -R tank/data backup/data
 ```
 
-The progress command must read from stdin and write the stream back to stdout.
-`%%size%%` expands to an estimated stream size and `%%title%%` expands to the
-source `dataset@snapshot` label.
+The progress command must read the copied stream from stdin until EOF. Its
+stdout is discarded so progress helpers such as `pv` cannot duplicate or
+corrupt the receive stream; progress text should go to stderr. `%%size%%`
+expands to an estimated stream size and `%%title%%` expands to the source
+`dataset@snapshot` label.
 
 ### `-w` Use raw `zfs send`
 

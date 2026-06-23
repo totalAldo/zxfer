@@ -33,6 +33,7 @@ Targets:
   shfmt
   codespell
   shellcheck
+  budget
   all
 
 Options:
@@ -352,6 +353,11 @@ run_shellcheck() {
 	)
 }
 
+run_budget() {
+	printf '==> budget (tests/budget_policy.tsv)\n'
+	"$ZXFER_ROOT/tests/run_budget_check.sh"
+}
+
 run_target() {
 	case "$1" in
 	actionlint)
@@ -368,6 +374,9 @@ run_target() {
 		;;
 	shellcheck)
 		run_shellcheck
+		;;
+	budget)
+		run_budget
 		;;
 	*)
 		die "Unknown lint target: $1"
@@ -397,6 +406,9 @@ bootstrap_target() {
 		printf '==> bootstrap shellcheck %s\n' "$SHELLCHECK_VERSION"
 		ensure_shellcheck
 		;;
+	budget)
+		printf '==> bootstrap budget (no downloads required)\n'
+		;;
 	*)
 		die "Unknown lint target: $1"
 		;;
@@ -420,6 +432,7 @@ append_default_targets() {
 	append_target shfmt
 	append_target codespell
 	append_target shellcheck
+	append_target budget
 }
 
 print_default_targets() {
@@ -429,6 +442,7 @@ checkbashisms
 shfmt
 codespell
 shellcheck
+budget
 EOF
 }
 
@@ -463,7 +477,7 @@ else
 			TARGET_LIST=
 			append_default_targets
 			;;
-		actionlint | checkbashisms | shfmt | codespell | shellcheck)
+		actionlint | checkbashisms | shfmt | codespell | shellcheck | budget)
 			append_target "$l_arg"
 			;;
 		*)

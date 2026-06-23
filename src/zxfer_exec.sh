@@ -128,9 +128,33 @@ zxfer_execute_background_cmd() {
 # payloads.
 #
 # Escape characters for a single-quoted context by closing and reopening quotes
-# around embedded apostrophes.
+# around embedded apostrophes. Pure shell: this runs for every rendered token,
+# so quote-free values return without spawning a subprocess and quote-bearing
+# values are rewritten with parameter expansion instead of sed.
 zxfer_escape_for_single_quotes() {
-	printf '%s' "$1" | sed "s/'/'\\\\''/g"
+	case $1 in
+	*\'*) ;;
+	*)
+		printf '%s' "$1"
+		return 0
+		;;
+	esac
+
+	l_escape_rest=$1
+	l_escape_out=""
+	while :; do
+		case $l_escape_rest in
+		*\'*)
+			l_escape_out="$l_escape_out${l_escape_rest%%\'*}'\\''"
+			l_escape_rest=${l_escape_rest#*\'}
+			;;
+		*)
+			l_escape_out="$l_escape_out$l_escape_rest"
+			break
+			;;
+		esac
+	done
+	printf '%s' "$l_escape_out"
 }
 
 # Purpose: Split the tokens on whitespace into the token stream expected by
@@ -140,7 +164,9 @@ zxfer_escape_for_single_quotes() {
 #
 # Split whitespace-delimited arguments into separate lines without invoking the
 # shell parser. This intentionally ignores quoting so callers must escape
-# metacharacters themselves, preventing shell injection attacks.
+# metacharacters themselves, preventing shell injection attacks. Pure shell:
+# metacharacter normalization and field splitting previously spawned one sed
+# plus one awk per call on every rendered command.
 zxfer_split_tokens_on_whitespace() {
 	l_input=$1
 	if [ "$l_input" = "" ]; then
@@ -150,17 +176,59 @@ zxfer_split_tokens_on_whitespace() {
 	# Ensure shell metacharacters such as ';', '|', and '&' break tokens even
 	# when users omit the following whitespace, so injected commands remain
 	# literal arguments instead of spawning new pipelines.
-	l_normalized_input=$(printf '%s' "$l_input" | sed 's/[;|&]/& /g')
+	case $l_input in
+	*\;* | *\|* | *\&*)
+		l_split_rest=$l_input
+		l_normalized_input=""
+		while :; do
+			l_split_head=${l_split_rest%%[;\|\&]*}
+			if [ "$l_split_head" = "$l_split_rest" ]; then
+				l_normalized_input="$l_normalized_input$l_split_rest"
+				break
+			fi
+			l_split_rest=${l_split_rest#"$l_split_head"}
+			l_split_char=${l_split_rest%"${l_split_rest#?}"}
+			l_split_rest=${l_split_rest#?}
+			l_normalized_input="$l_normalized_input$l_split_head$l_split_char "
+		done
+		;;
+	*)
+		l_normalized_input=$l_input
+		;;
+	esac
 
-	l_awk_cmd=${g_cmd_awk:-$(command -v awk 2>/dev/null || echo awk)}
-	# shellcheck disable=SC2016
-	# $i references belong to awk, not the shell.
-	printf '%s\n' "$l_normalized_input" | "$l_awk_cmd" '
-	{
-		for (i = 1; i <= NF; i++) {
-			print $i
-		}
-	}'
+	# Field-split on default IFS whitespace with globbing disabled so glob
+	# characters in user input stay literal tokens. IFS is restored exactly,
+	# including the unset case, because callers may hold a modified IFS.
+	case $- in
+	*f*)
+		l_split_restore_glob=0
+		;;
+	*)
+		l_split_restore_glob=1
+		set -f
+		;;
+	esac
+	if [ "${IFS+set}" = "set" ]; then
+		l_split_saved_ifs_set=1
+		l_split_saved_ifs=$IFS
+	else
+		l_split_saved_ifs_set=0
+		l_split_saved_ifs=""
+	fi
+	unset IFS
+	# shellcheck disable=SC2086  # Intentional field splitting of normalized input.
+	set -- $l_normalized_input
+	if [ "$l_split_saved_ifs_set" -eq 1 ]; then
+		IFS=$l_split_saved_ifs
+	fi
+	if [ "$l_split_restore_glob" -eq 1 ]; then
+		set +f
+	fi
+
+	for l_split_token in "$@"; do
+		printf '%s\n' "$l_split_token"
+	done
 }
 
 # Purpose: Reject token strings that would require shell parsing semantics
@@ -223,6 +291,7 @@ zxfer_quote_token_stream() {
 		return
 	fi
 
+	zxfer_profile_increment_counter g_zxfer_profile_command_render_calls
 	l_output=""
 	while IFS= read -r l_token || [ -n "$l_token" ]; do
 		[ "$l_token" = "" ] && continue
@@ -243,6 +312,7 @@ EOF
 # Usage: Called during command rendering, ssh wrapping, and ZFS execution
 # before other helpers consume the assembled value.
 zxfer_build_shell_command_from_argv() {
+	zxfer_profile_increment_counter g_zxfer_profile_command_render_calls
 	l_output=""
 	for l_arg in "$@"; do
 		l_safe_arg=$(zxfer_escape_for_single_quotes "$l_arg")
@@ -436,14 +506,14 @@ zxfer_get_ssh_base_transport_tokens() {
 	fi
 }
 
-# Purpose: Return the SSH transport tokens for host in the form expected by
-# later helpers.
-# Usage: Called during command rendering, ssh wrapping, and ZFS execution when
-# sibling helpers need the same lookup without duplicating module logic.
+# Purpose: Render the SSH transport tokens for host from the current managed
+# option policy and control-socket state without consulting the per-role memo.
+# Usage: Called by zxfer_get_ssh_transport_tokens_for_host on memo misses and
+# by zxfer_refresh_ssh_transport_tokens_for_role to fill the memo.
 #
 # Render the ssh transport argv for a given host, including any control socket,
 # as a newline-delimited token stream that can be safely re-quoted or executed.
-zxfer_get_ssh_transport_tokens_for_host() {
+zxfer_render_ssh_transport_tokens_for_host() {
 	l_host=$1
 
 	if ! l_base_transport_tokens=$(zxfer_get_ssh_base_transport_tokens); then
@@ -466,22 +536,75 @@ zxfer_get_ssh_transport_tokens_for_host() {
 	fi
 }
 
-# Purpose: Return the SSH command for host in the form expected by later
-# helpers.
+# Purpose: Refresh the per-role rendered SSH transport-token memo from the
+# current managed-option policy and control-socket state.
+# Usage: Called in the main shell after CLI validation and whenever a role's
+# control-socket state changes, so per-command transport rendering becomes one
+# memo read instead of re-validating managed ssh options every time.
+zxfer_refresh_ssh_transport_tokens_for_role() {
+	l_role=$1
+
+	case "$l_role" in
+	origin)
+		g_zxfer_ssh_transport_tokens_origin_set=0
+		g_zxfer_ssh_transport_tokens_origin=""
+		g_zxfer_ssh_transport_tokens_origin_socket=""
+		[ -n "${g_option_O_origin_host:-}" ] || return 0
+		if l_role_tokens=$(zxfer_render_ssh_transport_tokens_for_host \
+			"$g_option_O_origin_host"); then
+			g_zxfer_ssh_transport_tokens_origin=$l_role_tokens
+			g_zxfer_ssh_transport_tokens_origin_socket=${g_ssh_origin_control_socket:-}
+			g_zxfer_ssh_transport_tokens_origin_set=1
+		fi
+		;;
+	target)
+		g_zxfer_ssh_transport_tokens_target_set=0
+		g_zxfer_ssh_transport_tokens_target=""
+		g_zxfer_ssh_transport_tokens_target_socket=""
+		[ -n "${g_option_T_target_host:-}" ] || return 0
+		# A target spec equal to the origin spec renders origin-socket
+		# tokens, so the origin memo already covers it; skip a target memo
+		# whose staleness could not be keyed on the target socket.
+		[ "${g_option_T_target_host}" != "${g_option_O_origin_host:-}" ] || return 0
+		if l_role_tokens=$(zxfer_render_ssh_transport_tokens_for_host \
+			"$g_option_T_target_host"); then
+			g_zxfer_ssh_transport_tokens_target=$l_role_tokens
+			g_zxfer_ssh_transport_tokens_target_socket=${g_ssh_target_control_socket:-}
+			g_zxfer_ssh_transport_tokens_target_set=1
+		fi
+		;;
+	esac
+	return 0
+}
+
+# Purpose: Return the SSH transport tokens for host in the form expected by
+# later helpers.
 # Usage: Called during command rendering, ssh wrapping, and ZFS execution when
 # sibling helpers need the same lookup without duplicating module logic.
 #
-# Render the local ssh transport command used for a host spec. This is a
-# display helper only; execution paths should use the argv-based helpers below.
-zxfer_get_ssh_cmd_for_host() {
+# The per-role memo answers -O/-T hosts when the recorded control-socket state
+# still matches; anything else falls through to a fresh render so correctness
+# never depends on the memo being warm.
+zxfer_get_ssh_transport_tokens_for_host() {
 	l_host=$1
-	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host"); then
-		:
-	else
-		l_transport_status=$?
-		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
+
+	if [ -n "$l_host" ]; then
+		if [ "$l_host" = "${g_option_O_origin_host:-}" ] &&
+			[ "${g_zxfer_ssh_transport_tokens_origin_set:-0}" -eq 1 ] &&
+			[ "${g_zxfer_ssh_transport_tokens_origin_socket:-}" = "${g_ssh_origin_control_socket:-}" ]; then
+			printf '%s\n' "$g_zxfer_ssh_transport_tokens_origin"
+			return 0
+		fi
+		if [ "$l_host" = "${g_option_T_target_host:-}" ] &&
+			[ "$l_host" != "${g_option_O_origin_host:-}" ] &&
+			[ "${g_zxfer_ssh_transport_tokens_target_set:-0}" -eq 1 ] &&
+			[ "${g_zxfer_ssh_transport_tokens_target_socket:-}" = "${g_ssh_target_control_socket:-}" ]; then
+			printf '%s\n' "$g_zxfer_ssh_transport_tokens_target"
+			return 0
+		fi
 	fi
-	zxfer_quote_token_stream "$l_transport_tokens"
+
+	zxfer_render_ssh_transport_tokens_for_host "$l_host"
 }
 
 # Purpose: Return the remote command context label in the form expected by
@@ -529,75 +652,14 @@ zxfer_get_remote_command_context_label() {
 # Purpose: Emit very-verbose diagnostic output for `-V` runs.
 # Usage: Called during command rendering, ssh wrapping, and ZFS execution when
 # zxfer wants low-level debug output that should stay hidden in normal verbose
-# mode.
+# mode. Returns before rendering anything when `-V` is off.
 zxfer_echoV_remote_command_for_host() {
+	[ "${g_option_V_very_verbose:-0}" -eq 1 ] || return 0
 	l_host_spec=$1
 	l_profile_side=${2:-}
 	shift 2
 
-	l_command_context=$(zxfer_get_remote_command_context_label \
-		"$l_host_spec" "$l_profile_side")
-	l_rendered_command=$(zxfer_render_command_for_report "" "$@")
-	zxfer_echoV "Running remote command [$l_command_context]: $l_rendered_command"
-}
-
-# Purpose: Run the SSH command for host through the controlled execution path
-# owned by this module.
-# Usage: Called during command rendering, ssh wrapping, and ZFS execution once
-# planning is complete and zxfer is ready to execute the action.
-#
-# Expand the ssh transport and host spec into discrete arguments before
-# executing the remote command so multi-token -O/-T inputs (like "host pfexec")
-# are preserved without reparsing a shell string. STDIN/STDOUT/STDERR are
-# passed through to the invoked ssh process.
-zxfer_invoke_ssh_command_for_host() {
-	l_host_spec=$1
-	shift
-
-	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
-		:
-	else
-		l_transport_status=$?
-		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
-	fi
-	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec"); then
-		zxfer_throw_error "$l_host_tokens"
-	fi
-	l_remote_args_stream=""
-	if [ $# -gt 0 ]; then
-		l_remote_args_stream=$(printf '%s\n' "$@")
-	fi
-
-	set --
-	if [ "$l_transport_tokens" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			[ "$l_token" = "" ] && continue
-			set -- "$@" "$l_token"
-		done <<EOF
-$l_transport_tokens
-EOF
-	fi
-
-	if [ "$l_host_tokens" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			[ "$l_token" = "" ] && continue
-			set -- "$@" "$l_token"
-		done <<EOF
-$l_host_tokens
-EOF
-	fi
-
-	if [ "$l_remote_args_stream" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			set -- "$@" "$l_token"
-		done <<EOF
-$l_remote_args_stream
-EOF
-	fi
-
-	zxfer_record_last_command_argv "$@"
-	zxfer_echoV_remote_command_for_host "$l_host_spec" "" "$@"
-	"$@"
+	zxfer_echoV "Running remote command [$(zxfer_get_remote_command_context_label "$l_host_spec" "$l_profile_side")]: $(zxfer_render_command_for_report "" "$@")"
 }
 
 # Purpose: Prepare the parsed SSH host and wrapped remote command for one host
@@ -615,6 +677,31 @@ zxfer_prepare_ssh_shell_command_context() {
 	g_zxfer_ssh_shell_full_remote_command_result=""
 	g_zxfer_ssh_shell_context_error_result=""
 	[ "$l_remote_shell_cmd" = "" ] && return 1
+
+	# Per-role parse memo: -O/-T host specs are fixed after CLI validation,
+	# so the host/wrapper split renders once per spec string and later remote
+	# commands reuse it. Keyed on the exact spec text, so a memo hit always
+	# replays a validated parse of the identical input.
+	if [ -n "$l_host_spec" ]; then
+		if [ "${g_zxfer_ssh_shell_context_memo_origin_spec:-}" = "$l_host_spec" ]; then
+			g_zxfer_ssh_shell_host_result=$g_zxfer_ssh_shell_context_memo_origin_host
+			if [ "${g_zxfer_ssh_shell_context_memo_origin_wrapper:-}" != "" ]; then
+				g_zxfer_ssh_shell_full_remote_command_result="$g_zxfer_ssh_shell_context_memo_origin_wrapper $l_remote_shell_cmd"
+			else
+				g_zxfer_ssh_shell_full_remote_command_result=$l_remote_shell_cmd
+			fi
+			return 0
+		fi
+		if [ "${g_zxfer_ssh_shell_context_memo_target_spec:-}" = "$l_host_spec" ]; then
+			g_zxfer_ssh_shell_host_result=$g_zxfer_ssh_shell_context_memo_target_host
+			if [ "${g_zxfer_ssh_shell_context_memo_target_wrapper:-}" != "" ]; then
+				g_zxfer_ssh_shell_full_remote_command_result="$g_zxfer_ssh_shell_context_memo_target_wrapper $l_remote_shell_cmd"
+			else
+				g_zxfer_ssh_shell_full_remote_command_result=$l_remote_shell_cmd
+			fi
+			return 0
+		fi
+	fi
 
 	l_context_status=0
 	l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec") ||
@@ -644,6 +731,7 @@ EOF
 	[ "$l_ssh_host" != "" ] || return 1
 
 	l_full_remote_cmd=$l_remote_shell_cmd
+	l_wrapper_cmd=""
 	if [ "$l_wrapper_tokens" != "" ]; then
 		l_wrapper_cmd=$(zxfer_quote_token_stream "$l_wrapper_tokens")
 		l_full_remote_cmd="$l_wrapper_cmd $l_remote_shell_cmd"
@@ -651,6 +739,18 @@ EOF
 
 	g_zxfer_ssh_shell_host_result=$l_ssh_host
 	g_zxfer_ssh_shell_full_remote_command_result=$l_full_remote_cmd
+	# Memoize role specs only; plain calls from the invoke path persist the
+	# memo in the main shell, command-substituted callers just recompute.
+	if [ "$l_host_spec" = "${g_option_O_origin_host:-}" ] && [ -n "$l_host_spec" ]; then
+		g_zxfer_ssh_shell_context_memo_origin_spec=$l_host_spec
+		g_zxfer_ssh_shell_context_memo_origin_host=$l_ssh_host
+		g_zxfer_ssh_shell_context_memo_origin_wrapper=$l_wrapper_cmd
+	fi
+	if [ "$l_host_spec" = "${g_option_T_target_host:-}" ] && [ -n "$l_host_spec" ]; then
+		g_zxfer_ssh_shell_context_memo_target_spec=$l_host_spec
+		g_zxfer_ssh_shell_context_memo_target_host=$l_ssh_host
+		g_zxfer_ssh_shell_context_memo_target_wrapper=$l_wrapper_cmd
+	fi
 	return 0
 }
 
@@ -1060,8 +1160,9 @@ zxfer_destination_parent_missing_confirmed_by_ancestor_listing() {
 		l_ancestor_dataset=${l_missing_dataset%/*}
 		[ "$l_ancestor_dataset" != "$l_missing_dataset" ] || return 1
 
-		l_cmd=$(zxfer_render_destination_zfs_command list -H -r -o name "$l_ancestor_dataset")
-		zxfer_echoV "Parent recursive destination probe was ambiguous on SunOS; checking ancestor recursively: $l_cmd"
+		if zxfer_command_display_render_enabled; then
+			zxfer_echoV "Parent recursive destination probe was ambiguous on SunOS; checking ancestor recursively: $(zxfer_render_destination_zfs_command list -H -r -o name "$l_ancestor_dataset")"
+		fi
 
 		if l_ancestor_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_ancestor_dataset" 2>&1); then
 			if printf '%s\n' "$l_ancestor_listing" | grep -F -x "$l_missing_dataset" >/dev/null 2>&1; then
@@ -1105,8 +1206,9 @@ zxfer_exists_destination_via_parent_recursive_listing() {
 
 	[ "$l_parent_dataset" != "$l_dest" ] || return 2
 
-	l_cmd=$(zxfer_render_destination_zfs_command list -H -r -o name "$l_parent_dataset")
-	zxfer_echoV "Exact destination probe was ambiguous on SunOS; checking parent recursively: $l_cmd"
+	if zxfer_command_display_render_enabled; then
+		zxfer_echoV "Exact destination probe was ambiguous on SunOS; checking parent recursively: $(zxfer_render_destination_zfs_command list -H -r -o name "$l_parent_dataset")"
+	fi
 
 	if l_parent_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_parent_dataset" 2>&1); then
 		if printf '%s\n' "$l_parent_listing" | grep -F -x "$l_dest" >/dev/null 2>&1; then
@@ -1172,8 +1274,9 @@ zxfer_exists_destination() {
 
 	zxfer_profile_increment_counter g_zxfer_profile_exists_destination_calls
 
-	l_cmd=$(zxfer_render_destination_zfs_command list -H "$l_dest")
-	zxfer_echoV "Checking if destination exists: $l_cmd"
+	if zxfer_command_display_render_enabled; then
+		zxfer_echoV "Checking if destination exists: $(zxfer_render_destination_zfs_command list -H "$l_dest")"
+	fi
 
 	if l_probe_output=$(zxfer_run_destination_zfs_cmd list -H "$l_dest" 2>&1); then
 		zxfer_set_destination_existence_cache_entry "$l_dest" 1

@@ -4,17 +4,24 @@
 
 zxfer is intended to work with current OpenZFS 2.0+ environments:
 
-- FreeBSD 14.x and 15.x maintained branches with OpenZFS
+- FreeBSD 14.4+ and 15.0+ maintained branches with OpenZFS
 - Linux with OpenZFS
-- current OmniOS / illumos systems
+- currently supported OmniOS / illumos systems
 - current OpenZFS on macOS workflows
 
 For releases published after 2026-05-01, zxfer follows maintained FreeBSD
-branches. FreeBSD 13.5 and the stable/13 branch reach end of life on
-2026-04-30, so this codebase does not guarantee support for FreeBSD 13.x or
-other end-of-life FreeBSD branches. Reports from EOL systems can still be
-useful historical context, but fixes are prioritized only when the issue also
-affects a maintained branch.
+branches. The current FreeBSD baseline is 14.4+ on the stable/14 line and
+15.0+ on the stable/15 line. FreeBSD 13.5 and the stable/13 branch reached
+end of life on 2026-04-30, and FreeBSD 14.3 reaches upstream end of life on
+2026-06-30. This codebase does not guarantee support for FreeBSD 14.3,
+FreeBSD 13.x, or other end-of-life FreeBSD releases. Reports from EOL systems
+can still be useful historical context, but fixes are prioritized only when
+the issue also affects a maintained branch.
+
+As of 2026-06-23, the supported OmniOS trains are `r151054` LTS, `r151056`
+stable, and `r151058` stable. Older OmniOS trains are treated as historical
+compatibility context unless a reported issue also affects a currently
+supported train.
 
 The project targets POSIX `/bin/sh`, so portability depends more on shell and
 tool behavior than on GNU-specific scripting features.
@@ -36,9 +43,9 @@ of the supported host surface.
 
 Current guest targets for the VM matrix are:
 
-- Ubuntu 24.04
-- FreeBSD 15.0
-- OmniOS r151056
+- Ubuntu 26.04
+- FreeBSD 15.1
+- OmniOS r151058
 
 The local runner prefers the guest architecture that best matches the host. On
 Linux `amd64` hosts with KVM, and on Intel macOS hosts, the matrix uses the
@@ -101,38 +108,49 @@ matters especially when:
 - restore mode (`-e`) needs a remote `cat` on the origin, and remote backup
   writes for `-k` use `cat` on the target
 - `-j` uses explicit per-dataset source discovery on the executing origin host
-  whenever `jobs > 1`. Local-origin and remote-origin runs require a resolved
-  `parallel` helper on that host. zxfer intentionally validates only helper
-  existence through the secure-PATH model and assumes the operator or package
-  supplied an implementation compatible with the GNU Parallel-style options
-  used by the rendered pipeline. zxfer fails closed if the required helper is
-  missing, while incompatible helpers fail through source discovery instead of
-  silently falling back to the serial recursive listing. Source discovery uses
-  tracked background PID cleanup and staged stderr, while send/receive workers
-  run under the shared supervisor rather than bare wrapper-shell PID cleanup
+  in the changed-source/full discovery path whenever `jobs > 1`. The clean
+  recursive no-op proof uses one recursive `name,guid` source stream and defers
+  `parallel` until that heavier path is needed. Local-origin and remote-origin
+  full discovery runs require a resolved `parallel` helper on that host. zxfer
+  intentionally validates only helper existence through the secure-PATH model
+  and assumes the operator or package supplied an implementation compatible
+  with the GNU Parallel-style options used by the rendered pipeline. zxfer fails
+  closed if the required helper is missing, while incompatible helpers fail
+  through source discovery instead of silently falling back to the serial
+  recursive listing. Source discovery uses tracked background PID cleanup and
+  staged stderr, while send/receive workers run under the shared supervisor
+  rather than bare wrapper-shell PID cleanup. The send/receive ready queue
+  serializes active parent/child destination receives on the same target but can
+  skip blocked descendants and start later independent datasets while job slots
+  remain
 - custom `-Z` compression commands or default `zstd` helpers must be resolved
   per host instead of assuming one shared absolute path
-- the per-host remote-capability cache is keyed from the host spec, trusted
-  dependency path, ssh transport policy, and the requested optional tool set;
-  cache files store the full encoded identity and reads reject mismatches,
-  so repeated helper discovery inside one zxfer run can safely reuse matching
-  handshake results without sharing stale helper-path data across different run
-  shapes
+- remote helper capability discovery runs once per host per invocation, keyed
+  in memory by the host spec, trusted dependency path, ssh transport policy,
+  and the requested optional tool set; no capability-cache files are reused
+  across concurrent or later zxfer invocations
 
-Current releases also coordinate shared ssh control sockets, per-process ssh
-leases, and remote capability-cache fills through one metadata-bearing
-directory format under the validated temp root. Native `.lock` and
-`leases/lease.*` paths therefore carry owner metadata instead of relying on
-plain pid files, zxfer validates and reaps stale or corrupt owners before
-reuse, and release failures are checked rather than silently ignored. Older
-plain ssh lease files and pid-only lock directories are no longer supported;
-clear stale reused cache roots before rerunning a current release.
+Current releases keep ssh control sockets and remote capability state
+strictly per-run. Each invocation creates its own short `ssh-<role>.sock`
+path under the private 0700 temp root, reuses that socket only for its own
+remote commands, and closes it before removing the temp root. There are no
+shared ssh lease directories or remote capability-cache locks to inspect or
+clear for current runs; only `ZXFER_ERROR_LOG` appends use the
+metadata-bearing owned-directory lock format.
 
 The same validated secure `PATH` is also exported before remote capability
 handshakes, helper-discovery probes, backup-directory prep, and remote
 backup-metadata guard/staging scripts run, so their auxiliary
 `stat`/`ls`/`id`/`awk` lookups do not fall back to the remote login shell's
 ambient `PATH`.
+
+Remote target (`-T`) destination discovery also runs under that validated
+target-side `PATH`. Current discovery batches the recursive destination dataset
+inventory, the missing-root pool probe, and `name,guid` destination snapshot
+listing into one target-side POSIX `sh -c` payload. The large snapshot section
+is streamed back over ssh, compact statuses and stderr are staged separately,
+and malformed or truncated section payloads fail closed. Local destination
+discovery deliberately remains on the direct local `zfs` path.
 
 zxfer-managed ssh transports also now force `BatchMode=yes` and
 `StrictHostKeyChecking=yes` by default. They still rely on the local ssh
@@ -151,9 +169,10 @@ flowchart TD
     B --> F["Remote cat when -e reads backup metadata from the origin"]
 
     G["Target role via -T"] --> H["Remote destination-side helpers"]
-    H --> I["zfs receive and destination-side property work"]
-    H --> J["Remote decompression helper when -z or -Z is active"]
-    H --> K["Remote backup-directory and backup-write helpers for -k, including cat-based metadata writes"]
+    H --> I["Batched destination discovery: datasets, pool fallback, and name,guid snapshots"]
+    H --> J["zfs receive and destination-side property work"]
+    H --> K["Remote decompression helper when -z or -Z is active"]
+    H --> L["Remote backup-directory and backup-write helpers for -k, including cat-based metadata writes"]
 ```
 
 ## Service Management
@@ -173,7 +192,8 @@ Current platform-specific testing guidance:
   integration coverage and for low-risk local validation on Linux, macOS, and
   WSL2 hosts. That runner keeps `integration` as its default guest test layer
   and can opt into guest shunit2 coverage with `--test-layer shunit2` or
-  guest-side performance checks with `--test-layer perf`.
+  guest-side performance checks with `--test-layer perf` or
+  `--test-layer perf-compare`.
 - Keep [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   for manual, interactive runs on a disposable ZFS-capable host or VM when you
   explicitly want to exercise the harness outside the guest wrapper.

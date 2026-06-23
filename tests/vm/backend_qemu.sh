@@ -18,6 +18,9 @@ zxfer_vm_backend_qemu_check_host() {
 	zxfer_vm_require_command ssh-keygen
 	zxfer_vm_require_command ssh-keyscan
 	zxfer_vm_require_command tar
+	if [ "$ZXFER_VM_TEST_LAYER" = "perf-compare" ]; then
+		zxfer_vm_require_command git
+	fi
 
 	l_required_qemu_commands=
 	for l_guest in $ZXFER_VM_SELECTED_GUESTS; do
@@ -379,15 +382,21 @@ zxfer_vm_qemu_prepare_remote_ssh_step() {
 	l_step_label=${6:-remote step}
 	l_timeout_seconds=${7:-30}
 	l_elapsed=0
+	l_refreshed=0
 
 	while [ "$l_elapsed" -lt "$l_timeout_seconds" ]; do
+		l_refreshed=0
 		if zxfer_vm_qemu_refresh_known_hosts "$l_host" "$l_port" "$l_known_hosts"; then
-			if [ "$l_elapsed" -gt 0 ] && [ -n "$l_log_prefix" ]; then
-				zxfer_vm_log "==> [$l_log_prefix] SSH host-key refresh recovered for $l_step_label"
+			l_refreshed=1
+			if zxfer_vm_qemu_ssh_probe "$l_host" "$l_port" "$l_known_hosts" "$l_identity"; then
+				if [ "$l_elapsed" -gt 0 ] && [ -n "$l_log_prefix" ]; then
+					zxfer_vm_log "==> [$l_log_prefix] SSH readiness recovered for $l_step_label"
+				fi
+				return 0
 			fi
-			return 0
 		fi
-		if [ -r "$l_known_hosts" ] &&
+		if [ "$l_refreshed" -ne 1 ] &&
+			[ -r "$l_known_hosts" ] &&
 			zxfer_vm_qemu_ssh_probe "$l_host" "$l_port" "$l_known_hosts" "$l_identity"; then
 			if [ -n "$l_log_prefix" ]; then
 				zxfer_vm_warn "[$l_log_prefix] ssh-keyscan did not refresh the guest host key before $l_step_label; reusing the existing validated known_hosts entry"
@@ -400,7 +409,7 @@ zxfer_vm_qemu_prepare_remote_ssh_step() {
 		if [ -n "$l_log_prefix" ] &&
 			[ "$l_elapsed" -gt 0 ] &&
 			[ $((l_elapsed % 15)) -eq 0 ]; then
-			zxfer_vm_log "==> [$l_log_prefix] still waiting for SSH host-key refresh before $l_step_label (${l_elapsed}s elapsed)"
+			zxfer_vm_log "==> [$l_log_prefix] still waiting for SSH readiness before $l_step_label (${l_elapsed}s elapsed)"
 		fi
 	done
 
@@ -538,6 +547,21 @@ zxfer_vm_qemu_write_repo_archive() {
 	fi
 }
 
+zxfer_vm_qemu_write_ref_archive() {
+	l_ref=$1
+
+	case "$l_ref" in
+	'' | -* | *'
+'*)
+		zxfer_vm_die "ZXFER_VM_PERF_BASELINE_REF must be a non-empty ref name, tag, or commit and must not begin with '-' or contain newlines: $l_ref"
+		;;
+	esac
+	git -C "$ZXFER_ROOT" rev-parse --verify "$l_ref^{tree}" >/dev/null 2>&1 ||
+		zxfer_vm_die "ZXFER_VM_PERF_BASELINE_REF does not name a tree in this repository: $l_ref"
+	git -C "$ZXFER_ROOT" archive --format=tar "$l_ref" ||
+		zxfer_vm_die "Failed to archive ZXFER_VM_PERF_BASELINE_REF: $l_ref"
+}
+
 zxfer_vm_qemu_log_cached_download_state() {
 	l_log_prefix=$1
 	l_subject=$2
@@ -573,6 +597,20 @@ zxfer_vm_qemu_log_base_image_state() {
 	esac
 }
 
+zxfer_vm_qemu_resize_overlay_if_needed() {
+	l_log_prefix=$1
+	l_overlay_path=$2
+	l_min_disk_size=$3
+
+	if [ -z "$l_min_disk_size" ]; then
+		return 0
+	fi
+
+	zxfer_vm_log "==> [$l_log_prefix] resizing writable overlay to $l_min_disk_size"
+	qemu-img resize "$l_overlay_path" "$l_min_disk_size" >/dev/null ||
+		zxfer_vm_die "Failed to resize writable overlay for [$l_log_prefix] to $l_min_disk_size"
+}
+
 zxfer_vm_qemu_copy_repo_to_guest() {
 	l_port=$1
 	l_known_hosts=$2
@@ -588,6 +626,24 @@ zxfer_vm_qemu_copy_repo_to_guest() {
 			-p "$l_port" \
 			root@127.0.0.1 "rm -rf '$l_remote_dir' && mkdir -p '$l_remote_dir' && tar xf - -C '$l_remote_dir'" ||
 		zxfer_vm_die "Failed to copy repository contents into the guest"
+}
+
+zxfer_vm_qemu_copy_ref_to_guest() {
+	l_port=$1
+	l_known_hosts=$2
+	l_identity=$3
+	l_remote_dir=$4
+	l_ref=$5
+
+	zxfer_vm_qemu_write_ref_archive "$l_ref" |
+		ssh -i "$l_identity" \
+			-o BatchMode=yes \
+			-o IdentitiesOnly=yes \
+			-o StrictHostKeyChecking=yes \
+			-o UserKnownHostsFile="$l_known_hosts" \
+			-p "$l_port" \
+			root@127.0.0.1 "rm -rf '$l_remote_dir' && mkdir -p '$l_remote_dir' && tar xf - -C '$l_remote_dir'" ||
+		zxfer_vm_die "Failed to copy baseline ref [$l_ref] into the guest"
 }
 
 zxfer_vm_qemu_run_remote_script() {
@@ -647,6 +703,7 @@ zxfer_vm_backend_qemu_run_guest() {
 	l_guest_base_name=
 	l_guest_archive_compression=
 	l_guest_base_format=
+	l_guest_min_disk_size=
 	l_guest_arch=
 	l_seed_transport=
 	l_guest_cache_dir=
@@ -665,6 +722,7 @@ zxfer_vm_backend_qemu_run_guest() {
 	l_test_script=
 	l_prepare_script=
 	l_remote_dir=/root/zxfer
+	l_remote_baseline_dir=/root/zxfer-baseline
 	l_remote_artifact_dir=/var/tmp/zxfer-vm-matrix
 	l_ssh_ready_probe_count=1
 	l_status=0
@@ -684,6 +742,8 @@ zxfer_vm_backend_qemu_run_guest() {
 		zxfer_vm_die "No qemu archive compression is defined for guest [$l_guest]"
 	l_guest_base_format=$(zxfer_vm_guest_qemu_base_format "$l_guest" "$l_guest_arch") ||
 		zxfer_vm_die "No qemu base image format is defined for guest [$l_guest]"
+	l_guest_min_disk_size=$(zxfer_vm_guest_qemu_min_disk_size "$l_guest" "$l_guest_arch") ||
+		zxfer_vm_die "No qemu minimum disk size is defined for guest [$l_guest]"
 	l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest") ||
 		zxfer_vm_die "No qemu seed transport is defined for guest [$l_guest]"
 	zxfer_vm_guest_qemu_shell "$l_guest" >/dev/null ||
@@ -774,6 +834,7 @@ zxfer_vm_backend_qemu_run_guest() {
 
 	qemu-img create -f qcow2 -F "$l_guest_base_format" -b "$l_base_image_path" "$l_overlay_path" >/dev/null ||
 		zxfer_vm_die "Failed to create writable overlay for guest [$l_guest]"
+	zxfer_vm_qemu_resize_overlay_if_needed "$l_guest_label/$l_guest_arch" "$l_overlay_path" "$l_guest_min_disk_size"
 	ZXFER_VM_QEMU_PID_FILE=$(zxfer_vm_join_path "$l_state_dir" "qemu.pid")
 
 	zxfer_vm_qemu_start_guest "$l_guest_arch" "$l_accel" "$l_http_port" "$l_ssh_port" \
@@ -792,6 +853,19 @@ zxfer_vm_backend_qemu_run_guest() {
 		"$l_guest_label/$l_guest_arch" "copying the repository" ||
 		zxfer_vm_die "Failed to refresh the guest SSH host key before copying the repository for [$l_guest]"
 	zxfer_vm_qemu_copy_repo_to_guest "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" "$l_remote_dir"
+	if [ "$ZXFER_VM_TEST_LAYER" = "perf-compare" ]; then
+		zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] copying baseline ref ${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final} into guest"
+		zxfer_vm_qemu_prepare_remote_ssh_step \
+			127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
+			"$l_guest_label/$l_guest_arch" "copying the performance baseline" ||
+			zxfer_vm_die "Failed to refresh the guest SSH host key before copying the performance baseline for [$l_guest]"
+		zxfer_vm_qemu_copy_ref_to_guest \
+			"$l_ssh_port" \
+			"$l_state_dir/known_hosts" \
+			"$l_identity_path" \
+			"$l_remote_baseline_dir" \
+			"${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final}"
+	fi
 	if [ "$ZXFER_VM_STREAM_GUEST_OUTPUT" != "1" ]; then
 		zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] guest logs: $l_artifact_dir/prepare.stdout, $l_artifact_dir/prepare.stderr, $l_artifact_dir/harness.stdout, $l_artifact_dir/harness.stderr"
 	fi

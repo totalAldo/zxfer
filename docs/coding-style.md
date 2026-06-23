@@ -134,11 +134,12 @@ The project priority order still applies:
 - For runtime-temp-root artifacts, prefer the current-shell helpers in
   [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh):
   `zxfer_create_runtime_artifact_file`,
-  `zxfer_create_runtime_artifact_dir`,
+  `zxfer_create_private_temp_dir`,
   `zxfer_write_runtime_artifact_file`,
   `zxfer_read_runtime_artifact_file`,
-  `zxfer_write_runtime_cache_file_atomically`,
   `zxfer_cleanup_runtime_artifact_path`.
+  They allocate under the one per-run 0700 temp root that trap exit removes
+  with a single `rm -rf`.
 - Do not add new ad hoc runtime-temp-root `mktemp` calls, hard-coded `/tmp`
   scratch paths, raw `: >"$file"` truncation, unchecked `cat "$file"`
   readbacks, or unguarded `while ... done <"$file"` loops for staged payloads,

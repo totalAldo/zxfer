@@ -20,7 +20,7 @@ oneTimeTearDown() {
 }
 
 setUp() {
-	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE
+	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE ZXFER_VM_PERF_BASELINE_REF ZXFER_VM_PERF_CASES
 	# shellcheck source=tests/vm/lib.sh
 	. "$VM_MATRIX_LIB"
 	zxfer_vm_reset_state
@@ -42,6 +42,30 @@ test_vm_profile_full_includes_omnios() {
 
 	assertEquals "The full profile should include Ubuntu, FreeBSD, and OmniOS." \
 		"ubuntu freebsd omnios" "$ZXFER_VM_SELECTED_GUESTS"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_catalog_uses_current_guest_releases() {
+	assertEquals "The Linux VM guest label should track the current Ubuntu release." \
+		"Ubuntu 26.04" "$(zxfer_vm_guest_label ubuntu)"
+	assertEquals "The FreeBSD VM guest label should track the current FreeBSD release." \
+		"FreeBSD 15.1" "$(zxfer_vm_guest_label freebsd)"
+	assertEquals "The OmniOS VM guest label should track the current stable release." \
+		"OmniOS r151058" "$(zxfer_vm_guest_label omnios)"
+	assertEquals "The Ubuntu amd64 VM image should use the current cloud image name." \
+		"ubuntu-26.04-server-cloudimg-amd64.img" "$(zxfer_vm_guest_qemu_image_filename ubuntu amd64)"
+	assertEquals "The FreeBSD arm64 VM image should use the current cloud image name." \
+		"FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz" "$(zxfer_vm_guest_qemu_image_filename freebsd arm64)"
+	assertEquals "The OmniOS amd64 VM image should use the current stable cloud image name." \
+		"omnios-r151058.cloud.qcow2" "$(zxfer_vm_guest_qemu_image_filename omnios amd64)"
+	assertContains "The Ubuntu image URL should use the current released cloud-image directory." \
+		"$(zxfer_vm_guest_qemu_image_url ubuntu amd64)" "/releases/26.04/release/"
+	assertContains "The FreeBSD image URL should use the current release directory." \
+		"$(zxfer_vm_guest_qemu_image_url freebsd amd64)" "/15.1-RELEASE/"
+	assertContains "The OmniOS image URL should use the current stable cloud image." \
+		"$(zxfer_vm_guest_qemu_image_url omnios amd64)" "/stable/omnios-r151058.cloud.qcow2"
+	assertContains "The OmniOS checksum URL should use the matching current stable checksum." \
+		"$(zxfer_vm_guest_qemu_checksum_url omnios amd64)" "/stable/omnios-r151058.cloud.qcow2.sha256"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -68,6 +92,22 @@ test_vm_parse_args_accepts_perf_test_layer() {
 
 	assertEquals "The VM runner should accept an opt-in performance test layer." \
 		"perf" "$ZXFER_VM_TEST_LAYER"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_parse_args_accepts_perf_compare_test_layer() {
+	zxfer_vm_parse_args --test-layer perf-compare
+
+	assertEquals "The VM runner should accept the performance comparison test layer." \
+		"perf-compare" "$ZXFER_VM_TEST_LAYER"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_shell_quote_preserves_single_shell_argument() {
+	quoted=$(zxfer_vm_shell_quote "feature/has'quote")
+
+	assertEquals "The VM shell quoting helper should preserve embedded single quotes." \
+		"'feature/has'\\''quote'" "$quoted"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -140,6 +180,51 @@ test_vm_validate_options_rejects_unknown_perf_profile() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_backend_validate_selection_rejects_ci_managed_perf_compare() {
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		ZXFER_VM_BACKEND=ci-managed
+		ZXFER_VM_TEST_LAYER=perf-compare
+		ZXFER_VM_SELECTED_GUESTS=ubuntu
+		zxfer_vm_backend_validate_selection
+	"
+
+	assertEquals "perf-compare should require the qemu backend because qemu exports the baseline ref." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The validation error should explain the backend requirement." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "perf-compare test layer currently requires the qemu backend"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_ref_archive_rejects_unknown_perf_baseline_ref() {
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		zxfer_vm_qemu_write_ref_archive refs/heads/zxfer-nosuch-perf-baseline-ref >/dev/null
+	"
+
+	assertEquals "The qemu backend should validate the baseline ref on the host before guest copy." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The validation error should name ZXFER_VM_PERF_BASELINE_REF." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ZXFER_VM_PERF_BASELINE_REF does not name a tree"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_ref_archive_rejects_option_like_perf_baseline_ref() {
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		zxfer_vm_qemu_write_ref_archive --output=/tmp/zxfer-perf-baseline.tar >/dev/null
+	"
+
+	assertEquals "The qemu backend should reject option-like baseline refs before invoking git." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The validation error should reject option-like ZXFER_VM_PERF_BASELINE_REF values." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "must not begin with '-'"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_validate_options_rejects_only_test_outside_integration_layer() {
 	zxfer_test_capture_subshell "
 		. \"$VM_MATRIX_LIB\"
@@ -209,7 +294,7 @@ test_vm_refresh_cached_download_uses_cached_copy_when_refresh_fails() {
 	mock_bin="$TEST_TMPDIR/mock-bin-refresh-cached"
 	checksum_file="$TEST_TMPDIR/SHA256SUMS"
 	mkdir -p "$mock_bin"
-	printf '%s\n' "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 ubuntu-24.04-server-cloudimg-arm64.img" >"$checksum_file"
+	printf '%s\n' "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 ubuntu-26.04-server-cloudimg-arm64.img" >"$checksum_file"
 
 	cat <<'EOF' >"$mock_bin/curl"
 #!/bin/sh
@@ -221,7 +306,7 @@ EOF
 		PATH=\"$mock_bin:\$PATH\"
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_refresh_cached_download 'https://example.invalid/SHA256SUMS' \"$checksum_file\" 'Ubuntu 24.04/arm64' 'checksum manifest SHA256SUMS'
+		zxfer_vm_refresh_cached_download 'https://example.invalid/SHA256SUMS' \"$checksum_file\" 'Ubuntu 26.04/arm64' 'checksum manifest SHA256SUMS'
 		cat \"$checksum_file\"
 	"
 
@@ -230,7 +315,7 @@ EOF
 	assertContains "The refresh helper should warn when it reuses a cached manifest after a download failure." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "reusing cached copy"
 	assertContains "The refresh helper should preserve the existing manifest contents when it falls back to cache." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ubuntu-24.04-server-cloudimg-arm64.img"
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ubuntu-26.04-server-cloudimg-arm64.img"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -249,7 +334,7 @@ EOF
 		PATH=\"$mock_bin:\$PATH\"
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_refresh_cached_download 'https://example.invalid/SHA256SUMS' \"$checksum_file\" 'Ubuntu 24.04/arm64' 'checksum manifest SHA256SUMS'
+		zxfer_vm_refresh_cached_download 'https://example.invalid/SHA256SUMS' \"$checksum_file\" 'Ubuntu 26.04/arm64' 'checksum manifest SHA256SUMS'
 	"
 
 	assertEquals "Checksum refresh should still fail closed when no cached manifest exists." \
@@ -303,8 +388,8 @@ test_vm_guest_qemu_ssh_ready_probe_count_uses_single_probe_for_supported_guests(
 		"3" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count omnios)"
 	assertEquals "Ubuntu qemu guests should keep the default one-probe SSH readiness threshold." \
 		"1" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count ubuntu)"
-	assertEquals "FreeBSD qemu guests should keep the default one-probe SSH readiness threshold." \
-		"1" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count freebsd)"
+	assertEquals "FreeBSD qemu guests should require several successful SSH probes while first-boot services settle." \
+		"3" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count freebsd)"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -353,7 +438,7 @@ EOF
 		PATH=\"$mock_bin:\$PATH\"
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 30 \"OmniOS r151056/amd64\" 2
+		zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 30 \"OmniOS r151058/amd64\" 2
 		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
 	"
 
@@ -401,7 +486,7 @@ EOF
 		PATH=\"$mock_bin:\$PATH\"
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.0/arm64' 'the selected guest test layer' 15
+		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.1/arm64' 'the selected guest test layer' 15
 		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
 	"
 
@@ -418,6 +503,7 @@ test_vm_qemu_prepare_remote_ssh_step_retries_until_keyscan_recovers() {
 	mock_bin="$TEST_TMPDIR/mock-bin-prepare-step-retry"
 	known_hosts_file="$TEST_TMPDIR/known_hosts.prepare-step-retry"
 	keyscan_count_file="$TEST_TMPDIR/keyscan-count.prepare-step-retry"
+	ssh_count_file="$TEST_TMPDIR/ssh-count.prepare-step-retry"
 	mkdir -p "$mock_bin"
 
 	cat <<EOF >"$mock_bin/ssh-keyscan"
@@ -435,9 +521,15 @@ printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_B"
 EOF
 	chmod 700 "$mock_bin/ssh-keyscan"
 
-	cat <<'EOF' >"$mock_bin/ssh"
+	cat <<EOF >"$mock_bin/ssh"
 #!/bin/sh
-exit 1
+count=0
+if [ -r "$ssh_count_file" ]; then
+	count=\$(cat "$ssh_count_file")
+fi
+count=\$((count + 1))
+printf '%s\n' "\$count" >"$ssh_count_file"
+exit 0
 EOF
 	chmod 700 "$mock_bin/ssh"
 
@@ -451,18 +543,81 @@ EOF
 		PATH=\"$mock_bin:\$PATH\"
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.0/arm64' 'guest preparation' 15
+		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.1/arm64' 'guest preparation' 15
 		printf 'keyscan-count=%s\n' \"\$(cat \"$keyscan_count_file\")\"
+		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
 	"
 
 	assertEquals "Step-level SSH preparation should retry until ssh-keyscan succeeds again." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "The helper should keep retrying transient keyscan failures." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "keyscan-count=2"
-	assertContains "Recovered keyscan retries should log that the host-key refresh succeeded before the remote step continues." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "SSH host-key refresh recovered for guest preparation"
+	assertContains "Recovered retries should log that the SSH readiness check succeeded before the remote step continues." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "SSH readiness recovered for guest preparation"
+	assertContains "The recovered refresh path should still prove the guest is reachable over SSH." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ssh-count=1"
 	assertContains "The recovered refresh should publish the new host key." \
 		"$(cat "$known_hosts_file")" "KEY_B"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_prepare_remote_ssh_step_requires_probe_after_keyscan_success() {
+	mock_bin="$TEST_TMPDIR/mock-bin-prepare-step-probe"
+	known_hosts_file="$TEST_TMPDIR/known_hosts.prepare-step-probe"
+	keyscan_count_file="$TEST_TMPDIR/keyscan-count.prepare-step-probe"
+	ssh_count_file="$TEST_TMPDIR/ssh-count.prepare-step-probe"
+	mkdir -p "$mock_bin"
+
+	cat <<EOF >"$mock_bin/ssh-keyscan"
+#!/bin/sh
+count=0
+if [ -r "$keyscan_count_file" ]; then
+	count=\$(cat "$keyscan_count_file")
+fi
+count=\$((count + 1))
+printf '%s\n' "\$count" >"$keyscan_count_file"
+printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_\$count"
+EOF
+	chmod 700 "$mock_bin/ssh-keyscan"
+
+	cat <<EOF >"$mock_bin/ssh"
+#!/bin/sh
+count=0
+if [ -r "$ssh_count_file" ]; then
+	count=\$(cat "$ssh_count_file")
+fi
+count=\$((count + 1))
+printf '%s\n' "\$count" >"$ssh_count_file"
+if [ "\$count" -eq 1 ]; then
+	exit 255
+fi
+exit 0
+EOF
+	chmod 700 "$mock_bin/ssh"
+
+	cat <<'EOF' >"$mock_bin/sleep"
+#!/bin/sh
+exit 0
+EOF
+	chmod 700 "$mock_bin/sleep"
+
+	zxfer_test_capture_subshell "
+		PATH=\"$mock_bin:\$PATH\"
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.1/arm64' 'guest preparation' 15
+		printf 'keyscan-count=%s\n' \"\$(cat \"$keyscan_count_file\")\"
+		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
+	"
+
+	assertEquals "A fresh keyscan is not enough; the remote step should wait until SSH can execute a command." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The helper should retry after a successful keyscan when the command probe still fails." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "keyscan-count=2"
+	assertContains "The helper should require a successful command probe before returning." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ssh-count=2"
+	assertContains "The final known_hosts file should reflect the host key from the successful probe attempt." \
+		"$(cat "$known_hosts_file")" "KEY_2"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -481,7 +636,7 @@ EOF
 	zxfer_test_capture_subshell "
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_report_guest_command_failure 'FreeBSD 15.0/arm64' 'shunit2 runner' 1 \"$stdout_file\" \"$stderr_file\"
+		zxfer_vm_report_guest_command_failure 'FreeBSD 15.1/arm64' 'shunit2 runner' 1 \"$stdout_file\" \"$stderr_file\"
 	"
 
 	assertEquals "Guest command failure summaries should not fail the reporting helper itself." \
@@ -506,7 +661,7 @@ EOF
 	zxfer_test_capture_subshell "
 		. \"$VM_MATRIX_LIB\"
 		zxfer_vm_reset_state
-		zxfer_vm_report_guest_command_failure 'FreeBSD 15.0/arm64' 'shunit2 runner' 1 \"$stdout_file\" \"$stderr_file\"
+		zxfer_vm_report_guest_command_failure 'FreeBSD 15.1/arm64' 'shunit2 runner' 1 \"$stdout_file\" \"$stderr_file\"
 	"
 
 	assertEquals "Assertion-only harness failures should still render through the shared guest failure reporter." \
@@ -601,10 +756,10 @@ test_vm_detect_host_platform_marks_wsl2() {
 test_vm_checksum_parser_supports_bsd_format() {
 	checksum_file="$TEST_TMPDIR/freebsd.CHECKSUM.SHA256"
 	cat <<'EOF' >"$checksum_file"
-SHA256 (FreeBSD-15.0-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz) = abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+SHA256 (FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz) = abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 EOF
 
-	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "FreeBSD-15.0-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz")
+	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz")
 
 	assertEquals "The checksum parser should support FreeBSD-style SHA256 manifests." \
 		"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" "$result"
@@ -614,10 +769,10 @@ EOF
 test_vm_checksum_parser_supports_gnu_format() {
 	checksum_file="$TEST_TMPDIR/ubuntu.SHA256SUMS"
 	cat <<'EOF' >"$checksum_file"
-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 ubuntu-24.04-server-cloudimg-amd64.img
+abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 ubuntu-26.04-server-cloudimg-amd64.img
 EOF
 
-	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "ubuntu-24.04-server-cloudimg-amd64.img")
+	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "ubuntu-26.04-server-cloudimg-amd64.img")
 
 	assertEquals "The checksum parser should support GNU-style checksum manifests." \
 		"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" "$result"
@@ -627,10 +782,10 @@ EOF
 test_vm_checksum_parser_supports_gnu_binary_format() {
 	checksum_file="$TEST_TMPDIR/ubuntu-binary.SHA256SUMS"
 	cat <<'EOF' >"$checksum_file"
-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 *ubuntu-24.04-server-cloudimg-arm64.img
+abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 *ubuntu-26.04-server-cloudimg-arm64.img
 EOF
 
-	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "ubuntu-24.04-server-cloudimg-arm64.img")
+	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "ubuntu-26.04-server-cloudimg-arm64.img")
 
 	assertEquals "The checksum parser should support GNU binary-mode checksum manifests." \
 		"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" "$result"
@@ -643,7 +798,7 @@ test_vm_checksum_parser_supports_single_hash_files() {
 abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 EOF
 
-	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "omnios-r151056.cloud.qcow2")
+	result=$(zxfer_vm_resolve_expected_checksum "$checksum_file" "omnios-r151058.cloud.qcow2")
 
 	assertEquals "The checksum parser should support one-line sha256 files." \
 		"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" "$result"
@@ -721,6 +876,69 @@ test_vm_render_guest_test_script_uses_perf_runner_when_requested() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_render_guest_test_script_uses_perf_compare_runner_when_requested() {
+	ZXFER_VM_TEST_LAYER=perf-compare
+	ZXFER_VM_PERF_PROFILE=standard
+	ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final
+
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertContains "Performance comparison guest runs should invoke the comparator." \
+		"$script_body" "./tests/run_perf_compare.sh --yes --profile \"standard\""
+	assertContains "Performance comparison guest runs should use the archived baseline checkout beside the candidate." \
+		"$script_body" "--baseline-bin \"/root/zxfer-baseline/zxfer\""
+	assertContains "Performance comparison guest runs should label the baseline ref." \
+		"$script_body" "--baseline-label 'upstream-compat-final'"
+	assertContains "Performance comparison guest runs should measure the current checkout as candidate." \
+		"$script_body" "--candidate-bin \"/root/zxfer/zxfer\""
+	assertNotContains "Performance comparison guest runs should not rely on git inside the guest." \
+		"$script_body" "git "
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_render_guest_test_script_shell_quotes_perf_compare_baseline_label() {
+	ZXFER_VM_TEST_LAYER=perf-compare
+	ZXFER_VM_PERF_PROFILE=smoke
+	ZXFER_VM_PERF_BASELINE_REF="feature/has'quote"
+
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertContains "Performance comparison guest scripts should shell-quote the baseline label." \
+		"$script_body" "--baseline-label 'feature/has'\\''quote'"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_render_guest_test_script_forwards_perf_case_selection() {
+	ZXFER_VM_TEST_LAYER=perf-compare
+	ZXFER_VM_PERF_PROFILE=smoke
+	ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final
+	ZXFER_VM_PERF_CASES="chain_local chain_local_noop"
+
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertContains "Perf-compare guest scripts should forward the case selection through --case." \
+		"$script_body" "--case 'chain_local chain_local_noop'"
+
+	ZXFER_VM_TEST_LAYER=perf
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertContains "Perf guest scripts should forward the case selection through --case." \
+		"$script_body" "--case 'chain_local chain_local_noop'"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_render_guest_test_script_omits_case_flag_without_perf_case_selection() {
+	ZXFER_VM_TEST_LAYER=perf-compare
+	ZXFER_VM_PERF_PROFILE=smoke
+	ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final
+
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
+
+	assertNotContains "Perf-compare guest scripts should omit --case when no selection is configured." \
+		"$script_body" "--case"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_render_guest_test_script_wraps_omnios_shunit2_with_bash_posix() {
 	ZXFER_VM_TEST_LAYER=shunit2
 
@@ -751,6 +969,16 @@ test_vm_guest_prepare_script_installs_zfs_tools_for_ubuntu_perf() {
 	assertContains "Ubuntu perf guest preparation should install OpenZFS tooling." \
 		"$script_body" "apt-get install -y csh zfsutils-linux parallel zstd"
 	assertContains "Ubuntu perf guest preparation should load the ZFS module before running sparse-pool fixtures." \
+		"$script_body" "modprobe zfs"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_prepare_script_installs_zfs_tools_for_ubuntu_perf_compare() {
+	script_body=$(zxfer_vm_guest_prepare_script ubuntu qemu perf-compare)
+
+	assertContains "Ubuntu perf-compare guest preparation should install OpenZFS tooling." \
+		"$script_body" "apt-get install -y csh zfsutils-linux parallel zstd"
+	assertContains "Ubuntu perf-compare guest preparation should load the ZFS module before running sparse-pool fixtures." \
 		"$script_body" "modprobe zfs"
 }
 
@@ -963,6 +1191,76 @@ test_vm_qemu_aarch64_efi_prefers_explicit_override() {
 test_vm_qemu_machine_arg_keeps_highmem_enabled_for_arm64_guests() {
 	assertEquals "Apple Silicon arm64 guests should keep QEMU's default highmem layout enabled." \
 		"virt,accel=hvf" "$(zxfer_vm_qemu_machine_arg arm64 hvf)"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_qemu_min_disk_size_expands_ubuntu_overlays() {
+	assertEquals "Ubuntu guest overlays should be large enough for apt metadata and ZFS package setup." \
+		"16G" "$(zxfer_vm_guest_qemu_min_disk_size ubuntu arm64)"
+	assertEquals "FreeBSD guest overlays should keep the upstream image size unless a need is identified." \
+		"" "$(zxfer_vm_guest_qemu_min_disk_size freebsd arm64)"
+	assertEquals "OmniOS guest overlays should keep the upstream image size unless a need is identified." \
+		"" "$(zxfer_vm_guest_qemu_min_disk_size omnios amd64)"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_resize_overlay_if_needed_invokes_qemu_img_resize() {
+	fake_bin_dir="$TEST_TMPDIR/fake-bin-qemu-resize"
+	recorded_args="$TEST_TMPDIR/qemu-img-resize-args.txt"
+	mkdir -p "$fake_bin_dir"
+	cat <<EOF >"$fake_bin_dir/qemu-img"
+#!/bin/sh
+printf 'argc=%s\n' "\$#" >"$recorded_args"
+while [ "\$#" -gt 0 ]; do
+	printf '<%s>\n' "\$1" >>"$recorded_args"
+	shift
+done
+exit 0
+EOF
+	chmod +x "$fake_bin_dir/qemu-img"
+
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		PATH=\"$fake_bin_dir:/usr/bin:/bin\"
+		zxfer_vm_qemu_resize_overlay_if_needed 'Ubuntu 26.04/arm64' \"$TEST_TMPDIR/overlay.qcow2\" 16G
+	"
+
+	assertEquals "Overlay resizing should succeed when qemu-img resize succeeds." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The resize helper should report the requested guest overlay size." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "resizing writable overlay to 16G"
+	assertContains "The resize helper should call qemu-img resize." \
+		"$(cat "$recorded_args")" "<resize>"
+	assertContains "The resize helper should preserve the overlay path argument." \
+		"$(cat "$recorded_args")" "<$TEST_TMPDIR/overlay.qcow2>"
+	assertContains "The resize helper should preserve the requested size argument." \
+		"$(cat "$recorded_args")" "<16G>"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_resize_overlay_if_needed_skips_blank_size() {
+	fake_bin_dir="$TEST_TMPDIR/fake-bin-qemu-resize-skip"
+	recorded_args="$TEST_TMPDIR/qemu-img-resize-skip-args.txt"
+	mkdir -p "$fake_bin_dir"
+	cat <<EOF >"$fake_bin_dir/qemu-img"
+#!/bin/sh
+printf '%s\n' "unexpected qemu-img invocation" >"$recorded_args"
+exit 99
+EOF
+	chmod +x "$fake_bin_dir/qemu-img"
+
+	zxfer_test_capture_subshell "
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		PATH=\"$fake_bin_dir:/usr/bin:/bin\"
+		zxfer_vm_qemu_resize_overlay_if_needed 'FreeBSD 15.1/arm64' \"$TEST_TMPDIR/overlay.qcow2\" ''
+	"
+
+	assertEquals "Guests without a minimum disk size should skip qemu-img resize." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertFalse "The resize helper should not invoke qemu-img for blank sizes." \
+		"[ -e \"$recorded_args\" ]"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

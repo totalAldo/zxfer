@@ -20,6 +20,9 @@ Use the layers this way:
 - Use [../tests/run_perf_tests.sh](../tests/run_perf_tests.sh) for manual
   throughput and startup/cleanup regression checks, preferably through the VM
   matrix `perf` layer unless you are on a disposable ZFS-capable host.
+- Use [../tests/run_perf_compare.sh](../tests/run_perf_compare.sh), preferably
+  through the VM matrix `perf-compare` layer, when comparing two zxfer
+  binaries such as the current checkout against `upstream-compat-final`.
 - Use [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   directly only when you explicitly want an interactive host-side harness run
   on a disposable ZFS-capable system.
@@ -45,7 +48,7 @@ flowchart TD
     H --> I["Default guest test layer: integration"]
     H --> J["Optional guest test layer: shunit2"]
     G -->|no| N{"Need manual performance regression signal?"}
-    N -->|yes| O["Run tests/run_vm_matrix.sh --test-layer perf, or tests/run_perf_tests.sh manually on a disposable host"]
+    N -->|yes| O["Run tests/run_vm_matrix.sh --test-layer perf or perf-compare"]
     N -->|no| K{"Do you explicitly want the expert host-side harness on a disposable ZFS-capable system?"}
     K -->|yes| L["Run tests/run_integration_zxfer.sh manually"]
     K -->|no| M["Stay on the guest-backed VM path"]
@@ -58,6 +61,9 @@ The safe default is still:
   integration, guest-side shunit2, or guest-side performance runs
 - [../tests/run_perf_tests.sh](../tests/run_perf_tests.sh) for explicit
   manual performance comparisons on disposable ZFS-capable hosts
+- [../tests/run_perf_compare.sh](../tests/run_perf_compare.sh) for
+  informative two-binary comparisons when both binaries are already available
+  on a disposable ZFS-capable host
 - [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   only for explicit manual host-side harness work
 
@@ -93,9 +99,9 @@ Run the local lint stack with the same pinned toolchain as CI:
 ```
 
 For a ready-made contributor environment, open the repository in the included
-VS Code / GitHub Codespaces devcontainer. It tracks the Ubuntu 24.04 CI host
-family closely enough for local lint, shunit2, and coverage work, and it
-preinstalls:
+VS Code / GitHub Codespaces devcontainer. It stays on the stable Ubuntu 24.04
+base while carrying the same pinned lint, shunit2, and coverage tooling used
+by CI, and it preinstalls:
 
 - `dash`
 - `bash-posix`
@@ -145,6 +151,7 @@ The test layout broadly follows the source layout:
 - `test_run_shunit_tests.sh`
 - `test_run_integration_zxfer.sh`
 - `test_run_perf_tests.sh`
+- `test_run_perf_compare.sh`
 - `test_run_vm_matrix.sh`
 - `test_zxfer_launcher.sh`
 - `test_zxfer_locking.sh`
@@ -153,12 +160,10 @@ The test layout broadly follows the source layout:
 - `test_zxfer_dependencies.sh`
 - `test_zxfer_runtime.sh`
 - `test_zxfer_background_jobs.sh`
-- `test_zxfer_background_job_runner.sh`
 - `test_zxfer_cleanup_child_wrapper.sh`
 - `test_zxfer_cli.sh`
 - `test_zxfer_snapshot_state.sh`
 - `test_zxfer_backup_metadata.sh`
-- `test_zxfer_property_cache_coverage.sh`
 - `test_zxfer_remote_hosts.sh`
 - `test_zxfer_remote_hosts_coverage.sh`
 - `test_zxfer_snapshot_discovery.sh`
@@ -167,10 +172,7 @@ The test layout broadly follows the source layout:
 - `test_zxfer_replication.sh`
 - `test_zxfer_send_receive.sh`
 
-Some support modules are still covered inside adjacent suites. For example,
-`src/zxfer_property_cache.sh` is exercised mainly by
-`test_zxfer_property_reconcile.sh`, with supplemental edge-path coverage in
-`test_zxfer_property_cache_coverage.sh`.
+Some support modules are still covered inside adjacent suites.
 `src/zxfer_backup_metadata.sh` now has a dedicated peer suite in
 `test_zxfer_backup_metadata.sh`, with a smaller number of cross-module backup
 restore and remote-helper expectations still covered in the property and
@@ -181,17 +183,16 @@ through the broader peer suite alone.
 
 The top-level launcher and `tests/test_helper.sh` both source
 `src/zxfer_modules.sh`, so runtime module order is defined in one place rather
-than being duplicated across test fixtures, including the owned-locking layer
-that now sits ahead of reporting and remote-host helpers and the supervised
-background-job layer that now sits between runtime and the higher-level
-replication modules.
+than being duplicated across test fixtures. The path-security and owned-lock
+helpers live as sections of `src/zxfer_runtime.sh` (Phase 8 merge), and the
+supervision-lite background-job layer sits between runtime and the
+higher-level replication modules.
 
-`test_zxfer_locking.sh` owns the shared lock/lease primitive itself:
-metadata render/parse, owner-identity capture, stale-owner reaping, checked
-release mismatches, and trap-time owned-lock cleanup helpers. The remote-host,
-reporting, and runtime suites then cover the subsystem adapters that apply
-that shared metadata-bearing format to ssh control-socket locks and leases,
-remote capability-cache locks, and `ZXFER_ERROR_LOG` locking.
+`test_zxfer_locking.sh` owns the owned-lock primitive itself (now defined in
+`src/zxfer_runtime.sh` and sourced through that module): pid+start-token
+metadata render/parse, owner-identity capture, stale-owner reaping, and
+checked release mismatches. The reporting suite covers the
+`ZXFER_ERROR_LOG` lock, the primitive's only cross-process consumer.
 
 Focused tests that exercise `zxfer_init_globals()` should source through at
 least the property-reconcile boundary, or anything later in
@@ -199,25 +200,20 @@ least the property-reconcile boundary, or anything later in
 the property modules' public reset helpers rather than carrying a duplicated
 copy of that reset inventory inside `zxfer_runtime.sh`.
 
-`test_zxfer_background_jobs.sh` owns the supervisor-specific metadata and
-abort-path coverage: launch/completion parsing, queue-record normalization,
-completion-aware cleanup shortcuts when `completion.tsv` already exists,
-refreshed post-signal revalidation when a runner disappears during teardown,
-validated process-group cleanup, owned-child-set fallback, and PID-reuse
-rejection when the tracked runner no longer matches the recorded helper
-identity. The send/receive and snapshot-discovery suites then focus on how
-their modules consume the shared supervisor contract.
+`test_zxfer_background_jobs.sh` owns the supervision-lite background-job
+coverage: status-file propagation (success, failure, missing-status-file and
+non-numeric-status fail-closed paths), queue-record normalization and FIFO
+notification ordering, abort teardown of the whole pipeline on both the setsid
+process-group path and the cleanup-wrapper fallback, trap-style abort-all
+teardown, and the spawn failure paths. The send/receive and
+snapshot-discovery suites then focus on how their modules consume the shared
+spawn/wait/abort contract.
 
-`test_zxfer_background_job_runner.sh` owns the standalone runner entry point:
-launch/completion file publication, completion queue notifications, fail-closed
-queue/completion rewrite paths, optional `setsid` process-group isolation, and
-the script's direct-exec behavior when it is invoked as a helper instead of
-sourced for tests.
-
-`test_zxfer_cleanup_child_wrapper.sh` owns the short-lived cleanup wrapper
-entry point: direct-exec argument validation, exit-status passthrough for the
-wrapped command, and descendant teardown when the wrapper is interrupted during
-abort cleanup.
+`test_zxfer_cleanup_child_wrapper.sh` owns the cleanup wrapper entry point
+(used both by short-lived helpers and as the no-setsid background-job spawn
+fallback): direct-exec argument validation, exit-status passthrough for the
+wrapped command, and descendant teardown when the wrapper is interrupted
+during abort cleanup.
 
 The suites also use `tests/test_helper.sh` for the shared shunit2 scaffolding:
 default no-op lifecycle hooks, temporary-directory setup helpers, and common
@@ -298,6 +294,9 @@ sequenceDiagram
     else perf test layer
         Matrix->>Layer: run guest performance workflow
         Layer->>Guest: execute tests/run_perf_tests.sh --yes inside the guest
+    else perf-compare test layer
+        Matrix->>Layer: export baseline ref beside candidate checkout
+        Layer->>Guest: execute tests/run_perf_compare.sh --yes inside the guest
     end
     Guest-->>Matrix: return guest logs and exit status
     Matrix-->>Host: summarize results and clean host-side runner state
@@ -339,6 +338,25 @@ Run the larger performance profile inside the same guest layer:
 
 ```sh
 ZXFER_VM_PERF_PROFILE=standard ./tests/run_vm_matrix.sh --profile smoke --test-layer perf
+```
+
+Compare the current checkout against `upstream-compat-final` inside the guest:
+
+```sh
+ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final ./tests/run_vm_matrix.sh --profile smoke --test-layer perf-compare
+```
+
+Older baseline binaries cannot execute every case. `upstream-compat-final`
+requires a BSD-userland guest (its `mktemp -t` template is rejected by GNU
+coreutils, so use the FreeBSD guest from the `local` profile) and fails the
+property-transfer fanout cases on current OpenZFS because its legacy `-P`
+path forwards read-only properties such as `pbkdf2iters` to `zfs create`.
+Use `ZXFER_VM_PERF_CASES` to compare only the cases the baseline can run:
+
+```sh
+ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final \
+	ZXFER_VM_PERF_CASES="chain_local chain_local_noop chain_local_incr fanout_local_j1_incr chain_remote_mock chain_remote_mock_noop chain_remote_mock_pull_noop chain_remote_mock_compressed" \
+	./tests/run_vm_matrix.sh --profile local --guest freebsd --test-layer perf-compare
 ```
 
 Run the same profile with live guest stdout/stderr mirrored to the console:
@@ -406,38 +424,43 @@ Execution defaults:
   runs and switches to `ci-managed` only when `ZXFER_VM_CI_MANAGED_GUEST`
   pins one guest in an already-in-guest CI environment
 - guest execution is serial by default (`--jobs 1`)
-- guest test-layer selection defaults to `integration`; `--test-layer shunit2` opts in to guest shunit2 runs, and `--test-layer perf` opts in to guest performance runs
+- guest test-layer selection defaults to `integration`; `--test-layer shunit2`
+  opts in to guest shunit2 runs, `--test-layer perf` opts in to guest
+  performance runs, and `--test-layer perf-compare` opts in to a two-binary
+  performance comparison
 - guest stdout/stderr is written to per-guest artifact files by default
 - `--stream-guest-output` mirrors guest logs live to the console
 - `--list-profiles` and `--list-guests` print the current supported choices
   and exit without touching a guest
-- `--only-test name[,name...]` narrows the in-guest integration harness to one or more named tests and can be repeated; it is not used by the shunit2 or perf layers
-- `--failed-tests-only` suppresses passing integration-test chatter inside the guest harness, automatically enables live guest output streaming, prints a compact `[N/TOTAL] PASS test_name` or `[N/TOTAL] SKIP test_name` line for each non-failing test, and replays the full labeled stdout/stderr for each failing test; it is not used by the shunit2 or perf layers
+- `--only-test name[,name...]` narrows the in-guest integration harness to one or more named tests and can be repeated; it is not used by the shunit2, perf, or perf-compare layers
+- `--failed-tests-only` suppresses passing integration-test chatter inside the guest harness, automatically enables live guest output streaming, prints a compact `[N/TOTAL] PASS test_name` or `[N/TOTAL] SKIP test_name` line for each non-failing test, and replays the full labeled stdout/stderr for each failing test; it is not used by the shunit2, perf, or perf-compare layers
 - `--jobs N` allows multiple selected guests to run in parallel
 
 Profiles:
 
-- `smoke`: Ubuntu 24.04 guest
-- `local`: Ubuntu 24.04 plus FreeBSD 15.0 guests
-- `full`: Ubuntu 24.04, FreeBSD 15.0, and OmniOS r151056 guests
+- `smoke`: Ubuntu 26.04 guest
+- `local`: Ubuntu 26.04 plus FreeBSD 15.1 guests
+- `full`: Ubuntu 26.04, FreeBSD 15.1, and OmniOS r151058 guests
 - `ci`: the same guest set as `full`, intended for workflow-driven selection
 
 The local QEMU backend prefers the guest architecture that best matches the
 host while keeping the guest matrix stable. On Linux `amd64` hosts with
 `/dev/kvm` access, and on Intel macOS hosts, the current guests run as
 hardware-virtualized `amd64` VMs. On Apple Silicon macOS hosts and other
-`arm64` hosts, the runner now prefers official `arm64` Ubuntu 24.04 and
-FreeBSD 15.0 images for the `smoke` and `local` profiles. That lets those
+`arm64` hosts, the runner now prefers official `arm64` Ubuntu 26.04 and
+FreeBSD 15.1 images for the `smoke` and `local` profiles. That lets those
 lanes use a hardware-virtualized ARM guest boundary when the local QEMU
 aarch64 UEFI firmware is available. OmniOS still ships only the pinned
 `amd64` cloud image in this matrix, so OmniOS on `arm64` hosts remains a
 best-effort TCG lane rather than the project's strict isolation gate.
 
 Use `smoke` or `local` for routine development on Apple Silicon and other
-`arm64` hosts. Treat the GitHub Actions `ubuntu-24.04` direct-host Linux lane
-as the project's strict automated Linux integration gate, and treat local
-TCG-backed OmniOS runs as development/debug coverage rather than the
-highest-confidence certification path.
+`arm64` hosts. Treat the GitHub Actions `ubuntu-26.04` direct-host Linux lane
+as the project's strict automated Linux integration gate. GitHub currently
+offers that runner as a public preview, so runner-image regressions should be
+triaged separately from zxfer integration failures. Treat local TCG-backed
+OmniOS runs as development/debug coverage rather than the highest-confidence
+certification path.
 
 Recommended host tools for the local `qemu` backend:
 
@@ -459,12 +482,25 @@ test layer. By default that layer is the existing
 `--test-layer shunit2` to run `tests/run_shunit_tests.sh` inside the guest
 instead, or add `--test-layer perf` to run
 `tests/run_perf_tests.sh --yes --profile "${ZXFER_VM_PERF_PROFILE:-smoke}"`
-inside the guest. Perf artifacts land under the guest temp/artifact tree and
-are copied back with the rest of the VM artifacts. Logs and preserved workdirs
-still land under the configured artifact root. Even without live guest-output
-streaming, the runner now logs each major phase so local runs do not appear
-idle while a guest boots, installs prerequisites, or runs the selected guest
-test layer.
+inside the guest. Add `--test-layer perf-compare` to export
+`${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final}` with host-side
+`git archive`, copy it beside the current checkout in the guest, and run
+`tests/run_perf_compare.sh` from the candidate checkout. Perf artifacts land
+under the guest temp/artifact tree and are copied back with the rest of the VM
+artifacts. Logs and preserved workdirs still land under the configured artifact
+root. Even without live guest-output streaming, the runner now logs each major
+phase so local runs do not appear idle while a guest boots, installs
+prerequisites, or runs the selected guest test layer.
+
+Ubuntu QEMU guests use a 16G per-run writable overlay so cloud-init can grow
+the root filesystem before `apt` metadata and OpenZFS package setup run. The
+cached upstream base image remains unchanged. FreeBSD and OmniOS overlays keep
+the upstream image size unless a guest-specific need is identified.
+
+FreeBSD QEMU guests require three consecutive SSH readiness probes before the
+runner starts copying files, and each later remote step rechecks that SSH can
+execute a command after refreshing the host key. This avoids first-boot
+`sshd` restart windows on the 15.1 cloud images.
 
 Useful VM-runner environment variables:
 
@@ -476,8 +512,13 @@ Useful VM-runner environment variables:
 - `ZXFER_VM_ONLY_TESTS`: whitespace- or comma-delimited in-guest integration
   test names to pass through to `--only-test`
 - `ZXFER_VM_FAILED_TESTS_ONLY=1`: default to the failure-only integration view
-- `ZXFER_VM_PERF_PROFILE`: performance profile for `--test-layer perf`;
-  supported values are `smoke` and `standard`
+- `ZXFER_VM_PERF_PROFILE`: performance profile for `--test-layer perf` and
+  `--test-layer perf-compare`; supported values are `smoke` and `standard`
+- `ZXFER_VM_PERF_BASELINE_REF`: host git ref archived by the QEMU backend for
+  `--test-layer perf-compare`; defaults to `upstream-compat-final`
+- `ZXFER_VM_PERF_CASES`: whitespace-delimited perf case names forwarded to the
+  in-guest perf runner or comparator through `--case`; use this to restrict a
+  comparison to cases the selected baseline binary can execute
 - `ZXFER_VM_QEMU_AARCH64_EFI`: override the detected aarch64 QEMU UEFI path
 - `ZXFER_VM_CI_MANAGED_GUEST`: make `--backend auto` select the `ci-managed`
   backend for one named guest
@@ -514,7 +555,19 @@ Compare a current run against a previous `summary.tsv` without turning
 regressions into hard failures:
 
 ```sh
-./tests/run_perf_tests.sh --yes --profile standard --case chain_local,fanout_local_j4_props --baseline /tmp/zxfer-perf/summary.tsv
+./tests/run_perf_tests.sh --yes --label candidate --profile standard --case chain_local,fanout_local_j4_props --baseline /tmp/zxfer-perf/summary.tsv
+```
+
+Compare two already-built zxfer executables on a disposable ZFS-capable host:
+
+```sh
+./tests/run_perf_compare.sh --yes \
+  --baseline-bin /tmp/zxfer-baseline/zxfer \
+  --candidate-bin ./zxfer \
+  --baseline-label upstream-compat-final \
+  --candidate-label candidate \
+  --profile smoke \
+  --output-dir /tmp/zxfer-perf-compare
 ```
 
 Profiles:
@@ -524,12 +577,46 @@ Profiles:
 - `standard`: 1 warmup, 3 samples, about 32 chain snapshots, 48 sibling
   datasets, and 2048 MB sparse pool files
 
-Initial cases:
+Artifacts:
+
+- `run-info.tsv`: run label, profile, selected cases, sample counts, platform,
+  `ZXFER_BIN`, `zfs` / `zpool` version lines, timestamp, and fixture sizes
+- `samples.tsv`: one raw row per warmup or measured sample, including all
+  known `-V` profile counters; missing counters from older binaries are empty,
+  not zero
+- `summary.tsv` and `summary.md`: measured-sample averages only
+- `compare.tsv`: advisory deltas for common numeric metrics when a baseline is
+  supplied
+
+No-op cases seed the destination first and measure the second run:
+`chain_local_noop`, `fanout_local_j4_props_noop`, `chain_remote_mock_noop`,
+and `chain_remote_mock_pull_noop`. The pull variant uses `-O localhost` only
+(mock ssh origin, local destination). Since Phase 8 the fast recursive no-op
+proof covers both the local and the pull no-op cases; only `-T` runs and
+gated option combinations still take full discovery on a clean no-op.
+
+Incremental cases seed the destination first, then create one newer snapshot
+and measure the run that sends only that increment: `chain_local_incr`
+(exactly one increment on the chain) and `fanout_local_j1_incr` (one increment
+per sibling dataset with one job).
+
+`tests/run_perf_compare.sh` writes `baseline/`, `candidate/`, top-level
+`compare.tsv`, and top-level `compare.md`. It fails only when argument
+validation or a sample run fails; performance regressions are annotations, not
+CI gates.
+
+Cases:
 
 - `chain_local`
+- `chain_local_noop`
+- `chain_local_incr`
 - `fanout_local_j1_props`
+- `fanout_local_j1_incr`
 - `fanout_local_j4_props`
+- `fanout_local_j4_props_noop`
 - `chain_remote_mock`
+- `chain_remote_mock_noop`
+- `chain_remote_mock_pull_noop`
 - `chain_remote_mock_compressed`
 
 Artifacts:
@@ -662,22 +749,23 @@ The project currently ships four GitHub Actions workflows:
   hygiene checks through the shared `tests/run_lint.sh` bootstrap with pinned
   tool versions and hashes
 - `coverage.yml`: shell coverage with both the bash-xtrace fallback and a
-  Docker-backed `kcov` pass, each uploaded as its own workflow artifact; the
-  bash-xtrace lane is the coverage-policy gate and publishes the current
-  `missing.txt` diff plus the policy report into the GitHub step summary
+  non-blocking Docker-backed `kcov` pass, each uploaded as its own workflow
+  artifact; the bash-xtrace lane is the coverage-policy gate and publishes the
+  current `missing.txt` diff plus the policy report into the GitHub step
+  summary
 - `tests.yml`: shunit2 unit tests on Ubuntu and macOS, plus an Ubuntu
   portable-shell matrix for `dash`, `bash --posix`, and `busybox ash` on every
   push, plus a non-blocking `posh` lane on pushes to `main` only so the slower
   hosted-runner pass stays out of routine branch pushes; plus dedicated
   FreeBSD and OmniOS VM-backed unit jobs
 - `integration.yml`: integration tests with the direct-host Ubuntu harness on
-  `ubuntu-24.04`, plus FreeBSD and OmniOS guest-local `vmactions` lanes that
+  `ubuntu-26.04`, plus FreeBSD and OmniOS guest-local `vmactions` lanes that
   install their native prerequisites and run `tests/run_integration_zxfer.sh`
   inside the guest, each preserving failure artifacts in a host-appropriate
   location before a host-side status check restores the guest harness result
 
 The Linux integration lane now follows the same direct-host implementation as
-the repository's `main` branch: it runs on GitHub-hosted `ubuntu-24.04`,
+the repository's `main` branch: it runs on GitHub-hosted `ubuntu-26.04`,
 installs `zfsutils-linux`, loads the `zfs` module, and invokes
 `./tests/run_integration_zxfer.sh --yes --keep-going` through `sudo` with a
 preserved temporary workdir so failure artifacts can still be uploaded.
@@ -736,11 +824,14 @@ The CI workflows use GitHub Actions concurrency cancellation keyed by workflow
 name plus pushed ref, so stale branch runs are canceled when a new push
 supersedes them.
 
-The `kcov` job runs on `ubuntu-24.04` and uses the official `kcov/kcov` Docker
+The `kcov` job runs on `ubuntu-26.04` and uses the official `kcov/kcov` Docker
 image pinned by digest instead of installing `kcov` from the runner package
 manager. That keeps the higher-fidelity coverage lane available even though
 current Ubuntu runner images do not consistently ship a native `kcov` package.
-The bash-xtrace job is kept alongside it because the line-oriented
+The Docker-backed `kcov` step is artifact-only and non-blocking because that
+instrumented container can diverge from the normal unit-test hosts in process,
+file-descriptor, and base-tool behavior. The bash-xtrace job is kept alongside
+it because the line-oriented
 `summary.tsv`, `policy_failures.tsv`, and `missing.txt` diff outputs are stable
 enough to enforce no-regression coverage policy in CI and on local developer
 machines.

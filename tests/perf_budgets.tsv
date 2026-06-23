@@ -1,0 +1,133 @@
+# tests/perf_budgets.tsv — helper-spawn and profile-counter budgets for the
+# micro-bench inner-loop signal (tests/run_microbench.sh), enforced by
+# tests/test_zxfer_microbench_budgets.sh.
+#
+# Format: <scenario><TAB><metric><TAB><max>  (observed must be <= max)
+#
+# Scenario keys:
+#   noop / dryrun_incr               default CLI fixture, 25 datasets x 4
+#                                    snapshots (local iteration:
+#                                    tests/run_microbench.sh -V)
+#   noop_small / dryrun_incr_small   CI fixture, 8 datasets x 2 snapshots
+#                                    (what the shunit suite runs)
+#
+# RATCHET-DOWN-ONLY RULE: these budgets may only ever DECREASE. When an
+# optimization lands and the observed counts drop, lower max to
+# ceil(new-observed * 1.15) in the same change. Never raise a budget to make
+# a regression pass; a budget failure means the change reintroduced
+# per-run process spawns or structural work that Phase 0 pinned away.
+#
+# Seeded 2026-06-10 from three -V runs each of
+#   tests/run_microbench.sh -V                (25x4, "noop"/"dryrun_incr")
+#   tests/run_microbench.sh -V -d 8 -s 2      (8x2, "*_small")
+# on the macOS baseline host with max = ceil(observed * 1.15). All
+# non-timing rows were identical across runs AND across both fixture sizes
+# (spawn counts do not scale with dataset count today), so the _small and
+# full budgets start equal. Observed baselines: noop TOTAL=176 (sed=43
+# awk=34 date=17 ps=3 od=0 tr=2, runtime_artifact_files_created=14,
+# command_render_calls=0); dryrun_incr TOTAL=38 (sed=6 awk=9 date=5
+# ps/od/tr=0, all structural profile counters 0).
+#
+# Never budget advisory:* rows (wall time is timing noise, not a contract).
+#
+# Re-ratcheted 2026-06-11 after Phase 6 (per-run temp root + pure-shell
+# permission parsing + slim pid+start-token locks): observed noop TOTAL=43
+# (sed=9 awk=10 date=17 cut=0 tr=0 ps=0 mktemp=1) and dryrun_incr TOTAL=9
+# (date=5 mktemp=1, everything else 0) on the macOS baseline host, identical
+# across both fixture sizes. mktemp=1 is the single per-run temp-root
+# allocation; cut stays a hard zero now that permission strings parse with
+# parameter expansion.
+#
+# Re-ratcheted 2026-06-12 after Phase 8 (fast recursive no-op proof widened to
+# local sources): the clean -V no-op now takes the proof path -- TOTAL 43->30,
+# sed 9->3, awk 10->4, zfs_list_calls 1->0 (the proof's two identity listings
+# run inside rendered background pipelines, outside the parent-shell counters).
+# command_render_calls rises 0->1 because the proof renders its source listing
+# command in the parent shell; the full path rendered it inside a command
+# substitution, invisible to counters.
+#
+# Re-ratcheted 2026-06-13 after replacing the proof's private FIFO pair with
+# regular files under the existing per-run temp root:
+# runtime_artifact_dirs_created 1->0. The file-artifact budget stays at 11 for
+# the staged source/destination identity streams and existing status sidecars.
+# dryrun_incr rows are unchanged. Values stay identical across fixture sizes.
+noop	TOTAL	35
+noop	sed	4
+noop	awk	5
+noop	date	20
+noop	ps	0
+noop	od	0
+noop	cut	0
+noop	mktemp	2
+noop	tr	0
+noop	profile:command_render_calls	1
+noop	profile:runtime_artifact_files_created	11
+noop	profile:runtime_artifact_dirs_created	0
+noop	profile:runtime_cache_object_writes	0
+noop	profile:runtime_cache_object_readbacks	0
+noop	profile:zfs_list_calls	0
+noop	profile:zfs_send_calls	0
+noop	profile:zfs_receive_calls	0
+noop	profile:send_receive_pipeline_commands	0
+noop	profile:live_destination_snapshot_rechecks	0
+noop	profile:exists_destination_calls	0
+dryrun_incr	TOTAL	11
+dryrun_incr	sed	0
+dryrun_incr	awk	0
+dryrun_incr	date	6
+dryrun_incr	ps	0
+dryrun_incr	od	0
+dryrun_incr	cut	0
+dryrun_incr	mktemp	2
+dryrun_incr	tr	0
+dryrun_incr	profile:command_render_calls	0
+dryrun_incr	profile:runtime_artifact_files_created	0
+dryrun_incr	profile:runtime_artifact_dirs_created	0
+dryrun_incr	profile:runtime_cache_object_writes	0
+dryrun_incr	profile:runtime_cache_object_readbacks	0
+dryrun_incr	profile:zfs_list_calls	0
+dryrun_incr	profile:zfs_send_calls	0
+dryrun_incr	profile:zfs_receive_calls	0
+dryrun_incr	profile:send_receive_pipeline_commands	0
+dryrun_incr	profile:live_destination_snapshot_rechecks	0
+dryrun_incr	profile:exists_destination_calls	0
+noop_small	TOTAL	35
+noop_small	sed	4
+noop_small	awk	5
+noop_small	date	20
+noop_small	ps	0
+noop_small	od	0
+noop_small	cut	0
+noop_small	mktemp	2
+noop_small	tr	0
+noop_small	profile:command_render_calls	1
+noop_small	profile:runtime_artifact_files_created	11
+noop_small	profile:runtime_artifact_dirs_created	0
+noop_small	profile:runtime_cache_object_writes	0
+noop_small	profile:runtime_cache_object_readbacks	0
+noop_small	profile:zfs_list_calls	0
+noop_small	profile:zfs_send_calls	0
+noop_small	profile:zfs_receive_calls	0
+noop_small	profile:send_receive_pipeline_commands	0
+noop_small	profile:live_destination_snapshot_rechecks	0
+noop_small	profile:exists_destination_calls	0
+dryrun_incr_small	TOTAL	11
+dryrun_incr_small	sed	0
+dryrun_incr_small	awk	0
+dryrun_incr_small	date	6
+dryrun_incr_small	ps	0
+dryrun_incr_small	od	0
+dryrun_incr_small	cut	0
+dryrun_incr_small	mktemp	2
+dryrun_incr_small	tr	0
+dryrun_incr_small	profile:command_render_calls	0
+dryrun_incr_small	profile:runtime_artifact_files_created	0
+dryrun_incr_small	profile:runtime_artifact_dirs_created	0
+dryrun_incr_small	profile:runtime_cache_object_writes	0
+dryrun_incr_small	profile:runtime_cache_object_readbacks	0
+dryrun_incr_small	profile:zfs_list_calls	0
+dryrun_incr_small	profile:zfs_send_calls	0
+dryrun_incr_small	profile:zfs_receive_calls	0
+dryrun_incr_small	profile:send_receive_pipeline_commands	0
+dryrun_incr_small	profile:live_destination_snapshot_rechecks	0
+dryrun_incr_small	profile:exists_destination_calls	0

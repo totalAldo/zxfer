@@ -27,7 +27,7 @@ These tools are required by the installed `zxfer` command itself.
 | `/bin/sh` | interpreter for `zxfer` and `src/*.sh` | script shebang | base system |
 | `zfs` | all replication, property, snapshot, and existence operations | resolved through the secure-PATH model locally; resolved per host remotely | base system on supported FreeBSD/OpenZFS installs |
 | `awk` | parsing, normalization, sorting helpers, report rendering, and cache/index helpers | resolved through the secure-PATH model locally | base system |
-| `ps` | supervised background-job identity validation, process-group checks, and owned-child-set teardown discovery | resolved through the secure-PATH model locally | base system |
+| `ps` | the memoized process-start token used by owned-lock metadata, plus background-job liveness and descendant-reap checks | resolved through the secure-PATH model locally | base system |
 
 Notes:
 
@@ -43,7 +43,7 @@ These tools are only required when the corresponding feature is used.
 | `ssh` | remote host probing, remote command execution, control sockets | required when `-O` or `-T` is used, and resolved lazily through the secure-PATH model when remote transport is actually needed | base system on the supported host families; do not make it a local-only hard dependency |
 | `cat` | property backup restore and remote backup metadata writes | `-e` restore mode on the origin side, plus `-k` when backup metadata is written through a remote target helper; remote `cat` is resolved per host role | base system; do not add a separate FreeBSD package dependency |
 | `parallel` | explicit per-dataset source snapshot discovery for `-j > 1` | required on the executing origin host whenever `-j > 1` is requested; zxfer intentionally validates only that a helper named `parallel` resolves through the secure-PATH model, then assumes the operator/package supplied a compatible implementation; the rendered pipeline uses GNU Parallel-style options and does not silently fall back to the serial recursive listing once `-j > 1` is requested | consider a package dependency if the port should guarantee `-j > 1` support out of the box |
-| `setsid` | supervisor runner process-group isolation | optional; when the local host provides `setsid`, the background-job runner prefers launching long-lived workers in a dedicated process group and falls back to owned-child-set teardown otherwise | usually a base or util-linux userland tool; do not make it a hard dependency unless packaging wants to require process-group isolation everywhere |
+| `setsid` | background-job process-group isolation | optional; when the local host provides `setsid`, supervision-lite jobs launch in a dedicated process group so abort can signal the whole pipeline at once, falling back to cleanup-wrapper child teardown otherwise | usually a base or util-linux userland tool; do not make it a hard dependency unless packaging wants to require process-group isolation everywhere |
 | `zstd` | compressed send/receive streams and remote snapshot-discovery metadata compression | `-z` or default/custom `-Z` compression paths, including remote `-O ... -j ...` metadata discovery when ssh compression is active | consider a package dependency only if the port should guarantee compression support out of the box |
 | `svcadm` | migration/service handling | `-c` and `-m` on OmniOS/illumos systems | not a FreeBSD package dependency |
 | `kldstat`, `kldload`, `/dev/speaker` | audible status beeps | FreeBSD-only `-b` / `-B` path | base system and device availability; not a package dependency |
@@ -99,6 +99,11 @@ Current runtime inventory:
 On FreeBSD, these are expected from base and usually do not belong in
 `RUN_DEPENDS`.
 
+Remote helper scripts assume the same kind of base userland on the executing
+remote host. For example, the `-T` destination discovery batch uses target-side
+POSIX `sh`, `mktemp`, `grep`, `cat`, and `rm` around the resolved target
+`zfs` command, all under the validated remote dependency `PATH`.
+
 ## Direct Integration Harness Dependencies
 
 These tools are used by [run_integration_zxfer.sh](../tests/run_integration_zxfer.sh),
@@ -150,6 +155,7 @@ host that orchestrates disposable guests:
 | `python3` | serve NoCloud metadata and allocate local ephemeral TCP ports |
 | `ssh`, `ssh-keygen`, `ssh-keyscan` | provision guests, copy the checkout, and collect artifacts |
 | `tar` | transfer the current checkout into guests and stream guest artifacts back out |
+| `git` | validate and archive `ZXFER_VM_PERF_BASELINE_REF` for the optional `perf-compare` guest layer |
 | `xz` | decompress the pinned FreeBSD cloud image |
 | `zstd` | future-proof `.zst` guest image support when a selected guest ships one |
 

@@ -1,0 +1,13 @@
+zxfer: failure report begin
+timestamp: [normalized]
+hostname: [normalized]
+zxfer_version: [normalized]
+exit_status: 2
+failure_class: usage
+failure_stage: cli parse
+message: Need a destination.
+dry_run: 0
+mode: recursive
+yield_iterations: 1
+invocation: [redacted]
+zxfer: failure report end

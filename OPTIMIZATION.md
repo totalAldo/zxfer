@@ -1,222 +1,232 @@
-# Optimization Review
+# Optimization Record
 
-This document catalogs the current performance baseline in the `zxfer`
-codebase. The larger discovery, caching, delete-path, property-path,
-progress-planning, and remote-startup optimizations are already landed, so
-this file now serves primarily as a compact baseline and measurement reference
-for any future profiling-driven work. It focuses on four areas the project
-already cares about:
+This file records the performance program that ran as Phases 0-8 on this
+branch, with measured results, and keeps a slim list of genuinely remaining
+candidates. It started as a static comparison with `upstream-compat-final`,
+which was faster mostly because it did less work overall; the program's goal
+was to recover that throughput and no-op speed without reintroducing the older
+safety and injection risks. Snapshot discovery remains identity-aware with
+`name,guid` records, including the fast no-op proof, because name-only
+comparison can incorrectly treat same-name snapshots with different GUIDs as
+clean.
 
-- caching repeated work
-- minimizing `zfs` and `ssh` calls
-- improving concurrency behavior
-- replacing shell paths that scale poorly on large dataset/snapshot trees
+Budgets that pin these results live in `tests/perf_budgets.tsv`
+(micro-bench helper-spawn and profile-counter budgets) and
+`tests/budget_policy.tsv` (anti-rebloat line/function/caller budgets). Both
+are ratchet-down-only.
 
-The current flat `src/` layout keeps the hot paths for this work in focused
-modules: remote startup and transport reuse in `src/zxfer_remote_hosts.sh`,
-snapshot discovery and diff planning in `src/zxfer_snapshot_discovery.sh`,
-property caching and reconciliation in `src/zxfer_property_cache.sh` and
-`src/zxfer_property_reconcile.sh`, send/receive setup in
-`src/zxfer_send_receive.sh`, and profiling output in `src/zxfer_reporting.sh`.
+## Measured Results
 
-This is a review document only. No behavior changes are proposed here without
-separate implementation, tests, and manual integration validation.
+Micro-bench (`tests/run_microbench.sh`, canned zfs, counted helper spawns;
+identical across fixture sizes):
 
-## Existing Strengths
+| Scenario | Program start | After Phase 6 | After Phase 8 |
+| --- | --- | --- | --- |
+| no-op recursive, default CLI | 102 spawns | 7 | 7 |
+| no-op recursive, `-V` | 176 | 43 | 30 |
+| incremental dry run, default CLI | — | 4 | 4 |
+| incremental dry run, `-V` | 38 | 9 | 9 |
 
-The current tree already contains several good performance-oriented choices:
+Notable structural counters on the `-V` no-op path: `cut` 57 -> 0,
+`mktemp` 14 -> 1, `sed` 43 -> 3, `awk` 34 -> 4,
+`runtime_artifact_files_created` 14 -> 9. The clean no-op proof path adds one
+private FIFO directory (`runtime_artifact_dirs_created` 0 -> 1) and renders
+its source listing command once in the parent shell
+(`command_render_calls` 0 -> 1); both are documented in
+`tests/perf_budgets.tsv`.
 
-- snapshot tree diffing for recursive replication already relies on sorted lists
-  plus `comm` instead of older nested-loop comparison patterns
-- `zfs send -I` is used so incremental chains move in one stream
-- source snapshot discovery now adapts between a single recursive list and the
-  older per-dataset GNU `parallel` fan-out based on dataset count plus remote
-  startup warmth, validates local GNU `parallel` only when the chosen branch
-  actually needs it, resolves the remote origin-host `parallel` path only when
-  the remote parallel branch wins, and reuses the prefetched dataset list
-  directly inside the selected command path, so startup-bound and externally
-  orchestrated `-j` runs no longer always pay the full N+1 discovery cost
-  before data moves
-- remote startup discovery now collapses `uname` plus helper-path lookups into
-  one requested-tool-aware per-host capability handshake, with current-process
-  reuse, a short-lived cross-process cache stored in a validated per-user
-  `0700` directory under `TMPDIR`, and generic remote helper lookups such as
-  `zstd` satisfied from that cached payload when the active run shape already
-  requested the tool head
-- concurrent sibling zxfer processes now coalesce remote capability handshakes
-  through a secure per-host lock plus a bounded fast-retry window before the
-  older whole-second backoff, so a burst of same-host processes reuses one
-  live probe result instead of stampeding the helper-discovery ssh path or
-  paying avoidable 1-second convoy delays before the cache is populated
-- ssh control sockets are now reused across sibling zxfer processes through a
-  validated per-user cache directory under `TMPDIR`, with per-process lease
-  files and stale-lease pruning so one process can reuse another process's
-  live transport without tearing it down out from under concurrent siblings
-- `-j` send/receive scheduling now keeps a rolling background worker pool full
-  instead of waiting for an entire batch to drain before launching the next
-  transfer
-- common-snapshot selection and live destination rechecks already compare
-  snapshot identities using `name+guid` records instead of trusting snapshot
-  names alone
-- common-snapshot selection and live destination rechecks now use one-pass
-  `awk`-backed identity-set lookups instead of repeated shell-string
-  membership scans
-- recursive snapshot discovery now keeps the raw global source/destination
-  snapshot caches and lazily builds the per-dataset source/destination
-  snapshot indexes only when delete/common-snapshot planning actually asks for
-  per-dataset records, so no-op runs no longer pay the reverse/index build
-  cost up front while delete/common-snapshot paths still consume pre-sliced
-  records instead of re-filtering the full global snapshot lists for every
-  dataset pass
-- recursive snapshot discovery now starts with name-only source and
-  destination snapshot records plus name-only per-dataset indexes, and only
-  fetches guid-bearing records for datasets whose overlapping snapshot names
-  actually require common-snapshot, delete, rollback, or live-recheck
-  identity validation
-- recursive `-d` runs now track datasets with destination-only snapshot deltas
-  separately and iterate only datasets with source deltas, destination-only
-  deltas, or explicit property-reconcile work, so no-op recursive delete runs
-  no longer force every dataset through `zxfer_get_last_common_snapshot()`,
-  delete-planning, and copy-path setup just because `-d` is enabled
-- per-dataset property reconciliation now batches consecutive `zfs set`
-  operations instead of issuing one destination-side call per property
-- normalized property reads and explicit required-property probes are now cached
-  per replication iteration with destination-side invalidation after create,
-  receive, set, and inherit operations
-- recursive property-transfer runs now prefetch source and destination property
-  trees once per iteration, slice normalized per-dataset results locally, and
-  reuse prefetched destination parent state for child-inherit adjustment before
-  falling back to exact live reads for datasets created or mutated mid-iteration
-- the remaining small property-diff helper loops now use `awk`-backed
-  transforms for override validation, override/create-list derivation,
-  destination diffing, child inherit adjustment, and unsupported-property
-  filtering instead of repeatedly spawning `cut`, `grep`, and shell nested-loop
-  scans across the same short property lists
-- destination-only snapshot deletion planning now resolves identity-to-path
-  matches in one destination-order-preserving pass instead of rescanning the
-  full destination snapshot list for every delete candidate
-- rollback-eligibility and grandfather checks now batch per-dataset snapshot
-  `creation` reads and cache the numeric results locally, so delete-heavy
-  runs no longer pay one remote `zfs get creation` round trip per candidate
-  snapshot before the final human-readable grandfather error path
-- destination existence probes now fail closed on operational errors instead of
-  treating every failed `zfs list` as proof that the dataset is absent
-- destination existence answers are now cached per replication iteration from
-  the recursive destination dataset list and updated after successful creates
-  and foreground receives, reducing redundant `zfs list -H` probes on non-
-  destructive paths while keeping live rechecks on safety-critical branches
-- deferred post-seed property reconciliation now updates seeded destination
-  datasets incrementally and clears only destination-side property state,
-  avoiding a full source/destination snapshot-tree refresh at the end of
-  bootstrap and first-replication runs
-- progress-enabled send/receive runs now skip size probes entirely when the
-  configured `-D` template does not use `%%size%%`, and remote or multi-job
-  transfers now prefer cheaper approximate size probes with exact fallback
-  instead of always paying an extra `zfs send -nPv` estimate round trip
-- adaptive remote source snapshot discovery now keeps send-stream compression
-  semantics unchanged and reuses the validated remote/local metadata
-  compression pipeline on `-O ... -j ... -z/-Z` listing runs, while requested-
-  tool capability caching avoids paying a second ssh helper probe for the
-  compressor or decompressor head during startup
-- source snapshot list reversal now uses a bounded POSIX-`awk` fast path with
-  automatic sort fallback for larger inputs, and that reversal is now also
-  deferred until a later consumer actually requests newest-first per-dataset
-  source records, avoiding the old unconditional `cat -n | sort -nr | cut`
-  path and the newer eager reverse-on-discovery cost on typical no-op runs
-  without making large trees depend on unbounded awk memory or weakening
-  cross-shell failure handling on the fallback path
+Remote and structural results:
 
-The larger discovery, caching, delete, property-path, progress-planning, lazy
-snapshot-identity, and remote-startup optimizations have already landed. There
-are no queued pure-throughput optimization items at the moment; future work
-should come from fresh profiling of real no-op, bootstrap, and multi-host runs
-rather than from the older startup bottlenecks this branch has already
-addressed.
+- Cold incremental `-O` pull: 12 -> 10 ssh invocations; control-socket
+  `-O check` probes around commands: 2 -> 0 (one `-M` master open per run,
+  multiplexed, one `-O exit` close at exit). One capability probe round trip
+  per host per run.
+- A clean `-O` pull no-op opens no ssh control master at all
+  (deferred-socket behavior), pinned by black-box tests.
+- Background jobs: 21 -> 5 helper spawns per send/receive job
+  (supervision-lite: setsid process group + one status file, runner module
+  deleted).
+- Module size: `src/zxfer_remote_hosts.sh` 3,869 -> 1,964 lines (Phase 7);
+  the property-cache module and the background-job runner module were deleted
+  outright; `src/zxfer_locking.sh` and `src/zxfer_path_security.sh` merged
+  verbatim into `src/zxfer_runtime.sh` (Phase 8). Source TOTAL is enforced
+  ratchet-down in `tests/budget_policy.tsv`.
 
-## Current Caveats In Optimized Paths
+## What Landed (Phases 0-8)
 
-The current optimization baseline is good, but a few correctness and
-compatibility caveats still sit inside performance-sensitive paths:
+- Phase 0 — measurement and pins. Behavior pins for the externally
+  observable planning contract (`tests/test_zxfer_planning_blackbox.sh`),
+  the canned-zfs micro-bench (`tests/run_microbench.sh`) with ratchet-only
+  budgets, and anti-rebloat line/function/caller budgets. The
+  branch-to-branch comparator (`tests/run_perf_compare.sh`, VM
+  `perf-compare` layer) stays the ranking tool for future work.
+- Phase 1 — hot-path micro-overhead. Profiling captures are gated at call
+  sites so non-`-V` runs skip recorder work entirely; quoting and
+  permission-string parsing run in pure shell on the fast path; profiling
+  recorders always return status 0 (`-V` can never change replication
+  outcomes).
+- Phase 2 — render-once display commands. Operator-facing command strings
+  are rendered once and only when verbose/dry-run/error output actually
+  consumes them; execution argv is never derived from display strings.
+- Phase 3 — cache flattening. Snapshot record lookups serve from flat
+  per-run record files; the per-dataset property cache-object module was
+  deleted in favor of in-memory property tables with targeted invalidation;
+  destination existence answers use an O(1) prepend-only cache; backup
+  metadata uses a validate-once buffer.
+- Phase 4 — generation-gated live rechecks. Live destination rechecks are
+  served from one batched recursive destination listing per
+  destination-mutation generation; each receive/destroy bumps the
+  generation, and `-Y` invalidates at pass boundaries. Rechecks still happen
+  before every mutating decision; they are just no longer per-dataset
+  round trips.
+- Phase 5 — supervision-lite jobs. The standalone runner process, control
+  directories, launch/completion records, and per-job identity revalidation
+  were replaced with one backgrounded job shell per job (setsid when
+  available), one in-memory registry row, and one status file; the
+  descendant reaper lists the full process table (`ps -A`) so cron-launched
+  runs reap correctly.
+- Phase 6 — per-run temp root. All run-private temp state lives under one
+  0700 root from a single `mktemp -d`; allocators hand out children by
+  counter with no per-file registration or readback ceremony, and trap exit
+  removes everything with one `rm -rf` after jobs, sockets, and locks are
+  torn down. Lock metadata slimmed to owner pid + one memoized `ps` start
+  token; error-log lock acquisition treats missing/corrupt metadata as busy
+  first and corrupt-reaps only after a recheck round, and concurrent
+  error-log loss is strictly better than the old baseline.
+- Phase 7 — per-run remote state. Remote capability discovery is one
+  fail-closed ssh probe per host per run, parsed into memory (capability
+  cache files, TTLs, identity hex, cache locks, and wait loops deleted).
+  SSH control sockets are per-run, per-role paths under the private temp
+  root (socket locks, leases, identity files, and foreign-socket reaping
+  deleted). Rendered ssh transport tokens and parsed host/wrapper splits
+  are memoized once per role. `-V` counter keys are unchanged (deleted
+  machinery's counters now always read 0).
+- Phase 8 — no-op proof widening + module merge. The fast recursive no-op
+  proof now covers local sources as well as `-O` pulls: a clean local
+  recursive no-op is proven from two sorted `name,guid` identity listings
+  through private FIFOs and never pays for the creation-order source
+  listing or the destination existence check. All other eligibility gates
+  are unchanged (`-R` required, `-T` absent, no `-s`/`-m`/`-P`/`-o`/`-e`/`-k`),
+  and divergence or any stream failure still falls back to full discovery
+  or fails closed exactly as before. `src/zxfer_path_security.sh` and
+  `src/zxfer_locking.sh` merged verbatim into `src/zxfer_runtime.sh`.
 
-- adaptive remote `-j` discovery now defers origin-host helper resolution until
-  the parallel branch actually wins, but the remote branch still trusts the
-  resolved origin-host `parallel` path by name only instead of confirming a GNU
-  `parallel` signature with a remote `--version` probe
-- cross-process ssh control-socket reuse is landed and measured, but
-  wrapper-style remote specs such as `host pfexec` and `host doas` still have
-  a known setup/teardown caveat in the control-socket helpers because those
-  transport-control operations should use only the ssh destination host tokens
-- strict dry-run `-n` now intentionally skips live helper validation,
-  snapshot discovery, and other startup probes, so dry-run timings are a
-  render-only preview metric and should not be compared directly to live no-op
-  or startup-bound measurements
+Mapping from the original review's numbered items: 1 (batched destination
+discovery), 3 (live recheck gating), 4 (snapshot index flattening), 5
+(table-oriented property state), 8 (encoded keys/identity hex — deleted with
+their machinery), 9 (runtime artifact slimming), 10 (background job
+overhead), 11 (ssh transport memos + socket probes), 12 (capability cache
+strategy), 13 (duplicate command rendering), 14 (combined snapshot list
+passes), 17 (fast-path quoting), 22 (disabled-profiling fast path), 24
+(zero-work cleanup), and 25 (lock identity slimming) are DONE. Item 20 (the
+perf harness) is maintained as measurement foundation.
 
-These are tracked as current issues because they affect the behavior of already
-optimized paths, not because the old startup bottlenecks remain open.
+## Remaining Candidates
 
-## Remaining Opportunity
+These are unranked ideas that survived the program. None are approvals to
+weaken replication correctness, remote quoting, structured error reporting,
+secure `PATH`, or cleanup behavior. Measure first
+(`tests/run_microbench.sh`, `tests/run_perf_compare.sh`, or the VM
+`perf-compare` layer).
 
-The April 7, 2026 no-op trace that originally motivated this review has now had
-its last concrete open item addressed: remote snapshot-discovery compression is
-adaptive instead of unconditional. The older trace also flagged shell-side
-remote dataset counting, eager `name,guid` discovery, private per-process
-control sockets, and recursive `-d` no-op dataset scans; those are already
-landed optimizations and should not be treated as open work.
+Concurrency (the C-series from the original review):
 
-There are no queued pure-throughput optimization items at the moment. Future
-work should come from fresh `-V` timings on real no-op, bootstrap, and
-multi-host runs rather than from the older startup bottlenecks that are now
-closed, while keeping the known correctness caveats above separate from any
-new performance-only proposals.
+- C1. Prewarm origin and target remote state in parallel when `-O` and `-T`
+  name distinct remote contexts. Needs a checked role-state handoff because
+  subshells cannot mutate parent globals; never publish partially
+  initialized role state.
+- C2. Widen read-only source/target discovery overlap. Source listing
+  already overlaps destination discovery; the remaining serial joins are
+  dataset inventory, snapshot inventory, and index publication. Prefer
+  overlap or a collector over more destination-side `zfs list` fanout (the
+  old destination parallel listing was not a net win).
+- C5. Dependency-aware dataset work scheduler: bounded work items
+  (inspection, mutation, receive, post-seed reconcile, metadata flush) so
+  independent destination subtrees advance during long transfers. Must keep
+  parent-before-child receives, serialize mutations sharing destination
+  ancestry, and make cache invalidation generation-aware. This is a large
+  refactor, not a `-j` tweak.
+- C6. Ephemeral remote collector with bounded internal fanout (see also the
+  collector item below): run independent read-only remote metadata commands
+  concurrently inside one remote shell and return one structured payload,
+  failing closed on any malformed or partial section.
 
-## Measurement Plan
+Other remaining items:
 
-Any future implementation work should be measured before and after. The safest
-first step is lightweight call counting around the existing helpers:
+- Remote collector (original item 2): stage or stream a small POSIX `sh`
+  helper per run (`ssh host sh -s`) that gathers OS, helper paths, dataset
+  inventory, snapshot inventory, and selected property tables in one
+  structured response. Keep the no-remote-install default; fail closed on
+  truncated payloads; never persist remote state across runs.
+- Property-read scoping (item 6): build the minimum safe property set from
+  active options instead of `zfs get ... all` where the mode provably does
+  not need full property discovery; fall back to `all` whenever
+  completeness cannot be proven.
+- Batched `awk` for remaining per-property shell loops in property
+  reconciliation (item 7), preserving delimiter/newline escaping and
+  source-priority behavior.
+- Metadata compression threshold (item 15): small metadata payloads can pay
+  more in compressor startup than they save; keep data-stream compression
+  unchanged.
+- Generated single-file release artifact (item 16): packaging-only; keep
+  `src/zxfer_modules.sh` as the source-order authority and keep modular
+  files for tests.
+- Argv-exec split for more non-pipeline commands (item 18): fewer `eval`
+  paths; keep shell execution for real pipelines and remote `sh -c`.
+- Remote backup preflight caching (item 19): cache remote backup-directory
+  preflight per host/path scope; the local metadata buffer is already
+  validate-once.
+- Lazy startup dependency resolution (item 21) and deferred
+  compression/remote-ZFS command rendering (items 26, 27): resolve optional
+  helpers and render remote command state only after consistency checks
+  prove the mode needs them.
+- Module-loaded flags instead of `command -v` function probes (item 23),
+  preserving `ZXFER_SOURCE_MODULES_THROUGH` partial loads for tests.
+- Minimal help/early-usage paths (item 28): keep `zxfer -h` on the smallest
+  path that preserves documented output.
+- Tune serial versus GNU `parallel` source discovery for the changed-source
+  fallback: fanout can lose on small remote trees; consider a threshold or
+  knob. The clean no-op proof deliberately stays on one serial recursive
+  stream even when `-j` is configured.
+- Destination existence cache: the prepend-only cache is O(1) per insert,
+  but a generation table could simplify invalidation further; preserve
+  fail-closed handling for operational `zfs list` errors.
 
-- `-V` is now the intended baseline mode for this work: it emits an end-of-run
-  profiling summary without affecting normal output modes
-- the current `-V` summary already includes elapsed time, ssh setup time,
-  source/destination snapshot-listing time, diff/sort time, source/destination
-  and total `zfs` / `ssh` call counts, source snapshot-list command counts,
-  send/receive pipeline counts, destination-existence probes, normalized
-  property-read counters, required-property backfill counters, per-stage
-  bucket counters, ssh control-socket wait counts/timing, remote-capability
-  cache wait counts/timing, remote-capability bootstrap-source totals, and
-  direct remote helper probe counts
-- count calls to `run_source_zfs_cmd()`, `run_destination_zfs_cmd()`, and
-  `invoke_ssh_shell_command_for_host()`
-- on `-O` / `-T` startup-sensitive runs, separate first-process measurements
-  from warm-cache sibling-process measurements so the remote capability
-  handshake cache benefit remains visible
-- `exists_destination_calls` now tracks only live destination probes, not
-  cache hits, so it can be used directly when measuring the destination-
-  existence cache effectiveness
-- count those calls separately for source inspection, destination inspection,
-  property reconciliation, and send/receive setup
-- record wall-clock time for:
-  - many datasets / few snapshots
-  - few datasets / many snapshots
-  - property-heavy recursive runs
-  - remote runs with non-trivial RTT
-- distinguish first-run or cold-cache behavior from repeated hot-cache behavior
+## Measurement
 
-Recommended success metrics for future work:
+- `tests/run_microbench.sh [-V] [-d N -s S]` — helper-spawn counts and `-V`
+  profile counters against the canned zfs; budgets in
+  `tests/perf_budgets.tsv` are enforced by
+  `tests/test_zxfer_microbench_budgets.sh`.
+- `tests/run_perf_compare.sh` and the VM `perf-compare` layer compare this
+  branch against a baseline ref inside the same disposable guest:
 
-- fewer `zfs get`, `zfs list`, and snapshot-slice passes per replicated
-  dataset/tree
-- fewer ssh command invocations on `-O` and `-T`
-- better steady-state throughput with `-j`
-- no change to replication semantics, rollback safety, or deletion safety
+  ```sh
+  ./tests/run_vm_matrix.sh --profile smoke --test-layer perf
+  ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final ./tests/run_vm_matrix.sh --profile smoke --test-layer perf-compare
+  ```
+
+  Direct host execution of the integration or perf harness remains
+  manual-only.
+- `-V` profiling counters are the first-stop ranking signal; counter keys
+  are stable (deleted machinery's counters read 0 rather than disappearing).
 
 ## Safety Notes
 
-Because `zxfer` operates on real ZFS pools and remote hosts, performance work
-must keep the existing fail-closed behavior. In practice that means:
-
-- cache only where invalidation is explicit and testable
-- keep live probes on correctness-critical branches
-- treat destructive paths (`destroy`, `rollback`, full-seed refusal decisions)
-  as safety-first even if a shortcut looks faster
-- validate every behavior change with unit tests and manual integration runs by
-  a human operator
+- Do not optimize by removing GUID checks from decisions that can
+  overwrite, delete, roll back, or choose an incremental base.
+- Do not optimize remote execution by collapsing wrapper host specs into a
+  raw hostname.
+- Do not bypass secure helper path resolution or managed SSH option
+  validation.
+- Do not skip structured failure reporting for faster error exits.
+- Do not run destination receives, destroys, rollbacks, or property
+  mutations in parallel unless exact-dataset and ancestry conflicts are
+  explicitly modeled.
+- Do not treat a failed concurrent metadata worker as an empty source,
+  destination, or property table.
+- Do not leave temp files, FIFOs, control sockets, or status files behind
+  on failure unless an explicit debug mode requested it.
+- Any optimization that changes flags, defaults, output, error text,
+  replication order, retention, packaging, or test entrypoints needs
+  matching tests and docs.

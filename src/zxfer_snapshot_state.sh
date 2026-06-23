@@ -32,21 +32,28 @@
 # shellcheck shell=sh disable=SC2034,SC2154
 
 ################################################################################
-# SNAPSHOT RECORD STATE / INDEXES / IDENTITIES
+# SNAPSHOT RECORD STATE / LOOKUPS / IDENTITIES
 ################################################################################
 
 # Module contract:
-# owns globals: destination-existence cache and snapshot-record index state.
-# reads globals: g_cmd_awk and temp-root helpers.
-# mutates caches: in-memory destination-existence state and on-disk snapshot index files.
-# returns via stdout: parsed snapshot identities, indexed records, and cache-backed existence probes.
+# owns globals: destination-existence cache, derived snapshot-record lookup state, and the generation-gated live destination view (g_zxfer_destination_mutation_generation plus the g_zxfer_live_destination_view_* stamp/root/file trio).
+# reads globals: g_cmd_awk and the flat per-run snapshot record files staged by discovery.
+# mutates caches: in-memory destination-existence state, the derived reversed source record list, and the batched live destination view file.
+# returns via stdout: parsed snapshot identities, per-dataset record lookups, and cache-backed existence probes.
 
-ZXFER_SNAPSHOT_RECORD_INDEX_OBJECT_KIND="snapshot-record-index"
-ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND="snapshot-records"
+# Snapshot discovery stages at most one flat, sorted snapshot record file per
+# side inside the 0700 run-private temp root (g_zxfer_source_... and
+# g_zxfer_destination_snapshot_record_cache_file). Those files ARE the
+# snapshot-record index: a per-dataset lookup is a single awk prefix filter
+# over the staged file, with no per-dataset cache objects, manifests, or
+# readback validation in between. The files are written once by exit-status
+# checked pipelines and never legitimately mutated afterwards, so a staged
+# file that cannot be read back is corrupted run-private state and aborts the
+# run instead of degrading to an empty snapshot list.
 
 # Purpose: Reset the destination existence cache so the next snapshot-state
 # pass starts from a clean state.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks before this module reuses mutable scratch globals or cached decisions.
 zxfer_reset_destination_existence_cache() {
 	g_destination_existence_cache=""
@@ -54,591 +61,99 @@ zxfer_reset_destination_existence_cache() {
 	g_destination_existence_cache_root_complete=0
 }
 
-# Purpose: Reset the snapshot record indexes so the next snapshot-state pass
-# starts from a clean state.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks before this module reuses mutable scratch globals or cached decisions.
+# Purpose: Reset the derived snapshot-record lookup state so the next
+# snapshot-state pass starts from a clean state.
+# Usage: Called during startup, discovery resets, and dry-run preview seeding
+# so per-dataset lookups cannot reuse a reversed source record list derived
+# from a previous pass. The flat record files themselves are owned by
+# discovery (zxfer_cleanup_snapshot_record_cache_files).
 zxfer_reset_snapshot_record_indexes() {
-	if [ -n "${g_zxfer_snapshot_index_dir:-}" ] && [ -d "$g_zxfer_snapshot_index_dir" ]; then
-		zxfer_cleanup_runtime_artifact_path "$g_zxfer_snapshot_index_dir"
-	fi
-
-	g_zxfer_snapshot_index_dir=""
-	g_zxfer_snapshot_index_unavailable=0
-	g_zxfer_source_snapshot_record_index_dir=""
-	g_zxfer_source_snapshot_record_index=""
-	g_zxfer_source_snapshot_record_index_ready=0
-	g_zxfer_destination_snapshot_record_index_dir=""
-	g_zxfer_destination_snapshot_record_index=""
-	g_zxfer_destination_snapshot_record_index_ready=0
+	g_lzfs_list_hr_S_snap=""
 }
 
-# Purpose: Invalidate destination snapshot-record caches after destination
-# snapshot state changes.
-# Usage: Called after receives, snapshot destroys, and rollbacks so later
-# planning cannot reuse stale destination snapshot lists or indexes.
-zxfer_invalidate_destination_snapshot_record_cache() {
-	if [ -n "${g_zxfer_destination_snapshot_record_cache_file:-}" ]; then
-		zxfer_cleanup_runtime_artifact_path "$g_zxfer_destination_snapshot_record_cache_file"
-	fi
+# Generation-gated live destination view (approved trade-off): a live view of
+# the destination is valid until THIS RUN mutates the destination, and never
+# across a -Y pass boundary — each replication pass starts from a fresh
+# batched listing because -Y exists to converge under concurrent drift. Every
+# destination mutation this run performs (receive completion including -j
+# reap time, dataset create, property set/inherit, snapshot destroy, and
+# rollback) bumps g_zxfer_destination_mutation_generation in the main shell.
+# Live rechecks are then served from ONE batched snapshot listing of the
+# run's destination root, captured lazily into
+# g_zxfer_live_destination_view_file and stamped with the generation it was
+# captured under; a stale stamp forces a fresh listing before the next
+# recheck-driven decision. Fail closed: a failed or partial capture never
+# stamps the view, so it can never be served as fresh.
 
-	g_rzfs_list_hr_snap=""
-	g_zxfer_destination_snapshot_record_cache_file=""
-	zxfer_clear_snapshot_record_index_state_for_side destination
-	if command -v zxfer_reset_destination_snapshot_creation_cache >/dev/null 2>&1; then
-		zxfer_reset_destination_snapshot_creation_cache
-	fi
-}
-
-# Purpose: Ensure the snapshot index directory exists and is ready before the
-# flow continues.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks before later helpers assume the resource or cache is available.
-zxfer_ensure_snapshot_index_dir() {
-	if [ "${g_zxfer_snapshot_index_unavailable:-0}" -eq 1 ]; then
-		return 1
-	fi
-
-	if [ -n "${g_zxfer_snapshot_index_dir:-}" ] && [ -d "$g_zxfer_snapshot_index_dir" ]; then
-		return 0
-	fi
-
-	l_index_status=0
-	zxfer_create_runtime_artifact_dir "zxfer-snapshot-index" >/dev/null ||
-		l_index_status=$?
-	if [ "$l_index_status" -ne 0 ]; then
-		g_zxfer_snapshot_index_unavailable=1
-		g_zxfer_snapshot_index_dir=""
-		return "$l_index_status"
-	fi
-	g_zxfer_snapshot_index_dir=$g_zxfer_runtime_artifact_path_result
-
+# Purpose: Record that this run mutated the destination so live views older
+# than the mutation are refreshed before the next recheck-driven decision.
+# Usage: Called from the destination mutation choke points (receive
+# completion including -j reap time in the main shell, dataset create,
+# property set/inherit, snapshot destroy, and rollback).
+zxfer_bump_destination_mutation_generation() {
+	g_zxfer_destination_mutation_generation=$((${g_zxfer_destination_mutation_generation:-0} + 1))
 	return 0
 }
 
-# Purpose: Clear the snapshot record index state for side from the module-owned
-# state.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks when later helpers must not see an old cached or role-specific value.
-zxfer_clear_snapshot_record_index_state_for_side() {
-	l_side=$1
-	l_remove_dir=${2:-1}
+# Purpose: Drop the batched live destination view stamp so the next recheck
+# must capture a fresh listing regardless of the mutation generation.
+# Usage: Called in the main shell at the top of every -Y replication pass.
+# View validity is bounded by a single pass: when a pass's last refresh
+# postdates its last destination mutation, the stamp still matches the
+# generation at the pass boundary, and without this reset the next pass would
+# serve its first rechecks from the previous pass's listing.
+zxfer_invalidate_live_destination_view() {
+	g_zxfer_live_destination_view_generation=""
+	g_zxfer_live_destination_view_root=""
+	return 0
+}
 
-	case "$l_side" in
-	source)
-		if [ "$l_remove_dir" -eq 1 ] &&
-			[ -n "${g_zxfer_source_snapshot_record_index_dir:-}" ] &&
-			[ -d "$g_zxfer_source_snapshot_record_index_dir" ]; then
-			zxfer_cleanup_runtime_artifact_path "$g_zxfer_source_snapshot_record_index_dir"
+# Purpose: Capture one batched live destination snapshot listing for the view
+# root and stamp it with the current destination mutation generation.
+# Usage: Called by zxfer_ensure_live_destination_snapshot_view when the view
+# is missing or older than this run's last destination mutation. Returns
+# non-zero without stamping when the listing cannot be captured, so callers
+# fail closed instead of serving a stale or partial view as fresh.
+zxfer_refresh_live_destination_view() {
+	l_view_refresh_root=$1
+
+	# Semantic change with the batched view: this counter now counts batched
+	# view refreshes (plus per-dataset fallback listings) instead of
+	# per-dataset live rechecks. The counter key is unchanged.
+	zxfer_profile_increment_counter g_zxfer_profile_live_destination_snapshot_rechecks
+
+	# Drop the stamp before listing so a failed or partial capture can never
+	# be mistaken for a fresh view.
+	g_zxfer_live_destination_view_generation=""
+	if [ -z "${g_zxfer_live_destination_view_file:-}" ]; then
+		l_view_file_prefix="${g_zxfer_temp_prefix:-zxfer.$$}.live-dest-view"
+		if ! zxfer_create_runtime_artifact_file "$l_view_file_prefix" >/dev/null; then
+			return 1
 		fi
-		g_zxfer_source_snapshot_record_index_dir=""
-		g_zxfer_source_snapshot_record_index=""
-		g_zxfer_source_snapshot_record_index_ready=0
-		;;
-	destination)
-		if [ "$l_remove_dir" -eq 1 ] &&
-			[ -n "${g_zxfer_destination_snapshot_record_index_dir:-}" ] &&
-			[ -d "$g_zxfer_destination_snapshot_record_index_dir" ]; then
-			zxfer_cleanup_runtime_artifact_path "$g_zxfer_destination_snapshot_record_index_dir"
-		fi
-		g_zxfer_destination_snapshot_record_index_dir=""
-		g_zxfer_destination_snapshot_record_index=""
-		g_zxfer_destination_snapshot_record_index_ready=0
-		;;
-	*)
-		return 1
-		;;
-	esac
+		g_zxfer_live_destination_view_file=$g_zxfer_runtime_artifact_path_result
+	fi
 
-	return 0
-}
-
-# Purpose: Update the snapshot record index state for side in the shared
-# runtime state.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks after a probe or planning step changes the active context that later
-# helpers should use.
-zxfer_set_snapshot_record_index_state_for_side() {
-	l_side=$1
-	l_index_dir=$2
-	l_index_map=$3
-
-	case "$l_side" in
-	source)
-		g_zxfer_source_snapshot_record_index_dir=$l_index_dir
-		g_zxfer_source_snapshot_record_index=$l_index_map
-		g_zxfer_source_snapshot_record_index_ready=1
-		;;
-	destination)
-		g_zxfer_destination_snapshot_record_index_dir=$l_index_dir
-		g_zxfer_destination_snapshot_record_index=$l_index_map
-		g_zxfer_destination_snapshot_record_index_ready=1
-		;;
-	*)
-		return 1
-		;;
-	esac
-
-	return 0
-}
-
-# Purpose: Validate the snapshot record index manifest file before zxfer relies
-# on it.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks to fail closed on malformed, unsafe, or stale input.
-zxfer_validate_snapshot_record_index_manifest_file() {
-	l_index_dir=$1
-	l_manifest_path=$2
-	l_entry_count_expected=$3
-	l_index_map=""
-	l_seen_datasets=""
-	l_seen_relpaths=""
-	l_entry_count=0
-
-	[ -f "$l_manifest_path" ] || return 1
-	[ ! -L "$l_manifest_path" ] || return 1
-	[ ! -h "$l_manifest_path" ] || return 1
-	[ -r "$l_manifest_path" ] || return 1
-
-	if zxfer_read_runtime_artifact_file "$l_manifest_path" >/dev/null; then
-		l_manifest_contents=$g_zxfer_runtime_artifact_read_result
+	# Non-recursive runs replicate exactly one dataset, so their batched view
+	# is the same depth-1 listing the per-dataset recheck used.
+	if [ "${g_option_R_recursive:-}" != "" ]; then
+		set -- -Hr
 	else
-		l_read_status=$?
-		return "$l_read_status"
+		set -- -H -d 1
 	fi
-	case "$l_manifest_contents" in
-	*'
-')
-		l_manifest_contents=${l_manifest_contents%?}
-		;;
-	esac
-
-	while IFS='	' read -r l_dataset l_record_relpath l_extra || [ -n "${l_dataset}${l_record_relpath}${l_extra}" ]; do
-		[ -n "$l_dataset" ] || return 1
-		[ -n "$l_record_relpath" ] || return 1
-		[ -z "$l_extra" ] || return 1
-		case "
-$l_seen_datasets
-" in
-		*"
-$l_dataset
-"*)
-			return 1
-			;;
-		esac
-		case "
-$l_seen_relpaths
-" in
-		*"
-$l_record_relpath
-"*)
-			return 1
-			;;
-		esac
-		case "$l_record_relpath" in
-		records/*) ;;
-		/* | ../* | */../* | */.. | [.] | [.]/* | */[.]/* | */[.])
-			return 1
-			;;
-		*)
-			return 1
-			;;
-		esac
-
-		l_record_path="$l_index_dir/$l_record_relpath"
-		l_manifest_status=0
-		zxfer_read_cache_object_file \
-			"$l_record_path" "$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null ||
-			l_manifest_status=$?
-		if [ "$l_manifest_status" -ne 0 ]; then
-			return "$l_manifest_status"
-		fi
-
-		if [ -n "$l_index_map" ]; then
-			l_index_map="$l_index_map
-$l_dataset	$l_record_path"
-		else
-			l_index_map="$l_dataset	$l_record_path"
-		fi
-		if [ -n "$l_seen_datasets" ]; then
-			l_seen_datasets="$l_seen_datasets
-$l_dataset"
-		else
-			l_seen_datasets=$l_dataset
-		fi
-		if [ -n "$l_seen_relpaths" ]; then
-			l_seen_relpaths="$l_seen_relpaths
-$l_record_relpath"
-		else
-			l_seen_relpaths=$l_record_relpath
-		fi
-		l_entry_count=$((l_entry_count + 1))
-	done <<EOF
-$l_manifest_contents
-EOF
-
-	[ "$l_entry_count" -eq "$l_entry_count_expected" ] || return 1
-	[ "$l_entry_count" -gt 0 ] || return 1
-
-	printf '%s\n' "$l_index_map"
-}
-
-# Purpose: Validate the snapshot record index object directory before zxfer
-# relies on it.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks to fail closed on malformed, unsafe, or stale input.
-zxfer_validate_snapshot_record_index_object_dir() {
-	l_index_dir=$1
-	l_expected_side=$2
-	l_meta_path="$l_index_dir/meta"
-	l_manifest_path="$l_index_dir/manifest.tsv"
-
-	[ -d "$l_index_dir" ] || return 1
-	[ ! -L "$l_index_dir" ] || return 1
-	[ ! -h "$l_index_dir" ] || return 1
-	l_index_object_status=0
-	zxfer_read_cache_object_file \
-		"$l_meta_path" "$ZXFER_SNAPSHOT_RECORD_INDEX_OBJECT_KIND" >/dev/null ||
-		l_index_object_status=$?
-	if [ "$l_index_object_status" -ne 0 ]; then
-		return "$l_index_object_status"
-	fi
-	[ "$g_zxfer_cache_object_payload_result" = "ready" ] || return 1
-	l_index_object_status=0
-	l_manifest_name=$(zxfer_get_cache_object_metadata_value \
-		"$g_zxfer_cache_object_metadata_result" manifest) ||
-		l_index_object_status=$?
-	if [ "$l_index_object_status" -ne 0 ]; then
-		return "$l_index_object_status"
-	fi
-	[ "$l_manifest_name" = "manifest.tsv" ] || return 1
-	l_index_object_status=0
-	l_entry_count_expected=$(zxfer_get_cache_object_metadata_value \
-		"$g_zxfer_cache_object_metadata_result" entries) ||
-		l_index_object_status=$?
-	if [ "$l_index_object_status" -ne 0 ]; then
-		return "$l_index_object_status"
-	fi
-	case "$l_entry_count_expected" in
-	'' | *[!0-9]*)
+	l_view_capture_generation=${g_zxfer_destination_mutation_generation:-0}
+	if ! zxfer_run_destination_zfs_cmd list "$@" -o name,guid -t snapshot "$l_view_refresh_root" \
+		>"$g_zxfer_live_destination_view_file"; then
 		return 1
-		;;
-	esac
-	l_index_object_status=0
-	l_meta_side=$(zxfer_get_cache_object_metadata_value \
-		"$g_zxfer_cache_object_metadata_result" side) ||
-		l_index_object_status=$?
-	if [ "$l_index_object_status" -ne 0 ]; then
-		return "$l_index_object_status"
-	fi
-	[ -z "$l_expected_side" ] || [ "$l_meta_side" = "$l_expected_side" ] || return 1
-
-	zxfer_validate_snapshot_record_index_manifest_file \
-		"$l_index_dir" "$l_manifest_path" "$l_entry_count_expected"
-}
-
-# Purpose: Validate the snapshot record index for side before zxfer relies on
-# it.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks to fail closed on malformed, unsafe, or stale input.
-zxfer_validate_snapshot_record_index_for_side() {
-	l_side=$1
-
-	case "$l_side" in
-	source)
-		l_index_dir=${g_zxfer_source_snapshot_record_index_dir:-}
-		l_index_ready=${g_zxfer_source_snapshot_record_index_ready:-0}
-		;;
-	destination)
-		l_index_dir=${g_zxfer_destination_snapshot_record_index_dir:-}
-		l_index_ready=${g_zxfer_destination_snapshot_record_index_ready:-0}
-		;;
-	*)
-		return 1
-		;;
-	esac
-
-	[ "$l_index_ready" -eq 1 ] || return 1
-	[ -n "$l_index_dir" ] || {
-		zxfer_clear_snapshot_record_index_state_for_side "$l_side" 0
-		return 1
-	}
-
-	l_validate_status=0
-	l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_index_dir" "$l_side") ||
-		l_validate_status=$?
-	if [ "$l_validate_status" -ne 0 ]; then
-		zxfer_clear_snapshot_record_index_state_for_side "$l_side"
-		return "$l_validate_status"
 	fi
 
-	zxfer_set_snapshot_record_index_state_for_side "$l_side" "$l_index_dir" "$l_index_map"
-}
-
-# Purpose: Return the snapshot-record cache file path for the requested source
-# or destination side.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks before snapshot-record cache data is read or rewritten for one side of
-# the run.
-zxfer_snapshot_record_cache_file_for_side() {
-	case "$1" in
-	source)
-		printf '%s\n' "${g_zxfer_source_snapshot_record_cache_file:-}"
-		;;
-	destination)
-		printf '%s\n' "${g_zxfer_destination_snapshot_record_cache_file:-}"
-		;;
-	*)
-		return 1
-		;;
-	esac
-}
-
-# Purpose: Build the snapshot record index from either a file or in-memory
-# records.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks so public builders share one validation, publish, and cleanup path.
-zxfer_build_snapshot_record_index_core() {
-	l_side=$1
-	l_input_kind=$2
-	l_snapshot_records_input=$3
-	l_stage_dir=""
-	l_manifest_path=""
-	l_records_dir=""
-	l_stage_map=""
-	l_manifest_payload=""
-
-	case "$l_side" in
-	source)
-		l_previous_index_dir=${g_zxfer_source_snapshot_record_index_dir:-}
-		;;
-	destination)
-		l_previous_index_dir=${g_zxfer_destination_snapshot_record_index_dir:-}
-		;;
-	*)
-		return 1
-		;;
-	esac
-	case "$l_input_kind" in
-	file)
-		[ -r "$l_snapshot_records_input" ] || return 1
-		;;
-	records)
-		:
-		;;
-	*)
-		return 1
-		;;
-	esac
-
-	l_build_status=0
-	zxfer_ensure_snapshot_index_dir || l_build_status=$?
-	if [ "$l_build_status" -ne 0 ]; then
-		return "$l_build_status"
-	fi
-
-	l_build_status=0
-	zxfer_create_cache_object_stage_dir_in_parent \
-		"$g_zxfer_snapshot_index_dir" "zxfer-snapshot-index-$l_side" >/dev/null ||
-		l_build_status=$?
-	if [ "$l_build_status" -ne 0 ]; then
-		return "$l_build_status"
-	fi
-	l_stage_dir=$g_zxfer_runtime_artifact_path_result
-	l_manifest_path="$l_stage_dir/manifest.tsv"
-	l_records_dir="$l_stage_dir/records"
-	l_build_status=0
-	mkdir -p "$l_records_dir" || l_build_status=$?
-	if [ "$l_build_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return "$l_build_status"
-	fi
-
-	l_build_status=0
-	# shellcheck disable=SC2016  # awk program should see literal $0.
-	l_snapshot_index_stage_awk='
-$0 != "" {
-	record = $0
-	tab_pos = index(record, "\t")
-	snapshot_path = (tab_pos > 0 ? substr(record, 1, tab_pos - 1) : record)
-	at_pos = index(snapshot_path, "@")
-	if (at_pos <= 0)
-		next
-	dataset = substr(snapshot_path, 1, at_pos - 1)
-	if (!(dataset in file_paths)) {
-		file_count++
-		relative_paths[dataset] = "records/" file_count ".raw"
-		file_paths[dataset] = index_dir "/" relative_paths[dataset]
-		dataset_order[file_count] = dataset
-	}
-	print record >> file_paths[dataset]
-	# Avoid exhausting awk output descriptors on deep recursive trees.
-	close(file_paths[dataset])
-}
-END {
-	for (i = 1; i <= file_count; i++)
-		print dataset_order[i] "\t" "records/" i ".records" "\t" file_paths[dataset_order[i]]
-}'
-	case "$l_input_kind" in
-	file)
-		l_stage_map=$("${g_cmd_awk:-awk}" -v index_dir="$l_stage_dir" \
-			"$l_snapshot_index_stage_awk" "$l_snapshot_records_input") ||
-			l_build_status=$?
-		;;
-	records)
-		l_stage_map=$(printf '%s\n' "$l_snapshot_records_input" |
-			"${g_cmd_awk:-awk}" -v index_dir="$l_stage_dir" "$l_snapshot_index_stage_awk") ||
-			l_build_status=$?
-		;;
-	esac
-	if [ "$l_build_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return "$l_build_status"
-	fi
-
-	while IFS='	' read -r l_dataset l_record_relpath l_raw_record_path || [ -n "${l_dataset}${l_record_relpath}${l_raw_record_path}" ]; do
-		[ -n "$l_dataset" ] || continue
-		[ -n "$l_record_relpath" ] || {
-			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-			return 1
-		}
-		[ -n "$l_raw_record_path" ] || {
-			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-			return 1
-		}
-		if zxfer_read_runtime_artifact_file "$l_raw_record_path" >/dev/null 2>&1; then
-			l_record_payload=$g_zxfer_runtime_artifact_read_result
-		else
-			l_read_status=$?
-			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-			return "$l_read_status"
-		fi
-		l_build_status=0
-		zxfer_write_cache_object_contents_to_path \
-			"$l_stage_dir/$l_record_relpath" \
-			"$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" "" "$l_record_payload" ||
-			l_build_status=$?
-		if [ "$l_build_status" -ne 0 ]; then
-			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-			return "$l_build_status"
-		fi
-		l_build_status=0
-		zxfer_read_cache_object_file \
-			"$l_stage_dir/$l_record_relpath" \
-			"$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null ||
-			l_build_status=$?
-		if [ "$l_build_status" -ne 0 ]; then
-			zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-			return "$l_build_status"
-		fi
-		zxfer_cleanup_runtime_artifact_path "$l_raw_record_path"
-		if [ -n "$l_manifest_payload" ]; then
-			l_manifest_payload="$l_manifest_payload
-$l_dataset	$l_record_relpath"
-		else
-			l_manifest_payload="$l_dataset	$l_record_relpath"
-		fi
-	done <<-EOF
-		$l_stage_map
-	EOF
-
-	[ -n "$l_manifest_payload" ] || {
-		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return 1
-	}
-	l_build_status=0
-	printf '%s\n' "$l_manifest_payload" >"$l_manifest_path" || l_build_status=$?
-	if [ "$l_build_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return "$l_build_status"
-	fi
-	l_build_status=0
-	l_stage_entry_count=$(printf '%s\n' "$l_stage_map" | "${g_cmd_awk:-awk}" 'END {print NR + 0}') ||
-		l_build_status=$?
-	if [ "$l_build_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return "$l_build_status"
-	fi
-	l_build_status=0
-	l_index_map=$(zxfer_validate_snapshot_record_index_manifest_file \
-		"$l_stage_dir" "$l_manifest_path" "$l_stage_entry_count") ||
-		l_build_status=$?
-	if [ "$l_build_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return "$l_build_status"
-	fi
-	l_build_status=0
-	zxfer_write_cache_object_contents_to_path \
-		"$l_stage_dir/meta" \
-		"$ZXFER_SNAPSHOT_RECORD_INDEX_OBJECT_KIND" \
-		"side=$l_side
-manifest=manifest.tsv
-entries=$l_stage_entry_count" \
-		"ready" ||
-		l_build_status=$?
-	if [ "$l_build_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return "$l_build_status"
-	fi
-	l_build_status=0
-	l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_stage_dir" "$l_side") ||
-		l_build_status=$?
-	if [ "$l_build_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return "$l_build_status"
-	fi
-
-	l_stage_base=${l_stage_dir##*/}
-	l_generation_token=${l_stage_base##*.}
-	l_published_index_dir="$g_zxfer_snapshot_index_dir/$l_side.$l_generation_token.obj"
-	l_build_status=0
-	zxfer_publish_cache_object_directory "$l_stage_dir" "$l_published_index_dir" ||
-		l_build_status=$?
-	if [ "$l_build_status" -ne 0 ]; then
-		zxfer_cleanup_cache_object_stage_dir "$l_stage_dir"
-		return "$l_build_status"
-	fi
-
-	l_build_status=0
-	zxfer_set_snapshot_record_index_state_for_side \
-		"$l_side" "$l_published_index_dir" "$l_index_map" ||
-		l_build_status=$?
-	if [ "$l_build_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_published_index_dir"
-		return "$l_build_status"
-	fi
-	if [ -n "$l_previous_index_dir" ] && [ "$l_previous_index_dir" != "$l_published_index_dir" ]; then
-		zxfer_cleanup_runtime_artifact_path "$l_previous_index_dir"
-	fi
-
+	g_zxfer_live_destination_view_root=$l_view_refresh_root
+	g_zxfer_live_destination_view_generation=$l_view_capture_generation
 	return 0
-}
-
-# Purpose: Build the snapshot record index from file for the next execution or
-# comparison step.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks before other helpers consume the assembled value.
-zxfer_build_snapshot_record_index_from_file() {
-	l_side=$1
-	l_snapshot_records_file=$2
-
-	zxfer_build_snapshot_record_index_core "$l_side" file "$l_snapshot_records_file"
-}
-
-# Purpose: Build the snapshot record index for the next execution or comparison
-# step.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks before other helpers consume the assembled value.
-zxfer_build_snapshot_record_index() {
-	l_side=$1
-	l_snapshot_records=$2
-
-	zxfer_build_snapshot_record_index_core "$l_side" records "$l_snapshot_records"
 }
 
 # Purpose: Ensure the source snapshot record cache exists and is ready before
 # the flow continues.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks before later helpers assume the resource or cache is available.
 zxfer_ensure_source_snapshot_record_cache() {
 	[ -n "${g_lzfs_list_hr_S_snap:-}" ] && return 0
@@ -654,61 +169,9 @@ zxfer_ensure_source_snapshot_record_cache() {
 	[ -n "${g_lzfs_list_hr_S_snap:-}" ]
 }
 
-# Purpose: Ensure the snapshot record index for side exists and is ready before
-# the flow continues.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks before later helpers assume the resource or cache is available.
-zxfer_ensure_snapshot_record_index_for_side() {
-	l_side=$1
-
-	case "$l_side" in
-	source)
-		if [ "${g_zxfer_source_snapshot_record_index_ready:-0}" -eq 1 ] &&
-			zxfer_validate_snapshot_record_index_for_side "$l_side"; then
-			return 0
-		fi
-		if l_snapshot_record_cache_file=$(zxfer_snapshot_record_cache_file_for_side "$l_side") &&
-			[ -r "$l_snapshot_record_cache_file" ]; then
-			l_status=0
-			zxfer_build_snapshot_record_index_from_file "$l_side" "$l_snapshot_record_cache_file" ||
-				l_status=$?
-			return "$l_status"
-		fi
-		if zxfer_ensure_source_snapshot_record_cache; then
-			:
-		else
-			l_status=$?
-			return "$l_status"
-		fi
-		l_snapshot_records=$g_lzfs_list_hr_S_snap
-		;;
-	destination)
-		if [ "${g_zxfer_destination_snapshot_record_index_ready:-0}" -eq 1 ] &&
-			zxfer_validate_snapshot_record_index_for_side "$l_side"; then
-			return 0
-		fi
-		if l_snapshot_record_cache_file=$(zxfer_snapshot_record_cache_file_for_side "$l_side") &&
-			[ -r "$l_snapshot_record_cache_file" ]; then
-			l_status=0
-			zxfer_build_snapshot_record_index_from_file "$l_side" "$l_snapshot_record_cache_file" ||
-				l_status=$?
-			return "$l_status"
-		fi
-		l_snapshot_records=${g_rzfs_list_hr_snap:-}
-		;;
-	*)
-		return 1
-		;;
-	esac
-
-	[ -n "$l_snapshot_records" ] || return 1
-
-	zxfer_build_snapshot_record_index "$l_side" "$l_snapshot_records"
-}
-
 # Purpose: Filter the snapshot record file for dataset down to the subset later
 # helpers should act on.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks before reconciliation, execution, or reporting consumes the reduced
 # set.
 zxfer_filter_snapshot_record_file_for_dataset() {
@@ -717,97 +180,49 @@ zxfer_filter_snapshot_record_file_for_dataset() {
 
 	[ -r "$l_snapshot_records_file" ] || return 1
 
+	# Splitting on the first "@" matches exactly "dataset@" record prefixes,
+	# so sibling datasets that share a name prefix ("a/b" vs "a/bc") can
+	# never collide.
 	# shellcheck disable=SC2016  # awk program should see literal $1/$0.
 	"${g_cmd_awk:-awk}" -F@ -v ds="$l_dataset" '$1 == ds { print $0 }' "$l_snapshot_records_file"
 }
 
-# Purpose: Return the indexed snapshot records for dataset in the form expected
-# by later helpers.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks when sibling helpers need the same lookup without duplicating module
+# Purpose: Return the snapshot records for dataset in the form expected by
+# later helpers.
+# Usage: Called during last-common-snapshot selection and delete planning when
+# sibling helpers need the same per-dataset lookup without duplicating module
 # logic.
-zxfer_get_indexed_snapshot_records_for_dataset() {
-	l_side=$1
-	l_dataset=$2
+zxfer_get_snapshot_records_for_dataset() {
+	l_snapshot_lookup_side=$1
+	l_snapshot_lookup_dataset=$2
 
-	case "$l_side" in
+	case "$l_snapshot_lookup_side" in
 	source)
-		l_index_dir=${g_zxfer_source_snapshot_record_index_dir:-}
-		l_index_map=${g_zxfer_source_snapshot_record_index:-}
-		l_index_ready=${g_zxfer_source_snapshot_record_index_ready:-0}
+		l_snapshot_record_cache_file=${g_zxfer_source_snapshot_record_cache_file:-}
 		;;
 	destination)
-		l_index_dir=${g_zxfer_destination_snapshot_record_index_dir:-}
-		l_index_map=${g_zxfer_destination_snapshot_record_index:-}
-		l_index_ready=${g_zxfer_destination_snapshot_record_index_ready:-0}
+		l_snapshot_record_cache_file=${g_zxfer_destination_snapshot_record_cache_file:-}
 		;;
 	*)
 		return 1
 		;;
 	esac
 
-	[ "$l_index_ready" -eq 1 ] || return 1
-	l_lookup_status=0
-	l_index_map=$(zxfer_validate_snapshot_record_index_object_dir "$l_index_dir" "$l_side") ||
-		l_lookup_status=$?
-	if [ "$l_lookup_status" -ne 0 ]; then
-		zxfer_clear_snapshot_record_index_state_for_side "$l_side"
-		return "$l_lookup_status"
-	fi
-	l_lookup_status=0
-	zxfer_set_snapshot_record_index_state_for_side "$l_side" "$l_index_dir" "$l_index_map" ||
-		l_lookup_status=$?
-	if [ "$l_lookup_status" -ne 0 ]; then
-		return "$l_lookup_status"
-	fi
-
-	while IFS='	' read -r l_indexed_dataset l_record_file || [ -n "${l_indexed_dataset}${l_record_file}" ]; do
-		[ -n "$l_indexed_dataset" ] || continue
-		if [ "$l_indexed_dataset" = "$l_dataset" ]; then
-			l_lookup_status=0
-			zxfer_read_cache_object_file \
-				"$l_record_file" "$ZXFER_SNAPSHOT_RECORDS_OBJECT_KIND" >/dev/null ||
-				l_lookup_status=$?
-			if [ "$l_lookup_status" -eq 0 ]; then
-				printf '%s\n' "$g_zxfer_cache_object_payload_result"
-				return 0
-			fi
-			zxfer_clear_snapshot_record_index_state_for_side "$l_side"
-			return "$l_lookup_status"
+	# Discovery stages one flat sorted record file per side; filtering it
+	# directly is the whole per-dataset lookup.
+	if [ -n "$l_snapshot_record_cache_file" ]; then
+		if [ ! -r "$l_snapshot_record_cache_file" ]; then
+			# Fail closed: the staged record file is run-private state that
+			# is never legitimately removed while lookups can still happen,
+			# so an unreadable file is corruption, not an empty snapshot
+			# list.
+			zxfer_throw_error "Failed to read staged $l_snapshot_lookup_side snapshot record cache."
 		fi
-	done <<-EOF
-		$l_index_map
-	EOF
-
-	return 0
-}
-
-# Purpose: Return the snapshot records for dataset in the form expected by
-# later helpers.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
-# checks when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_snapshot_records_for_dataset() {
-	l_snapshot_lookup_side=$1
-	l_snapshot_lookup_dataset=$2
-
-	if zxfer_get_indexed_snapshot_records_for_dataset \
-		"$l_snapshot_lookup_side" "$l_snapshot_lookup_dataset"; then
-		return 0
-	fi
-	if zxfer_ensure_snapshot_record_index_for_side "$l_snapshot_lookup_side"; then
-		if zxfer_get_indexed_snapshot_records_for_dataset \
-			"$l_snapshot_lookup_side" "$l_snapshot_lookup_dataset"; then
-			return 0
-		fi
-	fi
-	if l_snapshot_record_cache_file=$(zxfer_snapshot_record_cache_file_for_side "$l_snapshot_lookup_side") &&
-		[ -r "$l_snapshot_record_cache_file" ]; then
-		l_status=0
+		l_lookup_status=0
 		zxfer_filter_snapshot_record_file_for_dataset \
 			"$l_snapshot_record_cache_file" "$l_snapshot_lookup_dataset" ||
-			l_status=$?
-		return "$l_status"
+			l_lookup_status=$?
+		return "$l_lookup_status"
 	fi
 
 	case "$l_snapshot_lookup_side" in
@@ -825,60 +240,56 @@ zxfer_get_snapshot_records_for_dataset() {
 		# shellcheck disable=SC2016  # awk program should see literal $1/$0.
 		printf '%s\n' "$g_rzfs_list_hr_snap" | "${g_cmd_awk:-awk}" -F@ -v ds="$l_snapshot_lookup_dataset" '$1 == ds { print $0 }'
 		;;
-	*)
-		return 1
-		;;
 	esac
 }
 
 # Purpose: Update the destination existence cache entry in the shared runtime
 # state.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks after a probe or planning step changes the active context that later
 # helpers should use.
+#
+# The cache is a prepend-only newline list of "state<TAB>dataset" rows: a
+# mutation is one O(1) string prepend, and the newest row for a dataset
+# shadows older rows, so invalidation just prepends authoritative entries.
 zxfer_set_destination_existence_cache_entry() {
 	l_dataset=$1
 	l_exists_state=$2
-	l_updated_cache=""
 
-	while IFS='	' read -r l_cached_dataset l_cached_state || [ -n "${l_cached_dataset}${l_cached_state}" ]; do
-		[ -n "$l_cached_dataset" ] || continue
-		[ "$l_cached_dataset" = "$l_dataset" ] && continue
-		if [ -n "$l_updated_cache" ]; then
-			l_updated_cache="$l_updated_cache
-$l_cached_dataset	$l_cached_state"
-		else
-			l_updated_cache="$l_cached_dataset	$l_cached_state"
-		fi
-	done <<-EOF
-		${g_destination_existence_cache:-}
-	EOF
-
-	if [ -n "$l_updated_cache" ]; then
-		g_destination_existence_cache="$l_updated_cache
-$l_dataset	$l_exists_state"
+	[ -n "$l_dataset" ] || return 0
+	if [ -n "${g_destination_existence_cache:-}" ]; then
+		g_destination_existence_cache="$l_exists_state	$l_dataset
+$g_destination_existence_cache"
 	else
-		g_destination_existence_cache="$l_dataset	$l_exists_state"
+		g_destination_existence_cache="$l_exists_state	$l_dataset"
 	fi
 }
 
 # Purpose: Return the destination existence cache entry in the form expected by
 # later helpers.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when sibling helpers need the same lookup without duplicating module
 # logic.
+#
+# First match scanning top-down wins: rows are prepended, so the earliest
+# "<TAB>dataset<NL>" needle hit (dataset names cannot contain tab/newline)
+# is the newest shadowing row, and the text between the preceding newline
+# and that tab is its state. Misses return 1 so callers live-probe.
 zxfer_get_destination_existence_cache_entry() {
 	l_dataset=$1
+	l_nl='
+'
 
-	while IFS='	' read -r l_cached_dataset l_cached_state || [ -n "${l_cached_dataset}${l_cached_state}" ]; do
-		[ -n "$l_cached_dataset" ] || continue
-		if [ "$l_cached_dataset" = "$l_dataset" ]; then
-			printf '%s\n' "$l_cached_state"
+	if [ -n "$l_dataset" ] && [ -n "${g_destination_existence_cache:-}" ]; then
+		l_cache_scan="$g_destination_existence_cache$l_nl"
+		case "$l_cache_scan" in
+		*"	$l_dataset$l_nl"*)
+			l_preceding=${l_cache_scan%%"	$l_dataset$l_nl"*}
+			printf '%s\n' "${l_preceding##*"$l_nl"}"
 			return 0
-		fi
-	done <<-EOF
-		${g_destination_existence_cache:-}
-	EOF
+			;;
+		esac
+	fi
 
 	if [ "${g_destination_existence_cache_root_complete:-0}" -eq 1 ] &&
 		[ -n "${g_destination_existence_cache_root:-}" ]; then
@@ -895,7 +306,7 @@ zxfer_get_destination_existence_cache_entry() {
 
 # Purpose: Seed the destination existence cache from recursive list so
 # incremental work can continue from a valid base.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when zxfer must bootstrap a destination before sending the remaining
 # range.
 zxfer_seed_destination_existence_cache_from_recursive_list() {
@@ -916,7 +327,7 @@ zxfer_seed_destination_existence_cache_from_recursive_list() {
 
 # Purpose: Mark the destination root missing in cache in the module-owned
 # state.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks so later helpers can make decisions from one shared marker instead of
 # re-deriving it.
 zxfer_mark_destination_root_missing_in_cache() {
@@ -929,7 +340,7 @@ zxfer_mark_destination_root_missing_in_cache() {
 }
 
 # Purpose: Mark the destination hierarchy exists in the module-owned state.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks so later helpers can make decisions from one shared marker instead of
 # re-deriving it.
 zxfer_mark_destination_hierarchy_exists() {
@@ -949,7 +360,7 @@ zxfer_mark_destination_hierarchy_exists() {
 
 # Purpose: Record the destination dataset exists for later diagnostics or
 # control decisions.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when zxfer needs the state preserved for follow-on helpers or
 # reporting.
 zxfer_note_destination_dataset_exists() {
@@ -1000,7 +411,7 @@ zxfer_note_destination_receive_completed() {
 
 # Purpose: Extract the snapshot path from the serialized input this module
 # works with.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when later helpers need one field or derived fragment without
 # reparsing the full payload themselves.
 zxfer_extract_snapshot_path() {
@@ -1019,7 +430,7 @@ zxfer_extract_snapshot_path() {
 
 # Purpose: Extract the snapshot name from the serialized input this module
 # works with.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when later helpers need one field or derived fragment without
 # reparsing the full payload themselves.
 #
@@ -1039,7 +450,7 @@ zxfer_extract_snapshot_name() {
 
 # Purpose: Extract the snapshot dataset from the serialized input this module
 # works with.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when later helpers need one field or derived fragment without
 # reparsing the full payload themselves.
 zxfer_extract_snapshot_dataset() {
@@ -1057,7 +468,7 @@ zxfer_extract_snapshot_dataset() {
 
 # Purpose: Extract the snapshot guid from the serialized input this module
 # works with.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when later helpers need one field or derived fragment without
 # reparsing the full payload themselves.
 zxfer_extract_snapshot_guid() {
@@ -1076,7 +487,7 @@ zxfer_extract_snapshot_guid() {
 
 # Purpose: Extract the snapshot identity from the serialized input this module
 # works with.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when later helpers need one field or derived fragment without
 # reparsing the full payload themselves.
 zxfer_extract_snapshot_identity() {
@@ -1097,14 +508,14 @@ zxfer_extract_snapshot_identity() {
 
 # Purpose: Normalize the snapshot record list into the stable form used across
 # zxfer.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks before comparison, caching, or reporting depends on exact formatting.
 zxfer_normalize_snapshot_record_list() {
 	printf '%s\n' "$1" | tr ' ' '\n'
 }
 
 # Purpose: Check whether the snapshot record list contains guid.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when later helpers need a boolean answer about the snapshot record
 # list.
 zxfer_snapshot_record_list_contains_guid() {
@@ -1120,7 +531,7 @@ zxfer_snapshot_record_list_contains_guid() {
 
 # Purpose: Reverse the snapshot record list while preserving the record
 # structure later helpers rely on.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when comparison or replay logic needs the same data in the opposite
 # order.
 zxfer_reverse_snapshot_record_list() {
@@ -1133,7 +544,7 @@ zxfer_reverse_snapshot_record_list() {
 }
 
 # Purpose: Transform snapshot records through a staged file and read the result.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when later helpers need a checked reload after normalizing or reversing
 # record lists.
 zxfer_read_transformed_snapshot_record_list() {
@@ -1161,7 +572,7 @@ zxfer_read_transformed_snapshot_record_list() {
 
 # Purpose: Read the normalized snapshot record list from staged state into the
 # current shell.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when later helpers need a checked reload instead of ad hoc file reads.
 zxfer_read_normalized_snapshot_record_list() {
 	zxfer_read_transformed_snapshot_record_list "$1" normalized
@@ -1169,14 +580,14 @@ zxfer_read_normalized_snapshot_record_list() {
 
 # Purpose: Read the reversed snapshot record list from staged state into the
 # current shell.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when later helpers need a checked reload instead of ad hoc file reads.
 zxfer_read_reversed_snapshot_record_list() {
 	zxfer_read_transformed_snapshot_record_list "$1" reversed
 }
 
 # Purpose: Check whether the snapshot record lists share snapshot name.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when later helpers need a boolean answer about the snapshot record
 # lists.
 zxfer_snapshot_record_lists_share_snapshot_name() {
@@ -1225,7 +636,7 @@ EOF
 
 # Purpose: Filter the snapshot identity records to reference paths down to the
 # subset later helpers should act on.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks before reconciliation, execution, or reporting consumes the reduced
 # set.
 zxfer_filter_snapshot_identity_records_to_reference_paths() {
@@ -1267,7 +678,7 @@ EOF
 
 # Purpose: Return the source snapshot identity records for dataset in the form
 # expected by later helpers.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when sibling helpers need the same lookup without duplicating module
 # logic.
 zxfer_get_source_snapshot_identity_records_for_dataset() {
@@ -1300,13 +711,17 @@ zxfer_get_source_snapshot_identity_records_for_dataset() {
 
 # Purpose: Return the destination snapshot identity records for dataset in the
 # form expected by later helpers.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when sibling helpers need the same lookup without duplicating module
 # logic.
 zxfer_get_destination_snapshot_identity_records_for_dataset() {
 	l_dataset=$1
 
-	if l_snapshot_records=$(zxfer_run_destination_zfs_cmd list -Hr -o name,guid -t snapshot "$l_dataset"); then
+	# Filtered to "$l_dataset"@* below, so list at depth 1 rather than
+	# recursively (mirrors the source side in
+	# zxfer_get_source_snapshot_identity_records_for_dataset). Avoids pulling the
+	# whole destination subtree just to drop the descendant snapshots.
+	if l_snapshot_records=$(zxfer_run_destination_zfs_cmd list -H -d 1 -o name,guid -t snapshot "$l_dataset"); then
 		:
 	else
 		l_status=$?
@@ -1343,7 +758,7 @@ EOF
 
 # Purpose: Return the snapshot identity records for dataset in the form
 # expected by later helpers.
-# Usage: Called during snapshot indexing, cache reads, and destination-state
+# Usage: Called during snapshot lookups, cache reads, and destination-state
 # checks when sibling helpers need the same lookup without duplicating module
 # logic.
 zxfer_get_snapshot_identity_records_for_dataset() {
@@ -1379,7 +794,3 @@ zxfer_get_snapshot_identity_records_for_dataset() {
 		printf '%s\n' "$l_identity_records"
 	fi
 }
-
-#
-# Initializes OS and local/remote specific variables
-#

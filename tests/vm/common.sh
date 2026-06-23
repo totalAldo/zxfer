@@ -228,6 +228,27 @@ zxfer_vm_count_words() {
 	printf '%s\n' "$#"
 }
 
+zxfer_vm_shell_quote() {
+	l_value=$1
+
+	printf "'"
+	while :; do
+		case $l_value in
+		*"'"*)
+			l_prefix=${l_value%%"'"*}
+			printf '%s' "$l_prefix"
+			printf "'\\\\''"
+			l_value=${l_value#*"'"}
+			;;
+		*)
+			printf '%s' "$l_value"
+			break
+			;;
+		esac
+	done
+	printf "'\n"
+}
+
 zxfer_vm_sha256_file() {
 	l_file=$1
 

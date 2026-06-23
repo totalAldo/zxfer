@@ -33,7 +33,10 @@
 
 zxfer_cleanup_child_wrapper_list_descendants() {
 	l_cleanup_wrapper_snapshot_status=0
-	l_cleanup_wrapper_snapshot=$(ps -o pid= -o ppid= 2>/dev/null) || l_cleanup_wrapper_snapshot_status=$?
+	# -A is required: without it ps only lists same-terminal processes, so a
+	# wrapper running without a controlling terminal (cron, CI, supervised
+	# background jobs) would miss its own descendants and leak them on TERM.
+	l_cleanup_wrapper_snapshot=$(ps -A -o pid= -o ppid= 2>/dev/null) || l_cleanup_wrapper_snapshot_status=$?
 	[ "$l_cleanup_wrapper_snapshot_status" -eq 0 ] || return "$l_cleanup_wrapper_snapshot_status"
 
 	printf '%s\n' "$l_cleanup_wrapper_snapshot" | awk -v root="$$" '
@@ -81,12 +84,12 @@ zxfer_cleanup_child_wrapper_abort_descendants() {
 
 zxfer_cleanup_child_wrapper_on_signal() {
 	zxfer_cleanup_child_wrapper_abort_descendants >/dev/null 2>&1 || :
+	[ -z "${l_cleanup_wrapper_child_pid:-}" ] || wait "$l_cleanup_wrapper_child_pid" 2>/dev/null || :
 	exit 143
 }
 
 zxfer_cleanup_child_wrapper_main() {
 	l_cleanup_wrapper_exec_cmd=$1
-
 	[ -n "$l_cleanup_wrapper_exec_cmd" ] || return 1
 	trap 'zxfer_cleanup_child_wrapper_on_signal' TERM INT HUP
 	l_cleanup_wrapper_status=0
@@ -96,7 +99,7 @@ zxfer_cleanup_child_wrapper_main() {
 	# Preserve the wrapper's stdin for background children. Some /bin/sh
 	# implementations reattach asynchronous jobs to /dev/null unless stdin is
 	# duplicated onto a dedicated descriptor before the background launch.
-	sh -c "$l_cleanup_wrapper_exec_cmd" <&3 &
+	/bin/sh -c "$l_cleanup_wrapper_exec_cmd" <&3 &
 	l_cleanup_wrapper_child_pid=$!
 	l_cleanup_wrapper_status=0
 	wait "$l_cleanup_wrapper_child_pid" || l_cleanup_wrapper_status=$?

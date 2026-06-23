@@ -43,6 +43,38 @@ tearDown() {
 	export PATH
 }
 
+zxfer_runtime_wait_for_path() {
+	l_runtime_wait_path=$1
+	l_runtime_wait_tries=0
+
+	while [ "$l_runtime_wait_tries" -lt 50 ]; do
+		[ -e "$l_runtime_wait_path" ] && return 0
+		sleep 0.1 2>/dev/null || sleep 1
+		l_runtime_wait_tries=$((l_runtime_wait_tries + 1))
+	done
+
+	return 1
+}
+
+zxfer_runtime_spawn_term_trap_helper() {
+	l_runtime_ready_file=$1
+	l_runtime_marker_file=$2
+
+	rm -f "$l_runtime_ready_file" "$l_runtime_marker_file" || return 1
+	sh -c '
+		l_ready_file=$1
+		l_marker_file=$2
+		trap '"'"'printf "%s\n" "term" >"$l_marker_file"; exit 143'"'"' TERM
+		: >"$l_ready_file" || exit 1
+		while :; do
+			sleep 1
+		done
+	' zxfer-runtime-term-helper "$l_runtime_ready_file" "$l_runtime_marker_file" &
+	g_zxfer_runtime_term_helper_pid=$!
+
+	zxfer_runtime_wait_for_path "$l_runtime_ready_file"
+}
+
 test_refresh_backup_storage_root_rejects_relative_override() {
 	zxfer_test_capture_subshell '
 		ZXFER_BACKUP_DIR="relative-backups"
@@ -84,8 +116,6 @@ EOF
 		0 "$group_status"
 	assertEquals "Temp-file group allocation should publish one path per requested file." \
 		3 "$group_count"
-	assertEquals "Temp-file group allocation should track the number of allocated files." \
-		3 "$g_zxfer_temp_file_group_allocated_count"
 	assertEquals "Temp-file group allocation should print the same newline-delimited paths it stores." \
 		"$g_zxfer_temp_file_group_result" "$(cat "$group_output_file")"
 	assertEquals "Temp-file group allocation should create every published file." \
@@ -117,7 +147,6 @@ test_zxfer_create_temp_file_group_cleans_partial_allocations_on_failure() {
 	set +e
 	zxfer_create_temp_file_group 4 >/dev/null
 	group_status=$?
-	allocated_count=$g_zxfer_temp_file_group_allocated_count
 	group_result=$g_zxfer_temp_file_group_result
 	if [ -e "$first_path" ]; then
 		first_exists=yes
@@ -136,8 +165,6 @@ test_zxfer_create_temp_file_group_cleans_partial_allocations_on_failure() {
 
 	assertEquals "Temp-file group allocation should preserve the failed allocation status." \
 		73 "$group_status"
-	assertEquals "Temp-file group allocation should report how many files were allocated before failure." \
-		2 "$allocated_count"
 	assertEquals "Temp-file group allocation should not publish a complete group on failure." \
 		"" "$group_result"
 	assertFalse "Temp-file group allocation should clean the first partial file on failure." \
@@ -148,7 +175,6 @@ test_zxfer_create_temp_file_group_cleans_partial_allocations_on_failure() {
 
 test_zxfer_create_temp_file_group_rejects_invalid_counts() {
 	g_zxfer_temp_file_group_result="stale-group"
-	g_zxfer_temp_file_group_allocated_count=9
 
 	set +e
 	zxfer_create_temp_file_group 0 >/dev/null
@@ -158,8 +184,6 @@ test_zxfer_create_temp_file_group_rejects_invalid_counts() {
 		1 "$group_status"
 	assertEquals "Temp-file group allocation should clear stale group results on invalid input." \
 		"" "$g_zxfer_temp_file_group_result"
-	assertEquals "Temp-file group allocation should reset the allocated count on invalid input." \
-		0 "$g_zxfer_temp_file_group_allocated_count"
 }
 
 test_zxfer_cleanup_pid_helpers_cover_current_shell_paths() {
@@ -199,728 +223,212 @@ test_zxfer_cleanup_pid_helpers_cover_current_shell_paths() {
 		"$output" "registered=<$first_pid $second_pid>"
 	assertContains "Cleanup PID unregistration should remove only the requested helper PID." \
 		"$output" "after_unregister=<$second_pid>"
-	assertContains "Cleanup PID teardown should delegate validated teardown for the remaining helper PID." \
+	assertContains "Cleanup PID teardown should delegate teardown for the remaining helper PID." \
 		"$output" "abort:$second_pid"
-	assertContains "Cleanup PID teardown should clear the registered helper PID list after delegated validated teardown." \
+	assertContains "Cleanup PID teardown should clear the registered helper PID list after delegated teardown." \
 		"$output" "after_kill=<>"
 }
 
-test_zxfer_abort_cleanup_pid_untracks_stale_start_token_mismatches() {
+test_zxfer_register_cleanup_pid_tracks_direct_children_without_identity_captures() {
 	sleep 30 &
 	tracked_pid=$!
 
 	zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
+	register_status=$?
 	zxfer_find_cleanup_pid_record "$tracked_pid"
-	g_zxfer_cleanup_pid_records="$tracked_pid	unit cleanup helper	bogus-start-token	$g_zxfer_cleanup_pid_record_hostname	$g_zxfer_cleanup_pid_record_pgid	$g_zxfer_cleanup_pid_record_teardown_mode"
-
-	zxfer_abort_cleanup_pid "$tracked_pid" TERM
-	status=$?
-
-	assertEquals "Validated cleanup teardown should treat a start-token mismatch as a stale record and return success." \
-		0 "$status"
-	assertEquals "Validated cleanup teardown should keep the abort-failure message empty when a tracked helper record is stale." \
-		"" "$g_zxfer_cleanup_pid_abort_failure_message"
-	assertTrue "Validated cleanup teardown should leave the live helper running when the tracked record is stale and no longer validated for teardown." \
-		"kill -s 0 \"$tracked_pid\" >/dev/null 2>&1"
-	assertEquals "Validated cleanup teardown should unregister stale helper records once ownership validation fails cleanly." \
-		"" "$g_zxfer_cleanup_pids"
+	find_status=$?
 
 	kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
 	wait "$tracked_pid" 2>/dev/null || true
+
+	assertEquals "Registering a live direct child should succeed." 0 "$register_status"
+	assertEquals "Registered helpers should be findable by PID." 0 "$find_status"
+	assertEquals "Registered rows should carry only the PID and purpose." \
+		"$tracked_pid	unit cleanup helper" "$g_zxfer_cleanup_pid_records"
+	assertEquals "Record lookups should publish the stored purpose." \
+		"unit cleanup helper" "$g_zxfer_cleanup_pid_record_purpose"
 }
 
-test_zxfer_abort_cleanup_pid_fails_closed_when_ownership_validation_errors() {
-	output=$(
-		(
-			sleep 30 &
-			tracked_pid=$!
-			zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
-			zxfer_owned_lock_owner_is_live() {
-				return 2
-			}
-			zxfer_abort_cleanup_pid "$tracked_pid" TERM
-			printf 'status=%s\n' "$?"
-			printf 'message=%s\n' "$g_zxfer_cleanup_pid_abort_failure_message"
-			printf 'pids=<%s>\n' "$g_zxfer_cleanup_pids"
-			kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
-			wait "$tracked_pid" 2>/dev/null || true
-		)
-	)
+test_zxfer_register_cleanup_pid_rejects_invalid_self_and_dead_pids() {
+	zxfer_register_cleanup_pid "not-a-pid" "unit cleanup helper"
+	invalid_status=$?
+	zxfer_register_cleanup_pid "$$" "current shell"
+	self_status=$?
+	sh -c 'exit 0' &
+	dead_pid=$!
+	wait "$dead_pid" 2>/dev/null
+	zxfer_register_cleanup_pid "$dead_pid" "already exited helper"
+	dead_status=$?
 
-	assertContains "Validated cleanup teardown should fail closed when ownership validation returns an internal error." \
-		"$output" "status=1"
-	assertContains "Validated cleanup teardown should preserve the ownership-validation failure message when validation errors out." \
-		"$output" "message=Failed to validate ownership for cleanup helper [unit cleanup helper] (PID "
-	assertContains "Validated cleanup teardown should preserve the tracked PID list after an ownership-validation error." \
-		"$output" "pids=<"
-	assertNotContains "Validated cleanup teardown should not clear the tracked PID list after an ownership-validation error." \
-		"$output" "pids=<>"
+	assertEquals "Non-numeric PIDs should be ignored without error." 0 "$invalid_status"
+	assertEquals "The current shell PID should be ignored without error." 0 "$self_status"
+	assertEquals "Already-exited helpers should be ignored without error." 0 "$dead_status"
+	assertEquals "No registry rows should exist after rejected registrations." \
+		"" "$g_zxfer_cleanup_pid_records"
+	assertEquals "No tracked PIDs should exist after rejected registrations." \
+		"" "$g_zxfer_cleanup_pids"
 }
 
-test_zxfer_cleanup_pid_low_level_helpers_cover_validation_paths() {
+test_zxfer_register_cleanup_pid_fails_closed_when_purpose_normalization_fails() {
 	zxfer_test_capture_subshell '
-		set +e
-		fake_ps() {
-			if [ "$1" = "-o" ] && [ "$2" = "pgid=" ] && [ "$3" = "-p" ]; then
-				case "$4" in
-				4242)
-					printf "%s\n" " 900 "
-					;;
-				5050)
-					printf "%s\n" "not-a-pgid"
-					;;
-				*)
-					return 1
-					;;
-				esac
-				return 0
-			fi
-			if [ "$1" = "-o" ] && [ "$2" = "pid=" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "ppid=" ] && [ "$5" = "-o" ] && [ "$6" = "pgid=" ]; then
-				printf "%s\n" "4242 1 900"
-				printf "%s\n" "4243 4242 900"
-				return 0
-			fi
+		sleep 30 &
+		tracked_pid=$!
+		zxfer_normalize_owned_lock_text_field() {
 			return 1
 		}
+		zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
+		printf "status=%s\n" "$?"
+		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
+		kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
+		wait "$tracked_pid" 2>/dev/null || true
+	'
+	output=$ZXFER_TEST_CAPTURE_OUTPUT
+
+	assertContains "Registration should fail closed when purpose normalization fails." \
+		"$output" "status=1"
+	assertContains "Failed registrations should not leave registry rows behind." \
+		"$output" "records=<>"
+}
+
+test_zxfer_abort_cleanup_pid_signals_and_unregisters_live_tracked_children() {
+	ready_file="$TEST_TMPDIR/abort_cleanup.ready"
+	marker_file="$TEST_TMPDIR/abort_cleanup.marker"
+	zxfer_runtime_spawn_term_trap_helper "$ready_file" "$marker_file" ||
+		fail "Unable to start TERM-aware cleanup helper."
+	tracked_pid=$g_zxfer_runtime_term_helper_pid
+
+	zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
+	zxfer_abort_cleanup_pid "$tracked_pid" TERM
+	abort_status=$?
+	wait "$tracked_pid" 2>/dev/null
+	reaped_status=$?
+
+	assertEquals "Aborting a live tracked helper should succeed." 0 "$abort_status"
+	assertEquals "Aborting should leave no failure message." \
+		"" "$g_zxfer_cleanup_pid_abort_failure_message"
+	assertEquals "Aborting should remove the registry row." "" "$g_zxfer_cleanup_pid_records"
+	assertEquals "Aborting should remove the tracked PID." "" "$g_zxfer_cleanup_pids"
+	assertEquals "The aborted helper should have handled the TERM signal." \
+		143 "$reaped_status"
+	assertEquals "The aborted helper should have recorded its TERM trap." \
+		"term" "$(tr -d '[:space:]' <"$marker_file")"
+}
+
+test_zxfer_abort_cleanup_pid_handles_untracked_and_already_exited_helpers() {
+	zxfer_abort_cleanup_pid 99999 TERM
+	untracked_status=$?
+
+	sh -c 'exit 0' &
+	dead_pid=$!
+	g_zxfer_cleanup_pid_records="$dead_pid	already exited helper"
+	g_zxfer_cleanup_pids=$dead_pid
+	wait "$dead_pid" 2>/dev/null
+	zxfer_abort_cleanup_pid "$dead_pid" TERM
+	dead_status=$?
+
+	assertEquals "Aborting an untracked PID should be a no-op success." 0 "$untracked_status"
+	assertEquals "Aborting a tracked helper that already exited should succeed." 0 "$dead_status"
+	assertEquals "Already-exited helpers should be unregistered during abort." \
+		"" "$g_zxfer_cleanup_pid_records"
+	assertEquals "Already-exited helpers should leave no failure message." \
+		"" "$g_zxfer_cleanup_pid_abort_failure_message"
+}
+
+test_zxfer_abort_cleanup_pid_fails_closed_when_signalling_a_live_helper_fails() {
+	zxfer_test_capture_subshell '
+		sleep 30 &
+		tracked_pid=$!
+		zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
 		kill() {
-			case "$1:$2" in
-			-TERM:4242 | -TERM:4243 | -TERM:-900)
-				return 0
+			case "$2" in
+			0)
+				command kill -0 "$3" 2>/dev/null
+				return $?
 				;;
 			esac
 			return 1
 		}
-
-		g_cmd_ps=fake_ps
-		g_zxfer_cleanup_pid_records="4242	unit cleanup helper	start-token	unit-host	900	process_group"
-		zxfer_validate_cleanup_pid_teardown_mode child_set
-		printf "mode_child=%s\n" "$?"
-		zxfer_validate_cleanup_pid_teardown_mode process_group
-		printf "mode_group=%s\n" "$?"
-		zxfer_validate_cleanup_pid_teardown_mode invalid
-		printf "mode_invalid=%s\n" "$?"
-		printf "pgid_ok=%s\n" "$(zxfer_read_cleanup_pid_process_group 4242)"
-		zxfer_read_cleanup_pid_process_group 5050 >/dev/null 2>&1
-		printf "pgid_bad=%s\n" "$?"
-		zxfer_find_cleanup_pid_record 4242
-		printf "find_hit=%s:%s:%s\n" "$?" \
-			"$g_zxfer_cleanup_pid_record_purpose" \
-			"$g_zxfer_cleanup_pid_record_teardown_mode"
-		zxfer_find_cleanup_pid_record 9999 >/dev/null 2>&1
-		printf "find_miss=%s:<%s>\n" "$?" "$g_zxfer_cleanup_pid_record_purpose"
-		snapshot_read=$(zxfer_read_cleanup_pid_process_snapshot)
-		printf "snapshot_read_status=%s\n" "$?"
-		printf "snapshot_read=<%s>\n" "$(printf "%s" "$snapshot_read" | tr "\n" ";")"
-		g_cmd_ps=false
-		zxfer_read_cleanup_pid_process_snapshot >/dev/null 2>&1
-		printf "snapshot_read_fail=%s\n" "$?"
-		g_cmd_ps=fake_ps
-		l_snapshot=$(printf "%s\n%s\n" "4242 1 900" "4243 4242 900")
-		zxfer_cleanup_pid_snapshot_has_pid_with_pgid "$l_snapshot" 4242 900
-		printf "has_pgid=%s\n" "$?"
-		zxfer_cleanup_pid_snapshot_has_pid_with_pgid "$l_snapshot" bad 900 >/dev/null 2>&1
-		printf "has_pgid_bad=%s\n" "$?"
-		zxfer_cleanup_pid_snapshot_has_pid_with_parent "$l_snapshot" 4243 4242
-		printf "has_parent=%s\n" "$?"
-		zxfer_cleanup_pid_snapshot_has_pid_with_parent "$l_snapshot" 4243 bad >/dev/null 2>&1
-		printf "has_parent_bad=%s\n" "$?"
-		l_pid_set=$(zxfer_get_cleanup_pid_set "$l_snapshot" 4242)
-		printf "pid_set_status=%s\n" "$?"
-		printf "pid_set=<%s>\n" "$(printf "%s" "$l_pid_set" | tr "\n" " " | sed "s/[[:space:]]*$//")"
-		zxfer_get_cleanup_pid_set "$l_snapshot" "" >/dev/null 2>&1
-		printf "pid_set_blank=%s\n" "$?"
-		l_signal_input=$(printf "%s\n%s\n" "4242" "4243")
-		zxfer_signal_cleanup_pid_set "$l_signal_input" TERM
-		printf "signal_set=%s\n" "$?"
-		zxfer_signal_cleanup_process_group 900 TERM
-		printf "signal_group=%s\n" "$?"
-		zxfer_signal_cleanup_process_group bad TERM >/dev/null 2>&1
-		printf "signal_group_bad=%s\n" "$?"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Validated cleanup-helper mode validation should accept child-set teardown." \
-		"$output" "mode_child=0"
-	assertContains "Validated cleanup-helper mode validation should accept process-group teardown." \
-		"$output" "mode_group=0"
-	assertContains "Validated cleanup-helper mode validation should reject unknown teardown modes." \
-		"$output" "mode_invalid=1"
-	assertContains "Validated cleanup-helper process-group reads should trim whitespace around numeric pgids." \
-		"$output" "pgid_ok=900"
-	assertContains "Validated cleanup-helper process-group reads should reject nonnumeric pgids." \
-		"$output" "pgid_bad=1"
-	assertContains "Validated cleanup-helper record lookup should publish the stored purpose and teardown mode for matching PIDs." \
-		"$output" "find_hit=0:unit cleanup helper:process_group"
-	assertContains "Validated cleanup-helper record lookup should clear the published record fields after a miss." \
-		"$output" "find_miss=1:<>"
-	assertContains "Validated cleanup-helper snapshot reads should preserve the ps output in current-shell scratch state." \
-		"$output" "snapshot_read_status=0"
-	assertContains "Validated cleanup-helper snapshot reads should fail closed when ps cannot be queried." \
-		"$output" "snapshot_read_fail=1"
-	assertContains "Validated cleanup-helper snapshot scans should detect matching pgids." \
-		"$output" "has_pgid=0"
-	assertContains "Validated cleanup-helper snapshot scans should reject malformed pgid probes." \
-		"$output" "has_pgid_bad=1"
-	assertContains "Validated cleanup-helper snapshot scans should detect matching parent-child ownership." \
-		"$output" "has_parent=0"
-	assertContains "Validated cleanup-helper snapshot scans should reject malformed parent probes." \
-		"$output" "has_parent_bad=1"
-	assertContains "Validated cleanup-helper child-set derivation should return the owned root and descendants." \
-		"$output" "pid_set=<4242 4243>"
-	assertContains "Validated cleanup-helper child-set derivation should fail closed when the root pid is blank." \
-		"$output" "pid_set_blank=1"
-	assertContains "Validated cleanup-helper child-set signaling should return success when every tracked pid is signaled." \
-		"$output" "signal_set=0"
-	assertContains "Validated cleanup-helper process-group signaling should return success for numeric pgids." \
-		"$output" "signal_group=0"
-	assertContains "Validated cleanup-helper process-group signaling should reject malformed pgids." \
-		"$output" "signal_group_bad=1"
-}
-
-test_zxfer_register_cleanup_pid_covers_validation_and_transient_lookup_paths() {
-	zxfer_test_capture_subshell '
-		set +e
-		kill() {
-			[ "$1" = "-s" ] && [ "$2" = "0" ] || return 1
-			[ "$3" = "${live_pid:-}" ]
-		}
-		zxfer_normalize_owned_lock_text_field() {
-			[ "${normalize_fail:-0}" -eq 1 ] && return 1
-			printf "%s\n" "$1"
-		}
-		zxfer_get_process_start_token() {
-			[ "${start_fail:-0}" -eq 1 ] && return 1
-			printf "start-%s\n" "$1"
-		}
-		zxfer_get_owned_lock_hostname() {
-			[ "${hostname_fail:-0}" -eq 1 ] && return 1
-			printf "%s\n" "unit-host"
-		}
-		zxfer_read_cleanup_pid_process_group() {
-			printf "%s\n" "900"
-		}
-
-		live_pid=101
-		normalize_fail=1
-		zxfer_register_cleanup_pid 101 "unit cleanup helper" child_set
-		printf "normalize=%s\n" "$?"
-		normalize_fail=0
-
-		live_pid=102
-		zxfer_register_cleanup_pid 102 "unit cleanup helper" invalid
-		printf "mode=%s\n" "$?"
-
-		start_fail=1
-		live_pid=""
-		zxfer_register_cleanup_pid 103 "unit cleanup helper" child_set
-		printf "start_gone=%s\n" "$?"
-
-		live_pid=104
-		zxfer_register_cleanup_pid 104 "unit cleanup helper" child_set
-		printf "start_live=%s\n" "$?"
-		start_fail=0
-
-		hostname_fail=1
-		live_pid=""
-		zxfer_register_cleanup_pid 105 "unit cleanup helper" child_set
-		printf "host_gone=%s\n" "$?"
-
-		live_pid=106
-		zxfer_register_cleanup_pid 106 "unit cleanup helper" child_set
-		printf "host_live=%s\n" "$?"
-		hostname_fail=0
-
-		live_pid=107
-		zxfer_register_cleanup_pid 107 "unit cleanup helper" process_group
-		printf "success=%s\n" "$?"
-		printf "pids=<%s>\n" "$g_zxfer_cleanup_pids"
-		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Cleanup-helper registration should fail closed when purpose normalization fails." \
-		"$output" "normalize=1"
-	assertContains "Cleanup-helper registration should fail closed when teardown mode validation fails." \
-		"$output" "mode=1"
-	assertContains "Cleanup-helper registration should treat disappearing helpers as already gone when start-token lookup races with exit." \
-		"$output" "start_gone=0"
-	assertContains "Cleanup-helper registration should fail closed when start-token lookup fails for a still-live helper." \
-		"$output" "start_live=1"
-	assertContains "Cleanup-helper registration should treat disappearing helpers as already gone when hostname lookup races with exit." \
-		"$output" "host_gone=0"
-	assertContains "Cleanup-helper registration should fail closed when hostname lookup fails for a still-live helper." \
-		"$output" "host_live=1"
-	assertContains "Cleanup-helper registration should preserve the success path for validated process-group helpers." \
-		"$output" "success=0"
-	assertContains "Cleanup-helper registration should only track helpers that published validated metadata successfully." \
-		"$output" "pids=<107>"
-	assertContains "Cleanup-helper registration should store the requested teardown mode in the validated record set." \
-		"$output" "records=<107	unit cleanup helper	start-107	unit-host	900	process_group>"
-}
-
-test_zxfer_register_cleanup_pid_replaces_stale_records_when_numeric_pids_are_reused() {
-	zxfer_test_capture_subshell '
-		set +e
-		kill() {
-			[ "$1" = "-s" ] && [ "$2" = "0" ] || return 1
-			[ "$3" = "108" ]
-		}
-		zxfer_normalize_owned_lock_text_field() {
-			printf "%s\n" "$1"
-		}
-		zxfer_get_process_start_token() {
-			printf "start-108-new\n"
-		}
-		zxfer_get_owned_lock_hostname() {
-			printf "%s\n" "unit-host"
-		}
-		zxfer_read_cleanup_pid_process_group() {
-			printf "%s\n" "901"
-		}
-
-		g_zxfer_cleanup_pids="108"
-		g_zxfer_cleanup_pid_records="108	stale cleanup helper	start-108-old	unit-host	700	child_set"
-
-		zxfer_register_cleanup_pid 108 "replacement cleanup helper" process_group
-		printf "status=%s\n" "$?"
-		printf "pids=<%s>\n" "$g_zxfer_cleanup_pids"
-		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Cleanup-helper registration should accept a reused numeric pid when the live helper has a different validated start token." \
-		"$output" "status=0"
-	assertContains "Cleanup-helper registration should preserve only one tracked pid after replacing a stale record for a reused numeric pid." \
-		"$output" "pids=<108>"
-	assertContains "Cleanup-helper registration should replace stale reused-pid metadata with the current validated helper identity." \
-		"$output" "records=<108	replacement cleanup helper	start-108-new	unit-host	901	process_group>"
-	assertNotContains "Cleanup-helper registration should discard the stale reused-pid metadata once the live helper has been revalidated." \
-		"$output" "start-108-old"
-}
-
-test_zxfer_abort_direct_child_pid_reports_lookup_and_ownership_failures() {
-	zxfer_test_capture_subshell '
-		set +e
-		kill() {
-			[ "$1" = "-s" ] && [ "$2" = "0" ] && [ "$3" = "201" ]
-		}
-		zxfer_normalize_owned_lock_text_field() {
-			printf "%s\n" "$1"
-		}
-
-			zxfer_read_cleanup_pid_process_snapshot() {
-				return 23
-			}
-			zxfer_abort_direct_child_pid 201 TERM "unit cleanup helper"
-			printf "snapshot=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-
-		zxfer_read_cleanup_pid_process_snapshot() {
-			g_zxfer_cleanup_pid_process_snapshot_result="201 999 700"
-			printf "%s\n" "$g_zxfer_cleanup_pid_process_snapshot_result"
-		}
-		zxfer_abort_direct_child_pid 201 TERM "unit cleanup helper"
-		printf "ownership=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-
-		zxfer_read_cleanup_pid_process_snapshot() {
-			g_zxfer_cleanup_pid_process_snapshot_result="201 $$ 700"
-			printf "%s\n" "$g_zxfer_cleanup_pid_process_snapshot_result"
-		}
-		zxfer_get_cleanup_pid_set() {
-			return 1
-		}
-		zxfer_abort_direct_child_pid 201 TERM "unit cleanup helper"
-		printf "pidset=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Validated direct-child abort should fail closed when the process table cannot be inspected." \
-		"$output" "snapshot=23:Failed to inspect the process table for cleanup helper [unit cleanup helper] (PID 201)."
-	assertContains "Validated direct-child abort should refuse to tear down helpers that are no longer direct children of the current zxfer process." \
-		"$output" "ownership=1:Refusing to tear down cleanup helper [unit cleanup helper] (PID 201) because it is no longer an owned child of the current zxfer process."
-	assertContains "Validated direct-child abort should fail closed when it cannot derive the owned child set." \
-		"$output" "pidset=1:Failed to derive the owned child set for cleanup helper [unit cleanup helper] (PID 201)."
-}
-
-test_zxfer_abort_direct_child_pid_signals_owned_child_sets_and_reports_signal_failures() {
-	zxfer_test_capture_subshell '
-		set +e
-		kill() {
-			if [ "$1" = "-s" ] && [ "$2" = "0" ] && [ "$3" = "202" ]; then
-				return 0
-			fi
-			if [ "$1" = "-TERM" ]; then
-				printf "signal:%s\n" "$2"
-				[ "${signal_fail:-0}" -eq 0 ]
-				return $?
-			fi
-			return 1
-		}
-		zxfer_normalize_owned_lock_text_field() {
-			printf "%s\n" "$1"
-		}
-		zxfer_read_cleanup_pid_process_snapshot() {
-			g_zxfer_cleanup_pid_process_snapshot_result=$(printf "%s\n%s\n" "202 $$ 700" "203 202 700")
-			printf "%s\n" "$g_zxfer_cleanup_pid_process_snapshot_result"
-		}
-
-		signal_fail=0
-		zxfer_abort_direct_child_pid 202 TERM "unit cleanup helper"
-		printf "success=%s\n" "$?"
-
-		signal_fail=1
-		zxfer_abort_direct_child_pid 202 TERM "unit cleanup helper"
-		printf "signal_failure=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Validated direct-child abort should signal the owned root helper pid." \
-		"$output" "signal:202"
-	assertContains "Validated direct-child abort should signal owned descendants as part of the derived child set." \
-		"$output" "signal:203"
-	assertContains "Validated direct-child abort should return success when the owned child set is signaled successfully." \
-		"$output" "success=0"
-	assertContains "Validated direct-child abort should fail closed when signaling the derived child set fails while the helper is still live." \
-		"$output" "signal_failure=1:Failed to signal the owned child set for cleanup helper [unit cleanup helper] (PID 202)."
-}
-
-test_zxfer_abort_direct_child_pid_current_shell_shortcuts_cover_remaining_paths() {
-	zxfer_abort_direct_child_pid "" TERM "unit cleanup helper" >/dev/null 2>&1
-	l_invalid_status=$?
-
-	zxfer_abort_direct_child_pid "$$" TERM "unit cleanup helper" >/dev/null 2>&1
-	l_self_status=$?
-
-	zxfer_normalize_owned_lock_text_field() {
-		return 1
-	}
-	zxfer_abort_direct_child_pid 201 TERM "unit cleanup helper" >/dev/null 2>&1
-	l_normalize_status=$?
-
-	zxfer_normalize_owned_lock_text_field() {
-		printf '%s\n' "$1"
-	}
-	kill() {
-		if [ "$1" = "-s" ] && [ "$2" = "0" ]; then
-			return 1
-		fi
-		return 1
-	}
-	zxfer_abort_direct_child_pid 202 TERM "unit cleanup helper" >/dev/null 2>&1
-	l_gone_status=$?
-
-	l_kill_probe_calls=0
-	kill() {
-		if [ "$1" = "-s" ] && [ "$2" = "0" ]; then
-			l_kill_probe_calls=$((l_kill_probe_calls + 1))
-			[ "$l_kill_probe_calls" -eq 1 ] && return 0
-			return 1
-		fi
-		return 1
-	}
-	zxfer_normalize_owned_lock_text_field() {
-		printf '%s\n' "$1"
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		g_zxfer_cleanup_pid_process_snapshot_result="203 999 700"
-		printf '%s\n' "$g_zxfer_cleanup_pid_process_snapshot_result"
-	}
-	zxfer_abort_direct_child_pid 203 TERM "unit cleanup helper" >/dev/null 2>&1
-	l_orphan_gone_status=$?
-
-	l_kill_probe_calls=0
-	kill() {
-		if [ "$1" = "-s" ] && [ "$2" = "0" ]; then
-			l_kill_probe_calls=$((l_kill_probe_calls + 1))
-			[ "$l_kill_probe_calls" -eq 1 ] && return 0
-			return 1
-		fi
-		if [ "$1" = "-TERM" ]; then
-			return 1
-		fi
-		return 1
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		g_zxfer_cleanup_pid_process_snapshot_result=$(printf '%s\n%s\n' "204 $$ 700" "205 204 700")
-		printf '%s\n' "$g_zxfer_cleanup_pid_process_snapshot_result"
-	}
-	zxfer_abort_direct_child_pid 204 TERM "unit cleanup helper" >/dev/null 2>&1
-	l_signal_gone_status=$?
-
-	zxfer_source_runtime_modules_through "zxfer_replication.sh"
-	setUp
-
-	assertEquals "Validated direct-child abort should treat blank pid inputs as already handled." \
-		0 "$l_invalid_status"
-	assertEquals "Validated direct-child abort should refuse to target the current shell pid." \
-		1 "$l_self_status"
-	assertEquals "Validated direct-child abort should fail closed when purpose normalization fails in the current shell." \
-		1 "$l_normalize_status"
-	assertEquals "Validated direct-child abort should treat already-exited helpers as already gone before any ownership checks." \
-		0 "$l_gone_status"
-	assertEquals "Validated direct-child abort should return success when an unowned helper exits before the ownership failure is reported." \
-		0 "$l_orphan_gone_status"
-	assertEquals "Validated direct-child abort should return success when signal delivery races with helper exit after the owned child set has been derived." \
-		0 "$l_signal_gone_status"
-}
-
-test_zxfer_abort_cleanup_pid_rejects_missing_records_and_uses_process_group_teardown() {
-	zxfer_test_capture_subshell '
-		set +e
-		fake_ps() {
-			if [ "$1" = "-o" ] && [ "$2" = "pid=" ] && [ "$3" = "-o" ] &&
-				[ "$4" = "ppid=" ] && [ "$5" = "-o" ] && [ "$6" = "pgid=" ]; then
-				printf "%s\n" "301 1 900"
-				return 0
-			fi
-			if [ "$1" = "-o" ] && [ "$2" = "pgid=" ] && [ "$3" = "-p" ] &&
-				[ "$4" = "$$" ]; then
-				printf "%s\n" "700"
-				return 0
-			fi
-			return 1
-		}
-
-		g_zxfer_cleanup_pids="301"
-		zxfer_abort_cleanup_pid 301 TERM
-		printf "missing=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-
-		g_cmd_ps=fake_ps
-		g_zxfer_cleanup_pids="301"
-		g_zxfer_cleanup_pid_records="301	unit cleanup helper	start-token	unit-host	900	process_group"
-		zxfer_owned_lock_owner_is_live() {
-			return 0
-		}
-		zxfer_signal_cleanup_process_group() {
-			printf "process_group:%s:%s\n" "$1" "$2"
-			return 0
-		}
-		zxfer_abort_cleanup_pid 301 TERM
-		printf "process_group_status=%s\n" "$?"
-		printf "remaining=<%s>\n" "$g_zxfer_cleanup_pids"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Validated cleanup abort should refuse teardown when a tracked pid has no matching validated ownership record." \
-		"$output" "missing=1:Refusing to tear down cleanup helper [PID 301] because no validated ownership record was found."
-	assertContains "Validated cleanup abort should prefer process-group teardown when the helper record requested it and the pgid remains isolated from the current shell." \
-		"$output" "process_group:900:TERM"
-	assertContains "Validated cleanup abort should return success after process-group teardown succeeds." \
-		"$output" "process_group_status=0"
-	assertContains "Validated cleanup abort should unregister helpers that were torn down successfully." \
-		"$output" "remaining=<>"
-}
-
-test_zxfer_abort_cleanup_pid_current_shell_revalidation_paths_cover_remaining_branches() {
-	l_saved_cmd_ps=${g_cmd_ps:-ps}
-	l_tab=$(printf '\t')
-
-	g_zxfer_cleanup_pids="301"
-	g_zxfer_cleanup_pid_records="301${l_tab}unit cleanup helper${l_tab}start-token${l_tab}unit-host${l_tab}900${l_tab}process_group"
-	zxfer_owned_lock_owner_is_live() {
-		return 0
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		return 29
-	}
-	zxfer_abort_cleanup_pid 301 TERM >/dev/null 2>&1
-	l_snapshot_status=$?
-	l_snapshot_message=$g_zxfer_cleanup_pid_abort_failure_message
-
-	fake_ps() {
-		if [ "$1" = "-o" ] && [ "$2" = "pgid=" ] && [ "$3" = "-p" ] && [ "$4" = "$$" ]; then
-			printf '%s\n' "700"
-			return 0
-		fi
-		return 1
-	}
-	g_cmd_ps=fake_ps
-	g_zxfer_cleanup_pids="302"
-	g_zxfer_cleanup_pid_records="302${l_tab}unit cleanup helper${l_tab}start-token${l_tab}unit-host${l_tab}bad${l_tab}child_set"
-	zxfer_owned_lock_owner_is_live() {
-		return 0
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		g_zxfer_cleanup_pid_process_snapshot_result="302 1 700"
-		printf '%s\n' "$g_zxfer_cleanup_pid_process_snapshot_result"
-	}
-	zxfer_get_cleanup_pid_set() {
-		return 1
-	}
-	zxfer_abort_cleanup_pid 302 TERM >/dev/null 2>&1
-	l_child_set_status=$?
-	l_child_set_message=$g_zxfer_cleanup_pid_abort_failure_message
-
-	l_recheck_calls=0
-	g_zxfer_cleanup_pids="303"
-	g_zxfer_cleanup_pid_records="303${l_tab}unit cleanup helper${l_tab}start-token${l_tab}unit-host${l_tab}bad${l_tab}child_set"
-	zxfer_owned_lock_owner_is_live() {
-		l_recheck_calls=$((l_recheck_calls + 1))
-		if [ "$l_recheck_calls" -eq 1 ]; then
-			return 0
-		fi
-		return 1
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		g_zxfer_cleanup_pid_process_snapshot_result="303 1 700"
-		printf '%s\n' "$g_zxfer_cleanup_pid_process_snapshot_result"
-	}
-	zxfer_get_cleanup_pid_set() {
-		g_zxfer_cleanup_pid_set_result="303"
-		return 0
-	}
-	zxfer_signal_cleanup_pid_set() {
-		return 1
-	}
-	zxfer_abort_cleanup_pid 303 TERM >/dev/null 2>&1
-	l_stale_signal_status=$?
-	l_stale_signal_remaining=$g_zxfer_cleanup_pids
-
-	l_recheck_calls=0
-	g_zxfer_cleanup_pids="304"
-	g_zxfer_cleanup_pid_records="304${l_tab}unit cleanup helper${l_tab}start-token${l_tab}unit-host${l_tab}bad${l_tab}child_set"
-	zxfer_owned_lock_owner_is_live() {
-		l_recheck_calls=$((l_recheck_calls + 1))
-		if [ "$l_recheck_calls" -eq 1 ]; then
-			return 0
-		fi
-		return 2
-	}
-	zxfer_read_cleanup_pid_process_snapshot() {
-		g_zxfer_cleanup_pid_process_snapshot_result="304 1 700"
-		printf '%s\n' "$g_zxfer_cleanup_pid_process_snapshot_result"
-	}
-	zxfer_get_cleanup_pid_set() {
-		g_zxfer_cleanup_pid_set_result="304"
-		return 0
-	}
-	zxfer_signal_cleanup_pid_set() {
-		return 1
-	}
-	zxfer_abort_cleanup_pid 304 TERM >/dev/null 2>&1
-	l_validation_status=$?
-	l_validation_message=$g_zxfer_cleanup_pid_abort_failure_message
-
-	zxfer_source_runtime_modules_through "zxfer_replication.sh"
-	setUp
-	g_cmd_ps=$l_saved_cmd_ps
-
-	assertEquals "Validated cleanup abort should fail closed when the process table cannot be inspected after ownership validation succeeds." \
-		29 "$l_snapshot_status"
-	assertEquals "Validated cleanup abort should preserve the process-table failure message in the current shell." \
-		"Failed to inspect the process table for cleanup helper [unit cleanup helper] (PID 301)." "$l_snapshot_message"
-	assertEquals "Validated cleanup abort should fail closed when child-set derivation fails for a still-live helper on the child-set path." \
-		1 "$l_child_set_status"
-	assertEquals "Validated cleanup abort should preserve the child-set derivation failure message on the child-set fallback path." \
-		"Failed to derive the owned child set for cleanup helper [unit cleanup helper] (PID 302)." "$l_child_set_message"
-	assertEquals "Validated cleanup abort should treat a signal-delivery failure as success when the helper exits before revalidation completes." \
-		0 "$l_stale_signal_status"
-	assertEquals "Validated cleanup abort should unregister helpers that exit before post-signal revalidation completes." \
-		"" "$l_stale_signal_remaining"
-	assertEquals "Validated cleanup abort should fail closed when post-signal ownership revalidation errors." \
-		1 "$l_validation_status"
-	assertEquals "Validated cleanup abort should preserve the ownership-validation failure message when post-signal revalidation errors." \
-		"Failed to validate ownership for cleanup helper [unit cleanup helper] (PID 304)." "$l_validation_message"
-}
-
-test_zxfer_abort_cleanup_pid_handles_child_set_revalidation_and_signal_failures() {
-	zxfer_test_capture_subshell '
-		set +e
-		zxfer_read_cleanup_pid_process_snapshot() {
-			g_zxfer_cleanup_pid_process_snapshot_result="302 1 700"
-			printf "%s\n" "$g_zxfer_cleanup_pid_process_snapshot_result"
-		}
-		zxfer_get_cleanup_pid_set() {
-			if [ "${case_name:-}" = "signal_failure" ]; then
-				g_zxfer_cleanup_pid_set_result=$(printf "%s\n%s\n" "304" "305")
-				return 0
-			fi
-			return 1
-		}
-		zxfer_signal_cleanup_pid_set() {
-			return 1
-		}
-
-		case_name=stale
-		recheck_calls=0
-		g_zxfer_cleanup_pids="302"
-		g_zxfer_cleanup_pid_records="302	unit cleanup helper	start-token	unit-host	700	child_set"
-		zxfer_owned_lock_owner_is_live() {
-			recheck_calls=$((recheck_calls + 1))
-			if [ "$recheck_calls" -eq 1 ]; then
-				return 0
-			fi
-			return 1
-		}
-		zxfer_abort_cleanup_pid 302 TERM
-		printf "stale=%s:<%s>\n" "$?" "$g_zxfer_cleanup_pids"
-
-		case_name=recheck_error
-		recheck_calls=0
-		g_zxfer_cleanup_pids="303"
-		g_zxfer_cleanup_pid_records="303	unit cleanup helper	start-token	unit-host	700	child_set"
-		zxfer_owned_lock_owner_is_live() {
-			recheck_calls=$((recheck_calls + 1))
-			if [ "$recheck_calls" -eq 1 ]; then
-				return 0
-			fi
-			return 2
-		}
-		zxfer_abort_cleanup_pid 303 TERM
-		printf "recheck_error=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-
-		case_name=signal_failure
-		g_zxfer_cleanup_pids="304"
-		g_zxfer_cleanup_pid_records="304	unit cleanup helper	start-token	unit-host	700	child_set"
-		zxfer_owned_lock_owner_is_live() {
-			return 0
-		}
-		zxfer_abort_cleanup_pid 304 TERM
-		printf "signal_failure=%s:%s\n" "$?" "$g_zxfer_cleanup_pid_abort_failure_message"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-
-	assertContains "Validated cleanup abort should treat a failed child-set derivation as a stale record when ownership revalidation says the helper has already exited." \
-		"$output" "stale=0:<>"
-	assertContains "Validated cleanup abort should fail closed when ownership revalidation errors while recovering from a child-set derivation failure." \
-		"$output" "recheck_error=1:Failed to validate ownership for cleanup helper [unit cleanup helper] (PID 303)."
-	assertContains "Validated cleanup abort should fail closed when signaling a derived child set fails and the helper still validates as live." \
-		"$output" "signal_failure=1:Failed to signal the validated teardown target for cleanup helper [unit cleanup helper] (PID 304)."
-}
-
-test_zxfer_abort_cleanup_pid_fails_closed_when_child_set_revalidation_errors_immediately() {
-	zxfer_test_capture_subshell '
-		set +e
-		zxfer_read_cleanup_pid_process_snapshot() {
-			g_zxfer_cleanup_pid_process_snapshot_result="306 1 700"
-			printf "%s\n" "$g_zxfer_cleanup_pid_process_snapshot_result"
-		}
-		zxfer_get_cleanup_pid_set() {
-			return 1
-		}
-		g_zxfer_cleanup_pids="306"
-		g_zxfer_cleanup_pid_records="306	unit cleanup helper	start-token	unit-host	700	child_set"
-		zxfer_owned_lock_owner_is_live() {
-			return 2
-		}
-		zxfer_abort_cleanup_pid 306 TERM
+		zxfer_abort_cleanup_pid "$tracked_pid" TERM
 		printf "status=%s\n" "$?"
 		printf "message=%s\n" "$g_zxfer_cleanup_pid_abort_failure_message"
+		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
+		unset -f kill
+		kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
+		wait "$tracked_pid" 2>/dev/null || true
 	'
 	output=$ZXFER_TEST_CAPTURE_OUTPUT
 
-	assertContains "Validated cleanup abort should fail closed when ownership revalidation errors immediately after child-set derivation fails." \
+	assertContains "Aborting should fail closed when the signal cannot be delivered to a live helper." \
 		"$output" "status=1"
-	assertContains "Validated cleanup abort should preserve the ownership-validation failure message when revalidation errors immediately after child-set derivation fails." \
-		"$output" "message=Failed to validate ownership for cleanup helper [unit cleanup helper] (PID 306)."
+	assertContains "Failed aborts should explain which helper could not be signalled." \
+		"$output" "message=Failed to signal cleanup helper [unit cleanup helper] (PID "
+	assertNotContains "Failed aborts should preserve the registry row for a later retry." \
+		"$output" "records=<>"
+}
+
+test_zxfer_abort_direct_child_pid_signals_unreaped_direct_children() {
+	ready_file="$TEST_TMPDIR/abort_direct.ready"
+	marker_file="$TEST_TMPDIR/abort_direct.marker"
+	zxfer_runtime_spawn_term_trap_helper "$ready_file" "$marker_file" ||
+		fail "Unable to start TERM-aware direct child helper."
+	child_pid=$g_zxfer_runtime_term_helper_pid
+
+	zxfer_abort_direct_child_pid "$child_pid" TERM "unit direct helper"
+	abort_status=$?
+	wait "$child_pid" 2>/dev/null
+	reaped_status=$?
+
+	assertEquals "Signalling a live direct child should succeed." 0 "$abort_status"
+	assertEquals "Signalling should leave no failure message." \
+		"" "$g_zxfer_cleanup_pid_abort_failure_message"
+	assertEquals "The signalled child should have handled the TERM signal." \
+		143 "$reaped_status"
+	assertEquals "The signalled child should have recorded its TERM trap." \
+		"term" "$(tr -d '[:space:]' <"$marker_file")"
+}
+
+test_zxfer_abort_direct_child_pid_rejects_invalid_self_and_dead_pids() {
+	zxfer_abort_direct_child_pid "" TERM "unit direct helper"
+	empty_status=$?
+	zxfer_abort_direct_child_pid "not-a-pid" TERM "unit direct helper"
+	invalid_status=$?
+	zxfer_abort_direct_child_pid "$$" TERM "unit direct helper"
+	self_status=$?
+	sh -c 'exit 0' &
+	dead_pid=$!
+	wait "$dead_pid" 2>/dev/null
+	zxfer_abort_direct_child_pid "$dead_pid" TERM "unit direct helper"
+	dead_status=$?
+
+	assertEquals "Empty PIDs should be a no-op success." 0 "$empty_status"
+	assertEquals "Non-numeric PIDs should be a no-op success." 0 "$invalid_status"
+	assertEquals "The current shell PID must be refused." 1 "$self_status"
+	assertEquals "Already-exited children should be a no-op success." 0 "$dead_status"
+}
+
+test_zxfer_abort_direct_child_pid_fails_closed_when_purpose_normalization_fails() {
+	zxfer_test_capture_subshell '
+		sleep 30 &
+		child_pid=$!
+		zxfer_normalize_owned_lock_text_field() {
+			return 1
+		}
+		zxfer_abort_direct_child_pid "$child_pid" TERM "unit direct helper"
+		printf "status=%s\n" "$?"
+		kill -s TERM "$child_pid" >/dev/null 2>&1 || true
+		wait "$child_pid" 2>/dev/null || true
+	'
+
+	assertContains "Direct-child aborts should fail closed when purpose normalization fails." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=1"
 }
 
 test_zxfer_kill_registered_cleanup_pids_preserves_first_failure_message_and_rebuilds_tracked_pids() {
 	zxfer_test_capture_subshell '
 		set +e
 		g_zxfer_cleanup_pids="401 402"
-		g_zxfer_cleanup_pid_records="401	first helper	start-one	host-a	700	child_set
-402	second helper	start-two	host-a	700	child_set"
+		g_zxfer_cleanup_pid_records="401	first helper
+402	second helper"
 		zxfer_abort_cleanup_pid() {
 			if [ "$1" = "401" ]; then
 				g_zxfer_cleanup_pid_abort_failure_message="first cleanup abort failed"
@@ -936,29 +444,36 @@ test_zxfer_kill_registered_cleanup_pids_preserves_first_failure_message_and_rebu
 	'
 	output=$ZXFER_TEST_CAPTURE_OUTPUT
 
-	assertContains "Validated cleanup-helper shutdown should preserve the first abort failure status." \
+	assertContains "Cleanup-helper shutdown should preserve the first abort failure status." \
 		"$output" "status=1"
-	assertContains "Validated cleanup-helper shutdown should preserve the first abort failure message." \
+	assertContains "Cleanup-helper shutdown should preserve the first abort failure message." \
 		"$output" "message=first cleanup abort failed"
-	assertContains "Validated cleanup-helper shutdown should rebuild the tracked pid list from the remaining validated records after a failed aggregate pass." \
+	assertContains "Cleanup-helper shutdown should rebuild the tracked pid list from the remaining records after a failed aggregate pass." \
 		"$output" "remaining=<401 402>"
 }
 
-test_runtime_init_default_helpers_cover_current_shell_paths() {
+test_runtime_global_init_covers_default_assignments_in_current_shell() {
 	output=$(
 		(
 			zxfer_ssh_supports_control_sockets() {
 				return 0
 			}
+			zxfer_refresh_secure_path_state() {
+				:
+			}
+			zxfer_init_dependency_tool_defaults() {
+				g_cmd_zfs="/sbin/zfs"
+				g_cmd_compress_safe="gzip"
+				g_cmd_decompress_safe="gunzip"
+			}
+			zxfer_apply_secure_path() {
+				:
+			}
+			zxfer_ensure_run_tmp_root() {
+				:
+			}
 
-			g_cmd_zfs="/sbin/zfs"
-			g_cmd_compress_safe="gzip"
-			g_cmd_decompress_safe="gunzip"
-
-			zxfer_init_runtime_metadata
-			zxfer_init_option_defaults
-			zxfer_init_transport_remote_defaults
-			zxfer_init_runtime_state_defaults
+			zxfer_init_globals
 			zxfer_init_temp_artifacts
 
 			printf 'version=%s\n' "$g_zxfer_version"
@@ -974,7 +489,7 @@ test_runtime_init_default_helpers_cover_current_shell_paths() {
 	)
 
 	assertContains "Runtime metadata initialization should set the current zxfer version string." \
-		"$output" "version=2.0.0-20260430"
+		"$output" "version=2.0.0-20260623"
 	assertContains "Option default initialization should restore the single-job default." \
 		"$output" "jobs=1"
 	assertContains "Transport runtime defaults should clear cached remote capability payloads." \
@@ -1065,9 +580,26 @@ test_runtime_execution_context_init_helpers_cover_local_and_dry_run_remote_paths
 			g_target_cmd_zfs=""
 			g_cmd_cat=""
 
-			zxfer_init_transfer_command_context
-			printf 'transfer_origin=%s\n' "$g_origin_cmd_compress_safe"
-			printf 'transfer_target=%s\n' "$g_target_cmd_decompress_safe"
+			(
+				zxfer_init_source_execution_context() {
+					:
+				}
+				zxfer_init_destination_execution_context() {
+					:
+				}
+				zxfer_refresh_remote_zfs_commands() {
+					:
+				}
+				zxfer_init_restore_property_helpers() {
+					:
+				}
+				zxfer_init_local_awk_compatibility() {
+					:
+				}
+				zxfer_init_variables
+				printf 'transfer_origin=%s\n' "$g_origin_cmd_compress_safe"
+				printf 'transfer_target=%s\n' "$g_target_cmd_decompress_safe"
+			)
 
 			g_option_e_restore_property_mode=1
 			g_option_O_origin_host=""
@@ -1117,54 +649,98 @@ test_runtime_execution_context_init_helpers_cover_local_and_dry_run_remote_paths
 		"$output" "remote_cat=cat"
 }
 
-test_runtime_artifact_allocators_use_validated_temp_root_for_files_and_dirs() {
+test_runtime_artifact_allocators_use_the_per_run_temp_root_for_files_and_dirs() {
 	zxfer_create_runtime_artifact_file "runtime-file" >/dev/null
 	file_status=$?
 	file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_runtime_artifact_dir "runtime-dir" >/dev/null
+	zxfer_create_private_temp_dir "runtime-dir" >/dev/null
 	dir_status=$?
 	dir_path=$g_zxfer_runtime_artifact_path_result
 
-	assertEquals "Runtime artifact file allocation should succeed under the validated temp root." \
+	assertEquals "Runtime artifact file allocation should succeed under the per-run temp root." \
 		0 "$file_status"
-	assertEquals "Runtime artifact directory allocation should succeed under the validated temp root." \
+	assertEquals "Runtime artifact directory allocation should succeed under the per-run temp root." \
 		0 "$dir_status"
-	assertContains "Runtime artifact files should be allocated under the validated temp root." \
-		"$file_path" "$TEST_TMPDIR/"
-	assertContains "Runtime artifact directories should be allocated under the validated temp root." \
-		"$dir_path" "$TEST_TMPDIR/"
+	assertNotEquals "Runtime artifact allocation should publish the per-run temp root." \
+		"" "$g_zxfer_run_tmp_root"
+	assertContains "The per-run temp root should live under the validated temp root." \
+		"$g_zxfer_run_tmp_root" "$TEST_TMPDIR/"
+	assertEquals "The per-run temp root should be private to the current user (0700)." \
+		"700" "$(zxfer_get_path_mode_octal "$g_zxfer_run_tmp_root")"
+	assertContains "Runtime artifact files should be allocated under the per-run temp root." \
+		"$file_path" "$g_zxfer_run_tmp_root/"
+	assertContains "Runtime artifact directories should be allocated under the per-run temp root." \
+		"$dir_path" "$g_zxfer_run_tmp_root/"
 	assertTrue "Runtime artifact file allocation should create the requested file." \
 		"[ -f \"$file_path\" ]"
+	assertEquals "Runtime artifact files should be created owner-only (0600)." \
+		"600" "$(zxfer_get_path_mode_octal "$file_path")"
 	assertTrue "Runtime artifact directory allocation should create the requested directory." \
 		"[ -d \"$dir_path\" ]"
-	assertContains "Runtime artifact allocation should register the created file for cleanup." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$file_path"
-	assertContains "Runtime artifact allocation should register the created directory for cleanup." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$dir_path"
+	assertEquals "Runtime artifact directories should be created owner-only (0700)." \
+		"700" "$(zxfer_get_path_mode_octal "$dir_path")"
+	assertEquals "Per-run-root allocations should not register per-file cleanup bookkeeping." \
+		"" "${g_zxfer_runtime_artifact_cleanup_paths:-}"
 }
 
-test_runtime_artifact_file_allocator_in_parent_uses_validated_parent_and_registers_path() {
-	parent_dir="$TEST_TMPDIR/runtime-parent"
-	mkdir -p "$parent_dir"
-
-	zxfer_create_runtime_artifact_file_in_parent "$parent_dir" "runtime-parent-file" >/dev/null
-	status=$?
+test_runtime_artifact_allocators_skip_pre_seeded_counter_names_in_current_shell() {
+	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
+	g_zxfer_run_tmp_counter=0
+	: >"$g_zxfer_run_tmp_root/skip-file.1"
+	zxfer_create_runtime_artifact_file "skip-file" >/dev/null
+	file_status=$?
 	file_path=$g_zxfer_runtime_artifact_path_result
+	mkdir -m 700 "$g_zxfer_run_tmp_root/skip-dir.3"
+	zxfer_create_private_temp_dir "skip-dir" >/dev/null
+	dir_status=$?
+	dir_path=$g_zxfer_runtime_artifact_path_result
 
-	assertEquals "Parent-scoped runtime artifact allocation should succeed for validated directories." \
-		0 "$status"
-	assertContains "Parent-scoped runtime artifact allocation should create files in the requested directory." \
-		"$file_path" "$parent_dir/"
-	assertTrue "Parent-scoped runtime artifact allocation should create the requested file." \
-		"[ -f \"$file_path\" ]"
-	assertContains "Parent-scoped runtime artifact allocation should register the file for cleanup." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$file_path"
+	assertEquals "File allocation should succeed after skipping a taken counter name." \
+		0 "$file_status"
+	assertEquals "File allocation should advance past the taken counter name." \
+		"$g_zxfer_run_tmp_root/skip-file.2" "$file_path"
+	assertEquals "Directory allocation should succeed after skipping a taken counter name." \
+		0 "$dir_status"
+	assertEquals "Directory allocation should advance past the taken counter name." \
+		"$g_zxfer_run_tmp_root/skip-dir.4" "$dir_path"
+}
+
+test_runtime_artifact_allocators_fail_closed_when_the_target_path_rejects_writes() {
+	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
+	# A regular-file path component rejects child creation even for root in the
+	# FreeBSD shunit2 guest; chmod-only fixtures are bypassable there.
+	: >"$g_zxfer_run_tmp_root/file-blocker"
+	: >"$g_zxfer_run_tmp_root/dir-blocker"
+	zxfer_create_runtime_artifact_file "file-blocker/unwritable-file" >/dev/null 2>&1
+	file_status=$?
+	zxfer_create_private_temp_dir "dir-blocker/unwritable-dir" >/dev/null 2>&1
+	dir_status=$?
+
+	assertEquals "File allocation should fail closed when the target path rejects writes." \
+		1 "$file_status"
+	assertEquals "Directory allocation should fail closed when the target path rejects writes." \
+		1 "$dir_status"
+}
+
+test_runtime_artifact_allocators_skip_taken_names_after_subshell_allocations() {
+	# Allocate through command substitutions so the counter bumps never reach
+	# this shell; the allocator must still hand out unique, existing paths.
+	first_path=$(zxfer_get_temp_file)
+	printf 'first payload\n' >"$first_path"
+	second_path=$(zxfer_get_temp_file)
+
+	assertNotEquals "Subshell allocations should never reuse a taken temp path." \
+		"$first_path" "$second_path"
+	assertEquals "Subshell allocations should never truncate earlier allocations." \
+		"first payload" "$(cat "$first_path")"
+	assertTrue "Subshell allocations should create the later temp file." \
+		"[ -f \"$second_path\" ]"
 }
 
 test_zxfer_reset_runtime_artifact_state_cleans_registered_artifacts() {
 	zxfer_create_runtime_artifact_file "runtime-reset-file" >/dev/null
 	file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_runtime_artifact_dir "runtime-reset-dir" >/dev/null
+	zxfer_create_private_temp_dir "runtime-reset-dir" >/dev/null
 	dir_path=$g_zxfer_runtime_artifact_path_result
 
 	zxfer_reset_runtime_artifact_state
@@ -1188,6 +764,7 @@ test_zxfer_reset_runtime_artifact_state_preserves_failed_cleanup_registrations()
 	output=$(
 		(
 			zxfer_register_runtime_artifact_path "$artifact_path"
+			zxfer_ensure_run_tmp_root || exit 90
 			g_zxfer_runtime_artifact_path_result="stale-path"
 			g_zxfer_runtime_artifact_read_result="stale-read"
 			rm() {
@@ -1199,6 +776,7 @@ test_zxfer_reset_runtime_artifact_state_preserves_failed_cleanup_registrations()
 			printf 'registered=<%s>\n' "$g_zxfer_runtime_artifact_cleanup_paths"
 			printf 'path_result=<%s>\n' "$g_zxfer_runtime_artifact_path_result"
 			printf 'read_result=<%s>\n' "$g_zxfer_runtime_artifact_read_result"
+			printf 'root_retained=<%s>\n' "$([ -n "$g_zxfer_run_tmp_root" ] && printf yes || printf no)"
 		)
 	)
 
@@ -1212,6 +790,8 @@ test_zxfer_reset_runtime_artifact_state_preserves_failed_cleanup_registrations()
 		"$output" "read_result=<>"
 	assertTrue "Resetting runtime artifact state should leave undeleted artifacts in place when cleanup fails." \
 		"[ -e \"$artifact_path\" ]"
+	assertContains "Resetting runtime artifact state should keep the undeleted run root tracked for later cleanup." \
+		"$output" "root_retained=<yes>"
 }
 
 test_zxfer_trap_exit_cleans_registered_runtime_artifacts() {
@@ -1245,6 +825,149 @@ test_zxfer_trap_exit_cleans_registered_runtime_artifacts() {
 		"[ -e \"$registered_file\" ]"
 	assertFalse "zxfer_trap_exit should remove registered runtime directories." \
 		"[ -e \"$registered_dir\" ]"
+}
+
+test_zxfer_trap_exit_removes_the_per_run_temp_root_on_success_and_failure_paths() {
+	success_output=$(
+		(
+			zxfer_close_all_ssh_control_sockets() {
+				:
+			}
+			zxfer_echoV() {
+				:
+			}
+			zxfer_get_temp_file >/dev/null
+			printf 'root=%s\n' "$g_zxfer_run_tmp_root" >&2
+			true
+			zxfer_trap_exit
+		) 2>&1
+	)
+	success_status=$?
+	success_root=${success_output#root=}
+
+	assertEquals "zxfer_trap_exit should preserve success after removing the per-run temp root." \
+		0 "$success_status"
+	assertNotEquals "The per-run temp root should exist before the trap runs." \
+		"" "$success_root"
+	assertFalse "zxfer_trap_exit should remove the per-run temp root and everything below it." \
+		"[ -e \"$success_root\" ]"
+
+	failure_root_file="$TEST_TMPDIR/trap-failure-root.path"
+	(
+		zxfer_close_all_ssh_control_sockets() {
+			:
+		}
+		zxfer_echoV() {
+			:
+		}
+		zxfer_get_temp_file >/dev/null
+		printf '%s\n' "$g_zxfer_run_tmp_root" >"$failure_root_file"
+		false
+		zxfer_trap_exit
+	) 2>/dev/null
+	failure_status=$?
+	failure_root=$(cat "$failure_root_file")
+
+	assertEquals "zxfer_trap_exit should preserve the failing exit status while removing the per-run temp root." \
+		1 "$failure_status"
+	assertFalse "zxfer_trap_exit should remove the per-run temp root on failure paths too." \
+		"[ -e \"$failure_root\" ]"
+}
+
+test_zxfer_trap_exit_surfaces_failed_run_tmp_root_removal_as_trap_cleanup_failure() {
+	l_restore_errexit=0
+	case $- in
+	*e*)
+		l_restore_errexit=1
+		;;
+	esac
+	set +e
+	output=$(
+		(
+			zxfer_close_all_ssh_control_sockets() {
+				:
+			}
+			zxfer_echoV() {
+				:
+			}
+			zxfer_profile_emit_summary() {
+				:
+			}
+			zxfer_emit_failure_report() {
+				printf 'status=%s\n' "$1"
+				printf 'class=%s\n' "${g_zxfer_failure_class:-}"
+				printf 'stage=%s\n' "${g_zxfer_failure_stage:-}"
+				printf 'message=%s\n' "${g_zxfer_failure_message:-}"
+			}
+			zxfer_get_temp_file >/dev/null
+			rm() {
+				return 1
+			}
+			true
+			zxfer_trap_exit
+		) 2>&1
+	)
+	status=$?
+	if [ "$l_restore_errexit" -eq 1 ]; then
+		set -e
+	fi
+
+	assertEquals "zxfer_trap_exit should fail closed when the per-run temp root cannot be removed." \
+		1 "$status"
+	assertContains "Failed run-root removal should surface as a runtime trap-cleanup failure." \
+		"$output" "class=runtime"
+	assertContains "Failed run-root removal should mark the trap-cleanup stage." \
+		"$output" "stage=trap cleanup"
+	assertContains "Failed run-root removal should report the runtime temp-artifact cleanup message." \
+		"$output" "message=Failed to remove one or more runtime temp artifacts during exit."
+}
+
+test_run_tmp_root_is_removed_when_the_process_is_terminated_mid_run() {
+	leak_tmpdir="$TEST_TMPDIR/sigterm-leak-tmp"
+	ready_flag="$TEST_TMPDIR/sigterm-child.ready"
+	child_script="$TEST_TMPDIR/sigterm-child.sh"
+	child_stderr="$TEST_TMPDIR/sigterm-child.stderr"
+	rm -rf "$leak_tmpdir" "$ready_flag"
+	mkdir -p "$leak_tmpdir"
+
+	cat >"$child_script" <<EOF
+#!/bin/sh
+ZXFER_SOURCE_MODULES_ROOT="$ZXFER_ROOT" \\
+	ZXFER_SOURCE_MODULES_THROUGH=zxfer_replication.sh \\
+	. "$ZXFER_ROOT/src/zxfer_modules.sh"
+TMPDIR="$leak_tmpdir"
+export TMPDIR
+zxfer_reset_failure_context "sigterm-test"
+zxfer_reset_runtime_artifact_state
+zxfer_reset_background_job_state
+zxfer_reset_cleanup_pid_tracking
+zxfer_reset_owned_lock_tracking
+g_option_Y_yield_iterations=1
+zxfer_register_runtime_traps
+zxfer_get_temp_file >/dev/null
+: >"$ready_flag"
+# An interruptible wait so the TERM trap runs promptly.
+sleep 30 &
+wait \$!
+EOF
+
+	/bin/sh "$child_script" >/dev/null 2>"$child_stderr" &
+	child_pid=$!
+	wait_count=0
+	while [ ! -e "$ready_flag" ] && [ "$wait_count" -lt 100 ]; do
+		wait_count=$((wait_count + 1))
+		sleep 0.1 2>/dev/null || sleep 1
+	done
+	assertTrue "The SIGTERM fixture child should reach its ready state." \
+		"[ -e \"$ready_flag\" ]"
+	assertNotEquals "The SIGTERM fixture child should allocate under the per-run temp root before the signal." \
+		"" "$(ls -A "$leak_tmpdir")"
+
+	kill -s TERM "$child_pid" 2>/dev/null
+	wait "$child_pid" 2>/dev/null
+
+	assertEquals "A SIGTERM mid-run must not leak any temp state into TMPDIR." \
+		"" "$(ls -A "$leak_tmpdir")"
 }
 
 test_zxfer_trap_exit_aborts_supervised_background_jobs_before_legacy_pid_cleanup() {
@@ -1383,30 +1106,6 @@ test_zxfer_trap_exit_fails_closed_when_validated_cleanup_helper_abort_fails() {
 		"$output" "message=validated cleanup helper abort failed"
 }
 
-test_zxfer_trap_exit_releases_registered_owned_locks() {
-	lock_dir="$TEST_TMPDIR/trap-owned.lock"
-	zxfer_create_owned_lock_dir "$lock_dir" lock "trap-owned-lock" >/dev/null
-	zxfer_register_owned_lock_path "$lock_dir"
-
-	output=$(
-		(
-			zxfer_close_all_ssh_control_sockets() {
-				:
-			}
-			true
-			zxfer_trap_exit
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "zxfer_trap_exit should preserve success after releasing registered owned locks." \
-		0 "$status"
-	assertEquals "zxfer_trap_exit should keep stderr clean when registered owned locks release cleanly." \
-		"" "$output"
-	assertFalse "zxfer_trap_exit should remove registered owned lock directories." \
-		"[ -e \"$lock_dir\" ]"
-}
-
 test_zxfer_trap_exit_fails_closed_when_ssh_socket_cleanup_fails_after_success() {
 	registered_file="$TEST_TMPDIR/trap-close-failure-artifact"
 	: >"$registered_file"
@@ -1460,51 +1159,6 @@ test_zxfer_trap_exit_fails_closed_when_ssh_socket_cleanup_fails_after_success() 
 		"[ -e \"$registered_file\" ]"
 }
 
-test_zxfer_trap_exit_preserves_failed_owned_lock_cleanup_paths_under_temp_prefix() {
-	g_zxfer_temp_prefix="zxfer.trap-owned"
-	cache_root=$(zxfer_ssh_control_socket_cache_dir_path_for_tmpdir "$TEST_TMPDIR") ||
-		fail "Unable to derive the shared remote-host cache root."
-	lock_dir="$cache_root/repro.lock"
-	current_hostname=$(zxfer_get_owned_lock_hostname) ||
-		fail "Unable to derive the current hostname for the owned-lock fixture."
-	created_at=$(zxfer_get_owned_lock_created_at) ||
-		fail "Unable to derive the creation timestamp for the owned-lock fixture."
-
-	mkdir -p "$lock_dir" || fail "Unable to create the owned-lock cleanup fixture."
-	chmod 700 "$lock_dir" || fail "Unable to chmod the owned-lock cleanup fixture."
-	{
-		printf '%s\n' "$ZXFER_LOCK_METADATA_HEADER"
-		printf 'kind\tlock\n'
-		printf 'purpose\ttrap-owned-lock\n'
-		printf 'pid\t%s\n' "$$"
-		printf 'start_token\tlstart:not-the-current-process\n'
-		printf 'hostname\t%s\n' "$current_hostname"
-		printf 'created_at\t%s\n' "$created_at"
-	} >"$lock_dir/metadata"
-	chmod 600 "$lock_dir/metadata" || fail "Unable to chmod the owned-lock cleanup fixture metadata."
-	zxfer_register_owned_lock_path "$lock_dir"
-
-	output=$(
-		(
-			zxfer_close_all_ssh_control_sockets() {
-				:
-			}
-			true
-			zxfer_trap_exit
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "zxfer_trap_exit should preserve the original success status when a later owned-lock release only produces cleanup warnings." \
-		0 "$status"
-	assertContains "zxfer_trap_exit should warn when a registered owned lock cannot be released during cleanup." \
-		"$output" "unable to release owned lock or lease"
-	assertTrue "zxfer_trap_exit should preserve the failed owned lock directory for later inspection instead of deleting it through generic temp-prefix cleanup." \
-		"[ -d \"$lock_dir\" ]"
-	assertTrue "zxfer_trap_exit should preserve the enclosing remote-host cache root when it still contains a failed owned-lock cleanup path." \
-		"[ -d \"$cache_root\" ]"
-}
-
 test_zxfer_cleanup_runtime_artifact_path_preserves_registration_when_delete_fails() {
 	artifact_path="$TEST_TMPDIR/runtime-cleanup-failure"
 	: >"$artifact_path"
@@ -1533,7 +1187,7 @@ test_zxfer_cleanup_runtime_artifact_path_preserves_registration_when_delete_fail
 test_zxfer_cleanup_runtime_artifact_paths_removes_and_unregisters_multiple_paths() {
 	zxfer_create_runtime_artifact_file "runtime-cleanup-file" >/dev/null
 	file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_runtime_artifact_dir "runtime-cleanup-dir" >/dev/null
+	zxfer_create_private_temp_dir "runtime-cleanup-dir" >/dev/null
 	dir_path=$g_zxfer_runtime_artifact_path_result
 
 	zxfer_cleanup_runtime_artifact_paths "$file_path" "$dir_path"
@@ -1579,7 +1233,7 @@ test_zxfer_cleanup_runtime_artifact_paths_preserves_failures_when_one_path_canno
 test_zxfer_cleanup_runtime_artifact_path_list_removes_newline_delimited_paths() {
 	zxfer_create_runtime_artifact_file "runtime-cleanup-list-file" >/dev/null
 	file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_runtime_artifact_dir "runtime-cleanup-list-dir" >/dev/null
+	zxfer_create_private_temp_dir "runtime-cleanup-list-dir" >/dev/null
 	dir_path=$g_zxfer_runtime_artifact_path_result
 	path_list=$(printf '%s\n%s\n' "$file_path" "$dir_path")
 
@@ -1892,27 +1546,6 @@ test_zxfer_write_runtime_artifact_file_suppresses_shell_redirection_stderr() {
 		"status=1" "$output"
 }
 
-test_runtime_artifact_parent_and_stage_helpers_reject_invalid_parent_contexts() {
-	set +e
-	zxfer_create_runtime_artifact_file_in_parent "relative-parent" "runtime-parent-file" >/dev/null 2>&1
-	parent_status=$?
-	stage_output=$(
-		(
-			zxfer_get_path_parent_dir() {
-				return 1
-			}
-			zxfer_stage_runtime_artifact_file_for_path "$TEST_TMPDIR/runtime-target" >/dev/null 2>&1
-			printf 'stage_status=%s\n' "$?"
-		)
-	)
-	set -e
-
-	assertEquals "Runtime artifact files staged in explicit parents should reject unvalidated parent directories." \
-		1 "$parent_status"
-	assertContains "Runtime artifact staging should preserve parent-directory lookup failures." \
-		"$stage_output" "stage_status=1"
-}
-
 test_zxfer_write_runtime_artifact_file_preserves_non_redirection_failure_status() {
 	artifact_path="$TEST_TMPDIR/runtime-nonredirection-failure"
 
@@ -1931,164 +1564,6 @@ test_zxfer_write_runtime_artifact_file_preserves_non_redirection_failure_status(
 
 	assertContains "Runtime artifact writes should preserve non-redirection shell failures from the payload writer." \
 		"$output" "status=7"
-}
-
-test_zxfer_write_runtime_cache_file_atomically_cleans_up_on_write_and_publish_failures() {
-	stage_root="$TEST_TMPDIR/runtime-cache-stage-cleanup"
-	write_target="$stage_root/write-failure.entry"
-	publish_target="$stage_root/publish-failure.entry"
-	mkdir -p "$stage_root" || fail "Unable to create runtime cache stage root."
-
-	set +e
-	(
-		zxfer_write_runtime_artifact_file() {
-			return 1
-		}
-		zxfer_write_runtime_cache_file_atomically \
-			"$write_target" "payload" "zxfer-runtime-cache-test"
-	)
-	write_status=$?
-	set -- "$stage_root"/.zxfer-runtime-cache-test.*
-	if [ -e "$1" ]; then
-		write_stage_count=$#
-	else
-		write_stage_count=0
-	fi
-
-	set +e
-	(
-		zxfer_publish_runtime_artifact_file() {
-			return 1
-		}
-		zxfer_write_runtime_cache_file_atomically \
-			"$publish_target" "payload" "zxfer-runtime-cache-test"
-	)
-	publish_status=$?
-	set -- "$stage_root"/.zxfer-runtime-cache-test.*
-	if [ -e "$1" ]; then
-		publish_stage_count=$#
-	else
-		publish_stage_count=0
-	fi
-
-	assertEquals "Atomic runtime cache writes should fail closed when the staged payload cannot be written." \
-		1 "$write_status"
-	assertFalse "Failed runtime cache writes should not leave a published cache target behind." \
-		"[ -e \"$write_target\" ]"
-	assertEquals "Failed runtime cache writes should clean up their staged artifact files." \
-		0 "$write_stage_count"
-	assertEquals "Atomic runtime cache writes should fail closed when the staged payload cannot be published." \
-		1 "$publish_status"
-	assertFalse "Failed runtime cache publishes should not leave a published cache target behind." \
-		"[ -e \"$publish_target\" ]"
-	assertEquals "Failed runtime cache publishes should clean up their staged artifact files." \
-		0 "$publish_stage_count"
-}
-
-test_zxfer_write_runtime_cache_and_cache_object_helpers_cover_success_and_redirection_failures() {
-	cache_target="$TEST_TMPDIR/runtime-cache-success.entry"
-	object_path="$TEST_TMPDIR/cache-object-open-failure"
-	object_target_dir="$TEST_TMPDIR/cache-object-target-dir"
-	stage_dir="$TEST_TMPDIR/cache-object-publish-stage"
-	missing_parent_target="$TEST_TMPDIR/missing-cache-parent/object.dir"
-	published_target="$TEST_TMPDIR/runtime-cache-object.dir"
-	mkdir -p "$object_target_dir" "$stage_dir" || fail "Unable to create the runtime helper fixture directories."
-	ln -s "$object_target_dir" "$object_path" || fail "Unable to create the cache-object redirection failure fixture."
-
-	zxfer_write_runtime_cache_file_atomically "$cache_target" "payload" "zxfer-runtime-cache-test"
-	cache_status=$?
-	cache_mode=$(zxfer_get_path_mode_octal "$cache_target")
-
-	set +e
-	zxfer_write_cache_object_contents_to_path "$object_path" "demo-kind" "" "payload" >/dev/null 2>&1
-	object_write_status=$?
-	if [ -e "$object_path" ] && [ ! -L "$object_path" ]; then
-		object_partial_exists=yes
-	else
-		object_partial_exists=no
-	fi
-	zxfer_publish_cache_object_directory "$stage_dir" "$missing_parent_target" >/dev/null 2>&1
-	missing_parent_status=$?
-	publish_move_output=$(
-		(
-			set +e
-			mv() {
-				return 1
-			}
-			zxfer_publish_cache_object_directory "$stage_dir" "$published_target" >/dev/null 2>&1
-			printf 'status=%s\n' "$?"
-		)
-	)
-	publish_move_status=$(printf '%s\n' "$publish_move_output" | awk -F= '/^status=/{print $2; exit}')
-	set -e
-
-	assertEquals "Atomic runtime cache writes should succeed on the direct helper success path." \
-		0 "$cache_status"
-	assertEquals "Successful atomic runtime cache writes should leave the published target mode at 0600." \
-		600 "$cache_mode"
-	assertEquals "Cache-object content writes should fail closed when the destination path cannot be opened for writing." \
-		1 "$object_write_status"
-	assertEquals "Failed cache-object content writes should not leave a partially published target behind." \
-		no "$object_partial_exists"
-	assertEquals "Publishing cache-object directories should fail closed when the target parent directory is missing." \
-		1 "$missing_parent_status"
-	assertEquals "Publishing cache-object directories should preserve move failures from the live publish step." \
-		1 "$publish_move_status"
-}
-
-test_zxfer_write_runtime_cache_file_atomically_requires_existing_parent_dir() {
-	missing_parent="$TEST_TMPDIR/runtime-cache-missing-parent"
-	target_path="$missing_parent/cache.entry"
-
-	set +e
-	zxfer_write_runtime_cache_file_atomically "$target_path" "payload" "zxfer-runtime-cache-test"
-	status=$?
-
-	assertEquals "Atomic runtime cache writes should fail closed when the target parent directory is missing." \
-		1 "$status"
-	assertFalse "Atomic runtime cache writes should not create a missing parent directory implicitly." \
-		"[ -d \"$missing_parent\" ]"
-	assertFalse "Atomic runtime cache writes should not leave a published cache target behind when the parent is missing." \
-		"[ -e \"$target_path\" ]"
-}
-
-test_zxfer_write_runtime_cache_file_atomically_rejects_non_file_targets_and_parent_lookup_failures() {
-	dir_target="$TEST_TMPDIR/runtime-cache-dir-target"
-	parent_lookup_target="$TEST_TMPDIR/runtime-cache-parent-lookup.entry"
-	stage_failure_target="$TEST_TMPDIR/runtime-cache-stage-failure.entry"
-	mkdir -p "$dir_target" || fail "Unable to create runtime cache directory target fixture."
-
-	set +e
-	zxfer_write_runtime_cache_file_atomically "$dir_target" "payload" "zxfer-runtime-cache-test" >/dev/null 2>&1
-	dir_status=$?
-	parent_lookup_output=$(
-		(
-			zxfer_get_path_parent_dir() {
-				return 1
-			}
-			zxfer_write_runtime_cache_file_atomically \
-				"$parent_lookup_target" "payload" "zxfer-runtime-cache-test" >/dev/null 2>&1
-			printf 'status=%s\n' "$?"
-		)
-	)
-	stage_failure_output=$(
-		(
-			zxfer_stage_runtime_artifact_file_for_path() {
-				return 1
-			}
-			zxfer_write_runtime_cache_file_atomically \
-				"$stage_failure_target" "payload" "zxfer-runtime-cache-test" >/dev/null 2>&1
-			printf 'status=%s\n' "$?"
-		)
-	)
-	set -e
-
-	assertEquals "Atomic runtime cache writes should fail closed when the existing target path is not a regular file." \
-		1 "$dir_status"
-	assertContains "Atomic runtime cache writes should preserve target-parent lookup failures exactly." \
-		"$parent_lookup_output" "status=1"
-	assertContains "Atomic runtime cache writes should fail closed when the staging helper cannot allocate the private artifact path." \
-		"$stage_failure_output" "status=1"
 }
 
 test_get_os_handles_local_and_remote_invocations() {
@@ -2121,8 +1596,8 @@ test_init_globals_initializes_dependency_state_and_temp_files() {
 			g_last_common_snap="stale@snap"
 			g_zfs_send_job_pids="123 456"
 			g_zxfer_background_job_records="stale-job	kind	111	/tmp/bg	/runner	token"
-			g_zxfer_background_job_wait_job_id="stale-job"
-			g_zxfer_property_cache_path="/tmp/stale-cache"
+			g_zxfer_background_job_wait_exit_status="stale-status"
+			g_zxfer_property_table_lookup_result="stale-lookup"
 			g_zxfer_source_pvs_raw="stale=property=local"
 			g_zxfer_property_stage_file_read_result="stale-stage-read"
 			zxfer_assign_required_tool() {
@@ -2153,8 +1628,8 @@ test_init_globals_initializes_dependency_state_and_temp_files() {
 			printf 'last_common=<%s>\n' "$g_last_common_snap"
 			printf 'send_pids=<%s>\n' "$g_zfs_send_job_pids"
 			printf 'background_records=<%s>\n' "$g_zxfer_background_job_records"
-			printf 'background_wait_job=<%s>\n' "$g_zxfer_background_job_wait_job_id"
-			printf 'cache_path=<%s>\n' "$g_zxfer_property_cache_path"
+			printf 'background_wait_status=<%s>\n' "$g_zxfer_background_job_wait_exit_status"
+			printf 'table_lookup=<%s>\n' "$g_zxfer_property_table_lookup_result"
 			printf 'source_pvs=<%s>\n' "$g_zxfer_source_pvs_raw"
 			printf 'property_stage_read=<%s>\n' "$g_zxfer_property_stage_file_read_result"
 		)
@@ -2197,9 +1672,9 @@ test_init_globals_initializes_dependency_state_and_temp_files() {
 	assertContains "zxfer_init_globals should reset supervised background-job registry state." \
 		"$output" "background_records=<>"
 	assertContains "zxfer_init_globals should reset supervised background-job wait scratch state." \
-		"$output" "background_wait_job=<>"
-	assertContains "zxfer_init_globals should reset property-cache path scratch state." \
-		"$output" "cache_path=<>"
+		"$output" "background_wait_status=<>"
+	assertContains "zxfer_init_globals should reset property-table lookup scratch state." \
+		"$output" "table_lookup=<>"
 	assertContains "zxfer_init_globals should reset property-reconcile source scratch state." \
 		"$output" "source_pvs=<>"
 	assertContains "zxfer_init_globals should reset staged property-file read scratch state." \
@@ -2245,7 +1720,9 @@ test_ensure_snapshot_delete_temp_artifacts_allocates_paths_lazily_in_current_she
 	output=$(
 		(
 			counter=0
-			zxfer_reset_delete_temp_artifacts
+			g_delete_source_tmp_file=""
+			g_delete_dest_tmp_file=""
+			g_delete_snapshots_to_delete_tmp_file=""
 			zxfer_get_temp_file() {
 				counter=$((counter + 1))
 				g_zxfer_temp_file_result="$TEST_TMPDIR/delete.$counter"
@@ -2287,7 +1764,9 @@ test_ensure_snapshot_delete_temp_artifacts_allocates_paths_lazily_in_current_she
 test_ensure_snapshot_delete_temp_artifacts_preserves_allocation_failures_without_publishing_paths() {
 	output=$(
 		(
-			zxfer_reset_delete_temp_artifacts
+			g_delete_source_tmp_file=""
+			g_delete_dest_tmp_file=""
+			g_delete_snapshots_to_delete_tmp_file=""
 			zxfer_get_temp_file() {
 				return 71
 			}
@@ -2316,7 +1795,9 @@ test_ensure_snapshot_delete_temp_artifacts_preserves_allocation_failures_without
 
 test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_second_allocation_failure_in_current_shell() {
 	cleanup_log="$TEST_TMPDIR/delete_temp_cleanup_second.log"
-	zxfer_reset_delete_temp_artifacts
+	g_delete_source_tmp_file=""
+	g_delete_dest_tmp_file=""
+	g_delete_snapshots_to_delete_tmp_file=""
 	call_count=0
 
 	zxfer_get_temp_file() {
@@ -2364,7 +1845,9 @@ test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_second_allocation_fai
 
 test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_third_allocation_failure_in_current_shell() {
 	cleanup_log="$TEST_TMPDIR/delete_temp_cleanup_third.log"
-	zxfer_reset_delete_temp_artifacts
+	g_delete_source_tmp_file=""
+	g_delete_dest_tmp_file=""
+	g_delete_snapshots_to_delete_tmp_file=""
 	call_count=0
 
 	zxfer_get_temp_file() {
@@ -2509,12 +1992,12 @@ test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 
 			zxfer_init_globals
 
-			stale_cache_dir="$TEST_TMPDIR/stale-property-cache"
-			mkdir -p "$stale_cache_dir/normalized/source"
-			: >"$stale_cache_dir/normalized/source/entry"
-			g_zxfer_property_cache_dir=$stale_cache_dir
+			g_zxfer_source_property_table="tank/src	compression=stale=local"
+			g_zxfer_destination_property_table="backup/dst	compression=stale=local"
+			g_zxfer_property_table_memo_side="source"
+			g_zxfer_property_table_memo_dataset="tank/src"
+			g_zxfer_property_table_memo_payload="compression=stale=local"
 			g_zxfer_required_properties_result="stale-required"
-			g_zxfer_property_cache_key="stale-key"
 			g_zxfer_adjusted_set_list="compression=lz4"
 			g_zxfer_adjusted_inherit_list="mountpoint"
 			g_zxfer_override_pvs_result="compression=lz4=local"
@@ -2528,29 +2011,29 @@ test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 			zxfer_init_globals
 
 			printf 'required=<%s>\n' "$g_zxfer_required_properties_result"
-			printf 'cache_key=<%s>\n' "$g_zxfer_property_cache_key"
+			printf 'source_table=<%s>\n' "${g_zxfer_source_property_table:-}"
+			printf 'destination_table=<%s>\n' "${g_zxfer_destination_property_table:-}"
+			printf 'memo_dataset=<%s>\n' "${g_zxfer_property_table_memo_dataset:-}"
 			printf 'adjusted_set=<%s>\n' "$g_zxfer_adjusted_set_list"
 			printf 'adjusted_inherit=<%s>\n' "$g_zxfer_adjusted_inherit_list"
 			printf 'override_result=<%s>\n' "$g_zxfer_override_pvs_result"
 			printf 'creation_result=<%s>\n' "$g_zxfer_creation_pvs_result"
 			printf 'property_stage_read=<%s>\n' "$g_zxfer_property_stage_file_read_result"
 			printf 'remote_capture_failed=%s\n' "${g_zxfer_remote_probe_capture_failed:-0}"
-			printf 'cache_dir=<%s>\n' "$g_zxfer_property_cache_dir"
 			printf 'prefetch_state=%s\n' "$g_zxfer_destination_property_tree_prefetch_state"
 			printf 'unsupported_fs=<%s>\n' "$g_zxfer_unsupported_filesystem_properties"
 			printf 'unsupported_vol=<%s>\n' "$g_zxfer_unsupported_volume_properties"
-			if [ -d "$stale_cache_dir" ]; then
-				printf 'stale_dir_exists=1\n'
-			else
-				printf 'stale_dir_exists=0\n'
-			fi
 		)
 	)
 
 	assertContains "Re-running zxfer_init_globals should clear required-property scratch results." \
 		"$output" "required=<>"
-	assertContains "Re-running zxfer_init_globals should clear property-cache key scratch state." \
-		"$output" "cache_key=<>"
+	assertContains "Re-running zxfer_init_globals should clear the in-memory source property table." \
+		"$output" "source_table=<>"
+	assertContains "Re-running zxfer_init_globals should clear the in-memory destination property table." \
+		"$output" "destination_table=<>"
+	assertContains "Re-running zxfer_init_globals should clear the property-table memo." \
+		"$output" "memo_dataset=<>"
 	assertContains "Re-running zxfer_init_globals should clear adjusted set scratch state." \
 		"$output" "adjusted_set=<>"
 	assertContains "Re-running zxfer_init_globals should clear adjusted inherit scratch state." \
@@ -2563,447 +2046,12 @@ test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 		"$output" "property_stage_read=<>"
 	assertContains "Re-running zxfer_init_globals should clear remote probe capture-failure scratch state." \
 		"$output" "remote_capture_failed=0"
-	assertContains "Re-running zxfer_init_globals should reset the cache directory pointer." \
-		"$output" "cache_dir=<>"
 	assertContains "Re-running zxfer_init_globals should rearm destination property prefetch state." \
 		"$output" "prefetch_state=0"
 	assertContains "Re-running zxfer_init_globals should clear filesystem unsupported-property cache state." \
 		"$output" "unsupported_fs=<>"
 	assertContains "Re-running zxfer_init_globals should clear volume unsupported-property cache state." \
 		"$output" "unsupported_vol=<>"
-	assertContains "Re-running zxfer_init_globals should remove stale property cache directories." \
-		"$output" "stale_dir_exists=0"
-}
-
-test_zxfer_cache_object_file_round_trip_preserves_metadata_and_payload() {
-	object_path="$TEST_TMPDIR/cache-object-round-trip.entry"
-	output_file="$TEST_TMPDIR/cache-object-round-trip.out"
-	metadata=$(printf '%s\n' \
-		"created_epoch=123" \
-		"side=source")
-	payload=$(printf '%s\n' \
-		"line one" \
-		"line two")
-
-	zxfer_write_cache_object_file_atomically \
-		"$object_path" "demo-kind" "$metadata" "$payload" >/dev/null
-	write_status=$?
-	zxfer_read_cache_object_file "$object_path" "demo-kind" >"$output_file"
-	read_status=$?
-
-	assertEquals "Atomic cache-object writes should publish a readable cache object." \
-		0 "$write_status"
-	assertEquals "Cache-object reads should succeed for valid published objects." \
-		0 "$read_status"
-	assertEquals "Valid cache-object reads should reproduce the original payload on stdout." \
-		"$payload" "$(cat "$output_file")"
-	assertEquals "Valid cache-object reads should publish the parsed object kind in shared scratch state." \
-		"demo-kind" "$g_zxfer_cache_object_kind_result"
-	assertEquals "Valid cache-object reads should preserve metadata lines in shared scratch state." \
-		"$metadata" "$g_zxfer_cache_object_metadata_result"
-	assertEquals "Valid cache-object reads should preserve the full payload in shared scratch state." \
-		"$payload" "$g_zxfer_cache_object_payload_result"
-}
-
-test_cache_object_metadata_helpers_cover_invalid_lines_missing_keys_and_max_yield_constant() {
-	set +e
-	zxfer_validate_cache_object_metadata_lines "broken-metadata-line" >/dev/null 2>&1
-	metadata_status=$?
-	zxfer_get_cache_object_metadata_value "kind=demo" "missing" >/dev/null 2>&1
-	missing_key_status=$?
-	set -e
-	max_yield=$(zxfer_get_max_yield_iterations)
-
-	assertEquals "Cache-object metadata validation should fail closed on lines without key separators." \
-		1 "$metadata_status"
-	assertEquals "Cache-object metadata lookup should fail when the requested key is absent." \
-		1 "$missing_key_status"
-	assertEquals "Runtime max-yield helpers should return the exported runtime constant." \
-		"$ZXFER_MAX_YIELD_ITERATIONS" "$max_yield"
-}
-
-test_zxfer_read_cache_object_file_rejects_missing_end_marker() {
-	object_path="$TEST_TMPDIR/cache-object-missing-end.entry"
-	output_file="$TEST_TMPDIR/cache-object-missing-end.out"
-
-	cat >"$object_path" <<-EOF
-		$ZXFER_CACHE_OBJECT_HEADER_LINE
-		kind=demo-kind
-
-		payload
-	EOF
-
-	g_zxfer_cache_object_kind_result="stale-kind"
-	g_zxfer_cache_object_metadata_result="stale=metadata"
-	g_zxfer_cache_object_payload_result="stale-payload"
-	set +e
-	zxfer_read_cache_object_file "$object_path" "demo-kind" >"$output_file"
-	status=$?
-
-	assertEquals "Cache-object reads should fail closed when the end marker is missing." \
-		1 "$status"
-	assertEquals "Rejected cache objects should not emit a payload." \
-		"" "$(cat "$output_file")"
-	assertEquals "Rejected cache objects should clear the kind scratch result." \
-		"" "$g_zxfer_cache_object_kind_result"
-	assertEquals "Rejected cache objects should clear the metadata scratch result." \
-		"" "$g_zxfer_cache_object_metadata_result"
-	assertEquals "Rejected cache objects should clear the payload scratch result." \
-		"" "$g_zxfer_cache_object_payload_result"
-}
-
-test_zxfer_read_cache_object_file_rejects_wrong_kind() {
-	object_path="$TEST_TMPDIR/cache-object-wrong-kind.entry"
-	output_file="$TEST_TMPDIR/cache-object-wrong-kind.out"
-
-	zxfer_write_cache_object_file_atomically \
-		"$object_path" "actual-kind" "" "payload" >/dev/null ||
-		fail "Unable to create a valid cache object fixture."
-
-	g_zxfer_cache_object_kind_result="stale-kind"
-	g_zxfer_cache_object_payload_result="stale-payload"
-	set +e
-	zxfer_read_cache_object_file "$object_path" "expected-kind" >"$output_file"
-	status=$?
-
-	assertEquals "Cache-object reads should fail closed when the published object kind does not match the expected kind." \
-		1 "$status"
-	assertEquals "Wrong-kind cache objects should not emit a payload." \
-		"" "$(cat "$output_file")"
-	assertEquals "Wrong-kind cache objects should clear the cached kind scratch state." \
-		"" "$g_zxfer_cache_object_kind_result"
-	assertEquals "Wrong-kind cache objects should clear the cached payload scratch state." \
-		"" "$g_zxfer_cache_object_payload_result"
-}
-
-test_zxfer_read_cache_object_file_rejects_runtime_read_failures() {
-	unreadable_path="$TEST_TMPDIR/cache-object-unreadable.entry"
-	unreadable_output="$TEST_TMPDIR/cache-object-unreadable.out"
-	output=$(
-		(
-			zxfer_write_cache_object_file_atomically \
-				"$unreadable_path" "demo-kind" "" "payload" >/dev/null ||
-				fail "Unable to create a cache object fixture for readback failure coverage."
-
-			zxfer_read_runtime_artifact_file() {
-				g_zxfer_runtime_artifact_read_result="stale-runtime-read"
-				return 1
-			}
-
-			g_zxfer_cache_object_kind_result="stale-kind"
-			g_zxfer_cache_object_metadata_result="stale=metadata"
-			g_zxfer_cache_object_payload_result="stale-payload"
-			set +e
-			zxfer_read_cache_object_file "$unreadable_path" "demo-kind" >"$unreadable_output"
-			unreadable_status=$?
-			set -e
-
-			printf 'status=%s\n' "$unreadable_status"
-			printf 'payload=<%s>\n' "$(cat "$unreadable_output")"
-			printf 'kind=<%s>\n' "$g_zxfer_cache_object_kind_result"
-			printf 'metadata=<%s>\n' "$g_zxfer_cache_object_metadata_result"
-			printf 'cache_payload=<%s>\n' "$g_zxfer_cache_object_payload_result"
-		)
-	)
-
-	assertContains "Cache-object reads should fail closed when the staged runtime read helper fails." \
-		"$output" "status=1"
-	assertContains "Runtime read failures should not emit a payload." \
-		"$output" "payload=<>"
-	assertContains "Runtime read failures should clear the cached kind scratch state." \
-		"$output" "kind=<>"
-	assertContains "Runtime read failures should clear the cached metadata scratch state." \
-		"$output" "metadata=<>"
-	assertContains "Runtime read failures should clear the cached payload scratch state." \
-		"$output" "cache_payload=<>"
-}
-
-test_zxfer_read_cache_object_file_rejects_invalid_kind_and_metadata_lines() {
-	invalid_kind_path="$TEST_TMPDIR/cache-object-invalid-kind"
-	invalid_metadata_path="$TEST_TMPDIR/cache-object-invalid-metadata"
-	printf '%s\n%s\n\npayload\n%s\n' \
-		"$ZXFER_CACHE_OBJECT_HEADER_LINE" \
-		"broken" \
-		"$ZXFER_CACHE_OBJECT_END_LINE" >"$invalid_kind_path"
-	printf '%s\n%s\n%s\n\npayload\n%s\n' \
-		"$ZXFER_CACHE_OBJECT_HEADER_LINE" \
-		"kind=demo-kind" \
-		"broken-metadata-line" \
-		"$ZXFER_CACHE_OBJECT_END_LINE" >"$invalid_metadata_path"
-
-	set +e
-	zxfer_read_cache_object_file "$invalid_kind_path" "demo-kind" >/dev/null 2>&1
-	invalid_kind_status=$?
-	zxfer_read_cache_object_file "$invalid_metadata_path" "demo-kind" >/dev/null 2>&1
-	invalid_metadata_status=$?
-	set -e
-
-	assertEquals "Cache-object reads should fail closed when the kind header is malformed." \
-		1 "$invalid_kind_status"
-	assertEquals "Cache-object reads should fail closed when metadata lines are malformed." \
-		1 "$invalid_metadata_status"
-}
-
-test_zxfer_read_cache_object_file_rejects_empty_payloads() {
-	empty_path="$TEST_TMPDIR/cache-object-empty.entry"
-	empty_output="$TEST_TMPDIR/cache-object-empty.out"
-
-	cat >"$empty_path" <<-EOF
-		$ZXFER_CACHE_OBJECT_HEADER_LINE
-		kind=demo-kind
-
-		$ZXFER_CACHE_OBJECT_END_LINE
-	EOF
-
-	set +e
-	zxfer_read_cache_object_file "$empty_path" "demo-kind" >"$empty_output"
-	empty_status=$?
-
-	assertEquals "Cache-object reads should fail closed when the published payload is empty." \
-		1 "$empty_status"
-	assertEquals "Empty-payload cache objects should not emit a payload." \
-		"" "$(cat "$empty_output")"
-}
-
-test_zxfer_write_cache_object_file_atomically_cleans_up_stage_dirs_on_write_readback_and_rename_failures() {
-	stage_root="$TEST_TMPDIR/cache-object-stage-cleanup"
-	write_target="$stage_root/write-failure.entry"
-	readback_target="$stage_root/readback-failure.entry"
-	rename_target="$stage_root/rename-failure.entry"
-	mkdir -p "$stage_root" || fail "Unable to create cache-object stage root."
-
-	set +e
-	(
-		zxfer_write_cache_object_contents_to_path() {
-			return 1
-		}
-		zxfer_write_cache_object_file_atomically \
-			"$write_target" "demo-kind" "" "payload"
-	)
-	write_status=$?
-	set -- "$stage_root"/.zxfer-cache-object.*
-	if [ -e "$1" ]; then
-		write_stage_count=$#
-	else
-		write_stage_count=0
-	fi
-
-	set +e
-	(
-		mv() {
-			return 1
-		}
-		zxfer_write_cache_object_file_atomically \
-			"$rename_target" "demo-kind" "" "payload"
-	)
-	rename_status=$?
-	set -- "$stage_root"/.zxfer-cache-object.*
-	if [ -e "$1" ]; then
-		rename_stage_count=$#
-	else
-		rename_stage_count=0
-	fi
-
-	assertEquals "Atomic cache-object writes should fail closed when the staged payload cannot be written." \
-		1 "$write_status"
-	assertFalse "Failed staged payload writes should not leave a published cache object behind." \
-		"[ -e \"$write_target\" ]"
-	assertEquals "Failed staged payload writes should clean up their private stage directory." \
-		0 "$write_stage_count"
-
-	set +e
-	(
-		zxfer_read_cache_object_file() {
-			return 1
-		}
-		zxfer_write_cache_object_file_atomically \
-			"$readback_target" "demo-kind" "" "payload"
-	)
-	readback_status=$?
-	set -- "$stage_root"/.zxfer-cache-object.*
-	if [ -e "$1" ]; then
-		readback_stage_count=$#
-	else
-		readback_stage_count=0
-	fi
-
-	assertEquals "Atomic cache-object writes should fail closed when the staged object cannot be read back for validation." \
-		1 "$readback_status"
-	assertFalse "Failed staged readback validation should not leave a published cache object behind." \
-		"[ -e \"$readback_target\" ]"
-	assertEquals "Failed staged readback validation should clean up their private stage directory." \
-		0 "$readback_stage_count"
-
-	assertEquals "Atomic cache-object writes should fail closed when the staged object cannot be renamed into place." \
-		1 "$rename_status"
-	assertFalse "Failed cache-object renames should not leave a published cache object behind." \
-		"[ -e \"$rename_target\" ]"
-	assertEquals "Failed cache-object renames should clean up their private stage directory." \
-		0 "$rename_stage_count"
-}
-
-test_zxfer_write_cache_object_file_atomically_cleans_up_stage_dirs_when_rmdir_would_fail() {
-	stage_root="$TEST_TMPDIR/cache-object-stage-rmdir-failure"
-	target_path="$stage_root/published.entry"
-	mkdir -p "$stage_root" || fail "Unable to create cache-object publish root."
-
-	set +e
-	(
-		rmdir() {
-			return 1
-		}
-		zxfer_write_cache_object_file_atomically \
-			"$target_path" "demo-kind" "" "payload"
-	)
-	status=$?
-	set -- "$stage_root"/.zxfer-cache-object.*
-	if [ -e "$1" ]; then
-		stage_count=$#
-	else
-		stage_count=0
-	fi
-
-	assertEquals "Successful cache-object publishes should not depend on a direct rmdir cleanup path." \
-		0 "$status"
-	assertTrue "Successful cache-object publishes should still create the published target." \
-		"[ -f \"$target_path\" ]"
-	assertEquals "Successful cache-object publishes should clean up their private stage directory even when rmdir would fail." \
-		0 "$stage_count"
-}
-
-test_zxfer_write_cache_object_file_atomically_reports_stage_dir_creation_failures_and_publish_dir_rejections() {
-	set +e
-	stage_output=$(
-		(
-			zxfer_create_cache_object_stage_dir_for_path() {
-				return 1
-			}
-			zxfer_write_cache_object_file_atomically \
-				"$TEST_TMPDIR/cache-object-stage-dir-failure" "demo-kind" "" "payload" >/dev/null 2>&1
-			printf 'status=%s\n' "$?"
-		)
-	)
-	publish_output=$(
-		(
-			stage_dir="$TEST_TMPDIR/publish-cache-object-stage"
-			mkdir -p "$stage_dir" || exit 1
-			relative_parent="relative-publish-parent"
-			rm -rf "$relative_parent"
-			mkdir -p "$relative_parent" || exit 1
-			set +e
-			zxfer_publish_cache_object_directory "$stage_dir" "$relative_parent/object-dir" >/dev/null 2>&1
-			status=$?
-			rm -rf "$relative_parent"
-			set -e
-			printf 'status=%s\n' "$status"
-		)
-	)
-	set -e
-
-	assertContains "Atomic cache-object writes should fail closed when the stage directory cannot be allocated." \
-		"$stage_output" "status=1"
-	assertContains "Publishing cache-object directories should reject existing relative parents that are outside the validated temp-root rules." \
-		"$publish_output" "status=1"
-}
-
-test_zxfer_create_cache_object_stage_dir_for_path_preserves_parent_lookup_failures() {
-	output=$(
-		(
-			zxfer_get_path_parent_dir() {
-				return 1
-			}
-			set +e
-			zxfer_create_cache_object_stage_dir_for_path "$TEST_TMPDIR/cache-object-parent-lookup" >/dev/null
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Cache-object stage-dir creation should preserve target-parent lookup failures." \
-		"$output" "status=1"
-}
-
-test_zxfer_write_cache_object_file_atomically_registers_stage_dirs_in_current_shell_before_failures() {
-	stage_root="$TEST_TMPDIR/cache-object-stage-current-shell"
-	target_path="$stage_root/published.entry"
-	trace_file="$TEST_TMPDIR/cache-object-stage-current-shell.trace"
-	mkdir -p "$stage_root" || fail "Unable to create the cache-object stage root."
-
-	output=$(
-		(
-			zxfer_write_cache_object_contents_to_path() {
-				printf 'registered=<%s>\n' "${g_zxfer_runtime_artifact_cleanup_paths:-}" >"$trace_file"
-				return 1
-			}
-			set +e
-			zxfer_write_cache_object_file_atomically \
-				"$target_path" "demo-kind" "" "payload" >/dev/null
-			status=$?
-			set -e
-			printf 'status=%s\n' "$status"
-		)
-	)
-	set -- "$stage_root"/.zxfer-cache-object.*
-	if [ -e "$1" ]; then
-		stage_count=$#
-	else
-		stage_count=0
-	fi
-
-	assertContains "Atomic cache-object writes should still fail closed when the staged payload helper fails." \
-		"$output" "status=1"
-	assertContains "Atomic cache-object writes should register their private stage dir in current-shell cleanup state before helper failures." \
-		"$(cat "$trace_file")" "/.zxfer-cache-object."
-	assertEquals "Atomic cache-object writes should still clean up their private stage directory after helper failures." \
-		0 "$stage_count"
-}
-
-test_zxfer_publish_cache_object_directory_preserves_parent_lookup_failures() {
-	stage_dir="$TEST_TMPDIR/cache-object-parent-lookup-stage"
-	target_path="$TEST_TMPDIR/cache-object-parent-lookup-target/object.dir"
-	mkdir -p "$stage_dir" || fail "Unable to create the staged cache-object directory."
-
-	output=$(
-		(
-			zxfer_get_path_parent_dir() {
-				return 1
-			}
-			set +e
-			zxfer_publish_cache_object_directory "$stage_dir" "$target_path" >/dev/null
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Publishing cache-object directories should preserve target-parent lookup failures." \
-		"$output" "status=1"
-}
-
-test_zxfer_write_cache_object_contents_to_path_rejects_invalid_metadata_and_failed_writes() {
-	write_failure_target="$TEST_TMPDIR/cache-object-write-failure.entry"
-
-	set +e
-	zxfer_write_cache_object_contents_to_path \
-		"$TEST_TMPDIR/cache-object-invalid-metadata.entry" \
-		"demo-kind" "broken-metadata-line" "payload" >/dev/null 2>&1
-	metadata_status=$?
-	write_failure_output=$(
-		(
-			printf() {
-				return 1
-			}
-			set +e
-			zxfer_write_cache_object_contents_to_path \
-				"$write_failure_target" \
-				"demo-kind" "kind=demo" "payload" >/dev/null 2>&1
-			command printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertEquals "Cache-object content writes should fail closed when metadata lines are malformed." \
-		1 "$metadata_status"
-	assertContains "Cache-object content writes should fail closed when the staged write operation fails." \
-		"$write_failure_output" "status=1"
-	assertFalse "Failed cache-object content writes should not create the destination path when the staged write operation fails." \
-		"[ -e \"$write_failure_target\" ]"
 }
 
 test_try_get_effective_tmpdir_fails_cleanly_when_no_safe_default_exists() {
@@ -3012,8 +2060,9 @@ test_try_get_effective_tmpdir_fails_cleanly_when_no_safe_default_exists() {
 			unset TMPDIR
 			g_zxfer_effective_tmpdir=""
 			g_zxfer_effective_tmpdir_requested=""
-			zxfer_try_get_default_tmpdir() {
-				return 1
+			# A candidate list with no safe entry exhausts the fallback walk.
+			zxfer_list_default_tmpdir_candidates() {
+				printf '%s\n' "$TEST_TMPDIR/no-such-default-candidate"
 			}
 			set +e
 			zxfer_try_get_effective_tmpdir >/dev/null

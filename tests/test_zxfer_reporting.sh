@@ -79,6 +79,56 @@ test_zxfer_record_last_command_helpers_preserve_empty_input_semantics_by_default
 		"" "$g_zxfer_failure_last_command"
 }
 
+test_zxfer_record_last_command_opaque_matches_redaction_marker() {
+	g_zxfer_failure_last_command=""
+
+	zxfer_record_last_command_opaque
+
+	assertEquals "Opaque last-command tracking should store the shared redaction marker." \
+		"$(zxfer_get_failure_report_redaction_marker)" "$g_zxfer_failure_last_command"
+}
+
+test_zxfer_command_display_render_enabled_tracks_display_consumers() {
+	quiet_status=$(
+		(
+			g_option_v_verbose=0
+			g_option_V_very_verbose=0
+			zxfer_command_display_render_enabled
+			printf '%s\n' "$?"
+		)
+	)
+	verbose_status=$(
+		(
+			g_option_v_verbose=1
+			g_option_V_very_verbose=0
+			zxfer_command_display_render_enabled
+			printf '%s\n' "$?"
+		)
+	)
+	very_verbose_status=$(
+		(
+			g_option_v_verbose=0
+			g_option_V_very_verbose=1
+			zxfer_command_display_render_enabled
+			printf '%s\n' "$?"
+		)
+	)
+	unsafe_status=$(
+		(
+			g_option_v_verbose=0
+			g_option_V_very_verbose=0
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
+			zxfer_command_display_render_enabled
+			printf '%s\n' "$?"
+		)
+	)
+
+	assertEquals "Quiet runs should skip display command rendering." "1" "$quiet_status"
+	assertEquals "Verbose (-v) runs should render display commands." "0" "$verbose_status"
+	assertEquals "Very-verbose (-V) runs should render display commands." "0" "$very_verbose_status"
+	assertEquals "Unsafe failure-report mode should render commands for failure context." "0" "$unsafe_status"
+}
+
 test_zxfer_render_failure_report_preserves_command_fields_in_unsafe_mode() {
 	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 	zxfer_set_failure_roots "tank/src" "backup/dst"
@@ -351,6 +401,38 @@ test_zxfer_append_failure_report_to_log_appends_existing_file_when_parent_is_not
 		"$(cat "$log_path")" "message: appended-report"
 }
 
+test_zxfer_append_failure_report_to_log_rechecks_existence_under_lock_before_creating() {
+	# A concurrent winner can create the log while this run waits on the
+	# error-log lock; the stale pre-lock existence answer must not route the
+	# waiting run onto the create path, which would clobber the winner's
+	# freshly published report with an empty staged file.
+	log_path="$TEST_TMPDIR/recheck-under-lock.log"
+	rm -f "$log_path"
+
+	output=$(
+		(
+			ZXFER_ERROR_LOG="$log_path"
+			zxfer_acquire_error_log_lock() {
+				# Simulate the concurrent winner publishing the log while
+				# this run was blocked on lock acquisition.
+				printf 'winner: report-kept\n' >"$log_path"
+				chmod 600 "$log_path"
+				return 0
+			}
+			set +e
+			zxfer_append_failure_report_to_log "loser: report-appended"
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Appending after a lock wait should still succeed." \
+		"$output" "status=0"
+	assertContains "The concurrent winner's report must survive the recheck (no create-path clobber)." \
+		"$(cat "$log_path")" "winner: report-kept"
+	assertContains "The waiting run's report must append behind the winner's content." \
+		"$(cat "$log_path")" "loser: report-appended"
+}
+
 test_zxfer_get_error_log_fallback_lock_dir_uses_system_tmp_fallback_chain() {
 	zxfer_test_capture_subshell '
 		TMPDIR="/unsafe-tmpdir"
@@ -597,6 +679,40 @@ test_zxfer_acquire_error_log_lock_reaps_stale_lock_and_retries_successfully() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "creates=2"
 	assertContains "Error-log lock acquisition should attempt exactly one stale-lock reap in this path." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "reaps=1"
+}
+
+test_zxfer_acquire_error_log_lock_defers_corrupt_reap_until_recheck_round() {
+	# A 0700 lock dir without metadata models a live winner inside its
+	# mkdir-to-metadata publish window: the first sighting must be treated as
+	# busy (lock preserved across the sleep) and the corrupt reap may only
+	# happen after the recheck still reports corrupt metadata.
+	lock_dir="$TEST_TMPDIR/midpublish.lock"
+	mkdir -m 700 "$lock_dir" || fail "Unable to create the mid-publish lock fixture."
+	g_test_sleep_calls=0
+	g_test_lock_present_at_sleep=no
+	sleep() {
+		g_test_sleep_calls=$((g_test_sleep_calls + 1))
+		if [ -d "$lock_dir" ]; then
+			g_test_lock_present_at_sleep=yes
+		fi
+		return 0
+	}
+
+	zxfer_acquire_error_log_lock "$lock_dir"
+	status=$?
+	unset -f sleep
+
+	assertEquals "Acquisition should still succeed after the corrupt recheck round reaps the metadata-less lock." \
+		0 "$status"
+	assertEquals "The metadata-less lock must survive the first sighting (treated as busy, not reaped)." \
+		yes "$g_test_lock_present_at_sleep"
+	assertEquals "Exactly one recheck sleep should separate the corrupt sighting from the corrupt reap." \
+		1 "$g_test_sleep_calls"
+	assertTrue "The acquired lock should carry this process's published metadata." \
+		"[ -f \"$lock_dir/metadata\" ]"
+
+	zxfer_release_error_log_lock "$lock_dir" ||
+		fail "Unable to release the acquired error-log lock fixture."
 }
 
 test_zxfer_acquire_error_log_lock_fails_closed_when_stale_reap_errors() {
@@ -1235,6 +1351,46 @@ test_zxfer_profile_add_elapsed_ms_ignores_empty_counter_names_and_invalid_end_va
 	assertEquals "Elapsed-timing helpers should ignore empty counter names and invalid end timestamps without mutating state." \
 		"counter=9
 has_data=0" "$output"
+}
+
+test_zxfer_profile_recorders_always_return_success() {
+	# Regression: profiling recorders are often the final statement of a
+	# caller, so a non-zero recorder status leaks into replication control
+	# flow. With -V active, zxfer_profile_record_zfs_call previously returned
+	# 1 for destination-side calls because a trailing "[ side = source ] &&"
+	# guard failed; that aborted batched -T destination discovery.
+	l_failures=""
+	for l_verbose in 0 1; do
+		g_option_V_very_verbose=$l_verbose
+		for l_stage in "" "snapshot discovery" "send/receive" "property transfer"; do
+			g_zxfer_failure_stage=$l_stage
+			for l_side in source destination other; do
+				for l_verb in list get send receive; do
+					if ! zxfer_profile_record_zfs_call "$l_side" "$l_verb"; then
+						l_failures="$l_failures zfs_call:$l_verbose:$l_stage:$l_side:$l_verb"
+					fi
+				done
+			done
+		done
+		for l_bucket in source_inspection destination_inspection unknown_bucket; do
+			if ! zxfer_profile_record_bucket "$l_bucket"; then
+				l_failures="$l_failures bucket:$l_verbose:$l_bucket"
+			fi
+		done
+		for l_bootstrap in live cache memory unknown_source; do
+			if ! zxfer_profile_record_remote_capability_bootstrap_source "$l_bootstrap"; then
+				l_failures="$l_failures bootstrap:$l_verbose:$l_bootstrap"
+			fi
+		done
+		if ! zxfer_profile_record_ssh_invocation "user@host" ""; then
+			l_failures="$l_failures ssh:$l_verbose"
+		fi
+	done
+	g_zxfer_failure_stage=""
+	g_option_V_very_verbose=0
+
+	assertEquals "Profiling recorders must never return a non-zero status." \
+		"" "$l_failures"
 }
 
 test_throw_usage_error_writes_message_and_usage_to_stderr() {

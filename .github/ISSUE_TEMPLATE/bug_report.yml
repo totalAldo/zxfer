@@ -40,7 +40,7 @@ body:
     attributes:
       label: OS release
       description: Include kernel or release details when relevant.
-      placeholder: FreeBSD 14.4-RELEASE, Ubuntu 24.04, OmniOS r151056, macOS 15.4
+      placeholder: FreeBSD 15.1-RELEASE, Ubuntu 26.04, OmniOS r151058, macOS 15.4
     validations:
       required: true
   - type: input
