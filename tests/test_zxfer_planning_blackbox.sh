@@ -659,8 +659,10 @@ test_delete_option_live_destroys_only_extra_destination_snapshot() {
 
 # Write a minimal GNU-parallel stand-in: skip options through "--", then run
 # the single command argument once per stdin line with every {} replaced by
-# the line. Sequential execution is a valid serialization of parallel's
-# interleaving, so the canned-zfs fixtures stay deterministic.
+# that line. Sequential execution is a valid serialization of parallel's
+# interleaving, so the canned-zfs fixtures stay deterministic. Each job gets
+# the replacement as a shell parameter and stdin from /dev/null, matching the
+# real helper's boundary between the input stream and spawned jobs.
 planning_write_mock_parallel() {
 	l_parallel_path=$1
 
@@ -678,20 +680,13 @@ while [ $# -gt 0 ]; do
 	esac
 done
 mock_parallel_cmd=$*
+mock_parallel_template=$(printf '%s\n' "$mock_parallel_cmd" |
+	sed "s/'{}'/\"\$1\"/g; s/{}/\"\$1\"/g") || exit $?
 mock_parallel_status=0
 while IFS= read -r mock_parallel_line || [ -n "$mock_parallel_line" ]; do
 	[ -n "$mock_parallel_line" ] || continue
-	mock_parallel_line_sed=$(printf '%s\n' "$mock_parallel_line" |
-		sed 's/[\\\/&]/\\&/g') || {
+	sh -c "$mock_parallel_template" mock_parallel "$mock_parallel_line" </dev/null ||
 		mock_parallel_status=$?
-		continue
-	}
-	mock_parallel_run=$(printf '%s\n' "$mock_parallel_cmd" |
-		sed "s/{}/$mock_parallel_line_sed/g") || {
-		mock_parallel_status=$?
-		continue
-	}
-	sh -c "$mock_parallel_run" || mock_parallel_status=$?
 done
 exit $mock_parallel_status
 EOF
