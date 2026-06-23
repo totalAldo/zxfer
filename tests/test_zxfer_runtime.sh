@@ -447,7 +447,7 @@ test_runtime_global_init_covers_default_assignments_in_current_shell() {
 	)
 
 	assertContains "Runtime metadata initialization should set the current zxfer version string." \
-		"$output" "version=2.0.0-20260611"
+		"$output" "version=2.0.0-20260622"
 	assertContains "Option default initialization should restore the single-job default." \
 		"$output" "jobs=1"
 	assertContains "Transport runtime defaults should clear cached remote capability payloads." \
@@ -663,19 +663,20 @@ test_runtime_artifact_allocators_skip_pre_seeded_counter_names_in_current_shell(
 		"$g_zxfer_run_tmp_root/skip-dir.4" "$dir_path"
 }
 
-test_runtime_artifact_allocators_fail_closed_when_the_target_dir_is_unwritable() {
+test_runtime_artifact_allocators_fail_closed_when_the_target_path_rejects_writes() {
 	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
-	# Owner-only without write: passes safety validation, rejects creation.
-	chmod 500 "$g_zxfer_run_tmp_root"
-	zxfer_create_runtime_artifact_file "unwritable-file" >/dev/null 2>&1
+	# A regular-file path component rejects child creation even for root in the
+	# FreeBSD shunit2 guest; chmod-only fixtures are bypassable there.
+	: >"$g_zxfer_run_tmp_root/file-blocker"
+	: >"$g_zxfer_run_tmp_root/dir-blocker"
+	zxfer_create_runtime_artifact_file "file-blocker/unwritable-file" >/dev/null 2>&1
 	file_status=$?
-	zxfer_create_private_temp_dir "unwritable-dir" >/dev/null 2>&1
+	zxfer_create_private_temp_dir "dir-blocker/unwritable-dir" >/dev/null 2>&1
 	dir_status=$?
-	chmod 700 "$g_zxfer_run_tmp_root"
 
-	assertEquals "File allocation should fail closed when the run root rejects writes." \
+	assertEquals "File allocation should fail closed when the target path rejects writes." \
 		1 "$file_status"
-	assertEquals "Directory allocation should fail closed when the run root rejects writes." \
+	assertEquals "Directory allocation should fail closed when the target path rejects writes." \
 		1 "$dir_status"
 }
 

@@ -2032,7 +2032,7 @@ zxfer_init_globals() {
 	zxfer_reset_failure_context "startup"
 	zxfer_refresh_secure_path_state
 
-	g_zxfer_version="2.0.0-20260611"
+	g_zxfer_version="2.0.0-20260622"
 	g_option_b_beep_always=0
 	g_option_B_beep_on_success=0
 	g_option_c_services=""

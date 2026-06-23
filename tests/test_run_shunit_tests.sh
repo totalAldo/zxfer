@@ -1240,6 +1240,15 @@ test_run_shunit_tests_rejects_missing_zxfer_test_shell() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vendored_shunit_escape_characters_handles_bsd_userland() {
+	actual=$(_shunit_escapeCharactersInString "has'quote\`and\$dollar")
+	expected="has\\'quote\\\`and\\\$dollar"
+
+	assertEquals "The vendored shunit2 string escaper should not depend on GNU sed extensions." \
+		"$expected" "$actual"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_test_helper_clears_unsafe_failure_report_commands_from_ambient_env() {
 	zxfer_test_capture_subshell "
 		TESTS_DIR=\"$TESTS_DIR\" \

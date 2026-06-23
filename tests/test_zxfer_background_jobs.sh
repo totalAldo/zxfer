@@ -551,14 +551,12 @@ test_fifo_notification_reports_status_write_failures_as_completion_write_failed_
 		wait "$open_helper_pid"
 		open_background_job_test_fifo_reader_fd8 "$fifo_dir/queue" || exit 1
 
-		# Point the allocated status file into a read-only directory so the
-		# job shell's status write fails and the failure record is queued.
-		readonly_dir=$(mktemp -d "$TEST_TMPDIR/rofail.XXXXXX") || exit 1
-		: >"$readonly_dir/status"
-		chmod 400 "$readonly_dir/status"
-		chmod 500 "$readonly_dir"
+		# Point the allocated status file below a regular-file path component
+		# so the status write fails even when the FreeBSD guest runs as root.
+		status_blocker="$TEST_TMPDIR/status-blocker"
+		: >"$status_blocker"
 		zxfer_get_temp_file() {
-			g_zxfer_temp_file_result="$readonly_dir/status"
+			g_zxfer_temp_file_result="$status_blocker/status"
 			printf '%s\n' "$g_zxfer_temp_file_result"
 		}
 
@@ -580,7 +578,6 @@ test_fifo_notification_reports_status_write_failures_as_completion_write_failed_
 		printf 'job_shell_status=%s\n' "$?"
 		exec 8<&- 2>/dev/null
 		exec 9>&- 2>/dev/null
-		chmod 700 "$readonly_dir" 2>/dev/null
 	)
 
 	assertContains "Status-write failures should publish completion_write_failed queue records." \
