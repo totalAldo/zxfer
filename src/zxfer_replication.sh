@@ -1113,7 +1113,9 @@ zxfer_process_replication_ready_queue() {
 		l_next_pending_sources=""
 		l_processed_source=0
 
-		while IFS= read -r l_source || [ -n "$l_source" ]; do
+		# Keep queue bookkeeping in the current shell; some illumos /bin/sh
+		# redirected loops lose l_next_pending_sources after parent receives.
+		for l_source in $l_pending_sources; do
 			[ -n "$l_source" ] || continue
 			l_source_is_ready=1
 			if [ "$l_ready_queue_active" -eq 1 ]; then
@@ -1134,9 +1136,7 @@ zxfer_process_replication_ready_queue() {
 			fi
 			l_next_pending_sources=${l_next_pending_sources:+$l_next_pending_sources
 }$l_source
-		done <<-EOF
-			$l_pending_sources
-		EOF
+		done
 
 		l_pending_sources=$l_next_pending_sources
 		[ -n "$l_pending_sources" ] || {

@@ -1635,7 +1635,7 @@ test_wait_for_next_zfs_send_job_completion_uses_wait_status_when_status_file_is_
 			queue_file="$TEST_TMPDIR/wait_next_queue.txt"
 			printf '%s\n' "not-a-number" >"$status_file"
 			printf '%s\n' "$status_file" >"$queue_file"
-			sh -c 'exit 7' &
+			sh -c 'sleep 1; exit 7' &
 			job_pid=$!
 			exec 8<"$queue_file"
 			zxfer_find_send_job_pid_by_status_file() {

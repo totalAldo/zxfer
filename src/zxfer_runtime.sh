@@ -2102,12 +2102,12 @@ zxfer_init_globals() {
 	zxfer_init_dependency_tool_defaults
 	zxfer_init_transport_remote_defaults
 	zxfer_init_temp_artifacts
-	zxfer_apply_secure_path
-	# Create the per-run temp root eagerly in this shell (after the secure
-	# PATH is live so mktemp resolves through it) so subshell allocators share
-	# one root the already-registered exit trap removes. Failure stays
+	# Create the per-run temp root before narrowing PATH so bootstrap helpers
+	# still have access to base utilities such as mktemp even when an explicit
+	# ZXFER_SECURE_PATH intentionally omits their directories. Failure stays
 	# non-fatal; the first allocation that needs the root reports it.
 	zxfer_ensure_run_tmp_root || :
+	zxfer_apply_secure_path
 }
 
 # Purpose: Run the centralized shutdown path that cleans up runtime artifacts,

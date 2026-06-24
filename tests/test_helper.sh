@@ -22,10 +22,39 @@ if [ ! -r "$SHUNIT2_BIN" ]; then
 	exit 1
 fi
 
-# shellcheck source=src/zxfer_modules.sh
-ZXFER_SOURCE_MODULES_ROOT=$ZXFER_ROOT \
-	ZXFER_SOURCE_MODULES_THROUGH=zxfer_dependencies.sh \
-	. "$ZXFER_ROOT/src/zxfer_modules.sh"
+zxfer_source_dependency_modules_for_tests() {
+	l_root=$1
+
+	ZXFER_SOURCE_MODULES_ROOT=$l_root
+	ZXFER_SOURCE_MODULES_THROUGH=zxfer_dependencies.sh
+	export ZXFER_SOURCE_MODULES_ROOT ZXFER_SOURCE_MODULES_THROUGH
+
+	# Source the dependency prefix directly. posh treats `return` from a nested
+	# dot script as a return from this helper while test_helper.sh itself is
+	# being sourced, so the early-return module loader would skip the helper
+	# functions below.
+	# shellcheck source=src/zxfer_reporting.sh
+	. "$l_root/src/zxfer_reporting.sh"
+	# shellcheck source=src/zxfer_exec.sh
+	. "$l_root/src/zxfer_exec.sh"
+	# shellcheck source=src/zxfer_dependencies.sh
+	. "$l_root/src/zxfer_dependencies.sh"
+	zxfer_initialize_dependency_defaults
+}
+
+zxfer_source_modules_for_tests() {
+	l_root=$1
+	l_last_module=$2
+
+	ZXFER_SOURCE_MODULES_ROOT=$l_root
+	ZXFER_SOURCE_MODULES_THROUGH=$l_last_module
+	export ZXFER_SOURCE_MODULES_ROOT ZXFER_SOURCE_MODULES_THROUGH
+
+	# shellcheck source=src/zxfer_modules.sh
+	. "$l_root/src/zxfer_modules.sh"
+}
+
+zxfer_source_dependency_modules_for_tests "$ZXFER_ROOT"
 
 # Test suites should not inherit runner-only environment knobs from the
 # developer's shell unless a specific case opts in explicitly.
@@ -36,10 +65,7 @@ zxfer_source_runtime_modules_through() {
 	l_last_module=$1
 	l_root=${2:-$ZXFER_ROOT}
 
-	# shellcheck source=src/zxfer_modules.sh
-	ZXFER_SOURCE_MODULES_ROOT=$l_root \
-		ZXFER_SOURCE_MODULES_THROUGH=$l_last_module \
-		. "$l_root/src/zxfer_modules.sh"
+	zxfer_source_modules_for_tests "$l_root" "$l_last_module"
 }
 
 zxfer_test_create_tmpdir() {
