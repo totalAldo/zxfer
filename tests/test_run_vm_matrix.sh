@@ -20,7 +20,7 @@ oneTimeTearDown() {
 }
 
 setUp() {
-	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE ZXFER_VM_PERF_BASELINE_REF ZXFER_VM_PERF_CASES
+	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE ZXFER_VM_PERF_BASELINE_REF ZXFER_VM_PERF_CASES ZXFER_VM_QEMU_PID_FILE ZXFER_VM_QEMU_WAIT_FAILURE_REASON
 	# shellcheck source=tests/vm/lib.sh
 	. "$VM_MATRIX_LIB"
 	zxfer_vm_reset_state
@@ -66,6 +66,15 @@ test_vm_guest_catalog_uses_current_guest_releases() {
 		"$(zxfer_vm_guest_qemu_image_url omnios amd64)" "/stable/omnios-r151058.cloud.qcow2"
 	assertContains "The OmniOS checksum URL should use the matching current stable checksum." \
 		"$(zxfer_vm_guest_qemu_checksum_url omnios amd64)" "/stable/omnios-r151058.cloud.qcow2.sha256"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_catalog_keeps_omnios_amd64_only() {
+	zxfer_vm_guest_qemu_supports_arch omnios arm64
+	status=$?
+
+	assertEquals "The VM catalog should not advertise an OmniOS arm64 image." \
+		1 "$status"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -383,6 +392,12 @@ test_vm_guest_qemu_seed_transport_uses_cidata_for_freebsd() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_qemu_ssh_ready_timeout_is_1800_seconds() {
+	assertEquals "The qemu backend should allow slow first boots before declaring SSH readiness failed." \
+		"1800" "$(zxfer_vm_guest_qemu_ssh_ready_timeout_seconds omnios)"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_guest_qemu_ssh_ready_probe_count_uses_single_probe_for_supported_guests() {
 	assertEquals "OmniOS qemu guests should use a shorter but still stable SSH readiness threshold under first-boot host-key churn." \
 		"3" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count omnios)"
@@ -448,6 +463,54 @@ EOF
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "ssh-count=3"
 	assertContains "The final known_hosts file should keep the stable replacement host key." \
 		"$(cat "$known_hosts_file")" "KEY_B"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_wait_for_ssh_fails_fast_when_qemu_exits_before_readiness() {
+	mock_bin="$TEST_TMPDIR/mock-bin-qemu-exited"
+	known_hosts_file="$TEST_TMPDIR/known_hosts.qemu-exited"
+	sleep_count_file="$TEST_TMPDIR/sleep-count.qemu-exited"
+	qemu_pid_file="$TEST_TMPDIR/qemu-exited.pid"
+	mkdir -p "$mock_bin"
+	printf '%s\n' "999999" >"$qemu_pid_file"
+
+	cat <<'EOF' >"$mock_bin/ssh-keyscan"
+#!/bin/sh
+exit 1
+EOF
+	chmod 700 "$mock_bin/ssh-keyscan"
+
+	cat <<EOF >"$mock_bin/sleep"
+#!/bin/sh
+printf '%s\n' slept >"$sleep_count_file"
+exit 0
+EOF
+	chmod 700 "$mock_bin/sleep"
+
+	zxfer_test_capture_subshell "
+		PATH=\"$mock_bin:\$PATH\"
+		. \"$VM_MATRIX_LIB\"
+		zxfer_vm_reset_state
+		ZXFER_VM_QEMU_PID_FILE=\"$qemu_pid_file\"
+		zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 30 \"OmniOS r151058/amd64\" 1
+		status=\$?
+		printf 'reason=%s\n' \"\${ZXFER_VM_QEMU_WAIT_FAILURE_REASON:-}\"
+		if [ -r \"$sleep_count_file\" ]; then
+			printf 'sleep-count=1\n'
+		else
+			printf 'sleep-count=0\n'
+		fi
+		exit \"\$status\"
+	"
+
+	assertEquals "The readiness wait should fail when the daemonized qemu pid exits." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The failure reason should distinguish early qemu exit from a timeout." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "reason=qemu_exited"
+	assertContains "The readiness wait should report the early qemu exit." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "qemu process exited before SSH readiness"
+	assertContains "The readiness wait should not continue sleeping after qemu has exited." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "sleep-count=0"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

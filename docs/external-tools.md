@@ -157,7 +157,6 @@ host that orchestrates disposable guests:
 | `tar` | transfer the current checkout into guests and stream guest artifacts back out |
 | `git` | validate and archive `ZXFER_VM_PERF_BASELINE_REF` for the optional `perf-compare` guest layer |
 | `xz` | decompress the pinned FreeBSD cloud image |
-| `zstd` | future-proof `.zst` guest image support when a selected guest ships one |
 
 These are local QA or CI-orchestration dependencies, not installed-command
 runtime dependencies of `zxfer`.

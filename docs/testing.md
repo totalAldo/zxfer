@@ -501,6 +501,13 @@ FreeBSD QEMU guests require three consecutive SSH readiness probes before the
 runner starts copying files, and each later remote step rechecks that SSH can
 execute a command after refreshing the host key. This avoids first-boot
 `sshd` restart windows on the 15.1 cloud images.
+QEMU guests now have up to 1800 seconds to reach initial SSH readiness before
+the host runner declares a boot/provisioning timeout.
+If the daemonized QEMU process exits while the runner is waiting for SSH, the
+runner now fails immediately and points at the guest `serial.log`. A completely
+empty `serial.log` usually means QEMU exited before firmware or the guest wrote
+to the serial device; check the runner error and the per-run `qemu.pid` before
+assuming the guest is still booting.
 
 Useful VM-runner environment variables:
 

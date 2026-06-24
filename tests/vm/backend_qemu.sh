@@ -26,8 +26,10 @@ zxfer_vm_backend_qemu_check_host() {
 	for l_guest in $ZXFER_VM_SELECTED_GUESTS; do
 		l_guest_arch=$(zxfer_vm_guest_qemu_preferred_arch "$l_guest") ||
 			zxfer_vm_die "No qemu guest architecture is defined for guest [$l_guest]"
-		l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest") ||
+		l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest" "$l_guest_arch") ||
 			zxfer_vm_die "No qemu seed transport is defined for guest [$l_guest]"
+		l_archive_compression=$(zxfer_vm_guest_qemu_archive_compression "$l_guest" "$l_guest_arch") ||
+			zxfer_vm_die "No qemu archive compression is defined for guest [$l_guest]"
 		l_qemu_cmd=$(zxfer_vm_qemu_system_binary "$l_guest_arch") ||
 			zxfer_vm_die "No qemu system binary is defined for guest architecture [$l_guest_arch]"
 		if ! zxfer_vm_list_contains "$l_required_qemu_commands" "$l_qemu_cmd"; then
@@ -40,17 +42,17 @@ zxfer_vm_backend_qemu_check_host() {
 		if [ "$l_seed_transport" = "disk-cidata" ]; then
 			zxfer_vm_qemu_require_seed_image_builder
 		fi
+		case "$l_archive_compression" in
+		xz)
+			zxfer_vm_require_command xz
+			;;
+		esac
 	done
 
 	if command -v xz >/dev/null 2>&1; then
 		:
 	else
 		zxfer_vm_warn "xz is not installed; FreeBSD guest downloads will fail until it is available."
-	fi
-	if command -v zstd >/dev/null 2>&1; then
-		:
-	else
-		zxfer_vm_warn "zstd is not installed; .zst guest image archives would fail until it is available."
 	fi
 }
 
@@ -244,9 +246,9 @@ zxfer_vm_qemu_start_guest() {
 		esac
 		;;
 	arm64)
-		l_efi_firmware=$(zxfer_vm_qemu_resolve_aarch64_efi)
 		l_machine=$(zxfer_vm_qemu_machine_arg "$l_guest_arch" "$l_accel") ||
 			zxfer_vm_die "Unsupported qemu machine selection for guest architecture: $l_guest_arch"
+		l_efi_firmware=$(zxfer_vm_qemu_resolve_aarch64_efi)
 		case "$l_seed_transport" in
 		disk-cidata)
 			qemu-system-aarch64 \
@@ -290,12 +292,29 @@ zxfer_vm_qemu_start_guest() {
 	esac
 }
 
+zxfer_vm_qemu_pid_file_has_dead_process() {
+	l_pid_file=${1:-}
+	l_pid=
+
+	[ -n "$l_pid_file" ] || return 1
+	[ -r "$l_pid_file" ] || return 1
+	IFS= read -r l_pid <"$l_pid_file" || return 1
+	case "$l_pid" in
+	"" | *[!0123456789]*)
+		return 1
+		;;
+	esac
+
+	kill -s 0 "$l_pid" >/dev/null 2>&1 && return 1
+	return 0
+}
+
 zxfer_vm_qemu_wait_for_ssh() {
 	l_host=$1
 	l_port=$2
 	l_known_hosts=$3
 	l_identity=$4
-	l_timeout_seconds=${5:-900}
+	l_timeout_seconds=${5:-1800}
 	l_log_prefix=${6:-}
 	l_min_successes=${7:-1}
 	l_elapsed=0
@@ -303,6 +322,8 @@ zxfer_vm_qemu_wait_for_ssh() {
 	l_current_signature=
 	l_last_signature=
 	l_consecutive_successes=0
+	# shellcheck disable=SC2034  # Read by the qemu backend after this helper fails.
+	ZXFER_VM_QEMU_WAIT_FAILURE_REASON=timeout
 
 	[ "$l_min_successes" -gt 0 ] 2>/dev/null || l_min_successes=1
 
@@ -327,6 +348,14 @@ zxfer_vm_qemu_wait_for_ssh() {
 			fi
 		else
 			l_consecutive_successes=0
+		fi
+		if zxfer_vm_qemu_pid_file_has_dead_process "${ZXFER_VM_QEMU_PID_FILE:-}"; then
+			# shellcheck disable=SC2034  # Read by the qemu backend after this helper fails.
+			ZXFER_VM_QEMU_WAIT_FAILURE_REASON=qemu_exited
+			if [ -n "$l_log_prefix" ]; then
+				zxfer_vm_warn "Guest [$l_log_prefix] qemu process exited before SSH readiness."
+			fi
+			return 1
 		fi
 		sleep 5
 		l_elapsed=$((l_elapsed + 5))
@@ -696,7 +725,7 @@ zxfer_vm_qemu_collect_remote_artifacts() {
 zxfer_vm_backend_qemu_run_guest() {
 	l_guest=$1
 	l_artifact_dir=$2
-	l_guest_label=$(zxfer_vm_guest_label "$l_guest") || return 1
+	l_guest_label=
 	l_guest_image_url=
 	l_guest_checksum_url=
 	l_guest_image_filename=
@@ -706,6 +735,7 @@ zxfer_vm_backend_qemu_run_guest() {
 	l_guest_min_disk_size=
 	l_guest_arch=
 	l_seed_transport=
+	l_ssh_ready_timeout_seconds=
 	l_guest_cache_dir=
 	l_checksum_file=
 	l_checksum=
@@ -730,6 +760,7 @@ zxfer_vm_backend_qemu_run_guest() {
 
 	l_guest_arch=$(zxfer_vm_guest_qemu_preferred_arch "$l_guest") ||
 		zxfer_vm_die "No qemu guest architecture is defined for guest [$l_guest]"
+	l_guest_label=$(zxfer_vm_guest_label "$l_guest") || return 1
 	l_guest_image_url=$(zxfer_vm_guest_qemu_image_url "$l_guest" "$l_guest_arch") ||
 		zxfer_vm_die "No qemu image URL is defined for guest [$l_guest]"
 	l_guest_checksum_url=$(zxfer_vm_guest_qemu_checksum_url "$l_guest" "$l_guest_arch") ||
@@ -744,10 +775,12 @@ zxfer_vm_backend_qemu_run_guest() {
 		zxfer_vm_die "No qemu base image format is defined for guest [$l_guest]"
 	l_guest_min_disk_size=$(zxfer_vm_guest_qemu_min_disk_size "$l_guest" "$l_guest_arch") ||
 		zxfer_vm_die "No qemu minimum disk size is defined for guest [$l_guest]"
-	l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest") ||
+	l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest" "$l_guest_arch") ||
 		zxfer_vm_die "No qemu seed transport is defined for guest [$l_guest]"
 	zxfer_vm_guest_qemu_shell "$l_guest" >/dev/null ||
 		zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
+	l_ssh_ready_timeout_seconds=$(zxfer_vm_guest_qemu_ssh_ready_timeout_seconds "$l_guest") ||
+		zxfer_vm_die "No qemu SSH readiness timeout is defined for guest [$l_guest]"
 	l_ssh_ready_probe_count=$(zxfer_vm_guest_qemu_ssh_ready_probe_count "$l_guest") ||
 		zxfer_vm_die "No qemu SSH readiness threshold is defined for guest [$l_guest]"
 	l_prepare_script=$(zxfer_vm_guest_prepare_script "$l_guest" "qemu" "$ZXFER_VM_TEST_LAYER") ||
@@ -842,8 +875,11 @@ zxfer_vm_backend_qemu_run_guest() {
 		zxfer_vm_die "Failed to start qemu guest [$l_guest]"
 
 	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] waiting for SSH readiness on 127.0.0.1:$l_ssh_port"
-	if ! zxfer_vm_qemu_wait_for_ssh 127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" 900 "$l_guest_label/$l_guest_arch" "$l_ssh_ready_probe_count"; then
+	if ! zxfer_vm_qemu_wait_for_ssh 127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" "$l_ssh_ready_timeout_seconds" "$l_guest_label/$l_guest_arch" "$l_ssh_ready_probe_count"; then
 		ZXFER_VM_QEMU_PRESERVE_STATE=$ZXFER_VM_PRESERVE_FAILED_GUESTS
+		if [ "${ZXFER_VM_QEMU_WAIT_FAILURE_REASON:-}" = "qemu_exited" ]; then
+			zxfer_vm_die "Guest [$l_guest] qemu exited before SSH readiness; inspect $l_artifact_dir/serial.log"
+		fi
 		zxfer_vm_die "Timed out waiting for guest [$l_guest] SSH readiness; inspect $l_artifact_dir/serial.log"
 	fi
 

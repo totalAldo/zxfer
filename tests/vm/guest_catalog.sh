@@ -163,9 +163,6 @@ zxfer_vm_guest_qemu_base_image_name() {
 	xz)
 		printf '%s\n' "${l_file_name%.xz}"
 		;;
-	zst)
-		printf '%s\n' "${l_file_name%.zst}"
-		;;
 	none)
 		printf '%s\n' "$l_file_name"
 		;;
@@ -221,12 +218,26 @@ zxfer_vm_guest_qemu_shell() {
 }
 
 zxfer_vm_guest_qemu_seed_transport() {
-	case "$1" in
-	freebsd)
+	l_guest=$1
+	l_arch=${2:-$(zxfer_vm_guest_qemu_preferred_arch "$l_guest")} || return 1
+
+	case "$l_guest/$l_arch" in
+	freebsd/*)
 		printf '%s\n' "disk-cidata"
 		;;
-	ubuntu | omnios)
+	ubuntu/* | omnios/amd64)
 		printf '%s\n' "smbios-nocloud-net"
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+zxfer_vm_guest_qemu_ssh_ready_timeout_seconds() {
+	case "$1" in
+	ubuntu | freebsd | omnios)
+		printf '%s\n' "1800"
 		;;
 	*)
 		return 1
