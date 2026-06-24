@@ -1112,13 +1112,7 @@ zxfer_process_replication_ready_queue() {
 	while [ -n "$l_pending_sources" ]; do
 		l_next_pending_sources=""
 		l_processed_source=0
-		l_saved_ifs=$IFS
-		IFS=$(printf '\n_')
-		IFS=${IFS%_}
-		# shellcheck disable=SC2086  # Newline-delimited dataset work queue.
-		set -- $l_pending_sources
-		IFS=$l_saved_ifs
-		for l_source; do
+		while IFS= read -r l_source || [ -n "$l_source" ]; do
 			[ -n "$l_source" ] || continue
 			l_source_is_ready=1
 			if [ "$l_ready_queue_active" -eq 1 ]; then
@@ -1139,7 +1133,9 @@ zxfer_process_replication_ready_queue() {
 			fi
 			l_next_pending_sources=${l_next_pending_sources:+$l_next_pending_sources
 }$l_source
-		done
+		done <<-EOF
+			$l_pending_sources
+		EOF
 		l_pending_sources=$l_next_pending_sources
 		[ -n "$l_pending_sources" ] || {
 			[ "$l_ready_queue_active" -eq 1 ] && zxfer_echov "Replication ready queue summary: queued_datasets=$(printf '%s\n' "$l_initial_pending_sources" | "${g_cmd_awk:-awk}" 'NF { count++ } END { print count + 0 }') processed_datasets=$l_processed_source_count waits=$l_wait_count active_jobs=${g_count_zfs_send_jobs:-0}"
