@@ -1101,6 +1101,7 @@ zxfer_replication_background_send_has_capacity() {
 # starting.
 zxfer_process_replication_ready_queue() {
 	l_pending_sources=$1
+	l_initial_pending_sources=$l_pending_sources
 	l_property_pass_required=$2
 	l_post_seed_property_sources_file=$3
 	l_ready_queue_active=0
@@ -1108,14 +1109,16 @@ zxfer_process_replication_ready_queue() {
 	l_wait_count=0
 	l_job_limit=$(zxfer_get_replication_background_send_job_limit)
 	[ "$l_job_limit" -gt 1 ] && [ "${g_option_n_dryrun:-0}" -eq 0 ] && l_ready_queue_active=1
-
 	while [ -n "$l_pending_sources" ]; do
 		l_next_pending_sources=""
 		l_processed_source=0
-
-		# Keep queue bookkeeping in the current shell; some illumos /bin/sh
-		# redirected loops lose l_next_pending_sources after parent receives.
-		for l_source in $l_pending_sources; do
+		l_saved_ifs=$IFS
+		IFS=$(printf '\n_')
+		IFS=${IFS%_}
+		# shellcheck disable=SC2086  # Newline-delimited dataset work queue.
+		set -- $l_pending_sources
+		IFS=$l_saved_ifs
+		for l_source; do
 			[ -n "$l_source" ] || continue
 			l_source_is_ready=1
 			if [ "$l_ready_queue_active" -eq 1 ]; then
@@ -1137,10 +1140,9 @@ zxfer_process_replication_ready_queue() {
 			l_next_pending_sources=${l_next_pending_sources:+$l_next_pending_sources
 }$l_source
 		done
-
 		l_pending_sources=$l_next_pending_sources
 		[ -n "$l_pending_sources" ] || {
-			[ "$l_ready_queue_active" -eq 1 ] && zxfer_echov "Replication ready queue summary: queued_datasets=$(printf '%s\n' "$1" | "${g_cmd_awk:-awk}" 'NF { count++ } END { print count + 0 }') processed_datasets=$l_processed_source_count waits=$l_wait_count active_jobs=${g_count_zfs_send_jobs:-0}"
+			[ "$l_ready_queue_active" -eq 1 ] && zxfer_echov "Replication ready queue summary: queued_datasets=$(printf '%s\n' "$l_initial_pending_sources" | "${g_cmd_awk:-awk}" 'NF { count++ } END { print count + 0 }') processed_datasets=$l_processed_source_count waits=$l_wait_count active_jobs=${g_count_zfs_send_jobs:-0}"
 			return 0
 		}
 		[ "$l_processed_source" -eq 1 ] && continue
@@ -1168,8 +1170,6 @@ zxfer_process_replication_ready_queue() {
 # Usage: Called during top-level dataset iteration and replication
 # orchestration after discovery and reconciliation have produced the exact work
 # list.
-#
-# main loop that copies the filesystems
 zxfer_copy_filesystems() {
 	zxfer_echoV "Begin zxfer_copy_filesystems()"
 

@@ -4054,6 +4054,30 @@ process:tank/src/db
 process:tank/src/db/root" "$(cat "$log")"
 }
 
+test_replication_ready_queue_splits_pending_sources_when_ifs_was_narrowed() {
+	g_option_j_jobs=4
+	g_option_n_dryrun=0
+	log="$TEST_TMPDIR/ready_queue_ifs.log"
+	rm -f "$log"
+
+	(
+		READY_LOG="$log"
+		IFS='	'
+		zxfer_process_source_dataset() {
+			printf 'process:%s\n' "$1" >>"$READY_LOG"
+		}
+
+		zxfer_process_replication_ready_queue "tank/src
+tank/src/child1
+tank/src/child2" 0 "$TEST_TMPDIR/post_seed_sources"
+	)
+
+	assertEquals "The ready queue should split its newline-delimited work list even if an illumos /bin/sh read helper narrowed IFS earlier." \
+		"process:tank/src
+process:tank/src/child1
+process:tank/src/child2" "$(cat "$log")"
+}
+
 test_copy_filesystems_merges_iteration_sources_and_deduplicates_post_seed_reconcile_in_current_shell() {
 	g_option_P_transfer_property=1
 	g_option_R_recursive="tank/src"
