@@ -1,97 +1,230 @@
 # AGENTS
 
-## Mission & Context
-`zxfer` is a collection of POSIX shell scripts for high-reliability ZFS snapshot replication. The repository targets FreeBSD, Linux/OpenZFS, Solaris/illumos, and current OpenZFS-on-macOS workflows. It manipulates real storage pools and remote hosts, so every change must preserve data integrity and remain transparent to administrators who depend on the tool in production. Its CLI behavior, operator-visible output, and replication semantics are public interfaces; compatibility changes must be intentional, documented, and tested.
+## Mission and Completion Bar
 
-## Environment & Constraints
-- Primary shell is `/bin/sh`; assume POSIX features only. Bash-isms or GNU-only flags must be gated by compatibility checks.
-- Treat [`docs/coding-style.md`](docs/coding-style.md) as the repository style authority for shell naming, formatting, quoting, module layout, and validation expectations.
-- Respect `.editorconfig` for cross-repo formatting: shell sources use tabs, while docs and workflow-style files use their existing space-indented layout.
-- Keep `src/` flat and preserve [`src/zxfer_modules.sh`](src/zxfer_modules.sh) as the single source-order authority for the launcher and direct-sourcing tests.
-- External tools (`zfs`, `zpool`, `ssh`, `gnu parallel`, `zstd`, `mktemp`, `comm`, `awk`) are assumed to exist but can vary by platform; guard optional dependencies with feature tests.
-- zxfer now rebuilds `PATH` from a trusted allowlist and resolves required helpers to absolute paths. If a change touches dependency lookup or remote helper execution, preserve `ZXFER_SECURE_PATH` / `ZXFER_SECURE_PATH_APPEND` behavior locally and over `-O/-T`.
-- Non-zero exits now emit a structured stderr failure report and may optionally mirror it to `ZXFER_ERROR_LOG`. Keep new error paths compatible with that centralized reporting flow.
-- Integration tests use file-backed sparse pools rooted under a temporary `WORKDIR`. On macOS and Linux they no longer hard-require root, but they still require OpenZFS permissions that allow `zpool create` / `zpool destroy`; on FreeBSD root may still be required depending on device/module setup. Keep the harness current when behavior changes. An automated agent may run the VM-backed integration entrypoint `tests/run_vm_matrix.sh` automatically only with host-friendly local profiles such as `--profile smoke` or `--profile local`, and must never invoke `tests/run_integration_zxfer.sh` directly on the host. Broader VM-matrix runs such as `--profile full`, `--profile ci`, or slow emulated guests remain manual-only.
-- `tests/run_integration_zxfer.sh` prompts for approval before data-modifying wrapped external commands by default. Update the script and its expectations when behavior changes. Direct host execution of `tests/run_integration_zxfer.sh`, including any `--yes` usage, remains human-only; when an automated agent runs integration automatically it must do so through `tests/run_vm_matrix.sh`, which runs the harness inside the guest.
-- Temporary files, FIFOs, and private directories should be allocated under the per-run 0700 temp root through the helpers in `src/zxfer_runtime.sh` (`zxfer_get_temp_file`, `zxfer_create_temp_file_group`, `zxfer_create_private_temp_dir`); trap exit removes the whole root in one pass on both success and failure, so do not add per-file cleanup ceremony unless a path is intentionally preserved for debugging. Path-security checks and the owned-lock helpers (used by the `ZXFER_ERROR_LOG` append lock) also live in `src/zxfer_runtime.sh`.
+`zxfer` is a collection of POSIX shell scripts for high-reliability ZFS
+snapshot replication across FreeBSD, Linux/OpenZFS, Solaris/illumos, and
+current OpenZFS-on-macOS workflows. It manipulates real pools, datasets, and
+remote hosts. Treat data integrity, operator trust, and compatibility as
+release requirements.
 
-## Priority Stack
-1. **Safety** – never risk data loss or host instability.
-2. **Security** – protect credentials, transports, and trust boundaries.
-3. **Maintainability & Ease of Development** – keep the codebase simple to understand, test, and modify.
-4. **Performance** – improve throughput only after the other priorities are satisfied and documented.
+A change is complete only when it:
 
-## Model Guidance
-- Keep this file model-agnostic. Do not add instructions that depend on a specific frontier model version unless a repository workflow truly requires it.
-- When model behavior, OpenAI API behavior, or Codex tooling matters, consult current official OpenAI/Codex docs during the task and prefer those docs over remembered release details.
-- Favor zxfer-specific safety, security, compatibility, and validation rules over generic model-prompting tips.
+- satisfies the requested behavior without unrelated scope expansion;
+- preserves safety, security, POSIX portability, and public interfaces unless
+  an intentional compatibility change is documented;
+- includes focused regression coverage and operator-facing documentation when
+  behavior changes;
+- passes the relevant host-safe validation, or clearly records what was not
+  run and why; and
+- has been self-reviewed for data-loss risk, command-injection risk, failure
+  propagation, cleanup, cross-platform behavior, and documentation drift.
 
-## Agent Operating Loop
-- Gather targeted repository context before asking product or implementation questions. Prefer `rg`, relevant source modules, tests, docs, and man pages over assumptions.
-- For multi-step work, maintain a visible checklist when the active tooling supports it and update it as the work changes.
-- Use matching repo-scoped skills from `.agents/skills` for repeatable zxfer workflows such as PR review, validation planning, platform portability checks, and release-doc review.
-- Before notable or risky tool use, give a concise preamble that says what context or validation the tool call is meant to provide.
-- Continue through implementation, validation, self-review of the diff, and a final safety/security/compatibility summary unless blocked by missing input, unavailable tooling, or an explicit user stop.
+## Priority Order
 
-## Safety Expectations
-- Treat every command as if it will run on a production host; avoid destructive ZFS operations unless explicitly scoped to throwaway sparse files created by the tests.
-- Prefer reviewing the focused helpers in `src/zxfer_reporting.sh`, `src/zxfer_exec.sh`, `src/zxfer_runtime.sh` (including its path-security and owned-lock sections), `src/zxfer_cli.sh`, `src/zxfer_dependencies.sh`, `src/zxfer_remote_hosts.sh`, and `src/zxfer_snapshot_state.sh` before re-implementing logic—many guardrails (argument validation, quoting, dependency lookup, snapshot sanity checks, logging helpers) already exist.
-- When a fix requires pool-level changes, use `tests/run_integration_zxfer.sh` as the integration harness to review and update. An automated agent may execute that harness only through `tests/run_vm_matrix.sh`, only when the pool activity stays inside a disposable VM guest, and only with host-friendly local profiles unless the user explicitly asks for a broader manual run. Never run `tests/run_integration_zxfer.sh` directly on the host, and never target live pools or datasets without the user’s confirmation.
-- Keep the integration harness file-backed only. Do not add raw-device, loopback-device, or host-import/export paths without a very strong reason and explicit documentation.
-- The integration harness is safer than before, but it still performs real kernel ZFS operations. For “zero host risk” requests, recommend a disposable VM rather than claiming the harness is fully sandboxed.
-- Fail closed: check command exit codes, route operator-facing failures through the reporting helpers such as `zxfer_throw_error*`, preserve structured failure metadata, and default to aborting when state is uncertain.
-- Document any behavior that could influence snapshot retention, deletion, or replication order so operators understand the blast radius.
+1. **Safety** — never risk data loss or host instability.
+2. **Security** — protect credentials, transports, paths, and trust boundaries.
+3. **Maintainability** — keep behavior understandable, testable, and explicit.
+4. **Performance** — optimize only after the first three are preserved and the
+   trade-off is measured.
 
-## Security Expectations
-- Keep `ssh` interactions hardened: respect control-socket reuse, avoid leaking private keys, and make sure any new options pass through quoting utilities already present in the scripts.
-- Preserve support for wrapper-style host specs such as `user@host pfexec` or `user@host doas`; do not collapse them into a single hostname or reintroduce shell-injection surfaces in remote command construction.
-- Scrub external inputs (CLI flags, environment variables, remote dataset names). When expanding variables, prefer `${var:-}` patterns and guard against globbing or word-splitting.
-- Avoid writing secrets to disk; if temporary files are required, lean on `mktemp` wrappers already provided and immediately `chmod 600` when storing sensitive data.
-- Review calls to `sudo`/`ssh`/`zfs` for least privilege; never add new network endpoints or telemetry without an explicit design.
+## Scope, Authority, and Communication
 
-## Maintainability & Ease of Development
-- Follow the flat modular layout under `src/`: functionality is grouped by stable concern (`zxfer_send_receive.sh`, `zxfer_snapshot_reconcile.sh`, `zxfer_property_reconcile.sh`, etc.). Extend an existing module before creating a new file, avoid generic filenames such as `common`, `globals`, `utils`, or `lib`, and keep `src/zxfer_modules.sh` as the only source-order authority.
-- Major `src/` modules should start with a short `Module contract` comment block that summarizes `owns globals`, `reads globals`, `mutates caches`, and `returns via stdout`. Keep those headers short and focused on ownership boundaries and data flow.
-- Keep shell code POSIX-compliant; avoid Bash-isms because the scripts run with `/bin/sh` on BSD systems.
-- Use the project naming conventions consistently: shared helpers use `zxfer_`, global state uses `g_`, parsed option state uses `g_option_*`, function-scoped temporaries use `l_`, and operator-facing environment variables remain `ZXFER_*`.
-- Top-level functions in `src/` modules should have the current short structured comment form with `Purpose:` and `Usage:`, plus `Returns:` or `Side effects:` when the contract is not obvious. When you change a function's contract, update that comment block and any still-relevant nearby rationale comments in the same change.
-- Apply modern software-engineering practices: incremental commits, peer review mindset, automated lint/test runs, and clear commit messages that explain the "why" as well as the "what."
-- Treat flags, positional arguments, environment variables, help text, exit codes, stdout/stderr formats, structured error reports, and replication/retention behavior as public interfaces. Do not change them silently; document compatibility impact and add or adjust regression coverage when they move.
-- Prefer small, testable functions with descriptive names and short pipelines; prefer early returns over deep nesting; and document any non-obvious `awk`, `sed`, `comm`, `gnu parallel`, ssh, or quoting logic with short comments that explain why the block exists.
-- Reduce cyclomatic complexity wherever possible by splitting large conditionals/loops into helpers and simplifying branching with early returns/guards.
-- Preserve argument boundaries and quoting discipline. Reuse the centralized helpers in `src/zxfer_exec.sh`, `src/zxfer_dependencies.sh`, and `src/zxfer_remote_hosts.sh` instead of adding ad hoc `eval`, helper lookup, or remote-command construction paths.
-- Keep source-time side effects minimal. Runtime setup should happen in explicit init flows, not merely because a module was sourced.
-- Use `./tests/run_lint.sh` as the authoritative pinned lint entrypoint because it mirrors CI's toolchain and checks. Ad hoc `shellcheck` or `shfmt` runs are useful for iteration but do not replace the repository lint runner.
-- Whenever a feature is added or existing behavior, flags, defaults, workflows, error messages, or contributor/security expectations change, review all user-facing docs for drift and update them in the same change. At minimum this includes `README.md`, `CHANGELOG.txt`, `CONTRIBUTING.md`, `SECURITY.md`, `KNOWN_ISSUES.md` when applicable, the relevant docs under `docs/`, `examples/README.md`, `packaging/README.txt`, the man pages under `man/`, and any examples or inline help that describe the affected functionality.
-- When modifying replication logic, state initialization, or adding new features, ensure the corresponding Mermaid diagrams in `architecture.md` and `README.md` are updated to reflect the new control flow.
-- When behavior differs by platform or OpenZFS variant, document the affected platforms explicitly and keep tests gated or annotated so the expected differences are visible rather than implied.
-- When commands, dependencies, installed paths, test entry points, or release expectations change, review related packaging and automation artifacts for drift as part of the same change. This includes files under `packaging/`, `.github/workflows/`, and `.github/PULL_REQUEST_TEMPLATE.md` when they describe or enforce the affected behavior.
-- Keep tests aligned with shipped behavior. The main shunit2 suites live under `tests/test_*.sh`; add or update focused coverage when modifying public helpers or replication control flow, use `tests/test_helper.sh` before adding new suite-local scaffolding, and adjust integration or regression coverage when behavior changes so stale expectations do not linger, even when the integration harness will be run manually later.
-- `tests/run_coverage.sh` is available and should be kept working; it prefers `kcov` and falls back to a bash xtrace approximation, and the bash-xtrace lane is the current enforcement path. When coverage behavior or expectations change, review `tests/coverage_policy.tsv` and `tests/coverage_baseline/bash-xtrace/` in the same change instead of treating generated coverage output as incidental.
+- For requests to answer, explain, review, diagnose, or plan, inspect the
+  relevant repository state and report the result. Do not edit unless the
+  request also asks for a change.
+- For requests to change, build, fix, or update, make the smallest coherent
+  in-scope edits and run relevant non-destructive validation without asking
+  first.
+- Safe local reads, in-scope edits, and host-safe unit/lint/coverage commands
+  are authorized by an implementation request. Require confirmation before
+  touching live pools or datasets, writing to an external service, adding a
+  production dependency, or materially expanding the requested scope. The
+  stricter integration-test prohibition below still applies.
+- Inspect `git status` and the focused diff before editing. Preserve user-owned
+  changes, including overlapping work, and never discard or rewrite them merely
+  to simplify the task.
+- Gather targeted repository context before asking questions. Infer from the
+  task, code, tests, and docs when safe; ask only when a missing choice would
+  materially change behavior, compatibility, or risk.
+- For multi-step work, keep a short visible checklist. Send concise updates at
+  phase changes or when evidence changes the plan; do not narrate routine tool
+  calls.
+- Lead the final handoff with the outcome, then validation performed, checks not
+  run, compatibility impact, and residual risk.
 
-## Performance (last, but deliberate)
-- Only pursue concurrency tweaks (e.g., adjusting `-j`, gnu parallel usage, compression flags) after validating safety/security and explaining trade-offs.
-- Measure before optimizing. Capture representative timings during manual integration tests when they are performed and summarize them in the PR or commit message.
-- Keep resource usage configurable (env vars or flags) instead of hard-coding aggressive defaults.
+## Codex and GPT-5.6 Guidance
 
-## Review Expectations
-- In review mode, lead with findings ordered by severity and grounded in file/line references.
-- Prioritize safety, security, replication correctness, missing tests, public-interface drift, and docs drift over cosmetic issues.
-- Avoid low-signal style findings unless they materially affect maintainability, portability, safety, or operator clarity.
-- Call out residual risk and test gaps after findings; if no issues are found, say so directly and still note what was not verified.
+- Keep this file focused on durable repository facts. Put richer repeatable
+  workflows in `.agents/skills/`, temporary task constraints in the prompt,
+  and intentional project-wide Codex settings in `.codex/config.toml`.
+- Write instructions for GPT-5.6-class agents in terms of the outcome, relevant
+  context, hard constraints, success criteria, and stop conditions. State each
+  invariant once, avoid contradictory or ceremonial process rules, and leave
+  implementation-path choices to the agent when safety does not prescribe one.
+- Do not pin a model or reasoning effort in `AGENTS.md`. If the project adopts a
+  shared model or effort default, configure it in Codex configuration and
+  compare it on representative zxfer tasks. Higher reasoning effort is not a
+  substitute for precise constraints, source evidence, or validation; reserve
+  maximum effort for unusually difficult quality-first work where it shows a
+  measured benefit.
+- When Codex behavior, OpenAI model behavior, or configuration semantics matter,
+  consult current official OpenAI/Codex documentation instead of relying on
+  remembered release details.
 
-## Patterns & Best Practices for Agents
-- **Collect context first:** read `README.md`, `CHANGELOG.txt`, the relevant man page/example, the scripts you plan to touch, and the matching `tests/test_*.sh` coverage before editing. Also read `docs/testing.md`, `docs/platforms.md`, `docs/architecture.md`, `KNOWN_ISSUES.md`, and `SECURITY.md` when the change touches validation flow, platform behavior, architecture/state ownership, known open risks, or trust boundaries.
-- **Plan before executing:** outline the approach, especially for anything touching ZFS send/receive, replication semantics, or dataset deletion.
-- **Edit safely:** prefer `apply_patch` for small changes, keep modifications minimal, and never revert user edits unless asked. When updating shell code, mirror the project’s indentation (tabs), naming (`zxfer_`, `g_`, `g_option_*`, `l_`), and quoting style, and prefer the shared execution, dependency, and reporting helpers over new ad hoc plumbing.
-- **Validate continuously:** when changing shell logic, run `./tests/run_shunit_tests.sh`, `./tests/run_lint.sh`, and `ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh`. Use targeted suites for faster iteration before the full pass. When the work changes coverage behavior or the expected covered surface, review `tests/coverage_policy.tsv` and `tests/coverage_baseline/bash-xtrace/` deliberately rather than only looking at generated reports. An automated agent may additionally run `tests/run_vm_matrix.sh` when a disposable guest boundary is available and the work benefits from automatic integration coverage, but must not run `tests/run_integration_zxfer.sh` directly on the host. Automatic VM-backed validation should stay on `--profile smoke` or `--profile local`; do not have the agent auto-run `--profile full`, `--profile ci`, or slow emulated guests such as OmniOS on macOS/arm64 hosts. When integration coverage is needed during iteration, tighten the loop first with `tests/run_vm_matrix.sh --profile local --guest ... --only-test ...` so the agent reruns only the affected in-guest cases before widening back out manually when a human chooses to do so.
-- **Explain trade-offs:** whenever a change impacts the priority stack, call out how safety/security were preserved, how maintainability was affected, and why performance adjustments are justified.
-- **Document artifacts:** treat documentation, packaging metadata, CI metadata, top-level contributor/security docs, and test review as part of implementation. When behavior changes, verify the relevant docs, man pages, examples, `CONTRIBUTING.md`, `SECURITY.md`, `KNOWN_ISSUES.md` when applicable, packaging files, workflow files, comments, and tests still match the code, update them together, and if no doc or test update is needed, say why explicitly.
+## Context and Tool Routing
 
-### Information Agents Need Up Front
-- Target platform (FreeBSD, Linux, illumos/Solaris, or OpenZFS-on-macOS) and whether the current user can create/destroy file-backed zpools without `sudo`.
-- Whether tests can touch real pools or must be confined to the integration harness’s sparse-file pools; include dataset names and any redacted hostnames to avoid accidents.
-- Expected user-facing behavior (flags, error messages, compatibility requirements) so documentation and changelog entries stay accurate.
-- Whether the change affects packaging, CI, installation paths, or release artifacts so related files under `packaging/` and `.github/` can be reviewed and updated deliberately.
-- Any performance expectations (max concurrency, bandwidth caps, compression defaults) to evaluate trade-offs against the priority stack.
-- Confirmation that optional tooling (`gnu parallel`, `zstd`, `shellcheck`, `shfmt`, `kcov`) is installed when a proposed change depends on it; otherwise plan for fallbacks.
+- Start with `rg`, the focused diff, and the smallest set of relevant source,
+  test, and documentation files. Read `README.md`, `CHANGELOG.txt`, the relevant
+  man page or example, the changed modules, and peer `tests/test_*.sh` coverage
+  before changing shipped behavior.
+- Read `docs/testing.md` for validation changes, `docs/platforms.md` for
+  compatibility work, `docs/architecture.md` for module/state ownership,
+  `SECURITY.md` for trust-boundary changes, and `KNOWN_ISSUES.md` when resolving
+  or discovering an open risk.
+- Use the matching repository skill when applicable:
+  - `zxfer-pr-review` for branch, PR, commit, or working-tree reviews;
+  - `zxfer-platform-portability` for shell, command, ZFS, or platform-sensitive
+    changes;
+  - `zxfer-validation-plan` to select safe, proportionate checks;
+  - `zxfer-release-docs` to audit behavior-facing docs and release surfaces; and
+  - `zxfer-known-issues` to confirm and deduplicate newly discovered risks.
+- Parallelize independent reads or checks when useful. Use subagents only for a
+  substantial task with clearly independent workstreams, especially read-heavy
+  exploration, portability review, test-gap analysis, or documentation audit.
+  Give each subagent a bounded deliverable; keep overlapping edits under one
+  owner; and have the main agent synthesize findings and validate the combined
+  result. Do not delegate small, serial, or tightly coupled work.
+- When one result determines the next action, work sequentially. If a read or
+  search returns empty, partial, or suspiciously narrow results, try a small
+  number of meaningful fallbacks before concluding that evidence is absent.
+
+## Repository and Shell Conventions
+
+- The primary shell is `/bin/sh`. Use POSIX features only. Gate Bash-specific,
+  GNU-only, or platform-specific behavior with explicit capability checks.
+- Treat [`docs/coding-style.md`](docs/coding-style.md) as the style authority and
+  respect `.editorconfig`: shell sources use tabs; documentation and workflow
+  files retain their established space indentation and line endings.
+- Keep `src/` flat and grouped by stable concern. Extend the appropriate module
+  instead of adding generic `common`, `globals`, `utils`, or `lib` files.
+  [`src/zxfer_modules.sh`](src/zxfer_modules.sh) is the single source-order
+  authority for the launcher, partial-load validation, and direct-sourcing
+  tests.
+- Before reimplementing a guardrail, inspect the concern-specific modules in
+  `src/`, especially reporting, execution, dependency resolution, path
+  security, locking, runtime lifecycle, secure staging, error logging, remote
+  hosts, snapshot state, property policy/state, and backup storage/metadata.
+- Major source modules need a short `Module contract` header covering owned and
+  read globals, cache mutation, and stdout returns. Top-level functions use the
+  structured `Purpose:` and `Usage:` comments plus `Returns:` or `Side effects:`
+  when the contract is not obvious. Update comments when contracts change.
+- Shared helpers use `zxfer_`; global state uses `g_`; parsed options use
+  `g_option_*`; function-scoped temporaries use `l_`; operator-facing
+  environment variables use `ZXFER_*`.
+- Prefer small functions, early guards, short pipelines, and comments that
+  explain non-obvious `awk`, `sed`, `comm`, GNU parallel, SSH, or quoting logic.
+  Keep source-time side effects minimal; runtime setup belongs in explicit
+  initialization flows.
+
+## Safety and Security Invariants
+
+- Treat flags, positional arguments, environment variables, help text, exit
+  codes, stdout/stderr formats, structured failure reports, snapshot retention,
+  deletion order, rollback, and replication semantics as public interfaces.
+  Change them intentionally, document compatibility impact, and add regression
+  coverage.
+- Fail closed when state or command success is uncertain. Check exit statuses,
+  preserve the original meaningful status where required, and route
+  operator-facing failures through centralized reporting helpers such as
+  `zxfer_throw_error*` so structured stderr reports and `ZXFER_ERROR_LOG`
+  mirroring remain coherent.
+- Preserve argument boundaries and quoting. Reuse the execution, dependency,
+  path-security, staging, and remote-command helpers instead of adding ad hoc
+  `eval`, helper lookup, shell interpolation, or command construction.
+- Scrub CLI values, environment variables, host specs, and dataset names.
+  Preserve wrapper-style remote specs such as `user@host pfexec` and
+  `user@host doas`; do not flatten them or reintroduce injection surfaces.
+- Preserve SSH control-socket reuse and least-privilege behavior. Do not leak
+  keys, credentials, rendered secrets, or sensitive command arguments to logs,
+  temp files, or diagnostics.
+- Preserve trusted helper lookup and `ZXFER_SECURE_PATH` /
+  `ZXFER_SECURE_PATH_APPEND` behavior locally and over `-O` / `-T`. Feature-test
+  optional dependencies and platform-varying tool flags.
+- Allocate temporary files, FIFOs, and private directories through the per-run
+  0700 temp-root and secure-staging helpers. Do not add redundant per-file
+  cleanup when trap-exit owns the root, and do not weaken ownership, symlink,
+  hard-link, permission, or atomic-publication checks.
+- Never add telemetry, network endpoints, raw-device integration paths, or new
+  `sudo`/privilege requirements without an explicit design and user approval.
+
+## Documentation and Test Alignment
+
+- Add or update focused shunit2 coverage whenever shell behavior or a public
+  helper changes. Reuse `tests/test_helper.sh` before adding suite-local
+  scaffolding, and keep expectations aligned with shipped behavior.
+- For behavior or public-interface changes, review the relevant `README.md`,
+  `CHANGELOG.txt`, man pages, `docs/`, examples, and inline help. Review
+  `CONTRIBUTING.md`, `SECURITY.md`, `KNOWN_ISSUES.md`, packaging metadata,
+  workflow files, and the PR template when their concerns are affected.
+- Update Mermaid control-flow diagrams in `README.md` or
+  `docs/architecture.md` when replication flow, lifecycle/state ownership, or
+  module boundaries change.
+- Document platform-specific differences explicitly and gate or annotate tests
+  so FreeBSD, Linux/OpenZFS, illumos/Solaris, and OpenZFS-on-macOS expectations
+  remain visible.
+- When changing coverage behavior, deliberately review
+  `tests/coverage_policy.tsv` and `tests/coverage_baseline/bash-xtrace/`.
+  Generated reports do not replace policy review.
+
+## Validation
+
+- Use `./tests/validate.sh quick [PATH...]` for the first host-safe feedback
+  loop. It runs only offline budget and mapped unit checks while printing wider
+  integration, performance, and documentation recommendations.
+- During shell iteration, run the closest peer suites with
+  `./tests/run_shunit_tests.sh tests/test_<area>.sh`. Before handoff for shell
+  logic, tests, or validation tooling, run `./tests/validate.sh full`; it is the
+  discoverable front door for the pinned lint stack, full shunit2 suite, and
+  enforced bash-xtrace coverage.
+- For documentation-only changes, prefer `git diff --check`, link/command
+  inspection, and rendered-structure review. Use `./tests/validate.sh docs` when
+  spelling, workflow, or budget checks are relevant; it may populate the pinned
+  lint-tool cache.
+- Automated agents must never invoke `tests/run_integration_zxfer.sh` directly
+  on the host, including with `--yes`. When end-to-end ZFS coverage is warranted,
+  use `tests/run_vm_matrix.sh` or `./tests/validate.sh vm` only with disposable
+  guests and host-friendly `smoke` or `local` profiles. Broader `full` / `ci`
+  profiles and slow emulated guests remain human-run only; do not execute them
+  automatically.
+- The integration harness must remain file-backed. Never target live pools,
+  datasets, raw devices, loopback devices, or host import/export paths without
+  explicit user confirmation. For a zero-host-risk requirement, recommend a
+  disposable VM rather than claiming the harness is fully sandboxed.
+- Performance work requires a representative baseline and explicit resource
+  limits. Keep throughput tests manual/non-gating unless the user requests the
+  documented disposable-guest path; report timing and resource trade-offs.
+- If a required check cannot run because tooling, permissions, platform, or
+  time is unavailable, state it as not run, explain why, and give the safest
+  exact follow-up command.
+
+## Review Mode
+
+- Lead with actionable findings ordered by severity and grounded in file and
+  line references.
+- Prioritize data safety, security, replication correctness, failure handling,
+  POSIX/platform portability, missing tests, public-interface drift, and docs
+  drift over cosmetic style.
+- Avoid low-signal findings unless they materially affect maintainability,
+  operator clarity, or one of the priorities above.
+- If no issues are found, say so directly, then list unverified areas and
+  residual risk.
+
+## Material Context to Resolve
+
+Before risky or behavior-changing work, determine the target platforms, whether
+any validation may create disposable pools, the expected user-visible behavior
+and compatibility constraints, packaging/CI/release impact, and any performance
+limits. Look for these answers in the task and repository first. Ask the user
+only when the information is unavailable and a reasonable assumption could
+change the result or blast radius.
