@@ -27,7 +27,7 @@ These tools are required by the installed `zxfer` command itself.
 | `/bin/sh` | interpreter for `zxfer` and `src/*.sh` | script shebang | base system |
 | `zfs` | all replication, property, snapshot, and existence operations | resolved through the secure-PATH model locally; resolved per host remotely | base system on supported FreeBSD/OpenZFS installs |
 | `awk` | parsing, normalization, sorting helpers, report rendering, and cache/index helpers | resolved through the secure-PATH model locally | base system |
-| `ps` | the memoized process-start token used by owned-lock metadata, plus background-job liveness and descendant-reap checks | resolved through the secure-PATH model locally | base system |
+| `ps` | the memoized process-start token used by owned-lock metadata, plus abort-only descendant discovery and identity revalidation | resolved through the secure-PATH model locally | base system |
 
 Notes:
 
@@ -127,9 +127,11 @@ Important packaging note:
 ## Manual Performance Harness Dependencies
 
 These tools are used by [run_perf_tests.sh](../tests/run_perf_tests.sh), not by
-the installed `zxfer` command. The performance harness sources the direct
-integration harness in source-only mode, so it inherits the direct integration
-harness dependencies above.
+the installed `zxfer` command. The performance and integration harnesses share
+focused host, reporting, file-backed pool, and mock-remote fixtures under
+`tests/helpers/`; the performance harness does not source the complete
+integration harness or its test bodies. It still uses the same guarded
+file-backed `zfs`/`zpool` fixture lifecycle described above.
 
 | Tool | Why it is needed |
 | --- | --- |
@@ -171,6 +173,8 @@ These tools are used for development, CI, or local QA.
 - `/bin/sh` is sufficient for the normal shunit2 runner
 - alternate shells such as `dash`, `bash --posix`, `busybox ash`, and
   `/usr/xpg4/bin/sh` are CI/test-matrix tools, not runtime dependencies
+- FreeBSD VM-backed shunit2 runs install `bash` for coverage-helper tests and
+  `git` for lint/validation fixtures that exercise changed-path discovery
 - OmniOS shunit2 guest runs through `tests/run_vm_matrix.sh --test-layer shunit2`
   install `bash` in the guest and export a `bash --posix` wrapper via
   `ZXFER_TEST_SHELL`, because `/usr/xpg4/bin/sh` does not honor the mock-heavy

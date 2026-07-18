@@ -32,65 +32,90 @@
 
 # Loader contract:
 # owns globals: none.
-# reads globals: ZXFER_SOURCE_MODULES_ROOT and ZXFER_SOURCE_MODULES_THROUGH.
-# mutates caches: dependency defaults via zxfer_initialize_dependency_defaults.
+# reads globals: ZXFER_SOURCE_MODULES_ROOT.
+# mutates caches: none; loading defines functions but performs no initialization.
 # returns via stdout: none.
 
-: "${ZXFER_SOURCE_MODULES_ROOT:=.}"
+# Canonical newline-delimited source order. Keep this list as data so loading,
+# partial-load validation, architecture checks, and release concatenation can
+# consume one manifest instead of maintaining parallel module inventories.
+ZXFER_SOURCE_MODULE_MANIFEST='zxfer_path_security.sh
+zxfer_quoting.sh
+zxfer_locking.sh
+zxfer_reporting.sh
+zxfer_profile.sh
+zxfer_exec.sh
+zxfer_dependencies.sh
+zxfer_runtime.sh
+zxfer_secure_staging.sh
+zxfer_error_log.sh
+zxfer_background_jobs.sh
+zxfer_ssh_transport.sh
+zxfer_remote_hosts.sh
+zxfer_cli.sh
+zxfer_operation_state.sh
+zxfer_snapshot_state.sh
+zxfer_backup_storage.sh
+zxfer_backup_metadata.sh
+zxfer_property_state.sh
+zxfer_property_policy.sh
+zxfer_property_reconcile.sh
+zxfer_snapshot_producers.sh
+zxfer_remote_snapshot_discovery.sh
+zxfer_snapshot_discovery.sh
+zxfer_migration_services.sh
+zxfer_send_jobs.sh
+zxfer_send_receive.sh
+zxfer_snapshot_reconcile.sh
+zxfer_replication.sh
+zxfer_session.sh'
 
 # Purpose: Source one `src/` module through the canonical loader path.
 # Usage: Called during module loading and bootstrap sequencing so the launcher
 # and tests share one source-order authority.
 zxfer_source_module() {
-	l_module=$1
+	l_zxfer_source_module_name=$1
+	l_zxfer_source_module_root=${ZXFER_SOURCE_MODULES_ROOT:-.}
 	# shellcheck source=/dev/null
-	. "$ZXFER_SOURCE_MODULES_ROOT/src/$l_module"
+	. "$l_zxfer_source_module_root/src/$l_zxfer_source_module_name"
 }
 
-# Foundation: reporting, command rendering, and local dependency resolution.
-# Path-security and owned-lock helpers live in zxfer_runtime.sh (merged in
-# Phase 8); every consumer invokes them at call time, after all modules load.
-zxfer_source_module zxfer_reporting.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_reporting.sh" ] && return 0
+# Purpose: Validate a requested partial-load boundary against the manifest.
+# Usage: Called before loading so an invalid boundary cannot partially mutate
+# the current shell by sourcing an unintended prefix.
+zxfer_is_source_module_name() {
+	l_zxfer_source_module_candidate=${1:-}
+	[ -n "$l_zxfer_source_module_candidate" ] || return 1
 
-zxfer_source_module zxfer_exec.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_exec.sh" ] && return 0
+	while IFS= read -r l_zxfer_source_module_manifest_name; do
+		[ "$l_zxfer_source_module_manifest_name" = \
+			"$l_zxfer_source_module_candidate" ] && return 0
+	done <<EOF
+$ZXFER_SOURCE_MODULE_MANIFEST
+EOF
 
-zxfer_source_module zxfer_dependencies.sh
-zxfer_initialize_dependency_defaults
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_dependencies.sh" ] && return 0
+	return 1
+}
 
-# Runtime/session state and remote/bootstrap layers.
-zxfer_source_module zxfer_runtime.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_runtime.sh" ] && return 0
+# Purpose: Source the canonical module sequence, optionally through one module.
+# Usage: The launcher loads the complete sequence; focused tests pass a final
+# module name without relying on source-time returns or initialization effects.
+# Side effects: Defines functions from each selected module in the current shell.
+zxfer_load_modules() {
+	l_zxfer_load_modules_through=${1:-}
+	if [ -n "$l_zxfer_load_modules_through" ] &&
+		! zxfer_is_source_module_name "$l_zxfer_load_modules_through"; then
+		printf '%s\n' "zxfer: unknown source module boundary: $l_zxfer_load_modules_through" >&2
+		return 2
+	fi
 
-zxfer_source_module zxfer_background_jobs.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_background_jobs.sh" ] && return 0
-
-zxfer_source_module zxfer_remote_hosts.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_remote_hosts.sh" ] && return 0
-
-zxfer_source_module zxfer_cli.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_cli.sh" ] && return 0
-
-# Cached dataset/property state before replication planning.
-zxfer_source_module zxfer_snapshot_state.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_snapshot_state.sh" ] && return 0
-
-zxfer_source_module zxfer_backup_metadata.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_backup_metadata.sh" ] && return 0
-
-zxfer_source_module zxfer_property_reconcile.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_property_reconcile.sh" ] && return 0
-
-# Snapshot discovery, transfer, reconciliation, and top-level orchestration.
-zxfer_source_module zxfer_snapshot_discovery.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_snapshot_discovery.sh" ] && return 0
-
-zxfer_source_module zxfer_send_receive.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_send_receive.sh" ] && return 0
-
-zxfer_source_module zxfer_snapshot_reconcile.sh
-[ "${ZXFER_SOURCE_MODULES_THROUGH:-}" = "zxfer_snapshot_reconcile.sh" ] && return 0
-
-zxfer_source_module zxfer_replication.sh
+	while IFS= read -r l_zxfer_load_modules_name; do
+		zxfer_source_module "$l_zxfer_load_modules_name" || return $?
+		if [ -n "$l_zxfer_load_modules_through" ] &&
+			[ "$l_zxfer_load_modules_name" = "$l_zxfer_load_modules_through" ]; then
+			return 0
+		fi
+	done <<EOF
+$ZXFER_SOURCE_MODULE_MANIFEST
+EOF
+}

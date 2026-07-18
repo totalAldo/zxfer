@@ -1,168 +1,27 @@
-# zxfer anti-rebloat budget policy (TAB-separated).
+# zxfer complexity and anti-rebloat policy (TAB-separated).
 # Checked by tests/run_budget_check.sh (lint target: budget).
-# Ratchet-down-only: lowering a MAX is routine maintenance; raising ANY value
-# requires explicit justification in the PR that edits it.
+#
+# Universal ceilings prevent large modules/functions and oversized focused-test
+# files without creating a tree-wide raw-line incentive to compress or merge
+# unrelated concerns. Sensitive caller rows remain ratchets and may optionally
+# restrict matches to an explicit comma-separated file list.
+# Lowering a ceiling or caller count is routine maintenance; raising one
+# requires explicit review justification.
+#
 # Record kinds:
-#   lines <src/FILE|zxfer|TOTAL> MAX -- max wc -l line count
-#   functions <src/FILE|zxfer|TOTAL> MAX -- max top-level function definitions
-#   callers SYMBOL MAX [ALLOWED_FILES] -- max grep -rnF match lines for the
-#     literal SYMBOL across src/ + zxfer; the optional comma-separated
-#     ALLOWED_FILES list pins which files may contain matches at all.
-# Refresh current values with: tests/run_budget_check.sh --list
-# Round 2 P2 (2026-06-12) duplicate-pair parameterization: the audited
-# local/remote, set/inherit, reverse-file, discovery-read, and collect-props
-# families resolved to pinned test seams or disjoint per-side bodies after
-# P0/P1; the one live single-caller wrapper
-# (zxfer_capture_recursive_dataset_list_from_snapshot_record_file) was
-# inlined into its only caller, so snapshot_discovery and both TOTALs
-# ratchet down.
-# Round 2 P1 (2026-06-12) mechanical ceremony pass: status ladders collapsed
-# to status-preserving one-liners/blocks across nine modules, plus one-caller
-# pass-through and constant-getter inlining (backup-metadata format/header/
-# split getters, readonly-property getters, discovery metadata-compress and
-# reverse/dataset-line helpers, replication transfer-bounds/send-range,
-# send-receive cleanup-failure throwers); every touched row and both TOTALs
-# ratchet down.
-# Round 2 P0 (2026-06-12) verified dead-code sweep: 27 unreferenced
-# functions (15 def-only candidates plus their orphaned callees to fixed
-# point) and 22 write-only globals deleted across eight modules; every
-# touched row and both TOTALs ratchet down.
-lines	src/zxfer_background_jobs.sh	582
-# R2-P4a replaced the duplicated remote backup-directory and backup-metadata
-# symlink guard renderers with one parameterized command builder.
-# R2-P4b inlined the single-use remote single-file and pair-write command
-# fragments into their builders while keeping the shared target guard.
-# R2-P4c inlined the single-use remote backup-read setup, parent-trust,
-# staging cleanup, validation, and payload fragments into the read builder.
-# R2-P7 consolidated the duplicated remote backup-write status ladders and
-# inlined the remaining single-use pair payload renderer.
-# 2026-06-14 conservative sweep inlined remaining local render glue.
-lines	src/zxfer_backup_metadata.sh	2279
-# zxfer_cleanup_child_wrapper.sh grew by the Phase 5 ps -A fix comment (the
-# descendant reaper must list every process, not just same-terminal ones);
-# the runner-module deletion pays for it many times over in the TOTAL row.
-lines	src/zxfer_cleanup_child_wrapper.sh	113
-# zxfer_cli.sh, zxfer_reporting.sh, and zxfer_runtime.sh rose slightly when
-# the Phase 6 adversarial review landed safety fixes: the deferred
-# corrupt-metadata reap recheck in error-log lock acquisition, the held
-# unsafe-TMPDIR fallback advisory replayed after option parsing, main-shell
-# start-token memoization comments, and the randomized staging-name helper
-# for shared sticky parents. The TOTAL row still sits ~1,200 lines below the
-# pre-Phase 6 baseline.
-lines	src/zxfer_cli.sh	261
-lines	src/zxfer_dependencies.sh	332
-# zxfer_exec.sh grew by the Phase 7 per-role transport-token and host-spec
-# parse memos (OPTIMIZATION 11): rendered ssh transport argv and the parsed
-# host/wrapper split are computed once per role and replayed per command.
-# The growth is paid for many times over by the ~1,900-line remote_hosts
-# deletion in the same change; the TOTAL row drops by ~2,000 lines.
-lines	src/zxfer_exec.sh	1314
-lines	src/zxfer_modules.sh	96
-# zxfer_property_reconcile.sh absorbed the ~1.4k-line zxfer_property_cache.sh
-# survivors (serialize/decode, prefetch, in-memory property tables) when the
-# per-dataset file cache was deleted; the TOTAL row still ratchets down.
-# R2-P5 inlined tiny single-use destination probe classifiers, probe-detail
-# formatting, recursive destination-record lookup, and destination-exists flag
-# plumbing while keeping the main transfer stage helpers intact.
-# R2-P7 merged duplicated property prefetch reset guards.
-# 2026-06-14 conservative sweep inlined tiny property list/override glue.
-lines	src/zxfer_property_reconcile.sh	3464
-# zxfer_remote_hosts.sh halved in Phase 7: capability state is one live ssh
-# probe per host per run held in memory (no cache files, TTL, identity hex,
-# lock dirs, or wait loops) and ssh control sockets are per-run paths under
-# the private run temp root (no socket locks, leases, identity files, or
-# foreign-socket reaping).
-# R2-P6 inlined role-match predicates and the one-call SSH role-state getter
-# while preserving host-spec parsing, transport-token, and remote-probe
-# boundaries.
-# R2-P7 removed redundant remote-preload status scratch.
-lines	src/zxfer_remote_hosts.sh	1805
-# zxfer_replication.sh, zxfer_snapshot_state.sh, and
-# zxfer_snapshot_reconcile.sh grew by the Phase 4 generation-gated live
-# destination view (ensure/refresh/bump helpers, the -Y pass-boundary
-# invalidate helper plus its loop call site, and the destroy-site generation
-# bump with its comment); the rise is paid for by deleting dead discovery
-# refine/diff helpers, so the TOTAL row still ratchets down.
-# 2026-06-14 conservative sweep collapsed ready-queue ceremony wrappers.
-lines	src/zxfer_replication.sh	1619
-# zxfer_reporting.sh: +1 line for the diverged_snapshot_warnings -V profile
-# summary key (approved 2026-06-12 divergence-contract feature).
-lines	src/zxfer_reporting.sh	1386
-# zxfer_runtime.sh absorbed src/zxfer_path_security.sh (502) and
-# src/zxfer_locking.sh (477) verbatim in Phase 8 (their rows above were
-# deleted); the lines moved between rows and the TOTAL row still ratchets
-# down because the two duplicated BSD license headers disappeared.
-# R2-P3b folded the default-tmpdir candidate walk into
-# zxfer_try_get_effective_tmpdir, the dir allocator body into
-# zxfer_create_private_temp_dir, and the delete-scratch reset into
-# zxfer_init_temp_artifacts.
-# R2-P7 removed a same-module owned-lock reset availability guard.
-# 2026-06-14 conservative sweep flattened pure init assignment wrappers.
-lines	src/zxfer_runtime.sh	2386
-# zxfer_send_receive.sh: +16 lines for the post-receive divergence
-# verification hooks at the two receive finalize choke points (approved
-# 2026-06-12 divergence-contract feature) and +8 comment lines documenting
-# the rolling-queue stderr-sink fix (exec 2>/dev/null removed).
-lines	src/zxfer_send_receive.sh	1713
-# R2-P6 inlined the dry-run source preview renderer, the awk reverse wrapper,
-# and remote batch profile-counter recorder while keeping parser and batch
-# response boundaries intact.
-# R2-P7 collapsed adjacent fast-noop cleanup status checks.
-# 2026-06-14 conservative sweep merged staged source-command read cleanup.
-lines	src/zxfer_snapshot_discovery.sh	2763
-# zxfer_snapshot_reconcile.sh grew by the approved 2026-06-12 divergence
-# contract: the single-pass name-match/guid-mismatch classifier (replacing
-# the shared-name awk in zxfer_inspect_delete_snap, so in-sync planning
-# spawns are unchanged), the always-on warning + -d/-F authorization gate,
-# the converged-dataset marker helpers, and the post-receive verification.
-lines	src/zxfer_snapshot_reconcile.sh	1192
-lines	src/zxfer_snapshot_state.sh	796
-lines	zxfer	211
-# TOTAL rises by the net addition of the approved divergence-contract
-# feature (classifier, gate, warning, post-receive verification, -V key)
-# plus the rolling-queue stderr-sink fix comments.
-lines	TOTAL	22312
-functions	src/zxfer_background_jobs.sh	15
-functions	src/zxfer_backup_metadata.sh	64
-functions	src/zxfer_cleanup_child_wrapper.sh	4
-functions	src/zxfer_cli.sh	3
-functions	src/zxfer_dependencies.sh	11
-functions	src/zxfer_exec.sh	41
-functions	src/zxfer_modules.sh	1
-functions	src/zxfer_property_reconcile.sh	70
-functions	src/zxfer_remote_hosts.sh	58
-functions	src/zxfer_replication.sh	51
-functions	src/zxfer_reporting.sh	54
-# zxfer_runtime.sh absorbed the 15 path-security and 17 owned-lock functions
-# in the Phase 8 module merge (68 + 15 + 17 = 100); the deleted modules' rows
-# above were removed and the functions TOTAL is unchanged by the move.
-# R2-P3b merged zxfer_try_get_default_tmpdir,
-# zxfer_create_runtime_artifact_dir, and zxfer_reset_delete_temp_artifacts
-# into their single callers.
-functions	src/zxfer_runtime.sh	82
-functions	src/zxfer_send_receive.sh	44
-functions	src/zxfer_snapshot_discovery.sh	46
-# zxfer_snapshot_reconcile.sh gained the seven divergence-contract helpers
-# (scan, record, marker find/unmark, example renderer, contract gate, and
-# post-receive verification) in the approved 2026-06-12 feature.
-functions	src/zxfer_snapshot_reconcile.sh	26
-# zxfer_snapshot_state.sh gained the Phase 4 -Y pass-boundary
-# zxfer_invalidate_live_destination_view helper; the functions TOTAL still
-# ratchets down against the pre-Phase 4 baseline.
-functions	src/zxfer_snapshot_state.sh	31
-functions	zxfer	5
-# functions TOTAL rises by the seven divergence-contract helpers above, then
-# ratchets down after the R2-P6 discovery wrapper inlining.
-functions	TOTAL	606
-callers	zxfer_profile_now_ms	12	src/zxfer_reporting.sh,src/zxfer_remote_hosts.sh,src/zxfer_runtime.sh,src/zxfer_snapshot_discovery.sh
+#   module_lines ALL MAX
+#   function_lines ALL MAX
+#   function_decisions ALL MAX
+#   test_lines ALL MAX
+#   callers SYMBOL MAX [ALLOWED_FILES]
+#
+# Refresh measured values with: tests/run_budget_check.sh --list
+module_lines	ALL	1800
+function_lines	ALL	120
+function_decisions	ALL	24
+test_lines	ALL	2500
+callers	zxfer_profile_now_ms	12
 callers	zxfer_escape_for_single_quotes	26
-callers	eval 	10
+callers	eval 	7
 callers	$(date	15
-# mktemp callers after Phase 6 are the single per-run temp-root allocation
-# and the shared randomized staging-name helper, both in zxfer_runtime.sh
-# (path-adjacent staging parents can be shared sticky directories where
-# predictable pid+attempt slots are squat-able), plus backup_metadata's
-# path-adjacent staging (its module owns same-directory atomic rename and
-# stays untouched) and remote-side helper scripts that run mktemp on the
-# remote host.
-callers	mktemp	21
+callers	mktemp	18

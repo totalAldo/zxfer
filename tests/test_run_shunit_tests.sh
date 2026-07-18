@@ -11,9 +11,19 @@ TESTS_DIR=$(dirname "$0")
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_run_shunit_tests"
 	RUN_SHUNIT_TESTS_BIN="$ZXFER_ROOT/tests/run_shunit_tests.sh"
+	RUN_SHUNIT_TESTS_ORIGINAL_PATH=${PATH:-/usr/bin:/bin}
+	RUN_SHUNIT_TESTS_IDENTITY_BIN="$TEST_TMPDIR/process-identity-bin"
+	ZXFER_TEST_REAL_PS=$(command -v ps 2>/dev/null || printf '%s\n' /bin/ps)
+	mkdir -p "$RUN_SHUNIT_TESTS_IDENTITY_BIN"
+	zxfer_test_write_process_identity_ps "$RUN_SHUNIT_TESTS_IDENTITY_BIN/ps"
+	PATH="$RUN_SHUNIT_TESTS_IDENTITY_BIN:$RUN_SHUNIT_TESTS_ORIGINAL_PATH"
+	export PATH ZXFER_TEST_REAL_PS
 }
 
 oneTimeTearDown() {
+	PATH=$RUN_SHUNIT_TESTS_ORIGINAL_PATH
+	export PATH
+	unset ZXFER_TEST_REAL_PS
 	zxfer_test_cleanup_tmpdir
 }
 
@@ -82,6 +92,41 @@ EOF
 write_fake_suite_with_body() {
 	l_fake_suite_path=$1
 	cat >"$l_fake_suite_path"
+}
+
+# Generate named fake functions at test runtime. Keeping the definitions out of
+# this suite's literal source prevents shunit2 from discovering fixture-only
+# names as tests of tests/test_run_shunit_tests.sh itself.
+# shellcheck disable=SC2016,SC2317,SC2329  # Generates runtime-expanded fixture source; invoked indirectly by shunit2.
+write_fake_named_suite() {
+	l_fake_suite_path=$1
+	l_fake_suite_marker=$2
+	shift 2
+	case "$l_fake_suite_marker" in
+	'' | *[!A-Za-z0-9_-]*) fail "Invalid fake suite marker: $l_fake_suite_marker" ;;
+	esac
+	{
+		printf '%s\n' '#!/bin/sh'
+		for l_fake_test_name in "$@"; do
+			case "$l_fake_test_name" in
+			test*) ;;
+			*) fail "Invalid fake test name: $l_fake_test_name" ;;
+			esac
+			case "$l_fake_test_name" in
+			'' | [!A-Za-z_]* | *[!A-Za-z0-9_]*)
+				fail "Invalid fake test name: $l_fake_test_name"
+				;;
+			esac
+			printf '%s() {\n' "$l_fake_test_name"
+			printf '\t:\n'
+			printf '%s\n' '}'
+		done
+		printf "FAKE_NAMED_SUITE_MARKER='%s'\n" "$l_fake_suite_marker"
+		printf '%s\n' 'printf "%s" "$FAKE_NAMED_SUITE_MARKER" >>"${FAKE_SUITE_LOG:?}"'
+		printf '%s\n' 'printf ":%s" "$@" >>"${FAKE_SUITE_LOG:?}"'
+		printf '%s\n' 'printf "\n" >>"${FAKE_SUITE_LOG:?}"'
+	} >"$l_fake_suite_path"
+	chmod +x "$l_fake_suite_path"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -513,6 +558,34 @@ test_send_test_signal_to_pid_uses_numeric_signal_fallback() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_refuses_to_signal_a_reused_root_pid() {
+	output=$(
+		env -i \
+			PATH="${PATH:-/usr/bin:/bin}" \
+			TMPDIR="${TMPDIR:-/tmp}" \
+			RUN_SHUNIT_TESTS_BIN="$RUN_SHUNIT_TESTS_BIN" \
+			ZXFER_RUN_SHUNIT_SOURCE_ONLY=1 \
+			/bin/sh -s <<'EOF'
+. "$RUN_SHUNIT_TESTS_BIN"
+runner_get_process_start_token() {
+	printf '%s\n' 'lstart:new-process'
+}
+snapshot_process_descendants() {
+	printf 'snapshot=%s\n' "$1"
+}
+send_signal_to_pid() {
+	printf 'signal=%s pid=%s\n' "$1" "$2"
+}
+signal_pid_and_descendants TERM 43210 'lstart:original-process'
+signal_tracked_runner_process TERM 43210 'lstart:original-process'
+EOF
+	)
+
+	assertEquals "A changed root process-start token must prevent descendant discovery and signalling of a reused PID." \
+		"" "$output"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_fake_suite_process_running_requires_expected_marker() {
 	result=$(
 		send_test_signal_to_pid() {
@@ -558,6 +631,260 @@ test_run_shunit_tests_runs_explicit_suite_directly_by_default() {
 		"direct-default" "$(cat "$FAKE_SUITE_LOG")"
 	assertEquals "The fake alternate-shell log should remain empty during the default dispatch path." \
 		"" "$(cat "$FAKE_TEST_SHELL_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_lists_suites_and_named_tests_without_running_them() {
+	l_suite_path="$TEST_TMPDIR/listable-suite.sh"
+	{
+		printf '%s\n' '#!/bin/sh'
+		printf '%s\n' 'test_first_case() {'
+		printf '\t:\n'
+		printf '%s\n' '}'
+		printf '%s\n' 'helper_case() {'
+		printf '\t:\n'
+		printf '%s\n' '}'
+		printf '%s\n' 'test_second_case() {'
+		printf '\t:\n'
+		printf '%s\n' '}'
+	} >"$l_suite_path"
+	chmod +x "$l_suite_path"
+
+	suite_output=$("$RUN_SHUNIT_TESTS_BIN" --list-suites "$l_suite_path")
+	compat_suite_output=$("$RUN_SHUNIT_TESTS_BIN" --list "$l_suite_path")
+	test_output=$("$RUN_SHUNIT_TESTS_BIN" --list-tests "$l_suite_path")
+
+	assertEquals "Suite listing should print the resolved explicit suite once." \
+		"$l_suite_path" "$suite_output"
+	assertEquals "The original --list spelling should remain a compatibility alias for --list-suites." \
+		"$suite_output" "$compat_suite_output"
+	assertContains "Named-test listing should identify the first test and its suite." \
+		"$test_output" "$l_suite_path	test_first_case"
+	assertContains "Named-test listing should identify every test function." \
+		"$test_output" "$l_suite_path	test_second_case"
+	assertNotContains "Named-test listing should exclude non-test helpers." \
+		"$test_output" "helper_case"
+	assertEquals "Listing should not execute the selected suite." \
+		"" "$(cat "$FAKE_SUITE_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_lists_named_tests_from_declared_behavior_fragments() {
+	l_suite_path="$TEST_TMPDIR/fragmented-suite.sh"
+	l_fragment_path="$TEST_TMPDIR/fragmented-suite-cases.sh"
+	{
+		printf '%s\n' '#!/bin/sh'
+		printf '%s\n' '# zxfer-test-fragment: fragmented-suite-cases.sh'
+		printf '%s\n' 'test_main_case() {'
+		printf '\t:\n'
+		printf '%s\n' '}'
+	} >"$l_suite_path"
+	{
+		printf '%s\n' '#!/bin/sh'
+		printf '%s\n' 'test_fragment_case() {'
+		printf '\t:\n'
+		printf '%s\n' '}'
+		printf '%s\n' 'fragment_helper() {'
+		printf '\t:\n'
+		printf '%s\n' '}'
+	} >"$l_fragment_path"
+	chmod +x "$l_suite_path"
+
+	test_output=$("$RUN_SHUNIT_TESTS_BIN" --list-tests "$l_suite_path")
+
+	assertContains "Fragment-aware listing should preserve tests defined in the stable suite entry point." \
+		"$test_output" "$l_suite_path	test_main_case"
+	assertContains "Fragment-aware listing should include tests from every declared behavior fragment." \
+		"$test_output" "$l_suite_path	test_fragment_case"
+	assertNotContains "Fragment-aware listing should continue to exclude non-test helpers." \
+		"$test_output" "fragment_helper"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_list_tests_requires_one_explicit_suite() {
+	l_first_suite="$TEST_TMPDIR/list-first-suite.sh"
+	l_second_suite="$TEST_TMPDIR/list-second-suite.sh"
+	write_fake_suite "$l_first_suite" "list-first"
+	write_fake_suite "$l_second_suite" "list-second"
+	chmod +x "$l_first_suite" "$l_second_suite"
+
+	zxfer_test_capture_subshell "
+		FAKE_SUITE_LOG=\"$FAKE_SUITE_LOG\" \\
+		\"$RUN_SHUNIT_TESTS_BIN\" --list-tests
+	"
+
+	assertEquals "Named-test listing should reject an omitted suite instead of expanding to the full suite set." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The missing-suite error should explain the single-suite contract." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "--list-tests requires exactly one explicit suite; found 0."
+
+	zxfer_test_capture_subshell "
+		FAKE_SUITE_LOG=\"$FAKE_SUITE_LOG\" \\
+		\"$RUN_SHUNIT_TESTS_BIN\" --list-tests \\
+		\"$l_first_suite\" \"$l_second_suite\"
+	"
+
+	assertEquals "Named-test listing should reject ambiguous multi-suite selection." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The multi-suite error should report how many suites were supplied." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "--list-tests requires exactly one explicit suite; found 2."
+	assertEquals "Rejected named-test listing must not execute either suite." \
+		"" "$(cat "$FAKE_SUITE_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_forwards_named_tests_to_one_suite() {
+	l_suite_path="$TEST_TMPDIR/named-suite.sh"
+	write_fake_named_suite "$l_suite_path" named \
+		test_first_case test_second_case
+
+	output=$(
+		FAKE_SUITE_LOG="$FAKE_SUITE_LOG" \
+			"$RUN_SHUNIT_TESTS_BIN" \
+			--suite "$l_suite_path" \
+			--test test_first_case \
+			--test test_second_case
+	)
+
+	assertContains "Named test execution should preserve the passing suite summary." \
+		"$output" "==> shunit2 summary: 1 passed, 0 failed"
+	assertEquals "The runner should use shunit2's documented -- separator before forwarding selected test names." \
+		"named:--:test_first_case:test_second_case" \
+		"$(cat "$FAKE_SUITE_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_preserves_positional_suite_named_test_selection() {
+	l_suite_path="$TEST_TMPDIR/named-positional-suite.sh"
+	write_fake_named_suite "$l_suite_path" positional \
+		test_positional_one test_positional_two
+
+	output=$(
+		FAKE_SUITE_LOG="$FAKE_SUITE_LOG" \
+			"$RUN_SHUNIT_TESTS_BIN" --jobs 1 \
+			--test test_positional_one \
+			--test test_positional_two \
+			"$l_suite_path"
+	)
+
+	assertContains "The legacy positional-suite form should retain named-test selection." \
+		"$output" "==> shunit2 summary: 1 passed, 0 failed"
+	assertEquals "Positional named-test selection should preserve requested order and shunit2's separator." \
+		"positional:--:test_positional_one:test_positional_two" \
+		"$(cat "$FAKE_SUITE_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_runs_cross_suite_named_selections_in_first_suite_order() {
+	l_first_suite="$TEST_TMPDIR/named-cross-first.sh"
+	l_second_suite="$TEST_TMPDIR/named-cross-second.sh"
+	write_fake_named_suite "$l_first_suite" first \
+		test_first_one test_first_two
+	write_fake_named_suite "$l_second_suite" second test_second_one
+
+	output=$(
+		FAKE_SUITE_LOG="$FAKE_SUITE_LOG" \
+			"$RUN_SHUNIT_TESTS_BIN" --jobs 1 \
+			--suite "$l_first_suite" \
+			--test test_first_one \
+			--test test_first_two \
+			--suite "$l_second_suite" \
+			--test test_second_one
+	)
+
+	assertContains "Cross-suite named selection should report both suites as passing." \
+		"$output" "==> shunit2 summary: 2 passed, 0 failed"
+	assertEquals "Each suite should run once in first-selection order with only its associated names." \
+		"first:--:test_first_one:test_first_two
+second:--:test_second_one" "$(cat "$FAKE_SUITE_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_merges_duplicate_suite_selectors_without_reordering_tests() {
+	l_suite_path="$TEST_TMPDIR/named-duplicate-suite.sh"
+	write_fake_named_suite "$l_suite_path" duplicate \
+		test_duplicate_one test_duplicate_two
+
+	output=$(
+		FAKE_SUITE_LOG="$FAKE_SUITE_LOG" \
+			"$RUN_SHUNIT_TESTS_BIN" --jobs 1 \
+			--suite "$l_suite_path" --test test_duplicate_one \
+			--suite "$l_suite_path" --test test_duplicate_two
+	)
+
+	assertContains "A repeated suite selector should still count as one suite execution." \
+		"$output" "==> shunit2 summary: 1 passed, 0 failed"
+	assertEquals "Duplicate suite selectors should merge ordered names into one invocation." \
+		"duplicate:--:test_duplicate_one:test_duplicate_two" \
+		"$(cat "$FAKE_SUITE_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_rejects_unknown_named_test_before_starting_any_suite() {
+	l_first_suite="$TEST_TMPDIR/named-known-suite.sh"
+	l_second_suite="$TEST_TMPDIR/named-unknown-suite.sh"
+	write_fake_named_suite "$l_first_suite" first test_known_first
+	write_fake_named_suite "$l_second_suite" second test_known_second
+
+	set +e
+	output=$(
+		FAKE_SUITE_LOG="$FAKE_SUITE_LOG" \
+			"$RUN_SHUNIT_TESTS_BIN" --jobs 2 \
+			--suite "$l_first_suite" --test test_known_first \
+			--suite "$l_second_suite" --test test_missing 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "An unknown selected name should fail preflight." 1 "$status"
+	assertContains "The preflight failure should identify the exact suite and unknown test." \
+		"$output" "Unknown test for $l_second_suite: test_missing"
+	assertEquals "Named-test validation must finish before launching even an earlier valid suite." \
+		"" "$(cat "$FAKE_SUITE_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_rejects_test_option_before_its_suite() {
+	l_suite_path="$TEST_TMPDIR/named-orphan-suite.sh"
+	write_fake_named_suite "$l_suite_path" orphan test_orphan
+
+	set +e
+	output=$(
+		FAKE_SUITE_LOG="$FAKE_SUITE_LOG" \
+			"$RUN_SHUNIT_TESTS_BIN" \
+			--test test_orphan --suite "$l_suite_path" 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "A --test without a current suite should fail closed in option-selector mode." \
+		1 "$status"
+	assertContains "The orphan-test diagnostic should require ordering the suite first." \
+		"$output" "--test must follow the --suite it selects."
+	assertEquals "An orphan named-test option must not launch its later suite." \
+		"" "$(cat "$FAKE_SUITE_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_rejects_named_tests_without_one_suite() {
+	l_first_suite="$TEST_TMPDIR/named-first-suite.sh"
+	l_second_suite="$TEST_TMPDIR/named-second-suite.sh"
+	write_fake_suite "$l_first_suite" "named-first"
+	write_fake_suite "$l_second_suite" "named-second"
+	chmod +x "$l_first_suite" "$l_second_suite"
+
+	zxfer_test_capture_subshell "
+		FAKE_SUITE_LOG=\"$FAKE_SUITE_LOG\" \
+		\"$RUN_SHUNIT_TESTS_BIN\" --test test_case \
+		\"$l_first_suite\" \"$l_second_suite\"
+	"
+
+	assertEquals "Named test selection should fail before launching an ambiguous multi-suite run." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "The validation error should explain the one-suite requirement." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "--test requires exactly one runnable suite; found 2."
+	assertEquals "Rejected named selection should not execute either suite." \
+		"" "$(cat "$FAKE_SUITE_LOG")"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -804,14 +1131,31 @@ test_run_shunit_tests_signal_cleanup_kills_term_resistant_serial_suite() {
 	l_output_path="$TEST_TMPDIR/term-resistant-serial.output"
 	l_started_path="$TEST_TMPDIR/term-resistant-serial.started"
 	l_suite_pid_path="$TEST_TMPDIR/term-resistant-serial.pid"
+	l_grandchild_pid_path="$TEST_TMPDIR/term-resistant-serial-grandchild.pid"
 	l_runner_pid_path="$TEST_TMPDIR/term-resistant-serial-runner.pid"
-	rm -f "$l_output_path" "$l_started_path" "$l_suite_pid_path" "$l_runner_pid_path"
+	rm -f "$l_output_path" "$l_started_path" "$l_suite_pid_path" \
+		"$l_grandchild_pid_path" "$l_runner_pid_path"
 	write_fake_runner_pid_wrapper "$l_runner_wrapper_path"
 
 	write_fake_suite_with_body "$l_suite_path" <<'EOF'
 #!/bin/sh
+	(
+		trap 'exit 0' TERM
+		/bin/sh -c '
+			trap "" TERM
+			printf "%s\n" "$$" >"${FAKE_GRANDCHILD_PID_FILE:?}"
+			while :; do sleep 1; done
+		' term-resistant-grandchild-marker &
+		wait
+	) &
 	trap '' TERM
 	printf '%s\n' "$$" >"${FAKE_SUITE_LOG:?}"
+	l_wait_count=0
+	while [ ! -s "${FAKE_GRANDCHILD_PID_FILE:?}" ] && [ "$l_wait_count" -lt 10 ]; do
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	[ -s "${FAKE_GRANDCHILD_PID_FILE:?}" ] || exit 9
 	: >"${FAKE_SUITE_STARTED:?}"
 	while :; do
 		sleep 1
@@ -829,6 +1173,7 @@ EOF
 	set +e
 	FAKE_SUITE_LOG="$l_suite_pid_path" \
 		FAKE_SUITE_STARTED="$l_started_path" \
+		FAKE_GRANDCHILD_PID_FILE="$l_grandchild_pid_path" \
 		FAKE_RUNNER_PID_FILE="$l_runner_pid_path" \
 		FAKE_RUNNER_TARGET="$RUN_SHUNIT_TESTS_BIN" \
 		"$l_runner_wrapper_path" --jobs 1 "$l_suite_path" >"$l_output_path" 2>&1 &
@@ -854,6 +1199,7 @@ EOF
 	fi
 
 	l_suite_pid=$(cat "$l_suite_pid_path")
+	l_grandchild_pid=$(cat "$l_grandchild_pid_path")
 	l_runner_signal_pid=$(cat "$l_runner_pid_path" 2>/dev/null || true)
 	case "$l_runner_signal_pid" in
 	'' | *[!0-9]*)
@@ -916,6 +1262,19 @@ EOF
 	if [ "$l_suite_gone" -ne 0 ]; then
 		send_test_signal_to_pid KILL "$l_suite_pid" || :
 	fi
+	l_grandchild_gone=1
+	l_wait_count=0
+	while [ "$l_wait_count" -lt 10 ]; do
+		if ! fake_suite_process_running_p "$l_grandchild_pid" "term-resistant-grandchild-marker"; then
+			l_grandchild_gone=0
+			break
+		fi
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	if [ "$l_grandchild_gone" -ne 0 ]; then
+		send_test_signal_to_pid KILL "$l_grandchild_pid" || :
+	fi
 	if [ "$l_runner_gone" -ne 0 ]; then
 		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
 		case "$l_runner_pid:$l_runner_signal_pid" in
@@ -930,6 +1289,8 @@ EOF
 		143 "$l_runner_status"
 	assertEquals "Serial signal cleanup should not leave a TERM-resistant suite running after the runner exits." \
 		0 "$l_suite_gone"
+	assertEquals "Serial signal cleanup should retain and KILL a TERM-resistant grandchild after its intermediate parent exits on TERM." \
+		0 "$l_grandchild_gone"
 	assertEquals "Serial signal cleanup should not leave the nested shunit runner alive after the caller regains control." \
 		0 "$l_runner_gone"
 }

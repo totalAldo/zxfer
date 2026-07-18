@@ -9,7 +9,7 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-zxfer_source_runtime_modules_through "zxfer_runtime.sh"
+zxfer_source_runtime_modules_through "zxfer_error_log.sh"
 
 zxfer_usage() {
 	printf '%s\n' "usage output"
@@ -38,6 +38,8 @@ setUp() {
 	g_zxfer_secure_staging_dir_result=""
 	g_zxfer_runtime_artifact_cleanup_paths=""
 	unset ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
+	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" ||
+		fail "Unable to allocate the reporting test run root."
 	zxfer_reset_failure_context "unit"
 }
 
@@ -601,7 +603,7 @@ test_zxfer_prepare_error_log_fallback_lock_dir_distinguishes_known_legacy_cksum_
 }
 
 test_zxfer_capture_reporting_helper_output_preserves_readback_failures_and_cleans_up() {
-	capture_file="$TEST_TMPDIR/reporting_capture_failure.out"
+	capture_file="$g_zxfer_run_tmp_root/reporting_capture_failure.out"
 
 	zxfer_test_capture_subshell "
 		set +e
@@ -623,6 +625,33 @@ test_zxfer_capture_reporting_helper_output_preserves_readback_failures_and_clean
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=17"
 	assertContains "Reporting-helper captures should clean up the staged capture file after readback failures." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "exists=no"
+}
+
+test_zxfer_capture_reporting_helper_output_rejects_untrusted_result_targets_before_capture() {
+	zxfer_test_capture_subshell '
+		g_reporting_capture_calls=0
+		g_reporting_assignment_injected=0
+		zxfer_capture_runtime_artifact_command_output() {
+			g_reporting_capture_calls=$((g_reporting_capture_calls + 1))
+			g_zxfer_runtime_artifact_read_result=1
+			return 0
+		}
+		zxfer_capture_reporting_helper_output g_result printf "%s\n" "first"
+		printf "outside_prefix_status=%s\n" "$?"
+		zxfer_capture_reporting_helper_output "l_safe=ignored; g_reporting_assignment_injected" printf "%s\n" "second"
+		printf "invalid_name_status=%s\n" "$?"
+		printf "captures=%s\n" "$g_reporting_capture_calls"
+		printf "injected=%s\n" "$g_reporting_assignment_injected"
+	'
+
+	assertContains "Reporting captures should reject result variables outside the l_ namespace." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "outside_prefix_status=1"
+	assertContains "Reporting captures should reject malformed result variable names." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "invalid_name_status=1"
+	assertContains "Reporting result targets should be validated before running the capture command." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "captures=0"
+	assertContains "Rejected reporting targets should never be evaluated." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "injected=0"
 }
 
 test_zxfer_acquire_error_log_lock_retries_before_failing() {
@@ -943,22 +972,6 @@ test_zxfer_create_secure_staging_dir_for_path_registers_and_cleanup_unregisters_
 		"$g_zxfer_runtime_artifact_cleanup_paths" "$stage_dir"
 }
 
-test_zxfer_cleanup_error_log_stage_dir_falls_back_without_runtime_cleanup_helper_in_current_shell() {
-	stage_dir="$TEST_TMPDIR/error_log_stage_dir_fallback"
-	mkdir -p "$stage_dir" || fail "Unable to create the fallback error-log stage directory."
-	: >"$stage_dir/log.snapshot"
-	: >"$stage_dir/log.write"
-
-	unset -f zxfer_cleanup_runtime_artifact_path
-	zxfer_cleanup_error_log_stage_dir "$stage_dir"
-
-	assertFalse "Error-log stage-dir cleanup should remove staged files even when the runtime cleanup helper is unavailable." \
-		"[ -e \"$stage_dir\" ]"
-
-	zxfer_source_runtime_modules_through "zxfer_runtime.sh"
-	setUp
-}
-
 test_zxfer_get_error_log_fallback_lock_dir_reports_lock_prepare_capture_failures_in_current_shell() {
 	TMPDIR="$TEST_TMPDIR"
 
@@ -980,22 +993,26 @@ test_zxfer_get_error_log_fallback_lock_dir_reports_lock_prepare_capture_failures
 	}
 
 	set +e
+	# shellcheck disable=SC2218  # Loaded by the canonical module boundary before this test runs.
 	zxfer_get_error_log_fallback_lock_dir "/tmp/failure.log" >/dev/null
 	status=$?
 	set -e
 	unset -f zxfer_capture_reporting_helper_output
+	# shellcheck source=src/zxfer_error_log.sh
+	. "$ZXFER_ROOT/src/zxfer_error_log.sh"
 
 	assertEquals "Current-shell fallback lock-dir lookup should fail closed when exact lock path preparation cannot be captured." \
 		1 "$status"
 }
 
 test_zxfer_create_error_log_file_cleans_up_stage_dir_when_write_or_move_fails() {
-	write_stage_dir="$TEST_TMPDIR/error_log_write_stage"
-	move_stage_dir="$TEST_TMPDIR/error_log_move_stage"
+	write_stage_dir="$TEST_TMPDIR/.zxfer-error-log.write.$$"
+	move_stage_dir="$TEST_TMPDIR/.zxfer-error-log.move.$$"
 	write_output=$(
 		(
 			set +e
 			mkdir -p "$write_stage_dir"
+			zxfer_register_runtime_artifact_path "$write_stage_dir" || exit 90
 			zxfer_create_secure_staging_dir_for_path() {
 				g_zxfer_secure_staging_dir_result="$write_stage_dir"
 				return 0
@@ -1012,6 +1029,7 @@ test_zxfer_create_error_log_file_cleans_up_stage_dir_when_write_or_move_fails() 
 		(
 			set +e
 			mkdir -p "$move_stage_dir"
+			zxfer_register_runtime_artifact_path "$move_stage_dir" || exit 90
 			zxfer_create_secure_staging_dir_for_path() {
 				g_zxfer_secure_staging_dir_result="$move_stage_dir"
 				return 0
@@ -1038,7 +1056,7 @@ test_zxfer_create_error_log_file_cleans_up_stage_dir_when_write_or_move_fails() 
 test_zxfer_create_error_log_file_helpers_cover_current_shell_paths() {
 	create_fail_target="$TEST_TMPDIR/error_log_create_fail.log"
 	create_success_target="$TEST_TMPDIR/error_log_create_success.log"
-	create_success_stage="$TEST_TMPDIR/error_log_create_success.stage"
+	create_success_stage="$TEST_TMPDIR/.zxfer-error-log.success.$$"
 
 	zxfer_test_capture_subshell "
 		set +e
@@ -1050,6 +1068,7 @@ test_zxfer_create_error_log_file_helpers_cover_current_shell_paths() {
 		unset -f zxfer_create_secure_staging_dir_for_path
 
 		mkdir -p \"$create_success_stage\" || exit 91
+		zxfer_register_runtime_artifact_path \"$create_success_stage\" || exit 92
 		zxfer_create_secure_staging_dir_for_path() {
 			g_zxfer_secure_staging_dir_result=\"$create_success_stage\"
 			return 0
@@ -1288,6 +1307,29 @@ test_zxfer_append_failure_report_to_log_warns_when_staged_log_chmod_fails() {
 		"$(cat "$stderr_file")" "unable to chmod ZXFER_ERROR_LOG file"
 }
 
+test_zxfer_reset_profile_state_clears_owned_timing_and_counter_state() {
+	g_zxfer_profile_has_data=1
+	g_zxfer_profile_summary_emitted=1
+	g_zxfer_profile_cleanup_ms=999
+	g_zxfer_profile_ssh_shell_invocations=999
+	g_zxfer_profile_runtime_artifact_files_created=999
+	g_zxfer_profile_live_destination_snapshot_rechecks=999
+	g_zxfer_profile_diverged_snapshot_warnings=999
+
+	zxfer_reset_profile_state
+
+	assertEquals "Profile reset should clear the data marker." 0 "$g_zxfer_profile_has_data"
+	assertEquals "Profile reset should rearm summary emission." 0 "$g_zxfer_profile_summary_emitted"
+	assertEquals "Profile reset should clear cleanup timing." 0 "$g_zxfer_profile_cleanup_ms"
+	assertEquals "Profile reset should clear ssh counters." 0 "$g_zxfer_profile_ssh_shell_invocations"
+	assertEquals "Profile reset should clear runtime artifact counters." \
+		0 "$g_zxfer_profile_runtime_artifact_files_created"
+	assertEquals "Profile reset should clear destination-recheck counters." \
+		0 "$g_zxfer_profile_live_destination_snapshot_rechecks"
+	assertEquals "Profile reset should clear diverged-snapshot counters." \
+		0 "$g_zxfer_profile_diverged_snapshot_warnings"
+}
+
 test_zxfer_profile_now_ms_returns_failure_when_date_is_unavailable() {
 	zxfer_test_capture_subshell '
 		date() {
@@ -1307,12 +1349,12 @@ test_zxfer_profile_add_elapsed_ms_ignores_failed_clock_lookups_in_current_shell(
 		(
 			g_option_V_very_verbose=1
 			g_zxfer_profile_has_data=0
-			g_test_profile_elapsed_ms=7
+			g_zxfer_profile_test_elapsed_ms=7
 			zxfer_profile_now_ms() {
 				return 1
 			}
-			zxfer_profile_add_elapsed_ms g_test_profile_elapsed_ms 10
-			printf 'counter=%s\n' "$g_test_profile_elapsed_ms"
+			zxfer_profile_add_elapsed_ms g_zxfer_profile_test_elapsed_ms 10
+			printf 'counter=%s\n' "$g_zxfer_profile_test_elapsed_ms"
 			printf 'has_data=%s\n' "${g_zxfer_profile_has_data:-0}"
 		)
 	)
@@ -1325,12 +1367,12 @@ has_data=0" "$output"
 test_zxfer_profile_add_elapsed_ms_normalizes_invalid_existing_counter_values() {
 	g_option_V_very_verbose=1
 	g_zxfer_profile_has_data=0
-	g_test_profile_elapsed_ms="bogus"
+	g_zxfer_profile_test_elapsed_ms="bogus"
 
-	zxfer_profile_add_elapsed_ms g_test_profile_elapsed_ms 10 15
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_test_elapsed_ms 10 15
 
 	assertEquals "Elapsed-timing helpers should normalize invalid stored counter values before adding elapsed milliseconds." \
-		5 "$g_test_profile_elapsed_ms"
+		5 "$g_zxfer_profile_test_elapsed_ms"
 	assertEquals "Successful elapsed-timing updates should mark that profiling data exists." \
 		1 "$g_zxfer_profile_has_data"
 }
@@ -1340,10 +1382,10 @@ test_zxfer_profile_add_elapsed_ms_ignores_empty_counter_names_and_invalid_end_va
 		(
 			g_option_V_very_verbose=1
 			g_zxfer_profile_has_data=0
-			g_test_profile_elapsed_ms=9
+			g_zxfer_profile_test_elapsed_ms=9
 			zxfer_profile_add_elapsed_ms "" 10 15
-			zxfer_profile_add_elapsed_ms g_test_profile_elapsed_ms 10 "bad-end"
-			printf 'counter=%s\n' "$g_test_profile_elapsed_ms"
+			zxfer_profile_add_elapsed_ms g_zxfer_profile_test_elapsed_ms 10 "bad-end"
+			printf 'counter=%s\n' "$g_zxfer_profile_test_elapsed_ms"
 			printf 'has_data=%s\n' "${g_zxfer_profile_has_data:-0}"
 		)
 	)
@@ -1351,6 +1393,21 @@ test_zxfer_profile_add_elapsed_ms_ignores_empty_counter_names_and_invalid_end_va
 	assertEquals "Elapsed-timing helpers should ignore empty counter names and invalid end timestamps without mutating state." \
 		"counter=9
 has_data=0" "$output"
+}
+
+test_zxfer_profile_helpers_ignore_untrusted_indirect_assignment_targets() {
+	g_option_V_very_verbose=1
+	g_zxfer_profile_has_data=0
+	g_zxfer_profile_assignment_injected=0
+	l_untrusted_counter_name='g_zxfer_profile_probe:-0}; g_zxfer_profile_assignment_injected=1; l_counter_value=${g_zxfer_profile_probe'
+
+	zxfer_profile_increment_counter "$l_untrusted_counter_name"
+	zxfer_profile_add_elapsed_ms "$l_untrusted_counter_name" 10 20
+
+	assertEquals "Rejected profile targets should not mark profile data present." \
+		0 "$g_zxfer_profile_has_data"
+	assertEquals "Rejected profile targets should never be evaluated." \
+		0 "$g_zxfer_profile_assignment_injected"
 }
 
 test_zxfer_profile_recorders_always_return_success() {
@@ -1408,6 +1465,13 @@ test_throw_usage_error_writes_message_and_usage_to_stderr() {
 	assertContains "zxfer_throw_usage_error should print usage to stderr." \
 		"$(cat "$stderr_file")" "usage output"
 }
+
+# Compatibility aliases live in a sourced fragment so named dispatch and
+# --list-tests preserve the pre-split suite contract without shunit2's
+# unfiltered entry-file scan executing replacement coverage twice.
+# zxfer-test-fragment: suites/zxfer_reporting_compatibility_alias_tests.sh
+# shellcheck source=tests/suites/zxfer_reporting_compatibility_alias_tests.sh
+. "$TESTS_DIR/suites/zxfer_reporting_compatibility_alias_tests.sh"
 
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

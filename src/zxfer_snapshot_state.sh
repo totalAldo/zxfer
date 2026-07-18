@@ -36,10 +36,14 @@
 ################################################################################
 
 # Module contract:
-# owns globals: destination-existence cache, derived snapshot-record lookup state, and the generation-gated live destination view (g_zxfer_destination_mutation_generation plus the g_zxfer_live_destination_view_* stamp/root/file trio).
-# reads globals: g_cmd_awk and the flat per-run snapshot record files staged by discovery.
-# mutates caches: in-memory destination-existence state, the derived reversed source record list, and the batched live destination view file.
-# returns via stdout: parsed snapshot identities, per-dataset record lookups, and cache-backed existence probes.
+# owns globals: destination-existence cache, derived snapshot-record lookup state,
+#   and the generation-gated g_zxfer_live_destination_view_* state.
+# reads globals: g_cmd_awk, g_option_*, current destination context, and the flat
+#   per-run snapshot record files staged by discovery.
+# mutates caches: in-memory destination existence, reversed source records, and
+#   the batched live destination view file/stamps.
+# returns via stdout: snapshot identities/lookups plus cache-backed and live
+#   destination existence and snapshot probes.
 
 # Snapshot discovery stages at most one flat, sorted snapshot record file per
 # side inside the 0700 run-private temp root (g_zxfer_source_... and
@@ -69,6 +73,33 @@ zxfer_reset_destination_existence_cache() {
 # discovery (zxfer_cleanup_snapshot_record_cache_files).
 zxfer_reset_snapshot_record_indexes() {
 	g_lzfs_list_hr_S_snap=""
+}
+
+# Purpose: Clear recursive dataset lists owned by snapshot state.
+# Usage: Called before full discovery, fast no-op publication, and dry-run
+# seeding so orchestration never writes shared list state directly.
+zxfer_reset_recursive_dataset_lists() {
+	g_recursive_source_list=""
+	g_recursive_source_dataset_list=""
+	g_recursive_dest_list=""
+}
+
+# Purpose: Publish the recursive source transfer list.
+# Usage: Discovery filtering and non-recursive fallback pass a complete list.
+zxfer_set_recursive_source_list() {
+	g_recursive_source_list=${1:-}
+}
+
+# Purpose: Publish the recursive source inventory list.
+# Usage: Discovery filtering and dry-run seeding pass a complete list.
+zxfer_set_recursive_source_dataset_list() {
+	g_recursive_source_dataset_list=${1:-}
+}
+
+# Purpose: Publish the recursive destination dataset list.
+# Usage: Destination producers pass only validated, normalized inventory.
+zxfer_set_recursive_destination_list() {
+	g_recursive_dest_list=${1:-}
 }
 
 # Generation-gated live destination view (approved trade-off): a live view of
@@ -149,6 +180,80 @@ zxfer_refresh_live_destination_view() {
 	g_zxfer_live_destination_view_root=$l_view_refresh_root
 	g_zxfer_live_destination_view_generation=$l_view_capture_generation
 	return 0
+}
+
+# Purpose: Ensure the batched live destination view is fresh for the current
+# dataset and publish whether it can serve the dataset's recheck.
+# Usage: Called in the main shell right before each captured live recheck so
+# the refresh's generation stamp and view file survive the caller's command
+# substitution, and again inside zxfer_get_live_destination_snapshots as a
+# subshell-safe backstop. Aborts when a required refresh fails (fail closed).
+zxfer_ensure_live_destination_snapshot_view() {
+	l_live_view_destination=${1:-$g_actual_dest}
+	g_zxfer_live_destination_view_serves_current_dataset=0
+
+	[ -n "${g_initial_source:-}" ] || return 0
+	l_live_view_root=$(zxfer_get_destination_snapshot_root_dataset)
+	[ -n "$l_live_view_root" ] || return 0
+	case "$l_live_view_destination" in
+	"$l_live_view_root" | "$l_live_view_root"/*) ;;
+	*)
+		return 0
+		;;
+	esac
+
+	if [ "${g_zxfer_live_destination_view_generation:-}" != "${g_zxfer_destination_mutation_generation:-0}" ] ||
+		[ "${g_zxfer_live_destination_view_root:-}" != "$l_live_view_root" ]; then
+		if ! zxfer_refresh_live_destination_view "$l_live_view_root"; then
+			zxfer_throw_error "Failed to refresh the batched live destination snapshot view for [$l_live_view_destination] from [$l_live_view_root]."
+		fi
+	fi
+	g_zxfer_live_destination_view_serves_current_dataset=1
+	return 0
+}
+
+# Purpose: Return the live destination snapshots in the form expected by later
+# helpers.
+# Usage: Called by live reconciliation and send-planning paths when they need a
+# generation-checked destination snapshot view for the current dataset.
+#
+# Datasets under the run's destination root are served from the batched,
+# generation-stamped live view (one listing per destination mutation this run
+# performs) filtered with the exact-prefix record lookup. Datasets outside
+# the batched root keep the original per-dataset depth-1 live listing.
+zxfer_get_live_destination_snapshots() {
+	l_live_destination=${1:-$g_actual_dest}
+	zxfer_ensure_live_destination_snapshot_view "$l_live_destination"
+	if [ "${g_zxfer_live_destination_view_serves_current_dataset:-0}" -eq 1 ]; then
+		l_live_lookup_status=0
+		zxfer_filter_snapshot_record_file_for_dataset \
+			"$g_zxfer_live_destination_view_file" "$l_live_destination" ||
+			l_live_lookup_status=$?
+		return "$l_live_lookup_status"
+	fi
+
+	zxfer_profile_increment_counter g_zxfer_profile_live_destination_snapshot_rechecks
+
+	# Only this dataset's own snapshots are kept below, so list at depth 1
+	# instead of recursively: -d 1 matches the source identity listing in
+	# zxfer_snapshot_state.sh and returns exactly "$g_actual_dest"@* for the
+	# -t snapshot filter.
+	if ! l_snapshot_records=$(zxfer_run_destination_zfs_cmd list -H -d 1 -o name,guid -t snapshot "$l_live_destination"); then
+		printf '%s\n' "$l_snapshot_records"
+		return 1
+	fi
+
+	while IFS= read -r l_snapshot_record; do
+		[ -n "$l_snapshot_record" ] || continue
+		l_snapshot_path=$(zxfer_extract_snapshot_path "$l_snapshot_record")
+		case "$l_snapshot_path" in
+		"$l_live_destination"@*)
+			printf '%s\n' "$l_snapshot_record"
+			;;
+		esac
+	done <<-EOF
+		$(zxfer_normalize_snapshot_record_list "$l_snapshot_records")
+	EOF
 }
 
 # Purpose: Ensure the source snapshot record cache exists and is ready before
@@ -409,6 +514,201 @@ zxfer_note_destination_receive_completed() {
 	zxfer_note_destination_dataset_exists "$l_dataset"
 }
 
+# Purpose: Check whether the destination probe reports missing.
+# Usage: Called after destination ZFS probes to distinguish supported
+# platform-specific missing-dataset diagnostics from operational failures.
+zxfer_destination_probe_reports_missing() {
+	l_probe_err=$1
+
+	case "$l_probe_err" in
+	*"dataset does not exist"* | *"Dataset does not exist"* | *"no such dataset"* | *"No such dataset"* | *"no such pool or dataset"* | *"No such pool or dataset"*)
+		return 0
+		;;
+	esac
+
+	return 1
+}
+
+# Purpose: Check whether the destination probe is ambiguous.
+# Usage: Called after failed destination ZFS probes when an empty diagnostic
+# may require the SunOS ancestor-listing fallback.
+zxfer_destination_probe_is_ambiguous() {
+	l_probe_err=$1
+
+	case "$l_probe_err" in
+	*[![:space:]]*)
+		return 1
+		;;
+	esac
+
+	return 0
+}
+
+# Purpose: Confirm whether an ambiguous SunOS parent-listing failure means the
+# requested parent is absent.
+# Usage: Called during destination existence fallback when OmniOS/SunOS returns
+# no diagnostic text for a failed recursive listing of a missing parent.
+zxfer_destination_parent_missing_confirmed_by_ancestor_listing() {
+	l_missing_dataset=$1
+	l_original_missing_dataset=$1
+
+	while :; do
+		l_ancestor_dataset=${l_missing_dataset%/*}
+		[ "$l_ancestor_dataset" != "$l_missing_dataset" ] || return 1
+
+		if zxfer_command_display_render_enabled; then
+			zxfer_echoV "Parent recursive destination probe was ambiguous on SunOS; checking ancestor recursively: $(zxfer_render_destination_zfs_command list -H -r -o name "$l_ancestor_dataset")"
+		fi
+
+		if l_ancestor_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_ancestor_dataset" 2>&1); then
+			if printf '%s\n' "$l_ancestor_listing" | grep -F -x "$l_missing_dataset" >/dev/null 2>&1; then
+				return 1
+			fi
+
+			if printf '%s\n' "$l_ancestor_listing" | grep -F -x "$l_ancestor_dataset" >/dev/null 2>&1; then
+				zxfer_mark_destination_hierarchy_exists "$l_ancestor_dataset"
+				zxfer_set_destination_existence_cache_entry "$l_missing_dataset" 0
+				zxfer_set_destination_existence_cache_entry "$l_original_missing_dataset" 0
+				return 0
+			fi
+
+			return 1
+		fi
+
+		if zxfer_destination_probe_reports_missing "$l_ancestor_listing"; then
+			zxfer_set_destination_existence_cache_entry "$l_missing_dataset" 0
+			zxfer_set_destination_existence_cache_entry "$l_original_missing_dataset" 0
+			return 0
+		fi
+
+		zxfer_destination_probe_is_ambiguous "$l_ancestor_listing" || return 1
+		l_missing_dataset=$l_ancestor_dataset
+	done
+}
+
+# Purpose: Check whether the destination via parent recursive listing exists.
+# Usage: Called for ambiguous SunOS exact probes before create, seed, or delete
+# decisions depend on authoritative destination presence or absence.
+zxfer_exists_destination_via_parent_recursive_listing() {
+	l_dest=$1
+	l_parent_dataset=${l_dest%/*}
+
+	case "${g_destination_operating_system:-}" in
+	SunOS) ;;
+	*)
+		return 2
+		;;
+	esac
+
+	[ "$l_parent_dataset" != "$l_dest" ] || return 2
+
+	if zxfer_command_display_render_enabled; then
+		zxfer_echoV "Exact destination probe was ambiguous on SunOS; checking parent recursively: $(zxfer_render_destination_zfs_command list -H -r -o name "$l_parent_dataset")"
+	fi
+
+	if l_parent_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_parent_dataset" 2>&1); then
+		if printf '%s\n' "$l_parent_listing" | grep -F -x "$l_dest" >/dev/null 2>&1; then
+			zxfer_mark_destination_hierarchy_exists "$l_dest"
+			printf '%s\n' 1
+			return 0
+		fi
+
+		if printf '%s\n' "$l_parent_listing" | grep -F -x "$l_parent_dataset" >/dev/null 2>&1; then
+			zxfer_mark_destination_hierarchy_exists "$l_parent_dataset"
+			zxfer_set_destination_existence_cache_entry "$l_dest" 0
+			printf '%s\n' 0
+			return 0
+		fi
+
+		printf 'Failed to determine whether destination dataset [%s] exists: parent recursive listing for [%s] did not contain the parent dataset.\n' \
+			"$l_dest" "$l_parent_dataset"
+		return 1
+	fi
+
+	if zxfer_destination_probe_reports_missing "$l_parent_listing"; then
+		zxfer_set_destination_existence_cache_entry "$l_parent_dataset" 0
+		zxfer_set_destination_existence_cache_entry "$l_dest" 0
+		printf '%s\n' 0
+		return 0
+	fi
+
+	if zxfer_destination_probe_is_ambiguous "$l_parent_listing" &&
+		zxfer_destination_parent_missing_confirmed_by_ancestor_listing "$l_parent_dataset"; then
+		zxfer_set_destination_existence_cache_entry "$l_dest" 0
+		printf '%s\n' 0
+		return 0
+	fi
+
+	if [ -n "$l_parent_listing" ]; then
+		printf 'Failed to determine whether destination dataset [%s] exists: parent recursive listing for [%s] failed: %s\n' \
+			"$l_dest" "$l_parent_dataset" "$l_parent_listing"
+	else
+		printf 'Failed to determine whether destination dataset [%s] exists: parent recursive listing for [%s] failed.\n' \
+			"$l_dest" "$l_parent_dataset"
+	fi
+	return 1
+}
+
+# Purpose: Check whether the destination exists.
+# Usage: Called by snapshot discovery, reconciliation, and property/replication
+# planning before decisions depend on destination presence or absence.
+#
+# Checks whether the destination dataset exists.
+# Prints 1 when it exists, 0 when it is explicitly missing, and returns non-zero
+# with an explanatory message when the probe itself fails.
+zxfer_exists_destination() {
+	l_dest=$1
+	l_probe_mode=${2:-cache}
+
+	if [ "$l_probe_mode" != "live" ]; then
+		if l_cached_exists=$(zxfer_get_destination_existence_cache_entry "$l_dest"); then
+			zxfer_echoV "Using cached destination existence for [$l_dest]: $l_cached_exists"
+			printf '%s\n' "$l_cached_exists"
+			return 0
+		fi
+	fi
+
+	zxfer_profile_increment_counter g_zxfer_profile_exists_destination_calls
+
+	if zxfer_command_display_render_enabled; then
+		zxfer_echoV "Checking if destination exists: $(zxfer_render_destination_zfs_command list -H "$l_dest")"
+	fi
+
+	if l_probe_output=$(zxfer_run_destination_zfs_cmd list -H "$l_dest" 2>&1); then
+		zxfer_set_destination_existence_cache_entry "$l_dest" 1
+		printf '%s\n' 1
+		return 0
+	fi
+
+	l_probe_err=$l_probe_output
+
+	if zxfer_destination_probe_reports_missing "$l_probe_err"; then
+		zxfer_set_destination_existence_cache_entry "$l_dest" 0
+		printf '%s\n' 0
+		return 0
+	fi
+
+	if zxfer_destination_probe_is_ambiguous "$l_probe_err"; then
+		l_parent_fallback_result=$(zxfer_exists_destination_via_parent_recursive_listing "$l_dest")
+		l_parent_fallback_status=$?
+		if [ "$l_parent_fallback_status" -eq 0 ]; then
+			printf '%s\n' "$l_parent_fallback_result"
+			return 0
+		fi
+		if [ "$l_parent_fallback_status" -eq 1 ]; then
+			printf '%s\n' "$l_parent_fallback_result"
+			return 1
+		fi
+	fi
+
+	if [ -n "$l_probe_err" ]; then
+		printf 'Failed to determine whether destination dataset [%s] exists: %s\n' "$l_dest" "$l_probe_err"
+	else
+		printf 'Failed to determine whether destination dataset [%s] exists.\n' "$l_dest"
+	fi
+	return 1
+}
+
 # Purpose: Extract the snapshot path from the serialized input this module
 # works with.
 # Usage: Called during snapshot lookups, cache reads, and destination-state
@@ -551,7 +851,6 @@ zxfer_read_transformed_snapshot_record_list() {
 	l_snapshot_records=$1
 	l_snapshot_record_transform=$2
 
-	g_zxfer_runtime_artifact_read_result=""
 	[ -n "$l_snapshot_records" ] || return 0
 	case "$l_snapshot_record_transform" in
 	normalized)

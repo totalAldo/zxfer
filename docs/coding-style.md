@@ -94,6 +94,9 @@ The project priority order still applies:
 - Reuse the centralized command-rendering and execution helpers in
   [../src/zxfer_exec.sh](../src/zxfer_exec.sh) instead of adding new ad hoc
   `eval` paths.
+- The remaining production `eval` commands are exact-site inventoried in
+  `tests/architecture_eval_policy.tsv`; adding, moving, or changing one
+  requires an explicit purpose review and architecture-check update.
 - Treat `-O` / `-T` host specs and remote wrapper tokens as structured command
   inputs, not as plain hostnames.
 
@@ -223,7 +226,7 @@ When changing shell logic, run:
 ```sh
 ./tests/run_shunit_tests.sh
 ./tests/run_lint.sh
-ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
+ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh --enforce
 ```
 
 When changing one area heavily, run the focused suite for that module first,
@@ -236,8 +239,8 @@ docs in the same change:
 
 - [../README.md](../README.md)
 - [../CHANGELOG.txt](../CHANGELOG.txt)
-- [../man/zxfer.8](../man/zxfer.8)
-- [../man/zxfer.1m](../man/zxfer.1m)
+- canonical [../man/zxfer.8](../man/zxfer.8), followed by
+  `./tests/generate_solaris_manpage.sh --write` for the generated `.1m` page
 - [testing.md](./testing.md)
 - [architecture.md](./architecture.md)
 - [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) when applicable

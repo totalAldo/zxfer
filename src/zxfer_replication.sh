@@ -36,7 +36,7 @@
 ################################################################################
 
 # Module contract:
-# owns globals: per-run orchestration scratch state such as g_zxfer_services_to_restart, g_zxfer_post_seed_property_sources_result, g_zxfer_replication_iteration_list_result, and g_zxfer_replication_file_read_result plus per-dataset replication state like g_actual_dest, g_last_common_snap, and g_src_snapshot_transfer_list.
+# owns globals: per-run orchestration scratch state such as g_zxfer_post_seed_property_sources_result, g_zxfer_replication_iteration_list_result, and g_zxfer_replication_file_read_result plus per-dataset replication state like g_actual_dest, g_last_common_snap, and g_src_snapshot_transfer_list.
 # reads globals: g_option_*, g_initial_source, g_destination, and current dataset/property state.
 # mutates caches: per-iteration property and destination cache state through shared reset helpers.
 # returns via stdout: none; orchestration mutates runtime state and delegates output to shared helpers.
@@ -47,9 +47,6 @@
 # orchestration before this module reuses mutable scratch globals or cached
 # decisions.
 zxfer_reset_replication_runtime_state() {
-	g_services_need_relaunch=0
-	g_services_relaunch_in_progress=0
-	g_zxfer_services_to_restart=""
 	g_initial_source=""
 	g_initial_source_had_trailing_slash=0
 	g_actual_dest=""
@@ -57,6 +54,8 @@ zxfer_reset_replication_runtime_state() {
 	g_zxfer_post_seed_property_sources_result=""
 	g_zxfer_replication_iteration_list_result=""
 	g_zxfer_replication_file_read_result=""
+	g_zxfer_live_reconcile_destination_exists_result=0
+	g_zxfer_live_reconcile_source_records_result=""
 }
 
 # Purpose: Read the replication stage file from staged state into the current
@@ -162,80 +161,7 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 	# is planned from the live recheck, and the wipe also cleared the in-memory
 	# fallback list, silently emptying -d delete planning for later datasets.
 
-	g_did_delete_dest_snapshots=0
-}
-
-# Purpose: Ensure the batched live destination view is fresh for the current
-# dataset and publish whether it can serve the dataset's recheck.
-# Usage: Called in the main shell right before each captured live recheck so
-# the refresh's generation stamp and view file survive the caller's command
-# substitution, and again inside zxfer_get_live_destination_snapshots as a
-# subshell-safe backstop. Aborts when a required refresh fails (fail closed).
-zxfer_ensure_live_destination_snapshot_view() {
-	g_zxfer_live_destination_view_serves_current_dataset=0
-
-	[ -n "${g_initial_source:-}" ] || return 0
-	l_live_view_root=$(zxfer_get_destination_snapshot_root_dataset)
-	[ -n "$l_live_view_root" ] || return 0
-	case "$g_actual_dest" in
-	"$l_live_view_root" | "$l_live_view_root"/*) ;;
-	*)
-		return 0
-		;;
-	esac
-
-	if [ "${g_zxfer_live_destination_view_generation:-}" != "${g_zxfer_destination_mutation_generation:-0}" ] ||
-		[ "${g_zxfer_live_destination_view_root:-}" != "$l_live_view_root" ]; then
-		if ! zxfer_refresh_live_destination_view "$l_live_view_root"; then
-			zxfer_throw_error "Failed to refresh the batched live destination snapshot view for [$g_actual_dest] from [$l_live_view_root]."
-		fi
-	fi
-	g_zxfer_live_destination_view_serves_current_dataset=1
-	return 0
-}
-
-# Purpose: Return the live destination snapshots in the form expected by later
-# helpers.
-# Usage: Called during top-level dataset iteration and replication
-# orchestration when sibling helpers need the same lookup without duplicating
-# module logic.
-#
-# Datasets under the run's destination root are served from the batched,
-# generation-stamped live view (one listing per destination mutation this run
-# performs) filtered with the exact-prefix record lookup. Datasets outside
-# the batched root keep the original per-dataset depth-1 live listing.
-zxfer_get_live_destination_snapshots() {
-	zxfer_ensure_live_destination_snapshot_view
-	if [ "${g_zxfer_live_destination_view_serves_current_dataset:-0}" -eq 1 ]; then
-		l_live_lookup_status=0
-		zxfer_filter_snapshot_record_file_for_dataset \
-			"$g_zxfer_live_destination_view_file" "$g_actual_dest" ||
-			l_live_lookup_status=$?
-		return "$l_live_lookup_status"
-	fi
-
-	zxfer_profile_increment_counter g_zxfer_profile_live_destination_snapshot_rechecks
-
-	# Only this dataset's own snapshots are kept below, so list at depth 1
-	# instead of recursively: -d 1 matches the source identity listing in
-	# zxfer_snapshot_state.sh and returns exactly "$g_actual_dest"@* for the
-	# -t snapshot filter.
-	if ! l_snapshot_records=$(zxfer_run_destination_zfs_cmd list -H -d 1 -o name,guid -t snapshot "$g_actual_dest"); then
-		printf '%s\n' "$l_snapshot_records"
-		return 1
-	fi
-
-	while IFS= read -r l_snapshot_record; do
-		[ -n "$l_snapshot_record" ] || continue
-		l_snapshot_path=$(zxfer_extract_snapshot_path "$l_snapshot_record")
-		case "$l_snapshot_path" in
-		"$g_actual_dest"@*)
-			printf '%s\n' "$l_snapshot_record"
-			;;
-		esac
-	done <<-EOF
-		$(zxfer_normalize_snapshot_record_list "$l_snapshot_records")
-	EOF
+	zxfer_clear_destination_delete_marker
 }
 
 # Purpose: Return snapshot record-list bounds for a caller-provided list.
@@ -319,9 +245,8 @@ zxfer_clear_live_destination_common_snapshot_state() {
 	l_recheck_source_records=$1
 	l_destination_has_snapshots=$2
 
-	g_last_common_snap=""
-	g_src_snapshot_transfer_list=$l_recheck_source_records
-	g_dest_has_snapshots=$l_destination_has_snapshots
+	zxfer_publish_snapshot_transfer_plan "" \
+		"$l_recheck_source_records" "$l_destination_has_snapshots"
 }
 
 # Purpose: Return the destination existence state to use before seeding.
@@ -366,7 +291,7 @@ zxfer_seed_destination_for_snapshot_transfer() {
 			zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
 		fi
 		if [ -z "$l_live_dest_snaps" ]; then
-			g_dest_has_snapshots=0
+			zxfer_set_destination_snapshot_presence 0
 		else
 			zxfer_throw_error "Destination dataset [$g_actual_dest] has snapshots but none share a common guid with the source. Refusing to perform a full receive into an existing snapshotted dataset."
 		fi
@@ -375,8 +300,7 @@ zxfer_seed_destination_for_snapshot_transfer() {
 		zxfer_echov "Destination dataset does not exist [$g_actual_dest]. Sending first snapshot [$l_first_snapshot_path]"
 		zxfer_zfs_send_receive "" "$l_first_snapshot_path" "$g_actual_dest" "0"
 		g_dest_seed_requires_property_reconcile=1
-		g_last_common_snap=$l_first_snapshot
-		g_dest_has_snapshots=1
+		zxfer_mark_destination_snapshot_seeded "$l_first_snapshot"
 		return
 	fi
 	if [ "$g_dest_has_snapshots" -eq 0 ]; then
@@ -384,8 +308,7 @@ zxfer_seed_destination_for_snapshot_transfer() {
 		zxfer_echov "Temporarily enabling receive-side -F to seed existing empty destination dataset [$g_actual_dest]."
 		zxfer_zfs_send_receive "" "$l_first_snapshot_path" "$g_actual_dest" "0" "-F"
 		g_dest_seed_requires_property_reconcile=1
-		g_last_common_snap=$l_first_snapshot
-		g_dest_has_snapshots=1
+		zxfer_mark_destination_snapshot_seeded "$l_first_snapshot"
 	fi
 }
 
@@ -459,19 +382,13 @@ zxfer_copy_snapshots() {
 	zxfer_zfs_send_receive "$(zxfer_extract_snapshot_path "$g_last_common_snap")" "$l_final_snapshot_path" "$g_actual_dest" "1"
 }
 
-# Purpose: Recheck live destination snapshot state and reconcile delete or seed
-# decisions before the next transfer step runs.
-# Usage: Called during top-level dataset iteration and replication
-# orchestration after property work and before send/receive so zxfer acts on
-# current destination state instead of stale planning data.
-#
-# When running with -Y, the cached destination snapshot list can briefly lag a
-# deletion from the previous iteration. Before reseeding an existing dataset,
-# verify whether the destination already has a common snapshot so we do not try
-# to receive a full stream into an existing filesystem.
-zxfer_reconcile_live_destination_snapshot_state() {
-	l_reconcile_source_records=$(zxfer_get_live_recheck_source_snapshot_records) || return 0
-
+# Purpose: Resolve whether the current destination needs a live snapshot
+# reconciliation pass.
+# Usage: Called before live-view capture. Publishes 1 when the dataset exists
+# and should be reconciled, or 0 when the established absent-root fast path or
+# a confirmed missing dataset should return without further work.
+zxfer_resolve_live_reconcile_destination_existence() {
+	g_zxfer_live_reconcile_destination_exists_result=0
 	if ! l_dest_exists=$(zxfer_exists_destination "$g_actual_dest"); then
 		zxfer_throw_error "$l_dest_exists"
 	fi
@@ -482,7 +399,7 @@ zxfer_reconcile_live_destination_snapshot_state() {
 	# the missing-dataset receive path; child datasets recheck here because a
 	# recursive parent receive may have created them earlier in the iteration.
 	if [ "$l_dest_exists" -eq 0 ] && zxfer_current_destination_is_initial_source_dataset; then
-		return
+		return 0
 	fi
 
 	if [ "$l_dest_exists" -eq 0 ]; then
@@ -490,44 +407,52 @@ zxfer_reconcile_live_destination_snapshot_state() {
 			zxfer_throw_error "$l_dest_exists"
 		fi
 	fi
-	[ "$l_dest_exists" -eq 1 ] || return
+	[ "$l_dest_exists" -eq 1 ] || return 0
+	g_zxfer_live_reconcile_destination_exists_result=1
+}
 
-	# Refresh the batched view in this shell so the generation stamp and view
-	# file path survive the captured recheck below.
-	zxfer_ensure_live_destination_snapshot_view
-	if ! l_live_dest_snaps=$(zxfer_get_live_destination_snapshots 2>&1); then
-		zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
-	fi
-	if [ -z "$l_live_dest_snaps" ]; then
-		zxfer_clear_live_destination_common_snapshot_state "$l_reconcile_source_records" 0
+# Purpose: Upgrade source snapshot records to guid-bearing identities when a
+# shared snapshot name makes exact live reconciliation necessary.
+# Usage: Called after live destination capture. Publishes the original or
+# refreshed source list through g_zxfer_live_reconcile_source_records_result.
+zxfer_prepare_live_reconcile_source_records() {
+	l_prepare_reconcile_source_records=$1
+	l_prepare_reconcile_destination_records=$2
+
+	g_zxfer_live_reconcile_source_records_result=$l_prepare_reconcile_source_records
+	if ! zxfer_snapshot_record_lists_share_snapshot_name \
+		"$l_prepare_reconcile_source_records" "$l_prepare_reconcile_destination_records"; then
 		return 0
 	fi
-	g_dest_has_snapshots=1
-
-	# Build a destination identity set once, then scan the source records in
-	# order so we keep the newest matching snapshot and the remaining tail after
-	# it without repeated large shell-string membership checks.
-	if zxfer_snapshot_record_lists_share_snapshot_name "$l_reconcile_source_records" "$l_live_dest_snaps"; then
-		if ! zxfer_snapshot_record_list_contains_guid "$l_reconcile_source_records"; then
-			l_reconcile_source_dataset=""
-			while IFS= read -r l_reconcile_source_record; do
-				[ -n "$l_reconcile_source_record" ] || continue
-				l_reconcile_source_dataset=$(zxfer_extract_snapshot_dataset "$l_reconcile_source_record")
-				[ -n "$l_reconcile_source_dataset" ] && break
-			done <<-EOF
-				$(zxfer_normalize_snapshot_record_list "$l_reconcile_source_records")
-			EOF
-
-			if [ -n "$l_reconcile_source_dataset" ]; then
-				if ! l_reconcile_source_records=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_reconcile_source_dataset" "$l_reconcile_source_records"); then
-					zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_reconcile_source_dataset]."
-				fi
-			fi
-		fi
+	if zxfer_snapshot_record_list_contains_guid "$l_prepare_reconcile_source_records"; then
+		return 0
 	fi
 
-	l_section_break="@@ZXFER_SET_BREAK@@"
-	l_reconcile_snapshot_awk=$(
+	l_prepare_reconcile_source_dataset=""
+	while IFS= read -r l_prepare_reconcile_source_record; do
+		[ -n "$l_prepare_reconcile_source_record" ] || continue
+		l_prepare_reconcile_source_dataset=$(zxfer_extract_snapshot_dataset "$l_prepare_reconcile_source_record")
+		[ -n "$l_prepare_reconcile_source_dataset" ] && break
+	done <<-EOF
+		$(zxfer_normalize_snapshot_record_list "$l_prepare_reconcile_source_records")
+	EOF
+	[ -n "$l_prepare_reconcile_source_dataset" ] || return 0
+
+	if ! g_zxfer_live_reconcile_source_records_result=$(zxfer_get_snapshot_identity_records_for_dataset \
+		source "$l_prepare_reconcile_source_dataset" "$l_prepare_reconcile_source_records"); then
+		zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_prepare_reconcile_source_dataset]."
+	fi
+}
+
+# Purpose: Select the newest common snapshot and the remaining source tail in
+# one checked awk pass over normalized identity records.
+# Usage: Called through command substitution by live reconciliation. Prints the
+# common record first followed by the transfer tail, preserving source order.
+zxfer_select_live_reconcile_snapshot_range() {
+	l_select_reconcile_source_records=$1
+	l_select_reconcile_destination_records=$2
+	l_select_reconcile_section_break="@@ZXFER_SET_BREAK@@"
+	l_select_reconcile_awk=$(
 		cat <<'EOF'
 BEGIN {
 	in_source = 0
@@ -571,179 +496,82 @@ END {
 }
 EOF
 	)
-	l_reconcile_result=$(
-		{
-			while IFS= read -r l_live_dest_snap; do
-				[ -n "$l_live_dest_snap" ] || continue
-				l_live_dest_identity=$(zxfer_extract_snapshot_identity "$l_live_dest_snap")
-				[ -n "$l_live_dest_identity" ] || continue
-				printf '%s\n' "$l_live_dest_identity"
-			done <<-EOF
-				$(zxfer_normalize_snapshot_record_list "$l_live_dest_snaps")
-			EOF
-			printf '%s\n' "$l_section_break"
-			zxfer_normalize_snapshot_record_list "$l_reconcile_source_records"
-		} | "${g_cmd_awk:-awk}" -v section_break="$l_section_break" "$l_reconcile_snapshot_awk"
-	)
 
-	l_confirmed_common_snap=""
-	l_remaining_source_snaps=""
-	l_is_first_result_line=1
-	while IFS= read -r l_reconcile_line; do
-		if [ "$l_is_first_result_line" -eq 1 ]; then
-			l_confirmed_common_snap=$l_reconcile_line
-			l_is_first_result_line=0
-		elif [ -z "$l_remaining_source_snaps" ]; then
-			l_remaining_source_snaps=$l_reconcile_line
+	{
+		while IFS= read -r l_select_reconcile_destination_record; do
+			[ -n "$l_select_reconcile_destination_record" ] || continue
+			l_select_reconcile_destination_identity=$(zxfer_extract_snapshot_identity "$l_select_reconcile_destination_record")
+			[ -n "$l_select_reconcile_destination_identity" ] || continue
+			printf '%s\n' "$l_select_reconcile_destination_identity"
+		done <<-EOF
+			$(zxfer_normalize_snapshot_record_list "$l_select_reconcile_destination_records")
+		EOF
+		printf '%s\n' "$l_select_reconcile_section_break"
+		zxfer_normalize_snapshot_record_list "$l_select_reconcile_source_records"
+	} | "${g_cmd_awk:-awk}" -v section_break="$l_select_reconcile_section_break" "$l_select_reconcile_awk"
+}
+
+# Purpose: Publish a selected live-reconciliation range into the established
+# last-common and transfer-list state.
+# Usage: Called after the single-pass selector. Clears stale common state when
+# no exact identity match remains.
+zxfer_publish_live_reconcile_snapshot_range() {
+	l_publish_reconcile_result=$1
+	l_publish_reconcile_source_records=$2
+	l_publish_reconcile_common=""
+	l_publish_reconcile_remaining=""
+	l_publish_reconcile_first=1
+
+	while IFS= read -r l_publish_reconcile_line; do
+		if [ "$l_publish_reconcile_first" -eq 1 ]; then
+			l_publish_reconcile_common=$l_publish_reconcile_line
+			l_publish_reconcile_first=0
+		elif [ -z "$l_publish_reconcile_remaining" ]; then
+			l_publish_reconcile_remaining=$l_publish_reconcile_line
 		else
-			l_remaining_source_snaps="$l_remaining_source_snaps
-$l_reconcile_line"
+			l_publish_reconcile_remaining="$l_publish_reconcile_remaining
+$l_publish_reconcile_line"
 		fi
 	done <<-EOF
-		$(printf '%s\n' "$l_reconcile_result")
+		$(printf '%s\n' "$l_publish_reconcile_result")
 	EOF
 
-	if [ -z "$l_confirmed_common_snap" ]; then
-		zxfer_clear_live_destination_common_snapshot_state "$l_reconcile_source_records" 1
+	if [ -z "$l_publish_reconcile_common" ]; then
+		zxfer_clear_live_destination_common_snapshot_state "$l_publish_reconcile_source_records" 1
 		return 0
 	fi
 
-	g_dest_has_snapshots=1
-	g_last_common_snap=$l_confirmed_common_snap
-	g_src_snapshot_transfer_list=$l_remaining_source_snaps
+	zxfer_publish_snapshot_transfer_plan "$l_publish_reconcile_common" \
+		"$l_publish_reconcile_remaining" 1
 	zxfer_echoV "Refreshed destination snapshot cache for $g_actual_dest using live snapshot state."
 }
 
-# Purpose: Stop migration-mode services and remember which ones need to be re-
-# enabled later.
+# Purpose: Recheck live destination snapshot state and reconcile delete or seed
+# decisions before the next transfer step runs.
 # Usage: Called during top-level dataset iteration and replication
-# orchestration when `-m` prepares a source host for a controlled service
-# migration.
-#
-# Stop a list of SMF services. The services are read in from stdin.
-zxfer_stopsvcs() {
-	zxfer_set_failure_stage "migration service handling"
-	l_raw_services=$(cat)
+# orchestration after property work and before send/receive so zxfer acts on
+# current destination state instead of stale planning data.
+zxfer_reconcile_live_destination_snapshot_state() {
+	l_reconcile_source_records=$(zxfer_get_live_recheck_source_snapshot_records) || return 0
+	zxfer_resolve_live_reconcile_destination_existence
+	[ "$g_zxfer_live_reconcile_destination_exists_result" -eq 1 ] || return 0
 
-	# Nothing to do if the caller provided an empty string.
-	[ -n "$l_raw_services" ] || return
-
-	l_normalized_services=$(zxfer_normalize_service_list "$l_raw_services")
-
-	[ -n "$l_normalized_services" ] || return
-
-	while IFS= read -r service; do
-		zxfer_echov "Disabling service $service."
-		svcadm disable -st "$service" ||
-			{
-				zxfer_relaunch
-				zxfer_throw_error "Could not disable service $service."
-			}
-		g_zxfer_services_to_restart="$g_zxfer_services_to_restart $service"
-		g_services_need_relaunch=1
-	done <<EOF
-$l_normalized_services
-EOF
-}
-
-# Purpose: Normalize the service list into the stable form used across zxfer.
-# Usage: Called during top-level dataset iteration and replication
-# orchestration before comparison, caching, or reporting depends on exact
-# formatting.
-zxfer_normalize_service_list() {
-	l_raw_services=$1
-	[ -n "$l_raw_services" ] || return
-
-	printf '%s\n' "$l_raw_services" | awk '
-{
-	for (i = 1; i <= NF; i++)
-		print $i
-}'
-}
-
-# Purpose: Preview the service disable commands without performing the live
-# change.
-# Usage: Called during top-level dataset iteration and replication
-# orchestration on dry-run paths where zxfer still needs the exact command or
-# action shape.
-zxfer_preview_service_disable_commands() {
-	l_raw_services=$1
-	l_normalized_services=$(zxfer_normalize_service_list "$l_raw_services")
-	[ -n "$l_normalized_services" ] || return
-
-	while IFS= read -r service; do
-		zxfer_echov "Dry run: $(zxfer_build_shell_command_from_argv svcadm disable -st "$service")"
-	done <<EOF
-$l_normalized_services
-EOF
-}
-
-# Purpose: Record the services for relaunch for later diagnostics or control
-# decisions.
-# Usage: Called during top-level dataset iteration and replication
-# orchestration when zxfer needs the state preserved for follow-on helpers or
-# reporting.
-zxfer_record_services_for_relaunch() {
-	l_raw_services=$1
-	l_normalized_services=$(zxfer_normalize_service_list "$l_raw_services")
-	[ -n "$l_normalized_services" ] || return
-
-	while IFS= read -r service; do
-		[ -n "$service" ] || continue
-		g_zxfer_services_to_restart="$g_zxfer_services_to_restart $service"
-		g_services_need_relaunch=1
-	done <<EOF
-$l_normalized_services
-EOF
-}
-
-# Purpose: Re-enable the services that migration mode previously stopped for
-# this run.
-# Usage: Called during top-level dataset iteration and replication
-# orchestration after replication work finishes or abort paths need to restore
-# service state.
-#
-# Relaunch a list of stopped services
-zxfer_relaunch() {
-	zxfer_set_failure_stage "migration service handling"
-	[ -z "$g_zxfer_services_to_restart" ] && {
-		g_services_need_relaunch=0
-		g_services_relaunch_in_progress=0
-		return
-	}
-
-	g_services_relaunch_in_progress=1
-	l_failed_services=""
-	l_failed_count=0
-
-	for l_i in $g_zxfer_services_to_restart; do
-		zxfer_echov "Restarting service $l_i"
-		if [ "$g_option_n_dryrun" -eq 1 ]; then
-			zxfer_echov "Dry run: $(zxfer_build_shell_command_from_argv svcadm enable "$l_i")"
-			continue
-		fi
-		if ! svcadm enable "$l_i"; then
-			l_failed_count=$((l_failed_count + 1))
-			if [ -z "$l_failed_services" ]; then
-				l_failed_services=$l_i
-			else
-				l_failed_services="$l_failed_services $l_i"
-			fi
-		fi
-	done
-
-	if [ "$l_failed_count" -gt 0 ]; then
-		g_zxfer_services_to_restart=$l_failed_services
-		g_services_need_relaunch=1
-		if [ "$l_failed_count" -eq 1 ]; then
-			zxfer_throw_error "Couldn't re-enable service $l_failed_services."
-		fi
-		zxfer_throw_error "Couldn't re-enable services: $l_failed_services."
+	# Refresh the batched view in this shell so the generation stamp and view
+	# file path survive the captured recheck below.
+	zxfer_ensure_live_destination_snapshot_view
+	if ! l_live_dest_snaps=$(zxfer_get_live_destination_snapshots 2>&1); then
+		zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: $l_live_dest_snaps"
 	fi
-
-	g_zxfer_services_to_restart=""
-	g_services_need_relaunch=0
-	g_services_relaunch_in_progress=0
+	if [ -z "$l_live_dest_snaps" ]; then
+		zxfer_clear_live_destination_common_snapshot_state "$l_reconcile_source_records" 0
+		return 0
+	fi
+	zxfer_set_destination_snapshot_presence 1
+	zxfer_prepare_live_reconcile_source_records "$l_reconcile_source_records" "$l_live_dest_snaps"
+	l_reconcile_source_records=$g_zxfer_live_reconcile_source_records_result
+	l_reconcile_result=$(zxfer_select_live_reconcile_snapshot_range \
+		"$l_reconcile_source_records" "$l_live_dest_snaps")
+	zxfer_publish_live_reconcile_snapshot_range "$l_reconcile_result" "$l_reconcile_source_records"
 }
 
 # Purpose: Create the new snapshot requested by the current run before
@@ -1273,7 +1101,8 @@ zxfer_normalize_source_destination_paths() {
 	# Trailing slashes on the destination are meaningless for dataset names but
 	# make later concatenation produce an illegal double slash, so normalize it
 	# once up front.
-	g_destination=$(zxfer_strip_trailing_slashes "$g_destination")
+	l_normalized_destination=$(zxfer_strip_trailing_slashes "$g_destination")
+	zxfer_set_destination_argument "$l_normalized_destination"
 	zxfer_set_failure_roots "$g_initial_source" "$g_destination"
 }
 
@@ -1335,7 +1164,7 @@ zxfer_check_backup_storage_dir_if_needed() {
 # orchestration after upstream inputs or staged data change.
 zxfer_update_recursive_source_list_if_needed() {
 	if [ "$g_option_R_recursive" = "" ]; then
-		g_recursive_source_list=$g_initial_source
+		zxfer_set_recursive_source_list "$g_initial_source"
 	fi
 }
 
@@ -1413,9 +1242,13 @@ zxfer_preview_migration_services_dry_run() {
 	zxfer_record_services_for_relaunch "$g_option_c_services"
 
 	if zxfer_command_display_render_enabled; then
-		for l_source in $g_recursive_source_list; do
+		l_preview_sources=$(zxfer_split_tokens_on_whitespace "${g_recursive_source_list:-}")
+		while IFS= read -r l_source || [ -n "$l_source" ]; do
+			[ -n "$l_source" ] || continue
 			zxfer_echov "Dry run: $(zxfer_render_source_zfs_command unmount "$l_source")"
-		done
+		done <<EOF
+$l_preview_sources
+EOF
 	fi
 
 	zxfer_newsnap "$g_initial_source"
@@ -1440,25 +1273,32 @@ zxfer_prepare_migration_services() {
 $g_option_c_services
 EOF
 	fi
+	l_migration_sources=$(zxfer_split_tokens_on_whitespace "${g_recursive_source_list:-}")
 
 	# Validate that each dataset is mounted before we attempt to unmount or snapshot.
-	for l_source in $g_recursive_source_list; do
+	while IFS= read -r l_source || [ -n "$l_source" ]; do
+		[ -n "$l_source" ] || continue
 		if ! l_source_mounted=$(zxfer_run_source_zfs_cmd get -Ho value mounted "$l_source"); then
 			zxfer_throw_error "Couldn't determine whether source $l_source is mounted."
 		fi
 		if [ "$l_source_mounted" != "yes" ]; then
 			zxfer_throw_usage_error "The source filesystem is not mounted, cannot use -m."
 		fi
-	done
+	done <<EOF
+$l_migration_sources
+EOF
 
-	for l_source in $g_recursive_source_list; do
+	while IFS= read -r l_source || [ -n "$l_source" ]; do
+		[ -n "$l_source" ] || continue
 		# Unmount the source filesystem before doing the last snapshot.
 		zxfer_echov "Unmounting $l_source."
 		if ! zxfer_run_source_zfs_cmd unmount "$l_source"; then
 			zxfer_relaunch
 			zxfer_throw_error "Couldn't unmount source $l_source."
 		fi
-	done
+	done <<EOF
+$l_migration_sources
+EOF
 
 	# Create the new snapshot with a unique name.
 	zxfer_newsnap "$g_initial_source"
@@ -1474,18 +1314,12 @@ EOF
 # orchestration when zxfer must bootstrap a destination before sending the
 # remaining range.
 zxfer_seed_dry_run_preview_source_list() {
-	if command -v zxfer_reset_snapshot_discovery_state >/dev/null 2>&1; then
-		zxfer_reset_snapshot_discovery_state
-	fi
-	if command -v zxfer_reset_destination_existence_cache >/dev/null 2>&1; then
-		zxfer_reset_destination_existence_cache
-	fi
-	if command -v zxfer_reset_snapshot_record_indexes >/dev/null 2>&1; then
-		zxfer_reset_snapshot_record_indexes
-	fi
+	zxfer_reset_snapshot_discovery_state
+	zxfer_reset_destination_existence_cache
+	zxfer_reset_snapshot_record_indexes
 
-	g_recursive_source_list=$g_initial_source
-	g_recursive_source_dataset_list=$g_initial_source
+	zxfer_set_recursive_source_list "$g_initial_source"
+	zxfer_set_recursive_source_dataset_list "$g_initial_source"
 
 	if [ "$g_option_R_recursive" != "" ]; then
 		zxfer_echoV "Dry run: recursive descendant discovery is skipped; previewing only the explicitly requested source dataset."
@@ -1526,11 +1360,15 @@ zxfer_perform_grandfather_protection_checks() {
 
 	zxfer_echov "Checking grandfather status of all snapshots marked for deletion..."
 
-	for l_source in $g_recursive_source_list; do
+	l_grandfather_sources=$(zxfer_split_tokens_on_whitespace "${g_recursive_source_list:-}")
+	while IFS= read -r l_source || [ -n "$l_source" ]; do
+		[ -n "$l_source" ] || continue
 		zxfer_set_actual_dest "$l_source"
 		# turn off delete so that we are only checking snapshots, pass 0
 		zxfer_inspect_delete_snap 0 "$l_source"
-	done
+	done <<EOF
+$l_grandfather_sources
+EOF
 	zxfer_echov "Grandfather check passed."
 }
 
@@ -1579,7 +1417,7 @@ zxfer_run_zfs_mode_loop() {
 	while true; do
 		# A pass sets this when it performs send/destroy work that may require
 		# another replication iteration.
-		g_is_performed_send_destroy=0
+		zxfer_reset_operation_state
 
 		zxfer_reset_property_iteration_caches
 		# -Y passes exist to converge under concurrent drift, so a batched

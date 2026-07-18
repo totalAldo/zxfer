@@ -34,6 +34,59 @@ test_zxfer_compute_secure_path_defaults_to_allowlist() {
 		"$(zxfer_compute_secure_path)"
 }
 
+test_zxfer_compute_secure_path_preserves_custom_ifs_and_enabled_globbing() {
+	secure_fixture_root=$(mktemp -d -t zxfer-dependencies-secure.XXXXXX) ||
+		fail "Unable to create secure-PATH fixture directory."
+	mkdir -p "$secure_fixture_root/secure-one" "$secure_fixture_root/secure-two"
+	path_output_file="$secure_fixture_root/secure-path-custom-ifs.out"
+
+	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
+	zxfer_test_capture_subshell '
+		IFS="|"
+		set +f
+		ZXFER_SECURE_PATH="$secure_fixture_root/secure-*:/usr/bin"
+		zxfer_compute_secure_path >"$secure_fixture_root/secure-path-custom-ifs.out"
+		printf "ifs=<%s>\n" "$IFS"
+		case $- in
+		*f*) printf "%s\n" "globbing=disabled" ;;
+		*) printf "%s\n" "globbing=enabled" ;;
+		esac
+	'
+
+	assertEquals "Secure PATH parsing should keep wildcard characters literal instead of expanding them against the filesystem." \
+		"$secure_fixture_root/secure-*:/usr/bin" "$(cat "$path_output_file")"
+	assertContains "Secure PATH parsing should restore a caller-defined IFS exactly." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ifs=<|>"
+	assertContains "Secure PATH parsing should leave caller-enabled globbing enabled." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "globbing=enabled"
+
+	rm -rf "$secure_fixture_root"
+}
+
+test_zxfer_compute_secure_path_preserves_unset_ifs_and_disabled_globbing() {
+	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
+	zxfer_test_capture_subshell '
+		unset IFS
+		set -f
+		ZXFER_SECURE_PATH="/opt/zfs/bin:/usr/bin"
+		zxfer_compute_secure_path >/dev/null
+		if [ "${IFS+set}" = "set" ]; then
+			printf "%s\n" "ifs=set"
+		else
+			printf "%s\n" "ifs=unset"
+		fi
+		case $- in
+		*f*) printf "%s\n" "globbing=disabled" ;;
+		*) printf "%s\n" "globbing=enabled" ;;
+		esac
+	'
+
+	assertContains "Secure PATH parsing should restore an originally unset IFS." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ifs=unset"
+	assertContains "Secure PATH parsing should preserve a caller's disabled-globbing state." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "globbing=disabled"
+}
+
 test_zxfer_get_effective_dependency_path_refreshes_from_environment() {
 	result=$(
 		(
@@ -126,6 +179,84 @@ test_zxfer_validate_resolved_tool_path_accepts_double_quoted_absolute_path() {
 		"/tmp/mocktool.\$(touch marker)" "$result"
 }
 
+test_zxfer_assign_required_tool_rejects_untrusted_assignment_target_before_lookup() {
+	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
+	zxfer_test_capture_subshell '
+		g_dependency_lookup_calls=0
+		g_dependency_assignment_injected=0
+		zxfer_find_required_tool() {
+			g_dependency_lookup_calls=$((g_dependency_lookup_calls + 1))
+			printf "%s\n" "/opt/mock/mocktool"
+		}
+		zxfer_throw_error() {
+			printf "class=%s\n" "$g_zxfer_failure_class"
+			printf "message=%s\n" "$1"
+			printf "lookups=%s\n" "$g_dependency_lookup_calls"
+			printf "injected=%s\n" "$g_dependency_assignment_injected"
+			exit 1
+		}
+		zxfer_assign_required_tool "g_cmd_safe=ignored; g_dependency_assignment_injected" mocktool "mocktool"
+	'
+
+	assertEquals "Invalid dependency assignment targets should fail closed." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Invalid dependency assignment targets should use dependency failure classification." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "class=dependency"
+	assertContains "Invalid dependency assignment targets should use a stable internal-error diagnostic." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "message=Invalid internal dependency assignment target."
+	assertContains "Dependency assignment targets should be validated before helper lookup." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "lookups=0"
+	assertContains "Rejected dependency targets should never be evaluated." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "injected=0"
+}
+
+test_zxfer_assign_required_tool_rejects_valid_names_outside_command_prefix() {
+	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
+	zxfer_test_capture_subshell '
+		zxfer_throw_error() {
+			printf "%s\n" "$1"
+			exit 1
+		}
+		zxfer_assign_required_tool g_dependency_result mocktool "mocktool"
+	'
+
+	assertEquals "Dependency assignment should reject valid shell names outside the g_cmd_ namespace." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Out-of-namespace dependency targets should use the stable internal-error diagnostic." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Invalid internal dependency assignment target."
+}
+
+test_zxfer_set_dependency_command_publishes_each_supported_command_slot() {
+	zxfer_set_dependency_command g_cmd_compress_safe "'/opt/bin/zstd' '-3'"
+	zxfer_set_dependency_command g_cmd_decompress "/opt/bin/zstd -d"
+	zxfer_set_dependency_command g_cmd_decompress_safe "'/opt/bin/zstd' '-d'"
+	zxfer_set_dependency_command g_cmd_parallel "/opt/bin/parallel"
+	zxfer_set_dependency_command g_cmd_ps "/bin/ps"
+	zxfer_set_dependency_command g_cmd_zfs "/sbin/zfs"
+
+	assertEquals "The dependency owner should publish the safe compression command." \
+		"'/opt/bin/zstd' '-3'" "$g_cmd_compress_safe"
+	assertEquals "The dependency owner should publish the decompression command." \
+		"/opt/bin/zstd -d" "$g_cmd_decompress"
+	assertEquals "The dependency owner should publish the safe decompression command." \
+		"'/opt/bin/zstd' '-d'" "$g_cmd_decompress_safe"
+	assertEquals "The dependency owner should publish the optional parallel command." \
+		"/opt/bin/parallel" "$g_cmd_parallel"
+	assertEquals "The dependency owner should publish the process-inspection command." \
+		"/bin/ps" "$g_cmd_ps"
+	assertEquals "The dependency owner should publish the ZFS command." \
+		"/sbin/zfs" "$g_cmd_zfs"
+}
+
+test_zxfer_set_endpoint_compression_command_rejects_unknown_selector() {
+	set +e
+	zxfer_set_endpoint_compression_command other compress "'/opt/bin/zstd' '-3'"
+	status=$?
+
+	assertEquals "Endpoint compression publication should reject unknown role and codec selectors." \
+		2 "$status"
+}
+
 test_zxfer_resolve_local_cli_command_safe_rejects_quoted_token_strings() {
 	set +e
 	output=$(zxfer_resolve_local_cli_command_safe '"/opt/zstd dir/zstd" -3' "compression command")
@@ -176,6 +307,21 @@ test_zxfer_initialize_dependency_defaults_sets_runtime_path_and_awk() {
 		"$result" "awk=/"
 }
 
+test_zxfer_initialize_dependency_defaults_replaces_inherited_awk_command() {
+	g_cmd_awk="$TEST_TMPDIR/inherited-untrusted-awk"
+
+	zxfer_initialize_dependency_defaults
+
+	assertNotEquals "Dependency bootstrap must not preserve an inherited internal awk command." \
+		"$TEST_TMPDIR/inherited-untrusted-awk" "$g_cmd_awk"
+	case $g_cmd_awk in
+	/* | awk) l_awk_is_bootstrap_safe=0 ;;
+	*) l_awk_is_bootstrap_safe=1 ;;
+	esac
+	assertEquals "The replacement awk command should be an absolute secure-PATH result or the safe early-PATH fallback." \
+		0 "$l_awk_is_bootstrap_safe"
+}
+
 test_zxfer_initialize_dependency_defaults_falls_back_to_plain_awk_when_secure_path_has_no_awk() {
 	result=$(
 		(
@@ -194,6 +340,43 @@ test_zxfer_initialize_dependency_defaults_falls_back_to_plain_awk_when_secure_pa
 		"$result" "awk=awk"
 	assertContains "The plain awk fallback should remain usable before runtime init exports the strict secure PATH." \
 		"$result" "tokens=alpha beta "
+}
+
+test_zxfer_init_dependency_tool_defaults_owns_command_state() {
+	result=$(
+		(
+			g_zxfer_dependency_path=""
+			zxfer_assign_required_tool() {
+				eval "$1=/stub/$2"
+			}
+			zxfer_refresh_compression_commands() {
+				printf '%s\n' "compression_refreshed=yes"
+			}
+
+			zxfer_init_dependency_tool_defaults
+			printf 'zfs=%s\n' "$g_cmd_zfs"
+			printf 'ssh=<%s>\n' "$g_cmd_ssh"
+			printf 'compress=%s\n' "$g_cmd_compress"
+			printf 'decompress=%s\n' "$g_cmd_decompress"
+			printf 'ps=%s\n' "$g_cmd_ps"
+			printf 'parallel=<%s>\n' "$g_cmd_parallel"
+		)
+	)
+
+	assertContains "Dependency defaults should resolve the required zfs helper." \
+		"$result" "zfs=/stub/zfs"
+	assertContains "Dependency defaults should keep ssh lazy for local-only runs." \
+		"$result" "ssh=<>"
+	assertContains "Dependency defaults should retain the established compression command." \
+		"$result" "compress=zstd -3"
+	assertContains "Dependency defaults should retain the established decompression command." \
+		"$result" "decompress=zstd -d"
+	assertContains "Dependency defaults should resolve ps for process identity checks." \
+		"$result" "ps=/stub/ps"
+	assertContains "Dependency defaults should leave missing optional parallel unset." \
+		"$result" "parallel=<>"
+	assertContains "Dependency defaults should refresh the safe compression renderings." \
+		"$result" "compression_refreshed=yes"
 }
 
 # shellcheck source=tests/shunit2/shunit2

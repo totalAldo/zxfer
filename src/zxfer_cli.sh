@@ -41,48 +41,182 @@
 # mutates caches: none.
 # returns via stdout: none; parser and validators update shared runtime globals directly.
 
-# Purpose: Refresh the validated compression and decompression command variants
-# derived from the current CLI state.
-# Usage: Called during CLI parsing and startup validation after compression-
-# related options change so later execution paths reuse one safe command-
-# resolution result.
-zxfer_refresh_compression_commands() {
-	if [ "$g_option_z_compress" -eq 1 ]; then
-		if [ "$g_cmd_compress" = "" ]; then
-			zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
-		fi
-		if ! l_compress_tokens=$(zxfer_split_cli_tokens "$g_cmd_compress" "Compression command (-Z)"); then
-			zxfer_throw_usage_error "$l_compress_tokens" 2
-		fi
-		if [ "$l_compress_tokens" = "" ]; then
-			zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
-		fi
-		if [ "$g_cmd_decompress" = "" ]; then
-			zxfer_throw_error "Compression requested but decompression command missing."
-		fi
-		if ! l_decompress_tokens=$(zxfer_split_cli_tokens "$g_cmd_decompress" "Decompression command"); then
-			zxfer_throw_error "$l_decompress_tokens"
-		fi
-		if [ "$l_decompress_tokens" = "" ]; then
-			zxfer_throw_error "Compression requested but decompression command missing."
-		fi
-		if ! g_cmd_compress_safe=$(zxfer_resolve_local_cli_command_safe "$g_cmd_compress" "compression command"); then
-			g_zxfer_failure_class=dependency
-			zxfer_throw_error "$g_cmd_compress_safe"
-		fi
-		if ! g_cmd_decompress_safe=$(zxfer_resolve_local_cli_command_safe "$g_cmd_decompress" "decompression command"); then
-			g_zxfer_failure_class=dependency
-			zxfer_throw_error "$g_cmd_decompress_safe"
-		fi
-		return
-	fi
+# Purpose: Reset every parsed CLI option to its established startup default.
+# Usage: Called by the session composition root before parsing a new invocation.
+# Side effects: Reinitializes the complete g_option_* state owned by this module.
+zxfer_init_cli_option_defaults() {
+	g_destination=""
+	g_option_b_beep_always=0
+	g_option_B_beep_on_success=0
+	g_option_c_services=""
+	g_option_d_delete_destination_snapshots=0
+	g_option_D_display_progress_bar=""
+	g_option_e_restore_property_mode=0
+	g_option_F_force_rollback=""
+	g_option_g_grandfather_protection=""
+	g_option_I_ignore_properties=""
+	# Default 1 avoids parallel source listing and background send jobs.
+	g_option_j_jobs=1
+	g_option_k_backup_property_mode=0
+	g_option_o_override_property=""
+	g_option_O_origin_host=""
+	g_option_P_transfer_property=0
+	g_option_R_recursive=""
+	g_option_m_migrate=0
+	g_option_n_dryrun=0
+	g_option_N_nonrecursive=""
+	g_option_s_make_snapshot=0
+	g_option_T_target_host=""
+	g_option_U_skip_unsupported_properties=0
+	g_option_v_verbose=0
+	g_option_V_very_verbose=0
+	g_option_x_exclude_datasets=""
+	g_option_Y_yield_iterations=1
+	g_option_w_raw_send=0
+	g_option_z_compress=0
+}
 
-	if ! g_cmd_compress_safe=$(zxfer_quote_cli_tokens "$g_cmd_compress" "Compression command"); then
-		zxfer_throw_error "$g_cmd_compress_safe"
-	fi
-	if ! g_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress" "Decompression command"); then
-		zxfer_throw_error "$g_cmd_decompress_safe"
-	fi
+# Purpose: Publish the validated positional destination through configuration
+# ownership.
+# Usage: Session parsing and later path normalization call this instead of
+# assigning shared configuration directly.
+zxfer_set_destination_argument() {
+	g_destination=${1:-}
+}
+
+# Purpose: Apply one parsed option from the first half of zxfer's stable CLI.
+# Usage: Called by zxfer_read_command_line_switches with the option name and
+# its captured argument. Returns 1 only when the option belongs to the second
+# handler, keeping each decision table bounded and independently reviewable.
+zxfer_apply_cli_option_b_to_o() {
+	l_cli_option=$1
+	l_cli_option_argument=$2
+
+	case $l_cli_option in
+	b)
+		g_option_b_beep_always=1
+		;;
+	B)
+		g_option_B_beep_on_success=1
+		;;
+	c)
+		g_option_c_services=$l_cli_option_argument
+		;;
+	d)
+		g_option_d_delete_destination_snapshots=1
+		;;
+	D)
+		g_option_D_display_progress_bar=$l_cli_option_argument
+		;;
+	e)
+		g_option_e_restore_property_mode=1
+		# Restore mode still flows through the property-transfer path.
+		g_option_P_transfer_property=1
+		;;
+	F)
+		g_option_F_force_rollback="-F"
+		;;
+	g)
+		g_option_g_grandfather_protection=$l_cli_option_argument
+		;;
+	h)
+		zxfer_usage
+		exit 0
+		;;
+	I)
+		g_option_I_ignore_properties=$l_cli_option_argument
+		;;
+	j)
+		g_option_j_jobs=$l_cli_option_argument
+		;;
+	k)
+		g_option_k_backup_property_mode=1
+		# Backup mode still needs live source properties so they can be saved.
+		g_option_P_transfer_property=1
+		;;
+	m)
+		g_option_m_migrate=1
+		g_option_s_make_snapshot=1
+		g_option_P_transfer_property=1
+		;;
+	n)
+		g_option_n_dryrun=1
+		;;
+	N)
+		g_option_N_nonrecursive=$l_cli_option_argument
+		;;
+	o)
+		g_option_o_override_property=$l_cli_option_argument
+		;;
+	O)
+		l_new_origin_host=$l_cli_option_argument
+		g_option_O_origin_host="$l_new_origin_host"
+		# Rebuild rendered zfs commands after the origin host spec changes.
+		zxfer_refresh_remote_zfs_commands
+		;;
+	*)
+		return 1
+		;;
+	esac
+	return 0
+}
+
+# Purpose: Apply one parsed option from the second half of zxfer's stable CLI.
+# Usage: Called after zxfer_apply_cli_option_b_to_o declines the option.
+zxfer_apply_cli_option_p_to_z() {
+	l_cli_option=$1
+	l_cli_option_argument=$2
+
+	case $l_cli_option in
+	P)
+		g_option_P_transfer_property=1
+		;;
+	R)
+		g_option_R_recursive=$l_cli_option_argument
+		;;
+	s)
+		g_option_s_make_snapshot=1
+		;;
+	T)
+		l_new_target_host=$l_cli_option_argument
+		g_option_T_target_host="$l_new_target_host"
+		# Rebuild rendered zfs commands after the target host spec changes.
+		zxfer_refresh_remote_zfs_commands
+		;;
+	U)
+		g_option_U_skip_unsupported_properties=1
+		;;
+	v)
+		g_option_v_verbose=1
+		;;
+	V)
+		g_option_v_verbose=1
+		g_option_V_very_verbose=1
+		;;
+	w)
+		g_option_w_raw_send=1
+		;;
+	x)
+		g_option_x_exclude_datasets=$l_cli_option_argument
+		;;
+	Y)
+		g_option_Y_yield_iterations=$(zxfer_get_max_yield_iterations)
+		;;
+	z)
+		g_option_z_compress=1
+		;;
+	Z)
+		g_option_z_compress=1
+		zxfer_set_dependency_command g_cmd_compress "$l_cli_option_argument"
+		;;
+	\?)
+		zxfer_throw_usage_error "Invalid option provided." 2
+		;;
+	*)
+		zxfer_throw_usage_error "Invalid option provided." 2
+		;;
+	esac
+	return 0
 }
 
 # Purpose: Parse supported command-line switches into the shared `g_option_*`
@@ -91,113 +225,10 @@ zxfer_refresh_compression_commands() {
 # checks and transport bootstrap depend on the parsed flags.
 zxfer_read_command_line_switches() {
 	while getopts bBc:dD:eFg:hI:j:kmnN:o:O:PR:sT:UvVwx:YzZ: l_i; do
-		case $l_i in
-		b)
-			g_option_b_beep_always=1
-			;;
-		B)
-			g_option_B_beep_on_success=1
-			;;
-		c)
-			g_option_c_services="$OPTARG"
-			;;
-		d)
-			g_option_d_delete_destination_snapshots=1
-			;;
-		D)
-			g_option_D_display_progress_bar="$OPTARG"
-			;;
-		e)
-			g_option_e_restore_property_mode=1
-			# Restore mode still flows through the property-transfer path.
-			g_option_P_transfer_property=1
-			;;
-		F)
-			g_option_F_force_rollback="-F"
-			;;
-		g)
-			g_option_g_grandfather_protection="$OPTARG"
-			;;
-		h)
-			zxfer_usage
-			exit 0
-			;;
-		I)
-			g_option_I_ignore_properties="$OPTARG"
-			;;
-		j)
-			g_option_j_jobs="$OPTARG"
-			;;
-		k)
-			g_option_k_backup_property_mode=1
-			# Backup mode still needs live source properties so they can be saved.
-			g_option_P_transfer_property=1
-			;;
-		m)
-			g_option_m_migrate=1
-			g_option_s_make_snapshot=1
-			g_option_P_transfer_property=1
-			;;
-		n)
-			g_option_n_dryrun=1
-			;;
-		N)
-			g_option_N_nonrecursive="$OPTARG"
-			;;
-		o)
-			g_option_o_override_property="$OPTARG"
-			;;
-		O)
-			l_new_origin_host="$OPTARG"
-			g_option_O_origin_host="$l_new_origin_host"
-			# Rebuild rendered zfs commands after the origin host spec changes.
-			zxfer_refresh_remote_zfs_commands
-			;;
-		P)
-			g_option_P_transfer_property=1
-			;;
-		R)
-			g_option_R_recursive="$OPTARG"
-			;;
-		s)
-			g_option_s_make_snapshot=1
-			;;
-		T)
-			l_new_target_host="$OPTARG"
-			g_option_T_target_host="$l_new_target_host"
-			# Rebuild rendered zfs commands after the target host spec changes.
-			zxfer_refresh_remote_zfs_commands
-			;;
-		U)
-			g_option_U_skip_unsupported_properties=1
-			;;
-		v)
-			g_option_v_verbose=1
-			;;
-		V)
-			g_option_v_verbose=1
-			g_option_V_very_verbose=1
-			;;
-		w)
-			g_option_w_raw_send=1
-			;;
-		x)
-			g_option_x_exclude_datasets="$OPTARG"
-			;;
-		Y)
-			g_option_Y_yield_iterations=$(zxfer_get_max_yield_iterations)
-			;;
-		z)
-			g_option_z_compress=1
-			;;
-		Z)
-			g_option_z_compress=1
-			g_cmd_compress="$OPTARG"
-			;;
-		\?)
-			zxfer_throw_usage_error "Invalid option provided." 2
-			;;
-		esac
+		if zxfer_apply_cli_option_b_to_o "$l_i" "${OPTARG:-}"; then
+			continue
+		fi
+		zxfer_apply_cli_option_p_to_z "$l_i" "${OPTARG:-}"
 	done
 
 	zxfer_refresh_compression_commands

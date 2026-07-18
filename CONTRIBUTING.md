@@ -35,6 +35,24 @@ should prioritize:
 
 ## Required Validation
 
+The profile dispatcher provides one discoverable front door for the existing
+validation entrypoints:
+
+```sh
+./tests/validate.sh --list
+./tests/validate.sh full
+```
+
+`full` runs the complete host-safe lint, unit, and enforced bash-xtrace
+coverage stack. Profile composition lives in `tests/validation_profiles.tsv`;
+`tests/validation_map.tsv` maps changed path patterns to unit suites plus
+recommended integration groups, performance cases, and documentation
+surfaces. Neither file is evaluated as shell code. `quick` executes only the
+offline budget and mapped unit checks; `vm` accepts only `smoke` or `local`.
+No profile invokes the direct host integration harness.
+`quick` and `full` run independent suites with four workers by default; set
+`ZXFER_VALIDATE_JOBS` to another positive integer for a constrained host.
+
 Run unit tests:
 
 ```sh
@@ -47,13 +65,25 @@ Run the pinned local lint stack:
 ./tests/run_lint.sh
 ```
 
-The lint stack includes the anti-rebloat budget gate
-(`./tests/run_lint.sh budget`), which checks the working tree against the
-ratchet-down-only size and caller budgets in `tests/budget_policy.tsv`.
-Lowering a budget is routine maintenance; raising any value requires explicit
-justification in the PR that edits it. Use
+The lint stack includes the complexity and anti-rebloat budget gate
+(`./tests/run_lint.sh budget`), which enforces universal per-module,
+per-function, and focused-test ceilings plus sensitive-caller ratchets from
+`tests/budget_policy.tsv`.
+It also checks that `man/zxfer.1m` is the exact generated Solaris/illumos
+rendering of canonical `man/zxfer.8`; edit only the `.8` page, then run
+`./tests/generate_solaris_manpage.sh --write`.
+The budget is also an explicit GitHub Actions lint-matrix target, and a
+workflow contract test keeps the local runner target list and CI matrix in
+sync. Dependency-free targets such as `budget` and `--list` do not initialize
+or download the pinned lint toolchain.
+Lowering a ceiling or caller ratchet is routine maintenance; raising one
+requires explicit justification in the PR that edits it. Use
 `./tests/run_budget_check.sh --list` to print current measured values in
 policy format when ratcheting budgets down.
+
+The shell lint targets include tracked and non-ignored untracked `*.sh` files
+and the `zxfer` launcher, so a newly extracted module is checked before it is
+staged. Ignored files remain outside the lint source set.
 
 If you prefer a prebuilt contributor environment, open the repository in the
 included `.devcontainer/` from GitHub Codespaces or VS Code. It preinstalls
@@ -68,17 +98,36 @@ Run targeted suites when editing a specific area:
 ./tests/run_shunit_tests.sh tests/test_zxfer_replication.sh
 ```
 
+List suites or the named tests in one suite, then run only the needed tests:
+
+```sh
+./tests/run_shunit_tests.sh --list
+./tests/run_shunit_tests.sh --list-suites
+./tests/run_shunit_tests.sh --list-tests tests/test_zxfer_replication.sh
+./tests/run_shunit_tests.sh \
+  --suite tests/test_zxfer_replication.sh --test test_name \
+  --suite tests/test_zxfer_exec.sh --test another_test_name
+```
+
+Named tests are validated as a batch before any selected suite starts. A
+repeated suite is merged into its first position and executes once with all of
+its selected tests.
+
 Run coverage when useful:
 
 ```sh
 ./tests/run_coverage.sh
 ```
 
+Coverage runs are report-only by default. Targeted bash-xtrace suite runs stay
+report-only because a partial trace cannot satisfy the full-tree policy. Only
+a full run with `--enforce` applies the repository thresholds.
+
 Run the enforced bash-xtrace coverage gate when changing shell logic, tests,
 or coverage tooling:
 
 ```sh
-ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
+ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh --enforce
 ```
 
 That local run matches the GitHub Actions policy lane: it checks the committed
@@ -125,7 +174,7 @@ When behavior changes, update the relevant docs:
 
 - `README.md`
 - `CHANGELOG.txt`
-- man pages
+- canonical `man/zxfer.8` (regenerate `man/zxfer.1m` rather than editing it)
 - `docs/` guides when workflows or platform behavior changes
 - `SECURITY.md` when trust boundaries, helper resolution, or failure-report
   handling change

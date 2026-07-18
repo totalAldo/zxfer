@@ -63,7 +63,22 @@ zxfer_compute_secure_path() {
 		fi
 	fi
 
-	OLDIFS=$IFS
+	case $- in
+	*f*)
+		l_secure_path_restore_glob=0
+		;;
+	*)
+		l_secure_path_restore_glob=1
+		set -f
+		;;
+	esac
+	if [ "${IFS+set}" = "set" ]; then
+		l_secure_path_saved_ifs_set=1
+		l_secure_path_saved_ifs=$IFS
+	else
+		l_secure_path_saved_ifs_set=0
+		l_secure_path_saved_ifs=""
+	fi
 	IFS=":"
 	l_clean=""
 	for l_entry in $l_candidate; do
@@ -84,7 +99,14 @@ zxfer_compute_secure_path() {
 			;;
 		esac
 	done
-	IFS=$OLDIFS
+	if [ "$l_secure_path_saved_ifs_set" -eq 1 ]; then
+		IFS=$l_secure_path_saved_ifs
+	else
+		unset IFS
+	fi
+	if [ "$l_secure_path_restore_glob" -eq 1 ]; then
+		set +f
+	fi
 
 	if [ "$l_clean" = "" ]; then
 		l_clean=$ZXFER_DEFAULT_SECURE_PATH
@@ -232,22 +254,73 @@ zxfer_find_required_tool() {
 	zxfer_validate_resolved_tool_path "$l_path" "$l_label"
 }
 
-# Purpose: Assign the required tool into the shared runtime variable that owns
-# it.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# after a validated lookup succeeds and downstream helpers should reuse the
-# stored result.
+# Purpose: Publish one resolved command through the dependency owner.
+# Usage: The explicit mapping keeps every supported helper visible to static
+# ownership checks and avoids indirect assignment.
+zxfer_set_dependency_command() {
+	l_var_name=$1
+	l_command_value=${2:-}
+
+	case "$l_var_name" in
+	g_cmd_awk) g_cmd_awk=$l_command_value ;;
+	g_cmd_cat) g_cmd_cat=$l_command_value ;;
+	g_cmd_compress) g_cmd_compress=$l_command_value ;;
+	g_cmd_compress_safe) g_cmd_compress_safe=$l_command_value ;;
+	g_cmd_decompress) g_cmd_decompress=$l_command_value ;;
+	g_cmd_decompress_safe) g_cmd_decompress_safe=$l_command_value ;;
+	g_cmd_parallel) g_cmd_parallel=$l_command_value ;;
+	g_cmd_ps) g_cmd_ps=$l_command_value ;;
+	g_cmd_ssh) g_cmd_ssh=$l_command_value ;;
+	g_cmd_zfs) g_cmd_zfs=$l_command_value ;;
+	*) return 2 ;;
+	esac
+}
+
+# Purpose: Publish one role-specific safe compression command.
+# Usage: Endpoint initialization passes validated `origin|target` and
+# `compress|decompress` selectors through this owner operation.
+zxfer_set_endpoint_compression_command() {
+	l_endpoint_role=$1
+	l_endpoint_codec=$2
+	l_endpoint_command=${3:-}
+
+	case "$l_endpoint_role:$l_endpoint_codec" in
+	origin:compress) g_origin_cmd_compress_safe=$l_endpoint_command ;;
+	origin:decompress) g_origin_cmd_decompress_safe=$l_endpoint_command ;;
+	target:compress) g_target_cmd_compress_safe=$l_endpoint_command ;;
+	target:decompress) g_target_cmd_decompress_safe=$l_endpoint_command ;;
+	*) return 2 ;;
+	esac
+}
+
+# Purpose: Reset endpoint-safe commands to the resolved local defaults.
+# Usage: Called before remote roles selectively replace their command.
+zxfer_reset_endpoint_compression_commands() {
+	zxfer_set_endpoint_compression_command origin compress "$g_cmd_compress_safe"
+	zxfer_set_endpoint_compression_command origin decompress "$g_cmd_decompress_safe"
+	zxfer_set_endpoint_compression_command target compress "$g_cmd_compress_safe"
+	zxfer_set_endpoint_compression_command target decompress "$g_cmd_decompress_safe"
+}
+
+# Purpose: Resolve and assign one required dependency command.
+# Usage: Called during secure-PATH bootstrap after callers select a supported
+# dependency-owned command slot.
 zxfer_assign_required_tool() {
 	l_var_name=$1
 	l_tool=$2
 	l_label=${3:-$l_tool}
 
+	if ! zxfer_set_dependency_command "$l_var_name" ""; then
+		zxfer_set_failure_class dependency
+		zxfer_throw_error "Invalid internal dependency assignment target."
+	fi
+
 	if ! l_resolved_path=$(zxfer_find_required_tool "$l_tool" "$l_label"); then
-		g_zxfer_failure_class=dependency
+		zxfer_set_failure_class dependency
 		zxfer_throw_error "$l_resolved_path"
 	fi
 
-	eval "$l_var_name=\$l_resolved_path"
+	zxfer_set_dependency_command "$l_var_name" "$l_resolved_path"
 }
 
 # Purpose: Rebuild a CLI command string around a validated absolute helper path
@@ -321,12 +394,95 @@ zxfer_resolve_local_cli_command_safe() {
 zxfer_initialize_dependency_defaults() {
 	zxfer_refresh_secure_path_state
 
-	if [ -z "${g_cmd_awk:-}" ]; then
-		l_search_path=${g_zxfer_dependency_path:-$g_zxfer_secure_path}
-		[ -n "$l_search_path" ] || l_search_path=$ZXFER_DEFAULT_SECURE_PATH
-		g_cmd_awk=$(PATH=$l_search_path command -v awk 2>/dev/null || :)
-		if [ -z "$g_cmd_awk" ]; then
-			g_cmd_awk='awk'
+	# This bootstrap value is reachable from the EXIT trap's failure renderer
+	# before the full dependency owner reset runs. Never preserve an inherited
+	# internal command global across that boundary.
+	l_search_path=${g_zxfer_dependency_path:-$g_zxfer_secure_path}
+	[ -n "$l_search_path" ] || l_search_path=$ZXFER_DEFAULT_SECURE_PATH
+	g_cmd_awk=$(PATH=$l_search_path command -v awk 2>/dev/null || :)
+	if [ -z "$g_cmd_awk" ]; then
+		g_cmd_awk='awk'
+	fi
+}
+
+# Purpose: Refresh the validated compression and decompression command variants
+# derived from the parsed CLI configuration and resolved dependency paths.
+# Usage: Called after dependency initialization and whenever compression-
+# related options change so execution paths reuse one safe command result.
+zxfer_refresh_compression_commands() {
+	if [ "$g_option_z_compress" -eq 1 ]; then
+		if [ "$g_cmd_compress" = "" ]; then
+			zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
+		fi
+		if ! l_compress_tokens=$(zxfer_split_cli_tokens "$g_cmd_compress" "Compression command (-Z)"); then
+			zxfer_throw_usage_error "$l_compress_tokens" 2
+		fi
+		if [ "$l_compress_tokens" = "" ]; then
+			zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
+		fi
+		if [ "$g_cmd_decompress" = "" ]; then
+			zxfer_throw_error "Compression requested but decompression command missing."
+		fi
+		if ! l_decompress_tokens=$(zxfer_split_cli_tokens "$g_cmd_decompress" "Decompression command"); then
+			zxfer_throw_error "$l_decompress_tokens"
+		fi
+		if [ "$l_decompress_tokens" = "" ]; then
+			zxfer_throw_error "Compression requested but decompression command missing."
+		fi
+		if ! g_cmd_compress_safe=$(zxfer_resolve_local_cli_command_safe "$g_cmd_compress" "compression command"); then
+			zxfer_set_failure_class dependency
+			zxfer_throw_error "$g_cmd_compress_safe"
+		fi
+		if ! g_cmd_decompress_safe=$(zxfer_resolve_local_cli_command_safe "$g_cmd_decompress" "decompression command"); then
+			zxfer_set_failure_class dependency
+			zxfer_throw_error "$g_cmd_decompress_safe"
+		fi
+		return
+	fi
+
+	if ! g_cmd_compress_safe=$(zxfer_quote_cli_tokens "$g_cmd_compress" "Compression command"); then
+		zxfer_throw_error "$g_cmd_compress_safe"
+	fi
+	if ! g_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress" "Decompression command"); then
+		zxfer_throw_error "$g_cmd_decompress_safe"
+	fi
+}
+
+# Purpose: Reset and resolve the local command defaults for a new session.
+# Usage: Called by the session composition root after all modules are loaded
+# and before the runtime PATH is narrowed to the validated dependency path.
+# Side effects: Publishes validated g_cmd_* helper and compression state.
+zxfer_init_dependency_tool_defaults() {
+	g_cmd_zfs=""
+	g_cmd_ssh=""
+
+	# default compression commands
+	g_cmd_compress="zstd -3"
+	g_cmd_decompress="zstd -d"
+	g_cmd_compress_safe=""
+	g_cmd_decompress_safe=""
+	g_origin_cmd_compress_safe=""
+	g_origin_cmd_decompress_safe=""
+	g_target_cmd_compress_safe=""
+	g_target_cmd_decompress_safe=""
+	g_cmd_cat=""
+	g_cmd_ps=""
+
+	zxfer_assign_required_tool g_cmd_awk awk "awk"
+	zxfer_assign_required_tool g_cmd_zfs zfs "zfs"
+	g_cmd_parallel=$(PATH=$g_zxfer_dependency_path command -v parallel 2>/dev/null || :)
+	if [ "$g_cmd_parallel" != "" ]; then
+		l_dependency_status=0
+		g_cmd_parallel=$(zxfer_validate_resolved_tool_path "$g_cmd_parallel" "parallel") ||
+			l_dependency_status=$?
+		if [ "$l_dependency_status" -ne 0 ]; then
+			zxfer_set_failure_class dependency
+			zxfer_throw_error "$g_cmd_parallel" "$l_dependency_status"
 		fi
 	fi
+
+	# enable compression in ssh options so that remote snapshot lists that
+	# contain thousands of snapshots are compressed
+	zxfer_assign_required_tool g_cmd_ps ps "ps"
+	zxfer_refresh_compression_commands
 }

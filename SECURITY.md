@@ -17,6 +17,18 @@ Key protections already present in the project include:
 - hardened `ZXFER_ERROR_LOG` path validation
 - secured property backup metadata directories and file-permission checks
 - explicit handling for wrapped remote host specs
+- separate argv-preserving execution and hardened rendered-pipeline APIs
+- a private per-run 0700 artifact root whose exact path, validated parent, and
+  stored device/inode identity must match runtime-owned provenance before
+  recursive cleanup
+- exact registration and shape checks for the small number of path-adjacent
+  staging entries that cannot live below the run root, plus stored
+  device/inode identity checks for registered directories
+- pre-trap rejection of inherited internal cleanup handles, so exported `g_*`
+  state cannot authorize process signals, SSH actions, path removal, or SMF
+  service changes
+- supervised background-job teardown limited to zxfer-created process groups
+  or direct children that have not yet been reaped
 
 Structured failure reports now redact `invocation` and `last_command` as
 `[redacted]` by default in both `stderr` output and any `ZXFER_ERROR_LOG`
@@ -57,4 +69,6 @@ Changes in these areas should receive extra scrutiny:
 - secure-PATH resolution
 - property backup / restore lookup
 - ssh control-socket management
+- runtime-root and path-adjacent staging cleanup
+- background-process registration, signalling, and status protocols
 - snapshot deletion and rollback behavior

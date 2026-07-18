@@ -1,0 +1,40 @@
+# zxfer module layering policy (TAB-separated).
+# Dependencies may stay within one layer when acyclic or point to a lower
+# numeric layer. Upward edges and every cycle are rejected.
+#
+# Records:
+#   layer MODULE RANK NAME
+#   standalone MODULE
+# Literal eval commands are inventoried separately in
+# tests/architecture_eval_policy.tsv.
+standalone	src/zxfer_cleanup_child_wrapper.sh
+layer	src/zxfer_path_security.sh	0	foundation
+layer	src/zxfer_quoting.sh	0	foundation
+layer	src/zxfer_reporting.sh	0	foundation
+layer	src/zxfer_dependencies.sh	0	foundation
+layer	src/zxfer_locking.sh	1	infrastructure
+layer	src/zxfer_profile.sh	1	infrastructure
+layer	src/zxfer_runtime.sh	1	infrastructure
+layer	src/zxfer_secure_staging.sh	1	infrastructure
+layer	src/zxfer_error_log.sh	1	infrastructure
+layer	src/zxfer_exec.sh	1	infrastructure
+layer	src/zxfer_background_jobs.sh	1	infrastructure
+layer	src/zxfer_ssh_transport.sh	1	infrastructure
+layer	src/zxfer_cli.sh	2	state-adapter
+layer	src/zxfer_operation_state.sh	2	state-adapter
+layer	src/zxfer_remote_hosts.sh	2	state-adapter
+layer	src/zxfer_snapshot_state.sh	2	state-adapter
+layer	src/zxfer_property_state.sh	2	state-adapter
+layer	src/zxfer_backup_storage.sh	2	state-adapter
+layer	src/zxfer_backup_metadata.sh	3	domain
+layer	src/zxfer_property_policy.sh	3	domain
+layer	src/zxfer_property_reconcile.sh	3	domain
+layer	src/zxfer_snapshot_producers.sh	3	domain
+layer	src/zxfer_remote_snapshot_discovery.sh	3	domain
+layer	src/zxfer_snapshot_discovery.sh	3	domain
+layer	src/zxfer_snapshot_reconcile.sh	3	domain
+layer	src/zxfer_migration_services.sh	3	domain
+layer	src/zxfer_send_jobs.sh	3	domain
+layer	src/zxfer_send_receive.sh	3	domain
+layer	src/zxfer_replication.sh	4	composition
+layer	src/zxfer_session.sh	4	composition

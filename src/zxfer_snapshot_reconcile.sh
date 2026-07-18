@@ -54,6 +54,11 @@ zxfer_reset_snapshot_reconcile_state() {
 	g_deleted_dest_newer_snapshots=0
 	g_src_snapshot_transfer_list=""
 	g_zxfer_snapshot_record_capture_result=""
+	g_zxfer_inspect_source_snapshots_result=""
+	g_zxfer_inspect_destination_snapshots_result=""
+	g_zxfer_inspect_identity_source_snapshots_result=""
+	g_zxfer_inspect_identity_destination_snapshots_result=""
+	g_zxfer_inspect_diverged_snapshot_records_result=""
 	# Per-dataset divergence scratch (also reset per dataset by
 	# zxfer_record_diverged_destination_snapshots) and the run-level
 	# "diverged and converged this run" marker list consumed by the
@@ -63,6 +68,40 @@ zxfer_reset_snapshot_reconcile_state() {
 	g_zxfer_diverged_converged_datasets=""
 	g_zxfer_diverged_converged_marker_source=""
 	zxfer_reset_destination_snapshot_creation_cache
+}
+
+# Purpose: Publish the current snapshot transfer plan through its owner.
+# Usage: Live reconciliation supplies the last common snapshot, remaining
+# source records, and validated destination-snapshot presence as one update.
+zxfer_publish_snapshot_transfer_plan() {
+	g_last_common_snap=${1:-}
+	g_src_snapshot_transfer_list=${2:-}
+	case ${3:-0} in
+	0 | 1) g_dest_has_snapshots=$3 ;;
+	*) return 2 ;;
+	esac
+}
+
+# Purpose: Mark a destination seed as the new common snapshot base.
+# Usage: Called only after the foreground seed receive succeeds.
+zxfer_mark_destination_snapshot_seeded() {
+	g_last_common_snap=${1:-}
+	g_dest_has_snapshots=1
+}
+
+# Purpose: Publish destination snapshot presence without changing the plan.
+# Usage: Used when a live probe proves an empty or non-empty destination.
+zxfer_set_destination_snapshot_presence() {
+	case ${1:-} in
+	0 | 1) g_dest_has_snapshots=$1 ;;
+	*) return 2 ;;
+	esac
+}
+
+# Purpose: Clear the per-dataset destination-deletion marker.
+# Usage: Called when a fresh planning or dry-run pass starts.
+zxfer_clear_destination_delete_marker() {
+	g_did_delete_dest_snapshots=0
 }
 
 # Purpose: Capture the snapshot records for dataset into staged state or module
@@ -176,7 +215,8 @@ zxfer_get_dest_snapshots_to_delete_per_dataset() {
 	zxfer_write_snapshot_identities_to_file "$l_zfs_source_snaps" "$g_delete_source_tmp_file" &
 	l_source_identity_pid=$!
 	l_source_identity_waited=0
-	if ! zxfer_register_cleanup_pid "$l_source_identity_pid" "delete planning identity writer"; then
+	if ! zxfer_register_cleanup_pid \
+		"$l_source_identity_pid" "delete planning identity writer"; then
 		l_source_identity_status=0
 		wait "$l_source_identity_pid" 2>/dev/null || l_source_identity_status=$?
 		l_source_identity_waited=1
@@ -633,6 +673,119 @@ zxfer_grandfather_test() {
 	fi
 }
 
+# Purpose: Revalidate a plan that would delete every destination snapshot.
+# Usage: Called only for an empty cached source list with a known source
+# dataset; returns non-zero when a live source snapshot makes deletion unsafe.
+# Returns: Zero when the delete plan remains safe, one after a skip warning.
+zxfer_all_destination_snapshot_delete_is_safe() {
+	l_delete_safety_source_snapshots=$1
+	l_delete_safety_source_dataset=$2
+
+	[ -n "$l_delete_safety_source_dataset" ] || return 0
+	case ${l_delete_safety_source_snapshots:-} in
+	*[![:space:]]*)
+		return 0
+		;;
+	esac
+
+	l_delete_safety_live_status=0
+	l_delete_safety_live_snapshots=$(zxfer_run_source_zfs_cmd \
+		list -H -d 1 -o name -t snapshot \
+		"$l_delete_safety_source_dataset" 2>&1) ||
+		l_delete_safety_live_status=$?
+	if [ "$l_delete_safety_live_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to re-verify source snapshots for [$l_delete_safety_source_dataset] before deleting all destination snapshots: $l_delete_safety_live_snapshots" \
+			"$l_delete_safety_live_status"
+	fi
+
+	# Remote stderr can share the capture with stdout. Count only real source
+	# snapshot rows so benign transport diagnostics cannot change the decision.
+	while IFS= read -r l_delete_safety_live_line; do
+		case $l_delete_safety_live_line in
+		"$l_delete_safety_source_dataset@"*)
+			zxfer_warn_stderr "WARNING: skipping destination snapshot deletion for [$l_delete_safety_source_dataset]: the plan would delete every destination snapshot, but a live source re-check still shows snapshots. The cached source listing was likely incomplete."
+			return 1
+			;;
+		esac
+	done <<-EOF
+		$l_delete_safety_live_snapshots
+	EOF
+
+	return 0
+}
+
+# Purpose: Prefetch and classify creation-time state for a snapshot delete plan.
+# Usage: Called after the all-snapshots safety recheck and before grandfather
+# policy or destroy-target rendering.
+# Side effects: Publishes whether the plan deletes snapshots newer than common.
+zxfer_prepare_snapshot_delete_creation_state() {
+	l_delete_creation_snapshots=$1
+
+	zxfer_reset_destination_snapshot_creation_cache
+	l_delete_creation_prefetch_status=0
+	zxfer_prefetch_delete_snapshot_creation_times \
+		"$l_delete_creation_snapshots" >/dev/null ||
+		l_delete_creation_prefetch_status=$?
+	if [ "$l_delete_creation_prefetch_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to query destination snapshot creation times while planning snapshot deletions. Review prior stderr for the transport or query error." \
+			"$l_delete_creation_prefetch_status"
+	fi
+
+	g_deleted_dest_newer_snapshots=0
+	l_delete_creation_newer_status=0
+	zxfer_deleted_snapshots_include_newer_than_last_common \
+		"$l_delete_creation_snapshots" ||
+		l_delete_creation_newer_status=$?
+	if [ "$l_delete_creation_newer_status" -eq 2 ]; then
+		zxfer_throw_error "Failed to query destination snapshot creation times while evaluating rollback eligibility. Review prior stderr for the transport or query error."
+	fi
+	if [ "$l_delete_creation_newer_status" -eq 0 ]; then
+		g_deleted_dest_newer_snapshots=1
+	fi
+}
+
+# Purpose: Apply grandfather retention policy to one snapshot delete plan.
+# Usage: Called in the owning shell before destroy-target rendering so a usage
+# error cannot be confined to and discarded with command-substitution state.
+# Side effects: Exits through zxfer_grandfather_test when a protected snapshot
+# would be deleted.
+zxfer_check_snapshot_delete_grandfather_policy() {
+	l_grandfather_plan_snapshots=$1
+
+	[ "$g_option_g_grandfather_protection" != "" ] || return 0
+	while IFS= read -r l_grandfather_plan_snapshot; do
+		[ -n "$l_grandfather_plan_snapshot" ] || continue
+		zxfer_grandfather_test "$l_grandfather_plan_snapshot"
+	done <<-EOF
+		$(zxfer_normalize_snapshot_record_list "$l_grandfather_plan_snapshots")
+	EOF
+}
+
+# Purpose: Render the exact dataset@snapshot-list target for one delete plan.
+# Usage: Called only after main-shell grandfather checks have passed; builds
+# the comma-delimited target consumed by `zfs destroy`.
+# Returns: The destroy target on stdout.
+zxfer_get_snapshot_destroy_target() {
+	l_destroy_plan_snapshots=$1
+	l_destroy_plan_unprotected_names=""
+
+	while IFS= read -r l_destroy_plan_snapshot; do
+		[ -n "$l_destroy_plan_snapshot" ] || continue
+		l_destroy_plan_name=$(zxfer_extract_snapshot_name \
+			"$l_destroy_plan_snapshot")
+		l_destroy_plan_unprotected_names="$l_destroy_plan_name,$l_destroy_plan_unprotected_names"
+	done <<-EOF
+		$(zxfer_normalize_snapshot_record_list "$l_destroy_plan_snapshots")
+	EOF
+	l_destroy_plan_unprotected_names=${l_destroy_plan_unprotected_names%,}
+
+	# shellcheck disable=SC2016
+	l_destroy_plan_dataset=$(printf '%s\n' "$l_destroy_plan_snapshots" |
+		head -n 1 | "$g_cmd_awk" -F'@' '{print $1}')
+	printf '%s@%s\n' "$l_destroy_plan_dataset" \
+		"$l_destroy_plan_unprotected_names"
+}
+
 # Purpose: Delete the snaps through the guarded reconciliation path owned by
 # this module.
 # Usage: Called during last-common-snapshot selection and delete planning after
@@ -661,93 +814,17 @@ zxfer_delete_snaps() {
 		return
 	fi
 
-	# An empty source snapshot list plans the deletion of EVERY destination
-	# snapshot for this dataset. A truly snapshot-less source is legitimate,
-	# but an incomplete cached source listing must never be allowed to wipe
-	# the destination's history, so re-verify the source live (one round-trip,
-	# only in this suspicious case) and fail closed when the probe errors.
-	if [ -n "$l_delete_source_dataset" ]; then
-		case ${l_zfs_source_snaps:-} in
-		*[![:space:]]*) ;;
-		*)
-			l_live_source_status=0
-			l_live_source_snaps=$(zxfer_run_source_zfs_cmd list -H -d 1 -o name -t snapshot "$l_delete_source_dataset" 2>&1) ||
-				l_live_source_status=$?
-			if [ "$l_live_source_status" -ne 0 ]; then
-				zxfer_throw_error "Failed to re-verify source snapshots for [$l_delete_source_dataset] before deleting all destination snapshots: $l_live_source_snaps" "$l_live_source_status"
-			fi
-			# The capture merges stderr so probe failures can report transport
-			# errors, but the snapshot-presence decision must only count real
-			# snapshot lines: over ssh, benign stderr (host-key notices, locale
-			# warnings, -V command echoes) lands in the same capture and must
-			# not make a genuinely empty source look populated.
-			l_live_source_has_snapshots=0
-			while IFS= read -r l_live_source_line; do
-				case $l_live_source_line in
-				"$l_delete_source_dataset@"*)
-					l_live_source_has_snapshots=1
-					;;
-				esac
-			done <<-EOF
-				$l_live_source_snaps
-			EOF
-			if [ "$l_live_source_has_snapshots" -eq 1 ]; then
-				zxfer_warn_stderr "WARNING: skipping destination snapshot deletion for [$l_delete_source_dataset]: the plan would delete every destination snapshot, but a live source re-check still shows snapshots. The cached source listing was likely incomplete."
-				return 0
-			fi
-			;;
-		esac
+	# An empty source list plans deletion of every destination snapshot. Recheck
+	# the source live in that suspicious case and skip when the cache was stale.
+	if ! zxfer_all_destination_snapshot_delete_is_safe \
+		"$l_zfs_source_snaps" "$l_delete_source_dataset"; then
+		return 0
 	fi
 
-	zxfer_reset_destination_snapshot_creation_cache
-	l_prefetch_creation_status=0
-	zxfer_prefetch_delete_snapshot_creation_times "$l_snaps_to_delete" >/dev/null ||
-		l_prefetch_creation_status=$?
-	if [ "$l_prefetch_creation_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to query destination snapshot creation times while planning snapshot deletions. Review prior stderr for the transport or query error." "$l_prefetch_creation_status"
-	fi
-
-	g_deleted_dest_newer_snapshots=0
-	l_deleted_newer_status=0
-	zxfer_deleted_snapshots_include_newer_than_last_common "$l_snaps_to_delete" ||
-		l_deleted_newer_status=$?
-	if [ "$l_deleted_newer_status" -eq 2 ]; then
-		zxfer_throw_error "Failed to query destination snapshot creation times while evaluating rollback eligibility. Review prior stderr for the transport or query error."
-	fi
-	if [ "$l_deleted_newer_status" -eq 0 ]; then
-		g_deleted_dest_newer_snapshots=1
-	fi
-
-	l_unprotected_snaps_to_delete=""
-
-	# checks if any of the snapshots to delete are protected by the grandfather option
-	while IFS= read -r l_snap_to_delete; do
-		[ -n "$l_snap_to_delete" ] || continue
-		if [ "$g_option_g_grandfather_protection" != "" ]; then
-			zxfer_grandfather_test "$l_snap_to_delete"
-		fi
-
-		l_snapshot=$(zxfer_extract_snapshot_name "$l_snap_to_delete")
-
-		# prepend this snapshot to the list of snapshots to delete in a comma
-		# delimited list; the trailing comma is trimmed before issuing zfs destroy.
-		l_unprotected_snaps_to_delete="$l_snapshot,$l_unprotected_snaps_to_delete"
-	done <<-EOF
-		$(zxfer_normalize_snapshot_record_list "$l_snaps_to_delete")
-	EOF
-
-	# drop any trailing delimiter so the destroy command receives valid names
-	l_unprotected_snaps_to_delete=${l_unprotected_snaps_to_delete%,}
-
-	# get the dataset name from the first snapshot in the list
-	#
-	# - get the first element of the list
-	# - get the portion of the string prior to the @ symbol
-	# shellcheck disable=SC2016
-	l_zfs_dest_dataset=$(echo "$l_snaps_to_delete" | head -n 1 | "$g_cmd_awk" -F'@' '{print $1}')
-
-	# build the destroy command
-	l_destroy_target="$l_zfs_dest_dataset@$l_unprotected_snaps_to_delete"
+	zxfer_prepare_snapshot_delete_creation_state "$l_snaps_to_delete"
+	zxfer_check_snapshot_delete_grandfather_policy "$l_snaps_to_delete"
+	l_destroy_target=$(zxfer_get_snapshot_destroy_target "$l_snaps_to_delete") ||
+		return "$?"
 	if [ "$g_option_n_dryrun" -eq 1 ]; then
 		zxfer_echov "Dry run: $(zxfer_render_destination_zfs_command destroy "$l_destroy_target")"
 		return
@@ -769,8 +846,7 @@ zxfer_delete_snaps() {
 	# an empty destination and silently skipped its deletions.
 
 	# set the flag to indicate that a destroy command was sent
-	# shellcheck disable=SC2034
-	g_is_performed_send_destroy=1
+	zxfer_mark_send_or_destroy_performed
 
 	zxfer_echoV "End zxfer_delete_snaps()"
 }
@@ -1061,16 +1137,13 @@ zxfer_verify_converged_destination_after_receive() {
 		fi
 	fi
 
-	# The live destination view helpers key on g_actual_dest; at -j reap time
-	# the current dataset context may belong to another dataset, so swap it in
-	# only for the captured recheck and restore it before any other decision.
-	l_verify_saved_actual_dest=${g_actual_dest:-}
-	g_actual_dest=$l_verify_dest
-	zxfer_ensure_live_destination_snapshot_view
+	# At -j reap time the current dataset context may belong to another dataset,
+	# so pass the completed destination explicitly instead of mutating shared
+	# orchestration state.
+	zxfer_ensure_live_destination_snapshot_view "$l_verify_dest"
 	l_verify_dest_status=0
-	l_verify_dest_snaps=$(zxfer_get_live_destination_snapshots 2>&1) ||
+	l_verify_dest_snaps=$(zxfer_get_live_destination_snapshots "$l_verify_dest" 2>&1) ||
 		l_verify_dest_status=$?
-	g_actual_dest=$l_verify_saved_actual_dest
 	if [ "$l_verify_dest_status" -ne 0 ]; then
 		zxfer_throw_error "Failed to retrieve live destination snapshots for [$l_verify_dest] during post-receive divergence verification: $l_verify_dest_snaps"
 	fi
@@ -1090,6 +1163,107 @@ An external writer is modifying the destination while zxfer converges it; stop t
 	return 0
 }
 
+# Purpose: Capture the source and destination snapshot records used by one
+# inspect/delete planning operation.
+# Usage: Called once at the start of zxfer_inspect_delete_snap. Publishes the
+# checked lists through this module's g_zxfer_inspect_* result globals and
+# updates the established g_dest_has_snapshots status flag.
+zxfer_capture_inspect_snapshot_record_lists() {
+	l_capture_inspect_source=$1
+
+	g_zxfer_inspect_source_snapshots_result=""
+	g_zxfer_inspect_destination_snapshots_result=""
+
+	l_capture_inspect_status=0
+	zxfer_capture_snapshot_records_for_dataset source "$l_capture_inspect_source" ||
+		l_capture_inspect_status=$?
+	if [ "$l_capture_inspect_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to retrieve source snapshot records for [$l_capture_inspect_source]." "$l_capture_inspect_status"
+	fi
+	g_zxfer_inspect_source_snapshots_result=$g_zxfer_snapshot_record_capture_result
+
+	l_capture_inspect_status=0
+	zxfer_capture_snapshot_records_for_dataset destination "$g_actual_dest" ||
+		l_capture_inspect_status=$?
+	if [ "$l_capture_inspect_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to retrieve destination snapshot records for [$g_actual_dest]." "$l_capture_inspect_status"
+	fi
+	g_zxfer_inspect_destination_snapshots_result=$g_zxfer_snapshot_record_capture_result
+
+	if [ -n "$g_zxfer_inspect_destination_snapshots_result" ]; then
+		g_dest_has_snapshots=1
+	else
+		g_dest_has_snapshots=0
+	fi
+}
+
+# Purpose: Resolve guid-bearing identity lists and classify divergence for one
+# inspect/delete planning operation.
+# Usage: Called after zxfer_capture_inspect_snapshot_record_lists. Publishes
+# identity lists and divergence records through module-owned result globals.
+zxfer_classify_inspect_snapshot_record_lists() {
+	l_classify_inspect_source=$1
+	l_classify_inspect_source_snapshots=$g_zxfer_inspect_source_snapshots_result
+	l_classify_inspect_destination_snapshots=$g_zxfer_inspect_destination_snapshots_result
+
+	g_zxfer_inspect_identity_source_snapshots_result=$l_classify_inspect_source_snapshots
+	g_zxfer_inspect_identity_destination_snapshots_result=$l_classify_inspect_destination_snapshots
+	g_zxfer_inspect_diverged_snapshot_records_result=""
+
+	l_classify_inspect_shared_status=0
+	g_zxfer_inspect_diverged_snapshot_records_result=$(zxfer_scan_snapshot_record_lists_for_divergence \
+		"$l_classify_inspect_source_snapshots" "$l_classify_inspect_destination_snapshots") ||
+		l_classify_inspect_shared_status=$?
+	[ "$l_classify_inspect_shared_status" -eq 0 ] || return 0
+
+	l_classify_inspect_refetched=0
+	if ! zxfer_snapshot_record_list_contains_guid "$l_classify_inspect_source_snapshots"; then
+		l_classify_inspect_identity_status=0
+		g_zxfer_inspect_identity_source_snapshots_result=$(zxfer_get_snapshot_identity_records_for_dataset \
+			source "$l_classify_inspect_source" "$l_classify_inspect_source_snapshots") ||
+			l_classify_inspect_identity_status=$?
+		if [ "$l_classify_inspect_identity_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_classify_inspect_source]." "$l_classify_inspect_identity_status"
+		fi
+		l_classify_inspect_refetched=1
+	fi
+
+	if ! zxfer_snapshot_record_list_contains_guid "$l_classify_inspect_destination_snapshots"; then
+		l_classify_inspect_identity_status=0
+		g_zxfer_inspect_identity_destination_snapshots_result=$(zxfer_get_snapshot_identity_records_for_dataset \
+			destination "$g_actual_dest" "$l_classify_inspect_destination_snapshots") ||
+			l_classify_inspect_identity_status=$?
+		if [ "$l_classify_inspect_identity_status" -ne 0 ]; then
+			zxfer_throw_error "Failed to retrieve destination snapshot identities for [$g_actual_dest]." "$l_classify_inspect_identity_status"
+		fi
+		l_classify_inspect_refetched=1
+	fi
+
+	# Guid-less raw records cannot be classified. Reuse the already-fetched
+	# identity lists instead of issuing a second set of live queries.
+	if [ "$l_classify_inspect_refetched" -eq 1 ]; then
+		g_zxfer_inspect_diverged_snapshot_records_result=$(zxfer_scan_snapshot_record_lists_for_divergence \
+			"$g_zxfer_inspect_identity_source_snapshots_result" \
+			"$g_zxfer_inspect_identity_destination_snapshots_result") || :
+	fi
+}
+
+# Purpose: Publish the last common snapshot for the current inspect/delete
+# planning operation.
+# Usage: Called after identity resolution and before the divergence contract.
+zxfer_set_inspect_last_common_snapshot() {
+	l_set_inspect_common_source=$1
+	l_set_inspect_common_status=0
+
+	g_last_common_snap=$(zxfer_get_last_common_snapshot \
+		"$g_zxfer_inspect_identity_source_snapshots_result" \
+		"$g_zxfer_inspect_identity_destination_snapshots_result") ||
+		l_set_inspect_common_status=$?
+	if [ "$l_set_inspect_common_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to determine the last common snapshot for [$l_set_inspect_common_source] and [$g_actual_dest]." "$l_set_inspect_common_status"
+	fi
+}
+
 # Purpose: Inspect the delete snap before later delete or rollback decisions.
 # Usage: Called during last-common-snapshot selection and delete planning when
 # zxfer needs one focused probe before it mutates live state.
@@ -1102,79 +1276,10 @@ zxfer_inspect_delete_snap() {
 	# shellcheck disable=SC2034
 	g_deleted_dest_newer_snapshots=0
 
-	# Get only the snapshots for the exact source dataset in descending order
-	# by creation date.
-	l_source_records_status=0
-	zxfer_capture_snapshot_records_for_dataset source "$l_source" || l_source_records_status=$?
-	if [ "$l_source_records_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to retrieve source snapshot records for [$l_source]." "$l_source_records_status"
-	fi
-	l_zfs_source_snaps=$g_zxfer_snapshot_record_capture_result
-
-	# Get the list of destination snapshots for the matching destination dataset.
-	l_dest_records_status=0
-	zxfer_capture_snapshot_records_for_dataset destination "$g_actual_dest" || l_dest_records_status=$?
-	if [ "$l_dest_records_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to retrieve destination snapshot records for [$g_actual_dest]." "$l_dest_records_status"
-	fi
-	l_zfs_dest_snaps=$g_zxfer_snapshot_record_capture_result
-	l_identity_source_snaps=$l_zfs_source_snaps
-	l_identity_dest_snaps=$l_zfs_dest_snaps
-	if [ -n "$l_zfs_dest_snaps" ]; then
-		# shellcheck disable=SC2034
-		# consumed by zxfer_replication.sh for status checks.
-		g_dest_has_snapshots=1
-	else
-		# shellcheck disable=SC2034
-		# consumed by zxfer_replication.sh for status checks.
-		g_dest_has_snapshots=0
-	fi
-
-	# One awk pass doubles as the shared-snapshot-name gate and the
-	# name-match/guid-mismatch divergence classifier, so in-sync planning
-	# paths spawn exactly what the old shared-name check spawned.
-	l_shared_snapshot_names_status=0
-	l_diverged_snapshot_records=$(zxfer_scan_snapshot_record_lists_for_divergence \
-		"$l_zfs_source_snaps" "$l_zfs_dest_snaps") || l_shared_snapshot_names_status=$?
-	if [ "$l_shared_snapshot_names_status" -eq 0 ]; then
-		l_identity_lists_refetched=0
-		if ! zxfer_snapshot_record_list_contains_guid "$l_zfs_source_snaps"; then
-			l_identity_source_status=0
-			l_identity_source_snaps=$(zxfer_get_snapshot_identity_records_for_dataset source "$l_source" "$l_zfs_source_snaps") ||
-				l_identity_source_status=$?
-			if [ "$l_identity_source_status" -ne 0 ]; then
-				zxfer_throw_error "Failed to retrieve source snapshot identities for [$l_source]." "$l_identity_source_status"
-			fi
-			l_identity_lists_refetched=1
-		fi
-
-		if ! zxfer_snapshot_record_list_contains_guid "$l_zfs_dest_snaps"; then
-			l_identity_dest_status=0
-			l_identity_dest_snaps=$(zxfer_get_snapshot_identity_records_for_dataset destination "$g_actual_dest" "$l_zfs_dest_snaps") ||
-				l_identity_dest_status=$?
-			if [ "$l_identity_dest_status" -ne 0 ]; then
-				zxfer_throw_error "Failed to retrieve destination snapshot identities for [$g_actual_dest]." "$l_identity_dest_status"
-			fi
-			l_identity_lists_refetched=1
-		fi
-
-		# Guid-less raw records cannot be classified; once identities exist,
-		# classify the dataset on the refetched lists (rare path: it already
-		# paid for live identity listings).
-		if [ "$l_identity_lists_refetched" -eq 1 ]; then
-			l_diverged_snapshot_records=$(zxfer_scan_snapshot_record_lists_for_divergence \
-				"$l_identity_source_snaps" "$l_identity_dest_snaps") || :
-		fi
-	fi
-	zxfer_record_diverged_destination_snapshots "$l_diverged_snapshot_records"
-
-	# Find the most recent common snapshot on source and destination.
-	l_last_common_status=0
-	g_last_common_snap=$(zxfer_get_last_common_snapshot "$l_identity_source_snaps" "$l_identity_dest_snaps") ||
-		l_last_common_status=$?
-	if [ "$l_last_common_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to determine the last common snapshot for [$l_source] and [$g_actual_dest]." "$l_last_common_status"
-	fi
+	zxfer_capture_inspect_snapshot_record_lists "$l_source"
+	zxfer_classify_inspect_snapshot_record_lists "$l_source"
+	zxfer_record_diverged_destination_snapshots "$g_zxfer_inspect_diverged_snapshot_records_result"
+	zxfer_set_inspect_last_common_snapshot "$l_source"
 
 	# Enforce the divergence contract BEFORE any destructive planning: with
 	# both -d and -F this warns and proceeds (converge); otherwise it fails
@@ -1183,10 +1288,13 @@ zxfer_inspect_delete_snap() {
 
 	# Deletes non-common snaps on destination if asked to.
 	if [ "$l_is_delete_snap" -eq 1 ]; then
-		zxfer_delete_snaps "$l_identity_source_snaps" "$l_identity_dest_snaps" "$l_source"
+		zxfer_delete_snaps \
+			"$g_zxfer_inspect_identity_source_snapshots_result" \
+			"$g_zxfer_inspect_identity_destination_snapshots_result" \
+			"$l_source" || return "$?"
 	fi
 
 	# Create a list of source snapshots to transfer, beginning with the
 	# first snapshot after the last common one.
-	zxfer_set_src_snapshot_transfer_list "$l_zfs_source_snaps" "$l_source"
+	zxfer_set_src_snapshot_transfer_list "$g_zxfer_inspect_source_snapshots_result" "$l_source"
 }

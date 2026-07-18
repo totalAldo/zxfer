@@ -18,14 +18,23 @@ RUNNER_NEXT_WORKER_ID=1
 RUNNER_DEFER_SIGNALS=0
 RUNNER_DEFERRED_SIGNAL=""
 RUNNER_FOREGROUND_SUITE_PID=""
+RUNNER_FOREGROUND_SUITE_TOKEN=""
 RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=""
+RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE=""
 RUNNER_FOREGROUND_SUITE_STATUS_FILE=""
 RUNNER_SHUTTING_DOWN=0
 RUNNER_SIGNAL_SHUTDOWN_GRACE_SECONDS=2
+RUNNER_LIST_MODE=
+RUNNER_CURRENT_SUITE_OPTION=
+RUNNER_SELECTED_SUITES=
+RUNNER_NAMED_TEST_SELECTIONS=
+RUNNER_POSITIONAL_TEST_NAMES=
+RUNNER_HAS_NAMED_TESTS=0
+TAB=$(printf '\t')
 
 print_usage() {
 	cat <<'EOF'
-Usage: tests/run_shunit_tests.sh [--jobs count] [--] [suite ...]
+Usage: tests/run_shunit_tests.sh [options] [--] [suite ...]
 
 Runs every shunit2 suite (tests/test_*.sh) when no arguments are provided.
 Pass specific suite paths to limit execution, e.g.:
@@ -33,10 +42,133 @@ Pass specific suite paths to limit execution, e.g.:
   tests/run_shunit_tests.sh --jobs 4
   tests/run_shunit_tests.sh test_zxfer_reporting.sh
   tests/run_shunit_tests.sh tests/test_zxfer_replication.sh
+  tests/run_shunit_tests.sh --suite tests/test_zxfer_replication.sh --test test_name
+  tests/run_shunit_tests.sh --list-tests tests/test_zxfer_replication.sh
+
+Options:
+  --jobs count   bound concurrent suite workers
+  --list-suites  list the selected suites without running them
+  --list         compatibility alias for --list-suites
+  --list-tests suite
+                 list test names in one suite without running it
+  --suite suite  select a suite and make it current for following --test options;
+                 repeat to select named tests from multiple suites
+  --test name    run a named shunit2 test in the current --suite; repeat until
+                 the next --suite (or use before one positional suite)
+  -h, --help     show this help
+
+Every named test is validated before any suite starts. Repeated --suite values
+are merged and each suite executes once in first-selection order. Options must
+precede positional suite paths; use -- when a suite path begins with a dash.
 
 Set ZXFER_TEST_SHELL to an alternate shell executable to run each suite through
 that interpreter. For multi-word shell modes such as "bash --posix", point
 ZXFER_TEST_SHELL at a wrapper script that execs the desired command.
+EOF
+}
+
+valid_test_name_p() {
+	case "${1:-}" in
+	'' | [!A-Za-z_]* | *[!A-Za-z0-9_]*)
+		return 1
+		;;
+	esac
+	return 0
+}
+
+append_positional_test_name() {
+	l_test_name=$1
+	if ! valid_test_name_p "$l_test_name"; then
+		echo "--test requires a shell function name: $l_test_name" >&2
+		return 1
+	fi
+
+	if [ -n "$RUNNER_POSITIONAL_TEST_NAMES" ]; then
+		RUNNER_POSITIONAL_TEST_NAMES="$RUNNER_POSITIONAL_TEST_NAMES
+$l_test_name"
+	else
+		RUNNER_POSITIONAL_TEST_NAMES=$l_test_name
+	fi
+	RUNNER_HAS_NAMED_TESTS=1
+}
+
+suite_selection_present_p() {
+	l_selection_suite=$1
+	while IFS= read -r l_selection_existing_suite; do
+		[ -n "$l_selection_existing_suite" ] || continue
+		[ "$l_selection_existing_suite" = "$l_selection_suite" ] && return 0
+	done <<EOF
+$RUNNER_SELECTED_SUITES
+EOF
+	return 1
+}
+
+append_suite_selection() {
+	l_selection_input=$1
+	l_selection_suite=$(resolve_suite_path "$l_selection_input")
+	case "$l_selection_suite" in
+	*"$TAB"* | *'
+'*)
+		echo "Suite paths may not contain tabs or newlines: $l_selection_input" >&2
+		return 1
+		;;
+	esac
+
+	if ! suite_selection_present_p "$l_selection_suite"; then
+		if [ -n "$RUNNER_SELECTED_SUITES" ]; then
+			RUNNER_SELECTED_SUITES="$RUNNER_SELECTED_SUITES
+$l_selection_suite"
+		else
+			RUNNER_SELECTED_SUITES=$l_selection_suite
+		fi
+	fi
+	RUNNER_CURRENT_SUITE_OPTION=$l_selection_suite
+}
+
+suite_test_selection_present_p() {
+	l_selection_suite=$1
+	l_selection_test=$2
+	while IFS="$TAB" read -r l_selection_existing_suite l_selection_existing_test; do
+		[ -n "$l_selection_existing_suite" ] || continue
+		if [ "$l_selection_existing_suite" = "$l_selection_suite" ] &&
+			[ "$l_selection_existing_test" = "$l_selection_test" ]; then
+			return 0
+		fi
+	done <<EOF
+$RUNNER_NAMED_TEST_SELECTIONS
+EOF
+	return 1
+}
+
+append_suite_test_selection() {
+	l_selection_suite=$1
+	l_selection_test=$2
+	if ! valid_test_name_p "$l_selection_test"; then
+		echo "--test requires a shell function name: $l_selection_test" >&2
+		return 1
+	fi
+
+	if ! suite_test_selection_present_p "$l_selection_suite" "$l_selection_test"; then
+		l_selection_record=$(printf '%s\t%s' "$l_selection_suite" "$l_selection_test")
+		if [ -n "$RUNNER_NAMED_TEST_SELECTIONS" ]; then
+			RUNNER_NAMED_TEST_SELECTIONS="$RUNNER_NAMED_TEST_SELECTIONS
+$l_selection_record"
+		else
+			RUNNER_NAMED_TEST_SELECTIONS=$l_selection_record
+		fi
+	fi
+	RUNNER_HAS_NAMED_TESTS=1
+}
+
+selected_test_names_for_suite() {
+	l_selection_suite=$1
+	while IFS="$TAB" read -r l_selection_existing_suite l_selection_existing_test; do
+		[ -n "$l_selection_existing_suite" ] || continue
+		if [ "$l_selection_existing_suite" = "$l_selection_suite" ]; then
+			printf '%s\n' "$l_selection_existing_test"
+		fi
+	done <<EOF
+$RUNNER_NAMED_TEST_SELECTIONS
 EOF
 }
 
@@ -201,6 +333,83 @@ send_signal_to_pid() {
 	return 1
 }
 
+runner_get_process_start_token() {
+	l_runner_token_pid=$1
+
+	case "$l_runner_token_pid" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	l_runner_token_selector=lstart
+	l_runner_token_raw=$(LC_ALL=C ps -p "$l_runner_token_pid" -o lstart= 2>/dev/null || true)
+	case $- in
+	*f*) l_runner_token_restore_glob=0 ;;
+	*)
+		l_runner_token_restore_glob=1
+		set -f
+		;;
+	esac
+	if [ "${IFS+set}" = "set" ]; then
+		l_runner_token_saved_ifs_set=1
+		l_runner_token_saved_ifs=$IFS
+	else
+		l_runner_token_saved_ifs_set=0
+		l_runner_token_saved_ifs=
+	fi
+	unset IFS
+	# shellcheck disable=SC2086
+	set -- $l_runner_token_raw
+	if [ "$#" -eq 0 ]; then
+		l_runner_token_selector=stime
+		l_runner_token_raw=$(LC_ALL=C ps -p "$l_runner_token_pid" -o stime= 2>/dev/null || true)
+		# shellcheck disable=SC2086
+		set -- $l_runner_token_raw
+	fi
+	l_runner_token_normalized=$*
+	if [ "$l_runner_token_saved_ifs_set" -eq 1 ]; then
+		IFS=$l_runner_token_saved_ifs
+	else
+		unset IFS
+	fi
+	if [ "$l_runner_token_restore_glob" -eq 1 ]; then
+		set +f
+	fi
+	[ "$#" -gt 0 ] || return 1
+	printf '%s:%s\n' "$l_runner_token_selector" "$l_runner_token_normalized"
+}
+
+runner_child_pid_matches_parent() {
+	l_runner_child_parent=$1
+	l_runner_child_pid=$2
+
+	for l_runner_child_current in $(list_child_pids_for_parent "$l_runner_child_parent"); do
+		[ "$l_runner_child_current" = "$l_runner_child_pid" ] && return 0
+	done
+	return 1
+}
+
+runner_capture_child_identity() {
+	l_runner_identity_parent=$1
+	l_runner_identity_pid=$2
+	l_runner_identity_before=
+	l_runner_identity_after=
+
+	l_runner_identity_before=$(runner_get_process_start_token "$l_runner_identity_pid") || return 1
+	runner_child_pid_matches_parent "$l_runner_identity_parent" "$l_runner_identity_pid" || return 1
+	l_runner_identity_after=$(runner_get_process_start_token "$l_runner_identity_pid") || return 1
+	[ "$l_runner_identity_before" = "$l_runner_identity_after" ] || return 1
+	printf '%s\n' "$l_runner_identity_before"
+}
+
+runner_process_identity_matches() {
+	l_runner_match_pid=$1
+	l_runner_match_expected=$2
+	l_runner_match_current=
+
+	[ -n "$l_runner_match_expected" ] || return 1
+	l_runner_match_current=$(runner_get_process_start_token "$l_runner_match_pid") || return 1
+	[ "$l_runner_match_current" = "$l_runner_match_expected" ]
+}
+
 process_state_for_pid() {
 	l_process_state_for_pid_pid=$1
 	l_process_state_for_pid_state=
@@ -246,28 +455,105 @@ process_running_p() {
 	return 0
 }
 
-signal_process_descendants() {
-	l_signal_process_descendants_signal=$1
-	l_signal_process_descendants_pending=$2
-	l_signal_process_descendants_next=
-	l_signal_process_descendants_parent=
-	l_signal_process_descendants_child=
+snapshot_process_descendants() {
+	l_snapshot_pending=$1
+	l_snapshot_next=
+	l_snapshot_records=
+	l_snapshot_parent=
+	l_snapshot_child=
+	l_snapshot_token=
+	l_snapshot_record=
 
-	while [ -n "$l_signal_process_descendants_pending" ]; do
-		l_signal_process_descendants_next=
-		for l_signal_process_descendants_parent in $l_signal_process_descendants_pending; do
-			for l_signal_process_descendants_child in $(list_child_pids_for_parent "$l_signal_process_descendants_parent"); do
-				send_signal_to_pid "$l_signal_process_descendants_signal" "$l_signal_process_descendants_child" || true
-				l_signal_process_descendants_next="${l_signal_process_descendants_next}${l_signal_process_descendants_next:+ }$l_signal_process_descendants_child"
+	while [ -n "$l_snapshot_pending" ]; do
+		l_snapshot_next=
+		for l_snapshot_parent in $l_snapshot_pending; do
+			for l_snapshot_child in $(list_child_pids_for_parent "$l_snapshot_parent"); do
+				l_snapshot_token=$(runner_capture_child_identity \
+					"$l_snapshot_parent" "$l_snapshot_child") || continue
+				l_snapshot_next="${l_snapshot_next}${l_snapshot_next:+ }$l_snapshot_child"
+				l_snapshot_record=$(printf '%s\t%s' "$l_snapshot_child" "$l_snapshot_token")
+				if [ -n "$l_snapshot_records" ]; then
+					l_snapshot_records="$l_snapshot_record
+$l_snapshot_records"
+				else
+					l_snapshot_records=$l_snapshot_record
+				fi
 			done
 		done
-		l_signal_process_descendants_pending=$l_signal_process_descendants_next
+		l_snapshot_pending=$l_snapshot_next
 	done
+	printf '%s\n' "$l_snapshot_records"
+}
+
+signal_process_descendant_records() {
+	l_descendant_signal=$1
+	l_descendant_records=$2
+	l_descendant_tab=$(printf '\t')
+
+	while IFS="$l_descendant_tab" read -r l_descendant_pid l_descendant_token; do
+		[ -n "$l_descendant_pid" ] || continue
+		runner_process_identity_matches "$l_descendant_pid" "$l_descendant_token" || continue
+		send_signal_to_pid "$l_descendant_signal" "$l_descendant_pid" || true
+	done <<EOF
+$l_descendant_records
+EOF
+}
+
+process_descendant_records_running_p() {
+	l_descendant_records=$1
+	l_descendant_tab=$(printf '\t')
+
+	while IFS="$l_descendant_tab" read -r l_descendant_pid l_descendant_token; do
+		[ -n "$l_descendant_pid" ] || continue
+		runner_process_identity_matches "$l_descendant_pid" "$l_descendant_token" || continue
+		process_running_p "$l_descendant_pid" && return 0
+	done <<EOF
+$l_descendant_records
+EOF
+	return 1
+}
+
+wait_for_process_descendant_records() {
+	l_descendant_records=$1
+	l_descendant_remaining=$RUNNER_SIGNAL_SHUTDOWN_GRACE_SECONDS
+
+	while [ "$l_descendant_remaining" -gt 0 ]; do
+		process_descendant_records_running_p "$l_descendant_records" || return 0
+		sleep 1 || true
+		l_descendant_remaining=$((l_descendant_remaining - 1))
+	done
+	process_descendant_records_running_p "$l_descendant_records" && return 1
+	return 0
+}
+
+signal_process_descendants() {
+	l_signal_process_descendants_signal=$1
+	l_signal_process_descendants_root=$2
+	l_signal_process_descendants_root_token=$3
+	l_signal_process_descendants_records=
+
+	runner_process_identity_matches \
+		"$l_signal_process_descendants_root" \
+		"$l_signal_process_descendants_root_token" || return 0
+	l_signal_process_descendants_records=$(snapshot_process_descendants \
+		"$l_signal_process_descendants_root")
+	[ -n "$l_signal_process_descendants_records" ] || return 0
+	signal_process_descendant_records \
+		"$l_signal_process_descendants_signal" "$l_signal_process_descendants_records"
+	case "$l_signal_process_descendants_signal" in
+	TERM | term)
+		if ! wait_for_process_descendant_records "$l_signal_process_descendants_records"; then
+			signal_process_descendant_records KILL "$l_signal_process_descendants_records"
+			wait_for_process_descendant_records "$l_signal_process_descendants_records" || true
+		fi
+		;;
+	esac
 }
 
 signal_pid_and_descendants() {
 	l_signal=$1
 	l_pid=$2
+	l_pid_token=$3
 
 	case "$l_pid" in
 	'' | *[!0-9]*)
@@ -275,7 +561,9 @@ signal_pid_and_descendants() {
 		;;
 	esac
 
-	signal_process_descendants "$l_signal" "$l_pid"
+	runner_process_identity_matches "$l_pid" "$l_pid_token" || return 0
+	signal_process_descendants "$l_signal" "$l_pid" "$l_pid_token"
+	runner_process_identity_matches "$l_pid" "$l_pid_token" || return 0
 	send_signal_to_pid "$l_signal" "$l_pid" || true
 }
 
@@ -297,6 +585,169 @@ count_runnable_suites() {
 	done
 
 	printf '%s\n' "$l_count"
+}
+
+display_suite_path() {
+	l_suite_path=$1
+	case "$l_suite_path" in
+	"$ZXFER_ROOT"/*)
+		printf '%s\n' "${l_suite_path#"$ZXFER_ROOT"/}"
+		;;
+	*)
+		printf '%s\n' "$l_suite_path"
+		;;
+	esac
+}
+
+list_selected_suites() {
+	l_list_status=0
+
+	for l_suite in "$@"; do
+		l_suite_path=$(resolve_suite_path "$l_suite")
+		if [ ! -f "$l_suite_path" ]; then
+			echo "Missing suite: $l_suite_path" >&2
+			l_list_status=1
+			continue
+		fi
+		case "$(basename "$l_suite_path")" in
+		test_helper.sh)
+			continue
+			;;
+		esac
+		display_suite_path "$l_suite_path"
+	done
+
+	return "$l_list_status"
+}
+
+# Print the shunit test definitions from one suite or sourced behavior fragment.
+list_test_names_in_definition_file() {
+	l_definition_file=$1
+	l_definition_suite=$2
+
+	awk -v suite="$l_definition_suite" '
+		/^test[A-Za-z0-9_]*\(\)[[:space:]]*\{/ {
+			name = $0
+			sub(/\(.*/, "", name)
+			printf "%s\t%s\n", suite, name
+		}
+	' "$l_definition_file"
+}
+
+list_selected_test_names() {
+	l_list_status=0
+
+	for l_suite in "$@"; do
+		l_suite_path=$(resolve_suite_path "$l_suite")
+		if [ ! -f "$l_suite_path" ]; then
+			echo "Missing suite: $l_suite_path" >&2
+			l_list_status=1
+			continue
+		fi
+		case "$(basename "$l_suite_path")" in
+		test_helper.sh)
+			continue
+			;;
+		esac
+		l_display_path=$(display_suite_path "$l_suite_path")
+		list_test_names_in_definition_file "$l_suite_path" "$l_display_path"
+		l_suite_dir=$(dirname "$l_suite_path")
+		l_fragment_paths=$(awk '
+			/^# zxfer-test-fragment: / {
+				fragment = $0
+				sub(/^# zxfer-test-fragment: /, "", fragment)
+				print fragment
+			}
+		' "$l_suite_path")
+		for l_fragment_path in $l_fragment_paths; do
+			case "$l_fragment_path" in
+			'' | /* | ../* | */../* | */.. | *[!A-Za-z0-9_./-]*)
+				echo "Invalid suite test fragment path: $l_fragment_path" >&2
+				l_list_status=1
+				continue
+				;;
+			*) ;;
+			esac
+			l_fragment_file=$l_suite_dir/$l_fragment_path
+			if [ ! -f "$l_fragment_file" ]; then
+				echo "Missing suite test fragment: $l_fragment_file" >&2
+				l_list_status=1
+				continue
+			fi
+			list_test_names_in_definition_file "$l_fragment_file" "$l_display_path"
+		done
+	done
+
+	return "$l_list_status"
+}
+
+test_name_list_contains() {
+	l_available_test_rows=$1
+	l_requested_test_name=$2
+	while IFS="$TAB" read -r _l_available_suite l_available_test_name; do
+		[ "$l_available_test_name" = "$l_requested_test_name" ] && return 0
+	done <<EOF
+$l_available_test_rows
+EOF
+	return 1
+}
+
+bind_positional_tests_to_suite() {
+	l_positional_suite=$(resolve_suite_path "$1")
+	while IFS= read -r l_positional_test_name; do
+		[ -n "$l_positional_test_name" ] || continue
+		append_suite_test_selection \
+			"$l_positional_suite" "$l_positional_test_name" || return 1
+	done <<EOF
+$RUNNER_POSITIONAL_TEST_NAMES
+EOF
+}
+
+validate_named_test_selections() {
+	[ "$RUNNER_HAS_NAMED_TESTS" -eq 1 ] || return 0
+	l_validation_status=0
+
+	for l_validation_suite in "$@"; do
+		l_validation_suite_path=$(resolve_suite_path "$l_validation_suite")
+		l_validation_test_names=$(selected_test_names_for_suite \
+			"$l_validation_suite_path")
+		[ -n "$l_validation_test_names" ] || continue
+
+		if [ ! -f "$l_validation_suite_path" ]; then
+			echo "Missing suite for named-test selection: $l_validation_suite_path" >&2
+			l_validation_status=1
+			continue
+		fi
+		case "$(basename "$l_validation_suite_path")" in
+		test_helper.sh)
+			echo "Helper libraries cannot be selected for named tests: $l_validation_suite_path" >&2
+			l_validation_status=1
+			continue
+			;;
+		esac
+
+		if l_validation_available_tests=$(list_selected_test_names \
+			"$l_validation_suite_path"); then
+			:
+		else
+			l_validation_status=1
+			continue
+		fi
+		while IFS= read -r l_validation_test_name; do
+			[ -n "$l_validation_test_name" ] || continue
+			if ! test_name_list_contains \
+				"$l_validation_available_tests" "$l_validation_test_name"; then
+				l_validation_display_suite=$(display_suite_path \
+					"$l_validation_suite_path")
+				echo "Unknown test for $l_validation_display_suite: $l_validation_test_name" >&2
+				l_validation_status=1
+			fi
+		done <<EOF
+$l_validation_test_names
+EOF
+	done
+
+	return "$l_validation_status"
 }
 
 detect_default_parallel_jobs() {
@@ -371,7 +822,9 @@ cleanup_runner_state() {
 	RUNNER_PENDING_WORKERS=""
 	RUNNER_INFLIGHT_COUNT=0
 	RUNNER_FOREGROUND_SUITE_PID=""
+	RUNNER_FOREGROUND_SUITE_TOKEN=""
 	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=""
+	RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE=""
 	RUNNER_FOREGROUND_SUITE_STATUS_FILE=""
 }
 
@@ -414,9 +867,50 @@ consume_deferred_runner_signal() {
 	handle_runner_signal "$l_signal"
 }
 
+read_runner_process_token() {
+	l_read_runner_token_file=$1
+	l_read_runner_token=
+
+	[ -r "$l_read_runner_token_file" ] || return 1
+	l_read_runner_token=$(cat "$l_read_runner_token_file" 2>/dev/null || true)
+	[ -n "$l_read_runner_token" ] || return 1
+	printf '%s\n' "$l_read_runner_token"
+}
+
+tracked_runner_process_running_p() {
+	l_tracked_runner_running_pid=$1
+	l_tracked_runner_running_token=$2
+	l_tracked_runner_allow_unverified=${3:-0}
+
+	if [ -n "$l_tracked_runner_running_token" ]; then
+		runner_process_identity_matches \
+			"$l_tracked_runner_running_pid" \
+			"$l_tracked_runner_running_token" || return 1
+	elif [ "$l_tracked_runner_allow_unverified" != "1" ]; then
+		return 1
+	fi
+	process_running_p "$l_tracked_runner_running_pid"
+}
+
+signal_tracked_runner_process() {
+	l_tracked_runner_signal=$1
+	l_tracked_runner_signal_pid=$2
+	l_tracked_runner_signal_token=$3
+
+	case "$l_tracked_runner_signal_pid" in
+	'' | *[!0-9]*) return 0 ;;
+	esac
+	runner_process_identity_matches \
+		"$l_tracked_runner_signal_pid" \
+		"$l_tracked_runner_signal_token" || return 0
+	send_signal_to_pid \
+		"$l_tracked_runner_signal" "$l_tracked_runner_signal_pid" || true
+}
+
 signal_foreground_suite() {
 	l_signal=$1
 	l_child_pid=""
+	l_child_token=""
 
 	case "${RUNNER_FOREGROUND_SUITE_PID:-}" in
 	'' | *[!0-9]*)
@@ -427,13 +921,28 @@ signal_foreground_suite() {
 	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
 		l_child_pid=$(cat "$RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE" 2>/dev/null || true)
 	fi
+	if [ -n "${RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE:-}" ]; then
+		l_child_token=$(read_runner_process_token \
+			"$RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE" 2>/dev/null || true)
+	fi
 	case "$l_child_pid" in
 	'' | *[!0-9]*)
-		signal_pid_and_descendants "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID"
+		signal_pid_and_descendants \
+			"$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" \
+			"$RUNNER_FOREGROUND_SUITE_TOKEN"
 		;;
 	*)
-		signal_pid_and_descendants "$l_signal" "$l_child_pid"
-		send_signal_to_pid "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" || true
+		if [ -n "$l_child_token" ]; then
+			signal_pid_and_descendants \
+				"$l_signal" "$l_child_pid" "$l_child_token"
+			signal_tracked_runner_process \
+				"$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" \
+				"$RUNNER_FOREGROUND_SUITE_TOKEN"
+		else
+			signal_pid_and_descendants \
+				"$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" \
+				"$RUNNER_FOREGROUND_SUITE_TOKEN"
+		fi
 		;;
 	esac
 }
@@ -441,6 +950,7 @@ signal_foreground_suite() {
 signal_foreground_suite_child() {
 	l_signal=$1
 	l_child_pid=""
+	l_child_token=""
 
 	case "${RUNNER_FOREGROUND_SUITE_PID:-}" in
 	'' | *[!0-9]*)
@@ -451,18 +961,32 @@ signal_foreground_suite_child() {
 	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
 		l_child_pid=$(cat "$RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE" 2>/dev/null || true)
 	fi
+	if [ -n "${RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE:-}" ]; then
+		l_child_token=$(read_runner_process_token \
+			"$RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE" 2>/dev/null || true)
+	fi
 	case "$l_child_pid" in
 	'' | *[!0-9]*)
-		signal_process_descendants "$l_signal" "$RUNNER_FOREGROUND_SUITE_PID"
+		signal_process_descendants \
+			"$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" \
+			"$RUNNER_FOREGROUND_SUITE_TOKEN"
 		;;
 	*)
-		signal_pid_and_descendants "$l_signal" "$l_child_pid"
+		if [ -n "$l_child_token" ]; then
+			signal_pid_and_descendants \
+				"$l_signal" "$l_child_pid" "$l_child_token"
+		else
+			signal_process_descendants \
+				"$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" \
+				"$RUNNER_FOREGROUND_SUITE_TOKEN"
+		fi
 		;;
 	esac
 }
 
 foreground_suite_running_p() {
 	l_child_pid=""
+	l_child_token=""
 
 	case "${RUNNER_FOREGROUND_SUITE_PID:-}" in
 	'' | *[!0-9]*)
@@ -478,16 +1002,22 @@ foreground_suite_running_p() {
 		return 1
 	fi
 
-	if process_running_p "$RUNNER_FOREGROUND_SUITE_PID"; then
+	if tracked_runner_process_running_p \
+		"$RUNNER_FOREGROUND_SUITE_PID" \
+		"$RUNNER_FOREGROUND_SUITE_TOKEN" 1; then
 		return 0
 	fi
 	if [ -r "${RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE:-}" ]; then
 		l_child_pid=$(cat "$RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE" 2>/dev/null || true)
 	fi
+	if [ -n "${RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE:-}" ]; then
+		l_child_token=$(read_runner_process_token \
+			"$RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE" 2>/dev/null || true)
+	fi
 	case "$l_child_pid" in
 	'' | *[!0-9]*) ;;
 	*)
-		if process_running_p "$l_child_pid"; then
+		if tracked_runner_process_running_p "$l_child_pid" "$l_child_token"; then
 			return 0
 		fi
 		;;
@@ -498,8 +1028,10 @@ foreground_suite_running_p() {
 
 run_suite_foreground() {
 	l_suite_path=$1
+	l_selected_test_names=${2:-}
 	l_status_file=
 	l_child_pid_file=
+	l_child_token_file=
 	l_wait_status=0
 
 	emit_suite_banner "$l_suite_path"
@@ -510,9 +1042,12 @@ run_suite_foreground() {
 	fi
 	l_status_file="$RUNNER_STATE_DIR/foreground.status"
 	l_child_pid_file="$RUNNER_STATE_DIR/foreground.child.pid"
+	l_child_token_file="$RUNNER_STATE_DIR/foreground.child.token"
 	rm -f "$l_status_file"
 	rm -f "$l_child_pid_file"
+	rm -f "$l_child_token_file"
 	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=$l_child_pid_file
+	RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE=$l_child_token_file
 	RUNNER_FOREGROUND_SUITE_STATUS_FILE=$l_status_file
 
 	# macOS /bin/sh can defer traps while blocked in wait, so serial mode
@@ -521,19 +1056,35 @@ run_suite_foreground() {
 	(
 		set +e
 		trap - HUP INT TERM
+		set -- "$l_suite_path"
+		if [ -n "$l_selected_test_names" ]; then
+			set -- "$@" --
+		fi
+		while IFS= read -r l_test_name; do
+			[ -n "$l_test_name" ] || continue
+			set -- "$@" "$l_test_name"
+		done <<EOF
+$l_selected_test_names
+EOF
 		if [ -n "${TEST_SHELL_RUNNER:-}" ]; then
-			"$TEST_SHELL_RUNNER" "$l_suite_path" &
+			"$TEST_SHELL_RUNNER" "$@" &
 		else
-			"$l_suite_path" &
+			"$@" &
 		fi
 		l_suite_pid=$!
-		printf '%s\n' "$l_suite_pid" >"$l_child_pid_file" 2>/dev/null || :
+		l_suite_token=$(runner_get_process_start_token "$l_suite_pid" 2>/dev/null || true)
+		if [ -n "$l_suite_token" ]; then
+			printf '%s\n' "$l_suite_token" >"$l_child_token_file" 2>/dev/null || :
+			printf '%s\n' "$l_suite_pid" >"$l_child_pid_file" 2>/dev/null || :
+		fi
 		wait "$l_suite_pid"
 		l_status=$?
 		printf '%s\n' "$l_status" >"$l_status_file" 2>/dev/null || :
 		exit "$l_status"
 	) &
 	RUNNER_FOREGROUND_SUITE_PID=$!
+	RUNNER_FOREGROUND_SUITE_TOKEN=$(runner_get_process_start_token \
+		"$RUNNER_FOREGROUND_SUITE_PID" 2>/dev/null || true)
 	RUNNER_DEFER_SIGNALS=0
 	consume_deferred_runner_signal
 
@@ -553,14 +1104,16 @@ run_suite_foreground() {
 		l_wait_status=$?
 	fi
 	RUNNER_FOREGROUND_SUITE_PID=""
+	RUNNER_FOREGROUND_SUITE_TOKEN=""
 	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=""
+	RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE=""
 	RUNNER_FOREGROUND_SUITE_STATUS_FILE=""
 
 	l_status=$l_wait_status
 	if [ -r "$l_status_file" ]; then
 		l_status=$(cat "$l_status_file" 2>/dev/null || printf '%s\n' "$l_wait_status")
 	fi
-	rm -f "$l_status_file" "$l_child_pid_file"
+	rm -f "$l_status_file" "$l_child_pid_file" "$l_child_token_file"
 
 	if [ "$l_status" -eq 0 ]; then
 		passed_count=$((passed_count + 1))
@@ -573,22 +1126,28 @@ run_suite_foreground() {
 
 launch_suite_worker() {
 	l_suite_path=$1
+	l_selected_test_names=${2:-}
 	l_worker_id=$RUNNER_NEXT_WORKER_ID
 	l_log_file="$RUNNER_STATE_DIR/$l_worker_id.log"
 	l_status_file="$RUNNER_STATE_DIR/$l_worker_id.status"
 	l_path_file="$RUNNER_STATE_DIR/$l_worker_id.path"
 	l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.pid"
+	l_token_file="$RUNNER_STATE_DIR/$l_worker_id.token"
 	l_child_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
+	l_child_token_file="$RUNNER_STATE_DIR/$l_worker_id.child.token"
 	l_ready_file="$RUNNER_STATE_DIR/$l_worker_id.ready"
 
 	printf '%s\n' "$l_suite_path" >"$l_path_file"
+	rm -f "$l_token_file"
 	rm -f "$l_child_pid_file"
+	rm -f "$l_child_token_file"
 	rm -f "$l_ready_file"
 
 	RUNNER_DEFER_SIGNALS=1
 	(
 		set +e
 		l_suite_pid=
+		l_suite_token=
 		l_launching_suite_child=1
 		l_deferred_signal=
 		runner_remember_deferred_signal() {
@@ -604,7 +1163,8 @@ launch_suite_worker() {
 				return 0
 				;;
 			esac
-			signal_pid_and_descendants "$l_signal" "$l_suite_pid"
+			signal_pid_and_descendants \
+				"$l_signal" "$l_suite_pid" "$l_suite_token"
 		}
 		runner_suite_child_running_p() {
 			case "${l_suite_pid:-}" in
@@ -612,7 +1172,8 @@ launch_suite_worker() {
 				return 1
 				;;
 			esac
-			if process_running_p "$l_suite_pid"; then
+			if tracked_runner_process_running_p \
+				"$l_suite_pid" "$l_suite_token" 1; then
 				return 0
 			fi
 			return 1
@@ -661,13 +1222,27 @@ launch_suite_worker() {
 		trap 'runner_handle_worker_signal HUP' HUP
 		trap 'runner_handle_worker_signal INT' INT
 		trap 'runner_handle_worker_signal TERM' TERM
+		set -- "$l_suite_path"
+		if [ -n "$l_selected_test_names" ]; then
+			set -- "$@" --
+		fi
+		while IFS= read -r l_test_name; do
+			[ -n "$l_test_name" ] || continue
+			set -- "$@" "$l_test_name"
+		done <<EOF
+$l_selected_test_names
+EOF
 		if [ -n "${TEST_SHELL_RUNNER:-}" ]; then
-			"$TEST_SHELL_RUNNER" "$l_suite_path" >"$l_log_file" 2>&1 &
+			"$TEST_SHELL_RUNNER" "$@" >"$l_log_file" 2>&1 &
 		else
-			"$l_suite_path" >"$l_log_file" 2>&1 &
+			"$@" >"$l_log_file" 2>&1 &
 		fi
 		l_suite_pid=$!
-		printf '%s\n' "$l_suite_pid" >"$l_child_pid_file" 2>/dev/null || :
+		l_suite_token=$(runner_get_process_start_token "$l_suite_pid" 2>/dev/null || true)
+		if [ -n "$l_suite_token" ]; then
+			printf '%s\n' "$l_suite_token" >"$l_child_token_file" 2>/dev/null || :
+			printf '%s\n' "$l_suite_pid" >"$l_child_pid_file" 2>/dev/null || :
+		fi
 		l_launching_suite_child=0
 		runner_consume_deferred_signal
 		if wait "$l_suite_pid"; then
@@ -680,8 +1255,12 @@ launch_suite_worker() {
 		exit "$l_status"
 	) &
 	l_pid=$!
+	l_token=$(runner_get_process_start_token "$l_pid" 2>/dev/null || true)
 
 	printf '%s\n' "$l_pid" >"$l_pid_file"
+	if [ -n "$l_token" ]; then
+		printf '%s\n' "$l_token" >"$l_token_file"
+	fi
 	RUNNER_PENDING_WORKERS=$(append_worker_id "$RUNNER_PENDING_WORKERS" "$l_worker_id")
 	RUNNER_INFLIGHT_COUNT=$((RUNNER_INFLIGHT_COUNT + 1))
 	RUNNER_NEXT_WORKER_ID=$((RUNNER_NEXT_WORKER_ID + 1))
@@ -693,7 +1272,9 @@ replay_suite_worker() {
 	l_worker_id=$1
 	l_path_file="$RUNNER_STATE_DIR/$l_worker_id.path"
 	l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.pid"
+	l_token_file="$RUNNER_STATE_DIR/$l_worker_id.token"
 	l_child_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
+	l_child_token_file="$RUNNER_STATE_DIR/$l_worker_id.child.token"
 	l_log_file="$RUNNER_STATE_DIR/$l_worker_id.log"
 	l_status_file="$RUNNER_STATE_DIR/$l_worker_id.status"
 	l_ready_file="$RUNNER_STATE_DIR/$l_worker_id.ready"
@@ -726,7 +1307,9 @@ replay_suite_worker() {
 		failed_count=$((failed_count + 1))
 	fi
 
-	rm -f "$l_path_file" "$l_pid_file" "$l_child_pid_file" "$l_log_file" "$l_status_file" "$l_ready_file"
+	rm -f "$l_path_file" "$l_pid_file" "$l_token_file" \
+		"$l_child_pid_file" "$l_child_token_file" \
+		"$l_log_file" "$l_status_file" "$l_ready_file"
 }
 
 wait_for_next_worker_completion() {
@@ -736,6 +1319,7 @@ wait_for_next_worker_completion() {
 		for l_worker_id in $RUNNER_PENDING_WORKERS; do
 			l_path_file="$RUNNER_STATE_DIR/$l_worker_id.path"
 			l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.pid"
+			l_token_file="$RUNNER_STATE_DIR/$l_worker_id.token"
 			l_status_file="$RUNNER_STATE_DIR/$l_worker_id.status"
 			l_ready_file="$RUNNER_STATE_DIR/$l_worker_id.ready"
 			[ -r "$l_path_file" ] || continue
@@ -747,12 +1331,13 @@ wait_for_next_worker_completion() {
 			fi
 			[ -r "$l_pid_file" ] || continue
 			l_pid=$(cat "$l_pid_file" 2>/dev/null || true)
+			l_token=$(read_runner_process_token "$l_token_file" 2>/dev/null || true)
 			case "$l_pid" in
 			'' | *[!0-9]*)
 				continue
 				;;
 			esac
-			if ! process_running_p "$l_pid"; then
+			if ! tracked_runner_process_running_p "$l_pid" "$l_token" 1; then
 				: >"$l_ready_file"
 				RUNNER_INFLIGHT_COUNT=$((RUNNER_INFLIGHT_COUNT - 1))
 				return 0
@@ -796,23 +1381,29 @@ signal_pending_workers() {
 
 	for l_worker_id in $RUNNER_PENDING_WORKERS; do
 		l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.pid"
+		l_token_file="$RUNNER_STATE_DIR/$l_worker_id.token"
 		if [ -r "$l_pid_file" ]; then
 			l_pid=$(cat "$l_pid_file" 2>/dev/null || true)
+			l_token=$(read_runner_process_token "$l_token_file" 2>/dev/null || true)
 			case "$l_pid" in
 			'' | *[!0-9]*) ;;
 			*)
-				signal_pid_and_descendants "$l_signal" "$l_pid"
+				signal_pid_and_descendants \
+					"$l_signal" "$l_pid" "$l_token"
 				;;
 			esac
 		fi
 
 		l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
+		l_token_file="$RUNNER_STATE_DIR/$l_worker_id.child.token"
 		if [ -r "$l_pid_file" ]; then
 			l_pid=$(cat "$l_pid_file" 2>/dev/null || true)
+			l_token=$(read_runner_process_token "$l_token_file" 2>/dev/null || true)
 			case "$l_pid" in
 			'' | *[!0-9]*) ;;
 			*)
-				signal_pid_and_descendants "$l_signal" "$l_pid"
+				signal_pid_and_descendants \
+					"$l_signal" "$l_pid" "$l_token"
 				;;
 			esac
 		fi
@@ -824,12 +1415,15 @@ signal_pending_worker_children() {
 
 	for l_worker_id in $RUNNER_PENDING_WORKERS; do
 		l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
+		l_token_file="$RUNNER_STATE_DIR/$l_worker_id.child.token"
 		if [ -r "$l_pid_file" ]; then
 			l_pid=$(cat "$l_pid_file" 2>/dev/null || true)
+			l_token=$(read_runner_process_token "$l_token_file" 2>/dev/null || true)
 			case "$l_pid" in
 			'' | *[!0-9]*) ;;
 			*)
-				signal_pid_and_descendants "$l_signal" "$l_pid"
+				signal_pid_and_descendants \
+					"$l_signal" "$l_pid" "$l_token"
 				;;
 			esac
 		fi
@@ -845,14 +1439,21 @@ pending_worker_pids_running_p() {
 		for l_pid_file in \
 			"$RUNNER_STATE_DIR/$l_worker_id.child.pid" \
 			"$RUNNER_STATE_DIR/$l_worker_id.pid"; do
+			l_allow_unverified=0
 			[ -r "$l_pid_file" ] || continue
 			l_pid=$(cat "$l_pid_file" 2>/dev/null || true)
+			l_token_file=${l_pid_file%.pid}.token
+			l_token=$(read_runner_process_token "$l_token_file" 2>/dev/null || true)
 			case "$l_pid" in
 			'' | *[!0-9]*)
 				continue
 				;;
 			esac
-			if process_running_p "$l_pid"; then
+			if [ "$l_pid_file" = "$RUNNER_STATE_DIR/$l_worker_id.pid" ]; then
+				l_allow_unverified=1
+			fi
+			if tracked_runner_process_running_p \
+				"$l_pid" "$l_token" "$l_allow_unverified"; then
 				return 0
 			fi
 		done
@@ -968,6 +1569,11 @@ handle_runner_signal() {
 	exit "$l_status"
 }
 
+if [ "${ZXFER_RUN_SHUNIT_SOURCE_ONLY:-0}" = "1" ]; then
+	# shellcheck disable=SC2317  # exit is the direct-execution fallback.
+	return 0 2>/dev/null || exit 0
+fi
+
 if [ "$#" -gt 0 ]; then
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
@@ -987,6 +1593,33 @@ if [ "$#" -gt 0 ]; then
 			print_usage
 			exit 0
 			;;
+		--list | --list-suites)
+			RUNNER_LIST_MODE=suites
+			;;
+		--list-tests)
+			RUNNER_LIST_MODE=tests
+			;;
+		--test)
+			shift
+			[ "$#" -gt 0 ] || {
+				echo "--test requires a value" >&2
+				exit 1
+			}
+			if [ -n "$RUNNER_CURRENT_SUITE_OPTION" ]; then
+				append_suite_test_selection \
+					"$RUNNER_CURRENT_SUITE_OPTION" "$1" || exit 1
+			else
+				append_positional_test_name "$1" || exit 1
+			fi
+			;;
+		--suite)
+			shift
+			[ "$#" -gt 0 ] || {
+				echo "--suite requires a value" >&2
+				exit 1
+			}
+			append_suite_selection "$1" || exit 1
+			;;
 		-*)
 			echo "Unknown argument: $1" >&2
 			exit 1
@@ -997,6 +1630,40 @@ if [ "$#" -gt 0 ]; then
 		esac
 		shift
 	done
+fi
+
+if [ -n "$RUNNER_SELECTED_SUITES" ]; then
+	[ "$#" -eq 0 ] || {
+		echo "--suite cannot be combined with positional suite paths." >&2
+		exit 1
+	}
+	[ -z "$RUNNER_POSITIONAL_TEST_NAMES" ] || {
+		echo "--test must follow the --suite it selects." >&2
+		exit 1
+	}
+	set --
+	while IFS= read -r l_selected_suite; do
+		[ -n "$l_selected_suite" ] || continue
+		set -- "$@" "$l_selected_suite"
+	done <<EOF
+$RUNNER_SELECTED_SUITES
+EOF
+elif [ -n "$RUNNER_POSITIONAL_TEST_NAMES" ]; then
+	if [ "$#" -eq 0 ]; then
+		echo "--test requires a positional suite or a preceding --suite." >&2
+		exit 1
+	fi
+	l_positional_runnable_count=$(count_runnable_suites "$@")
+	if [ "$#" -ne 1 ] || [ "$l_positional_runnable_count" -ne 1 ]; then
+		echo "--test requires exactly one runnable suite; found $l_positional_runnable_count." >&2
+		exit 1
+	fi
+	bind_positional_tests_to_suite "$1" || exit 1
+fi
+
+if [ "$RUNNER_LIST_MODE" = tests ] && [ "$#" -ne 1 ]; then
+	echo "--list-tests requires exactly one explicit suite; found $#." >&2
+	exit 1
 fi
 
 if [ "$#" -eq 0 ]; then
@@ -1014,7 +1681,25 @@ if [ "$#" -eq 0 ]; then
 	exit 1
 fi
 
+if [ -n "$RUNNER_LIST_MODE" ] && [ "$RUNNER_HAS_NAMED_TESTS" -eq 1 ]; then
+	echo "--list/--list-tests cannot be combined with --test." >&2
+	exit 1
+fi
+
+case "$RUNNER_LIST_MODE" in
+suites)
+	list_selected_suites "$@"
+	exit $?
+	;;
+tests)
+	list_selected_test_names "$@"
+	exit $?
+	;;
+esac
+
 resolve_test_shell_runner
+
+validate_named_test_selections "$@" || exit 1
 
 overall_status=0
 passed_count=0
@@ -1033,6 +1718,7 @@ fi
 
 for suite in "$@"; do
 	suite_path=$(resolve_suite_path "$suite")
+	suite_test_names=$(selected_test_names_for_suite "$suite_path")
 
 	if [ ! -f "$suite_path" ]; then
 		flush_all_workers
@@ -1051,11 +1737,11 @@ for suite in "$@"; do
 	esac
 
 	if [ "$RUNNER_PARALLEL_JOBS" -eq 1 ]; then
-		run_suite_foreground "$suite_path"
+		run_suite_foreground "$suite_path" "$suite_test_names"
 		continue
 	fi
 
-	launch_suite_worker "$suite_path"
+	launch_suite_worker "$suite_path" "$suite_test_names"
 	if [ "$RUNNER_INFLIGHT_COUNT" -ge "$RUNNER_PARALLEL_JOBS" ]; then
 		wait_for_next_worker_completion
 		replay_ready_workers_in_order

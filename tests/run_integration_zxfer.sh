@@ -5,6 +5,12 @@
 
 set -eu
 
+if [ -n "${ZXFER_INTEGRATION_TESTS_DIR:-}" ]; then
+	INTEGRATION_TESTS_DIR=$ZXFER_INTEGRATION_TESTS_DIR
+else
+	INTEGRATION_TESTS_DIR=$(dirname "$0")
+fi
+
 ZXFER_BIN=${ZXFER_BIN:-"./zxfer"}
 SPARSE_SIZE_MB=${SPARSE_SIZE_MB:-256}
 OS_NAME=$(uname -s)
@@ -29,24 +35,23 @@ TEST_POOL_WORKDIR_PROP="org.zxfer:workdir"
 TEST_POOL_RUN_PROP="org.zxfer:run"
 TEST_POOL_VDEV_PROP="org.zxfer:vdev"
 TEST_RUN_ID=""
-RED=$(printf '\033[31m')
-GREEN=$(printf '\033[32m')
-YELLOW=$(printf '\033[33m')
-RESET=$(printf '\033[0m')
+
+# shellcheck source=tests/helpers/zfs_test_reporting.sh
+. "$INTEGRATION_TESTS_DIR/helpers/zfs_test_reporting.sh"
+# shellcheck source=tests/helpers/zfs_test_host.sh
+. "$INTEGRATION_TESTS_DIR/helpers/zfs_test_host.sh"
+# shellcheck source=tests/helpers/zfs_pool_fixtures.sh
+. "$INTEGRATION_TESTS_DIR/helpers/zfs_pool_fixtures.sh"
+# shellcheck source=tests/helpers/zxfer_remote_fixtures.sh
+. "$INTEGRATION_TESTS_DIR/helpers/zxfer_remote_fixtures.sh"
+# shellcheck source=tests/helpers/integration_test_registry.sh
+. "$INTEGRATION_TESTS_DIR/helpers/integration_test_registry.sh"
 
 has_parallel() {
 	if ! command -v parallel >/dev/null 2>&1; then
 		return 1
 	fi
 	return 0
-}
-
-require_cmd() {
-	l_cmd=$1
-	if ! command -v "$l_cmd" >/dev/null 2>&1; then
-		echo "Missing required command: $l_cmd" >&2
-		exit 1
-	fi
 }
 
 print_usage() {
@@ -165,10 +170,6 @@ parse_args() {
 		esac
 		shift
 	done
-}
-
-list_failed_tests_only_enabled() {
-	[ "${ZXFER_LIST_FAILED_TESTS_ONLY:-0}" -eq 1 ]
 }
 
 reset_test_output_captures() {
@@ -306,87 +307,6 @@ append_failed_test() {
 		fi
 		;;
 	esac
-}
-
-append_path_entry() {
-	l_entry=$1
-
-	[ -n "$l_entry" ] || return
-	case ":$PATH:" in
-	*:"$l_entry":*) ;;
-	*)
-		PATH="$l_entry:$PATH"
-		export PATH
-		;;
-	esac
-}
-
-append_secure_path_entry() {
-	l_entry=$1
-
-	[ -n "$l_entry" ] || return
-	case ":${ZXFER_SECURE_PATH_APPEND-}:" in
-	*:"$l_entry":*) ;;
-	*)
-		if [ -n "${ZXFER_SECURE_PATH_APPEND-}" ]; then
-			ZXFER_SECURE_PATH_APPEND="$ZXFER_SECURE_PATH_APPEND:$l_entry"
-		else
-			ZXFER_SECURE_PATH_APPEND="$l_entry"
-		fi
-		export ZXFER_SECURE_PATH_APPEND
-		;;
-	esac
-}
-
-configure_platform_tool_paths() {
-	if [ "$OS_NAME" = "Darwin" ] && [ -x "$MACOS_OPENZFS_ZFS_BIN" ]; then
-		l_zfs_dir=${MACOS_OPENZFS_ZFS_BIN%/*}
-		append_path_entry "$l_zfs_dir"
-		append_secure_path_entry "$l_zfs_dir"
-	fi
-}
-
-compute_absolute_path() {
-	l_path=$1
-
-	case "$l_path" in
-	/*)
-		printf '%s\n' "$l_path"
-		;;
-	*)
-		l_dir=${l_path%/*}
-		l_base=${l_path##*/}
-		if [ "$l_dir" = "$l_path" ]; then
-			l_dir=.
-		fi
-		l_abs_dir=$(cd "$l_dir" 2>/dev/null && pwd -P) || return 1
-		printf '%s/%s\n' "$l_abs_dir" "$l_base"
-		;;
-	esac
-}
-
-resolve_host_command() {
-	l_cmd=$1
-	l_search_path=$PATH
-	l_oldifs=$IFS
-
-	if [ -n "${ZXFER_CONFIRM_WRAPPER_DIR:-}" ]; then
-		l_search_path=
-		IFS=:
-		for l_entry in $PATH; do
-			[ "$l_entry" = "$ZXFER_CONFIRM_WRAPPER_DIR" ] && continue
-			if [ "$l_search_path" = "" ]; then
-				l_search_path=$l_entry
-			else
-				l_search_path="$l_search_path:$l_entry"
-			fi
-		done
-		IFS=$l_oldifs
-	else
-		IFS=$l_oldifs
-	fi
-
-	PATH=$l_search_path command -v "$l_cmd" 2>/dev/null || true
 }
 
 write_command_confirmation_wrapper() {
@@ -528,411 +448,6 @@ setup_command_confirmation_wrappers() {
 	log "Confirmation enabled for data-modifying wrapped commands"
 }
 
-log() {
-	if list_failed_tests_only_enabled; then
-		return
-	fi
-	printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"
-}
-
-log_summary() {
-	printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"
-}
-
-emit_failed_tests_only_status_line() {
-	l_index=$1
-	l_total=$2
-	l_result=$3
-	l_func=${4:-}
-
-	if list_failed_tests_only_enabled; then
-		printf '[%s/%s] %s %s\n' "$l_index" "$l_total" "$l_result" "$l_func"
-	fi
-}
-
-fail() {
-	printf '%sERROR:%s %s\n' "$RED" "$RESET" "$*" >&2
-	exit 1
-}
-
-assert_exists() {
-	l_path=$1
-	l_msg=$2
-	if [ ! -e "$l_path" ]; then
-		fail "$l_msg"
-	fi
-}
-
-assert_dataset_absent() {
-	l_dataset=$1
-
-	if zfs list "$l_dataset" >/dev/null 2>&1; then
-		fail "Dataset $l_dataset should not exist."
-	fi
-}
-
-assert_snapshot_exists() {
-	l_dataset=$1
-	l_snapshot=$2
-
-	wait_for_snapshot_exists "$l_dataset" "$l_snapshot"
-}
-
-wait_for_snapshot_exists() {
-	l_dataset=$1
-	l_snapshot=$2
-	l_attempts=${3:-30}
-
-	l_i=0
-	while [ "$l_i" -lt "$l_attempts" ]; do
-		if zfs list -t snapshot "$l_dataset@$l_snapshot" >/dev/null 2>&1; then
-			return
-		fi
-		sleep 1
-		l_i=$((l_i + 1))
-	done
-
-	l_snapshot_list=$(zfs list -H -t snapshot -o name -r "$l_dataset" 2>/dev/null || true)
-	fail "Expected snapshot $l_dataset@$l_snapshot to exist after $l_attempts attempts. Visible snapshots under $l_dataset: ${l_snapshot_list:-<none>}"
-}
-
-wait_for_snapshot_absent() {
-	l_dataset=$1
-	l_snapshot=$2
-	l_attempts=${3:-60}
-
-	l_i=0
-	while [ "$l_i" -lt "$l_attempts" ]; do
-		if ! zfs list -t snapshot "$l_dataset@$l_snapshot" >/dev/null 2>&1; then
-			return
-		fi
-		sleep 1
-		l_i=$((l_i + 1))
-	done
-
-	fail "Snapshot $l_dataset@$l_snapshot still present after waiting."
-}
-
-get_latest_snapshot_name_for_dataset() {
-	l_dataset=$1
-
-	list_exact_snapshot_names_for_dataset "$l_dataset" |
-		awk 'NF { last = $0 } END { if (last != "") print last }'
-}
-
-list_exact_snapshot_names_for_dataset() {
-	l_dataset=$1
-
-	if ! l_snapshot_list=$(zfs list -H -o name -t snapshot -s creation -r "$l_dataset" 2>&1); then
-		fail "Failed to list snapshots for $l_dataset: $l_snapshot_list"
-	fi
-
-	printf '%s\n' "$l_snapshot_list" |
-		awk -v dataset="$l_dataset" 'index($0, dataset "@") == 1 { print $0 }'
-}
-
-assert_output_mentions_snapshot_destroy() {
-	l_output=$1
-	l_dataset=$2
-	l_snapshot=$3
-	l_target="$l_dataset@$l_snapshot"
-
-	if ! printf '%s\n' "$l_output" | grep -F "$l_target" >/dev/null 2>&1; then
-		fail "Expected dry-run output to mention snapshot target $l_target. Output: $l_output"
-	fi
-
-	if ! printf '%s\n' "$l_output" | grep -F "destroy" >/dev/null 2>&1; then
-		fail "Expected dry-run output to include a destroy operation for $l_target. Output: $l_output"
-	fi
-}
-
-wait_for_destroy_process_to_finish() {
-	l_dataset=$1
-	l_snapshot=$2
-	l_attempts=${3:-30}
-
-	if ! command -v pgrep >/dev/null 2>&1; then
-		return
-	fi
-
-	l_pattern="zfs destroy .*${l_dataset}@${l_snapshot}"
-	l_i=0
-	while [ "$l_i" -lt "$l_attempts" ]; do
-		if ! pgrep -f "$l_pattern" >/dev/null 2>&1; then
-			return
-		fi
-		sleep 1
-		l_i=$((l_i + 1))
-	done
-}
-
-require_platform_permissions() {
-	:
-}
-
-create_sparse_file() {
-	l_file=$1
-	l_size_mb=$2
-	l_size_bytes=$((l_size_mb * 1024 * 1024))
-
-	if command -v truncate >/dev/null 2>&1; then
-		truncate -s "${l_size_mb}M" "$l_file"
-	elif command -v mkfile >/dev/null 2>&1; then
-		mkfile -n "${l_size_mb}m" "$l_file"
-	elif command -v perl >/dev/null 2>&1; then
-		perl -e '
-			my ($path, $size) = @ARGV;
-			open(my $fh, ">", $path) or exit 1;
-			if ($size > 0) {
-				seek($fh, $size - 1, 0) or exit 1;
-				print {$fh} "\0" or exit 1;
-			}
-			close($fh) or exit 1;
-		' "$l_file" "$l_size_bytes" >/dev/null 2>&1 ||
-			fail "Unable to create sparse file $l_file of size ${l_size_mb}M."
-	elif command -v python3 >/dev/null 2>&1; then
-		python3 - "$l_file" "$l_size_bytes" <<'PY' >/dev/null 2>&1 || fail "Unable to create sparse file $l_file of size ${l_size_mb}M."
-import os
-import sys
-
-path = sys.argv[1]
-size = int(sys.argv[2])
-with open(path, "wb") as fh:
-    if size > 0:
-        fh.seek(size - 1)
-        fh.write(b"\0")
-PY
-	else
-		fail "Need truncate, mkfile, perl, or python3 to create sparse test files safely."
-	fi
-}
-
-is_safe_test_file_vdev() {
-	l_path=$1
-
-	is_safe_workdir_path "$l_path" || return 1
-	[ -f "$l_path" ] || return 1
-	[ ! -L "$l_path" ] || [ ! -h "$l_path" ] || return 1
-	return 0
-}
-
-is_safe_workdir_path() {
-	l_path=$1
-	l_parent=
-	l_parent_phys=
-
-	[ -n "$WORKDIR" ] || return 1
-	case "$l_path" in
-	"$WORKDIR") return 0 ;;
-	"$WORKDIR"/*) ;;
-	*) return 1 ;;
-	esac
-
-	case "$l_path" in
-	*"/../"* | *"/.." | *"/./"* | *"/.")
-		return 1
-		;;
-	esac
-
-	l_parent=${l_path%/*}
-	if [ "$l_parent" = "$l_path" ]; then
-		return 1
-	fi
-	l_parent_phys=$(cd -P "$l_parent" 2>/dev/null && pwd) || return 1
-	case "$l_parent_phys" in
-	"$WORKDIR" | "$WORKDIR"/*) return 0 ;;
-	*) return 1 ;;
-	esac
-}
-
-safe_rm_rf() {
-	for l_path in "$@"; do
-		[ -n "$l_path" ] || continue
-		if ! is_safe_workdir_path "$l_path"; then
-			fail "Refusing to remove path outside WORKDIR: $l_path"
-		fi
-		rm -rf "$l_path"
-	done
-}
-
-safe_rm_f() {
-	for l_path in "$@"; do
-		[ -n "$l_path" ] || continue
-		if ! is_safe_workdir_path "$l_path"; then
-			fail "Refusing to remove file outside WORKDIR: $l_path"
-		fi
-		rm -f "$l_path"
-	done
-}
-
-generate_test_pool_name() {
-	l_prefix=$1
-	l_suffix=$(basename "${WORKDIR:-zxfer}" | tr -cd '[:alnum:]')
-	if [ "$l_suffix" = "" ]; then
-		l_suffix=$$
-	fi
-	printf 'zxfer_%s_%s\n' "$l_prefix" "$l_suffix"
-}
-
-mark_test_pool() {
-	l_pool=$1
-	l_vdev=$2
-
-	zfs set "$TEST_POOL_MARKER_PROP=yes" "$l_pool" >/dev/null 2>&1 ||
-		return 1
-	zfs set "$TEST_POOL_WORKDIR_PROP=$WORKDIR" "$l_pool" >/dev/null 2>&1 ||
-		return 1
-	zfs set "$TEST_POOL_RUN_PROP=$TEST_RUN_ID" "$l_pool" >/dev/null 2>&1 ||
-		return 1
-	zfs set "$TEST_POOL_VDEV_PROP=$l_vdev" "$l_pool" >/dev/null 2>&1 ||
-		return 1
-}
-
-pool_belongs_to_test_run() {
-	l_pool=$1
-	l_expected_vdev=${2:-}
-
-	if ! zpool list "$l_pool" >/dev/null 2>&1; then
-		return 1
-	fi
-
-	l_marker=$(zfs get -H -o value "$TEST_POOL_MARKER_PROP" "$l_pool" 2>/dev/null || printf '%s\n' "")
-	if [ "$l_marker" != "yes" ]; then
-		return 1
-	fi
-
-	l_workdir=$(zfs get -H -o value "$TEST_POOL_WORKDIR_PROP" "$l_pool" 2>/dev/null || printf '%s\n' "")
-	if [ "$l_workdir" != "$WORKDIR" ]; then
-		return 1
-	fi
-
-	l_run_id=$(zfs get -H -o value "$TEST_POOL_RUN_PROP" "$l_pool" 2>/dev/null || printf '%s\n' "")
-	if [ "$l_run_id" != "$TEST_RUN_ID" ]; then
-		return 1
-	fi
-
-	l_recorded_vdev=$(zfs get -H -o value "$TEST_POOL_VDEV_PROP" "$l_pool" 2>/dev/null || printf '%s\n' "")
-	if [ "$l_recorded_vdev" != "$l_expected_vdev" ]; then
-		return 1
-	fi
-
-	is_safe_test_file_vdev "$l_expected_vdev" || return 1
-	l_status_paths=$(zpool status -P "$l_pool" 2>/dev/null | awk '/^[[:space:]]+\// { print $1 }')
-	if [ "$l_status_paths" != "$l_expected_vdev" ]; then
-		return 1
-	fi
-
-	return 0
-}
-
-destroy_test_pool_if_owned() {
-	l_label=$1
-	l_pool=$2
-	l_created=$3
-	l_expected_vdev=${4:-}
-
-	[ "$l_created" -eq 1 ] || return
-	[ -n "$l_pool" ] || return
-
-	if ! zpool list "$l_pool" >/dev/null 2>&1; then
-		return
-	fi
-
-	if ! pool_belongs_to_test_run "$l_pool" "$l_expected_vdev"; then
-		printf 'WARNING: refusing to destroy %s pool %s because it does not match this test run'\''s safety markers.\n' \
-			"$l_label" "$l_pool" >&2
-		return 1
-	fi
-
-	log "Destroying $l_label pool $l_pool"
-	if ! zpool destroy -f "$l_pool"; then
-		printf 'WARNING: failed to destroy %s pool %s; preserving workdir for inspection.\n' \
-			"$l_label" "$l_pool" >&2
-		return 1
-	fi
-	if zpool list "$l_pool" >/dev/null 2>&1; then
-		printf 'WARNING: %s pool %s still exists after destroy; preserving workdir for inspection.\n' \
-			"$l_label" "$l_pool" >&2
-		return 1
-	fi
-	return 0
-}
-
-create_test_pool() {
-	l_label=$1
-	l_pool=$2
-	l_vdev=$3
-	l_mount_root=$4
-	l_mountpoint_opt=$l_mount_root
-
-	if zpool list "$l_pool" >/dev/null 2>&1; then
-		fail "Refusing to reuse pre-existing $l_label pool $l_pool."
-	fi
-
-	if ! is_safe_test_file_vdev "$l_vdev"; then
-		fail "Refusing to create $l_label pool $l_pool on non-file-backed or out-of-workdir vdev $l_vdev."
-	fi
-
-	if [ "$l_label" = "destination" ]; then
-		l_mountpoint_opt=none
-	fi
-
-	mkdir -p "$(dirname "$l_mount_root")"
-	if ! zpool create -f -o cachefile=none -O mountpoint="$l_mountpoint_opt" "$l_pool" "$l_vdev"; then
-		fail "Failed to create $l_label pool $l_pool on $l_vdev. Local non-root runs require OpenZFS permissions that allow file-backed pool creation."
-	fi
-
-	if ! mark_test_pool "$l_pool" "$l_vdev"; then
-		zpool destroy -f "$l_pool" >/dev/null 2>&1 || true
-		fail "Failed to mark newly created $l_label pool $l_pool as an integration-test pool."
-	fi
-}
-
-is_safe_test_dataset_target() {
-	l_target=$1
-	l_dataset=${l_target%@*}
-
-	[ -n "${SRC_POOL:-}" ] || return 1
-	[ -n "${DEST_POOL:-}" ] || return 1
-	case "$l_dataset" in
-	"$SRC_POOL"/* | "$DEST_POOL"/*) return 0 ;;
-	*) return 1 ;;
-	esac
-}
-
-destroy_test_datasets_if_present() {
-	for l_target in "$@"; do
-		[ -n "$l_target" ] || continue
-		if ! is_safe_test_dataset_target "$l_target"; then
-			fail "Refusing to destroy dataset outside test pools: $l_target"
-		fi
-		zfs destroy -r "$l_target" >/dev/null 2>&1 || true
-	done
-}
-
-destroy_test_dataset() {
-	l_target=$1
-
-	if ! is_safe_test_dataset_target "$l_target"; then
-		fail "Refusing to destroy dataset outside test pools: $l_target"
-	fi
-	zfs destroy -r "$l_target"
-}
-
-get_mountpoint() {
-	l_dataset=$1
-	zfs get -H -o value mountpoint "$l_dataset"
-}
-
-append_data_to_dataset() {
-	l_dataset=$1
-	l_file=$2
-	l_data=$3
-
-	l_mountpoint=$(get_mountpoint "$l_dataset")
-	printf '%s\n' "$l_data" >>"$l_mountpoint/$l_file"
-}
-
 get_file_mode_octal() {
 	l_path=$1
 
@@ -1011,41 +526,6 @@ set_test_dataset_mountpoint() {
 	zfs mount "$l_dataset" >/dev/null 2>&1 || true
 }
 
-prepare_mock_bin_dir() {
-	l_dir=$1
-	shift
-
-	safe_rm_rf "$l_dir"
-	mkdir -p "$l_dir"
-
-	for l_bin in "$@"; do
-		l_actual=$(resolve_host_command "$l_bin")
-		if [ "$l_actual" = "" ]; then
-			fail "Required binary $l_bin not found on host; cannot prepare mock PATH."
-		fi
-		ln -s "$l_actual" "$l_dir/$l_bin"
-	done
-}
-
-write_passthrough_zstd() {
-	l_path=$1
-	safe_rm_f "$l_path"
-	cat >"$l_path" <<'EOF'
-#!/bin/sh
-# Minimal zstd stand-in that simply passes stdin to stdout for integration tests.
-while [ $# -gt 0 ]; do
-	case "$1" in
-	-d) shift ;;
-	-T*) shift ;;
-	-*) shift ;;
-	*) break ;;
-	esac
-done
-cat
-EOF
-	chmod +x "$l_path"
-}
-
 write_progress_logger_script() {
 	l_path=$1
 	safe_rm_f "$l_path"
@@ -1075,242 +555,6 @@ write_exec_wrapper_script() {
 log=${MOCK_WRAPPER_LOG:-}
 wrapper_name=$(basename "$0")
 [ -n "$log" ] && printf '%s:%s\n' "$wrapper_name" "$*" >>"$log"
-exec "$@"
-EOF
-	chmod +x "$l_path"
-}
-
-write_mock_ssh_script() {
-	l_path=$1
-	safe_rm_f "$l_path"
-	cat >"$l_path" <<'EOF'
-#!/bin/sh
-# Lightweight ssh stand-in that honors control sockets and runs commands locally.
-
-mock_ssh_matches_missing_tool_probe() {
-	l_cmd=$1
-
-	[ -n "${MOCK_SSH_MISSING_TOOL:-}" ] || return 1
-
-	case "$l_cmd" in
-	*"command -v"*"$MOCK_SSH_MISSING_TOOL"*) printf '%s\n' "10"; return 0 ;;
-	*"l_path=\$(command -v"*"$MOCK_SSH_MISSING_TOOL"*) printf '%s\n' "10"; return 0 ;;
-	*) return 1 ;;
-	esac
-}
-
-mock_ssh_emit_capability_response() {
-	l_cmd=$1
-	l_tools=""
-
-	case "$l_cmd" in
-	*"ZXFER_REMOTE_CAPS_V2"*)
-		;;
-	*)
-		return 1
-		;;
-	esac
-
-	if [ -n "${MOCK_SSH_CAPABILITY_RESPONSE_FILE:-}" ]; then
-		cat "$MOCK_SSH_CAPABILITY_RESPONSE_FILE"
-		return $?
-	fi
-
-	l_tools=$(printf '%s\n' "$l_cmd" | awk '
-		found == 0 {
-			if ($0 ~ /<<'\''ZXFER_REMOTE_CAPABILITY_TOOLS'\''$/) {
-				found = 1
-			}
-			next
-		}
-		$0 == "ZXFER_REMOTE_CAPABILITY_TOOLS" {
-			exit
-		}
-		$0 != "" {
-			print
-		}
-	')
-	if [ -z "$l_tools" ]; then
-		l_tools=$(printf '%s\n' "zfs" "parallel" "cat")
-	fi
-
-	printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
-	printf 'os\t%s\n' "${MOCK_SSH_FORCE_UNAME:-$(uname 2>/dev/null)}"
-	printf '%s\n' "$l_tools" |
-	while IFS= read -r l_tool || [ -n "$l_tool" ]; do
-		[ -n "$l_tool" ] || continue
-		if [ -n "${MOCK_SSH_MISSING_TOOL:-}" ] && [ "$l_tool" = "$MOCK_SSH_MISSING_TOOL" ]; then
-			printf 'tool\t%s\t1\t-\n' "$l_tool"
-			continue
-		fi
-		l_path=$(command -v "$l_tool" 2>/dev/null)
-		l_status=$?
-		if [ "$l_status" -eq 0 ]; then
-			printf 'tool\t%s\t0\t%s\n' "$l_tool" "$l_path"
-		else
-			printf 'tool\t%s\t%s\t-\n' "$l_tool" "$l_status"
-		fi
-	done
-	return 0
-}
-
-mock_ssh_matches_command_v_override() {
-	l_cmd=$1
-
-	[ -n "${MOCK_SSH_COMMAND_V_TOOL:-}" ] || return 1
-	[ -n "${MOCK_SSH_COMMAND_V_RESULT:-}" ] || return 1
-
-	case "$l_cmd" in
-	*"command -v"*"$MOCK_SSH_COMMAND_V_TOOL"*)
-		printf '%s\n' "$MOCK_SSH_COMMAND_V_RESULT"
-		return 0
-		;;
-	*) return 1 ;;
-	esac
-}
-
-mock_ssh_is_uname_command() {
-	l_cmd=$1
-
-	case "$l_cmd" in
-	uname | "'uname'" | '"uname"')
-		return 0
-		;;
-	*)
-		return 1
-		;;
-	esac
-}
-
-l_socket=""
-l_op=""
-l_host=""
-
-if [ -n "${MOCK_SSH_ARGV_LOG:-}" ]; then
-	printf '%s\n' "---" >>"$MOCK_SSH_ARGV_LOG"
-	for l_arg in "$@"; do
-		printf 'argv:%s\n' "$l_arg" >>"$MOCK_SSH_ARGV_LOG"
-	done
-fi
-
-while [ $# -gt 0 ]; do
-	case "$1" in
-	-M)
-		shift
-		;;
-	-S)
-		l_socket=$2
-		shift 2
-		;;
-	-O)
-		l_op=$2
-		shift 2
-		;;
-	-o)
-		shift 2
-		;;
-	-p)
-		shift 2
-		;;
-	-f | -n | -N)
-		shift
-		;;
-	--)
-		shift
-		break
-		;;
-	-*)
-		shift
-		;;
-	*)
-		l_host=$1
-		shift
-		break
-		;;
-	esac
-done
-
-if [ -n "$l_socket" ]; then
-	mkdir -p "$(dirname "$l_socket")" || exit 1
-	: >"$l_socket"
-fi
-
-if [ "$l_op" = "exit" ]; then
-	[ -n "${MOCK_SSH_LOG:-}" ] && printf 'close %s\n' "$l_host" >>"$MOCK_SSH_LOG"
-	exit 0
-fi
-
-[ $# -gt 0 ] || exit 0
-
-if [ -n "${MOCK_SSH_LOG:-}" ]; then
-	if [ $# -eq 1 ]; then
-		printf '%s\n' "$1" >>"$MOCK_SSH_LOG"
-	else
-		printf '%s\n' "$*" >>"$MOCK_SSH_LOG"
-	fi
-fi
-
-	if [ $# -eq 1 ]; then
-		l_cmd=$1
-		l_shell=${MOCK_SSH_REMOTE_SHELL:-sh}
-
-		if [ -n "${MOCK_SSH_FORCE_UNAME:-}" ] && mock_ssh_is_uname_command "$l_cmd"; then
-			printf '%s\n' "$MOCK_SSH_FORCE_UNAME"
-			exit 0
-		fi
-
-		if mock_ssh_emit_capability_response "$l_cmd"; then
-			exit 0
-		fi
-
-		if mock_ssh_matches_command_v_override "$l_cmd"; then
-			exit 0
-		fi
-
-		if [ -n "${MOCK_SSH_FILTER_PROPERTY:-}" ] && printf '%s\n' "$l_cmd" |
-			grep -q "^zfs get -Ho property all "; then
-			l_pool=${l_cmd#*all }
-			if [ -n "$l_pool" ]; then
-				zfs get -Ho property all "$l_pool" | grep -v "^${MOCK_SSH_FILTER_PROPERTY}$"
-				exit 0
-			fi
-		fi
-		if l_missing_probe_status=$(mock_ssh_matches_missing_tool_probe "$l_cmd"); then
-			exit "$l_missing_probe_status"
-		fi
-
-		exec "$l_shell" -c "$l_cmd"
-	fi
-
-if [ -n "${MOCK_SSH_FORCE_UNAME:-}" ] && mock_ssh_is_uname_command "$1"; then
-	printf '%s\n' "$MOCK_SSH_FORCE_UNAME"
-	exit 0
-fi
-
-if [ -n "${MOCK_SSH_FILTER_PROPERTY:-}" ] &&
-	[ $# -ge 6 ] &&
-	[ "${1##*/}" = "zfs" ] &&
-	[ "$2" = "get" ] &&
-	[ "$3" = "-Ho" ] &&
-	[ "$4" = "property" ] &&
-	[ "$5" = "all" ]; then
-	l_pool=$6
-	"$1" "$2" "$3" "$4" "$5" "$6" | grep -v "^${MOCK_SSH_FILTER_PROPERTY}$"
-	exit $?
-fi
-
-	if [ "${1##*/}" = "sh" ] && [ "${2:-}" = "-c" ]; then
-		l_cmd=$3
-		shift 3
-		if mock_ssh_emit_capability_response "$l_cmd"; then
-			exit 0
-		fi
-		if l_missing_probe_status=$(mock_ssh_matches_missing_tool_probe "$l_cmd"); then
-			exit "$l_missing_probe_status"
-		fi
-		exec sh -c "$l_cmd" "$@"
-	fi
-
 exec "$@"
 EOF
 	chmod +x "$l_path"
@@ -5548,14 +4792,16 @@ EOF
 	chmod +x "$mock_path/uname"
 	write_mock_ssh_script "$mock_path/ssh"
 
-	local_os=$(ZXFER_SECURE_PATH="$mock_path" PATH="$mock_path:$PATH" sh -c 'ZXFER_SOURCE_MODULES_ROOT=. ZXFER_SOURCE_MODULES_THROUGH=zxfer_runtime.sh . ./src/zxfer_modules.sh; zxfer_get_os ""')
+	local_os=$(ZXFER_SECURE_PATH="$mock_path" PATH="$mock_path:$PATH" sh -c 'ZXFER_SOURCE_MODULES_ROOT=.; . ./src/zxfer_modules.sh; zxfer_load_modules zxfer_remote_hosts.sh; zxfer_get_os ""')
 	if [ "$local_os" != "MockLocalOS" ]; then
 		fail "Expected MockLocalOS from local zxfer_get_os, got $local_os"
 	fi
 
 	remote_os=$(MOCK_SSH_FORCE_UNAME="MockRemoteOS" ZXFER_SECURE_PATH="$mock_path" PATH="$mock_path:$PATH" sh -c '
 		# shellcheck source=src/zxfer_modules.sh
-		ZXFER_SOURCE_MODULES_ROOT=. ZXFER_SOURCE_MODULES_THROUGH=zxfer_remote_hosts.sh . ./src/zxfer_modules.sh
+		ZXFER_SOURCE_MODULES_ROOT=.
+		. ./src/zxfer_modules.sh
+		zxfer_load_modules zxfer_remote_hosts.sh
 		g_cmd_ssh="'"$mock_path"'/ssh"
 		zxfer_get_os "remotehost"
 	')
@@ -5636,6 +4882,12 @@ EOF
 
 main() {
 	parse_args "$@"
+	zxfer_validate_integration_registry ||
+		fail "Unable to load the integration test registry."
+	TEST_SEQUENCE=$(zxfer_integration_registry_names) ||
+		fail "Unable to read the integration test registry sequence."
+	PRE_POOL_TEST_SEQUENCE=$(zxfer_integration_registry_pre_pool_names) ||
+		fail "Unable to read the integration pre-pool test sequence."
 	configure_platform_tool_paths
 	require_platform_permissions
 	require_cmd zpool
@@ -5652,15 +4904,17 @@ main() {
 	trap 'abort_integration_run TERM 143' TERM
 	setup_command_confirmation_wrappers
 
-	if run_test_body usage_error_tests; then
-		cleanup_test_output_captures
-	else
-		l_status=$?
-		log_summary "$(printf '%sPRECHECK FAIL%s usage_error_tests (exit %s)' "$RED" "$RESET" "$l_status")"
-		replay_test_output_captures "usage_error_tests"
-		cleanup_test_output_captures
-		exit "$l_status"
-	fi
+	for l_pre_pool_test in $PRE_POOL_TEST_SEQUENCE; do
+		if run_test_body "$l_pre_pool_test"; then
+			cleanup_test_output_captures
+		else
+			l_status=$?
+			log_summary "$(printf '%sPRECHECK FAIL%s %s (exit %s)' "$RED" "$RESET" "$l_pre_pool_test" "$l_status")"
+			replay_test_output_captures "$l_pre_pool_test"
+			cleanup_test_output_captures
+			exit "$l_status"
+		fi
+	done
 	SRC_POOL=$(generate_test_pool_name "src")
 	DEST_POOL=$(generate_test_pool_name "dest")
 	SRC_MOUNT_ROOT="$WORKDIR/mnt/src"
@@ -5679,95 +4933,6 @@ main() {
 	create_test_pool "destination" "$DEST_POOL" "$DEST_IMG" "$DEST_MOUNT_ROOT"
 	DEST_POOL_CREATED=1
 
-	TEST_SEQUENCE="usage_error_tests \
-usage_error_failure_report_test \
-usage_error_failure_report_unsafe_commands_test \
-usage_error_failure_report_control_character_escaping_test \
-usage_error_failure_report_trailing_newline_preservation_test \
-basic_replication_test \
-non_recursive_replication_test \
-generate_tests_replication \
-idempotent_replication_test \
-auto_snapshot_replication_test \
-auto_snapshot_nonrecursive_test \
-trailing_slash_destination_test \
-exclude_filter_test \
-missing_destination_error_test \
-invalid_override_property_test \
-dry_run_replication_test \
-remote_dry_run_noexec_progress_test \
-yield_loop_dryrun_iteration_test \
-force_rollback_test \
-failure_handling_tests \
-runtime_failure_report_test \
-runtime_failure_report_redaction_test \
-runtime_failure_report_unsafe_commands_test \
-extended_usage_error_tests \
-consistency_option_validation_tests \
-snapshot_deletion_test \
-snapshot_name_mismatch_deletion_test \
-snapshot_name_prefix_collision_deletion_test \
-send_command_dryrun_test \
-raw_send_replication_test \
-backup_dir_symlink_guard_test \
-relative_backup_dir_rejection_test \
-missing_backup_metadata_error_test \
-grandfather_protection_test \
-migration_unmounted_guard_test \
-property_backup_restore_test \
-chained_property_backup_provenance_test \
-remote_property_backup_restore_test \
-property_creation_with_zvol_test \
-	property_override_and_ignore_test \
-	escaped_comma_override_test \
-	unsupported_property_skip_test \
-	must_create_property_error_test \
-	delete_dest_only_snapshot_test \
-	existing_empty_destination_seed_test \
-	dry_run_deletion_test \
-	progress_wrapper_test \
-	progress_placeholder_passthrough_test \
-	job_limit_enforcement_test \
-	background_receive_ancestry_serialization_test \
-	background_send_failure_test \
-	secure_path_dependency_tests \
-	secure_path_failure_report_test \
-	secure_path_append_resolution_test \
-	error_log_mirror_test \
-	usage_error_log_mirror_test \
-	invalid_error_log_warning_test \
-	error_log_email_example_self_test \
-	remote_migration_guard_tests \
-	local_helper_path_shell_metacharacters_test \
-	garbage_wrapped_host_spec_fails_closed_test \
-	control_socket_path_shell_metacharacters_test \
-	remote_origin_target_uncompressed_test \
-	remote_helper_path_shell_metacharacters_test \
-	remote_capability_control_whitespace_path_falls_back_to_direct_probe_test \
-	target_capability_control_whitespace_path_falls_back_to_direct_probe_test \
-	remote_compression_pipeline_test \
-	target_only_remote_compression_test \
-	remote_csh_origin_snapshot_listing_test \
-	remote_wrapped_host_spec_test \
-	malformed_remote_capability_response_fails_closed_test \
-	malformed_remote_capability_response_falls_back_to_direct_probe_test \
-	malformed_target_capability_response_falls_back_to_direct_probe_test \
-	trap_exit_cleanup_test \
-	missing_parallel_error_test \
-	remote_missing_parallel_origin_test \
-	remote_incompatible_parallel_origin_test \
-	remote_parallel_rendered_failure_origin_test \
-	managed_ssh_policy_test \
-	parallel_jobs_listing_test \
-	migration_service_success_test \
-	migration_service_failure_test \
-	get_os_detection_test \
-	verbose_debug_logging_test \
-	legacy_backup_layout_rejected_test \
-	unsupported_backup_format_version_rejected_test \
-	remote_legacy_backup_layout_rejected_test \
-	insecure_backup_metadata_guard_test \
-	beep_handling_test"
 	TEST_SEQUENCE=$(build_requested_test_sequence)
 	# shellcheck disable=SC2086
 	set -- $TEST_SEQUENCE

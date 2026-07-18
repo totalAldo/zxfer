@@ -1,4 +1,4 @@
-.\" Solaris/illumos-oriented rendering of the maintained zxfer command reference.
+.\" Generated from man/zxfer.8 by tests/generate_solaris_manpage.sh; do not edit.
 .\"
 .\" Copyright (c) 2024-2026 Aldo Gonzalez
 .\" Copyright (c) 2013-2016 Allan Jude <allanjude@freebsd.org>
@@ -108,10 +108,17 @@ etc. as overrides, the original properties may be restored without the
 user having to make a note of what those original properties were.
 .PP
 \fBzxfer\fR
-requires privileges sufficient for the requested zfs(8), zpool(8), and ssh(1)
+requires privileges sufficient for the requested
+zfs(8),
+zpool(8),
+and
+ssh(1)
 operations. In practice this often means root, delegated ZFS privileges, or a
-remote wrapper such as \fBpfexec\fR or \fBdoas\fR, depending on platform and
-workflow.
+remote wrapper such as
+\(lqpfexec\(rq
+or
+\(lqdoas\(rq,
+depending on platform and workflow.
 .PP
 Note that at present, the usage of spaces in
 zfs(8)
@@ -193,15 +200,20 @@ In order to allow the restoration of filesystems within the hierarchy,
 will check the exact current keyed metadata path
 \fI.zxfer_backup_info.v2/h/<id-chunks>/.zxfer_backup_info.v2\fR
 in the hardened metadata directory
-(\fBZXFER_BACKUP_DIR\fR/\fIsource/dataset/path\fR/) for the requested source
-and destination roots, with a read-only fallback for the retired checksum-keyed
-v2 filename when the current lossless-key path is absent. The metadata must
-also carry the
-\fB#zxfer property backup file\fR header and a supported
-\fB#format_version:2\fR marker before \fBzxfer\fR will consume any restore
-v2 source-root-relative rows. Older, unversioned, or otherwise unsupported backup metadata layouts are
-not supported; restore the properties only from files stored in the hardened
-directory (which defaults to \fI/var/db/zxfer\fR and can be changed by exporting
+(\fIZXFER_BACKUP_DIR/source/dataset/path/\fR)
+for the requested source and destination roots. The current lossless-key path is
+checked first with a read-only fallback to the retired checksum-keyed v2
+filename when it is absent. The metadata must also carry the
+\(lq#zxfer property backup file\(rq
+header and a supported
+\(lq#format_version:2\(rq
+marker before
+\fBzxfer\fR
+will consume any v2 source-root-relative restore rows. Older, unversioned, or otherwise unsupported
+backup metadata layouts are not supported; restore the properties only from
+files stored in the hardened directory (which defaults to
+\fI/var/db/zxfer\fR
+and can be changed by exporting
 \fBZXFER_BACKUP_DIR\fR).
 .TP 8n
 \fB\-h\fR
@@ -211,35 +223,44 @@ Prints (h)elp.
 Bac(k)up property mode. This backs up the original filesystem property settings
 to the current keyed metadata path
 \fI.zxfer_backup_info.v2/h/<id-chunks>/.zxfer_backup_info.v2\fR
-stored inside the secured metadata directory
-(\fBZXFER_BACKUP_DIR\fR/\fIsource/dataset/path\fR/). This keeps the metadata outside live
-mountpoints so unprivileged users cannot pre-create symlinks. The
-\fB#zxfer property backup file\fR header and \fB#format_version:2\fR marker are
-written automatically so future restore runs can validate the metadata format
-before consuming v2 source-root-relative rows. The
-\fI<id-chunks>\fR path components are a lossless identity derived from the full
-source and destination pair, split into bounded chunks so long dataset names do
-not exceed per-component filesystem limits and distinct replication runs do not
-overwrite each other just because they share the same source tail. Restore still
+stored inside the hardened metadata directory
+(\fIZXFER_BACKUP_DIR/source/dataset/path/\fR).
+This file lives outside the dataset mountpoints so unprivileged users cannot
+pre-create symlinks. The
+\(lq#zxfer property backup file\(rq
+header and
+\(lq#format_version:2\(rq
+marker are written automatically so future restore runs can validate the
+metadata format before consuming v2 source-root-relative rows. The
+\(laid-chunks\(ra
+path components are a lossless identity derived from the full source and
+destination pair, split into bounded chunks so long dataset names do not exceed
+per-component filesystem limits and distinct replication runs do not overwrite
+each other just because they share the same source tail. Restore still
 recognizes the retired checksum-keyed v2 filename as a read-only fallback when
-the current lossless-key path is absent.
-The metadata header also records the full
-\fBsource_root\fR and \fBdestination_root\fR dataset identifiers for the
-backup run, while the body rows retain source-root-relative dataset paths later
-consumed by \fB\-e\fR. Current-format files emit only those versioned root
-markers; the older compatibility alias lines are no longer written. For example, if
-you are backing up
+the current lossless-key path is absent. The metadata
+header also records the full
+\(lqsource_root\(rq
+and
+\(lqdestination_root\(rq
+dataset identifiers for the backup run, while the body rows retain
+source-root-relative dataset paths later consumed by
+\fB\-e\fR.
+Current-format files emit only those versioned root markers; the older
+compatibility alias lines are no longer written.
+For example, if you are backing up
 \fItank/src\fR
 and you keep the default
 \fBZXFER_BACKUP_DIR\fR
-of \fI/var/db/zxfer\fR, the metadata path
+of
+\fI/var/db/zxfer\fR,
+the metadata path
 \fI/var/db/zxfer/tank/src/.zxfer_backup_info.v2/h/74616e6b2f7372630a6261636b75702f647374/.zxfer_backup_info.v2\fR
-would hold all the information about the original filesystem properties, and
-some other useful info. Point
+would hold all the information about the original values of the filesystem
+properties, and some other useful info. Set
 \fBZXFER_BACKUP_DIR\fR
-at another secure directory owned by root or the effective UID if you need the
-metadata on a different
-filesystem.
+to point at an alternate secure directory owned by root or the effective UID if you need to relocate the
+metadata.
 .sp
 This allows us to use the
 [\fB\-o\fR]
@@ -256,29 +277,37 @@ runs now forward that original-source property provenance into the next hop's
 backup metadata instead of re-recording intermediate override or local-property
 drift as the restored baseline.
 .sp
-When \fB\-k\fR publishes backup metadata through a remote target specified by
-\fB\-T\fR, \fBzxfer\fR also resolves and validates that target host's
-\fBcat\fR helper through the same secure remote-helper path instead of
-assuming a fixed remote binary location.
+When
+\fB\-k\fR
+publishes backup metadata through a remote target specified by
+\fB\-T\fR,
+\fBzxfer\fR
+also resolves and validates the target host's
+cat(1)
+helper through the same secure remote-helper path instead of assuming a fixed
+remote binary location.
 .TP 8n
 \fB\-n\fR
 Dry ru(n) mode. Prints out the commands that would otherwise execute, but
 current releases now treat this as a strict no-exec preview: launcher ssh
 preflight, remote helper validation, live backup-restore checks,
-unsupported-property discovery, snapshot discovery, and \fB-D\fR templates
-that reference \fB%%size%%\fR are all skipped instead of validated against the
-live source or destination. This means dry runs no longer render the eventual
-send/receive or property-reconcile commands, because those require live
-snapshot state. Use this when you need a safe preflight preview rather than
-live validation. When combined with
+unsupported-property discovery, snapshot discovery, and
+\fB\-D\fR
+templates that reference
+\(oq%%size%%\(cq
+are all skipped instead of validated against the live source or destination.
+This means dry runs no longer render the eventual send/receive or
+property-reconcile commands, because those require live snapshot state. Use
+this when you need a safe preflight preview rather than live validation. When combined with
 \fB\-k\fR,
 \fBzxfer\fR
 also previews the local or remote secure backup-directory preparation and
 staged backup-metadata write commands under
 \fBZXFER_BACKUP_DIR\fR
 instead of creating, chmodding, or writing those metadata files during
-preflight; chained \fB\-k\fR backups also preview any forwarded provenance
-alias write. When combined with
+preflight; chained
+\fB\-k\fR
+backups also preview any forwarded provenance alias write. When combined with
 \fB\-s\fR
 or
 \fB\-m\fR,
@@ -293,19 +322,25 @@ cached state as though those actions had already happened.
 e.g.
 \fB\-o\fR \fIproperty1=value1,property2=value2...\fR
 .sp
-If one value must contain a literal comma, quote the full \fB\-o\fR argument
-and escape that comma as \fB\\,\fR, for example
-\fB\-o\fR \fI'user:note=value\\,with\\,commas'\fR.
+If one value must contain a literal comma, quote the full
+\fB\-o\fR
+argument and escape that comma as
+\(oq\e,\(cq,
+for example
+\fB\-o\fR \fI'user:note=value\e,with\e,commas'\fR.
 For example,
 \fB\-o\fR \fIcompression=lzjb\fR
 will cause all destination filesystems to be set to lzjb compression. If using
-recursive mode, \fBzxfer\fR sets the override on the replicated root and leaves
-descendants inherited when the property can inherit and their parent already
-provides the requested value; non-inheritable overrides, such as quotas and
-reservations, remain local on descendants. Note that this option will also
-override any values that would otherwise be \fBset\fR by "-P". Invoking this
-option will also create the destination filesystem(s) if they do not already
-exist.
+recursive mode,
+\fBzxfer\fR
+sets the override on the replicated root and leaves descendants inherited when
+the property can inherit and their parent already provides the requested value;
+non-inheritable overrides, such as quotas and reservations, remain local on
+descendants.
+Note that this option will also override any values that would otherwise be
+\fBset\fR
+by "-P". Invoking this option will also create the destination filesystem(s)
+if they do not already exist.
 .TP 8n
 \fB\-P\fR
 Transfer (P)roperty mode. This causes the destination to have properties explicitly
@@ -402,14 +437,22 @@ of the destination. Requires -m.
 \fB\-d\fR
 (d)elete snapshots on the destination that are absent on the source. This may
 be necessary to function properly anyway, in a similar fashion to
-.PP
-\fBzxfer\fR batches snapshot deletions into background zfs(8) \fIdestroy\fR
-commands so replication can continue while cleanup executes. Those background
-jobs remain tied to the lifetime of the main process via its EXIT trap; if
-\fBzxfer\fR exits for any reason, the trap terminates outstanding destroy jobs
-so they never run unattended. If \fBzxfer\fR stops before the kernel finishes
-deleting the snapshots, rerun \fBzxfer\fR with \fB\-d\fR to resume cleanup and
-finish removing the stale datasets.
+.sp
+\fBzxfer\fR
+batches those snapshot deletions into background
+zfs(8)
+\fBdestroy\fR
+commands so replication can continue while snapshots are removed. The background
+jobs are tied to the lifetime of
+\fBzxfer\fR:
+its EXIT trap kills any remaining destroy processes when the main script
+terminates so snapshot deletes never run unattended. If
+\fBzxfer\fR
+exits before the kernel finishes destroying the targeted snapshots, rerun
+\fBzxfer\fR
+with
+\fB\-d\fR
+to resume cleanup and finish removing the stale datasets.
 .TP 8n
 \fB\-D\fR
 \fBzxfer\fR
@@ -428,9 +471,13 @@ A number of macros will be replaced with values before the command is executed:
 .TP 3n
 %%size%%
 Will be replaced with the estimated size of the snapshot.
-On remote or multi-job runs, \fBzxfer\fR may use a cheaper approximate probe
-for this value to reduce startup latency.
-When combined with \fB\-n\fR, templates that reference \fB%%size%%\fR can
+On remote or multi-job runs,
+\fBzxfer\fR
+may use a cheaper approximate probe for this value to reduce startup latency.
+When combined with
+\fB\-n\fR,
+templates that reference
+\(oq%%size%%\(cq
 no longer probe the live source; strict dry-run leaves size estimates unknown
 because send planning is skipped entirely.
 .PD
@@ -463,17 +510,23 @@ the target has diverged.
 .sp
 Divergence contract: when a destination snapshot shares a source snapshot's
 name but carries a different GUID, the destination holds diverged data under
-an identical name. \fBzxfer\fR always warns on stderr, naming the dataset,
-the diverged-snapshot count, and up to three example snapshots with both
-GUIDs. The destructive convergence (destroy the diverged destination
-snapshots, roll back to the last GUID-matching common snapshot, and resend
-the source range) proceeds only when BOTH \fB\-d\fR and \fB\-F\fR are active;
-otherwise the run fails closed with a structured error and plans no deletes
-or sends for the diverged dataset. After a converged dataset's receive
-completes, \fBzxfer\fR re-checks the live destination listing and aborts with
-an error naming the snapshot if any name-match/GUID-mismatch remains, so an
-external writer re-diverging the destination cannot cause a silent
-destroy-and-resend loop.
+an identical name.
+\fBzxfer\fR
+always warns on stderr, naming the dataset, the diverged-snapshot count, and
+up to three example snapshots with both GUIDs. The destructive convergence
+(destroy the diverged destination snapshots, roll back to the last
+GUID-matching common snapshot, and resend the source range) proceeds only when
+BOTH
+\fB\-d\fR
+and
+\fB\-F\fR
+are active; otherwise the run fails closed with a structured error and plans
+no deletes or sends for the diverged dataset. After a converged dataset's
+receive completes,
+\fBzxfer\fR
+re-checks the live destination listing and aborts with an error naming the
+snapshot if any name-match/GUID-mismatch remains, so an external writer
+re-diverging the destination cannot cause a silent destroy-and-resend loop.
 .TP 8n
 \fB\-g\fR
 (g)randfather protection. Specify a number of days old (relative to the system
@@ -517,25 +570,29 @@ Run up to this many zfs send/receive jobs concurrently and use the explicit
 per-dataset source snapshot-discovery path when determining the work queue.
 When jobs is greater than 1, zxfer uses a direct per-dataset source listing
 pipeline instead of the single recursive snapshot list. Local-origin and
-remote-origin runs through \fB\-O\fR require a resolved \fBparallel\fR helper
-on the executing origin host. zxfer intentionally validates only helper
+remote-origin runs through
+\fB\-O\fR
+require a resolved
+\fBparallel\fR
+helper on the executing origin host. zxfer intentionally validates only helper
 existence through the secure-PATH model, then assumes the operator or package
 supplied an implementation compatible with the GNU Parallel-style options used
 by the rendered source-discovery pipeline.
-zxfer does not
-silently fall back to the serial recursive listing once \fB\-j\fR is greater
-than 1. The default is 1, which disables background sends and keeps source
-snapshot discovery on the serial recursive listing path. Raising this value can
-hide WAN latency or speed up large replications, but will also increase
-memory, CPU and I/O load. Source listing runs as a tracked background helper
-with staged stderr and registered PID cleanup. The long-lived send/receive
-workers launched for this path run under a shared supervisor that records
-launch/completion metadata and tears them down through validated process-group
-or owned-child-set cleanup instead of signaling a bare wrapper-shell PID.
-\fBzxfer\fR also serializes conflicting ancestor/descendant destination
-receives on the same target so parent and child datasets do not receive
-concurrently, and its ready queue skips blocked descendants to start later
-independent datasets while job slots remain.
+zxfer does not silently fall back to the serial recursive listing once
+\fB\-j\fR
+is greater than 1. The default is 1, which disables background sends and keeps
+source snapshot discovery on the serial recursive listing path. Raising this
+value can hide WAN latency or speed up large replications, but will also
+increase memory, CPU and I/O load. Source listing runs as a tracked background
+helper with staged stderr and PID cleanup. The long-lived
+send/receive workers launched for this path run supervision-lite: each job is
+one backgrounded job shell that records its own exit status to a per-run
+status file, and teardown signals the job's setsid process group or its
+tracked direct children instead of a bare
+wrapper-shell PID. zxfer also serializes conflicting ancestor/descendant
+destination receives on the same target so parent and child datasets do not
+receive concurrently, and its ready queue skips blocked descendants to start
+later independent datasets while job slots remain.
 .TP 8n
 \fB\-m\fR
 After sending all snapshots, (m)igrate the source to the destination filesystem by
@@ -573,8 +630,12 @@ grep(1)
 \fB\-v\fR,
 so be sure to escape shell metacharacters or provide quotes where appropriate.
 Useful when a recursive send should omit scratch datasets or other prefixes.
-To exclude only \fItank/data\fR without also matching \fItank/data.bob\fR,
-use an anchored pattern such as \fB^tank/data$\fR.
+To exclude only
+\fItank/data\fR
+without also matching
+\fItank/data.bob\fR,
+use an anchored pattern such as
+\(lq^tank/data$\(rq.
 .TP 8n
 \fB\-O\fR
 Specify an (O)rigin user@host. This allows transfers FROM a remote host via ssh.
@@ -592,17 +653,21 @@ and so does your local machine if
 [\fB\-T\fR]
 is not also used.
 .sp
-.sp
 This fork is exercised across current OpenZFS 2.0+ environments on maintained
 FreeBSD branches, Linux with OpenZFS, supported OmniOS/illumos trains, and
-OpenZFS on macOS. For releases published after 2026-05-01, the FreeBSD support
-baseline is FreeBSD 14.4+ and 15.0+; FreeBSD 14.3, FreeBSD 13.x, and other
-end-of-life branches are not guaranteed.
-Remote helper resolution is designed to tolerate different absolute zfs(1)
+OpenZFS on macOS.
+For releases published after 2026-05-01, the FreeBSD support baseline is
+FreeBSD 14.4+ and 15.0+; FreeBSD 14.3, FreeBSD 13.x, and other end-of-life
+branches are not guaranteed. Remote helper resolution is designed to tolerate
+different absolute
+zfs(8)
 paths on each host, but property support can still differ across operating
-systems and ZFS versions. When mixing platforms or versions, validate property
-behavior carefully and consider \fB-I\fR or \fB-U\fR if the destination cannot
-support every source property.
+systems and ZFS versions. When mixing platforms or versions, validate
+property behavior carefully and consider
+\fB\-I\fR
+or
+\fB\-U\fR
+if the destination cannot support every source property.
 .sp
 Note that if at all possible, do not try and be clever
 and run
@@ -622,10 +687,13 @@ quotes and spacing exactly:
 .sp
 e.g. -O "user1@192.168.0.1 pfexec"
 .sp
-The \fB\-O\fR and \fB\-T\fR values are treated as literal whitespace-delimited
-tokens. Outer shell quoting is fine, but embedded quote characters or
-backslash escapes inside the value are rejected instead of being silently
-re-tokenized.
+The
+\fB\-O\fR
+and
+\fB\-T\fR
+values are treated as literal whitespace-delimited tokens. Outer shell quoting
+is fine, but embedded quote characters or backslash escapes inside the value
+are rejected instead of being silently re-tokenized.
 .sp
 The reason this works is because the commands that are related to
 reading/writing/modifying data will be prefaced with in normal circumstances:
@@ -710,10 +778,11 @@ pre-OpenZFS 2.0 destinations.
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
 profiling counters plus startup latency, trap-cleanup timing, and accumulated
 stage timings for ssh setup, snapshot listing, and diff/sort hot paths, along
-with runtime artifact/cache-object counts, command-rendering counts, live
-destination snapshot recheck counts, ssh control-socket wait,
-remote-capability cache wait, capability-bootstrap source, and direct remote
-helper-probe counters. While the run is active it also prints prefixed live
+with runtime temp-file counts, command-rendering counts, live destination
+snapshot recheck counts, ssh/zfs invocation counts by role, and direct remote
+helper-probe counters. Counter keys are stable across releases; counters for
+machinery that no longer exists (capability cache waits, cache-object writes,
+socket lock waits) still emit and always read 0. While the run is active it also prints prefixed live
 remote ssh commands, remote probe commands, and any ssh control-socket
 check/open commands before each execution so slow startup or remote-probe phases are
 visible in real time.
@@ -746,10 +815,10 @@ zfs send dataset@snap1 | zstd -3 | ssh user@host zstd -d | /sbin/zfs receive des
 .RE
 .sp
 Remote source snapshot-list metadata discovery
-(\fB\-O\fR with \fB\-j\fR and \fB\-z\fR) uses the selected
-compression/decompression pipeline when ssh is active, including the remote
-parallel source-discovery path before zxfer decides whether any snapshots
-actually need transfer.
+(\fB\-O\fR with \fB\-j\fR and \fB\-z\fR)
+uses the selected compression/decompression pipeline when ssh is active,
+including the remote parallel source-discovery path before zxfer decides
+whether any snapshots actually need transfer.
 .RE
 .TP 8n
 \fB\-Z\fR
@@ -770,12 +839,20 @@ zfs send dataset@snap1 | zstd -T0 -3 | ssh user@host zstd -d | /sbin/zfs receive
 .RE
 .RS 8n
 .sp
-Like \fB\-O\fR and \fB\-T\fR, the \fB\-Z\fR value must be expressible as
-literal whitespace-delimited tokens; embedded quote characters or backslash
-escapes are rejected instead of being re-tokenized.
+Like
+\fB\-O\fR
+and
+\fB\-T\fR,
+the
+\fB\-Z\fR
+value must be expressible as literal whitespace-delimited tokens; embedded
+quote characters or backslash escapes are rejected instead of being
+re-tokenized.
 .sp
-Higher custom levels such as \fB\-9\fR can improve compression ratio, but they
-consume substantially more CPU time and are therefore not the default.
+Higher custom levels such as
+\fR-9\fR
+can improve compression ratio, but they consume substantially more CPU time and
+are therefore not the default.
 .sp
 .RE
 .SH "EXAMPLES"
@@ -1019,119 +1096,193 @@ in Ex9. Again, if using Solaris refer to
 \fBzxfer\fR
 \fB-deFPv -O root@192.168.123.1 -R backup01/pools/storage/ storage\fR
 .SH "ENVIRONMENT"
-.TP 8n
+.TP 37n
 \fBZXFER_BACKUP_DIR\fR
-Secure directory owned by root or the effective UID that holds \fI.zxfer_backup_info.*\fR metadata generated by
-\fB-k\fR
+Secure directory owned by root or the effective UID that holds `.zxfer_backup_info.*` metadata generated by
+\fB\-k\fR
 and consumed by
-\fB-e\fR.
+\fB\-e\fR.
 Defaults to
 \fI/var/db/zxfer\fR
 and must be an absolute path that is not writable by unprivileged users.
-.TP 8n
+.TP 37n
 \fBZXFER_SECURE_PATH\fR
 Overrides the whitelist of directories that zxfer trusts when it resolves
-\fBzfs\fR,
-\fBssh\fR,
-\fBawk\fR,
+zfs(8),
+ssh(1),
+awk(1),
 and other helper binaries. The default value is
 \fI/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin\fR.
-Only absolute directories are honored. The computed allowlist also becomes the
-live runtime \fBPATH\fR, and zxfer also exports the same value before remote
-capability handshakes, helper-discovery probes, backup-directory helpers, and
-backup-metadata helper scripts run, so every trusted helper directory that
-later bare command lookups may need must appear here or be added through
+Only absolute directories are honored so zxfer cannot be tricked into executing
+programs from the current working directory or other user-controlled paths.
+The computed allowlist also becomes the live runtime
+\fBPATH\fR,
+and zxfer also exports the same value before remote capability handshakes,
+helper-discovery probes, backup-directory helpers, and backup-metadata helper
+scripts run, so every trusted helper directory that later bare command lookups
+may need must appear here or be added through
 \fBZXFER_SECURE_PATH_APPEND\fR.
-.TP 8n
+.TP 37n
 \fBZXFER_SECURE_PATH_APPEND\fR
-Appends extra absolute directories to the secure PATH whitelist for local and
-remote helper discovery without replacing the stock list. These appended
-directories also become part of the exported runtime \fBPATH\fR.
-.TP 8n
+Appends extra absolute directories to the secure PATH whitelist, allowing
+administrators to point zxfer at custom locations (both locally and on hosts
+referenced by
+\fB\-O\fR
+and
+\fB\-T\fR)
+without replacing the stock list. These appended directories also become part
+of the exported runtime
+\fBPATH\fR.
+.TP 37n
 \fBZXFER_SSH_BATCH_MODE\fR
-Overrides the default \fByes\fR value that zxfer passes as \fBBatchMode\fR
-for its own \fBssh\fR connections.
-.TP 8n
+Overrides the default
+\(oqyes\(cq
+value that zxfer passes as
+\fBBatchMode\fR
+for its own
+ssh(1)
+connections.
+.TP 37n
 \fBZXFER_SSH_STRICT_HOST_KEY_CHECKING\fR
-Overrides the default \fByes\fR value that zxfer passes as
-\fBStrictHostKeyChecking\fR for its own \fBssh\fR connections.
-.TP 8n
+Overrides the default
+\(oqyes\(cq
+value that zxfer passes as
+\fBStrictHostKeyChecking\fR
+for its own
+ssh(1)
+connections.
+.TP 37n
 \fBZXFER_SSH_USER_KNOWN_HOSTS_FILE\fR
-Optional absolute path that zxfer passes as \fBUserKnownHostsFile\fR for its
-own \fBssh\fR connections. When unset, zxfer still relies on the local
-\fBssh\fR configuration and defaults for known-hosts file discovery even
-though it forces \fBBatchMode=yes\fR and
+Optional absolute path that zxfer passes as
+\fBUserKnownHostsFile\fR
+for its own
+ssh(1)
+connections. When unset, zxfer still relies on the local
+ssh(1)
+configuration and defaults for known-hosts file discovery even though it
+forces
+\fBBatchMode=yes\fR
+and
 \fBStrictHostKeyChecking=yes\fR.
-.TP 8n
+.TP 37n
 \fBZXFER_SSH_USE_AMBIENT_CONFIG\fR
-When set to \fB1\fR, \fByes\fR, \fBtrue\fR, or \fBon\fR, zxfer stops adding
-its own \fBBatchMode\fR, \fBStrictHostKeyChecking\fR, and
-\fBUserKnownHostsFile\fR options, so remote connections fall back entirely to
-the ambient local \fBssh\fR configuration.
-.TP 8n
+When set to
+\(oq1\(cq,
+\(oqyes\(cq,
+\(oqtrue\(cq,
+or
+\(oqon\(cq,
+zxfer stops adding its own
+\fBBatchMode\fR,
+\fBStrictHostKeyChecking\fR,
+and
+\fBUserKnownHostsFile\fR
+options, so remote connections fall back entirely to the ambient local
+ssh(1)
+configuration.
+.TP 37n
 \fBZXFER_ERROR_LOG\fR
 Absolute path to a local file where zxfer should append the same delimited
-failure report that it writes to \fIstderr\fR on non-zero exits. The parent
-directory must already exist, be owned by root or the effective UID, and not
-be writable by other users unless the sticky bit is set. Any symlinked path
-component is refused, existing log files must be owned by root or the effective
-UID and already use mode 0600, and zxfer stages appends through a sibling
-temporary file before the final rename when the parent is writable. Appends are
-coordinated through a metadata-bearing lock directory that records PID,
-process-start identity, hostname, purpose, and creation time. Writable log
-parents use a sibling lock; existing logs under trusted but non-writable parents
-use an exact log-path fallback lock under a validated temp root. Stale owners
-are reaped after validation. If zxfer cannot append the report, or if a
-successful append cannot release that lock cleanly, it emits a warning to
-\fIstderr\fR; when that happens during trap-time failure reporting, zxfer still
-preserves the original exit status.
-.TP 8n
+failure report that it writes to
+\fRstderr\fR
+on non-zero exits. The parent directory must already exist, be owned by root
+or the effective UID, and not be writable by other users unless the sticky bit
+is set. Any symlinked path component is refused, existing log files must be
+owned by root or the effective UID and already use mode 0600, and zxfer stages
+appends through a sibling temporary file before the final rename when the
+parent is writable. Appends are coordinated through a metadata-bearing lock
+directory that records PID, process-start identity, hostname, purpose, and
+creation time. Writable log parents use a sibling lock; existing logs under
+trusted but non-writable parents use an exact log-path fallback lock under a
+validated temp root. Stale owners are reaped after validation. If zxfer cannot
+append the report, or if a successful append cannot release that lock cleanly,
+it emits a warning to
+\fRstderr\fR;
+when that happens during trap-time failure reporting, zxfer still preserves the
+original exit status.
+.TP 37n
 \fBZXFER_UNSAFE_FAILURE_REPORT_COMMANDS\fR
-When set to \fB1\fR, \fByes\fR, \fBtrue\fR, or \fBon\fR, zxfer preserves the
-\fBinvocation\fR and \fBlast_command\fR fields verbatim in structured failure
-reports on both \fIstderr\fR and any \fBZXFER_ERROR_LOG\fR mirror. The default
-behavior is to redact those two fields as \fB[redacted]\fR, so this override
-is intended only for deliberate local debugging on trusted log sinks.
-.TP 8n
+.br
+When set to
+\(oq1\(cq,
+\(oqyes\(cq,
+\(oqtrue\(cq,
+or
+\(oqon\(cq,
+zxfer preserves the
+\(lqinvocation\(rq
+and
+\(lqlast_command\(rq
+fields verbatim in structured failure reports
+on both
+\fRstderr\fR
+and any
+\fBZXFER_ERROR_LOG\fR
+mirror. The default behavior is to redact those two fields as
+\(lq[redacted]\(rq,
+so this override is intended only for deliberate local debugging on trusted
+log sinks.
+.TP 37n
 \fBTMPDIR\fR
 Optional local scratch root for zxfer temporary files, FIFOs, and caches.
 When set, it must resolve to an absolute directory owned by root or the
 effective UID and not be writable by other users unless the sticky bit is set;
 otherwise zxfer prefers a validated memory-backed temporary directory such as
-\fB/dev/shm\fR or \fB/run/shm\fR when available and falls back to the system
-temporary directory.
-.PP
-Current releases keep ssh control sockets and remote capability state per
-run: each invocation opens at most one control master per remote role under
-its private per-run temp directory, probes each remote host's capabilities
-once, holds the answer in memory, and removes everything on exit. Nothing is
-cached or coordinated across concurrent or consecutive invocations. Only
-\fBZXFER_ERROR_LOG\fR appends still coordinate through a metadata-bearing
-owned lock directory rather than a bare PID file; zxfer validates and reaps
-stale or corrupt owners before reuse and checks release failures instead of
-ignoring them.
-.PP
-The repository includes \fBexamples/error-log-email-notify.sh\fR, which shows
-how to set \fBZXFER_ERROR_LOG\fR, capture the current run's failure report from
-\fIstderr\fR along with any extra stderr warnings, and send an alert with
-\fBmailx\fR, BSD \fBmail\fR, or \fBsendmail\fR. The wrapper also accepts a
-whitespace-separated \fBSRC_DATASETS\fR list so multiple source roots can be
-replicated sequentially while preserving the first non-zero zxfer exit status.
+\fI/dev/shm\fR
+or
+\fI/run/shm\fR
+when available and falls back to the system temporary directory.
+.sp
+Current releases keep ssh control sockets and remote capability state per run:
+each invocation opens at most one control master per remote role under its
+private per-run temp directory, probes each remote host's capabilities once,
+holds the answer in memory, and removes everything on exit. Nothing is cached
+or coordinated across concurrent or consecutive invocations. Only
+\fBZXFER_ERROR_LOG\fR
+appends still coordinate through a metadata-bearing owned lock directory
+rather than a bare PID file; zxfer validates and reaps stale or corrupt owners
+before reuse and checks release failures instead of ignoring them.
+.sp
+The repository includes
+\fIexamples/error-log-email-notify.sh\fR,
+which shows how to set
+\fBZXFER_ERROR_LOG\fR,
+capture the current run's failure report from
+\fRstderr\fR
+along with any extra stderr warnings, and send an alert with
+mailx(1),
+BSD
+mail(1),
+or
+sendmail(8).
+It also accepts a whitespace-separated
+\fBSRC_DATASETS\fR
+list so the wrapper can run multiple source roots sequentially while preserving
+the first non-zero zxfer exit status.
 .PP
 \fBzxfer\fR
 prints its immediate error message and then emits a delimited failure report to
-\fIstderr\fR on every non-zero exit. The block begins with
-\fBzxfer: failure report begin\fR
+\fRstderr\fR
+on every non-zero exit. The block begins with
+\(lqzxfer: failure report begin\(rq
 and ends with
-\fBzxfer: failure report end\fR,
-using stable \fBkey: value\fR lines so operators can archive or post-process
-the output. When available, the report includes the failure class and stage,
-source and destination context, and redacted \fBinvocation\fR /
-\fBlast_command\fR placeholders by default. Raw ASCII control bytes inside
-report values are escaped before output so the structured block stays inert in
-terminals, pagers, and \fBZXFER_ERROR_LOG\fR. Set
-\fBZXFER_UNSAFE_FAILURE_REPORT_COMMANDS\fR only when you deliberately want
-those last two fields emitted verbatim for local debugging.
+\(lqzxfer: failure report end\(rq,
+using stable
+\(lqkey: value\(rq
+lines so operators can archive or post-process the output. When available, the
+report includes the failure class and stage, source and destination context,
+and redacted
+\(lqinvocation\(rq
+/
+\(lqlast_command\(rq
+placeholders by default. Raw ASCII control bytes inside report values are
+escaped before output so the structured block stays inert in terminals,
+pagers, and
+\fBZXFER_ERROR_LOG\fR.
+Set
+\fBZXFER_UNSAFE_FAILURE_REPORT_COMMANDS\fR
+only when you deliberately want those last two fields emitted verbatim for
+local debugging.
 .SH "EXIT VALUES"
 \fBzxfer\fR
 exits 0 on success and 2 if a command line option is incorrect. Runtime
@@ -1148,9 +1299,10 @@ Linux with OpenZFS, supported OmniOS/illumos trains, and OpenZFS on macOS.
 For releases published after 2026-05-01, the FreeBSD support baseline is
 FreeBSD 14.4+ and 15.0+; FreeBSD 14.3, FreeBSD 13.x, and other end-of-life
 branches are not guaranteed.
-Cross-version and cross-platform replication can still expose property or
-helper-path differences, so mixed-environment deployments should validate
-their exact send/receive and property behavior before production use.
+Cross-version and cross-platform
+replication can still expose property or helper-path differences, so
+mixed-environment deployments should validate their exact send/receive and
+property behavior before production use.
 .SH "THANKS"
 Thanks to Constantin Gonzalez for his constant collaboration, guidance, and
 his
@@ -1199,11 +1351,10 @@ platform filter. See the
 documentation for current platform-specific limitations.
 .PP
 Report bugs through the project issue tracker:
-.br
-https://github.com/totalAldo/zxfer/issues
+\fBhttps://github.com/totalAldo/zxfer/issues\fR
 .PP
 For security-sensitive issues, follow the private reporting guidance in
-\fBSECURITY.md\fR
+\fISECURITY.md\fR
 instead of opening a public issue.
 .SH "CREDITS"
 \fBzxfer\fR

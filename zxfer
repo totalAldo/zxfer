@@ -155,15 +155,14 @@ zxfer_failure_report_uses_unsafe_command_fields_early() {
 }
 
 if zxfer_failure_report_uses_unsafe_command_fields_early; then
-	g_zxfer_original_invocation=$(zxfer_quote_token_for_failure_context_early "$0")
+	zxfer_bootstrap_original_invocation=$(zxfer_quote_token_for_failure_context_early "$0")
 	for l_zxfer_arg in "$@"; do
 		l_zxfer_quoted_arg=$(zxfer_quote_token_for_failure_context_early "$l_zxfer_arg")
-		g_zxfer_original_invocation="$g_zxfer_original_invocation $l_zxfer_quoted_arg"
+		zxfer_bootstrap_original_invocation="$zxfer_bootstrap_original_invocation $l_zxfer_quoted_arg"
 	done
 else
-	g_zxfer_original_invocation="[redacted]"
+	zxfer_bootstrap_original_invocation="[redacted]"
 fi
-g_zxfer_failure_stage=startup
 
 ###############################################################################
 # MAIN
@@ -172,40 +171,12 @@ g_zxfer_failure_stage=startup
 zxfer_prescan_help_flag "$@"
 
 # Source runtime modules from this project
-g_zxfer_launcher_dir=$(dirname "$0")
+zxfer_launcher_dir=$(dirname "$0")
 # shellcheck source=src/zxfer_modules.sh
-ZXFER_SOURCE_MODULES_ROOT=$g_zxfer_launcher_dir . "$g_zxfer_launcher_dir"/src/zxfer_modules.sh
+ZXFER_SOURCE_MODULES_ROOT=$zxfer_launcher_dir
+. "$zxfer_launcher_dir"/src/zxfer_modules.sh
+zxfer_load_modules || exit $?
+zxfer_set_original_invocation "$zxfer_bootstrap_original_invocation"
 
-zxfer_register_runtime_traps
-zxfer_init_globals
-
-zxfer_set_failure_stage "cli parse"
-zxfer_read_command_line_switches "$@"
-
-# Read out source and dest values
-shift "$((OPTIND - 1))"
-g_destination=$1
-
-# Basic consistency checking
-if [ $# -lt 1 ]; then
-	zxfer_throw_usage_error "Need a destination."
-fi
-
-zxfer_set_failure_roots "" "$g_destination"
-zxfer_set_failure_stage "cli validation"
-zxfer_consistency_check
-zxfer_prepare_remote_host_connections
-zxfer_init_variables
-
-zxfer_set_failure_stage "replication"
-zxfer_run_zfs_mode_loop
-
-# Final backup-metadata preview / safety flush. Live -k runs already persist
-# after each successful per-dataset replication step.
-if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
-	zxfer_write_backup_properties
-fi
-
-# exit with success
-zxfer_beep 0
-exit 0
+zxfer_main "$@"
+exit $?

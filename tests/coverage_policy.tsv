@@ -2,28 +2,41 @@
 TOTAL	92.50
 src/zxfer_background_jobs.sh	91.50
 src/zxfer_backup_metadata.sh	94.50
+src/zxfer_backup_storage.sh	97.50
 src/zxfer_cleanup_child_wrapper.sh	95.00
 src/zxfer_cli.sh	94.00
 src/zxfer_dependencies.sh	98.00
+src/zxfer_error_log.sh	97.00
 src/zxfer_exec.sh	98.50
+src/zxfer_locking.sh	94.75
+src/zxfer_migration_services.sh	92.50
 src/zxfer_modules.sh	99.00
+src/zxfer_operation_state.sh	99.00
+src/zxfer_path_security.sh	88.00
+src/zxfer_profile.sh	99.00
+src/zxfer_property_policy.sh	97.75
 src/zxfer_property_reconcile.sh	92.00
+src/zxfer_property_state.sh	97.00
+src/zxfer_quoting.sh	99.00
 # zxfer_remote_hosts.sh: Phase 7 deleted the capability cache-file and ssh
 # socket lock/lease machinery (~1,900 lines, much of it hard-to-trace error
 # plumbing); the slimmed per-run module covers far better, so the minimum
 # ratchets up from 81.50.
 src/zxfer_remote_hosts.sh	92.50
+src/zxfer_remote_snapshot_discovery.sh	98.50
 src/zxfer_replication.sh	94.50
 src/zxfer_reporting.sh	92.50
-# zxfer_runtime.sh absorbed the path-security and owned-lock modules in the
-# Phase 8 merge (their rows were deleted); the merged file observes 96.22,
-# improving on the pre-merge 95.75 minimum, so the row ratchets up.
+# Runtime lifecycle is now independent of the extracted path-security and
+# owned-lock modules. Keep its pre-extraction threshold as a no-regression gate.
 src/zxfer_runtime.sh	96.00
+src/zxfer_secure_staging.sh	88.50
+src/zxfer_send_jobs.sh	96.75
 src/zxfer_send_receive.sh	96.00
-# zxfer_snapshot_discovery.sh: Phase 4 deleted ~250 lines of dead but
-# fully-tested refine/diff helpers, shrinking the covered denominator; the
-# absolute uncovered-line count went DOWN (112 -> 109) while the ratio
-# dipped below the old 94.00 minimum.
+src/zxfer_session.sh	93.25
+# Snapshot producer and remote-collector code now have their own measured
+# rows. The orchestration row retains the post-extraction coverage floor.
 src/zxfer_snapshot_discovery.sh	93.25
+src/zxfer_snapshot_producers.sh	93.00
 src/zxfer_snapshot_reconcile.sh	95.75
 src/zxfer_snapshot_state.sh	89.00
+src/zxfer_ssh_transport.sh	96.00

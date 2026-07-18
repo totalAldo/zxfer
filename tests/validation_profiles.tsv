@@ -1,0 +1,11 @@
+# zxfer validation profile composition (TAB-separated).
+# profile	step	host-risk	description
+doctor	doctor	none	Inspect shells, VM/ZFS commands, and cached lint tools without downloading.
+quick	quick-offline	none	Map changed paths to focused offline unit checks and print wider recommendations.
+full	lint	network-cache	Run the complete host-safe lint, unit, and enforced coverage stack.
+full	shunit-full	none	Run the complete host-safe lint, unit, and enforced coverage stack.
+full	coverage-full	none	Run the complete host-safe lint, unit, and enforced coverage stack.
+portable	portability-lint	network-cache	Run the static POSIX portability checks without ZFS activity.
+docs	docs-lint	network-cache	Run workflow, spelling, and anti-rebloat checks; pinned tools may populate the cache.
+vm	vm-bounded	guest-zfs	Run only the smoke or local disposable-guest VM profiles.
+bootstrap	lint-bootstrap	network	Download or refresh the pinned lint toolchain without running checks.

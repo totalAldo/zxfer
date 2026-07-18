@@ -1,14 +1,19 @@
 #!/bin/sh
 #
-# Anti-rebloat budget gate: measure the working tree and compare it against
-# the ratchet-down-only budgets committed in tests/budget_policy.tsv.
+# Complexity and anti-rebloat gate: enforce universal module/function/test
+# ceilings plus the sensitive-caller ratchets selected by policy.
 #
 
 set -eu
 
-ZXFER_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+if [ -n "${ZXFER_BUDGET_ROOT:-}" ]; then
+	ZXFER_ROOT=$(cd "$ZXFER_BUDGET_ROOT" && pwd)
+else
+	ZXFER_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+fi
 POLICY_FILE=$ZXFER_ROOT/tests/budget_policy.tsv
 FUNCTION_DEF_PATTERN='^[A-Za-z_][A-Za-z0-9_]*() {'
+COMPLEXITY_AWK=$ZXFER_ROOT/tests/measure_shell_complexity.awk
 TAB=$(printf '\t')
 VIOLATION_COUNT=0
 ROW_COUNT=0
@@ -17,9 +22,8 @@ print_usage() {
 	cat <<'EOF'
 Usage: tests/run_budget_check.sh [--list]
 
-Check the working tree against the ratchet-down-only size budgets in
-tests/budget_policy.tsv. Exits non-zero when any measurement exceeds its
-budget or when a policy row names a file that no longer exists.
+Check the working tree against the architecture-oriented ceilings and
+ratchet-down-only budgets in tests/budget_policy.tsv.
 
 Options:
   --list        print current measured values in policy format (for ratcheting)
@@ -32,9 +36,7 @@ die() {
 	exit 1
 }
 
-# The budgeted file set: every src module plus the launcher, as repo-relative
-# paths. This list is the single authority for what lines/functions budgets
-# cover.
+# Every production module plus the launcher, as repo-relative paths.
 budget_file_set() {
 	(
 		cd "$ZXFER_ROOT"
@@ -42,6 +44,28 @@ budget_file_set() {
 			printf '%s\n' "$l_file"
 		done
 		printf 'zxfer\n'
+	)
+}
+
+module_file_set() {
+	(
+		cd "$ZXFER_ROOT"
+		for l_file in src/*.sh; do
+			printf '%s\n' "$l_file"
+		done
+	)
+}
+
+test_definition_file_set() {
+	(
+		cd "$ZXFER_ROOT"
+		for l_file in \
+			tests/test_*.sh \
+			tests/suites/*.sh \
+			tests/fixtures/snapshot_discovery/*.sh; do
+			[ -f "$l_file" ] || continue
+			printf '%s\n' "$l_file"
+		done
 	)
 }
 
@@ -70,11 +94,94 @@ measure_functions() {
 	fi
 }
 
+measure_executable_lines() {
+	cat_budget_file_set | awk 'NF && $0 !~ /^[[:space:]]*#/ { count++ } END { print count + 0 }'
+}
+
+measure_function_metrics() {
+	(
+		cd "$ZXFER_ROOT"
+		awk -f "$COMPLEXITY_AWK" src/*.sh zxfer
+	)
+}
+
+check_file_line_ceiling() {
+	l_file_kind=$1
+	l_file_max=$2
+	if [ "$l_file_kind" = module_lines ]; then
+		l_file_list=$(module_file_set)
+	else
+		l_file_list=$(test_definition_file_set)
+	fi
+
+	while IFS= read -r l_file; do
+		[ -n "$l_file" ] || continue
+		l_current=$(measure_lines "$l_file")
+		if [ "$l_current" -gt "$l_file_max" ]; then
+			report_violation "$l_file_kind" "$l_file" "$l_current" "$l_file_max" "universal physical-line ceiling exceeded"
+		fi
+	done <<EOF
+$l_file_list
+EOF
+}
+
+measure_max_file_lines() {
+	if [ "$1" = module_lines ]; then
+		l_measure_file_list=$(module_file_set)
+	else
+		l_measure_file_list=$(test_definition_file_set)
+	fi
+
+	while IFS= read -r l_file; do
+		[ -n "$l_file" ] || continue
+		measure_lines "$l_file"
+	done <<EOF | awk '$1 > maximum { maximum = $1 } END { print maximum + 0 }'
+$l_measure_file_list
+EOF
+}
+
+check_function_ceiling() {
+	l_metric_kind=$1
+	l_metric_max=$2
+	l_metric_field=4
+	[ "$l_metric_kind" != function_decisions ] || l_metric_field=5
+
+	measure_function_metrics | while IFS=$TAB read -r l_file l_function l_start l_lines l_decisions; do
+		if [ "$l_metric_field" -eq 4 ]; then
+			l_current=$l_lines
+		else
+			l_current=$l_decisions
+		fi
+		if [ "$l_current" -gt "$l_metric_max" ]; then
+			# This runs in a pipeline subshell on POSIX shells. Emit a stable
+			# machine-readable row; the parent counts it below.
+			printf '%s\t%s:%s:%s\t%s\t%s\n' "$l_metric_kind" "$l_file" "$l_start" "$l_function" "$l_current" "$l_metric_max"
+		fi
+	done
+}
+
+report_function_ceiling_violations() {
+	l_metric_kind=$1
+	l_metric_max=$2
+	l_metric_violations=$(check_function_ceiling "$l_metric_kind" "$l_metric_max")
+	[ -n "$l_metric_violations" ] || return 0
+
+	while IFS=$TAB read -r l_kind l_target l_current l_max; do
+		report_violation "$l_kind" "$l_target" "$l_current" "$l_max" "production function complexity ceiling exceeded"
+	done <<EOF
+$l_metric_violations
+EOF
+}
+
 # Print file:line:text rows for one literal symbol across the budgeted tree.
 measure_caller_matches() {
 	(
 		cd "$ZXFER_ROOT"
-		grep -rnF -- "$1" src zxfer || :
+		awk -v symbol="$1" '
+			index($0, symbol) && $0 !~ /^[[:space:]]*#/ {
+				printf "%s:%d:%s\n", FILENAME, FNR, $0
+			}
+		' src/*.sh zxfer
 	)
 }
 
@@ -120,6 +227,24 @@ run_check() {
 		esac
 		ROW_COUNT=$((ROW_COUNT + 1))
 		case "$l_kind" in
+		module_lines | test_lines)
+			[ "$l_target" = ALL ] || report_violation "$l_kind" "$l_target" - "$l_max" "target must be ALL"
+			check_file_line_ceiling "$l_kind" "$l_max"
+			;;
+		function_lines | function_decisions)
+			[ "$l_target" = ALL ] || report_violation "$l_kind" "$l_target" - "$l_max" "target must be ALL"
+			report_function_ceiling_violations "$l_kind" "$l_max"
+			;;
+		executable_lines)
+			if [ "$l_target" != TOTAL ]; then
+				report_violation "$l_kind" "$l_target" - "$l_max" "target must be TOTAL"
+				continue
+			fi
+			l_current=$(measure_executable_lines)
+			if [ "$l_current" -gt "$l_max" ]; then
+				report_violation "$l_kind" "$l_target" "$l_current" "$l_max" "tree-wide executable-line ratchet exceeded"
+			fi
+			;;
 		lines | functions)
 			if [ "$l_target" != TOTAL ] && [ ! -f "$ZXFER_ROOT/$l_target" ]; then
 				report_violation "$l_kind" "$l_target" missing "$l_max" "policy row names a file that no longer exists"
@@ -157,14 +282,14 @@ run_check() {
 }
 
 print_list() {
-	budget_file_set | while IFS= read -r l_file; do
-		printf 'lines\t%s\t%s\n' "$l_file" "$(measure_lines "$l_file")"
-	done
-	printf 'lines\tTOTAL\t%s\n' "$(measure_lines TOTAL)"
-	budget_file_set | while IFS= read -r l_file; do
-		printf 'functions\t%s\t%s\n' "$l_file" "$(measure_functions "$l_file")"
-	done
-	printf 'functions\tTOTAL\t%s\n' "$(measure_functions TOTAL)"
+	l_function_metrics=$(measure_function_metrics)
+	l_max_function_lines=$(printf '%s\n' "$l_function_metrics" | awk -F "$TAB" '$4 > maximum { maximum = $4 } END { print maximum + 0 }')
+	l_max_function_decisions=$(printf '%s\n' "$l_function_metrics" | awk -F "$TAB" '$5 > maximum { maximum = $5 } END { print maximum + 0 }')
+	printf 'module_lines\tALL\t%s\n' "$(measure_max_file_lines module_lines)"
+	printf 'function_lines\tALL\t%s\n' "$l_max_function_lines"
+	printf 'function_decisions\tALL\t%s\n' "$l_max_function_decisions"
+	printf 'test_lines\tALL\t%s\n' "$(measure_max_file_lines test_lines)"
+	printf 'executable_lines\tTOTAL\t%s\n' "$(measure_executable_lines)"
 	# Caller symbols cannot be discovered from the tree, so refresh the
 	# measured counts for the symbols already tracked by the policy.
 	while IFS=$TAB read -r l_kind l_target l_max l_allowed; do

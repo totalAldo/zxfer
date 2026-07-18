@@ -99,6 +99,42 @@ snap2	222" "$(cat "$identity_output_file")"
 backup/dst@snap2" "$(cat "$path_output_file")"
 }
 
+test_snapshot_reconcile_owner_operations_publish_and_validate_state() {
+	zxfer_publish_snapshot_transfer_plan \
+		"tank/src@snap1" "tank/src@snap2" 1
+
+	assertEquals "Publishing a transfer plan should update the last common snapshot." \
+		"tank/src@snap1" "$g_last_common_snap"
+	assertEquals "Publishing a transfer plan should update the transfer list." \
+		"tank/src@snap2" "$g_src_snapshot_transfer_list"
+	assertEquals "Publishing a transfer plan should update destination snapshot presence." \
+		1 "$g_dest_has_snapshots"
+
+	invalid_plan_status=0
+	zxfer_publish_snapshot_transfer_plan "" "" invalid || invalid_plan_status=$?
+	assertEquals "Transfer-plan publication should reject invalid destination presence values." \
+		2 "$invalid_plan_status"
+
+	zxfer_mark_destination_snapshot_seeded "tank/src@seed"
+	assertEquals "A received seed should become the last common snapshot." \
+		"tank/src@seed" "$g_last_common_snap"
+	assertEquals "A received seed should mark destination snapshots present." \
+		1 "$g_dest_has_snapshots"
+
+	zxfer_set_destination_snapshot_presence 0
+	assertEquals "The presence owner should publish a validated empty destination." \
+		0 "$g_dest_has_snapshots"
+	invalid_presence_status=0
+	zxfer_set_destination_snapshot_presence invalid || invalid_presence_status=$?
+	assertEquals "The presence owner should reject invalid marker values." \
+		2 "$invalid_presence_status"
+
+	g_did_delete_dest_snapshots=1
+	zxfer_clear_destination_delete_marker
+	assertEquals "Clearing the destination-delete marker should publish zero." \
+		0 "$g_did_delete_dest_snapshots"
+}
+
 test_delete_snaps_returns_when_nothing_needs_deletion() {
 	log_file="$TEST_TMPDIR/delete_none.log"
 	: >"$log_file"
@@ -965,6 +1001,58 @@ test_delete_snaps_runs_grandfather_checks_before_destroying() {
 	assertContains "Unprotected snapshots should still be destroyed after grandfather checks pass." \
 		"$(cat "$log_file")" "destroy destroy tank/fs@snap3"
 	assertEquals "Successful deletions should set the destination-delete flag." 1 "$g_did_delete_dest_snapshots"
+}
+
+test_inspect_delete_snap_stops_in_main_shell_on_grandfather_violation() {
+	action_log="$TEST_TMPDIR/inspect_grandfather_stop.log"
+
+	set +e
+	output=$(
+		(
+			g_option_g_grandfather_protection=7
+			g_option_n_dryrun=0
+			zxfer_capture_inspect_snapshot_record_lists() { :; }
+			zxfer_classify_inspect_snapshot_record_lists() {
+				g_zxfer_inspect_identity_source_snapshots_result="tank/fs@snap1"
+				g_zxfer_inspect_identity_destination_snapshots_result=$(
+					printf '%s\n%s\n' "tank/fs@snap1" "tank/fs@protected"
+				)
+				g_zxfer_inspect_diverged_snapshot_records_result=""
+				g_zxfer_inspect_source_snapshots_result="tank/fs@snap1"
+			}
+			zxfer_record_diverged_destination_snapshots() { :; }
+			zxfer_set_inspect_last_common_snapshot() { g_last_common_snap="tank/fs@snap1"; }
+			zxfer_enforce_destination_divergence_contract() { :; }
+			zxfer_get_dest_snapshots_to_delete_per_dataset() {
+				printf '%s\n' "tank/fs@protected"
+			}
+			zxfer_all_destination_snapshot_delete_is_safe() { return 0; }
+			zxfer_prepare_snapshot_delete_creation_state() { :; }
+			zxfer_grandfather_test() {
+				zxfer_throw_usage_error "protected snapshot"
+			}
+			zxfer_throw_usage_error() {
+				printf '%s\n' "$1"
+				exit 2
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' destroy >>"$action_log"
+			}
+			zxfer_set_src_snapshot_transfer_list() {
+				printf '%s\n' transfer-list >>"$action_log"
+			}
+
+			zxfer_inspect_delete_snap 1 "tank/fs"
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Grandfather protection must terminate the owning inspect path, not only a render subshell." \
+		2 "$status"
+	assertContains "The protected-snapshot usage error should remain operator-visible." \
+		"$output" "protected snapshot"
+	assertFalse "No destroy or transfer planning may run after a grandfather violation." \
+		"[ -e '$action_log' ]"
 }
 
 test_delete_snaps_propagates_snapshot_delete_plan_failures() {
@@ -2176,6 +2264,52 @@ test_verify_converged_destination_skips_unmarked_datasets() {
 	# returning 0 proves the unmarked path is a pure string test.
 	zxfer_verify_converged_destination_after_receive "backup/dst"
 	assertEquals "Unmarked datasets must skip post-receive verification." 0 $?
+}
+
+test_verify_converged_destination_preserves_source_capture_failures() {
+	g_zxfer_diverged_converged_datasets="backup/dst	tank/src"
+
+	verify_status=0
+	verify_output=$(
+		(
+			zxfer_capture_snapshot_records_for_dataset() { return 37; }
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_verify_converged_destination_after_receive "backup/dst"
+		) 2>&1
+	) || verify_status=$?
+
+	assertEquals "Post-receive verification should preserve source record capture failures." \
+		37 "$verify_status"
+	assertContains "Source record capture failures should retain post-receive context." \
+		"$verify_output" "Failed to retrieve source snapshot records for [tank/src] during post-receive divergence verification."
+}
+
+test_verify_converged_destination_preserves_source_identity_failures() {
+	g_zxfer_diverged_converged_datasets="backup/dst	tank/src"
+
+	verify_status=0
+	verify_output=$(
+		(
+			zxfer_capture_snapshot_records_for_dataset() {
+				g_zxfer_snapshot_record_capture_result="tank/src@snap1"
+				return 0
+			}
+			zxfer_get_snapshot_identity_records_for_dataset() { return 38; }
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_verify_converged_destination_after_receive "backup/dst"
+		) 2>&1
+	) || verify_status=$?
+
+	assertEquals "Post-receive verification should preserve source identity lookup failures." \
+		38 "$verify_status"
+	assertContains "Source identity failures should retain post-receive context." \
+		"$verify_output" "Failed to retrieve source snapshot identities for [tank/src] during post-receive divergence verification."
 }
 
 test_verify_converged_destination_clears_marker_on_aligned_live_view() {

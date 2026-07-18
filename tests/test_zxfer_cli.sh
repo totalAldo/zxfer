@@ -18,31 +18,7 @@ zxfer_usage() {
 setUp() {
 	OPTIND=1
 	g_test_max_yield_iterations=8
-	g_option_b_beep_always=0
-	g_option_B_beep_on_success=0
-	g_option_c_services=""
-	g_option_e_restore_property_mode=0
-	g_option_F_force_rollback=""
-	g_option_g_grandfather_protection=""
-	g_option_I_ignore_properties=""
-	g_option_j_jobs=1
-	g_option_k_backup_property_mode=0
-	g_option_m_migrate=0
-	g_option_n_dryrun=0
-	g_option_N_nonrecursive=""
-	g_option_o_override_property=""
-	g_option_O_origin_host=""
-	g_option_P_transfer_property=0
-	g_option_R_recursive=""
-	g_option_s_make_snapshot=0
-	g_option_T_target_host=""
-	g_option_U_skip_unsupported_properties=0
-	g_option_v_verbose=0
-	g_option_V_very_verbose=0
-	g_option_w_raw_send=0
-	g_option_x_exclude_datasets=""
-	g_option_Y_yield_iterations=1
-	g_option_z_compress=0
+	zxfer_init_cli_option_defaults
 	g_cmd_compress="zstd -3"
 	g_cmd_decompress="zstd -d"
 	zxfer_resolve_local_cli_command_safe() {
@@ -54,6 +30,23 @@ setUp() {
 	zxfer_get_max_yield_iterations() {
 		printf '%s\n' "$g_test_max_yield_iterations"
 	}
+}
+
+test_zxfer_init_cli_option_defaults_resets_complete_owned_state() {
+	g_option_b_beep_always=9
+	g_option_j_jobs=9
+	g_option_O_origin_host="dirty-origin"
+	g_option_Y_yield_iterations=9
+	zxfer_init_cli_option_defaults
+
+	boolean_defaults="$g_option_b_beep_always:$g_option_B_beep_on_success:$g_option_d_delete_destination_snapshots:$g_option_e_restore_property_mode:$g_option_k_backup_property_mode:$g_option_P_transfer_property:$g_option_m_migrate:$g_option_n_dryrun:$g_option_s_make_snapshot:$g_option_U_skip_unsupported_properties:$g_option_v_verbose:$g_option_V_very_verbose:$g_option_w_raw_send:$g_option_z_compress"
+	string_defaults="$g_option_c_services$g_option_D_display_progress_bar$g_option_F_force_rollback$g_option_g_grandfather_protection$g_option_I_ignore_properties$g_option_o_override_property$g_option_O_origin_host$g_option_R_recursive$g_option_N_nonrecursive$g_option_T_target_host$g_option_x_exclude_datasets"
+
+	assertEquals "Every boolean CLI option should reset to disabled." \
+		"0:0:0:0:0:0:0:0:0:0:0:0:0:0" "$boolean_defaults"
+	assertEquals "Every string CLI option should reset to empty." "" "$string_defaults"
+	assertEquals "Parallelism should retain the safe single-job default." 1 "$g_option_j_jobs"
+	assertEquals "Yield retries should retain the one-iteration default." 1 "$g_option_Y_yield_iterations"
 }
 
 test_read_command_line_switches_sets_flags_in_current_shell() {

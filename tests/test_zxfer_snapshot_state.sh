@@ -20,6 +20,7 @@ oneTimeTearDown() {
 }
 
 setUp() {
+	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" || return "$?"
 	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
 	g_lzfs_list_hr_snap=""
 	g_lzfs_list_hr_S_snap=""
@@ -31,6 +32,43 @@ setUp() {
 	g_destination_existence_cache_root=""
 	g_destination_existence_cache_root_complete=0
 	zxfer_reset_failure_context "unit"
+}
+
+test_destination_probe_helpers_load_with_snapshot_state_not_generic_exec() {
+	# shellcheck disable=SC2016  # Module-root variables expand inside the clean child shell.
+	ownership_output=$(
+		ZXFER_SOURCE_MODULES_ROOT="$ZXFER_ROOT" /bin/sh -c '
+			. "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_modules.sh" || exit 1
+			zxfer_load_modules zxfer_exec.sh || exit 1
+			if command -v zxfer_exists_destination >/dev/null 2>&1; then
+				printf "%s\n" "exec_has_destination_state=yes"
+			else
+				printf "%s\n" "exec_has_destination_state=no"
+			fi
+
+			zxfer_load_modules zxfer_snapshot_state.sh || exit 1
+			if command -v zxfer_exists_destination >/dev/null 2>&1; then
+				printf "%s\n" "snapshot_has_destination_state=yes"
+			else
+				printf "%s\n" "snapshot_has_destination_state=no"
+			fi
+			if command -v zxfer_get_live_destination_snapshots >/dev/null 2>&1; then
+				printf "%s\n" "snapshot_has_live_view=yes"
+			else
+				printf "%s\n" "snapshot_has_live_view=no"
+			fi
+		'
+	)
+	ownership_status=$?
+
+	assertEquals "Canonical partial loading should succeed across the exec and snapshot-state boundaries." \
+		0 "$ownership_status"
+	assertContains "Generic execution should not own destination snapshot-state probes." \
+		"$ownership_output" "exec_has_destination_state=no"
+	assertContains "Snapshot state should own destination existence probes." \
+		"$ownership_output" "snapshot_has_destination_state=yes"
+	assertContains "Snapshot state should own the complete live destination view." \
+		"$ownership_output" "snapshot_has_live_view=yes"
 }
 
 test_zxfer_reset_destination_existence_cache_clears_root_and_completion_state() {
@@ -743,7 +781,7 @@ test_zxfer_snapshot_record_read_helpers_preserve_readback_and_reverse_stage_fail
 	set +e
 	normalized_read_output=$(
 		(
-			normalized_tmp_file="$TEST_TMPDIR/normalized-readback-failure.records"
+			normalized_tmp_file="$g_zxfer_run_tmp_root/normalized-readback-failure.records"
 			zxfer_create_runtime_artifact_file() {
 				: >"$normalized_tmp_file"
 				g_zxfer_runtime_artifact_path_result=$normalized_tmp_file
@@ -759,7 +797,7 @@ test_zxfer_snapshot_record_read_helpers_preserve_readback_and_reverse_stage_fail
 	)
 	reversed_stage_output=$(
 		(
-			reversed_stage_tmp_file="$TEST_TMPDIR/reversed-stage-failure.records"
+			reversed_stage_tmp_file="$g_zxfer_run_tmp_root/reversed-stage-failure.records"
 			zxfer_create_runtime_artifact_file() {
 				: >"$reversed_stage_tmp_file"
 				g_zxfer_runtime_artifact_path_result=$reversed_stage_tmp_file
@@ -775,7 +813,7 @@ test_zxfer_snapshot_record_read_helpers_preserve_readback_and_reverse_stage_fail
 	)
 	reversed_read_output=$(
 		(
-			reversed_read_tmp_file="$TEST_TMPDIR/reversed-readback-failure.records"
+			reversed_read_tmp_file="$g_zxfer_run_tmp_root/reversed-readback-failure.records"
 			zxfer_create_runtime_artifact_file() {
 				: >"$reversed_read_tmp_file"
 				g_zxfer_runtime_artifact_path_result=$reversed_read_tmp_file

@@ -19,67 +19,120 @@ responsibility boundary.
   source-order entry point for the runtime modules
 - [../src/zxfer_reporting.sh](../src/zxfer_reporting.sh): structured failure
   reporting, verbose output helpers, usage errors, and operator-facing status
+- [../src/zxfer_quoting.sh](../src/zxfer_quoting.sh): literal token splitting,
+  single-quote escaping, and argv-to-shell rendering primitives
+- [../src/zxfer_profile.sh](../src/zxfer_profile.sh): profiling counters,
+  elapsed timings, and end-of-run summary rendering
 - [../src/zxfer_exec.sh](../src/zxfer_exec.sh): shell-safe token handling,
-  command rendering, ssh wrappers, and exec helpers
+  generic command rendering, foreground execution, and cleanup-aware short-
+  lived background helpers; it has no remote-capability or snapshot-state
+  dependency
 - [../src/zxfer_dependencies.sh](../src/zxfer_dependencies.sh): secure PATH
   computation, required-tool lookup, and local dependency validation
-- [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh): runtime/session
-  initialization, shared per-run defaults, the validated per-run temp root and
-  its child allocators, trap handling, and two merged sections (Phase 8):
-  the path-security helpers (filesystem ownership/mode checks, symlink-aware
-  path guards, secure staging) and the owned-lock helpers (pid+start-token
-  lock metadata, stale-owner validation/reaping, checked release)
+- [../src/zxfer_path_security.sh](../src/zxfer_path_security.sh): filesystem
+  ownership/mode checks and symlink-aware trusted-path validation
+- [../src/zxfer_locking.sh](../src/zxfer_locking.sh): pid/start-token owned-lock
+  metadata, stale-owner validation/reaping, and checked release
+- [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh): validated per-run temp
+  root, runtime artifact allocation/readback, and short-lived cleanup-PID state
+- [../src/zxfer_secure_staging.sh](../src/zxfer_secure_staging.sh): randomized
+  path-adjacent staging entries and runtime artifact registration
+- [../src/zxfer_error_log.sh](../src/zxfer_error_log.sh): secure structured
+  failure-log mirroring and serialized append coordination
 - [../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh):
   supervision-lite long-lived background jobs: an in-memory job registry,
   per-job status files written by the job shell itself, rolling completion
   queue notifications, and process-group (setsid) or cleanup-wrapper teardown
+- [../src/zxfer_ssh_transport.sh](../src/zxfer_ssh_transport.sh): validated
+  host/wrapper parsing, managed SSH options, direct argv invocation versus
+  rendered shell-pipeline channels, per-role transport memos, active remote
+  ZFS routing, and per-run control-socket lifecycle
 - [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh): remote helper
   resolution, one fail-closed per-run capability probe per host parsed into
-  in-memory state, and per-run per-role ssh control-socket management under
-  the private temp root
+  in-memory state, and resolved remote OS/tool selections; it consumes the SSH
+  transport API but does not own transport state
 - [../src/zxfer_cli.sh](../src/zxfer_cli.sh): CLI parsing, option validation,
   and compression command interpretation
+- [../src/zxfer_operation_state.sh](../src/zxfer_operation_state.sh): mutable
+  per-pass planning and replication-convergence state
 - [../src/zxfer_snapshot_state.sh](../src/zxfer_snapshot_state.sh): snapshot
   record parsing, normalization, flat per-run snapshot record files, and the
   generation-gated live destination view
+- [../src/zxfer_backup_storage.sh](../src/zxfer_backup_storage.sh): secure
+  exact-keyed storage layout, local/remote path guards, checked reads, atomic
+  publication/rollback, and remote storage transport rendering
 - [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh): backup
-  metadata accumulation, path derivation, and secure exact-keyed lookup/read/write flows
+  format/record handling, capture and write orchestration, provenance, and
+  restore-candidate selection
+- [../src/zxfer_property_state.sh](../src/zxfer_property_state.sh): property
+  serialization, shared result/reset lifecycle, normalized-property tables,
+  recursive prefetch, and targeted destination invalidation
+- [../src/zxfer_property_policy.sh](../src/zxfer_property_policy.sh): readonly
+  and noninheritable defaults, override validation/planning, filtering, and
+  unsupported-property compatibility decisions
 - [../src/zxfer_property_reconcile.sh](../src/zxfer_property_reconcile.sh):
-  readonly-property defaults, unsupported-property derivation, property
-  diffing, filtering, override planning, per-call scratch resets, apply
-  logic, and the per-iteration in-memory normalized-property tables with
-  recursive prefetch and targeted destination invalidation
+  source/destination collection, dataset creation, property diffing and
+  application, and the per-dataset transfer workflow
+- [../src/zxfer_snapshot_producers.sh](../src/zxfer_snapshot_producers.sh):
+  source/destination command production, staged execution, and snapshot-stream
+  normalization
+- [../src/zxfer_remote_snapshot_discovery.sh](../src/zxfer_remote_snapshot_discovery.sh):
+  target-side discovery batch rendering, checked status parsing, and remote
+  inventory/snapshot collection
 - [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh):
-  source and destination dataset / snapshot discovery
+  discovery orchestration, source/destination diffing, cache publication, and
+  recursive discovery state
+- [../src/zxfer_migration_services.sh](../src/zxfer_migration_services.sh):
+  Solaris/illumos SMF stop/restart state and recovery behavior
+- [../src/zxfer_send_jobs.sh](../src/zxfer_send_jobs.sh): send/receive domain
+  queue metadata, rolling completion handling, job limits, and destination-
+  ancestry serialization
 - [../src/zxfer_send_receive.sh](../src/zxfer_send_receive.sh): send /
   receive command construction, progress pipeline, compression handling
 - [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh):
   snapshot comparison and deletion planning
-- [../src/zxfer_replication.sh](../src/zxfer_replication.sh): dataset iteration,
-  replication orchestration, migration/service handling
+- [../src/zxfer_replication.sh](../src/zxfer_replication.sh): dataset iteration
+  and replication orchestration across discovery, reconciliation, and transfer
+- [../src/zxfer_session.sh](../src/zxfer_session.sh): final composition root for
+  owner resets, CLI-to-execution-context startup, remote connection
+  preparation, trap registration, ordered shutdown, and top-level execution
 
 ## Initialization And State Ownership
 
 The startup path is intentionally explicit:
 
 1. [../src/zxfer_modules.sh](../src/zxfer_modules.sh) loads the flat module
-   stack in one canonical order.
-2. `zxfer_init_globals()` seeds generic runtime/session state in
-   [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh).
-3. Module-specific mutable scratch state is then reset through the owning
-   module helpers rather than by duplicating those variable inventories in the
-   runtime layer. The main examples are
+   stack in one canonical order without source-time initialization.
+2. `zxfer_discard_inherited_cleanup_state()` clears every inherited internal
+   process, SSH, path, and migration-service handle without acting on it. An
+   exported `g_*` value can therefore never grant cleanup ownership.
+3. Dependency bootstrap completes, then the session installs traps before any
+   initialization step can allocate a runtime resource.
+4. `zxfer_init_globals()` in
+   [../src/zxfer_session.sh](../src/zxfer_session.sh) calls each module's
+   owner-specific reset in a fixed order. SSH transport and remote capability
+   state are reset independently through `zxfer_reset_ssh_transport_state()`
+   and `zxfer_reset_remote_host_state()`.
+5. Module-specific mutable scratch state stays with the owning module rather
+   than being duplicated in the runtime layer. The main examples are
    [../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh),
    [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh),
    [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh),
    [../src/zxfer_send_receive.sh](../src/zxfer_send_receive.sh),
+   [../src/zxfer_backup_storage.sh](../src/zxfer_backup_storage.sh),
    [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh), and
-   [../src/zxfer_property_reconcile.sh](../src/zxfer_property_reconcile.sh).
-4. `zxfer_init_variables()` resolves local/remote execution context, helper
-   paths, and platform-specific bootstrap details.
+   [../src/zxfer_property_state.sh](../src/zxfer_property_state.sh).
+6. `zxfer_prepare_remote_host_connections()` composes transport validation and
+   capability preload without moving either concern into the other module.
+   `zxfer_init_variables()` then resolves local/remote execution context,
+   helper paths, and platform-specific bootstrap details.
 
-That split keeps startup readable without reintroducing source-time side
-effects or generic catch-all modules.
+The manifest and architecture policies machine-check layer direction, cycles,
+module completeness, mutable-global ownership, caller/callee scratch overlap,
+and the exact inventory of the few remaining production `eval` commands.
+Dependencies point only downward from composition through
+domain/state/infrastructure to foundation. That split keeps startup readable
+without reintroducing source-time side effects or generic catch-all modules.
 
 ## Runtime Artifact Layer
 
@@ -88,38 +141,58 @@ created with a single `mktemp -d` after TMPDIR is validated once (single-pass
 physical resolution plus owner/mode checks). Allocators in
 [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh) hand out
 `<prefix>.<counter>` children by redirection or `mkdir`; there is no per-file
-registration, unregistration, or readback ceremony. `zxfer_trap_exit()`
-removes the whole root with one `rm -rf` after background jobs, ssh control
-sockets, and owned locks have been torn down. Staged contents reload through
-the shared readback helper, which keeps partial payloads out of shared `g_*`
+registration or unregistration ceremony for contained children. Runtime
+records the exact root, validated physical parent, and device/inode identity
+returned by its own allocation; whole-root removal requires that provenance,
+an unchanged identity, and the reserved `zxfer.<pid>.*` shape.
+`zxfer_trap_exit()` in
+[../src/zxfer_session.sh](../src/zxfer_session.sh) removes the whole root only
+after supervised jobs, short-lived cleanup helpers, SSH control sockets, and
+registered path-adjacent staging entries have been handled. Staged contents
+reload through the shared readback helper, which keeps partial payloads out of
+shared `g_*`
 scratch state and preserves exact nonzero readback failures for the caller.
+Registered path-adjacent directories also retain their allocation-time
+device/inode identity. Recursive cleanup requires that identity to remain
+unchanged; SSH socket-directory memo reuse additionally rechecks effective
+ownership and private mode. A same-path replacement is never adopted as
+zxfer-owned state.
 
 Not every staging flow belongs in that layer. Modules that intentionally stage
 files beside the final target to preserve same-directory atomic rename and
-trusted-parent checks, such as backup publish or rollback paths, continue to
-own that path-adjacent secure staging locally.
+trusted-parent checks continue to own that path-adjacent secure staging
+locally. In particular, backup publication and rollback staging lives in
+[`../src/zxfer_backup_storage.sh`](../src/zxfer_backup_storage.sh).
 
 Long-lived background work now layers on top of the runtime temp root through
 [../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh) using a
 supervision-lite model: there is no per-job supervisor process. Spawn runs the
 job pipeline directly in one backgrounded job shell, and the per-job state is
 one in-memory registry row (`job_id`, kind, pid, teardown mode, status file).
-The job shell itself appends `status<TAB>N` to a per-run temp status file
+The job shell itself writes `status<TAB>N` to a per-run temp status file
 after the pipeline finishes and then publishes its `job_id` to the rolling
 completion queue when one is open, so a queue reader always finds the status
-already recorded. A missing or non-numeric status file at wait time means the
-job shell died abnormally and is reported as a failure.
+already recorded. Missing, unterminated, duplicated, unknown, noncanonical, or
+out-of-range protocol rows fail closed rather than being accepted as a job
+completion.
 
 When `setsid` works (feature-tested once per process, requiring the spawned
 child to lead its own process group), abort signals the whole pipeline with
 one process-group TERM, a brief bounded wait, and a single KILL escalation
 before reaping. Without `setsid` the job runs through
 [../src/zxfer_cleanup_child_wrapper.sh](../src/zxfer_cleanup_child_wrapper.sh),
-whose TERM trap reaps the job's descendants. The safety argument that replaced
-the old start-token revalidation and process-table snapshots: zxfer only ever
-signals process groups created by its own setsid child or direct children it
-has not waited on yet, and POSIX keeps an un-reaped child's PID/PGID from
-being recycled, so the signal cannot reach an unrelated process. Trap-time
+whose TERM trap bounds teardown of its owned direct child and performs
+token-validated, best-effort cleanup of cooperative descendants. POSIX ancestry
+snapshots cannot guarantee containment if an arbitrary TERM handler forks and
+exits before the refreshed snapshot; strict containment requires the isolated
+process-group path. The safety argument that replaced
+the old normal-path start-token revalidation and process-table snapshots is
+the baseline supervision-lite ownership model: zxfer registers the `$!` from
+its own spawn, signals it before the script's explicit wait, and releases the
+record only after reaping. This avoids a per-job `ps` spawn but does not claim
+that every POSIX shell defers internal reaping until the script calls `wait`.
+Wrapper-mode abort still snapshots descendants and revalidates their start
+tokens immediately before signalling them. Trap-time
 transport cleanup follows the same checked-cleanup contract: a managed ssh
 control-socket close failure now upgrades an otherwise successful exit into a
 runtime cleanup failure instead of being treated as warning-only success.
@@ -128,17 +201,18 @@ Short-lived background helpers still go through the shared runtime cleanup
 registry in [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh). Helpers that
 need an inline shell wrapper now launch through the standalone
 [../src/zxfer_cleanup_child_wrapper.sh](../src/zxfer_cleanup_child_wrapper.sh),
-which traps TERM and reaps its descendant set before exiting. That keeps the
+which traps TERM, escalates its owned direct child with KILL after a bounded
+grace period, and reaps that child before exiting. It also snapshots and
+token-validates cooperative descendants on the abort path. That keeps the
 remaining local helper paths on validated ownership tracking instead of bare
 wrapper-shell PID teardown.
 
 ## Owned Lock Layer
 
 Cross-process coordination is now a single concern: the `ZXFER_ERROR_LOG`
-append lock. The generic owned-lock helpers live in the OWNED LOCK / LEASE
-COORDINATION section of [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh)
-(merged from the former locking module in Phase 8) and are also used by the
-runtime staging reap path. Lock identity is deliberately slim: a
+append lock. The generic owned-lock helpers live in
+[../src/zxfer_locking.sh](../src/zxfer_locking.sh) and are used by the secure
+error-log append path. Lock identity is deliberately slim: a
 mode-0700 lock directory whose metadata file records only the owner pid and
 one memoized `ps` process-start token. Helpers validate that metadata before
 trusting an existing owner, treat missing or corrupt metadata as busy on
@@ -154,8 +228,9 @@ cross-process locking.
 
 1. Bootstrap with the built-in trusted PATH allowlist, capture the invocation,
    and source the flat module stack.
-2. Register runtime traps and initialize runtime/session state through the
-   explicit init flow.
+2. Discard inherited internal cleanup handles without side effects, bootstrap
+   dependencies, register runtime traps, and initialize owner state through
+   the explicit session flow.
 3. Parse CLI options, validate combinations, and resolve source and
    destination execution context.
 4. Build identity-aware dataset and snapshot lists. Eligible recursive no-op
@@ -190,12 +265,18 @@ function boundaries so operators and contributors can line the diagrams up with
 [`../zxfer`](../zxfer),
 [`../src/zxfer_runtime.sh`](../src/zxfer_runtime.sh),
 [`../src/zxfer_background_jobs.sh`](../src/zxfer_background_jobs.sh),
+[`../src/zxfer_ssh_transport.sh`](../src/zxfer_ssh_transport.sh),
 [`../src/zxfer_remote_hosts.sh`](../src/zxfer_remote_hosts.sh),
+[`../src/zxfer_snapshot_producers.sh`](../src/zxfer_snapshot_producers.sh),
+[`../src/zxfer_remote_snapshot_discovery.sh`](../src/zxfer_remote_snapshot_discovery.sh),
 [`../src/zxfer_snapshot_discovery.sh`](../src/zxfer_snapshot_discovery.sh),
 [`../src/zxfer_snapshot_reconcile.sh`](../src/zxfer_snapshot_reconcile.sh),
+[`../src/zxfer_property_state.sh`](../src/zxfer_property_state.sh),
+[`../src/zxfer_property_policy.sh`](../src/zxfer_property_policy.sh),
 [`../src/zxfer_property_reconcile.sh`](../src/zxfer_property_reconcile.sh),
-[`../src/zxfer_send_receive.sh`](../src/zxfer_send_receive.sh), and
-[`../src/zxfer_replication.sh`](../src/zxfer_replication.sh).
+[`../src/zxfer_send_receive.sh`](../src/zxfer_send_receive.sh),
+[`../src/zxfer_replication.sh`](../src/zxfer_replication.sh), and
+[`../src/zxfer_session.sh`](../src/zxfer_session.sh).
 
 ### General Run Lifecycle
 
@@ -205,9 +286,13 @@ bootstrap, one or more replication passes, and trap-driven shutdown.
 ```mermaid
 flowchart TD
     A["User invokes zxfer"] --> B["Early bootstrap: trusted PATH allowlist and invocation capture"]
-    B --> C["Source zxfer_modules.sh"]
-    C --> D["Register zxfer_trap_exit() and run zxfer_init_globals()"]
-    D --> E["Parse flags with zxfer_read_command_line_switches()"]
+    B --> C["Source zxfer_modules.sh to define the pure loader"]
+    C --> C1["Call zxfer_load_modules() for the canonical manifest"]
+    C1 --> D["Discard inherited cleanup handles"]
+    D --> D1["Run zxfer_initialize_dependency_defaults()"]
+    D1 --> D2["Register zxfer_trap_exit()"]
+    D2 --> D3["Run zxfer_init_globals()"]
+    D3 --> E["Parse flags with zxfer_read_command_line_switches()"]
     E --> F["Validate combinations with zxfer_consistency_check()"]
     F --> G["Probe remote capabilities once per host into in-memory state when -O or -T is configured"]
     G --> H["Resolve local and needed remote helper paths with zxfer_init_variables()"]
@@ -233,7 +318,7 @@ flowchart TD
     V -- "yes: -Y and send/destroy work occurred" --> J
     V -- "no" --> Z["Invoke final -k backup metadata write or dry-run preview hook"]
     Z --> AA["Normal exit path"]
-    AA --> AB["zxfer_trap_exit(): abort remaining background jobs, close the per-run ssh control sockets, release any held owned lock, remove the per-run temp root, emit profiling and structured failure report"]
+    AA --> AB["zxfer_trap_exit(): abort owned jobs/helpers, close SSH sockets, remove registered staging and the proven run root, restore migration services, then emit profiling and structured failure output"]
 ```
 
 ### Snapshot Discovery And No-Op Proof
@@ -439,13 +524,15 @@ sequenceDiagram
     Launcher-->>Operator: success or structured failure report
 ```
 
-SSH control sockets and remote capability state are strictly per-run: the
-socket is a short `ssh-<role>.sock` path under the private per-run temp root
-(with a short-socket-root fallback for long TMPDIR paths), and capability
-answers live only in this process's memory. Nothing remote-related is shared
-between concurrent zxfer processes, so no socket locks, leases, or cache
-files exist to coordinate or clean up; trap cleanup closes each opened
-master once with `-O exit` before the temp root is removed.
+SSH control sockets and remote capability state are strictly per-run but have
+separate owners. `zxfer_ssh_transport.sh` owns the short
+`ssh-<role>.sock` paths under the private temp root (including the fallback for
+long TMPDIR paths), managed options, host-wrapper parsing, and socket cleanup.
+`zxfer_remote_hosts.sh` owns only in-memory capability responses and resolved
+remote helpers. Nothing is shared between concurrent zxfer processes, so no
+socket locks, leases, or capability cache files exist to coordinate; session
+trap cleanup closes each opened master once with `-O exit` before removing the
+temp root.
 
 ### Example: Diverged Destination With `-d`, `-F`, And `-Y`
 

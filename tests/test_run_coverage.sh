@@ -29,6 +29,96 @@ run_coverage_helper() {
 		/bin/sh -c ". \"$RUN_COVERAGE_BIN\"; $l_command"
 }
 
+# shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
+test_run_coverage_full_runs_are_report_only_without_explicit_enforcement() {
+	output=$(run_coverage_helper \
+		'COVERAGE_POLICY_MODE=auto; configure_coverage_policy_enforcement 0; printf "%s %s\n" "$ZXFER_COVERAGE_ENFORCE_POLICY" "$COVERAGE_RUN_SCOPE"')
+
+	assertEquals "A full coverage run should stay report-only unless enforcement is explicit." \
+		"0 full" "$output"
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
+test_run_coverage_targeted_runs_are_report_only_by_default() {
+	output=$(run_coverage_helper \
+		'COVERAGE_POLICY_MODE=auto; configure_coverage_policy_enforcement 1; printf "%s %s\n" "$ZXFER_COVERAGE_ENFORCE_POLICY" "$COVERAGE_RUN_SCOPE"')
+
+	assertEquals "A targeted suite trace should not be compared with the full-tree policy unless enforcement is requested." \
+		"0 targeted" "$output"
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
+test_run_coverage_rejects_conflicting_explicit_policy_options() {
+	set +e
+	output=$(run_coverage_helper '
+		select_explicit_coverage_policy_mode 1
+		select_explicit_coverage_policy_mode 0
+	' 2>&1)
+	status=$?
+	set -e
+
+	assertEquals "Conflicting explicit policy options must fail instead of silently letting the last option win." \
+		1 "$status"
+	assertContains "The conflict error should name both incompatible options." \
+		"$output" "--enforce and --report-only cannot be used together"
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
+test_run_coverage_enforcement_requires_a_full_run() {
+	output=$(run_coverage_helper '
+		COVERAGE_POLICY_MODE=1
+		configure_coverage_policy_enforcement 0
+		printf "full=%s\n" "$ZXFER_COVERAGE_ENFORCE_POLICY"
+		COVERAGE_POLICY_MODE=0
+		configure_coverage_policy_enforcement 0
+		printf "report=%s\n" "$ZXFER_COVERAGE_ENFORCE_POLICY"
+	')
+
+	assertContains "Explicit enforcement should apply to a full coverage run." \
+		"$output" "full=1"
+	assertContains "Explicit report-only mode should also work for full coverage runs." \
+		"$output" "report=0"
+
+	set +e
+	output=$(run_coverage_helper '
+		COVERAGE_POLICY_MODE=1
+		configure_coverage_policy_enforcement 1
+	' 2>&1)
+	status=$?
+	set -e
+
+	assertEquals "A targeted trace should reject policy enforcement instead of comparing partial coverage to full-tree thresholds." \
+		1 "$status"
+	assertContains "The targeted-enforcement error should explain the full-run requirement." \
+		"$output" "targeted suites are always report-only"
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
+test_run_coverage_enforcement_selects_bash_xtrace_and_rejects_kcov() {
+	output=$(run_coverage_helper '
+		ZXFER_COVERAGE_ENFORCE_POLICY=1
+		ZXFER_COVERAGE_MODE=auto
+		resolve_coverage_collector_mode
+	')
+
+	assertEquals "An enforced auto-mode run should select the collector that implements repository thresholds." \
+		"bash-xtrace" "$output"
+
+	set +e
+	output=$(run_coverage_helper '
+		ZXFER_COVERAGE_ENFORCE_POLICY=1
+		ZXFER_COVERAGE_MODE=kcov
+		resolve_coverage_collector_mode
+	' 2>&1)
+	status=$?
+	set -e
+
+	assertEquals "Explicit kcov mode should fail rather than silently skipping requested policy enforcement." \
+		1 "$status"
+	assertContains "The collector error should name the required enforcement mode." \
+		"$output" "requires ZXFER_COVERAGE_MODE=bash-xtrace"
+}
+
 # shellcheck disable=SC2016,SC2317,SC2329  # Invoked indirectly by shunit2; command expands inside the helper shell.
 test_run_coverage_default_suite_resolution_includes_coverage_overlays() {
 	output=$(run_coverage_helper 'ZXFER_ROOT=$(cd "$(dirname "$RUN_COVERAGE_BIN")/.." && pwd); TEST_DIR="$ZXFER_ROOT/tests"; resolve_suites | while IFS= read -r suite; do case "$suite" in "$ZXFER_ROOT"/*) printf "%s\n" "${suite#$ZXFER_ROOT/}" ;; *) printf "%s\n" "$suite" ;; esac; done')
@@ -45,18 +135,51 @@ test_run_coverage_default_suite_resolution_includes_coverage_overlays() {
 		"$output" "tests/test_helper.sh"
 }
 
+# shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
+test_run_coverage_repository_policy_and_baseline_cover_every_production_target() {
+	set +e
+	output=$(run_coverage_helper '
+		ZXFER_ROOT=$(cd "$(dirname "$RUN_COVERAGE_BIN")/.." && pwd)
+		ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=0
+		COVERAGE_POLICY_FILE="$ZXFER_ROOT/tests/coverage_policy.tsv"
+		COVERAGE_BASELINE_SUMMARY_FILE="$ZXFER_ROOT/tests/coverage_baseline/bash-xtrace/summary.tsv"
+		check_coverage_policy_target_inventory
+	' 2>&1)
+	status=$?
+	set -e
+
+	assertEquals "Every production coverage target and TOTAL must have exactly one policy and baseline row. Output: $output" \
+		0 "$status" || :
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_repository_policy_and_baseline_have_measured_production_rows() {
+	l_invalid_policy=$(awk -F '\t' '
+		$1 ~ /^src\// && ($2 + 0) <= 0 { print $1 }
+	' "$ZXFER_ROOT/tests/coverage_policy.tsv")
+	l_invalid_baseline=$(awk -F '\t' '
+		$5 ~ /^src\// && ($2 + 0) <= 0 { print $5 }
+	' "$ZXFER_ROOT/tests/coverage_baseline/bash-xtrace/summary.tsv")
+
+	assertEquals "Every production coverage target must have a nonzero enforced minimum." \
+		"" "$l_invalid_policy"
+	assertEquals "Every production coverage target must have measured full-run baseline evidence." \
+		"" "$l_invalid_baseline"
+}
+
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_coverage_capture_bash_xtrace_to_file_survives_fd_9_closure() {
 	l_bash_bin=${ZXFER_COVERAGE_BASH_BIN:-}
 	if [ -z "$l_bash_bin" ]; then
-		l_bash_bin=$(command -v bash)
+		l_bash_bin=$(command -v bash 2>/dev/null || true)
 	fi
 	if [ -z "$l_bash_bin" ] || [ ! -x "$l_bash_bin" ]; then
 		return 0
 	fi
 	l_support_status=$(run_coverage_helper \
-		"bash_supports_xtrace_line_numbers \"$l_bash_bin\" >/dev/null 2>&1; printf '%s' \"\$?\"")
+		"if bash_supports_xtrace_line_numbers \"$l_bash_bin\" >/dev/null 2>&1; then printf '%s' 0; else printf '%s' 1; fi")
 	if [ "$l_support_status" != "0" ]; then
+		fail "The selected Bash should support the line-number trace format used by coverage."
 		return 0
 	fi
 	l_script_file="$TEST_TMPDIR/trace-survives-fd9-close.sh"
@@ -67,14 +190,164 @@ test_run_coverage_capture_bash_xtrace_to_file_survives_fd_9_closure() {
 before=1
 exec 9<&- 2>/dev/null || true
 after=1
+set -u
 EOF
 
 	output=$(run_coverage_helper \
-		"capture_bash_xtrace_to_file \"$l_bash_bin\" \"$l_trace_file\" \"$l_script_file\" >/dev/null 2>&1; cat \"$l_trace_file\"")
+		"if capture_bash_xtrace_to_file \"$l_bash_bin\" \"$l_trace_file\" \"$l_script_file\" >/dev/null 2>&1; then l_capture_status=0; else l_capture_status=\$?; fi; printf 'capture_status=%s\\n' \"\$l_capture_status\"; cat \"$l_trace_file\"")
 
+	assertContains "The bash-xtrace capture helper should report a successful traced process." \
+		"$output" "capture_status=0"
 	if ! printf '%s\n' "$output" | grep -F -- 'after=1' >/dev/null; then
 		fail "The bash-xtrace capture helper should keep tracing after a suite closes fd 9 for its own descriptor management. Output: $output"
 	fi
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
+test_run_coverage_refuses_to_signal_a_reused_descendant_pid() {
+	output=$(run_coverage_helper '
+		coverage_get_process_start_token() {
+			printf "%s\n" "lstart:new-process"
+		}
+		coverage_send_signal_to_pid() {
+			printf "signal=%s pid=%s\n" "$1" "$2"
+		}
+		tab=$(printf "\t")
+		record="43210${tab}lstart:original-process"
+		coverage_signal_process_tree TERM "$record"
+	')
+
+	assertEquals "A changed process-start token must prevent TERM/KILL from touching a reused PID." \
+		"" "$output"
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
+test_run_coverage_refuses_to_signal_a_reused_root_pid() {
+	output=$(run_coverage_helper '
+		coverage_get_process_start_token() {
+			printf "%s\n" "lstart:new-process"
+		}
+		coverage_send_signal_to_pid() {
+			printf "signal=%s pid=%s\n" "$1" "$2"
+		}
+		coverage_signal_tracked_process TERM 43210 "lstart:original-process"
+	')
+
+	assertEquals "A changed root process-start token must prevent TERM/KILL from touching a reused PID." \
+		"" "$output"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_term_exits_and_reaps_the_active_suite() {
+	l_suite_file="$TEST_TMPDIR/coverage-term-suite.sh"
+	l_suite_pid_file="$TEST_TMPDIR/coverage-term-suite.pid"
+	l_child_pid_file="$TEST_TMPDIR/coverage-term-child.pid"
+	l_grandchild_pid_file="$TEST_TMPDIR/coverage-term-grandchild.pid"
+	l_output_file="$TEST_TMPDIR/coverage-term-runner.out"
+	l_coverage_dir="$TEST_TMPDIR/coverage-term-output"
+	l_fake_bin="$TEST_TMPDIR/coverage-term-bin"
+	mkdir -p "$l_fake_bin"
+	cat >"$l_fake_bin/pgrep" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = "-P" ] || exit 2
+l_parent_pid=$2
+l_suite_pid=$(cat "${COVERAGE_TERM_SUITE_PID_FILE:?}" 2>/dev/null || :)
+l_child_pid=$(cat "${COVERAGE_TERM_CHILD_PID_FILE:?}" 2>/dev/null || :)
+if [ -n "$l_suite_pid" ] && [ "$l_parent_pid" = "$l_suite_pid" ]; then
+	cat "${COVERAGE_TERM_CHILD_PID_FILE:?}"
+	check_status=$?
+	[ "$check_status" -eq 0 ] || exit "$check_status"
+	exit 0
+fi
+if [ -n "$l_child_pid" ] && [ "$l_parent_pid" = "$l_child_pid" ]; then
+	cat "${COVERAGE_TERM_GRANDCHILD_PID_FILE:?}"
+	check_status=$?
+	[ "$check_status" -eq 0 ] || exit "$check_status"
+	exit 0
+fi
+exit 1
+EOF
+	chmod +x "$l_fake_bin/pgrep"
+	cat >"$l_fake_bin/ps" <<'EOF'
+#!/bin/sh
+if [ "$#" -eq 4 ] && [ "$1" = "-p" ] && [ "$3" = "-o" ]; then
+	case "$4" in
+	lstart=)
+		printf '%s\n' 'Fri Jul 17 12:00:00 2026'
+		exit 0
+		;;
+	stime=)
+		printf '%s\n' '12:00:00'
+		exit 0
+		;;
+	esac
+fi
+exec /bin/ps "$@"
+EOF
+	chmod +x "$l_fake_bin/ps"
+	cat >"$l_suite_file" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$$" >"${COVERAGE_TERM_SUITE_PID_FILE:?}"
+(
+	trap '' TERM
+	sh -c 'trap "" TERM; while :; do sleep 1; done' &
+	printf '%s\n' "$!" >"${COVERAGE_TERM_GRANDCHILD_PID_FILE:?}"
+	wait
+) &
+printf '%s\n' "$!" >"${COVERAGE_TERM_CHILD_PID_FILE:?}"
+trap '' TERM
+while :; do
+	sleep 1
+done
+EOF
+	chmod +x "$l_suite_file"
+
+	COVERAGE_TERM_SUITE_PID_FILE="$l_suite_pid_file" \
+		COVERAGE_TERM_CHILD_PID_FILE="$l_child_pid_file" \
+		COVERAGE_TERM_GRANDCHILD_PID_FILE="$l_grandchild_pid_file" \
+		COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS=1 \
+		ZXFER_COVERAGE_MODE=bash-xtrace \
+		COVERAGE_DIR="$l_coverage_dir" \
+		PATH="$l_fake_bin:${PATH:-/usr/bin:/bin}" \
+		"$RUN_COVERAGE_BIN" --report-only "$l_suite_file" >"$l_output_file" 2>&1 &
+	l_runner_pid=$!
+	l_wait_count=0
+	while { [ ! -s "$l_suite_pid_file" ] || [ ! -s "$l_child_pid_file" ] || [ ! -s "$l_grandchild_pid_file" ]; } &&
+		[ "$l_wait_count" -lt 10 ]; do
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	if [ ! -s "$l_suite_pid_file" ] || [ ! -s "$l_child_pid_file" ] || [ ! -s "$l_grandchild_pid_file" ]; then
+		kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
+		wait "$l_runner_pid" >/dev/null 2>&1 || :
+		fail "The coverage runner did not start its selected suite within the bounded wait. Output: $(cat "$l_output_file" 2>/dev/null || :)"
+		return
+	fi
+	l_suite_pid=$(cat "$l_suite_pid_file")
+	l_child_pid=$(cat "$l_child_pid_file")
+	l_grandchild_pid=$(cat "$l_grandchild_pid_file")
+
+	kill -s TERM "$l_runner_pid"
+	set +e
+	wait "$l_runner_pid"
+	l_runner_status=$?
+	set -e
+
+	assertEquals "TERM should end the coverage runner with the conventional signal-derived status." \
+		143 "$l_runner_status"
+	for l_reaped_record in \
+		"suite:$l_suite_pid" \
+		"child:$l_child_pid" \
+		"grandchild:$l_grandchild_pid"; do
+		l_reaped_role=${l_reaped_record%%:*}
+		l_reaped_pid=${l_reaped_record#*:}
+		set +e
+		run_coverage_helper "coverage_process_running_p '$l_reaped_pid'" >/dev/null 2>&1
+		l_suite_running_status=$?
+		set -e
+		assertNotEquals "TERM should not leave the selected suite or any captured descendant live after the coverage runner exits ($l_reaped_role pid $l_reaped_pid)." \
+			0 "$l_suite_running_status"
+	done
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -333,6 +606,109 @@ TRACE
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_ignores_multiline_single_quote_openers_with_inline_data() {
+	l_fake_root="$TEST_TMPDIR/fake-root-inline-single-quote"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-inline-single-quote.list"
+	l_trace_file="$TEST_TMPDIR/merged-inline-single-quote.trace"
+	l_summary_file="$TEST_TMPDIR/render-inline-single-quote-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-inline-single-quote-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+MANIFEST='first-item
+second-item
+third-item'
+printf '%s\n' "$MANIFEST"
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:5: printf '%s\n' "\$MANIFEST"
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "Inline data after an opening single quote should still start a non-coverable multiline body." \
+		"$output" "100.00	1	1	0	src/fake.sh"
+	assertNotContains "Manifest data lines should not be reported as executable misses." \
+		"$output" "second-item"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_single_quoted_double_quotes_do_not_hide_following_executable_lines() {
+	l_fake_root="$TEST_TMPDIR/fake-root-single-quoted-double-quote"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-single-quoted-double-quote.list"
+	l_trace_file="$TEST_TMPDIR/merged-single-quoted-double-quote.trace"
+	l_summary_file="$TEST_TMPDIR/render-single-quoted-double-quote-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-single-quoted-double-quote-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+MANIFEST='first " item
+second-item
+third-item'
+printf '%s\n' still-coverable
+printf '%s\n' done
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:6: printf '%s\n' done
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "Double quotes inside a single-quoted multiline value must not hide later executable lines from the denominator." \
+		"$output" "50.00	2	1	1	src/fake.sh"
+	assertContains "The executable line after the single-quoted value should remain visible as a miss." \
+		"$output" "  5:printf '%s"
+	assertNotContains "The genuine multiline value body should remain excluded." \
+		"$output" "second-item"
+}
+
+# shellcheck disable=SC1003,SC2016,SC2317,SC2329  # Literal shell source; invoked indirectly by shunit2.
+test_run_coverage_does_not_treat_escaped_or_double_quoted_apostrophes_as_multiline_openers() {
+	l_fake_root="$TEST_TMPDIR/fake-root-literal-apostrophe"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-literal-apostrophe.list"
+	l_trace_file="$TEST_TMPDIR/merged-literal-apostrophe.trace"
+	l_summary_file="$TEST_TMPDIR/render-literal-apostrophe-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-literal-apostrophe-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+escaped=${escaped#*\'}
+quoted="an apostrophe isn't a shell quote here"
+printf '%s\n' before-comment;# operator isn't a shell quote
+printf '%s\n' still-coverable
+MANIFEST='first-item
+second-item\'
+printf '%s\n' done
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:8: printf '%s\n' done
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "Escaped and double-quoted apostrophes must not hide the executable lines that follow them from the coverage denominator." \
+		"$output" "20.00	5	1	4	src/fake.sh"
+	assertContains "A parameter-pattern apostrophe should remain a coverable shell assignment." \
+		"$output" '  2:escaped=${escaped#*\'"'"'}'
+	assertContains "Executable lines following literal apostrophes should remain visible as misses." \
+		"$output" "  5:printf '%s"
+	assertNotContains "A genuine multiline single-quoted body should remain excluded." \
+		"$output" "second-item"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_coverage_render_bash_xtrace_report_ignores_multiline_single_quoted_bodies_started_on_backslash_continuations() {
 	l_fake_root="$TEST_TMPDIR/fake-root-single-quote-continuation"
 	l_source_file="$l_fake_root/src/fake.sh"
@@ -432,6 +808,38 @@ EOF
 		"$output" "50.00	2	1	1	src/fake.sh"
 	assertNotContains "The renderer should not append to stale summary rows from prior runs." \
 		"$output" "src/stale.sh"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_targeted_missing_report_skips_the_full_baseline_diff() {
+	l_missing_file="$TEST_TMPDIR/targeted-missing.txt"
+	l_baseline_file="$TEST_TMPDIR/targeted-baseline-missing.txt"
+	l_diff_file="$TEST_TMPDIR/targeted-missing.diff"
+	printf '%s\n' "src/current.sh" >"$l_missing_file"
+	printf '%s\n' "src/baseline.sh" >"$l_baseline_file"
+
+	output=$(run_coverage_helper \
+		"COVERAGE_BASELINE_MISSING_FILE=\"$l_baseline_file\"; write_missing_diff_file \"$l_missing_file\" \"$l_diff_file\" targeted; cat \"$l_diff_file\"")
+
+	assertEquals "A targeted trace should not render a misleading diff against the full-run missing-line baseline." \
+		"Full-baseline missing-line diff skipped for targeted coverage run." "$output"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_full_missing_report_still_compares_the_committed_baseline() {
+	l_missing_file="$TEST_TMPDIR/full-missing.txt"
+	l_baseline_file="$TEST_TMPDIR/full-baseline-missing.txt"
+	l_diff_file="$TEST_TMPDIR/full-missing.diff"
+	printf '%s\n' "src/current.sh" >"$l_missing_file"
+	printf '%s\n' "src/baseline.sh" >"$l_baseline_file"
+
+	output=$(run_coverage_helper \
+		"COVERAGE_BASELINE_MISSING_FILE=\"$l_baseline_file\"; write_missing_diff_file \"$l_missing_file\" \"$l_diff_file\" full; cat \"$l_diff_file\"")
+
+	assertContains "A full trace should retain the committed missing-line baseline diff." \
+		"$output" "src/baseline.sh"
+	assertContains "The full-run diff should include the current missing-line report." \
+		"$output" "src/current.sh"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

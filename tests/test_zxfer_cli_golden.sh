@@ -98,14 +98,8 @@ zxfer_golden_invoke_zxfer() {
 		;;
 	esac
 
-	# test_helper.sh sources src/zxfer_modules.sh with prefix assignments on
-	# the `.` special builtin, so ZXFER_SOURCE_MODULES_* leak into this shell
-	# and its children. Pin them to empty (treated as unset by the module
-	# loader) so the launcher under test sources its full module list.
 	set +e
-	ZXFER_SOURCE_MODULES_ROOT='' \
-		ZXFER_SOURCE_MODULES_THROUGH='' \
-		ZXFER_SECURE_PATH="$g_golden_secure_path" \
+	ZXFER_SECURE_PATH="$g_golden_secure_path" \
 		ZXFER_SECURE_PATH_APPEND='' \
 		ZXFER_ERROR_LOG="$g_golden_case_error_log" \
 		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS="$g_golden_case_unsafe_commands" \

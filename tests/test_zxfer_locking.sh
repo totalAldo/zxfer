@@ -1,7 +1,6 @@
 #!/bin/sh
 #
-# shunit2 tests for the owned-lock helpers (the OWNED LOCK / LEASE
-# COORDINATION section of src/zxfer_runtime.sh, formerly zxfer_locking.sh).
+# shunit2 tests for the owned-lock helpers in src/zxfer_locking.sh.
 #
 # Lock metadata is owner pid + process start token only (V2). These tests pin
 # pid+start-token liveness, stale reaping, checked release, and the
@@ -14,7 +13,7 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-zxfer_source_runtime_modules_through "zxfer_runtime.sh"
+zxfer_source_runtime_modules_through "zxfer_locking.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_locking"
@@ -125,6 +124,89 @@ test_zxfer_get_process_start_token_covers_invalid_pids_and_selector_fallback() {
 		"$failure_output" "ps=1"
 }
 
+test_zxfer_get_process_start_token_honors_requested_header_form_selector() {
+	output=$(
+		(
+			set +e
+			ps() {
+				if [ "${4:-}" = "stime=" ]; then
+					return 1
+				fi
+				if [ "${4:-}" = "stime" ]; then
+					printf '%s\n' "STIME" "  Jul 18 12:34  "
+					return 0
+				fi
+				return 1
+			}
+			token=$(zxfer_get_process_start_token 701 stime)
+			printf 'token=<%s> status=%s\n' "$token" "$?"
+			zxfer_get_process_start_token 701 invalid >/dev/null
+			printf 'invalid_selector=%s\n' "$?"
+		)
+	)
+
+	assertContains "A captured stime identity should be revalidated with the same header-form selector." \
+		"$output" "token=<stime:Jul 18 12:34> status=0"
+	assertContains "Process-token lookup should reject unknown requested selectors." \
+		"$output" "invalid_selector=1"
+}
+
+test_zxfer_get_process_start_token_preserves_caller_ifs_and_globbing_state() {
+	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
+	zxfer_test_capture_subshell '
+		ps() {
+			case "$4" in
+			lstart=)
+				printf "%s\n" "  Mon * Jan 1 00:00:00 2026  "
+				return 0
+				;;
+			esac
+			return 1
+		}
+
+		IFS="|"
+		set -f
+		zxfer_get_process_start_token "$$" >"$TEST_TMPDIR/process-token-custom.out"
+		printf "custom_status=%s\n" "$?"
+		printf "custom_ifs=<%s>\n" "$IFS"
+		case $- in
+		*f*) printf "%s\n" "custom_globbing=disabled" ;;
+		*) printf "%s\n" "custom_globbing=enabled" ;;
+		esac
+
+		unset IFS
+		set +f
+		zxfer_get_process_start_token "$$" >"$TEST_TMPDIR/process-token-unset.out"
+		printf "unset_status=%s\n" "$?"
+		if [ "${IFS+set}" = "set" ]; then
+			printf "%s\n" "unset_ifs=set"
+		else
+			printf "%s\n" "unset_ifs=unset"
+		fi
+		case $- in
+		*f*) printf "%s\n" "unset_globbing=disabled" ;;
+		*) printf "%s\n" "unset_globbing=enabled" ;;
+		esac
+	'
+
+	assertContains "Process-token normalization should succeed under a custom IFS." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "custom_status=0"
+	assertEquals "Process-token normalization should squeeze default whitespace while keeping globs literal." \
+		"lstart:Mon * Jan 1 00:00:00 2026" "$(cat "$TEST_TMPDIR/process-token-custom.out")"
+	assertContains "Process-token lookup should restore a caller-defined IFS exactly." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "custom_ifs=<|>"
+	assertContains "Process-token lookup should preserve disabled globbing." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "custom_globbing=disabled"
+	assertContains "Process-token lookup should succeed with caller IFS unset." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "unset_status=0"
+	assertEquals "Process-token normalization should keep globs literal with caller globbing enabled." \
+		"lstart:Mon * Jan 1 00:00:00 2026" "$(cat "$TEST_TMPDIR/process-token-unset.out")"
+	assertContains "Process-token lookup should restore an originally unset IFS." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "unset_ifs=unset"
+	assertContains "Process-token lookup should leave caller-enabled globbing enabled." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "unset_globbing=enabled"
+}
+
 test_zxfer_get_own_process_start_token_memoizes_one_ps_capture() {
 	output=$(
 		(
@@ -190,7 +272,7 @@ test_zxfer_owned_lock_create_and_release_memoize_one_main_shell_ps_capture() {
 	capture_count=$(cat "$capture_count_file")
 
 	unset -f zxfer_get_process_start_token
-	zxfer_source_runtime_modules_through "zxfer_runtime.sh"
+	zxfer_source_runtime_modules_through "zxfer_locking.sh"
 	setUp
 
 	assertEquals "Owned lock creation should succeed with the mocked start-token probe." \
@@ -228,6 +310,64 @@ test_zxfer_normalize_owned_lock_text_field_rejects_blank_values_and_keeps_globs_
 		"$output" "blank=1"
 	assertContains "Owned lock text normalization should keep glob characters literal." \
 		"$output" "glob=<glob * purpose>"
+}
+
+test_zxfer_normalize_owned_lock_text_field_preserves_caller_ifs_and_globbing_state() {
+	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
+	zxfer_test_capture_subshell '
+		IFS="|"
+		set -f
+		zxfer_normalize_owned_lock_text_field "  owned * lock   value  " >"$TEST_TMPDIR/lock-text-custom.out"
+		printf "custom_status=%s\n" "$?"
+		printf "custom_ifs=<%s>\n" "$IFS"
+		case $- in
+		*f*) printf "%s\n" "custom_globbing=disabled" ;;
+		*) printf "%s\n" "custom_globbing=enabled" ;;
+		esac
+
+		unset IFS
+		set +f
+		zxfer_normalize_owned_lock_text_field "  owned * lock   value  " >"$TEST_TMPDIR/lock-text-unset.out"
+		printf "unset_status=%s\n" "$?"
+		if [ "${IFS+set}" = "set" ]; then
+			printf "%s\n" "unset_ifs=set"
+		else
+			printf "%s\n" "unset_ifs=unset"
+		fi
+		case $- in
+		*f*) printf "%s\n" "unset_globbing=disabled" ;;
+		*) printf "%s\n" "unset_globbing=enabled" ;;
+		esac
+
+		set -f
+		zxfer_normalize_owned_lock_text_field "   " >/dev/null
+		printf "blank_status=%s\n" "$?"
+		case $- in
+		*f*) printf "%s\n" "blank_globbing=disabled" ;;
+		*) printf "%s\n" "blank_globbing=enabled" ;;
+		esac
+	'
+
+	assertContains "Owned-lock text normalization should succeed under a custom IFS." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "custom_status=0"
+	assertEquals "Owned-lock text normalization should use default whitespace and keep globs literal." \
+		"owned * lock value" "$(cat "$TEST_TMPDIR/lock-text-custom.out")"
+	assertContains "Owned-lock text normalization should restore a caller-defined IFS exactly." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "custom_ifs=<|>"
+	assertContains "Owned-lock text normalization should preserve disabled globbing." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "custom_globbing=disabled"
+	assertContains "Owned-lock text normalization should succeed with caller IFS unset." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "unset_status=0"
+	assertEquals "Owned-lock text normalization should keep globs literal with caller globbing enabled." \
+		"owned * lock value" "$(cat "$TEST_TMPDIR/lock-text-unset.out")"
+	assertContains "Owned-lock text normalization should restore an originally unset IFS." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "unset_ifs=unset"
+	assertContains "Owned-lock text normalization should leave caller-enabled globbing enabled." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "unset_globbing=enabled"
+	assertContains "Blank owned-lock text should still be rejected after state restoration." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "blank_status=1"
+	assertContains "Blank-value rejection should preserve disabled globbing." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "blank_globbing=disabled"
 }
 
 test_owned_lock_validation_helpers_reject_insecure_paths() {
@@ -593,6 +733,7 @@ test_owned_lock_owner_and_cleanup_helpers_cover_stale_unknown_and_invalid_target
 	link_path="$TEST_TMPDIR/cleanup-link.lock"
 	: >"$file_path" || fail "Unable to create owned lock cleanup file fixture."
 	mkdir "$target_dir" || fail "Unable to create owned lock cleanup target directory."
+	chmod 700 "$target_dir"
 	ln -s "$target_dir" "$link_path" || fail "Unable to create owned lock cleanup symlink."
 
 	liveness_output=$(
@@ -630,9 +771,9 @@ test_owned_lock_owner_and_cleanup_helpers_cover_stale_unknown_and_invalid_target
 			printf 'symlink=%s\n' "$?"
 			zxfer_cleanup_owned_lock_dir "$file_path" >/dev/null
 			printf 'file=%s\n' "$?"
-			mkdir "$TEST_TMPDIR/rm-fallback.lock" || exit 1
-			rm() {
-				rmdir "$2"
+			mkdir -m 700 "$TEST_TMPDIR/rm-fallback.lock" || exit 1
+			rmdir() {
+				command rmdir "$1"
 				return 1
 			}
 			zxfer_cleanup_owned_lock_dir "$TEST_TMPDIR/rm-fallback.lock" >/dev/null
@@ -656,18 +797,18 @@ test_owned_lock_owner_and_cleanup_helpers_cover_stale_unknown_and_invalid_target
 		"$cleanup_output" "symlink=1"
 	assertContains "Owned lock cleanup should reject non-directory targets." \
 		"$cleanup_output" "file=1"
-	assertContains "Owned lock cleanup should still succeed when rm reports failure but the directory is already gone by the post-check." \
+	assertContains "Owned lock cleanup should still succeed when rmdir reports failure but the directory is already gone by the post-check." \
 		"$cleanup_output" "rm_fallback=0"
 }
 
 test_owned_lock_cleanup_fails_closed_when_rm_failures_persist() {
 	lock_dir="$TEST_TMPDIR/cleanup-hard-fail.lock"
-	mkdir "$lock_dir" || fail "Unable to create hard-fail owned lock cleanup fixture."
+	mkdir -m 700 "$lock_dir" || fail "Unable to create hard-fail owned lock cleanup fixture."
 
 	cleanup_output=$(
 		(
 			set +e
-			rm() {
+			rmdir() {
 				return 1
 			}
 			zxfer_cleanup_owned_lock_dir "$lock_dir" >/dev/null
@@ -676,10 +817,65 @@ test_owned_lock_cleanup_fails_closed_when_rm_failures_persist() {
 		)
 	)
 
-	assertContains "Owned lock cleanup should fail when rm reports failure and the lock directory still exists afterward." \
+	assertContains "Owned lock cleanup should fail when rmdir reports failure and the lock directory still exists afterward." \
 		"$cleanup_output" "cleanup=1"
 	assertContains "Owned lock cleanup failure paths should leave the existing directory in place for inspection." \
 		"$cleanup_output" "exists=yes"
+}
+
+test_zxfer_cleanup_owned_lock_dir_revalidates_and_removes_only_known_entries() {
+	arbitrary_dir="$TEST_TMPDIR/arbitrary-cleanup-target.lock"
+	wrong_mode_dir="$TEST_TMPDIR/wrong-mode-cleanup.lock"
+	wrong_owner_dir="$TEST_TMPDIR/wrong-owner-cleanup.lock"
+	mismatch_dir="$TEST_TMPDIR/metadata-mismatch-cleanup.lock"
+	symlink_dir="$TEST_TMPDIR/symlink-metadata-cleanup.lock"
+	hardlink_dir="$TEST_TMPDIR/hardlink-metadata-cleanup.lock"
+	external_symlink_target="$TEST_TMPDIR/external-symlink-target"
+	external_hardlink_target="$TEST_TMPDIR/external-hardlink-target"
+
+	mkdir -m 700 "$arbitrary_dir" "$wrong_owner_dir" "$symlink_dir" "$hardlink_dir"
+	: >"$arbitrary_dir/operator-data"
+	mkdir -m 755 "$wrong_mode_dir"
+	write_owned_lock_metadata_fixture "$mismatch_dir"
+	printf '%s\n' symlink-sentinel >"$external_symlink_target"
+	ln -s "$external_symlink_target" "$symlink_dir/metadata"
+	printf '%s\n' hardlink-sentinel >"$external_hardlink_target"
+	ln "$external_hardlink_target" "$hardlink_dir/metadata"
+
+	zxfer_cleanup_owned_lock_dir "$arbitrary_dir" >/dev/null
+	arbitrary_status=$?
+	zxfer_cleanup_owned_lock_dir "$wrong_mode_dir" >/dev/null
+	wrong_mode_status=$?
+	wrong_owner_status=$(
+		(
+			zxfer_get_effective_user_uid() { printf '%s\n' 100; }
+			zxfer_get_path_owner_uid() { printf '%s\n' 101; }
+			zxfer_cleanup_owned_lock_dir "$wrong_owner_dir" >/dev/null
+			printf '%s\n' "$?"
+		)
+	)
+	zxfer_cleanup_owned_lock_dir "$mismatch_dir" 999999 "lstart:not-the-owner" >/dev/null
+	mismatch_status=$?
+	zxfer_cleanup_owned_lock_dir "$symlink_dir" >/dev/null
+	symlink_status=$?
+	zxfer_cleanup_owned_lock_dir "$hardlink_dir" >/dev/null
+	hardlink_status=$?
+
+	assertEquals "Cleanup should reject arbitrary directories containing unknown entries." 1 "$arbitrary_status"
+	assertTrue "Rejected arbitrary directories should retain operator data." \
+		"[ -f '$arbitrary_dir/operator-data' ]"
+	assertEquals "Cleanup should reject a lock container whose mode is not 0700." 1 "$wrong_mode_status"
+	assertTrue "Wrong-mode lock containers should be leaked intact." "[ -d '$wrong_mode_dir' ]"
+	assertEquals "Cleanup should reject a lock container not owned by the effective uid." 1 "$wrong_owner_status"
+	assertTrue "Wrong-owner lock containers should be leaked intact." "[ -d '$wrong_owner_dir' ]"
+	assertEquals "Cleanup should reject metadata that changed after caller ownership proof." 1 "$mismatch_status"
+	assertTrue "Metadata-mismatch lock containers should be leaked intact." "[ -d '$mismatch_dir' ]"
+	assertEquals "Known-name metadata symlinks may be unlinked without following them." 0 "$symlink_status"
+	assertEquals "Removing a metadata symlink must preserve its external target." \
+		"symlink-sentinel" "$(cat "$external_symlink_target")"
+	assertEquals "Known-name metadata hard links may be unlinked without recursive deletion." 0 "$hardlink_status"
+	assertEquals "Removing a metadata hard link must preserve its external inode through the other link." \
+		"hardlink-sentinel" "$(cat "$external_hardlink_target")"
 }
 
 test_zxfer_create_owned_lock_dir_failure_paths_clean_up_partial_directories() {
@@ -711,8 +907,8 @@ test_zxfer_create_owned_lock_dir_failure_paths_clean_up_partial_directories() {
 
 	assertContains "Owned lock creation should fail closed when the created directory cannot be revalidated." \
 		"$validate_output" "status=1"
-	assertContains "Owned lock creation should remove directories that fail post-create validation." \
-		"$validate_output" "exists=no"
+	assertContains "Owned lock creation should leak rather than delete a directory that cannot be revalidated safely." \
+		"$validate_output" "exists=yes"
 	assertContains "Owned lock creation should fail closed when metadata publication fails." \
 		"$write_output" "status=1"
 	assertContains "Owned lock creation should remove directories whose metadata write fails." \
@@ -760,6 +956,16 @@ test_zxfer_try_reap_stale_owned_lock_dir_propagates_unknown_states_and_cleanup_f
 			printf 'unknown=%s\n' "$?"
 		)
 	)
+	hard_load_output=$(
+		(
+			set +e
+			zxfer_load_owned_lock_metadata_from_dir() {
+				return 1
+			}
+			zxfer_try_reap_stale_owned_lock_dir "$TEST_TMPDIR/hard-load.lock" 1 >/dev/null
+			printf 'hard=%s\n' "$?"
+		)
+	)
 
 	assertContains "Owned lock reaping should fail closed when live-owner validation is inconclusive." \
 		"$liveness_output" "liveness=1"
@@ -767,6 +973,8 @@ test_zxfer_try_reap_stale_owned_lock_dir_propagates_unknown_states_and_cleanup_f
 		"$cleanup_output" "cleanup=1"
 	assertContains "Owned lock reaping should fail closed on unexpected metadata-loader statuses." \
 		"$unknown_load_output" "unknown=1"
+	assertContains "Owned lock reaping should preserve hard metadata-validation failures." \
+		"$hard_load_output" "hard=1"
 }
 
 test_zxfer_release_owned_lock_dir_requires_current_owner_identity() {

@@ -6,9 +6,10 @@ here.
 
 ## Validation
 
+- [ ] `./tests/validate.sh full` (or the equivalent focused commands below)
 - [ ] `./tests/run_lint.sh`
 - [ ] `./tests/run_shunit_tests.sh`
-- [ ] `ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh` when shell logic, tests, or coverage tooling changed
+- [ ] `ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh --enforce` when shell logic, tests, or coverage tooling changed
 - [ ] targeted suites for edited modules
 - [ ] integration tests, if safe and relevant
 - [ ] `./tests/run_perf_tests.sh`, `./tests/run_perf_compare.sh`, or `./tests/run_vm_matrix.sh --test-layer perf` / `perf-compare` when performance-sensitive behavior changed

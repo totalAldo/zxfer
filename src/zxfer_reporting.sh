@@ -32,14 +32,27 @@
 # shellcheck shell=sh disable=SC2034,SC2154
 
 ################################################################################
-# REPORTING / FAILURE HANDLING / PROFILING
+# REPORTING / FAILURE HANDLING
 ################################################################################
 
 # Module contract:
-# owns globals: g_zxfer_failure_* and g_zxfer_profile_* reporting state.
+# owns globals: g_zxfer_failure_* structured failure context.
 # reads globals: g_option_* verbosity/beep flags, g_cmd_awk, and current dataset context.
 # mutates caches: none.
-# returns via stdout: escaped values, rendered reports, timestamps, and counter values.
+# returns via stdout: escaped values and rendered failure reports.
+
+# Purpose: Check whether a string is a portable POSIX shell variable name.
+# Usage: Called immediately before the small number of intentional indirect
+# assignments so eval never receives an unvalidated assignment target.
+zxfer_shell_variable_name_is_valid() {
+	case "${1:-}" in
+	'' | [0-9]* | *[!A-Za-z0-9_]*)
+		return 1
+		;;
+	esac
+
+	return 0
+}
 
 # Purpose: Initialize the failure context defaults before later helpers depend
 # on it.
@@ -73,6 +86,13 @@ zxfer_reset_failure_context() {
 	g_zxfer_failure_destination_root=""
 	g_zxfer_failure_current_destination=""
 	g_zxfer_failure_last_command=""
+}
+
+# Purpose: Publish the launcher-captured invocation through the reporting owner.
+# Usage: Called once after the pure module load and before session initialization
+# resets the remaining failure context.
+zxfer_set_original_invocation() {
+	g_zxfer_original_invocation=${1:-}
 }
 
 # Purpose: Emit the stderr in the operator-facing format owned by this module.
@@ -249,6 +269,49 @@ zxfer_set_failure_stage() {
 	[ -n "$1" ] && g_zxfer_failure_stage=$1
 }
 
+# Purpose: Set the structured failure class through its owning module.
+# Usage: Called immediately before throwing an error whose category is more
+# specific than the runtime default.
+zxfer_set_failure_class() {
+	zxfer_init_failure_context_defaults
+	case ${1:-} in
+	usage | dependency | runtime | '')
+		g_zxfer_failure_class=${1:-}
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+# Purpose: Set the operator-facing structured failure message.
+# Usage: Called by composition cleanup when it must promote a cleanup failure
+# without invoking a throwing helper from inside the EXIT trap.
+zxfer_set_failure_message() {
+	zxfer_init_failure_context_defaults
+	g_zxfer_failure_message=${1:-}
+}
+
+# Purpose: Publish a complete cleanup failure only when no earlier failure
+# message already owns the diagnostic context.
+# Usage: Keeps EXIT cleanup precedence and the established first-failure rule
+# in one owner operation.
+zxfer_set_failure_context_if_empty() {
+	zxfer_init_failure_context_defaults
+	[ -z "${g_zxfer_failure_message:-}" ] || return 0
+	zxfer_set_failure_class "${1:-runtime}" || return 1
+	g_zxfer_failure_stage=${2:-trap cleanup}
+	g_zxfer_failure_message=${3:-}
+}
+
+# Purpose: Mark the current structured failure report as emitted.
+# Usage: Called by secure error-log coordination after stderr rendering and
+# before optional mirroring, preventing duplicate reports during later cleanup.
+zxfer_mark_failure_report_emitted() {
+	zxfer_init_failure_context_defaults
+	g_zxfer_failure_report_emitted=1
+}
+
 # Purpose: Update the failure roots in the shared runtime state.
 # Usage: Called during failure reporting, profiling, and verbose operator
 # output after a probe or planning step changes the active context that later
@@ -301,366 +364,12 @@ zxfer_record_last_command_argv() {
 	fi
 }
 
-# Purpose: Record or emit the metrics enabled for end-of-run profiling.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer updates performance counters or prints the profiling
-# summary.
-zxfer_profile_metrics_enabled() {
-	[ "${g_option_V_very_verbose:-0}" -eq 1 ]
-}
-
-# Purpose: Record or emit the increment counter for end-of-run profiling.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer updates performance counters or prints the profiling
-# summary.
-zxfer_profile_increment_counter() {
-	l_counter_name=$1
-	l_increment_by=${2:-1}
-
-	zxfer_profile_metrics_enabled || return 0
-
-	case "$l_counter_name" in
-	'')
-		return 0
-		;;
-	esac
-
-	g_zxfer_profile_has_data=1
-
-	case "$l_increment_by" in
-	'' | *[!0-9]*)
-		l_increment_by=1
-		;;
-	esac
-
-	eval "l_counter_value=\${$l_counter_name:-0}"
-	case "$l_counter_value" in
-	'' | *[!0-9]*)
-		l_counter_value=0
-		;;
-	esac
-
-	l_counter_value=$((l_counter_value + l_increment_by))
-	eval "$l_counter_name=\$l_counter_value"
-}
-
-# Purpose: Record or emit the now ms for end-of-run profiling.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer updates performance counters or prints the profiling
-# summary.
-zxfer_profile_now_ms() {
-	l_now_ms=$(date '+%s%3N' 2>/dev/null || :)
-	case "$l_now_ms" in
-	'' | *[!0-9]*)
-		l_now_epoch=$(date '+%s' 2>/dev/null || :)
-		case "$l_now_epoch" in
-		'' | *[!0-9]*)
-			return 1
-			;;
-		esac
-		l_now_ms=$((l_now_epoch * 1000))
-		;;
-	esac
-
-	printf '%s\n' "$l_now_ms"
-}
-
-# Purpose: Record or emit the add elapsed ms for end-of-run profiling.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer updates performance counters or prints the profiling
-# summary.
-zxfer_profile_add_elapsed_ms() {
-	l_counter_name=$1
-	l_start_ms=$2
-	l_end_ms=${3:-}
-
-	zxfer_profile_metrics_enabled || return 0
-
-	case "$l_counter_name" in
-	'')
-		return 0
-		;;
-	esac
-
-	case "$l_start_ms" in
-	'' | *[!0-9]*)
-		return 0
-		;;
-	esac
-
-	if [ -z "$l_end_ms" ]; then
-		l_end_ms=$(zxfer_profile_now_ms) || return 0
-	fi
-
-	case "$l_end_ms" in
-	'' | *[!0-9]*)
-		return 0
-		;;
-	esac
-
-	[ "$l_end_ms" -ge "$l_start_ms" ] || return 0
-
-	g_zxfer_profile_has_data=1
-
-	eval "l_counter_value=\${$l_counter_name:-0}"
-	case "$l_counter_value" in
-	'' | *[!0-9]*)
-		l_counter_value=0
-		;;
-	esac
-
-	l_elapsed_ms=$((l_end_ms - l_start_ms))
-	l_counter_value=$((l_counter_value + l_elapsed_ms))
-	eval "$l_counter_name=\$l_counter_value"
-}
-
-# Purpose: Record or emit the record bucket for end-of-run profiling.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer updates performance counters or prints the profiling
-# summary.
-zxfer_profile_record_bucket() {
-	l_bucket=$1
-
-	case "$l_bucket" in
-	source_inspection)
-		zxfer_profile_increment_counter g_zxfer_profile_bucket_source_inspection
-		;;
-	destination_inspection)
-		zxfer_profile_increment_counter g_zxfer_profile_bucket_destination_inspection
-		;;
-	property_reconciliation)
-		zxfer_profile_increment_counter g_zxfer_profile_bucket_property_reconciliation
-		;;
-	send_receive_setup)
-		zxfer_profile_increment_counter g_zxfer_profile_bucket_send_receive_setup
-		;;
-	esac
-
-	return 0
-}
-
-# Purpose: Record or emit the record ZFS call for end-of-run profiling.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer updates performance counters or prints the profiling
-# summary.
-zxfer_profile_record_zfs_call() {
-	l_side=$1
-	l_verb=$2
-
-	zxfer_profile_metrics_enabled || return 0
-
-	case "$l_side" in
-	source)
-		zxfer_profile_increment_counter g_zxfer_profile_source_zfs_calls
-		;;
-	destination)
-		zxfer_profile_increment_counter g_zxfer_profile_destination_zfs_calls
-		;;
-	*)
-		zxfer_profile_increment_counter g_zxfer_profile_other_zfs_calls
-		;;
-	esac
-
-	case "$l_verb" in
-	list)
-		zxfer_profile_increment_counter g_zxfer_profile_zfs_list_calls
-		;;
-	get)
-		zxfer_profile_increment_counter g_zxfer_profile_zfs_get_calls
-		;;
-	send)
-		zxfer_profile_increment_counter g_zxfer_profile_zfs_send_calls
-		;;
-	receive)
-		zxfer_profile_increment_counter g_zxfer_profile_zfs_receive_calls
-		;;
-	esac
-
-	case "${g_zxfer_failure_stage:-}" in
-	"property transfer")
-		zxfer_profile_record_bucket property_reconciliation
-		;;
-	"send/receive")
-		case "$l_verb" in
-		send | receive)
-			zxfer_profile_record_bucket send_receive_setup
-			;;
-		list | get)
-			if [ "$l_side" = "destination" ]; then
-				zxfer_profile_record_bucket destination_inspection
-			elif [ "$l_side" = "source" ]; then
-				zxfer_profile_record_bucket source_inspection
-			fi
-			;;
-		esac
-		;;
-	"snapshot discovery")
-		if [ "$l_side" = "destination" ]; then
-			zxfer_profile_record_bucket destination_inspection
-		elif [ "$l_side" = "source" ]; then
-			zxfer_profile_record_bucket source_inspection
-		fi
-		;;
-	*)
-		case "$l_verb" in
-		list | get)
-			if [ "$l_side" = "destination" ]; then
-				zxfer_profile_record_bucket destination_inspection
-			elif [ "$l_side" = "source" ]; then
-				zxfer_profile_record_bucket source_inspection
-			fi
-			;;
-		esac
-		;;
-	esac
-
-	# Profiling must never alter caller control flow; callers may invoke a
-	# recorder as their final statement and propagate its status.
-	return 0
-}
-
-# Purpose: Record or emit the record SSH invocation for end-of-run profiling.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer updates performance counters or prints the profiling
-# summary.
-zxfer_profile_record_ssh_invocation() {
-	l_host_spec=$1
-	l_side=${2:-}
-
-	zxfer_profile_metrics_enabled || return 0
-
-	zxfer_profile_increment_counter g_zxfer_profile_ssh_shell_invocations
-
-	case "$l_side" in
-	source)
-		zxfer_profile_increment_counter g_zxfer_profile_source_ssh_shell_invocations
-		return 0
-		;;
-	destination)
-		zxfer_profile_increment_counter g_zxfer_profile_destination_ssh_shell_invocations
-		return 0
-		;;
-	other)
-		zxfer_profile_increment_counter g_zxfer_profile_other_ssh_shell_invocations
-		return 0
-		;;
-	esac
-
-	if [ -n "${g_option_O_origin_host:-}" ] && [ "$l_host_spec" = "$g_option_O_origin_host" ]; then
-		zxfer_profile_increment_counter g_zxfer_profile_source_ssh_shell_invocations
-	elif [ -n "${g_option_T_target_host:-}" ] && [ "$l_host_spec" = "$g_option_T_target_host" ]; then
-		zxfer_profile_increment_counter g_zxfer_profile_destination_ssh_shell_invocations
-	else
-		zxfer_profile_increment_counter g_zxfer_profile_other_ssh_shell_invocations
-	fi
-
-	return 0
-}
-
-# Purpose: Record or emit the record remote capability bootstrap source for
-# end-of-run profiling.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer updates performance counters or prints the profiling
-# summary.
-zxfer_profile_record_remote_capability_bootstrap_source() {
-	l_source=$1
-
-	case "$l_source" in
-	live)
-		zxfer_profile_increment_counter g_zxfer_profile_remote_capability_bootstrap_live
-		;;
-	cache)
-		zxfer_profile_increment_counter g_zxfer_profile_remote_capability_bootstrap_cache
-		;;
-	memory)
-		zxfer_profile_increment_counter g_zxfer_profile_remote_capability_bootstrap_memory
-		;;
-	esac
-
-	return 0
-}
-
-# Purpose: Record or emit the emit summary for end-of-run profiling.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer updates performance counters or prints the profiling
-# summary.
-zxfer_profile_emit_summary() {
-	zxfer_profile_metrics_enabled || return 0
-	[ "${g_zxfer_profile_has_data:-0}" -eq 1 ] || return 0
-
-	if [ "${g_zxfer_profile_summary_emitted:-0}" -eq 1 ]; then
-		return 0
-	fi
-	g_zxfer_profile_summary_emitted=1
-
-	l_end_epoch=$(date '+%s' 2>/dev/null || :)
-	l_start_epoch=${g_zxfer_profile_start_epoch:-}
-	l_elapsed=unknown
-	case "$l_start_epoch:$l_end_epoch" in
-	*[!0-9:]* | :* | *:) ;;
-	*)
-		l_elapsed=$((l_end_epoch - l_start_epoch))
-		;;
-	esac
-
-	zxfer_warn_stderr "zxfer profile: elapsed_seconds=$l_elapsed"
-	zxfer_warn_stderr "zxfer profile: startup_latency_ms=${g_zxfer_profile_startup_latency_ms:-0}"
-	zxfer_warn_stderr "zxfer profile: cleanup_ms=${g_zxfer_profile_cleanup_ms:-0}"
-	zxfer_warn_stderr "zxfer profile: ssh_setup_ms=${g_zxfer_profile_ssh_setup_ms:-0}"
-	zxfer_warn_stderr "zxfer profile: source_snapshot_listing_ms=${g_zxfer_profile_source_snapshot_listing_ms:-0}"
-	zxfer_warn_stderr "zxfer profile: destination_snapshot_listing_ms=${g_zxfer_profile_destination_snapshot_listing_ms:-0}"
-	zxfer_warn_stderr "zxfer profile: snapshot_diff_sort_ms=${g_zxfer_profile_snapshot_diff_sort_ms:-0}"
-	zxfer_warn_stderr "zxfer profile: ssh_control_socket_lock_wait_count=${g_zxfer_profile_ssh_control_socket_lock_wait_count:-0}"
-	zxfer_warn_stderr "zxfer profile: ssh_control_socket_lock_wait_ms=${g_zxfer_profile_ssh_control_socket_lock_wait_ms:-0}"
-	zxfer_warn_stderr "zxfer profile: remote_capability_cache_wait_count=${g_zxfer_profile_remote_capability_cache_wait_count:-0}"
-	zxfer_warn_stderr "zxfer profile: remote_capability_cache_wait_ms=${g_zxfer_profile_remote_capability_cache_wait_ms:-0}"
-	zxfer_warn_stderr "zxfer profile: remote_capability_bootstrap_live=${g_zxfer_profile_remote_capability_bootstrap_live:-0}"
-	zxfer_warn_stderr "zxfer profile: remote_capability_bootstrap_cache=${g_zxfer_profile_remote_capability_bootstrap_cache:-0}"
-	zxfer_warn_stderr "zxfer profile: remote_capability_bootstrap_memory=${g_zxfer_profile_remote_capability_bootstrap_memory:-0}"
-	zxfer_warn_stderr "zxfer profile: remote_cli_tool_direct_probes=${g_zxfer_profile_remote_cli_tool_direct_probes:-0}"
-	zxfer_warn_stderr "zxfer profile: source_zfs_calls=${g_zxfer_profile_source_zfs_calls:-0}"
-	zxfer_warn_stderr "zxfer profile: destination_zfs_calls=${g_zxfer_profile_destination_zfs_calls:-0}"
-	zxfer_warn_stderr "zxfer profile: other_zfs_calls=${g_zxfer_profile_other_zfs_calls:-0}"
-	zxfer_warn_stderr "zxfer profile: zfs_list_calls=${g_zxfer_profile_zfs_list_calls:-0}"
-	zxfer_warn_stderr "zxfer profile: zfs_get_calls=${g_zxfer_profile_zfs_get_calls:-0}"
-	zxfer_warn_stderr "zxfer profile: zfs_send_calls=${g_zxfer_profile_zfs_send_calls:-0}"
-	zxfer_warn_stderr "zxfer profile: zfs_receive_calls=${g_zxfer_profile_zfs_receive_calls:-0}"
-	zxfer_warn_stderr "zxfer profile: ssh_shell_invocations=${g_zxfer_profile_ssh_shell_invocations:-0}"
-	zxfer_warn_stderr "zxfer profile: source_ssh_shell_invocations=${g_zxfer_profile_source_ssh_shell_invocations:-0}"
-	zxfer_warn_stderr "zxfer profile: destination_ssh_shell_invocations=${g_zxfer_profile_destination_ssh_shell_invocations:-0}"
-	zxfer_warn_stderr "zxfer profile: other_ssh_shell_invocations=${g_zxfer_profile_other_ssh_shell_invocations:-0}"
-	zxfer_warn_stderr "zxfer profile: source_snapshot_list_commands=${g_zxfer_profile_source_snapshot_list_commands:-0}"
-	zxfer_warn_stderr "zxfer profile: source_snapshot_list_parallel_commands=${g_zxfer_profile_source_snapshot_list_parallel_commands:-0}"
-	zxfer_warn_stderr "zxfer profile: send_receive_pipeline_commands=${g_zxfer_profile_send_receive_pipeline_commands:-0}"
-	zxfer_warn_stderr "zxfer profile: send_receive_background_pipeline_commands=${g_zxfer_profile_send_receive_background_pipeline_commands:-0}"
-	zxfer_warn_stderr "zxfer profile: exists_destination_calls=${g_zxfer_profile_exists_destination_calls:-0}"
-	zxfer_warn_stderr "zxfer profile: normalized_property_reads_source=${g_zxfer_profile_normalized_property_reads_source:-0}"
-	zxfer_warn_stderr "zxfer profile: normalized_property_reads_destination=${g_zxfer_profile_normalized_property_reads_destination:-0}"
-	zxfer_warn_stderr "zxfer profile: normalized_property_reads_other=${g_zxfer_profile_normalized_property_reads_other:-0}"
-	zxfer_warn_stderr "zxfer profile: required_property_backfill_gets=${g_zxfer_profile_required_property_backfill_gets:-0}"
-	zxfer_warn_stderr "zxfer profile: parent_destination_property_reads=${g_zxfer_profile_parent_destination_property_reads:-0}"
-	zxfer_warn_stderr "zxfer profile: bucket_source_inspection=${g_zxfer_profile_bucket_source_inspection:-0}"
-	zxfer_warn_stderr "zxfer profile: bucket_destination_inspection=${g_zxfer_profile_bucket_destination_inspection:-0}"
-	zxfer_warn_stderr "zxfer profile: bucket_property_reconciliation=${g_zxfer_profile_bucket_property_reconciliation:-0}"
-	zxfer_warn_stderr "zxfer profile: bucket_send_receive_setup=${g_zxfer_profile_bucket_send_receive_setup:-0}"
-	zxfer_warn_stderr "zxfer profile: runtime_artifact_files_created=${g_zxfer_profile_runtime_artifact_files_created:-0}"
-	zxfer_warn_stderr "zxfer profile: runtime_artifact_dirs_created=${g_zxfer_profile_runtime_artifact_dirs_created:-0}"
-	zxfer_warn_stderr "zxfer profile: runtime_artifact_paths_cleaned=${g_zxfer_profile_runtime_artifact_paths_cleaned:-0}"
-	zxfer_warn_stderr "zxfer profile: runtime_cache_object_writes=${g_zxfer_profile_runtime_cache_object_writes:-0}"
-	zxfer_warn_stderr "zxfer profile: runtime_cache_object_readbacks=${g_zxfer_profile_runtime_cache_object_readbacks:-0}"
-	zxfer_warn_stderr "zxfer profile: command_render_calls=${g_zxfer_profile_command_render_calls:-0}"
-	zxfer_warn_stderr "zxfer profile: live_destination_snapshot_rechecks=${g_zxfer_profile_live_destination_snapshot_rechecks:-0}"
-	zxfer_warn_stderr "zxfer profile: diverged_snapshot_warnings=${g_zxfer_profile_diverged_snapshot_warnings:-0}"
-}
-
 # Purpose: Emit the usage to stderr in the operator-facing format owned by this
 # module.
 # Usage: Called during failure reporting, profiling, and verbose operator
 # output when zxfer needs to surface status, warning, or diagnostic text.
 zxfer_print_usage_to_stderr() {
-	if command -v zxfer_usage >/dev/null 2>&1; then
-		zxfer_usage >&2
-	fi
+	zxfer_usage >&2
 }
 
 # Purpose: Return the failure mode label in the form expected by later helpers.
@@ -760,496 +469,6 @@ zxfer_render_failure_report() {
 	printf 'zxfer: failure report end\n'
 }
 
-# Purpose: Validate the existing error log file before zxfer relies on it.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output to fail closed on malformed, unsafe, or stale input.
-zxfer_validate_existing_error_log_file() {
-	l_validate_candidate_path=$1
-	l_validate_display_path=$2
-
-	if [ -L "$l_validate_candidate_path" ] || [ -h "$l_validate_candidate_path" ]; then
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_validate_display_path\" because it is a symlink."
-		return 1
-	fi
-	if [ -e "$l_validate_candidate_path" ] && [ ! -f "$l_validate_candidate_path" ]; then
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_validate_display_path\" because it is not a regular file."
-		return 1
-	fi
-	if ! l_validate_owner_uid=$(zxfer_get_path_owner_uid "$l_validate_candidate_path"); then
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_display_path\" because its owner could not be determined."
-		return 1
-	fi
-	if ! zxfer_backup_owner_uid_is_allowed "$l_validate_owner_uid"; then
-		l_validate_expected_owner_desc=$(zxfer_describe_expected_backup_owner)
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_display_path\" because it is owned by UID $l_validate_owner_uid instead of $l_validate_expected_owner_desc."
-		return 1
-	fi
-	if ! l_validate_mode=$(zxfer_get_path_mode_octal "$l_validate_candidate_path"); then
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_display_path\" because its permissions could not be determined."
-		return 1
-	fi
-	if [ "$l_validate_mode" != "600" ]; then
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_display_path\" because its permissions ($l_validate_mode) are not 0600."
-		return 1
-	fi
-}
-
-# Purpose: Render the error-log path identity as lowercase hex.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output before fallback lock directories are created or reused for one
-# error-log file.
-zxfer_error_log_lock_identity_hex() {
-	l_key_path=$1
-
-	l_key_hex=$(printf '%s' "$l_key_path" |
-		LC_ALL=C od -An -tx1 -v | tr -d ' \n')
-	[ -n "$l_key_hex" ] || return 1
-
-	printf '%s\n' "$l_key_hex"
-}
-
-# Purpose: Ensure an error-log fallback lock component directory is private
-# and owned by the current user.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output while preparing exact fallback lock paths under a validated temp root.
-zxfer_ensure_error_log_fallback_lock_component_dir() {
-	l_component_dir=$1
-	l_old_umask=$(umask)
-
-	[ -n "$l_component_dir" ] || return 1
-	if [ -L "$l_component_dir" ] || [ -h "$l_component_dir" ]; then
-		return 1
-	fi
-	if [ ! -e "$l_component_dir" ]; then
-		umask 077
-		if ! mkdir "$l_component_dir" 2>/dev/null; then
-			umask "$l_old_umask"
-			[ -d "$l_component_dir" ] || return 1
-		else
-			umask "$l_old_umask"
-		fi
-	else
-		umask "$l_old_umask"
-	fi
-
-	zxfer_validate_owned_lock_container_dir "$l_component_dir"
-}
-
-# Purpose: Prepare the exact fallback lock directory path for `ZXFER_ERROR_LOG`.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when the real log parent is trusted but not writable, forcing lock
-# state under the validated temp root instead.
-zxfer_prepare_error_log_fallback_lock_dir() {
-	l_fallback_tmpdir=$1
-	l_fallback_log_path=$2
-
-	l_fallback_identity_hex=$(zxfer_error_log_lock_identity_hex "$l_fallback_log_path") || return 1
-	l_fallback_identity_hex_len=${#l_fallback_identity_hex}
-	l_fallback_identity_byte_len=$((l_fallback_identity_hex_len / 2))
-	l_fallback_parent_dir=$l_fallback_tmpdir/.zxfer-error-log.lock.d
-
-	zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir" || return 1
-	l_fallback_parent_dir=$l_fallback_parent_dir/h$l_fallback_identity_byte_len
-	zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir" || return 1
-
-	l_fallback_remaining_hex=$l_fallback_identity_hex
-	while [ -n "$l_fallback_remaining_hex" ]; do
-		l_fallback_chunk=$(printf '%s' "$l_fallback_remaining_hex" | cut -c 1-96)
-		l_fallback_remaining_hex=$(printf '%s' "$l_fallback_remaining_hex" | cut -c 97-)
-		[ -n "$l_fallback_chunk" ] || return 1
-		l_fallback_parent_dir=$l_fallback_parent_dir/$l_fallback_chunk
-		zxfer_ensure_error_log_fallback_lock_component_dir "$l_fallback_parent_dir" || return 1
-	done
-
-	printf '%s/lock\n' "$l_fallback_parent_dir"
-}
-
-# Purpose: Capture the reporting helper output into staged state or module
-# globals for later use.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when later helpers need a checked snapshot of command output or
-# computed state.
-zxfer_capture_reporting_helper_output() {
-	l_result_var=$1
-	shift
-
-	g_zxfer_reporting_capture_result=""
-	zxfer_capture_runtime_artifact_command_output "zxfer-reporting" "$@" ||
-		return "$?"
-
-	g_zxfer_reporting_capture_result=$g_zxfer_runtime_artifact_read_result
-	case "$g_zxfer_reporting_capture_result" in
-	*'
-')
-		g_zxfer_reporting_capture_result=${g_zxfer_reporting_capture_result%?}
-		;;
-	esac
-	eval "$l_result_var=\$g_zxfer_reporting_capture_result"
-	return 0
-}
-
-# Purpose: Return the error log fallback lock directory in the form expected by
-# later helpers.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_error_log_fallback_lock_dir() {
-	l_fallback_log_path=$1
-
-	l_fallback_tmpdir=""
-	if [ -n "${TMPDIR:-}" ] &&
-		zxfer_capture_reporting_helper_output l_fallback_tmpdir zxfer_validate_temp_root_candidate "$TMPDIR"; then
-		:
-	elif zxfer_capture_reporting_helper_output l_fallback_tmpdir zxfer_validate_temp_root_candidate "/dev/shm"; then
-		:
-	elif zxfer_capture_reporting_helper_output l_fallback_tmpdir zxfer_validate_temp_root_candidate "/run/shm"; then
-		:
-	elif zxfer_capture_reporting_helper_output l_fallback_tmpdir zxfer_validate_temp_root_candidate "/tmp"; then
-		:
-	else
-		return 1
-	fi
-	if ! zxfer_capture_reporting_helper_output l_fallback_lock_dir \
-		zxfer_prepare_error_log_fallback_lock_dir \
-		"$l_fallback_tmpdir" "$l_fallback_log_path"; then
-		return 1
-	fi
-
-	printf '%s\n' "$l_fallback_lock_dir"
-}
-
-# Purpose: Acquire the error log lock so concurrent zxfer work does not reuse
-# it unsafely.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output before a shared cache, lock, or transport resource is used by this
-# run.
-zxfer_acquire_error_log_lock() {
-	l_lock_dir_path=$1
-	l_lock_attempts=0
-	l_corrupt_metadata_sightings=0
-
-	while ! zxfer_create_owned_lock_dir \
-		"$l_lock_dir_path" lock "error-log-lock" >/dev/null; do
-		if [ -L "$l_lock_dir_path" ] || [ -h "$l_lock_dir_path" ]; then
-			return 1
-		fi
-		if [ -d "$l_lock_dir_path" ]; then
-			# Missing or corrupt metadata can be a live winner inside its
-			# mkdir-to-metadata publish window, so the first sighting is
-			# treated as busy; the corrupt reap is allowed only when a
-			# sleep-and-recheck round still reports corrupt metadata. The
-			# stale-owner reap policy itself is unchanged.
-			l_allow_corrupt_reap=0
-			zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir_path"
-			l_lock_metadata_status=$?
-			if [ "$l_lock_metadata_status" -eq 2 ]; then
-				l_corrupt_metadata_sightings=$((l_corrupt_metadata_sightings + 1))
-				if [ "$l_corrupt_metadata_sightings" -ge 2 ]; then
-					l_allow_corrupt_reap=1
-				fi
-			fi
-			zxfer_try_reap_stale_owned_lock_dir \
-				"$l_lock_dir_path" "$l_allow_corrupt_reap" lock "error-log-lock" >/dev/null
-			l_reap_status=$?
-			if [ "$l_reap_status" -eq 0 ]; then
-				continue
-			fi
-			if [ "$l_reap_status" -eq 1 ]; then
-				return 1
-			fi
-		fi
-		l_lock_attempts=$((l_lock_attempts + 1))
-		if [ "$l_lock_attempts" -ge 3 ]; then
-			return 1
-		fi
-		sleep 1
-	done
-	return 0
-}
-
-# Purpose: Release the error log lock after the protected work finishes.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when a shared cache, lock, or transport resource should no longer be
-# held.
-zxfer_release_error_log_lock() {
-	l_release_lock_dir=$1
-
-	zxfer_release_owned_lock_dir \
-		"$l_release_lock_dir" lock "error-log-lock"
-}
-
-zxfer_warn_error_log_lock_release_failure() {
-	l_log_path=$1
-	l_status=$2
-
-	zxfer_warn_stderr "zxfer: warning: unable to release ZXFER_ERROR_LOG lock for \"$l_log_path\" (status $l_status)."
-}
-
-zxfer_release_error_log_lock_warn_only() {
-	l_log_path=$1
-	l_lock_dir=$2
-
-	zxfer_release_error_log_lock "$l_lock_dir"
-	l_release_status=$?
-	if [ "$l_release_status" -eq 0 ]; then
-		return 0
-	fi
-	zxfer_warn_error_log_lock_release_failure "$l_log_path" "$l_release_status"
-	return 0
-}
-
-zxfer_release_error_log_lock_checked() {
-	l_log_path=$1
-	l_lock_dir=$2
-
-	zxfer_release_error_log_lock "$l_lock_dir"
-	l_release_status=$?
-	if [ "$l_release_status" -eq 0 ]; then
-		return 0
-	fi
-	zxfer_warn_error_log_lock_release_failure "$l_log_path" "$l_release_status"
-	return 1
-}
-
-# Purpose: Clean up the error log stage directory that this module created or
-# tracks.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output on success and failure paths so temporary state does not linger.
-zxfer_cleanup_error_log_stage_dir() {
-	l_cleanup_stage_dir=$1
-
-	[ -n "$l_cleanup_stage_dir" ] || return 0
-	if command -v zxfer_cleanup_runtime_artifact_path >/dev/null 2>&1; then
-		zxfer_cleanup_runtime_artifact_path "$l_cleanup_stage_dir" >/dev/null 2>&1 || true
-		return 0
-	fi
-	rm -f "$l_cleanup_stage_dir/log.snapshot" "$l_cleanup_stage_dir/log.write" 2>/dev/null || true
-	rmdir "$l_cleanup_stage_dir" 2>/dev/null || true
-}
-
-# Purpose: Append the failure report to existing log directly to the module-
-# owned accumulator.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when later helpers need one shared place to extend staged or in-memory
-# state.
-zxfer_append_failure_report_to_existing_log_directly() {
-	l_direct_report=$1
-	l_direct_log_path=$2
-
-	printf '%s\n' "$l_direct_report" >>"$l_direct_log_path"
-}
-
-# Purpose: Check whether the error log parent is writable.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when later helpers need a boolean answer about the error log parent.
-zxfer_error_log_parent_is_writable() {
-	[ -w "$1" ]
-}
-
-# Purpose: Create the error log file using the safety checks owned by this
-# module.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer needs a fresh staged resource or persistent helper state.
-zxfer_create_error_log_file() {
-	l_create_log_path=$1
-
-	zxfer_create_secure_staging_dir_for_path "$l_create_log_path" "zxfer-error-log" >/dev/null || return 1
-	l_create_stage_dir=$g_zxfer_secure_staging_dir_result
-	l_create_stage_file="$l_create_stage_dir/log.write"
-
-	if ! (
-		umask 077
-		zxfer_write_runtime_artifact_file "$l_create_stage_file" ""
-	); then
-		zxfer_cleanup_error_log_stage_dir "$l_create_stage_dir"
-		return 1
-	fi
-	if ! mv -f "$l_create_stage_file" "$l_create_log_path"; then
-		zxfer_cleanup_error_log_stage_dir "$l_create_stage_dir"
-		return 1
-	fi
-	zxfer_cleanup_error_log_stage_dir "$l_create_stage_dir"
-}
-
-# Purpose: Apply the required permissions to the error log file.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output after a file is created so later reads honor zxfer's security
-# expectations.
-zxfer_chmod_error_log_file() {
-	l_chmod_log_path=$1
-
-	chmod 600 "$l_chmod_log_path"
-}
-
-# Purpose: Append the failure report to log to the module-owned accumulator.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when later helpers need one shared place to extend staged or in-memory
-# state.
-zxfer_append_failure_report_to_log() {
-	l_report=$1
-	l_log_path=${ZXFER_ERROR_LOG:-}
-
-	[ -n "$l_log_path" ] || return 0
-
-	case "$l_log_path" in
-	/*) ;;
-	*)
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_log_path\" because it is not absolute."
-		return 1
-		;;
-	esac
-
-	if l_symlink_component=$(zxfer_find_symlink_path_component "$l_log_path"); then
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_log_path\" because path component \"$l_symlink_component\" is a symlink."
-		return 1
-	fi
-
-	l_log_parent=$(zxfer_get_path_parent_dir "$l_log_path")
-	if [ ! -d "$l_log_parent" ]; then
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_log_path\" because parent directory \"$l_log_parent\" does not exist."
-		return 1
-	fi
-	if ! l_trusted_log_parent=$(zxfer_validate_temp_root_candidate "$l_log_parent"); then
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_log_path\" because parent directory \"$l_log_parent\" is not owned by root or the effective user, or is writable by others without sticky-bit protection."
-		return 1
-	fi
-
-	l_log_exists=0
-	if [ -e "$l_log_path" ]; then
-		l_log_exists=1
-	fi
-	l_log_parent_writable=0
-	if zxfer_error_log_parent_is_writable "$l_trusted_log_parent"; then
-		l_log_parent_writable=1
-	fi
-
-	if [ "$l_log_exists" -eq 0 ] && [ "$l_log_parent_writable" -eq 0 ]; then
-		zxfer_warn_stderr "zxfer: warning: unable to create ZXFER_ERROR_LOG file \"$l_log_path\"."
-		return 1
-	fi
-
-	if [ "$l_log_exists" -eq 1 ] && [ "$l_log_parent_writable" -eq 0 ]; then
-		if ! l_lock_dir=$(zxfer_get_error_log_fallback_lock_dir "$l_log_path"); then
-			zxfer_warn_stderr "zxfer: warning: unable to acquire ZXFER_ERROR_LOG lock for \"$l_log_path\"."
-			return 1
-		fi
-	else
-		l_lock_dir="$l_trusted_log_parent/.zxfer-error-log.lock.${l_log_path##*/}"
-	fi
-	if ! zxfer_acquire_error_log_lock "$l_lock_dir"; then
-		zxfer_warn_stderr "zxfer: warning: unable to acquire ZXFER_ERROR_LOG lock for \"$l_log_path\"."
-		return 1
-	fi
-
-	# A concurrent holder may have created the log while this run waited on
-	# the lock; recheck existence under the lock so the create path cannot
-	# clobber a freshly published log with an empty staged file.
-	if [ "$l_log_exists" -eq 0 ] && [ -e "$l_log_path" ]; then
-		l_log_exists=1
-	fi
-
-	if [ "$l_log_exists" -eq 1 ]; then
-		if ! zxfer_validate_existing_error_log_file "$l_log_path" "$l_log_path"; then
-			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-			return 1
-		fi
-	else
-		if ! zxfer_create_error_log_file "$l_log_path"; then
-			zxfer_warn_stderr "zxfer: warning: unable to create ZXFER_ERROR_LOG file \"$l_log_path\"."
-			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-			return 1
-		fi
-		if ! zxfer_chmod_error_log_file "$l_log_path"; then
-			zxfer_warn_stderr "zxfer: warning: unable to chmod ZXFER_ERROR_LOG file \"$l_log_path\" to 0600."
-			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-			return 1
-		fi
-		if ! zxfer_validate_existing_error_log_file "$l_log_path" "$l_log_path"; then
-			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-			return 1
-		fi
-	fi
-
-	if [ "$l_log_parent_writable" -eq 0 ]; then
-		if ! zxfer_append_failure_report_to_existing_log_directly "$l_report" "$l_log_path"; then
-			zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
-			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-			return 1
-		fi
-		zxfer_release_error_log_lock_checked "$l_log_path" "$l_lock_dir"
-		return "$?"
-	fi
-
-	if ! zxfer_create_secure_staging_dir_for_path "$l_log_path" "zxfer-error-log" >/dev/null; then
-		zxfer_warn_stderr "zxfer: warning: unable to create ZXFER_ERROR_LOG staging directory for \"$l_log_path\"."
-		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-		return 1
-	fi
-	l_stage_dir=$g_zxfer_secure_staging_dir_result
-	l_snapshot_path="$l_stage_dir/log.snapshot"
-	l_staged_log_path="$l_stage_dir/log.write"
-	if ! ln "$l_log_path" "$l_snapshot_path" 2>/dev/null; then
-		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
-		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-		return 1
-	fi
-	if ! zxfer_validate_existing_error_log_file "$l_snapshot_path" "$l_log_path"; then
-		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-		return 1
-	fi
-	l_old_umask=$(umask)
-	umask 077
-	if ! cat "$l_snapshot_path" >"$l_staged_log_path"; then
-		umask "$l_old_umask"
-		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
-		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-		return 1
-	fi
-	if ! printf '%s\n' "$l_report" >>"$l_staged_log_path"; then
-		umask "$l_old_umask"
-		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
-		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-		return 1
-	fi
-	umask "$l_old_umask"
-	if ! zxfer_chmod_error_log_file "$l_staged_log_path"; then
-		zxfer_warn_stderr "zxfer: warning: unable to chmod ZXFER_ERROR_LOG file \"$l_log_path\" to 0600."
-		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-		return 1
-	fi
-	if ! mv -f "$l_staged_log_path" "$l_log_path"; then
-		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
-		zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
-		return 1
-	fi
-	zxfer_cleanup_error_log_stage_dir "$l_stage_dir"
-	zxfer_release_error_log_lock_checked "$l_log_path" "$l_lock_dir"
-}
-
-# Purpose: Emit the failure report in the operator-facing format owned by this
-# module.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when zxfer needs to surface status, warning, or diagnostic text.
-zxfer_emit_failure_report() {
-	l_exit_status=$1
-
-	zxfer_init_failure_context_defaults
-
-	[ "$l_exit_status" -ne 0 ] || return 0
-	[ "${g_zxfer_failure_report_emitted:-0}" -eq 0 ] || return 0
-
-	l_report=$(zxfer_render_failure_report "$l_exit_status")
-	printf '%s\n' "$l_report" >&2
-	g_zxfer_failure_report_emitted=1
-	zxfer_append_failure_report_to_log "$l_report" || true
-}
-
 # Purpose: Raise the error through zxfer's structured failure reporting path.
 # Usage: Called during failure reporting, profiling, and verbose operator
 # output when the current error should stop the run with the module's normal
@@ -1313,7 +532,7 @@ zxfer_throw_error_with_usage() {
 # very-verbose diagnostics.
 #
 # sample usage:
-# zxfer_execute_command "ls -l" 1
+# zxfer_execute_rendered_shell_command "ls -l" 1
 # l_cmd: command to execute
 # l_is_continue_on_fail: 1 to continue on fail, 0 to stop on fail
 zxfer_echov() {

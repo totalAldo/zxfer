@@ -24,7 +24,7 @@ jobs:
           ZXFER_COVERAGE_MODE: bash-xtrace
         run: |
           set -euo pipefail
-          ./tests/run_coverage.sh
+          ./tests/run_coverage.sh --enforce
       - name: Summarize bash-xtrace coverage
         if: always()
         shell: bash

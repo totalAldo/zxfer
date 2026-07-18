@@ -29,7 +29,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 # BSD HEADER END
-# shellcheck shell=sh disable=SC2034,SC2154
+# shellcheck shell=sh disable=SC2016,SC2034,SC2154
 
 ################################################################################
 # BACKGROUND JOB SUPERVISION (supervision-lite)
@@ -43,13 +43,15 @@
 #
 # Supervision-lite model: spawn runs the pipeline in one backgrounded job
 # shell. With setsid(1), that shell leads a process group; without setsid it
-# runs through the cleanup child wrapper, whose TERM trap reaps descendants.
+# runs through the cleanup child wrapper, whose TERM trap bounds direct-child
+# teardown and token-validates best-effort cleanup of cooperative descendants.
 # - The job shell writes the pipeline exit status to a per-run temp
 #   status file before queue notification; missing or malformed status means
 #   the shell died abnormally.
-# - SAFETY INVARIANT: abort only signals a process group created by our
-#   setsid child or a direct child this shell has not waited on yet, before
-#   wait() makes pid reuse possible.
+# - SAFETY INVARIANT: root PID/PGID signals use zxfer-owned registered `$!`
+#   values before wait, preserving the supervision-lite baseline without a
+#   per-job ps spawn. Wrapper descendants are snapshotted and token-validated
+#   only on abort.
 
 # Purpose: Reset the background-job registry and scratch state so the next
 # runtime pass starts from a clean state.
@@ -79,6 +81,23 @@ zxfer_reset_background_job_state() {
 	g_zxfer_background_job_use_setsid=${g_zxfer_background_job_use_setsid:-}
 }
 
+# Purpose: Discard inherited supervisor state without signalling or waiting on
+# any referenced process.
+# Usage: Called by the session composition root before traps are installed so
+# exported internal globals cannot grant process-cleanup ownership.
+zxfer_discard_background_job_cleanup_state() {
+	g_zxfer_background_job_use_setsid=""
+	g_zxfer_background_job_abort_grace_seconds=1
+	zxfer_reset_background_job_state
+}
+
+# Purpose: Publish an aggregate supervisor abort diagnostic.
+# Usage: Domain schedulers call this after attempting every tracked abort so
+# cleanup reporting retains the first failure message.
+zxfer_set_background_job_abort_failure_message() {
+	g_zxfer_background_job_abort_failure_message=${1:-}
+}
+
 # Purpose: Allocate the next unique background job id for this process.
 # Usage: Called during spawn; publishes the id in
 # $g_zxfer_background_job_last_id and echoes it for capture-style callers.
@@ -104,17 +123,47 @@ zxfer_init_background_job_spawn_support() {
 	# forks (or fails) yields a mismatch and falls back to the wrapper path.
 	l_spawn_probe=$(setsid sh -c 'printf "%s " "$$"; ps -o pgid= -p "$$"' 2>/dev/null) ||
 		return 0
+	case $- in
+	*f*)
+		l_background_spawn_probe_restore_glob=0
+		;;
+	*)
+		l_background_spawn_probe_restore_glob=1
+		set -f
+		;;
+	esac
+	if [ "${IFS+set}" = "set" ]; then
+		l_background_spawn_probe_saved_ifs_set=1
+		l_background_spawn_probe_saved_ifs=$IFS
+	else
+		l_background_spawn_probe_saved_ifs_set=0
+		l_background_spawn_probe_saved_ifs=""
+	fi
+	# Use the shell's default whitespace field splitting regardless of caller
+	# state, then restore both IFS and pathname expansion before branching.
+	unset IFS
 	# shellcheck disable=SC2086  # probe output is two space-separated fields
 	set -- $l_spawn_probe
-	if [ "$#" -ne 2 ]; then
+	l_background_spawn_probe_argc=$#
+	l_background_spawn_probe_pid=${1:-}
+	l_background_spawn_probe_pgid=${2:-}
+	if [ "$l_background_spawn_probe_saved_ifs_set" -eq 1 ]; then
+		IFS=$l_background_spawn_probe_saved_ifs
+	else
+		unset IFS
+	fi
+	if [ "$l_background_spawn_probe_restore_glob" -eq 1 ]; then
+		set +f
+	fi
+	if [ "$l_background_spawn_probe_argc" -ne 2 ]; then
 		return 0
 	fi
-	case "$1$2" in
+	case "$l_background_spawn_probe_pid$l_background_spawn_probe_pgid" in
 	*[!0-9]*)
 		return 0
 		;;
 	esac
-	if [ "$1" = "$2" ]; then
+	if [ "$l_background_spawn_probe_pid" = "$l_background_spawn_probe_pgid" ]; then
 		g_zxfer_background_job_use_setsid=1
 	fi
 	return 0
@@ -197,6 +246,41 @@ $l_existing_job_id	$l_existing_kind	$l_existing_pid	$l_existing_teardown	$l_exis
 	EOF
 
 	g_zxfer_background_job_records=$l_remaining_records
+}
+
+# Purpose: Tear down an unregistered direct-child job after registry insertion
+# fails, promoting the first cleanup failure over the earlier registration
+# status while still reaping the child and removing its status artifact.
+# Usage: Called only by spawn before the direct child has been waited on.
+zxfer_fail_background_job_registration() {
+	l_registration_failure_job_id=$1
+	l_registration_failure_pid=$2
+	l_registration_failure_teardown=$3
+	l_registration_failure_status_file=$4
+	l_registration_failure_status=$5
+	l_registration_failure_teardown_status=0
+
+	zxfer_signal_background_job_scope \
+		"$l_registration_failure_pid" "$l_registration_failure_teardown" TERM ||
+		l_registration_failure_teardown_status=$?
+	zxfer_background_job_abort_grace_wait
+	zxfer_signal_background_job_scope \
+		"$l_registration_failure_pid" "$l_registration_failure_teardown" KILL || {
+		l_registration_failure_kill_status=$?
+		[ "$l_registration_failure_teardown_status" -ne 0 ] ||
+			l_registration_failure_teardown_status=$l_registration_failure_kill_status
+	}
+	wait "$l_registration_failure_pid" 2>/dev/null || :
+	zxfer_cleanup_runtime_artifact_path \
+		"$l_registration_failure_status_file" >/dev/null 2>&1 || :
+	if [ "$l_registration_failure_teardown_status" -ne 0 ]; then
+		l_registration_failure_message=${g_zxfer_background_job_abort_failure_message:-Failed to tear down unregistered background job [$l_registration_failure_job_id].}
+		zxfer_throw_error \
+			"$l_registration_failure_message" "$l_registration_failure_teardown_status"
+	fi
+	zxfer_throw_error \
+		"Failed to register background job [$l_registration_failure_job_id]." \
+		"$l_registration_failure_status"
 }
 
 # Purpose: Spawn one supervised background job that runs the caller's command
@@ -298,6 +382,7 @@ exit \"\$l_zxfer_job_status\""
 		/bin/sh "$l_wrapper_script" "$l_job_cmd" &
 	fi
 	l_job_pid=$!
+	g_zxfer_background_job_last_runner_pid=$l_job_pid
 
 	l_spawn_status=0
 	zxfer_register_background_job_record \
@@ -310,12 +395,9 @@ exit \"\$l_zxfer_job_status\""
 	if [ "$l_spawn_status" -ne 0 ]; then
 		# The job shell is still our un-reaped child here, so the teardown
 		# signals cannot reach an unrelated process.
-		zxfer_signal_background_job_scope "$l_job_pid" "$l_teardown" TERM
-		zxfer_background_job_abort_grace_wait
-		zxfer_signal_background_job_scope "$l_job_pid" "$l_teardown" KILL
-		wait "$l_job_pid" 2>/dev/null || :
-		zxfer_cleanup_runtime_artifact_path "$l_status_file" >/dev/null 2>&1 || :
-		zxfer_throw_error "Failed to register background job [$l_job_id]." "$l_spawn_status"
+		zxfer_fail_background_job_registration \
+			"$l_job_id" "$l_job_pid" "$l_teardown" \
+			"$l_status_file" "$l_spawn_status"
 	fi
 
 	g_zxfer_background_job_last_id=$l_job_id
@@ -343,15 +425,32 @@ zxfer_read_background_job_status_file() {
 	if [ "$l_read_status" -ne 0 ]; then
 		return "$l_read_status"
 	fi
+	# A completed writer always terminates its last protocol row. Remove
+	# exactly that delimiter before the here-document supplies its own; any
+	# remaining blank row is then real malformed input rather than a parser
+	# artifact.
+	case $g_zxfer_runtime_artifact_read_result in
+	*'
+')
+		l_status_contents=${g_zxfer_runtime_artifact_read_result%?}
+		;;
+	*)
+		return 1
+		;;
+	esac
 	while IFS='	' read -r l_key l_value || [ -n "${l_key}${l_value}" ]; do
 		case $l_key in
 		status)
 			[ "$l_status_seen" -eq 0 ] || return 1
 			case "$l_value" in
-			'' | *[!0-9]*)
+			0 | [1-9] | [1-9][0-9] | [12][0-9][0-9])
+				:
+				;;
+			*)
 				return 1
 				;;
 			esac
+			[ "$l_value" -le 255 ] || return 1
 			g_zxfer_background_job_completion_exit_status=$l_value
 			l_status_seen=1
 			;;
@@ -368,9 +467,15 @@ zxfer_read_background_job_status_file() {
 			g_zxfer_background_job_completion_report_failure=$l_value
 			l_report_failure_seen=1
 			;;
+		*)
+			# The file is a private protocol, not an extensible key/value
+			# store. Unknown or blank records indicate truncation or
+			# corruption and must not be treated as a successful completion.
+			return 1
+			;;
 		esac
 	done <<-EOF || l_read_status=$?
-		$g_zxfer_runtime_artifact_read_result
+		$l_status_contents
 	EOF
 
 	if [ "$l_read_status" -ne 0 ]; then
@@ -436,44 +541,135 @@ zxfer_wait_for_background_job() {
 	return 0
 }
 
+# Purpose: Capture descendant PID/start-token pairs from one process-table
+# snapshot so a later numeric PID can be rejected if it has been recycled.
+# Usage: Wrapper-mode KILL teardown calls this after stopping the root process.
+zxfer_capture_background_job_descendant_identity_records() {
+	l_descendant_identity_root=$1
+	l_descendant_identity_selector=lstart
+
+	if l_descendant_identity_snapshot=$(LC_ALL=C ps -A -o pid= -o ppid= -o lstart= 2>/dev/null); then
+		:
+	elif l_descendant_identity_snapshot=$(LC_ALL=C ps -A -o pid -o ppid -o lstart 2>/dev/null); then
+		:
+	else
+		l_descendant_identity_selector=stime
+		if l_descendant_identity_snapshot=$(LC_ALL=C ps -A -o pid= -o ppid= -o stime= 2>/dev/null); then
+			:
+		else
+			l_descendant_identity_snapshot=$(LC_ALL=C ps -A -o pid -o ppid -o stime 2>/dev/null) ||
+				return "$?"
+		fi
+	fi
+	printf '%s\n' "$l_descendant_identity_snapshot" |
+		"${g_cmd_awk:-awk}" \
+			-v root="$l_descendant_identity_root" \
+			-v selector="$l_descendant_identity_selector" '
+		$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+			pid = $1
+			parent[pid] = $2
+			seen[pid] = 1
+			token = ""
+			for (field = 3; field <= NF; field++)
+				token = token (token == "" ? "" : " ") $field
+			start_token[pid] = selector ":" token
+		}
+		END {
+			if (!(root in seen)) exit 1
+			target[root] = 1
+			for (changed = 1; changed;) {
+				changed = 0
+				for (pid in seen)
+					if ((parent[pid] in target) && !(pid in target))
+						{ target[pid] = 1; changed = 1 }
+			}
+			for (pid in target)
+				if (pid != root) {
+					if (start_token[pid] == selector ":") exit 1
+					print pid "\t" start_token[pid]
+				}
+		}'
+}
+
+# Purpose: Signal captured descendants only while each stored start token still
+# matches immediately before delivery.
+# Usage: Wrapper-mode KILL teardown passes the one-snapshot identity records.
+zxfer_signal_background_job_descendant_records() {
+	l_descendant_signal_records=$1
+	l_descendant_signal_status=0
+
+	while IFS='	' read -r l_descendant_signal_pid l_descendant_signal_start_token || [ -n "${l_descendant_signal_pid}${l_descendant_signal_start_token}" ]; do
+		[ -n "$l_descendant_signal_pid" ] || continue
+		l_descendant_signal_selector=${l_descendant_signal_start_token%%:*}
+		if l_descendant_signal_current_token=$(zxfer_get_process_start_token \
+			"$l_descendant_signal_pid" \
+			"$l_descendant_signal_selector" 2>/dev/null); then
+			if [ "$l_descendant_signal_current_token" != \
+				"$l_descendant_signal_start_token" ]; then
+				l_descendant_signal_status=2
+				continue
+			fi
+			if ! kill -s KILL "$l_descendant_signal_pid" 2>/dev/null; then
+				# A matching descendant can exit between token validation and
+				# delivery. Treat ESRCH as success, but fail closed if the PID
+				# is still live and could not be signalled.
+				kill -s 0 "$l_descendant_signal_pid" 2>/dev/null &&
+					l_descendant_signal_status=1
+			fi
+		elif kill -s 0 "$l_descendant_signal_pid" 2>/dev/null; then
+			l_descendant_signal_status=2
+		fi
+	done <<-EOF
+		$l_descendant_signal_records
+	EOF
+	if [ "$l_descendant_signal_status" -ne 0 ]; then
+		zxfer_set_background_job_abort_failure_message \
+			"Refusing to signal one or more supervised background job descendants because their process identities changed or were unavailable."
+	fi
+	return "$l_descendant_signal_status"
+}
+
 # Purpose: Signal one background job's teardown scope during abort.
-# Usage: Called with an un-reaped direct child pid, teardown mode, and signal;
-# delivery failures for already-exited jobs are ignored.
+# Usage: Root PID/PGID values come only from zxfer's registered `$!` before
+# wait. Wrapper descendant token snapshots happen only for KILL teardown.
 zxfer_signal_background_job_scope() {
 	l_scope_pid=$1
 	l_scope_teardown=$2
 	l_scope_signal=$3
+	l_scope_status=0
 
 	case "$l_scope_pid" in
 	'' | *[!0-9]*)
 		return 0
 		;;
 	esac
-	if [ "$l_scope_teardown" = "process_group" ]; then
+	if [ "$l_scope_teardown" = process_group ]; then
 		kill "-$l_scope_signal" "-$l_scope_pid" 2>/dev/null || :
-	else
-		if [ "$l_scope_signal" = "KILL" ]; then
-			kill -s STOP "$l_scope_pid" 2>/dev/null || :
-			ps -A -o pid= -o ppid= 2>/dev/null |
-				awk -v root="$l_scope_pid" '
-				{ parent[$1] = $2; seen[$1] = 1 }
-				END {
-					target[root] = 1
-					for (changed = 1; changed;) {
-						changed = 0
-						for (pid in seen)
-							if ((parent[pid] in target) && !(pid in target))
-								{ target[pid] = 1; changed = 1 }
-					}
-					for (pid in target) if (pid != root) print pid
-				}' |
-				while IFS= read -r l_scope_descendant_pid || [ -n "$l_scope_descendant_pid" ]; do
-					[ -n "$l_scope_descendant_pid" ] && kill -s KILL "$l_scope_descendant_pid" 2>/dev/null || :
-				done
-		fi
-		kill -s "$l_scope_signal" "$l_scope_pid" 2>/dev/null || :
+		return 0
 	fi
-	return 0
+	if [ "$l_scope_signal" != KILL ]; then
+		kill -s "$l_scope_signal" "$l_scope_pid" 2>/dev/null || :
+		return 0
+	fi
+
+	kill -s STOP "$l_scope_pid" 2>/dev/null || :
+	if l_scope_descendant_records=$(zxfer_capture_background_job_descendant_identity_records \
+		"$l_scope_pid"); then
+		zxfer_signal_background_job_descendant_records \
+			"$l_scope_descendant_records" || l_scope_status=$?
+	else
+		l_scope_status=$?
+		# TERM may have completed during the grace window. An absent owned
+		# root has no remaining teardown scope, so a failed process-table
+		# snapshot must not turn that normal completion into cleanup failure.
+		if ! kill -s 0 "$l_scope_pid" 2>/dev/null; then
+			return 0
+		fi
+		zxfer_set_background_job_abort_failure_message \
+			"Failed to discover all descendants of supervised background job process [$l_scope_pid] during abort."
+	fi
+	kill -s KILL "$l_scope_pid" 2>/dev/null || :
+	return "$l_scope_status"
 }
 # Purpose: Give a signaled background job a brief bounded window to exit
 # before the single KILL escalation.
@@ -532,15 +728,20 @@ zxfer_abort_background_job() {
 	l_abort_pid=$g_zxfer_background_job_record_pid
 	l_abort_teardown=$g_zxfer_background_job_record_teardown
 	l_abort_status_file=$g_zxfer_background_job_record_status_file
+	l_abort_status=0
 
-	zxfer_signal_background_job_scope "$l_abort_pid" "$l_abort_teardown" "$l_signal"
+	zxfer_signal_background_job_scope \
+		"$l_abort_pid" "$l_abort_teardown" "$l_signal" ||
+		l_abort_status=$?
 	zxfer_background_job_abort_grace_wait
-	zxfer_signal_background_job_scope "$l_abort_pid" "$l_abort_teardown" KILL
+	zxfer_signal_background_job_scope \
+		"$l_abort_pid" "$l_abort_teardown" KILL ||
+		l_abort_status=$?
 	wait "$l_abort_pid" 2>/dev/null || :
 
 	zxfer_unregister_background_job_record "$l_job_id"
 	zxfer_cleanup_runtime_artifact_path "$l_abort_status_file" >/dev/null 2>&1 || :
-	return 0
+	return "$l_abort_status"
 }
 
 # Purpose: Abort every tracked background job with one shared grace window:
@@ -548,14 +749,18 @@ zxfer_abort_background_job() {
 # Usage: Called from the trap-exit path before the short-lived cleanup-PID
 # registry teardown so long-lived pipelines stop first.
 zxfer_abort_all_background_jobs() {
+	g_zxfer_background_job_abort_failure_message=""
 	if [ -z "${g_zxfer_background_job_records:-}" ]; then
 		return 0
 	fi
 	l_abort_all_records=$g_zxfer_background_job_records
+	l_abort_all_status=0
 
 	while IFS='	' read -r l_job_id l_kind l_pid l_teardown l_status_file || [ -n "${l_job_id}${l_kind}${l_pid}${l_teardown}${l_status_file}" ]; do
 		[ -n "$l_job_id" ] || continue
-		zxfer_signal_background_job_scope "$l_pid" "$l_teardown" TERM
+		zxfer_signal_background_job_scope \
+			"$l_pid" "$l_teardown" TERM ||
+			l_abort_all_status=$?
 	done <<-EOF
 		$l_abort_all_records
 	EOF
@@ -564,7 +769,9 @@ zxfer_abort_all_background_jobs() {
 
 	while IFS='	' read -r l_job_id l_kind l_pid l_teardown l_status_file || [ -n "${l_job_id}${l_kind}${l_pid}${l_teardown}${l_status_file}" ]; do
 		[ -n "$l_job_id" ] || continue
-		zxfer_signal_background_job_scope "$l_pid" "$l_teardown" KILL
+		zxfer_signal_background_job_scope \
+			"$l_pid" "$l_teardown" KILL ||
+			l_abort_all_status=$?
 	done <<-EOF
 		$l_abort_all_records
 	EOF
@@ -578,5 +785,5 @@ zxfer_abort_all_background_jobs() {
 		$l_abort_all_records
 	EOF
 
-	return 0
+	return "$l_abort_all_status"
 }

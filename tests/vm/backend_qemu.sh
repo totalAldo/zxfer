@@ -457,16 +457,19 @@ zxfer_vm_qemu_render_cloud_init() {
 	l_seed_dir=$2
 	l_public_key_file=$3
 	l_public_key=
+	l_cloud_init_style=
 
 	l_public_key=$(cat "$l_public_key_file") ||
 		zxfer_vm_die "Unable to read generated SSH public key: $l_public_key_file"
+	l_cloud_init_style=$(zxfer_vm_guest_cloud_init_style "$l_guest") ||
+		zxfer_vm_die "No cloud-init style is defined for guest [$l_guest]"
 	zxfer_vm_mkdir_p "$l_seed_dir"
 	cat <<EOF >"$l_seed_dir/meta-data"
 instance-id: zxfer-$l_guest
 local-hostname: zxfer-$l_guest
 EOF
-	case "$l_guest" in
-	freebsd)
+	case "$l_cloud_init_style" in
+	root-login)
 		cat <<EOF >"$l_seed_dir/user-data"
 #cloud-config
 ssh_pwauth: false
@@ -492,7 +495,7 @@ runcmd:
     service sshd restart
 EOF
 		;;
-	*)
+	default)
 		cat <<EOF >"$l_seed_dir/user-data"
 #cloud-config
 disable_root: false
@@ -508,6 +511,9 @@ runcmd:
   - chmod 700 /root/.ssh
   - chown root:root /root/.ssh
 EOF
+		;;
+	*)
+		zxfer_vm_die "Unsupported cloud-init style [$l_cloud_init_style] for guest [$l_guest]"
 		;;
 	esac
 }

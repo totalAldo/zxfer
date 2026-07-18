@@ -1,0 +1,113 @@
+PATH='/secure/sbin:/secure/bin'
+export PATH
+
+l_zfs_cmd='/opt/zfs/bin/zfs'
+l_destination_root_dataset='backup/dst'
+l_destination_snapshot_dataset='backup/dst/src'
+l_destination_pool='backup'
+
+zxfer_cleanup_destination_discovery_batch() {
+if [ "$l_inventory_pid" != "" ]; then
+kill "$l_inventory_pid" 2>/dev/null || :
+wait "$l_inventory_pid" 2>/dev/null || :
+fi
+for l_cleanup_file in "$l_inventory_stdout_file" "$l_inventory_stderr_file" "$l_pool_stderr_file" "$l_snapshot_stderr_file"; do
+[ "$l_cleanup_file" != "" ] || continue
+rm -f "$l_cleanup_file" 2>/dev/null || :
+done
+}
+
+zxfer_emit_destination_discovery_section_file() {
+l_section_name=$1
+l_section_file=$2
+
+printf '%s\t%s\n' 'BEGIN' "$l_section_name"
+if [ -f "$l_section_file" ]; then
+cat "$l_section_file" || return $?
+fi
+printf '%s\t%s\n' 'END' "$l_section_name"
+}
+
+zxfer_destination_discovery_stderr_reports_missing() {
+l_stderr_file=$1
+grep -F 				-e 'dataset does not exist' 				-e 'Dataset does not exist' 				-e 'no such dataset' 				-e 'No such dataset' 				-e 'no such pool or dataset' 				-e 'No such pool or dataset' 				"$l_stderr_file" >/dev/null 2>&1
+}
+
+l_inventory_stdout_file=''
+l_inventory_stderr_file=''
+l_pool_stderr_file=''
+l_snapshot_stderr_file=''
+l_inventory_pid=''
+trap 'zxfer_cleanup_destination_discovery_batch' 0
+trap 'zxfer_cleanup_destination_discovery_batch; exit 1' HUP INT TERM QUIT
+
+l_tmpdir=${TMPDIR:-/tmp}
+case "$l_tmpdir" in
+/*)
+:
+;;
+*)
+l_tmpdir=/tmp
+;;
+esac
+umask 077
+l_inventory_stdout_file=$(mktemp "$l_tmpdir/zxfer.destination-discovery.inventory.XXXXXX" 2>/dev/null) || exit $?
+l_inventory_stderr_file=$(mktemp "$l_tmpdir/zxfer.destination-discovery.inventory-stderr.XXXXXX" 2>/dev/null) || exit $?
+l_pool_stderr_file=$(mktemp "$l_tmpdir/zxfer.destination-discovery.pool-stderr.XXXXXX" 2>/dev/null) || exit $?
+l_snapshot_stderr_file=$(mktemp "$l_tmpdir/zxfer.destination-discovery.snapshots-stderr.XXXXXX" 2>/dev/null) || exit $?
+
+"$l_zfs_cmd" list -t filesystem,volume -Hr -o name "$l_destination_root_dataset" >"$l_inventory_stdout_file" 2>"$l_inventory_stderr_file" &
+l_inventory_pid=$!
+l_pool_status=''
+l_snapshot_status=0
+l_snapshot_ran=1
+
+printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+printf '%s\t%s\n' 'BEGIN' 'snapshot_stdout'
+"$l_zfs_cmd" list -Hr -o name,guid -t snapshot "$l_destination_snapshot_dataset" 2>"$l_snapshot_stderr_file"
+l_snapshot_status=$?
+printf '%s\t%s\n' 'END' 'snapshot_stdout'
+
+l_inventory_status=0
+wait "$l_inventory_pid" || l_inventory_status=$?
+l_inventory_pid=''
+
+if [ "$l_inventory_status" -ne 0 ]; then
+if zxfer_destination_discovery_stderr_reports_missing "$l_inventory_stderr_file"; then
+"$l_zfs_cmd" list -H -o name "$l_destination_pool" >/dev/null 2>"$l_pool_stderr_file"
+l_pool_status=$?
+if [ "$l_pool_status" -eq 0 ] && zxfer_destination_discovery_stderr_reports_missing "$l_snapshot_stderr_file"; then
+l_snapshot_status=0
+: >"$l_snapshot_stderr_file"
+fi
+fi
+fi
+
+if [ "$l_inventory_status" -eq 0 ]; then
+grep -F -x -e "$l_destination_snapshot_dataset" "$l_inventory_stdout_file" >/dev/null 2>&1
+l_grep_status=$?
+case "$l_grep_status" in
+0)
+:
+;;
+1)
+l_snapshot_status=0
+: >"$l_snapshot_stderr_file"
+:
+;;
+*)
+l_inventory_status=$l_grep_status
+printf 'Failed to scan destination dataset inventory for %s.\n' "$l_destination_snapshot_dataset" >"$l_inventory_stderr_file"
+;;
+esac
+fi
+
+printf '%s\t%s\t%s\n' 'STATUS' 'inventory' "$l_inventory_status"
+printf '%s\t%s\t%s\n' 'STATUS' 'pool' "$l_pool_status"
+printf '%s\t%s\t%s\n' 'STATUS' 'snapshot_ran' "$l_snapshot_ran"
+zxfer_emit_destination_discovery_section_file inventory_stdout "$l_inventory_stdout_file" || exit $?
+zxfer_emit_destination_discovery_section_file inventory_stderr "$l_inventory_stderr_file" || exit $?
+zxfer_emit_destination_discovery_section_file pool_stderr "$l_pool_stderr_file" || exit $?
+printf '%s\t%s\t%s\n' 'STATUS' 'snapshot' "$l_snapshot_status"
+zxfer_emit_destination_discovery_section_file snapshot_stderr "$l_snapshot_stderr_file" || exit $?
+printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'

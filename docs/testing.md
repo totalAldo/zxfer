@@ -67,6 +67,46 @@ The safe default is still:
 - [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   only for explicit manual host-side harness work
 
+## Validation Profiles
+
+`tests/validate.sh` is the discoverable front door for common local paths.
+Profile composition lives in `tests/validation_profiles.tsv` and dispatches
+only a closed set of step names. `tests/validation_map.tsv` independently maps
+changed path patterns to `unit_suites`, `integration_groups`, `perf_cases`, and
+`doc_surfaces`. Neither TSV file is evaluated as shell code.
+
+```sh
+./tests/validate.sh --list
+./tests/validate.sh doctor
+./tests/validate.sh quick
+./tests/validate.sh full
+```
+
+- `quick [PATH...]` explains each first-match path mapping, runs the offline
+  anti-rebloat budget and deduplicated unit suites, and prints (without
+  executing) relevant integration, performance, and documentation follow-ups.
+  With no paths it inspects staged, unstaged, and untracked Git paths. It never
+  downloads tools, starts a VM, invokes ZFS, or runs the integration harness.
+- `full` runs the complete pinned lint stack, all unit suites, and enforced
+  bash-xtrace coverage.
+- `portable` runs the static POSIX portability lint targets.
+- `docs` runs actionlint, codespell, the budget gate, and the deterministic
+  `man/zxfer.8` to `man/zxfer.1m` rendering check.
+- `vm [smoke|local]` forwards optional guest/test selectors but rejects every
+  broader profile.
+
+`quick` and the full shunit step default to four concurrent suites. Set
+`ZXFER_VALIDATE_JOBS` to a positive integer to reduce or increase that bound;
+direct `tests/run_shunit_tests.sh` compatibility and its bounded,
+auto-detected default are unchanged.
+- `bootstrap` installs the pinned lint tools.
+- `doctor` reports available POSIX shells, QEMU and ZFS commands, validation
+  entrypoints, and cached lint binaries without downloading or invoking them.
+- `docs` is host-safe but may populate the pinned lint-tool cache; its
+  `network-cache` risk label makes that behavior explicit.
+
+No profile runs `tests/run_integration_zxfer.sh` directly on the host.
+
 ## Unit Tests
 
 Run all suites with the default bounded parallel worker count:
@@ -97,6 +137,11 @@ Run the local lint stack with the same pinned toolchain as CI:
 ```sh
 ./tests/run_lint.sh
 ```
+
+The shell lint targets use one NUL-delimited Git source list containing the
+tracked and non-ignored untracked `*.sh` files plus the `zxfer` launcher. New
+modules therefore receive portability, formatting, and static checks before
+they are staged, while ignored artifacts remain excluded.
 
 For a ready-made contributor environment, open the repository in the included
 VS Code / GitHub Codespaces devcontainer. It stays on the stable Ubuntu 24.04
@@ -129,6 +174,31 @@ Run one suite:
 ./tests/run_shunit_tests.sh tests/test_zxfer_replication.sh
 ```
 
+Discover suites and named tests without sourcing or executing them:
+
+```sh
+./tests/run_shunit_tests.sh --list
+./tests/run_shunit_tests.sh --list-suites
+./tests/run_shunit_tests.sh --list-tests tests/test_zxfer_replication.sh
+```
+
+Run one or more named tests from one or several suites:
+
+```sh
+./tests/run_shunit_tests.sh \
+  --suite tests/test_zxfer_replication.sh \
+  --test test_first_case \
+  --test test_second_case \
+  --suite tests/test_zxfer_exec.sh \
+  --test test_exec_case
+```
+
+The runner validates test names and supplies shunit2's required `--`
+separator before starting any suite. Each repeated `--suite` makes that suite
+current for following `--test` options; duplicate suite selectors are merged,
+and every suite runs once in first-selection order. The positional compatibility
+form (`--test test_name tests/test_suite.sh`) remains available for one suite.
+
 Run the suites with an explicit parallel worker count:
 
 ```sh
@@ -147,8 +217,11 @@ an executable wrapper script that `exec`s the desired command.
 The test layout broadly follows the source layout:
 
 - `test_run_coverage.sh`
+- `test_ci_workflow_contracts.sh`
 - `test_ci_vmactions_integration.sh`
+- `test_run_lint.sh`
 - `test_run_shunit_tests.sh`
+- `test_validate.sh`
 - `test_run_integration_zxfer.sh`
 - `test_run_perf_tests.sh`
 - `test_run_perf_compare.sh`
@@ -173,10 +246,27 @@ The test layout broadly follows the source layout:
 - `test_zxfer_send_receive.sh`
 
 Some support modules are still covered inside adjacent suites.
-`src/zxfer_backup_metadata.sh` now has a dedicated peer suite in
-`test_zxfer_backup_metadata.sh`, with a smaller number of cross-module backup
-restore and remote-helper expectations still covered in the property and
-remote-host suites. Likewise,
+The property suite intentionally exercises the ordered
+`zxfer_property_state.sh` → `zxfer_property_policy.sh` →
+`zxfer_property_reconcile.sh` stack as one behavioral surface while keeping
+state ownership, policy decisions, and destination mutation in separate
+source modules.
+The snapshot-discovery suite likewise exercises the ordered
+`zxfer_snapshot_producers.sh` → `zxfer_remote_snapshot_discovery.sh` →
+`zxfer_snapshot_discovery.sh` stack as one behavioral surface while keeping
+command production and normalization, remote batch handling, and mutable
+discovery orchestration in separate source modules.
+Its `golden/remote_destination_discovery_batch_script.golden` fixture pins the
+exact target-side secure-PATH setup, quoting, sentinels, section order, and
+command topology; adjacent behavioral cases also execute that rendered script.
+The stable `test_zxfer_snapshot_discovery.sh` entry point sources ordered
+behavior fragments from `fixtures/snapshot_discovery/`; its fragment markers
+and static suite registrars keep named listing and unfiltered execution in the
+same order.
+`src/zxfer_backup_storage.sh` and `src/zxfer_backup_metadata.sh` share the
+dedicated `test_zxfer_backup_metadata.sh` peer suite, with a smaller number of
+cross-module restore and remote-helper expectations still covered in the
+property and remote-host suites. Likewise,
 `test_zxfer_remote_hosts_coverage.sh` keeps focused regression coverage for
 remote-host and ssh-control-socket edge paths that would be awkward to express
 through the broader peer suite alone.
@@ -188,8 +278,8 @@ helpers live as sections of `src/zxfer_runtime.sh` (Phase 8 merge), and the
 supervision-lite background-job layer sits between runtime and the
 higher-level replication modules.
 
-`test_zxfer_locking.sh` owns the owned-lock primitive itself (now defined in
-`src/zxfer_runtime.sh` and sourced through that module): pid+start-token
+`test_zxfer_locking.sh` owns the owned-lock primitive in
+`src/zxfer_locking.sh`: pid+start-token
 metadata render/parse, owner-identity capture, stale-owner reaping, and
 checked release mismatches. The reporting suite covers the
 `ZXFER_ERROR_LOG` lock, the primitive's only cross-process consumer.
@@ -249,18 +339,29 @@ Because bash xtrace coverage is an approximation and can vary slightly by shell
 or platform, the no-regression comparison also allows a small committed
 hit-count tolerance before it treats a lower percentage as a real regression.
 
+Coverage runs are report-only by default. Passing one or more suite paths
+always keeps report-only mode because a partial trace is not comparable to the
+full-tree baseline. The summary and missing-line reports are still generated,
+while `missing.diff` records that the incomparable full-baseline diff was
+skipped.
+
 Run the policy gate locally:
 
 ```sh
-ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
+ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh \
+  --enforce
 ```
 
 Bypass the gate when you intentionally need a fresh report before updating the
 committed baseline:
 
 ```sh
-ZXFER_COVERAGE_MODE=bash-xtrace ZXFER_COVERAGE_ENFORCE_POLICY=0 ./tests/run_coverage.sh
+ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh --report-only
 ```
+
+The `ZXFER_COVERAGE_ENFORCE_POLICY=0|1` environment override remains available
+for automation compatibility, but value `1` is valid only for a full
+bash-xtrace run; explicit command-line policy options take precedence.
 
 Locally, you can force the higher-fidelity path when `kcov` is installed:
 
@@ -320,6 +421,13 @@ Print the currently supported profiles or guest names without starting a run:
 ./tests/run_vm_matrix.sh --list-profiles
 ./tests/run_vm_matrix.sh --list-guests
 ```
+
+The supported guest, profile, architecture, image, and guest-runtime metadata
+is defined in `tests/vm/guest_manifest.tsv`. Keep that table in the intended
+guest and profile display order when updating a guest release. The runner
+validates the complete manifest before using it, and
+`tests/test_run_vm_matrix.sh` pins the resolved contract so metadata changes
+remain explicit.
 
 Run the shunit2 suites inside the selected guests while keeping the default
 VM path on integration:
@@ -658,6 +766,14 @@ commands. This is the safest mode when testing on a real workstation.
 This harness is still maintained and documented because it is the underlying
 integration engine, but it is no longer the default recommendation for routine
 unattended validation now that the VM-backed runner exists.
+
+The exact integration test/group order, including checks that run before pool
+creation, is declared in `tests/integration_test_registry.tsv`. The harness
+validates that non-eval registry and every named function before consulting
+`zpool`. Shared reporting, host setup, file-backed pool guards, and mock-remote
+fixtures live under `tests/helpers/`; the performance runner sources only
+those focused fixtures and never sources the integration harness or its test
+bodies.
 
 Run it unattended:
 

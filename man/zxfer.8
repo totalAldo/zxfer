@@ -1,3 +1,4 @@
+.\" Canonical zxfer command reference; edit this file only.
 .\"
 .\" Copyright (c) 2024-2026 Aldo Gonzalez
 .\" Copyright (c) 2013-2016 Allan Jude <allanjude@freebsd.org>
@@ -26,205 +27,212 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd Apr 11, 2026
-.Dt ZXFER 8
-.Os
-.Sh NAME
-.Nm zxfer
-.Nd "replicate ZFS filesystems, snapshots, and properties"
-.Sh SYNOPSIS
-.Nm
-.Op Fl b
-.Op Fl B
-.Op Fl c Ar "FMRI|pattern[ FMRI|pattern]..."
-.Op Fl d
-.Op Fl D Ar 'progress dialog options'
-.Op Fl e
-.Op Fl F
-.Op Fl g Ar days
-.Op Fl I Ar properties,to,ignore
-.Op Fl j Ar jobs
-.Op Fl k
-.Op Fl m
-.Op Fl n
-.Brq -N path/to/src | -R path/to/src
-.Op Fl o Ar option1=value1,option2=value2...
-.Op Fl O Ar user@host
-.Op Fl P
-.Op Fl s
-.Op Fl T Ar user@host
-.Op Fl U
-.Op Fl v
-.Op Fl V
-.Op Fl w
-.Op Fl x Ar pattern
-.Op Fl Y
-.Op Fl z
-.Op Fl Z Ar "zstd compression command"
-.Ar destination
-.Nm
-.Op Fl h
-.Pp
+.TH "ZXFER" "8" "April 11, 2026" "zxfer" "System Manager's Manual"
+.nh
+.if n .ad l
+.SH "NAME"
+\fBzxfer\fR
+\- replicate ZFS filesystems, snapshots, and properties
+.SH "SYNOPSIS"
+.HP 6n
+\fBzxfer\fR
+[\fB\-b\fR]
+[\fB\-B\fR]
+[\fB\-c\fR\ \fIFMRI|pattern[ FMRI|pattern]...\fR]
+[\fB\-d\fR]
+[\fB\-D\fR\ \fI'progress\ dialog\ options'\fR]
+[\fB\-e\fR]
+[\fB\-F\fR]
+[\fB\-g\fR\ \fIdays\fR]
+[\fB\-I\fR\ \fIproperties,to,ignore\fR]
+[\fB\-j\fR\ \fIjobs\fR]
+[\fB\-k\fR]
+[\fB\-m\fR]
+[\fB\-n\fR]
+{-N\ path/to/src\ |\ -R\ path/to/src}
+[\fB\-o\fR\ \fIoption1=value1,option2=value2...\fR]
+[\fB\-O\fR\ \fIuser@host\fR]
+[\fB\-P\fR]
+[\fB\-s\fR]
+[\fB\-T\fR\ \fIuser@host\fR]
+[\fB\-U\fR]
+[\fB\-v\fR]
+[\fB\-V\fR]
+[\fB\-w\fR]
+[\fB\-x\fR\ \fIpattern\fR]
+[\fB\-Y\fR]
+[\fB\-z\fR]
+[\fB\-Z\fR\ \fIzstd compression command\fR]
+\fIdestination\fR
+.br
+.PD 0
+.HP 6n
+\fBzxfer\fR
+[\fB\-h\fR]
+.PD
+.PP
 Where
-.Em destination
+\fIdestination\fR
 is a ZFS filesystem e.g.
-.Pa poolname/fsname
-.Sh DESCRIPTION
+\fIpoolname/fsname\fR
+.SH "DESCRIPTION"
 The
-.Nm
+\fBzxfer\fR
 utility replicates ZFS filesystems (including snapshots and properties) using
-.Xr zfs 8
-.Va send
+zfs(8)
+\fIsend\fR
 to do the heavy lifting. It can transfer dataset properties,
 optionally override them, and create missing descendants so the destination
 matches the source layout. This is desirable when we want parity between
 the source and destination snapshot regimes, or when we need a single
 command that transfers both data and relevant dataset metadata.
-.Pp
+.PP
 The transfer process allows for the properties of each filesystem to be
 replicated and specific properties overridden as necessary. For example,
-.Va compression ,
-.Va readonly ,
+\fIcompression\fR,
+\fIreadonly\fR,
 and
-.Va copies
+\fIcopies\fR
 are properties that are likely to be useful to override if
 we are using this utility to make backups. If the destination filesystems
 do not exist,
-.Nm
+\fBzxfer\fR
 will automatically create them.
-.Pp
+.PP
 The script also allows
 the backup and restore of the original filesystem properties so that
 if it is desirable to backup the filesystem(s) for archival purposes
 using
-.Va compression
+\fIcompression\fR
 etc. as overrides, the original properties may be restored without the
 user having to make a note of what those original properties were.
-.Pp
-.Nm
+.PP
+\fBzxfer\fR
 requires privileges sufficient for the requested
-.Xr zfs 8 ,
-.Xr zpool 8 ,
+zfs(8),
+zpool(8),
 and
-.Xr ssh 1
+ssh(1)
 operations. In practice this often means root, delegated ZFS privileges, or a
 remote wrapper such as
-.Dq pfexec
+\(lqpfexec\(rq
 or
-.Dq doas ,
+\(lqdoas\(rq,
 depending on platform and workflow.
-.Pp
+.PP
 Note that at present, the usage of spaces in
-.Xr zfs 8
+zfs(8)
 filesystem names is NOT supported. There is no plan to support it without
 someone else doing the coding or a good funding proposal coming my way.
-.Sh DISCLAIMER/WARNING
+.SH "DISCLAIMER/WARNING"
 You MUST read, understand and agree to the disclaimer in the BSD license
 before applying any of these examples or using
-.Nm .
+\fBzxfer\fR.
 (See the file "COPYING" that should have been included with this utility.)
 Review the command line carefully and validate your workflow on test datasets,
 throwaway pools, or a disposable host before using
-.Nm
+\fBzxfer\fR
 against production data. Keep independent backups and confirm the option
 combination you intend to use, especially when enabling snapshot deletion,
 rollback, migration, or property restore modes.
-.Pp
+.PP
 Modifying an example first is a good way to start using the script, as
 there are some options (e.g. -d and -F) that are in practice
 always used.
-.Sh SNAPSHOTS
-.Nm
+.SH "SNAPSHOTS"
+\fBzxfer\fR
 as a backup/restore solution is designed to be used
 hand-in-hand with a regular snapshotting
 regime. If there is no regular snapshotting regime in place then the results
 won't be nearly as good.
-.Nm
+\fBzxfer\fR
 would still be useful to reliably and easily copy
 a pool for example, but you would be missing the main point of the program.
-.Pp
-.Sh OPTIONS
+.SH "OPTIONS"
 The following options control the
-.Xr zfs 8
-.Va send
+zfs(8)
+\fIsend\fR
 replication workflow managed by
-.Nm .
+\fBzxfer\fR.
 Unless noted otherwise the semantics apply uniformly across all invocations.
-.Pp
+.PP
 Please note that options with arguments (e.g. -R, -N
 and the like) can not be concatenated after other options.
 (e.g. -vFdR
-.Va source
-.Va destination
+\fIsource\fR
+\fIdestination\fR
 will fail. You should use instead:
 -vFd -R
-.Va source
-.Va destination
+\fIsource\fR
+\fIdestination\fR
 )
 Otherwise this will confuse getopts and
-.Xr zfs 8
+zfs(8)
 will complain that "dataset already exists".
-.Pp
+.PP
 The options are as follows:
-.Bl -tag -width indent
-.It Fl b
+.TP 8n
+\fB\-b\fR
 Small (b)eep mode. Play a failure tune before exit with failure
 so that you don't have to monitor
 the terminal to know when a lengthy backup or restore finishes.
 (This is not as yet supported in (Open) Solaris.)
 To save insult being added to injury, the failure beep will not play
 during errors that
-.Nm
+\fBzxfer\fR
 discovers in the initialization phase, beeps will only occur if an error
 has the possibility of occurring after significant time has elapsed.
-.Pp
-.It Fl B
+.TP 8n
+\fB\-B\fR
 Large (B)eep mode. Similar to (b) but suitable for use at the end of a script.
 It plays a success or failure tune before exit. If you are executing
-.Nm
+\fBzxfer\fR
 multiple times, use -b for everything but the last execution, for which you
 should use -B.
-.It Fl e
+.TP 8n
+\fB\-e\fR
 R(e)store property mode. This restores all filesystem properties from the
 backup file mentioned in the previous option.
-.Pp
+.sp
 A word of warning:
 In order to allow the restoration of filesystems within the hierarchy,
-.Nm
+\fBzxfer\fR
 will check the exact current keyed metadata path
-.Pa .zxfer_backup_info.v2/h/<id-chunks>/.zxfer_backup_info.v2
+\fI.zxfer_backup_info.v2/h/<id-chunks>/.zxfer_backup_info.v2\fR
 in the hardened metadata directory
-.Pq Pa ZXFER_BACKUP_DIR/source/dataset/path/
+(\fIZXFER_BACKUP_DIR/source/dataset/path/\fR)
 for the requested source and destination roots. The current lossless-key path is
 checked first with a read-only fallback to the retired checksum-keyed v2
 filename when it is absent. The metadata must also carry the
-.Dq #zxfer property backup file
+\(lq#zxfer property backup file\(rq
 header and a supported
-.Dq #format_version:2
+\(lq#format_version:2\(rq
 marker before
-.Nm
+\fBzxfer\fR
 will consume any v2 source-root-relative restore rows. Older, unversioned, or otherwise unsupported
 backup metadata layouts are not supported; restore the properties only from
 files stored in the hardened directory (which defaults to
-.Pa /var/db/zxfer
+\fI/var/db/zxfer\fR
 and can be changed by exporting
-.Ev ZXFER_BACKUP_DIR Ns ).
-.It Fl h
+\fBZXFER_BACKUP_DIR\fR).
+.TP 8n
+\fB\-h\fR
 Prints (h)elp.
-.It Fl k
+.TP 8n
+\fB\-k\fR
 Bac(k)up property mode. This backs up the original filesystem property settings
 to the current keyed metadata path
-.Pa .zxfer_backup_info.v2/h/<id-chunks>/.zxfer_backup_info.v2
+\fI.zxfer_backup_info.v2/h/<id-chunks>/.zxfer_backup_info.v2\fR
 stored inside the hardened metadata directory
-.Pq Pa ZXFER_BACKUP_DIR/source/dataset/path/.
+(\fIZXFER_BACKUP_DIR/source/dataset/path/\fR).
 This file lives outside the dataset mountpoints so unprivileged users cannot
 pre-create symlinks. The
-.Dq #zxfer property backup file
+\(lq#zxfer property backup file\(rq
 header and
-.Dq #format_version:2
+\(lq#format_version:2\(rq
 marker are written automatically so future restore runs can validate the
 metadata format before consuming v2 source-root-relative rows. The
-.Aq id-chunks
+\(laid-chunks\(ra
 path components are a lossless identity derived from the full source and
 destination pair, split into bounded chunks so long dataset names do not exceed
 per-component filesystem limits and distinct replication runs do not overwrite
@@ -232,308 +240,318 @@ each other just because they share the same source tail. Restore still
 recognizes the retired checksum-keyed v2 filename as a read-only fallback when
 the current lossless-key path is absent. The metadata
 header also records the full
-.Dq source_root
+\(lqsource_root\(rq
 and
-.Dq destination_root
+\(lqdestination_root\(rq
 dataset identifiers for the backup run, while the body rows retain
 source-root-relative dataset paths later consumed by
-.Fl e .
+\fB\-e\fR.
 Current-format files emit only those versioned root markers; the older
 compatibility alias lines are no longer written.
 For example, if you are backing up
-.Pa tank/src
+\fItank/src\fR
 and you keep the default
-.Ev ZXFER_BACKUP_DIR
+\fBZXFER_BACKUP_DIR\fR
 of
-.Pa /var/db/zxfer ,
+\fI/var/db/zxfer\fR,
 the metadata path
-.Pa /var/db/zxfer/tank/src/.zxfer_backup_info.v2/h/74616e6b2f7372630a6261636b75702f647374/.zxfer_backup_info.v2
+\fI/var/db/zxfer/tank/src/.zxfer_backup_info.v2/h/74616e6b2f7372630a6261636b75702f647374/.zxfer_backup_info.v2\fR
 would hold all the information about the original values of the filesystem
 properties, and some other useful info. Set
-.Ev ZXFER_BACKUP_DIR
+\fBZXFER_BACKUP_DIR\fR
 to point at an alternate secure directory owned by root or the effective UID if you need to relocate the
 metadata.
-.Pp
+.sp
 This allows us to use the
-.Op Fl o
+[\fB\-o\fR]
 option freely, e.g. specifying
-.Va copies ,
-.Va compression
+\fIcopies\fR,
+\fIcompression\fR
 etc. without having to remember what the original options were.
-.Pp
+.sp
 If the current source was itself produced from an earlier
-.Nm
+\fBzxfer\fR
 property backup, chained
-.Fl k
+\fB\-k\fR
 runs now forward that original-source property provenance into the next hop's
 backup metadata instead of re-recording intermediate override or local-property
 drift as the restored baseline.
-.Pp
+.sp
 When
-.Fl k
+\fB\-k\fR
 publishes backup metadata through a remote target specified by
-.Fl T ,
-.Nm
+\fB\-T\fR,
+\fBzxfer\fR
 also resolves and validates the target host's
-.Xr cat 1
+cat(1)
 helper through the same secure remote-helper path instead of assuming a fixed
 remote binary location.
-.It Fl n
+.TP 8n
+\fB\-n\fR
 Dry ru(n) mode. Prints out the commands that would otherwise execute, but
 current releases now treat this as a strict no-exec preview: launcher ssh
 preflight, remote helper validation, live backup-restore checks,
 unsupported-property discovery, snapshot discovery, and
-.Fl D
+\fB\-D\fR
 templates that reference
-.Ql %%size%%
+\(oq%%size%%\(cq
 are all skipped instead of validated against the live source or destination.
 This means dry runs no longer render the eventual send/receive or
 property-reconcile commands, because those require live snapshot state. Use
 this when you need a safe preflight preview rather than live validation. When combined with
-.Fl k ,
-.Nm
+\fB\-k\fR,
+\fBzxfer\fR
 also previews the local or remote secure backup-directory preparation and
 staged backup-metadata write commands under
-.Ev ZXFER_BACKUP_DIR
+\fBZXFER_BACKUP_DIR\fR
 instead of creating, chmodding, or writing those metadata files during
 preflight; chained
-.Fl k
+\fB\-k\fR
 backups also preview any forwarded provenance alias write. When combined with
-.Fl s
+\fB\-s\fR
 or
-.Fl m ,
-.Nm
+\fB\-m\fR,
+\fBzxfer\fR
 only previews the source-side snapshot plus the migration service-disable,
 service-enable, and unmount commands; it does not execute them or refresh
 cached state as though those actions had already happened.
-.It Fl o
+.TP 8n
+\fB\-o\fR
 (o)verride property mode. Property overrides are specified with commas to separate.
-.Pp
+.sp
 e.g.
-.Fl o Ar property1=value1,property2=value2...
-.Pp
+\fB\-o\fR \fIproperty1=value1,property2=value2...\fR
+.sp
 If one value must contain a literal comma, quote the full
-.Fl o
+\fB\-o\fR
 argument and escape that comma as
-.Ql \e, ,
+\(oq\e,\(cq,
 for example
-.Fl o Ar 'user:note=value\e,with\e,commas' .
+\fB\-o\fR \fI'user:note=value\e,with\e,commas'\fR.
 For example,
-.Fl o Ar compression=lzjb
+\fB\-o\fR \fIcompression=lzjb\fR
 will cause all destination filesystems to be set to lzjb compression. If using
 recursive mode,
-.Nm
+\fBzxfer\fR
 sets the override on the replicated root and leaves descendants inherited when
 the property can inherit and their parent already provides the requested value;
 non-inheritable overrides, such as quotas and reservations, remain local on
 descendants.
 Note that this option will also override any values that would otherwise be
-.Cm set
+\fBset\fR
 by "-P". Invoking this option will also create the destination filesystem(s)
 if they do not already exist.
-.It Fl P
+.TP 8n
+\fB\-P\fR
 Transfer (P)roperty mode. This causes the destination to have properties explicitly
-.Cm set
+\fBset\fR
 (i.e. with property
-.Va sources
+\fIsources\fR
 as
-.Va local )
+\fIlocal\fR)
 to exactly the same properties as the source. If the destination filesystems do
 not exist, they will be created with the correct properties.
-.Pp
+.sp
 If using recursive modes, child
 filesystems have property
-.Va sources
+\fIsources\fR
 (as in, the fourth column of
-.Cm # zfs get all pool/filesystem
+\fB# zfs get all pool/filesystem\fR
 ) that are made either
-.Va local ,
+\fIlocal\fR,
 (if the
-.Va source
+\fIsource\fR
 is
-.Va local )
+\fIlocal\fR)
 or
-.Va inherited
+\fIinherited\fR
 (if the
-.Va source
+\fIsource\fR
 is
-.Va default
+\fIdefault\fR
 or
-.Va inherited )
+\fIinherited\fR)
 as per the source filesystem. Note that
-.Va inherited
+\fIinherited\fR
 behaves in a similar manner to
-.Va default .
+\fIdefault\fR.
 If you were to set a given property of the parent of a child filesystem, the
 child would have that same property's source listed as "inherited from..."
 whether that child property source had been
-.Va default
+\fIdefault\fR
 or
-.Va inherited .
-.Pp
+\fIinherited\fR.
+.sp
 There are several properties that
 must be set (using
-.Cm zfs create )
+\fBzfs create\fR)
 at filesystem creation time. These are:
-.Va casesensitivity ,
-.Va normalization ,
-.Va utf8only .
+\fIcasesensitivity\fR,
+\fInormalization\fR,
+\fIutf8only\fR.
 If you are trying to replicate such a filesystem where one of these properties is
 different from source to destination, destroy the destination
 filesystems before you begin otherwise the utility will fail with an error.
-.Pp
+.sp
 There are several other properties that may not be technically readonly
 but it was
 judged that it would not make sense to try and transfer them. They are:
-.Va type ,
-.Va creation ,
-.Va used ,
-.Va available ,
-.Va referenced ,
-.Va compressratio ,
-.Va mounted ,
-.Va version ,
-.Va primarycache ,
-.Va secondarycache ,
-.Va usedbysnapshots ,
-.Va usedbydataset ,
-.Va usedbychildren ,
-.Va usedbyrefreservation ,
-.Va version ,
-.Va volsize ,
-.Va mountpoint .
+\fItype\fR,
+\fIcreation\fR,
+\fIused\fR,
+\fIavailable\fR,
+\fIreferenced\fR,
+\fIcompressratio\fR,
+\fImounted\fR,
+\fIversion\fR,
+\fIprimarycache\fR,
+\fIsecondarycache\fR,
+\fIusedbysnapshots\fR,
+\fIusedbydataset\fR,
+\fIusedbychildren\fR,
+\fIusedbyrefreservation\fR,
+\fIversion\fR,
+\fIvolsize\fR,
+\fImountpoint\fR.
 There are several properties that may be unsupported on some platforms and hence will
 not be transferred via
-.Nm ,
+\fBzxfer\fR,
 they are:
-.Va idevices ,
-.Va aclmode ,
-.Va aclinherit ,
-.Va nbmand ,
-.Va shareiscsi ,
-.Va vscan ,
-.Va xattr .
-.It Fl v
+\fIidevices\fR,
+\fIaclmode\fR,
+\fIaclinherit\fR,
+\fInbmand\fR,
+\fIshareiscsi\fR,
+\fIvscan\fR,
+\fIxattr\fR.
+.TP 8n
+\fB\-v\fR
 (v)erbose mode.
-.El
-.Ss ZFS send/receive mode
-.Bl -tag -width indent
-.It Fl c
+.SS "ZFS send/receive mode"
+.TP 8n
+\fB\-c\fR
 A space delimited list of SMF services in quotes to be temporarily disabled
 before unmounting the source, then re-enable after changing the mountpoint
 of the destination. Requires -m.
-.It Fl d
+.TP 8n
+\fB\-d\fR
 (d)elete snapshots on the destination that are absent on the source. This may
 be necessary to function properly anyway, in a similar fashion to
-.Pp
-.Nm
+.sp
+\fBzxfer\fR
 batches those snapshot deletions into background
-.Xr zfs 8
-.Cm destroy
+zfs(8)
+\fBdestroy\fR
 commands so replication can continue while snapshots are removed. The background
 jobs are tied to the lifetime of
-.Nm :
+\fBzxfer\fR:
 its EXIT trap kills any remaining destroy processes when the main script
 terminates so snapshot deletes never run unattended. If
-.Nm
+\fBzxfer\fR
 exits before the kernel finishes destroying the targeted snapshots, rerun
-.Nm
+\fBzxfer\fR
 with
-.Fl d
-to resume cleanup;
-.Nm
-will zxfer_relaunch the pending destroys on the next pass.
-.It Fl D
-.Nm
+\fB\-d\fR
+to resume cleanup and finish removing the stale datasets.
+.TP 8n
+\fB\-D\fR
+\fBzxfer\fR
 will pipe
-.Xr zfs 8
-.Va send
+zfs(8)
+\fIsend\fR
 through an internal passthrough helper that feeds a copy of the stream to the
 indicated command and parameters, to create a progress bar. The progress
 command must read stdin until EOF. Its stdout is discarded so helper output
 cannot duplicate or corrupt the receive stream; progress text should go to
 stderr.
 A number of macros will be replaced with values before the command is executed:
-.Bl -tag -width a
-.It %%size%%
+.PP
+.RS 8n
+.PD 0
+.TP 3n
+%%size%%
 Will be replaced with the estimated size of the snapshot.
 On remote or multi-job runs,
-.Nm
+\fBzxfer\fR
 may use a cheaper approximate probe for this value to reduce startup latency.
 When combined with
-.Fl n ,
+\fB\-n\fR,
 templates that reference
-.Ql %%size%%
+\(oq%%size%%\(cq
 no longer probe the live source; strict dry-run leaves size estimates unknown
 because send planning is skipped entirely.
-.It %%title%%
+.PD
+.TP 3n
+%%title%%
 Will be replaced with the name of the source dataset@snapshot.
-.El
-.Pp
+.PP
 Example:
-.Pp
-.Nm
-.Fl O Ar user@host Fl D Ar 'bar -s %%size%%' Fl R Ar source destination
+.sp
+\fBzxfer\fR
+\fB\-O\fR \fIuser@host\fR \fB\-D\fR \fI'bar -s %%size%%'\fR \fB\-R\fR \fIsource destination\fR
 This will occur if you are using
-.Nm
+\fBzxfer\fR
 for routine backups and in the interim, culling snapshots on the source.
 The snapshot corresponding to the most recent snapshot on the destination
 often gets deleted on the source. Any snapshots on the destination more
 recent than the most recent common snapshot must be deleted for
-.Cm zfs send
+\fBzfs send\fR
 to work.
-.It Fl F
+.RE
+.TP 8n
+\fB\-F\fR
 Pass (F) to
-.Xr zfs 8
-.Cm receive
+zfs(8)
+\fBreceive\fR
 so the destination side will roll back to the most recent snapshot that
 matches the stream. This forcibly destroys any newer snapshots or data that
 only exist on the destination and allows incremental sends to proceed when
 the target has diverged.
-.Pp
+.sp
 Divergence contract: when a destination snapshot shares a source snapshot's
 name but carries a different GUID, the destination holds diverged data under
 an identical name.
-.Nm
+\fBzxfer\fR
 always warns on stderr, naming the dataset, the diverged-snapshot count, and
 up to three example snapshots with both GUIDs. The destructive convergence
 (destroy the diverged destination snapshots, roll back to the last
 GUID-matching common snapshot, and resend the source range) proceeds only when
 BOTH
-.Fl d
+\fB\-d\fR
 and
-.Fl F
+\fB\-F\fR
 are active; otherwise the run fails closed with a structured error and plans
 no deletes or sends for the diverged dataset. After a converged dataset's
 receive completes,
-.Nm
+\fBzxfer\fR
 re-checks the live destination listing and aborts with an error naming the
 snapshot if any name-match/GUID-mismatch remains, so an external writer
 re-diverging the destination cannot cause a silent destroy-and-resend loop.
-.It Fl g
+.TP 8n
+\fB\-g\fR
 (g)randfather protection. Specify a number of days old (relative to the system
 date) at and above which snapshots on the destination won't be deleted. For use
 with
-.Op Fl d .
+[\fB\-d\fR].
 This allows a safeguard to protect the "grandfathers" in a
 Grandfather-Father-Son (GFS) snapshot
 collection on a destination. Grandfathers (as defined by
-.Nm )
+\fBzxfer\fR)
 are the snapshots that never get
 deleted (often yearly, half yearly or quarterly snapshots).
-.Pp
+.sp
 Note that for
 this to work properly, you must set
-.Op Fl g
+[\fB\-g\fR]
 so that it does not inadvertently protect the "fathers" which will be deleted on
 the source by your snapshot management tool, and hence will need to be deleted
 on the
 destination. If you go a long time between backups with an otherwise well set
-.Op Fl g ,
+[\fB\-g\fR],
 you may have fathers on the destination that are the age of grandfathers and so
 you will need to either relax the number of days provided for, or manually
 delete those fathers.
-.Pp
+.sp
 For example,
 specifying -g 375 should protect snapshots as old or older than 375 days,
 which could be useful where grandfathers are yearly and monthly fathers are
@@ -541,25 +559,27 @@ kept for a period of a year or less. This gives us 9 days of grace period
 to make a backup without throwing an error, but do note that during
 this grace period grandfathers
 less than 375 days old are not protected.
-.It Fl I Ar properties,to,ignore
+.TP 8n
+\fB\-I\fR \fIproperties,to,ignore\fR
 Do not copy this comma separated list of properties when performing replication.
 Useful for skipping properties like quotas that can interfere with replication,
 or properties that are not supported on the destination.
-.It Fl j Ar jobs
+.TP 8n
+\fB\-j\fR \fIjobs\fR
 Run up to this many zfs send/receive jobs concurrently and use the explicit
 per-dataset source snapshot-discovery path when determining the work queue.
 When jobs is greater than 1, zxfer uses a direct per-dataset source listing
 pipeline instead of the single recursive snapshot list. Local-origin and
 remote-origin runs through
-.Fl O
+\fB\-O\fR
 require a resolved
-.Sy parallel
+\fBparallel\fR
 helper on the executing origin host. zxfer intentionally validates only helper
 existence through the secure-PATH model, then assumes the operator or package
 supplied an implementation compatible with the GNU Parallel-style options used
 by the rendered source-discovery pipeline.
 zxfer does not silently fall back to the serial recursive listing once
-.Fl j
+\fB\-j\fR
 is greater than 1. The default is 1, which disables background sends and keeps
 source snapshot discovery on the serial recursive listing path. Raising this
 value can hide WAN latency or speed up large replications, but will also
@@ -573,62 +593,66 @@ wrapper-shell PID. zxfer also serializes conflicting ancestor/descendant
 destination receives on the same target so parent and child datasets do not
 receive concurrently, and its ready queue skips blocked descendants to start
 later independent datasets while job slots remain.
-.It Fl m
+.TP 8n
+\fB\-m\fR
 After sending all snapshots, (m)igrate the source to the destination filesystem by
 unmounting the source filesystem and changing the new filesystem's
 mountpoint to that of the source. This option includes -s. It also includes
 -P. Note that
-.Nm
+\fBzxfer\fR
 does not prevent you from migrating a default mountpoint
 (e.g. pool/filesystem) to something that will be potentially confusing, so
 be sure that this is what you want before executing.
-.Pp
+.sp
 Note also that
-.Op Fl O
+[\fB\-O\fR]
 and
-.Op Fl T
+[\fB\-T\fR]
 (i.e. remote transfers) are not supported with this option enabled.
-.Pp
+.sp
 With
-.Fl n ,
+\fB\-n\fR,
 these migration preflight steps are previewed only.
-.It Fl N
+.TP 8n
+\fB\-N\fR
 Replicate the listed filesystem. Note the provisos listed above in
-.Op Fl R .
+[\fB\-R\fR].
 It works similarly but is (N)ot recursive.
 e.g.  specifying -N
-.Pa tank/tmp
+\fItank/tmp\fR
 will transfer only
-.Pa tank/tmp .
-.It Fl x Ar pattern
+\fItank/tmp\fR.
+.TP 8n
+\fB\-x\fR \fIpattern\fR
 Exclude any datasets whose names match the supplied regular expression from
 the recursive replication list. The pattern is passed to
-.Xr grep 1
-.Fl v ,
+grep(1)
+\fB\-v\fR,
 so be sure to escape shell metacharacters or provide quotes where appropriate.
 Useful when a recursive send should omit scratch datasets or other prefixes.
 To exclude only
-.Pa tank/data
+\fItank/data\fR
 without also matching
-.Pa tank/data.bob ,
+\fItank/data.bob\fR,
 use an anchored pattern such as
-.Dq ^tank/data$ .
-.It Fl O
+\(lq^tank/data$\(rq.
+.TP 8n
+\fB\-O\fR
 Specify an (O)rigin user@host. This allows transfers FROM a remote host via ssh.
 e.g. Whatever filesystems you specify as the source are taken to exist on that
 remote host.
-.Pp
+.sp
 For this to work, you must have a working ssh
 connection from your local machine to the remote host, using public key based
 authentication (so that you won't have to keep entering a password every time
 a command is sent over ssh). You must have
-.Nm
+\fBzxfer\fR
 on your local machine. The remote host must support
-.Xr zfs 1 ,
+zfs(1),
 and so does your local machine if
-.Op Fl T
+[\fB\-T\fR]
 is not also used.
-.Pp
+.sp
 This fork is exercised across current OpenZFS 2.0+ environments on maintained
 FreeBSD branches, Linux with OpenZFS, supported OmniOS/illumos trains, and
 OpenZFS on macOS.
@@ -636,73 +660,74 @@ For releases published after 2026-05-01, the FreeBSD support baseline is
 FreeBSD 14.4+ and 15.0+; FreeBSD 14.3, FreeBSD 13.x, and other end-of-life
 branches are not guaranteed. Remote helper resolution is designed to tolerate
 different absolute
-.Xr zfs 8
+zfs(8)
 paths on each host, but property support can still differ across operating
 systems and ZFS versions. When mixing platforms or versions, validate
 property behavior carefully and consider
-.Fl I
+\fB\-I\fR
 or
-.Fl U
+\fB\-U\fR
 if the destination cannot support every source property.
-.Pp
+.sp
 Note that if at all possible, do not try and be clever
 and run
-.Nm
+\fBzxfer\fR
 with both an origin and a target host. While this may work,
 the transfer will be piped from the remote origin to the local machine and from
 there to the remote target machine, which will be slow as it is
 not a direct path.
-.Pp
+.sp
 The syntax for this command is -O user@remote_host.
-.Pp
+.sp
 e.g. -O root@192.168.0.1
-.Pp
+.sp
 Please note that if you are using Solaris, you will most likely need to use
 "pfexec" (similar to sudo) and have a suitably privileged user. Copy the
 quotes and spacing exactly:
-.Pp
+.sp
 e.g. -O "user1@192.168.0.1 pfexec"
-.Pp
+.sp
 The
-.Fl O
+\fB\-O\fR
 and
-.Fl T
+\fB\-T\fR
 values are treated as literal whitespace-delimited tokens. Outer shell quoting
 is fine, but embedded quote characters or backslash escapes inside the value
 are rejected instead of being silently re-tokenized.
-.Pp
+.sp
 The reason this works is because the commands that are related to
 reading/writing/modifying data will be prefaced with in normal circumstances:
-.Pp
+.sp
 ssh root@192.168.0.1 command ...
-.Pp
+.sp
 So with Solaris, specifying the pfexec at the end results in:
-.Pp
+.sp
 ssh user1@192.168.0.1 pfexec command ...
-.Pp
-.It Fl R
+.TP 8n
+\fB\-R\fR
 (R)ecursively replicate all filesystems under the specified source. If not
 specifying
-.Op Fl N ,
+[\fB\-N\fR],
 you must invoke one and only one of either
-.Op Fl R
+[\fB\-R\fR]
 or
-.Op Fl N .
+[\fB\-N\fR].
 Note that if you enable this option, you must specify only one filesystem,
 and that it starts without a "/". e.g. specifying -R
-.Pa tank/tmp
+\fItank/tmp\fR
 will transfer
-.Pa tank/tmp ,
-.Pa tank/tmp/foo,
-.Pa tank/tmp/foo/bar
+\fItank/tmp\fR,
+\fItank/tmp/foo,\fR
+\fItank/tmp/foo/bar\fR
 etc.
-.Pp
+.sp
 Also note that a trailing slash on the source filesystem has a similar effect
 as it has in
-.Xr cp 1 .
+cp(1).
 This would primarily be used in restoring filesystems, especially pools.
 See Ex3.
-.It Fl s
+.TP 8n
+\fB\-s\fR
 Make a (s)napshot of the source before replication. Note that you might want to
 transfer a current snapshot at the end of a transfer, as the initial transfer
 might take a long time. This would leave you with an old snapshot on the
@@ -711,42 +736,45 @@ at the end, and ensure that a current snapshot is taken before or during the
 second execution. e.g. use this option to ensure that a relatively current
 snapshot exists, create it manually, or wait until your own snapshotting
 regime does the job for you (if you have one).
-.Pp
+.sp
 With
-.Fl n ,
-.Nm
+\fB\-n\fR,
+\fBzxfer\fR
 only previews this snapshot command.
-.Pp
-.It Fl T
+.TP 8n
+\fB\-T\fR
 Specify a (T)arget user@host. This allows transfers TO a remote host via ssh.
 e.g. Whatever filesystem you specify as the destination will be where the
 source filesystems will be sent.
-.Pp
+.sp
 See the section on
-.Op Fl O
+[\fB\-O\fR]
 for notes, usage advice and warnings, as this option is very similar in
 operation.
-.Pp
+.sp
 The syntax for this command is -T user@remote_host. e.g. -T root@192.168.1.2
-.Pp
+.sp
 Again, please note that if you are using Solaris, you will most likely need to use
 "pfexec" (similar to sudo) and have a suitably privileged user. Copy the
 quotes and spacing exactly:
-.Pp
+.sp
 e.g. -T "user1@192.168.0.1 pfexec"
-.Pp
+.sp
 Like
-.Op Fl O ,
-.It Fl U
+[\fB\-O\fR],
+.TP 8n
+\fB\-U\fR
 Skip replicating any properties that are not supported by the destination.
 Before replication begins, zxfer probes the current destination within the
 OpenZFS 2.0+ support floor and removes source properties that the destination
 does not accept for the current dataset type.
 This is a current-platform skip mechanism, not a compatibility bridge for
 pre-OpenZFS 2.0 destinations.
-.It Fl v
+.TP 8n
+\fB\-v\fR
 (v) verbose mode
-.It Fl V
+.TP 8n
+\fB\-V\fR
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
 profiling counters plus startup latency, trap-cleanup timing, and accumulated
 stage timings for ssh setup, snapshot listing, and diff/sort hot paths, along
@@ -758,228 +786,249 @@ socket lock waits) still emit and always read 0. While the run is active it also
 remote ssh commands, remote probe commands, and any ssh control-socket
 check/open commands before each execution so slow startup or remote-probe phases are
 visible in real time.
-.It Fl w
+.TP 8n
+\fB\-w\fR
 uses zfs ra(w) send mode
-.It Fl Y
+.TP 8n
+\fB\-Y\fR
 (Y)ield after no zfs send or zfs destroy commands are executed or 8 iterations
 have been performed, whichever comes first.
-.It Fl z
+.TP 8n
+\fB\-z\fR
 Pipe the send stream through zstd -3 compression and then decode it at the
 remote side using zstd -d. This option requires either
-.Op Fl O
+[\fB\-O\fR]
 or
-.Op Fl T
+[\fB\-T\fR]
 because compression only occurs when traffic flows over ssh.
 This converts:
-.Pp
-.Dl zfs send dataset@snap1 | ssh user@host "/sbin/zfs receive destination"
-.Pp
+.sp
+.RS 14n
+zfs send dataset@snap1 | ssh user@host /sbin/zfs receive destination
+.RE
+.RS 8n
+.sp
 to
-.Pp
-.Dl zfs send dataset@snap1 | zstd -3 | ssh user@host "zstd -d | /sbin/zfs receive destination"
-.Pp
+.sp
+.RS 14n
+zfs send dataset@snap1 | zstd -3 | ssh user@host zstd -d | /sbin/zfs receive destination
+.RE
+.sp
 Remote source snapshot-list metadata discovery
-.Pq Fl O No with Fl j No and Fl z
+(\fB\-O\fR with \fB\-j\fR and \fB\-z\fR)
 uses the selected compression/decompression pipeline when ssh is active,
 including the remote parallel source-discovery path before zxfer decides
 whether any snapshots actually need transfer.
-.It Fl Z
+.RE
+.TP 8n
+\fB\-Z\fR
 Pass the zstd command to use during compression.
-.Op Fl O
+[\fB\-O\fR]
 or
-.Op Fl T
+[\fB\-T\fR]
 must also be provided.
-.Pp
+.sp
 e.g.
-.Pp
+.sp
 -Z "zstd -T0 -3"
-.Pp
+.sp
 This will modify the default -z option to
-.Pp
-.Dl zfs send dataset@snap1 | zstd -T0 -3 | ssh user@host "zstd -d | /sbin/zfs receive"
-.Pp
+.sp
+.RS 14n
+zfs send dataset@snap1 | zstd -T0 -3 | ssh user@host zstd -d | /sbin/zfs receive
+.RE
+.RS 8n
+.sp
 Like
-.Fl O
+\fB\-O\fR
 and
-.Fl T ,
+\fB\-T\fR,
 the
-.Fl Z
+\fB\-Z\fR
 value must be expressible as literal whitespace-delimited tokens; embedded
 quote characters or backslash escapes are rejected instead of being
 re-tokenized.
-.Pp
+.sp
 Higher custom levels such as
-.Li -9
+\fR-9\fR
 can improve compression ratio, but they consume substantially more CPU time and
 are therefore not the default.
-
-.El
-.Sh EXAMPLES
+.sp
+.RE
+.SH "EXAMPLES"
 Note that some of these example commands are lengthy, so be sure to fix
 the line wrapping appropriately. Also if you wonder why
-.Nm
+\fBzxfer\fR
 isn't transferring anything, please read the section titled SNAPSHOTS.
-.Ss Ex1 - Backup a pool (including snapshots and properties)
+.SS "Ex1 - Backup a pool (including snapshots and properties)"
 We have a pool called
-.Pa storage
+\fIstorage\fR
 and we want to back it up to
-.Pa backup01/pools ,
+\fIbackup01/pools\fR,
 along with all its snapshots. Grandfather snapshots are yearly, fathers are
 monthly and are deleted after 365 days.
 The resultant filesystem hierarchy should look like so:
-.Bl -bullet -offset indent -compact
-.It
-.Pa backup01/pools/storage
-.It
-.Pa backup01/pools/storage/home
-.It
-.Pa backup01/pools/storage/back
-.It
+.RS 6n
+.PD 0
+.TP 4n
+\fB\(bu\fR
+\fIbackup01/pools/storage\fR
+.TP 4n
+\fB\(bu\fR
+\fIbackup01/pools/storage/home\fR
+.TP 4n
+\fB\(bu\fR
+\fIbackup01/pools/storage/back\fR
+.TP 4n
+\fB\(bu\fR
 etc.
-.El
+.RE
 To back this up while:
-.Bl -bullet -offset indent -compact
-.It
-.Op Fl g
+.RS 6n
+.TP 4n
+\fB\(bu\fR
+[\fB\-g\fR]
 protecting (grandfather) snapshots older than 375 days
-.It
-.Op Fl P
+.TP 4n
+\fB\(bu\fR
+[\fB\-P\fR]
 copying across the properties of each filesystem
-.It
-.Op Fl k
+.TP 4n
+\fB\(bu\fR
+[\fB\-k\fR]
 storing the original filesystem properties in the file
-.Pa backup01/pools/.zxfer_backup_info.storage
-.It
-.Op Fl F
+\fIbackup01/pools/.zxfer_backup_info.storage\fR
+.TP 4n
+\fB\(bu\fR
+[\fB\-F\fR]
 forcing a rollback of destination to the most recent snapshot. Given even
 mounting the filesystem will cause a change and hence cause
-.Cm zfs receive
+\fBzfs receive\fR
 to fail with an error, enabling this
 is the way to go. Otherwise you would be modifying(!) a backup,
 wanting to keep the changes you are making(!?) and also wanting to copy more
 stuff to the backup (hence it's still being used as a backup)... well
 if that's what you want then don't use
 this option.
-.It
-.Op Fl d
+.TP 4n
+\fB\(bu\fR
+[\fB\-d\fR]
 deleting stale snapshots that don't exist on the source
 (e.g. if using
 a snapshot management script such as
-.Xr zfs-snapshot-mgmt 8 ,
+zfs-snapshot-mgmt(8),
 snapshots are regularly taken and regularly deleted to leave a range of
 frequencies of snapshots at different vintages. If you are regularly backing
 up to another pool which is stored off-site as is
-.Em highly
+\fIhighly\fR
 recommended, you may want
 to delete the stale snapshots on the backup pool without having to manage the
 snapshots there too. This is especially true for those pools that are usually
 not connected to a machine, e.g. if you are using HDD as backup media. Note that
-.Cm zfs send
+\fBzfs send\fR
 will also refuse to work if you have newer snapshots on destination than
 the most recent common snapshot on both, so it's easier to just enable it.)
-.It
-.Op Fl v
+.TP 4n
+\fB\(bu\fR
+[\fB\-v\fR]
 seeing lots of output (verbose)
-.It
-.Op Fl V
+.TP 4n
+\fB\(bu\fR
+[\fB\-V\fR]
 (V)ery verbose output sent to stderr
-.It
-.Op Fl R
+.TP 4n
+\fB\(bu\fR
+[\fB\-R\fR]
 copying the source filesystem recursively
-.El
+.RE
 use the following command:
-.Pp
-.Nm
-.Cm -dFkPv -g 375 -R storage backup01/pools
-.Pp
+.PD
+.PP
+\fBzxfer\fR
+\fB-dFkPv -g 375 -R storage backup01/pools\fR
+.PP
 Note that this same command will work for both the initial replication
 and subsequent replications (which are potentially much faster due to
 incremental transfers being used). Also note that if you don't have any
 snapshots on the source, nothing will be transferred. You can create
 a snapshot for this very occasion by adding the -s option.
-.Ss Ex2 - Backup pool to HDD
+.SS "Ex2 - Backup pool to HDD"
 Using HDDs as backup media was in large part a motivation for writing this
 utility. (Using an e-SATA dock is particularly convenient). The source and
 destination are the same as Ex1.
-.Pp
+.PP
 We will want to increase the number of
-.Va copies
+\fIcopies\fR
 to at
 least 2 or more so that we have some protection against bad sectors. We won't
 have protection against a HDD crash so use more than one HDD if you are doing
 this (mirrored or otherwise). We may also want to override the
-.Va compression
+\fIcompression\fR
 to make up for the multiplication in disk usage by the number of copies. Here
 is the command:
-.Pp
-.Nm
-.Cm -dFkPv -o copies=2,compression=lzjb -R storage backup01/pools
-.Pp
-.Ss Ex3 - Restore a pool
+.PP
+\fBzxfer\fR
+\fB-dFkPv -o copies=2,compression=lzjb -R storage backup01/pools\fR
+.SS "Ex3 - Restore a pool"
 To restore the pools we have backed up in Examples 1 and 2, we would first
 make sure that there is a new pool named
-.Pa storage
+\fIstorage\fR
 to copy the backup to. Then we would issue the following command:
-.Pp
-.Nm
-.Cm -deFPv -R backup01/pools/storage/ storage
-.Pp
+.PP
+\fBzxfer\fR
+\fB-deFPv -R backup01/pools/storage/ storage\fR
+.PP
 Note that the trailing slash enables us to copy the backed-up root filesystem
 directly to the pool level, and then the child filesystems below that, which
 is where we want them. If the pool name is to be changed,
 the command becomes:
-.Pp
-.Nm
-.Cm -deFPv -R backup01/pools/storage/ newpoolname
-.Pp
-.Ss Ex4 - Backup a filesystem
+.PP
+\fBzxfer\fR
+\fB-deFPv -R backup01/pools/storage/ newpoolname\fR
+.SS "Ex4 - Backup a filesystem"
 We might want to just backup a filesystem within a pool. That is easily done:
-.Pp
-.Nm
-.Cm -dFkPv -N storage/home backup01/filesystems
-.Pp
+.PP
+\fBzxfer\fR
+\fB-dFkPv -N storage/home backup01/filesystems\fR
+.PP
 The resulting filesystem will be
-.Pa backup01/filesystems/home .
+\fIbackup01/filesystems/home\fR.
 This example will only replicate that exact filesystem
 (i.e. it is non-recursive). If we wanted to recursively transfer all
 filesystems under
-.Pa storage/home
+\fIstorage/home\fR
 at the same time we could do so by changing the
-.Op Fl N
+[\fB\-N\fR]
 to an
-.Op Fl R .
-.Pp
-.Ss Ex5 - Restore a filesystem
+[\fB\-R\fR].
+.SS "Ex5 - Restore a filesystem"
 To restore the filesystem backed up in Ex4, we would do so using the
 following command:
-.Pp
-.Nm
-.Cm -deFPv -N backup01/filesystems/home storage
-.Pp
-.Ss Ex6 - Migrate a filesystem
+.PP
+\fBzxfer\fR
+\fB-deFPv -N backup01/filesystems/home storage\fR
+.SS "Ex6 - Migrate a filesystem"
 We might want to migrate a filesystem (including properties).
 Note that this is only allowable when the original mountpoint is
 not the default (i.e. pool/filesystem). In the following example,
 the new filesystem will be located in
-.Pa new_pool/location/fs .
+\fInew_pool/location/fs\fR.
 If the old mountpoint was
-.Pa /path/to/old_fs
+\fI/path/to/old_fs\fR
 then that will be the mountpoint of the new filesystem.
-.Pp
-.Nm
-.Cm -PmFdv -N original_pool/fs new_pool/location
-.Pp
-.Ss Ex7 - Compress a filesystem
+.PP
+\fBzxfer\fR
+\fB-PmFdv -N original_pool/fs new_pool/location\fR
+.SS "Ex7 - Compress a filesystem"
 If we want to compress a filesystem, it is not enough to simply
 set a compression setting of some sort on that filesystem. This
 will only cause new files to be compressed. If we want to compress
 a filesystem, what we would want to do is to transfer it to another
 location (where compression is enabled).
-.Pp
-.Nm
-.Cm -PmFdv -o compression=gzip -N original_pool/fs new_pool/location
-.Pp
-.Ss Ex8 - Compress a filesystem...
+.PP
+\fBzxfer\fR
+\fB-PmFdv -o compression=gzip -N original_pool/fs new_pool/location\fR
+.SS "Ex8 - Compress a filesystem..."
 - and store it in the original location.
 This is probably what you want to do instead of example 7. Usually
 what we want to do when we want to compress
@@ -989,149 +1038,153 @@ we want to do something similar to compression, like dedup, and it was
 not supported at the time we created the filesystem. So it is not enough
 to have the filesystem compressed in a new location, we want it in the
 original location.
-.Pp
+.PP
 If so, we will need to migrate the filesystem. Then, if necessary, we would
 need to upgrade the original pool
 to ensure that the new filesystem can do what it is we want it to do
 (e.g. dedup perhaps), and then transfer it back. Here are the steps.
-.Pp
+.PP
 1. Ensure you have set aside a time where nothing will be reading or writing
 to the filesystem(s) in question. If you are performing this operation on a
 system filesystem (e.g. something like
-.Pa zroot/usr )
+\fIzroot/usr\fR)
 then ensure that you are performing these operations from a recovery disk
 (e.g. Fixit # in FreeBSD). Also it is a very good idea to ensure that you
 have made backups of the filesystems you are going to perform this operation
 on.
-.Pp
+.PP
 2. Migrate the filesystems to a new location. e.g.
-.Pp
-.Nm
-.Cm -PmFdv -N original_pool/fs new_pool/location
-.Pp
+.PP
+\fBzxfer\fR
+\fB-PmFdv -N original_pool/fs new_pool/location\fR
+.PP
 3. Triple check that the new filesystems are as they should be. Be very,
 very, very careful here. It is a good idea to have made a backup before
 doing this next step. In fact, it's probably worth practicing on a system
 you don't care about first. And do not, repeat do not, blame me if something
 goes wrong.
-.Pp
+.PP
 4. Destroy the original filesystem. e.g.
-.Pp
+.PP
 zfs destroy original_pool/fs
-.Pp
+.PP
 5. Ensure that the original pool is upgraded to do what you want it to do
 (e.g. dedup perhaps, though you will need to change the option setting
 appropriately).
-.Pp
+.PP
 6. Migrate the filesystem back, but with the overrides you want. e.g.
-.Pp
-.Nm
-.Cm -PmFdv -o compression=gzip -N new_pool/location/fs original_pool
-.Pp
-.Ss Ex9 - Backup a pool to a remote host
+.PP
+\fBzxfer\fR
+\fB-PmFdv -o compression=gzip -N new_pool/location/fs original_pool\fR
+.SS "Ex9 - Backup a pool to a remote host"
 Notice this is the same as in Ex2 with the exception of option
-.Op Fl T ,
+[\fB\-T\fR],
 and uses the same options which
 have been explained in that example. Note that if you use Solaris you will
 most likely need to specify pfexec (refer to the
-.Op Fl O
+[\fB\-O\fR]
 section).
 Here is the command:
-.Pp
-.Nm
-.Cm -dFkPv -o copies=2,compression=lzjb -T root@192.168.123.1 -R storage backup01/pools
-.Pp
-.Ss Ex10 - Restore a pool from a remote host
+.PP
+\fBzxfer\fR
+\fB-dFkPv -o copies=2,compression=lzjb -T root@192.168.123.1 -R storage backup01/pools\fR
+.SS "Ex10 - Restore a pool from a remote host"
 Use the following command, assuming that you are restoring from a situation as
 in Ex9. Again, if using Solaris refer to
-.Op Fl O .
-.Pp
-.Nm
-.Cm -deFPv -O root@192.168.123.1 -R backup01/pools/storage/ storage
-.Pp
-.Sh ENVIRONMENT
-.Bl -tag -width ".Ev ZXFER_SSH_USER_KNOWN_HOSTS_FILE"
-.It Ev ZXFER_BACKUP_DIR
+[\fB\-O\fR].
+.PP
+\fBzxfer\fR
+\fB-deFPv -O root@192.168.123.1 -R backup01/pools/storage/ storage\fR
+.SH "ENVIRONMENT"
+.TP 37n
+\fBZXFER_BACKUP_DIR\fR
 Secure directory owned by root or the effective UID that holds `.zxfer_backup_info.*` metadata generated by
-.Fl k
+\fB\-k\fR
 and consumed by
-.Fl e .
+\fB\-e\fR.
 Defaults to
-.Pa /var/db/zxfer
+\fI/var/db/zxfer\fR
 and must be an absolute path that is not writable by unprivileged users.
-.It Ev ZXFER_SECURE_PATH
+.TP 37n
+\fBZXFER_SECURE_PATH\fR
 Overrides the whitelist of directories that zxfer trusts when it resolves
-.Xr zfs 8 ,
-.Xr ssh 1 ,
-.Xr awk 1 ,
+zfs(8),
+ssh(1),
+awk(1),
 and other helper binaries. The default value is
-.Pa /sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin .
+\fI/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin\fR.
 Only absolute directories are honored so zxfer cannot be tricked into executing
 programs from the current working directory or other user-controlled paths.
 The computed allowlist also becomes the live runtime
-.Ev PATH ,
+\fBPATH\fR,
 and zxfer also exports the same value before remote capability handshakes,
 helper-discovery probes, backup-directory helpers, and backup-metadata helper
 scripts run, so every trusted helper directory that later bare command lookups
 may need must appear here or be added through
-.Ev ZXFER_SECURE_PATH_APPEND .
-.It Ev ZXFER_SECURE_PATH_APPEND
+\fBZXFER_SECURE_PATH_APPEND\fR.
+.TP 37n
+\fBZXFER_SECURE_PATH_APPEND\fR
 Appends extra absolute directories to the secure PATH whitelist, allowing
 administrators to point zxfer at custom locations (both locally and on hosts
 referenced by
-.Fl O
+\fB\-O\fR
 and
-.Fl T )
+\fB\-T\fR)
 without replacing the stock list. These appended directories also become part
 of the exported runtime
-.Ev PATH .
-.It Ev ZXFER_SSH_BATCH_MODE
+\fBPATH\fR.
+.TP 37n
+\fBZXFER_SSH_BATCH_MODE\fR
 Overrides the default
-.Ql yes
+\(oqyes\(cq
 value that zxfer passes as
-.Cm BatchMode
+\fBBatchMode\fR
 for its own
-.Xr ssh 1
+ssh(1)
 connections.
-.It Ev ZXFER_SSH_STRICT_HOST_KEY_CHECKING
+.TP 37n
+\fBZXFER_SSH_STRICT_HOST_KEY_CHECKING\fR
 Overrides the default
-.Ql yes
+\(oqyes\(cq
 value that zxfer passes as
-.Cm StrictHostKeyChecking
+\fBStrictHostKeyChecking\fR
 for its own
-.Xr ssh 1
+ssh(1)
 connections.
-.It Ev ZXFER_SSH_USER_KNOWN_HOSTS_FILE
+.TP 37n
+\fBZXFER_SSH_USER_KNOWN_HOSTS_FILE\fR
 Optional absolute path that zxfer passes as
-.Cm UserKnownHostsFile
+\fBUserKnownHostsFile\fR
 for its own
-.Xr ssh 1
+ssh(1)
 connections. When unset, zxfer still relies on the local
-.Xr ssh 1
+ssh(1)
 configuration and defaults for known-hosts file discovery even though it
 forces
-.Cm BatchMode=yes
+\fBBatchMode=yes\fR
 and
-.Cm StrictHostKeyChecking=yes .
-.It Ev ZXFER_SSH_USE_AMBIENT_CONFIG
+\fBStrictHostKeyChecking=yes\fR.
+.TP 37n
+\fBZXFER_SSH_USE_AMBIENT_CONFIG\fR
 When set to
-.Ql 1 ,
-.Ql yes ,
-.Ql true ,
+\(oq1\(cq,
+\(oqyes\(cq,
+\(oqtrue\(cq,
 or
-.Ql on ,
+\(oqon\(cq,
 zxfer stops adding its own
-.Cm BatchMode ,
-.Cm StrictHostKeyChecking ,
+\fBBatchMode\fR,
+\fBStrictHostKeyChecking\fR,
 and
-.Cm UserKnownHostsFile
+\fBUserKnownHostsFile\fR
 options, so remote connections fall back entirely to the ambient local
-.Xr ssh 1
+ssh(1)
 configuration.
-.It Ev ZXFER_ERROR_LOG
+.TP 37n
+\fBZXFER_ERROR_LOG\fR
 Absolute path to a local file where zxfer should append the same delimited
 failure report that it writes to
-.Dv stderr
+\fRstderr\fR
 on non-zero exits. The parent directory must already exist, be owned by root
 or the effective UID, and not be writable by other users unless the sticky bit
 is set. Any symlinked path component is refused, existing log files must be
@@ -1144,102 +1197,103 @@ trusted but non-writable parents use an exact log-path fallback lock under a
 validated temp root. Stale owners are reaped after validation. If zxfer cannot
 append the report, or if a successful append cannot release that lock cleanly,
 it emits a warning to
-.Dv stderr ;
+\fRstderr\fR;
 when that happens during trap-time failure reporting, zxfer still preserves the
 original exit status.
-.It Ev ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
+.TP 37n
+\fBZXFER_UNSAFE_FAILURE_REPORT_COMMANDS\fR
+.br
 When set to
-.Ql 1 ,
-.Ql yes ,
-.Ql true ,
+\(oq1\(cq,
+\(oqyes\(cq,
+\(oqtrue\(cq,
 or
-.Ql on ,
+\(oqon\(cq,
 zxfer preserves the
-.Dq invocation
+\(lqinvocation\(rq
 and
-.Dq last_command
+\(lqlast_command\(rq
 fields verbatim in structured failure reports
 on both
-.Dv stderr
+\fRstderr\fR
 and any
-.Ev ZXFER_ERROR_LOG
+\fBZXFER_ERROR_LOG\fR
 mirror. The default behavior is to redact those two fields as
-.Dq [redacted] ,
+\(lq[redacted]\(rq,
 so this override is intended only for deliberate local debugging on trusted
 log sinks.
-.It Ev TMPDIR
+.TP 37n
+\fBTMPDIR\fR
 Optional local scratch root for zxfer temporary files, FIFOs, and caches.
 When set, it must resolve to an absolute directory owned by root or the
 effective UID and not be writable by other users unless the sticky bit is set;
 otherwise zxfer prefers a validated memory-backed temporary directory such as
-.Pa /dev/shm
+\fI/dev/shm\fR
 or
-.Pa /run/shm
+\fI/run/shm\fR
 when available and falls back to the system temporary directory.
-.Pp
+.sp
 Current releases keep ssh control sockets and remote capability state per run:
 each invocation opens at most one control master per remote role under its
 private per-run temp directory, probes each remote host's capabilities once,
 holds the answer in memory, and removes everything on exit. Nothing is cached
 or coordinated across concurrent or consecutive invocations. Only
-.Ev ZXFER_ERROR_LOG
+\fBZXFER_ERROR_LOG\fR
 appends still coordinate through a metadata-bearing owned lock directory
 rather than a bare PID file; zxfer validates and reaps stale or corrupt owners
 before reuse and checks release failures instead of ignoring them.
-.Pp
+.sp
 The repository includes
-.Pa examples/error-log-email-notify.sh ,
+\fIexamples/error-log-email-notify.sh\fR,
 which shows how to set
-.Ev ZXFER_ERROR_LOG ,
+\fBZXFER_ERROR_LOG\fR,
 capture the current run's failure report from
-.Dv stderr
+\fRstderr\fR
 along with any extra stderr warnings, and send an alert with
-.Xr mailx 1 ,
+mailx(1),
 BSD
-.Xr mail 1 ,
+mail(1),
 or
-.Xr sendmail 8 .
+sendmail(8).
 It also accepts a whitespace-separated
-.Ev SRC_DATASETS
+\fBSRC_DATASETS\fR
 list so the wrapper can run multiple source roots sequentially while preserving
 the first non-zero zxfer exit status.
-.El
-.Pp
-.Nm
+.PP
+\fBzxfer\fR
 prints its immediate error message and then emits a delimited failure report to
-.Dv stderr
+\fRstderr\fR
 on every non-zero exit. The block begins with
-.Dq zxfer: failure report begin
+\(lqzxfer: failure report begin\(rq
 and ends with
-.Dq zxfer: failure report end ,
+\(lqzxfer: failure report end\(rq,
 using stable
-.Dq key: value
+\(lqkey: value\(rq
 lines so operators can archive or post-process the output. When available, the
 report includes the failure class and stage, source and destination context,
 and redacted
-.Dq invocation
+\(lqinvocation\(rq
 /
-.Dq last_command
+\(lqlast_command\(rq
 placeholders by default. Raw ASCII control bytes inside report values are
 escaped before output so the structured block stays inert in terminals,
 pagers, and
-.Ev ZXFER_ERROR_LOG .
+\fBZXFER_ERROR_LOG\fR.
 Set
-.Ev ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
+\fBZXFER_UNSAFE_FAILURE_REPORT_COMMANDS\fR
 only when you deliberately want those last two fields emitted verbatim for
 local debugging.
-.Pp
-.Sh EXIT VALUES
-.Nm
+.SH "EXIT VALUES"
+\fBzxfer\fR
 exits 0 on success and 2 if a command line option is incorrect. Runtime
 failures exit with the original non-zero status reported by the failing helper
 or command; zxfer-created validation failures that have no lower-level status
 exit 1.
-.Sh SEE ALSO
-.Xr zfs 1 ,
-.Xr zpool 1
-.Sh COMPATIBILITY
-.Nm
+.SH "SEE ALSO"
+zfs(1),
+zpool(1)
+.SH "COMPATIBILITY"
+\fBzxfer\fR
 targets current OpenZFS 2.0+ environments on maintained FreeBSD branches,
 Linux with OpenZFS, supported OmniOS/illumos trains, and OpenZFS on macOS.
 For releases published after 2026-05-01, the FreeBSD support baseline is
@@ -1249,7 +1303,7 @@ Cross-version and cross-platform
 replication can still expose property or helper-path differences, so
 mixed-environment deployments should validate their exact send/receive and
 property behavior before production use.
-.Sh THANKS
+.SH "THANKS"
 Thanks to Constantin Gonzalez for his constant collaboration, guidance, and
 his
 providing of a sounding board for ideas and decisions as I developed this
@@ -1257,53 +1311,51 @@ script. It is no understatement to say that this script would not have been
 developed to the extent it has and in its present form if not for his
 encouragement, input on design decisions, and often just simply agreeing that
 some features would be really cool, which spurred me on.
-.Pp
+.PP
 Constantin's zfs-replicate script formed the original basis for this one, and
 was very useful as a template for me to follow. Thanks to Constantin also
 for generously allowing his code to be licensed under the BSD license, and
 also encouraging the existence of this project under its own banner.
-.Pp
+.PP
 You can read Constantin's blog "Constant Thinking" at
 constantin.glez.de - if you are at all interested in the world of ZFS it is
 worth reading regularly (his non-ZFS stuff is good too).
-.Pp
-.Sh AUTHORS
+.SH "AUTHORS"
 The basis for
-.Nm ,
+\fBzxfer\fR,
 zfs-replicate, was written by Constantin Gonzalez. Ivan Nash Dreckman
 built upon that work to create the additional code and documentation
 required for
-.Nm .
+\fBzxfer\fR.
 Constantin was invaluable throughout with providing feedback
 on design decisions, suggestions and encouragement, not to mention initial
 testing on Solaris.
-.Sh BUGS
+.SH "BUGS"
 (This is a bug of ZFS on FreeBSD and not this script.)
 There are several properties in FreeBSD that when set via "zfs create"
 or "zfs set" will have the source stay as default while others are
 set to local. This does not have any real impacts because these properties
 are not inheritable. The properties are: quota, reservation, canmount,
 refquota, refreservation.
-.Pp
+.PP
 Note that FreeBSD does not support the transfer of several properties. See
-.Op Fl P
+[\fB\-P\fR]
 section for details on this.
-.Pp
+.PP
 There are several properties that are skipped over when transferring
 or setting properties when testing has shown that creating or setting
 them would fail on one or more supported platforms. If certain newer ZFS
 properties are not being transferred, they may have been added to that current
 platform filter. See the
-.Op Fl P
+[\fB\-P\fR]
 documentation for current platform-specific limitations.
-.Pp
+.PP
 Report bugs through the project issue tracker:
-.Lk https://github.com/totalAldo/zxfer/issues
-.Pp
+\fBhttps://github.com/totalAldo/zxfer/issues\fR
+.PP
 For security-sensitive issues, follow the private reporting guidance in
-.Pa SECURITY.md
+\fISECURITY.md\fR
 instead of opening a public issue.
-.Sh CREDITS
-.Nm
+.SH "CREDITS"
+\fBzxfer\fR
 is distributed under the BSD license. See the file COPYING for details.
-.Pp

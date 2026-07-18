@@ -30,6 +30,7 @@ setUp() {
 	g_zxfer_temp_prefix="zxfer.bgtest.$$"
 	g_option_Y_yield_iterations=1
 	zxfer_reset_runtime_artifact_state
+	zxfer_ensure_run_tmp_root || fail "Unable to create the background-job test run root."
 	g_zxfer_background_job_use_setsid=""
 	zxfer_reset_background_job_state
 	# Force the wrapper fallback by default so the suite behaves the same on
@@ -195,9 +196,53 @@ test_init_background_job_spawn_support_parses_probe_output_through_a_mock_setsid
 		"$output" "probe[fail]=0 expected=0"
 }
 
+test_init_background_job_spawn_support_preserves_ifs_and_existing_noglob_state() {
+	mock_dir=$(mktemp -d "$TEST_TMPDIR/setsidstate.XXXXXX") ||
+		fail "Unable to create the setsid shell-state mock directory."
+	printf '#!/bin/sh\nprintf "%%s\\n" "123 123"\n' >"$mock_dir/setsid"
+	chmod +x "$mock_dir/setsid"
+
+	output=$(
+		(
+			PATH="$mock_dir:$PATH"
+			IFS=:
+			set +f
+			g_zxfer_background_job_use_setsid=""
+			zxfer_init_background_job_spawn_support
+			shell_flags=$-
+			if [ "${shell_flags#*f}" != "$shell_flags" ]; then
+				glob_state=off
+			else
+				glob_state=on
+			fi
+			printf 'custom_ifs_result=%s ifs=<%s> glob=%s\n' \
+				"$g_zxfer_background_job_use_setsid" "$IFS" "$glob_state"
+
+			unset IFS
+			set -f
+			g_zxfer_background_job_use_setsid=""
+			zxfer_init_background_job_spawn_support
+			shell_flags=$-
+			if [ "${shell_flags#*f}" != "$shell_flags" ]; then
+				glob_state=off
+			else
+				glob_state=on
+			fi
+			printf 'unset_ifs_result=%s ifs_state=%s glob=%s\n' \
+				"$g_zxfer_background_job_use_setsid" "${IFS+set}" "$glob_state"
+		)
+	)
+
+	assertContains "The setsid probe should use whitespace splitting independently of a custom caller IFS." \
+		"$output" "custom_ifs_result=1 ifs=<:> glob=on"
+	assertContains "The setsid probe should preserve an unset IFS and a caller that already disabled globbing." \
+		"$output" "unset_ifs_result=1 ifs_state= glob=off"
+}
+
 test_spawn_uses_setsid_spawn_path_when_capability_flag_is_set() {
 	mock_dir=$(mktemp -d "$TEST_TMPDIR/setsidspawn.XXXXXX") ||
 		fail "Unable to create the setsid spawn mock directory."
+	token_marker="$TEST_TMPDIR/setsidspawn.token"
 	# Pass-through mock: enough to drive the setsid spawn line without
 	# requiring a real session leader; teardown is not exercised here.
 	printf '#!/bin/sh\nexec "$@"\n' >"$mock_dir/setsid"
@@ -206,6 +251,10 @@ test_spawn_uses_setsid_spawn_path_when_capability_flag_is_set() {
 	output=$(
 		PATH="$mock_dir:$PATH"
 		g_zxfer_background_job_use_setsid=1
+		zxfer_get_process_start_token() {
+			: >"$token_marker"
+			return 1
+		}
 		zxfer_spawn_supervised_background_job \
 			"unit_test" \
 			"printf '%s\n' 'setsid-payload'" \
@@ -220,6 +269,8 @@ test_spawn_uses_setsid_spawn_path_when_capability_flag_is_set() {
 		"$output" "teardown=process_group"
 	assertContains "The setsid spawn path should complete and report the job status." \
 		"$output" "wait_status=0 exit_status=0"
+	assertFalse "A cached normal spawn must not capture a process start token." \
+		"[ -e '$token_marker' ]"
 }
 
 test_spawn_reports_output_and_error_file_quoting_failures() {
@@ -292,10 +343,17 @@ test_signal_scope_process_group_path_ignores_missing_groups() {
 test_signal_scope_wrapper_kill_reaches_descendants_from_parent() {
 	output=$(
 		ps() {
-			printf '%s\n' '77 1'
-			printf '%s\n' '88 77'
-			printf '%s\n' '99 88'
-			printf '%s\n' '100 1'
+			printf '%s\n' '77 1 root-token'
+			printf '%s\n' '88 77 child-token'
+			printf '%s\n' '99 88 grandchild-token'
+			printf '%s\n' '100 1 unrelated-token'
+		}
+		zxfer_get_process_start_token() {
+			if [ "$1" = 88 ]; then
+				printf '%s\n' 'lstart:child-token'
+			elif [ "$1" = 99 ]; then
+				printf '%s\n' 'lstart:grandchild-token'
+			fi
 		}
 		kill() {
 			printf 'kill:%s:%s\n' "$2" "$3"
@@ -314,6 +372,244 @@ test_signal_scope_wrapper_kill_reaches_descendants_from_parent() {
 		"$output" "kill:KILL:77"
 	assertNotContains "Wrapper KILL must not signal unrelated processes." \
 		"$output" "kill:KILL:100"
+}
+
+test_descendant_capture_preserves_spaced_awk_helper_path() {
+	spaced_helper_dir="$TEST_TMPDIR/awk helper directory"
+	spaced_awk="$spaced_helper_dir/awk helper"
+	mkdir -p "$spaced_helper_dir"
+	ln -s "$(command -v awk)" "$spaced_awk"
+
+	output=$(
+		ps() {
+			printf '%s\n' '77 1 root-token'
+			printf '%s\n' '88 77 child-token'
+		}
+		g_cmd_awk=$spaced_awk
+		zxfer_capture_background_job_descendant_identity_records 77
+	)
+	status=$?
+
+	assertEquals "Descendant capture should invoke a validated awk helper whose path contains spaces." \
+		0 "$status"
+	assertEquals "Descendant capture should preserve the child identity record through a spaced helper path." \
+		"$(printf '88\tlstart:child-token')" "$output"
+}
+
+test_descendant_capture_accepts_header_form_lstart_output() {
+	output=$(
+		ps() {
+			if [ "$*" = '-A -o pid= -o ppid= -o lstart=' ]; then
+				return 1
+			fi
+			if [ "$*" = '-A -o pid -o ppid -o lstart' ]; then
+				printf '%s\n' \
+					'PID PPID STARTED' \
+					'77 1 root-token' \
+					'88 77 child-token'
+				return 0
+			fi
+			return 1
+		}
+		zxfer_capture_background_job_descendant_identity_records 77
+	)
+	status=$?
+
+	assertEquals "Header-form lstart process snapshots should be accepted on platforms that reject headerless fields." \
+		0 "$status"
+	assertEquals "Header rows should be ignored while descendant identities retain the lstart selector." \
+		"$(printf '88\tlstart:child-token')" "$output"
+}
+
+test_descendant_capture_and_signal_share_header_form_stime_selector() {
+	output=$(
+		ps() {
+			if [ "$*" = '-A -o pid= -o ppid= -o lstart=' ] ||
+				[ "$*" = '-A -o pid -o ppid -o lstart' ] ||
+				[ "$*" = '-A -o pid= -o ppid= -o stime=' ]; then
+				return 1
+			fi
+			if [ "$*" = '-A -o pid -o ppid -o stime' ]; then
+				printf '%s\n' \
+					'PID PPID STIME' \
+					'77 1 root-stime' \
+					'88 77 child-stime'
+				return 0
+			fi
+			if [ "$*" = '-p 88 -o stime=' ]; then
+				return 1
+			fi
+			if [ "$*" = '-p 88 -o stime' ]; then
+				printf '%s\n' 'STIME' 'child-stime'
+				return 0
+			fi
+			return 1
+		}
+		kill() {
+			printf 'kill:%s:%s\n' "$2" "$3"
+			return 0
+		}
+		records=$(zxfer_capture_background_job_descendant_identity_records 77)
+		printf '%s\n' "$records"
+		zxfer_signal_background_job_descendant_records "$records"
+		printf 'status=%s\n' "$?"
+	)
+
+	assertContains "Header-form stime snapshots should publish their selected identity format." \
+		"$output" "$(printf '88\tstime:child-stime')"
+	assertContains "Descendant signalling should revalidate the exact captured stime selector before KILL." \
+		"$output" "kill:KILL:88"
+	assertContains "Matching header-form stime identities should complete teardown successfully." \
+		"$output" "status=0"
+}
+
+test_descendant_signal_treats_exit_after_identity_validation_as_success() {
+	output=$(
+		zxfer_get_process_start_token() {
+			printf '%s\n' 'lstart:matching-child'
+		}
+		kill() {
+			return 1
+		}
+		zxfer_signal_background_job_descendant_records \
+			"$(printf '88\tlstart:matching-child')"
+		printf 'status=%s message=<%s>\n' \
+			"$?" "$g_zxfer_background_job_abort_failure_message"
+	)
+
+	assertContains "A descendant that exits between token validation and KILL should already be considered reaped." \
+		"$output" "status=0 message=<>"
+}
+
+test_descendant_signal_fails_when_matching_process_remains_unsignallable() {
+	output=$(
+		zxfer_get_process_start_token() {
+			printf '%s\n' 'lstart:matching-child'
+		}
+		kill() {
+			[ "$2" = KILL ] && return 1
+			[ "$2" = 0 ] && return 0
+			return 1
+		}
+		zxfer_signal_background_job_descendant_records \
+			"$(printf '88\tlstart:matching-child')"
+		printf 'status=%s message=<%s>\n' \
+			"$?" "$g_zxfer_background_job_abort_failure_message"
+	)
+
+	assertContains "A matching process that remains live after failed KILL delivery should fail teardown closed." \
+		"$output" "status=1"
+	assertContains "Unsignallable live descendants should retain the aggregate abort diagnostic." \
+		"$output" "Refusing to signal one or more supervised background job descendants"
+}
+
+test_signal_scope_process_group_does_not_capture_root_identity() {
+	output=$(
+		zxfer_get_process_start_token() {
+			printf '%s\n' "unexpected-token-capture"
+		}
+		kill() {
+			printf 'kill:%s\n' "$*"
+			return 0
+		}
+		zxfer_signal_background_job_scope 77 process_group TERM
+		printf 'status=%s\n' "$?"
+	)
+
+	assertContains "Registered process-group teardown should signal its owned group." \
+		"$output" "kill:-TERM -77"
+	assertContains "Registered process-group teardown should succeed." \
+		"$output" "status=0"
+	assertNotContains "Normal root signalling must not capture a process start token." \
+		"$output" "unexpected-token-capture"
+}
+
+test_signal_scope_skips_recycled_descendant_pid_before_kill() {
+	output=$(
+		zxfer_get_process_start_token() {
+			if [ "$1" = 77 ]; then
+				printf '%s\n' "lstart:root"
+			elif [ "$1" = 88 ]; then
+				printf '%s\n' "lstart:replacement-child"
+			fi
+		}
+		zxfer_capture_background_job_descendant_identity_records() {
+			printf '88\tlstart:original-child\n'
+		}
+		kill() {
+			printf 'kill:%s:%s\n' "$2" "$3"
+			return 0
+		}
+		zxfer_signal_background_job_scope 77 wrapper KILL
+		printf 'status=%s\n' "$?"
+	)
+
+	assertContains "A recycled descendant should make scoped teardown report failure." \
+		"$output" "status=2"
+	assertContains "The still-owned wrapper root should be stopped before discovery." \
+		"$output" "kill:STOP:77"
+	assertContains "The still-owned wrapper root should still receive KILL." \
+		"$output" "kill:KILL:77"
+	assertNotContains "A recycled descendant PID must never receive KILL." \
+		"$output" "kill:KILL:88"
+}
+
+test_wrapper_descendant_discovery_failure_propagates_through_abort() {
+	output=$(
+		(
+			set +e
+			zxfer_find_background_job_record() {
+				g_zxfer_background_job_record_pid=77
+				g_zxfer_background_job_record_teardown=wrapper
+				g_zxfer_background_job_record_status_file="$g_zxfer_run_tmp_root/ps-failure.status"
+				return 0
+			}
+			zxfer_unregister_background_job_record() { :; }
+			zxfer_cleanup_runtime_artifact_path() { :; }
+			zxfer_background_job_abort_grace_wait() { :; }
+			ps() { return 9; }
+			kill() {
+				printf 'kill:%s:%s\n' "$2" "$3"
+				return 0
+			}
+
+			zxfer_abort_background_job job-ps-failure TERM
+			printf 'status=%s\n' "$?"
+			printf 'message=%s\n' "$g_zxfer_background_job_abort_failure_message"
+		)
+	)
+
+	assertContains "Abort should still signal the wrapper when descendant discovery fails." \
+		"$output" "kill:KILL:77"
+	assertContains "A failed process-tree discovery must make the abort fail closed." \
+		"$output" "status=9"
+	assertContains "A failed process-tree discovery should publish a cleanup diagnostic." \
+		"$output" "Failed to discover all descendants"
+}
+
+test_wrapper_descendant_discovery_failure_is_ignored_after_term_exits_root() {
+	output=$(
+		zxfer_capture_background_job_descendant_identity_records() {
+			return 9
+		}
+		kill() {
+			if [ "$2" = "0" ]; then
+				return 1
+			fi
+			printf 'kill:%s:%s\n' "$2" "$3"
+			return 0
+		}
+		zxfer_signal_background_job_scope 77 wrapper KILL
+		printf 'status=%s message=<%s>\n' \
+			"$?" "$g_zxfer_background_job_abort_failure_message"
+	)
+
+	assertContains "A root that exited during TERM grace should make KILL teardown a no-op success." \
+		"$output" "status=0 message=<>"
+	assertContains "KILL teardown may attempt to stop the owned root before discovering it exited." \
+		"$output" "kill:STOP:77"
+	assertNotContains "An exited root should not receive a final KILL." \
+		"$output" "kill:KILL:77"
 }
 
 test_spawn_and_wait_round_trips_success_status_and_output_capture() {
@@ -368,7 +664,7 @@ test_spawn_and_wait_propagate_nonzero_job_exit_status() {
 test_wait_reports_missing_status_file_as_completion_write_failure() {
 	sh -c 'exit 3' &
 	job_pid=$!
-	zxfer_register_background_job_record "job-missing-status" "unit_test" "$job_pid" wrapper "$TEST_TMPDIR/never_written.status"
+	zxfer_register_background_job_record "job-missing-status" "unit_test" "$job_pid" wrapper "$g_zxfer_run_tmp_root/never_written.status"
 
 	zxfer_wait_for_background_job "job-missing-status"
 	wait_status=$?
@@ -384,7 +680,7 @@ test_wait_reports_missing_status_file_as_completion_write_failure() {
 }
 
 test_wait_fails_closed_on_non_numeric_status_file() {
-	status_file="$TEST_TMPDIR/bad_status.status"
+	status_file="$g_zxfer_run_tmp_root/bad_status.status"
 	printf 'status\tbad\n' >"$status_file"
 	sh -c 'exit 0' &
 	job_pid=$!
@@ -401,8 +697,52 @@ test_wait_fails_closed_on_non_numeric_status_file() {
 		"[ -e \"$status_file\" ]"
 }
 
+test_read_background_job_status_file_rejects_corrupt_protocol_rows() {
+	status_file="$g_zxfer_run_tmp_root/corrupt_status.status"
+
+	printf 'status\t256\n' >"$status_file"
+	zxfer_read_background_job_status_file "$status_file"
+	overflow_status=$?
+
+	printf 'status\t999999999999999999999999999999\n' >"$status_file"
+	zxfer_read_background_job_status_file "$status_file"
+	huge_status=$?
+
+	printf 'status\t0' >"$status_file"
+	zxfer_read_background_job_status_file "$status_file"
+	truncated_status=$?
+
+	printf 'status\t0\nunknown\tvalue\n' >"$status_file"
+	zxfer_read_background_job_status_file "$status_file"
+	unknown_status=$?
+
+	printf 'status\t0\n\nreport_failure\t\n' >"$status_file"
+	zxfer_read_background_job_status_file "$status_file"
+	blank_status=$?
+
+	printf 'status\t255\nreport_failure\tcompletion_write\n' >"$status_file"
+	zxfer_read_background_job_status_file "$status_file"
+	valid_status=$?
+	valid_exit=$g_zxfer_background_job_completion_exit_status
+	valid_marker=$g_zxfer_background_job_completion_report_failure
+
+	assertEquals "Statuses outside the shell exit range should fail closed." \
+		1 "$overflow_status"
+	assertEquals "Arbitrarily large status values should fail closed without arithmetic overflow." \
+		1 "$huge_status"
+	assertEquals "A protocol row without its terminating newline should fail closed." \
+		1 "$truncated_status"
+	assertEquals "Unknown protocol rows should fail closed." 1 "$unknown_status"
+	assertEquals "Blank protocol rows should fail closed." 1 "$blank_status"
+	assertEquals "The maximum shell exit status and optional marker should remain valid." \
+		0 "$valid_status"
+	assertEquals "The maximum valid status should be preserved." 255 "$valid_exit"
+	assertEquals "A valid optional report-failure marker should be preserved." \
+		"completion_write" "$valid_marker"
+}
+
 test_wait_fails_closed_on_unknown_report_failure_marker() {
-	status_file="$TEST_TMPDIR/bad_marker.status"
+	status_file="$g_zxfer_run_tmp_root/bad_marker.status"
 	printf 'status\t0\nreport_failure\tbad_marker\n' >"$status_file"
 	sh -c 'exit 0' &
 	job_pid=$!
@@ -416,7 +756,7 @@ test_wait_fails_closed_on_unknown_report_failure_marker() {
 }
 
 test_wait_preserves_queue_write_report_failure_marker() {
-	status_file="$TEST_TMPDIR/queue_write.status"
+	status_file="$g_zxfer_run_tmp_root/queue_write.status"
 	printf 'status\t0\nreport_failure\tqueue_write\n' >"$status_file"
 	sh -c 'exit 125' &
 	job_pid=$!
@@ -887,6 +1227,9 @@ test_spawn_cleans_up_job_and_status_file_when_registration_fails() {
 	rm -f "$status_file_record"
 	zxfer_test_capture_subshell '
 		g_zxfer_background_job_abort_grace_seconds=0
+		zxfer_capture_background_job_descendant_identity_records() {
+			return 0
+		}
 		zxfer_register_background_job_record() {
 			printf "%s\n" "$5" >"'"$status_file_record"'"
 			return 1
@@ -905,6 +1248,31 @@ test_spawn_cleans_up_job_and_status_file_when_registration_fails() {
 		assertFalse "Spawn should remove the status file when registration fails." \
 			"[ -e \"$leaked_status_file\" ]"
 	fi
+}
+
+test_spawn_registration_failure_promotes_descendant_discovery_teardown_failure() {
+	zxfer_test_capture_subshell '
+		zxfer_signal_background_job_scope() {
+			zxfer_set_background_job_abort_failure_message \
+				"Failed to discover all descendants of supervised background job process [$1] during abort."
+			return 9
+		}
+		zxfer_background_job_abort_grace_wait() { :; }
+		wait() { :; }
+		zxfer_cleanup_runtime_artifact_path() { :; }
+		zxfer_throw_error() {
+			printf "%s\n" "$1"
+			exit "$2"
+		}
+		zxfer_fail_background_job_registration \
+			"bgjob.test" 4242 wrapper \
+			"$g_zxfer_run_tmp_root/test.status" 1
+	'
+
+	assertEquals "Registration failure cleanup should promote failed process-tree discovery over the earlier registration status." \
+		9 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Registration failure cleanup should surface the descendant-discovery teardown diagnostic." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to discover all descendants"
 }
 
 test_spawn_reports_status_file_quoting_failures() {

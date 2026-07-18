@@ -24,8 +24,8 @@ man zxfer
 
 Bundled references:
 
-- [man/zxfer.8](./man/zxfer.8) for FreeBSD/Linux-style installs
-- [man/zxfer.1m](./man/zxfer.1m) for Solaris/illumos-style installs
+- canonical [man/zxfer.8](./man/zxfer.8) for section 8 installs
+- generated [man/zxfer.1m](./man/zxfer.1m) for Solaris/illumos-style installs
 - [docs/cli-examples.md](./docs/cli-examples.md) for task-oriented examples
 
 If you are upgrading from the 2019 `v1.1.7` release, start with
@@ -260,10 +260,25 @@ Current runtime caveats are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 Run the main local validation steps:
 
 ```sh
-./tests/run_shunit_tests.sh
-./tests/run_lint.sh
-ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
+./tests/validate.sh full
 ```
+
+For a faster edit loop, `./tests/validate.sh quick` maps staged, unstaged, and
+untracked paths to focused offline checks. Pass paths explicitly when needed:
+
+```sh
+./tests/validate.sh quick src/zxfer_replication.sh
+./tests/run_shunit_tests.sh \
+  --suite tests/test_zxfer_replication.sh --test test_name
+```
+
+Repeat `--suite ... --test ...` to select named tests across several suites;
+the runner validates the complete selection before starting any of them.
+
+Use `./tests/validate.sh --list` to see the host-risk label and purpose of each
+profile. Quick mode explains its path mappings and prints relevant integration,
+performance, and documentation follow-ups without running them. The dispatcher
+never runs the direct host integration harness.
 
 For unattended integration coverage on a disposable guest boundary, prefer:
 

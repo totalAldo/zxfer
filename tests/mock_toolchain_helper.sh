@@ -447,10 +447,8 @@ zxfer_mockbin_secure_path_env() {
 # canned zfs is missing from <mockdir> so a misbuilt mock dir can never let
 # zxfer resolve a real zfs. Stdout/stderr pass through; redirect at the call
 # site. Returns zxfer's exit status.
-# Side effects: Clears ZXFER_SOURCE_MODULES_THROUGH in the child environment.
-# Suites that source tests/test_helper.sh leak it as an exported variable
-# (assignments preceding the `.` special builtin persist exported in
-# bash-as-sh), which would otherwise truncate the launcher's module sourcing.
+# Side effects: Runs the launcher with a fixture-scoped secure PATH and canned
+# ZFS state while leaving the caller's environment unchanged.
 zxfer_mockbin_run_zxfer() {
 	l_mockbin_run_mockdir=$1
 	l_mockbin_run_state=$2
@@ -473,6 +471,5 @@ zxfer_mockbin_run_zxfer() {
 		MOCK_ZFS_FIXTURE_DIR="$l_mockbin_run_state" \
 		ZXFER_SECURE_PATH=$(zxfer_mockbin_secure_path_env "$l_mockbin_run_mockdir") \
 		ZXFER_SECURE_PATH_APPEND="" \
-		ZXFER_SOURCE_MODULES_THROUGH="" \
 		"$l_mockbin_run_bin" "$@"
 }

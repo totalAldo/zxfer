@@ -2,6 +2,7 @@
 #
 # Run zxfer lint targets with pinned tool versions so local runs mirror CI.
 #
+# shellcheck shell=sh disable=SC2016
 
 set -eu
 
@@ -20,6 +21,11 @@ DEVSCRIPTS_VERSION=2.25.33
 CHECKBASHISMS_DEB_URL=https://snapshot.debian.org/archive/debian/20251229T143714Z/pool/main/d/devscripts/devscripts_2.25.33_all.deb
 CHECKBASHISMS_DEB_SHA256=f1fae3aad11d4d8c3565eafdc15ee8bbf95f7452ede52f4b4bc372dd2a38b54f
 
+LINT_TOOL_ROOT=
+DOWNLOAD_DIR=
+HOST_OS=
+HOST_ARCH=
+
 print_usage() {
 	cat <<'EOF'
 Usage: tests/run_lint.sh [target ...]
@@ -34,6 +40,7 @@ Targets:
   codespell
   shellcheck
   budget
+  manpages
   all
 
 Options:
@@ -76,6 +83,9 @@ download_and_verify() {
 	l_actual_sha256=
 	l_tmp=
 
+	require_command curl
+	require_command awk
+
 	mkdir -p "$(dirname "$l_dest")"
 	if [ -f "$l_dest" ]; then
 		l_actual_sha256=$(sha256_file "$l_dest")
@@ -111,6 +121,11 @@ set_tool_root() {
 	mkdir -p "$DOWNLOAD_DIR"
 }
 
+ensure_tool_root() {
+	[ -n "$LINT_TOOL_ROOT" ] && return 0
+	set_tool_root
+}
+
 detect_host_platform() {
 	case "$(uname -s)" in
 	Linux)
@@ -135,6 +150,11 @@ detect_host_platform() {
 		die "Unsupported host architecture for lint bootstrap: $(uname -m)"
 		;;
 	esac
+}
+
+ensure_host_platform() {
+	[ -n "$HOST_OS" ] && [ -n "$HOST_ARCH" ] && return 0
+	detect_host_platform
 }
 
 set_actionlint_asset() {
@@ -210,12 +230,16 @@ set_shellcheck_asset() {
 }
 
 ensure_actionlint() {
+	ensure_tool_root
+	ensure_host_platform
+	set_actionlint_asset
 	l_install_dir=$LINT_TOOL_ROOT/actionlint/$ACTIONLINT_VERSION/$HOST_OS-$HOST_ARCH
 	ACTIONLINT_BIN=$l_install_dir/actionlint
 	if [ -x "$ACTIONLINT_BIN" ]; then
 		return 0
 	fi
 
+	require_command tar
 	l_archive=$DOWNLOAD_DIR/$ACTIONLINT_ASSET
 	l_stage=$l_install_dir.stage.$$
 
@@ -229,6 +253,7 @@ ensure_actionlint() {
 }
 
 ensure_checkbashisms() {
+	ensure_tool_root
 	l_install_dir=$LINT_TOOL_ROOT/checkbashisms/$DEVSCRIPTS_VERSION
 	CHECKBASHISMS_BIN=$l_install_dir/checkbashisms
 	if [ -x "$CHECKBASHISMS_BIN" ]; then
@@ -237,6 +262,7 @@ ensure_checkbashisms() {
 
 	require_command ar
 	require_command perl
+	require_command tar
 	l_deb=$DOWNLOAD_DIR/devscripts_$DEVSCRIPTS_VERSION"_all.deb"
 	l_stage=$l_install_dir.stage.$$
 
@@ -254,6 +280,9 @@ ensure_checkbashisms() {
 }
 
 ensure_shfmt() {
+	ensure_tool_root
+	ensure_host_platform
+	set_shfmt_asset
 	l_install_dir=$LINT_TOOL_ROOT/shfmt/$SHFMT_VERSION/$HOST_OS-$HOST_ARCH
 	SHFMT_BIN=$l_install_dir/shfmt
 	if [ -x "$SHFMT_BIN" ]; then
@@ -269,6 +298,7 @@ ensure_shfmt() {
 }
 
 ensure_codespell() {
+	ensure_tool_root
 	l_install_dir=$LINT_TOOL_ROOT/codespell/$CODESPELL_VERSION
 	CODESPELL_BIN=$l_install_dir/venv/bin/codespell
 	if [ -x "$CODESPELL_BIN" ] && "$CODESPELL_BIN" --version >/dev/null 2>&1; then
@@ -287,12 +317,16 @@ ensure_codespell() {
 }
 
 ensure_shellcheck() {
+	ensure_tool_root
+	ensure_host_platform
+	set_shellcheck_asset
 	l_install_dir=$LINT_TOOL_ROOT/shellcheck/$SHELLCHECK_VERSION/$HOST_OS-$HOST_ARCH
 	SHELLCHECK_BIN=$l_install_dir/shellcheck
 	if [ -x "$SHELLCHECK_BIN" ]; then
 		return 0
 	fi
 
+	require_command tar
 	l_archive=$DOWNLOAD_DIR/$SHELLCHECK_ASSET
 	l_stage=$l_install_dir.stage.$$
 
@@ -314,23 +348,44 @@ run_actionlint() {
 	)
 }
 
+list_lint_shell_files() {
+	# A single Git query keeps tracked and non-ignored untracked shell sources
+	# NUL-delimited without reporting any path twice.
+	git ls-files -z --cached --others --exclude-standard -- \
+		'zxfer' '*.sh' ':!:tests/shunit2/shunit2'
+}
+
 run_checkbashisms() {
+	require_command git
+	require_command xargs
 	ensure_checkbashisms
 	printf '==> checkbashisms (devscripts %s)\n' "$DEVSCRIPTS_VERSION"
 	(
 		cd "$ZXFER_ROOT"
-		git ls-files -z -- 'zxfer' '*.sh' ':!:tests/shunit2/shunit2' |
-			xargs -0 "$CHECKBASHISMS_BIN" --posix
+		list_lint_shell_files |
+			xargs -0 sh -c '
+				l_tool=$1
+				shift
+				[ "$#" -gt 0 ] || exit 0
+				exec "$l_tool" --posix "$@"
+			' sh "$CHECKBASHISMS_BIN"
 	)
 }
 
 run_shfmt() {
+	require_command git
+	require_command xargs
 	ensure_shfmt
 	printf '==> shfmt %s\n' "$SHFMT_VERSION"
 	(
 		cd "$ZXFER_ROOT"
-		git ls-files -z '*.sh' |
-			xargs -0 "$SHFMT_BIN" -d zxfer
+		list_lint_shell_files |
+			xargs -0 sh -c '
+				l_tool=$1
+				shift
+				[ "$#" -gt 0 ] || exit 0
+				exec "$l_tool" -d "$@"
+			' sh "$SHFMT_BIN"
 	)
 }
 
@@ -343,19 +398,40 @@ run_codespell() {
 	)
 }
 
+run_test_helper_eval_policy() {
+	require_command awk
+	printf '==> test-helper eval policy\n'
+	"$ZXFER_ROOT/tests/check_test_helper_eval.sh" "$ZXFER_ROOT"
+}
+
 run_shellcheck() {
+	require_command git
+	require_command xargs
+	run_test_helper_eval_policy
 	ensure_shellcheck
 	printf '==> shellcheck %s\n' "$SHELLCHECK_VERSION"
 	(
 		cd "$ZXFER_ROOT"
-		git ls-files -z '*.sh' |
-			xargs -0 "$SHELLCHECK_BIN" --external-sources --source-path=.:src zxfer
+		list_lint_shell_files |
+			xargs -0 sh -c '
+				l_tool=$1
+				shift
+				[ "$#" -gt 0 ] || exit 0
+				exec "$l_tool" --external-sources --source-path=.:src "$@"
+			' sh "$SHELLCHECK_BIN"
 	)
 }
 
 run_budget() {
 	printf '==> budget (tests/budget_policy.tsv)\n'
 	"$ZXFER_ROOT/tests/run_budget_check.sh"
+	printf '==> architecture (tests/architecture_policy.tsv)\n'
+	"$ZXFER_ROOT/tests/check_architecture.sh"
+}
+
+run_manpages() {
+	printf '==> manpages (man/zxfer.8 -> man/zxfer.1m)\n'
+	"$ZXFER_ROOT/tests/generate_solaris_manpage.sh" --check
 }
 
 run_target() {
@@ -377,6 +453,9 @@ run_target() {
 		;;
 	budget)
 		run_budget
+		;;
+	manpages)
+		run_manpages
 		;;
 	*)
 		die "Unknown lint target: $1"
@@ -409,6 +488,9 @@ bootstrap_target() {
 	budget)
 		printf '==> bootstrap budget (no downloads required)\n'
 		;;
+	manpages)
+		printf '==> bootstrap manpages (no downloads required)\n'
+		;;
 	*)
 		die "Unknown lint target: $1"
 		;;
@@ -433,6 +515,7 @@ append_default_targets() {
 	append_target codespell
 	append_target shellcheck
 	append_target budget
+	append_target manpages
 }
 
 print_default_targets() {
@@ -443,17 +526,9 @@ shfmt
 codespell
 shellcheck
 budget
+manpages
 EOF
 }
-
-set_tool_root
-detect_host_platform
-set_actionlint_asset
-set_shfmt_asset
-set_shellcheck_asset
-require_command curl
-require_command git
-require_command tar
 
 TARGET_LIST=
 BOOTSTRAP_ONLY=0
@@ -477,7 +552,7 @@ else
 			TARGET_LIST=
 			append_default_targets
 			;;
-		actionlint | checkbashisms | shfmt | codespell | shellcheck | budget)
+		actionlint | checkbashisms | shfmt | codespell | shellcheck | budget | manpages)
 			append_target "$l_arg"
 			;;
 		*)
