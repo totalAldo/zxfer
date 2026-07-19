@@ -55,6 +55,7 @@ test_zxfer_init_globals_preserves_owner_initialization_order() {
 			zxfer_reset_snapshot_producer_session_state() { zxfer_session_test_log snapshot-producers; }
 			zxfer_reset_snapshot_discovery_state() { zxfer_session_test_log snapshot-discovery; }
 			zxfer_reset_snapshot_reconcile_state() { zxfer_session_test_log snapshot-reconcile; }
+			zxfer_reset_snapshot_delete_artifact_state() { zxfer_session_test_log snapshot-delete-artifacts; }
 			zxfer_reset_backup_metadata_state() { zxfer_session_test_log backup-metadata; }
 			zxfer_reset_property_runtime_state() { zxfer_session_test_log property-runtime; }
 			zxfer_reset_property_iteration_caches() { zxfer_session_test_log property-iteration; }
@@ -91,6 +92,7 @@ snapshot-index
 snapshot-producers
 snapshot-discovery
 snapshot-reconcile
+snapshot-delete-artifacts
 backup-metadata
 property-runtime
 property-iteration
@@ -112,6 +114,9 @@ test_zxfer_session_initialize_preserves_bootstrap_and_trap_order() {
 			zxfer_discard_inherited_cleanup_state() {
 				printf '%s\n' discard-cleanup
 			}
+			zxfer_initialize_dependency_reporting_defaults() {
+				printf '%s\n' reporting-dependency-bootstrap
+			}
 			zxfer_initialize_dependency_defaults() {
 				printf '%s\n' dependency-bootstrap
 			}
@@ -126,10 +131,11 @@ test_zxfer_session_initialize_preserves_bootstrap_and_trap_order() {
 		)
 	)
 
-	assertEquals "Session bootstrap should discard inherited cleanup handles before resolving dependencies or installing traps." \
+	assertEquals "Session bootstrap should discard inherited cleanup handles and secure reporting dependencies before installing traps or validating configuration." \
 		'discard-cleanup
-dependency-bootstrap
+reporting-dependency-bootstrap
 traps
+dependency-bootstrap
 globals' "$output"
 }
 
@@ -261,6 +267,39 @@ test_zxfer_session_run_does_not_promote_optional_beep_failure() {
 
 	assertEquals "A best-effort beep failure must not change a successful replication exit status." \
 		0 "$l_status"
+}
+
+test_zxfer_session_run_promotes_final_backup_write_failure() {
+	log="$TEST_TMPDIR/session_backup_write_failure.log"
+	: >"$log"
+
+	set +e
+	(
+		SESSION_LOG="$log"
+		OPTIND=1
+		g_option_k_backup_property_mode=1
+		zxfer_set_failure_stage() { :; }
+		zxfer_read_command_line_switches() { OPTIND=1; }
+		zxfer_set_failure_roots() { :; }
+		zxfer_consistency_check() { :; }
+		zxfer_prepare_remote_host_connections() { :; }
+		zxfer_init_variables() { :; }
+		zxfer_run_zfs_mode_loop() { :; }
+		zxfer_write_backup_properties() { return 41; }
+		zxfer_throw_error() {
+			printf 'throw=%s status=%s\n' "$1" "$2" >>"$SESSION_LOG"
+			return "$2"
+		}
+		zxfer_beep() { printf 'unexpected-success-beep\n' >>"$SESSION_LOG"; }
+
+		zxfer_session_run backup/destination
+	)
+	status=$?
+
+	assertEquals "The session boundary should preserve final backup-write failures." \
+		41 "$status"
+	assertEquals "Final backup-write failures should be reported and must not continue to the success beep." \
+		"throw=Failed to write backup metadata. status=41" "$(cat "$log")"
 }
 
 test_migration_service_status_only_restore_returns_failure_without_throwing() {

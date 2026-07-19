@@ -1645,5 +1645,56 @@ test_test_helper_clears_ambient_runner_test_shell() {
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_test_helper_keeps_domain_fixtures_opt_in() {
+	/bin/sh -c '
+		TESTS_DIR=$1
+		. "$1/test_helper.sh"
+		if command -v zxfer_test_render_current_backup_metadata_contents >/dev/null 2>&1 ||
+			command -v zxfer_test_write_env_fake_ssh >/dev/null 2>&1; then
+			exit 1
+		fi
+		. "$1/helpers/backup_fixtures.sh"
+		. "$1/helpers/fake_tool_fixtures.sh"
+		command -v zxfer_test_render_current_backup_metadata_contents >/dev/null 2>&1 &&
+			command -v zxfer_test_write_env_fake_ssh >/dev/null 2>&1
+	' sh "$TESTS_DIR"
+	l_status=$?
+
+	assertEquals "Domain-specific backup and fake-tool fixtures should load only after a suite explicitly sources them." \
+		0 "$l_status"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_fake_tool_fixture_returns_write_failure_before_chmod() {
+	l_fake_chmod_log="$TEST_TMPDIR/fake-tool-chmod.log"
+	l_fake_ssh_path="$TEST_TMPDIR/fake-tool-ssh"
+
+	if /bin/sh -c '
+		. "$1/helpers/fake_tool_fixtures.sh"
+		fake_chmod_log=$2
+		cat() { return 73; }
+		chmod() {
+			: >"$fake_chmod_log"
+			return 0
+		}
+		zxfer_test_write_env_fake_ssh "$3"
+	' sh "$TESTS_DIR" "$l_fake_chmod_log" "$l_fake_ssh_path"; then
+		l_status=0
+	else
+		l_status=$?
+	fi
+	if [ -e "$l_fake_chmod_log" ]; then
+		l_chmod_called=yes
+	else
+		l_chmod_called=no
+	fi
+
+	assertEquals "The fake-tool writer should preserve the executable write failure." \
+		73 "$l_status"
+	assertEquals "The fake-tool writer should not chmod a path after its write fails." \
+		no "$l_chmod_called"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

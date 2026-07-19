@@ -15,6 +15,7 @@ POLICY_FILE=$ZXFER_ROOT/tests/architecture_policy.tsv
 EVAL_POLICY_FILE=$ZXFER_ROOT/tests/architecture_eval_policy.tsv
 EVAL_SITE_AWK=$ZXFER_ROOT/tests/extract_eval_sites.awk
 GLOBAL_WRITER_AWK=$ZXFER_ROOT/tests/extract_global_writes.awk
+GLOBAL_REFERENCE_AWK=$ZXFER_ROOT/tests/extract_global_references.awk
 FUNCTION_SCRATCH_AWK=$ZXFER_ROOT/tests/extract_function_scratch.awk
 FUNCTION_SCRATCH_BASELINE=$ZXFER_ROOT/tests/function_scratch_baseline.tsv
 TAB=$(printf '\t')
@@ -42,6 +43,10 @@ report_architecture_violation() {
 }
 [ -r "$GLOBAL_WRITER_AWK" ] || {
 	echo "Missing global-writer extractor: $GLOBAL_WRITER_AWK" >&2
+	exit 1
+}
+[ -r "$GLOBAL_REFERENCE_AWK" ] || {
+	echo "Missing global-reference extractor: $GLOBAL_REFERENCE_AWK" >&2
 	exit 1
 }
 [ -r "$FUNCTION_SCRATCH_AWK" ] || {
@@ -162,6 +167,63 @@ if [ -s "$architecture_tmp/global-owner-violations" ]; then
 	done <"$architecture_tmp/global-owner-violations"
 fi
 
+# Owner-prefixed *_result globals are the sanctioned hot-path alternative to
+# command substitution. Every cross-module reader is exact-inventoried so a
+# result channel cannot quietly spread to another consumer or retain obsolete
+# policy after its caller moves back to stdout/status-only flow.
+awk -F "$TAB" '
+	!seen[$1 SUBSEP $2]++ && $1 ~ /^g_zxfer_[A-Za-z0-9_]*_result$/ {
+		printf "%s\t%s\n", $1, $2
+	}
+' "$architecture_tmp/global-writes" | sort >"$architecture_tmp/result-channel-owners"
+while IFS= read -r l_module; do
+	awk -v module="$l_module" -f "$GLOBAL_REFERENCE_AWK" "$ZXFER_ROOT/$l_module"
+done <"$architecture_tmp/source-modules" >"$architecture_tmp/global-references"
+awk -F "$TAB" '
+	NR == FNR {
+		owner[$1] = $2
+		next
+	}
+	$1 in owner && owner[$1] != $2 {
+		printf "%s\t%s\t%s\n", $1, owner[$1], $2
+	}
+' "$architecture_tmp/result-channel-owners" "$architecture_tmp/global-references" |
+	sort -u >"$architecture_tmp/result-channel-consumers"
+awk -F "$TAB" '
+	$1 == "result-consumer" &&
+		(NF != 4 || $2 == "" || $3 == "" || $4 == "") {
+		printf "line %d must contain result-consumer, global, owner, and consumer: %s\n", FNR, $0
+	}
+' "$POLICY_FILE" >"$architecture_tmp/result-consumer-policy-invalid"
+if [ -s "$architecture_tmp/result-consumer-policy-invalid" ]; then
+	while IFS= read -r l_violation; do
+		report_architecture_violation "invalid result-channel consumer policy: $l_violation"
+	done <"$architecture_tmp/result-consumer-policy-invalid"
+fi
+awk -F "$TAB" '
+	$1 == "result-consumer" && NF == 4 && $2 != "" && $3 != "" && $4 != "" {
+		printf "%s\t%s\t%s\n", $2, $3, $4
+	}
+' "$POLICY_FILE" | sort >"$architecture_tmp/result-consumer-policy"
+l_duplicate_result_consumers=$(uniq -d "$architecture_tmp/result-consumer-policy")
+if [ -n "$l_duplicate_result_consumers" ]; then
+	report_architecture_violation "duplicate result-channel consumer policy entries: $(printf '%s' "$l_duplicate_result_consumers" | tr '\n' ' ')"
+fi
+comm -23 "$architecture_tmp/result-channel-consumers" \
+	"$architecture_tmp/result-consumer-policy" >"$architecture_tmp/result-consumers-new"
+if [ -s "$architecture_tmp/result-consumers-new" ]; then
+	while IFS="$TAB" read -r l_global l_owner l_consumer; do
+		report_architecture_violation "unapproved cross-owner result-channel consumer: $l_global owned by $l_owner read by $l_consumer"
+	done <"$architecture_tmp/result-consumers-new"
+fi
+comm -13 "$architecture_tmp/result-channel-consumers" \
+	"$architecture_tmp/result-consumer-policy" >"$architecture_tmp/result-consumers-stale"
+if [ -s "$architecture_tmp/result-consumers-stale" ]; then
+	while IFS="$TAB" read -r l_global l_owner l_consumer; do
+		report_architecture_violation "stale result-channel consumer policy entry: $l_global owned by $l_owner no longer read by $l_consumer"
+	done <"$architecture_tmp/result-consumers-stale"
+fi
+
 # Parsed CLI option state is immutable outside the CLI owner. This is stricter
 # than single-writer ownership: moving the only g_option_* write to another
 # module must not silently redefine the option-state boundary.
@@ -260,9 +322,99 @@ fi
 while IFS= read -r l_module; do
 	awk -F "$TAB" -v caller="$l_module" '
 		NR == FNR { owner[$1] = $2; next }
-		$0 ~ /^[[:space:]]*#/ { next }
+
+		function is_shell_token_separator(char) {
+			return (char == " " || char == "\t" ||
+				char == ";" || char == "|" || char == "&" ||
+				char == "(" || char == ")" || char == "<" || char == ">")
+		}
+
+		function remember_heredoc_at(line, start,    fragment) {
+			fragment = substr(line, start)
+			if (!match(fragment, /^<<-?[ \t]*(\\[A-Za-z_][A-Za-z0-9_]*|[\047"][A-Za-z_][A-Za-z0-9_]*[\047"]|[A-Za-z_][A-Za-z0-9_]*)/))
+				return
+			fragment = substr(fragment, RSTART, RLENGTH)
+			heredoc_strip_tabs = (fragment ~ /^<<-/)
+			sub(/^<<-?[ \t]*/, "", fragment)
+			gsub(/[\047"]/, "", fragment)
+			gsub(/\\/, "", fragment)
+			heredoc_delimiter = fragment
+		}
+
+		# Strip comments in the source shell grammar, but retain quoted command
+		# renderers and heredoc payloads for the deliberately conservative edge
+		# inventory below.
+		function shell_without_comment(line,    output, candidate, i, char, token_start) {
+			if (heredoc_delimiter != "") {
+				candidate = line
+				if (heredoc_strip_tabs)
+					sub(/^\t+/, "", candidate)
+				if (candidate == heredoc_delimiter) {
+					heredoc_delimiter = ""
+					heredoc_strip_tabs = 0
+				}
+				return line
+			}
+
+			output = ""
+			token_start = (quote == "" && !continued_word)
+			continued_word = 0
+			for (i = 1; i <= length(line); i++) {
+				char = substr(line, i, 1)
+				if (quote == "\047") {
+					output = output char
+					if (char == "\047")
+						quote = ""
+					continue
+				}
+				if (quote == "\"") {
+					output = output char
+					if (char == "\\" && i < length(line)) {
+						i++
+						output = output substr(line, i, 1)
+						continue
+					}
+					if (char == "\"")
+						quote = ""
+					continue
+				}
+				if (char == "#" && token_start)
+					break
+				if (char == "\\") {
+					output = output char
+					if (i < length(line)) {
+						i++
+						output = output substr(line, i, 1)
+					} else if (!token_start) {
+						continued_word = 1
+					}
+					token_start = 0
+					continue
+				}
+				if (char == "\047" || char == "\"") {
+					quote = char
+					output = output char
+					token_start = 0
+					continue
+				}
+				if (char == "<" && substr(line, i, 2) == "<<" &&
+						heredoc_delimiter == "")
+					remember_heredoc_at(line, i)
+				output = output char
+				token_start = is_shell_token_separator(char)
+			}
+			return output
+		}
+
+		FNR == 1 {
+			quote = ""
+			heredoc_delimiter = ""
+			heredoc_strip_tabs = 0
+			continued_word = 0
+		}
+
 		{
-			line = $0
+			line = shell_without_comment($0)
 			gsub(/[^A-Za-z0-9_]/, " ", line)
 			count = split(line, token, / +/)
 			for (i = 1; i <= count; i++) {
@@ -272,6 +424,40 @@ while IFS= read -r l_module; do
 		}
 	' "$architecture_tmp/function-owners" "$ZXFER_ROOT/$l_module"
 done <"$architecture_tmp/manifest" | sort -u >"$architecture_tmp/edges"
+
+awk -F "$TAB" '
+	$1 == "edge" && (NF != 3 || $2 == "" || $3 == "") {
+		printf "line %d must contain edge, caller module, and callee module: %s\n", FNR, $0
+	}
+' "$POLICY_FILE" >"$architecture_tmp/edge-policy-invalid"
+if [ -s "$architecture_tmp/edge-policy-invalid" ]; then
+	while IFS= read -r l_violation; do
+		report_architecture_violation "invalid dependency-edge policy: $l_violation"
+	done <"$architecture_tmp/edge-policy-invalid"
+fi
+awk -F "$TAB" '
+	$1 == "edge" && NF == 3 && $2 != "" && $3 != "" {
+		printf "%s\t%s\n", $2, $3
+	}
+' "$POLICY_FILE" | sort >"$architecture_tmp/edge-policy"
+l_duplicate_edges=$(uniq -d "$architecture_tmp/edge-policy")
+if [ -n "$l_duplicate_edges" ]; then
+	report_architecture_violation "duplicate dependency-edge policy entries: $(printf '%s' "$l_duplicate_edges" | tr '\n' ' ')"
+fi
+comm -23 "$architecture_tmp/edges" \
+	"$architecture_tmp/edge-policy" >"$architecture_tmp/edges-new"
+if [ -s "$architecture_tmp/edges-new" ]; then
+	while IFS="$TAB" read -r l_caller_module l_callee_module; do
+		report_architecture_violation "unapproved dependency edge: $l_caller_module -> $l_callee_module"
+	done <"$architecture_tmp/edges-new"
+fi
+comm -13 "$architecture_tmp/edges" \
+	"$architecture_tmp/edge-policy" >"$architecture_tmp/edges-stale"
+if [ -s "$architecture_tmp/edges-stale" ]; then
+	while IFS="$TAB" read -r l_caller_module l_callee_module; do
+		report_architecture_violation "stale dependency-edge policy entry: $l_caller_module -> $l_callee_module"
+	done <"$architecture_tmp/edges-stale"
+fi
 
 awk -F "$TAB" '$1 == "layer" { print $2 "\t" $3 "\t" $4 }' "$POLICY_FILE" >"$architecture_tmp/layers"
 cut -f1 "$architecture_tmp/layers" | sort >"$architecture_tmp/layer-modules"
@@ -365,5 +551,6 @@ l_module_count=$(wc -l <"$architecture_tmp/manifest" | tr -d ' \t')
 l_edge_count=$(wc -l <"$architecture_tmp/edges" | tr -d ' \t')
 l_global_count=$(cut -f1 "$architecture_tmp/global-writes" | sort -u | wc -l | tr -d ' \t')
 l_scratch_count=$(wc -l <"$architecture_tmp/function-scratch-collisions" | tr -d ' \t')
-printf 'architecture check passed: %s canonical modules, %s acyclic dependency edges, %s singly owned mutable globals, %s baselined function-scratch overlaps\n' \
-	"$l_module_count" "$l_edge_count" "$l_global_count" "$l_scratch_count"
+l_result_consumer_count=$(wc -l <"$architecture_tmp/result-channel-consumers" | tr -d ' \t')
+printf 'architecture check passed: %s canonical modules, %s approved acyclic dependency edges, %s singly owned mutable globals, %s approved cross-owner result-channel consumers, %s baselined function-scratch overlaps\n' \
+	"$l_module_count" "$l_edge_count" "$l_global_count" "$l_result_consumer_count" "$l_scratch_count"

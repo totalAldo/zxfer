@@ -12,8 +12,10 @@ clean.
 
 Budgets that pin these results live in `tests/perf_budgets.tsv`
 (micro-bench helper-spawn and profile-counter budgets) and
-`tests/budget_policy.tsv` (anti-rebloat line/function/caller budgets). Both
-are ratchet-down-only.
+`tests/budget_policy.tsv` (universal module/function/test complexity ceilings
+plus sensitive call-site ratchets). Performance and call-site budgets ratchet
+down; the universal ceilings prevent oversized units without rewarding an
+unrelated source-total merge.
 
 ## Measured Results
 
@@ -29,11 +31,11 @@ identical across fixture sizes):
 
 Notable structural counters on the `-V` no-op path: `cut` 57 -> 0,
 `mktemp` 14 -> 1, `sed` 43 -> 3, `awk` 34 -> 4,
-`runtime_artifact_files_created` 14 -> 9. The clean no-op proof path adds one
-private FIFO directory (`runtime_artifact_dirs_created` 0 -> 1) and renders
-its source listing command once in the parent shell
-(`command_render_calls` 0 -> 1); both are documented in
-`tests/perf_budgets.tsv`.
+`runtime_artifact_files_created` 14 -> 11. The clean no-op proof uses regular
+files below the existing run root, so `runtime_artifact_dirs_created` remains
+zero, and renders its source listing command once in the parent shell
+(`command_render_calls` 0 -> 1). These current structural budgets are
+documented in `tests/perf_budgets.tsv`.
 
 Remote and structural results:
 
@@ -46,11 +48,31 @@ Remote and structural results:
 - Background jobs: 21 -> 5 helper spawns per send/receive job
   (supervision-lite: setsid process group + one status file, runner module
   deleted).
-- Module size: `src/zxfer_remote_hosts.sh` 3,869 -> 1,964 lines (Phase 7);
-  the property-cache module and the background-job runner module were deleted
-  outright; `src/zxfer_locking.sh` and `src/zxfer_path_security.sh` merged
-  verbatim into `src/zxfer_runtime.sh` (Phase 8). Source TOTAL is enforced
-  ratchet-down in `tests/budget_policy.tsv`.
+- Structural size: the property-cache module and background-job runner module
+  were deleted outright. Path security, lock coordination, and runtime
+  artifacts are current concern-specific modules; universal per-module,
+  per-function, decision, and test-file ceilings prevent catch-all growth,
+  while sensitive caller counts ratchet down in `tests/budget_policy.tsv`.
+
+Recursive property-prefetch grouping was measured again during the module
+ownership refactor. The two required recursive `zfs get` views are unchanged,
+but their two grouping passes plus merge are now one POSIX `awk` pass and the
+staging group falls from seven artifacts to five. The checked-in offline gate
+uses deterministic 100- and 1,000-dataset fixtures, alternating samples, exact
+byte comparison, and peak-RSS measurement when the host `time` supports it.
+Seven-sample medians on macOS were:
+
+| AWK | Datasets | Legacy ms/op | One-pass ms/op | Improvement | Legacy peak RSS | One-pass peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `/usr/bin/awk` | 100 | 28.0 | 13.0 | 53.57% | 3,031,040 | 2,998,272 |
+| `/usr/bin/awk` | 1,000 | 190.0 | 98.0 | 48.42% | 3,129,344 | 3,112,960 |
+| GNU awk 5.4.1 | 100 | 55.5 | 24.0 | 56.76% | 8,224,768 | 8,224,768 |
+| GNU awk 5.4.1 | 1,000 | 346.0 | 170.0 | 50.87% | 9,519,104 | 9,388,032 |
+
+Both implementations produced byte-identical output at both sizes. The
+candidate therefore cleared the required 10% large-fixture improvement, the
+small-fixture no-regression gate, and the no-RSS-regression gate. These are
+grouping costs only; they do not claim end-to-end transfer throughput gains.
 
 ## What Landed (Phases 0-8)
 
@@ -101,15 +123,22 @@ Remote and structural results:
   deleted). Rendered ssh transport tokens and parsed host/wrapper splits
   are memoized once per role. `-V` counter keys are unchanged (deleted
   machinery's counters now always read 0).
-- Phase 8 — no-op proof widening + module merge. The fast recursive no-op
+- Phase 8 — no-op proof widening. The fast recursive no-op
   proof now covers local sources as well as `-O` pulls: a clean local
   recursive no-op is proven from two sorted `name,guid` identity listings
-  through private FIFOs and never pays for the creation-order source
+  staged in regular run-root files and never pays for the creation-order source
   listing or the destination existence check. All other eligibility gates
   are unchanged (`-R` required, `-T` absent, no `-s`/`-m`/`-P`/`-o`/`-e`/`-k`),
-  and divergence or any stream failure still falls back to full discovery
-  or fails closed exactly as before. `src/zxfer_path_security.sh` and
-  `src/zxfer_locking.sh` merged verbatim into `src/zxfer_runtime.sh`.
+  and divergence or any stream failure still falls back to full discovery or
+  fails closed exactly as before. Current path-security, locking, and runtime
+  artifact concerns remain separate modules.
+- Refactor follow-up — recursive property-prefetch grouping. Machine and human
+  property trees are parsed once into the same machine-first/human-only table
+  order as the legacy three-`awk` pipeline. Complete one-line records reuse
+  AWK's parsed fields, multiline records are reparsed only when extended, and
+  filter membership is released as each selected dataset is materialized.
+  Malformed views still fail before publication, embedded values retain the
+  existing escaping, and both recursive ZFS calls remain separately checked.
 
 Mapping from the original review's numbered items: 1 (batched destination
 discovery), 3 (live recheck gating), 4 (snapshot index flattening), 5
@@ -117,9 +146,13 @@ discovery), 3 (live recheck gating), 4 (snapshot index flattening), 5
 their machinery), 9 (runtime artifact slimming), 10 (background job
 overhead), 11 (ssh transport memos + socket probes), 12 (capability cache
 strategy), 13 (duplicate command rendering), 14 (combined snapshot list
-passes), 17 (fast-path quoting), 22 (disabled-profiling fast path), 24
-(zero-work cleanup), and 25 (lock identity slimming) are DONE. Item 20 (the
-perf harness) is maintained as measurement foundation.
+passes), 17 (fast-path quoting), 18 (indirect-assignment and counter `eval`
+removal, leaving only the two hardened rendered-shell execution sites), 22
+(disabled-profiling fast path), 23 (removal of internal function-existence
+probes), 24 (zero-work cleanup), and 25 (lock identity slimming) are DONE.
+Item 7's recursive property-prefetch grouping is also complete; other
+property-loop candidates remain separate. Item 20 (the perf harness) is
+maintained as measurement foundation.
 
 ## Remaining Candidates
 
@@ -146,33 +179,31 @@ Concurrency (the C-series from the original review):
   parent-before-child receives, serialize mutations sharing destination
   ancestry, and make cache invalidation generation-aware. This is a large
   refactor, not a `-j` tweak.
-- C6. Ephemeral remote collector with bounded internal fanout (see also the
-  collector item below): run independent read-only remote metadata commands
-  concurrently inside one remote shell and return one structured payload,
-  failing closed on any malformed or partial section.
+- C6. Broaden the existing transactional target-discovery batch with bounded
+  internal fanout for other independent read-only remote metadata. Preserve
+  its ordered protocol, private workspace, and all-or-nothing publication.
 
 Other remaining items:
 
-- Remote collector (original item 2): stage or stream a small POSIX `sh`
-  helper per run (`ssh host sh -s`) that gathers OS, helper paths, dataset
-  inventory, snapshot inventory, and selected property tables in one
-  structured response. Keep the no-remote-install default; fail closed on
-  truncated payloads; never persist remote state across runs.
+- Broader remote collector (remaining part of original item 2): the target
+  dataset/snapshot batch and its transactional local publication are complete.
+  A future collector could add selected property tables or combine compatible
+  helper/OS discovery without a remote install, but must retain exact framing,
+  fail closed on truncation, and never persist remote state across runs.
 - Property-read scoping (item 6): build the minimum safe property set from
   active options instead of `zfs get ... all` where the mode provably does
   not need full property discovery; fall back to `all` whenever
   completeness cannot be proven.
-- Batched `awk` for remaining per-property shell loops in property
-  reconciliation (item 7), preserving delimiter/newline escaping and
-  source-priority behavior.
+- Further batched `awk` work for any remaining per-property shell loops in
+  reconciliation (the unfinished part of item 7). Recursive property-prefetch
+  grouping is already one measured POSIX `awk` pass; future candidates must
+  preserve delimiter/newline escaping and source-priority behavior.
 - Metadata compression threshold (item 15): small metadata payloads can pay
   more in compressor startup than they save; keep data-stream compression
   unchanged.
 - Generated single-file release artifact (item 16): packaging-only; keep
   `src/zxfer_modules.sh` as the source-order authority and keep modular
   files for tests.
-- Argv-exec split for more non-pipeline commands (item 18): fewer `eval`
-  paths; keep shell execution for real pipelines and remote `sh -c`.
 - Remote backup preflight caching (item 19): cache remote backup-directory
   preflight per host/path scope; the local metadata buffer is already
   validate-once.
@@ -180,8 +211,6 @@ Other remaining items:
   compression/remote-ZFS command rendering (items 26, 27): resolve optional
   helpers and render remote command state only after consistency checks
   prove the mode needs them.
-- Module-loaded flags instead of `command -v` function probes (item 23),
-  preserving `ZXFER_SOURCE_MODULES_THROUGH` partial loads for tests.
 - Minimal help/early-usage paths (item 28): keep `zxfer -h` on the smallest
   path that preserves documented output.
 - Tune serial versus GNU `parallel` source discovery for the changed-source
@@ -198,6 +227,13 @@ Other remaining items:
   profile counters against the canned zfs; budgets in
   `tests/perf_budgets.tsv` are enforced by
   `tests/test_zxfer_microbench_budgets.sh`.
+- `tests/run_property_prefetch_benchmark.sh --output-dir DIR` — host-safe,
+  offline acceptance gate for the recursive property grouping pipeline. It
+  never invokes ZFS or the network; raw timing/RSS rows and the gate result are
+  retained below `DIR`. `DIR` must be a new child of an existing directory;
+  the benchmark preserves an existing path or concurrent race winner and
+  fails instead of replacing it. Relative output paths beginning with `-` are
+  rejected.
 - `tests/run_perf_compare.sh` and the VM `perf-compare` layer compare this
   branch against a baseline ref inside the same disposable guest:
 

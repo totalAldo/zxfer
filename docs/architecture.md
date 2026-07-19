@@ -48,9 +48,10 @@ responsibility boundary.
   rendered shell-pipeline channels, per-role transport memos, active remote
   ZFS routing, and per-run control-socket lifecycle
 - [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh): remote helper
-  resolution, one fail-closed per-run capability probe per host parsed into
-  in-memory state, and resolved remote OS/tool selections; it consumes the SSH
-  transport API but does not own transport state
+  resolution, one fail-closed per-run capability probe per exact role/identity
+  parsed into keyed in-memory fields once, and resolved remote OS/tool
+  selections; it consumes the SSH transport API but does not own transport
+  state
 - [../src/zxfer_cli.sh](../src/zxfer_cli.sh): CLI parsing, option validation,
   and compression command interpretation
 - [../src/zxfer_operation_state.sh](../src/zxfer_operation_state.sh): mutable
@@ -77,11 +78,11 @@ responsibility boundary.
   source/destination command production, staged execution, and snapshot-stream
   normalization
 - [../src/zxfer_remote_snapshot_discovery.sh](../src/zxfer_remote_snapshot_discovery.sh):
-  target-side discovery batch rendering, checked status parsing, and remote
-  inventory/snapshot collection
+  target-side discovery batch rendering, ordered protocol/status parsing, one
+  contained local workspace, and transactional inventory/snapshot publication
 - [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh):
-  discovery orchestration, source/destination diffing, cache publication, and
-  recursive discovery state
+  discovery orchestration, source/destination diffing, cache publication,
+  recursive discovery state, and complete full/fast-no-op artifact groups
 - [../src/zxfer_migration_services.sh](../src/zxfer_migration_services.sh):
   Solaris/illumos SMF stop/restart state and recovery behavior
 - [../src/zxfer_send_jobs.sh](../src/zxfer_send_jobs.sh): send/receive domain
@@ -90,7 +91,8 @@ responsibility boundary.
 - [../src/zxfer_send_receive.sh](../src/zxfer_send_receive.sh): send /
   receive command construction, progress pipeline, compression handling
 - [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh):
-  snapshot comparison and deletion planning
+  snapshot comparison, deletion planning, and its three reusable run-scoped
+  identity/difference artifacts
 - [../src/zxfer_replication.sh](../src/zxfer_replication.sh): dataset iteration
   and replication orchestration across discovery, reconciliation, and transfer
 - [../src/zxfer_session.sh](../src/zxfer_session.sh): final composition root for
@@ -128,11 +130,23 @@ The startup path is intentionally explicit:
    helper paths, and platform-specific bootstrap details.
 
 The manifest and architecture policies machine-check layer direction, cycles,
-module completeness, mutable-global ownership, caller/callee scratch overlap,
-and the exact inventory of the few remaining production `eval` commands.
+the exact internal dependency-edge graph, module completeness, mutable-global
+ownership, approved cross-owner `g_zxfer_*_result` consumers, direct
+current-shell caller/callee `l_*` scratch overlap, and the exact inventory of
+the two remaining production `eval` commands. New and stale edge,
+result-consumer, scratch-baseline, or eval rows all fail, so resolved coupling
+ratchets away instead of remaining as invisible baseline debt. The scratch
+baseline is empty: POSIX shell has no function-local variables, so functions
+use function-specific `l_*` names along every direct in-process call edge.
 Dependencies point only downward from composition through
 domain/state/infrastructure to foundation. That split keeps startup readable
 without reintroducing source-time side effects or generic catch-all modules.
+
+The stable `tests/test_helper.sh` entry point owns only canonical module
+loading, test lifecycle, and process capture. Domain helpers such as backup
+renderers and environment-driven fake tools are opt-in fixture modules sourced
+only by their owning suites; this keeps fixture functions from becoming an
+implicit global test API.
 
 ## Runtime Artifact Layer
 
@@ -163,6 +177,16 @@ files beside the final target to preserve same-directory atomic rename and
 trusted-parent checks continue to own that path-adjacent secure staging
 locally. In particular, backup publication and rollback staging lives in
 [`../src/zxfer_backup_storage.sh`](../src/zxfer_backup_storage.sh).
+
+Snapshot artifacts also have narrower owners above the allocator. Full
+discovery and the fast recursive no-op proof each allocate one complete ordered
+file group, retain its handles in operation-specific state, and clean the group
+from one terminal path. Discovery owns the flat source/destination record files
+that survive for later lookups. Snapshot-delete reconciliation separately owns
+three lazily allocated identity/difference files that are reusable across
+datasets for one run and are not cleared by a per-dataset state reset. The
+runtime layer allocates and verifies these contained files but does not adopt
+their domain lifecycle.
 
 Long-lived background work now layers on top of the runtime temp root through
 [../src/zxfer_background_jobs.sh](../src/zxfer_background_jobs.sh) using a
@@ -223,6 +247,38 @@ hostname/purpose/created-at metadata fields, ssh socket locks, and
 capability-cache locks were deleted with the machinery they coordinated:
 ssh control sockets and remote capability state are per-run now and need no
 cross-process locking.
+
+## Remote Protocol Rendering And Capability State
+
+Remote capability probes and secure backup-directory/write protocols,
+including their shared guards, are assembled as readable multiline POSIX `sh`
+programs. Their stages, quoting, status values, and publication/rollback
+topology are reviewable directly and pinned by golden fixtures. Only the
+capability and backup transport adapters join nonblank, semicolon-terminated
+lines into one physical command line for a csh/tcsh login shell, immediately
+before quoting the explicit `sh -c` handoff.
+`ZXFER_SECURE_PATH`, `ZXFER_SECURE_PATH_APPEND`, resolved helper paths, and
+`ZXFER_BACKUP_DIR` reject tab, carriage-return, and line-feed bytes before that
+join, so transport compatibility cannot translate trusted configuration.
+
+One accepted capability response is parsed and checked for framing, exact tool
+coverage, duplicate records, statuses, and helper-path shape before its fields
+are published to the exact origin/target identity. Later OS and tool consumers
+load those validated parsed fields; the raw response remains only for
+compatibility/diagnostics and is reparsed only if parsed state is absent or
+corrupt. A host, role, secure-PATH, SSH-policy, requested-tool, or response
+change clears the corresponding parsed slot before replacement.
+
+## Recursive Property Prefetch
+
+Recursive property prefetch still performs the two semantically distinct
+machine and human `zfs get` calls and checks each status. A single POSIX `awk`
+program now validates, groups, and merges both captures in machine-first /
+human-only order, including continued multiline records, before one checked
+readback publishes the table. The owned staging group is five files rather than
+seven. The legacy and one-pass transforms are characterized by a deterministic
+offline 100/1,000-dataset benchmark with exact byte comparison, timing gates,
+and peak-RSS checks when the host `time` supports them.
 
 ## High-Level Replication Flow
 
@@ -354,12 +410,19 @@ starts recursive dataset inventory in the background, streams the large
 destination snapshot stdout section directly back over ssh as `name,guid`
 records, captures stderr and compact statuses in target-side temp files, and
 runs the pool-exists fallback only when the destination root appears missing.
-The local splitter writes the same staged inventory, stderr, and raw snapshot
-files that the non-batched path expects, then the existing destination snapshot
-normalization helper produces the normalized diff input. Protocol markers are
-interpreted only outside section bodies, malformed or truncated payloads fail
-closed, and snapshot-list stderr is preserved before the existing `Failed to
-retrieve snapshot list from the destination.` context is reported.
+The local side allocates one private child workspace below the run root, then
+streams the single SSH response through one AWK parser into fixed descendants.
+The parser accepts statuses, sections, and the final sentinel only in the exact
+order emitted by the target renderer. Transport status, parser status, the
+complete status sidecar, and every staged file are checked before publication.
+The four caller-owned inventory, inventory-stderr, snapshot, and snapshot-stderr
+files are then published as one rollback-protected transaction: a later-file
+rename failure restores the complete prior generation, and a rollback failure
+clears all four rather than exposing mixed discovery state. The workspace has
+one normal cleanup after execution; whole-run trap cleanup remains the failure
+fallback. Validated SSH stderr uses a separate failure-only diagnostic stage,
+while snapshot-list stderr still precedes the existing `Failed to retrieve
+snapshot list from the destination.` context.
 
 ```mermaid
 flowchart TD
@@ -373,9 +436,10 @@ flowchart TD
     B -- "no" --> H
     H --> I{"Remote target -T?"}
     I -- "yes" --> J["Run one target-side destination discovery batch"]
-    J --> K["Split streamed sections into staged files and status sidecar"]
+    J --> K["Validate the streamed response in one private workspace"]
     I -- "no" --> L["Use direct destination zfs inventory and snapshot commands"]
-    K --> M["Normalize destination snapshot prefixes and diff identity records"]
+    K --> P["Publish four outputs transactionally, then clean once"]
+    P --> M["Normalize destination snapshot prefixes and diff identity records"]
     L --> M
     M --> N["Publish source/destination lists, caches, and record indexes"]
 ```
@@ -514,7 +578,8 @@ sequenceDiagram
     Launcher->>Local: list source datasets and name,guid snapshots
     Launcher->>Target: run one destination discovery batch through sh -c
     Target-->>Launcher: stream snapshot_stdout and return inventory/status/stderr sections
-    Launcher->>Launcher: split batch sections, normalize destination prefixes, and build identity diffs
+    Launcher->>Launcher: validate one private workspace and transactionally publish all four batch outputs
+    Launcher->>Launcher: normalize destination prefixes and build identity diffs
     loop choose non-conflicting ready datasets before waiting
         Launcher->>Local: zfs send ... | local compression helper
         Local-->>Launcher: compressed replication stream
@@ -529,7 +594,8 @@ separate owners. `zxfer_ssh_transport.sh` owns the short
 `ssh-<role>.sock` paths under the private temp root (including the fallback for
 long TMPDIR paths), managed options, host-wrapper parsing, and socket cleanup.
 `zxfer_remote_hosts.sh` owns only in-memory capability responses and resolved
-remote helpers. Nothing is shared between concurrent zxfer processes, so no
+remote helpers, including the role/identity-keyed parsed fields reused by later
+lookups. Nothing is shared between concurrent zxfer processes, so no
 socket locks, leases, or capability cache files exist to coordinate; session
 trap cleanup closes each opened master once with `-O exit` before removing the
 temp root.

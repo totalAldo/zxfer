@@ -48,16 +48,44 @@ setUp() {
 	g_zxfer_diverged_snapshot_examples=""
 	g_zxfer_diverged_converged_datasets=""
 	g_zxfer_diverged_converged_marker_source=""
-	g_delete_source_tmp_file=$(mktemp "$TEST_TMPDIR/delete_source.XXXXXX")
-	g_delete_dest_tmp_file=$(mktemp "$TEST_TMPDIR/delete_dest.XXXXXX")
-	g_delete_snapshots_to_delete_tmp_file=$(mktemp "$TEST_TMPDIR/delete_diff.XXXXXX")
+	g_zxfer_snapshot_delete_source_identities_file=$(mktemp "$TEST_TMPDIR/delete_source.XXXXXX")
+	g_zxfer_snapshot_delete_destination_identities_file=$(mktemp "$TEST_TMPDIR/delete_dest.XXXXXX")
+	g_zxfer_snapshot_delete_difference_file=$(mktemp "$TEST_TMPDIR/delete_diff.XXXXXX")
 	zxfer_reset_snapshot_record_indexes
 	zxfer_reset_failure_context "unit"
 }
 
 tearDown() {
-	rm -f "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" "$g_delete_snapshots_to_delete_tmp_file"
+	rm -f "$g_zxfer_snapshot_delete_source_identities_file" "$g_zxfer_snapshot_delete_destination_identities_file" "$g_zxfer_snapshot_delete_difference_file"
 	zxfer_reset_snapshot_record_indexes
+}
+
+test_zxfer_snapshot_delete_artifact_reset_is_separate_from_dataset_state() {
+	delete_source_file=$g_zxfer_snapshot_delete_source_identities_file
+	delete_destination_file=$g_zxfer_snapshot_delete_destination_identities_file
+	delete_difference_file=$g_zxfer_snapshot_delete_difference_file
+
+	zxfer_reset_snapshot_reconcile_state
+
+	assertEquals "Per-dataset reconciliation resets should preserve the reusable source identity artifact." \
+		"$delete_source_file" "$g_zxfer_snapshot_delete_source_identities_file"
+	assertEquals "Per-dataset reconciliation resets should preserve the reusable destination identity artifact." \
+		"$delete_destination_file" "$g_zxfer_snapshot_delete_destination_identities_file"
+	assertEquals "Per-dataset reconciliation resets should preserve the reusable difference artifact." \
+		"$delete_difference_file" "$g_zxfer_snapshot_delete_difference_file"
+
+	zxfer_reset_snapshot_delete_artifact_state
+	assertEquals "The run-scoped artifact reset should clear the source identity handle." \
+		"" "$g_zxfer_snapshot_delete_source_identities_file"
+	assertEquals "The run-scoped artifact reset should clear the destination identity handle." \
+		"" "$g_zxfer_snapshot_delete_destination_identities_file"
+	assertEquals "The run-scoped artifact reset should clear the difference handle." \
+		"" "$g_zxfer_snapshot_delete_difference_file"
+
+	# Restore the handles so the suite's normal teardown removes the fixtures.
+	g_zxfer_snapshot_delete_source_identities_file=$delete_source_file
+	g_zxfer_snapshot_delete_destination_identities_file=$delete_destination_file
+	g_zxfer_snapshot_delete_difference_file=$delete_difference_file
 }
 
 test_zxfer_snapshot_reconcile_state_helpers_cover_current_shell_paths() {
@@ -817,7 +845,7 @@ test_get_dest_snapshots_to_delete_per_dataset_reports_destination_identity_write
 	output=$(
 		(
 			zxfer_write_snapshot_identities_to_file() {
-				if [ "$2" = "$g_delete_dest_tmp_file" ]; then
+				if [ "$2" = "$g_zxfer_snapshot_delete_destination_identities_file" ]; then
 					return 9
 				fi
 				printf '%s\n' "snap1" >"$2"
@@ -844,7 +872,7 @@ test_get_dest_snapshots_to_delete_per_dataset_reports_source_identity_write_fail
 	output=$(
 		(
 			zxfer_write_snapshot_identities_to_file() {
-				if [ "$2" = "$g_delete_source_tmp_file" ]; then
+				if [ "$2" = "$g_zxfer_snapshot_delete_source_identities_file" ]; then
 					return 7
 				fi
 				printf '%s\n' "snap1" >"$2"
@@ -879,7 +907,7 @@ test_get_dest_snapshots_to_delete_per_dataset_falls_back_to_serial_when_cleanup_
 				printf 'unregister:%s\n' "$1" >>"$LOG_FILE"
 			}
 			zxfer_write_snapshot_identities_to_file() {
-				if [ "$2" = "$g_delete_source_tmp_file" ]; then
+				if [ "$2" = "$g_zxfer_snapshot_delete_source_identities_file" ]; then
 					sleep 1
 					printf '%s\n' "snap1	111" >"$2"
 					printf '%s\n' "source" >>"$LOG_FILE"

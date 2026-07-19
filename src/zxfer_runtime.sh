@@ -65,18 +65,18 @@ zxfer_get_destination_snapshot_root_dataset() {
 # Usage: Called during runtime bootstrap, staging, and trap cleanup when
 # sibling helpers need the same lookup without duplicating module logic.
 zxfer_get_destination_dataset_for_source_dataset() {
-	l_source_dataset=$1
-	l_destination_root_dataset=$(zxfer_get_destination_snapshot_root_dataset)
+	l_destination_mapping_source_dataset=$1
+	l_destination_mapping_root_dataset=$(zxfer_get_destination_snapshot_root_dataset)
 
-	case "$l_source_dataset" in
+	case "$l_destination_mapping_source_dataset" in
 	"$g_initial_source")
-		printf '%s\n' "$l_destination_root_dataset"
+		printf '%s\n' "$l_destination_mapping_root_dataset"
 		;;
 	"$g_initial_source"/*)
-		printf '%s\n' "$l_destination_root_dataset${l_source_dataset#"$g_initial_source"}"
+		printf '%s\n' "$l_destination_mapping_root_dataset${l_destination_mapping_source_dataset#"$g_initial_source"}"
 		;;
 	*)
-		printf '%s\n' "$l_destination_root_dataset"
+		printf '%s\n' "$l_destination_mapping_root_dataset"
 		;;
 	esac
 }
@@ -378,15 +378,15 @@ zxfer_list_default_tmpdir_candidates() {
 # Usage: Called during runtime bootstrap, staging, and trap cleanup when zxfer
 # has an optional or fallback path that still needs one checked helper.
 zxfer_try_get_socket_cache_tmpdir() {
-	l_requested_tmpdir=${TMPDIR:-}
+	l_try_get_socket_cache_tmpdir_requested_tmpdir=${TMPDIR:-}
 
-	if [ -n "$l_requested_tmpdir" ] &&
-		l_effective_tmpdir=$(zxfer_validate_temp_root_candidate "$l_requested_tmpdir"); then
+	if [ -n "$l_try_get_socket_cache_tmpdir_requested_tmpdir" ] &&
+		l_try_get_socket_cache_tmpdir_effective_tmpdir=$(zxfer_validate_temp_root_candidate "$l_try_get_socket_cache_tmpdir_requested_tmpdir"); then
 		# Keep the literal TMPDIR spelling only when the single-pass cd -P
 		# resolution proves no symlink or dot segment changes its meaning;
 		# otherwise fall through to the validated physical path.
-		if [ "$l_effective_tmpdir" = "$l_requested_tmpdir" ]; then
-			printf '%s\n' "$l_requested_tmpdir"
+		if [ "$l_try_get_socket_cache_tmpdir_effective_tmpdir" = "$l_try_get_socket_cache_tmpdir_requested_tmpdir" ]; then
+			printf '%s\n' "$l_try_get_socket_cache_tmpdir_requested_tmpdir"
 			return 0
 		fi
 	fi
@@ -608,18 +608,18 @@ zxfer_ensure_run_tmp_root() {
 	# memoizes in this shell and a held unsafe-TMPDIR fallback advisory
 	# survives until option parsing can emit it.
 	zxfer_try_get_effective_tmpdir >/dev/null || return "$?"
-	l_effective_tmpdir=$g_zxfer_effective_tmpdir
+	l_ensure_run_tmp_root_effective_tmpdir=$g_zxfer_effective_tmpdir
 	l_revalidated_effective_tmpdir=$(zxfer_validate_temp_root_candidate \
-		"$l_effective_tmpdir") || return 1
-	[ "$l_revalidated_effective_tmpdir" = "$l_effective_tmpdir" ] || return 1
+		"$l_ensure_run_tmp_root_effective_tmpdir") || return 1
+	[ "$l_revalidated_effective_tmpdir" = "$l_ensure_run_tmp_root_effective_tmpdir" ] || return 1
 
 	l_old_umask=$(umask)
 	umask 077
 	l_status=0
-	if [ "$l_effective_tmpdir" = "/" ]; then
+	if [ "$l_ensure_run_tmp_root_effective_tmpdir" = "/" ]; then
 		l_run_tmp_template="/zxfer.$$.XXXXXX"
 	else
-		l_run_tmp_template="$l_effective_tmpdir/zxfer.$$.XXXXXX"
+		l_run_tmp_template="$l_ensure_run_tmp_root_effective_tmpdir/zxfer.$$.XXXXXX"
 	fi
 	l_run_tmp_root=$(mktemp -d "$l_run_tmp_template" 2>/dev/null) ||
 		l_status=$?
@@ -634,7 +634,7 @@ zxfer_ensure_run_tmp_root() {
 
 	g_zxfer_run_tmp_root=$l_run_tmp_root
 	g_zxfer_owned_run_tmp_root=$l_run_tmp_root
-	g_zxfer_owned_run_tmp_root_parent=$l_effective_tmpdir
+	g_zxfer_owned_run_tmp_root_parent=$l_ensure_run_tmp_root_effective_tmpdir
 	g_zxfer_owned_run_tmp_root_identity=$l_run_tmp_root_identity
 	g_zxfer_run_tmp_counter=0
 	return 0
@@ -809,34 +809,38 @@ zxfer_runtime_artifact_path_is_run_root_child() {
 # trap cleanup.
 # Usage: Callers must have just created the safely named file or directory.
 zxfer_register_runtime_artifact_path() {
-	l_artifact_path=$1
+	l_runtime_registration_artifact_path=$1
 
-	[ -n "$l_artifact_path" ] || return 0
-	zxfer_runtime_artifact_registration_path_is_safe "$l_artifact_path" || return 1
+	[ -n "$l_runtime_registration_artifact_path" ] || return 0
+	zxfer_runtime_artifact_registration_path_is_safe \
+		"$l_runtime_registration_artifact_path" || return 1
 
-	while IFS= read -r l_existing_path || [ -n "$l_existing_path" ]; do
-		[ -n "$l_existing_path" ] || continue
-		[ "$l_existing_path" = "$l_artifact_path" ] && return 0
+	while IFS= read -r l_runtime_registration_existing_path ||
+		[ -n "$l_runtime_registration_existing_path" ]; do
+		[ -n "$l_runtime_registration_existing_path" ] || continue
+		[ "$l_runtime_registration_existing_path" = \
+			"$l_runtime_registration_artifact_path" ] && return 0
 	done <<EOF
 ${g_zxfer_runtime_artifact_cleanup_paths:-}
 EOF
-	if [ -d "$l_artifact_path" ]; then
-		l_registration_identity=$(zxfer_get_path_device_inode "$l_artifact_path") || return 1
+	if [ -d "$l_runtime_registration_artifact_path" ]; then
+		l_runtime_registration_identity=$(zxfer_get_path_device_inode \
+			"$l_runtime_registration_artifact_path") || return 1
 		if [ -n "${g_zxfer_runtime_artifact_cleanup_dir_identities:-}" ]; then
 			g_zxfer_runtime_artifact_cleanup_dir_identities=$g_zxfer_runtime_artifact_cleanup_dir_identities'
-'$l_registration_identity'
-'$l_artifact_path
+'$l_runtime_registration_identity'
+'$l_runtime_registration_artifact_path
 		else
-			g_zxfer_runtime_artifact_cleanup_dir_identities=$l_registration_identity'
-'$l_artifact_path
+			g_zxfer_runtime_artifact_cleanup_dir_identities=$l_runtime_registration_identity'
+'$l_runtime_registration_artifact_path
 		fi
 	fi
 
 	if [ -n "${g_zxfer_runtime_artifact_cleanup_paths:-}" ]; then
 		g_zxfer_runtime_artifact_cleanup_paths=$g_zxfer_runtime_artifact_cleanup_paths'
-'$l_artifact_path
+'$l_runtime_registration_artifact_path
 	else
-		g_zxfer_runtime_artifact_cleanup_paths=$l_artifact_path
+		g_zxfer_runtime_artifact_cleanup_paths=$l_runtime_registration_artifact_path
 	fi
 }
 
@@ -845,26 +849,29 @@ EOF
 # Usage: Called during runtime bootstrap, staging, and trap cleanup after the
 # tracked resource has completed or been cleaned up.
 zxfer_unregister_runtime_artifact_path() {
-	l_artifact_path=$1
-	l_remaining_paths=""
+	l_runtime_unregistration_artifact_path=$1
+	l_runtime_unregistration_remaining_paths=""
 
-	[ -n "$l_artifact_path" ] || return 0
+	[ -n "$l_runtime_unregistration_artifact_path" ] || return 0
 
-	while IFS= read -r l_existing_path || [ -n "$l_existing_path" ]; do
-		[ -n "$l_existing_path" ] || continue
-		[ "$l_existing_path" = "$l_artifact_path" ] && continue
-		if [ -n "$l_remaining_paths" ]; then
-			l_remaining_paths=$l_remaining_paths'
-'$l_existing_path
+	while IFS= read -r l_runtime_unregistration_existing_path ||
+		[ -n "$l_runtime_unregistration_existing_path" ]; do
+		[ -n "$l_runtime_unregistration_existing_path" ] || continue
+		[ "$l_runtime_unregistration_existing_path" = \
+			"$l_runtime_unregistration_artifact_path" ] && continue
+		if [ -n "$l_runtime_unregistration_remaining_paths" ]; then
+			l_runtime_unregistration_remaining_paths=$l_runtime_unregistration_remaining_paths'
+'$l_runtime_unregistration_existing_path
 		else
-			l_remaining_paths=$l_existing_path
+			l_runtime_unregistration_remaining_paths=$l_runtime_unregistration_existing_path
 		fi
 	done <<EOF
 ${g_zxfer_runtime_artifact_cleanup_paths:-}
 EOF
 
-	g_zxfer_runtime_artifact_cleanup_paths=$l_remaining_paths
-	zxfer_unregister_runtime_artifact_directory_identity "$l_artifact_path"
+	g_zxfer_runtime_artifact_cleanup_paths=$l_runtime_unregistration_remaining_paths
+	zxfer_unregister_runtime_artifact_directory_identity \
+		"$l_runtime_unregistration_artifact_path"
 }
 
 # Purpose: Clean up the runtime artifact path that this module created or
@@ -872,44 +879,44 @@ EOF
 # Usage: Called during runtime bootstrap, staging, and trap cleanup on success
 # and failure paths so temporary state does not linger.
 zxfer_cleanup_runtime_artifact_path() {
-	l_artifact_path=$1
+	l_cleanup_runtime_artifact_path_artifact_path=$1
 	l_runtime_cleanup_is_registered=0
 
-	[ -n "$l_artifact_path" ] || return 0
-	if zxfer_runtime_artifact_path_is_run_root_child "$l_artifact_path"; then
+	[ -n "$l_cleanup_runtime_artifact_path_artifact_path" ] || return 0
+	if zxfer_runtime_artifact_path_is_run_root_child "$l_cleanup_runtime_artifact_path_artifact_path"; then
 		:
-	elif zxfer_runtime_artifact_path_is_registered "$l_artifact_path"; then
+	elif zxfer_runtime_artifact_path_is_registered "$l_cleanup_runtime_artifact_path_artifact_path"; then
 		l_runtime_cleanup_is_registered=1
 	else
 		return 1
 	fi
-	if { [ -L "$l_artifact_path" ] || [ -h "$l_artifact_path" ]; } &&
-		rm -f "$l_artifact_path" 2>/dev/null; then
+	if { [ -L "$l_cleanup_runtime_artifact_path_artifact_path" ] || [ -h "$l_cleanup_runtime_artifact_path_artifact_path" ]; } &&
+		rm -f "$l_cleanup_runtime_artifact_path_artifact_path" 2>/dev/null; then
 		l_runtime_cleanup_removed=1
-	elif [ -d "$l_artifact_path" ]; then
+	elif [ -d "$l_cleanup_runtime_artifact_path_artifact_path" ]; then
 		if [ "$l_runtime_cleanup_is_registered" -eq 1 ]; then
 			zxfer_get_registered_runtime_artifact_directory_identity \
-				"$l_artifact_path" || return 1
+				"$l_cleanup_runtime_artifact_path_artifact_path" || return 1
 			l_runtime_cleanup_registered_identity=$g_zxfer_runtime_artifact_directory_identity_result
 			l_runtime_cleanup_current_identity=$(zxfer_get_path_device_inode \
-				"$l_artifact_path") || return 1
+				"$l_cleanup_runtime_artifact_path_artifact_path") || return 1
 			[ "$l_runtime_cleanup_current_identity" = "$l_runtime_cleanup_registered_identity" ] || return 1
 		fi
-		if rm -rf "$l_artifact_path" 2>/dev/null; then
+		if rm -rf "$l_cleanup_runtime_artifact_path_artifact_path" 2>/dev/null; then
 			l_runtime_cleanup_removed=1
 		else
 			l_runtime_cleanup_removed=0
 		fi
-	elif [ -e "$l_artifact_path" ] && rm -f "$l_artifact_path" 2>/dev/null; then
+	elif [ -e "$l_cleanup_runtime_artifact_path_artifact_path" ] && rm -f "$l_cleanup_runtime_artifact_path_artifact_path" 2>/dev/null; then
 		l_runtime_cleanup_removed=1
-	elif [ ! -e "$l_artifact_path" ] &&
-		[ ! -L "$l_artifact_path" ] && [ ! -h "$l_artifact_path" ]; then
+	elif [ ! -e "$l_cleanup_runtime_artifact_path_artifact_path" ] &&
+		[ ! -L "$l_cleanup_runtime_artifact_path_artifact_path" ] && [ ! -h "$l_cleanup_runtime_artifact_path_artifact_path" ]; then
 		l_runtime_cleanup_removed=1
 	else
 		l_runtime_cleanup_removed=0
 	fi
 	if [ "$l_runtime_cleanup_removed" -eq 1 ]; then
-		zxfer_unregister_runtime_artifact_path "$l_artifact_path"
+		zxfer_unregister_runtime_artifact_path "$l_cleanup_runtime_artifact_path_artifact_path"
 		zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_paths_cleaned
 		return 0
 	fi
@@ -924,9 +931,9 @@ zxfer_cleanup_runtime_artifact_path() {
 zxfer_cleanup_runtime_artifact_paths() {
 	l_cleanup_status=0
 
-	for l_artifact_path in "$@"; do
-		[ -n "$l_artifact_path" ] || continue
-		if ! zxfer_cleanup_runtime_artifact_path "$l_artifact_path"; then
+	for l_cleanup_runtime_artifact_paths_artifact_path in "$@"; do
+		[ -n "$l_cleanup_runtime_artifact_paths_artifact_path" ] || continue
+		if ! zxfer_cleanup_runtime_artifact_path "$l_cleanup_runtime_artifact_paths_artifact_path"; then
 			l_cleanup_status=1
 		fi
 	done
@@ -942,9 +949,9 @@ zxfer_cleanup_runtime_artifact_path_list() {
 	l_artifact_path_list=$1
 	l_cleanup_status=0
 
-	while IFS= read -r l_artifact_path || [ -n "$l_artifact_path" ]; do
-		[ -n "$l_artifact_path" ] || continue
-		if ! zxfer_cleanup_runtime_artifact_path "$l_artifact_path"; then
+	while IFS= read -r l_cleanup_runtime_artifact_path_list_artifact_path || [ -n "$l_cleanup_runtime_artifact_path_list_artifact_path" ]; do
+		[ -n "$l_cleanup_runtime_artifact_path_list_artifact_path" ] || continue
+		if ! zxfer_cleanup_runtime_artifact_path "$l_cleanup_runtime_artifact_path_list_artifact_path"; then
 			l_cleanup_status=1
 		fi
 	done <<-EOF
@@ -960,9 +967,9 @@ zxfer_cleanup_runtime_artifact_path_list() {
 # paths that must preserve the lower-level failure status after cleanup.
 zxfer_cleanup_runtime_artifact_path_list_and_return() {
 	l_return_status=$1
-	l_artifact_path_list=$2
+	l_cleanup_runtime_artifact_path_list_and_return_artifact_path_list=$2
 
-	zxfer_cleanup_runtime_artifact_path_list "$l_artifact_path_list" >/dev/null 2>&1 || :
+	zxfer_cleanup_runtime_artifact_path_list "$l_cleanup_runtime_artifact_path_list_and_return_artifact_path_list" >/dev/null 2>&1 || :
 	return "$l_return_status"
 }
 
@@ -1060,19 +1067,20 @@ zxfer_create_runtime_artifact_file() {
 # Usage: Called during runtime bootstrap, staging, and trap cleanup when the
 # module needs a stable staged file or emitted stream for downstream use.
 zxfer_write_runtime_artifact_file() {
-	l_artifact_path=$1
-	l_artifact_payload=$2
+	l_runtime_write_artifact_path=$1
+	l_runtime_write_artifact_payload=$2
 
-	[ -n "$l_artifact_path" ] || return 1
+	[ -n "$l_runtime_write_artifact_path" ] || return 1
 	if (
-		printf '%s' "$l_artifact_payload" >"$l_artifact_path"
+		printf '%s' "$l_runtime_write_artifact_payload" \
+			>"$l_runtime_write_artifact_path"
 	) 2>/dev/null; then
 		return 0
 	else
-		l_status=$?
+		l_runtime_write_status=$?
 	fi
 
-	case "$l_status" in
+	case "$l_runtime_write_status" in
 	1 | 2)
 		# dash reports redirection-open failures as status 2 while other
 		# supported /bin/sh implementations collapse the same failure to 1.
@@ -1080,7 +1088,7 @@ zxfer_write_runtime_artifact_file() {
 		;;
 	esac
 
-	return "$l_status"
+	return "$l_runtime_write_status"
 }
 
 # Purpose: Read the runtime artifact file from staged state into the current
@@ -1088,28 +1096,28 @@ zxfer_write_runtime_artifact_file() {
 # Usage: Called during runtime bootstrap, staging, and trap cleanup when later
 # helpers need a checked reload instead of ad hoc file reads.
 zxfer_read_runtime_artifact_file() {
-	l_artifact_path=$1
-	l_artifact_contents=""
+	l_runtime_read_artifact_path=$1
+	l_runtime_read_artifact_contents=""
 
 	g_zxfer_runtime_artifact_read_result=""
-	[ -r "$l_artifact_path" ] || return 1
+	[ -r "$l_runtime_read_artifact_path" ] || return 1
 
-	l_read_status=0
-	l_artifact_contents=$(
-		cat "$l_artifact_path"
-		l_read_status=$?
+	l_runtime_artifact_read_status=0
+	l_runtime_read_artifact_contents=$(
+		cat "$l_runtime_read_artifact_path"
+		l_runtime_artifact_read_status=$?
 		# Keep one non-newline sentinel inside the substitution so trailing
 		# blank lines from the artifact survive command substitution intact.
 		printf x
-		exit "$l_read_status"
-	) || l_read_status=$?
-	if [ "$l_read_status" -ne 0 ]; then
-		return "$l_read_status"
+		exit "$l_runtime_artifact_read_status"
+	) || l_runtime_artifact_read_status=$?
+	if [ "$l_runtime_artifact_read_status" -ne 0 ]; then
+		return "$l_runtime_artifact_read_status"
 	fi
-	l_artifact_contents=${l_artifact_contents%?}
+	l_runtime_read_artifact_contents=${l_runtime_read_artifact_contents%?}
 
-	g_zxfer_runtime_artifact_read_result=$l_artifact_contents
-	printf '%s' "$l_artifact_contents"
+	g_zxfer_runtime_artifact_read_result=$l_runtime_read_artifact_contents
+	printf '%s' "$l_runtime_read_artifact_contents"
 }
 
 # Purpose: Read the runtime artifact file and trim one trailing newline from
@@ -1266,54 +1274,4 @@ zxfer_init_runtime_state_defaults() {
 # consistent defaults and runtime state.
 zxfer_init_temp_artifacts() {
 	g_zxfer_temp_prefix="zxfer.$$.${g_option_Y_yield_iterations}.$(date +%s)"
-	# Delete-planning scratch paths stay empty until
-	# zxfer_ensure_snapshot_delete_temp_artifacts allocates them lazily.
-	g_delete_source_tmp_file=""
-	g_delete_dest_tmp_file=""
-	g_delete_snapshots_to_delete_tmp_file=""
-}
-
-# Purpose: Ensure the snapshot delete temp artifacts exists and is ready before
-# the flow continues.
-# Usage: Called during runtime bootstrap, staging, and trap cleanup before
-# later helpers assume the resource or cache is available.
-zxfer_ensure_snapshot_delete_temp_artifacts() {
-	l_delete_source_tmp_file=${g_delete_source_tmp_file:-}
-	l_delete_dest_tmp_file=${g_delete_dest_tmp_file:-}
-	l_delete_snapshots_to_delete_tmp_file=${g_delete_snapshots_to_delete_tmp_file:-}
-	l_new_delete_source_tmp_file=""
-	l_new_delete_dest_tmp_file=""
-
-	if [ -z "$l_delete_source_tmp_file" ]; then
-		zxfer_get_temp_file >/dev/null || return "$?"
-		l_delete_source_tmp_file=$g_zxfer_temp_file_result
-		l_new_delete_source_tmp_file=$l_delete_source_tmp_file
-	fi
-
-	if [ -z "$l_delete_dest_tmp_file" ]; then
-		zxfer_get_temp_file >/dev/null || {
-			l_status=$?
-			zxfer_cleanup_runtime_artifact_paths \
-				"$l_new_delete_source_tmp_file"
-			return "$l_status"
-		}
-		l_delete_dest_tmp_file=$g_zxfer_temp_file_result
-		l_new_delete_dest_tmp_file=$l_delete_dest_tmp_file
-	fi
-
-	if [ -z "$l_delete_snapshots_to_delete_tmp_file" ]; then
-		zxfer_get_temp_file >/dev/null || {
-			l_status=$?
-			zxfer_cleanup_runtime_artifact_paths \
-				"$l_new_delete_source_tmp_file" \
-				"$l_new_delete_dest_tmp_file"
-			return "$l_status"
-		}
-		l_delete_snapshots_to_delete_tmp_file=$g_zxfer_temp_file_result
-	fi
-
-	g_delete_source_tmp_file=$l_delete_source_tmp_file
-	g_delete_dest_tmp_file=$l_delete_dest_tmp_file
-	g_delete_snapshots_to_delete_tmp_file=$l_delete_snapshots_to_delete_tmp_file
-	return 0
 }

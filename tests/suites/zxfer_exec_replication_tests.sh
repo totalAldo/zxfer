@@ -1217,9 +1217,9 @@ tank/doET/tank@zxfer_1"
 
 test_inspect_delete_snap_filters_exact_dataset_matches() {
 	g_option_d_delete_destination_snapshots=0
-	g_delete_source_tmp_file=$(mktemp -t zxfer_src.XXXXXX)
-	g_delete_dest_tmp_file=$(mktemp -t zxfer_dst.XXXXXX)
-	g_delete_snapshots_to_delete_tmp_file=$(mktemp -t zxfer_diff.XXXXXX)
+	g_zxfer_snapshot_delete_source_identities_file=$(mktemp -t zxfer_src.XXXXXX)
+	g_zxfer_snapshot_delete_destination_identities_file=$(mktemp -t zxfer_dst.XXXXXX)
+	g_zxfer_snapshot_delete_difference_file=$(mktemp -t zxfer_diff.XXXXXX)
 	g_lzfs_list_hr_S_snap=$(
 		cat <<'EOF'
 tank/zfsbackup/doCGA/tank@zxfer_30473_20251114214157
@@ -1255,24 +1255,24 @@ EOF
 
 	assertEquals "tank/zfsbackup/doET/tank@zxfer_30473_20251114214157" "$g_last_common_snap"
 	unset -f zxfer_get_snapshot_identity_records_for_dataset
-	rm -f "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" "$g_delete_snapshots_to_delete_tmp_file"
+	rm -f "$g_zxfer_snapshot_delete_source_identities_file" "$g_zxfer_snapshot_delete_destination_identities_file" "$g_zxfer_snapshot_delete_difference_file"
 }
 
 test_get_dest_snapshots_to_delete_per_dataset_returns_extra_dest_entries() {
-	g_delete_source_tmp_file=$(mktemp -t zxfer_src.XXXXXX)
-	g_delete_dest_tmp_file=$(mktemp -t zxfer_dst.XXXXXX)
-	g_delete_snapshots_to_delete_tmp_file=$(mktemp -t zxfer_diff.XXXXXX)
+	g_zxfer_snapshot_delete_source_identities_file=$(mktemp -t zxfer_src.XXXXXX)
+	g_zxfer_snapshot_delete_destination_identities_file=$(mktemp -t zxfer_dst.XXXXXX)
+	g_zxfer_snapshot_delete_difference_file=$(mktemp -t zxfer_diff.XXXXXX)
 	source_list=$(printf '%s\n%s' "tank/fs@s1" "tank/fs@s2")
 	dest_list=$(printf '%s\n%s' "tank/fs@s1" "tank/fs@s3")
 	result=$(zxfer_get_dest_snapshots_to_delete_per_dataset "$source_list" "$dest_list")
 	assertEquals "tank/fs@s3" "$result"
-	rm -f "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" "$g_delete_snapshots_to_delete_tmp_file"
+	rm -f "$g_zxfer_snapshot_delete_source_identities_file" "$g_zxfer_snapshot_delete_destination_identities_file" "$g_zxfer_snapshot_delete_difference_file"
 }
 
 test_get_dest_snapshots_to_delete_per_dataset_treats_guid_mismatches_as_extra() {
-	g_delete_source_tmp_file=$(mktemp -t zxfer_src.XXXXXX)
-	g_delete_dest_tmp_file=$(mktemp -t zxfer_dst.XXXXXX)
-	g_delete_snapshots_to_delete_tmp_file=$(mktemp -t zxfer_diff.XXXXXX)
+	g_zxfer_snapshot_delete_source_identities_file=$(mktemp -t zxfer_src.XXXXXX)
+	g_zxfer_snapshot_delete_destination_identities_file=$(mktemp -t zxfer_dst.XXXXXX)
+	g_zxfer_snapshot_delete_difference_file=$(mktemp -t zxfer_diff.XXXXXX)
 	source_list=$(
 		cat <<'EOF'
 tank/fs@s1	111
@@ -1286,7 +1286,7 @@ EOF
 	result=$(zxfer_get_dest_snapshots_to_delete_per_dataset "$source_list" "$dest_list")
 	assertEquals "Same-named destination snapshots with a different guid should be treated as divergent extras." \
 		"tank/fs@s1" "$result"
-	rm -f "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" "$g_delete_snapshots_to_delete_tmp_file"
+	rm -f "$g_zxfer_snapshot_delete_source_identities_file" "$g_zxfer_snapshot_delete_destination_identities_file" "$g_zxfer_snapshot_delete_difference_file"
 }
 
 test_set_src_snapshot_transfer_list_collects_newer_snapshots() {
@@ -1298,9 +1298,9 @@ test_set_src_snapshot_transfer_list_collects_newer_snapshots() {
 
 test_delete_snaps_invokes_destroy_for_missing_snapshots() {
 	log="$TEST_TMPDIR/delete_snap_cmd.log"
-	g_delete_source_tmp_file=$(mktemp -t zxfer_src.XXXXXX)
-	g_delete_dest_tmp_file=$(mktemp -t zxfer_dst.XXXXXX)
-	g_delete_snapshots_to_delete_tmp_file=$(mktemp -t zxfer_diff.XXXXXX)
+	g_zxfer_snapshot_delete_source_identities_file=$(mktemp -t zxfer_src.XXXXXX)
+	g_zxfer_snapshot_delete_destination_identities_file=$(mktemp -t zxfer_dst.XXXXXX)
+	g_zxfer_snapshot_delete_difference_file=$(mktemp -t zxfer_diff.XXXXXX)
 	source_list=$(printf '%s\n%s' "tank/fs@snap1" "tank/fs@snap2")
 	dest_list=$(printf '%s\n%s\n%s' "tank/fs@snap1" "tank/fs@snap2" "tank/fs@snap3")
 	(
@@ -1311,7 +1311,7 @@ test_delete_snaps_invokes_destroy_for_missing_snapshots() {
 	)
 	result=$(cat "$log")
 	assertEquals "/sbin/zfs destroy tank/fs@snap3" "$result"
-	rm -f "$log" "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" "$g_delete_snapshots_to_delete_tmp_file"
+	rm -f "$log" "$g_zxfer_snapshot_delete_source_identities_file" "$g_zxfer_snapshot_delete_destination_identities_file" "$g_zxfer_snapshot_delete_difference_file"
 }
 
 test_grandfather_test_allows_young_snapshots() {

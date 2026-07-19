@@ -103,11 +103,11 @@ zxfer_open_send_job_completion_queue() {
 		return 1
 	fi
 	l_queue_dir=$g_zxfer_runtime_artifact_path_result
-	l_queue_path=$l_queue_dir/queue
+	l_open_send_job_completion_queue_queue_path=$l_queue_dir/queue
 
 	l_old_umask=$(umask)
 	umask 077
-	if ! mkfifo "$l_queue_path"; then
+	if ! mkfifo "$l_open_send_job_completion_queue_queue_path"; then
 		umask "$l_old_umask"
 		zxfer_echoV "Unable to create rolling send/receive completion queue; falling back to batch waits."
 		zxfer_cleanup_runtime_artifact_path "$l_queue_dir"
@@ -116,7 +116,7 @@ zxfer_open_send_job_completion_queue() {
 	fi
 	umask "$l_old_umask"
 
-	if ! chmod 600 "$l_queue_path"; then
+	if ! chmod 600 "$l_open_send_job_completion_queue_queue_path"; then
 		zxfer_echoV "Unable to secure rolling send/receive completion queue; falling back to batch waits."
 		zxfer_cleanup_runtime_artifact_path "$l_queue_dir"
 		g_zfs_send_job_queue_unavailable=1
@@ -124,7 +124,7 @@ zxfer_open_send_job_completion_queue() {
 	fi
 
 	l_queue_open_status=0
-	zxfer_open_send_job_completion_queue_fd "$l_queue_path" ||
+	zxfer_open_send_job_completion_queue_fd "$l_open_send_job_completion_queue_queue_path" ||
 		l_queue_open_status=$?
 	if [ "$l_queue_open_status" -ne 0 ]; then
 		if [ "${g_zxfer_send_job_queue_open_failure_fatal:-0}" -eq 1 ]; then
@@ -141,7 +141,7 @@ zxfer_open_send_job_completion_queue() {
 	fi
 
 	g_zfs_send_job_queue_open=1
-	g_zfs_send_job_queue_path=$l_queue_path
+	g_zfs_send_job_queue_path=$l_open_send_job_completion_queue_queue_path
 	g_zfs_send_job_queue_dir=$l_queue_dir
 	g_zfs_send_job_queue_writer_open=1
 	return 0
@@ -333,9 +333,9 @@ zxfer_find_supervised_send_job_record() {
 # Usage: Called during send/receive job waiting and cleanup when later helpers
 # need the runner PID without reparsing the full tracked record.
 zxfer_find_supervised_send_job_pid_by_job_id() {
-	l_job_id=$1
+	l_find_supervised_send_job_pid_by_job_id_job_id=$1
 
-	zxfer_find_supervised_send_job_record "$l_job_id" || return 1
+	zxfer_find_supervised_send_job_record "$l_find_supervised_send_job_pid_by_job_id_job_id" || return 1
 
 	printf '%s\n' "$g_zxfer_send_job_record_runner_pid"
 	return 0
@@ -396,9 +396,9 @@ zxfer_supervised_send_job_conflicts_with_destination() {
 # Usage: Called during send/receive waits and failure handling so background
 # job errors identify the dataset transfer that failed instead of only a PID.
 zxfer_get_supervised_send_job_error_context() {
-	l_job_id=$1
+	l_get_supervised_send_job_error_context_job_id=$1
 
-	zxfer_find_supervised_send_job_record "$l_job_id" || return 1
+	zxfer_find_supervised_send_job_record "$l_get_supervised_send_job_error_context_job_id" || return 1
 
 	l_source_label=${g_zxfer_send_job_record_source_snapshot:-$g_zxfer_send_job_record_source_dataset}
 	if [ -n "$l_source_label" ] && [ -n "$g_zxfer_send_job_record_dest_dataset" ]; then
@@ -406,7 +406,7 @@ zxfer_get_supervised_send_job_error_context() {
 	elif [ -n "$g_zxfer_send_job_record_dest_dataset" ]; then
 		l_context="[$g_zxfer_send_job_record_dest_dataset]"
 	else
-		l_context="[job $l_job_id]"
+		l_context="[job $l_get_supervised_send_job_error_context_job_id]"
 	fi
 	if [ -n "${g_zxfer_send_job_record_target_host:-}" ]; then
 		l_context="$l_context on target [$g_zxfer_send_job_record_target_host]"
@@ -416,9 +416,9 @@ zxfer_get_supervised_send_job_error_context() {
 }
 
 zxfer_finalize_supervised_send_job_success() {
-	l_job_id=$1
+	l_finalize_supervised_send_job_success_job_id=$1
 
-	zxfer_find_supervised_send_job_record "$l_job_id" || return 0
+	zxfer_find_supervised_send_job_record "$l_finalize_supervised_send_job_success_job_id" || return 0
 	[ -n "${g_zxfer_send_job_record_dest_dataset:-}" ] || return 0
 
 	zxfer_note_destination_receive_completed "$g_zxfer_send_job_record_dest_dataset"
@@ -500,22 +500,24 @@ $l_record_job_id	$l_record_pid	$l_record_source_snapshot	$l_record_dest_dataset	
 zxfer_terminate_remaining_send_jobs() {
 	if [ -n "${g_zfs_send_job_supervisor_records:-}" ]; then
 		zxfer_collect_supervised_send_job_ids >/dev/null || return "$?"
-		l_job_ids=$g_zxfer_send_job_ids_result
+		l_terminate_remaining_send_jobs_job_ids=$g_zxfer_send_job_ids_result
 		l_terminate_send_jobs_abort_status=0
 		l_first_abort_failure_message=""
-		while IFS= read -r l_job_id || [ -n "$l_job_id" ]; do
-			[ -n "$l_job_id" ] || continue
+		while IFS= read -r l_send_job_abort_id ||
+			[ -n "$l_send_job_abort_id" ]; do
+			[ -n "$l_send_job_abort_id" ] || continue
 			l_current_abort_status=0
-			zxfer_abort_background_job "$l_job_id" TERM || l_current_abort_status=$?
+			zxfer_abort_background_job "$l_send_job_abort_id" TERM ||
+				l_current_abort_status=$?
 			if [ "$l_current_abort_status" -ne 0 ]; then
 				[ -n "$l_first_abort_failure_message" ] || l_first_abort_failure_message=${g_zxfer_background_job_abort_failure_message:-}
 				[ "$l_terminate_send_jobs_abort_status" -ne 0 ] ||
 					l_terminate_send_jobs_abort_status=$l_current_abort_status
 				continue
 			fi
-			zxfer_unregister_supervised_send_job "$l_job_id"
+			zxfer_unregister_supervised_send_job "$l_send_job_abort_id"
 		done <<-EOF
-			$l_job_ids
+			$l_terminate_remaining_send_jobs_job_ids
 		EOF
 
 		zxfer_close_send_job_completion_queue
@@ -579,16 +581,16 @@ zxfer_throw_supervised_send_job_error_after_cleanup() {
 }
 
 zxfer_wait_for_next_supervised_zfs_send_job_completion() {
-	l_reason=$1
+	l_wait_for_next_supervised_zfs_send_job_completion_reason=$1
 	l_completed_record=""
-	l_job_context=""
-	l_pid=""
-	l_pid_status=""
+	l_wait_for_next_supervised_zfs_send_job_completion_job_context=""
+	l_wait_for_next_supervised_zfs_send_job_completion_pid=""
+	l_wait_for_next_supervised_zfs_send_job_completion_pid_status=""
 
 	[ "${g_count_zfs_send_jobs:-0}" -gt 0 ] || return 0
 
 	if [ "${g_zfs_send_job_queue_open:-0}" -ne 1 ] || [ -z "${g_zfs_send_job_supervisor_records:-}" ]; then
-		zxfer_wait_for_zfs_send_jobs "$l_reason"
+		zxfer_wait_for_zfs_send_jobs "$l_wait_for_next_supervised_zfs_send_job_completion_reason"
 		return 0
 	fi
 
@@ -613,25 +615,25 @@ zxfer_wait_for_next_supervised_zfs_send_job_completion() {
 	fi
 
 	l_pid_lookup_status=0
-	l_pid=$(zxfer_find_supervised_send_job_pid_by_job_id "$g_zxfer_background_job_queue_record_job_id") ||
+	l_wait_for_next_supervised_zfs_send_job_completion_pid=$(zxfer_find_supervised_send_job_pid_by_job_id "$g_zxfer_background_job_queue_record_job_id") ||
 		l_pid_lookup_status=$?
 	if [ "$l_pid_lookup_status" -ne 0 ]; then
 		zxfer_throw_supervised_send_job_error_after_cleanup \
 			"Failed to match a completed zfs send/receive job to a tracked PID." "$l_pid_lookup_status"
 	fi
-	l_job_context=$(zxfer_get_supervised_send_job_error_context "$g_zxfer_background_job_queue_record_job_id" || printf '[job %s]' "$g_zxfer_background_job_queue_record_job_id")
+	l_wait_for_next_supervised_zfs_send_job_completion_job_context=$(zxfer_get_supervised_send_job_error_context "$g_zxfer_background_job_queue_record_job_id" || printf '[job %s]' "$g_zxfer_background_job_queue_record_job_id")
 
-	l_wait_helper_status=0
+	l_wait_for_next_supervised_zfs_send_job_completion_wait_helper_status=0
 	zxfer_wait_for_background_job "$g_zxfer_background_job_queue_record_job_id" ||
-		l_wait_helper_status=$?
-	if [ "$l_wait_helper_status" -ne 0 ]; then
+		l_wait_for_next_supervised_zfs_send_job_completion_wait_helper_status=$?
+	if [ "$l_wait_for_next_supervised_zfs_send_job_completion_wait_helper_status" -ne 0 ]; then
 		zxfer_throw_supervised_send_job_error_after_cleanup \
-			"Failed to read zfs send/receive completion metadata for $l_job_context." "$l_wait_helper_status"
+			"Failed to read zfs send/receive completion metadata for $l_wait_for_next_supervised_zfs_send_job_completion_job_context." "$l_wait_for_next_supervised_zfs_send_job_completion_wait_helper_status"
 	fi
-	l_pid_status=$g_zxfer_background_job_wait_exit_status
+	l_wait_for_next_supervised_zfs_send_job_completion_pid_status=$g_zxfer_background_job_wait_exit_status
 	if [ "${g_zxfer_background_job_queue_record_type:-}" != "completion_write_failed" ] &&
 		[ "${g_zxfer_background_job_wait_report_failure:-}" = "" ] &&
-		[ "$l_pid_status" -eq 0 ]; then
+		[ "$l_wait_for_next_supervised_zfs_send_job_completion_pid_status" -eq 0 ]; then
 		zxfer_finalize_supervised_send_job_success "$g_zxfer_background_job_queue_record_job_id"
 	fi
 	zxfer_unregister_supervised_send_job "$g_zxfer_background_job_queue_record_job_id"
@@ -641,33 +643,37 @@ zxfer_wait_for_next_supervised_zfs_send_job_completion() {
 
 	if [ "${g_zxfer_background_job_queue_record_type:-}" = "completion_write_failed" ]; then
 		zxfer_throw_supervised_send_job_error_after_cleanup \
-			"Failed to record zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_queue_record_status)." "$l_queue_record_status"
+			"Failed to record zfs send/receive background completion for $l_wait_for_next_supervised_zfs_send_job_completion_job_context (PID $l_wait_for_next_supervised_zfs_send_job_completion_pid, exit $l_queue_record_status)." "$l_queue_record_status"
 	fi
 	if [ "${g_zxfer_background_job_wait_report_failure:-}" = "queue_write" ]; then
 		zxfer_throw_supervised_send_job_error_after_cleanup \
-			"Failed to publish zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+			"Failed to publish zfs send/receive background completion for $l_wait_for_next_supervised_zfs_send_job_completion_job_context (PID $l_wait_for_next_supervised_zfs_send_job_completion_pid, exit $l_wait_for_next_supervised_zfs_send_job_completion_pid_status)." "$l_wait_for_next_supervised_zfs_send_job_completion_pid_status"
 	fi
 	if [ "${g_zxfer_background_job_wait_report_failure:-}" = "completion_write" ]; then
 		zxfer_throw_supervised_send_job_error_after_cleanup \
-			"Failed to report zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+			"Failed to report zfs send/receive background completion for $l_wait_for_next_supervised_zfs_send_job_completion_job_context (PID $l_wait_for_next_supervised_zfs_send_job_completion_pid, exit $l_wait_for_next_supervised_zfs_send_job_completion_pid_status)." "$l_wait_for_next_supervised_zfs_send_job_completion_pid_status"
 	fi
-	if [ "$l_pid_status" -ne 0 ]; then
+	if [ "$l_wait_for_next_supervised_zfs_send_job_completion_pid_status" -ne 0 ]; then
 		zxfer_throw_supervised_send_job_error_after_cleanup \
-			"zfs send/receive job failed for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
+			"zfs send/receive job failed for $l_wait_for_next_supervised_zfs_send_job_completion_job_context (PID $l_wait_for_next_supervised_zfs_send_job_completion_pid, exit $l_wait_for_next_supervised_zfs_send_job_completion_pid_status)." "$l_wait_for_next_supervised_zfs_send_job_completion_pid_status"
 	fi
 }
 
 zxfer_wait_for_supervised_zfs_send_jobs_batch() {
 	zxfer_collect_supervised_send_job_ids >/dev/null ||
 		zxfer_throw_error "Failed to collect supervised send/receive job ids." "$?"
-	l_job_ids=$g_zxfer_send_job_ids_result
+	l_wait_for_supervised_zfs_send_jobs_batch_job_ids=$g_zxfer_send_job_ids_result
 
-	while IFS= read -r l_job_id || [ -n "$l_job_id" ]; do
-		[ -n "$l_job_id" ] || continue
-		l_pid=$(zxfer_find_supervised_send_job_pid_by_job_id "$l_job_id" || :)
-		l_job_context=$(zxfer_get_supervised_send_job_error_context "$l_job_id" || printf '[job %s]' "$l_job_id")
+	while IFS= read -r l_send_job_wait_id ||
+		[ -n "$l_send_job_wait_id" ]; do
+		[ -n "$l_send_job_wait_id" ] || continue
+		l_pid=$(zxfer_find_supervised_send_job_pid_by_job_id \
+			"$l_send_job_wait_id" || :)
+		l_job_context=$(zxfer_get_supervised_send_job_error_context \
+			"$l_send_job_wait_id" || printf '[job %s]' "$l_send_job_wait_id")
 		l_wait_helper_status=0
-		zxfer_wait_for_background_job "$l_job_id" || l_wait_helper_status=$?
+		zxfer_wait_for_background_job "$l_send_job_wait_id" ||
+			l_wait_helper_status=$?
 		if [ "$l_wait_helper_status" -ne 0 ]; then
 			zxfer_throw_supervised_send_job_error_after_cleanup \
 				"Failed to read zfs send/receive completion metadata for $l_job_context." "$l_wait_helper_status"
@@ -675,9 +681,9 @@ zxfer_wait_for_supervised_zfs_send_jobs_batch() {
 		l_pid_status=$g_zxfer_background_job_wait_exit_status
 		if [ "${g_zxfer_background_job_wait_report_failure:-}" = "" ] &&
 			[ "$l_pid_status" -eq 0 ]; then
-			zxfer_finalize_supervised_send_job_success "$l_job_id"
+			zxfer_finalize_supervised_send_job_success "$l_send_job_wait_id"
 		fi
-		zxfer_unregister_supervised_send_job "$l_job_id"
+		zxfer_unregister_supervised_send_job "$l_send_job_wait_id"
 		if [ "${g_zxfer_background_job_wait_report_failure:-}" = "queue_write" ]; then
 			zxfer_throw_supervised_send_job_error_after_cleanup \
 				"Failed to publish zfs send/receive background completion for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
@@ -691,7 +697,7 @@ zxfer_wait_for_supervised_zfs_send_jobs_batch() {
 				"zfs send/receive job failed for $l_job_context (PID $l_pid, exit $l_pid_status)." "$l_pid_status"
 		fi
 	done <<-EOF
-		$l_job_ids
+		$l_wait_for_supervised_zfs_send_jobs_batch_job_ids
 	EOF
 
 	g_zfs_send_job_pids=""
@@ -715,10 +721,10 @@ zxfer_wait_for_next_zfs_send_job_completion() {
 # coordination when later steps must block until background work or shared
 # state catches up.
 zxfer_wait_for_zfs_send_jobs() {
-	l_reason=$1
+	l_wait_for_zfs_send_jobs_reason=$1
 
-	if [ "$l_reason" != "" ] && [ -n "$g_zfs_send_job_pids" ]; then
-		zxfer_echoV "Waiting for zfs send/receive jobs ($l_reason)."
+	if [ "$l_wait_for_zfs_send_jobs_reason" != "" ] && [ -n "$g_zfs_send_job_pids" ]; then
+		zxfer_echoV "Waiting for zfs send/receive jobs ($l_wait_for_zfs_send_jobs_reason)."
 	fi
 
 	if [ -z "$g_zfs_send_job_pids" ]; then

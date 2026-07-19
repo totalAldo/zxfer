@@ -64,7 +64,13 @@ The project priority order still applies:
   runtime or session state.
 - Parsed option state should use `g_option_*` and should not be reused as
   general scratch state.
-- Function-scoped temporaries should use `l_` prefixes consistently.
+- Function-scoped temporaries should use `l_` prefixes consistently. POSIX
+  shell functions do not have local variables, so mutable scratch names must
+  also be function-specific along every direct current-shell call edge (for
+  example, `l_prepare_remote_host_status`, not a reusable `l_status` in both
+  caller and callee). `tests/check_architecture.sh` exact-checks these
+  caller/callee/name tuples; the checked-in baseline is intentionally empty,
+  and new or stale approvals fail.
 - Immutable internal constants may use `ZXFER_*`.
 - Only documented operator-facing `ZXFER_*` environment variables are public
   configuration inputs; uppercase alone does not imply user configurability.
@@ -94,11 +100,21 @@ The project priority order still applies:
 - Reuse the centralized command-rendering and execution helpers in
   [../src/zxfer_exec.sh](../src/zxfer_exec.sh) instead of adding new ad hoc
   `eval` paths.
-- The remaining production `eval` commands are exact-site inventoried in
-  `tests/architecture_eval_policy.tsv`; adding, moving, or changing one
-  requires an explicit purpose review and architecture-check update.
+- The only remaining production `eval` commands are the two hardened pipeline
+  execution sites in `zxfer_execute_rendered_shell_command()`. They are
+  exact-site inventoried in `tests/architecture_eval_policy.tsv`; adding,
+  moving, changing, or deleting one requires an explicit purpose review and
+  architecture-check update.
 - Treat `-O` / `-T` host specs and remote wrapper tokens as structured command
   inputs, not as plain hostnames.
+- Build substantial remote helper protocols as readable multiline POSIX `sh`
+  programs with explicit command terminators and focused golden coverage. For
+  the capability and backup directory/write protocol paths, collapse nonblank
+  renderer lines to one physical command line only at the SSH or dry-run
+  transport boundary, immediately before the explicit `sh -c` handoff
+  required to survive csh/tcsh login shells. Do not make transport collapse a
+  general renderer API or apply it before configuration bytes have passed
+  control-character checks.
 
 ## Dependency And Path Handling
 
@@ -108,8 +124,27 @@ The project priority order still applies:
   `PATH` lookups in feature code.
 - Keep remote helper resolution inside
   [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh).
-- Validate absolute paths and reject control characters or unsafe whitespace in
-  resolved helper paths.
+- Reject tab, carriage-return, and line-feed bytes in
+  `ZXFER_SECURE_PATH`, `ZXFER_SECURE_PATH_APPEND`, and resolved helper paths
+  before splitting, caching, exporting, or remote rendering. Apply the same
+  exact byte-shape rule to `ZXFER_BACKUP_DIR` before deriving local or remote
+  metadata paths.
+
+## Result Channels And Status
+
+- Prefer stdout for pure values when command substitution cannot hide a needed
+  state change or lower-level status.
+- Use an owner-prefixed `g_zxfer_*_result` channel only for a deliberate
+  current-shell/hot-path handoff. The owning module is the sole writer; it
+  clears the channel before work, publishes only a complete validated result,
+  clears it on failure, and preserves the first meaningful non-zero status.
+- A caller must capture status before reading a result channel. Cross-module
+  readers must have an exact `result-consumer` row in
+  `tests/architecture_policy.tsv`; both a new reader and a stale policy row
+  fail architecture validation.
+- Do not accept a caller-provided variable name and assign through `eval` as a
+  generic return mechanism. Add a narrow owner result, explicit publisher, or
+  ordinary stdout/status contract instead.
 
 ## Errors, Logging, And Output
 
@@ -213,8 +248,11 @@ zxfer_get_ssh_transport_tokens_for_host() {
 
 - Add or update focused shunit2 coverage when changing shell helpers or public
   behavior.
-- Use [../tests/test_helper.sh](../tests/test_helper.sh) for shared scaffolding
-  before adding new suite-local plumbing.
+- Keep [../tests/test_helper.sh](../tests/test_helper.sh) limited to the stable
+  loader, lifecycle, and process-capture contract. Domain fixtures such as
+  backup renderers or environment-driven fake tools stay in focused
+  `tests/helpers/*_fixtures.sh` files and must be sourced explicitly only by
+  the suites that own those cases.
 - Keep fixtures explicit and local to the suite unless they are broadly useful.
 - Update the integration harness expectations when behavior changes, but leave
   actual integration execution to a human operator.

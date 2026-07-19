@@ -87,6 +87,64 @@ test_zxfer_compute_secure_path_preserves_unset_ifs_and_disabled_globbing() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "globbing=disabled"
 }
 
+test_zxfer_compute_secure_path_rejects_control_whitespace_without_mutating_shell_state() {
+	control_output_file=$(mktemp -t zxfer-dependencies-control.XXXXXX) ||
+		fail "Unable to create secure-PATH rejection capture file."
+	control_rejection_result=$(
+		IFS="|"
+		set -f
+		ZXFER_SECURE_PATH=$(printf "/opt/trusted/bin\n/opt/translated/bin")
+		if zxfer_compute_secure_path >"$control_output_file"; then
+			path_status=0
+		else
+			path_status=$?
+		fi
+		printf "path-status=%s\n" "$path_status"
+		printf "path-output=<%s>\n" \
+			"$(cat "$control_output_file")"
+		printf "ifs=<%s>\n" "$IFS"
+		control_shell_flags=$-
+		if [ "${control_shell_flags#*f}" != "$control_shell_flags" ]; then
+			printf "%s\n" "globbing=disabled"
+		else
+			printf "%s\n" "globbing=enabled"
+		fi
+		ZXFER_SECURE_PATH="/usr/bin"
+		ZXFER_SECURE_PATH_APPEND=$(printf "/opt/append\t/opt/translated")
+		if zxfer_compute_secure_path >/dev/null; then
+			append_status=0
+		else
+			append_status=$?
+		fi
+		printf "append-status=%s\n" "$append_status"
+	)
+	rm -f "$control_output_file"
+
+	assertContains "Newline-bearing secure-PATH entries must fail closed before remote rendering can translate them." \
+		"$control_rejection_result" "path-status=1"
+	assertContains "Rejected secure-PATH input must not publish a partial path." \
+		"$control_rejection_result" "path-output=<>"
+	assertContains "Secure-PATH rejection should preserve a caller-defined IFS." \
+		"$control_rejection_result" "ifs=<|>"
+	assertContains "Secure-PATH rejection should preserve disabled globbing." \
+		"$control_rejection_result" "globbing=disabled"
+	assertContains "Control whitespace in ZXFER_SECURE_PATH_APPEND must also fail closed." \
+		"$control_rejection_result" "append-status=1"
+}
+
+test_zxfer_initialize_dependency_defaults_reports_invalid_secure_path() {
+	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
+	zxfer_test_capture_subshell '
+		ZXFER_SECURE_PATH=$(printf "/opt/trusted/bin\n/opt/translated/bin")
+		zxfer_initialize_dependency_defaults
+	'
+
+	assertEquals "Dependency bootstrap should stop on a secure PATH that cannot survive remote rendering." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Dependency bootstrap should explain the control-whitespace restriction." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "single-line absolute path without control whitespace"
+}
+
 test_zxfer_get_effective_dependency_path_refreshes_from_environment() {
 	result=$(
 		(
@@ -145,6 +203,32 @@ test_zxfer_apply_secure_path_keeps_runtime_path_equal_to_secure_allowlist() {
 		"$result" "runtime=/opt/zfs/bin:/usr/sbin:/custom/bin"
 	assertContains "Exported PATH should match the strict runtime PATH." \
 		"$result" "path=/opt/zfs/bin:/usr/sbin:/custom/bin"
+}
+
+test_zxfer_apply_secure_path_rejects_invalid_configuration_through_owner_path() {
+	set +e
+	result=$(
+		(
+			ZXFER_SECURE_PATH=$(printf '/opt/trusted/bin\n/opt/translated/bin')
+			zxfer_set_failure_context_if_empty() {
+				printf 'context=%s:%s\n' "$1" "$2"
+			}
+			zxfer_throw_error() {
+				printf 'message=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_apply_secure_path
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Applying a control-whitespace-bearing secure PATH should fail closed." \
+		1 "$status"
+	assertContains "The secure-PATH owner should classify rejected configuration before throwing." \
+		"$result" "context=dependency:secure PATH validation"
+	assertContains "The secure-PATH owner should preserve the stable rejection diagnostic." \
+		"$result" "single-line absolute path without control whitespace"
 }
 
 test_zxfer_validate_resolved_tool_path_rejects_relative_path() {
@@ -377,6 +461,45 @@ test_zxfer_init_dependency_tool_defaults_owns_command_state() {
 		"$result" "parallel=<>"
 	assertContains "Dependency defaults should refresh the safe compression renderings." \
 		"$result" "compression_refreshed=yes"
+}
+
+test_zxfer_init_dependency_tool_defaults_rejects_nonabsolute_parallel_resolution() {
+	set +e
+	result=$(
+		(
+			g_zxfer_dependency_path=/definitely/missing
+			parallel() {
+				:
+			}
+			zxfer_assign_required_tool() {
+				zxfer_set_dependency_command "$1" "/stub/$2"
+			}
+			zxfer_refresh_compression_commands() {
+				:
+			}
+			zxfer_set_failure_class() {
+				g_zxfer_failure_class=$1
+			}
+			zxfer_throw_error() {
+				printf 'class=%s\n' "$g_zxfer_failure_class"
+				printf 'message=%s\n' "$1"
+				printf 'status=%s\n' "${2:-1}"
+				exit "${2:-1}"
+			}
+			zxfer_init_dependency_tool_defaults
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Dependency initialization should preserve validation failure status for a nonabsolute optional parallel path." \
+		1 "$status"
+	assertContains "Nonabsolute optional parallel paths should retain dependency failure classification." \
+		"$result" "class=dependency"
+	assertContains "Nonabsolute optional parallel paths should retain the absolute-path diagnostic." \
+		"$result" "zxfer requires an absolute path"
+	assertContains "Nonabsolute optional parallel paths should preserve the lower-level validation status." \
+		"$result" "status=1"
 }
 
 # shellcheck source=tests/shunit2/shunit2

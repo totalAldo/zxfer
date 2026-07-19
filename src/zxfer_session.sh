@@ -67,7 +67,8 @@ zxfer_discard_inherited_cleanup_state() {
 # is loaded, so owner resets can be direct calls instead of optional probes.
 zxfer_init_globals() {
 	zxfer_reset_failure_context "startup"
-	zxfer_refresh_secure_path_state
+	zxfer_refresh_secure_path_state ||
+		zxfer_reject_invalid_secure_path_configuration
 
 	g_zxfer_version="2.0.0-20260623"
 	zxfer_init_cli_option_defaults
@@ -90,6 +91,7 @@ zxfer_init_globals() {
 	zxfer_reset_snapshot_producer_session_state
 	zxfer_reset_snapshot_discovery_state
 	zxfer_reset_snapshot_reconcile_state
+	zxfer_reset_snapshot_delete_artifact_state
 	zxfer_reset_backup_metadata_state
 	zxfer_reset_property_runtime_state
 	# Property scratch state lives with the property modules; reset it through
@@ -115,7 +117,7 @@ zxfer_init_globals() {
 # stopped migration services, emits profile/failure output, and exits.
 zxfer_trap_exit() {
 	# get the exit status of the last command
-	l_exit_status=$?
+	l_trap_exit_status=$?
 	l_cleanup_start_ms=""
 	if zxfer_profile_metrics_enabled; then
 		l_cleanup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
@@ -127,14 +129,16 @@ zxfer_trap_exit() {
 	l_background_cleanup_status=0
 	zxfer_abort_all_background_jobs || l_background_cleanup_status=$?
 	if [ "$l_background_cleanup_status" -ne 0 ]; then
-		[ "$l_exit_status" -eq 0 ] && l_exit_status=$l_background_cleanup_status
+		[ "$l_trap_exit_status" -eq 0 ] &&
+			l_trap_exit_status=$l_background_cleanup_status
 		zxfer_set_failure_context_if_empty runtime "trap cleanup" \
 			"${g_zxfer_background_job_abort_failure_message:-Failed to tear down one or more supervised background jobs during exit.}"
 	fi
 	l_cleanup_pid_status=0
 	zxfer_kill_registered_cleanup_pids || l_cleanup_pid_status=$?
 	if [ "$l_cleanup_pid_status" -ne 0 ]; then
-		[ "$l_exit_status" -eq 0 ] && l_exit_status=$l_cleanup_pid_status
+		[ "$l_trap_exit_status" -eq 0 ] &&
+			l_trap_exit_status=$l_cleanup_pid_status
 		zxfer_set_failure_context_if_empty runtime "trap cleanup" \
 			"${g_zxfer_cleanup_pid_abort_failure_message:-Failed to tear down one or more validated cleanup helpers during exit.}"
 	fi
@@ -142,9 +146,9 @@ zxfer_trap_exit() {
 	if zxfer_close_all_ssh_control_sockets; then
 		:
 	else
-		l_close_status=$?
-		if [ "$l_exit_status" -eq 0 ]; then
-			l_exit_status=$l_close_status
+		l_trap_close_status=$?
+		if [ "$l_trap_exit_status" -eq 0 ]; then
+			l_trap_exit_status=$l_trap_close_status
 			zxfer_set_failure_context_if_empty runtime "trap cleanup" \
 				"Failed to close one or more ssh control sockets during exit."
 		fi
@@ -156,7 +160,7 @@ zxfer_trap_exit() {
 	zxfer_cleanup_registered_runtime_artifacts || l_artifact_cleanup_failed=1
 	zxfer_remove_run_tmp_root || l_artifact_cleanup_failed=1
 	if [ "$l_artifact_cleanup_failed" -ne 0 ]; then
-		[ "$l_exit_status" -eq 0 ] && l_exit_status=1
+		[ "$l_trap_exit_status" -eq 0 ] && l_trap_exit_status=1
 		zxfer_set_failure_context_if_empty runtime "trap cleanup" \
 			"Failed to remove one or more runtime temp artifacts during exit."
 	fi
@@ -170,8 +174,8 @@ zxfer_trap_exit() {
 				l_migration_service_cleanup_status=$?
 			if [ "$l_migration_service_cleanup_status" -ne 0 ]; then
 				l_migration_service_cleanup_message=${g_zxfer_migration_service_restore_failure_message:-Failed to restore stopped migration services during exit.}
-				[ "$l_exit_status" -eq 0 ] &&
-					l_exit_status=$l_migration_service_cleanup_status
+				[ "$l_trap_exit_status" -eq 0 ] &&
+					l_trap_exit_status=$l_migration_service_cleanup_status
 				if [ -n "${g_zxfer_failure_message:-}" ]; then
 					# The primary structured failure keeps ownership, but a failed
 					# service restart must never disappear: the operator may need to
@@ -186,9 +190,9 @@ zxfer_trap_exit() {
 	fi
 
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_cleanup_ms "$l_cleanup_start_ms"
-	zxfer_echoV "zxfer exiting with status $l_exit_status"
+	zxfer_echoV "zxfer exiting with status $l_trap_exit_status"
 	zxfer_profile_emit_summary
-	zxfer_emit_failure_report "$l_exit_status"
+	zxfer_emit_failure_report "$l_trap_exit_status"
 
 	# Failure reporting may lazily recreate the run temp root or stage log
 	# files (ZXFER_ERROR_LOG mirroring); sweep again so nothing survives exit.
@@ -196,7 +200,7 @@ zxfer_trap_exit() {
 	zxfer_remove_run_tmp_root >/dev/null 2>&1 || :
 
 	# exit this script
-	exit $l_exit_status
+	exit $l_trap_exit_status
 }
 
 # Purpose: Register the legacy-named runtime traps with session-owned cleanup.
@@ -435,11 +439,13 @@ zxfer_init_variables() {
 
 # Purpose: Initialize one complete zxfer session after all modules are loaded.
 # Usage: Called once by zxfer_main before parsing options or preparing hosts.
-# Side effects: Resolves dependency defaults, installs traps, and resets session state.
+# Side effects: Secures early reporting dependencies, installs traps, resolves
+# configured dependency defaults, and resets session state.
 zxfer_session_initialize() {
 	zxfer_discard_inherited_cleanup_state
-	zxfer_initialize_dependency_defaults
+	zxfer_initialize_dependency_reporting_defaults
 	zxfer_register_runtime_traps
+	zxfer_initialize_dependency_defaults
 	zxfer_init_globals
 }
 
@@ -469,7 +475,14 @@ zxfer_session_run() {
 	# Live -k runs persist after each successful dataset; this final pass also
 	# preserves the established dry-run preview and safety-flush behavior.
 	if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
-		zxfer_write_backup_properties
+		if zxfer_write_backup_properties; then
+			:
+		else
+			l_session_backup_write_status=$?
+			zxfer_throw_error "Failed to write backup metadata." \
+				"$l_session_backup_write_status"
+			return "$l_session_backup_write_status"
+		fi
 	fi
 
 	zxfer_beep 0

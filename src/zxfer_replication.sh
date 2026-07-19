@@ -220,13 +220,13 @@ zxfer_get_live_recheck_source_snapshot_records() {
 		l_live_recheck_source_records=$g_last_common_snap
 	fi
 
-	while IFS= read -r l_snapshot_record; do
-		[ -n "$l_snapshot_record" ] || continue
+	while IFS= read -r l_get_live_recheck_source_snapshot_records_snapshot_record; do
+		[ -n "$l_get_live_recheck_source_snapshot_records_snapshot_record" ] || continue
 		if [ -n "$l_live_recheck_source_records" ]; then
 			l_live_recheck_source_records="$l_live_recheck_source_records
-$l_snapshot_record"
+$l_get_live_recheck_source_snapshot_records_snapshot_record"
 		else
-			l_live_recheck_source_records=$l_snapshot_record
+			l_live_recheck_source_records=$l_get_live_recheck_source_snapshot_records_snapshot_record
 		fi
 	done <<-EOF
 		$(zxfer_normalize_snapshot_record_list "${g_src_snapshot_transfer_list:-}")
@@ -349,37 +349,37 @@ zxfer_copy_snapshots() {
 		return
 	fi
 	{
-		IFS= read -r l_first_snapshot
+		IFS= read -r l_copy_snapshots_first_snapshot
 		IFS= read -r l_final_snapshot
 	} <<-EOF
 		$l_snapshot_transfer_bounds
 	EOF
 
-	l_first_snapshot_path=$(zxfer_extract_snapshot_path "$l_first_snapshot")
-	l_final_snapshot_path=$(zxfer_extract_snapshot_path "$l_final_snapshot")
-	l_last_common_path=$(zxfer_extract_snapshot_path "$g_last_common_snap")
+	l_copy_snapshots_first_snapshot_path=$(zxfer_extract_snapshot_path "$l_copy_snapshots_first_snapshot")
+	l_copy_snapshots_final_snapshot_path=$(zxfer_extract_snapshot_path "$l_final_snapshot")
+	l_copy_snapshots_last_common_path=$(zxfer_extract_snapshot_path "$g_last_common_snap")
 
 	# When there is nothing new to send, there is no need to roll the
 	# destination back after deleting extra snapshots.
-	if [ -n "$l_last_common_path" ] && [ "$l_last_common_path" = "$l_final_snapshot_path" ]; then
+	if [ -n "$l_copy_snapshots_last_common_path" ] && [ "$l_copy_snapshots_last_common_path" = "$l_copy_snapshots_final_snapshot_path" ]; then
 		zxfer_echoV "No new snapshots to copy for $g_actual_dest."
 		return
 	fi
 
 	zxfer_rollback_destination_to_last_common_snapshot
-	zxfer_seed_destination_for_snapshot_transfer "$l_first_snapshot" "$l_first_snapshot_path"
+	zxfer_seed_destination_for_snapshot_transfer "$l_copy_snapshots_first_snapshot" "$l_copy_snapshots_first_snapshot_path"
 
 	# A destination bootstrap/seed can fully satisfy the transfer when there is
 	# only one source snapshot. Do not attempt an incremental send from a
 	# snapshot to itself.
-	if zxfer_snapshot_transfer_is_complete "$l_final_snapshot_path"; then
+	if zxfer_snapshot_transfer_is_complete "$l_copy_snapshots_final_snapshot_path"; then
 		return
 	fi
 
-	zxfer_echoV "Final snapshot: $l_final_snapshot_path"
+	zxfer_echoV "Final snapshot: $l_copy_snapshots_final_snapshot_path"
 	# Re-extract the last common snapshot here: the rollback/seed steps above
 	# can update g_last_common_snap before the incremental send starts.
-	zxfer_zfs_send_receive "$(zxfer_extract_snapshot_path "$g_last_common_snap")" "$l_final_snapshot_path" "$g_actual_dest" "1"
+	zxfer_zfs_send_receive "$(zxfer_extract_snapshot_path "$g_last_common_snap")" "$l_copy_snapshots_final_snapshot_path" "$g_actual_dest" "1"
 }
 
 # Purpose: Resolve whether the current destination needs a live snapshot
@@ -753,17 +753,17 @@ zxfer_build_replication_iteration_list() {
 		"$l_iteration_filtered_file" \
 		"$l_iteration_sorted_file" \
 		"$l_iteration_input_file"
-	l_sort_status=$?
-	if [ "$l_sort_status" -ne 0 ]; then
+	l_build_replication_iteration_list_sort_status=$?
+	if [ "$l_build_replication_iteration_list_sort_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path_list "$l_iteration_stage_files"
-		return "$l_sort_status"
+		return "$l_build_replication_iteration_list_sort_status"
 	fi
 
 	zxfer_read_replication_stage_file "$l_iteration_sorted_file" >/dev/null
-	l_read_status=$?
-	if [ "$l_read_status" -ne 0 ]; then
+	l_build_replication_iteration_list_read_status=$?
+	if [ "$l_build_replication_iteration_list_read_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path_list "$l_iteration_stage_files"
-		return "$l_read_status"
+		return "$l_build_replication_iteration_list_read_status"
 	fi
 	g_zxfer_replication_iteration_list_result=$g_zxfer_replication_file_read_result
 
@@ -823,10 +823,10 @@ zxfer_collect_post_seed_property_sources() {
 	fi
 
 	zxfer_read_replication_stage_file "$l_sorted_sources_file" >/dev/null
-	l_read_status=$?
-	if [ "$l_read_status" -ne 0 ]; then
+	l_collect_post_seed_property_sources_read_status=$?
+	if [ "$l_collect_post_seed_property_sources_read_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path_list "$l_post_seed_stage_files"
-		return "$l_read_status"
+		return "$l_collect_post_seed_property_sources_read_status"
 	fi
 	g_zxfer_post_seed_property_sources_result=$g_zxfer_replication_file_read_result
 
@@ -839,11 +839,11 @@ zxfer_collect_post_seed_property_sources() {
 # orchestration when the surrounding orchestration has selected one work item
 # for detailed handling.
 zxfer_process_source_dataset() {
-	l_source=$1
+	l_process_source_dataset=$1
 	l_property_pass_required=$2
-	l_post_seed_property_sources_file=${3:-}
+	l_process_source_dataset_post_seed_property_sources_file=${3:-}
 
-	zxfer_set_actual_dest "$l_source"
+	zxfer_set_actual_dest "$l_process_source_dataset"
 	# In-flight background receives cannot affect this dataset's cached
 	# destination state: the ready-queue ancestry gate defers any dataset whose
 	# destination conflicts with an active job, completed jobs invalidate their
@@ -853,10 +853,11 @@ zxfer_process_source_dataset() {
 	# forced a tree-wide property re-derivation for nearly every dataset under
 	# -j and was the parallel-mode performance regression.
 
-	zxfer_inspect_delete_snap "$g_option_d_delete_destination_snapshots" "$l_source"
+	zxfer_inspect_delete_snap "$g_option_d_delete_destination_snapshots" \
+		"$l_process_source_dataset"
 
 	if [ "$l_property_pass_required" -eq 1 ]; then
-		zxfer_transfer_properties "$l_source"
+		zxfer_transfer_properties "$l_process_source_dataset"
 	fi
 
 	zxfer_copy_snapshots
@@ -864,16 +865,26 @@ zxfer_process_source_dataset() {
 	if [ "$l_property_pass_required" -eq 1 ] &&
 		[ -z "${g_zfs_send_job_pids:-}" ] &&
 		[ "${g_dest_seed_requires_property_reconcile:-0}" -eq 0 ]; then
-		zxfer_flush_captured_backup_metadata_if_live
+		if zxfer_flush_captured_backup_metadata_if_live; then
+			:
+		else
+			l_process_source_backup_flush_status=$?
+			zxfer_throw_error "Failed to write backup metadata." \
+				"$l_process_source_backup_flush_status"
+			return "$l_process_source_backup_flush_status"
+		fi
 	fi
 
 	if [ "$l_property_pass_required" -eq 1 ] &&
 		[ "${g_dest_seed_requires_property_reconcile:-0}" -eq 1 ] &&
 		[ "$g_option_n_dryrun" -eq 0 ]; then
-		zxfer_defer_buffered_backup_metadata_record "$l_source"
+		zxfer_defer_buffered_backup_metadata_record \
+			"$l_process_source_dataset"
 		zxfer_note_destination_dataset_exists "$g_actual_dest"
-		if ! zxfer_append_post_seed_property_source "$l_post_seed_property_sources_file" "$l_source"; then
-			zxfer_throw_error "Failed to queue post-seed property reconcile source [$l_source]."
+		if ! zxfer_append_post_seed_property_source \
+			"$l_process_source_dataset_post_seed_property_sources_file" \
+			"$l_process_source_dataset"; then
+			zxfer_throw_error "Failed to queue post-seed property reconcile source [$l_process_source_dataset]."
 		fi
 	fi
 }
@@ -889,11 +900,11 @@ zxfer_run_post_seed_property_reconcile() {
 	[ -n "$l_post_seed_property_sources" ] || return
 
 	zxfer_reset_destination_property_iteration_cache
-	while IFS= read -r l_source; do
-		[ -n "$l_source" ] || continue
-		zxfer_set_actual_dest "$l_source"
-		zxfer_transfer_properties "$l_source" 1
-		zxfer_finalize_deferred_backup_metadata_record "$l_source"
+	while IFS= read -r l_post_seed_source; do
+		[ -n "$l_post_seed_source" ] || continue
+		zxfer_set_actual_dest "$l_post_seed_source"
+		zxfer_transfer_properties "$l_post_seed_source" 1
+		zxfer_finalize_deferred_backup_metadata_record "$l_post_seed_source"
 	done <<-EOF
 		$l_post_seed_property_sources
 	EOF
@@ -930,13 +941,13 @@ zxfer_replication_background_send_has_capacity() {
 zxfer_process_replication_ready_queue() {
 	l_pending_sources=$1
 	l_initial_pending_sources=$l_pending_sources
-	l_property_pass_required=$2
-	l_post_seed_property_sources_file=$3
+	l_process_replication_ready_queue_property_pass_required=$2
+	l_process_replication_ready_queue_post_seed_property_sources_file=$3
 	l_ready_queue_active=0
 	l_processed_source_count=0
 	l_wait_count=0
-	l_job_limit=$(zxfer_get_replication_background_send_job_limit)
-	[ "$l_job_limit" -gt 1 ] && [ "${g_option_n_dryrun:-0}" -eq 0 ] && l_ready_queue_active=1
+	l_process_replication_ready_queue_job_limit=$(zxfer_get_replication_background_send_job_limit)
+	[ "$l_process_replication_ready_queue_job_limit" -gt 1 ] && [ "${g_option_n_dryrun:-0}" -eq 0 ] && l_ready_queue_active=1
 	while [ -n "$l_pending_sources" ]; do
 		l_next_pending_sources=""
 		l_processed_source=0
@@ -954,7 +965,7 @@ zxfer_process_replication_ready_queue() {
 				fi
 			fi
 			if [ "$l_source_is_ready" -eq 1 ]; then
-				zxfer_process_source_dataset "$l_source" "$l_property_pass_required" "$l_post_seed_property_sources_file" </dev/null
+				zxfer_process_source_dataset "$l_source" "$l_process_replication_ready_queue_property_pass_required" "$l_process_replication_ready_queue_post_seed_property_sources_file" </dev/null
 				l_processed_source=1
 				l_processed_source_count=$((l_processed_source_count + 1))
 				continue
@@ -997,11 +1008,11 @@ zxfer_process_replication_ready_queue() {
 zxfer_copy_filesystems() {
 	zxfer_echoV "Begin zxfer_copy_filesystems()"
 
-	l_property_pass_required=0
+	l_copy_filesystems_property_pass_required=0
 	if zxfer_property_pass_is_required; then
-		l_property_pass_required=1
+		l_copy_filesystems_property_pass_required=1
 	fi
-	if [ "$l_property_pass_required" -eq 0 ] &&
+	if [ "$l_copy_filesystems_property_pass_required" -eq 0 ] &&
 		[ -z "${g_recursive_source_list:-}" ] &&
 		{ [ "$g_option_d_delete_destination_snapshots" -ne 1 ] ||
 			[ -z "${g_recursive_destination_extra_dataset_list:-}" ]; }; then
@@ -1009,11 +1020,11 @@ zxfer_copy_filesystems() {
 		zxfer_echoV "End zxfer_copy_filesystems()"
 		return
 	fi
-	if ! zxfer_build_replication_iteration_list "$l_property_pass_required"; then
+	if ! zxfer_build_replication_iteration_list "$l_copy_filesystems_property_pass_required"; then
 		zxfer_throw_error "Failed to prepare replication dataset iteration list."
 	fi
 	l_iteration_list=$g_zxfer_replication_iteration_list_result
-	if [ -z "$l_iteration_list" ] && [ "$l_property_pass_required" -eq 0 ]; then
+	if [ -z "$l_iteration_list" ] && [ "$l_copy_filesystems_property_pass_required" -eq 0 ]; then
 		zxfer_wait_for_zfs_send_jobs "final sync"
 		zxfer_echoV "End zxfer_copy_filesystems()"
 		return
@@ -1022,18 +1033,18 @@ zxfer_copy_filesystems() {
 	if ! zxfer_get_temp_file >/dev/null; then
 		zxfer_throw_error "Error creating temporary file."
 	fi
-	l_post_seed_property_sources_file=$g_zxfer_temp_file_result
-	if ! zxfer_write_runtime_artifact_file "$l_post_seed_property_sources_file" ""; then
-		zxfer_cleanup_runtime_artifact_path "$l_post_seed_property_sources_file"
+	l_copy_filesystems_post_seed_property_sources_file=$g_zxfer_temp_file_result
+	if ! zxfer_write_runtime_artifact_file "$l_copy_filesystems_post_seed_property_sources_file" ""; then
+		zxfer_cleanup_runtime_artifact_path "$l_copy_filesystems_post_seed_property_sources_file"
 		zxfer_throw_error "Error creating temporary file."
 	fi
 
 	zxfer_refresh_property_tree_prefetch_context
 
-	zxfer_process_replication_ready_queue "$l_iteration_list" "$l_property_pass_required" "$l_post_seed_property_sources_file"
+	zxfer_process_replication_ready_queue "$l_iteration_list" "$l_copy_filesystems_property_pass_required" "$l_copy_filesystems_post_seed_property_sources_file"
 
 	l_has_post_seed_property_sources=0
-	if [ -s "$l_post_seed_property_sources_file" ]; then
+	if [ -s "$l_copy_filesystems_post_seed_property_sources_file" ]; then
 		l_has_post_seed_property_sources=1
 	fi
 
@@ -1041,23 +1052,30 @@ zxfer_copy_filesystems() {
 	[ -n "${g_zfs_send_job_pids:-}" ] && l_had_pending_send_jobs=1
 	zxfer_wait_for_zfs_send_jobs "final sync"
 
-	if [ "$l_property_pass_required" -eq 1 ] &&
+	if [ "$l_copy_filesystems_property_pass_required" -eq 1 ] &&
 		[ "$g_option_n_dryrun" -eq 0 ] &&
 		[ "$l_has_post_seed_property_sources" -eq 1 ]; then
-		if ! zxfer_collect_post_seed_property_sources "$l_post_seed_property_sources_file"; then
-			zxfer_cleanup_runtime_artifact_path "$l_post_seed_property_sources_file"
+		if ! zxfer_collect_post_seed_property_sources "$l_copy_filesystems_post_seed_property_sources_file"; then
+			zxfer_cleanup_runtime_artifact_path "$l_copy_filesystems_post_seed_property_sources_file"
 			zxfer_throw_error "Failed to prepare post-seed property reconcile source queue."
 		fi
-		l_post_seed_property_sources=$g_zxfer_post_seed_property_sources_result
-		zxfer_run_post_seed_property_reconcile "$l_post_seed_property_sources"
+		l_copy_filesystems_post_seed_property_sources=$g_zxfer_post_seed_property_sources_result
+		zxfer_run_post_seed_property_reconcile "$l_copy_filesystems_post_seed_property_sources"
 	fi
 
-	if [ "$l_property_pass_required" -eq 1 ] &&
+	if [ "$l_copy_filesystems_property_pass_required" -eq 1 ] &&
 		{ [ "$l_had_pending_send_jobs" -eq 1 ] || [ "$l_has_post_seed_property_sources" -eq 1 ]; }; then
-		zxfer_flush_captured_backup_metadata_if_live
+		if zxfer_flush_captured_backup_metadata_if_live; then
+			:
+		else
+			l_copy_filesystems_backup_flush_status=$?
+			zxfer_throw_error "Failed to write backup metadata." \
+				"$l_copy_filesystems_backup_flush_status"
+			return "$l_copy_filesystems_backup_flush_status"
+		fi
 	fi
 
-	zxfer_cleanup_runtime_artifact_path "$l_post_seed_property_sources_file"
+	zxfer_cleanup_runtime_artifact_path "$l_copy_filesystems_post_seed_property_sources_file"
 	zxfer_echoV "End zxfer_copy_filesystems()"
 }
 
@@ -1129,17 +1147,20 @@ zxfer_validate_zfs_mode_preconditions() {
 # orchestration before later helpers act on a result that must be validated
 # first.
 zxfer_check_backup_storage_dir_if_needed() {
-	[ "$g_option_k_backup_property_mode" -eq 1 ] || return
+	[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] || return 0
 
 	zxfer_refresh_backup_storage_root
 
 	if [ "$g_option_n_dryrun" -eq 1 ]; then
-		l_backup_dir_cmd=$(zxfer_build_shell_command_from_argv mkdir -p "$g_backup_storage_root")
-		l_backup_dir_mode_cmd=$(zxfer_build_shell_command_from_argv chmod 700 "$g_backup_storage_root")
+		l_backup_dir_cmd=$(zxfer_build_shell_command_from_argv \
+			mkdir -p "$g_backup_storage_root") || return "$?"
+		l_backup_dir_mode_cmd=$(zxfer_build_shell_command_from_argv \
+			chmod 700 "$g_backup_storage_root") || return "$?"
 		if [ "$g_option_T_target_host" = "" ]; then
 			zxfer_echov "Dry run: umask 077; $l_backup_dir_cmd; $l_backup_dir_mode_cmd"
 		else
-			l_remote_backup_dir_cmd=$(zxfer_build_remote_backup_dir_prepare_cmd "$g_backup_storage_root" "$g_option_T_target_host" 99)
+			l_remote_backup_dir_cmd=$(zxfer_build_remote_backup_dir_prepare_cmd \
+				"$g_backup_storage_root" "$g_option_T_target_host" 99) || return "$?"
 			zxfer_render_remote_backup_dry_run_shell_command "$g_option_T_target_host" "$l_remote_backup_dir_cmd" ||
 				return "$?"
 			l_remote_backup_display_cmd=$g_zxfer_remote_backup_dry_run_shell_command_result
@@ -1276,10 +1297,10 @@ EOF
 	l_migration_sources=$(zxfer_split_tokens_on_whitespace "${g_recursive_source_list:-}")
 
 	# Validate that each dataset is mounted before we attempt to unmount or snapshot.
-	while IFS= read -r l_source || [ -n "$l_source" ]; do
-		[ -n "$l_source" ] || continue
-		if ! l_source_mounted=$(zxfer_run_source_zfs_cmd get -Ho value mounted "$l_source"); then
-			zxfer_throw_error "Couldn't determine whether source $l_source is mounted."
+	while IFS= read -r l_prepare_migration_services_source || [ -n "$l_prepare_migration_services_source" ]; do
+		[ -n "$l_prepare_migration_services_source" ] || continue
+		if ! l_source_mounted=$(zxfer_run_source_zfs_cmd get -Ho value mounted "$l_prepare_migration_services_source"); then
+			zxfer_throw_error "Couldn't determine whether source $l_prepare_migration_services_source is mounted."
 		fi
 		if [ "$l_source_mounted" != "yes" ]; then
 			zxfer_throw_usage_error "The source filesystem is not mounted, cannot use -m."
@@ -1288,13 +1309,13 @@ EOF
 $l_migration_sources
 EOF
 
-	while IFS= read -r l_source || [ -n "$l_source" ]; do
-		[ -n "$l_source" ] || continue
+	while IFS= read -r l_prepare_migration_services_source || [ -n "$l_prepare_migration_services_source" ]; do
+		[ -n "$l_prepare_migration_services_source" ] || continue
 		# Unmount the source filesystem before doing the last snapshot.
-		zxfer_echov "Unmounting $l_source."
-		if ! zxfer_run_source_zfs_cmd unmount "$l_source"; then
+		zxfer_echov "Unmounting $l_prepare_migration_services_source."
+		if ! zxfer_run_source_zfs_cmd unmount "$l_prepare_migration_services_source"; then
 			zxfer_relaunch
-			zxfer_throw_error "Couldn't unmount source $l_source."
+			zxfer_throw_error "Couldn't unmount source $l_prepare_migration_services_source."
 		fi
 	done <<EOF
 $l_migration_sources
@@ -1361,11 +1382,12 @@ zxfer_perform_grandfather_protection_checks() {
 	zxfer_echov "Checking grandfather status of all snapshots marked for deletion..."
 
 	l_grandfather_sources=$(zxfer_split_tokens_on_whitespace "${g_recursive_source_list:-}")
-	while IFS= read -r l_source || [ -n "$l_source" ]; do
-		[ -n "$l_source" ] || continue
-		zxfer_set_actual_dest "$l_source"
+	while IFS= read -r l_grandfather_source ||
+		[ -n "$l_grandfather_source" ]; do
+		[ -n "$l_grandfather_source" ] || continue
+		zxfer_set_actual_dest "$l_grandfather_source"
 		# turn off delete so that we are only checking snapshots, pass 0
-		zxfer_inspect_delete_snap 0 "$l_source"
+		zxfer_inspect_delete_snap 0 "$l_grandfather_source"
 	done <<EOF
 $l_grandfather_sources
 EOF
@@ -1383,7 +1405,14 @@ zxfer_run_zfs_mode() {
 	zxfer_resolve_initial_source_from_options
 	zxfer_normalize_source_destination_paths
 	zxfer_validate_zfs_mode_preconditions
-	zxfer_check_backup_storage_dir_if_needed
+	if zxfer_check_backup_storage_dir_if_needed; then
+		:
+	else
+		l_run_zfs_mode_backup_status=$?
+		zxfer_throw_error "Failed to prepare backup metadata storage." \
+			"$l_run_zfs_mode_backup_status"
+		return "$l_run_zfs_mode_backup_status"
+	fi
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
 		zxfer_preview_zfs_mode_dry_run

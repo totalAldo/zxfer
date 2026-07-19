@@ -7,6 +7,18 @@ function is_shell_token_separator(char) {
 		char == "(" || char == ")" || char == "<" || char == ">")
 }
 
+function emit_parameter_default_assignment(text, start,    remaining, variable, operator) {
+	if (substr(text, start, 2) != "${")
+		return
+	remaining = substr(text, start + 2)
+	if (!match(remaining, /^g_[A-Za-z0-9_]+/))
+		return
+	variable = substr(remaining, RSTART, RLENGTH)
+	operator = substr(remaining, RLENGTH + 1, 2)
+	if (operator == ":=" || substr(operator, 1, 1) == "=")
+		emit(variable, "default-assignment")
+}
+
 function shell_code(line,    output, i, char, token_start) {
 	output = ""
 	token_start = (quote == "")
@@ -47,6 +59,8 @@ function shell_code(line,    output, i, char, token_start) {
 			i++
 			continue
 		}
+		if (char == "$")
+			emit_parameter_default_assignment(line, i)
 		if (char == "\"")
 			quote = ""
 	}
@@ -56,13 +70,29 @@ function shell_code(line,    output, i, char, token_start) {
 function remember_heredoc(line, code,    fragment) {
 	if (index(code, "<<") == 0)
 		return
-	if (!match(line, /<<-?[ \t]*[\047"]?[A-Za-z_][A-Za-z0-9_]*[\047"]?/))
+	if (!match(line, /<<-?[ \t]*(\\[A-Za-z_][A-Za-z0-9_]*|[\047"][A-Za-z_][A-Za-z0-9_]*[\047"]|[A-Za-z_][A-Za-z0-9_]*)/))
 		return
 	fragment = substr(line, RSTART, RLENGTH)
 	heredoc_strip_tabs = (fragment ~ /^<<-/)
+	heredoc_expands = (fragment !~ /[\047"]/ && fragment !~ /\\/)
 	sub(/^<<-?[ \t]*/, "", fragment)
 	gsub(/[\047"]/, "", fragment)
+	gsub(/\\/, "", fragment)
 	heredoc_delimiter = fragment
+}
+
+function scan_expanding_heredoc(line,    i, char, backslashes) {
+	backslashes = 0
+	for (i = 1; i <= length(line); i++) {
+		char = substr(line, i, 1)
+		if (char == "\\") {
+			backslashes++
+			continue
+		}
+		if (char == "$" && backslashes % 2 == 0)
+			emit_parameter_default_assignment(line, i)
+		backslashes = 0
+	}
 }
 
 function emit(variable, kind) {
@@ -95,6 +125,7 @@ FNR == 1 {
 	quote = ""
 	heredoc_delimiter = ""
 	heredoc_strip_tabs = 0
+	heredoc_expands = 0
 }
 
 {
@@ -105,6 +136,9 @@ FNR == 1 {
 		if (candidate == heredoc_delimiter) {
 			heredoc_delimiter = ""
 			heredoc_strip_tabs = 0
+			heredoc_expands = 0
+		} else if (heredoc_expands) {
+			scan_expanding_heredoc(candidate)
 		}
 		next
 	}

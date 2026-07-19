@@ -80,6 +80,7 @@ Important environment variables:
 
 - `ZXFER_SECURE_PATH`: replace the default allowlist entirely
 - `ZXFER_SECURE_PATH_APPEND`: append extra absolute directories
+- `ZXFER_BACKUP_DIR`: select the absolute property-backup metadata root
 - `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1`: emit verbatim `invocation` and `last_command` in structured failure reports and any `ZXFER_ERROR_LOG` mirror; unsafe for shared logs
 - `ZXFER_SSH_USER_KNOWN_HOSTS_FILE`: pin zxfer-managed ssh host-key checks to a specific absolute known-hosts file
 - `ZXFER_SSH_USE_AMBIENT_CONFIG=1`: opt out of zxfer's default `BatchMode=yes` / `StrictHostKeyChecking=yes` transport policy
@@ -96,6 +97,12 @@ OpenZFS-on-macOS path exists.
 The computed allowlist also becomes the live runtime `PATH`, so an explicit
 `ZXFER_SECURE_PATH` override must include every trusted helper directory that
 later bare command lookups may need.
+Both secure-PATH inputs are rejected in full if they contain a tab, carriage
+return, or line feed; resolved local and remote helper paths must satisfy the
+same byte-shape rule. `ZXFER_BACKUP_DIR` is likewise rejected before any path
+derivation if it contains one of those three bytes. This validation happens
+before readable remote programs are converted to their one-line transport
+form, so login-shell compatibility cannot translate configured path bytes.
 
 ## Remote Hosts
 
@@ -125,10 +132,13 @@ matters especially when:
   remain
 - custom `-Z` compression commands or default `zstd` helpers must be resolved
   per host instead of assuming one shared absolute path
-- remote helper capability discovery runs once per host per invocation, keyed
-  in memory by the host spec, trusted dependency path, ssh transport policy,
-  and the requested optional tool set; no capability-cache files are reused
-  across concurrent or later zxfer invocations
+- remote helper capability discovery runs once per exact origin/target cache
+  identity per invocation, keyed in memory by role, host spec, trusted
+  dependency path, ssh transport policy, and the requested optional tool set;
+  no capability-cache files are reused across concurrent or later zxfer
+  invocations. Each accepted response is parsed once for that identity; later
+  OS and helper lookups load the validated parsed fields instead of reparsing
+  the raw handshake
 
 Current releases keep ssh control sockets and remote capability state
 strictly per-run. Each invocation creates its own short `ssh-<role>.sock`
@@ -144,13 +154,24 @@ backup-metadata guard/staging scripts run, so their auxiliary
 `stat`/`ls`/`id`/`awk` lookups do not fall back to the remote login shell's
 ambient `PATH`.
 
+Capability probes and secure remote-backup directory/write protocols are
+maintained as readable multiline POSIX `sh` programs and pinned by focused
+golden tests. At the SSH boundary zxfer removes blank lines and joins the
+semicolon-terminated commands into one physical line, then passes that line
+through an explicit `sh -c`. That narrow transport step preserves the same
+program on remote accounts whose login shell is csh or tcsh; it does not change
+the validated program or its protocol fields.
+
 Remote target (`-T`) destination discovery also runs under that validated
 target-side `PATH`. Current discovery batches the recursive destination dataset
 inventory, the missing-root pool probe, and `name,guid` destination snapshot
 listing into one target-side POSIX `sh -c` payload. The large snapshot section
 is streamed back over ssh, compact statuses and stderr are staged separately,
-and malformed or truncated section payloads fail closed. Local destination
-discovery deliberately remains on the direct local `zfs` path.
+and malformed or truncated section payloads fail closed. The local side
+validates the complete ordered protocol in one private run-root workspace and
+publishes its inventory, inventory-stderr, snapshot, and snapshot-stderr files
+as one rollback-protected transaction. Local destination discovery deliberately
+remains on the direct local `zfs` path.
 
 zxfer-managed ssh transports also now force `BatchMode=yes` and
 `StrictHostKeyChecking=yes` by default. They still rely on the local ssh

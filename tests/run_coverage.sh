@@ -971,16 +971,98 @@ function ends_with_line_continuation(line, t, trailing_backslashes) {
 	trailing_backslashes = count_trailing_backslashes(line)
 	return (trailing_backslashes % 2) == 1
 }
-function heredoc_delimiter(line,    match_count, start, length_part, delimiter) {
-	match_count = match(line, /<<-?[[:space:]]*[A-Za-z_][A-Za-z0-9_]*/)
-	if (match_count == 0) {
+function heredoc_delimiter(line,    rest, quote, quote_end, delimiter) {
+	if (!match(line, /<<-?[[:space:]]*/)) {
 		return ""
 	}
-	start = RSTART
-	length_part = RLENGTH
-	delimiter = substr(line, start, length_part)
-	sub(/^<<-?[[:space:]]*/, "", delimiter)
+	rest = substr(line, RSTART + RLENGTH)
+	if (substr(rest, 1, 1) == "\\") {
+		rest = substr(rest, 2)
+	}
+	quote = substr(rest, 1, 1)
+	if (quote == "\"" || quote == "'\''") {
+		quote_end = index(substr(rest, 2), quote)
+		if (quote_end == 0) {
+			return ""
+		}
+		delimiter = substr(rest, 2, quote_end - 1)
+	} else {
+		if (!match(rest, /^[A-Za-z_][A-Za-z0-9_]*/)) {
+			return ""
+		}
+		delimiter = substr(rest, RSTART, RLENGTH)
+	}
+	if (delimiter !~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+		return ""
+	}
 	return delimiter
+}
+function unclosed_command_substitution_depth(line,    i, ch, next_ch, after_next, depth, escaped, in_single_quote, in_double_quote, scope_index) {
+	for (scope_index in command_substitution_outer_double_quote)
+		delete command_substitution_outer_double_quote[scope_index]
+	for (scope_index in command_substitution_parenthesis_depth)
+		delete command_substitution_parenthesis_depth[scope_index]
+	depth = 0
+	escaped = 0
+	in_single_quote = 0
+	in_double_quote = 0
+	for (i = 1; i <= length(line); i++) {
+		ch = substr(line, i, 1)
+		next_ch = substr(line, i + 1, 1)
+		after_next = substr(line, i + 2, 1)
+		if (in_single_quote) {
+			if (ch == "'\''") {
+				in_single_quote = 0
+			}
+			continue
+		}
+		if (escaped) {
+			escaped = 0
+			continue
+		}
+		if (ch == "\\") {
+			escaped = 1
+			continue
+		}
+		if (ch == "'\''" && !in_double_quote) {
+			in_single_quote = 1
+			continue
+		}
+		if (ch == "$" && next_ch == "(" && after_next != "(") {
+			depth++
+			command_substitution_outer_double_quote[depth] = in_double_quote
+			command_substitution_parenthesis_depth[depth] = 0
+			# The command inside $(...) has its own quote context even when the
+			# substitution itself appears inside an outer double-quoted word.
+			in_single_quote = 0
+			in_double_quote = 0
+			escaped = 0
+			i++
+			continue
+		}
+		if (ch == "\"") {
+			in_double_quote = !in_double_quote
+			continue
+		}
+		if (!in_double_quote && starts_shell_comment_at(line, i)) {
+			break
+		}
+		if (depth > 0 && !in_double_quote && ch == "(") {
+			command_substitution_parenthesis_depth[depth]++
+			continue
+		}
+		if (depth > 0 && !in_double_quote && ch == ")") {
+			if (command_substitution_parenthesis_depth[depth] > 0) {
+				command_substitution_parenthesis_depth[depth]--
+			} else {
+				in_double_quote = command_substitution_outer_double_quote[depth]
+				delete command_substitution_outer_double_quote[depth]
+				delete command_substitution_parenthesis_depth[depth]
+				depth--
+			}
+		}
+	}
+	return depth
 }
 function is_case_pattern_line(line, t) {
 	t = trim(line)
@@ -1003,6 +1085,16 @@ function opens_command_substitution_subshell(line, t) {
 function closes_command_substitution_scope(line, t) {
 	t = trim(line)
 	return (t ~ /^\)/)
+}
+function is_untraceable_control_syntax_line(line, t) {
+	t = trim(line)
+	if (t ~ /^(if|elif|while|until)[[:space:]]+(![[:space:]]+)?\($/) {
+		return 1
+	}
+	if (t ~ /^\)([[:space:]]+[^;]+)?;[[:space:]]*(then|do)$/) {
+		return 1
+	}
+	return (t ~ /^(done|[{}()])[[:space:]]*[0-9]*[<>]/)
 }
 function is_coverable_line(line, t, l_heredoc_delimiter) {
 	t = trim(line)
@@ -1078,16 +1170,27 @@ function is_coverable_line(line, t, l_heredoc_delimiter) {
 	if (l_heredoc_delimiter != "") {
 		coverage_in_heredoc = 1
 		coverage_heredoc_delimiter = l_heredoc_delimiter
-		if (t ~ /^(done|[{}])[[:space:]].*<<-?[[:space:]]*[A-Za-z_][A-Za-z0-9_]*$/) {
+		if (t ~ /^(done|[{}])[[:space:]]*<<-?/) {
 			return 0
 		}
 	}
+	if (is_untraceable_control_syntax_line(line)) return 0
 	if (has_unbalanced_double_quote(line)) {
 		coverage_in_multiline_double_quote = 1
 		return 0
 	}
 	if (starts_multiline_single_quote(line)) {
 		coverage_in_multiline_single_quote = 1
+		return 0
+	}
+	# Bash attributes an assignment containing a command substitution to a
+	# later physical line when the substitution continues there. Exclude only
+	# the untraceable opener; independently attributable body lines remain
+	# eligible unless an existing multiline rule applies.
+	if (unclosed_command_substitution_depth(line) > 0) {
+		if (ends_with_line_continuation(line)) {
+			coverage_in_backslash_continuation = 1
+		}
 		return 0
 	}
 	if (ends_with_line_continuation(line)) {

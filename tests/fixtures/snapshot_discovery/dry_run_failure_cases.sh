@@ -1140,6 +1140,79 @@ test_execute_source_snapshot_name_list_background_sort_cmd_preserves_count_statu
 		"" "$output"
 }
 
+test_execute_source_snapshot_name_list_background_sort_cmd_preserves_count_status_quoting_failures() {
+	set +e
+	output=$(
+		(
+			temp_call_count=0
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "$TEST_TMPDIR/cleanup-wrapper.sh"
+			}
+			zxfer_get_temp_file() {
+				temp_call_count=$((temp_call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/count-quote-status-$temp_call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_shell_command_from_argv() {
+				if [ "$1" = "$TEST_TMPDIR/count-quote-status-2.tmp" ]; then
+					return 61
+				fi
+				printf "'%s'\n" "$1"
+			}
+			zxfer_cleanup_runtime_artifact_paths() {
+				return 0
+			}
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				"echo snapshots" \
+				"$TEST_TMPDIR/count-quote-status-sorted.out" \
+				"" \
+				"$TEST_TMPDIR/count-quote-status.count"
+		)
+	)
+	status=$?
+
+	assertEquals "The no-op proof source launcher should preserve count status-file quoting failures exactly." \
+		61 "$status"
+	assertEquals "Count status-file quoting failures should not emit partial commands." \
+		"" "$output"
+}
+
+test_execute_source_snapshot_name_list_background_sort_cmd_preserves_filter_status_quoting_failures() {
+	set +e
+	output=$(
+		(
+			temp_call_count=0
+			g_option_x_exclude_datasets='replica$'
+			zxfer_get_cleanup_child_wrapper_script_path() {
+				printf '%s\n' "$TEST_TMPDIR/cleanup-wrapper.sh"
+			}
+			zxfer_get_temp_file() {
+				temp_call_count=$((temp_call_count + 1))
+				g_zxfer_temp_file_result="$TEST_TMPDIR/filter-quote-status-$temp_call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_build_shell_command_from_argv() {
+				if [ "$1" = "$TEST_TMPDIR/filter-quote-status-2.tmp" ]; then
+					return 62
+				fi
+				printf "'%s'\n" "$1"
+			}
+			zxfer_cleanup_runtime_artifact_paths() {
+				return 0
+			}
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				"echo snapshots" \
+				"$TEST_TMPDIR/filter-quote-status-sorted.out"
+		)
+	)
+	status=$?
+
+	assertEquals "The no-op proof source launcher should preserve filter status-file quoting failures exactly." \
+		62 "$status"
+	assertEquals "Filter status-file quoting failures should not emit partial commands." \
+		"" "$output"
+}
+
 test_get_zfs_list_reports_initial_tempfile_failures() {
 	set +e
 	output=$(

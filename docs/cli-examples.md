@@ -255,7 +255,8 @@ validates `#format_version:2`, then restores the matching source-root-relative
 row. `-e` also flows through the property-transfer path during the restore.
 Older mountpoint-local `.zxfer_backup_info.*` files and other legacy metadata
 layouts are intentionally unsupported.
-`ZXFER_BACKUP_DIR` must be an absolute path.
+`ZXFER_BACKUP_DIR` must be a single-line absolute path without tabs or
+carriage returns.
 
 ## Remote Replication And Stream Options
 

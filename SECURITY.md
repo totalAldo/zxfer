@@ -11,16 +11,33 @@ resolution security-sensitive by default.
 
 Key protections already present in the project include:
 
-- secure-PATH resolution for required local helpers and the main remote helper lookups (`zfs`, `cat`, and GNU `parallel`)
+- secure-PATH resolution for required local helpers and the main remote helper
+  lookups (`zfs`, `cat`, and GNU `parallel`), with resolved helper paths
+  rejected if they contain a tab, carriage return, or line feed
+- rejection of tab, carriage-return, or line-feed bytes in
+  `ZXFER_SECURE_PATH`, `ZXFER_SECURE_PATH_APPEND`, and `ZXFER_BACKUP_DIR`
+  before those values are split, cached, exported, or remotely rendered
 - structured failure reporting instead of ad hoc error handling
 - safe-by-default failure-report redaction for `invocation` and `last_command`
 - hardened `ZXFER_ERROR_LOG` path validation
 - secured property backup metadata directories and file-permission checks
 - explicit handling for wrapped remote host specs
 - separate argv-preserving execution and hardened rendered-pipeline APIs
+- readable multiline capability and remote-backup directory/write programs
+  with golden protocol pins; only their validated, semicolon-terminated
+  transport form is joined to one physical line for csh/tcsh before an
+  explicit `sh -c`, so line collapse cannot translate trusted configuration
+  bytes
 - a private per-run 0700 artifact root whose exact path, validated parent, and
   stored device/inode identity must match runtime-owned provenance before
   recursive cleanup
+- remote destination discovery streams into one private run-root child and
+  publishes its four outputs only after transport, protocol order, statuses,
+  sentinel, and staged-file readback all pass; partial publication is rolled
+  back or cleared rather than exposing mixed discovery generations
+- remote capability responses are framed, coverage-checked, and parsed once per
+  exact role/identity into owner state; later OS/tool consumers load validated
+  fields instead of repeatedly trusting or reparsing raw handshake text
 - exact registration and shape checks for the small number of path-adjacent
   staging entries that cannot live below the run root, plus stored
   device/inode identity checks for registered directories

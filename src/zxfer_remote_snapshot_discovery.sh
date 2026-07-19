@@ -37,13 +37,14 @@
 
 # Module contract:
 # owns globals: destination batch status/result channels for inventory, pool,
-#   snapshot, and snapshot-ran state; in-shell script and parser renderer
-#   result channels.
+#   snapshot, and snapshot-ran state; the contained local operation workspace;
+#   in-shell script, parser, transport, and failure result channels.
 # reads globals: target-host execution context, resolved remote helpers,
 #   destination roots, compression settings, and producer staging helpers.
 # mutates caches: none.
-# returns via stdout: rendered remote batch scripts and parsed batch status;
-#   writes separated inventory, stderr, and snapshot streams to caller paths.
+# returns via stdout: rendered remote batch scripts and validated transport
+#   stderr; transactionally publishes separated inventory, stderr, and snapshot
+#   streams only after the complete transport protocol passes validation.
 
 # Purpose: Return whether a status value from the destination discovery batch
 # is numeric.
@@ -63,12 +64,51 @@ zxfer_destination_discovery_batch_status_is_numeric() {
 # Usage: Called before parsing a target-side batch payload so stale statuses
 # cannot leak into the current discovery result.
 zxfer_reset_destination_discovery_batch_state() {
+	zxfer_reset_destination_discovery_batch_status_state
+	zxfer_reset_remote_destination_discovery_workspace_state
+	g_zxfer_remote_destination_discovery_command_result=""
+	g_zxfer_remote_destination_discovery_parser_status_result=""
+	g_zxfer_remote_destination_discovery_transport_status_result=""
+	g_zxfer_remote_destination_discovery_transport_stderr_result=""
+	g_zxfer_remote_destination_discovery_failure_kind=""
+	g_zxfer_remote_destination_discovery_failure_status=""
+	zxfer_reset_remote_destination_discovery_batch_script_state
+	zxfer_reset_remote_destination_discovery_batch_parser_state
+}
+
+# Purpose: Reset only the validated destination discovery status channel.
+# Usage: The status-sidecar loader calls this without discarding the command,
+# parser, or workspace state still owned by the active operation.
+zxfer_reset_destination_discovery_batch_status_state() {
 	g_zxfer_destination_discovery_batch_inventory_status=""
 	g_zxfer_destination_discovery_batch_pool_status=""
 	g_zxfer_destination_discovery_batch_snapshot_status=""
 	g_zxfer_destination_discovery_batch_snapshot_ran=""
-	zxfer_reset_remote_destination_discovery_batch_script_state
-	zxfer_reset_remote_destination_discovery_batch_parser_state
+	g_zxfer_destination_discovery_batch_inventory_status_seen=0
+	g_zxfer_destination_discovery_batch_pool_status_seen=0
+	g_zxfer_destination_discovery_batch_snapshot_status_seen=0
+	g_zxfer_destination_discovery_batch_snapshot_ran_status_seen=0
+	g_zxfer_destination_discovery_batch_status_name_result=""
+	g_zxfer_destination_discovery_batch_status_value_result=""
+}
+
+# Purpose: Reset the fixed paths for one local destination-discovery workspace.
+# Usage: Called before allocating a private run-root child and after its single
+# normal cleanup so stale descendants can never authorize a later publication.
+zxfer_reset_remote_destination_discovery_workspace_state() {
+	g_zxfer_remote_destination_discovery_workspace=""
+	g_zxfer_remote_destination_discovery_rollback_dir=""
+	g_zxfer_remote_destination_discovery_transport_status_file=""
+	g_zxfer_remote_destination_discovery_transport_stderr_file=""
+	g_zxfer_remote_destination_discovery_batch_status_file=""
+	g_zxfer_remote_destination_discovery_inventory_stage_file=""
+	g_zxfer_remote_destination_discovery_inventory_stderr_stage_file=""
+	g_zxfer_remote_destination_discovery_snapshot_stage_file=""
+	g_zxfer_remote_destination_discovery_snapshot_stderr_stage_file=""
+	g_zxfer_remote_destination_discovery_inventory_target_file=""
+	g_zxfer_remote_destination_discovery_inventory_stderr_target_file=""
+	g_zxfer_remote_destination_discovery_snapshot_target_file=""
+	g_zxfer_remote_destination_discovery_snapshot_stderr_target_file=""
 }
 
 # Purpose: Reset the in-shell result channel used to render one remote
@@ -113,7 +153,12 @@ zxfer_prepare_remote_destination_discovery_batch_script_inputs() {
 	g_zxfer_remote_snapshot_discovery_batch_script_destination_snapshot_single=$(zxfer_escape_for_single_quotes "$l_remote_destination_discovery_batch_script_snapshot")
 	g_zxfer_remote_snapshot_discovery_batch_script_destination_pool_single=$(zxfer_escape_for_single_quotes "$l_remote_destination_discovery_batch_script_pool")
 	g_zxfer_remote_snapshot_discovery_batch_script_zfs_cmd_single=$(zxfer_escape_for_single_quotes "$l_remote_destination_discovery_batch_script_zfs_cmd")
-	l_remote_destination_discovery_batch_script_dependency_path=$(zxfer_get_effective_dependency_path)
+	if l_remote_destination_discovery_batch_script_dependency_path=$(zxfer_get_effective_dependency_path); then
+		:
+	else
+		l_remote_destination_discovery_batch_script_dependency_status=$?
+		return "$l_remote_destination_discovery_batch_script_dependency_status"
+	fi
 	g_zxfer_remote_snapshot_discovery_batch_script_dependency_path_single=$(zxfer_escape_for_single_quotes "$l_remote_destination_discovery_batch_script_dependency_path")
 }
 
@@ -282,7 +327,8 @@ zxfer_render_remote_destination_discovery_batch_script_publication_stage() {
 # Returns: A POSIX sh script suitable for execution by sh -c on the target host.
 zxfer_build_remote_destination_discovery_batch_script() {
 	zxfer_reset_remote_destination_discovery_batch_script_state
-	zxfer_prepare_remote_destination_discovery_batch_script_inputs "$1" "$2" "$3"
+	zxfer_prepare_remote_destination_discovery_batch_script_inputs \
+		"$1" "$2" "$3" || return "$?"
 	zxfer_render_remote_destination_discovery_batch_script_support_stage
 	zxfer_render_remote_destination_discovery_batch_script_staging_stage
 	zxfer_render_remote_destination_discovery_batch_script_discovery_stage
@@ -294,67 +340,94 @@ zxfer_build_remote_destination_discovery_batch_script() {
 	EOF
 }
 
+# Purpose: Parse one compact status-sidecar row into owner-prefixed results.
+# Usage: The loader calls this before role-specific duplicate checks; embedded
+# tabs remain part of the value and are rejected by numeric validation later.
+zxfer_parse_destination_discovery_batch_status_line() {
+	l_batch_status_parse_line=$1
+	l_batch_status_parse_tab='	'
+	g_zxfer_destination_discovery_batch_status_name_result=""
+	g_zxfer_destination_discovery_batch_status_value_result=""
+
+	case "$l_batch_status_parse_line" in
+	*"$l_batch_status_parse_tab"*)
+		g_zxfer_destination_discovery_batch_status_name_result=${l_batch_status_parse_line%%"$l_batch_status_parse_tab"*}
+		g_zxfer_destination_discovery_batch_status_value_result=${l_batch_status_parse_line#*"$l_batch_status_parse_tab"}
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+# Purpose: Record one parsed sidecar row in the explicit status-owner slot.
+# Usage: Called only after row framing succeeds; duplicate and unknown names
+# fail closed before any complete status set can be accepted.
+zxfer_record_destination_discovery_batch_status() {
+	l_batch_status_record_name=$g_zxfer_destination_discovery_batch_status_name_result
+	l_batch_status_record_value=$g_zxfer_destination_discovery_batch_status_value_result
+
+	case "$l_batch_status_record_name" in
+	inventory)
+		[ "$g_zxfer_destination_discovery_batch_inventory_status_seen" -eq 0 ] || return 1
+		g_zxfer_destination_discovery_batch_inventory_status=$l_batch_status_record_value
+		g_zxfer_destination_discovery_batch_inventory_status_seen=1
+		;;
+	pool)
+		[ "$g_zxfer_destination_discovery_batch_pool_status_seen" -eq 0 ] || return 1
+		g_zxfer_destination_discovery_batch_pool_status=$l_batch_status_record_value
+		g_zxfer_destination_discovery_batch_pool_status_seen=1
+		;;
+	snapshot)
+		[ "$g_zxfer_destination_discovery_batch_snapshot_status_seen" -eq 0 ] || return 1
+		g_zxfer_destination_discovery_batch_snapshot_status=$l_batch_status_record_value
+		g_zxfer_destination_discovery_batch_snapshot_status_seen=1
+		;;
+	snapshot_ran)
+		[ "$g_zxfer_destination_discovery_batch_snapshot_ran_status_seen" -eq 0 ] || return 1
+		g_zxfer_destination_discovery_batch_snapshot_ran=$l_batch_status_record_value
+		g_zxfer_destination_discovery_batch_snapshot_ran_status_seen=1
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+# Purpose: Validate completeness and numeric shape of the loaded status set.
+# Usage: Final sidecar stage; pool status alone may be empty when no fallback
+# pool probe ran, matching the target protocol's existing contract.
+zxfer_validate_loaded_destination_discovery_batch_statuses() {
+	[ "$g_zxfer_destination_discovery_batch_inventory_status_seen" -eq 1 ] || return 1
+	[ "$g_zxfer_destination_discovery_batch_pool_status_seen" -eq 1 ] || return 1
+	[ "$g_zxfer_destination_discovery_batch_snapshot_status_seen" -eq 1 ] || return 1
+	[ "$g_zxfer_destination_discovery_batch_snapshot_ran_status_seen" -eq 1 ] || return 1
+	zxfer_destination_discovery_batch_status_is_numeric \
+		"$g_zxfer_destination_discovery_batch_inventory_status" || return 1
+	zxfer_destination_discovery_batch_status_is_numeric \
+		"$g_zxfer_destination_discovery_batch_snapshot_status" || return 1
+	zxfer_destination_discovery_batch_status_is_numeric \
+		"$g_zxfer_destination_discovery_batch_snapshot_ran" || return 1
+	[ -z "$g_zxfer_destination_discovery_batch_pool_status" ] ||
+		zxfer_destination_discovery_batch_status_is_numeric \
+			"$g_zxfer_destination_discovery_batch_pool_status"
+}
+
 # Purpose: Load the compact status sidecar from destination discovery parsing.
-# Usage: Called after the batch output file has been split into staged payload
-# files without replaying large snapshot lists through a shell loop.
+# Usage: Called after streamed sections are complete; line parsing, duplicate
+# ownership, and final completeness are separate protocol stages.
 zxfer_load_destination_discovery_batch_status_file() {
-	l_status_file=$1
-	l_tab='	'
+	l_batch_status_load_file=$1
+	zxfer_reset_destination_discovery_batch_status_state
 
-	zxfer_reset_destination_discovery_batch_state
+	while IFS= read -r l_batch_status_load_line ||
+		[ -n "$l_batch_status_load_line" ]; do
+		zxfer_parse_destination_discovery_batch_status_line \
+			"$l_batch_status_load_line" || return 1
+		zxfer_record_destination_discovery_batch_status || return 1
+	done <"$l_batch_status_load_file"
 
-	l_seen_inventory_status=0
-	l_seen_pool_status=0
-	l_seen_snapshot_status=0
-	l_seen_snapshot_ran_status=0
-
-	while IFS= read -r l_status_line || [ -n "$l_status_line" ]; do
-		case "$l_status_line" in
-		*"$l_tab"*)
-			l_status_name=${l_status_line%%"$l_tab"*}
-			l_status_value=${l_status_line#*"$l_tab"}
-			;;
-		*)
-			return 1
-			;;
-		esac
-		case "$l_status_name" in
-		inventory)
-			[ "$l_seen_inventory_status" -eq 0 ] || return 1
-			g_zxfer_destination_discovery_batch_inventory_status=$l_status_value
-			l_seen_inventory_status=1
-			;;
-		pool)
-			[ "$l_seen_pool_status" -eq 0 ] || return 1
-			g_zxfer_destination_discovery_batch_pool_status=$l_status_value
-			l_seen_pool_status=1
-			;;
-		snapshot)
-			[ "$l_seen_snapshot_status" -eq 0 ] || return 1
-			g_zxfer_destination_discovery_batch_snapshot_status=$l_status_value
-			l_seen_snapshot_status=1
-			;;
-		snapshot_ran)
-			[ "$l_seen_snapshot_ran_status" -eq 0 ] || return 1
-			g_zxfer_destination_discovery_batch_snapshot_ran=$l_status_value
-			l_seen_snapshot_ran_status=1
-			;;
-		*)
-			return 1
-			;;
-		esac
-	done <"$l_status_file"
-
-	[ "$l_seen_inventory_status" -eq 1 ] || return 1
-	[ "$l_seen_pool_status" -eq 1 ] || return 1
-	[ "$l_seen_snapshot_status" -eq 1 ] || return 1
-	[ "$l_seen_snapshot_ran_status" -eq 1 ] || return 1
-	zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_inventory_status" || return 1
-	zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_snapshot_status" || return 1
-	zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_snapshot_ran" || return 1
-	if [ -n "$g_zxfer_destination_discovery_batch_pool_status" ]; then
-		zxfer_destination_discovery_batch_status_is_numeric "$g_zxfer_destination_discovery_batch_pool_status" || return 1
-	fi
+	zxfer_validate_loaded_destination_discovery_batch_statuses
 }
 
 # Purpose: Reset the in-shell AWK parser result channel.
@@ -363,9 +436,10 @@ zxfer_reset_remote_destination_discovery_batch_parser_state() {
 	g_zxfer_remote_snapshot_discovery_batch_parser_program=""
 }
 
-# Purpose: Render parser support functions and initialization.
-# Usage: First fixed AWK stage for remote destination batch validation.
-zxfer_render_remote_destination_discovery_batch_parser_support_stage() {
+# Purpose: Render parser status validation and fixed protocol-order checks.
+# Usage: First AWK support stage; every status must appear once at its exact
+# position between the streamed sections emitted by the target renderer.
+zxfer_render_remote_destination_discovery_batch_parser_status_stage() {
 	# shellcheck disable=SC2016  # awk program should see literal $0.
 	g_zxfer_remote_snapshot_discovery_batch_parser_program='
 		function fail() {
@@ -373,63 +447,75 @@ zxfer_render_remote_destination_discovery_batch_parser_support_stage() {
 		}
 		function record_status(name, value) {
 			if (name == "inventory") {
-				if (seen_inventory_status != 0) {
+				if (seen_inventory_status != 0 || protocol_step != 2) {
 					fail()
 				}
 				inventory_status = value
 				seen_inventory_status = 1
+				protocol_step = 3
 			} else if (name == "pool") {
-				if (seen_pool_status != 0) {
+				if (seen_pool_status != 0 || protocol_step != 3) {
 					fail()
 				}
 				pool_status = value
 				seen_pool_status = 1
+				protocol_step = 4
 			} else if (name == "snapshot") {
-				if (seen_snapshot_status != 0) {
+				if (seen_snapshot_status != 0 || protocol_step != 8) {
 					fail()
 				}
 				snapshot_status = value
 				seen_snapshot_status = 1
+				protocol_step = 9
 			} else if (name == "snapshot_ran") {
-				if (seen_snapshot_ran_status != 0) {
+				if (seen_snapshot_ran_status != 0 || protocol_step != 4) {
 					fail()
 				}
 				snapshot_ran_status = value
 				seen_snapshot_ran_status = 1
+				protocol_step = 5
 			} else {
 				fail()
 			}
-		}
+		}'
+}
+
+# Purpose: Render parser section routing and staged-output initialization.
+# Usage: Second AWK support stage; section order is validated before any body
+# line is routed to a workspace file.
+zxfer_render_remote_destination_discovery_batch_parser_section_stage() {
+	# shellcheck disable=SC2016  # awk program should see literal $0.
+	g_zxfer_remote_snapshot_discovery_batch_parser_program=$g_zxfer_remote_snapshot_discovery_batch_parser_program'
 		function begin_section(name) {
 			if (current_section != "") {
 				fail()
 			}
 			if (name == "inventory_stdout") {
-				if (seen_inventory_stdout != 0) {
+				if (seen_inventory_stdout != 0 || protocol_step != 5) {
 					fail()
 				}
 				current_output = dest_out
 				seen_inventory_stdout = 1
 			} else if (name == "inventory_stderr") {
-				if (seen_inventory_stderr != 0) {
+				if (seen_inventory_stderr != 0 || protocol_step != 6) {
 					fail()
 				}
 				current_output = dest_err
 				seen_inventory_stderr = 1
 			} else if (name == "pool_stderr") {
-				if (seen_pool_stderr != 0) {
+				if (seen_pool_stderr != 0 || protocol_step != 7) {
 					fail()
 				}
 				current_output = ""
 				seen_pool_stderr = 1
 			} else if (name == "snapshot_stdout") {
-				if (seen_snapshot_stdout != 0) {
+				if (seen_snapshot_stdout != 0 || protocol_step != 1) {
 					fail()
 				}
 				current_output = snap_out
 				seen_snapshot_stdout = 1
 			} else if (name == "snapshot_stderr") {
-				if (seen_snapshot_stderr != 0) {
+				if (seen_snapshot_stderr != 0 || protocol_step != 9) {
 					fail()
 				}
 				current_output = snap_err
@@ -448,6 +534,7 @@ zxfer_render_remote_destination_discovery_batch_parser_support_stage() {
 			tab = sprintf("%c", 9)
 			current_section = ""
 			current_output = ""
+			protocol_step = 0
 		}'
 }
 
@@ -460,19 +547,21 @@ zxfer_render_remote_destination_discovery_batch_parser_records_stage() {
 			if (bad != 0) {
 				next
 			}
-			if (seen_header == 0) {
-				if ($0 != "ZXFER_DESTINATION_DISCOVERY_BATCH_V1") {
-					fail()
+				if (seen_header == 0) {
+					if ($0 != "ZXFER_DESTINATION_DISCOVERY_BATCH_V1") {
+						fail()
+					}
+					seen_header = 1
+					protocol_step = 1
+					next
 				}
-				seen_header = 1
-				next
-			}
-			if ($0 == "ZXFER_DESTINATION_DISCOVERY_BATCH_END") {
-				if (current_section != "") {
-					fail()
-				}
-				seen_end = 1
-				next
+				if ($0 == "ZXFER_DESTINATION_DISCOVERY_BATCH_END") {
+					if (seen_end != 0 || current_section != "" || protocol_step != 10) {
+						fail()
+					}
+					seen_end = 1
+					protocol_step = 11
+					next
 			}
 			if (seen_end != 0) {
 				if ($0 != "") {
@@ -483,10 +572,11 @@ zxfer_render_remote_destination_discovery_batch_parser_records_stage() {
 			if (current_section != "") {
 				if (index($0, "END" tab) == 1) {
 					section_name = substr($0, 5)
-					if (section_name == current_section) {
-						current_section = ""
-						current_output = ""
-						next
+						if (section_name == current_section) {
+							current_section = ""
+							current_output = ""
+							protocol_step++
+							next
 					}
 				}
 				append_section_line($0)
@@ -522,7 +612,7 @@ zxfer_render_remote_destination_discovery_batch_parser_finalize_stage() {
 			if (bad != 0) {
 				exit 1
 			}
-			if (seen_header != 1 || seen_end != 1 || current_section != "") {
+			if (seen_header != 1 || seen_end != 1 || current_section != "" || protocol_step != 11) {
 				exit 1
 			}
 			if (seen_inventory_status != 1 || seen_pool_status != 1 || seen_snapshot_status != 1 || seen_snapshot_ran_status != 1) {
@@ -548,7 +638,8 @@ zxfer_render_remote_destination_discovery_batch_parser_finalize_stage() {
 # Usage: Called once per payload before the single existing AWK invocation.
 zxfer_build_remote_destination_discovery_batch_parser_program() {
 	zxfer_reset_remote_destination_discovery_batch_parser_state
-	zxfer_render_remote_destination_discovery_batch_parser_support_stage
+	zxfer_render_remote_destination_discovery_batch_parser_status_stage
+	zxfer_render_remote_destination_discovery_batch_parser_section_stage
 	zxfer_render_remote_destination_discovery_batch_parser_records_stage
 	zxfer_render_remote_destination_discovery_batch_parser_finalize_stage
 }
@@ -558,143 +649,477 @@ zxfer_build_remote_destination_discovery_batch_parser_program() {
 # Usage: Called with batch payload on stdin so large snapshot sections can be
 # streamed through awk into final staging files instead of captured wholesale.
 zxfer_split_remote_destination_discovery_batch_stream_to_files() {
-	l_batch_status_file=$1
-	l_dest_list_tmp_file=$2
-	l_dest_list_err_file=$3
-	l_rzfs_list_hr_snap_tmp_file=$4
-	l_rzfs_list_hr_snap_err_tmp_file=$5
-
-	zxfer_write_runtime_artifact_file "$l_dest_list_tmp_file" "" || return "$?"
-	zxfer_write_runtime_artifact_file "$l_dest_list_err_file" "" || return "$?"
-	zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_tmp_file" "" || return "$?"
-	zxfer_write_runtime_artifact_file "$l_rzfs_list_hr_snap_err_tmp_file" "" || return "$?"
-	zxfer_write_runtime_artifact_file "$l_batch_status_file" "" || return "$?"
+	l_remote_batch_split_status_file=$1
+	l_remote_batch_split_inventory_file=$2
+	l_remote_batch_split_inventory_stderr_file=$3
+	l_remote_batch_split_snapshot_file=$4
+	l_remote_batch_split_snapshot_stderr_file=$5
 
 	zxfer_build_remote_destination_discovery_batch_parser_program
 	"${g_cmd_awk:-awk}" \
-		-v dest_out="$l_dest_list_tmp_file" \
-		-v dest_err="$l_dest_list_err_file" \
-		-v snap_out="$l_rzfs_list_hr_snap_tmp_file" \
-		-v snap_err="$l_rzfs_list_hr_snap_err_tmp_file" \
-		-v status_out="$l_batch_status_file" \
+		-v dest_out="$l_remote_batch_split_inventory_file" \
+		-v dest_err="$l_remote_batch_split_inventory_stderr_file" \
+		-v snap_out="$l_remote_batch_split_snapshot_file" \
+		-v snap_err="$l_remote_batch_split_snapshot_stderr_file" \
+		-v status_out="$l_remote_batch_split_status_file" \
 		"$g_zxfer_remote_snapshot_discovery_batch_parser_program"
 }
 
-# Purpose: Run target-side destination discovery through one remote SSH shell
-# invocation and stage its results.
-# Usage: Called by snapshot discovery when `-T` is active to avoid separate
-# target SSH round trips for destination dataset inventory and snapshot listing.
-zxfer_run_remote_destination_discovery_batch_to_files() {
-	l_destination_dataset=$1
-	l_dest_list_tmp_file=$2
-	l_dest_list_err_file=$3
-	l_rzfs_list_hr_snap_tmp_file=$4
-	l_rzfs_list_hr_snap_err_tmp_file=$5
-	l_destination_pool=${g_destination%%/*}
-	l_transport_status_file=""
-	l_transport_stderr_file=""
-	l_batch_status_file=""
+# Purpose: Prepare and prevalidate the one target-side discovery command.
+# Usage: Runs before local workspace allocation so script, quoting, transport,
+# and wrapper-host failures leave no operation artifacts behind.
+zxfer_prepare_remote_destination_discovery_batch_command() {
+	l_remote_batch_prepare_dataset=$1
+	l_remote_batch_prepare_pool=${g_destination%%/*}
+	g_zxfer_remote_destination_discovery_command_result=""
 
-	zxfer_reset_destination_discovery_batch_state
-
-	l_remote_script=$(zxfer_build_remote_destination_discovery_batch_script \
-		"$g_destination" "$l_destination_dataset" "$l_destination_pool") ||
-		return "$?"
-	l_remote_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_script") ||
-		return "$?"
-	l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$g_option_T_target_host") ||
-		zxfer_throw_error "$l_transport_tokens" "$?"
-	# Prevalidate wrapper-style host specs outside the streaming pipeline so
-	# setup failures still exit through the parent shell's reporting path.
-	if zxfer_prepare_ssh_shell_command_context "$g_option_T_target_host" "$l_remote_cmd"; then
+	if l_remote_batch_prepare_script=$(zxfer_build_remote_destination_discovery_batch_script \
+		"$g_destination" "$l_remote_batch_prepare_dataset" \
+		"$l_remote_batch_prepare_pool"); then
 		:
 	else
-		l_status=$?
-		if [ "$g_zxfer_ssh_shell_context_error_result" != "" ]; then
+		l_remote_batch_prepare_status=$?
+		return "$l_remote_batch_prepare_status"
+	fi
+	if l_remote_batch_prepare_command=$(zxfer_build_remote_sh_c_command \
+		"$l_remote_batch_prepare_script"); then
+		:
+	else
+		l_remote_batch_prepare_status=$?
+		return "$l_remote_batch_prepare_status"
+	fi
+	if l_remote_batch_prepare_transport=$(zxfer_get_ssh_transport_tokens_for_host \
+		"$g_option_T_target_host"); then
+		:
+	else
+		l_remote_batch_prepare_status=$?
+		zxfer_throw_error "$l_remote_batch_prepare_transport" \
+			"$l_remote_batch_prepare_status"
+		return "$l_remote_batch_prepare_status"
+	fi
+	# Prevalidate wrapper-style host specs outside the streaming pipeline so
+	# setup failures still exit through the parent shell's reporting path.
+	if zxfer_prepare_ssh_shell_command_context \
+		"$g_option_T_target_host" "$l_remote_batch_prepare_command"; then
+		:
+	else
+		l_remote_batch_prepare_status=$?
+		if [ -n "${g_zxfer_ssh_shell_context_error_result:-}" ]; then
 			zxfer_throw_error "$g_zxfer_ssh_shell_context_error_result"
 		fi
-		return "$l_status"
+		return "$l_remote_batch_prepare_status"
 	fi
 
-	zxfer_get_temp_file >/dev/null || return "$?"
-	l_transport_status_file=$g_zxfer_temp_file_result
-	zxfer_get_temp_file >/dev/null || {
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_transport_status_file"
-		return "$l_status"
-	}
-	l_transport_stderr_file=$g_zxfer_temp_file_result
-	zxfer_get_temp_file >/dev/null || {
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_paths "$l_transport_status_file" "$l_transport_stderr_file"
-		return "$l_status"
-	}
-	l_batch_status_file=$g_zxfer_temp_file_result
+	g_zxfer_remote_destination_discovery_command_result=$l_remote_batch_prepare_command
+}
 
+# Purpose: Validate one caller-visible discovery file before transactional use.
+# Usage: Output paths must be regular direct children of the current private
+# run root; workspace publication never accepts an unchecked external path.
+zxfer_remote_destination_discovery_publish_target_is_valid() {
+	l_remote_batch_target_path=$1
+	zxfer_runtime_artifact_path_is_run_root_child \
+		"$l_remote_batch_target_path" || return 1
+	l_remote_batch_target_name=${l_remote_batch_target_path##*/}
+	case "$l_remote_batch_target_name" in
+	'' | *'
+'* | rollback | transport.status | transport.stderr | batch.status)
+		return 1
+		;;
+	esac
+	[ -f "$l_remote_batch_target_path" ] || return 1
+	[ ! -L "$l_remote_batch_target_path" ] &&
+		[ ! -h "$l_remote_batch_target_path" ]
+}
+
+# Purpose: Initialize the fixed files inside one contained local workspace.
+# Usage: Called before SSH starts so unwritable staging fails without opening a
+# transport; descendants are removed only through their owning workspace.
+zxfer_initialize_remote_destination_discovery_workspace_files() {
+	for l_remote_batch_workspace_init_file in \
+		"$g_zxfer_remote_destination_discovery_transport_status_file" \
+		"$g_zxfer_remote_destination_discovery_transport_stderr_file" \
+		"$g_zxfer_remote_destination_discovery_batch_status_file" \
+		"$g_zxfer_remote_destination_discovery_inventory_stage_file" \
+		"$g_zxfer_remote_destination_discovery_inventory_stderr_stage_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stage_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stderr_stage_file"; do
+		zxfer_write_runtime_artifact_file \
+			"$l_remote_batch_workspace_init_file" "" || return "$?"
+	done
+}
+
+# Purpose: Allocate one private run-root child for the complete local protocol.
+# Usage: The four staged payload basenames match their caller targets so normal
+# backup and publish each require one multi-file rename operation.
+zxfer_allocate_remote_destination_discovery_workspace() {
+	g_zxfer_remote_destination_discovery_inventory_target_file=$1
+	g_zxfer_remote_destination_discovery_inventory_stderr_target_file=$2
+	g_zxfer_remote_destination_discovery_snapshot_target_file=$3
+	g_zxfer_remote_destination_discovery_snapshot_stderr_target_file=$4
+
+	for l_remote_batch_workspace_target in \
+		"$g_zxfer_remote_destination_discovery_inventory_target_file" \
+		"$g_zxfer_remote_destination_discovery_inventory_stderr_target_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_target_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stderr_target_file"; do
+		zxfer_remote_destination_discovery_publish_target_is_valid \
+			"$l_remote_batch_workspace_target" || return 1
+	done
+
+	l_remote_batch_workspace_inventory_name=${g_zxfer_remote_destination_discovery_inventory_target_file##*/}
+	l_remote_batch_workspace_inventory_stderr_name=${g_zxfer_remote_destination_discovery_inventory_stderr_target_file##*/}
+	l_remote_batch_workspace_snapshot_name=${g_zxfer_remote_destination_discovery_snapshot_target_file##*/}
+	l_remote_batch_workspace_snapshot_stderr_name=${g_zxfer_remote_destination_discovery_snapshot_stderr_target_file##*/}
+	if [ "$l_remote_batch_workspace_inventory_name" = "$l_remote_batch_workspace_inventory_stderr_name" ] ||
+		[ "$l_remote_batch_workspace_inventory_name" = "$l_remote_batch_workspace_snapshot_name" ] ||
+		[ "$l_remote_batch_workspace_inventory_name" = "$l_remote_batch_workspace_snapshot_stderr_name" ] ||
+		[ "$l_remote_batch_workspace_inventory_stderr_name" = "$l_remote_batch_workspace_snapshot_name" ] ||
+		[ "$l_remote_batch_workspace_inventory_stderr_name" = "$l_remote_batch_workspace_snapshot_stderr_name" ] ||
+		[ "$l_remote_batch_workspace_snapshot_name" = "$l_remote_batch_workspace_snapshot_stderr_name" ]; then
+		return 1
+	fi
+
+	zxfer_create_private_temp_dir \
+		"zxfer-remote-destination-discovery" >/dev/null || return "$?"
+	g_zxfer_remote_destination_discovery_workspace=$g_zxfer_runtime_artifact_path_result
+	g_zxfer_remote_destination_discovery_rollback_dir="$g_zxfer_remote_destination_discovery_workspace/rollback"
+	mkdir -m 700 "$g_zxfer_remote_destination_discovery_rollback_dir" \
+		2>/dev/null || return "$?"
+	g_zxfer_remote_destination_discovery_transport_status_file="$g_zxfer_remote_destination_discovery_workspace/transport.status"
+	g_zxfer_remote_destination_discovery_transport_stderr_file="$g_zxfer_remote_destination_discovery_workspace/transport.stderr"
+	g_zxfer_remote_destination_discovery_batch_status_file="$g_zxfer_remote_destination_discovery_workspace/batch.status"
+	g_zxfer_remote_destination_discovery_inventory_stage_file="$g_zxfer_remote_destination_discovery_workspace/$l_remote_batch_workspace_inventory_name"
+	g_zxfer_remote_destination_discovery_inventory_stderr_stage_file="$g_zxfer_remote_destination_discovery_workspace/$l_remote_batch_workspace_inventory_stderr_name"
+	g_zxfer_remote_destination_discovery_snapshot_stage_file="$g_zxfer_remote_destination_discovery_workspace/$l_remote_batch_workspace_snapshot_name"
+	g_zxfer_remote_destination_discovery_snapshot_stderr_stage_file="$g_zxfer_remote_destination_discovery_workspace/$l_remote_batch_workspace_snapshot_stderr_name"
+
+	zxfer_initialize_remote_destination_discovery_workspace_files
+}
+
+# Purpose: Execute the one SSH-to-parser pipeline for the active workspace.
+# Usage: Transport status crosses the POSIX pipeline boundary through a compact
+# file because supported shells do not provide pipefail or shared pipe state.
+zxfer_execute_remote_destination_discovery_batch_pipeline() {
+	g_zxfer_remote_destination_discovery_parser_status_result=0
 	zxfer_echoV "Running remote destination discovery batch for $g_destination."
-	l_parse_status=0
 	{
-		l_transport_status=0
-		zxfer_invoke_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd" destination 2>"$l_transport_stderr_file" ||
-			l_transport_status=$?
-		printf '%s\n' "$l_transport_status" >"$l_transport_status_file" || :
+		l_remote_batch_pipeline_transport_status=0
+		zxfer_invoke_ssh_shell_command_for_host \
+			"$g_option_T_target_host" \
+			"$g_zxfer_remote_destination_discovery_command_result" \
+			destination \
+			2>"$g_zxfer_remote_destination_discovery_transport_stderr_file" ||
+			l_remote_batch_pipeline_transport_status=$?
+		printf '%s\n' "$l_remote_batch_pipeline_transport_status" \
+			>"$g_zxfer_remote_destination_discovery_transport_status_file" || :
 	} | zxfer_split_remote_destination_discovery_batch_stream_to_files \
-		"$l_batch_status_file" \
-		"$l_dest_list_tmp_file" \
-		"$l_dest_list_err_file" \
-		"$l_rzfs_list_hr_snap_tmp_file" \
-		"$l_rzfs_list_hr_snap_err_tmp_file" || l_parse_status=$?
+		"$g_zxfer_remote_destination_discovery_batch_status_file" \
+		"$g_zxfer_remote_destination_discovery_inventory_stage_file" \
+		"$g_zxfer_remote_destination_discovery_inventory_stderr_stage_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stage_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stderr_stage_file" ||
+		g_zxfer_remote_destination_discovery_parser_status_result=$?
+}
 
-	zxfer_read_snapshot_discovery_capture_file "$l_transport_status_file" || {
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_paths "$l_transport_status_file" "$l_transport_stderr_file" "$l_batch_status_file"
-		return "$l_status"
-	}
-	l_batch_status=$g_zxfer_snapshot_discovery_file_read_result
-	case "$l_batch_status" in
+# Purpose: Load and validate the transport status written by the pipeline side.
+# Usage: Publishes a failure kind so the post-cleanup reporter can preserve the
+# old malformed-status message without throwing while the workspace is live.
+zxfer_load_remote_destination_discovery_transport_status() {
+	if zxfer_read_snapshot_discovery_capture_file \
+		"$g_zxfer_remote_destination_discovery_transport_status_file"; then
+		:
+	else
+		l_remote_batch_transport_status_read_failure=$?
+		g_zxfer_remote_destination_discovery_failure_kind=transport_status_read
+		g_zxfer_remote_destination_discovery_failure_status=$l_remote_batch_transport_status_read_failure
+		return "$g_zxfer_remote_destination_discovery_failure_status"
+	fi
+	l_remote_batch_transport_status=$g_zxfer_snapshot_discovery_file_read_result
+	case "$l_remote_batch_transport_status" in
 	*'
 ')
-		l_batch_status=${l_batch_status%?}
+		l_remote_batch_transport_status=${l_remote_batch_transport_status%?}
 		;;
 	esac
-	case "$l_batch_status" in
+	case "$l_remote_batch_transport_status" in
 	'' | *[!0-9]*)
-		zxfer_cleanup_runtime_artifact_paths "$l_transport_status_file" "$l_transport_stderr_file" "$l_batch_status_file"
-		zxfer_throw_error "Malformed destination discovery transport status."
+		g_zxfer_remote_destination_discovery_failure_kind=transport_status_malformed
+		g_zxfer_remote_destination_discovery_failure_status=1
+		return 1
 		;;
 	esac
-	if [ "$l_batch_status" -ne 0 ]; then
-		zxfer_read_snapshot_discovery_capture_file "$l_transport_stderr_file" || {
-			l_status=$?
-			zxfer_cleanup_runtime_artifact_paths "$l_transport_status_file" "$l_transport_stderr_file" "$l_batch_status_file"
-			return "$l_status"
-		}
-		l_transport_stderr=$g_zxfer_snapshot_discovery_file_read_result
-		l_status=0
-		zxfer_write_runtime_artifact_file "$l_dest_list_err_file" "$l_transport_stderr" || l_status=$?
-		zxfer_cleanup_runtime_artifact_paths "$l_transport_status_file" "$l_transport_stderr_file" "$l_batch_status_file"
-		if [ "$l_status" -ne 0 ]; then
-			return "$l_status"
-		fi
-		return "$l_batch_status"
+	g_zxfer_remote_destination_discovery_transport_status_result=$l_remote_batch_transport_status
+}
+
+# Purpose: Capture transport stderr after a validated nonzero SSH status.
+# Usage: The full collector retrieves this through an accessor so malformed
+# protocol output is never published merely to preserve the SSH diagnostic.
+zxfer_load_remote_destination_discovery_transport_stderr() {
+	if zxfer_read_snapshot_discovery_capture_file \
+		"$g_zxfer_remote_destination_discovery_transport_stderr_file"; then
+		g_zxfer_remote_destination_discovery_transport_stderr_result=$g_zxfer_snapshot_discovery_file_read_result
+		return 0
+	else
+		l_remote_batch_transport_stderr_read_failure=$?
+		g_zxfer_remote_destination_discovery_failure_kind=transport_stderr_read
+		g_zxfer_remote_destination_discovery_failure_status=$l_remote_batch_transport_stderr_read_failure
+		return "$g_zxfer_remote_destination_discovery_failure_status"
+	fi
+}
+
+# Purpose: Validate the complete staged payload set before publication.
+# Usage: Parser success alone is insufficient if a file was replaced, removed,
+# or made unreadable between AWK finalization and the publish transaction.
+zxfer_validate_remote_destination_discovery_workspace_files() {
+	for l_remote_batch_readback_file in \
+		"$g_zxfer_remote_destination_discovery_batch_status_file" \
+		"$g_zxfer_remote_destination_discovery_inventory_stage_file" \
+		"$g_zxfer_remote_destination_discovery_inventory_stderr_stage_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stage_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stderr_stage_file"; do
+		[ -f "$l_remote_batch_readback_file" ] &&
+			[ -r "$l_remote_batch_readback_file" ] &&
+			[ ! -L "$l_remote_batch_readback_file" ] &&
+			[ ! -h "$l_remote_batch_readback_file" ] || return 1
+	done
+}
+
+# Purpose: Move all four prior caller files into the workspace rollback slot.
+# Usage: One multi-file move keeps the normal helper-spawn budget below the old
+# three-file allocation and cleanup path.
+zxfer_backup_remote_destination_discovery_publish_targets() {
+	mv -f \
+		"$g_zxfer_remote_destination_discovery_inventory_target_file" \
+		"$g_zxfer_remote_destination_discovery_inventory_stderr_target_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_target_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stderr_target_file" \
+		"$g_zxfer_remote_destination_discovery_rollback_dir" 2>/dev/null
+}
+
+# Purpose: Publish all four validated staged payloads into the run root.
+# Usage: Kept behind one abstraction so failure tests can simulate a later-file
+# rename failure after making one new file visible.
+zxfer_publish_remote_destination_discovery_staged_files() {
+	mv -f \
+		"$g_zxfer_remote_destination_discovery_inventory_stage_file" \
+		"$g_zxfer_remote_destination_discovery_inventory_stderr_stage_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stage_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stderr_stage_file" \
+		"$g_zxfer_run_tmp_root" 2>/dev/null
+}
+
+# Purpose: Restore every available rollback file to its caller-visible path.
+# Usage: The fast path restores all four in one move; the partial-backup path
+# checks fixed pairs individually because a failed multi-file move may stop late.
+zxfer_restore_remote_destination_discovery_publish_targets() {
+	l_remote_batch_restore_inventory="$g_zxfer_remote_destination_discovery_rollback_dir/${g_zxfer_remote_destination_discovery_inventory_target_file##*/}"
+	l_remote_batch_restore_inventory_stderr="$g_zxfer_remote_destination_discovery_rollback_dir/${g_zxfer_remote_destination_discovery_inventory_stderr_target_file##*/}"
+	l_remote_batch_restore_snapshot="$g_zxfer_remote_destination_discovery_rollback_dir/${g_zxfer_remote_destination_discovery_snapshot_target_file##*/}"
+	l_remote_batch_restore_snapshot_stderr="$g_zxfer_remote_destination_discovery_rollback_dir/${g_zxfer_remote_destination_discovery_snapshot_stderr_target_file##*/}"
+
+	if [ -f "$l_remote_batch_restore_inventory" ] &&
+		[ -f "$l_remote_batch_restore_inventory_stderr" ] &&
+		[ -f "$l_remote_batch_restore_snapshot" ] &&
+		[ -f "$l_remote_batch_restore_snapshot_stderr" ]; then
+		mv -f "$l_remote_batch_restore_inventory" \
+			"$l_remote_batch_restore_inventory_stderr" \
+			"$l_remote_batch_restore_snapshot" \
+			"$l_remote_batch_restore_snapshot_stderr" \
+			"$g_zxfer_run_tmp_root" 2>/dev/null
+		return
 	fi
 
-	if [ "$l_parse_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_paths "$l_transport_status_file" "$l_transport_stderr_file" "$l_batch_status_file"
-		zxfer_throw_error "Malformed destination discovery batch response." "$l_parse_status"
-	fi
+	l_remote_batch_restore_status=0
+	[ ! -f "$l_remote_batch_restore_inventory" ] ||
+		mv -f "$l_remote_batch_restore_inventory" \
+			"$g_zxfer_remote_destination_discovery_inventory_target_file" 2>/dev/null ||
+		l_remote_batch_restore_status=1
+	[ ! -f "$l_remote_batch_restore_inventory_stderr" ] ||
+		mv -f "$l_remote_batch_restore_inventory_stderr" \
+			"$g_zxfer_remote_destination_discovery_inventory_stderr_target_file" 2>/dev/null ||
+		l_remote_batch_restore_status=1
+	[ ! -f "$l_remote_batch_restore_snapshot" ] ||
+		mv -f "$l_remote_batch_restore_snapshot" \
+			"$g_zxfer_remote_destination_discovery_snapshot_target_file" 2>/dev/null ||
+		l_remote_batch_restore_status=1
+	[ ! -f "$l_remote_batch_restore_snapshot_stderr" ] ||
+		mv -f "$l_remote_batch_restore_snapshot_stderr" \
+			"$g_zxfer_remote_destination_discovery_snapshot_stderr_target_file" 2>/dev/null ||
+		l_remote_batch_restore_status=1
+	return "$l_remote_batch_restore_status"
+}
 
-	l_status=0
-	zxfer_load_destination_discovery_batch_status_file "$l_batch_status_file" || l_status=$?
-	zxfer_cleanup_runtime_artifact_paths "$l_transport_status_file" "$l_transport_stderr_file" "$l_batch_status_file"
-	if [ "$l_status" -ne 0 ]; then
-		zxfer_throw_error "Malformed destination discovery batch response." "$l_status"
+# Purpose: Clear all four caller files when rollback itself cannot complete.
+# Usage: Mixed old/new discovery state must never survive a failed transaction;
+# cleared transient files make the operation fail closed instead.
+zxfer_clear_remote_destination_discovery_publish_targets() {
+	l_remote_batch_clear_status=0
+	for l_remote_batch_clear_target in \
+		"$g_zxfer_remote_destination_discovery_inventory_target_file" \
+		"$g_zxfer_remote_destination_discovery_inventory_stderr_target_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_target_file" \
+		"$g_zxfer_remote_destination_discovery_snapshot_stderr_target_file"; do
+		zxfer_write_runtime_artifact_file "$l_remote_batch_clear_target" "" ||
+			l_remote_batch_clear_status=1
+	done
+	return "$l_remote_batch_clear_status"
+}
+
+# Purpose: Atomically publish the validated four-file discovery result set.
+# Usage: Any backup or later-file publish failure restores all prior files; a
+# failed restore clears all four targets rather than exposing mixed generations.
+zxfer_publish_remote_destination_discovery_workspace_files() {
+	if zxfer_backup_remote_destination_discovery_publish_targets; then
+		:
+	else
+		l_remote_batch_publish_status=$?
+		zxfer_restore_remote_destination_discovery_publish_targets ||
+			zxfer_clear_remote_destination_discovery_publish_targets || :
+		return "$l_remote_batch_publish_status"
 	fi
+	if zxfer_publish_remote_destination_discovery_staged_files; then
+		return 0
+	else
+		l_remote_batch_publish_status=$?
+		zxfer_restore_remote_destination_discovery_publish_targets ||
+			zxfer_clear_remote_destination_discovery_publish_targets || :
+		return "$l_remote_batch_publish_status"
+	fi
+}
+
+# Purpose: Record the target-side ZFS calls represented by one valid batch.
+# Usage: Called only after publication so malformed or transport-failed payloads
+# cannot inflate successful destination discovery counters.
+zxfer_profile_remote_destination_discovery_batch_calls() {
 	zxfer_profile_record_zfs_call destination list
-	if [ -n "${g_zxfer_destination_discovery_batch_pool_status:-}" ]; then
+	[ -z "${g_zxfer_destination_discovery_batch_pool_status:-}" ] ||
 		zxfer_profile_record_zfs_call destination list
-	fi
-	if [ "${g_zxfer_destination_discovery_batch_snapshot_ran:-0}" -eq 1 ]; then
+	[ "${g_zxfer_destination_discovery_batch_snapshot_ran:-0}" -ne 1 ] ||
 		zxfer_profile_record_zfs_call destination list
+}
+
+# Purpose: Execute, validate, and publish one prepared workspace protocol.
+# Usage: Does not clean or throw; the outer coordinator performs exactly one
+# normal workspace cleanup before translating the recorded failure kind.
+zxfer_process_remote_destination_discovery_workspace() {
+	zxfer_execute_remote_destination_discovery_batch_pipeline
+	zxfer_load_remote_destination_discovery_transport_status || return "$?"
+	if [ "$g_zxfer_remote_destination_discovery_transport_status_result" -ne 0 ]; then
+		zxfer_load_remote_destination_discovery_transport_stderr || return "$?"
+		g_zxfer_remote_destination_discovery_failure_kind=transport
+		g_zxfer_remote_destination_discovery_failure_status=$g_zxfer_remote_destination_discovery_transport_status_result
+		return "$g_zxfer_remote_destination_discovery_failure_status"
 	fi
+	if [ "$g_zxfer_remote_destination_discovery_parser_status_result" -ne 0 ]; then
+		g_zxfer_remote_destination_discovery_failure_kind=batch_parse
+		g_zxfer_remote_destination_discovery_failure_status=$g_zxfer_remote_destination_discovery_parser_status_result
+		return "$g_zxfer_remote_destination_discovery_failure_status"
+	fi
+	if zxfer_load_destination_discovery_batch_status_file \
+		"$g_zxfer_remote_destination_discovery_batch_status_file"; then
+		:
+	else
+		l_remote_batch_status_load_failure=$?
+		g_zxfer_remote_destination_discovery_failure_kind=batch_status
+		g_zxfer_remote_destination_discovery_failure_status=$l_remote_batch_status_load_failure
+		return "$g_zxfer_remote_destination_discovery_failure_status"
+	fi
+	if zxfer_validate_remote_destination_discovery_workspace_files; then
+		:
+	else
+		l_remote_batch_readback_failure=$?
+		g_zxfer_remote_destination_discovery_failure_kind=batch_readback
+		g_zxfer_remote_destination_discovery_failure_status=$l_remote_batch_readback_failure
+		return "$g_zxfer_remote_destination_discovery_failure_status"
+	fi
+	if zxfer_publish_remote_destination_discovery_workspace_files; then
+		:
+	else
+		l_remote_batch_publish_failure=$?
+		g_zxfer_remote_destination_discovery_failure_kind=batch_publish
+		g_zxfer_remote_destination_discovery_failure_status=$l_remote_batch_publish_failure
+		return "$g_zxfer_remote_destination_discovery_failure_status"
+	fi
+	zxfer_profile_remote_destination_discovery_batch_calls
+}
+
+# Purpose: Clean the one contained local discovery workspace.
+# Usage: Called once after every post-allocation processing result; whole-run
+# trap cleanup remains the fallback if this checked direct-child cleanup fails.
+zxfer_cleanup_remote_destination_discovery_workspace() {
+	l_remote_batch_cleanup_workspace=${g_zxfer_remote_destination_discovery_workspace:-}
+	if [ -n "$l_remote_batch_cleanup_workspace" ]; then
+		zxfer_cleanup_runtime_artifact_path \
+			"$l_remote_batch_cleanup_workspace" >/dev/null 2>&1 || :
+	fi
+	zxfer_reset_remote_destination_discovery_workspace_state
+}
+
+# Purpose: Translate one post-cleanup protocol failure to its legacy contract.
+# Usage: Keeps reporting out of staging helpers so throw/exit cannot bypass the
+# operation's normal workspace cleanup.
+zxfer_report_remote_destination_discovery_failure() {
+	case "$g_zxfer_remote_destination_discovery_failure_kind" in
+	transport | transport_status_read | transport_stderr_read)
+		return "$g_zxfer_remote_destination_discovery_failure_status"
+		;;
+	transport_status_malformed)
+		zxfer_throw_error "Malformed destination discovery transport status."
+		return 1
+		;;
+	batch_parse | batch_status | batch_readback | batch_publish)
+		zxfer_throw_error "Malformed destination discovery batch response." \
+			"$g_zxfer_remote_destination_discovery_failure_status"
+		return "$g_zxfer_remote_destination_discovery_failure_status"
+		;;
+	esac
+	return "${g_zxfer_remote_destination_discovery_failure_status:-1}"
+}
+
+# Purpose: Return the last validated transport stderr diagnostic.
+# Usage: Full discovery uses this only after a numeric nonzero SSH status; raw
+# malformed protocol output never becomes caller-visible staged data.
+zxfer_get_remote_destination_discovery_transport_stderr() {
+	printf '%s' "${g_zxfer_remote_destination_discovery_transport_stderr_result:-}"
+}
+
+# Purpose: Return whether the last batch failure was a validated SSH failure.
+# Usage: Orchestration uses this owner operation before staging the captured
+# transport diagnostic separately from the four transaction output files.
+zxfer_remote_destination_discovery_failure_is_transport() {
+	[ "${g_zxfer_remote_destination_discovery_failure_kind:-}" = transport ]
+}
+
+# Purpose: Run target-side destination discovery through one remote SSH shell
+# invocation and publish its complete result set transactionally.
+# Usage: Called by snapshot discovery when `-T` is active; caller files remain
+# untouched until transport, sentinels, sections, statuses, and readback pass.
+zxfer_run_remote_destination_discovery_batch_to_files() {
+	l_remote_batch_run_dataset=$1
+	l_remote_batch_run_inventory_target=$2
+	l_remote_batch_run_inventory_stderr_target=$3
+	l_remote_batch_run_snapshot_target=$4
+	l_remote_batch_run_snapshot_stderr_target=$5
+
+	zxfer_reset_destination_discovery_batch_state
+	zxfer_prepare_remote_destination_discovery_batch_command \
+		"$l_remote_batch_run_dataset" || return "$?"
+	if zxfer_allocate_remote_destination_discovery_workspace \
+		"$l_remote_batch_run_inventory_target" \
+		"$l_remote_batch_run_inventory_stderr_target" \
+		"$l_remote_batch_run_snapshot_target" \
+		"$l_remote_batch_run_snapshot_stderr_target"; then
+		:
+	else
+		l_remote_batch_run_status=$?
+		zxfer_cleanup_remote_destination_discovery_workspace
+		return "$l_remote_batch_run_status"
+	fi
+
+	zxfer_process_remote_destination_discovery_workspace
+	l_remote_batch_run_status=$?
+	zxfer_cleanup_remote_destination_discovery_workspace
+	[ "$l_remote_batch_run_status" -eq 0 ] ||
+		zxfer_report_remote_destination_discovery_failure
 }

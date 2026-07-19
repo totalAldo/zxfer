@@ -1104,7 +1104,8 @@ and consumed by
 \fB\-e\fR.
 Defaults to
 \fI/var/db/zxfer\fR
-and must be an absolute path that is not writable by unprivileged users.
+and must be an absolute path without tab, carriage-return, or line-feed
+characters that is not writable by unprivileged users.
 .TP 37n
 \fBZXFER_SECURE_PATH\fR
 Overrides the whitelist of directories that zxfer trusts when it resolves
@@ -1115,6 +1116,8 @@ and other helper binaries. The default value is
 \fI/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin\fR.
 Only absolute directories are honored so zxfer cannot be tricked into executing
 programs from the current working directory or other user-controlled paths.
+Entries containing tabs, carriage returns, or line feeds are rejected so the
+same path is used by local lookup and rendered remote helper commands.
 The computed allowlist also becomes the live runtime
 \fBPATH\fR,
 and zxfer also exports the same value before remote capability handshakes,
@@ -1132,7 +1135,8 @@ and
 \fB\-T\fR)
 without replacing the stock list. These appended directories also become part
 of the exported runtime
-\fBPATH\fR.
+\fBPATH\fR. Entries containing tabs, carriage returns, or line feeds are
+rejected.
 .TP 37n
 \fBZXFER_SSH_BATCH_MODE\fR
 Overrides the default

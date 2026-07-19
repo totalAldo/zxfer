@@ -77,6 +77,9 @@ EOF
 
 	cat >"$l_fixture_dir/src/zxfer_dependencies.sh" <<'EOF'
 #!/bin/sh
+zxfer_initialize_dependency_reporting_defaults() {
+	:
+}
 zxfer_initialize_dependency_defaults() {
 	:
 }
@@ -319,6 +322,9 @@ EOF
 zxfer_reset_snapshot_reconcile_state() {
 	:
 }
+zxfer_reset_snapshot_delete_artifact_state() {
+	:
+}
 EOF
 }
 
@@ -518,6 +524,33 @@ test_launcher_prepares_remote_connections_before_runtime_initialization() {
 		"$(cat "$log_path")" "zxfer_run_zfs_mode_loop"
 	assertEquals "The launcher should not emit a spurious command-not-found error when the required module is present." \
 		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
+test_launcher_invalid_secure_path_preserves_structured_failure_reporting() {
+	invalid_path=$(printf '/bin\t/untrusted')
+	error_log="$TEST_TMPDIR/invalid-secure-path.log"
+	rm -f "$error_log"
+
+	set +e
+	output=$(
+		ZXFER_SECURE_PATH="$invalid_path" \
+			ZXFER_ERROR_LOG="$error_log" \
+			"$ZXFER_ROOT/zxfer" backup/dst 2>&1
+	)
+	status=$?
+
+	assertEquals "Invalid secure-PATH configuration should preserve the dependency failure status." \
+		1 "$status"
+	assertContains "Invalid secure-PATH configuration should still emit the structured failure envelope." \
+		"$output" "zxfer: failure report begin"
+	assertContains "Invalid secure-PATH configuration should retain dependency classification." \
+		"$output" "failure_class: dependency"
+	assertContains "Invalid secure-PATH configuration should retain its validation stage." \
+		"$output" "failure_stage: secure PATH validation"
+	assertTrue "Invalid secure-PATH configuration should still mirror the structured report to ZXFER_ERROR_LOG." \
+		"[ -f '$error_log' ]"
+	assertContains "The mirrored startup failure should retain dependency classification." \
+		"$(cat "$error_log" 2>/dev/null || :)" "failure_class: dependency"
 }
 
 # shellcheck source=tests/shunit2/shunit2

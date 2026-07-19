@@ -45,6 +45,35 @@
 # entire list via ZXFER_SECURE_PATH or append additional trusted directories via
 # ZXFER_SECURE_PATH_APPEND.
 ZXFER_DEFAULT_SECURE_PATH="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+ZXFER_INVALID_SECURE_PATH_MESSAGE="Refusing to use ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND because every secure PATH entry must be a single-line absolute path without control whitespace."
+
+# Purpose: Reject control whitespace that cannot survive remote one-line
+# transport rendering without changing the configured path bytes.
+# Usage: Called before secure-PATH configuration is split, cached, or exported.
+zxfer_secure_path_value_is_single_line() {
+	l_secure_path_validation_value=${1:-}
+	l_secure_path_validation_tab=$(printf '\t')
+	l_secure_path_validation_cr=$(printf '\r')
+	l_secure_path_validation_lf=$(printf '\n_')
+	l_secure_path_validation_lf=${l_secure_path_validation_lf%_}
+
+	case "$l_secure_path_validation_value" in
+	*"$l_secure_path_validation_tab"* | *"$l_secure_path_validation_cr"* | *"$l_secure_path_validation_lf"*)
+		return 1
+		;;
+	esac
+	return 0
+}
+
+# Purpose: Stop dependency initialization with the structured classification
+# used for other trusted-helper path validation failures.
+# Usage: Called whenever public secure-PATH configuration fails byte-shape
+# validation before helper lookup or remote rendering.
+zxfer_reject_invalid_secure_path_configuration() {
+	zxfer_set_failure_context_if_empty dependency "secure PATH validation" \
+		"$ZXFER_INVALID_SECURE_PATH_MESSAGE"
+	zxfer_throw_error "$ZXFER_INVALID_SECURE_PATH_MESSAGE"
+}
 
 # Purpose: Compute the secure path from the active configuration and runtime
 # state.
@@ -62,6 +91,7 @@ zxfer_compute_secure_path() {
 			l_candidate=$l_candidate:$ZXFER_SECURE_PATH_APPEND
 		fi
 	fi
+	zxfer_secure_path_value_is_single_line "$l_candidate" || return 1
 
 	case $- in
 	*f*)
@@ -142,9 +172,15 @@ zxfer_get_effective_dependency_path() {
 # Usage: Called during secure-PATH bootstrap and local dependency resolution
 # after inputs change and downstream helpers need the derived value rebuilt.
 zxfer_refresh_secure_path_state() {
-	g_zxfer_secure_path=$(zxfer_compute_secure_path)
-	g_zxfer_dependency_path=$g_zxfer_secure_path
-	g_zxfer_runtime_path=$g_zxfer_secure_path
+	if l_refreshed_secure_path=$(zxfer_compute_secure_path); then
+		:
+	else
+		l_refreshed_secure_path_status=$?
+		return "$l_refreshed_secure_path_status"
+	fi
+	g_zxfer_secure_path=$l_refreshed_secure_path
+	g_zxfer_dependency_path=$l_refreshed_secure_path
+	g_zxfer_runtime_path=$l_refreshed_secure_path
 }
 
 # Purpose: Apply the secure path through the controlled helper path owned by
@@ -152,7 +188,8 @@ zxfer_refresh_secure_path_state() {
 # Usage: Called during secure-PATH bootstrap and local dependency resolution
 # once planning is complete and zxfer is ready to mutate live state.
 zxfer_apply_secure_path() {
-	zxfer_refresh_secure_path_state
+	zxfer_refresh_secure_path_state ||
+		zxfer_reject_invalid_secure_path_configuration
 	# Keep the live runtime PATH equal to the configured secure allowlist so
 	# later bare helper lookups cannot escape an explicit ZXFER_SECURE_PATH.
 	PATH=$g_zxfer_runtime_path
@@ -200,37 +237,38 @@ zxfer_normalize_resolved_tool_path() {
 # Usage: Called during secure-PATH bootstrap and local dependency resolution to
 # fail closed on malformed, unsafe, or stale input.
 zxfer_validate_resolved_tool_path() {
-	l_path=$1
-	l_label=$2
-	l_scope=${3:-}
+	l_validated_tool_path=$1
+	l_validated_tool_label=$2
+	l_validated_tool_scope=${3:-}
 
-	l_path=$(zxfer_normalize_resolved_tool_path "$l_path")
-	l_tab=$(printf '\t')
-	l_cr=$(printf '\r')
-	l_lf=$(printf '\n_')
-	l_lf=${l_lf%_}
+	l_validated_tool_path=$(zxfer_normalize_resolved_tool_path \
+		"$l_validated_tool_path")
+	l_validated_tool_tab=$(printf '\t')
+	l_validated_tool_cr=$(printf '\r')
+	l_validated_tool_lf=$(printf '\n_')
+	l_validated_tool_lf=${l_validated_tool_lf%_}
 
-	case "$l_path" in
-	*"$l_tab"* | *"$l_cr"* | *"$l_lf"*)
-		if [ "$l_scope" = "" ]; then
-			printf '%s\n' "Required dependency \"$l_label\" resolved to \"$l_path\", but zxfer requires a single-line absolute path without control whitespace."
+	case "$l_validated_tool_path" in
+	*"$l_validated_tool_tab"* | *"$l_validated_tool_cr"* | *"$l_validated_tool_lf"*)
+		if [ "$l_validated_tool_scope" = "" ]; then
+			printf '%s\n' "Required dependency \"$l_validated_tool_label\" resolved to \"$l_validated_tool_path\", but zxfer requires a single-line absolute path without control whitespace."
 		else
-			printf '%s\n' "Required dependency \"$l_label\" on $l_scope resolved to \"$l_path\", but zxfer requires a single-line absolute path without control whitespace."
+			printf '%s\n' "Required dependency \"$l_validated_tool_label\" on $l_validated_tool_scope resolved to \"$l_validated_tool_path\", but zxfer requires a single-line absolute path without control whitespace."
 		fi
 		return 1
 		;;
 	esac
 
-	case "$l_path" in
+	case "$l_validated_tool_path" in
 	/*)
-		printf '%s\n' "$l_path"
+		printf '%s\n' "$l_validated_tool_path"
 		return 0
 		;;
 	*)
-		if [ "$l_scope" = "" ]; then
-			printf '%s\n' "Required dependency \"$l_label\" resolved to \"$l_path\", but zxfer requires an absolute path."
+		if [ "$l_validated_tool_scope" = "" ]; then
+			printf '%s\n' "Required dependency \"$l_validated_tool_label\" resolved to \"$l_validated_tool_path\", but zxfer requires an absolute path."
 		else
-			printf '%s\n' "Required dependency \"$l_label\" on $l_scope resolved to \"$l_path\", but zxfer requires an absolute path."
+			printf '%s\n' "Required dependency \"$l_validated_tool_label\" on $l_validated_tool_scope resolved to \"$l_validated_tool_path\", but zxfer requires an absolute path."
 		fi
 		return 1
 		;;
@@ -306,11 +344,11 @@ zxfer_reset_endpoint_compression_commands() {
 # Usage: Called during secure-PATH bootstrap after callers select a supported
 # dependency-owned command slot.
 zxfer_assign_required_tool() {
-	l_var_name=$1
+	l_assign_required_tool_var_name=$1
 	l_tool=$2
 	l_label=${3:-$l_tool}
 
-	if ! zxfer_set_dependency_command "$l_var_name" ""; then
+	if ! zxfer_set_dependency_command "$l_assign_required_tool_var_name" ""; then
 		zxfer_set_failure_class dependency
 		zxfer_throw_error "Invalid internal dependency assignment target."
 	fi
@@ -320,7 +358,7 @@ zxfer_assign_required_tool() {
 		zxfer_throw_error "$l_resolved_path"
 	fi
 
-	zxfer_set_dependency_command "$l_var_name" "$l_resolved_path"
+	zxfer_set_dependency_command "$l_assign_required_tool_var_name" "$l_resolved_path"
 }
 
 # Purpose: Rebuild a CLI command string around a validated absolute helper path
@@ -329,36 +367,38 @@ zxfer_assign_required_tool() {
 # after the command head is resolved so later rendering keeps the caller's
 # remaining arguments intact.
 zxfer_requote_cli_command_with_resolved_head() {
-	l_cli_string=$1
-	l_resolved_head=$2
-	l_label=${3:-CLI command}
-	if ! l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
-		printf '%s\n' "$l_cli_tokens"
+	l_requoted_cli_string=$1
+	l_requoted_cli_resolved_head=$2
+	l_requoted_cli_label=${3:-CLI command}
+	if ! l_requoted_cli_tokens=$(zxfer_split_cli_tokens \
+		"$l_requoted_cli_string" "$l_requoted_cli_label"); then
+		printf '%s\n' "$l_requoted_cli_tokens"
 		return 1
 	fi
-	[ -n "$l_cli_tokens" ] || return 1
+	[ -n "$l_requoted_cli_tokens" ] || return 1
 
-	l_output_tokens=""
-	l_replaced_head=0
+	l_requoted_cli_output_tokens=""
+	l_requoted_cli_replaced_head=0
 
-	while IFS= read -r l_cli_token || [ -n "$l_cli_token" ]; do
-		[ -n "$l_cli_token" ] || continue
-		if [ "$l_replaced_head" -eq 0 ]; then
-			l_cli_token=$l_resolved_head
-			l_replaced_head=1
+	while IFS= read -r l_requoted_cli_token ||
+		[ -n "$l_requoted_cli_token" ]; do
+		[ -n "$l_requoted_cli_token" ] || continue
+		if [ "$l_requoted_cli_replaced_head" -eq 0 ]; then
+			l_requoted_cli_token=$l_requoted_cli_resolved_head
+			l_requoted_cli_replaced_head=1
 		fi
-		if [ "$l_output_tokens" = "" ]; then
-			l_output_tokens=$l_cli_token
+		if [ "$l_requoted_cli_output_tokens" = "" ]; then
+			l_requoted_cli_output_tokens=$l_requoted_cli_token
 		else
-			l_output_tokens="$l_output_tokens
-$l_cli_token"
+			l_requoted_cli_output_tokens="$l_requoted_cli_output_tokens
+$l_requoted_cli_token"
 		fi
 	done <<-EOF
-		$l_cli_tokens
+		$l_requoted_cli_tokens
 	EOF
 
-	[ "$l_replaced_head" -eq 1 ] || return 1
-	zxfer_quote_token_stream "$l_output_tokens"
+	[ "$l_requoted_cli_replaced_head" -eq 1 ] || return 1
+	zxfer_quote_token_stream "$l_requoted_cli_output_tokens"
 }
 
 # Purpose: Resolve the effective local CLI command safe that zxfer should use.
@@ -386,13 +426,27 @@ zxfer_resolve_local_cli_command_safe() {
 	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head" "$l_label"
 }
 
+# Purpose: Replace any inherited awk command before EXIT traps can render an
+# early startup failure.
+# Usage: Called after inherited cleanup handles are discarded and immediately
+# before session trap registration.
+# Side effects: Publishes only the dependency owner's bootstrap awk command.
+zxfer_initialize_dependency_reporting_defaults() {
+	l_dependency_reporting_path=$ZXFER_DEFAULT_SECURE_PATH
+	g_cmd_awk=$(PATH=$l_dependency_reporting_path command -v awk 2>/dev/null || :)
+	if [ -z "$g_cmd_awk" ]; then
+		g_cmd_awk='awk'
+	fi
+}
+
 # Purpose: Initialize the dependency defaults before later helpers depend on
 # it.
 # Usage: Called during secure-PATH bootstrap and local dependency resolution
 # during bootstrap so downstream code sees consistent defaults and runtime
 # state.
 zxfer_initialize_dependency_defaults() {
-	zxfer_refresh_secure_path_state
+	zxfer_refresh_secure_path_state ||
+		zxfer_reject_invalid_secure_path_configuration
 
 	# This bootstrap value is reachable from the EXIT trap's failure renderer
 	# before the full dependency owner reset runs. Never preserve an inherited

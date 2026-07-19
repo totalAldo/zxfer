@@ -1,0 +1,424 @@
+### symlink-guard
+l_scan_path='/var/db/zxfer/tank/src/backup.meta';
+l_scan_remaining=$l_scan_path;
+l_scan_candidate='';
+while [ -n "$l_scan_remaining" ]; do
+  case "$l_scan_remaining" in
+  /*)
+    if [ "$l_scan_candidate" = '' ]; then
+      l_scan_candidate=/;
+      l_scan_remaining=${l_scan_remaining#/};
+      continue;
+    fi;
+    ;;
+  esac;
+  l_scan_component=${l_scan_remaining%%/*};
+  if [ "$l_scan_component" = "$l_scan_remaining" ]; then
+    l_scan_remaining='';
+  else
+    l_scan_remaining=${l_scan_remaining#*/};
+  fi;
+  [ -n "$l_scan_component" ] || continue;
+  case "$l_scan_candidate" in
+  '') l_scan_candidate=$l_scan_component ;;
+  /) l_scan_candidate=/$l_scan_component ;;
+  *) l_scan_candidate=$l_scan_candidate/$l_scan_component ;;
+  esac;
+  if [ -L "$l_scan_candidate" ] || [ -h "$l_scan_candidate" ]; then
+    l_scan_trusted=0;
+    case "$l_scan_candidate" in
+    /*)
+      l_scan_parent=${l_scan_candidate%/*};
+      [ -n "$l_scan_parent" ] || l_scan_parent=/;
+      l_scan_owner='';
+      l_scan_parent_owner='';
+      if command -v stat >/dev/null 2>&1; then
+        l_scan_owner=$(stat -c '%u' "$l_scan_candidate" 2>/dev/null);
+        if [ "$l_scan_owner" = '' ] || printf '%s' "$l_scan_owner" | grep -q '[^0-9]' >/dev/null 2>&1; then
+          l_scan_owner=$(stat -f '%u' "$l_scan_candidate" 2>/dev/null);
+        fi;
+        l_scan_parent_owner=$(stat -c '%u' "$l_scan_parent" 2>/dev/null);
+        if [ "$l_scan_parent_owner" = '' ] || printf '%s' "$l_scan_parent_owner" | grep -q '[^0-9]' >/dev/null 2>&1; then
+          l_scan_parent_owner=$(stat -f '%u' "$l_scan_parent" 2>/dev/null);
+        fi;
+      fi;
+      if [ "$l_scan_owner" = '0' ] && [ "$l_scan_parent_owner" = '0' ] && [ "$l_scan_parent" = '/' ]; then
+        l_scan_ls_path=$l_scan_parent;
+        case "$l_scan_ls_path" in -*) l_scan_ls_path=./$l_scan_ls_path ;; esac;
+        l_scan_ls_line=$(ls -ldn "$l_scan_ls_path" 2>/dev/null) || l_scan_ls_line='';
+        if [ "$l_scan_ls_line" != '' ]; then
+          l_scan_parent_perm=$(printf '%s\n' "$l_scan_ls_line" | awk '{print $1}');
+          case "$l_scan_parent_perm" in
+          ??????????*)
+            l_scan_group_write=$(printf '%s' "$l_scan_parent_perm" | cut -c 6);
+            l_scan_other_write=$(printf '%s' "$l_scan_parent_perm" | cut -c 9);
+            l_scan_sticky=$(printf '%s' "$l_scan_parent_perm" | cut -c 10);
+            case "$l_scan_group_write$l_scan_other_write" in
+            *w*) case "$l_scan_sticky" in t|T) l_scan_trusted=1 ;; esac ;;
+            *) l_scan_trusted=1 ;;
+            esac;
+            ;;
+          esac;
+        fi;
+      fi;
+      ;;
+    esac;
+    if [ "$l_scan_trusted" = '1' ]; then
+      continue;
+    fi;
+    if [ "$l_scan_candidate" = "$l_scan_path" ]; then
+      echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    else
+      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    fi;
+    exit 98;
+  fi;
+done;
+### dependency-check
+l_required_host='target.example doas';
+zxfer_require_remote_backup_tool() {
+  l_required_tool=$1;
+  if command -v "$l_required_tool" >/dev/null 2>&1; then
+    return 0;
+  fi;
+  printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
+  exit 99;
+};
+for l_required_tool in 'mktemp' 'chmod' 'mv'; do
+  zxfer_require_remote_backup_tool "$l_required_tool";
+done;
+### directory-prepare
+PATH='/secure/bin:/usr/bin';
+export PATH;
+
+l_required_host='target.example doas';
+zxfer_require_remote_backup_tool() {
+  l_required_tool=$1;
+  if command -v "$l_required_tool" >/dev/null 2>&1; then
+    return 0;
+  fi;
+  printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
+  exit 99;
+};
+for l_required_tool in 'mkdir' 'chmod' 'id' 'grep' 'ls' 'awk' 'cut'; do
+  zxfer_require_remote_backup_tool "$l_required_tool";
+done;
+
+l_scan_path='/var/db/zxfer/tank/src';
+l_scan_remaining=$l_scan_path;
+l_scan_candidate='';
+while [ -n "$l_scan_remaining" ]; do
+  case "$l_scan_remaining" in
+  /*)
+    if [ "$l_scan_candidate" = '' ]; then
+      l_scan_candidate=/;
+      l_scan_remaining=${l_scan_remaining#/};
+      continue;
+    fi;
+    ;;
+  esac;
+  l_scan_component=${l_scan_remaining%%/*};
+  if [ "$l_scan_component" = "$l_scan_remaining" ]; then
+    l_scan_remaining='';
+  else
+    l_scan_remaining=${l_scan_remaining#*/};
+  fi;
+  [ -n "$l_scan_component" ] || continue;
+  case "$l_scan_candidate" in
+  '') l_scan_candidate=$l_scan_component ;;
+  /) l_scan_candidate=/$l_scan_component ;;
+  *) l_scan_candidate=$l_scan_candidate/$l_scan_component ;;
+  esac;
+  if [ -L "$l_scan_candidate" ] || [ -h "$l_scan_candidate" ]; then
+    l_scan_trusted=0;
+    case "$l_scan_candidate" in
+    /*)
+      l_scan_parent=${l_scan_candidate%/*};
+      [ -n "$l_scan_parent" ] || l_scan_parent=/;
+      l_scan_owner='';
+      l_scan_parent_owner='';
+      if command -v stat >/dev/null 2>&1; then
+        l_scan_owner=$(stat -c '%u' "$l_scan_candidate" 2>/dev/null);
+        if [ "$l_scan_owner" = '' ] || printf '%s' "$l_scan_owner" | grep -q '[^0-9]' >/dev/null 2>&1; then
+          l_scan_owner=$(stat -f '%u' "$l_scan_candidate" 2>/dev/null);
+        fi;
+        l_scan_parent_owner=$(stat -c '%u' "$l_scan_parent" 2>/dev/null);
+        if [ "$l_scan_parent_owner" = '' ] || printf '%s' "$l_scan_parent_owner" | grep -q '[^0-9]' >/dev/null 2>&1; then
+          l_scan_parent_owner=$(stat -f '%u' "$l_scan_parent" 2>/dev/null);
+        fi;
+      fi;
+      if [ "$l_scan_owner" = '0' ] && [ "$l_scan_parent_owner" = '0' ] && [ "$l_scan_parent" = '/' ]; then
+        l_scan_ls_path=$l_scan_parent;
+        case "$l_scan_ls_path" in -*) l_scan_ls_path=./$l_scan_ls_path ;; esac;
+        l_scan_ls_line=$(ls -ldn "$l_scan_ls_path" 2>/dev/null) || l_scan_ls_line='';
+        if [ "$l_scan_ls_line" != '' ]; then
+          l_scan_parent_perm=$(printf '%s\n' "$l_scan_ls_line" | awk '{print $1}');
+          case "$l_scan_parent_perm" in
+          ??????????*)
+            l_scan_group_write=$(printf '%s' "$l_scan_parent_perm" | cut -c 6);
+            l_scan_other_write=$(printf '%s' "$l_scan_parent_perm" | cut -c 9);
+            l_scan_sticky=$(printf '%s' "$l_scan_parent_perm" | cut -c 10);
+            case "$l_scan_group_write$l_scan_other_write" in
+            *w*) case "$l_scan_sticky" in t|T) l_scan_trusted=1 ;; esac ;;
+            *) l_scan_trusted=1 ;;
+            esac;
+            ;;
+          esac;
+        fi;
+      fi;
+      ;;
+    esac;
+    if [ "$l_scan_trusted" = '1' ]; then
+      continue;
+    fi;
+    if [ "$l_scan_candidate" = "$l_scan_path" ]; then
+      echo 'Refusing to use symlinked zxfer backup directory.' >&2;
+    else
+      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    fi;
+    exit 92;
+  fi;
+done;
+
+if [ -L '/var/db/zxfer/tank/src' ]; then
+  echo 'Refusing to use symlinked zxfer backup directory.' >&2;
+  exit 92;
+fi;
+if [ -e '/var/db/zxfer/tank/src' ] && [ ! -d '/var/db/zxfer/tank/src' ]; then
+  echo 'Backup path exists but is not a directory.' >&2;
+  exit 92;
+fi;
+
+umask 077;
+if ! mkdir -p '/var/db/zxfer/tank/src'; then
+  echo 'Error creating secure backup directory.' >&2;
+  exit 92;
+fi;
+if ! chmod 700 '/var/db/zxfer/tank/src'; then
+  echo 'Error securing backup directory.' >&2;
+  exit 92;
+fi;
+
+l_expected_uid=$(id -u);
+l_dir_uid='';
+if command -v stat >/dev/null 2>&1; then
+  l_dir_uid=$(stat -c '%u' '/var/db/zxfer/tank/src' 2>/dev/null);
+  if [ "$l_dir_uid" = '' ] || printf '%s' "$l_dir_uid" | grep -q '[^0-9]' >/dev/null 2>&1; then
+    l_dir_uid=$(stat -f '%u' '/var/db/zxfer/tank/src' 2>/dev/null);
+  fi;
+fi;
+if [ "$l_dir_uid" = '' ] || printf '%s' "$l_dir_uid" | grep -q '[^0-9]' >/dev/null 2>&1; then
+  l_ls_line=$(ls -ldn '/var/db/zxfer/tank/src' 2>/dev/null) || l_ls_line='';
+  if [ "$l_ls_line" != '' ]; then
+    l_dir_uid=$(printf '%s\n' "$l_ls_line" | awk '{print $3}');
+  fi;
+fi;
+if [ "$l_dir_uid" = '' ]; then
+  echo 'Unable to determine backup directory owner.' >&2;
+  exit 92;
+fi;
+if [ "$l_dir_uid" != 0 ] && [ "$l_dir_uid" != "$l_expected_uid" ]; then
+  echo 'Backup directory must be owned by root or the ssh user.' >&2;
+  exit 92;
+fi;
+### single-write
+PATH='/secure/bin:/usr/bin';
+export PATH;
+
+l_required_host='target.example doas';
+zxfer_require_remote_backup_tool() {
+  l_required_tool=$1;
+  if command -v "$l_required_tool" >/dev/null 2>&1; then
+    return 0;
+  fi;
+  printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
+  exit 99;
+};
+for l_required_tool in 'mktemp' 'chmod' 'mv' 'rm' 'rmdir'; do
+  zxfer_require_remote_backup_tool "$l_required_tool";
+done;
+
+cleanup_stage() {
+  rm -f "$l_stage_file";
+  rmdir "$l_stage_dir" 2>/dev/null || true;
+};
+
+if [ -L '/var/db/zxfer/tank/src/backup.meta' ] || [ -h '/var/db/zxfer/tank/src/backup.meta' ]; then
+  echo 'Refusing to write backup metadata because the target is a symlink.' >&2;
+  exit 92;
+fi;
+if [ -e '/var/db/zxfer/tank/src/backup.meta' ] && [ ! -f '/var/db/zxfer/tank/src/backup.meta' ]; then
+  echo 'Refusing to write backup metadata because the target is not a regular file.' >&2;
+  exit 92;
+fi;
+
+umask 077;
+l_stage_dir=$(mktemp -d '/var/db/zxfer/tank/src/.zxfer-backup-write.XXXXXX' 2>/dev/null) || exit 92;
+l_stage_file="$l_stage_dir/backup.write";
+if ! cat >"$l_stage_file"; then
+  cleanup_stage;
+  exit 92;
+fi;
+if ! chmod 600 "$l_stage_file"; then
+  cleanup_stage;
+  exit 92;
+fi;
+
+if [ -L '/var/db/zxfer/tank/src/backup.meta' ] || [ -h '/var/db/zxfer/tank/src/backup.meta' ]; then
+  cleanup_stage;
+  exit 92;
+fi;
+if [ -e '/var/db/zxfer/tank/src/backup.meta' ] && [ ! -f '/var/db/zxfer/tank/src/backup.meta' ]; then
+  cleanup_stage;
+  exit 92;
+fi;
+if ! mv -f "$l_stage_file" '/var/db/zxfer/tank/src/backup.meta'; then
+  cleanup_stage;
+  exit 92;
+fi;
+rmdir "$l_stage_dir" 2>/dev/null || true;
+### pair-write
+PATH='/secure/bin:/usr/bin';
+export PATH;
+
+l_required_host='target.example doas';
+zxfer_require_remote_backup_tool() {
+  l_required_tool=$1;
+  if command -v "$l_required_tool" >/dev/null 2>&1; then
+    return 0;
+  fi;
+  printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
+  exit 99;
+};
+for l_required_tool in 'mktemp' 'chmod' 'mv' 'rm' 'rmdir' 'awk'; do
+  zxfer_require_remote_backup_tool "$l_required_tool";
+done;
+
+create_backup_temp() {
+  mktemp "$@";
+};
+cleanup_stages() {
+  rm -f "$l_primary_stage_file" "$l_forwarded_stage_file" 2>/dev/null || true;
+  rmdir "$l_primary_stage_dir" "$l_forwarded_stage_dir" 2>/dev/null || true;
+};
+rollback_forwarded() {
+  rm -f '/var/db/zxfer/backup/dst/forwarded.meta' 2>/dev/null || true;
+  if [ "${l_forwarded_had_existing:-0}" -eq 1 ] && [ "${l_forwarded_rollback_file:-}" != '' ]; then
+    if ! mv -f "$l_forwarded_rollback_file" '/var/db/zxfer/backup/dst/forwarded.meta' 2>/dev/null; then
+      return 1;
+    fi;
+    if [ -e "$l_forwarded_rollback_file" ]; then
+      rm -f "$l_forwarded_rollback_file" 2>/dev/null || true;
+    fi;
+  fi;
+  return 0;
+};
+
+if [ -L '/var/db/zxfer/tank/src/backup.meta' ] || [ -h '/var/db/zxfer/tank/src/backup.meta' ]; then
+  echo 'Refusing to write backup metadata because the target is a symlink.' >&2;
+  exit 92;
+fi;
+if [ -e '/var/db/zxfer/tank/src/backup.meta' ] && [ ! -f '/var/db/zxfer/tank/src/backup.meta' ]; then
+  echo 'Refusing to write backup metadata because the target is not a regular file.' >&2;
+  exit 92;
+fi;
+if [ -L '/var/db/zxfer/backup/dst/forwarded.meta' ] || [ -h '/var/db/zxfer/backup/dst/forwarded.meta' ]; then
+  echo 'Refusing to write backup metadata because the target is a symlink.' >&2;
+  exit 92;
+fi;
+if [ -e '/var/db/zxfer/backup/dst/forwarded.meta' ] && [ ! -f '/var/db/zxfer/backup/dst/forwarded.meta' ]; then
+  echo 'Refusing to write backup metadata because the target is not a regular file.' >&2;
+  exit 92;
+fi;
+
+umask 077;
+l_primary_stage_dir=$(create_backup_temp -d '/var/db/zxfer/tank/src/.zxfer-backup-write.XXXXXX' 2>/dev/null) || exit 92;
+l_primary_stage_file="$l_primary_stage_dir/backup.write";
+l_forwarded_stage_dir=$(create_backup_temp -d '/var/db/zxfer/backup/dst/.zxfer-backup-write.XXXXXX' 2>/dev/null) || {
+  cleanup_stages;
+  exit 92;
+};
+l_forwarded_stage_file="$l_forwarded_stage_dir/backup.write";
+if ! awk -v split_line='__ZXFER_BACKUP_METADATA_PAIR_SPLIT__' -v primary_file="$l_primary_stage_file" -v forwarded_file="$l_forwarded_stage_file" 'BEGIN { current = primary_file; saw_split = 0 } $0 == split_line { current = forwarded_file; saw_split = 1; next } { print > current } END { if (!saw_split) exit 1 }'; then
+  cleanup_stages;
+  exit 92;
+fi;
+if ! chmod 600 "$l_primary_stage_file"; then
+  cleanup_stages;
+  exit 92;
+fi;
+if ! chmod 600 "$l_forwarded_stage_file"; then
+  cleanup_stages;
+  exit 92;
+fi;
+l_forwarded_had_existing=0;
+l_forwarded_rollback_file='';
+if [ -e '/var/db/zxfer/backup/dst/forwarded.meta' ]; then
+  l_forwarded_had_existing=1;
+  l_forwarded_rollback_file=$(create_backup_temp '/var/db/zxfer/backup/dst/.zxfer-backup-rollback.XXXXXX' 2>/dev/null) || {
+    cleanup_stages;
+    exit 92;
+  };
+  if ! mv -f '/var/db/zxfer/backup/dst/forwarded.meta' "$l_forwarded_rollback_file"; then
+    rm -f "$l_forwarded_rollback_file" 2>/dev/null || true;
+    cleanup_stages;
+    exit 92;
+  fi;
+fi;
+if ! mv -f "$l_forwarded_stage_file" '/var/db/zxfer/backup/dst/forwarded.meta'; then
+  if ! rollback_forwarded; then
+    cleanup_stages;
+    exit 98;
+  fi;
+  cleanup_stages;
+  exit 92;
+fi;
+l_primary_had_existing=0;
+l_primary_rollback_file='';
+if [ -e '/var/db/zxfer/tank/src/backup.meta' ]; then
+  l_primary_had_existing=1;
+  l_primary_rollback_file=$(create_backup_temp '/var/db/zxfer/tank/src/.zxfer-backup-rollback.XXXXXX' 2>/dev/null) || {
+    if ! rollback_forwarded; then
+      cleanup_stages;
+      exit 98;
+    fi;
+    cleanup_stages;
+    exit 92;
+  };
+  if ! mv -f '/var/db/zxfer/tank/src/backup.meta' "$l_primary_rollback_file"; then
+    rm -f "$l_primary_rollback_file" 2>/dev/null || true;
+    if ! rollback_forwarded; then
+      cleanup_stages;
+      exit 98;
+    fi;
+    cleanup_stages;
+    exit 92;
+  fi;
+fi;
+if ! mv -f "$l_primary_stage_file" '/var/db/zxfer/tank/src/backup.meta'; then
+  l_primary_restore_failed=0;
+  if [ "$l_primary_had_existing" -eq 1 ] && [ "$l_primary_rollback_file" != '' ]; then
+    if ! mv -f "$l_primary_rollback_file" '/var/db/zxfer/tank/src/backup.meta' 2>/dev/null; then
+      l_primary_restore_failed=1;
+    elif [ -e "$l_primary_rollback_file" ]; then
+      rm -f "$l_primary_rollback_file" 2>/dev/null || true;
+    fi;
+  fi;
+  if ! rollback_forwarded; then
+    cleanup_stages;
+    exit 98;
+  fi;
+  if [ "$l_primary_restore_failed" -eq 1 ]; then
+    cleanup_stages;
+    exit 98;
+  fi;
+  cleanup_stages;
+  exit 92;
+fi;
+if [ "$l_forwarded_had_existing" -eq 1 ] && [ "$l_forwarded_rollback_file" != '' ]; then
+  rm -f "$l_forwarded_rollback_file" 2>/dev/null || true;
+fi;
+if [ "$l_primary_had_existing" -eq 1 ] && [ "$l_primary_rollback_file" != '' ]; then
+  rm -f "$l_primary_rollback_file" 2>/dev/null || true;
+fi;
+cleanup_stages;

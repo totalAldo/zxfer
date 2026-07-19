@@ -347,14 +347,14 @@ zxfer_get_effective_user_uid() {
 # Usage: Called before zxfer trusts temp-root or backup-metadata paths when
 # later helpers need a boolean answer about the backup owner UID.
 zxfer_backup_owner_uid_is_allowed() {
-	l_owner_uid=$1
+	l_backup_owner_uid=$1
 
-	if [ "$l_owner_uid" = "0" ]; then
+	if [ "$l_backup_owner_uid" = "0" ]; then
 		return 0
 	fi
 
-	if l_effective_uid=$(zxfer_get_effective_user_uid); then
-		if [ "$l_owner_uid" = "$l_effective_uid" ]; then
+	if l_backup_effective_uid=$(zxfer_get_effective_user_uid); then
+		if [ "$l_backup_owner_uid" = "$l_backup_effective_uid" ]; then
 			return 0
 		fi
 	fi
@@ -393,13 +393,15 @@ zxfer_reject_backup_metadata_path() {
 # Usage: Called before zxfer trusts temp-root or backup-metadata paths when
 # later helpers should stop immediately if the precondition is not met.
 zxfer_require_backup_metadata_path_without_symlinks() {
-	l_path=$1
+	l_backup_metadata_nosymlink_path=$1
 
-	if l_symlink_component=$(zxfer_find_symlink_path_component "$l_path"); then
-		if [ "$l_symlink_component" = "$l_path" ]; then
-			zxfer_reject_backup_metadata_path "Refusing to use backup metadata $l_path because it is a symlink."
+	if l_backup_metadata_symlink_component=$(zxfer_find_symlink_path_component \
+		"$l_backup_metadata_nosymlink_path"); then
+		if [ "$l_backup_metadata_symlink_component" = \
+			"$l_backup_metadata_nosymlink_path" ]; then
+			zxfer_reject_backup_metadata_path "Refusing to use backup metadata $l_backup_metadata_nosymlink_path because it is a symlink."
 		fi
-		zxfer_reject_backup_metadata_path "Refusing to use backup metadata $l_path because path component $l_symlink_component is a symlink."
+		zxfer_reject_backup_metadata_path "Refusing to use backup metadata $l_backup_metadata_nosymlink_path because path component $l_backup_metadata_symlink_component is a symlink."
 	fi
 }
 
@@ -408,11 +410,11 @@ zxfer_require_backup_metadata_path_without_symlinks() {
 # Usage: Called before zxfer trusts temp-root or backup-metadata paths when
 # later helpers need an existing record instead of rebuilding one.
 zxfer_find_symlink_path_component() {
-	l_path=$1
+	l_find_symlink_path_component_path=$1
 
-	[ -n "$l_path" ] || return 1
+	[ -n "$l_find_symlink_path_component_path" ] || return 1
 
-	l_remaining=$l_path
+	l_remaining=$l_find_symlink_path_component_path
 	l_candidate_path=""
 	while [ -n "$l_remaining" ]; do
 		case "$l_remaining" in

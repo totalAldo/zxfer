@@ -22,6 +22,6 @@ function_decisions	ALL	24
 test_lines	ALL	2500
 callers	zxfer_profile_now_ms	12
 callers	zxfer_escape_for_single_quotes	26
-callers	eval 	7
+callers	eval 	2
 callers	$(date	15
 callers	mktemp	18

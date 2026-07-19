@@ -150,20 +150,21 @@ zxfer_split_host_spec_tokens() {
 # token in single quotes. This keeps multi-word ssh arguments working while
 # preventing the shell from interpreting metacharacters provided by the user.
 zxfer_quote_host_spec_tokens() {
-	l_host_spec=$1
-	if [ "$l_host_spec" = "" ]; then
+	l_quoted_host_spec=$1
+	if [ "$l_quoted_host_spec" = "" ]; then
 		return
 	fi
 
-	if ! l_tokens=$(zxfer_split_host_spec_tokens "$l_host_spec"); then
-		printf '%s\n' "$l_tokens"
+	if ! l_quoted_host_tokens=$(zxfer_split_host_spec_tokens \
+		"$l_quoted_host_spec"); then
+		printf '%s\n' "$l_quoted_host_tokens"
 		return 1
 	fi
-	if [ "$l_tokens" = "" ]; then
+	if [ "$l_quoted_host_tokens" = "" ]; then
 		return
 	fi
 
-	zxfer_quote_token_stream "$l_tokens"
+	zxfer_quote_token_stream "$l_quoted_host_tokens"
 }
 
 # Purpose: Return the resolved local ssh helper in the form expected by later
@@ -406,12 +407,12 @@ zxfer_echoV_ssh_control_socket_command_for_host() {
 # socket management once planning is complete and zxfer is ready to execute the
 # action.
 zxfer_run_ssh_control_socket_action_for_host() {
-	l_host=$1
+	l_run_ssh_control_socket_action_for_host_host=$1
 	l_socket_path=$2
 	l_action=$3
 
 	zxfer_reset_ssh_control_socket_action_state
-	[ -n "$l_host" ] || return 1
+	[ -n "$l_run_ssh_control_socket_action_for_host_host" ] || return 1
 	[ -n "$l_socket_path" ] || return 1
 
 	case "$l_action" in
@@ -426,7 +427,7 @@ zxfer_run_ssh_control_socket_action_for_host() {
 		g_zxfer_ssh_control_socket_action_stderr=$l_transport_tokens
 		return 1
 	fi
-	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host"); then
+	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_run_ssh_control_socket_action_for_host_host"); then
 		g_zxfer_ssh_control_socket_action_result="error"
 		g_zxfer_ssh_control_socket_action_stderr=$l_host_tokens
 		return 1
@@ -452,7 +453,7 @@ EOF
 	zxfer_record_last_command_argv "$@"
 	if [ "$l_action" = "check" ]; then
 		zxfer_echoV_ssh_control_socket_command_for_host \
-			"$l_host" "Checking ssh control socket" "$@"
+			"$l_run_ssh_control_socket_action_for_host_host" "Checking ssh control socket" "$@"
 	fi
 
 	if zxfer_get_temp_file >/dev/null; then
@@ -463,21 +464,21 @@ EOF
 		g_zxfer_ssh_control_socket_action_stderr="Failed to stage ssh control socket stderr for $l_action action."
 		return "$l_stage_status"
 	fi
-	l_stderr_path=$g_zxfer_temp_file_result
+	l_run_ssh_control_socket_action_for_host_stderr_path=$g_zxfer_temp_file_result
 
-	if "$@" >/dev/null 2>"$l_stderr_path"; then
+	if "$@" >/dev/null 2>"$l_run_ssh_control_socket_action_for_host_stderr_path"; then
 		l_action_status=0
 	else
 		l_action_status=$?
 	fi
 
-	if ! zxfer_read_ssh_control_socket_action_stderr_file "$l_stderr_path" >/dev/null; then
-		zxfer_cleanup_runtime_artifact_path "$l_stderr_path"
+	if ! zxfer_read_ssh_control_socket_action_stderr_file "$l_run_ssh_control_socket_action_for_host_stderr_path" >/dev/null; then
+		zxfer_cleanup_runtime_artifact_path "$l_run_ssh_control_socket_action_for_host_stderr_path"
 		g_zxfer_ssh_control_socket_action_result="capture_error"
 		g_zxfer_ssh_control_socket_action_stderr="Failed to read ssh control socket stderr for $l_action action."
 		return 1
 	fi
-	zxfer_cleanup_runtime_artifact_path "$l_stderr_path"
+	zxfer_cleanup_runtime_artifact_path "$l_run_ssh_control_socket_action_for_host_stderr_path"
 
 	if [ "$l_action_status" -eq 0 ]; then
 		case "$l_action" in
@@ -507,10 +508,10 @@ EOF
 # socket management before later helpers act on a result that must be validated
 # first.
 zxfer_check_ssh_control_socket_for_host() {
-	l_host=$1
-	l_socket_path=$2
+	l_check_ssh_control_socket_for_host_host=$1
+	l_check_ssh_control_socket_for_host_socket_path=$2
 
-	zxfer_run_ssh_control_socket_action_for_host "$l_host" "$l_socket_path" check
+	zxfer_run_ssh_control_socket_action_for_host "$l_check_ssh_control_socket_for_host_host" "$l_check_ssh_control_socket_for_host_socket_path" check
 }
 
 # Purpose: Open the SSH control socket for host and publish the handles or
@@ -519,15 +520,15 @@ zxfer_check_ssh_control_socket_for_host() {
 # socket management before asynchronous work starts using the shared
 # coordination resource.
 zxfer_open_ssh_control_socket_for_host() {
-	l_host=$1
+	l_open_ssh_control_socket_for_host_host=$1
 	l_socket_path=$2
 
-	[ -n "$l_host" ] || return 1
+	[ -n "$l_open_ssh_control_socket_for_host_host" ] || return 1
 	[ -n "$l_socket_path" ] || return 1
 
 	l_transport_tokens=$(zxfer_get_ssh_base_transport_tokens) ||
 		zxfer_throw_error "$l_transport_tokens" "$?"
-	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_host"); then
+	if ! l_host_tokens=$(zxfer_split_host_spec_tokens "$l_open_ssh_control_socket_for_host_host"); then
 		zxfer_throw_error "$l_host_tokens"
 	fi
 	set --
@@ -550,7 +551,7 @@ EOF
 
 	zxfer_record_last_command_argv "$@"
 	zxfer_echoV_ssh_control_socket_command_for_host \
-		"$l_host" "Opening ssh control socket" "$@"
+		"$l_open_ssh_control_socket_for_host_host" "Opening ssh control socket" "$@"
 	"$@"
 }
 
@@ -560,10 +561,10 @@ EOF
 # socket management after a probe or planning step changes the active context
 # that later helpers should use.
 zxfer_set_ssh_control_socket_role_state() {
-	l_role=$1
+	l_set_ssh_control_socket_role_state_role=$1
 	l_socket_path=$2
 
-	case "$l_role" in
+	case "$l_set_ssh_control_socket_role_state_role" in
 	origin)
 		g_ssh_origin_control_socket="$l_socket_path"
 		;;
@@ -571,7 +572,7 @@ zxfer_set_ssh_control_socket_role_state() {
 		g_ssh_target_control_socket="$l_socket_path"
 		;;
 	esac
-	zxfer_refresh_ssh_transport_tokens_for_role "$l_role"
+	zxfer_refresh_ssh_transport_tokens_for_role "$l_set_ssh_control_socket_role_state_role"
 	return 0
 }
 
@@ -580,9 +581,9 @@ zxfer_set_ssh_control_socket_role_state() {
 # socket management when later helpers must not see an old cached or role-
 # specific value.
 zxfer_clear_ssh_control_socket_role_state() {
-	l_role=$1
+	l_clear_ssh_control_socket_role_state_role=$1
 
-	case "$l_role" in
+	case "$l_clear_ssh_control_socket_role_state_role" in
 	origin)
 		g_ssh_origin_control_socket=""
 		;;
@@ -590,7 +591,7 @@ zxfer_clear_ssh_control_socket_role_state() {
 		g_ssh_target_control_socket=""
 		;;
 	esac
-	zxfer_refresh_ssh_transport_tokens_for_role "$l_role"
+	zxfer_refresh_ssh_transport_tokens_for_role "$l_clear_ssh_control_socket_role_state_role"
 	return 0
 }
 
@@ -808,17 +809,17 @@ zxfer_refresh_ssh_transport_tokens_for_role() {
 # still matches; anything else falls through to a fresh render so correctness
 # never depends on the memo being warm.
 zxfer_get_ssh_transport_tokens_for_host() {
-	l_host=$1
+	l_get_ssh_transport_tokens_for_host_host=$1
 
-	if [ -n "$l_host" ]; then
-		if [ "$l_host" = "${g_option_O_origin_host:-}" ] &&
+	if [ -n "$l_get_ssh_transport_tokens_for_host_host" ]; then
+		if [ "$l_get_ssh_transport_tokens_for_host_host" = "${g_option_O_origin_host:-}" ] &&
 			[ "${g_zxfer_ssh_transport_tokens_origin_set:-0}" -eq 1 ] &&
 			[ "${g_zxfer_ssh_transport_tokens_origin_socket:-}" = "${g_ssh_origin_control_socket:-}" ]; then
 			printf '%s\n' "$g_zxfer_ssh_transport_tokens_origin"
 			return 0
 		fi
-		if [ "$l_host" = "${g_option_T_target_host:-}" ] &&
-			[ "$l_host" != "${g_option_O_origin_host:-}" ] &&
+		if [ "$l_get_ssh_transport_tokens_for_host_host" = "${g_option_T_target_host:-}" ] &&
+			[ "$l_get_ssh_transport_tokens_for_host_host" != "${g_option_O_origin_host:-}" ] &&
 			[ "${g_zxfer_ssh_transport_tokens_target_set:-0}" -eq 1 ] &&
 			[ "${g_zxfer_ssh_transport_tokens_target_socket:-}" = "${g_ssh_target_control_socket:-}" ]; then
 			printf '%s\n' "$g_zxfer_ssh_transport_tokens_target"
@@ -826,7 +827,7 @@ zxfer_get_ssh_transport_tokens_for_host() {
 		fi
 	fi
 
-	zxfer_render_ssh_transport_tokens_for_host "$l_host"
+	zxfer_render_ssh_transport_tokens_for_host "$l_get_ssh_transport_tokens_for_host_host"
 }
 
 # Purpose: Return the remote command context label in the form expected by
@@ -985,25 +986,25 @@ EOF
 # tokens embedded in the -O/-T host spec (for example "host pfexec"). The
 # remote command must already be quoted for execution by the remote shell.
 zxfer_build_ssh_shell_command_for_host() {
-	l_host_spec=$1
-	l_remote_shell_cmd=$2
+	l_build_ssh_shell_command_for_host_host_spec=$1
+	l_build_ssh_shell_command_for_host_remote_shell_cmd=$2
 
-	[ "$l_remote_shell_cmd" = "" ] && return 1
+	[ "$l_build_ssh_shell_command_for_host_remote_shell_cmd" = "" ] && return 1
 
-	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_build_ssh_shell_command_for_host_host_spec"); then
 		:
 	else
 		l_transport_status=$?
 		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
 	fi
-	if zxfer_prepare_ssh_shell_command_context "$l_host_spec" "$l_remote_shell_cmd"; then
+	if zxfer_prepare_ssh_shell_command_context "$l_build_ssh_shell_command_for_host_host_spec" "$l_build_ssh_shell_command_for_host_remote_shell_cmd"; then
 		:
 	else
-		l_context_status=$?
+		l_build_ssh_shell_command_for_host_context_status=$?
 		if [ "$g_zxfer_ssh_shell_context_error_result" != "" ]; then
 			zxfer_throw_error "$g_zxfer_ssh_shell_context_error_result"
 		fi
-		return "$l_context_status"
+		return "$l_build_ssh_shell_command_for_host_context_status"
 	fi
 
 	l_command_tokens=$(printf '%s\n%s\n%s\n' "$l_transport_tokens" "$g_zxfer_ssh_shell_host_result" "$g_zxfer_ssh_shell_full_remote_command_result")
@@ -1019,42 +1020,48 @@ zxfer_build_ssh_shell_command_for_host() {
 # local shell string. Wrapper tokens embedded in the -O/-T host spec are
 # preserved as part of the single remote command argument.
 zxfer_invoke_ssh_shell_command_for_host() {
-	l_host_spec=$1
-	l_remote_shell_cmd=$2
-	l_profile_side=${3:-}
+	l_ssh_invoke_host_spec=$1
+	l_ssh_invoke_remote_shell_cmd=$2
+	l_ssh_invoke_profile_side=${3:-}
 
-	[ "$l_remote_shell_cmd" = "" ] && return 1
-	zxfer_profile_record_ssh_invocation "$l_host_spec" "$l_profile_side"
+	[ "$l_ssh_invoke_remote_shell_cmd" = "" ] && return 1
+	zxfer_profile_record_ssh_invocation \
+		"$l_ssh_invoke_host_spec" "$l_ssh_invoke_profile_side"
 
-	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+	if l_ssh_invoke_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host \
+		"$l_ssh_invoke_host_spec"); then
 		:
 	else
-		l_transport_status=$?
-		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
+		l_ssh_invoke_transport_status=$?
+		zxfer_throw_error \
+			"$l_ssh_invoke_transport_tokens" "$l_ssh_invoke_transport_status"
 	fi
-	if zxfer_prepare_ssh_shell_command_context "$l_host_spec" "$l_remote_shell_cmd"; then
+	if zxfer_prepare_ssh_shell_command_context \
+		"$l_ssh_invoke_host_spec" "$l_ssh_invoke_remote_shell_cmd"; then
 		:
 	else
-		l_context_status=$?
+		l_ssh_invoke_context_status=$?
 		if [ "$g_zxfer_ssh_shell_context_error_result" != "" ]; then
 			zxfer_throw_error "$g_zxfer_ssh_shell_context_error_result"
 		fi
-		return "$l_context_status"
+		return "$l_ssh_invoke_context_status"
 	fi
 
 	set --
-	if [ "$l_transport_tokens" != "" ]; then
-		while IFS= read -r l_token || [ -n "$l_token" ]; do
-			[ "$l_token" = "" ] && continue
-			set -- "$@" "$l_token"
+	if [ "$l_ssh_invoke_transport_tokens" != "" ]; then
+		while IFS= read -r l_ssh_invoke_token ||
+			[ -n "$l_ssh_invoke_token" ]; do
+			[ "$l_ssh_invoke_token" = "" ] && continue
+			set -- "$@" "$l_ssh_invoke_token"
 		done <<EOF
-$l_transport_tokens
+$l_ssh_invoke_transport_tokens
 EOF
 	fi
 	set -- "$@" "$g_zxfer_ssh_shell_host_result" "$g_zxfer_ssh_shell_full_remote_command_result"
 
 	zxfer_record_last_command_argv "$@"
-	zxfer_echoV_remote_command_for_host "$l_host_spec" "$l_profile_side" "$@"
+	zxfer_echoV_remote_command_for_host \
+		"$l_ssh_invoke_host_spec" "$l_ssh_invoke_profile_side" "$@"
 	"$@"
 }
 
@@ -1115,23 +1122,23 @@ EOF
 # $g_zxfer_prepared_ssh_shell_command_result or the diagnostic in
 # $g_zxfer_prepared_ssh_shell_command_error_result.
 zxfer_build_prepared_ssh_shell_command_for_host() {
-	l_host_spec=$1
-	l_remote_shell_cmd=$2
+	l_build_prepared_ssh_shell_command_for_host_host_spec=$1
+	l_build_prepared_ssh_shell_command_for_host_remote_shell_cmd=$2
 
 	g_zxfer_prepared_ssh_shell_command_result=""
 	g_zxfer_prepared_ssh_shell_command_error_result=""
-	if zxfer_prepare_remote_shell_command_for_host "$l_host_spec" "$l_remote_shell_cmd"; then
+	if zxfer_prepare_remote_shell_command_for_host "$l_build_prepared_ssh_shell_command_for_host_host_spec" "$l_build_prepared_ssh_shell_command_for_host_remote_shell_cmd"; then
 		:
 	else
-		l_prepare_status=$?
+		l_build_prepared_ssh_shell_command_for_host_prepare_status=$?
 		if [ "$g_zxfer_remote_shell_command_for_host_result" != "" ]; then
 			g_zxfer_prepared_ssh_shell_command_error_result=$g_zxfer_remote_shell_command_for_host_result
 		fi
-		return "$l_prepare_status"
+		return "$l_build_prepared_ssh_shell_command_for_host_prepare_status"
 	fi
 
 	l_build_status=0
-	l_rendered_command=$(zxfer_build_ssh_shell_command_for_host "$l_host_spec" "$g_zxfer_remote_shell_command_for_host_result") ||
+	l_rendered_command=$(zxfer_build_ssh_shell_command_for_host "$l_build_prepared_ssh_shell_command_for_host_host_spec" "$g_zxfer_remote_shell_command_for_host_result") ||
 		l_build_status=$?
 	if [ "$l_build_status" -ne 0 ]; then
 		if [ "$l_rendered_command" != "" ]; then
@@ -1149,18 +1156,18 @@ zxfer_build_prepared_ssh_shell_command_for_host() {
 # $g_zxfer_prepared_ssh_shell_command_result while preserving failure text.
 # Side effects: Publishes the rendered command or exits through zxfer_throw_error.
 zxfer_publish_prepared_ssh_shell_command_for_host_or_throw() {
-	l_host_spec=$1
-	l_remote_shell_cmd=$2
+	l_publish_prepared_ssh_shell_command_for_host_or_throw_host_spec=$1
+	l_publish_prepared_ssh_shell_command_for_host_or_throw_remote_shell_cmd=$2
 
-	zxfer_build_prepared_ssh_shell_command_for_host "$l_host_spec" "$l_remote_shell_cmd" >/dev/null
-	l_prepare_status=$?
-	if [ "$l_prepare_status" -eq 0 ]; then
+	zxfer_build_prepared_ssh_shell_command_for_host "$l_publish_prepared_ssh_shell_command_for_host_or_throw_host_spec" "$l_publish_prepared_ssh_shell_command_for_host_or_throw_remote_shell_cmd" >/dev/null
+	l_publish_prepared_ssh_shell_command_for_host_or_throw_prepare_status=$?
+	if [ "$l_publish_prepared_ssh_shell_command_for_host_or_throw_prepare_status" -eq 0 ]; then
 		return 0
 	fi
 	if [ "$g_zxfer_prepared_ssh_shell_command_error_result" != "" ]; then
-		zxfer_throw_error "$g_zxfer_prepared_ssh_shell_command_error_result" "$l_prepare_status"
+		zxfer_throw_error "$g_zxfer_prepared_ssh_shell_command_error_result" "$l_publish_prepared_ssh_shell_command_for_host_or_throw_prepare_status"
 	fi
-	return "$l_prepare_status"
+	return "$l_publish_prepared_ssh_shell_command_for_host_or_throw_prepare_status"
 }
 
 # Purpose: Run the source ZFS command through the controlled execution path
@@ -1214,13 +1221,17 @@ zxfer_run_destination_zfs_cmd() {
 		return
 	fi
 
-	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
-	l_remote_tokens=$(printf '%s\n' "$l_target_zfs_cmd")
-	for l_arg in "$@"; do
-		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
+	l_destination_zfs_command=${g_target_cmd_zfs:-$g_cmd_zfs}
+	l_destination_zfs_remote_tokens=$(printf '%s\n' \
+		"$l_destination_zfs_command")
+	for l_destination_zfs_arg in "$@"; do
+		l_destination_zfs_remote_tokens=$(printf '%s\n%s' \
+			"$l_destination_zfs_remote_tokens" "$l_destination_zfs_arg")
 	done
-	l_remote_cmd=$(zxfer_quote_token_stream "$l_remote_tokens")
-	zxfer_invoke_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd" destination
+	l_destination_zfs_remote_command=$(zxfer_quote_token_stream \
+		"$l_destination_zfs_remote_tokens")
+	zxfer_invoke_ssh_shell_command_for_host "$g_option_T_target_host" \
+		"$l_destination_zfs_remote_command" destination
 }
 
 # Purpose: Render the source ZFS command as a stable shell-safe or operator-
@@ -1228,25 +1239,30 @@ zxfer_run_destination_zfs_cmd() {
 # Usage: Called by SSH transport rendering and remote ZFS execution when
 # zxfer needs to display or transport the value without reparsing it.
 zxfer_render_source_zfs_command() {
-	l_subcommand=$1
+	l_source_render_subcommand=$1
 	shift
 
 	if [ "$g_option_O_origin_host" = "" ]; then
-		l_source_zfs_cmd=$g_cmd_zfs
+		l_source_render_zfs_command=$g_cmd_zfs
 		if [ -n "$g_LZFS" ] && [ "$g_LZFS" != "$g_cmd_zfs" ]; then
-			l_source_zfs_cmd=$g_LZFS
+			l_source_render_zfs_command=$g_LZFS
 		fi
-		zxfer_build_shell_command_from_argv "$l_source_zfs_cmd" "$l_subcommand" "$@"
+		zxfer_build_shell_command_from_argv \
+			"$l_source_render_zfs_command" "$l_source_render_subcommand" "$@"
 		return
 	fi
 
-	l_origin_zfs_cmd=${g_origin_cmd_zfs:-$g_cmd_zfs}
-	l_remote_tokens=$(printf '%s\n%s' "$l_origin_zfs_cmd" "$l_subcommand")
-	for l_arg in "$@"; do
-		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
+	l_source_render_zfs_command=${g_origin_cmd_zfs:-$g_cmd_zfs}
+	l_source_render_remote_tokens=$(printf '%s\n%s' \
+		"$l_source_render_zfs_command" "$l_source_render_subcommand")
+	for l_source_render_arg in "$@"; do
+		l_source_render_remote_tokens=$(printf '%s\n%s' \
+			"$l_source_render_remote_tokens" "$l_source_render_arg")
 	done
-	l_remote_cmd=$(zxfer_quote_token_stream "$l_remote_tokens")
-	zxfer_build_ssh_shell_command_for_host "$g_option_O_origin_host" "$l_remote_cmd"
+	l_source_render_remote_command=$(zxfer_quote_token_stream \
+		"$l_source_render_remote_tokens")
+	zxfer_build_ssh_shell_command_for_host "$g_option_O_origin_host" \
+		"$l_source_render_remote_command"
 }
 
 # Purpose: Render the destination ZFS command as a stable shell-safe or
@@ -1254,25 +1270,33 @@ zxfer_render_source_zfs_command() {
 # Usage: Called by SSH transport rendering and remote ZFS execution when
 # zxfer needs to display or transport the value without reparsing it.
 zxfer_render_destination_zfs_command() {
-	l_subcommand=$1
+	l_destination_render_subcommand=$1
 	shift
 
 	if [ "$g_option_T_target_host" = "" ]; then
-		l_target_zfs_cmd=$g_cmd_zfs
+		l_destination_render_zfs_command=$g_cmd_zfs
 		if [ -n "$g_RZFS" ] && [ "$g_RZFS" != "$g_cmd_zfs" ]; then
-			l_target_zfs_cmd=$g_RZFS
+			l_destination_render_zfs_command=$g_RZFS
 		fi
-		zxfer_build_shell_command_from_argv "$l_target_zfs_cmd" "$l_subcommand" "$@"
+		zxfer_build_shell_command_from_argv \
+			"$l_destination_render_zfs_command" \
+			"$l_destination_render_subcommand" "$@"
 		return
 	fi
 
-	l_target_zfs_cmd=${g_target_cmd_zfs:-$g_cmd_zfs}
-	l_remote_tokens=$(printf '%s\n%s' "$l_target_zfs_cmd" "$l_subcommand")
-	for l_arg in "$@"; do
-		l_remote_tokens=$(printf '%s\n%s' "$l_remote_tokens" "$l_arg")
+	l_destination_render_zfs_command=${g_target_cmd_zfs:-$g_cmd_zfs}
+	l_destination_render_remote_tokens=$(printf '%s\n%s' \
+		"$l_destination_render_zfs_command" \
+		"$l_destination_render_subcommand")
+	for l_destination_render_arg in "$@"; do
+		l_destination_render_remote_tokens=$(printf '%s\n%s' \
+			"$l_destination_render_remote_tokens" \
+			"$l_destination_render_arg")
 	done
-	l_remote_cmd=$(zxfer_quote_token_stream "$l_remote_tokens")
-	zxfer_build_ssh_shell_command_for_host "$g_option_T_target_host" "$l_remote_cmd"
+	l_destination_render_remote_command=$(zxfer_quote_token_stream \
+		"$l_destination_render_remote_tokens")
+	zxfer_build_ssh_shell_command_for_host "$g_option_T_target_host" \
+		"$l_destination_render_remote_command"
 }
 
 # Purpose: Render the ZFS command for spec as a stable shell-safe or operator-
@@ -1324,12 +1348,12 @@ zxfer_run_zfs_cmd_for_spec() {
 #
 # setup an ssh control socket for the specified role (origin or target)
 zxfer_setup_ssh_control_socket() {
-	l_host=$1
-	l_role=$2
+	l_setup_ssh_control_socket_host=$1
+	l_setup_ssh_control_socket_role=$2
 
-	[ -z "$l_host" ] && return
+	[ -z "$l_setup_ssh_control_socket_host" ] && return
 
-	case "$l_role" in
+	case "$l_setup_ssh_control_socket_role" in
 	origin)
 		if [ "$g_ssh_origin_control_socket" != "" ] &&
 			! zxfer_close_origin_ssh_control_socket; then
@@ -1347,11 +1371,11 @@ zxfer_setup_ssh_control_socket() {
 	if ! zxfer_ensure_ssh_control_socket_dir >/dev/null; then
 		zxfer_throw_error "Error creating temporary directory for ssh control socket."
 	fi
-	if ! l_control_socket=$(zxfer_get_ssh_control_socket_path_for_role "$l_role"); then
-		zxfer_throw_error "Error creating ssh control socket for $l_role host."
+	if ! l_control_socket=$(zxfer_get_ssh_control_socket_path_for_role "$l_setup_ssh_control_socket_role"); then
+		zxfer_throw_error "Error creating ssh control socket for $l_setup_ssh_control_socket_role host."
 	fi
-	if ! l_transport_tokens=$(zxfer_get_ssh_base_transport_tokens); then
-		zxfer_throw_error "$l_transport_tokens"
+	if ! l_setup_ssh_control_socket_transport_tokens=$(zxfer_get_ssh_base_transport_tokens); then
+		zxfer_throw_error "$l_setup_ssh_control_socket_transport_tokens"
 	fi
 
 	# The socket lives under the private per-run directory, so it can only
@@ -1360,8 +1384,8 @@ zxfer_setup_ssh_control_socket() {
 	# before a fresh master is opened.
 	if [ -e "$l_control_socket" ] || [ -L "$l_control_socket" ] ||
 		[ -h "$l_control_socket" ]; then
-		if zxfer_check_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
-			zxfer_set_ssh_control_socket_role_state "$l_role" "$l_control_socket"
+		if zxfer_check_ssh_control_socket_for_host "$l_setup_ssh_control_socket_host" "$l_control_socket"; then
+			zxfer_set_ssh_control_socket_role_state "$l_setup_ssh_control_socket_role" "$l_control_socket"
 			return 0
 		fi
 		case "${g_zxfer_ssh_control_socket_action_result:-}" in
@@ -1370,16 +1394,16 @@ zxfer_setup_ssh_control_socket() {
 			;;
 		*)
 			zxfer_emit_ssh_control_socket_action_failure_message \
-				"Error checking ssh control socket for $l_role host." >&2
-			zxfer_throw_error "Error creating ssh control socket for $l_role host."
+				"Error checking ssh control socket for $l_setup_ssh_control_socket_role host." >&2
+			zxfer_throw_error "Error creating ssh control socket for $l_setup_ssh_control_socket_role host."
 			;;
 		esac
 	fi
 
-	if ! zxfer_open_ssh_control_socket_for_host "$l_host" "$l_control_socket"; then
-		zxfer_throw_error "Error creating ssh control socket for $l_role host."
+	if ! zxfer_open_ssh_control_socket_for_host "$l_setup_ssh_control_socket_host" "$l_control_socket"; then
+		zxfer_throw_error "Error creating ssh control socket for $l_setup_ssh_control_socket_role host."
 	fi
-	zxfer_set_ssh_control_socket_role_state "$l_role" "$l_control_socket"
+	zxfer_set_ssh_control_socket_role_state "$l_setup_ssh_control_socket_role" "$l_control_socket"
 }
 
 # Purpose: Close one role's SSH control socket and release the related state.
@@ -1388,37 +1412,37 @@ zxfer_setup_ssh_control_socket() {
 # keeps the role state so trap cleanup reports it instead of claiming a clean
 # run.
 zxfer_close_ssh_control_socket_for_role() {
-	l_role=$1
+	l_close_ssh_control_socket_for_role_role=$1
 
-	case "$l_role" in
+	case "$l_close_ssh_control_socket_for_role_role" in
 	origin)
-		l_host=${g_option_O_origin_host:-}
+		l_close_ssh_control_socket_for_role_host=${g_option_O_origin_host:-}
 		l_control_socket=${g_ssh_origin_control_socket:-}
 		;;
 	target)
-		l_host=${g_option_T_target_host:-}
+		l_close_ssh_control_socket_for_role_host=${g_option_T_target_host:-}
 		l_control_socket=${g_ssh_target_control_socket:-}
 		;;
 	*)
 		return 1
 		;;
 	esac
-	if [ "$l_host" = "" ] || [ "$l_control_socket" = "" ]; then
+	if [ "$l_close_ssh_control_socket_for_role_host" = "" ] || [ "$l_control_socket" = "" ]; then
 		return 0
 	fi
 
-	if zxfer_run_ssh_control_socket_action_for_host "$l_host" "$l_control_socket" exit; then
-		zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+	if zxfer_run_ssh_control_socket_action_for_host "$l_close_ssh_control_socket_for_role_host" "$l_control_socket" exit; then
+		zxfer_echoV "Closing $l_close_ssh_control_socket_for_role_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
 	elif [ "${g_zxfer_ssh_control_socket_action_result:-}" = "stale" ]; then
-		zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+		zxfer_echoV "Closing $l_close_ssh_control_socket_for_role_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
 	else
-		zxfer_echoV "Closing $l_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+		zxfer_echoV "Closing $l_close_ssh_control_socket_for_role_role ssh control socket: $g_zxfer_ssh_control_socket_action_command"
 		zxfer_emit_ssh_control_socket_action_failure_message \
-			"Error closing $l_role ssh control socket." >&2
+			"Error closing $l_close_ssh_control_socket_for_role_role ssh control socket." >&2
 		return 1
 	fi
 	rm -f "$l_control_socket" 2>/dev/null || :
-	zxfer_clear_ssh_control_socket_role_state "$l_role"
+	zxfer_clear_ssh_control_socket_role_state "$l_close_ssh_control_socket_for_role_role"
 	return 0
 }
 

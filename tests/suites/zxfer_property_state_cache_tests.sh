@@ -1364,13 +1364,14 @@ test_zxfer_prefetch_recursive_normalized_properties_disables_failed_recursive_re
 		esac
 		return 1
 	}
-	zxfer_group_recursive_property_tree_by_dataset() {
+	zxfer_group_recursive_property_prefetch_trees() {
 		return 1
 	}
 	zxfer_prefetch_recursive_normalized_properties source >/dev/null 2>&1
 	group_failure_status=$?
 	unset -f zxfer_run_zfs_cmd_for_spec
-	unset -f zxfer_group_recursive_property_tree_by_dataset
+	unset -f zxfer_group_recursive_property_prefetch_trees
+	zxfer_source_runtime_modules_through "zxfer_property_reconcile.sh"
 
 	assertEquals "Recursive source property-tree prefetch should fail closed when the recursive zfs get probe fails." \
 		"1" "$read_failure_status"
@@ -1406,19 +1407,14 @@ test_zxfer_prefetch_recursive_normalized_properties_disables_failed_destination_
 		esac
 		return 1
 	}
-	group_call_count=0
-	zxfer_group_recursive_property_tree_by_dataset() {
-		group_call_count=$((group_call_count + 1))
-		if [ "$group_call_count" -eq 1 ]; then
-			printf '%s\t%s\n' "backup/dst" "compression=lz4=local"
-			return 0
-		fi
+	zxfer_group_recursive_property_prefetch_trees() {
 		return 1
 	}
 	zxfer_prefetch_recursive_normalized_properties destination >/dev/null 2>&1
 	group_failure_status=$?
 	unset -f zxfer_run_zfs_cmd_for_spec
-	unset -f zxfer_group_recursive_property_tree_by_dataset
+	unset -f zxfer_group_recursive_property_prefetch_trees
+	zxfer_source_runtime_modules_through "zxfer_property_reconcile.sh"
 
 	assertEquals "Recursive destination property-tree prefetch should fail closed when the recursive zfs get probe fails." \
 		"1" "$read_failure_status"
@@ -1519,16 +1515,11 @@ EOF
 		esac
 		return 1
 	}
-	zxfer_group_recursive_property_tree_by_dataset() {
-		printf '%s\t%s\n' "tank/src" "compression=lz4=local"
-	}
-
 	set +e
 	zxfer_prefetch_recursive_normalized_properties source >"$err_log" 2>&1
 	prefetch_status=$?
 
 	unset -f zxfer_run_zfs_cmd_for_spec
-	unset -f zxfer_group_recursive_property_tree_by_dataset
 	g_cmd_awk=$old_cmd_awk
 	zxfer_source_runtime_modules_through "zxfer_property_reconcile.sh"
 
@@ -1561,6 +1552,8 @@ test_zxfer_maybe_prefetch_recursive_normalized_properties_handles_mismatches_and
 	missing_source_status=$?
 	zxfer_maybe_prefetch_recursive_normalized_properties "backup/other" "/dest/zfs" destination >/dev/null 2>&1
 	missing_dest_status=$?
+	zxfer_maybe_prefetch_recursive_normalized_properties "tank/src" "/source/zfs" invalid-side >/dev/null 2>&1
+	invalid_side_status=$?
 
 	zxfer_prefetch_recursive_normalized_properties() {
 		return 0
@@ -1575,6 +1568,8 @@ test_zxfer_maybe_prefetch_recursive_normalized_properties_handles_mismatches_and
 		"1" "$missing_source_status"
 	assertEquals "Datasets outside the recursive destination tree should bypass destination-side property-tree prefetch." \
 		"1" "$missing_dest_status"
+	assertEquals "Unknown property lookup sides should fail closed before attempting recursive prefetch." \
+		"1" "$invalid_side_status"
 	assertEquals "A prefetch pass that does not materialize the requested dataset table row should still fall back to exact live reads." \
 		"1" "$missing_cache_status"
 }
@@ -1870,6 +1865,126 @@ test_zxfer_group_recursive_property_tree_by_dataset_preserves_line_feed_values()
 		"tank/src	user:note=line1%0Aline2=local,compression=lz4=local" "$(cat "$output_file")"
 }
 
+zxfer_property_test_run_legacy_recursive_group_merge() {
+	legacy_filter_file=$1
+	legacy_machine_file=$2
+	legacy_human_file=$3
+	legacy_output_file=$4
+	legacy_machine_grouped_file=$legacy_output_file.machine
+	legacy_human_grouped_file=$legacy_output_file.human
+
+	: >"$legacy_output_file"
+	zxfer_group_recursive_property_tree_by_dataset \
+		"$legacy_filter_file" "$legacy_machine_file" \
+		>"$legacy_machine_grouped_file" || return "$?"
+	zxfer_group_recursive_property_tree_by_dataset \
+		"$legacy_filter_file" "$legacy_human_file" \
+		>"$legacy_human_grouped_file" || return "$?"
+	"${g_cmd_awk:-awk}" -F "$(printf '\t')" \
+		"$ZXFER_MERGE_RECURSIVE_PROPERTY_TREES_AWK" \
+		"$legacy_machine_grouped_file" "$legacy_human_grouped_file" \
+		>"$legacy_output_file"
+}
+
+test_zxfer_group_and_merge_recursive_property_trees_matches_legacy_bytes() {
+	filter_file="$TEST_TMPDIR/property-merge-filter.list"
+	machine_file="$TEST_TMPDIR/property-merge-machine.tsv"
+	human_file="$TEST_TMPDIR/property-merge-human.tsv"
+	legacy_output_file="$TEST_TMPDIR/property-merge-legacy.tsv"
+	candidate_output_file="$TEST_TMPDIR/property-merge-candidate.tsv"
+
+	printf '%s\n' "tank/src" "tank/src/child" "tank/src/machine" \
+		"tank/src/human" >"$filter_file"
+	{
+		printf 'tank/src\tuser:note\tline1\nline2\tlocal\n'
+		printf 'tank/src\tuser:delimiters\ta%%,b=c;d\tlocal\n'
+		printf 'tank/src/child\tcompression\tlz4\tinherited from tank/src\n'
+		printf 'tank/src/machine\treadonly\toff\tlocal\n'
+		printf 'tank/skip\tcompression\toff\tlocal\n'
+	} >"$machine_file"
+	{
+		printf 'tank/src/child\tcompression\tlz4\tinherited from tank/src\n'
+		printf 'tank/src\tuser:note\tline1\nline2\tlocal\n'
+		printf 'tank/src\tuser:delimiters\ta%%,b=c;d\tlocal\n'
+		printf 'tank/src/human\tatime\toff\tdefault\n'
+	} >"$human_file"
+
+	zxfer_property_test_run_legacy_recursive_group_merge \
+		"$filter_file" "$machine_file" "$human_file" "$legacy_output_file"
+	legacy_status=$?
+	zxfer_group_and_merge_recursive_property_trees_by_dataset \
+		"$filter_file" "$machine_file" "$human_file" >"$candidate_output_file"
+	candidate_status=$?
+
+	assertEquals "The legacy recursive grouping pipeline should accept the characterization fixture." \
+		"0" "$legacy_status"
+	assertEquals "The one-pass recursive grouping pipeline should accept the characterization fixture." \
+		"0" "$candidate_status"
+	assertEquals "The one-pass recursive grouping pipeline must preserve exact bytes, including order, multiline values, delimiters, and one-view datasets." \
+		"$(cat "$legacy_output_file")" "$(cat "$candidate_output_file")"
+}
+
+test_zxfer_group_and_merge_recursive_property_trees_preserves_literal_backslash_paths() {
+	backslash_dir="$TEST_TMPDIR/property-merge-\\test"
+	filter_file="$backslash_dir/filter.list"
+	machine_file="$backslash_dir/machine.tsv"
+	human_file="$backslash_dir/human.tsv"
+	output_file="$backslash_dir/output.tsv"
+	mkdir -p "$backslash_dir"
+
+	printf '%s\n' "tank/src" >"$filter_file"
+	printf 'tank/src\tcompression\tlz4\tlocal\n' >"$machine_file"
+	printf 'tank/src\tatime\toff\tdefault\n' >"$human_file"
+
+	zxfer_group_and_merge_recursive_property_trees_by_dataset \
+		"$filter_file" "$machine_file" "$human_file" >"$output_file"
+	status=$?
+
+	assertEquals "One-pass property grouping should not let AWK decode backslashes in filename operands." \
+		0 "$status"
+	assertEquals "Literal backslash paths should retain the complete grouped property result." \
+		"tank/src	compression=lz4=local	atime=off=default" "$(cat "$output_file")"
+}
+
+test_zxfer_group_and_merge_recursive_property_trees_matches_legacy_fail_closed_behavior() {
+	filter_file="$TEST_TMPDIR/property-merge-invalid-filter.list"
+	valid_file="$TEST_TMPDIR/property-merge-valid.tsv"
+	invalid_file="$TEST_TMPDIR/property-merge-invalid.tsv"
+	legacy_output_file="$TEST_TMPDIR/property-merge-invalid-legacy.tsv"
+	candidate_output_file="$TEST_TMPDIR/property-merge-invalid-candidate.tsv"
+
+	printf '%s\n' "tank/src" >"$filter_file"
+	printf 'tank/src\tcompression\tlz4\tlocal\n' >"$valid_file"
+	printf 'tank/src\tcompression\tlz4\tuntrusted-source\n' >"$invalid_file"
+
+	set +e
+	zxfer_property_test_run_legacy_recursive_group_merge \
+		"$filter_file" "$invalid_file" "$valid_file" "$legacy_output_file"
+	legacy_machine_status=$?
+	zxfer_group_and_merge_recursive_property_trees_by_dataset \
+		"$filter_file" "$invalid_file" "$valid_file" >"$candidate_output_file"
+	candidate_machine_status=$?
+	legacy_machine_output=$(cat "$legacy_output_file")
+	candidate_machine_output=$(cat "$candidate_output_file")
+
+	zxfer_property_test_run_legacy_recursive_group_merge \
+		"$filter_file" "$valid_file" "$invalid_file" "$legacy_output_file"
+	legacy_human_status=$?
+	zxfer_group_and_merge_recursive_property_trees_by_dataset \
+		"$filter_file" "$valid_file" "$invalid_file" >"$candidate_output_file"
+	candidate_human_status=$?
+	set -e
+
+	assertEquals "Malformed machine views must preserve the legacy failure status." \
+		"$legacy_machine_status" "$candidate_machine_status"
+	assertEquals "Malformed machine views must not publish partial grouped output." \
+		"$legacy_machine_output" "$candidate_machine_output"
+	assertEquals "Malformed human views must preserve the legacy failure status." \
+		"$legacy_human_status" "$candidate_human_status"
+	assertEquals "Malformed human views must not publish partial grouped output." \
+		"$(cat "$legacy_output_file")" "$(cat "$candidate_output_file")"
+}
+
 test_zxfer_prefetch_recursive_normalized_properties_preserves_grouped_read_failures() {
 	g_zxfer_source_property_tree_prefetch_root="tank/src"
 	g_zxfer_source_property_tree_prefetch_zfs_cmd="/sbin/zfs"
@@ -2146,6 +2261,9 @@ zxfer_test_add_property_state_cache_tests() {
 	suite_addTest test_zxfer_capture_serialized_property_records_reports_readback_failures_in_current_shell
 	suite_addTest test_zxfer_group_recursive_property_tree_by_dataset_groups_filtered_datasets_in_order
 	suite_addTest test_zxfer_group_recursive_property_tree_by_dataset_preserves_line_feed_values
+	suite_addTest test_zxfer_group_and_merge_recursive_property_trees_matches_legacy_bytes
+	suite_addTest test_zxfer_group_and_merge_recursive_property_trees_preserves_literal_backslash_paths
+	suite_addTest test_zxfer_group_and_merge_recursive_property_trees_matches_legacy_fail_closed_behavior
 	suite_addTest test_zxfer_prefetch_recursive_normalized_properties_preserves_grouped_read_failures
 	suite_addTest test_zxfer_prefetch_recursive_normalized_properties_skips_malformed_grouped_rows
 	suite_addTest test_zxfer_property_wrapper_helpers_preserve_exact_failure_statuses

@@ -5,6 +5,8 @@
 # Records:
 #   layer MODULE RANK NAME
 #   standalone MODULE
+#   edge CALLER_MODULE CALLEE_MODULE
+#   result-consumer GLOBAL OWNER_MODULE CONSUMER_MODULE
 # Literal eval commands are inventoried separately in
 # tests/architecture_eval_policy.tsv.
 standalone	src/zxfer_cleanup_child_wrapper.sh
@@ -38,3 +40,228 @@ layer	src/zxfer_send_jobs.sh	3	domain
 layer	src/zxfer_send_receive.sh	3	domain
 layer	src/zxfer_replication.sh	4	composition
 layer	src/zxfer_session.sh	4	composition
+
+# Exact internal module edges. Additions and removals both require updating
+# this inventory so dependency spread is an explicit architecture decision.
+edge	src/zxfer_background_jobs.sh	src/zxfer_locking.sh
+edge	src/zxfer_background_jobs.sh	src/zxfer_quoting.sh
+edge	src/zxfer_background_jobs.sh	src/zxfer_reporting.sh
+edge	src/zxfer_background_jobs.sh	src/zxfer_runtime.sh
+edge	src/zxfer_backup_metadata.sh	src/zxfer_backup_storage.sh
+edge	src/zxfer_backup_metadata.sh	src/zxfer_path_security.sh
+edge	src/zxfer_backup_metadata.sh	src/zxfer_remote_hosts.sh
+edge	src/zxfer_backup_metadata.sh	src/zxfer_reporting.sh
+edge	src/zxfer_backup_metadata.sh	src/zxfer_runtime.sh
+edge	src/zxfer_backup_metadata.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_backup_storage.sh	src/zxfer_dependencies.sh
+edge	src/zxfer_backup_storage.sh	src/zxfer_path_security.sh
+edge	src/zxfer_backup_storage.sh	src/zxfer_profile.sh
+edge	src/zxfer_backup_storage.sh	src/zxfer_quoting.sh
+edge	src/zxfer_backup_storage.sh	src/zxfer_remote_hosts.sh
+edge	src/zxfer_backup_storage.sh	src/zxfer_reporting.sh
+edge	src/zxfer_backup_storage.sh	src/zxfer_runtime.sh
+edge	src/zxfer_backup_storage.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_cli.sh	src/zxfer_dependencies.sh
+edge	src/zxfer_cli.sh	src/zxfer_reporting.sh
+edge	src/zxfer_cli.sh	src/zxfer_runtime.sh
+edge	src/zxfer_cli.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_dependencies.sh	src/zxfer_quoting.sh
+edge	src/zxfer_dependencies.sh	src/zxfer_reporting.sh
+edge	src/zxfer_error_log.sh	src/zxfer_locking.sh
+edge	src/zxfer_error_log.sh	src/zxfer_path_security.sh
+edge	src/zxfer_error_log.sh	src/zxfer_reporting.sh
+edge	src/zxfer_error_log.sh	src/zxfer_runtime.sh
+edge	src/zxfer_error_log.sh	src/zxfer_secure_staging.sh
+edge	src/zxfer_exec.sh	src/zxfer_reporting.sh
+edge	src/zxfer_exec.sh	src/zxfer_runtime.sh
+edge	src/zxfer_locking.sh	src/zxfer_path_security.sh
+edge	src/zxfer_migration_services.sh	src/zxfer_quoting.sh
+edge	src/zxfer_migration_services.sh	src/zxfer_reporting.sh
+edge	src/zxfer_profile.sh	src/zxfer_reporting.sh
+edge	src/zxfer_property_policy.sh	src/zxfer_property_state.sh
+edge	src/zxfer_property_policy.sh	src/zxfer_quoting.sh
+edge	src/zxfer_property_policy.sh	src/zxfer_reporting.sh
+edge	src/zxfer_property_policy.sh	src/zxfer_runtime.sh
+edge	src/zxfer_property_policy.sh	src/zxfer_snapshot_state.sh
+edge	src/zxfer_property_policy.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_property_reconcile.sh	src/zxfer_backup_metadata.sh
+edge	src/zxfer_property_reconcile.sh	src/zxfer_profile.sh
+edge	src/zxfer_property_reconcile.sh	src/zxfer_property_policy.sh
+edge	src/zxfer_property_reconcile.sh	src/zxfer_property_state.sh
+edge	src/zxfer_property_reconcile.sh	src/zxfer_quoting.sh
+edge	src/zxfer_property_reconcile.sh	src/zxfer_reporting.sh
+edge	src/zxfer_property_reconcile.sh	src/zxfer_runtime.sh
+edge	src/zxfer_property_reconcile.sh	src/zxfer_snapshot_state.sh
+edge	src/zxfer_property_reconcile.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_property_state.sh	src/zxfer_profile.sh
+edge	src/zxfer_property_state.sh	src/zxfer_runtime.sh
+edge	src/zxfer_property_state.sh	src/zxfer_snapshot_state.sh
+edge	src/zxfer_property_state.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_remote_hosts.sh	src/zxfer_dependencies.sh
+edge	src/zxfer_remote_hosts.sh	src/zxfer_profile.sh
+edge	src/zxfer_remote_hosts.sh	src/zxfer_quoting.sh
+edge	src/zxfer_remote_hosts.sh	src/zxfer_reporting.sh
+edge	src/zxfer_remote_hosts.sh	src/zxfer_runtime.sh
+edge	src/zxfer_remote_hosts.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_remote_snapshot_discovery.sh	src/zxfer_dependencies.sh
+edge	src/zxfer_remote_snapshot_discovery.sh	src/zxfer_profile.sh
+edge	src/zxfer_remote_snapshot_discovery.sh	src/zxfer_quoting.sh
+edge	src/zxfer_remote_snapshot_discovery.sh	src/zxfer_reporting.sh
+edge	src/zxfer_remote_snapshot_discovery.sh	src/zxfer_runtime.sh
+edge	src/zxfer_remote_snapshot_discovery.sh	src/zxfer_snapshot_producers.sh
+edge	src/zxfer_remote_snapshot_discovery.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_replication.sh	src/zxfer_backup_metadata.sh
+edge	src/zxfer_replication.sh	src/zxfer_backup_storage.sh
+edge	src/zxfer_replication.sh	src/zxfer_cli.sh
+edge	src/zxfer_replication.sh	src/zxfer_migration_services.sh
+edge	src/zxfer_replication.sh	src/zxfer_operation_state.sh
+edge	src/zxfer_replication.sh	src/zxfer_property_policy.sh
+edge	src/zxfer_replication.sh	src/zxfer_property_reconcile.sh
+edge	src/zxfer_replication.sh	src/zxfer_property_state.sh
+edge	src/zxfer_replication.sh	src/zxfer_quoting.sh
+edge	src/zxfer_replication.sh	src/zxfer_reporting.sh
+edge	src/zxfer_replication.sh	src/zxfer_runtime.sh
+edge	src/zxfer_replication.sh	src/zxfer_send_jobs.sh
+edge	src/zxfer_replication.sh	src/zxfer_send_receive.sh
+edge	src/zxfer_replication.sh	src/zxfer_snapshot_discovery.sh
+edge	src/zxfer_replication.sh	src/zxfer_snapshot_reconcile.sh
+edge	src/zxfer_replication.sh	src/zxfer_snapshot_state.sh
+edge	src/zxfer_replication.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_runtime.sh	src/zxfer_locking.sh
+edge	src/zxfer_runtime.sh	src/zxfer_path_security.sh
+edge	src/zxfer_runtime.sh	src/zxfer_profile.sh
+edge	src/zxfer_runtime.sh	src/zxfer_reporting.sh
+edge	src/zxfer_secure_staging.sh	src/zxfer_path_security.sh
+edge	src/zxfer_secure_staging.sh	src/zxfer_runtime.sh
+edge	src/zxfer_send_jobs.sh	src/zxfer_background_jobs.sh
+edge	src/zxfer_send_jobs.sh	src/zxfer_exec.sh
+edge	src/zxfer_send_jobs.sh	src/zxfer_profile.sh
+edge	src/zxfer_send_jobs.sh	src/zxfer_property_state.sh
+edge	src/zxfer_send_jobs.sh	src/zxfer_quoting.sh
+edge	src/zxfer_send_jobs.sh	src/zxfer_reporting.sh
+edge	src/zxfer_send_jobs.sh	src/zxfer_runtime.sh
+edge	src/zxfer_send_jobs.sh	src/zxfer_snapshot_reconcile.sh
+edge	src/zxfer_send_jobs.sh	src/zxfer_snapshot_state.sh
+edge	src/zxfer_send_receive.sh	src/zxfer_operation_state.sh
+edge	src/zxfer_send_receive.sh	src/zxfer_profile.sh
+edge	src/zxfer_send_receive.sh	src/zxfer_property_state.sh
+edge	src/zxfer_send_receive.sh	src/zxfer_quoting.sh
+edge	src/zxfer_send_receive.sh	src/zxfer_reporting.sh
+edge	src/zxfer_send_receive.sh	src/zxfer_runtime.sh
+edge	src/zxfer_send_receive.sh	src/zxfer_send_jobs.sh
+edge	src/zxfer_send_receive.sh	src/zxfer_snapshot_reconcile.sh
+edge	src/zxfer_send_receive.sh	src/zxfer_snapshot_state.sh
+edge	src/zxfer_send_receive.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_session.sh	src/zxfer_background_jobs.sh
+edge	src/zxfer_session.sh	src/zxfer_backup_metadata.sh
+edge	src/zxfer_session.sh	src/zxfer_backup_storage.sh
+edge	src/zxfer_session.sh	src/zxfer_cli.sh
+edge	src/zxfer_session.sh	src/zxfer_dependencies.sh
+edge	src/zxfer_session.sh	src/zxfer_error_log.sh
+edge	src/zxfer_session.sh	src/zxfer_locking.sh
+edge	src/zxfer_session.sh	src/zxfer_migration_services.sh
+edge	src/zxfer_session.sh	src/zxfer_operation_state.sh
+edge	src/zxfer_session.sh	src/zxfer_profile.sh
+edge	src/zxfer_session.sh	src/zxfer_property_policy.sh
+edge	src/zxfer_session.sh	src/zxfer_property_state.sh
+edge	src/zxfer_session.sh	src/zxfer_quoting.sh
+edge	src/zxfer_session.sh	src/zxfer_remote_hosts.sh
+edge	src/zxfer_session.sh	src/zxfer_replication.sh
+edge	src/zxfer_session.sh	src/zxfer_reporting.sh
+edge	src/zxfer_session.sh	src/zxfer_runtime.sh
+edge	src/zxfer_session.sh	src/zxfer_send_jobs.sh
+edge	src/zxfer_session.sh	src/zxfer_send_receive.sh
+edge	src/zxfer_session.sh	src/zxfer_snapshot_discovery.sh
+edge	src/zxfer_session.sh	src/zxfer_snapshot_producers.sh
+edge	src/zxfer_session.sh	src/zxfer_snapshot_reconcile.sh
+edge	src/zxfer_session.sh	src/zxfer_snapshot_state.sh
+edge	src/zxfer_session.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_snapshot_discovery.sh	src/zxfer_background_jobs.sh
+edge	src/zxfer_snapshot_discovery.sh	src/zxfer_exec.sh
+edge	src/zxfer_snapshot_discovery.sh	src/zxfer_profile.sh
+edge	src/zxfer_snapshot_discovery.sh	src/zxfer_remote_hosts.sh
+edge	src/zxfer_snapshot_discovery.sh	src/zxfer_remote_snapshot_discovery.sh
+edge	src/zxfer_snapshot_discovery.sh	src/zxfer_reporting.sh
+edge	src/zxfer_snapshot_discovery.sh	src/zxfer_runtime.sh
+edge	src/zxfer_snapshot_discovery.sh	src/zxfer_snapshot_producers.sh
+edge	src/zxfer_snapshot_discovery.sh	src/zxfer_snapshot_state.sh
+edge	src/zxfer_snapshot_discovery.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_snapshot_producers.sh	src/zxfer_exec.sh
+edge	src/zxfer_snapshot_producers.sh	src/zxfer_profile.sh
+edge	src/zxfer_snapshot_producers.sh	src/zxfer_quoting.sh
+edge	src/zxfer_snapshot_producers.sh	src/zxfer_remote_hosts.sh
+edge	src/zxfer_snapshot_producers.sh	src/zxfer_reporting.sh
+edge	src/zxfer_snapshot_producers.sh	src/zxfer_runtime.sh
+edge	src/zxfer_snapshot_producers.sh	src/zxfer_snapshot_state.sh
+edge	src/zxfer_snapshot_producers.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_snapshot_reconcile.sh	src/zxfer_operation_state.sh
+edge	src/zxfer_snapshot_reconcile.sh	src/zxfer_profile.sh
+edge	src/zxfer_snapshot_reconcile.sh	src/zxfer_reporting.sh
+edge	src/zxfer_snapshot_reconcile.sh	src/zxfer_runtime.sh
+edge	src/zxfer_snapshot_reconcile.sh	src/zxfer_snapshot_state.sh
+edge	src/zxfer_snapshot_reconcile.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_snapshot_state.sh	src/zxfer_profile.sh
+edge	src/zxfer_snapshot_state.sh	src/zxfer_reporting.sh
+edge	src/zxfer_snapshot_state.sh	src/zxfer_runtime.sh
+edge	src/zxfer_snapshot_state.sh	src/zxfer_ssh_transport.sh
+edge	src/zxfer_ssh_transport.sh	src/zxfer_dependencies.sh
+edge	src/zxfer_ssh_transport.sh	src/zxfer_path_security.sh
+edge	src/zxfer_ssh_transport.sh	src/zxfer_profile.sh
+edge	src/zxfer_ssh_transport.sh	src/zxfer_quoting.sh
+edge	src/zxfer_ssh_transport.sh	src/zxfer_reporting.sh
+edge	src/zxfer_ssh_transport.sh	src/zxfer_runtime.sh
+edge	src/zxfer_ssh_transport.sh	src/zxfer_secure_staging.sh
+
+# Owner-prefixed result channels read outside their owner. These are approved
+# hot stateful return paths; additions and removals both ratchet exactly.
+result-consumer	g_zxfer_backup_file_read_result	src/zxfer_backup_storage.sh	src/zxfer_backup_metadata.sh
+result-consumer	g_zxfer_backup_local_read_failure_result	src/zxfer_backup_storage.sh	src/zxfer_backup_metadata.sh
+result-consumer	g_zxfer_backup_local_write_failure_result	src/zxfer_backup_storage.sh	src/zxfer_backup_metadata.sh
+result-consumer	g_zxfer_creation_pvs_result	src/zxfer_property_state.sh	src/zxfer_property_reconcile.sh
+result-consumer	g_zxfer_decoded_property_assignment_result	src/zxfer_property_state.sh	src/zxfer_property_reconcile.sh
+result-consumer	g_zxfer_override_pvs_result	src/zxfer_property_state.sh	src/zxfer_property_reconcile.sh
+result-consumer	g_zxfer_prepared_ssh_shell_command_result	src/zxfer_ssh_transport.sh	src/zxfer_backup_storage.sh
+result-consumer	g_zxfer_prepared_ssh_shell_command_result	src/zxfer_ssh_transport.sh	src/zxfer_send_receive.sh
+result-consumer	g_zxfer_property_reconcile_stage_file_result	src/zxfer_property_state.sh	src/zxfer_property_policy.sh
+result-consumer	g_zxfer_property_reconcile_stage_file_result	src/zxfer_property_state.sh	src/zxfer_property_reconcile.sh
+result-consumer	g_zxfer_property_stage_file_read_result	src/zxfer_property_state.sh	src/zxfer_property_policy.sh
+result-consumer	g_zxfer_property_stage_file_read_result	src/zxfer_property_state.sh	src/zxfer_property_reconcile.sh
+result-consumer	g_zxfer_remote_backup_dry_run_shell_command_result	src/zxfer_backup_storage.sh	src/zxfer_backup_metadata.sh
+result-consumer	g_zxfer_remote_backup_dry_run_shell_command_result	src/zxfer_backup_storage.sh	src/zxfer_replication.sh
+result-consumer	g_zxfer_required_property_backfill_result	src/zxfer_property_state.sh	src/zxfer_property_reconcile.sh
+result-consumer	g_zxfer_resolved_local_ssh_command_result	src/zxfer_ssh_transport.sh	src/zxfer_session.sh
+result-consumer	g_zxfer_runtime_artifact_directory_identity_result	src/zxfer_runtime.sh	src/zxfer_ssh_transport.sh
+result-consumer	g_zxfer_runtime_artifact_path_result	src/zxfer_runtime.sh	src/zxfer_backup_storage.sh
+result-consumer	g_zxfer_runtime_artifact_path_result	src/zxfer_runtime.sh	src/zxfer_remote_hosts.sh
+result-consumer	g_zxfer_runtime_artifact_path_result	src/zxfer_runtime.sh	src/zxfer_remote_snapshot_discovery.sh
+result-consumer	g_zxfer_runtime_artifact_path_result	src/zxfer_runtime.sh	src/zxfer_send_jobs.sh
+result-consumer	g_zxfer_runtime_artifact_path_result	src/zxfer_runtime.sh	src/zxfer_send_receive.sh
+result-consumer	g_zxfer_runtime_artifact_path_result	src/zxfer_runtime.sh	src/zxfer_snapshot_state.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_background_jobs.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_backup_storage.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_error_log.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_property_state.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_remote_hosts.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_replication.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_send_receive.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_snapshot_producers.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_snapshot_reconcile.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_snapshot_state.sh
+result-consumer	g_zxfer_runtime_artifact_read_result	src/zxfer_runtime.sh	src/zxfer_ssh_transport.sh
+result-consumer	g_zxfer_secure_staging_dir_result	src/zxfer_secure_staging.sh	src/zxfer_error_log.sh
+result-consumer	g_zxfer_send_receive_ran_in_background_result	src/zxfer_send_jobs.sh	src/zxfer_send_receive.sh
+result-consumer	g_zxfer_snapshot_discovery_file_read_result	src/zxfer_snapshot_producers.sh	src/zxfer_remote_snapshot_discovery.sh
+result-consumer	g_zxfer_snapshot_discovery_file_read_result	src/zxfer_snapshot_producers.sh	src/zxfer_snapshot_discovery.sh
+result-consumer	g_zxfer_snapshot_discovery_status_file_result	src/zxfer_snapshot_producers.sh	src/zxfer_snapshot_discovery.sh
+result-consumer	g_zxfer_ssh_shell_context_error_result	src/zxfer_ssh_transport.sh	src/zxfer_remote_snapshot_discovery.sh
+result-consumer	g_zxfer_temp_file_group_result	src/zxfer_runtime.sh	src/zxfer_property_state.sh
+result-consumer	g_zxfer_temp_file_group_result	src/zxfer_runtime.sh	src/zxfer_replication.sh
+result-consumer	g_zxfer_temp_file_group_result	src/zxfer_runtime.sh	src/zxfer_snapshot_discovery.sh
+result-consumer	g_zxfer_temp_file_group_result	src/zxfer_runtime.sh	src/zxfer_snapshot_producers.sh
+result-consumer	g_zxfer_temp_file_group_result	src/zxfer_runtime.sh	src/zxfer_snapshot_reconcile.sh
+result-consumer	g_zxfer_temp_file_result	src/zxfer_runtime.sh	src/zxfer_background_jobs.sh
+result-consumer	g_zxfer_temp_file_result	src/zxfer_runtime.sh	src/zxfer_property_state.sh
+result-consumer	g_zxfer_temp_file_result	src/zxfer_runtime.sh	src/zxfer_replication.sh
+result-consumer	g_zxfer_temp_file_result	src/zxfer_runtime.sh	src/zxfer_snapshot_discovery.sh
+result-consumer	g_zxfer_temp_file_result	src/zxfer_runtime.sh	src/zxfer_snapshot_producers.sh
+result-consumer	g_zxfer_temp_file_result	src/zxfer_runtime.sh	src/zxfer_ssh_transport.sh

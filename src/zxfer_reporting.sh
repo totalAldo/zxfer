@@ -41,19 +41,6 @@
 # mutates caches: none.
 # returns via stdout: escaped values and rendered failure reports.
 
-# Purpose: Check whether a string is a portable POSIX shell variable name.
-# Usage: Called immediately before the small number of intentional indirect
-# assignments so eval never receives an unvalidated assignment target.
-zxfer_shell_variable_name_is_valid() {
-	case "${1:-}" in
-	'' | [0-9]* | *[!A-Za-z0-9_]*)
-		return 1
-		;;
-	esac
-
-	return 0
-}
-
 # Purpose: Initialize the failure context defaults before later helpers depend
 # on it.
 # Usage: Called during failure reporting, profiling, and verbose operator
@@ -477,14 +464,14 @@ zxfer_render_failure_report() {
 # Create a temporary file and return the filename.
 zxfer_throw_error() {
 	l_msg=$1
-	l_exit_status=${2:-1} # global used by zxfer_beep
+	l_throw_error_exit_status=${2:-1} # global used by zxfer_beep
 
 	zxfer_init_failure_context_defaults
 	[ -n "$g_zxfer_failure_class" ] || g_zxfer_failure_class=runtime
 	[ -n "$l_msg" ] && g_zxfer_failure_message=$l_msg
 	zxfer_warn_stderr "$l_msg"
-	zxfer_beep "$l_exit_status"
-	exit "$l_exit_status"
+	zxfer_beep "$l_throw_error_exit_status"
+	exit "$l_throw_error_exit_status"
 }
 
 # Purpose: Raise the usage error through zxfer's structured failure reporting
@@ -494,7 +481,7 @@ zxfer_throw_error() {
 # reporting contract.
 zxfer_throw_usage_error() {
 	l_msg=$1
-	l_exit_status=${2:-2} # global used by zxfer_beep
+	l_throw_usage_error_exit_status=${2:-2} # global used by zxfer_beep
 	zxfer_init_failure_context_defaults
 	g_zxfer_failure_class=usage
 	[ -n "$l_msg" ] && g_zxfer_failure_message=$l_msg
@@ -502,8 +489,8 @@ zxfer_throw_usage_error() {
 		zxfer_warn_stderr "Error: $l_msg"
 	fi
 	zxfer_print_usage_to_stderr
-	zxfer_beep "$l_exit_status"
-	exit "$l_exit_status"
+	zxfer_beep "$l_throw_usage_error_exit_status"
+	exit "$l_throw_usage_error_exit_status"
 }
 
 # Purpose: Raise the error with usage through zxfer's structured failure
@@ -513,7 +500,7 @@ zxfer_throw_usage_error() {
 # reporting contract.
 zxfer_throw_error_with_usage() {
 	l_msg=$1
-	l_exit_status=${2:-1}
+	l_throw_error_with_usage_exit_status=${2:-1}
 
 	zxfer_init_failure_context_defaults
 	[ -n "$g_zxfer_failure_class" ] || g_zxfer_failure_class=runtime
@@ -522,8 +509,8 @@ zxfer_throw_error_with_usage() {
 		zxfer_warn_stderr "Error: $l_msg"
 	fi
 	zxfer_print_usage_to_stderr
-	zxfer_beep "$l_exit_status"
-	exit "$l_exit_status"
+	zxfer_beep "$l_throw_error_with_usage_exit_status"
+	exit "$l_throw_error_with_usage_exit_status"
 }
 
 # Purpose: Emit normal verbose output only when `-v` is active.

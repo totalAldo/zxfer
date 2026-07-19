@@ -83,6 +83,26 @@ test_zxfer_get_path_owner_uid_preserves_caller_ifs_and_globbing_state() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "unset_globbing=enabled"
 }
 
+test_zxfer_get_path_owner_uid_fails_when_all_metadata_probes_fail() {
+	owner_path="$TEST_TMPDIR/path-owner-unavailable"
+	: >"$owner_path"
+
+	zxfer_test_capture_subshell '
+		stat() {
+			return 1
+		}
+		ls() {
+			return 1
+		}
+		zxfer_get_path_owner_uid "$TEST_TMPDIR/path-owner-unavailable"
+	'
+
+	assertEquals "Owner lookup must fail closed when neither stat nor ls can provide trusted metadata." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Failed owner lookup must not publish a partial UID." \
+		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
 test_zxfer_get_path_device_inode_parses_leading_whitespace_ls_fallback_portably() {
 	identity_path="$TEST_TMPDIR/path-identity-state"
 	mkdir "$identity_path"

@@ -371,16 +371,16 @@ zxfer_parse_owned_lock_metadata_file() {
 # 2 = corrupt or missing metadata (including pre-V2 metadata formats)
 zxfer_load_owned_lock_metadata_from_dir() {
 	l_lock_dir=$1
-	l_metadata_path=$(zxfer_get_owned_lock_metadata_path "$l_lock_dir")
+	l_load_owned_lock_metadata_from_dir_metadata_path=$(zxfer_get_owned_lock_metadata_path "$l_lock_dir")
 
 	zxfer_reset_owned_lock_metadata_result
 
 	zxfer_validate_owned_lock_container_dir "$l_lock_dir" || return 1
-	if [ ! -e "$l_metadata_path" ]; then
+	if [ ! -e "$l_load_owned_lock_metadata_from_dir_metadata_path" ]; then
 		return 2
 	fi
-	zxfer_validate_owned_lock_metadata_file "$l_metadata_path" || return 1
-	zxfer_parse_owned_lock_metadata_file "$l_metadata_path" || return 2
+	zxfer_validate_owned_lock_metadata_file "$l_load_owned_lock_metadata_from_dir_metadata_path" || return 1
+	zxfer_parse_owned_lock_metadata_file "$l_load_owned_lock_metadata_from_dir_metadata_path" || return 2
 	return 0
 }
 
@@ -528,21 +528,21 @@ zxfer_cleanup_owned_lock_dir() {
 # Usage: zxfer_create_owned_lock_dir <dir> [kind] [purpose] -- the trailing
 # labels are accepted for caller compatibility and ignored.
 zxfer_create_owned_lock_dir() {
-	l_lock_dir=$1
+	l_create_owned_lock_dir_lock_dir=$1
 
-	[ -n "$l_lock_dir" ] || return 1
-	mkdir -m 700 "$l_lock_dir" 2>/dev/null || return 1
+	[ -n "$l_create_owned_lock_dir_lock_dir" ] || return 1
+	mkdir -m 700 "$l_create_owned_lock_dir_lock_dir" 2>/dev/null || return 1
 
-	if ! zxfer_validate_owned_lock_container_dir "$l_lock_dir"; then
-		zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
+	if ! zxfer_validate_owned_lock_container_dir "$l_create_owned_lock_dir_lock_dir"; then
+		zxfer_cleanup_owned_lock_dir "$l_create_owned_lock_dir_lock_dir" >/dev/null 2>&1 || :
 		return 1
 	fi
-	if ! zxfer_write_owned_lock_metadata_file "$l_lock_dir"; then
-		zxfer_cleanup_owned_lock_dir "$l_lock_dir" >/dev/null 2>&1 || :
+	if ! zxfer_write_owned_lock_metadata_file "$l_create_owned_lock_dir_lock_dir"; then
+		zxfer_cleanup_owned_lock_dir "$l_create_owned_lock_dir_lock_dir" >/dev/null 2>&1 || :
 		return 1
 	fi
 
-	printf '%s\n' "$l_lock_dir"
+	printf '%s\n' "$l_create_owned_lock_dir_lock_dir"
 	return 0
 }
 
@@ -556,12 +556,12 @@ zxfer_create_owned_lock_dir() {
 # 1 = hard failure
 # 2 = entry is still busy or not yet reapable under the caller policy
 zxfer_try_reap_stale_owned_lock_dir() {
-	l_lock_dir=$1
+	l_try_reap_stale_owned_lock_dir_lock_dir=$1
 	l_allow_corrupt_reap=${2:-0}
 	l_reap_owner_pid=""
 	l_reap_owner_start_token=""
 
-	zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir"
+	zxfer_load_owned_lock_metadata_from_dir "$l_try_reap_stale_owned_lock_dir_lock_dir"
 	l_load_status=$?
 	case "$l_load_status" in
 	0)
@@ -597,7 +597,7 @@ zxfer_try_reap_stale_owned_lock_dir() {
 	esac
 
 	zxfer_cleanup_owned_lock_dir \
-		"$l_lock_dir" "$l_reap_owner_pid" "$l_reap_owner_start_token" || return 1
+		"$l_try_reap_stale_owned_lock_dir_lock_dir" "$l_reap_owner_pid" "$l_reap_owner_start_token" || return 1
 	return 0
 }
 
@@ -605,9 +605,9 @@ zxfer_try_reap_stale_owned_lock_dir() {
 # directory (pid match AND start-token match).
 # Usage: Called by the checked release path so only the owner ever releases.
 zxfer_current_process_owns_owned_lock_dir() {
-	l_lock_dir=$1
+	l_current_process_owns_owned_lock_dir_lock_dir=$1
 
-	zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir" || return 1
+	zxfer_load_owned_lock_metadata_from_dir "$l_current_process_owns_owned_lock_dir_lock_dir" || return 1
 	[ "$g_zxfer_owned_lock_pid_result" = "$$" ] || return 1
 	# Plain call (no command substitution) so the first ps capture memoizes in
 	# this shell instead of a throwaway subshell.
@@ -620,14 +620,14 @@ zxfer_current_process_owns_owned_lock_dir() {
 # Usage: zxfer_release_owned_lock_dir <dir> [kind] [purpose] -- the trailing
 # labels are accepted for caller compatibility and ignored.
 zxfer_release_owned_lock_dir() {
-	l_lock_dir=$1
+	l_release_owned_lock_dir_lock_dir=$1
 
-	[ -n "$l_lock_dir" ] || return 0
-	if [ ! -e "$l_lock_dir" ] && [ ! -L "$l_lock_dir" ] && [ ! -h "$l_lock_dir" ]; then
+	[ -n "$l_release_owned_lock_dir_lock_dir" ] || return 0
+	if [ ! -e "$l_release_owned_lock_dir_lock_dir" ] && [ ! -L "$l_release_owned_lock_dir_lock_dir" ] && [ ! -h "$l_release_owned_lock_dir_lock_dir" ]; then
 		return 0
 	fi
-	zxfer_current_process_owns_owned_lock_dir "$l_lock_dir" || return 1
+	zxfer_current_process_owns_owned_lock_dir "$l_release_owned_lock_dir_lock_dir" || return 1
 	zxfer_cleanup_owned_lock_dir \
-		"$l_lock_dir" "$$" "$g_zxfer_own_process_start_token" || return 1
+		"$l_release_owned_lock_dir_lock_dir" "$$" "$g_zxfer_own_process_start_token" || return 1
 	return 0
 }

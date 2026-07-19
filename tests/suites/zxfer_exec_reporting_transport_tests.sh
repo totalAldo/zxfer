@@ -319,9 +319,9 @@ test_trap_exit_emits_failure_report_once() {
 			g_zxfer_failure_class="runtime"
 			g_zxfer_failure_stage="unit"
 			g_zxfer_failure_message="trap failure"
-			g_delete_source_tmp_file=""
-			g_delete_dest_tmp_file=""
-			g_delete_snapshots_to_delete_tmp_file=""
+			g_zxfer_snapshot_delete_source_identities_file=""
+			g_zxfer_snapshot_delete_destination_identities_file=""
+			g_zxfer_snapshot_delete_difference_file=""
 			g_services_need_relaunch=0
 			false
 			zxfer_trap_exit
@@ -363,9 +363,9 @@ test_trap_exit_emits_profile_summary_once_in_very_verbose_mode() {
 			g_zxfer_profile_bucket_destination_inspection=9
 			g_zxfer_profile_bucket_property_reconciliation=10
 			g_zxfer_profile_bucket_send_receive_setup=11
-			g_delete_source_tmp_file=""
-			g_delete_dest_tmp_file=""
-			g_delete_snapshots_to_delete_tmp_file=""
+			g_zxfer_snapshot_delete_source_identities_file=""
+			g_zxfer_snapshot_delete_destination_identities_file=""
+			g_zxfer_snapshot_delete_difference_file=""
 			g_services_need_relaunch=0
 			zxfer_close_all_ssh_control_sockets() {
 				:
@@ -416,17 +416,17 @@ test_zxfer_profile_emit_summary_returns_without_output_when_already_emitted() {
 test_zxfer_profile_increment_counter_normalizes_blank_and_invalid_inputs_in_current_shell() {
 	g_option_V_very_verbose=1
 	g_zxfer_profile_has_data=0
-	g_zxfer_profile_test_counter="bogus"
+	g_zxfer_profile_runtime_cache_object_writes="bogus"
 
 	zxfer_profile_increment_counter ""
 	assertEquals "Blank profile counter names should be ignored without marking profile data present." \
 		0 "$g_zxfer_profile_has_data"
 
-	zxfer_profile_increment_counter g_zxfer_profile_test_counter "bogus"
+	zxfer_profile_increment_counter g_zxfer_profile_runtime_cache_object_writes "bogus"
 
 	assertEquals "Profile counter updates should mark that profile data exists." 1 "$g_zxfer_profile_has_data"
 	assertEquals "Invalid increment amounts and counter values should be normalized before incrementing." \
-		1 "$g_zxfer_profile_test_counter"
+		1 "$g_zxfer_profile_runtime_cache_object_writes"
 }
 
 test_zxfer_profile_now_ms_falls_back_to_second_resolution_when_millisecond_format_is_unavailable() {
@@ -453,14 +453,14 @@ test_zxfer_profile_now_ms_falls_back_to_second_resolution_when_millisecond_forma
 test_zxfer_profile_add_elapsed_ms_accumulates_only_valid_positive_durations_in_current_shell() {
 	g_option_V_very_verbose=1
 	g_zxfer_profile_has_data=0
-	g_zxfer_profile_test_elapsed_ms=5
+	g_zxfer_profile_snapshot_diff_sort_ms=5
 
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_test_elapsed_ms 10 25
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_test_elapsed_ms bogus 30
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_test_elapsed_ms 40 35
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms 10 25
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms bogus 30
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms 40 35
 
 	assertEquals "Elapsed stage timings should accumulate onto existing millisecond totals." \
-		20 "$g_zxfer_profile_test_elapsed_ms"
+		20 "$g_zxfer_profile_snapshot_diff_sort_ms"
 	assertEquals "Elapsed stage timings should mark that profiling data exists." \
 		1 "$g_zxfer_profile_has_data"
 }
@@ -804,9 +804,9 @@ test_trap_exit_preserves_failure_status_when_error_log_warning_fails() {
 			g_zxfer_failure_class="runtime"
 			g_zxfer_failure_stage="unit"
 			g_zxfer_failure_message="trap failure"
-			g_delete_source_tmp_file=""
-			g_delete_dest_tmp_file=""
-			g_delete_snapshots_to_delete_tmp_file=""
+			g_zxfer_snapshot_delete_source_identities_file=""
+			g_zxfer_snapshot_delete_destination_identities_file=""
+			g_zxfer_snapshot_delete_difference_file=""
 			g_services_need_relaunch=0
 			false
 			zxfer_trap_exit

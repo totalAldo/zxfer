@@ -228,15 +228,15 @@ zxfer_quote_cli_tokens() {
 		return
 	fi
 
-	if ! l_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
-		printf '%s\n' "$l_tokens"
+	if ! l_quote_cli_tokens_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
+		printf '%s\n' "$l_quote_cli_tokens_tokens"
 		return 1
 	fi
-	if [ "$l_tokens" = "" ]; then
+	if [ "$l_quote_cli_tokens_tokens" = "" ]; then
 		return
 	fi
 
-	zxfer_quote_token_stream "$l_tokens"
+	zxfer_quote_token_stream "$l_quote_cli_tokens_tokens"
 }
 
 # Purpose: Strip trailing slashes without changing all-slash inputs.

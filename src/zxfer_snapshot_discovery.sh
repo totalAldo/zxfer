@@ -58,6 +58,10 @@ zxfer_reset_full_snapshot_discovery_operation_state() {
 	g_zxfer_full_destination_snapshot_sorted_file=""
 	g_zxfer_full_destination_snapshot_error_file=""
 	g_zxfer_full_destination_inventory_attempted=0
+	g_zxfer_full_remote_destination_inventory_stage_files=""
+	g_zxfer_full_remote_destination_list_file=""
+	g_zxfer_full_remote_destination_list_error_file=""
+	g_zxfer_full_remote_destination_failure_error_file=""
 }
 
 # Purpose: Reset the owned scratch for one fast recursive no-op proof attempt.
@@ -152,24 +156,6 @@ zxfer_publish_recursive_dataset_list_from_snapshot_discovery_read_result() {
 	done <<EOF
 $g_zxfer_snapshot_discovery_file_read_result
 EOF
-}
-
-# Purpose: Decide whether recursive discovery may use the identity-aware
-# no-op proof before the full creation-order source listing. Local and
-# remote-origin (-O) sources are both eligible; -T target-host runs are not.
-# Usage: Called by snapshot discovery before launching the heavier source
-# discovery path.
-zxfer_fast_recursive_noop_discovery_is_eligible() {
-	[ "${g_option_T_target_host:-}" = "" ] || return 1
-	[ "${g_option_R_recursive:-}" != "" ] || return 1
-	[ "${g_option_s_make_snapshot:-0}" -eq 0 ] || return 1
-	[ "${g_option_m_migrate:-0}" -eq 0 ] || return 1
-	[ "${g_option_P_transfer_property:-0}" -eq 0 ] || return 1
-	[ -z "${g_option_o_override_property:-}" ] || return 1
-	[ "${g_option_e_restore_property_mode:-0}" -eq 0 ] || return 1
-	[ "${g_option_k_backup_property_mode:-0}" -eq 0 ] || return 1
-
-	return 0
 }
 
 # Purpose: Collect and publish destination dataset inventory through the local
@@ -358,13 +344,13 @@ zxfer_reverse_plain_file_lines_with_sort() {
 # Usage: Called during source and destination snapshot discovery when
 # comparison or replay logic needs the same data in the opposite order.
 zxfer_reverse_file_lines() {
-	l_input_file=$1
+	l_reverse_file_lines_input_file=$1
 
-	if zxfer_should_use_linear_reverse_for_file "$l_input_file"; then
+	if zxfer_should_use_linear_reverse_for_file "$l_reverse_file_lines_input_file"; then
 		# shellcheck disable=SC2016  # awk program should see literal $0/NR.
-		"${g_cmd_awk:-awk}" '{ l_lines[NR] = $0 } END { for (l_i = NR; l_i >= 1; l_i--) print l_lines[l_i] }' "$l_input_file"
+		"${g_cmd_awk:-awk}" '{ l_lines[NR] = $0 } END { for (l_i = NR; l_i >= 1; l_i--) print l_lines[l_i] }' "$l_reverse_file_lines_input_file"
 	else
-		zxfer_reverse_plain_file_lines_with_sort "$l_input_file"
+		zxfer_reverse_plain_file_lines_with_sort "$l_reverse_file_lines_input_file"
 	fi
 }
 
@@ -412,23 +398,23 @@ zxfer_capture_recursive_dataset_list_from_snapshot_file() {
 	[ -f "$l_snapshot_records_file" ] || return 0
 
 	zxfer_get_temp_file >/dev/null || return "$?"
-	l_dataset_lines_file=$g_zxfer_temp_file_result
+	l_capture_recursive_dataset_list_from_snapshot_file_dataset_lines_file=$g_zxfer_temp_file_result
 
 	# Stage the dataset name (everything before @) of every snapshot record.
 	# shellcheck disable=SC2016  # awk script should see literal $1.
-	"$g_cmd_awk" -F@ '{print $1}' "$l_snapshot_records_file" >"$l_dataset_lines_file" || {
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_dataset_lines_file"
-		return "$l_status"
+	"$g_cmd_awk" -F@ '{print $1}' "$l_snapshot_records_file" >"$l_capture_recursive_dataset_list_from_snapshot_file_dataset_lines_file" || {
+		l_capture_recursive_dataset_list_from_snapshot_file_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_capture_recursive_dataset_list_from_snapshot_file_dataset_lines_file"
+		return "$l_capture_recursive_dataset_list_from_snapshot_file_status"
 	}
 
-	zxfer_capture_recursive_dataset_list_from_lines_file "$l_dataset_lines_file" || {
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_path "$l_dataset_lines_file"
-		return "$l_status"
+	zxfer_capture_recursive_dataset_list_from_lines_file "$l_capture_recursive_dataset_list_from_snapshot_file_dataset_lines_file" || {
+		l_capture_recursive_dataset_list_from_snapshot_file_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_capture_recursive_dataset_list_from_snapshot_file_dataset_lines_file"
+		return "$l_capture_recursive_dataset_list_from_snapshot_file_status"
 	}
 
-	zxfer_cleanup_runtime_artifact_path "$l_dataset_lines_file"
+	zxfer_cleanup_runtime_artifact_path "$l_capture_recursive_dataset_list_from_snapshot_file_dataset_lines_file"
 	return 0
 }
 
@@ -1147,7 +1133,7 @@ zxfer_publish_fast_recursive_noop_discovery() {
 # Usage: Called by zxfer_get_zfs_list; returns 0 when no-op was proven and the
 # caller can return, returns 1 when the normal discovery path should continue.
 zxfer_try_fast_recursive_noop_discovery() {
-	zxfer_fast_recursive_noop_discovery_is_eligible || return 1
+	zxfer_fast_recursive_noop_options_are_eligible || return 1
 
 	g_source_snapshot_fast_noop_attempted=1
 	zxfer_allocate_fast_recursive_noop_discovery_stages || return "$?"
@@ -1255,118 +1241,235 @@ zxfer_collect_full_destination_snapshot_discovery() {
 	return 0
 }
 
-# Purpose: Collect the remote destination inventory and snapshot stream.
-# Usage: Called only by full destination discovery for a configured target
-# host, keeping remote batch parsing separate from local discovery flow.
-# Returns: Zero with normalized destination files, otherwise the original status.
-zxfer_collect_full_remote_destination_snapshot_discovery() {
-	l_full_remote_destination_dataset=$1
+# Purpose: Clear the caller-owned inventory staging for one remote batch.
+# Usage: Normal completion and every post-allocation failure share this owner
+# operation so the contained transport workspace remains separately owned.
+zxfer_cleanup_full_remote_destination_inventory_stages() {
+	l_full_remote_inventory_cleanup_paths=${g_zxfer_full_remote_destination_inventory_stage_files:-}
+	if [ -n "$l_full_remote_inventory_cleanup_paths" ]; then
+		zxfer_cleanup_runtime_artifact_path_list \
+			"$l_full_remote_inventory_cleanup_paths" >/dev/null 2>&1 || :
+	fi
+	g_zxfer_full_remote_destination_inventory_stage_files=""
+	g_zxfer_full_remote_destination_list_file=""
+	g_zxfer_full_remote_destination_list_error_file=""
+}
 
-	zxfer_create_temp_file_group 2 >/dev/null || {
-		l_full_remote_destination_status=$?
-		zxfer_cleanup_runtime_artifact_paths \
-			"$g_zxfer_full_source_snapshot_file" \
-			"$g_zxfer_full_source_snapshot_error_file" \
-			"$g_zxfer_full_destination_snapshot_file" \
-			"$g_zxfer_full_destination_snapshot_sorted_file"
-		zxfer_cleanup_snapshot_record_cache_files
-		return "$l_full_remote_destination_status"
-	}
-	l_full_remote_destination_inventory_stage_files=$g_zxfer_temp_file_group_result
+# Purpose: Clean all full-discovery state after a remote destination failure.
+# Usage: Called only after preserving the meaningful lower-level status or
+# staged stderr text needed by the failure reporter.
+zxfer_cleanup_failed_full_remote_destination_snapshot_discovery() {
+	zxfer_cleanup_full_remote_destination_inventory_stages
+	zxfer_cleanup_runtime_artifact_paths \
+		"$g_zxfer_full_source_snapshot_file" \
+		"$g_zxfer_full_source_snapshot_error_file" \
+		"$g_zxfer_full_destination_snapshot_file" \
+		"$g_zxfer_full_destination_snapshot_sorted_file" \
+		"${g_zxfer_full_destination_snapshot_error_file:-}" \
+		"${g_zxfer_full_remote_destination_failure_error_file:-}" \
+		>/dev/null 2>&1 || :
+	g_zxfer_full_destination_snapshot_error_file=""
+	g_zxfer_full_remote_destination_failure_error_file=""
+	zxfer_cleanup_snapshot_record_cache_files
+}
+
+# Purpose: Allocate caller-owned inventory stages for one remote destination.
+# Usage: Runs before command rendering, preserving the historical allocation,
+# verbose-rendering, and snapshot-stderr allocation order.
+zxfer_allocate_full_remote_destination_inventory_stages() {
+	zxfer_create_temp_file_group 2 >/dev/null || return "$?"
+	g_zxfer_full_remote_destination_inventory_stage_files=$g_zxfer_temp_file_group_result
 	{
-		IFS= read -r l_full_remote_destination_list_file
-		IFS= read -r l_full_remote_destination_list_error_file
+		IFS= read -r g_zxfer_full_remote_destination_list_file
+		IFS= read -r g_zxfer_full_remote_destination_list_error_file
 	} <<-EOF
-		$l_full_remote_destination_inventory_stage_files
+		$g_zxfer_full_remote_destination_inventory_stage_files
 	EOF
 
+	return 0
+}
+
+# Purpose: Allocate the fourth caller-owned remote-batch output stage.
+# Usage: Runs after command rendering, exactly where the former collector
+# allocated destination snapshot stderr.
+zxfer_allocate_full_remote_destination_snapshot_error_stage() {
+	g_zxfer_full_destination_snapshot_error_file=""
+	zxfer_get_temp_file >/dev/null || return "$?"
+	g_zxfer_full_destination_snapshot_error_file=$g_zxfer_temp_file_result
+}
+
+# Purpose: Preserve the operator-visible command rendering for remote inventory.
+# Usage: Runs after stage allocation and before the one SSH batch, matching the
+# prior verbose output and last-command ordering.
+zxfer_render_full_remote_destination_inventory_command() {
 	if zxfer_command_display_render_enabled; then
-		l_full_remote_destination_command=$(zxfer_render_destination_zfs_command \
+		l_full_remote_rendered_command=$(zxfer_render_destination_zfs_command \
 			list -t filesystem,volume -Hr -o name "$g_destination")
-		zxfer_echoV "Running command: $l_full_remote_destination_command"
-		zxfer_record_last_command_string "$l_full_remote_destination_command"
+		zxfer_echoV "Running command: $l_full_remote_rendered_command"
+		zxfer_record_last_command_string "$l_full_remote_rendered_command"
 	else
 		zxfer_record_last_command_opaque
 	fi
+}
 
-	g_zxfer_full_destination_snapshot_error_file=""
-	zxfer_get_temp_file >/dev/null || {
-		l_full_remote_destination_status=$?
-		zxfer_cleanup_runtime_artifact_path_list \
-			"$l_full_remote_destination_inventory_stage_files"
-		zxfer_cleanup_runtime_artifact_paths \
-			"$g_zxfer_full_source_snapshot_file" \
-			"$g_zxfer_full_source_snapshot_error_file" \
-			"$g_zxfer_full_destination_snapshot_file" \
-			"$g_zxfer_full_destination_snapshot_sorted_file"
-		zxfer_cleanup_snapshot_record_cache_files
-		return "$l_full_remote_destination_status"
-	}
-	g_zxfer_full_destination_snapshot_error_file=$g_zxfer_temp_file_result
+# Purpose: Stage a remote-batch failure diagnostic without modifying outputs.
+# Usage: The extra file exists only on failure; a validated SSH diagnostic is
+# copied exactly, while malformed protocol failures use an empty stage.
+zxfer_stage_full_remote_destination_failure_error() {
+	g_zxfer_full_remote_destination_failure_error_file=""
+	zxfer_get_temp_file >/dev/null || return "$?"
+	g_zxfer_full_remote_destination_failure_error_file=$g_zxfer_temp_file_result
+	if zxfer_remote_destination_discovery_failure_is_transport; then
+		zxfer_get_remote_destination_discovery_transport_stderr \
+			>"$g_zxfer_full_remote_destination_failure_error_file" || return "$?"
+	fi
+}
 
-	l_full_remote_destination_inventory_status=0
+# Purpose: Report a remote-batch failure when its diagnostic cannot be staged.
+# Usage: Called only after preserving the meaningful transport or protocol
+# status. Cleanup precedes reporting because the production reporter exits.
+zxfer_report_unstaged_full_remote_destination_failure() {
+	l_full_remote_unstaged_status=$1
+	l_full_remote_unstaged_error=""
+
+	if zxfer_remote_destination_discovery_failure_is_transport; then
+		l_full_remote_unstaged_error=$(zxfer_get_remote_destination_discovery_transport_stderr)
+		l_full_remote_unstaged_error=$(zxfer_limit_snapshot_discovery_capture_lines \
+			"$l_full_remote_unstaged_error" 5)
+	fi
+	zxfer_cleanup_failed_full_remote_destination_snapshot_discovery
+	if [ -n "$l_full_remote_unstaged_error" ]; then
+		zxfer_throw_error "Failed to retrieve list of datasets from the destination: $l_full_remote_unstaged_error" \
+			"$l_full_remote_unstaged_status"
+	else
+		zxfer_throw_error "Failed to retrieve list of datasets from the destination" \
+			"$l_full_remote_unstaged_status"
+	fi
+	return "$l_full_remote_unstaged_status"
+}
+
+# Purpose: Run one remote batch and publish its dataset-inventory result.
+# Usage: A failed batch gets a separate diagnostic stage so all four transaction
+# outputs remain either the old generation or the complete new generation.
+zxfer_run_and_publish_full_remote_destination_discovery_batch() {
+	l_full_remote_batch_dataset=$1
+	l_full_remote_batch_status=0
+	l_full_remote_batch_error_file=$g_zxfer_full_remote_destination_list_error_file
+
 	zxfer_run_remote_destination_discovery_batch_to_files \
-		"$l_full_remote_destination_dataset" \
-		"$l_full_remote_destination_list_file" \
-		"$l_full_remote_destination_list_error_file" \
+		"$l_full_remote_batch_dataset" \
+		"$g_zxfer_full_remote_destination_list_file" \
+		"$g_zxfer_full_remote_destination_list_error_file" \
 		"$g_zxfer_full_destination_snapshot_file" \
 		"$g_zxfer_full_destination_snapshot_error_file" ||
-		l_full_remote_destination_inventory_status=$?
-	if [ "$l_full_remote_destination_inventory_status" -eq 0 ]; then
-		l_full_remote_destination_inventory_status=$g_zxfer_destination_discovery_batch_inventory_status
+		l_full_remote_batch_status=$?
+	if [ "$l_full_remote_batch_status" -eq 0 ]; then
+		l_full_remote_batch_status=$g_zxfer_destination_discovery_batch_inventory_status
+	else
+		zxfer_stage_full_remote_destination_failure_error
+		l_full_remote_failure_stage_status=$?
+		if [ "$l_full_remote_failure_stage_status" -ne 0 ]; then
+			zxfer_report_unstaged_full_remote_destination_failure \
+				"$l_full_remote_batch_status"
+			return "$l_full_remote_batch_status"
+		fi
+		l_full_remote_batch_error_file=$g_zxfer_full_remote_destination_failure_error_file
 	fi
+
 	zxfer_publish_destination_dataset_inventory_from_stage \
-		"$l_full_remote_destination_list_file" \
-		"$l_full_remote_destination_list_error_file" \
-		"$l_full_remote_destination_inventory_status" \
+		"$g_zxfer_full_remote_destination_list_file" \
+		"$l_full_remote_batch_error_file" \
+		"$l_full_remote_batch_status" \
 		"${g_zxfer_destination_discovery_batch_pool_status:-}"
 	g_zxfer_full_destination_inventory_attempted=1
+}
 
-	if [ "${g_zxfer_destination_discovery_batch_snapshot_status:-0}" -ne 0 ]; then
-		l_full_remote_destination_stderr_read_status=0
-		zxfer_read_snapshot_discovery_capture_file \
-			"$g_zxfer_full_destination_snapshot_error_file" ||
-			l_full_remote_destination_stderr_read_status=$?
-		l_full_remote_destination_stderr=$g_zxfer_snapshot_discovery_file_read_result
-		zxfer_cleanup_runtime_artifact_path_list \
-			"$l_full_remote_destination_inventory_stage_files"
-		zxfer_cleanup_runtime_artifact_paths \
-			"$g_zxfer_full_source_snapshot_file" \
-			"$g_zxfer_full_source_snapshot_error_file" \
-			"$g_zxfer_full_destination_snapshot_file" \
-			"$g_zxfer_full_destination_snapshot_sorted_file" \
-			"$g_zxfer_full_destination_snapshot_error_file"
-		zxfer_cleanup_snapshot_record_cache_files
-		if [ "$l_full_remote_destination_stderr_read_status" -ne 0 ]; then
-			zxfer_throw_error "Failed to read staged destination snapshot stderr." \
-				"$l_full_remote_destination_stderr_read_status"
-		fi
-		if [ "$l_full_remote_destination_stderr" != "" ]; then
-			zxfer_warn_stderr "$l_full_remote_destination_stderr"
-		fi
-		zxfer_throw_error "Failed to retrieve snapshot list from the destination." \
-			"$g_zxfer_destination_discovery_batch_snapshot_status"
+# Purpose: Report a target-side snapshot-list failure after checked readback.
+# Usage: Called after inventory publication; cleanup precedes either exact legacy
+# error so the full run-root trap is only the failure fallback.
+zxfer_report_full_remote_destination_snapshot_failure() {
+	[ "${g_zxfer_destination_discovery_batch_snapshot_status:-0}" -ne 0 ] || return 0
+
+	l_full_remote_snapshot_failure_read_status=0
+	zxfer_read_snapshot_discovery_capture_file \
+		"$g_zxfer_full_destination_snapshot_error_file" ||
+		l_full_remote_snapshot_failure_read_status=$?
+	l_full_remote_snapshot_failure_stderr=$g_zxfer_snapshot_discovery_file_read_result
+	l_full_remote_snapshot_failure_status=$g_zxfer_destination_discovery_batch_snapshot_status
+	zxfer_cleanup_failed_full_remote_destination_snapshot_discovery
+	if [ "$l_full_remote_snapshot_failure_read_status" -ne 0 ]; then
+		zxfer_throw_error "Failed to read staged destination snapshot stderr." \
+			"$l_full_remote_snapshot_failure_read_status"
+		return "$l_full_remote_snapshot_failure_read_status"
 	fi
+	if [ -n "$l_full_remote_snapshot_failure_stderr" ]; then
+		zxfer_warn_stderr "$l_full_remote_snapshot_failure_stderr"
+	fi
+	zxfer_throw_error "Failed to retrieve snapshot list from the destination." \
+		"$l_full_remote_snapshot_failure_status"
+	return "$l_full_remote_snapshot_failure_status"
+}
 
-	zxfer_cleanup_runtime_artifact_path_list \
-		"$l_full_remote_destination_inventory_stage_files"
-	zxfer_normalize_destination_snapshot_list \
-		"$l_full_remote_destination_dataset" \
+# Purpose: Normalize and release successful full remote destination stages.
+# Usage: Inventory staging is no longer needed once publication succeeds; the
+# raw snapshot stream remains owned by full-discovery result publication.
+zxfer_normalize_full_remote_destination_snapshot_discovery() {
+	l_full_remote_normalize_dataset=$1
+	zxfer_cleanup_full_remote_destination_inventory_stages
+	if zxfer_normalize_destination_snapshot_list \
+		"$l_full_remote_normalize_dataset" \
 		"$g_zxfer_full_destination_snapshot_file" \
-		"$g_zxfer_full_destination_snapshot_sorted_file" || {
-		l_full_remote_destination_status=$?
-		zxfer_cleanup_runtime_artifact_paths \
-			"$g_zxfer_full_source_snapshot_file" \
-			"$g_zxfer_full_source_snapshot_error_file" \
-			"$g_zxfer_full_destination_snapshot_file" \
-			"$g_zxfer_full_destination_snapshot_sorted_file" \
-			"$g_zxfer_full_destination_snapshot_error_file"
-		zxfer_cleanup_snapshot_record_cache_files
-		return "$l_full_remote_destination_status"
-	}
-	zxfer_cleanup_runtime_artifact_path \
-		"$g_zxfer_full_destination_snapshot_error_file"
-	return 0
+		"$g_zxfer_full_destination_snapshot_sorted_file"; then
+		:
+	else
+		l_full_remote_normalize_status=$?
+		zxfer_cleanup_failed_full_remote_destination_snapshot_discovery
+		return "$l_full_remote_normalize_status"
+	fi
+	zxfer_cleanup_runtime_artifact_paths \
+		"$g_zxfer_full_destination_snapshot_error_file" \
+		"${g_zxfer_full_remote_destination_failure_error_file:-}" \
+		>/dev/null 2>&1 || :
+	g_zxfer_full_destination_snapshot_error_file=""
+	g_zxfer_full_remote_destination_failure_error_file=""
+}
+
+# Purpose: Collect the remote destination inventory and snapshot stream.
+# Usage: Called only by full destination discovery for a configured target
+# host; protocol stages remain independently testable and cleanup is centralized.
+# Returns: Zero with normalized destination files, otherwise the original status.
+zxfer_collect_full_remote_destination_snapshot_discovery() {
+	l_full_remote_collect_dataset=$1
+	if zxfer_allocate_full_remote_destination_inventory_stages; then
+		:
+	else
+		l_full_remote_collect_status=$?
+		zxfer_cleanup_failed_full_remote_destination_snapshot_discovery
+		return "$l_full_remote_collect_status"
+	fi
+	zxfer_render_full_remote_destination_inventory_command
+	if zxfer_allocate_full_remote_destination_snapshot_error_stage; then
+		:
+	else
+		l_full_remote_collect_status=$?
+		zxfer_cleanup_failed_full_remote_destination_snapshot_discovery
+		return "$l_full_remote_collect_status"
+	fi
+	if zxfer_run_and_publish_full_remote_destination_discovery_batch \
+		"$l_full_remote_collect_dataset"; then
+		:
+	else
+		l_full_remote_collect_status=$?
+		zxfer_cleanup_failed_full_remote_destination_snapshot_discovery
+		return "$l_full_remote_collect_status"
+	fi
+	if zxfer_report_full_remote_destination_snapshot_failure; then
+		:
+	else
+		return "$?"
+	fi
+	zxfer_normalize_full_remote_destination_snapshot_discovery \
+		"$l_full_remote_collect_dataset"
 }
 
 # Purpose: Wait for and validate the full source snapshot producer.

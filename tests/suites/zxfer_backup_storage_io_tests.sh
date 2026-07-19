@@ -1176,7 +1176,7 @@ test_run_remote_backup_helper_with_payload_rethrows_transport_setup_failures_wit
 		(
 			zxfer_get_ssh_transport_tokens_for_host() {
 				printf '%s\n' "Managed ssh policy invalid."
-				return 1
+				return 43
 			}
 			zxfer_create_private_temp_dir() {
 				mkdir -p "$l_stage_dir" || return 1
@@ -1184,8 +1184,9 @@ test_run_remote_backup_helper_with_payload_rethrows_transport_setup_failures_wit
 				printf '%s\n' "$l_stage_dir"
 			}
 			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
+				printf 'message=%s\n' "$1"
+				printf 'throw_status=%s\n' "$2"
+				exit "$2"
 			}
 			zxfer_run_remote_backup_helper_with_payload "target.example" "printf '%s\\n' ok" "payload" destination
 		) 2>&1
@@ -1193,9 +1194,11 @@ test_run_remote_backup_helper_with_payload_rethrows_transport_setup_failures_wit
 	status=$?
 
 	assertEquals "Remote backup helper payload staging should fail closed when ssh transport setup fails before the remote helper runs." \
-		1 "$status"
+		43 "$status"
 	assertContains "Remote backup helper payload staging should preserve the transport setup error instead of collapsing it into a later write failure." \
 		"$output" "Managed ssh policy invalid."
+	assertContains "Remote backup helper payload staging should preserve the transport setup failure status after profiling the failed ssh invocation." \
+		"$output" "throw_status=43"
 	assertFalse "Remote backup helper payload staging should not leak its staged temp directory when ssh transport setup fails before invocation." \
 		"[ -e \"$l_stage_dir\" ]"
 }
@@ -1407,6 +1410,35 @@ test_write_backup_metadata_contents_to_store_runs_remote_helper_with_newline_pay
 		"#header;payload" "$(cat "$payload_file")"
 	assertEquals "Single-file remote backup writes should leave capture-failure scratch cleared on helper success." \
 		"0" "$(cat "$capture_file")"
+}
+
+test_write_backup_metadata_contents_to_store_stops_after_remote_directory_prepare_failure() {
+	g_option_T_target_host="target.example"
+	g_backup_storage_root="/var/db/zxfer"
+	stage_log="$TEST_TMPDIR/remote_single_prepare_failure.log"
+	: >"$stage_log"
+
+	(
+		STAGE_LOG="$stage_log"
+		zxfer_ensure_remote_backup_dir() {
+			printf 'prepare %s\n' "$1" >>"$STAGE_LOG"
+			return 37
+		}
+		zxfer_resolve_remote_cli_command_safe() {
+			printf '%s\n' unexpected-resolve >>"$STAGE_LOG"
+		}
+
+		zxfer_write_backup_metadata_contents_to_store \
+			"/var/db/zxfer/tank/src" \
+			"/var/db/zxfer/tank/src/.zxfer_backup_info.src" \
+			"#header;payload"
+	)
+	status=$?
+
+	assertEquals "Single-file remote backup writes should preserve directory-preparation failures." \
+		37 "$status"
+	assertEquals "Single-file remote backup writes should stop before helper resolution after directory preparation fails." \
+		"prepare /var/db/zxfer" "$(cat "$stage_log")"
 }
 
 test_write_backup_metadata_contents_to_store_marks_remote_cat_lookup_failures_as_dependency_errors() {
@@ -1726,6 +1758,41 @@ $pair_split_line
 		"0" "$(cat "$capture_file")"
 }
 
+test_write_backup_metadata_pair_contents_to_store_stops_after_remote_directory_prepare_failure() {
+	g_option_T_target_host="target.example"
+	g_backup_storage_root="/var/db/zxfer"
+	stage_log="$TEST_TMPDIR/remote_pair_prepare_failure.log"
+	: >"$stage_log"
+
+	(
+		STAGE_LOG="$stage_log"
+		zxfer_ensure_remote_backup_dir() {
+			printf 'prepare %s\n' "$1" >>"$STAGE_LOG"
+			case "$1" in
+			/var/db/zxfer/tank/src) return 38 ;;
+			esac
+		}
+		zxfer_build_remote_backup_pair_write_cmd() {
+			printf '%s\n' unexpected-render >>"$STAGE_LOG"
+		}
+
+		zxfer_write_backup_metadata_pair_contents_to_store \
+			"/var/db/zxfer/tank/src" \
+			"/var/db/zxfer/tank/src/.zxfer_backup_info.src" \
+			"#header;payload" \
+			"/var/db/zxfer/backup/dst/src" \
+			"/var/db/zxfer/backup/dst/src/.zxfer_backup_info.src" \
+			"#header;forwarded"
+	)
+	status=$?
+
+	assertEquals "Transactional remote backup writes should preserve directory-preparation failures." \
+		38 "$status"
+	assertEquals "Transactional remote backup writes should stop before later directory and renderer stages after a preparation failure." \
+		"prepare /var/db/zxfer
+prepare /var/db/zxfer/tank/src" "$(cat "$stage_log")"
+}
+
 test_build_remote_backup_pair_write_cmd_rolls_back_forwarded_after_primary_restore_failure() {
 	primary_dir="$TEST_TMPDIR/remote_pair_primary_restore_fail_primary"
 	forwarded_dir="$TEST_TMPDIR/remote_pair_primary_restore_fail_forwarded"
@@ -1792,6 +1859,189 @@ EOF
 		1 "$leftover_rollbacks"
 	assertContains "The generated helper should attempt the forwarded rollback after the failed primary restore path." \
 		"$(cat "$mv_log")" "$forwarded_file"
+}
+
+test_remote_backup_protocol_renderers_match_readable_golden_output() {
+	actual_script="$TEST_TMPDIR/remote_backup_protocol_scripts.actual"
+	golden_script="$ZXFER_ROOT/tests/golden/remote_backup_protocol_scripts.golden"
+
+	(
+		zxfer_get_remote_backup_helper_dependency_path() {
+			printf '%s\n' "/secure/bin:/usr/bin"
+		}
+		printf '%s\n' "### symlink-guard"
+		zxfer_build_remote_backup_symlink_guard_cmd \
+			"/var/db/zxfer/tank/src/backup.meta" 98 metadata
+		printf '%s\n' "### dependency-check"
+		zxfer_build_remote_backup_helper_dependency_check_cmd \
+			"target.example doas" 99 mktemp chmod mv
+		printf '%s\n' "### directory-prepare"
+		zxfer_build_remote_backup_dir_prepare_cmd \
+			"/var/db/zxfer/tank/src" "target.example doas" 99 92
+		printf '%s\n' "### single-write"
+		zxfer_build_remote_backup_write_cmd \
+			"/var/db/zxfer/tank/src" \
+			"/var/db/zxfer/tank/src/backup.meta" \
+			"target.example doas" "cat" 99 92
+		printf '%s\n' "### pair-write"
+		zxfer_build_remote_backup_pair_write_cmd \
+			"/var/db/zxfer/tank/src" \
+			"/var/db/zxfer/tank/src/backup.meta" \
+			"/var/db/zxfer/backup/dst" \
+			"/var/db/zxfer/backup/dst/forwarded.meta" \
+			"target.example doas" 99 92
+	) >"$actual_script"
+
+	if ! cmp -s "$golden_script" "$actual_script"; then
+		diff -u "$golden_script" "$actual_script" >&2
+		fail "Readable remote backup protocol renderers drifted from their exact-output golden."
+	fi
+}
+
+test_remote_backup_protocol_transport_collapse_preserves_script_and_one_line_contract() {
+	readable_script=$(zxfer_build_remote_backup_pair_write_cmd \
+		"/var/db/zxfer/tank/src" "/var/db/zxfer/tank/src/backup.meta" \
+		"/var/db/zxfer/backup/dst" "/var/db/zxfer/backup/dst/forwarded.meta" \
+		"target.example doas" 99 92)
+	transport_script=$(zxfer_prepare_remote_backup_transport_script "$readable_script")
+
+	assertTrue "Readable pair-write renderers should expose protocol stages on separate lines." \
+		"[ \"$(printf '%s\n' "$readable_script" | wc -l | tr -d '[:space:]')\" -gt 20 ]"
+	assertEquals "Remote backup transport should collapse the readable renderer for csh/tcsh-safe handoff." \
+		1 "$(printf '%s\n' "$transport_script" | wc -l | tr -d '[:space:]')"
+	assertContains "Transport collapse must preserve the atomic publication stage." \
+		"$transport_script" "rollback_forwarded"
+	assertContains "Transport collapse must preserve the dedicated rollback failure status." \
+		"$transport_script" "exit 98"
+	assertTrue "The collapsed pair-write transport must remain valid POSIX shell syntax." \
+		"printf '%s\n' \"\$transport_script\" | sh -n"
+}
+
+test_remote_backup_root_rejects_newlines_before_transport_collapse() {
+	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
+	zxfer_test_capture_subshell '
+		g_backup_storage_root="/unchanged/root"
+		ZXFER_BACKUP_DIR=$(printf "/tmp/first\nsecond")
+		zxfer_refresh_backup_storage_root
+		printf "root=%s\n" "$g_backup_storage_root"
+	'
+
+	assertEquals "A backup root whose bytes would change in one-line remote transport must fail closed." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Rejected backup roots should explain the single-line path contract without replaying unsafe path bytes." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "single-line absolute path without control whitespace"
+	assertNotContains "Rejected backup roots must not continue after translating the embedded newline to a space." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "root=/tmp/first second"
+}
+
+test_remote_backup_dependency_renderer_treats_host_metacharacters_as_data() {
+	injected_marker="$TEST_TMPDIR/remote_backup_host_injected"
+	host_spec="target.example env ZXFER_NOTE=\$(touch\${IFS}$injected_marker)"
+	remote_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd \
+		"$host_spec" 99 zxfer-definitely-missing-helper)
+
+	set +e
+	output=$(sh -c "$remote_cmd" 2>&1)
+	status=$?
+
+	assertEquals "Missing dependency renderers should preserve their established failure status for metacharacter host specs." \
+		99 "$status"
+	assertFalse "Host-spec command substitutions must remain diagnostic data inside the rendered remote helper." \
+		"[ -e \"$injected_marker\" ]"
+	assertContains "Missing dependency diagnostics should preserve the literal host spec without evaluating it." \
+		"$output" "not found on host $host_spec in secure PATH"
+}
+
+test_build_remote_backup_write_cmd_executes_staged_atomic_publication() {
+	backup_dir="$TEST_TMPDIR/remote_single_renderer_success"
+	backup_path="$backup_dir/backup.meta"
+	mkdir -p "$backup_dir"
+	remote_cmd=$(zxfer_build_remote_backup_write_cmd \
+		"$backup_dir" "$backup_path" "target.example" "cat" 99 92)
+
+	printf '%s\n' "rendered-payload" | sh -c "$remote_cmd"
+	status=$?
+	leftovers=$(find "$backup_dir" -maxdepth 1 -type d \
+		-name '.zxfer-backup-write.*' | wc -l | tr -d '[:space:]')
+
+	assertEquals "The readable single-write renderer should execute successfully under POSIX sh." \
+		0 "$status"
+	assertEquals "The single-write renderer should publish the exact stdin payload." \
+		"rendered-payload" "$(cat "$backup_path")"
+	assertEquals "Successful single writes should remove their staging directory." \
+		0 "$leftovers"
+}
+
+test_build_remote_backup_write_cmd_quotes_metacharacter_target_without_execution() {
+	backup_dir="$TEST_TMPDIR/remote_single_renderer_metachar"
+	backup_path="$backup_dir/metadata'; touch zxfer_backup_injected; : '"
+	injected_marker="$TEST_TMPDIR/zxfer_backup_injected"
+	mkdir -p "$backup_dir"
+	remote_cmd=$(zxfer_build_remote_backup_write_cmd \
+		"$backup_dir" "$backup_path" "target.example" "cat" 99 92)
+
+	(
+		cd "$TEST_TMPDIR" || exit 1
+		printf '%s\n' "quoted-payload" | sh -c "$remote_cmd"
+	)
+	status=$?
+
+	assertEquals "Metacharacter target paths should remain data during remote script execution." \
+		0 "$status"
+	assertFalse "Quoted target paths must not execute an injected command." \
+		"[ -e \"$injected_marker\" ]"
+	assertEquals "Metacharacter target paths should receive the exact staged payload." \
+		"quoted-payload" "$(cat "$backup_path")"
+}
+
+test_build_remote_backup_write_cmd_cleans_staging_and_returns_92_on_payload_failure() {
+	backup_dir="$TEST_TMPDIR/remote_single_renderer_failure"
+	backup_path="$backup_dir/backup.meta"
+	mkdir -p "$backup_dir"
+	remote_cmd=$(zxfer_build_remote_backup_write_cmd \
+		"$backup_dir" "$backup_path" "target.example" "false" 99 92)
+
+	set +e
+	printf '%s\n' "unpublished-payload" | sh -c "$remote_cmd"
+	status=$?
+	leftovers=$(find "$backup_dir" -maxdepth 1 -type d \
+		-name '.zxfer-backup-write.*' | wc -l | tr -d '[:space:]')
+
+	assertEquals "Payload-helper failures should keep the established remote write status." \
+		92 "$status"
+	assertFalse "Payload-helper failures must not publish a partial metadata file." \
+		"[ -e \"$backup_path\" ]"
+	assertEquals "Payload-helper failures should remove their staging directory." \
+		0 "$leftovers"
+}
+
+test_build_remote_backup_pair_write_cmd_rejects_truncated_payload_before_publication() {
+	primary_dir="$TEST_TMPDIR/remote_pair_truncated_primary"
+	forwarded_dir="$TEST_TMPDIR/remote_pair_truncated_forwarded"
+	primary_path="$primary_dir/backup.meta"
+	forwarded_path="$forwarded_dir/forwarded.meta"
+	mkdir -p "$primary_dir" "$forwarded_dir"
+	printf '%s\n' "old-primary" >"$primary_path"
+	printf '%s\n' "old-forwarded" >"$forwarded_path"
+	remote_cmd=$(zxfer_build_remote_backup_pair_write_cmd \
+		"$primary_dir" "$primary_path" "$forwarded_dir" "$forwarded_path" \
+		"target.example" 99 92)
+
+	set +e
+	printf '%s\n' "payload-without-split-sentinel" | sh -c "$remote_cmd"
+	status=$?
+	leftovers=$(find "$primary_dir" "$forwarded_dir" -maxdepth 1 \
+		\( -name '.zxfer-backup-write.*' -o -name '.zxfer-backup-rollback.*' \) |
+		wc -l | tr -d '[:space:]')
+
+	assertEquals "Truncated pair payloads should retain the established remote write failure status." \
+		92 "$status"
+	assertEquals "A truncated pair payload must leave the primary metadata unchanged." \
+		"old-primary" "$(cat "$primary_path")"
+	assertEquals "A truncated pair payload must leave the forwarded metadata unchanged." \
+		"old-forwarded" "$(cat "$forwarded_path")"
+	assertEquals "A truncated pair payload should not leak staging or rollback artifacts." \
+		0 "$leftovers"
 }
 
 test_write_backup_metadata_pair_contents_to_store_reports_remote_rollback_failure() {
@@ -1933,4 +2183,131 @@ test_write_backup_metadata_pair_contents_to_store_reports_capture_failures_disti
 		"$output" "Failed to reload local remote helper capture while writing backup metadata /var/db/zxfer/tank/src/.zxfer_backup_info.src on host target.example."
 	assertNotContains "Transactional remote pair writes should not misreport local capture failures as host-contact failures." \
 		"$output" "Failed to contact target host target.example"
+}
+
+test_backup_storage_key_fallbacks_cover_empty_and_unavailable_digest_helpers() {
+	set +e
+	output=$(
+		(
+			od() {
+				return 0
+			}
+			zxfer_backup_metadata_file_key "" ""
+			printf 'file_key_status=%s\n' "$?"
+
+			cksum() {
+				return 1
+			}
+			od() {
+				printf '%s\n' " 61 62"
+			}
+			zxfer_backup_metadata_legacy_file_key "tank/src" "backup/dst"
+			printf 'legacy_hex_status=%s\n' "$?"
+
+			od() {
+				return 0
+			}
+			zxfer_backup_metadata_legacy_file_key "" ""
+			printf 'legacy_empty_status=%s\n' "$?"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "The key-fallback test wrapper should finish after recording all stable results." \
+		0 "$status"
+	assertContains "An empty exact identity should retain a nonempty lossless key when od emits no bytes." \
+		"$output" "h/00"
+	assertContains "Legacy key fallback should use a bounded hex digest when cksum is unavailable." \
+		"$output" "k6162"
+	assertContains "Legacy key fallback should retain the historical k00 sentinel when no digest bytes are available." \
+		"$output" "k00"
+	assertContains "Exact-key fallback should return success for the defined empty identity." \
+		"$output" "file_key_status=0"
+	assertContains "Legacy hex fallback should return success." \
+		"$output" "legacy_hex_status=0"
+	assertContains "Legacy empty fallback should return success." \
+		"$output" "legacy_empty_status=0"
+}
+
+test_wrap_remote_backup_helper_preserves_secure_path_failure_status() {
+	set +e
+	output=$(
+		(
+			zxfer_get_remote_backup_helper_dependency_path() {
+				return 39
+			}
+			zxfer_wrap_remote_backup_helper_with_secure_path "printf payload"
+			printf 'status=%s\n' "$?"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "The secure-PATH failure test wrapper should finish after recording the stage status." \
+		0 "$status"
+	assertContains "Remote backup wrappers should preserve secure-PATH validation failure statuses." \
+		"$output" "status=39"
+	assertNotContains "A failed secure-PATH lookup should not render any partial remote helper payload." \
+		"$output" "printf payload"
+}
+
+test_create_backup_metadata_stage_dir_cleans_unregistered_directory() {
+	stage_target="$TEST_TMPDIR/unregistered-stage/backup.meta"
+	mkdir -p "${stage_target%/*}"
+
+	set +e
+	output=$(
+		(
+			zxfer_register_backup_metadata_runtime_artifact_path() {
+				return 1
+			}
+			zxfer_create_backup_metadata_stage_dir_for_path \
+				"$stage_target" "zxfer-unregistered-stage"
+			printf 'status=%s\n' "$?"
+		)
+	)
+	status=$?
+	set -e
+	leftovers=$(find "${stage_target%/*}" -maxdepth 1 -type d \
+		-name '.zxfer-unregistered-stage.*' | wc -l | tr -d '[:space:]')
+
+	assertEquals "The registration-failure test wrapper should finish after recording the stage status." \
+		0 "$status"
+	assertContains "A stage directory that cannot be registered should fail closed." \
+		"$output" "status=1"
+	assertEquals "Registration failure should remove the newly allocated directory immediately." \
+		0 "$leftovers"
+}
+
+test_commit_local_backup_file_stage_removes_stale_rollback_after_restore() {
+	target_file="$TEST_TMPDIR/commit-stale-rollback.meta"
+	stage_file="$TEST_TMPDIR/commit-stale-rollback.stage"
+	printf '%s' "old" >"$target_file"
+	printf '%s' "new" >"$stage_file"
+	g_test_backup_move_calls=0
+	g_test_backup_removed_path=""
+	zxfer_move_local_backup_metadata_path() {
+		g_test_backup_move_calls=$((g_test_backup_move_calls + 1))
+		if [ "$g_test_backup_move_calls" -eq 2 ]; then
+			return 55
+		fi
+		return 0
+	}
+	zxfer_remove_local_backup_metadata_path_if_present() {
+		g_test_backup_removed_path=$1
+		return 0
+	}
+
+	set +e
+	zxfer_commit_local_backup_file_stage "$target_file" "$stage_file" >/dev/null
+	status=$?
+	set -e
+
+	assertEquals "The failed staged publication should preserve its move status after a successful rollback." \
+		55 "$status"
+	assertEquals "Commit failure should attempt original backup, staged publish, and rollback restore in order." \
+		3 "$g_test_backup_move_calls"
+	assertContains "A rollback helper that reports success without consuming its file should trigger stale rollback cleanup." \
+		"$g_test_backup_removed_path" ".zxfer-backup-rollback."
 }

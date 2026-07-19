@@ -5,7 +5,7 @@
 #
 # Test definitions live in ordered behavior fragments below. Keep the fragment
 # markers aligned with source order so listing and execution preserve the
-# 216-test contract.
+# stable named-test contract.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
@@ -14,29 +14,17 @@ TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# Remote fake executables are loaded only by suites that exercise transport.
+# shellcheck source=tests/helpers/fake_tool_fixtures.sh
+. "$TESTS_DIR/helpers/fake_tool_fixtures.sh"
+# shellcheck source=tests/helpers/backup_fixtures.sh
+. "$TESTS_DIR/helpers/backup_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_session.sh"
 
 tearDown() {
 	PATH=$TEST_ORIGINAL_PATH
 	export PATH
-}
-
-create_fake_ssh_bin() {
-	cat >"$FAKE_SSH_BIN" <<'EOF'
-#!/bin/sh
-if [ -n "${FAKE_SSH_LOG:-}" ]; then
-	printf '%s\n' "$@" >>"$FAKE_SSH_LOG"
-fi
-if [ -n "${FAKE_SSH_STDOUT:-}" ] && [ -z "${FAKE_SSH_SUPPRESS_STDOUT:-}" ]; then
-	printf '%s' "$FAKE_SSH_STDOUT"
-fi
-if [ -n "${FAKE_SSH_STDERR:-}" ]; then
-	printf '%s' "$FAKE_SSH_STDERR" >&2
-fi
-exit "${FAKE_SSH_EXIT_STATUS:-0}"
-EOF
-	chmod +x "$FAKE_SSH_BIN"
 }
 
 find_csh_shell_for_tests() {
@@ -98,6 +86,15 @@ end
 EOF
 }
 
+# Publish a mocked capability response through the same parsed-result channel
+# that production ensure calls guarantee to their OS and tool consumers.
+zxfer_test_accept_remote_capability_response() {
+	l_test_capability_response=$1
+	g_zxfer_remote_capability_response_result=$l_test_capability_response
+	zxfer_parse_remote_capability_response "$l_test_capability_response" || return 1
+	printf '%s\n' "$l_test_capability_response"
+}
+
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_remote_hosts"
 	TEST_TMPDIR_PHYSICAL=$(cd -P "$TEST_TMPDIR" && pwd)
@@ -106,7 +103,7 @@ oneTimeSetUp() {
 		exit 1
 	}
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
-	create_fake_ssh_bin
+	zxfer_test_write_env_fake_ssh "$FAKE_SSH_BIN"
 }
 
 oneTimeTearDown() {
@@ -170,11 +167,21 @@ zxfer_test_reset_remote_host_capability_fixture() {
 	g_origin_remote_capabilities_cache_identity=""
 	g_origin_remote_capabilities_response=""
 	g_origin_remote_capabilities_bootstrap_source=""
+	g_origin_remote_capabilities_parsed_identity=""
+	g_origin_remote_capabilities_os=""
+	g_origin_remote_capabilities_zfs_status=""
+	g_origin_remote_capabilities_tool_records=""
 	g_target_remote_capabilities_host=""
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
+	g_target_remote_capabilities_parsed_identity=""
+	g_target_remote_capabilities_os=""
+	g_target_remote_capabilities_zfs_status=""
+	g_target_remote_capabilities_tool_records=""
 	g_zxfer_remote_capability_response_result=""
+	g_zxfer_remote_capability_cache_role_result=""
+	g_zxfer_remote_capability_cache_identity_result=""
 	g_zxfer_backup_file_read_result=""
 	g_zxfer_remote_probe_stdout=""
 	g_zxfer_remote_probe_stderr=""
@@ -237,7 +244,7 @@ setUp() {
 	if command -v zxfer_reset_owned_lock_tracking >/dev/null 2>&1; then
 		zxfer_reset_owned_lock_tracking
 	fi
-	create_fake_ssh_bin
+	zxfer_test_write_env_fake_ssh "$FAKE_SSH_BIN"
 }
 
 # Behavior-focused fragments keep this stable suite entry point while bounding

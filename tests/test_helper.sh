@@ -38,5 +38,3 @@ unset ZXFER_TEST_SHELL
 . "$ZXFER_ROOT/tests/helpers/lifecycle.sh"
 # shellcheck source=tests/helpers/process_capture.sh
 . "$ZXFER_ROOT/tests/helpers/process_capture.sh"
-# shellcheck source=tests/helpers/backup_fixtures.sh
-. "$ZXFER_ROOT/tests/helpers/backup_fixtures.sh"

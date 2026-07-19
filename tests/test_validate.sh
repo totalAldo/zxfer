@@ -44,10 +44,15 @@ EOF
 #!/bin/sh
 printf 'vm:%s\n' "$*" >>"${VALIDATION_LOG:?}"
 EOF
+	cat >"$FAKE_ROOT/tests/run_property_prefetch_benchmark.sh" <<'EOF'
+#!/bin/sh
+printf 'property-prefetch:%s\n' "$*" >>"${VALIDATION_LOG:?}"
+EOF
 	chmod +x "$FAKE_ROOT/tests/run_lint.sh" \
 		"$FAKE_ROOT/tests/run_shunit_tests.sh" \
 		"$FAKE_ROOT/tests/run_coverage.sh" \
-		"$FAKE_ROOT/tests/run_vm_matrix.sh"
+		"$FAKE_ROOT/tests/run_vm_matrix.sh" \
+		"$FAKE_ROOT/tests/run_property_prefetch_benchmark.sh"
 }
 
 validation_mapping_block() {
@@ -184,6 +189,33 @@ shunit:--jobs 4 tests/test_run_shunit_tests.sh tests/test_zxfer_launcher.sh test
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_validate_quick_maps_remote_script_goldens_to_owning_suites() {
+	output=$(
+		VALIDATION_LOG="$VALIDATION_LOG" \
+			"$FAKE_ROOT/tests/validate.sh" quick \
+			tests/golden/remote_backup_protocol_scripts.golden \
+			tests/golden/remote_capability_probe_script.golden
+	)
+
+	l_mapping_block=$(validation_mapping_block "$output" tests/golden/remote_backup_protocol_scripts.golden)
+	assertContains "The remote backup protocol golden should use its exact mapping row." \
+		"$l_mapping_block" "matched:     tests/golden/remote_backup_protocol_scripts.golden"
+	assertContains "The remote backup protocol golden should select the backup-metadata suite." \
+		"$l_mapping_block" "tests/test_zxfer_backup_metadata.sh"
+
+	l_mapping_block=$(validation_mapping_block "$output" tests/golden/remote_capability_probe_script.golden)
+	assertContains "The remote capability-probe golden should use its exact mapping row." \
+		"$l_mapping_block" "matched:     tests/golden/remote_capability_probe_script.golden"
+	assertContains "The remote capability-probe golden should select the remote-host suite." \
+		"$l_mapping_block" "tests/test_zxfer_remote_hosts.sh"
+
+	assertEquals "Golden mappings should dispatch only their two stable owning suites." \
+		"lint:budget
+shunit:--jobs 4 tests/test_zxfer_backup_metadata.sh tests/test_zxfer_remote_hosts.sh" \
+		"$(cat "$VALIDATION_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_full_uses_explicit_enforced_bash_xtrace_coverage() {
 	VALIDATION_LOG="$VALIDATION_LOG" \
 		"$FAKE_ROOT/tests/validate.sh" full >/dev/null
@@ -299,6 +331,10 @@ test_validate_doctor_reports_optional_capabilities_without_running_them() {
 		"$output" "comm"
 	assertContains "Doctor should include the xargs dependency used to scan the budgeted source set." \
 		"$output" "xargs"
+	assertContains "Doctor should report the cmp dependency used by the offline property-prefetch benchmark." \
+		"$output" "cmp"
+	assertContains "Doctor should report the exact time utility required by the offline property-prefetch benchmark." \
+		"$output" "/usr/bin/time"
 	assertContains "Doctor should report QEMU availability without starting a guest." "$output" "QEMU commands (optional):"
 	assertContains "Doctor should report ZFS command presence without invoking ZFS." "$output" "never invoked"
 	assertContains "Doctor should report whether pinned lint tools are already cached." "$output" "not cached"

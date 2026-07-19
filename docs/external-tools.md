@@ -142,6 +142,24 @@ file-backed `zfs`/`zpool` fixture lifecycle described above.
 Perf dependencies are local QA dependencies only. They should not become
 installed-command runtime dependencies.
 
+## Offline Property-Prefetch Benchmark Dependencies
+
+These tools are used by
+[run_property_prefetch_benchmark.sh](../tests/run_property_prefetch_benchmark.sh),
+not by the installed `zxfer` command. The benchmark generates deterministic
+plain-text fixtures and never invokes ZFS, SSH, or the network.
+
+| Tool | Why it is needed |
+| --- | --- |
+| POSIX `awk` | generate fixtures, run both grouping implementations, parse timings, and produce the acceptance summary |
+| `cmp` | require byte-identical baseline and candidate output before accepting performance evidence |
+| `/usr/bin/time` | provide portable `-p` elapsed time; GNU `-f` and BSD `-l` are optional probes for peak RSS |
+
+The runner forces `LC_ALL=C` in its executable main and worker paths so timing
+decimals and TSV evidence remain machine-readable across supported hosts. These
+are local QA dependencies only and must not become installed-command runtime
+dependencies.
+
 ## VM Matrix Host Dependencies
 
 These tools are used by [run_vm_matrix.sh](../tests/run_vm_matrix.sh) on the

@@ -51,6 +51,16 @@ test_check_backup_storage_dir_if_needed_routes_local_and_remote() {
 		"$TEST_TMPDIR/remote_backup target.example" "$(cat "$remote_log")"
 }
 
+test_check_backup_storage_dir_if_needed_returns_success_when_disabled() {
+	g_option_k_backup_property_mode=0
+
+	zxfer_check_backup_storage_dir_if_needed
+	status=$?
+
+	assertEquals "Disabled backup metadata mode should remain a successful no-op at checked composition boundaries." \
+		0 "$status"
+}
+
 test_check_backup_storage_dir_if_needed_refreshes_backup_root_from_environment() {
 	output=$(
 		(
@@ -142,6 +152,32 @@ test_check_backup_storage_dir_if_needed_preserves_remote_dry_run_render_failures
 		46 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
+test_check_backup_storage_dir_if_needed_preserves_remote_dry_run_builder_failures() {
+	l_builder_log="$TEST_TMPDIR/remote_backup_dry_run_builder_failure.log"
+	: >"$l_builder_log"
+
+	# shellcheck disable=SC2016  # Evaluated by zxfer_test_capture_subshell.
+	zxfer_test_capture_subshell '
+		g_option_k_backup_property_mode=1
+		g_option_n_dryrun=1
+		g_option_v_verbose=1
+		g_option_T_target_host="target.example doas"
+		g_backup_storage_root="/var/db/zxfer"
+		zxfer_build_remote_backup_dir_prepare_cmd() {
+			return 45
+		}
+		zxfer_render_remote_backup_dry_run_shell_command() {
+			printf "%s\n" unexpected-renderer-call >>"$l_builder_log"
+		}
+		zxfer_check_backup_storage_dir_if_needed
+	'
+
+	assertEquals "Remote dry-run backup preflight should preserve directory-script builder failures." \
+		45 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "A failed directory-script build must stop before remote rendering." \
+		"" "$(cat "$l_builder_log")"
+}
+
 test_check_backup_storage_dir_if_needed_rejects_relative_backup_dir_override() {
 	zxfer_test_capture_subshell "
 		g_option_k_backup_property_mode=1
@@ -156,6 +192,37 @@ test_check_backup_storage_dir_if_needed_rejects_relative_backup_dir_override() {
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Relative backup-root preflight failures should explain the absolute-path requirement." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "ZXFER_BACKUP_DIR must be an absolute path"
+}
+
+test_run_zfs_mode_stops_before_replication_when_backup_preflight_fails() {
+	log="$TEST_TMPDIR/zxfer_run_zfs_mode_backup_failure.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			RUN_LOG="$log"
+			zxfer_resolve_initial_source_from_options() { :; }
+			zxfer_normalize_source_destination_paths() { :; }
+			zxfer_validate_zfs_mode_preconditions() { :; }
+			zxfer_check_backup_storage_dir_if_needed() { return 37; }
+			zxfer_initialize_replication_context() { printf 'unexpected-context\n' >>"$RUN_LOG"; }
+			zxfer_throw_error() {
+				printf 'throw=%s status=%s\n' "$1" "$2"
+				return "$2"
+			}
+
+			zxfer_run_zfs_mode
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Backup preflight failures should retain their exact status at the replication boundary." \
+		37 "$status"
+	assertContains "Backup preflight failures should enter structured error reporting." \
+		"$output" "throw=Failed to prepare backup metadata storage. status=37"
+	assertEquals "Replication planning must not begin after backup storage preflight fails." \
+		"" "$(cat "$log")"
 }
 
 test_initialize_replication_context_runs_restore_and_unsupported_scan() {
@@ -910,6 +977,43 @@ flush $root_backup_row
 wait final sync" "$(cat "$log")"
 }
 
+test_process_source_dataset_stops_after_live_backup_metadata_flush_failure() {
+	g_option_k_backup_property_mode=1
+	g_zfs_send_job_pids=""
+	g_dest_seed_requires_property_reconcile=0
+	log="$TEST_TMPDIR/process_source_backup_flush_failure.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			PROCESS_LOG="$log"
+			zxfer_set_actual_dest() { g_actual_dest="backup/target/src"; }
+			zxfer_inspect_delete_snap() { :; }
+			zxfer_transfer_properties() { :; }
+			zxfer_copy_snapshots() { :; }
+			zxfer_flush_captured_backup_metadata_if_live() {
+				printf 'flush\n' >>"$PROCESS_LOG"
+				return 39
+			}
+			zxfer_throw_error() {
+				printf 'throw=%s status=%s\n' "$1" "$2"
+				return "$2"
+			}
+
+			zxfer_process_source_dataset "tank/src" 1 ""
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Immediate backup metadata flush failures should preserve their exact status." \
+		39 "$status"
+	assertContains "Immediate backup metadata flush failures should enter structured error reporting." \
+		"$output" "throw=Failed to write backup metadata. status=39"
+	assertEquals "A completed dataset should attempt its live backup metadata flush exactly once." \
+		"flush" "$(cat "$log")"
+}
+
 test_copy_filesystems_does_not_flush_backup_metadata_when_snapshot_copy_fails() {
 	g_option_P_transfer_property=1
 	g_option_k_backup_property_mode=1
@@ -1005,6 +1109,47 @@ props tank/src
 copy backup/target/src
 wait final sync
 flush $root_backup_row" "$(cat "$log")"
+}
+
+test_copy_filesystems_promotes_deferred_backup_metadata_flush_failure() {
+	g_option_P_transfer_property=1
+	g_option_k_backup_property_mode=1
+	g_option_R_recursive="tank/src"
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	g_recursive_source_dataset_list="$g_recursive_source_list"
+	log="$TEST_TMPDIR/copy_filesystems_deferred_backup_failure.log"
+	: >"$log"
+
+	set +e
+	output=$(
+		(
+			FLUSH_LOG="$log"
+			zxfer_set_actual_dest() { g_actual_dest="backup/target/src"; }
+			zxfer_inspect_delete_snap() { :; }
+			zxfer_transfer_properties() { :; }
+			zxfer_copy_snapshots() { g_zfs_send_job_pids="12345"; }
+			zxfer_wait_for_zfs_send_jobs() { g_zfs_send_job_pids=""; }
+			zxfer_flush_captured_backup_metadata_if_live() {
+				printf 'flush\n' >>"$FLUSH_LOG"
+				return 40
+			}
+			zxfer_throw_error() {
+				printf 'throw=%s status=%s\n' "$1" "$2"
+				return "$2"
+			}
+
+			zxfer_copy_filesystems
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "Deferred backup metadata flush failures should preserve their exact status." \
+		40 "$status"
+	assertContains "Deferred backup metadata flush failures should enter structured error reporting." \
+		"$output" "throw=Failed to write backup metadata. status=40"
+	assertEquals "Final synchronization should attempt the deferred metadata flush exactly once." \
+		"flush" "$(cat "$log")"
 }
 
 test_copy_filesystems_defers_backup_metadata_flush_until_post_seed_reconcile_finishes() {

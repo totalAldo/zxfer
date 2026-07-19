@@ -2,6 +2,37 @@
 # Runtime initialization, reset, trap-registration, and remote-context tests.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329,SC2016
 
+test_runtime_artifact_registry_helpers_cover_rejected_and_missing_entries() {
+	set +e
+	zxfer_runtime_artifact_registration_path_has_safe_shape "relative-stage"
+	relative_status=$?
+	nested_child_status=$(
+		(
+			g_zxfer_run_tmp_root="$TEST_TMPDIR/zxfer.runtime-shape"
+			zxfer_run_tmp_root_is_current_private_dir() {
+				return 0
+			}
+			zxfer_runtime_artifact_path_is_run_root_child \
+				"$g_zxfer_run_tmp_root/nested/child"
+			printf '%s\n' "$?"
+		)
+	)
+
+	g_zxfer_runtime_artifact_cleanup_dir_identities=""
+	zxfer_get_registered_runtime_artifact_directory_identity \
+		"$TEST_TMPDIR/zxfer.missing-stage"
+	missing_identity_status=$?
+
+	assertEquals "Runtime artifact registration should reject non-absolute paths." \
+		1 "$relative_status"
+	assertEquals "A contained runtime artifact must be one direct run-root child, never a nested path." \
+		1 "$nested_child_status"
+	assertEquals "Runtime artifact identity lookup should fail for an unregistered directory." \
+		1 "$missing_identity_status"
+	assertEquals "Missing runtime artifact identity lookup should clear the owner result channel." \
+		"" "$g_zxfer_runtime_artifact_directory_identity_result"
+}
+
 test_init_globals_reinitializes_property_module_scratch_state_when_reinvoked() {
 	output=$(
 		(

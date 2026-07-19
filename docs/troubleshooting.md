@@ -20,6 +20,7 @@ What to check:
 - `ZXFER_SECURE_PATH`
 - `ZXFER_SECURE_PATH_APPEND`
 - every trusted directory needed for later bare helper invocations
+- whether either secure-PATH value contains a tab, carriage return, or newline
 - remote `zfs`, `ssh`, `cat`, `parallel`, or `zstd` availability
 
 ## Remote Dependency Probe Failures
@@ -222,7 +223,8 @@ What it usually means:
 What to inspect:
 
 - `ZXFER_BACKUP_DIR`
-- whether `ZXFER_BACKUP_DIR` is set to an absolute path
+- whether `ZXFER_BACKUP_DIR` is set to a single-line absolute path without
+  tabs or carriage returns
 - the source-dataset-relative tree under `ZXFER_BACKUP_DIR`
 - the exact source/destination roots that were backed up with `-k`
 - ownership and permissions of `.zxfer_backup_info.*`

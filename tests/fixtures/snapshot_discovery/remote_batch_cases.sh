@@ -3,6 +3,71 @@
 # Remote destination batching, staged status, and orchestration failure cases.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
+# Emit the target renderer's exact destination-discovery wire order. Keeping
+# valid fixtures here makes reordered protocol rows stand out as adversarial.
+zxfer_test_emit_remote_destination_discovery_batch() {
+	l_test_remote_batch_inventory_status=$1
+	l_test_remote_batch_pool_status=$2
+	l_test_remote_batch_snapshot_status=$3
+	l_test_remote_batch_snapshot_ran=$4
+	l_test_remote_batch_inventory_stdout=$5
+	l_test_remote_batch_inventory_stderr=$6
+	l_test_remote_batch_snapshot_stdout=$7
+	l_test_remote_batch_snapshot_stderr=$8
+
+	printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+	printf 'BEGIN\tsnapshot_stdout\n'
+	[ -z "$l_test_remote_batch_snapshot_stdout" ] ||
+		printf '%s\n' "$l_test_remote_batch_snapshot_stdout"
+	printf 'END\tsnapshot_stdout\n'
+	printf 'STATUS\tinventory\t%s\n' "$l_test_remote_batch_inventory_status"
+	printf 'STATUS\tpool\t%s\n' "$l_test_remote_batch_pool_status"
+	printf 'STATUS\tsnapshot_ran\t%s\n' "$l_test_remote_batch_snapshot_ran"
+	printf 'BEGIN\tinventory_stdout\n'
+	[ -z "$l_test_remote_batch_inventory_stdout" ] ||
+		printf '%s\n' "$l_test_remote_batch_inventory_stdout"
+	printf 'END\tinventory_stdout\n'
+	printf 'BEGIN\tinventory_stderr\n'
+	[ -z "$l_test_remote_batch_inventory_stderr" ] ||
+		printf '%s\n' "$l_test_remote_batch_inventory_stderr"
+	printf 'END\tinventory_stderr\n'
+	printf 'BEGIN\tpool_stderr\n'
+	printf 'END\tpool_stderr\n'
+	printf 'STATUS\tsnapshot\t%s\n' "$l_test_remote_batch_snapshot_status"
+	printf 'BEGIN\tsnapshot_stderr\n'
+	[ -z "$l_test_remote_batch_snapshot_stderr" ] ||
+		printf '%s\n' "$l_test_remote_batch_snapshot_stderr"
+	printf 'END\tsnapshot_stderr\n'
+	printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+}
+
+# Allocate the four direct run-root children accepted by the publication API.
+zxfer_test_allocate_remote_destination_batch_outputs() {
+	zxfer_create_temp_file_group 4 >/dev/null || return "$?"
+	{
+		IFS= read -r g_test_remote_batch_inventory_file
+		IFS= read -r g_test_remote_batch_inventory_error_file
+		IFS= read -r g_test_remote_batch_snapshot_file
+		IFS= read -r g_test_remote_batch_snapshot_error_file
+	} <<-EOF
+		$g_zxfer_temp_file_group_result
+	EOF
+}
+
+zxfer_test_seed_remote_destination_batch_outputs() {
+	printf '%s' 'old-inventory' >"$g_test_remote_batch_inventory_file"
+	printf '%s' 'old-inventory-error' >"$g_test_remote_batch_inventory_error_file"
+	printf '%s' 'old-snapshot' >"$g_test_remote_batch_snapshot_file"
+	printf '%s' 'old-snapshot-error' >"$g_test_remote_batch_snapshot_error_file"
+}
+
+zxfer_test_print_remote_destination_batch_outputs() {
+	printf 'inventory=%s\n' "$(cat "$g_test_remote_batch_inventory_file")"
+	printf 'inventory_error=%s\n' "$(cat "$g_test_remote_batch_inventory_error_file")"
+	printf 'snapshot=%s\n' "$(cat "$g_test_remote_batch_snapshot_file")"
+	printf 'snapshot_error=%s\n' "$(cat "$g_test_remote_batch_snapshot_error_file")"
+}
+
 test_get_zfs_list_remote_target_batches_destination_discovery() {
 	ssh_log="$TEST_TMPDIR/get_zfs_remote_batch_success.ssh"
 	: >"$ssh_log"
@@ -19,26 +84,12 @@ test_get_zfs_list_remote_target_batches_destination_discovery() {
 			zxfer_invoke_ssh_shell_command_for_host() {
 				printf 'host=%s side=%s\n' "$1" "$3" >>"$SSH_LOG"
 				printf 'cmd=%s\n' "$2" >>"$SSH_LOG"
-				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
-				printf 'STATUS\tinventory\t0\n'
-				printf 'STATUS\tpool\t\n'
-				printf 'STATUS\tsnapshot\t0\n'
-				printf 'STATUS\tsnapshot_ran\t1\n'
-				printf 'BEGIN\tinventory_stdout\n'
-				printf '%s\n' "backup/dst"
-				printf '%s\n' "backup/dst/src"
-				printf 'END\tinventory_stdout\n'
-				printf 'BEGIN\tinventory_stderr\n'
-				printf 'END\tinventory_stderr\n'
-				printf 'BEGIN\tpool_stderr\n'
-				printf 'END\tpool_stderr\n'
-				printf 'BEGIN\tsnapshot_stdout\n'
-				printf '%s\t%s\n' "backup/dst/src@snapA" "guid-a"
-				printf '%s\t%s\n' "backup/dst/src/child@snapB" "guid-b"
-				printf 'END\tsnapshot_stdout\n'
-				printf 'BEGIN\tsnapshot_stderr\n'
-				printf 'END\tsnapshot_stderr\n'
-				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+				zxfer_test_emit_remote_destination_discovery_batch \
+					0 "" 0 1 \
+					"backup/dst
+backup/dst/src" "" \
+					"backup/dst/src@snapA	guid-a
+backup/dst/src/child@snapB	guid-b" ""
 			}
 			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' "unexpected-destination-zfs" >>"$SSH_LOG"
@@ -99,6 +150,26 @@ test_build_remote_destination_discovery_batch_script_matches_golden_output() {
 	fi
 	assertEquals "Remote destination batch rendering should remain byte-for-byte stable." \
 		0 "$golden_status"
+}
+
+test_build_remote_destination_discovery_batch_script_preserves_dependency_path_failures() {
+	set +e
+	output=$(
+		(
+			zxfer_get_effective_dependency_path() {
+				return 48
+			}
+			zxfer_build_remote_destination_discovery_batch_script \
+				backup/dst backup/dst/src backup
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "Remote destination rendering should preserve secure PATH validation failures." \
+		48 "$status"
+	assertEquals "A failed secure PATH stage should not emit a partial remote script." \
+		"" "$output"
 }
 
 test_build_remote_destination_discovery_batch_script_streams_snapshot_stdout_directly() {
@@ -168,6 +239,20 @@ EOF
 		"2" "$(wc -l <"$zfs_log" | tr -d '[:space:]')"
 	assertEquals "Generated remote batch should remove its target-side temp files." \
 		"" "$(find "$TEST_TMPDIR" -name 'zxfer.destination-discovery.*' -print)"
+
+	injection_marker="$TEST_TMPDIR/remote-batch-render-injected"
+	injected_dataset="backup/dst/src'; : >'$injection_marker'; #"
+	injected_script=$(zxfer_build_remote_destination_discovery_batch_script \
+		"backup/dst" "$injected_dataset" "backup")
+	ZXFER_FAKE_ZFS_LOG="$zfs_log" TMPDIR="$TEST_TMPDIR" \
+		sh -c "$injected_script" >/dev/null 2>&1 || :
+	if [ -e "$injection_marker" ]; then
+		injection_status=0
+	else
+		injection_status=1
+	fi
+	assertEquals "Quoted remote dataset values must not execute inserted shell syntax." \
+		1 "$injection_status"
 }
 
 test_destination_discovery_batch_status_loader_rejects_malformed_sidecars() {
@@ -248,23 +333,10 @@ test_get_zfs_list_remote_target_batches_missing_destination_root_fallback() {
 			}
 			zxfer_invoke_ssh_shell_command_for_host() {
 				printf 'host=%s side=%s\n' "$1" "$3" >>"$SSH_LOG"
-				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
-				printf 'STATUS\tinventory\t1\n'
-				printf 'STATUS\tpool\t0\n'
-				printf 'STATUS\tsnapshot\t0\n'
-				printf 'STATUS\tsnapshot_ran\t0\n'
-				printf 'BEGIN\tinventory_stdout\n'
-				printf 'END\tinventory_stdout\n'
-				printf 'BEGIN\tinventory_stderr\n'
-				printf '%s\n' "cannot open 'backup/dst': no such pool or dataset"
-				printf 'END\tinventory_stderr\n'
-				printf 'BEGIN\tpool_stderr\n'
-				printf 'END\tpool_stderr\n'
-				printf 'BEGIN\tsnapshot_stdout\n'
-				printf 'END\tsnapshot_stdout\n'
-				printf 'BEGIN\tsnapshot_stderr\n'
-				printf 'END\tsnapshot_stderr\n'
-				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+				zxfer_test_emit_remote_destination_discovery_batch \
+					1 0 0 0 "" \
+					"cannot open 'backup/dst': no such pool or dataset" \
+					"" ""
 			}
 			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' "unexpected-pool-probe" >>"$SSH_LOG"
@@ -307,23 +379,8 @@ test_get_zfs_list_remote_target_batches_inventory_failures() {
 				g_source_snapshot_list_pid=""
 			}
 			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
-				printf 'STATUS\tinventory\t13\n'
-				printf 'STATUS\tpool\t\n'
-				printf 'STATUS\tsnapshot\t0\n'
-				printf 'STATUS\tsnapshot_ran\t0\n'
-				printf 'BEGIN\tinventory_stdout\n'
-				printf 'END\tinventory_stdout\n'
-				printf 'BEGIN\tinventory_stderr\n'
-				printf '%s\n' "permission denied"
-				printf 'END\tinventory_stderr\n'
-				printf 'BEGIN\tpool_stderr\n'
-				printf 'END\tpool_stderr\n'
-				printf 'BEGIN\tsnapshot_stdout\n'
-				printf 'END\tsnapshot_stdout\n'
-				printf 'BEGIN\tsnapshot_stderr\n'
-				printf 'END\tsnapshot_stderr\n'
-				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+				zxfer_test_emit_remote_destination_discovery_batch \
+					13 "" 0 0 "" "permission denied" "" ""
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
@@ -341,6 +398,72 @@ test_get_zfs_list_remote_target_batches_inventory_failures() {
 		"$output" "Failed to retrieve list of datasets from the destination: permission denied"
 }
 
+test_get_zfs_list_remote_target_transport_failures_preserve_diagnostic_and_status() {
+	set +e
+	output=$(
+		(
+			g_option_T_target_host=target.example
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' 'tank/src@snapA' >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ssh transport timed out' >&2
+				return 34
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Remote destination transport failures should preserve SSH status." \
+		34 "$status"
+	assertContains "Remote destination transport failures should preserve staged SSH diagnostics." \
+		"$output" 'Failed to retrieve list of datasets from the destination: ssh transport timed out'
+}
+
+test_remote_destination_failure_staging_preserves_original_status_and_diagnostic() {
+	output=$(
+		set +e
+		(
+			g_zxfer_full_remote_destination_list_error_file=unused-error-stage
+			zxfer_run_remote_destination_discovery_batch_to_files() {
+				g_zxfer_remote_destination_discovery_failure_kind=transport
+				g_zxfer_remote_destination_discovery_transport_stderr_result='ssh transport timed out'
+				return 37
+			}
+			zxfer_stage_full_remote_destination_failure_error() {
+				return 44
+			}
+			zxfer_cleanup_failed_full_remote_destination_snapshot_discovery() {
+				printf '%s\n' cleanup=complete
+			}
+			zxfer_throw_error() {
+				printf 'error=%s\nerror_status=%s\n' "$1" "${2:-1}"
+				return 0
+			}
+			zxfer_run_and_publish_full_remote_destination_discovery_batch \
+				backup/dst/src
+			printf 'status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Failure-diagnostic staging errors should preserve the original batch status." \
+		"$output" 'status=37'
+	assertContains "Failure-diagnostic staging errors should preserve validated SSH diagnostics." \
+		"$output" 'error=Failed to retrieve list of datasets from the destination: ssh transport timed out'
+	assertContains "Failure-diagnostic staging errors should report the original status." \
+		"$output" 'error_status=37'
+	assertContains "Failure-diagnostic staging errors should clean discovery state before reporting." \
+		"$output" 'cleanup=complete'
+}
+
 test_get_zfs_list_remote_target_batches_snapshot_failures() {
 	set +e
 	output=$(
@@ -352,25 +475,10 @@ test_get_zfs_list_remote_target_batches_snapshot_failures() {
 				g_source_snapshot_list_pid=""
 			}
 			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
-				printf 'STATUS\tinventory\t0\n'
-				printf 'STATUS\tpool\t\n'
-				printf 'STATUS\tsnapshot\t17\n'
-				printf 'STATUS\tsnapshot_ran\t1\n'
-				printf 'BEGIN\tinventory_stdout\n'
-				printf '%s\n' "backup/dst"
-				printf '%s\n' "backup/dst/src"
-				printf 'END\tinventory_stdout\n'
-				printf 'BEGIN\tinventory_stderr\n'
-				printf 'END\tinventory_stderr\n'
-				printf 'BEGIN\tpool_stderr\n'
-				printf 'END\tpool_stderr\n'
-				printf 'BEGIN\tsnapshot_stdout\n'
-				printf 'END\tsnapshot_stdout\n'
-				printf 'BEGIN\tsnapshot_stderr\n'
-				printf '%s\n' "snapshot list failed"
-				printf 'END\tsnapshot_stderr\n'
-				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
+				zxfer_test_emit_remote_destination_discovery_batch \
+					0 "" 17 1 \
+					"backup/dst
+backup/dst/src" "" "" "snapshot list failed"
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
@@ -466,532 +574,673 @@ test_get_zfs_list_remote_target_batches_malformed_payloads_fail_closed() {
 }
 
 test_run_remote_destination_discovery_batch_preserves_setup_and_transport_failures() {
+	zxfer_test_allocate_remote_destination_batch_outputs
+	zxfer_test_seed_remote_destination_batch_outputs
+
 	output=$(
 		set +e
-		dest_file="$TEST_TMPDIR/remote_batch_failure.dest"
-		err_file="$TEST_TMPDIR/remote_batch_failure.err"
-		snap_file="$TEST_TMPDIR/remote_batch_failure.snap"
-		snap_err_file="$TEST_TMPDIR/remote_batch_failure.snap.err"
-		: >"$dest_file"
-		: >"$err_file"
-		: >"$snap_file"
-		: >"$snap_err_file"
-
 		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
-			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
-			}
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
-			}
-			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
-			}
-			zxfer_prepare_ssh_shell_command_context() {
-				return 0
-			}
-			zxfer_get_temp_file() {
-				return 31
-			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
-		)
-		printf 'temp=%s\n' "$?"
-
-		(
-			g_destination="backup/dst"
+			g_destination=backup/dst
 			zxfer_build_remote_destination_discovery_batch_script() {
 				return 32
 			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
 		)
 		printf 'build=%s\n' "$?"
 
 		(
-			g_destination="backup/dst"
+			g_destination=backup/dst
 			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
+				printf '%s\n' batch-script
 			}
 			zxfer_build_remote_sh_c_command() {
 				return 33
 			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
 		)
 		printf 'command=%s\n' "$?"
 
 		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
+			g_destination=backup/dst
+			g_option_T_target_host=target.example
 			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
+				printf '%s\n' batch-script
 			}
 			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
+				printf '%s\n' remote-command
 			}
 			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "transport-policy-failed"
+				printf '%s\n' transport-policy-failed
 				return 35
 			}
 			zxfer_throw_error() {
 				printf 'transport_error=%s\n' "$1"
 				exit "${2:-1}"
 			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
 		)
-		printf 'transport=%s\n' "$?"
+		printf 'transport_policy=%s\n' "$?"
 
 		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
+			g_destination=backup/dst
+			g_option_T_target_host=target.example
 			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
+				printf '%s\n' batch-script
 			}
 			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
+				printf '%s\n' remote-command
 			}
 			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
+				printf '%s\n' ssh
 			}
 			zxfer_prepare_ssh_shell_command_context() {
-				g_zxfer_ssh_shell_context_error_result="wrapper setup failed"
+				g_zxfer_ssh_shell_context_error_result='wrapper setup failed'
 				return 38
 			}
 			zxfer_throw_error() {
 				printf 'context_error=%s\n' "$1"
 				exit "${2:-1}"
 			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
 		)
 		printf 'context=%s\n' "$?"
 
 		(
-			pool_log="$TEST_TMPDIR/remote_batch_rootless_pool.log"
-			g_destination="backup"
-			g_option_T_target_host="target.example"
+			g_destination=backup/dst
+			g_option_T_target_host=target.example
 			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "$3" >"$pool_log"
-				printf '%s\n' "batch-script"
+				printf '%s\n' batch-script
 			}
 			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
+				printf '%s\n' remote-command
 			}
 			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
-			}
-			zxfer_prepare_ssh_shell_command_context() {
-				return 39
-			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
-			l_rootless_status=$?
-			printf 'rootless_pool=%s\n' "$(cat "$pool_log")"
-			exit "$l_rootless_status"
-		)
-		printf 'context_nomsg=%s\n' "$?"
-
-		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
-			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
-			}
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
-			}
-			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
+				printf '%s\n' ssh
 			}
 			zxfer_prepare_ssh_shell_command_context() {
 				return 0
 			}
-			zxfer_get_temp_file() {
-				if [ "${remote_batch_second_temp_count:-0}" = 1 ]; then
-					return 36
-				fi
-				remote_batch_second_temp_count=1
-				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_second_temp_$remote_batch_second_temp_count.out"
-				: >"$g_zxfer_temp_file_result"
+			zxfer_create_private_temp_dir() {
+				return 31
 			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
 		)
-		printf 'second_temp=%s\n' "$?"
+		printf 'workspace=%s\n' "$?"
 
 		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
+			g_destination=backup/dst
+			g_option_T_target_host=target.example
 			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
+				printf '%s\n' batch-script
 			}
 			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
+				printf '%s\n' remote-command
 			}
 			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
-			}
-			zxfer_prepare_ssh_shell_command_context() {
-				return 0
-			}
-			zxfer_get_temp_file() {
-				if [ "${remote_batch_third_temp_count:-0}" = 0 ]; then
-					remote_batch_third_temp_count=1
-				elif [ "$remote_batch_third_temp_count" = 1 ]; then
-					remote_batch_third_temp_count=2
-				else
-					return 37
-				fi
-				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_third_temp_$remote_batch_third_temp_count.out"
-				: >"$g_zxfer_temp_file_result"
-			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
-		)
-		printf 'third_temp=%s\n' "$?"
-
-		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
-			zxfer_get_temp_file() {
-				if [ "${remote_batch_ssh_temp_count:-0}" = 0 ]; then
-					remote_batch_ssh_temp_count=1
-				elif [ "$remote_batch_ssh_temp_count" = 1 ]; then
-					remote_batch_ssh_temp_count=2
-				else
-					remote_batch_ssh_temp_count=3
-				fi
-				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_ssh_$remote_batch_ssh_temp_count.out"
-				: >"$g_zxfer_temp_file_result"
-			}
-			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
-			}
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
-			}
-			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
+				printf '%s\n' ssh
 			}
 			zxfer_prepare_ssh_shell_command_context() {
 				return 0
 			}
 			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'transport stderr' >&2
 				return 34
 			}
-			zxfer_cleanup_runtime_artifact_path() {
-				printf 'ssh_cleanup=%s\n' "$1"
-				rm -f "$1"
-			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
+			l_test_remote_transport_status=$?
+			printf 'transport_status=%s\n' "$l_test_remote_transport_status"
+			printf 'transport_stderr=%s\n' \
+				"$(zxfer_get_remote_destination_discovery_transport_stderr)"
+			zxfer_test_print_remote_destination_batch_outputs
 		)
-		printf 'ssh=%s\n' "$?"
+	)
 
-		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
-			zxfer_get_temp_file() {
-				if [ "${remote_batch_status_read_temp_count:-0}" = 0 ]; then
-					remote_batch_status_read_temp_count=1
-				elif [ "$remote_batch_status_read_temp_count" = 1 ]; then
-					remote_batch_status_read_temp_count=2
-				else
-					remote_batch_status_read_temp_count=3
-				fi
-				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_status_read_$remote_batch_status_read_temp_count.out"
-				: >"$g_zxfer_temp_file_result"
-			}
-			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
-			}
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
-			}
-			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
-			}
-			zxfer_prepare_ssh_shell_command_context() {
-				return 0
-			}
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' "ZXFER_DESTINATION_DISCOVERY_BATCH_V1"
-			}
-			zxfer_read_snapshot_discovery_capture_file() {
-				return 41
-			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
-		)
+	assertContains "Remote batch script render failures should preserve status." \
+		"$output" 'build=32'
+	assertContains "Remote batch command render failures should preserve status." \
+		"$output" 'command=33'
+	assertContains "Remote transport-policy failures should preserve status." \
+		"$output" 'transport_policy=35'
+	assertContains "Remote transport-policy failures should preserve diagnostics." \
+		"$output" 'transport_error=transport-policy-failed'
+	assertContains "Wrapper-context failures should preserve status and context." \
+		"$output" 'context_error=wrapper setup failed'
+	assertContains "Wrapper-context diagnostics should preserve the legacy reporter status." \
+		"$output" 'context=1'
+	assertContains "Workspace allocation failures should preserve status." \
+		"$output" 'workspace=31'
+	assertContains "SSH failures should preserve the exact transport status." \
+		"$output" 'transport_status=34'
+	assertContains "SSH failures should retain the checked diagnostic channel." \
+		"$output" 'transport_stderr=transport stderr'
+	assertContains "SSH failures must leave inventory output untouched." \
+		"$output" 'inventory=old-inventory'
+	assertContains "SSH failures must leave inventory stderr untouched." \
+		"$output" 'inventory_error=old-inventory-error'
+	assertContains "SSH failures must leave snapshot output untouched." \
+		"$output" 'snapshot=old-snapshot'
+	assertContains "SSH failures must leave snapshot stderr untouched." \
+		"$output" 'snapshot_error=old-snapshot-error'
+}
+
+test_prepare_remote_destination_discovery_batch_preserves_rootless_pool_and_wrapper_status() {
+	pool_file="$TEST_TMPDIR/remote-batch-rootless-pool"
+	set +e
+	(
+		g_destination=backup
+		g_option_T_target_host=target.example
+		g_zxfer_ssh_shell_context_error_result=""
+		zxfer_build_remote_destination_discovery_batch_script() {
+			printf '%s\n' "$3" >"$pool_file"
+			printf '%s\n' batch-script
+		}
+		zxfer_build_remote_sh_c_command() {
+			printf '%s\n' remote-command
+		}
+		zxfer_get_ssh_transport_tokens_for_host() {
+			printf '%s\n' ssh
+		}
+		zxfer_prepare_ssh_shell_command_context() {
+			return 39
+		}
+		zxfer_prepare_remote_destination_discovery_batch_command backup/src
+	)
+	status=$?
+	set -e
+
+	assertEquals "Rootless destinations should pass their full name as the pool probe." \
+		backup "$(cat "$pool_file")"
+	assertEquals "Wrapper-context failures without diagnostics should preserve status." \
+		39 "$status"
+}
+
+test_run_remote_destination_discovery_batch_preserves_transport_sidecar_read_failures() {
+	zxfer_test_allocate_remote_destination_batch_outputs
+	zxfer_test_seed_remote_destination_batch_outputs
+
+	output=$(
+		set +e
+		g_destination=backup/dst
+		g_option_T_target_host=target.example
+		zxfer_prepare_remote_destination_discovery_batch_command() {
+			g_zxfer_remote_destination_discovery_command_result=remote-command
+		}
+		zxfer_invoke_ssh_shell_command_for_host() {
+			printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+		}
+		zxfer_read_snapshot_discovery_capture_file() {
+			return 41
+		}
+		zxfer_run_remote_destination_discovery_batch_to_files \
+			backup/dst/src \
+			"$g_test_remote_batch_inventory_file" \
+			"$g_test_remote_batch_inventory_error_file" \
+			"$g_test_remote_batch_snapshot_file" \
+			"$g_test_remote_batch_snapshot_error_file"
 		printf 'status_read=%s\n' "$?"
 
-		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
-			zxfer_get_temp_file() {
-				if [ "${remote_batch_malformed_status_temp_count:-0}" = 0 ]; then
-					remote_batch_malformed_status_temp_count=1
-				elif [ "$remote_batch_malformed_status_temp_count" = 1 ]; then
-					remote_batch_malformed_status_temp_count=2
-				else
-					remote_batch_malformed_status_temp_count=3
-				fi
-				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_malformed_status_$remote_batch_malformed_status_temp_count.out"
-				: >"$g_zxfer_temp_file_result"
-			}
-			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
-			}
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
-			}
-			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
-			}
-			zxfer_prepare_ssh_shell_command_context() {
-				return 0
-			}
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' "ZXFER_DESTINATION_DISCOVERY_BATCH_V1"
-			}
-			zxfer_read_snapshot_discovery_capture_file() {
-				g_zxfer_snapshot_discovery_file_read_result="not-a-number"
-				return 0
-			}
-			zxfer_throw_error() {
-				printf 'malformed_status_error=%s\n' "$1"
-				exit "${2:-1}"
-			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
-		)
-		printf 'malformed_status=%s\n' "$?"
-
-		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
-			zxfer_get_temp_file() {
-				if [ "${remote_batch_stderr_read_temp_count:-0}" = 0 ]; then
-					remote_batch_stderr_read_temp_count=1
-				elif [ "$remote_batch_stderr_read_temp_count" = 1 ]; then
-					remote_batch_stderr_read_temp_count=2
-				else
-					remote_batch_stderr_read_temp_count=3
-				fi
-				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_stderr_read_$remote_batch_stderr_read_temp_count.out"
-				: >"$g_zxfer_temp_file_result"
-			}
-			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
-			}
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
-			}
-			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
-			}
-			zxfer_prepare_ssh_shell_command_context() {
-				return 0
-			}
-			zxfer_invoke_ssh_shell_command_for_host() {
-				return 34
-			}
-			zxfer_read_snapshot_discovery_capture_file() {
-				if [ "$1" = "$TEST_TMPDIR/remote_batch_stderr_read_2.out" ]; then
-					return 42
-				fi
-				IFS= read -r g_zxfer_snapshot_discovery_file_read_result <"$1" || return "$?"
-			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
-		)
+		g_destination=backup/dst
+		g_option_T_target_host=target.example
+		zxfer_prepare_remote_destination_discovery_batch_command() {
+			g_zxfer_remote_destination_discovery_command_result=remote-command
+		}
+		zxfer_invoke_ssh_shell_command_for_host() {
+			return 34
+		}
+		zxfer_read_snapshot_discovery_capture_file() {
+			if [ "${1##*/}" = transport.stderr ]; then
+				return 42
+			fi
+			zxfer_read_runtime_artifact_file "$1" >/dev/null || return "$?"
+			g_zxfer_snapshot_discovery_file_read_result=$g_zxfer_runtime_artifact_read_result
+		}
+		zxfer_run_remote_destination_discovery_batch_to_files \
+			backup/dst/src \
+			"$g_test_remote_batch_inventory_file" \
+			"$g_test_remote_batch_inventory_error_file" \
+			"$g_test_remote_batch_snapshot_file" \
+			"$g_test_remote_batch_snapshot_error_file"
 		printf 'stderr_read=%s\n' "$?"
+	)
 
+	assertContains "Transport-status read failures should preserve exact status." \
+		"$output" 'status_read=41'
+	assertContains "Transport-stderr read failures should preserve exact status." \
+		"$output" 'stderr_read=42'
+	assertEquals "Transport sidecar read failures must leave inventory untouched." \
+		old-inventory "$(cat "$g_test_remote_batch_inventory_file")"
+	assertEquals "Transport sidecar read failures must leave snapshots untouched." \
+		old-snapshot "$(cat "$g_test_remote_batch_snapshot_file")"
+}
+
+test_run_remote_destination_discovery_batch_uses_one_workspace_and_one_ssh() {
+	zxfer_test_allocate_remote_destination_batch_outputs
+	zxfer_test_seed_remote_destination_batch_outputs
+	ssh_log="$TEST_TMPDIR/remote-batch-workspace.ssh"
+	: >"$ssh_log"
+
+	output=$(
 		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
-			zxfer_get_temp_file() {
-				if [ "${remote_batch_err_write_temp_count:-0}" = 0 ]; then
-					remote_batch_err_write_temp_count=1
-				elif [ "$remote_batch_err_write_temp_count" = 1 ]; then
-					remote_batch_err_write_temp_count=2
-				else
-					remote_batch_err_write_temp_count=3
-				fi
-				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_err_write_$remote_batch_err_write_temp_count.out"
-				: >"$g_zxfer_temp_file_result"
-			}
+			SSH_LOG=$ssh_log
+			g_destination=backup/dst
+			g_option_T_target_host=target.example
+			l_test_remote_workspace="$g_zxfer_run_tmp_root/remote-batch-workspace"
+			l_test_remote_cleanup_count=0
 			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
+				printf '%s\n' batch-script
 			}
 			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
+				printf '%s\n' remote-command
 			}
 			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
+				printf '%s\n' ssh
 			}
 			zxfer_prepare_ssh_shell_command_context() {
 				return 0
 			}
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' "transport stderr" >&2
-				return 34
-			}
-			zxfer_write_runtime_artifact_file() {
-				if [ "$1" = "$err_file" ] && [ $# -gt 1 ] && [ "$2" != "" ]; then
-					return 43
-				fi
-				: >"$1" || return "$?"
-				if [ $# -gt 1 ]; then
-					printf '%s' "$2" >"$1"
-				fi
-			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
-		)
-		printf 'err_write=%s\n' "$?"
-
-		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
-			zxfer_get_temp_file() {
-				if [ "${remote_batch_parse_temp_count:-0}" = 0 ]; then
-					remote_batch_parse_temp_count=1
-				elif [ "$remote_batch_parse_temp_count" = 1 ]; then
-					remote_batch_parse_temp_count=2
-				else
-					remote_batch_parse_temp_count=3
-				fi
-				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_parse_$remote_batch_parse_temp_count.out"
-				: >"$g_zxfer_temp_file_result"
-			}
-			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
-			}
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
-			}
-			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
-			}
-			zxfer_prepare_ssh_shell_command_context() {
-				return 0
-			}
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' "ZXFER_DESTINATION_DISCOVERY_BATCH_V1"
-			}
-			zxfer_throw_error() {
-				printf 'parse_error=%s\n' "$1"
-				exit "${2:-1}"
+			zxfer_create_private_temp_dir() {
+				mkdir -m 700 "$l_test_remote_workspace" || return "$?"
+				g_zxfer_runtime_artifact_path_result=$l_test_remote_workspace
+				printf '%s\n' "$l_test_remote_workspace"
 			}
 			zxfer_cleanup_runtime_artifact_path() {
-				printf 'parse_cleanup=%s\n' "$1"
-				rm -f "$1"
+				[ "$1" = "$l_test_remote_workspace" ] || return 91
+				l_test_remote_cleanup_count=$((l_test_remote_cleanup_count + 1))
+				rm -rf "$l_test_remote_workspace"
 			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' ssh >>"$SSH_LOG"
+				zxfer_test_emit_remote_destination_discovery_batch \
+					0 "" 0 1 \
+					"backup/dst
+backup/dst/src" "" \
+					"backup/dst/src@snapA	guid-a" ""
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
+			printf 'status=%s\n' "$?"
+			printf 'cleanup_count=%s\n' "$l_test_remote_cleanup_count"
+			zxfer_test_print_remote_destination_batch_outputs
 		)
-		printf 'parse=%s\n' "$?"
+	)
 
+	assertContains "Valid batches should succeed." "$output" 'status=0'
+	assertEquals "One remote batch should invoke SSH exactly once." \
+		1 "$(wc -l <"$ssh_log" | tr -d '[:space:]')"
+	assertContains "One remote batch should clean its workspace exactly once." \
+		"$output" 'cleanup_count=1'
+	assertContains "Valid batches should publish complete inventory output." \
+		"$output" 'inventory=backup/dst
+backup/dst/src'
+	assertContains "Valid batches should publish complete snapshot output." \
+		"$output" 'snapshot=backup/dst/src@snapA	guid-a'
+	assertEquals "Normal cleanup should remove the contained workspace." \
+		"" "$(find "$g_zxfer_run_tmp_root" -type d -name 'remote-batch-workspace' -print)"
+}
+
+test_run_remote_destination_discovery_batch_rejects_truncated_and_reordered_protocols() {
+	zxfer_test_allocate_remote_destination_batch_outputs
+	zxfer_test_seed_remote_destination_batch_outputs
+
+	output=$(
+		set +e
 		(
-			g_destination="backup/dst"
-			g_option_T_target_host="target.example"
-			zxfer_get_temp_file() {
-				if [ "${remote_batch_status_load_temp_count:-0}" = 0 ]; then
-					remote_batch_status_load_temp_count=1
-				elif [ "$remote_batch_status_load_temp_count" = 1 ]; then
-					remote_batch_status_load_temp_count=2
-				else
-					remote_batch_status_load_temp_count=3
-				fi
-				g_zxfer_temp_file_result="$TEST_TMPDIR/remote_batch_status_load_$remote_batch_status_load_temp_count.out"
-				: >"$g_zxfer_temp_file_result"
+			g_destination=backup/dst
+			g_option_T_target_host=target.example
+			zxfer_prepare_remote_destination_discovery_batch_command() {
+				g_zxfer_remote_destination_discovery_command_result=remote-command
 			}
-			zxfer_build_remote_destination_discovery_batch_script() {
-				printf '%s\n' "batch-script"
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
+				printf 'BEGIN\tsnapshot_stdout\n'
+				printf '%s\n' 'backup/dst/src@snapA	guid-a'
 			}
-			zxfer_build_remote_sh_c_command() {
-				printf '%s\n' "remote-cmd"
-			}
-			zxfer_get_ssh_transport_tokens_for_host() {
-				printf '%s\n' "ssh"
-			}
-			zxfer_prepare_ssh_shell_command_context() {
+			zxfer_throw_error() {
+				printf 'truncated_error=%s\n' "$1"
 				return 0
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
+			printf 'truncated_status=%s\n' "$?"
+			zxfer_test_print_remote_destination_batch_outputs
+		)
+	)
+	assertContains "Truncated protocols should preserve parser status." \
+		"$output" 'truncated_status=1'
+	assertContains "Truncated protocols should report malformed context." \
+		"$output" 'truncated_error=Malformed destination discovery batch response.'
+	assertContains "Truncated protocols must leave all outputs on the old generation." \
+		"$output" 'snapshot_error=old-snapshot-error'
+
+	zxfer_test_seed_remote_destination_batch_outputs
+	output=$(
+		set +e
+		(
+			g_destination=backup/dst
+			g_option_T_target_host=target.example
+			zxfer_prepare_remote_destination_discovery_batch_command() {
+				g_zxfer_remote_destination_discovery_command_result=remote-command
 			}
 			zxfer_invoke_ssh_shell_command_for_host() {
 				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1'
 				printf 'STATUS\tinventory\t0\n'
-				printf 'STATUS\tpool\t\n'
-				printf 'STATUS\tsnapshot\t0\n'
-				printf 'STATUS\tsnapshot_ran\t1\n'
-				printf 'BEGIN\tinventory_stdout\n'
-				printf '%s\n' "backup/dst"
-				printf 'END\tinventory_stdout\n'
-				printf 'BEGIN\tinventory_stderr\n'
-				printf 'END\tinventory_stderr\n'
-				printf 'BEGIN\tpool_stderr\n'
-				printf 'END\tpool_stderr\n'
 				printf 'BEGIN\tsnapshot_stdout\n'
 				printf 'END\tsnapshot_stdout\n'
-				printf 'BEGIN\tsnapshot_stderr\n'
-				printf 'END\tsnapshot_stderr\n'
-				printf '%s\n' 'ZXFER_DESTINATION_DISCOVERY_BATCH_END'
-			}
-			zxfer_load_destination_discovery_batch_status_file() {
-				return 44
 			}
 			zxfer_throw_error() {
-				printf 'load_error=%s\n' "$1"
-				exit "${2:-1}"
+				return 0
 			}
-			zxfer_run_remote_destination_discovery_batch_to_files "backup/dst/src" "$dest_file" "$err_file" "$snap_file" "$snap_err_file"
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
+			printf 'reordered_status=%s\n' "$?"
+			zxfer_test_print_remote_destination_batch_outputs
 		)
-		printf 'load=%s\n' "$?"
+	)
+	assertContains "Reordered protocols should fail closed." \
+		"$output" 'reordered_status=1'
+	assertContains "Reordered protocols must leave inventory on the old generation." \
+		"$output" 'inventory=old-inventory'
+	assertContains "Reordered protocols must leave snapshot on the old generation." \
+		"$output" 'snapshot=old-snapshot'
+}
+
+test_run_remote_destination_discovery_batch_preserves_stage_and_readback_failures() {
+	zxfer_test_allocate_remote_destination_batch_outputs
+	zxfer_test_seed_remote_destination_batch_outputs
+	ssh_log="$TEST_TMPDIR/remote-batch-stage-failure.ssh"
+	: >"$ssh_log"
+
+	output=$(
+		set +e
+		(
+			SSH_LOG=$ssh_log
+			g_destination=backup/dst
+			g_option_T_target_host=target.example
+			zxfer_prepare_remote_destination_discovery_batch_command() {
+				g_zxfer_remote_destination_discovery_command_result=remote-command
+			}
+			zxfer_initialize_remote_destination_discovery_workspace_files() {
+				return 45
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf '%s\n' ssh >>"$SSH_LOG"
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
+			printf 'stage_status=%s\n' "$?"
+			zxfer_test_print_remote_destination_batch_outputs
+		)
+	)
+	assertContains "Workspace stage failures should preserve exact status." \
+		"$output" 'stage_status=45'
+	assertEquals "Workspace stage failures should happen before SSH." \
+		"" "$(cat "$ssh_log")"
+	assertContains "Workspace stage failures must preserve output state." \
+		"$output" 'inventory=old-inventory'
+
+	zxfer_test_seed_remote_destination_batch_outputs
+	output=$(
+		set +e
+		(
+			g_destination=backup/dst
+			g_option_T_target_host=target.example
+			zxfer_prepare_remote_destination_discovery_batch_command() {
+				g_zxfer_remote_destination_discovery_command_result=remote-command
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				zxfer_test_emit_remote_destination_discovery_batch \
+					0 "" 0 1 'backup/dst' "" "" ""
+			}
+			zxfer_validate_remote_destination_discovery_workspace_files() {
+				return 46
+			}
+			zxfer_throw_error() {
+				return 0
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
+			printf 'readback_status=%s\n' "$?"
+			zxfer_test_print_remote_destination_batch_outputs
+		)
+	)
+	assertContains "Readback validation failures should preserve exact status." \
+		"$output" 'readback_status=46'
+	assertContains "Readback failures must preserve snapshot output state." \
+		"$output" 'snapshot=old-snapshot'
+}
+
+test_run_remote_destination_discovery_batch_rolls_back_late_publish_failures() {
+	zxfer_test_allocate_remote_destination_batch_outputs
+	zxfer_test_seed_remote_destination_batch_outputs
+
+	output=$(
+		set +e
+		(
+			g_destination=backup/dst
+			g_option_T_target_host=target.example
+			zxfer_prepare_remote_destination_discovery_batch_command() {
+				g_zxfer_remote_destination_discovery_command_result=remote-command
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				zxfer_test_emit_remote_destination_discovery_batch \
+					0 "" 0 1 'backup/dst' "" \
+					'backup/dst/src@snapA	guid-a' ""
+			}
+			zxfer_publish_remote_destination_discovery_staged_files() {
+				mv -f \
+					"$g_zxfer_remote_destination_discovery_inventory_stage_file" \
+					"$g_zxfer_remote_destination_discovery_inventory_stderr_stage_file" \
+					"$g_zxfer_run_tmp_root" || return "$?"
+				return 47
+			}
+			zxfer_throw_error() {
+				printf 'publish_error=%s\n' "$1"
+				return 0
+			}
+			zxfer_run_remote_destination_discovery_batch_to_files \
+				backup/dst/src \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
+			printf 'publish_status=%s\n' "$?"
+			zxfer_test_print_remote_destination_batch_outputs
+		)
 	)
 
-	assertContains "Remote batch temp allocation failures should preserve status." \
-		"$output" "temp=31"
-	assertContains "Remote batch script render failures should preserve status." \
-		"$output" "build=32"
-	assertContains "Remote batch command render failures should preserve status." \
-		"$output" "command=33"
-	assertContains "Remote batch transport token failures should preserve status." \
-		"$output" "transport=35"
-	assertContains "Remote batch transport token failures should preserve diagnostics." \
-		"$output" "transport_error=transport-policy-failed"
-	assertContains "Remote batch wrapper setup failures should preserve diagnostics." \
-		"$output" "context_error=wrapper setup failed"
-	assertContains "Remote batch wrapper setup failures without diagnostics should preserve status." \
-		"$output" "context_nomsg=39"
-	assertContains "Remote batch rootless destination roots should be passed through as the pool probe name." \
-		"$output" "rootless_pool=backup"
-	assertContains "Remote batch second temp allocation failures should preserve status." \
-		"$output" "second_temp=36"
-	assertContains "Remote batch third temp allocation failures should preserve status." \
-		"$output" "third_temp=37"
-	assertContains "Remote batch SSH failures should preserve transport status." \
-		"$output" "ssh=34"
-	assertContains "Remote batch transport status read failures should preserve status." \
-		"$output" "status_read=41"
-	assertContains "Remote batch malformed transport status should report context." \
-		"$output" "malformed_status_error=Malformed destination discovery transport status."
-	assertContains "Remote batch malformed transport status should fail closed." \
-		"$output" "malformed_status=1"
-	assertContains "Remote batch transport stderr read failures should preserve status." \
-		"$output" "stderr_read=42"
-	assertContains "Remote batch transport stderr stage failures should preserve status." \
-		"$output" "err_write=43"
-	assertContains "Remote batch parse failures should report malformed batch context." \
-		"$output" "parse_error=Malformed destination discovery batch response."
-	assertContains "Remote batch parse failures should preserve parser status." \
-		"$output" "parse=1"
-	assertContains "Remote batch status load failures should report malformed batch context." \
-		"$output" "load_error=Malformed destination discovery batch response."
-	assertContains "Remote batch status load failures should preserve status." \
-		"$output" "load=44"
-	assertContains "Remote batch SSH failures should clean the transport status sidecar." \
-		"$output" "ssh_cleanup=$TEST_TMPDIR/remote_batch_ssh_1.out"
-	assertContains "Remote batch SSH failures should clean the transport stderr sidecar." \
-		"$output" "ssh_cleanup=$TEST_TMPDIR/remote_batch_ssh_2.out"
-	assertContains "Remote batch SSH failures should clean the batch status sidecar." \
-		"$output" "ssh_cleanup=$TEST_TMPDIR/remote_batch_ssh_3.out"
-	assertContains "Remote batch parse failures should clean the transport status sidecar." \
-		"$output" "parse_cleanup=$TEST_TMPDIR/remote_batch_parse_1.out"
-	assertContains "Remote batch parse failures should clean the transport stderr sidecar." \
-		"$output" "parse_cleanup=$TEST_TMPDIR/remote_batch_parse_2.out"
-	assertContains "Remote batch parse failures should clean the batch status sidecar." \
-		"$output" "parse_cleanup=$TEST_TMPDIR/remote_batch_parse_3.out"
+	assertContains "Late publish failures should preserve their exact status." \
+		"$output" 'publish_status=47'
+	assertContains "Late publish failures should report malformed batch context." \
+		"$output" 'publish_error=Malformed destination discovery batch response.'
+	assertContains "Late publish failures should roll inventory back." \
+		"$output" 'inventory=old-inventory'
+	assertContains "Late publish failures should roll inventory stderr back." \
+		"$output" 'inventory_error=old-inventory-error'
+	assertContains "Late publish failures should roll snapshots back." \
+		"$output" 'snapshot=old-snapshot'
+	assertContains "Late publish failures should roll snapshot stderr back." \
+		"$output" 'snapshot_error=old-snapshot-error'
+}
+
+test_remote_destination_discovery_transaction_restores_partial_backup() {
+	zxfer_test_allocate_remote_destination_batch_outputs
+	zxfer_test_seed_remote_destination_batch_outputs
+
+	output=$(
+		set +e
+		(
+			zxfer_allocate_remote_destination_discovery_workspace \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file" || exit "$?"
+			printf '%s' new-inventory >"$g_zxfer_remote_destination_discovery_inventory_stage_file"
+			printf '%s' new-inventory-error >"$g_zxfer_remote_destination_discovery_inventory_stderr_stage_file"
+			printf '%s' new-snapshot >"$g_zxfer_remote_destination_discovery_snapshot_stage_file"
+			printf '%s' new-snapshot-error >"$g_zxfer_remote_destination_discovery_snapshot_stderr_stage_file"
+			zxfer_backup_remote_destination_discovery_publish_targets() {
+				mv -f "$g_zxfer_remote_destination_discovery_inventory_target_file" \
+					"$g_zxfer_remote_destination_discovery_rollback_dir" || return "$?"
+				return 48
+			}
+			zxfer_publish_remote_destination_discovery_workspace_files
+			printf 'status=%s\n' "$?"
+			zxfer_test_print_remote_destination_batch_outputs
+			zxfer_cleanup_remote_destination_discovery_workspace
+		)
+	)
+
+	assertContains "Partial backup failures should preserve their original status." \
+		"$output" 'status=48'
+	assertContains "Partial backup failures should restore inventory." \
+		"$output" 'inventory=old-inventory'
+	assertContains "Partial backup failures should retain inventory stderr." \
+		"$output" 'inventory_error=old-inventory-error'
+	assertContains "Partial backup failures should retain snapshots." \
+		"$output" 'snapshot=old-snapshot'
+	assertContains "Partial backup failures should retain snapshot stderr." \
+		"$output" 'snapshot_error=old-snapshot-error'
+}
+
+test_remote_destination_discovery_transaction_clears_all_targets_when_rollback_fails() {
+	zxfer_test_allocate_remote_destination_batch_outputs
+	zxfer_test_seed_remote_destination_batch_outputs
+
+	output=$(
+		set +e
+		(
+			zxfer_allocate_remote_destination_discovery_workspace \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file" || exit "$?"
+			printf '%s' new-inventory >"$g_zxfer_remote_destination_discovery_inventory_stage_file"
+			printf '%s' new-inventory-error >"$g_zxfer_remote_destination_discovery_inventory_stderr_stage_file"
+			printf '%s' new-snapshot >"$g_zxfer_remote_destination_discovery_snapshot_stage_file"
+			printf '%s' new-snapshot-error >"$g_zxfer_remote_destination_discovery_snapshot_stderr_stage_file"
+			zxfer_publish_remote_destination_discovery_staged_files() {
+				mv -f \
+					"$g_zxfer_remote_destination_discovery_inventory_stage_file" \
+					"$g_zxfer_remote_destination_discovery_inventory_stderr_stage_file" \
+					"$g_zxfer_run_tmp_root" || return "$?"
+				return 49
+			}
+			zxfer_restore_remote_destination_discovery_publish_targets() {
+				return 1
+			}
+			zxfer_publish_remote_destination_discovery_workspace_files
+			printf 'status=%s\n' "$?"
+			zxfer_test_print_remote_destination_batch_outputs
+			zxfer_cleanup_remote_destination_discovery_workspace
+		)
+	)
+
+	assertEquals "A failed rollback should preserve the publication status and clear every caller target." \
+		"status=49
+inventory=
+inventory_error=
+snapshot=
+snapshot_error=" "$output"
+}
+
+test_remote_destination_discovery_workspace_rejects_untrusted_publish_targets() {
+	zxfer_test_allocate_remote_destination_batch_outputs
+	outside_target="$TEST_TMPDIR/outside-remote-batch-target"
+	workspace_log="$TEST_TMPDIR/untrusted-remote-batch-workspace.log"
+	: >"$outside_target"
+	: >"$workspace_log"
+
+	output=$(
+		set +e
+		(
+			WORKSPACE_LOG=$workspace_log
+			zxfer_create_private_temp_dir() {
+				printf '%s\n' called >>"$WORKSPACE_LOG"
+				return 90
+			}
+			zxfer_allocate_remote_destination_discovery_workspace \
+				"$outside_target" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
+			printf 'outside_status=%s\n' "$?"
+			zxfer_allocate_remote_destination_discovery_workspace \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
+			printf 'duplicate_status=%s\n' "$?"
+			mv "$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_file.real" || exit "$?"
+			ln -s "$g_test_remote_batch_inventory_file.real" \
+				"$g_test_remote_batch_inventory_file" || exit "$?"
+			zxfer_allocate_remote_destination_discovery_workspace \
+				"$g_test_remote_batch_inventory_file" \
+				"$g_test_remote_batch_inventory_error_file" \
+				"$g_test_remote_batch_snapshot_file" \
+				"$g_test_remote_batch_snapshot_error_file"
+			printf 'symlink_status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Workspace allocation should reject targets outside the private run root." \
+		"$output" 'outside_status=1'
+	assertContains "Workspace allocation should reject duplicate publish targets." \
+		"$output" 'duplicate_status=1'
+	assertContains "Workspace allocation should reject symlink publish targets." \
+		"$output" 'symlink_status=1'
+	assertEquals "Rejected targets should fail before allocating a workspace." \
+		"" "$(cat "$workspace_log")"
 }
 
 test_get_zfs_list_local_destination_discovery_does_not_use_remote_batch() {
@@ -1470,4 +1719,250 @@ test_get_zfs_list_reports_source_stderr_readback_failures_after_background_failu
 		"$output" "cmd=sh -c 'exit 1'"
 	assertContains "Background source stderr readback failures should report the staged stderr context." \
 		"$output" "msg=Failed to read staged source snapshot stderr."
+}
+
+test_prepare_remote_destination_discovery_batch_preserves_transport_token_failure_after_reporting() {
+	set +e
+	output=$(
+		(
+			g_destination="backup/dst"
+			g_option_T_target_host="target.example invalid-wrapper"
+			zxfer_build_remote_destination_discovery_batch_script() {
+				printf '%s\n' "batch script"
+			}
+			zxfer_build_remote_sh_c_command() {
+				printf '%s\n' "sh -c batch"
+			}
+			zxfer_get_ssh_transport_tokens_for_host() {
+				printf '%s\n' "invalid wrapper transport"
+				return 44
+			}
+			zxfer_throw_error() {
+				printf 'reported=%s status=%s\n' "$1" "$2"
+				return 0
+			}
+			zxfer_prepare_remote_destination_discovery_batch_command "backup/dst/src"
+			printf 'status=%s\n' "$?"
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "The prepared-command test wrapper should finish after publishing the preserved status." \
+		0 "$status"
+	assertContains "Transport-token failures should pass their diagnostic and status through the reporter." \
+		"$output" "reported=invalid wrapper transport status=44"
+	assertContains "A returning reporter should not replace the transport-token failure status." \
+		"$output" "status=44"
+}
+
+test_remote_destination_discovery_publish_target_rejects_reserved_workspace_names() {
+	reserved_target="$g_zxfer_run_tmp_root/rollback"
+	zxfer_write_runtime_artifact_file "$reserved_target" "old payload"
+
+	set +e
+	zxfer_remote_destination_discovery_publish_target_is_valid "$reserved_target"
+	status=$?
+	set -e
+
+	assertEquals "Caller-visible discovery files should reject names reserved for the contained workspace transaction." \
+		1 "$status"
+}
+
+test_load_remote_destination_discovery_transport_status_rejects_nonnumeric_content() {
+	status_file="$g_zxfer_run_tmp_root/remote-discovery-transport-status"
+	zxfer_write_runtime_artifact_file "$status_file" "not-a-status"
+	g_zxfer_remote_destination_discovery_transport_status_file=$status_file
+	g_zxfer_remote_destination_discovery_failure_kind=""
+	g_zxfer_remote_destination_discovery_failure_status=""
+
+	set +e
+	zxfer_load_remote_destination_discovery_transport_status
+	status=$?
+	set -e
+
+	assertEquals "Nonnumeric SSH status sidecars should fail closed." 1 "$status"
+	assertEquals "Nonnumeric SSH status sidecars should retain the malformed-status failure kind." \
+		"transport_status_malformed" "$g_zxfer_remote_destination_discovery_failure_kind"
+	assertEquals "Nonnumeric SSH status sidecars should publish the stable malformed-status value." \
+		1 "$g_zxfer_remote_destination_discovery_failure_status"
+}
+
+test_restore_remote_destination_discovery_publish_targets_reports_each_partial_move_failure() {
+	rollback_dir="$g_zxfer_run_tmp_root/remote-discovery-rollback"
+	mkdir "$rollback_dir"
+	g_zxfer_remote_destination_discovery_rollback_dir=$rollback_dir
+	g_zxfer_remote_destination_discovery_inventory_target_file="$g_zxfer_run_tmp_root/inventory-target"
+	g_zxfer_remote_destination_discovery_inventory_stderr_target_file="$g_zxfer_run_tmp_root/inventory-stderr-target"
+	g_zxfer_remote_destination_discovery_snapshot_target_file="$g_zxfer_run_tmp_root/snapshot-target"
+	g_zxfer_remote_destination_discovery_snapshot_stderr_target_file="$g_zxfer_run_tmp_root/snapshot-stderr-target"
+	zxfer_write_runtime_artifact_file "$rollback_dir/inventory-target" "old inventory"
+	zxfer_write_runtime_artifact_file "$rollback_dir/inventory-stderr-target" "old inventory stderr"
+	zxfer_write_runtime_artifact_file "$rollback_dir/snapshot-target" "old snapshot"
+	# Keep the set partial so the owner takes its checked one-by-one restore path.
+
+	set +e
+	output=$(
+		(
+			mv() {
+				return 1
+			}
+			zxfer_restore_remote_destination_discovery_publish_targets
+			printf 'status=%s\n' "$?"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "The partial-restore test wrapper should finish after recording the owner status." \
+		0 "$status"
+	assertContains "Any failed partial rollback move should make the whole four-file restore fail." \
+		"$output" "status=1"
+
+	# Exercise the fourth fixed pair separately; a complete four-file set takes
+	# the optimized multi-file restore branch instead of the partial path.
+	rm -f "$rollback_dir/inventory-target" \
+		"$rollback_dir/inventory-stderr-target" \
+		"$rollback_dir/snapshot-target"
+	zxfer_write_runtime_artifact_file "$rollback_dir/snapshot-stderr-target" \
+		"old snapshot stderr"
+	set +e
+	fourth_output=$(
+		(
+			mv() {
+				return 1
+			}
+			zxfer_restore_remote_destination_discovery_publish_targets
+			printf 'status=%s\n' "$?"
+		)
+	)
+	fourth_status=$?
+	set -e
+
+	assertEquals "The fourth-pair restore test wrapper should finish after recording the owner status." \
+		0 "$fourth_status"
+	assertContains "A failed snapshot-stderr rollback should make the fixed-pair restore fail." \
+		"$fourth_output" "status=1"
+}
+
+test_clear_remote_destination_discovery_publish_targets_reports_clear_failure() {
+	g_zxfer_remote_destination_discovery_inventory_target_file="$g_zxfer_run_tmp_root/clear-inventory"
+	g_zxfer_remote_destination_discovery_inventory_stderr_target_file="$g_zxfer_run_tmp_root/clear-inventory-stderr"
+	g_zxfer_remote_destination_discovery_snapshot_target_file="$g_zxfer_run_tmp_root/clear-snapshot"
+	g_zxfer_remote_destination_discovery_snapshot_stderr_target_file="$g_zxfer_run_tmp_root/clear-snapshot-stderr"
+
+	set +e
+	output=$(
+		(
+			zxfer_write_runtime_artifact_file() {
+				return 27
+			}
+			zxfer_clear_remote_destination_discovery_publish_targets
+			printf 'status=%s\n' "$?"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "The clear-failure test wrapper should finish after recording the owner status." \
+		0 "$status"
+	assertContains "A failed fail-closed target clear should remain observable to its coordinator." \
+		"$output" "status=1"
+}
+
+test_publish_remote_destination_discovery_workspace_clears_after_backup_restore_failure() {
+	set +e
+	output=$(
+		(
+			zxfer_backup_remote_destination_discovery_publish_targets() {
+				return 31
+			}
+			zxfer_restore_remote_destination_discovery_publish_targets() {
+				printf '%s\n' restore
+				return 1
+			}
+			zxfer_clear_remote_destination_discovery_publish_targets() {
+				printf '%s\n' clear
+				return 0
+			}
+			zxfer_publish_remote_destination_discovery_workspace_files
+			printf 'status=%s\n' "$?"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "The publication-failure test wrapper should finish after recording the owner status." \
+		0 "$status"
+	assertContains "A partial backup that cannot be restored should clear every caller-visible target." \
+		"$output" "clear"
+	assertContains "Publication should preserve the original backup failure over cleanup failures." \
+		"$output" "status=31"
+}
+
+test_process_remote_destination_discovery_workspace_classifies_status_loader_failure() {
+	set +e
+	output=$(
+		(
+			g_zxfer_remote_destination_discovery_parser_status_result=0
+			g_zxfer_remote_destination_discovery_transport_status_result=0
+			g_zxfer_remote_destination_discovery_batch_status_file="batch.status"
+			zxfer_execute_remote_destination_discovery_batch_pipeline() {
+				return 0
+			}
+			zxfer_load_remote_destination_discovery_transport_status() {
+				g_zxfer_remote_destination_discovery_transport_status_result=0
+				return 0
+			}
+			zxfer_load_destination_discovery_batch_status_file() {
+				return 23
+			}
+			zxfer_process_remote_destination_discovery_workspace
+			printf 'status=%s\n' "$?"
+			printf 'kind=%s\n' "$g_zxfer_remote_destination_discovery_failure_kind"
+			printf 'failure_status=%s\n' "$g_zxfer_remote_destination_discovery_failure_status"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "The status-loader test wrapper should finish after recording the failure channel." \
+		0 "$status"
+	assertContains "Malformed compact status sidecars should use the batch-status failure kind." \
+		"$output" "kind=batch_status"
+	assertContains "Compact status-sidecar failures should preserve their exact stage status." \
+		"$output" "failure_status=23"
+	assertContains "The workspace processor should return the compact status-sidecar failure." \
+		"$output" "status=23"
+}
+
+test_report_remote_destination_discovery_failure_handles_malformed_and_unknown_kinds() {
+	set +e
+	output=$(
+		(
+			zxfer_throw_error() {
+				printf 'error=%s\n' "$1"
+				return 0
+			}
+			g_zxfer_remote_destination_discovery_failure_kind=transport_status_malformed
+			g_zxfer_remote_destination_discovery_failure_status=77
+			zxfer_report_remote_destination_discovery_failure
+			printf 'malformed_status=%s\n' "$?"
+			g_zxfer_remote_destination_discovery_failure_kind=unknown
+			unset g_zxfer_remote_destination_discovery_failure_status
+			zxfer_report_remote_destination_discovery_failure
+			printf 'unknown_status=%s\n' "$?"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "The failure-reporter test wrapper should finish after recording both stable statuses." \
+		0 "$status"
+	assertContains "Malformed transport status should retain its operator-visible error text." \
+		"$output" "error=Malformed destination discovery transport status."
+	assertContains "Malformed transport status should return the stable generic status after a returning reporter." \
+		"$output" "malformed_status=1"
+	assertContains "Unknown failure kinds should retain the stable generic fallback status." \
+		"$output" "unknown_status=1"
 }

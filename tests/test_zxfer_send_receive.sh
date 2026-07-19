@@ -60,9 +60,9 @@ zxfer_send_receive_test_reset_job_state() {
 zxfer_send_receive_test_reset_runtime_state() {
 	g_is_performed_send_destroy=0
 	g_zxfer_failure_last_command=""
-	g_delete_source_tmp_file=""
-	g_delete_dest_tmp_file=""
-	g_delete_snapshots_to_delete_tmp_file=""
+	g_zxfer_snapshot_delete_source_identities_file=""
+	g_zxfer_snapshot_delete_destination_identities_file=""
+	g_zxfer_snapshot_delete_difference_file=""
 	g_ssh_origin_control_socket=""
 	g_zxfer_ssh_control_socket_dir_result=""
 	g_ssh_target_control_socket=""

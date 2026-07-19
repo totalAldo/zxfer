@@ -479,6 +479,28 @@ test_flush_captured_backup_metadata_if_live_flushes_and_restores_failure_stage()
 		"property transfer" "$g_zxfer_failure_stage"
 }
 
+test_flush_captured_backup_metadata_if_live_preserves_write_failure_status_and_stage() {
+	g_option_k_backup_property_mode=1
+	g_option_n_dryrun=0
+	g_zxfer_failure_stage="property transfer"
+	g_backup_file_contents=$(zxfer_test_backup_metadata_row "." "compression=lz4=local")
+
+	zxfer_write_backup_properties() {
+		zxfer_set_failure_stage "backup metadata write"
+		return 37
+	}
+
+	set +e
+	zxfer_flush_captured_backup_metadata_if_live
+	status=$?
+	unset -f zxfer_write_backup_properties
+
+	assertEquals "Live backup flushes should preserve the exact metadata-write failure status." \
+		37 "$status"
+	assertEquals "Failed live backup flushes should retain the metadata-write failure stage for structured reporting." \
+		"backup metadata write" "$g_zxfer_failure_stage"
+}
+
 test_flush_captured_backup_metadata_if_live_skips_dry_run_and_empty_buffers() {
 	log="$TEST_TMPDIR/flush_backup_dryrun.log"
 	: >"$log"
@@ -1083,7 +1105,7 @@ test_write_backup_properties_renders_remote_dry_run_command() {
 	assertContains "Remote dry-run backup writes should preview the remote target guards that live writes now enforce." \
 		"$result" "Refusing to write backup metadata because the target is a symlink."
 	assertContains "Remote dry-run backup writes should stage remote writes through mktemp before the final rename." \
-		"$result" "mktemp -d"
+		"$result" "create_backup_temp -d"
 	assertEquals "Remote dry-run backup writes should now preview the primary metadata file and forwarded alias as one transactional command." \
 		1 "$(printf '%s\n' "$result" | wc -l | tr -d '[:space:]')"
 	assertContains "Remote dry-run backup writes should preview rollback staging for the forwarded alias and primary file." \
@@ -2014,4 +2036,173 @@ test_get_forwarded_backup_properties_for_source_rejects_unexpected_forwarded_val
 		"$output" "Failed to validate forwarded backup property file"
 	assertEquals "Unexpected forwarded provenance validation failures should restore the prior restored-backup scratch state." \
 		"saved-cache" "$g_restored_backup_file_contents"
+}
+
+test_backup_metadata_relative_paths_reject_empty_and_outside_datasets() {
+	set +e
+	zxfer_backup_metadata_relative_path_for_dataset "" "tank/src" >/dev/null
+	empty_status=$?
+	zxfer_backup_metadata_relative_path_for_dataset "tank/src" "tank/other" >/dev/null
+	outside_status=$?
+	set -e
+
+	assertEquals "Relative backup metadata paths should reject an empty source root." \
+		1 "$empty_status"
+	assertEquals "Relative backup metadata paths should reject datasets outside the exact source tree." \
+		1 "$outside_status"
+}
+
+test_backup_metadata_record_key_helpers_report_outside_source_rows() {
+	set +e
+	output=$(
+		(
+			g_initial_source="tank/src"
+			zxfer_throw_error() {
+				printf 'error=%s\n' "$1"
+				return 0
+			}
+			zxfer_get_backup_metadata_record_key_for_source "tank/other"
+			zxfer_get_backup_metadata_record_key_for_source() {
+				return 1
+			}
+			zxfer_append_backup_metadata_row_to_record_list "" \
+				"tank/other" "compression=lz4=local"
+		) 2>&1
+	)
+	status=$?
+	set -e
+
+	assertEquals "Returning test reporters should let both owner guards finish without a shell error." \
+		0 "$status"
+	assertContains "Record-key lookup should identify a source outside the metadata root." \
+		"$output" "Backup metadata source dataset [tank/other] is outside source root [tank/src]."
+	outside_error_count=$(printf '%s\n' "$output" |
+		grep -F -c 'Backup metadata source dataset [tank/other] is outside source root [tank/src].')
+	assertEquals "The row append boundary should retain its own outside-root diagnostic after key lookup reports the same guard." \
+		2 "$outside_error_count"
+}
+
+test_try_backup_restore_candidate_set_reports_legacy_filename_failure_as_missing() {
+	set +e
+	output=$(
+		(
+			zxfer_get_backup_metadata_filename() {
+				printf '%s\n' current.v2
+			}
+			zxfer_try_backup_restore_candidate() {
+				return 1
+			}
+			zxfer_get_legacy_backup_metadata_filename() {
+				return 37
+			}
+			zxfer_try_backup_restore_candidate_set "/backup" \
+				"tank/src" "backup/dst" "tank/src" "backup/dst"
+			printf 'status=%s\n' "$?"
+			printf 'candidate=%s\n' "$g_zxfer_backup_restore_candidate_path_result"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "The fallback wrapper should return cleanly after publishing its stable status." \
+		0 "$status"
+	assertContains "Legacy filename derivation failures should retain the stable missing-candidate status." \
+		"$output" "status=1"
+	assertContains "A legacy filename failure should leave the current exact candidate visible to diagnostics." \
+		"$output" "candidate=/backup/current.v2"
+}
+
+test_write_backup_metadata_pair_contents_to_store_returns_after_nonfatal_reporter() {
+	set +e
+	output=$(
+		(
+			g_option_T_target_host=""
+			g_backup_storage_root="/backup"
+			zxfer_ensure_local_backup_dir() {
+				return 0
+			}
+			zxfer_require_backup_write_target_path() {
+				return 0
+			}
+			zxfer_write_local_backup_file_pair_atomically() {
+				return 1
+			}
+			zxfer_throw_error() {
+				printf 'error=%s\n' "$1"
+				return 0
+			}
+			zxfer_write_backup_metadata_pair_contents_to_store \
+				"/backup/primary" "/backup/primary/file" "primary" \
+				"/backup/forwarded" "/backup/forwarded/file" "forwarded"
+			printf 'status=%s\n' "$?"
+		)
+	)
+	status=$?
+	set -e
+
+	assertEquals "The pair writer contract should remain defined when a test reporter returns." \
+		0 "$status"
+	assertContains "A failed pair write should keep the operator-visible generic write diagnostic." \
+		"$output" "Error writing backup file. Is filesystem mounted?"
+	assertContains "A returning reporter should reach the pair writer's explicit success-compatible return." \
+		"$output" "status=0"
+}
+
+test_write_backup_properties_reports_primary_and_forwarded_parent_failures() {
+	set +e
+	primary_output=$(
+		{
+			g_backup_file_contents=".	compression=lz4=local"
+			g_backup_file_extension=".zxfer_backup_info"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			zxfer_get_path_parent_dir() {
+				return 41
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_write_backup_properties
+		} 2>&1
+	)
+	primary_status=$?
+	forwarded_output=$(
+		{
+			g_backup_file_contents=".	compression=lz4=local"
+			g_backup_file_extension=".zxfer_backup_info"
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_actual_dest="backup/dst/src"
+			zxfer_get_backup_storage_dir_for_dataset_tree() {
+				if [ "$1" = "tank/src" ]; then
+					printf '%s\n' "/primary"
+				else
+					printf '%s\n' "/forwarded"
+				fi
+			}
+			zxfer_get_path_parent_dir() {
+				if [ "${1#/forwarded/}" != "$1" ]; then
+					return 42
+				fi
+				printf '%s\n' "${1%/*}"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_write_backup_properties
+		} 2>&1
+	)
+	forwarded_status=$?
+	set -e
+
+	assertEquals "Primary metadata parent derivation failures should fail closed." \
+		1 "$primary_status"
+	assertContains "Primary metadata parent failures should identify the derived backup path." \
+		"$primary_output" "Failed to derive backup metadata directory for"
+	assertEquals "Forwarded metadata parent derivation failures should fail closed." \
+		1 "$forwarded_status"
+	assertContains "Forwarded metadata parent failures should identify the forwarded path." \
+		"$forwarded_output" "Failed to derive forwarded backup metadata directory for /forwarded/"
 }

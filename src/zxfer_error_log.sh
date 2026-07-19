@@ -145,24 +145,14 @@ zxfer_prepare_error_log_fallback_lock_dir() {
 	printf '%s/lock\n' "$l_fallback_parent_dir"
 }
 
-# Purpose: Capture the reporting helper output into staged state or module
-# globals for later use.
-# Usage: Called during failure reporting, profiling, and verbose operator
-# output when later helpers need a checked snapshot of command output or
-# computed state.
+# Purpose: Capture reporting-helper output through the module-owned result.
+# Usage: Called when fallback-lock discovery needs a checked current-shell
+# snapshot without accepting an indirect assignment target.
+# Side effects: Publishes the captured value in
+# g_zxfer_reporting_capture_result, or clears it before returning non-zero.
 zxfer_capture_reporting_helper_output() {
-	l_result_var=${1:-}
-	case "$l_result_var" in
-	l_?*)
-		zxfer_shell_variable_name_is_valid "$l_result_var" || return 1
-		;;
-	*)
-		return 1
-		;;
-	esac
-	shift
-
 	g_zxfer_reporting_capture_result=""
+	[ "$#" -gt 0 ] || return 1
 	zxfer_capture_runtime_artifact_command_output "zxfer-reporting" "$@" ||
 		return "$?"
 
@@ -173,7 +163,6 @@ zxfer_capture_reporting_helper_output() {
 		g_zxfer_reporting_capture_result=${g_zxfer_reporting_capture_result%?}
 		;;
 	esac
-	eval "$l_result_var=\$g_zxfer_reporting_capture_result"
 	return 0
 }
 
@@ -183,26 +172,27 @@ zxfer_capture_reporting_helper_output() {
 # output when sibling helpers need the same lookup without duplicating module
 # logic.
 zxfer_get_error_log_fallback_lock_dir() {
-	l_fallback_log_path=$1
+	l_get_error_log_fallback_lock_dir_fallback_log_path=$1
 
-	l_fallback_tmpdir=""
+	l_get_error_log_fallback_lock_dir_fallback_tmpdir=""
 	if [ -n "${TMPDIR:-}" ] &&
-		zxfer_capture_reporting_helper_output l_fallback_tmpdir zxfer_validate_temp_root_candidate "$TMPDIR"; then
-		:
-	elif zxfer_capture_reporting_helper_output l_fallback_tmpdir zxfer_validate_temp_root_candidate "/dev/shm"; then
-		:
-	elif zxfer_capture_reporting_helper_output l_fallback_tmpdir zxfer_validate_temp_root_candidate "/run/shm"; then
-		:
-	elif zxfer_capture_reporting_helper_output l_fallback_tmpdir zxfer_validate_temp_root_candidate "/tmp"; then
-		:
+		zxfer_capture_reporting_helper_output zxfer_validate_temp_root_candidate "$TMPDIR"; then
+		l_get_error_log_fallback_lock_dir_fallback_tmpdir=$g_zxfer_reporting_capture_result
+	elif zxfer_capture_reporting_helper_output zxfer_validate_temp_root_candidate "/dev/shm"; then
+		l_get_error_log_fallback_lock_dir_fallback_tmpdir=$g_zxfer_reporting_capture_result
+	elif zxfer_capture_reporting_helper_output zxfer_validate_temp_root_candidate "/run/shm"; then
+		l_get_error_log_fallback_lock_dir_fallback_tmpdir=$g_zxfer_reporting_capture_result
+	elif zxfer_capture_reporting_helper_output zxfer_validate_temp_root_candidate "/tmp"; then
+		l_get_error_log_fallback_lock_dir_fallback_tmpdir=$g_zxfer_reporting_capture_result
 	else
 		return 1
 	fi
-	if ! zxfer_capture_reporting_helper_output l_fallback_lock_dir \
+	if ! zxfer_capture_reporting_helper_output \
 		zxfer_prepare_error_log_fallback_lock_dir \
-		"$l_fallback_tmpdir" "$l_fallback_log_path"; then
+		"$l_get_error_log_fallback_lock_dir_fallback_tmpdir" "$l_get_error_log_fallback_lock_dir_fallback_log_path"; then
 		return 1
 	fi
+	l_fallback_lock_dir=$g_zxfer_reporting_capture_result
 
 	printf '%s\n' "$l_fallback_lock_dir"
 }
@@ -228,17 +218,18 @@ zxfer_acquire_error_log_lock() {
 			# treated as busy; the corrupt reap is allowed only when a
 			# sleep-and-recheck round still reports corrupt metadata. The
 			# stale-owner reap policy itself is unchanged.
-			l_allow_corrupt_reap=0
+			l_error_log_allow_corrupt_reap=0
 			zxfer_load_owned_lock_metadata_from_dir "$l_lock_dir_path"
 			l_lock_metadata_status=$?
 			if [ "$l_lock_metadata_status" -eq 2 ]; then
 				l_corrupt_metadata_sightings=$((l_corrupt_metadata_sightings + 1))
 				if [ "$l_corrupt_metadata_sightings" -ge 2 ]; then
-					l_allow_corrupt_reap=1
+					l_error_log_allow_corrupt_reap=1
 				fi
 			fi
 			zxfer_try_reap_stale_owned_lock_dir \
-				"$l_lock_dir_path" "$l_allow_corrupt_reap" lock "error-log-lock" >/dev/null
+				"$l_lock_dir_path" "$l_error_log_allow_corrupt_reap" \
+				lock "error-log-lock" >/dev/null
 			l_reap_status=$?
 			if [ "$l_reap_status" -eq 0 ]; then
 				continue
@@ -283,7 +274,7 @@ zxfer_warn_error_log_lock_release_failure() {
 # authoritative even when lock cleanup also fails.
 # Returns: Always zero after warning about any release failure.
 zxfer_release_error_log_lock_warn_only() {
-	l_log_path=$1
+	l_release_error_log_lock_warn_only_log_path=$1
 	l_lock_dir=$2
 
 	zxfer_release_error_log_lock "$l_lock_dir"
@@ -291,7 +282,7 @@ zxfer_release_error_log_lock_warn_only() {
 	if [ "$l_release_status" -eq 0 ]; then
 		return 0
 	fi
-	zxfer_warn_error_log_lock_release_failure "$l_log_path" "$l_release_status"
+	zxfer_warn_error_log_lock_release_failure "$l_release_error_log_lock_warn_only_log_path" "$l_release_status"
 	return 0
 }
 
@@ -300,7 +291,7 @@ zxfer_release_error_log_lock_warn_only() {
 # remaining operation that can fail.
 # Returns: Zero on release success and one after warning on release failure.
 zxfer_release_error_log_lock_checked() {
-	l_log_path=$1
+	l_release_error_log_lock_checked_log_path=$1
 	l_lock_dir=$2
 
 	zxfer_release_error_log_lock "$l_lock_dir"
@@ -308,7 +299,7 @@ zxfer_release_error_log_lock_checked() {
 	if [ "$l_release_status" -eq 0 ]; then
 		return 0
 	fi
-	zxfer_warn_error_log_lock_release_failure "$l_log_path" "$l_release_status"
+	zxfer_warn_error_log_lock_release_failure "$l_release_error_log_lock_checked_log_path" "$l_release_status"
 	return 1
 }
 
@@ -527,15 +518,15 @@ zxfer_append_failure_report_with_atomic_replace() {
 # state.
 zxfer_append_failure_report_to_log() {
 	l_report=$1
-	l_log_path=${ZXFER_ERROR_LOG:-}
+	l_append_failure_report_to_log_log_path=${ZXFER_ERROR_LOG:-}
 
-	[ -n "$l_log_path" ] || return 0
-	if ! l_trusted_log_parent=$(zxfer_get_trusted_error_log_parent "$l_log_path"); then
+	[ -n "$l_append_failure_report_to_log_log_path" ] || return 0
+	if ! l_trusted_log_parent=$(zxfer_get_trusted_error_log_parent "$l_append_failure_report_to_log_log_path"); then
 		return 1
 	fi
 
 	l_log_exists=0
-	if [ -e "$l_log_path" ]; then
+	if [ -e "$l_append_failure_report_to_log_log_path" ]; then
 		l_log_exists=1
 	fi
 	l_log_parent_writable=0
@@ -544,36 +535,36 @@ zxfer_append_failure_report_to_log() {
 	fi
 
 	if [ "$l_log_exists" -eq 0 ] && [ "$l_log_parent_writable" -eq 0 ]; then
-		zxfer_warn_stderr "zxfer: warning: unable to create ZXFER_ERROR_LOG file \"$l_log_path\"."
+		zxfer_warn_stderr "zxfer: warning: unable to create ZXFER_ERROR_LOG file \"$l_append_failure_report_to_log_log_path\"."
 		return 1
 	fi
 
-	if ! l_lock_dir=$(zxfer_get_error_log_lock_dir "$l_log_path" \
+	if ! l_append_failure_report_to_log_lock_dir=$(zxfer_get_error_log_lock_dir "$l_append_failure_report_to_log_log_path" \
 		"$l_trusted_log_parent" "$l_log_exists" "$l_log_parent_writable"); then
-		zxfer_warn_stderr "zxfer: warning: unable to acquire ZXFER_ERROR_LOG lock for \"$l_log_path\"."
+		zxfer_warn_stderr "zxfer: warning: unable to acquire ZXFER_ERROR_LOG lock for \"$l_append_failure_report_to_log_log_path\"."
 		return 1
 	fi
-	if ! zxfer_acquire_error_log_lock "$l_lock_dir"; then
-		zxfer_warn_stderr "zxfer: warning: unable to acquire ZXFER_ERROR_LOG lock for \"$l_log_path\"."
+	if ! zxfer_acquire_error_log_lock "$l_append_failure_report_to_log_lock_dir"; then
+		zxfer_warn_stderr "zxfer: warning: unable to acquire ZXFER_ERROR_LOG lock for \"$l_append_failure_report_to_log_log_path\"."
 		return 1
 	fi
 
-	if ! zxfer_prepare_locked_error_log_file "$l_log_path" "$l_log_exists"; then
-		zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
+	if ! zxfer_prepare_locked_error_log_file "$l_append_failure_report_to_log_log_path" "$l_log_exists"; then
+		zxfer_release_error_log_lock_warn_only "$l_append_failure_report_to_log_log_path" "$l_append_failure_report_to_log_lock_dir"
 		return 1
 	fi
 
 	if [ "$l_log_parent_writable" -eq 0 ]; then
-		if ! zxfer_append_failure_report_to_existing_log_directly "$l_report" "$l_log_path"; then
-			zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_log_path\"."
-			zxfer_release_error_log_lock_warn_only "$l_log_path" "$l_lock_dir"
+		if ! zxfer_append_failure_report_to_existing_log_directly "$l_report" "$l_append_failure_report_to_log_log_path"; then
+			zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_append_failure_report_to_log_log_path\"."
+			zxfer_release_error_log_lock_warn_only "$l_append_failure_report_to_log_log_path" "$l_append_failure_report_to_log_lock_dir"
 			return 1
 		fi
-		zxfer_release_error_log_lock_checked "$l_log_path" "$l_lock_dir"
+		zxfer_release_error_log_lock_checked "$l_append_failure_report_to_log_log_path" "$l_append_failure_report_to_log_lock_dir"
 		return "$?"
 	fi
 
-	zxfer_append_failure_report_with_atomic_replace "$l_report" "$l_log_path" "$l_lock_dir"
+	zxfer_append_failure_report_with_atomic_replace "$l_report" "$l_append_failure_report_to_log_log_path" "$l_append_failure_report_to_log_lock_dir"
 }
 
 # Purpose: Emit the failure report in the operator-facing format owned by this
@@ -588,8 +579,8 @@ zxfer_emit_failure_report() {
 	[ "$l_exit_status" -ne 0 ] || return 0
 	[ "${g_zxfer_failure_report_emitted:-0}" -eq 0 ] || return 0
 
-	l_report=$(zxfer_render_failure_report "$l_exit_status")
-	printf '%s\n' "$l_report" >&2
+	l_emit_failure_report_report=$(zxfer_render_failure_report "$l_exit_status")
+	printf '%s\n' "$l_emit_failure_report_report" >&2
 	zxfer_mark_failure_report_emitted
-	zxfer_append_failure_report_to_log "$l_report" || true
+	zxfer_append_failure_report_to_log "$l_emit_failure_report_report" || true
 }

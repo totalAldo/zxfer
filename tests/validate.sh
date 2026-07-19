@@ -138,7 +138,7 @@ run_doctor() {
 	# This is the common offline baseline used by budget, architecture, quick,
 	# and full dispatch before optional lint or guest tooling is considered.
 	for l_command in \
-		awk cat comm cut git grep mktemp sed sort tr uniq wc xargs; do
+		awk cat cmp comm cut git grep mktemp sed sort tr uniq wc xargs; do
 		if [ -n "$(command_path "$l_command")" ]; then
 			report_command_availability "$l_command" "$l_command"
 		else
@@ -146,6 +146,12 @@ run_doctor() {
 			l_status=1
 		fi
 	done
+	if [ -x /usr/bin/time ]; then
+		printf '  %-20s available (%s)\n' "benchmark time" /usr/bin/time
+	else
+		printf '  %-20s not found (%s)\n' "benchmark time" /usr/bin/time
+		l_status=1
+	fi
 
 	printf '%s\n' "Shells:"
 	report_command_availability "POSIX sh" sh
@@ -175,6 +181,7 @@ run_doctor() {
 		tests/run_lint.sh \
 		tests/run_shunit_tests.sh \
 		tests/run_coverage.sh \
+		tests/run_property_prefetch_benchmark.sh \
 		tests/run_vm_matrix.sh; do
 		if [ ! -x "$ZXFER_ROOT/$l_entrypoint" ]; then
 			printf 'Missing validation entrypoint: %s\n' "$l_entrypoint" >&2

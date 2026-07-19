@@ -36,7 +36,7 @@
 ################################################################################
 
 # Module contract:
-# owns globals: g_zxfer_profile_* counters, timings, and summary emission state.
+# owns globals: g_zxfer_profile_* counters, timings, result scratch, and summary emission state.
 # reads globals: g_option_* verbosity/host roles and g_zxfer_failure_stage.
 # mutates caches: profile counters, elapsed timings, and summary emission state.
 # returns via stdout: millisecond timestamps.
@@ -99,6 +99,7 @@ zxfer_reset_profile_state() {
 	g_zxfer_profile_runtime_cache_object_readbacks=0
 	g_zxfer_profile_live_destination_snapshot_rechecks=0
 	g_zxfer_profile_diverged_snapshot_warnings=0
+	g_zxfer_profile_counter_value_result=""
 }
 
 # Purpose: Record or emit the metrics enabled for end-of-run profiling.
@@ -107,6 +108,129 @@ zxfer_reset_profile_state() {
 # summary.
 zxfer_profile_metrics_enabled() {
 	[ "${g_option_V_very_verbose:-0}" -eq 1 ]
+}
+
+# Purpose: Load one profile-owned numeric counter without indirect expansion.
+# Usage: Called by the generic counter and elapsed-time recorders before they
+# normalize and add a value.
+# Side effects: Publishes the current value in
+# g_zxfer_profile_counter_value_result, or clears it and returns non-zero for
+# an unrecognized counter.
+zxfer_profile_load_counter_value() {
+	g_zxfer_profile_counter_value_result=""
+
+	case "${1:-}" in
+	g_zxfer_profile_startup_latency_ms) g_zxfer_profile_counter_value_result=${g_zxfer_profile_startup_latency_ms:-0} ;;
+	g_zxfer_profile_cleanup_ms) g_zxfer_profile_counter_value_result=${g_zxfer_profile_cleanup_ms:-0} ;;
+	g_zxfer_profile_ssh_setup_ms) g_zxfer_profile_counter_value_result=${g_zxfer_profile_ssh_setup_ms:-0} ;;
+	g_zxfer_profile_source_snapshot_listing_ms) g_zxfer_profile_counter_value_result=${g_zxfer_profile_source_snapshot_listing_ms:-0} ;;
+	g_zxfer_profile_destination_snapshot_listing_ms) g_zxfer_profile_counter_value_result=${g_zxfer_profile_destination_snapshot_listing_ms:-0} ;;
+	g_zxfer_profile_snapshot_diff_sort_ms) g_zxfer_profile_counter_value_result=${g_zxfer_profile_snapshot_diff_sort_ms:-0} ;;
+	g_zxfer_profile_ssh_control_socket_lock_wait_count) g_zxfer_profile_counter_value_result=${g_zxfer_profile_ssh_control_socket_lock_wait_count:-0} ;;
+	g_zxfer_profile_ssh_control_socket_lock_wait_ms) g_zxfer_profile_counter_value_result=${g_zxfer_profile_ssh_control_socket_lock_wait_ms:-0} ;;
+	g_zxfer_profile_remote_capability_cache_wait_count) g_zxfer_profile_counter_value_result=${g_zxfer_profile_remote_capability_cache_wait_count:-0} ;;
+	g_zxfer_profile_remote_capability_cache_wait_ms) g_zxfer_profile_counter_value_result=${g_zxfer_profile_remote_capability_cache_wait_ms:-0} ;;
+	g_zxfer_profile_remote_capability_bootstrap_live) g_zxfer_profile_counter_value_result=${g_zxfer_profile_remote_capability_bootstrap_live:-0} ;;
+	g_zxfer_profile_remote_capability_bootstrap_cache) g_zxfer_profile_counter_value_result=${g_zxfer_profile_remote_capability_bootstrap_cache:-0} ;;
+	g_zxfer_profile_remote_capability_bootstrap_memory) g_zxfer_profile_counter_value_result=${g_zxfer_profile_remote_capability_bootstrap_memory:-0} ;;
+	g_zxfer_profile_remote_cli_tool_direct_probes) g_zxfer_profile_counter_value_result=${g_zxfer_profile_remote_cli_tool_direct_probes:-0} ;;
+	g_zxfer_profile_source_zfs_calls) g_zxfer_profile_counter_value_result=${g_zxfer_profile_source_zfs_calls:-0} ;;
+	g_zxfer_profile_destination_zfs_calls) g_zxfer_profile_counter_value_result=${g_zxfer_profile_destination_zfs_calls:-0} ;;
+	g_zxfer_profile_other_zfs_calls) g_zxfer_profile_counter_value_result=${g_zxfer_profile_other_zfs_calls:-0} ;;
+	g_zxfer_profile_zfs_list_calls) g_zxfer_profile_counter_value_result=${g_zxfer_profile_zfs_list_calls:-0} ;;
+	g_zxfer_profile_zfs_get_calls) g_zxfer_profile_counter_value_result=${g_zxfer_profile_zfs_get_calls:-0} ;;
+	g_zxfer_profile_zfs_send_calls) g_zxfer_profile_counter_value_result=${g_zxfer_profile_zfs_send_calls:-0} ;;
+	g_zxfer_profile_zfs_receive_calls) g_zxfer_profile_counter_value_result=${g_zxfer_profile_zfs_receive_calls:-0} ;;
+	g_zxfer_profile_ssh_shell_invocations) g_zxfer_profile_counter_value_result=${g_zxfer_profile_ssh_shell_invocations:-0} ;;
+	g_zxfer_profile_source_ssh_shell_invocations) g_zxfer_profile_counter_value_result=${g_zxfer_profile_source_ssh_shell_invocations:-0} ;;
+	g_zxfer_profile_destination_ssh_shell_invocations) g_zxfer_profile_counter_value_result=${g_zxfer_profile_destination_ssh_shell_invocations:-0} ;;
+	g_zxfer_profile_other_ssh_shell_invocations) g_zxfer_profile_counter_value_result=${g_zxfer_profile_other_ssh_shell_invocations:-0} ;;
+	g_zxfer_profile_source_snapshot_list_commands) g_zxfer_profile_counter_value_result=${g_zxfer_profile_source_snapshot_list_commands:-0} ;;
+	g_zxfer_profile_source_snapshot_list_parallel_commands) g_zxfer_profile_counter_value_result=${g_zxfer_profile_source_snapshot_list_parallel_commands:-0} ;;
+	g_zxfer_profile_send_receive_pipeline_commands) g_zxfer_profile_counter_value_result=${g_zxfer_profile_send_receive_pipeline_commands:-0} ;;
+	g_zxfer_profile_send_receive_background_pipeline_commands) g_zxfer_profile_counter_value_result=${g_zxfer_profile_send_receive_background_pipeline_commands:-0} ;;
+	g_zxfer_profile_exists_destination_calls) g_zxfer_profile_counter_value_result=${g_zxfer_profile_exists_destination_calls:-0} ;;
+	g_zxfer_profile_normalized_property_reads_source) g_zxfer_profile_counter_value_result=${g_zxfer_profile_normalized_property_reads_source:-0} ;;
+	g_zxfer_profile_normalized_property_reads_destination) g_zxfer_profile_counter_value_result=${g_zxfer_profile_normalized_property_reads_destination:-0} ;;
+	g_zxfer_profile_normalized_property_reads_other) g_zxfer_profile_counter_value_result=${g_zxfer_profile_normalized_property_reads_other:-0} ;;
+	g_zxfer_profile_required_property_backfill_gets) g_zxfer_profile_counter_value_result=${g_zxfer_profile_required_property_backfill_gets:-0} ;;
+	g_zxfer_profile_parent_destination_property_reads) g_zxfer_profile_counter_value_result=${g_zxfer_profile_parent_destination_property_reads:-0} ;;
+	g_zxfer_profile_bucket_source_inspection) g_zxfer_profile_counter_value_result=${g_zxfer_profile_bucket_source_inspection:-0} ;;
+	g_zxfer_profile_bucket_destination_inspection) g_zxfer_profile_counter_value_result=${g_zxfer_profile_bucket_destination_inspection:-0} ;;
+	g_zxfer_profile_bucket_property_reconciliation) g_zxfer_profile_counter_value_result=${g_zxfer_profile_bucket_property_reconciliation:-0} ;;
+	g_zxfer_profile_bucket_send_receive_setup) g_zxfer_profile_counter_value_result=${g_zxfer_profile_bucket_send_receive_setup:-0} ;;
+	g_zxfer_profile_runtime_artifact_files_created) g_zxfer_profile_counter_value_result=${g_zxfer_profile_runtime_artifact_files_created:-0} ;;
+	g_zxfer_profile_runtime_artifact_dirs_created) g_zxfer_profile_counter_value_result=${g_zxfer_profile_runtime_artifact_dirs_created:-0} ;;
+	g_zxfer_profile_runtime_artifact_paths_cleaned) g_zxfer_profile_counter_value_result=${g_zxfer_profile_runtime_artifact_paths_cleaned:-0} ;;
+	g_zxfer_profile_runtime_cache_object_writes) g_zxfer_profile_counter_value_result=${g_zxfer_profile_runtime_cache_object_writes:-0} ;;
+	g_zxfer_profile_runtime_cache_object_readbacks) g_zxfer_profile_counter_value_result=${g_zxfer_profile_runtime_cache_object_readbacks:-0} ;;
+	g_zxfer_profile_live_destination_snapshot_rechecks) g_zxfer_profile_counter_value_result=${g_zxfer_profile_live_destination_snapshot_rechecks:-0} ;;
+	g_zxfer_profile_diverged_snapshot_warnings) g_zxfer_profile_counter_value_result=${g_zxfer_profile_diverged_snapshot_warnings:-0} ;;
+	*) return 1 ;;
+	esac
+
+	return 0
+}
+
+# Purpose: Store one validated value in an explicitly selected profile counter.
+# Usage: Called after the generic recorders normalize the current value and
+# compute the new total without spawning a helper process.
+# Returns: Zero after updating an owned counter, or non-zero for an unknown one.
+zxfer_profile_store_counter_value() {
+	l_profile_store_counter_name=${1:-}
+	l_profile_store_counter_value=$2
+
+	case "$l_profile_store_counter_name" in
+	g_zxfer_profile_startup_latency_ms) g_zxfer_profile_startup_latency_ms=$l_profile_store_counter_value ;;
+	g_zxfer_profile_cleanup_ms) g_zxfer_profile_cleanup_ms=$l_profile_store_counter_value ;;
+	g_zxfer_profile_ssh_setup_ms) g_zxfer_profile_ssh_setup_ms=$l_profile_store_counter_value ;;
+	g_zxfer_profile_source_snapshot_listing_ms) g_zxfer_profile_source_snapshot_listing_ms=$l_profile_store_counter_value ;;
+	g_zxfer_profile_destination_snapshot_listing_ms) g_zxfer_profile_destination_snapshot_listing_ms=$l_profile_store_counter_value ;;
+	g_zxfer_profile_snapshot_diff_sort_ms) g_zxfer_profile_snapshot_diff_sort_ms=$l_profile_store_counter_value ;;
+	g_zxfer_profile_ssh_control_socket_lock_wait_count) g_zxfer_profile_ssh_control_socket_lock_wait_count=$l_profile_store_counter_value ;;
+	g_zxfer_profile_ssh_control_socket_lock_wait_ms) g_zxfer_profile_ssh_control_socket_lock_wait_ms=$l_profile_store_counter_value ;;
+	g_zxfer_profile_remote_capability_cache_wait_count) g_zxfer_profile_remote_capability_cache_wait_count=$l_profile_store_counter_value ;;
+	g_zxfer_profile_remote_capability_cache_wait_ms) g_zxfer_profile_remote_capability_cache_wait_ms=$l_profile_store_counter_value ;;
+	g_zxfer_profile_remote_capability_bootstrap_live) g_zxfer_profile_remote_capability_bootstrap_live=$l_profile_store_counter_value ;;
+	g_zxfer_profile_remote_capability_bootstrap_cache) g_zxfer_profile_remote_capability_bootstrap_cache=$l_profile_store_counter_value ;;
+	g_zxfer_profile_remote_capability_bootstrap_memory) g_zxfer_profile_remote_capability_bootstrap_memory=$l_profile_store_counter_value ;;
+	g_zxfer_profile_remote_cli_tool_direct_probes) g_zxfer_profile_remote_cli_tool_direct_probes=$l_profile_store_counter_value ;;
+	g_zxfer_profile_source_zfs_calls) g_zxfer_profile_source_zfs_calls=$l_profile_store_counter_value ;;
+	g_zxfer_profile_destination_zfs_calls) g_zxfer_profile_destination_zfs_calls=$l_profile_store_counter_value ;;
+	g_zxfer_profile_other_zfs_calls) g_zxfer_profile_other_zfs_calls=$l_profile_store_counter_value ;;
+	g_zxfer_profile_zfs_list_calls) g_zxfer_profile_zfs_list_calls=$l_profile_store_counter_value ;;
+	g_zxfer_profile_zfs_get_calls) g_zxfer_profile_zfs_get_calls=$l_profile_store_counter_value ;;
+	g_zxfer_profile_zfs_send_calls) g_zxfer_profile_zfs_send_calls=$l_profile_store_counter_value ;;
+	g_zxfer_profile_zfs_receive_calls) g_zxfer_profile_zfs_receive_calls=$l_profile_store_counter_value ;;
+	g_zxfer_profile_ssh_shell_invocations) g_zxfer_profile_ssh_shell_invocations=$l_profile_store_counter_value ;;
+	g_zxfer_profile_source_ssh_shell_invocations) g_zxfer_profile_source_ssh_shell_invocations=$l_profile_store_counter_value ;;
+	g_zxfer_profile_destination_ssh_shell_invocations) g_zxfer_profile_destination_ssh_shell_invocations=$l_profile_store_counter_value ;;
+	g_zxfer_profile_other_ssh_shell_invocations) g_zxfer_profile_other_ssh_shell_invocations=$l_profile_store_counter_value ;;
+	g_zxfer_profile_source_snapshot_list_commands) g_zxfer_profile_source_snapshot_list_commands=$l_profile_store_counter_value ;;
+	g_zxfer_profile_source_snapshot_list_parallel_commands) g_zxfer_profile_source_snapshot_list_parallel_commands=$l_profile_store_counter_value ;;
+	g_zxfer_profile_send_receive_pipeline_commands) g_zxfer_profile_send_receive_pipeline_commands=$l_profile_store_counter_value ;;
+	g_zxfer_profile_send_receive_background_pipeline_commands) g_zxfer_profile_send_receive_background_pipeline_commands=$l_profile_store_counter_value ;;
+	g_zxfer_profile_exists_destination_calls) g_zxfer_profile_exists_destination_calls=$l_profile_store_counter_value ;;
+	g_zxfer_profile_normalized_property_reads_source) g_zxfer_profile_normalized_property_reads_source=$l_profile_store_counter_value ;;
+	g_zxfer_profile_normalized_property_reads_destination) g_zxfer_profile_normalized_property_reads_destination=$l_profile_store_counter_value ;;
+	g_zxfer_profile_normalized_property_reads_other) g_zxfer_profile_normalized_property_reads_other=$l_profile_store_counter_value ;;
+	g_zxfer_profile_required_property_backfill_gets) g_zxfer_profile_required_property_backfill_gets=$l_profile_store_counter_value ;;
+	g_zxfer_profile_parent_destination_property_reads) g_zxfer_profile_parent_destination_property_reads=$l_profile_store_counter_value ;;
+	g_zxfer_profile_bucket_source_inspection) g_zxfer_profile_bucket_source_inspection=$l_profile_store_counter_value ;;
+	g_zxfer_profile_bucket_destination_inspection) g_zxfer_profile_bucket_destination_inspection=$l_profile_store_counter_value ;;
+	g_zxfer_profile_bucket_property_reconciliation) g_zxfer_profile_bucket_property_reconciliation=$l_profile_store_counter_value ;;
+	g_zxfer_profile_bucket_send_receive_setup) g_zxfer_profile_bucket_send_receive_setup=$l_profile_store_counter_value ;;
+	g_zxfer_profile_runtime_artifact_files_created) g_zxfer_profile_runtime_artifact_files_created=$l_profile_store_counter_value ;;
+	g_zxfer_profile_runtime_artifact_dirs_created) g_zxfer_profile_runtime_artifact_dirs_created=$l_profile_store_counter_value ;;
+	g_zxfer_profile_runtime_artifact_paths_cleaned) g_zxfer_profile_runtime_artifact_paths_cleaned=$l_profile_store_counter_value ;;
+	g_zxfer_profile_runtime_cache_object_writes) g_zxfer_profile_runtime_cache_object_writes=$l_profile_store_counter_value ;;
+	g_zxfer_profile_runtime_cache_object_readbacks) g_zxfer_profile_runtime_cache_object_readbacks=$l_profile_store_counter_value ;;
+	g_zxfer_profile_live_destination_snapshot_rechecks) g_zxfer_profile_live_destination_snapshot_rechecks=$l_profile_store_counter_value ;;
+	g_zxfer_profile_diverged_snapshot_warnings) g_zxfer_profile_diverged_snapshot_warnings=$l_profile_store_counter_value ;;
+	*) return 1 ;;
+	esac
+
+	return 0
 }
 
 # Purpose: Record or emit the increment counter for end-of-run profiling.
@@ -119,14 +243,7 @@ zxfer_profile_increment_counter() {
 
 	zxfer_profile_metrics_enabled || return 0
 
-	case "$l_counter_name" in
-	g_zxfer_profile_?*)
-		zxfer_shell_variable_name_is_valid "$l_counter_name" || return 0
-		;;
-	*)
-		return 0
-		;;
-	esac
+	zxfer_profile_load_counter_value "$l_counter_name" || return 0
 
 	g_zxfer_profile_has_data=1
 
@@ -136,7 +253,7 @@ zxfer_profile_increment_counter() {
 		;;
 	esac
 
-	eval "l_counter_value=\${$l_counter_name:-0}"
+	l_counter_value=$g_zxfer_profile_counter_value_result
 	case "$l_counter_value" in
 	'' | *[!0-9]*)
 		l_counter_value=0
@@ -144,7 +261,8 @@ zxfer_profile_increment_counter() {
 	esac
 
 	l_counter_value=$((l_counter_value + l_increment_by))
-	eval "$l_counter_name=\$l_counter_value"
+	zxfer_profile_store_counter_value "$l_counter_name" "$l_counter_value" || return 0
+	return 0
 }
 
 # Purpose: Record or emit the now ms for end-of-run profiling.
@@ -179,14 +297,7 @@ zxfer_profile_add_elapsed_ms() {
 
 	zxfer_profile_metrics_enabled || return 0
 
-	case "$l_counter_name" in
-	g_zxfer_profile_?*)
-		zxfer_shell_variable_name_is_valid "$l_counter_name" || return 0
-		;;
-	*)
-		return 0
-		;;
-	esac
+	zxfer_profile_load_counter_value "$l_counter_name" || return 0
 
 	case "$l_start_ms" in
 	'' | *[!0-9]*)
@@ -208,7 +319,7 @@ zxfer_profile_add_elapsed_ms() {
 
 	g_zxfer_profile_has_data=1
 
-	eval "l_counter_value=\${$l_counter_name:-0}"
+	l_counter_value=$g_zxfer_profile_counter_value_result
 	case "$l_counter_value" in
 	'' | *[!0-9]*)
 		l_counter_value=0
@@ -217,7 +328,8 @@ zxfer_profile_add_elapsed_ms() {
 
 	l_elapsed_ms=$((l_end_ms - l_start_ms))
 	l_counter_value=$((l_counter_value + l_elapsed_ms))
-	eval "$l_counter_name=\$l_counter_value"
+	zxfer_profile_store_counter_value "$l_counter_name" "$l_counter_value" || return 0
+	return 0
 }
 
 # Purpose: Record warm startup latency at the first live transfer only.
@@ -341,14 +453,14 @@ zxfer_profile_record_zfs_call() {
 # output when zxfer updates performance counters or prints the profiling
 # summary.
 zxfer_profile_record_ssh_invocation() {
-	l_host_spec=$1
-	l_side=${2:-}
+	l_profile_ssh_host_spec=$1
+	l_profile_ssh_side=${2:-}
 
 	zxfer_profile_metrics_enabled || return 0
 
 	zxfer_profile_increment_counter g_zxfer_profile_ssh_shell_invocations
 
-	case "$l_side" in
+	case "$l_profile_ssh_side" in
 	source)
 		zxfer_profile_increment_counter g_zxfer_profile_source_ssh_shell_invocations
 		return 0
@@ -363,9 +475,11 @@ zxfer_profile_record_ssh_invocation() {
 		;;
 	esac
 
-	if [ -n "${g_option_O_origin_host:-}" ] && [ "$l_host_spec" = "$g_option_O_origin_host" ]; then
+	if [ -n "${g_option_O_origin_host:-}" ] &&
+		[ "$l_profile_ssh_host_spec" = "$g_option_O_origin_host" ]; then
 		zxfer_profile_increment_counter g_zxfer_profile_source_ssh_shell_invocations
-	elif [ -n "${g_option_T_target_host:-}" ] && [ "$l_host_spec" = "$g_option_T_target_host" ]; then
+	elif [ -n "${g_option_T_target_host:-}" ] &&
+		[ "$l_profile_ssh_host_spec" = "$g_option_T_target_host" ]; then
 		zxfer_profile_increment_counter g_zxfer_profile_destination_ssh_shell_invocations
 	else
 		zxfer_profile_increment_counter g_zxfer_profile_other_ssh_shell_invocations

@@ -1064,7 +1064,7 @@ full-diff-planning" "$(cat "$full_discovery_log")"
 		"$output" "source_list=<>"
 }
 
-# Probe zxfer_fast_recursive_noop_discovery_is_eligible with a clean option
+# Probe zxfer_fast_recursive_noop_options_are_eligible with a clean option
 # state plus the supplied overrides; prints the helper's exit status.
 # Errexit-safe so the suite's set -e tests cannot abort the caller.
 zxfer_test_noop_proof_eligibility_status() {
@@ -1082,7 +1082,7 @@ zxfer_test_noop_proof_eligibility_status() {
 		for l_eligibility_override in "$@"; do
 			eval "$l_eligibility_override"
 		done
-		zxfer_fast_recursive_noop_discovery_is_eligible
+		zxfer_fast_recursive_noop_options_are_eligible
 	) || l_eligibility_status=$?
 	printf '%s\n' "$l_eligibility_status"
 	return 0

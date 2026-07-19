@@ -606,6 +606,33 @@ EOF
 		"$(cat "$ssh_log")" "./-remote_backup"
 }
 
+test_ensure_remote_backup_dir_handles_csh_remote_login_shell() {
+	l_csh_shell=$(find_csh_shell_for_tests)
+	if [ "$l_csh_shell" = "" ]; then
+		return 0
+	fi
+
+	realistic_ssh_bin="$TEST_TMPDIR/fake_ssh_backup_csh_exec"
+	realistic_ssh_log="$TEST_TMPDIR/fake_ssh_backup_csh_exec.log"
+	target_dir="$TEST_TMPDIR_PHYSICAL/ensure_remote_backup_csh/child"
+	create_fake_ssh_join_csh_exec_bin "$realistic_ssh_bin" "$l_csh_shell"
+
+	g_cmd_ssh="$realistic_ssh_bin"
+	FAKE_SSH_LOG="$realistic_ssh_log"
+	export FAKE_SSH_LOG
+
+	zxfer_ensure_remote_backup_dir "$target_dir" "backup@example.com" destination
+	status=$?
+	unset FAKE_SSH_LOG
+
+	assertEquals "Remote backup directory preparation should succeed through csh/tcsh login shells." \
+		0 "$status"
+	assertTrue "The csh/tcsh remote handoff should create the requested secure backup directory." \
+		"[ -d \"$target_dir\" ]"
+	assertEquals "The csh/tcsh backup handoff should receive one physical command line after the host line." \
+		2 "$(sed -n '$=' "$realistic_ssh_log")"
+}
+
 test_ensure_remote_backup_dir_rejects_nested_symlink_components() {
 	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
 	real_dir="$physical_tmpdir/ensure_remote_nested_real"

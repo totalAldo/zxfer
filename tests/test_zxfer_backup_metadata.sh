@@ -8,19 +8,14 @@ TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# Property-backup renderers and fake tools are domain fixtures, not part of the
+# minimal shared lifecycle. This suite opts in explicitly.
+# shellcheck source=tests/helpers/backup_fixtures.sh
+. "$TESTS_DIR/helpers/backup_fixtures.sh"
+# shellcheck source=tests/helpers/fake_tool_fixtures.sh
+. "$TESTS_DIR/helpers/fake_tool_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_property_reconcile.sh"
-
-create_fake_ssh_bin() {
-	cat >"$FAKE_SSH_BIN" <<'EOF'
-#!/bin/sh
-if [ -n "${FAKE_SSH_LOG:-}" ]; then
-	printf '%s\n' "$@" >>"$FAKE_SSH_LOG"
-fi
-exit "${FAKE_SSH_EXIT_STATUS:-0}"
-EOF
-	chmod +x "$FAKE_SSH_BIN"
-}
 
 zxfer_test_ensure_parent_dir() {
 	l_path=$1
@@ -35,16 +30,14 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_backup_metadata"
 	TEST_TMPDIR_PHYSICAL=$(cd -P "$TEST_TMPDIR" && pwd)
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
-	create_fake_ssh_bin
+	zxfer_test_write_env_fake_ssh "$FAKE_SSH_BIN"
 }
 
 oneTimeTearDown() {
 	zxfer_test_cleanup_tmpdir
 }
 
-setUp() {
-	set +e
-	OPTIND=1
+zxfer_test_reset_backup_metadata_function_overrides() {
 	unset -f zxfer_ensure_local_backup_dir
 	unset -f zxfer_ensure_remote_backup_dir
 	unset -f zxfer_get_backup_metadata_filename
@@ -59,14 +52,21 @@ setUp() {
 	unset -f zxfer_throw_error_with_usage
 	unset -f cksum
 	unset -f od
+}
+
+zxfer_test_reset_backup_metadata_environment() {
 	unset FAKE_SSH_LOG
 	unset FAKE_SSH_EXIT_STATUS
+	unset FAKE_SSH_STDOUT
+	unset FAKE_SSH_STDERR
+	unset FAKE_SSH_SUPPRESS_STDOUT
 	unset ZXFER_BACKUP_DIR
 	unset ZXFER_SECURE_PATH
 	unset ZXFER_SECURE_PATH_APPEND
-	zxfer_source_runtime_modules_through "zxfer_property_reconcile.sh"
-	TMPDIR="$TEST_TMPDIR"
-	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" || return "$?"
+}
+
+zxfer_test_reset_backup_metadata_options() {
+	OPTIND=1
 	g_option_n_dryrun=0
 	g_option_v_verbose=0
 	g_option_V_very_verbose=0
@@ -81,6 +81,9 @@ setUp() {
 	g_option_g_grandfather_protection=""
 	g_option_j_jobs=1
 	g_option_m_migrate=0
+}
+
+zxfer_test_reset_backup_metadata_remote_state() {
 	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
 	g_cmd_zfs="/sbin/zfs"
 	g_cmd_ssh="$FAKE_SSH_BIN"
@@ -97,6 +100,10 @@ setUp() {
 	g_ssh_target_control_socket=""
 	g_ssh_supports_control_sockets=0
 	g_zxfer_remote_capability_cache_wait_retries=5
+}
+
+zxfer_test_reset_backup_metadata_runtime_state() {
+	TMPDIR="$TEST_TMPDIR"
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
 	g_zxfer_secure_path=$ZXFER_DEFAULT_SECURE_PATH
@@ -106,6 +113,9 @@ setUp() {
 	g_rzfs_list_hr_snap=""
 	g_zxfer_source_snapshot_record_cache_file=""
 	g_zxfer_destination_snapshot_record_cache_file=""
+}
+
+zxfer_test_reset_backup_metadata_result_state() {
 	g_backup_storage_root=""
 	g_backup_file_extension=""
 	g_backup_file_contents=""
@@ -124,9 +134,21 @@ setUp() {
 	g_initial_source_had_trailing_slash=0
 	g_destination="backup/dst"
 	g_actual_dest="backup/dst"
+}
+
+setUp() {
+	set +e
+	zxfer_test_reset_backup_metadata_function_overrides
+	zxfer_test_reset_backup_metadata_environment
+	zxfer_source_runtime_modules_through "zxfer_property_reconcile.sh"
+	zxfer_test_reset_backup_metadata_options
+	zxfer_test_reset_backup_metadata_remote_state
+	zxfer_test_reset_backup_metadata_runtime_state
+	zxfer_test_reset_backup_metadata_result_state
+	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" || return "$?"
 	zxfer_reset_snapshot_record_indexes
 	zxfer_reset_failure_context "unit"
-	create_fake_ssh_bin
+	zxfer_test_write_env_fake_ssh "$FAKE_SSH_BIN"
 }
 
 # Behavior-focused fragments keep this stable suite entry point while

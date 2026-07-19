@@ -36,12 +36,61 @@
 ################################################################################
 
 # Module contract:
-# owns globals: current-dataset delete/rollback scratch state such as g_last_common_snap,
-# plus the divergence-contract state (g_zxfer_diverged_snapshot_count,
-# g_zxfer_diverged_snapshot_examples, g_zxfer_diverged_converged_datasets).
-# reads globals: g_actual_dest, delete scratch temp files, and current dataset context.
-# mutates caches: none; updates current delete/rollback state for replication.
+# owns globals: current-dataset delete/rollback state, its three lazy staging
+#   artifacts, and the divergence contract (g_zxfer_diverged_snapshot_count,
+#   g_zxfer_diverged_snapshot_examples, g_zxfer_diverged_converged_datasets).
+# reads globals: g_actual_dest, runtime artifact results, and current dataset context.
+# mutates caches: delete-planning artifacts and current rollback state.
 # returns via stdout: last-common snapshot values, delete lists, and filtered snapshot identities.
+
+# Purpose: Reset run-scoped snapshot delete-planning artifact handles.
+# Usage: Called by session initialization separately from per-dataset reconcile
+# resets so the same three contained files can be reused throughout one run.
+zxfer_reset_snapshot_delete_artifact_state() {
+	g_zxfer_snapshot_delete_source_identities_file=""
+	g_zxfer_snapshot_delete_destination_identities_file=""
+	g_zxfer_snapshot_delete_difference_file=""
+}
+
+# Purpose: Lazily allocate the three contained snapshot delete-planning files.
+# Usage: Called before identity sorting and comparison. Existing paths are
+# reused; partial allocation failures clean only paths created by this call and
+# preserve the exact allocator status without publishing incomplete state.
+zxfer_ensure_snapshot_delete_temp_artifacts() {
+	l_snapshot_delete_source_file=${g_zxfer_snapshot_delete_source_identities_file:-}
+	l_snapshot_delete_destination_file=${g_zxfer_snapshot_delete_destination_identities_file:-}
+	l_snapshot_delete_difference_file=${g_zxfer_snapshot_delete_difference_file:-}
+	l_snapshot_delete_missing_count=0
+	[ -n "$l_snapshot_delete_source_file" ] ||
+		l_snapshot_delete_missing_count=$((l_snapshot_delete_missing_count + 1))
+	[ -n "$l_snapshot_delete_destination_file" ] ||
+		l_snapshot_delete_missing_count=$((l_snapshot_delete_missing_count + 1))
+	[ -n "$l_snapshot_delete_difference_file" ] ||
+		l_snapshot_delete_missing_count=$((l_snapshot_delete_missing_count + 1))
+
+	if [ "$l_snapshot_delete_missing_count" -gt 0 ]; then
+		zxfer_create_temp_file_group "$l_snapshot_delete_missing_count" \
+			>/dev/null || return "$?"
+		while IFS= read -r l_snapshot_delete_new_file ||
+			[ -n "$l_snapshot_delete_new_file" ]; do
+			[ -n "$l_snapshot_delete_new_file" ] || continue
+			if [ -z "$l_snapshot_delete_source_file" ]; then
+				l_snapshot_delete_source_file=$l_snapshot_delete_new_file
+			elif [ -z "$l_snapshot_delete_destination_file" ]; then
+				l_snapshot_delete_destination_file=$l_snapshot_delete_new_file
+			else
+				l_snapshot_delete_difference_file=$l_snapshot_delete_new_file
+			fi
+		done <<EOF
+$g_zxfer_temp_file_group_result
+EOF
+	fi
+
+	g_zxfer_snapshot_delete_source_identities_file=$l_snapshot_delete_source_file
+	g_zxfer_snapshot_delete_destination_identities_file=$l_snapshot_delete_destination_file
+	g_zxfer_snapshot_delete_difference_file=$l_snapshot_delete_difference_file
+	return 0
+}
 
 # Purpose: Reset the snapshot reconcile state so the next snapshot-reconcile
 # pass starts from a clean state.
@@ -118,8 +167,8 @@ zxfer_capture_snapshot_records_for_dataset() {
 		zxfer_get_snapshot_records_for_dataset "$l_side" "$l_dataset"; then
 		:
 	else
-		l_capture_status=$?
-		return "$l_capture_status"
+		l_snapshot_record_capture_status=$?
+		return "$l_snapshot_record_capture_status"
 	fi
 
 	g_zxfer_snapshot_record_capture_result=$g_zxfer_runtime_artifact_read_result
@@ -141,9 +190,9 @@ zxfer_capture_snapshot_records_for_dataset() {
 # Returns a list of destination snapshots that don't exist in the source.
 # The source and destination snapshots should correspond to 1 dataset.
 # Uses global temporary files to reduce mktemp operations per call
-# g_delete_source_tmp_file
-# g_delete_dest_tmp_file
-# g_delete_snapshots_to_delete_tmp_file
+# g_zxfer_snapshot_delete_source_identities_file
+# g_zxfer_snapshot_delete_destination_identities_file
+# g_zxfer_snapshot_delete_difference_file
 zxfer_write_snapshot_identities_to_file() {
 	l_snapshot_records=$1
 	l_output_file=$2
@@ -205,14 +254,14 @@ zxfer_get_dest_snapshots_to_delete_per_dataset() {
 	if zxfer_ensure_snapshot_delete_temp_artifacts; then
 		:
 	else
-		l_status=$?
-		return "$l_status"
+		l_delete_artifact_status=$?
+		return "$l_delete_artifact_status"
 	fi
 
 	# Write snapshot identity keys (name + guid) to the temporary files so that
 	# `comm` can distinguish same-named but unrelated snapshots.
 	# run the first process in the background
-	zxfer_write_snapshot_identities_to_file "$l_zfs_source_snaps" "$g_delete_source_tmp_file" &
+	zxfer_write_snapshot_identities_to_file "$l_zfs_source_snaps" "$g_zxfer_snapshot_delete_source_identities_file" &
 	l_source_identity_pid=$!
 	l_source_identity_waited=0
 	if ! zxfer_register_cleanup_pid \
@@ -223,7 +272,7 @@ zxfer_get_dest_snapshots_to_delete_per_dataset() {
 	fi
 
 	l_dest_identity_status=0
-	zxfer_write_snapshot_identities_to_file "$l_zfs_dest_snaps" "$g_delete_dest_tmp_file" ||
+	zxfer_write_snapshot_identities_to_file "$l_zfs_dest_snaps" "$g_zxfer_snapshot_delete_destination_identities_file" ||
 		l_dest_identity_status=$?
 
 	# wait for the background process to finish
@@ -240,16 +289,16 @@ zxfer_get_dest_snapshots_to_delete_per_dataset() {
 		zxfer_throw_error "Failed to generate source snapshot identities for delete planning." "$l_source_identity_status"
 	fi
 
-	# Use comm to find snapshots in g_delete_dest_tmp_file that don't have a match in g_delete_source_tmp_file
+	# Use comm to find snapshots in g_zxfer_snapshot_delete_destination_identities_file that don't have a match in g_zxfer_snapshot_delete_source_identities_file
 	l_snapshot_diff_status=0
-	LC_ALL=C comm -13 "$g_delete_source_tmp_file" "$g_delete_dest_tmp_file" >"$g_delete_snapshots_to_delete_tmp_file" ||
+	LC_ALL=C comm -13 "$g_zxfer_snapshot_delete_source_identities_file" "$g_zxfer_snapshot_delete_destination_identities_file" >"$g_zxfer_snapshot_delete_difference_file" ||
 		l_snapshot_diff_status=$?
 	if [ "$l_snapshot_diff_status" -ne 0 ]; then
 		zxfer_throw_error "Failed to diff source and destination snapshot identities for delete planning." "$l_snapshot_diff_status"
 	fi
 
 	l_snapshot_path_status=0
-	l_dest_snaps_to_delete=$(zxfer_write_destination_snapshot_paths_for_identity_file "$l_zfs_dest_snaps" "$g_delete_snapshots_to_delete_tmp_file") ||
+	l_dest_snaps_to_delete=$(zxfer_write_destination_snapshot_paths_for_identity_file "$l_zfs_dest_snaps" "$g_zxfer_snapshot_delete_difference_file") ||
 		l_snapshot_path_status=$?
 	if [ "$l_snapshot_path_status" -ne 0 ]; then
 		zxfer_throw_error "Failed to map destination snapshot identities back to snapshot paths for delete planning." "$l_snapshot_path_status"
@@ -307,15 +356,15 @@ EOF
 	if zxfer_read_normalized_snapshot_record_list "$l_zfs_dest_snaps" >/dev/null; then
 		:
 	else
-		l_status=$?
-		return "$l_status"
+		l_get_last_common_snapshot_status=$?
+		return "$l_get_last_common_snapshot_status"
 	fi
 	l_normalized_dest_snaps=$g_zxfer_runtime_artifact_read_result
 
-	l_status=0
-	zxfer_create_temp_file_group 2 >/dev/null || l_status=$?
-	if [ "$l_status" -ne 0 ]; then
-		return "$l_status"
+	l_get_last_common_snapshot_status=0
+	zxfer_create_temp_file_group 2 >/dev/null || l_get_last_common_snapshot_status=$?
+	if [ "$l_get_last_common_snapshot_status" -ne 0 ]; then
+		return "$l_get_last_common_snapshot_status"
 	fi
 	l_last_common_stage_files=$g_zxfer_temp_file_group_result
 	{
@@ -328,23 +377,23 @@ EOF
 	if zxfer_write_snapshot_identities_to_file "$l_normalized_dest_snaps" "$l_dest_identity_file"; then
 		:
 	else
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_last_common_stage_files"
+		l_get_last_common_snapshot_status=$?
+		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_get_last_common_snapshot_status" "$l_last_common_stage_files"
 		return "$?"
 	fi
 	if zxfer_read_normalized_snapshot_record_list "$l_zfs_source_snaps" >/dev/null; then
 		:
 	else
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_last_common_stage_files"
+		l_get_last_common_snapshot_status=$?
+		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_get_last_common_snapshot_status" "$l_last_common_stage_files"
 		return "$?"
 	fi
 	if zxfer_write_runtime_artifact_file \
 		"$l_source_snapshot_file" "$g_zxfer_runtime_artifact_read_result"; then
 		:
 	else
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_last_common_stage_files"
+		l_get_last_common_snapshot_status=$?
+		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_get_last_common_snapshot_status" "$l_last_common_stage_files"
 		return "$?"
 	fi
 
@@ -352,8 +401,8 @@ EOF
 		"$l_dest_identity_file" "$l_source_snapshot_file"); then
 		:
 	else
-		l_status=$?
-		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_status" "$l_last_common_stage_files"
+		l_get_last_common_snapshot_status=$?
+		zxfer_cleanup_runtime_artifact_path_list_and_return "$l_get_last_common_snapshot_status" "$l_last_common_stage_files"
 		return "$?"
 	fi
 	zxfer_cleanup_runtime_artifact_path_list "$l_last_common_stage_files"
@@ -1269,32 +1318,32 @@ zxfer_set_inspect_last_common_snapshot() {
 # zxfer needs one focused probe before it mutates live state.
 zxfer_inspect_delete_snap() {
 	l_is_delete_snap=$1
-	l_source=$2
+	l_inspect_delete_snap_source=$2
 
 	# shellcheck disable=SC2034
 	g_did_delete_dest_snapshots=0
 	# shellcheck disable=SC2034
 	g_deleted_dest_newer_snapshots=0
 
-	zxfer_capture_inspect_snapshot_record_lists "$l_source"
-	zxfer_classify_inspect_snapshot_record_lists "$l_source"
+	zxfer_capture_inspect_snapshot_record_lists "$l_inspect_delete_snap_source"
+	zxfer_classify_inspect_snapshot_record_lists "$l_inspect_delete_snap_source"
 	zxfer_record_diverged_destination_snapshots "$g_zxfer_inspect_diverged_snapshot_records_result"
-	zxfer_set_inspect_last_common_snapshot "$l_source"
+	zxfer_set_inspect_last_common_snapshot "$l_inspect_delete_snap_source"
 
 	# Enforce the divergence contract BEFORE any destructive planning: with
 	# both -d and -F this warns and proceeds (converge); otherwise it fails
 	# closed with zero actions for the diverged dataset.
-	zxfer_enforce_destination_divergence_contract "$l_source"
+	zxfer_enforce_destination_divergence_contract "$l_inspect_delete_snap_source"
 
 	# Deletes non-common snaps on destination if asked to.
 	if [ "$l_is_delete_snap" -eq 1 ]; then
 		zxfer_delete_snaps \
 			"$g_zxfer_inspect_identity_source_snapshots_result" \
 			"$g_zxfer_inspect_identity_destination_snapshots_result" \
-			"$l_source" || return "$?"
+			"$l_inspect_delete_snap_source" || return "$?"
 	fi
 
 	# Create a list of source snapshots to transfer, beginning with the
 	# first snapshot after the last common one.
-	zxfer_set_src_snapshot_transfer_list "$g_zxfer_inspect_source_snapshots_result" "$l_source"
+	zxfer_set_src_snapshot_transfer_list "$g_zxfer_inspect_source_snapshots_result" "$l_inspect_delete_snap_source"
 }

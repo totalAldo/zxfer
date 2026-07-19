@@ -215,29 +215,29 @@ zxfer_calculate_size_estimate() {
 	fi
 
 	if [ -n "$l_previous_snapshot" ]; then
-		l_status=0
+		l_calculate_size_estimate_status=0
 		zxfer_capture_progress_estimate_probe_output \
 			zxfer_run_source_zfs_cmd send -nPv -I "$l_previous_snapshot" "$l_current_snapshot" ||
-			l_status=$?
+			l_calculate_size_estimate_status=$?
 		l_size_dataset=$g_zxfer_progress_probe_output_result
 	else
-		l_status=0
+		l_calculate_size_estimate_status=0
 		zxfer_capture_progress_estimate_probe_output \
 			zxfer_run_source_zfs_cmd send -nPv "$l_current_snapshot" ||
-			l_status=$?
+			l_calculate_size_estimate_status=$?
 		l_size_dataset=$g_zxfer_progress_probe_output_result
 	fi
 	if l_size_est=$(zxfer_extract_numeric_progress_estimate "$l_size_dataset"); then
 		:
 	else
 		if [ -n "$l_previous_snapshot" ]; then
-			if [ "$l_status" -ne 0 ]; then
-				zxfer_throw_error "Error calculating incremental estimate: $l_size_dataset" "$l_status"
+			if [ "$l_calculate_size_estimate_status" -ne 0 ]; then
+				zxfer_throw_error "Error calculating incremental estimate: $l_size_dataset" "$l_calculate_size_estimate_status"
 			fi
 			zxfer_throw_error "Error parsing incremental estimate: $l_size_dataset"
 		fi
-		if [ "$l_status" -ne 0 ]; then
-			zxfer_throw_error "Error calculating estimate: $l_size_dataset" "$l_status"
+		if [ "$l_calculate_size_estimate_status" -ne 0 ]; then
+			zxfer_throw_error "Error calculating estimate: $l_size_dataset" "$l_calculate_size_estimate_status"
 		fi
 		zxfer_throw_error "Error parsing estimate: $l_size_dataset"
 	fi
@@ -356,9 +356,9 @@ zxfer_progress_passthrough() {
 # estimate size, or pass the stream through unchanged.
 zxfer_handle_progress_bar_option() {
 	l_snapshot=$1
-	l_previous_snapshot=$2
+	l_handle_progress_bar_option_previous_snapshot=$2
 	l_progress_bar_cmd=""
-	l_size_est=""
+	l_handle_progress_bar_option_size_est=""
 	l_use_fast_estimate=0
 	g_zxfer_progress_bar_command_result=""
 
@@ -366,22 +366,22 @@ zxfer_handle_progress_bar_option() {
 	if zxfer_progress_dialog_uses_size_estimate; then
 		if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
 			zxfer_echoV "Dry run: skipping live %%size%% progress estimate discovery."
-			l_size_est="UNKNOWN"
+			l_handle_progress_bar_option_size_est="UNKNOWN"
 		else
 			if zxfer_should_use_fast_progress_estimate; then
 				l_use_fast_estimate=1
 			fi
 			l_size_est_status=0
-			zxfer_calculate_size_estimate "$l_snapshot" "$l_previous_snapshot" "$l_use_fast_estimate" >/dev/null ||
+			zxfer_calculate_size_estimate "$l_snapshot" "$l_handle_progress_bar_option_previous_snapshot" "$l_use_fast_estimate" >/dev/null ||
 				l_size_est_status=$?
 			[ "$l_size_est_status" -eq 0 ] || return "$l_size_est_status"
-			l_size_est=$g_zxfer_progress_size_estimate_result
-			if [ -z "$l_size_est" ]; then
+			l_handle_progress_bar_option_size_est=$g_zxfer_progress_size_estimate_result
+			if [ -z "$l_handle_progress_bar_option_size_est" ]; then
 				zxfer_throw_error "Failed to calculate progress size estimate for $l_snapshot."
 			fi
 		fi
 	fi
-	l_progress_dialog=$(zxfer_setup_progress_dialog "$l_size_est" "$l_snapshot")
+	l_progress_dialog=$(zxfer_setup_progress_dialog "$l_handle_progress_bar_option_size_est" "$l_snapshot")
 
 	# Modify the send command to include the progress dialog.
 	l_escaped_progress_dialog=$(zxfer_escape_for_single_quotes "$l_progress_dialog")
@@ -543,7 +543,7 @@ zxfer_profile_record_send_receive_pipeline_metrics() {
 zxfer_zfs_send_receive() {
 	zxfer_set_failure_stage "send/receive"
 	zxfer_echoV "Begin zxfer_zfs_send_receive()"
-	l_previous_snapshot=$1
+	l_zfs_send_receive_previous_snapshot=$1
 	l_current_snapshot=$2
 	l_dest=$3
 	# 4th optional parameter specifies if background process is allowed, with a default to 1
@@ -564,9 +564,9 @@ zxfer_zfs_send_receive() {
 	fi
 
 	# Set up the send and receive commands
-	l_send_display_cmd=$(zxfer_get_send_command "$l_previous_snapshot" "$l_current_snapshot" "$l_send_zfs_cmd")
+	l_send_display_cmd=$(zxfer_get_send_command "$l_zfs_send_receive_previous_snapshot" "$l_current_snapshot" "$l_send_zfs_cmd")
 	l_recv_display_cmd=$(zxfer_get_receive_command "$l_dest" "$l_recv_zfs_cmd" display "$l_receive_force_flag")
-	l_send_cmd=$(zxfer_get_send_command "$l_previous_snapshot" "$l_current_snapshot" "$l_send_zfs_cmd" "exec")
+	l_send_cmd=$(zxfer_get_send_command "$l_zfs_send_receive_previous_snapshot" "$l_current_snapshot" "$l_send_zfs_cmd" "exec")
 	l_recv_cmd=$(zxfer_get_receive_command "$l_dest" "$l_recv_zfs_cmd" "exec" "$l_receive_force_flag")
 	if [ "$l_receive_force_flag" != "" ]; then
 		zxfer_echov "Receive-side force flag (-F) is active for destination [$l_dest]."
@@ -584,15 +584,15 @@ zxfer_zfs_send_receive() {
 	# Perform this after ssh wrapping occurs
 	if [ "$g_option_D_display_progress_bar" != "" ]; then
 		l_progress_bar_status=0
-		zxfer_handle_progress_bar_option "$l_current_snapshot" "$l_previous_snapshot" >/dev/null ||
+		zxfer_handle_progress_bar_option "$l_current_snapshot" "$l_zfs_send_receive_previous_snapshot" >/dev/null ||
 			l_progress_bar_status=$?
 		[ "$l_progress_bar_status" -eq 0 ] || return "$l_progress_bar_status"
-		l_progress_bar_cmd=$g_zxfer_progress_bar_command_result
-		if [ -z "$l_progress_bar_cmd" ]; then
+		l_zfs_send_receive_progress_bar_cmd=$g_zxfer_progress_bar_command_result
+		if [ -z "$l_zfs_send_receive_progress_bar_cmd" ]; then
 			zxfer_throw_error "Failed to build progress wrapper for $l_current_snapshot."
 		fi
-		l_send_display_cmd="$l_send_display_cmd $l_progress_bar_cmd"
-		l_send_cmd="$l_send_cmd $l_progress_bar_cmd"
+		l_send_display_cmd="$l_send_display_cmd $l_zfs_send_receive_progress_bar_cmd"
+		l_send_cmd="$l_send_cmd $l_zfs_send_receive_progress_bar_cmd"
 	fi
 
 	l_pipeline_display_cmd="$l_send_display_cmd | $l_recv_display_cmd"

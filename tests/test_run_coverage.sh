@@ -471,6 +471,97 @@ TRACE
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_ignores_quoted_heredoc_payloads() {
+	l_fake_root="$TEST_TMPDIR/fake-root-quoted-heredoc"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-quoted-heredoc.list"
+	l_trace_file="$TEST_TMPDIR/merged-quoted-heredoc.trace"
+	l_summary_file="$TEST_TMPDIR/render-quoted-heredoc-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-quoted-heredoc-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+{
+printf '%s\n' block
+} <<-'QUOTED'
+	if payload-were-counted; then
+		this-would-be-a-miss
+	fi
+QUOTED
+cat <<\ESCAPED
+another payload miss
+ESCAPED
+printf '%s\n' done
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:3: printf '%s\n' block
++$l_source_file:9: cat
++$l_source_file:12: printf '%s\n' done
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "Single-quoted and backslash-quoted heredoc delimiters should exclude their payloads from the bash-xtrace denominator." \
+		"$output" "100.00	3	3	0	src/fake.sh"
+	assertNotContains "A quoted heredoc payload should not be reported as uncovered shell code." \
+		"$output" "payload-were-counted"
+	assertNotContains "Control-flow terminators carrying quoted heredocs should not be counted as executable misses." \
+		"$output" "} <<-'QUOTED'"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_ignores_compound_control_delimiters() {
+	l_fake_root="$TEST_TMPDIR/fake-root-control-delimiters"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-control-delimiters.list"
+	l_trace_file="$TEST_TMPDIR/merged-control-delimiters.trace"
+	l_summary_file="$TEST_TMPDIR/render-control-delimiters-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-control-delimiters-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+if (
+printf '%s\n' condition
+); then
+printf '%s\n' branch
+fi
+if ! (
+false
+); then
+printf '%s\n' negated
+fi
+while IFS= read -r line; do
+printf '%s\n' "$line"
+done <"$1"
+printf '%s\n' done
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:3: printf '%s\n' condition
++$l_source_file:5: printf '%s\n' branch
++$l_source_file:8: false
++$l_source_file:10: printf '%s\n' negated
++$l_source_file:12: IFS= read -r line
++$l_source_file:13: printf '%s\n' payload
++$l_source_file:15: printf '%s\n' done
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "Subshell conditions and redirected loop terminators should not add syntax-only lines to the bash-xtrace denominator." \
+		"$output" "100.00	7	7	0	src/fake.sh"
+	assertNotContains "An if-subshell opener should not be reported as an uncovered command." \
+		"$output" "if ("
+	assertNotContains "A redirected loop terminator should not be reported as an uncovered command." \
+		"$output" "done <\"\$1\""
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_coverage_render_bash_xtrace_report_ignores_multiline_command_substitutions() {
 	l_fake_root="$TEST_TMPDIR/fake-root-command-subst"
 	l_source_file="$l_fake_root/src/fake.sh"
@@ -501,6 +592,114 @@ TRACE
 		"$output" "captured=\$("
 	assertNotContains "The inner command-substitution body should not appear as uncovered shell code." \
 		"$output" "one"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_ignores_unattributable_command_substitution_openers() {
+	l_fake_root="$TEST_TMPDIR/fake-root-command-subst-openers"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-command-subst-openers.list"
+	l_trace_file="$TEST_TMPDIR/merged-command-subst-openers.trace"
+	l_summary_file="$TEST_TMPDIR/render-command-subst-openers-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-command-subst-openers-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+continued=$(render_value \
+	'one')
+piped=$(printf '%s\n' input |
+	sed 's/input/output/')
+same_line=$(printf '%s\n' same)
+printf '%s\n' "$continued:$piped:$same_line"
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:3: render_value one
++$l_source_file:3: continued=one
++$l_source_file:5: printf '%s\n' input
++$l_source_file:5: sed s/input/output/
++$l_source_file:5: piped=output
++$l_source_file:6: printf '%s\n' same
++$l_source_file:6: same_line=same
++$l_source_file:7: printf '%s\n' one:output:same
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "Command-substitution opener lines that Bash attributes to a later physical line should not become structural coverage misses." \
+		"$output" "100.00	3	3	0	src/fake.sh"
+	# shellcheck disable=SC1003,SC2016  # Exact shell source fragments, not expansions.
+	assertNotContains "A backslash-continued command-substitution opener should not appear as uncovered shell code." \
+		"$output" 'continued=$(render_value \'
+	assertNotContains "A pipeline command-substitution opener should not appear as uncovered shell code." \
+		"$output" "piped=\$(printf"
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Literal fixture text; invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_ignores_quoted_closes_in_command_substitution_openers() {
+	l_fake_root="$TEST_TMPDIR/fake-root-command-subst-quoted-close"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-command-subst-quoted-close.list"
+	l_trace_file="$TEST_TMPDIR/merged-command-subst-quoted-close.trace"
+	l_summary_file="$TEST_TMPDIR/render-command-subst-quoted-close-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-command-subst-quoted-close-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+continued=$(printf "%s)" \
+	input)
+printf '%s\n' "$continued"
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:3: printf '%s)' input
++$l_source_file:3: continued='input)'
++$l_source_file:4: printf '%s\n' 'input)'
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "A close parenthesis inside a command-substitution string literal should not expose the opener as an uncovered command." \
+		"$output" "100.00	1	1	0	src/fake.sh"
+	assertNotContains "The command-substitution opener should remain structural when Bash attributes it to the continued line." \
+		"$output" 'continued=$(printf'
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Literal fixture text; invoked indirectly by shunit2.
+test_run_coverage_render_bash_xtrace_report_balances_nested_parentheses_in_command_substitution_openers() {
+	l_fake_root="$TEST_TMPDIR/fake-root-command-subst-nested-opener"
+	l_source_file="$l_fake_root/src/fake.sh"
+	l_target_list_file="$TEST_TMPDIR/targets-command-subst-nested-opener.list"
+	l_trace_file="$TEST_TMPDIR/merged-command-subst-nested-opener.trace"
+	l_summary_file="$TEST_TMPDIR/render-command-subst-nested-opener-summary.tsv"
+	l_missing_file="$TEST_TMPDIR/render-command-subst-nested-opener-missing.txt"
+
+	mkdir -p "$l_fake_root/src"
+	cat >"$l_source_file" <<'SCRIPT'
+#!/bin/sh
+continued=$( (printf '%s\n' one) |
+	sed 's/one/two/')
+printf '%s\n' "$continued"
+SCRIPT
+	printf '%s\n' "$l_source_file" >"$l_target_list_file"
+	cat >"$l_trace_file" <<TRACE
++$l_source_file:3: printf '%s\n' one
++$l_source_file:3: sed s/one/two/
++$l_source_file:3: continued=two
++$l_source_file:4: printf '%s\n' two
+TRACE
+
+	output=$(run_coverage_helper \
+		"ZXFER_ROOT=\"$l_fake_root\"; render_bash_xtrace_report \"$l_target_list_file\" \"$l_trace_file\" \"$l_summary_file\" \"$l_missing_file\"; printf '%s\n---\n%s\n' \"\$(cat \"$l_summary_file\")\" \"\$(cat \"$l_missing_file\" 2>/dev/null || :)\"")
+
+	assertContains "Nested subshell parentheses should not close the surrounding command substitution early." \
+		"$output" "100.00	2	2	0	src/fake.sh"
+	assertNotContains "A command-substitution opener with a nested subshell should not become an uncovered command." \
+		"$output" 'continued=$( (printf'
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

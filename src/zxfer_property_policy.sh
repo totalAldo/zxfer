@@ -642,7 +642,7 @@ EOF
 # $3: additional ignore list to remove
 zxfer_sanitize_property_list() {
 	l_input_list=$1
-	l_remove_list=$2
+	l_sanitize_property_list_remove_list=$2
 	l_ignore_list=$3
 
 	if [ -z "$l_input_list" ]; then
@@ -652,8 +652,8 @@ zxfer_sanitize_property_list() {
 
 	l_filtered_list=$l_input_list
 
-	if [ -n "$l_remove_list" ]; then
-		zxfer_remove_properties "$l_filtered_list" "$l_remove_list"
+	if [ -n "$l_sanitize_property_list_remove_list" ]; then
+		zxfer_remove_properties "$l_filtered_list" "$l_sanitize_property_list_remove_list"
 		l_filtered_list="$g_zxfer_new_rmv_pvs"
 	fi
 
@@ -754,14 +754,14 @@ zxfer_get_required_creation_properties_for_dataset_type() {
 # $2: unsupported property names
 zxfer_strip_unsupported_properties() {
 	l_input_list=$1
-	l_unsupported_list=$2
+	l_strip_unsupported_properties_unsupported_list=$2
 
-	if [ -z "$l_unsupported_list" ] || [ -z "$l_input_list" ]; then
+	if [ -z "$l_strip_unsupported_properties_unsupported_list" ] || [ -z "$l_input_list" ]; then
 		printf '%s\n' "$l_input_list"
 		return
 	fi
 
-	zxfer_remove_unsupported_properties "$l_input_list" "$l_unsupported_list"
+	zxfer_remove_unsupported_properties "$l_input_list" "$l_strip_unsupported_properties_unsupported_list"
 	printf '%s\n' "$g_zxfer_only_supported_properties"
 }
 
@@ -841,14 +841,14 @@ zxfer_get_unsupported_property_probe_dataset_for_source() {
 	l_source_dataset=$1
 
 	l_probe_destination_status=0
-	l_requested_destination=$(zxfer_get_unsupported_property_probe_destination_for_source "$l_source_dataset") ||
+	l_get_unsupported_property_probe_dataset_for_source_requested_destination=$(zxfer_get_unsupported_property_probe_destination_for_source "$l_source_dataset") ||
 		l_probe_destination_status=$?
 	if [ "$l_probe_destination_status" -ne 0 ]; then
-		printf '%s\n' "$l_requested_destination"
+		printf '%s\n' "$l_get_unsupported_property_probe_dataset_for_source_requested_destination"
 		return "$l_probe_destination_status"
 	fi
 
-	zxfer_get_unsupported_property_probe_dataset "$l_requested_destination"
+	zxfer_get_unsupported_property_probe_dataset "$l_get_unsupported_property_probe_dataset_for_source_requested_destination"
 }
 
 # Purpose: Append the unsupported property for dataset type to the module-owned
@@ -1009,7 +1009,7 @@ EOF
 # callers select the current dataset type before filtering.
 zxfer_calculate_unsupported_properties() {
 	zxfer_reset_unsupported_property_state
-	l_resolved_source_property_type_pairs=""
+	l_calculate_unsupported_properties_resolved_source_property_type_pairs=""
 	l_scan_source_list=${g_recursive_source_list:-$g_initial_source}
 	l_scan_sources=$(zxfer_split_tokens_on_whitespace "$l_scan_source_list")
 
@@ -1045,28 +1045,28 @@ EOF
 # Usage: Called before destination create planning so parent-creation handling
 # can avoid combining `zfs create -p` with create-time properties.
 zxfer_property_list_has_entries() {
-	l_property_list=$1
+	l_property_entry_list=$1
 
-	l_has_entries=1
-	l_property_list_remaining=$l_property_list
-	while [ -n "$l_property_list_remaining" ]; do
-		case "$l_property_list_remaining" in
+	l_property_entry_list_has_entries=1
+	l_property_entry_list_remaining=$l_property_entry_list
+	while [ -n "$l_property_entry_list_remaining" ]; do
+		case "$l_property_entry_list_remaining" in
 		*,*)
-			l_property_entry=${l_property_list_remaining%%,*}
-			l_property_list_remaining=${l_property_list_remaining#*,}
+			l_property_entry_list_value=${l_property_entry_list_remaining%%,*}
+			l_property_entry_list_remaining=${l_property_entry_list_remaining#*,}
 			;;
 		*)
-			l_property_entry=$l_property_list_remaining
-			l_property_list_remaining=""
+			l_property_entry_list_value=$l_property_entry_list_remaining
+			l_property_entry_list_remaining=""
 			;;
 		esac
-		if [ -n "$l_property_entry" ]; then
-			l_has_entries=0
+		if [ -n "$l_property_entry_list_value" ]; then
+			l_property_entry_list_has_entries=0
 			break
 		fi
 	done
 
-	return "$l_has_entries"
+	return "$l_property_entry_list_has_entries"
 }
 
 # Purpose: Remove child create overrides that the parent already supplies.

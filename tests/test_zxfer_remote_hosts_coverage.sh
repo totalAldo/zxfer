@@ -10,29 +10,14 @@ TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# shellcheck source=tests/helpers/fake_tool_fixtures.sh
+. "$TESTS_DIR/helpers/fake_tool_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_replication.sh"
 
 tearDown() {
 	PATH=$TEST_ORIGINAL_PATH
 	export PATH
-}
-
-create_fake_ssh_bin() {
-	cat >"$FAKE_SSH_BIN" <<'EOF'
-#!/bin/sh
-if [ -n "${FAKE_SSH_LOG:-}" ]; then
-	printf '%s\n' "$@" >>"$FAKE_SSH_LOG"
-fi
-if [ -n "${FAKE_SSH_STDOUT:-}" ] && [ -z "${FAKE_SSH_SUPPRESS_STDOUT:-}" ]; then
-	printf '%s' "$FAKE_SSH_STDOUT"
-fi
-if [ -n "${FAKE_SSH_STDERR:-}" ]; then
-	printf '%s' "$FAKE_SSH_STDERR" >&2
-fi
-exit "${FAKE_SSH_EXIT_STATUS:-0}"
-EOF
-	chmod +x "$FAKE_SSH_BIN"
 }
 
 oneTimeSetUp() {
@@ -42,7 +27,7 @@ oneTimeSetUp() {
 		exit 1
 	}
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
-	create_fake_ssh_bin
+	zxfer_test_write_env_fake_ssh "$FAKE_SSH_BIN"
 }
 
 oneTimeTearDown() {
@@ -90,7 +75,7 @@ setUp() {
 	if command -v zxfer_reset_owned_lock_tracking >/dev/null 2>&1; then
 		zxfer_reset_owned_lock_tracking
 	fi
-	create_fake_ssh_bin
+	zxfer_test_write_env_fake_ssh "$FAKE_SSH_BIN"
 }
 
 test_zxfer_ssh_control_socket_action_failure_helpers_cover_stale_classification_and_output() {
@@ -516,6 +501,442 @@ test_zxfer_ssh_setup_and_close_error_branches_cover_current_shell_paths() {
 		"$output" "setup_open_throw=Error creating ssh control socket for origin host."
 	assertContains "Setup should fail closed when an existing role socket cannot be closed first." \
 		"$output" "setup_close_throw=Error closing ssh control socket for target host."
+}
+
+test_zxfer_ssh_transport_directory_and_render_failure_branches_fail_closed() {
+	branch_root="$TEST_TMPDIR/ssh_transport_directory_branch_coverage"
+	mkdir -p "$branch_root/private"
+	chmod 700 "$branch_root/private"
+
+	output=$(
+		(
+			set +e
+			zxfer_split_host_spec_tokens() {
+				printf '%s\n' "invalid host specification"
+				return 7
+			}
+			quoted=$(zxfer_quote_host_spec_tokens "invalid host")
+			printf 'quote_status=%s\n' "$?"
+			printf 'quote_output=%s\n' "$quoted"
+		)
+		(
+			set +e
+			zxfer_runtime_artifact_path_is_registered() {
+				return 0
+			}
+			zxfer_get_registered_runtime_artifact_directory_identity() {
+				g_zxfer_runtime_artifact_directory_identity_result="device:inode"
+				return 0
+			}
+			zxfer_get_path_device_inode() {
+				printf '%s\n' "device:inode"
+			}
+			zxfer_get_effective_user_uid() {
+				printf '%s\n' 501
+			}
+			zxfer_get_path_owner_uid() {
+				printf '%s\n' 501
+			}
+			zxfer_get_path_mode_octal() {
+				printf '%s\n' 700
+			}
+			zxfer_ssh_control_socket_dir_is_current_private "$branch_root/private"
+			printf 'private_status=%s\n' "$?"
+		)
+		(
+			set +e
+			g_zxfer_ssh_control_socket_dir_result=""
+			g_zxfer_run_tmp_root="$branch_root/long-run-root"
+			zxfer_ensure_run_tmp_root() {
+				return 0
+			}
+			zxfer_is_ssh_control_socket_path_short_enough() {
+				return 1
+			}
+			zxfer_try_get_socket_cache_tmpdir() {
+				printf '%s\n' "$branch_root"
+			}
+			zxfer_create_unpredictable_staging_entry() {
+				return 71
+			}
+			zxfer_ensure_ssh_control_socket_dir >/dev/null
+			printf 'create_status=%s\n' "$?"
+		)
+		(
+			set +e
+			g_zxfer_ssh_control_socket_dir_result=""
+			g_zxfer_run_tmp_root="$branch_root/long-run-root"
+			unregistered_dir="$branch_root/unregistered"
+			zxfer_ensure_run_tmp_root() {
+				return 0
+			}
+			zxfer_is_ssh_control_socket_path_short_enough() {
+				if [ "${1#"$g_zxfer_run_tmp_root"/}" != "$1" ]; then
+					return 1
+				fi
+				return 0
+			}
+			zxfer_try_get_socket_cache_tmpdir() {
+				printf '%s\n' "$branch_root"
+			}
+			zxfer_create_unpredictable_staging_entry() {
+				mkdir "$unregistered_dir" || return "$?"
+				printf '%s\n' "$unregistered_dir"
+			}
+			zxfer_register_runtime_artifact_path() {
+				return 72
+			}
+			zxfer_ensure_ssh_control_socket_dir >/dev/null
+			printf 'register_status=%s\n' "$?"
+			if [ -e "$unregistered_dir" ]; then
+				printf '%s\n' 'register_cleanup=kept'
+			else
+				printf '%s\n' 'register_cleanup=removed'
+			fi
+		)
+		(
+			set +e
+			zxfer_get_ssh_base_transport_tokens() {
+				printf '%s\n' "transport policy failure"
+				return 73
+			}
+			zxfer_run_ssh_control_socket_action_for_host \
+				"user@example" "$branch_root/action.sock" check >/dev/null
+			printf 'action_status=%s\n' "$?"
+			printf 'action_result=%s\n' "$g_zxfer_ssh_control_socket_action_result"
+			printf 'action_stderr=%s\n' "$g_zxfer_ssh_control_socket_action_stderr"
+		)
+	)
+
+	assertContains "Host-spec quoting should preserve splitter failures." \
+		"$output" "quote_status=1"
+	assertContains "Host-spec quoting should retain the splitter diagnostic." \
+		"$output" "quote_output=invalid host specification"
+	assertContains "Registered private socket directories should pass all identity, owner, and mode checks." \
+		"$output" "private_status=0"
+	assertContains "Short socket-directory staging failures should fail closed." \
+		"$output" "create_status=1"
+	assertContains "Runtime artifact registration failures should fail closed." \
+		"$output" "register_status=1"
+	assertContains "Unregistered socket directories should be removed immediately." \
+		"$output" "register_cleanup=removed"
+	assertContains "SSH action transport-policy failures should fail closed." \
+		"$output" "action_status=1"
+	assertContains "SSH action transport-policy failures should publish an error result." \
+		"$output" "action_result=error"
+	assertContains "SSH action transport-policy failures should preserve the diagnostic." \
+		"$output" "action_stderr=transport policy failure"
+}
+
+test_zxfer_ssh_transport_owner_guards_cover_setup_and_bootstrap_failures() {
+	branch_root="$TEST_TMPDIR/ssh_transport_owner_guard_coverage"
+	mkdir -p "$branch_root"
+
+	output=$(
+		(
+			set +e
+			g_ssh_origin_control_socket="$branch_root/origin.sock"
+			zxfer_close_origin_ssh_control_socket() {
+				return 76
+			}
+			zxfer_throw_error() {
+				printf 'origin_close_throw=%s\n' "$1"
+				exit 9
+			}
+			zxfer_setup_ssh_control_socket origin.example origin
+			printf 'origin_close_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_ensure_ssh_control_socket_dir() {
+				return 0
+			}
+			zxfer_get_ssh_control_socket_path_for_role() {
+				return 77
+			}
+			zxfer_throw_error() {
+				printf 'socket_path_throw=%s\n' "$1"
+				exit 9
+			}
+			zxfer_setup_ssh_control_socket origin.example origin
+			printf 'socket_path_status=%s\n' "$?"
+		)
+		(
+			set +e
+			stale_socket="$branch_root/stale.sock"
+			: >"$stale_socket"
+			zxfer_ensure_ssh_control_socket_dir() {
+				return 0
+			}
+			zxfer_get_ssh_control_socket_path_for_role() {
+				printf '%s\n' "$stale_socket"
+			}
+			zxfer_get_ssh_base_transport_tokens() {
+				printf '%s\n' "$FAKE_SSH_BIN"
+			}
+			zxfer_check_ssh_control_socket_for_host() {
+				g_zxfer_ssh_control_socket_action_result=stale
+				return 1
+			}
+			zxfer_open_ssh_control_socket_for_host() {
+				return 0
+			}
+			zxfer_set_ssh_control_socket_role_state() {
+				return 0
+			}
+			zxfer_setup_ssh_control_socket origin.example origin
+			printf 'stale_setup_status=%s\n' "$?"
+			if [ -e "$stale_socket" ]; then
+				printf '%s\n' 'stale_socket=kept'
+			else
+				printf '%s\n' 'stale_socket=removed'
+			fi
+		)
+		(
+			set +e
+			zxfer_close_ssh_control_socket_for_role invalid
+			printf 'close_invalid_role_status=%s\n' "$?"
+		)
+		(
+			set +e
+			g_option_O_origin_host=origin.example
+			g_option_T_target_host=""
+			g_option_n_dryrun=1
+			zxfer_prepare_ssh_control_sockets_for_active_hosts
+			printf 'prepare_dryrun_status=%s\n' "$?"
+		)
+		(
+			set +e
+			g_option_O_origin_host=origin.example
+			g_option_T_target_host=""
+			g_option_n_dryrun=0
+			g_cmd_ssh=""
+			zxfer_profile_metrics_enabled() {
+				return 1
+			}
+			zxfer_ensure_local_ssh_command() {
+				g_zxfer_resolved_local_ssh_command_result="ssh dependency missing"
+				return 78
+			}
+			zxfer_set_failure_class() {
+				g_zxfer_failure_class=$1
+			}
+			zxfer_throw_error() {
+				printf 'prepare_dependency_class=%s\n' "$g_zxfer_failure_class"
+				printf 'prepare_dependency_throw=%s\n' "$1"
+				exit 9
+			}
+			zxfer_prepare_ssh_control_sockets_for_active_hosts
+			printf 'prepare_dependency_status=%s\n' "$?"
+		)
+		(
+			set +e
+			g_option_O_origin_host=""
+			g_option_T_target_host="invalid target"
+			zxfer_quote_host_spec_tokens() {
+				printf '%s\n' "target host rejected"
+				return 1
+			}
+			zxfer_throw_usage_error() {
+				printf 'target_usage_throw=%s\n' "$1"
+				exit "$2"
+			}
+			zxfer_refresh_remote_zfs_commands
+			printf 'target_usage_status=%s\n' "$?"
+		)
+	)
+
+	assertContains "Replacing an origin socket should fail closed when the old socket cannot be closed." \
+		"$output" "origin_close_throw=Error closing ssh control socket for origin host."
+	assertContains "Socket setup should reject a role path that cannot be resolved." \
+		"$output" "socket_path_throw=Error creating ssh control socket for origin host."
+	assertContains "Socket setup should continue safely after removing a stale role socket." \
+		"$output" "stale_setup_status=0"
+	assertContains "Socket setup should remove a stale role socket before opening a replacement." \
+		"$output" "stale_socket=removed"
+	assertContains "Socket close dispatch should reject unknown roles." \
+		"$output" "close_invalid_role_status=1"
+	assertContains "Dry-run bootstrap should skip SSH socket setup successfully." \
+		"$output" "prepare_dryrun_status=0"
+	assertContains "SSH bootstrap dependency failures should use dependency classification." \
+		"$output" "prepare_dependency_class=dependency"
+	assertContains "SSH bootstrap dependency failures should preserve the lookup diagnostic." \
+		"$output" "prepare_dependency_throw=ssh dependency missing"
+	assertContains "Target host quoting failures should retain usage-error handling." \
+		"$output" "target_usage_throw=target host rejected"
+}
+
+test_zxfer_remote_capability_owner_and_cache_error_branches_fail_closed() {
+	output=$(
+		(
+			set +e
+			zxfer_publish_endpoint_runtime_context invalid Linux /sbin/zfs
+			printf 'publish_endpoint_status=%s\n' "$?"
+
+			g_zxfer_remote_capability_tool_records=$(printf 'zfs\t0')
+			zxfer_get_parsed_remote_capability_tool_record zfs >/dev/null
+			printf 'malformed_record_status=%s\n' "$?"
+
+			zxfer_render_remote_capability_cache_identity_for_host \
+				"host.example" zfs invalid >/dev/null
+			printf 'identity_role_status=%s\n' "$?"
+
+			zxfer_clear_parsed_remote_capability_state_for_role invalid
+			printf 'clear_role_status=%s\n' "$?"
+
+			g_zxfer_remote_capability_os=Linux
+			g_zxfer_remote_capability_zfs_status=0
+			g_zxfer_remote_capability_tool_records=$(printf 'zfs\t0\t/sbin/zfs')
+			zxfer_publish_parsed_remote_capability_state_for_role \
+				invalid identity
+			printf 'publish_role_status=%s\n' "$?"
+
+			g_target_remote_capabilities_parsed_identity=target-identity
+			g_target_remote_capabilities_os=FreeBSD
+			g_target_remote_capabilities_zfs_status=0
+			g_target_remote_capabilities_tool_records=$(printf 'zfs\t0\t/sbin/zfs')
+			zxfer_load_parsed_remote_capability_state_for_role \
+				target target-identity
+			printf 'load_target_status=%s\n' "$?"
+			printf 'load_target_os=%s\n' "$g_zxfer_remote_capability_os"
+			zxfer_load_parsed_remote_capability_state_for_role invalid identity
+			printf 'load_invalid_status=%s\n' "$?"
+
+			zxfer_store_remote_capability_response_for_role \
+				invalid host identity response
+			printf 'store_invalid_status=%s\n' "$?"
+		)
+		(
+			set +e
+			g_target_remote_capabilities_host=old.example
+			g_target_remote_capabilities_cache_identity=old-identity
+			g_target_remote_capabilities_response=old-response
+			g_target_remote_capabilities_bootstrap_source=live
+			g_target_remote_capabilities_parsed_identity=old-identity
+			g_target_remote_capabilities_os=Linux
+			g_target_remote_capabilities_zfs_status=0
+			g_target_remote_capabilities_tool_records=$(printf 'zfs\t0\t/sbin/zfs')
+			zxfer_store_remote_capability_response_for_role \
+				target new.example new-identity new-response
+			printf 'store_target_status=%s\n' "$?"
+			printf 'store_target_host=%s\n' "$g_target_remote_capabilities_host"
+			printf 'store_target_bootstrap=<%s>\n' "$g_target_remote_capabilities_bootstrap_source"
+			printf 'store_target_parsed=<%s>\n' "$g_target_remote_capabilities_parsed_identity"
+		)
+	)
+
+	assertContains "Endpoint context publication should reject unknown roles." \
+		"$output" "publish_endpoint_status=2"
+	assertContains "Malformed parsed tool records should fail closed." \
+		"$output" "malformed_record_status=1"
+	assertContains "Capability cache identities should reject unknown roles." \
+		"$output" "identity_role_status=1"
+	assertContains "Parsed capability clearing should reject unknown roles." \
+		"$output" "clear_role_status=2"
+	assertContains "Parsed capability publication should reject unknown roles." \
+		"$output" "publish_role_status=2"
+	assertContains "Target parsed capability state should load through the explicit owner path." \
+		"$output" "load_target_status=0"
+	assertContains "Target parsed capability state should publish the cached operating system." \
+		"$output" "load_target_os=FreeBSD"
+	assertContains "Parsed capability loads should reject unknown roles." \
+		"$output" "load_invalid_status=2"
+	assertContains "Raw capability storage should reject unknown roles." \
+		"$output" "store_invalid_status=2"
+	assertContains "Target cache replacement should publish the new host." \
+		"$output" "store_target_host=new.example"
+	assertContains "Target cache replacement should clear stale bootstrap provenance." \
+		"$output" "store_target_bootstrap=<>"
+	assertContains "Target cache replacement should clear stale parsed state." \
+		"$output" "store_target_parsed=<>"
+}
+
+test_zxfer_remote_capability_lookup_guard_branches_preserve_cache_ownership() {
+	output=$(
+		(
+			set +e
+			zxfer_get_remote_capability_requested_tools_for_host() {
+				printf '%s\n' zfs cat
+			}
+			requested=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+				"host.example" zfs)
+			printf 'requested_status=%s\n' "$?"
+			printf 'requested_tools=%s\n' "$(printf '%s\n' "$requested" | tr '\n' ',')"
+		)
+		(
+			set +e
+			zxfer_resolve_remote_capability_requested_tools_for_host() {
+				return 74
+			}
+			zxfer_parsed_remote_capabilities_cover_requested_tools \
+				"host.example" zfs
+			printf 'coverage_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_load_cached_remote_capability_state_for_host \
+				"host.example" zfs invalid
+			printf 'load_invalid_role_status=%s\n' "$?"
+			zxfer_get_cached_remote_capability_response_for_host \
+				"host.example" zfs invalid >/dev/null
+			printf 'get_invalid_role_status=%s\n' "$?"
+			zxfer_store_cached_remote_capability_response_for_host \
+				"host.example" response zfs invalid
+			printf 'store_invalid_role_status=%s\n' "$?"
+			zxfer_note_remote_capability_bootstrap_source_for_host \
+				"host.example" live zfs invalid
+			printf 'note_invalid_role_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_render_remote_capability_cache_identity_for_host() {
+				return 75
+			}
+			zxfer_load_cached_remote_capability_state_for_host \
+				"host.example" zfs origin
+			printf 'load_identity_status=%s\n' "$?"
+		)
+		(
+			set +e
+			zxfer_render_remote_capability_cache_identity_for_host() {
+				printf '%s\n' target-identity
+			}
+			g_origin_remote_capabilities_host=other.example
+			g_origin_remote_capabilities_cache_identity=origin-identity
+			g_origin_remote_capabilities_response=origin-response
+			g_target_remote_capabilities_host=target.example
+			g_target_remote_capabilities_cache_identity=target-identity
+			g_target_remote_capabilities_response=target-response
+			zxfer_load_cached_remote_capability_state_for_host \
+				target.example zfs ""
+			printf 'legacy_target_status=%s\n' "$?"
+			printf 'legacy_target_role=%s\n' "$g_zxfer_remote_capability_cache_role_result"
+			printf 'legacy_target_response=%s\n' "$g_zxfer_remote_capability_response_result"
+		)
+	)
+
+	assertContains "Resolved-tool requests should reuse a matching host-scoped request set." \
+		"$output" "requested_status=0"
+	assertContains "Resolved-tool requests should retain the complete matching host scope." \
+		"$output" "requested_tools=zfs,cat,"
+	assertContains "Requested-tool coverage should fail when request normalization fails." \
+		"$output" "coverage_status=1"
+	assertContains "Capability cache loads should reject unknown roles." \
+		"$output" "load_invalid_role_status=1"
+	assertContains "Capability cache stdout reads should reject unknown roles." \
+		"$output" "get_invalid_role_status=1"
+	assertContains "Capability cache stores should reject unknown roles." \
+		"$output" "store_invalid_role_status=1"
+	assertContains "Capability bootstrap provenance should ignore unknown roles safely." \
+		"$output" "note_invalid_role_status=0"
+	assertContains "Capability cache loads should reject identity-rendering failures." \
+		"$output" "load_identity_status=1"
+	assertContains "Legacy unassigned cache loads should select an exact matching target slot." \
+		"$output" "legacy_target_status=0"
+	assertContains "Legacy unassigned cache loads should publish the selected target role." \
+		"$output" "legacy_target_role=target"
+	assertContains "Legacy unassigned cache loads should publish the exact target response." \
+		"$output" "legacy_target_response=target-response"
 }
 
 # shellcheck source=tests/shunit2/shunit2

@@ -9,8 +9,3 @@
 # policy review; tests/budget_policy.tsv retains the secondary tree-wide count.
 src/zxfer_exec.sh	zxfer_execute_rendered_shell_command	eval "$l_cmd" || {	execute a hardened rendered shell pipeline with continue-on-failure handling
 src/zxfer_exec.sh	zxfer_execute_rendered_shell_command	eval "$l_cmd" || zxfer_throw_error "Error when executing command."	execute a hardened rendered shell pipeline with checked failure handling
-src/zxfer_error_log.sh	zxfer_capture_reporting_helper_output	eval "$l_result_var=\$g_zxfer_reporting_capture_result"	publish a captured result through a validated l_* target
-src/zxfer_profile.sh	zxfer_profile_increment_counter	eval "l_counter_value=\${$l_counter_name:-0}"	read a validated owner-prefixed profile counter
-src/zxfer_profile.sh	zxfer_profile_increment_counter	eval "$l_counter_name=\$l_counter_value"	update a validated owner-prefixed profile counter
-src/zxfer_profile.sh	zxfer_profile_add_elapsed_ms	eval "l_counter_value=\${$l_counter_name:-0}"	read a validated owner-prefixed profile counter
-src/zxfer_profile.sh	zxfer_profile_add_elapsed_ms	eval "$l_counter_name=\$l_counter_value"	update a validated owner-prefixed profile counter

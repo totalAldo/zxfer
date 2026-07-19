@@ -335,8 +335,8 @@ zxfer_get_snapshot_records_for_dataset() {
 		if zxfer_ensure_source_snapshot_record_cache; then
 			:
 		else
-			l_status=$?
-			return "$l_status"
+			l_get_snapshot_records_for_dataset_status=$?
+			return "$l_get_snapshot_records_for_dataset_status"
 		fi
 		# shellcheck disable=SC2016  # awk program should see literal $1/$0.
 		printf '%s\n' "$g_lzfs_list_hr_S_snap" | "${g_cmd_awk:-awk}" -F@ -v ds="$l_snapshot_lookup_dataset" '$1 == ds { print $0 }'
@@ -422,9 +422,9 @@ zxfer_seed_destination_existence_cache_from_recursive_list() {
 	g_destination_existence_cache_root=$l_root_dataset
 	g_destination_existence_cache_root_complete=1
 
-	while IFS= read -r l_dataset; do
-		[ -n "$l_dataset" ] || continue
-		zxfer_set_destination_existence_cache_entry "$l_dataset" 1
+	while IFS= read -r l_seed_destination_existence_cache_from_recursive_list_dataset; do
+		[ -n "$l_seed_destination_existence_cache_from_recursive_list_dataset" ] || continue
+		zxfer_set_destination_existence_cache_entry "$l_seed_destination_existence_cache_from_recursive_list_dataset" 1
 	done <<-EOF
 		$l_recursive_dest_list
 	EOF
@@ -449,17 +449,17 @@ zxfer_mark_destination_root_missing_in_cache() {
 # checks so later helpers can make decisions from one shared marker instead of
 # re-deriving it.
 zxfer_mark_destination_hierarchy_exists() {
-	l_dataset=$1
+	l_mark_destination_hierarchy_exists_dataset=$1
 	l_cache_root=${g_destination_existence_cache_root:-}
 
-	while [ -n "$l_dataset" ]; do
-		zxfer_set_destination_existence_cache_entry "$l_dataset" 1
-		if [ -n "$l_cache_root" ] && [ "$l_dataset" = "$l_cache_root" ]; then
+	while [ -n "$l_mark_destination_hierarchy_exists_dataset" ]; do
+		zxfer_set_destination_existence_cache_entry "$l_mark_destination_hierarchy_exists_dataset" 1
+		if [ -n "$l_cache_root" ] && [ "$l_mark_destination_hierarchy_exists_dataset" = "$l_cache_root" ]; then
 			break
 		fi
-		l_parent_dataset=${l_dataset%/*}
-		[ "$l_parent_dataset" = "$l_dataset" ] && break
-		l_dataset=$l_parent_dataset
+		l_parent_dataset=${l_mark_destination_hierarchy_exists_dataset%/*}
+		[ "$l_parent_dataset" = "$l_mark_destination_hierarchy_exists_dataset" ] && break
+		l_mark_destination_hierarchy_exists_dataset=$l_parent_dataset
 	done
 }
 
@@ -469,13 +469,13 @@ zxfer_mark_destination_hierarchy_exists() {
 # checks when zxfer needs the state preserved for follow-on helpers or
 # reporting.
 zxfer_note_destination_dataset_exists() {
-	l_dataset=$1
+	l_note_destination_dataset_exists_dataset=$1
 	l_created_dataset=$1
 	l_recursive_dest_list=${g_recursive_dest_list:-}
 
-	[ -n "$l_dataset" ] || return
+	[ -n "$l_note_destination_dataset_exists_dataset" ] || return
 
-	zxfer_mark_destination_hierarchy_exists "$l_dataset"
+	zxfer_mark_destination_hierarchy_exists "$l_note_destination_dataset_exists_dataset"
 
 	case "
 $l_recursive_dest_list
@@ -499,19 +499,19 @@ $l_created_dataset"
 # receive targets are known-present while descendants are live-probed instead
 # of inherited from an old missing-root assumption.
 zxfer_note_destination_receive_completed() {
-	l_dataset=$1
+	l_note_destination_receive_completed_dataset=$1
 
-	[ -n "$l_dataset" ] || return 0
+	[ -n "$l_note_destination_receive_completed_dataset" ] || return 0
 	if [ "${g_destination_existence_cache_root_complete:-0}" -eq 1 ] &&
 		[ -n "${g_destination_existence_cache_root:-}" ]; then
-		case "$l_dataset" in
+		case "$l_note_destination_receive_completed_dataset" in
 		"$g_destination_existence_cache_root" | "$g_destination_existence_cache_root"/*)
 			g_destination_existence_cache_root_complete=0
 			;;
 		esac
 	fi
 
-	zxfer_note_destination_dataset_exists "$l_dataset"
+	zxfer_note_destination_dataset_exists "$l_note_destination_receive_completed_dataset"
 }
 
 # Purpose: Check whether the destination probe reports missing.
@@ -591,7 +591,7 @@ zxfer_destination_parent_missing_confirmed_by_ancestor_listing() {
 # decisions depend on authoritative destination presence or absence.
 zxfer_exists_destination_via_parent_recursive_listing() {
 	l_dest=$1
-	l_parent_dataset=${l_dest%/*}
+	l_exists_destination_via_parent_recursive_listing_parent_dataset=${l_dest%/*}
 
 	case "${g_destination_operating_system:-}" in
 	SunOS) ;;
@@ -600,40 +600,40 @@ zxfer_exists_destination_via_parent_recursive_listing() {
 		;;
 	esac
 
-	[ "$l_parent_dataset" != "$l_dest" ] || return 2
+	[ "$l_exists_destination_via_parent_recursive_listing_parent_dataset" != "$l_dest" ] || return 2
 
 	if zxfer_command_display_render_enabled; then
-		zxfer_echoV "Exact destination probe was ambiguous on SunOS; checking parent recursively: $(zxfer_render_destination_zfs_command list -H -r -o name "$l_parent_dataset")"
+		zxfer_echoV "Exact destination probe was ambiguous on SunOS; checking parent recursively: $(zxfer_render_destination_zfs_command list -H -r -o name "$l_exists_destination_via_parent_recursive_listing_parent_dataset")"
 	fi
 
-	if l_parent_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_parent_dataset" 2>&1); then
+	if l_parent_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_exists_destination_via_parent_recursive_listing_parent_dataset" 2>&1); then
 		if printf '%s\n' "$l_parent_listing" | grep -F -x "$l_dest" >/dev/null 2>&1; then
 			zxfer_mark_destination_hierarchy_exists "$l_dest"
 			printf '%s\n' 1
 			return 0
 		fi
 
-		if printf '%s\n' "$l_parent_listing" | grep -F -x "$l_parent_dataset" >/dev/null 2>&1; then
-			zxfer_mark_destination_hierarchy_exists "$l_parent_dataset"
+		if printf '%s\n' "$l_parent_listing" | grep -F -x "$l_exists_destination_via_parent_recursive_listing_parent_dataset" >/dev/null 2>&1; then
+			zxfer_mark_destination_hierarchy_exists "$l_exists_destination_via_parent_recursive_listing_parent_dataset"
 			zxfer_set_destination_existence_cache_entry "$l_dest" 0
 			printf '%s\n' 0
 			return 0
 		fi
 
 		printf 'Failed to determine whether destination dataset [%s] exists: parent recursive listing for [%s] did not contain the parent dataset.\n' \
-			"$l_dest" "$l_parent_dataset"
+			"$l_dest" "$l_exists_destination_via_parent_recursive_listing_parent_dataset"
 		return 1
 	fi
 
 	if zxfer_destination_probe_reports_missing "$l_parent_listing"; then
-		zxfer_set_destination_existence_cache_entry "$l_parent_dataset" 0
+		zxfer_set_destination_existence_cache_entry "$l_exists_destination_via_parent_recursive_listing_parent_dataset" 0
 		zxfer_set_destination_existence_cache_entry "$l_dest" 0
 		printf '%s\n' 0
 		return 0
 	fi
 
 	if zxfer_destination_probe_is_ambiguous "$l_parent_listing" &&
-		zxfer_destination_parent_missing_confirmed_by_ancestor_listing "$l_parent_dataset"; then
+		zxfer_destination_parent_missing_confirmed_by_ancestor_listing "$l_exists_destination_via_parent_recursive_listing_parent_dataset"; then
 		zxfer_set_destination_existence_cache_entry "$l_dest" 0
 		printf '%s\n' 0
 		return 0
@@ -641,10 +641,10 @@ zxfer_exists_destination_via_parent_recursive_listing() {
 
 	if [ -n "$l_parent_listing" ]; then
 		printf 'Failed to determine whether destination dataset [%s] exists: parent recursive listing for [%s] failed: %s\n' \
-			"$l_dest" "$l_parent_dataset" "$l_parent_listing"
+			"$l_dest" "$l_exists_destination_via_parent_recursive_listing_parent_dataset" "$l_parent_listing"
 	else
 		printf 'Failed to determine whether destination dataset [%s] exists: parent recursive listing for [%s] failed.\n' \
-			"$l_dest" "$l_parent_dataset"
+			"$l_dest" "$l_exists_destination_via_parent_recursive_listing_parent_dataset"
 	fi
 	return 1
 }
@@ -680,15 +680,15 @@ zxfer_exists_destination() {
 		return 0
 	fi
 
-	l_probe_err=$l_probe_output
+	l_exists_destination_probe_err=$l_probe_output
 
-	if zxfer_destination_probe_reports_missing "$l_probe_err"; then
+	if zxfer_destination_probe_reports_missing "$l_exists_destination_probe_err"; then
 		zxfer_set_destination_existence_cache_entry "$l_dest" 0
 		printf '%s\n' 0
 		return 0
 	fi
 
-	if zxfer_destination_probe_is_ambiguous "$l_probe_err"; then
+	if zxfer_destination_probe_is_ambiguous "$l_exists_destination_probe_err"; then
 		l_parent_fallback_result=$(zxfer_exists_destination_via_parent_recursive_listing "$l_dest")
 		l_parent_fallback_status=$?
 		if [ "$l_parent_fallback_status" -eq 0 ]; then
@@ -701,8 +701,8 @@ zxfer_exists_destination() {
 		fi
 	fi
 
-	if [ -n "$l_probe_err" ]; then
-		printf 'Failed to determine whether destination dataset [%s] exists: %s\n' "$l_dest" "$l_probe_err"
+	if [ -n "$l_exists_destination_probe_err" ]; then
+		printf 'Failed to determine whether destination dataset [%s] exists: %s\n' "$l_dest" "$l_exists_destination_probe_err"
 	else
 		printf 'Failed to determine whether destination dataset [%s] exists.\n' "$l_dest"
 	fi
@@ -848,20 +848,20 @@ zxfer_reverse_snapshot_record_list() {
 # checks when later helpers need a checked reload after normalizing or reversing
 # record lists.
 zxfer_read_transformed_snapshot_record_list() {
-	l_snapshot_records=$1
+	l_read_transformed_snapshot_record_list_snapshot_records=$1
 	l_snapshot_record_transform=$2
 
-	[ -n "$l_snapshot_records" ] || return 0
+	[ -n "$l_read_transformed_snapshot_record_list_snapshot_records" ] || return 0
 	case "$l_snapshot_record_transform" in
 	normalized)
 		zxfer_capture_runtime_artifact_command_output \
 			"zxfer-snapshot-records" \
-			zxfer_normalize_snapshot_record_list "$l_snapshot_records"
+			zxfer_normalize_snapshot_record_list "$l_read_transformed_snapshot_record_list_snapshot_records"
 		;;
 	reversed)
 		zxfer_capture_runtime_artifact_command_output \
 			"zxfer-snapshot-records" \
-			zxfer_reverse_snapshot_record_list "$l_snapshot_records"
+			zxfer_reverse_snapshot_record_list "$l_read_transformed_snapshot_record_list_snapshot_records"
 		;;
 	*)
 		return 1
@@ -1063,11 +1063,11 @@ EOF
 zxfer_get_snapshot_identity_records_for_dataset() {
 	l_side=$1
 	l_dataset=$2
-	l_reference_records=${3:-}
+	l_get_snapshot_identity_records_for_dataset_reference_records=${3:-}
 
 	case "$l_side" in
 	source)
-		if l_identity_records=$(zxfer_get_source_snapshot_identity_records_for_dataset "$l_dataset"); then
+		if l_get_snapshot_identity_records_for_dataset_identity_records=$(zxfer_get_source_snapshot_identity_records_for_dataset "$l_dataset"); then
 			:
 		else
 			l_status=$?
@@ -1075,7 +1075,7 @@ zxfer_get_snapshot_identity_records_for_dataset() {
 		fi
 		;;
 	destination)
-		if l_identity_records=$(zxfer_get_destination_snapshot_identity_records_for_dataset "$l_dataset"); then
+		if l_get_snapshot_identity_records_for_dataset_identity_records=$(zxfer_get_destination_snapshot_identity_records_for_dataset "$l_dataset"); then
 			:
 		else
 			l_status=$?
@@ -1087,9 +1087,9 @@ zxfer_get_snapshot_identity_records_for_dataset() {
 		;;
 	esac
 
-	if [ -n "$l_reference_records" ]; then
-		zxfer_filter_snapshot_identity_records_to_reference_paths "$l_identity_records" "$l_reference_records"
+	if [ -n "$l_get_snapshot_identity_records_for_dataset_reference_records" ]; then
+		zxfer_filter_snapshot_identity_records_to_reference_paths "$l_get_snapshot_identity_records_for_dataset_identity_records" "$l_get_snapshot_identity_records_for_dataset_reference_records"
 	else
-		printf '%s\n' "$l_identity_records"
+		printf '%s\n' "$l_get_snapshot_identity_records_for_dataset_identity_records"
 	fi
 }

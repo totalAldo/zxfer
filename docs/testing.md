@@ -259,6 +259,13 @@ discovery orchestration in separate source modules.
 Its `golden/remote_destination_discovery_batch_script.golden` fixture pins the
 exact target-side secure-PATH setup, quoting, sentinels, section order, and
 command topology; adjacent behavioral cases also execute that rendered script.
+Focused remote-batch cases require one SSH invocation and one contained
+workspace cleanup, reject truncated or reordered protocols, inject staging and
+readback failures, and verify that a later-file publication failure restores all
+four caller-visible outputs. Transport failures retain their exact status and
+diagnostic through a separate failure stage without partially publishing the
+batch outputs. These cases use only fake ZFS and SSH functions and are safe for
+the native and dash host-side loops.
 The stable `test_zxfer_snapshot_discovery.sh` entry point sources ordered
 behavior fragments from `fixtures/snapshot_discovery/`; its fragment markers
 and static suite registrars keep named listing and unfiltered execution in the
@@ -307,9 +314,13 @@ during abort cleanup.
 
 The suites also use `tests/test_helper.sh` for the shared shunit2 scaffolding:
 default no-op lifecycle hooks, temporary-directory setup helpers, and common
-stdout/stderr/status capture wrappers for failure-path assertions. Keep new
-suite-local helpers focused on domain-specific fixtures rather than re-creating
-that generic test plumbing.
+stdout/stderr/status capture wrappers for failure-path assertions. Domain
+fixtures are deliberately opt-in: suites that render property-backup metadata
+source `tests/helpers/backup_fixtures.sh`, while suites needing the shared
+environment-driven SSH stand-in source
+`tests/helpers/fake_tool_fixtures.sh`. Keep new suite-local helpers focused on
+domain-specific behavior rather than re-creating generic test plumbing or
+adding every fixture to `tests/test_helper.sh`.
 
 ## Coverage
 
@@ -639,6 +650,33 @@ Useful VM-runner environment variables:
   backend for one named guest
 
 ## Performance Harness
+
+### Offline property-prefetch gate
+
+Recursive property-prefetch grouping has a separate host-safe benchmark. It
+generates deterministic text fixtures and invokes only POSIX shell utilities
+and the selected `awk`; it does not source the integration harness, contact the
+network, or invoke ZFS:
+
+```sh
+./tests/run_property_prefetch_benchmark.sh \
+  --awk /usr/bin/awk \
+  --output-dir /tmp/zxfer-property-prefetch-benchmark
+```
+
+The fixed workloads cover 100 and 1,000 datasets. Seven alternating samples
+are used by default after one warmup. `identity.tsv` pins byte-for-byte output,
+`samples.tsv` retains every batched timing, `memory.tsv` records peak RSS when
+the host `/usr/bin/time` exposes it, and `summary.tsv` records each acceptance
+decision. The command fails unless the 100-dataset median is no slower, the
+1,000-dataset median improves by at least 10%, output is identical, and median
+peak RSS does not increase. On hosts without a supported RSS field, timing and
+identity remain enforced and memory is explicitly reported as `unavailable`.
+
+Use `--samples` and `--warmups` only to investigate stability; release evidence
+uses the defaults. The ordinary `validate.sh quick` loop runs the harness's
+contract tests but deliberately does not run timing gates, which are sensitive
+to concurrent host load.
 
 `tests/run_perf_tests.sh` is a manual, non-gating performance runner. It
 sources the integration harness in source-only mode and reuses the existing

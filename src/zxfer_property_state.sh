@@ -195,14 +195,15 @@ zxfer_publish_property_transfer_diff_results() {
 # Usage: Called during property filtering, diffing, and apply when later
 # helpers need a checked reload instead of ad hoc file reads.
 zxfer_read_property_reconcile_stage_file() {
-	l_stage_file=$1
+	l_property_stage_file=$1
 
 	g_zxfer_property_stage_file_read_result=""
-	if zxfer_read_runtime_artifact_file_trimmed "$l_stage_file" >/dev/null; then
+	if zxfer_read_runtime_artifact_file_trimmed \
+		"$l_property_stage_file" >/dev/null; then
 		g_zxfer_property_stage_file_read_result=$g_zxfer_runtime_artifact_read_result
 	else
-		l_read_status=$?
-		return "$l_read_status"
+		l_property_stage_read_status=$?
+		return "$l_property_stage_read_status"
 	fi
 	printf '%s\n' "$g_zxfer_property_stage_file_read_result"
 }
@@ -887,6 +888,137 @@ END {
 	}
 }'
 
+# Group both recursive ZFS views and emit the merged dataset table in one AWK
+# process. This is deliberately POSIX AWK: FILENAME and the untouched ARGV
+# filename operands replace non-portable ARGIND/nextfile features. Reading the
+# paths from ARGV also avoids AWK -v backslash decoding changing valid temp
+# paths before comparison with FILENAME.
+# shellcheck disable=SC2016  # AWK field references must remain literal.
+ZXFER_GROUP_MERGE_RECURSIVE_PROPERTY_TREES_AWK='
+BEGIN {
+	filter_file = ARGV[1]
+	machine_file = ARGV[2]
+	human_file = ARGV[3]
+	wanted_sentinel = "\034"
+}
+function encode_value(value) {
+	gsub(/%/, "%25", value)
+	gsub(/,/, "%2C", value)
+	gsub(/=/, "%3D", value)
+	gsub(/;/, "%3B", value)
+	gsub(/\t/, "%09", value)
+	gsub(/\r/, "%0D", value)
+	gsub(/\n/, "%0A", value)
+	return value
+}
+function valid_property_name(name) {
+	return name ~ /^[A-Za-z0-9_.:@-][A-Za-z0-9_.:@-]*$/
+}
+function valid_source(source) {
+	return source == "-" ||
+		source == "local" ||
+		source == "default" ||
+		source == "temporary" ||
+		source == "received" ||
+		source == "inherited" ||
+		source == "none" ||
+		source ~ /^inherited from [^	]+$/
+}
+function append_grouped_record(view, dataset, line) {
+	if (!(dataset in machine_grouped) && !(dataset in human_grouped))
+		dataset_order[++dataset_count] = dataset
+	if (view == "machine") {
+		if (machine_grouped[dataset] != "")
+			machine_grouped[dataset] = machine_grouped[dataset] "," line
+		else
+			machine_grouped[dataset] = line
+		return
+	}
+	if (human_grouped[dataset] != "")
+		human_grouped[dataset] = human_grouped[dataset] "," line
+	else
+		human_grouped[dataset] = line
+}
+function cache_current_input(i) {
+	current_record = $0
+	current_field_count = NF
+	current_dataset = $1
+	current_property_name = $2
+	current_property_source = $NF
+	current_record_complete = current_field_count >= 4 && valid_source(current_property_source)
+	current_value = $3
+	for (i = 4; i < current_field_count; i++)
+		current_value = current_value "\t" $i
+}
+function cache_current_record(record, fields, field_count, i) {
+	current_field_count = split(record, fields, "[	]")
+	current_dataset = fields[1]
+	current_property_name = fields[2]
+	current_property_source = fields[current_field_count]
+	current_record_complete = current_field_count >= 4 && valid_source(current_property_source)
+	current_value = fields[3]
+	for (i = 4; i < current_field_count; i++)
+		current_value = current_value "\t" fields[i]
+}
+function flush_active_record(line) {
+	if (current_record == "")
+		return
+	if (current_field_count < 4 || current_dataset == "" ||
+		!valid_property_name(current_property_name) || !valid_source(current_property_source)) {
+		parse_failed = 1
+	} else if ((current_dataset in machine_grouped) || (current_dataset in human_grouped)) {
+		# Reuse the machine table for the filter membership marker. A grouped
+		# payload starts with a validated property name, so this control-byte
+		# sentinel cannot collide with a real value.
+		if (machine_grouped[current_dataset] == wanted_sentinel)
+			delete machine_grouped[current_dataset]
+		line = current_property_name "=" encode_value(current_value) "=" current_property_source
+		append_grouped_record(active_view, current_dataset, line)
+	}
+	current_record = ""
+	current_field_count = 0
+	current_record_complete = 0
+}
+FILENAME == filter_file {
+	if ($0 != "" && !($0 in machine_grouped))
+		machine_grouped[$0] = wanted_sentinel
+	next
+}
+{
+	view = ""
+	if (FILENAME == machine_file)
+		view = "machine"
+	else if (FILENAME == human_file)
+		view = "human"
+	else {
+		parse_failed = 1
+		next
+	}
+	if (active_view != "" && active_view != view)
+		flush_active_record()
+	active_view = view
+	if (current_record == "") {
+		cache_current_input()
+		next
+	}
+	if (current_record_complete && NF >= 3 && $1 != "" && valid_property_name($2)) {
+		flush_active_record()
+		cache_current_input()
+		next
+	}
+	current_record = current_record "\n" $0
+	cache_current_record(current_record)
+}
+END {
+	flush_active_record()
+	if (parse_failed)
+		exit 1
+	for (i = 1; i <= dataset_count; i++) {
+		dataset = dataset_order[i]
+		printf "%s\t%s\t%s\n", dataset, machine_grouped[dataset], human_grouped[dataset]
+	}
+}'
+
 # Purpose: Group the recursive property tree by dataset into the shape later
 # helpers expect.
 # Usage: Called during property prefetch before the grouped result is merged
@@ -897,6 +1029,23 @@ zxfer_group_recursive_property_tree_by_dataset() {
 
 	"${g_cmd_awk:-awk}" -F '	' "$ZXFER_GROUP_RECURSIVE_PROPERTY_TREE_AWK" \
 		"$l_dataset_filter_file" "$l_property_tree_file"
+}
+
+# Purpose: Group and merge both recursive property views in one POSIX AWK
+# process while retaining the legacy byte format and dataset ordering.
+# Usage: Called after both recursive reads succeed; writes the complete merged
+# table to stdout and returns non-zero without publishing partial state when
+# either view is malformed.
+zxfer_group_and_merge_recursive_property_trees_by_dataset() {
+	l_grouped_property_filter_file=$1
+	l_grouped_property_machine_file=$2
+	l_grouped_property_human_file=$3
+
+	"${g_cmd_awk:-awk}" -F '	' \
+		"$ZXFER_GROUP_MERGE_RECURSIVE_PROPERTY_TREES_AWK" \
+		"$l_grouped_property_filter_file" \
+		"$l_grouped_property_machine_file" \
+		"$l_grouped_property_human_file"
 }
 
 # Purpose: Mark one side's recursive property prefetch failed, clean up any
@@ -931,7 +1080,7 @@ zxfer_abort_recursive_property_prefetch() {
 # l_*_file variables consumed by the prefetch orchestration.
 zxfer_allocate_recursive_property_prefetch_stage_files() {
 	l_prefetch_stage_status=0
-	zxfer_create_temp_file_group 7 >/dev/null || l_prefetch_stage_status=$?
+	zxfer_create_temp_file_group 5 >/dev/null || l_prefetch_stage_status=$?
 	[ "$l_prefetch_stage_status" -eq 0 ] || return "$l_prefetch_stage_status"
 
 	l_prefetch_stage_files=$g_zxfer_temp_file_group_result
@@ -939,8 +1088,6 @@ zxfer_allocate_recursive_property_prefetch_stage_files() {
 		IFS= read -r l_dataset_filter_file
 		IFS= read -r l_machine_tree_file
 		IFS= read -r l_human_tree_file
-		IFS= read -r l_machine_grouped_file
-		IFS= read -r l_human_grouped_file
 		IFS= read -r l_combined_grouped_file
 		IFS= read -r l_tree_err_file
 	} <<-EOF
@@ -975,18 +1122,12 @@ zxfer_group_recursive_property_prefetch_trees() {
 	l_prefetch_filter_file=$1
 	l_prefetch_machine_tree_file=$2
 	l_prefetch_human_tree_file=$3
-	l_prefetch_machine_grouped_file=$4
-	l_prefetch_human_grouped_file=$5
-	l_prefetch_combined_grouped_file=$6
+	l_prefetch_combined_grouped_file=$4
 
-	zxfer_group_recursive_property_tree_by_dataset "$l_prefetch_filter_file" \
-		"$l_prefetch_machine_tree_file" >"$l_prefetch_machine_grouped_file" ||
-		return "$?"
-	zxfer_group_recursive_property_tree_by_dataset "$l_prefetch_filter_file" \
-		"$l_prefetch_human_tree_file" >"$l_prefetch_human_grouped_file" ||
-		return "$?"
-	"${g_cmd_awk:-awk}" -F '	' "$ZXFER_MERGE_RECURSIVE_PROPERTY_TREES_AWK" \
-		"$l_prefetch_machine_grouped_file" "$l_prefetch_human_grouped_file" \
+	zxfer_group_and_merge_recursive_property_trees_by_dataset \
+		"$l_prefetch_filter_file" \
+		"$l_prefetch_machine_tree_file" \
+		"$l_prefetch_human_tree_file" \
 		>"$l_prefetch_combined_grouped_file"
 }
 
@@ -1067,9 +1208,9 @@ zxfer_publish_recursive_property_prefetch_table() {
 # Usage: Called during normalized property lookup before a loop would
 # otherwise repeat the same live probe for every dataset in the tree.
 zxfer_prefetch_recursive_normalized_properties() {
-	l_side=$1
+	l_prefetch_recursive_normalized_properties_side=$1
 
-	case "$l_side" in
+	case "$l_prefetch_recursive_normalized_properties_side" in
 	source)
 		l_prefetch_state=${g_zxfer_source_property_tree_prefetch_state:-0}
 		l_root_dataset=${g_zxfer_source_property_tree_prefetch_root:-}
@@ -1097,22 +1238,22 @@ zxfer_prefetch_recursive_normalized_properties() {
 	esac
 
 	l_dataset_list_status=0
-	l_dataset_list=$(zxfer_get_property_tree_prefetch_dataset_list "$l_side") ||
+	l_dataset_list=$(zxfer_get_property_tree_prefetch_dataset_list "$l_prefetch_recursive_normalized_properties_side") ||
 		l_dataset_list_status=$?
 	if [ "$l_dataset_list_status" -ne 0 ]; then
-		zxfer_abort_recursive_property_prefetch "$l_side" "" "$l_dataset_list_status"
+		zxfer_abort_recursive_property_prefetch "$l_prefetch_recursive_normalized_properties_side" "" "$l_dataset_list_status"
 		return "$?"
 	fi
 
 	if [ -z "$l_root_dataset" ] || [ -z "$l_zfs_cmd" ]; then
-		zxfer_abort_recursive_property_prefetch "$l_side" "" 1
+		zxfer_abort_recursive_property_prefetch "$l_prefetch_recursive_normalized_properties_side" "" 1
 		return "$?"
 	fi
 
 	l_stage_status=0
 	zxfer_allocate_recursive_property_prefetch_stage_files || l_stage_status=$?
 	if [ "$l_stage_status" -ne 0 ]; then
-		zxfer_abort_recursive_property_prefetch "$l_side" "" "$l_stage_status"
+		zxfer_abort_recursive_property_prefetch "$l_prefetch_recursive_normalized_properties_side" "" "$l_stage_status"
 		return "$?"
 	fi
 
@@ -1120,7 +1261,7 @@ zxfer_prefetch_recursive_normalized_properties() {
 	printf '%s\n' "$l_dataset_list" | grep -v '^[[:space:]]*$' |
 		"${g_cmd_awk:-awk}" '!seen[$0]++' >"$l_dataset_filter_file"
 	if [ ! -s "$l_dataset_filter_file" ]; then
-		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" 1
+		zxfer_abort_recursive_property_prefetch "$l_prefetch_recursive_normalized_properties_side" "$l_prefetch_stage_files" 1
 		return "$?"
 	fi
 
@@ -1129,18 +1270,17 @@ zxfer_prefetch_recursive_normalized_properties() {
 		"$l_profile_counter" "$l_machine_tree_file" "$l_human_tree_file" "$l_tree_err_file" ||
 		l_tree_status=$?
 	if [ "$l_tree_status" -ne 0 ]; then
-		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" "$l_tree_status"
+		zxfer_abort_recursive_property_prefetch "$l_prefetch_recursive_normalized_properties_side" "$l_prefetch_stage_files" "$l_tree_status"
 		return "$?"
 	fi
 
 	l_group_status=0
 	zxfer_group_recursive_property_prefetch_trees "$l_dataset_filter_file" \
 		"$l_machine_tree_file" "$l_human_tree_file" \
-		"$l_machine_grouped_file" "$l_human_grouped_file" \
 		"$l_combined_grouped_file" ||
 		l_group_status=$?
 	if [ "$l_group_status" -ne 0 ]; then
-		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" "$l_group_status"
+		zxfer_abort_recursive_property_prefetch "$l_prefetch_recursive_normalized_properties_side" "$l_prefetch_stage_files" "$l_group_status"
 		return "$?"
 	fi
 
@@ -1148,7 +1288,7 @@ zxfer_prefetch_recursive_normalized_properties() {
 	zxfer_load_recursive_property_prefetch_table "$l_combined_grouped_file" ||
 		l_grouped_read_status=$?
 	if [ "$l_grouped_read_status" -ne 0 ]; then
-		zxfer_abort_recursive_property_prefetch "$l_side" "$l_prefetch_stage_files" "$l_grouped_read_status"
+		zxfer_abort_recursive_property_prefetch "$l_prefetch_recursive_normalized_properties_side" "$l_prefetch_stage_files" "$l_grouped_read_status"
 		return "$?"
 	fi
 
@@ -1156,7 +1296,7 @@ zxfer_prefetch_recursive_normalized_properties() {
 
 	# Fresh prefetch rows precede earlier live reads, so first-match lookup keeps
 	# the new tree authoritative without invalidating the memo separately.
-	zxfer_publish_recursive_property_prefetch_table "$l_side" "$l_prefetched_table"
+	zxfer_publish_recursive_property_prefetch_table "$l_prefetch_recursive_normalized_properties_side" "$l_prefetched_table"
 }
 
 # Purpose: Run the optional prefetch recursive normalized properties step only
@@ -1166,13 +1306,13 @@ zxfer_prefetch_recursive_normalized_properties() {
 # only when prefetch materialized the requested dataset's table row.
 zxfer_maybe_prefetch_recursive_normalized_properties() {
 	l_dataset=$1
-	l_zfs_cmd=$2
+	l_maybe_prefetch_recursive_normalized_properties_zfs_cmd=$2
 	l_lookup_side=$3
 
 	case "$l_lookup_side" in
 	source)
 		[ -n "${g_zxfer_source_property_tree_prefetch_root:-}" ] || return 1
-		[ "${g_zxfer_source_property_tree_prefetch_zfs_cmd:-}" = "$l_zfs_cmd" ] || return 1
+		[ "${g_zxfer_source_property_tree_prefetch_zfs_cmd:-}" = "$l_maybe_prefetch_recursive_normalized_properties_zfs_cmd" ] || return 1
 		case "
 ${g_recursive_source_dataset_list:-}
 $(printf '%s\n' "${g_recursive_source_list:-}" | tr ' ' '\n')" in
@@ -1184,7 +1324,7 @@ $l_dataset
 		;;
 	destination)
 		[ -n "${g_zxfer_destination_property_tree_prefetch_root:-}" ] || return 1
-		[ "${g_zxfer_destination_property_tree_prefetch_zfs_cmd:-}" = "$l_zfs_cmd" ] || return 1
+		[ "${g_zxfer_destination_property_tree_prefetch_zfs_cmd:-}" = "$l_maybe_prefetch_recursive_normalized_properties_zfs_cmd" ] || return 1
 		case "
 ${g_recursive_dest_list:-}
 " in
@@ -1209,47 +1349,47 @@ $l_dataset
 # Usage: Called during property collection when later helpers need a checked
 # in-memory copy of the dataset's normalized property list.
 zxfer_load_normalized_dataset_properties() {
-	l_dataset=$1
-	l_zfs_cmd=$2
-	l_lookup_side=${3:-other}
+	l_load_normalized_dataset_properties_dataset=$1
+	l_load_normalized_dataset_properties_zfs_cmd=$2
+	l_load_normalized_dataset_properties_lookup_side=${3:-other}
 
-	if [ -z "$l_zfs_cmd" ]; then
-		l_zfs_cmd=$g_LZFS
+	if [ -z "$l_load_normalized_dataset_properties_zfs_cmd" ]; then
+		l_load_normalized_dataset_properties_zfs_cmd=$g_LZFS
 	fi
 
 	g_zxfer_normalized_dataset_properties=""
 	g_zxfer_normalized_dataset_properties_cache_hit=0
 
-	case "$l_lookup_side" in
+	case "$l_load_normalized_dataset_properties_lookup_side" in
 	source | destination)
-		if [ "${g_zxfer_property_table_memo_side:-}" = "$l_lookup_side" ] &&
-			[ "${g_zxfer_property_table_memo_dataset:-}" = "$l_dataset" ] &&
+		if [ "${g_zxfer_property_table_memo_side:-}" = "$l_load_normalized_dataset_properties_lookup_side" ] &&
+			[ "${g_zxfer_property_table_memo_dataset:-}" = "$l_load_normalized_dataset_properties_dataset" ] &&
 			[ -n "${g_zxfer_property_table_memo_payload:-}" ]; then
 			g_zxfer_normalized_dataset_properties=$g_zxfer_property_table_memo_payload
 			g_zxfer_normalized_dataset_properties_cache_hit=1
 			return 0
 		fi
-		if zxfer_property_table_find_dataset "$l_lookup_side" "$l_dataset"; then
+		if zxfer_property_table_find_dataset "$l_load_normalized_dataset_properties_lookup_side" "$l_load_normalized_dataset_properties_dataset"; then
 			g_zxfer_normalized_dataset_properties=$g_zxfer_property_table_lookup_result
 			g_zxfer_normalized_dataset_properties_cache_hit=1
-			g_zxfer_property_table_memo_side=$l_lookup_side
-			g_zxfer_property_table_memo_dataset=$l_dataset
+			g_zxfer_property_table_memo_side=$l_load_normalized_dataset_properties_lookup_side
+			g_zxfer_property_table_memo_dataset=$l_load_normalized_dataset_properties_dataset
 			g_zxfer_property_table_memo_payload=$g_zxfer_property_table_lookup_result
 			return 0
 		fi
-		if zxfer_maybe_prefetch_recursive_normalized_properties "$l_dataset" "$l_zfs_cmd" "$l_lookup_side" >/dev/null 2>&1 &&
-			zxfer_property_table_find_dataset "$l_lookup_side" "$l_dataset"; then
+		if zxfer_maybe_prefetch_recursive_normalized_properties "$l_load_normalized_dataset_properties_dataset" "$l_load_normalized_dataset_properties_zfs_cmd" "$l_load_normalized_dataset_properties_lookup_side" >/dev/null 2>&1 &&
+			zxfer_property_table_find_dataset "$l_load_normalized_dataset_properties_lookup_side" "$l_load_normalized_dataset_properties_dataset"; then
 			g_zxfer_normalized_dataset_properties=$g_zxfer_property_table_lookup_result
 			g_zxfer_normalized_dataset_properties_cache_hit=1
-			g_zxfer_property_table_memo_side=$l_lookup_side
-			g_zxfer_property_table_memo_dataset=$l_dataset
+			g_zxfer_property_table_memo_side=$l_load_normalized_dataset_properties_lookup_side
+			g_zxfer_property_table_memo_dataset=$l_load_normalized_dataset_properties_dataset
 			g_zxfer_property_table_memo_payload=$g_zxfer_property_table_lookup_result
 			return 0
 		fi
 		;;
 	esac
 
-	case "$l_lookup_side" in
+	case "$l_load_normalized_dataset_properties_lookup_side" in
 	source)
 		zxfer_profile_increment_counter g_zxfer_profile_normalized_property_reads_source
 		;;
@@ -1262,7 +1402,7 @@ zxfer_load_normalized_dataset_properties() {
 	esac
 
 	l_machine_status=0
-	l_machine_pvs=$(zxfer_run_zfs_cmd_for_spec "$l_zfs_cmd" get -Hpo property,value,source all "$l_dataset" 2>&1) ||
+	l_machine_pvs=$(zxfer_run_zfs_cmd_for_spec "$l_load_normalized_dataset_properties_zfs_cmd" get -Hpo property,value,source all "$l_load_normalized_dataset_properties_dataset" 2>&1) ||
 		l_machine_status=$?
 	if [ "$l_machine_status" -ne 0 ]; then
 		printf '%s\n' "$l_machine_pvs"
@@ -1271,7 +1411,7 @@ zxfer_load_normalized_dataset_properties() {
 	zxfer_capture_serialized_property_records "$l_machine_pvs" || return "$?"
 	l_machine_pvs=$g_zxfer_serialized_property_records_result
 	l_human_status=0
-	l_human_pvs=$(zxfer_run_zfs_cmd_for_spec "$l_zfs_cmd" get -Ho property,value,source all "$l_dataset" 2>&1) ||
+	l_human_pvs=$(zxfer_run_zfs_cmd_for_spec "$l_load_normalized_dataset_properties_zfs_cmd" get -Ho property,value,source all "$l_load_normalized_dataset_properties_dataset" 2>&1) ||
 		l_human_status=$?
 	if [ "$l_human_status" -ne 0 ]; then
 		printf '%s\n' "$l_human_pvs"
@@ -1282,7 +1422,7 @@ zxfer_load_normalized_dataset_properties() {
 	zxfer_resolve_human_vars "$l_machine_pvs" "$l_human_pvs"
 	g_zxfer_normalized_dataset_properties=$human_results
 
-	zxfer_property_table_append_dataset "$l_lookup_side" "$l_dataset" "$g_zxfer_normalized_dataset_properties"
+	zxfer_property_table_append_dataset "$l_load_normalized_dataset_properties_lookup_side" "$l_load_normalized_dataset_properties_dataset" "$g_zxfer_normalized_dataset_properties"
 
 	return 0
 }
@@ -1362,14 +1502,14 @@ zxfer_get_required_property_probe() {
 # Usage: Called during required-property backfill when the surrounding flow
 # needs a fully expanded in-memory view.
 zxfer_populate_required_properties_present() {
-	l_dataset=$1
+	l_populate_required_properties_present_dataset=$1
 	l_property_list=$2
-	l_zfs_cmd=$3
+	l_populate_required_properties_present_zfs_cmd=$3
 	l_required_properties=$4
-	l_lookup_side=${5:-other}
+	l_populate_required_properties_present_lookup_side=${5:-other}
 
-	if [ -z "$l_zfs_cmd" ]; then
-		l_zfs_cmd=$g_LZFS
+	if [ -z "$l_populate_required_properties_present_zfs_cmd" ]; then
+		l_populate_required_properties_present_zfs_cmd=$g_LZFS
 	fi
 
 	g_zxfer_required_properties_result=""
@@ -1378,15 +1518,15 @@ zxfer_populate_required_properties_present() {
 	while [ -n "$l_required_properties_remaining" ]; do
 		case "$l_required_properties_remaining" in
 		*,*)
-			l_required_property=${l_required_properties_remaining%%,*}
+			l_populate_required_properties_present_required_property=${l_required_properties_remaining%%,*}
 			l_required_properties_remaining=${l_required_properties_remaining#*,}
 			;;
 		*)
-			l_required_property=$l_required_properties_remaining
+			l_populate_required_properties_present_required_property=$l_required_properties_remaining
 			l_required_properties_remaining=""
 			;;
 		esac
-		[ -n "$l_required_property" ] || continue
+		[ -n "$l_populate_required_properties_present_required_property" ] || continue
 		l_found_property=0
 		l_required_property_lines_remaining=$l_result
 		while [ -n "$l_required_property_lines_remaining" ]; do
@@ -1401,7 +1541,7 @@ zxfer_populate_required_properties_present() {
 				;;
 			esac
 			l_property_name=${l_property_line%%=*}
-			if [ "$l_property_name" = "$l_required_property" ]; then
+			if [ "$l_property_name" = "$l_populate_required_properties_present_required_property" ]; then
 				l_found_property=1
 				break
 			fi
@@ -1409,11 +1549,11 @@ zxfer_populate_required_properties_present() {
 
 		[ "$l_found_property" -eq 0 ] || continue
 
-		l_status=0
-		zxfer_get_required_property_probe "$l_dataset" "$l_required_property" "$l_zfs_cmd" "$l_lookup_side" ||
-			l_status=$?
-		if [ "$l_status" -ne 0 ]; then
-			return "$l_status"
+		l_populate_required_properties_present_status=0
+		zxfer_get_required_property_probe "$l_populate_required_properties_present_dataset" "$l_populate_required_properties_present_required_property" "$l_populate_required_properties_present_zfs_cmd" "$l_populate_required_properties_present_lookup_side" ||
+			l_populate_required_properties_present_status=$?
+		if [ "$l_populate_required_properties_present_status" -ne 0 ]; then
+			return "$l_populate_required_properties_present_status"
 		fi
 
 		case "$g_zxfer_required_property_probe_result" in
@@ -1438,15 +1578,15 @@ zxfer_populate_required_properties_present() {
 # Usage: Called during property collection when later helpers need a checked
 # in-memory copy of the destination's normalized property list.
 zxfer_load_destination_props() {
-	l_dataset=$1
-	l_zfs_cmd=$2
+	l_load_destination_props_dataset=$1
+	l_load_destination_props_zfs_cmd=$2
 
-	if [ -z "$l_zfs_cmd" ]; then
-		l_zfs_cmd=$g_RZFS
+	if [ -z "$l_load_destination_props_zfs_cmd" ]; then
+		l_load_destination_props_zfs_cmd=$g_RZFS
 	fi
 
 	g_zxfer_destination_pvs_raw=""
-	zxfer_load_normalized_dataset_properties "$l_dataset" "$l_zfs_cmd" destination ||
+	zxfer_load_normalized_dataset_properties "$l_load_destination_props_dataset" "$l_load_destination_props_zfs_cmd" destination ||
 		return "$?"
 
 	g_zxfer_destination_pvs_raw=$g_zxfer_normalized_dataset_properties

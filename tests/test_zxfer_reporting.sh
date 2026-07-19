@@ -466,20 +466,19 @@ test_zxfer_get_error_log_fallback_lock_dir_uses_dev_shm_fallback_when_available(
 	zxfer_test_capture_subshell '
 		TMPDIR="/unsafe-tmpdir"
 		zxfer_capture_reporting_helper_output() {
-			l_result_var=$1
-			l_helper_name=$2
-			l_helper_arg=$3
-			l_helper_arg_two=${4:-}
+			l_helper_name=$1
+			l_helper_arg=$2
+			l_helper_arg_two=${3:-}
 			case "$l_helper_name:$l_helper_arg:$l_helper_arg_two" in
 			"zxfer_validate_temp_root_candidate:/unsafe-tmpdir:")
 				return 1
 				;;
 			"zxfer_validate_temp_root_candidate:/dev/shm:")
-				eval "$l_result_var=/dev/shm"
+				g_zxfer_reporting_capture_result=/dev/shm
 				return 0
 				;;
 			"zxfer_prepare_error_log_fallback_lock_dir:/dev/shm:/tmp/failure.log")
-				eval "$l_result_var=/dev/shm/.zxfer-error-log.lock.d/prepared/lock"
+				g_zxfer_reporting_capture_result=/dev/shm/.zxfer-error-log.lock.d/prepared/lock
 				return 0
 				;;
 			esac
@@ -498,21 +497,20 @@ test_zxfer_get_error_log_fallback_lock_dir_uses_run_shm_fallback_when_dev_shm_is
 	zxfer_test_capture_subshell '
 		TMPDIR="/unsafe-tmpdir"
 		zxfer_capture_reporting_helper_output() {
-			l_result_var=$1
-			l_helper_name=$2
-			l_helper_arg=$3
-			l_helper_arg_two=${4:-}
+			l_helper_name=$1
+			l_helper_arg=$2
+			l_helper_arg_two=${3:-}
 			case "$l_helper_name:$l_helper_arg:$l_helper_arg_two" in
 			"zxfer_validate_temp_root_candidate:/unsafe-tmpdir:"|\
 			"zxfer_validate_temp_root_candidate:/dev/shm:")
 				return 1
 				;;
 			"zxfer_validate_temp_root_candidate:/run/shm:")
-				eval "$l_result_var=/run/shm"
+				g_zxfer_reporting_capture_result=/run/shm
 				return 0
 				;;
 			"zxfer_prepare_error_log_fallback_lock_dir:/run/shm:/tmp/failure.log")
-				eval "$l_result_var=/run/shm/.zxfer-error-log.lock.d/prepared/lock"
+				g_zxfer_reporting_capture_result=/run/shm/.zxfer-error-log.lock.d/prepared/lock
 				return 0
 				;;
 			esac
@@ -558,6 +556,20 @@ test_zxfer_get_error_log_fallback_lock_dir_returns_failure_when_lock_path_prepar
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertEquals "Failed fallback lock-dir lookups should not emit a partial path." \
 		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
+test_zxfer_ensure_error_log_fallback_lock_component_dir_rejects_symlinks() {
+	component_target="$TEST_TMPDIR/error-log-component-target"
+	component_link="$TEST_TMPDIR/error-log-component-link"
+	mkdir "$component_target"
+	ln -s "$component_target" "$component_link"
+
+	set +e
+	zxfer_ensure_error_log_fallback_lock_component_dir "$component_link"
+	component_status=$?
+
+	assertEquals "Fallback error-log lock components must reject symlinks before changing their mode or contents." \
+		1 "$component_status"
 }
 
 test_zxfer_error_log_lock_identity_hex_fails_when_hex_encoding_is_empty() {
@@ -616,7 +628,7 @@ test_zxfer_capture_reporting_helper_output_preserves_readback_failures_and_clean
 			g_zxfer_runtime_artifact_read_result=''
 			return 17
 		}
-		zxfer_capture_reporting_helper_output l_result printf '%s\\n' 'captured'
+		zxfer_capture_reporting_helper_output printf '%s\\n' 'captured'
 		printf 'status=%s\\n' \"\$?\"
 		printf 'exists=%s\\n' \"\$([ -e \"$capture_file\" ] && printf yes || printf no)\"
 	"
@@ -630,28 +642,24 @@ test_zxfer_capture_reporting_helper_output_preserves_readback_failures_and_clean
 test_zxfer_capture_reporting_helper_output_rejects_untrusted_result_targets_before_capture() {
 	zxfer_test_capture_subshell '
 		g_reporting_capture_calls=0
-		g_reporting_assignment_injected=0
 		zxfer_capture_runtime_artifact_command_output() {
 			g_reporting_capture_calls=$((g_reporting_capture_calls + 1))
-			g_zxfer_runtime_artifact_read_result=1
+			g_zxfer_runtime_artifact_read_result="captured result
+"
 			return 0
 		}
-		zxfer_capture_reporting_helper_output g_result printf "%s\n" "first"
-		printf "outside_prefix_status=%s\n" "$?"
-		zxfer_capture_reporting_helper_output "l_safe=ignored; g_reporting_assignment_injected" printf "%s\n" "second"
-		printf "invalid_name_status=%s\n" "$?"
+		zxfer_capture_reporting_helper_output printf "%s\n" "first"
+		printf "status=%s\n" "$?"
 		printf "captures=%s\n" "$g_reporting_capture_calls"
-		printf "injected=%s\n" "$g_reporting_assignment_injected"
+		printf "result=%s\n" "$g_zxfer_reporting_capture_result"
 	'
 
-	assertContains "Reporting captures should reject result variables outside the l_ namespace." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "outside_prefix_status=1"
-	assertContains "Reporting captures should reject malformed result variable names." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "invalid_name_status=1"
-	assertContains "Reporting result targets should be validated before running the capture command." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "captures=0"
-	assertContains "Rejected reporting targets should never be evaluated." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "injected=0"
+	assertContains "Reporting captures should succeed without an indirect result target." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=0"
+	assertContains "Reporting captures should run the staged capture exactly once." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "captures=1"
+	assertContains "Reporting captures should publish through the module-owned result and trim one trailing newline." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "result=captured result"
 }
 
 test_zxfer_acquire_error_log_lock_retries_before_failing() {
@@ -976,13 +984,12 @@ test_zxfer_get_error_log_fallback_lock_dir_reports_lock_prepare_capture_failures
 	TMPDIR="$TEST_TMPDIR"
 
 	zxfer_capture_reporting_helper_output() {
-		l_result_var=$1
-		l_helper_name=$2
-		l_helper_arg=$3
-		l_helper_arg_two=${4:-}
+		l_helper_name=$1
+		l_helper_arg=$2
+		l_helper_arg_two=${3:-}
 		case "$l_helper_name:$l_helper_arg:$l_helper_arg_two" in
 		"zxfer_validate_temp_root_candidate:$TEST_TMPDIR:")
-			eval "$l_result_var=\$TEST_TMPDIR"
+			g_zxfer_reporting_capture_result=$TEST_TMPDIR
 			return 0
 			;;
 		"zxfer_prepare_error_log_fallback_lock_dir:$TEST_TMPDIR:/tmp/failure.log")
@@ -1330,6 +1337,37 @@ test_zxfer_reset_profile_state_clears_owned_timing_and_counter_state() {
 		0 "$g_zxfer_profile_diverged_snapshot_warnings"
 }
 
+test_zxfer_profile_counter_accessors_cover_new_owned_slots() {
+	for counter_name in \
+		g_zxfer_profile_ssh_control_socket_lock_wait_count \
+		g_zxfer_profile_ssh_control_socket_lock_wait_ms \
+		g_zxfer_profile_remote_capability_cache_wait_count \
+		g_zxfer_profile_remote_capability_cache_wait_ms \
+		g_zxfer_profile_send_receive_background_pipeline_commands \
+		g_zxfer_profile_normalized_property_reads_other \
+		g_zxfer_profile_runtime_cache_object_readbacks \
+		g_zxfer_profile_live_destination_snapshot_rechecks; do
+		zxfer_profile_store_counter_value "$counter_name" 7
+		store_status=$?
+		zxfer_profile_load_counter_value "$counter_name"
+		load_status=$?
+
+		assertEquals "Every profile-owned counter should accept an explicit owner write." \
+			0 "$store_status"
+		assertEquals "Every profile-owned counter should support an explicit owner read." \
+			0 "$load_status"
+		# shellcheck disable=SC2154  # Published by zxfer_profile_load_counter_value.
+		assertEquals "Profile counter accessors should round-trip the exact numeric value." \
+			7 "$g_zxfer_profile_counter_value_result"
+	done
+
+	set +e
+	zxfer_profile_store_counter_value g_zxfer_profile_unowned_counter 9
+	unknown_store_status=$?
+	assertEquals "Profile counter writes must fail closed for an unowned slot." \
+		1 "$unknown_store_status"
+}
+
 test_zxfer_profile_now_ms_returns_failure_when_date_is_unavailable() {
 	zxfer_test_capture_subshell '
 		date() {
@@ -1349,12 +1387,12 @@ test_zxfer_profile_add_elapsed_ms_ignores_failed_clock_lookups_in_current_shell(
 		(
 			g_option_V_very_verbose=1
 			g_zxfer_profile_has_data=0
-			g_zxfer_profile_test_elapsed_ms=7
+			g_zxfer_profile_snapshot_diff_sort_ms=7
 			zxfer_profile_now_ms() {
 				return 1
 			}
-			zxfer_profile_add_elapsed_ms g_zxfer_profile_test_elapsed_ms 10
-			printf 'counter=%s\n' "$g_zxfer_profile_test_elapsed_ms"
+			zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms 10
+			printf 'counter=%s\n' "$g_zxfer_profile_snapshot_diff_sort_ms"
 			printf 'has_data=%s\n' "${g_zxfer_profile_has_data:-0}"
 		)
 	)
@@ -1367,12 +1405,12 @@ has_data=0" "$output"
 test_zxfer_profile_add_elapsed_ms_normalizes_invalid_existing_counter_values() {
 	g_option_V_very_verbose=1
 	g_zxfer_profile_has_data=0
-	g_zxfer_profile_test_elapsed_ms="bogus"
+	g_zxfer_profile_snapshot_diff_sort_ms="bogus"
 
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_test_elapsed_ms 10 15
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms 10 15
 
 	assertEquals "Elapsed-timing helpers should normalize invalid stored counter values before adding elapsed milliseconds." \
-		5 "$g_zxfer_profile_test_elapsed_ms"
+		5 "$g_zxfer_profile_snapshot_diff_sort_ms"
 	assertEquals "Successful elapsed-timing updates should mark that profiling data exists." \
 		1 "$g_zxfer_profile_has_data"
 }
@@ -1382,10 +1420,10 @@ test_zxfer_profile_add_elapsed_ms_ignores_empty_counter_names_and_invalid_end_va
 		(
 			g_option_V_very_verbose=1
 			g_zxfer_profile_has_data=0
-			g_zxfer_profile_test_elapsed_ms=9
+			g_zxfer_profile_snapshot_diff_sort_ms=9
 			zxfer_profile_add_elapsed_ms "" 10 15
-			zxfer_profile_add_elapsed_ms g_zxfer_profile_test_elapsed_ms 10 "bad-end"
-			printf 'counter=%s\n' "$g_zxfer_profile_test_elapsed_ms"
+			zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms 10 "bad-end"
+			printf 'counter=%s\n' "$g_zxfer_profile_snapshot_diff_sort_ms"
 			printf 'has_data=%s\n' "${g_zxfer_profile_has_data:-0}"
 		)
 	)
@@ -1399,15 +1437,20 @@ test_zxfer_profile_helpers_ignore_untrusted_indirect_assignment_targets() {
 	g_option_V_very_verbose=1
 	g_zxfer_profile_has_data=0
 	g_zxfer_profile_assignment_injected=0
+	g_zxfer_profile_unknown_counter=4
 	l_untrusted_counter_name='g_zxfer_profile_probe:-0}; g_zxfer_profile_assignment_injected=1; l_counter_value=${g_zxfer_profile_probe'
 
 	zxfer_profile_increment_counter "$l_untrusted_counter_name"
 	zxfer_profile_add_elapsed_ms "$l_untrusted_counter_name" 10 20
+	zxfer_profile_increment_counter g_zxfer_profile_unknown_counter
+	zxfer_profile_add_elapsed_ms g_zxfer_profile_unknown_counter 10 20
 
 	assertEquals "Rejected profile targets should not mark profile data present." \
 		0 "$g_zxfer_profile_has_data"
 	assertEquals "Rejected profile targets should never be evaluated." \
 		0 "$g_zxfer_profile_assignment_injected"
+	assertEquals "Syntactically valid but unowned profile counters should remain unchanged." \
+		4 "$g_zxfer_profile_unknown_counter"
 }
 
 test_zxfer_profile_recorders_always_return_success() {

@@ -1076,18 +1076,18 @@ zxfer_try_property_transfer_destination_create() {
 	l_property_source_volsize=$7
 	l_property_effective_readonly_properties=$8
 
-	l_dest_exist=0
+	l_try_property_transfer_destination_create_dest_exist=0
 	l_destinations=$(printf '%s\n' "${g_recursive_dest_list:-}" | tr ' ' '\n')
 	while IFS= read -r l_recorded_destination || [ -n "$l_recorded_destination" ]; do
 		[ -n "$l_recorded_destination" ] || continue
 		if [ "$l_recorded_destination" = "$g_actual_dest" ]; then
-			l_dest_exist=1
+			l_try_property_transfer_destination_create_dest_exist=1
 			break
 		fi
 	done <<-EOF
 		$l_destinations
 	EOF
-	if [ "$l_dest_exist" -eq 0 ]; then
+	if [ "$l_try_property_transfer_destination_create_dest_exist" -eq 0 ]; then
 		l_dest_exist_status=0
 		l_live_dest_exist=$(zxfer_exists_destination "$g_actual_dest" live) ||
 			l_dest_exist_status=$?
@@ -1097,11 +1097,11 @@ zxfer_try_property_transfer_destination_create() {
 		fi
 		if [ "$l_live_dest_exist" -ne 0 ]; then
 			zxfer_note_destination_dataset_exists "$g_actual_dest"
-			l_dest_exist=1
+			l_try_property_transfer_destination_create_dest_exist=1
 		fi
 	fi
 
-	if zxfer_ensure_destination_exists "$l_dest_exist" "$l_property_is_initial_source" "$l_property_override_pvs" "$l_property_creation_pvs" "$l_property_source_dstype" "$l_property_source_volsize" "$g_actual_dest" "$l_property_effective_readonly_properties" ""; then
+	if zxfer_ensure_destination_exists "$l_try_property_transfer_destination_create_dest_exist" "$l_property_is_initial_source" "$l_property_override_pvs" "$l_property_creation_pvs" "$l_property_source_dstype" "$l_property_source_volsize" "$g_actual_dest" "$l_property_effective_readonly_properties" ""; then
 		zxfer_capture_backup_metadata_for_completed_transfer "$l_property_source" "$g_zxfer_source_pvs_raw" "$l_property_skip_backup_capture"
 		return 0
 	fi
@@ -1127,9 +1127,9 @@ zxfer_collect_property_transfer_destination_context() {
 		zxfer_throw_error "Failed to retrieve destination properties for [$g_actual_dest]." "$l_dest_pvs_status"
 	}
 	zxfer_read_property_reconcile_stage_file "$l_dest_pvs_tmp" >/dev/null || {
-		l_read_status=$?
+		l_collect_property_transfer_destination_context_read_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_dest_pvs_tmp"
-		return "$l_read_status"
+		return "$l_collect_property_transfer_destination_context_read_status"
 	}
 	l_dest_pvs=$g_zxfer_property_stage_file_read_result
 
@@ -1167,9 +1167,9 @@ zxfer_diff_property_transfer_changes() {
 		zxfer_throw_error "Failed to calculate property reconciliation changes for destination [$g_actual_dest]." "$l_diff_properties_status"
 	}
 	zxfer_read_property_reconcile_stage_file "$l_diff_properties_tmp" >/dev/null || {
-		l_read_status=$?
+		l_diff_property_transfer_changes_read_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_diff_properties_tmp"
-		return "$l_read_status"
+		return "$l_diff_property_transfer_changes_read_status"
 	}
 	l_property_transfer_initial_set_list=""
 	l_property_transfer_child_set_list=""

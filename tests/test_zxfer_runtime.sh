@@ -664,7 +664,7 @@ test_runtime_global_init_covers_default_assignments_in_current_shell() {
 			printf 'local_zfs=%s\n' "$g_LZFS"
 			printf 'backup_root=%s\n' "$g_backup_storage_root"
 			printf 'backup_ext=%s\n' "$g_backup_file_extension"
-			printf 'delete_source=<%s>\n' "$g_delete_source_tmp_file"
+			printf 'delete_source=<%s>\n' "$g_zxfer_snapshot_delete_source_identities_file"
 			printf 'temp_prefix=%s\n' "$g_zxfer_temp_prefix"
 		)
 	)
@@ -2097,8 +2097,8 @@ test_init_globals_initializes_dependency_state_and_temp_files() {
 			printf 'awk=%s\n' "$g_cmd_awk"
 			printf 'ps=%s\n' "$g_cmd_ps"
 			printf 'control=%s\n' "$g_ssh_supports_control_sockets"
-			printf 'tmp_source=%s\n' "$g_delete_source_tmp_file"
-			printf 'tmp_dest=%s\n' "$g_delete_dest_tmp_file"
+			printf 'tmp_source=%s\n' "$g_zxfer_snapshot_delete_source_identities_file"
+			printf 'tmp_dest=%s\n' "$g_zxfer_snapshot_delete_destination_identities_file"
 			printf 'restart=<%s>\n' "$g_zxfer_services_to_restart"
 			printf 'backup=<%s>\n' "$g_backup_file_contents"
 			printf 'restored=<%s>\n' "$g_restored_backup_file_contents"
@@ -2184,7 +2184,7 @@ test_init_globals_defers_strict_path_export_until_startup_helpers_finish() {
 			status=$?
 			printf 'status=%s\n' "$status"
 			printf 'path=%s\n' "$PATH"
-			printf 'tmp_source=%s\n' "$g_delete_source_tmp_file"
+			printf 'tmp_source=%s\n' "$g_zxfer_snapshot_delete_source_identities_file"
 		) 2>&1
 	)
 
@@ -2202,9 +2202,9 @@ test_ensure_snapshot_delete_temp_artifacts_allocates_paths_lazily_in_current_she
 	output=$(
 		(
 			counter=0
-			g_delete_source_tmp_file=""
-			g_delete_dest_tmp_file=""
-			g_delete_snapshots_to_delete_tmp_file=""
+			g_zxfer_snapshot_delete_source_identities_file=""
+			g_zxfer_snapshot_delete_destination_identities_file=""
+			g_zxfer_snapshot_delete_difference_file=""
 			zxfer_get_temp_file() {
 				counter=$((counter + 1))
 				g_zxfer_temp_file_result="$TEST_TMPDIR/delete.$counter"
@@ -2213,19 +2213,19 @@ test_ensure_snapshot_delete_temp_artifacts_allocates_paths_lazily_in_current_she
 			}
 
 			zxfer_ensure_snapshot_delete_temp_artifacts
-			first_source=$g_delete_source_tmp_file
-			first_dest=$g_delete_dest_tmp_file
-			first_diff=$g_delete_snapshots_to_delete_tmp_file
+			first_source=$g_zxfer_snapshot_delete_source_identities_file
+			first_dest=$g_zxfer_snapshot_delete_destination_identities_file
+			first_diff=$g_zxfer_snapshot_delete_difference_file
 
 			zxfer_ensure_snapshot_delete_temp_artifacts
 
-			printf 'source=%s\n' "$g_delete_source_tmp_file"
-			printf 'dest=%s\n' "$g_delete_dest_tmp_file"
-			printf 'diff=%s\n' "$g_delete_snapshots_to_delete_tmp_file"
+			printf 'source=%s\n' "$g_zxfer_snapshot_delete_source_identities_file"
+			printf 'dest=%s\n' "$g_zxfer_snapshot_delete_destination_identities_file"
+			printf 'diff=%s\n' "$g_zxfer_snapshot_delete_difference_file"
 			printf 'reused=%s\n' \
-				"$([ "$first_source" = "$g_delete_source_tmp_file" ] &&
-					[ "$first_dest" = "$g_delete_dest_tmp_file" ] &&
-					[ "$first_diff" = "$g_delete_snapshots_to_delete_tmp_file" ] &&
+				"$([ "$first_source" = "$g_zxfer_snapshot_delete_source_identities_file" ] &&
+					[ "$first_dest" = "$g_zxfer_snapshot_delete_destination_identities_file" ] &&
+					[ "$first_diff" = "$g_zxfer_snapshot_delete_difference_file" ] &&
 					printf yes || printf no)"
 			printf 'count=%s\n' "$counter"
 		)
@@ -2246,9 +2246,9 @@ test_ensure_snapshot_delete_temp_artifacts_allocates_paths_lazily_in_current_she
 test_ensure_snapshot_delete_temp_artifacts_preserves_allocation_failures_without_publishing_paths() {
 	output=$(
 		(
-			g_delete_source_tmp_file=""
-			g_delete_dest_tmp_file=""
-			g_delete_snapshots_to_delete_tmp_file=""
+			g_zxfer_snapshot_delete_source_identities_file=""
+			g_zxfer_snapshot_delete_destination_identities_file=""
+			g_zxfer_snapshot_delete_difference_file=""
 			zxfer_get_temp_file() {
 				return 71
 			}
@@ -2259,9 +2259,9 @@ test_ensure_snapshot_delete_temp_artifacts_preserves_allocation_failures_without
 			set -e
 
 			printf 'status=%s\n' "$status"
-			printf 'source=<%s>\n' "${g_delete_source_tmp_file:-}"
-			printf 'dest=<%s>\n' "${g_delete_dest_tmp_file:-}"
-			printf 'diff=<%s>\n' "${g_delete_snapshots_to_delete_tmp_file:-}"
+			printf 'source=<%s>\n' "${g_zxfer_snapshot_delete_source_identities_file:-}"
+			printf 'dest=<%s>\n' "${g_zxfer_snapshot_delete_destination_identities_file:-}"
+			printf 'diff=<%s>\n' "${g_zxfer_snapshot_delete_difference_file:-}"
 		)
 	)
 
@@ -2277,9 +2277,9 @@ test_ensure_snapshot_delete_temp_artifacts_preserves_allocation_failures_without
 
 test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_second_allocation_failure_in_current_shell() {
 	cleanup_log="$TEST_TMPDIR/delete_temp_cleanup_second.log"
-	g_delete_source_tmp_file=""
-	g_delete_dest_tmp_file=""
-	g_delete_snapshots_to_delete_tmp_file=""
+	g_zxfer_snapshot_delete_source_identities_file=""
+	g_zxfer_snapshot_delete_destination_identities_file=""
+	g_zxfer_snapshot_delete_difference_file=""
 	call_count=0
 
 	zxfer_get_temp_file() {
@@ -2296,8 +2296,8 @@ test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_second_allocation_fai
 		esac
 		return 72
 	}
-	zxfer_cleanup_runtime_artifact_paths() {
-		printf '%s\n' "$*" >"$cleanup_log"
+	zxfer_cleanup_runtime_artifact_path_list() {
+		printf '%s\n' "$1" >"$cleanup_log"
 		return 0
 	}
 
@@ -2306,9 +2306,9 @@ test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_second_allocation_fai
 	status=$?
 	set -e
 	cleanup_paths=$(cat "$cleanup_log" 2>/dev/null || :)
-	source_path=${g_delete_source_tmp_file:-}
-	dest_path=${g_delete_dest_tmp_file:-}
-	diff_path=${g_delete_snapshots_to_delete_tmp_file:-}
+	source_path=${g_zxfer_snapshot_delete_source_identities_file:-}
+	dest_path=${g_zxfer_snapshot_delete_destination_identities_file:-}
+	diff_path=${g_zxfer_snapshot_delete_difference_file:-}
 
 	zxfer_source_runtime_modules_through "zxfer_replication.sh"
 	setUp
@@ -2327,9 +2327,9 @@ test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_second_allocation_fai
 
 test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_third_allocation_failure_in_current_shell() {
 	cleanup_log="$TEST_TMPDIR/delete_temp_cleanup_third.log"
-	g_delete_source_tmp_file=""
-	g_delete_dest_tmp_file=""
-	g_delete_snapshots_to_delete_tmp_file=""
+	g_zxfer_snapshot_delete_source_identities_file=""
+	g_zxfer_snapshot_delete_destination_identities_file=""
+	g_zxfer_snapshot_delete_difference_file=""
 	call_count=0
 
 	zxfer_get_temp_file() {
@@ -2351,8 +2351,8 @@ test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_third_allocation_fail
 		esac
 		return 73
 	}
-	zxfer_cleanup_runtime_artifact_paths() {
-		printf '%s\n' "$*" >"$cleanup_log"
+	zxfer_cleanup_runtime_artifact_path_list() {
+		printf '%s\n' "$1" >"$cleanup_log"
 		return 0
 	}
 
@@ -2361,9 +2361,9 @@ test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_third_allocation_fail
 	status=$?
 	set -e
 	cleanup_paths=$(cat "$cleanup_log" 2>/dev/null || :)
-	source_path=${g_delete_source_tmp_file:-}
-	dest_path=${g_delete_dest_tmp_file:-}
-	diff_path=${g_delete_snapshots_to_delete_tmp_file:-}
+	source_path=${g_zxfer_snapshot_delete_source_identities_file:-}
+	dest_path=${g_zxfer_snapshot_delete_destination_identities_file:-}
+	diff_path=${g_zxfer_snapshot_delete_difference_file:-}
 
 	zxfer_source_runtime_modules_through "zxfer_replication.sh"
 	setUp
@@ -2371,7 +2371,8 @@ test_ensure_snapshot_delete_temp_artifacts_cleans_up_after_third_allocation_fail
 	assertEquals "Current-shell delete-temp setup should preserve the third allocation failure status." \
 		72 "$status"
 	assertEquals "Current-shell delete-temp setup should clean up both already allocated tempfiles when the third allocation fails." \
-		"$TEST_TMPDIR/delete-third-source $TEST_TMPDIR/delete-third-dest" "$cleanup_paths"
+		"$TEST_TMPDIR/delete-third-source
+$TEST_TMPDIR/delete-third-dest" "$cleanup_paths"
 	assertEquals "Current-shell delete-temp setup should not publish the source tempfile after the third allocation fails." \
 		"" "$source_path"
 	assertEquals "Current-shell delete-temp setup should not publish the destination tempfile after the third allocation fails." \
@@ -2425,6 +2426,9 @@ test_init_globals_calls_owner_reset_helpers() {
 			zxfer_reset_snapshot_reconcile_state() {
 				printf 'snapshot_reconcile\n' >>"$reset_log"
 			}
+			zxfer_reset_snapshot_delete_artifact_state() {
+				printf 'snapshot_delete_artifacts\n' >>"$reset_log"
+			}
 			zxfer_reset_backup_metadata_state() {
 				printf 'backup_metadata\n' >>"$reset_log"
 			}
@@ -2463,6 +2467,8 @@ test_init_globals_calls_owner_reset_helpers() {
 		"$output" "snapshot_discovery"
 	assertContains "zxfer_init_globals should delegate snapshot reconcile reset to the snapshot-reconcile owner helper." \
 		"$output" "snapshot_reconcile"
+	assertContains "zxfer_init_globals should delegate snapshot delete artifacts to the snapshot-reconcile owner helper." \
+		"$output" "snapshot_delete_artifacts"
 	assertContains "zxfer_init_globals should delegate backup metadata reset to the backup owner helper." \
 		"$output" "backup_metadata"
 	assertContains "zxfer_init_globals should delegate run-wide property state reset to the property owner helper." \

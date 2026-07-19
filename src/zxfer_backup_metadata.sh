@@ -198,11 +198,11 @@ $l_record_key	$l_properties"
 # boundary, so a malformed buffered row surfaces when the metadata file is
 # written instead of on the append that follows it.
 zxfer_append_backup_metadata_record() {
-	l_source=$1
-	l_properties=$2
+	l_append_metadata_source=$1
+	l_append_metadata_properties=$2
 
 	zxfer_append_backup_metadata_row_to_record_list "${g_backup_file_contents:-}" \
-		"$l_source" "$l_properties"
+		"$l_append_metadata_source" "$l_append_metadata_properties"
 	g_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
 }
 
@@ -339,38 +339,38 @@ END {
 # flows when zxfer has to preserve state now but can only commit it safely
 # after later work succeeds.
 zxfer_defer_buffered_backup_metadata_record() {
-	l_source=$1
+	l_defer_metadata_source=$1
 
 	[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] || return 0
 	[ "${g_option_n_dryrun:-0}" -eq 0 ] || return 0
 
 	if zxfer_get_buffered_backup_metadata_record_properties "${g_backup_file_contents:-}" \
-		"$l_source" >/dev/null; then
+		"$l_defer_metadata_source" >/dev/null; then
 		:
 	else
-		l_live_lookup_status=$?
-		case $l_live_lookup_status in
+		l_defer_metadata_lookup_status=$?
+		case $l_defer_metadata_lookup_status in
 		1)
-			zxfer_throw_error "Buffered backup metadata row for source dataset [$l_source] is missing."
+			zxfer_throw_error "Buffered backup metadata row for source dataset [$l_defer_metadata_source] is missing."
 			;;
 		3)
-			zxfer_throw_error "Buffered backup metadata rows are malformed while deferring source dataset [$l_source]."
+			zxfer_throw_error "Buffered backup metadata rows are malformed while deferring source dataset [$l_defer_metadata_source]."
 			;;
 		*)
-			zxfer_throw_error "Failed to inspect buffered backup metadata row for source dataset [$l_source]."
+			zxfer_throw_error "Failed to inspect buffered backup metadata row for source dataset [$l_defer_metadata_source]."
 			;;
 		esac
 	fi
-	l_buffered_properties=$g_zxfer_backup_metadata_record_properties_result
+	l_defer_metadata_properties=$g_zxfer_backup_metadata_record_properties_result
 
-	zxfer_remove_backup_metadata_record_list "${g_backup_file_contents:-}" "$l_source" >/dev/null
-	l_next_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
+	zxfer_remove_backup_metadata_record_list "${g_backup_file_contents:-}" "$l_defer_metadata_source" >/dev/null
+	l_defer_metadata_next_live=$g_zxfer_backup_metadata_record_list_result
 	zxfer_append_backup_metadata_row_to_record_list "${g_pending_backup_file_contents:-}" \
-		"$l_source" "$l_buffered_properties"
-	l_next_pending_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
+		"$l_defer_metadata_source" "$l_defer_metadata_properties"
+	l_defer_metadata_next_pending=$g_zxfer_backup_metadata_record_list_result
 
-	g_backup_file_contents=$l_next_backup_file_contents
-	g_pending_backup_file_contents=$l_next_pending_backup_file_contents
+	g_backup_file_contents=$l_defer_metadata_next_live
+	g_pending_backup_file_contents=$l_defer_metadata_next_pending
 }
 
 # Purpose: Finalize the deferred backup metadata record once all prerequisites
@@ -379,38 +379,38 @@ zxfer_defer_buffered_backup_metadata_record() {
 # flows after staged or deferred work is ready to become the module's final
 # result.
 zxfer_finalize_deferred_backup_metadata_record() {
-	l_source=$1
+	l_finalize_metadata_source=$1
 
 	[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] || return 0
 	[ "${g_option_n_dryrun:-0}" -eq 0 ] || return 0
 
 	if zxfer_get_buffered_backup_metadata_record_properties "${g_pending_backup_file_contents:-}" \
-		"$l_source" >/dev/null; then
+		"$l_finalize_metadata_source" >/dev/null; then
 		:
 	else
-		l_pending_lookup_status=$?
-		case $l_pending_lookup_status in
+		l_finalize_metadata_lookup_status=$?
+		case $l_finalize_metadata_lookup_status in
 		1)
-			zxfer_throw_error "Deferred backup metadata row for source dataset [$l_source] is missing."
+			zxfer_throw_error "Deferred backup metadata row for source dataset [$l_finalize_metadata_source] is missing."
 			;;
 		3)
-			zxfer_throw_error "Deferred backup metadata rows are malformed while finalizing source dataset [$l_source]."
+			zxfer_throw_error "Deferred backup metadata rows are malformed while finalizing source dataset [$l_finalize_metadata_source]."
 			;;
 		*)
-			zxfer_throw_error "Failed to inspect deferred backup metadata row for source dataset [$l_source]."
+			zxfer_throw_error "Failed to inspect deferred backup metadata row for source dataset [$l_finalize_metadata_source]."
 			;;
 		esac
 	fi
-	l_deferred_properties=$g_zxfer_backup_metadata_record_properties_result
+	l_finalize_metadata_properties=$g_zxfer_backup_metadata_record_properties_result
 
-	zxfer_remove_backup_metadata_record_list "${g_pending_backup_file_contents:-}" "$l_source" >/dev/null
-	l_next_pending_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
+	zxfer_remove_backup_metadata_record_list "${g_pending_backup_file_contents:-}" "$l_finalize_metadata_source" >/dev/null
+	l_finalize_metadata_next_pending=$g_zxfer_backup_metadata_record_list_result
 	zxfer_append_backup_metadata_row_to_record_list "${g_backup_file_contents:-}" \
-		"$l_source" "$l_deferred_properties"
-	l_next_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
+		"$l_finalize_metadata_source" "$l_finalize_metadata_properties"
+	l_finalize_metadata_next_live=$g_zxfer_backup_metadata_record_list_result
 
-	g_pending_backup_file_contents=$l_next_pending_backup_file_contents
-	g_backup_file_contents=$l_next_backup_file_contents
+	g_pending_backup_file_contents=$l_finalize_metadata_next_pending
+	g_backup_file_contents=$l_finalize_metadata_next_live
 }
 
 # Purpose: Capture the backup metadata for completed transfer into staged state
@@ -423,25 +423,25 @@ zxfer_finalize_deferred_backup_metadata_record() {
 # keep the captured rows buffered in memory until orchestration decides the
 # dataset or iteration is safe to persist.
 zxfer_capture_backup_metadata_for_completed_transfer() {
-	l_source=$1
-	l_properties=$2
-	l_skip_backup_capture=${3:-0}
+	l_capture_metadata_source=$1
+	l_capture_metadata_properties=$2
+	l_capture_metadata_skip=${3:-0}
 
 	[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] || return 0
-	[ "$l_skip_backup_capture" -eq 0 ] || return 0
+	[ "$l_capture_metadata_skip" -eq 0 ] || return 0
 
 	if [ "${g_option_n_dryrun:-0}" -eq 0 ] && [ -n "${g_backup_file_extension:-}" ]; then
-		if zxfer_get_forwarded_backup_properties_for_source "$l_source" >/dev/null; then
-			l_properties=$g_forwarded_backup_properties
+		if zxfer_get_forwarded_backup_properties_for_source "$l_capture_metadata_source" >/dev/null; then
+			l_capture_metadata_properties=$g_forwarded_backup_properties
 		else
-			l_forwarded_lookup_status=$?
-			if [ "$l_forwarded_lookup_status" -ne 1 ]; then
-				zxfer_throw_error "Failed to derive forwarded backup properties for source dataset [$l_source]."
+			l_capture_metadata_forwarded_status=$?
+			if [ "$l_capture_metadata_forwarded_status" -ne 1 ]; then
+				zxfer_throw_error "Failed to derive forwarded backup properties for source dataset [$l_capture_metadata_source]."
 			fi
 		fi
 	fi
 
-	zxfer_append_backup_metadata_record "$l_source" "$l_properties"
+	zxfer_append_backup_metadata_record "$l_capture_metadata_source" "$l_capture_metadata_properties"
 }
 
 # Purpose: Flush the captured backup metadata if live that was buffered earlier
@@ -459,8 +459,16 @@ zxfer_flush_captured_backup_metadata_if_live() {
 	[ -n "${g_backup_file_contents:-}" ] || return 0
 
 	l_saved_failure_stage=${g_zxfer_failure_stage:-startup}
-	zxfer_write_backup_properties
-	zxfer_set_failure_stage "$l_saved_failure_stage"
+	if zxfer_write_backup_properties; then
+		zxfer_set_failure_stage "$l_saved_failure_stage"
+		return 0
+	else
+		l_flush_backup_write_status=$?
+	fi
+
+	# zxfer_write_backup_properties owns the more precise failure stage. Keep it
+	# intact so the composition boundary can render useful structured context.
+	return "$l_flush_backup_write_status"
 }
 
 # Purpose: Validate the backup metadata format before zxfer relies on it.
@@ -752,11 +760,13 @@ END {
 # Usage: Called during backup-metadata capture, readback, and atomic publish
 # flows when later helpers need a boolean answer about the backup metadata.
 zxfer_backup_metadata_matches_source() {
-	l_backup_contents=$1
-	l_expected_source=$2
-	l_expected_destination=$3
+	l_metadata_match_contents=$1
+	l_metadata_match_source=$2
+	l_metadata_match_destination=$3
 
-	zxfer_backup_metadata_extract_properties_for_dataset_pair "$l_backup_contents" "$l_expected_source" "$l_expected_destination" >/dev/null
+	zxfer_backup_metadata_extract_properties_for_dataset_pair \
+		"$l_metadata_match_contents" "$l_metadata_match_source" \
+		"$l_metadata_match_destination" >/dev/null
 }
 
 # Purpose: Return the expected backup destination for source in the form
@@ -776,57 +786,58 @@ zxfer_get_expected_backup_destination_for_source() {
 # flows when zxfer has an optional exact candidate that still needs one checked
 # helper.
 zxfer_try_backup_restore_candidate() {
-	l_candidate=$1
-	l_expected_source=$2
-	l_expected_destination=$3
-	l_host=${4:-}
-	l_profile_side=${5:-}
-	l_missing_status=4
-	l_remote_transport_status=6
-	l_transport_failure_status=8
-	l_remote_capture_status=7
-	l_capture_failure_status=9
-	l_local_staging_status=10
+	l_restore_candidate_path=$1
+	l_restore_candidate_source=$2
+	l_restore_candidate_destination=$3
+	l_restore_candidate_host=${4:-}
+	l_restore_candidate_profile_side=${5:-}
+	l_restore_candidate_missing_status=4
+	l_restore_candidate_remote_transport_status=6
+	l_restore_candidate_transport_failure_status=8
+	l_restore_candidate_remote_capture_status=7
+	l_restore_candidate_capture_failure_status=9
+	l_restore_candidate_local_staging_status=10
 
-	if [ "$l_host" = "" ]; then
-		if zxfer_read_local_backup_file "$l_candidate" >/dev/null; then
-			l_read_status=0
-			l_backup_contents=$g_zxfer_backup_file_read_result
+	if [ "$l_restore_candidate_host" = "" ]; then
+		if zxfer_read_local_backup_file "$l_restore_candidate_path" >/dev/null; then
+			l_restore_candidate_read_status=0
+			l_restore_candidate_contents=$g_zxfer_backup_file_read_result
 		else
-			l_read_status=$?
-			if [ "$l_read_status" -eq "$l_missing_status" ]; then
+			l_restore_candidate_read_status=$?
+			if [ "$l_restore_candidate_read_status" -eq "$l_restore_candidate_missing_status" ]; then
 				return 1
 			fi
 			if [ "${g_zxfer_backup_local_read_failure_result:-}" = "staging" ]; then
-				return "$l_local_staging_status"
+				return "$l_restore_candidate_local_staging_status"
 			fi
 			return 5
 		fi
 	else
-		if zxfer_read_remote_backup_file "$l_host" "$l_candidate" "$l_profile_side" >/dev/null; then
-			l_read_status=0
-			l_backup_contents=$g_zxfer_backup_file_read_result
+		if zxfer_read_remote_backup_file "$l_restore_candidate_host" \
+			"$l_restore_candidate_path" "$l_restore_candidate_profile_side" >/dev/null; then
+			l_restore_candidate_read_status=0
+			l_restore_candidate_contents=$g_zxfer_backup_file_read_result
 		else
-			l_read_status=$?
-			if [ "$l_read_status" -eq "$l_missing_status" ]; then
+			l_restore_candidate_read_status=$?
+			if [ "$l_restore_candidate_read_status" -eq "$l_restore_candidate_missing_status" ]; then
 				return 1
 			fi
-			if [ "$l_read_status" -eq "$l_remote_transport_status" ]; then
-				return "$l_transport_failure_status"
+			if [ "$l_restore_candidate_read_status" -eq "$l_restore_candidate_remote_transport_status" ]; then
+				return "$l_restore_candidate_transport_failure_status"
 			fi
-			if [ "$l_read_status" -eq "$l_remote_capture_status" ]; then
-				return "$l_capture_failure_status"
+			if [ "$l_restore_candidate_read_status" -eq "$l_restore_candidate_remote_capture_status" ]; then
+				return "$l_restore_candidate_capture_failure_status"
 			fi
 			return 5
 		fi
 	fi
 
-	if zxfer_validate_backup_metadata_format "$l_backup_contents"; then
-		l_format_status=0
+	if zxfer_validate_backup_metadata_format "$l_restore_candidate_contents"; then
+		l_restore_candidate_format_status=0
 	else
-		l_format_status=$?
+		l_restore_candidate_format_status=$?
 	fi
-	case $l_format_status in
+	case $l_restore_candidate_format_status in
 	0) ;;
 	1)
 		return 6
@@ -839,12 +850,13 @@ zxfer_try_backup_restore_candidate() {
 		;;
 	esac
 
-	if zxfer_backup_metadata_matches_source "$l_backup_contents" "$l_expected_source" "$l_expected_destination"; then
-		l_match_status=0
+	if zxfer_backup_metadata_matches_source "$l_restore_candidate_contents" \
+		"$l_restore_candidate_source" "$l_restore_candidate_destination"; then
+		l_restore_candidate_match_status=0
 	else
-		l_match_status=$?
+		l_restore_candidate_match_status=$?
 	fi
-	case $l_match_status in
+	case $l_restore_candidate_match_status in
 	0) ;;
 	1)
 		return 3
@@ -860,7 +872,7 @@ zxfer_try_backup_restore_candidate() {
 		;;
 	esac
 
-	g_restored_backup_file_contents=$l_backup_contents
+	g_restored_backup_file_contents=$l_restore_candidate_contents
 	return 0
 }
 
@@ -981,17 +993,18 @@ exists under the source-dataset-relative tree inside ZXFER_BACKUP_DIR."
 # flows when the module needs a stable staged file or emitted stream for
 # downstream use.
 zxfer_write_backup_metadata_contents_to_store() {
-	l_backup_file_dir=$1
-	l_backup_file_path=$2
-	l_rendered_backup_contents=$3
+	l_write_metadata_dir=$1
+	l_write_metadata_path=$2
+	l_write_metadata_contents=$3
 
 	if [ "$g_option_T_target_host" = "" ]; then
-		zxfer_ensure_local_backup_dir "$g_backup_storage_root"
-		zxfer_ensure_local_backup_dir "$l_backup_file_dir"
-		zxfer_require_backup_write_target_path "$l_backup_file_path"
-		if ! zxfer_write_local_backup_file_atomically "$l_backup_file_path" "$l_rendered_backup_contents"; then
+		zxfer_ensure_local_backup_dir "$g_backup_storage_root" || return "$?"
+		zxfer_ensure_local_backup_dir "$l_write_metadata_dir" || return "$?"
+		zxfer_require_backup_write_target_path "$l_write_metadata_path"
+		if ! zxfer_write_local_backup_file_atomically \
+			"$l_write_metadata_path" "$l_write_metadata_contents"; then
 			if [ "${g_zxfer_backup_local_write_failure_result:-}" = "staging" ]; then
-				zxfer_throw_error "Failed to stage local backup file $l_backup_file_path for atomic write."
+				zxfer_throw_error "Failed to stage local backup file $l_write_metadata_path for atomic write."
 			fi
 			if [ "${g_zxfer_backup_local_write_failure_result:-}" = "rollback" ]; then
 				zxfer_throw_backup_write_rollback_error
@@ -1001,27 +1014,37 @@ zxfer_write_backup_metadata_contents_to_store() {
 		return 0
 	fi
 
-	zxfer_ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host" destination
-	zxfer_ensure_remote_backup_dir "$l_backup_file_dir" "$g_option_T_target_host" destination
-	if ! l_remote_write_helper_safe=$(zxfer_resolve_remote_cli_command_safe "$g_option_T_target_host" "cat" "cat" destination); then
+	zxfer_ensure_remote_backup_dir "$g_backup_storage_root" \
+		"$g_option_T_target_host" destination || return "$?"
+	zxfer_ensure_remote_backup_dir "$l_write_metadata_dir" \
+		"$g_option_T_target_host" destination || return "$?"
+	if ! l_write_metadata_helper_safe=$(zxfer_resolve_remote_cli_command_safe \
+		"$g_option_T_target_host" "cat" "cat" destination); then
 		zxfer_set_failure_class dependency
-		zxfer_throw_error "$l_remote_write_helper_safe"
+		zxfer_throw_error "$l_write_metadata_helper_safe"
 	fi
-	l_remote_dependency_status=99
-	l_remote_write_failure_status=92
-	l_dependency_path=$(zxfer_get_remote_backup_helper_dependency_path)
-	l_remote_write_cmd=$(zxfer_build_remote_backup_write_cmd "$l_backup_file_dir" "$l_backup_file_path" "$g_option_T_target_host" "$l_remote_write_helper_safe" "$l_remote_dependency_status" "$l_remote_write_failure_status")
-	l_remote_write_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_write_cmd")
-	l_remote_write_payload=$(printf '%s\n' "$l_rendered_backup_contents")
-	if zxfer_run_remote_backup_helper_with_payload "$g_option_T_target_host" "$l_remote_write_shell_cmd" "$l_remote_write_payload" destination; then
-		l_remote_write_status=0
+	l_write_metadata_dependency_status=99
+	l_write_metadata_failure_status=92
+	l_write_metadata_dependency_path=$(zxfer_get_remote_backup_helper_dependency_path)
+	l_write_metadata_script=$(zxfer_build_remote_backup_write_cmd \
+		"$l_write_metadata_dir" "$l_write_metadata_path" "$g_option_T_target_host" \
+		"$l_write_metadata_helper_safe" "$l_write_metadata_dependency_status" \
+		"$l_write_metadata_failure_status") || return "$?"
+	l_write_metadata_transport=$(zxfer_prepare_remote_backup_transport_script \
+		"$l_write_metadata_script") || return "$?"
+	l_write_metadata_shell_cmd=$(zxfer_build_remote_sh_c_command \
+		"$l_write_metadata_transport") || return "$?"
+	l_write_metadata_payload=$(printf '%s\n' "$l_write_metadata_contents")
+	if zxfer_run_remote_backup_helper_with_payload "$g_option_T_target_host" \
+		"$l_write_metadata_shell_cmd" "$l_write_metadata_payload" destination; then
+		l_write_metadata_status=0
 	else
-		l_remote_write_status=$?
+		l_write_metadata_status=$?
 	fi
-	zxfer_throw_remote_backup_write_status "$l_remote_write_status" \
-		"$l_remote_dependency_status" "$l_remote_write_failure_status" "" \
-		"$g_option_T_target_host" "writing backup metadata $l_backup_file_path" \
-		"$l_dependency_path"
+	zxfer_throw_remote_backup_write_status "$l_write_metadata_status" \
+		"$l_write_metadata_dependency_status" "$l_write_metadata_failure_status" "" \
+		"$g_option_T_target_host" "writing backup metadata $l_write_metadata_path" \
+		"$l_write_metadata_dependency_path"
 }
 
 # Purpose: Write the backup metadata pair contents to store in the normalized
@@ -1030,25 +1053,27 @@ zxfer_write_backup_metadata_contents_to_store() {
 # flows when the module needs a stable staged file or emitted stream for
 # downstream use.
 zxfer_write_backup_metadata_pair_contents_to_store() {
-	l_primary_backup_file_dir=$1
-	l_primary_backup_file_path=$2
-	l_primary_rendered_backup_contents=$3
-	l_forwarded_backup_file_dir=$4
-	l_forwarded_backup_file_path=$5
-	l_forwarded_backup_contents=$6
+	l_write_pair_primary_dir=$1
+	l_write_pair_primary_path=$2
+	l_write_pair_primary_contents=$3
+	l_write_pair_forwarded_dir=$4
+	l_write_pair_forwarded_path=$5
+	l_write_pair_forwarded_contents=$6
 
 	if [ "$g_option_T_target_host" = "" ]; then
-		zxfer_ensure_local_backup_dir "$g_backup_storage_root"
-		zxfer_ensure_local_backup_dir "$l_primary_backup_file_dir"
-		zxfer_ensure_local_backup_dir "$l_forwarded_backup_file_dir"
-		zxfer_require_backup_write_target_path "$l_primary_backup_file_path"
-		zxfer_require_backup_write_target_path "$l_forwarded_backup_file_path"
-		zxfer_write_local_backup_file_pair_atomically "$l_primary_backup_file_path" "$l_primary_rendered_backup_contents" "$l_forwarded_backup_file_path" "$l_forwarded_backup_contents"
-		l_local_pair_write_status=$?
-		if [ "$l_local_pair_write_status" -eq 0 ]; then
+		zxfer_ensure_local_backup_dir "$g_backup_storage_root" || return "$?"
+		zxfer_ensure_local_backup_dir "$l_write_pair_primary_dir" || return "$?"
+		zxfer_ensure_local_backup_dir "$l_write_pair_forwarded_dir" || return "$?"
+		zxfer_require_backup_write_target_path "$l_write_pair_primary_path"
+		zxfer_require_backup_write_target_path "$l_write_pair_forwarded_path"
+		zxfer_write_local_backup_file_pair_atomically \
+			"$l_write_pair_primary_path" "$l_write_pair_primary_contents" \
+			"$l_write_pair_forwarded_path" "$l_write_pair_forwarded_contents"
+		l_write_pair_local_status=$?
+		if [ "$l_write_pair_local_status" -eq 0 ]; then
 			return 0
 		fi
-		if [ "$l_local_pair_write_status" -eq 2 ] ||
+		if [ "$l_write_pair_local_status" -eq 2 ] ||
 			[ "${g_zxfer_backup_local_write_failure_result:-}" = "rollback" ]; then
 			zxfer_throw_backup_write_rollback_error
 		elif [ "${g_zxfer_backup_local_write_failure_result:-}" = "staging" ]; then
@@ -1059,26 +1084,40 @@ zxfer_write_backup_metadata_pair_contents_to_store() {
 		return 0
 	fi
 
-	zxfer_ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host" destination
-	zxfer_ensure_remote_backup_dir "$l_primary_backup_file_dir" "$g_option_T_target_host" destination
-	zxfer_ensure_remote_backup_dir "$l_forwarded_backup_file_dir" "$g_option_T_target_host" destination
-	l_remote_dependency_status=99
-	l_remote_write_failure_status=92
-	l_remote_rollback_failure_status=98
-	l_dependency_path=$(zxfer_get_remote_backup_helper_dependency_path)
-	l_remote_pair_write_cmd=$(zxfer_build_remote_backup_pair_write_cmd "$l_primary_backup_file_dir" "$l_primary_backup_file_path" "$l_forwarded_backup_file_dir" "$l_forwarded_backup_file_path" "$g_option_T_target_host" "$l_remote_dependency_status" "$l_remote_write_failure_status")
-	l_remote_pair_write_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_pair_write_cmd")
-	l_pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
-	l_remote_pair_payload=$(printf '%s\n%s\n%s\n' "$l_primary_rendered_backup_contents" "$l_pair_split_line" "$l_forwarded_backup_contents")
-	if zxfer_run_remote_backup_helper_with_payload "$g_option_T_target_host" "$l_remote_pair_write_shell_cmd" "$l_remote_pair_payload" destination; then
-		l_remote_write_status=0
+	zxfer_ensure_remote_backup_dir "$g_backup_storage_root" \
+		"$g_option_T_target_host" destination || return "$?"
+	zxfer_ensure_remote_backup_dir "$l_write_pair_primary_dir" \
+		"$g_option_T_target_host" destination || return "$?"
+	zxfer_ensure_remote_backup_dir "$l_write_pair_forwarded_dir" \
+		"$g_option_T_target_host" destination || return "$?"
+	l_write_pair_dependency_status=99
+	l_write_pair_failure_status=92
+	l_write_pair_rollback_status=98
+	l_write_pair_dependency_path=$(zxfer_get_remote_backup_helper_dependency_path)
+	l_write_pair_script=$(zxfer_build_remote_backup_pair_write_cmd \
+		"$l_write_pair_primary_dir" "$l_write_pair_primary_path" \
+		"$l_write_pair_forwarded_dir" "$l_write_pair_forwarded_path" \
+		"$g_option_T_target_host" "$l_write_pair_dependency_status" \
+		"$l_write_pair_failure_status") || return "$?"
+	l_write_pair_transport=$(zxfer_prepare_remote_backup_transport_script \
+		"$l_write_pair_script") || return "$?"
+	l_write_pair_shell_cmd=$(zxfer_build_remote_sh_c_command \
+		"$l_write_pair_transport") || return "$?"
+	l_write_pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
+	l_write_pair_payload=$(printf '%s\n%s\n%s\n' \
+		"$l_write_pair_primary_contents" "$l_write_pair_split_line" \
+		"$l_write_pair_forwarded_contents")
+	if zxfer_run_remote_backup_helper_with_payload "$g_option_T_target_host" \
+		"$l_write_pair_shell_cmd" "$l_write_pair_payload" destination; then
+		l_write_pair_status=0
 	else
-		l_remote_write_status=$?
+		l_write_pair_status=$?
 	fi
-	zxfer_throw_remote_backup_write_status "$l_remote_write_status" \
-		"$l_remote_dependency_status" "$l_remote_write_failure_status" \
-		"$l_remote_rollback_failure_status" "$g_option_T_target_host" \
-		"writing backup metadata $l_primary_backup_file_path" "$l_dependency_path"
+	zxfer_throw_remote_backup_write_status "$l_write_pair_status" \
+		"$l_write_pair_dependency_status" "$l_write_pair_failure_status" \
+		"$l_write_pair_rollback_status" "$g_option_T_target_host" \
+		"writing backup metadata $l_write_pair_primary_path" \
+		"$l_write_pair_dependency_path"
 }
 
 # Purpose: Write the backup properties in the normalized form later zxfer steps

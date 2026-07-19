@@ -7,13 +7,21 @@ test_zxfer_reset_remote_host_state_resets_capability_and_resolved_tool_state() {
 		(
 			g_cmd_zfs="/stub/zfs"
 			g_origin_remote_capabilities_response="dirty-origin"
+			g_origin_remote_capabilities_parsed_identity="dirty-origin-identity"
+			g_origin_remote_capabilities_os="DirtyOriginOS"
 			g_target_remote_capabilities_response="dirty-target"
+			g_target_remote_capabilities_parsed_identity="dirty-target-identity"
+			g_target_remote_capabilities_tool_records="dirty-target-tools"
 			g_zxfer_remote_probe_capture_failed=1
 			g_origin_cmd_zfs="/dirty/origin-zfs"
 
 			zxfer_reset_remote_host_state
 			printf 'origin=<%s>\n' "$g_origin_remote_capabilities_response"
+			printf 'origin_parsed=<%s>\n' "$g_origin_remote_capabilities_parsed_identity"
+			printf 'origin_os=<%s>\n' "$g_origin_remote_capabilities_os"
 			printf 'target=<%s>\n' "$g_target_remote_capabilities_response"
+			printf 'target_parsed=<%s>\n' "$g_target_remote_capabilities_parsed_identity"
+			printf 'target_tools=<%s>\n' "$g_target_remote_capabilities_tool_records"
 			printf 'capture_failed=%s\n' "$g_zxfer_remote_probe_capture_failed"
 			printf 'origin_zfs=%s\n' "$g_origin_cmd_zfs"
 		)
@@ -21,8 +29,16 @@ test_zxfer_reset_remote_host_state_resets_capability_and_resolved_tool_state() {
 
 	assertContains "Remote-host reset should clear origin capability payloads." \
 		"$result" "origin=<>"
+	assertContains "Remote-host reset should clear origin parsed capability identities." \
+		"$result" "origin_parsed=<>"
+	assertContains "Remote-host reset should clear origin parsed operating-system state." \
+		"$result" "origin_os=<>"
 	assertContains "Remote-host reset should clear target capability payloads." \
 		"$result" "target=<>"
+	assertContains "Remote-host reset should clear target parsed capability identities." \
+		"$result" "target_parsed=<>"
+	assertContains "Remote-host reset should clear target parsed tool records." \
+		"$result" "target_tools=<>"
 	assertContains "Remote-host reset should clear remote capture failure state." \
 		"$result" "capture_failed=0"
 	assertContains "Remote-host reset should restore origin zfs to the local default." \
@@ -61,9 +77,9 @@ test_init_globals_initializes_defaults_and_temp_files() {
 			printf 'backup=%s\n' "$g_backup_storage_root"
 			printf 'control=%s\n' "$g_ssh_supports_control_sockets"
 			printf 'yield=%s\n' "$g_option_Y_yield_iterations"
-			printf 'tmp1=%s\n' "$g_delete_source_tmp_file"
-			printf 'tmp2=%s\n' "$g_delete_dest_tmp_file"
-			printf 'tmp3=%s\n' "$g_delete_snapshots_to_delete_tmp_file"
+			printf 'tmp1=%s\n' "$g_zxfer_snapshot_delete_source_identities_file"
+			printf 'tmp2=%s\n' "$g_zxfer_snapshot_delete_destination_identities_file"
+			printf 'tmp3=%s\n' "$g_zxfer_snapshot_delete_difference_file"
 			printf 'restart=<%s>\n' "$g_zxfer_services_to_restart"
 			printf 'table_lookup=<%s>\n' "$g_zxfer_property_table_lookup_result"
 		)
@@ -1075,14 +1091,12 @@ test_zxfer_resolve_remote_cli_command_safe_uses_cached_capability_tool_for_gener
 		g_cmd_compress="zstd -T0 -9"
 		g_zxfer_profile_remote_cli_tool_direct_probes=0
 		zxfer_ensure_remote_host_capabilities() {
-			cat <<'EOF'
-ZXFER_REMOTE_CAPS_V2
+			zxfer_test_accept_remote_capability_response 'ZXFER_REMOTE_CAPS_V2
 os	RemoteOS
 tool	zfs	0	/remote/bin/zfs
 tool	parallel	0	/opt/bin/parallel
 tool	zstd	0	/remote/bin/zstd
-end
-EOF
+end'
 		}
 		zxfer_resolve_remote_cli_tool_direct() {
 			printf '%s\n' "direct-probe-called" >"$direct_log"
@@ -1118,15 +1132,13 @@ test_zxfer_resolve_remote_cli_tool_prefers_prewarmed_host_scope_for_generic_head
 		g_cmd_compress="zstd -T0 -9"
 		zxfer_ensure_remote_host_capabilities() {
 			printf '%s\n' "${3:-}" >"$LOG_PATH"
-			cat <<'EOF'
-ZXFER_REMOTE_CAPS_V2
+			zxfer_test_accept_remote_capability_response 'ZXFER_REMOTE_CAPS_V2
 os	RemoteOS
 tool	zfs	0	/remote/bin/zfs
 tool	parallel	0	/opt/bin/parallel
 tool	cat	0	/remote/bin/cat
 tool	zstd	0	/remote/bin/zstd
-end
-EOF
+end'
 		}
 		zxfer_resolve_remote_cli_tool_direct() {
 			printf '%s\n' "direct-probe-called" >"$direct_log"
@@ -1252,7 +1264,8 @@ test_zxfer_resolve_remote_cli_tool_falls_back_to_direct_probe_when_generic_tool_
 		g_option_V_very_verbose=1
 		g_zxfer_profile_remote_cli_tool_direct_probes=0
 		zxfer_ensure_remote_host_capabilities() {
-			fake_remote_capability_response
+			zxfer_test_accept_remote_capability_response \
+				"$(fake_remote_capability_response)"
 		}
 		zxfer_resolve_remote_cli_tool_direct() {
 			printf '%s\n' "direct-probe-called" >"$direct_log"
@@ -1281,13 +1294,11 @@ test_zxfer_resolve_remote_cli_tool_reports_missing_generic_dependency_from_capab
 	set +e
 	(
 		zxfer_ensure_remote_host_capabilities() {
-			cat <<'EOF'
-ZXFER_REMOTE_CAPS_V2
+			zxfer_test_accept_remote_capability_response 'ZXFER_REMOTE_CAPS_V2
 os	RemoteOS
 tool	zfs	0	/remote/bin/zfs
 tool	zstd	1	-
-end
-EOF
+end'
 		}
 		zxfer_resolve_remote_cli_tool_direct() {
 			printf '%s\n' "direct-probe-called" >"$direct_log"

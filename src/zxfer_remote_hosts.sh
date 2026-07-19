@@ -37,12 +37,12 @@
 ################################################################################
 
 # Module contract:
-# owns globals: per-role capability responses, parsed remote OS/tool records,
-#   probe capture state, and resolved remote helper selections.
+# owns globals: per-role raw and parsed capability state, active parsed-result
+#   channels, probe capture state, and resolved remote helper selections.
 # reads globals: parsed host options, secure dependency PATH, SSH transport
 #   command channels, runtime artifact helpers, and profile/reporting state.
-# mutates caches: per-run in-memory capability responses only; no transport or
-#   cross-process state.
+# mutates caches: per-run role/identity-keyed raw responses and parsed fields
+#   only; no transport or cross-process state.
 # returns via stdout: remote capability payloads, OS values, and tool paths.
 
 # Purpose: Reset per-run remote capability and resolved-tool state.
@@ -55,17 +55,28 @@ zxfer_reset_remote_host_state() {
 	g_origin_remote_capabilities_cache_identity=""
 	g_origin_remote_capabilities_response=""
 	g_origin_remote_capabilities_bootstrap_source=""
+	g_origin_remote_capabilities_parsed_identity=""
+	g_origin_remote_capabilities_os=""
+	g_origin_remote_capabilities_zfs_status=""
+	g_origin_remote_capabilities_tool_records=""
 	g_target_remote_capabilities_host=""
 	g_target_remote_capabilities_cache_identity=""
 	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_bootstrap_source=""
+	g_target_remote_capabilities_parsed_identity=""
+	g_target_remote_capabilities_os=""
+	g_target_remote_capabilities_zfs_status=""
+	g_target_remote_capabilities_tool_records=""
 	g_zxfer_remote_capability_response_result=""
+	g_zxfer_remote_capability_cache_role_result=""
+	g_zxfer_remote_capability_cache_identity_result=""
 	g_zxfer_remote_capability_os=""
 	g_zxfer_remote_capability_zfs_status=""
 	g_zxfer_remote_capability_tool_records=""
 	g_zxfer_remote_capability_tool_status_result=""
 	g_zxfer_remote_capability_tool_path_result=""
 	g_zxfer_remote_capability_requested_tools_result=""
+	g_zxfer_remote_capability_probe_transport_script_result=""
 	g_zxfer_remote_probe_stdout=""
 	g_zxfer_remote_probe_stderr=""
 	g_zxfer_remote_probe_capture_read_result=""
@@ -194,18 +205,18 @@ EOF
 # resolution when later helpers need one shared place to extend staged
 # or in-memory state.
 zxfer_append_remote_capability_requested_tool() {
-	l_tool=$1
+	l_append_remote_capability_requested_tool_tool=$1
 
-	[ -n "$l_tool" ] || return 0
-	if zxfer_remote_capability_requested_tool_is_present "$l_tool"; then
+	[ -n "$l_append_remote_capability_requested_tool_tool" ] || return 0
+	if zxfer_remote_capability_requested_tool_is_present "$l_append_remote_capability_requested_tool_tool"; then
 		return 0
 	fi
 
 	if [ -n "${g_zxfer_remote_capability_requested_tools_result:-}" ]; then
 		g_zxfer_remote_capability_requested_tools_result=$g_zxfer_remote_capability_requested_tools_result'
-'$l_tool
+'$l_append_remote_capability_requested_tool_tool
 	else
-		g_zxfer_remote_capability_requested_tools_result=$l_tool
+		g_zxfer_remote_capability_requested_tools_result=$l_append_remote_capability_requested_tool_tool
 	fi
 }
 
@@ -232,14 +243,14 @@ zxfer_render_remote_capability_requested_tools() {
 # resolution after configuration, cache state, or remote state can
 # change the final choice.
 zxfer_resolve_remote_capability_requested_tools_for_host() {
-	l_host_spec=$1
+	l_resolve_remote_capability_requested_tools_for_host_host_spec=$1
 	l_requested_tools=${2:-}
 
 	if [ -n "$l_requested_tools" ]; then
 		zxfer_render_remote_capability_requested_tools >/dev/null
-		while IFS= read -r l_tool || [ -n "$l_tool" ]; do
-			[ -n "$l_tool" ] || continue
-			zxfer_append_remote_capability_requested_tool "$l_tool"
+		while IFS= read -r l_resolve_remote_capability_requested_tools_for_host_tool || [ -n "$l_resolve_remote_capability_requested_tools_for_host_tool" ]; do
+			[ -n "$l_resolve_remote_capability_requested_tools_for_host_tool" ] || continue
+			zxfer_append_remote_capability_requested_tool "$l_resolve_remote_capability_requested_tools_for_host_tool"
 		done <<EOF
 $l_requested_tools
 EOF
@@ -247,7 +258,7 @@ EOF
 		return 0
 	fi
 
-	zxfer_get_remote_capability_requested_tools_for_host "$l_host_spec"
+	zxfer_get_remote_capability_requested_tools_for_host "$l_resolve_remote_capability_requested_tools_for_host_host_spec"
 }
 
 # Purpose: Return the remote capability requested tools for tool in the form
@@ -285,13 +296,11 @@ zxfer_extract_remote_cli_command_head() {
 	printf '%s\n' "$l_cli_head"
 }
 
-# Purpose: Decide whether the clean recursive no-op proof can defer origin
-# parallel resolution.
-# Usage: Called while building the active remote capability scope. This mirrors
-# the proof eligibility checks in snapshot discovery because this module is
-# sourced earlier and cannot call that helper directly.
-zxfer_remote_capability_origin_can_defer_parallel_for_fast_noop_proof() {
-	[ "${g_option_O_origin_host:-}" != "" ] || return 1
+# Purpose: Decide whether the active options permit the clean recursive no-op
+# proof before full source discovery.
+# Usage: Shared by capability scoping and snapshot discovery so the safety
+# gates for the optimization have one implementation.
+zxfer_fast_recursive_noop_options_are_eligible() {
 	[ "${g_option_T_target_host:-}" = "" ] || return 1
 	[ "${g_option_R_recursive:-}" != "" ] || return 1
 	[ "${g_option_s_make_snapshot:-0}" -eq 0 ] || return 1
@@ -302,6 +311,16 @@ zxfer_remote_capability_origin_can_defer_parallel_for_fast_noop_proof() {
 	[ "${g_option_k_backup_property_mode:-0}" -eq 0 ] || return 1
 
 	return 0
+}
+
+# Purpose: Decide whether the clean recursive no-op proof can defer origin
+# parallel resolution.
+# Usage: Called while building the active remote capability scope. Deferral is
+# useful only for a remote origin, while proof eligibility also covers local
+# origins.
+zxfer_remote_capability_origin_can_defer_parallel_for_fast_noop_proof() {
+	[ "${g_option_O_origin_host:-}" != "" ] || return 1
+	zxfer_fast_recursive_noop_options_are_eligible
 }
 
 # Purpose: Decide whether origin capability preloading should include parallel.
@@ -365,16 +384,16 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 # already includes the requested helper.
 zxfer_get_remote_capability_requested_tools_for_resolved_tool() {
 	l_host_spec=$1
-	l_tool=$2
+	l_get_remote_capability_requested_tools_for_resolved_tool_tool=$2
 
-	[ -n "$l_tool" ] || return 1
+	[ -n "$l_get_remote_capability_requested_tools_for_resolved_tool_tool" ] || return 1
 	if l_host_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
 		"$l_host_spec"); then
 		case "
 $l_host_requested_tools
 " in
 		*"
-$l_tool
+$l_get_remote_capability_requested_tools_for_resolved_tool_tool
 "*)
 			printf '%s\n' "$l_host_requested_tools"
 			return 0
@@ -382,7 +401,7 @@ $l_tool
 		esac
 	fi
 
-	zxfer_get_remote_capability_requested_tools_for_tool "$l_tool"
+	zxfer_get_remote_capability_requested_tools_for_tool "$l_get_remote_capability_requested_tools_for_resolved_tool_tool"
 }
 
 ################################################################################
@@ -394,19 +413,24 @@ $l_tool
 # resolution when zxfer needs to display or transport the value without
 # reparsing it.
 zxfer_render_remote_capability_cache_identity_for_host() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
+	l_render_remote_capability_cache_identity_for_host_host_spec=$1
+	l_render_remote_capability_cache_identity_for_host_requested_tools=${2:-}
 	l_cache_role_input=${3:-}
 	if ! l_cache_role=$(zxfer_normalize_remote_capability_role "$l_cache_role_input"); then
 		return 1
 	fi
-	l_dependency_path=$(zxfer_get_effective_dependency_path)
+	if l_dependency_path=$(zxfer_get_effective_dependency_path); then
+		:
+	else
+		l_cache_dependency_path_status=$?
+		return "$l_cache_dependency_path_status"
+	fi
 	if ! l_transport_policy_identity=$(zxfer_render_ssh_transport_policy_identity); then
 		[ "$l_transport_policy_identity" = "" ] || printf '%s\n' "$l_transport_policy_identity"
 		return 1
 	fi
 	if ! zxfer_resolve_remote_capability_requested_tools_for_host \
-		"$l_host_spec" "$l_requested_tools" >/dev/null; then
+		"$l_render_remote_capability_cache_identity_for_host_host_spec" "$l_render_remote_capability_cache_identity_for_host_requested_tools" >/dev/null; then
 		return 1
 	fi
 
@@ -544,7 +568,7 @@ zxfer_store_parsed_remote_capability_tool_record() {
 # later remote-helper logic consumes.
 # Usage: Called after a live or cached capability payload is loaded into the
 # current shell.
-zxfer_parse_remote_capability_response() {
+zxfer_parse_remote_capability_response_body() {
 	l_response=$1
 	l_capability_parse_tab='	'
 	l_capability_parse_cr=$(printf '\r')
@@ -588,6 +612,25 @@ zxfer_parse_remote_capability_response() {
 	[ -n "$g_zxfer_remote_capability_zfs_status" ] || return 1
 	[ "$l_capability_end_seen" -eq 1 ] || return 1
 	return 0
+}
+
+# Purpose: Parse one remote capability payload through the single validation
+# entry point used by live probes and legacy response-only cache hydration.
+# Usage: Kept as a thin wrapper so focused tests can count parser entries
+# without replacing or duplicating the protocol implementation.
+zxfer_parse_remote_capability_response() {
+	zxfer_parse_remote_capability_response_body "$@"
+}
+
+# Purpose: Check whether the active capability parse channel contains every
+# field required by OS and tool consumers.
+# Usage: Cache and live-response paths use this before accepting parser state;
+# a partial or externally corrupted slot is reparsed from its validated raw
+# response instead of being treated as a cache hit.
+zxfer_remote_capability_parse_state_is_complete() {
+	[ -n "${g_zxfer_remote_capability_os:-}" ] &&
+		[ -n "${g_zxfer_remote_capability_zfs_status:-}" ] &&
+		[ -n "${g_zxfer_remote_capability_tool_records:-}" ]
 }
 
 # Purpose: Require a parsed capability payload to contain every tool in the
@@ -637,14 +680,14 @@ zxfer_reset_remote_probe_capture_state() {
 # resolution when later helpers need a checked reload instead of ad hoc
 # file reads.
 zxfer_read_remote_probe_capture_file() {
-	l_capture_path=$1
+	l_probe_capture_read_path=$1
 
 	g_zxfer_remote_probe_capture_read_result=""
-	if zxfer_read_runtime_artifact_file "$l_capture_path" >/dev/null; then
+	if zxfer_read_runtime_artifact_file "$l_probe_capture_read_path" >/dev/null; then
 		g_zxfer_remote_probe_capture_read_result=$g_zxfer_runtime_artifact_read_result
 	else
-		l_read_status=$?
-		return "$l_read_status"
+		l_probe_capture_read_status=$?
+		return "$l_probe_capture_read_status"
 	fi
 
 	printf '%s\n' "$g_zxfer_remote_probe_capture_read_result"
@@ -656,41 +699,44 @@ zxfer_read_remote_probe_capture_file() {
 # resolution when later helpers need a checked in-memory copy of staged
 # data.
 zxfer_load_remote_probe_capture_files() {
-	l_capture_label=$1
-	l_stdout_path=$2
-	l_stderr_path=$3
+	l_probe_capture_load_label=$1
+	l_probe_capture_load_stdout_path=$2
+	l_probe_capture_load_stderr_path=$3
 
 	g_zxfer_remote_probe_stdout=""
 	g_zxfer_remote_probe_stderr=""
 	g_zxfer_remote_probe_capture_failed=0
 
-	zxfer_read_remote_probe_capture_file "$l_stdout_path" >/dev/null
-	l_stdout_read_status=$?
-	l_stdout_contents=$g_zxfer_remote_probe_capture_read_result
+	zxfer_read_remote_probe_capture_file \
+		"$l_probe_capture_load_stdout_path" >/dev/null
+	l_probe_capture_load_stdout_status=$?
+	l_probe_capture_load_stdout_contents=$g_zxfer_remote_probe_capture_read_result
 
-	zxfer_read_remote_probe_capture_file "$l_stderr_path" >/dev/null
-	l_stderr_read_status=$?
-	l_stderr_contents=$g_zxfer_remote_probe_capture_read_result
+	zxfer_read_remote_probe_capture_file \
+		"$l_probe_capture_load_stderr_path" >/dev/null
+	l_probe_capture_load_stderr_status=$?
+	l_probe_capture_load_stderr_contents=$g_zxfer_remote_probe_capture_read_result
 
-	if [ "$l_stdout_read_status" -eq 0 ] && [ "$l_stderr_read_status" -eq 0 ]; then
-		g_zxfer_remote_probe_stdout=$l_stdout_contents
-		g_zxfer_remote_probe_stderr=$l_stderr_contents
+	if [ "$l_probe_capture_load_stdout_status" -eq 0 ] &&
+		[ "$l_probe_capture_load_stderr_status" -eq 0 ]; then
+		g_zxfer_remote_probe_stdout=$l_probe_capture_load_stdout_contents
+		g_zxfer_remote_probe_stderr=$l_probe_capture_load_stderr_contents
 		return 0
 	fi
 
 	g_zxfer_remote_probe_capture_failed=1
-	case "${l_stdout_read_status}:${l_stderr_read_status}" in
+	case "${l_probe_capture_load_stdout_status}:${l_probe_capture_load_stderr_status}" in
 	0:*)
-		g_zxfer_remote_probe_stderr="Failed to read $l_capture_label stderr capture from local staging."
-		return "$l_stderr_read_status"
+		g_zxfer_remote_probe_stderr="Failed to read $l_probe_capture_load_label stderr capture from local staging."
+		return "$l_probe_capture_load_stderr_status"
 		;;
 	*:0)
-		g_zxfer_remote_probe_stderr="Failed to read $l_capture_label stdout capture from local staging."
-		return "$l_stdout_read_status"
+		g_zxfer_remote_probe_stderr="Failed to read $l_probe_capture_load_label stdout capture from local staging."
+		return "$l_probe_capture_load_stdout_status"
 		;;
 	*)
-		g_zxfer_remote_probe_stderr="Failed to read $l_capture_label stdout and stderr capture from local staging."
-		return "$l_stdout_read_status"
+		g_zxfer_remote_probe_stderr="Failed to read $l_probe_capture_load_label stdout and stderr capture from local staging."
+		return "$l_probe_capture_load_stdout_status"
 		;;
 	esac
 }
@@ -701,47 +747,56 @@ zxfer_load_remote_probe_capture_files() {
 # resolution when later helpers need a checked snapshot of command
 # output or computed state.
 zxfer_capture_remote_probe_output() {
-	l_host_spec=$1
-	l_remote_probe_cmd=$2
-	l_profile_side=${3:-}
+	l_probe_capture_host_spec=$1
+	l_probe_capture_command=$2
+	l_probe_capture_profile_side=${3:-}
 
 	zxfer_reset_remote_probe_capture_state
 
-	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host_spec"); then
+	if l_probe_capture_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host \
+		"$l_probe_capture_host_spec"); then
 		:
 	else
-		zxfer_profile_record_ssh_invocation "$l_host_spec" "$l_profile_side"
-		l_transport_status=$?
-		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
+		l_probe_capture_transport_status=$?
+		zxfer_profile_record_ssh_invocation \
+			"$l_probe_capture_host_spec" "$l_probe_capture_profile_side"
+		zxfer_throw_error \
+			"$l_probe_capture_transport_tokens" \
+			"$l_probe_capture_transport_status"
 	fi
 
-	l_temp_prefix="${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}.remote-probe"
-	zxfer_create_private_temp_dir "$l_temp_prefix" >/dev/null
-	l_capture_status=$?
-	if [ "$l_capture_status" -ne 0 ]; then
+	l_probe_capture_temp_prefix="${g_zxfer_temp_prefix:-zxfer.$$.${g_option_Y_yield_iterations:-1}.$(date +%s)}.remote-probe"
+	zxfer_create_private_temp_dir "$l_probe_capture_temp_prefix" >/dev/null
+	l_probe_capture_status=$?
+	if [ "$l_probe_capture_status" -ne 0 ]; then
 		zxfer_throw_error "Error creating temporary file."
 	fi
-	l_capture_dir=$g_zxfer_runtime_artifact_path_result
-	l_stdout_path="$l_capture_dir/stdout"
-	l_stderr_path="$l_capture_dir/stderr"
+	l_probe_capture_dir=$g_zxfer_runtime_artifact_path_result
+	l_probe_capture_stdout_path="$l_probe_capture_dir/stdout"
+	l_probe_capture_stderr_path="$l_probe_capture_dir/stderr"
 	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
-		zxfer_echoV "Running remote probe [$(zxfer_get_remote_command_context_label "$l_host_spec" "$l_profile_side")]: $l_remote_probe_cmd"
+		zxfer_echoV "Running remote probe [$(zxfer_get_remote_command_context_label "$l_probe_capture_host_spec" "$l_probe_capture_profile_side")]: $l_probe_capture_command"
 	fi
 
 	if zxfer_invoke_ssh_shell_command_for_host \
-		"$l_host_spec" "$l_remote_probe_cmd" "$l_profile_side" >"$l_stdout_path" 2>"$l_stderr_path"; then
-		l_remote_status=0
+		"$l_probe_capture_host_spec" "$l_probe_capture_command" \
+		"$l_probe_capture_profile_side" \
+		>"$l_probe_capture_stdout_path" \
+		2>"$l_probe_capture_stderr_path"; then
+		l_probe_capture_remote_status=0
 	else
-		l_remote_status=$?
+		l_probe_capture_remote_status=$?
 	fi
 
-	zxfer_load_remote_probe_capture_files "remote probe" "$l_stdout_path" "$l_stderr_path"
-	l_capture_status=$?
-	zxfer_cleanup_runtime_artifact_path "$l_capture_dir"
-	if [ "$l_capture_status" -ne 0 ]; then
-		return "$l_capture_status"
+	zxfer_load_remote_probe_capture_files \
+		"remote probe" "$l_probe_capture_stdout_path" \
+		"$l_probe_capture_stderr_path"
+	l_probe_capture_status=$?
+	zxfer_cleanup_runtime_artifact_path "$l_probe_capture_dir"
+	if [ "$l_probe_capture_status" -ne 0 ]; then
+		return "$l_probe_capture_status"
 	fi
-	return "$l_remote_status"
+	return "$l_probe_capture_remote_status"
 }
 
 # Purpose: Emit the remote probe failure message in the operator-facing format
@@ -759,108 +814,310 @@ zxfer_emit_remote_probe_failure_message() {
 	[ -z "$l_default_message" ] || printf '%s\n' "$l_default_message"
 }
 
-# Purpose: Return the cached remote capability response for host in the form
-# expected by later helpers.
-# Usage: Called during capability negotiation and remote tool-
-# resolution when sibling helpers need the same lookup without
-# duplicating module logic.
-zxfer_get_cached_remote_capability_response_for_host() {
-	l_cache_get_host_spec=$1
-	l_cache_get_requested_tools=${2:-}
-	l_cache_get_role_input=${3:-}
-	if ! l_cache_get_role=$(zxfer_normalize_remote_capability_role \
-		"$l_cache_get_role_input"); then
-		return 1
-	fi
-	if ! l_cache_get_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
-		"$l_cache_get_host_spec" "$l_cache_get_requested_tools" \
-		"$l_cache_get_role"); then
-		return 1
-	fi
+# Purpose: Clear one role's parsed capability cache while retaining its raw
+# response slot.
+# Usage: Called when a role's host, cache identity, or response changes; the
+# next accepted lookup hydrates the replacement payload exactly once.
+zxfer_clear_parsed_remote_capability_state_for_role() {
+	l_clear_capability_role=$1
 
-	if [ "$l_cache_get_role" != target ] &&
-		[ "$l_cache_get_host_spec" = "${g_origin_remote_capabilities_host:-}" ] &&
-		[ "$l_cache_get_identity" = "${g_origin_remote_capabilities_cache_identity:-}" ] &&
-		[ -n "${g_origin_remote_capabilities_response:-}" ]; then
-		printf '%s\n' "$g_origin_remote_capabilities_response"
-		return 0
-	fi
-
-	if [ "$l_cache_get_role" != origin ] &&
-		[ "$l_cache_get_host_spec" = "${g_target_remote_capabilities_host:-}" ] &&
-		[ "$l_cache_get_identity" = "${g_target_remote_capabilities_cache_identity:-}" ] &&
-		[ -n "${g_target_remote_capabilities_response:-}" ]; then
-		printf '%s\n' "$g_target_remote_capabilities_response"
-		return 0
-	fi
-
-	return 1
+	case "$l_clear_capability_role" in
+	origin)
+		g_origin_remote_capabilities_parsed_identity=""
+		g_origin_remote_capabilities_os=""
+		g_origin_remote_capabilities_zfs_status=""
+		g_origin_remote_capabilities_tool_records=""
+		;;
+	target)
+		g_target_remote_capabilities_parsed_identity=""
+		g_target_remote_capabilities_os=""
+		g_target_remote_capabilities_zfs_status=""
+		g_target_remote_capabilities_tool_records=""
+		;;
+	*)
+		return 2
+		;;
+	esac
 }
 
-# Purpose: Store the cached remote capability response for host in the cache or
-# staging location owned by this module.
-# Usage: Called during capability negotiation and remote tool-
-# resolution after zxfer has a validated value that later helpers may
-# reuse.
+# Purpose: Publish the active validated parser state into one role-owned cache.
+# Usage: Called only after protocol framing, paths, and requested-tool coverage
+# have succeeded for the exact cache identity being stored.
+zxfer_publish_parsed_remote_capability_state_for_role() {
+	l_publish_capability_role=$1
+	l_publish_capability_identity=$2
+
+	[ -n "$l_publish_capability_identity" ] || return 1
+	[ -n "${g_zxfer_remote_capability_os:-}" ] || return 1
+	[ -n "${g_zxfer_remote_capability_zfs_status:-}" ] || return 1
+	[ -n "${g_zxfer_remote_capability_tool_records:-}" ] || return 1
+
+	case "$l_publish_capability_role" in
+	origin)
+		g_origin_remote_capabilities_parsed_identity=$l_publish_capability_identity
+		g_origin_remote_capabilities_os=$g_zxfer_remote_capability_os
+		g_origin_remote_capabilities_zfs_status=$g_zxfer_remote_capability_zfs_status
+		g_origin_remote_capabilities_tool_records=$g_zxfer_remote_capability_tool_records
+		;;
+	target)
+		g_target_remote_capabilities_parsed_identity=$l_publish_capability_identity
+		g_target_remote_capabilities_os=$g_zxfer_remote_capability_os
+		g_target_remote_capabilities_zfs_status=$g_zxfer_remote_capability_zfs_status
+		g_target_remote_capabilities_tool_records=$g_zxfer_remote_capability_tool_records
+		;;
+	*)
+		return 2
+		;;
+	esac
+}
+
+# Purpose: Load one role's already validated capability fields into the active
+# lookup channel without reparsing the raw handshake response.
+# Usage: Called after an exact host/identity cache match and before OS or tool
+# consumers inspect the shared parsed-result globals.
+zxfer_load_parsed_remote_capability_state_for_role() {
+	l_load_capability_role=$1
+	l_load_capability_identity=$2
+
+	zxfer_reset_remote_capability_parse_state
+	case "$l_load_capability_role" in
+	origin)
+		[ "$l_load_capability_identity" = \
+			"${g_origin_remote_capabilities_parsed_identity:-}" ] || return 1
+		g_zxfer_remote_capability_os=${g_origin_remote_capabilities_os:-}
+		g_zxfer_remote_capability_zfs_status=${g_origin_remote_capabilities_zfs_status:-}
+		g_zxfer_remote_capability_tool_records=${g_origin_remote_capabilities_tool_records:-}
+		;;
+	target)
+		[ "$l_load_capability_identity" = \
+			"${g_target_remote_capabilities_parsed_identity:-}" ] || return 1
+		g_zxfer_remote_capability_os=${g_target_remote_capabilities_os:-}
+		g_zxfer_remote_capability_zfs_status=${g_target_remote_capabilities_zfs_status:-}
+		g_zxfer_remote_capability_tool_records=${g_target_remote_capabilities_tool_records:-}
+		;;
+	*)
+		return 2
+		;;
+	esac
+
+	[ -n "$g_zxfer_remote_capability_os" ] || return 1
+	[ -n "$g_zxfer_remote_capability_zfs_status" ] || return 1
+	[ -n "$g_zxfer_remote_capability_tool_records" ] || return 1
+}
+
+# Purpose: Select an exact role-owned raw capability response and, when
+# available, load its previously parsed fields.
+# Usage: Hot capability consumers call this status-only owner operation instead
+# of capturing and reparsing the response returned by the compatibility getter.
+# Side effects: Publishes response, selected role, and identity result globals.
+zxfer_load_cached_remote_capability_state_for_host() {
+	l_load_cache_host_spec=$1
+	l_load_cache_requested_tools=${2:-}
+	l_load_cache_role_input=${3:-}
+
+	g_zxfer_remote_capability_response_result=""
+	g_zxfer_remote_capability_cache_role_result=""
+	g_zxfer_remote_capability_cache_identity_result=""
+	zxfer_reset_remote_capability_parse_state
+	if ! l_load_cache_role=$(zxfer_normalize_remote_capability_role \
+		"$l_load_cache_role_input"); then
+		return 1
+	fi
+	if ! l_load_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+		"$l_load_cache_host_spec" "$l_load_cache_requested_tools" \
+		"$l_load_cache_role"); then
+		return 1
+	fi
+
+	case "$l_load_cache_role" in
+	origin)
+		[ "$l_load_cache_host_spec" = "${g_origin_remote_capabilities_host:-}" ] &&
+			[ "$l_load_cache_identity" = "${g_origin_remote_capabilities_cache_identity:-}" ] &&
+			[ -n "${g_origin_remote_capabilities_response:-}" ] || return 1
+		g_zxfer_remote_capability_response_result=$g_origin_remote_capabilities_response
+		g_zxfer_remote_capability_cache_role_result=origin
+		;;
+	target)
+		[ "$l_load_cache_host_spec" = "${g_target_remote_capabilities_host:-}" ] &&
+			[ "$l_load_cache_identity" = "${g_target_remote_capabilities_cache_identity:-}" ] &&
+			[ -n "${g_target_remote_capabilities_response:-}" ] || return 1
+		g_zxfer_remote_capability_response_result=$g_target_remote_capabilities_response
+		g_zxfer_remote_capability_cache_role_result=target
+		;;
+	'')
+		if [ "$l_load_cache_host_spec" = "${g_origin_remote_capabilities_host:-}" ] &&
+			[ "$l_load_cache_identity" = "${g_origin_remote_capabilities_cache_identity:-}" ] &&
+			[ -n "${g_origin_remote_capabilities_response:-}" ]; then
+			g_zxfer_remote_capability_response_result=$g_origin_remote_capabilities_response
+			g_zxfer_remote_capability_cache_role_result=origin
+		elif [ "$l_load_cache_host_spec" = "${g_target_remote_capabilities_host:-}" ] &&
+			[ "$l_load_cache_identity" = "${g_target_remote_capabilities_cache_identity:-}" ] &&
+			[ -n "${g_target_remote_capabilities_response:-}" ]; then
+			g_zxfer_remote_capability_response_result=$g_target_remote_capabilities_response
+			g_zxfer_remote_capability_cache_role_result=target
+		else
+			return 1
+		fi
+		;;
+	esac
+
+	g_zxfer_remote_capability_cache_identity_result=$l_load_cache_identity
+	zxfer_load_parsed_remote_capability_state_for_role \
+		"$g_zxfer_remote_capability_cache_role_result" \
+		"$l_load_cache_identity" || :
+	return 0
+}
+
+# Purpose: Return an exact cached remote capability response on stdout without
+# changing the active parsed-result channel.
+# Usage: Stdout compatibility read helper for characterization and diagnostics;
+# hot stateful consumers use zxfer_load_cached_remote_capability_state_for_host.
+zxfer_get_cached_remote_capability_response_for_host() {
+	l_get_cache_host_spec=$1
+	l_get_cache_requested_tools=${2:-}
+	l_get_cache_role_input=${3:-}
+	if ! l_get_cache_role=$(zxfer_normalize_remote_capability_role \
+		"$l_get_cache_role_input"); then
+		return 1
+	fi
+	if ! l_get_cache_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
+		"$l_get_cache_host_spec" "$l_get_cache_requested_tools" \
+		"$l_get_cache_role"); then
+		return 1
+	fi
+
+	case "$l_get_cache_role" in
+	origin)
+		[ "$l_get_cache_host_spec" = "${g_origin_remote_capabilities_host:-}" ] &&
+			[ "$l_get_cache_identity" = "${g_origin_remote_capabilities_cache_identity:-}" ] &&
+			[ -n "${g_origin_remote_capabilities_response:-}" ] || return 1
+		printf '%s\n' "$g_origin_remote_capabilities_response"
+		;;
+	target)
+		[ "$l_get_cache_host_spec" = "${g_target_remote_capabilities_host:-}" ] &&
+			[ "$l_get_cache_identity" = "${g_target_remote_capabilities_cache_identity:-}" ] &&
+			[ -n "${g_target_remote_capabilities_response:-}" ] || return 1
+		printf '%s\n' "$g_target_remote_capabilities_response"
+		;;
+	'')
+		if [ "$l_get_cache_host_spec" = "${g_origin_remote_capabilities_host:-}" ] &&
+			[ "$l_get_cache_identity" = "${g_origin_remote_capabilities_cache_identity:-}" ] &&
+			[ -n "${g_origin_remote_capabilities_response:-}" ]; then
+			printf '%s\n' "$g_origin_remote_capabilities_response"
+		elif [ "$l_get_cache_host_spec" = "${g_target_remote_capabilities_host:-}" ] &&
+			[ "$l_get_cache_identity" = "${g_target_remote_capabilities_cache_identity:-}" ] &&
+			[ -n "${g_target_remote_capabilities_response:-}" ]; then
+			printf '%s\n' "$g_target_remote_capabilities_response"
+		else
+			return 1
+		fi
+		;;
+	esac
+}
+
+# Purpose: Store one response in an explicitly selected role-owned cache slot.
+# Usage: Called by the compatibility selector below after it resolves the legacy
+# empty-role behavior; live negotiation always supplies origin or target.
+zxfer_store_remote_capability_response_for_role() {
+	l_store_role=$1
+	l_store_host_spec=$2
+	l_store_identity=$3
+	l_store_response=$4
+
+	case "$l_store_role" in
+	origin)
+		if [ "${g_origin_remote_capabilities_cache_identity:-}" != "$l_store_identity" ] ||
+			[ "${g_origin_remote_capabilities_host:-}" != "$l_store_host_spec" ]; then
+			g_origin_remote_capabilities_bootstrap_source=""
+		fi
+		if [ "${g_origin_remote_capabilities_cache_identity:-}" != "$l_store_identity" ] ||
+			[ "${g_origin_remote_capabilities_host:-}" != "$l_store_host_spec" ] ||
+			[ "${g_origin_remote_capabilities_response:-}" != "$l_store_response" ]; then
+			zxfer_clear_parsed_remote_capability_state_for_role origin
+		fi
+		g_origin_remote_capabilities_host=$l_store_host_spec
+		g_origin_remote_capabilities_cache_identity=$l_store_identity
+		g_origin_remote_capabilities_response=$l_store_response
+		;;
+	target)
+		if [ "${g_target_remote_capabilities_cache_identity:-}" != "$l_store_identity" ] ||
+			[ "${g_target_remote_capabilities_host:-}" != "$l_store_host_spec" ]; then
+			g_target_remote_capabilities_bootstrap_source=""
+		fi
+		if [ "${g_target_remote_capabilities_cache_identity:-}" != "$l_store_identity" ] ||
+			[ "${g_target_remote_capabilities_host:-}" != "$l_store_host_spec" ] ||
+			[ "${g_target_remote_capabilities_response:-}" != "$l_store_response" ]; then
+			zxfer_clear_parsed_remote_capability_state_for_role target
+		fi
+		g_target_remote_capabilities_host=$l_store_host_spec
+		g_target_remote_capabilities_cache_identity=$l_store_identity
+		g_target_remote_capabilities_response=$l_store_response
+		;;
+	*)
+		return 2
+		;;
+	esac
+
+	g_zxfer_remote_capability_cache_role_result=$l_store_role
+	g_zxfer_remote_capability_cache_identity_result=$l_store_identity
+}
+
+# Purpose: Store a cached response using explicit role mapping while preserving
+# the legacy empty-role fallback used by direct helper tests.
+# Usage: Live session callers pass source/destination; unassigned callers fill
+# the matching configured slot or the first available role in stable order.
 zxfer_store_cached_remote_capability_response_for_host() {
 	l_cache_store_host_spec=$1
 	l_cache_store_response=$2
 	l_cache_store_requested_tools=${3:-}
 	l_cache_store_role_input=${4:-}
+
+	g_zxfer_remote_capability_cache_role_result=""
+	g_zxfer_remote_capability_cache_identity_result=""
 	if ! l_cache_store_role=$(zxfer_normalize_remote_capability_role \
 		"$l_cache_store_role_input"); then
 		return 1
 	fi
-	l_cache_store_stored=0
 	if ! l_cache_store_identity=$(zxfer_render_remote_capability_cache_identity_for_host \
 		"$l_cache_store_host_spec" "$l_cache_store_requested_tools" \
 		"$l_cache_store_role"); then
 		l_cache_store_identity=""
 	fi
 
-	if [ "$l_cache_store_role" = origin ] ||
-		{ [ -z "$l_cache_store_role" ] &&
-			{ [ "$l_cache_store_host_spec" = "${g_option_O_origin_host:-}" ] ||
-				[ "$l_cache_store_host_spec" = "${g_origin_remote_capabilities_host:-}" ]; }; }; then
-		if [ "${g_origin_remote_capabilities_cache_identity:-}" != "$l_cache_store_identity" ] ||
-			[ "${g_origin_remote_capabilities_host:-}" != "$l_cache_store_host_spec" ]; then
-			g_origin_remote_capabilities_bootstrap_source=""
-		fi
-		g_origin_remote_capabilities_host=$l_cache_store_host_spec
-		g_origin_remote_capabilities_cache_identity=$l_cache_store_identity
-		g_origin_remote_capabilities_response=$l_cache_store_response
-		l_cache_store_stored=1
-	fi
-
-	if [ "$l_cache_store_role" = target ] ||
-		{ [ -z "$l_cache_store_role" ] &&
-			{ [ "$l_cache_store_host_spec" = "${g_option_T_target_host:-}" ] ||
-				[ "$l_cache_store_host_spec" = "${g_target_remote_capabilities_host:-}" ]; }; }; then
-		if [ "${g_target_remote_capabilities_cache_identity:-}" != "$l_cache_store_identity" ] ||
-			[ "${g_target_remote_capabilities_host:-}" != "$l_cache_store_host_spec" ]; then
-			g_target_remote_capabilities_bootstrap_source=""
-		fi
-		g_target_remote_capabilities_host=$l_cache_store_host_spec
-		g_target_remote_capabilities_cache_identity=$l_cache_store_identity
-		g_target_remote_capabilities_response=$l_cache_store_response
-		l_cache_store_stored=1
-	fi
-
-	if [ "$l_cache_store_stored" -eq 0 ] &&
-		[ "${g_origin_remote_capabilities_host:-}" = "" ]; then
-		g_origin_remote_capabilities_host=$l_cache_store_host_spec
-		g_origin_remote_capabilities_cache_identity=$l_cache_store_identity
-		g_origin_remote_capabilities_response=$l_cache_store_response
-		g_origin_remote_capabilities_bootstrap_source=""
+	case "$l_cache_store_role" in
+	origin | target)
+		zxfer_store_remote_capability_response_for_role \
+			"$l_cache_store_role" "$l_cache_store_host_spec" \
+			"$l_cache_store_identity" "$l_cache_store_response"
 		return
-	fi
-
-	if [ "$l_cache_store_stored" -eq 0 ]; then
-		g_target_remote_capabilities_host=$l_cache_store_host_spec
-		g_target_remote_capabilities_cache_identity=$l_cache_store_identity
-		g_target_remote_capabilities_response=$l_cache_store_response
-		g_target_remote_capabilities_bootstrap_source=""
-	fi
+		;;
+	'')
+		l_cache_store_matched=0
+		if [ "$l_cache_store_host_spec" = "${g_option_O_origin_host:-}" ] ||
+			[ "$l_cache_store_host_spec" = "${g_origin_remote_capabilities_host:-}" ]; then
+			zxfer_store_remote_capability_response_for_role origin \
+				"$l_cache_store_host_spec" "$l_cache_store_identity" \
+				"$l_cache_store_response" || return "$?"
+			l_cache_store_matched=1
+		fi
+		if [ "$l_cache_store_host_spec" = "${g_option_T_target_host:-}" ] ||
+			[ "$l_cache_store_host_spec" = "${g_target_remote_capabilities_host:-}" ]; then
+			zxfer_store_remote_capability_response_for_role target \
+				"$l_cache_store_host_spec" "$l_cache_store_identity" \
+				"$l_cache_store_response" || return "$?"
+			l_cache_store_matched=1
+		fi
+		[ "$l_cache_store_matched" -eq 0 ] || return 0
+		if [ -z "${g_origin_remote_capabilities_host:-}" ]; then
+			l_cache_store_fallback_role=origin
+		else
+			l_cache_store_fallback_role=target
+		fi
+		zxfer_store_remote_capability_response_for_role \
+			"$l_cache_store_fallback_role" "$l_cache_store_host_spec" \
+			"$l_cache_store_identity" "$l_cache_store_response"
+		;;
+	esac
 }
 
 # Purpose: Record the remote capability bootstrap source for host for later
@@ -914,20 +1171,80 @@ zxfer_note_remote_capability_bootstrap_source_for_host() {
 # Usage: Called during capability negotiation and remote tool-
 # resolution before other helpers consume the assembled value.
 zxfer_build_remote_capability_probe_script() {
-	l_host_spec=$1
-	l_requested_tools=${2:-}
+	l_capability_probe_host_spec=$1
+	l_capability_probe_requested_tools=${2:-}
 
-	l_dependency_path=$(zxfer_get_effective_dependency_path)
-	l_dependency_path_single=$(zxfer_escape_for_single_quotes "$l_dependency_path")
+	if l_capability_probe_dependency_path=$(zxfer_get_effective_dependency_path); then
+		:
+	else
+		l_capability_probe_dependency_path_status=$?
+		return "$l_capability_probe_dependency_path_status"
+	fi
+	l_capability_probe_dependency_path_single=$(zxfer_escape_for_single_quotes \
+		"$l_capability_probe_dependency_path")
 	if ! zxfer_resolve_remote_capability_requested_tools_for_host \
-		"$l_host_spec" "$l_requested_tools" >/dev/null; then
+		"$l_capability_probe_host_spec" \
+		"$l_capability_probe_requested_tools" >/dev/null; then
 		return 1
 	fi
-	l_requested_tool_tokens=$(zxfer_quote_token_stream \
+	l_capability_probe_requested_tool_tokens=$(zxfer_quote_token_stream \
 		"${g_zxfer_remote_capability_requested_tools_result:-zfs}")
-	[ "$l_requested_tool_tokens" != "" ] || l_requested_tool_tokens="'zfs'"
+	[ "$l_capability_probe_requested_tool_tokens" != "" ] ||
+		l_capability_probe_requested_tool_tokens="'zfs'"
 
-	printf "%s\n" "PATH='$l_dependency_path_single'; export PATH; l_os=\$(uname 2>/dev/null) || exit \$?; printf '%s\n' 'ZXFER_REMOTE_CAPS_V2'; printf '%s\t%s\n' 'os' \"\$l_os\"; for l_tool in $l_requested_tool_tokens; do [ -n \"\$l_tool\" ] || continue; l_path=\$(command -v \"\$l_tool\" 2>/dev/null); l_status=\$?; if [ \"\$l_status\" -eq 0 ]; then printf '%s\t%s\t0\t%s\n' 'tool' \"\$l_tool\" \"\$l_path\"; elif [ \"\$l_status\" -eq 1 ]; then printf '%s\t%s\t1\t-\n' 'tool' \"\$l_tool\"; else printf '%s\t%s\t%s\t-\n' 'tool' \"\$l_tool\" \"\$l_status\"; fi; done; printf '%s\n' 'end'"
+	while IFS= read -r l_capability_probe_script_line ||
+		[ -n "$l_capability_probe_script_line" ]; do
+		printf '%s\n' "$l_capability_probe_script_line"
+	done <<-EOF
+		PATH='$l_capability_probe_dependency_path_single';
+		export PATH;
+
+		l_os=\$(uname 2>/dev/null) || exit \$?;
+		printf '%s\n' 'ZXFER_REMOTE_CAPS_V2';
+		printf '%s\t%s\n' 'os' "\$l_os";
+
+		for l_tool in $l_capability_probe_requested_tool_tokens; do
+		  [ -n "\$l_tool" ] || continue;
+		  l_path=\$(command -v "\$l_tool" 2>/dev/null);
+		  l_status=\$?;
+		  if [ "\$l_status" -eq 0 ]; then
+		    printf '%s\t%s\t0\t%s\n' 'tool' "\$l_tool" "\$l_path";
+		  elif [ "\$l_status" -eq 1 ]; then
+		    printf '%s\t%s\t1\t-\n' 'tool' "\$l_tool";
+		  else
+		    printf '%s\t%s\t%s\t-\n' 'tool' "\$l_tool" "\$l_status";
+		  fi;
+		done;
+
+		printf '%s\n' 'end';
+	EOF
+}
+
+# Purpose: Collapse the readable capability renderer into the single physical
+# command line required by csh/tcsh login shells before their explicit
+# `sh -c` handoff.
+# Usage: Called after rendering and before shell-command quoting. The renderer
+# terminates every POSIX command with `;`, so replacing line boundaries with
+# spaces preserves its syntax and output protocol.
+# Side effects: Publishes the transport form in
+# g_zxfer_remote_capability_probe_transport_script_result.
+zxfer_prepare_remote_capability_probe_transport_script() {
+	l_capability_probe_transport_script=${1:-}
+	g_zxfer_remote_capability_probe_transport_script_result=""
+
+	while IFS= read -r l_capability_probe_transport_line ||
+		[ -n "$l_capability_probe_transport_line" ]; do
+		[ -n "$l_capability_probe_transport_line" ] || continue
+		if [ -n "$g_zxfer_remote_capability_probe_transport_script_result" ]; then
+			g_zxfer_remote_capability_probe_transport_script_result=$g_zxfer_remote_capability_probe_transport_script_result' '$l_capability_probe_transport_line
+		else
+			g_zxfer_remote_capability_probe_transport_script_result=$l_capability_probe_transport_line
+		fi
+	done <<EOF
+$l_capability_probe_transport_script
+EOF
+
+	[ -n "$g_zxfer_remote_capability_probe_transport_script_result" ]
 }
 
 # Purpose: Probe a remote host live for the capability payload that describes
@@ -935,77 +1252,122 @@ zxfer_build_remote_capability_probe_script() {
 # Usage: Called during capability negotiation and remote tool-
 # resolution when cached capability data is missing or invalid.
 zxfer_fetch_remote_host_capabilities_live() {
-	l_host_spec=$1
-	l_profile_side=${2:-}
-	l_requested_tools=${3:-}
+	l_live_capability_host_spec=$1
+	l_live_capability_profile_side=${2:-}
+	l_live_capability_requested_tools=${3:-}
 
 	g_zxfer_remote_capability_response_result=""
-	[ -n "$l_host_spec" ] || return 1
+	[ -n "$l_live_capability_host_spec" ] || return 1
 
-	if ! l_remote_probe=$(zxfer_build_remote_capability_probe_script \
-		"$l_host_spec" "$l_requested_tools"); then
+	if ! l_live_capability_probe=$(zxfer_build_remote_capability_probe_script \
+		"$l_live_capability_host_spec" \
+		"$l_live_capability_requested_tools"); then
 		return 1
 	fi
-	l_remote_probe_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_probe")
-	if ! zxfer_capture_remote_probe_output "$l_host_spec" "$l_remote_probe_cmd" "$l_profile_side"; then
+	if ! zxfer_prepare_remote_capability_probe_transport_script \
+		"$l_live_capability_probe"; then
+		return 1
+	fi
+	l_live_capability_probe_command=$(zxfer_build_remote_sh_c_command \
+		"$g_zxfer_remote_capability_probe_transport_script_result")
+	if ! zxfer_capture_remote_probe_output \
+		"$l_live_capability_host_spec" \
+		"$l_live_capability_probe_command" \
+		"$l_live_capability_profile_side"; then
 		zxfer_emit_remote_probe_failure_message >&2
 		return 1
 	fi
-	l_remote_output=$g_zxfer_remote_probe_stdout
+	l_live_capability_output=$g_zxfer_remote_probe_stdout
 
-	zxfer_parse_remote_capability_response "$l_remote_output" || return 1
+	zxfer_parse_remote_capability_response \
+		"$l_live_capability_output" || return 1
 	zxfer_parsed_remote_capabilities_cover_requested_tools \
-		"$l_host_spec" "$l_requested_tools" || return 1
+		"$l_live_capability_host_spec" \
+		"$l_live_capability_requested_tools" || return 1
 
-	g_zxfer_remote_capability_response_result=$l_remote_output
-	printf '%s\n' "$l_remote_output"
+	g_zxfer_remote_capability_response_result=$l_live_capability_output
+	printf '%s\n' "$l_live_capability_output"
 }
 
 # Purpose: Ensure the remote host capabilities exist and are ready before the
 # flow continues.
 # Usage: Called during remote bootstrap, capability probing, and ssh control-
 # socket management before later helpers assume the capability payload is
-# available. Capability state is per-run only: one live probe per host fills
-# the in-memory tier and every later lookup in this run is answered from
-# memory.
+# available. Capability state is per-run only: one live probe and parse per
+# exact role, host, secure-PATH, SSH-policy, and requested-tool identity fills
+# the in-memory tier for later OS and tool lookups.
+# Side effects: Publishes the accepted response and active parsed fields in
+# module-owned result globals; retains raw response stdout for compatibility.
 zxfer_ensure_remote_host_capabilities() {
-	l_host_spec=$1
-	l_profile_side=${2:-}
-	l_requested_tools=${3:-}
+	l_ensure_capability_host_spec=$1
+	l_ensure_capability_profile_side=${2:-}
+	l_ensure_capability_requested_tools=${3:-}
 
 	g_zxfer_remote_capability_response_result=""
-	[ -n "$l_host_spec" ] || return 1
+	[ -n "$l_ensure_capability_host_spec" ] || return 1
+	if ! l_ensure_capability_role=$(zxfer_normalize_remote_capability_role \
+		"$l_ensure_capability_profile_side"); then
+		return 1
+	fi
 
-	if l_cached_response=$(zxfer_get_cached_remote_capability_response_for_host \
-		"$l_host_spec" "$l_requested_tools" "$l_profile_side"); then
-		if zxfer_parse_remote_capability_response "$l_cached_response" &&
-			zxfer_parsed_remote_capabilities_cover_requested_tools \
-				"$l_host_spec" "$l_requested_tools"; then
+	if zxfer_load_cached_remote_capability_state_for_host \
+		"$l_ensure_capability_host_spec" \
+		"$l_ensure_capability_requested_tools" \
+		"$l_ensure_capability_role"; then
+		l_ensure_capability_cached_response=$g_zxfer_remote_capability_response_result
+		if zxfer_remote_capability_parse_state_is_complete ||
+			{ zxfer_parse_remote_capability_response \
+				"$l_ensure_capability_cached_response" &&
+				zxfer_parsed_remote_capabilities_cover_requested_tools \
+					"$l_ensure_capability_host_spec" \
+					"$l_ensure_capability_requested_tools" &&
+				zxfer_publish_parsed_remote_capability_state_for_role \
+					"$g_zxfer_remote_capability_cache_role_result" \
+					"$g_zxfer_remote_capability_cache_identity_result"; }; then
 			zxfer_note_remote_capability_bootstrap_source_for_host \
-				"$l_host_spec" memory "$l_requested_tools" "$l_profile_side"
+				"$l_ensure_capability_host_spec" memory \
+				"$l_ensure_capability_requested_tools" \
+				"$l_ensure_capability_role"
 			zxfer_profile_record_remote_capability_bootstrap_source memory
-			g_zxfer_remote_capability_response_result=$l_cached_response
-			printf '%s\n' "$l_cached_response"
+			g_zxfer_remote_capability_response_result=$l_ensure_capability_cached_response
+			printf '%s\n' "$l_ensure_capability_cached_response"
 			return 0
 		fi
 	fi
 
 	if zxfer_fetch_remote_host_capabilities_live \
-		"$l_host_spec" "$l_profile_side" "$l_requested_tools" >/dev/null; then
+		"$l_ensure_capability_host_spec" \
+		"$l_ensure_capability_profile_side" \
+		"$l_ensure_capability_requested_tools" >/dev/null; then
 		:
 	else
-		l_live_status=$?
-		return "$l_live_status"
+		l_ensure_capability_live_status=$?
+		return "$l_ensure_capability_live_status"
 	fi
-	l_live_response=$g_zxfer_remote_capability_response_result
+	l_ensure_capability_live_response=$g_zxfer_remote_capability_response_result
+	if ! zxfer_remote_capability_parse_state_is_complete; then
+		zxfer_parse_remote_capability_response \
+			"$l_ensure_capability_live_response" || return 1
+		zxfer_parsed_remote_capabilities_cover_requested_tools \
+			"$l_ensure_capability_host_spec" \
+			"$l_ensure_capability_requested_tools" || return 1
+	fi
 
 	zxfer_store_cached_remote_capability_response_for_host \
-		"$l_host_spec" "$l_live_response" "$l_requested_tools" "$l_profile_side"
+		"$l_ensure_capability_host_spec" \
+		"$l_ensure_capability_live_response" \
+		"$l_ensure_capability_requested_tools" \
+		"$l_ensure_capability_role"
+	zxfer_publish_parsed_remote_capability_state_for_role \
+		"$g_zxfer_remote_capability_cache_role_result" \
+		"$g_zxfer_remote_capability_cache_identity_result" || :
 	zxfer_note_remote_capability_bootstrap_source_for_host \
-		"$l_host_spec" live "$l_requested_tools" "$l_profile_side"
+		"$l_ensure_capability_host_spec" live \
+		"$l_ensure_capability_requested_tools" \
+		"$l_ensure_capability_role"
 	zxfer_profile_record_remote_capability_bootstrap_source live
-	g_zxfer_remote_capability_response_result=$l_live_response
-	printf '%s\n' "$l_live_response"
+	g_zxfer_remote_capability_response_result=$l_ensure_capability_live_response
+	printf '%s\n' "$l_ensure_capability_live_response"
 }
 
 # Purpose: Preload the remote host capabilities before later helpers need them.
@@ -1013,21 +1375,25 @@ zxfer_ensure_remote_host_capabilities() {
 # resolution when zxfer wants startup or iteration work to resolve
 # expensive state ahead of time.
 zxfer_preload_remote_host_capabilities() {
-	l_host_spec=$1
-	l_profile_side=${2:-}
-	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
-		"$l_host_spec"); then
-		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+	l_preload_capability_host_spec=$1
+	l_preload_capability_profile_side=${2:-}
+	if ! l_preload_capability_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
+		"$l_preload_capability_host_spec"); then
+		l_preload_capability_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
 	fi
 
 	if [ "${g_option_v_verbose:-0}" -eq 1 ] || [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
 		zxfer_ensure_remote_host_capabilities \
-			"$l_host_spec" "$l_profile_side" "$l_requested_tools" >/dev/null
+			"$l_preload_capability_host_spec" \
+			"$l_preload_capability_profile_side" \
+			"$l_preload_capability_requested_tools" >/dev/null
 		return "$?"
 	fi
 
 	zxfer_ensure_remote_host_capabilities \
-		"$l_host_spec" "$l_profile_side" "$l_requested_tools" >/dev/null 2>&1
+		"$l_preload_capability_host_spec" \
+		"$l_preload_capability_profile_side" \
+		"$l_preload_capability_requested_tools" >/dev/null 2>&1
 }
 
 # Purpose: Return the remote host operating system direct in the form expected
@@ -1036,22 +1402,31 @@ zxfer_preload_remote_host_capabilities() {
 # resolution when sibling helpers need the same lookup without
 # duplicating module logic.
 zxfer_get_remote_host_operating_system_direct() {
-	l_host_spec=$1
-	l_profile_side=${2:-}
+	l_direct_os_host_spec=$1
+	l_direct_os_profile_side=${2:-}
 
-	l_dependency_path=$(zxfer_get_effective_dependency_path)
-	l_dependency_path_single=$(zxfer_escape_for_single_quotes "$l_dependency_path")
-	l_remote_probe="PATH='$l_dependency_path_single'; export PATH; uname 2>/dev/null"
-	l_remote_probe_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_probe")
-	if ! zxfer_capture_remote_probe_output "$l_host_spec" "$l_remote_probe_cmd" "$l_profile_side"; then
+	if l_direct_os_dependency_path=$(zxfer_get_effective_dependency_path); then
+		:
+	else
+		l_direct_os_dependency_path_status=$?
+		return "$l_direct_os_dependency_path_status"
+	fi
+	l_direct_os_dependency_path_single=$(zxfer_escape_for_single_quotes \
+		"$l_direct_os_dependency_path")
+	l_direct_os_probe="PATH='$l_direct_os_dependency_path_single'; export PATH; uname 2>/dev/null"
+	l_direct_os_probe_command=$(zxfer_build_remote_sh_c_command \
+		"$l_direct_os_probe")
+	if ! zxfer_capture_remote_probe_output \
+		"$l_direct_os_host_spec" "$l_direct_os_probe_command" \
+		"$l_direct_os_profile_side"; then
 		zxfer_emit_remote_probe_failure_message
 		return 1
 	fi
-	l_remote_output=$g_zxfer_remote_probe_stdout
+	l_direct_os_output=$g_zxfer_remote_probe_stdout
 
-	l_remote_os=$(printf '%s\n' "$l_remote_output" | sed -n '1p')
-	[ -n "$l_remote_os" ] || return 1
-	printf '%s\n' "$l_remote_os"
+	l_direct_os_result=$(printf '%s\n' "$l_direct_os_output" | sed -n '1p')
+	[ -n "$l_direct_os_result" ] || return 1
+	printf '%s\n' "$l_direct_os_result"
 }
 
 # Purpose: Return the remote host operating system in the form expected by
@@ -1060,27 +1435,32 @@ zxfer_get_remote_host_operating_system_direct() {
 # resolution when sibling helpers need the same lookup without
 # duplicating module logic.
 zxfer_get_remote_host_operating_system() {
-	l_host_spec=$1
-	l_profile_side=${2:-}
-	if ! l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host "$l_host_spec"); then
-		l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
+	l_remote_os_host_spec=$1
+	l_remote_os_profile_side=${2:-}
+	if ! l_remote_os_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_host \
+		"$l_remote_os_host_spec"); then
+		l_remote_os_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_tool zfs)
 	fi
 
-	if ! l_response=$(zxfer_ensure_remote_host_capabilities \
-		"$l_host_spec" "$l_profile_side" "$l_requested_tools"); then
-		if ! l_fallback_os=$(zxfer_get_remote_host_operating_system_direct "$l_host_spec" "$l_profile_side"); then
-			[ "$l_fallback_os" = "" ] || printf '%s\n' "$l_fallback_os"
+	zxfer_reset_remote_capability_parse_state
+	if ! zxfer_ensure_remote_host_capabilities \
+		"$l_remote_os_host_spec" "$l_remote_os_profile_side" \
+		"$l_remote_os_requested_tools" >/dev/null; then
+		if ! l_remote_os_fallback=$(zxfer_get_remote_host_operating_system_direct \
+			"$l_remote_os_host_spec" "$l_remote_os_profile_side"); then
+			[ "$l_remote_os_fallback" = "" ] || printf '%s\n' "$l_remote_os_fallback"
 			return 1
 		fi
-		printf '%s\n' "$l_fallback_os"
+		printf '%s\n' "$l_remote_os_fallback"
 		return 0
 	fi
-	if ! zxfer_parse_remote_capability_response "$l_response"; then
-		if ! l_fallback_os=$(zxfer_get_remote_host_operating_system_direct "$l_host_spec" "$l_profile_side"); then
-			[ "$l_fallback_os" = "" ] || printf '%s\n' "$l_fallback_os"
+	if [ -z "${g_zxfer_remote_capability_os:-}" ]; then
+		if ! l_remote_os_fallback=$(zxfer_get_remote_host_operating_system_direct \
+			"$l_remote_os_host_spec" "$l_remote_os_profile_side"); then
+			[ "$l_remote_os_fallback" = "" ] || printf '%s\n' "$l_remote_os_fallback"
 			return 1
 		fi
-		printf '%s\n' "$l_fallback_os"
+		printf '%s\n' "$l_remote_os_fallback"
 		return 0
 	fi
 	printf '%s\n' "$g_zxfer_remote_capability_os"
@@ -1132,28 +1512,30 @@ zxfer_print_missing_remote_dependency_message() {
 # the current shell. Return status 2 when the tool is absent from the payload
 # so callers can fall back to a direct secure probe.
 zxfer_resolve_remote_tool_from_parsed_capabilities() {
-	l_host=$1
-	l_tool=$2
-	l_label=${3:-$l_tool}
+	l_parsed_tool_host=$1
+	l_parsed_tool_name=$2
+	l_parsed_tool_label=${3:-$l_parsed_tool_name}
 
-	[ -n "$l_host" ] || return 1
-	[ -n "$l_tool" ] || return 1
+	[ -n "$l_parsed_tool_host" ] || return 1
+	[ -n "$l_parsed_tool_name" ] || return 1
 
-	zxfer_get_parsed_remote_capability_tool_record "$l_tool" || return 2
+	zxfer_get_parsed_remote_capability_tool_record \
+		"$l_parsed_tool_name" || return 2
 
 	case "$g_zxfer_remote_capability_tool_status_result" in
 	0)
 		zxfer_validate_resolved_tool_path \
 			"$g_zxfer_remote_capability_tool_path_result" \
-			"$l_label" \
-			"host $l_host"
+			"$l_parsed_tool_label" \
+			"host $l_parsed_tool_host"
 		;;
 	1)
-		zxfer_print_missing_remote_dependency_message "$l_host" "$l_label"
+		zxfer_print_missing_remote_dependency_message \
+			"$l_parsed_tool_host" "$l_parsed_tool_label"
 		return 1
 		;;
 	*)
-		printf '%s\n' "Failed to query dependency \"$l_label\" on host $l_host."
+		printf '%s\n' "Failed to query dependency \"$l_parsed_tool_label\" on host $l_parsed_tool_host."
 		return 1
 		;;
 	esac
@@ -1164,64 +1546,62 @@ zxfer_resolve_remote_tool_from_parsed_capabilities() {
 # resolution after configuration, cache state, or remote state can
 # change the final choice.
 zxfer_resolve_remote_required_tool() {
-	l_host=$1
-	l_tool=$2
-	l_label=${3:-$l_tool}
-	l_profile_side=${4:-}
+	l_required_remote_host=$1
+	l_required_remote_tool=$2
+	l_required_remote_label=${3:-$l_required_remote_tool}
+	l_required_remote_profile_side=${4:-}
 
-	[ -n "$l_host" ] || return 1
+	[ -n "$l_required_remote_host" ] || return 1
 
 	# The combined capability protocol only has records for zxfer's fixed set
 	# of remote dependencies. Reject any other name before opening an SSH
 	# connection or attempting the direct-probe fallback.
-	case "$l_tool" in
+	case "$l_required_remote_tool" in
 	zfs | parallel | cat) ;;
 	*)
-		printf '%s\n' "Failed to query dependency \"$l_label\" on host $l_host."
+		printf '%s\n' "Failed to query dependency \"$l_required_remote_label\" on host $l_required_remote_host."
 		return 1
 		;;
 	esac
 
-	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
-		"$l_host" "$l_tool")
+	l_required_remote_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+		"$l_required_remote_host" "$l_required_remote_tool")
 
-	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
-		"$l_host" "$l_profile_side" "$l_requested_tools"); then
-		if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct "$l_host" "$l_tool" "$l_label" "$l_profile_side"); then
-			printf '%s\n' "$l_fallback_path"
+	zxfer_reset_remote_capability_parse_state
+	if ! zxfer_ensure_remote_host_capabilities \
+		"$l_required_remote_host" "$l_required_remote_profile_side" \
+		"$l_required_remote_requested_tools" >/dev/null; then
+		if l_required_remote_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
+			"$l_required_remote_host" "$l_required_remote_tool" \
+			"$l_required_remote_label" "$l_required_remote_profile_side"); then
+			printf '%s\n' "$l_required_remote_fallback_path"
 			return 0
 		fi
-		printf '%s\n' "$l_fallback_path"
-		return 1
-	fi
-	if ! zxfer_parse_remote_capability_response "$l_remote_caps"; then
-		if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct "$l_host" "$l_tool" "$l_label" "$l_profile_side"); then
-			printf '%s\n' "$l_fallback_path"
-			return 0
-		fi
-		printf '%s\n' "$l_fallback_path"
+		printf '%s\n' "$l_required_remote_fallback_path"
 		return 1
 	fi
 
-	l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
-		"$l_host" "$l_tool" "$l_label")
-	l_resolve_status=$?
-	if [ "$l_resolve_status" -eq 0 ]; then
-		printf '%s\n' "$l_resolved_path"
+	l_required_remote_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
+		"$l_required_remote_host" "$l_required_remote_tool" \
+		"$l_required_remote_label")
+	l_required_remote_resolve_status=$?
+	if [ "$l_required_remote_resolve_status" -eq 0 ]; then
+		printf '%s\n' "$l_required_remote_resolved_path"
 		return 0
 	fi
-	case "$l_resolve_status" in
+	case "$l_required_remote_resolve_status" in
 	2)
-		if l_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
-			"$l_host" "$l_tool" "$l_label" "$l_profile_side"); then
-			printf '%s\n' "$l_fallback_path"
+		if l_required_remote_fallback_path=$(zxfer_resolve_remote_cli_tool_direct \
+			"$l_required_remote_host" "$l_required_remote_tool" \
+			"$l_required_remote_label" "$l_required_remote_profile_side"); then
+			printf '%s\n' "$l_required_remote_fallback_path"
 			return 0
 		fi
-		printf '%s\n' "$l_fallback_path"
+		printf '%s\n' "$l_required_remote_fallback_path"
 		return 1
 		;;
 	*)
-		printf '%s\n' "$l_resolved_path"
+		printf '%s\n' "$l_required_remote_resolved_path"
 		return 1
 		;;
 	esac
@@ -1232,35 +1612,48 @@ zxfer_resolve_remote_required_tool() {
 # resolution after configuration, cache state, or remote state can
 # change the final choice.
 zxfer_resolve_remote_cli_tool_direct() {
-	l_host=$1
-	l_tool=$2
-	l_label=${3:-$l_tool}
-	l_profile_side=${4:-}
+	l_direct_tool_host=$1
+	l_direct_tool_name=$2
+	l_direct_tool_label=${3:-$l_direct_tool_name}
+	l_direct_tool_profile_side=${4:-}
 
 	zxfer_profile_increment_counter g_zxfer_profile_remote_cli_tool_direct_probes
-	l_dependency_path=$(zxfer_get_effective_dependency_path)
-	l_dependency_path_single=$(zxfer_escape_for_single_quotes "$l_dependency_path")
-	l_tool_single=$(zxfer_escape_for_single_quotes "$l_tool")
-	l_remote_probe="PATH='$l_dependency_path_single'; export PATH; l_path=\$(command -v '$l_tool_single' 2>/dev/null); l_status=\$?; if [ \"\$l_status\" -eq 0 ]; then printf '%s\n' \"\$l_path\"; elif [ \"\$l_status\" -eq 1 ]; then exit 10; else exit \"\$l_status\"; fi"
-	l_remote_probe_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_probe")
-	if zxfer_capture_remote_probe_output "$l_host" "$l_remote_probe_cmd" "$l_profile_side"; then
-		l_remote_status=0
+	if l_direct_tool_dependency_path=$(zxfer_get_effective_dependency_path); then
+		:
 	else
-		l_remote_status=$?
+		l_direct_tool_dependency_path_status=$?
+		return "$l_direct_tool_dependency_path_status"
 	fi
-	l_remote_output=$g_zxfer_remote_probe_stdout
+	l_direct_tool_dependency_path_single=$(zxfer_escape_for_single_quotes \
+		"$l_direct_tool_dependency_path")
+	l_direct_tool_name_single=$(zxfer_escape_for_single_quotes \
+		"$l_direct_tool_name")
+	l_direct_tool_probe="PATH='$l_direct_tool_dependency_path_single'; export PATH; l_path=\$(command -v '$l_direct_tool_name_single' 2>/dev/null); l_status=\$?; if [ \"\$l_status\" -eq 0 ]; then printf '%s\n' \"\$l_path\"; elif [ \"\$l_status\" -eq 1 ]; then exit 10; else exit \"\$l_status\"; fi"
+	l_direct_tool_probe_command=$(zxfer_build_remote_sh_c_command \
+		"$l_direct_tool_probe")
+	if zxfer_capture_remote_probe_output \
+		"$l_direct_tool_host" "$l_direct_tool_probe_command" \
+		"$l_direct_tool_profile_side"; then
+		l_direct_tool_remote_status=0
+	else
+		l_direct_tool_remote_status=$?
+	fi
+	l_direct_tool_remote_output=$g_zxfer_remote_probe_stdout
 
-	case "$l_remote_status" in
+	case "$l_direct_tool_remote_status" in
 	0)
-		zxfer_validate_resolved_tool_path "$l_remote_output" "$l_label" "host $l_host"
+		zxfer_validate_resolved_tool_path \
+			"$l_direct_tool_remote_output" "$l_direct_tool_label" \
+			"host $l_direct_tool_host"
 		;;
 	10)
-		zxfer_print_missing_remote_dependency_message "$l_host" "$l_label"
+		zxfer_print_missing_remote_dependency_message \
+			"$l_direct_tool_host" "$l_direct_tool_label"
 		return 1
 		;;
 	*)
 		zxfer_emit_remote_probe_failure_message \
-			"Failed to query dependency \"$l_label\" on host $l_host."
+			"Failed to query dependency \"$l_direct_tool_label\" on host $l_direct_tool_host."
 		return 1
 		;;
 	esac
@@ -1271,43 +1664,47 @@ zxfer_resolve_remote_cli_tool_direct() {
 # resolution after configuration, cache state, or remote state can
 # change the final choice.
 zxfer_resolve_remote_cli_tool() {
-	l_host=$1
-	l_tool=$2
-	l_label=${3:-$l_tool}
-	l_profile_side=${4:-}
-	l_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
-		"$l_host" "$l_tool")
+	l_remote_cli_host=$1
+	l_remote_cli_tool=$2
+	l_remote_cli_label=${3:-$l_remote_cli_tool}
+	l_remote_cli_profile_side=${4:-}
+	l_remote_cli_requested_tools=$(zxfer_get_remote_capability_requested_tools_for_resolved_tool \
+		"$l_remote_cli_host" "$l_remote_cli_tool")
 
-	case "$l_tool" in
+	case "$l_remote_cli_tool" in
 	zfs | parallel | cat)
-		zxfer_resolve_remote_required_tool "$l_host" "$l_tool" "$l_label" "$l_profile_side"
+		zxfer_resolve_remote_required_tool \
+			"$l_remote_cli_host" "$l_remote_cli_tool" \
+			"$l_remote_cli_label" "$l_remote_cli_profile_side"
 		return
 		;;
 	esac
 
-	if ! l_remote_caps=$(zxfer_ensure_remote_host_capabilities \
-		"$l_host" "$l_profile_side" "$l_requested_tools"); then
-		zxfer_resolve_remote_cli_tool_direct "$l_host" "$l_tool" "$l_label" "$l_profile_side"
-		return
-	fi
-	if ! zxfer_parse_remote_capability_response "$l_remote_caps"; then
-		zxfer_resolve_remote_cli_tool_direct "$l_host" "$l_tool" "$l_label" "$l_profile_side"
+	zxfer_reset_remote_capability_parse_state
+	if ! zxfer_ensure_remote_host_capabilities \
+		"$l_remote_cli_host" "$l_remote_cli_profile_side" \
+		"$l_remote_cli_requested_tools" >/dev/null; then
+		zxfer_resolve_remote_cli_tool_direct \
+			"$l_remote_cli_host" "$l_remote_cli_tool" \
+			"$l_remote_cli_label" "$l_remote_cli_profile_side"
 		return
 	fi
 
-	l_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
-		"$l_host" "$l_tool" "$l_label")
-	l_resolve_status=$?
-	if [ "$l_resolve_status" -eq 0 ]; then
-		printf '%s\n' "$l_resolved_path"
+	l_remote_cli_resolved_path=$(zxfer_resolve_remote_tool_from_parsed_capabilities \
+		"$l_remote_cli_host" "$l_remote_cli_tool" "$l_remote_cli_label")
+	l_remote_cli_resolve_status=$?
+	if [ "$l_remote_cli_resolve_status" -eq 0 ]; then
+		printf '%s\n' "$l_remote_cli_resolved_path"
 		return 0
 	fi
-	case "$l_resolve_status" in
+	case "$l_remote_cli_resolve_status" in
 	2)
-		zxfer_resolve_remote_cli_tool_direct "$l_host" "$l_tool" "$l_label" "$l_profile_side"
+		zxfer_resolve_remote_cli_tool_direct \
+			"$l_remote_cli_host" "$l_remote_cli_tool" \
+			"$l_remote_cli_label" "$l_remote_cli_profile_side"
 		;;
 	*)
-		printf '%s\n' "$l_resolved_path"
+		printf '%s\n' "$l_remote_cli_resolved_path"
 		return 1
 		;;
 	esac
@@ -1318,24 +1715,30 @@ zxfer_resolve_remote_cli_tool() {
 # resolution after configuration, cache state, or remote state can
 # change the final choice.
 zxfer_resolve_remote_cli_command_safe() {
-	l_host=$1
-	l_cli_string=$2
-	l_label=${3:-command}
-	l_profile_side=${4:-}
-	if ! l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
-		printf '%s\n' "$l_cli_tokens"
+	l_remote_command_host=$1
+	l_remote_command_cli_string=$2
+	l_remote_command_label=${3:-command}
+	l_remote_command_profile_side=${4:-}
+	if ! l_remote_command_cli_tokens=$(zxfer_split_cli_tokens \
+		"$l_remote_command_cli_string" "$l_remote_command_label"); then
+		printf '%s\n' "$l_remote_command_cli_tokens"
 		return 1
 	fi
-	l_cli_head=$(printf '%s\n' "$l_cli_tokens" | sed -n '1p')
-	if [ -z "$l_cli_head" ]; then
-		printf '%s\n' "Required dependency \"$l_label\" must not be empty or whitespace-only."
-		return 1
-	fi
-
-	if ! l_resolved_head=$(zxfer_resolve_remote_cli_tool "$l_host" "$l_cli_head" "$l_label" "$l_profile_side"); then
-		printf '%s\n' "$l_resolved_head"
+	l_remote_command_cli_head=$(printf '%s\n' \
+		"$l_remote_command_cli_tokens" | sed -n '1p')
+	if [ -z "$l_remote_command_cli_head" ]; then
+		printf '%s\n' "Required dependency \"$l_remote_command_label\" must not be empty or whitespace-only."
 		return 1
 	fi
 
-	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head" "$l_label"
+	if ! l_remote_command_resolved_head=$(zxfer_resolve_remote_cli_tool \
+		"$l_remote_command_host" "$l_remote_command_cli_head" \
+		"$l_remote_command_label" "$l_remote_command_profile_side"); then
+		printf '%s\n' "$l_remote_command_resolved_head"
+		return 1
+	fi
+
+	zxfer_requote_cli_command_with_resolved_head \
+		"$l_remote_command_cli_string" "$l_remote_command_resolved_head" \
+		"$l_remote_command_label"
 }
