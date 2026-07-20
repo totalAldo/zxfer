@@ -443,22 +443,12 @@ zxfer_dx_benchmark_wait_for_status_record() {
 	done
 }
 
-zxfer_dx_benchmark_run_kill() {
-	# Shell builtins disagree on whether `--` is required or rejected between
-	# `-s SIGNAL` and a negative process-group operand. Use the fixed-path POSIX
-	# utility so one argv form works on macOS /bin/sh and BusyBox ash alike.
-	for l_dx_kill_path in /bin/kill /usr/bin/kill; do
-		[ -x "$l_dx_kill_path" ] || continue
-		"$l_dx_kill_path" "$@"
-		return "$?"
-	done
-	return 127
-}
-
 zxfer_dx_benchmark_active_group_exists_p() {
 	[ -n "$ZXFER_DX_BENCHMARK_ACTIVE_PGID" ] || return 1
-	zxfer_dx_benchmark_run_kill \
-		-s 0 "-$ZXFER_DX_BENCHMARK_ACTIVE_PGID" 2>/dev/null
+	# Supplying the signal as the first option disambiguates the following
+	# negative process-group operand without the non-portable `-s ... --` form.
+	l_dx_group_probe_signal=0
+	kill "-$l_dx_group_probe_signal" "-$ZXFER_DX_BENCHMARK_ACTIVE_PGID" 2>/dev/null
 }
 
 zxfer_dx_benchmark_signal_active_group() {
@@ -466,8 +456,7 @@ zxfer_dx_benchmark_signal_active_group() {
 	[ -n "$ZXFER_DX_BENCHMARK_ACTIVE_PID" ] || return 0
 	[ "$ZXFER_DX_BENCHMARK_ACTIVE_PID" = "$ZXFER_DX_BENCHMARK_ACTIVE_PGID" ] ||
 		return 1
-	zxfer_dx_benchmark_run_kill -s "$l_dx_group_signal" \
-		"-$ZXFER_DX_BENCHMARK_ACTIVE_PGID" 2>/dev/null
+	kill "-$l_dx_group_signal" "-$ZXFER_DX_BENCHMARK_ACTIVE_PGID" 2>/dev/null
 }
 
 zxfer_dx_benchmark_clear_active() {

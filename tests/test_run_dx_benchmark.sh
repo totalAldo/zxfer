@@ -768,7 +768,7 @@ EOF
 
 test_dx_benchmark_group_signals_use_busybox_portable_kill_argv() {
 	output=$(
-		zxfer_dx_benchmark_run_kill() {
+		kill() {
 			printf 'kill'
 			for l_test_kill_arg; do
 				printf ':<%s>' "$l_test_kill_arg"
@@ -781,11 +781,11 @@ test_dx_benchmark_group_signals_use_busybox_portable_kill_argv() {
 		zxfer_dx_benchmark_signal_active_group STOP
 	)
 
-	assertContains "The existence probe should pass a negative process group directly after the signal." \
-		"$output" "kill:<-s>:<0>:<-7000>"
+	assertContains "The existence probe should disambiguate the negative process group with a leading signal option." \
+		"$output" "kill:<-0>:<-7000>"
 	assertContains "Supervisor teardown should use the BusyBox-compatible signal form." \
-		"$output" "kill:<-s>:<STOP>:<-7000>"
-	assertNotContains "BusyBox treats -- after -s SIGNAL as a PID rather than an option terminator." \
+		"$output" "kill:<-STOP>:<-7000>"
+	assertNotContains "BusyBox treats -- after a signal option as a PID rather than an option terminator." \
 		"$output" "<-->"
 }
 
