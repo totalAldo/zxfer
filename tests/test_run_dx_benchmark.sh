@@ -766,6 +766,29 @@ EOF
 		"[ -e \"$job_control_marker\" ]"
 }
 
+test_dx_benchmark_group_signals_use_busybox_portable_kill_argv() {
+	output=$(
+		zxfer_dx_benchmark_run_kill() {
+			printf 'kill'
+			for l_test_kill_arg; do
+				printf ':<%s>' "$l_test_kill_arg"
+			done
+			printf '\n'
+		}
+		ZXFER_DX_BENCHMARK_ACTIVE_PID=7000
+		ZXFER_DX_BENCHMARK_ACTIVE_PGID=7000
+		zxfer_dx_benchmark_active_group_exists_p
+		zxfer_dx_benchmark_signal_active_group STOP
+	)
+
+	assertContains "The existence probe should pass a negative process group directly after the signal." \
+		"$output" "kill:<-s>:<0>:<-7000>"
+	assertContains "Supervisor teardown should use the BusyBox-compatible signal form." \
+		"$output" "kill:<-s>:<STOP>:<-7000>"
+	assertNotContains "BusyBox treats -- after -s SIGNAL as a PID rather than an option terminator." \
+		"$output" "<-->"
+}
+
 test_dx_benchmark_supervisor_refuses_go_when_it_is_not_group_leader() {
 	runner_marker="$TEST_TMPDIR/nonleader-runner"
 	ready_file="$TEST_TMPDIR/nonleader-ready"

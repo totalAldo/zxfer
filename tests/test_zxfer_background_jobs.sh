@@ -1126,7 +1126,9 @@ test_abort_completed_job_reaps_and_cleans_up() {
 		zxfer_spawn_supervised_background_job \
 			"unit_test" \
 			"exit 0" \
-			"display completed"
+			"display completed" \
+			"$TEST_TMPDIR/abort_completed.stdout" \
+			"$TEST_TMPDIR/abort_completed.stderr"
 		job_id=$g_zxfer_background_job_last_id
 		status_file=$g_zxfer_background_job_last_status_file
 		# Let the job finish before aborting it.

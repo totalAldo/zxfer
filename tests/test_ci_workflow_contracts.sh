@@ -111,14 +111,20 @@ test_unit_workflow_installs_platform_test_prerequisites() {
 		"$workflow" "PKG_SUCCESS_ON_NOP=1 pkg install bash git"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+# shellcheck disable=SC2016,SC2317,SC2329  # Literal workflow expression; invoked indirectly by shunit2.
 test_unit_workflow_bounds_process_heavy_suite_parallelism() {
 	workflow=$(cat "$UNIT_WORKFLOW_FILE")
 
 	assertNotContains "CI must not launch the entire process-heavy suite inventory concurrently." \
 		"$workflow" "--jobs 30"
-	assertContains "Hosted runners should match the documented four-worker validation default." \
+	assertContains "Linux and portable-shell runners should keep the documented four-worker validation default." \
 		"$workflow" "./tests/run_shunit_tests.sh --jobs 4"
+	assertContains "The hosted matrix should retain its four-worker Linux entry." \
+		"$workflow" "unit_jobs: 4"
+	assertContains "macOS should avoid nesting process-heavy suites under a parallel worker." \
+		"$workflow" "unit_jobs: 1"
+	assertContains "Hosted jobs should consume the validated per-platform worker count." \
+		"$workflow" './tests/run_shunit_tests.sh --jobs "${{ matrix.unit_jobs }}"'
 	assertContains "VM-backed platform jobs should respect their smaller guest CPU allocation." \
 		"$workflow" "./tests/run_shunit_tests.sh --jobs 2"
 }
