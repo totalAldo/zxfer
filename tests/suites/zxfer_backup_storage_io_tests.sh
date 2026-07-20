@@ -1016,7 +1016,14 @@ test_write_backup_properties_uses_resolved_remote_cat_helper_for_live_writes() {
 		return 0
 	}
 
-	zxfer_write_backup_properties
+	(
+		# This case verifies storage routing and helper selection; keep transport
+		# chunking out of its rendered-command string assertions.
+		zxfer_build_remote_sh_c_command() {
+			printf '%s\n' "$1"
+		}
+		zxfer_write_backup_properties
+	)
 
 	assertEquals "Transactional live remote backup writes should use one remote write invocation for the primary file and forwarded alias together." \
 		1 "$(wc -l <"$log_file" | tr -d '[:space:]')"

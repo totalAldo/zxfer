@@ -951,30 +951,56 @@ zxfer_process_replication_ready_queue() {
 	while [ -n "$l_pending_sources" ]; do
 		l_next_pending_sources=""
 		l_processed_source=0
-		while IFS= read -r l_source || [ -n "$l_source" ]; do
-			[ -n "$l_source" ] || continue
+		# Keep queue bookkeeping in this shell. Some illumos /bin/sh
+		# implementations run redirected compound loops in a subshell, which
+		# loses deferred parent/child work when the loop exits.
+		case $- in
+		*f*) l_process_replication_ready_queue_restore_glob=0 ;;
+		*)
+			l_process_replication_ready_queue_restore_glob=1
+			set -f
+			;;
+		esac
+		if [ "${IFS+set}" = "set" ]; then
+			l_process_replication_ready_queue_saved_ifs_set=1
+			l_process_replication_ready_queue_saved_ifs=$IFS
+		else
+			l_process_replication_ready_queue_saved_ifs_set=0
+			l_process_replication_ready_queue_saved_ifs=""
+		fi
+		IFS=$(printf '\n_')
+		IFS=${IFS%_}
+		# shellcheck disable=SC2086 # Split the newline-delimited queue only.
+		set -- $l_pending_sources
+		if [ "$l_process_replication_ready_queue_saved_ifs_set" -eq 1 ]; then
+			IFS=$l_process_replication_ready_queue_saved_ifs
+		else
+			unset IFS
+		fi
+		[ "$l_process_replication_ready_queue_restore_glob" -eq 0 ] || set +f
+
+		for l_process_replication_ready_queue_source; do
+			[ -n "$l_process_replication_ready_queue_source" ] || continue
 			l_source_is_ready=1
 			if [ "$l_ready_queue_active" -eq 1 ]; then
 				if ! zxfer_replication_background_send_has_capacity; then
 					l_source_is_ready=0
 				elif [ -n "${g_zfs_send_job_supervisor_records:-}" ]; then
-					l_candidate_dest=$(zxfer_compute_actual_dest_for_source "$l_source")
+					l_candidate_dest=$(zxfer_compute_actual_dest_for_source "$l_process_replication_ready_queue_source")
 					if zxfer_supervised_send_job_conflicts_with_destination "${g_option_T_target_host:-}" "$l_candidate_dest"; then
 						l_source_is_ready=0
 					fi
 				fi
 			fi
 			if [ "$l_source_is_ready" -eq 1 ]; then
-				zxfer_process_source_dataset "$l_source" "$l_process_replication_ready_queue_property_pass_required" "$l_process_replication_ready_queue_post_seed_property_sources_file" </dev/null
+				zxfer_process_source_dataset "$l_process_replication_ready_queue_source" "$l_process_replication_ready_queue_property_pass_required" "$l_process_replication_ready_queue_post_seed_property_sources_file" </dev/null
 				l_processed_source=1
 				l_processed_source_count=$((l_processed_source_count + 1))
 				continue
 			fi
 			l_next_pending_sources=${l_next_pending_sources:+$l_next_pending_sources
-}$l_source
-		done <<-EOF
-			$l_pending_sources
-		EOF
+}$l_process_replication_ready_queue_source
+		done
 		l_pending_sources=$l_next_pending_sources
 		[ -n "$l_pending_sources" ] || {
 			[ "$l_ready_queue_active" -eq 1 ] && zxfer_echov "Replication ready queue summary: queued_datasets=$(printf '%s\n' "$l_initial_pending_sources" | "${g_cmd_awk:-awk}" 'NF { count++ } END { print count + 0 }') processed_datasets=$l_processed_source_count waits=$l_wait_count active_jobs=${g_count_zfs_send_jobs:-0}"

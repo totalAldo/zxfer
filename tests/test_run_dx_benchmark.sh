@@ -717,7 +717,8 @@ test_dx_benchmark_refuses_to_launch_without_verified_group_isolation() {
 	runner_marker="$TEST_TMPDIR/unisolated-runner"
 	launch_status=0
 	(
-		zxfer_dx_benchmark_job_control_supported_p() {
+		set +m 2>/dev/null || :
+		zxfer_dx_benchmark_enable_job_control() {
 			return 1
 		}
 		zxfer_dx_benchmark_resolve_setsid() {
@@ -743,8 +744,11 @@ EOF
 	chmod +x "$fake_setsid"
 	launch_status=0
 	(
-		zxfer_dx_benchmark_job_control_supported_p() {
-			return 1
+		set +m 2>/dev/null || :
+		zxfer_dx_benchmark_enable_job_control() {
+			# dash and other non-interactive shells can report success without
+			# actually adding `m` to the current option state.
+			return 0
 		}
 		zxfer_dx_benchmark_resolve_setsid() {
 			printf '%s\n' "$fake_setsid"

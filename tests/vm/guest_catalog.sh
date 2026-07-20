@@ -502,7 +502,7 @@ EOF
 		;;
 	shunit2/ci-managed/omnios-pkg | shunit2/qemu/omnios-pkg)
 		cat <<'EOF'
-PKG_SUCCESS_ON_NOP=1 pkg install bash
+PKG_SUCCESS_ON_NOP=1 pkg install bash git
 EOF
 		;;
 	*)

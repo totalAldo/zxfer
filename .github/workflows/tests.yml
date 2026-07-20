@@ -139,6 +139,8 @@ jobs:
         with:
           release: "15.1"
           usesh: true
+          prepare: |
+            pkg install -y bash git
           run: |
             ./tests/run_shunit_tests.sh --jobs 30
 
@@ -155,7 +157,7 @@ jobs:
         with:
           usesh: true
           prepare: |
-            PKG_SUCCESS_ON_NOP=1 pkg install bash
+            PKG_SUCCESS_ON_NOP=1 pkg install bash git
           run: |
             bash_bin=$(command -v bash)
             wrapper=$(mktemp /tmp/zxfer-bash-posix.XXXXXX)

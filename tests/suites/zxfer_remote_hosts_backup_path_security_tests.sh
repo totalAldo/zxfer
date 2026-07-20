@@ -472,25 +472,26 @@ test_ensure_local_backup_dir_rejects_unknown_or_disallowed_owner() {
 test_ensure_local_backup_dir_reports_chmod_failures_in_current_shell() {
 	backup_dir="$TEST_TMPDIR_PHYSICAL/ensure_local_chmod_fail"
 	fake_bin="$TEST_TMPDIR/ensure_local_chmod_bin"
+	throw_file="$TEST_TMPDIR/ensure_local_chmod_throw"
 	mkdir -p "$backup_dir" "$fake_bin"
 	cat >"$fake_bin/chmod" <<'EOF'
 #!/bin/sh
 exit 1
 EOF
 	chmod +x "$fake_bin/chmod"
-	old_path=$PATH
-	PATH="$fake_bin:$PATH"
-	THROW_MSG=""
-	zxfer_throw_error() {
-		THROW_MSG=$1
-		return 1
-	}
+	: >"$throw_file"
+	(
+		PATH="$fake_bin:$PATH"
+		export PATH
+		zxfer_throw_error() {
+			printf '%s\n' "$1" >"$throw_file"
+			return 1
+		}
 
-	zxfer_ensure_local_backup_dir "$backup_dir"
+		zxfer_ensure_local_backup_dir "$backup_dir"
+	)
 	status=$?
-
-	unset -f zxfer_throw_error
-	PATH=$old_path
+	THROW_MSG=$(cat "$throw_file")
 
 	assertEquals "chmod failures should cause zxfer_ensure_local_backup_dir to fail." 1 "$status"
 	assertContains "chmod failures should use the documented backup-directory error." \

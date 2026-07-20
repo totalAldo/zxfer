@@ -156,11 +156,13 @@ ambient `PATH`.
 
 Capability probes and secure remote-backup directory/write protocols are
 maintained as readable multiline POSIX `sh` programs and pinned by focused
-golden tests. At the SSH boundary zxfer removes blank lines and joins the
-semicolon-terminated commands into one physical line, then passes that line
-through an explicit `sh -c`. That narrow transport step preserves the same
-program on remote accounts whose login shell is csh or tcsh; it does not change
-the validated program or its protocol fields.
+golden tests. At the SSH boundary zxfer retains the established rendering for
+short, single-line scripts. Long or multiline scripts are split into bounded,
+quoted positional arguments on one physical login-shell command line; a fixed
+POSIX `sh` bootstrap reassembles the original bytes before an explicit
+`sh -c`. This keeps every word below the illumos csh lexical limit while
+preserving the program, standard input, exit status, and protocol fields on
+remote accounts whose login shell is csh or tcsh.
 
 Remote target (`-T`) destination discovery also runs under that validated
 target-side `PATH`. Current discovery batches the recursive destination dataset

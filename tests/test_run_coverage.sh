@@ -29,6 +29,18 @@ run_coverage_helper() {
 		/bin/sh -c ". \"$RUN_COVERAGE_BIN\"; $l_command"
 }
 
+# Bash 4.1 introduced BASH_XTRACEFD. Check that prerequisite independently of
+# the capture helper so a regression in the helper still fails its tests.
+# shellcheck disable=SC2016,SC2329  # Bash expands this; shunit tests call the helper indirectly.
+zxfer_test_bash_supports_xtracefd() {
+	l_test_bash_bin=$1
+	"$l_test_bash_bin" --noprofile --norc -c '
+		[ "${BASH_VERSINFO[0]}" -gt 4 ] ||
+			{ [ "${BASH_VERSINFO[0]}" -eq 4 ] &&
+				[ "${BASH_VERSINFO[1]}" -ge 1 ]; }
+	' >/dev/null 2>&1
+}
+
 # shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
 test_run_coverage_full_runs_are_report_only_without_explicit_enforcement() {
 	output=$(run_coverage_helper \
@@ -176,6 +188,12 @@ test_run_coverage_capture_bash_xtrace_to_file_survives_fd_9_closure() {
 	if [ -z "$l_bash_bin" ] || [ ! -x "$l_bash_bin" ]; then
 		return 0
 	fi
+	if ! zxfer_test_bash_supports_xtracefd "$l_bash_bin"; then
+		startSkipping
+		assertTrue "The available Bash predates BASH_XTRACEFD; descriptor-isolation coverage skipped." true
+		endSkipping
+		return 0
+	fi
 	l_support_status=$(run_coverage_helper \
 		"if bash_supports_xtrace_line_numbers \"$l_bash_bin\" >/dev/null 2>&1; then printf '%s' 0; else printf '%s' 1; fi")
 	if [ "$l_support_status" != "0" ]; then
@@ -239,6 +257,28 @@ test_run_coverage_refuses_to_signal_a_reused_root_pid() {
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_coverage_term_exits_and_reaps_the_active_suite() {
+	l_bash_bin=${ZXFER_COVERAGE_BASH_BIN:-}
+	if [ -z "$l_bash_bin" ]; then
+		l_bash_bin=$(command -v bash 2>/dev/null || true)
+	fi
+	if [ -z "$l_bash_bin" ] || [ ! -x "$l_bash_bin" ]; then
+		startSkipping
+		assertTrue "No executable Bash is available; coverage-runner TERM cleanup skipped." true
+		endSkipping
+		return 0
+	fi
+	if ! zxfer_test_bash_supports_xtracefd "$l_bash_bin"; then
+		startSkipping
+		assertTrue "The available Bash predates BASH_XTRACEFD; coverage-runner TERM cleanup skipped." true
+		endSkipping
+		return 0
+	fi
+	l_support_status=$(run_coverage_helper \
+		"if bash_supports_xtrace_line_numbers \"$l_bash_bin\" >/dev/null 2>&1; then printf '%s' 0; else printf '%s' 1; fi")
+	if [ "$l_support_status" != "0" ]; then
+		fail "The selected Bash should support the line-number trace format used by coverage."
+		return 0
+	fi
 	l_suite_file="$TEST_TMPDIR/coverage-term-suite.sh"
 	l_suite_pid_file="$TEST_TMPDIR/coverage-term-suite.pid"
 	l_child_pid_file="$TEST_TMPDIR/coverage-term-child.pid"
@@ -307,6 +347,7 @@ EOF
 		COVERAGE_TERM_GRANDCHILD_PID_FILE="$l_grandchild_pid_file" \
 		COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS=1 \
 		ZXFER_COVERAGE_MODE=bash-xtrace \
+		ZXFER_COVERAGE_BASH_BIN="$l_bash_bin" \
 		COVERAGE_DIR="$l_coverage_dir" \
 		PATH="$l_fake_bin:${PATH:-/usr/bin:/bin}" \
 		"$RUN_COVERAGE_BIN" --report-only "$l_suite_file" >"$l_output_file" 2>&1 &

@@ -1065,13 +1065,141 @@ EOF
 	"$@"
 }
 
-# Purpose: Build the remote sh c command for the next execution or comparison
-# step.
-# Usage: Called by SSH transport rendering and remote ZFS execution
-# before other helpers consume the assembled value.
+# Purpose: Restore the caller's set or unset LC_ALL state after byte chunking.
+# Usage: Internal companion to zxfer_build_remote_sh_c_command.
+zxfer_restore_remote_sh_c_lc_all() {
+	if [ "$1" -eq 1 ]; then
+		LC_ALL=$2
+	else
+		unset LC_ALL
+	fi
+}
+
+# Purpose: Build a csh-safe remote `sh -c` command without changing the script
+# bytes or consuming its standard input.
+# Usage: Called by SSH transport rendering and remote ZFS execution before the
+# login shell receives a command string. Short scripts retain the historical
+# rendering; longer or multiline scripts use bounded argv chunks so illumos
+# csh never has to lex one oversized word.
 zxfer_build_remote_sh_c_command() {
-	l_remote_script=$1
-	zxfer_build_shell_command_from_argv "sh" "-c" "$l_remote_script"
+	l_build_remote_sh_c_command_script=$1
+	l_build_remote_sh_c_command_newline='
+'
+	l_build_remote_sh_c_command_use_chunks=0
+	l_build_remote_sh_c_command_status=0
+
+	if [ "${LC_ALL+x}" = "x" ]; then
+		l_build_remote_sh_c_command_saved_lc_all_set=1
+		l_build_remote_sh_c_command_saved_lc_all=$LC_ALL
+	else
+		l_build_remote_sh_c_command_saved_lc_all_set=0
+		l_build_remote_sh_c_command_saved_lc_all=""
+	fi
+	LC_ALL=C
+	case $l_build_remote_sh_c_command_script in
+	*"$l_build_remote_sh_c_command_newline"*)
+		l_build_remote_sh_c_command_use_chunks=1
+		;;
+	*)
+		if l_build_remote_sh_c_command_candidate=$(
+			zxfer_build_shell_command_from_argv \
+				"sh" "-c" "$l_build_remote_sh_c_command_script"
+		); then
+			:
+		else
+			l_build_remote_sh_c_command_status=$?
+		fi
+		# Bound the complete command, not just its script argument, with ample
+		# headroom below illumos csh's 1020-character lexical buffer. This
+		# pattern is 768 single-byte characters in the C locale.
+		l_build_remote_sh_c_command_safe_pattern='????????????'
+		l_build_remote_sh_c_command_safe_pattern=$l_build_remote_sh_c_command_safe_pattern$l_build_remote_sh_c_command_safe_pattern
+		l_build_remote_sh_c_command_safe_pattern=$l_build_remote_sh_c_command_safe_pattern$l_build_remote_sh_c_command_safe_pattern
+		l_build_remote_sh_c_command_safe_pattern=$l_build_remote_sh_c_command_safe_pattern$l_build_remote_sh_c_command_safe_pattern
+		l_build_remote_sh_c_command_safe_pattern=$l_build_remote_sh_c_command_safe_pattern$l_build_remote_sh_c_command_safe_pattern
+		l_build_remote_sh_c_command_safe_pattern=$l_build_remote_sh_c_command_safe_pattern$l_build_remote_sh_c_command_safe_pattern
+		l_build_remote_sh_c_command_safe_pattern=$l_build_remote_sh_c_command_safe_pattern$l_build_remote_sh_c_command_safe_pattern
+		case $l_build_remote_sh_c_command_candidate in
+		${l_build_remote_sh_c_command_safe_pattern}?*)
+			l_build_remote_sh_c_command_use_chunks=1
+			;;
+		esac
+		;;
+	esac
+
+	if [ "$l_build_remote_sh_c_command_status" -ne 0 ]; then
+		zxfer_restore_remote_sh_c_lc_all \
+			"$l_build_remote_sh_c_command_saved_lc_all_set" \
+			"$l_build_remote_sh_c_command_saved_lc_all"
+		printf '%s' "$l_build_remote_sh_c_command_candidate"
+		return "$l_build_remote_sh_c_command_status"
+	fi
+
+	if [ "$l_build_remote_sh_c_command_use_chunks" -eq 0 ]; then
+		zxfer_restore_remote_sh_c_lc_all \
+			"$l_build_remote_sh_c_command_saved_lc_all_set" \
+			"$l_build_remote_sh_c_command_saved_lc_all"
+		printf '%s' "$l_build_remote_sh_c_command_candidate"
+		return $?
+	fi
+
+	# The fixed bootstrap uses only POSIX sh builtins. Data chunks never contain
+	# a newline; tagged `n` arguments restore every original newline, including
+	# consecutive and trailing ones. `exec` keeps stdin and the script status.
+	# shellcheck disable=SC2016 # Expanded by the remote bootstrap, not locally.
+	l_build_remote_sh_c_command_bootstrap='l_nl=$(printf "\\nx") || exit $?; l_nl=${l_nl%x}; l_script=; for l_part do case $l_part in d*) l_script=$l_script${l_part#d} ;; n) l_script=$l_script$l_nl ;; *) exit 125 ;; esac; done; exec sh -c "$l_script"'
+	set -- sh -c "$l_build_remote_sh_c_command_bootstrap" sh
+
+	# 128 raw bytes expand to at most 515 rendered bytes even when every byte is
+	# a single quote, keeping each csh lexical word comfortably below its limit.
+	l_build_remote_sh_c_command_chunk_pattern='????????'
+	l_build_remote_sh_c_command_chunk_pattern=$l_build_remote_sh_c_command_chunk_pattern$l_build_remote_sh_c_command_chunk_pattern
+	l_build_remote_sh_c_command_chunk_pattern=$l_build_remote_sh_c_command_chunk_pattern$l_build_remote_sh_c_command_chunk_pattern
+	l_build_remote_sh_c_command_chunk_pattern=$l_build_remote_sh_c_command_chunk_pattern$l_build_remote_sh_c_command_chunk_pattern
+	l_build_remote_sh_c_command_chunk_pattern=$l_build_remote_sh_c_command_chunk_pattern$l_build_remote_sh_c_command_chunk_pattern
+	l_build_remote_sh_c_command_remaining=$l_build_remote_sh_c_command_script
+	while [ -n "$l_build_remote_sh_c_command_remaining" ]; do
+		case $l_build_remote_sh_c_command_remaining in
+		"$l_build_remote_sh_c_command_newline"*)
+			set -- "$@" n
+			l_build_remote_sh_c_command_remaining=${l_build_remote_sh_c_command_remaining#"$l_build_remote_sh_c_command_newline"}
+			continue
+			;;
+		*"$l_build_remote_sh_c_command_newline"*)
+			l_build_remote_sh_c_command_before_newline=${l_build_remote_sh_c_command_remaining%%"$l_build_remote_sh_c_command_newline"*}
+			;;
+		*)
+			l_build_remote_sh_c_command_before_newline=$l_build_remote_sh_c_command_remaining
+			;;
+		esac
+
+		case $l_build_remote_sh_c_command_before_newline in
+		${l_build_remote_sh_c_command_chunk_pattern}*)
+			# The unquoted pattern expansion intentionally removes exactly 128
+			# C-locale bytes; the derived suffix is quoted when extracting them.
+			# shellcheck disable=SC2295
+			l_build_remote_sh_c_command_tail=${l_build_remote_sh_c_command_before_newline#$l_build_remote_sh_c_command_chunk_pattern}
+			l_build_remote_sh_c_command_chunk=${l_build_remote_sh_c_command_before_newline%"$l_build_remote_sh_c_command_tail"}
+			;;
+		*)
+			l_build_remote_sh_c_command_chunk=$l_build_remote_sh_c_command_before_newline
+			;;
+		esac
+		if [ -z "$l_build_remote_sh_c_command_chunk" ]; then
+			l_build_remote_sh_c_command_status=1
+			break
+		fi
+		set -- "$@" "d$l_build_remote_sh_c_command_chunk"
+		l_build_remote_sh_c_command_remaining=${l_build_remote_sh_c_command_remaining#"$l_build_remote_sh_c_command_chunk"}
+	done
+
+	zxfer_restore_remote_sh_c_lc_all \
+		"$l_build_remote_sh_c_command_saved_lc_all_set" \
+		"$l_build_remote_sh_c_command_saved_lc_all"
+	[ "$l_build_remote_sh_c_command_status" -eq 0 ] ||
+		return "$l_build_remote_sh_c_command_status"
+
+	zxfer_build_shell_command_from_argv "$@"
 }
 
 # Purpose: Prepare a shell-ready remote command for one host spec.

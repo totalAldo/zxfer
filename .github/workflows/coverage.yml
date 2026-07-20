@@ -133,7 +133,7 @@ jobs:
             -v "$COVERAGE_DIR:/tmp/zxfer-coverage" \
             -w "$PWD" \
             kcov/kcov@sha256:481289ae32e55e5b733019515acd10948a4f76dfed381765577db909664fc603 \
-            sh -lc './tests/run_coverage.sh'
+            sh -lc './tests/run_coverage.sh tests/test_zxfer_*.sh'
       - name: Upload kcov artifact
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

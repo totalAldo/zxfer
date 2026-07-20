@@ -341,14 +341,8 @@ zxfer_dx_benchmark_get_process_group() {
 	return 1
 }
 
-zxfer_dx_benchmark_job_control_supported_p() {
-	(
-		set -m 2>/dev/null || exit 1
-		case $- in
-		*m*) exit 0 ;;
-		esac
-		exit 1
-	) 2>/dev/null
+zxfer_dx_benchmark_enable_job_control() {
+	set -m 2>/dev/null
 }
 
 zxfer_dx_benchmark_resolve_setsid() {
@@ -362,19 +356,23 @@ zxfer_dx_benchmark_resolve_setsid() {
 
 zxfer_dx_benchmark_launch_supervisor() {
 	g_zxfer_dx_benchmark_launch_pid=
-	if zxfer_dx_benchmark_job_control_supported_p; then
-		case $- in
-		*m*) l_dx_launch_restore_monitor=0 ;;
-		*)
-			l_dx_launch_restore_monitor=1
-			set -m 2>/dev/null || return 1
-			;;
-		esac
+	case $- in
+	*m*) l_dx_launch_restore_monitor=0 ;;
+	*)
+		l_dx_launch_restore_monitor=1
+		zxfer_dx_benchmark_enable_job_control >/dev/null 2>&1 || :
+		;;
+	esac
+	# Some non-interactive shells return success from `set -m` without enabling
+	# monitor mode. Trust the current shell's option state, not that status.
+	case $- in
+	*m*)
 		"$@" &
 		g_zxfer_dx_benchmark_launch_pid=$!
 		[ "$l_dx_launch_restore_monitor" -eq 0 ] || set +m
 		return 0
-	fi
+		;;
+	esac
 	l_dx_launch_setsid=$(zxfer_dx_benchmark_resolve_setsid) || return 1
 	"$l_dx_launch_setsid" "$@" &
 	g_zxfer_dx_benchmark_launch_pid=$!

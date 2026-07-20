@@ -1264,8 +1264,8 @@ test_vm_guest_prepare_script_installs_perf_tools_for_freebsd_perf() {
 test_vm_guest_prepare_script_installs_bash_for_omnios_shunit2() {
 	script_body=$(zxfer_vm_guest_prepare_script omnios qemu shunit2)
 
-	assertContains "OmniOS shunit2 guest preparation should install bash for the POSIX wrapper path." \
-		"$script_body" "pkg install bash"
+	assertContains "OmniOS shunit2 guest preparation should install bash for the POSIX wrapper and Git for validation-runner fixtures." \
+		"$script_body" "pkg install bash git"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

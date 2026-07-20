@@ -1070,8 +1070,10 @@ manager. That keeps the higher-fidelity coverage lane available even though
 current Ubuntu runner images do not consistently ship a native `kcov` package.
 The Docker-backed `kcov` step is artifact-only and non-blocking because that
 instrumented container can diverge from the normal unit-test hosts in process,
-file-descriptor, and base-tool behavior. The bash-xtrace job is kept alongside
-it because the line-oriented
+file-descriptor, and base-tool behavior. In CI it is deliberately scoped to
+the production-focused `tests/test_zxfer_*.sh` suites, avoiding recursive
+instrumentation of the shunit, lint, validation, and benchmark runners. The
+bash-xtrace job is kept alongside it because the line-oriented
 `summary.tsv`, `policy_failures.tsv`, and `missing.txt` diff outputs are stable
 enough to enforce no-regression coverage policy in CI and on local developer
 machines.

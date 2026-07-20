@@ -1006,6 +1006,11 @@ test_get_backup_properties_rejects_insecure_exact_remote_backup_file_without_anc
 
 	set +e
 	(
+		# This restore-selection case classifies the exact requested path; keep
+		# transport chunking out of its string-matching stand-in.
+		zxfer_build_remote_sh_c_command() {
+			printf '%s\n' "$1"
+		}
 		zxfer_invoke_ssh_shell_command_for_host() {
 			case "$2" in
 			*"$direct_file"*)

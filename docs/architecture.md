@@ -253,13 +253,16 @@ cross-process locking.
 Remote capability probes and secure backup-directory/write protocols,
 including their shared guards, are assembled as readable multiline POSIX `sh`
 programs. Their stages, quoting, status values, and publication/rollback
-topology are reviewable directly and pinned by golden fixtures. Only the
-capability and backup transport adapters join nonblank, semicolon-terminated
-lines into one physical command line for a csh/tcsh login shell, immediately
-before quoting the explicit `sh -c` handoff.
+topology are reviewable directly and pinned by golden fixtures. The SSH
+transport retains the established rendering for short, single-line scripts.
+For long or multiline scripts it places bounded, quoted data chunks on one
+physical login-shell command line; a fixed POSIX `sh` bootstrap reconstructs
+the exact program before the explicit `sh -c` handoff. This keeps individual
+words below the illumos csh lexical limit while preserving standard input and
+the program's exit status.
 `ZXFER_SECURE_PATH`, `ZXFER_SECURE_PATH_APPEND`, resolved helper paths, and
 `ZXFER_BACKUP_DIR` reject tab, carriage-return, and line-feed bytes before that
-join, so transport compatibility cannot translate trusted configuration.
+rendering, so transport compatibility cannot translate trusted configuration.
 
 One accepted capability response is parsed and checked for framing, exact tool
 coverage, duplicate records, statuses, and helper-path shape before its fields

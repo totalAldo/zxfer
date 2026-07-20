@@ -712,7 +712,16 @@ test_read_remote_backup_file_quotes_resolved_remote_cat_path() {
 	FAKE_SSH_STDOUT_OVERRIDE="payload"
 	export FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE
 
-	result=$(zxfer_read_remote_backup_file "backup@example.com" "/tmp/backup.meta")
+	result=$(
+		(
+			# This case verifies helper-token quoting before transport; keep the
+			# csh-safe transport chunker out of its string assertion.
+			zxfer_build_remote_sh_c_command() {
+				printf '%s' "$1"
+			}
+			zxfer_read_remote_backup_file "backup@example.com" "/tmp/backup.meta"
+		)
+	)
 	status=$?
 
 	unset FAKE_SSH_LOG FAKE_SSH_STDOUT_OVERRIDE

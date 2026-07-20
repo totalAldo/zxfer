@@ -24,10 +24,10 @@ Key protections already present in the project include:
 - explicit handling for wrapped remote host specs
 - separate argv-preserving execution and hardened rendered-pipeline APIs
 - readable multiline capability and remote-backup directory/write programs
-  with golden protocol pins; only their validated, semicolon-terminated
-  transport form is joined to one physical line for csh/tcsh before an
-  explicit `sh -c`, so line collapse cannot translate trusted configuration
-  bytes
+  with golden protocol pins; long or multiline programs cross csh/tcsh login
+  shells as bounded, quoted positional chunks on one physical command line,
+  then a fixed POSIX `sh` bootstrap reassembles the exact bytes before the
+  explicit `sh -c` while preserving stdin and status
 - a private per-run 0700 artifact root whose exact path, validated parent, and
   stored device/inode identity must match runtime-owned provenance before
   recursive cleanup

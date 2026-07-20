@@ -196,6 +196,28 @@ planning_log_nth_line_number() {
 		'$0 == needle { c++; if (c == n) { print NR; exit } }' "$ZFS_LOG"
 }
 
+# Count SSH invocations whose rendered remote script contains one marker.
+# Long scripts cross csh/tcsh as single-quoted `d` data chunks; normalize only
+# the fixed boundary between adjacent data chunks so a marker split at byte 128
+# remains observable without evaluating the logged shell command.
+planning_count_remote_script_marker() {
+	l_marker=$1
+	awk -v marker="$l_marker" '
+		BEGIN {
+			quote = sprintf("%c", 39)
+			data_boundary = quote " " quote "d"
+		}
+		{
+			line = $0
+			while ((position = index(line, data_boundary)) != 0)
+				line = substr(line, 1, position - 1) \
+					substr(line, position + length(data_boundary))
+			if (index(line, marker) != 0) count++
+		}
+		END { print count + 0 }
+	' "$SSH_LOG"
+}
+
 # Assert the structured stderr failure report is present with the expected
 # class, stage, and operator-facing message fragment.
 planning_assert_failure_report() {
@@ -866,7 +888,7 @@ test_remote_origin_pull_noop_defers_control_socket_and_probes_once() {
 	assertFalse "a clean pull no-op must never multiplex over a control socket" \
 		"grep -q -- ' -S ' '$SSH_LOG'"
 	assertEquals "a warmed origin host must cost exactly one capability probe round trip" \
-		1 "$(grep -c 'ZXFER_REMOTE_CAPS_V2' "$SSH_LOG")"
+		1 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
 }
@@ -898,7 +920,7 @@ test_remote_origin_pull_incremental_opens_master_once() {
 	assertEquals "an incremental pull must open the ssh control master exactly once" \
 		1 "$(grep -c -- ' -M ' "$SSH_LOG")"
 	assertEquals "a warmed origin host must cost exactly one capability probe round trip" \
-		1 "$(grep -c 'ZXFER_REMOTE_CAPS_V2' "$SSH_LOG")"
+		1 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
 	assertEquals "the per-run ssh control master must be closed exactly once at exit" \
 		1 "$(grep -c -- ' -O exit ' "$SSH_LOG")"
 	l_master_socket=$(awk '/ -M /{for (i=1;i<NF;i++) if ($i=="-S") {print $(i+1); exit}}' "$SSH_LOG")

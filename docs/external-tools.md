@@ -220,8 +220,9 @@ These tools are used for development, CI, or local QA.
 - FreeBSD VM-backed shunit2 runs install `bash` for coverage-helper tests and
   `git` for lint/validation fixtures that exercise changed-path discovery
 - OmniOS shunit2 guest runs through `tests/run_vm_matrix.sh --test-layer shunit2`
-  install `bash` in the guest and export a `bash --posix` wrapper via
-  `ZXFER_TEST_SHELL`, because `/usr/xpg4/bin/sh` does not honor the mock-heavy
+  install `bash` for the `bash --posix` wrapper and `git` for lint/validation
+  fixtures that exercise changed-path discovery. The wrapper is exported via
+  `ZXFER_TEST_SHELL` because `/usr/xpg4/bin/sh` does not honor the mock-heavy
   subshell helper overrides the same way
 
 ### Coverage Tooling

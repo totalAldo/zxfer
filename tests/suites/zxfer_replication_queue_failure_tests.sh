@@ -209,7 +209,8 @@ test_replication_ready_queue_splits_pending_sources_when_ifs_was_narrowed() {
 
 	(
 		READY_LOG="$log"
-		IFS='	'
+		IFS=:
+		set +f
 		zxfer_process_source_dataset() {
 			printf 'process:%s\n' "$1" >>"$READY_LOG"
 		}
@@ -217,12 +218,55 @@ test_replication_ready_queue_splits_pending_sources_when_ifs_was_narrowed() {
 		zxfer_process_replication_ready_queue "tank/src
 tank/src/child1
 tank/src/child2" 0 "$TEST_TMPDIR/post_seed_sources"
+		printf 'ifs:%s\n' "$IFS" >>"$READY_LOG"
+		case $- in
+		*f*) printf 'globbing:disabled\n' >>"$READY_LOG" ;;
+		*) printf 'globbing:enabled\n' >>"$READY_LOG" ;;
+		esac
 	)
 
-	assertEquals "The ready queue should split its newline-delimited work list even if an illumos /bin/sh read helper narrowed IFS earlier." \
+	assertEquals "The ready queue should split its newline-delimited work list and restore a custom IFS and enabled globbing." \
 		"process:tank/src
 process:tank/src/child1
-process:tank/src/child2" "$(cat "$log")"
+process:tank/src/child2
+ifs::
+globbing:enabled" "$(cat "$log")"
+}
+
+test_replication_ready_queue_preserves_unset_ifs_and_disabled_globbing() {
+	g_option_j_jobs=4
+	g_option_n_dryrun=0
+	log="$TEST_TMPDIR/ready_queue_unset_ifs.log"
+	rm -f "$log"
+
+	(
+		READY_LOG="$log"
+		unset IFS
+		set -f
+		zxfer_process_source_dataset() {
+			printf 'process:%s\n' "$1" >>"$READY_LOG"
+		}
+
+		zxfer_process_replication_ready_queue "tank/src
+tank/src/child1
+tank/src/child2" 0 "$TEST_TMPDIR/post_seed_sources"
+		if [ "${IFS+set}" = "set" ]; then
+			printf 'ifs:set\n' >>"$READY_LOG"
+		else
+			printf 'ifs:unset\n' >>"$READY_LOG"
+		fi
+		case $- in
+		*f*) printf 'globbing:disabled\n' >>"$READY_LOG" ;;
+		*) printf 'globbing:enabled\n' >>"$READY_LOG" ;;
+		esac
+	)
+
+	assertEquals "The ready queue should process every entry and preserve an unset IFS and disabled globbing." \
+		"process:tank/src
+process:tank/src/child1
+process:tank/src/child2
+ifs:unset
+globbing:disabled" "$(cat "$log")"
 }
 
 test_copy_filesystems_merges_iteration_sources_and_deduplicates_post_seed_reconcile_in_current_shell() {

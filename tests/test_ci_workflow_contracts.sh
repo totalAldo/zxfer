@@ -10,6 +10,7 @@ TESTS_DIR=$(dirname "$0")
 
 LINT_WORKFLOW_FILE="$ZXFER_ROOT/.github/workflows/lint.yml"
 COVERAGE_WORKFLOW_FILE="$ZXFER_ROOT/.github/workflows/coverage.yml"
+UNIT_WORKFLOW_FILE="$ZXFER_ROOT/.github/workflows/tests.yml"
 RUN_LINT_BIN="$ZXFER_ROOT/tests/run_lint.sh"
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -88,6 +89,26 @@ test_coverage_workflow_explicitly_enforces_the_bash_xtrace_policy() {
 		"./tests/run_coverage.sh --enforce" "$policy_runner_commands"
 	assertNotContains "The required coverage policy job must not be allowed to fail without failing CI." \
 		"$policy_job" "continue-on-error: true"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_coverage_workflow_bounds_advisory_kcov_to_production_suites() {
+	workflow=$(cat "$COVERAGE_WORKFLOW_FILE")
+
+	assertContains "The advisory kcov artifact should cover production-focused suites without recursively instrumenting validation tooling." \
+		"$workflow" "./tests/run_coverage.sh tests/test_zxfer_*.sh"
+	assertContains "The advisory kcov step should remain explicitly non-blocking." \
+		"$workflow" "continue-on-error: true"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_unit_workflow_installs_platform_test_prerequisites() {
+	workflow=$(cat "$UNIT_WORKFLOW_FILE")
+
+	assertContains "FreeBSD shunit coverage and Git-backed workflow fixtures require bash and Git in the guest." \
+		"$workflow" "pkg install -y bash git"
+	assertContains "OmniOS uses the same bash wrapper and Git-backed workflow fixtures." \
+		"$workflow" "PKG_SUCCESS_ON_NOP=1 pkg install bash git"
 }
 
 # shellcheck source=tests/shunit2/shunit2
