@@ -1,0 +1,6 @@
+# path
+integration/cli_reporting_tests.sh
+integration/snapshot_replication_tests.sh
+integration/property_backup_tests.sh
+integration/remote_security_tests.sh
+integration/jobs_platform_tests.sh

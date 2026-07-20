@@ -19,8 +19,7 @@ oneTimeTearDown() {
 	zxfer_test_cleanup_tmpdir
 }
 
-setUp() {
-	zxfer_source_runtime_modules_through "zxfer_snapshot_reconcile.sh"
+reset_snapshot_reconcile_test_options() {
 	g_option_n_dryrun=0
 	g_option_v_verbose=0
 	g_option_V_very_verbose=0
@@ -29,6 +28,9 @@ setUp() {
 	g_option_g_grandfather_protection=""
 	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
 	g_RZFS="/sbin/zfs"
+}
+
+reset_snapshot_reconcile_test_state() {
 	g_lzfs_list_hr_snap=""
 	g_lzfs_list_hr_S_snap=""
 	g_rzfs_list_hr_snap=""
@@ -48,9 +50,19 @@ setUp() {
 	g_zxfer_diverged_snapshot_examples=""
 	g_zxfer_diverged_converged_datasets=""
 	g_zxfer_diverged_converged_marker_source=""
+}
+
+create_snapshot_reconcile_test_artifacts() {
 	g_zxfer_snapshot_delete_source_identities_file=$(mktemp "$TEST_TMPDIR/delete_source.XXXXXX")
 	g_zxfer_snapshot_delete_destination_identities_file=$(mktemp "$TEST_TMPDIR/delete_dest.XXXXXX")
 	g_zxfer_snapshot_delete_difference_file=$(mktemp "$TEST_TMPDIR/delete_diff.XXXXXX")
+}
+
+setUp() {
+	zxfer_source_runtime_modules_through "zxfer_snapshot_reconcile.sh"
+	reset_snapshot_reconcile_test_options
+	reset_snapshot_reconcile_test_state
+	create_snapshot_reconcile_test_artifacts
 	zxfer_reset_snapshot_record_indexes
 	zxfer_reset_failure_context "unit"
 }

@@ -95,6 +95,14 @@ changed path patterns to `unit_suites`, `integration_groups`, `perf_cases`, and
 - `vm [smoke|local]` forwards optional guest/test selectors but rejects every
   broader profile.
 
+Every manifest-listed `tests/integration/` fragment has an exact first-match
+row that selects the host-safe `tests/test_run_integration_zxfer.sh` loader
+contract. A later `tests/integration/*.sh` fallback gives future fragments the
+same safe minimum until they receive a concern-specific row. Changes to the
+fragment manifest also select `tests/test_validate.sh`, so declared fragments
+and quick-map ownership cannot drift independently. Wider integration groups
+remain recommendations only; `quick` never runs the direct harness.
+
 `quick` and the full shunit step default to four concurrent suites. Set
 `ZXFER_VALIDATE_JOBS` to a positive integer to reduce or increase that bound;
 direct `tests/run_shunit_tests.sh` compatibility and its bounded,
@@ -106,6 +114,57 @@ auto-detected default are unchanged.
   `network-cache` risk label makes that behavior explicit.
 
 No profile runs `tests/run_integration_zxfer.sh` directly on the host.
+
+## Developer Workflow Timing
+
+`tests/run_dx_benchmark.sh` records report-only wall-time evidence for the
+four contributor paths named by the DX targets:
+
+- `named`: one named shunit test, with one summary-excluded warmup by default
+- `quick`: a representative changed-path `validate.sh quick` run
+- `shunit`: the complete shunit suite
+- `validate`: the complete `validate.sh full` profile
+
+Narrow the routine measurement to the sub-minute paths:
+
+```sh
+./tests/run_dx_benchmark.sh \
+  --case named,quick --samples 5 \
+  --output-dir /tmp/zxfer-dx-candidate
+```
+
+Omitting `--case` selects all four paths. The output directory is required,
+must not already exist, and is created privately. `metadata.tsv` records the
+selected runners and arguments, `results.tsv` retains every warmup and sample,
+`summary.tsv` reports successful-sample median and nearest-rank P95 wall time,
+and `logs/` preserves command and timer output.
+
+Elapsed-time thresholds are intentionally not enforced. A selected command or
+timing-parse failure is retained in the artifacts and makes evidence
+collection return nonzero, while a slow successful sample remains report-only.
+The runner uses fixed argv dispatch rather than shell command strings and
+cleans up the active runner group on INT or TERM. Before arbitrary runner code
+can start, a resident supervisor must prove that its PID is also the leader of
+a private process group, publish readiness, and wait for the parent's explicit
+`go` record. The launcher uses verified non-interactive shell job control when
+available and otherwise a non-forking `setsid` utility. If neither path can be
+verified, the measurement fails before the selected runner starts.
+
+The supervisor remains the group leader after publishing the measured command
+status. Normal retirement and signal cleanup first send `STOP` to the complete
+group, then send one `KILL`, wait for the trusted supervisor, and clear active
+state. A successful group-wide `STOP` freezes inherited-group descendants and
+pins the group identity across teardown, so cleanup needs no post-readiness
+process-table snapshot or PID/start-time race. Repeated INT or TERM is ignored
+after cleanup commits. As with any process-group boundary, a deliberately
+hostile child that explicitly creates a new session or process group is outside
+the containment contract; contributor validation commands do not do so.
+
+Executed measurements use the C locale so portable `time -p` decimals and TSV
+summaries remain machine-readable. The runner does not invoke ZFS or the
+network itself; selected commands retain their normal behavior. In particular,
+the `validate` case may populate the pinned lint cache just as
+`validate.sh full` does.
 
 ## Unit Tests
 
@@ -142,6 +201,12 @@ The shell lint targets use one NUL-delimited Git source list containing the
 tracked and non-ignored untracked `*.sh` files plus the `zxfer` launcher. New
 modules therefore receive portability, formatting, and static checks before
 they are staged, while ignored artifacts remain excluded.
+
+The `budget` lint target also caps every integration concern fragment at
+2,000 physical lines, the stable integration composition runner at 1,800
+lines, and each shunit `setUp` function at 30 lines. These are ownership and
+fixture-readability guardrails; lower measured values may be ratcheted down,
+while higher ceilings require explicit review justification.
 
 For a ready-made contributor environment, open the repository in the included
 VS Code / GitHub Codespaces devcontainer. It stays on the stable Ubuntu 24.04
@@ -223,6 +288,7 @@ The test layout broadly follows the source layout:
 - `test_run_shunit_tests.sh`
 - `test_validate.sh`
 - `test_run_integration_zxfer.sh`
+- `test_run_dx_benchmark.sh`
 - `test_run_perf_tests.sh`
 - `test_run_perf_compare.sh`
 - `test_run_vm_matrix.sh`
@@ -280,8 +346,8 @@ through the broader peer suite alone.
 
 The top-level launcher and `tests/test_helper.sh` both source
 `src/zxfer_modules.sh`, so runtime module order is defined in one place rather
-than being duplicated across test fixtures. The path-security and owned-lock
-helpers live as sections of `src/zxfer_runtime.sh` (Phase 8 merge), and the
+than being duplicated across test fixtures. Path security, owned locks, and
+runtime artifact lifecycle remain separate concern modules, and the
 supervision-lite background-job layer sits between runtime and the
 higher-level replication modules.
 
@@ -679,9 +745,9 @@ contract tests but deliberately does not run timing gates, which are sensitive
 to concurrent host load.
 
 `tests/run_perf_tests.sh` is a manual, non-gating performance runner. It
-sources the integration harness in source-only mode and reuses the existing
-file-backed sparse-pool, safety, mock-ssh, and passthrough-zstd helpers instead
-of maintaining a second ZFS fixture layer.
+reuses the focused file-backed sparse-pool, safety, mock-ssh, and
+passthrough-zstd fixtures under `tests/helpers/` without sourcing the
+integration composition runner or its test bodies.
 
 Prefer the VM-backed path for unattended measurements:
 
@@ -806,12 +872,25 @@ integration engine, but it is no longer the default recommendation for routine
 unattended validation now that the VM-backed runner exists.
 
 The exact integration test/group order, including checks that run before pool
-creation, is declared in `tests/integration_test_registry.tsv`. The harness
-validates that non-eval registry and every named function before consulting
-`zpool`. Shared reporting, host setup, file-backed pool guards, and mock-remote
-fixtures live under `tests/helpers/`; the performance runner sources only
-those focused fixtures and never sources the integration harness or its test
-bodies.
+creation, is declared in `tests/integration_test_registry.tsv`. Test bodies
+are grouped by concern under `tests/integration/`, and the fixed source order
+is declared separately in `tests/integration_fragment_manifest.tsv`. Both TSV
+files are validated as data rather than evaluated as shell. Before consulting
+`zpool`, the harness rejects invalid manifest rows, missing fragments,
+symlinked leaf or parent path components, duplicate paths, and registry or
+definition drift. Integration fragments are definition-only: executable
+top-level statements and nested function definitions are rejected before
+sourcing, every registry name must have exactly one top-level definition, and
+every top-level fragment function must appear in the registry.
+
+The stable `tests/run_integration_zxfer.sh` entry point owns argument parsing,
+confirmation, filtering, pool lifecycle, execution, and cleanup. Shared
+reporting, host setup, file-backed pool guards, and mock-remote fixtures live
+under `tests/helpers/`; the performance runner sources only those focused
+fixtures and never sources the integration runner or its test bodies. Add a
+new integration case to its matching concern fragment and to the execution
+registry. Edit the fragment manifest only when the concern-level file set
+itself changes.
 
 Run it unattended:
 

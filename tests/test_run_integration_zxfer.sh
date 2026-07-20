@@ -9,11 +9,29 @@ TESTS_DIR=$(dirname "$0")
 . "$TESTS_DIR/test_helper.sh"
 
 oneTimeSetUp() {
-	zxfer_test_create_tmpdir "zxfer_run_integration"
 	ZXFER_ROOT=$(cd "$TESTS_DIR/.." && pwd -P)
 	INTEGRATION_HARNESS="$ZXFER_ROOT/tests/run_integration_zxfer.sh"
 	INTEGRATION_REGISTRY="$ZXFER_ROOT/tests/integration_test_registry.tsv"
+	INTEGRATION_FRAGMENT_MANIFEST="$ZXFER_ROOT/tests/integration_fragment_manifest.tsv"
 	INTEGRATION_REGISTRY_HELPER="$ZXFER_ROOT/tests/helpers/integration_test_registry.sh"
+	l_integration_load_sentinel=zxfer-integration-source-load-complete
+	l_integration_load_status=0
+	l_integration_load_output=$(
+		ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1 \
+			ZXFER_INTEGRATION_TESTS_DIR="$ZXFER_ROOT/tests" \
+			INTEGRATION_HARNESS="$INTEGRATION_HARNESS" \
+			/bin/sh -c '
+				. "$INTEGRATION_HARNESS" || exit $?
+				printf "%s\n" "zxfer-integration-source-load-complete"
+			' 2>&1
+	) || l_integration_load_status=$?
+	if [ "$l_integration_load_status" -ne 0 ] ||
+		[ "$l_integration_load_output" != "$l_integration_load_sentinel" ]; then
+		printf 'Source-only integration load did not reach its sentinel (status %s): %s\n' \
+			"$l_integration_load_status" "$l_integration_load_output" >&2
+		return 1
+	fi
+	zxfer_test_create_tmpdir "zxfer_run_integration"
 }
 
 oneTimeTearDown() {
@@ -22,6 +40,7 @@ oneTimeTearDown() {
 
 setUp() {
 	unset ZXFER_INTEGRATION_REGISTRY_FILE
+	unset ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE
 	ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1
 	ZXFER_INTEGRATION_TESTS_DIR="$TESTS_DIR"
 	# shellcheck source=tests/run_integration_zxfer.sh
@@ -40,6 +59,17 @@ setUp() {
 
 tearDown() {
 	rm -rf "$WORKDIR"
+}
+
+# shellcheck disable=SC2329  # Invoked by assertions through command substitution.
+zxfer_test_integration_fragment_corpus() {
+	l_test_integration_fragment_files=$(zxfer_integration_fragment_files) || return 1
+	while IFS= read -r l_test_integration_fragment_file; do
+		[ -n "$l_test_integration_fragment_file" ] || continue
+		cat "$l_test_integration_fragment_file" || return $?
+	done <<-EOF
+		$l_test_integration_fragment_files
+	EOF
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -67,6 +97,63 @@ test_integration_parse_args_preserves_confirmation_default_and_yes_override() {
 
 	assertEquals "The explicit --yes flag should remain the only CLI bypass for per-command confirmation." \
 		0 "$ZXFER_CONFIRM_EACH_COMMAND"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_help_returns_before_fragment_or_registry_loading() {
+	bad_manifest="$TEST_TMPDIR/help-invalid-fragment-manifest.tsv"
+	printf '%s\n' '# invalid header' >"$bad_manifest"
+
+	status=0
+	output=$(ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$bad_manifest \
+		"$INTEGRATION_HARNESS" --help 2>&1) || status=$?
+
+	assertEquals "Help should retain its early zero-status path without loading test fragments." 0 "$status"
+	assertContains "Help should retain the integration harness usage synopsis." \
+		"$output" "usage: ./tests/run_integration_zxfer.sh"
+	assertNotContains "Help should not expose an unrelated fragment validation failure." \
+		"$output" "Invalid integration fragment manifest"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_source_only_loading_preserves_caller_options_and_positionals() {
+	status=0
+	output=$(
+		ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1 \
+			ZXFER_INTEGRATION_TESTS_DIR="$ZXFER_ROOT/tests" \
+			INTEGRATION_HARNESS="$INTEGRATION_HARNESS" \
+			/bin/sh -c '
+				set +e
+				set +u
+				set -f
+				set -- "first value" "second*value" ""
+				options_before=$-
+				. "$INTEGRATION_HARNESS" || exit $?
+				options_after=$-
+				printf "options_before=%s\n" "$options_before"
+				printf "options_after=%s\n" "$options_after"
+				printf "argument_count=%s\n" "$#"
+				for argument do
+					printf "argument=<%s>\n" "$argument"
+				done
+			' 2>&1
+	) || status=$?
+	options_before=$(printf '%s\n' "$output" | sed -n 's/^options_before=//p')
+	options_after=$(printf '%s\n' "$output" | sed -n 's/^options_after=//p')
+
+	assertEquals "Source-only loading should succeed. Output: $output" 0 "$status"
+	assertContains "The caller fixture should begin with globbing disabled." \
+		"$options_before" "f"
+	assertEquals "Source-only loading must preserve the caller's shell-option flags." \
+		"$options_before" "$options_after"
+	assertContains "Source-only loading must preserve the caller's positional count." \
+		"$output" "argument_count=3"
+	assertContains "Source-only loading must preserve positional whitespace." \
+		"$output" "argument=<first value>"
+	assertContains "Source-only loading must preserve positional glob characters." \
+		"$output" "argument=<second*value>"
+	assertContains "Source-only loading must preserve an empty trailing positional argument." \
+		"$output" "argument=<>"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -212,12 +299,370 @@ beep_handling_test'
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_fragment_manifest_preserves_fixed_concern_order_and_complete_registry_coverage() {
+	expected_paths='integration/cli_reporting_tests.sh
+integration/snapshot_replication_tests.sh
+integration/property_backup_tests.sh
+integration/remote_security_tests.sh
+integration/jobs_platform_tests.sh'
+	actual_paths=$(zxfer_integration_fragment_paths)
+	definition_rows=$(zxfer_integration_fragment_definition_rows)
+	definition_count=$(printf '%s\n' "$definition_rows" | awk 'NF { count++ } END { print count + 0 }')
+	unique_definition_count=$(printf '%s\n' "$definition_rows" |
+		awk -F '\t' 'NF { names[$1] = 1 } END { for (name in names) count++; print count + 0 }')
+	definition_tab=$(printf '\t')
+	runner_definition_status=0
+	runner_definition_rows=$(awk -v headers_only=1 \
+		-f "$ZXFER_ROOT/tests/measure_shell_complexity.awk" "$INTEGRATION_HARNESS") ||
+		runner_definition_status=$?
+	registered_runner_status=0
+	registered_runner_definitions=$(printf '%s\n' "$runner_definition_rows" |
+		awk -F "$definition_tab" '
+			FILENAME == ARGV[1] {
+				if (FNR > 1) registered[$1] = 1
+				next
+			}
+			$2 in registered { print $2 }
+		' "$INTEGRATION_REGISTRY" -) || registered_runner_status=$?
+
+	assertEquals "The fragment manifest should retain the fixed concern-loading order." \
+		"$expected_paths" "$actual_paths"
+	assertEquals "Every one of the 89 registered tests and groups should have one fragment definition." \
+		89 "$definition_count"
+	assertEquals "Integration function definitions should remain unique across fragments." \
+		89 "$unique_definition_count"
+	assertEquals "The runner definition scan should complete successfully." \
+		0 "$runner_definition_status"
+	assertEquals "The registered-definition intersection should complete successfully." \
+		0 "$registered_runner_status"
+	assertEquals "The composition runner must not define any registered integration behavior body." \
+		"" "$registered_runner_definitions"
+	assertContains "Source-only loading should publish manifest-listed functions into the current shell." \
+		"$(command -v basic_replication_test)" "basic_replication_test"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_shell_function_check_accepts_loaded_function_and_rejects_external_sort() {
+	function_path="$TEST_TMPDIR/function-tools"
+	function_path_command="$function_path/collision_probe"
+	mkdir "$function_path"
+	printf '%s\n' '#!/bin/sh' 'exit 0' >"$function_path_command"
+	chmod +x "$function_path_command"
+	loaded_function_status=0
+	zxfer_integration_shell_function_p basic_replication_test || loaded_function_status=$?
+	external_sort_lookup_status=0
+	external_sort_description=$(LC_ALL=C command -V sort 2>&1) ||
+		external_sort_lookup_status=$?
+	external_sort_status=0
+	zxfer_integration_shell_function_p sort || external_sort_status=$?
+	path_collision_status=0
+	PATH="$function_path:$PATH" zxfer_integration_shell_function_p collision_probe ||
+		path_collision_status=$?
+
+	assertEquals "A manifest-loaded integration function should satisfy the callable contract." \
+		0 "$loaded_function_status"
+	assertEquals "The callable collision fixture requires an installed external sort command." \
+		0 "$external_sort_lookup_status"
+	assertNotContains "The sort collision fixture must resolve to an external command." \
+		"$external_sort_description" "function"
+	assertEquals "An external executable must not satisfy the integration function contract." \
+		1 "$external_sort_status"
+	assertEquals "The word function in an executable path must not satisfy the shell-function contract." \
+		1 "$path_collision_status"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_fragment_manifest_rejects_schema_duplicates_unsafe_paths_missing_files_and_symlinks() {
+	bad_header="$TEST_TMPDIR/integration-fragments-bad-header.tsv"
+	duplicate="$TEST_TMPDIR/integration-fragments-duplicate.tsv"
+	unsafe_path="$TEST_TMPDIR/integration-fragments-unsafe-path.tsv"
+	missing="$TEST_TMPDIR/integration-fragments-missing.tsv"
+	fixture_root="$TEST_TMPDIR/integration-fragment-symlink-root"
+	symlink_manifest="$fixture_root/manifest.tsv"
+	parent_symlink_root="$TEST_TMPDIR/integration-fragment-parent-symlink-root"
+	parent_symlink_target="$TEST_TMPDIR/integration-fragment-parent-symlink-target"
+	parent_symlink_manifest="$parent_symlink_root/manifest.tsv"
+
+	printf '%s\n' "# invalid header" >"$bad_header"
+	cp "$INTEGRATION_FRAGMENT_MANIFEST" "$duplicate"
+	sed -n '2p' "$INTEGRATION_FRAGMENT_MANIFEST" >>"$duplicate"
+	printf '%s\n%s\n' '# path' 'integration/../run_integration_zxfer.sh' >"$unsafe_path"
+	printf '%s\n%s\n' '# path' 'integration/missing_tests.sh' >"$missing"
+	mkdir -p "$fixture_root/integration"
+	ln -s "$INTEGRATION_HARNESS" "$fixture_root/integration/symlink_tests.sh"
+	printf '%s\n%s\n' '# path' 'integration/symlink_tests.sh' >"$symlink_manifest"
+	mkdir -p "$parent_symlink_root" "$parent_symlink_target"
+	printf '%s\n' 'registered_test() {' ':' '}' \
+		>"$parent_symlink_target/parent_tests.sh"
+	ln -s "$parent_symlink_target" "$parent_symlink_root/integration"
+	printf '%s\n%s\n' '# path' 'integration/parent_tests.sh' \
+		>"$parent_symlink_manifest"
+
+	bad_header_status=0
+	bad_header_output=$(zxfer_validate_integration_fragment_manifest_file "$bad_header" 2>&1) ||
+		bad_header_status=$?
+	duplicate_status=0
+	duplicate_output=$(zxfer_validate_integration_fragment_manifest_file "$duplicate" 2>&1) ||
+		duplicate_status=$?
+	unsafe_status=0
+	unsafe_output=$(zxfer_validate_integration_fragment_manifest_file "$unsafe_path" 2>&1) ||
+		unsafe_status=$?
+	missing_status=0
+	missing_output=$(zxfer_validate_integration_fragment_manifest_file "$missing" 2>&1) ||
+		missing_status=$?
+	symlink_status=0
+	symlink_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$fixture_root
+			zxfer_validate_integration_fragment_manifest_file "$symlink_manifest"
+		) 2>&1
+	) || symlink_status=$?
+	parent_symlink_status=0
+	parent_symlink_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$parent_symlink_root
+			zxfer_validate_integration_fragment_manifest_file \
+				"$parent_symlink_manifest"
+		) 2>&1
+	) || parent_symlink_status=$?
+
+	assertEquals "Changed fragment-manifest schemas should fail closed." 1 "$bad_header_status"
+	assertContains "Schema failures should identify the manifest header contract." \
+		"$bad_header_output" "header does not match the one-field manifest schema"
+	assertEquals "Duplicate fragment paths should fail closed." 1 "$duplicate_status"
+	assertContains "Duplicate failures should name the repeated fragment." \
+		"$duplicate_output" "duplicates fragment [integration/cli_reporting_tests.sh]"
+	assertEquals "Traversal-shaped fragment paths should fail closed." 1 "$unsafe_status"
+	assertContains "Unsafe path failures should identify the invalid row." \
+		"$unsafe_output" "has an invalid fragment path"
+	assertEquals "Missing manifest-listed fragments should fail closed." 1 "$missing_status"
+	assertContains "Missing fragment failures should identify the unreadable path." \
+		"$missing_output" "fragment [integration/missing_tests.sh] is not readable"
+	assertEquals "Symbolic-link fragments should fail closed." 1 "$symlink_status"
+	assertContains "Symlink failures should retain the no-indirection contract." \
+		"$symlink_output" "must not be a symbolic link"
+	assertEquals "A symlinked integration directory must fail closed." \
+		1 "$parent_symlink_status"
+	assertContains "Parent-symlink failures should identify the directory boundary." \
+		"$parent_symlink_output" "integration directory must not be a symbolic link"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_registry_rejects_duplicate_and_unlisted_fragment_definitions() {
+	fixture_root="$TEST_TMPDIR/integration-definition-root"
+	fixture_registry="$fixture_root/registry.tsv"
+	fixture_manifest="$fixture_root/manifest.tsv"
+	mkdir -p "$fixture_root/integration"
+	cp "$ZXFER_ROOT/tests/measure_shell_complexity.awk" \
+		"$fixture_root/measure_shell_complexity.awk"
+	printf '# name\tkind\tpre_pool\nregistered_test\ttest\tyes\n' >"$fixture_registry"
+	printf '%s\n%s\n%s\n' '# path' \
+		'integration/one_tests.sh' 'integration/two_tests.sh' >"$fixture_manifest"
+	printf '%s\n' 'registered_test() {' ':' '}' >"$fixture_root/integration/one_tests.sh"
+	printf '%s\n' 'registered_test() {' ':' '}' >"$fixture_root/integration/two_tests.sh"
+
+	duplicate_status=0
+	duplicate_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$fixture_root
+			ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$fixture_manifest
+			zxfer_validate_integration_registry_definitions "$fixture_registry"
+		) 2>&1
+	) || duplicate_status=$?
+
+	printf '%s\n' 'unlisted_test() {' ':' '}' >"$fixture_root/integration/two_tests.sh"
+	unlisted_status=0
+	unlisted_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$fixture_root
+			ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$fixture_manifest
+			zxfer_validate_integration_registry_definitions "$fixture_registry"
+		) 2>&1
+	) || unlisted_status=$?
+
+	assertEquals "Definitions duplicated across fragments should fail closed." 1 "$duplicate_status"
+	assertContains "Duplicate-definition failures should name the collision." \
+		"$duplicate_output" "function [registered_test] is defined by multiple integration fragments"
+	assertEquals "Manifest fragments must not define functions absent from the registry." 1 "$unlisted_status"
+	assertContains "Unlisted-definition failures should name the unexpected function." \
+		"$unlisted_output" "fragment function [unlisted_test] is not listed in the registry"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_definition_scan_ignores_heredoc_payloads_and_detects_whitespace_variants() {
+	fixture_root="$TEST_TMPDIR/integration-definition-syntax-root"
+	fixture_registry="$fixture_root/registry.tsv"
+	fixture_manifest="$fixture_root/manifest.tsv"
+	mkdir -p "$fixture_root/integration"
+	cp "$ZXFER_ROOT/tests/measure_shell_complexity.awk" \
+		"$fixture_root/measure_shell_complexity.awk"
+	printf '# name\tkind\tpre_pool\nregistered_test\ttest\tyes\n' >"$fixture_registry"
+	printf '%s\n%s\n' '# path' 'integration/one_tests.sh' >"$fixture_manifest"
+	cat >"$fixture_root/integration/one_tests.sh" <<'EOF'
+registered_test() {
+	cat <<'PAYLOAD'
+payload_only_test() {
+PAYLOAD
+}
+EOF
+
+	heredoc_status=0
+	heredoc_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$fixture_root
+			ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$fixture_manifest
+			zxfer_validate_integration_registry_definitions "$fixture_registry"
+		) 2>&1
+	) || heredoc_status=$?
+
+	printf '%s\n' 'integration/two_tests.sh' >>"$fixture_manifest"
+	cat >"$fixture_root/integration/two_tests.sh" <<'EOF'
+registered_test ( )
+{
+	:
+}
+EOF
+	duplicate_status=0
+	duplicate_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$fixture_root
+			ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$fixture_manifest
+			zxfer_validate_integration_registry_definitions "$fixture_registry"
+		) 2>&1
+	) || duplicate_status=$?
+
+	cat >"$fixture_root/integration/two_tests.sh" <<'EOF'
+registered_test\
+() {
+	:
+}
+EOF
+	continued_status=0
+	continued_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$fixture_root
+			ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$fixture_manifest
+			zxfer_validate_integration_registry_definitions "$fixture_registry"
+		) 2>&1
+	) || continued_status=$?
+
+	assertEquals "Function-shaped heredoc data must not become an unlisted integration definition. Output: $heredoc_output" \
+		0 "$heredoc_status"
+	assertEquals "A valid POSIX whitespace variant must not bypass duplicate-definition validation." \
+		1 "$duplicate_status"
+	assertContains "Whitespace-variant collisions should name the duplicated registered function." \
+		"$duplicate_output" "function [registered_test] is defined by multiple integration fragments"
+	assertEquals "A backslash-newline function header must not bypass duplicate-definition validation." \
+		1 "$continued_status"
+	assertContains "Continued-header collisions should name the duplicated registered function." \
+		"$continued_output" "function [registered_test] is defined by multiple integration fragments"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_fragments_reject_top_level_execution_and_nested_definitions() {
+	fixture_root="$TEST_TMPDIR/integration-definition-only-root"
+	fixture_registry="$fixture_root/registry.tsv"
+	fixture_manifest="$fixture_root/manifest.tsv"
+	fixture_fragment="$fixture_root/integration/one_tests.sh"
+	mkdir -p "$fixture_root/integration"
+	cp "$ZXFER_ROOT/tests/measure_shell_complexity.awk" \
+		"$fixture_root/measure_shell_complexity.awk"
+	printf '%s\n%s\n' '# path' 'integration/one_tests.sh' >"$fixture_manifest"
+	printf '# name\tkind\tpre_pool\nregistered_test\ttest\tyes\n' >"$fixture_registry"
+
+	cat >"$fixture_fragment" <<'EOF'
+registered_test() {
+	:
+}
+exit 0
+EOF
+	exit_status=0
+	exit_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$fixture_root
+			ZXFER_INTEGRATION_REGISTRY_FILE=$fixture_registry
+			ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$fixture_manifest
+			zxfer_load_integration_test_fragments
+		) 2>&1
+	) || exit_status=$?
+
+	cat >"$fixture_fragment" <<'EOF'
+registered_test() {
+	:
+}
+FRAGMENT_MUTATION=changed
+EOF
+	mutation_status=0
+	mutation_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$fixture_root
+			ZXFER_INTEGRATION_REGISTRY_FILE=$fixture_registry
+			ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$fixture_manifest
+			zxfer_load_integration_test_fragments
+		) 2>&1
+	) || mutation_status=$?
+
+	printf '# name\tkind\tpre_pool\nsort\ttest\tyes\n' >"$fixture_registry"
+	cat >"$fixture_fragment" <<'EOF'
+if false; then
+	sort() {
+		:
+	}
+fi
+EOF
+	conditional_status=0
+	conditional_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$fixture_root
+			ZXFER_INTEGRATION_REGISTRY_FILE=$fixture_registry
+			ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$fixture_manifest
+			zxfer_load_integration_test_fragments
+		) 2>&1
+	) || conditional_status=$?
+
+	printf '# name\tkind\tpre_pool\nouter_test\ttest\tyes\nnested_test\ttest\tno\n' \
+		>"$fixture_registry"
+	cat >"$fixture_fragment" <<'EOF'
+outer_test() {
+	nested_test() {
+		:
+	}
+}
+EOF
+	nested_status=0
+	nested_output=$(
+		(
+			INTEGRATION_TESTS_DIR=$fixture_root
+			ZXFER_INTEGRATION_REGISTRY_FILE=$fixture_registry
+			ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$fixture_manifest
+			zxfer_load_integration_test_fragments
+		) 2>&1
+	) || nested_status=$?
+
+	assertEquals "Top-level exit must be rejected before a fragment can silently end the caller." \
+		1 "$exit_status"
+	assertContains "Top-level exit rejection should identify executable fragment code." \
+		"$exit_output" "executable top-level shell code"
+	assertEquals "Top-level state mutation must be rejected before sourcing." \
+		1 "$mutation_status"
+	assertContains "State-mutation rejection should identify executable fragment code." \
+		"$mutation_output" "executable top-level shell code"
+	assertEquals "A conditional definition must not let an external executable satisfy the registry." \
+		1 "$conditional_status"
+	assertContains "Conditional definitions should fail the definition-only boundary." \
+		"$conditional_output" "executable top-level shell code"
+	assertEquals "Nested registered definitions must fail closed." 1 "$nested_status"
+	assertContains "Nested-definition rejection should identify the structural violation." \
+		"$nested_output" "nested function definition"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_harness_declares_remote_parallel_rendered_failure_case() {
-	harness_contents=$(cat "$INTEGRATION_HARNESS")
+	fragment_contents=$(zxfer_test_integration_fragment_corpus)
 	registry_contents=$(cat "$INTEGRATION_REGISTRY")
 
-	assertContains "The integration harness should define the rendered remote parallel failure integration case." \
-		"$harness_contents" "remote_parallel_rendered_failure_origin_test()"
+	assertContains "A manifest-listed integration fragment should define the rendered remote parallel failure integration case." \
+		"$fragment_contents" "remote_parallel_rendered_failure_origin_test()"
 	assertContains "The integration harness should keep the rendered remote parallel failure case in the declared test sequence." \
 		"$registry_contents" "remote_parallel_rendered_failure_origin_test"
 }
@@ -287,16 +732,17 @@ test_integration_registry_rejects_bad_schema_duplicates_and_undefined_functions(
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_main_rejects_invalid_registry_before_any_zpool_lookup() {
 	bad_registry="$TEST_TMPDIR/integration-registry-main-invalid.tsv"
-	zpool_marker="$TEST_TMPDIR/zpool-called"
+	tool_lookup_log="$TEST_TMPDIR/tool-lookups-for-invalid-registry"
 	printf '%s\n' "# invalid header" >"$bad_registry"
+	rm -f "$tool_lookup_log"
 
 	status=0
 	output=$(
 		(
 			ZXFER_INTEGRATION_REGISTRY_FILE=$bad_registry
-			zpool() {
-				printf '%s\n' "called" >"$zpool_marker"
-				return 1
+			require_cmd() {
+				printf '%s\n' "$1" >>"$tool_lookup_log"
+				exit 97
 			}
 			main
 		) 2>&1
@@ -305,10 +751,38 @@ test_integration_main_rejects_invalid_registry_before_any_zpool_lookup() {
 	assertEquals "Invalid registries should stop the harness." 1 "$status"
 	assertContains "The early failure should report the registry schema error." \
 		"$output" "header does not match the 3-field registry schema"
-	zpool_marker_status=0
-	[ ! -e "$zpool_marker" ] || zpool_marker_status=1
-	assertEquals "Registry validation must complete before the harness touches zpool." \
-		0 "$zpool_marker_status"
+	tool_lookup_status=0
+	[ ! -s "$tool_lookup_log" ] || tool_lookup_status=1
+	assertEquals "Registry validation must complete before any dependency lookup." \
+		0 "$tool_lookup_status"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_integration_main_rejects_invalid_fragment_manifest_before_any_zpool_lookup() {
+	bad_manifest="$TEST_TMPDIR/integration-fragment-main-invalid.tsv"
+	tool_lookup_log="$TEST_TMPDIR/tool-lookups-for-invalid-fragment"
+	printf '%s\n' "# invalid header" >"$bad_manifest"
+	rm -f "$tool_lookup_log"
+
+	status=0
+	output=$(
+		(
+			ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE=$bad_manifest
+			require_cmd() {
+				printf '%s\n' "$1" >>"$tool_lookup_log"
+				exit 97
+			}
+			main
+		) 2>&1
+	) || status=$?
+
+	assertEquals "Invalid fragment manifests should stop the harness." 1 "$status"
+	assertContains "The early failure should report the fragment manifest schema error." \
+		"$output" "header does not match the one-field manifest schema"
+	tool_lookup_status=0
+	[ ! -s "$tool_lookup_log" ] || tool_lookup_status=1
+	assertEquals "Fragment validation must complete before any dependency lookup." \
+		0 "$tool_lookup_status"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -355,14 +829,14 @@ test_pool_fixture_workdir_guard_rejects_traversal_and_symlink_escape() {
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_harness_does_not_skip_child_property_assertions_on_darwin() {
-	harness_contents=$(cat "$INTEGRATION_HARNESS")
+	fragment_contents=$(zxfer_test_integration_fragment_corpus)
 
 	assertContains "The integration harness should still assert inherited child atime after initial replication." \
-		"$harness_contents" "Expected atime=off on \$dest_child, got \$child_atime."
+		"$fragment_contents" "Expected atime=off on \$dest_child, got \$child_atime."
 	assertContains "The integration harness should still assert child atime after an explicit property pass." \
-		"$harness_contents" "Expected atime=off to be set on \$dest_child after property pass."
+		"$fragment_contents" "Expected atime=off to be set on \$dest_child after property pass."
 	assertNotContains "Darwin should not bypass supported child property reconciliation assertions." \
-		"$harness_contents" "Skipping child atime assertion on Darwin"
+		"$fragment_contents" "Skipping child atime assertion on Darwin"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

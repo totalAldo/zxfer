@@ -12,10 +12,11 @@ clean.
 
 Budgets that pin these results live in `tests/perf_budgets.tsv`
 (micro-bench helper-spawn and profile-counter budgets) and
-`tests/budget_policy.tsv` (universal module/function/test complexity ceilings
-plus sensitive call-site ratchets). Performance and call-site budgets ratchet
-down; the universal ceilings prevent oversized units without rewarding an
-unrelated source-total merge.
+`tests/budget_policy.tsv` (universal production module/function and focused
+test/integration-fixture complexity ceilings plus sensitive call-site
+ratchets). Performance and call-site budgets ratchet down; the universal
+ceilings prevent oversized units without rewarding an unrelated source-total
+merge.
 
 ## Measured Results
 
@@ -51,8 +52,9 @@ Remote and structural results:
 - Structural size: the property-cache module and background-job runner module
   were deleted outright. Path security, lock coordination, and runtime
   artifacts are current concern-specific modules; universal per-module,
-  per-function, decision, and test-file ceilings prevent catch-all growth,
-  while sensitive caller counts ratchet down in `tests/budget_policy.tsv`.
+  per-function, decision, test-file, integration-fragment, integration-runner,
+  and shunit `setUp` ceilings prevent catch-all growth, while sensitive caller
+  counts ratchet down in `tests/budget_policy.tsv`.
 
 Recursive property-prefetch grouping was measured again during the module
 ownership refactor. The two required recursive `zfs get` views are unchanged,

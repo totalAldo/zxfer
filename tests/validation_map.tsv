@@ -42,7 +42,9 @@ src/*.sh	tests/test_zxfer_launcher.sh,tests/test_run_coverage.sh	basic_replicati
 tests/check_architecture.sh	tests/test_check_architecture.sh	-	-	docs/architecture.md	Architecture-check changes need focused policy fixtures before wider validation.
 tests/architecture_*	tests/test_check_architecture.sh	-	-	docs/architecture.md	Architecture policy changes need focused ownership, layering, eval-inventory, and scratch-collision fixtures.
 tests/extract_*	tests/test_check_architecture.sh	-	-	docs/architecture.md	Architecture extractor changes need focused lexical false-positive and false-negative fixtures.
-tests/measure_shell_complexity.awk	tests/test_run_budget_check.sh	-	-	docs/testing.md	Complexity-metric lexer changes need focused function-span and decision-count fixtures.
+tests/measure_shell_complexity.awk	tests/test_run_budget_check.sh,tests/test_run_integration_zxfer.sh	-	-	docs/testing.md	The shell-aware function lexer drives production budgets and integration-fragment definition validation.
+tests/run_budget_check.sh	tests/test_run_budget_check.sh	-	-	docs/testing.md,CONTRIBUTING.md,OPTIMIZATION.md	Budget-runner changes need metric, policy, list-output, and fail-closed fixture coverage.
+tests/budget_policy.tsv	tests/test_run_budget_check.sh	-	-	docs/testing.md,CONTRIBUTING.md,OPTIMIZATION.md	Budget-policy changes need contract coverage and explicit ceiling or ratchet justification.
 tests/function_scratch_baseline.tsv	tests/test_check_architecture.sh	-	-	docs/architecture.md	Scratch-overlap baseline changes need exact new/stale tuple validation.
 tests/run_coverage.sh	tests/test_run_coverage.sh	-	-	docs/testing.md,CONTRIBUTING.md	Coverage-runner changes need policy and report-contract tests.
 tests/coverage_policy.tsv	tests/test_run_coverage.sh	-	-	docs/testing.md,CONTRIBUTING.md	Coverage thresholds must retain an exact row for every production coverage target and TOTAL.
@@ -52,8 +54,16 @@ tests/generate_solaris_manpage.sh	tests/test_generate_solaris_manpage.sh,tests/t
 tests/run_shunit_tests.sh	tests/test_run_shunit_tests.sh	-	-	docs/testing.md,CONTRIBUTING.md	Unit-runner changes need dispatch, ordering, and signal-cleanup coverage.
 tests/run_vm_matrix.sh	tests/test_run_vm_matrix.sh	-	-	docs/testing.md,docs/platforms.md	VM-runner changes need host-safe argument and guest-command tests.
 tests/run_integration_zxfer.sh	tests/test_run_integration_zxfer.sh	usage_error_tests,basic_replication_test	-	docs/testing.md	Integration-harness changes need runner contracts before a manual guest run.
+tests/run_dx_benchmark.sh	tests/test_run_dx_benchmark.sh	-	-	docs/testing.md,docs/external-tools.md	Workflow-timing changes need fixed-argv, artifact, report-only, percentile, and signal-cleanup contract tests.
 tests/run_perf_tests.sh	tests/test_run_perf_tests.sh	-	chain_local	docs/testing.md	Performance-runner changes need artifact and argument-contract tests.
 tests/integration_test_registry.tsv	tests/test_run_integration_zxfer.sh	-	-	docs/testing.md	Integration registry changes must preserve validated function names, pre-pool checks, filtering, and exact order.
+tests/integration_fragment_manifest.tsv	tests/test_run_integration_zxfer.sh,tests/test_validate.sh	-	-	docs/testing.md	Integration fragment-manifest changes must preserve validated fixed-order loading and exact quick-validation ownership before any pool access.
+tests/integration/cli_reporting_tests.sh	tests/test_run_integration_zxfer.sh	usage_error_tests,runtime_failure_report_test	-	docs/testing.md	CLI/reporting integration definitions affect usage errors, structured failures, diagnostics, and error-log behavior.
+tests/integration/snapshot_replication_tests.sh	tests/test_run_integration_zxfer.sh	basic_replication_test,force_rollback_test	chain_local	docs/testing.md	Snapshot/replication integration definitions affect retention, seeding, divergence, and convergence behavior.
+tests/integration/property_backup_tests.sh	tests/test_run_integration_zxfer.sh	property_backup_restore_test,property_override_and_ignore_test	fanout_local_j4_props	docs/testing.md	Property/backup integration definitions affect reconciliation, metadata storage, and restore behavior.
+tests/integration/remote_security_tests.sh	tests/test_run_integration_zxfer.sh	remote_origin_target_uncompressed_test,malformed_remote_capability_response_fails_closed_test	chain_remote_mock	docs/testing.md	Remote/security integration definitions affect secure PATH, SSH wrappers, capability protocols, and remote execution.
+tests/integration/jobs_platform_tests.sh	tests/test_run_integration_zxfer.sh	job_limit_enforcement_test,migration_service_failure_test	fanout_local_j4_props	docs/testing.md	Jobs/platform integration definitions affect progress, supervision, cleanup, migration services, and platform behavior.
+tests/integration/*.sh	tests/test_run_integration_zxfer.sh	usage_error_tests,basic_replication_test	-	docs/testing.md	Future integration fragments must run the host-safe loader and safety-contract suite until they receive an explicit concern-specific mapping.
 tests/helpers/integration_test_registry.sh	tests/test_run_integration_zxfer.sh	-	-	docs/testing.md	Integration registry parsing must remain non-eval and fail closed before pool access.
 tests/helpers/lifecycle.sh	tests/test_run_shunit_tests.sh,tests/test_zxfer_launcher.sh	-	-	docs/testing.md	Shared unit lifecycle changes need runner cleanup coverage and a representative launcher suite.
 tests/helpers/process_capture.sh	tests/test_run_shunit_tests.sh,tests/test_zxfer_launcher.sh	-	-	docs/testing.md	Shared process-capture changes need runner supervision coverage and a representative launcher suite.
@@ -66,6 +76,7 @@ tests/helpers/zxfer_remote_fixtures.sh	tests/test_run_integration_zxfer.sh,tests
 tests/run_perf_compare.sh	tests/test_run_perf_compare.sh	-	chain_local	docs/testing.md	Performance-comparison changes need non-gating comparison-contract tests.
 tests/run_property_prefetch_benchmark.sh	tests/test_run_property_prefetch_benchmark.sh	-	-	docs/testing.md,docs/external-tools.md,OPTIMIZATION.md	The offline property-prefetch gate needs deterministic-fixture, exact-output, timing-threshold, memory-threshold, locale-stability, and no-ZFS contract tests.
 tests/test_run_property_prefetch_benchmark.sh	@self	-	-	docs/testing.md,OPTIMIZATION.md	Property-prefetch benchmark contracts run without executing the timing gate.
+tests/test_run_dx_benchmark.sh	@self	-	-	docs/testing.md	Workflow-timing contracts run with fake commands and do not execute the measured validation paths.
 tests/validate.sh	tests/test_validate.sh,tests/test_ci_workflow_contracts.sh	-	-	docs/testing.md,CONTRIBUTING.md	Validation-dispatch changes need safety-boundary and mapping tests.
 tests/validation_map.tsv	tests/test_validate.sh	-	-	docs/testing.md	Map changes need deterministic first-match selection tests.
 tests/validation_profiles.tsv	tests/test_validate.sh	-	-	docs/testing.md	Profile changes need closed-step dispatch tests.

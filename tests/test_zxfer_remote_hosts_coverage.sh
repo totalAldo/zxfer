@@ -35,8 +35,7 @@ oneTimeTearDown() {
 	zxfer_test_cleanup_tmpdir
 }
 
-setUp() {
-	zxfer_source_runtime_modules_through "zxfer_replication.sh"
+reset_remote_hosts_coverage_environment() {
 	PATH=$TEST_ORIGINAL_PATH
 	export PATH
 	mkdir -p "$TEST_PRIVATE_DEFAULT_TMPDIR"
@@ -55,6 +54,9 @@ setUp() {
 	zxfer_list_default_tmpdir_candidates() {
 		printf '%s\n' "$TEST_PRIVATE_DEFAULT_TMPDIR"
 	}
+}
+
+reset_remote_hosts_coverage_options() {
 	g_option_v_verbose=0
 	g_option_V_very_verbose=0
 	g_option_O_origin_host=""
@@ -62,6 +64,9 @@ setUp() {
 	g_option_Y_yield_iterations=1
 	g_cmd_zfs="/sbin/zfs"
 	g_cmd_ssh="$FAKE_SSH_BIN"
+}
+
+reset_remote_hosts_coverage_runtime_state() {
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
 	g_zxfer_dependency_path=$ZXFER_DEFAULT_SECURE_PATH
@@ -75,6 +80,13 @@ setUp() {
 	if command -v zxfer_reset_owned_lock_tracking >/dev/null 2>&1; then
 		zxfer_reset_owned_lock_tracking
 	fi
+}
+
+setUp() {
+	zxfer_source_runtime_modules_through "zxfer_replication.sh"
+	reset_remote_hosts_coverage_environment
+	reset_remote_hosts_coverage_options
+	reset_remote_hosts_coverage_runtime_state
 	zxfer_test_write_env_fake_ssh "$FAKE_SSH_BIN"
 }
 

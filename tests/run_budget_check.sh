@@ -69,6 +69,41 @@ test_definition_file_set() {
 	)
 }
 
+test_helper_file_set() {
+	(
+		cd "$ZXFER_ROOT"
+		for l_file in tests/helpers/*.sh; do
+			[ -f "$l_file" ] || continue
+			printf '%s\n' "$l_file"
+		done
+	)
+}
+
+integration_fragment_file_set() {
+	(
+		cd "$ZXFER_ROOT"
+		for l_file in tests/integration/*.sh; do
+			[ -f "$l_file" ] || continue
+			printf '%s\n' "$l_file"
+		done
+	)
+}
+
+integration_composition_runner_file_set() {
+	(
+		cd "$ZXFER_ROOT"
+		[ ! -f tests/run_integration_zxfer.sh ] ||
+			printf '%s\n' tests/run_integration_zxfer.sh
+	)
+}
+
+setup_definition_file_set() {
+	test_definition_file_set
+	test_helper_file_set
+	integration_fragment_file_set
+	integration_composition_runner_file_set
+}
+
 cat_budget_file_set() {
 	(
 		cd "$ZXFER_ROOT"
@@ -105,14 +140,61 @@ measure_function_metrics() {
 	)
 }
 
+measure_setup_metrics() {
+	l_setup_file_list=$(setup_definition_file_set)
+	set --
+	while IFS= read -r l_file; do
+		[ -n "$l_file" ] || continue
+		set -- "$@" "$l_file"
+	done <<EOF
+$l_setup_file_list
+EOF
+	[ "$#" -gt 0 ] || return 0
+	l_setup_metrics=$(
+		cd "$ZXFER_ROOT"
+		awk -f "$COMPLEXITY_AWK" "$@"
+	) || return "$?"
+	printf '%s\n' "$l_setup_metrics" | awk -F "$TAB" '$2 == "setUp"'
+}
+
+measure_setup_headers() {
+	l_setup_header_file_list=$(setup_definition_file_set)
+	set --
+	while IFS= read -r l_file; do
+		[ -n "$l_file" ] || continue
+		set -- "$@" "$l_file"
+	done <<EOF
+$l_setup_header_file_list
+EOF
+	[ "$#" -gt 0 ] || return 0
+	l_setup_headers=$(
+		cd "$ZXFER_ROOT"
+		awk -v headers_only=1 -f "$COMPLEXITY_AWK" "$@"
+	) || return "$?"
+	printf '%s\n' "$l_setup_headers" | awk -F "$TAB" '$2 == "setUp"'
+}
+
+file_set_for_line_ceiling() {
+	case "$1" in
+	module_lines)
+		module_file_set
+		;;
+	test_lines)
+		test_definition_file_set
+		;;
+	integration_fragment_lines)
+		integration_fragment_file_set
+		;;
+	integration_runner_lines)
+		integration_composition_runner_file_set
+		;;
+	esac
+}
+
 check_file_line_ceiling() {
 	l_file_kind=$1
 	l_file_max=$2
-	if [ "$l_file_kind" = module_lines ]; then
-		l_file_list=$(module_file_set)
-	else
-		l_file_list=$(test_definition_file_set)
-	fi
+	l_file_list=$(file_set_for_line_ceiling "$l_file_kind")
 
 	while IFS= read -r l_file; do
 		[ -n "$l_file" ] || continue
@@ -126,17 +208,54 @@ EOF
 }
 
 measure_max_file_lines() {
-	if [ "$1" = module_lines ]; then
-		l_measure_file_list=$(module_file_set)
-	else
-		l_measure_file_list=$(test_definition_file_set)
-	fi
+	l_measure_file_list=$(file_set_for_line_ceiling "$1")
 
 	while IFS= read -r l_file; do
 		[ -n "$l_file" ] || continue
 		measure_lines "$l_file"
 	done <<EOF | awk '$1 > maximum { maximum = $1 } END { print maximum + 0 }'
 $l_measure_file_list
+EOF
+}
+
+check_setup_ceiling() {
+	l_setup_max=$1
+	l_setup_metrics=$(measure_setup_metrics) || return "$?"
+	l_setup_headers=$(measure_setup_headers) || return "$?"
+	while IFS=$TAB read -r l_file l_function l_start l_lines l_decisions; do
+		[ -n "$l_file" ] || continue
+		if [ "$l_lines" -gt "$l_setup_max" ]; then
+			printf 'setup_lines\t%s:%s:%s\t%s\t%s\n' \
+				"$l_file" "$l_start" "$l_function" "$l_lines" "$l_setup_max"
+		fi
+	done <<EOF
+$l_setup_metrics
+EOF
+	{
+		printf '%s\n' "$l_setup_metrics" |
+			awk -F "$TAB" 'NF >= 4 { printf "metric\t%s\t%s\t%s\n", $1, $2, $3 }'
+		printf '%s\n' "$l_setup_headers" |
+			awk -F "$TAB" 'NF >= 3 { printf "header\t%s\t%s\t%s\n", $1, $2, $3 }'
+	} | awk -F "$TAB" -v maximum="$l_setup_max" '
+		$1 == "metric" {
+			measured[$2 SUBSEP $3 SUBSEP $4] = 1
+			next
+		}
+		$1 == "header" && !(($2 SUBSEP $3 SUBSEP $4) in measured) {
+			printf "setup_lines\t%s:%s:%s\tunmeasured\t%s\n", $2, $4, $3, maximum
+		}
+	'
+}
+
+report_setup_ceiling_violations() {
+	l_setup_max=$1
+	l_setup_violations=$(check_setup_ceiling "$l_setup_max") || return "$?"
+	[ -n "$l_setup_violations" ] || return 0
+
+	while IFS=$TAB read -r l_kind l_target l_current l_max; do
+		report_violation "$l_kind" "$l_target" "$l_current" "$l_max" "test fixture setup ceiling or span validation failed"
+	done <<EOF
+$l_setup_violations
 EOF
 }
 
@@ -227,9 +346,13 @@ run_check() {
 		esac
 		ROW_COUNT=$((ROW_COUNT + 1))
 		case "$l_kind" in
-		module_lines | test_lines)
+		module_lines | test_lines | integration_fragment_lines | integration_runner_lines)
 			[ "$l_target" = ALL ] || report_violation "$l_kind" "$l_target" - "$l_max" "target must be ALL"
 			check_file_line_ceiling "$l_kind" "$l_max"
+			;;
+		setup_lines)
+			[ "$l_target" = ALL ] || report_violation "$l_kind" "$l_target" - "$l_max" "target must be ALL"
+			report_setup_ceiling_violations "$l_max"
 			;;
 		function_lines | function_decisions)
 			[ "$l_target" = ALL ] || report_violation "$l_kind" "$l_target" - "$l_max" "target must be ALL"
@@ -283,12 +406,16 @@ run_check() {
 
 print_list() {
 	l_function_metrics=$(measure_function_metrics)
+	l_setup_metrics=$(measure_setup_metrics)
 	l_max_function_lines=$(printf '%s\n' "$l_function_metrics" | awk -F "$TAB" '$4 > maximum { maximum = $4 } END { print maximum + 0 }')
 	l_max_function_decisions=$(printf '%s\n' "$l_function_metrics" | awk -F "$TAB" '$5 > maximum { maximum = $5 } END { print maximum + 0 }')
 	printf 'module_lines\tALL\t%s\n' "$(measure_max_file_lines module_lines)"
 	printf 'function_lines\tALL\t%s\n' "$l_max_function_lines"
 	printf 'function_decisions\tALL\t%s\n' "$l_max_function_decisions"
 	printf 'test_lines\tALL\t%s\n' "$(measure_max_file_lines test_lines)"
+	printf 'integration_fragment_lines\tALL\t%s\n' "$(measure_max_file_lines integration_fragment_lines)"
+	printf 'integration_runner_lines\tALL\t%s\n' "$(measure_max_file_lines integration_runner_lines)"
+	printf 'setup_lines\tALL\t%s\n' "$(printf '%s\n' "$l_setup_metrics" | awk -F "$TAB" '$4 > maximum { maximum = $4 } END { print maximum + 0 }')"
 	printf 'executable_lines\tTOTAL\t%s\n' "$(measure_executable_lines)"
 	# Caller symbols cannot be discovered from the tree, so refresh the
 	# measured counts for the symbols already tracked by the policy.

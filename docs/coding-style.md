@@ -254,8 +254,12 @@ zxfer_get_ssh_transport_tokens_for_host() {
   `tests/helpers/*_fixtures.sh` files and must be sourced explicitly only by
   the suites that own those cases.
 - Keep fixtures explicit and local to the suite unless they are broadly useful.
-- Update the integration harness expectations when behavior changes, but leave
-  actual integration execution to a human operator.
+- Keep each shunit `setUp` focused on lifecycle composition and below the
+  budgeted 30-line ceiling; move domain-specific preparation into named fixture
+  helpers.
+- Update integration expectations when behavior changes. Automated runs use
+  the disposable VM matrix with a `smoke` or `local` profile; leave direct-host
+  integration-harness execution to a human operator.
 
 ## Required Validation
 

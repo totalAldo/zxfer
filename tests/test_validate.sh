@@ -18,7 +18,7 @@ oneTimeTearDown() {
 	zxfer_test_cleanup_tmpdir
 }
 
-setUp() {
+reset_validate_fixture_root() {
 	FAKE_ROOT="$TEST_TMPDIR/fake-root"
 	VALIDATION_LOG="$TEST_TMPDIR/validation.log"
 	rm -rf "$FAKE_ROOT"
@@ -27,7 +27,9 @@ setUp() {
 	ln -s "$VALIDATE_BIN" "$FAKE_ROOT/tests/validate.sh"
 	ln -s "$ZXFER_ROOT/tests/validation_map.tsv" "$FAKE_ROOT/tests/validation_map.tsv"
 	ln -s "$ZXFER_ROOT/tests/validation_profiles.tsv" "$FAKE_ROOT/tests/validation_profiles.tsv"
+}
 
+write_validate_fixture_commands() {
 	cat >"$FAKE_ROOT/tests/run_lint.sh" <<'EOF'
 #!/bin/sh
 printf 'lint:%s\n' "$*" >>"${VALIDATION_LOG:?}"
@@ -48,11 +50,20 @@ EOF
 #!/bin/sh
 printf 'property-prefetch:%s\n' "$*" >>"${VALIDATION_LOG:?}"
 EOF
+}
+
+make_validate_fixture_commands_executable() {
 	chmod +x "$FAKE_ROOT/tests/run_lint.sh" \
 		"$FAKE_ROOT/tests/run_shunit_tests.sh" \
 		"$FAKE_ROOT/tests/run_coverage.sh" \
 		"$FAKE_ROOT/tests/run_vm_matrix.sh" \
 		"$FAKE_ROOT/tests/run_property_prefetch_benchmark.sh"
+}
+
+setUp() {
+	reset_validate_fixture_root
+	write_validate_fixture_commands
+	make_validate_fixture_commands_executable
 }
 
 validation_mapping_block() {
@@ -143,6 +154,70 @@ test_validate_quick_maps_every_split_suite_fragment_to_its_stable_parent() {
 		"lint:budget
 shunit:--jobs 4 tests/test_zxfer_backup_metadata.sh tests/test_zxfer_exec.sh tests/test_zxfer_property_reconcile.sh tests/test_zxfer_remote_hosts.sh tests/test_zxfer_replication.sh tests/test_zxfer_runtime.sh tests/test_zxfer_send_receive.sh" \
 		"$(cat "$VALIDATION_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_validate_quick_maps_every_manifest_integration_fragment_to_exact_loader_contracts() {
+	set --
+	while IFS= read -r l_fragment_path; do
+		[ -n "$l_fragment_path" ] || continue
+		set -- "$@" "tests/$l_fragment_path"
+	done <<EOF
+$(awk 'NR > 1 { print }' "$ZXFER_ROOT/tests/integration_fragment_manifest.tsv")
+EOF
+
+	output=$(
+		VALIDATION_LOG="$VALIDATION_LOG" \
+			"$FAKE_ROOT/tests/validate.sh" quick "$@"
+	)
+
+	for l_fragment_path in "$@"; do
+		l_mapping_block=$(validation_mapping_block "$output" "$l_fragment_path")
+		assertContains "Each manifest fragment should select its exact row before the wildcard fallback." \
+			"$l_mapping_block" "matched:     $l_fragment_path"
+		assertContains "Each manifest fragment should select the stable loader and safety-contract suite." \
+			"$l_mapping_block" "tests/test_run_integration_zxfer.sh"
+	done
+	assertEquals "Manifest fragments should deduplicate to one host-safe loader-contract suite." \
+		"lint:budget
+shunit:--jobs 4 tests/test_run_integration_zxfer.sh" "$(cat "$VALIDATION_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_validate_quick_maps_fragment_manifest_to_loader_and_map_contracts() {
+	output=$(
+		VALIDATION_LOG="$VALIDATION_LOG" \
+			"$FAKE_ROOT/tests/validate.sh" quick tests/integration_fragment_manifest.tsv
+	)
+	l_mapping_block=$(validation_mapping_block "$output" tests/integration_fragment_manifest.tsv)
+
+	assertContains "The fragment manifest should use its exact validation-map row." \
+		"$l_mapping_block" "matched:     tests/integration_fragment_manifest.tsv"
+	assertContains "Manifest changes should validate integration loading and quick-map completeness together." \
+		"$l_mapping_block" "tests/test_run_integration_zxfer.sh,tests/test_validate.sh"
+	assertEquals "Manifest changes should execute both host-safe contract suites." \
+		"lint:budget
+shunit:--jobs 4 tests/test_run_integration_zxfer.sh tests/test_validate.sh" \
+		"$(cat "$VALIDATION_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_validate_quick_maps_unclassified_integration_fragments_to_loader_contracts() {
+	output=$(
+		VALIDATION_LOG="$VALIDATION_LOG" \
+			"$FAKE_ROOT/tests/validate.sh" quick tests/integration/future_concern_tests.sh
+	)
+	l_mapping_block=$(validation_mapping_block "$output" tests/integration/future_concern_tests.sh)
+
+	assertContains "A future integration fragment should select the dedicated wildcard before generic test mappings." \
+		"$l_mapping_block" "matched:     tests/integration/*.sh"
+	assertContains "A new integration concern fragment should select the stable loader and safety-contract suite." \
+		"$l_mapping_block" "tests/test_run_integration_zxfer.sh"
+	assertContains "The integration fallback should explain why unclassified fragments cannot skip focused validation." \
+		"$l_mapping_block" "Future integration fragments must run the host-safe loader and safety-contract suite"
+	assertEquals "Quick validation should execute the integration loader contract for an unclassified fragment." \
+		"lint:budget
+shunit:--jobs 4 tests/test_run_integration_zxfer.sh" "$(cat "$VALIDATION_LOG")"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -367,9 +442,21 @@ $(validation_map_field_values 2)
 EOF
 
 	missing_integration=
+	integration_fragment_paths=$(awk 'NR > 1 { print }' \
+		"$ZXFER_ROOT/tests/integration_fragment_manifest.tsv")
 	while IFS= read -r l_test; do
 		[ -n "$l_test" ] || continue
-		if ! grep -q "^$l_test() {" "$ZXFER_ROOT/tests/run_integration_zxfer.sh"; then
+		l_integration_definition_found=0
+		while IFS= read -r l_integration_fragment_path; do
+			[ -n "$l_integration_fragment_path" ] || continue
+			if grep -q "^$l_test() {" "$ZXFER_ROOT/tests/$l_integration_fragment_path"; then
+				l_integration_definition_found=1
+				break
+			fi
+		done <<-EOF
+			$integration_fragment_paths
+		EOF
+		if [ "$l_integration_definition_found" -ne 1 ]; then
 			missing_integration="$missing_integration${missing_integration:+
 }$l_test"
 		fi
@@ -428,6 +515,44 @@ EOF
 
 	assertEquals "Every canonical module should have a concern-specific quick-validation row before the generic source fallback." \
 		"" "$missing_modules"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_validation_map_has_an_exact_row_for_every_integration_fragment() {
+	invalid_fragments=
+	l_fallback_count=$(awk -F '\t' \
+		'$1 == "tests/integration/*.sh" { count++ } END { print count + 0 }' \
+		"$ZXFER_ROOT/tests/validation_map.tsv")
+	l_fallback_line=$(awk -F '\t' \
+		'$1 == "tests/integration/*.sh" { print NR; exit }' \
+		"$ZXFER_ROOT/tests/validation_map.tsv")
+	assertEquals "The integration quick-validation map should have one safe wildcard fallback." \
+		1 "$l_fallback_count"
+	while IFS= read -r l_fragment; do
+		[ -n "$l_fragment" ] || continue
+		l_fragment_path="tests/$l_fragment"
+		if ! awk -F '\t' -v fragment_path="$l_fragment_path" \
+			-v fallback_line="$l_fallback_line" '
+			$1 == fragment_path {
+				count++
+				exact_line = NR
+				suites = $2
+			}
+			END {
+				has_owner = suites ~ /(^|,)tests\/test_run_integration_zxfer[.]sh(,|$)/
+				exit !(count == 1 && exact_line < fallback_line && has_owner)
+			}
+		' \
+			"$ZXFER_ROOT/tests/validation_map.tsv"; then
+			invalid_fragments="$invalid_fragments${invalid_fragments:+
+}$l_fragment_path"
+		fi
+	done <<EOF
+$(awk 'NR > 1 { print }' "$ZXFER_ROOT/tests/integration_fragment_manifest.tsv")
+EOF
+
+	assertEquals "Every manifest-listed integration fragment should have one owning-suite row before the safe wildcard fallback." \
+		"" "$invalid_fragments"
 }
 
 # shellcheck source=tests/shunit2/shunit2

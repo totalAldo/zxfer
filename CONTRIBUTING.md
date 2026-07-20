@@ -25,8 +25,8 @@ should prioritize:
 
 - `zxfer`: entry point
 - `src/`: functional shell modules
-- `tests/`: shunit2 suites, coverage runner, direct integration harness, and
-  the VM-backed integration matrix
+- `tests/`: shunit2 suites, coverage runner, the stable integration entry
+  point plus concern fragments, and the VM-backed integration matrix
 - `docs/`: operator and contributor guides
 - `examples/`: runnable command templates for common workflows
 - `man/`: primary CLI reference (`zxfer.8`, `zxfer.1m`)
@@ -67,7 +67,8 @@ Run the pinned local lint stack:
 
 The lint stack includes the complexity and anti-rebloat budget gate
 (`./tests/run_lint.sh budget`), which enforces universal per-module,
-per-function, and focused-test ceilings plus sensitive-caller ratchets from
+per-function, focused-test, integration-fragment, integration-runner, and
+shunit `setUp` ceilings plus sensitive-caller ratchets from
 `tests/budget_policy.tsv`.
 It also checks that `man/zxfer.1m` is the exact generated Solaris/illumos
 rendering of canonical `man/zxfer.8`; edit only the `.8` page, then run
@@ -80,6 +81,19 @@ Lowering a ceiling or caller ratchet is routine maintenance; raising one
 requires explicit justification in the PR that edits it. Use
 `./tests/run_budget_check.sh --list` to print current measured values in
 policy format when ratcheting budgets down.
+
+For optional, non-gating evidence about the changed-code loop, record warmed
+named-test and representative quick-validation timings without applying a
+threshold:
+
+```sh
+./tests/run_dx_benchmark.sh \
+  --case named,quick --samples 5 \
+  --output-dir /tmp/zxfer-dx-candidate
+```
+
+The complete `shunit` and `validate` timing cases are available for wider
+measurements; see [docs/testing.md](./docs/testing.md).
 
 The shell lint targets include tracked and non-ignored untracked `*.sh` files
 and the `zxfer` launcher, so a newly extracted module is checked before it is
@@ -167,6 +181,15 @@ Run the integration harness interactively when you want per-command approval:
 ```sh
 ./tests/run_integration_zxfer.sh
 ```
+
+Integration test bodies live in concern-focused files under
+`tests/integration/`. `tests/integration_fragment_manifest.tsv` is the fixed,
+non-evaluated source order, while `tests/integration_test_registry.tsv` is the
+exact execution order and pre-pool classification. Add a case to the matching
+fragment and registry row; change the fragment manifest only when adding or
+removing a whole concern fragment. The stable runner keeps ownership of
+argument parsing, confirmation, pool lifecycle, filtering, supervision, and
+cleanup.
 
 ## Documentation Expectations
 

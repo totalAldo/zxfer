@@ -20,17 +20,24 @@ function is_shell_token_separator(char) {
 
 function shell_code(line,    output, i, char, token_start) {
 	output = ""
-	token_start = (quote == "")
+	line_continues = 0
+	token_start = shell_token_start
 	for (i = 1; i <= length(line); i++) {
 		char = substr(line, i, 1)
 		if (quote == "") {
 			if (char == "#" && token_start)
 				break
 			if (char == "\\") {
-				output = output char
 				if (i < length(line)) {
+					output = output char
 					i++
 					output = output substr(line, i, 1)
+				} else {
+					# POSIX removes an unquoted backslash-newline pair before
+					# recognizing tokens. Publish that state so the caller can
+					# analyze the complete logical line rather than letting a
+					# continued function header evade the scanner.
+					line_continues = 1
 				}
 				token_start = 0
 				continue
@@ -55,24 +62,28 @@ function shell_code(line,    output, i, char, token_start) {
 			continue
 		}
 		if (char == "\\") {
-			i++
+			if (i < length(line))
+				i++
+			else
+				line_continues = 1
 			continue
 		}
 		if (char == "\"")
 			quote = ""
 	}
+	shell_token_start = token_start
 	return output
 }
 
 function remember_heredoc(line, code,    fragment) {
 	if (index(code, "<<") == 0)
 		return
-	if (!match(line, /<<-?[ \t]*[\047\"]?[A-Za-z_][A-Za-z0-9_]*[\047\"]?/))
+	if (!match(line, /<<-?[ \t]*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/))
 		return
 	fragment = substr(line, RSTART, RLENGTH)
 	heredoc_strip_tabs = (fragment ~ /^<<-/)
 	sub(/^<<-?[ \t]*/, "", fragment)
-	gsub(/[\047\"]/, "", fragment)
+	gsub(/['"]/, "", fragment)
 	heredoc_delimiter = fragment
 }
 
@@ -88,6 +99,23 @@ function count_operator(code, operator,    count, position, remainder) {
 
 function is_shell_separator(char) {
 	return char == "" || char ~ /[ \t;|&()]/
+}
+
+function contains_function_header(code,    remainder, previous) {
+	remainder = code
+	while (match(remainder, /[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)/)) {
+		previous = (RSTART == 1 ? "" : substr(remainder, RSTART - 1, 1))
+		if (is_shell_separator(previous) || previous == "{" || previous == "}")
+			return 1
+		remainder = substr(remainder, RSTART + RLENGTH)
+	}
+	return 0
+}
+
+function report_definition_violation(line_number, message) {
+	printf "Invalid integration fragment [%s]: %s at line %d.\n", \
+		FILENAME, message, line_number
+	definition_violation = 1
 }
 
 # Count only braces that are standalone shell syntax. Parameter expansion and
@@ -122,14 +150,21 @@ FNR == 1 {
 	heredoc_delimiter = ""
 	heredoc_strip_tabs = 0
 	in_function = 0
+	pending_function_name = ""
+	pending_function_start = 0
 	case_depth = 0
 	group_depth = 0
+	logical_code = ""
+	logical_original = ""
+	logical_start = 0
+	shell_token_start = 1
+	definition_violation = 0
 }
 
 {
-	original = $0
+	physical_original = $0
 	if (heredoc_delimiter != "") {
-		candidate = original
+		candidate = physical_original
 		if (heredoc_strip_tabs)
 			sub(/^\t+/, "", candidate)
 		if (candidate == heredoc_delimiter) {
@@ -139,23 +174,75 @@ FNR == 1 {
 		next
 	}
 
-	code = shell_code(original)
+	if (logical_start == 0) {
+		logical_start = FNR
+		shell_token_start = (quote == "")
+	}
+	code_piece = shell_code(physical_original)
+	logical_code = logical_code code_piece
+	if (line_continues) {
+		logical_original = logical_original substr(physical_original, 1, length(physical_original) - 1)
+		next
+	}
+	code = logical_code
+	original = logical_original physical_original
+	code_start = logical_start
+	logical_code = ""
+	logical_original = ""
+	logical_start = 0
 	remember_heredoc(original, code)
 	normalized = trim(code)
 
-	if (!in_function && normalized ~ /^[A-Za-z_][A-Za-z0-9_]*\(\)[ \t]*\{$/) {
+	if (!in_function && pending_function_name != "") {
+		if (normalized == "")
+			next
+		if (normalized == "{") {
+			function_name = pending_function_name
+			function_start = pending_function_start
+			function_decisions = 0
+			in_function = 1
+			pending_function_name = ""
+			pending_function_start = 0
+			case_depth = 0
+			group_depth = 0
+			next
+		}
+		if (definitions_only)
+			report_definition_violation(pending_function_start, \
+				"function header does not use a measurable brace body")
+		pending_function_name = ""
+		pending_function_start = 0
+	}
+
+	if (!in_function && normalized ~ /^[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*\{$/) {
 		function_name = normalized
-		sub(/\(.*/, "", function_name)
-		function_start = FNR
+		sub(/[ \t]*\(.*/, "", function_name)
+		if (headers_only)
+			printf "%s\t%s\t%d\n", FILENAME, function_name, code_start
+		function_start = code_start
 		function_decisions = 0
 		in_function = 1
 		case_depth = 0
 		group_depth = 0
 		next
 	}
-
-	if (!in_function)
+	if (!in_function && normalized ~ /^[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)$/) {
+		pending_function_name = normalized
+		sub(/[ \t]*\(.*/, "", pending_function_name)
+		pending_function_start = code_start
+		if (headers_only)
+			printf "%s\t%s\t%d\n", FILENAME, pending_function_name, code_start
 		next
+	}
+
+	if (!in_function) {
+		if (definitions_only && normalized != "")
+			report_definition_violation(code_start, "executable top-level shell code")
+		next
+	}
+
+	if (definitions_only && contains_function_header(code))
+		report_definition_violation(code_start, "nested function definition")
 
 	function_decisions += count_decisions(code)
 	if (normalized ~ /^case[ \t]/)
@@ -164,7 +251,8 @@ FNR == 1 {
 		case_depth--
 
 	if (normalized == "}" && group_depth == 0) {
-		printf "%s\t%s\t%d\t%d\t%d\n", FILENAME, function_name, function_start, FNR - function_start + 1, function_decisions
+		if (!headers_only && !definitions_only)
+			printf "%s\t%s\t%d\t%d\t%d\n", FILENAME, function_name, function_start, FNR - function_start + 1, function_decisions
 		in_function = 0
 		case_depth = 0
 		group_depth = 0
@@ -175,4 +263,12 @@ FNR == 1 {
 	group_depth -= count_group_braces(code, "}")
 	if (group_depth < 0)
 		group_depth = 0
+}
+
+END {
+	if (definitions_only && !definition_violation &&
+		(pending_function_name != "" || in_function || heredoc_delimiter != "" || logical_start != 0))
+		report_definition_violation(FNR, "unterminated shell construct")
+	if (definitions_only && definition_violation)
+		exit 1
 }
