@@ -1267,7 +1267,10 @@ test_spawn_cleans_up_job_and_status_file_when_registration_fails() {
 	status_file_record="$TEST_TMPDIR/spawn_register_fail.statuspath"
 	rm -f "$status_file_record"
 	zxfer_test_capture_subshell '
-		g_zxfer_background_job_abort_grace_seconds=0
+		# Keep the production grace while making the wrapper the sole owner of
+		# descendant teardown. A zero grace plus an intentionally empty parent
+		# snapshot can kill the wrapper before its child finishes the status
+		# write, turning this artifact-cleanup assertion into a scheduler race.
 		zxfer_capture_background_job_descendant_identity_records() {
 			return 0
 		}
