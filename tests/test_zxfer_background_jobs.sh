@@ -1005,7 +1005,9 @@ test_abort_kills_whole_pipeline_on_wrapper_fallback_path() {
 		zxfer_spawn_supervised_background_job \
 			"unit_test" \
 			"sh -c 'echo \$\$ > $pid_file_one; exec sleep 300' | sh -c 'echo \$\$ > $pid_file_two; exec sleep 300'" \
-			"display abort pipeline"
+			"display abort pipeline" \
+			"$TEST_TMPDIR/abort_wrapper.stdout" \
+			"$TEST_TMPDIR/abort_wrapper.stderr"
 		job_id=$g_zxfer_background_job_last_id
 		status_file=$g_zxfer_background_job_last_status_file
 
@@ -1069,7 +1071,9 @@ test_abort_kills_whole_pipeline_process_group_on_setsid_path() {
 		zxfer_spawn_supervised_background_job \
 			"unit_test" \
 			"sh -c 'echo \$\$ > $pid_file_one; exec sleep 300' | sh -c 'echo \$\$ > $pid_file_two; exec sleep 300'" \
-			"display abort process group"
+			"display abort process group" \
+			"$TEST_TMPDIR/abort_setsid.stdout" \
+			"$TEST_TMPDIR/abort_setsid.stderr"
 		job_id=$g_zxfer_background_job_last_id
 		job_pid=$g_zxfer_background_job_last_runner_pid
 
@@ -1157,12 +1161,16 @@ test_abort_all_background_jobs_terminates_every_tracked_job() {
 		zxfer_spawn_supervised_background_job \
 			"unit_test" \
 			"sh -c 'echo \$\$ > $pid_file_one; exec sleep 300'" \
-			"display abort-all one"
+			"display abort-all one" \
+			"$TEST_TMPDIR/abort_all_one.stdout" \
+			"$TEST_TMPDIR/abort_all_one.stderr"
 		first_status_file=$g_zxfer_background_job_last_status_file
 		zxfer_spawn_supervised_background_job \
 			"unit_test" \
 			"sh -c 'echo \$\$ > $pid_file_two; exec sleep 300'" \
-			"display abort-all two"
+			"display abort-all two" \
+			"$TEST_TMPDIR/abort_all_two.stdout" \
+			"$TEST_TMPDIR/abort_all_two.stderr"
 		second_status_file=$g_zxfer_background_job_last_status_file
 
 		wait_for_nonempty_file "$pid_file_one" || printf 'setup=job-one-missing\n'
@@ -1216,7 +1224,9 @@ test_term_mid_run_teardown_through_wrapper_trap_kills_descendants() {
 		zxfer_spawn_supervised_background_job \
 			"unit_test" \
 			"sh -c 'echo \$\$ > $pid_file; exec sleep 300'" \
-			"display term mid-run"
+			"display term mid-run" \
+			"$TEST_TMPDIR/term_mid_run.stdout" \
+			"$TEST_TMPDIR/term_mid_run.stderr"
 		job_pid=$g_zxfer_background_job_last_runner_pid
 		job_id=$g_zxfer_background_job_last_id
 		status_file=$g_zxfer_background_job_last_status_file
@@ -1278,7 +1288,10 @@ test_spawn_cleans_up_job_and_status_file_when_registration_fails() {
 			printf "%s\n" "$5" >"'"$status_file_record"'"
 			return 1
 		}
-		zxfer_spawn_supervised_background_job "unit_test" "sleep 300" "display"
+		zxfer_spawn_supervised_background_job \
+			"unit_test" "sleep 300" "display" \
+			"$TEST_TMPDIR/register_fail.stdout" \
+			"$TEST_TMPDIR/register_fail.stderr"
 	'
 	leaked_status_file=$(cat "$status_file_record" 2>/dev/null)
 

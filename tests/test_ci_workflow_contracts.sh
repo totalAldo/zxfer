@@ -111,5 +111,17 @@ test_unit_workflow_installs_platform_test_prerequisites() {
 		"$workflow" "PKG_SUCCESS_ON_NOP=1 pkg install bash git"
 }
 
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_unit_workflow_bounds_process_heavy_suite_parallelism() {
+	workflow=$(cat "$UNIT_WORKFLOW_FILE")
+
+	assertNotContains "CI must not launch the entire process-heavy suite inventory concurrently." \
+		"$workflow" "--jobs 30"
+	assertContains "Hosted runners should match the documented four-worker validation default." \
+		"$workflow" "./tests/run_shunit_tests.sh --jobs 4"
+	assertContains "VM-backed platform jobs should respect their smaller guest CPU allocation." \
+		"$workflow" "./tests/run_shunit_tests.sh --jobs 2"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

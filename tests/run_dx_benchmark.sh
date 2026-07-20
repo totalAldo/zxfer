@@ -357,12 +357,27 @@ zxfer_dx_benchmark_resolve_setsid() {
 zxfer_dx_benchmark_launch_supervisor() {
 	g_zxfer_dx_benchmark_launch_pid=
 	case $- in
-	*m*) l_dx_launch_restore_monitor=0 ;;
-	*)
-		l_dx_launch_restore_monitor=1
-		zxfer_dx_benchmark_enable_job_control >/dev/null 2>&1 || :
+	*m*)
+		# An already monitored shell gives each asynchronous command its own
+		# process group, so starting setsid(1) here could make it fork and
+		# break direct-child ownership of $!.
+		"$@" &
+		g_zxfer_dx_benchmark_launch_pid=$!
+		return 0
 		;;
 	esac
+
+	# Prefer fixed-argv setsid isolation while monitor mode is disabled. This
+	# avoids changing non-interactive shell job-control state (notably BusyBox
+	# ash) and keeps the supervisor as the waitable direct child.
+	if l_dx_launch_setsid=$(zxfer_dx_benchmark_resolve_setsid); then
+		"$l_dx_launch_setsid" "$@" &
+		g_zxfer_dx_benchmark_launch_pid=$!
+		return 0
+	fi
+
+	l_dx_launch_restore_monitor=1
+	zxfer_dx_benchmark_enable_job_control >/dev/null 2>&1 || :
 	# Some non-interactive shells return success from `set -m` without enabling
 	# monitor mode. Trust the current shell's option state, not that status.
 	case $- in
@@ -373,9 +388,7 @@ zxfer_dx_benchmark_launch_supervisor() {
 		return 0
 		;;
 	esac
-	l_dx_launch_setsid=$(zxfer_dx_benchmark_resolve_setsid) || return 1
-	"$l_dx_launch_setsid" "$@" &
-	g_zxfer_dx_benchmark_launch_pid=$!
+	return 1
 }
 
 zxfer_dx_benchmark_wait_for_supervisor_record() {

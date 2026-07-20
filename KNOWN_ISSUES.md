@@ -15,7 +15,16 @@ peer-named to the implementation module it exercises.
 
 ## Correctness And Portability
 
-No open issues are currently tracked in this section.
+### Low: parallel shunit output can hide a stalled suite until workflow timeout
+
+`tests/run_shunit_tests.sh` buffers parallel worker logs and replays them in
+suite order, but it does not impose a per-suite deadline or dump pending worker
+state when a suite stalls. A process-supervision regression can therefore hide
+later completed suites and hold CI until the outer 30- or 60-minute workflow
+timeout. The process-heavy tests now avoid known command-substitution pipe
+leaks and CI uses bounded worker counts, but the runner still needs portable
+per-suite timeout and pending-log diagnostics so future failures terminate with
+actionable evidence.
 
 ### Resolved: silent destroy/rollback/resend churn on GUID-diverged destinations (fixed 2026-06-12)
 

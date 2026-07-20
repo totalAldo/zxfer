@@ -737,6 +737,7 @@ test_dx_benchmark_refuses_to_launch_without_verified_group_isolation() {
 test_dx_benchmark_uses_fixed_argv_setsid_fallback_without_shell_text() {
 	fake_setsid="$TEST_TMPDIR/fake-setsid.sh"
 	runner_marker="$TEST_TMPDIR/setsid-runner"
+	job_control_marker="$TEST_TMPDIR/job-control-enabled"
 	cat >"$fake_setsid" <<'EOF'
 #!/bin/sh
 exec "$@"
@@ -746,9 +747,8 @@ EOF
 	(
 		set +m 2>/dev/null || :
 		zxfer_dx_benchmark_enable_job_control() {
-			# dash and other non-interactive shells can report success without
-			# actually adding `m` to the current option state.
-			return 0
+			: >"$job_control_marker"
+			return 1
 		}
 		zxfer_dx_benchmark_resolve_setsid() {
 			printf '%s\n' "$fake_setsid"
@@ -758,10 +758,12 @@ EOF
 		wait "$g_zxfer_dx_benchmark_launch_pid"
 	) || launch_status=$?
 
-	assertEquals "The fallback launcher should preserve argv and waitable child ownership." \
+	assertEquals "The resolved setsid launcher should preserve argv and waitable child ownership." \
 		0 "$launch_status"
-	assertTrue "The fixed-argv setsid fallback should execute the exact requested command." \
+	assertTrue "The fixed-argv setsid launcher should execute the exact requested command." \
 		"[ -e \"$runner_marker\" ]"
+	assertFalse "A resolved setsid launcher should avoid mutating non-interactive job-control state." \
+		"[ -e \"$job_control_marker\" ]"
 }
 
 test_dx_benchmark_supervisor_refuses_go_when_it_is_not_group_leader() {
