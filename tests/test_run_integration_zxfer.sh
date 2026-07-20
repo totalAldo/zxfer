@@ -879,6 +879,85 @@ test_find_backup_metadata_file_for_exact_pair_ignores_v1_body_rows() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_mock_ssh_fixture_matches_controls_across_transport_chunk_boundaries() {
+	mock_dir="$WORKDIR/chunked-mock-ssh"
+	mock_ssh="$mock_dir/ssh"
+	capability_response="$WORKDIR/chunked-capability-response"
+	mkdir -p "$mock_dir"
+	write_mock_ssh_script "$mock_ssh"
+	printf '%s\n' "fixture-capability-response" >"$capability_response"
+
+	prefix=""
+	prefix_count=0
+	while [ "$prefix_count" -lt 124 ]; do
+		prefix=${prefix}x
+		prefix_count=$((prefix_count + 1))
+	done
+	suffix=""
+	suffix_count=0
+	while [ "$suffix_count" -lt 800 ]; do
+		suffix=${suffix}y
+		suffix_count=$((suffix_count + 1))
+	done
+
+	capability_script="#$prefix ZXFER_REMOTE_CAPS_V2 '$suffix'"
+	capability_command=$(
+		(
+			zxfer_source_runtime_modules_through "zxfer_ssh_transport.sh"
+			zxfer_build_remote_sh_c_command "$capability_script"
+		)
+	)
+	capability_output=$(
+		MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_response" \
+			"$mock_ssh" "fixture.example" "$capability_command"
+	)
+
+	assertContains "The fixture regression must exercise the bounded long-script transport." \
+		"$capability_command" "for l_part do case"
+	assertNotContains "The fixture regression must split the protocol marker across data chunks." \
+		"$capability_command" "ZXFER_REMOTE_CAPS_V2"
+	assertEquals "Capability-response controls should match when the protocol marker crosses a data-chunk boundary." \
+		"fixture-capability-response" "$capability_output"
+	wrapped_capability_command="'pfexec' '-u' 'root' $capability_command"
+	wrapped_capability_output=$(
+		MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_response" \
+			"$mock_ssh" "fixture.example" "$wrapped_capability_command"
+	)
+	assertEquals "Capability-response controls should match chunked commands after wrapper argv." \
+		"fixture-capability-response" "$wrapped_capability_output"
+
+	missing_probe_script="#$prefix command -v zfs '$suffix'"
+	missing_probe_command=$(
+		(
+			zxfer_source_runtime_modules_through "zxfer_ssh_transport.sh"
+			zxfer_build_remote_sh_c_command "$missing_probe_script"
+		)
+	)
+	if MOCK_SSH_MISSING_TOOL=zfs \
+		"$mock_ssh" "fixture.example" "$missing_probe_command" \
+		>/dev/null 2>&1; then
+		missing_probe_status=0
+	else
+		missing_probe_status=$?
+	fi
+
+	assertNotContains "The fixture regression must split command -v across data chunks." \
+		"$missing_probe_command" "command -v zfs"
+	assertEquals "Missing-tool controls should retain their synthetic status when command -v crosses a data-chunk boundary." \
+		10 "$missing_probe_status"
+	wrapped_missing_probe_command="'doas' $missing_probe_command"
+	if MOCK_SSH_MISSING_TOOL=zfs \
+		"$mock_ssh" "fixture.example" "$wrapped_missing_probe_command" \
+		>/dev/null 2>&1; then
+		wrapped_missing_probe_status=0
+	else
+		wrapped_missing_probe_status=$?
+	fi
+	assertEquals "Missing-tool controls should match chunked commands after wrapper argv." \
+		10 "$wrapped_missing_probe_status"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_run_test_suppresses_passing_output_in_failed_tests_only_mode() {
 	zxfer_test_capture_subshell "
 		ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1

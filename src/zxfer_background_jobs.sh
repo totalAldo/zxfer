@@ -283,13 +283,51 @@ zxfer_fail_background_job_registration() {
 		"$l_registration_failure_status"
 }
 
+# Purpose: Start the already-rendered job shell with the selected teardown
+# scope and explicitly preserve its optional completion-queue writer.
+# Usage: Called only after the caller validates the owned queue descriptor.
+# Side effects: Publishes the child pid in
+# $g_zxfer_background_job_last_runner_pid.
+zxfer_start_supervised_background_job_runner() {
+	l_start_job_cmd=$1
+	l_start_job_teardown=$2
+	l_start_job_wrapper=${3:-}
+	l_start_job_notify_fd=${4:-}
+
+	case $l_start_job_teardown in
+	process_group)
+		if [ -n "$l_start_job_notify_fd" ]; then
+			setsid sh -c "$l_start_job_cmd" 9>&9 &
+		else
+			setsid sh -c "$l_start_job_cmd" &
+		fi
+		;;
+	wrapper)
+		if [ -n "$l_start_job_notify_fd" ]; then
+			/bin/sh "$l_start_job_wrapper" "$l_start_job_cmd" 9>&9 &
+		else
+			/bin/sh "$l_start_job_wrapper" "$l_start_job_cmd" &
+		fi
+		;;
+	*) return 1 ;;
+	esac
+	g_zxfer_background_job_last_runner_pid=$!
+}
+
+# Purpose: Accept only the owned rolling-queue descriptor and confirm that it
+# is open without publishing queue data.
+# Usage: Called before explicitly duplicating the descriptor for a job child.
+zxfer_background_job_notify_fd_is_valid() {
+	[ "${1:-}" = "9" ] && { printf '' >&9; } 2>/dev/null
+}
+
 # Purpose: Spawn one supervised background job that runs the caller's command
 # string, records its exit status, and optionally notifies the rolling
 # completion queue.
 # Usage: Called during send/receive job scheduling (and any future background
 # consumers) with: kind, exec command, display command (carried by the
 # caller's own records; accepted for call-site compatibility), optional
-# stdout capture file, optional stderr capture file, optional notify fd.
+# stdout capture file, optional stderr capture file, optional notify fd 9.
 # Side effects: Publishes the job id, job-shell pid, and status file in
 # $g_zxfer_background_job_last_id, $g_zxfer_background_job_last_runner_pid,
 # and $g_zxfer_background_job_last_status_file.
@@ -334,6 +372,11 @@ zxfer_spawn_supervised_background_job() {
 		}
 		l_redirections="$l_redirections 2> $l_error_file_safe"
 	fi
+	if [ -n "$l_notify_fd" ] &&
+		! zxfer_background_job_notify_fd_is_valid "$l_notify_fd"; then
+		zxfer_cleanup_runtime_artifact_path "$l_spawn_supervised_background_job_status_file" >/dev/null 2>&1 || :
+		zxfer_throw_error "Invalid background job [$l_spawn_supervised_background_job_job_id] notify descriptor." 1
+	fi
 
 	# The job shell records its own completion: pipeline first (per-stage
 	# exit captures inside $l_exec_cmd stay untouched), then the status-file
@@ -341,21 +384,18 @@ zxfer_spawn_supervised_background_job() {
 	# always finds the status file already written.
 	l_notify_cmds=""
 	l_notify_write_failed_cmd=""
-	case "$l_notify_fd" in
-	'' | *[!0-9]*) ;;
-	*)
-		l_notify_write_failed_cmd="printf 'completion_write_failed\t%s\t%s\n' '$l_spawn_supervised_background_job_job_id' \"\$l_zxfer_job_status\" >&$l_notify_fd 2>/dev/null || :
+	if [ -n "$l_notify_fd" ]; then
+		l_notify_write_failed_cmd="printf 'completion_write_failed\t%s\t%s\n' '$l_spawn_supervised_background_job_job_id' \"\$l_zxfer_job_status\" >&9 2>/dev/null || :
 	"
 		l_notify_cmds="
-if ! printf '%s\n' '$l_spawn_supervised_background_job_job_id' >&$l_notify_fd 2>/dev/null; then
+if ! printf '%s\n' '$l_spawn_supervised_background_job_job_id' >&9 2>/dev/null; then
 	if ! printf 'report_failure\tqueue_write\n' >> $l_status_file_safe 2>/dev/null; then
 		rm -f $l_status_file_safe 2>/dev/null || :
 	fi
 	printf '%s\n' 'Failed to publish background job completion for [$l_spawn_supervised_background_job_job_id].' >&2
 	exit 125
 fi"
-		;;
-	esac
+	fi
 	# The pipeline runs in a subshell so an "exit N" inside the caller's
 	# command string (per-stage exit captures) ends the pipeline, not the
 	# job shell, and the status write below still happens.
@@ -371,7 +411,7 @@ exit \"\$l_zxfer_job_status\""
 
 	if [ "${g_zxfer_background_job_use_setsid:-0}" = "1" ]; then
 		l_spawn_supervised_background_job_teardown=process_group
-		setsid sh -c "$l_job_cmd" &
+		l_wrapper_script=""
 	else
 		l_wrapper_script=$(zxfer_get_cleanup_child_wrapper_script_path) || {
 			l_spawn_status=$?
@@ -379,10 +419,13 @@ exit \"\$l_zxfer_job_status\""
 			zxfer_throw_error "Failed to locate the background job cleanup wrapper." "$l_spawn_status"
 		}
 		l_spawn_supervised_background_job_teardown=wrapper
-		/bin/sh "$l_wrapper_script" "$l_job_cmd" &
 	fi
-	l_job_pid=$!
-	g_zxfer_background_job_last_runner_pid=$l_job_pid
+	# An explicit command redirection clears ksh's close-on-exec treatment of
+	# the queue descriptor while preserving the already-open FIFO lifetime.
+	zxfer_start_supervised_background_job_runner \
+		"$l_job_cmd" "$l_spawn_supervised_background_job_teardown" \
+		"$l_wrapper_script" "$l_notify_fd"
+	l_job_pid=$g_zxfer_background_job_last_runner_pid
 
 	l_spawn_status=0
 	zxfer_register_background_job_record \

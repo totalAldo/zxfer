@@ -243,6 +243,8 @@ test_spawn_uses_setsid_spawn_path_when_capability_flag_is_set() {
 	mock_dir=$(mktemp -d "$TEST_TMPDIR/setsidspawn.XXXXXX") ||
 		fail "Unable to create the setsid spawn mock directory."
 	token_marker="$TEST_TMPDIR/setsidspawn.token"
+	notify_fifo="$TEST_TMPDIR/setsidspawn.queue"
+	mkfifo "$notify_fifo"
 	# Pass-through mock: enough to drive the setsid spawn line without
 	# requiring a real session leader; teardown is not exercised here.
 	printf '#!/bin/sh\nexec "$@"\n' >"$mock_dir/setsid"
@@ -255,10 +257,22 @@ test_spawn_uses_setsid_spawn_path_when_capability_flag_is_set() {
 			: >"$token_marker"
 			return 1
 		}
+		(: <"$notify_fifo") &
+		open_helper_pid=$!
+		open_background_job_test_fifo_writer_fd9 "$notify_fifo" || exit 1
+		wait "$open_helper_pid"
+		open_background_job_test_fifo_reader_fd8 "$notify_fifo" || exit 1
 		zxfer_spawn_supervised_background_job \
 			"unit_test" \
 			"printf '%s\n' 'setsid-payload'" \
-			"display setsid spawn"
+			"display setsid spawn" \
+			"" \
+			"" \
+			9
+		exec 9>&- || :
+		IFS= read -r completed_record <&8
+		printf 'completion=%s\n' "$completed_record"
+		exec 8<&- || :
 		zxfer_find_background_job_record "$g_zxfer_background_job_last_id"
 		printf 'teardown=%s\n' "$g_zxfer_background_job_record_teardown"
 		zxfer_wait_for_background_job "$g_zxfer_background_job_last_id"
@@ -269,6 +283,8 @@ test_spawn_uses_setsid_spawn_path_when_capability_flag_is_set() {
 		"$output" "teardown=process_group"
 	assertContains "The setsid spawn path should complete and report the job status." \
 		"$output" "wait_status=0 exit_status=0"
+	assertContains "The setsid spawn path should explicitly preserve its completion writer across exec." \
+		"$output" "completion=bgjob.$$."
 	assertFalse "A cached normal spawn must not capture a process start token." \
 		"[ -e '$token_marker' ]"
 }
@@ -308,6 +324,28 @@ test_spawn_reports_output_and_error_file_quoting_failures() {
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Spawn should report the error-file quoting failure." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "error file path"
+}
+
+test_spawn_rejects_invalid_notify_descriptor_state() {
+	zxfer_test_capture_subshell '
+		zxfer_spawn_supervised_background_job "unit_test" "exit 0" "display" "" "" 8
+	'
+	wrong_fd_status=$ZXFER_TEST_CAPTURE_STATUS
+	wrong_fd_output=$ZXFER_TEST_CAPTURE_OUTPUT
+
+	zxfer_test_capture_subshell '
+		exec 9>&-
+		zxfer_spawn_supervised_background_job "unit_test" "exit 0" "display" "" "" 9
+	'
+
+	assertEquals "Spawn should reject notify descriptors other than the owned queue fd." \
+		1 "$wrong_fd_status"
+	assertContains "Spawn should report an invalid notify descriptor number." \
+		"$wrong_fd_output" "Invalid background job"
+	assertEquals "Spawn should reject the owned notify descriptor when it is closed." \
+		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Spawn should report a closed notify descriptor." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "Invalid background job"
 }
 
 test_read_background_job_status_file_preserves_readback_failures() {
@@ -866,7 +904,6 @@ test_fifo_notification_publishes_job_id_after_status_file_write() {
 		open_background_job_test_fifo_writer_fd9 "$fifo_dir/queue" || exit 1
 		wait "$open_helper_pid"
 		open_background_job_test_fifo_reader_fd8 "$fifo_dir/queue" || exit 1
-
 		zxfer_spawn_supervised_background_job \
 			"unit_test" \
 			"printf '%s\n' 'queued-payload'" \
@@ -876,6 +913,9 @@ test_fifo_notification_publishes_job_id_after_status_file_write() {
 			9
 		job_id=$g_zxfer_background_job_last_id
 		status_file=$g_zxfer_background_job_last_status_file
+		# The spawn path explicitly duplicates the queue writer for the child;
+		# the parent's writer can now close before it begins reading.
+		exec 9>&- || :
 
 		IFS= read -r completed_record <&8
 		printf 'record=%s\n' "$completed_record"
@@ -935,6 +975,7 @@ test_fifo_notification_reports_status_write_failures_as_completion_write_failed_
 			"" \
 			9 2>/dev/null
 		job_id=$g_zxfer_background_job_last_id
+		exec 9>&- || :
 
 		IFS= read -r completed_record <&8
 		zxfer_parse_background_job_queue_record "$completed_record"
