@@ -550,7 +550,7 @@ backup/dst/child@snap2	222
 EOF
 
 	zxfer_normalize_destination_snapshot_list "backup/dst" "$dest_full_tmp" "$dest_norm_tmp"
-	sort "$source_tmp" -o "$source_tmp"
+	LC_ALL=C sort "$source_tmp" -o "$source_tmp"
 	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_norm_tmp" "$source_tmp"
 
 	assertEquals "Trailing-slash destination snapshots with matching GUIDs should not be queued as missing source work." \
