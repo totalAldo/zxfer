@@ -52,6 +52,21 @@ coverage_policy_job_body() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+unit_workflow_job_body() {
+	awk -v job_name="$1" '
+		$0 == "  " job_name ":" {
+			in_job = 1
+			print
+			next
+		}
+		in_job && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+			exit
+		}
+		in_job { print }
+	' "$UNIT_WORKFLOW_FILE"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_lint_workflow_runs_every_public_lint_target() {
 	runner_targets=$("$RUN_LINT_BIN" --list | sort)
 	workflow_targets=$(lint_workflow_matrix_targets | sort)
@@ -114,6 +129,8 @@ test_unit_workflow_installs_platform_test_prerequisites() {
 # shellcheck disable=SC2016,SC2317,SC2329  # Literal workflow expression; invoked indirectly by shunit2.
 test_unit_workflow_bounds_process_heavy_suite_parallelism() {
 	workflow=$(cat "$UNIT_WORKFLOW_FILE")
+	freebsd_job=$(unit_workflow_job_body shunit2-freebsd)
+	omnios_job=$(unit_workflow_job_body shunit2-omnios)
 
 	assertNotContains "CI must not launch the entire process-heavy suite inventory concurrently." \
 		"$workflow" "--jobs 30"
@@ -125,8 +142,14 @@ test_unit_workflow_bounds_process_heavy_suite_parallelism() {
 		"$workflow" "unit_jobs: 1"
 	assertContains "Hosted jobs should consume the validated per-platform worker count." \
 		"$workflow" './tests/run_shunit_tests.sh --jobs "${{ matrix.unit_jobs }}"'
-	assertContains "VM-backed platform jobs should respect their smaller guest CPU allocation." \
-		"$workflow" "./tests/run_shunit_tests.sh --jobs 2"
+	assertContains "FreeBSD should respect its smaller guest CPU allocation." \
+		"$freebsd_job" "./tests/run_shunit_tests.sh --jobs 2"
+	assertContains "OmniOS should not nest runner self-tests under parallel worker supervision." \
+		"$omnios_job" '"$bash_bin" ./tests/run_shunit_tests.sh --jobs 1'
+	assertNotContains "The OmniOS unit job must not restore nested parallel worker supervision." \
+		"$omnios_job" "./tests/run_shunit_tests.sh --jobs 2"
+	assertContains "The serial OmniOS lane needs enough time for the full guest suite." \
+		"$omnios_job" "timeout-minutes: 45"
 }
 
 # shellcheck source=tests/shunit2/shunit2

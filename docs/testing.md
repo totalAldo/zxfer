@@ -1064,6 +1064,11 @@ The CI workflows use GitHub Actions concurrency cancellation keyed by workflow
 name plus pushed ref, so stale branch runs are canceled when a new push
 supersedes them.
 
+The hosted OmniOS unit lane and the VM-matrix OmniOS shunit2 layer run suites
+serially; the hosted job has a 45-minute limit. This avoids nesting the runner's
+process-supervision self-tests under a parallel outer worker in the smaller
+guest, while the FreeBSD guest continues to use two suite workers.
+
 The `kcov` job runs on `ubuntu-26.04` and uses the official `kcov/kcov` Docker
 image pinned by digest instead of installing `kcov` from the runner package
 manager. That keeps the higher-fidelity coverage lane available even though
