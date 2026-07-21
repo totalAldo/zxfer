@@ -333,55 +333,82 @@ send_signal_to_pid() {
 	return 1
 }
 
-runner_get_process_start_token() {
-	l_runner_token_pid=$1
+runner_get_process_start_token_for_selector() {
+	l_runner_selector_token_pid=$1
+	l_runner_selector_token_selector=$2
 
-	case "$l_runner_token_pid" in
+	case "$l_runner_selector_token_pid" in
 	'' | *[!0-9]*) return 1 ;;
 	esac
-	l_runner_token_selector=lstart
-	l_runner_token_raw=$(LC_ALL=C ps -p "$l_runner_token_pid" -o lstart= 2>/dev/null || true)
+	case "$l_runner_selector_token_selector" in
+	lstart | stime) ;;
+	*) return 1 ;;
+	esac
+	if l_runner_selector_token_raw=$(LC_ALL=C ps \
+		-p "$l_runner_selector_token_pid" \
+		-o "$l_runner_selector_token_selector=" 2>/dev/null); then
+		:
+	else
+		l_runner_selector_token_raw=
+	fi
 	case $- in
-	*f*) l_runner_token_restore_glob=0 ;;
+	*f*) l_runner_selector_token_restore_glob=0 ;;
 	*)
-		l_runner_token_restore_glob=1
+		l_runner_selector_token_restore_glob=1
 		set -f
 		;;
 	esac
 	if [ "${IFS+set}" = "set" ]; then
-		l_runner_token_saved_ifs_set=1
-		l_runner_token_saved_ifs=$IFS
+		l_runner_selector_token_saved_ifs_set=1
+		l_runner_selector_token_saved_ifs=$IFS
 	else
-		l_runner_token_saved_ifs_set=0
-		l_runner_token_saved_ifs=
+		l_runner_selector_token_saved_ifs_set=0
+		l_runner_selector_token_saved_ifs=
 	fi
 	unset IFS
 	# shellcheck disable=SC2086
-	set -- $l_runner_token_raw
-	if [ "$#" -eq 0 ]; then
-		l_runner_token_selector=stime
-		l_runner_token_raw=$(LC_ALL=C ps -p "$l_runner_token_pid" -o stime= 2>/dev/null || true)
-		# shellcheck disable=SC2086
-		set -- $l_runner_token_raw
-	fi
-	l_runner_token_normalized=$*
-	if [ "$l_runner_token_saved_ifs_set" -eq 1 ]; then
-		IFS=$l_runner_token_saved_ifs
+	set -- $l_runner_selector_token_raw
+	l_runner_selector_token_normalized=$*
+	if [ "$l_runner_selector_token_saved_ifs_set" -eq 1 ]; then
+		IFS=$l_runner_selector_token_saved_ifs
 	else
 		unset IFS
 	fi
-	if [ "$l_runner_token_restore_glob" -eq 1 ]; then
+	if [ "$l_runner_selector_token_restore_glob" -eq 1 ]; then
 		set +f
 	fi
 	[ "$#" -gt 0 ] || return 1
-	printf '%s:%s\n' "$l_runner_token_selector" "$l_runner_token_normalized"
+	printf '%s:%s\n' \
+		"$l_runner_selector_token_selector" "$l_runner_selector_token_normalized"
+}
+
+runner_get_process_start_token() {
+	l_runner_token_pid=$1
+	l_runner_token_value=
+
+	if l_runner_token_value=$(runner_get_process_start_token_for_selector \
+		"$l_runner_token_pid" lstart); then
+		printf '%s\n' "$l_runner_token_value"
+		return 0
+	fi
+	runner_get_process_start_token_for_selector "$l_runner_token_pid" stime
 }
 
 runner_child_pid_matches_parent() {
 	l_runner_child_parent=$1
 	l_runner_child_pid=$2
+	l_runner_child_candidates=
 
-	for l_runner_child_current in $(list_child_pids_for_parent "$l_runner_child_parent"); do
+	if l_runner_child_candidates=$(list_child_pids_for_parent \
+		"$l_runner_child_parent"); then
+		:
+	else
+		# Status 2 distinguishes unavailable process enumeration from an
+		# observed parent/child mismatch. Existing boolean callers treat both as
+		# failure; ownership cleanup uses the distinction for diagnostics.
+		return 2
+	fi
+	for l_runner_child_current in $l_runner_child_candidates; do
 		[ "$l_runner_child_current" = "$l_runner_child_pid" ] && return 0
 	done
 	return 1
@@ -391,22 +418,90 @@ runner_capture_child_identity() {
 	l_runner_identity_parent=$1
 	l_runner_identity_pid=$2
 	l_runner_identity_before=
-	l_runner_identity_after=
 
 	l_runner_identity_before=$(runner_get_process_start_token "$l_runner_identity_pid") || return 1
 	runner_child_pid_matches_parent "$l_runner_identity_parent" "$l_runner_identity_pid" || return 1
-	l_runner_identity_after=$(runner_get_process_start_token "$l_runner_identity_pid") || return 1
-	[ "$l_runner_identity_before" = "$l_runner_identity_after" ] || return 1
+	runner_process_identity_matches \
+		"$l_runner_identity_pid" "$l_runner_identity_before" || return 1
 	printf '%s\n' "$l_runner_identity_before"
+}
+
+runner_capture_child_identity_with_retry() {
+	l_runner_retry_identity_parent=$1
+	l_runner_retry_identity_pid=$2
+	l_runner_retry_identity_remaining=3
+	l_runner_retry_identity_value=
+
+	while [ "$l_runner_retry_identity_remaining" -gt 0 ]; do
+		if l_runner_retry_identity_value=$(runner_capture_child_identity \
+			"$l_runner_retry_identity_parent" "$l_runner_retry_identity_pid" \
+			2>/dev/null); then
+			printf '%s\n' "$l_runner_retry_identity_value"
+			return 0
+		fi
+		l_runner_retry_identity_remaining=$((l_runner_retry_identity_remaining - 1))
+	done
+	return 1
+}
+
+runner_read_numeric_pid_file() {
+	l_runner_pid_file_path=$1
+	l_runner_pid_file_value=
+
+	[ -r "$l_runner_pid_file_path" ] || return 1
+	IFS= read -r l_runner_pid_file_value <"$l_runner_pid_file_path" ||
+		[ -n "$l_runner_pid_file_value" ] || return 1
+	case "$l_runner_pid_file_value" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	printf '%s\n' "$l_runner_pid_file_value"
+}
+
+# Capture a child identity only after the parent-published worker PID proves
+# the relationship. This permits launch-race retries without adopting a PID
+# that a shell may already have reaped and the kernel may have reused.
+runner_capture_child_identity_from_parent_file() {
+	l_runner_file_identity_parent_file=$1
+	l_runner_file_identity_pid=$2
+	l_runner_file_identity_remaining=3
+	l_runner_file_identity_parent=
+	l_runner_file_identity_value=
+
+	while [ "$l_runner_file_identity_remaining" -gt 0 ]; do
+		if l_runner_file_identity_parent=$(runner_read_numeric_pid_file \
+			"$l_runner_file_identity_parent_file" 2>/dev/null); then
+			if l_runner_file_identity_value=$(runner_capture_child_identity \
+				"$l_runner_file_identity_parent" "$l_runner_file_identity_pid" \
+				2>/dev/null); then
+				printf '%s\n' "$l_runner_file_identity_value"
+				return 0
+			fi
+		else
+			l_runner_file_identity_parent=
+		fi
+		l_runner_file_identity_remaining=$((l_runner_file_identity_remaining - 1))
+		if [ -z "$l_runner_file_identity_parent" ] &&
+			[ "$l_runner_file_identity_remaining" -gt 0 ]; then
+			sleep 1 || true
+		fi
+	done
+	return 1
 }
 
 runner_process_identity_matches() {
 	l_runner_match_pid=$1
 	l_runner_match_expected=$2
 	l_runner_match_current=
+	l_runner_match_selector=
 
-	[ -n "$l_runner_match_expected" ] || return 1
-	l_runner_match_current=$(runner_get_process_start_token "$l_runner_match_pid") || return 1
+	case "$l_runner_match_expected" in
+	lstart:* | stime:*)
+		l_runner_match_selector=${l_runner_match_expected%%:*}
+		;;
+	*) return 1 ;;
+	esac
+	l_runner_match_current=$(runner_get_process_start_token_for_selector \
+		"$l_runner_match_pid" "$l_runner_match_selector") || return 1
 	[ "$l_runner_match_current" = "$l_runner_match_expected" ]
 }
 
@@ -526,6 +621,26 @@ wait_for_process_descendant_records() {
 	return 0
 }
 
+signal_process_descendant_records_with_escalation() {
+	l_descendant_escalation_signal=$1
+	l_descendant_escalation_records=$2
+
+	[ -n "$l_descendant_escalation_records" ] || return 0
+	signal_process_descendant_records \
+		"$l_descendant_escalation_signal" "$l_descendant_escalation_records"
+	case "$l_descendant_escalation_signal" in
+	TERM | term)
+		if ! wait_for_process_descendant_records \
+			"$l_descendant_escalation_records"; then
+			signal_process_descendant_records KILL \
+				"$l_descendant_escalation_records"
+			wait_for_process_descendant_records \
+				"$l_descendant_escalation_records" || true
+		fi
+		;;
+	esac
+}
+
 signal_process_descendants() {
 	l_signal_process_descendants_signal=$1
 	l_signal_process_descendants_root=$2
@@ -537,17 +652,212 @@ signal_process_descendants() {
 		"$l_signal_process_descendants_root_token" || return 0
 	l_signal_process_descendants_records=$(snapshot_process_descendants \
 		"$l_signal_process_descendants_root")
-	[ -n "$l_signal_process_descendants_records" ] || return 0
-	signal_process_descendant_records \
-		"$l_signal_process_descendants_signal" "$l_signal_process_descendants_records"
-	case "$l_signal_process_descendants_signal" in
-	TERM | term)
-		if ! wait_for_process_descendant_records "$l_signal_process_descendants_records"; then
-			signal_process_descendant_records KILL "$l_signal_process_descendants_records"
-			wait_for_process_descendant_records "$l_signal_process_descendants_records" || true
-		fi
-		;;
+	signal_process_descendant_records_with_escalation \
+		"$l_signal_process_descendants_signal" \
+		"$l_signal_process_descendants_records"
+}
+
+# Verify every direct parent/child link in one colon-separated PID chain.
+# Callers construct chains only from numeric PIDs observed in private runner
+# state and current process relationships.
+runner_owned_process_chain_matches() {
+	l_owned_chain_remaining=$1
+	l_owned_chain_previous=${l_owned_chain_remaining%%:*}
+
+	case "$l_owned_chain_remaining" in
+	'' | *[!0-9:]* | *:) return 1 ;;
+	*:*) ;;
+	*) return 1 ;;
 	esac
+	case "$l_owned_chain_previous" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	l_owned_chain_remaining=${l_owned_chain_remaining#*:}
+
+	while [ -n "$l_owned_chain_remaining" ]; do
+		case "$l_owned_chain_remaining" in
+		*:*)
+			l_owned_chain_current=${l_owned_chain_remaining%%:*}
+			l_owned_chain_remaining=${l_owned_chain_remaining#*:}
+			;;
+		*)
+			l_owned_chain_current=$l_owned_chain_remaining
+			l_owned_chain_remaining=
+			;;
+		esac
+		case "$l_owned_chain_current" in
+		'' | *[!0-9]*) return 1 ;;
+		esac
+		if runner_child_pid_matches_parent \
+			"$l_owned_chain_previous" "$l_owned_chain_current"; then
+			:
+		else
+			l_owned_chain_match_status=$?
+			return "$l_owned_chain_match_status"
+		fi
+		l_owned_chain_previous=$l_owned_chain_current
+	done
+	return 0
+}
+
+# Snapshot descendant ownership paths deepest-first. These paths are used only
+# when process-start tokens are unavailable. Revalidating the entire path
+# immediately before each signal prevents adoption of reparented processes.
+snapshot_owned_process_descendant_chains() {
+	l_owned_snapshot_initial_chain=$1
+	l_owned_snapshot_pending=$l_owned_snapshot_initial_chain
+	l_owned_snapshot_records=
+
+	if runner_owned_process_chain_matches \
+		"$l_owned_snapshot_initial_chain"; then
+		:
+	else
+		l_owned_snapshot_status=$?
+		return "$l_owned_snapshot_status"
+	fi
+	while [ -n "$l_owned_snapshot_pending" ]; do
+		l_owned_snapshot_next=
+		while IFS= read -r l_owned_snapshot_chain; do
+			[ -n "$l_owned_snapshot_chain" ] || continue
+			if runner_owned_process_chain_matches \
+				"$l_owned_snapshot_chain"; then
+				:
+			else
+				l_owned_snapshot_status=$?
+				[ "$l_owned_snapshot_status" -eq 2 ] && return 2
+				continue
+			fi
+			l_owned_snapshot_parent=${l_owned_snapshot_chain##*:}
+			if l_owned_snapshot_children=$(list_child_pids_for_parent \
+				"$l_owned_snapshot_parent"); then
+				:
+			else
+				return 2
+			fi
+			for l_owned_snapshot_child in $l_owned_snapshot_children; do
+				case "$l_owned_snapshot_child" in
+				'' | *[!0-9]*) continue ;;
+				esac
+				l_owned_snapshot_new_chain="${l_owned_snapshot_chain}:$l_owned_snapshot_child"
+				if runner_owned_process_chain_matches \
+					"$l_owned_snapshot_new_chain"; then
+					:
+				else
+					l_owned_snapshot_status=$?
+					[ "$l_owned_snapshot_status" -eq 2 ] && return 2
+					continue
+				fi
+				if [ -n "$l_owned_snapshot_next" ]; then
+					l_owned_snapshot_next="$l_owned_snapshot_next
+$l_owned_snapshot_new_chain"
+				else
+					l_owned_snapshot_next=$l_owned_snapshot_new_chain
+				fi
+				if [ -n "$l_owned_snapshot_records" ]; then
+					l_owned_snapshot_records="$l_owned_snapshot_new_chain
+$l_owned_snapshot_records"
+				else
+					l_owned_snapshot_records=$l_owned_snapshot_new_chain
+				fi
+			done
+		done <<EOF
+$l_owned_snapshot_pending
+EOF
+		l_owned_snapshot_pending=$l_owned_snapshot_next
+	done
+	printf '%s\n' "$l_owned_snapshot_records"
+}
+
+kill_owned_process_descendant_chains() {
+	l_owned_kill_records=$1
+
+	while IFS= read -r l_owned_kill_chain; do
+		[ -n "$l_owned_kill_chain" ] || continue
+		if runner_owned_process_chain_matches "$l_owned_kill_chain"; then
+			:
+		else
+			l_owned_kill_status=$?
+			[ "$l_owned_kill_status" -eq 2 ] && return 2
+			continue
+		fi
+		l_owned_kill_pid=${l_owned_kill_chain##*:}
+		if send_signal_to_pid KILL "$l_owned_kill_pid"; then
+			:
+		elif runner_owned_process_chain_matches "$l_owned_kill_chain"; then
+			# The descendant is still attached but could not be killed (for
+			# example, after a credential change). Keep its ancestors alive.
+			return 1
+		else
+			l_owned_kill_status=$?
+			[ "$l_owned_kill_status" -eq 2 ] && return 2
+		fi
+	done <<EOF
+$l_owned_kill_records
+EOF
+	return 0
+}
+
+# Signal only a currently attached direct child of a live two-level ownership
+# chain. This fallback is intentionally narrower than the persisted-PID APIs:
+# it is used only while the top-level runner still owns the wrapper and that
+# wrapper still owns the suite, so reused or reparented PIDs remain fail-closed.
+signal_owned_child_and_descendants() {
+	l_owned_child_signal=$1
+	l_owned_child_owner_parent_pid=$2
+	l_owned_child_owner_pid=$3
+	l_owned_child_pid=$4
+	l_owned_child_chain=
+	l_owned_child_descendant_chains=
+	l_owned_child_snapshot_ok=0
+	l_owned_child_snapshot_remaining=3
+
+	case "$l_owned_child_owner_parent_pid" in
+	'' | *[!0-9]*) return 0 ;;
+	esac
+	case "$l_owned_child_owner_pid" in
+	'' | *[!0-9]*) return 0 ;;
+	esac
+	case "$l_owned_child_pid" in
+	'' | *[!0-9]*) return 0 ;;
+	esac
+	l_owned_child_chain="${l_owned_child_owner_parent_pid}:${l_owned_child_owner_pid}:${l_owned_child_pid}"
+	while [ "$l_owned_child_snapshot_remaining" -gt 0 ]; do
+		if l_owned_child_descendant_chains=$(snapshot_owned_process_descendant_chains \
+			"$l_owned_child_chain"); then
+			l_owned_child_snapshot_ok=1
+			break
+		else
+			l_owned_child_snapshot_status=$?
+			[ "$l_owned_child_snapshot_status" -eq 1 ] && return 0
+		fi
+		l_owned_child_snapshot_remaining=$((l_owned_child_snapshot_remaining - 1))
+		[ "$l_owned_child_snapshot_remaining" -gt 0 ] && sleep 1 || true
+	done
+	if [ "$l_owned_child_snapshot_ok" -ne 1 ]; then
+		# Do not terminate a possible ancestor when its complete descendant set
+		# could not be enumerated; keeping ownership intact is safer than orphaning
+		# an unknown suite process.
+		echo "Unable to verify shunit suite descendants; waiting for the owning wrapper to reap them." >&2
+		return 0
+	fi
+	# A tokenless descendant cannot be followed safely after its parent exits.
+	# Kill proven descendants deepest-first before giving the direct suite child
+	# its requested graceful signal.
+	if ! kill_owned_process_descendant_chains \
+		"$l_owned_child_descendant_chains"; then
+		echo "Unable to revalidate shunit suite descendants; waiting for the owning wrapper to reap them." >&2
+		return 0
+	fi
+	if runner_owned_process_chain_matches "$l_owned_child_chain"; then
+		:
+	else
+		l_owned_child_chain_status=$?
+		if [ "$l_owned_child_chain_status" -eq 2 ]; then
+			echo "Unable to revalidate the shunit suite owner; waiting for the owning wrapper to reap it." >&2
+		fi
+		return 0
+	fi
+	send_signal_to_pid "$l_owned_child_signal" "$l_owned_child_pid" || true
 }
 
 signal_pid_and_descendants() {
@@ -806,8 +1116,16 @@ resolve_parallel_jobs() {
 
 ensure_runner_state_dir() {
 	[ -n "$RUNNER_STATE_DIR" ] && return 0
+	l_runner_state_parent=${TMPDIR:-/tmp}
+	case "$l_runner_state_parent" in
+	/*) l_runner_state_template="$l_runner_state_parent/zxfer_shunit.XXXXXX" ;;
+	*) l_runner_state_template="./$l_runner_state_parent/zxfer_shunit.XXXXXX" ;;
+	esac
 
-	RUNNER_STATE_DIR=$(mktemp -d -t "zxfer_shunit.XXXXXX") || {
+	# Pass the parent explicitly. Some execution wrappers preserve the TMPDIR
+	# value in the environment while the platform mktemp -t implementation
+	# still falls back to its default temporary directory.
+	RUNNER_STATE_DIR=$(mktemp -d "$l_runner_state_template") || {
 		echo "Unable to create shunit2 runner state directory." >&2
 		return 1
 	}
@@ -826,17 +1144,6 @@ cleanup_runner_state() {
 	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=""
 	RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE=""
 	RUNNER_FOREGROUND_SUITE_STATUS_FILE=""
-}
-
-append_worker_id() {
-	l_queue=$1
-	l_worker_id=$2
-
-	if [ -n "$l_queue" ]; then
-		printf '%s %s\n' "$l_queue" "$l_worker_id"
-	else
-		printf '%s\n' "$l_worker_id"
-	fi
 }
 
 emit_suite_banner() {
@@ -939,9 +1246,10 @@ signal_foreground_suite() {
 				"$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" \
 				"$RUNNER_FOREGROUND_SUITE_TOKEN"
 		else
-			signal_pid_and_descendants \
-				"$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" \
-				"$RUNNER_FOREGROUND_SUITE_TOKEN"
+			# The wrapper still owns a published child whose identity could not
+			# be verified. Keep the wrapper alive to reap it rather than risk
+			# orphaning the child by signalling its parent.
+			return 0
 		fi
 		;;
 	esac
@@ -976,9 +1284,9 @@ signal_foreground_suite_child() {
 			signal_pid_and_descendants \
 				"$l_signal" "$l_child_pid" "$l_child_token"
 		else
-			signal_process_descendants \
-				"$l_signal" "$RUNNER_FOREGROUND_SUITE_PID" \
-				"$RUNNER_FOREGROUND_SUITE_TOKEN"
+			signal_owned_child_and_descendants \
+				"$l_signal" "$$" \
+				"$RUNNER_FOREGROUND_SUITE_PID" "$l_child_pid"
 		fi
 		;;
 	esac
@@ -1030,7 +1338,10 @@ run_suite_foreground() {
 	l_suite_path=$1
 	l_selected_test_names=${2:-}
 	l_status_file=
+	l_wrapper_pid_file=
+	l_wrapper_owner_pid_file=
 	l_child_pid_file=
+	l_child_owner_pid_file=
 	l_child_token_file=
 	l_wait_status=0
 
@@ -1041,11 +1352,18 @@ run_suite_foreground() {
 		return 0
 	fi
 	l_status_file="$RUNNER_STATE_DIR/foreground.status"
+	l_wrapper_pid_file="$RUNNER_STATE_DIR/foreground.pid"
+	l_wrapper_owner_pid_file="$RUNNER_STATE_DIR/foreground.owner.pid"
 	l_child_pid_file="$RUNNER_STATE_DIR/foreground.child.pid"
+	l_child_owner_pid_file="$RUNNER_STATE_DIR/foreground.child.owner.pid"
 	l_child_token_file="$RUNNER_STATE_DIR/foreground.child.token"
 	rm -f "$l_status_file"
+	rm -f "$l_wrapper_pid_file"
+	rm -f "$l_wrapper_owner_pid_file"
 	rm -f "$l_child_pid_file"
+	rm -f "$l_child_owner_pid_file"
 	rm -f "$l_child_token_file"
+	printf '%s\n' "$$" >"$l_wrapper_owner_pid_file"
 	RUNNER_FOREGROUND_SUITE_CHILD_PID_FILE=$l_child_pid_file
 	RUNNER_FOREGROUND_SUITE_CHILD_TOKEN_FILE=$l_child_token_file
 	RUNNER_FOREGROUND_SUITE_STATUS_FILE=$l_status_file
@@ -1072,10 +1390,15 @@ EOF
 			"$@" &
 		fi
 		l_suite_pid=$!
-		l_suite_token=$(runner_get_process_start_token "$l_suite_pid" 2>/dev/null || true)
+		printf '%s\n' "$l_suite_pid" >"$l_child_pid_file" 2>/dev/null || :
+		if l_suite_token=$(runner_capture_child_identity_from_parent_file \
+			"$l_wrapper_pid_file" "$l_suite_pid" 2>/dev/null); then
+			:
+		else
+			l_suite_token=
+		fi
 		if [ -n "$l_suite_token" ]; then
 			printf '%s\n' "$l_suite_token" >"$l_child_token_file" 2>/dev/null || :
-			printf '%s\n' "$l_suite_pid" >"$l_child_pid_file" 2>/dev/null || :
 		fi
 		wait "$l_suite_pid"
 		l_status=$?
@@ -1083,8 +1406,15 @@ EOF
 		exit "$l_status"
 	) &
 	RUNNER_FOREGROUND_SUITE_PID=$!
-	RUNNER_FOREGROUND_SUITE_TOKEN=$(runner_get_process_start_token \
-		"$RUNNER_FOREGROUND_SUITE_PID" 2>/dev/null || true)
+	printf '%s\n' "$RUNNER_FOREGROUND_SUITE_PID" \
+		>"$l_child_owner_pid_file"
+	printf '%s\n' "$RUNNER_FOREGROUND_SUITE_PID" >"$l_wrapper_pid_file"
+	if RUNNER_FOREGROUND_SUITE_TOKEN=$(runner_capture_child_identity_with_retry \
+		"$$" "$RUNNER_FOREGROUND_SUITE_PID" 2>/dev/null); then
+		:
+	else
+		RUNNER_FOREGROUND_SUITE_TOKEN=
+	fi
 	RUNNER_DEFER_SIGNALS=0
 	consume_deferred_runner_signal
 
@@ -1113,7 +1443,9 @@ EOF
 	if [ -r "$l_status_file" ]; then
 		l_status=$(cat "$l_status_file" 2>/dev/null || printf '%s\n' "$l_wait_status")
 	fi
-	rm -f "$l_status_file" "$l_child_pid_file" "$l_child_token_file"
+	rm -f "$l_status_file" "$l_wrapper_pid_file" \
+		"$l_wrapper_owner_pid_file" "$l_child_pid_file" \
+		"$l_child_owner_pid_file" "$l_child_token_file"
 
 	if [ "$l_status" -eq 0 ]; then
 		passed_count=$((passed_count + 1))
@@ -1132,14 +1464,18 @@ launch_suite_worker() {
 	l_status_file="$RUNNER_STATE_DIR/$l_worker_id.status"
 	l_path_file="$RUNNER_STATE_DIR/$l_worker_id.path"
 	l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.pid"
+	l_owner_pid_file="$RUNNER_STATE_DIR/$l_worker_id.owner.pid"
 	l_token_file="$RUNNER_STATE_DIR/$l_worker_id.token"
 	l_child_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
+	l_child_owner_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.owner.pid"
 	l_child_token_file="$RUNNER_STATE_DIR/$l_worker_id.child.token"
 	l_ready_file="$RUNNER_STATE_DIR/$l_worker_id.ready"
 
 	printf '%s\n' "$l_suite_path" >"$l_path_file"
+	printf '%s\n' "$$" >"$l_owner_pid_file"
 	rm -f "$l_token_file"
 	rm -f "$l_child_pid_file"
+	rm -f "$l_child_owner_pid_file"
 	rm -f "$l_child_token_file"
 	rm -f "$l_ready_file"
 
@@ -1158,23 +1494,55 @@ launch_suite_worker() {
 		}
 		runner_signal_suite_child() {
 			l_signal=$1
+			l_suite_owner_pid=
 			case "${l_suite_pid:-}" in
 			'' | *[!0-9]*)
 				return 0
 				;;
 			esac
-			signal_pid_and_descendants \
-				"$l_signal" "$l_suite_pid" "$l_suite_token"
+			if [ -z "${l_suite_token:-}" ]; then
+				if l_suite_token=$(runner_capture_child_identity_from_parent_file \
+					"$l_pid_file" "$l_suite_pid" 2>/dev/null); then
+					:
+				else
+					l_suite_token=
+				fi
+				if [ -n "$l_suite_token" ]; then
+					printf '%s\n' "$l_suite_token" \
+						>"$l_child_token_file" 2>/dev/null || :
+				fi
+			fi
+			if [ -n "${l_suite_token:-}" ]; then
+				signal_pid_and_descendants \
+					"$l_signal" "$l_suite_pid" "$l_suite_token"
+			else
+				l_suite_owner_pid=$(runner_read_numeric_pid_file \
+					"$l_pid_file" 2>/dev/null || true)
+				signal_owned_child_and_descendants \
+					"$l_signal" "$$" \
+					"$l_suite_owner_pid" "$l_suite_pid"
+			fi
 		}
 		runner_suite_child_running_p() {
+			l_suite_owner_pid=
 			case "${l_suite_pid:-}" in
 			'' | *[!0-9]*)
 				return 1
 				;;
 			esac
-			if tracked_runner_process_running_p \
-				"$l_suite_pid" "$l_suite_token" 1; then
-				return 0
+			if [ -n "${l_suite_token:-}" ]; then
+				if tracked_runner_process_running_p \
+					"$l_suite_pid" "$l_suite_token"; then
+					return 0
+				fi
+			else
+				l_suite_owner_pid=$(runner_read_numeric_pid_file \
+					"$l_pid_file" 2>/dev/null || true)
+				if runner_child_pid_matches_parent \
+					"$l_suite_owner_pid" "$l_suite_pid" &&
+					process_running_p "$l_suite_pid"; then
+					return 0
+				fi
 			fi
 			return 1
 		}
@@ -1207,6 +1575,7 @@ launch_suite_worker() {
 			esac
 			if ! runner_wait_for_suite_child_shutdown; then
 				runner_signal_suite_child KILL
+				runner_wait_for_suite_child_shutdown || :
 			fi
 			wait "$l_suite_pid" >/dev/null 2>&1 || :
 			exit "$l_status"
@@ -1238,13 +1607,23 @@ EOF
 			"$@" >"$l_log_file" 2>&1 &
 		fi
 		l_suite_pid=$!
-		l_suite_token=$(runner_get_process_start_token "$l_suite_pid" 2>/dev/null || true)
+		printf '%s\n' "$l_suite_pid" >"$l_child_pid_file" 2>/dev/null || :
+		if l_suite_token=$(runner_capture_child_identity_from_parent_file \
+			"$l_pid_file" "$l_suite_pid" 2>/dev/null); then
+			:
+		else
+			l_suite_token=
+		fi
 		if [ -n "$l_suite_token" ]; then
 			printf '%s\n' "$l_suite_token" >"$l_child_token_file" 2>/dev/null || :
-			printf '%s\n' "$l_suite_pid" >"$l_child_pid_file" 2>/dev/null || :
 		fi
 		l_launching_suite_child=0
 		runner_consume_deferred_signal
+		while runner_suite_child_running_p; do
+			# Poll instead of blocking in wait: supported /bin/sh variants may
+			# defer a pending trap until the waited-on child exits.
+			sleep 1 || true
+		done
 		if wait "$l_suite_pid"; then
 			l_status=0
 		else
@@ -1255,13 +1634,22 @@ EOF
 		exit "$l_status"
 	) &
 	l_pid=$!
-	l_token=$(runner_get_process_start_token "$l_pid" 2>/dev/null || true)
-
+	printf '%s\n' "$l_pid" >"$l_child_owner_pid_file"
 	printf '%s\n' "$l_pid" >"$l_pid_file"
+	if l_token=$(runner_capture_child_identity_with_retry \
+		"$$" "$l_pid" 2>/dev/null); then
+		:
+	else
+		l_token=
+	fi
 	if [ -n "$l_token" ]; then
 		printf '%s\n' "$l_token" >"$l_token_file"
 	fi
-	RUNNER_PENDING_WORKERS=$(append_worker_id "$RUNNER_PENDING_WORKERS" "$l_worker_id")
+	if [ -n "$RUNNER_PENDING_WORKERS" ]; then
+		RUNNER_PENDING_WORKERS="$RUNNER_PENDING_WORKERS $l_worker_id"
+	else
+		RUNNER_PENDING_WORKERS=$l_worker_id
+	fi
 	RUNNER_INFLIGHT_COUNT=$((RUNNER_INFLIGHT_COUNT + 1))
 	RUNNER_NEXT_WORKER_ID=$((RUNNER_NEXT_WORKER_ID + 1))
 	RUNNER_DEFER_SIGNALS=0
@@ -1272,8 +1660,10 @@ replay_suite_worker() {
 	l_worker_id=$1
 	l_path_file="$RUNNER_STATE_DIR/$l_worker_id.path"
 	l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.pid"
+	l_owner_pid_file="$RUNNER_STATE_DIR/$l_worker_id.owner.pid"
 	l_token_file="$RUNNER_STATE_DIR/$l_worker_id.token"
 	l_child_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
+	l_child_owner_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.owner.pid"
 	l_child_token_file="$RUNNER_STATE_DIR/$l_worker_id.child.token"
 	l_log_file="$RUNNER_STATE_DIR/$l_worker_id.log"
 	l_status_file="$RUNNER_STATE_DIR/$l_worker_id.status"
@@ -1307,8 +1697,9 @@ replay_suite_worker() {
 		failed_count=$((failed_count + 1))
 	fi
 
-	rm -f "$l_path_file" "$l_pid_file" "$l_token_file" \
-		"$l_child_pid_file" "$l_child_token_file" \
+	rm -f "$l_path_file" "$l_pid_file" "$l_owner_pid_file" \
+		"$l_token_file" "$l_child_pid_file" \
+		"$l_child_owner_pid_file" "$l_child_token_file" \
 		"$l_log_file" "$l_status_file" "$l_ready_file"
 }
 
@@ -1380,33 +1771,55 @@ signal_pending_workers() {
 	l_signal=$1
 
 	for l_worker_id in $RUNNER_PENDING_WORKERS; do
-		l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.pid"
-		l_token_file="$RUNNER_STATE_DIR/$l_worker_id.token"
-		if [ -r "$l_pid_file" ]; then
-			l_pid=$(cat "$l_pid_file" 2>/dev/null || true)
-			l_token=$(read_runner_process_token "$l_token_file" 2>/dev/null || true)
-			case "$l_pid" in
-			'' | *[!0-9]*) ;;
-			*)
-				signal_pid_and_descendants \
-					"$l_signal" "$l_pid" "$l_token"
-				;;
-			esac
+		l_pending_worker_child_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
+		l_pending_worker_child_token_file="$RUNNER_STATE_DIR/$l_worker_id.child.token"
+		l_pending_worker_child_pid=
+		l_pending_worker_child_token=
+		l_pending_worker_child_unverified=0
+		if [ -r "$l_pending_worker_child_pid_file" ]; then
+			l_pending_worker_child_pid=$(cat \
+				"$l_pending_worker_child_pid_file" 2>/dev/null || true)
+			l_pending_worker_child_token=$(read_runner_process_token \
+				"$l_pending_worker_child_token_file" 2>/dev/null || true)
 		fi
 
-		l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
-		l_token_file="$RUNNER_STATE_DIR/$l_worker_id.child.token"
-		if [ -r "$l_pid_file" ]; then
-			l_pid=$(cat "$l_pid_file" 2>/dev/null || true)
-			l_token=$(read_runner_process_token "$l_token_file" 2>/dev/null || true)
-			case "$l_pid" in
-			'' | *[!0-9]*) ;;
-			*)
-				signal_pid_and_descendants \
-					"$l_signal" "$l_pid" "$l_token"
-				;;
-			esac
+		# Never terminate a wrapper while its published child lacks a stable
+		# identity. The wrapper is the remaining ownership proof and must stay
+		# alive until it can reap that child.
+		case "$l_pending_worker_child_pid" in
+		'' | *[!0-9]*) ;;
+		*)
+			[ -n "$l_pending_worker_child_token" ] ||
+				l_pending_worker_child_unverified=1
+			;;
+		esac
+		if [ "$l_pending_worker_child_unverified" -eq 0 ]; then
+			l_pending_worker_pid_file="$RUNNER_STATE_DIR/$l_worker_id.pid"
+			l_pending_worker_token_file="$RUNNER_STATE_DIR/$l_worker_id.token"
+			if [ -r "$l_pending_worker_pid_file" ]; then
+				l_pending_worker_pid=$(cat \
+					"$l_pending_worker_pid_file" 2>/dev/null || true)
+				l_pending_worker_token=$(read_runner_process_token \
+					"$l_pending_worker_token_file" 2>/dev/null || true)
+				case "$l_pending_worker_pid" in
+				'' | *[!0-9]*) ;;
+				*)
+					signal_pid_and_descendants \
+						"$l_signal" "$l_pending_worker_pid" \
+						"$l_pending_worker_token"
+					;;
+				esac
+			fi
 		fi
+
+		case "$l_pending_worker_child_pid" in
+		'' | *[!0-9]*) ;;
+		*)
+			signal_pid_and_descendants \
+				"$l_signal" "$l_pending_worker_child_pid" \
+				"$l_pending_worker_child_token"
+			;;
+		esac
 	done
 }
 
@@ -1414,6 +1827,7 @@ signal_pending_worker_children() {
 	l_signal=$1
 
 	for l_worker_id in $RUNNER_PENDING_WORKERS; do
+		l_worker_owner_pid_file="$RUNNER_STATE_DIR/$l_worker_id.pid"
 		l_pid_file="$RUNNER_STATE_DIR/$l_worker_id.child.pid"
 		l_token_file="$RUNNER_STATE_DIR/$l_worker_id.child.token"
 		if [ -r "$l_pid_file" ]; then
@@ -1422,8 +1836,16 @@ signal_pending_worker_children() {
 			case "$l_pid" in
 			'' | *[!0-9]*) ;;
 			*)
-				signal_pid_and_descendants \
-					"$l_signal" "$l_pid" "$l_token"
+				if [ -n "$l_token" ]; then
+					signal_pid_and_descendants \
+						"$l_signal" "$l_pid" "$l_token"
+				else
+					l_worker_owner_pid=$(runner_read_numeric_pid_file \
+						"$l_worker_owner_pid_file" 2>/dev/null || true)
+					signal_owned_child_and_descendants \
+						"$l_signal" "$$" \
+						"$l_worker_owner_pid" "$l_pid"
+				fi
 				;;
 			esac
 		fi
@@ -1541,11 +1963,14 @@ handle_runner_signal() {
 	fi
 
 	if [ "$RUNNER_SHUTTING_DOWN" = "1" ]; then
-		exit "$l_status"
+		return 0
 	fi
 
 	RUNNER_SHUTTING_DOWN=1
-	trap - HUP INT TERM
+	# Once teardown starts, a second catchable signal must not kill the owner
+	# shells and orphan an unverified suite. Operators can still use SIGKILL if
+	# the platform cannot provide either tokens or parent/child enumeration.
+	trap '' HUP INT TERM
 	# Keep wrapper shells alive while payload suites are terminated so they can
 	# reap children before the runner exits. This avoids persistent suite PIDs
 	# on illumos/OmniOS when a suite ignores TERM.

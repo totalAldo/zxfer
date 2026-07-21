@@ -26,6 +26,16 @@ leaks and CI uses bounded worker counts, but the runner still needs portable
 per-suite timeout and pending-log diagnostics so future failures terminate with
 actionable evidence.
 
+### Low: shunit signal cleanup waits when all process identity is unavailable
+
+Signal cleanup also fails closed if a host provides neither usable process-start
+tokens nor any supported parent/child enumeration. In that degraded state the
+runner keeps its wrapper alive instead of risking a reused PID or orphaned test
+descendant, and ignores repeated catchable signals after teardown begins. A
+manual `KILL` remains possible, but can orphan the unverified child. Supported
+CI platforms provide at least the parent/child path; the degraded path emits an
+explicit diagnostic rather than silently targeting an unverified process.
+
 ### Resolved: silent destroy/rollback/resend churn on GUID-diverged destinations (fixed 2026-06-12)
 
 Before 2026-06-12, when destination snapshots matched source snapshots by

@@ -13,17 +13,23 @@ oneTimeSetUp() {
 	RUN_SHUNIT_TESTS_BIN="$ZXFER_ROOT/tests/run_shunit_tests.sh"
 	RUN_SHUNIT_TESTS_ORIGINAL_PATH=${PATH:-/usr/bin:/bin}
 	RUN_SHUNIT_TESTS_IDENTITY_BIN="$TEST_TMPDIR/process-identity-bin"
+	RUN_SHUNIT_TESTS_IDENTITY_RELATIONS="$TEST_TMPDIR/process-identity-relations"
 	ZXFER_TEST_REAL_PS=$(command -v ps 2>/dev/null || printf '%s\n' /bin/ps)
-	mkdir -p "$RUN_SHUNIT_TESTS_IDENTITY_BIN"
+	ZXFER_TEST_PROCESS_IDENTITY_STATE_ROOT=${TMPDIR:-/tmp}
+	ZXFER_TEST_PROCESS_IDENTITY_RELATION_ROOT=$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS
+	mkdir -p "$RUN_SHUNIT_TESTS_IDENTITY_BIN" \
+		"$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS"
 	zxfer_test_write_process_identity_ps "$RUN_SHUNIT_TESTS_IDENTITY_BIN/ps"
 	PATH="$RUN_SHUNIT_TESTS_IDENTITY_BIN:$RUN_SHUNIT_TESTS_ORIGINAL_PATH"
-	export PATH ZXFER_TEST_REAL_PS
+	export PATH ZXFER_TEST_REAL_PS ZXFER_TEST_PROCESS_IDENTITY_STATE_ROOT \
+		ZXFER_TEST_PROCESS_IDENTITY_RELATION_ROOT
 }
 
 oneTimeTearDown() {
 	PATH=$RUN_SHUNIT_TESTS_ORIGINAL_PATH
 	export PATH
-	unset ZXFER_TEST_REAL_PS
+	unset ZXFER_TEST_REAL_PS ZXFER_TEST_PROCESS_IDENTITY_STATE_ROOT \
+		ZXFER_TEST_PROCESS_IDENTITY_RELATION_ROOT
 	zxfer_test_cleanup_tmpdir
 }
 
@@ -37,6 +43,10 @@ setUp() {
 	: >"$FAKE_SUITE_LOG"
 	: >"$FAKE_TEST_SHELL_LOG"
 	rm -f "$FAKE_SUITE_STARTED" "$FAKE_SUITE_RELEASE"
+	for l_relation_path in "$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS"/*; do
+		[ -e "$l_relation_path" ] || continue
+		rm -f "$l_relation_path"
+	done
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -559,16 +569,20 @@ test_send_test_signal_to_pid_uses_numeric_signal_fallback() {
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_refuses_to_signal_a_reused_root_pid() {
+	l_matcher_log="$TEST_TMPDIR/reused-root-token-matcher.called"
+	rm -f "$l_matcher_log"
 	output=$(
 		env -i \
 			PATH="${PATH:-/usr/bin:/bin}" \
 			TMPDIR="${TMPDIR:-/tmp}" \
 			RUN_SHUNIT_TESTS_BIN="$RUN_SHUNIT_TESTS_BIN" \
+			TOKEN_MATCHER_LOG="$l_matcher_log" \
 			ZXFER_RUN_SHUNIT_SOURCE_ONLY=1 \
 			/bin/sh -s <<'EOF'
 . "$RUN_SHUNIT_TESTS_BIN"
-runner_get_process_start_token() {
-	printf '%s\n' 'lstart:new-process'
+runner_get_process_start_token_for_selector() {
+	: >"$TOKEN_MATCHER_LOG"
+	printf '%s:%s\n' "$2" 'new-process'
 }
 snapshot_process_descendants() {
 	printf 'snapshot=%s\n' "$1"
@@ -583,6 +597,148 @@ EOF
 
 	assertEquals "A changed root process-start token must prevent descendant discovery and signalling of a reused PID." \
 		"" "$output"
+	l_matcher_called=1
+	if [ -f "$l_matcher_log" ]; then
+		l_matcher_called=0
+	fi
+	assertEquals "The reused-PID regression should exercise the selector-specific token matcher." \
+		0 "$l_matcher_called"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_refuses_a_reused_tokenless_owner_chain() {
+	l_chain_log="$TEST_TMPDIR/reused-tokenless-owner-chain.log"
+	rm -f "$l_chain_log"
+	output=$(
+		env -i \
+			PATH="${PATH:-/usr/bin:/bin}" \
+			OWNER_CHAIN_LOG="$l_chain_log" \
+			RUN_SHUNIT_TESTS_BIN="$RUN_SHUNIT_TESTS_BIN" \
+			ZXFER_RUN_SHUNIT_SOURCE_ONLY=1 \
+			/bin/sh -s <<'EOF'
+. "$RUN_SHUNIT_TESTS_BIN"
+runner_child_pid_matches_parent() {
+	printf '%s:%s\n' "$1" "$2" >>"$OWNER_CHAIN_LOG"
+	if [ "$1:$2" = "200:300" ]; then
+		return 0
+	fi
+	return 1
+}
+snapshot_owned_process_descendant_chains() {
+	printf '%s\n' snapshot
+}
+send_signal_to_pid() {
+	printf 'signal=%s pid=%s\n' "$1" "$2"
+}
+signal_owned_child_and_descendants TERM 100 200 300
+EOF
+	)
+
+	assertEquals "A reused tokenless owner must prevent descendant discovery and signalling even when the lower owner-child pair matches." \
+		"" "$output"
+	assertEquals "The tokenless fallback should validate the top runner-to-owner link before trusting the lower pair." \
+		"100:200" "$(cat "$l_chain_log")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_rejects_a_malformed_ownership_chain() {
+	output=$(
+		env -i \
+			PATH="${PATH:-/usr/bin:/bin}" \
+			RUN_SHUNIT_TESTS_BIN="$RUN_SHUNIT_TESTS_BIN" \
+			ZXFER_RUN_SHUNIT_SOURCE_ONLY=1 \
+			/bin/sh -s <<'EOF'
+. "$RUN_SHUNIT_TESTS_BIN"
+runner_child_pid_matches_parent() {
+	return 0
+}
+if runner_owned_process_chain_matches '1:2:'; then
+	printf '%s\n' accepted
+fi
+EOF
+	)
+
+	assertEquals "Ownership chains with an empty trailing component must fail closed." \
+		"" "$output"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_reports_unavailable_ownership_enumeration() {
+	output=$(
+		env -i \
+			PATH="${PATH:-/usr/bin:/bin}" \
+			RUN_SHUNIT_TESTS_BIN="$RUN_SHUNIT_TESTS_BIN" \
+			ZXFER_RUN_SHUNIT_SOURCE_ONLY=1 \
+			/bin/sh -s 2>&1 <<'EOF'
+. "$RUN_SHUNIT_TESTS_BIN"
+list_child_pids_for_parent() {
+	return 1
+}
+sleep() {
+	:
+}
+send_signal_to_pid() {
+	printf 'signal=%s pid=%s\n' "$1" "$2"
+}
+signal_owned_child_and_descendants TERM 100 200 300
+EOF
+	)
+
+	assertEquals "Unavailable relationship enumeration should fail closed with an actionable diagnostic and no signal." \
+		"Unable to verify shunit suite descendants; waiting for the owning wrapper to reap them." \
+		"$output"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_keeps_the_suite_when_a_proven_descendant_rejects_kill() {
+	output=$(
+		env -i \
+			PATH="${PATH:-/usr/bin:/bin}" \
+			RUN_SHUNIT_TESTS_BIN="$RUN_SHUNIT_TESTS_BIN" \
+			ZXFER_RUN_SHUNIT_SOURCE_ONLY=1 \
+			/bin/sh -s 2>&1 <<'EOF'
+. "$RUN_SHUNIT_TESTS_BIN"
+snapshot_owned_process_descendant_chains() {
+	printf '%s\n' '100:200:300:400'
+}
+runner_owned_process_chain_matches() {
+	return 0
+}
+send_signal_to_pid() {
+	if [ "$2" = "400" ]; then
+		return 1
+	fi
+	printf 'signal=%s pid=%s\n' "$1" "$2"
+}
+signal_owned_child_and_descendants TERM 100 200 300
+EOF
+	)
+
+	assertEquals "A still-attached descendant that rejects KILL must keep the suite owner alive." \
+		"Unable to revalidate shunit suite descendants; waiting for the owning wrapper to reap them." \
+		"$output"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_matches_the_recorded_process_token_selector() {
+	output=$(
+		env -i \
+			PATH="${PATH:-/usr/bin:/bin}" \
+			RUN_SHUNIT_TESTS_BIN="$RUN_SHUNIT_TESTS_BIN" \
+			ZXFER_RUN_SHUNIT_SOURCE_ONLY=1 \
+			/bin/sh -s <<'EOF'
+. "$RUN_SHUNIT_TESTS_BIN"
+runner_get_process_start_token_for_selector() {
+	printf '%s:%s\n' "$2" stable
+}
+if runner_process_identity_matches 43210 'stime:stable'; then
+	printf '%s\n' matched
+fi
+EOF
+	)
+
+	assertEquals "Identity checks should reuse the selector embedded in the captured token instead of switching back to lstart." \
+		"matched" "$output"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -1131,10 +1287,16 @@ test_run_shunit_tests_signal_cleanup_kills_term_resistant_serial_suite() {
 	l_output_path="$TEST_TMPDIR/term-resistant-serial.output"
 	l_started_path="$TEST_TMPDIR/term-resistant-serial.started"
 	l_suite_pid_path="$TEST_TMPDIR/term-resistant-serial.pid"
-	l_grandchild_pid_path="$TEST_TMPDIR/term-resistant-serial-grandchild.pid"
+	l_intermediate_owner_pid_path="$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS/serial-intermediate.owner.pid"
+	l_intermediate_pid_path="$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS/serial-intermediate.pid"
+	l_grandchild_owner_pid_path="$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS/serial-grandchild.owner.pid"
+	l_grandchild_pid_path="$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS/serial-grandchild.pid"
+	l_grandchild_term_path="$TEST_TMPDIR/term-resistant-serial-grandchild.term"
 	l_runner_pid_path="$TEST_TMPDIR/term-resistant-serial-runner.pid"
 	rm -f "$l_output_path" "$l_started_path" "$l_suite_pid_path" \
-		"$l_grandchild_pid_path" "$l_runner_pid_path"
+		"$l_intermediate_owner_pid_path" "$l_intermediate_pid_path" \
+		"$l_grandchild_owner_pid_path" "$l_grandchild_pid_path" \
+		"$l_grandchild_term_path" "$l_runner_pid_path"
 	write_fake_runner_pid_wrapper "$l_runner_wrapper_path"
 
 	write_fake_suite_with_body "$l_suite_path" <<'EOF'
@@ -1142,12 +1304,16 @@ test_run_shunit_tests_signal_cleanup_kills_term_resistant_serial_suite() {
 	(
 		trap 'exit 0' TERM
 		/bin/sh -c '
-			trap "" TERM
+			trap ": >\"${FAKE_GRANDCHILD_TERM_FILE:?}\"" TERM
 			printf "%s\n" "$$" >"${FAKE_GRANDCHILD_PID_FILE:?}"
 			while :; do sleep 1; done
 		' term-resistant-grandchild-marker &
 		wait
 	) &
+	l_intermediate_pid=$!
+	printf '%s\n' "$$" >"${FAKE_INTERMEDIATE_OWNER_PID_FILE:?}"
+	printf '%s\n' "$l_intermediate_pid" >"${FAKE_INTERMEDIATE_PID_FILE:?}"
+	printf '%s\n' "$l_intermediate_pid" >"${FAKE_GRANDCHILD_OWNER_PID_FILE:?}"
 	trap '' TERM
 	printf '%s\n' "$$" >"${FAKE_SUITE_LOG:?}"
 	l_wait_count=0
@@ -1173,7 +1339,11 @@ EOF
 	set +e
 	FAKE_SUITE_LOG="$l_suite_pid_path" \
 		FAKE_SUITE_STARTED="$l_started_path" \
+		FAKE_INTERMEDIATE_OWNER_PID_FILE="$l_intermediate_owner_pid_path" \
+		FAKE_INTERMEDIATE_PID_FILE="$l_intermediate_pid_path" \
+		FAKE_GRANDCHILD_OWNER_PID_FILE="$l_grandchild_owner_pid_path" \
 		FAKE_GRANDCHILD_PID_FILE="$l_grandchild_pid_path" \
+		FAKE_GRANDCHILD_TERM_FILE="$l_grandchild_term_path" \
 		FAKE_RUNNER_PID_FILE="$l_runner_pid_path" \
 		FAKE_RUNNER_TARGET="$RUN_SHUNIT_TESTS_BIN" \
 		"$l_runner_wrapper_path" --jobs 1 "$l_suite_path" >"$l_output_path" 2>&1 &
@@ -1236,10 +1406,9 @@ EOF
 	wait "$l_watchdog_pid" >/dev/null 2>&1 || :
 
 	l_suite_gone=1
-	l_suite_marker=$(basename "$l_suite_path")
 	l_wait_count=0
 	while [ "$l_wait_count" -lt 10 ]; do
-		if ! fake_suite_process_running_p "$l_suite_pid" "$l_suite_marker"; then
+		if ! send_test_signal_to_pid 0 "$l_suite_pid"; then
 			l_suite_gone=0
 			break
 		fi
@@ -1248,10 +1417,9 @@ EOF
 	done
 
 	l_runner_gone=1
-	l_runner_marker=$(basename "$RUN_SHUNIT_TESTS_BIN")
 	l_wait_count=0
 	while [ "$l_wait_count" -lt 10 ]; do
-		if ! fake_suite_process_running_p "$l_runner_signal_pid" "$l_runner_marker"; then
+		if ! send_test_signal_to_pid 0 "$l_runner_signal_pid"; then
 			l_runner_gone=0
 			break
 		fi
@@ -1265,7 +1433,7 @@ EOF
 	l_grandchild_gone=1
 	l_wait_count=0
 	while [ "$l_wait_count" -lt 10 ]; do
-		if ! fake_suite_process_running_p "$l_grandchild_pid" "term-resistant-grandchild-marker"; then
+		if ! send_test_signal_to_pid 0 "$l_grandchild_pid"; then
 			l_grandchild_gone=0
 			break
 		fi
@@ -1291,6 +1459,12 @@ EOF
 		0 "$l_suite_gone"
 	assertEquals "Serial signal cleanup should retain and KILL a TERM-resistant grandchild after its intermediate parent exits on TERM." \
 		0 "$l_grandchild_gone"
+	l_grandchild_signalled=1
+	if [ -f "$l_grandchild_term_path" ]; then
+		l_grandchild_signalled=0
+	fi
+	assertEquals "Serial cleanup should discover and signal the recorded grandchild before escalation." \
+		0 "$l_grandchild_signalled"
 	assertEquals "Serial signal cleanup should not leave the nested shunit runner alive after the caller regains control." \
 		0 "$l_runner_gone"
 }
@@ -1304,7 +1478,9 @@ test_run_shunit_tests_signal_cleanup_kills_term_resistant_workers() {
 	l_started_path="$TEST_TMPDIR/term-resistant.started"
 	l_suite_pid_path="$TEST_TMPDIR/term-resistant.pid"
 	l_runner_pid_path="$TEST_TMPDIR/term-resistant-runner.pid"
+	l_runner_tmpdir="$TEST_TMPDIR/term-resistant-state"
 	rm -f "$l_output_path" "$l_started_path" "$l_suite_pid_path" "$l_runner_pid_path"
+	mkdir -p "$l_runner_tmpdir"
 	write_fake_runner_pid_wrapper "$l_runner_wrapper_path"
 
 	write_fake_suite_with_body "$l_suite_path" <<'EOF'
@@ -1336,6 +1512,8 @@ EOF
 		FAKE_SUITE_STARTED="$l_started_path" \
 		FAKE_RUNNER_PID_FILE="$l_runner_pid_path" \
 		FAKE_RUNNER_TARGET="$RUN_SHUNIT_TESTS_BIN" \
+		TMPDIR="$l_runner_tmpdir" \
+		ZXFER_TEST_PROCESS_IDENTITY_STATE_ROOT="$l_runner_tmpdir" \
 		"$l_runner_wrapper_path" --jobs 2 "$l_suite_path" "$l_second_suite_path" >"$l_output_path" 2>&1 &
 	l_runner_pid=$!
 	[ "$l_restore_errexit" = "1" ] && set -e
@@ -1359,6 +1537,41 @@ EOF
 	fi
 
 	l_suite_pid=$(cat "$l_suite_pid_path")
+	l_identity_published=1
+	l_wait_count=0
+	while [ "$l_wait_count" -lt "$RUN_SHUNIT_TESTS_WAIT_LIMIT" ]; do
+		for l_child_pid_file in \
+			"$l_runner_tmpdir"/zxfer_shunit.*/*.child.pid; do
+			[ -r "$l_child_pid_file" ] || continue
+			l_recorded_child_pid=$(cat "$l_child_pid_file" 2>/dev/null || true)
+			l_child_token_file=${l_child_pid_file%.pid}.token
+			if [ "$l_recorded_child_pid" = "$l_suite_pid" ] &&
+				[ -s "$l_child_token_file" ]; then
+				l_identity_published=0
+				break
+			fi
+		done
+		[ "$l_identity_published" -eq 0 ] && break
+		if ! send_test_signal_to_pid 0 "$l_runner_pid"; then
+			break
+		fi
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	if [ "$l_identity_published" -ne 0 ]; then
+		send_test_signal_to_pid TERM "$l_runner_pid" || :
+		(
+			sleep "$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS"
+			send_test_signal_to_pid KILL "$l_suite_pid" || :
+			send_test_signal_to_pid KILL "$l_runner_pid" || :
+		) &
+		l_readiness_watchdog_pid=$!
+		wait "$l_runner_pid" >/dev/null 2>&1 || :
+		kill "$l_readiness_watchdog_pid" >/dev/null 2>&1 || :
+		wait "$l_readiness_watchdog_pid" >/dev/null 2>&1 || :
+		fail "The parallel cleanup test did not observe published child identity state."
+		return 0
+	fi
 	l_runner_signal_pid=$(cat "$l_runner_pid_path" 2>/dev/null || true)
 	case "$l_runner_signal_pid" in
 	'' | *[!0-9]*)
@@ -1396,10 +1609,9 @@ EOF
 	wait "$l_watchdog_pid" >/dev/null 2>&1 || :
 
 	l_suite_gone=1
-	l_suite_marker=$(basename "$l_suite_path")
 	l_wait_count=0
 	while [ "$l_wait_count" -lt 10 ]; do
-		if ! fake_suite_process_running_p "$l_suite_pid" "$l_suite_marker"; then
+		if ! send_test_signal_to_pid 0 "$l_suite_pid"; then
 			l_suite_gone=0
 			break
 		fi
@@ -1408,10 +1620,9 @@ EOF
 	done
 
 	l_runner_gone=1
-	l_runner_marker=$(basename "$RUN_SHUNIT_TESTS_BIN")
 	l_wait_count=0
 	while [ "$l_wait_count" -lt 10 ]; do
-		if ! fake_suite_process_running_p "$l_runner_signal_pid" "$l_runner_marker"; then
+		if ! send_test_signal_to_pid 0 "$l_runner_signal_pid"; then
 			l_runner_gone=0
 			break
 		fi
@@ -1447,7 +1658,10 @@ test_run_shunit_tests_tracks_worker_child_before_handling_launch_signals() {
 	l_shell_path="$TEST_TMPDIR/race-launch-shell"
 	l_started_path="$TEST_TMPDIR/race-launch.started"
 	l_suite_pid_path="$TEST_TMPDIR/race-launch.pid"
-	rm -f "$l_started_path" "$l_suite_pid_path"
+	l_capture_path="$TEST_TMPDIR/race-launch.output"
+	l_empty_token_done_path="$TEST_TMPDIR/race-launch.empty-token"
+	rm -f "$l_started_path" "$l_suite_pid_path" \
+		"$l_empty_token_done_path" "$l_empty_token_done_path.active"
 
 	write_fake_suite_with_body "$l_race_suite" <<'EOF'
 #!/bin/sh
@@ -1468,9 +1682,12 @@ case "$1" in
 	: >"${FAKE_SUITE_STARTED:?}"
 	trap '' TERM
 	kill -TERM "$PPID"
-	while :; do
+	l_fake_wait_remaining=${FAKE_SUITE_WAIT_LIMIT:?}
+	while [ "$l_fake_wait_remaining" -gt 0 ]; do
 		sleep 1
+		l_fake_wait_remaining=$((l_fake_wait_remaining - 1))
 	done
+	exit 124
 	;;
 *)
 	exec /bin/sh "$1"
@@ -1479,12 +1696,20 @@ esac
 EOF
 	chmod +x "$l_shell_path"
 
-	zxfer_test_capture_subshell "
-		ZXFER_TEST_SHELL=\"$l_shell_path\" \
-		FAKE_SUITE_LOG=\"$l_suite_pid_path\" \
-		FAKE_SUITE_STARTED=\"$l_started_path\" \
-		\"$RUN_SHUNIT_TESTS_BIN\" --jobs 2 \"$l_race_suite\" \"$l_support_suite\"
-	"
+	if ZXFER_TEST_SHELL="$l_shell_path" \
+		FAKE_SUITE_LOG="$l_suite_pid_path" \
+		FAKE_SUITE_STARTED="$l_started_path" \
+		FAKE_SUITE_WAIT_LIMIT="$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS" \
+		ZXFER_TEST_EMPTY_PROCESS_TOKEN_PID_FILE="$l_suite_pid_path" \
+		ZXFER_TEST_EMPTY_PROCESS_TOKEN_DONE_FILE="$l_empty_token_done_path" \
+		ZXFER_TEST_EMPTY_PROCESS_TOKEN_READY_FILE="$l_started_path" \
+		"$RUN_SHUNIT_TESTS_BIN" --jobs 2 \
+		"$l_race_suite" "$l_support_suite" >"$l_capture_path" 2>&1; then
+		ZXFER_TEST_CAPTURE_STATUS=0
+	else
+		ZXFER_TEST_CAPTURE_STATUS=$?
+	fi
+	ZXFER_TEST_CAPTURE_OUTPUT=$(cat "$l_capture_path")
 
 	assertEquals "A worker that receives TERM during child launch should still report the signal-derived suite status after the child PID is tracked." \
 		143 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -1500,6 +1725,12 @@ EOF
 	fi
 	assertEquals "The launch-race wrapper should have reached its startup marker before being torn down." \
 		0 "$l_started_present"
+	l_empty_token_forced=1
+	if [ -f "$l_empty_token_done_path" ]; then
+		l_empty_token_forced=0
+	fi
+	assertEquals "The launch-race fixture should force the first complete child identity lookup to return no token." \
+		0 "$l_empty_token_forced"
 
 	l_suite_pid=$(cat "$l_suite_pid_path")
 	l_suite_gone=1
@@ -1515,6 +1746,548 @@ EOF
 
 	assertEquals "Signals that land during worker child launch should not orphan the launched test-shell process." \
 		0 "$l_suite_gone"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_consumes_parent_signal_during_worker_identity_capture() {
+	l_race_suite="$TEST_TMPDIR/parent-race-suite.sh"
+	l_support_suite="$TEST_TMPDIR/parent-race-support-suite.sh"
+	l_runner_wrapper="$TEST_TMPDIR/parent-race-runner.sh"
+	l_runner_pid_path="$TEST_TMPDIR/parent-race-runner.pid"
+	l_worker_pid_path="$TEST_TMPDIR/parent-race-worker.pid"
+	l_suite_pid_path="$TEST_TMPDIR/parent-race-suite.pid"
+	l_started_path="$TEST_TMPDIR/parent-race-suite.started"
+	l_signal_done_path="$TEST_TMPDIR/parent-race-signal.done"
+	l_capture_path="$TEST_TMPDIR/parent-race.output"
+	l_runner_tmpdir="$TEST_TMPDIR/parent-race-state"
+	rm -f "$l_runner_pid_path" "$l_worker_pid_path" \
+		"$l_suite_pid_path" "$l_started_path" \
+		"$l_signal_done_path" "$l_capture_path"
+	mkdir -p "$l_runner_tmpdir"
+	write_fake_runner_pid_wrapper "$l_runner_wrapper"
+
+	write_fake_suite_with_body "$l_race_suite" <<'EOF'
+#!/bin/sh
+	trap '' TERM
+	printf '%s\n' "$PPID" >"${FAKE_WORKER_PID_LOG:?}"
+	printf '%s\n' "$$" >"${FAKE_SUITE_LOG:?}"
+	: >"${FAKE_SUITE_STARTED:?}"
+	l_fake_wait_remaining=${FAKE_SUITE_WAIT_LIMIT:?}
+	while [ "$l_fake_wait_remaining" -gt 0 ]; do
+		sleep 1
+		l_fake_wait_remaining=$((l_fake_wait_remaining - 1))
+	done
+	exit 124
+EOF
+	write_fake_suite_with_body "$l_support_suite" <<'EOF'
+#!/bin/sh
+	printf '%s\n' parent-race-support
+	exit 0
+EOF
+	chmod +x "$l_race_suite" "$l_support_suite"
+
+	if FAKE_RUNNER_PID_FILE="$l_runner_pid_path" \
+		FAKE_RUNNER_TARGET="$RUN_SHUNIT_TESTS_BIN" \
+		FAKE_WORKER_PID_LOG="$l_worker_pid_path" \
+		FAKE_SUITE_LOG="$l_suite_pid_path" \
+		FAKE_SUITE_STARTED="$l_started_path" \
+		FAKE_SUITE_WAIT_LIMIT="$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS" \
+		TMPDIR="$l_runner_tmpdir" \
+		ZXFER_TEST_PROCESS_IDENTITY_STATE_ROOT="$l_runner_tmpdir" \
+		ZXFER_TEST_SIGNAL_PARENT_RUNNER_PID_FILE="$l_runner_pid_path" \
+		ZXFER_TEST_SIGNAL_PARENT_WORKER_PID_FILE="$l_worker_pid_path" \
+		ZXFER_TEST_SIGNAL_PARENT_DONE_FILE="$l_signal_done_path" \
+		ZXFER_TEST_SIGNAL_PARENT_READY_FILE="$l_started_path" \
+		"$l_runner_wrapper" --jobs 2 \
+		"$l_race_suite" "$l_support_suite" >"$l_capture_path" 2>&1; then
+		l_runner_status=0
+	else
+		l_runner_status=$?
+	fi
+
+	assertEquals "A parent-side TERM during worker identity capture should retain the signal-derived runner status." \
+		143 "$l_runner_status"
+	l_signal_forced=1
+	if [ -f "$l_signal_done_path" ]; then
+		l_signal_forced=0
+	fi
+	assertEquals "The identity fixture should deliver TERM while the parent runner is inspecting its worker." \
+		0 "$l_signal_forced"
+
+	l_suite_pid=$(cat "$l_suite_pid_path" 2>/dev/null || true)
+	l_suite_gone=1
+	l_wait_count=0
+	while [ "$l_wait_count" -lt 5 ]; do
+		if ! send_test_signal_to_pid 0 "$l_suite_pid"; then
+			l_suite_gone=0
+			break
+		fi
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	if [ "$l_suite_gone" -ne 0 ]; then
+		send_test_signal_to_pid KILL "$l_suite_pid" || :
+	fi
+	assertEquals "Parent launch-window cleanup should not orphan the suite child." \
+		0 "$l_suite_gone"
+
+	l_state_dir_count=0
+	for l_state_dir in "$l_runner_tmpdir"/zxfer_shunit.*; do
+		[ -d "$l_state_dir" ] || continue
+		l_state_dir_count=$((l_state_dir_count + 1))
+	done
+	assertEquals "The parent launch-window signal should still reach normal runner state cleanup." \
+		0 "$l_state_dir_count"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_reaps_child_when_identity_stays_unavailable() {
+	l_race_suite="$TEST_TMPDIR/tokenless-suite.sh"
+	l_support_suite="$TEST_TMPDIR/tokenless-support-suite.sh"
+	l_shell_path="$TEST_TMPDIR/tokenless-test-shell"
+	l_runner_wrapper="$TEST_TMPDIR/tokenless-runner.sh"
+	l_runner_pid_path="$TEST_TMPDIR/tokenless-runner.pid"
+	l_runner_tmpdir="$TEST_TMPDIR/tokenless-state"
+	l_started_path="$TEST_TMPDIR/tokenless-suite.started"
+	l_support_started_path="$TEST_TMPDIR/tokenless-support.started"
+	l_suite_pid_path="$TEST_TMPDIR/tokenless-suite.pid"
+	l_grandchild_owner_pid_path="$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS/tokenless-grandchild.owner.pid"
+	l_grandchild_pid_path="$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS/tokenless-grandchild.pid"
+	l_capture_path="$TEST_TMPDIR/tokenless.output"
+	l_force_empty_hit_path="$TEST_TMPDIR/tokenless-force-empty.hit"
+	l_watchdog_fired_path="$TEST_TMPDIR/tokenless-watchdog.fired"
+	rm -f "$l_runner_pid_path" "$l_started_path" \
+		"$l_support_started_path" "$l_suite_pid_path" \
+		"$l_grandchild_owner_pid_path" "$l_grandchild_pid_path" \
+		"$l_capture_path" "$l_force_empty_hit_path" \
+		"$l_watchdog_fired_path"
+	mkdir -p "$l_runner_tmpdir"
+	write_fake_runner_pid_wrapper "$l_runner_wrapper"
+
+	write_fake_suite_with_body "$l_race_suite" <<'EOF'
+#!/bin/sh
+	exit 0
+EOF
+	write_fake_suite_with_body "$l_support_suite" <<'EOF'
+#!/bin/sh
+	: >"${FAKE_SUPPORT_STARTED:?}"
+	printf '%s\n' tokenless-support
+	exit 0
+EOF
+	chmod 644 "$l_race_suite" "$l_support_suite"
+
+	cat >"$l_shell_path" <<'EOF'
+#!/bin/sh
+case "$1" in
+*tokenless-suite.sh)
+	trap '' TERM
+	/bin/sh -c '
+		trap "" TERM
+		printf "%s\n" "$$" >"${FAKE_GRANDCHILD_PID_FILE:?}"
+		exec sleep "${FAKE_DESCENDANT_WAIT_SECONDS:?}"
+	' tokenless-grandchild-marker &
+	l_grandchild_pid=$!
+	printf '%s\n' "$$" >"${FAKE_GRANDCHILD_OWNER_PID_FILE:?}"
+	printf '%s\n' "$$" >"${FAKE_SUITE_LOG:?}"
+	l_wait_count=0
+	while [ ! -s "${FAKE_GRANDCHILD_PID_FILE:?}" ] &&
+		[ "$l_wait_count" -lt 10 ]; do
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	[ -s "${FAKE_GRANDCHILD_PID_FILE:?}" ] || exit 9
+	: >"${FAKE_SUITE_STARTED:?}"
+	wait "$l_grandchild_pid"
+	;;
+*)
+	exec /bin/sh "$1"
+	;;
+esac
+EOF
+	chmod +x "$l_shell_path"
+
+	l_restore_errexit=0
+	case $- in
+	*e*) l_restore_errexit=1 ;;
+	esac
+	set +e
+	FAKE_RUNNER_PID_FILE="$l_runner_pid_path" \
+		FAKE_RUNNER_TARGET="$RUN_SHUNIT_TESTS_BIN" \
+		ZXFER_TEST_SHELL="$l_shell_path" \
+		FAKE_SUITE_LOG="$l_suite_pid_path" \
+		FAKE_SUITE_STARTED="$l_started_path" \
+		FAKE_SUPPORT_STARTED="$l_support_started_path" \
+		FAKE_GRANDCHILD_OWNER_PID_FILE="$l_grandchild_owner_pid_path" \
+		FAKE_GRANDCHILD_PID_FILE="$l_grandchild_pid_path" \
+		FAKE_DESCENDANT_WAIT_SECONDS=$((RUN_SHUNIT_TESTS_WATCHDOG_SECONDS + 10)) \
+		TMPDIR="$l_runner_tmpdir" \
+		ZXFER_TEST_PROCESS_IDENTITY_STATE_ROOT="$l_runner_tmpdir" \
+		ZXFER_TEST_FORCE_EMPTY_PROCESS_TOKEN_ALL=1 \
+		ZXFER_TEST_FORCE_EMPTY_PROCESS_TOKEN_HIT_FILE="$l_force_empty_hit_path" \
+		ZXFER_TEST_FORCE_EMPTY_PROCESS_TOKEN_READY_FILE="$l_started_path" \
+		"$l_runner_wrapper" --jobs 2 \
+		"$l_race_suite" "$l_support_suite" >"$l_capture_path" 2>&1 &
+	l_runner_launch_pid=$!
+	if [ "$l_restore_errexit" = "1" ]; then
+		set -e
+	fi
+	(
+		sleep $((RUN_SHUNIT_TESTS_WATCHDOG_SECONDS + 20))
+		send_test_signal_to_pid KILL "$l_runner_launch_pid" || :
+	) &
+	l_readiness_watchdog_pid=$!
+
+	l_relationship_ready=1
+	l_wait_count=0
+	while [ "$l_wait_count" -lt 10 ]; do
+		if [ -s "$l_runner_pid_path" ] && [ -s "$l_suite_pid_path" ] &&
+			[ -s "$l_grandchild_pid_path" ] && [ -e "$l_started_path" ] &&
+			[ -e "$l_support_started_path" ] &&
+			[ -e "$l_force_empty_hit_path" ]; then
+			l_runner_signal_pid=$(cat "$l_runner_pid_path")
+			l_suite_pid=$(cat "$l_suite_pid_path")
+			l_grandchild_pid=$(cat "$l_grandchild_pid_path")
+			case "$l_runner_signal_pid:$l_suite_pid:$l_grandchild_pid" in
+			*[!0-9:]* | :* | *: | *::*)
+				l_wait_count=$((l_wait_count + 1))
+				sleep 1
+				continue
+				;;
+			esac
+			l_recorded_grandchild_owner=$(cat \
+				"$l_grandchild_owner_pid_path" 2>/dev/null || true)
+			for l_child_pid_file in \
+				"$l_runner_tmpdir"/zxfer_shunit.*/*.child.pid; do
+				[ -r "$l_child_pid_file" ] || continue
+				l_recorded_suite_pid=$(cat "$l_child_pid_file" 2>/dev/null || true)
+				[ "$l_recorded_suite_pid" = "$l_suite_pid" ] || continue
+				l_worker_prefix=${l_child_pid_file%.child.pid}
+				l_worker_pid=$(cat "$l_worker_prefix.pid" 2>/dev/null || true)
+				case "$l_worker_pid" in
+				'' | *[!0-9]*) continue ;;
+				esac
+				l_recorded_worker_owner=$(cat \
+					"$l_worker_prefix.owner.pid" 2>/dev/null || true)
+				l_recorded_suite_owner=$(cat \
+					"$l_worker_prefix.child.owner.pid" 2>/dev/null || true)
+				if [ "$l_recorded_worker_owner" = "$l_runner_signal_pid" ] &&
+					[ "$l_recorded_suite_owner" = "$l_worker_pid" ] &&
+					[ "$l_recorded_grandchild_owner" = "$l_suite_pid" ]; then
+					l_relationship_ready=0
+					break
+				fi
+			done
+			[ "$l_relationship_ready" -eq 0 ] && break
+		fi
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	if [ "$l_relationship_ready" -ne 0 ]; then
+		set +e
+		wait "$l_runner_launch_pid" >/dev/null 2>&1 || :
+		if [ "$l_restore_errexit" = "1" ]; then
+			set -e
+		fi
+		kill "$l_readiness_watchdog_pid" >/dev/null 2>&1 || :
+		wait "$l_readiness_watchdog_pid" >/dev/null 2>&1 || :
+		fail "The tokenless top-level cleanup fixture did not publish its complete ownership chain."
+		return 0
+	fi
+	kill "$l_readiness_watchdog_pid" >/dev/null 2>&1 || :
+	wait "$l_readiness_watchdog_pid" >/dev/null 2>&1 || :
+	send_test_signal_to_pid TERM "$l_runner_signal_pid" || :
+	(
+		sleep "$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS"
+		: >"$l_watchdog_fired_path"
+		send_test_signal_to_pid KILL "$l_grandchild_pid" || :
+		send_test_signal_to_pid KILL "$l_suite_pid" || :
+		send_test_signal_to_pid KILL "$l_worker_pid" || :
+		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
+		case "$l_runner_launch_pid:$l_runner_signal_pid" in
+		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
+		*) send_test_signal_to_pid KILL "$l_runner_launch_pid" || : ;;
+		esac
+	) &
+	l_watchdog_pid=$!
+
+	set +e
+	wait "$l_runner_launch_pid"
+	l_runner_status=$?
+	if [ "$l_restore_errexit" = "1" ]; then
+		set -e
+	fi
+	kill "$l_watchdog_pid" >/dev/null 2>&1 || :
+	wait "$l_watchdog_pid" >/dev/null 2>&1 || :
+
+	assertEquals "Top-level tokenless cleanup should retain the signal-derived runner status." \
+		143 "$l_runner_status"
+	l_force_empty_hit=1
+	if [ -f "$l_force_empty_hit_path" ]; then
+		l_force_empty_hit=0
+	fi
+	assertEquals "The persistent-empty fixture should intercept the suite token lookup." \
+		0 "$l_force_empty_hit"
+	l_watchdog_fired=0
+	if [ -f "$l_watchdog_fired_path" ]; then
+		l_watchdog_fired=1
+	fi
+	assertEquals "Tokenless cleanup should complete before the external watchdog fires." \
+		0 "$l_watchdog_fired"
+
+	l_suite_gone=1
+	l_wait_count=0
+	while [ "$l_wait_count" -lt 10 ]; do
+		if ! send_test_signal_to_pid 0 "$l_suite_pid"; then
+			l_suite_gone=0
+			break
+		fi
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	if [ "$l_suite_gone" -ne 0 ]; then
+		send_test_signal_to_pid KILL "$l_suite_pid" || :
+	fi
+	assertEquals "Top-level persistent identity failure must not leave the suite child alive." \
+		0 "$l_suite_gone"
+
+	l_grandchild_gone=1
+	l_wait_count=0
+	while [ "$l_wait_count" -lt 10 ]; do
+		if ! send_test_signal_to_pid 0 "$l_grandchild_pid"; then
+			l_grandchild_gone=0
+			break
+		fi
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	if [ "$l_grandchild_gone" -ne 0 ]; then
+		send_test_signal_to_pid KILL "$l_grandchild_pid" || :
+	fi
+	assertEquals "Tokenless ownership cleanup must not orphan a TERM-resistant grandchild." \
+		0 "$l_grandchild_gone"
+
+	l_worker_gone=1
+	l_wait_count=0
+	while [ "$l_wait_count" -lt 10 ]; do
+		if ! send_test_signal_to_pid 0 "$l_worker_pid"; then
+			l_worker_gone=0
+			break
+		fi
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	if [ "$l_worker_gone" -ne 0 ]; then
+		send_test_signal_to_pid KILL "$l_worker_pid" || :
+	fi
+	assertEquals "Persistent identity failure must not leave the owning worker alive." \
+		0 "$l_worker_gone"
+
+	l_state_dir_count=0
+	for l_state_dir in "$l_runner_tmpdir"/zxfer_shunit.*; do
+		[ -d "$l_state_dir" ] || continue
+		l_state_dir_count=$((l_state_dir_count + 1))
+	done
+	assertEquals "Top-level tokenless cleanup should remove private runner state." \
+		0 "$l_state_dir_count"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_reaps_serial_child_when_identity_stays_unavailable() {
+	l_suite_path="$TEST_TMPDIR/tokenless-serial-suite.sh"
+	l_shell_path="$TEST_TMPDIR/tokenless-serial-test-shell"
+	l_runner_wrapper="$TEST_TMPDIR/tokenless-serial-runner.sh"
+	l_runner_pid_path="$TEST_TMPDIR/tokenless-serial-runner.pid"
+	l_runner_tmpdir="$TEST_TMPDIR/tokenless-serial-state"
+	l_started_path="$TEST_TMPDIR/tokenless-serial-suite.started"
+	l_suite_pid_path="$TEST_TMPDIR/tokenless-serial-suite.pid"
+	l_descendant_owner_pid_path="$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS/tokenless-serial-descendant.owner.pid"
+	l_descendant_pid_path="$RUN_SHUNIT_TESTS_IDENTITY_RELATIONS/tokenless-serial-descendant.pid"
+	l_capture_path="$TEST_TMPDIR/tokenless-serial.output"
+	l_force_empty_hit_path="$TEST_TMPDIR/tokenless-serial-force-empty.hit"
+	l_watchdog_fired_path="$TEST_TMPDIR/tokenless-serial-watchdog.fired"
+	rm -f "$l_runner_pid_path" "$l_started_path" "$l_suite_pid_path" \
+		"$l_descendant_owner_pid_path" "$l_descendant_pid_path" \
+		"$l_capture_path" "$l_force_empty_hit_path" \
+		"$l_watchdog_fired_path"
+	mkdir -p "$l_runner_tmpdir"
+	write_fake_runner_pid_wrapper "$l_runner_wrapper"
+
+	write_fake_suite_with_body "$l_suite_path" <<'EOF'
+#!/bin/sh
+	exit 0
+EOF
+	chmod 644 "$l_suite_path"
+	cat >"$l_shell_path" <<'EOF'
+#!/bin/sh
+trap '' TERM
+/bin/sh -c '
+	trap "" TERM
+	printf "%s\n" "$$" >"${FAKE_DESCENDANT_PID_FILE:?}"
+	exec sleep "${FAKE_DESCENDANT_WAIT_SECONDS:?}"
+' tokenless-serial-descendant-marker &
+l_descendant_pid=$!
+printf '%s\n' "$$" >"${FAKE_DESCENDANT_OWNER_PID_FILE:?}"
+printf '%s\n' "$$" >"${FAKE_SUITE_LOG:?}"
+l_wait_count=0
+while [ ! -s "${FAKE_DESCENDANT_PID_FILE:?}" ] &&
+	[ "$l_wait_count" -lt 10 ]; do
+	l_wait_count=$((l_wait_count + 1))
+	sleep 1
+done
+[ -s "${FAKE_DESCENDANT_PID_FILE:?}" ] || exit 9
+: >"${FAKE_SUITE_STARTED:?}"
+wait "$l_descendant_pid"
+EOF
+	chmod +x "$l_shell_path"
+
+	l_restore_errexit=0
+	case $- in
+	*e*) l_restore_errexit=1 ;;
+	esac
+	set +e
+	FAKE_RUNNER_PID_FILE="$l_runner_pid_path" \
+		FAKE_RUNNER_TARGET="$RUN_SHUNIT_TESTS_BIN" \
+		ZXFER_TEST_SHELL="$l_shell_path" \
+		FAKE_SUITE_LOG="$l_suite_pid_path" \
+		FAKE_SUITE_STARTED="$l_started_path" \
+		FAKE_DESCENDANT_OWNER_PID_FILE="$l_descendant_owner_pid_path" \
+		FAKE_DESCENDANT_PID_FILE="$l_descendant_pid_path" \
+		FAKE_DESCENDANT_WAIT_SECONDS=$((RUN_SHUNIT_TESTS_WATCHDOG_SECONDS + 10)) \
+		TMPDIR="$l_runner_tmpdir" \
+		ZXFER_TEST_PROCESS_IDENTITY_STATE_ROOT="$l_runner_tmpdir" \
+		ZXFER_TEST_FORCE_EMPTY_PROCESS_TOKEN_ALL=1 \
+		ZXFER_TEST_FORCE_EMPTY_PROCESS_TOKEN_HIT_FILE="$l_force_empty_hit_path" \
+		ZXFER_TEST_FORCE_EMPTY_PROCESS_TOKEN_READY_FILE="$l_started_path" \
+		"$l_runner_wrapper" --jobs 1 "$l_suite_path" \
+		>"$l_capture_path" 2>&1 &
+	l_runner_launch_pid=$!
+	if [ "$l_restore_errexit" = "1" ]; then
+		set -e
+	fi
+	(
+		sleep $((RUN_SHUNIT_TESTS_WATCHDOG_SECONDS + 20))
+		send_test_signal_to_pid KILL "$l_runner_launch_pid" || :
+	) &
+	l_readiness_watchdog_pid=$!
+
+	l_relationship_ready=1
+	l_wait_count=0
+	while [ "$l_wait_count" -lt 10 ]; do
+		l_state_dir=
+		for l_candidate_state_dir in "$l_runner_tmpdir"/zxfer_shunit.*; do
+			[ -d "$l_candidate_state_dir" ] || continue
+			l_state_dir=$l_candidate_state_dir
+			break
+		done
+		if [ -n "$l_state_dir" ] && [ -s "$l_runner_pid_path" ] &&
+			[ -s "$l_suite_pid_path" ] && [ -s "$l_descendant_pid_path" ] &&
+			[ -e "$l_started_path" ] && [ -e "$l_force_empty_hit_path" ]; then
+			l_runner_signal_pid=$(cat "$l_runner_pid_path")
+			l_wrapper_pid=$(cat "$l_state_dir/foreground.pid" 2>/dev/null || true)
+			l_suite_pid=$(cat "$l_suite_pid_path")
+			l_descendant_pid=$(cat "$l_descendant_pid_path")
+			l_recorded_wrapper_owner=$(cat \
+				"$l_state_dir/foreground.owner.pid" 2>/dev/null || true)
+			l_recorded_suite_owner=$(cat \
+				"$l_state_dir/foreground.child.owner.pid" 2>/dev/null || true)
+			l_recorded_suite_pid=$(cat \
+				"$l_state_dir/foreground.child.pid" 2>/dev/null || true)
+			l_recorded_descendant_owner=$(cat \
+				"$l_descendant_owner_pid_path" 2>/dev/null || true)
+			case "$l_runner_signal_pid:$l_wrapper_pid:$l_suite_pid:$l_descendant_pid" in
+			*[!0-9:]* | :* | *: | *::*) ;;
+			*)
+				if [ "$l_recorded_wrapper_owner" = "$l_runner_signal_pid" ] &&
+					[ "$l_recorded_suite_owner" = "$l_wrapper_pid" ] &&
+					[ "$l_recorded_suite_pid" = "$l_suite_pid" ] &&
+					[ "$l_recorded_descendant_owner" = "$l_suite_pid" ]; then
+					l_relationship_ready=0
+				fi
+				;;
+			esac
+			[ "$l_relationship_ready" -eq 0 ] && break
+		fi
+		l_wait_count=$((l_wait_count + 1))
+		sleep 1
+	done
+	if [ "$l_relationship_ready" -ne 0 ]; then
+		set +e
+		wait "$l_runner_launch_pid" >/dev/null 2>&1 || :
+		if [ "$l_restore_errexit" = "1" ]; then
+			set -e
+		fi
+		kill "$l_readiness_watchdog_pid" >/dev/null 2>&1 || :
+		wait "$l_readiness_watchdog_pid" >/dev/null 2>&1 || :
+		fail "The serial tokenless fixture did not publish its ownership chain."
+		return 0
+	fi
+	kill "$l_readiness_watchdog_pid" >/dev/null 2>&1 || :
+	wait "$l_readiness_watchdog_pid" >/dev/null 2>&1 || :
+
+	send_test_signal_to_pid TERM "$l_runner_signal_pid" || :
+	(
+		sleep "$RUN_SHUNIT_TESTS_WATCHDOG_SECONDS"
+		: >"$l_watchdog_fired_path"
+		send_test_signal_to_pid KILL "$l_descendant_pid" || :
+		send_test_signal_to_pid KILL "$l_suite_pid" || :
+		send_test_signal_to_pid KILL "$l_wrapper_pid" || :
+		send_test_signal_to_pid KILL "$l_runner_signal_pid" || :
+		case "$l_runner_launch_pid:$l_runner_signal_pid" in
+		"$l_runner_signal_pid:$l_runner_signal_pid") ;;
+		*) send_test_signal_to_pid KILL "$l_runner_launch_pid" || : ;;
+		esac
+	) &
+	l_watchdog_pid=$!
+
+	set +e
+	wait "$l_runner_launch_pid"
+	l_runner_status=$?
+	if [ "$l_restore_errexit" = "1" ]; then
+		set -e
+	fi
+	kill "$l_watchdog_pid" >/dev/null 2>&1 || :
+	wait "$l_watchdog_pid" >/dev/null 2>&1 || :
+
+	l_watchdog_fired=0
+	if [ -f "$l_watchdog_fired_path" ]; then
+		l_watchdog_fired=1
+	fi
+	for l_tracked_pid in \
+		"$l_descendant_pid" "$l_suite_pid" "$l_wrapper_pid"; do
+		l_wait_count=0
+		while [ "$l_wait_count" -lt 10 ] &&
+			send_test_signal_to_pid 0 "$l_tracked_pid"; do
+			l_wait_count=$((l_wait_count + 1))
+			sleep 1
+		done
+	done
+	l_descendant_gone=0
+	l_suite_gone=0
+	l_wrapper_gone=0
+	send_test_signal_to_pid 0 "$l_descendant_pid" && l_descendant_gone=1
+	send_test_signal_to_pid 0 "$l_suite_pid" && l_suite_gone=1
+	send_test_signal_to_pid 0 "$l_wrapper_pid" && l_wrapper_gone=1
+	[ "$l_descendant_gone" -eq 0 ] || send_test_signal_to_pid KILL "$l_descendant_pid" || :
+	[ "$l_suite_gone" -eq 0 ] || send_test_signal_to_pid KILL "$l_suite_pid" || :
+	[ "$l_wrapper_gone" -eq 0 ] || send_test_signal_to_pid KILL "$l_wrapper_pid" || :
+
+	l_state_dir_count=0
+	for l_state_dir in "$l_runner_tmpdir"/zxfer_shunit.*; do
+		[ -d "$l_state_dir" ] || continue
+		l_state_dir_count=$((l_state_dir_count + 1))
+	done
+	assertEquals "Serial top-level tokenless cleanup should preserve the TERM-derived status." \
+		143 "$l_runner_status"
+	assertEquals "Serial tokenless cleanup should finish before its watchdog." \
+		0 "$l_watchdog_fired"
+	assertEquals "Serial tokenless cleanup should terminate its resistant descendant." \
+		0 "$l_descendant_gone"
+	assertEquals "Serial tokenless cleanup should terminate its suite." \
+		0 "$l_suite_gone"
+	assertEquals "Serial tokenless cleanup should reap its foreground wrapper." \
+		0 "$l_wrapper_gone"
+	assertEquals "Serial tokenless cleanup should remove private runner state." \
+		0 "$l_state_dir_count"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

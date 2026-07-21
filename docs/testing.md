@@ -179,6 +179,14 @@ and clamps that default to the number of runnable suites. It buffers each
 suite to a private log and replays grouped output in suite order so parallel
 runs stay readable.
 
+On `INT` or `TERM`, the runner keeps wrapper shells alive to reap their suites.
+It signals only a PID whose start token still matches or whose complete live
+runner-to-wrapper-to-suite ownership chain can be revalidated. If start tokens
+are unavailable, proven descendants are retired deepest-first before their
+suite is signalled. A host that provides neither token queries nor parent/child
+enumeration fails closed with a diagnostic and retains the wrapper; see
+`KNOWN_ISSUES.md` for that degraded-platform limitation.
+
 Force serial execution:
 
 ```sh
@@ -1063,11 +1071,6 @@ selects `--test-layer shunit2` for an OmniOS guest.
 The CI workflows use GitHub Actions concurrency cancellation keyed by workflow
 name plus pushed ref, so stale branch runs are canceled when a new push
 supersedes them.
-
-The hosted OmniOS unit lane and the VM-matrix OmniOS shunit2 layer run suites
-serially; the hosted job has a 45-minute limit. This avoids nesting the runner's
-process-supervision self-tests under a parallel outer worker in the smaller
-guest, while the FreeBSD guest continues to use two suite workers.
 
 The `kcov` job runs on `ubuntu-26.04` and uses the official `kcov/kcov` Docker
 image pinned by digest instead of installing `kcov` from the runner package

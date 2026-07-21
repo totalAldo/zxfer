@@ -144,12 +144,10 @@ test_unit_workflow_bounds_process_heavy_suite_parallelism() {
 		"$workflow" './tests/run_shunit_tests.sh --jobs "${{ matrix.unit_jobs }}"'
 	assertContains "FreeBSD should respect its smaller guest CPU allocation." \
 		"$freebsd_job" "./tests/run_shunit_tests.sh --jobs 2"
-	assertContains "OmniOS should not nest runner self-tests under parallel worker supervision." \
-		"$omnios_job" '"$bash_bin" ./tests/run_shunit_tests.sh --jobs 1'
-	assertNotContains "The OmniOS unit job must not restore nested parallel worker supervision." \
-		"$omnios_job" "./tests/run_shunit_tests.sh --jobs 2"
-	assertContains "The serial OmniOS lane needs enough time for the full guest suite." \
-		"$omnios_job" "timeout-minutes: 45"
+	assertContains "OmniOS should respect its smaller guest CPU allocation." \
+		"$omnios_job" '"$bash_bin" ./tests/run_shunit_tests.sh --jobs 2'
+	assertContains "The bounded OmniOS unit job should retain its 30-minute guard." \
+		"$omnios_job" "timeout-minutes: 30"
 }
 
 # shellcheck source=tests/shunit2/shunit2

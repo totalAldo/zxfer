@@ -130,7 +130,7 @@ arch|ubuntu|arm64|ubuntu-26.04-server-cloudimg-arm64.img|https://cloud-images.ub
 guest|freebsd|FreeBSD 15.1|local,full,ci|/bin/sh|1800|3|2|native|freebsd-pkg|root-login|
 arch|freebsd|amd64|FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/CHECKSUM.SHA256|xz|FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2|qcow2||disk-cidata
 arch|freebsd|arm64|FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/aarch64/Latest/FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/aarch64/Latest/CHECKSUM.SHA256|xz|FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2|qcow2||disk-cidata
-guest|omnios|OmniOS r151058|full,ci|/usr/xpg4/bin/sh|1800|3|1|bash-posix|omnios-pkg|default|
+guest|omnios|OmniOS r151058|full,ci|/usr/xpg4/bin/sh|1800|3|2|bash-posix|omnios-pkg|default|
 arch|omnios|amd64|omnios-r151058.cloud.qcow2|https://downloads.omnios.org/media/stable/omnios-r151058.cloud.qcow2|https://downloads.omnios.org/media/stable/omnios-r151058.cloud.qcow2.sha256|none|omnios-r151058.cloud.qcow2|qcow2||smbios-nocloud-net'
 
 	assertEquals "The validated manifest should preserve every existing guest, profile, architecture, and resolved runtime field." \
@@ -1211,7 +1211,7 @@ test_vm_render_guest_test_script_wraps_omnios_shunit2_with_bash_posix() {
 	assertContains "OmniOS shunit2 guest runs should preserve suite positional arguments in the generated bash wrapper." \
 		"$script_body" '\$@'
 	assertContains "OmniOS shunit2 guest runs should invoke the shunit2 runner through bash." \
-		"$script_body" "\"\$bash_bin\" ./tests/run_shunit_tests.sh --jobs 1"
+		"$script_body" "\"\$bash_bin\" ./tests/run_shunit_tests.sh --jobs 2"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
