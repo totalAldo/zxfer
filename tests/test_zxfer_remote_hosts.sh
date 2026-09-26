@@ -57,9 +57,6 @@ tearDown() {
 # shellcheck source=tests/suites/zxfer_remote_hosts_capability_probe_tests.sh
 . "$TESTS_DIR/suites/zxfer_remote_hosts_capability_probe_tests.sh"
 
-# zxfer-test-fragment: suites/zxfer_remote_hosts_backup_path_security_tests.sh
-# shellcheck source=tests/suites/zxfer_remote_hosts_backup_path_security_tests.sh
-. "$TESTS_DIR/suites/zxfer_remote_hosts_backup_path_security_tests.sh"
 # zxfer-test-fragment: suites/zxfer_remote_hosts_tool_probe_tests.sh
 # shellcheck source=tests/suites/zxfer_remote_hosts_tool_probe_tests.sh
 . "$TESTS_DIR/suites/zxfer_remote_hosts_tool_probe_tests.sh"
@@ -68,7 +65,6 @@ suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_remote_hosts.sh" \
 		"$TESTS_DIR/suites/zxfer_remote_hosts_capability_probe_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_remote_hosts_backup_path_security_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_remote_hosts_tool_probe_tests.sh"
 }
 

@@ -205,6 +205,38 @@ test_init_backup_storage_root_reads_the_override_once_and_rejects_unsafe_roots()
 	done
 }
 
+test_init_backup_storage_root_rejects_relative_override() {
+	zxfer_test_capture_subshell '
+		ZXFER_BACKUP_DIR="relative-backups"
+		zxfer_init_backup_storage_root
+	'
+
+	assertEquals "Relative ZXFER_BACKUP_DIR overrides should fail closed." 1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Relative backup-root errors should explain the absolute-path requirement." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "ZXFER_BACKUP_DIR must be an absolute path"
+}
+
+test_init_backup_storage_root_ignores_inherited_internal_state() {
+	output=$(
+		(
+			unset ZXFER_BACKUP_DIR
+			g_backup_storage_root="$TEST_TMPDIR/inherited-internal-root"
+			zxfer_init_backup_storage_root
+			printf 'default=%s\n' "$g_backup_storage_root"
+
+			ZXFER_BACKUP_DIR="$TEST_TMPDIR/public-backup-root"
+			g_backup_storage_root="$TEST_TMPDIR/second-inherited-root"
+			zxfer_init_backup_storage_root
+			printf 'public=%s\n' "$g_backup_storage_root"
+		)
+	)
+
+	assertContains "Backup-root initialization must ignore an inherited internal cache when the public override is unset." \
+		"$output" "default=/var/db/zxfer"
+	assertContains "Backup-root initialization should still honor the documented public environment override." \
+		"$output" "public=$TEST_TMPDIR/public-backup-root"
+}
+
 test_get_backup_metadata_filename_chunks_long_identities_and_keeps_pairs_distinct() {
 	g_backup_file_extension=".zxfer_backup_info"
 	long_source="tank/$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30)"

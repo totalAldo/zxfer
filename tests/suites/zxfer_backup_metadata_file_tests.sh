@@ -1,5 +1,8 @@
 #!/bin/sh
-# Tests for src/zxfer_backup_metadata.sh, run by tests/test_zxfer_exec.sh.
+# Backup file tests for src/zxfer_backup_metadata.sh: the documented identity
+# filename, literal writes, and remote reads through the resolved cat and the
+# remote symlink guards. Run by tests/test_zxfer_backup_metadata.sh under the
+# exec fixture.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 fake_zfs_mountpoint_cmd() {
