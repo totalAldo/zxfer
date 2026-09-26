@@ -120,7 +120,7 @@ microbench_write_budget_edge_tsv() {
 test_microbench_small_run_succeeds() {
 	assertEquals "micro-bench should exit 0; stderr: $(cat "$MICROBENCH_SMALL_ERR")" \
 		0 "$MICROBENCH_SMALL_STATUS"
-	for l_scenario in noop dryrun_incr incr remote_noop remote_incr; do
+	for l_scenario in noop dryrun_incr incr remote_noop remote_incr props; do
 		assertTrue "micro-bench should emit $l_scenario rows" \
 			"grep -q '^$l_scenario	TOTAL	' '$MICROBENCH_SMALL_TSV'"
 		assertTrue "micro-bench should emit $l_scenario ssh rows" \
@@ -128,6 +128,12 @@ test_microbench_small_run_succeeds() {
 	done
 	assertTrue "-V run should emit profile rows" \
 		"grep -q '^noop	profile:command_render_calls	' '$MICROBENCH_SMALL_TSV'"
+	# The props rows count one recursive property read per side: a fallback
+	# to per-dataset reads would show up here before it shows in TOTAL.
+	assertEquals "props should read each side's properties with one recursive read" \
+		"props	profile:normalized_property_reads_source	1
+props	profile:normalized_property_reads_destination	1" \
+		"$(grep -E '^props	profile:normalized_property_reads_(source|destination)	' "$MICROBENCH_SMALL_TSV")"
 }
 
 test_budgets_file_is_well_formed() {
@@ -142,7 +148,7 @@ test_budgets_file_is_well_formed() {
 		esac
 		l_rows=$((l_rows + 1))
 		case "${l_scenario%_small}" in
-		noop | dryrun_incr | incr | remote_noop | remote_incr) ;;
+		noop | dryrun_incr | incr | remote_noop | remote_incr | props) ;;
 		*)
 			fail "unknown budget scenario key: $l_scenario"
 			;;

@@ -1,7 +1,8 @@
 #!/bin/sh
 #
-# shunit2 tests for the advisory --forks mode of tests/run_microbench.sh.
-# The default rows are covered by tests/test_zxfer_microbench_budgets.sh.
+# shunit2 tests for the advisory --forks mode of tests/run_microbench.sh and
+# the props scenario's fixture check. The default rows are covered by
+# tests/test_zxfer_microbench_budgets.sh.
 #
 
 TESTS_DIR=$(dirname "$0")
@@ -59,6 +60,39 @@ test_forks_mode_refuses_a_missing_bash() {
 		"$output" "set ZXFER_MICROBENCH_BASH"
 	assertNotContains "No scenario should run without a usable bash." \
 		"$output" "noop	TOTAL"
+}
+
+# The props fixture's properties already match on both sides; a launcher
+# that changes one is measuring other work, so the scenario must fail.
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_props_scenario_fails_when_a_property_changes() {
+	fake_zxfer="$TEST_TMPDIR/props_zxfer"
+	cat >"$fake_zxfer" <<'EOF'
+#!/bin/sh
+PATH=$ZXFER_SECURE_PATH
+zfs set atime=on dstpool/back/data
+exit 0
+EOF
+	chmod +x "$fake_zxfer"
+
+	status=0
+	output=$(ZXFER_MOCKBIN_ZXFER_BIN=$fake_zxfer TMPDIR=$TEST_TMPDIR \
+		sh "$MICROBENCH_BIN" -d 1 -s 2 props 2>&1) || status=$?
+
+	assertEquals "a props run that changes a property should fail. Output: $output" \
+		1 "$status"
+	assertContains "the failure should say the fixture needs no change" \
+		"$output" "scenario props changed 1 properties; its fixture must need none"
+	assertNotContains "no counts should be reported for the failed run" \
+		"$output" "props	TOTAL"
+
+	status=0
+	output=$(TMPDIR=$TEST_TMPDIR sh "$MICROBENCH_BIN" -d 1 -s 2 props 2>&1) ||
+		status=$?
+	assertEquals "the real launcher should change nothing in props. Output: $output" \
+		0 "$status"
+	assertContains "the props run should report its counts" \
+		"$output" "props	TOTAL	"
 }
 
 # shellcheck source=tests/shunit2/shunit2
