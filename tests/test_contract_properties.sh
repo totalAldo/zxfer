@@ -35,6 +35,14 @@
 #   → -P -R reads each side with one recursive machine/human/skeleton triple
 #     filtered to filesystems and volumes, and never falls back to
 #     per-dataset reads.
+#   test_repeated_override_property_is_a_usage_error_before_any_zfs_call
+#   → a property named twice in -o, with the same or another value, exits 2
+#     with a usage report from CLI validation before zxfer runs any zfs
+#     command, as zfs itself refuses a property given twice.
+#   test_override_missing_on_the_source_fails_before_the_destination_is_touched
+#   → an -o property the source root lacks exits 2 with a usage report once
+#     the source is read, before any destination property read, probe or
+#     change.
 #
 # shellcheck disable=SC1090,SC2034,SC2154
 
@@ -408,6 +416,54 @@ test_property_pass_reads_each_tree_once_with_type_filter() {
 	assertEquals "the prefetch must answer every dataset; zfs log: $(cat "$ZFS_LOG")" \
 		0 "$(grep -c '^get -H[p]*o property[,a-z]* all ' "$ZFS_LOG")"
 	planning_assert_no_mutations
+}
+
+# Purpose: Fail unless stderr holds one usage-class failure report with the
+# given stage and message.
+# Usage: blackbox_properties_assert_usage_report STAGE MESSAGE
+blackbox_properties_assert_usage_report() {
+	for l_usage_line in "failure_class: usage" "failure_stage: $1" "message: $2" \
+		"Error: $2"; do
+		grep -Fqx "$l_usage_line" "$CASE_DIR/zxfer.stderr" ||
+			fail "Missing failure report line: $l_usage_line
+stderr: $(cat "$CASE_DIR/zxfer.stderr")"
+	done
+	assertEquals "exactly one failure report" \
+		1 "$(grep -c '^zxfer: failure report begin$' "$CASE_DIR/zxfer.stderr")"
+}
+
+test_repeated_override_property_is_a_usage_error_before_any_zfs_call() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" repeated_override
+	planning_add_property_transfer_fixtures
+	for l_repeated in compression=lz4,compression=gzip compression=gzip,atime=off,compression=gzip; do
+		rm -f "$ZFS_LOG"
+		planning_run_zxfer "$STATE_DIR" -P -o "$l_repeated" -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		assertEquals "-o $l_repeated must exit 2" 2 "$?"
+		blackbox_properties_assert_usage_report "cli validation" \
+			"Duplicate property for -o override: compression."
+		assertFalse "-o $l_repeated must stop before any zfs command; zfs log: $(cat "$ZFS_LOG" 2>/dev/null)" \
+			"[ -s '$ZFS_LOG' ]"
+	done
+}
+
+test_override_missing_on_the_source_fails_before_the_destination_is_touched() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" missing_override
+	planning_add_property_transfer_fixtures
+
+	planning_run_zxfer "$STATE_DIR" -o compression=gzip,copies=2 -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "an -o property the source lacks must exit 2" 2 "$?"
+	blackbox_properties_assert_usage_report "property transfer" \
+		"Missing source property for -o override: copies."
+	assertTrue "the source properties are read first; zfs log: $(cat "$ZFS_LOG")" \
+		"grep -q '^get .* $ZXFER_MOCKBIN_SOURCE_ROOT\$' '$ZFS_LOG'"
+	assertEquals "no destination property is read or probed; zfs log: $(cat "$ZFS_LOG")" \
+		0 "$(grep -c "^get .* $ZXFER_MOCKBIN_DEST_ROOT" "$ZFS_LOG")"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
 }
 
 . "$SHUNIT2_BIN"

@@ -1,7 +1,7 @@
 #!/bin/sh
-# The unit fixture shared by the property-state, property-policy and
-# property-reconcile entries: reset owner state, a trimmed readonly list, the
-# tank/src -> backup/dst roots and a run root, plus small property helpers.
+# The unit fixture shared by the property-state and property-transfer
+# entries: reset owner state, a trimmed readonly list, the tank/src ->
+# backup/dst roots and a run root, plus small property helpers.
 # shellcheck disable=SC2034,SC2317,SC2329
 
 # Purpose: Append one "dataset<TAB>list" row to one side's property table.

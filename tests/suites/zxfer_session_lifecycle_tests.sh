@@ -589,7 +589,6 @@ test_session_init_initializes_dependency_state_and_temp_files() {
 			g_zxfer_send_jobs="123 456"
 			g_zxfer_send_job_abort_failure_message="stale-job	kind	111	wrapper	/tmp/bg"
 			g_zxfer_property_table_lookup_result="stale-lookup"
-			g_zxfer_source_pvs_raw="stale=property=local"
 			zxfer_init_dependency_tool_defaults() {
 				:
 			}
@@ -615,7 +614,6 @@ test_session_init_initializes_dependency_state_and_temp_files() {
 			printf 'send_pids=<%s>\n' "$g_zxfer_send_jobs"
 			printf 'background_records=<%s>\n' "$g_zxfer_send_job_abort_failure_message"
 			printf 'table_lookup=<%s>\n' "$g_zxfer_property_table_lookup_result"
-			printf 'source_pvs=<%s>\n' "$g_zxfer_source_pvs_raw"
 		)
 	)
 
@@ -653,8 +651,6 @@ test_session_init_initializes_dependency_state_and_temp_files() {
 		"$output" "background_records=<>"
 	assertContains "Session initialization should reset property-table lookup scratch state." \
 		"$output" "table_lookup=<>"
-	assertContains "Session initialization should reset property-reconcile source scratch state." \
-		"$output" "source_pvs=<>"
 }
 
 test_session_init_defers_strict_path_export_until_startup_helpers_finish() {
@@ -707,10 +703,6 @@ test_session_init_reinitializes_property_module_scratch_state_when_reinvoked() {
 			g_zxfer_source_property_table="tank/src\tcompression=stale=local"
 			g_zxfer_destination_property_table="backup/dst\tcompression=stale=local"
 			g_zxfer_required_properties_result="stale-required"
-			g_zxfer_adjusted_set_list="compression=lz4"
-			g_zxfer_adjusted_inherit_list="mountpoint"
-			g_zxfer_override_pvs_result="compression=lz4=local"
-			g_zxfer_creation_pvs_result="compression=lz4=local"
 			g_zxfer_remote_probe_capture_failed=1
 			g_zxfer_destination_property_tree_prefetch_state=2
 			g_zxfer_unsupported_filesystem_properties="compression"
@@ -722,10 +714,6 @@ test_session_init_reinitializes_property_module_scratch_state_when_reinvoked() {
 			printf 'required=<%s>\n' "$g_zxfer_required_properties_result"
 			printf 'source_table=<%s>\n' "${g_zxfer_source_property_table:-}"
 			printf 'destination_table=<%s>\n' "${g_zxfer_destination_property_table:-}"
-			printf 'adjusted_set=<%s>\n' "$g_zxfer_adjusted_set_list"
-			printf 'adjusted_inherit=<%s>\n' "$g_zxfer_adjusted_inherit_list"
-			printf 'override_result=<%s>\n' "$g_zxfer_override_pvs_result"
-			printf 'creation_result=<%s>\n' "$g_zxfer_creation_pvs_result"
 			printf 'remote_capture_failed=%s\n' "${g_zxfer_remote_probe_capture_failed:-0}"
 			printf 'prefetch_state=%s\n' "$g_zxfer_destination_property_tree_prefetch_state"
 			printf 'unsupported_fs=<%s>\n' "$g_zxfer_unsupported_filesystem_properties"
@@ -739,14 +727,6 @@ test_session_init_reinitializes_property_module_scratch_state_when_reinvoked() {
 		"$output" "source_table=<>"
 	assertContains "Re-running session initialization should clear the in-memory destination property table." \
 		"$output" "destination_table=<>"
-	assertContains "Re-running session initialization should clear adjusted set scratch state." \
-		"$output" "adjusted_set=<>"
-	assertContains "Re-running session initialization should clear adjusted inherit scratch state." \
-		"$output" "adjusted_inherit=<>"
-	assertContains "Re-running session initialization should clear derived override scratch state." \
-		"$output" "override_result=<>"
-	assertContains "Re-running session initialization should clear derived creation-property scratch state." \
-		"$output" "creation_result=<>"
 	assertContains "Re-running session initialization should clear remote probe capture-failure scratch state." \
 		"$output" "remote_capture_failed=0"
 	assertContains "Re-running session initialization should rearm destination property prefetch state." \

@@ -272,6 +272,20 @@ test_usage_error_invalid_grandfather_days() {
 	assertEquals "A non-numeric -g value must exit with status 2." 2 "$g_golden_exit_status"
 }
 
+test_usage_error_repeated_override_property() {
+	zxfer_golden_assert_case_matches_golden cli_usage_repeated_override_property \
+		-o compression=lz4,compression=gzip -R tank/src backup/dest
+
+	assertEquals "A property named twice in -o must exit with status 2." 2 "$g_golden_exit_status"
+}
+
+test_usage_error_invalid_override_syntax() {
+	zxfer_golden_assert_case_matches_golden cli_usage_invalid_override_syntax \
+		-o compression -R tank/src backup/dest
+
+	assertEquals "An -o item without a property name must exit with status 2." 2 "$g_golden_exit_status"
+}
+
 test_usage_error_missing_source() {
 	zxfer_golden_assert_case_matches_golden cli_usage_missing_source backup/dest
 

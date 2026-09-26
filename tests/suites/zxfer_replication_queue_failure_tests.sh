@@ -485,8 +485,8 @@ props skip=0" "$(cat "$log")"
 
 	# shellcheck source=src/zxfer_property_state.sh
 	. "$ZXFER_ROOT/src/zxfer_property_state.sh"
-	# shellcheck source=src/zxfer_property_reconcile.sh
-	. "$ZXFER_ROOT/src/zxfer_property_reconcile.sh"
+	# shellcheck source=src/zxfer_property_transfer.sh
+	. "$ZXFER_ROOT/src/zxfer_property_transfer.sh"
 	# shellcheck source=src/zxfer_replication.sh
 	. "$ZXFER_ROOT/src/zxfer_replication.sh"
 }
