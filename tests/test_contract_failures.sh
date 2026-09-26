@@ -6,9 +6,11 @@
 #
 # Each scenario drives the REAL launcher against the canned zfs from
 # tests/mock_toolchain_helper.sh on a small tree (a root and two children,
-# three snapshots each) chosen so its mutating path really runs. A clean run
-# numbers every zfs call (MOCK_FAIL_CALL=0) and records the ordered list of
-# mutating calls; then each call is failed in turn (MOCK_FAIL_CALL=K of
+# three snapshots each) chosen so its mutating path really runs; a clean run
+# that mutates nothing (for -k: publishes no metadata) fails the case, so a
+# drifted fixture cannot hollow a scenario out. The clean run numbers every
+# zfs call (MOCK_FAIL_CALL=0) and records the ordered list of mutating
+# calls; then each call is failed in turn (MOCK_FAIL_CALL=K of
 # MOCK_FAIL_MATCH=<its argv>, so "the Kth call with this argv" is the same
 # call however background discovery or -j jobs interleave) and every run
 # must end in exactly one of:
