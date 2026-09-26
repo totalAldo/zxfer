@@ -1,8 +1,9 @@
 #!/bin/sh
 # shellcheck shell=sh
 # Source command production, parallel discovery, staged capture and status
-# files, and producer execution cases for src/zxfer_snapshot_producers.sh. Run
-# by tests/test_zxfer_snapshot_producers.sh.
+# files, and producer execution cases for src/zxfer_snapshot_producers.sh. The
+# two discovery-state reset cases stay first: later cases read the producer
+# state their reset leaves. Run by tests/test_zxfer_snapshot_producers.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_state() {

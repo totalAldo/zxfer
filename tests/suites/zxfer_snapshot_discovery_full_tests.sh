@@ -1,8 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Full discovery, record-cache, discovery-state reset and fast recursive no-op
-# cases for src/zxfer_snapshot_discovery.sh. Run by
-# tests/test_zxfer_snapshot_discovery.sh.
+# Full discovery, record-cache, and fast recursive no-op cases for
+# src/zxfer_snapshot_discovery.sh. Run by tests/test_zxfer_snapshot_discovery.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_get_zfs_list_bootstraps_missing_destination_dataset_when_pool_exists() {
