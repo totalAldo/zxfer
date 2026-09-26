@@ -171,7 +171,9 @@ These tools are used for development, CI, or local QA.
 ### Unit Test Runner
 
 - `tests/shunit2/shunit2` is vendored in the repository
-- `/bin/sh` is sufficient for the normal shunit2 runner
+- `/bin/sh` is sufficient for the normal shunit2 runner, which also uses
+  `mktemp`, `mkfifo`, `sleep` (its once-a-second ticker) and, only to stop a
+  timed-out or interrupted suite, `ps -A -o pid= -o ppid= -o args=`
 - alternate shells such as `dash`, `bash --posix`, `busybox ash`, and
   `/usr/xpg4/bin/sh` are CI/test-matrix tools, not runtime dependencies
 - FreeBSD VM-backed shunit2 runs install `bash` for coverage-helper tests and

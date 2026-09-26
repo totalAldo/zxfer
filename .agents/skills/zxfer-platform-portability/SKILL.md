@@ -8,7 +8,7 @@ description: Review zxfer changes for POSIX /bin/sh portability and ZFS/OpenZFS 
 ## Context to Load
 
 - Read `AGENTS.md`, `docs/coding-style.md`, `docs/platforms.md`, and `docs/external-tools.md`.
-- Inspect the relevant source module and peer tests before proposing a portability fix.
+- Inspect the relevant source module and its tests (`tests/test_zxfer_NAME.sh`, its `tests/suites/` fragments, and the `tests/test_contract_*.sh` suites) before proposing a portability fix.
 - For runtime artifacts, also inspect `src/zxfer_runtime.sh`.
 - For remote execution, also inspect `src/zxfer_exec.sh`, `src/zxfer_dependencies.sh`, and `src/zxfer_remote_hosts.sh`.
 
