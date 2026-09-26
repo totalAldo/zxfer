@@ -5,10 +5,6 @@ zxfer_integration_registry_path() {
 	printf '%s\n' "${ZXFER_INTEGRATION_REGISTRY_FILE:-$INTEGRATION_TESTS_DIR/integration_test_registry.tsv}"
 }
 
-zxfer_integration_fragment_manifest_path() {
-	printf '%s\n' "${ZXFER_INTEGRATION_FRAGMENT_MANIFEST_FILE:-$INTEGRATION_TESTS_DIR/integration_fragment_manifest.tsv}"
-}
-
 zxfer_validate_integration_registry_file() {
 	l_registry=${1:-$(zxfer_integration_registry_path)}
 	l_tab=$(printf '\t')
@@ -77,119 +73,125 @@ zxfer_validate_integration_registry_file() {
 	' <"$l_registry" >&2
 }
 
-zxfer_validate_integration_fragment_manifest_file() {
-	l_fragment_manifest=${1:-$(zxfer_integration_fragment_manifest_path)}
-
-	if [ ! -f "$l_fragment_manifest" ] || [ ! -r "$l_fragment_manifest" ]; then
-		printf 'Invalid integration fragment manifest [%s]: file is not readable.\n' \
-			"$l_fragment_manifest" >&2
+# Purpose: Print the integration fragments, integration/NAME_tests.sh, in C
+# sort order. Each must have a lower-case name, be a regular readable file
+# and not a symbolic link, in an integration directory that is not a
+# symbolic link; the first violation stops the harness before any pool work.
+# Usage: zxfer_integration_fragment_paths; paths are relative to
+# INTEGRATION_TESTS_DIR. It runs in a subshell, so the glob works whatever the
+# caller's noglob setting and leaves that setting alone.
+zxfer_integration_fragment_paths() (
+	set +f
+	l_fragment_dir=$INTEGRATION_TESTS_DIR/integration
+	if [ -L "$l_fragment_dir" ] || [ -h "$l_fragment_dir" ]; then
+		printf 'Invalid integration fragments [%s]: the directory must not be a symbolic link.\n' \
+			"$l_fragment_dir" >&2
 		return 1
 	fi
+	if ! [ -d "$l_fragment_dir" ]; then
+		printf 'Invalid integration fragments [%s]: the directory is not accessible.\n' \
+			"$l_fragment_dir" >&2
+		return 1
+	fi
+	l_fragment_list=
+	for l_fragment_file in "$l_fragment_dir"/*_tests.sh; do
+		[ -e "$l_fragment_file" ] || [ -L "$l_fragment_file" ] || continue
+		l_fragment_name=${l_fragment_file##*/}
+		case "${l_fragment_name%_tests.sh}" in
+		'' | [!a-z]* | *[!a-z0-9_]*)
+			printf 'Invalid integration fragments [%s]: fragment [%s] must be named like name_tests.sh in lower case.\n' \
+				"$l_fragment_dir" "$l_fragment_name" >&2
+			return 1
+			;;
+		esac
+		if [ -L "$l_fragment_file" ] || [ -h "$l_fragment_file" ]; then
+			printf 'Invalid integration fragments [%s]: fragment [%s] must not be a symbolic link.\n' \
+				"$l_fragment_dir" "$l_fragment_name" >&2
+			return 1
+		fi
+		if [ ! -f "$l_fragment_file" ] || [ ! -r "$l_fragment_file" ]; then
+			printf 'Invalid integration fragments [%s]: fragment [%s] is not a readable file.\n' \
+				"$l_fragment_dir" "$l_fragment_name" >&2
+			return 1
+		fi
+		l_fragment_list="${l_fragment_list}integration/$l_fragment_name
+"
+	done
+	if [ -z "$l_fragment_list" ]; then
+		printf 'Invalid integration fragments [%s]: no NAME_tests.sh fragment found.\n' \
+			"$l_fragment_dir" >&2
+		return 1
+	fi
+	printf '%s' "$l_fragment_list" | LC_ALL=C sort
+)
 
-	awk -v manifest="$l_fragment_manifest" '
-		function fail(message) {
-			if (!failed) {
-				printf "Invalid integration fragment manifest [%s]: %s\n", manifest, message
-			}
-			failed = 1
-			exit 1
+# Purpose: Scan one shfmt-formatted shell file for its top-level functions.
+# Usage: zxfer_scan_integration_fragment headers|definitions FILE. headers
+# prints "FILE<TAB>NAME<TAB>LINE" for each "name() {" header at column 0.
+# definitions prints one "Invalid integration fragment" line and returns 1
+# for anything else outside a function (a fragment must be definition-only),
+# for a line that starts with "}" but holds more, for a name() pattern inside
+# a function body (a nested definition) and for an unterminated function. A
+# function ends at the first lone "}" in column 0; shfmt, which lint runs on
+# every fragment, puts each function's closing brace there and nothing else.
+zxfer_scan_integration_fragment() {
+	awk -v headers_only="$([ "$1" = headers ] && echo 1 || echo 0)" '
+		function report(message, line) {
+			if (headers_only)
+				return
+			printf "Invalid integration fragment [%s]: %s at line %d.\n", FILENAME, message, line
+			bad = 1
 		}
-		NR == 1 {
-			if ($0 != "# path") {
-				fail("header does not match the one-field manifest schema")
+		BEGIN {
+			in_function = 0
+			bad = 0
+		}
+		/^[ \t]*(#|$)/ {
+			next
+		}
+		!in_function {
+			if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{$/) {
+				in_function = FNR
+				if (headers_only) {
+					name = $0
+					sub(/\(.*/, "", name)
+					printf "%s\t%s\t%d\n", FILENAME, name, FNR
+				}
+			} else {
+				report("executable top-level shell code", FNR)
 			}
 			next
 		}
-		{
-			if ($0 == "") {
-				fail("blank data rows are not allowed")
-			}
-			if ($0 !~ /^integration\/[a-z][a-z0-9_]*_tests[.]sh$/) {
-				fail("line " NR " has an invalid fragment path")
-			}
-			if ($0 in paths) {
-				fail("line " NR " duplicates fragment [" $0 "]")
-			}
-			paths[$0] = 1
-			row_count++
+		$0 == "}" {
+			in_function = 0
+			next
+		}
+		/^}/ {
+			report("code after a function closing brace", FNR)
+			in_function = 0
+			next
+		}
+		/(^|[;&|(){}[:space:]])[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)/ {
+			report("nested function definition", FNR)
 		}
 		END {
-			if (failed) {
-				exit 1
-			}
-			if (NR == 0) {
-				fail("file is empty")
-			}
-			if (row_count == 0) {
-				fail("manifest contains no fragments")
-			}
+			if (in_function)
+				report("unterminated function", in_function)
+			exit bad
 		}
-	' <"$l_fragment_manifest" >&2 || return 1
-
-	l_fragment_manifest_paths=$(awk 'NR > 1 { print }' "$l_fragment_manifest") || return 1
-	l_fragment_manifest_integration_dir=$INTEGRATION_TESTS_DIR/integration
-	if [ -L "$l_fragment_manifest_integration_dir" ] ||
-		[ -h "$l_fragment_manifest_integration_dir" ]; then
-		printf 'Invalid integration fragment manifest [%s]: integration directory must not be a symbolic link.\n' \
-			"$l_fragment_manifest" >&2
-		return 1
-	fi
-	l_fragment_manifest_physical_dir=$(cd -P \
-		"$l_fragment_manifest_integration_dir" 2>/dev/null && pwd -P) || {
-		printf 'Invalid integration fragment manifest [%s]: integration directory is not accessible.\n' \
-			"$l_fragment_manifest" >&2
-		return 1
-	}
-	while IFS= read -r l_fragment_manifest_relative_path; do
-		[ -n "$l_fragment_manifest_relative_path" ] || continue
-		l_fragment_manifest_file=$INTEGRATION_TESTS_DIR/$l_fragment_manifest_relative_path
-		if [ ! -f "$l_fragment_manifest_file" ] || [ ! -r "$l_fragment_manifest_file" ]; then
-			printf 'Invalid integration fragment manifest [%s]: fragment [%s] is not readable.\n' \
-				"$l_fragment_manifest" "$l_fragment_manifest_relative_path" >&2
-			return 1
-		fi
-		if [ -L "$l_fragment_manifest_file" ] || [ -h "$l_fragment_manifest_file" ]; then
-			printf 'Invalid integration fragment manifest [%s]: fragment [%s] must not be a symbolic link.\n' \
-				"$l_fragment_manifest" "$l_fragment_manifest_relative_path" >&2
-			return 1
-		fi
-		l_fragment_manifest_parent=$(dirname "$l_fragment_manifest_file") || return 1
-		l_fragment_manifest_physical_parent=$(cd -P \
-			"$l_fragment_manifest_parent" 2>/dev/null && pwd -P) || return 1
-		if [ "$l_fragment_manifest_physical_parent" != \
-			"$l_fragment_manifest_physical_dir" ]; then
-			printf 'Invalid integration fragment manifest [%s]: fragment [%s] is outside the approved integration directory.\n' \
-				"$l_fragment_manifest" "$l_fragment_manifest_relative_path" >&2
-			return 1
-		fi
-	done <<-EOF
-		$l_fragment_manifest_paths
-	EOF
+	' "$2"
 }
 
 zxfer_validate_integration_fragment_contents() {
 	l_fragment_contents_paths=$(zxfer_integration_fragment_paths) || return 1
-	l_fragment_contents_extractor=$INTEGRATION_TESTS_DIR/measure_shell_complexity.awk
-	if [ ! -f "$l_fragment_contents_extractor" ] ||
-		[ ! -r "$l_fragment_contents_extractor" ]; then
-		printf 'Unable to inspect integration fragment contents: extractor [%s] is not readable.\n' \
-			"$l_fragment_contents_extractor" >&2
-		return 1
-	fi
 	while IFS= read -r l_fragment_contents_relative_path; do
 		[ -n "$l_fragment_contents_relative_path" ] || continue
-		awk -v definitions_only=1 -f "$l_fragment_contents_extractor" \
+		zxfer_scan_integration_fragment definitions \
 			"$INTEGRATION_TESTS_DIR/$l_fragment_contents_relative_path" >&2 ||
 			return "$?"
 	done <<-EOF
 		$l_fragment_contents_paths
 	EOF
-}
-
-zxfer_integration_fragment_paths() {
-	l_fragment_paths_manifest=$(zxfer_integration_fragment_manifest_path) || return 1
-	zxfer_validate_integration_fragment_manifest_file "$l_fragment_paths_manifest" || return 1
-	awk 'NR > 1 { print }' "$l_fragment_paths_manifest"
 }
 
 zxfer_integration_fragment_files() {
@@ -205,17 +207,9 @@ zxfer_integration_fragment_files() {
 zxfer_integration_fragment_definition_rows() {
 	l_fragment_definition_paths=$(zxfer_integration_fragment_paths) || return 1
 	l_fragment_definition_tab=$(printf '\t')
-	l_fragment_definition_extractor=$INTEGRATION_TESTS_DIR/measure_shell_complexity.awk
-	if [ ! -f "$l_fragment_definition_extractor" ] ||
-		[ ! -r "$l_fragment_definition_extractor" ]; then
-		printf 'Unable to inspect integration fragment definitions: extractor [%s] is not readable.\n' \
-			"$l_fragment_definition_extractor" >&2
-		return 1
-	fi
 	while IFS= read -r l_fragment_definition_relative_path; do
 		[ -n "$l_fragment_definition_relative_path" ] || continue
-		l_fragment_definition_metrics=$(awk -v headers_only=1 \
-			-f "$l_fragment_definition_extractor" \
+		l_fragment_definition_metrics=$(zxfer_scan_integration_fragment headers \
 			"$INTEGRATION_TESTS_DIR/$l_fragment_definition_relative_path") || return "$?"
 		printf '%s\n' "$l_fragment_definition_metrics" |
 			awk -F "$l_fragment_definition_tab" \
@@ -250,7 +244,7 @@ zxfer_validate_integration_registry_definitions() {
 			for (i = 1; i <= registry_count; i++) {
 				name = registry_order[i]
 				if (!(name in definition_count)) {
-					printf "Invalid integration test registry: function [%s] is not defined by a manifest-listed integration fragment.\n", name
+					printf "Invalid integration test registry: function [%s] is not defined by an integration fragment.\n", name
 					failed = 1
 				} else if (definition_count[name] != 1) {
 					printf "Invalid integration test registry: function [%s] is defined by multiple integration fragments.\n", name

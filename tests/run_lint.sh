@@ -398,10 +398,34 @@ run_codespell() {
 	)
 }
 
+# Purpose: Keep eval out of the shared test helpers (tests/*_helper.sh and
+# tests/helpers/*.sh) except the two legacy string-capture helpers in
+# tests/helpers/process_capture.sh, zxfer_test_capture_subshell and
+# zxfer_test_capture_subshell_split, which about 200 test call sites use.
+# Usage: run_test_helper_eval_policy; prints each other eval line and fails.
 run_test_helper_eval_policy() {
 	require_command awk
 	printf '==> test-helper eval policy\n'
-	"$ZXFER_ROOT/tests/check_test_helper_eval.sh" "$ZXFER_ROOT"
+	set --
+	for l_eval_helper in "$ZXFER_ROOT"/tests/*_helper.sh \
+		"$ZXFER_ROOT"/tests/helpers/*.sh; do
+		[ ! -f "$l_eval_helper" ] || set -- "$@" "$l_eval_helper"
+	done
+	[ "$#" -gt 0 ] || return 0
+	awk -v root="$ZXFER_ROOT/" '
+		$0 ~ /^[[:space:]]*#/ || $0 !~ /(^|[^[:alnum:]_])eval([^[:alnum:]_]|$)/ {
+			next
+		}
+		FILENAME == root "tests/helpers/process_capture.sh" && ++legacy <= 2 {
+			next
+		}
+		{
+			printf "%s:%d: eval in a shared test helper; only the two legacy capture helpers may use it\n",
+				substr(FILENAME, length(root) + 1), FNR
+			bad = 1
+		}
+		END { exit bad }
+	' "$@"
 }
 
 run_shellcheck() {
