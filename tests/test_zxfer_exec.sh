@@ -54,8 +54,8 @@ tearDown() {
 	relax_test_tmpdir_permissions
 }
 
-# Each fragment holds the tests of the src modules named in its header. They
-# load and run in src/zxfer_modules.sh order.
+# Each fragment has a "zxfer-test-fragment" marker, a source line and a path
+# in suite(); keep the three in the same order so listing and execution agree.
 # zxfer-test-fragment: suites/zxfer_exec_command_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_command_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_command_tests.sh"
