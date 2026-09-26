@@ -39,10 +39,12 @@ Examples:
   ./tests/validate.sh vm smoke --guest ubuntu
 
 With no path arguments, quick inspects staged, unstaged, and untracked Git
-paths. It prints why each path maps to its selected unit suites and wider
-integration/performance/documentation recommendations, but executes only the
-offline budget and unit checks. It never downloads tools, starts VMs, invokes
-ZFS, or runs the direct host integration harness.
+paths. A change to src/zxfer_NAME.sh selects tests/test_zxfer_NAME.sh and every
+tests/test_contract_*.sh suite by name; tests/validation_map.tsv adds the
+exceptions and the wider integration/performance/documentation guidance. quick
+prints why each path maps to its suites and recommendations, but executes only
+the offline budget and unit checks. It never downloads tools, starts VMs,
+invokes ZFS, or runs the direct host integration harness.
 
 Set ZXFER_VALIDATE_JOBS to a positive integer to change the default four-way
 unit-suite concurrency used by quick and full.
@@ -202,6 +204,36 @@ append_unique_word() {
 	esac
 }
 
+# Purpose: Print every black-box contract suite, tests/test_contract_*.sh,
+# one repository-relative path per line.
+# Usage: contract_suites
+contract_suites() {
+	for l_contract_suite in "$ZXFER_ROOT"/tests/test_contract_*.sh; do
+		[ -f "$l_contract_suite" ] || continue
+		printf 'tests/%s\n' "${l_contract_suite##*/}"
+	done
+}
+
+# Purpose: Print the unit suites the naming convention selects for a changed
+# path: for src/zxfer_NAME.sh its entry tests/test_zxfer_NAME.sh, when present,
+# and every contract suite.
+# Usage: convention_unit_suites PATH; prints nothing for other paths.
+convention_unit_suites() {
+	case "$1" in
+	src/zxfer_*.sh) ;;
+	*) return 0 ;;
+	esac
+	l_convention_module=${1#src/zxfer_}
+	l_convention_module=${l_convention_module%.sh}
+	case "$l_convention_module" in
+	'' | *[!A-Za-z0-9_]*) return 0 ;;
+	esac
+	if [ -f "$ZXFER_ROOT/tests/test_zxfer_$l_convention_module.sh" ]; then
+		printf 'tests/test_zxfer_%s.sh\n' "$l_convention_module"
+	fi
+	contract_suites
+}
+
 append_mapping_field() {
 	l_kind=$1
 	l_field=$2
@@ -219,6 +251,12 @@ append_mapping_field() {
 		if [ "$l_value" = @self ]; then
 			[ -f "$ZXFER_ROOT/$l_changed_path" ] || continue
 			l_value=$l_changed_path
+		fi
+		if [ "$l_value" = @contract ]; then
+			for l_contract_value in $(contract_suites); do
+				QUICK_UNIT_SUITES=$(append_unique_word "$QUICK_UNIT_SUITES" "$l_contract_value")
+			done
+			continue
 		fi
 		case "$l_kind" in
 		unit)
@@ -248,7 +286,7 @@ print_mapping_field() {
 }
 
 # Purpose: Print the entry suite whose "# zxfer-test-fragment:" marker names a
-# tests/suites or tests/fixtures path; the runner reads the same markers.
+# tests/suites path; the runner reads the same markers.
 # Usage: fragment_entry_suite tests/suites/NAME; prints tests/test_*.sh, or
 # nothing when no entry suite marks the path as a fragment.
 fragment_entry_suite() {
@@ -270,12 +308,13 @@ map_changed_path() {
 	# change to that entry file; other paths map as themselves.
 	l_map_path=$l_changed_path
 	case "$l_changed_path" in
-	tests/suites/* | tests/fixtures/*)
+	tests/suites/*)
 		l_fragment_entry=$(fragment_entry_suite "$l_changed_path") ||
 			die "Failed to read the fragment markers for: $l_changed_path"
 		[ -z "$l_fragment_entry" ] || l_map_path=$l_fragment_entry
 		;;
 	esac
+	l_convention_suites=$(convention_unit_suites "$l_map_path")
 
 	while IFS=$TAB read -r l_pattern l_units l_integration l_perf l_docs l_reason; do
 		case "$l_pattern" in
@@ -294,6 +333,13 @@ map_changed_path() {
 			fi
 			printf '    matched:     %s\n' "$l_pattern"
 			printf '    reason:      %s\n' "$l_reason"
+			if [ -n "$l_convention_suites" ]; then
+				# One repository-controlled path per line; join with commas.
+				printf '    convention:  %s\n' "$(printf '%s' "$l_convention_suites" | tr '\n' ',')"
+				for l_convention_suite in $l_convention_suites; do
+					QUICK_UNIT_SUITES=$(append_unique_word "$QUICK_UNIT_SUITES" "$l_convention_suite")
+				done
+			fi
 			print_mapping_field unit "$l_units"
 			print_mapping_field integration "$l_integration"
 			print_mapping_field perf "$l_perf"

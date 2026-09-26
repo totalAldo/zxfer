@@ -1,26 +1,36 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_dependencies.sh helpers.
+# shunit2 tests for src/zxfer_dependencies.sh: the secure PATH, required and
+# optional helper lookup, and compression command resolution.
 #
-# shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
+# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
 TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# shellcheck source=tests/helpers/remote_host_fixtures.sh
+. "$TESTS_DIR/helpers/remote_host_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_dependencies.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_dependencies"
+	zxfer_test_remote_host_fixture_one_time_setup
 }
 
 oneTimeTearDown() {
+	zxfer_test_remote_host_fixture_one_time_teardown
 	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
+	# The tool-resolution cases were written for the remote-host fixture.
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_dependencies_tool_resolution_tests.sh"; then
+		zxfer_test_remote_host_fixture_setup
+		return
+	fi
 	PATH=$TEST_ORIGINAL_PATH
 	export PATH
 	unset ZXFER_SECURE_PATH
@@ -494,6 +504,84 @@ test_zxfer_init_dependency_tool_defaults_reports_a_missing_zfs() {
 	assertEquals "A missing zfs should stop startup." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "A missing zfs should keep its dependency classification and message." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "class=dependency message=Required dependency \"zfs\" not found in secure PATH ($tools). Set ZXFER_SECURE_PATH or install the binary."
+}
+
+test_zxfer_compute_secure_path_filters_relative_entries() {
+	result=$(
+		ZXFER_SECURE_PATH="./bin:/tmp/bin:relative:/usr/sbin"
+		ZXFER_SECURE_PATH_APPEND=""
+		zxfer_compute_secure_path
+		printf '%s\n' "$g_zxfer_computed_secure_path"
+	)
+
+	assertEquals "Relative path segments must be dropped from the secure PATH." "/tmp/bin:/usr/sbin" "$result"
+}
+
+test_zxfer_compute_secure_path_appends_extra_entries() {
+	result=$(
+		ZXFER_SECURE_PATH="/sbin:/bin"
+		ZXFER_SECURE_PATH_APPEND=":/opt/zfs/bin:./malicious"
+		zxfer_compute_secure_path
+		printf '%s\n' "$g_zxfer_computed_secure_path"
+	)
+
+	assertEquals "ZXFER_SECURE_PATH_APPEND should only add absolute directories to the allowlist." "/sbin:/bin:/opt/zfs/bin" "$result"
+}
+
+test_zxfer_compute_secure_path_uses_append_when_default_is_empty() {
+	result=$(
+		ZXFER_DEFAULT_SECURE_PATH=""
+		ZXFER_SECURE_PATH=""
+		ZXFER_SECURE_PATH_APPEND="/opt/trusted/bin"
+		zxfer_compute_secure_path
+		printf '%s\n' "$g_zxfer_computed_secure_path"
+	)
+
+	assertEquals "Append-only secure-path configuration should still work when the built-in allowlist is empty." \
+		"/opt/trusted/bin" "$result"
+}
+
+test_zxfer_compute_secure_path_falls_back_to_default_when_all_entries_are_filtered() {
+	result=$(
+		ZXFER_SECURE_PATH="relative:.:./bin"
+		ZXFER_SECURE_PATH_APPEND="also-relative:./still-bad"
+		zxfer_compute_secure_path
+		printf '%s\n' "$g_zxfer_computed_secure_path"
+	)
+
+	assertEquals "When every configured secure-PATH entry is filtered out, zxfer should fall back to the built-in allowlist." \
+		"$ZXFER_DEFAULT_SECURE_PATH" "$result"
+}
+
+test_refresh_compression_commands_tokenizes_custom_pipeline() {
+	# A -Z command is resolved and quoted token by token, so the shell never
+	# runs the raw string.
+	zstd_dir="$TEST_TMPDIR/custom_pipeline_bin"
+	mkdir -p "$zstd_dir"
+	printf '#!/bin/sh\nexit 0\n' >"$zstd_dir/zstd"
+	chmod 755 "$zstd_dir/zstd"
+
+	result=$(
+		g_zxfer_secure_path=$zstd_dir
+		g_option_z_compress=1
+		g_cmd_compress="zstd -3;touch /tmp/pwn"
+		g_cmd_decompress="zstd -d"
+		zxfer_refresh_compression_commands
+		printf '%s\n' "$g_cmd_compress_safe"
+	)
+
+	assertEquals "Compression command tokens should be quoted." \
+		"'$zstd_dir/zstd' '-3;' 'touch' '/tmp/pwn'" "$result"
+}
+
+# zxfer-test-fragment: suites/zxfer_dependencies_tool_resolution_tests.sh
+# shellcheck source=tests/suites/zxfer_dependencies_tool_resolution_tests.sh
+. "$TESTS_DIR/suites/zxfer_dependencies_tool_resolution_tests.sh"
+
+suite() {
+	zxfer_test_register_fragment_tests \
+		"$TESTS_DIR/test_zxfer_dependencies.sh" \
+		"$TESTS_DIR/suites/zxfer_dependencies_tool_resolution_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

@@ -46,6 +46,20 @@ EOF
 	chmod +x "$l_zxfer_test_fake_ssh_path"
 }
 
+# Purpose: Print a well-formed V2 capability handshake for RemoteOS that
+# resolves zfs, parallel and cat.
+# Usage: FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response)
+fake_remote_capability_response() {
+	cat <<'EOF'
+ZXFER_REMOTE_CAPS_V2
+os	RemoteOS
+tool	zfs	0	/remote/bin/zfs
+tool	parallel	0	/opt/bin/parallel
+tool	cat	0	/remote/bin/cat
+end
+EOF
+}
+
 # Purpose: Print the path of a csh-family shell, or nothing when none exists.
 # Usage: l_csh_shell=$(find_csh_shell_for_tests)
 find_csh_shell_for_tests() {
@@ -120,4 +134,34 @@ zxfer_test_print_source_listing() {
 	[ -z "${g_zxfer_source_snapshot_list_cmd_result:-}" ] ||
 		printf '%s\n' "$g_zxfer_source_snapshot_list_cmd_result"
 	return "$l_test_listing_status"
+}
+
+# Purpose: Build a secure-PATH directory for launcher runs that stop at a
+# usage error: the host awk plus ps, zfs and ssh stand-ins that exit 0.
+# Usage: create_launcher_usage_secure_path DIR || return
+create_launcher_usage_secure_path() {
+	l_secure_path_dir=$1
+	l_real_awk=$(command -v awk 2>/dev/null || :)
+
+	mkdir -p "$l_secure_path_dir"
+
+	if [ -z "$l_real_awk" ]; then
+		fail "Host test requires awk on the local system PATH."
+		return 1
+	fi
+
+	ln -s "$l_real_awk" "$l_secure_path_dir/awk"
+	cat >"$l_secure_path_dir/ps" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	cat >"$l_secure_path_dir/zfs" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	cat >"$l_secure_path_dir/ssh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$l_secure_path_dir/ps" "$l_secure_path_dir/zfs" "$l_secure_path_dir/ssh"
 }

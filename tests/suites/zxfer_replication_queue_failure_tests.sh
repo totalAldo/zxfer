@@ -766,77 +766,6 @@ wait final sync"
 		"$expected" "$(cat "$log")"
 }
 
-test_prepare_migration_services_rejects_unmounted_sources() {
-	g_option_m_migrate=1
-	g_recursive_source_list="tank/src"
-	g_initial_source="tank/src"
-
-	set +e
-	output=$(
-		(
-			zxfer_run_source_zfs_cmd() {
-				if [ "$1" = "get" ] && [ "$4" = "mounted" ]; then
-					printf 'no\n'
-					return 0
-				fi
-				return 0
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_prepare_migration_services
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Migration preflight should abort when a source dataset is not mounted." 2 "$status"
-	assertContains "Unmounted migration sources should use the documented usage error." \
-		"$output" "The source filesystem is not mounted, cannot use -m."
-}
-
-test_prepare_migration_services_reports_mounted_probe_failures() {
-	g_option_m_migrate=1
-	g_recursive_source_list="tank/src"
-	g_initial_source="tank/src"
-
-	set +e
-	output=$(
-		(
-			zxfer_run_source_zfs_cmd() {
-				if [ "$1" = "get" ] && [ "$4" = "mounted" ]; then
-					return 1
-				fi
-				return 0
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_prepare_migration_services
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Migration preflight should abort when mounted-state lookup fails." 1 "$status"
-	assertContains "Mounted-state lookup failures should not be misreported as an unmounted source." \
-		"$output" "Couldn't determine whether source tank/src is mounted."
-}
-
-test_prepare_migration_services_live_uses_mountpoint_free_effective_readonly_list() {
-	g_option_m_migrate=1
-	g_initial_source="tank/src"
-	g_recursive_source_list="tank/src"
-	ZXFER_BASE_READONLY_PROPERTIES="type,mountpoint,creation"
-
-	zxfer_prepare_migration_services
-
-	assertEquals "Live migration should drop mountpoint from the effective readonly-property list." \
-		"type,creation" "$(zxfer_resolve_readonly_properties && printf '%s' "$g_zxfer_readonly_properties_result")"
-	assertEquals "Live migration should not mutate the base readonly-property defaults." \
-		"type,mountpoint,creation" "$ZXFER_BASE_READONLY_PROPERTIES"
-}
-
 test_copy_filesystems_allows_post_unmount_migration_replication() {
 	g_option_m_migrate=1
 	g_recursive_source_list="tank/src"
@@ -869,42 +798,6 @@ test_copy_filesystems_allows_post_unmount_migration_replication() {
 	assertEquals "Migration copy loop should proceed after zxfer_prepare_migration_services unmounts the source." \
 		"inspect 0 tank/src
 copy backup/target/src" "$(cat "$log")"
-}
-
-test_prepare_migration_services_relaunches_when_unmount_fails() {
-	g_option_m_migrate=1
-	g_recursive_source_list="tank/src"
-	g_initial_source="tank/src"
-
-	set +e
-	output=$(
-		(
-			zxfer_run_source_zfs_cmd() {
-				if [ "$1" = "get" ] && [ "$4" = "mounted" ]; then
-					printf 'yes\n'
-					return 0
-				fi
-				if [ "$1" = "unmount" ]; then
-					return 1
-				fi
-				return 0
-			}
-			zxfer_relaunch() {
-				printf 'zxfer_relaunch\n'
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_prepare_migration_services
-		)
-	)
-	status=$?
-
-	assertEquals "Failed unmounts during migration should abort." 1 "$status"
-	assertContains "Failed unmounts should zxfer_relaunch services before aborting." "$output" "zxfer_relaunch"
-	assertContains "Failed unmounts should identify the affected source." \
-		"$output" "Couldn't unmount source tank/src."
 }
 
 test_run_zfs_mode_loop_exits_after_single_iteration_when_no_changes() {

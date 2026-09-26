@@ -65,8 +65,8 @@ test_run_coverage_default_suite_resolution_includes_coverage_overlays() {
 
 	assertContains "The default coverage run should include the send-job coverage suite." \
 		"$output" "tests/test_zxfer_send_jobs.sh"
-	assertContains "The default coverage run should include the remote host overlay suite." \
-		"$output" "tests/test_zxfer_remote_hosts_coverage.sh"
+	assertContains "The default coverage run should include the remote host suite." \
+		"$output" "tests/test_zxfer_remote_hosts.sh"
 	assertContains "The default coverage run should include the property reconcile suite that exercises the in-memory property tables." \
 		"$output" "tests/test_zxfer_property_reconcile.sh"
 	assertContains "The default coverage run should include the snapshot state suite that protects transform readback coverage." \
