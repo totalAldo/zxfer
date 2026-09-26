@@ -62,9 +62,6 @@ tearDown() {
 # zxfer-test-fragment: suites/zxfer_exec_command_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_command_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_command_tests.sh"
-# zxfer-test-fragment: suites/zxfer_exec_snapshot_producers_tests.sh
-# shellcheck source=tests/suites/zxfer_exec_snapshot_producers_tests.sh
-. "$TESTS_DIR/suites/zxfer_exec_snapshot_producers_tests.sh"
 # zxfer-test-fragment: suites/zxfer_exec_background_shell_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_background_shell_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_background_shell_tests.sh"
@@ -73,7 +70,6 @@ suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_exec.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_command_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_exec_snapshot_producers_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_background_shell_tests.sh"
 }
 

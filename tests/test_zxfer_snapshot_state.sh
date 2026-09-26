@@ -1,8 +1,10 @@
 #!/bin/sh
 #
 # shunit2 tests for src/zxfer_snapshot_state.sh: the destination existence
-# cache and probes, snapshot record files, and the live destination view. The
-# existence-probe fragment keeps the exec fixture it was written for.
+# cache and probes, destination dataset mapping, snapshot record files, and
+# the live destination view. The existence-probe fragment keeps the exec
+# fixture and the destination-map fragment the snapshot-discovery fixture they
+# were written for.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -13,12 +15,15 @@ TEST_ORIGINAL_PATH=$PATH
 . "$TESTS_DIR/test_helper.sh"
 # shellcheck source=tests/helpers/exec_fixtures.sh
 . "$TESTS_DIR/helpers/exec_fixtures.sh"
+# shellcheck source=tests/helpers/snapshot_discovery_fixtures.sh
+. "$TESTS_DIR/helpers/snapshot_discovery_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_snapshot_state.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_snapshot_state"
 	zxfer_test_exec_fixture_one_time_setup
+	zxfer_test_snapshot_discovery_fixture_write_tools
 }
 
 oneTimeTearDown() {
@@ -33,6 +38,12 @@ tearDown() {
 setUp() {
 	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh"; then
 		zxfer_test_exec_fixture_setup
+		return
+	fi
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_snapshot_state_destination_map_tests.sh"; then
+		# The exec fixture empties TEST_TMPDIR and writes its own ssh stand-in.
+		zxfer_test_snapshot_discovery_fixture_write_tools
+		zxfer_test_snapshot_discovery_fixture_setup
 		return
 	fi
 	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" || return "$?"
@@ -556,11 +567,15 @@ test_zxfer_refresh_live_destination_view_ignores_an_inherited_view_file() {
 # zxfer-test-fragment: suites/zxfer_snapshot_state_existence_probe_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_state_existence_probe_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh"
+# zxfer-test-fragment: suites/zxfer_snapshot_state_destination_map_tests.sh
+# shellcheck source=tests/suites/zxfer_snapshot_state_destination_map_tests.sh
+. "$TESTS_DIR/suites/zxfer_snapshot_state_destination_map_tests.sh"
 
 suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_snapshot_state.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh"
+		"$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh" \
+		"$TESTS_DIR/suites/zxfer_snapshot_state_destination_map_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

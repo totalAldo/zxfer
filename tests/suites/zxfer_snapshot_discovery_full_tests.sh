@@ -1,6 +1,8 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Full discovery, record-cache, and fast recursive no-op behavior cases.
+# Full discovery, record-cache, discovery-state reset and fast recursive no-op
+# cases for src/zxfer_snapshot_discovery.sh. Run by
+# tests/test_zxfer_snapshot_discovery.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_get_zfs_list_bootstraps_missing_destination_dataset_when_pool_exists() {
@@ -1562,4 +1564,25 @@ tank/src@snap1"
 backup/dst@legacy1"
 	assertContains "Snapshot discovery should cache destination child snapshots separately." \
 		"$output" "dest_child=backup/dst/child@child1"
+}
+
+test_set_g_recursive_source_list_updates_dataset_caches() {
+	source_tmp=$(mktemp -t zxfer_srcsnap.XXXXXX)
+	dest_tmp=$(mktemp -t zxfer_dstsnap.XXXXXX)
+	cat <<'EOF' >"$source_tmp"
+tank/src@a
+tank/src@b
+tank/src/child@a
+EOF
+	cat <<'EOF' >"$dest_tmp"
+tank/src@a
+EOF
+	g_cmd_awk=${g_cmd_awk:-$(command -v awk)}
+	g_option_x_exclude_datasets=""
+	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+	expected_list=$(printf '%s\n%s' "tank/src" "tank/src/child")
+	assertEquals "Missing datasets should be identified for replication." "$expected_list" "$g_recursive_source_list"
+	expected_datasets=$(printf '%s\n%s' "tank/src" "tank/src/child")
+	assertEquals "Dataset cache should include every source filesystem." "$expected_datasets" "$g_recursive_source_dataset_list"
+	rm -f "$source_tmp" "$dest_tmp"
 }

@@ -1,6 +1,8 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Source command production, parallel discovery, and producer execution cases.
+# Source command production, parallel discovery, staged capture and status
+# files, and producer execution cases for src/zxfer_snapshot_producers.sh. Run
+# by tests/test_zxfer_snapshot_producers.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_state() {
@@ -85,49 +87,6 @@ line3" "invalid" >"$output_file"
 		"line1
 line2
 line3" "$(cat "$output_file")"
-}
-
-test_destination_snapshot_dataset_helpers_map_root_and_child_datasets() {
-	zxfer_map_destination_dataset
-	assertEquals "Non-trailing-slash recursive replication should append the source root name under the destination root." \
-		"backup/dst/src" "$g_zxfer_destination_dataset_result"
-	zxfer_map_destination_dataset "tank/src/child"
-	assertEquals "Non-trailing-slash recursive replication should map child datasets beneath the derived destination root." \
-		"backup/dst/src/child" "$g_zxfer_destination_dataset_result"
-
-	g_initial_source_had_trailing_slash=1
-	zxfer_map_destination_dataset
-	assertEquals "Trailing-slash recursive replication should keep the destination root unchanged." \
-		"backup/dst" "$g_zxfer_destination_dataset_result"
-	zxfer_map_destination_dataset "tank/src/child"
-	assertEquals "Trailing-slash recursive replication should map child datasets directly beneath the requested destination." \
-		"backup/dst/child" "$g_zxfer_destination_dataset_result"
-}
-
-test_destination_snapshot_dataset_helpers_cover_exact_root_and_fallback_mappings() {
-	zxfer_map_destination_dataset "otherpool/unrelated"
-	assertEquals "Non-trailing-slash mapping should fall back to the destination root when a dataset does not extend the initial source path." \
-		"backup/dst/src" "$g_zxfer_destination_dataset_result"
-
-	g_initial_source_had_trailing_slash=1
-	zxfer_map_destination_dataset "tank/src"
-	assertEquals "Trailing-slash mapping should keep the destination root unchanged for the exact source dataset." \
-		"backup/dst" "$g_zxfer_destination_dataset_result"
-}
-
-test_destination_snapshot_dataset_helpers_treat_regex_significant_source_names_as_literal_paths() {
-	g_initial_source="tank/app.v1"
-	g_destination="backup/dst"
-	g_initial_source_had_trailing_slash=0
-
-	zxfer_map_destination_dataset "tank/app.v1/releases.2026"
-	assertEquals "Non-trailing-slash mapping should preserve dots in the source root as literal path components." \
-		"backup/dst/app.v1/releases.2026" "$g_zxfer_destination_dataset_result"
-
-	g_initial_source_had_trailing_slash=1
-	zxfer_map_destination_dataset "tank/app.v1/releases.2026"
-	assertEquals "Trailing-slash mapping should still preserve dotted child names as literal path components." \
-		"backup/dst/releases.2026" "$g_zxfer_destination_dataset_result"
 }
 
 test_build_source_snapshot_list_cmd_reports_parallel_helper_failures_in_current_shell() {
@@ -1794,4 +1753,243 @@ test_execute_source_snapshot_name_list_background_sort_cmd_preserves_setup_failu
 
 test_execute_source_snapshot_name_list_background_sort_cmd_aborts_child_when_registration_fails() {
 	zxfer_test_assert_source_producer_registration_cleanup names
+}
+
+test_zxfer_read_snapshot_discovery_capture_file_reads_multiline_results_in_current_shell() {
+	capture_file="$TEST_TMPDIR/snapshot_discovery_capture.txt"
+	expected_capture='first line
+second line
+'
+	cat >"$capture_file" <<'EOF'
+first line
+second line
+EOF
+
+	zxfer_read_snapshot_discovery_capture_file "$capture_file"
+
+	# shellcheck disable=SC2031  # Current-shell scratch is asserted directly in tests.
+	assertEquals "Snapshot-discovery capture-file reads should preserve multiline staged command content in current-shell scratch." \
+		"$expected_capture" "$g_zxfer_snapshot_discovery_file_read_result"
+}
+
+test_zxfer_read_snapshot_discovery_capture_file_fails_closed_on_redirection_errors_in_current_shell() {
+	capture_dir="$TEST_TMPDIR/snapshot_discovery_capture_dir"
+	mkdir -p "$capture_dir"
+	g_zxfer_snapshot_discovery_file_read_result="stale-capture"
+
+	set +e
+	zxfer_read_snapshot_discovery_capture_file "$capture_dir" 2>/dev/null
+	status=$?
+	set -e
+
+	assertNotEquals "Snapshot-discovery capture-file reads should fail when the staged capture path cannot be opened for reading." \
+		0 "$status"
+	assertEquals "Snapshot-discovery capture-file reads should not publish stale or partial scratch on redirection failure." \
+		"" "$g_zxfer_snapshot_discovery_file_read_result"
+}
+
+test_ensure_parallel_available_for_source_jobs_clears_a_stale_reason() {
+	output=$(
+		(
+			g_zxfer_parallel_source_job_check_result="stale-parallel-check"
+			g_option_j_jobs=2
+			g_option_O_origin_host=""
+			g_cmd_parallel="$PARALLEL_BIN"
+			set +e
+			zxfer_ensure_parallel_available_for_source_jobs
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+			# shellcheck disable=SC2031  # Current-shell scratch is asserted directly in tests.
+			printf 'result=<%s>\n' "${g_zxfer_parallel_source_job_check_result:-}"
+		)
+	)
+
+	assertEquals "A passing parallel check should clear a stale reason and print nothing." \
+		"status=0
+result=<>" "$output"
+}
+
+test_build_source_snapshot_list_cmd_publishes_the_parallel_check_reason() {
+	output=$(
+		(
+			zxfer_ensure_parallel_available_for_source_jobs() {
+				# Helpers share one variable namespace; clobbering the
+				# builder's scratch name must not change its result.
+				l_list_status=0
+				g_zxfer_parallel_source_job_check_result="nested remote validation failed"
+				return 1
+			}
+			g_option_j_jobs=2
+			set +e
+			zxfer_build_source_snapshot_list_cmd
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+			printf 'result=<%s>\n' "$g_zxfer_source_snapshot_list_cmd_result"
+		)
+	)
+
+	assertEquals "The source listing builder should return the parallel check's status and publish its reason." \
+		"status=1
+result=<nested remote validation failed>" "$output"
+}
+
+test_build_source_snapshot_list_cmd_allocates_no_scratch_when_the_parallel_check_fails() {
+	output=$(
+		(
+			tempfile_log="$TEST_TMPDIR/parallel-check-tempfile.log"
+			cleanup_log="$TEST_TMPDIR/parallel-check-cleanup.log"
+			zxfer_get_temp_file() {
+				printf '%s\n' "called" >"$tempfile_log"
+				return 1
+			}
+			zxfer_ensure_parallel_available_for_source_jobs() {
+				return 27
+			}
+			zxfer_cleanup_runtime_artifact_path() {
+				printf '%s\n' "$1" >"$cleanup_log"
+				return 0
+			}
+			g_option_j_jobs=2
+			set +e
+			zxfer_build_source_snapshot_list_cmd
+			status=$?
+			set -e
+			printf 'status=%s\n' "$status"
+			printf 'result=<%s>\n' "$g_zxfer_source_snapshot_list_cmd_result"
+			printf 'tempfile_called=<%s>\n' "$(cat "$tempfile_log" 2>/dev/null)"
+			printf 'cleanup=<%s>\n' "$(cat "$cleanup_log" 2>/dev/null)"
+		)
+	)
+
+	assertContains "A silent parallel check failure should keep its status." \
+		"$output" "status=27"
+	assertContains "A silent parallel check failure should publish the generic message." \
+		"$output" "result=<Failed to prepare parallel source discovery.>"
+	assertContains "A failed parallel check should allocate no scratch file." \
+		"$output" "tempfile_called=<>"
+	assertContains "A failed parallel check should clean up nothing." \
+		"$output" "cleanup=<>"
+}
+
+test_build_source_snapshot_list_cmd_preserves_remote_parallel_resolution_from_current_shell() {
+	output=$(
+		(
+			zxfer_build_remote_sh_c_command() {
+				g_zxfer_remote_sh_c_command_result="sh -c $1"
+				printf '%s\n' "sh -c $1"
+			}
+			zxfer_ssh_shell_command_for_host() {
+				g_zxfer_shell_command_result="ssh $2 $3"
+			}
+			zxfer_ensure_parallel_available_for_source_jobs() {
+				g_origin_parallel_cmd="/opt/bin/parallel"
+				return 0
+			}
+			g_option_j_jobs=4
+			g_option_O_origin_host="origin.example"
+			g_origin_parallel_cmd=""
+			g_origin_cmd_zfs="/remote/bin/zfs"
+			g_initial_source="tank/src"
+			zxfer_test_print_source_listing zxfer_build_source_snapshot_list_cmd
+			printf 'resolved=%s\n' "$g_origin_parallel_cmd"
+		)
+	)
+
+	assertContains "Remote source snapshot planning should retain the helper path resolved during the current-shell availability check." \
+		"$output" "'/opt/bin/parallel' -j 4 --line-buffer"
+	assertContains "Remote source snapshot planning should preserve the direct remote dataset enumeration command." \
+		"$output" "'/remote/bin/zfs' 'list' '-Hr' '-t' 'filesystem,volume' '-o' 'name' 'tank/src'"
+	assertContains "Remote source snapshot planning should preserve the resolved origin-host parallel helper after command rendering." \
+		"$output" "resolved=/opt/bin/parallel"
+}
+
+test_write_source_snapshot_list_to_file_reports_tempfile_failures() {
+	outfile="$TEST_TMPDIR/source_tempfile_failure.out"
+	errfile="$TEST_TMPDIR/source_tempfile_failure.err"
+
+	output=$(
+		(
+			zxfer_create_runtime_artifact_file() {
+				printf '%s\n' "unexpected staging file"
+				return 17
+			}
+			zxfer_build_source_snapshot_list_cmd() {
+				g_zxfer_source_snapshot_list_cmd_result="printf '%s\\n' staged-free"
+			}
+			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
+			wait "$g_source_snapshot_list_pid"
+			printf 'status=%s payload=%s\n' "$?" "$(cat "$outfile")"
+		)
+	)
+
+	assertEquals "A serial source listing should start without allocating a staging file for its command." \
+		"status=0 payload=staged-free" "$output"
+}
+
+test_write_source_snapshot_list_to_file_runs_each_pass_own_command() {
+	outfile="$TEST_TMPDIR/source_command_reuse.out"
+
+	output=$(
+		(
+			pass=0
+			zxfer_build_source_snapshot_list_cmd() {
+				pass=$((pass + 1))
+				g_zxfer_source_snapshot_list_cmd_result="printf '%s\\n' pass-$pass"
+			}
+			zxfer_write_source_snapshot_list_to_file "$outfile"
+			wait "$g_source_snapshot_list_pid"
+			printf 'first=%s\n' "$(cat "$outfile")"
+			zxfer_write_source_snapshot_list_to_file "$outfile"
+			wait "$g_source_snapshot_list_pid"
+			printf 'second=%s\n' "$(cat "$outfile")"
+		)
+	)
+
+	assertContains "The first discovery pass should run the builder's command." \
+		"$output" "first=pass-1"
+	assertContains "A second discovery pass should run the command its own build published." \
+		"$output" "second=pass-2"
+}
+
+test_execute_source_snapshot_name_list_background_sort_cmd_preserves_count_status_tempfile_failures() {
+	set +e
+	output=$(
+		(
+			temp_call_count=0
+			zxfer_get_temp_file() {
+				temp_call_count=$((temp_call_count + 1))
+				if [ "$temp_call_count" -ge 2 ]; then
+					return 57
+				fi
+				g_zxfer_temp_file_result="$TEST_TMPDIR/count-temp-$temp_call_count.tmp"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				"echo snapshots" \
+				"$TEST_TMPDIR/count-temp-sorted.out" \
+				"" \
+				"$TEST_TMPDIR/count-temp.count"
+		)
+	)
+	status=$?
+
+	assertEquals "The no-op proof source launcher should preserve count status-file allocation failures exactly." \
+		57 "$status"
+	assertEquals "The no-op proof source launcher should not emit output for count status-file allocation failures." \
+		"" "$output"
+}
+
+test_read_snapshot_discovery_status_file_defaults_empty_sidecars() {
+	status_file="$TEST_TMPDIR/snapshot_discovery_empty_status.out"
+	: >"$status_file"
+
+	zxfer_read_snapshot_discovery_status_file "$status_file" 37
+	status=$?
+
+	assertEquals "Empty snapshot discovery status files should be accepted as the supplied default." \
+		0 "$status"
+	assertEquals "Empty snapshot discovery status files should publish the supplied default." \
+		37 "$g_zxfer_snapshot_discovery_status_file_result"
 }

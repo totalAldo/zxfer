@@ -1,8 +1,11 @@
 #!/bin/sh
 # shellcheck shell=sh
 #
-# Shared fake executables and reset helpers for snapshot-discovery behavior
-# fragments. The stable suite entry point sources this file once.
+# The unit fixture of tests/test_zxfer_snapshot_discovery.sh, shared with
+# tests/test_zxfer_snapshot_producers.sh and the destination-mapping fragment
+# of tests/test_zxfer_snapshot_state.sh: fake parallel, ssh, zfs and awk
+# executables, and reset helpers for discovery options, remote capabilities,
+# helper commands and discovery results.
 #
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -172,8 +175,10 @@ zxfer_test_start_fast_noop_destination_fifo_producer() {
 	zxfer_register_cleanup_pid "$g_last_background_pid" "test destination snapshot no-op proof helper"
 }
 
-oneTimeSetUp() {
-	zxfer_test_create_tmpdir "zxfer_get_list"
+# Purpose: Write the parallel and ssh stand-ins the discovery cases share.
+# Usage: zxfer_test_snapshot_discovery_fixture_write_tools, from oneTimeSetUp
+# after zxfer_test_create_tmpdir.
+zxfer_test_snapshot_discovery_fixture_write_tools() {
 	PARALLEL_BIN="$TEST_TMPDIR/parallel"
 	ALT_PARALLEL_BIN="$TEST_TMPDIR/alt_parallel"
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
@@ -182,12 +187,8 @@ oneTimeSetUp() {
 	create_fake_ssh_bin "$FAKE_SSH_BIN"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 # Purpose: Reset public discovery options and root mappings.
-# Usage: Called by setUp before every sourced behavior case.
+# Usage: Called by zxfer_test_snapshot_discovery_fixture_setup.
 zxfer_test_reset_snapshot_discovery_option_fixture() {
 	TMPDIR="$TEST_TMPDIR"
 	g_option_n_dryrun=0
@@ -208,7 +209,8 @@ zxfer_test_reset_snapshot_discovery_option_fixture() {
 }
 
 # Purpose: Reset origin and target capability-cache fixtures.
-# Usage: Called by setUp so remote capability tests never share probe state.
+# Usage: Called by zxfer_test_snapshot_discovery_fixture_setup so remote
+# capability tests never share probe state.
 zxfer_test_reset_snapshot_discovery_remote_capability_fixture() {
 	g_origin_remote_capabilities_host=""
 	g_origin_remote_capabilities_response=""
@@ -217,7 +219,8 @@ zxfer_test_reset_snapshot_discovery_remote_capability_fixture() {
 }
 
 # Purpose: Reset fake helper commands and rendered-command state.
-# Usage: Called by setUp before producer, SSH, and ZFS command tests.
+# Usage: Called by zxfer_test_snapshot_discovery_fixture_setup before
+# producer, SSH, and ZFS command tests.
 zxfer_test_reset_snapshot_discovery_command_fixture() {
 	g_cmd_parallel="$PARALLEL_BIN"
 	g_origin_parallel_cmd=""
@@ -234,7 +237,8 @@ zxfer_test_reset_snapshot_discovery_command_fixture() {
 }
 
 # Purpose: Reset discovery outputs, staged-result channels, and job scratch.
-# Usage: Called by setUp before cache and orchestration behavior tests.
+# Usage: Called by zxfer_test_snapshot_discovery_fixture_setup before cache
+# and orchestration behavior tests.
 zxfer_test_reset_snapshot_discovery_result_fixture() {
 	g_recursive_source_list=""
 	g_recursive_source_dataset_list=""
@@ -255,7 +259,9 @@ zxfer_test_reset_snapshot_discovery_result_fixture() {
 	g_zxfer_temp_file_result=""
 }
 
-setUp() {
+# Purpose: Reset every discovery input and output before a case.
+# Usage: zxfer_test_snapshot_discovery_fixture_setup || return, from setUp.
+zxfer_test_snapshot_discovery_fixture_setup() {
 	# Some cases re-enable errexit after capturing a status. Clear it so a
 	# failed assertion in a later case is reported instead of ending the suite.
 	set +e

@@ -1,6 +1,8 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Remote destination batching, staged status, and orchestration failure cases.
+# Remote destination batching (src/zxfer_remote_snapshot_discovery.sh and its
+# adaptors in src/zxfer_snapshot_discovery.sh), staged status, and orchestration
+# failure cases. Run by tests/test_zxfer_snapshot_discovery.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 # Emit the target renderer's exact destination-discovery wire order. Keeping
@@ -378,19 +380,6 @@ test_run_remote_destination_discovery_batch_validates_statuses_in_the_parser() {
 		"$output" "empty=1|"
 	assertContains "Rejected statuses should report a malformed batch response." \
 		"$output" "error=Malformed destination discovery batch response."
-}
-
-test_read_snapshot_discovery_status_file_defaults_empty_sidecars() {
-	status_file="$TEST_TMPDIR/snapshot_discovery_empty_status.out"
-	: >"$status_file"
-
-	zxfer_read_snapshot_discovery_status_file "$status_file" 37
-	status=$?
-
-	assertEquals "Empty snapshot discovery status files should be accepted as the supplied default." \
-		0 "$status"
-	assertEquals "Empty snapshot discovery status files should publish the supplied default." \
-		37 "$g_zxfer_snapshot_discovery_status_file_result"
 }
 
 test_get_zfs_list_remote_target_batches_missing_destination_root_fallback() {
