@@ -23,6 +23,10 @@
 #                           files for read-only discovery answers.
 #   MOCK_ZFS_DEFAULT_STATUS exit status for unmatched read-only commands
 #                           (default 1).
+#   MOCK_ZFS_STRICT_RECEIVE 1 makes a receive whose stream is empty fail the
+#                           way zfs receive does ("cannot receive: failed to
+#                           read from stream", status 1, no END line)
+#                           instead of accepting it; any other value accepts.
 #
 # Manifest format ($MOCK_ZFS_FIXTURE_DIR/manifest), one rule per line:
 #   <glob-pattern><TAB><fixture-file><TAB><exit-status>[<TAB>once]
@@ -51,6 +55,40 @@
 #                           zxfer_mockbin_ssh_log_rows.
 #   MOCK_SSH_HANDSHAKE_S    seconds each new connection sleeps (unset: none).
 #   MOCK_SSH_MUX_S          seconds each multiplexed or control call sleeps.
+#
+# Fault injection, shared by the canned zfs, the socket-aware mock ssh and
+# every counting wrapper (all unset: no counting and no overhead):
+#   MOCK_FAIL_TOOL          which mock counts its calls: zfs (default), ssh,
+#                           or a counting wrapper's tool name.
+#   MOCK_FAIL_CALL          N >= 1: the Nth counted call prints the failure
+#                           stderr and exits with the failure status instead
+#                           of answering (a receive reads no stream, the ssh
+#                           runs no command). 0 counts calls and never fails,
+#                           so a clean run numbers its calls the same way.
+#   MOCK_FAIL_MATCH         optional sh glob matched against the space-joined
+#                           argv; when set, only matching calls are counted,
+#                           so "the Kth call of this argv" stays the same call
+#                           when concurrent calls (background discovery, -j)
+#                           start in a different order.
+#   MOCK_FAIL_DIR           existing directory for the counter, empty before
+#                           each run: counted call n creates the file "n"
+#                           holding its argv (noclobber creation is atomic, so
+#                           concurrent calls never share a number). Required
+#                           whenever MOCK_FAIL_CALL is set.
+#   MOCK_FAIL_STDERR        stderr text of the failing call; set but empty
+#                           prints nothing. Defaults: zfs "cannot open
+#                           '<last argument>': I/O error" (an operational
+#                           error, never "dataset does not exist", which
+#                           zxfer reads as absence), ssh "Connection to
+#                           <host> closed by remote host.", a wrapper
+#                           "<tool>: mock failure".
+#   MOCK_FAIL_STATUS        exit status of the failing call (default 1; 255
+#                           for ssh).
+# The failing call appends "FAIL <n> <tool> <argv>" (newlines in the argv
+# become spaces) to MOCK_ZFS_LOG when that is set, so its position orders it
+# against the zfs calls; the mock ssh also logs it to MOCK_SSH_LOG with the
+# kind "fail". A misconfigured counter (no MOCK_FAIL_DIR, a non-numeric
+# MOCK_FAIL_CALL) makes every counted call exit 125 with a stderr note.
 #
 # shellcheck shell=sh
 
@@ -100,6 +138,88 @@ zxfer_mockbin_prepare_dir() {
 	done
 }
 
+# Purpose: Print the fault-injection functions every generated mock embeds
+# (the MOCK_FAIL_* contract in the header).
+# Usage: zxfer_mockbin_emit_fail_injection, inside a generated script. The
+# script then runs `if mock_fail_claim TOOL KEY; then ...; mock_fail_now TOOL
+# STATUS STDERR KEY; fi` before it acts: mock_fail_claim returns 0 only for
+# the call that must fail, and mock_fail_now logs it and exits.
+zxfer_mockbin_emit_fail_injection() {
+	cat <<'EOF'
+# Fault injection; see MOCK_FAIL_* in tests/mock_toolchain_helper.sh.
+mock_fail_claim() {
+	[ -n "${MOCK_FAIL_CALL:-}" ] || return 1
+	[ "${MOCK_FAIL_TOOL:-zfs}" = "$1" ] || return 1
+	if [ -n "${MOCK_FAIL_MATCH:-}" ]; then
+		# shellcheck disable=SC2254  # the match is a glob on purpose
+		case "$2" in
+		$MOCK_FAIL_MATCH) ;;
+		*) return 1 ;;
+		esac
+	fi
+	case $MOCK_FAIL_CALL in
+	*[!0-9]*)
+		printf 'mock %s: MOCK_FAIL_CALL must be a number: %s\n' "$1" \
+			"$MOCK_FAIL_CALL" >&2
+		exit 125
+		;;
+	esac
+	if [ -z "${MOCK_FAIL_DIR:-}" ] || [ ! -d "$MOCK_FAIL_DIR" ]; then
+		printf 'mock %s: MOCK_FAIL_CALL needs an existing MOCK_FAIL_DIR\n' "$1" >&2
+		exit 125
+	fi
+	# Claim the lowest free number: a noclobber redirection creates the file
+	# with O_EXCL, so concurrent calls never share one. ".last" only says
+	# where to start looking; a stale or torn read just starts lower. printf,
+	# not the special builtin :, because a failed redirection on : exits dash.
+	mock_fail_n=""
+	[ ! -f "$MOCK_FAIL_DIR/.last" ] ||
+		IFS= read -r mock_fail_n <"$MOCK_FAIL_DIR/.last" || :
+	case $mock_fail_n in
+	'' | *[!0-9]*) mock_fail_n=0 ;;
+	esac
+	set -C
+	while :; do
+		mock_fail_n=$((mock_fail_n + 1))
+		if { printf '%s\n' "$2" >"$MOCK_FAIL_DIR/$mock_fail_n"; } 2>/dev/null; then
+			break
+		fi
+		if [ ! -e "$MOCK_FAIL_DIR/$mock_fail_n" ]; then
+			set +C
+			printf 'mock %s: cannot claim a call number in %s\n' "$1" \
+				"$MOCK_FAIL_DIR" >&2
+			exit 125
+		fi
+	done
+	set +C
+	{ printf '%s\n' "$mock_fail_n" >|"$MOCK_FAIL_DIR/.last"; } 2>/dev/null || :
+	[ "$MOCK_FAIL_CALL" -ne 0 ] && [ "$mock_fail_n" -eq "$MOCK_FAIL_CALL" ]
+}
+
+mock_fail_now() {
+	mock_fail_nl='
+'
+	mock_fail_line="FAIL $mock_fail_n $1 $4"
+	while :; do
+		case $mock_fail_line in
+		*"$mock_fail_nl"*)
+			mock_fail_line="${mock_fail_line%%"$mock_fail_nl"*} ${mock_fail_line#*"$mock_fail_nl"}"
+			;;
+		*) break ;;
+		esac
+	done
+	[ -z "${MOCK_ZFS_LOG:-}" ] || printf '%s\n' "$mock_fail_line" >>"$MOCK_ZFS_LOG"
+	if [ -n "${MOCK_FAIL_STDERR+set}" ]; then
+		mock_fail_text=$MOCK_FAIL_STDERR
+	else
+		mock_fail_text=$3
+	fi
+	[ -z "$mock_fail_text" ] || printf '%s\n' "$mock_fail_text" >&2
+	exit "${MOCK_FAIL_STATUS:-$2}"
+}
+EOF
+}
+
 # Purpose: Write the canned zfs mock that logs every invocation and answers
 # read-only discovery from a manifest-driven fixture directory.
 # Usage: zxfer_mockbin_write_canned_zfs <path> — typically
@@ -112,16 +232,20 @@ zxfer_mockbin_prepare_dir() {
 #     manifest (default 0);
 #   - receive/recv is logged without the MUTATE prefix, consumes stdin to
 #     /dev/null, logs "END receive <dataset>" (its last argument) once the
-#     stream ends, and exits per manifest (default 0);
+#     stream ends, and exits per manifest (default 0); with
+#     MOCK_ZFS_STRICT_RECEIVE=1 an empty stream fails instead;
 #   - send emits matched fixture bytes, or a one-line dummy stream when
 #     unmatched, and exits per manifest (default 0);
 #   - all other subcommands are read-only: matched rules emit the fixture
 #     and exit with the rule status; unmatched commands print a stderr note
-#     and exit $MOCK_ZFS_DEFAULT_STATUS (default 1).
+#     and exit $MOCK_ZFS_DEFAULT_STATUS (default 1);
+#   - with MOCK_FAIL_TOOL unset or zfs, the MOCK_FAIL_CALL-th call fails
+#     before any of the above (logged as "FAIL <n> zfs <argv>").
 zxfer_mockbin_write_canned_zfs() {
 	l_mockbin_zfs_path=$1
 
-	cat >"$l_mockbin_zfs_path" <<'EOF'
+	{
+		cat <<'EOF'
 #!/bin/sh
 # Canned zfs mock generated by tests/mock_toolchain_helper.sh.
 # See that helper's header comment for the manifest and env contract.
@@ -129,6 +253,10 @@ zxfer_mockbin_write_canned_zfs() {
 mock_key=$*
 mock_fixture=""
 mock_status=0
+
+EOF
+		zxfer_mockbin_emit_fail_injection
+		cat <<'EOF'
 
 mock_log_line() {
 	if [ -n "${MOCK_ZFS_LOG:-}" ]; then
@@ -176,6 +304,14 @@ mock_emit_fixture() {
 	fi
 }
 
+if mock_fail_claim zfs "$mock_key"; then
+	mock_fail_operand=""
+	for mock_arg in "$@"; do
+		mock_fail_operand=$mock_arg
+	done
+	mock_fail_now zfs 1 "cannot open '$mock_fail_operand': I/O error" "$mock_key"
+fi
+
 case "${1:-}" in
 destroy | rollback | create | set | inherit | snapshot | rename | clone | promote | hold | release | bookmark)
 	mock_log_line "MUTATE $mock_key"
@@ -187,6 +323,15 @@ destroy | rollback | create | set | inherit | snapshot | rename | clone | promot
 	;;
 receive | recv)
 	mock_log_line "$mock_key"
+	if [ "${MOCK_ZFS_STRICT_RECEIVE:-}" = 1 ]; then
+		# Like zfs receive, refuse a stream without a single byte; read, a
+		# builtin, takes the first line without spawning a byte counter.
+		mock_stream_head=""
+		if ! IFS= read -r mock_stream_head && [ -z "$mock_stream_head" ]; then
+			printf '%s\n' 'cannot receive: failed to read from stream' >&2
+			exit 1
+		fi
+	fi
 	cat >/dev/null
 	for mock_arg in "$@"; do
 		mock_receive_dataset=$mock_arg
@@ -218,6 +363,7 @@ send)
 	;;
 esac
 EOF
+	} >"$l_mockbin_zfs_path" || return 1
 	chmod +x "$l_mockbin_zfs_path"
 }
 
@@ -225,7 +371,9 @@ EOF
 # invocation and then execs the real tool unchanged.
 # Usage: zxfer_mockbin_write_counting_wrapper <path> <real-tool-abs-path> —
 # the logged name is the basename of <path>; place the wrapper in the mock
-# bin directory so it shadows the system tool via the secure PATH.
+# bin directory so it shadows the system tool via the secure PATH. With
+# MOCK_FAIL_TOOL set to that name, the MOCK_FAIL_CALL-th call fails instead
+# of running the tool (it is still logged as a spawn).
 zxfer_mockbin_write_counting_wrapper() {
 	l_mockbin_wrapper_path=$1
 	l_mockbin_wrapper_real=$2
@@ -250,8 +398,13 @@ zxfer_mockbin_write_counting_wrapper() {
 		# shellcheck disable=SC2016  # MOCK_SPAWN_LOG must expand at wrapper runtime
 		printf 'printf '\''%%s\\n'\'' "%s" >>"${MOCK_SPAWN_LOG:-/dev/null}"\n' \
 			"$l_mockbin_wrapper_name"
+		zxfer_mockbin_emit_fail_injection
+		# shellcheck disable=SC2016  # $* must expand at wrapper runtime
+		printf 'if mock_fail_claim "%s" "$*"; then\n\tmock_fail_now "%s" 1 "%s: mock failure" "$*"\nfi\n' \
+			"$l_mockbin_wrapper_name" "$l_mockbin_wrapper_name" \
+			"$l_mockbin_wrapper_name"
 		printf 'exec "%s" "$@"\n' "$l_mockbin_wrapper_real"
-	} >"$l_mockbin_wrapper_path"
+	} >"$l_mockbin_wrapper_path" || return 1
 	chmod +x "$l_mockbin_wrapper_path"
 }
 
@@ -298,7 +451,9 @@ EOF
 #   control  `-O check|exit` over SOCKET; exit removes it;
 #   mux      a command over a live SOCKET;
 #   direct   a command without -S, or whose SOCKET is not live (real ssh then
-#            connects on its own).
+#            connects on its own);
+#   fail     the MOCK_FAIL_CALL-th call with MOCK_FAIL_TOOL=ssh: it exits
+#            255 without creating a socket or running a command.
 # master and direct are new connections and sleep $MOCK_SSH_HANDSHAKE_S when
 # set; mux and control calls sleep $MOCK_SSH_MUX_S when set. Options that
 # take a separate value in OpenSSH (-o, -p, -i, -l, -F, -J ...) skip it, and
@@ -313,6 +468,7 @@ zxfer_mockbin_write_socket_ssh() {
 	{
 		printf '#!/bin/sh\n'
 		printf "mock_rm='%s'\n" "$l_mockbin_ssh_rm"
+		zxfer_mockbin_emit_fail_injection
 		cat <<'EOF'
 mock_argv=$*
 mock_socket=""
@@ -350,6 +506,12 @@ elif [ -n "$mock_socket" ] && [ -e "$mock_socket" ]; then
 	mock_kind=mux
 else
 	mock_kind=direct
+fi
+if mock_fail_claim ssh "$mock_argv"; then
+	[ -z "${MOCK_SSH_LOG:-}" ] ||
+		printf 'fail\t%s\n' "$mock_argv" >>"$MOCK_SSH_LOG"
+	mock_fail_now ssh 255 "Connection to ${1:-localhost} closed by remote host." \
+		"$mock_argv"
 fi
 [ -z "${MOCK_SSH_LOG:-}" ] ||
 	printf '%s\t%s\n' "$mock_kind" "$mock_argv" >>"$MOCK_SSH_LOG"
