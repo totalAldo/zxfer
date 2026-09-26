@@ -61,9 +61,6 @@ tearDown() {
 # zxfer-test-fragment: suites/zxfer_exec_remote_hosts_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_remote_hosts_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_remote_hosts_tests.sh"
-# zxfer-test-fragment: suites/zxfer_exec_cli_tests.sh
-# shellcheck source=tests/suites/zxfer_exec_cli_tests.sh
-. "$TESTS_DIR/suites/zxfer_exec_cli_tests.sh"
 # zxfer-test-fragment: suites/zxfer_exec_snapshot_state_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_snapshot_state_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_snapshot_state_tests.sh"
@@ -83,7 +80,6 @@ suite() {
 		"$TESTS_DIR/suites/zxfer_exec_command_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_ssh_transport_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_remote_hosts_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_exec_cli_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_snapshot_state_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_backup_metadata_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_snapshot_producers_tests.sh" \

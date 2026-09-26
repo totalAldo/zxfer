@@ -1,5 +1,7 @@
 #!/bin/sh
-# Tests for src/zxfer_cli.sh, run by tests/test_zxfer_remote_hosts.sh.
+# Switch-parsing and consistency-check tests for src/zxfer_cli.sh that need
+# the real remote-host and compression helpers. Run by tests/test_zxfer_cli.sh
+# under the remote-host fixture.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
 test_read_command_line_switches_sets_options_and_remote_paths() {
@@ -80,6 +82,40 @@ test_read_command_line_switches_exits_zero_for_help() {
 	assertEquals "The help switch should print usage and stop parsing immediately." "usage output" "$output"
 }
 
+test_read_command_line_switches_skips_control_socket_when_ssh_lacks_support() {
+	remote_log="$TEST_TMPDIR/unsupported_control_socket.log"
+	result_file="$TEST_TMPDIR/unsupported_control_socket.out"
+	stderr_file="$TEST_TMPDIR/unsupported_control_socket.err"
+
+	set +e
+	(
+		trap - EXIT INT TERM HUP QUIT
+		: >"$remote_log"
+		FAKE_SSH_LOG="$remote_log"
+		export FAKE_SSH_LOG
+		OPTIND=1
+		g_option_z_compress=0
+		g_cmd_compress="zstd -3"
+		g_cmd_decompress="zstd -d"
+		g_option_O_origin_host=""
+		g_cmd_ssh="$FAKE_SSH_BIN"
+		g_cmd_zfs="/sbin/zfs"
+		g_ssh_supports_control_sockets=0
+		g_ssh_origin_control_socket=""
+		zxfer_read_command_line_switches -O "backup@example.com"
+		printf 'origin=%s\n' "$g_option_O_origin_host"
+		printf 'socket=%s\n' "$g_ssh_origin_control_socket"
+	) >"$result_file" 2>"$stderr_file"
+	status=$?
+
+	result=$(cat "$result_file")
+	assertNotEquals "Skipping unsupported control sockets should still leave observable parser state." "" "$result"
+	assertEquals "Unsupported ssh clients should not be asked to create control sockets." "" "$(cat "$remote_log")"
+	assertEquals "Parsing should not emit stderr noise when multiplexing is unavailable." "" "$(cat "$stderr_file")"
+	assertContains "$result" "origin=backup@example.com"
+	assertContains "$result" "socket="
+}
+
 test_consistency_check_rejects_non_numeric_jobs() {
 	set +e
 	output=$(
@@ -136,4 +172,78 @@ test_consistency_check_rejects_compression_without_remote_host() {
 	assertEquals "Compression without -O/-T should be rejected." 2 "$status"
 	assertContains "Compression validation should point to the missing remote host." \
 		"$output" "-z option can only be used with -O or -T option"
+}
+
+test_consistency_check_rejects_backup_and_restore_modes_together() {
+	set +e
+	output=$(
+		(
+			zxfer_throw_usage_error() {
+				printf '%s\n' "$1"
+				exit 2
+			}
+			g_option_k_backup_property_mode=1
+			g_option_e_restore_property_mode=1
+			zxfer_consistency_check
+		)
+	)
+	status=$?
+
+	assertEquals "Backup and restore mode conflicts should fail validation." 2 "$status"
+	assertContains "Backup and restore mode conflicts should use the documented error." \
+		"$output" "You cannot bac(k)up and r(e)store properties at the same time."
+}
+
+test_consistency_check_rejects_dual_beep_modes() {
+	set +e
+	output=$(
+		(
+			zxfer_throw_usage_error() {
+				printf '%s\n' "$1"
+				exit 2
+			}
+			g_option_b_beep_always=1
+			g_option_B_beep_on_success=1
+			zxfer_consistency_check
+		)
+	)
+	status=$?
+
+	assertEquals "Conflicting beep modes should fail validation." 2 "$status"
+	assertContains "Conflicting beep modes should use the documented error." \
+		"$output" "You cannot use both beep modes at the same time."
+}
+
+test_consistency_check_rejects_invalid_grandfather_values() {
+	set +e
+	output_non_numeric=$(
+		(
+			zxfer_throw_usage_error() {
+				printf '%s\n' "$1"
+				exit 2
+			}
+			g_option_g_grandfather_protection="abc"
+			zxfer_consistency_check
+		)
+	)
+	status_non_numeric=$?
+
+	output_zero=$(
+		(
+			zxfer_throw_usage_error() {
+				printf '%s\n' "$1"
+				exit 2
+			}
+			g_option_g_grandfather_protection="0"
+			zxfer_consistency_check
+		)
+	)
+	status_zero=$?
+
+	assertEquals "Non-numeric grandfather values should fail validation." 2 "$status_non_numeric"
+	assertContains "Non-numeric grandfather errors should mention the received value." \
+		"$output_non_numeric" "grandfather protection requires a positive integer; received \"abc\"."
+	assertEquals "Zero-day grandfather values should fail validation." 2 "$status_zero"
+	assertContains "Zero-day grandfather errors should require days greater than zero." \
+		"$output_zero" "grandfather protection requires days greater than 0; received \"0\"."
 }
