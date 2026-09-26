@@ -92,7 +92,6 @@ EOF
 	chmod +x "$l_fake_shell_path"
 }
 
-
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_runs_explicit_suite_directly_by_default() {
 	l_suite_path="$TEST_TMPDIR/default-suite.sh"
@@ -596,8 +595,6 @@ EOF
 		"$(cat "$l_output_path")" "serial-end"
 }
 
-
-
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_preserves_last_failed_suite_status_in_parallel() {
 	l_first_suite="$TEST_TMPDIR/first-fail-suite.sh"
@@ -841,7 +838,7 @@ live_pids_in() {
 	while :; do
 		l_live_left=
 		for l_live_pid in $l_live_pids; do
-			! kill -0 "$l_live_pid" 2>/dev/null ||
+			! kill -s 0 "$l_live_pid" 2>/dev/null ||
 				l_live_left="$l_live_left $l_live_pid"
 		done
 		if [ -z "$l_live_left" ] || [ "$l_live_remaining" -eq 0 ]; then

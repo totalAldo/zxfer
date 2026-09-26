@@ -159,7 +159,7 @@ test_unit_workflow_bounds_process_heavy_suite_parallelism() {
 		"$omnios_job" "timeout-minutes: 30"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+# shellcheck disable=SC2016,SC2317,SC2329  # Literal workflow expression; invoked indirectly by shunit2.
 test_unit_workflow_runs_tool_suites_on_one_linux_and_one_macos_lane() {
 	matrix_flags=$(workflow_job_body "$UNIT_WORKFLOW_FILE" shunit2 | awk '
 		$1 == "-" && $2 == "os:" { os = $3 }

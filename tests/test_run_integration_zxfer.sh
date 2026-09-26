@@ -477,7 +477,12 @@ test_integration_definition_scan_rejects_other_header_spellings_and_function_sha
 	spaced_output=$(zxfer_scan_integration_fragment definitions "$fixture_file") ||
 		spaced_status=$?
 
-	printf '%s\n' 'registered_test\' '() {' '	:' '}' >"$fixture_file"
+	cat >"$fixture_file" <<'EOF'
+registered_test\
+() {
+	:
+}
+EOF
 	continued_status=0
 	continued_output=$(zxfer_scan_integration_fragment definitions "$fixture_file") ||
 		continued_status=$?

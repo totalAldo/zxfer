@@ -568,7 +568,7 @@ runner_start() {
 	# holds the caller's pipe open.
 	l_start_runner_pid=$$
 	(
-		while kill -0 "$l_start_runner_pid" 2>/dev/null; do
+		while kill -s 0 "$l_start_runner_pid" 2>/dev/null; do
 			sleep 1 || exit 0
 			printf 'tick\n' >&3 || exit 0
 		done
@@ -674,7 +674,7 @@ runner_parse_worker() {
 # first, from one process-table snapshot. Prints nothing when ps fails.
 # Usage: runner_process_tree ROOT_PID
 runner_process_tree() {
-	ps -A -o pid= -o ppid= -o args= 2>/dev/null </dev/null | awk -v root="$1" '
+	ps -A -o pid= -o ppid= -o args= 2>/dev/null | awk -v root="$1" '
 		$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
 			pid = $1
 			kids[$2] = kids[$2] " " pid
@@ -766,15 +766,15 @@ runner_tick() {
 		case "$RUNNER_W_PHASE" in
 		run)
 			[ $((RUNNER_TICKS - RUNNER_W_START)) -lt "$RUNNER_SUITE_TIMEOUT" ] ||
-				l_tick_action=term
+				l_tick_action="term"
 			;;
 		term)
 			[ $((RUNNER_TICKS - RUNNER_W_PHASE_TICK)) -lt "$RUNNER_GRACE_TICKS" ] ||
-				l_tick_action=kill
+				l_tick_action="kill"
 			;;
 		kill)
 			[ $((RUNNER_TICKS - RUNNER_W_PHASE_TICK)) -lt "$RUNNER_GRACE_TICKS" ] ||
-				l_tick_action=reap
+				l_tick_action="reap"
 			;;
 		esac
 		if [ -n "$l_tick_action" ]; then
@@ -905,6 +905,7 @@ runner_stop_workers() {
 # Purpose: Remember the first HUP, INT or TERM; the main loop acts on it after
 # the current event, outside the trap.
 # Usage: installed by the trap command only.
+# shellcheck disable=SC2329  # Invoked by the HUP, INT and TERM traps.
 runner_note_signal() {
 	[ -n "$RUNNER_PENDING_SIGNAL" ] || RUNNER_PENDING_SIGNAL=$1
 }
