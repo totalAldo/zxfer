@@ -121,3 +121,33 @@ zxfer_test_print_source_listing() {
 		printf '%s\n' "$g_zxfer_source_snapshot_list_cmd_result"
 	return "$l_test_listing_status"
 }
+
+# Purpose: Build a secure-PATH directory for launcher runs that stop at a
+# usage error: the host awk plus ps, zfs and ssh stand-ins that exit 0.
+# Usage: create_launcher_usage_secure_path DIR || return
+create_launcher_usage_secure_path() {
+	l_secure_path_dir=$1
+	l_real_awk=$(command -v awk 2>/dev/null || :)
+
+	mkdir -p "$l_secure_path_dir"
+
+	if [ -z "$l_real_awk" ]; then
+		fail "Host test requires awk on the local system PATH."
+		return 1
+	fi
+
+	ln -s "$l_real_awk" "$l_secure_path_dir/awk"
+	cat >"$l_secure_path_dir/ps" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	cat >"$l_secure_path_dir/zfs" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	cat >"$l_secure_path_dir/ssh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$l_secure_path_dir/ps" "$l_secure_path_dir/zfs" "$l_secure_path_dir/ssh"
+}

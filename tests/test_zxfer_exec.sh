@@ -28,33 +28,6 @@ EOF
 	chmod +x "$l_path"
 }
 
-create_launcher_usage_secure_path() {
-	l_secure_path_dir=$1
-	l_real_awk=$(command -v awk 2>/dev/null || :)
-
-	mkdir -p "$l_secure_path_dir"
-
-	if [ -z "$l_real_awk" ]; then
-		fail "Host test requires awk on the local system PATH."
-		return 1
-	fi
-
-	ln -s "$l_real_awk" "$l_secure_path_dir/awk"
-	cat >"$l_secure_path_dir/ps" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	cat >"$l_secure_path_dir/zfs" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	cat >"$l_secure_path_dir/ssh" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	chmod +x "$l_secure_path_dir/ps" "$l_secure_path_dir/zfs" "$l_secure_path_dir/ssh"
-}
-
 fake_remote_capability_response() {
 	cat <<'EOF'
 ZXFER_REMOTE_CAPS_V2
@@ -137,9 +110,6 @@ tearDown() {
 
 # Each fragment holds the tests of the src modules named in its header. They
 # load and run in src/zxfer_modules.sh order.
-# zxfer-test-fragment: suites/zxfer_exec_reporting_tests.sh
-# shellcheck source=tests/suites/zxfer_exec_reporting_tests.sh
-. "$TESTS_DIR/suites/zxfer_exec_reporting_tests.sh"
 # zxfer-test-fragment: suites/zxfer_exec_command_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_command_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_command_tests.sh"
@@ -177,7 +147,6 @@ tearDown() {
 suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_exec.sh" \
-		"$TESTS_DIR/suites/zxfer_exec_reporting_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_command_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_dependencies_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_runtime_tests.sh" \

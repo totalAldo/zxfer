@@ -52,3 +52,15 @@ zxfer_test_register_fragment_tests() {
 		done
 	done
 }
+
+# Purpose: Succeed when the running test is defined in FILE, so an entry's
+# setUp can add the fixture that one behavior fragment was written for.
+# Usage: zxfer_test_running_test_is_in FILE; call it from setUp. It reads
+# shunit2's current test name, which holds only [A-Za-z0-9_] characters.
+zxfer_test_running_test_is_in() {
+	case "${_shunit_test_:-}" in
+	test[A-Za-z0-9_]*) ;;
+	*) return 1 ;;
+	esac
+	grep -q "^${_shunit_test_}()" "$1"
+}

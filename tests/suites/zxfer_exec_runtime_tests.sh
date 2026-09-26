@@ -490,6 +490,27 @@ test_zxfer_create_secure_staging_dir_for_path_uses_unpredictable_mktemp_names() 
 		"$stage_dir" "$second_stage_dir"
 }
 
+test_zxfer_create_secure_staging_dir_for_path_registers_and_cleanup_unregisters_error_log_stage_dirs() {
+	log_path="$TEST_TMPDIR/runtime-cleanup.log"
+	zxfer_reset_runtime_artifact_state
+	zxfer_create_secure_staging_dir_for_path "$log_path" "zxfer-error-log" >/dev/null
+	status=$?
+	stage_dir=$g_zxfer_secure_staging_dir_result
+
+	assertEquals "Secure error-log staging should succeed for writable parents." 0 "$status"
+	assertTrue "Secure error-log staging should create the stage directory." \
+		"[ -d \"$stage_dir\" ]"
+	assertContains "Secure error-log staging should register its stage directory for abort cleanup." \
+		"$g_zxfer_runtime_artifact_cleanup_paths" "$stage_dir"
+
+	zxfer_cleanup_runtime_artifact_path "$stage_dir"
+
+	assertFalse "Runtime artifact cleanup should remove the error-log stage directory." \
+		"[ -e \"$stage_dir\" ]"
+	assertNotContains "Runtime artifact cleanup should unregister the error-log stage directory." \
+		"$g_zxfer_runtime_artifact_cleanup_paths" "$stage_dir"
+}
+
 test_zxfer_try_get_effective_tmpdir_reuses_cached_value_in_current_shell() {
 	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
 	cached_tmp="$physical_tmpdir/effective_tmp_cached"
