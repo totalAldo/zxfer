@@ -88,6 +88,47 @@ shunit:--jobs 4 tests/test_run_coverage.sh" "$(cat "$VALIDATION_LOG")"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_validate_quick_selects_the_module_entry_and_every_contract_suite_by_name() {
+	: >"$FAKE_ROOT/tests/test_zxfer_path_security.sh"
+	: >"$FAKE_ROOT/tests/test_contract_alpha.sh"
+	: >"$FAKE_ROOT/tests/test_contract_beta.sh"
+	: >"$FAKE_ROOT/tests/test_zxfer_path_security_extra.sh"
+
+	output=$(
+		VALIDATION_LOG="$VALIDATION_LOG" \
+			"$FAKE_ROOT/tests/validate.sh" quick src/zxfer_path_security.sh src/zxfer_quoting.sh
+	)
+
+	assertContains "A module change should name the suites its file name selects." \
+		"$(validation_mapping_block "$output" src/zxfer_path_security.sh)" \
+		"convention:  tests/test_zxfer_path_security.sh,tests/test_contract_alpha.sh,tests/test_contract_beta.sh"
+	assertContains "A module without an entry suite should still select every contract suite." \
+		"$(validation_mapping_block "$output" src/zxfer_quoting.sh)" \
+		"convention:  tests/test_contract_alpha.sh,tests/test_contract_beta.sh"
+	assertEquals "Quick validation should run the module entry and each contract suite once, and no suite that only shares the prefix." \
+		"lint:budget
+shunit:--jobs 4 tests/test_zxfer_path_security.sh tests/test_contract_alpha.sh tests/test_contract_beta.sh" \
+		"$(cat "$VALIDATION_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_validate_quick_expands_the_contract_token_of_a_map_row() {
+	: >"$FAKE_ROOT/tests/test_contract_alpha.sh"
+	: >"$FAKE_ROOT/tests/test_run_argv_fuzz.sh"
+
+	output=$(
+		VALIDATION_LOG="$VALIDATION_LOG" \
+			"$FAKE_ROOT/tests/validate.sh" quick tests/helpers/blackbox.sh
+	)
+
+	assertContains "The black-box helper row should select every contract suite through @contract." \
+		"$(validation_mapping_block "$output" tests/helpers/blackbox.sh)" "unit:        @contract,tests/test_run_argv_fuzz.sh"
+	assertEquals "The contract token should expand to the contract suites that exist." \
+		"lint:budget
+shunit:--jobs 4 tests/test_contract_alpha.sh tests/test_run_argv_fuzz.sh" "$(cat "$VALIDATION_LOG")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_quick_maps_every_fragment_to_the_entry_suite_that_marks_it() {
 	set --
 	fragment_owners=
@@ -328,6 +369,9 @@ vm:--profile local --guest freebsd" "$(cat "$VALIDATION_LOG")"
 test_validate_quick_without_paths_inspects_git_changes() {
 	mkdir -p "$FAKE_ROOT/src"
 	printf '%s\n' "baseline" >"$FAKE_ROOT/src/zxfer_cli.sh"
+	: >"$FAKE_ROOT/tests/test_zxfer_cli.sh"
+	: >"$FAKE_ROOT/tests/test_zxfer_runtime.sh"
+	: >"$FAKE_ROOT/tests/test_contract_example.sh"
 	(
 		cd "$FAKE_ROOT"
 		git init -q
@@ -359,7 +403,7 @@ test_validate_quick_without_paths_inspects_git_changes() {
 		"$output" "quick map: tests/test_untracked.sh"
 	assertEquals "Git-derived quick validation should deduplicate suites from unstaged, staged, and untracked paths." \
 		"lint:budget
-shunit:--jobs 4 tests/test_zxfer_cli.sh tests/test_contract_cli_golden.sh tests/test_zxfer_launcher.sh tests/test_contract_planning.sh tests/test_zxfer_runtime.sh tests/test_zxfer_locking.sh tests/test_zxfer_reporting.sh tests/test_zxfer_backup_metadata.sh tests/test_zxfer_remote_hosts.sh tests/test_untracked.sh" \
+shunit:--jobs 4 tests/test_zxfer_cli.sh tests/test_contract_example.sh tests/test_zxfer_runtime.sh tests/test_untracked.sh" \
 		"$(cat "$VALIDATION_LOG")"
 }
 
@@ -401,6 +445,7 @@ test_validation_map_references_existing_targets() {
 	while IFS= read -r l_suite; do
 		[ -n "$l_suite" ] || continue
 		[ "$l_suite" = @self ] && continue
+		[ "$l_suite" = @contract ] && continue
 		if [ ! -f "$ZXFER_ROOT/$l_suite" ]; then
 			missing_units="$missing_units${missing_units:+
 }$l_suite"
@@ -483,6 +528,30 @@ EOF
 
 	assertEquals "Every canonical module should have a concern-specific quick-validation row before the generic source fallback." \
 		"" "$missing_modules"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_every_manifest_module_resolves_to_an_entry_suite() {
+	unresolved_modules=
+	while IFS= read -r l_module; do
+		[ -n "$l_module" ] || continue
+		l_module_name=${l_module#zxfer_}
+		l_module_name=${l_module_name%.sh}
+		[ -f "$ZXFER_ROOT/tests/test_zxfer_$l_module_name.sh" ] && continue
+		# Without an entry named for it, the module's exact row must name one.
+		if ! awk -F '\t' -v module_path="src/$l_module" '
+			$1 == module_path && $2 ~ /(^|,)tests\/test_zxfer_[A-Za-z0-9_]+[.]sh(,|$)/ { found = 1 }
+			END { exit !found }
+		' "$ZXFER_ROOT/tests/validation_map.tsv"; then
+			unresolved_modules="$unresolved_modules${unresolved_modules:+
+}src/$l_module"
+		fi
+	done <<EOF
+$ZXFER_SOURCE_MODULE_MANIFEST
+EOF
+
+	assertEquals "Every canonical module should have tests/test_zxfer_NAME.sh or an exact map row naming its entry suite." \
+		"" "$unresolved_modules"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

@@ -20,8 +20,6 @@ TEST_ORIGINAL_PATH=$PATH
 . "$TESTS_DIR/helpers/remote_host_fixtures.sh"
 # shellcheck source=tests/helpers/exec_fixtures.sh
 . "$TESTS_DIR/helpers/exec_fixtures.sh"
-# shellcheck source=tests/helpers/backup_fixtures.sh
-. "$TESTS_DIR/helpers/backup_fixtures.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_remote_hosts"

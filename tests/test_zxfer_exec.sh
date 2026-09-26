@@ -10,9 +10,6 @@ TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
-# Exec behavior includes property-backup serialization cases.
-# shellcheck source=tests/helpers/backup_fixtures.sh
-. "$TESTS_DIR/helpers/backup_fixtures.sh"
 # shellcheck source=tests/helpers/exec_fixtures.sh
 . "$TESTS_DIR/helpers/exec_fixtures.sh"
 # shellcheck source=tests/helpers/send_job_fixtures.sh
