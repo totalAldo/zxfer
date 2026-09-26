@@ -26,8 +26,8 @@ These tools are required by the installed `zxfer` command itself.
 | --- | --- | --- | --- |
 | `/bin/sh` | interpreter for `zxfer` and `src/*.sh`, and the fixed shell for background jobs | script shebang; background job shells run `/bin/sh` by path | base system |
 | `zfs` | all replication, property, snapshot, and existence operations | resolved through the secure-PATH model locally; resolved per host remotely | base system on supported FreeBSD/OpenZFS installs |
-| `awk` | parsing, normalization, sorting helpers, report rendering, and cache/index helpers | resolved through the secure-PATH model locally | base system |
-| `ps` | the memoized process-start token used by owned-lock metadata, plus abort-only descendant discovery and identity revalidation and, during abnormal teardown, a zombie check (`ps -o stat=`, or `-o s=` on illumos) | resolved through the secure-PATH model locally | base system |
+| `awk` | parsing, normalization, sorting helpers, report rendering, `ZXFER_ERROR_LOG` appends, and cache/index helpers | resolved through the secure-PATH model locally | base system |
+| `ps` | abort-only descendant discovery and process-start-token revalidation and, during abnormal teardown, a zombie check (`ps -o stat=`, or `-o s=` on illumos) | resolved through the secure-PATH model locally | base system |
 
 Notes:
 
@@ -86,7 +86,6 @@ Current runtime inventory:
 - `mkfifo`
 - `mktemp`
 - `mv`
-- `od`
 - `printf`
 - `ps`
 - `rm`

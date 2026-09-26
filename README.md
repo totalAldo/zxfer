@@ -91,9 +91,9 @@ Use remote compression:
   `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1` local-debug override
 - Per-run ssh control sockets and one in-memory remote capability probe per
   role, host and requested tool set per run; all run-private temp state lives under one 0700
-  per-run temp root removed in one pass at exit. The only cross-process lock
-  left is the `ZXFER_ERROR_LOG` append lock (slim pid+start-token metadata,
-  validated stale-owner reaping, checked release)
+  per-run temp root removed in one pass at exit, and zxfer takes no
+  cross-process locks (each `ZXFER_ERROR_LOG` report is one validated
+  append-mode write)
 - Identity-aware recursive snapshot discovery with `name,guid` records, plus a
   fast clean-no-op proof for eligible recursive runs — local sources and
   remote-origin pulls alike
@@ -185,11 +185,9 @@ requested tool set per run, held in memory and keyed by the host spec and
 requested helper set (the secure PATH and ssh policy are fixed for the run).
 A recursive `-O -j` pull that the fast no-op proof finds work for probes the
 origin a second time, for `parallel`. Nothing is shared between
-concurrent or consecutive zxfer invocations, matching upstream zxfer behavior. Only
-`ZXFER_ERROR_LOG` appends still coordinate through a metadata-bearing lock
-directory that records the owner PID and process-start identity; zxfer
-validates and reaps stale or corrupt owners before reuse and checks release
-operations instead of silently suppressing failures.
+concurrent or consecutive zxfer invocations, matching upstream zxfer behavior.
+`ZXFER_ERROR_LOG` needs no lock either: each failure report is one append-mode
+write to a validated 0600 log.
 
 Each parallel send/receive job records its exit status in a private per-run
 file. The scheduler checks all active jobs and reports missing or invalid

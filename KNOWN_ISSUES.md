@@ -187,20 +187,6 @@ BusyBox ash itself is supported, but a host whose whole userland is BusyBox
 teardown and the setsid launcher check in `zxfer_signal_background_shell`
 use. Those checks fail closed rather than signal the wrong process.
 
-### Low: GNU `stat` special bits fail the error-log lock directory check under a setgid parent
-
-On Linux, GNU `stat -c %a` also prints the set-user-ID, set-group-ID and
-sticky bits (for example `2700`), and a directory created inside a
-set-group-ID directory inherits that bit. `zxfer_get_path_mode_octal` in
-`src/zxfer_path_security.sh` passes that value through, and the
-`ZXFER_ERROR_LOG` owned-lock directory check (`zxfer_validate_owned_lock_path`
-in `src/zxfer_error_log.sh`) compares it with exactly `700`. Under a
-set-group-ID log parent, zxfer warns and does not mirror the report; this
-fails closed. The per-run temp root accepts `[1-7]700` since 2026-09-23, and
-the short fallback ssh socket directory is no longer revalidated after
-creation. BSD `stat -f %OLp` prints permission bits only, so FreeBSD and macOS
-are not affected. Found by review; not yet reproduced on a Linux host.
-
 ### Low: an internal error in the startup capability probe can exit without a message
 
 Outside `-v`/`-V`, `zxfer_preload_remote_host_capabilities` in

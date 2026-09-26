@@ -1248,18 +1248,19 @@ failure report that it writes to
 \fRstderr\fR
 on non-zero exits. The parent directory must already exist, be owned by root
 or the effective UID, and not be writable by other users unless the sticky bit
-is set. Any symlinked path component is refused, existing log files must be
-owned by root or the effective UID and already use mode 0600, and zxfer stages
-appends through a sibling temporary file before the final rename when the
-parent is writable. Appends are coordinated through a metadata-bearing lock
-directory that records the owner PID and process-start identity. Writable log parents use a sibling lock; existing logs under
-trusted but non-writable parents use an exact log-path fallback lock under a
-validated temp root. Stale owners are reaped after validation. If zxfer cannot
-append the report, or if a successful append cannot release that lock cleanly,
+is set. Any symlinked path component is refused. zxfer creates a missing log
+with mode 0600 and never truncates or replaces an existing file; an existing
+log must be a regular file owned by root or the effective UID, with mode 0600
+and a single link. Each report is appended with one write in append mode, so
+concurrent runs need no lock and leave nothing beside the log. Reports can
+still interleave on NFS, or when one report needs more than one write (a
+report larger than the file system block size, often 4 KiB; a default report
+is a few hundred bytes). If zxfer refuses the log or cannot append the report,
 it emits a warning to
-\fRstderr\fR;
-when that happens during trap-time failure reporting, zxfer still preserves the
-original exit status.
+\fRstderr\fR
+and keeps its exit status and its
+\fRstderr\fR
+failure report.
 .TP 37n
 \fBZXFER_UNSAFE_FAILURE_REPORT_COMMANDS\fR
 .br
@@ -1301,12 +1302,10 @@ per role and requested tool set (a recursive
 pull that the fast no-op proof finds work for probes the origin a second time,
 for
 \fBparallel\fR),
-holds the answers in memory, and removes everything on exit. Nothing is cached
-or coordinated across concurrent or consecutive invocations. Only
+holds the answers in memory, and removes everything on exit. Nothing is cached,
+locked, or coordinated across concurrent or consecutive invocations;
 \fBZXFER_ERROR_LOG\fR
-appends still coordinate through a metadata-bearing owned lock directory
-rather than a bare PID file; zxfer validates and reaps stale or corrupt owners
-before reuse and checks release failures instead of ignoring them.
+appends need no lock because each report is one append-mode write.
 .sp
 The repository includes
 \fIexamples/error-log-email-notify.sh\fR,

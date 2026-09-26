@@ -106,6 +106,25 @@ escaped `\033` or `\c` back into a control byte. Two gaps remain (see
 0x80-0x9F, raw or UTF-8 encoded) pass through this escaping, and the `-U`
 unsupported-property warning prints its value raw.
 
+`ZXFER_ERROR_LOG` mirroring checks the path before every append: the path is
+absolute with no symlinked component, the parent is owned by root or the
+effective user and not writable by others unless it is sticky, and the log is
+a regular 0600 file with a single link, owned by root or the effective user.
+The single-link rule refuses a root-owned 0600 file that another user
+hard-linked into a shared parent. A missing log is created under umask 077
+with noclobber, so zxfer never truncates or replaces an existing file, and each
+report is then appended with one `O_APPEND` write, without a lock. Two guards
+of earlier versions are given up. First, zxfer no longer pins the validated
+file while it writes, so root or the effective user can swap the path between
+the checks and the write and send the report elsewhere; other users cannot,
+because they cannot replace an entry in a parent that passes the checks.
+Second, reports from concurrent runs can interleave on NFS, whose appends are
+not atomic, and when one report needs more than one write (larger than the
+file system block size, often 4 KiB; a default report is a few hundred bytes).
+In a shared sticky directory such as `/tmp`, another user can still create the
+log's name first; zxfer then refuses the log rather than write to it, so keep
+it in a directory only root or the zxfer user can write.
+
 Current open security concerns are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 
 ## Reporting A Vulnerability
