@@ -1,5 +1,7 @@
 #!/bin/sh
-# Tests for src/zxfer_runtime.sh, run by tests/test_zxfer_exec.sh.
+# Effective TMPDIR, temp-file, staging-directory and cleanup-PID tests for
+# src/zxfer_runtime.sh. Run by tests/test_zxfer_runtime.sh under the exec
+# fixture.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_get_temp_file_creates_unique_file() {

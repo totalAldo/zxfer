@@ -1,14 +1,20 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_runtime.sh helpers.
+# shunit2 tests for src/zxfer_runtime.sh: the per-run temp root, runtime
+# artifacts, cleanup PIDs and the effective TMPDIR. The TMPDIR fragment keeps
+# the exec fixture it was written for.
 #
-# shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329,SC2016
+# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329,SC2016
 
 TESTS_DIR=$(dirname "$0")
 TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# shellcheck source=tests/helpers/runtime_fixtures.sh
+. "$TESTS_DIR/helpers/runtime_fixtures.sh"
+# shellcheck source=tests/helpers/exec_fixtures.sh
+. "$TESTS_DIR/helpers/exec_fixtures.sh"
 
 # Session owns startup and shutdown composition; source the complete graph for
 # lifecycle tests while runtime-only helpers remain independently testable.
@@ -16,30 +22,28 @@ zxfer_source_runtime_modules_through "zxfer_session.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_runtime"
+	zxfer_test_exec_fixture_one_time_setup
 }
 
 oneTimeTearDown() {
+	relax_test_tmpdir_permissions
 	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
-	PATH=$TEST_ORIGINAL_PATH
-	export PATH
-	unset ZXFER_BACKUP_DIR
-	TMPDIR="$TEST_TMPDIR"
-	zxfer_reset_runtime_artifact_state
-	zxfer_reset_send_job_state
-	zxfer_reset_cleanup_pid_tracking
-	zxfer_reset_failure_context "unit"
-	g_option_Y_yield_iterations=1
-	g_option_z_compress=0
-	g_zxfer_effective_tmpdir=""
-	g_zxfer_effective_tmpdir_requested=""
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_runtime_tmpdir_tests.sh"; then
+		zxfer_test_exec_fixture_setup
+		return
+	fi
+	zxfer_test_runtime_fixture_setup
 }
 
 tearDown() {
-	PATH=$TEST_ORIGINAL_PATH
-	export PATH
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_runtime_tmpdir_tests.sh"; then
+		relax_test_tmpdir_permissions
+		return
+	fi
+	zxfer_test_runtime_fixture_teardown
 }
 
 zxfer_runtime_wait_for_path() {
@@ -1682,19 +1686,120 @@ test_zxfer_write_runtime_artifact_file_preserves_non_redirection_failure_status(
 		"$output" "status=7"
 }
 
-# zxfer-test-fragment: suites/zxfer_runtime_session_tests.sh
-# shellcheck source=tests/suites/zxfer_runtime_session_tests.sh
-. "$TESTS_DIR/suites/zxfer_runtime_session_tests.sh"
+test_runtime_artifact_registry_helpers_cover_rejected_and_missing_entries() {
+	set +e
+	zxfer_runtime_artifact_registration_path_has_safe_shape "relative-stage"
+	relative_status=$?
+	child_statuses=$(
+		(
+			zxfer_ensure_run_tmp_root || exit 90
+			zxfer_runtime_artifact_path_is_run_root_child \
+				"$g_zxfer_run_tmp_root/child"
+			printf 'direct=%s ' "$?"
+			zxfer_runtime_artifact_path_is_run_root_child \
+				"$g_zxfer_run_tmp_root/nested/child"
+			printf 'nested=%s\n' "$?"
+			zxfer_remove_run_tmp_root
+		)
+	)
 
-# zxfer-test-fragment: suites/zxfer_runtime_initialization_tests.sh
-# shellcheck source=tests/suites/zxfer_runtime_initialization_tests.sh
-. "$TESTS_DIR/suites/zxfer_runtime_initialization_tests.sh"
+	g_zxfer_runtime_artifact_cleanup_paths=""
+	zxfer_runtime_artifact_path_is_registered \
+		"$TEST_TMPDIR/zxfer.missing-stage"
+	missing_identity_status=$?
+
+	assertEquals "Runtime artifact registration should reject non-absolute paths." \
+		1 "$relative_status"
+	assertEquals "A contained runtime artifact must be one direct run-root child, never a nested path." \
+		"direct=0 nested=1" "$child_statuses"
+	assertEquals "Runtime artifact identity lookup should fail for an unregistered directory." \
+		1 "$missing_identity_status"
+	assertEquals "Missing runtime artifact identity lookup should clear the owner result channel." \
+		"" "$g_zxfer_runtime_artifact_directory_identity_result"
+}
+
+test_runtime_artifact_registry_keeps_one_identity_path_pair_per_entry() {
+	stage_file="$TEST_TMPDIR/zxfer.registry-file"
+	stage_dir="$TEST_TMPDIR/.zxfer-registry-dir"
+	glob_dir="$TEST_TMPDIR/.zxfer-registry-[glob]*"
+	: >"$stage_file"
+	mkdir -p "$stage_dir" "$glob_dir"
+	output=$(
+		(
+			g_zxfer_runtime_artifact_cleanup_paths=""
+			zxfer_register_runtime_artifact_path "$stage_file" || exit 90
+			zxfer_register_runtime_artifact_path "$stage_dir" || exit 91
+			zxfer_register_runtime_artifact_path "$glob_dir" || exit 92
+			zxfer_register_runtime_artifact_path "$stage_file" || exit 93
+			dir_identity=$(zxfer_get_path_device_inode "$stage_dir") || exit 94
+			printf 'pairs=%s\n' "$(printf '%s\n' "$g_zxfer_runtime_artifact_cleanup_paths" | wc -l | tr -d ' ')"
+			zxfer_runtime_artifact_path_is_registered "$stage_file"
+			printf 'file_identity_status=%s result=<%s>\n' "$?" \
+				"$g_zxfer_runtime_artifact_directory_identity_result"
+			zxfer_runtime_artifact_path_is_registered "$stage_dir"
+			[ "$g_zxfer_runtime_artifact_directory_identity_result" = "$dir_identity" ] &&
+				printf '%s\n' 'dir_identity=current'
+			zxfer_runtime_artifact_path_is_registered "${stage_dir#/}"
+			printf 'relative_lookup=%s\n' "$?"
+			zxfer_runtime_artifact_path_is_registered "$TEST_TMPDIR/.zxfer-registry-*"
+			printf 'pattern_lookup=%s\n' "$?"
+			zxfer_runtime_artifact_path_is_registered "$stage_dir" drop
+			printf 'after_drop=<%s>\n' "$g_zxfer_runtime_artifact_cleanup_paths"
+			zxfer_runtime_artifact_path_is_registered "$glob_dir" drop
+			zxfer_runtime_artifact_path_is_registered "$stage_file" drop
+			printf 'emptied=<%s>\n' "$g_zxfer_runtime_artifact_cleanup_paths"
+		)
+	)
+
+	assertContains "A duplicate registration should not add a second pair." "$output" "pairs=6"
+	assertContains "A registered file should publish - as its identity." \
+		"$output" "file_identity_status=0 result=<->"
+	assertContains "A registered directory should publish the identity it had at registration." \
+		"$output" "dir_identity=current"
+	assertContains "Registry lookups should reject relative paths." "$output" "relative_lookup=1"
+	assertContains "Registry lookups should match paths literally, never as patterns." \
+		"$output" "pattern_lookup=1"
+	assertContains "Dropping one entry should keep every other pair in order." \
+		"$output" "after_drop=<-
+$stage_file
+$(zxfer_get_path_device_inode "$glob_dir")
+$glob_dir>"
+	assertContains "Dropping every entry should empty the registry." "$output" "emptied=<>"
+}
+
+test_try_get_effective_tmpdir_fails_cleanly_when_no_safe_default_exists() {
+	output=$(
+		(
+			unset TMPDIR
+			g_zxfer_effective_tmpdir=""
+			g_zxfer_effective_tmpdir_requested=""
+			# A candidate list with no safe entry exhausts the fallback walk.
+			zxfer_list_default_tmpdir_candidates() {
+				printf '%s\n' "$TEST_TMPDIR/no-such-default-candidate"
+			}
+			set +e
+			zxfer_try_get_effective_tmpdir >/dev/null
+			status=$?
+			printf 'status=%s\n' "$status"
+			printf 'requested=%s\n' "${g_zxfer_effective_tmpdir_requested:-}"
+			printf 'effective=<%s>\n' "${g_zxfer_effective_tmpdir:-}"
+		)
+	)
+
+	assertEquals "Temp-root resolution should fail cleanly when both TMPDIR and the built-in defaults are unavailable." \
+		"status=1
+requested=__ZXFER_DEFAULT_TMPDIR__
+effective=<>" "$output"
+}
+
+# zxfer-test-fragment: suites/zxfer_runtime_tmpdir_tests.sh
+# shellcheck source=tests/suites/zxfer_runtime_tmpdir_tests.sh
+. "$TESTS_DIR/suites/zxfer_runtime_tmpdir_tests.sh"
 
 suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_runtime.sh" \
-		"$TESTS_DIR/suites/zxfer_runtime_session_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_runtime_initialization_tests.sh"
+		"$TESTS_DIR/suites/zxfer_runtime_tmpdir_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

@@ -1,20 +1,56 @@
 #!/bin/sh
 #
-# shunit2 tests for the session composition root in src/zxfer_session.sh.
+# shunit2 tests for the session composition root in src/zxfer_session.sh:
+# startup order, zxfer_main, remote connection preparation and trap exit.
 #
-# shellcheck disable=SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
+# The fragments keep the fixture they were written for: the exec fixture for
+# the main-path cases, the remote-host fixture for the remote cases and the
+# runtime fixture for the lifecycle cases. The cases in this file use none.
+#
+# shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
+TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# shellcheck source=tests/helpers/exec_fixtures.sh
+. "$TESTS_DIR/helpers/exec_fixtures.sh"
+# shellcheck source=tests/helpers/remote_host_fixtures.sh
+. "$TESTS_DIR/helpers/remote_host_fixtures.sh"
+# shellcheck source=tests/helpers/runtime_fixtures.sh
+. "$TESTS_DIR/helpers/runtime_fixtures.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_session"
+	zxfer_test_exec_fixture_one_time_setup
+	zxfer_test_remote_host_fixture_one_time_setup
 }
 
 oneTimeTearDown() {
+	zxfer_test_remote_host_fixture_one_time_teardown
+	relax_test_tmpdir_permissions
 	zxfer_test_cleanup_tmpdir
+}
+
+setUp() {
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_main_tests.sh"; then
+		zxfer_test_exec_fixture_setup
+	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"; then
+		zxfer_test_remote_host_fixture_setup
+	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"; then
+		zxfer_test_runtime_fixture_setup
+	fi
+}
+
+tearDown() {
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_main_tests.sh"; then
+		relax_test_tmpdir_permissions
+	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"; then
+		zxfer_test_remote_host_fixture_teardown
+	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"; then
+		zxfer_test_runtime_fixture_teardown
+	fi
 }
 
 # Startup must settle the secure PATH before it creates anything, and create
@@ -502,6 +538,24 @@ test_zxfer_trap_exit_int_status_exits_130_with_one_signal_report() {
 		zxfer_trap_exit 130
 	) >/dev/null 2>"$TEST_TMPDIR/signal.stderr"
 	zxfer_session_test_assert_signal_exit "$?" 130
+}
+
+# zxfer-test-fragment: suites/zxfer_session_main_tests.sh
+# shellcheck source=tests/suites/zxfer_session_main_tests.sh
+. "$TESTS_DIR/suites/zxfer_session_main_tests.sh"
+# zxfer-test-fragment: suites/zxfer_session_remote_tests.sh
+# shellcheck source=tests/suites/zxfer_session_remote_tests.sh
+. "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"
+# zxfer-test-fragment: suites/zxfer_session_lifecycle_tests.sh
+# shellcheck source=tests/suites/zxfer_session_lifecycle_tests.sh
+. "$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"
+
+suite() {
+	zxfer_test_register_fragment_tests \
+		"$TESTS_DIR/test_zxfer_session.sh" \
+		"$TESTS_DIR/suites/zxfer_session_main_tests.sh" \
+		"$TESTS_DIR/suites/zxfer_session_remote_tests.sh" \
+		"$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

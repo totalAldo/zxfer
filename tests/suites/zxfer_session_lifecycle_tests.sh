@@ -1,6 +1,8 @@
 #!/bin/sh
-# Tests for src/zxfer_session.sh startup and trap paths, run by
-# tests/test_zxfer_runtime.sh.
+# Lifecycle tests for src/zxfer_session.sh: global and execution-context
+# initialization, signal traps, and zxfer_trap_exit cleanup of runtime
+# artifacts, jobs and sockets. Run by tests/test_zxfer_session.sh under the
+# runtime fixture.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329,SC2016
 
 test_runtime_global_init_covers_default_assignments_in_current_shell() {
@@ -686,4 +688,161 @@ test_session_init_defers_strict_path_export_until_startup_helpers_finish() {
 		"$output" "temp_file=<>"
 	assertNotContains "Startup should not trip over missing bootstrap utilities when the strict PATH is applied at the end of init." \
 		"$output" "command not found"
+}
+
+test_session_init_reinitializes_property_module_scratch_state_when_reinvoked() {
+	output=$(
+		(
+			TMPDIR="$TEST_TMPDIR"
+			zxfer_init_dependency_tool_defaults() {
+				:
+			}
+			zxfer_ssh_supports_control_sockets() {
+				return 0
+			}
+
+			zxfer_reset_session_state
+			zxfer_init_session_environment
+
+			g_zxfer_source_property_table="tank/src\tcompression=stale=local"
+			g_zxfer_destination_property_table="backup/dst\tcompression=stale=local"
+			g_zxfer_required_properties_result="stale-required"
+			g_zxfer_adjusted_set_list="compression=lz4"
+			g_zxfer_adjusted_inherit_list="mountpoint"
+			g_zxfer_override_pvs_result="compression=lz4=local"
+			g_zxfer_creation_pvs_result="compression=lz4=local"
+			g_zxfer_remote_probe_capture_failed=1
+			g_zxfer_destination_property_tree_prefetch_state=2
+			g_zxfer_unsupported_filesystem_properties="compression"
+			g_zxfer_unsupported_volume_properties="volblocksize"
+
+			zxfer_reset_session_state
+			zxfer_init_session_environment
+
+			printf 'required=<%s>\n' "$g_zxfer_required_properties_result"
+			printf 'source_table=<%s>\n' "${g_zxfer_source_property_table:-}"
+			printf 'destination_table=<%s>\n' "${g_zxfer_destination_property_table:-}"
+			printf 'adjusted_set=<%s>\n' "$g_zxfer_adjusted_set_list"
+			printf 'adjusted_inherit=<%s>\n' "$g_zxfer_adjusted_inherit_list"
+			printf 'override_result=<%s>\n' "$g_zxfer_override_pvs_result"
+			printf 'creation_result=<%s>\n' "$g_zxfer_creation_pvs_result"
+			printf 'remote_capture_failed=%s\n' "${g_zxfer_remote_probe_capture_failed:-0}"
+			printf 'prefetch_state=%s\n' "$g_zxfer_destination_property_tree_prefetch_state"
+			printf 'unsupported_fs=<%s>\n' "$g_zxfer_unsupported_filesystem_properties"
+			printf 'unsupported_vol=<%s>\n' "$g_zxfer_unsupported_volume_properties"
+		)
+	)
+
+	assertContains "Re-running session initialization should clear required-property scratch results." \
+		"$output" "required=<>"
+	assertContains "Re-running session initialization should clear the in-memory source property table." \
+		"$output" "source_table=<>"
+	assertContains "Re-running session initialization should clear the in-memory destination property table." \
+		"$output" "destination_table=<>"
+	assertContains "Re-running session initialization should clear adjusted set scratch state." \
+		"$output" "adjusted_set=<>"
+	assertContains "Re-running session initialization should clear adjusted inherit scratch state." \
+		"$output" "adjusted_inherit=<>"
+	assertContains "Re-running session initialization should clear derived override scratch state." \
+		"$output" "override_result=<>"
+	assertContains "Re-running session initialization should clear derived creation-property scratch state." \
+		"$output" "creation_result=<>"
+	assertContains "Re-running session initialization should clear remote probe capture-failure scratch state." \
+		"$output" "remote_capture_failed=0"
+	assertContains "Re-running session initialization should rearm destination property prefetch state." \
+		"$output" "prefetch_state=0"
+	assertContains "Re-running session initialization should clear filesystem unsupported-property cache state." \
+		"$output" "unsupported_fs=<>"
+	assertContains "Re-running session initialization should clear volume unsupported-property cache state." \
+		"$output" "unsupported_vol=<>"
+}
+
+# Purpose: Rewrite `trap` listing lines as "SIGNAL action", dropping the SIG
+# prefix and quoting that differ between shells.
+# Usage: trap | zxfer_test_normalize_trap_listing
+zxfer_test_normalize_trap_listing() {
+	awk -v quote="'" '{
+		signal = $NF
+		sub(/^SIG/, "", signal)
+		action = $0
+		sub(/^trap -- /, "", action)
+		sub(/ [^ ]*$/, "", action)
+		gsub(quote, "", action)
+		print signal " " action
+	}'
+}
+
+# EXIT runs the plain handler; each signal passes its 128+signo status. A
+# signal ignored on entry (INT and QUIT in an async suite) cannot be trapped,
+# so the expectation covers only the signals a probe trap shows this shell
+# accepts.
+test_zxfer_session_initialize_maps_each_signal_to_its_exit_status() {
+	trappable=$(
+		(
+			trap 'zxfer_trap_probe' HUP INT QUIT TERM
+			trap
+		) | zxfer_test_normalize_trap_listing |
+			awk '$2 == "zxfer_trap_probe" { print $1 }'
+	)
+	expected="EXIT zxfer_trap_exit"
+	for signal in $trappable; do
+		case $signal in
+		HUP) expected="$expected
+HUP zxfer_trap_exit 129" ;;
+		INT) expected="$expected
+INT zxfer_trap_exit 130" ;;
+		QUIT) expected="$expected
+QUIT zxfer_trap_exit 131" ;;
+		TERM) expected="$expected
+TERM zxfer_trap_exit 143" ;;
+		esac
+	done
+	output=$(
+		(
+			zxfer_init_session_environment() {
+				:
+			}
+			zxfer_session_initialize
+			trap
+			trap - EXIT HUP INT QUIT TERM
+		) | zxfer_test_normalize_trap_listing | grep ' zxfer_trap_exit' | sort
+	)
+
+	assertContains "TERM must be trappable in the test shell." "$trappable" "TERM"
+	assertEquals "Session startup should route EXIT and each signal through zxfer_trap_exit with its exit status." \
+		"$(printf '%s\n' "$expected" | sort)" "$output"
+}
+
+test_zxfer_init_endpoint_execution_context_reports_remote_decompress_resolution_failures() {
+	set +e
+	output=$(
+		(
+			g_option_T_target_host="target.example"
+			g_option_z_compress=1
+			g_cmd_decompress="zstd -d"
+			g_cmd_zfs="/sbin/zfs"
+			zxfer_get_os() {
+				g_zxfer_os_result="RemoteOS"
+				printf '%s\n' "RemoteOS"
+			}
+			zxfer_resolve_remote_required_tool() {
+				g_zxfer_required_tool_result="/remote/bin/$2"
+			}
+			zxfer_resolve_cli_command_safe() {
+				g_zxfer_resolved_cli_command_result="decompress lookup failed"
+				return 1
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit 1
+			}
+			zxfer_init_endpoint_execution_context target
+		)
+	)
+	status=$?
+
+	assertEquals "Target execution-context initialization should fail closed when the remote decompressor cannot be resolved safely." \
+		1 "$status"
+	assertContains "Remote decompressor resolution failures should preserve the dependency error." \
+		"$output" "decompress lookup failed"
 }

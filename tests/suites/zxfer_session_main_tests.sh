@@ -1,6 +1,7 @@
 #!/bin/sh
-# Tests for src/zxfer_session.sh and launcher startup paths, run by
-# tests/test_zxfer_exec.sh.
+# zxfer_main and session startup tests for src/zxfer_session.sh: variable
+# initialization, help and usage exits through the launcher, and trap-exit
+# reporting. Run by tests/test_zxfer_session.sh under the exec fixture.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_init_variables_resolves_remote_tool_paths_and_restore_cat() {
