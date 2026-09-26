@@ -652,6 +652,51 @@ test_ssh_control_socket_action_reports_policy_and_host_spec_failures_as_errors()
 	assertEquals "An unknown action, including the retired check, should fail closed." 1 "$check_status"
 }
 
+test_zxfer_ssh_control_socket_action_failure_helpers_cover_stale_classification_and_output() {
+	zxfer_reset_ssh_control_socket_action_state
+	blank_output=$(zxfer_emit_ssh_control_socket_action_failure_message)
+	blank_status=$?
+	default_output=$(zxfer_emit_ssh_control_socket_action_failure_message "default action failure.")
+	default_status=$?
+	g_zxfer_ssh_control_socket_action_stderr="staged action failure"
+	staged_output=$(zxfer_emit_ssh_control_socket_action_failure_message "ignored default")
+	staged_status=$?
+
+	classification_output=$(
+		(
+			set +e
+			zxfer_ssh_control_socket_failure_is_stale_master \
+				"Control socket connect($TEST_TMPDIR/check.sock): No such file or directory"
+			printf 'missing=%s\n' "$?"
+			zxfer_ssh_control_socket_failure_is_stale_master \
+				"Control socket connect($TEST_TMPDIR/check.sock): Broken pipe"
+			printf 'broken_pipe=%s\n' "$?"
+			zxfer_ssh_control_socket_failure_is_stale_master \
+				"Host key verification failed."
+			printf 'other=%s\n' "$?"
+		)
+	)
+
+	assertEquals "ssh control socket action failure message emission should stay silent when no detail is staged and no default is supplied." \
+		"" "$blank_output"
+	assertEquals "ssh control socket action failure message emission should still succeed when no message is emitted." \
+		0 "$blank_status"
+	assertEquals "ssh control socket action failure message emission should print the default message when no detail is staged." \
+		"default action failure." "$default_output"
+	assertEquals "ssh control socket action failure message emission should succeed when printing the default message." \
+		0 "$default_status"
+	assertEquals "ssh control socket action failure message emission should prefer the staged stderr over the default message." \
+		"staged action failure" "$staged_output"
+	assertEquals "ssh control socket action failure message emission should succeed when printing the staged stderr." \
+		0 "$staged_status"
+	assertContains "ssh control socket stale-master detection should classify missing control sockets as stale masters." \
+		"$classification_output" "missing=0"
+	assertContains "ssh control socket stale-master detection should classify broken pipes as stale masters." \
+		"$classification_output" "broken_pipe=0"
+	assertContains "ssh control socket stale-master detection should not classify unrelated transport failures as stale masters." \
+		"$classification_output" "other=1"
+}
+
 test_zxfer_close_all_ssh_control_sockets_prefers_origin_failure_and_uses_target_failure_when_origin_succeeds() {
 	set +e
 	output=$(
