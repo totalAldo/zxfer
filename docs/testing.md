@@ -488,7 +488,12 @@ so 1 for the remote scenarios and 0 for local ones.
 command breaks the remote no-op budget, and so does a remote no-op that never
 reaches ssh. Both bench runners keep their work directory directly under
 `/tmp` and give zxfer its `tmp/` as `TMPDIR`, so the caller's `TMPDIR` cannot
-change the counts.
+change the counts. A sixth scenario, `props`, runs the incremental with `-P`
+and 68 properties per dataset that already match on both sides
+(`zxfer_mockbin_add_property_fixtures`); it fails if a property is set or
+inherited, and its budgets include `zfs_get_calls` and the
+`normalized_property_reads_*` counters, which jump if the recursive property
+read falls back to per-dataset reads.
 
 `tests/run_argv_fuzz.sh [--seed N] [--iterations N] [--case K] [--keep]` is a
 seeded argv-boundary fuzz. Each case generates a small tree (a root and one to
@@ -555,6 +560,45 @@ rejects the empty pattern a trailing newline produces.
 `test_vendored_shunit2_contains_matches_literal_text` in
 `tests/test_run_shunit_tests.sh` pins that behavior; keep both changes when
 updating shunit2.
+
+### Fail-Closed Contract Sweep
+
+`tests/test_contract_failures.sh` proves black-box that zxfer fails closed
+whenever a zfs or ssh call fails. The canned zfs, the socket-aware mock ssh
+and every counting wrapper in `tests/mock_toolchain_helper.sh` share one
+fault injector: with `MOCK_FAIL_CALL=N` the Nth call of `MOCK_FAIL_TOOL`
+(`zfs` by default, `ssh`, or a wrapped tool's name) prints
+`MOCK_FAIL_STDERR` and exits `MOCK_FAIL_STATUS` instead of answering. The
+defaults are an operational error, never "dataset does not exist" (for zfs
+`cannot open '<last operand>': I/O error`, status 1; for ssh a closed
+connection, status 255). Calls claim their numbers by noclobber file creation
+in `MOCK_FAIL_DIR`, so concurrent calls never share one; `MOCK_FAIL_MATCH`
+counts only calls whose argv matches a glob, `MOCK_FAIL_CALL=0` only counts,
+and the failing call logs `FAIL <n> <tool> <argv>` to `MOCK_ZFS_LOG`.
+`MOCK_ZFS_STRICT_RECEIVE=1` makes a receive refuse an empty stream, as
+`zfs receive` does.
+
+The suite runs nine small scenarios (local incremental, `-d`, `-d -F` with a
+diverged child, `-d -g`, `-P`, `-k` then `-e`, `-j 2`, `-O localhost` and
+`-T localhost`), numbers every zfs call of a clean run, and fails each one in
+turn, by argv and occurrence so background discovery and `-j` interleaving
+cannot move the target; the remote scenarios also fail each ssh call by
+position. Every run must either exit 0 with the clean run's mutating calls
+(a fallback absorbed the failure) or exit non-zero with one structured
+runtime failure report and no mutating zfs call starting after the failure.
+Two exceptions are exact: the receive sharing a failed send's pipeline, and
+under `-j` the sibling child launched together with the failing one. Every
+run must leave its `TMPDIR` empty, `-k` must publish nothing when it stops,
+and `-e` must never change its backup files. Self-tests feed the classifier
+synthetic logs and a launcher that ignores a failed destroy, so each kind of
+fail-open is shown to be caught.
+
+The default run (about 160 zxfer runs, about 80 s on macOS `/bin/sh`) fails
+every call once. `ZXFER_FAILURE_SWEEP=full` repeats every failing run with a
+second failure shape (zfs status 2 "dataset is busy", ssh status 255 with no
+stderr), about 330 runs. `ZXFER_FAILURE_SWEEP_TRACE=FILE` appends one TSV
+line per failing run (scenario, verdict, status, failed call); each scenario
+also prints a `contract sweep:` summary line.
 
 ## Coverage
 
@@ -993,14 +1037,22 @@ canned zfs and a mock ssh, with no pools and no root:
   --sizes 25,100 --reps 5 --summary /tmp/perf-ab.md
 ```
 
-- The baseline tree comes from `git archive`; `--candidate-root DIR` picks
-  another candidate tree (default: this checkout).
-- For each size (child datasets of the canned tree) it times `noop`, `incr`,
-  `remote_noop` and `remote_incr`: one warm-up per tree, then `--reps`
-  alternating runs. The remote scenarios run `-O localhost -T localhost`
-  through the socket-aware mock ssh, which sleeps `--latency-ms` (default 80)
-  per new connection or master open and a sixteenth of it per multiplexed
-  call.
+- The baseline tree comes from `git archive` of any commit-ish, a SHA
+  included; `--candidate-root DIR` picks another candidate tree (default:
+  this checkout).
+- For each size (child datasets of the canned tree, `--snapshots N` deep,
+  default 4) it times `noop`, `incr`, `remote_noop` and `remote_incr`: one
+  warm-up per tree, then `--reps` alternating runs. The remote scenarios run
+  `-O localhost -T localhost` through the socket-aware mock ssh, which sleeps
+  `--latency-ms` (default 80) per new connection or master open and a
+  sixteenth of it per multiplexed call. `--scenarios LIST` picks and orders
+  them and adds the opt-in `props`: the incremental with `-P` and 68
+  properties per dataset that already match, where a set or inherit is a
+  harness error. `props` is opt-in because `upstream-compat-final` reads
+  properties in per-property shell loops (about 15 s for three children on
+  macOS).
+- `--shell PATH` runs both launchers with that interpreter (default
+  `/bin/sh`), for example `--shell /bin/dash`.
 - The clock is `date +%s%N` where it prints nanoseconds, then perl
   `Time::HiRes`, then `python3`, and otherwise whole seconds with a warning;
   the median cost of reading the clock is subtracted from every sample.
@@ -1008,11 +1060,14 @@ canned zfs and a mock ssh, with no pools and no root:
   `--summary FILE` appends a Markdown table; progress goes to stderr, whose
   first line names the work directory.
 - The `perf-advisory` job in `.github/workflows/perf.yml` runs this against
-  `origin/upstream-compat-final` at sizes 25,100 with 5 reps and never gates.
+  `origin/upstream-compat-final` at sizes 25,100 with 5 reps, then against
+  the code the push replaces (the merge base with `origin/main` on a branch,
+  `HEAD~1` on `main`) with `props` added, and never gates.
 - Exit status: 0 for a completed run whatever the ratios; 1 for a harness
   error (an unknown ref, a failed run, a run that never reached the canned
-  zfs, a wrong receive count, or a remote run without ssh); 2 for a usage
-  error, including a repeated `--sizes` value; 130 on INT and 143 on TERM.
+  zfs, a wrong receive count, a remote run without ssh, or a `props` run that
+  changed a property); 2 for a usage error, including a repeated `--sizes` or
+  `--scenarios` value; 130 on INT and 143 on TERM.
 - The work directory sits directly under `/tmp` whatever `TMPDIR` is, so the
   candidate's control-socket paths stay below the socket path limit. A nested
   `TMPDIR` used to push the candidate into zxfer's socket-directory fallback,
@@ -1195,11 +1250,14 @@ The project currently ships five GitHub Actions workflows:
   ship with it; the job prints the awk version first, so a failure shows
   which awk ran)
 - `perf.yml`: the advisory `perf-advisory` job (continue-on-error, with a
-  full-history checkout so `origin/upstream-compat-final` exists) runs
-  `./tests/run_perf_ab.sh --baseline-ref origin/upstream-compat-final --sizes 25,100 --reps 5 --summary "$GITHUB_STEP_SUMMARY"`
-  and appends the `tests/run_microbench.sh` TOTAL and `ssh_*` rows to the job
-  summary; a slowdown or harness error never fails the workflow, and the
-  spawn budgets are enforced by the unit suites
+  full-history checkout so `origin/upstream-compat-final`, `origin/main` and
+  `HEAD~1` exist) runs
+  `./tests/run_perf_ab.sh --baseline-ref origin/upstream-compat-final --sizes 25,100 --reps 5 --summary "$GITHUB_STEP_SUMMARY"`,
+  then the same A/B with `props` against the merge base with `origin/main`
+  (on `main`, against `HEAD~1`), each step continue-on-error, and appends the
+  `tests/run_microbench.sh` TOTAL and `ssh_*` rows to the job summary; a
+  slowdown or harness error never fails the workflow, and the spawn budgets
+  are enforced by the unit suites
 - `integration.yml`: integration tests with the direct-host Ubuntu harness on
   `ubuntu-26.04`, plus FreeBSD and OmniOS guest-local `vmactions` lanes that
   install their native prerequisites and run `tests/run_integration_zxfer.sh`

@@ -330,6 +330,16 @@ contract_sweep() {
 	RUN_DIR="$CASE_DIR/run"
 	assertTrue "[$l_sweep_label] the clean run must make $l_sweep_tool calls" \
 		"[ '$l_sweep_calls' -gt 0 ]"
+	# A scenario whose fixture drifted into a no-op would sweep nothing
+	# worth sweeping: the clean run must mutate, or for -k publish metadata.
+	l_sweep_mutating=$(wc -l <"$CONTRACT_CLEAN_DIR/mutations" | tr -d ' ')
+	if [ "$CONTRACT_BACKUP_CHECK" = publish ]; then
+		assertNotNull "[$l_sweep_label] the clean run must publish backup metadata" \
+			"$(cat "$CONTRACT_CLEAN_DIR/backup.digest")"
+	else
+		assertTrue "[$l_sweep_label] the clean run must make a mutating zfs call" \
+			"[ '$l_sweep_mutating' -gt 0 ]"
+	fi
 
 	# One target per clean call: "<occurrence><TAB><argv>" for zfs, where
 	# the occurrence counts earlier calls with the same argv. A zfs argv
@@ -378,9 +388,9 @@ contract_sweep() {
 	done
 
 	l_sweep_elapsed=$(($(date '+%s') - l_sweep_started))
-	printf 'contract sweep: %s %s: %s calls, %s runs, %s absorbed, %s stopped, %ss\n' \
-		"$l_sweep_label" "$l_sweep_tool" "$l_sweep_calls" "$CONTRACT_RUNS" \
-		"$CONTRACT_ABSORBED" "$CONTRACT_STOPPED" "$l_sweep_elapsed"
+	printf 'contract sweep: %s %s: %s calls (%s mutating), %s runs, %s absorbed, %s stopped, %ss\n' \
+		"$l_sweep_label" "$l_sweep_tool" "$l_sweep_calls" "$l_sweep_mutating" \
+		"$CONTRACT_RUNS" "$CONTRACT_ABSORBED" "$CONTRACT_STOPPED" "$l_sweep_elapsed"
 }
 
 # Purpose: Print the failure shapes this mode injects for a tool.
@@ -575,7 +585,8 @@ contract_late_mutations() {
 		-v siblings="$CONTRACT_SIBLINGS" '
 		# Drop the shell quoting a rendered remote command adds.
 		function unquote(word) {
-			gsub(/[\047\\]/, "", word)
+			gsub(quote, "", word)
+			gsub(/\\/, "", word)
 			return word
 		}
 		# Map a source dataset (or snapshot) to its destination dataset.
@@ -584,6 +595,9 @@ contract_late_mutations() {
 			if (name != source_root && index(name, source_root "/") != 1)
 				return ""
 			return dest_root substr(name, length(source_root) + 1)
+		}
+		BEGIN {
+			quote = sprintf("%c", 39)
 		}
 		NR == fail_at {
 			n = split(siblings, sibling, " ")
