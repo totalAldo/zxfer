@@ -464,6 +464,30 @@ test_zxfer_append_failure_report_to_log_warns_when_the_log_cannot_be_created() {
 		"$(cat "$stderr_file")" "unable to create ZXFER_ERROR_LOG file"
 }
 
+# Linux caps one exec argument or environment string at 128 KiB, so a report
+# this size arrives whole only through the pipe to awk.
+test_zxfer_append_failure_report_to_log_mirrors_a_report_larger_than_an_exec_string() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	log_path="$physical_tmpdir/large_report.log"
+	expected_file="$TEST_TMPDIR/large_report.expected"
+	awk 'BEGIN {
+		printf "zxfer: failure report begin\nlast_command: "
+		for (i = 0; i < 300000; i++)
+			printf "x"
+		printf "\nzxfer: failure report end\n"
+	}' >"$expected_file"
+	report=$(cat "$expected_file")
+	ZXFER_ERROR_LOG="$log_path"
+
+	set +e
+	zxfer_append_failure_report_to_log "$report" 2>"$TEST_TMPDIR/large_report.stderr"
+	status=$?
+
+	assertEquals "A report larger than an exec string should be mirrored." 0 "$status"
+	assertTrue "The log should hold the whole report." \
+		"cmp -s '$expected_file' '$log_path'"
+}
+
 # Purpose: Run the launcher to a usage failure that mirrors its report to
 # LOG_PATH, with verbatim command fields so the report names TAG's source.
 # Usage: zxfer_test_error_log_usage_failure SECURE_PATH_DIR LOG_PATH TAG;

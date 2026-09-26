@@ -554,17 +554,18 @@ zxfer_append_failure_report_to_log() {
 
 	# One write per report. bash line-buffers its printf builtin, so a report
 	# printed there would go out one line per write and could interleave with
-	# a concurrent run's report. awk sends the whole report in one write when
-	# it closes the file (a report larger than its output buffer, usually the
-	# file system block size, takes more than one), and O_APPEND puts that
-	# write at the end of the file.
+	# a concurrent run's report. awk collects the report from the pipe and
+	# sends it in one write when it closes the file (a report larger than its
+	# output buffer, usually the file system block size, takes more than one),
+	# and O_APPEND puts that write at the end of the file. The pipe, unlike an
+	# environment variable, has no size limit.
 	# shellcheck disable=SC2016 # awk reads ENVIRON; nothing is shell-expanded.
-	if ! ZXFER_AWK_ERROR_LOG_PATH=$l_errlog_path \
-		ZXFER_AWK_ERROR_LOG_REPORT=$1 \
-		LC_ALL=C "${g_cmd_awk:-awk}" '
-BEGIN {
+	if ! printf '%s\n' "$1" |
+		ZXFER_AWK_ERROR_LOG_PATH=$l_errlog_path LC_ALL=C "${g_cmd_awk:-awk}" '
+{ report = report $0 "\n" }
+END {
 	log_path = ENVIRON["ZXFER_AWK_ERROR_LOG_PATH"]
-	printf "%s\n", ENVIRON["ZXFER_AWK_ERROR_LOG_REPORT"] >> log_path
+	printf "%s", report >> log_path
 	exit (close(log_path) != 0)
 }'; then
 		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_errlog_path\"."
