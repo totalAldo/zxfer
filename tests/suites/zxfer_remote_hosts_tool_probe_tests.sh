@@ -1,5 +1,7 @@
 #!/bin/sh
-# Tests for src/zxfer_remote_hosts.sh, run by tests/test_zxfer_exec.sh.
+# Remote tool and OS probe tests for src/zxfer_remote_hosts.sh: required-tool
+# resolution from the handshake or a direct probe, and zxfer_get_os. Run by
+# tests/test_zxfer_remote_hosts.sh under the exec fixture.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 fake_remote_capability_response_missing_zfs() {

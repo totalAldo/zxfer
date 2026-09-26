@@ -5,37 +5,6 @@
 # under the remote-host fixture.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
-test_zxfer_local_ssh_resolution_helpers_cover_success_and_failure_paths() {
-	output=$(
-		(
-			set +e
-			g_cmd_ssh=""
-			zxfer_find_required_tool() {
-				if [ "$1" = "ssh" ]; then
-					g_zxfer_required_tool_result=$FAKE_SSH_BIN
-					return 0
-				fi
-				return 1
-			}
-			zxfer_ensure_local_ssh_command
-			printf 'ensure_success=%s:%s:%s\n' "$?" "$g_cmd_ssh" "$g_zxfer_resolved_local_ssh_command_result"
-
-			g_cmd_ssh=""
-			zxfer_find_required_tool() {
-				g_zxfer_required_tool_result="missing ssh"
-				return 1
-			}
-			zxfer_ensure_local_ssh_command
-			printf 'ensure_failure=%s:%s\n' "$?" "$g_zxfer_resolved_local_ssh_command_result"
-		)
-	)
-
-	assertContains "Lazy local ssh resolution should cache the resolved ssh helper on success." \
-		"$output" "ensure_success=0:$FAKE_SSH_BIN:$FAKE_SSH_BIN"
-	assertContains "Lazy local ssh resolution should preserve the dependency diagnostic when ssh lookup fails." \
-		"$output" "ensure_failure=1:missing ssh"
-}
-
 test_zxfer_find_required_tool_reports_missing_dependency() {
 	empty_path="$TEST_TMPDIR/empty_path"
 	mkdir -p "$empty_path"

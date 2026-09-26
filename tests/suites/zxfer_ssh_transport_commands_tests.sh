@@ -1,5 +1,7 @@
 #!/bin/sh
-# Tests for src/zxfer_ssh_transport.sh, run by tests/test_zxfer_exec.sh.
+# Remote-command tests for src/zxfer_ssh_transport.sh: zfs routing by role,
+# ssh shell commands, rendering, transport policy and wrapper host specs. Run
+# by tests/test_zxfer_ssh_transport.sh under the exec fixture.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_parse_ssh_host_spec_splits_host_and_wrapper_tokens() {
