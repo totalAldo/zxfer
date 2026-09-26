@@ -1,25 +1,40 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_snapshot_state.sh helpers.
+# shunit2 tests for src/zxfer_snapshot_state.sh: the destination existence
+# cache and probes, snapshot record files, and the live destination view. The
+# existence-probe fragment keeps the exec fixture it was written for.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
+TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# shellcheck source=tests/helpers/exec_fixtures.sh
+. "$TESTS_DIR/helpers/exec_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_snapshot_state.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_snapshot_state"
+	zxfer_test_exec_fixture_one_time_setup
 }
 
 oneTimeTearDown() {
+	relax_test_tmpdir_permissions
 	zxfer_test_cleanup_tmpdir
 }
 
+tearDown() {
+	relax_test_tmpdir_permissions
+}
+
 setUp() {
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh"; then
+		zxfer_test_exec_fixture_setup
+		return
+	fi
 	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" || return "$?"
 	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
 	g_zxfer_source_snapshot_record_cache_file=""
@@ -231,6 +246,25 @@ test_zxfer_note_destination_dataset_exists_appends_missing_dataset_to_recursive_
 backup/dst/newchild" "$g_recursive_dest_list"
 	assertEquals "Noting an existing destination dataset should mark the dataset as present in the existence cache." \
 		1 "$(cached_state "backup/dst/newchild")"
+}
+
+test_zxfer_note_destination_dataset_exists_appends_new_children_in_current_shell() {
+	g_recursive_dest_list="backup/dst"
+
+	zxfer_note_destination_dataset_exists "backup/dst/child"
+
+	assertEquals "New destination datasets should be appended as exact newline-delimited entries." \
+		"backup/dst
+backup/dst/child" "$g_recursive_dest_list"
+}
+
+test_zxfer_note_destination_dataset_exists_sets_first_entry_when_list_is_empty() {
+	g_recursive_dest_list=""
+
+	zxfer_note_destination_dataset_exists "backup/dst"
+
+	assertEquals "The first observed destination dataset should seed the recursive destination list directly." \
+		"backup/dst" "$g_recursive_dest_list"
 }
 
 test_zxfer_lookup_destination_existence_cache_matches_newest_row_semantics() {
@@ -517,6 +551,16 @@ test_zxfer_refresh_live_destination_view_ignores_an_inherited_view_file() {
 	assertContains "The fresh view should serve the dataset." "$output" "serves=1"
 	assertContains "The fresh view should hold the captured listing." \
 		"$output" "rows=dstpool/back/data/c@snap1	222"
+}
+
+# zxfer-test-fragment: suites/zxfer_snapshot_state_existence_probe_tests.sh
+# shellcheck source=tests/suites/zxfer_snapshot_state_existence_probe_tests.sh
+. "$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh"
+
+suite() {
+	zxfer_test_register_fragment_tests \
+		"$TESTS_DIR/test_zxfer_snapshot_state.sh" \
+		"$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

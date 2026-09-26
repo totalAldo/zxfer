@@ -144,25 +144,6 @@ test_zxfer_ssh_control_socket_action_failure_helpers_cover_stale_classification_
 		"$classification_output" "other=1"
 }
 
-test_zxfer_note_destination_dataset_exists_appends_new_children_in_current_shell() {
-	g_recursive_dest_list="backup/dst"
-
-	zxfer_note_destination_dataset_exists "backup/dst/child"
-
-	assertEquals "New destination datasets should be appended as exact newline-delimited entries." \
-		"backup/dst
-backup/dst/child" "$g_recursive_dest_list"
-}
-
-test_zxfer_note_destination_dataset_exists_sets_first_entry_when_list_is_empty() {
-	g_recursive_dest_list=""
-
-	zxfer_note_destination_dataset_exists "backup/dst"
-
-	assertEquals "The first observed destination dataset should seed the recursive destination list directly." \
-		"backup/dst" "$g_recursive_dest_list"
-}
-
 ################################################################################
 # Parser
 ################################################################################

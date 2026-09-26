@@ -1,5 +1,7 @@
 #!/bin/sh
-# Tests for src/zxfer_snapshot_state.sh, run by tests/test_zxfer_exec.sh.
+# Destination existence-probe tests for src/zxfer_snapshot_state.sh, including
+# the OmniOS parent-listing fallbacks. Run by tests/test_zxfer_snapshot_state.sh
+# under the exec fixture.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 # Print what a destination probe published: "status=N result=R error=E".
