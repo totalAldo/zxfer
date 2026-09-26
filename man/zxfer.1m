@@ -355,6 +355,21 @@ argument and escape that comma as
 \(oq\e,\(cq,
 for example
 \fB\-o\fR \fI'user:note=value\e,with\e,commas'\fR.
+.sp
+Each property may appear only once in the list, since
+\fBzfs\fR
+refuses a property given twice.
+\fBzxfer\fR
+checks the list before it runs any
+\fBzfs\fR
+command: an item without a property name, such as
+\fB\-o\fR \fIcompression\fR,
+or a property named twice, such as
+\fB\-o\fR \fIcompression=lz4,compression=gzip\fR,
+is a usage error (exit status 2). Every property in the list must also exist
+on the source; one that does not is a usage error once the source properties
+are read, before the destination is read or changed.
+.sp
 For example,
 \fB\-o\fR \fIcompression=lzjb\fR
 will cause all destination filesystems to be set to lzjb compression. If using

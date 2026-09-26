@@ -171,6 +171,28 @@ test_consistency_check_rejects_zero_jobs() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "job count of at least 1"
 }
 
+test_consistency_check_reads_the_override_list() {
+	zxfer_test_capture_subshell '
+		zxfer_throw_usage_error() {
+			printf "%s\n" "$1"
+			exit "${2:-2}"
+		}
+		g_option_o_override_property="compression=lz4,compression=gzip"
+		zxfer_consistency_check
+	'
+
+	assertEquals "A property named twice in -o should fail validation." 2 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Duplicate property for -o override: compression." "$ZXFER_TEST_CAPTURE_OUTPUT"
+
+	zxfer_test_capture_subshell '
+		g_option_o_override_property="compression=lz4,atime=off"
+		zxfer_consistency_check
+		printf "%s\n" "$g_zxfer_override_properties_result"
+	'
+	assertEquals "A valid -o list passes validation." 0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "compression=lz4=override,atime=off=override" "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
 test_refresh_compression_commands_clears_stale_safe_commands_without_z() {
 	g_option_z_compress=0
 	g_cmd_compress_safe="evil"

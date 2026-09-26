@@ -76,14 +76,15 @@ module or a chain of setters.
   per-iteration in-memory property tables with
   targeted destination invalidation, live normalized lookups, argv decoding,
   and required creation-time property backfill
-- [../src/zxfer_property_policy.sh](../src/zxfer_property_policy.sh): readonly
-  and noninheritable defaults, override validation and derivation, one-pass
-  readonly/`-I`/`-U` list filtering, source create-time metadata, and the `-U`
-  destination-support scan
-- [../src/zxfer_property_reconcile.sh](../src/zxfer_property_reconcile.sh):
-  source collection (with `-e` restore), destination creation, destination
-  set/inherit execution, property diffing and child-inherit adjustment, and
-  the linear per-dataset `zxfer_transfer_properties` flow
+- [../src/zxfer_property_transfer.sh](../src/zxfer_property_transfer.sh):
+  the property pass: readonly and noninheritable defaults, the `-o` reader
+  (CLI validation runs it before any zfs command; a malformed item or a
+  property named twice is a usage error), the `-U` destination-support scan,
+  source collection (with `-e` restore) and create-time metadata, one plan
+  `awk` per dataset (derive the apply and creation lists with the
+  readonly/`-I`/`-U` filters, then diff them against an existing
+  destination), destination creation, set/inherit execution, child-inherit
+  adjustment, and the linear per-dataset `zxfer_transfer_properties` flow
 - [../src/zxfer_snapshot_producers.sh](../src/zxfer_snapshot_producers.sh):
   source/destination command production, staged execution, and snapshot-stream
   normalization
@@ -426,8 +427,7 @@ function boundaries so operators and contributors can line the diagrams up with
 [`../src/zxfer_snapshot_discovery.sh`](../src/zxfer_snapshot_discovery.sh),
 [`../src/zxfer_snapshot_reconcile.sh`](../src/zxfer_snapshot_reconcile.sh),
 [`../src/zxfer_property_state.sh`](../src/zxfer_property_state.sh),
-[`../src/zxfer_property_policy.sh`](../src/zxfer_property_policy.sh),
-[`../src/zxfer_property_reconcile.sh`](../src/zxfer_property_reconcile.sh),
+[`../src/zxfer_property_transfer.sh`](../src/zxfer_property_transfer.sh),
 [`../src/zxfer_send_receive.sh`](../src/zxfer_send_receive.sh),
 [`../src/zxfer_replication.sh`](../src/zxfer_replication.sh), and
 [`../src/zxfer_session.sh`](../src/zxfer_session.sh).
@@ -558,7 +558,7 @@ flowchart TD
     E -- "yes" --> F["Read creation times in one batched query (rollback eligibility and -g), then delete destination-only snapshots"]
     E -- "no" --> G{"Property pass required?"}
     F --> G
-    G -- "yes" --> H["Run zxfer_transfer_properties(): collect source properties, ensure or create the destination, diff and apply property changes when needed, and buffer -k metadata when enabled"]
+    G -- "yes" --> H["Run zxfer_transfer_properties(): collect source properties, check -o against the initial source, create a missing destination or plan and apply property changes, and buffer -k metadata when enabled"]
     G -- "no" --> I["Skip property phase"]
     H --> J["Recheck live destination; re-plan when rows changed; never adopt an anchor older than the inspected one"]
     I --> J
@@ -765,11 +765,10 @@ flowchart LR
     C -- "no" --> E["Keep the live effective source property view"]
     D --> F["Backfill required creation-time properties"]
     E --> F
-    F --> G["Derive creation and override property sets"]
-    G --> H["Apply readonly, -I ignore, dataset-type -U filters, and parent-matching inheritance for inheritable child overrides"]
-    H --> I{"Did zxfer create the destination during this property pass?"}
-    I -- "yes" --> J["Return after creation and buffer the raw live source -k metadata row when enabled"]
-    I -- "no" --> K["Collect destination properties, diff them, adjust child inheritance, and apply zfs set or inherit changes"]
+    F --> G["Check every -o property against the initial source, before the destination is read, probed or changed"]
+    G --> I{"Does the destination exist (recursive listing, else a live probe)?"}
+    I -- "no" --> J["Plan the creation and override sets with the readonly, -I and dataset-type -U filters in one awk, create the destination (a child drops inheritable -o overrides its parent already supplies), and buffer the raw live source -k metadata row when enabled"]
+    I -- "yes" --> K["Read destination properties, derive and diff them in the same plan awk, adjust child inheritance, and apply zfs set or inherit changes"]
     K --> L{"-k backup mode?"}
     L -- "no" --> M["Property phase complete"]
     L -- "yes" --> N["Buffer the source property row in memory (the row from the nearest earlier -k alias at or above the dataset replaces the live values)"]

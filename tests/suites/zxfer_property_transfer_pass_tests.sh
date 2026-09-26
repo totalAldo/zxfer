@@ -185,6 +185,34 @@ test_transfer_properties_checks_override_names_on_the_initial_source_only() {
 		"" "$(cat "$TRANSFER_MUTATE_LOG")"
 }
 
+test_transfer_properties_checks_override_names_before_probing_the_destination() {
+	zxfer_property_test_default_rows
+	g_recursive_dest_list=""
+	g_option_o_override_property="copies=2"
+	: >"$TRANSFER_READ_LOG"
+	: >"$TRANSFER_MUTATE_LOG"
+	output=$(
+		(
+			zxfer_probe_destination_existence() {
+				printf 'probe %s\n' "$1" >>"$TRANSFER_READ_LOG"
+				g_zxfer_destination_exists_result=0
+			}
+			zxfer_run_zfs_cmd_for_role() { zxfer_property_test_transfer_reads "$@"; }
+			zxfer_run_destination_zfs_cmd() { zxfer_property_test_transfer_mutations "$@"; }
+			zxfer_throw_usage_error() {
+				printf 'USAGE %s\n' "$1"
+				exit 2
+			}
+			zxfer_transfer_properties "tank/src"
+		)
+	)
+	assertEquals 2 "$?"
+	assertEquals "USAGE Missing source property for -o override: copies." "$output"
+	assertEquals "Only the source is read; the unlisted destination is never probed." \
+		"" "$(grep -v '^source ' "$TRANSFER_READ_LOG")"
+	assertEquals "" "$(cat "$TRANSFER_MUTATE_LOG")"
+}
+
 test_transfer_properties_preserves_escaped_comma_override_end_to_end() {
 	zxfer_property_test_default_rows
 	TRANSFER_SRC_ROWS='type\tfilesystem\t-\nuser:note\told\tlocal\ncasesensitivity\tsensitive\t-\nnormalization\tnone\t-\nutf8only\toff\t-\n'
