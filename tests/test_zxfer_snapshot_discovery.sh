@@ -1,8 +1,6 @@
 #!/bin/sh
 #
-# shunit2 entry point for src/zxfer_snapshot_discovery.sh, and for
-# src/zxfer_remote_snapshot_discovery.sh, whose remote destination batch the
-# remote-batch fragment pins together with its discovery adaptors.
+# shunit2 entry point for src/zxfer_snapshot_discovery.sh.
 #
 # Test definitions live in the behavior fragments below. Each fragment has a
 # "zxfer-test-fragment" marker, a source line and a path in suite(); keep the
@@ -38,10 +36,6 @@ setUp() {
 # shellcheck source=tests/suites/zxfer_snapshot_discovery_full_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_discovery_full_tests.sh"
 
-# zxfer-test-fragment: suites/zxfer_snapshot_discovery_remote_batch_tests.sh
-# shellcheck source=tests/suites/zxfer_snapshot_discovery_remote_batch_tests.sh
-. "$TESTS_DIR/suites/zxfer_snapshot_discovery_remote_batch_tests.sh"
-
 # zxfer-test-fragment: suites/zxfer_snapshot_discovery_failure_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_discovery_failure_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_discovery_failure_tests.sh"
@@ -51,7 +45,6 @@ suite() {
 		"$TESTS_DIR/test_zxfer_snapshot_discovery.sh" \
 		"$TESTS_DIR/suites/zxfer_snapshot_discovery_stream_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_snapshot_discovery_full_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_discovery_remote_batch_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_snapshot_discovery_failure_tests.sh"
 }
 

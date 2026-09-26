@@ -1,7 +1,8 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Current-shell seam and injected failure-propagation cases for
-# src/zxfer_snapshot_discovery.sh. Run by tests/test_zxfer_snapshot_discovery.sh.
+# Current-shell seam, injected failure-propagation and source-listing failure
+# cases for src/zxfer_snapshot_discovery.sh. Run by
+# tests/test_zxfer_snapshot_discovery.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_capture_recursive_dataset_list_from_snapshot_file_extracts_sorted_unique_datasets() {
@@ -463,4 +464,217 @@ test_collapsed_status_ladder_forms_preserve_original_failure_status() {
 
 	assertEquals "The 'cmd || return \"\$?\"' collapse must propagate the failed command's exact status." \
 		"plain=27 cleanup=27" "$output"
+}
+
+test_get_zfs_list_throws_when_source_snapshot_list_is_empty() {
+	set +e
+	output=$(
+		(
+			counter_file="$TEST_TMPDIR/get_zfs_empty.counter"
+			printf '%s\n' 0 >"$counter_file"
+			zxfer_get_temp_file() {
+				idx=$(cat "$counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$counter_file"
+				g_zxfer_temp_file_result="$TEST_TMPDIR/get_zfs_empty.$idx"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				: >"$1"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "backup/dst"
+			}
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		)
+	)
+	status=$?
+
+	assertEquals "Empty source snapshot listings should abort with zxfer's direct invariant failure status." 1 "$status"
+	assertContains "Empty source snapshot listings should surface the retrieval failure." \
+		"$output" "Failed to retrieve snapshots from the source"
+}
+
+test_get_zfs_list_restores_source_last_command_when_background_snapshot_listing_fails() {
+	set +e
+	output=$(
+		(
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
+			counter_file="$TEST_TMPDIR/get_zfs_fail.counter"
+			dest_cache_stage_path=""
+			printf '%s\n' 0 >"$counter_file"
+			zxfer_get_temp_file() {
+				idx=$(cat "$counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$counter_file"
+				g_zxfer_temp_file_result="$g_zxfer_run_tmp_root/get_zfs_fail.$idx"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				: >"$1"
+				printf '%s\n' "missing command" >"$2"
+				sh -c 'exit 37' &
+				g_source_snapshot_list_pid=$!
+				g_source_snapshot_list_job_id=""
+				g_source_snapshot_list_cmd="sh -c 'printf \"%s\\n\" \"missing command\" >&2; exit 37'"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				dest_cache_stage_path=$1
+				: >"$1"
+				: >"$2"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
+					printf '%s\n' "backup/dst"
+					return 0
+				fi
+				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-o" ] && [ "$4" = "name" ] && [ "$5" = "backup" ]; then
+					printf '%s\n' "backup"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_throw_error() {
+				printf 'cmd=%s\n' "$g_zxfer_failure_last_command"
+				printf 'dst_cache=<%s>\n' "${g_zxfer_destination_snapshot_record_cache_file:-}"
+				if [ -n "$dest_cache_stage_path" ] && [ -e "$dest_cache_stage_path" ]; then
+					printf 'dst_cache_exists=yes\n'
+				else
+					printf 'dst_cache_exists=no\n'
+				fi
+				printf 'msg=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		)
+	)
+	status=$?
+
+	assertEquals "Background source snapshot listing failures should propagate the exact worker status." 37 "$status"
+	assertContains "Failure handling should restore the source snapshot command before reporting." \
+		"$output" "cmd=sh -c 'printf \"%s"
+	assertContains "The restored command should still reference the failing source snapshot probe." \
+		"$output" "\"missing command\" >&2; exit 37'"
+	assertContains "Background source snapshot listing failures should clear the remembered destination snapshot cache path before reporting." \
+		"$output" "dst_cache=<>"
+	assertContains "Background source snapshot listing failures should remove the staged destination snapshot cache file before reporting." \
+		"$output" "dst_cache_exists=no"
+	assertContains "Failure handling should still emit the source snapshot error." \
+		"$output" "msg=Failed to retrieve snapshots from the source: missing command"
+}
+
+test_get_zfs_list_reports_generic_source_failure_when_background_snapshot_listing_has_no_stderr() {
+	set +e
+	output=$(
+		(
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
+			counter_file="$TEST_TMPDIR/get_zfs_fail_blank.counter"
+			printf '%s\n' 0 >"$counter_file"
+			zxfer_get_temp_file() {
+				idx=$(cat "$counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$counter_file"
+				g_zxfer_temp_file_result="$TEST_TMPDIR/get_zfs_fail_blank.$idx"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				: >"$1"
+				: >"$2"
+				sh -c 'exit 1' &
+				g_source_snapshot_list_pid=$!
+				g_source_snapshot_list_job_id=""
+				g_source_snapshot_list_cmd="sh -c 'exit 1'"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
+					printf '%s\n' "backup/dst"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_throw_error() {
+				printf 'cmd=%s\n' "$g_zxfer_failure_last_command"
+				printf 'msg=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		)
+	)
+	status=$?
+
+	assertEquals "Background source snapshot failures without stderr should still propagate the exact worker status." 1 "$status"
+	assertContains "Failure handling should still restore the last attempted source snapshot command." \
+		"$output" "cmd=sh -c 'exit 1'"
+	assertContains "Failure handling should fall back to the generic source snapshot retrieval error when stderr is empty." \
+		"$output" "msg=Failed to retrieve snapshots from the source"
+}
+
+test_get_zfs_list_reports_source_stderr_readback_failures_after_background_failure() {
+	set +e
+	output=$(
+		(
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
+			l_read_count=0
+			zxfer_write_source_snapshot_list_to_file() {
+				: >"$1"
+				printf '%s\n' "missing stderr capture" >"$2"
+				sh -c 'exit 1' &
+				g_source_snapshot_list_pid=$!
+				g_source_snapshot_list_job_id=""
+				g_source_snapshot_list_cmd="sh -c 'exit 1'"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				printf '%s\n' "backup/dst@snapA" >"$1"
+				: >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
+					printf '%s\n' "backup/dst"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_read_snapshot_discovery_capture_file() {
+				l_read_count=$((l_read_count + 1))
+				return 31
+			}
+			zxfer_throw_error() {
+				printf 'cmd=%s\n' "$g_zxfer_failure_last_command"
+				printf 'msg=%s\n' "$1"
+				exit "${2:-1}"
+			}
+			zxfer_get_zfs_list
+		)
+	)
+	status=$?
+
+	assertEquals "Background source stderr readback failures should preserve the readback status." 31 "$status"
+	assertContains "Background source stderr readback failures should still restore the source snapshot command context." \
+		"$output" "cmd=sh -c 'exit 1'"
+	assertContains "Background source stderr readback failures should report the staged stderr context." \
+		"$output" "msg=Failed to read staged source snapshot stderr."
 }

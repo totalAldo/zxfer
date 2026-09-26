@@ -1,7 +1,8 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Full discovery, record-cache, and fast recursive no-op cases for
-# src/zxfer_snapshot_discovery.sh. Run by tests/test_zxfer_snapshot_discovery.sh.
+# Full discovery, destination routing (local and -T), record-cache, stage
+# timing and fast recursive no-op cases for src/zxfer_snapshot_discovery.sh.
+# Run by tests/test_zxfer_snapshot_discovery.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_get_zfs_list_bootstraps_missing_destination_dataset_when_pool_exists() {
@@ -189,7 +190,7 @@ test_collect_local_destination_dataset_inventory_preserves_setup_and_publish_fai
 				return 66
 			}
 			set +e
-			zxfer_collect_local_destination_dataset_inventory
+			zxfer_collect_destination_dataset_inventory
 			printf '%s\n' "$?"
 		)
 	)
@@ -210,7 +211,7 @@ test_collect_local_destination_dataset_inventory_preserves_setup_and_publish_fai
 				return 67
 			}
 			set +e
-			zxfer_collect_local_destination_dataset_inventory 2>/dev/null
+			zxfer_collect_destination_dataset_inventory 2>/dev/null
 			printf '%s\n' "$?"
 		)
 	)
@@ -1584,4 +1585,168 @@ EOF
 	expected_datasets=$(printf '%s\n%s' "tank/src" "tank/src/child")
 	assertEquals "Dataset cache should include every source filesystem." "$expected_datasets" "$g_recursive_source_dataset_list"
 	rm -f "$source_tmp" "$dest_tmp"
+}
+
+# A -T target is listed like a local destination: both destination listings go
+# through zxfer_run_destination_zfs_cmd (which routes to the -T host over its
+# control master), never through a separate remote script.
+test_get_zfs_list_routes_destination_listings_through_the_destination_role() {
+	for l_test_target_host in "" target.example; do
+		ssh_log="$TEST_TMPDIR/get_zfs_destination_role${l_test_target_host:+.remote}.ssh"
+		zfs_log="$TEST_TMPDIR/get_zfs_destination_role${l_test_target_host:+.remote}.zfs"
+		: >"$ssh_log"
+		: >"$zfs_log"
+
+		output=$(
+			(
+				SSH_LOG="$ssh_log"
+				ZFS_LOG="$zfs_log"
+				g_option_T_target_host=$l_test_target_host
+				zxfer_write_source_snapshot_list_to_file() {
+					printf '%s\n' "tank/src@snapA" >"$1"
+					: >"$2"
+					g_source_snapshot_list_pid=""
+				}
+				zxfer_invoke_ssh_shell_command_for_host() {
+					printf '%s\n' "unexpected-ssh" >>"$SSH_LOG"
+					return 99
+				}
+				zxfer_run_destination_zfs_cmd() {
+					printf '%s\n' "$*" >>"$ZFS_LOG"
+					if [ "$1" = "list" ] && [ "$2" = "-t" ]; then
+						printf '%s\n' "backup/dst"
+						printf '%s\n' "backup/dst/src"
+						return 0
+					fi
+					if [ "$1" = "list" ] && [ "$2" = "-Hr" ]; then
+						printf '%s\t%s\n' "backup/dst/src@snapA" "guid-a"
+						return 0
+					fi
+					return 99
+				}
+				zxfer_set_g_recursive_source_list() {
+					g_recursive_source_list="tank/src"
+					g_recursive_source_dataset_list="tank/src"
+				}
+				zxfer_get_zfs_list
+				printf 'dest=%s\n' "$g_recursive_dest_list"
+				printf 'root_cache=%s\n' "$(zxfer_lookup_destination_existence_cache "backup/dst" && printf '%s' "$g_zxfer_destination_existence_cache_entry_result")"
+				printf 'raw=%s\n' "$(cat "$g_zxfer_destination_snapshot_record_cache_file")"
+			)
+		)
+
+		assertEquals "Destination discovery should not invoke ssh outside the destination role [target:$l_test_target_host]." \
+			"" "$(cat "$ssh_log")"
+		assertEquals "Destination discovery should list the snapshots, then the dataset inventory, through the destination role [target:$l_test_target_host]." \
+			"list -Hr -o name,guid -t snapshot backup/dst/src
+list -t filesystem,volume -Hr -o name backup/dst" "$(cat "$zfs_log")"
+		assertContains "Destination discovery should publish the recursive destination inventory [target:$l_test_target_host]." \
+			"$output" "dest=backup/dst
+backup/dst/src"
+		assertContains "Destination discovery should seed the destination root existence cache [target:$l_test_target_host]." \
+			"$output" "root_cache=1"
+		assertContains "Destination discovery should keep the raw destination snapshot cache [target:$l_test_target_host]." \
+			"$output" "raw=backup/dst/src@snapA	guid-a"
+	done
+}
+
+# A -T no-op lists no dataset inventory: nothing after discovery reads it.
+test_get_zfs_list_remote_target_noop_skips_the_dataset_inventory() {
+	zfs_log="$TEST_TMPDIR/get_zfs_remote_noop.zfs"
+	: >"$zfs_log"
+
+	(
+		ZFS_LOG="$zfs_log"
+		g_option_T_target_host=target.example
+		g_option_R_recursive="-R"
+		zxfer_write_source_snapshot_list_to_file() {
+			printf '%s\n' "tank/src@snapA	guid-a" >"$1"
+			: >"$2"
+			g_source_snapshot_list_pid=""
+		}
+		zxfer_run_destination_zfs_cmd() {
+			printf '%s\n' "$*" >>"$ZFS_LOG"
+			printf '%s\t%s\n' "backup/dst/src@snapA" "guid-a"
+		}
+		zxfer_get_zfs_list
+	) >/dev/null
+
+	assertEquals "A -T no-op should list only the destination snapshots." \
+		"list -Hr -o name,guid -t snapshot backup/dst/src" "$(cat "$zfs_log")"
+}
+
+test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
+	output=$(
+		(
+			counter_file="$TEST_TMPDIR/get_zfs_profile.counter"
+			now_counter_file="$TEST_TMPDIR/get_zfs_profile.now.counter"
+			printf '%s\n' 0 >"$counter_file"
+			printf '%s\n' 0 >"$now_counter_file"
+			zxfer_get_temp_file() {
+				idx=$(cat "$counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$counter_file"
+				g_zxfer_temp_file_result="$TEST_TMPDIR/get_zfs_profile.$idx"
+				: >"$g_zxfer_temp_file_result"
+			}
+			zxfer_profile_now_ms() {
+				idx=$(cat "$now_counter_file")
+				idx=$((idx + 1))
+				printf '%s\n' "$idx" >"$now_counter_file"
+				if [ "$idx" = "1" ]; then
+					printf '%s\n' 1000
+				elif [ "$idx" = "2" ]; then
+					printf '%s\n' 1500
+				elif [ "$idx" = "3" ]; then
+					printf '%s\n' 1900
+				elif [ "$idx" = "4" ]; then
+					printf '%s\n' 2600
+				elif [ "$idx" = "5" ]; then
+					printf '%s\n' 3000
+				elif [ "$idx" = "6" ]; then
+					printf '%s\n' 3550
+				fi
+			}
+			zxfer_echoV() {
+				:
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				printf '%s\n' "tank/src@snapA" >"$1"
+				: >"$2"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			zxfer_set_g_recursive_source_list() {
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+			}
+			zxfer_reverse_file_lines() {
+				cat "$1"
+			}
+			g_option_V_very_verbose=1
+			zxfer_run_destination_zfs_cmd() {
+				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
+					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
+					[ "$7" = "backup/dst" ]; then
+					printf '%s\n' "backup/dst"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_get_zfs_list
+			printf 'source_ms=%s\n' "${g_zxfer_profile_source_snapshot_listing_ms:-0}"
+			printf 'destination_ms=%s\n' "${g_zxfer_profile_destination_snapshot_listing_ms:-0}"
+			printf 'diff_ms=%s\n' "${g_zxfer_profile_snapshot_diff_sort_ms:-0}"
+		)
+	)
+
+	assertContains "Very-verbose snapshot discovery should accumulate source snapshot listing timings." \
+		"$output" "source_ms=1600"
+	assertContains "Very-verbose snapshot discovery should accumulate destination listing timings." \
+		"$output" "destination_ms=400"
+	assertContains "Very-verbose snapshot discovery should accumulate diff/sort timings." \
+		"$output" "diff_ms=550"
 }

@@ -77,6 +77,17 @@
 #       test_delete_option_live_destroys_only_extra_destination_snapshot
 #       → exactly one "MUTATE destroy" of the extra snapshot and no sends.
 #
+#   -T destination discovery (ordinary listings over the target master)
+#       test_remote_target_destination_listing_failure_fails_closed
+#       → a failed snapshot listing on the -T host keeps the zfs exit status
+#         and the local "Failed to retrieve snapshot list" report.
+#       test_remote_target_ssh_failure_during_discovery_fails_closed
+#       → an ssh failure of that listing exits 255 with a report.
+#       test_remote_target_bootstraps_a_missing_destination_root
+#       → a missing -T root whose pool the live probe lists is bootstrapped.
+#       test_remote_target_missing_root_with_an_unlistable_pool_fails_closed
+#       → the same root with an unlistable pool fails closed.
+#
 #   -T remote destination, -P property pass (role-routing fix, 2026-09)
 #       test_remote_target_property_pass_reads_destination_properties_over_ssh
 #       → every destination-side `zfs get` crosses the ssh transport and no
@@ -781,12 +792,12 @@ test_parallel_jobs_keep_dataset_names_with_spaces_whole_locally_and_over_origin(
 }
 
 # Invariant: -V must not change replication outcomes, and an ssh without
-# control-socket support still replicates over direct connections. Regression
-# for the batched -T destination discovery aborting under -V because a
-# profiling recorder's non-zero status leaked into the batch function's
-# return value (zxfer_profile_record_zfs_call returned 1 for destination-side
-# calls). The minimal mock ssh rejects -M.
-test_remote_target_batch_discovery_succeeds_with_very_verbose() {
+# control-socket support still replicates over direct connections, -T
+# destination discovery included. Regression for -T destination discovery
+# aborting under -V because a profiling recorder's non-zero status leaked into
+# a discovery function's return value (zxfer_profile_record_zfs_call returned
+# 1 for destination-side calls). The minimal mock ssh rejects -M.
+test_remote_target_discovery_succeeds_with_very_verbose() {
 	planning_setup_env
 	zxfer_mockbin_write_minimal_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write minimal mock ssh."
@@ -801,8 +812,8 @@ test_remote_target_batch_discovery_succeeds_with_very_verbose() {
 
 	assertEquals "-V remote no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
 		0 "$l_remote_noop_status"
-	assertTrue "the batched -T destination discovery must have run" \
-		"grep -q 'ZXFER_DESTINATION_DISCOVERY_BATCH_V1' '$SSH_LOG'"
+	assertTrue "the -T destination snapshot listing must have run over ssh" \
+		"grep -q \"'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'\" '$SSH_LOG'"
 	for l_remote_noop_role in origin target; do
 		assertContains "-V must explain the direct-connection fallback for the $l_remote_noop_role host" \
 			"$(cat "$CASE_DIR/zxfer.stderr")" \
@@ -846,8 +857,9 @@ test_remote_origin_pull_noop_opens_master_first_and_probes_once() {
 }
 
 # Invariant: a clean -T push no-op opens the target's master before its first
-# remote command, runs the capability probe and the batched destination
-# discovery over it, and closes it once at exit.
+# remote command, runs the capability probe and the destination snapshot
+# listing over it, lists no destination dataset inventory (nothing on a no-op
+# reads it), and closes the master once at exit.
 test_remote_target_push_noop_opens_master_first_and_probes_once() {
 	planning_setup_env
 	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
@@ -869,8 +881,10 @@ test_remote_target_push_noop_opens_master_first_and_probes_once() {
 		"grep -q -- '-M -S [^ ]*/ssh-target.sock -fN localhost' '$SSH_LOG'"
 	assertEquals "the target host must cost exactly one capability probe round trip" \
 		1 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
-	assertEquals "the destination discovery batch must run once over the target master" \
-		1 "$(grep -c -- 'ssh-target.sock localhost .*ZXFER_DESTINATION_DISCOVERY_BATCH_V1' "$SSH_LOG")"
+	assertEquals "the destination snapshot listing must run once over the target master" \
+		1 "$(grep -c -- "ssh-target.sock localhost .*'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'" "$SSH_LOG")"
+	assertEquals "a no-op must not list the destination dataset inventory" \
+		0 "$(grep -c -- "'filesystem,volume'" "$SSH_LOG")"
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
 }
@@ -901,8 +915,8 @@ test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 		"grep -q -- 'ssh-target.sock localhost' '$SSH_LOG'"
 	assertFalse "target commands must never use the origin socket" \
 		"grep -q -- 'ssh-origin.sock 127.0.0.1' '$SSH_LOG'"
-	assertEquals "the destination discovery batch must run once over the target master" \
-		1 "$(grep -c -- 'ssh-target.sock 127.0.0.1 .*ZXFER_DESTINATION_DISCOVERY_BATCH_V1' "$SSH_LOG")"
+	assertEquals "the destination snapshot listing must run once over the target master" \
+		1 "$(grep -c -- "ssh-target.sock 127.0.0.1 .*'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'" "$SSH_LOG")"
 
 	: >"$SSH_LOG"
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
@@ -918,6 +932,156 @@ test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 		"grep -q -- 'ssh-target.sock' '$SSH_LOG'"
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
+}
+
+# Purpose: Run a -T localhost push of STATE_DIR through the fault-injecting
+# socket-aware mock ssh, logging ssh calls to $CASE_DIR/ssh.log (SSH_LOG).
+# Usage: planning_run_remote_target_push; sets PLANNING_RUN_STATUS. Export
+# any MOCK_FAIL_* variables first: a prefix assignment on a function call is
+# not exported on FreeBSD sh.
+planning_run_remote_target_push() {
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write socket-aware mock ssh."
+	SSH_LOG="$CASE_DIR/ssh.log"
+	: >"$SSH_LOG"
+	MOCK_SSH_LOG=$SSH_LOG
+	export MOCK_SSH_LOG
+	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
+		planning_run_zxfer "$STATE_DIR" -T localhost -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	PLANNING_RUN_STATUS=$?
+	unset MOCK_SSH_LOG
+}
+
+# Purpose: Make the -T destination root and its mapped datasets answer like
+# missing datasets, while the pool rule is left to the caller. The recursive
+# snapshot listing fails, each exact probe prints zfs's missing-dataset line
+# (probes read stdout and stderr together) and the dataset inventory fails
+# once with that line on stderr, through the zfs fault injector.
+# Usage: planning_make_remote_destination_root_missing; exports the MOCK_FAIL_*
+# variables, which the caller unsets.
+planning_make_remote_destination_root_missing() {
+	planning_force_manifest_failure \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" 1
+	for l_missing_suffix in "" /child1 /child2; do
+		l_missing_dataset=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_missing_suffix
+		l_missing_fixture="missing_${l_missing_suffix#/}.list"
+		printf "cannot open '%s': dataset does not exist\n" "$l_missing_dataset" \
+			>"$STATE_DIR/$l_missing_fixture" ||
+			fail "Unable to write the missing-dataset fixture."
+		# The first matching rule wins, so these go first.
+		{
+			printf 'list -H %s\t%s\t1\n' "$l_missing_dataset" "$l_missing_fixture"
+			cat "$STATE_DIR/manifest"
+		} >"$STATE_DIR/manifest.new" &&
+			mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
+			fail "Unable to prepend the missing-dataset rule."
+	done
+	mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
+	MOCK_FAIL_TOOL=zfs
+	MOCK_FAIL_CALL=1
+	MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
+	MOCK_FAIL_MATCH="list -t filesystem,volume -Hr -o name $ZXFER_MOCKBIN_DEST_ROOT"
+	MOCK_FAIL_STDERR="cannot open '$ZXFER_MOCKBIN_DEST_ROOT': dataset does not exist"
+	MOCK_FAIL_STATUS=1
+	export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
+		MOCK_FAIL_STDERR MOCK_FAIL_STATUS
+}
+
+# Invariant (-T discovery): a failed destination snapshot listing on the -T
+# host fails closed like a local one: the zfs exit status, the snapshot
+# discovery stage report, and zero mutating or send/receive argv.
+test_remote_target_destination_listing_failure_fails_closed() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" remote_dstsnapfail
+	planning_force_manifest_failure \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" 2
+
+	planning_run_remote_target_push
+	assertEquals "a failed -T destination snapshot listing must keep the zfs exit status; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		2 "$PLANNING_RUN_STATUS"
+	assertEquals "the listing must have run over the target master" \
+		1 "$(grep -c -- "ssh-target.sock localhost .*'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'" "$SSH_LOG")"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+	planning_assert_failure_report "snapshot discovery" \
+		"Failed to retrieve snapshot list from the destination."
+}
+
+# Invariant (-T discovery): when the ssh call carrying the destination
+# snapshot listing fails, the run stops with ssh's exit status 255 and ssh's
+# diagnostic, and changes nothing.
+test_remote_target_ssh_failure_during_discovery_fails_closed() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" remote_sshfail
+	mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
+	MOCK_FAIL_TOOL=ssh
+	MOCK_FAIL_CALL=1
+	MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
+	MOCK_FAIL_MATCH="*'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'"
+	export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH
+
+	planning_run_remote_target_push
+	unset MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH
+	assertEquals "an ssh failure during -T discovery must exit with ssh's status; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		255 "$PLANNING_RUN_STATUS"
+	assertEquals "exactly the listing's ssh call must have failed" \
+		1 "$(grep -c '^fail	' "$SSH_LOG")"
+	assertContains "ssh's diagnostic must reach stderr" \
+		"$(cat "$CASE_DIR/zxfer.stderr")" "Connection to localhost closed by remote host."
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+	planning_assert_failure_report "snapshot discovery" \
+		"Failed to retrieve snapshot list from the destination."
+}
+
+# Invariant (-T discovery): a missing -T destination root is bootstrapped
+# only after the live pool probe, run over the target master, lists its pool;
+# every dataset is then received.
+test_remote_target_bootstraps_a_missing_destination_root() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" remote_missing_root
+	l_missing_pool=${ZXFER_MOCKBIN_DEST_ROOT%%/*}
+	printf '%s\n' "$l_missing_pool" >"$STATE_DIR/dst_pool.list"
+	printf 'list -H -o name %s\tdst_pool.list\t0\n' "$l_missing_pool" \
+		>>"$STATE_DIR/manifest" || fail "Unable to append the pool rule."
+	planning_make_remote_destination_root_missing
+
+	planning_run_remote_target_push
+	unset MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
+		MOCK_FAIL_STDERR MOCK_FAIL_STATUS
+	assertEquals "a missing -T root whose pool exists must be bootstrapped; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$PLANNING_RUN_STATUS"
+	assertEquals "the pool probe must run once, over the target master" \
+		1 "$(grep -c -- "ssh-target.sock localhost .*'list' '-H' '-o' 'name' '$l_missing_pool'" "$SSH_LOG")"
+	for l_missing_suffix in "" /child1 /child2; do
+		planning_assert_log_has_line \
+			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_missing_suffix"
+	done
+	planning_assert_no_mutations
+	assertNotContains "a bootstrap must not report a failure" \
+		"$(cat "$CASE_DIR/zxfer.stderr")" "zxfer: failure report begin"
+}
+
+# Invariant (-T discovery): a missing -T destination root whose pool cannot be
+# listed fails closed in discovery, before any send or receive.
+test_remote_target_missing_root_with_an_unlistable_pool_fails_closed() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" remote_missing_pool
+	l_missing_pool=${ZXFER_MOCKBIN_DEST_ROOT%%/*}
+	printf 'list -H -o name %s\t-\t2\n' "$l_missing_pool" \
+		>>"$STATE_DIR/manifest" || fail "Unable to append the pool rule."
+	planning_make_remote_destination_root_missing
+
+	planning_run_remote_target_push
+	unset MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
+		MOCK_FAIL_STDERR MOCK_FAIL_STATUS
+	assertEquals "an unlistable -T pool must keep the pool probe's status; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		2 "$PLANNING_RUN_STATUS"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+	planning_assert_failure_report "snapshot discovery" \
+		"Destination dataset [$ZXFER_MOCKBIN_DEST_ROOT] is missing and destination pool [$l_missing_pool] could not be listed"
 }
 
 # Invariant: when the origin's control master cannot be opened the run fails
