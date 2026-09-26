@@ -439,15 +439,20 @@ zxfer_get_validated_source_dataset_create_metadata() {
 # PLAN: DERIVE AND DIFF
 ################################################################################
 
-# Shared filter prefix: filter_property_list(list, drop_unsupported) drops
-# readonly and ignored (-I) properties unless the item is an explicit
-# override and, when drop_unsupported is 1, destination-unsupported (-U)
-# properties, collecting one verbose warning per dropped unsupported item.
+# Shared rules prefix of the plan, child-create and child-inherit programs.
+#   filter_property_list(list, drop_unsupported)  drop readonly and ignored
+#       (-I) properties unless the item is an explicit override and, when
+#       drop_unsupported is 1, destination-unsupported (-U) properties,
+#       collecting one verbose warning per dropped unsupported item
+#   sets_locally(property, source)  the inheritance rule: a local value or a
+#       noninheritable property is set on the dataset itself; any other value
+#       may be inherited from its parent
 # The lists arrive in ZXFER_AWK_REMOVE_LIST and ZXFER_AWK_UNSUPPORTED_LIST,
-# and verbose with -v. Every caller sets both variables, empty when unused, so
-# an exported value never leaks in. Runs behind ZXFER_PROPERTY_AWK_LIB.
+# the noninheritable names and verbose with -v. Every caller sets both
+# variables, empty when unused, so an exported value never leaks in. Runs
+# behind ZXFER_PROPERTY_AWK_LIB.
 # shellcheck disable=SC2016  # AWK program is intentionally single-quoted.
-ZXFER_PROPERTY_FILTER_AWK='
+ZXFER_PROPERTY_RULES_AWK='
 function filter_property_list(list, drop_unsupported, count, items, i, fields, field_count, output) {
 	count = split(list, items, ",")
 	output = ""
@@ -466,9 +471,13 @@ function filter_property_list(list, drop_unsupported, count, items, i, fields, f
 	}
 	return output
 }
+function sets_locally(property, source) {
+	return (source == "local" || (property in noninheritable))
+}
 BEGIN {
 	csv_to_set(ENVIRON["ZXFER_AWK_REMOVE_LIST"], remove_property)
 	csv_to_set(ENVIRON["ZXFER_AWK_UNSUPPORTED_LIST"], unsupported_property)
+	csv_to_set(noninheritable_properties, noninheritable)
 }
 '
 
@@ -481,7 +490,7 @@ BEGIN {
 # and inherit lists, one per line, then __ZXFER_PROPERTY_PLAN__ and one line
 # per -U warning. A creation-time property that differs on the destination
 # prints its name and the warnings and exits 3. Runs behind
-# ZXFER_PROPERTY_AWK_LIB and ZXFER_PROPERTY_FILTER_AWK.
+# ZXFER_PROPERTY_AWK_LIB and ZXFER_PROPERTY_RULES_AWK.
 # shellcheck disable=SC2016  # AWK field references must remain literal.
 ZXFER_PROPERTY_PLAN_AWK='
 function append_creation(property, value, source) {
@@ -494,20 +503,7 @@ function print_warnings(i) {
 	for (i = 1; i <= warning_count; i++)
 		print warnings[i]
 }
-function source_requires_local_set(source_value) {
-	return (source_value == "local")
-}
-function source_requires_initial_set(source_value) {
-	return (source_value == "local" || source_value == "override")
-}
-function property_blocks_inherit(property_name) {
-	return (property_name in noninheritable)
-}
-function source_can_inherit_on_child(property_name, source_value) {
-	return (source_value != "local" && !(property_name in noninheritable))
-}
 BEGIN {
-	csv_to_set(noninheritable_properties, noninheritable)
 	if (source_dstype != "volume")
 		csv_to_set(required_creation_properties, required_create)
 
@@ -589,11 +585,12 @@ BEGIN {
 			if (property == "" || (property in required_create))
 				continue
 			item = property "=" plan_value[i]
+			# Local and -o values are set on the replicated root itself.
+			root_sets = (plan_source[i] == "local" || plan_source[i] == "override")
 			if (!(property in dest_available)) {
-				if (source_requires_initial_set(plan_source[i]))
+				if (root_sets)
 					initial_set_list = append_csv(initial_set_list, item)
-				if (source_requires_local_set(plan_source[i]) ||
-					property_blocks_inherit(property))
+				if (sets_locally(property, plan_source[i]))
 					child_set_list = append_csv(child_set_list, item)
 				else
 					inherit_list = append_csv(inherit_list, item)
@@ -601,20 +598,18 @@ BEGIN {
 			}
 
 			if (dest_value[property] != plan_value[i] ||
-				(source_requires_initial_set(plan_source[i]) &&
-				dest_source[property] != "local"))
+				(root_sets && dest_source[property] != "local"))
 				initial_set_list = append_csv(initial_set_list, item)
 
 			if (plan_value[i] != dest_value[property]) {
-				if (source_requires_local_set(plan_source[i]) ||
-					property_blocks_inherit(property))
+				if (sets_locally(property, plan_source[i]))
 					child_set_list = append_csv(child_set_list, item)
 				else
 					inherit_list = append_csv(inherit_list, item)
-			} else if (source_requires_local_set(plan_source[i]) &&
+			} else if (plan_source[i] == "local" &&
 				dest_source[property] != "local") {
 				child_set_list = append_csv(child_set_list, item)
-			} else if (source_can_inherit_on_child(property, plan_source[i]) &&
+			} else if (!sets_locally(property, plan_source[i]) &&
 				dest_source[property] == "local") {
 				inherit_list = append_csv(inherit_list, item)
 			}
@@ -674,7 +669,7 @@ zxfer_plan_property_changes() {
 			-v required_creation_properties="$ZXFER_REQUIRED_CREATION_PROPERTIES" \
 			-v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
 			-v verbose="${g_option_v_verbose:-0}" \
-			"$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_FILTER_AWK$ZXFER_PROPERTY_PLAN_AWK"
+			"$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK$ZXFER_PROPERTY_PLAN_AWK"
 	) || l_property_plan_status=$?
 	case $l_property_plan_status in
 	0 | 3) ;;
@@ -748,9 +743,8 @@ zxfer_filter_child_creation_overrides_for_parent() {
 		ZXFER_AWK_REMOVE_LIST="${3:-},${g_option_I_ignore_properties:-}" \
 		ZXFER_AWK_UNSUPPORTED_LIST='' "${g_cmd_awk:-awk}" \
 		-v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
-		"$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_FILTER_AWK"'
+		"$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK"'
 BEGIN {
-	csv_to_set(noninheritable_properties, noninheritable)
 	first_values(filter_property_list(ENVIRON["ZXFER_AWK_PARENT_PVS"], 0), parent_value, parent_source)
 	count = split(ENVIRON["ZXFER_AWK_CREATION_PVS"], items, ",")
 	for (i = 1; i <= count; i++) {
@@ -943,12 +937,9 @@ zxfer_run_destination_property_verb() {
 # first: a property stays inherited only when the parent already provides the
 # desired effective value (or the value is a matching inheritable -o
 # override); otherwise it must be set locally on the child. Runs behind
-# ZXFER_PROPERTY_AWK_LIB and ZXFER_PROPERTY_FILTER_AWK.
+# ZXFER_PROPERTY_AWK_LIB and ZXFER_PROPERTY_RULES_AWK.
 # shellcheck disable=SC2016  # AWK field references must remain literal.
 ZXFER_CHILD_INHERIT_ADJUST_AWK='
-function source_requires_local_set(property_name, source_value) {
-	return (source_value == "local" || (property_name in noninheritable))
-}
 function matches_inheritable_override(property_name, property_value) {
 	return ((property_name in override_source) &&
 		override_source[property_name] == "override" &&
@@ -956,7 +947,6 @@ function matches_inheritable_override(property_name, property_value) {
 		override_value[property_name] == property_value)
 }
 BEGIN {
-	csv_to_set(noninheritable_properties, noninheritable)
 	first_values(filter_property_list(ENVIRON["ZXFER_AWK_PARENT_PVS"], 0), parent_value, parent_source)
 	first_values(ENVIRON["ZXFER_AWK_OVERRIDE_PVS"], override_value, override_source)
 
@@ -969,7 +959,7 @@ BEGIN {
 		set_value = set_fields[2]
 
 		if (!(set_property in override_source) ||
-			source_requires_local_set(set_property, override_source[set_property])) {
+			sets_locally(set_property, override_source[set_property])) {
 			new_set_list = append_csv(new_set_list, set_items[i])
 			continue
 		}
@@ -1056,7 +1046,7 @@ zxfer_adjust_child_inherit_to_match_parent() {
 			ZXFER_AWK_REMOVE_LIST="$l_adjust_readonly_properties,${g_option_I_ignore_properties:-}" \
 			ZXFER_AWK_UNSUPPORTED_LIST='' \
 			"${g_cmd_awk:-awk}" -v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
-			"$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_FILTER_AWK$ZXFER_CHILD_INHERIT_ADJUST_AWK"
+			"$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK$ZXFER_CHILD_INHERIT_ADJUST_AWK"
 	) || l_adjust_status=$?
 	[ "$l_adjust_status" -eq 0 ] ||
 		zxfer_throw_error "Failed to reconcile child property inheritance."

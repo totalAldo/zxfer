@@ -234,7 +234,7 @@ unchanged. A C1 control character, UTF-8 encoded (`C2 80` to `C2 9F`, such as
 reports, `ZXFER_ERROR_LOG` and the `-v`/`-V` property lines as is, and some
 terminals (xterm, for example) act on it. This predates the 2026.09.26
 verbose escaping. Separately, with `-U` and `-v`, the warning
-`Destination does not support property NAME=VALUE` (`ZXFER_PROPERTY_FILTER_AWK`
+`Destination does not support property NAME=VALUE` (`ZXFER_PROPERTY_RULES_AWK`
 and `zxfer_plan_property_changes` in `src/zxfer_property_transfer.sh`) prints
 the decoded value raw, one warning line per line of the value, so a value can
 print C0 control bytes and forge output lines. User properties are never

@@ -34,8 +34,10 @@ status: 0" "$(zxfer_property_test_read_override ",compression=lz4,,atime=off,")"
 }
 
 test_read_override_properties_escapes_only_a_backslash_before_a_comma() {
+	# The last value ends in a backslash that no comma follows.
+	l_trailing_backslash_text="user:path=C:\\new,user:end=x\\"
 	assertEquals 'list: <user:path=C:\new=override,user:end=x\=override>
-status: 0' "$(zxfer_property_test_read_override 'user:path=C:\new,user:end=x\')"
+status: 0' "$(zxfer_property_test_read_override "$l_trailing_backslash_text")"
 	assertEquals "A doubled backslash before a comma keeps one backslash and the comma." \
 		'list: <user:a=x\%2Cuser:b%3Dy=override>
 status: 0' "$(zxfer_property_test_read_override 'user:a=x\\,user:b=y')"
@@ -347,11 +349,11 @@ compression=lz4" "$(zxfer_property_test_diff 0 "" "compression=lz4=override" "")
 }
 
 test_plan_property_changes_skips_must_create_properties_and_multiple_entries() {
+	l_diff_source="casesensitivity=sensitive=-,compression=lz4=local,atime=off=received"
+	l_diff_dest="casesensitivity=sensitive=-,compression=off=local,atime=on=local"
 	assertEquals "compression=lz4,atime=off
 compression=lz4
-atime=off" "$(zxfer_property_test_diff 1 \
-		"casesensitivity=sensitive=-,compression=lz4=local,atime=off=received" "" \
-		"casesensitivity=sensitive=-,compression=off=local,atime=on=local")"
+atime=off" "$(zxfer_property_test_diff 1 "$l_diff_source" "" "$l_diff_dest")"
 }
 
 test_plan_property_changes_preserves_literal_backslashes() {
