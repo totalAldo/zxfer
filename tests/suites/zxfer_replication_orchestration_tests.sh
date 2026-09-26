@@ -1,5 +1,5 @@
 #!/bin/sh
-# Replication initialization, orchestration, property, and metadata behavior tests.
+# Replication initialization, orchestration, and property-pass behavior tests.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_run_zfs_mode_stops_before_replication_when_backup_preflight_fails() {

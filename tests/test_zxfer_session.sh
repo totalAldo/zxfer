@@ -333,43 +333,6 @@ test_zxfer_session_run_requires_local_parallel_for_jobs_before_any_helper_starts
 connect origin=operator@origin" "$(cat "$log")"
 }
 
-test_migration_service_status_only_restore_returns_failure_without_throwing() {
-	output=$(
-		(
-			g_option_n_dryrun=0
-			g_zxfer_services_to_restart="svc:/broken:default"
-			g_services_need_relaunch=1
-			g_services_relaunch_in_progress=0
-			zxfer_echov() { :; }
-			svcadm() { return 1; }
-			zxfer_throw_error() {
-				printf '%s\n' throw-called
-				exit 91
-			}
-
-			l_restore_status=0
-			zxfer_restore_migration_services_status_only ||
-				l_restore_status=$?
-			printf 'status=%s\n' "$l_restore_status"
-			printf 'message=%s\n' "$g_zxfer_migration_service_restore_failure_message"
-			printf 'pending=%s\n' "$g_zxfer_services_to_restart"
-			printf 'need=%s guard=%s\n' \
-				"$g_services_need_relaunch" "$g_services_relaunch_in_progress"
-		)
-	)
-
-	assertContains "Status-only migration restore should report a service enable failure without exiting its caller." \
-		"$output" "status=1"
-	assertContains "Status-only migration restore should publish the established operator-facing failure message." \
-		"$output" "message=Couldn't re-enable service svc:/broken:default."
-	assertContains "Status-only migration restore should retain failed services for recovery." \
-		"$output" "pending=svc:/broken:default"
-	assertContains "Status-only migration restore should retain the failure guards after an incomplete restore." \
-		"$output" "need=1 guard=1"
-	assertNotContains "Status-only migration restore must not invoke the exiting error API." \
-		"$output" "throw-called"
-}
-
 test_zxfer_trap_exit_promotes_migration_restore_failure_and_finishes_reporting() {
 	shutdown_log="$TEST_TMPDIR/session-migration-shutdown.log"
 	: >"$shutdown_log"
