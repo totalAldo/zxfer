@@ -64,7 +64,11 @@ The project priority order still applies:
   runtime or session state.
 - Parsed option state should use `g_option_*` and should not be reused as
   general scratch state.
-- Function-scoped temporaries should use `l_` prefixes consistently.
+- Function-scoped temporaries should use `l_` prefixes consistently. POSIX
+  shell functions do not have local variables, so mutable scratch names must
+  also be function-specific along every direct current-shell call edge (for
+  example, `l_prepare_remote_host_status`, not a reusable `l_status` in both
+  caller and callee). This is a review convention; no tool enforces it.
 - Immutable internal constants may use `ZXFER_*`.
 - Only documented operator-facing `ZXFER_*` environment variables are public
   configuration inputs; uppercase alone does not imply user configurability.
@@ -94,8 +98,20 @@ The project priority order still applies:
 - Reuse the centralized command-rendering and execution helpers in
   [../src/zxfer_exec.sh](../src/zxfer_exec.sh) instead of adding new ad hoc
   `eval` paths.
+- The only remaining production `eval` is the single hardened pipeline
+  execution site in `zxfer_execute_rendered_shell_command()`. The
+  `callers eval` ratchet in `tests/budget_policy.tsv` caps production `eval`
+  at that one site; adding one requires an explicit purpose review.
 - Treat `-O` / `-T` host specs and remote wrapper tokens as structured command
   inputs, not as plain hostnames.
+- Build substantial remote helper protocols as readable multiline POSIX `sh`
+  programs with explicit command terminators and focused golden coverage. For
+  the capability and backup directory/write protocol paths, collapse nonblank
+  renderer lines to one physical command line only at the SSH or dry-run
+  transport boundary, immediately before the explicit `sh -c` handoff
+  required to survive csh/tcsh login shells. Do not make transport collapse a
+  general renderer API or apply it before configuration bytes have passed
+  control-character checks.
 
 ## Dependency And Path Handling
 
@@ -105,8 +121,25 @@ The project priority order still applies:
   `PATH` lookups in feature code.
 - Keep remote helper resolution inside
   [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh).
-- Validate absolute paths and reject control characters or unsafe whitespace in
-  resolved helper paths.
+- Reject tab, carriage-return, and line-feed bytes in
+  `ZXFER_SECURE_PATH`, `ZXFER_SECURE_PATH_APPEND`, and resolved helper paths
+  before splitting, caching, exporting, or remote rendering. Apply the same
+  exact byte-shape rule to `ZXFER_BACKUP_DIR` before deriving local or remote
+  metadata paths.
+
+## Result Channels And Status
+
+- Prefer stdout for pure values when command substitution cannot hide a needed
+  state change or lower-level status.
+- Use an owner-prefixed `g_zxfer_*_result` channel only for a deliberate
+  current-shell/hot-path handoff. The owning module is the sole writer; it
+  clears the channel before work, publishes only a complete validated result,
+  clears it on failure, and preserves the first meaningful non-zero status.
+- A caller must capture status before reading a result channel. Keep
+  cross-module readers deliberate and few; no tool inventories them.
+- Do not accept a caller-provided variable name and assign through `eval` as a
+  generic return mechanism. Add a narrow owner result, explicit publisher, or
+  ordinary stdout/status contract instead.
 
 ## Errors, Logging, And Output
 
@@ -121,7 +154,10 @@ The project priority order still applies:
 - Preserve structured stderr failure reporting, failure classes, and failure
   stages.
 - Prefer existing output helpers such as `zxfer_echov`, `zxfer_echoV`, and `zxfer_throw_error*`
-  instead of printing new ad hoc messages.
+  instead of printing new ad hoc messages. Print a value that may hold
+  untrusted bytes, such as a property value, through `zxfer_escape_report_value`
+  or `zxfer_echoV_escaped`, and print variable text with `printf '%s\n'`, not
+  `echo`, whose backslash expansion differs between shells.
 - Keep stdout/stderr behavior stable unless a compatibility change is
   intentional, documented, and tested.
 - Make verbose output useful for operators. Avoid noisy debug text that does
@@ -140,6 +176,13 @@ The project priority order still applies:
   `zxfer_cleanup_runtime_artifact_path`.
   They allocate under the one per-run 0700 temp root that trap exit removes
   with a single `rm -rf`.
+- `zxfer_create_runtime_artifact_file` creates each 0600 file in the current
+  shell under `umask 077` and noclobber, then restores the run umask recorded
+  when the temp root was created, so callers must not hold a temporary umask
+  across it. Helpers that overwrite a file the allocator just created use
+  `>|`. `zxfer_trap_exit` restores noclobber, noglob, `IFS`, and the run umask
+  before any cleanup, because a signal can land inside the allocator or a
+  `zxfer_split_begin`/`zxfer_split_end` pair.
 - Do not add new ad hoc runtime-temp-root `mktemp` calls, hard-coded `/tmp`
   scratch paths, raw `: >"$file"` truncation, unchecked `cat "$file"`
   readbacks, or unguarded `while ... done <"$file"` loops for staged payloads,
@@ -155,7 +198,8 @@ The project priority order still applies:
 - Register background PIDs and cleanup artifacts with the existing runtime
   helpers.
 - Remove temporary files, FIFOs, queues, and cache directories on both success
-  and failure paths unless they are intentionally preserved for debugging.
+  and failure paths unless they live under the per-run temp root, which the
+  exit trap removes as a whole, or are intentionally preserved for debugging.
 - When startup or iteration reset needs module-owned scratch state, call the
   module's public reset helper instead of duplicating its `g_*` inventory in
   the runtime layer.
@@ -169,11 +213,9 @@ The project priority order still applies:
   comment block in this short structured form:
 
 ```sh
-# Purpose: Return the resolved ssh transport argv for one host spec.
-# Usage: Called during remote bootstrap and command rendering so callers reuse
-# one quoting-safe transport builder instead of rebuilding ssh argv by hand.
-# Returns: Newline-delimited transport tokens.
-zxfer_get_ssh_transport_tokens_for_host() {
+# Purpose: Allocate one scratch file under the run root, or stop the run.
+# Usage: zxfer_get_temp_file; publishes g_zxfer_temp_file_result.
+zxfer_get_temp_file() {
 ```
 
 - Use `Purpose:` and `Usage:` on every function comment block.
@@ -210,11 +252,23 @@ zxfer_get_ssh_transport_tokens_for_host() {
 
 - Add or update focused shunit2 coverage when changing shell helpers or public
   behavior.
-- Use [../tests/test_helper.sh](../tests/test_helper.sh) for shared scaffolding
-  before adding new suite-local plumbing.
+- Keep [../tests/test_helper.sh](../tests/test_helper.sh) limited to loading
+  every module, the test lifecycle, and process capture. Domain fixtures such
+  as backup renderers or environment-driven fake tools stay in focused
+  `tests/helpers/*_fixtures.sh` files and must be sourced explicitly only by
+  the suites that own those cases.
 - Keep fixtures explicit and local to the suite unless they are broadly useful.
-- Update the integration harness expectations when behavior changes, but leave
-  actual integration execution to a human operator.
+- Start an entry suite's `setUp` with `zxfer_test_reset_all_owner_state`, then
+  override only suite-specific values; move domain-specific preparation into
+  named fixture helpers.
+- Stub `src/` functions inside a subshell so the stub cannot leak into later
+  cases.
+- Capture a command's status (`l_run_status=$?`) on the line after it before
+  asserting on it. In `assertEquals "... $(cat ERR)" 0 $?`, bash, ksh and zsh
+  expand `$?` to the substitution's status, so the check always passes.
+- Update integration expectations when behavior changes. Automated runs use
+  the disposable VM matrix with a `smoke` or `local` profile; leave direct-host
+  integration-harness execution to a human operator.
 
 ## Required Validation
 
@@ -236,8 +290,8 @@ docs in the same change:
 
 - [../README.md](../README.md)
 - [../CHANGELOG.txt](../CHANGELOG.txt)
-- [../man/zxfer.8](../man/zxfer.8)
-- [../man/zxfer.1m](../man/zxfer.1m)
+- canonical [../man/zxfer.8](../man/zxfer.8), followed by
+  `./tests/generate_solaris_manpage.sh --write` for the generated `.1m` page
 - [testing.md](./testing.md)
 - [architecture.md](./architecture.md)
 - [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) when applicable

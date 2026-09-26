@@ -1,0 +1,49 @@
+# Advisory performance report: a wall-clock A/B of ./zxfer against
+# upstream-compat-final and the helper spawn counts, both on a canned zfs and
+# a mock ssh, written to the job summary. Hosted-runner timing is noisy, so
+# this never gates: run_perf_ab.sh exits 0 on any slowdown and the job is
+# continue-on-error, so even a harness error leaves the workflow green. The
+# spawn-count budgets are enforced by the unit suites, not here.
+name: Performance
+
+on:
+  push:
+
+concurrency:
+  # Cancel superseded runs for the same pushed ref.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf-advisory:
+    name: perf A/B (advisory)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, so origin/upstream-compat-final exists locally.
+          fetch-depth: 0
+      - name: Wall-clock A/B against upstream-compat-final
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tests/run_perf_ab.sh --baseline-ref origin/upstream-compat-final --sizes 25,100 --reps 5 --summary "$GITHUB_STEP_SUMMARY"
+      - name: Helper spawn counts
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tests/run_microbench.sh >"$RUNNER_TEMP/microbench.tsv"
+          {
+            echo "### Helper spawns (tests/run_microbench.sh)"
+            echo
+            echo "| scenario | metric | count |"
+            echo "| --- | --- | ---: |"
+            awk -F '\t' '$2 == "TOTAL" || $2 ~ /^ssh_/ {
+              printf "| %s | %s | %s |\n", $1, $2, $3
+            }' "$RUNNER_TEMP/microbench.tsv"
+          } >>"$GITHUB_STEP_SUMMARY"

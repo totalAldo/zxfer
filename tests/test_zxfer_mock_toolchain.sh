@@ -233,8 +233,62 @@ test_canned_zfs_send_receive_defaults() {
 	l_status=$?
 	assertEquals "receive should consume stdin and exit 0" 0 "$l_status"
 	assertEquals "receive should emit nothing by default" "" "$l_output"
-	assertTrue "receive should be logged without MUTATE prefix" \
-		"grep -Fxq 'receive -F tank/dst' '$CASE_DIR/zfs.log'"
+	assertEquals "receive should be logged without MUTATE prefix and end with an END line naming its dataset" \
+		"send -I tank@1 tank@2
+receive -F tank/dst
+END receive tank/dst" "$(cat "$CASE_DIR/zfs.log")"
+}
+
+# Pin the socket-aware mock ssh: masters and commands that miss a live
+# control socket are new connections, commands over the socket multiplex,
+# and zxfer_mockbin_ssh_log_rows turns the log into the bench rows.
+test_socket_ssh_classifies_connections() {
+	zxfer_mockbin_write_socket_ssh "$CASE_DIR/ssh"
+	assertEquals "socket ssh write should succeed" 0 $?
+	l_socket="$CASE_DIR/origin.sock"
+	MOCK_SSH_LOG="$CASE_DIR/ssh.log"
+	export MOCK_SSH_LOG
+
+	"$CASE_DIR/ssh" -M -V 2>"$CASE_DIR/version.err"
+	assertEquals "the -M -V probe should succeed" 0 $?
+	"$CASE_DIR/ssh" -o BatchMode=yes -M -S "$l_socket" -fN localhost
+	assertTrue "a master should create its socket" "[ -e '$l_socket' ]"
+	l_output=$("$CASE_DIR/ssh" -o BatchMode=yes -p 2222 -l root \
+		-S "$l_socket" localhost printf "'%s|'" "'a b'" c)
+	assertEquals "a command should skip option values and run locally with the remote shell's word splitting" \
+		"a b|c|" "$l_output"
+	"$CASE_DIR/ssh" -S "$l_socket" -O check localhost
+	assertEquals "-O check should succeed on a live socket" 0 $?
+	"$CASE_DIR/ssh" localhost true
+	"$CASE_DIR/ssh" -S "$CASE_DIR/missing.sock" localhost true
+	"$CASE_DIR/ssh" -S "$l_socket" -O exit localhost
+	assertFalse "-O exit should remove the socket" "[ -e '$l_socket' ]"
+	"$CASE_DIR/ssh" -S "$l_socket" -O check localhost 2>"$CASE_DIR/check.err"
+	assertEquals "-O check should fail once the master exited" 255 $?
+	unset MOCK_SSH_LOG
+
+	assertEquals "each call should be logged with its kind" \
+		"version master mux control direct direct control control " \
+		"$(cut -f1 "$CASE_DIR/ssh.log" | tr '\n' ' ')"
+	assertEquals "the log rows should count masters and direct calls as connections" \
+		"demo	ssh_connections	3
+demo	ssh_invocations	8
+demo	ssh_master_opens	1" \
+		"$(zxfer_mockbin_ssh_log_rows demo "$CASE_DIR/ssh.log")"
+}
+
+test_make_bench_workdir_creates_a_private_dir_under_tmp() {
+	l_workdir=$(zxfer_mockbin_make_bench_workdir zxfer_mock_toolchain_test)
+	assertEquals "work directory creation should succeed" 0 $?
+	case "$l_workdir" in
+	/tmp/zxfer_mock_toolchain_test.??????) ;;
+	*) fail "the work directory should sit directly under /tmp: $l_workdir" ;;
+	esac
+	assertTrue "the work directory should hold a tmp/ for zxfer" \
+		"[ -d '$l_workdir/tmp' ]"
+	assertEquals "the work directory should be private (mode 0700)" \
+		"$l_workdir" "$(find "$l_workdir" -prune -perm 700 -print)"
+	rm -rf "$l_workdir"
 }
 
 test_build_fixture_tree_layout_and_guids() {

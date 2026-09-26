@@ -1,0 +1,3 @@
+# helper_path	function_name	rationale
+tests/helpers/process_capture.sh	zxfer_test_capture_subshell	Legacy string-script capture API used by existing suites.
+tests/helpers/process_capture.sh	zxfer_test_capture_subshell_split	Legacy split-stream string-script capture API used by existing suites.

@@ -39,6 +39,7 @@ zxfer_vm_reset_state() {
 	ZXFER_VM_LIST_ONLY=0
 	ZXFER_VM_LIST_PROFILES_ONLY=0
 	ZXFER_VM_SELECTED_GUESTS=
+	ZXFER_VM_VALIDATED_GUEST_MANIFEST_FILE=
 	ZXFER_VM_PRESERVE_FAILED_GUESTS=0
 	ZXFER_VM_JOBS=${ZXFER_VM_JOBS:-1}
 	ZXFER_VM_STREAM_GUEST_OUTPUT=${ZXFER_VM_STREAM_GUEST_OUTPUT:-0}
@@ -217,6 +218,7 @@ zxfer_vm_append_test_names() {
 	l_spec=$2
 	l_result=$l_current
 	l_tests=
+	l_invalid_test=
 
 	[ -n "$l_spec" ] || {
 		printf '%s\n' "$l_result"
@@ -224,12 +226,43 @@ zxfer_vm_append_test_names() {
 	}
 
 	l_tests=$(printf '%s\n' "$l_spec" | tr ',' ' ')
+	case $- in
+	*f*) l_restore_test_glob=0 ;;
+	*)
+		l_restore_test_glob=1
+		set -f
+		;;
+	esac
+	if [ "${IFS+set}" = "set" ]; then
+		l_saved_test_ifs_set=1
+		l_saved_test_ifs=$IFS
+	else
+		l_saved_test_ifs_set=0
+		l_saved_test_ifs=
+	fi
+	unset IFS
 	for l_test in $l_tests; do
 		[ -n "$l_test" ] || continue
+		case "$l_test" in
+		'' | [!a-z]* | *[!a-z0-9_]*)
+			l_invalid_test=$l_test
+			break
+			;;
+		esac
 		if ! zxfer_vm_list_contains "$l_result" "$l_test"; then
 			l_result=$(zxfer_vm_append_word "$l_result" "$l_test")
 		fi
 	done
+	if [ "$l_saved_test_ifs_set" -eq 1 ]; then
+		IFS=$l_saved_test_ifs
+	else
+		unset IFS
+	fi
+	if [ "$l_restore_test_glob" -eq 1 ]; then
+		set +f
+	fi
+	[ -z "$l_invalid_test" ] ||
+		zxfer_vm_die "Invalid integration test name for --only-test: $l_invalid_test"
 
 	printf '%s\n' "$l_result"
 }
@@ -285,16 +318,11 @@ zxfer_vm_test_layer_run_label() {
 }
 
 zxfer_vm_print_guest_list() {
-	printf '%s\n' "ubuntu"
-	printf '%s\n' "freebsd"
-	printf '%s\n' "omnios"
+	zxfer_vm_guest_names
 }
 
 zxfer_vm_print_profile_list() {
-	printf '%s\n' "smoke"
-	printf '%s\n' "local"
-	printf '%s\n' "full"
-	printf '%s\n' "ci"
+	zxfer_vm_profile_names
 }
 
 zxfer_vm_resolve_backend() {
@@ -380,15 +408,22 @@ zxfer_vm_backend_run_guest() {
 }
 
 zxfer_vm_integration_harness_extra_args() {
-	zxfer_vm_normalize_requested_tests
+	zxfer_vm_normalize_requested_tests || return 1
 	l_args=
+	l_test_arg=
 
 	if [ "${ZXFER_VM_FAILED_TESTS_ONLY:-0}" = "1" ]; then
 		l_args=$(zxfer_vm_append_word "$l_args" "--failed-tests-only")
 	fi
 	for l_test in $ZXFER_VM_ONLY_TESTS; do
+		case "$l_test" in
+		'' | [!a-z]* | *[!a-z0-9_]*)
+			zxfer_vm_die "Invalid integration test name for --only-test: $l_test"
+			;;
+		esac
+		l_test_arg=$(zxfer_vm_shell_quote "$l_test")
 		l_args=$(zxfer_vm_append_word "$l_args" "--only-test")
-		l_args=$(zxfer_vm_append_word "$l_args" "$l_test")
+		l_args=$(zxfer_vm_append_word "$l_args" "$l_test_arg")
 	done
 
 	printf '%s\n' "$l_args"
@@ -400,14 +435,23 @@ zxfer_vm_render_guest_test_script() {
 	l_tmpdir=$3
 	l_test_layer=${4:-$ZXFER_VM_TEST_LAYER}
 	l_guest_shell=
+	l_guest_shell_arg=
 	l_integration_args=
 	l_shunit_jobs=
+	l_shunit_mode=
 	l_perf_profile=${ZXFER_VM_PERF_PROFILE:-smoke}
+	l_perf_profile_arg=
 	l_perf_baseline_ref=${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final}
 	l_perf_baseline_label_arg=
 	l_perf_baseline_dir="$l_repo_dir-baseline"
+	l_perf_baseline_bin_arg=
+	l_candidate_bin_arg=
 	l_perf_cases=${ZXFER_VM_PERF_CASES:-}
 	l_perf_cases_arg=
+	l_repo_dir_arg=$(zxfer_vm_shell_quote "$l_repo_dir")
+	l_tmpdir_arg=$(zxfer_vm_shell_quote "$l_tmpdir")
+	l_perf_output_dir_arg=$(zxfer_vm_shell_quote "$l_tmpdir/perf-artifacts")
+	l_wrapper_template_arg=$(zxfer_vm_shell_quote "$l_tmpdir/zxfer-bash-posix.XXXXXX")
 	if [ -n "$l_perf_cases" ]; then
 		l_perf_cases_arg=$(zxfer_vm_shell_quote "$l_perf_cases")
 	fi
@@ -416,67 +460,79 @@ zxfer_vm_render_guest_test_script() {
 	integration)
 		l_guest_shell=$(zxfer_vm_guest_qemu_shell "$l_guest") ||
 			zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
-		l_integration_args=$(zxfer_vm_integration_harness_extra_args)
+		l_guest_shell_arg=$(zxfer_vm_shell_quote "$l_guest_shell")
+		l_integration_args=$(zxfer_vm_integration_harness_extra_args) || return 1
 		cat <<EOF
-mkdir -p "$l_tmpdir"
-cd "$l_repo_dir"
-env TMPDIR="$l_tmpdir" \\
+mkdir -p $l_tmpdir_arg
+cd $l_repo_dir_arg
+env TMPDIR=$l_tmpdir_arg \\
 	ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1 \\
-	$l_guest_shell ./tests/run_integration_zxfer.sh --yes --keep-going${l_integration_args:+ $l_integration_args}
+	$l_guest_shell_arg ./tests/run_integration_zxfer.sh --yes --keep-going${l_integration_args:+ $l_integration_args}
 EOF
 		;;
 	shunit2)
 		l_shunit_jobs=$(zxfer_vm_guest_shunit_jobs "$l_guest") ||
 			zxfer_vm_die "No shunit2 guest job count is defined for guest [$l_guest]"
-		case "$l_guest" in
-		omnios)
+		l_shunit_mode=$(zxfer_vm_guest_shunit_mode "$l_guest") ||
+			zxfer_vm_die "No shunit2 mode is defined for guest [$l_guest]"
+		case "$l_shunit_mode" in
+		bash-posix)
 			cat <<EOF
-mkdir -p "$l_tmpdir"
-cd "$l_repo_dir"
+mkdir -p $l_tmpdir_arg
+cd $l_repo_dir_arg
 bash_bin=\$(command -v bash)
-wrapper=\$(mktemp "$l_tmpdir/zxfer-bash-posix.XXXXXX")
+wrapper=\$(mktemp $l_wrapper_template_arg)
 printf '%s\n' '#!/bin/sh' "exec \"\$bash_bin\" --posix \"\\\$@\"" >"\$wrapper"
 chmod 755 "\$wrapper"
 export ZXFER_TEST_SHELL="\$wrapper"
-env TMPDIR="$l_tmpdir" "\$bash_bin" ./tests/run_shunit_tests.sh --jobs $l_shunit_jobs
+env TMPDIR=$l_tmpdir_arg "\$bash_bin" ./tests/run_shunit_tests.sh --jobs $l_shunit_jobs
+EOF
+			;;
+		native)
+			cat <<EOF
+mkdir -p $l_tmpdir_arg
+cd $l_repo_dir_arg
+env TMPDIR=$l_tmpdir_arg ./tests/run_shunit_tests.sh --jobs $l_shunit_jobs
 EOF
 			;;
 		*)
-			cat <<EOF
-mkdir -p "$l_tmpdir"
-cd "$l_repo_dir"
-env TMPDIR="$l_tmpdir" ./tests/run_shunit_tests.sh --jobs $l_shunit_jobs
-EOF
+			zxfer_vm_die "Unsupported shunit2 mode [$l_shunit_mode] for guest [$l_guest]"
 			;;
 		esac
 		;;
 	perf)
 		l_guest_shell=$(zxfer_vm_guest_qemu_shell "$l_guest") ||
 			zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
+		l_guest_shell_arg=$(zxfer_vm_shell_quote "$l_guest_shell")
 		zxfer_vm_validate_perf_profile_value "$l_perf_profile"
+		l_perf_profile_arg=$(zxfer_vm_shell_quote "$l_perf_profile")
 		cat <<EOF
-mkdir -p "$l_tmpdir"
-cd "$l_repo_dir"
-env TMPDIR="$l_tmpdir" \\
-	ZXFER_PERF_OUTPUT_DIR="$l_tmpdir/perf-artifacts" \\
-	$l_guest_shell ./tests/run_perf_tests.sh --yes --profile "$l_perf_profile"${l_perf_cases_arg:+ --case $l_perf_cases_arg}
+mkdir -p $l_tmpdir_arg
+cd $l_repo_dir_arg
+env TMPDIR=$l_tmpdir_arg \\
+	ZXFER_PERF_OUTPUT_DIR=$l_perf_output_dir_arg \\
+	$l_guest_shell_arg ./tests/run_perf_tests.sh --yes --profile $l_perf_profile_arg${l_perf_cases_arg:+ --case $l_perf_cases_arg}
 EOF
 		;;
 	perf-compare)
 		l_guest_shell=$(zxfer_vm_guest_qemu_shell "$l_guest") ||
 			zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
+		l_guest_shell_arg=$(zxfer_vm_shell_quote "$l_guest_shell")
 		zxfer_vm_validate_perf_profile_value "$l_perf_profile"
+		l_perf_profile_arg=$(zxfer_vm_shell_quote "$l_perf_profile")
 		l_perf_baseline_label_arg=$(zxfer_vm_shell_quote "$l_perf_baseline_ref")
+		l_perf_baseline_bin_arg=$(zxfer_vm_shell_quote "$l_perf_baseline_dir/zxfer")
+		l_candidate_bin_arg=$(zxfer_vm_shell_quote "$l_repo_dir/zxfer")
 		cat <<EOF
-mkdir -p "$l_tmpdir"
-cd "$l_repo_dir"
-env TMPDIR="$l_tmpdir" \\
-	$l_guest_shell ./tests/run_perf_compare.sh --yes --profile "$l_perf_profile" \\
-	--baseline-bin "$l_perf_baseline_dir/zxfer" \\
-	--candidate-bin "$l_repo_dir/zxfer" \\
+mkdir -p $l_tmpdir_arg
+cd $l_repo_dir_arg
+env TMPDIR=$l_tmpdir_arg \\
+	$l_guest_shell_arg ./tests/run_perf_compare.sh --yes --profile $l_perf_profile_arg \\
+	--baseline-bin $l_perf_baseline_bin_arg \\
+	--candidate-bin $l_candidate_bin_arg \\
 	--baseline-label $l_perf_baseline_label_arg \\
-	--candidate-label "candidate" \\
-	--output-dir "$l_tmpdir/perf-artifacts"${l_perf_cases_arg:+ \\
+	--candidate-label 'candidate' \\
+	--output-dir $l_perf_output_dir_arg${l_perf_cases_arg:+ \\
 	--case $l_perf_cases_arg}
 EOF
 		;;
@@ -698,14 +754,13 @@ zxfer_vm_run_selected_guests_parallel() {
 }
 
 zxfer_vm_guest_requires_strict_isolation() {
-	case "$ZXFER_VM_PROFILE/$ZXFER_VM_BACKEND/$1" in
-	ci/qemu/ubuntu)
-		return 0
-		;;
-	*)
-		return 1
-		;;
-	esac
+	l_guest=$1
+	l_strict_profiles=
+
+	[ "$ZXFER_VM_BACKEND" = "qemu" ] || return 1
+	l_strict_profiles=$(zxfer_vm_guest_strict_qemu_profiles "$l_guest") || return 1
+	[ -n "$l_strict_profiles" ] || return 1
+	zxfer_vm_list_contains "$l_strict_profiles" "$ZXFER_VM_PROFILE"
 }
 
 zxfer_vm_run_selected_guests() {
@@ -735,6 +790,8 @@ zxfer_vm_main() {
 	zxfer_vm_normalize_requested_tests
 	zxfer_vm_validate_options
 	zxfer_vm_normalize_output_modes
+	zxfer_vm_require_guest_manifest ||
+		zxfer_vm_die "Unable to load the VM guest manifest."
 
 	if [ "$ZXFER_VM_LIST_ONLY" = "1" ]; then
 		zxfer_vm_print_guest_list

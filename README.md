@@ -24,8 +24,8 @@ man zxfer
 
 Bundled references:
 
-- [man/zxfer.8](./man/zxfer.8) for FreeBSD/Linux-style installs
-- [man/zxfer.1m](./man/zxfer.1m) for Solaris/illumos-style installs
+- canonical [man/zxfer.8](./man/zxfer.8) for section 8 installs
+- generated [man/zxfer.1m](./man/zxfer.1m) for Solaris/illumos-style installs
 - [docs/cli-examples.md](./docs/cli-examples.md) for task-oriented examples
 
 If you are upgrading from the 2019 `v1.1.7` release, start with
@@ -77,8 +77,7 @@ Use remote compression:
 - Local and remote replication with `-O` and `-T`
 - Wrapper-style remote host specs such as `user@host pfexec` or `user@host doas`
 - Concurrent send/receive jobs with explicit per-dataset source discovery and
-  supervision-lite job teardown (process-group signaling plus per-job status
-  files) via `-j`
+  per-job status files and bounded process cleanup via `-j`
 - Property replication, overrides, and unsupported-property skipping for the
   current OpenZFS 2.0+ support floor
 - Property backup and restore with `-k` and `-e`, using hardened metadata
@@ -91,10 +90,10 @@ Use remote compression:
   optional `ZXFER_ERROR_LOG` mirroring, and an explicit
   `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1` local-debug override
 - Per-run ssh control sockets and one in-memory remote capability probe per
-  host per run; all run-private temp state lives under one 0700 per-run temp
-  root removed in one pass at exit. The only cross-process lock left is the
-  `ZXFER_ERROR_LOG` append lock (slim pid+start-token metadata, validated
-  stale-owner reaping, checked release)
+  role, host and requested tool set per run; all run-private temp state lives under one 0700
+  per-run temp root removed in one pass at exit. The only cross-process lock
+  left is the `ZXFER_ERROR_LOG` append lock (slim pid+start-token metadata,
+  validated stale-owner reaping, checked release)
 - Identity-aware recursive snapshot discovery with `name,guid` records, plus a
   fast clean-no-op proof for eligible recursive runs — local sources and
   remote-origin pulls alike
@@ -108,17 +107,17 @@ Use remote compression:
   explicit per-dataset source discovery instead of the serial recursive
   listing (the clean no-op proof still runs one serial recursive stream
   first). Source discovery runs as a tracked background helper with staged
-  stderr and PID cleanup, while send/receive workers run supervision-lite:
-  each job is one backgrounded job shell that writes its own status file,
-  and aborts signal the job's setsid process group (or its tracked child
-  set) instead of a bare wrapper PID. zxfer also serializes conflicting ancestor/descendant
+  stderr and PID cleanup. Send/receive jobs write their own status files;
+  abort uses a verified process group or a descendant-tracking wrapper.
+  zxfer also serializes conflicting ancestor/descendant
   destination receives on the same target so parent and child datasets do not
   receive concurrently, and its ready queue skips blocked descendants to start
   later independent datasets while job slots remain. Local-origin and
   remote-origin runs require a resolved `parallel` helper on the executing
-  origin host; zxfer intentionally checks only that the helper exists through
-  the secure-PATH model, so operators and packages must provide an
-  implementation compatible with the GNU Parallel-style options used by the
+  origin host (without `-O`, the local helper is checked at startup, even for
+  a run with nothing to send); zxfer intentionally checks only that the helper
+  exists through the secure-PATH model, so operators and packages must provide
+  an implementation compatible with the GNU Parallel-style options used by the
   rendered source-discovery pipeline
 - `-V`: enable very verbose debug output and end-of-run profiling counters,
   including startup latency, trap-cleanup timing, per-phase listing times,
@@ -178,29 +177,30 @@ fall back to the ambient local ssh policy.
 
 SSH control sockets and remote capability state are per-run only. Each
 invocation opens at most one control master per remote role under its private
-per-run temp directory, multiplexes its own remote commands over that socket,
-and closes it on exit; clean no-op runs never open a master at all. Remote
-helper discovery costs one capability probe round trip per host per run, held
-in memory and identity-checked against the host spec, secure PATH, ssh
-policy, and requested helper set -- nothing is shared between concurrent or
-consecutive zxfer invocations, matching upstream zxfer behavior. Only
+per-run temp directory, opens it before its first remote command (a `-T` host
+spec equal to the `-O` spec shares the origin master), multiplexes every
+remote command of the run over it, and closes it on exit. Remote
+helper discovery costs one capability probe round trip per role, host and
+requested tool set per run, held in memory and keyed by the host spec and
+requested helper set (the secure PATH and ssh policy are fixed for the run).
+A recursive `-O -j` pull that the fast no-op proof finds work for probes the
+origin a second time, for `parallel`. Nothing is shared between
+concurrent or consecutive zxfer invocations, matching upstream zxfer behavior. Only
 `ZXFER_ERROR_LOG` appends still coordinate through a metadata-bearing lock
 directory that records the owner PID and process-start identity; zxfer
 validates and reaps stale or corrupt owners before reuse and checks release
 operations instead of silently suppressing failures.
 
-Long-lived parallel send/receive work runs supervision-lite: each job is one
-backgrounded job shell (in its own `setsid` process group when the host
-provides it) that writes its own exit status to a per-run status file and
-notifies the rolling completion queue itself. Trap-time abort signals the
-job's process group or its tracked direct children — never a bare wrapper
-PID — waits briefly, escalates once with KILL, and only then reaps; an
-un-reaped child's PID/PGID cannot be recycled, so the signal cannot reach an
-unrelated process. A missing or non-numeric status file at wait time is
-reported as a job failure. The same checked-cleanup rule applies to ssh
-control-socket teardown during trap cleanup: if zxfer cannot close a managed
-socket after otherwise successful work, it exits nonzero instead of
-reporting a clean run.
+Each parallel send/receive job records its exit status in a private per-run
+file. The scheduler checks all active jobs and reports missing or invalid
+completion data as a failure. Where the host supports verified process-group
+isolation, abort signals the complete job group; otherwise a cleanup wrapper
+tracks the command's descendants. Both paths use a bounded grace period and
+KILL escalation. A job that has recorded its exit status is signalled only
+through its process group, never by a bare PID that may have been recycled.
+Failed job or SSH control-socket cleanup makes the run fail.
+The fallback wrapper cannot guarantee containment of descendants that fork
+and escape its ancestry snapshots; see [architecture](./docs/architecture.md).
 
 For `-j` send/receive work, the scheduler also treats ancestor/descendant
 destination datasets on the same target as mutually exclusive. zxfer skips
@@ -218,7 +218,9 @@ first tries a fast no-op proof. That proof compares one recursive source
 `name,guid` stream with one normalized destination `name,guid` stream staged
 under the per-run temp root and falls back to full discovery when the streams
 differ or the destination is missing; a proven clean no-op skips the
-creation-order source listing and the destination existence check entirely.
+creation-order source listing entirely, and full discovery reuses the proof's
+destination listing. A local destination listing checks destination existence
+only when the listing itself fails.
 `-U` and `-g` can remain enabled on this proof path because exact no-op
 discovery leaves no source transfer queue, destination delete queue, or
 property/create work to consume those checks.
@@ -244,14 +246,16 @@ When `-T` is used, destination discovery runs a structured target-side batch:
 recursive destination dataset inventory, the missing-root pool fallback probe,
 and destination snapshot listing are issued inside one remote `sh -c` payload.
 Large snapshot stdout is streamed back as `name,guid` records, while status and
-stderr sections are staged and parsed locally. The local destination path keeps
-the direct `zfs` command flow.
+stderr sections are staged and parsed locally; any transport or parse failure
+empties all four discovery outputs. The local destination path keeps the
+direct `zfs` command flow.
 
-Short-lived local background helpers that still need shell wrappers, such as
-progress dialogs and delete-planning identity writers, register their PIDs
-with the in-memory runtime cleanup tracker. The remaining local wrapper-style
-helpers run under a small TERM-aware child wrapper so early-exit cleanup no
-longer falls back to signaling a bare wrapper-shell PID.
+A `-D` progress dialog runs under the cleanup child wrapper as part of the
+send pipeline: zxfer tees the stream into a private FIFO that the dialog
+reads, so `-D` works with `-j`. Under `-j` the dialog lives in the job's
+process group, or in its wrapper when process groups are unavailable. The
+remaining local wrapper-style helpers use verified process groups where
+available and a TERM-aware child wrapper otherwise.
 
 Current runtime caveats are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 
@@ -260,10 +264,25 @@ Current runtime caveats are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 Run the main local validation steps:
 
 ```sh
-./tests/run_shunit_tests.sh
-./tests/run_lint.sh
-ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
+./tests/validate.sh full
 ```
+
+For a faster edit loop, `./tests/validate.sh quick` maps staged, unstaged, and
+untracked paths to focused offline checks. Pass paths explicitly when needed:
+
+```sh
+./tests/validate.sh quick src/zxfer_replication.sh
+./tests/run_shunit_tests.sh \
+  --suite tests/test_zxfer_replication.sh --test test_name
+```
+
+Repeat `--suite ... --test ...` to select named tests across several suites;
+the runner validates the complete selection before starting any of them.
+
+Use `./tests/validate.sh --list` to see the host-risk label and purpose of each
+profile. Quick mode explains its path mappings and prints relevant integration,
+performance, and documentation follow-ups without running them. The dispatcher
+never runs the direct host integration harness.
 
 For unattended integration coverage on a disposable guest boundary, prefer:
 

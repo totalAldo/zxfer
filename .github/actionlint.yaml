@@ -4,3 +4,6 @@ paths:
       # GitHub announced ubuntu-26.04 as a public-preview hosted runner after
       # actionlint 1.7.12's runner-label table was cut.
       - 'label "ubuntu-26\.04" is unknown'
+      # The xcode-27 preview image (the hosted macOS 27 runner) also postdates
+      # that table.
+      - 'label "xcode-27" is unknown'

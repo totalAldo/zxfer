@@ -26,8 +26,10 @@ zxfer_vm_backend_qemu_check_host() {
 	for l_guest in $ZXFER_VM_SELECTED_GUESTS; do
 		l_guest_arch=$(zxfer_vm_guest_qemu_preferred_arch "$l_guest") ||
 			zxfer_vm_die "No qemu guest architecture is defined for guest [$l_guest]"
-		l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest") ||
+		l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest" "$l_guest_arch") ||
 			zxfer_vm_die "No qemu seed transport is defined for guest [$l_guest]"
+		l_archive_compression=$(zxfer_vm_guest_qemu_archive_compression "$l_guest" "$l_guest_arch") ||
+			zxfer_vm_die "No qemu archive compression is defined for guest [$l_guest]"
 		l_qemu_cmd=$(zxfer_vm_qemu_system_binary "$l_guest_arch") ||
 			zxfer_vm_die "No qemu system binary is defined for guest architecture [$l_guest_arch]"
 		if ! zxfer_vm_list_contains "$l_required_qemu_commands" "$l_qemu_cmd"; then
@@ -40,17 +42,17 @@ zxfer_vm_backend_qemu_check_host() {
 		if [ "$l_seed_transport" = "disk-cidata" ]; then
 			zxfer_vm_qemu_require_seed_image_builder
 		fi
+		case "$l_archive_compression" in
+		xz)
+			zxfer_vm_require_command xz
+			;;
+		esac
 	done
 
 	if command -v xz >/dev/null 2>&1; then
 		:
 	else
 		zxfer_vm_warn "xz is not installed; FreeBSD guest downloads will fail until it is available."
-	fi
-	if command -v zstd >/dev/null 2>&1; then
-		:
-	else
-		zxfer_vm_warn "zstd is not installed; .zst guest image archives would fail until it is available."
 	fi
 }
 
@@ -244,9 +246,9 @@ zxfer_vm_qemu_start_guest() {
 		esac
 		;;
 	arm64)
-		l_efi_firmware=$(zxfer_vm_qemu_resolve_aarch64_efi)
 		l_machine=$(zxfer_vm_qemu_machine_arg "$l_guest_arch" "$l_accel") ||
 			zxfer_vm_die "Unsupported qemu machine selection for guest architecture: $l_guest_arch"
+		l_efi_firmware=$(zxfer_vm_qemu_resolve_aarch64_efi)
 		case "$l_seed_transport" in
 		disk-cidata)
 			qemu-system-aarch64 \
@@ -290,73 +292,127 @@ zxfer_vm_qemu_start_guest() {
 	esac
 }
 
-zxfer_vm_qemu_wait_for_ssh() {
-	l_host=$1
-	l_port=$2
-	l_known_hosts=$3
-	l_identity=$4
-	l_timeout_seconds=${5:-900}
-	l_log_prefix=${6:-}
-	l_min_successes=${7:-1}
-	l_elapsed=0
-	l_scan_file=$l_known_hosts.scan
-	l_current_signature=
-	l_last_signature=
-	l_consecutive_successes=0
+zxfer_vm_qemu_pid_file_has_dead_process() {
+	l_pid_file=${1:-}
+	l_pid=
 
-	[ "$l_min_successes" -gt 0 ] 2>/dev/null || l_min_successes=1
+	[ -n "$l_pid_file" ] || return 1
+	[ -r "$l_pid_file" ] || return 1
+	IFS= read -r l_pid <"$l_pid_file" || return 1
+	case "$l_pid" in
+	"" | *[!0123456789]*)
+		return 1
+		;;
+	esac
 
+	kill -s 0 "$l_pid" >/dev/null 2>&1 && return 1
+	return 0
+}
+
+# Guest SSH trust: the harness pins the guest's ed25519 host key in a per-run
+# known_hosts file, and every later ssh runs with StrictHostKeyChecking=yes
+# against that file, so the key it trusts is the key it connects with. A key
+# change during first boot (cloud-init may regenerate host keys) is logged
+# and re-pinned while waiting for readiness; after readiness a changed key
+# stops the run. A scan matches when the pinned file still holds its line
+# (ssh may append other key types there under `UpdateHostKeys yes`).
+
+# Purpose: Scan the guest's ed25519 host key into FILE as one normalized
+# known_hosts line ("[host]:port ssh-ed25519 KEY").
+# Usage: zxfer_vm_qemu_scan_host_key HOST PORT FILE; returns 1 and leaves no
+# FILE when the scan printed no key (sshd down, refused or timed out).
+zxfer_vm_qemu_scan_host_key() {
+	l_scan_host=$1
+	l_scan_port=$2
+	l_scan_file=$3
+
+	# One key type is one connection per scan (sshd's PerSourcePenalties
+	# charge each unauthenticated one) and output whose order cannot vary.
+	# Comment lines, other key types and trailing fields are dropped.
+	ssh-keyscan -T 5 -t ed25519 -p "$l_scan_port" "$l_scan_host" 2>/dev/null |
+		awk '$1 !~ /^[#;]/ && $2 == "ssh-ed25519" && $3 != "" { print $1, $2, $3 }' |
+		sort -u >"$l_scan_file"
+	[ -s "$l_scan_file" ] && return 0
 	rm -f "$l_scan_file"
-	while [ "$l_elapsed" -lt "$l_timeout_seconds" ]; do
-		if zxfer_vm_qemu_refresh_known_hosts "$l_host" "$l_port" "$l_known_hosts"; then
-			l_current_signature=$(zxfer_vm_qemu_known_hosts_signature "$l_known_hosts")
-			if [ "$l_current_signature" != "$l_last_signature" ]; then
-				if [ -n "$l_last_signature" ] && [ -n "$l_log_prefix" ]; then
-					zxfer_vm_log "==> [$l_log_prefix] detected a guest SSH host-key change during first boot; revalidating"
-				fi
-				l_last_signature=$l_current_signature
-				l_consecutive_successes=0
+	return 1
+}
+
+# Purpose: Wait until the guest accepts the harness key over SSH on a stable,
+# pinned host key.
+# Usage: zxfer_vm_qemu_wait_for_ssh HOST PORT KNOWN_HOSTS IDENTITY
+#   [TIMEOUT_SECONDS] [LOG_PREFIX] [MIN_SUCCESSES]; KNOWN_HOSTS is replaced.
+# Returns 0 after MIN_SUCCESSES consecutive probes on one key, else 1 with
+# ZXFER_VM_QEMU_WAIT_FAILURE_REASON set to timeout or qemu_exited.
+zxfer_vm_qemu_wait_for_ssh() {
+	l_wait_host=$1
+	l_wait_port=$2
+	l_wait_known_hosts=$3
+	l_wait_identity=$4
+	l_wait_timeout=${5:-1800}
+	l_wait_log_prefix=${6:-}
+	l_wait_min_successes=${7:-1}
+	l_wait_scan_file=$l_wait_known_hosts.scan
+	l_wait_elapsed=0
+	l_wait_delay=0
+	l_wait_next_progress=30
+	l_wait_successes=0
+	# shellcheck disable=SC2034  # Read by the qemu backend after this helper fails.
+	ZXFER_VM_QEMU_WAIT_FAILURE_REASON=timeout
+
+	[ "$l_wait_min_successes" -gt 0 ] 2>/dev/null || l_wait_min_successes=1
+
+	rm -f "$l_wait_known_hosts" "$l_wait_scan_file"
+	while [ "$l_wait_elapsed" -lt "$l_wait_timeout" ]; do
+		# Scan only before the first probe and after a failed one; an empty
+		# scan is not a key change and leaves the pinned key in place.
+		if [ "$l_wait_successes" -eq 0 ] &&
+			zxfer_vm_qemu_scan_host_key "$l_wait_host" "$l_wait_port" "$l_wait_scan_file"; then
+			if [ -f "$l_wait_known_hosts" ] &&
+				! grep -q -x -F -f "$l_wait_scan_file" "$l_wait_known_hosts" &&
+				[ -n "$l_wait_log_prefix" ]; then
+				zxfer_vm_log "==> [$l_wait_log_prefix] guest SSH host key changed during first boot; pinning the new key and restarting the readiness count"
 			fi
-			if zxfer_vm_qemu_ssh_probe "$l_host" "$l_port" "$l_known_hosts" "$l_identity"; then
-				l_consecutive_successes=$((l_consecutive_successes + 1))
-				if [ "$l_consecutive_successes" -ge "$l_min_successes" ]; then
-					return 0
-				fi
-			else
-				l_consecutive_successes=0
-			fi
-		else
-			l_consecutive_successes=0
+			mv "$l_wait_scan_file" "$l_wait_known_hosts"
 		fi
-		sleep 5
-		l_elapsed=$((l_elapsed + 5))
-		if [ -n "$l_log_prefix" ] &&
-			[ "$l_elapsed" -gt 0 ] &&
-			[ $((l_elapsed % 30)) -eq 0 ]; then
-			zxfer_vm_log "==> [$l_log_prefix] still waiting for SSH readiness (${l_elapsed}s elapsed)"
+		if [ -f "$l_wait_known_hosts" ] &&
+			zxfer_vm_qemu_ssh_probe "$l_wait_host" "$l_wait_port" "$l_wait_known_hosts" "$l_wait_identity"; then
+			l_wait_successes=$((l_wait_successes + 1))
+			if [ "$l_wait_successes" -ge "$l_wait_min_successes" ]; then
+				[ -z "$l_wait_log_prefix" ] ||
+					zxfer_vm_log "==> [$l_wait_log_prefix] SSH ready after ${l_wait_elapsed}s of waiting"
+				return 0
+			fi
+			l_wait_delay=5
+		else
+			# Back off (doubling from 5 s, at most 20 s) so failed connections from
+			# the one QEMU user-network address stay under the rate that
+			# makes sshd's PerSourcePenalties refuse it.
+			l_wait_successes=0
+			l_wait_delay=$((l_wait_delay * 2))
+			[ "$l_wait_delay" -ge 5 ] || l_wait_delay=5
+			[ "$l_wait_delay" -le 20 ] || l_wait_delay=20
+		fi
+		if zxfer_vm_qemu_pid_file_has_dead_process "${ZXFER_VM_QEMU_PID_FILE:-}"; then
+			# shellcheck disable=SC2034  # Read by the qemu backend after this helper fails.
+			ZXFER_VM_QEMU_WAIT_FAILURE_REASON=qemu_exited
+			if [ -n "$l_wait_log_prefix" ]; then
+				zxfer_vm_warn "Guest [$l_wait_log_prefix] qemu process exited before SSH readiness."
+			fi
+			return 1
+		fi
+		sleep "$l_wait_delay"
+		l_wait_elapsed=$((l_wait_elapsed + l_wait_delay))
+		if [ -n "$l_wait_log_prefix" ] && [ "$l_wait_elapsed" -ge "$l_wait_next_progress" ]; then
+			zxfer_vm_log "==> [$l_wait_log_prefix] still waiting for SSH readiness (${l_wait_elapsed}s elapsed)"
+			l_wait_next_progress=$((l_wait_elapsed + 30))
 		fi
 	done
 
 	return 1
 }
 
-zxfer_vm_qemu_refresh_known_hosts() {
-	l_host=$1
-	l_port=$2
-	l_known_hosts=$3
-	l_scan_file=$l_known_hosts.scan
-
-	rm -f "$l_scan_file"
-	if ssh-keyscan -T 5 -p "$l_port" "$l_host" >"$l_scan_file" 2>/dev/null &&
-		[ -s "$l_scan_file" ]; then
-		mv "$l_scan_file" "$l_known_hosts"
-		return 0
-	fi
-
-	rm -f "$l_scan_file"
-	return 1
-}
-
+# Purpose: Check that the guest runs a command over SSH on the pinned key.
+# Usage: zxfer_vm_qemu_ssh_probe HOST PORT KNOWN_HOSTS IDENTITY
 zxfer_vm_qemu_ssh_probe() {
 	l_host=$1
 	l_port=$2
@@ -373,54 +429,44 @@ zxfer_vm_qemu_ssh_probe() {
 		root@"$l_host" true >/dev/null 2>&1
 }
 
+# Purpose: Before a remote step, wait for SSH on the pinned host key (sshd may
+# be restarting); a different key is refused, never re-pinned.
+# Usage: zxfer_vm_qemu_prepare_remote_ssh_step HOST PORT KNOWN_HOSTS IDENTITY
+#   [LOG_PREFIX] [STEP_LABEL] [TIMEOUT_SECONDS]; returns 1 on timeout or at
+#   once when the guest presents another host key.
 zxfer_vm_qemu_prepare_remote_ssh_step() {
-	l_host=$1
-	l_port=$2
-	l_known_hosts=$3
-	l_identity=$4
-	l_log_prefix=${5:-}
+	l_step_host=$1
+	l_step_port=$2
+	l_step_known_hosts=$3
+	l_step_identity=$4
+	l_step_log_prefix=${5:-}
 	l_step_label=${6:-remote step}
-	l_timeout_seconds=${7:-30}
-	l_elapsed=0
-	l_refreshed=0
+	l_step_timeout=${7:-30}
+	l_step_scan_file=$l_step_known_hosts.scan
+	l_step_elapsed=0
 
-	while [ "$l_elapsed" -lt "$l_timeout_seconds" ]; do
-		l_refreshed=0
-		if zxfer_vm_qemu_refresh_known_hosts "$l_host" "$l_port" "$l_known_hosts"; then
-			l_refreshed=1
-			if zxfer_vm_qemu_ssh_probe "$l_host" "$l_port" "$l_known_hosts" "$l_identity"; then
-				if [ "$l_elapsed" -gt 0 ] && [ -n "$l_log_prefix" ]; then
-					zxfer_vm_log "==> [$l_log_prefix] SSH readiness recovered for $l_step_label"
-				fi
-				return 0
-			fi
-		fi
-		if [ "$l_refreshed" -ne 1 ] &&
-			[ -r "$l_known_hosts" ] &&
-			zxfer_vm_qemu_ssh_probe "$l_host" "$l_port" "$l_known_hosts" "$l_identity"; then
-			if [ -n "$l_log_prefix" ]; then
-				zxfer_vm_warn "[$l_log_prefix] ssh-keyscan did not refresh the guest host key before $l_step_label; reusing the existing validated known_hosts entry"
+	while [ "$l_step_elapsed" -lt "$l_step_timeout" ]; do
+		if zxfer_vm_qemu_ssh_probe "$l_step_host" "$l_step_port" "$l_step_known_hosts" "$l_step_identity"; then
+			if [ "$l_step_elapsed" -gt 0 ] && [ -n "$l_step_log_prefix" ]; then
+				zxfer_vm_log "==> [$l_step_log_prefix] SSH readiness recovered for $l_step_label"
 			fi
 			return 0
 		fi
-
+		if zxfer_vm_qemu_scan_host_key "$l_step_host" "$l_step_port" "$l_step_scan_file" &&
+			! grep -q -x -F -f "$l_step_scan_file" "$l_step_known_hosts"; then
+			rm -f "$l_step_scan_file"
+			zxfer_vm_warn "[$l_step_log_prefix] the guest SSH host key changed after readiness; refusing to trust the new key before $l_step_label"
+			return 1
+		fi
+		rm -f "$l_step_scan_file"
 		sleep 5
-		l_elapsed=$((l_elapsed + 5))
-		if [ -n "$l_log_prefix" ] &&
-			[ "$l_elapsed" -gt 0 ] &&
-			[ $((l_elapsed % 15)) -eq 0 ]; then
-			zxfer_vm_log "==> [$l_log_prefix] still waiting for SSH readiness before $l_step_label (${l_elapsed}s elapsed)"
+		l_step_elapsed=$((l_step_elapsed + 5))
+		if [ -n "$l_step_log_prefix" ] && [ $((l_step_elapsed % 15)) -eq 0 ]; then
+			zxfer_vm_log "==> [$l_step_log_prefix] still waiting for SSH readiness before $l_step_label (${l_step_elapsed}s elapsed)"
 		fi
 	done
 
 	return 1
-}
-
-zxfer_vm_qemu_known_hosts_signature() {
-	l_known_hosts=$1
-
-	[ -r "$l_known_hosts" ] || return 1
-	cksum <"$l_known_hosts" 2>/dev/null
 }
 
 zxfer_vm_qemu_render_cloud_init() {
@@ -428,16 +474,19 @@ zxfer_vm_qemu_render_cloud_init() {
 	l_seed_dir=$2
 	l_public_key_file=$3
 	l_public_key=
+	l_cloud_init_style=
 
 	l_public_key=$(cat "$l_public_key_file") ||
 		zxfer_vm_die "Unable to read generated SSH public key: $l_public_key_file"
+	l_cloud_init_style=$(zxfer_vm_guest_cloud_init_style "$l_guest") ||
+		zxfer_vm_die "No cloud-init style is defined for guest [$l_guest]"
 	zxfer_vm_mkdir_p "$l_seed_dir"
 	cat <<EOF >"$l_seed_dir/meta-data"
 instance-id: zxfer-$l_guest
 local-hostname: zxfer-$l_guest
 EOF
-	case "$l_guest" in
-	freebsd)
+	case "$l_cloud_init_style" in
+	root-login)
 		cat <<EOF >"$l_seed_dir/user-data"
 #cloud-config
 ssh_pwauth: false
@@ -463,7 +512,7 @@ runcmd:
     service sshd restart
 EOF
 		;;
-	*)
+	default)
 		cat <<EOF >"$l_seed_dir/user-data"
 #cloud-config
 disable_root: false
@@ -479,6 +528,9 @@ runcmd:
   - chmod 700 /root/.ssh
   - chown root:root /root/.ssh
 EOF
+		;;
+	*)
+		zxfer_vm_die "Unsupported cloud-init style [$l_cloud_init_style] for guest [$l_guest]"
 		;;
 	esac
 }
@@ -696,7 +748,7 @@ zxfer_vm_qemu_collect_remote_artifacts() {
 zxfer_vm_backend_qemu_run_guest() {
 	l_guest=$1
 	l_artifact_dir=$2
-	l_guest_label=$(zxfer_vm_guest_label "$l_guest") || return 1
+	l_guest_label=
 	l_guest_image_url=
 	l_guest_checksum_url=
 	l_guest_image_filename=
@@ -706,6 +758,7 @@ zxfer_vm_backend_qemu_run_guest() {
 	l_guest_min_disk_size=
 	l_guest_arch=
 	l_seed_transport=
+	l_ssh_ready_timeout_seconds=
 	l_guest_cache_dir=
 	l_checksum_file=
 	l_checksum=
@@ -730,6 +783,7 @@ zxfer_vm_backend_qemu_run_guest() {
 
 	l_guest_arch=$(zxfer_vm_guest_qemu_preferred_arch "$l_guest") ||
 		zxfer_vm_die "No qemu guest architecture is defined for guest [$l_guest]"
+	l_guest_label=$(zxfer_vm_guest_label "$l_guest") || return 1
 	l_guest_image_url=$(zxfer_vm_guest_qemu_image_url "$l_guest" "$l_guest_arch") ||
 		zxfer_vm_die "No qemu image URL is defined for guest [$l_guest]"
 	l_guest_checksum_url=$(zxfer_vm_guest_qemu_checksum_url "$l_guest" "$l_guest_arch") ||
@@ -744,10 +798,12 @@ zxfer_vm_backend_qemu_run_guest() {
 		zxfer_vm_die "No qemu base image format is defined for guest [$l_guest]"
 	l_guest_min_disk_size=$(zxfer_vm_guest_qemu_min_disk_size "$l_guest" "$l_guest_arch") ||
 		zxfer_vm_die "No qemu minimum disk size is defined for guest [$l_guest]"
-	l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest") ||
+	l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest" "$l_guest_arch") ||
 		zxfer_vm_die "No qemu seed transport is defined for guest [$l_guest]"
 	zxfer_vm_guest_qemu_shell "$l_guest" >/dev/null ||
 		zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
+	l_ssh_ready_timeout_seconds=$(zxfer_vm_guest_qemu_ssh_ready_timeout_seconds "$l_guest") ||
+		zxfer_vm_die "No qemu SSH readiness timeout is defined for guest [$l_guest]"
 	l_ssh_ready_probe_count=$(zxfer_vm_guest_qemu_ssh_ready_probe_count "$l_guest") ||
 		zxfer_vm_die "No qemu SSH readiness threshold is defined for guest [$l_guest]"
 	l_prepare_script=$(zxfer_vm_guest_prepare_script "$l_guest" "qemu" "$ZXFER_VM_TEST_LAYER") ||
@@ -842,8 +898,11 @@ zxfer_vm_backend_qemu_run_guest() {
 		zxfer_vm_die "Failed to start qemu guest [$l_guest]"
 
 	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] waiting for SSH readiness on 127.0.0.1:$l_ssh_port"
-	if ! zxfer_vm_qemu_wait_for_ssh 127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" 900 "$l_guest_label/$l_guest_arch" "$l_ssh_ready_probe_count"; then
+	if ! zxfer_vm_qemu_wait_for_ssh 127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" "$l_ssh_ready_timeout_seconds" "$l_guest_label/$l_guest_arch" "$l_ssh_ready_probe_count"; then
 		ZXFER_VM_QEMU_PRESERVE_STATE=$ZXFER_VM_PRESERVE_FAILED_GUESTS
+		if [ "${ZXFER_VM_QEMU_WAIT_FAILURE_REASON:-}" = "qemu_exited" ]; then
+			zxfer_vm_die "Guest [$l_guest] qemu exited before SSH readiness; inspect $l_artifact_dir/serial.log"
+		fi
 		zxfer_vm_die "Timed out waiting for guest [$l_guest] SSH readiness; inspect $l_artifact_dir/serial.log"
 	fi
 
@@ -851,14 +910,14 @@ zxfer_vm_backend_qemu_run_guest() {
 	zxfer_vm_qemu_prepare_remote_ssh_step \
 		127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
 		"$l_guest_label/$l_guest_arch" "copying the repository" ||
-		zxfer_vm_die "Failed to refresh the guest SSH host key before copying the repository for [$l_guest]"
+		zxfer_vm_die "Guest [$l_guest] did not accept SSH on its pinned host key before copying the repository"
 	zxfer_vm_qemu_copy_repo_to_guest "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" "$l_remote_dir"
 	if [ "$ZXFER_VM_TEST_LAYER" = "perf-compare" ]; then
 		zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] copying baseline ref ${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final} into guest"
 		zxfer_vm_qemu_prepare_remote_ssh_step \
 			127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
 			"$l_guest_label/$l_guest_arch" "copying the performance baseline" ||
-			zxfer_vm_die "Failed to refresh the guest SSH host key before copying the performance baseline for [$l_guest]"
+			zxfer_vm_die "Guest [$l_guest] did not accept SSH on its pinned host key before copying the performance baseline"
 		zxfer_vm_qemu_copy_ref_to_guest \
 			"$l_ssh_port" \
 			"$l_state_dir/known_hosts" \
@@ -881,7 +940,7 @@ EOF
 	zxfer_vm_qemu_prepare_remote_ssh_step \
 		127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
 		"$l_guest_label/$l_guest_arch" "guest preparation" ||
-		zxfer_vm_die "Failed to refresh the guest SSH host key before guest preparation for [$l_guest]"
+		zxfer_vm_die "Guest [$l_guest] did not accept SSH on its pinned host key before guest preparation"
 	if zxfer_vm_qemu_run_remote_script "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
 		"$l_artifact_dir/prepare-guest.sh" "$l_artifact_dir/prepare.stdout" "$l_artifact_dir/prepare.stderr"; then
 		:
@@ -902,7 +961,7 @@ EOF
 	zxfer_vm_qemu_prepare_remote_ssh_step \
 		127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
 		"$l_guest_label/$l_guest_arch" "the selected guest test layer" ||
-		zxfer_vm_die "Failed to refresh the guest SSH host key before the selected guest test layer for [$l_guest]"
+		zxfer_vm_die "Guest [$l_guest] did not accept SSH on its pinned host key before the selected guest test layer"
 	if zxfer_vm_qemu_run_remote_script "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
 		"$l_artifact_dir/run-harness.sh" "$l_artifact_dir/harness.stdout" "$l_artifact_dir/harness.stderr"; then
 		l_status=0
@@ -918,7 +977,6 @@ EOF
 	fi
 
 	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] collecting guest artifacts"
-	zxfer_vm_qemu_refresh_known_hosts 127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" >/dev/null 2>&1 || true
 	zxfer_vm_qemu_collect_remote_artifacts "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
 		"$l_remote_artifact_dir" "$l_artifact_dir"
 

@@ -36,297 +36,302 @@
 ################################################################################
 
 # Module contract:
-# owns globals: secure-PATH defaults and local helper resolutions initialized here.
-# reads globals: ZXFER_SECURE_PATH*, PATH, and g_cmd_awk fallback needs.
+# owns globals: g_zxfer_secure_path; the g_cmd_* helper and compression
+#   commands with their *_safe renderings; the lookup results
+#   g_zxfer_computed_secure_path, g_zxfer_tool_path_result,
+#   g_zxfer_normalized_tool_path, g_zxfer_required_tool_result and
+#   g_zxfer_resolved_cli_command_result.
+# reads globals: ZXFER_SECURE_PATH, ZXFER_SECURE_PATH_APPEND and
+#   g_option_z_compress.
 # mutates caches: none.
-# returns via stdout: secure PATH strings and validated absolute helper paths.
+# returns via stdout: none.
+# Helper lookup never forks: zxfer_find_tool_in_path walks the PATH list.
 
 # Directories considered safe for PATH lookups. Administrators may override the
 # entire list via ZXFER_SECURE_PATH or append additional trusted directories via
 # ZXFER_SECURE_PATH_APPEND.
 ZXFER_DEFAULT_SECURE_PATH="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+ZXFER_INVALID_SECURE_PATH_MESSAGE="Refusing to use ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND because every secure PATH entry must be a single-line absolute path without control whitespace."
 
-# Purpose: Compute the secure path from the active configuration and runtime
-# state.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# when later helpers need a derived value without duplicating the calculation.
+# Purpose: Stop startup with a dependency failure for an unusable secure PATH.
+# Usage: zxfer_refresh_secure_path_state || zxfer_reject_invalid_secure_path_configuration
+zxfer_reject_invalid_secure_path_configuration() {
+	zxfer_set_failure_context_if_empty dependency "secure PATH validation" \
+		"$ZXFER_INVALID_SECURE_PATH_MESSAGE"
+	zxfer_throw_error "$ZXFER_INVALID_SECURE_PATH_MESSAGE"
+}
+
+# Purpose: Build the secure PATH from ZXFER_SECURE_PATH (or the default) plus
+# ZXFER_SECURE_PATH_APPEND, keeping absolute entries only.
+# Usage: zxfer_compute_secure_path; publishes g_zxfer_computed_secure_path,
+# or returns 1 with it empty when the value holds a tab, CR or LF.
 zxfer_compute_secure_path() {
-	l_candidate=$ZXFER_DEFAULT_SECURE_PATH
-	if [ -n "${ZXFER_SECURE_PATH:-}" ]; then
-		l_candidate=$ZXFER_SECURE_PATH
-	fi
+	g_zxfer_computed_secure_path=""
+	l_candidate=${ZXFER_SECURE_PATH:-$ZXFER_DEFAULT_SECURE_PATH}
 	if [ -n "${ZXFER_SECURE_PATH_APPEND:-}" ]; then
-		if [ "$l_candidate" = "" ]; then
-			l_candidate=$ZXFER_SECURE_PATH_APPEND
-		else
-			l_candidate=$l_candidate:$ZXFER_SECURE_PATH_APPEND
-		fi
+		l_candidate=${l_candidate:+$l_candidate:}$ZXFER_SECURE_PATH_APPEND
 	fi
+	zxfer_value_is_single_line "$l_candidate" || return 1
 
-	OLDIFS=$IFS
-	IFS=":"
 	l_clean=""
+	zxfer_split_begin :
 	for l_entry in $l_candidate; do
-		case "$l_entry" in
-		'' | .)
-			continue
-			;;
-		/*)
-			if [ "$l_clean" = "" ]; then
-				l_clean=$l_entry
-			else
-				l_clean=$l_clean:$l_entry
-			fi
-			;;
-		*)
-			# Ignore relative path segments to keep PATH confined to absolute directories.
-			continue
-			;;
+		# Empty, "." and other relative entries never reach PATH.
+		case $l_entry in
+		/*) l_clean=${l_clean:+$l_clean:}$l_entry ;;
 		esac
 	done
-	IFS=$OLDIFS
-
-	if [ "$l_clean" = "" ]; then
-		l_clean=$ZXFER_DEFAULT_SECURE_PATH
-	fi
-
-	printf '%s\n' "$l_clean"
+	zxfer_split_end
+	g_zxfer_computed_secure_path=${l_clean:-$ZXFER_DEFAULT_SECURE_PATH}
 }
 
-# Purpose: Return the effective dependency path in the form expected by later
-# helpers.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# when sibling helpers need the same lookup without duplicating module logic.
-zxfer_get_effective_dependency_path() {
-	if [ -n "${ZXFER_SECURE_PATH:-}" ] || [ -n "${ZXFER_SECURE_PATH_APPEND:-}" ]; then
-		zxfer_compute_secure_path
-		return
-	fi
-
-	if [ -n "${g_zxfer_dependency_path:-}" ]; then
-		printf '%s\n' "$g_zxfer_dependency_path"
-		return
-	fi
-	if [ -n "${g_zxfer_secure_path:-}" ]; then
-		printf '%s\n' "$g_zxfer_secure_path"
-		return
-	fi
-
-	printf '%s\n' "$ZXFER_DEFAULT_SECURE_PATH"
-}
-
-# Purpose: Refresh the secure path state from the current configuration and
-# runtime state.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# after inputs change and downstream helpers need the derived value rebuilt.
+# Purpose: Recompute g_zxfer_secure_path from the environment.
+# Usage: zxfer_refresh_secure_path_state || zxfer_reject_invalid_secure_path_configuration
 zxfer_refresh_secure_path_state() {
-	g_zxfer_secure_path=$(zxfer_compute_secure_path)
-	g_zxfer_dependency_path=$g_zxfer_secure_path
-	g_zxfer_runtime_path=$g_zxfer_secure_path
+	zxfer_compute_secure_path || return
+	g_zxfer_secure_path=$g_zxfer_computed_secure_path
 }
 
-# Purpose: Apply the secure path through the controlled helper path owned by
-# this module.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# once planning is complete and zxfer is ready to mutate live state.
+# Purpose: Narrow the live PATH to the secure PATH so a bare command name can
+# never resolve outside it.
+# Usage: zxfer_apply_secure_path, once startup no longer needs helpers such as
+# mktemp from outside a narrow ZXFER_SECURE_PATH. Throws when the secure PATH
+# is empty, because an empty PATH makes bash and dash search the cwd.
 zxfer_apply_secure_path() {
-	zxfer_refresh_secure_path_state
-	# Keep the live runtime PATH equal to the configured secure allowlist so
-	# later bare helper lookups cannot escape an explicit ZXFER_SECURE_PATH.
-	PATH=$g_zxfer_runtime_path
+	[ -n "${g_zxfer_secure_path:-}" ] ||
+		zxfer_reject_invalid_secure_path_configuration
+	PATH=$g_zxfer_secure_path
 	export PATH
 }
 
-# Purpose: Normalize the resolved tool path into the stable form used across
-# zxfer.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# before comparison, caching, or reporting depends on exact formatting.
-zxfer_normalize_resolved_tool_path() {
-	l_path=$1
+# Purpose: Find an executable regular file on a colon-separated directory list
+# without forking, as command -v does for a utility.
+# Usage: zxfer_find_tool_in_path TOOL PATHLIST; publishes the match in
+# g_zxfer_tool_path_result or returns 1. Relative list entries are skipped, and
+# a TOOL containing / is checked as given.
+zxfer_find_tool_in_path() {
+	g_zxfer_tool_path_result=""
+	case $1 in
+	'') return 1 ;;
+	*/*)
+		[ -f "$1" ] && [ -x "$1" ] || return 1
+		g_zxfer_tool_path_result=$1
+		return 0
+		;;
+	esac
 
-	# Some /bin/sh implementations (including OmniOS) shell-quote absolute
-	# command -v results when helper paths contain metacharacters.
-	case "$l_path" in
-	\'/*\')
-		l_unquoted_path=${l_path#\'}
-		l_unquoted_path=${l_unquoted_path%\'}
-		case "$l_unquoted_path" in
-		*"'"*) ;;
-		*)
-			printf '%s\n' "$l_unquoted_path"
+	l_tool_path_rest=$2:
+	while [ -n "$l_tool_path_rest" ]; do
+		l_tool_path_dir=${l_tool_path_rest%%:*}
+		l_tool_path_rest=${l_tool_path_rest#*:}
+		# Drop one trailing slash so "/usr/bin/" yields "/usr/bin/TOOL".
+		case $l_tool_path_dir in
+		/*) l_tool_path_dir=${l_tool_path_dir%/} ;;
+		*) continue ;;
+		esac
+		if [ -f "$l_tool_path_dir/$1" ] && [ -x "$l_tool_path_dir/$1" ]; then
+			g_zxfer_tool_path_result=$l_tool_path_dir/$1
 			return 0
-			;;
+		fi
+	done
+	return 1
+}
+
+# Purpose: Undo the shell quoting that some /bin/sh builds (OmniOS) add to
+# command -v output, and drop trailing newlines as a $(...) capture would.
+# Usage: zxfer_normalize_resolved_tool_path PATH; publishes
+# g_zxfer_normalized_tool_path and prints nothing.
+zxfer_normalize_resolved_tool_path() {
+	g_zxfer_normalized_tool_path=$1
+	case $1 in
+	\'/*\')
+		l_unquoted_path=${1#\'}
+		l_unquoted_path=${l_unquoted_path%\'}
+		case $l_unquoted_path in
+		*\'*) ;;
+		*) g_zxfer_normalized_tool_path=$l_unquoted_path ;;
 		esac
 		;;
 	\"/*\")
-		l_unquoted_path=${l_path#\"}
+		l_unquoted_path=${1#\"}
 		l_unquoted_path=${l_unquoted_path%\"}
-		case "$l_unquoted_path" in
-		*'"'*) ;;
-		*)
-			printf '%s\n' "$l_unquoted_path"
-			return 0
-			;;
+		case $l_unquoted_path in
+		*\"*) ;;
+		*) g_zxfer_normalized_tool_path=$l_unquoted_path ;;
 		esac
 		;;
 	esac
 
-	printf '%s\n' "$l_path"
+	while :; do
+		case $g_zxfer_normalized_tool_path in
+		*"$ZXFER_LF") g_zxfer_normalized_tool_path=${g_zxfer_normalized_tool_path%"$ZXFER_LF"} ;;
+		*) break ;;
+		esac
+	done
 }
 
-# Purpose: Validate the resolved tool path before zxfer relies on it.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution to
-# fail closed on malformed, unsafe, or stale input.
+# Purpose: Check that a resolved helper path is one absolute line.
+# Usage: zxfer_validate_resolved_tool_path PATH LABEL [SCOPE]; publishes the
+# normalized path in g_zxfer_required_tool_result, or returns 1 with the
+# operator message there.
 zxfer_validate_resolved_tool_path() {
-	l_path=$1
-	l_label=$2
-	l_scope=${3:-}
+	zxfer_normalize_resolved_tool_path "$1"
+	l_validated_tool_path=$g_zxfer_normalized_tool_path
+	l_validated_tool_problem=""
+	if ! zxfer_value_is_single_line "$l_validated_tool_path"; then
+		l_validated_tool_problem="a single-line absolute path without control whitespace"
+	else
+		case $l_validated_tool_path in
+		/*) ;;
+		*) l_validated_tool_problem="an absolute path" ;;
+		esac
+	fi
 
-	l_path=$(zxfer_normalize_resolved_tool_path "$l_path")
-	l_tab=$(printf '\t')
-	l_cr=$(printf '\r')
-	l_lf=$(printf '\n_')
-	l_lf=${l_lf%_}
-
-	case "$l_path" in
-	*"$l_tab"* | *"$l_cr"* | *"$l_lf"*)
-		if [ "$l_scope" = "" ]; then
-			printf '%s\n' "Required dependency \"$l_label\" resolved to \"$l_path\", but zxfer requires a single-line absolute path without control whitespace."
-		else
-			printf '%s\n' "Required dependency \"$l_label\" on $l_scope resolved to \"$l_path\", but zxfer requires a single-line absolute path without control whitespace."
-		fi
-		return 1
-		;;
-	esac
-
-	case "$l_path" in
-	/*)
-		printf '%s\n' "$l_path"
+	if [ -z "$l_validated_tool_problem" ]; then
+		g_zxfer_required_tool_result=$l_validated_tool_path
 		return 0
-		;;
-	*)
-		if [ "$l_scope" = "" ]; then
-			printf '%s\n' "Required dependency \"$l_label\" resolved to \"$l_path\", but zxfer requires an absolute path."
-		else
-			printf '%s\n' "Required dependency \"$l_label\" on $l_scope resolved to \"$l_path\", but zxfer requires an absolute path."
-		fi
-		return 1
-		;;
-	esac
+	fi
+	g_zxfer_required_tool_result="Required dependency \"$2\"${3:+ on $3} resolved to \"$l_validated_tool_path\", but zxfer requires $l_validated_tool_problem."
+	return 1
 }
 
-# Purpose: Find the required tool in the tracked state owned by this module.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# when later helpers need an existing record instead of rebuilding one.
+# Purpose: Resolve a required helper to an absolute path on the secure PATH.
+# Usage: zxfer_find_required_tool TOOL [LABEL]; publishes the path in
+# g_zxfer_required_tool_result, or returns 1 with the operator message there.
+# Shell functions and aliases never count.
 zxfer_find_required_tool() {
-	l_tool=$1
-	l_label=${2:-$l_tool}
-	l_search_path=${g_zxfer_dependency_path:-$g_zxfer_secure_path}
-	[ -n "$l_search_path" ] || l_search_path=$ZXFER_DEFAULT_SECURE_PATH
-	l_path=$(PATH=$l_search_path command -v "$l_tool" 2>/dev/null || :)
-	if [ "$l_path" = "" ]; then
-		printf '%s\n' "Required dependency \"$l_label\" not found in secure PATH ($g_zxfer_secure_path). Set ZXFER_SECURE_PATH or install the binary."
-		return 1
+	if zxfer_find_tool_in_path "$1" "${g_zxfer_secure_path:-$ZXFER_DEFAULT_SECURE_PATH}"; then
+		zxfer_validate_resolved_tool_path "$g_zxfer_tool_path_result" "${2:-$1}"
+		return
 	fi
-
-	zxfer_validate_resolved_tool_path "$l_path" "$l_label"
+	g_zxfer_required_tool_result="Required dependency \"${2:-$1}\" not found in secure PATH ($g_zxfer_secure_path). Set ZXFER_SECURE_PATH or install the binary."
+	return 1
 }
 
-# Purpose: Assign the required tool into the shared runtime variable that owns
-# it.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# after a validated lookup succeeds and downstream helpers should reuse the
-# stored result.
-zxfer_assign_required_tool() {
-	l_var_name=$1
-	l_tool=$2
-	l_label=${3:-$l_tool}
-
-	if ! l_resolved_path=$(zxfer_find_required_tool "$l_tool" "$l_label"); then
-		g_zxfer_failure_class=dependency
-		zxfer_throw_error "$l_resolved_path"
-	fi
-
-	eval "$l_var_name=\$l_resolved_path"
+# Purpose: Resolve a required helper or stop the run with a dependency failure.
+# Usage: zxfer_require_tool TOOL [LABEL], then read the absolute path from
+# g_zxfer_required_tool_result.
+zxfer_require_tool() {
+	zxfer_find_required_tool "$@" ||
+		zxfer_throw_dependency_error "$g_zxfer_required_tool_result"
 }
 
-# Purpose: Rebuild a CLI command string around a validated absolute helper path
-# for its head token.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# after the command head is resolved so later rendering keeps the caller's
-# remaining arguments intact.
-zxfer_requote_cli_command_with_resolved_head() {
-	l_cli_string=$1
-	l_resolved_head=$2
-	l_label=${3:-CLI command}
-	if ! l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
-		printf '%s\n' "$l_cli_tokens"
-		return 1
-	fi
-	[ -n "$l_cli_tokens" ] || return 1
-
-	l_output_tokens=""
-	l_replaced_head=0
-
-	while IFS= read -r l_cli_token || [ -n "$l_cli_token" ]; do
-		[ -n "$l_cli_token" ] || continue
-		if [ "$l_replaced_head" -eq 0 ]; then
-			l_cli_token=$l_resolved_head
-			l_replaced_head=1
-		fi
-		if [ "$l_output_tokens" = "" ]; then
-			l_output_tokens=$l_cli_token
-		else
-			l_output_tokens="$l_output_tokens
-$l_cli_token"
-		fi
-	done <<-EOF
-		$l_cli_tokens
-	EOF
-
-	[ "$l_replaced_head" -eq 1 ] || return 1
-	zxfer_quote_token_stream "$l_output_tokens"
+# Purpose: Reset the endpoint-safe codecs (the origin compressor and the
+# target decompressor) to the local ones.
+# Usage: Called before the remote roles replace the command they run.
+zxfer_reset_endpoint_compression_commands() {
+	g_origin_cmd_compress_safe=$g_cmd_compress_safe
+	g_target_cmd_decompress_safe=$g_cmd_decompress_safe
 }
 
-# Purpose: Resolve the effective local CLI command safe that zxfer should use.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# after configuration, cache state, or remote state can change the final
-# choice.
-zxfer_resolve_local_cli_command_safe() {
-	l_cli_string=$1
-	l_label=${2:-command}
-	if ! l_cli_tokens=$(zxfer_split_cli_tokens "$l_cli_string" "$l_label"); then
-		printf '%s\n' "$l_cli_tokens"
+# Purpose: Resolve a CLI command's first token, on the local secure PATH or on
+# a remote host, and requote the command around the resolved path.
+# Usage: zxfer_resolve_cli_command_safe HOST_SPEC STRING [LABEL]
+# [PROFILE_SIDE]; an empty HOST_SPEC resolves locally. Publishes the command,
+# each token single-quoted, in g_zxfer_resolved_cli_command_result, or
+# returns 1 with the operator message there.
+zxfer_resolve_cli_command_safe() {
+	l_cli_label=${3:-command}
+	if ! zxfer_check_literal_token_string "$2" "$l_cli_label"; then
+		g_zxfer_resolved_cli_command_result=$g_zxfer_literal_token_error_result
 		return 1
 	fi
-	l_cli_head=$(printf '%s\n' "$l_cli_tokens" | sed -n '1p')
-	if [ -z "$l_cli_head" ]; then
-		printf '%s\n' "Required dependency \"$l_label\" must not be empty or whitespace-only."
+	zxfer_split_tokens_into_result "$2"
+	l_cli_tokens=$g_zxfer_split_tokens_result
+	if [ -z "$l_cli_tokens" ]; then
+		g_zxfer_resolved_cli_command_result="Required dependency \"$l_cli_label\" must not be empty or whitespace-only."
 		return 1
 	fi
+	if [ -n "$1" ]; then
+		zxfer_resolve_remote_required_tool "$1" "${l_cli_tokens%%"$ZXFER_LF"*}" \
+			"$l_cli_label" "${4:-}"
+	else
+		zxfer_find_required_tool "${l_cli_tokens%%"$ZXFER_LF"*}" "$l_cli_label"
+	fi || {
+		g_zxfer_resolved_cli_command_result=$g_zxfer_required_tool_result
+		return 1
+	}
 
-	if ! l_resolved_head=$(zxfer_find_required_tool "$l_cli_head" "$l_label"); then
-		printf '%s\n' "$l_resolved_head"
-		return 1
-	fi
-
-	zxfer_requote_cli_command_with_resolved_head "$l_cli_string" "$l_resolved_head" "$l_label"
+	zxfer_split_begin "$ZXFER_LF"
+	# shellcheck disable=SC2086 # One checked token per line.
+	set -- $l_cli_tokens
+	zxfer_split_end
+	shift
+	zxfer_render_shell_command_from_argv "$g_zxfer_required_tool_result" "$@"
+	g_zxfer_resolved_cli_command_result=$g_zxfer_shell_command_result
 }
 
-# Purpose: Initialize the dependency defaults before later helpers depend on
-# it.
-# Usage: Called during secure-PATH bootstrap and local dependency resolution
-# during bootstrap so downstream code sees consistent defaults and runtime
-# state.
-zxfer_initialize_dependency_defaults() {
-	zxfer_refresh_secure_path_state
+# Purpose: Drop every inherited helper command and the secure PATH, and set the
+# default compression commands.
+# Usage: Called first by zxfer_reset_session_state: later resets copy g_cmd_zfs
+# and probe g_cmd_ssh, so neither may keep an inherited value.
+zxfer_reset_dependency_state() {
+	g_zxfer_secure_path=""
+	g_cmd_awk=""
+	g_cmd_cat=""
+	g_cmd_parallel=""
+	g_cmd_ps=""
+	g_cmd_ssh=""
+	g_cmd_zfs=""
+	g_cmd_compress="zstd -3"
+	g_cmd_decompress="zstd -d"
+	g_cmd_compress_safe=""
+	g_cmd_decompress_safe=""
+	g_origin_cmd_compress_safe=""
+	g_target_cmd_decompress_safe=""
+}
 
-	if [ -z "${g_cmd_awk:-}" ]; then
-		l_search_path=${g_zxfer_dependency_path:-$g_zxfer_secure_path}
-		[ -n "$l_search_path" ] || l_search_path=$ZXFER_DEFAULT_SECURE_PATH
-		g_cmd_awk=$(PATH=$l_search_path command -v awk 2>/dev/null || :)
-		if [ -z "$g_cmd_awk" ]; then
-			g_cmd_awk='awk'
-		fi
+# Purpose: Point g_cmd_awk at the awk on the built-in secure PATH, so the EXIT
+# trap can render an early failure without running an inherited command.
+# Usage: Called by zxfer_session_initialize just before the traps go in.
+zxfer_initialize_dependency_reporting_defaults() {
+	g_cmd_awk='awk'
+	if zxfer_find_tool_in_path awk "$ZXFER_DEFAULT_SECURE_PATH"; then
+		g_cmd_awk=$g_zxfer_tool_path_result
 	fi
+}
+
+# Purpose: Validate -z/-Z and resolve the local compression and decompression
+# commands into g_cmd_compress_safe and g_cmd_decompress_safe.
+# Usage: Called once after option parsing. Without -z (which -Z implies) both
+# stay empty, since every consumer is gated on -z.
+zxfer_refresh_compression_commands() {
+	g_cmd_compress_safe=""
+	g_cmd_decompress_safe=""
+	[ "$g_option_z_compress" -eq 1 ] || return 0
+
+	zxfer_check_literal_token_string "$g_cmd_compress" "Compression command (-Z)" ||
+		zxfer_throw_usage_error "$g_zxfer_literal_token_error_result" 2
+	zxfer_split_tokens_into_result "$g_cmd_compress"
+	[ -n "$g_zxfer_split_tokens_result" ] ||
+		zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
+	zxfer_check_literal_token_string "$g_cmd_decompress" "Decompression command" ||
+		zxfer_throw_error "$g_zxfer_literal_token_error_result"
+	zxfer_split_tokens_into_result "$g_cmd_decompress"
+	[ -n "$g_zxfer_split_tokens_result" ] ||
+		zxfer_throw_error "Compression requested but decompression command missing."
+	zxfer_resolve_cli_command_safe "" "$g_cmd_compress" "compression command" ||
+		zxfer_throw_dependency_error "$g_zxfer_resolved_cli_command_result"
+	g_cmd_compress_safe=$g_zxfer_resolved_cli_command_result
+	zxfer_resolve_cli_command_safe "" "$g_cmd_decompress" "decompression command" ||
+		zxfer_throw_dependency_error "$g_zxfer_resolved_cli_command_result"
+	g_cmd_decompress_safe=$g_zxfer_resolved_cli_command_result
+}
+
+# Purpose: Resolve the helpers every run needs on the secure PATH.
+# Usage: Called by zxfer_init_session_environment after
+# zxfer_refresh_secure_path_state; throws when awk, zfs or ps is missing.
+zxfer_init_dependency_tool_defaults() {
+	zxfer_require_tool awk
+	g_cmd_awk=$g_zxfer_required_tool_result
+	zxfer_require_tool zfs
+	g_cmd_zfs=$g_zxfer_required_tool_result
+	# parallel is optional, but a parallel that is present must validate.
+	g_cmd_parallel=""
+	if zxfer_find_tool_in_path parallel "$g_zxfer_secure_path"; then
+		zxfer_require_tool parallel
+		g_cmd_parallel=$g_zxfer_required_tool_result
+	fi
+	zxfer_require_tool ps
+	g_cmd_ps=$g_zxfer_required_tool_result
 }

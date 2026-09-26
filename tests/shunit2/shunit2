@@ -231,6 +231,26 @@ assertNotEquals() {
 # shellcheck disable=SC2016,SC2034
 _ASSERT_NOT_EQUALS_='eval assertNotEquals --lineno "${LINENO:-}"'
 
+# Report whether a container holds a content as one literal substring.
+#
+# Local zxfer change: upstream pipes the container through echo into
+# grep -F, which splits a multi-line content into one pattern per line and
+# matches any of them; illumos grep also rejects the empty pattern that a
+# trailing newline produces, and echo reinterprets backslashes on some shells.
+# The quoted pattern keeps glob characters literal.
+#
+# Args:
+#   container: string: text to search
+#   content: string: text to find
+# Returns:
+#   integer: 0 when found, 1 otherwise
+_shunit_containsLiteral() {
+  case "$1" in
+    *"$2"*) return 0 ;;
+  esac
+  return 1
+}
+
 # Assert that a container contains a content.
 #
 # Args:
@@ -258,7 +278,7 @@ assertContains() {
   shunit_content_=$2
 
   shunit_return=${SHUNIT_TRUE}
-  if echo "$shunit_container_" | grep -F -- "$shunit_content_" > /dev/null; then
+  if _shunit_containsLiteral "$shunit_container_" "$shunit_content_"; then
     _shunit_assertPass
   else
     failNotFound "${shunit_message_}" "${shunit_content_}"
@@ -298,7 +318,7 @@ assertNotContains() {
   shunit_content_=$2
 
   shunit_return=${SHUNIT_TRUE}
-  if echo "$shunit_container_" | grep -F -- "$shunit_content_" > /dev/null; then
+  if _shunit_containsLiteral "$shunit_container_" "$shunit_content_"; then
     failFound "${shunit_message_}" "${shunit_content_}"
     shunit_return=${SHUNIT_FALSE}
   else

@@ -20,7 +20,7 @@ oneTimeTearDown() {
 }
 
 setUp() {
-	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE ZXFER_VM_PERF_BASELINE_REF ZXFER_VM_PERF_CASES
+	unset ZXFER_VM_JOBS ZXFER_VM_STREAM_GUEST_OUTPUT ZXFER_VM_FAILED_TESTS_ONLY ZXFER_VM_ONLY_TESTS ZXFER_VM_TEST_LAYER ZXFER_VM_PERF_PROFILE ZXFER_VM_PERF_BASELINE_REF ZXFER_VM_PERF_CASES ZXFER_VM_QEMU_PID_FILE ZXFER_VM_QEMU_WAIT_FAILURE_REASON ZXFER_VM_GUEST_MANIFEST_FILE
 	# shellcheck source=tests/vm/lib.sh
 	. "$VM_MATRIX_LIB"
 	zxfer_vm_reset_state
@@ -66,6 +66,142 @@ test_vm_guest_catalog_uses_current_guest_releases() {
 		"$(zxfer_vm_guest_qemu_image_url omnios amd64)" "/stable/omnios-r151058.cloud.qcow2"
 	assertContains "The OmniOS checksum URL should use the matching current stable checksum." \
 		"$(zxfer_vm_guest_qemu_checksum_url omnios amd64)" "/stable/omnios-r151058.cloud.qcow2.sha256"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_catalog_keeps_omnios_amd64_only() {
+	zxfer_vm_guest_qemu_supports_arch omnios arm64
+	status=$?
+
+	assertEquals "The VM catalog should not advertise an OmniOS arm64 image." \
+		1 "$status"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_manifest_resolves_all_existing_guest_contract_fields() {
+	zxfer_vm_require_guest_manifest ||
+		fail "The checked-in VM guest manifest should validate."
+
+	resolved=$(
+		printf 'guests=%s\n' "$(zxfer_vm_guest_names | awk 'BEGIN { separator = "" } { printf "%s%s", separator, $0; separator = "," } END { print "" }')"
+		printf 'profiles=%s\n' "$(zxfer_vm_profile_names | awk 'BEGIN { separator = "" } { printf "%s%s", separator, $0; separator = "," } END { print "" }')"
+		for profile in smoke local full ci; do
+			printf 'profile|%s|%s\n' "$profile" "$(zxfer_vm_profile_guests "$profile")"
+		done
+		for guest in ubuntu freebsd omnios; do
+			printf 'guest|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+				"$guest" \
+				"$(zxfer_vm_guest_label "$guest")" \
+				"$(zxfer_vm_guest_manifest_field "$guest" "" profiles)" \
+				"$(zxfer_vm_guest_qemu_shell "$guest")" \
+				"$(zxfer_vm_guest_qemu_ssh_ready_timeout_seconds "$guest")" \
+				"$(zxfer_vm_guest_qemu_ssh_ready_probe_count "$guest")" \
+				"$(zxfer_vm_guest_shunit_jobs "$guest")" \
+				"$(zxfer_vm_guest_shunit_mode "$guest")" \
+				"$(zxfer_vm_guest_provisioner "$guest")" \
+				"$(zxfer_vm_guest_cloud_init_style "$guest")" \
+				"$(zxfer_vm_guest_strict_qemu_profiles "$guest")"
+			for arch in amd64 arm64; do
+				if ! zxfer_vm_guest_qemu_supports_arch "$guest" "$arch"; then
+					continue
+				fi
+				printf 'arch|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+					"$guest" "$arch" \
+					"$(zxfer_vm_guest_qemu_image_filename "$guest" "$arch")" \
+					"$(zxfer_vm_guest_qemu_image_url "$guest" "$arch")" \
+					"$(zxfer_vm_guest_qemu_checksum_url "$guest" "$arch")" \
+					"$(zxfer_vm_guest_qemu_archive_compression "$guest" "$arch")" \
+					"$(zxfer_vm_guest_qemu_base_image_name "$guest" "$arch")" \
+					"$(zxfer_vm_guest_qemu_base_format "$guest" "$arch")" \
+					"$(zxfer_vm_guest_qemu_min_disk_size "$guest" "$arch")" \
+					"$(zxfer_vm_guest_qemu_seed_transport "$guest" "$arch")"
+			done
+		done
+	)
+	expected='guests=ubuntu,freebsd,omnios
+profiles=smoke,local,full,ci
+profile|smoke|ubuntu
+profile|local|ubuntu freebsd
+profile|full|ubuntu freebsd omnios
+profile|ci|ubuntu freebsd omnios
+guest|ubuntu|Ubuntu 26.04|smoke,local,full,ci|/bin/sh|1800|1|4|native|apt-zfs|default|ci
+arch|ubuntu|amd64|ubuntu-26.04-server-cloudimg-amd64.img|https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img|https://cloud-images.ubuntu.com/releases/26.04/release/SHA256SUMS|none|ubuntu-26.04-server-cloudimg-amd64.img|qcow2|16G|smbios-nocloud-net
+arch|ubuntu|arm64|ubuntu-26.04-server-cloudimg-arm64.img|https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-arm64.img|https://cloud-images.ubuntu.com/releases/26.04/release/SHA256SUMS|none|ubuntu-26.04-server-cloudimg-arm64.img|qcow2|16G|smbios-nocloud-net
+guest|freebsd|FreeBSD 15.1|local,full,ci|/bin/sh|1800|3|2|native|freebsd-pkg|root-login|
+arch|freebsd|amd64|FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/CHECKSUM.SHA256|xz|FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2|qcow2||disk-cidata
+arch|freebsd|arm64|FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/aarch64/Latest/FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/aarch64/Latest/CHECKSUM.SHA256|xz|FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2|qcow2||disk-cidata
+guest|omnios|OmniOS r151058|full,ci|/usr/xpg4/bin/sh|1800|3|2|bash-posix|omnios-pkg|default|
+arch|omnios|amd64|omnios-r151058.cloud.qcow2|https://downloads.omnios.org/media/stable/omnios-r151058.cloud.qcow2|https://downloads.omnios.org/media/stable/omnios-r151058.cloud.qcow2.sha256|none|omnios-r151058.cloud.qcow2|qcow2||smbios-nocloud-net'
+
+	assertEquals "The validated manifest should preserve every existing guest, profile, architecture, and resolved runtime field." \
+		"$expected" "$resolved"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_manifest_validation_rejects_schema_duplicates_and_inconsistent_guest_rows() {
+	default_manifest=$(zxfer_vm_guest_manifest_path)
+	bad_header="$TEST_TMPDIR/guest-manifest-bad-header.tsv"
+	duplicate_row="$TEST_TMPDIR/guest-manifest-duplicate.tsv"
+	inconsistent_guest="$TEST_TMPDIR/guest-manifest-inconsistent.tsv"
+
+	printf '%s\n' "# invalid header" >"$bad_header"
+	cp "$default_manifest" "$duplicate_row"
+	sed -n '2p' "$default_manifest" >>"$duplicate_row"
+	sed '3s/Ubuntu 26.04/Ubuntu drift/' "$default_manifest" >"$inconsistent_guest"
+
+	header_status=0
+	header_output=$(zxfer_vm_validate_guest_manifest "$bad_header" 2>&1) || header_status=$?
+	duplicate_status=0
+	duplicate_output=$(zxfer_vm_validate_guest_manifest "$duplicate_row" 2>&1) || duplicate_status=$?
+	inconsistent_status=0
+	inconsistent_output=$(zxfer_vm_validate_guest_manifest "$inconsistent_guest" 2>&1) || inconsistent_status=$?
+
+	assertEquals "Guest manifests with the wrong schema header should fail closed." 1 "$header_status"
+	assertContains "Schema failures should identify the manifest header contract." \
+		"$header_output" "header does not match the 19-field guest schema"
+	assertEquals "Guest manifests with duplicate guest/architecture rows should fail closed." 1 "$duplicate_status"
+	assertContains "Duplicate-row failures should identify the duplicated guest and architecture." \
+		"$duplicate_output" "duplicates guest/architecture [ubuntu/amd64]"
+	assertEquals "Guest manifests that drift across architecture rows should fail closed." 1 "$inconsistent_status"
+	assertContains "Cross-architecture drift should identify inconsistent guest-level fields." \
+		"$inconsistent_output" "changes guest-level fields across architecture rows"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_manifest_validation_rejects_shell_command_syntax() {
+	default_manifest=$(zxfer_vm_guest_manifest_path)
+	unsafe_shell_manifest="$TEST_TMPDIR/guest-manifest-unsafe-shell.tsv"
+
+	awk -F '\t' 'BEGIN { OFS = FS } NR == 2 { $11 = "/bin/sh;touch-pwned" } { print }' \
+		"$default_manifest" >"$unsafe_shell_manifest"
+
+	status=0
+	output=$(zxfer_vm_validate_guest_manifest "$unsafe_shell_manifest" 2>&1) || status=$?
+
+	assertEquals "Guest-shell fields containing command syntax should fail closed." \
+		1 "$status"
+	assertContains "Unsafe shell failures should identify the guest-shell contract." \
+		"$output" "has an invalid guest shell"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_main_validates_guest_manifest_before_listing_guests() {
+	bad_manifest="$TEST_TMPDIR/guest-manifest-main-invalid.tsv"
+	printf '%s\n' "# invalid header" >"$bad_manifest"
+
+	status=0
+	output=$(
+		(
+			ZXFER_VM_GUEST_MANIFEST_FILE=$bad_manifest
+			zxfer_vm_main --list-guests
+		) 2>&1
+	) || status=$?
+
+	assertEquals "The VM runner should reject an invalid guest manifest before listing guests." 1 "$status"
+	assertContains "Main-path manifest failures should report the schema error." \
+		"$output" "header does not match the 19-field guest schema"
+	assertNotContains "Invalid manifests should never publish a partial guest list." \
+		"$output" "ubuntu"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -383,6 +519,12 @@ test_vm_guest_qemu_seed_transport_uses_cidata_for_freebsd() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_guest_qemu_ssh_ready_timeout_is_1800_seconds() {
+	assertEquals "The qemu backend should allow slow first boots before declaring SSH readiness failed." \
+		"1800" "$(zxfer_vm_guest_qemu_ssh_ready_timeout_seconds omnios)"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vm_guest_qemu_ssh_ready_probe_count_uses_single_probe_for_supported_guests() {
 	assertEquals "OmniOS qemu guests should use a shorter but still stable SSH readiness threshold under first-boot host-key churn." \
 		"3" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count omnios)"
@@ -392,232 +534,254 @@ test_vm_guest_qemu_ssh_ready_probe_count_uses_single_probe_for_supported_guests(
 		"3" "$(zxfer_vm_guest_qemu_ssh_ready_probe_count freebsd)"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_vm_qemu_wait_for_ssh_resets_stability_when_host_key_changes() {
-	mock_bin="$TEST_TMPDIR/mock-bin"
-	known_hosts_file="$TEST_TMPDIR/known_hosts"
-	keyscan_count_file="$TEST_TMPDIR/keyscan-count"
-	ssh_count_file="$TEST_TMPDIR/ssh-count"
-	mkdir -p "$mock_bin"
-
-	cat <<EOF >"$mock_bin/ssh-keyscan"
+# Purpose: Write ssh-keyscan, ssh and sleep stand-ins for a mock guest into
+# STATE/bin; the guest's current host key is the text in STATE/key.
+# Usage: vm_test_write_mock_guest STATE_DIR
+# The Nth keyscan prints STATE/scan.N when it exists, else the current key
+# (nothing, status 1, without STATE/key). The Nth ssh fails when
+# STATE/ssh-fail.N exists, succeeds only when its UserKnownHostsFile holds the
+# current key, and then installs STATE/rotate.N as the new key. The tools
+# count their calls in STATE/<tool>-count and log to STATE/calls; sleep
+# appends its argument to STATE/sleeps.
+# shellcheck disable=SC2329  # Called from the tests shunit2 invokes.
+vm_test_write_mock_guest() {
+	l_mock_state=$1
+	mkdir -p "$l_mock_state/bin"
+	cat <<EOF >"$l_mock_state/bin/ssh-keyscan"
 #!/bin/sh
-count=0
-if [ -r "$keyscan_count_file" ]; then
-	count=\$(cat "$keyscan_count_file")
-fi
-count=\$((count + 1))
-	printf '%s\n' "\$count" >"$keyscan_count_file"
-if [ "\$count" -eq 1 ]; then
-	printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_A"
+state='$l_mock_state'
+count=\$((\$(cat "\$state/keyscan-count" 2>/dev/null || echo 0) + 1))
+printf '%s\n' "\$count" >"\$state/keyscan-count"
+printf 'ssh-keyscan %s\n' "\$*" >>"\$state/calls"
+if [ -f "\$state/scan.\$count" ]; then
+	cat "\$state/scan.\$count"
+elif [ -f "\$state/key" ]; then
+	printf '[127.0.0.1]:2222 ssh-ed25519 %s\n' "\$(cat "\$state/key")"
 else
-	printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_B"
-fi
-EOF
-	chmod 700 "$mock_bin/ssh-keyscan"
-
-	cat <<EOF >"$mock_bin/ssh"
-#!/bin/sh
-count=0
-if [ -r "$ssh_count_file" ]; then
-	count=\$(cat "$ssh_count_file")
-fi
-count=\$((count + 1))
-printf '%s\n' "\$count" >"$ssh_count_file"
-exit 0
-EOF
-	chmod 700 "$mock_bin/ssh"
-
-	cat <<'EOF' >"$mock_bin/sleep"
-#!/bin/sh
-exit 0
-EOF
-	chmod 700 "$mock_bin/sleep"
-
-	zxfer_test_capture_subshell "
-		PATH=\"$mock_bin:\$PATH\"
-		. \"$VM_MATRIX_LIB\"
-		zxfer_vm_reset_state
-		zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 30 \"OmniOS r151058/amd64\" 2
-		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
-	"
-
-	assertEquals "The readiness probe should succeed once the SSH host key stays stable." \
-		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "A host-key change during readiness should reset the consecutive-success counter." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ssh-count=3"
-	assertContains "The final known_hosts file should keep the stable replacement host key." \
-		"$(cat "$known_hosts_file")" "KEY_B"
-}
-
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_vm_qemu_prepare_remote_ssh_step_reuses_existing_known_hosts_when_keyscan_flakes() {
-	mock_bin="$TEST_TMPDIR/mock-bin-prepare-step"
-	known_hosts_file="$TEST_TMPDIR/known_hosts.prepare-step"
-	ssh_count_file="$TEST_TMPDIR/ssh-count.prepare-step"
-	mkdir -p "$mock_bin"
-	printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_A" >"$known_hosts_file"
-
-	cat <<'EOF' >"$mock_bin/ssh-keyscan"
-#!/bin/sh
-exit 1
-EOF
-	chmod 700 "$mock_bin/ssh-keyscan"
-
-	cat <<EOF >"$mock_bin/ssh"
-#!/bin/sh
-count=0
-if [ -r "$ssh_count_file" ]; then
-	count=\$(cat "$ssh_count_file")
-fi
-count=\$((count + 1))
-printf '%s\n' "\$count" >"$ssh_count_file"
-exit 0
-EOF
-	chmod 700 "$mock_bin/ssh"
-
-	cat <<'EOF' >"$mock_bin/sleep"
-#!/bin/sh
-exit 0
-EOF
-	chmod 700 "$mock_bin/sleep"
-
-	zxfer_test_capture_subshell "
-		PATH=\"$mock_bin:\$PATH\"
-		. \"$VM_MATRIX_LIB\"
-		zxfer_vm_reset_state
-		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.1/arm64' 'the selected guest test layer' 15
-		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
-	"
-
-	assertEquals "Transient keyscan failures should not abort a remote step when the existing known_hosts entry still works." \
-		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "The helper should warn when it falls back to the existing validated known_hosts entry." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "reusing the existing validated known_hosts entry"
-	assertContains "The fallback path should still prove the guest is reachable over SSH." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ssh-count=1"
-}
-
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_vm_qemu_prepare_remote_ssh_step_retries_until_keyscan_recovers() {
-	mock_bin="$TEST_TMPDIR/mock-bin-prepare-step-retry"
-	known_hosts_file="$TEST_TMPDIR/known_hosts.prepare-step-retry"
-	keyscan_count_file="$TEST_TMPDIR/keyscan-count.prepare-step-retry"
-	ssh_count_file="$TEST_TMPDIR/ssh-count.prepare-step-retry"
-	mkdir -p "$mock_bin"
-
-	cat <<EOF >"$mock_bin/ssh-keyscan"
-#!/bin/sh
-count=0
-if [ -r "$keyscan_count_file" ]; then
-	count=\$(cat "$keyscan_count_file")
-fi
-count=\$((count + 1))
-printf '%s\n' "\$count" >"$keyscan_count_file"
-if [ "\$count" -eq 1 ]; then
 	exit 1
 fi
-printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_B"
 EOF
-	chmod 700 "$mock_bin/ssh-keyscan"
-
-	cat <<EOF >"$mock_bin/ssh"
+	cat <<EOF >"$l_mock_state/bin/ssh"
 #!/bin/sh
-count=0
-if [ -r "$ssh_count_file" ]; then
-	count=\$(cat "$ssh_count_file")
-fi
-count=\$((count + 1))
-printf '%s\n' "\$count" >"$ssh_count_file"
+state='$l_mock_state'
+count=\$((\$(cat "\$state/ssh-count" 2>/dev/null || echo 0) + 1))
+printf '%s\n' "\$count" >"\$state/ssh-count"
+printf 'ssh\n' >>"\$state/calls"
+[ ! -f "\$state/ssh-fail.\$count" ] || exit 255
+known_hosts=
+for arg do
+	case \$arg in
+	UserKnownHostsFile=*) known_hosts=\${arg#UserKnownHostsFile=} ;;
+	esac
+done
+[ -f "\$state/key" ] || exit 255
+grep -q -x -F "[127.0.0.1]:2222 ssh-ed25519 \$(cat "\$state/key")" "\$known_hosts" || exit 255
+[ ! -f "\$state/rotate.\$count" ] || cp "\$state/rotate.\$count" "\$state/key"
 exit 0
 EOF
-	chmod 700 "$mock_bin/ssh"
-
-	cat <<'EOF' >"$mock_bin/sleep"
+	cat <<EOF >"$l_mock_state/bin/sleep"
 #!/bin/sh
-exit 0
+printf '%s\n' "\$1" >>'$l_mock_state/sleeps'
 EOF
-	chmod 700 "$mock_bin/sleep"
+	chmod 700 "$l_mock_state/bin/ssh-keyscan" "$l_mock_state/bin/ssh" "$l_mock_state/bin/sleep"
+}
 
-	zxfer_test_capture_subshell "
-		PATH=\"$mock_bin:\$PATH\"
-		. \"$VM_MATRIX_LIB\"
-		zxfer_vm_reset_state
-		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.1/arm64' 'guest preparation' 15
-		printf 'keyscan-count=%s\n' \"\$(cat \"$keyscan_count_file\")\"
-		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
-	"
+# Purpose: Run CMD with the mock guest's tools first on PATH.
+# Usage: vm_test_with_mock_guest STATE_DIR CMD [ARG...]
+# shellcheck disable=SC2030,SC2329  # PATH changes only in this subshell; called from the tests.
+vm_test_with_mock_guest() (
+	PATH="$1/bin:$PATH"
+	shift
+	"$@"
+)
 
-	assertEquals "Step-level SSH preparation should retry until ssh-keyscan succeeds again." \
-		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "The helper should keep retrying transient keyscan failures." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "keyscan-count=2"
-	assertContains "Recovered retries should log that the SSH readiness check succeeded before the remote step continues." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "SSH readiness recovered for guest preparation"
-	assertContains "The recovered refresh path should still prove the guest is reachable over SSH." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ssh-count=1"
-	assertContains "The recovered refresh should publish the new host key." \
-		"$(cat "$known_hosts_file")" "KEY_B"
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_wait_for_ssh_pins_one_normalized_ed25519_key() {
+	state="$TEST_TMPDIR/guest-normalized"
+	vm_test_write_mock_guest "$state"
+	printf '%s\n' KEY_A >"$state/key"
+	# Raw scans vary in order, comments, other key types and spacing.
+	printf '%s\n' "# 127.0.0.1:2222 SSH-2.0-OpenSSH_10.0" \
+		"[127.0.0.1]:2222 ssh-rsa RSA_KEY" \
+		"[127.0.0.1]:2222   ssh-ed25519	KEY_A  trailing" >"$state/scan.1"
+	printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_A" \
+		"# 127.0.0.1:2222 SSH-2.0-OpenSSH_10.0" >"$state/scan.2"
+	: >"$state/ssh-fail.1"
+
+	output=$(vm_test_with_mock_guest "$state" zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \
+		"$state/known_hosts" "$TEST_TMPDIR/id_ed25519" 60 "FreeBSD 15.1/arm64" 2 2>&1)
+
+	assertEquals "SSH readiness should succeed on the stable key: $output" 0 "$?"
+	assertEquals "The pinned known_hosts holds exactly one normalized ed25519 line." \
+		"[127.0.0.1]:2222 ssh-ed25519 KEY_A" "$(cat "$state/known_hosts")"
+	assertNotContains "Differently formatted scans of one key are not a key change." \
+		"$output" "changed"
+	assertContains "The scan asks for the ed25519 key only." \
+		"$(cat "$state/calls")" "ssh-keyscan -T 5 -t ed25519 -p 2222 127.0.0.1"
+	assertContains "The wait reports how long readiness took." "$output" "SSH ready after 10s of waiting"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_vm_qemu_prepare_remote_ssh_step_requires_probe_after_keyscan_success() {
-	mock_bin="$TEST_TMPDIR/mock-bin-prepare-step-probe"
-	known_hosts_file="$TEST_TMPDIR/known_hosts.prepare-step-probe"
-	keyscan_count_file="$TEST_TMPDIR/keyscan-count.prepare-step-probe"
-	ssh_count_file="$TEST_TMPDIR/ssh-count.prepare-step-probe"
-	mkdir -p "$mock_bin"
+test_vm_qemu_wait_for_ssh_ignores_empty_and_partial_scans() {
+	state="$TEST_TMPDIR/guest-empty-scans"
+	vm_test_write_mock_guest "$state"
+	printf '%s\n' KEY_A >"$state/key"
+	# sshd restarts after the first probe: two probes fail while one scan
+	# prints only the banner comment and the next prints nothing.
+	: >"$state/ssh-fail.2"
+	: >"$state/ssh-fail.3"
+	printf '%s\n' "# 127.0.0.1:2222 SSH-2.0-OpenSSH_10.0" >"$state/scan.2"
+	: >"$state/scan.3"
 
-	cat <<EOF >"$mock_bin/ssh-keyscan"
-#!/bin/sh
-count=0
-if [ -r "$keyscan_count_file" ]; then
-	count=\$(cat "$keyscan_count_file")
-fi
-count=\$((count + 1))
-printf '%s\n' "\$count" >"$keyscan_count_file"
-printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_\$count"
-EOF
-	chmod 700 "$mock_bin/ssh-keyscan"
+	output=$(vm_test_with_mock_guest "$state" zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \
+		"$state/known_hosts" "$TEST_TMPDIR/id_ed25519" 120 "FreeBSD 15.1/arm64" 3 2>&1)
 
-	cat <<EOF >"$mock_bin/ssh"
-#!/bin/sh
-count=0
-if [ -r "$ssh_count_file" ]; then
-	count=\$(cat "$ssh_count_file")
-fi
-count=\$((count + 1))
-printf '%s\n' "\$count" >"$ssh_count_file"
-if [ "\$count" -eq 1 ]; then
-	exit 255
-fi
-exit 0
-EOF
-	chmod 700 "$mock_bin/ssh"
+	assertEquals "Readiness should survive scans that print no key: $output" 0 "$?"
+	assertNotContains "An empty or partial scan is not a key change." "$output" "changed"
+	assertEquals "The pinned key stays in place." \
+		"[127.0.0.1]:2222 ssh-ed25519 KEY_A" "$(cat "$state/known_hosts")"
+	assertEquals "The count restarts after a failed probe until three probes pass in a row." \
+		6 "$(cat "$state/ssh-count")"
+	assertEquals "Failed probes back off; confirmation probes stay five seconds apart." \
+		"5 10 20 5 5" "$(tr '\n' ' ' <"$state/sleeps" | sed 's/ $//')"
+}
 
-	cat <<'EOF' >"$mock_bin/sleep"
-#!/bin/sh
-exit 0
-EOF
-	chmod 700 "$mock_bin/sleep"
+# shellcheck disable=SC2030,SC2031,SC2317,SC2329  # PATH changes only inside $(...); invoked indirectly by shunit2.
+test_vm_qemu_wait_for_ssh_backs_off_while_the_guest_is_down() {
+	state="$TEST_TMPDIR/guest-down"
+	vm_test_write_mock_guest "$state"
 
-	zxfer_test_capture_subshell "
-		PATH=\"$mock_bin:\$PATH\"
-		. \"$VM_MATRIX_LIB\"
-		zxfer_vm_reset_state
-		zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \"$known_hosts_file\" \"$TEST_TMPDIR/id_ed25519\" 'FreeBSD 15.1/arm64' 'guest preparation' 15
-		printf 'keyscan-count=%s\n' \"\$(cat \"$keyscan_count_file\")\"
-		printf 'ssh-count=%s\n' \"\$(cat \"$ssh_count_file\")\"
-	"
+	output=$(
+		PATH="$state/bin:$PATH"
+		zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \
+			"$state/known_hosts" "$TEST_TMPDIR/id_ed25519" 60 "FreeBSD 15.1/arm64" 3 2>&1
+		status=$?
+		printf 'reason=%s\n' "$ZXFER_VM_QEMU_WAIT_FAILURE_REASON"
+		exit "$status"
+	)
 
-	assertEquals "A fresh keyscan is not enough; the remote step should wait until SSH can execute a command." \
-		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "The helper should retry after a successful keyscan when the command probe still fails." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "keyscan-count=2"
-	assertContains "The helper should require a successful command probe before returning." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ssh-count=2"
-	assertContains "The final known_hosts file should reflect the host key from the successful probe attempt." \
-		"$(cat "$known_hosts_file")" "KEY_2"
+	assertEquals "The wait should time out while no key can be scanned." 1 "$?"
+	assertContains "$output" "reason=timeout"
+	assertEquals "Scans back off to twenty seconds." \
+		"5 10 20 20 20" "$(tr '\n' ' ' <"$state/sleeps" | sed 's/ $//')"
+	assertFalse "Nothing is probed before a key is pinned." "[ -e '$state/ssh-count' ]"
+	assertContains "Progress is logged about every thirty seconds." \
+		"$output" "still waiting for SSH readiness (35s elapsed)"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_wait_for_ssh_repins_a_first_boot_key_change_and_restarts_the_count() {
+	state="$TEST_TMPDIR/guest-rekey"
+	vm_test_write_mock_guest "$state"
+	printf '%s\n' KEY_A >"$state/key"
+	# First boot regenerates the host keys right after the first probe.
+	printf '%s\n' KEY_B >"$state/rotate.1"
+
+	output=$(vm_test_with_mock_guest "$state" zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \
+		"$state/known_hosts" "$TEST_TMPDIR/id_ed25519" 60 "OmniOS r151058/amd64" 2 2>&1)
+
+	assertEquals "Readiness should succeed once the new key is stable: $output" 0 "$?"
+	assertContains "A key change during readiness is logged, not accepted silently." \
+		"$output" "guest SSH host key changed during first boot"
+	assertEquals "The new key replaces the old one." \
+		"[127.0.0.1]:2222 ssh-ed25519 KEY_B" "$(cat "$state/known_hosts")"
+	assertEquals "The key change restarts the consecutive-probe count." \
+		4 "$(cat "$state/ssh-count")"
+}
+
+# shellcheck disable=SC2030,SC2031,SC2317,SC2329  # PATH changes only inside $(...); invoked indirectly by shunit2.
+test_vm_qemu_wait_for_ssh_fails_fast_when_qemu_exits_before_readiness() {
+	state="$TEST_TMPDIR/guest-qemu-exited"
+	vm_test_write_mock_guest "$state"
+	printf '%s\n' "999999" >"$state/qemu.pid"
+
+	output=$(
+		PATH="$state/bin:$PATH"
+		ZXFER_VM_QEMU_PID_FILE="$state/qemu.pid"
+		zxfer_vm_qemu_wait_for_ssh 127.0.0.1 2222 \
+			"$state/known_hosts" "$TEST_TMPDIR/id_ed25519" 30 "OmniOS r151058/amd64" 1 2>&1
+		status=$?
+		printf 'reason=%s\n' "$ZXFER_VM_QEMU_WAIT_FAILURE_REASON"
+		exit "$status"
+	)
+
+	assertEquals "The readiness wait should fail when the daemonized qemu pid exits." 1 "$?"
+	assertContains "The failure reason should distinguish early qemu exit from a timeout." \
+		"$output" "reason=qemu_exited"
+	assertContains "The readiness wait should report the early qemu exit." \
+		"$output" "qemu process exited before SSH readiness"
+	assertFalse "The readiness wait should not continue sleeping after qemu has exited." \
+		"[ -e '$state/sleeps' ]"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_prepare_remote_ssh_step_uses_the_pinned_key_without_rescanning() {
+	state="$TEST_TMPDIR/guest-step-ready"
+	vm_test_write_mock_guest "$state"
+	printf '%s\n' KEY_A >"$state/key"
+	printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_A" >"$state/known_hosts"
+
+	output=$(vm_test_with_mock_guest "$state" zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \
+		"$state/known_hosts" "$TEST_TMPDIR/id_ed25519" "FreeBSD 15.1/arm64" "guest preparation" 15 2>&1)
+
+	assertEquals "A working pinned key is enough: $output" 0 "$?"
+	assertEquals "One probe, no scan." "ssh" "$(cat "$state/calls")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_prepare_remote_ssh_step_waits_for_sshd_on_the_pinned_key() {
+	state="$TEST_TMPDIR/guest-step-restart"
+	vm_test_write_mock_guest "$state"
+	printf '%s\n' KEY_A >"$state/key"
+	printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_A" >"$state/known_hosts"
+	# sshd is restarting: the probe fails and the scan prints nothing.
+	: >"$state/ssh-fail.1"
+	: >"$state/scan.1"
+
+	output=$(vm_test_with_mock_guest "$state" zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \
+		"$state/known_hosts" "$TEST_TMPDIR/id_ed25519" "FreeBSD 15.1/arm64" "guest preparation" 15 2>&1)
+
+	assertEquals "The step should wait until SSH works again: $output" 0 "$?"
+	assertContains "$output" "SSH readiness recovered for guest preparation"
+	assertEquals "The pinned key is unchanged." \
+		"[127.0.0.1]:2222 ssh-ed25519 KEY_A" "$(cat "$state/known_hosts")"
+	assertEquals 2 "$(cat "$state/ssh-count")"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_prepare_remote_ssh_step_accepts_a_pinned_file_with_appended_keys() {
+	state="$TEST_TMPDIR/guest-step-update-host-keys"
+	vm_test_write_mock_guest "$state"
+	printf '%s\n' KEY_A >"$state/key"
+	# `UpdateHostKeys yes` in the user's ssh config appends the other key
+	# types after the first successful probe.
+	printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_A" \
+		"[127.0.0.1]:2222 ssh-rsa RSA_KEY" >"$state/known_hosts"
+	: >"$state/ssh-fail.1"
+
+	output=$(vm_test_with_mock_guest "$state" zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \
+		"$state/known_hosts" "$TEST_TMPDIR/id_ed25519" "FreeBSD 15.1/arm64" "guest preparation" 15 2>&1)
+
+	assertEquals "A scan of the pinned key is not a key change: $output" 0 "$?"
+	assertNotContains "$output" "changed after readiness"
+	assertContains "$output" "SSH readiness recovered for guest preparation"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_qemu_prepare_remote_ssh_step_refuses_a_changed_host_key() {
+	state="$TEST_TMPDIR/guest-step-rekey"
+	vm_test_write_mock_guest "$state"
+	printf '%s\n' KEY_B >"$state/key"
+	printf '%s\n' "[127.0.0.1]:2222 ssh-ed25519 KEY_A" >"$state/known_hosts"
+
+	output=$(vm_test_with_mock_guest "$state" zxfer_vm_qemu_prepare_remote_ssh_step 127.0.0.1 2222 \
+		"$state/known_hosts" "$TEST_TMPDIR/id_ed25519" "FreeBSD 15.1/arm64" "guest preparation" 15 2>&1)
+
+	assertEquals "A host key change after readiness must stop the step." 1 "$?"
+	assertContains "$output" "the guest SSH host key changed after readiness; refusing to trust the new key before guest preparation"
+	assertEquals "The pinned key is kept." \
+		"[127.0.0.1]:2222 ssh-ed25519 KEY_A" "$(cat "$state/known_hosts")"
+	assertFalse "The refusal is immediate." "[ -e '$state/sleeps' ]"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -835,7 +999,45 @@ test_vm_integration_harness_extra_args_adds_only_test_flags() {
 	ZXFER_VM_ONLY_TESTS="basic_replication_test force_rollback_test"
 
 	assertEquals "The VM runner should pass named in-guest test filters through to the integration harness." \
-		"--only-test basic_replication_test --only-test force_rollback_test" "$(zxfer_vm_integration_harness_extra_args)"
+		"--only-test 'basic_replication_test' --only-test 'force_rollback_test'" "$(zxfer_vm_integration_harness_extra_args)"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_integration_harness_extra_args_rejects_shell_syntax() {
+	status=0
+	output=$(
+		(
+			ZXFER_VM_ONLY_TESTS='basic_replication_test;touch'
+			zxfer_vm_integration_harness_extra_args
+		) 2>&1
+	) || status=$?
+
+	assertEquals "VM --only-test values with shell syntax should fail before guest rendering." \
+		1 "$status"
+	assertContains "Invalid VM test names should identify the rejected selector." \
+		"$output" "Invalid integration test name for --only-test: basic_replication_test;touch"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_integration_harness_extra_args_rejects_globs_before_pathname_expansion() {
+	glob_dir="$TEST_TMPDIR/only-test-glob"
+	mkdir -p "$glob_dir"
+	: >"$glob_dir/basic_replication_test"
+	status=0
+	output=$(
+		(
+			cd "$glob_dir" || exit 1
+			ZXFER_VM_ONLY_TESTS='*'
+			zxfer_vm_integration_harness_extra_args
+		) 2>&1
+	) || status=$?
+
+	assertEquals "VM --only-test globs must fail before they can expand to a valid-looking filename." \
+		1 "$status"
+	assertContains "The glob rejection should report the original selector, not an expanded path." \
+		"$output" "Invalid integration test name for --only-test: *"
+	assertNotContains "The invalid glob must not become the valid-looking fixture filename." \
+		"$output" "--only-test 'basic_replication_test'"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -844,6 +1046,8 @@ test_vm_render_guest_test_script_defaults_to_integration_harness() {
 
 	assertContains "The default guest test layer should keep using the integration harness." \
 		"$script_body" "./tests/run_integration_zxfer.sh --yes --keep-going"
+	assertContains "The manifest-provided guest shell should be quoted as one rendered command token." \
+		"$script_body" "'/bin/sh' ./tests/run_integration_zxfer.sh"
 	assertNotContains "The default guest test layer should not switch to the shunit2 runner." \
 		"$script_body" "./tests/run_shunit_tests.sh"
 }
@@ -868,9 +1072,9 @@ test_vm_render_guest_test_script_uses_perf_runner_when_requested() {
 	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
 
 	assertContains "Opt-in performance guest runs should invoke the perf runner." \
-		"$script_body" "./tests/run_perf_tests.sh --yes --profile \"standard\""
+		"$script_body" "./tests/run_perf_tests.sh --yes --profile 'standard'"
 	assertContains "Performance guest runs should keep artifacts under the guest temp root." \
-		"$script_body" "ZXFER_PERF_OUTPUT_DIR=\"/var/tmp/zxfer-vm-matrix/perf-artifacts\""
+		"$script_body" "ZXFER_PERF_OUTPUT_DIR='/var/tmp/zxfer-vm-matrix/perf-artifacts'"
 	assertNotContains "Opt-in performance guest runs should not invoke the integration harness." \
 		"$script_body" "./tests/run_integration_zxfer.sh"
 }
@@ -884,13 +1088,13 @@ test_vm_render_guest_test_script_uses_perf_compare_runner_when_requested() {
 	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
 
 	assertContains "Performance comparison guest runs should invoke the comparator." \
-		"$script_body" "./tests/run_perf_compare.sh --yes --profile \"standard\""
+		"$script_body" "./tests/run_perf_compare.sh --yes --profile 'standard'"
 	assertContains "Performance comparison guest runs should use the archived baseline checkout beside the candidate." \
-		"$script_body" "--baseline-bin \"/root/zxfer-baseline/zxfer\""
+		"$script_body" "--baseline-bin '/root/zxfer-baseline/zxfer'"
 	assertContains "Performance comparison guest runs should label the baseline ref." \
 		"$script_body" "--baseline-label 'upstream-compat-final'"
 	assertContains "Performance comparison guest runs should measure the current checkout as candidate." \
-		"$script_body" "--candidate-bin \"/root/zxfer/zxfer\""
+		"$script_body" "--candidate-bin '/root/zxfer/zxfer'"
 	assertNotContains "Performance comparison guest runs should not rely on git inside the guest." \
 		"$script_body" "git "
 }
@@ -905,6 +1109,36 @@ test_vm_render_guest_test_script_shell_quotes_perf_compare_baseline_label() {
 
 	assertContains "Performance comparison guest scripts should shell-quote the baseline label." \
 		"$script_body" "--baseline-label 'feature/has'\\''quote'"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_vm_render_guest_test_script_shell_quotes_all_interpolated_paths() {
+	ZXFER_VM_TEST_LAYER=perf-compare
+	ZXFER_VM_PERF_PROFILE=smoke
+	ZXFER_VM_PERF_BASELINE_REF=upstream-compat-final
+	repo_dir="/root/zxfer'; touch /tmp/zxfer-vm-injected; #"
+	tmp_dir='/var/tmp/zxfer"; uname; #'
+	quoted_repo=$(zxfer_vm_shell_quote "$repo_dir")
+	quoted_tmp=$(zxfer_vm_shell_quote "$tmp_dir")
+	quoted_baseline=$(zxfer_vm_shell_quote "$repo_dir-baseline/zxfer")
+	quoted_candidate=$(zxfer_vm_shell_quote "$repo_dir/zxfer")
+	quoted_output=$(zxfer_vm_shell_quote "$tmp_dir/perf-artifacts")
+
+	script_body=$(zxfer_vm_render_guest_test_script ubuntu "$repo_dir" "$tmp_dir")
+
+	assertContains "The rendered guest script should quote its repository directory as one token." \
+		"$script_body" "cd $quoted_repo"
+	assertContains "The rendered guest script should quote its temporary directory as one environment value." \
+		"$script_body" "env TMPDIR=$quoted_tmp"
+	assertContains "The rendered guest script should quote its baseline binary path as one argument." \
+		"$script_body" "--baseline-bin $quoted_baseline"
+	assertContains "The rendered guest script should quote its candidate binary path as one argument." \
+		"$script_body" "--candidate-bin $quoted_candidate"
+	assertContains "The rendered guest script should quote its output directory as one argument." \
+		"$script_body" "--output-dir $quoted_output"
+	if ! printf '%s\n' "$script_body" | /bin/sh -n; then
+		fail "Metacharacter-bearing rendered guest paths should still produce valid POSIX shell."
+	fi
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -983,11 +1217,11 @@ test_vm_guest_prepare_script_installs_zfs_tools_for_ubuntu_perf_compare() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_vm_guest_prepare_script_installs_bash_for_freebsd_shunit2() {
+test_vm_guest_prepare_script_installs_bash_and_git_for_freebsd_shunit2() {
 	script_body=$(zxfer_vm_guest_prepare_script freebsd qemu shunit2)
 
-	assertContains "FreeBSD shunit2 guest preparation should install bash for the coverage fallback suite." \
-		"$script_body" "pkg install -y bash"
+	assertContains "FreeBSD shunit2 guest preparation should install bash for coverage and Git for validation-runner fixtures." \
+		"$script_body" "pkg install -y bash git"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -1004,8 +1238,8 @@ test_vm_guest_prepare_script_installs_perf_tools_for_freebsd_perf() {
 test_vm_guest_prepare_script_installs_bash_for_omnios_shunit2() {
 	script_body=$(zxfer_vm_guest_prepare_script omnios qemu shunit2)
 
-	assertContains "OmniOS shunit2 guest preparation should install bash for the POSIX wrapper path." \
-		"$script_body" "pkg install bash"
+	assertContains "OmniOS shunit2 guest preparation should install bash for the POSIX wrapper and Git for validation-runner fixtures." \
+		"$script_body" "pkg install bash git"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

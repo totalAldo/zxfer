@@ -24,15 +24,18 @@ These tools are required by the installed `zxfer` command itself.
 
 | Tool | Why it is needed | Resolution path | FreeBSD ports note |
 | --- | --- | --- | --- |
-| `/bin/sh` | interpreter for `zxfer` and `src/*.sh` | script shebang | base system |
+| `/bin/sh` | interpreter for `zxfer` and `src/*.sh`, and the fixed shell for background jobs | script shebang; background job shells run `/bin/sh` by path | base system |
 | `zfs` | all replication, property, snapshot, and existence operations | resolved through the secure-PATH model locally; resolved per host remotely | base system on supported FreeBSD/OpenZFS installs |
 | `awk` | parsing, normalization, sorting helpers, report rendering, and cache/index helpers | resolved through the secure-PATH model locally | base system |
-| `ps` | the memoized process-start token used by owned-lock metadata, plus background-job liveness and descendant-reap checks | resolved through the secure-PATH model locally | base system |
+| `ps` | the memoized process-start token used by owned-lock metadata, plus abort-only descendant discovery and identity revalidation and, during abnormal teardown, a zombie check (`ps -o stat=`, or `-o s=` on illumos) | resolved through the secure-PATH model locally | base system |
 
 Notes:
 
 - On SunOS/illumos, `gawk` is preferred when available, but plain `awk`
   remains the baseline dependency.
+- Background job shells (source discovery, `-j` jobs, the `-D` dialog) and
+  local `-k` metadata writes run `/bin/sh`, so `ZXFER_SECURE_PATH` need not
+  list `sh`.
 
 ### Conditional Runtime Requirements
 
@@ -41,9 +44,10 @@ These tools are only required when the corresponding feature is used.
 | Tool | Used by | When required | Packaging guidance |
 | --- | --- | --- | --- |
 | `ssh` | remote host probing, remote command execution, control sockets | required when `-O` or `-T` is used, and resolved lazily through the secure-PATH model when remote transport is actually needed | base system on the supported host families; do not make it a local-only hard dependency |
-| `cat` | property backup restore and remote backup metadata writes | `-e` restore mode on the origin side, plus `-k` when backup metadata is written through a remote target helper; remote `cat` is resolved per host role | base system; do not add a separate FreeBSD package dependency |
-| `parallel` | explicit per-dataset source snapshot discovery for `-j > 1` | required on the executing origin host whenever `-j > 1` is requested; zxfer intentionally validates only that a helper named `parallel` resolves through the secure-PATH model, then assumes the operator/package supplied a compatible implementation; the rendered pipeline uses GNU Parallel-style options and does not silently fall back to the serial recursive listing once `-j > 1` is requested | consider a package dependency if the port should guarantee `-j > 1` support out of the box |
-| `setsid` | background-job process-group isolation | optional; when the local host provides `setsid`, supervision-lite jobs launch in a dedicated process group so abort can signal the whole pipeline at once, falling back to cleanup-wrapper child teardown otherwise | usually a base or util-linux userland tool; do not make it a hard dependency unless packaging wants to require process-group isolation everywhere |
+| `cat` | property backup restore, staged publication, and recovery copies | `-e` restore mode on the origin side and `-k` publication on the destination side; remote `cat` is resolved per host role | base system; do not add a separate FreeBSD package dependency |
+| `find` | listing the origin's backup storage directories for forwarded `-k` provenance | `-k` with `-O`, on the origin host, once per run, only when the source dataset already has a storage directory there | base system; do not add a package dependency |
+| `parallel` | explicit per-dataset source snapshot discovery for `-j > 1` | required on the executing origin host whenever `-j > 1` is requested (without `-O`, the local `parallel` is checked at startup, before any other work); zxfer intentionally validates only that a helper named `parallel` resolves through the secure-PATH model, then assumes the operator/package supplied a compatible implementation; the rendered pipeline uses GNU Parallel-style options and does not silently fall back to the serial recursive listing once `-j > 1` is requested | consider a package dependency if the port should guarantee `-j > 1` support out of the box |
+| `setsid` | background-job process-group isolation | optional; a working local `setsid` isolates background pipelines; verified shell job control is also supported without a controlling terminal (bash only: FreeBSD sh, dash and ksh93 cannot give a job its own group from a subshell, so without `setsid` they use the cleanup wrapper); a descendant-tracking cleanup wrapper is the fallback | usually a base or util-linux userland tool; do not make it a hard dependency unless packaging wants to require process-group isolation everywhere |
 | `zstd` | compressed send/receive streams and remote snapshot-discovery metadata compression | `-z` or default/custom `-Z` compression paths, including remote `-O ... -j ...` metadata discovery when ssh compression is active | consider a package dependency only if the port should guarantee compression support out of the box |
 | `svcadm` | migration/service handling | `-c` and `-m` on OmniOS/illumos systems | not a FreeBSD package dependency |
 | `kldstat`, `kldload`, `/dev/speaker` | audible status beeps | FreeBSD-only `-b` / `-B` path | base system and device availability; not a package dependency |
@@ -73,9 +77,7 @@ Current runtime inventory:
 - `comm`
 - `cut`
 - `date`
-- `find`
 - `grep`
-- `head`
 - `hostname`
 - `id`
 - `kill`
@@ -94,14 +96,13 @@ Current runtime inventory:
 - `tail`
 - `tr`
 - `uname`
-- `wc`
 
 On FreeBSD, these are expected from base and usually do not belong in
 `RUN_DEPENDS`.
 
 Remote helper scripts assume the same kind of base userland on the executing
 remote host. For example, the `-T` destination discovery batch uses target-side
-POSIX `sh`, `mktemp`, `grep`, `cat`, and `rm` around the resolved target
+POSIX `sh`, `mktemp -d`, `grep`, `cat`, and `rm` around the resolved target
 `zfs` command, all under the validated remote dependency `PATH`.
 
 ## Direct Integration Harness Dependencies
@@ -127,9 +128,11 @@ Important packaging note:
 ## Manual Performance Harness Dependencies
 
 These tools are used by [run_perf_tests.sh](../tests/run_perf_tests.sh), not by
-the installed `zxfer` command. The performance harness sources the direct
-integration harness in source-only mode, so it inherits the direct integration
-harness dependencies above.
+the installed `zxfer` command. The performance and integration harnesses share
+focused host, reporting, file-backed pool, and mock-remote fixtures under
+`tests/helpers/`; the performance harness does not source the complete
+integration harness or its test bodies. It still uses the same guarded
+file-backed `zfs`/`zpool` fixture lifecycle described above.
 
 | Tool | Why it is needed |
 | --- | --- |
@@ -139,6 +142,32 @@ harness dependencies above.
 
 Perf dependencies are local QA dependencies only. They should not become
 installed-command runtime dependencies.
+
+## Developer Workflow Timing Dependencies
+
+These tools are used by
+[run_dx_benchmark.sh](../tests/run_dx_benchmark.sh), not by the installed
+`zxfer` command. The runner measures existing validation entry points and does
+not add a timing gate.
+
+| Tool | Why it is needed |
+| --- | --- |
+| `/usr/bin/time -p` | record portable wall time separately from command stderr |
+| POSIX `awk` | validate timer output and calculate median and nearest-rank P95 summaries |
+| `ps`, `kill`, `sleep` | verify private process-group leadership, coordinate readiness, and retire the active validation group |
+| `setsid` | fallback private-group launcher when non-interactive shell job control is unavailable (normally provided by util-linux on Linux) |
+
+The selected validation case retains its own dependencies and host-risk
+contract. A resident supervisor verifies `PID == PGID` and publishes readiness
+before the selected runner receives permission to start. The launcher uses
+non-interactive shell job control where it produces a verified private group,
+with `setsid` as a fail-closed fallback. Once ready, cleanup needs no ancestry
+snapshot: group-wide `STOP` pins and freezes the supervisor plus every
+inherited-group descendant before one `KILL` and `wait`. The timing runner
+itself does not invoke ZFS or access the network; the complete `validate` case
+may populate the pinned lint cache through the normal `validate.sh full` path.
+Measurements execute under `LC_ALL=C` so portable `time -p` decimals and TSV
+summaries remain machine-readable.
 
 ## VM Matrix Host Dependencies
 
@@ -157,7 +186,6 @@ host that orchestrates disposable guests:
 | `tar` | transfer the current checkout into guests and stream guest artifacts back out |
 | `git` | validate and archive `ZXFER_VM_PERF_BASELINE_REF` for the optional `perf-compare` guest layer |
 | `xz` | decompress the pinned FreeBSD cloud image |
-| `zstd` | future-proof `.zst` guest image support when a selected guest ships one |
 
 These are local QA or CI-orchestration dependencies, not installed-command
 runtime dependencies of `zxfer`.
@@ -172,9 +200,12 @@ These tools are used for development, CI, or local QA.
 - `/bin/sh` is sufficient for the normal shunit2 runner
 - alternate shells such as `dash`, `bash --posix`, `busybox ash`, and
   `/usr/xpg4/bin/sh` are CI/test-matrix tools, not runtime dependencies
+- FreeBSD VM-backed shunit2 runs install `bash` for coverage-helper tests and
+  `git` for lint/validation fixtures that exercise changed-path discovery
 - OmniOS shunit2 guest runs through `tests/run_vm_matrix.sh --test-layer shunit2`
-  install `bash` in the guest and export a `bash --posix` wrapper via
-  `ZXFER_TEST_SHELL`, because `/usr/xpg4/bin/sh` does not honor the mock-heavy
+  install `bash` for the `bash --posix` wrapper and `git` for lint/validation
+  fixtures that exercise changed-path discovery. The wrapper is exported via
+  `ZXFER_TEST_SHELL` because `/usr/xpg4/bin/sh` does not honor the mock-heavy
   subshell helper overrides the same way
 
 ### Coverage Tooling

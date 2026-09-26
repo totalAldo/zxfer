@@ -175,8 +175,8 @@ These are the biggest user-visible additions since the 2019 release.
   checks helper existence through the secure-PATH model and intentionally
   leaves GNU Parallel-style compatibility to operators and packages. Source
   discovery uses tracked background PID cleanup, and long-lived send/receive
-  workers use supervisor-backed teardown instead of bare wrapper-shell PID
-  cleanup. The scheduler serializes active parent/child destination receives on
+  workers use verified process groups where available, with a descendant-
+  tracking cleanup wrapper as the fallback. The scheduler serializes active parent/child destination receives on
   the same target, but skips blocked descendants and starts later independent
   datasets while job slots remain
 - `-V`: very verbose debug output plus profiling counters
@@ -196,8 +196,10 @@ These are the biggest user-visible additions since the 2019 release.
 - ssh control sockets are reused within one run through short per-role socket
   paths under that invocation's private temp root; concurrent zxfer processes
   do not share sockets
-- remote capability discovery is one fail-closed probe per host per run, held
-  in memory instead of persisted in cache files; `ZXFER_ERROR_LOG` appends are
+- remote capability discovery is one fail-closed probe per role, host and
+  requested tool set per run (a recursive `-O -j` pull that the fast no-op
+  proof finds work for probes the origin a second time, for `parallel`), held in memory instead of persisted in
+  cache files; `ZXFER_ERROR_LOG` appends are
   still serialized through metadata-bearing owned lock directories
 
 ### Better property handling

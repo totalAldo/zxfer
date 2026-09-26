@@ -25,8 +25,8 @@ should prioritize:
 
 - `zxfer`: entry point
 - `src/`: functional shell modules
-- `tests/`: shunit2 suites, coverage runner, direct integration harness, and
-  the VM-backed integration matrix
+- `tests/`: shunit2 suites, coverage runner, the stable integration entry
+  point plus concern fragments, and the VM-backed integration matrix
 - `docs/`: operator and contributor guides
 - `examples/`: runnable command templates for common workflows
 - `man/`: primary CLI reference (`zxfer.8`, `zxfer.1m`)
@@ -34,6 +34,24 @@ should prioritize:
 - `.github/`: workflows, templates, and `CODEOWNERS`
 
 ## Required Validation
+
+The profile dispatcher provides one discoverable front door for the existing
+validation entrypoints:
+
+```sh
+./tests/validate.sh --list
+./tests/validate.sh full
+```
+
+`full` runs the complete host-safe lint, unit, and report-only bash-xtrace
+coverage stack. Profile composition lives in `tests/validation_profiles.tsv`;
+`tests/validation_map.tsv` maps changed path patterns to unit suites plus
+recommended integration groups, performance cases, and documentation
+surfaces. Neither file is evaluated as shell code. `quick` executes only the
+offline budget and mapped unit checks; `vm` accepts only `smoke` or `local`.
+No profile invokes the direct host integration harness.
+`quick` and `full` run independent suites with four workers by default; set
+`ZXFER_VALIDATE_JOBS` to another positive integer for a constrained host.
 
 Run unit tests:
 
@@ -48,12 +66,40 @@ Run the pinned local lint stack:
 ```
 
 The lint stack includes the anti-rebloat budget gate
-(`./tests/run_lint.sh budget`), which checks the working tree against the
-ratchet-down-only size and caller budgets in `tests/budget_policy.tsv`.
-Lowering a budget is routine maintenance; raising any value requires explicit
-justification in the PR that edits it. Use
+(`./tests/run_lint.sh budget`), which checks only the sensitive-caller
+ratchets in `tests/budget_policy.tsv` (production `eval`, `$(date`,
+`mktemp`, and `zxfer_profile_now_ms` call sites); any other record kind
+fails the gate. There are no module, function, or test-file size ceilings and
+no machine-checked layering or ownership policy; collapsing modules and
+inlining single-caller wrappers is welcome.
+It also checks that `man/zxfer.1m` is the exact generated Solaris/illumos
+rendering of canonical `man/zxfer.8`; edit only the `.8` page, then run
+`./tests/generate_solaris_manpage.sh --write`.
+The budget is also an explicit GitHub Actions lint-matrix target, and a
+workflow contract test keeps the local runner target list and CI matrix in
+sync. Dependency-free targets such as `budget` and `--list` do not initialize
+or download the pinned lint toolchain.
+Lowering a caller ratchet is routine maintenance; raising one requires
+explicit justification in the PR that edits it. Use
 `./tests/run_budget_check.sh --list` to print current measured values in
 policy format when ratcheting budgets down.
+
+For optional, non-gating evidence about the changed-code loop, record warmed
+named-test and representative quick-validation timings without applying a
+threshold:
+
+```sh
+./tests/run_dx_benchmark.sh \
+  --case named,quick --samples 5 \
+  --output-dir /tmp/zxfer-dx-candidate
+```
+
+The complete `shunit` and `validate` timing cases are available for wider
+measurements; see [docs/testing.md](./docs/testing.md).
+
+The shell lint targets include tracked and non-ignored untracked `*.sh` files
+and the `zxfer` launcher, so a newly extracted module is checked before it is
+staged. Ignored files remain outside the lint source set.
 
 If you prefer a prebuilt contributor environment, open the repository in the
 included `.devcontainer/` from GitHub Codespaces or VS Code. It preinstalls
@@ -68,23 +114,40 @@ Run targeted suites when editing a specific area:
 ./tests/run_shunit_tests.sh tests/test_zxfer_replication.sh
 ```
 
+List suites or the named tests in one suite, then run only the needed tests:
+
+```sh
+./tests/run_shunit_tests.sh --list
+./tests/run_shunit_tests.sh --list-suites
+./tests/run_shunit_tests.sh --list-tests tests/test_zxfer_replication.sh
+./tests/run_shunit_tests.sh \
+  --suite tests/test_zxfer_replication.sh --test test_name \
+  --suite tests/test_zxfer_exec.sh --test another_test_name
+```
+
+Named tests are validated as a batch before any selected suite starts. A
+repeated suite is merged into its first position and executes once with all of
+its selected tests.
+
 Run coverage when useful:
 
 ```sh
 ./tests/run_coverage.sh
 ```
 
-Run the enforced bash-xtrace coverage gate when changing shell logic, tests,
-or coverage tooling:
+Coverage is report-only: there is no committed minimum, baseline, or
+no-regression policy, and the runner's exit status reflects only whether the
+selected suites passed.
+
+Run the bash-xtrace coverage report when changing shell logic, tests, or
+coverage tooling:
 
 ```sh
 ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
 ```
 
-That local run matches the GitHub Actions policy lane: it checks the committed
-minimums in `tests/coverage_policy.tsv`, rejects regressions relative to
-`tests/coverage_baseline/bash-xtrace/summary.tsv`, and writes the
-`missing.txt` diff that CI publishes in the PR step summary.
+That local run matches the GitHub Actions coverage lane, which publishes
+`summary.tsv` in the step summary and uploads the full report as an artifact.
 
 Run the default unattended VM-backed integration profile:
 
@@ -119,13 +182,22 @@ Run the integration harness interactively when you want per-command approval:
 ./tests/run_integration_zxfer.sh
 ```
 
+Integration test bodies live in concern-focused files under
+`tests/integration/`. `tests/integration_fragment_manifest.tsv` is the fixed,
+non-evaluated source order, while `tests/integration_test_registry.tsv` is the
+exact execution order and pre-pool classification. Add a case to the matching
+fragment and registry row; change the fragment manifest only when adding or
+removing a whole concern fragment. The stable runner keeps ownership of
+argument parsing, confirmation, pool lifecycle, filtering, supervision, and
+cleanup.
+
 ## Documentation Expectations
 
 When behavior changes, update the relevant docs:
 
 - `README.md`
 - `CHANGELOG.txt`
-- man pages
+- canonical `man/zxfer.8` (regenerate `man/zxfer.1m` rather than editing it)
 - `docs/` guides when workflows or platform behavior changes
 - `SECURITY.md` when trust boundaries, helper resolution, or failure-report
   handling change
@@ -158,7 +230,7 @@ Good pull requests explain:
 - what platforms were considered
 - what tests were run
 - whether any safety or security assumptions changed
-- whether CI, coverage policy, or baseline artifacts changed intentionally
+- whether CI or coverage tooling changed intentionally
 
 GitHub Actions also runs an Ubuntu portable-shell matrix for `dash`,
 `bash --posix`, and `busybox ash` on every push, plus a non-blocking `posh`

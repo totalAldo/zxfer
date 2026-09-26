@@ -33,97 +33,48 @@
 # shellcheck shell=sh disable=SC2034,SC2154
 
 ################################################################################
-# BACKUP METADATA / BACKUP STORAGE LAYOUT HELPERS
+# PROPERTY BACKUP METADATA: -k CAPTURE/WRITE AND -e RESTORE
 ################################################################################
 
 # Module contract:
-# owns globals: backup metadata accumulation, record-list/render result scratch, forwarded provenance scratch, and restored backup contents.
-# reads globals: g_backup_storage_root, g_option_O_*/g_option_T_*, g_cmd_awk, remote cat helpers, and current dataset context.
-# mutates caches: none.
-# returns via stdout: backup-storage paths, metadata file locations, and property payloads.
+# owns globals: g_backup_storage_root (validated once per session), the
+#   buffered -k rows in g_backup_file_contents ("<source-relative path>TAB
+#   <properties>" lines), g_restored_backup_file_contents (-e), the forwarded
+#   provenance memo g_zxfer_backup_forwarded_*, and the read, candidate and
+#   dry-run result channels.
+# reads globals: backup options, source and destination roots, -O/-T host
+#   specs, g_zxfer_secure_path, path-security helpers, and the ssh transport.
+# returns via stdout: metadata filenames, validated rows, extracted
+#   properties, file contents, and rendered remote sh programs.
+#
+# Layout: ZXFER_BACKUP_DIR/<source>/.zxfer_backup_info.v2/h/<chunks>/
+# .zxfer_backup_info.v2, <chunks> being the hex of "<source>\n<destination>"
+# split into 48-character components. A live -k run buffers one row per
+# dataset and publishes two files once at the end of the run (and once after
+# a post-seed property pass): the exact-pair file under the source root and
+# a forwarded alias keyed by the destination root so a later -k hop from
+# that destination forwards the original provenance. Each dataset takes its
+# row from the nearest alias at or above it that has one. Both 0600 files
+# are staged before either is renamed. If the second publish fails, restore
+# the first file from its adjacent recovery copy (or remove a newly created
+# file). Each rename is atomic; the pair is not a crash-atomic transaction.
+#
+# Protections, enforced locally and in the rendered remote programs: an
+# absolute single-line ZXFER_BACKUP_DIR; no symlinked path component (a
+# symlink directly under / such as macOS /var is trusted since only root can
+# create entries there); directories 0700 and owned by root or the effective
+# uid; files written 0600 and read only when they are regular 0600 files with
+# that owner inside a directory other users cannot modify; a symlinked target
+# is never followed; readers require the header and #format_version:2 and
+# only ever look under ZXFER_BACKUP_DIR; remote status is captured through
+# the probe files and fails closed; values travel as argv or file contents,
+# never through eval.
 
 ZXFER_BACKUP_METADATA_HEADER_LINE="#zxfer property backup file"
 ZXFER_BACKUP_METADATA_FORMAT_VERSION="2"
-ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE="__ZXFER_BACKUP_METADATA_PAIR_SPLIT__"
-
-# Purpose: Reset the backup metadata state so the next backup-metadata pass
-# starts from a clean state.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows before this module reuses mutable scratch globals or cached decisions.
-zxfer_reset_backup_metadata_state() {
-	g_backup_file_contents=""
-	g_pending_backup_file_contents=""
-	g_zxfer_backup_metadata_record_list_result=""
-	g_zxfer_backup_metadata_record_properties_result=""
-	g_zxfer_rendered_backup_metadata_contents=""
-	g_zxfer_remote_backup_dry_run_shell_command_result=""
-	g_zxfer_backup_file_read_result=""
-	g_zxfer_backup_stage_dir_result=""
-	g_zxfer_backup_stage_file_result=""
-	g_zxfer_backup_commit_had_existing_target_result=""
-	g_zxfer_backup_commit_rollback_file_result=""
-	g_zxfer_backup_restore_candidate_path_result=""
-	g_zxfer_backup_local_read_failure_result=""
-	g_zxfer_backup_local_write_failure_result=""
-	g_forwarded_backup_properties=""
-	g_restored_backup_file_contents=""
-}
-
-# Purpose: Return the backup metadata relative dataset path for a source under
-# a metadata root.
-# Usage: Called during backup-metadata capture and restore lookup so v2 rows
-# are keyed by source-root-relative path instead of by source/destination pairs.
-zxfer_backup_metadata_relative_path_for_dataset() {
-	l_root=$1
-	l_dataset=$2
-
-	if [ -z "$l_root" ] || [ -z "$l_dataset" ]; then
-		return 1
-	fi
-	if [ "$l_dataset" = "$l_root" ]; then
-		printf '%s\n' "."
-		return 0
-	fi
-	l_root_prefix=$l_root/
-	case "$l_dataset" in
-	"$l_root_prefix"*)
-		printf '%s\n' "${l_dataset#"$l_root_prefix"}"
-		return 0
-		;;
-	esac
-
-	return 1
-}
-
-# Purpose: Return the v2 backup metadata row key for a source dataset.
-# Usage: Called by buffered-row helpers that store only source-root-relative
-# rows internally.
-zxfer_get_backup_metadata_record_key_for_source() {
-	l_source=$1
-	l_metadata_source_root=${g_initial_source:-$l_source}
-
-	if ! l_record_key=$(zxfer_backup_metadata_relative_path_for_dataset "$l_metadata_source_root" "$l_source"); then
-		zxfer_throw_error "Backup metadata source dataset [$l_source] is outside source root [$l_metadata_source_root]."
-	fi
-	printf '%s\n' "$l_record_key"
-}
-
-# Purpose: Validate, deduplicate, and return the backup metadata record list.
-# Usage: Called once per write boundary (and for forwarded-provenance
-# rendering) before rows are published under a current v2 metadata header.
-#
-# Buffered appends are plain O(1) string appends, so this single pass is where
-# every buffered row is format-checked and where duplicate keys from repeated
-# property passes collapse newest-row-wins in first-appearance order. That
-# reproduces the row order and values the retired per-append replacement
-# produced, while validating each row once per write instead of once per
-# append.
-zxfer_validate_backup_metadata_record_list() {
-	l_existing_records=$1
-
-	# shellcheck disable=SC2016  # awk program should see literal field references.
-	if ! l_validated_records=$(printf '%s\n' "$l_existing_records" |
-		"${g_cmd_awk:-awk}" '
+# Shared awk predicate: a row's property payload is "name=value=source" items
+# joined by commas, none empty.
+ZXFER_BACKUP_METADATA_PROPERTIES_AWK='
 function validate_properties(properties, item_count, i, field_count) {
 	if (properties == "")
 		return 0
@@ -136,7 +87,98 @@ function validate_properties(properties, item_count, i, field_count) {
 			return 0
 	}
 	return 1
+}'
+
+# Purpose: Validate ZXFER_BACKUP_DIR (default /var/db/zxfer) once per session
+# into g_backup_storage_root, ignoring any inherited internal value.
+# Usage: zxfer_init_backup_storage_root, from session bootstrap; throws unless
+# the root is a single-line absolute path. A dataset's storage directory is
+# "$g_backup_storage_root/<dataset>".
+zxfer_init_backup_storage_root() {
+	l_init_backup_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
+	zxfer_value_is_single_line "$l_init_backup_root" ||
+		zxfer_throw_error "Refusing to use ZXFER_BACKUP_DIR because the backup metadata root must be a single-line absolute path without control whitespace."
+	case $l_init_backup_root in
+	/*) g_backup_storage_root=$l_init_backup_root ;;
+	*) zxfer_throw_error "Refusing to use backup metadata root \"$l_init_backup_root\" because ZXFER_BACKUP_DIR must be an absolute path." ;;
+	esac
 }
+
+# Purpose: Reset the buffered rows, restore cache, forwarded memo, and result
+# channels.
+# Usage: zxfer_reset_backup_metadata_state, from session bootstrap.
+zxfer_reset_backup_metadata_state() {
+	g_backup_file_contents=""
+	g_restored_backup_file_contents=""
+	g_zxfer_backup_file_read_result=""
+	g_zxfer_backup_restore_candidate_path_result=""
+	g_zxfer_backup_restore_candidate_contents_result=""
+	g_zxfer_backup_forwarded_roots=""
+	g_zxfer_backup_forwarded_rows=""
+	g_zxfer_backup_forwarded_properties=""
+	g_zxfer_backup_forwarded_listed=0
+	g_zxfer_backup_forwarded_listing=""
+	g_zxfer_remote_backup_dry_run_shell_command_result=""
+}
+
+# Purpose: Print the metadata filename for a source/destination pair.
+# Usage: zxfer_get_backup_metadata_filename SOURCE DESTINATION [legacy]. The
+# current name is the chunked lossless identity path rendered by one awk
+# pass; "legacy" prints the retired cksum-keyed name that lookups still read
+# (never write). Fails (status 1) when the key cannot be derived.
+zxfer_get_backup_metadata_filename() {
+	l_filename_source=$1
+	l_filename_destination=$2
+
+	# shellcheck disable=SC2016  # awk programs should see literal field references.
+	if [ "${3:-}" = legacy ]; then
+		# Every retired writer hashed "SOURCE<LF>DESTINATION" with no final
+		# newline (the command substitution that built it stripped one).
+		l_filename_key=$(printf '%s\n%s' "$l_filename_source" "$l_filename_destination" |
+			cksum | "${g_cmd_awk:-awk}" '$1 != "" && $2 != "" { print "k" $1 "." $2 }') || return 1
+		[ -n "$l_filename_key" ] || return 1
+		printf '%s.%s.%s\n' "$g_backup_file_extension" "${l_filename_source##*/}" "$l_filename_key"
+		return 0
+	fi
+
+	# shellcheck disable=SC2016
+	l_filename_key=$(printf '%s\n%s\n' "$l_filename_source" "$l_filename_destination" |
+		LC_ALL=C "${g_cmd_awk:-awk}" '
+BEGIN {
+	for (i = 1; i < 256; i++)
+		hex[sprintf("%c", i)] = sprintf("%02x", i)
+}
+{
+	if (NR > 1)
+		out = out "0a"
+	n = length($0)
+	for (i = 1; i <= n; i++)
+		out = out hex[substr($0, i, 1)]
+}
+END {
+	if (out == "")
+		exit 1
+	key_path = "h"
+	for (i = 1; i <= length(out); i += 48)
+		key_path = key_path "/" substr(out, i, 48)
+	print key_path
+}') || return 1
+	[ -n "$l_filename_key" ] || return 1
+	printf '%s.v2/%s/%s.v2\n' "$g_backup_file_extension" "$l_filename_key" "$g_backup_file_extension"
+}
+
+# Purpose: Validate, deduplicate, and print the buffered record list.
+# Usage: Called once at the write boundary. Appends are plain O(1) string
+# appends, so this is where every row is format-checked and where duplicate
+# keys (repeated property passes, -Y iterations, post-seed reconciles)
+# collapse newest-row-wins in first-appearance order. Returns 1 for a
+# malformed row.
+zxfer_validate_backup_metadata_record_list() {
+	l_existing_records=$1
+
+	# shellcheck disable=SC2016  # awk program should see literal field references.
+	printf '%s\n' "$l_existing_records" |
+		"${g_cmd_awk:-awk}" "$ZXFER_BACKUP_METADATA_PROPERTIES_AWK"'
 {
 	if ($0 == "")
 		next
@@ -161,1610 +203,322 @@ END {
 		else
 			output = output "\n" line
 	}
-	printf "%s", output
-}'); then
-		zxfer_throw_error "Failed to validate buffered backup metadata records for chained backup provenance."
-	fi
-
-	g_zxfer_backup_metadata_record_list_result=$l_validated_records
-	printf '%s\n' "$l_validated_records"
+	printf "%s\n", output
+}' || return 1
 }
 
-# Purpose: Append the v2 row for a source dataset to a buffered record list.
-# Usage: Called by the append, defer, and finalize buffering helpers; the
-# extended list is returned through the record-list result scratch channel.
-#
-# This is a plain O(1) string append. Duplicate keys are legitimate transient
-# buffer state; they collapse newest-row-wins inside
-# zxfer_validate_backup_metadata_record_list at the write boundary.
-zxfer_append_backup_metadata_row_to_record_list() {
-	l_existing_records=$1
-	l_source=$2
-	l_properties=$3
-
-	l_record_key=$(zxfer_get_backup_metadata_record_key_for_source "$l_source") ||
-		zxfer_throw_error "Backup metadata source dataset [$l_source] is outside source root [${g_initial_source:-$l_source}]."
-
-	if [ -n "$l_existing_records" ]; then
-		g_zxfer_backup_metadata_record_list_result="$l_existing_records
-$l_record_key	$l_properties"
-	else
-		g_zxfer_backup_metadata_record_list_result="$l_record_key	$l_properties"
-	fi
-	return 0
-}
-
-# Purpose: Append the backup metadata record to the module-owned accumulator.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when later helpers need one shared place to extend staged or in-memory
-# state.
-#
-# Buffering stays O(1) per row; full row validation runs once per write
-# boundary, so a malformed buffered row surfaces when the metadata file is
-# written instead of on the append that follows it.
+# Purpose: Append one source-root-relative row to the in-memory buffer.
+# Usage: Called by the capture helper (and directly by tests). Duplicate keys
+# are legitimate transient state; they collapse at the write boundary.
 zxfer_append_backup_metadata_record() {
-	l_source=$1
-	l_properties=$2
+	l_append_metadata_source=$1
+	l_append_metadata_properties=$2
+	l_append_metadata_root=${g_initial_source:-$l_append_metadata_source}
 
-	zxfer_append_backup_metadata_row_to_record_list "${g_backup_file_contents:-}" \
-		"$l_source" "$l_properties"
-	g_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
-}
-
-# Purpose: Return the buffered backup metadata record properties in the form
-# expected by later helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-#
-# Buffered rows are plain appends, so duplicate keys are legitimate transient
-# state: the newest buffered row for a key wins, mirroring the newest-row-wins
-# collapse the write boundary applies.
-zxfer_get_buffered_backup_metadata_record_properties() {
-	l_existing_records=$1
-	l_source=$2
-	l_record_key=$(zxfer_get_backup_metadata_record_key_for_source "$l_source")
-
-	# shellcheck disable=SC2016  # awk program should see literal field references.
-	if l_record_properties=$(printf '%s\n' "$l_existing_records" |
-		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
-			"${g_cmd_awk:-awk}" '
-function validate_properties(properties, item_count, i, field_count) {
-	if (properties == "")
-		return 0
-	item_count = split(properties, prop_items, ",")
-	for (i = 1; i <= item_count; i++) {
-		if (prop_items[i] == "")
-			return 0
-		field_count = split(prop_items[i], prop_fields, "=")
-		if (field_count < 2 || prop_fields[1] == "" || prop_fields[field_count] == "")
-			return 0
-	}
-	return 1
-}
-BEGIN {
-	record_key = ENVIRON["ZXFER_BACKUP_METADATA_RECORD_KEY"]
-}
-{
-	if ($0 == "")
-		next
-	tab = index($0, "\t")
-	if (tab <= 0) {
-		malformed = 1
-		next
-	}
-	current_key = substr($0, 1, tab - 1)
-	current_properties = substr($0, tab + 1)
-	if (current_key == "" || !validate_properties(current_properties)) {
-		malformed = 1
-		next
-	}
-	if (current_key == record_key) {
-		match_count++
-		match_properties = current_properties
-	}
-}
-END {
-	if (malformed)
-		exit 3
-	if (match_count == 0)
-		exit 1
-	print match_properties
-	exit 0
-}'); then
-		:
+	if [ "$l_append_metadata_source" = "$l_append_metadata_root" ]; then
+		l_append_metadata_key=.
 	else
-		l_status=$?
-		case $l_status in
-		1 | 3)
-			g_zxfer_backup_metadata_record_properties_result=""
-			return "$l_status"
+		case "$l_append_metadata_source" in
+		"$l_append_metadata_root"/*)
+			l_append_metadata_key=${l_append_metadata_source#"$l_append_metadata_root"/}
 			;;
 		*)
-			zxfer_throw_error "Failed to inspect buffered backup metadata records."
+			zxfer_throw_error "Backup metadata source dataset [$l_append_metadata_source] is outside source root [$l_append_metadata_root]."
 			;;
 		esac
 	fi
-
-	g_zxfer_backup_metadata_record_properties_result=$l_record_properties
-	printf '%s\n' "$l_record_properties"
+	g_backup_file_contents="${g_backup_file_contents:+$g_backup_file_contents
+}$l_append_metadata_key	$l_append_metadata_properties"
 }
 
-# Purpose: Remove the backup metadata record list from the current working set
-# while preserving the module's special-case rules.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when filtering logic must trim staged data before later reconciliation
-# or apply steps run.
-zxfer_remove_backup_metadata_record_list() {
-	l_existing_records=$1
-	l_source=$2
-	l_record_key=$(zxfer_get_backup_metadata_record_key_for_source "$l_source")
-
-	# shellcheck disable=SC2016  # awk program should see literal field references.
-	if ! l_filtered_records=$(printf '%s\n' "$l_existing_records" |
-		ZXFER_BACKUP_METADATA_RECORD_KEY=$l_record_key \
-			"${g_cmd_awk:-awk}" '
-function append_line(line) {
-	if (line == "")
-		return
-	if (output == "")
-		output = line
-	else
-		output = output "\n" line
-}
-BEGIN {
-	record_key = ENVIRON["ZXFER_BACKUP_METADATA_RECORD_KEY"]
-}
-{
-	if ($0 == "")
-		next
-	tab = index($0, "\t")
-	if (tab <= 0) {
-		append_line($0)
-		next
-	}
-	current_key = substr($0, 1, tab - 1)
-	if (current_key == record_key)
-		next
-	append_line($0)
-}
-END {
-	printf "%s", output
-}'); then
-		zxfer_throw_error "Failed to remove buffered backup metadata records."
-	fi
-
-	g_zxfer_backup_metadata_record_list_result=$l_filtered_records
-	printf '%s\n' "$l_filtered_records"
-}
-
-# Purpose: Defer the buffered backup metadata record until a later checkpoint
-# in the run.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when zxfer has to preserve state now but can only commit it safely
-# after later work succeeds.
-zxfer_defer_buffered_backup_metadata_record() {
-	l_source=$1
-
-	[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] || return 0
-	[ "${g_option_n_dryrun:-0}" -eq 0 ] || return 0
-
-	if zxfer_get_buffered_backup_metadata_record_properties "${g_backup_file_contents:-}" \
-		"$l_source" >/dev/null; then
-		:
-	else
-		l_live_lookup_status=$?
-		case $l_live_lookup_status in
-		1)
-			zxfer_throw_error "Buffered backup metadata row for source dataset [$l_source] is missing."
-			;;
-		3)
-			zxfer_throw_error "Buffered backup metadata rows are malformed while deferring source dataset [$l_source]."
-			;;
-		*)
-			zxfer_throw_error "Failed to inspect buffered backup metadata row for source dataset [$l_source]."
-			;;
-		esac
-	fi
-	l_buffered_properties=$g_zxfer_backup_metadata_record_properties_result
-
-	zxfer_remove_backup_metadata_record_list "${g_backup_file_contents:-}" "$l_source" >/dev/null
-	l_next_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
-	zxfer_append_backup_metadata_row_to_record_list "${g_pending_backup_file_contents:-}" \
-		"$l_source" "$l_buffered_properties"
-	l_next_pending_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
-
-	g_backup_file_contents=$l_next_backup_file_contents
-	g_pending_backup_file_contents=$l_next_pending_backup_file_contents
-}
-
-# Purpose: Finalize the deferred backup metadata record once all prerequisites
-# have succeeded.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows after staged or deferred work is ready to become the module's final
-# result.
-zxfer_finalize_deferred_backup_metadata_record() {
-	l_source=$1
-
-	[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] || return 0
-	[ "${g_option_n_dryrun:-0}" -eq 0 ] || return 0
-
-	if zxfer_get_buffered_backup_metadata_record_properties "${g_pending_backup_file_contents:-}" \
-		"$l_source" >/dev/null; then
-		:
-	else
-		l_pending_lookup_status=$?
-		case $l_pending_lookup_status in
-		1)
-			zxfer_throw_error "Deferred backup metadata row for source dataset [$l_source] is missing."
-			;;
-		3)
-			zxfer_throw_error "Deferred backup metadata rows are malformed while finalizing source dataset [$l_source]."
-			;;
-		*)
-			zxfer_throw_error "Failed to inspect deferred backup metadata row for source dataset [$l_source]."
-			;;
-		esac
-	fi
-	l_deferred_properties=$g_zxfer_backup_metadata_record_properties_result
-
-	zxfer_remove_backup_metadata_record_list "${g_pending_backup_file_contents:-}" "$l_source" >/dev/null
-	l_next_pending_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
-	zxfer_append_backup_metadata_row_to_record_list "${g_backup_file_contents:-}" \
-		"$l_source" "$l_deferred_properties"
-	l_next_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
-
-	g_pending_backup_file_contents=$l_next_pending_backup_file_contents
-	g_backup_file_contents=$l_next_backup_file_contents
-}
-
-# Purpose: Capture the backup metadata for completed transfer into staged state
-# or module globals for later use.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when later helpers need a checked snapshot of command output or
-# computed state.
-#
-# Record backup metadata only after a dataset property pass succeeds. Live runs
-# keep the captured rows buffered in memory until orchestration decides the
-# dataset or iteration is safe to persist.
+# Purpose: Buffer the backup row of a dataset whose property pass succeeded.
+# Usage: zxfer_capture_backup_metadata_for_completed_transfer SOURCE
+# LIVE_PROPERTIES [SKIP]; a forwarded provenance row from an earlier -k hop
+# replaces the live properties. Nothing is written until
+# zxfer_write_backup_properties runs.
 zxfer_capture_backup_metadata_for_completed_transfer() {
-	l_source=$1
-	l_properties=$2
-	l_skip_backup_capture=${3:-0}
-
 	[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] || return 0
-	[ "$l_skip_backup_capture" -eq 0 ] || return 0
+	[ "${3:-0}" -eq 0 ] || return 0
 
-	if [ "${g_option_n_dryrun:-0}" -eq 0 ] && [ -n "${g_backup_file_extension:-}" ]; then
-		if zxfer_get_forwarded_backup_properties_for_source "$l_source" >/dev/null; then
-			l_properties=$g_forwarded_backup_properties
-		else
-			l_forwarded_lookup_status=$?
-			if [ "$l_forwarded_lookup_status" -ne 1 ]; then
-				zxfer_throw_error "Failed to derive forwarded backup properties for source dataset [$l_source]."
-			fi
-		fi
+	if zxfer_resolve_forwarded_backup_metadata "$1"; then
+		zxfer_append_backup_metadata_record "$1" "$g_zxfer_backup_forwarded_properties"
+	else
+		zxfer_append_backup_metadata_record "$1" "$2"
 	fi
-
-	zxfer_append_backup_metadata_record "$l_source" "$l_properties"
 }
 
-# Purpose: Flush the captured backup metadata if live that was buffered earlier
-# in the run.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when staged state is ready to move from deferred accumulation into its
-# final destination.
-#
-# Persist the currently buffered backup metadata when live orchestration has
-# finished the part of the dataset flow that should survive later failures.
-# Dry runs keep the existing one-shot final preview behavior.
-zxfer_flush_captured_backup_metadata_if_live() {
-	[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] || return 0
-	[ "${g_option_n_dryrun:-0}" -eq 0 ] || return 0
-	[ -n "${g_backup_file_contents:-}" ] || return 0
-
-	l_saved_failure_stage=${g_zxfer_failure_stage:-startup}
-	zxfer_write_backup_properties
-	zxfer_set_failure_stage "$l_saved_failure_stage"
-}
-
-# Purpose: Validate the backup metadata format before zxfer relies on it.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows to fail closed on malformed, unsafe, or stale input.
-zxfer_validate_backup_metadata_format() {
-	l_backup_contents=$1
-	l_expected_header=$ZXFER_BACKUP_METADATA_HEADER_LINE
-	l_expected_format_version=$ZXFER_BACKUP_METADATA_FORMAT_VERSION
-
-	# shellcheck disable=SC2016
-	printf '%s\n' "$l_backup_contents" | "${g_cmd_awk:-awk}" \
-		-v expected_header="$l_expected_header" \
-		-v expected_format_version="$l_expected_format_version" '
-	{
-		if (!header_seen) {
-			if ($0 == "") {
-				preamble_invalid = 1
-				next
-			}
-			if ($0 != expected_header) {
-				preamble_invalid = 1
-				next
-			}
-			header_count++
-			header_seen = 1
-			next
-		}
-		if (!format_seen && $0 != "" && substr($0, 1, 1) != "#") {
-			preamble_invalid = 1
-			next
-		}
-		if (index($0, "#format_version:") == 1) {
-			format_count++
-			if (seen_data)
-				preamble_invalid = 1
-			format_value = substr($0, length("#format_version:") + 1)
-			if (format_value == expected_format_version)
-				format_ok = 1
-			else
-				format_invalid = 1
-			format_seen = 1
-			next
-		}
-		if ($0 == expected_header) {
-			header_count++
-			preamble_invalid = 1
-			next
-		}
-		if ($0 != "" && substr($0, 1, 1) != "#")
-			seen_data = 1
-	}
-	END {
-		if (header_count != 1 || preamble_invalid)
-			exit 1
-		if (format_count != 1 || format_invalid || !format_ok)
-			exit 2
-		exit 0
-	}'
-}
-
-# Purpose: Render the backup metadata contents for roots as a stable shell-safe
-# or operator-facing string.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when zxfer needs to display or transport the value without reparsing
-# it.
-zxfer_render_backup_metadata_contents_for_roots() {
-	l_source_root=$1
-	l_destination_root=$2
-	l_record_list=$3
-	l_backup_date=$(date)
-
-	{
-		printf '%s\n' "$ZXFER_BACKUP_METADATA_HEADER_LINE"
-		printf '%s\n' "#format_version:$ZXFER_BACKUP_METADATA_FORMAT_VERSION"
-		printf '%s\n' "#version:$g_zxfer_version"
-		printf '%s\n' "#R options:$g_option_R_recursive"
-		printf '%s\n' "#N options:$g_option_N_nonrecursive"
-		printf '%s\n' "#source_root:$l_source_root"
-		printf '%s\n' "#destination_root:$l_destination_root"
-		printf '%s\n' "#backup_date:$l_backup_date"
-		if [ -n "${l_record_list:-}" ]; then
-			printf '%s\n' "$l_record_list"
-		fi
-	}
-}
-
-# Purpose: Render the backup metadata contents as a stable shell-safe or
-# operator-facing string.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when zxfer needs to display or transport the value without reparsing
-# it.
-zxfer_render_backup_metadata_contents() {
-	l_backup_destination_root=$(zxfer_get_expected_backup_destination_for_source "$g_initial_source")
-	g_zxfer_rendered_backup_metadata_contents=$(zxfer_render_backup_metadata_contents_for_roots \
-		"$g_initial_source" "$l_backup_destination_root" "${g_backup_file_contents:-}")
-	printf '%s\n' "$g_zxfer_rendered_backup_metadata_contents"
-}
-
-# Purpose: Render the forwarded backup metadata contents as a stable shell-safe
-# or operator-facing string.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when zxfer needs to display or transport the value without reparsing
-# it.
-zxfer_render_forwarded_backup_metadata_contents() {
-	l_forwarded_root=$(zxfer_get_expected_backup_destination_for_source "$g_initial_source")
-	zxfer_validate_backup_metadata_record_list "${g_backup_file_contents:-}" >/dev/null
-	l_forwarded_records=$g_zxfer_backup_metadata_record_list_result
-
-	g_zxfer_rendered_backup_metadata_contents=$(zxfer_render_backup_metadata_contents_for_roots \
-		"$l_forwarded_root" "$l_forwarded_root" "$l_forwarded_records")
-	printf '%s\n' "$g_zxfer_rendered_backup_metadata_contents"
-}
-
-# Purpose: Return the backup storage directory for dataset tree in the form
-# expected by later helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_backup_storage_dir_for_dataset_tree() {
-	l_dataset=$1
-	zxfer_refresh_backup_storage_root
-
-	l_dataset_rel=${l_dataset#/}
-	l_dataset_rel=${l_dataset_rel%/}
-	if [ "$l_dataset_rel" = "" ]; then
-		l_dataset_rel="dataset"
-	fi
-
-	printf '%s/%s\n' "$g_backup_storage_root" "$l_dataset_rel"
-}
-
-# Purpose: Build the current exact key path used to name backup-metadata files
-# for a dataset pair.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows so reads and writes address the same source/destination identity.
-zxfer_backup_metadata_file_key() {
-	l_source=$1
-	l_destination=$2
-
-	l_identity=$(printf '%s\n%s' "$l_source" "$l_destination")
-	l_key_hex=$(printf '%s' "$l_identity" |
-		LC_ALL=C od -An -tx1 -v | tr -d ' \n')
-	if [ "$l_key_hex" = "" ]; then
-		if [ "$l_identity" != "" ]; then
-			return 1
-		fi
-		l_key_hex="00"
-	fi
-	# shellcheck disable=SC2016  # awk program should see literal $0.
-	l_key_path=$(
-		printf '%s\n' "$l_key_hex" |
-			"${g_cmd_awk:-awk}" '
-				{
-					key_path = "h"
-					for (i = 1; i <= length($0); i += 48)
-					key_path = key_path "/" substr($0, i, 48)
-				print key_path
-			}'
-	) || return "$?"
-	[ -n "$l_key_path" ] || return 1
-	printf '%s\n' "$l_key_path"
-}
-
-# Purpose: Build the retired cksum key string used by older current-format
-# backup-metadata filenames.
-# Usage: Called only by restore fallback paths so existing v2 backup files keep
-# working after current writes move to lossless identity keys.
-zxfer_backup_metadata_legacy_file_key() {
-	l_source=$1
-	l_destination=$2
-	l_identity=$(printf '%s\n%s\n' "$l_source" "$l_destination")
-	if l_key_cksum=$(printf '%s' "$l_identity" | cksum 2>/dev/null); then
-		# shellcheck disable=SC2086
-		set -- $l_key_cksum
-		if [ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
-			printf 'k%s.%s\n' "$1" "$2"
-			return 0
-		fi
-	fi
-	l_key_hex=$(printf '%s' "$l_identity" |
-		LC_ALL=C od -An -tx1 -v | tr -d ' \n' | cut -c 1-16)
-	if [ "$l_key_hex" = "" ]; then
-		l_key_hex="00"
-	fi
-	printf 'k%s\n' "$l_key_hex"
-}
-
-# Purpose: Return the backup metadata filename in the form expected by later
-# helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_backup_metadata_filename() {
-	l_source=$1
-	l_destination=$2
-	l_key=$(zxfer_backup_metadata_file_key "$l_source" "$l_destination") || return 1
-	# Keep current exact-pair identities lossless without exceeding NAME_MAX on
-	# long pool/dataset names: the identity is chunked into directories and the
-	# leaf file has a fixed bounded name.
-	printf '%s.v2/%s/%s.v2\n' "$g_backup_file_extension" "$l_key" "$g_backup_file_extension"
-}
-
-# Purpose: Return the retired backup metadata filename used before exact
-# dataset-pair identities became lossless.
-# Usage: Called by restore fallback helpers only; new writes always use
-# zxfer_get_backup_metadata_filename.
-zxfer_get_legacy_backup_metadata_filename() {
-	l_source=$1
-	l_destination=$2
-	l_tail=${l_source##*/}
-	l_key=$(zxfer_backup_metadata_legacy_file_key "$l_source" "$l_destination") || return 1
-	printf '%s.%s.%s\n' "$g_backup_file_extension" "$l_tail" "$l_key"
-}
-
-# Purpose: Return the forwarded backup metadata filename in the form expected
-# by later helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_forwarded_backup_metadata_filename() {
-	l_dataset_root=$1
-
-	zxfer_get_backup_metadata_filename "$l_dataset_root" "$l_dataset_root"
-}
-
-# Purpose: Return the forwarded backup properties for source in the form
-# expected by later helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_forwarded_backup_properties_for_source() {
-	l_source=$1
-	l_saved_restored_backup_file_contents=${g_restored_backup_file_contents:-}
-	l_suspect_fs=$l_source
-	g_forwarded_backup_properties=""
-
+# Purpose: Find the forwarded provenance row of one dataset: the nearest
+# alias at or above it that has a row for it wins.
+# Usage: zxfer_resolve_forwarded_backup_metadata DATASET; returns 0 with the
+# row in g_zxfer_backup_forwarded_properties, 1 when no alias has one. A
+# duplicate row fails closed.
+zxfer_resolve_forwarded_backup_metadata() {
+	g_zxfer_backup_forwarded_properties=""
+	l_forwarded_root=$1
 	while :; do
-		l_dataset_secure_dir=$(zxfer_get_backup_storage_dir_for_dataset_tree "$l_suspect_fs")
-		if zxfer_try_backup_restore_candidate_set "$l_dataset_secure_dir" "$l_suspect_fs" "$l_suspect_fs" "$l_source" "$l_source" "$g_option_O_origin_host" source; then
-			l_backup_match_status=0
-		else
-			l_backup_match_status=$?
+		l_forwarded_key=$l_forwarded_root$ZXFER_TAB$1$ZXFER_TAB
+		if zxfer_load_forwarded_backup_alias "$l_forwarded_root"; then
+			# An alias without a row for the dataset lets the walk go on.
+			case $ZXFER_LF$g_zxfer_backup_forwarded_rows in
+			*"$ZXFER_LF$l_forwarded_key"*) break ;;
+			esac
 		fi
-		l_dataset_backup_file=$g_zxfer_backup_restore_candidate_path_result
-		case $l_backup_match_status in
-		0)
-			l_forwarded_properties=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
-				"$g_restored_backup_file_contents" "$l_source" "$l_source") || {
-				g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-				zxfer_throw_error "Failed to extract forwarded backup properties from $l_dataset_backup_file for source dataset $l_source."
-			}
-			g_forwarded_backup_properties=$l_forwarded_properties
-			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-			printf '%s\n' "$l_forwarded_properties"
-			return 0
-			;;
-		1) ;;
-		11)
-			break
-			;;
-		3)
-			if [ "$l_suspect_fs" = "$l_source" ]; then
-				g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-				zxfer_throw_error "Forwarded backup property file $l_dataset_backup_file does not contain a current-format relative row for source dataset $l_source."
-			fi
-			;;
-		2)
-			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-			zxfer_throw_error "Forwarded backup property file $l_dataset_backup_file contains multiple relative rows for source dataset $l_source."
-			;;
-		4)
-			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-			zxfer_throw_error "Forwarded backup property file $l_dataset_backup_file is malformed. Expected current-format relative-path and properties rows."
-			;;
-		5)
-			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-			zxfer_throw_error "Failed to read forwarded backup property file $l_dataset_backup_file."
-			;;
-		10)
-			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-			zxfer_throw_error "Failed to stage local forwarded backup property file $l_dataset_backup_file for secure read."
-			;;
-		8)
-			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-			zxfer_throw_error "Failed to contact origin host $g_option_O_origin_host while reading forwarded backup property file $l_dataset_backup_file. Review prior stderr for the transport or authentication error."
-			;;
-		6)
-			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-			zxfer_throw_error "Forwarded backup property file $l_dataset_backup_file does not start with the required zxfer backup metadata header."
-			;;
-		7)
-			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-			zxfer_throw_error "Forwarded backup property file $l_dataset_backup_file does not declare supported zxfer backup metadata format version #format_version:$ZXFER_BACKUP_METADATA_FORMAT_VERSION."
-			;;
-		*)
-			g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
-			zxfer_throw_error "Failed to validate forwarded backup property file $l_dataset_backup_file."
-			;;
+		case $l_forwarded_root in
+		*/*) l_forwarded_root=${l_forwarded_root%/*} ;;
+		*) return 1 ;;
 		esac
-
-		l_suspect_fs_parent=$(echo "$l_suspect_fs" | sed -e 's%/[^/]*$%%g')
-		if [ "$l_suspect_fs_parent" = "$l_suspect_fs" ]; then
-			break
-		fi
-		l_suspect_fs=$l_suspect_fs_parent
 	done
 
-	g_restored_backup_file_contents=$l_saved_restored_backup_file_contents
+	# shellcheck disable=SC2016  # awk program should see literal field references.
+	if g_zxfer_backup_forwarded_properties=$(printf '%s\n' "$g_zxfer_backup_forwarded_rows" |
+		ZXFER_AWK_FORWARDED_KEY=$l_forwarded_key "${g_cmd_awk:-awk}" '
+index($0, ENVIRON["ZXFER_AWK_FORWARDED_KEY"]) == 1 {
+	print substr($0, length(ENVIRON["ZXFER_AWK_FORWARDED_KEY"]) + 1)
+	exit
+}'); then
+		[ -z "$g_zxfer_backup_forwarded_properties" ] || return 0
+		l_forwarded_status=2
+	else
+		l_forwarded_status=5
+	fi
+	# Status 2: an empty row marks a dataset with more than one row.
+	l_forwarded_path=$ZXFER_LF$g_zxfer_backup_forwarded_roots
+	l_forwarded_path=${l_forwarded_path#*"$ZXFER_LF$l_forwarded_root$ZXFER_TAB"}
+	zxfer_throw_backup_candidate_failure "$l_forwarded_status" "${l_forwarded_path%%"$ZXFER_LF"*}" \
+		"$1" "Forwarded backup property file"
+}
+
+# Purpose: Load ROOT's forwarded alias (the file keyed by ROOT/ROOT on the
+# source side, -O host or local) into the run's memo, once per run.
+# Usage: zxfer_load_forwarded_backup_alias ROOT; returns 0 when ROOT has an
+# alias, 1 when it has none. Every root looked up is remembered in
+# g_zxfer_backup_forwarded_roots ("ROOT<TAB>ALIAS_PATH" lines, ALIAS_PATH
+# empty without an alias), and every alias's rows in
+# g_zxfer_backup_forwarded_rows ("ROOT<TAB>DATASET<TAB>PROPERTIES" lines,
+# PROPERTIES empty for a dataset with more than one row), so each root is
+# read at most once. A root without a storage directory is ruled out without
+# a read; an unreadable or invalid alias fails closed.
+zxfer_load_forwarded_backup_alias() {
+	case $ZXFER_LF$g_zxfer_backup_forwarded_roots$ZXFER_LF in
+	*"$ZXFER_LF$1$ZXFER_TAB$ZXFER_LF"*) return 1 ;;
+	*"$ZXFER_LF$1$ZXFER_TAB"*) return 0 ;;
+	esac
+
+	l_alias_dir=$g_backup_storage_root/$1
+	l_alias_status=1
+	# A symlinked directory counts as present: the lookup then refuses it.
+	if [ -n "$g_option_O_origin_host" ]; then
+		[ "${g_zxfer_backup_forwarded_listed:-0}" -eq 1 ] ||
+			zxfer_list_remote_backup_storage_dirs
+		case $ZXFER_LF$g_zxfer_backup_forwarded_listing$ZXFER_LF in
+		*"$ZXFER_LF$1$ZXFER_LF"*) l_alias_status=0 ;;
+		esac
+	elif [ -d "$l_alias_dir" ] || [ -L "$l_alias_dir" ]; then
+		l_alias_status=0
+	fi
+	if [ "$l_alias_status" -eq 0 ]; then
+		zxfer_try_backup_restore_candidate "$l_alias_dir" "$1" "$1" "$1" "$1" \
+			"$g_option_O_origin_host" source
+		l_alias_status=$?
+	fi
+	l_alias_path=$g_zxfer_backup_restore_candidate_path_result
+	# Status 8, an alias without a row for ROOT itself (-k writes one when -x
+	# excludes the source root), still forwards its other rows.
+	case $l_alias_status in
+	0 | 8) ;;
+	1)
+		g_zxfer_backup_forwarded_roots=${g_zxfer_backup_forwarded_roots:+$g_zxfer_backup_forwarded_roots$ZXFER_LF}$1$ZXFER_TAB
+		return 1
+		;;
+	*) zxfer_throw_backup_candidate_failure "$l_alias_status" "$l_alias_path" "$1" "Forwarded backup property file" ;;
+	esac
+
+	# The lookup has validated the whole alias. Name each row's dataset
+	# from the alias's #source_root and mark duplicated rows empty.
+	# shellcheck disable=SC2016  # awk program should see literal field references.
+	l_alias_rows=$(printf '%s\n' "$g_zxfer_backup_restore_candidate_contents_result" |
+		ZXFER_AWK_ALIAS_ROOT=$1 "${g_cmd_awk:-awk}" '
+index($0, "#source_root:") == 1 {
+	source_root = substr($0, length("#source_root:") + 1)
+	next
+}
+$0 == "" || substr($0, 1, 1) == "#" { next }
+{
+	tab = index($0, "\t")
+	key = substr($0, 1, tab - 1)
+	if (key in properties) {
+		properties[key] = ""
+		next
+	}
+	keys[++key_count] = key
+	properties[key] = substr($0, tab + 1)
+}
+END {
+	for (i = 1; i <= key_count; i++) {
+		dataset = (keys[i] == ".") ? source_root : (source_root "/" keys[i])
+		print ENVIRON["ZXFER_AWK_ALIAS_ROOT"] "\t" dataset "\t" properties[keys[i]]
+	}
+}') || zxfer_throw_backup_candidate_failure 5 "$l_alias_path" "$1" "Forwarded backup property file"
+	g_zxfer_backup_forwarded_rows=${g_zxfer_backup_forwarded_rows:+$g_zxfer_backup_forwarded_rows$ZXFER_LF}$l_alias_rows
+	g_zxfer_backup_forwarded_roots=${g_zxfer_backup_forwarded_roots:+$g_zxfer_backup_forwarded_roots$ZXFER_LF}$1$ZXFER_TAB$l_alias_path
+	zxfer_echoV "Forwarding backup provenance from $l_alias_path"
+	return 0
+}
+
+# Purpose: Learn in one -O round trip which datasets on the source root's
+# path and below it have a storage directory on the origin host, so
+# forwarded lookups skip the rest.
+# Usage: zxfer_list_remote_backup_storage_dirs; sets
+# g_zxfer_backup_forwarded_listing (dataset names, one per line) and
+# g_zxfer_backup_forwarded_listed=1, or throws.
+zxfer_list_remote_backup_storage_dirs() {
+	l_listing_script=$(zxfer_build_remote_backup_storage_listing_cmd \
+		"$g_initial_source" "$g_option_O_origin_host") ||
+		zxfer_throw_error "Failed to render the backup metadata listing for $g_option_O_origin_host." "$?"
+	zxfer_run_remote_backup_script "$g_option_O_origin_host" "$l_listing_script" source \
+		"listing backup metadata under $g_backup_storage_root/$g_initial_source" \
+		backup-metadata '9[27]'
+	l_listing_status=$?
+	if [ "$l_listing_status" -ne 0 ]; then
+		zxfer_emit_remote_probe_failure_message >&2
+		zxfer_throw_error "Failed to list backup metadata under $g_backup_storage_root/$g_initial_source on $g_option_O_origin_host."
+	fi
+	g_zxfer_backup_forwarded_listing=$g_zxfer_remote_probe_stdout
+	g_zxfer_backup_forwarded_listed=1
+}
+
+# Purpose: Try the current and then the retired cksum-keyed filename for one
+# source/destination pair and validate what is found.
+# Usage: zxfer_try_backup_restore_candidate DIR FILENAME_SOURCE
+# FILENAME_DESTINATION EXPECTED_SOURCE EXPECTED_DESTINATION [HOST]
+# [PROFILE_SIDE]. Returns 0 with the contents in
+# g_zxfer_backup_restore_candidate_contents_result, 8 with the contents when
+# the file is valid but has no row for the pair, 1 when neither file exists,
+# 2 (ambiguous rows), 3 (the pair does not resolve), 4 (malformed rows), 5
+# (read failure), 6 (missing header), 7 (unsupported version), or 11 when no
+# filename can be derived. The path examined last is published in
+# g_zxfer_backup_restore_candidate_path_result for error messages.
+zxfer_try_backup_restore_candidate() {
+	l_candidate_dir=$1
+	l_candidate_filename_source=$2
+	l_candidate_filename_destination=$3
+	l_candidate_expected_source=$4
+	l_candidate_expected_destination=$5
+	l_candidate_host=${6:-}
+	l_candidate_profile_side=${7:-}
+	g_zxfer_backup_restore_candidate_path_result=""
+	g_zxfer_backup_restore_candidate_contents_result=""
+
+	for l_candidate_kind in current legacy; do
+		if ! l_candidate_name=$(zxfer_get_backup_metadata_filename \
+			"$l_candidate_filename_source" "$l_candidate_filename_destination" "$l_candidate_kind"); then
+			[ "$l_candidate_kind" = legacy ] || return 11
+			break
+		fi
+		l_candidate_path=$l_candidate_dir/$l_candidate_name
+		if [ "$l_candidate_host" = "" ]; then
+			zxfer_read_local_backup_file "$l_candidate_path" >/dev/null
+		else
+			zxfer_read_remote_backup_file "$l_candidate_host" "$l_candidate_path" \
+				"$l_candidate_profile_side" >/dev/null
+		fi
+		l_candidate_read_status=$?
+		if [ "$l_candidate_kind" = current ] || [ "$l_candidate_read_status" -ne 4 ]; then
+			g_zxfer_backup_restore_candidate_path_result=$l_candidate_path
+		fi
+		case $l_candidate_read_status in
+		0) ;;
+		4) continue ;;
+		*) return 5 ;;
+		esac
+		l_candidate_contents=$g_zxfer_backup_file_read_result
+
+		zxfer_backup_metadata_extract_properties_for_dataset_pair "$l_candidate_contents" \
+			"$l_candidate_expected_source" "$l_candidate_expected_destination" >/dev/null
+		l_candidate_match_status=$?
+		case $l_candidate_match_status in
+		0 | 8)
+			g_zxfer_backup_restore_candidate_contents_result=$l_candidate_contents
+			return "$l_candidate_match_status"
+			;;
+		1) return 3 ;;
+		2) return 2 ;;
+		3) return 4 ;;
+		6 | 7) return "$l_candidate_match_status" ;;
+		*) return 5 ;;
+		esac
+	done
 	return 1
 }
 
-# Purpose: Ensure the local backup directory exists and is ready before the
-# flow continues.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows before later helpers assume the resource or cache is available.
-zxfer_ensure_local_backup_dir() {
-	l_dir=$1
-	if l_symlink_component=$(zxfer_find_symlink_path_component "$l_dir"); then
-		if [ "$l_symlink_component" = "$l_dir" ]; then
-			zxfer_throw_error "Refusing to use backup directory $l_dir because it is a symlink."
-		fi
-		zxfer_throw_error "Refusing to use backup directory $l_dir because path component $l_symlink_component is a symlink."
-	fi
-	if [ -L "$l_dir" ]; then
-		zxfer_throw_error "Refusing to use backup directory $l_dir because it is a symlink."
-	fi
-	if [ -e "$l_dir" ] && [ ! -d "$l_dir" ]; then
-		zxfer_throw_error "Refusing to use backup directory $l_dir because it is not a directory."
-	fi
-	if [ ! -d "$l_dir" ]; then
-		l_old_umask=$(umask)
-		umask 077
-		if ! mkdir -p "$l_dir"; then
-			umask "$l_old_umask"
-			zxfer_throw_error "Error creating secure backup directory $l_dir."
-		fi
-		umask "$l_old_umask"
-	fi
-	if ! l_owner_uid=$(zxfer_get_path_owner_uid "$l_dir"); then
-		zxfer_throw_error "Cannot determine the owner of backup directory $l_dir."
-	fi
-	if ! zxfer_backup_owner_uid_is_allowed "$l_owner_uid"; then
-		l_expected_owner_desc=$(zxfer_describe_expected_backup_owner)
-		zxfer_throw_error "Refusing to use backup directory $l_dir because it is owned by UID $l_owner_uid instead of $l_expected_owner_desc."
-	fi
-	if ! chmod 700 "$l_dir"; then
-		zxfer_throw_error "Error securing backup directory $l_dir."
-	fi
-}
+# Purpose: Raise the structured error for a failed candidate lookup.
+# Usage: zxfer_throw_backup_candidate_failure STATUS PATH DATASET LABEL
+# [USAGE]; LABEL names the file kind in messages and a non-empty USAGE routes
+# the operator-facing lookup failures through the usage error.
+zxfer_throw_backup_candidate_failure() {
+	l_candidate_failure_status=$1
+	l_candidate_failure_path=$2
+	l_candidate_failure_dataset=$3
+	l_candidate_failure_label=$4
+	l_candidate_failure_usage=${5:-}
 
-# Purpose: Build a remote backup symlink guard command.
-# Usage: Shared by remote backup directory prepare and metadata read paths.
-zxfer_build_remote_backup_symlink_guard_cmd() {
-	l_path_single=$1
-	l_reject_status=${2:-1}
-	l_guard_kind=$3
-	case "$l_guard_kind" in
-	directory)
-		l_exact_symlink_cmd="echo 'Refusing to use symlinked zxfer backup directory.' >&2"
-		l_component_symlink_cmd="echo \"Refusing to use backup directory \$l_scan_path because path component \$l_scan_candidate is a symlink.\" >&2"
-		;;
-	metadata)
-		l_exact_symlink_cmd="echo \"Refusing to use backup metadata \$l_scan_path because it is a symlink.\" >&2"
-		l_component_symlink_cmd="echo \"Refusing to use backup metadata \$l_scan_path because path component \$l_scan_candidate is a symlink.\" >&2"
-		;;
-	*) return 1 ;;
+	case $l_candidate_failure_status in
+	1) zxfer_throw_error_with_usage "Cannot find backup property file. Ensure that it
+exists under the source-dataset-relative tree inside ZXFER_BACKUP_DIR." ;;
+	2) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path contains multiple relative rows for source dataset $l_candidate_failure_dataset. Remove the ambiguous rows or restore from a specific exact backup path." ;;
+	3 | 8) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path does not contain a current-format relative row for source dataset $l_candidate_failure_dataset." ;;
+	4) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path is malformed. Expected current-format relative-path and properties rows." ;;
+	6) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path does not start with the required zxfer backup metadata header." ;;
+	7) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path does not declare supported zxfer backup metadata format version #format_version:$ZXFER_BACKUP_METADATA_FORMAT_VERSION." ;;
+	11) zxfer_throw_error "Failed to derive backup metadata filename for source dataset [$l_candidate_failure_dataset]." ;;
+	*) zxfer_throw_error "Failed to read $(printf '%s' "$l_candidate_failure_label" | tr '[:upper:]' '[:lower:]') $l_candidate_failure_path." ;;
 	esac
-
-	printf '%s' "l_scan_path='$l_path_single'; l_scan_remaining=\$l_scan_path; l_scan_candidate=''; while [ -n \"\$l_scan_remaining\" ]; do case \"\$l_scan_remaining\" in /*) if [ \"\$l_scan_candidate\" = '' ]; then l_scan_candidate=/; l_scan_remaining=\${l_scan_remaining#/}; continue; fi ;; esac; l_scan_component=\${l_scan_remaining%%/*}; if [ \"\$l_scan_component\" = \"\$l_scan_remaining\" ]; then l_scan_remaining=''; else l_scan_remaining=\${l_scan_remaining#*/}; fi; [ -n \"\$l_scan_component\" ] || continue; case \"\$l_scan_candidate\" in '') l_scan_candidate=\$l_scan_component ;; /) l_scan_candidate=/\$l_scan_component ;; *) l_scan_candidate=\$l_scan_candidate/\$l_scan_component ;; esac; if [ -L \"\$l_scan_candidate\" ] || [ -h \"\$l_scan_candidate\" ]; then l_scan_trusted=0; case \"\$l_scan_candidate\" in /*) l_scan_parent=\${l_scan_candidate%/*}; [ -n \"\$l_scan_parent\" ] || l_scan_parent=/; l_scan_owner=''; l_scan_parent_owner=''; if command -v stat >/dev/null 2>&1; then l_scan_owner=\$(stat -c '%u' \"\$l_scan_candidate\" 2>/dev/null); if [ \"\$l_scan_owner\" = '' ] || printf '%s' \"\$l_scan_owner\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_scan_owner=\$(stat -f '%u' \"\$l_scan_candidate\" 2>/dev/null); fi; l_scan_parent_owner=\$(stat -c '%u' \"\$l_scan_parent\" 2>/dev/null); if [ \"\$l_scan_parent_owner\" = '' ] || printf '%s' \"\$l_scan_parent_owner\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_scan_parent_owner=\$(stat -f '%u' \"\$l_scan_parent\" 2>/dev/null); fi; fi; if [ \"\$l_scan_owner\" = '0' ] && [ \"\$l_scan_parent_owner\" = '0' ] && [ \"\$l_scan_parent\" = '/' ]; then l_scan_ls_path=\$l_scan_parent; case \"\$l_scan_ls_path\" in -*) l_scan_ls_path=./\$l_scan_ls_path ;; esac; l_scan_ls_line=\$(ls -ldn \"\$l_scan_ls_path\" 2>/dev/null) || l_scan_ls_line=''; if [ \"\$l_scan_ls_line\" != '' ]; then l_scan_parent_perm=\$(printf '%s\n' \"\$l_scan_ls_line\" | awk '{print \$1}'); case \"\$l_scan_parent_perm\" in ??????????*) l_scan_group_write=\$(printf '%s' \"\$l_scan_parent_perm\" | cut -c 6); l_scan_other_write=\$(printf '%s' \"\$l_scan_parent_perm\" | cut -c 9); l_scan_sticky=\$(printf '%s' \"\$l_scan_parent_perm\" | cut -c 10); case \"\$l_scan_group_write\$l_scan_other_write\" in *w*) case \"\$l_scan_sticky\" in t|T) l_scan_trusted=1 ;; esac ;; *) l_scan_trusted=1 ;; esac ;; esac; fi; fi ;; esac; if [ \"\$l_scan_trusted\" = '1' ]; then continue; fi; if [ \"\$l_scan_candidate\" = \"\$l_scan_path\" ]; then $l_exact_symlink_cmd; else $l_component_symlink_cmd; fi; exit $l_reject_status; fi; done"
+	if [ -n "$l_candidate_failure_usage" ]; then
+		zxfer_throw_error_with_usage "$l_candidate_failure_message"
+	fi
+	zxfer_throw_error "$l_candidate_failure_message"
 }
 
-# Purpose: Return the remote backup helper dependency path in the form expected
-# by later helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_remote_backup_helper_dependency_path() {
-	zxfer_get_effective_dependency_path
-}
+# Purpose: Load the exact-pair restore metadata for -e into
+# g_restored_backup_file_contents, failing closed before any dataset work.
+# Usage: zxfer_get_backup_properties, from replication startup. The file is
+# keyed by the source root and CLI destination under ZXFER_BACKUP_DIR on the
+# source side; child datasets restore from relative rows of that one file.
+zxfer_get_backup_properties() {
+	zxfer_set_failure_stage "backup metadata read"
 
-# Purpose: Wrap a remote backup helper command so it runs under the validated
-# remote secure-PATH contract.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows before remote helper payloads are sent over SSH.
-zxfer_wrap_remote_backup_helper_with_secure_path() {
-	l_remote_cmd=$1
-	l_dependency_path=$(zxfer_get_remote_backup_helper_dependency_path)
-	l_dependency_path_single=$(zxfer_escape_for_single_quotes "$l_dependency_path")
-
-	printf "PATH='%s'; export PATH; %s" "$l_dependency_path_single" "$l_remote_cmd"
-}
-
-# Purpose: Build the remote backup helper dependency check command for the next
-# execution or comparison step.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows before other helpers consume the assembled value.
-zxfer_build_remote_backup_helper_dependency_check_cmd() {
-	l_host=$1
-	l_status=$2
-	shift 2
-
-	l_host_single=$(zxfer_escape_for_single_quotes "$l_host")
-	l_required_tools=""
-	for l_required_tool in "$@"; do
-		l_required_tool_single=$(zxfer_escape_for_single_quotes "$l_required_tool")
-		l_required_tools="$l_required_tools '$l_required_tool_single'"
-	done
-
-	printf '%s' "zxfer_require_remote_backup_tool() { l_required_tool=\$1; if command -v \"\$l_required_tool\" >/dev/null 2>&1; then return 0; fi; printf '%s\n' \"Required dependency \\\"\$l_required_tool\\\" not found on host $l_host_single in secure PATH (\$PATH). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\" >&2; exit $l_status; }; for l_required_tool in$l_required_tools; do zxfer_require_remote_backup_tool \"\$l_required_tool\"; done"
-}
-
-# Purpose: Build the remote backup directory prepare command for the next
-# execution or comparison step.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows before other helpers consume the assembled value.
-zxfer_build_remote_backup_dir_prepare_cmd() {
-	l_dir=$1
-	l_host=$2
-	l_remote_dependency_status=${3:-99}
-	l_remote_prepare_failure_status=${4:-92}
-
-	l_dir_single=$(zxfer_escape_for_single_quotes "$l_dir")
-	l_dir_ls_path=$l_dir
-	case "$l_dir_ls_path" in
-	-*)
-		l_dir_ls_path=./$l_dir_ls_path
-		;;
-	esac
-	l_dir_ls_single=$(zxfer_escape_for_single_quotes "$l_dir_ls_path")
-	l_remote_symlink_guard_cmd=$(zxfer_build_remote_backup_symlink_guard_cmd "$l_dir_single" "$l_remote_prepare_failure_status" directory)
-	l_remote_dependency_check_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd "$l_host" "$l_remote_dependency_status" mkdir chmod id grep ls awk cut)
-	l_remote_cmd="$l_remote_dependency_check_cmd; $l_remote_symlink_guard_cmd; [ -L '$l_dir_single' ] && { echo 'Refusing to use symlinked zxfer backup directory.' >&2; exit $l_remote_prepare_failure_status; }; if [ -e '$l_dir_single' ] && [ ! -d '$l_dir_single' ]; then echo 'Backup path exists but is not a directory.' >&2; exit $l_remote_prepare_failure_status; fi; umask 077; if ! mkdir -p '$l_dir_single'; then echo 'Error creating secure backup directory.' >&2; exit $l_remote_prepare_failure_status; fi; if ! chmod 700 '$l_dir_single'; then echo 'Error securing backup directory.' >&2; exit $l_remote_prepare_failure_status; fi; l_expected_uid=\$(id -u); l_dir_uid=''; if command -v stat >/dev/null 2>&1; then l_dir_uid=\$(stat -c '%u' '$l_dir_single' 2>/dev/null); if [ \"\$l_dir_uid\" = '' ] || printf '%s' \"\$l_dir_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_dir_uid=\$(stat -f '%u' '$l_dir_single' 2>/dev/null); fi; fi; if [ \"\$l_dir_uid\" = '' ] || printf '%s' \"\$l_dir_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_ls_line=\$(ls -ldn '$l_dir_ls_single' 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_dir_uid=\$(printf '%s\n' \"\$l_ls_line\" | awk '{print \$3}'); fi; fi; if [ \"\$l_dir_uid\" = '' ]; then echo 'Unable to determine backup directory owner.' >&2; exit $l_remote_prepare_failure_status; fi; if [ \"\$l_dir_uid\" != 0 ] && [ \"\$l_dir_uid\" != \"\$l_expected_uid\" ]; then echo 'Backup directory must be owned by root or the ssh user.' >&2; exit $l_remote_prepare_failure_status; fi"
-
-	zxfer_wrap_remote_backup_helper_with_secure_path "$l_remote_cmd"
-}
-
-# Purpose: Ensure the remote backup directory exists and is ready before the
-# flow continues.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows before later helpers assume the resource or cache is available.
-zxfer_ensure_remote_backup_dir() {
-	l_dir=$1
-	l_host=$2
-	l_profile_side=${3:-}
-
-	[ "$l_host" = "" ] && return
-
-	l_remote_dependency_status=99
-	l_remote_prepare_failure_status=92
-	l_dependency_path=$(zxfer_get_remote_backup_helper_dependency_path)
-	l_remote_cmd=$(zxfer_build_remote_backup_dir_prepare_cmd "$l_dir" "$l_host" "$l_remote_dependency_status" "$l_remote_prepare_failure_status")
-	l_remote_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_cmd")
-	if zxfer_capture_remote_probe_output "$l_host" "$l_remote_shell_cmd" "$l_profile_side"; then
-		l_remote_status=0
-	else
-		l_remote_status=$?
-	fi
-	if [ "${g_zxfer_remote_probe_capture_failed:-0}" -eq 1 ]; then
-		zxfer_throw_remote_backup_capture_error "$l_host" "preparing backup directory $l_dir"
-	fi
-	if [ "$l_remote_status" -eq "$l_remote_dependency_status" ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		g_zxfer_failure_class=dependency
-		zxfer_throw_error "Required remote backup-directory helper dependency not found on host $l_host in secure PATH ($l_dependency_path). Review prior stderr for the missing tool name."
-	fi
-	if [ "$l_remote_status" -eq "$l_remote_prepare_failure_status" ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		zxfer_throw_error "Error preparing backup directory on $l_host."
-	fi
-	if [ "$l_remote_status" -ne 0 ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-			zxfer_throw_error "Failed to contact target host $l_host while preparing backup directory $l_dir. Review prior stderr for the transport or authentication error."
-		fi
-		zxfer_throw_error "Error preparing backup directory on $l_host."
-	fi
-}
-
-# Purpose: Clean up the backup metadata stage directory that this module
-# created or tracks.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows on success and failure paths so temporary state does not linger.
-zxfer_cleanup_backup_metadata_stage_dir() {
-	l_stage_dir=$1
-
-	[ -n "$l_stage_dir" ] || return 0
-	if command -v zxfer_cleanup_runtime_artifact_path >/dev/null 2>&1; then
-		zxfer_cleanup_runtime_artifact_path "$l_stage_dir" >/dev/null 2>&1 || true
-		return 0
-	fi
-	rm -f "$l_stage_dir/backup.snapshot" "$l_stage_dir/backup.write" 2>/dev/null || true
-	rmdir "$l_stage_dir" 2>/dev/null || true
-}
-
-# Purpose: Register the backup metadata runtime artifact path with the tracking
-# state owned by this module.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows so cleanup and later lookups can find the live resource.
-zxfer_register_backup_metadata_runtime_artifact_path() {
-	l_artifact_path=$1
-
-	[ -n "$l_artifact_path" ] || return 0
-	if command -v zxfer_register_runtime_artifact_path >/dev/null 2>&1; then
-		zxfer_register_runtime_artifact_path "$l_artifact_path"
-	fi
-}
-
-# Purpose: Remove the backup metadata runtime artifact path from the tracking
-# state owned by this module.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows after the tracked resource has completed or been cleaned up.
-zxfer_unregister_backup_metadata_runtime_artifact_path() {
-	l_artifact_path=$1
-
-	[ -n "$l_artifact_path" ] || return 0
-	if command -v zxfer_unregister_runtime_artifact_path >/dev/null 2>&1; then
-		zxfer_unregister_runtime_artifact_path "$l_artifact_path"
-	fi
-}
-
-# Purpose: Remove the local backup metadata path if present from the current
-# working set while preserving the module's special-case rules.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when filtering logic must trim staged data before later reconciliation
-# or apply steps run.
-zxfer_remove_local_backup_metadata_path_if_present() {
-	l_path=$1
-
-	[ -n "$l_path" ] || return 0
-	if [ ! -e "$l_path" ] && [ ! -L "$l_path" ] && [ ! -h "$l_path" ]; then
-		return 0
-	fi
-	if rm -f "$l_path" 2>/dev/null; then
+	zxfer_map_destination_dataset "$g_initial_source"
+	l_restore_destination_root=$g_zxfer_destination_dataset_result
+	if zxfer_try_backup_restore_candidate "$g_backup_storage_root/$g_initial_source" \
+		"$g_initial_source" "$g_destination" \
+		"$g_initial_source" "$l_restore_destination_root" "$g_option_O_origin_host" source; then
+		g_restored_backup_file_contents=$g_zxfer_backup_restore_candidate_contents_result
 		return 0
 	else
-		l_status=$?
-		return "$l_status"
+		l_restore_status=$?
 	fi
+	zxfer_throw_backup_candidate_failure "$l_restore_status" \
+		"$g_zxfer_backup_restore_candidate_path_result" "$g_initial_source" \
+		"Backup property file" usage
 }
 
-# Purpose: Move the local backup metadata path through the controlled local
-# publish path.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when staged local data is ready for its final path.
-zxfer_move_local_backup_metadata_path() {
-	l_source_path=$1
-	l_target_path=$2
-
-	if mv -f "$l_source_path" "$l_target_path" 2>/dev/null; then
-		return 0
-	else
-		l_status=$?
-		return "$l_status"
-	fi
-}
-
-# Purpose: Create the backup metadata stage directory for path using the safety
-# checks owned by this module.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when zxfer needs a fresh staged resource or persistent helper state.
-zxfer_create_backup_metadata_stage_dir_for_path() {
-	l_backup_stage_path=$1
-	l_backup_stage_prefix=${2:-zxfer-backup-stage}
-
-	g_zxfer_backup_stage_dir_result=""
-	l_backup_stage_parent=$(zxfer_get_path_parent_dir "$l_backup_stage_path") || return "$?"
-	if [ ! -d "$l_backup_stage_parent" ]; then
-		return 1
-	fi
-
-	l_backup_stage_old_umask=$(umask)
-	umask 077
-	if l_backup_stage_dir=$(mktemp -d "$l_backup_stage_parent/.$l_backup_stage_prefix.XXXXXX" 2>/dev/null); then
-		l_backup_stage_status=0
-	else
-		l_backup_stage_status=$?
-	fi
-	umask "$l_backup_stage_old_umask"
-	[ "$l_backup_stage_status" -eq 0 ] || return "$l_backup_stage_status"
-	zxfer_register_backup_metadata_runtime_artifact_path "$l_backup_stage_dir"
-
-	g_zxfer_backup_stage_dir_result=$l_backup_stage_dir
-	printf '%s\n' "$l_backup_stage_dir"
-}
-
-# Purpose: Check whether the backup metadata path uses trusted nonwritable
-# parent.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when later helpers need a boolean answer about the backup metadata
-# path.
-zxfer_backup_metadata_path_uses_trusted_nonwritable_parent() {
-	l_backup_io_path=$1
-
-	l_backup_io_parent=$(zxfer_get_path_parent_dir "$l_backup_io_path") || return 1
-	l_backup_io_parent=$(zxfer_validate_temp_root_candidate "$l_backup_io_parent") || return 1
-
-	[ ! -w "$l_backup_io_parent" ]
-}
-
-# Purpose: Require the backup write target path before the surrounding flow
-# continues.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when later helpers should stop immediately if the precondition is not
-# met.
-zxfer_require_backup_write_target_path() {
-	l_path=$1
-
-	if [ -L "$l_path" ] || [ -h "$l_path" ]; then
-		zxfer_throw_error "Refusing to write backup metadata $l_path because it is a symlink."
-	fi
-	if [ -e "$l_path" ] && [ ! -f "$l_path" ]; then
-		zxfer_throw_error "Refusing to write backup metadata $l_path because it is not a regular file."
-	fi
-}
-
-# Purpose: Prepare the local backup file stage before the surrounding flow uses
-# it.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows once prerequisites are known but before live work depends on the
-# prepared state.
-zxfer_prepare_local_backup_file_stage() {
-	l_backup_file_path=$1
-	l_rendered_backup_contents=$2
-	g_zxfer_backup_local_write_failure_result=""
-	g_zxfer_backup_stage_dir_result=""
-	g_zxfer_backup_stage_file_result=""
-
-	if zxfer_create_backup_metadata_stage_dir_for_path "$l_backup_file_path" "zxfer-backup-write" >/dev/null; then
-		:
-	else
-		l_status=$?
-		g_zxfer_backup_local_write_failure_result=staging
-		return "$l_status"
-	fi
-	l_stage_dir=$g_zxfer_backup_stage_dir_result
-	l_stage_file="$l_stage_dir/backup.write"
-	if (
-		umask 077
-		printf '%s\n' "$l_rendered_backup_contents" >"$l_stage_file"
-	); then
-		:
-	else
-		l_status=$?
-		g_zxfer_backup_local_write_failure_result=staging
-		g_zxfer_backup_stage_dir_result=""
-		g_zxfer_backup_stage_file_result=""
-		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
-		return "$l_status"
-	fi
-	if chmod 600 "$l_stage_file"; then
-		:
-	else
-		l_status=$?
-		g_zxfer_backup_local_write_failure_result=staging
-		g_zxfer_backup_stage_dir_result=""
-		g_zxfer_backup_stage_file_result=""
-		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
-		return "$l_status"
-	fi
-
-	g_zxfer_backup_stage_dir_result=$l_stage_dir
-	g_zxfer_backup_stage_file_result=$l_stage_file
-	printf '%s\n' "$l_stage_dir"
-	printf '%s\n' "$l_stage_file"
-}
-
-# Purpose: Commit the local backup file stage once staged validation has
-# already succeeded.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows after the staged backup or cache payload is ready to become live.
-zxfer_commit_local_backup_file_stage() {
-	l_backup_file_path=$1
-	l_stage_file=$2
-	g_zxfer_backup_commit_had_existing_target_result=""
-	g_zxfer_backup_commit_rollback_file_result=""
-
-	if [ -L "$l_backup_file_path" ] || [ -h "$l_backup_file_path" ]; then
-		return 1
-	fi
-	if [ -e "$l_backup_file_path" ] && [ ! -f "$l_backup_file_path" ]; then
-		return 1
-	fi
-
-	l_had_existing_target=0
-	l_rollback_file=""
-	if [ -e "$l_backup_file_path" ]; then
-		l_had_existing_target=1
-		l_backup_parent=$(zxfer_get_path_parent_dir "$l_backup_file_path") || return "$?"
-		l_rollback_file=$(mktemp "$l_backup_parent/.zxfer-backup-rollback.XXXXXX" 2>/dev/null) ||
-			return "$?"
-		if zxfer_move_local_backup_metadata_path "$l_backup_file_path" "$l_rollback_file"; then
-			:
-		else
-			l_status=$?
-			zxfer_remove_local_backup_metadata_path_if_present "$l_rollback_file" >/dev/null 2>&1 || :
-			return "$l_status"
-		fi
-	fi
-
-	if zxfer_move_local_backup_metadata_path "$l_stage_file" "$l_backup_file_path"; then
-		:
-	else
-		l_stage_move_status=$?
-		if [ "$l_had_existing_target" -eq 1 ] && [ -n "$l_rollback_file" ]; then
-			if zxfer_move_local_backup_metadata_path "$l_rollback_file" "$l_backup_file_path"; then
-				:
-			else
-				l_restore_status=$?
-				g_zxfer_backup_local_write_failure_result=rollback
-				if [ -e "$l_rollback_file" ]; then
-					zxfer_remove_local_backup_metadata_path_if_present "$l_backup_file_path" >/dev/null 2>&1 || :
-				fi
-				return "$l_restore_status"
-			fi
-			if [ -e "$l_rollback_file" ]; then
-				zxfer_remove_local_backup_metadata_path_if_present "$l_rollback_file" >/dev/null 2>&1 || :
-			fi
-		else
-			zxfer_remove_local_backup_metadata_path_if_present "$l_backup_file_path" >/dev/null 2>&1 || :
-		fi
-		return "$l_stage_move_status"
-	fi
-
-	g_zxfer_backup_commit_had_existing_target_result=$l_had_existing_target
-	g_zxfer_backup_commit_rollback_file_result=$l_rollback_file
-	printf '%s\n' "$l_had_existing_target"
-	printf '%s\n' "$l_rollback_file"
-}
-
-# Purpose: Rollback the local backup file commit to the last safe state this
-# module recognizes.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when zxfer detects divergence and must re-establish a safe base.
-zxfer_rollback_local_backup_file_commit() {
-	l_backup_file_path=$1
-	l_had_existing_target=$2
-	l_rollback_file=$3
-
-	if [ "$l_had_existing_target" -eq 1 ] && [ -n "$l_rollback_file" ]; then
-		zxfer_remove_local_backup_metadata_path_if_present "$l_backup_file_path" || return "$?"
-		zxfer_move_local_backup_metadata_path "$l_rollback_file" "$l_backup_file_path" || return "$?"
-		zxfer_unregister_backup_metadata_runtime_artifact_path "$l_rollback_file"
-		return 0
-	fi
-
-	zxfer_remove_local_backup_metadata_path_if_present "$l_backup_file_path"
-}
-
-# Purpose: Finalize the local backup file commit once all prerequisites have
-# succeeded.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows after staged or deferred work is ready to become the module's final
-# result.
-zxfer_finalize_local_backup_file_commit() {
-	l_had_existing_target=$1
-	l_rollback_file=$2
-
-	if [ "$l_had_existing_target" -eq 1 ] && [ -n "$l_rollback_file" ]; then
-		if zxfer_remove_local_backup_metadata_path_if_present "$l_rollback_file"; then
-			zxfer_unregister_backup_metadata_runtime_artifact_path "$l_rollback_file"
-			return 0
-		else
-			l_status=$?
-			return "$l_status"
-		fi
-	fi
-
-	return 0
-}
-
-# Purpose: Raise the backup write rollback error through zxfer's
-# structured failure reporting path.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when the current error should stop the run with the module's normal
-# reporting contract.
-zxfer_throw_backup_write_rollback_error() {
-	zxfer_throw_error "Error writing backup file and restoring backup metadata rollback state. Inspect rollback files under ZXFER_BACKUP_DIR for manual recovery."
-}
-
-# Purpose: Raise the remote backup transport error through zxfer's structured
-# failure reporting path.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when the current error should stop the run with the module's normal
-# reporting contract.
-zxfer_throw_remote_backup_transport_error() {
-	l_host=$1
-	l_action=$2
-
-	if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-		zxfer_emit_remote_probe_failure_message >&2
-	fi
-	zxfer_throw_error "Failed to contact target host $l_host while $l_action. Review prior stderr for the transport or authentication error."
-}
-
-# Purpose: Raise the remote backup capture error through zxfer's structured
-# failure reporting path.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when the current error should stop the run with the module's normal
-# reporting contract.
-zxfer_throw_remote_backup_capture_error() {
-	l_host=$1
-	l_action=$2
-
-	if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-		zxfer_emit_remote_probe_failure_message >&2
-	fi
-	zxfer_throw_error "Failed to reload local remote helper capture while $l_action on host $l_host."
-}
-
-# Purpose: Raise remote backup write statuses through the shared backup
-# metadata reporting paths.
-# Usage: Called after single-file and pair remote metadata write helpers
-# return so both flows preserve the same stderr text and failure classes.
-zxfer_throw_remote_backup_write_status() {
-	l_remote_write_status=$1
-	l_remote_dependency_status=$2
-	l_remote_write_failure_status=$3
-	l_remote_rollback_failure_status=$4
-	l_host=$5
-	l_action=$6
-	l_dependency_path=$7
-
-	if [ "${g_zxfer_remote_probe_capture_failed:-0}" -eq 1 ]; then
-		zxfer_throw_remote_backup_capture_error "$l_host" "$l_action"
-	fi
-	if [ "$l_remote_write_status" -eq "$l_remote_dependency_status" ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		g_zxfer_failure_class=dependency
-		zxfer_throw_error "Required remote backup-write helper dependency not found on host $l_host in secure PATH ($l_dependency_path). Review prior stderr for the missing tool name."
-	fi
-	if [ -n "$l_remote_rollback_failure_status" ] &&
-		[ "$l_remote_write_status" -eq "$l_remote_rollback_failure_status" ]; then
-		zxfer_throw_backup_write_rollback_error
-	fi
-	if [ "$l_remote_write_status" -eq "$l_remote_write_failure_status" ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
-	fi
-	if [ "$l_remote_write_status" -ne 0 ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_throw_remote_backup_transport_error "$l_host" "$l_action"
-		fi
-		zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
-	fi
-	return 0
-}
-
-# Purpose: Run the remote backup helper with payload through the controlled
-# execution path owned by this module.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows once planning is complete and zxfer is ready to execute the action.
-zxfer_run_remote_backup_helper_with_payload() {
-	l_host=$1
-	l_remote_shell_cmd=$2
-	l_payload=$3
-	l_profile_side=${4:-}
-
-	zxfer_reset_remote_probe_capture_state
-
-	if l_transport_tokens=$(zxfer_get_ssh_transport_tokens_for_host "$l_host"); then
-		:
-	else
-		zxfer_profile_record_ssh_invocation "$l_host" "$l_profile_side"
-		l_transport_status=$?
-		zxfer_throw_error "$l_transport_tokens" "$l_transport_status"
-	fi
-
-	zxfer_create_private_temp_dir "zxfer-remote-backup-helper" >/dev/null
-	l_stage_status=$?
-	if [ "$l_stage_status" -ne 0 ]; then
-		zxfer_throw_error "Error creating temporary file."
-	fi
-	l_stage_dir=$g_zxfer_runtime_artifact_path_result
-	l_stdin_path="$l_stage_dir/stdin"
-	l_stdout_path="$l_stage_dir/stdout"
-	l_stderr_path="$l_stage_dir/stderr"
-
-	if ! zxfer_write_runtime_artifact_file "$l_stdin_path" "$l_payload"; then
-		zxfer_cleanup_runtime_artifact_path "$l_stage_dir"
-		zxfer_throw_error "Error creating temporary file."
-	fi
-
-	if zxfer_invoke_ssh_shell_command_for_host \
-		"$l_host" "$l_remote_shell_cmd" "$l_profile_side" <"$l_stdin_path" >"$l_stdout_path" 2>"$l_stderr_path"; then
-		l_remote_status=0
-	else
-		l_remote_status=$?
-	fi
-
-	zxfer_load_remote_probe_capture_files "remote backup helper" "$l_stdout_path" "$l_stderr_path"
-	l_capture_status=$?
-	zxfer_cleanup_runtime_artifact_path "$l_stage_dir"
-	if [ "$l_capture_status" -ne 0 ]; then
-		return "$l_capture_status"
-	fi
-	return "$l_remote_status"
-}
-
-# Purpose: Write the local backup file pair atomically in the normalized form
-# later zxfer steps expect.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when the module needs a stable staged file or emitted stream for
-# downstream use.
-zxfer_write_local_backup_file_pair_atomically() {
-	l_primary_backup_file_path=$1
-	l_primary_rendered_backup_contents=$2
-	l_forwarded_backup_file_path=$3
-	l_forwarded_backup_contents=$4
-
-	g_zxfer_backup_local_write_failure_result=""
-	zxfer_prepare_local_backup_file_stage "$l_primary_backup_file_path" "$l_primary_rendered_backup_contents" >/dev/null ||
-		return "$?"
-	l_primary_stage_dir=$g_zxfer_backup_stage_dir_result
-	l_primary_stage_file=$g_zxfer_backup_stage_file_result
-
-	zxfer_prepare_local_backup_file_stage "$l_forwarded_backup_file_path" "$l_forwarded_backup_contents" >/dev/null || {
-		l_status=$?
-		zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
-		return "$l_status"
-	}
-	l_forwarded_stage_dir=$g_zxfer_backup_stage_dir_result
-	l_forwarded_stage_file=$g_zxfer_backup_stage_file_result
-
-	zxfer_commit_local_backup_file_stage "$l_forwarded_backup_file_path" "$l_forwarded_stage_file" >/dev/null || {
-		l_status=$?
-		zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
-		zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
-		return "$l_status"
-	}
-	l_forwarded_had_existing_target=$g_zxfer_backup_commit_had_existing_target_result
-	l_forwarded_rollback_file=$g_zxfer_backup_commit_rollback_file_result
-
-	if zxfer_commit_local_backup_file_stage "$l_primary_backup_file_path" "$l_primary_stage_file" >/dev/null; then
-		:
-	else
-		l_status=$?
-		if ! zxfer_rollback_local_backup_file_commit "$l_forwarded_backup_file_path" "$l_forwarded_had_existing_target" "$l_forwarded_rollback_file" >/dev/null 2>&1; then
-			zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
-			zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
-			return 2
-		fi
-		zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
-		zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
-		return "$l_status"
-	fi
-	l_primary_had_existing_target=$g_zxfer_backup_commit_had_existing_target_result
-	l_primary_rollback_file=$g_zxfer_backup_commit_rollback_file_result
-	if [ "$l_forwarded_had_existing_target" -eq 1 ] &&
-		[ -n "$l_forwarded_rollback_file" ]; then
-		zxfer_register_backup_metadata_runtime_artifact_path \
-			"$l_forwarded_rollback_file"
-	fi
-	if [ "$l_primary_had_existing_target" -eq 1 ] &&
-		[ -n "$l_primary_rollback_file" ]; then
-		zxfer_register_backup_metadata_runtime_artifact_path \
-			"$l_primary_rollback_file"
-	fi
-
-	zxfer_finalize_local_backup_file_commit "$l_forwarded_had_existing_target" "$l_forwarded_rollback_file" || {
-		l_status=$?
-		zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
-		zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
-		return "$l_status"
-	}
-	zxfer_finalize_local_backup_file_commit "$l_primary_had_existing_target" "$l_primary_rollback_file" || {
-		l_status=$?
-		zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
-		zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
-		return "$l_status"
-	}
-	zxfer_cleanup_backup_metadata_stage_dir "$l_primary_stage_dir"
-	zxfer_cleanup_backup_metadata_stage_dir "$l_forwarded_stage_dir"
-}
-
-# Purpose: Write the local backup file atomically in the normalized form later
-# zxfer steps expect.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when the module needs a stable staged file or emitted stream for
-# downstream use.
-zxfer_write_local_backup_file_atomically() {
-	l_backup_file_path=$1
-	l_rendered_backup_contents=$2
-
-	g_zxfer_backup_local_write_failure_result=""
-	zxfer_prepare_local_backup_file_stage "$l_backup_file_path" "$l_rendered_backup_contents" >/dev/null ||
-		return "$?"
-	l_stage_dir=$g_zxfer_backup_stage_dir_result
-	l_stage_file=$g_zxfer_backup_stage_file_result
-	zxfer_commit_local_backup_file_stage "$l_backup_file_path" "$l_stage_file" >/dev/null || {
-		l_status=$?
-		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
-		return "$l_status"
-	}
-	l_had_existing_target=$g_zxfer_backup_commit_had_existing_target_result
-	l_rollback_file=$g_zxfer_backup_commit_rollback_file_result
-	if [ "$l_had_existing_target" -eq 1 ] && [ -n "$l_rollback_file" ]; then
-		# Rollback files only become disposable after the staged backup is live.
-		zxfer_register_backup_metadata_runtime_artifact_path "$l_rollback_file"
-	fi
-	zxfer_finalize_local_backup_file_commit "$l_had_existing_target" "$l_rollback_file" || {
-		l_status=$?
-		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
-		return "$l_status"
-	}
-	zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
-}
-
-# Purpose: Render the reusable remote target guard for backup metadata writes.
-# Usage: Called by remote single-file and pair write command builders before
-# they stage or publish backup metadata on the target host.
-zxfer_render_remote_backup_target_write_guard_cmd() {
-	l_backup_file_path_single=$1
-	l_remote_write_failure_status=$2
-
-	printf '%s' "if [ -L '$l_backup_file_path_single' ] || [ -h '$l_backup_file_path_single' ]; then echo 'Refusing to write backup metadata because the target is a symlink.' >&2; exit $l_remote_write_failure_status; fi; if [ -e '$l_backup_file_path_single' ] && [ ! -f '$l_backup_file_path_single' ]; then echo 'Refusing to write backup metadata because the target is not a regular file.' >&2; exit $l_remote_write_failure_status; fi"
-}
-
-# Purpose: Build the remote backup write command for the next execution or
-# comparison step.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows before other helpers consume the assembled value.
-zxfer_build_remote_backup_write_cmd() {
-	l_backup_file_dir=$1
-	l_backup_file_path=$2
-	l_host=$3
-	l_remote_write_helper_safe=$4
-	l_remote_dependency_status=${5:-99}
-	l_remote_write_failure_status=${6:-92}
-
-	l_backup_file_dir_single=$(zxfer_escape_for_single_quotes "$l_backup_file_dir")
-	l_backup_file_path_single=$(zxfer_escape_for_single_quotes "$l_backup_file_path")
-	l_remote_dependency_check_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd "$l_host" "$l_remote_dependency_status" mktemp chmod mv rm rmdir)
-	l_target_guard_cmd=$(zxfer_render_remote_backup_target_write_guard_cmd "$l_backup_file_path_single" "$l_remote_write_failure_status")
-	# shellcheck disable=SC2016  # Remote shell variables should remain literal.
-	l_stage_cleanup_cmd='rm -f "$l_stage_file"; rmdir "$l_stage_dir" 2>/dev/null || true'
-	l_stage_setup_cmd="l_stage_dir=\$(mktemp -d '$l_backup_file_dir_single/.zxfer-backup-write.XXXXXX' 2>/dev/null) || exit $l_remote_write_failure_status; l_stage_file=\"\$l_stage_dir/backup.write\""
-	l_staged_target_guard_cmd="if [ -L '$l_backup_file_path_single' ] || [ -h '$l_backup_file_path_single' ]; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi; if [ -e '$l_backup_file_path_single' ] && [ ! -f '$l_backup_file_path_single' ]; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi"
-	# Stage remote writes inside the secure backup directory so validation and
-	# the final rename operate on the same object.
-	l_remote_write_cmd="$l_remote_dependency_check_cmd; $l_target_guard_cmd; umask 077; $l_stage_setup_cmd; if ! $l_remote_write_helper_safe >\"\$l_stage_file\"; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi; if ! chmod 600 \"\$l_stage_file\"; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi; $l_staged_target_guard_cmd; if ! mv -f \"\$l_stage_file\" '$l_backup_file_path_single'; then $l_stage_cleanup_cmd; exit $l_remote_write_failure_status; fi; rmdir \"\$l_stage_dir\" 2>/dev/null || true"
-
-	zxfer_wrap_remote_backup_helper_with_secure_path "$l_remote_write_cmd"
-}
-
-# Purpose: Build the remote backup pair write command for the next execution or
-# comparison step.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows before other helpers consume the assembled value.
-zxfer_build_remote_backup_pair_write_cmd() {
-	l_primary_backup_file_dir=$1
-	l_primary_backup_file_path=$2
-	l_forwarded_backup_file_dir=$3
-	l_forwarded_backup_file_path=$4
-	l_host=$5
-	l_remote_dependency_status=${6:-99}
-	l_remote_write_failure_status=${7:-92}
-
-	l_primary_backup_file_dir_single=$(zxfer_escape_for_single_quotes "$l_primary_backup_file_dir")
-	l_primary_backup_file_path_single=$(zxfer_escape_for_single_quotes "$l_primary_backup_file_path")
-	l_forwarded_backup_file_dir_single=$(zxfer_escape_for_single_quotes "$l_forwarded_backup_file_dir")
-	l_forwarded_backup_file_path_single=$(zxfer_escape_for_single_quotes "$l_forwarded_backup_file_path")
-	l_pair_split_line_single=$(zxfer_escape_for_single_quotes "$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE")
-	l_remote_dependency_check_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd "$l_host" "$l_remote_dependency_status" mktemp chmod mv rm rmdir awk)
-	l_remote_rollback_failure_status=98
-	l_remote_indent='	'
-	# shellcheck disable=SC2016  # Remote shell variables should remain literal.
-	l_cleanup_function_cmd='cleanup_stages() { rm -f "$l_primary_stage_file" "$l_forwarded_stage_file" 2>/dev/null || true; rmdir "$l_primary_stage_dir" "$l_forwarded_stage_dir" 2>/dev/null || true; }'
-	l_forwarded_rollback_function_cmd="rollback_forwarded() { rm -f '$l_forwarded_backup_file_path_single' 2>/dev/null || true; if [ \"\${l_forwarded_had_existing:-0}\" -eq 1 ] && [ \"\${l_forwarded_rollback_file:-}\" != '' ]; then if ! mv -f \"\$l_forwarded_rollback_file\" '$l_forwarded_backup_file_path_single' 2>/dev/null; then return 1; fi; if [ -e \"\$l_forwarded_rollback_file\" ]; then rm -f \"\$l_forwarded_rollback_file\" 2>/dev/null || true; fi; fi; return 0; }"
-	l_primary_guard_cmd=$(zxfer_render_remote_backup_target_write_guard_cmd "$l_primary_backup_file_path_single" "$l_remote_write_failure_status")
-	l_forwarded_guard_cmd=$(zxfer_render_remote_backup_target_write_guard_cmd "$l_forwarded_backup_file_path_single" "$l_remote_write_failure_status")
-	l_pair_target_guard_cmd="$l_primary_guard_cmd; $l_forwarded_guard_cmd"
-	l_pair_stage_setup_cmd="l_primary_stage_dir=\$(mktemp -d '$l_primary_backup_file_dir_single/.zxfer-backup-write.XXXXXX' 2>/dev/null) || exit $l_remote_write_failure_status; l_primary_stage_file=\"\$l_primary_stage_dir/backup.write\"; l_forwarded_stage_dir=\$(mktemp -d '$l_forwarded_backup_file_dir_single/.zxfer-backup-write.XXXXXX' 2>/dev/null) || { cleanup_stages; exit $l_remote_write_failure_status; }; l_forwarded_stage_file=\"\$l_forwarded_stage_dir/backup.write\""
-	l_pair_payload_split_cmd="if ! awk -v split_line='$l_pair_split_line_single' -v primary_file=\"\$l_primary_stage_file\" -v forwarded_file=\"\$l_forwarded_stage_file\" 'BEGIN { current = primary_file; saw_split = 0 } \$0 == split_line { current = forwarded_file; saw_split = 1; next } { print > current } END { if (!saw_split) exit 1 }'; then cleanup_stages; exit $l_remote_write_failure_status; fi"
-	l_pair_stage_chmod_cmd="if ! chmod 600 \"\$l_primary_stage_file\"; then cleanup_stages; exit $l_remote_write_failure_status; fi; if ! chmod 600 \"\$l_forwarded_stage_file\"; then cleanup_stages; exit $l_remote_write_failure_status; fi"
-	l_forwarded_publish_cmd="l_forwarded_had_existing=0; l_forwarded_rollback_file=''; if [ -e '$l_forwarded_backup_file_path_single' ]; then ${l_remote_indent}l_forwarded_had_existing=1; ${l_remote_indent}l_forwarded_rollback_file=\$(mktemp '$l_forwarded_backup_file_dir_single/.zxfer-backup-rollback.XXXXXX' 2>/dev/null) || { cleanup_stages; exit $l_remote_write_failure_status; }; ${l_remote_indent}if ! mv -f '$l_forwarded_backup_file_path_single' \"\$l_forwarded_rollback_file\"; then rm -f \"\$l_forwarded_rollback_file\" 2>/dev/null || true; cleanup_stages; exit $l_remote_write_failure_status; fi; fi; if ! mv -f \"\$l_forwarded_stage_file\" '$l_forwarded_backup_file_path_single'; then if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; cleanup_stages; exit $l_remote_write_failure_status; fi"
-	l_primary_publish_cmd="l_primary_had_existing=0; l_primary_rollback_file=''; if [ -e '$l_primary_backup_file_path_single' ]; then ${l_remote_indent}l_primary_had_existing=1; ${l_remote_indent}l_primary_rollback_file=\$(mktemp '$l_primary_backup_file_dir_single/.zxfer-backup-rollback.XXXXXX' 2>/dev/null) || { if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; cleanup_stages; exit $l_remote_write_failure_status; }; ${l_remote_indent}if ! mv -f '$l_primary_backup_file_path_single' \"\$l_primary_rollback_file\"; then rm -f \"\$l_primary_rollback_file\" 2>/dev/null || true; if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; cleanup_stages; exit $l_remote_write_failure_status; fi; fi; if ! mv -f \"\$l_primary_stage_file\" '$l_primary_backup_file_path_single'; then ${l_remote_indent}l_primary_restore_failed=0; ${l_remote_indent}if [ \"\$l_primary_had_existing\" -eq 1 ] && [ \"\$l_primary_rollback_file\" != '' ]; then if ! mv -f \"\$l_primary_rollback_file\" '$l_primary_backup_file_path_single' 2>/dev/null; then l_primary_restore_failed=1; else if [ -e \"\$l_primary_rollback_file\" ]; then rm -f \"\$l_primary_rollback_file\" 2>/dev/null || true; fi; fi; fi; ${l_remote_indent}if ! rollback_forwarded; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; ${l_remote_indent}if [ \"\$l_primary_restore_failed\" -eq 1 ]; then cleanup_stages; exit $l_remote_rollback_failure_status; fi; ${l_remote_indent}cleanup_stages; ${l_remote_indent}exit $l_remote_write_failure_status; fi"
-	l_pair_finish_cmd="if [ \"\$l_forwarded_had_existing\" -eq 1 ] && [ \"\$l_forwarded_rollback_file\" != '' ]; then rm -f \"\$l_forwarded_rollback_file\" 2>/dev/null || true; fi; if [ \"\$l_primary_had_existing\" -eq 1 ] && [ \"\$l_primary_rollback_file\" != '' ]; then rm -f \"\$l_primary_rollback_file\" 2>/dev/null || true; fi; cleanup_stages"
-	l_remote_pair_write_cmd="$l_remote_dependency_check_cmd; $l_cleanup_function_cmd; $l_forwarded_rollback_function_cmd; $l_pair_target_guard_cmd; umask 077; $l_pair_stage_setup_cmd; $l_pair_payload_split_cmd; $l_pair_stage_chmod_cmd; $l_forwarded_publish_cmd; $l_primary_publish_cmd; $l_pair_finish_cmd"
-
-	zxfer_wrap_remote_backup_helper_with_secure_path "$l_remote_pair_write_cmd"
-}
-
-# Purpose: Read the local backup file from staged state into the current shell.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when later helpers need a checked reload instead of ad hoc file reads.
-zxfer_read_local_backup_file() {
-	l_path=$1
-	g_zxfer_backup_file_read_result=""
-	g_zxfer_backup_local_read_failure_result=""
-	zxfer_require_backup_metadata_path_without_symlinks "$l_path" || return 1
-	if [ ! -f "$l_path" ] || [ -h "$l_path" ]; then
-		return 4
-	fi
-	# A trusted parent that is not writable cannot swap the directory entry,
-	# so direct validated reads are safe when same-directory staging is blocked.
-	if zxfer_backup_metadata_path_uses_trusted_nonwritable_parent "$l_path"; then
-		if ! l_error=$(zxfer_check_secure_backup_file "$l_path" "$l_path"); then
-			zxfer_throw_error "$l_error"
-		fi
-		zxfer_read_runtime_artifact_file "$l_path" >/dev/null || return "$?"
-		l_backup_contents=$g_zxfer_runtime_artifact_read_result
-		g_zxfer_backup_file_read_result=$l_backup_contents
-		printf '%s' "$l_backup_contents"
-		return 0
-	fi
-	if zxfer_create_backup_metadata_stage_dir_for_path "$l_path" "zxfer-backup-read" >/dev/null; then
-		:
-	else
-		l_status=$?
-		g_zxfer_backup_local_read_failure_result=staging
-		return "$l_status"
-	fi
-	l_stage_dir=$g_zxfer_backup_stage_dir_result
-	l_snapshot_path="$l_stage_dir/backup.snapshot"
-	if ln "$l_path" "$l_snapshot_path" 2>/dev/null; then
-		:
-	else
-		l_link_status=$?
-		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
-		if [ ! -f "$l_path" ] || [ -h "$l_path" ]; then
-			return 4
-		fi
-		return "$l_link_status"
-	fi
-	if ! l_error=$(zxfer_check_secure_backup_file "$l_snapshot_path" "$l_path"); then
-		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
-		zxfer_throw_error "$l_error"
-	fi
-	if zxfer_read_runtime_artifact_file "$l_snapshot_path" >/dev/null; then
-		:
-	else
-		l_status=$?
-		g_zxfer_backup_local_read_failure_result=staging
-		zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
-		return "$l_status"
-	fi
-	l_backup_contents=$g_zxfer_runtime_artifact_read_result
-	g_zxfer_backup_file_read_result=$l_backup_contents
-	printf '%s' "$l_backup_contents"
-	zxfer_cleanup_backup_metadata_stage_dir "$l_stage_dir"
-}
-
-# Purpose: Read the remote backup file from staged state into the current
-# shell.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when later helpers need a checked reload instead of ad hoc file reads.
-zxfer_read_remote_backup_file() {
-	l_host=$1
-	l_path=$2
-	l_profile_side=${3:-}
-
-	g_zxfer_backup_file_read_result=""
-	l_path_single=$(zxfer_escape_for_single_quotes "$l_path")
-	l_remote_transport_status=6
-	l_remote_capture_status=7
-	l_remote_missing_status=94
-	l_remote_insecure_owner_status=95
-	l_remote_insecure_mode_status=96
-	l_remote_unknown_status=97
-	l_remote_symlink_status=98
-	l_remote_dependency_status=93
-	l_remote_awk_cmd="awk"
-	l_remote_cat_helper=${g_cmd_cat:-cat}
-	l_remote_cat_helper_cmd=$(zxfer_build_shell_command_from_argv "$l_remote_cat_helper")
-	l_remote_symlink_guard_cmd=$(zxfer_build_remote_backup_symlink_guard_cmd "$l_path_single" "$l_remote_symlink_status" metadata)
-	l_remote_dependency_check_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd "$l_host" "$l_remote_dependency_status" id grep ls awk cut)
-	l_remote_stage_dependency_check_cmd=$(zxfer_build_remote_backup_helper_dependency_check_cmd "$l_host" "$l_remote_dependency_status" mktemp ln rm rmdir)
-	l_remote_path_setup_cmd="l_target_path='$l_path_single'; \
-l_parent=\${l_target_path%/*}; \
-if [ \"\$l_parent\" = \"\$l_target_path\" ] || [ \"\$l_parent\" = '' ]; then l_parent=/; fi; \
-l_target_ls_path=\$l_target_path; \
-case \"\$l_target_ls_path\" in -*) l_target_ls_path=./\$l_target_ls_path ;; esac; \
-l_parent_ls_path=\$l_parent; \
-case \"\$l_parent_ls_path\" in -*) l_parent_ls_path=./\$l_parent_ls_path ;; esac; \
-l_expected_uid=''; \
-if command -v id >/dev/null 2>&1; then l_expected_uid=\$(id -u 2>/dev/null); fi; \
-if [ \"\$l_expected_uid\" = '' ] || printf '%s' \"\$l_expected_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then exit $l_remote_unknown_status; fi"
-	l_remote_parent_trust_cmd="l_use_stage_dir=1; \
-if [ ! -w \"\$l_parent\" ]; then \
-	l_parent_ls_line=\$(ls -ldn \"\$l_parent_ls_path\" 2>/dev/null) || l_parent_ls_line=''; \
-	if [ \"\$l_parent_ls_line\" != '' ]; then \
-		l_parent_uid=\$(printf '%s\n' \"\$l_parent_ls_line\" | $l_remote_awk_cmd '{print \$3}'); \
-		l_parent_perm=\$(printf '%s\n' \"\$l_parent_ls_line\" | $l_remote_awk_cmd '{print \$1}'); \
-		l_parent_trusted=0; \
-		case \"\$l_parent_perm\" in ??????????*) ;; *) l_parent_perm='' ;; esac; \
-		if [ \"\$l_parent_uid\" = '0' ] || [ \"\$l_parent_uid\" = \"\$l_expected_uid\" ]; then \
-			l_parent_trusted=1; \
-			if [ \"\$l_parent_perm\" = '' ]; then \
-				l_parent_trusted=0; \
-			else \
-				l_group_write=\$(printf '%s' \"\$l_parent_perm\" | cut -c 6); \
-				l_other_write=\$(printf '%s' \"\$l_parent_perm\" | cut -c 9); \
-				l_sticky_char=\$(printf '%s' \"\$l_parent_perm\" | cut -c 10); \
-				case \"\$l_group_write\$l_other_write\" in \
-				*w*) case \"\$l_sticky_char\" in t|T) ;; *) l_parent_trusted=0 ;; esac ;; \
-				esac; \
-			fi; \
-		fi; \
-		if [ \"\$l_parent_trusted\" = '1' ]; then l_use_stage_dir=0; fi; \
-	fi; \
-fi"
-	l_remote_stage_setup_cmd="if [ \"\$l_use_stage_dir\" = '1' ]; then \
-	$l_remote_stage_dependency_check_cmd; \
-	umask 077; \
-	l_stage_dir=\$(mktemp -d \"\$l_parent/.zxfer-backup-read.XXXXXX\" 2>/dev/null) || exit $l_remote_unknown_status; \
-	l_snapshot_path=\"\$l_stage_dir/backup.snapshot\"; \
-	if ! ln \"\$l_target_path\" \"\$l_snapshot_path\" 2>/dev/null; then if [ ! -f \"\$l_target_path\" ] || [ -h \"\$l_target_path\" ]; then rmdir \"\$l_stage_dir\" 2>/dev/null || true; exit $l_remote_missing_status; fi; rmdir \"\$l_stage_dir\" 2>/dev/null || true; exit $l_remote_unknown_status; fi; \
-	l_snapshot_ls_path=\$l_snapshot_path; \
-	case \"\$l_snapshot_ls_path\" in -*) l_snapshot_ls_path=./\$l_snapshot_ls_path ;; esac; \
-else \
-	l_snapshot_path=\$l_target_path; \
-	l_snapshot_ls_path=\$l_target_ls_path; \
-fi"
-	l_remote_read_cleanup_cmd="if [ \"\$l_use_stage_dir\" = '1' ]; then rm -f \"\$l_snapshot_path\"; rmdir \"\$l_stage_dir\" 2>/dev/null || true; fi"
-	l_remote_validation_cmd="l_uid=''; \
-if command -v stat >/dev/null 2>&1; then l_uid=\$(stat -c '%u' \"\$l_snapshot_path\" 2>/dev/null); if [ \"\$l_uid\" = '' ] || printf '%s' \"\$l_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_uid=\$(stat -f '%u' \"\$l_snapshot_path\" 2>/dev/null); fi; fi; \
-if [ \"\$l_uid\" = '' ] || printf '%s' \"\$l_uid\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_ls_line=\$(ls -ldn \"\$l_snapshot_ls_path\" 2>/dev/null) || l_ls_line=''; if [ \"\$l_ls_line\" != '' ]; then l_uid=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$3}'); fi; fi; \
-if [ \"\$l_uid\" = '' ]; then $l_remote_read_cleanup_cmd; exit $l_remote_unknown_status; fi; \
-if [ \"\$l_uid\" != '0' ] && [ \"\$l_uid\" != \"\$l_expected_uid\" ]; then $l_remote_read_cleanup_cmd; exit $l_remote_insecure_owner_status; fi; \
-l_mode=''; \
-if command -v stat >/dev/null 2>&1; then l_mode=\$(stat -c '%a' \"\$l_snapshot_path\" 2>/dev/null); if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then l_mode=\$(stat -f '%OLp' \"\$l_snapshot_path\" 2>/dev/null); fi; fi; \
-if [ \"\$l_mode\" = '' ] || printf '%s' \"\$l_mode\" | grep -q '[^0-9]' >/dev/null 2>&1; then if [ \"\$l_ls_line\" = '' ]; then l_ls_line=\$(ls -ldn \"\$l_snapshot_ls_path\" 2>/dev/null) || l_ls_line=''; fi; if [ \"\$l_ls_line\" != '' ]; then l_perm=\$(printf '%s\n' \"\$l_ls_line\" | $l_remote_awk_cmd '{print \$1}'); if [ \"\$l_perm\" = '-rw-------' ]; then l_mode='600'; fi; fi; fi; \
-	if [ \"\$l_mode\" = '' ]; then $l_remote_read_cleanup_cmd; exit $l_remote_unknown_status; fi; \
-if [ \"\$l_mode\" != '600' ]; then $l_remote_read_cleanup_cmd; exit $l_remote_insecure_mode_status; fi"
-	l_remote_payload_cmd="$l_remote_cat_helper_cmd \"\$l_snapshot_path\"; \
-l_read_status=\$?; \
-$l_remote_read_cleanup_cmd; \
-exit \$l_read_status"
-	l_remote_secure_cat_cmd="$l_remote_dependency_check_cmd; $l_remote_symlink_guard_cmd; if [ ! -f '$l_path_single' ] || [ -h '$l_path_single' ]; then exit $l_remote_missing_status; fi; $l_remote_path_setup_cmd; $l_remote_parent_trust_cmd; $l_remote_stage_setup_cmd; $l_remote_validation_cmd; $l_remote_payload_cmd"
-	l_remote_secure_cat_cmd=$(zxfer_wrap_remote_backup_helper_with_secure_path "$l_remote_secure_cat_cmd")
-	l_remote_secure_cat_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_secure_cat_cmd")
-	if zxfer_capture_remote_probe_output "$l_host" "$l_remote_secure_cat_shell_cmd" "$l_profile_side"; then
-		l_remote_status=0
-	else
-		l_remote_status=$?
-	fi
-	if [ "${g_zxfer_remote_probe_capture_failed:-0}" -eq 1 ]; then
-		return "$l_remote_capture_status"
-	fi
-	if [ $l_remote_status -eq $l_remote_insecure_owner_status ]; then
-		zxfer_throw_error "Refusing to use backup metadata $l_path on $l_host because it is not owned by root or the ssh user."
-	fi
-	if [ $l_remote_status -eq $l_remote_insecure_mode_status ]; then
-		zxfer_throw_error "Refusing to use backup metadata $l_path on $l_host because its permissions are not 0600."
-	fi
-	if [ $l_remote_status -eq $l_remote_unknown_status ]; then
-		zxfer_throw_error "Cannot determine ownership or permissions for backup metadata $l_path on $l_host."
-	fi
-	if [ $l_remote_status -eq $l_remote_missing_status ]; then
-		return 4
-	fi
-	if [ $l_remote_status -eq $l_remote_dependency_status ]; then
-		l_dependency_path=$(zxfer_get_remote_backup_helper_dependency_path)
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		g_zxfer_failure_class=dependency
-		zxfer_throw_error "Required remote backup-metadata helper dependency not found on host $l_host in secure PATH ($l_dependency_path). Review prior stderr for the missing tool name."
-	fi
-	if [ $l_remote_status -eq $l_remote_symlink_status ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		return 1
-	fi
-	if [ $l_remote_status -ne 0 ]; then
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-			return "$l_remote_transport_status"
-		fi
-		return 5
-	fi
-	g_zxfer_backup_file_read_result=${g_zxfer_remote_probe_stdout:-}
-	printf '%s' "${g_zxfer_remote_probe_stdout:-}"
-	return 0
-}
-
-# Purpose: Handle backup metadata metadata extract properties for dataset pair
-# for the backup/restore flow.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when backup capture, lookup, or publish logic needs one shared helper.
+# Purpose: Check one metadata file's contents and print the properties it
+# records for a source/destination pair.
+# Usage: zxfer_backup_metadata_extract_properties_for_dataset_pair CONTENTS
+# SOURCE DESTINATION; both datasets must map to the same path relative to
+# #source_root and #destination_root. Returns 0 with the properties, 1 when
+# the pair does not resolve, 8 when it resolves but has no row, 2 for
+# duplicate rows, 3 when a root marker is missing or any row is malformed, 6
+# unless the header is the first line and appears once, 7 unless
+# #format_version:2 appears once before any row.
 zxfer_backup_metadata_extract_properties_for_dataset_pair() {
-	l_backup_contents=$1
-	l_expected_source=$2
-	l_expected_destination=$3
-
 	# shellcheck disable=SC2016
-	printf '%s\n' "$l_backup_contents" | "${g_cmd_awk:-awk}" \
-		-v expected_source="$l_expected_source" \
-		-v expected_destination="$l_expected_destination" '
+	printf '%s\n' "$1" | "${g_cmd_awk:-awk}" \
+		-v expected_header="$ZXFER_BACKUP_METADATA_HEADER_LINE" \
+		-v expected_format_version="$ZXFER_BACKUP_METADATA_FORMAT_VERSION" \
+		-v expected_source="$2" \
+		-v expected_destination="$3" \
+		"$ZXFER_BACKUP_METADATA_PROPERTIES_AWK"'
 function relative_path(root, dataset, prefix) {
 	if (root == "" || dataset == "")
 		return ""
@@ -1775,18 +529,25 @@ function relative_path(root, dataset, prefix) {
 		return substr(dataset, length(prefix) + 1)
 	return "__ZXFER_NO_MATCH__"
 }
-function validate_properties(properties, item_count, i, field_count) {
-	if (properties == "")
-		return 0
-	item_count = split(properties, prop_items, ",")
-	for (i = 1; i <= item_count; i++) {
-		if (prop_items[i] == "")
-			return 0
-		field_count = split(prop_items[i], prop_fields, "=")
-		if (field_count < 2 || prop_fields[1] == "" || prop_fields[field_count] == "")
-			return 0
+# An "exit" in a rule still runs END, which reports format_status first.
+NR == 1 {
+	if ($0 != expected_header) {
+		format_status = 6
+		exit
 	}
-	return 1
+	next
+}
+$0 == expected_header {
+	format_status = 6
+	exit
+}
+index($0, "#format_version:") == 1 {
+	if (format_seen || substr($0, length("#format_version:") + 1) != expected_format_version) {
+		format_status = 7
+		exit
+	}
+	format_seen = 1
+	next
 }
 {
 	if (index($0, "#source_root:") == 1) {
@@ -1801,6 +562,11 @@ function validate_properties(properties, item_count, i, field_count) {
 	}
 	if ($0 == "" || substr($0, 1, 1) == "#")
 		next
+	# A row before #format_version reads as a file without the header.
+	if (!format_seen) {
+		format_status = 6
+		exit
+	}
 
 	tab = index($0, "\t")
 	if (tab <= 0) {
@@ -1818,6 +584,10 @@ function validate_properties(properties, item_count, i, field_count) {
 	row_count[row_key]++
 }
 END {
+	if (format_status)
+		exit format_status
+	if (!format_seen)
+		exit 7
 	if (source_root_count != 1 || destination_root_count != 1 || source_root == "" || destination_root == "")
 		exit 3
 	expected_source_key = relative_path(source_root, expected_source)
@@ -1834,446 +604,638 @@ END {
 		exit 0
 	}
 	if (row_count[expected_source_key] == 0)
-		exit 1
+		exit 8
 	exit 2
 }'
 }
 
-# Purpose: Check whether the backup metadata matches source.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when later helpers need a boolean answer about the backup metadata.
-zxfer_backup_metadata_matches_source() {
-	l_backup_contents=$1
-	l_expected_source=$2
-	l_expected_destination=$3
-
-	zxfer_backup_metadata_extract_properties_for_dataset_pair "$l_backup_contents" "$l_expected_source" "$l_expected_destination" >/dev/null
-}
-
-# Purpose: Return the expected backup destination for source in the form
-# expected by later helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-zxfer_get_expected_backup_destination_for_source() {
-	l_source=$1
-
-	zxfer_get_destination_dataset_for_source_dataset "$l_source"
-}
-
-# Purpose: Try to resolve or create the backup restore candidate without
-# treating every miss as fatal.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when zxfer has an optional exact candidate that still needs one checked
-# helper.
-zxfer_try_backup_restore_candidate() {
-	l_candidate=$1
-	l_expected_source=$2
-	l_expected_destination=$3
-	l_host=${4:-}
-	l_profile_side=${5:-}
-	l_missing_status=4
-	l_remote_transport_status=6
-	l_transport_failure_status=8
-	l_remote_capture_status=7
-	l_capture_failure_status=9
-	l_local_staging_status=10
-
-	if [ "$l_host" = "" ]; then
-		if zxfer_read_local_backup_file "$l_candidate" >/dev/null; then
-			l_read_status=0
-			l_backup_contents=$g_zxfer_backup_file_read_result
-		else
-			l_read_status=$?
-			if [ "$l_read_status" -eq "$l_missing_status" ]; then
-				return 1
-			fi
-			if [ "${g_zxfer_backup_local_read_failure_result:-}" = "staging" ]; then
-				return "$l_local_staging_status"
-			fi
-			return 5
-		fi
-	else
-		if zxfer_read_remote_backup_file "$l_host" "$l_candidate" "$l_profile_side" >/dev/null; then
-			l_read_status=0
-			l_backup_contents=$g_zxfer_backup_file_read_result
-		else
-			l_read_status=$?
-			if [ "$l_read_status" -eq "$l_missing_status" ]; then
-				return 1
-			fi
-			if [ "$l_read_status" -eq "$l_remote_transport_status" ]; then
-				return "$l_transport_failure_status"
-			fi
-			if [ "$l_read_status" -eq "$l_remote_capture_status" ]; then
-				return "$l_capture_failure_status"
-			fi
-			return 5
-		fi
-	fi
-
-	if zxfer_validate_backup_metadata_format "$l_backup_contents"; then
-		l_format_status=0
-	else
-		l_format_status=$?
-	fi
-	case $l_format_status in
-	0) ;;
-	1)
-		return 6
-		;;
-	2)
-		return 7
-		;;
-	*)
-		return 5
-		;;
-	esac
-
-	if zxfer_backup_metadata_matches_source "$l_backup_contents" "$l_expected_source" "$l_expected_destination"; then
-		l_match_status=0
-	else
-		l_match_status=$?
-	fi
-	case $l_match_status in
-	0) ;;
-	1)
-		return 3
-		;;
-	2)
-		return 2
-		;;
-	3)
-		return 4
-		;;
-	*)
-		return 5
-		;;
-	esac
-
-	g_restored_backup_file_contents=$l_backup_contents
-	return 0
-}
-
-# Purpose: Try the current exact backup metadata path and then the retired
-# cksum-keyed path when the current path is absent.
-# Usage: Called by restore lookup helpers that need to keep existing v2
-# metadata readable while new writes use lossless identity filenames.
-zxfer_try_backup_restore_candidate_set() {
-	l_candidate_dir=$1
-	l_filename_source=$2
-	l_filename_destination=$3
-	l_expected_source=$4
-	l_expected_destination=$5
-	l_host=${6:-}
-	l_profile_side=${7:-}
-	g_zxfer_backup_restore_candidate_path_result=""
-
-	l_current_backup_file_name=$(zxfer_get_backup_metadata_filename "$l_filename_source" "$l_filename_destination") ||
-		return 11
-	l_current_candidate=$l_candidate_dir/$l_current_backup_file_name
-	g_zxfer_backup_restore_candidate_path_result=$l_current_candidate
-	if zxfer_try_backup_restore_candidate "$l_current_candidate" "$l_expected_source" "$l_expected_destination" "$l_host" "$l_profile_side"; then
-		return 0
-	else
-		l_current_status=$?
-	fi
-	if [ "$l_current_status" -ne 1 ]; then
-		return "$l_current_status"
-	fi
-
-	l_legacy_backup_file_name=$(zxfer_get_legacy_backup_metadata_filename "$l_filename_source" "$l_filename_destination") ||
-		return 1
-	if [ "$l_legacy_backup_file_name" = "$l_current_backup_file_name" ]; then
-		return 1
-	fi
-	l_legacy_candidate=$l_candidate_dir/$l_legacy_backup_file_name
-	g_zxfer_backup_restore_candidate_path_result=$l_legacy_candidate
-	if zxfer_try_backup_restore_candidate "$l_legacy_candidate" "$l_expected_source" "$l_expected_destination" "$l_host" "$l_profile_side"; then
-		return 0
-	else
-		l_legacy_status=$?
-	fi
-	if [ "$l_legacy_status" -eq 1 ]; then
-		g_zxfer_backup_restore_candidate_path_result=$l_current_candidate
-	fi
-	return "$l_legacy_status"
-}
-
-# Purpose: Return the backup properties in the form expected by later helpers.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when sibling helpers need the same lookup without duplicating module
-# logic.
-#
-# Gets the backup properties from a previous backup of those properties
-# This takes $g_initial_source. Secure backup metadata is keyed by the exact
-# current source/destination root pair under ZXFER_BACKUP_DIR; recursive child
-# restores are resolved by relative rows inside that one v2 file.
-zxfer_get_backup_properties() {
-	zxfer_set_failure_stage "backup metadata read"
-	zxfer_refresh_backup_storage_root
-
-	l_expected_root_destination=$(zxfer_get_expected_backup_destination_for_source "$g_initial_source")
-	l_dataset_secure_dir=$(zxfer_get_backup_storage_dir_for_dataset_tree "$g_initial_source")
-	if zxfer_try_backup_restore_candidate_set "$l_dataset_secure_dir" "$g_initial_source" "$g_destination" "$g_initial_source" "$l_expected_root_destination" "$g_option_O_origin_host" source; then
-		l_backup_match_status=0
-	else
-		l_backup_match_status=$?
-	fi
-	l_dataset_backup_file=$g_zxfer_backup_restore_candidate_path_result
-	case $l_backup_match_status in
-	0) ;;
-	11)
-		zxfer_throw_error "Failed to derive backup metadata filename for source dataset [$g_initial_source]."
-		;;
-	1)
-		zxfer_throw_error_with_usage "Cannot find backup property file. Ensure that it
-exists under the source-dataset-relative tree inside ZXFER_BACKUP_DIR."
-		;;
-	2)
-		zxfer_throw_error_with_usage "Backup property file $l_dataset_backup_file contains multiple relative rows for source dataset $g_initial_source. Remove the ambiguous rows or restore from a specific exact backup path."
-		;;
-	3)
-		zxfer_throw_error_with_usage "Backup property file $l_dataset_backup_file does not contain a current-format relative row for source dataset $g_initial_source."
-		;;
-	4)
-		zxfer_throw_error_with_usage "Backup property file $l_dataset_backup_file is malformed. Expected current-format relative-path and properties rows."
-		;;
-	6)
-		zxfer_throw_error_with_usage "Backup property file $l_dataset_backup_file does not start with the required zxfer backup metadata header."
-		;;
-	7)
-		zxfer_throw_error_with_usage "Backup property file $l_dataset_backup_file does not declare supported zxfer backup metadata format version #format_version:$ZXFER_BACKUP_METADATA_FORMAT_VERSION."
-		;;
-	8)
-		zxfer_throw_error "Failed to contact source host $g_option_O_origin_host while reading backup property file $l_dataset_backup_file. Review prior stderr for the transport or authentication error."
-		;;
-	9)
-		if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
-			zxfer_emit_remote_probe_failure_message >&2
-		fi
-		zxfer_throw_error "Failed to reload local remote helper capture while reading backup property file $l_dataset_backup_file on host $g_option_O_origin_host."
-		;;
-	5)
-		zxfer_throw_error "Failed to read backup property file $l_dataset_backup_file."
-		;;
-	10)
-		zxfer_throw_error "Failed to stage local backup property file $l_dataset_backup_file for secure read."
-		;;
-	esac
-
-	# g_restored_backup_file_contents now holds v2 metadata with
-	# relative-path/property rows under source_root and destination_root.
-}
-
-# Purpose: Write the backup metadata contents to store in the normalized form
-# later zxfer steps expect.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when the module needs a stable staged file or emitted stream for
-# downstream use.
-zxfer_write_backup_metadata_contents_to_store() {
-	l_backup_file_dir=$1
-	l_backup_file_path=$2
-	l_rendered_backup_contents=$3
+# Purpose: Validate or create the -k backup root before any replication work,
+# so an unsafe path fails before ZFS operations.
+# Usage: zxfer_check_backup_storage_dir_if_needed, at the start of each pass;
+# under -n it only prints the commands. Returns a renderer's failure status.
+zxfer_check_backup_storage_dir_if_needed() {
+	[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] || return 0
 
 	if [ "$g_option_T_target_host" = "" ]; then
-		zxfer_ensure_local_backup_dir "$g_backup_storage_root"
-		zxfer_ensure_local_backup_dir "$l_backup_file_dir"
-		zxfer_require_backup_write_target_path "$l_backup_file_path"
-		if ! zxfer_write_local_backup_file_atomically "$l_backup_file_path" "$l_rendered_backup_contents"; then
-			if [ "${g_zxfer_backup_local_write_failure_result:-}" = "staging" ]; then
-				zxfer_throw_error "Failed to stage local backup file $l_backup_file_path for atomic write."
-			fi
-			if [ "${g_zxfer_backup_local_write_failure_result:-}" = "rollback" ]; then
-				zxfer_throw_backup_write_rollback_error
-			fi
-			zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
-		fi
-		return 0
-	fi
-
-	zxfer_ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host" destination
-	zxfer_ensure_remote_backup_dir "$l_backup_file_dir" "$g_option_T_target_host" destination
-	if ! l_remote_write_helper_safe=$(zxfer_resolve_remote_cli_command_safe "$g_option_T_target_host" "cat" "cat" destination); then
-		g_zxfer_failure_class=dependency
-		zxfer_throw_error "$l_remote_write_helper_safe"
-	fi
-	l_remote_dependency_status=99
-	l_remote_write_failure_status=92
-	l_dependency_path=$(zxfer_get_remote_backup_helper_dependency_path)
-	l_remote_write_cmd=$(zxfer_build_remote_backup_write_cmd "$l_backup_file_dir" "$l_backup_file_path" "$g_option_T_target_host" "$l_remote_write_helper_safe" "$l_remote_dependency_status" "$l_remote_write_failure_status")
-	l_remote_write_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_write_cmd")
-	l_remote_write_payload=$(printf '%s\n' "$l_rendered_backup_contents")
-	if zxfer_run_remote_backup_helper_with_payload "$g_option_T_target_host" "$l_remote_write_shell_cmd" "$l_remote_write_payload" destination; then
-		l_remote_write_status=0
-	else
-		l_remote_write_status=$?
-	fi
-	zxfer_throw_remote_backup_write_status "$l_remote_write_status" \
-		"$l_remote_dependency_status" "$l_remote_write_failure_status" "" \
-		"$g_option_T_target_host" "writing backup metadata $l_backup_file_path" \
-		"$l_dependency_path"
-}
-
-# Purpose: Write the backup metadata pair contents to store in the normalized
-# form later zxfer steps expect.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when the module needs a stable staged file or emitted stream for
-# downstream use.
-zxfer_write_backup_metadata_pair_contents_to_store() {
-	l_primary_backup_file_dir=$1
-	l_primary_backup_file_path=$2
-	l_primary_rendered_backup_contents=$3
-	l_forwarded_backup_file_dir=$4
-	l_forwarded_backup_file_path=$5
-	l_forwarded_backup_contents=$6
-
-	if [ "$g_option_T_target_host" = "" ]; then
-		zxfer_ensure_local_backup_dir "$g_backup_storage_root"
-		zxfer_ensure_local_backup_dir "$l_primary_backup_file_dir"
-		zxfer_ensure_local_backup_dir "$l_forwarded_backup_file_dir"
-		zxfer_require_backup_write_target_path "$l_primary_backup_file_path"
-		zxfer_require_backup_write_target_path "$l_forwarded_backup_file_path"
-		zxfer_write_local_backup_file_pair_atomically "$l_primary_backup_file_path" "$l_primary_rendered_backup_contents" "$l_forwarded_backup_file_path" "$l_forwarded_backup_contents"
-		l_local_pair_write_status=$?
-		if [ "$l_local_pair_write_status" -eq 0 ]; then
+		if [ "$g_option_n_dryrun" -eq 1 ]; then
+			zxfer_render_shell_command_from_argv mkdir -p "$g_backup_storage_root"
+			l_check_mkdir=$g_zxfer_shell_command_result
+			zxfer_render_shell_command_from_argv chmod 700 "$g_backup_storage_root"
+			zxfer_echov "Dry run: umask 077; $l_check_mkdir; $g_zxfer_shell_command_result"
 			return 0
 		fi
-		if [ "$l_local_pair_write_status" -eq 2 ] ||
-			[ "${g_zxfer_backup_local_write_failure_result:-}" = "rollback" ]; then
-			zxfer_throw_backup_write_rollback_error
-		elif [ "${g_zxfer_backup_local_write_failure_result:-}" = "staging" ]; then
-			zxfer_throw_error "Failed to stage local backup file pair for atomic write."
-		else
-			zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
-		fi
+		zxfer_ensure_local_backup_dir "$g_backup_storage_root"
 		return 0
 	fi
 
-	zxfer_ensure_remote_backup_dir "$g_backup_storage_root" "$g_option_T_target_host" destination
-	zxfer_ensure_remote_backup_dir "$l_primary_backup_file_dir" "$g_option_T_target_host" destination
-	zxfer_ensure_remote_backup_dir "$l_forwarded_backup_file_dir" "$g_option_T_target_host" destination
-	l_remote_dependency_status=99
-	l_remote_write_failure_status=92
-	l_remote_rollback_failure_status=98
-	l_dependency_path=$(zxfer_get_remote_backup_helper_dependency_path)
-	l_remote_pair_write_cmd=$(zxfer_build_remote_backup_pair_write_cmd "$l_primary_backup_file_dir" "$l_primary_backup_file_path" "$l_forwarded_backup_file_dir" "$l_forwarded_backup_file_path" "$g_option_T_target_host" "$l_remote_dependency_status" "$l_remote_write_failure_status")
-	l_remote_pair_write_shell_cmd=$(zxfer_build_remote_sh_c_command "$l_remote_pair_write_cmd")
-	l_pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
-	l_remote_pair_payload=$(printf '%s\n%s\n%s\n' "$l_primary_rendered_backup_contents" "$l_pair_split_line" "$l_forwarded_backup_contents")
-	if zxfer_run_remote_backup_helper_with_payload "$g_option_T_target_host" "$l_remote_pair_write_shell_cmd" "$l_remote_pair_payload" destination; then
-		l_remote_write_status=0
-	else
-		l_remote_write_status=$?
+	l_check_script=$(zxfer_build_remote_backup_dir_prepare_cmd \
+		"$g_backup_storage_root" "$g_option_T_target_host") || return "$?"
+	if [ "$g_option_n_dryrun" -eq 1 ]; then
+		zxfer_render_remote_backup_dry_run_shell_command "$g_option_T_target_host" \
+			"$l_check_script" || return "$?"
+		zxfer_echov "Dry run: $g_zxfer_remote_backup_dry_run_shell_command_result"
+		return 0
 	fi
-	zxfer_throw_remote_backup_write_status "$l_remote_write_status" \
-		"$l_remote_dependency_status" "$l_remote_write_failure_status" \
-		"$l_remote_rollback_failure_status" "$g_option_T_target_host" \
-		"writing backup metadata $l_primary_backup_file_path" "$l_dependency_path"
+	if ! zxfer_run_remote_backup_script "$g_option_T_target_host" "$l_check_script" \
+		destination "preparing backup directory $g_backup_storage_root" \
+		backup-directory 92; then
+		zxfer_emit_remote_probe_failure_message >&2
+		zxfer_throw_error "Error preparing backup directory on $g_option_T_target_host."
+	fi
 }
 
-# Purpose: Render a remote backup write command as the ssh pipeline segment used
-# by dry-run output.
-# Usage: Called by backup-metadata dry-run rendering for single-file and pair
-# remote writes so wrapped host specs get the same `sh -c` handling.
-zxfer_render_remote_backup_dry_run_shell_command() {
-	l_host=$1
-	l_remote_backup_cmd=$2
-
-	g_zxfer_remote_backup_dry_run_shell_command_result=""
-	zxfer_publish_prepared_ssh_shell_command_for_host_or_throw "$l_host" "$l_remote_backup_cmd" ||
-		return "$?"
-	g_zxfer_remote_backup_dry_run_shell_command_result=$g_zxfer_prepared_ssh_shell_command_result
-	return 0
-}
-
-# Purpose: Write the backup properties in the normalized form later zxfer steps
-# expect.
-# Usage: Called during backup-metadata capture, readback, and atomic publish
-# flows when the module needs a stable staged file or emitted stream for
-# downstream use.
-#
-# Writes the backup properties to a file in the source-dataset-relative secure
-# backup tree under ZXFER_BACKUP_DIR. That keeps -k and -e keyed from the same
-# stable identifier set even when source and destination mountpoints differ.
+# Purpose: Publish the buffered -k rows as the exact-pair metadata file plus
+# the forwarded provenance alias, locally or on the -T host.
+# Usage: zxfer_write_backup_properties, once after a post-seed property pass
+# and once at run end. A dry run buffers no rows, so it only says so.
 zxfer_write_backup_properties() {
 	zxfer_set_failure_stage "backup metadata write"
 
-	if [ "$g_backup_file_contents" = "" ]; then
+	if [ -z "${g_backup_file_contents:-}" ]; then
 		zxfer_echov "No property data collected; skipping backup write."
-		return
+		return 0
 	fi
-
-	# Validate-once boundary: appends buffer rows without per-row awk passes,
-	# so every buffered row is format-checked here and duplicate keys collapse
-	# newest-row-wins before anything is rendered or published. The buffer is
-	# replaced by its canonical equivalent so later flushes and deferred-row
-	# lookups start from the compacted list.
-	zxfer_validate_backup_metadata_record_list "$g_backup_file_contents" >/dev/null
-	g_backup_file_contents=$g_zxfer_backup_metadata_record_list_result
-
-	zxfer_refresh_backup_storage_root
-	l_backup_file_name=$(zxfer_get_backup_metadata_filename "$g_initial_source" "$g_destination")
-	l_backup_file_dir=$(zxfer_get_backup_storage_dir_for_dataset_tree "$g_initial_source")
-	l_backup_file_path=$l_backup_file_dir/$l_backup_file_name
-	if ! l_backup_file_parent=$(zxfer_get_path_parent_dir "$l_backup_file_path"); then
-		zxfer_throw_error "Failed to derive backup metadata directory for $l_backup_file_path."
+	# Validate-once boundary: duplicate keys collapse newest-row-wins and any
+	# malformed row fails before either file is touched.
+	if ! l_write_records=$(zxfer_validate_backup_metadata_record_list "$g_backup_file_contents"); then
+		zxfer_throw_error "Failed to validate buffered backup metadata records for chained backup provenance."
 	fi
-	zxfer_echov "Writing backup info to secure path $l_backup_file_path (dataset $g_initial_source)"
+	g_backup_file_contents=$l_write_records
 
-	# Construct the backup file contents without mutating the owner scratch state.
-	zxfer_render_backup_metadata_contents >/dev/null
-	l_rendered_backup_contents=$g_zxfer_rendered_backup_metadata_contents
-	l_has_forwarded_backup_alias=0
-	l_forwarded_backup_root=$(zxfer_get_expected_backup_destination_for_source "$g_initial_source")
-	l_forwarded_backup_file_name=$(zxfer_get_forwarded_backup_metadata_filename "$l_forwarded_backup_root")
-	l_forwarded_backup_file_dir=$(zxfer_get_backup_storage_dir_for_dataset_tree "$l_forwarded_backup_root")
-	l_forwarded_backup_file_path=$l_forwarded_backup_file_dir/$l_forwarded_backup_file_name
-	if ! l_forwarded_backup_file_parent=$(zxfer_get_path_parent_dir "$l_forwarded_backup_file_path"); then
-		zxfer_throw_error "Failed to derive forwarded backup metadata directory for $l_forwarded_backup_file_path."
-	fi
-	if [ "$l_forwarded_backup_file_path" != "$l_backup_file_path" ]; then
-		l_has_forwarded_backup_alias=1
-		zxfer_render_forwarded_backup_metadata_contents >/dev/null
-		l_forwarded_backup_contents=$g_zxfer_rendered_backup_metadata_contents
-	fi
+	zxfer_map_destination_dataset "$g_initial_source"
+	l_write_destination_root=$g_zxfer_destination_dataset_result
+	l_write_primary_name=$(zxfer_get_backup_metadata_filename "$g_initial_source" "$g_destination") ||
+		zxfer_throw_error "Failed to derive backup metadata filename for source dataset [$g_initial_source]."
+	l_write_primary_path=$g_backup_storage_root/$g_initial_source/$l_write_primary_name
+	l_write_forwarded_name=$(zxfer_get_backup_metadata_filename "$l_write_destination_root" "$l_write_destination_root") ||
+		zxfer_throw_error "Failed to derive forwarded backup metadata filename for destination dataset [$l_write_destination_root]."
+	l_write_forwarded_path=$g_backup_storage_root/$l_write_destination_root/$l_write_forwarded_name
+	zxfer_echov "Writing backup info to secure path $l_write_primary_path (dataset $g_initial_source)"
+	l_write_date=$(date)
+	l_write_contents=$(printf '%s\n' "$ZXFER_BACKUP_METADATA_HEADER_LINE" \
+		"#format_version:$ZXFER_BACKUP_METADATA_FORMAT_VERSION" \
+		"#version:$g_zxfer_version" \
+		"#R options:$g_option_R_recursive" \
+		"#N options:$g_option_N_nonrecursive" \
+		"#source_root:$g_initial_source" \
+		"#destination_root:$l_write_destination_root" \
+		"#backup_date:$l_write_date" \
+		"$g_backup_file_contents")
 
-	# Execute the command
-	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		if [ "$l_has_forwarded_backup_alias" -eq 1 ]; then
-			zxfer_write_backup_metadata_pair_contents_to_store "$l_backup_file_parent" "$l_backup_file_path" "$l_rendered_backup_contents" "$l_forwarded_backup_file_parent" "$l_forwarded_backup_file_path" "$l_forwarded_backup_contents"
-		else
-			zxfer_write_backup_metadata_contents_to_store "$l_backup_file_parent" "$l_backup_file_path" "$l_rendered_backup_contents"
-		fi
+	l_write_status=0
+	if [ "$g_option_T_target_host" = "" ]; then
+		zxfer_ensure_local_backup_dir "${l_write_primary_path%/*}"
+		zxfer_ensure_local_backup_dir "${l_write_forwarded_path%/*}"
+		l_write_script=$(zxfer_build_backup_pair_write_cmd \
+			"$l_write_primary_path" "$l_write_forwarded_path" \
+			"$l_write_destination_root" cat) || return "$?"
+		# /bin/sh, as for job shells, so the secure PATH need not list sh.
+		/bin/sh -c "$l_write_script" <<EOF || l_write_status=$?
+$l_write_contents
+EOF
 	else
-		l_backup_contents_cmd=$(zxfer_render_command_for_report "" printf '%s' "$l_rendered_backup_contents")
-		l_backup_stage_template_safe=$(zxfer_quote_token_for_report "$l_backup_file_parent/.zxfer-backup-write.XXXXXX")
-		l_backup_file_path_safe=$(zxfer_quote_token_for_report "$l_backup_file_path")
-		if [ "$l_has_forwarded_backup_alias" -eq 1 ]; then
-			if [ "$g_option_T_target_host" = "" ]; then
-				l_forwarded_backup_contents_cmd=$(zxfer_render_command_for_report "" printf '%s' "$l_forwarded_backup_contents")
-				l_forwarded_backup_stage_template_safe=$(zxfer_quote_token_for_report "$l_forwarded_backup_file_parent/.zxfer-backup-write.XXXXXX")
-				l_primary_backup_rollback_template_safe=$(zxfer_quote_token_for_report "$l_backup_file_parent/.zxfer-backup-rollback.XXXXXX")
-				l_forwarded_backup_rollback_template_safe=$(zxfer_quote_token_for_report "$l_forwarded_backup_file_parent/.zxfer-backup-rollback.XXXXXX")
-				l_forwarded_backup_file_path_safe=$(zxfer_quote_token_for_report "$l_forwarded_backup_file_path")
-				printf '%s\n' "umask 077; l_primary_stage_dir=\$(mktemp -d $l_backup_stage_template_safe) && l_forwarded_stage_dir=\$(mktemp -d $l_forwarded_backup_stage_template_safe) && $l_backup_contents_cmd > \"\$l_primary_stage_dir/backup.write\" && $l_forwarded_backup_contents_cmd > \"\$l_forwarded_stage_dir/backup.write\" && chmod 600 \"\$l_primary_stage_dir/backup.write\" \"\$l_forwarded_stage_dir/backup.write\" && if [ -e $l_forwarded_backup_file_path_safe ]; then l_forwarded_rollback=\$(mktemp $l_forwarded_backup_rollback_template_safe) && mv -f $l_forwarded_backup_file_path_safe \"\$l_forwarded_rollback\"; else l_forwarded_rollback=''; fi && if ! mv -f \"\$l_forwarded_stage_dir/backup.write\" $l_forwarded_backup_file_path_safe; then rm -f $l_forwarded_backup_file_path_safe && if [ \"\$l_forwarded_rollback\" != '' ]; then mv -f \"\$l_forwarded_rollback\" $l_forwarded_backup_file_path_safe; fi; exit 1; fi && if [ -e $l_backup_file_path_safe ]; then l_primary_rollback=\$(mktemp $l_primary_backup_rollback_template_safe) && mv -f $l_backup_file_path_safe \"\$l_primary_rollback\"; else l_primary_rollback=''; fi && if ! mv -f \"\$l_primary_stage_dir/backup.write\" $l_backup_file_path_safe; then rm -f $l_backup_file_path_safe && if [ \"\$l_primary_rollback\" != '' ]; then mv -f \"\$l_primary_rollback\" $l_backup_file_path_safe; fi; rm -f $l_forwarded_backup_file_path_safe && if [ \"\$l_forwarded_rollback\" != '' ]; then mv -f \"\$l_forwarded_rollback\" $l_forwarded_backup_file_path_safe; fi; exit 1; fi && rm -f \"\${l_forwarded_rollback:-}\" \"\${l_primary_rollback:-}\" && rmdir \"\$l_primary_stage_dir\" \"\$l_forwarded_stage_dir\""
-			else
-				l_pair_split_line=$ZXFER_BACKUP_METADATA_PAIR_SPLIT_LINE
-				l_pair_backup_contents_cmd=$(zxfer_render_command_for_report "" printf '%s\\n%s\\n%s\\n' "$l_rendered_backup_contents" "$l_pair_split_line" "$l_forwarded_backup_contents")
-				l_remote_pair_write_cmd=$(zxfer_build_remote_backup_pair_write_cmd "$l_backup_file_parent" "$l_backup_file_path" "$l_forwarded_backup_file_parent" "$l_forwarded_backup_file_path" "$g_option_T_target_host" 99)
-				zxfer_render_remote_backup_dry_run_shell_command "$g_option_T_target_host" "$l_remote_pair_write_cmd" ||
-					return "$?"
-				l_remote_pair_write_shell_cmd=$g_zxfer_remote_backup_dry_run_shell_command_result
-				printf '%s\n' "$l_pair_backup_contents_cmd | $l_remote_pair_write_shell_cmd"
-			fi
-		elif [ "$g_option_T_target_host" = "" ]; then
-			printf '%s\n' "umask 077; l_stage_dir=\$(mktemp -d $l_backup_stage_template_safe) && $l_backup_contents_cmd > \"\$l_stage_dir/backup.write\" && chmod 600 \"\$l_stage_dir/backup.write\" && mv -f \"\$l_stage_dir/backup.write\" $l_backup_file_path_safe && rmdir \"\$l_stage_dir\""
-		else
-			l_remote_write_cmd=$(zxfer_build_remote_backup_write_cmd "$l_backup_file_parent" "$l_backup_file_path" "$g_option_T_target_host" "cat" 99)
-			zxfer_render_remote_backup_dry_run_shell_command "$g_option_T_target_host" "$l_remote_write_cmd" ||
-				return "$?"
-			l_remote_write_shell_cmd=$g_zxfer_remote_backup_dry_run_shell_command_result
-			printf '%s\n' "$l_backup_contents_cmd | $l_remote_write_shell_cmd"
-		fi
+		zxfer_resolve_cli_command_safe "$g_option_T_target_host" cat cat destination ||
+			zxfer_throw_dependency_error "$g_zxfer_resolved_cli_command_result"
+		l_write_remote_cat=$g_zxfer_resolved_cli_command_result
+		# One program prepares both directories and then publishes the pair;
+		# the file contents travel on stdin.
+		l_write_script=$(
+			for l_write_dir in "${l_write_primary_path%/*}" "${l_write_forwarded_path%/*}"; do
+				zxfer_build_remote_backup_dir_prepare_cmd "$l_write_dir" \
+					"$g_option_T_target_host" mktemp mv rm || exit
+			done
+			zxfer_build_backup_pair_write_cmd "$l_write_primary_path" \
+				"$l_write_forwarded_path" "$l_write_destination_root" "$l_write_remote_cat"
+		) || return "$?"
+		zxfer_run_remote_backup_script "$g_option_T_target_host" "$l_write_script" destination \
+			"writing backup metadata $l_write_primary_path" backup-write '9[28]' <<EOF || l_write_status=$?
+$l_write_contents
+EOF
+		[ "$l_write_status" -eq 0 ] || zxfer_emit_remote_probe_failure_message >&2
 	fi
+	if [ "$l_write_status" -eq 98 ]; then
+		zxfer_throw_error "Error writing backup file and restoring backup metadata rollback state. Inspect the reported paths under ZXFER_BACKUP_DIR for manual recovery."
+	fi
+	[ "$l_write_status" -eq 0 ] ||
+		zxfer_throw_error "Error writing backup file. Is filesystem mounted?"
+}
+
+# Purpose: Create or validate one local backup directory.
+# Usage: Refuses symlinked components, non-directories, and owners other
+# than root or the effective uid; creates missing directories 0700 and
+# re-applies 0700 so an operator-created directory is private too.
+zxfer_ensure_local_backup_dir() {
+	l_ensure_local_backup_dir=$1
+	if l_ensure_local_backup_symlink=$(zxfer_find_symlink_path_component \
+		"$l_ensure_local_backup_dir"); then
+		if [ "$l_ensure_local_backup_symlink" = "$l_ensure_local_backup_dir" ]; then
+			zxfer_throw_error "Refusing to use backup directory $l_ensure_local_backup_dir because it is a symlink."
+		fi
+		zxfer_throw_error "Refusing to use backup directory $l_ensure_local_backup_dir because path component $l_ensure_local_backup_symlink is a symlink."
+	fi
+	if [ -L "$l_ensure_local_backup_dir" ]; then
+		zxfer_throw_error "Refusing to use backup directory $l_ensure_local_backup_dir because it is a symlink."
+	fi
+	if [ -e "$l_ensure_local_backup_dir" ] && [ ! -d "$l_ensure_local_backup_dir" ]; then
+		zxfer_throw_error "Refusing to use backup directory $l_ensure_local_backup_dir because it is not a directory."
+	fi
+	if [ ! -d "$l_ensure_local_backup_dir" ]; then
+		(umask 077 && mkdir -p "$l_ensure_local_backup_dir") ||
+			zxfer_throw_error "Error creating secure backup directory $l_ensure_local_backup_dir."
+	fi
+	if ! l_ensure_local_backup_owner_uid=$(zxfer_get_path_owner_uid \
+		"$l_ensure_local_backup_dir"); then
+		zxfer_throw_error "Cannot determine the owner of backup directory $l_ensure_local_backup_dir."
+	fi
+	if ! zxfer_backup_owner_uid_is_allowed "$l_ensure_local_backup_owner_uid"; then
+		l_ensure_local_backup_expected_owner=$(zxfer_describe_expected_backup_owner)
+		zxfer_throw_error "Refusing to use backup directory $l_ensure_local_backup_dir because it is owned by UID $l_ensure_local_backup_owner_uid instead of $l_ensure_local_backup_expected_owner."
+	fi
+	if ! chmod 700 "$l_ensure_local_backup_dir"; then
+		zxfer_throw_error "Error securing backup directory $l_ensure_local_backup_dir."
+	fi
+}
+
+# Purpose: Read one local metadata file after the security checks.
+# Usage: Prints the contents and publishes g_zxfer_backup_file_read_result.
+# Returns 1 (symlink component, message on stderr), 4 (missing), the cat
+# status on read failure, and throws when the file is not a 0600 regular
+# file owned by root or the effective uid, or when its directory could be
+# modified by other users (which would let them swap the file between the
+# check and the read).
+zxfer_read_local_backup_file() {
+	l_read_local_path=$1
+	g_zxfer_backup_file_read_result=""
+
+	zxfer_require_backup_metadata_path_without_symlinks "$l_read_local_path" || return 1
+	if [ ! -f "$l_read_local_path" ]; then
+		return 4
+	fi
+	if ! l_read_local_error=$(zxfer_check_secure_backup_file "$l_read_local_path"); then
+		zxfer_throw_error "$l_read_local_error"
+	fi
+	case $l_read_local_path in
+	?*/*) l_read_local_parent=${l_read_local_path%/*} ;;
+	*) l_read_local_parent=/ ;;
+	esac
+	zxfer_validate_temp_root_candidate "$l_read_local_parent" >/dev/null ||
+		zxfer_throw_error "Refusing to use backup metadata $l_read_local_path because its directory $l_read_local_parent is not a private directory owned by root or the current user."
+	g_zxfer_backup_file_read_result=$(cat "$l_read_local_path") || return "$?"
+	printf '%s' "$g_zxfer_backup_file_read_result"
+}
+
+# Purpose: Read one metadata file on a remote host through the rendered read
+# program.
+# Usage: zxfer_read_remote_backup_file <host> <path> [profile-side]. Same
+# result contract as the local reader: 0 with contents, 1 after a symlink
+# refusal (remote stderr forwarded), 4 when missing, 5 on other failures;
+# insecure ownership, mode, or directory throws with the documented text.
+zxfer_read_remote_backup_file() {
+	l_read_remote_host=$1
+	l_read_remote_path=$2
+	l_read_remote_profile_side=${3:-}
+	g_zxfer_backup_file_read_result=""
+
+	l_read_remote_script=$(zxfer_build_remote_backup_read_cmd "$l_read_remote_path" \
+		"$l_read_remote_host") || return "$?"
+	zxfer_run_remote_backup_script "$l_read_remote_host" "$l_read_remote_script" \
+		"$l_read_remote_profile_side" "reading backup metadata $l_read_remote_path" \
+		backup-metadata '9[1-8]'
+	l_read_remote_status=$?
+	case $l_read_remote_status in
+	0)
+		g_zxfer_backup_file_read_result=${g_zxfer_remote_probe_stdout:-}
+		printf '%s' "$g_zxfer_backup_file_read_result"
+		return 0
+		;;
+	91) zxfer_throw_error "Refusing to use backup metadata $l_read_remote_path on $l_read_remote_host because its directory is not a private directory owned by root or the ssh user." ;;
+	94) return 4 ;;
+	95) zxfer_throw_error "Refusing to use backup metadata $l_read_remote_path on $l_read_remote_host because it is not owned by root or the ssh user." ;;
+	96) zxfer_throw_error "Refusing to use backup metadata $l_read_remote_path on $l_read_remote_host because its permissions are not 0600." ;;
+	97) zxfer_throw_error "Cannot determine ownership or permissions for backup metadata $l_read_remote_path on $l_read_remote_host." ;;
+	98)
+		zxfer_emit_remote_probe_failure_message >&2
+		return 1
+		;;
+	esac
+	zxfer_emit_remote_probe_failure_message >&2
+	return 5
+}
+
+# Purpose: Run one rendered backup program on a host and translate the
+# transport-level outcomes.
+# Usage: zxfer_run_remote_backup_script HOST SCRIPT PROFILE_SIDE ACTION
+# DEPENDENCY_LABEL OWN_STATUS_GLOB. Standard input is inherited (writers feed
+# the payload through a here-document). Returns 0 or a status matching
+# OWN_STATUS_GLOB for the caller to interpret; a capture failure, a missing
+# remote helper (99), or any other failure with stderr output throws here.
+zxfer_run_remote_backup_script() {
+	l_run_remote_host=$1
+	l_run_remote_script=$2
+	l_run_remote_profile_side=$3
+	l_run_remote_action=$4
+	l_run_remote_label=$5
+	l_run_remote_own_statuses=$6
+
+	zxfer_build_remote_sh_c_command "$l_run_remote_script" >/dev/null
+	zxfer_capture_remote_probe_output "$l_run_remote_host" \
+		"$g_zxfer_remote_sh_c_command_result" "$l_run_remote_profile_side"
+	l_run_remote_status=$?
+	if [ "${g_zxfer_remote_probe_capture_failed:-0}" -eq 1 ]; then
+		zxfer_emit_remote_probe_failure_message >&2
+		zxfer_throw_error "Failed to reload local remote helper capture while $l_run_remote_action on host $l_run_remote_host."
+	fi
+	# shellcheck disable=SC2254  # the caller's status set is a glob on purpose.
+	case $l_run_remote_status in
+	0 | $l_run_remote_own_statuses)
+		return "$l_run_remote_status"
+		;;
+	99)
+		zxfer_emit_remote_probe_failure_message >&2
+		zxfer_throw_dependency_error "Required remote $l_run_remote_label helper dependency not found on host $l_run_remote_host in secure PATH ($g_zxfer_secure_path). Review prior stderr for the missing tool name."
+		;;
+	esac
+	if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
+		zxfer_emit_remote_probe_failure_message >&2
+		zxfer_throw_error "Failed to contact host $l_run_remote_host while $l_run_remote_action. Review prior stderr for the transport or authentication error."
+	fi
+	return "$l_run_remote_status"
+}
+
+# Purpose: Render the shared prelude of every remote backup program: the
+# secure PATH, the helper check zxfer_require_remote_backup_tool (exit 99)
+# run on each TOOL, and the symlink walk over GUARD_PATH (exit 92 for a
+# directory, 98 for a metadata file).
+# Usage: zxfer_build_remote_backup_script_prelude HOST GUARD_PATH
+# directory|metadata [TOOL...]; every rendered line ends a command so the
+# program stays valid after newline collapsing.
+zxfer_build_remote_backup_script_prelude() {
+	l_prelude_host=$1
+	l_prelude_guard_path=$2
+	l_prelude_guard_kind=$3
+	shift 3
+
+	case $l_prelude_guard_kind in
+	directory)
+		l_prelude_guard_status=92
+		l_prelude_guard_exact="echo 'Refusing to use symlinked zxfer backup directory.' >&2"
+		l_prelude_guard_component="echo \"Refusing to use backup directory \$l_scan_path because path component \$l_scan_candidate is a symlink.\" >&2"
+		;;
+	metadata)
+		l_prelude_guard_status=98
+		l_prelude_guard_exact="echo \"Refusing to use backup metadata \$l_scan_path because it is a symlink.\" >&2"
+		l_prelude_guard_component="echo \"Refusing to use backup metadata \$l_scan_path because path component \$l_scan_candidate is a symlink.\" >&2"
+		;;
+	*) return 1 ;;
+	esac
+	zxfer_escape_single_quotes_into_result "$g_zxfer_secure_path"
+	l_prelude_secure_path_single=$g_zxfer_escaped_single_quotes_result
+	zxfer_escape_single_quotes_into_result "$l_prelude_host"
+	l_prelude_host_single=$g_zxfer_escaped_single_quotes_result
+	zxfer_escape_single_quotes_into_result "$l_prelude_guard_path"
+	l_prelude_guard_path_single=$g_zxfer_escaped_single_quotes_result
+	l_prelude_tools=""
+	for l_prelude_tool in "$@"; do
+		zxfer_escape_single_quotes_into_result "$l_prelude_tool"
+		l_prelude_tools="$l_prelude_tools '$g_zxfer_escaped_single_quotes_result'"
+	done
+
+	while IFS= read -r l_prelude_line || [ -n "$l_prelude_line" ]; do
+		printf '%s\n' "$l_prelude_line"
+	done <<-EOF
+		PATH='$l_prelude_secure_path_single';
+		export PATH;
+
+		l_required_host='$l_prelude_host_single';
+		zxfer_require_remote_backup_tool() {
+		  l_required_tool=\$1;
+		  if command -v "\$l_required_tool" >/dev/null 2>&1; then
+		    return 0;
+		  fi;
+		  printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "\$l_required_tool" "\$l_required_host" "\$PATH" >&2;
+		  exit 99;
+		};
+	EOF
+	if [ -n "$l_prelude_tools" ]; then
+		# shellcheck disable=SC2016  # the remote shell expands $l_required_tool.
+		printf '%s\n' "for l_required_tool in$l_prelude_tools; do" \
+			'  zxfer_require_remote_backup_tool "$l_required_tool";' 'done;'
+	fi
+
+	# Walk every component; a symlink is refused unless it sits directly
+	# under / (only root can create entries there, and macOS keeps /var and
+	# /tmp as such links).
+	while IFS= read -r l_prelude_line || [ -n "$l_prelude_line" ]; do
+		printf '%s\n' "$l_prelude_line"
+	done <<-EOF
+
+		l_scan_path='$l_prelude_guard_path_single';
+		l_scan_rest=\$l_scan_path;
+		l_scan_candidate='';
+		case "\$l_scan_rest" in
+		/*) l_scan_candidate=/; l_scan_rest=\${l_scan_rest#/} ;;
+		esac;
+		while [ -n "\$l_scan_rest" ]; do
+		  l_scan_component=\${l_scan_rest%%/*};
+		  case "\$l_scan_rest" in
+		  */*) l_scan_rest=\${l_scan_rest#*/} ;;
+		  *) l_scan_rest='' ;;
+		  esac;
+		  [ -n "\$l_scan_component" ] || continue;
+		  case "\$l_scan_candidate" in
+		  '') l_scan_candidate=\$l_scan_component ;;
+		  /) l_scan_candidate=/\$l_scan_component ;;
+		  *) l_scan_candidate=\$l_scan_candidate/\$l_scan_component ;;
+		  esac;
+		  [ -L "\$l_scan_candidate" ] || continue;
+		  case "\$l_scan_candidate" in
+		  /*/*) ;;
+		  /*) continue ;;
+		  esac;
+		  if [ "\$l_scan_candidate" = "\$l_scan_path" ]; then
+		    $l_prelude_guard_exact;
+		  else
+		    $l_prelude_guard_component;
+		  fi;
+		  exit $l_prelude_guard_status;
+		done;
+	EOF
+}
+
+# Purpose: Render the remote program that creates or validates one backup
+# directory: symlink walk, not-a-directory check, mkdir -p under umask 077,
+# chmod 700, and the root-or-ssh-user owner check.
+# Usage: zxfer_build_remote_backup_dir_prepare_cmd DIR HOST [EXTRA_TOOL...];
+# the program exits 99 for a missing helper and 92 for any other refusal.
+zxfer_build_remote_backup_dir_prepare_cmd() {
+	l_prepare_dir=$1
+	l_prepare_host=$2
+	shift 2
+
+	zxfer_escape_single_quotes_into_result "$l_prepare_dir"
+	l_prepare_dir_single=$g_zxfer_escaped_single_quotes_result
+	# ls must not read a leading dash as an option.
+	l_prepare_ls_single=$l_prepare_dir_single
+	case $l_prepare_dir in
+	-*) l_prepare_ls_single=./$l_prepare_dir_single ;;
+	esac
+	zxfer_build_remote_backup_script_prelude "$l_prepare_host" "$l_prepare_dir" \
+		directory mkdir chmod id ls awk "$@" || return "$?"
+
+	while IFS= read -r l_prepare_line || [ -n "$l_prepare_line" ]; do
+		printf '%s\n' "$l_prepare_line"
+	done <<-EOF
+
+		if [ -e '$l_prepare_dir_single' ] && [ ! -d '$l_prepare_dir_single' ]; then
+		  echo 'Backup path exists but is not a directory.' >&2;
+		  exit 92;
+		fi;
+		umask 077;
+		if ! mkdir -p '$l_prepare_dir_single'; then
+		  echo 'Error creating secure backup directory.' >&2;
+		  exit 92;
+		fi;
+		if ! chmod 700 '$l_prepare_dir_single'; then
+		  echo 'Error securing backup directory.' >&2;
+		  exit 92;
+		fi;
+		l_dir_uid=\$(ls -ldn '$l_prepare_ls_single' 2>/dev/null | awk '\$3 ~ /^[0-9]+\$/ { print \$3 }');
+		if [ "\$l_dir_uid" = '' ]; then
+		  echo 'Unable to determine backup directory owner.' >&2;
+		  exit 92;
+		fi;
+		if [ "\$l_dir_uid" != 0 ] && [ "\$l_dir_uid" != "\$(id -u)" ]; then
+		  echo 'Backup directory must be owned by root or the ssh user.' >&2;
+		  exit 92;
+		fi;
+	EOF
+}
+
+# Purpose: Render the local or remote program that publishes the metadata
+# pair from stdin (the complete primary file; the forwarded copy differs only
+# in its #source_root line) into two directories already trusted and private.
+# Usage: zxfer_build_backup_pair_write_cmd PRIMARY FORWARDED ROOT CAT_COMMAND,
+# CAT_COMMAND already shell-quoted. The program exits 92 when publication
+# fails and 98 when rollback fails too. Each rename is atomic; this is
+# detected-failure rollback, not crash atomicity. Signals are deferred until
+# each rename and its marker agree: a signal after the first publish rolls
+# it back; after the second, both files stay live.
+zxfer_build_backup_pair_write_cmd() {
+	zxfer_render_shell_command_from_argv set -- "$1" "$2" "$3"
+	l_pair_render_cat=$4
+	printf '%s;\n' "$g_zxfer_shell_command_result"
+	while IFS= read -r l_pair_render_line || [ -n "$l_pair_render_line" ]; do
+		printf '%s\n' "$l_pair_render_line"
+	done <<-EOF
+		l_pair_primary=\$1;
+		l_pair_forwarded=\$2;
+		l_pair_root=\$3;
+		l_pair_stage='';
+		l_pair_forwarded_stage='';
+		l_pair_recovery='';
+		l_pair_published=0;
+		zxfer_finish_backup_pair() {
+		  l_pair_exit=\$?;
+		  trap - 0;
+		  trap '' HUP INT TERM;
+		  if [ "\$l_pair_published" -eq 1 ]; then
+		    if [ -n "\$l_pair_recovery" ]; then
+		      if ! mv -f "\$l_pair_recovery" "\$l_pair_primary"; then
+		        rm -f "\$l_pair_primary" || :;
+		        printf 'Backup metadata rollback failed; recover %s from %s.\n' "\$l_pair_primary" "\$l_pair_recovery" >&2;
+		        l_pair_recovery='';
+		        l_pair_exit=98;
+		      fi;
+		    elif ! rm -f "\$l_pair_primary"; then
+		      printf 'Backup metadata rollback failed; remove the newly published %s before retrying.\n' "\$l_pair_primary" >&2;
+		      l_pair_exit=98;
+		    fi;
+		  fi;
+		  for l_pair_cleanup in "\$l_pair_stage" "\$l_pair_forwarded_stage" "\$l_pair_recovery"; do
+		    [ -z "\$l_pair_cleanup" ] || rm -f "\$l_pair_cleanup" || { [ "\$l_pair_exit" -ne 0 ] || l_pair_exit=92; };
+		  done;
+		  exit "\$l_pair_exit";
+		};
+		trap zxfer_finish_backup_pair 0;
+		trap 'exit 129' HUP;
+		trap 'exit 130' INT;
+		trap 'exit 143' TERM;
+		umask 077;
+		for l_pair_target in "\$l_pair_primary" "\$l_pair_forwarded"; do
+		  if [ -L "\$l_pair_target" ]; then
+		    printf 'Refusing to write backup metadata %s because it is a symlink.\n' "\$l_pair_target" >&2;
+		    exit 92;
+		  fi;
+		  if [ -e "\$l_pair_target" ] && [ ! -f "\$l_pair_target" ]; then
+		    printf 'Refusing to write backup metadata %s because it is not a regular file.\n' "\$l_pair_target" >&2;
+		    exit 92;
+		  fi;
+		done;
+		l_pair_stage=\$(mktemp "\${l_pair_primary%/*}/.zxfer-backup-write.XXXXXX") || exit 92;
+		$l_pair_render_cat >"\$l_pair_stage" && chmod 600 "\$l_pair_stage" || exit 92;
+		if [ "\$l_pair_primary" = "\$l_pair_forwarded" ]; then
+		  [ ! -L "\$l_pair_primary" ] && mv -f "\$l_pair_stage" "\$l_pair_primary" || exit 92;
+		  exit 0;
+		fi;
+		l_pair_forwarded_stage=\$(mktemp "\${l_pair_forwarded%/*}/.zxfer-backup-write.XXXXXX") || exit 92;
+		ZXFER_BACKUP_FORWARD_ROOT=\$l_pair_root awk '
+		  index(\$0, "#source_root:") == 1 { \$0 = "#source_root:" ENVIRON["ZXFER_BACKUP_FORWARD_ROOT"] }
+		  { print }
+		' "\$l_pair_stage" >"\$l_pair_forwarded_stage" && chmod 600 "\$l_pair_forwarded_stage" || exit 92;
+		if [ -e "\$l_pair_primary" ]; then
+		  l_pair_recovery=\$(mktemp "\${l_pair_primary%/*}/.zxfer-backup-recovery.XXXXXX") || exit 92;
+		  $l_pair_render_cat "\$l_pair_primary" >"\$l_pair_recovery" && chmod 600 "\$l_pair_recovery" || exit 92;
+		fi;
+		l_pair_signal=0;
+		trap 'l_pair_signal=129' HUP;
+		trap 'l_pair_signal=130' INT;
+		trap 'l_pair_signal=143' TERM;
+		[ ! -L "\$l_pair_primary" ] && mv -f "\$l_pair_stage" "\$l_pair_primary" || exit 92;
+		l_pair_published=1;
+		[ "\$l_pair_signal" -eq 0 ] || exit "\$l_pair_signal";
+		[ ! -L "\$l_pair_forwarded" ] && mv -f "\$l_pair_forwarded_stage" "\$l_pair_forwarded" || exit 92;
+		l_pair_published=0;
+		[ "\$l_pair_signal" -eq 0 ] || exit "\$l_pair_signal";
+	EOF
+}
+
+# Purpose: Render the remote program that validates and prints one metadata
+# file: symlink walk (98), missing (94), directory writable by others (91),
+# owner (95), mode (96), unknown metadata (97), then cat.
+# Usage: zxfer_build_remote_backup_read_cmd PATH HOST
+zxfer_build_remote_backup_read_cmd() {
+	l_read_cmd_path=$1
+	l_read_cmd_host=$2
+
+	case $l_read_cmd_path in
+	?*/*) l_read_cmd_parent=${l_read_cmd_path%/*} ;;
+	*) l_read_cmd_parent=/ ;;
+	esac
+	# ls must not read a leading dash as an option.
+	l_read_cmd_ls_path=$l_read_cmd_path
+	case $l_read_cmd_path in
+	-*) l_read_cmd_ls_path=./$l_read_cmd_path ;;
+	esac
+	case $l_read_cmd_parent in
+	-*) l_read_cmd_parent=./$l_read_cmd_parent ;;
+	esac
+	zxfer_escape_single_quotes_into_result "$l_read_cmd_path"
+	l_read_cmd_path_single=$g_zxfer_escaped_single_quotes_result
+	zxfer_escape_single_quotes_into_result "$l_read_cmd_ls_path"
+	l_read_cmd_ls_single=$g_zxfer_escaped_single_quotes_result
+	zxfer_escape_single_quotes_into_result "$l_read_cmd_parent"
+	l_read_cmd_parent_single=$g_zxfer_escaped_single_quotes_result
+	zxfer_render_shell_command_from_argv "${g_cmd_cat:-cat}"
+	l_read_cmd_cat=$g_zxfer_shell_command_result
+	zxfer_build_remote_backup_script_prelude "$l_read_cmd_host" "$l_read_cmd_path" \
+		metadata id ls awk || return "$?"
+
+	while IFS= read -r l_read_cmd_line || [ -n "$l_read_cmd_line" ]; do
+		printf '%s\n' "$l_read_cmd_line"
+	done <<-EOF
+
+		if [ ! -f '$l_read_cmd_path_single' ]; then
+		  exit 94;
+		fi;
+		l_expected_uid=\$(id -u 2>/dev/null | awk '/^[0-9]+\$/');
+		[ "\$l_expected_uid" != '' ] || exit 97;
+		l_parent_line=\$(ls -ldn '$l_read_cmd_parent_single' 2>/dev/null) || exit 97;
+		l_parent_uid=\$(printf '%s\n' "\$l_parent_line" | awk '\$3 ~ /^[0-9]+\$/ { print \$3 }');
+		[ "\$l_parent_uid" != '' ] || exit 97;
+		if [ "\$l_parent_uid" != 0 ] && [ "\$l_parent_uid" != "\$l_expected_uid" ]; then
+		  exit 91;
+		fi;
+		case "\$l_parent_line" in
+		?????w* | ????????w*)
+		  case "\$l_parent_line" in
+		  ?????????[tT]*) ;;
+		  *) exit 91 ;;
+		  esac;
+		  ;;
+		esac;
+		l_file_line=\$(ls -ldn '$l_read_cmd_ls_single' 2>/dev/null) || exit 97;
+		l_file_uid=\$(printf '%s\n' "\$l_file_line" | awk '\$3 ~ /^[0-9]+\$/ { print \$3 }');
+		[ "\$l_file_uid" != '' ] || exit 97;
+		if [ "\$l_file_uid" != 0 ] && [ "\$l_file_uid" != "\$l_expected_uid" ]; then
+		  exit 95;
+		fi;
+		case "\$l_file_line" in
+		-rw-------*) ;;
+		*) exit 96 ;;
+		esac;
+		$l_read_cmd_cat '$l_read_cmd_path_single';
+	EOF
+}
+
+# Purpose: Render the remote program that prints, relative to
+# ZXFER_BACKUP_DIR, every existing storage directory (or symlink) of ROOT,
+# its ancestors, and its descendants, skipping the metadata trees.
+# Usage: zxfer_build_remote_backup_storage_listing_cmd ROOT HOST; the program
+# prints nothing without ZXFER_BACKUP_DIR and exits 92 for a symlinked path
+# component, 97 when the listing fails, 99 when find(1) is missing. Only
+# ROOT's own storage directory is searched with find, so a store that is
+# empty, missing, or has no directory for ROOT needs no find.
+zxfer_build_remote_backup_storage_listing_cmd() {
+	l_listing_root=$1
+	l_listing_host=$2
+
+	zxfer_escape_single_quotes_into_result "$g_backup_storage_root"
+	l_listing_store_single=$g_zxfer_escaped_single_quotes_result
+	zxfer_escape_single_quotes_into_result "$l_listing_root"
+	l_listing_root_single=$g_zxfer_escaped_single_quotes_result
+	# The root and each ancestor, pool first.
+	l_listing_chain="'$l_listing_root_single'"
+	l_listing_ancestor=$l_listing_root
+	while :; do
+		case $l_listing_ancestor in
+		*/*) l_listing_ancestor=${l_listing_ancestor%/*} ;;
+		*) break ;;
+		esac
+		zxfer_escape_single_quotes_into_result "$l_listing_ancestor"
+		l_listing_chain="'$g_zxfer_escaped_single_quotes_result' $l_listing_chain"
+	done
+	zxfer_build_remote_backup_script_prelude "$l_listing_host" \
+		"$g_backup_storage_root/$l_listing_root" directory || return "$?"
+
+	while IFS= read -r l_listing_line || [ -n "$l_listing_line" ]; do
+		printf '%s\n' "$l_listing_line"
+	done <<-EOF
+
+		if [ ! -d '$l_listing_store_single' ]; then
+		  exit 0;
+		fi;
+		cd '$l_listing_store_single' || exit 97;
+		for l_listing_dir in $l_listing_chain; do
+		  if [ -d "\$l_listing_dir" ] || [ -L "\$l_listing_dir" ]; then
+		    printf '%s\n' "\$l_listing_dir";
+		  fi;
+		done;
+		if [ -d '$l_listing_root_single' ]; then
+		  zxfer_require_remote_backup_tool 'find';
+		  find '$l_listing_root_single' -name '.zxfer_backup_info*' -prune -o \\( -type d -o -type l \\) -print || exit 97;
+		fi;
+	EOF
+}
+
+# Purpose: Render one remote backup program as the ssh pipeline segment shown
+# by dry-run output.
+# Usage: Collapses the readable program to one physical line (every rendered
+# line ends a command) and publishes the prepared ssh command in
+# g_zxfer_remote_backup_dry_run_shell_command_result.
+zxfer_render_remote_backup_dry_run_shell_command() {
+	l_dry_run_host=$1
+	l_dry_run_script=$2
+	g_zxfer_remote_backup_dry_run_shell_command_result=""
+
+	l_dry_run_line=""
+	while IFS= read -r l_dry_run_script_line || [ -n "$l_dry_run_script_line" ]; do
+		[ -n "$l_dry_run_script_line" ] || continue
+		l_dry_run_line="${l_dry_run_line:+$l_dry_run_line }$l_dry_run_script_line"
+	done <<EOF
+$l_dry_run_script
+EOF
+	[ -n "$l_dry_run_line" ] || return 1
+	zxfer_publish_prepared_ssh_shell_command_for_host_or_throw "$l_dry_run_host" \
+		"$l_dry_run_line" || return "$?"
+	g_zxfer_remote_backup_dry_run_shell_command_result=$g_zxfer_prepared_ssh_shell_command_result
 }

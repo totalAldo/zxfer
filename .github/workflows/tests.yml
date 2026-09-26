@@ -1,6 +1,8 @@
-# The shunit2 tests are low resource tests, so we can run them all in high parallel counts even on the slower shells
-# --jobs 30 is selected to exceed the actual number of test files to ensure that all tests are run in parallel as much as possible.
-# The test runner will automatically scale down the parallelism if there are fewer test files than the specified job count.
+# Keep Linux and portable-shell shunit2 runs at the documented four-worker
+# validation bound. macOS runs serially because several suites intentionally
+# exercise process groups, signals, FIFOs, and nested runners, and nesting them
+# under a parallel worker can strand shell-level waits. VM-backed platform jobs
+# use two workers to match their smaller guest CPU allocation.
 name: Unit Tests
 
 on:
@@ -21,11 +23,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-26.04
-          - macos-26
+        include:
+          - os: ubuntu-26.04
+            unit_jobs: 4
+          - os: macos-26
+            unit_jobs: 1
+          # GitHub has no macos-27 label yet; the xcode-27 preview image is
+          # the hosted macOS 27 runner (macOS 27.0 base, bash 3.2 /bin/sh).
+          - os: xcode-27
+            unit_jobs: 1
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run shunit2 tests
         shell: bash
         run: |
@@ -33,7 +41,7 @@ jobs:
           # This unit matrix intentionally does not install ZFS on macOS.
           # The shunit2 suites are used here as a /bin/sh and BSD-userland
           # portability gate without requiring a live ZFS stack.
-          ./tests/run_shunit_tests.sh --jobs 30
+          ./tests/run_shunit_tests.sh --jobs "${{ matrix.unit_jobs }}"
 
   portable-shells:
     name: shunit2 (${{ matrix.shell_name }})
@@ -52,7 +60,7 @@ jobs:
           - shell_name: busybox ash
             shell_kind: busybox-ash
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install portable shells
         shell: bash
         run: |
@@ -100,7 +108,7 @@ jobs:
           ZXFER_TEST_SHELL: ${{ steps.shell_under_test.outputs.shell_under_test }}
         run: |
           set -euo pipefail
-          ./tests/run_shunit_tests.sh --jobs 30
+          ./tests/run_shunit_tests.sh --jobs 4
 
   portable-shell-posh:
     name: shunit2 (posh)
@@ -111,7 +119,7 @@ jobs:
       contents: read
     continue-on-error: true
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install posh
         shell: bash
         run: |
@@ -124,7 +132,7 @@ jobs:
           ZXFER_TEST_SHELL: /usr/bin/posh
         run: |
           set -euo pipefail
-          ./tests/run_shunit_tests.sh --jobs 30
+          ./tests/run_shunit_tests.sh --jobs 4
 
   shunit2-freebsd:
     name: shunit2 (FreeBSD)
@@ -133,14 +141,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run shunit2 tests on FreeBSD
-        uses: vmactions/freebsd-vm@b84ab5559b5a1bb4b8ee2737d2506a16e1737636 # v1.4.8
+        uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3 # v1.5.7
         with:
           release: "15.1"
           usesh: true
+          prepare: |
+            pkg install -y bash git
           run: |
-            ./tests/run_shunit_tests.sh --jobs 30
+            ./tests/run_shunit_tests.sh --jobs 2
 
   shunit2-omnios:
     name: shunit2 (OmniOS)
@@ -149,13 +159,14 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run shunit2 tests on OmniOS
-        uses: vmactions/omnios-vm@68da93c6d9812b29fc90c5b5141b093f84a590fb # v1
+        uses: vmactions/omnios-vm@317e4f8069dad8a65e1520808f1a68ef3fd20565 # v1.3.6
         with:
+          release: "r151058"
           usesh: true
           prepare: |
-            PKG_SUCCESS_ON_NOP=1 pkg install bash
+            PKG_SUCCESS_ON_NOP=1 pkg install bash git
           run: |
             bash_bin=$(command -v bash)
             wrapper=$(mktemp /tmp/zxfer-bash-posix.XXXXXX)
@@ -168,4 +179,23 @@ jobs:
             # job, but run the unit suites through a POSIX bash wrapper here so
             # the tests exercise zxfer logic rather than shell-specific stubbing
             # behavior.
-            "$bash_bin" ./tests/run_shunit_tests.sh --jobs 30
+            "$bash_bin" ./tests/run_shunit_tests.sh --jobs 2
+
+  argv-fuzz:
+    name: argv fuzz (seeded)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run the seeded argv-boundary fuzz
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The fuzz runs the real ./zxfer against its own fake zfs, mock ssh
+          # and mock parallel, so it needs nothing installed. The run number
+          # is the seed: a failure prints the command that reproduces it.
+          # Name the awk, since the fake zfs and the checker run under it.
+          awk -W version </dev/null 2>&1 | sed -n '1p' || :
+          ./tests/run_argv_fuzz.sh --seed "$GITHUB_RUN_NUMBER" --iterations 200

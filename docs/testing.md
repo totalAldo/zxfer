@@ -23,6 +23,12 @@ Use the layers this way:
 - Use [../tests/run_perf_compare.sh](../tests/run_perf_compare.sh), preferably
   through the VM matrix `perf-compare` layer, when comparing two zxfer
   binaries such as the current checkout against `upstream-compat-final`.
+- Use [../tests/run_perf_ab.sh](../tests/run_perf_ab.sh) for an advisory,
+  host-safe wall-clock A/B of this checkout against a baseline ref such as
+  `upstream-compat-final`. It needs no ZFS and no root: the baseline comes
+  from `git archive`, a canned zfs answers every zfs command, and a mock ssh
+  adds latency for `-O`/`-T` runs. A slowdown never fails it; exit 1 means a
+  harness error.
 - Use [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   directly only when you explicitly want an interactive host-side harness run
   on a disposable ZFS-capable system.
@@ -67,6 +73,111 @@ The safe default is still:
 - [../tests/run_integration_zxfer.sh](../tests/run_integration_zxfer.sh)
   only for explicit manual host-side harness work
 
+## Validation Profiles
+
+`tests/validate.sh` is the discoverable front door for common local paths.
+Profile composition lives in `tests/validation_profiles.tsv` and dispatches
+only a closed set of step names. `tests/validation_map.tsv` independently maps
+changed path patterns to `unit_suites`, `integration_groups`, `perf_cases`, and
+`doc_surfaces`. Neither TSV file is evaluated as shell code.
+
+```sh
+./tests/validate.sh --list
+./tests/validate.sh doctor
+./tests/validate.sh quick
+./tests/validate.sh full
+```
+
+- `quick [PATH...]` explains each first-match path mapping, runs the offline
+  anti-rebloat budget and deduplicated unit suites, and prints (without
+  executing) relevant integration, performance, and documentation follow-ups.
+  With no paths it inspects staged, unstaged, and untracked Git paths. It never
+  downloads tools, starts a VM, invokes ZFS, or runs the integration harness.
+- `full` runs the complete pinned lint stack, all unit suites, and report-only
+  bash-xtrace coverage.
+- `portable` runs the static POSIX portability lint targets.
+- `docs` runs actionlint, codespell, the budget gate, and the deterministic
+  `man/zxfer.8` to `man/zxfer.1m` rendering check.
+- `vm [smoke|local]` forwards optional guest/test selectors but rejects every
+  broader profile.
+
+Every manifest-listed `tests/integration/` fragment has an exact first-match
+row that selects the host-safe `tests/test_run_integration_zxfer.sh` loader
+contract. A later `tests/integration/*.sh` fallback gives future fragments the
+same safe minimum until they receive a concern-specific row. Changes to the
+fragment manifest also select `tests/test_validate.sh`, so declared fragments
+and quick-map ownership cannot drift independently. Wider integration groups
+remain recommendations only; `quick` never runs the direct harness.
+
+A `tests/suites/*` or `tests/fixtures/**` path that an entry suite names in a
+`# zxfer-test-fragment:` marker maps as a change to that entry suite: `quick`
+prints `fragment of: tests/test_*.sh` and uses the entry suite's map row.
+Unmarked paths, such as `tests/fixtures/snapshot_discovery/fixture.sh`, use
+their own row.
+
+`quick` and the full shunit step default to four concurrent suites. Set
+`ZXFER_VALIDATE_JOBS` to a positive integer to reduce or increase that bound;
+direct `tests/run_shunit_tests.sh` compatibility and its bounded,
+auto-detected default are unchanged.
+- `bootstrap` installs the pinned lint tools.
+- `doctor` reports available POSIX shells, QEMU and ZFS commands, validation
+  entrypoints, and cached lint binaries without downloading or invoking them.
+- `docs` is host-safe but may populate the pinned lint-tool cache; its
+  `network-cache` risk label makes that behavior explicit.
+
+No profile runs `tests/run_integration_zxfer.sh` directly on the host.
+
+## Developer Workflow Timing
+
+`tests/run_dx_benchmark.sh` records report-only wall-time evidence for the
+four contributor paths named by the DX targets:
+
+- `named`: one named shunit test, with one summary-excluded warmup by default
+- `quick`: a representative changed-path `validate.sh quick` run
+- `shunit`: the complete shunit suite
+- `validate`: the complete `validate.sh full` profile
+
+Narrow the routine measurement to the sub-minute paths:
+
+```sh
+./tests/run_dx_benchmark.sh \
+  --case named,quick --samples 5 \
+  --output-dir /tmp/zxfer-dx-candidate
+```
+
+Omitting `--case` selects all four paths. The output directory is required,
+must not already exist, and is created privately. `metadata.tsv` records the
+selected runners and arguments, `results.tsv` retains every warmup and sample,
+`summary.tsv` reports successful-sample median and nearest-rank P95 wall time,
+and `logs/` preserves command and timer output.
+
+Elapsed-time thresholds are intentionally not enforced. A selected command or
+timing-parse failure is retained in the artifacts and makes evidence
+collection return nonzero, while a slow successful sample remains report-only.
+The runner uses fixed argv dispatch rather than shell command strings and
+cleans up the active runner group on INT or TERM. Before arbitrary runner code
+can start, a resident supervisor must prove that its PID is also the leader of
+a private process group, publish readiness, and wait for the parent's explicit
+`go` record. The launcher uses verified non-interactive shell job control when
+available and otherwise a non-forking `setsid` utility. If neither path can be
+verified, the measurement fails before the selected runner starts.
+
+The supervisor remains the group leader after publishing the measured command
+status. Normal retirement and signal cleanup first send `STOP` to the complete
+group, then send one `KILL`, wait for the trusted supervisor, and clear active
+state. A successful group-wide `STOP` freezes inherited-group descendants and
+pins the group identity across teardown, so cleanup needs no post-readiness
+process-table snapshot or PID/start-time race. Repeated INT or TERM is ignored
+after cleanup commits. As with any process-group boundary, a deliberately
+hostile child that explicitly creates a new session or process group is outside
+the containment contract; contributor validation commands do not do so.
+
+Executed measurements use the C locale so portable `time -p` decimals and TSV
+summaries remain machine-readable. The runner does not invoke ZFS or the
+network itself; selected commands retain their normal behavior. In particular,
+the `validate` case may populate the pinned lint cache just as
+`validate.sh full` does.
+
 ## Unit Tests
 
 Run all suites with the default bounded parallel worker count:
@@ -79,6 +190,14 @@ The shunit2 runner auto-detects a local CPU count, caps itself at 4 workers,
 and clamps that default to the number of runnable suites. It buffers each
 suite to a private log and replays grouped output in suite order so parallel
 runs stay readable.
+
+On `INT` or `TERM`, the runner keeps wrapper shells alive to reap their suites.
+It signals only a PID whose start token still matches or whose complete live
+runner-to-wrapper-to-suite ownership chain can be revalidated. If start tokens
+are unavailable, proven descendants are retired deepest-first before their
+suite is signalled. A host that provides neither token queries nor parent/child
+enumeration fails closed with a diagnostic and retains the wrapper; see
+`KNOWN_ISSUES.md` for that degraded-platform limitation.
 
 Force serial execution:
 
@@ -97,6 +216,22 @@ Run the local lint stack with the same pinned toolchain as CI:
 ```sh
 ./tests/run_lint.sh
 ```
+
+The shell lint targets use one NUL-delimited Git source list containing the
+tracked and non-ignored untracked `*.sh` files plus the `zxfer` launcher. New
+modules therefore receive portability, formatting, and static checks before
+they are staged, while ignored artifacts remain excluded.
+
+The `budget` lint target checks only the sensitive-caller ratchets in
+`tests/budget_policy.tsv` (production `eval`, `$(date`, `mktemp`, and
+`zxfer_profile_now_ms` call sites).
+Measured counts may be ratcheted down; raising one requires explicit review
+justification. The former universal module, function, test-file,
+integration-fragment, and `setUp` size ceilings were removed on 2026-09-01
+because they forced mechanical module and function splitting instead of
+preventing bloat. `tests/run_budget_check.sh` now accepts only `callers` rows:
+any other record kind, a missing or non-numeric MAX, or a source tree it
+cannot scan fails the gate.
 
 For a ready-made contributor environment, open the repository in the included
 VS Code / GitHub Codespaces devcontainer. It stays on the stable Ubuntu 24.04
@@ -129,6 +264,31 @@ Run one suite:
 ./tests/run_shunit_tests.sh tests/test_zxfer_replication.sh
 ```
 
+Discover suites and named tests without sourcing or executing them:
+
+```sh
+./tests/run_shunit_tests.sh --list
+./tests/run_shunit_tests.sh --list-suites
+./tests/run_shunit_tests.sh --list-tests tests/test_zxfer_replication.sh
+```
+
+Run one or more named tests from one or several suites:
+
+```sh
+./tests/run_shunit_tests.sh \
+  --suite tests/test_zxfer_replication.sh \
+  --test test_first_case \
+  --test test_second_case \
+  --suite tests/test_zxfer_exec.sh \
+  --test test_exec_case
+```
+
+The runner validates test names and supplies shunit2's required `--`
+separator before starting any suite. Each repeated `--suite` makes that suite
+current for following `--test` options; duplicate suite selectors are merged,
+and every suite runs once in first-selection order. The positional compatibility
+form (`--test test_name tests/test_suite.sh`) remains available for one suite.
+
 Run the suites with an explicit parallel worker count:
 
 ```sh
@@ -144,22 +304,36 @@ ZXFER_TEST_SHELL=/bin/dash ./tests/run_shunit_tests.sh
 For multi-word shell modes such as `bash --posix`, point `ZXFER_TEST_SHELL` at
 an executable wrapper script that `exec`s the desired command.
 
+Parallel suites start as async lists, so on some shells (bash 3.2, the macOS
+`/bin/sh`) they inherit INT and QUIT ignored, and a non-interactive shell
+cannot trap a signal ignored on entry. Signal tests therefore deliver TERM for
+real, call the INT handler directly, and check trap registration only for the
+signals the test shell can trap.
+
 The test layout broadly follows the source layout:
 
 - `test_run_coverage.sh`
+- `test_ci_workflow_contracts.sh`
 - `test_ci_vmactions_integration.sh`
+- `test_run_lint.sh`
 - `test_run_shunit_tests.sh`
+- `test_validate.sh`
 - `test_run_integration_zxfer.sh`
+- `test_run_dx_benchmark.sh`
 - `test_run_perf_tests.sh`
+- `test_run_microbench.sh`
 - `test_run_perf_compare.sh`
+- `test_run_perf_ab.sh`
+- `test_run_argv_fuzz.sh`
 - `test_run_vm_matrix.sh`
 - `test_zxfer_launcher.sh`
 - `test_zxfer_locking.sh`
 - `test_zxfer_reporting.sh`
+- `test_zxfer_quoting.sh`
 - `test_zxfer_exec.sh`
 - `test_zxfer_dependencies.sh`
 - `test_zxfer_runtime.sh`
-- `test_zxfer_background_jobs.sh`
+- `test_zxfer_send_jobs.sh`
 - `test_zxfer_cleanup_child_wrapper.sh`
 - `test_zxfer_cli.sh`
 - `test_zxfer_snapshot_state.sh`
@@ -171,55 +345,216 @@ The test layout broadly follows the source layout:
 - `test_zxfer_property_reconcile.sh`
 - `test_zxfer_replication.sh`
 - `test_zxfer_send_receive.sh`
+- `test_zxfer_planning_blackbox.sh`
+- `test_zxfer_blackbox_send_receive.sh`
+- `test_zxfer_blackbox_properties.sh`
+- `test_zxfer_blackbox_verbose.sh`
+
+`test_zxfer_exec.sh`, `test_zxfer_remote_hosts.sh`, `test_zxfer_runtime.sh`,
+`test_zxfer_replication.sh`, `test_zxfer_property_reconcile.sh`,
+`test_zxfer_backup_metadata.sh`, `test_zxfer_send_receive.sh`, and
+`test_zxfer_snapshot_discovery.sh` are entry points for behavior fragments.
+Each fragment has three lines in its entry file, in the same order: a
+`# zxfer-test-fragment: <path under tests/>` marker (read by
+`run_shunit_tests.sh --list-tests` and `validate.sh quick`), a `.` source line,
+and its path in `suite() { zxfer_test_register_fragment_tests ...; }`. Each
+`suite()` passes the entry file first, and the registrar registers every
+`test*()` function in file order, so a new test needs no registration; a new
+fragment needs all three lines. Each fragment header names the source
+module(s) it covers.
 
 Some support modules are still covered inside adjacent suites.
-`src/zxfer_backup_metadata.sh` now has a dedicated peer suite in
-`test_zxfer_backup_metadata.sh`, with a smaller number of cross-module backup
-restore and remote-helper expectations still covered in the property and
-remote-host suites. Likewise,
+The property suite intentionally exercises the ordered
+`zxfer_property_state.sh` → `zxfer_property_policy.sh` →
+`zxfer_property_reconcile.sh` stack as one behavioral surface while keeping
+state ownership, policy decisions, and destination mutation in separate
+source modules.
+The snapshot-discovery suite likewise exercises the ordered
+`zxfer_snapshot_producers.sh` → `zxfer_remote_snapshot_discovery.sh` →
+`zxfer_snapshot_discovery.sh` stack as one behavioral surface while keeping
+command production and normalization, remote batch handling, and mutable
+discovery orchestration in separate source modules.
+Its `golden/remote_destination_discovery_batch_script.golden` fixture pins the
+exact target-side secure-PATH setup, quoting, sentinels, section order, and
+command topology; adjacent behavioral cases also execute that rendered script.
+Focused remote-batch cases require one SSH invocation that leaves no temp file
+behind, reject truncated or reordered protocols and non-numeric statuses, and
+verify that any transport or parse failure, including a late ssh failure after
+a complete stream, empties all four caller-visible outputs and publishes no
+batch status, so a missing root still re-probes the pool live. Transport
+failures retain their exact status and diagnostic. These cases use only fake
+ZFS and SSH functions and are safe for the native and dash host-side loops.
+The stable `test_zxfer_snapshot_discovery.sh` entry point sources ordered
+behavior fragments from `fixtures/snapshot_discovery/`; it follows the same
+marker, source, and registrar contract.
+`src/zxfer_backup_metadata.sh` has the dedicated `test_zxfer_backup_metadata.sh`
+peer suite, with a smaller number of restore and remote-helper expectations
+still covered in the property, exec, and remote-host suites, and the
+operator-visible `-k`/`-e` contract pinned black-box in
+`test_zxfer_planning_blackbox.sh`. Local and rendered-remote pair publication
+tests inject staging, recovery-read, and either rename failures, and verify
+that failed rollback preserves private recovery contents with operator
+guidance. Likewise,
 `test_zxfer_remote_hosts_coverage.sh` keeps focused regression coverage for
 remote-host and ssh-control-socket edge paths that would be awkward to express
 through the broader peer suite alone.
 
 The top-level launcher and `tests/test_helper.sh` both source
 `src/zxfer_modules.sh`, so runtime module order is defined in one place rather
-than being duplicated across test fixtures. The path-security and owned-lock
-helpers live as sections of `src/zxfer_runtime.sh` (Phase 8 merge), and the
-supervision-lite background-job layer sits between runtime and the
-higher-level replication modules.
+than being duplicated across test fixtures. Path security and the runtime
+artifact lifecycle (including path-adjacent staging) are separate modules;
+owned locks live with their only consumer in `src/zxfer_error_log.sh`. Send-job
+scheduling and completion state live together in `src/zxfer_send_jobs.sh`;
+source discovery waits directly on its registered helper PID.
 
-`test_zxfer_locking.sh` owns the owned-lock primitive itself (now defined in
-`src/zxfer_runtime.sh` and sourced through that module): pid+start-token
-metadata render/parse, owner-identity capture, stale-owner reaping, and
-checked release mismatches. The reporting suite covers the
-`ZXFER_ERROR_LOG` lock, the primitive's only cross-process consumer.
+`test_zxfer_locking.sh` owns the owned-lock protocol in
+`src/zxfer_error_log.sh` (pid+start-token metadata render/parse, owner-identity
+capture, stale-owner reaping, checked release); the `ps` start-token parser is
+covered by `test_zxfer_cleanup_child_wrapper.sh`. The reporting suite covers
+the `ZXFER_ERROR_LOG` lock, the protocol's only cross-process consumer.
 
-Focused tests that exercise `zxfer_init_globals()` should source through at
-least the property-reconcile boundary, or anything later in
-`src/zxfer_modules.sh`, because startup now resets property scratch state via
-the property modules' public reset helpers rather than carrying a duplicated
-copy of that reset inventory inside `zxfer_runtime.sh`.
+`tests/test_helper.sh` loads every module in `src/zxfer_modules.sh` order, so
+every suite sees the complete function set. The boundary argument of
+`zxfer_source_modules_for_tests` and `zxfer_source_runtime_modules_through` is
+ignored and kept only for older callers. Stub `src/` functions inside a
+subshell; a stub defined in the current shell leaks into later cases. Entry
+suites build `setUp` from `zxfer_test_reset_all_owner_state`
+(`tests/helpers/lifecycle.sh`), which runs the production owner resets of
+`zxfer_reset_session_state` without creating a run root or narrowing PATH, then
+override only suite-specific values. `zxfer_test_stub_throw_error_to_stdout
+[status]` is the shared `zxfer_throw_error` capture stub.
 
-`test_zxfer_background_jobs.sh` owns the supervision-lite background-job
-coverage: status-file propagation (success, failure, missing-status-file and
-non-numeric-status fail-closed paths), queue-record normalization and FIFO
-notification ordering, abort teardown of the whole pipeline on both the setsid
-process-group path and the cleanup-wrapper fallback, trap-style abort-all
-teardown, and the spawn failure paths. The send/receive and
-snapshot-discovery suites then focus on how their modules consume the shared
-spawn/wait/abort contract.
+`test_zxfer_launcher.sh` runs `./zxfer` against a fixture whose module files
+are empty files generated from the manifest plus a `zxfer_main` stub, so it
+pins only launcher behavior (`$0` module lookup, the `-V` prescan, the early
+secure PATH, invocation escaping), not module contents or order. Its loader
+cases run against the real tree. Session startup order is pinned as a safety
+property in `test_zxfer_session.sh`: an invalid secure PATH fails before the
+run root exists, the run root is created before PATH is narrowed, and PATH ends
+as the secure PATH; the same suite still pins the reset and trap order of
+`zxfer_session_initialize`.
 
-`test_zxfer_cleanup_child_wrapper.sh` owns the cleanup wrapper entry point
-(used both by short-lived helpers and as the no-setsid background-job spawn
-fallback): direct-exec argument validation, exit-status passthrough for the
-wrapped command, and descendant teardown when the wrapper is interrupted
-during abort cleanup.
+CLI goldens (`tests/golden/cli_*.golden`) compare byte for byte. After an
+intentional change, run
+`ZXFER_UPDATE_GOLDEN=1 ./tests/run_shunit_tests.sh tests/test_zxfer_cli_golden.sh`
+to rewrite them from the actual transcripts, then review the fixture diff. The
+remote-script goldens (capability probe, backup protocol, discovery batch) do
+not have an update mode yet.
+
+`test_zxfer_send_jobs.sh` covers the send-job scheduler: status-file
+success and failure, completion out of launch order, reaping every finished
+job in one scan, job limits, destination-ancestry conflicts, and abort
+cleanup, including TERM before KILL and never signalling a recycled PID (a job
+that recorded its status gets only a group signal, and a bare PID only while
+it is in zxfer's own process group). `test_zxfer_blackbox_send_receive.sh`
+runs `-D` with and without `-j` against a strict receive mock that fails on an
+empty stream, so a progress stage that drops the stream cannot pass.
+`test_zxfer_blackbox_properties.sh` puts an argv recorder in front of the
+canned ZFS to pin property argument boundaries (a `\001` or newline in a
+value stays one `zfs create -o` or `zfs set` argument, locally and over `-T`)
+and the `-t filesystem,volume` recursive prefetch.
+`test_zxfer_blackbox_verbose.sh` runs `-v -V -P` locally and over `-T`, with
+the launcher started by `/bin/sh` and by dash, on a property value holding
+ESC, BEL, a literal `\033` and `\c`, CR and LF, and pins that stdout and
+stderr hold no control byte but LF and TAB and that `zfs set` still gets the
+raw value. The black-box cases in
+`test_zxfer_planning_blackbox.sh` exercise complete `-j` runs with canned ZFS:
+each receive runs once, parent datasets precede their children, and failures
+or TERM clean up the running jobs and run-private files; a TERM exits 143 with
+one structured report whose stage is `signal`. The canned ZFS in
+`tests/mock_toolchain_helper.sh` logs an `END receive <dataset>` line once a
+receive has consumed its stream, which the `-j` ancestry pin uses to prove a
+child receive starts only after its parent's receive ends. The black-box mock
+parallel quotes each replacement the way GNU parallel does, and an argv
+recorder pins a `-j` dataset name with spaces as one `zfs list` argument,
+locally and over `-O`. Black-box suite entries share `tests/helpers/blackbox.sh`, which supplies the shunit2
+lifecycle hooks (a private `CASE_DIR` per case) and the `planning_*` fixture,
+run, and log-assertion helpers. The exec, runtime,
+and snapshot-discovery suites cover short-lived helper spawning and cleanup.
+`test_zxfer_cleanup_child_wrapper.sh` covers the fallback wrapper's argument
+validation, command status, and interrupted descendant cleanup, including
+descendants whose start token changed or cannot be read and a real zombie.
+
+`tests/run_microbench.sh` also runs `remote_noop` and `remote_incr`
+(`-O localhost -T localhost`) through the socket-aware mock ssh written by
+`zxfer_mockbin_write_socket_ssh` in `tests/mock_toolchain_helper.sh`. The mock
+logs each call as `version`, `master`, `control`, `mux` or `direct`; a master
+open, or a command without a live `-S` socket, counts as a new connection.
+Every scenario reports `ssh_connections`, `ssh_invocations` and
+`ssh_master_opens`, and `tests/perf_budgets.tsv` pins the connection and
+master rows exactly, in both directions: one master per distinct host spec,
+so 1 for the remote scenarios and 0 for local ones.
+`test_zxfer_microbench_budgets.sh` self-tests that one extra direct ssh
+command breaks the remote no-op budget, and so does a remote no-op that never
+reaches ssh. Both bench runners keep their work directory directly under
+`/tmp` and give zxfer its `tmp/` as `TMPDIR`, so the caller's `TMPDIR` cannot
+change the counts.
+
+`tests/run_argv_fuzz.sh [--seed N] [--iterations N] [--case K] [--keep]` is a
+seeded argv-boundary fuzz. Each case generates a small tree (a root and one to
+four children, some siblings whose names are prefixes of one another, some
+leaves volumes) whose dataset and snapshot names use alnum, space, `-`, `_`,
+`.` and `:`, and user properties whose values mix bytes 0x01-0x7f with tabs,
+newlines, CR, `\001`, quotes, backslashes, `$(`, backticks, `%`, commas and
+`=`. Any property may start below the root, so some datasets lack it and some
+hold no user property at all, and one case in three turns every line feed
+into a TAB, so the recursive prefetch reads the tree instead of leaving it to
+per-dataset reads. It then runs the real `./zxfer` against a model-backed fake
+zfs (`tests/helpers/argv_fuzz.awk`) in seven modes: `-R`, `-P -R`, `-P -R`
+with every recursive `zfs get` refused (mode `L`, so each dataset is read
+alone), `-j 2 -P -R` with the GNU-parallel-faithful mock
+parallel, `-O localhost` and `-T localhost` through a mock ssh that joins its
+remote argv and runs it with `sh -c` as sshd does, and an operand holding a
+control byte, which must fail closed with a structured report. The fake zfs
+records every argv exactly, flags any operand that is not a whole generated
+name, answers `list` and `get` from the model, and applies `create` (with
+`-V` for volumes), `set`, `inherit` and `receive`. The checker requires exit
+0, every generated property value as one byte-identical `name=value` argument
+of `zfs set` or `zfs create -o`, and a converged destination: each dataset's
+type and volume size, its snapshots, and every user property byte for byte
+where the source holds it and unchanged where it does not. Mode `L` must also
+make exactly the `zfs create`, `set` and `inherit` calls of mode `P`, which
+compares the recursive prefetch with per-dataset reads of the same model. The
+runner prints `seed=N`
+first; a failure prints the case, the recorded argv and
+`./tests/run_argv_fuzz.sh --seed N --case K --iterations 1 --keep`. The
+generator uses its own Park-Miller stream instead of awk's `rand`, so a seed
+reproduces with any awk. The `argv-fuzz` CI job runs
+`./tests/run_argv_fuzz.sh --seed "$GITHUB_RUN_NUMBER" --iterations 200` on
+every push, so each run takes a fresh seed and a failure prints its
+reproduction command. Values whose raw `zfs get -H` rendering reads like
+another record are generated on purpose (a fake user, native, real or
+dataset-led name), and the checker also fails a case that sets any
+property=value pair the source does not hold, derived from the case model.
+`tests/test_run_argv_fuzz.sh` runs three fixed seeds and proves that injected
+bugs (`ZXFER_ARGV_FUZZ_FAULT=split`, `truncate`, `inject` or `prefetch`) are
+reported. A black-box pin can give the fake zfs a one-shot race file that
+changes the model just before one call (`start_race`).
 
 The suites also use `tests/test_helper.sh` for the shared shunit2 scaffolding:
 default no-op lifecycle hooks, temporary-directory setup helpers, and common
-stdout/stderr/status capture wrappers for failure-path assertions. Keep new
-suite-local helpers focused on domain-specific fixtures rather than re-creating
-that generic test plumbing.
+stdout/stderr/status capture wrappers for failure-path assertions. Domain
+fixtures are deliberately opt-in: suites that render property-backup metadata
+source `tests/helpers/backup_fixtures.sh`, while suites needing the shared
+environment-driven SSH stand-in source
+`tests/helpers/fake_tool_fixtures.sh`. That file also provides the `echo` mode
+of `zxfer_test_write_env_fake_ssh` (print the stand-in's argv) and
+`create_fake_ssh_join_exec_bin PATH [CSH_SHELL]`, an SSH stand-in that joins
+the remote argv and runs it under `/bin/sh -c` or the given csh. Keep new suite-local helpers focused on
+domain-specific behavior rather than re-creating generic test plumbing or
+adding every fixture to `tests/test_helper.sh`.
+
+The vendored `tests/shunit2/shunit2` (2.1.8) carries two local portability
+changes. `_shunit_escapeCharInStr` escapes with `awk` because BSD `sed`
+rejects upstream's generated expression. `assertContains` and
+`assertNotContains` match the expected text as one literal substring through
+`_shunit_containsLiteral`. Upstream piped the container through `echo` into
+`grep -F`, which matched any single line of a multi-line expectation,
+reinterpreted backslashes on some shells, and failed on illumos, whose `grep`
+rejects the empty pattern a trailing newline produces.
+`test_vendored_shunit2_contains_matches_literal_text` in
+`tests/test_run_shunit_tests.sh` pins that behavior; keep both changes when
+updating shunit2.
 
 ## Coverage
 
@@ -237,29 +572,20 @@ real command line, such as `case` labels, here-doc bodies/delimiters attached
 to control-flow terminators, grouping delimiters, and multiline string
 continuations.
 
-The bash-xtrace path is also the enforcement path. It appends a `TOTAL` row to
-`coverage/bash-xtrace/summary.tsv`, checks the current summary against the
-committed minimums in `tests/coverage_policy.tsv`, rejects total or per-file
-coverage regressions relative to
-`tests/coverage_baseline/bash-xtrace/summary.tsv`, and writes a unified diff
-against `tests/coverage_baseline/bash-xtrace/missing.txt` to
-`coverage/bash-xtrace/missing.diff`.
+The bash-xtrace path appends a `TOTAL` row to
+`coverage/bash-xtrace/summary.tsv` and writes the uncovered lines to
+`coverage/bash-xtrace/missing.txt`.
 
-Because bash xtrace coverage is an approximation and can vary slightly by shell
-or platform, the no-regression comparison also allows a small committed
-hit-count tolerance before it treats a lower percentage as a real regression.
+Coverage is report-only. There is no committed minimum, baseline, or
+no-regression policy; the runner's exit status reflects only whether the
+selected suites passed. Passing one or more suite paths traces just those
+suites. The `--report-only` flag is still accepted for compatibility and has
+no effect.
 
-Run the policy gate locally:
+Run the bash-xtrace report locally:
 
 ```sh
 ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
-```
-
-Bypass the gate when you intentionally need a fresh report before updating the
-committed baseline:
-
-```sh
-ZXFER_COVERAGE_MODE=bash-xtrace ZXFER_COVERAGE_ENFORCE_POLICY=0 ./tests/run_coverage.sh
 ```
 
 Locally, you can force the higher-fidelity path when `kcov` is installed:
@@ -320,6 +646,13 @@ Print the currently supported profiles or guest names without starting a run:
 ./tests/run_vm_matrix.sh --list-profiles
 ./tests/run_vm_matrix.sh --list-guests
 ```
+
+The supported guest, profile, architecture, image, and guest-runtime metadata
+is defined in `tests/vm/guest_manifest.tsv`. Keep that table in the intended
+guest and profile display order when updating a guest release. The runner
+validates the complete manifest before using it, and
+`tests/test_run_vm_matrix.sh` pins the resolved contract so metadata changes
+remain explicit.
 
 Run the shunit2 suites inside the selected guests while keeping the default
 VM path on integration:
@@ -383,9 +716,14 @@ prepares base images, and waits for guest SSH readiness. Interactive serial
 downloads show a curl progress bar automatically.
 FreeBSD local guests now use an attached `cidata` config-drive because the
 official BASIC-CLOUDINIT images expect `nuageinit` seed media rather than the
-Ubuntu-style `nocloud-net` SMBIOS path. OmniOS local guests now keep waiting
-until the first-boot SSH host key stops changing before the runner starts guest
-preparation or the selected guest test layer.
+Ubuntu-style `nocloud-net` SMBIOS path. The runner pins the guest's ed25519
+host key (one normalized `ssh-keyscan -t ed25519` line) and connects only with
+`StrictHostKeyChecking=yes` against it. While waiting for readiness it rescans
+only after a failed probe, ignores scans that print no key, logs and re-pins a
+first-boot key change and restarts the consecutive-probe count, and backs off
+5, 10, 20 s between failed attempts so sshd's `PerSourcePenalties` does not
+refuse the QEMU user-network address. A local FreeBSD 15.1 guest reaches
+readiness after about 65 s.
 
 This is the preferred integration entrypoint for contributors and CI because it
 keeps the existing file-backed ZFS harness inside a disposable guest boundary.
@@ -497,10 +835,18 @@ the root filesystem before `apt` metadata and OpenZFS package setup run. The
 cached upstream base image remains unchanged. FreeBSD and OmniOS overlays keep
 the upstream image size unless a guest-specific need is identified.
 
-FreeBSD QEMU guests require three consecutive SSH readiness probes before the
-runner starts copying files, and each later remote step rechecks that SSH can
-execute a command after refreshing the host key. This avoids first-boot
-`sshd` restart windows on the 15.1 cloud images.
+FreeBSD and OmniOS QEMU guests require three consecutive SSH readiness probes
+before the runner starts copying files, which avoids first-boot `sshd` restart
+windows. After readiness each remote step waits for SSH on the pinned key and
+stops the run if the guest presents a different key; a pinned file to which
+ssh appended other key types (`UpdateHostKeys yes`) still matches.
+QEMU guests now have up to 1800 seconds to reach initial SSH readiness before
+the host runner declares a boot/provisioning timeout.
+If the daemonized QEMU process exits while the runner is waiting for SSH, the
+runner now fails immediately and points at the guest `serial.log`. A completely
+empty `serial.log` usually means QEMU exited before firmware or the guest wrote
+to the serial device; check the runner error and the per-run `qemu.pid` before
+assuming the guest is still booting.
 
 Useful VM-runner environment variables:
 
@@ -526,9 +872,9 @@ Useful VM-runner environment variables:
 ## Performance Harness
 
 `tests/run_perf_tests.sh` is a manual, non-gating performance runner. It
-sources the integration harness in source-only mode and reuses the existing
-file-backed sparse-pool, safety, mock-ssh, and passthrough-zstd helpers instead
-of maintaining a second ZFS fixture layer.
+reuses the focused file-backed sparse-pool, safety, mock-ssh, and
+passthrough-zstd fixtures under `tests/helpers/` without sourcing the
+integration composition runner or its test bodies.
 
 Prefer the VM-backed path for unattended measurements:
 
@@ -637,6 +983,44 @@ cleanup time rises by more than 10%, or throughput falls by more than 10%.
 Those warnings do not fail the run; setup failures, zxfer failures, and
 replication-correctness failures still fail immediately.
 
+### Advisory Wall-Clock A/B
+
+`tests/run_perf_ab.sh` times this checkout against a baseline ref on the
+canned zfs and a mock ssh, with no pools and no root:
+
+```sh
+./tests/run_perf_ab.sh --baseline-ref upstream-compat-final \
+  --sizes 25,100 --reps 5 --summary /tmp/perf-ab.md
+```
+
+- The baseline tree comes from `git archive`; `--candidate-root DIR` picks
+  another candidate tree (default: this checkout).
+- For each size (child datasets of the canned tree) it times `noop`, `incr`,
+  `remote_noop` and `remote_incr`: one warm-up per tree, then `--reps`
+  alternating runs. The remote scenarios run `-O localhost -T localhost`
+  through the socket-aware mock ssh, which sleeps `--latency-ms` (default 80)
+  per new connection or master open and a sixteenth of it per multiplexed
+  call.
+- The clock is `date +%s%N` where it prints nanoseconds, then perl
+  `Time::HiRes`, then `python3`, and otherwise whole seconds with a warning;
+  the median cost of reading the clock is subtracted from every sample.
+- Output: TSV (median, min, max and the candidate/baseline ratio) on stdout;
+  `--summary FILE` appends a Markdown table; progress goes to stderr, whose
+  first line names the work directory.
+- The `perf-advisory` job in `.github/workflows/perf.yml` runs this against
+  `origin/upstream-compat-final` at sizes 25,100 with 5 reps and never gates.
+- Exit status: 0 for a completed run whatever the ratios; 1 for a harness
+  error (an unknown ref, a failed run, a run that never reached the canned
+  zfs, a wrong receive count, or a remote run without ssh); 2 for a usage
+  error, including a repeated `--sizes` value; 130 on INT and 143 on TERM.
+- The work directory sits directly under `/tmp` whatever `TMPDIR` is, so the
+  candidate's control-socket paths stay below the socket path limit. A nested
+  `TMPDIR` used to push the candidate into zxfer's socket-directory fallback,
+  about 15-20 ms per remote run.
+- On hosts whose `mktemp` rejects X-less templates (GNU, busybox), it appends
+  `.XXXXXX` to `upstream-compat-final`'s `mktemp -t` templates in the
+  extracted copy, because that baseline otherwise exits 3 on Linux.
+
 ## Direct Host Harness
 
 Run the integration suite interactively:
@@ -651,6 +1035,52 @@ commands. This is the safest mode when testing on a real workstation.
 This harness is still maintained and documented because it is the underlying
 integration engine, but it is no longer the default recommendation for routine
 unattended validation now that the VM-backed runner exists.
+
+The exact integration test/group order, including checks that run before pool
+creation, is declared in `tests/integration_test_registry.tsv`. Test bodies
+are grouped by concern under `tests/integration/`, and the fixed source order
+is declared separately in `tests/integration_fragment_manifest.tsv`. Both TSV
+files are validated as data rather than evaluated as shell. Before consulting
+`zpool`, the harness rejects invalid manifest rows, missing fragments,
+symlinked leaf or parent path components, duplicate paths, and registry or
+definition drift. Integration fragments are definition-only: executable
+top-level statements and nested function definitions are rejected before
+sourcing, every registry name must have exactly one top-level definition, and
+every top-level fragment function must appear in the registry.
+
+The stable `tests/run_integration_zxfer.sh` entry point owns argument parsing,
+confirmation, filtering, pool lifecycle, execution, and cleanup. Shared
+reporting, host setup, file-backed pool guards, and mock-remote fixtures live
+under `tests/helpers/`; the performance runner sources only those focused
+fixtures and never sources the integration runner or its test bodies. Add a
+new integration case to its matching concern fragment and to the execution
+registry. Edit the fragment manifest only when the concern-level file set
+itself changes.
+
+`tests/integration/hostile_names_tests.sh` holds the hostile-input cases:
+dataset names with spaces and ZFS-legal punctuation (locally, with `-j`, over
+`-O` and `-T`, and with `-d`), and user property values with control
+characters, quotes, zxfer's own list delimiters and shell syntax (with `-P`
+locally and over `-O` and `-T`, with `-o`, and through `-k`/`-e`). A name or
+value the platform's zfs rejects while building the fixture is skipped with a
+log line; a zxfer failure fails the test.
+`hostile_property_record_shaped_value_test` requires exit 0, byte-identical
+values and no added, cut or changed property with `-R`, `-N`, `-O` and `-T`.
+It first checks that zfs answers a lone `zfs get -Hpo property,value,source`
+of a missing user property with `NAME<TAB>-<TAB>-` and exit 0, which zxfer
+relies on to leave out a user property removed during a read. It then
+replicates its whole tree with `-P -R`, locally and over `-T` (a one-line
+value with TABs that the recursive prefetch reads, siblings `user` and
+`user x` whose second value line is headed by the other's name, and a
+volume), and compares every dataset's type, user property names, local user
+property names below the root, and value bytes.
+`hostile_property_dash_name_test` gives the source user properties named
+`-x:y` and `-x:m` (the latter multi-line) and requires exit 0. It runs `-o`
+with `-N` and `-R`, and `-P` with `-R` and `-T`, two passes each, and requires
+byte-identical values under `-P`. It skips only when the platform's zfs cannot
+create such a name: it tries `zfs set -- NAME=VALUE`, then a plain assignment
+first. It never changes a destination value, because zxfer cannot yet
+`zfs set` or `zfs inherit` such a name (`KNOWN_ISSUES.md`).
 
 Run it unattended:
 
@@ -743,21 +1173,33 @@ gate.
 
 ## GitHub Actions
 
-The project currently ships four GitHub Actions workflows:
+The project currently ships five GitHub Actions workflows:
 
 - `lint.yml`: `actionlint`, `checkbashisms`, ShellCheck, shfmt, and repository
   hygiene checks through the shared `tests/run_lint.sh` bootstrap with pinned
   tool versions and hashes
 - `coverage.yml`: shell coverage with both the bash-xtrace fallback and a
   non-blocking Docker-backed `kcov` pass, each uploaded as its own workflow
-  artifact; the bash-xtrace lane is the coverage-policy gate and publishes the
-  current `missing.txt` diff plus the policy report into the GitHub step
-  summary
-- `tests.yml`: shunit2 unit tests on Ubuntu and macOS, plus an Ubuntu
+  artifact; the bash-xtrace lane is report-only and publishes the current
+  `summary.tsv` into the GitHub step summary
+- `tests.yml`: shunit2 unit tests on Ubuntu 26.04, macOS 26 (`macos-26`),
+  and macOS 27 (the `xcode-27` preview image, because GitHub publishes no
+  `macos-27` label yet), plus an Ubuntu
   portable-shell matrix for `dash`, `bash --posix`, and `busybox ash` on every
   push, plus a non-blocking `posh` lane on pushes to `main` only so the slower
   hosted-runner pass stays out of routine branch pushes; plus dedicated
-  FreeBSD and OmniOS VM-backed unit jobs
+  FreeBSD 15.1 and OmniOS r151058 VM-backed unit jobs, plus a gating
+  `argv-fuzz` job on `ubuntu-26.04` that runs
+  `./tests/run_argv_fuzz.sh --seed "$GITHUB_RUN_NUMBER" --iterations 200` on
+  every push (it installs nothing: the fake zfs, mock ssh and mock parallel
+  ship with it; the job prints the awk version first, so a failure shows
+  which awk ran)
+- `perf.yml`: the advisory `perf-advisory` job (continue-on-error, with a
+  full-history checkout so `origin/upstream-compat-final` exists) runs
+  `./tests/run_perf_ab.sh --baseline-ref origin/upstream-compat-final --sizes 25,100 --reps 5 --summary "$GITHUB_STEP_SUMMARY"`
+  and appends the `tests/run_microbench.sh` TOTAL and `ssh_*` rows to the job
+  summary; a slowdown or harness error never fails the workflow, and the
+  spawn budgets are enforced by the unit suites
 - `integration.yml`: integration tests with the direct-host Ubuntu harness on
   `ubuntu-26.04`, plus FreeBSD and OmniOS guest-local `vmactions` lanes that
   install their native prerequisites and run `tests/run_integration_zxfer.sh`
@@ -804,7 +1246,14 @@ The backup-metadata integration cases are also current-format only. Positive
 `-k` / `-e` restore scenarios first create the current chunked lossless-keyed
 v2 metadata path through live zxfer runs, then mutate that file for security or
 corruption checks. The unit suites cover read-only restore fallback for the
-retired checksum-keyed v2 filename. Legacy mountpoint-local
+retired checksum-keyed v2 filename, and `tests/test_zxfer_planning_blackbox.sh`
+pins it end to end with literal `k<cksum>.<len>` names. The black-box suite also
+pins the v1 retired-alias refusal, per-dataset forwarded aliases (local and
+`-O`), two-hop chained `-k` through an alias without its own root row, the
+`-n -v -k -P` output, the partial-failure write boundary, and `-s`
+and `-m` with a failing `date` (`-m` never unmounts); the unit suite pins that
+each forwarded alias is read once per run, locally and over `-O`. Legacy
+mountpoint-local
 `.zxfer_backup_info.*`, v1, and older layouts are covered only as fail-closed
 negative tests.
 
@@ -820,6 +1269,11 @@ specific test-stub dispatch.
 The same `bash --posix` wrapper now applies when `tests/run_vm_matrix.sh`
 selects `--test-layer shunit2` for an OmniOS guest.
 
+The FreeBSD and OmniOS unit guests (the `vmactions` jobs and the local qemu
+backend) run the suites as root, so owner and permission tests must not assume
+a non-root uid; fake the other identity instead, as the remote backup read
+test does.
+
 The CI workflows use GitHub Actions concurrency cancellation keyed by workflow
 name plus pushed ref, so stale branch runs are canceled when a new push
 supersedes them.
@@ -830,11 +1284,12 @@ manager. That keeps the higher-fidelity coverage lane available even though
 current Ubuntu runner images do not consistently ship a native `kcov` package.
 The Docker-backed `kcov` step is artifact-only and non-blocking because that
 instrumented container can diverge from the normal unit-test hosts in process,
-file-descriptor, and base-tool behavior. The bash-xtrace job is kept alongside
-it because the line-oriented
-`summary.tsv`, `policy_failures.tsv`, and `missing.txt` diff outputs are stable
-enough to enforce no-regression coverage policy in CI and on local developer
-machines.
+file-descriptor, and base-tool behavior. In CI it is deliberately scoped to
+the production-focused `tests/test_zxfer_*.sh` suites, avoiding recursive
+instrumentation of the shunit, lint, validation, and benchmark runners. The
+bash-xtrace job is kept alongside it because the line-oriented
+`summary.tsv` and `missing.txt` outputs are stable enough to compare across
+CI and local developer machines.
 
 The macOS GitHub-hosted runner is currently used for `/bin/sh` and BSD-userland
 unit coverage only. The macOS shunit2 job intentionally does not install ZFS;

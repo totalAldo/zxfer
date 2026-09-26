@@ -12,8 +12,27 @@ else
 fi
 ZXFER_PERF_ROOT=$(cd "$TESTS_DIR/.." && pwd -P)
 
-# shellcheck source=tests/run_integration_zxfer.sh
-ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1 . "$TESTS_DIR/run_integration_zxfer.sh"
+ZXFER_BIN=${ZXFER_BIN:-"./zxfer"}
+OS_NAME=$(uname -s)
+MACOS_OPENZFS_ZFS_BIN="/usr/local/zfs/bin/zfs"
+ZXFER_CONFIRM_WRAPPER_DIR=""
+ZXFER_LIST_FAILED_TESTS_ONLY=${ZXFER_LIST_FAILED_TESTS_ONLY:-0}
+SRC_POOL_CREATED=0
+DEST_POOL_CREATED=0
+TEST_POOL_MARKER_PROP="org.zxfer:test"
+TEST_POOL_WORKDIR_PROP="org.zxfer:workdir"
+TEST_POOL_RUN_PROP="org.zxfer:run"
+TEST_POOL_VDEV_PROP="org.zxfer:vdev"
+TEST_RUN_ID=""
+
+# shellcheck source=tests/helpers/zfs_test_reporting.sh
+. "$TESTS_DIR/helpers/zfs_test_reporting.sh"
+# shellcheck source=tests/helpers/zfs_test_host.sh
+. "$TESTS_DIR/helpers/zfs_test_host.sh"
+# shellcheck source=tests/helpers/zfs_pool_fixtures.sh
+. "$TESTS_DIR/helpers/zfs_pool_fixtures.sh"
+# shellcheck source=tests/helpers/zxfer_remote_fixtures.sh
+. "$TESTS_DIR/helpers/zxfer_remote_fixtures.sh"
 
 ZXFER_PERF_CASE_LIST="chain_local chain_local_noop chain_local_incr fanout_local_j1_props fanout_local_j1_incr fanout_local_j4_props fanout_local_j4_props_noop chain_remote_mock chain_remote_mock_noop chain_remote_mock_pull_noop chain_remote_mock_compressed"
 ZXFER_PERF_PROFILE_METRICS="elapsed_seconds startup_latency_ms cleanup_ms ssh_setup_ms source_snapshot_listing_ms destination_snapshot_listing_ms snapshot_diff_sort_ms ssh_control_socket_lock_wait_count ssh_control_socket_lock_wait_ms remote_capability_cache_wait_count remote_capability_cache_wait_ms remote_capability_bootstrap_live remote_capability_bootstrap_cache remote_capability_bootstrap_memory remote_cli_tool_direct_probes source_zfs_calls destination_zfs_calls other_zfs_calls zfs_list_calls zfs_get_calls zfs_send_calls zfs_receive_calls ssh_shell_invocations source_ssh_shell_invocations destination_ssh_shell_invocations other_ssh_shell_invocations source_snapshot_list_commands source_snapshot_list_parallel_commands send_receive_pipeline_commands send_receive_background_pipeline_commands exists_destination_calls normalized_property_reads_source normalized_property_reads_destination normalized_property_reads_other required_property_backfill_gets parent_destination_property_reads bucket_source_inspection bucket_destination_inspection bucket_property_reconciliation bucket_send_receive_setup runtime_artifact_files_created runtime_artifact_dirs_created runtime_artifact_paths_cleaned runtime_cache_object_writes runtime_cache_object_readbacks command_render_calls live_destination_snapshot_rechecks diverged_snapshot_warnings"

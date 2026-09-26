@@ -38,10 +38,10 @@
 # Uses `zfs send` / `zfs receive` with property synchronization, secure helper
 # resolution, and structured failure reporting.
 
-#
-# Print out usage information
+# Purpose: Print the usage synopsis.
+# Usage: zxfer_usage; -h prints it to stdout, and the usage throws in
+# src/zxfer_reporting.sh print it to stderr (a call shellcheck cannot see).
 # shellcheck disable=SC2329
-# zxfer_usage() is called indirectly via zxfer_throw_usage_error() in src/zxfer_reporting.sh.
 zxfer_usage() {
 	cat <<EOT
 usage:
@@ -63,12 +63,15 @@ EOT
 }
 
 # Bootstrap with the built-in allowlist before sourcing helpers so early startup
-# never executes PATH-injected awk/sed binaries. zxfer_init_globals() later applies the
-# configurable secure PATH derived from ZXFER_SECURE_PATH(_APPEND).
+# never executes PATH-injected awk/sed binaries. zxfer_init_session_environment()
+# later applies the configurable secure PATH derived from
+# ZXFER_SECURE_PATH(_APPEND).
 ZXFER_EARLY_DEFAULT_SECURE_PATH="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 PATH=$ZXFER_EARLY_DEFAULT_SECURE_PATH
 export PATH
 
+# Purpose: Print usage and exit 0 when -h appears before any module loads.
+# Usage: zxfer_prescan_help_flag "$@"
 zxfer_prescan_help_flag() {
 	l_opt=""
 	OPTIND=1
@@ -84,128 +87,39 @@ zxfer_prescan_help_flag() {
 	OPTIND=1
 }
 
-zxfer_escape_report_value_early() {
-	# Keep raw ASCII control bytes inert in failure-report fields so startup
-	# invocation capture cannot inject terminal control sequences or lose
-	# trailing newline markers in shell command substitution.
-	l_report_value=$1
-	l_trailing_newlines=0
-	l_scan_value=$l_report_value
-	while :; do
-		case $l_scan_value in
-		*'
-')
-			l_trailing_newlines=$((l_trailing_newlines + 1))
-			l_scan_value=${l_scan_value%?}
-			;;
-		*)
-			break
-			;;
-		esac
-	done
-
-	# shellcheck disable=SC2016
-	printf '%s' "$l_report_value" | LC_ALL=C awk '
-BEGIN {
-	ORS = ""
-	for (i = 1; i < 32; i++) {
-		ctrl[sprintf("%c", i)] = sprintf("\\x%02X", i)
-	}
-	ctrl[sprintf("%c", 9)] = "\\t"
-	ctrl[sprintf("%c", 13)] = "\\r"
-	ctrl[sprintf("%c", 127)] = "\\x7F"
-}
-{
-	if (NR > 1) {
-		printf "\\n"
-	}
-	line = $0
-	for (i = 1; i <= length(line); i++) {
-		c = substr(line, i, 1)
-		if (c == "\\") {
-			printf "\\\\"
-		} else if (c in ctrl) {
-			printf "%s", ctrl[c]
-		} else {
-			printf "%s", c
-		}
-	}
-}
-'
-	while [ "$l_trailing_newlines" -gt 0 ]; do
-		printf '\\n'
-		l_trailing_newlines=$((l_trailing_newlines - 1))
-	done
-}
-
-zxfer_quote_token_for_failure_context_early() {
-	l_value_escaped=$(zxfer_escape_report_value_early "$1")
-	l_value_safe=$(printf '%s' "$l_value_escaped" | sed "s/'/'\"'\"'/g")
-	printf "'%s'" "$l_value_safe"
-}
-
-zxfer_failure_report_uses_unsafe_command_fields_early() {
-	case "${ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS:-}" in
-	1 | [Yy][Ee][Ss] | [Tt][Rr][Uu][Ee] | [Oo][Nn])
-		return 0
-		;;
-	esac
-
-	return 1
-}
-
-if zxfer_failure_report_uses_unsafe_command_fields_early; then
-	g_zxfer_original_invocation=$(zxfer_quote_token_for_failure_context_early "$0")
-	for l_zxfer_arg in "$@"; do
-		l_zxfer_quoted_arg=$(zxfer_quote_token_for_failure_context_early "$l_zxfer_arg")
-		g_zxfer_original_invocation="$g_zxfer_original_invocation $l_zxfer_quoted_arg"
-	done
-else
-	g_zxfer_original_invocation="[redacted]"
-fi
-g_zxfer_failure_stage=startup
-
 ###############################################################################
 # MAIN
 ###############################################################################
 
 zxfer_prescan_help_flag "$@"
 
-# Source runtime modules from this project
-g_zxfer_launcher_dir=$(dirname "$0")
+# Tell the profiler before option parsing whether -V may be active, so it
+# reads the start clock only then (zxfer_reset_profile_state): any
+# short-option cluster containing V counts, and an option argument that merely
+# contains V costs one clock read.
+g_zxfer_profile_prescan=0
+for l_prescan_arg in "$@"; do
+	case $l_prescan_arg in
+	-*V*) g_zxfer_profile_prescan=1 ;;
+	esac
+done
+
+# Source runtime modules from this project; ${0%/*} is dirname without a fork.
+case $0 in
+*/*) zxfer_launcher_dir=${0%/*} ;;
+*) zxfer_launcher_dir=. ;;
+esac
+[ -n "$zxfer_launcher_dir" ] || zxfer_launcher_dir=/
+ZXFER_SOURCE_MODULES_ROOT=$zxfer_launcher_dir
 # shellcheck source=src/zxfer_modules.sh
-ZXFER_SOURCE_MODULES_ROOT=$g_zxfer_launcher_dir . "$g_zxfer_launcher_dir"/src/zxfer_modules.sh
+. "$zxfer_launcher_dir"/src/zxfer_modules.sh
+zxfer_load_modules || exit $?
 
-zxfer_register_runtime_traps
-zxfer_init_globals
+# Rendering the invocation can run ${g_cmd_awk:-awk} before dependency
+# resolution assigns g_cmd_awk, so an inherited value must never be used:
+# only the awk on the pinned PATH above may run.
+unset g_cmd_awk
+zxfer_set_original_invocation "$0" "$@"
 
-zxfer_set_failure_stage "cli parse"
-zxfer_read_command_line_switches "$@"
-
-# Read out source and dest values
-shift "$((OPTIND - 1))"
-g_destination=$1
-
-# Basic consistency checking
-if [ $# -lt 1 ]; then
-	zxfer_throw_usage_error "Need a destination."
-fi
-
-zxfer_set_failure_roots "" "$g_destination"
-zxfer_set_failure_stage "cli validation"
-zxfer_consistency_check
-zxfer_prepare_remote_host_connections
-zxfer_init_variables
-
-zxfer_set_failure_stage "replication"
-zxfer_run_zfs_mode_loop
-
-# Final backup-metadata preview / safety flush. Live -k runs already persist
-# after each successful per-dataset replication step.
-if [ "$g_option_k_backup_property_mode" -eq 1 ]; then
-	zxfer_write_backup_properties
-fi
-
-# exit with success
-zxfer_beep 0
-exit 0
+zxfer_main "$@"
+exit $?

@@ -11,6 +11,8 @@ Required dependency "zfs" not found in secure PATH ...
 What it usually means:
 
 - the required binary is outside the secure allowlist
+- the name exists only as a shell function, alias, or builtin; lookups accept
+  only an executable regular file in a secure-PATH directory
 - `ZXFER_SECURE_PATH` is too narrow
 - the live runtime `PATH` is also confined to that same allowlist
 - the remote host does not have the required tool in the expected directories
@@ -20,6 +22,7 @@ What to check:
 - `ZXFER_SECURE_PATH`
 - `ZXFER_SECURE_PATH_APPEND`
 - every trusted directory needed for later bare helper invocations
+- whether either secure-PATH value contains a tab, carriage return, or newline
 - remote `zfs`, `ssh`, `cat`, `parallel`, or `zstd` availability
 
 ## Remote Dependency Probe Failures
@@ -50,8 +53,11 @@ What to inspect:
 - whether `ZXFER_SSH_USER_KNOWN_HOSTS_FILE` should point at a specific absolute
   known-hosts file for this run
 - whether `-V` shows repeated `remote_capability_bootstrap_live`,
-  `remote_capability_bootstrap_cache`, or `remote_cli_tool_direct_probes`
+  `remote_capability_bootstrap_memory`, or `remote_cli_tool_direct_probes`
   counters that explain which startup probe path was active
+  (`remote_capability_bootstrap_cache`, `ssh_control_socket_lock_wait_*`,
+  `remote_capability_cache_wait_*`, and `runtime_cache_object_readbacks` are
+  kept for output compatibility and always read 0)
 - the stderr failure report and `last_command`
 
 ## Snapshot Discovery Failures
@@ -144,23 +150,48 @@ What to do:
   snapshots: N.` per planned dataset and the profile summary reports
   `diverged_snapshot_warnings` so unattended runs can be audited
 
+## Incremental Receive Refused After An External Prune
+
+Example:
+
+```text
+cannot receive incremental stream: most recent snapshot of backup/pool/data
+does not match incremental source (snap3)
+```
+
+with `failure_stage: send/receive` in the report.
+
+What it usually means:
+
+- another tool destroyed the destination's newest common snapshot while zxfer
+  was running. zxfer lists the destination once per pass and serves each
+  dataset's pre-send recheck from that listing until zxfer itself changes the
+  dataset, so a snapshot pruned after the listing is not seen, and the
+  incremental stream names a base the destination no longer has
+
+What to do:
+
+- nothing was received or destroyed for that dataset; stop the external
+  pruning (or schedule it outside zxfer runs) and run zxfer again. The next
+  run lists the destination afresh: it sends from an older common snapshot
+  when one remains, and otherwise refuses a full receive into the snapshotted
+  destination as usual
+
 ## Background Completion Failures
 
 Examples:
 
 ```text
-Failed to read zfs send/receive completion metadata for [tank/src@snap2 -> backup/dst].
-Failed to publish zfs send/receive background completion for [tank/src@snap2 -> backup/dst] (PID 12345, exit 0).
-Failed to report zfs send/receive background completion for [tank/src@snap2 -> backup/dst] (PID 12345, exit 1).
+zfs send/receive job failed for [tank/src@snap2 -> backup/dst] (PID 12345, exit 1).
+zfs send/receive job failed for [tank/src@snap2 -> backup/dst] (PID 12345, exit 125).
 ```
 
 What it usually means:
 
-- the background job shell finished, but its per-job status file could not be
-  written or reloaded (a missing or malformed status file at wait time means
-  the job shell died before recording its status)
-- the completion queue notification could not be published back to the parent
-  process
+- the send/receive pipeline failed; inspect its preceding diagnostics
+- the job shell died before recording its status, or its per-job status file
+  could not be written or read; absent or invalid completion data is reported
+  as failure with exit 125
 - the runtime temp root became unreadable, unwritable, or was removed mid-run
 
 What to inspect:
@@ -171,8 +202,8 @@ What to inspect:
   stderr, because later `zstd: unexpected end of file` or `cannot receive:
   failed to read from stream` messages are often collateral after zxfer aborts
   sibling background jobs on the first real failure
-- whether the failure is isolated to queue publication (`publish`) or
-  status-file persistence/readback (`read` / `report`)
+- whether the job reported an actual pipeline failure or lacked valid
+  completion data
 
 ## Performance Harness Results
 
@@ -198,6 +229,14 @@ pure throughput regression.
 
 ## Backup Metadata Restore Failures
 
+If a write reports `restoring backup metadata rollback state`, inspect the
+reported `.zxfer-backup-recovery.*` path before retrying. It contains the
+previous primary file, retained with mode 0600 because automatic restoration
+failed. The diagnostic identifies the intended primary path; preserve that
+recovery file until the pair has been repaired. Ordinary detected write
+failures restore the previous pair automatically. Abrupt process or host
+failure can interrupt the two atomic renames and still require inspection.
+
 Example:
 
 ```text
@@ -222,12 +261,37 @@ What it usually means:
 What to inspect:
 
 - `ZXFER_BACKUP_DIR`
-- whether `ZXFER_BACKUP_DIR` is set to an absolute path
+- whether `ZXFER_BACKUP_DIR` is set to a single-line absolute path without
+  tabs or carriage returns
 - the source-dataset-relative tree under `ZXFER_BACKUP_DIR`
 - the exact source/destination roots that were backed up with `-k`
 - ownership and permissions of `.zxfer_backup_info.*`
 - whether the backup file contains exactly one current-format relative row for
   the intended dataset
+
+A chained `-k` run reads the forwarded alias of every dataset root at or above
+each dataset it backs up, including descendants of the source root. It stops
+when one of those aliases is old or invalid, under the current name or the
+retired `.zxfer_backup_info.<tail>.k<cksum>.<len>` name:
+
+```text
+Forwarded backup property file PATH does not declare supported zxfer backup metadata format version #format_version:2.
+```
+
+The same stop reports `... does not start with the required zxfer backup
+metadata header.` or `... does not contain a current-format relative row for
+source dataset DATASET.`. Move the named file aside and rerun. An alias without
+a row for its own root (written by `-k` when `-x` excludes the source root) is
+valid.
+
+Over `-O`, zxfer first lists the origin's storage directories. `find` is needed
+there only when the source dataset has a storage directory on the origin. A
+missing `find` stops the run with `Required dependency "find" not found on host
+HOST in secure PATH (...)`, then the report message `Required remote
+backup-metadata helper dependency not found on host HOST in secure PATH (...).
+Review prior stderr for the missing tool name.` (failure_class: dependency).
+Other listing failures (a symlinked storage-path component, or a failed `cd` or
+`find`) stop with `Failed to list backup metadata under DIR on HOST.`.
 
 ## Failure Report Logging And Email Alerts
 
@@ -255,9 +319,12 @@ last_command: '/sbin/zfs' 'send' ...
 zxfer: failure report end
 ```
 
+A run interrupted by HUP, INT, QUIT, or TERM still cleans up, reports
+`failure_stage: signal`, and exits with 128 plus the signal number (129, 130,
+131, or 143).
+
 zxfer serializes those appends through a metadata-bearing lock directory that
-records owner PID, process-start identity, hostname, purpose, and creation
-time. Writable log parents use a sibling lock; existing logs under trusted but
+records the owner PID and process-start identity. Writable log parents use a sibling lock; existing logs under trusted but
 non-writable parents use an exact log-path fallback lock under a validated temp
 root. Stale owners are reaped automatically after validation. If a successful
 append cannot release that lock cleanly, the append helper now fails closed and
@@ -270,7 +337,10 @@ cleanup, expect at most short `ssh-<role>.sock` control sockets owned by that
 invocation; remote helper capabilities are held in memory and have no cache or
 lock files. Older shared ssh lease directories, pid-only socket locks, and
 remote capability-cache lock roots from pre-per-run branch builds are stale
-artifacts rather than current zxfer state.
+artifacts rather than current zxfer state. When the local ssh supports
+control sockets, an unreachable or refusing `-O`/`-T` host fails at startup,
+after ssh's own diagnostic, with "Error creating ssh control socket for origin
+host." (or target host).
 
 By default that block redacts `invocation` and `last_command` as `[redacted]`,
 so routine failure logs do not capture raw command lines. If you explicitly
@@ -290,6 +360,8 @@ deliberate local debugging on trusted log sinks.
 Even in unsafe verbatim mode, zxfer escapes raw ASCII control bytes in
 structured failure-report values before writing them, so terminal control
 sequences are rendered inert in both `stderr` and `ZXFER_ERROR_LOG`.
+The `-v` and `-V` property lines escape property values the same way: a value
+holding ESC shows `\x1B`, and a backslash in a value shows as `\\`.
 
 To extract the newest report from an existing log:
 

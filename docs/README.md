@@ -6,8 +6,9 @@ with operator and contributor reference material.
 ## Start Here
 
 - [../README.md](../README.md): project overview and quick start
-- [../man/zxfer.8](../man/zxfer.8): primary command reference
-- [../man/zxfer.1m](../man/zxfer.1m): Solaris/illumos command reference
+- [../CONTRIBUTING.md](../CONTRIBUTING.md): contributor workflow and validation profiles
+- [../man/zxfer.8](../man/zxfer.8): canonical command reference
+- [../man/zxfer.1m](../man/zxfer.1m): generated Solaris/illumos rendering
 
 ## Guides
 
@@ -27,5 +28,4 @@ with operator and contributor reference material.
 
 - [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md): open issues
 - [../SECURITY.md](../SECURITY.md): security model and vulnerability reporting
-- [../CONTRIBUTING.md](../CONTRIBUTING.md): contributor workflow
 - [../CHANGELOG.txt](../CHANGELOG.txt): release history

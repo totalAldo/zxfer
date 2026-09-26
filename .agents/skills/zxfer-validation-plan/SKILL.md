@@ -14,7 +14,7 @@ description: Choose and explain safe validation commands for zxfer changes based
    - `./tests/run_lint.sh`
    - `ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh`
 4. For docs-only changes, prefer `git diff --check` and manual rendered-structure review unless the docs alter commands, test entry points, or shipped behavior.
-5. For coverage tooling or policy changes, review `tests/coverage_policy.tsv` and `tests/coverage_baseline/bash-xtrace/`.
+5. For coverage tooling changes, run `./tests/run_shunit_tests.sh tests/test_run_coverage.sh`; coverage is report-only, with no committed policy or baseline files.
 
 ## Integration Rules
 

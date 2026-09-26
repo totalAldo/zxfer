@@ -91,8 +91,9 @@ backup-restore validation, unsupported-property detection, and `%%size%%`
 progress probes. Because strict dry-run no longer inspects live snapshot
 state, it does not render the eventual send/receive or property-reconcile
 commands. With `-k`, dry-run still previews secure backup-directory
-preparation plus the staged metadata-write commands, including chained
-provenance alias writes, without touching the live backup store.
+preparation without touching the live backup store; there is no metadata write
+to preview, because a dry run runs no property pass (`-v` prints "No property
+data collected; skipping backup write.").
 
 ### `-R` Recursive replication
 
@@ -139,9 +140,9 @@ If the helper is missing, zxfer fails closed during setup; if it is
 incompatible, the source-discovery pipeline fails instead of silently falling
 back to serial discovery. The
 source-discovery helper is still tracked for cleanup by PID, while long-lived
-send/receive workers run supervision-lite, so abort cleanup signals the job's
-setsid process group or its tracked direct children instead of a bare
-wrapper-shell PID. The send/receive scheduler treats
+send/receive workers record per-job status files. Abort cleanup uses verified
+process groups where available, with a descendant-tracking wrapper as the
+fallback. The send/receive scheduler treats
 ancestor/descendant destination receives on the same target as mutually
 exclusive, but it skips blocked descendants and starts later independent
 datasets while job slots remain.
@@ -170,6 +171,11 @@ Use anchored expressions when you want exact matches instead of prefix matches.
 
 This is usually paired with retention schemes where yearly snapshots should
 survive even after newer monthly or daily snapshots are removed at the source.
+With `-d`, zxfer checks every planned destination delete against `-g` before
+it sends, receives, or destroys anything on the destination, and exits 2 if
+one is protected; without `-d`, `-g` deletes nothing, but zxfer still plans
+every dataset first and stops on a diverged destination before it sends,
+receives, or destroys anything.
 
 ### `-F` Force rollback on the receive side
 
@@ -255,7 +261,8 @@ validates `#format_version:2`, then restores the matching source-root-relative
 row. `-e` also flows through the property-transfer path during the restore.
 Older mountpoint-local `.zxfer_backup_info.*` files and other legacy metadata
 layouts are intentionally unsupported.
-`ZXFER_BACKUP_DIR` must be an absolute path.
+`ZXFER_BACKUP_DIR` must be a single-line absolute path without tabs or
+carriage returns.
 
 ## Remote Replication And Stream Options
 
@@ -309,8 +316,9 @@ rejected instead of being re-tokenized.
 ./zxfer -v -D 'pv -brt -s %%size%% -N %%title%%' -R tank/data backup/data
 ```
 
-The progress command must read the copied stream from stdin until EOF. Its
-stdout is discarded so progress helpers such as `pv` cannot duplicate or
+zxfer tees the send stream into a private FIFO that the progress command reads,
+so `-D` also works with `-j`. The progress command must read the copied stream
+from stdin until EOF. Its stdout is discarded so progress helpers such as `pv` cannot duplicate or
 corrupt the receive stream; progress text should go to stderr. `%%size%%`
 expands to an estimated stream size and `%%title%%` expands to the source
 `dataset@snapshot` label.

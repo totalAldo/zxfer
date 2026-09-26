@@ -428,10 +428,6 @@ zxfer_vm_decompress_archive() {
 		xz -dc "$l_archive" >"$l_tmp" ||
 			zxfer_vm_die "Failed to decompress $(basename "$l_archive") with xz"
 		;;
-	zst)
-		zstd -dc "$l_archive" >"$l_tmp" ||
-			zxfer_vm_die "Failed to decompress $(basename "$l_archive") with zstd"
-		;;
 	none)
 		cp "$l_archive" "$l_tmp" ||
 			zxfer_vm_die "Failed to copy $(basename "$l_archive") into $l_dest"

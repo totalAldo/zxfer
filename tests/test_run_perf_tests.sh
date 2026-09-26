@@ -100,6 +100,27 @@ test_perf_case_list_registers_incremental_and_pull_noop_cases() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_runner_sources_only_focused_fixture_helpers() {
+	runner_contents=$(cat "$PERF_RUNNER")
+
+	assertNotContains "The perf runner should never source the full integration harness." \
+		"$runner_contents" "run_integration_zxfer.sh"
+	assertContains "The perf runner should source the shared guarded pool fixtures." \
+		"$runner_contents" "helpers/zfs_pool_fixtures.sh"
+	assertContains "The perf runner should source the shared mock-remote fixtures." \
+		"$runner_contents" "helpers/zxfer_remote_fixtures.sh"
+	pool_fixture_status=0
+	command -v destroy_test_pool_if_owned >/dev/null 2>&1 || pool_fixture_status=$?
+	remote_fixture_status=0
+	command -v write_mock_ssh_script >/dev/null 2>&1 || remote_fixture_status=$?
+	integration_body_status=0
+	command -v basic_replication_test >/dev/null 2>&1 || integration_body_status=$?
+	assertEquals "The focused pool fixture functions should be available to perf." 0 "$pool_fixture_status"
+	assertEquals "The focused remote fixture functions should be available to perf." 0 "$remote_fixture_status"
+	assertNotEquals "Integration test bodies should not leak into the perf runner shell." 0 "$integration_body_status"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_case_descriptions_cover_all_registered_cases() {
 	for l_case_name in $ZXFER_PERF_CASE_LIST; do
 		l_description=$(zxfer_perf_case_description "$l_case_name")

@@ -36,98 +36,71 @@
 ################################################################################
 
 # Module contract:
-# owns globals: g_option_* parse results and compression-command safety state.
-# reads globals: OPTARG inputs, resolved helper paths, and existing runtime option context.
+# owns globals: g_option_* parse results and g_destination.
+# reads globals: OPTARG and ZXFER_MAX_YIELD_ITERATIONS; -Z writes the
+#   dependency-owned g_cmd_compress.
 # mutates caches: none.
-# returns via stdout: none; parser and validators update shared runtime globals directly.
+# returns via stdout: none; -h prints usage and exits.
 
-# Purpose: Refresh the validated compression and decompression command variants
-# derived from the current CLI state.
-# Usage: Called during CLI parsing and startup validation after compression-
-# related options change so later execution paths reuse one safe command-
-# resolution result.
-zxfer_refresh_compression_commands() {
-	if [ "$g_option_z_compress" -eq 1 ]; then
-		if [ "$g_cmd_compress" = "" ]; then
-			zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
-		fi
-		if ! l_compress_tokens=$(zxfer_split_cli_tokens "$g_cmd_compress" "Compression command (-Z)"); then
-			zxfer_throw_usage_error "$l_compress_tokens" 2
-		fi
-		if [ "$l_compress_tokens" = "" ]; then
-			zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
-		fi
-		if [ "$g_cmd_decompress" = "" ]; then
-			zxfer_throw_error "Compression requested but decompression command missing."
-		fi
-		if ! l_decompress_tokens=$(zxfer_split_cli_tokens "$g_cmd_decompress" "Decompression command"); then
-			zxfer_throw_error "$l_decompress_tokens"
-		fi
-		if [ "$l_decompress_tokens" = "" ]; then
-			zxfer_throw_error "Compression requested but decompression command missing."
-		fi
-		if ! g_cmd_compress_safe=$(zxfer_resolve_local_cli_command_safe "$g_cmd_compress" "compression command"); then
-			g_zxfer_failure_class=dependency
-			zxfer_throw_error "$g_cmd_compress_safe"
-		fi
-		if ! g_cmd_decompress_safe=$(zxfer_resolve_local_cli_command_safe "$g_cmd_decompress" "decompression command"); then
-			g_zxfer_failure_class=dependency
-			zxfer_throw_error "$g_cmd_decompress_safe"
-		fi
-		return
-	fi
-
-	if ! g_cmd_compress_safe=$(zxfer_quote_cli_tokens "$g_cmd_compress" "Compression command"); then
-		zxfer_throw_error "$g_cmd_compress_safe"
-	fi
-	if ! g_cmd_decompress_safe=$(zxfer_quote_cli_tokens "$g_cmd_decompress" "Decompression command"); then
-		zxfer_throw_error "$g_cmd_decompress_safe"
-	fi
+# Purpose: Reset every parsed CLI option to its established startup default.
+# Usage: Called by the session composition root before parsing a new invocation.
+# Side effects: Reinitializes the complete g_option_* state owned by this module.
+zxfer_init_cli_option_defaults() {
+	g_destination=""
+	g_option_b_beep_always=0
+	g_option_B_beep_on_success=0
+	g_option_c_services=""
+	g_option_d_delete_destination_snapshots=0
+	g_option_D_display_progress_bar=""
+	g_option_e_restore_property_mode=0
+	g_option_F_force_rollback=""
+	g_option_g_grandfather_protection=""
+	g_option_I_ignore_properties=""
+	# Default 1 avoids parallel source listing and background send jobs.
+	g_option_j_jobs=1
+	g_option_k_backup_property_mode=0
+	g_option_o_override_property=""
+	g_option_O_origin_host=""
+	g_option_P_transfer_property=0
+	g_option_R_recursive=""
+	g_option_m_migrate=0
+	g_option_n_dryrun=0
+	g_option_N_nonrecursive=""
+	g_option_s_make_snapshot=0
+	g_option_T_target_host=""
+	g_option_U_skip_unsupported_properties=0
+	g_option_v_verbose=0
+	g_option_V_very_verbose=0
+	g_option_x_exclude_datasets=""
+	g_option_Y_yield_iterations=1
+	g_option_w_raw_send=0
+	g_option_z_compress=0
 }
 
-# Purpose: Parse supported command-line switches into the shared `g_option_*`
-# runtime state.
-# Usage: Called during CLI parsing and startup validation before consistency
-# checks and transport bootstrap depend on the parsed flags.
+# Purpose: Parse the command-line switches into the g_option_* state.
+# Usage: zxfer_read_command_line_switches "$@"; the caller shifts by OPTIND.
+# An unknown option is a usage error, and -h prints usage and exits 0.
 zxfer_read_command_line_switches() {
-	while getopts bBc:dD:eFg:hI:j:kmnN:o:O:PR:sT:UvVwx:YzZ: l_i; do
-		case $l_i in
-		b)
-			g_option_b_beep_always=1
-			;;
-		B)
-			g_option_B_beep_on_success=1
-			;;
-		c)
-			g_option_c_services="$OPTARG"
-			;;
-		d)
-			g_option_d_delete_destination_snapshots=1
-			;;
-		D)
-			g_option_D_display_progress_bar="$OPTARG"
-			;;
+	while getopts bBc:dD:eFg:hI:j:kmnN:o:O:PR:sT:UvVwx:YzZ: l_cli_option; do
+		case $l_cli_option in
+		b) g_option_b_beep_always=1 ;;
+		B) g_option_B_beep_on_success=1 ;;
+		c) g_option_c_services=$OPTARG ;;
+		d) g_option_d_delete_destination_snapshots=1 ;;
+		D) g_option_D_display_progress_bar=$OPTARG ;;
 		e)
 			g_option_e_restore_property_mode=1
 			# Restore mode still flows through the property-transfer path.
 			g_option_P_transfer_property=1
 			;;
-		F)
-			g_option_F_force_rollback="-F"
-			;;
-		g)
-			g_option_g_grandfather_protection="$OPTARG"
-			;;
+		F) g_option_F_force_rollback="-F" ;;
+		g) g_option_g_grandfather_protection=$OPTARG ;;
 		h)
 			zxfer_usage
 			exit 0
 			;;
-		I)
-			g_option_I_ignore_properties="$OPTARG"
-			;;
-		j)
-			g_option_j_jobs="$OPTARG"
-			;;
+		I) g_option_I_ignore_properties=$OPTARG ;;
+		j) g_option_j_jobs=$OPTARG ;;
 		k)
 			g_option_k_backup_property_mode=1
 			# Backup mode still needs live source properties so they can be saved.
@@ -138,65 +111,37 @@ zxfer_read_command_line_switches() {
 			g_option_s_make_snapshot=1
 			g_option_P_transfer_property=1
 			;;
-		n)
-			g_option_n_dryrun=1
-			;;
-		N)
-			g_option_N_nonrecursive="$OPTARG"
-			;;
-		o)
-			g_option_o_override_property="$OPTARG"
-			;;
+		n) g_option_n_dryrun=1 ;;
+		N) g_option_N_nonrecursive=$OPTARG ;;
+		o) g_option_o_override_property=$OPTARG ;;
 		O)
-			l_new_origin_host="$OPTARG"
-			g_option_O_origin_host="$l_new_origin_host"
+			g_option_O_origin_host=$OPTARG
 			# Rebuild rendered zfs commands after the origin host spec changes.
 			zxfer_refresh_remote_zfs_commands
 			;;
-		P)
-			g_option_P_transfer_property=1
-			;;
-		R)
-			g_option_R_recursive="$OPTARG"
-			;;
-		s)
-			g_option_s_make_snapshot=1
-			;;
+		P) g_option_P_transfer_property=1 ;;
+		R) g_option_R_recursive=$OPTARG ;;
+		s) g_option_s_make_snapshot=1 ;;
 		T)
-			l_new_target_host="$OPTARG"
-			g_option_T_target_host="$l_new_target_host"
+			g_option_T_target_host=$OPTARG
 			# Rebuild rendered zfs commands after the target host spec changes.
 			zxfer_refresh_remote_zfs_commands
 			;;
-		U)
-			g_option_U_skip_unsupported_properties=1
-			;;
-		v)
-			g_option_v_verbose=1
-			;;
+		U) g_option_U_skip_unsupported_properties=1 ;;
+		v) g_option_v_verbose=1 ;;
 		V)
 			g_option_v_verbose=1
 			g_option_V_very_verbose=1
 			;;
-		w)
-			g_option_w_raw_send=1
-			;;
-		x)
-			g_option_x_exclude_datasets="$OPTARG"
-			;;
-		Y)
-			g_option_Y_yield_iterations=$(zxfer_get_max_yield_iterations)
-			;;
-		z)
-			g_option_z_compress=1
-			;;
+		w) g_option_w_raw_send=1 ;;
+		x) g_option_x_exclude_datasets=$OPTARG ;;
+		Y) g_option_Y_yield_iterations=$ZXFER_MAX_YIELD_ITERATIONS ;;
+		z) g_option_z_compress=1 ;;
 		Z)
 			g_option_z_compress=1
-			g_cmd_compress="$OPTARG"
+			g_cmd_compress=$OPTARG
 			;;
-		\?)
-			zxfer_throw_usage_error "Invalid option provided." 2
-			;;
+		*) zxfer_throw_usage_error "Invalid option provided." 2 ;;
 		esac
 	done
 
@@ -208,15 +153,12 @@ zxfer_read_command_line_switches() {
 
 # Purpose: Reject malformed or incompatible CLI combinations before zxfer opens
 # transports or touches datasets.
-# Usage: Called during CLI parsing and startup validation immediately after
-# option parsing so usage failures stop the run before any live side effects.
+# Usage: zxfer_consistency_check, right after option parsing; every problem is
+# a usage error.
 zxfer_consistency_check() {
 	# Validate -j early so arithmetic comparisons do not trip /bin/sh errors.
-	case ${g_option_j_jobs:-} in
-	'' | *[!0-9]*)
+	zxfer_is_uint "${g_option_j_jobs:-}" ||
 		zxfer_throw_usage_error "The -j option requires a positive integer job count, but received \"${g_option_j_jobs:-}\"."
-		;;
-	esac
 	if [ "$g_option_j_jobs" -le 0 ]; then
 		zxfer_throw_usage_error "The -j option requires a job count of at least 1."
 	fi
@@ -240,16 +182,11 @@ zxfer_consistency_check() {
 	fi
 
 	if [ "$g_option_g_grandfather_protection" != "" ]; then
-		case $g_option_g_grandfather_protection in
-		*[!0-9]*)
+		if ! zxfer_is_uint "$g_option_g_grandfather_protection"; then
 			zxfer_throw_usage_error "grandfather protection requires a positive integer; received \"$g_option_g_grandfather_protection\"."
-			;;
-		*)
-			if [ "$g_option_g_grandfather_protection" -le 0 ]; then
-				zxfer_throw_usage_error "grandfather protection requires days greater than 0; received \"$g_option_g_grandfather_protection\"."
-			fi
-			;;
-		esac
+		elif [ "$g_option_g_grandfather_protection" -le 0 ]; then
+			zxfer_throw_usage_error "grandfather protection requires days greater than 0; received \"$g_option_g_grandfather_protection\"."
+		fi
 	fi
 
 	# disallow migration related options and remote transfers at same time

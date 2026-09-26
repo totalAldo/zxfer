@@ -13,10 +13,9 @@
 # diagnostic line for unknown flags. The field names themselves stay pinned,
 # so a real failure-report format change still fails the diff.
 #
-# This suite never regenerates fixtures. To refresh one intentionally, rerun
-# the failing case, review the unified diff that the failure prints, and copy
-# the reviewed "actual" transcript (left at $TEST_TMPDIR/case.actual while the
-# test runs) over the golden file by hand.
+# A normal run never rewrites fixtures. To refresh them after an intentional
+# change, run the suite with ZXFER_UPDATE_GOLDEN=1, then review the fixture
+# diff with git before committing it.
 #
 # shellcheck disable=SC1090,SC2317,SC2329
 
@@ -98,14 +97,8 @@ zxfer_golden_invoke_zxfer() {
 		;;
 	esac
 
-	# test_helper.sh sources src/zxfer_modules.sh with prefix assignments on
-	# the `.` special builtin, so ZXFER_SOURCE_MODULES_* leak into this shell
-	# and its children. Pin them to empty (treated as unset by the module
-	# loader) so the launcher under test sources its full module list.
 	set +e
-	ZXFER_SOURCE_MODULES_ROOT='' \
-		ZXFER_SOURCE_MODULES_THROUGH='' \
-		ZXFER_SECURE_PATH="$g_golden_secure_path" \
+	ZXFER_SECURE_PATH="$g_golden_secure_path" \
 		ZXFER_SECURE_PATH_APPEND='' \
 		ZXFER_ERROR_LOG="$g_golden_case_error_log" \
 		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS="$g_golden_case_unsafe_commands" \
@@ -152,10 +145,21 @@ zxfer_golden_render_transcript() {
 
 # Purpose: Compare one already-normalized actual file against its golden
 # fixture byte for byte and fail with a unified diff on drift.
+# Usage: zxfer_golden_assert_file_matches_golden CASE ACTUAL_FILE; with
+# ZXFER_UPDATE_GOLDEN=1 it rewrites the fixture from ACTUAL_FILE instead.
 zxfer_golden_assert_file_matches_golden() {
 	l_case_name=$1
 	l_actual_file=$2
 	l_golden_file="$ZXFER_TEST_GOLDEN_DIR/${l_case_name}.golden"
+
+	if [ "${ZXFER_UPDATE_GOLDEN:-0}" = 1 ]; then
+		if ! cp "$l_actual_file" "$l_golden_file"; then
+			fail "Could not update golden fixture $l_golden_file for case $l_case_name."
+			return 1
+		fi
+		echo "Updated golden fixture $l_golden_file." >&2
+		return 0
+	fi
 
 	if [ ! -f "$l_golden_file" ]; then
 		fail "Missing golden fixture $l_golden_file for case $l_case_name."
@@ -353,6 +357,24 @@ test_failing_usage_invocation_leaves_tmpdir_empty() {
 	assertEquals "A failing usage invocation must not leak temp files into TMPDIR." \
 		"" "$(ls -A "$l_leak_tmpdir")"
 	zxfer_golden_assert_mock_tools_not_executed cli_tmpdir_leak
+}
+
+test_golden_update_mode_rewrites_the_fixture_from_the_actual_transcript() {
+	l_update_dir="$TEST_TMPDIR/update_golden"
+	mkdir -p "$l_update_dir"
+	printf '%s\n' stale >"$l_update_dir/update_case.golden"
+	printf '%s\n' fresh >"$TEST_TMPDIR/update_case.actual"
+
+	(
+		ZXFER_TEST_GOLDEN_DIR=$l_update_dir
+		ZXFER_UPDATE_GOLDEN=1
+		zxfer_golden_assert_file_matches_golden update_case \
+			"$TEST_TMPDIR/update_case.actual" 2>/dev/null
+	)
+	l_update_status=$?
+
+	assertEquals "ZXFER_UPDATE_GOLDEN=1 should rewrite the golden fixture from the actual transcript." \
+		"status=0 golden=fresh" "status=$l_update_status golden=$(cat "$l_update_dir/update_case.golden")"
 }
 
 # shellcheck source=tests/shunit2/shunit2

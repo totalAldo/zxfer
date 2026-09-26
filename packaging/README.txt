@@ -8,8 +8,8 @@ The current project documentation lives in:
 
 - README.md      - primary project overview, testing notes, and current fork behavior
 - docs/external-tools.md - runtime, optional, and test tool inventory for packaging work
-- man/zxfer.8    - full CLI reference and examples for FreeBSD/Linux-style installs
-- man/zxfer.1m   - full CLI reference and examples for Solaris/illumos installs
+- man/zxfer.8    - canonical CLI reference and examples for section 8 installs
+- man/zxfer.1m   - generated Solaris/illumos section 1M rendering; do not edit directly
 - CHANGELOG.txt  - release history
 - COPYING        - license
 

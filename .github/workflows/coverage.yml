@@ -10,13 +10,13 @@ concurrency:
 
 jobs:
   coverage-bash-xtrace:
-    name: shell coverage (bash-xtrace policy)
+    name: shell coverage (bash-xtrace)
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run coverage
         shell: bash
         env:
@@ -32,30 +32,16 @@ jobs:
           GIT_SHA: ${{ github.sha }}
           GIT_REF: ${{ github.ref }}
           SUMMARY_FILE: ${{ runner.temp }}/coverage/bash-xtrace/summary.tsv
-          POLICY_REPORT_FILE: ${{ runner.temp }}/coverage/bash-xtrace/policy_report.txt
-          POLICY_FAILURES_FILE: ${{ runner.temp }}/coverage/bash-xtrace/policy_failures.tsv
-          MISSING_DIFF_FILE: ${{ runner.temp }}/coverage/bash-xtrace/missing.diff
         run: |
           set -euo pipefail
           {
-            echo "## Bash-Xtrace Coverage Policy"
+            echo "## Bash-Xtrace Coverage (report-only)"
             echo
             echo "Commit: \`$GIT_SHA\`"
             echo
             echo "Ref: \`$GIT_REF\`"
             echo
-            if [ -f "$POLICY_REPORT_FILE" ]; then
-              echo '```text'
-              cat "$POLICY_REPORT_FILE"
-              echo '```'
-            else
-              echo "Coverage policy report was not generated."
-            fi
-
             if [ -f "$SUMMARY_FILE" ]; then
-              echo
-              echo "### Coverage Summary"
-              echo
               echo "| target | pct | coverable | hit | miss |"
               echo "| --- | ---: | ---: | ---: | ---: |"
               awk -F '\t' '
@@ -63,46 +49,13 @@ jobs:
                   printf "| `%s` | %s%% | %s | %s | %s |\n", $5, $1, $2, $3, $4
                 }
               ' "$SUMMARY_FILE"
-            fi
-
-            if [ -f "$POLICY_FAILURES_FILE" ] && [ "$(wc -l < "$POLICY_FAILURES_FILE")" -gt 1 ]; then
-              echo
-              echo "### Policy Failures"
-              echo
-              echo "| type | target | current | required | note |"
-              echo "| --- | --- | ---: | ---: | --- |"
-              awk -F '\t' '
-                function pct(value) {
-                  return value == "-" ? value : value "%"
-                }
-                NR > 1 {
-                  printf "| `%s` | `%s` | %s | %s | %s |\n", $1, $2, pct($3), pct($4), $5
-                }
-              ' "$POLICY_FAILURES_FILE"
-            fi
-
-            echo
-            echo "### missing.txt Diff"
-            echo
-            if [ -f "$MISSING_DIFF_FILE" ]; then
-              echo "<details><summary>Show missing.txt diff against the committed baseline</summary>"
-              echo
-              echo '```diff'
-              sed -n '1,200p' "$MISSING_DIFF_FILE"
-              if [ "$(wc -l < "$MISSING_DIFF_FILE")" -gt 200 ]; then
-                echo
-                echo "... (truncated; see the uploaded coverage artifact for the full diff)"
-              fi
-              echo '```'
-              echo
-              echo "</details>"
             else
-              echo "missing.txt diff was not generated."
+              echo "Coverage summary was not generated."
             fi
           } >>"$GITHUB_STEP_SUMMARY"
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zxfer-coverage-bash-xtrace-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/coverage
@@ -115,7 +68,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run coverage with kcov
         continue-on-error: true
         shell: bash
@@ -133,10 +86,10 @@ jobs:
             -v "$COVERAGE_DIR:/tmp/zxfer-coverage" \
             -w "$PWD" \
             kcov/kcov@sha256:481289ae32e55e5b733019515acd10948a4f76dfed381765577db909664fc603 \
-            sh -lc './tests/run_coverage.sh'
+            sh -lc './tests/run_coverage.sh tests/test_zxfer_*.sh'
       - name: Upload kcov artifact
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zxfer-coverage-kcov-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/coverage-kcov

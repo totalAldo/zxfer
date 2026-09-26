@@ -11,17 +11,16 @@ TEST_DIR="$ZXFER_ROOT/tests"
 COVERAGE_DIR=${COVERAGE_DIR:-"$ZXFER_ROOT/coverage"}
 ZXFER_COVERAGE_MODE=${ZXFER_COVERAGE_MODE:-auto}
 ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=${ZXFER_COVERAGE_INCLUDE_ENTRYPOINT:-0}
-ZXFER_COVERAGE_ENFORCE_POLICY=${ZXFER_COVERAGE_ENFORCE_POLICY:-1}
-ZXFER_COVERAGE_REGRESSION_HIT_TOLERANCE=${ZXFER_COVERAGE_REGRESSION_HIT_TOLERANCE:-2}
-ZXFER_COVERAGE_TOTAL_REGRESSION_HIT_TOLERANCE=${ZXFER_COVERAGE_TOTAL_REGRESSION_HIT_TOLERANCE:-4}
-COVERAGE_POLICY_FILE=${ZXFER_COVERAGE_POLICY_FILE:-"$TEST_DIR/coverage_policy.tsv"}
-COVERAGE_BASELINE_DIR=${ZXFER_COVERAGE_BASELINE_DIR:-"$TEST_DIR/coverage_baseline/bash-xtrace"}
-COVERAGE_BASELINE_SUMMARY_FILE=${ZXFER_COVERAGE_BASELINE_SUMMARY_FILE:-"$COVERAGE_BASELINE_DIR/summary.tsv"}
-COVERAGE_BASELINE_MISSING_FILE=${ZXFER_COVERAGE_BASELINE_MISSING_FILE:-"$COVERAGE_BASELINE_DIR/missing.txt"}
+COVERAGE_ACTIVE_SUITE_PID=
+COVERAGE_ACTIVE_SUITE_TOKEN=
+COVERAGE_DEFER_SIGNALS=0
+COVERAGE_DEFERRED_SIGNAL=
+TARGET_LIST_FILE=
+COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS=${COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS:-2}
 
 print_usage() {
-	cat <<'EOF'
-Usage: tests/run_coverage.sh [suite ...]
+	cat <<'USAGE'
+Usage: tests/run_coverage.sh [--report-only] [--] [suite ...]
 
 Runs the shunit2 suites under a coverage collector and writes results to
 ./coverage by default.
@@ -36,29 +35,41 @@ Modes:
   kcov        Require kcov.
   bash-xtrace Require the bash xtrace fallback.
 
-Environment:
-  ZXFER_COVERAGE_ENFORCE_POLICY=0  disable the bash-xtrace coverage gate
-  ZXFER_COVERAGE_POLICY_FILE       override the minimum-coverage policy file
-  ZXFER_COVERAGE_BASELINE_DIR      override the committed bash-xtrace baseline dir
+Coverage is report-only: no minimum, baseline, or no-regression policy is
+applied, and the exit status reflects only the selected suites. The
+--report-only flag is accepted for compatibility and has no effect.
 
-The bash-xtrace mode writes repo-relative summary.tsv and missing.txt reports,
-appends a TOTAL row, compares them to the committed baseline, and writes a
-unified missing.txt diff for CI and pull request visibility.
-
-The committed bash-xtrace baseline uses a small hit-count tolerance during the
-no-regression comparison to absorb known shell / platform tracing jitter in the
-approximation path.
-
-Committed policy files:
-  tests/coverage_policy.tsv
-  tests/coverage_baseline/bash-xtrace/summary.tsv
-  tests/coverage_baseline/bash-xtrace/missing.txt
+The bash-xtrace mode writes repo-relative summary.tsv and missing.txt reports
+and appends a TOTAL row.
 
 Examples:
   tests/run_coverage.sh
   ZXFER_COVERAGE_MODE=bash-xtrace tests/run_coverage.sh tests/test_zxfer_reporting.sh
+  ZXFER_COVERAGE_MODE=bash-xtrace tests/run_coverage.sh
   COVERAGE_DIR=/tmp/zxfer-coverage tests/run_coverage.sh
-EOF
+USAGE
+}
+
+resolve_coverage_collector_mode() {
+	case "$ZXFER_COVERAGE_MODE" in
+	auto)
+		if command -v kcov >/dev/null 2>&1; then
+			printf '%s\n' kcov
+		else
+			printf '%s\n' bash-xtrace
+		fi
+		;;
+	kcov)
+		printf '%s\n' kcov
+		;;
+	bash-xtrace)
+		printf '%s\n' bash-xtrace
+		;;
+	*)
+		echo "Unknown coverage mode: $ZXFER_COVERAGE_MODE" >&2
+		return 1
+		;;
+	esac
 }
 
 resolve_suite_path() {
@@ -99,14 +110,22 @@ resolve_suites() {
 	done
 }
 
+list_coverage_target_labels() {
+	if [ "$ZXFER_COVERAGE_INCLUDE_ENTRYPOINT" = "1" ]; then
+		printf '%s\n' zxfer
+	fi
+	for l_coverage_target_path in "$ZXFER_ROOT"/src/*.sh; do
+		[ -f "$l_coverage_target_path" ] || continue
+		printf '%s\n' "${l_coverage_target_path#"$ZXFER_ROOT"/}"
+	done
+}
+
 write_target_file_list() {
 	l_target_list_file=$1
-	{
-		if [ "$ZXFER_COVERAGE_INCLUDE_ENTRYPOINT" = "1" ]; then
-			printf '%s\n' "$ZXFER_ROOT/zxfer"
-		fi
-		printf '%s\n' "$ZXFER_ROOT"/src/*.sh
-	} >"$l_target_list_file"
+	list_coverage_target_labels |
+		while IFS= read -r l_coverage_target_label; do
+			printf '%s\n' "$ZXFER_ROOT/$l_coverage_target_label"
+		done >"$l_target_list_file"
 }
 
 run_with_kcov() {
@@ -140,22 +159,32 @@ run_with_kcov() {
 
 bash_supports_xtrace_line_numbers() {
 	l_bash_bin=$1
-	l_probe_file=${TMPDIR:-/tmp}/zxfer.coverage.probe.$$
-	(
-		capture_bash_xtrace_to_file "$l_bash_bin" "$l_probe_file" -s <<'EOF' >/dev/null 2>&1
+	l_probe_script=$(mktemp "${TMPDIR:-/tmp}/zxfer.coverage.probe.XXXXXX") ||
+		return 1
+	l_probe_file=$l_probe_script.trace
+	if ! (
+		umask 077 && cat >"$l_probe_script" <<'EOF'
 probe() {
 	printf '%s\n' ok >/dev/null
 }
 probe
 EOF
+	); then
+		rm -f "$l_probe_script" "$l_probe_file"
+		return 1
+	fi
+	(
+		capture_bash_xtrace_to_file \
+			"$l_bash_bin" "$l_probe_file" "$l_probe_script" \
+			>/dev/null 2>&1
 	) || true
 
 	if grep -Eq '^\+[^:]+:[0-9]+: ' "$l_probe_file" 2>/dev/null; then
-		rm -f "$l_probe_file"
+		rm -f "$l_probe_script" "$l_probe_file"
 		return 0
 	fi
 
-	rm -f "$l_probe_file"
+	rm -f "$l_probe_script" "$l_probe_file"
 	return 1
 }
 
@@ -163,15 +192,462 @@ capture_bash_xtrace_to_file() {
 	l_bash_bin=$1
 	l_trace_file=$2
 	shift 2
+	[ "$#" -gt 0 ] || return 1
+	l_capture_script=$1
+	shift
+	l_capture_status=0
+	l_capture_pid=
+	l_capture_token=
 
 	# Keep the coverage trace off fd 9 because send/receive tests exercise
 	# their own queue descriptors on 8/9 and may close them during setUp().
-	(
-		exec 7>"$l_trace_file"
-		ZXFER_COVERAGE_BASH_BIN=$l_bash_bin \
-			BASH_XTRACEFD=7 PS4='+${BASH_SOURCE}:${LINENO}: ' \
-			exec "$l_bash_bin" --noprofile --norc -x "$@"
-	)
+	# Apply fd 7 directly to Bash: some POSIX shells mark descriptors opened by
+	# an earlier exec builtin close-on-exec inside an asynchronous subshell.
+	# Set PS4 inside Bash because privileged/root shells may reject an imported
+	# PS4 environment value. $0 and the remaining arguments still match a direct
+	# `bash suite [args...]` invocation while the wrapper sources the suite.
+	COVERAGE_DEFER_SIGNALS=1
+	# shellcheck disable=SC2016  # Expanded by the traced child Bash.
+	ZXFER_COVERAGE_BASH_BIN=$l_bash_bin \
+		"$l_bash_bin" --noprofile --norc -c '
+l_zxfer_coverage_script=$1
+shift
+PS4="+\${BASH_SOURCE[0]-\$0}:\${LINENO:-0}: "
+BASH_XTRACEFD=7
+set -x
+. "$l_zxfer_coverage_script"
+' "$l_capture_script" "$l_capture_script" "$@" \
+		7>"$l_trace_file" <&0 &
+	l_capture_pid=$!
+	l_capture_token=$(coverage_get_process_start_token "$l_capture_pid" 2>/dev/null || true)
+	COVERAGE_ACTIVE_SUITE_PID=$l_capture_pid
+	COVERAGE_ACTIVE_SUITE_TOKEN=$l_capture_token
+	COVERAGE_DEFER_SIGNALS=0
+	consume_deferred_coverage_signal
+	if wait "$COVERAGE_ACTIVE_SUITE_PID"; then
+		l_capture_status=0
+	else
+		l_capture_status=$?
+	fi
+	COVERAGE_ACTIVE_SUITE_PID=
+	COVERAGE_ACTIVE_SUITE_TOKEN=
+	return "$l_capture_status"
+}
+
+coverage_signal_exit_status() {
+	case "$1" in
+	HUP) printf '%s\n' 129 ;;
+	INT) printf '%s\n' 130 ;;
+	QUIT) printf '%s\n' 131 ;;
+	TERM) printf '%s\n' 143 ;;
+	*) printf '%s\n' 1 ;;
+	esac
+}
+
+coverage_signal_number() {
+	case "$1" in
+	0) printf '%s\n' 0 ;;
+	HUP) printf '%s\n' 1 ;;
+	INT) printf '%s\n' 2 ;;
+	QUIT) printf '%s\n' 3 ;;
+	KILL) printf '%s\n' 9 ;;
+	TERM) printf '%s\n' 15 ;;
+	*) return 1 ;;
+	esac
+}
+
+coverage_send_signal_to_pid() {
+	l_coverage_send_signal_name=$1
+	l_coverage_send_signal_pid=$2
+	l_coverage_send_signal_number=
+
+	case "$l_coverage_send_signal_pid" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	kill -s "$l_coverage_send_signal_name" "$l_coverage_send_signal_pid" >/dev/null 2>&1 && return 0
+	kill "-$l_coverage_send_signal_name" "$l_coverage_send_signal_pid" >/dev/null 2>&1 && return 0
+	l_coverage_send_signal_number=$(coverage_signal_number "$l_coverage_send_signal_name" 2>/dev/null || true)
+	[ -n "$l_coverage_send_signal_number" ] || return 1
+	kill "-$l_coverage_send_signal_number" "$l_coverage_send_signal_pid" >/dev/null 2>&1
+}
+
+# Return a stable process-start token so a snapshotted descendant PID can be
+# distinguished from an unrelated process that later reuses the same number.
+coverage_get_process_start_token() {
+	l_coverage_token_pid=$1
+
+	case "$l_coverage_token_pid" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	l_coverage_token_selector=lstart
+	l_coverage_token_raw=$(LC_ALL=C ps -p "$l_coverage_token_pid" -o lstart= 2>/dev/null || :)
+	case $- in
+	*f*) l_coverage_token_restore_glob=0 ;;
+	*)
+		l_coverage_token_restore_glob=1
+		set -f
+		;;
+	esac
+	if [ "${IFS+set}" = "set" ]; then
+		l_coverage_token_saved_ifs_set=1
+		l_coverage_token_saved_ifs=$IFS
+	else
+		l_coverage_token_saved_ifs_set=0
+		l_coverage_token_saved_ifs=
+	fi
+	unset IFS
+	# shellcheck disable=SC2086
+	set -- $l_coverage_token_raw
+	if [ "$#" -eq 0 ]; then
+		l_coverage_token_selector=stime
+		l_coverage_token_raw=$(LC_ALL=C ps -p "$l_coverage_token_pid" -o stime= 2>/dev/null || :)
+		# shellcheck disable=SC2086
+		set -- $l_coverage_token_raw
+	fi
+	l_coverage_token_normalized=$*
+	if [ "$l_coverage_token_saved_ifs_set" -eq 1 ]; then
+		IFS=$l_coverage_token_saved_ifs
+	else
+		unset IFS
+	fi
+	if [ "$l_coverage_token_restore_glob" -eq 1 ]; then
+		set +f
+	fi
+	[ "$#" -gt 0 ] || return 1
+	printf '%s:%s\n' "$l_coverage_token_selector" "$l_coverage_token_normalized"
+}
+
+coverage_list_child_pids() {
+	l_coverage_children_parent=$1
+	l_coverage_children_pgrep=
+	l_coverage_children_ps=
+
+	case "$l_coverage_children_parent" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	if command -v pgrep >/dev/null 2>&1; then
+		l_coverage_children_pgrep=$(pgrep -P "$l_coverage_children_parent" 2>/dev/null || true)
+		if [ -n "$l_coverage_children_pgrep" ]; then
+			printf '%s\n' "$l_coverage_children_pgrep"
+			return 0
+		fi
+	fi
+	if l_coverage_children_ps=$(ps -eo pid= -o ppid= 2>/dev/null); then
+		:
+	elif l_coverage_children_ps=$(ps -ax -o pid= -o ppid= 2>/dev/null); then
+		:
+	elif l_coverage_children_ps=$(ps -A -o pid= -o ppid= 2>/dev/null); then
+		:
+	else
+		return 1
+	fi
+	printf '%s\n' "$l_coverage_children_ps" | awk -v parent="$l_coverage_children_parent" '
+		$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $2 == parent { print $1 }
+	'
+}
+
+coverage_child_pid_matches_parent() {
+	l_coverage_child_parent=$1
+	l_coverage_child_pid=$2
+
+	for l_coverage_child_current in $(coverage_list_child_pids "$l_coverage_child_parent"); do
+		[ "$l_coverage_child_current" = "$l_coverage_child_pid" ] && return 0
+	done
+	return 1
+}
+
+# Capture identity only while the PID is still a child of the expected parent,
+# and require the start token to remain stable across that relationship check.
+coverage_capture_child_identity() {
+	l_coverage_identity_parent=$1
+	l_coverage_identity_pid=$2
+	l_coverage_identity_before=
+	l_coverage_identity_after=
+
+	l_coverage_identity_before=$(coverage_get_process_start_token "$l_coverage_identity_pid") || return 1
+	coverage_child_pid_matches_parent "$l_coverage_identity_parent" "$l_coverage_identity_pid" || return 1
+	l_coverage_identity_after=$(coverage_get_process_start_token "$l_coverage_identity_pid") || return 1
+	[ "$l_coverage_identity_before" = "$l_coverage_identity_after" ] || return 1
+	printf '%s\n' "$l_coverage_identity_before"
+}
+
+coverage_process_identity_matches() {
+	l_coverage_match_pid=$1
+	l_coverage_match_expected=$2
+	l_coverage_match_current=
+
+	[ -n "$l_coverage_match_expected" ] || return 1
+	l_coverage_match_current=$(coverage_get_process_start_token "$l_coverage_match_pid") || return 1
+	[ "$l_coverage_match_current" = "$l_coverage_match_expected" ]
+}
+
+coverage_tracked_process_running_p() {
+	l_coverage_tracked_running_pid=$1
+	l_coverage_tracked_running_token=$2
+
+	coverage_process_identity_matches \
+		"$l_coverage_tracked_running_pid" \
+		"$l_coverage_tracked_running_token" || return 1
+	coverage_process_running_p "$l_coverage_tracked_running_pid"
+}
+
+coverage_signal_tracked_process() {
+	l_coverage_tracked_signal=$1
+	l_coverage_tracked_signal_pid=$2
+	l_coverage_tracked_signal_token=$3
+
+	case "$l_coverage_tracked_signal_pid" in
+	'' | *[!0-9]*) return 0 ;;
+	esac
+	coverage_process_identity_matches \
+		"$l_coverage_tracked_signal_pid" \
+		"$l_coverage_tracked_signal_token" || return 0
+	coverage_send_signal_to_pid \
+		"$l_coverage_tracked_signal" "$l_coverage_tracked_signal_pid" || :
+}
+
+# Snapshot descendants before signalling so a parent that exits promptly
+# cannot reparent a still-running grandchild out of the traversal.
+coverage_collect_process_tree() {
+	l_coverage_tree_pending=$1
+	l_coverage_tree_next=
+	l_coverage_tree_descendants=
+	l_coverage_tree_parent=
+	l_coverage_tree_child=
+	l_coverage_tree_token=
+	l_coverage_tree_record=
+
+	while [ -n "$l_coverage_tree_pending" ]; do
+		l_coverage_tree_next=
+		for l_coverage_tree_parent in $l_coverage_tree_pending; do
+			for l_coverage_tree_child in $(coverage_list_child_pids "$l_coverage_tree_parent"); do
+				l_coverage_tree_token=$(coverage_capture_child_identity \
+					"$l_coverage_tree_parent" "$l_coverage_tree_child") || continue
+				l_coverage_tree_next="${l_coverage_tree_next}${l_coverage_tree_next:+ }$l_coverage_tree_child"
+				l_coverage_tree_record=$(printf '%s\t%s' \
+					"$l_coverage_tree_child" "$l_coverage_tree_token")
+				if [ -n "$l_coverage_tree_descendants" ]; then
+					l_coverage_tree_descendants="$l_coverage_tree_record
+$l_coverage_tree_descendants"
+				else
+					l_coverage_tree_descendants=$l_coverage_tree_record
+				fi
+			done
+		done
+		l_coverage_tree_pending=$l_coverage_tree_next
+	done
+	printf '%s\n' "$l_coverage_tree_descendants"
+}
+
+coverage_process_state() {
+	l_coverage_state_pid=$1
+	l_coverage_state_value=
+
+	l_coverage_state_value=$(ps -o stat= -p "$l_coverage_state_pid" 2>/dev/null |
+		awk '$1 != "STAT" && $1 != "STATE" && $1 != "" { print $1; exit }')
+	if [ -z "$l_coverage_state_value" ]; then
+		l_coverage_state_value=$(ps -o state= -p "$l_coverage_state_pid" 2>/dev/null |
+			awk '$1 != "S" && $1 != "STAT" && $1 != "STATE" && $1 != "" { print $1; exit }')
+	fi
+	printf '%s\n' "$l_coverage_state_value"
+}
+
+coverage_process_running_p() {
+	l_coverage_running_pid=$1
+	l_coverage_running_state=
+
+	coverage_send_signal_to_pid 0 "$l_coverage_running_pid" || return 1
+	l_coverage_running_state=$(coverage_process_state "$l_coverage_running_pid")
+	case "$l_coverage_running_state" in
+	Z* | z* | *zombie* | *defunct*) return 1 ;;
+	esac
+	return 0
+}
+
+coverage_process_tree_running_p() {
+	l_coverage_running_tree_records=$1
+	l_coverage_running_tree_tab=$(printf '\t')
+
+	while IFS="$l_coverage_running_tree_tab" read -r \
+		l_coverage_running_tree_pid l_coverage_running_tree_token; do
+		[ -n "$l_coverage_running_tree_pid" ] || continue
+		coverage_process_identity_matches \
+			"$l_coverage_running_tree_pid" "$l_coverage_running_tree_token" || continue
+		if coverage_process_running_p "$l_coverage_running_tree_pid"; then
+			return 0
+		fi
+	done <<EOF
+$l_coverage_running_tree_records
+EOF
+	return 1
+}
+
+coverage_process_tree_exists_p() {
+	l_coverage_existing_tree_records=$1
+	l_coverage_existing_tree_tab=$(printf '\t')
+
+	while IFS="$l_coverage_existing_tree_tab" read -r \
+		l_coverage_existing_tree_pid l_coverage_existing_tree_token; do
+		[ -n "$l_coverage_existing_tree_pid" ] || continue
+		coverage_process_identity_matches \
+			"$l_coverage_existing_tree_pid" "$l_coverage_existing_tree_token" || continue
+		if coverage_send_signal_to_pid 0 "$l_coverage_existing_tree_pid"; then
+			return 0
+		fi
+	done <<EOF
+$l_coverage_existing_tree_records
+EOF
+	return 1
+}
+
+coverage_signal_process_tree() {
+	l_coverage_signal_tree_signal=$1
+	l_coverage_signal_tree_records=$2
+	l_coverage_signal_tree_tab=$(printf '\t')
+
+	while IFS="$l_coverage_signal_tree_tab" read -r \
+		l_coverage_signal_tree_pid l_coverage_signal_tree_token; do
+		[ -n "$l_coverage_signal_tree_pid" ] || continue
+		coverage_process_identity_matches \
+			"$l_coverage_signal_tree_pid" "$l_coverage_signal_tree_token" || continue
+		coverage_send_signal_to_pid "$l_coverage_signal_tree_signal" "$l_coverage_signal_tree_pid" || :
+	done <<EOF
+$l_coverage_signal_tree_records
+EOF
+}
+
+coverage_wait_for_process_tree_shutdown() {
+	l_coverage_wait_tree_records=$1
+	l_coverage_wait_tree_remaining=$COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS
+
+	case "$l_coverage_wait_tree_remaining" in
+	'' | *[!0-9]*) l_coverage_wait_tree_remaining=2 ;;
+	esac
+	while [ "$l_coverage_wait_tree_remaining" -gt 0 ]; do
+		coverage_process_tree_running_p "$l_coverage_wait_tree_records" || return 0
+		sleep 1 || :
+		l_coverage_wait_tree_remaining=$((l_coverage_wait_tree_remaining - 1))
+	done
+	coverage_process_tree_running_p "$l_coverage_wait_tree_records" && return 1
+	return 0
+}
+
+coverage_wait_for_direct_process_shutdown() {
+	l_coverage_wait_pid=$1
+	l_coverage_wait_token=$2
+	l_coverage_wait_pid_remaining=$COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS
+
+	case "$l_coverage_wait_pid_remaining" in
+	'' | *[!0-9]*) l_coverage_wait_pid_remaining=2 ;;
+	esac
+	while [ "$l_coverage_wait_pid_remaining" -gt 0 ]; do
+		coverage_tracked_process_running_p \
+			"$l_coverage_wait_pid" "$l_coverage_wait_token" || return 0
+		sleep 1 || :
+		l_coverage_wait_pid_remaining=$((l_coverage_wait_pid_remaining - 1))
+	done
+	coverage_tracked_process_running_p \
+		"$l_coverage_wait_pid" "$l_coverage_wait_token" && return 1
+	return 0
+}
+
+# Once the directly owned suite has been waited for, give the system reaper a
+# bounded opportunity to remove any orphaned descendant zombies as well.
+coverage_wait_for_process_tree_reap() {
+	l_coverage_reap_tree_pids=$1
+	l_coverage_reap_tree_remaining=$COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS
+
+	case "$l_coverage_reap_tree_remaining" in
+	'' | *[!0-9]*) l_coverage_reap_tree_remaining=2 ;;
+	esac
+	while [ "$l_coverage_reap_tree_remaining" -gt 0 ]; do
+		coverage_process_tree_exists_p "$l_coverage_reap_tree_pids" || return 0
+		sleep 1 || :
+		l_coverage_reap_tree_remaining=$((l_coverage_reap_tree_remaining - 1))
+	done
+	coverage_process_tree_exists_p "$l_coverage_reap_tree_pids" && return 1
+	return 0
+}
+
+cleanup_coverage_runner() {
+	if [ -n "${TARGET_LIST_FILE:-}" ]; then
+		rm -f "$TARGET_LIST_FILE"
+		TARGET_LIST_FILE=
+	fi
+}
+
+remember_deferred_coverage_signal() {
+	l_coverage_deferred_signal=$1
+
+	if [ -z "${COVERAGE_DEFERRED_SIGNAL:-}" ]; then
+		COVERAGE_DEFERRED_SIGNAL=$l_coverage_deferred_signal
+	fi
+}
+
+consume_deferred_coverage_signal() {
+	if [ -z "${COVERAGE_DEFERRED_SIGNAL:-}" ]; then
+		return 0
+	fi
+
+	l_coverage_deferred_signal=$COVERAGE_DEFERRED_SIGNAL
+	COVERAGE_DEFERRED_SIGNAL=
+	handle_coverage_signal "$l_coverage_deferred_signal"
+}
+
+handle_coverage_signal() {
+	l_signal=$1
+	l_exit_status=$(coverage_signal_exit_status "$l_signal")
+	l_coverage_signal_descendants=
+	l_coverage_signal_pid=
+	l_coverage_signal_token=
+
+	if [ "${COVERAGE_DEFER_SIGNALS:-0}" = "1" ]; then
+		remember_deferred_coverage_signal "$l_signal"
+		return 0
+	fi
+
+	trap - EXIT HUP INT TERM QUIT
+	case "${COVERAGE_ACTIVE_SUITE_PID:-}" in
+	'' | *[!0-9]*) ;;
+	*)
+		l_coverage_signal_pid=$COVERAGE_ACTIVE_SUITE_PID
+		l_coverage_signal_token=$COVERAGE_ACTIVE_SUITE_TOKEN
+		if ! coverage_process_identity_matches \
+			"$l_coverage_signal_pid" "$l_coverage_signal_token"; then
+			COVERAGE_ACTIVE_SUITE_PID=
+			COVERAGE_ACTIVE_SUITE_TOKEN=
+			cleanup_coverage_runner
+			exit "$l_exit_status"
+		fi
+		l_coverage_signal_descendants=$(coverage_collect_process_tree \
+			"$l_coverage_signal_pid")
+		# Keep the directly owned suite alive while its descendants stop so it
+		# can reap them. Killing every level simultaneously leaves transient
+		# orphan zombies on platforms whose system reaper runs less eagerly.
+		if [ -n "$l_coverage_signal_descendants" ]; then
+			coverage_signal_process_tree "$l_signal" "$l_coverage_signal_descendants"
+			if ! coverage_wait_for_process_tree_shutdown "$l_coverage_signal_descendants"; then
+				coverage_signal_process_tree KILL "$l_coverage_signal_descendants"
+				coverage_wait_for_process_tree_shutdown "$l_coverage_signal_descendants" || :
+			fi
+		fi
+		coverage_signal_tracked_process \
+			"$l_signal" "$l_coverage_signal_pid" "$l_coverage_signal_token"
+		if ! coverage_wait_for_direct_process_shutdown \
+			"$l_coverage_signal_pid" "$l_coverage_signal_token"; then
+			coverage_signal_tracked_process \
+				KILL "$l_coverage_signal_pid" "$l_coverage_signal_token"
+			coverage_wait_for_direct_process_shutdown \
+				"$l_coverage_signal_pid" "$l_coverage_signal_token" || :
+		fi
+		wait "$l_coverage_signal_pid" >/dev/null 2>&1 || :
+		COVERAGE_ACTIVE_SUITE_PID=
+		COVERAGE_ACTIVE_SUITE_TOKEN=
+		coverage_wait_for_process_tree_reap "$l_coverage_signal_descendants" || :
+		;;
+	esac
+	cleanup_coverage_runner
+	exit "$l_exit_status"
 }
 
 render_bash_xtrace_report() {
@@ -234,11 +710,74 @@ function normalize_path(path, root_prefix) {
 	}
 	return path
 }
-function has_unbalanced_double_quote(line,    i, ch, escaped, quote_count) {
+function starts_shell_comment_at(line, position,    previous) {
+	if (substr(line, position, 1) != "#") {
+		return 0
+	}
+	if (position == 1) {
+		return 1
+	}
+	previous = substr(line, position - 1, 1)
+	return (previous == " " || previous == "\t" ||
+		previous == ";" || previous == "|" || previous == "&" ||
+		previous == "(" || previous == ")" ||
+		previous == "<" || previous == ">")
+}
+function double_quote_state_after_line(line, in_double_quote,    i, ch, escaped, in_single_quote) {
 	escaped = 0
-	quote_count = 0
+	in_single_quote = 0
 	for (i = 1; i <= length(line); i++) {
 		ch = substr(line, i, 1)
+		if (in_single_quote) {
+			if (ch == "'\''") {
+				in_single_quote = 0
+			}
+			continue
+		}
+		if (escaped) {
+			escaped = 0
+			continue
+		}
+		if (ch == "\\") {
+			escaped = 1
+			continue
+		}
+		if (in_double_quote) {
+			if (ch == "\"") {
+				in_double_quote = 0
+			}
+			continue
+		}
+		if (starts_shell_comment_at(line, i)) {
+			break
+		}
+		if (ch == "'\''") {
+			in_single_quote = 1
+			continue
+		}
+		if (ch == "\"") {
+			in_double_quote = 1
+		}
+	}
+	return in_double_quote
+}
+function has_unbalanced_double_quote(line) {
+	return double_quote_state_after_line(line, 0)
+}
+function continues_multiline_double_quote(line) {
+	return double_quote_state_after_line(line, 1)
+}
+function single_quote_state_after_line(line, in_single_quote,    i, ch, escaped, in_double_quote) {
+	escaped = 0
+	in_double_quote = 0
+	for (i = 1; i <= length(line); i++) {
+		ch = substr(line, i, 1)
+		if (in_single_quote) {
+			if (ch == "'\''") {
+				in_single_quote = 0
+			}
+			continue
+		}
 		if (escaped) {
 			escaped = 0
 			continue
@@ -248,24 +787,26 @@ function has_unbalanced_double_quote(line,    i, ch, escaped, quote_count) {
 			continue
 		}
 		if (ch == "\"") {
-			quote_count++
+			in_double_quote = !in_double_quote
+			continue
+		}
+		if (!in_double_quote && starts_shell_comment_at(line, i)) {
+			break
+		}
+		if (!in_double_quote && ch == "'\''") {
+			in_single_quote = 1
 		}
 	}
-	return (quote_count % 2) == 1
+	return in_single_quote
 }
-function has_unbalanced_single_quote(line,    i, ch, quote_count) {
-	quote_count = 0
-	for (i = 1; i <= length(line); i++) {
-		ch = substr(line, i, 1)
-		if (ch == "'\''") {
-			quote_count++
-		}
-	}
-	return (quote_count % 2) == 1
+function has_unbalanced_single_quote(line) {
+	return single_quote_state_after_line(line, 0)
+}
+function continues_multiline_single_quote(line) {
+	return single_quote_state_after_line(line, 1)
 }
 function starts_multiline_single_quote(line, t) {
-	t = trim(line)
-	return (has_unbalanced_single_quote(line) && t ~ /'\''$/)
+	return has_unbalanced_single_quote(line)
 }
 function count_trailing_backslashes(line,    i, ch, count) {
 	count = 0
@@ -286,16 +827,98 @@ function ends_with_line_continuation(line, t, trailing_backslashes) {
 	trailing_backslashes = count_trailing_backslashes(line)
 	return (trailing_backslashes % 2) == 1
 }
-function heredoc_delimiter(line,    match_count, start, length_part, delimiter) {
-	match_count = match(line, /<<-?[[:space:]]*[A-Za-z_][A-Za-z0-9_]*/)
-	if (match_count == 0) {
+function heredoc_delimiter(line,    rest, quote, quote_end, delimiter) {
+	if (!match(line, /<<-?[[:space:]]*/)) {
 		return ""
 	}
-	start = RSTART
-	length_part = RLENGTH
-	delimiter = substr(line, start, length_part)
-	sub(/^<<-?[[:space:]]*/, "", delimiter)
+	rest = substr(line, RSTART + RLENGTH)
+	if (substr(rest, 1, 1) == "\\") {
+		rest = substr(rest, 2)
+	}
+	quote = substr(rest, 1, 1)
+	if (quote == "\"" || quote == "'\''") {
+		quote_end = index(substr(rest, 2), quote)
+		if (quote_end == 0) {
+			return ""
+		}
+		delimiter = substr(rest, 2, quote_end - 1)
+	} else {
+		if (!match(rest, /^[A-Za-z_][A-Za-z0-9_]*/)) {
+			return ""
+		}
+		delimiter = substr(rest, RSTART, RLENGTH)
+	}
+	if (delimiter !~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+		return ""
+	}
 	return delimiter
+}
+function unclosed_command_substitution_depth(line,    i, ch, next_ch, after_next, depth, escaped, in_single_quote, in_double_quote, scope_index) {
+	for (scope_index in command_substitution_outer_double_quote)
+		delete command_substitution_outer_double_quote[scope_index]
+	for (scope_index in command_substitution_parenthesis_depth)
+		delete command_substitution_parenthesis_depth[scope_index]
+	depth = 0
+	escaped = 0
+	in_single_quote = 0
+	in_double_quote = 0
+	for (i = 1; i <= length(line); i++) {
+		ch = substr(line, i, 1)
+		next_ch = substr(line, i + 1, 1)
+		after_next = substr(line, i + 2, 1)
+		if (in_single_quote) {
+			if (ch == "'\''") {
+				in_single_quote = 0
+			}
+			continue
+		}
+		if (escaped) {
+			escaped = 0
+			continue
+		}
+		if (ch == "\\") {
+			escaped = 1
+			continue
+		}
+		if (ch == "'\''" && !in_double_quote) {
+			in_single_quote = 1
+			continue
+		}
+		if (ch == "$" && next_ch == "(" && after_next != "(") {
+			depth++
+			command_substitution_outer_double_quote[depth] = in_double_quote
+			command_substitution_parenthesis_depth[depth] = 0
+			# The command inside $(...) has its own quote context even when the
+			# substitution itself appears inside an outer double-quoted word.
+			in_single_quote = 0
+			in_double_quote = 0
+			escaped = 0
+			i++
+			continue
+		}
+		if (ch == "\"") {
+			in_double_quote = !in_double_quote
+			continue
+		}
+		if (!in_double_quote && starts_shell_comment_at(line, i)) {
+			break
+		}
+		if (depth > 0 && !in_double_quote && ch == "(") {
+			command_substitution_parenthesis_depth[depth]++
+			continue
+		}
+		if (depth > 0 && !in_double_quote && ch == ")") {
+			if (command_substitution_parenthesis_depth[depth] > 0) {
+				command_substitution_parenthesis_depth[depth]--
+			} else {
+				in_double_quote = command_substitution_outer_double_quote[depth]
+				delete command_substitution_outer_double_quote[depth]
+				delete command_substitution_parenthesis_depth[depth]
+				depth--
+			}
+		}
+	}
+	return depth
 }
 function is_case_pattern_line(line, t) {
 	t = trim(line)
@@ -318,6 +941,16 @@ function opens_command_substitution_subshell(line, t) {
 function closes_command_substitution_scope(line, t) {
 	t = trim(line)
 	return (t ~ /^\)/)
+}
+function is_untraceable_control_syntax_line(line, t) {
+	t = trim(line)
+	if (t ~ /^(if|elif|while|until)[[:space:]]+(![[:space:]]+)?\($/) {
+		return 1
+	}
+	if (t ~ /^\)([[:space:]]+[^;]+)?;[[:space:]]*(then|do)$/) {
+		return 1
+	}
+	return (t ~ /^(done|[{}()])[[:space:]]*[0-9]*[<>]/)
 }
 function is_coverable_line(line, t, l_heredoc_delimiter) {
 	t = trim(line)
@@ -342,13 +975,13 @@ function is_coverable_line(line, t, l_heredoc_delimiter) {
 		return 0
 	}
 	if (coverage_in_multiline_double_quote == 1) {
-		if (has_unbalanced_double_quote(line)) {
+		if (!continues_multiline_double_quote(line)) {
 			coverage_in_multiline_double_quote = 0
 		}
 		return 0
 	}
 	if (coverage_in_multiline_single_quote == 1) {
-		if (has_unbalanced_single_quote(line)) {
+		if (!continues_multiline_single_quote(line)) {
 			coverage_in_multiline_single_quote = 0
 		}
 		return 0
@@ -393,16 +1026,27 @@ function is_coverable_line(line, t, l_heredoc_delimiter) {
 	if (l_heredoc_delimiter != "") {
 		coverage_in_heredoc = 1
 		coverage_heredoc_delimiter = l_heredoc_delimiter
-		if (t ~ /^(done|[{}])[[:space:]].*<<-?[[:space:]]*[A-Za-z_][A-Za-z0-9_]*$/) {
+		if (t ~ /^(done|[{}])[[:space:]]*<<-?/) {
 			return 0
 		}
 	}
+	if (is_untraceable_control_syntax_line(line)) return 0
 	if (has_unbalanced_double_quote(line)) {
 		coverage_in_multiline_double_quote = 1
 		return 0
 	}
 	if (starts_multiline_single_quote(line)) {
 		coverage_in_multiline_single_quote = 1
+		return 0
+	}
+	# Bash attributes an assignment containing a command substitution to a
+	# later physical line when the substitution continues there. Exclude only
+	# the untraceable opener; independently attributable body lines remain
+	# eligible unless an existing multiline rule applies.
+	if (unclosed_command_substitution_depth(line) > 0) {
+		if (ends_with_line_continuation(line)) {
+			coverage_in_backslash_continuation = 1
+		}
 		return 0
 	}
 	if (ends_with_line_continuation(line)) {
@@ -505,192 +1149,6 @@ END {
 	mv "$l_tmp_file" "$l_summary_file"
 }
 
-write_missing_diff_file() {
-	l_missing_file=$1
-	l_missing_diff_file=$2
-	l_status=0
-
-	if [ ! -f "$COVERAGE_BASELINE_MISSING_FILE" ]; then
-		printf '%s\n' "Committed missing.txt baseline not found: $COVERAGE_BASELINE_MISSING_FILE" >"$l_missing_diff_file"
-		return 0
-	fi
-
-	set +e
-	diff -u "$COVERAGE_BASELINE_MISSING_FILE" "$l_missing_file" >"$l_missing_diff_file"
-	l_status=$?
-	set -e
-	case "$l_status" in
-	0)
-		printf '%s\n' "No missing-line changes relative to $COVERAGE_BASELINE_MISSING_FILE." >"$l_missing_diff_file"
-		;;
-	1)
-		:
-		;;
-	*)
-		return "$l_status"
-		;;
-	esac
-}
-
-write_policy_disabled_report() {
-	l_policy_report_file=$1
-	l_policy_failures_file=$2
-
-	{
-		printf '%s\n' "Coverage policy enforcement disabled (ZXFER_COVERAGE_ENFORCE_POLICY=0)."
-		printf '%s\n' "No minimum or no-regression checks were applied."
-	} >"$l_policy_report_file"
-	printf '%s\n' "type	target	current_pct	required_pct	note" >"$l_policy_failures_file"
-}
-
-enforce_bash_xtrace_policy() {
-	l_summary_file=$1
-	l_policy_report_file=$2
-	l_policy_failures_file=$3
-
-	awk -F '\t' \
-		-v summary_file="$l_summary_file" \
-		-v policy_file="$COVERAGE_POLICY_FILE" \
-		-v baseline_file="$COVERAGE_BASELINE_SUMMARY_FILE" \
-		-v regression_hit_tolerance="${ZXFER_COVERAGE_REGRESSION_HIT_TOLERANCE:-2}" \
-		-v total_regression_hit_tolerance="${ZXFER_COVERAGE_TOTAL_REGRESSION_HIT_TOLERANCE:-4}" \
-		-v report_file="$l_policy_report_file" \
-		-v failures_file="$l_policy_failures_file" '
-function trim(s) {
-	sub(/^[[:space:]]+/, "", s)
-	sub(/[[:space:]]+$/, "", s)
-	return s
-}
-function format_pct(value) {
-	if (value == "") {
-		return "-"
-	}
-	return sprintf("%.2f", value + 0)
-}
-function record_failure(type, target, current, expected, note) {
-	failures++
-	failure_type[failures] = type
-	failure_target[failures] = target
-	failure_current[failures] = current
-	failure_expected[failures] = expected
-	failure_note[failures] = note
-}
-function read_policy_file(   line, fields, target, min_pct) {
-	while ((getline line < policy_file) > 0) {
-		line = trim(line)
-		if (line == "" || line ~ /^#/) {
-			continue
-		}
-		split(line, fields, "\t")
-		target = trim(fields[1])
-		min_pct = trim(fields[2])
-		if (target == "" || min_pct == "") {
-			record_failure("invalid-policy", policy_file, "", "", "Malformed policy line: " line)
-			continue
-		}
-		policy_min[target] = min_pct + 0
-		policy_seen[target] = 1
-	}
-	close(policy_file)
-}
-function read_summary_file(path, pct_store, hit_store, seen_store,   line, fields, target, pct, hit) {
-	while ((getline line < path) > 0) {
-		if (line == "") {
-			continue
-		}
-		split(line, fields, "\t")
-		target = trim(fields[5])
-		pct = trim(fields[1])
-		hit = trim(fields[3])
-		if (target == "" || pct == "" || hit == "") {
-			record_failure("invalid-summary", path, "", "", "Malformed summary line: " line)
-			continue
-		}
-		pct_store[target] = pct + 0
-		hit_store[target] = hit + 0
-		seen_store[target] = 1
-	}
-	close(path)
-}
-BEGIN {
-	read_policy_file()
-	read_summary_file(baseline_file, baseline_pct, baseline_hit, baseline_seen)
-	read_summary_file(summary_file, current_pct, current_hit, current_seen)
-
-	if (!("TOTAL" in current_seen)) {
-		record_failure("missing-total", "TOTAL", "", "", "Current summary.tsv is missing the TOTAL row.")
-	}
-
-	for (target in current_seen) {
-		if (!(target in policy_seen)) {
-			record_failure("missing-policy", target, current_pct[target], "", "Target missing from coverage policy.")
-		}
-		if (!(target in baseline_seen)) {
-			record_failure("missing-baseline", target, current_pct[target], "", "Target missing from committed coverage baseline.")
-		}
-	}
-
-	for (target in policy_seen) {
-		if (!(target in current_seen) && !(target in reported_missing_current)) {
-			record_failure("missing-current", target, "", policy_min[target], "Policy target missing from current summary.")
-			reported_missing_current[target] = 1
-		}
-	}
-
-	for (target in baseline_seen) {
-		if (!(target in current_seen) && !(target in reported_missing_current)) {
-			record_failure("missing-current", target, "", baseline_pct[target], "Baseline target missing from current summary.")
-			reported_missing_current[target] = 1
-		}
-	}
-
-	for (target in current_seen) {
-		if ((target in policy_seen) && (current_pct[target] + 0.000001 < policy_min[target])) {
-			record_failure("minimum", target, current_pct[target], policy_min[target], "Coverage fell below the configured minimum.")
-		}
-		if ((target in baseline_seen) && (current_pct[target] + 0.000001 < baseline_pct[target])) {
-			regression_tolerance = (target == "TOTAL" ? total_regression_hit_tolerance + 0 : regression_hit_tolerance + 0)
-			if (!(target in current_hit) || !(target in baseline_hit) ||
-				(current_hit[target] + regression_tolerance) < baseline_hit[target]) {
-				record_failure("regression", target, current_pct[target], baseline_pct[target], "Coverage regressed relative to the committed baseline.")
-			}
-		}
-	}
-
-	print "type\ttarget\tcurrent_pct\trequired_pct\tnote" > failures_file
-	for (i = 1; i <= failures; i++) {
-		printf "%s\t%s\t%s\t%s\t%s\n", \
-			failure_type[i], \
-			failure_target[i], \
-			format_pct(failure_current[i]), \
-			format_pct(failure_expected[i]), \
-			failure_note[i] >> failures_file
-	}
-
-	if (failures > 0) {
-		print "Coverage policy failed." > report_file
-		print "Minimums: " policy_file >> report_file
-		print "Baseline: " baseline_file >> report_file
-		print "" >> report_file
-		for (i = 1; i <= failures; i++) {
-			printf "- %s: %s (current=%s required=%s) %s\n", \
-				failure_type[i], \
-				failure_target[i], \
-				format_pct(failure_current[i]), \
-				format_pct(failure_expected[i]), \
-				failure_note[i] >> report_file
-		}
-		exit 1
-	}
-
-	print "Coverage policy passed." > report_file
-	print "Minimums: " policy_file >> report_file
-	print "Baseline: " baseline_file >> report_file
-	exit 0
-}
-' /dev/null
-}
-
 run_with_bash_xtrace() {
 	l_target_list_file=$1
 	shift
@@ -723,9 +1181,6 @@ run_with_bash_xtrace() {
 	l_merged_trace="$COVERAGE_DIR/bash-xtrace/merged.trace"
 	l_summary_file="$COVERAGE_DIR/bash-xtrace/summary.tsv"
 	l_missing_file="$COVERAGE_DIR/bash-xtrace/missing.txt"
-	l_missing_diff_file="$COVERAGE_DIR/bash-xtrace/missing.diff"
-	l_policy_report_file="$COVERAGE_DIR/bash-xtrace/policy_report.txt"
-	l_policy_failures_file="$COVERAGE_DIR/bash-xtrace/policy_failures.tsv"
 	: >"$l_merged_trace"
 	: >"$l_summary_file"
 	: >"$l_missing_file"
@@ -743,21 +1198,9 @@ run_with_bash_xtrace() {
 
 	render_bash_xtrace_report "$l_target_list_file" "$l_merged_trace" "$l_summary_file" "$l_missing_file"
 	append_total_summary_row "$l_summary_file"
-	write_missing_diff_file "$l_missing_file" "$l_missing_diff_file"
-
-	l_policy_status=0
-	if [ "$ZXFER_COVERAGE_ENFORCE_POLICY" = "0" ]; then
-		write_policy_disabled_report "$l_policy_report_file" "$l_policy_failures_file"
-	else
-		if ! enforce_bash_xtrace_policy "$l_summary_file" "$l_policy_report_file" "$l_policy_failures_file"; then
-			l_policy_status=1
-		fi
-	fi
 
 	echo "Coverage summary: $l_summary_file"
 	echo "Missing lines: $l_missing_file"
-	echo "Missing diff: $l_missing_diff_file"
-	echo "Coverage policy report: $l_policy_report_file"
 	echo
 	echo "Approximate line coverage (bash xtrace fallback):"
 	sort -rn "$l_summary_file" | awk -F '\t' '
@@ -769,17 +1212,35 @@ BEGIN {
 }'
 
 	rm -rf "$l_trace_dir"
-	if [ "$l_overall_status" -ne 0 ]; then
-		return "$l_overall_status"
-	fi
-	return "$l_policy_status"
+	return "$l_overall_status"
 }
 
 main() {
-	if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-		print_usage
-		exit 0
-	fi
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		-h | --help)
+			print_usage
+			exit 0
+			;;
+		--report-only)
+			# Accepted for compatibility; every coverage run is report-only.
+			;;
+		--)
+			shift
+			break
+			;;
+		-*)
+			echo "Unknown argument: $1" >&2
+			exit 1
+			;;
+		*)
+			break
+			;;
+		esac
+		shift
+	done
+
+	COVERAGE_COLLECTOR_MODE=$(resolve_coverage_collector_mode)
 
 	SUITES=$(resolve_suites "$@")
 	if [ -z "$SUITES" ]; then
@@ -789,19 +1250,14 @@ main() {
 
 	mkdir -p "$COVERAGE_DIR"
 	TARGET_LIST_FILE=$(mktemp "${TMPDIR:-/tmp}/zxfer.coverage.targets.XXXXXX")
-	trap 'rm -f "$TARGET_LIST_FILE"' EXIT INT TERM HUP QUIT
+	trap 'cleanup_coverage_runner' EXIT
+	trap 'handle_coverage_signal HUP' HUP
+	trap 'handle_coverage_signal INT' INT
+	trap 'handle_coverage_signal QUIT' QUIT
+	trap 'handle_coverage_signal TERM' TERM
 	write_target_file_list "$TARGET_LIST_FILE"
 
-	case "$ZXFER_COVERAGE_MODE" in
-	auto)
-		if command -v kcov >/dev/null 2>&1; then
-			# shellcheck disable=SC2086
-			run_with_kcov "$TARGET_LIST_FILE" $SUITES
-		else
-			# shellcheck disable=SC2086
-			run_with_bash_xtrace "$TARGET_LIST_FILE" $SUITES
-		fi
-		;;
+	case "$COVERAGE_COLLECTOR_MODE" in
 	kcov)
 		if ! command -v kcov >/dev/null 2>&1; then
 			echo "kcov is not installed." >&2
@@ -813,10 +1269,6 @@ main() {
 	bash-xtrace)
 		# shellcheck disable=SC2086
 		run_with_bash_xtrace "$TARGET_LIST_FILE" $SUITES
-		;;
-	*)
-		echo "Unknown coverage mode: $ZXFER_COVERAGE_MODE" >&2
-		exit 1
 		;;
 	esac
 }
