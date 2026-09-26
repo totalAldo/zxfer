@@ -960,6 +960,7 @@ planning_run_remote_target_push() {
 # once with that line on stderr, through the zfs fault injector.
 # Usage: planning_make_remote_destination_root_missing; exports the MOCK_FAIL_*
 # variables, which the caller unsets.
+# shellcheck disable=SC2089,SC2090  # the quotes are part of the zfs message
 planning_make_remote_destination_root_missing() {
 	planning_force_manifest_failure \
 		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" 1
@@ -973,9 +974,10 @@ planning_make_remote_destination_root_missing() {
 		{
 			printf 'list -H %s\t%s\t1\n' "$l_missing_dataset" "$l_missing_fixture"
 			cat "$STATE_DIR/manifest"
-		} >"$STATE_DIR/manifest.new" &&
-			mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
+		} >"$STATE_DIR/manifest.new" ||
 			fail "Unable to prepend the missing-dataset rule."
+		mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
+			fail "Unable to install the missing-dataset rule."
 	done
 	mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
 	MOCK_FAIL_TOOL=zfs
@@ -1011,6 +1013,7 @@ test_remote_target_destination_listing_failure_fails_closed() {
 # Invariant (-T discovery): when the ssh call carrying the destination
 # snapshot listing fails, the run stops with ssh's exit status 255 and ssh's
 # diagnostic, and changes nothing.
+# shellcheck disable=SC2089,SC2090  # the quotes are part of the ssh argv glob
 test_remote_target_ssh_failure_during_discovery_fails_closed() {
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/incremental" remote_sshfail

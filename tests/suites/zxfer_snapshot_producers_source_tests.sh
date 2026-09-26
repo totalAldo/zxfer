@@ -1384,7 +1384,7 @@ test_write_source_snapshot_list_to_file_preserves_background_sort_temp_failures(
 			zxfer_get_temp_file() {
 				temp_calls=$((temp_calls + 1))
 				if [ "$temp_calls" -eq 1 ]; then
-					g_zxfer_temp_file_result="$TEST_TMPDIR/source_background_sort_temp_failure.cmd"
+					g_zxfer_temp_file_result="$TEST_TMPDIR/source_background_sort_temp_failure.sorted"
 					: >"$g_zxfer_temp_file_result"
 					return 0
 				fi
@@ -1400,9 +1400,9 @@ test_write_source_snapshot_list_to_file_preserves_background_sort_temp_failures(
 		)
 	)
 
-	assertContains "Source discovery should preserve sorted-sidecar tempfile failures before launching the background job." \
+	assertContains "Source discovery should preserve status-file tempfile failures before launching the background job." \
 		"$output" "status=33"
-	assertContains "Source discovery should attempt command and sorted-sidecar tempfile allocation." \
+	assertContains "Source discovery should allocate the sorted sidecar, then fail on the first status file." \
 		"$output" "calls=2"
 }
 
