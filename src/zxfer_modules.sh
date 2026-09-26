@@ -46,7 +46,6 @@ zxfer_profile.sh
 zxfer_exec.sh
 zxfer_dependencies.sh
 zxfer_runtime.sh
-zxfer_error_log.sh
 zxfer_ssh_transport.sh
 zxfer_remote_hosts.sh
 zxfer_cli.sh

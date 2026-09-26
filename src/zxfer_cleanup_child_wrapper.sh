@@ -34,9 +34,8 @@
 # Cleanup child wrapper: runs one rendered command as a background child and,
 # on TERM, INT or HUP, tears down that child's descendants, each identified by
 # pid plus process start token. Sourced with
-# ZXFER_CLEANUP_CHILD_WRAPPER_SOURCE_ONLY=1 it only defines functions:
-# zxfer_exec.sh reuses the descendant teardown, and zxfer_error_log.sh reuses
-# the start-token parser for its lock owners.
+# ZXFER_CLEANUP_CHILD_WRAPPER_SOURCE_ONLY=1 it only defines functions, and
+# zxfer_exec.sh reuses the descendant teardown.
 
 # Purpose: Print PID's start time as "SELECTOR:TIME" (whitespace squeezed), the
 # token that tells a process from a later one reusing its pid. This is zxfer's

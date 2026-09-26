@@ -298,7 +298,7 @@ test_failure_report_unsafe_mode_populates_invocation_field() {
 		"grep -q '^invocation: \[redacted\]$' '$g_golden_stderr_file'"
 }
 
-test_error_log_mirrors_failure_report_and_cleans_lock_dir() {
+test_error_log_mirrors_failure_report_and_leaves_only_the_log() {
 	l_log_dir="$TEST_TMPDIR/error_log_dir"
 	rm -rf "$l_log_dir"
 	mkdir -p "$l_log_dir"
@@ -329,9 +329,8 @@ test_error_log_mirrors_failure_report_and_cleans_lock_dir() {
 	zxfer_golden_assert_file_matches_golden cli_error_log_report \
 		"$TEST_TMPDIR/report_from_log.normalized"
 
-	# The per-log lock dir (.zxfer-error-log.lock.<name>) and any staging
-	# residue must be gone; only the log file itself may remain.
-	assertEquals "The error-log lock dir must be cleaned up after mirroring the report." \
+	# Appends take no lock and stage nothing: only the log file may appear.
+	assertEquals "Mirroring the report must leave only the log in its directory." \
 		"log" "$(ls -A "$l_log_dir")"
 
 	case "$(ls -ld "$l_log_dir/log")" in
