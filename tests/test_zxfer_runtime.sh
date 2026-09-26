@@ -78,6 +78,21 @@ zxfer_runtime_spawn_term_trap_helper() {
 	zxfer_runtime_wait_for_path "$l_runtime_ready_file"
 }
 
+# setUp above picks each fragment's fixture through
+# zxfer_test_running_test_is_in, which reads the vendored shunit2's current
+# test name. Fail here, instead of silently skipping every fragment fixture,
+# if a shunit2 upgrade stops exposing it.
+test_running_test_is_in_sees_the_current_test() {
+	zxfer_test_running_test_is_in "$TESTS_DIR/test_zxfer_runtime.sh"
+	l_running_test_status=$?
+	assertEquals "the running test should be found in its own entry file" \
+		0 "$l_running_test_status"
+	zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_runtime_tmpdir_tests.sh"
+	l_running_test_status=$?
+	assertEquals "the running test should not be found in another fragment" \
+		1 "$l_running_test_status"
+}
+
 test_get_temp_file_creates_unique_paths() {
 	file_one=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
 	file_two=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
