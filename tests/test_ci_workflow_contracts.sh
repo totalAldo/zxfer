@@ -183,6 +183,14 @@ test_perf_workflow_reports_an_advisory_ab_with_full_history() {
 		"$perf_job" "uses: $CHECKOUT_PIN"
 	assertContains "The perf job should compare against upstream-compat-final and write the job summary." \
 		"$perf_job" './tests/run_perf_ab.sh --baseline-ref origin/upstream-compat-final --sizes 25,100 --reps 5 --summary "$GITHUB_STEP_SUMMARY"'
+	assertContains "On a branch, the perf job should also compare against the merge base with origin/main." \
+		"$perf_job" 'baseline=$(git merge-base HEAD origin/main)'
+	assertContains "On main, the perf job should compare against the previous commit." \
+		"$perf_job" 'baseline=$(git rev-parse HEAD~1)'
+	assertContains "The second A/B should cover the props scenario and write the job summary." \
+		"$perf_job" './tests/run_perf_ab.sh --baseline-ref "$baseline" --sizes 25,100 --reps 5 --scenarios noop,incr,remote_noop,remote_incr,props --summary "$GITHUB_STEP_SUMMARY"'
+	assertEquals "Each A/B step should be continue-on-error, so one harness error never skips the other." \
+		2 "$(printf '%s\n' "$perf_job" | grep -c -x '        continue-on-error: true')"
 	assertContains "The perf job should add the helper spawn counts to the summary." \
 		"$perf_job" "./tests/run_microbench.sh"
 	assertEquals "The perf workflow should trigger like the other workflows." \

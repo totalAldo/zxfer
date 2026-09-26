@@ -1,7 +1,9 @@
-# Advisory performance report: a wall-clock A/B of ./zxfer against
-# upstream-compat-final and the helper spawn counts, both on a canned zfs and
-# a mock ssh, written to the job summary. Hosted-runner timing is noisy, so
-# this never gates: run_perf_ab.sh exits 0 on any slowdown and the job is
+# Advisory performance report: wall-clock A/Bs of ./zxfer against
+# upstream-compat-final and against the code this push replaces (the merge
+# base with origin/main on a branch, the previous commit on main), plus the
+# helper spawn counts, all on a canned zfs and a mock ssh, written to the job
+# summary. Hosted-runner timing is noisy, so this never gates: run_perf_ab.sh
+# exits 0 on any slowdown, and each A/B step and the job are
 # continue-on-error, so even a harness error leaves the workflow green. The
 # spawn-count budgets are enforced by the unit suites, not here.
 name: Performance
@@ -18,20 +20,41 @@ jobs:
   perf-advisory:
     name: perf A/B (advisory)
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     continue-on-error: true
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history, so origin/upstream-compat-final exists locally.
+          # Full history, so origin/upstream-compat-final, origin/main and
+          # HEAD~1 exist locally.
           fetch-depth: 0
       - name: Wall-clock A/B against upstream-compat-final
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           ./tests/run_perf_ab.sh --baseline-ref origin/upstream-compat-final --sizes 25,100 --reps 5 --summary "$GITHUB_STEP_SUMMARY"
+      - name: Wall-clock A/B against the code this push replaces
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          # On main the previous commit is what this push replaces; on any
+          # other ref it is the merge base with origin/main. props (-P with 68
+          # matching properties) runs here only: upstream-compat-final reads
+          # properties in per-property loops that take minutes at this size.
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            baseline=$(git rev-parse HEAD~1)
+            baseline_label="the previous commit on main"
+          else
+            baseline=$(git merge-base HEAD origin/main)
+            baseline_label="the merge base with origin/main"
+          fi
+          printf '%s\n' "Baseline below: $baseline_label." >>"$GITHUB_STEP_SUMMARY"
+          ./tests/run_perf_ab.sh --baseline-ref "$baseline" --sizes 25,100 --reps 5 --scenarios noop,incr,remote_noop,remote_incr,props --summary "$GITHUB_STEP_SUMMARY"
       - name: Helper spawn counts
         if: ${{ !cancelled() }}
         shell: bash
