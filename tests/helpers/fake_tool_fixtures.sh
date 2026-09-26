@@ -46,6 +46,20 @@ EOF
 	chmod +x "$l_zxfer_test_fake_ssh_path"
 }
 
+# Purpose: Print a well-formed V2 capability handshake for RemoteOS that
+# resolves zfs, parallel and cat.
+# Usage: FAKE_SSH_STDOUT_OVERRIDE=$(fake_remote_capability_response)
+fake_remote_capability_response() {
+	cat <<'EOF'
+ZXFER_REMOTE_CAPS_V2
+os	RemoteOS
+tool	zfs	0	/remote/bin/zfs
+tool	parallel	0	/opt/bin/parallel
+tool	cat	0	/remote/bin/cat
+end
+EOF
+}
+
 # Purpose: Print the path of a csh-family shell, or nothing when none exists.
 # Usage: l_csh_shell=$(find_csh_shell_for_tests)
 find_csh_shell_for_tests() {

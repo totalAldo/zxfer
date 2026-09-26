@@ -542,6 +542,39 @@ test_zxfer_ensure_remote_host_capabilities_never_treats_failed_probe_as_empty() 
 		"$output" "stored=<|>"
 }
 
+test_zxfer_reset_remote_host_state_resets_capability_and_resolved_tool_state() {
+	result=$(
+		(
+			g_cmd_zfs="/stub/zfs"
+			g_origin_remote_capabilities_host="origin.example"
+			g_origin_remote_capabilities_response="dirty-origin"
+			g_origin_remote_capabilities_os="DirtyOriginOS"
+			g_target_remote_capabilities_tools="zfs cat"
+			g_target_remote_capabilities_response="dirty-target"
+			g_target_remote_capabilities_tool_records="dirty-target-tools"
+			g_zxfer_remote_probe_capture_failed=1
+			g_origin_cmd_zfs="/dirty/origin-zfs"
+
+			zxfer_reset_remote_host_state
+			printf 'origin=<%s|%s|%s>\n' "$g_origin_remote_capabilities_host" \
+				"$g_origin_remote_capabilities_response" "$g_origin_remote_capabilities_os"
+			printf 'target=<%s|%s|%s>\n' "$g_target_remote_capabilities_tools" \
+				"$g_target_remote_capabilities_response" "$g_target_remote_capabilities_tool_records"
+			printf 'capture_failed=%s\n' "$g_zxfer_remote_probe_capture_failed"
+			printf 'origin_zfs=%s\n' "$g_origin_cmd_zfs"
+		)
+	)
+
+	assertContains "Remote-host reset should empty the origin capability slot." \
+		"$result" "origin=<||>"
+	assertContains "Remote-host reset should empty the target capability slot." \
+		"$result" "target=<||>"
+	assertContains "Remote-host reset should clear remote capture failure state." \
+		"$result" "capture_failed=0"
+	assertContains "Remote-host reset should restore origin zfs to the local default." \
+		"$result" "origin_zfs=/stub/zfs"
+}
+
 test_zxfer_prepare_ssh_shell_command_context_reuses_the_role_spec_parse() {
 	g_option_O_origin_host="origin.example pfexec"
 	g_option_T_target_host=""
