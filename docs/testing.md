@@ -321,6 +321,7 @@ they pin what an operator sees and outlive internal refactoring:
 | Suite | Pins |
 | --- | --- |
 | `test_contract_cli_golden.sh` | Help, usage-error and failure-report output, byte for byte (`tests/golden/cli_*.golden`). |
+| `test_contract_failures.sh` | Fail-closed behavior: every zfs and ssh call of nine scenarios fails in turn, and each run either keeps the clean run's changes or stops with one failure report and no later change (see Fail-Closed Contract Sweep). |
 | `test_contract_planning.sh` | The zfs argv of whole runs: GUID-aware planning, fail-closed listings, `-d`/`-F` divergence, `-g`, `-j` order and cleanup, `-O`/`-T`, the property pass, and `-k`/`-e`. |
 | `test_contract_properties.sh` | `-P` property argument boundaries and the recursive prefetch. |
 | `test_contract_send_receive.sh` | `-D` progress streams under `-j 1` and `-j 3`, and `-n`. |

@@ -527,7 +527,7 @@ grouping costs only; they do not claim end-to-end transfer throughput gains.
 ## What Landed (Phases 0-8)
 
 - Phase 0 — measurement and pins. Behavior pins for the externally
-  observable planning contract (`tests/test_zxfer_planning_blackbox.sh`),
+  observable planning contract (now `tests/test_contract_planning.sh`),
   the canned-zfs micro-bench (`tests/run_microbench.sh`) with ratchet-only
   budgets, and anti-rebloat line/function/caller budgets. The
   branch-to-branch comparator (`tests/run_perf_compare.sh`, VM
