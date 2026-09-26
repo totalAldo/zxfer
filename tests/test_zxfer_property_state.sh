@@ -1,32 +1,29 @@
 #!/bin/sh
-# Property state fragment: serialization, in-memory tables, recursive
-# prefetch, normalized lookup routing, and required-property backfill.
+#
+# shunit2 tests for src/zxfer_property_state.sh: the untrusted zfs get
+# parser, serialization, the in-memory property tables, normalized lookup
+# routing, required-property backfill and the recursive prefetch.
+#
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
-################################################################################
-# READONLY LIST
-################################################################################
+TESTS_DIR=$(dirname "$0")
 
-test_resolve_readonly_properties_appends_freebsd_list() {
-	g_destination_operating_system="FreeBSD"
-	zxfer_resolve_readonly_properties
-	assertEquals "readonly,mountpoint,aclmode" "$g_zxfer_readonly_properties_result"
+# shellcheck source=tests/test_helper.sh
+. "$TESTS_DIR/test_helper.sh"
+# shellcheck source=tests/helpers/property_fixtures.sh
+. "$TESTS_DIR/helpers/property_fixtures.sh"
+
+oneTimeSetUp() {
+	zxfer_test_create_tmpdir "zxfer_property_state"
+	zxfer_test_property_fixture_one_time_setup
 }
 
-test_resolve_readonly_properties_follows_the_current_platform_on_every_call() {
-	g_destination_operating_system="FreeBSD"
-	zxfer_resolve_readonly_properties
-	g_destination_operating_system="SunOS"
-	zxfer_resolve_readonly_properties
-	assertEquals "The list is resolved per call, not memoized." \
-		"readonly,mountpoint" "$g_zxfer_readonly_properties_result"
+oneTimeTearDown() {
+	zxfer_test_cleanup_tmpdir
 }
 
-test_resolve_readonly_properties_removes_mountpoint_during_migration() {
-	g_option_m_migrate=1
-	zxfer_resolve_readonly_properties
-	g_option_m_migrate=0
-	assertEquals "readonly" "$g_zxfer_readonly_properties_result"
+setUp() {
+	zxfer_test_property_fixture_setup
 }
 
 ################################################################################
@@ -1246,3 +1243,6 @@ test_property_state_helpers_preserve_caller_ifs_and_globbing() {
 	assertEquals "after_globbing=disabled" "$l_globbing"
 	assertEquals "," "$l_ifs_after"
 }
+
+# shellcheck source=tests/shunit2/shunit2
+. "$SHUNIT2_BIN"

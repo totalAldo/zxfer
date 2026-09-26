@@ -1,101 +1,58 @@
 #!/bin/sh
-# Property policy fragment: source collection and -e restore, override
-# derivation and -o validation, list sanitizing, create metadata, and the -U
-# unsupported-property scan.
+#
+# shunit2 tests for src/zxfer_property_policy.sh: the readonly list, -o
+# override validation and derivation, list sanitizing, create metadata, the
+# -U unsupported-property scan and create-time policy.
+#
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
+TESTS_DIR=$(dirname "$0")
+
+# shellcheck source=tests/test_helper.sh
+. "$TESTS_DIR/test_helper.sh"
+# Cases that render backup metadata opt in to that fixture.
+# shellcheck source=tests/helpers/backup_fixtures.sh
+. "$TESTS_DIR/helpers/backup_fixtures.sh"
+# shellcheck source=tests/helpers/property_fixtures.sh
+. "$TESTS_DIR/helpers/property_fixtures.sh"
+
+oneTimeSetUp() {
+	zxfer_test_create_tmpdir "zxfer_property_policy"
+	zxfer_test_property_fixture_one_time_setup
+}
+
+oneTimeTearDown() {
+	zxfer_test_cleanup_tmpdir
+}
+
+setUp() {
+	zxfer_test_property_fixture_setup
+}
+
 ################################################################################
-# SOURCE COLLECTION
+# READONLY LIST
 ################################################################################
 
-test_collect_source_props_publishes_raw_and_effective_lists() {
-	(
-		zxfer_load_normalized_dataset_properties() {
-			printf '%s\n' "$*" >>"$TEST_TMPDIR/collect_side.log"
-			g_zxfer_normalized_dataset_properties="compression=lz4=local,readonly=on=local"
-		}
-		zxfer_collect_source_props "tank/src" "backup/dst"
-		printf 'raw=%s\neffective=%s\n' "$g_zxfer_source_pvs_raw" "$g_zxfer_source_pvs_effective"
-	) >"$TEST_TMPDIR/collect_plain.out"
-	assertEquals "raw=compression=lz4=local,readonly=on=local
-effective=compression=lz4=local,readonly=on=local" "$(cat "$TEST_TMPDIR/collect_plain.out")"
-	assertEquals "Source properties are read through the source side." \
-		"tank/src source" "$(cat "$TEST_TMPDIR/collect_side.log")"
+test_resolve_readonly_properties_appends_freebsd_list() {
+	g_destination_operating_system="FreeBSD"
+	zxfer_resolve_readonly_properties
+	assertEquals "readonly,mountpoint,aclmode" "$g_zxfer_readonly_properties_result"
 }
 
-test_collect_source_props_propagates_lookup_failures_with_diagnostic() {
-	(
-		zxfer_load_normalized_dataset_properties() {
-			g_zxfer_property_error_result="cannot open tank/src: permission denied"
-			return 3
-		}
-		zxfer_collect_source_props "tank/src" "backup/dst"
-		printf 'status=%s raw=<%s> error=%s\n' "$?" "$g_zxfer_source_pvs_raw" "$g_zxfer_property_error_result"
-	) >"$TEST_TMPDIR/collect_failure.out"
-	assertEquals "status=3 raw=<> error=cannot open tank/src: permission denied" \
-		"$(cat "$TEST_TMPDIR/collect_failure.out")"
+test_resolve_readonly_properties_follows_the_current_platform_on_every_call() {
+	g_destination_operating_system="FreeBSD"
+	zxfer_resolve_readonly_properties
+	g_destination_operating_system="SunOS"
+	zxfer_resolve_readonly_properties
+	assertEquals "The list is resolved per call, not memoized." \
+		"readonly,mountpoint" "$g_zxfer_readonly_properties_result"
 }
 
-test_collect_source_props_uses_backup_restore() {
-	(
-		zxfer_load_normalized_dataset_properties() {
-			g_zxfer_normalized_dataset_properties="compression=lz4=local,readonly=on=local"
-		}
-		g_option_e_restore_property_mode=1
-		ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
-		ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
-		g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
-			"$(zxfer_test_backup_metadata_row "." "readonly=on=local,compression=lz4=local")")
-		zxfer_collect_source_props "tank/src" "backup/dst"
-		printf 'raw=%s\neffective=%s\n' "$g_zxfer_source_pvs_raw" "$g_zxfer_source_pvs_effective"
-	) >"$TEST_TMPDIR/collect_restore.out"
-	assertEquals "raw=compression=lz4=local,readonly=on=local
-effective=readonly=on=local,compression=lz4=local" "$(cat "$TEST_TMPDIR/collect_restore.out")"
-}
-
-test_collect_source_props_fails_when_backup_entry_missing() {
-	set +e
-	output=$(
-		(
-			zxfer_load_normalized_dataset_properties() {
-				g_zxfer_normalized_dataset_properties="compression=lz4=local"
-			}
-			zxfer_throw_usage_error() {
-				printf '%s\n' "$1"
-				exit 2
-			}
-			g_option_e_restore_property_mode=1
-			ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
-			ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
-			g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
-				"$(zxfer_test_backup_metadata_row "other" "compression=lz4=local")")
-			zxfer_collect_source_props "tank/src" "backup/dst"
-		)
-	)
-	status=$?
-	assertEquals 2 "$status"
-	assertEquals "Can't find the properties for the filesystem tank/src and destination backup/dst" "$output"
-}
-
-test_collect_source_props_restore_mode_requires_restored_contents() {
-	set +e
-	output=$(
-		(
-			zxfer_load_normalized_dataset_properties() {
-				g_zxfer_normalized_dataset_properties="compression=lz4=local"
-			}
-			zxfer_throw_usage_error() {
-				printf '%s\n' "$1"
-				exit 2
-			}
-			g_option_e_restore_property_mode=1
-			g_restored_backup_file_contents=""
-			zxfer_collect_source_props "tank/src" "backup/dst"
-		)
-	)
-	status=$?
-	assertEquals 2 "$status"
-	assertEquals "Can't find the properties for the filesystem tank/src and destination backup/dst" "$output"
+test_resolve_readonly_properties_removes_mountpoint_during_migration() {
+	g_option_m_migrate=1
+	zxfer_resolve_readonly_properties
+	g_option_m_migrate=0
+	assertEquals "readonly" "$g_zxfer_readonly_properties_result"
 }
 
 ################################################################################
@@ -793,3 +750,6 @@ test_filter_child_creation_overrides_for_parent_drops_inheritable_overrides_the_
 			"checksum=sha256=override,quota=1G=override,compression=lz4=local,atime=on=override" \
 			"checksum=sha256=local,quota=1G=local,atime=off=local")"
 }
+
+# shellcheck source=tests/shunit2/shunit2
+. "$SHUNIT2_BIN"

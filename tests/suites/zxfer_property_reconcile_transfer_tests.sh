@@ -1,6 +1,7 @@
 #!/bin/sh
 # Property transfer fragment: zxfer_transfer_properties driven end to end
-# against a fake zfs (reads answered by role, mutations logged).
+# against a fake zfs (reads answered by role, mutations logged). Run by
+# tests/test_zxfer_property_reconcile.sh.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 # Fake `zfs get` answers keyed on role and dataset. Datasets and their rows

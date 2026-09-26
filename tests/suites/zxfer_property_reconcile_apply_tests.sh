@@ -1,7 +1,102 @@
 #!/bin/sh
-# Property reconcile fragment: destination creation, destination command
-# rendering/execution, the diff and child-inheritance awks, and apply.
+# Property reconcile fragment: source collection and -e restore, destination
+# creation, destination command rendering/execution, the diff and
+# child-inheritance awks, and apply. Run by tests/test_zxfer_property_reconcile.sh.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
+
+################################################################################
+# SOURCE COLLECTION
+################################################################################
+
+test_collect_source_props_publishes_raw_and_effective_lists() {
+	(
+		zxfer_load_normalized_dataset_properties() {
+			printf '%s\n' "$*" >>"$TEST_TMPDIR/collect_side.log"
+			g_zxfer_normalized_dataset_properties="compression=lz4=local,readonly=on=local"
+		}
+		zxfer_collect_source_props "tank/src" "backup/dst"
+		printf 'raw=%s\neffective=%s\n' "$g_zxfer_source_pvs_raw" "$g_zxfer_source_pvs_effective"
+	) >"$TEST_TMPDIR/collect_plain.out"
+	assertEquals "raw=compression=lz4=local,readonly=on=local
+effective=compression=lz4=local,readonly=on=local" "$(cat "$TEST_TMPDIR/collect_plain.out")"
+	assertEquals "Source properties are read through the source side." \
+		"tank/src source" "$(cat "$TEST_TMPDIR/collect_side.log")"
+}
+
+test_collect_source_props_propagates_lookup_failures_with_diagnostic() {
+	(
+		zxfer_load_normalized_dataset_properties() {
+			g_zxfer_property_error_result="cannot open tank/src: permission denied"
+			return 3
+		}
+		zxfer_collect_source_props "tank/src" "backup/dst"
+		printf 'status=%s raw=<%s> error=%s\n' "$?" "$g_zxfer_source_pvs_raw" "$g_zxfer_property_error_result"
+	) >"$TEST_TMPDIR/collect_failure.out"
+	assertEquals "status=3 raw=<> error=cannot open tank/src: permission denied" \
+		"$(cat "$TEST_TMPDIR/collect_failure.out")"
+}
+
+test_collect_source_props_uses_backup_restore() {
+	(
+		zxfer_load_normalized_dataset_properties() {
+			g_zxfer_normalized_dataset_properties="compression=lz4=local,readonly=on=local"
+		}
+		g_option_e_restore_property_mode=1
+		ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
+		ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
+		g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
+			"$(zxfer_test_backup_metadata_row "." "readonly=on=local,compression=lz4=local")")
+		zxfer_collect_source_props "tank/src" "backup/dst"
+		printf 'raw=%s\neffective=%s\n' "$g_zxfer_source_pvs_raw" "$g_zxfer_source_pvs_effective"
+	) >"$TEST_TMPDIR/collect_restore.out"
+	assertEquals "raw=compression=lz4=local,readonly=on=local
+effective=readonly=on=local,compression=lz4=local" "$(cat "$TEST_TMPDIR/collect_restore.out")"
+}
+
+test_collect_source_props_fails_when_backup_entry_missing() {
+	set +e
+	output=$(
+		(
+			zxfer_load_normalized_dataset_properties() {
+				g_zxfer_normalized_dataset_properties="compression=lz4=local"
+			}
+			zxfer_throw_usage_error() {
+				printf '%s\n' "$1"
+				exit 2
+			}
+			g_option_e_restore_property_mode=1
+			ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
+			ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
+			g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
+				"$(zxfer_test_backup_metadata_row "other" "compression=lz4=local")")
+			zxfer_collect_source_props "tank/src" "backup/dst"
+		)
+	)
+	status=$?
+	assertEquals 2 "$status"
+	assertEquals "Can't find the properties for the filesystem tank/src and destination backup/dst" "$output"
+}
+
+test_collect_source_props_restore_mode_requires_restored_contents() {
+	set +e
+	output=$(
+		(
+			zxfer_load_normalized_dataset_properties() {
+				g_zxfer_normalized_dataset_properties="compression=lz4=local"
+			}
+			zxfer_throw_usage_error() {
+				printf '%s\n' "$1"
+				exit 2
+			}
+			g_option_e_restore_property_mode=1
+			g_restored_backup_file_contents=""
+			zxfer_collect_source_props "tank/src" "backup/dst"
+		)
+	)
+	status=$?
+	assertEquals 2 "$status"
+	assertEquals "Can't find the properties for the filesystem tank/src and destination backup/dst" "$output"
+}
 
 ################################################################################
 # DESTINATION CREATE

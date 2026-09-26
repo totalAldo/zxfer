@@ -110,7 +110,7 @@ that permission can set directly anyway, although the replica can end with
 values the source never held at any moment; native properties cannot be forged
 this way.
 `test_parse_property_views_residual_created_record_takes_text_from_the_value_before_it`
-in `tests/suites/zxfer_property_state_cache_tests.sh` pins the current
+in `tests/test_zxfer_property_state.sh` pins the current
 behavior. A complete fix reads every user property alone (two `zfs get` calls
 per user property per dataset) or uses `zfs get -j` where OpenZFS 2.3 or later
 provides it. Reading the name list, or the machine view, a second time costs
