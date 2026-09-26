@@ -506,7 +506,9 @@ own exit status gates its output file (ssh exits 255 when the connection
 drops), so there is no target-side script or framing protocol to validate.
 The destination snapshot listing overlaps the source listing; when it fails,
 the exact existence probe decides between a missing dataset (bootstrap) and
-a failed run. After the diff, the recursive dataset inventory is listed only
+a failed run. A `-T` listing that ssh could not deliver (status 255, which
+zfs never returns) says nothing about the dataset, so the run stops with
+that status without probing over the same connection. After the diff, the recursive dataset inventory is listed only
 when later work reads it (transfers, `-d` deletes, property work), so a clean
 `-T` no-op lists no inventory; a missing destination root is bootstrapped
 only after the live pool probe lists its pool. Snapshot-list stderr precedes

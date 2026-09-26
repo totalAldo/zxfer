@@ -1012,7 +1012,8 @@ test_remote_target_destination_listing_failure_fails_closed() {
 
 # Invariant (-T discovery): when the ssh call carrying the destination
 # snapshot listing fails, the run stops with ssh's exit status 255 and ssh's
-# diagnostic, and changes nothing.
+# diagnostic, sends no existence probe over that connection (a lost one would
+# turn the status into the probe's 1), and changes nothing.
 # shellcheck disable=SC2089,SC2090  # the quotes are part of the ssh argv glob
 test_remote_target_ssh_failure_during_discovery_fails_closed() {
 	planning_setup_env
@@ -1030,6 +1031,8 @@ test_remote_target_ssh_failure_during_discovery_fails_closed() {
 		255 "$PLANNING_RUN_STATUS"
 	assertEquals "exactly the listing's ssh call must have failed" \
 		1 "$(grep -c '^fail	' "$SSH_LOG")"
+	assertEquals "no existence probe may follow an undelivered listing" \
+		0 "$(grep -c -- "'list' '-H' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'" "$SSH_LOG")"
 	assertContains "ssh's diagnostic must reach stderr" \
 		"$(cat "$CASE_DIR/zxfer.stderr")" "Connection to localhost closed by remote host."
 	planning_assert_no_mutations

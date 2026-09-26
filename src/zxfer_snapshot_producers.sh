@@ -587,7 +587,8 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 # sorted form.
 # Usage: zxfer_write_destination_snapshot_list_to_files RAW SORTED; a missing
 # destination root leaves both files empty. The listing is serial and has no
-# creation order, since the destination side needs neither.
+# creation order, since the destination side needs neither. A -T listing that
+# ssh could not deliver (status 255) stops the run with that status.
 zxfer_write_destination_snapshot_list_to_files() {
 	l_dest_list_raw_file=$1
 	l_dest_list_sorted_file=$2
@@ -613,12 +614,20 @@ zxfer_write_destination_snapshot_list_to_files() {
 		fi
 	else
 		l_dest_list_status=$?
-		# Its stderr does not reliably say which dataset is missing, so an
-		# exact probe (with the SunOS fallback) decides whether the root is
-		# absent, the bootstrap case, or the listing itself failed.
-		zxfer_probe_destination_existence "$l_dest_list_dataset" live ||
-			zxfer_throw_error "$g_zxfer_destination_exists_error" "$?"
-		if [ "$g_zxfer_destination_exists_result" -ne 0 ]; then
+		# ssh exits 255 for its own failures and zfs never does, so a -T
+		# listing that ssh could not deliver says nothing about the dataset:
+		# the run stops with ssh's status instead of probing over the same
+		# connection. Otherwise the listing's stderr does not reliably say
+		# which dataset is missing, so an exact probe (with the SunOS
+		# fallback) decides whether the root is absent, the bootstrap case,
+		# or the listing itself failed.
+		l_dest_list_exists=1
+		if [ "$l_dest_list_status" -ne 255 ] || [ -z "${g_option_T_target_host:-}" ]; then
+			zxfer_probe_destination_existence "$l_dest_list_dataset" live ||
+				zxfer_throw_error "$g_zxfer_destination_exists_error" "$?"
+			l_dest_list_exists=$g_zxfer_destination_exists_result
+		fi
+		if [ "$l_dest_list_exists" -ne 0 ]; then
 			if zxfer_read_snapshot_discovery_capture_file "$g_zxfer_destination_listing_error_file" &&
 				[ -n "$g_zxfer_snapshot_discovery_file_read_result" ]; then
 				zxfer_warn_stderr "$g_zxfer_snapshot_discovery_file_read_result"

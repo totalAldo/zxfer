@@ -245,8 +245,9 @@ planned dataset and the profile summary reports `diverged_snapshot_warnings`.
 When `-T` is used, destination discovery issues the same `zfs list` commands
 as a local run, each over the target's ssh control master: the `name,guid`
 snapshot listing, the recursive dataset inventory only when later work needs
-it, the exact existence probe only after a failed listing, and the pool probe
-only for a missing destination root. Each listing's own exit status decides
+it, the exact existence probe only after a failed listing (never after an ssh
+failure, which stops the run with ssh's status 255), and the pool probe only
+for a missing destination root. Each listing's own exit status decides
 whether its output is used.
 
 A `-D` progress dialog runs under the cleanup child wrapper as part of the

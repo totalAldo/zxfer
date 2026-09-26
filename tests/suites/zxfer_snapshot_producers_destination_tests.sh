@@ -134,6 +134,57 @@ test_write_destination_snapshot_list_to_files_reports_snapshot_listing_failures(
 		"$output" "Failed to retrieve snapshot list from the destination."
 }
 
+# ssh exits 255 for its own failures: a -T listing that ssh could not deliver
+# stops the run with that status and is never followed by an existence probe
+# over the same connection. A local listing is always probed.
+test_write_destination_snapshot_list_to_files_stops_on_undelivered_remote_listings() {
+	full_file="$TEST_TMPDIR/dest_ssh_fail_full.txt"
+	norm_file="$TEST_TMPDIR/dest_ssh_fail_norm.txt"
+	DEST_LIST_LOG="$TEST_TMPDIR/dest_ssh_fail.log"
+
+	for l_test_target_host in target.example ""; do
+		: >"$DEST_LIST_LOG"
+		set +e
+		output=$(
+			(
+				g_option_T_target_host=$l_test_target_host
+				zxfer_test_stub_destination_listing
+				DEST_LIST_STDERR="Connection to target.example closed by remote host."
+				DEST_LIST_STATUS=255
+				zxfer_throw_error() {
+					printf 'error=%s status=%s\n' "$1" "${2:-1}"
+					exit "${2:-1}"
+				}
+				zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
+			) 2>&1
+		)
+		status=$?
+
+		assertEquals "An undelivered listing should keep ssh's status [target:$l_test_target_host]." \
+			255 "$status"
+		assertContains "An undelivered listing should pass ssh's stderr on [target:$l_test_target_host]." \
+			"$output" "Connection to target.example closed by remote host."
+		assertContains "An undelivered listing should report the snapshot-list failure [target:$l_test_target_host]." \
+			"$output" "error=Failed to retrieve snapshot list from the destination. status=255"
+	done
+	# The loop ends with the local case, which probed the root.
+	assertContains "A local listing failure should still be classified by the exact probe." \
+		"$(cat "$DEST_LIST_LOG")" "list -H backup/dst/src"
+
+	: >"$DEST_LIST_LOG"
+	(
+		g_option_T_target_host=target.example
+		zxfer_test_stub_destination_listing
+		DEST_LIST_STATUS=255
+		zxfer_throw_error() {
+			exit "${2:-1}"
+		}
+		zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
+	) >/dev/null 2>&1
+	assertEquals "An undelivered -T listing must not be followed by a probe over the same connection." \
+		"list -Hr -o name,guid -t snapshot backup/dst/src" "$(cat "$DEST_LIST_LOG")"
+}
+
 test_write_destination_snapshot_list_to_files_reports_empty_stage_failures_when_destination_missing() {
 	full_file="$TEST_TMPDIR/dest_missing_stage_fail_full.txt"
 	norm_file="$TEST_TMPDIR/dest_missing_stage_fail_norm.txt"
