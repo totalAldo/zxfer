@@ -3,7 +3,7 @@
 # shunit2 tests for the -V profiling counters and summary in
 # src/zxfer_profile.sh.
 #
-# shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
+# shellcheck disable=SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
 

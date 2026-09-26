@@ -4,7 +4,7 @@
 # source unmount, and relaunch, live and in dry runs. The cases share the
 # replication fixture, whose command stubs log what each step would run.
 #
-# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2317,SC2329
+# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
 

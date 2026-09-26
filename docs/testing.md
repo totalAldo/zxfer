@@ -77,9 +77,12 @@ The safe default is still:
 
 `tests/validate.sh` is the discoverable front door for common local paths.
 Profile composition lives in `tests/validation_profiles.tsv` and dispatches
-only a closed set of step names. `tests/validation_map.tsv` independently maps
-changed path patterns to `unit_suites`, `integration_groups`, `perf_cases`, and
-`doc_surfaces`. Neither TSV file is evaluated as shell code.
+only a closed set of step names. `quick` selects unit suites by name first: a
+change to `src/zxfer_NAME.sh` runs `tests/test_zxfer_NAME.sh` and every
+`tests/test_contract_*.sh` suite. `tests/validation_map.tsv` then maps changed
+path patterns to exception `unit_suites` (`@contract` selects every contract
+suite), `integration_groups`, `perf_cases`, and `doc_surfaces`. Neither TSV
+file is evaluated as shell code.
 
 ```sh
 ./tests/validate.sh --list
@@ -109,11 +112,10 @@ fragment manifest also select `tests/test_validate.sh`, so declared fragments
 and quick-map ownership cannot drift independently. Wider integration groups
 remain recommendations only; `quick` never runs the direct harness.
 
-A `tests/suites/*` or `tests/fixtures/**` path that an entry suite names in a
+A `tests/suites/*` path that an entry suite names in a
 `# zxfer-test-fragment:` marker maps as a change to that entry suite: `quick`
 prints `fragment of: tests/test_*.sh` and uses the entry suite's map row.
-Unmarked paths, such as `tests/fixtures/snapshot_discovery/fixture.sh`, use
-their own row.
+Shared fixtures under `tests/helpers/` use their own rows.
 
 `quick` and the full shunit step default to four concurrent suites. Set
 `ZXFER_VALIDATE_JOBS` to a positive integer to reduce or increase that bound;
@@ -310,71 +312,51 @@ cannot trap a signal ignored on entry. Signal tests therefore deliver TERM for
 real, call the INT handler directly, and check trap registration only for the
 signals the test shell can trap.
 
-The test layout broadly follows the source layout:
+### Unit-Test Layout
 
-- `test_run_coverage.sh`
-- `test_ci_workflow_contracts.sh`
-- `test_ci_vmactions_integration.sh`
-- `test_run_lint.sh`
-- `test_run_shunit_tests.sh`
-- `test_validate.sh`
-- `test_run_integration_zxfer.sh`
-- `test_run_dx_benchmark.sh`
-- `test_run_perf_tests.sh`
-- `test_run_microbench.sh`
-- `test_run_perf_compare.sh`
-- `test_run_perf_ab.sh`
-- `test_run_argv_fuzz.sh`
-- `test_run_vm_matrix.sh`
-- `test_zxfer_launcher.sh`
-- `test_zxfer_locking.sh`
-- `test_zxfer_reporting.sh`
-- `test_zxfer_quoting.sh`
-- `test_zxfer_exec.sh`
-- `test_zxfer_dependencies.sh`
-- `test_zxfer_runtime.sh`
-- `test_zxfer_send_jobs.sh`
-- `test_zxfer_cleanup_child_wrapper.sh`
-- `test_zxfer_cli.sh`
-- `test_zxfer_snapshot_state.sh`
-- `test_zxfer_backup_metadata.sh`
-- `test_zxfer_remote_hosts.sh`
-- `test_zxfer_remote_hosts_coverage.sh`
-- `test_zxfer_snapshot_discovery.sh`
-- `test_zxfer_snapshot_reconcile.sh`
-- `test_zxfer_property_reconcile.sh`
-- `test_zxfer_replication.sh`
-- `test_zxfer_send_receive.sh`
-- `test_contract_planning.sh`
-- `test_contract_send_receive.sh`
-- `test_contract_properties.sh`
-- `test_contract_verbose.sh`
+Contract suites come first. They drive the real `./zxfer` launcher against the
+canned zfs of `tests/mock_toolchain_helper.sh` or a stand-in secure PATH, so
+they pin what an operator sees and outlive internal refactoring:
 
-`test_zxfer_exec.sh`, `test_zxfer_remote_hosts.sh`, `test_zxfer_runtime.sh`,
-`test_zxfer_replication.sh`, `test_zxfer_property_reconcile.sh`,
-`test_zxfer_backup_metadata.sh`, `test_zxfer_send_receive.sh`, and
-`test_zxfer_snapshot_discovery.sh` are entry points for behavior fragments.
-Each fragment has three lines in its entry file, in the same order: a
-`# zxfer-test-fragment: <path under tests/>` marker (read by
+| Suite | Pins |
+| --- | --- |
+| `test_contract_cli_golden.sh` | Help, usage-error and failure-report output, byte for byte (`tests/golden/cli_*.golden`). |
+| `test_contract_planning.sh` | The zfs argv of whole runs: GUID-aware planning, fail-closed listings, `-d`/`-F` divergence, `-g`, `-j` order and cleanup, `-O`/`-T`, the property pass, and `-k`/`-e`. |
+| `test_contract_properties.sh` | `-P` property argument boundaries and the recursive prefetch. |
+| `test_contract_send_receive.sh` | `-D` progress streams under `-j 1` and `-j 3`, and `-n`. |
+| `test_contract_verbose.sh` | `-v`/`-V` output for hostile property values. |
+
+Every `src/zxfer_NAME.sh` has one home: the entry suite `test_zxfer_NAME.sh`
+and the fragments it runs from `tests/suites/zxfer_NAME_TOPIC_tests.sh`.
+`./tests/validate.sh quick` selects a module's tests by these names. Three
+suites cover more than their name: `test_zxfer_launcher.sh` also covers the
+`src/zxfer_modules.sh` loader, `test_zxfer_snapshot_discovery.sh` also covers
+`src/zxfer_remote_snapshot_discovery.sh` (its remote-batch fragment), and
+`test_zxfer_cleanup_child_wrapper.sh` covers the standalone wrapper script.
+`test_zxfer_mock_toolchain.sh` and `test_zxfer_microbench_budgets.sh` test the
+canned zfs and the spawn budgets; `test_run_*.sh`, `test_validate.sh`,
+`test_ci_*.sh` and `test_generate_solaris_manpage.sh` test the tooling.
+
+A fragment takes three lines in its entry, in the same order: a
+`# zxfer-test-fragment: suites/NAME` marker (read by
 `run_shunit_tests.sh --list-tests` and `validate.sh quick`), a `.` source line,
-and its path in `suite() { zxfer_test_register_fragment_tests ...; }`. Each
-`suite()` passes the entry file first, and the registrar registers every
-`test*()` function in file order, so a new test needs no registration; a new
-fragment needs all three lines. Each fragment header names the source
-module(s) it covers.
+and its path in `suite() { zxfer_test_register_fragment_tests ...; }`, which
+passes the entry file first and registers every `test*()` function in file
+order. A new test needs no registration; a new fragment needs all three lines.
+Each fragment header names what it covers and, when it is not the entry's
+own, the fixture it runs under.
 
-Some support modules are still covered inside adjacent suites.
-The property suite intentionally exercises the ordered
-`zxfer_property_state.sh` → `zxfer_property_policy.sh` →
-`zxfer_property_reconcile.sh` stack as one behavioral surface while keeping
-state ownership, policy decisions, and destination mutation in separate
-source modules.
-The snapshot-discovery suite likewise exercises the ordered
-`zxfer_snapshot_producers.sh` → `zxfer_remote_snapshot_discovery.sh` →
-`zxfer_snapshot_discovery.sh` stack as one behavioral surface while keeping
-command production and normalization, remote batch handling, and mutable
-discovery orchestration in separate source modules.
-Its `golden/remote_destination_discovery_batch_script.golden` fixture pins the
+Fixtures that several entries share live in `tests/helpers/*_fixtures.sh`
+(`exec`, `remote_host`, `runtime`, `send_job`, `property`, `replication` and
+`snapshot_discovery`, plus `fake_tool` and `backup`). A fragment keeps the
+fixture its cases were written for: the entry's `setUp` asks
+`zxfer_test_running_test_is_in FILE` (from `tests/helpers/loader.sh`) and
+applies that fixture to the fragment's cases only.
+
+### Suite Notes
+
+The remote-batch fragment's
+`golden/remote_destination_discovery_batch_script.golden` fixture pins the
 exact target-side secure-PATH setup, quoting, sentinels, section order, and
 command topology; adjacent behavioral cases also execute that rendered script.
 Focused remote-batch cases require one SSH invocation that leaves no temp file
@@ -384,20 +366,11 @@ a complete stream, empties all four caller-visible outputs and publishes no
 batch status, so a missing root still re-probes the pool live. Transport
 failures retain their exact status and diagnostic. These cases use only fake
 ZFS and SSH functions and are safe for the native and dash host-side loops.
-The stable `test_zxfer_snapshot_discovery.sh` entry point sources ordered
-behavior fragments from `fixtures/snapshot_discovery/`; it follows the same
-marker, source, and registrar contract.
-`src/zxfer_backup_metadata.sh` has the dedicated `test_zxfer_backup_metadata.sh`
-peer suite, with a smaller number of restore and remote-helper expectations
-still covered in the property, exec, and remote-host suites, and the
-operator-visible `-k`/`-e` contract pinned black-box in
-`test_contract_planning.sh`. Local and rendered-remote pair publication
-tests inject staging, recovery-read, and either rename failures, and verify
-that failed rollback preserves private recovery contents with operator
-guidance. Likewise,
-`test_zxfer_remote_hosts_coverage.sh` keeps focused regression coverage for
-remote-host and ssh-control-socket edge paths that would be awkward to express
-through the broader peer suite alone.
+`test_zxfer_backup_metadata.sh` holds every backup-metadata case, and
+`test_contract_planning.sh` pins the operator-visible `-k`/`-e` contract.
+Local and rendered-remote pair publication tests inject staging,
+recovery-read, and either rename failures, and verify that failed rollback
+preserves private recovery contents with operator guidance.
 
 The top-level launcher and `tests/test_helper.sh` both source
 `src/zxfer_modules.sh`, so runtime module order is defined in one place rather
@@ -407,11 +380,10 @@ owned locks live with their only consumer in `src/zxfer_error_log.sh`. Send-job
 scheduling and completion state live together in `src/zxfer_send_jobs.sh`;
 source discovery waits directly on its registered helper PID.
 
-`test_zxfer_locking.sh` owns the owned-lock protocol in
-`src/zxfer_error_log.sh` (pid+start-token metadata render/parse, owner-identity
-capture, stale-owner reaping, checked release); the `ps` start-token parser is
-covered by `test_zxfer_cleanup_child_wrapper.sh`. The reporting suite covers
-the `ZXFER_ERROR_LOG` lock, the protocol's only cross-process consumer.
+`test_zxfer_error_log.sh` owns the `ZXFER_ERROR_LOG` mirror and its
+owned-lock protocol in `src/zxfer_error_log.sh` (pid+start-token metadata
+render/parse, owner-identity capture, stale-owner reaping, checked release);
+the `ps` start-token parser is covered by `test_zxfer_cleanup_child_wrapper.sh`.
 
 `tests/test_helper.sh` loads every module in `src/zxfer_modules.sh` order, so
 every suite sees the complete function set. The boundary argument of
@@ -467,10 +439,12 @@ receive has consumed its stream, which the `-j` ancestry pin uses to prove a
 child receive starts only after its parent's receive ends. The black-box mock
 parallel quotes each replacement the way GNU parallel does, and an argv
 recorder pins a `-j` dataset name with spaces as one `zfs list` argument,
-locally and over `-O`. Black-box suite entries share `tests/helpers/blackbox.sh`, which supplies the shunit2
-lifecycle hooks (a private `CASE_DIR` per case) and the `planning_*` fixture,
-run, and log-assertion helpers. The exec, runtime,
-and snapshot-discovery suites cover short-lived helper spawning and cleanup.
+locally and over `-O`. Every contract suite but the CLI golden one shares
+`tests/helpers/blackbox.sh`, which supplies the shunit2 lifecycle hooks (a
+private `CASE_DIR` per case) and the `planning_*` fixture, run, and
+log-assertion helpers. The exec, runtime,
+snapshot-discovery and snapshot-producer suites cover short-lived helper
+spawning and cleanup.
 `test_zxfer_cleanup_child_wrapper.sh` covers the fallback wrapper's argument
 validation, command status, and interrupted descendant cleanup, including
 descendants whose start token changed or cannot be read and a real zombie.
