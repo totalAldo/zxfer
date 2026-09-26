@@ -159,6 +159,34 @@ test_unit_workflow_bounds_process_heavy_suite_parallelism() {
 		"$omnios_job" "timeout-minutes: 30"
 }
 
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_unit_workflow_runs_tool_suites_on_one_linux_and_one_macos_lane() {
+	matrix_flags=$(workflow_job_body "$UNIT_WORKFLOW_FILE" shunit2 | awk '
+		$1 == "-" && $2 == "os:" { os = $3 }
+		$1 == "unit_flags:" {
+			flags = $0
+			sub(/^[[:space:]]*unit_flags:[[:space:]]*/, "", flags)
+			print os " " flags
+		}
+	')
+
+	assertEquals "Only ubuntu-26.04 and macos-26 should run the tool self-tests in the hosted matrix." \
+		'ubuntu-26.04 ""
+macos-26 ""
+xcode-27 --skip-tool-suites' "$matrix_flags"
+	assertContains "The hosted matrix should pass each lane's runner flags." \
+		"$(workflow_job_body "$UNIT_WORKFLOW_FILE" shunit2)" \
+		'./tests/run_shunit_tests.sh --jobs "${{ matrix.unit_jobs }}" ${{ matrix.unit_flags }}'
+	for l_skip_job in portable-shells portable-shell-posh shunit2-freebsd shunit2-omnios; do
+		assertContains "The $l_skip_job lane should skip the tool self-tests." \
+			"$(workflow_job_body "$UNIT_WORKFLOW_FILE" "$l_skip_job")" \
+			"./tests/run_shunit_tests.sh --jobs "
+		assertEquals "Every runner call in the $l_skip_job lane should pass --skip-tool-suites." \
+			"" "$(workflow_job_body "$UNIT_WORKFLOW_FILE" "$l_skip_job" |
+				grep 'run_shunit_tests.sh' | grep -v -e '--skip-tool-suites')"
+	done
+}
+
 # shellcheck disable=SC2016,SC2317,SC2329  # Literal workflow expression; invoked indirectly by shunit2.
 test_unit_workflow_gates_a_seeded_argv_fuzz_job() {
 	fuzz_job=$(workflow_job_body "$UNIT_WORKFLOW_FILE" argv-fuzz)

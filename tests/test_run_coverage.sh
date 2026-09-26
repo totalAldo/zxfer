@@ -43,10 +43,8 @@ zxfer_test_bash_supports_xtracefd() {
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_coverage_rejects_the_removed_enforce_option_and_accepts_report_only() {
-	set +e
 	output=$("$RUN_COVERAGE_BIN" --enforce 2>&1)
 	status=$?
-	set -e
 
 	assertEquals "The removed --enforce option must fail instead of silently running report-only coverage." \
 		1 "$status"
@@ -76,7 +74,7 @@ test_run_coverage_default_suite_resolution_includes_coverage_overlays() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_run_coverage_capture_bash_xtrace_to_file_survives_fd_9_closure() {
+test_run_coverage_xtrace_shell_keeps_tracing_after_a_suite_closes_fd_9() {
 	l_bash_bin=${ZXFER_COVERAGE_BASH_BIN:-}
 	if [ -z "$l_bash_bin" ]; then
 		l_bash_bin=$(command -v bash 2>/dev/null || true)
@@ -90,201 +88,33 @@ test_run_coverage_capture_bash_xtrace_to_file_survives_fd_9_closure() {
 		endSkipping
 		return 0
 	fi
+	l_trace_dir="$TEST_TMPDIR/xtrace-fd9"
+	rm -rf "$l_trace_dir"
+	mkdir -p "$l_trace_dir/probe"
 	l_support_status=$(run_coverage_helper \
-		"if bash_supports_xtrace_line_numbers \"$l_bash_bin\" >/dev/null 2>&1; then printf '%s' 0; else printf '%s' 1; fi")
+		"if bash_supports_xtrace_line_numbers \"$l_bash_bin\" \"$l_trace_dir/probe\" >/dev/null 2>&1; then printf '%s' 0; else printf '%s' 1; fi")
 	if [ "$l_support_status" != "0" ]; then
 		fail "The selected Bash should support the line-number trace format used by coverage."
 		return 0
 	fi
 	l_script_file="$TEST_TMPDIR/trace-survives-fd9-close.sh"
-	l_trace_file="$TEST_TMPDIR/trace-survives-fd9-close.trace"
-
-	cat >"$l_script_file" <<'EOF'
+	cat >"$l_script_file" <<'EOS'
 #!/bin/sh
 before=1
 exec 9<&- 2>/dev/null || true
 after=1
 set -u
-EOF
+EOS
 
 	output=$(run_coverage_helper \
-		"if capture_bash_xtrace_to_file \"$l_bash_bin\" \"$l_trace_file\" \"$l_script_file\" >/dev/null 2>&1; then l_capture_status=0; else l_capture_status=\$?; fi; printf 'capture_status=%s\\n' \"\$l_capture_status\"; cat \"$l_trace_file\"")
+		"write_bash_xtrace_shell \"$l_bash_bin\" \"$l_trace_dir\" \"$l_trace_dir/xtrace-shell\" && \"$l_trace_dir/xtrace-shell\" \"$l_script_file\" >/dev/null 2>&1; printf 'trace_status=%s\\n' \"\$?\"; cat \"$l_trace_dir/trace-survives-fd9-close.trace\"")
 
-	assertContains "The bash-xtrace capture helper should report a successful traced process." \
-		"$output" "capture_status=0"
-	if ! printf '%s\n' "$output" | grep -F -- 'after=1' >/dev/null; then
-		fail "The bash-xtrace capture helper should keep tracing after a suite closes fd 9 for its own descriptor management. Output: $output"
-	fi
-}
-
-# shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
-test_run_coverage_refuses_to_signal_a_reused_descendant_pid() {
-	output=$(run_coverage_helper '
-		coverage_get_process_start_token() {
-			printf "%s\n" "lstart:new-process"
-		}
-		coverage_send_signal_to_pid() {
-			printf "signal=%s pid=%s\n" "$1" "$2"
-		}
-		tab=$(printf "\t")
-		record="43210${tab}lstart:original-process"
-		coverage_signal_process_tree TERM "$record"
-	')
-
-	assertEquals "A changed process-start token must prevent TERM/KILL from touching a reused PID." \
-		"" "$output"
-}
-
-# shellcheck disable=SC2016,SC2317,SC2329  # Expands in helper shell; invoked indirectly by shunit2.
-test_run_coverage_refuses_to_signal_a_reused_root_pid() {
-	output=$(run_coverage_helper '
-		coverage_get_process_start_token() {
-			printf "%s\n" "lstart:new-process"
-		}
-		coverage_send_signal_to_pid() {
-			printf "signal=%s pid=%s\n" "$1" "$2"
-		}
-		coverage_signal_tracked_process TERM 43210 "lstart:original-process"
-	')
-
-	assertEquals "A changed root process-start token must prevent TERM/KILL from touching a reused PID." \
-		"" "$output"
-}
-
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_run_coverage_term_exits_and_reaps_the_active_suite() {
-	l_bash_bin=${ZXFER_COVERAGE_BASH_BIN:-}
-	if [ -z "$l_bash_bin" ]; then
-		l_bash_bin=$(command -v bash 2>/dev/null || true)
-	fi
-	if [ -z "$l_bash_bin" ] || [ ! -x "$l_bash_bin" ]; then
-		startSkipping
-		assertTrue "No executable Bash is available; coverage-runner TERM cleanup skipped." true
-		endSkipping
-		return 0
-	fi
-	if ! zxfer_test_bash_supports_xtracefd "$l_bash_bin"; then
-		startSkipping
-		assertTrue "The available Bash predates BASH_XTRACEFD; coverage-runner TERM cleanup skipped." true
-		endSkipping
-		return 0
-	fi
-	l_support_status=$(run_coverage_helper \
-		"if bash_supports_xtrace_line_numbers \"$l_bash_bin\" >/dev/null 2>&1; then printf '%s' 0; else printf '%s' 1; fi")
-	if [ "$l_support_status" != "0" ]; then
-		fail "The selected Bash should support the line-number trace format used by coverage."
-		return 0
-	fi
-	l_suite_file="$TEST_TMPDIR/coverage-term-suite.sh"
-	l_suite_pid_file="$TEST_TMPDIR/coverage-term-suite.pid"
-	l_child_pid_file="$TEST_TMPDIR/coverage-term-child.pid"
-	l_grandchild_pid_file="$TEST_TMPDIR/coverage-term-grandchild.pid"
-	l_output_file="$TEST_TMPDIR/coverage-term-runner.out"
-	l_coverage_dir="$TEST_TMPDIR/coverage-term-output"
-	l_fake_bin="$TEST_TMPDIR/coverage-term-bin"
-	mkdir -p "$l_fake_bin"
-	cat >"$l_fake_bin/pgrep" <<'EOF'
-#!/bin/sh
-[ "$#" -eq 2 ] && [ "$1" = "-P" ] || exit 2
-l_parent_pid=$2
-l_suite_pid=$(cat "${COVERAGE_TERM_SUITE_PID_FILE:?}" 2>/dev/null || :)
-l_child_pid=$(cat "${COVERAGE_TERM_CHILD_PID_FILE:?}" 2>/dev/null || :)
-if [ -n "$l_suite_pid" ] && [ "$l_parent_pid" = "$l_suite_pid" ]; then
-	cat "${COVERAGE_TERM_CHILD_PID_FILE:?}"
-	check_status=$?
-	[ "$check_status" -eq 0 ] || exit "$check_status"
-	exit 0
-fi
-if [ -n "$l_child_pid" ] && [ "$l_parent_pid" = "$l_child_pid" ]; then
-	cat "${COVERAGE_TERM_GRANDCHILD_PID_FILE:?}"
-	check_status=$?
-	[ "$check_status" -eq 0 ] || exit "$check_status"
-	exit 0
-fi
-exit 1
-EOF
-	chmod +x "$l_fake_bin/pgrep"
-	cat >"$l_fake_bin/ps" <<'EOF'
-#!/bin/sh
-if [ "$#" -eq 4 ] && [ "$1" = "-p" ] && [ "$3" = "-o" ]; then
-	case "$4" in
-	lstart=)
-		printf '%s\n' 'Fri Jul 17 12:00:00 2026'
-		exit 0
-		;;
-	stime=)
-		printf '%s\n' '12:00:00'
-		exit 0
-		;;
-	esac
-fi
-exec /bin/ps "$@"
-EOF
-	chmod +x "$l_fake_bin/ps"
-	cat >"$l_suite_file" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$$" >"${COVERAGE_TERM_SUITE_PID_FILE:?}"
-(
-	trap '' TERM
-	sh -c 'trap "" TERM; while :; do sleep 1; done' &
-	printf '%s\n' "$!" >"${COVERAGE_TERM_GRANDCHILD_PID_FILE:?}"
-	wait
-) &
-printf '%s\n' "$!" >"${COVERAGE_TERM_CHILD_PID_FILE:?}"
-trap '' TERM
-while :; do
-	sleep 1
-done
-EOF
-	chmod +x "$l_suite_file"
-
-	COVERAGE_TERM_SUITE_PID_FILE="$l_suite_pid_file" \
-		COVERAGE_TERM_CHILD_PID_FILE="$l_child_pid_file" \
-		COVERAGE_TERM_GRANDCHILD_PID_FILE="$l_grandchild_pid_file" \
-		COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS=1 \
-		ZXFER_COVERAGE_MODE=bash-xtrace \
-		ZXFER_COVERAGE_BASH_BIN="$l_bash_bin" \
-		COVERAGE_DIR="$l_coverage_dir" \
-		PATH="$l_fake_bin:${PATH:-/usr/bin:/bin}" \
-		"$RUN_COVERAGE_BIN" --report-only "$l_suite_file" >"$l_output_file" 2>&1 &
-	l_runner_pid=$!
-	l_wait_count=0
-	while { [ ! -s "$l_suite_pid_file" ] || [ ! -s "$l_child_pid_file" ] || [ ! -s "$l_grandchild_pid_file" ]; } &&
-		[ "$l_wait_count" -lt 10 ]; do
-		l_wait_count=$((l_wait_count + 1))
-		sleep 1
-	done
-	if [ ! -s "$l_suite_pid_file" ] || [ ! -s "$l_child_pid_file" ] || [ ! -s "$l_grandchild_pid_file" ]; then
-		kill -s KILL "$l_runner_pid" >/dev/null 2>&1 || :
-		wait "$l_runner_pid" >/dev/null 2>&1 || :
-		fail "The coverage runner did not start its selected suite within the bounded wait. Output: $(cat "$l_output_file" 2>/dev/null || :)"
-		return
-	fi
-	l_suite_pid=$(cat "$l_suite_pid_file")
-	l_child_pid=$(cat "$l_child_pid_file")
-	l_grandchild_pid=$(cat "$l_grandchild_pid_file")
-
-	kill -s TERM "$l_runner_pid"
-	set +e
-	wait "$l_runner_pid"
-	l_runner_status=$?
-	set -e
-
-	assertEquals "TERM should end the coverage runner with the conventional signal-derived status." \
-		143 "$l_runner_status"
-	for l_reaped_record in \
-		"suite:$l_suite_pid" \
-		"child:$l_child_pid" \
-		"grandchild:$l_grandchild_pid"; do
-		l_reaped_role=${l_reaped_record%%:*}
-		l_reaped_pid=${l_reaped_record#*:}
-		set +e
-		run_coverage_helper "coverage_process_running_p '$l_reaped_pid'" >/dev/null 2>&1
-		l_suite_running_status=$?
-		set -e
-		assertNotEquals "TERM should not leave the selected suite or any captured descendant live after the coverage runner exits ($l_reaped_role pid $l_reaped_pid)." \
-			0 "$l_suite_running_status"
-	done
+	assertContains "The xtrace shell should report a successful traced suite." \
+		"$output" "trace_status=0"
+	assertContains "The xtrace shell should keep tracing after a suite closes fd 9 for its own descriptor management." \
+		"$output" "after=1"
+	assertContains "Trace lines should name the suite file and line." \
+		"$output" "+$l_script_file:4: after=1"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

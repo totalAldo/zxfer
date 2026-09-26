@@ -86,19 +86,6 @@ explicit justification in the PR that edits it. Use
 `./tests/run_budget_check.sh --list` to print current measured values in
 policy format when ratcheting budgets down.
 
-For optional, non-gating evidence about the changed-code loop, record warmed
-named-test and representative quick-validation timings without applying a
-threshold:
-
-```sh
-./tests/run_dx_benchmark.sh \
-  --case named,quick --samples 5 \
-  --output-dir /tmp/zxfer-dx-candidate
-```
-
-The complete `shunit` and `validate` timing cases are available for wider
-measurements; see [docs/testing.md](./docs/testing.md).
-
 The shell lint targets include tracked and non-ignored untracked `*.sh` files
 and the `zxfer` launcher, so a newly extracted module is checked before it is
 staged. Ignored files remain outside the lint source set.

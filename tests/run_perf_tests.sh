@@ -44,6 +44,9 @@ ZXFER_PERF_SAMPLES=""
 ZXFER_PERF_WARMUPS=""
 ZXFER_PERF_OUTPUT_DIR=${ZXFER_PERF_OUTPUT_DIR:-}
 ZXFER_PERF_BASELINE=""
+ZXFER_PERF_BASELINE_BIN=""
+ZXFER_PERF_BASELINE_LABEL="baseline"
+ZXFER_PERF_RUNNER="$ZXFER_PERF_ROOT/tests/run_perf_tests.sh"
 ZXFER_PERF_REGRESSION_THRESHOLD_PCT=${ZXFER_PERF_REGRESSION_THRESHOLD_PCT:-10}
 ZXFER_PERF_YES=0
 ZXFER_PERF_SPARSE_SIZE_MB=""
@@ -61,11 +64,17 @@ ZXFER_PERF_LAST_MOCK_SSH_LOG=""
 
 zxfer_perf_print_usage() {
 	cat <<'EOF'
-usage: ./tests/run_perf_tests.sh [--yes] [--label LABEL] [--profile smoke|standard] [--case name[,name...]] [--samples N] [--warmups N] [--output-dir path] [--baseline summary.tsv] [--help]
+usage: ./tests/run_perf_tests.sh [--yes] [--label LABEL] [--profile smoke|standard] [--case name[,name...]] [--samples N] [--warmups N] [--output-dir path] [--baseline summary.tsv | --baseline-bin PATH [--baseline-label LABEL]] [--help]
 
 Runs manual, non-gating performance checks against disposable file-backed ZFS
 pools. By default the runner asks for one confirmation before creating pools.
 Pass --yes only on a trusted throwaway host or inside a disposable VM guest.
+
+--baseline compares this run with an earlier summary.tsv. --baseline-bin
+first runs the same cases with another zxfer executable into
+OUTPUT_DIR/baseline/, then this run (ZXFER_BIN, default ./zxfer) compares
+itself with that. Either way compare.tsv and compare.md note regressions;
+they never fail the run.
 EOF
 }
 
@@ -177,6 +186,16 @@ zxfer_perf_parse_args() {
 			shift
 			[ $# -gt 0 ] && [ -n "$1" ] || zxfer_perf_die "--baseline requires a summary.tsv path"
 			ZXFER_PERF_BASELINE=$1
+			;;
+		--baseline-bin)
+			shift
+			[ $# -gt 0 ] && [ -n "$1" ] || zxfer_perf_die "--baseline-bin requires a path"
+			ZXFER_PERF_BASELINE_BIN=$1
+			;;
+		--baseline-label)
+			shift
+			[ $# -gt 0 ] && [ -n "$1" ] || zxfer_perf_die "--baseline-label requires a value"
+			ZXFER_PERF_BASELINE_LABEL=$1
 			;;
 		-h | --help)
 			zxfer_perf_print_usage
@@ -1077,17 +1096,52 @@ zxfer_perf_compare_baseline() {
 	[ -r "$ZXFER_PERF_BASELINE" ] || zxfer_perf_die "Baseline summary is not readable: $ZXFER_PERF_BASELINE"
 
 	zxfer_perf_compare_summary_files "$ZXFER_PERF_BASELINE" "$ZXFER_PERF_SUMMARY_FILE" "$ZXFER_PERF_COMPARE_FILE" "$ZXFER_PERF_REGRESSION_THRESHOLD_PCT"
+	awk -F '\t' '
+		NR == 1 {
+			print "# zxfer performance comparison"
+			print ""
+			print "| case | metric | baseline | current | delta % | warning |"
+			print "| --- | --- | ---: | ---: | ---: | --- |"
+			next
+		}
+		{ printf "| `%s` | `%s` | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6 }
+	' "$ZXFER_PERF_COMPARE_FILE" >"${ZXFER_PERF_COMPARE_FILE%.tsv}.md"
 
 	if awk -F '\t' 'NR > 1 && $6 == "regression" { found = 1 } END { exit(found ? 0 : 1) }' "$ZXFER_PERF_COMPARE_FILE"; then
 		zxfer_perf_warn "performance regressions were detected relative to $ZXFER_PERF_BASELINE; see $ZXFER_PERF_COMPARE_FILE"
 	fi
 }
 
+# Purpose: Run the selected cases with the --baseline-bin executable into
+# OUTPUT_DIR/baseline/ and make its summary this run's --baseline. The
+# baseline gets its own runner process, pools and cleanup.
+# Usage: zxfer_perf_run_baseline_bin; call after the output directory exists.
+zxfer_perf_run_baseline_bin() {
+	[ -n "$ZXFER_PERF_BASELINE_BIN" ] || return 0
+
+	set -- --yes --label "$ZXFER_PERF_BASELINE_LABEL" \
+		--profile "$ZXFER_PERF_PROFILE" \
+		--case "$(printf '%s\n' "$ZXFER_PERF_CASES" | tr ' ' ',')" \
+		--samples "$ZXFER_PERF_SAMPLES" --warmups "$ZXFER_PERF_WARMUPS" \
+		--output-dir "$ZXFER_PERF_OUTPUT_DIR/baseline"
+	log_summary "Running the baseline $ZXFER_PERF_BASELINE_BIN into $ZXFER_PERF_OUTPUT_DIR/baseline"
+	ZXFER_BIN=$ZXFER_PERF_BASELINE_BIN "$ZXFER_PERF_RUNNER" "$@" ||
+		zxfer_perf_die "Performance sample run failed for the baseline $ZXFER_PERF_BASELINE_BIN"
+	ZXFER_PERF_BASELINE="$ZXFER_PERF_OUTPUT_DIR/baseline/summary.tsv"
+}
+
 zxfer_perf_main() {
 	zxfer_perf_parse_args "$@"
 	zxfer_perf_apply_profile_defaults
+	if [ -n "$ZXFER_PERF_BASELINE_BIN" ]; then
+		[ -z "$ZXFER_PERF_BASELINE" ] ||
+			zxfer_perf_die "--baseline and --baseline-bin cannot be combined"
+		[ -x "$ZXFER_PERF_BASELINE_BIN" ] ||
+			zxfer_perf_die "Baseline binary is not executable: $ZXFER_PERF_BASELINE_BIN"
+	fi
 	zxfer_perf_confirm_once
 	zxfer_perf_setup_output_dir
+	zxfer_perf_run_baseline_bin
 	zxfer_perf_log_configuration
 	zxfer_perf_setup_pools
 	zxfer_perf_write_run_info

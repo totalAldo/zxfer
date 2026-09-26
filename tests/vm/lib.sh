@@ -527,11 +527,11 @@ EOF
 mkdir -p $l_tmpdir_arg
 cd $l_repo_dir_arg
 env TMPDIR=$l_tmpdir_arg \\
-	$l_guest_shell_arg ./tests/run_perf_compare.sh --yes --profile $l_perf_profile_arg \\
+	ZXFER_BIN=$l_candidate_bin_arg \\
+	$l_guest_shell_arg ./tests/run_perf_tests.sh --yes --profile $l_perf_profile_arg \\
 	--baseline-bin $l_perf_baseline_bin_arg \\
-	--candidate-bin $l_candidate_bin_arg \\
 	--baseline-label $l_perf_baseline_label_arg \\
-	--candidate-label 'candidate' \\
+	--label 'candidate' \\
 	--output-dir $l_perf_output_dir_arg${l_perf_cases_arg:+ \\
 	--case $l_perf_cases_arg}
 EOF

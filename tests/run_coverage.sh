@@ -2,6 +2,9 @@
 #
 # Run zxfer shunit2 suites under a coverage collector.
 # Prefers kcov when available; otherwise falls back to a bash xtrace report.
+# The bash-xtrace mode runs the suites through tests/run_shunit_tests.sh with
+# a ZXFER_TEST_SHELL wrapper that traces each suite into its own file, so it
+# shares that runner's worker pool, watchdog and signal teardown.
 #
 
 set -eu
@@ -11,12 +14,9 @@ TEST_DIR="$ZXFER_ROOT/tests"
 COVERAGE_DIR=${COVERAGE_DIR:-"$ZXFER_ROOT/coverage"}
 ZXFER_COVERAGE_MODE=${ZXFER_COVERAGE_MODE:-auto}
 ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=${ZXFER_COVERAGE_INCLUDE_ENTRYPOINT:-0}
-COVERAGE_ACTIVE_SUITE_PID=
-COVERAGE_ACTIVE_SUITE_TOKEN=
-COVERAGE_DEFER_SIGNALS=0
-COVERAGE_DEFERRED_SIGNAL=
 TARGET_LIST_FILE=
-COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS=${COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS:-2}
+COVERAGE_TRACE_DIR=
+COVERAGE_RUNNER_PID=
 
 print_usage() {
 	cat <<'USAGE'
@@ -28,7 +28,8 @@ Runs the shunit2 suites under a coverage collector and writes results to
 The bash-xtrace fallback covers sourced shell modules under src/. It excludes
 the top-level ./zxfer entrypoint by default because child-shell execution is
 not traced reliably without kcov. Set ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=1 to
-include it anyway.
+include it anyway. It runs the suites through tests/run_shunit_tests.sh, so
+that runner's default worker count and ZXFER_TEST_SUITE_TIMEOUT apply.
 
 Modes:
   auto        Prefer kcov when installed, otherwise use bash xtrace.
@@ -157,416 +158,48 @@ run_with_kcov() {
 	return "$l_overall_status"
 }
 
-bash_supports_xtrace_line_numbers() {
-	l_bash_bin=$1
-	l_probe_script=$(mktemp "${TMPDIR:-/tmp}/zxfer.coverage.probe.XXXXXX") ||
-		return 1
-	l_probe_file=$l_probe_script.trace
-	if ! (
-		umask 077 && cat >"$l_probe_script" <<'EOF'
-probe() {
-	printf '%s\n' ok >/dev/null
-}
-probe
-EOF
-	); then
-		rm -f "$l_probe_script" "$l_probe_file"
-		return 1
-	fi
-	(
-		capture_bash_xtrace_to_file \
-			"$l_bash_bin" "$l_probe_file" "$l_probe_script" \
-			>/dev/null 2>&1
-	) || true
-
-	if grep -Eq '^\+[^:]+:[0-9]+: ' "$l_probe_file" 2>/dev/null; then
-		rm -f "$l_probe_script" "$l_probe_file"
-		return 0
-	fi
-
-	rm -f "$l_probe_script" "$l_probe_file"
-	return 1
-}
-
-capture_bash_xtrace_to_file() {
-	l_bash_bin=$1
-	l_trace_file=$2
-	shift 2
-	[ "$#" -gt 0 ] || return 1
-	l_capture_script=$1
-	shift
-	l_capture_status=0
-	l_capture_pid=
-	l_capture_token=
-
+# Purpose: Write the ZXFER_TEST_SHELL wrapper that runs one suite under bash
+# xtrace. Each suite's trace goes to TRACE_DIR/<suite name>.trace on fd 7.
+# Usage: write_bash_xtrace_shell BASH_BIN TRACE_DIR WRAPPER_PATH
+# The wrapper reads its bash and trace directory from the environment
+# (ZXFER_COVERAGE_BASH_BIN, ZXFER_COVERAGE_TRACE_DIR), so no path is quoted
+# into its source.
+write_bash_xtrace_shell() {
 	# Keep the coverage trace off fd 9 because send/receive tests exercise
 	# their own queue descriptors on 8/9 and may close them during setUp().
-	# Apply fd 7 directly to Bash: some POSIX shells mark descriptors opened by
-	# an earlier exec builtin close-on-exec inside an asynchronous subshell.
-	# Set PS4 inside Bash because privileged/root shells may reject an imported
-	# PS4 environment value. $0 and the remaining arguments still match a direct
+	# Apply fd 7 on the exec itself: some POSIX shells mark descriptors
+	# opened by an earlier exec builtin close-on-exec. Set PS4 inside Bash
+	# because privileged/root shells may reject an imported PS4 environment
+	# value. $0 and the remaining arguments still match a direct
 	# `bash suite [args...]` invocation while the wrapper sources the suite.
-	COVERAGE_DEFER_SIGNALS=1
-	# shellcheck disable=SC2016  # Expanded by the traced child Bash.
-	ZXFER_COVERAGE_BASH_BIN=$l_bash_bin \
-		"$l_bash_bin" --noprofile --norc -c '
+	cat >"$3" <<'EOF'
+#!/bin/sh
+l_coverage_trace=$ZXFER_COVERAGE_TRACE_DIR/$(basename "$1" .sh).trace
+exec "$ZXFER_COVERAGE_BASH_BIN" --noprofile --norc -c '
 l_zxfer_coverage_script=$1
 shift
 PS4="+\${BASH_SOURCE[0]-\$0}:\${LINENO:-0}: "
 BASH_XTRACEFD=7
 set -x
 . "$l_zxfer_coverage_script"
-' "$l_capture_script" "$l_capture_script" "$@" \
-		7>"$l_trace_file" <&0 &
-	l_capture_pid=$!
-	l_capture_token=$(coverage_get_process_start_token "$l_capture_pid" 2>/dev/null || true)
-	COVERAGE_ACTIVE_SUITE_PID=$l_capture_pid
-	COVERAGE_ACTIVE_SUITE_TOKEN=$l_capture_token
-	COVERAGE_DEFER_SIGNALS=0
-	consume_deferred_coverage_signal
-	if wait "$COVERAGE_ACTIVE_SUITE_PID"; then
-		l_capture_status=0
-	else
-		l_capture_status=$?
-	fi
-	COVERAGE_ACTIVE_SUITE_PID=
-	COVERAGE_ACTIVE_SUITE_TOKEN=
-	return "$l_capture_status"
+' "$1" "$@" 7>"$l_coverage_trace"
+EOF
+	chmod 700 "$3"
+	ZXFER_COVERAGE_BASH_BIN=$1
+	ZXFER_COVERAGE_TRACE_DIR=$2
+	export ZXFER_COVERAGE_BASH_BIN ZXFER_COVERAGE_TRACE_DIR
 }
 
-coverage_signal_exit_status() {
-	case "$1" in
-	HUP) printf '%s\n' 129 ;;
-	INT) printf '%s\n' 130 ;;
-	QUIT) printf '%s\n' 131 ;;
-	TERM) printf '%s\n' 143 ;;
-	*) printf '%s\n' 1 ;;
-	esac
-}
-
-coverage_signal_number() {
-	case "$1" in
-	0) printf '%s\n' 0 ;;
-	HUP) printf '%s\n' 1 ;;
-	INT) printf '%s\n' 2 ;;
-	QUIT) printf '%s\n' 3 ;;
-	KILL) printf '%s\n' 9 ;;
-	TERM) printf '%s\n' 15 ;;
-	*) return 1 ;;
-	esac
-}
-
-coverage_send_signal_to_pid() {
-	l_coverage_send_signal_name=$1
-	l_coverage_send_signal_pid=$2
-	l_coverage_send_signal_number=
-
-	case "$l_coverage_send_signal_pid" in
-	'' | *[!0-9]*) return 1 ;;
-	esac
-	kill -s "$l_coverage_send_signal_name" "$l_coverage_send_signal_pid" >/dev/null 2>&1 && return 0
-	kill "-$l_coverage_send_signal_name" "$l_coverage_send_signal_pid" >/dev/null 2>&1 && return 0
-	l_coverage_send_signal_number=$(coverage_signal_number "$l_coverage_send_signal_name" 2>/dev/null || true)
-	[ -n "$l_coverage_send_signal_number" ] || return 1
-	kill "-$l_coverage_send_signal_number" "$l_coverage_send_signal_pid" >/dev/null 2>&1
-}
-
-# Return a stable process-start token so a snapshotted descendant PID can be
-# distinguished from an unrelated process that later reuses the same number.
-coverage_get_process_start_token() {
-	l_coverage_token_pid=$1
-
-	case "$l_coverage_token_pid" in
-	'' | *[!0-9]*) return 1 ;;
-	esac
-	l_coverage_token_selector=lstart
-	l_coverage_token_raw=$(LC_ALL=C ps -p "$l_coverage_token_pid" -o lstart= 2>/dev/null || :)
-	case $- in
-	*f*) l_coverage_token_restore_glob=0 ;;
-	*)
-		l_coverage_token_restore_glob=1
-		set -f
-		;;
-	esac
-	if [ "${IFS+set}" = "set" ]; then
-		l_coverage_token_saved_ifs_set=1
-		l_coverage_token_saved_ifs=$IFS
-	else
-		l_coverage_token_saved_ifs_set=0
-		l_coverage_token_saved_ifs=
-	fi
-	unset IFS
-	# shellcheck disable=SC2086
-	set -- $l_coverage_token_raw
-	if [ "$#" -eq 0 ]; then
-		l_coverage_token_selector=stime
-		l_coverage_token_raw=$(LC_ALL=C ps -p "$l_coverage_token_pid" -o stime= 2>/dev/null || :)
-		# shellcheck disable=SC2086
-		set -- $l_coverage_token_raw
-	fi
-	l_coverage_token_normalized=$*
-	if [ "$l_coverage_token_saved_ifs_set" -eq 1 ]; then
-		IFS=$l_coverage_token_saved_ifs
-	else
-		unset IFS
-	fi
-	if [ "$l_coverage_token_restore_glob" -eq 1 ]; then
-		set +f
-	fi
-	[ "$#" -gt 0 ] || return 1
-	printf '%s:%s\n' "$l_coverage_token_selector" "$l_coverage_token_normalized"
-}
-
-coverage_list_child_pids() {
-	l_coverage_children_parent=$1
-	l_coverage_children_pgrep=
-	l_coverage_children_ps=
-
-	case "$l_coverage_children_parent" in
-	'' | *[!0-9]*) return 1 ;;
-	esac
-	if command -v pgrep >/dev/null 2>&1; then
-		l_coverage_children_pgrep=$(pgrep -P "$l_coverage_children_parent" 2>/dev/null || true)
-		if [ -n "$l_coverage_children_pgrep" ]; then
-			printf '%s\n' "$l_coverage_children_pgrep"
-			return 0
-		fi
-	fi
-	if l_coverage_children_ps=$(ps -eo pid= -o ppid= 2>/dev/null); then
-		:
-	elif l_coverage_children_ps=$(ps -ax -o pid= -o ppid= 2>/dev/null); then
-		:
-	elif l_coverage_children_ps=$(ps -A -o pid= -o ppid= 2>/dev/null); then
-		:
-	else
+# Purpose: Succeed when BASH_BIN writes "+file:line:" xtrace lines to fd 7.
+# Usage: bash_supports_xtrace_line_numbers BASH_BIN SCRATCH_DIR
+bash_supports_xtrace_line_numbers() {
+	l_probe_dir=$2
+	printf '%s\n' 'probe() {' '	printf "%s\n" ok >/dev/null' '}' 'probe' \
+		>"$l_probe_dir/probe.sh" || return 1
+	write_bash_xtrace_shell "$1" "$l_probe_dir" "$l_probe_dir/xtrace-shell" ||
 		return 1
-	fi
-	printf '%s\n' "$l_coverage_children_ps" | awk -v parent="$l_coverage_children_parent" '
-		$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $2 == parent { print $1 }
-	'
-}
-
-coverage_child_pid_matches_parent() {
-	l_coverage_child_parent=$1
-	l_coverage_child_pid=$2
-
-	for l_coverage_child_current in $(coverage_list_child_pids "$l_coverage_child_parent"); do
-		[ "$l_coverage_child_current" = "$l_coverage_child_pid" ] && return 0
-	done
-	return 1
-}
-
-# Capture identity only while the PID is still a child of the expected parent,
-# and require the start token to remain stable across that relationship check.
-coverage_capture_child_identity() {
-	l_coverage_identity_parent=$1
-	l_coverage_identity_pid=$2
-	l_coverage_identity_before=
-	l_coverage_identity_after=
-
-	l_coverage_identity_before=$(coverage_get_process_start_token "$l_coverage_identity_pid") || return 1
-	coverage_child_pid_matches_parent "$l_coverage_identity_parent" "$l_coverage_identity_pid" || return 1
-	l_coverage_identity_after=$(coverage_get_process_start_token "$l_coverage_identity_pid") || return 1
-	[ "$l_coverage_identity_before" = "$l_coverage_identity_after" ] || return 1
-	printf '%s\n' "$l_coverage_identity_before"
-}
-
-coverage_process_identity_matches() {
-	l_coverage_match_pid=$1
-	l_coverage_match_expected=$2
-	l_coverage_match_current=
-
-	[ -n "$l_coverage_match_expected" ] || return 1
-	l_coverage_match_current=$(coverage_get_process_start_token "$l_coverage_match_pid") || return 1
-	[ "$l_coverage_match_current" = "$l_coverage_match_expected" ]
-}
-
-coverage_tracked_process_running_p() {
-	l_coverage_tracked_running_pid=$1
-	l_coverage_tracked_running_token=$2
-
-	coverage_process_identity_matches \
-		"$l_coverage_tracked_running_pid" \
-		"$l_coverage_tracked_running_token" || return 1
-	coverage_process_running_p "$l_coverage_tracked_running_pid"
-}
-
-coverage_signal_tracked_process() {
-	l_coverage_tracked_signal=$1
-	l_coverage_tracked_signal_pid=$2
-	l_coverage_tracked_signal_token=$3
-
-	case "$l_coverage_tracked_signal_pid" in
-	'' | *[!0-9]*) return 0 ;;
-	esac
-	coverage_process_identity_matches \
-		"$l_coverage_tracked_signal_pid" \
-		"$l_coverage_tracked_signal_token" || return 0
-	coverage_send_signal_to_pid \
-		"$l_coverage_tracked_signal" "$l_coverage_tracked_signal_pid" || :
-}
-
-# Snapshot descendants before signalling so a parent that exits promptly
-# cannot reparent a still-running grandchild out of the traversal.
-coverage_collect_process_tree() {
-	l_coverage_tree_pending=$1
-	l_coverage_tree_next=
-	l_coverage_tree_descendants=
-	l_coverage_tree_parent=
-	l_coverage_tree_child=
-	l_coverage_tree_token=
-	l_coverage_tree_record=
-
-	while [ -n "$l_coverage_tree_pending" ]; do
-		l_coverage_tree_next=
-		for l_coverage_tree_parent in $l_coverage_tree_pending; do
-			for l_coverage_tree_child in $(coverage_list_child_pids "$l_coverage_tree_parent"); do
-				l_coverage_tree_token=$(coverage_capture_child_identity \
-					"$l_coverage_tree_parent" "$l_coverage_tree_child") || continue
-				l_coverage_tree_next="${l_coverage_tree_next}${l_coverage_tree_next:+ }$l_coverage_tree_child"
-				l_coverage_tree_record=$(printf '%s\t%s' \
-					"$l_coverage_tree_child" "$l_coverage_tree_token")
-				if [ -n "$l_coverage_tree_descendants" ]; then
-					l_coverage_tree_descendants="$l_coverage_tree_record
-$l_coverage_tree_descendants"
-				else
-					l_coverage_tree_descendants=$l_coverage_tree_record
-				fi
-			done
-		done
-		l_coverage_tree_pending=$l_coverage_tree_next
-	done
-	printf '%s\n' "$l_coverage_tree_descendants"
-}
-
-coverage_process_state() {
-	l_coverage_state_pid=$1
-	l_coverage_state_value=
-
-	l_coverage_state_value=$(ps -o stat= -p "$l_coverage_state_pid" 2>/dev/null |
-		awk '$1 != "STAT" && $1 != "STATE" && $1 != "" { print $1; exit }')
-	if [ -z "$l_coverage_state_value" ]; then
-		l_coverage_state_value=$(ps -o state= -p "$l_coverage_state_pid" 2>/dev/null |
-			awk '$1 != "S" && $1 != "STAT" && $1 != "STATE" && $1 != "" { print $1; exit }')
-	fi
-	printf '%s\n' "$l_coverage_state_value"
-}
-
-coverage_process_running_p() {
-	l_coverage_running_pid=$1
-	l_coverage_running_state=
-
-	coverage_send_signal_to_pid 0 "$l_coverage_running_pid" || return 1
-	l_coverage_running_state=$(coverage_process_state "$l_coverage_running_pid")
-	case "$l_coverage_running_state" in
-	Z* | z* | *zombie* | *defunct*) return 1 ;;
-	esac
-	return 0
-}
-
-coverage_process_tree_running_p() {
-	l_coverage_running_tree_records=$1
-	l_coverage_running_tree_tab=$(printf '\t')
-
-	while IFS="$l_coverage_running_tree_tab" read -r \
-		l_coverage_running_tree_pid l_coverage_running_tree_token; do
-		[ -n "$l_coverage_running_tree_pid" ] || continue
-		coverage_process_identity_matches \
-			"$l_coverage_running_tree_pid" "$l_coverage_running_tree_token" || continue
-		if coverage_process_running_p "$l_coverage_running_tree_pid"; then
-			return 0
-		fi
-	done <<EOF
-$l_coverage_running_tree_records
-EOF
-	return 1
-}
-
-coverage_process_tree_exists_p() {
-	l_coverage_existing_tree_records=$1
-	l_coverage_existing_tree_tab=$(printf '\t')
-
-	while IFS="$l_coverage_existing_tree_tab" read -r \
-		l_coverage_existing_tree_pid l_coverage_existing_tree_token; do
-		[ -n "$l_coverage_existing_tree_pid" ] || continue
-		coverage_process_identity_matches \
-			"$l_coverage_existing_tree_pid" "$l_coverage_existing_tree_token" || continue
-		if coverage_send_signal_to_pid 0 "$l_coverage_existing_tree_pid"; then
-			return 0
-		fi
-	done <<EOF
-$l_coverage_existing_tree_records
-EOF
-	return 1
-}
-
-coverage_signal_process_tree() {
-	l_coverage_signal_tree_signal=$1
-	l_coverage_signal_tree_records=$2
-	l_coverage_signal_tree_tab=$(printf '\t')
-
-	while IFS="$l_coverage_signal_tree_tab" read -r \
-		l_coverage_signal_tree_pid l_coverage_signal_tree_token; do
-		[ -n "$l_coverage_signal_tree_pid" ] || continue
-		coverage_process_identity_matches \
-			"$l_coverage_signal_tree_pid" "$l_coverage_signal_tree_token" || continue
-		coverage_send_signal_to_pid "$l_coverage_signal_tree_signal" "$l_coverage_signal_tree_pid" || :
-	done <<EOF
-$l_coverage_signal_tree_records
-EOF
-}
-
-coverage_wait_for_process_tree_shutdown() {
-	l_coverage_wait_tree_records=$1
-	l_coverage_wait_tree_remaining=$COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS
-
-	case "$l_coverage_wait_tree_remaining" in
-	'' | *[!0-9]*) l_coverage_wait_tree_remaining=2 ;;
-	esac
-	while [ "$l_coverage_wait_tree_remaining" -gt 0 ]; do
-		coverage_process_tree_running_p "$l_coverage_wait_tree_records" || return 0
-		sleep 1 || :
-		l_coverage_wait_tree_remaining=$((l_coverage_wait_tree_remaining - 1))
-	done
-	coverage_process_tree_running_p "$l_coverage_wait_tree_records" && return 1
-	return 0
-}
-
-coverage_wait_for_direct_process_shutdown() {
-	l_coverage_wait_pid=$1
-	l_coverage_wait_token=$2
-	l_coverage_wait_pid_remaining=$COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS
-
-	case "$l_coverage_wait_pid_remaining" in
-	'' | *[!0-9]*) l_coverage_wait_pid_remaining=2 ;;
-	esac
-	while [ "$l_coverage_wait_pid_remaining" -gt 0 ]; do
-		coverage_tracked_process_running_p \
-			"$l_coverage_wait_pid" "$l_coverage_wait_token" || return 0
-		sleep 1 || :
-		l_coverage_wait_pid_remaining=$((l_coverage_wait_pid_remaining - 1))
-	done
-	coverage_tracked_process_running_p \
-		"$l_coverage_wait_pid" "$l_coverage_wait_token" && return 1
-	return 0
-}
-
-# Once the directly owned suite has been waited for, give the system reaper a
-# bounded opportunity to remove any orphaned descendant zombies as well.
-coverage_wait_for_process_tree_reap() {
-	l_coverage_reap_tree_pids=$1
-	l_coverage_reap_tree_remaining=$COVERAGE_SIGNAL_SHUTDOWN_GRACE_SECONDS
-
-	case "$l_coverage_reap_tree_remaining" in
-	'' | *[!0-9]*) l_coverage_reap_tree_remaining=2 ;;
-	esac
-	while [ "$l_coverage_reap_tree_remaining" -gt 0 ]; do
-		coverage_process_tree_exists_p "$l_coverage_reap_tree_pids" || return 0
-		sleep 1 || :
-		l_coverage_reap_tree_remaining=$((l_coverage_reap_tree_remaining - 1))
-	done
-	coverage_process_tree_exists_p "$l_coverage_reap_tree_pids" && return 1
-	return 0
+	"$l_probe_dir/xtrace-shell" "$l_probe_dir/probe.sh" >/dev/null 2>&1 || :
+	grep -Eq '^\+[^:]+:[0-9]+: ' "$l_probe_dir/probe.trace" 2>/dev/null
 }
 
 cleanup_coverage_runner() {
@@ -574,80 +207,30 @@ cleanup_coverage_runner() {
 		rm -f "$TARGET_LIST_FILE"
 		TARGET_LIST_FILE=
 	fi
-}
-
-remember_deferred_coverage_signal() {
-	l_coverage_deferred_signal=$1
-
-	if [ -z "${COVERAGE_DEFERRED_SIGNAL:-}" ]; then
-		COVERAGE_DEFERRED_SIGNAL=$l_coverage_deferred_signal
+	if [ -n "${COVERAGE_TRACE_DIR:-}" ]; then
+		rm -rf "$COVERAGE_TRACE_DIR"
+		COVERAGE_TRACE_DIR=
 	fi
 }
 
-consume_deferred_coverage_signal() {
-	if [ -z "${COVERAGE_DEFERRED_SIGNAL:-}" ]; then
-		return 0
-	fi
-
-	l_coverage_deferred_signal=$COVERAGE_DEFERRED_SIGNAL
-	COVERAGE_DEFERRED_SIGNAL=
-	handle_coverage_signal "$l_coverage_deferred_signal"
-}
-
+# Purpose: Stop the suite runner on HUP, INT, QUIT or TERM and exit 128+N.
+# The runner is a background job, so it ignores INT; it gets TERM and stops
+# its own suites before it exits.
+# Usage: installed by main's traps only.
 handle_coverage_signal() {
-	l_signal=$1
-	l_exit_status=$(coverage_signal_exit_status "$l_signal")
-	l_coverage_signal_descendants=
-	l_coverage_signal_pid=
-	l_coverage_signal_token=
-
-	if [ "${COVERAGE_DEFER_SIGNALS:-0}" = "1" ]; then
-		remember_deferred_coverage_signal "$l_signal"
-		return 0
-	fi
-
-	trap - EXIT HUP INT TERM QUIT
-	case "${COVERAGE_ACTIVE_SUITE_PID:-}" in
-	'' | *[!0-9]*) ;;
-	*)
-		l_coverage_signal_pid=$COVERAGE_ACTIVE_SUITE_PID
-		l_coverage_signal_token=$COVERAGE_ACTIVE_SUITE_TOKEN
-		if ! coverage_process_identity_matches \
-			"$l_coverage_signal_pid" "$l_coverage_signal_token"; then
-			COVERAGE_ACTIVE_SUITE_PID=
-			COVERAGE_ACTIVE_SUITE_TOKEN=
-			cleanup_coverage_runner
-			exit "$l_exit_status"
-		fi
-		l_coverage_signal_descendants=$(coverage_collect_process_tree \
-			"$l_coverage_signal_pid")
-		# Keep the directly owned suite alive while its descendants stop so it
-		# can reap them. Killing every level simultaneously leaves transient
-		# orphan zombies on platforms whose system reaper runs less eagerly.
-		if [ -n "$l_coverage_signal_descendants" ]; then
-			coverage_signal_process_tree "$l_signal" "$l_coverage_signal_descendants"
-			if ! coverage_wait_for_process_tree_shutdown "$l_coverage_signal_descendants"; then
-				coverage_signal_process_tree KILL "$l_coverage_signal_descendants"
-				coverage_wait_for_process_tree_shutdown "$l_coverage_signal_descendants" || :
-			fi
-		fi
-		coverage_signal_tracked_process \
-			"$l_signal" "$l_coverage_signal_pid" "$l_coverage_signal_token"
-		if ! coverage_wait_for_direct_process_shutdown \
-			"$l_coverage_signal_pid" "$l_coverage_signal_token"; then
-			coverage_signal_tracked_process \
-				KILL "$l_coverage_signal_pid" "$l_coverage_signal_token"
-			coverage_wait_for_direct_process_shutdown \
-				"$l_coverage_signal_pid" "$l_coverage_signal_token" || :
-		fi
-		wait "$l_coverage_signal_pid" >/dev/null 2>&1 || :
-		COVERAGE_ACTIVE_SUITE_PID=
-		COVERAGE_ACTIVE_SUITE_TOKEN=
-		coverage_wait_for_process_tree_reap "$l_coverage_signal_descendants" || :
-		;;
+	trap '' HUP INT QUIT TERM
+	case "$1" in
+	HUP) l_coverage_signal_exit=129 ;;
+	INT) l_coverage_signal_exit=130 ;;
+	QUIT) l_coverage_signal_exit=131 ;;
+	*) l_coverage_signal_exit=143 ;;
 	esac
+	if [ -n "$COVERAGE_RUNNER_PID" ]; then
+		kill -s TERM "$COVERAGE_RUNNER_PID" 2>/dev/null || :
+		wait "$COVERAGE_RUNNER_PID" 2>/dev/null || :
+	fi
 	cleanup_coverage_runner
-	exit "$l_exit_status"
+	exit "$l_coverage_signal_exit"
 }
 
 render_bash_xtrace_report() {
@@ -1171,13 +754,17 @@ run_with_bash_xtrace() {
 		echo "bash is required for ZXFER_COVERAGE_MODE=bash-xtrace." >&2
 		return 1
 	fi
-	if ! bash_supports_xtrace_line_numbers "$l_bash_bin"; then
+
+	COVERAGE_TRACE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zxfer.coverage.XXXXXX")
+	mkdir "$COVERAGE_TRACE_DIR/probe" "$COVERAGE_TRACE_DIR/traces"
+	if ! bash_supports_xtrace_line_numbers "$l_bash_bin" "$COVERAGE_TRACE_DIR/probe"; then
 		echo "The selected bash does not support PS4 line-number tracing." >&2
 		return 1
 	fi
+	write_bash_xtrace_shell "$l_bash_bin" "$COVERAGE_TRACE_DIR/traces" \
+		"$COVERAGE_TRACE_DIR/xtrace-shell"
 
 	mkdir -p "$COVERAGE_DIR/bash-xtrace"
-	l_trace_dir=$(mktemp -d "${TMPDIR:-/tmp}/zxfer.coverage.XXXXXX")
 	l_merged_trace="$COVERAGE_DIR/bash-xtrace/merged.trace"
 	l_summary_file="$COVERAGE_DIR/bash-xtrace/summary.tsv"
 	l_missing_file="$COVERAGE_DIR/bash-xtrace/missing.txt"
@@ -1185,14 +772,15 @@ run_with_bash_xtrace() {
 	: >"$l_summary_file"
 	: >"$l_missing_file"
 
+	echo "==> Running bash-xtrace coverage through tests/run_shunit_tests.sh"
+	ZXFER_TEST_SHELL="$COVERAGE_TRACE_DIR/xtrace-shell" \
+		"$TEST_DIR/run_shunit_tests.sh" -- "$@" &
+	COVERAGE_RUNNER_PID=$!
 	l_overall_status=0
-	for l_suite_path in "$@"; do
-		l_suite_name=$(basename "$l_suite_path" .sh)
-		l_trace_file="$l_trace_dir/$l_suite_name.trace"
-		echo "==> Running bash-xtrace coverage for $l_suite_path"
-		if ! capture_bash_xtrace_to_file "$l_bash_bin" "$l_trace_file" "$l_suite_path"; then
-			l_overall_status=1
-		fi
+	wait "$COVERAGE_RUNNER_PID" || l_overall_status=1
+	COVERAGE_RUNNER_PID=
+	for l_trace_file in "$COVERAGE_TRACE_DIR"/traces/*.trace; do
+		[ -f "$l_trace_file" ] || continue
 		cat "$l_trace_file" >>"$l_merged_trace"
 	done
 
@@ -1211,7 +799,6 @@ BEGIN {
 	printf "%-8s %-10s %-10s %-10s %s\n", $1 "%", $2, $3, $4, $5
 }'
 
-	rm -rf "$l_trace_dir"
 	return "$l_overall_status"
 }
 

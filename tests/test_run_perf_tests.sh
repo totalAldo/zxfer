@@ -30,6 +30,8 @@ setUp() {
 	ZXFER_PERF_WARMUPS=""
 	ZXFER_PERF_OUTPUT_DIR=""
 	ZXFER_PERF_BASELINE=""
+	ZXFER_PERF_BASELINE_BIN=""
+	ZXFER_PERF_BASELINE_LABEL=baseline
 	ZXFER_PERF_REGRESSION_THRESHOLD_PCT=10
 	ZXFER_PERF_YES=0
 }
@@ -607,6 +609,86 @@ test_perf_compare_baseline_writes_regression_annotations_without_failing() {
 		"$(cat "$ZXFER_PERF_COMPARE_FILE")" "wall_ms_avg"
 	assertContains "Baseline comparison should mark threshold-crossing deltas as warnings." \
 		"$(cat "$ZXFER_PERF_COMPARE_FILE")" "regression"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_parse_args_accepts_a_baseline_binary_and_label() {
+	zxfer_perf_parse_args --baseline-bin "$TEST_TMPDIR/base-zxfer" --baseline-label upstream
+
+	assertEquals "The perf runner should parse the baseline binary." \
+		"$TEST_TMPDIR/base-zxfer" "$ZXFER_PERF_BASELINE_BIN"
+	assertEquals "The perf runner should parse the baseline label." \
+		"upstream" "$ZXFER_PERF_BASELINE_LABEL"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_baseline_bin_runs_the_baseline_first_and_compares_against_it() {
+	l_base_bin="$TEST_TMPDIR/base-zxfer"
+	l_mock_runner="$TEST_TMPDIR/mock-run-perf-tests"
+	l_mock_log="$TEST_TMPDIR/mock-run-perf-tests.log"
+	printf '%s\n' '#!/bin/sh' 'exit 0' >"$l_base_bin"
+	chmod 700 "$l_base_bin"
+	cat >"$l_mock_runner" <<'EOF'
+#!/bin/sh
+printf 'ZXFER_BIN=%s\n' "$ZXFER_BIN" >"${MOCK_PERF_LOG:?}"
+printf '%s\n' "$*" >>"$MOCK_PERF_LOG"
+while [ $# -gt 0 ]; do
+	[ "$1" != --output-dir ] || l_out=$2
+	shift
+done
+mkdir -p "$l_out"
+printf '%s\n' "run_label	case	samples	wall_ms_avg	failed_samples" \
+	"upstream	chain_local	1	100.00	0" >"$l_out/summary.tsv"
+EOF
+	chmod 700 "$l_mock_runner"
+	ZXFER_PERF_RUNNER=$l_mock_runner
+	ZXFER_PERF_BASELINE_BIN=$l_base_bin
+	ZXFER_PERF_BASELINE_LABEL=upstream
+	ZXFER_PERF_CASES="chain_local chain_local_noop"
+	ZXFER_PERF_SAMPLES=1
+	ZXFER_PERF_WARMUPS=0
+	ZXFER_PERF_OUTPUT_DIR="$TEST_TMPDIR/baseline-bin-out"
+	mkdir -p "$ZXFER_PERF_OUTPUT_DIR"
+
+	MOCK_PERF_LOG=$l_mock_log zxfer_perf_run_baseline_bin >/dev/null 2>&1
+
+	assertEquals "The baseline run should use the baseline binary and the same cases and counts." \
+		"ZXFER_BIN=$l_base_bin
+--yes --label upstream --profile smoke --case chain_local,chain_local_noop --samples 1 --warmups 0 --output-dir $ZXFER_PERF_OUTPUT_DIR/baseline" \
+		"$(cat "$l_mock_log")"
+	assertEquals "The baseline summary should become this run's baseline." \
+		"$ZXFER_PERF_OUTPUT_DIR/baseline/summary.tsv" "$ZXFER_PERF_BASELINE"
+
+	ZXFER_PERF_SUMMARY_FILE="$ZXFER_PERF_OUTPUT_DIR/summary.tsv"
+	ZXFER_PERF_COMPARE_FILE="$ZXFER_PERF_OUTPUT_DIR/compare.tsv"
+	printf '%s\n' "run_label	case	samples	wall_ms_avg	failed_samples" \
+		"candidate	chain_local	1	125.00	0" >"$ZXFER_PERF_SUMMARY_FILE"
+	zxfer_perf_compare_baseline 2>/dev/null
+
+	assertContains "The comparison should flag the slower candidate." \
+		"$(cat "$ZXFER_PERF_COMPARE_FILE")" "chain_local	wall_ms_avg	100.00	125.00	25.00	regression"
+	assertContains "The comparison should also be written as Markdown." \
+		"$(cat "$ZXFER_PERF_OUTPUT_DIR/compare.md")" "| \`chain_local\` | \`wall_ms_avg\` | 100.00 | 125.00 | 25.00 | regression |"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_main_rejects_a_bad_baseline_binary_before_confirmation() {
+	# The sourced runner enables errexit, so capture each status with ||.
+	both_status=0
+	both_output=$(zxfer_perf_main --baseline "$TEST_TMPDIR/base.tsv" \
+		--baseline-bin /bin/sh 2>&1 </dev/null) || both_status=$?
+	missing_status=0
+	missing_output=$(zxfer_perf_main --baseline-bin "$TEST_TMPDIR/no-such-zxfer" \
+		2>&1 </dev/null) || missing_status=$?
+
+	assertEquals "--baseline and --baseline-bin together should be rejected." 1 "$both_status"
+	assertContains "The error should name both options." \
+		"$both_output" "--baseline and --baseline-bin cannot be combined"
+	assertEquals "A missing baseline binary should be rejected." 1 "$missing_status"
+	assertContains "The error should name the binary." \
+		"$missing_output" "Baseline binary is not executable: $TEST_TMPDIR/no-such-zxfer"
+	assertNotContains "Neither error should reach the confirmation prompt." \
+		"$both_output$missing_output" "Type YES"
 }
 
 # shellcheck source=tests/shunit2/shunit2
