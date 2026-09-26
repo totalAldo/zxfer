@@ -345,10 +345,10 @@ The test layout broadly follows the source layout:
 - `test_zxfer_property_reconcile.sh`
 - `test_zxfer_replication.sh`
 - `test_zxfer_send_receive.sh`
-- `test_zxfer_planning_blackbox.sh`
-- `test_zxfer_blackbox_send_receive.sh`
-- `test_zxfer_blackbox_properties.sh`
-- `test_zxfer_blackbox_verbose.sh`
+- `test_contract_planning.sh`
+- `test_contract_send_receive.sh`
+- `test_contract_properties.sh`
+- `test_contract_verbose.sh`
 
 `test_zxfer_exec.sh`, `test_zxfer_remote_hosts.sh`, `test_zxfer_runtime.sh`,
 `test_zxfer_replication.sh`, `test_zxfer_property_reconcile.sh`,
@@ -391,7 +391,7 @@ marker, source, and registrar contract.
 peer suite, with a smaller number of restore and remote-helper expectations
 still covered in the property, exec, and remote-host suites, and the
 operator-visible `-k`/`-e` contract pinned black-box in
-`test_zxfer_planning_blackbox.sh`. Local and rendered-remote pair publication
+`test_contract_planning.sh`. Local and rendered-remote pair publication
 tests inject staging, recovery-read, and either rename failures, and verify
 that failed rollback preserves private recovery contents with operator
 guidance. Likewise,
@@ -436,7 +436,7 @@ as the secure PATH; the same suite still pins the reset and trap order of
 
 CLI goldens (`tests/golden/cli_*.golden`) compare byte for byte. After an
 intentional change, run
-`ZXFER_UPDATE_GOLDEN=1 ./tests/run_shunit_tests.sh tests/test_zxfer_cli_golden.sh`
+`ZXFER_UPDATE_GOLDEN=1 ./tests/run_shunit_tests.sh tests/test_contract_cli_golden.sh`
 to rewrite them from the actual transcripts, then review the fixture diff. The
 remote-script goldens (capability probe, backup protocol, discovery batch) do
 not have an update mode yet.
@@ -446,19 +446,19 @@ success and failure, completion out of launch order, reaping every finished
 job in one scan, job limits, destination-ancestry conflicts, and abort
 cleanup, including TERM before KILL and never signalling a recycled PID (a job
 that recorded its status gets only a group signal, and a bare PID only while
-it is in zxfer's own process group). `test_zxfer_blackbox_send_receive.sh`
+it is in zxfer's own process group). `test_contract_send_receive.sh`
 runs `-D` with and without `-j` against a strict receive mock that fails on an
 empty stream, so a progress stage that drops the stream cannot pass.
-`test_zxfer_blackbox_properties.sh` puts an argv recorder in front of the
+`test_contract_properties.sh` puts an argv recorder in front of the
 canned ZFS to pin property argument boundaries (a `\001` or newline in a
 value stays one `zfs create -o` or `zfs set` argument, locally and over `-T`)
 and the `-t filesystem,volume` recursive prefetch.
-`test_zxfer_blackbox_verbose.sh` runs `-v -V -P` locally and over `-T`, with
+`test_contract_verbose.sh` runs `-v -V -P` locally and over `-T`, with
 the launcher started by `/bin/sh` and by dash, on a property value holding
 ESC, BEL, a literal `\033` and `\c`, CR and LF, and pins that stdout and
 stderr hold no control byte but LF and TAB and that `zfs set` still gets the
 raw value. The black-box cases in
-`test_zxfer_planning_blackbox.sh` exercise complete `-j` runs with canned ZFS:
+`test_contract_planning.sh` exercise complete `-j` runs with canned ZFS:
 each receive runs once, parent datasets precede their children, and failures
 or TERM clean up the running jobs and run-private files; a TERM exits 143 with
 one structured report whose stage is `signal`. The canned ZFS in
@@ -1246,7 +1246,7 @@ The backup-metadata integration cases are also current-format only. Positive
 `-k` / `-e` restore scenarios first create the current chunked lossless-keyed
 v2 metadata path through live zxfer runs, then mutate that file for security or
 corruption checks. The unit suites cover read-only restore fallback for the
-retired checksum-keyed v2 filename, and `tests/test_zxfer_planning_blackbox.sh`
+retired checksum-keyed v2 filename, and `tests/test_contract_planning.sh`
 pins it end to end with literal `k<cksum>.<len>` names. The black-box suite also
 pins the v1 retired-alias refusal, per-dataset forwarded aliases (local and
 `-O`), two-hop chained `-k` through an alias without its own root row, the
@@ -1285,7 +1285,8 @@ current Ubuntu runner images do not consistently ship a native `kcov` package.
 The Docker-backed `kcov` step is artifact-only and non-blocking because that
 instrumented container can diverge from the normal unit-test hosts in process,
 file-descriptor, and base-tool behavior. In CI it is deliberately scoped to
-the production-focused `tests/test_zxfer_*.sh` suites, avoiding recursive
+the production-focused `tests/test_contract_*.sh` and `tests/test_zxfer_*.sh`
+suites, avoiding recursive
 instrumentation of the shunit, lint, validation, and benchmark runners. The
 bash-xtrace job is kept alongside it because the line-oriented
 `summary.tsv` and `missing.txt` outputs are stable enough to compare across

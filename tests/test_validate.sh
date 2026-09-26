@@ -359,7 +359,7 @@ test_validate_quick_without_paths_inspects_git_changes() {
 		"$output" "quick map: tests/test_untracked.sh"
 	assertEquals "Git-derived quick validation should deduplicate suites from unstaged, staged, and untracked paths." \
 		"lint:budget
-shunit:--jobs 4 tests/test_zxfer_cli.sh tests/test_zxfer_cli_golden.sh tests/test_zxfer_launcher.sh tests/test_zxfer_planning_blackbox.sh tests/test_zxfer_runtime.sh tests/test_zxfer_locking.sh tests/test_zxfer_reporting.sh tests/test_zxfer_backup_metadata.sh tests/test_zxfer_remote_hosts.sh tests/test_untracked.sh" \
+shunit:--jobs 4 tests/test_zxfer_cli.sh tests/test_contract_cli_golden.sh tests/test_zxfer_launcher.sh tests/test_contract_planning.sh tests/test_zxfer_runtime.sh tests/test_zxfer_locking.sh tests/test_zxfer_reporting.sh tests/test_zxfer_backup_metadata.sh tests/test_zxfer_remote_hosts.sh tests/test_untracked.sh" \
 		"$(cat "$VALIDATION_LOG")"
 }
 

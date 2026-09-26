@@ -68,7 +68,7 @@ never a user property's text; an added user property is the next entry.
 Per-dataset reads (`-N`, and every dataset the prefetch leaves out) cannot
 take another dataset's values.
 `test_recursive_read_race_residual_forges_a_recreated_dataset` in
-`tests/test_zxfer_blackbox_properties.sh` pins the current behavior: a forged
+`tests/test_contract_properties.sh` pins the current behavior: a forged
 `readonly=on` reaches `zfs set`. Reading the name list both before and after
 the value views, and publishing nothing unless the two lists match, would cost
 one more `zfs get -r` per side but only narrow the window: a dataset destroyed
@@ -282,6 +282,6 @@ convergence requires BOTH `-d` and `-F` (otherwise the run fails closed with
 zero actions for the diverged dataset); and a post-receive verification of the
 live destination listing turns any re-divergence into a structured error
 naming the snapshot. Regression coverage:
-`tests/test_zxfer_planning_blackbox.sh` (divergence contract pins) and
+`tests/test_contract_planning.sh` (divergence contract pins) and
 `tests/test_zxfer_snapshot_reconcile.sh` (classifier, gate, and verification
 units).
