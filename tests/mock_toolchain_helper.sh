@@ -736,6 +736,176 @@ zxfer_mockbin_build_fixture_tree() {
 		"$((l_mockbin_tree_snaps - 1))" || return 1
 }
 
+# Purpose: Print the 68 properties a current OpenZFS filesystem reports, one
+# "name|value|source" row each, as the template of the property fixtures.
+# Usage: zxfer_mockbin_emit_property_template. LOCAL marks the properties the
+# fixture root sets locally (compression, atime, xattr, mountpoint) and its
+# children inherit; the mountpoint value is replaced per dataset.
+zxfer_mockbin_emit_property_template() {
+	cat <<'EOF'
+type|filesystem|-
+creation|1700000000|-
+used|98304|-
+available|1073741824|-
+referenced|24576|-
+compressratio|1.00x|-
+mounted|yes|-
+quota|0|default
+reservation|0|default
+recordsize|131072|default
+mountpoint|-|LOCAL
+sharenfs|off|default
+checksum|on|default
+compression|lz4|LOCAL
+atime|off|LOCAL
+devices|on|default
+exec|on|default
+setuid|on|default
+readonly|off|default
+zoned|off|default
+snapdir|hidden|default
+aclmode|discard|default
+aclinherit|restricted|default
+createtxg|100|-
+canmount|on|default
+xattr|sa|LOCAL
+copies|1|default
+version|5|-
+utf8only|off|-
+normalization|none|-
+casesensitivity|sensitive|-
+vscan|off|default
+nbmand|off|default
+sharesmb|off|default
+refquota|0|default
+refreservation|0|default
+guid|1000000000000000007|-
+primarycache|all|default
+secondarycache|all|default
+usedbysnapshots|0|-
+usedbydataset|24576|-
+usedbychildren|73728|-
+usedbyrefreservation|0|-
+logbias|latency|default
+objsetid|54|-
+dedup|off|default
+mlslabel|none|default
+sync|standard|default
+dnodesize|legacy|default
+refcompressratio|1.00x|-
+written|0|-
+logicalused|45056|-
+logicalreferenced|12288|-
+volmode|default|default
+filesystem_limit|18446744073709551615|default
+snapshot_limit|18446744073709551615|default
+filesystem_count|18446744073709551615|default
+snapshot_count|18446744073709551615|default
+snapdev|hidden|default
+acltype|off|default
+context|none|default
+fscontext|none|default
+defcontext|none|default
+rootcontext|none|default
+relatime|on|default
+redundant_metadata|all|default
+overlay|on|default
+encryption|off|default
+EOF
+}
+
+# Purpose: Add matching property fixtures to one canned-zfs state directory
+# of the fixture tree, so a -P run reads 68 properties per dataset that
+# already agree on both sides and plans no set or inherit.
+# Usage: zxfer_mockbin_add_property_fixtures <state-dir> <num-datasets>.
+# Answers every `zfs get` shape a -P pass issues: the current launcher's
+# recursive machine and human reads and name lists (rooted at the source
+# root and at the destination root), their per-dataset fallbacks, and the
+# type and volsize probes; plus the per-dataset reads of older launchers
+# such as upstream-compat-final.
+zxfer_mockbin_add_property_fixtures() {
+	l_mockbin_props_dir=$1
+	l_mockbin_props_datasets=$2
+
+	for l_mockbin_props_side in src dst; do
+		if [ "$l_mockbin_props_side" = src ]; then
+			l_mockbin_props_root=$ZXFER_MOCKBIN_SOURCE_ROOT
+		else
+			l_mockbin_props_root=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT
+		fi
+		# One pass per side writes each dataset's rows (<side>_props_root.list,
+		# <side>_props_child<N>.list), the recursive tree rows and name list
+		# that lead with the dataset, and the per-dataset name list.
+		zxfer_mockbin_emit_property_template | awk \
+			-v prefix="$l_mockbin_props_dir/${l_mockbin_props_side}_props" \
+			-v root="$l_mockbin_props_root" -v n="$l_mockbin_props_datasets" '
+			BEGIN {
+				FS = "|"
+				OFS = "\t"
+			}
+			{
+				name[NR] = $1
+				value[NR] = $2
+				source[NR] = $3
+			}
+			END {
+				for (d = 0; d <= n; d++) {
+					dataset = (d == 0) ? root : root "/child" d
+					file = prefix ((d == 0) ? "_root" : "_child" d) ".list"
+					for (i = 1; i <= NR; i++) {
+						v = (name[i] == "mountpoint") ? "/" dataset : value[i]
+						s = source[i]
+						if (s == "LOCAL")
+							s = (d == 0) ? "local" : "inherited from " root
+						print name[i], v, s > file
+						print dataset, name[i], v, s > (prefix "_tree.list")
+						print dataset, name[i] > (prefix "_tree.names")
+					}
+					close(file)
+				}
+				for (i = 1; i <= NR; i++)
+					print name[i] > (prefix ".names")
+			}
+		' || return 1
+	done
+	printf 'filesystem\n' >"$l_mockbin_props_dir/props_type.list" || return 1
+	printf -- '-\n' >"$l_mockbin_props_dir/props_volsize.list" || return 1
+
+	{
+		for l_mockbin_props_view in -Hpo -Ho; do
+			printf '%s\t%s\t0\n' \
+				"get -r -t filesystem,volume $l_mockbin_props_view name,property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT" \
+				src_props_tree.list \
+				"get -r -t filesystem,volume $l_mockbin_props_view name,property,value,source all $ZXFER_MOCKBIN_DEST_ROOT" \
+				dst_props_tree.list \
+				"get $l_mockbin_props_view property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT" \
+				src_props_root.list \
+				"get $l_mockbin_props_view property,value,source all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
+				dst_props_root.list
+		done
+		printf '%s\t%s\t0\n' \
+			"get -r -t filesystem,volume -Ho name,property all $ZXFER_MOCKBIN_SOURCE_ROOT" \
+			src_props_tree.names \
+			"get -r -t filesystem,volume -Ho name,property all $ZXFER_MOCKBIN_DEST_ROOT" \
+			dst_props_tree.names \
+			"get -Ho property all $ZXFER_MOCKBIN_SOURCE_ROOT*" src_props.names \
+			"get -Ho property all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT*" dst_props.names \
+			"get -Hpo value type *" props_type.list \
+			"get -Hpo value volsize *" props_volsize.list
+		l_mockbin_props_index=1
+		while [ "$l_mockbin_props_index" -le "$l_mockbin_props_datasets" ]; do
+			for l_mockbin_props_view in -Hpo -Ho; do
+				printf '%s\t%s\t0\n' \
+					"get $l_mockbin_props_view property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT/child$l_mockbin_props_index" \
+					"src_props_child$l_mockbin_props_index.list" \
+					"get $l_mockbin_props_view property,value,source all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child$l_mockbin_props_index" \
+					"dst_props_child$l_mockbin_props_index.list"
+			done
+			l_mockbin_props_index=$((l_mockbin_props_index + 1))
+		done
+	} >>"$l_mockbin_props_dir/manifest"
+}
+
 # Purpose: Print the ZXFER_SECURE_PATH value that resolves mocks first and
 # everything else from the standard system directories.
 # Usage: zxfer_mockbin_secure_path_env <mockdir> — pass the result as
