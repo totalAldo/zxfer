@@ -183,7 +183,49 @@ test_publish_destination_dataset_inventory_bootstraps_rootless_missing_destinati
 		"$output" "missing=0"
 }
 
-test_collect_local_destination_dataset_inventory_preserves_setup_and_publish_failures() {
+# Local and -T inventories share this publisher, so its operator messages and
+# statuses are pinned here once: a listing failure that names no missing
+# dataset, with and without stderr, and a missing root whose pool probe fails.
+test_publish_destination_dataset_inventory_reports_listing_and_pool_failures() {
+	dest_file="$TEST_TMPDIR/dest_inventory_failures.out"
+	err_file="$TEST_TMPDIR/dest_inventory_failures.err"
+	probe_log="$TEST_TMPDIR/dest_inventory_failures.probe"
+	: >"$dest_file"
+	: >"$probe_log"
+	: >"$TEST_TMPDIR/dest_inventory_failures.out.all"
+
+	for l_test_case in "permission denied|13" "|14" "cannot open 'backup/dst': dataset does not exist|1"; do
+		l_test_stderr=${l_test_case%|*}
+		: >"$err_file"
+		[ -z "$l_test_stderr" ] || printf '%s\n' "$l_test_stderr" >"$err_file"
+		output=$(
+			(
+				PROBE_LOG=$probe_log
+				zxfer_run_destination_zfs_cmd() {
+					printf '%s\n' "$*" >>"$PROBE_LOG"
+					return 2
+				}
+				zxfer_throw_error() {
+					printf 'error=%s status=%s\n' "$1" "${2:-1}"
+					exit "${2:-1}"
+				}
+				zxfer_publish_destination_dataset_inventory_from_stage \
+					"$dest_file" "$err_file" "${l_test_case##*|}"
+			)
+		)
+		printf '%s\n' "$output" >>"$TEST_TMPDIR/dest_inventory_failures.out.all"
+	done
+
+	assertEquals "Inventory failures should report the listing's stderr and status, and a missing root's failed pool probe its own status." \
+		"error=Failed to retrieve list of datasets from the destination: permission denied status=13
+error=Failed to retrieve list of datasets from the destination status=14
+error=Destination dataset [backup/dst] is missing and destination pool [backup] could not be listed. status=2" \
+		"$(cat "$TEST_TMPDIR/dest_inventory_failures.out.all")"
+	assertEquals "Only the missing root should probe its pool, once." \
+		"list -H -o name backup" "$(cat "$probe_log")"
+}
+
+test_collect_destination_dataset_inventory_preserves_setup_and_publish_failures() {
 	temp_status=$(
 		(
 			zxfer_create_temp_file_group() {
@@ -196,8 +238,8 @@ test_collect_local_destination_dataset_inventory_preserves_setup_and_publish_fai
 	)
 	publish_status=$(
 		(
-			l_one="$TEST_TMPDIR/local_dest_inventory_publish.one"
-			l_two="$TEST_TMPDIR/local_dest_inventory_publish.two"
+			l_one="$TEST_TMPDIR/dest_inventory_publish.one"
+			l_two="$TEST_TMPDIR/dest_inventory_publish.two"
 			g_option_V_very_verbose=1
 			zxfer_create_temp_file_group() {
 				: >"$l_one"
@@ -216,9 +258,9 @@ test_collect_local_destination_dataset_inventory_preserves_setup_and_publish_fai
 		)
 	)
 
-	assertEquals "Local destination inventory should preserve temp-file group allocation failures." \
+	assertEquals "Destination inventory should preserve temp-file group allocation failures." \
 		66 "$temp_status"
-	assertEquals "Local destination inventory should preserve publish failures after cleanup." \
+	assertEquals "Destination inventory should preserve publish failures after cleanup." \
 		67 "$publish_status"
 }
 
