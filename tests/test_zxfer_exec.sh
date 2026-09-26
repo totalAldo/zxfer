@@ -137,18 +137,9 @@ tearDown() {
 
 # Each fragment holds the tests of the src modules named in its header. They
 # load and run in src/zxfer_modules.sh order.
-# zxfer-test-fragment: suites/zxfer_exec_path_security_tests.sh
-# shellcheck source=tests/suites/zxfer_exec_path_security_tests.sh
-. "$TESTS_DIR/suites/zxfer_exec_path_security_tests.sh"
-# zxfer-test-fragment: suites/zxfer_exec_quoting_tests.sh
-# shellcheck source=tests/suites/zxfer_exec_quoting_tests.sh
-. "$TESTS_DIR/suites/zxfer_exec_quoting_tests.sh"
 # zxfer-test-fragment: suites/zxfer_exec_reporting_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_reporting_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_reporting_tests.sh"
-# zxfer-test-fragment: suites/zxfer_exec_profile_tests.sh
-# shellcheck source=tests/suites/zxfer_exec_profile_tests.sh
-. "$TESTS_DIR/suites/zxfer_exec_profile_tests.sh"
 # zxfer-test-fragment: suites/zxfer_exec_command_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_command_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_command_tests.sh"
@@ -186,10 +177,7 @@ tearDown() {
 suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_exec.sh" \
-		"$TESTS_DIR/suites/zxfer_exec_path_security_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_exec_quoting_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_reporting_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_exec_profile_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_command_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_dependencies_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_runtime_tests.sh" \

@@ -2,41 +2,6 @@
 # Secure-path, transport policy, runtime cleanup, and consistency behavior tests.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
-test_get_path_owner_uid_falls_back_to_ls_for_dash_prefixed_paths() {
-	result=$(
-		(
-			cd "$TEST_TMPDIR" || exit 1
-			: >"-owner_file"
-			chmod 600 "./-owner_file"
-			stat() {
-				return 1
-			}
-			zxfer_get_path_owner_uid "-owner_file"
-		)
-	)
-
-	assertEquals "LS fallback should recover the owner for dash-prefixed paths." "$(id -u)" "$result"
-}
-
-test_get_path_mode_octal_falls_back_to_ls_for_dash_prefixed_paths() {
-	result=$(
-		(
-			cd "$TEST_TMPDIR" || exit 1
-			: >"-mode_file"
-			chmod 600 "./-mode_file"
-			stat() {
-				return 1
-			}
-			ls() {
-				printf '%s\n' "-rw------- 1 0 0 0 Jan 1 00:00 ./-mode_file"
-			}
-			zxfer_get_path_mode_octal "-mode_file"
-		)
-	)
-
-	assertEquals "LS fallback should recover 0600 permissions for dash-prefixed paths." "600" "$result"
-}
-
 test_ssh_supports_control_sockets_reflects_ssh_status() {
 	g_cmd_ssh="$FAKE_SSH_BIN"
 

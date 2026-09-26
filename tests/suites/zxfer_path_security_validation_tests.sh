@@ -1,5 +1,7 @@
 #!/bin/sh
-# Tests for src/zxfer_path_security.sh, run by tests/test_zxfer_exec.sh.
+# Path validation tests for src/zxfer_path_security.sh: backup-file owner and
+# mode checks, symlink path components, trusted root symlinks, and temp-root
+# candidates. Run by tests/test_zxfer_path_security.sh.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 find_trusted_root_symlink_for_tests() {
