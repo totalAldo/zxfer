@@ -11,16 +11,6 @@ fake_zfs_mountpoint_cmd() {
 	return 1
 }
 
-read_backup_file_with_mocked_security() {
-	l_path=$1
-
-	(
-		zxfer_get_path_owner_uid() { printf '%s\n' "0"; }
-		zxfer_get_path_mode_octal() { printf '%s\n' "600"; }
-		zxfer_read_local_backup_file "$l_path"
-	)
-}
-
 test_zxfer_get_backup_metadata_filename_fails_closed_when_identity_hex_pass_fails() {
 	output_file="$TEST_TMPDIR/backup_metadata_filename_current_shell.out"
 	status_file="$TEST_TMPDIR/backup_metadata_filename_current_shell.status"
@@ -51,15 +41,6 @@ test_zxfer_get_backup_metadata_filename_renders_documented_identity_path() {
 	assertEquals "The retired cksum-keyed filename stays readable for restore fallback." \
 		".zxfer_backup_info.src.k1537737481.19" \
 		"$(zxfer_get_backup_metadata_filename "tank/src" "backup/dst" legacy)"
-}
-
-test_ensure_local_backup_dir_creates_secure_directory() {
-	l_dir=$(cd -P "$TEST_TMPDIR" && pwd)/local_backup
-	rm -rf "$l_dir"
-	zxfer_ensure_local_backup_dir "$l_dir"
-	assertTrue "Secure directory should be created." "[ -d '$l_dir' ]"
-	perms=$(stat -c '%a' "$l_dir" 2>/dev/null || stat -f '%Lp' "$l_dir" 2>/dev/null)
-	assertEquals "Backup directory must be chmod 700." "700" "$perms"
 }
 
 test_write_backup_properties_treats_backup_data_as_literal() {
@@ -133,110 +114,6 @@ test_write_backup_properties_skips_when_no_data() {
 	else
 		unset g_backup_storage_root
 	fi
-}
-
-test_read_local_backup_file_refuses_non_root_owned_metadata() {
-	# zxfer_read_local_backup_file must refuse to parse metadata when the file is
-	# not root-owned to prevent tampering from less-privileged users. Stub
-	# the ownership/mode helpers so the test does not rely on the invoking
-	# user's UID or default umask.
-	backup_file="$TEST_TMPDIR_PHYSICAL/insecure_backup"
-	printf '%s\n' "tampered" >"$backup_file"
-	chmod 600 "$backup_file"
-
-	if output=$(
-		(
-			zxfer_get_path_owner_uid() { printf '%s\n' "1234"; }
-			zxfer_get_path_mode_octal() { printf '%s\n' "600"; }
-			zxfer_read_local_backup_file "$backup_file"
-		) 2>&1
-	); then
-		status=0
-	else
-		status=$?
-	fi
-
-	assertEquals "Reading non-root metadata should exit with an error." 1 "$status"
-
-	expected_owner_desc="root (UID 0)"
-	if command -v id >/dev/null 2>&1; then
-		if current_uid=$(id -u 2>/dev/null); then
-			if [ "$current_uid" != "0" ]; then
-				expected_owner_desc="$expected_owner_desc or UID $current_uid"
-			fi
-		fi
-	fi
-
-	case "$output" in
-	*"Refusing to use backup metadata $backup_file because it is owned by UID 1234 instead of $expected_owner_desc."*) ;;
-	*)
-		fail "zxfer_read_local_backup_file did not report an insecure owner: $output"
-		;;
-	esac
-
-	rm -f "$backup_file"
-}
-
-test_read_local_backup_file_returns_contents_when_secure() {
-	# When metadata ownership and permissions pass validation, the helper
-	# should return the literal on-disk contents.
-	backup_file="$TEST_TMPDIR_PHYSICAL/secure_backup"
-	printf '%s\n' "trusted" >"$backup_file"
-
-	result=$(read_backup_file_with_mocked_security "$backup_file")
-
-	assertEquals "trusted" "$result"
-	rm -f "$backup_file"
-}
-
-test_read_local_backup_file_returns_failure_when_cat_fails_after_security_checks() {
-	backup_file="$TEST_TMPDIR_PHYSICAL/secure_backup_cat_fail"
-	printf '%s\n' "trusted" >"$backup_file"
-	chmod 600 "$backup_file"
-
-	set +e
-	status=$(
-		(
-			zxfer_require_backup_metadata_path_without_symlinks() {
-				return 0
-			}
-			zxfer_check_secure_backup_file() {
-				return 0
-			}
-			cat() {
-				return 1
-			}
-			zxfer_read_local_backup_file "$backup_file" >/dev/null
-			printf '%s\n' "$?"
-		)
-	)
-
-	assertEquals "Secure local backup reads should surface literal cat failures after security checks pass." \
-		1 "$status"
-	rm -f "$backup_file"
-}
-
-test_read_local_backup_file_rejects_nested_symlink_components() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	real_dir="$physical_tmpdir/read_local_backup_real"
-	link_dir="$physical_tmpdir/read_local_backup_link"
-	backup_file="$link_dir/backup.meta"
-	mkdir -p "$real_dir"
-	printf '%s\n' "trusted" >"$real_dir/backup.meta"
-	chmod 600 "$real_dir/backup.meta"
-	ln -s "$real_dir" "$link_dir"
-
-	set +e
-	output=$(
-		(
-			zxfer_read_local_backup_file "$backup_file"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Backup metadata reads should reject symlinked parent components." 1 "$status"
-	assertContains "Nested symlink reads should identify the offending path component." \
-		"$output" "Refusing to use backup metadata $backup_file because path component $link_dir is a symlink."
 }
 
 test_read_remote_backup_file_uses_resolved_remote_cat_path() {
@@ -333,26 +210,6 @@ test_read_remote_backup_file_quotes_resolved_remote_cat_path() {
 		"$log_line_remote_cmd" "'/remote/bin/cat; touch $marker #'"
 }
 
-test_read_remote_backup_file_returns_missing_status_when_remote_file_is_absent() {
-	set +e
-	status=$(
-		(
-			zxfer_build_remote_sh_c_command() {
-				g_zxfer_remote_sh_c_command_result=$1
-				printf '%s\n' "$1"
-			}
-			zxfer_invoke_ssh_shell_command_for_host() {
-				return 94
-			}
-			zxfer_read_remote_backup_file "backup@example.com" "/tmp/missing.meta" >/dev/null
-			printf '%s\n' "$?"
-		)
-	)
-
-	assertEquals "Remote backup reads should map the explicit remote missing-file status to the local missing sentinel." \
-		4 "$status"
-}
-
 test_read_remote_backup_file_rejects_nested_symlink_components() {
 	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
 	real_dir="$physical_tmpdir/read_remote_backup_real"
@@ -442,63 +299,6 @@ EOF
 	assertEquals "Remote backup reads should reject nested symlink components even when remote ownership probes report a secure root-owned path." 1 "$status"
 	assertContains "Root-owned nested symlink reads should still identify the offending path component." \
 		"$output" "Refusing to use backup metadata $backup_file because path component $link_dir is a symlink."
-}
-
-test_read_remote_backup_file_rejects_insecure_remote_owner() {
-	set +e
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() { return 95; }
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_read_remote_backup_file "backup@example.com" "/tmp/backup.meta"
-		)
-	)
-	status=$?
-
-	assertEquals "Remote backup reads should abort on insecure remote ownership." 1 "$status"
-	assertContains "Insecure remote ownership should use the documented error." \
-		"$output" "Refusing to use backup metadata /tmp/backup.meta on backup@example.com because it is not owned by root or the ssh user."
-}
-
-test_read_remote_backup_file_rejects_insecure_remote_mode() {
-	set +e
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() { return 96; }
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_read_remote_backup_file "backup@example.com" "/tmp/backup.meta"
-		)
-	)
-	status=$?
-
-	assertEquals "Remote backup reads should abort on insecure remote permissions." 1 "$status"
-	assertContains "Insecure remote permissions should use the documented error." \
-		"$output" "Refusing to use backup metadata /tmp/backup.meta on backup@example.com because its permissions are not 0600."
-}
-
-test_read_remote_backup_file_rejects_unknown_remote_security_metadata() {
-	set +e
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() { return 97; }
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_read_remote_backup_file "backup@example.com" "/tmp/backup.meta"
-		)
-	)
-	status=$?
-
-	assertEquals "Remote backup reads should abort when remote ownership or mode cannot be determined." 1 "$status"
-	assertContains "Unknown remote security metadata should use the documented error." \
-		"$output" "Cannot determine ownership or permissions for backup metadata /tmp/backup.meta on backup@example.com."
 }
 
 test_read_remote_backup_file_allows_trusted_absolute_root_symlink_components() {

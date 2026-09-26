@@ -304,6 +304,14 @@ test_sanitize_property_list_reports_awk_failures() {
 	assertEquals "Failed to filter unsupported destination properties." "$output"
 }
 
+test_sanitize_property_list_drops_requested_entries() {
+	l_oldifs=$IFS
+	IFS=","
+	zxfer_sanitize_property_list "compression=lz4=local,atime=off=local" "" "atime"
+	IFS=$l_oldifs
+	assertEquals "compression=lz4=local" "$g_zxfer_sanitized_property_list_result"
+}
+
 ################################################################################
 # CREATE METADATA
 ################################################################################

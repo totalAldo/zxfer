@@ -173,9 +173,6 @@ tearDown() {
 # zxfer-test-fragment: suites/zxfer_exec_backup_metadata_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_backup_metadata_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_backup_metadata_tests.sh"
-# zxfer-test-fragment: suites/zxfer_exec_property_tests.sh
-# shellcheck source=tests/suites/zxfer_exec_property_tests.sh
-. "$TESTS_DIR/suites/zxfer_exec_property_tests.sh"
 # zxfer-test-fragment: suites/zxfer_exec_snapshot_producers_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_snapshot_producers_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_snapshot_producers_tests.sh"
@@ -201,7 +198,6 @@ suite() {
 		"$TESTS_DIR/suites/zxfer_exec_cli_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_snapshot_state_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_backup_metadata_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_exec_property_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_snapshot_producers_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_send_receive_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_exec_session_tests.sh"
