@@ -1,8 +1,8 @@
 #!/bin/sh
 # ZXFER_ERROR_LOG tests for src/zxfer_reporting.sh: path, parent, owner, mode
-# and hard-link refusals, exclusive 0600 creation, the one-write append, and
-# two failing runs that mirror at the same time. Run by
-# tests/test_zxfer_reporting.sh.
+# and hard-link refusals, exclusive 0600 creation, the one-write append of
+# small and large reports, and failing runs that mirror at the same time. Run
+# by tests/test_zxfer_reporting.sh.
 # shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 # Make a log parent read-only for this user. When the user can still write
