@@ -1,6 +1,6 @@
 #!/bin/sh
 # Shared property-backup metadata fixture renderers.
-# shellcheck disable=SC2154,SC2317,SC2329
+# shellcheck disable=SC2034,SC2154,SC2317,SC2329
 
 zxfer_test_render_current_backup_metadata_contents() {
 	l_format_version=${ZXFER_BACKUP_METADATA_FORMAT_VERSION:-2}
