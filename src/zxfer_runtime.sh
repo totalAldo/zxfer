@@ -438,6 +438,9 @@ zxfer_discard_runtime_cleanup_state() {
 # Purpose: Check that PATH is the run root this process created, by the
 # recorded pathname, parent and reserved zxfer.<pid>.* name.
 # Usage: zxfer_run_tmp_root_has_safe_owned_shape PATH; lexical checks only.
+# Run where the root's pathname enters (creation) and before whole-root
+# removal; nothing in between can change it, because the session reset drops
+# inherited handles before the root exists.
 zxfer_run_tmp_root_has_safe_owned_shape() {
 	l_owned_root_shape_path=$1
 	l_owned_root_shape_parent=${g_zxfer_owned_run_tmp_root_parent:-}
@@ -472,22 +475,22 @@ zxfer_run_tmp_root_has_safe_owned_shape() {
 }
 
 # Purpose: Check, without forking, that the run root is still a real
-# directory at its recorded pathname.
-# Usage: zxfer_run_tmp_root_is_usable_dir PATH; called on every contained
-# allocation and cleanup. The stat-backed check runs only before whole-root
-# removal.
+# directory.
+# Usage: zxfer_run_tmp_root_is_usable_dir; called on every contained
+# allocation and cleanup. Its pathname was checked when the root was created;
+# only the directory behind it can change.
 zxfer_run_tmp_root_is_usable_dir() {
-	zxfer_run_tmp_root_has_safe_owned_shape "$1" || return 1
-	[ -d "$1" ] && [ ! -L "$1" ]
+	[ -n "${g_zxfer_run_tmp_root:-}" ] && [ -d "$g_zxfer_run_tmp_root" ] &&
+		[ ! -L "$g_zxfer_run_tmp_root" ]
 }
 
 # Purpose: Check that the run root is still the exact private directory this
 # process created.
 # Usage: zxfer_run_tmp_root_is_current_private_dir PATH; called right before
-# whole-root removal. One fresh security record (inode, owner, mode) must
-# equal the private record taken when mktemp created the root.
+# whole-root removal, after the shape check. One fresh security record (a
+# real directory's inode, owner and mode) must equal the private record taken
+# when mktemp created the root.
 zxfer_run_tmp_root_is_current_private_dir() {
-	zxfer_run_tmp_root_is_usable_dir "$1" || return 1
 	zxfer_get_private_directory_security_record "$1" || return 1
 	[ "$g_zxfer_private_directory_record_result" = "${g_zxfer_owned_run_tmp_root_identity:-}" ]
 }
@@ -503,18 +506,12 @@ zxfer_run_tmp_root_is_current_private_dir() {
 # child names inside it are safe: no other user can traverse, pre-create, or
 # replace entries under a private root this process just created.
 zxfer_ensure_run_tmp_root() {
+	# An inherited handle never reaches this point: the session reset
+	# (zxfer_discard_runtime_cleanup_state) drops it before startup.
 	if [ -n "${g_zxfer_run_tmp_root:-}" ]; then
-		if zxfer_run_tmp_root_is_usable_dir "$g_zxfer_run_tmp_root"; then
-			return 0
-		fi
-		# Never adopt a directory merely because an internal-looking global was
-		# inherited or overwritten. The session discard path clears such state
-		# before normal startup; later inconsistencies fail closed.
-		return 1
+		zxfer_run_tmp_root_is_usable_dir
+		return
 	fi
-	[ -z "${g_zxfer_owned_run_tmp_root:-}" ] || return 1
-	[ -z "${g_zxfer_owned_run_tmp_root_parent:-}" ] || return 1
-	[ -z "${g_zxfer_owned_run_tmp_root_identity:-}" ] || return 1
 
 	# Plain call (no command substitution) so the once-per-run validation
 	# memoizes in this shell and a held unsafe-TMPDIR fallback advisory
@@ -535,6 +532,16 @@ zxfer_ensure_run_tmp_root() {
 	l_run_umask=${l_run_tmp_root%%"$ZXFER_LF"*}
 	l_run_tmp_root=${l_run_tmp_root#"$l_run_umask"}
 	l_run_tmp_root=${l_run_tmp_root#"$ZXFER_LF"}
+	# mktemp's answer is the one input that sets the root's pathname, so its
+	# shape is checked here, once; a path outside the template is not ours
+	# to remove.
+	g_zxfer_owned_run_tmp_root=$l_run_tmp_root
+	g_zxfer_owned_run_tmp_root_parent=$l_ensure_run_tmp_root_effective_tmpdir
+	if ! zxfer_run_tmp_root_has_safe_owned_shape "$l_run_tmp_root"; then
+		g_zxfer_owned_run_tmp_root=""
+		g_zxfer_owned_run_tmp_root_parent=""
+		return 1
+	fi
 	# Record inode, owner and mode now; whole-root removal compares one fresh
 	# record against this one instead of asking id again.
 	l_run_tmp_root_record=""
@@ -545,14 +552,14 @@ zxfer_ensure_run_tmp_root() {
 	case $l_run_tmp_root_record in
 	*"$ZXFER_TAB"700 | *"$ZXFER_TAB"[1-7]700) ;;
 	*)
+		g_zxfer_owned_run_tmp_root=""
+		g_zxfer_owned_run_tmp_root_parent=""
 		rmdir "$l_run_tmp_root" 2>/dev/null || :
 		return 1
 		;;
 	esac
 
 	g_zxfer_run_tmp_root=$l_run_tmp_root
-	g_zxfer_owned_run_tmp_root=$l_run_tmp_root
-	g_zxfer_owned_run_tmp_root_parent=$l_ensure_run_tmp_root_effective_tmpdir
 	g_zxfer_owned_run_tmp_root_identity=$l_run_tmp_root_record
 	g_zxfer_run_umask=$l_run_umask
 	g_zxfer_run_tmp_counter=0
@@ -597,8 +604,7 @@ zxfer_runtime_artifact_path_is_run_root_child() {
 	l_artifact_path=$1
 	l_run_tmp_root=${g_zxfer_run_tmp_root:-}
 
-	[ -n "$l_run_tmp_root" ] || return 1
-	zxfer_run_tmp_root_is_usable_dir "$l_run_tmp_root" || return 1
+	zxfer_run_tmp_root_is_usable_dir || return 1
 	case "$l_artifact_path" in
 	"$l_run_tmp_root"/*)
 		l_artifact_name=${l_artifact_path#"$l_run_tmp_root"/}
@@ -667,7 +673,7 @@ zxfer_cleanup_runtime_artifact_path_list() {
 		$l_artifact_path_list
 	EOF
 	if [ "$#" -gt 0 ]; then
-		zxfer_run_tmp_root_is_usable_dir "${g_zxfer_run_tmp_root:-}" || return 1
+		zxfer_run_tmp_root_is_usable_dir || return 1
 		rm -f "$@" 2>/dev/null || l_cleanup_status=1
 		for l_cleanup_runtime_artifact_path_list_artifact_path; do
 			if [ -e "$l_cleanup_runtime_artifact_path_list_artifact_path" ] ||

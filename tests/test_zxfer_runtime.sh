@@ -1231,6 +1231,30 @@ test_zxfer_run_tmp_root_lifecycle_compares_the_creation_record_without_id() {
 	assertFalse "Whole-root removal must not run id." "[ -s '$id_log' ]"
 }
 
+test_zxfer_ensure_run_tmp_root_refuses_a_mktemp_answer_outside_its_template() {
+	foreign_dir="$TEST_TMPDIR/operator-owned-dir.$$"
+	mkdir -m 700 "$foreign_dir"
+	: >"$foreign_dir/must-survive"
+	zxfer_test_capture_subshell '
+		zxfer_discard_runtime_cleanup_state
+		zxfer_try_get_effective_tmpdir() {
+			g_zxfer_effective_tmpdir="'"$TEST_TMPDIR"'"
+		}
+		mktemp() {
+			printf "%s\n" "'"$foreign_dir"'"
+		}
+		zxfer_ensure_run_tmp_root
+		printf "status=%s root=<%s> owned=<%s> parent=<%s>\n" "$?" \
+			"$g_zxfer_run_tmp_root" "$g_zxfer_owned_run_tmp_root" \
+			"$g_zxfer_owned_run_tmp_root_parent"
+	'
+
+	assertEquals "Run-root creation should refuse a path outside the zxfer.<pid>.* template and record nothing." \
+		"status=1 root=<> owned=<> parent=<>" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertTrue "A refused mktemp answer must not be removed." \
+		"[ -f '$foreign_dir/must-survive' ]"
+}
+
 test_zxfer_ensure_run_tmp_root_rejects_a_root_that_is_not_mode_0700() {
 	candidate_root="$TEST_TMPDIR/zxfer.$$.wide-mode"
 	zxfer_test_capture_subshell '
