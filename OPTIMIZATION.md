@@ -22,7 +22,7 @@ ssh connections and zfs calls on the small micro-bench fixture) and
 
 Helper spawns counted by `tests/run_microbench.sh` on the default fixture
 (25 children x 4 snapshots), with and without `-V` (2026-09-26, after the
-next-phase items W3-W5):
+next-phase items W3-W5 and W7b):
 
 | Scenario | `-V` | Plain | ssh connections |
 | --- | ---: | ---: | ---: |
@@ -31,10 +31,10 @@ next-phase items W3-W5):
 | Incremental | 129 | 109 | 0 |
 | Remote no-op (`-O localhost -T localhost`) | 37 | 15 | 1 |
 | Remote incremental | 129 | 103 | 1 |
-| `props` (incremental, `-P`, 68 matching properties) | 177 | 163 | 0 |
+| `props` (incremental, `-P`, 68 matching properties) | 152 | 138 | 0 |
 
 Each remote run opens one ssh master, shared by both roles. On the small
-fixture (8 x 2) the incremental spawns 78 helpers with `-V` and `props` 101.
+fixture (8 x 2) the incremental spawns 78 helpers with `-V` and `props` 84.
 
 Wall clock against `upstream-compat-final` on the canned zfs, macOS
 (`/bin/sh` is bash 3.2), four snapshots per dataset, median seconds of
@@ -67,7 +67,14 @@ through the ordinary listings) remote no-op 0.74-0.75 at zero latency and
 0.83-0.85 at 80 ms, remote incremental 0.97-0.99; W4 (error log without a
 lock) a failing run with `ZXFER_ERROR_LOG` set 386 -> 130 ms under bash 3.2
 and 303 -> 88 ms under dash; W5 (one property plan program) `props` 0.92-0.93
-under `/bin/sh` and dash.
+under `/bin/sh` and dash; W7b (property rows looked up by index, `-e` rows
+looked up instead of re-checking the file) `props` 0.73 at 100 and 200
+children under `/bin/sh` and 0.50 and 0.40 under dash (30.8 s -> 12.2 s at
+200), and `-e` at 400 children no slower than `-P` (it was 23-25 s slower).
+The `props` fixture's canned zfs scans a manifest of about five lines per
+dataset on every call, which both trees pay: without it the `-P` work at 200
+children is about 2.2 s in either shell, from 16.6 s under dash and 5.5 s
+under bash 3.2.
 
 ## Remaining Candidates
 
@@ -77,8 +84,10 @@ quoting, structured error reporting, secure `PATH` or cleanup. Measure first.
 - Snapshot planning at scale: one sort and awk pass per replication pass
   that splits both record files per dataset, so each dataset's plan and live
   recheck read only its slice (next-phase W7a).
-- Property table lookup: read only the needed row instead of scanning the
-  table twice per dataset; must help dash without slowing bash 3.2 (W7b).
+- `-k` forwarded provenance: with an earlier `-k` hop's alias present, each
+  dataset runs one `awk` over every forwarded row
+  (`zxfer_resolve_forwarded_backup_metadata`); the property row store could
+  serve those rows the way it serves `-e`.
 - Multi-line property values in a recursive read: every dataset listed after
   the first ambiguous record falls back to per-dataset reads (3.9 s instead
   of 1.5 s for one such value in a 25-child `-P -R` run). Restarting the
