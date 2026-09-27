@@ -190,8 +190,11 @@ test_zxfer_kill_registered_cleanup_pids_only_terminates_registered_pids() {
 }
 
 test_zxfer_cleanup_pid_helpers_ignore_invalid_inputs_in_current_shell() {
-	sleep 30 &
-	tracked_pid=$!
+	# The entry file's helper returns once the child runs its own program, so
+	# the TERM below cannot reach a copy of this shell and its traps.
+	zxfer_runtime_spawn_live_child tracked ||
+		fail "Unable to start the live child."
+	tracked_pid=$g_zxfer_runtime_live_child_pid
 	zxfer_register_cleanup_pid "$tracked_pid" "tracked cleanup helper"
 
 	zxfer_register_cleanup_pid ""
