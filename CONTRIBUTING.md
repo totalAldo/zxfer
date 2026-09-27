@@ -126,8 +126,9 @@ raise the limit with `--suite-timeout SECONDS` (or `ZXFER_TEST_SUITE_TIMEOUT`,
 0 disables it) on a slow emulated guest. `--skip-tool-suites` leaves out the
 self-tests of the tooling (`tests/test_run_*.sh`, `tests/test_validate.sh`,
 `tests/test_ci_*.sh`, `tests/test_generate_solaris_manpage.sh`) when you only
-changed `src/`. See [docs/testing.md](./docs/testing.md) for the runner's
-reference.
+changed `src/`. A suite that takes more than about 10 s alone belongs in
+`RUNNER_SLOW_SUITES` at the top of the runner, which parallel runs start
+first. See [docs/testing.md](./docs/testing.md) for the runner's reference.
 
 Run coverage when useful:
 
