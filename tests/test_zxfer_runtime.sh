@@ -781,16 +781,12 @@ test_runtime_artifact_allocators_use_the_per_run_temp_root_for_files_and_dirs() 
 		"[ -d \"$dir_path\" ]"
 	assertEquals "Runtime artifact directories should be created owner-only (0700)." \
 		"700" "$(zxfer_get_path_mode_octal "$dir_path")"
-	assertEquals "Per-run-root allocations should not register per-file cleanup bookkeeping." \
-		"" "${g_zxfer_runtime_artifact_cleanup_paths:-}"
 }
 
 test_zxfer_discard_runtime_cleanup_state_drops_inherited_handles_without_acting_on_them() {
 	external_root="$TEST_TMPDIR/operator-owned-data"
-	external_stage="$TEST_TMPDIR/.zxfer-operator-stage"
 	mkdir -p "$external_root"
 	printf '%s\n' sentinel >"$external_root/sentinel"
-	printf '%s\n' stage-sentinel >"$external_stage"
 
 	# Simulate an exported caller environment, including forged copies of the
 	# internal provenance fields. Startup must discard all of it before any
@@ -798,9 +794,7 @@ test_zxfer_discard_runtime_cleanup_state_drops_inherited_handles_without_acting_
 	g_zxfer_run_tmp_root=$external_root
 	g_zxfer_owned_run_tmp_root=$external_root
 	g_zxfer_owned_run_tmp_root_parent=$TEST_TMPDIR
-	g_zxfer_owned_run_tmp_root_identity="device-inode:1:2"
-	g_zxfer_runtime_artifact_cleanup_paths="-
-$external_stage"
+	g_zxfer_owned_run_tmp_root_identity="2	0	700"
 	g_zxfer_cleanup_pid_records="424242	operator helper"
 	g_zxfer_effective_tmpdir=$external_root
 	g_zxfer_effective_tmpdir_requested=$external_root
@@ -810,14 +804,10 @@ $external_stage"
 
 	assertTrue "Runtime initialization must not recursively remove an inherited run-root path." \
 		"[ -f '$external_root/sentinel' ]"
-	assertTrue "Runtime initialization must not remove an inherited adjacent-artifact registration." \
-		"[ -f '$external_stage' ]"
 	assertEquals "Runtime initialization should discard the inherited run-root handle." \
 		"" "$g_zxfer_run_tmp_root"
 	assertEquals "Runtime initialization should discard inherited run-root object identity." \
 		"" "$g_zxfer_owned_run_tmp_root_identity"
-	assertEquals "Runtime initialization should discard inherited artifact registrations." \
-		"" "$g_zxfer_runtime_artifact_cleanup_paths"
 	assertEquals "Runtime initialization should discard inherited cleanup PIDs without signalling them." \
 		"" "$g_zxfer_cleanup_pid_records"
 	assertEquals "Runtime initialization should discard an inherited effective-temp-directory memo." \
@@ -865,7 +855,7 @@ test_zxfer_run_tmp_root_provenance_handles_a_root_temp_parent_without_double_sla
 				printf '/zxfer.%s.ABC123\n' "$$"
 			}
 			zxfer_get_private_directory_security_record() {
-				printf 'device-inode:1:2\t%s\t700\n' 501
+				g_zxfer_private_directory_record_result="2${ZXFER_TAB}501${ZXFER_TAB}700"
 			}
 
 			zxfer_ensure_run_tmp_root
@@ -893,7 +883,7 @@ test_zxfer_ensure_run_tmp_root_validates_a_fresh_parent_once() {
 	(
 		zxfer_validate_temp_root_candidate() {
 			printf '%s\n' "$1" >>"$validation_log"
-			printf '%s\n' "$1"
+			g_zxfer_temp_root_candidate_result=$1
 		}
 		g_zxfer_effective_tmpdir=""
 		g_zxfer_effective_tmpdir_requested=""
@@ -994,7 +984,7 @@ test_zxfer_ensure_run_tmp_root_removes_an_allocation_whose_identity_cannot_be_re
 			g_zxfer_effective_tmpdir="'"$TEST_TMPDIR"'"
 		}
 		zxfer_validate_temp_root_candidate() {
-			printf "%s\n" "'"$TEST_TMPDIR"'"
+			g_zxfer_temp_root_candidate_result="'"$TEST_TMPDIR"'"
 		}
 		mktemp() {
 			mkdir "'"$candidate_root"'" || return 1
@@ -1102,68 +1092,47 @@ test_runtime_artifact_allocators_skip_taken_names_after_subshell_allocations() {
 }
 
 test_trap_cleanup_steps_keep_what_rm_could_not_remove() {
-	artifact_path="$TEST_TMPDIR/zxfer.runtime-reset-failure"
-	: >"$artifact_path"
-
 	output=$(
 		(
-			zxfer_register_runtime_artifact_path "$artifact_path"
 			zxfer_ensure_run_tmp_root || exit 90
 			rm() {
 				return 1
 			}
-			zxfer_cleanup_registered_runtime_artifacts
-			printf 'registered_status=%s\n' "$?"
 			zxfer_remove_run_tmp_root
 			printf 'root_status=%s\n' "$?"
-			printf 'registered=<%s>\n' "$g_zxfer_runtime_artifact_cleanup_paths"
 			printf 'root_retained=<%s>\n' "$([ -n "$g_zxfer_run_tmp_root" ] && printf yes || printf no)"
 			unset -f rm
-			zxfer_cleanup_registered_runtime_artifacts
 			zxfer_remove_run_tmp_root
-			printf 'retry_registered=<%s> retry_root=<%s>\n' \
-				"$g_zxfer_runtime_artifact_cleanup_paths" "$g_zxfer_run_tmp_root"
+			printf 'retry_root=<%s>\n' "$g_zxfer_run_tmp_root"
 		)
 	)
 
-	assertContains "Registered-artifact cleanup should report an artifact rm could not remove." \
-		"$output" "registered_status=1"
 	assertContains "Run-root removal should report a root rm could not remove." \
 		"$output" "root_status=1"
-	assertContains "An artifact rm could not remove should stay registered for a later sweep." \
-		"$output" "registered=<-
-$artifact_path>"
 	assertContains "A run root rm could not remove should stay tracked for a later sweep." \
 		"$output" "root_retained=<yes>"
 	assertContains "A later sweep should remove what the failed one kept." \
-		"$output" "retry_registered=<> retry_root=<>"
-	assertFalse "The retried sweep should remove the adjacent artifact." \
-		"[ -e \"$artifact_path\" ]"
+		"$output" "retry_root=<>"
 }
 
-test_zxfer_cleanup_runtime_artifact_path_preserves_registration_when_delete_fails() {
-	artifact_path="$TEST_TMPDIR/zxfer.runtime-cleanup-failure"
-	: >"$artifact_path"
+test_zxfer_cleanup_runtime_artifact_path_preserves_failure_when_delete_fails() {
+	zxfer_create_runtime_artifact_file "cleanup-failure" >/dev/null ||
+		fail "Unable to allocate the cleanup-failure fixture."
+	artifact_path=$g_zxfer_runtime_artifact_path_result
 
 	output=$(
 		(
-			zxfer_register_runtime_artifact_path "$artifact_path"
 			rm() {
 				return 1
 			}
 			zxfer_cleanup_runtime_artifact_path "$artifact_path"
-			status=$?
-			printf 'status=%s\n' "$status"
-			printf 'registered=<%s>\n' "$g_zxfer_runtime_artifact_cleanup_paths"
+			printf 'status=%s\n' "$?"
 		)
 	)
 
 	assertContains "Runtime artifact cleanup should preserve failure when an artifact cannot be deleted." \
 		"$output" "status=1"
-	assertContains "Runtime artifact cleanup should keep undeleted artifacts registered for later cleanup." \
-		"$output" "registered=<-
-$artifact_path>"
-	assertTrue "Runtime artifact cleanup failures should leave the undeleted artifact in place." \
+	assertTrue "Runtime artifact cleanup failures should leave the undeleted artifact for whole-root cleanup." \
 		"[ -e \"$artifact_path\" ]"
 }
 
@@ -1227,16 +1196,20 @@ test_zxfer_remove_run_tmp_root_rejects_same_mode_owner_directory_replacement() {
 
 test_zxfer_run_tmp_root_lifecycle_compares_the_creation_record_without_id() {
 	id_log="$TEST_TMPDIR/run-root-id.log"
+	fake_id_dir="$TEST_TMPDIR/run-root-fake-id"
 	rm -f "$id_log"
+	mkdir -p "$fake_id_dir"
+	# The effective-UID lookup runs `exec id`, so only a command on PATH can
+	# stand in for it.
+	printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexit 1\n' "$id_log" >"$fake_id_dir/id"
+	chmod 755 "$fake_id_dir/id"
 	output=$(
 		(
 			zxfer_discard_runtime_cleanup_state
 			zxfer_ensure_run_tmp_root || exit 90
 			run_root=$g_zxfer_run_tmp_root
-			id() {
-				printf '%s\n' "$*" >>"$id_log"
-				command id "$@"
-			}
+			g_zxfer_effective_uid=""
+			PATH="$fake_id_dir:$PATH"
 			printf 'record_mode=%s\n' "${g_zxfer_owned_run_tmp_root_identity##*"$ZXFER_TAB"}"
 			chmod 755 "$run_root"
 			zxfer_remove_run_tmp_root
@@ -1256,6 +1229,30 @@ test_zxfer_run_tmp_root_lifecycle_compares_the_creation_record_without_id() {
 		"$output" "restored_status=0"
 	assertNotContains "The removed root must not remain." "$output" "root=present"
 	assertFalse "Whole-root removal must not run id." "[ -s '$id_log' ]"
+}
+
+test_zxfer_ensure_run_tmp_root_refuses_a_mktemp_answer_outside_its_template() {
+	foreign_dir="$TEST_TMPDIR/operator-owned-dir.$$"
+	mkdir -m 700 "$foreign_dir"
+	: >"$foreign_dir/must-survive"
+	zxfer_test_capture_subshell '
+		zxfer_discard_runtime_cleanup_state
+		zxfer_try_get_effective_tmpdir() {
+			g_zxfer_effective_tmpdir="'"$TEST_TMPDIR"'"
+		}
+		mktemp() {
+			printf "%s\n" "'"$foreign_dir"'"
+		}
+		zxfer_ensure_run_tmp_root
+		printf "status=%s root=<%s> owned=<%s> parent=<%s>\n" "$?" \
+			"$g_zxfer_run_tmp_root" "$g_zxfer_owned_run_tmp_root" \
+			"$g_zxfer_owned_run_tmp_root_parent"
+	'
+
+	assertEquals "Run-root creation should refuse a path outside the zxfer.<pid>.* template and record nothing." \
+		"status=1 root=<> owned=<> parent=<>" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertTrue "A refused mktemp answer must not be removed." \
+		"[ -f '$foreign_dir/must-survive' ]"
 }
 
 test_zxfer_ensure_run_tmp_root_rejects_a_root_that_is_not_mode_0700() {
@@ -1292,7 +1289,7 @@ test_zxfer_ensure_run_tmp_root_accepts_special_bits_in_front_of_mode_0700() {
 			printf "%s\n" "'"$candidate_root"'"
 		}
 		zxfer_get_private_directory_security_record() {
-			printf "device-inode:1:2\t0\t2700\n"
+			g_zxfer_private_directory_record_result="2${ZXFER_TAB}0${ZXFER_TAB}2700"
 		}
 		zxfer_ensure_run_tmp_root
 		printf "status=%s root=<%s>\n" "$?" "$g_zxfer_run_tmp_root"
@@ -1305,65 +1302,6 @@ test_zxfer_ensure_run_tmp_root_accepts_special_bits_in_front_of_mode_0700() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=0 root=<$candidate_root>"
 	assertContains "Removal should accept the unchanged 2700 creation record." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "current=0"
-}
-
-test_zxfer_cleanup_registered_runtime_artifacts_fails_on_an_unpaired_identity_line() {
-	zxfer_test_capture_subshell '
-		g_zxfer_runtime_artifact_cleanup_paths="device-inode:1:2"
-		zxfer_cleanup_runtime_artifact_path() {
-			printf "cleaned=%s\n" "$1"
-		}
-		zxfer_cleanup_registered_runtime_artifacts
-		printf "status=%s\n" "$?"
-	'
-
-	assertContains "A registry ending on an identity line without its path must fail closed." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=1"
-	assertNotContains "Nothing should be cleaned for a damaged registry entry." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "cleaned="
-}
-
-test_zxfer_cleanup_runtime_artifact_path_rejects_replaced_registered_directory() {
-	registered_dir="$TEST_TMPDIR/.zxfer-replaced-stage.$$"
-	saved_dir="$TEST_TMPDIR/.zxfer-original-stage.$$"
-	mkdir -m 700 "$registered_dir"
-	zxfer_register_runtime_artifact_path "$registered_dir"
-	mv "$registered_dir" "$saved_dir"
-	mkdir -m 700 "$registered_dir"
-	: >"$registered_dir/must-survive"
-
-	zxfer_cleanup_runtime_artifact_path "$registered_dir" >/dev/null 2>&1
-	cleanup_status=$?
-
-	assertEquals "Recursive cleanup must reject a real directory that replaced the registered staging object." \
-		1 "$cleanup_status"
-	assertTrue "A rejected adjacent-directory replacement and its contents must remain untouched." \
-		"[ -f '$registered_dir/must-survive' ]"
-	rm -f "$registered_dir/must-survive"
-	rmdir "$registered_dir"
-	mv "$saved_dir" "$registered_dir"
-	zxfer_cleanup_runtime_artifact_path "$registered_dir" >/dev/null
-}
-
-test_zxfer_register_runtime_artifact_path_rejects_unreserved_and_symlink_paths() {
-	unsafe_path="$TEST_TMPDIR/operator-data-file"
-	stage_target="$TEST_TMPDIR/zxfer.stage-target"
-	stage_link="$TEST_TMPDIR/zxfer.stage-link"
-	: >"$unsafe_path"
-	: >"$stage_target"
-	ln -s "$stage_target" "$stage_link"
-
-	zxfer_register_runtime_artifact_path "$unsafe_path"
-	unsafe_status=$?
-	zxfer_register_runtime_artifact_path "$stage_link"
-	symlink_status=$?
-
-	assertEquals "Adjacent cleanup registration should accept only reserved zxfer staging names." \
-		1 "$unsafe_status"
-	assertEquals "Adjacent cleanup registration should reject symlink entries." \
-		1 "$symlink_status"
-	assertEquals "Rejected paths must not enter the exact cleanup registry." \
-		"" "${g_zxfer_runtime_artifact_cleanup_paths:-}"
 }
 
 test_runtime_artifact_allocators_reject_path_components_in_prefixes() {
@@ -1382,7 +1320,7 @@ test_runtime_artifact_allocators_reject_path_components_in_prefixes() {
 		"[ -e '$escape_path' ]"
 }
 
-test_zxfer_cleanup_runtime_artifact_paths_removes_and_unregisters_multiple_paths() {
+test_zxfer_cleanup_runtime_artifact_paths_removes_multiple_paths() {
 	zxfer_create_runtime_artifact_file "runtime-cleanup-file" >/dev/null
 	file_path=$g_zxfer_runtime_artifact_path_result
 	zxfer_create_private_temp_dir "runtime-cleanup-dir" >/dev/null
@@ -1391,16 +1329,12 @@ test_zxfer_cleanup_runtime_artifact_paths_removes_and_unregisters_multiple_paths
 	zxfer_cleanup_runtime_artifact_paths "$file_path" "$dir_path"
 	cleanup_status=$?
 
-	assertEquals "Multi-path runtime artifact cleanup should succeed when every registered path can be deleted." \
+	assertEquals "Multi-path runtime artifact cleanup should succeed when every path can be deleted." \
 		0 "$cleanup_status"
-	assertFalse "Multi-path runtime artifact cleanup should remove registered files." \
+	assertFalse "Multi-path runtime artifact cleanup should remove the files." \
 		"[ -e \"$file_path\" ]"
-	assertFalse "Multi-path runtime artifact cleanup should remove registered directories." \
+	assertFalse "Multi-path runtime artifact cleanup should remove the directories." \
 		"[ -e \"$dir_path\" ]"
-	assertNotContains "Multi-path runtime artifact cleanup should unregister deleted files." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$file_path"
-	assertNotContains "Multi-path runtime artifact cleanup should unregister deleted directories." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$dir_path"
 }
 
 test_zxfer_cleanup_runtime_artifact_paths_preserves_failures_when_one_path_cannot_be_removed() {
@@ -1444,10 +1378,6 @@ test_zxfer_cleanup_runtime_artifact_path_list_removes_newline_delimited_paths() 
 		"[ -e \"$file_path\" ]"
 	assertFalse "List-based runtime artifact cleanup should remove listed directories." \
 		"[ -e \"$dir_path\" ]"
-	assertNotContains "List-based runtime artifact cleanup should unregister listed files." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$file_path"
-	assertNotContains "List-based runtime artifact cleanup should unregister listed directories." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$dir_path"
 }
 
 test_runtime_file_list_cleanup_batches_rm_and_retains_unowned_paths() {
@@ -1669,10 +1599,7 @@ test_zxfer_write_runtime_artifact_file_preserves_non_redirection_failure_status(
 		"$output" "status=7"
 }
 
-test_runtime_artifact_registry_helpers_cover_rejected_and_missing_entries() {
-	set +e
-	zxfer_runtime_artifact_registration_path_has_safe_shape "relative-stage"
-	relative_status=$?
+test_runtime_artifact_cleanup_takes_only_direct_run_root_children() {
 	child_statuses=$(
 		(
 			zxfer_ensure_run_tmp_root || exit 90
@@ -1681,73 +1608,16 @@ test_runtime_artifact_registry_helpers_cover_rejected_and_missing_entries() {
 			printf 'direct=%s ' "$?"
 			zxfer_runtime_artifact_path_is_run_root_child \
 				"$g_zxfer_run_tmp_root/nested/child"
-			printf 'nested=%s\n' "$?"
+			printf 'nested=%s ' "$?"
+			zxfer_runtime_artifact_path_is_run_root_child \
+				"$g_zxfer_run_tmp_root/.."
+			printf 'dotdot=%s\n' "$?"
 			zxfer_remove_run_tmp_root
 		)
 	)
 
-	g_zxfer_runtime_artifact_cleanup_paths=""
-	zxfer_runtime_artifact_path_is_registered \
-		"$TEST_TMPDIR/zxfer.missing-stage"
-	missing_identity_status=$?
-
-	assertEquals "Runtime artifact registration should reject non-absolute paths." \
-		1 "$relative_status"
-	assertEquals "A contained runtime artifact must be one direct run-root child, never a nested path." \
-		"direct=0 nested=1" "$child_statuses"
-	assertEquals "Runtime artifact identity lookup should fail for an unregistered directory." \
-		1 "$missing_identity_status"
-	assertEquals "Missing runtime artifact identity lookup should clear the owner result channel." \
-		"" "$g_zxfer_runtime_artifact_directory_identity_result"
-}
-
-test_runtime_artifact_registry_keeps_one_identity_path_pair_per_entry() {
-	stage_file="$TEST_TMPDIR/zxfer.registry-file"
-	stage_dir="$TEST_TMPDIR/.zxfer-registry-dir"
-	glob_dir="$TEST_TMPDIR/.zxfer-registry-[glob]*"
-	: >"$stage_file"
-	mkdir -p "$stage_dir" "$glob_dir"
-	output=$(
-		(
-			g_zxfer_runtime_artifact_cleanup_paths=""
-			zxfer_register_runtime_artifact_path "$stage_file" || exit 90
-			zxfer_register_runtime_artifact_path "$stage_dir" || exit 91
-			zxfer_register_runtime_artifact_path "$glob_dir" || exit 92
-			zxfer_register_runtime_artifact_path "$stage_file" || exit 93
-			dir_identity=$(zxfer_get_path_device_inode "$stage_dir") || exit 94
-			printf 'pairs=%s\n' "$(printf '%s\n' "$g_zxfer_runtime_artifact_cleanup_paths" | wc -l | tr -d ' ')"
-			zxfer_runtime_artifact_path_is_registered "$stage_file"
-			printf 'file_identity_status=%s result=<%s>\n' "$?" \
-				"$g_zxfer_runtime_artifact_directory_identity_result"
-			zxfer_runtime_artifact_path_is_registered "$stage_dir"
-			[ "$g_zxfer_runtime_artifact_directory_identity_result" = "$dir_identity" ] &&
-				printf '%s\n' 'dir_identity=current'
-			zxfer_runtime_artifact_path_is_registered "${stage_dir#/}"
-			printf 'relative_lookup=%s\n' "$?"
-			zxfer_runtime_artifact_path_is_registered "$TEST_TMPDIR/.zxfer-registry-*"
-			printf 'pattern_lookup=%s\n' "$?"
-			zxfer_runtime_artifact_path_is_registered "$stage_dir" drop
-			printf 'after_drop=<%s>\n' "$g_zxfer_runtime_artifact_cleanup_paths"
-			zxfer_runtime_artifact_path_is_registered "$glob_dir" drop
-			zxfer_runtime_artifact_path_is_registered "$stage_file" drop
-			printf 'emptied=<%s>\n' "$g_zxfer_runtime_artifact_cleanup_paths"
-		)
-	)
-
-	assertContains "A duplicate registration should not add a second pair." "$output" "pairs=6"
-	assertContains "A registered file should publish - as its identity." \
-		"$output" "file_identity_status=0 result=<->"
-	assertContains "A registered directory should publish the identity it had at registration." \
-		"$output" "dir_identity=current"
-	assertContains "Registry lookups should reject relative paths." "$output" "relative_lookup=1"
-	assertContains "Registry lookups should match paths literally, never as patterns." \
-		"$output" "pattern_lookup=1"
-	assertContains "Dropping one entry should keep every other pair in order." \
-		"$output" "after_drop=<-
-$stage_file
-$(zxfer_get_path_device_inode "$glob_dir")
-$glob_dir>"
-	assertContains "Dropping every entry should empty the registry." "$output" "emptied=<>"
+	assertEquals "A contained runtime artifact must be one direct run-root child, never a nested or parent path." \
+		"direct=0 nested=1 dotdot=1" "$child_statuses"
 }
 
 test_try_get_effective_tmpdir_fails_cleanly_when_no_safe_default_exists() {

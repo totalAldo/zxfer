@@ -59,8 +59,10 @@ Key protections already present in the project include:
   then a fixed POSIX `sh` bootstrap reassembles the exact bytes before the
   explicit `sh -c` while preserving stdin and status
 - a private per-run 0700 artifact root whose exact path, validated parent, and
-  stored device/inode identity, owner and 0700 mode record must match
-  runtime-owned provenance before recursive cleanup
+  stored inode, owner and 0700 mode record must match runtime-owned
+  provenance before recursive cleanup; owner, mode and inode come from one
+  `ls -ldin` line, whose fields GNU coreutils, the BSDs, macOS, illumos and
+  BusyBox print alike, so every platform applies the same checks
 - remote (`-T`) destination discovery runs no target-side script: each
   destination `zfs list` is one argv-quoted command over the role's control
   master, and its own exit status (255 when ssh loses the connection) decides
@@ -69,12 +71,15 @@ Key protections already present in the project include:
   discovery state, and a listing ssh could not deliver stops the run without
   even that probe
 - remote capability responses are framed, coverage-checked, and parsed once per
-  role, host and requested tool set; only a fully validated response is
-  stored, and later OS/tool lookups reuse its validated fields instead of
-  trusting or reparsing raw handshake text
-- exact registration and shape checks for the small number of path-adjacent
-  staging entries that cannot live below the run root, plus stored
-  device/inode identity checks for registered directories
+  host and requested tool set (equal `-O` and `-T` specs share one probe);
+  only a fully validated response is stored, and later OS/tool lookups reuse
+  its validated fields instead of trusting or reparsing raw handshake text
+- one run-private directory outside the run root, the ssh short socket
+  directory made only when a long TMPDIR would push the control-socket path
+  past the `sun_path` limit: a random `mktemp -d` name under the validated
+  default temp root, removed at exit without recursion (the two role sockets
+  and ssh's temporary listener names, then the empty directory), never
+  through a symlink
 - pre-trap rejection of inherited internal cleanup handles, so exported `g_*`
   state cannot authorize process signals, SSH actions, path removal, or SMF
   service changes
@@ -160,6 +165,6 @@ Changes in these areas should receive extra scrutiny:
 - secure-PATH resolution
 - property backup / restore lookup
 - ssh control-socket management
-- runtime-root and path-adjacent staging cleanup
+- runtime-root and ssh socket-directory cleanup
 - background-process registration, signalling, and status protocols
 - snapshot deletion and rollback behavior

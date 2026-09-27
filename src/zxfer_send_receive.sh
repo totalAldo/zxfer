@@ -172,12 +172,12 @@ zxfer_handle_progress_bar_option() {
 	# directory lives under the run root, whose removal cleans it up.
 	if ! zxfer_create_private_temp_dir zxfer-progress ||
 		! mkfifo -m 600 "$g_zxfer_runtime_artifact_path_result/fifo" ||
-		! l_progress_wrapper=$(zxfer_get_cleanup_child_wrapper_script_path); then
+		[ ! -r "$ZXFER_CLEANUP_CHILD_WRAPPER" ]; then
 		zxfer_throw_error "Failed to prepare the progress dialog FIFO for $l_progress_snapshot."
 	fi
 	zxfer_escape_single_quotes_into_result "$g_zxfer_runtime_artifact_path_result/fifo"
 	l_progress_fifo="'$g_zxfer_escaped_single_quotes_result'"
-	zxfer_render_shell_command_from_argv /bin/sh "$l_progress_wrapper" "$l_progress_dialog"
+	zxfer_render_shell_command_from_argv /bin/sh "$ZXFER_CLEANUP_CHILD_WRAPPER" "$l_progress_dialog"
 	g_zxfer_progress_bar_command_result="| { $g_zxfer_shell_command_result <$l_progress_fifo >/dev/null & tee $l_progress_fifo; l_tee=\$?; wait \$!; exit \$l_tee; }"
 }
 

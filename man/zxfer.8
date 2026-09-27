@@ -1312,7 +1312,11 @@ when available and falls back to the system temporary directory.
 Current releases keep ssh control sockets and remote capability state per run:
 each invocation opens at most one control master per remote role, before its
 first remote command, under its private per-run temp directory, probes each remote host's capabilities once
-per role and requested tool set (a recursive
+per host spec and requested tool set (equal
+\fB\-O\fR
+and
+\fB\-T\fR
+specs share one probe; a recursive
 \fB\-O \-j\fR
 pull that the fast no-op proof finds work for probes the origin a second time,
 for

@@ -570,20 +570,25 @@ test_zxfer_ensure_remote_host_capabilities_probes_once_per_role_host_and_scope()
 		"$output" "target_slot=origin.example|zfs"
 }
 
-test_zxfer_ensure_remote_host_capabilities_isolates_roles_for_a_shared_host() {
+test_zxfer_ensure_remote_host_capabilities_probes_a_shared_host_once_for_both_roles() {
 	zxfer_test_reset_remote_probe_counters
 	ZXFER_TEST_PROBE_RESPONSE='ZXFER_REMOTE_CAPS_V2
-os	OriginOS
-tool	zfs	0	/origin/bin/zfs
+os	SharedOS
+tool	zfs	0	/shared/bin/zfs
 end'
+	# A second probe from the target side would answer with this response.
 	ZXFER_TEST_TARGET_PROBE_RESPONSE='ZXFER_REMOTE_CAPS_V2
-os	TargetOS
-tool	zfs	0	/target/bin/zfs
+os	SecondProbeOS
+tool	zfs	0	/second/bin/zfs
+tool	xz	0	/second/bin/xz
 end'
 	output=$(
 		(
 			set +e
 			zxfer_test_stub_remote_probe_capture
+			g_zxfer_profile_remote_capability_bootstrap_live=0
+			g_zxfer_profile_remote_capability_bootstrap_memory=0
+			g_option_V_very_verbose=1
 			g_option_O_origin_host="shared.example"
 			g_option_T_target_host="shared.example"
 
@@ -593,23 +598,28 @@ end'
 			printf 'target_os=%s\n' "$g_zxfer_remote_capability_os"
 			zxfer_get_parsed_remote_capability_tool_record zfs || exit 33
 			printf 'target_zfs=%s\n' "$g_zxfer_remote_capability_tool_path_result"
-			zxfer_ensure_remote_host_capabilities shared.example source >/dev/null || exit 34
-			printf 'origin_reloaded_os=%s\n' "$g_zxfer_remote_capability_os"
-			zxfer_get_parsed_remote_capability_tool_record zfs || exit 35
-			printf 'origin_reloaded_zfs=%s\n' "$g_zxfer_remote_capability_tool_path_result"
-		)
+			zxfer_ensure_remote_host_capabilities shared.example >/dev/null || exit 34
+			printf 'no_side_os=%s\n' "$g_zxfer_remote_capability_os"
+			printf 'probes_before_new_scope=%s\n' "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
+			zxfer_ensure_remote_host_capabilities shared.example destination xz >/dev/null || exit 35
+			printf 'new_scope_os=%s\n' "$g_zxfer_remote_capability_os"
+			printf 'live=%s memory=%s\n' "$g_zxfer_profile_remote_capability_bootstrap_live" \
+				"$g_zxfer_profile_remote_capability_bootstrap_memory"
+		) 2>/dev/null
 	)
 	status=$?
 
 	assertEquals "Both roles of a shared host should load their capabilities." 0 "$status"
-	assertContains "The origin role should keep the origin response." "$output" "origin_os=OriginOS"
-	assertContains "The target role should keep the target response." "$output" "target_os=TargetOS"
-	assertContains "The target role should publish its own tool records." "$output" "target_zfs=/target/bin/zfs"
-	assertContains "Reloading the origin role must not cross-read the target slot." \
-		"$output" "origin_reloaded_os=OriginOS"
-	assertContains "Reloading the origin role should restore its tool records." \
-		"$output" "origin_reloaded_zfs=/origin/bin/zfs"
-	assertEquals "Each role should probe once." 2 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
+	assertEquals "Equal -O and -T specs should share one validated probe; a scope outside it probes again." \
+		"origin_os=SharedOS
+target_os=SharedOS
+target_zfs=/shared/bin/zfs
+no_side_os=SharedOS
+probes_before_new_scope=1
+new_scope_os=SecondProbeOS
+live=2 memory=2" "$output"
+	assertEquals "The shared host should be probed once for its scope and once for the narrowed one." \
+		2 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
 }
 
 test_zxfer_ensure_remote_host_capabilities_prints_the_response_on_a_miss_and_a_hit() {

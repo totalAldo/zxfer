@@ -38,9 +38,8 @@
 # Module contract:
 # owns globals: g_zxfer_secure_path; the g_cmd_* helper and compression
 #   commands with their *_safe renderings; the lookup results
-#   g_zxfer_computed_secure_path, g_zxfer_tool_path_result,
-#   g_zxfer_normalized_tool_path, g_zxfer_required_tool_result and
-#   g_zxfer_resolved_cli_command_result.
+#   g_zxfer_tool_path_result, g_zxfer_normalized_tool_path,
+#   g_zxfer_required_tool_result and g_zxfer_resolved_cli_command_result.
 # reads globals: ZXFER_SECURE_PATH, ZXFER_SECURE_PATH_APPEND and
 #   g_option_z_compress.
 # mutates caches: none.
@@ -61,12 +60,12 @@ zxfer_reject_invalid_secure_path_configuration() {
 	zxfer_throw_error "$ZXFER_INVALID_SECURE_PATH_MESSAGE"
 }
 
-# Purpose: Build the secure PATH from ZXFER_SECURE_PATH (or the default) plus
-# ZXFER_SECURE_PATH_APPEND, keeping absolute entries only.
-# Usage: zxfer_compute_secure_path; publishes g_zxfer_computed_secure_path,
-# or returns 1 with it empty when the value holds a tab, CR or LF.
-zxfer_compute_secure_path() {
-	g_zxfer_computed_secure_path=""
+# Purpose: Set g_zxfer_secure_path from ZXFER_SECURE_PATH (or the default)
+# plus ZXFER_SECURE_PATH_APPEND, keeping absolute entries only.
+# Usage: zxfer_refresh_secure_path_state ||
+# zxfer_reject_invalid_secure_path_configuration; returns 1, leaving
+# g_zxfer_secure_path as it was, when the value holds a tab, CR or LF.
+zxfer_refresh_secure_path_state() {
 	l_candidate=${ZXFER_SECURE_PATH:-$ZXFER_DEFAULT_SECURE_PATH}
 	if [ -n "${ZXFER_SECURE_PATH_APPEND:-}" ]; then
 		l_candidate=${l_candidate:+$l_candidate:}$ZXFER_SECURE_PATH_APPEND
@@ -82,14 +81,7 @@ zxfer_compute_secure_path() {
 		esac
 	done
 	zxfer_split_end
-	g_zxfer_computed_secure_path=${l_clean:-$ZXFER_DEFAULT_SECURE_PATH}
-}
-
-# Purpose: Recompute g_zxfer_secure_path from the environment.
-# Usage: zxfer_refresh_secure_path_state || zxfer_reject_invalid_secure_path_configuration
-zxfer_refresh_secure_path_state() {
-	zxfer_compute_secure_path || return
-	g_zxfer_secure_path=$g_zxfer_computed_secure_path
+	g_zxfer_secure_path=${l_clean:-$ZXFER_DEFAULT_SECURE_PATH}
 }
 
 # Purpose: Narrow the live PATH to the secure PATH so a bare command name can

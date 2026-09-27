@@ -967,7 +967,8 @@ test_remote_target_push_noop_opens_master_first_and_probes_once() {
 # Invariant: with distinct -O and -T host specs each role opens its own master
 # before any remote command and sends every command over its own socket; each
 # master closes once at exit. A -T spec equal to the -O spec shares the origin
-# master, since commands for that spec already use the origin socket.
+# master, since commands for that spec already use the origin socket, and one
+# capability probe, since both roles ask that host the same questions.
 test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 	planning_setup_env
 	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
@@ -1005,8 +1006,51 @@ test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 	planning_assert_ssh_commands_multiplexed 1
 	assertFalse "one host spec must not open a second master" \
 		"grep -q -- 'ssh-target.sock' '$SSH_LOG'"
+	assertEquals "one host spec must cost exactly one capability probe round trip" \
+		1 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
+}
+
+# Invariant: when a long TMPDIR would push the control-socket path past the
+# sun_path limit, the master's socket lives in a short private directory
+# under the default temp root instead, and the run leaves neither that
+# directory nor its run root behind.
+test_remote_noop_under_a_long_tmpdir_removes_its_short_socket_directory() {
+	planning_setup_env
+	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write socket-aware mock ssh."
+	SSH_LOG="$CASE_DIR/ssh_long_tmpdir.log"
+	: >"$SSH_LOG"
+	export MOCK_SSH_LOG="$SSH_LOG"
+	l_long_component="zxfer-long-tmpdir-component-00000000000000000000000000000"
+	l_long_tmpdir="$CASE_DIR/$l_long_component/$l_long_component"
+	mkdir -p "$l_long_tmpdir" || fail "Unable to create the long TMPDIR."
+	chmod 700 "$l_long_tmpdir"
+
+	TMPDIR=$l_long_tmpdir \
+		PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
+		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_long_tmpdir_status=$?
+	unset MOCK_SSH_LOG
+	l_long_socket=$(awk '$1 == "-M" || index($0, " -M -S ") {
+		for (i = 1; i < NF; i++) if ($i == "-S") { print $(i + 1); exit }
+	}' "$SSH_LOG")
+	l_long_socket_dir=${l_long_socket%/*}
+
+	assertEquals "-O no-op under a long TMPDIR must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_long_tmpdir_status"
+	planning_assert_ssh_commands_multiplexed 1
+	assertContains "the origin socket should sit in a short zxfer.ssh directory" \
+		"${l_long_socket_dir##*/}" "zxfer.ssh."
+	assertNotContains "the origin socket must not sit under the long TMPDIR" \
+		"$l_long_socket_dir" "$l_long_component"
+	assertFalse "the short socket directory must be gone after the run" \
+		"[ -e '$l_long_socket_dir' ]"
+	assertEquals "the run root under the long TMPDIR must be gone too" \
+		"" "$(ls -A "$l_long_tmpdir")"
+	planning_assert_no_mutations
 }
 
 # Purpose: Run a -T localhost push of STATE_DIR through the fault-injecting

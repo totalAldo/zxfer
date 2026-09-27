@@ -47,8 +47,9 @@
 #   -z with g_cmd_compress/g_cmd_decompress), g_zxfer_secure_path, and the ssh
 #   transport, runtime temp-file and profile helpers.
 # mutates caches: fills a role's slot once per host and tool scope, only after
-#   a validated live probe. Secure PATH and ssh policy are fixed per process,
-#   so they are not part of the key.
+#   a validated live probe; either role's slot answers a lookup with the same
+#   host and scope. Secure PATH and ssh policy are fixed per process, so they
+#   are not part of the key.
 # returns via stdout: the capability response
 #   (zxfer_ensure_remote_host_capabilities), the OS name (zxfer_get_os) and
 #   probe failure messages.
@@ -360,24 +361,18 @@ zxfer_capture_remote_probe_output() {
 	g_zxfer_remote_probe_stdout=""
 	g_zxfer_remote_probe_stderr=""
 	g_zxfer_remote_probe_capture_failed=0
-	# Throw here, not in the subshell below with stderr redirected, so the
-	# report reaches the operator and ends the run.
-	if ! zxfer_prepare_ssh_transport; then
-		zxfer_profile_record_ssh_invocation "$1" "${3:-}"
-		zxfer_throw_error "$g_zxfer_ssh_transport_error"
-	fi
-	zxfer_resolve_ssh_host_spec "$1" ||
-		zxfer_throw_error "$g_zxfer_ssh_shell_context_error_result"
+	# ssh runs in the substitution's subshell below, so count it here. Record
+	# mode prepares the transport and renders the argv in this shell: a bad
+	# policy or host spec throws here, where the report reaches the operator,
+	# not in the subshell with stderr redirected, and the argv becomes the
+	# report's last command.
+	zxfer_profile_record_ssh_invocation "$1" "${3:-}"
+	zxfer_ssh_shell_command_for_host record "$1" "$2" "${3:-}" || return
 	zxfer_get_temp_file
 	l_probe_stderr_file=$g_zxfer_temp_file_result
 	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
 		zxfer_echoV "Running remote probe [$(zxfer_get_remote_command_context_label "$1" "${3:-}")]: $2"
 	fi
-
-	# ssh runs in the substitution's subshell, so count it and record it as
-	# the report's last command here.
-	zxfer_profile_record_ssh_invocation "$1" "${3:-}"
-	zxfer_ssh_shell_command_for_host record "$1" "$2" "${3:-}" || return
 	l_probe_status=0
 	g_zxfer_remote_probe_stdout=$(zxfer_invoke_ssh_shell_command_for_host \
 		"$1" "$2" "${3:-}" 2>|"$l_probe_stderr_file") || l_probe_status=$?
@@ -437,8 +432,32 @@ zxfer_fetch_remote_host_capabilities_live() {
 	g_zxfer_remote_capability_response_result=$g_zxfer_remote_probe_stdout
 }
 
+# Purpose: Load one role's capability slot into the active channel when it
+# holds a validated response for HOST and TOOLS.
+# Usage: zxfer_load_remote_capability_slot origin|target HOST TOOLS; returns 1,
+# leaving the channel alone, on a miss.
+zxfer_load_remote_capability_slot() {
+	if [ "$1" = origin ]; then
+		[ "${g_origin_remote_capabilities_host:-}" = "$2" ] &&
+			[ "${g_origin_remote_capabilities_tools:-}" = "$3" ] &&
+			[ -n "${g_origin_remote_capabilities_os:-}" ] || return 1
+		g_zxfer_remote_capability_response_result=$g_origin_remote_capabilities_response
+		g_zxfer_remote_capability_os=$g_origin_remote_capabilities_os
+		g_zxfer_remote_capability_zfs_status=$g_origin_remote_capabilities_zfs_status
+		g_zxfer_remote_capability_tool_records=$g_origin_remote_capabilities_tool_records
+		return 0
+	fi
+	[ "${g_target_remote_capabilities_host:-}" = "$2" ] &&
+		[ "${g_target_remote_capabilities_tools:-}" = "$3" ] &&
+		[ -n "${g_target_remote_capabilities_os:-}" ] || return 1
+	g_zxfer_remote_capability_response_result=$g_target_remote_capabilities_response
+	g_zxfer_remote_capability_os=$g_target_remote_capabilities_os
+	g_zxfer_remote_capability_zfs_status=$g_target_remote_capabilities_zfs_status
+	g_zxfer_remote_capability_tool_records=$g_target_remote_capabilities_tool_records
+}
+
 # Purpose: Load a host's capabilities into the active channel, probing the host
-# at most once per role, host and tool scope.
+# at most once per host and tool scope.
 # Usage: zxfer_ensure_remote_host_capabilities HOST_SPEC [source|destination]
 # [TOOL]; without a side the host's -O/-T role picks the slot, and the scope
 # comes from zxfer_get_remote_capability_requested_tools_for_host. Prints the
@@ -454,11 +473,12 @@ zxfer_ensure_remote_host_capabilities() {
 	g_zxfer_remote_capability_tool_records=""
 	[ -n "$l_caps_host" ] || return 1
 	case $l_caps_side in
-	source) l_caps_role=origin ;;
-	destination) l_caps_role=target ;;
+	source) l_caps_role=origin l_caps_other_role=target ;;
+	destination) l_caps_role=target l_caps_other_role=origin ;;
 	'')
-		l_caps_role=origin
-		[ "$l_caps_host" != "${g_option_T_target_host:-}" ] || l_caps_role=target
+		l_caps_role=origin l_caps_other_role=target
+		[ "$l_caps_host" != "${g_option_T_target_host:-}" ] ||
+			l_caps_role=target l_caps_other_role=origin
 		;;
 	*) return 1 ;;
 	esac
@@ -466,27 +486,11 @@ zxfer_ensure_remote_host_capabilities() {
 	l_caps_tools=$g_zxfer_remote_capability_requested_tools_result
 
 	# Only a validated response fills a slot, so a slot with an os is whole.
-	l_caps_hit=0
-	if [ "$l_caps_role" = origin ]; then
-		if [ "${g_origin_remote_capabilities_host:-}" = "$l_caps_host" ] &&
-			[ "${g_origin_remote_capabilities_tools:-}" = "$l_caps_tools" ] &&
-			[ -n "${g_origin_remote_capabilities_os:-}" ]; then
-			g_zxfer_remote_capability_response_result=$g_origin_remote_capabilities_response
-			g_zxfer_remote_capability_os=$g_origin_remote_capabilities_os
-			g_zxfer_remote_capability_zfs_status=$g_origin_remote_capabilities_zfs_status
-			g_zxfer_remote_capability_tool_records=$g_origin_remote_capabilities_tool_records
-			l_caps_hit=1
-		fi
-	elif [ "${g_target_remote_capabilities_host:-}" = "$l_caps_host" ] &&
-		[ "${g_target_remote_capabilities_tools:-}" = "$l_caps_tools" ] &&
-		[ -n "${g_target_remote_capabilities_os:-}" ]; then
-		g_zxfer_remote_capability_response_result=$g_target_remote_capabilities_response
-		g_zxfer_remote_capability_os=$g_target_remote_capabilities_os
-		g_zxfer_remote_capability_zfs_status=$g_target_remote_capabilities_zfs_status
-		g_zxfer_remote_capability_tool_records=$g_target_remote_capabilities_tool_records
-		l_caps_hit=1
-	fi
-	if [ "$l_caps_hit" -eq 1 ]; then
+	# The probe depends only on the host spec and the tool scope, so the other
+	# role's slot answers too: when -O and -T name one host (and so ask the
+	# same scope, the union of both roles'), that host is probed once.
+	if zxfer_load_remote_capability_slot "$l_caps_role" "$l_caps_host" "$l_caps_tools" ||
+		zxfer_load_remote_capability_slot "$l_caps_other_role" "$l_caps_host" "$l_caps_tools"; then
 		zxfer_profile_increment_counter g_zxfer_profile_remote_capability_bootstrap_memory
 		printf '%s\n' "$g_zxfer_remote_capability_response_result"
 		return 0

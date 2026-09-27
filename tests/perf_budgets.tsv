@@ -31,13 +31,13 @@
 # The history of every ratchet is in CHANGELOG.txt. On 2026-09-26 (W10) the
 # file kept only these rows of the 450 it had: the full-fixture rows were
 # never enforced, and the per-helper rows duplicated TOTAL.
-noop_small	TOTAL	25
+noop_small	TOTAL	23
 noop_small	ssh_connections	0
 noop_small	ssh_master_opens	0
 noop_small	profile:zfs_list_calls	0
 noop_small	profile:zfs_send_calls	0
 noop_small	profile:zfs_receive_calls	0
-dryrun_incr_small	TOTAL	9
+dryrun_incr_small	TOTAL	7
 dryrun_incr_small	ssh_connections	0
 dryrun_incr_small	ssh_master_opens	0
 dryrun_incr_small	profile:zfs_list_calls	0
@@ -49,7 +49,7 @@ incr_small	ssh_master_opens	0
 incr_small	profile:zfs_list_calls	2
 incr_small	profile:zfs_send_calls	11
 incr_small	profile:zfs_receive_calls	11
-remote_noop_small	TOTAL	43
+remote_noop_small	TOTAL	37
 remote_noop_small	ssh_connections	1
 remote_noop_small	ssh_master_opens	1
 remote_noop_small	profile:zfs_list_calls	2

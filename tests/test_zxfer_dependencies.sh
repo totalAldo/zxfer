@@ -57,11 +57,11 @@ dependencies_test_make_tools() {
 }
 
 test_zxfer_compute_secure_path_defaults_to_allowlist() {
-	zxfer_compute_secure_path
+	zxfer_refresh_secure_path_state
 
 	assertEquals "The default secure PATH should use the built-in allowlist." \
 		"/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin" \
-		"$g_zxfer_computed_secure_path"
+		"$g_zxfer_secure_path"
 }
 
 test_zxfer_compute_secure_path_preserves_custom_ifs_and_enabled_globbing() {
@@ -73,8 +73,8 @@ test_zxfer_compute_secure_path_preserves_custom_ifs_and_enabled_globbing() {
 		IFS="|"
 		set +f
 		ZXFER_SECURE_PATH="$secure_fixture_root/secure-*:/usr/bin"
-		zxfer_compute_secure_path
-		printf "path=<%s>\n" "$g_zxfer_computed_secure_path"
+		zxfer_refresh_secure_path_state
+		printf "path=<%s>\n" "$g_zxfer_secure_path"
 		printf "ifs=<%s>\n" "$IFS"
 		case $- in
 		*f*) printf "%s\n" "globbing=disabled" ;;
@@ -96,7 +96,7 @@ test_zxfer_compute_secure_path_preserves_unset_ifs_and_disabled_globbing() {
 		unset IFS
 		set -f
 		ZXFER_SECURE_PATH="/opt/zfs/bin:/usr/bin"
-		zxfer_compute_secure_path >/dev/null
+		zxfer_refresh_secure_path_state >/dev/null
 		if [ "${IFS+set}" = "set" ]; then
 			printf "%s\n" "ifs=set"
 		else
@@ -119,13 +119,13 @@ test_zxfer_compute_secure_path_rejects_control_whitespace_without_mutating_shell
 		IFS="|"
 		set -f
 		ZXFER_SECURE_PATH=$(printf "/opt/trusted/bin\n/opt/translated/bin")
-		if zxfer_compute_secure_path; then
+		if zxfer_refresh_secure_path_state; then
 			path_status=0
 		else
 			path_status=$?
 		fi
 		printf "path-status=%s\n" "$path_status"
-		printf "path-result=<%s>\n" "$g_zxfer_computed_secure_path"
+		printf "path-result=<%s>\n" "$g_zxfer_secure_path"
 		printf "ifs=<%s>\n" "$IFS"
 		control_shell_flags=$-
 		if [ "${control_shell_flags#*f}" != "$control_shell_flags" ]; then
@@ -135,7 +135,7 @@ test_zxfer_compute_secure_path_rejects_control_whitespace_without_mutating_shell
 		fi
 		ZXFER_SECURE_PATH="/usr/bin"
 		ZXFER_SECURE_PATH_APPEND=$(printf "/opt/append\t/opt/translated")
-		if zxfer_compute_secure_path; then
+		if zxfer_refresh_secure_path_state; then
 			append_status=0
 		else
 			append_status=$?
@@ -510,8 +510,8 @@ test_zxfer_compute_secure_path_filters_relative_entries() {
 	result=$(
 		ZXFER_SECURE_PATH="./bin:/tmp/bin:relative:/usr/sbin"
 		ZXFER_SECURE_PATH_APPEND=""
-		zxfer_compute_secure_path
-		printf '%s\n' "$g_zxfer_computed_secure_path"
+		zxfer_refresh_secure_path_state
+		printf '%s\n' "$g_zxfer_secure_path"
 	)
 
 	assertEquals "Relative path segments must be dropped from the secure PATH." "/tmp/bin:/usr/sbin" "$result"
@@ -521,8 +521,8 @@ test_zxfer_compute_secure_path_appends_extra_entries() {
 	result=$(
 		ZXFER_SECURE_PATH="/sbin:/bin"
 		ZXFER_SECURE_PATH_APPEND=":/opt/zfs/bin:./malicious"
-		zxfer_compute_secure_path
-		printf '%s\n' "$g_zxfer_computed_secure_path"
+		zxfer_refresh_secure_path_state
+		printf '%s\n' "$g_zxfer_secure_path"
 	)
 
 	assertEquals "ZXFER_SECURE_PATH_APPEND should only add absolute directories to the allowlist." "/sbin:/bin:/opt/zfs/bin" "$result"
@@ -533,8 +533,8 @@ test_zxfer_compute_secure_path_uses_append_when_default_is_empty() {
 		ZXFER_DEFAULT_SECURE_PATH=""
 		ZXFER_SECURE_PATH=""
 		ZXFER_SECURE_PATH_APPEND="/opt/trusted/bin"
-		zxfer_compute_secure_path
-		printf '%s\n' "$g_zxfer_computed_secure_path"
+		zxfer_refresh_secure_path_state
+		printf '%s\n' "$g_zxfer_secure_path"
 	)
 
 	assertEquals "Append-only secure-path configuration should still work when the built-in allowlist is empty." \
@@ -545,8 +545,8 @@ test_zxfer_compute_secure_path_falls_back_to_default_when_all_entries_are_filter
 	result=$(
 		ZXFER_SECURE_PATH="relative:.:./bin"
 		ZXFER_SECURE_PATH_APPEND="also-relative:./still-bad"
-		zxfer_compute_secure_path
-		printf '%s\n' "$g_zxfer_computed_secure_path"
+		zxfer_refresh_secure_path_state
+		printf '%s\n' "$g_zxfer_secure_path"
 	)
 
 	assertEquals "When every configured secure-PATH entry is filtered out, zxfer should fall back to the built-in allowlist." \

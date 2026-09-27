@@ -41,7 +41,8 @@
 # g_zxfer_migration_service_restore_failure_message, and
 # g_zxfer_normalized_service_list_result.
 # reads globals: g_option_m_migrate, g_option_c_services, g_option_n_dryrun,
-# g_initial_source, and g_recursive_source_list.
+# g_initial_source, g_recursive_source_list, and g_zxfer_failure_message at
+# exit.
 # mutates caches: pending SMF service-restart state; -m preparation rebuilds
 # the replication dataset lists through zxfer_refresh_dataset_iteration_state.
 # returns via stdout: none.
@@ -151,8 +152,9 @@ EOF
 }
 
 # Purpose: Re-enable stopped SMF services without exiting the calling shell.
-# Usage: Called by session trap cleanup, and by zxfer_relaunch before it
-# applies the ordinary operator-facing throw. Failed services remain queued.
+# Usage: Called by zxfer_restore_migration_services_on_exit at exit, and by
+# zxfer_relaunch before it applies the ordinary operator-facing throw. Failed
+# services remain queued.
 # Returns: Zero on complete restoration, otherwise 1 with the failure message
 # published in $g_zxfer_migration_service_restore_failure_message.
 zxfer_restore_migration_services_status_only() {
@@ -198,6 +200,28 @@ EOF
 	g_services_need_relaunch=0
 	g_services_relaunch_in_progress=0
 	return 0
+}
+
+# Purpose: Restart the SMF services a run leaves stopped, from the exit trap.
+# Usage: zxfer_restore_migration_services_on_exit, from zxfer_trap_exit.
+# Returns 0 when no service waits, or when a failed zxfer_relaunch already
+# left them stopped; otherwise the status of the restore, with the operator
+# message in g_zxfer_migration_service_restore_failure_message. When the run
+# has already recorded its own failure, which keeps the report, that message
+# also goes to stderr: the operator may need to restart the service by hand.
+zxfer_restore_migration_services_on_exit() {
+	[ "${g_services_need_relaunch:-0}" -eq 1 ] || return 0
+	if [ "${g_services_relaunch_in_progress:-0}" -eq 1 ]; then
+		zxfer_echoV "zxfer exiting with services still stopped after a failed zxfer_relaunch attempt."
+		return 0
+	fi
+	zxfer_echoV "zxfer exiting early; restarting stopped services."
+	zxfer_restore_migration_services_status_only && return 0
+	l_exit_restore_status=$?
+	g_zxfer_migration_service_restore_failure_message=${g_zxfer_migration_service_restore_failure_message:-Failed to restore stopped migration services during exit.}
+	[ -z "${g_zxfer_failure_message:-}" ] ||
+		zxfer_warn_stderr "$g_zxfer_migration_service_restore_failure_message"
+	return "$l_exit_restore_status"
 }
 
 # Purpose: Re-enable every SMF service stopped during migration preparation.
