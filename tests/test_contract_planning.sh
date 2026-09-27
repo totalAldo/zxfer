@@ -941,8 +941,8 @@ test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 # sun_path limit, the master's socket lives in a short private directory
 # under the default temp root instead: the socket path, with the suffix ssh
 # adds to its temporary listener, stays under 104 bytes, and the run leaves
-# neither that directory nor its run root behind. The same holds for root
-# and other users: each owns the TMPDIR it made and a sticky /tmp.
+# neither that directory nor its run root behind. Root and other users alike
+# accept the 0700 TMPDIR they made and a root-owned sticky default root.
 test_remote_noop_under_a_long_tmpdir_removes_its_short_socket_directory() {
 	planning_setup_env
 	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
@@ -954,9 +954,10 @@ test_remote_noop_under_a_long_tmpdir_removes_its_short_socket_directory() {
 	mkdir -p "$l_long_tmpdir" || fail "Unable to create the long TMPDIR."
 	chmod 700 "$l_long_tmpdir"
 
-	# Export in a subshell: FreeBSD sh and ksh93 do not export a prefix
-	# assignment on a function call, so zxfer would never see this TMPDIR
-	# and would put its sockets under a short default run root instead.
+	# Export in a subshell: FreeBSD sh exports a prefix assignment on a
+	# function call only when the name was already exported, and ksh93 not
+	# even then, so zxfer would miss this TMPDIR and keep its sockets in a
+	# short run root under the default temp root.
 	(
 		TMPDIR=$l_long_tmpdir
 		PATH=$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")
