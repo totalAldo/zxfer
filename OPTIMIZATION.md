@@ -21,16 +21,17 @@ ssh connections and zfs calls on the small micro-bench fixture) and
 ## Current Results
 
 Helper spawns counted by `tests/run_microbench.sh` on the default fixture
-(25 children x 4 snapshots), with and without `-V` (2026-09-26):
+(25 children x 4 snapshots), with and without `-V` (2026-09-26, after the
+next-phase items W3-W5):
 
 | Scenario | `-V` | Plain | ssh connections |
 | --- | ---: | ---: | ---: |
 | No-op | 21 | 12 | 0 |
 | Incremental dry run | 7 | 4 | 0 |
 | Incremental | 129 | 109 | 0 |
-| Remote no-op (`-O localhost -T localhost`) | 47 | 25 | 1 |
-| Remote incremental | 135 | 110 | 1 |
-| `props` (incremental, `-P`, 68 matching properties) | 203 | 189 | 0 |
+| Remote no-op (`-O localhost -T localhost`) | 37 | 15 | 1 |
+| Remote incremental | 129 | 103 | 1 |
+| `props` (incremental, `-P`, 68 matching properties) | 177 | 163 | 0 |
 
 Each remote run opens one ssh master, shared by both roles. On the small
 fixture (8 x 2) the incremental spawns 78 helpers with `-V` and `props` 101.
@@ -61,6 +62,13 @@ no-op 0.10 s and incremental 3.79 s; 200 x 100 incremental 16.2 s; `props`
 1.34 s and 6.25 s at 25 and 100 children under `/bin/sh`, 1.29 s and 8.22 s
 under `--shell /bin/dash`. The next-phase items W7a and W7b target these.
 
+Next-phase results against `main` so far: W3 (`-T` destination discovery
+through the ordinary listings) remote no-op 0.74-0.75 at zero latency and
+0.83-0.85 at 80 ms, remote incremental 0.97-0.99; W4 (error log without a
+lock) a failing run with `ZXFER_ERROR_LOG` set 386 -> 130 ms under bash 3.2
+and 303 -> 88 ms under dash; W5 (one property plan program) `props` 0.92-0.93
+under `/bin/sh` and dash.
+
 ## Remaining Candidates
 
 Unranked, and none is permission to weaken replication correctness, remote
@@ -80,9 +88,8 @@ quoting, structured error reporting, secure `PATH` or cleanup. Measure first.
 - Parallel remote prewarm (C1): run the `-O` and `-T` capability probes
   concurrently when they name distinct hosts; never publish partial role
   state from a subshell.
-- Wider read-only discovery overlap (C2) and a broader remote collector:
-  overlap dataset and snapshot inventories, or add property tables to the
-  target batch, keeping exact framing and empty-on-failure outputs.
+- Wider read-only discovery overlap (C2): overlap the dataset and snapshot
+  inventories, keeping empty-on-failure outputs.
 - Dependency-aware dataset scheduler (C5): bounded work items so independent
   subtrees advance during long transfers, keeping parent-before-child
   receives and serialized mutations that share ancestry. A large refactor.
@@ -90,8 +97,9 @@ quoting, structured error reporting, secure `PATH` or cleanup. Measure first.
   options instead of `zfs get ... all` where completeness can be proven.
 - Remote backup preflight caching per host and path; lazy optional-helper
   resolution and deferred remote command rendering until a mode needs them.
-- Remote no-op at zero latency is at parity with upstream; most of the rest
-  is the size of the capability-probe and discovery-batch programs.
+- Remote no-op: about 0.75 of `main` at zero latency since W3, when `main`
+  was at parity with upstream; the capability probe is the largest remaining
+  remote cost.
 - Serial versus GNU `parallel` source discovery for the changed-source
   fallback: fanout can lose on small remote trees. The clean no-op proof
   stays one serial recursive stream even with `-j`.
