@@ -1078,5 +1078,53 @@ test_run_shunit_tests_rejects_a_non_numeric_suite_timeout() {
 	assertEquals "No suite should run." "" "$(cat "$FAKE_SUITE_LOG")"
 }
 
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_shunit_tests_checks_names_and_numbers_as_ascii_in_a_utf8_locale() {
+	# In a UTF-8 locale bash 3.2 (macOS /bin/sh) matches a range by
+	# collation: [0-9] also takes U+2185 and [A-Za-z] takes accented letters.
+	l_roman_six=$(printf '\342\206\205')
+	l_e_acute=$(printf '\303\251')
+	l_suite_path="$TEST_TMPDIR/utf8-suite.sh"
+	write_fake_suite "$l_suite_path" "utf8"
+	chmod +x "$l_suite_path"
+	l_fragment_suite_path="$TEST_TMPDIR/utf8-fragment-suite.sh"
+	{
+		printf '%s\n' '#!/bin/sh'
+		printf '# zxfer-test-fragment: name%s.sh\n' "$l_e_acute"
+	} >"$l_fragment_suite_path"
+	chmod +x "$l_fragment_suite_path"
+	printf '%s\n' 'test_fragment_case() {' ':' '}' >"$TEST_TMPDIR/name$l_e_acute.sh"
+
+	jobs_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
+		"$RUN_SHUNIT_TESTS_BIN" --jobs "$l_roman_six" "$l_suite_path" 2>&1)
+	jobs_status=$?
+	timeout_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
+		"$RUN_SHUNIT_TESTS_BIN" --suite-timeout "$l_roman_six" "$l_suite_path" 2>&1)
+	timeout_status=$?
+	name_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
+		"$RUN_SHUNIT_TESTS_BIN" --test "test_name$l_e_acute" "$l_suite_path" 2>&1)
+	name_status=$?
+	fragment_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
+		"$RUN_SHUNIT_TESTS_BIN" --list-tests "$l_fragment_suite_path" 2>&1)
+	fragment_status=$?
+
+	assertEquals "A non-ASCII digit in --jobs should fail in a UTF-8 locale." 1 "$jobs_status"
+	assertContains "The --jobs failure should be the positive-integer check." \
+		"$jobs_output" "--jobs must be a positive integer"
+	assertEquals "A non-ASCII digit in --suite-timeout should fail in a UTF-8 locale." \
+		1 "$timeout_status"
+	assertContains "The --suite-timeout failure should be the whole-number check." \
+		"$timeout_output" "must be a whole number of seconds"
+	assertEquals "An accented letter in a --test name should fail in a UTF-8 locale." \
+		1 "$name_status"
+	assertContains "The --test failure should be the function-name check." \
+		"$name_output" "--test requires a shell function name"
+	assertEquals "An accented letter in a fragment path should fail in a UTF-8 locale." \
+		1 "$fragment_status"
+	assertContains "The fragment failure should be the path check." \
+		"$fragment_output" "Invalid suite test fragment path"
+	assertEquals "No suite should run." "" "$(cat "$FAKE_SUITE_LOG")"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"
