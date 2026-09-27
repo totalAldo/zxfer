@@ -205,13 +205,14 @@ append_unique_word() {
 }
 
 # Purpose: Print every black-box contract suite, tests/test_contract_*.sh,
-# one repository-relative path per line.
+# one repository-relative path per line, sorted in the C locale so the
+# selection is the same whatever the caller's collation.
 # Usage: contract_suites
 contract_suites() {
 	for l_contract_suite in "$ZXFER_ROOT"/tests/test_contract_*.sh; do
 		[ -f "$l_contract_suite" ] || continue
 		printf 'tests/%s\n' "${l_contract_suite##*/}"
-	done
+	done | LC_ALL=C sort
 }
 
 # Purpose: Print the unit suites the naming convention selects for a changed
