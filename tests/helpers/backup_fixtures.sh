@@ -1,6 +1,6 @@
 #!/bin/sh
 # Shared property-backup metadata fixture renderers.
-# shellcheck disable=SC2154,SC2317,SC2329
+# shellcheck disable=SC2034,SC2154,SC2317,SC2329
 
 zxfer_test_render_current_backup_metadata_contents() {
 	l_format_version=${ZXFER_BACKUP_METADATA_FORMAT_VERSION:-2}
@@ -69,4 +69,17 @@ zxfer_test_backup_metadata_row() {
 	l_properties=$2
 
 	printf '%s\t%s\n' "$l_relative_path" "$l_properties"
+}
+
+# Purpose: Load -e rows as startup does once it has validated the file:
+# render current-format contents for the roots and store their rows.
+# Usage: zxfer_test_load_backup_restore_rows SOURCE_ROOT DESTINATION_ROOT
+# ROW...; needs a run root. Returns the loader's status.
+zxfer_test_load_backup_restore_rows() {
+	ZXFER_TEST_BACKUP_SOURCE_ROOT=$1
+	ZXFER_TEST_BACKUP_DESTINATION_ROOT=$2
+	shift 2
+	g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents "$@")
+	unset ZXFER_TEST_BACKUP_SOURCE_ROOT ZXFER_TEST_BACKUP_DESTINATION_ROOT
+	zxfer_load_backup_restore_rows
 }

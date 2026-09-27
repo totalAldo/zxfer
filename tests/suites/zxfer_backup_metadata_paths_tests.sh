@@ -1,8 +1,9 @@
 #!/bin/sh
-# Backup path tests for src/zxfer_backup_metadata.sh: metadata filenames and
-# source matching, restore candidates, local backup directories, and the
-# backup-directory preflight locally, remotely and in dry runs. Run by
-# tests/test_zxfer_backup_metadata.sh under the remote-host fixture.
+# Backup path tests for src/zxfer_backup_metadata.sh: metadata filenames,
+# restore candidates, local backup directories, and the backup-directory
+# preflight locally, remotely and in dry runs (the records fragment covers
+# the file check). Run by tests/test_zxfer_backup_metadata.sh under the
+# remote-host fixture.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
 # Run the -T backup-root check for DIR on backup@example.com.
@@ -40,84 +41,6 @@ test_zxfer_get_backup_metadata_filename_runs_in_current_shell() {
 		"$(cat "$output_file")" ".zxfer_backup_info.v2/h/"
 	assertContains "Backup metadata filename rendering should use the fixed v2 leaf name." \
 		"$(cat "$output_file")" "/.zxfer_backup_info.v2"
-}
-
-test_backup_metadata_matches_source_accepts_only_v2_relative_rows() {
-	ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
-	ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
-	current_contents=$(zxfer_test_render_current_backup_metadata_contents \
-		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")")
-	legacy_contents=$(zxfer_test_render_current_backup_metadata_contents \
-		"tank/src,backup/dst,compression=lz4")
-	unset ZXFER_TEST_BACKUP_SOURCE_ROOT
-	unset ZXFER_TEST_BACKUP_DESTINATION_ROOT
-
-	assertEquals "Backup metadata matching should accept current v2 relative rows." \
-		0 "$(
-			(
-				zxfer_backup_metadata_extract_properties_for_dataset_pair >/dev/null "$current_contents" "tank/src" "backup/dst"
-				printf '%s\n' "$?"
-			)
-		)"
-	assertEquals "Backup metadata matching should reject legacy exact-pair rows in v2 files." \
-		3 "$(
-			(
-				zxfer_backup_metadata_extract_properties_for_dataset_pair >/dev/null "$legacy_contents" "tank/src" "backup/dst"
-				printf '%s\n' "$?"
-			)
-		)"
-}
-
-test_backup_metadata_matches_source_rejects_wrong_destination_and_ambiguous_relative_rows() {
-	ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
-	ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/other"
-	wrong_destination_contents=$(zxfer_test_render_current_backup_metadata_contents \
-		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")")
-	ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
-	ambiguous_contents=$(zxfer_test_render_current_backup_metadata_contents \
-		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
-		"$(zxfer_test_backup_metadata_row "." "compression=off=local")")
-	unset ZXFER_TEST_BACKUP_SOURCE_ROOT
-	unset ZXFER_TEST_BACKUP_DESTINATION_ROOT
-
-	assertEquals "Backup metadata matching should reject rows for the requested source dataset when the destination root does not match." \
-		1 "$(
-			(
-				zxfer_backup_metadata_extract_properties_for_dataset_pair >/dev/null "$wrong_destination_contents" "tank/src" "backup/dst"
-				printf '%s\n' "$?"
-			)
-		)"
-	assertEquals "Backup metadata matching should reject files that contain multiple relative rows for the same source/destination root." \
-		2 "$(
-			(
-				zxfer_backup_metadata_extract_properties_for_dataset_pair >/dev/null "$ambiguous_contents" "tank/src" "backup/dst"
-				printf '%s\n' "$?"
-			)
-		)"
-}
-
-test_backup_metadata_matches_source_rejects_malformed_current_format_rows() {
-	ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
-	ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
-	missing_tab_contents=$(zxfer_test_render_current_backup_metadata_contents "broken-row")
-	extra_comma_contents=$(zxfer_test_render_current_backup_metadata_contents "broken,legacy,row")
-	unset ZXFER_TEST_BACKUP_SOURCE_ROOT
-	unset ZXFER_TEST_BACKUP_DESTINATION_ROOT
-
-	assertEquals "Backup metadata matching should reject rows that do not contain the current relative-path/properties format." \
-		3 "$(
-			(
-				zxfer_backup_metadata_extract_properties_for_dataset_pair >/dev/null "$missing_tab_contents" "tank/src" "backup/dst"
-				printf '%s\n' "$?"
-			)
-		)"
-	assertEquals "Backup metadata matching should reject rows that contain extra raw field delimiters." \
-		3 "$(
-			(
-				zxfer_backup_metadata_extract_properties_for_dataset_pair >/dev/null "$extra_comma_contents" "tank/src" "backup/dst"
-				printf '%s\n' "$?"
-			)
-		)"
 }
 
 test_zxfer_try_backup_restore_candidate_returns_missing_for_missing_local_candidate() {

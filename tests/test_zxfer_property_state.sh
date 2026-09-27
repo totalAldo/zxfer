@@ -269,15 +269,55 @@ test_zxfer_property_table_round_trips_hostile_dataset_names() {
 	assertEquals "Invalidation must not remove unrelated rows." 1 "$survivor"
 }
 
-test_zxfer_property_table_find_dataset_prefers_the_first_matching_row() {
-	g_zxfer_source_property_table="$(printf 'tank/src\tfresh=1=local\ntank/src\tstale=1=local')"
+test_zxfer_property_table_find_dataset_prefers_the_newest_row() {
+	zxfer_property_test_table_add source tank/src "stale=1=local"
+	zxfer_property_test_table_add source tank/src "fresh=1=local"
 	zxfer_property_table_find_dataset source tank/src
-	assertEquals "fresh=1=local" "$g_zxfer_property_table_lookup_result"
-	g_zxfer_source_property_table="$(printf 'tank/src\t\ntank/src\tstale=1=local')"
+	assertEquals "The newest row wins." "fresh=1=local" "$g_zxfer_property_table_lookup_result"
+	zxfer_property_test_table_add source tank/src ""
 	l_lookup_status=0
 	zxfer_property_table_find_dataset source tank/src || l_lookup_status=$?
-	assertEquals "An empty first row must not expose an older duplicate." 1 "$l_lookup_status"
+	assertEquals "An empty newest row must not expose an older duplicate." 1 "$l_lookup_status"
 	assertEquals "A miss must clear the previous lookup." "" "$g_zxfer_property_table_lookup_result"
+}
+
+test_zxfer_property_table_find_dataset_reads_only_the_named_row() {
+	zxfer_property_test_table_add source tank/src "compression=lz4=local"
+	l_src_row=$g_zxfer_property_row_result
+	zxfer_property_test_table_add source tank/src/a "compression=lz4=inherited from tank/src"
+	zxfer_property_test_table_add source tank/src/b "atime=off=local"
+	l_b_row=$g_zxfer_property_row_result
+	# Replace tank/src's row with a directory: a lookup that scanned every
+	# row would trip over it.
+	rm -f "$g_zxfer_property_row_dir/$l_src_row"
+	mkdir "$g_zxfer_property_row_dir/$l_src_row"
+	zxfer_property_table_find_dataset source tank/src/a
+	assertEquals "compression=lz4=inherited from tank/src" "$g_zxfer_property_table_lookup_result"
+	# A row file cut short (no final LF) or missing is a miss, silently.
+	printf 'atime=of' >"$g_zxfer_property_row_dir/$l_b_row"
+	l_lookup_status=0
+	l_stderr=$(zxfer_property_table_find_dataset source tank/src/b 2>&1) || l_lookup_status=$?
+	assertEquals "A row without its final LF is a miss." "1:" "$l_lookup_status:$l_stderr"
+	l_lookup_status=0
+	l_stderr=$(zxfer_property_table_find_dataset source tank/src 2>&1) || l_lookup_status=$?
+	assertEquals "An unreadable row is a miss." "1:" "$l_lookup_status:$l_stderr"
+}
+
+test_zxfer_find_property_row_matches_whole_keys_only() {
+	l_index=$(printf '\np3\ttank/a b\np2\ttank/a\np1\t[x]*\n.')
+	l_index=${l_index%.}
+	zxfer_find_property_row "$l_index" "tank/a"
+	assertEquals "p2" "$g_zxfer_property_row_result"
+	zxfer_find_property_row "$l_index" "[x]*"
+	assertEquals "Glob bytes in a key are literal." "p1" "$g_zxfer_property_row_result"
+	for l_key in tank "a b" "tank/a b/c" "[x]" "*" ""; do
+		assertFalse "[$l_key] names no line." "zxfer_find_property_row \"\$l_index\" \"\$l_key\""
+	done
+	# Without the TAB and LF guard this key would match across two lines
+	# and answer with tank/a b's row.
+	l_key=$(printf 'tank/a b\np2\ttank/a')
+	assertFalse "A key spanning lines never matches." \
+		"zxfer_find_property_row \"\$l_index\" \"\$l_key\""
 }
 
 test_zxfer_property_table_find_dataset_preserves_literal_keys_and_encoded_payloads() {
@@ -332,7 +372,7 @@ test_zxfer_invalidate_destination_property_mutation_cache_without_dataset_resets
 
 	assertEquals "" "${g_zxfer_destination_property_table:-}"
 	assertEquals "Source rows must survive a destination-wide reset." \
-		"$(printf 'tank/src\tcompression=lz4=local')" "$g_zxfer_source_property_table"
+		"$(printf 'tank/src\tcompression=lz4=local')" "$(zxfer_property_test_table_dump source)"
 	assertEquals "A destination-wide reset must re-arm the destination prefetch." \
 		0 "$g_zxfer_destination_property_tree_prefetch_state"
 }
@@ -353,13 +393,37 @@ test_zxfer_invalidate_destination_property_mutation_cache_exact_keeps_descendant
 
 test_zxfer_property_table_invalidation_clears_table_when_strip_command_fails() {
 	zxfer_property_test_table_add destination "backup/dst" "compression=lz4=local"
+	zxfer_property_test_table_add destination "backup/dst/child" "compression=lz4=inherited"
 	(
 		g_cmd_awk="$TEST_TMPDIR/missing-awk"
-		zxfer_invalidate_destination_property_mutation_cache "backup/other" 2>/dev/null
+		zxfer_invalidate_destination_property_mutation_cache "backup/dst" 2>/dev/null
 		printf '%s' "${g_zxfer_destination_property_table:-}"
 	) >"$TEST_TMPDIR/strip_failure.out"
 	assertEquals "A failed strip must clear the table so lookups fall back to live reads." \
 		"" "$(cat "$TEST_TMPDIR/strip_failure.out")"
+}
+
+test_zxfer_invalidate_destination_property_mutation_cache_hides_one_dataset_without_awk() {
+	zxfer_property_test_table_add destination "backup/dst" "compression=lz4=local"
+	zxfer_property_test_table_add destination "backup/dst/child" "compression=lz4=inherited"
+	(
+		# A receive, or a create, set or inherit of a dataset without
+		# descendant rows, needs no process: a tombstone hides the rows.
+		g_cmd_awk="$TEST_TMPDIR/missing-awk"
+		zxfer_invalidate_destination_property_mutation_cache "backup/dst" exact
+		zxfer_invalidate_destination_property_mutation_cache "backup/dst/child"
+		zxfer_invalidate_destination_property_mutation_cache "backup/none" exact
+		zxfer_property_test_table_dump destination
+		# The live read after the tombstone is the newest row again.
+		zxfer_property_test_table_add destination "backup/dst" "compression=gzip=local"
+		zxfer_property_table_find_dataset destination backup/dst
+		printf 'after=%s\n' "$g_zxfer_property_table_lookup_result"
+	) >"$TEST_TMPDIR/tombstone.out" 2>&1
+	assertEquals "backup/dst/child	-
+backup/dst	-
+backup/dst/child	compression=lz4=inherited
+backup/dst	compression=lz4=local
+after=compression=gzip=local" "$(cat "$TEST_TMPDIR/tombstone.out")"
 }
 
 test_zxfer_reset_property_iteration_caches_clears_tables_and_prefetch_state() {
@@ -846,7 +910,7 @@ tank/src/e"
 		zxfer_run_zfs_cmd_for_role() { zxfer_property_test_model_zfs "$@"; }
 		zxfer_prefetch_recursive_normalized_properties source
 		printf 'status=%s state=%s table=<%s>\n' "$?" "$g_zxfer_source_property_tree_prefetch_state" \
-			"$g_zxfer_source_property_table"
+			"$(zxfer_property_test_table_dump source)"
 		for l_dataset in tank/src/b tank/src/c tank/src/d tank/src/e; do
 			zxfer_load_normalized_dataset_properties "$l_dataset" source
 			printf '%s hit=%s: %s\n' "$l_dataset" "$g_zxfer_normalized_dataset_properties_cache_hit" \
@@ -1044,6 +1108,74 @@ test_prefetch_recursive_normalized_properties_fails_closed_on_a_malformed_skelet
 		printf 'status=%s state=%s table=<%s>\n' "$?" "$g_zxfer_source_property_tree_prefetch_state" "${g_zxfer_source_property_table:-}"
 	) >"$TEST_TMPDIR/prefetch_malformed.out"
 	assertEquals "status=1 state=2 table=<>" "$(cat "$TEST_TMPDIR/prefetch_malformed.out")"
+}
+
+test_prefetch_recursive_normalized_properties_fails_closed_when_rows_cannot_be_stored() {
+	ROLE_LOG="$TEST_TMPDIR/prefetch_unstored.log"
+	: >"$ROLE_LOG"
+	(
+		zxfer_property_test_model_trees
+		g_zxfer_source_property_tree_prefetch_root="tank/src"
+		g_recursive_source_list="tank/src
+tank/src/child"
+		zxfer_run_zfs_cmd_for_role() { zxfer_property_test_model_zfs "$@"; }
+		zxfer_prepare_property_read_files
+		g_zxfer_property_row_dir="$TEST_TMPDIR/no-such-row-dir"
+		l_status=ok
+		zxfer_prefetch_recursive_normalized_properties source 2>/dev/null || l_status=failed
+		printf 'prefetch=%s state=%s table=<%s>\n' "$l_status" \
+			"$g_zxfer_source_property_tree_prefetch_state" "${g_zxfer_source_property_table:-}"
+		zxfer_load_normalized_dataset_properties tank/src/child source
+		printf 'child=%s hit=%s\n' "$g_zxfer_normalized_dataset_properties" \
+			"$g_zxfer_normalized_dataset_properties_cache_hit"
+		zxfer_load_normalized_dataset_properties tank/src/child source
+		printf 'again hit=%s table=<%s>\n' "$g_zxfer_normalized_dataset_properties_cache_hit" \
+			"${g_zxfer_source_property_table:-}"
+	) >"$TEST_TMPDIR/prefetch_unstored.out"
+	assertEquals "A store that cannot be written publishes nothing; every lookup reads live." \
+		"prefetch=failed state=2 table=<>
+child=compression=gzip=inherited from tank/src hit=0
+again hit=0 table=<>" "$(cat "$TEST_TMPDIR/prefetch_unstored.out")"
+	assertEquals "One tree read, then two live reads of three calls each." \
+		9 "$(wc -l <"$ROLE_LOG" | tr -d ' ')"
+}
+
+test_property_row_store_guards_fail_closed() {
+	(
+		zxfer_property_test_table_add destination "backup/dst" "compression=lz4=local"
+		l_index=$g_zxfer_destination_property_table
+		# A name holding a TAB or LF is never in an index: nothing to drop.
+		zxfer_invalidate_destination_property_mutation_cache "$(printf 'backup/dst\tx')" exact
+		zxfer_invalidate_destination_property_mutation_cache "$(printf 'x\nbackup/dst')"
+		[ "$g_zxfer_destination_property_table" = "$l_index" ] && printf 'odd names: unchanged\n'
+		# A live read of such a name is used but never cached.
+		zxfer_run_zfs_cmd_for_role() {
+			case "$*" in
+			*" property,value,source all "*) printf 'compression\tlz4\tlocal\n' ;;
+			*) printf 'compression\n' ;;
+			esac
+		}
+		zxfer_load_normalized_dataset_properties "$(printf 'tank/a\tb')" source
+		printf 'odd live read: %s table=<%s>\n' "$g_zxfer_normalized_dataset_properties" \
+			"${g_zxfer_source_property_table:-}"
+		# A parse whose last line names no stored row publishes nothing.
+		zxfer_parse_property_views() { printf 'x\ttank/src\n'; }
+		g_zxfer_source_property_tree_prefetch_root="tank/src"
+		g_recursive_source_list="tank/src"
+		l_status=0
+		zxfer_prefetch_recursive_normalized_properties source || l_status=$?
+		printf 'bad parse: status=%s state=%s table=<%s>\n' "$l_status" \
+			"$g_zxfer_source_property_tree_prefetch_state" "${g_zxfer_source_property_table:-}"
+		# No row directory stops the run.
+		zxfer_test_stub_throw_error_to_stdout
+		zxfer_create_private_temp_dir() { return 1; }
+		g_zxfer_property_row_dir=""
+		zxfer_prepare_property_read_files
+	) >"$TEST_TMPDIR/row_store_guards.out" 2>&1
+	assertEquals "odd names: unchanged
+odd live read: compression=lz4=local table=<>
+bad parse: status=1 state=2 table=<>
+Error creating temporary directory." "$(cat "$TEST_TMPDIR/row_store_guards.out")"
 }
 
 test_prefetch_recursive_normalized_properties_prepends_fresh_rows_ahead_of_live_rows() {
