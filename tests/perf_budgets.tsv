@@ -300,9 +300,9 @@ remote_incr	profile:zfs_receive_calls	30
 remote_incr	profile:send_receive_pipeline_commands	30
 remote_incr	profile:live_destination_snapshot_rechecks	2
 remote_incr	profile:exists_destination_calls	0
-props	TOTAL	234
+props	TOTAL	204
 props	sed	2
-props	awk	161
+props	awk	132
 props	sort	5
 props	comm	2
 props	cut	0
@@ -525,9 +525,9 @@ remote_incr_small	profile:zfs_receive_calls	11
 remote_incr_small	profile:send_receive_pipeline_commands	11
 remote_incr_small	profile:live_destination_snapshot_rechecks	2
 remote_incr_small	profile:exists_destination_calls	0
-props_small	TOTAL	117
+props_small	TOTAL	106
 props_small	sed	2
-props_small	awk	64
+props_small	awk	53
 props_small	sort	5
 props_small	comm	2
 props_small	cut	0

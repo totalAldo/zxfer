@@ -122,9 +122,9 @@ and removed again at the right moments still passes.
 OpenZFS accepts user property names that start with `-` (for example `-x:y`;
 only a colon is required). zxfer reads such a name (a property read alone
 names it after `--`) and creates it through `zfs create -o`. However,
-`zxfer_run_zfs_set_properties` and `zxfer_apply_property_changes` in
-`src/zxfer_property_reconcile.sh` pass it as a bare `zfs set` or `zfs inherit`
-operand (`-x:y=VALUE` or `-x:y`), which zfs parses as an option. A `-P` run
+`zxfer_apply_property_changes` in `src/zxfer_property_transfer.sh` passes it
+as a bare `zfs set` or `zfs inherit` operand (`-x:y=VALUE` or `-x:y`), which
+zfs parses as an option. A `-P` run
 that must change or inherit such a property on an existing destination
 therefore stops with
 `Error when setting properties on destination filesystem.` or
@@ -220,8 +220,8 @@ unchanged. A C1 control character, UTF-8 encoded (`C2 80` to `C2 9F`, such as
 reports, `ZXFER_ERROR_LOG` and the `-v`/`-V` property lines as is, and some
 terminals (xterm, for example) act on it. This predates the 2026.09.26
 verbose escaping. Separately, with `-U` and `-v`, the warning
-`Destination does not support property NAME=VALUE` (`ZXFER_PROPERTY_FILTER_AWK`
-and `zxfer_derive_override_lists` in `src/zxfer_property_policy.sh`) prints
+`Destination does not support property NAME=VALUE` (`ZXFER_PROPERTY_RULES_AWK`
+and `zxfer_plan_property_changes` in `src/zxfer_property_transfer.sh`) prints
 the decoded value raw, one warning line per line of the value, so a value can
 print C0 control bytes and forge output lines. User properties are never
 marked unsupported, so the permission to set user properties alone cannot

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Property transfer fragment: zxfer_transfer_properties driven end to end
 # against a fake zfs (reads answered by role, mutations logged). Run by
-# tests/test_zxfer_property_reconcile.sh.
+# tests/test_zxfer_property_transfer.sh.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 # Fake `zfs get` answers keyed on role and dataset. Datasets and their rows
@@ -183,6 +183,34 @@ test_transfer_properties_checks_override_names_on_the_initial_source_only() {
 	assertEquals "" "$output"
 	assertEquals "With -P, an override the child source lacks is not applied." \
 		"" "$(cat "$TRANSFER_MUTATE_LOG")"
+}
+
+test_transfer_properties_checks_override_names_before_probing_the_destination() {
+	zxfer_property_test_default_rows
+	g_recursive_dest_list=""
+	g_option_o_override_property="copies=2"
+	: >"$TRANSFER_READ_LOG"
+	: >"$TRANSFER_MUTATE_LOG"
+	output=$(
+		(
+			zxfer_probe_destination_existence() {
+				printf 'probe %s\n' "$1" >>"$TRANSFER_READ_LOG"
+				g_zxfer_destination_exists_result=0
+			}
+			zxfer_run_zfs_cmd_for_role() { zxfer_property_test_transfer_reads "$@"; }
+			zxfer_run_destination_zfs_cmd() { zxfer_property_test_transfer_mutations "$@"; }
+			zxfer_throw_usage_error() {
+				printf 'USAGE %s\n' "$1"
+				exit 2
+			}
+			zxfer_transfer_properties "tank/src"
+		)
+	)
+	assertEquals 2 "$?"
+	assertEquals "USAGE Missing source property for -o override: copies." "$output"
+	assertEquals "Only the source is read; the unlisted destination is never probed." \
+		"" "$(grep -v '^source ' "$TRANSFER_READ_LOG")"
+	assertEquals "" "$(cat "$TRANSFER_MUTATE_LOG")"
 }
 
 test_transfer_properties_preserves_escaped_comma_override_end_to_end() {
@@ -433,7 +461,7 @@ test_transfer_properties_uses_restored_backup_properties_in_restore_mode() {
 test_transfer_properties_resets_per_transfer_result_channels() {
 	zxfer_property_test_default_rows
 	(
-		g_zxfer_diff_initial_set_result="stale"
+		g_zxfer_plan_initial_set_result="stale"
 		g_zxfer_source_pvs_raw="stale"
 		zxfer_probe_destination_existence() {
 			g_zxfer_destination_exists_result=${TRANSFER_DEST_EXISTS:-1}
@@ -446,7 +474,7 @@ test_transfer_properties_resets_per_transfer_result_channels() {
 		case "$g_zxfer_source_pvs_raw" in
 		type=filesystem=-*) l_raw_has_type=yes ;;
 		esac
-		printf 'diff=<%s> raw_has_type=%s\n' "$g_zxfer_diff_initial_set_result" "$l_raw_has_type"
+		printf 'diff=<%s> raw_has_type=%s\n' "$g_zxfer_plan_initial_set_result" "$l_raw_has_type"
 	) >"$TEST_TMPDIR/transfer_reset.out"
 	assertEquals "diff=<> raw_has_type=yes" "$(cat "$TEST_TMPDIR/transfer_reset.out")"
 }
