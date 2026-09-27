@@ -87,11 +87,9 @@ zxfer_forget_snapshot_slices() {
 # Purpose: Reset the per-dataset plan, delete, and divergence state.
 # Usage: Called by session initialization.
 zxfer_reset_snapshot_reconcile_state() {
-	g_last_common_snap=""
-	g_dest_has_snapshots=0
+	zxfer_publish_snapshot_transfer_plan "" "" 0
 	g_did_delete_dest_snapshots=0
 	g_deleted_dest_newer_snapshots=0
-	g_src_snapshot_transfer_list=""
 	g_zxfer_plan_common_snapshot=""
 	g_zxfer_plan_transfer_list=""
 	g_zxfer_plan_dest_has_snapshots=0
@@ -112,8 +110,9 @@ zxfer_reset_snapshot_reconcile_state() {
 # last common snapshot record, the pending source records (oldest first) and
 # whether the destination has snapshots. It is the only writer of
 # g_last_common_snap, g_src_snapshot_transfer_list and g_dest_has_snapshots:
-# the per-dataset plan, the live re-plan and a seed receive in replication
-# all publish through it. Returns 2 for a presence value other than 0 or 1.
+# the session reset, the per-dataset plan, the live re-plan and a seed receive
+# in replication all publish through it. Returns 2 for a presence value other
+# than 0 or 1.
 zxfer_publish_snapshot_transfer_plan() {
 	g_last_common_snap=${1:-}
 	g_src_snapshot_transfer_list=${2:-}
