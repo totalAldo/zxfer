@@ -54,8 +54,9 @@ module or a chain of setters.
   but does not own transport state
 - [../src/zxfer_cli.sh](../src/zxfer_cli.sh): CLI parsing, option validation,
   and compression command interpretation
-- [../src/zxfer_snapshot_state.sh](../src/zxfer_snapshot_state.sh): the
-  in-shell destination existence probe and its linear existence cache,
+- [../src/zxfer_destination_state.sh](../src/zxfer_destination_state.sh): the
+  in-shell destination existence probe and its linear existence cache, the
+  destination dataset inventory the cache is seeded from (its only writer),
   fork-free source-to-destination dataset mapping, and the depth-1 live
   listing of a dataset this run changed
 - [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh): the
@@ -80,13 +81,13 @@ module or a chain of setters.
   readonly/`-I`/`-U` filters, then diff them against an existing
   destination), destination creation, set/inherit execution, child-inherit
   adjustment, and the linear per-dataset `zxfer_transfer_properties` flow
-- [../src/zxfer_snapshot_producers.sh](../src/zxfer_snapshot_producers.sh):
-  source/destination command production, staged execution, and snapshot-stream
-  normalization
 - [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh):
-  discovery orchestration (a `-T` destination is listed like a local one),
-  source/destination diffing, cache publication, recursive discovery state,
-  and complete full/fast-no-op artifact groups
+  source and destination listing commands and their registered background
+  producers, destination-listing normalization, the fast no-op proof and full
+  discovery (a `-T` destination is listed like a local one), diffing, the
+  record files planning reads, and the work lists (the only writer of the
+  source, source-inventory and destination-delete lists, including the `-N`
+  and `-n` lists)
 - [../src/zxfer_migration_services.sh](../src/zxfer_migration_services.sh):
   `-m`/`-c` preparation (stopping `-c` services, the mounted checks, the source
   unmounts, and the `-m` snapshot plus rediscovery) and Solaris/illumos SMF
@@ -100,19 +101,20 @@ module or a chain of setters.
   receive command construction, the `-D` progress stage, compression
   handling, and ssh wrapping, all rendered in the current shell as plain shell
   text so a `-j` job shell needs no zxfer function
-- [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh):
+- [../src/zxfer_snapshot_plan.sh](../src/zxfer_snapshot_plan.sh):
   one-awk-pass snapshot planning (common snapshot, transfer list, divergence,
   and the `-d` delete list) from each dataset's own slice of the record files,
   cut by one keyed sort per iteration list, one batched creation-time query
-  per delete plan
-  that decides rollback eligibility and `-g`, deletion with its safety
-  rechecks, the divergence contract, and reusable run-scoped plan and
-  creation-time scratch files
+  per delete plan that decides rollback eligibility and `-g`, deletion with
+  its safety rechecks, the divergence contract, the live re-plan of a dataset
+  whose `-d` destroy ran, and reusable run-scoped plan, creation-time and
+  slice scratch files. `zxfer_publish_snapshot_transfer_plan` is the only
+  writer of the published plan; a seed receive records its new anchor
+  through it
 - [../src/zxfer_replication.sh](../src/zxfer_replication.sh): the numbered
-  dataset iteration list, per-dataset planning state, the `-g` pre-pass, the
-  live re-plan of a
-  dataset this run changed, the per-pass send/destroy marker used by `-Y`,
-  and orchestration across discovery, reconciliation, and transfer
+  dataset iteration list, the `-g` pre-pass, the rollback, seed and send of
+  each dataset, its failure stage, the per-pass send/destroy marker used by
+  `-Y`, and orchestration across discovery, planning, and transfer
 - [../src/zxfer_session.sh](../src/zxfer_session.sh): final composition root for
   owner resets, CLI-to-execution-context startup, remote connection
   preparation, trap registration, ordered shutdown, and top-level execution
@@ -140,7 +142,7 @@ The startup path is intentionally explicit:
    than being duplicated in the runtime layer. The main examples are
    [../src/zxfer_send_jobs.sh](../src/zxfer_send_jobs.sh),
    [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh),
-   [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh),
+   [../src/zxfer_snapshot_plan.sh](../src/zxfer_snapshot_plan.sh),
    [../src/zxfer_send_receive.sh](../src/zxfer_send_receive.sh),
    [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh), and
    [../src/zxfer_property_state.sh](../src/zxfer_property_state.sh).
@@ -206,13 +208,13 @@ Snapshot artifacts also have narrower owners above the allocator. Full
 discovery and the fast recursive no-op proof each allocate one complete ordered
 file group, retain its handles in operation-specific state, and clean the group
 from one terminal path. Discovery owns the flat source/destination record files
-that survive for later lookups. Snapshot reconciliation owns a reusable plan
-file, a reusable creation-time file and a reusable slice file, and snapshot
-state owns the reusable depth-1 listing file; all four are reused across
-datasets for one run, are not cleared by a per-dataset state reset, and are
-reused only when they lie under the run's private temp root. The
-runtime layer allocates and verifies these contained files but does not adopt
-their domain lifecycle.
+that survive for later lookups. The snapshot plan module owns a reusable plan
+file, a reusable creation-time file and a reusable slice file, and the
+destination-state module owns the reusable depth-1 listing file; all four are
+reused across datasets for one run, are not cleared by a per-dataset state
+reset, and are reused only when they lie under the run's private temp root.
+The runtime layer allocates and verifies these contained files but does not
+adopt their domain lifecycle.
 
 Planning reads each dataset's own rows. Every time
 `zxfer_build_replication_iteration_list` builds the pass's list (the `-g`
@@ -229,8 +231,10 @@ check of another dataset does. Planning cost therefore grows with the
 snapshots of one dataset instead of the whole pass.
 
 Before each send, only a dataset whose snapshots this run's `-d` destroy
-changed is listed again: `zxfer_get_live_destination_record_file` lists it at
-depth 1 and `zxfer_plan_dataset_snapshots` re-plans it. Every other dataset
+changed is listed again: `zxfer_reconcile_live_destination_snapshot_state` in
+the plan module lists it at depth 1 through
+`zxfer_get_live_destination_record_file` and re-plans it with
+`zxfer_plan_dataset_snapshots`. Every other dataset
 keeps the plan made from discovery. A common snapshot older than the
 inspected anchor is never adopted: the anchor and pending records are
 republished without an anchor, so the seed refuses a snapshotted destination,
@@ -426,9 +430,9 @@ function boundaries so operators and contributors can line the diagrams up with
 [`../src/zxfer_send_jobs.sh`](../src/zxfer_send_jobs.sh),
 [`../src/zxfer_ssh_transport.sh`](../src/zxfer_ssh_transport.sh),
 [`../src/zxfer_remote_hosts.sh`](../src/zxfer_remote_hosts.sh),
-[`../src/zxfer_snapshot_producers.sh`](../src/zxfer_snapshot_producers.sh),
+[`../src/zxfer_destination_state.sh`](../src/zxfer_destination_state.sh),
 [`../src/zxfer_snapshot_discovery.sh`](../src/zxfer_snapshot_discovery.sh),
-[`../src/zxfer_snapshot_reconcile.sh`](../src/zxfer_snapshot_reconcile.sh),
+[`../src/zxfer_snapshot_plan.sh`](../src/zxfer_snapshot_plan.sh),
 [`../src/zxfer_property_state.sh`](../src/zxfer_property_state.sh),
 [`../src/zxfer_property_transfer.sh`](../src/zxfer_property_transfer.sh),
 [`../src/zxfer_send_receive.sh`](../src/zxfer_send_receive.sh),
@@ -580,6 +584,18 @@ flowchart TD
     V -- "no" --> X["Dataset pass complete"]
     W --> X
 ```
+
+The planning steps (the plan, the `-d` delete and the live re-plan) live in
+[../src/zxfer_snapshot_plan.sh](../src/zxfer_snapshot_plan.sh), the property
+phase in [../src/zxfer_property_transfer.sh](../src/zxfer_property_transfer.sh),
+and the rollback, seed and send in
+[../src/zxfer_replication.sh](../src/zxfer_replication.sh) and
+[../src/zxfer_send_receive.sh](../src/zxfer_send_receive.sh).
+`zxfer_process_source_dataset()` sets `failure_stage: replication` before each
+dataset's plan and again after its property pass; the property pass and each
+send name their own stage (`property transfer`, `send/receive`). A structured
+failure report therefore names the step that failed, never a stage an earlier
+step or dataset left behind.
 
 Live `-k` rows stay buffered in memory between write checkpoints.
 `zxfer_write_backup_properties()` publishes the exact-pair file and the
