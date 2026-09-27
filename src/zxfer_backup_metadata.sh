@@ -83,6 +83,7 @@ ZXFER_BACKUP_METADATA_FORMAT_VERSION="2"
 #   4  malformed row or root marker      9  more than one row for the pair
 #   5  read or parse failure             11 no filename can be derived
 # awk itself exits 2 on a fatal error, so no lookup outcome uses 2.
+
 # Shared awk predicate: a row's property payload is "name=value=source" items
 # joined by commas, none empty.
 ZXFER_BACKUP_METADATA_PROPERTIES_AWK='

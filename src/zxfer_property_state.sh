@@ -69,14 +69,13 @@
 #
 # Each side's table is an index into the row store: every list lives in its
 # own row file, and the index, "<LF>ROW<TAB>DATASET" lines ending in a LF,
-# names the rows newest first. A lookup finds the dataset's first line with
-# one pattern match over the index, which is about 30 bytes a dataset, and
-# reads that row alone, so its cost no longer grows with the lists of every
-# other dataset (dash reads a here-document one byte at a time). ROW "-" is a
-# tombstone: the dataset has no usable row, whatever older lines say. A
-# destination receive puts a tombstone ahead of the dataset's rows; a create,
-# set or inherit also strips its descendants' lines, whose inherited values
-# may have changed.
+# names the rows newest first. A lookup takes the dataset's first line from
+# the index, about 30 bytes a dataset, and reads that row alone, so its cost
+# no longer grows with the lists of every other dataset (dash reads a
+# here-document one byte at a time). ROW "-" is a tombstone: the dataset has
+# no usable row, whatever older lines say. A destination receive puts a
+# tombstone ahead of the dataset's rows; a create, set or inherit also strips
+# its descendants' lines, whose inherited values may have changed.
 
 # Purpose: Clear the shared property failure text and forget the property
 # read scratch files and the row store directory. The transfer module's
@@ -537,20 +536,32 @@ zxfer_property_list_value() {
 # Usage: zxfer_find_property_row INDEX KEY; publishes the line's row name
 # ("-" for a tombstone) in g_zxfer_property_row_result, or returns 1 when no
 # line names KEY. A key never holds a TAB or LF, so TAB KEY LF matches only a
-# whole key, and the row name is the text from the LF before it.
+# whole key, and a line that ends in TAB KEY names exactly KEY.
 zxfer_find_property_row() {
 	g_zxfer_property_row_result=""
 	case $2 in
 	"" | *"$ZXFER_TAB"* | *"$ZXFER_LF"*) return 1 ;;
 	esac
-	# The case test and the longest-suffix cut are each one linear match;
-	# a cut of the text before the key would be quadratic under dash.
 	case $1 in
 	*"$ZXFER_TAB$2$ZXFER_LF"*) ;;
 	*) return 1 ;;
 	esac
-	l_find_row_head=${1%%"$ZXFER_TAB$2$ZXFER_LF"*}
-	g_zxfer_property_row_result=${l_find_row_head##*"$ZXFER_LF"}
+	# One split, then the lines in order. Cutting the index at the key
+	# instead (${1%%...}) costs bash the square of the index length.
+	l_find_row_key=$2
+	zxfer_split_begin "$ZXFER_LF"
+	# shellcheck disable=SC2086  # Intentional line splitting.
+	set -- $1
+	zxfer_split_end
+	for l_find_row_line; do
+		case $l_find_row_line in
+		*"$ZXFER_TAB$l_find_row_key")
+			g_zxfer_property_row_result=${l_find_row_line%%"$ZXFER_TAB"*}
+			return 0
+			;;
+		esac
+	done
+	return 1
 }
 
 # Purpose: Read one row file of the row store.

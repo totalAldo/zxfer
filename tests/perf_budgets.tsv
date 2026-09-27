@@ -61,7 +61,7 @@ remote_incr_small	ssh_master_opens	1
 remote_incr_small	profile:zfs_list_calls	4
 remote_incr_small	profile:zfs_send_calls	11
 remote_incr_small	profile:zfs_receive_calls	11
-props_small	TOTAL	106
+props_small	TOTAL	97
 props_small	ssh_connections	0
 props_small	ssh_master_opens	0
 props_small	profile:zfs_list_calls	4
