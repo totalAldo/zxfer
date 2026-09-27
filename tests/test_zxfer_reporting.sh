@@ -2,7 +2,7 @@
 #
 # shunit2 tests for the structured failure reports, verbose printers and
 # failure-context helpers in src/zxfer_reporting.sh. The ZXFER_ERROR_LOG
-# mirror is tested in tests/test_zxfer_error_log.sh.
+# mirror is tested in tests/suites/zxfer_reporting_error_log_tests.sh.
 #
 # shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -14,7 +14,7 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/helpers/fake_tool_fixtures.sh
 . "$TESTS_DIR/helpers/fake_tool_fixtures.sh"
 
-zxfer_source_runtime_modules_through "zxfer_error_log.sh"
+zxfer_source_runtime_modules_through "zxfer_reporting.sh"
 
 # zxfer_throw_usage_error prints this after its message; the usage cases look
 # for "usage: zxfer" or "usage output".
@@ -27,6 +27,8 @@ oneTimeSetUp() {
 }
 
 oneTimeTearDown() {
+	# Error-log cases make log parents read-only; restore them for removal.
+	chmod -R u+rwx "$TEST_TMPDIR" >/dev/null 2>&1 || true
 	zxfer_test_cleanup_tmpdir
 }
 
@@ -42,9 +44,8 @@ setUp() {
 	g_option_Y_yield_iterations=3
 	g_zxfer_version="test-version"
 	g_zxfer_original_invocation="'./zxfer' 'backup/dst'"
-	g_zxfer_secure_staging_dir_result=""
 	g_zxfer_runtime_artifact_cleanup_paths=""
-	unset ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
+	unset ZXFER_ERROR_LOG ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
 	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" ||
 		fail "Unable to allocate the reporting test run root."
 	zxfer_reset_failure_context "unit"
@@ -562,11 +563,15 @@ test_zxfer_report_quoting_renders_invalid_multibyte_bytes_under_utf8() {
 # zxfer-test-fragment: suites/zxfer_reporting_output_tests.sh
 # shellcheck source=tests/suites/zxfer_reporting_output_tests.sh
 . "$TESTS_DIR/suites/zxfer_reporting_output_tests.sh"
+# zxfer-test-fragment: suites/zxfer_reporting_error_log_tests.sh
+# shellcheck source=tests/suites/zxfer_reporting_error_log_tests.sh
+. "$TESTS_DIR/suites/zxfer_reporting_error_log_tests.sh"
 
 suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_reporting.sh" \
-		"$TESTS_DIR/suites/zxfer_reporting_output_tests.sh"
+		"$TESTS_DIR/suites/zxfer_reporting_output_tests.sh" \
+		"$TESTS_DIR/suites/zxfer_reporting_error_log_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

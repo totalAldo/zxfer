@@ -40,9 +40,10 @@
 #   g_zxfer_original_invocation, and g_zxfer_report_fast_path (set when the
 #   module is sourced).
 # reads globals: g_option_* verbosity, beep, host, and mode flags;
-#   g_zxfer_version; g_cmd_awk; ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS.
-# mutates caches: none; zxfer_emit_failure_report mirrors the report through
-#   zxfer_append_failure_report_to_log (zxfer_error_log.sh).
+#   g_zxfer_version; g_cmd_awk; ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS;
+#   ZXFER_ERROR_LOG.
+# mutates caches: none; zxfer_emit_failure_report appends each report to the
+#   ZXFER_ERROR_LOG file, creating that file when it is missing.
 # returns via stdout: escaped values, quoted commands, and rendered failure
 #   reports.
 #
@@ -421,6 +422,167 @@ zxfer_render_failure_report() {
 	zxfer_append_preescaped_report_field invocation "$l_report_invocation"
 	zxfer_append_preescaped_report_field last_command "$l_report_last_command"
 	printf 'zxfer: failure report end\n'
+}
+
+################################################################################
+# ZXFER_ERROR_LOG MIRROR
+################################################################################
+
+# ZXFER_ERROR_LOG names an operator-chosen file outside the run root. Each
+# report is appended with one O_APPEND write, which the kernel places at the
+# end of the file as one unit, so concurrent runs need no lock. The checks keep
+# other users out: no path component may be a symlink, the parent must be
+# owned by root or the effective user and not writable by others unless it is
+# sticky, and the log must be a regular 0600 file with a single link, owned by
+# root or the effective user. They do not stop root or the effective user from
+# replacing the log between the checks and the write.
+
+# Purpose: Refuse a ZXFER_ERROR_LOG path that is not absolute, passes through
+# a symlink, or whose parent directory is missing or untrusted.
+# Usage: zxfer_validate_error_log_parent PATH; warns and returns 1 on refusal.
+zxfer_validate_error_log_parent() {
+	l_errlog_target=$1
+
+	case $l_errlog_target in
+	/*) ;;
+	*)
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_errlog_target\" because it is not absolute."
+		return 1
+		;;
+	esac
+
+	if l_errlog_symlink_component=$(zxfer_find_symlink_path_component "$l_errlog_target"); then
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_errlog_target\" because path component \"$l_errlog_symlink_component\" is a symlink."
+		return 1
+	fi
+
+	l_errlog_parent=$(zxfer_get_path_parent_dir "$l_errlog_target")
+	if [ ! -d "$l_errlog_parent" ]; then
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_errlog_target\" because parent directory \"$l_errlog_parent\" does not exist."
+		return 1
+	fi
+	if ! zxfer_validate_temp_root_candidate "$l_errlog_parent" >/dev/null; then
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_errlog_target\" because parent directory \"$l_errlog_parent\" is not owned by root or the effective user, or is writable by others without sticky-bit protection."
+		return 1
+	fi
+}
+
+# Purpose: Refuse an existing log that is a symlink, is not a regular file, is
+# not owned by root or the effective user, has another hard link, or is not
+# mode 0600.
+# Usage: zxfer_validate_existing_error_log_file PATH [CREATED]; warns and
+# returns 1 on refusal. CREATED 1 marks a log this run has just created: it
+# gets mode 0600 (a default ACL on the parent can override the umask) once
+# the other checks pass, since chmod follows a symlink and the create step
+# can open a FIFO or device that another user put at the name.
+zxfer_validate_existing_error_log_file() {
+	l_validate_path=$1
+
+	if [ -L "$l_validate_path" ]; then
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_validate_path\" because it is a symlink."
+		return 1
+	fi
+	if [ -e "$l_validate_path" ] && [ ! -f "$l_validate_path" ]; then
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_validate_path\" because it is not a regular file."
+		return 1
+	fi
+	if ! l_validate_owner_uid=$(zxfer_get_path_owner_uid "$l_validate_path"); then
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its owner could not be determined."
+		return 1
+	fi
+	if ! zxfer_backup_owner_uid_is_allowed "$l_validate_owner_uid"; then
+		l_validate_expected_owner_desc=$(zxfer_describe_expected_backup_owner)
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because it is owned by UID $l_validate_owner_uid instead of $l_validate_expected_owner_desc."
+		return 1
+	fi
+
+	# The report would also land in every other name of this file, such as a
+	# root-owned 0600 file that another user hard-linked into a shared sticky
+	# parent. Field 2 of ls -ldn is the link count on every supported ls.
+	l_validate_ls=$(ls -ldn "$l_validate_path" 2>/dev/null) || l_validate_ls=""
+	IFS=' 	' read -r l_validate_ls_perm l_validate_links l_validate_ls_rest <<EOF
+$l_validate_ls
+EOF
+	case $l_validate_links in
+	1) ;;
+	'' | *[!0-9]*)
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its link count could not be determined."
+		return 1
+		;;
+	*)
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because it has $l_validate_links hard links."
+		return 1
+		;;
+	esac
+
+	# Now a single-link regular file owned by root or the effective user,
+	# which other users cannot replace in a parent that passed its checks.
+	if [ "${2:-0}" = 1 ]; then
+		chmod 600 "$l_validate_path" 2>/dev/null || :
+	fi
+	if ! l_validate_mode=$(zxfer_get_path_mode_octal "$l_validate_path"); then
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its permissions could not be determined."
+		return 1
+	fi
+	if [ "$l_validate_mode" != "600" ]; then
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its permissions ($l_validate_mode) are not 0600."
+		return 1
+	fi
+}
+
+# Purpose: Append one failure report to ZXFER_ERROR_LOG, first creating a
+# private 0600 log when none exists.
+# Usage: zxfer_append_failure_report_to_log REPORT; a no-op when
+# ZXFER_ERROR_LOG is unset, otherwise warns and returns 1 on any refusal or
+# write failure. The caller ignores the status, so a log problem never changes
+# zxfer's exit status or its stderr report.
+zxfer_append_failure_report_to_log() {
+	l_errlog_path=${ZXFER_ERROR_LOG:-}
+
+	[ -n "$l_errlog_path" ] || return 0
+	zxfer_validate_error_log_parent "$l_errlog_path" || return 1
+	l_errlog_created=0
+	if [ ! -e "$l_errlog_path" ] && [ ! -L "$l_errlog_path" ]; then
+		# Exclusive creation under umask 077 and noclobber, in a subshell that
+		# checks again just before its open. noclobber refuses an existing
+		# regular file but opens a FIFO or device, even through a symlink, so
+		# the second check narrows the window in which another user can put
+		# one at the name in a shared sticky parent; a FIFO put there in time
+		# blocks the open until someone reads it. The validation below refuses
+		# such an entry and appends to a log another run has just created.
+		if (
+			umask 077
+			set -C
+			[ ! -e "$l_errlog_path" ] && [ ! -L "$l_errlog_path" ] &&
+				printf '' >"$l_errlog_path"
+		) 2>/dev/null; then
+			l_errlog_created=1
+		elif [ ! -e "$l_errlog_path" ] && [ ! -L "$l_errlog_path" ]; then
+			zxfer_warn_stderr "zxfer: warning: unable to create ZXFER_ERROR_LOG file \"$l_errlog_path\"."
+			return 1
+		fi
+	fi
+	zxfer_validate_existing_error_log_file "$l_errlog_path" "$l_errlog_created" || return 1
+
+	# One write per report. bash line-buffers its printf builtin, so a report
+	# printed there would go out one line per write and could interleave with
+	# a concurrent run's report. awk collects the report from the pipe and
+	# sends it in one write when it closes the file (a report larger than its
+	# output buffer, usually the file system block size, takes more than one),
+	# and O_APPEND puts that write at the end of the file. The pipe, unlike an
+	# environment variable, has no size limit.
+	# shellcheck disable=SC2016 # awk reads ENVIRON; nothing is shell-expanded.
+	if ! printf '%s\n' "$1" |
+		ZXFER_AWK_ERROR_LOG_PATH=$l_errlog_path LC_ALL=C "${g_cmd_awk:-awk}" '
+{ report = report $0 "\n" }
+END {
+	log_path = ENVIRON["ZXFER_AWK_ERROR_LOG_PATH"]
+	printf "%s", report >> log_path
+	exit (close(log_path) != 0)
+}'; then
+		zxfer_warn_stderr "zxfer: warning: unable to append failure report to ZXFER_ERROR_LOG file \"$l_errlog_path\"."
+		return 1
+	fi
 }
 
 # Purpose: Print the failure report for a non-zero exit once, then mirror it to

@@ -199,8 +199,7 @@ These are the biggest user-visible additions since the 2019 release.
 - remote capability discovery is one fail-closed probe per role, host and
   requested tool set per run (a recursive `-O -j` pull that the fast no-op
   proof finds work for probes the origin a second time, for `parallel`), held in memory instead of persisted in
-  cache files; `ZXFER_ERROR_LOG` appends are
-  still serialized through metadata-bearing owned lock directories
+  cache files; zxfer takes no cross-process locks
 
 ### Better property handling
 
@@ -216,9 +215,9 @@ These are the biggest user-visible additions since the 2019 release.
 - command-bearing fields inside failure reports are redacted by default, with
   an explicit unsafe local-debug override through
   `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1`
-- `ZXFER_ERROR_LOG` appends now use the same metadata-bearing lock format as
-  the ssh and remote-capability coordination layer, including checked release
-  behavior that preserves the original zxfer exit status during trap cleanup
+- each `ZXFER_ERROR_LOG` report is one append-mode write to a validated 0600
+  log, so concurrent failures need no lock; a log problem only warns and keeps
+  the original zxfer exit status
 
 ## Behavior Changes That May Surprise Old Automation
 
@@ -238,8 +237,7 @@ or remote capability caches between processes:
 - ssh control sockets are short per-role files under the private per-run temp
   root and are removed with that root at exit
 - remote capability results are held in memory for the current invocation
-- `ZXFER_ERROR_LOG` appends still use metadata-bearing owned lock directories
-  with owner validation and checked release semantics
+- `ZXFER_ERROR_LOG` appends take no lock and leave no lock directories
 
 Older shared ssh lease files, pid-only socket locks, and remote capability
 cache roots from pre-per-run branch builds are no longer current zxfer state.
@@ -290,7 +288,7 @@ whether you still need it.
 - stricter temp-file and metadata validation
 - better remote capability probing and diagnostics
 - per-run ssh control sockets, in-memory remote capability state, and
-  metadata-bearing owned lock coordination for `ZXFER_ERROR_LOG` appends
+  lock-free validated `ZXFER_ERROR_LOG` appends
 - repository reorganization into `docs/`, `examples/`, `man/`, and
   `packaging/`, plus a much broader documentation set
 - stronger VM-backed validation and expanded CI coverage

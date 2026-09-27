@@ -201,8 +201,8 @@ test_zxfer_trap_exit_cleans_registered_runtime_artifacts() {
 test_zxfer_trap_exit_restores_shell_modes_before_mirroring_the_report() {
 	# A signal can land while zxfer_create_runtime_artifact_file holds umask
 	# 077 and noclobber, or between zxfer_split_begin and zxfer_split_end.
-	# The report must still reach ZXFER_ERROR_LOG; a read-only parent (unless
-	# running as root) sends it through the private fallback lock.
+	# The report must still reach ZXFER_ERROR_LOG, appended in place under a
+	# read-only parent (unless running as root).
 	log_dir="$TEST_TMPDIR/trap-modes-log"
 	log_path="$log_dir/failure.log"
 	modes_file="$TEST_TMPDIR/trap-modes.out"

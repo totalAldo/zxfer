@@ -72,7 +72,4 @@ zxfer_test_exec_fixture_setup() {
 	g_cmd_decompress_safe="'zstd' '-d'"
 	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/backup_store"
 	g_zxfer_original_invocation=""
-	# Owned-lock behavior is covered independently. Keep this broad fixture
-	# deterministic on restricted hosts where ps cannot inspect the test shell.
-	g_zxfer_own_process_start_token="lstart:zxfer exec test"
 }

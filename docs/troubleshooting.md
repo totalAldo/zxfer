@@ -323,13 +323,22 @@ A run interrupted by HUP, INT, QUIT, or TERM still cleans up, reports
 `failure_stage: signal`, and exits with 128 plus the signal number (129, 130,
 131, or 143).
 
-zxfer serializes those appends through a metadata-bearing lock directory that
-records the owner PID and process-start identity. Writable log parents use a sibling lock; existing logs under trusted but
-non-writable parents use an exact log-path fallback lock under a validated temp
-root. Stale owners are reaped automatically after validation. If a successful
-append cannot release that lock cleanly, the append helper now fails closed and
-emits a warning; trap-time failure reporting still preserves the original zxfer
-exit status while surfacing the warning on `stderr`.
+zxfer creates a missing log with mode 0600 and appends each report with one
+append-mode write, so concurrent runs need no lock and nothing but the log
+appears in its directory. An existing log must be a regular file owned by root
+or the effective UID, with mode 0600 and a single link. When zxfer refuses the
+log or cannot write to it, it prints a warning on `stderr` (`refusing
+ZXFER_ERROR_LOG path ...` or `refusing ZXFER_ERROR_LOG file ...` with the
+reason, `unable to create ZXFER_ERROR_LOG file ...`, or `unable to append
+failure report to ZXFER_ERROR_LOG file ...`) and keeps its exit status and its
+`stderr` failure report. A log that another user hard-linked into a shared
+directory is refused as `... because it has 2 hard links`; keep the log in a
+directory only root or the zxfer user can write. Reports from concurrent runs
+can interleave on NFS or when one report is larger than one write (the file
+system block size, often 4 KiB). Earlier versions locked the log through
+`.zxfer-error-log.lock.*` directories beside it or a
+`.zxfer-error-log.lock.d` tree under the temp directory; current zxfer does not
+use them, and any left behind can be removed once no older zxfer is running.
 
 Current ssh control sockets and remote capability state are per-run instead of
 shared. If you inspect a live run's temp root while debugging startup or

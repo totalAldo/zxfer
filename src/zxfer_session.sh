@@ -68,7 +68,6 @@ zxfer_reset_session_state() {
 	# Dropping the run-root handles first leaves the snapshot-discovery reset
 	# no owned cache path to remove.
 	zxfer_discard_runtime_cleanup_state
-	zxfer_reset_owned_lock_tracking
 	zxfer_reset_send_job_state
 	zxfer_reset_background_shell_spawn_mode
 	zxfer_reset_ssh_transport_state
@@ -211,8 +210,8 @@ zxfer_trap_exit() {
 	zxfer_profile_emit_summary
 	zxfer_emit_failure_report "$l_trap_exit_status"
 
-	# Failure reporting may lazily recreate the run temp root or stage log
-	# files (ZXFER_ERROR_LOG mirroring); sweep again so nothing survives exit.
+	# Failure reporting may lazily recreate the run temp root; sweep again so
+	# nothing survives exit.
 	zxfer_cleanup_registered_runtime_artifacts >/dev/null 2>&1 || :
 	zxfer_remove_run_tmp_root >/dev/null 2>&1 || :
 
