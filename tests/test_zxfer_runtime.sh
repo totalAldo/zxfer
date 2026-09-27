@@ -350,7 +350,7 @@ test_zxfer_register_cleanup_pid_does_not_capture_process_identity() {
 	zxfer_test_capture_subshell '
 		sleep 30 &
 		tracked_pid=$!
-		zxfer_get_process_start_token() {
+		ps() {
 			printf "unexpected-token-capture\n"
 			return 1
 		}

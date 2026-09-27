@@ -1,8 +1,9 @@
 #!/bin/sh
-# ZXFER_ERROR_LOG tests for src/zxfer_reporting.sh: path, parent, owner, mode
-# and hard-link refusals, exclusive 0600 creation, the one-write append of
-# small and large reports, and failing runs that mirror at the same time. Run
-# by tests/test_zxfer_reporting.sh.
+# ZXFER_ERROR_LOG tests for src/zxfer_reporting.sh: path, parent, owner, mode,
+# hard-link and FIFO refusals, exclusive 0600 creation (narrowed to 0600 only
+# once the checks pass), the one-write append of small and large reports, and
+# failing runs that mirror at the same time. Run by
+# tests/test_zxfer_reporting.sh.
 # shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 # Make a log parent read-only for this user. When the user can still write
@@ -462,6 +463,97 @@ test_zxfer_append_failure_report_to_log_warns_when_the_log_cannot_be_created() {
 	assertEquals "A log that cannot be created should be reported as a failure." 1 "$status"
 	assertContains "A log that cannot be created should produce the documented warning." \
 		"$(cat "$stderr_file")" "unable to create ZXFER_ERROR_LOG file"
+}
+
+# A default ACL on the parent can give a new log more than the umask allows;
+# the umask stub stands in for one.
+test_zxfer_append_failure_report_to_log_narrows_a_wider_new_log_to_0600() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	log_path="$physical_tmpdir/wider_new.log"
+	stderr_file="$TEST_TMPDIR/error_log_wider_new.stderr"
+	ZXFER_ERROR_LOG="$log_path"
+
+	set +e
+	(
+		umask() {
+			command umask 022
+		}
+		zxfer_append_failure_report_to_log "message: wider-new-log"
+	) >"$TEST_TMPDIR/error_log_wider_new.stdout" 2>"$stderr_file"
+	status=$?
+	perms=$(stat -c '%a' "$log_path" 2>/dev/null || stat -f '%Lp' "$log_path" 2>/dev/null)
+
+	assertEquals "A new log created wider than 0600 should still take the report." 0 "$status"
+	assertEquals "zxfer should narrow a new log to mode 600." "600" "$perms"
+	assertEquals "The new log should hold the report." \
+		"message: wider-new-log" "$(cat "$log_path")"
+	assertEquals "Narrowing a new log should not warn." "" "$(cat "$stderr_file")"
+}
+
+# CREATED 1 stands for a create step that opened what another user put at the
+# name; the chmod for a new log must not reach that entry's target.
+test_zxfer_validate_existing_error_log_file_never_changes_a_planted_entry() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	target_path="$physical_tmpdir/planted_target"
+	symlink_path="$physical_tmpdir/planted_symlink.log"
+	hard_link_path="$physical_tmpdir/planted_hard_link.log"
+	printf '%s\n' "target: keep-me" >"$target_path"
+	chmod 644 "$target_path"
+	ln -s "$target_path" "$symlink_path"
+	ln "$target_path" "$hard_link_path" || fail "Unable to create the hard-link fixture."
+
+	set +e
+	zxfer_validate_existing_error_log_file "$symlink_path" 1 \
+		2>"$TEST_TMPDIR/planted_symlink.stderr"
+	symlink_status=$?
+	zxfer_validate_existing_error_log_file "$hard_link_path" 1 \
+		2>"$TEST_TMPDIR/planted_hard_link.stderr"
+	hard_link_status=$?
+	perms=$(stat -c '%a' "$target_path" 2>/dev/null || stat -f '%Lp' "$target_path" 2>/dev/null)
+
+	assertEquals "A symlink at the new log's name should be refused." 1 "$symlink_status"
+	assertContains "The symlink refusal should explain it." \
+		"$(cat "$TEST_TMPDIR/planted_symlink.stderr")" "because it is a symlink"
+	assertEquals "A hard link at the new log's name should be refused." 1 "$hard_link_status"
+	assertContains "The hard-link refusal should give the link count." \
+		"$(cat "$TEST_TMPDIR/planted_hard_link.stderr")" "because it has 2 hard links"
+	assertEquals "The planted entries' target must keep its mode." "644" "$perms"
+}
+
+# Opening a FIFO for writing blocks until someone reads it, which would hang
+# zxfer's EXIT trap; a FIFO at the log path must be refused without an open.
+test_zxfer_append_failure_report_to_log_refuses_a_fifo_without_opening_it() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	log_path="$physical_tmpdir/fifo.log"
+	stderr_file="$TEST_TMPDIR/error_log_fifo.stderr"
+	status_file="$TEST_TMPDIR/error_log_fifo.status"
+	mkfifo "$log_path" || fail "Unable to create the FIFO fixture."
+	ZXFER_ERROR_LOG="$log_path"
+
+	set +e
+	(
+		zxfer_append_failure_report_to_log "message: should-not-append" \
+			>/dev/null 2>"$stderr_file"
+		printf '%s\n' "$?" >"$status_file"
+	) &
+	append_pid=$!
+	l_tries=0
+	while [ ! -s "$status_file" ] && [ "$l_tries" -lt 50 ]; do
+		sleep 0.1 2>/dev/null || sleep 1
+		l_tries=$((l_tries + 1))
+	done
+	blocked=0
+	if [ ! -s "$status_file" ]; then
+		# A read-write open of the FIFO releases a writer blocked in its open.
+		blocked=1
+		(true <>"$log_path")
+	fi
+	wait "$append_pid"
+
+	assertEquals "zxfer must not open a FIFO at the log path." 0 "$blocked"
+	assertEquals "A FIFO at the log path should be refused." "1" "$(cat "$status_file")"
+	assertContains "The FIFO refusal should explain it." \
+		"$(cat "$stderr_file")" "because it is not a regular file"
 }
 
 # Linux caps one exec argument or environment string at 128 KiB, so a report

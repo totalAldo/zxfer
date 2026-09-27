@@ -468,10 +468,13 @@ zxfer_validate_error_log_parent() {
 }
 
 # Purpose: Refuse an existing log that is a symlink, is not a regular file, is
-# not a 0600 file owned by root or the effective user, or has another hard
-# link.
-# Usage: zxfer_validate_existing_error_log_file PATH; warns and returns 1 on
-# refusal.
+# not owned by root or the effective user, has another hard link, or is not
+# mode 0600.
+# Usage: zxfer_validate_existing_error_log_file PATH [CREATED]; warns and
+# returns 1 on refusal. CREATED 1 marks a log this run has just created: it
+# gets mode 0600 (a default ACL on the parent can override the umask) once
+# the other checks pass, since chmod follows a symlink and the create step
+# can open a FIFO or device that another user put at the name.
 zxfer_validate_existing_error_log_file() {
 	l_validate_path=$1
 
@@ -490,14 +493,6 @@ zxfer_validate_existing_error_log_file() {
 	if ! zxfer_backup_owner_uid_is_allowed "$l_validate_owner_uid"; then
 		l_validate_expected_owner_desc=$(zxfer_describe_expected_backup_owner)
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because it is owned by UID $l_validate_owner_uid instead of $l_validate_expected_owner_desc."
-		return 1
-	fi
-	if ! l_validate_mode=$(zxfer_get_path_mode_octal "$l_validate_path"); then
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its permissions could not be determined."
-		return 1
-	fi
-	if [ "$l_validate_mode" != "600" ]; then
-		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its permissions ($l_validate_mode) are not 0600."
 		return 1
 	fi
 
@@ -519,6 +514,20 @@ EOF
 		return 1
 		;;
 	esac
+
+	# Now a single-link regular file owned by root or the effective user,
+	# which other users cannot replace in a parent that passed its checks.
+	if [ "${2:-0}" = 1 ]; then
+		chmod 600 "$l_validate_path" 2>/dev/null || :
+	fi
+	if ! l_validate_mode=$(zxfer_get_path_mode_octal "$l_validate_path"); then
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its permissions could not be determined."
+		return 1
+	fi
+	if [ "$l_validate_mode" != "600" ]; then
+		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its permissions ($l_validate_mode) are not 0600."
+		return 1
+	fi
 }
 
 # Purpose: Append one failure report to ZXFER_ERROR_LOG, first creating a
@@ -532,25 +541,28 @@ zxfer_append_failure_report_to_log() {
 
 	[ -n "$l_errlog_path" ] || return 0
 	zxfer_validate_error_log_parent "$l_errlog_path" || return 1
+	l_errlog_created=0
 	if [ ! -e "$l_errlog_path" ] && [ ! -L "$l_errlog_path" ]; then
 		# Exclusive creation under umask 077 and noclobber, in a subshell that
-		# checks again just before its open: an entry that appeared since the
-		# check above is not opened here, and the validation below appends to
-		# another run's new log or refuses anything else.
+		# checks again just before its open. noclobber refuses an existing
+		# regular file but opens a FIFO or device, even through a symlink, so
+		# the second check narrows the window in which another user can put
+		# one at the name in a shared sticky parent; a FIFO put there in time
+		# blocks the open until someone reads it. The validation below refuses
+		# such an entry and appends to a log another run has just created.
 		if (
 			umask 077
 			set -C
 			[ ! -e "$l_errlog_path" ] && [ ! -L "$l_errlog_path" ] &&
 				printf '' >"$l_errlog_path"
 		) 2>/dev/null; then
-			# A default ACL on the parent can override the umask.
-			chmod 600 "$l_errlog_path" 2>/dev/null || :
+			l_errlog_created=1
 		elif [ ! -e "$l_errlog_path" ] && [ ! -L "$l_errlog_path" ]; then
 			zxfer_warn_stderr "zxfer: warning: unable to create ZXFER_ERROR_LOG file \"$l_errlog_path\"."
 			return 1
 		fi
 	fi
-	zxfer_validate_existing_error_log_file "$l_errlog_path" || return 1
+	zxfer_validate_existing_error_log_file "$l_errlog_path" "$l_errlog_created" || return 1
 
 	# One write per report. bash line-buffers its printf builtin, so a report
 	# printed there would go out one line per write and could interleave with
