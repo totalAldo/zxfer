@@ -31,6 +31,13 @@ oneTimeTearDown() {
 }
 
 setUp() {
+	# A forked copy of this shell that ran shunit2's EXIT trap would have
+	# removed the suite directory. Fail this case once and recreate it, so the
+	# loss cannot cascade into every later case.
+	if [ ! -d "$TEST_TMPDIR" ]; then
+		fail "The suite directory $TEST_TMPDIR vanished before this case; recreating it."
+		mkdir -m 700 "$TEST_TMPDIR" && zxfer_test_exec_fixture_one_time_setup
+	fi
 	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_runtime_tmpdir_tests.sh"; then
 		zxfer_test_exec_fixture_setup
 		return
@@ -76,6 +83,24 @@ zxfer_runtime_spawn_term_trap_helper() {
 	g_zxfer_runtime_term_helper_pid=$!
 
 	zxfer_runtime_wait_for_path "$l_runtime_ready_file"
+}
+
+# Purpose: Start a live direct child and return only once it runs its own
+# program. Until a forked copy of this shell execs, it still holds shunit2's
+# traps: bash can swallow a TERM sent then, or run the EXIT trap in the copy,
+# whose oneTimeTearDown removes $TEST_TMPDIR under every later case.
+# Usage: zxfer_runtime_spawn_live_child NAME; publishes the PID in
+# g_zxfer_runtime_live_child_pid, or returns 1 when the child never reports
+# ready. The child is sh, then `sleep 30`; TERM ends either with status 143.
+zxfer_runtime_spawn_live_child() {
+	l_runtime_live_ready="$TEST_TMPDIR/$1.live-child.ready"
+
+	rm -f "$l_runtime_live_ready" || return 1
+	sh -c ': >"$1" && exec sleep 30' zxfer-runtime-live-child \
+		"$l_runtime_live_ready" &
+	g_zxfer_runtime_live_child_pid=$!
+
+	zxfer_runtime_wait_for_path "$l_runtime_live_ready"
 }
 
 # setUp above picks each fragment's fixture through
@@ -283,10 +308,12 @@ test_zxfer_create_temp_file_group_cleans_up_after_second_allocation_failure_in_c
 }
 
 test_zxfer_cleanup_pid_helpers_cover_current_shell_paths() {
-	sleep 30 &
-	first_pid=$!
-	sleep 30 &
-	second_pid=$!
+	zxfer_runtime_spawn_live_child first ||
+		fail "Unable to start the first live child."
+	first_pid=$g_zxfer_runtime_live_child_pid
+	zxfer_runtime_spawn_live_child second ||
+		fail "Unable to start the second live child."
+	second_pid=$g_zxfer_runtime_live_child_pid
 
 	output=$(
 		(
@@ -327,8 +354,11 @@ $second_pid	unit cleanup helper	pid>"
 }
 
 test_zxfer_register_cleanup_pid_tracks_direct_children_without_identity_captures() {
-	sleep 30 &
-	tracked_pid=$!
+	# This shell signals the child right after registering it, so the child
+	# must already run its own program (see zxfer_runtime_spawn_live_child).
+	zxfer_runtime_spawn_live_child tracked ||
+		fail "Unable to start the live child."
+	tracked_pid=$g_zxfer_runtime_live_child_pid
 
 	zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
 	register_status=$?
@@ -348,8 +378,8 @@ test_zxfer_register_cleanup_pid_tracks_direct_children_without_identity_captures
 
 test_zxfer_register_cleanup_pid_does_not_capture_process_identity() {
 	zxfer_test_capture_subshell '
-		sleep 30 &
-		tracked_pid=$!
+		zxfer_runtime_spawn_live_child tracked || exit 1
+		tracked_pid=$g_zxfer_runtime_live_child_pid
 		ps() {
 			printf "unexpected-token-capture\n"
 			return 1
@@ -409,8 +439,8 @@ test_zxfer_register_cleanup_pid_rejects_invalid_self_and_dead_pids() {
 
 test_zxfer_register_cleanup_pid_rejects_a_purpose_that_would_split_a_row() {
 	zxfer_test_capture_subshell '
-		sleep 30 &
-		tracked_pid=$!
+		zxfer_runtime_spawn_live_child tracked || exit 1
+		tracked_pid=$g_zxfer_runtime_live_child_pid
 		zxfer_register_cleanup_pid "$tracked_pid" "unit${ZXFER_TAB}helper"
 		printf "tab_status=%s\n" "$?"
 		zxfer_register_cleanup_pid "$tracked_pid" "unit${ZXFER_LF}helper"
@@ -480,8 +510,8 @@ test_zxfer_abort_cleanup_pid_handles_untracked_and_already_exited_helpers() {
 
 test_zxfer_abort_cleanup_pid_fails_closed_when_signalling_a_live_helper_fails() {
 	zxfer_test_capture_subshell '
-		sleep 30 &
-		tracked_pid=$!
+		zxfer_runtime_spawn_live_child tracked || exit 1
+		tracked_pid=$g_zxfer_runtime_live_child_pid
 		zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
 		kill() {
 			case "$2" in
@@ -599,8 +629,8 @@ test_zxfer_abort_direct_child_pid_signals_unreaped_direct_children() {
 
 test_zxfer_abort_direct_child_pid_tracks_live_child_when_immediate_signal_fails() {
 	zxfer_test_capture_subshell '
-		sleep 30 &
-		child_pid=$!
+		zxfer_runtime_spawn_live_child child || exit 1
+		child_pid=$g_zxfer_runtime_live_child_pid
 		kill() {
 			case "$2" in
 			0) return 0 ;;
@@ -647,8 +677,8 @@ test_zxfer_abort_direct_child_pid_rejects_invalid_self_and_dead_pids() {
 
 test_zxfer_abort_direct_child_pid_still_signals_with_a_purpose_that_would_split_a_row() {
 	zxfer_test_capture_subshell '
-		sleep 30 &
-		child_pid=$!
+		zxfer_runtime_spawn_live_child child || exit 1
+		child_pid=$g_zxfer_runtime_live_child_pid
 		zxfer_abort_direct_child_pid "$child_pid" TERM "unit${ZXFER_LF}direct helper"
 		printf "status=%s\n" "$?"
 		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
