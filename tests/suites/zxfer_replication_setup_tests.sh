@@ -234,34 +234,6 @@ test_set_actual_dest_treats_regex_significant_source_names_as_literal_paths() {
 		"backup/target/app.v1/projects.release" "$g_actual_dest"
 }
 
-test_refresh_dataset_iteration_state_populates_recursive_list_when_not_recursive() {
-	g_option_R_recursive=""
-	g_initial_source="tank/src"
-	g_recursive_source_list=""
-	STUB_ZFS_LIST_CALLS=0
-
-	zxfer_refresh_dataset_iteration_state
-
-	assertEquals "Refresh should re-populate the recursive source list when -R is unset." \
-		"$g_initial_source" "$g_recursive_source_list"
-	assertEquals "zxfer_get_zfs_list should be invoked once during refresh." "1" "$STUB_ZFS_LIST_CALLS"
-}
-
-test_refresh_dataset_iteration_state_preserves_list_when_recursive_mode_set() {
-	g_option_R_recursive="tank/src"
-	g_initial_source="tank/src"
-	g_recursive_source_list="tank/src
-tank/src/child"
-	STUB_ZFS_LIST_CALLS=0
-
-	zxfer_refresh_dataset_iteration_state
-
-	assertEquals "Recursive option should keep the existing dataset list untouched." \
-		"tank/src
-tank/src/child" "$g_recursive_source_list"
-	assertEquals "zxfer_get_zfs_list should still be called exactly once." "1" "$STUB_ZFS_LIST_CALLS"
-}
-
 test_refresh_dataset_iteration_state_refreshes_property_tree_prefetch_context_when_available() {
 	log="$TEST_TMPDIR/refresh_prefetch_context.log"
 	: >"$log"

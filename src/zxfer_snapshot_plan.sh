@@ -53,8 +53,8 @@
 #   written), g_option_d_delete_destination_snapshots,
 #   g_option_F_force_rollback, g_option_g_grandfather_protection, and
 #   discovery's snapshot record files.
-# mutates caches: replication's g_is_performed_send_destroy marker (after a
-#   destroy).
+# mutates caches: none; after a destroy g_did_delete_dest_snapshots tells
+#   replication to mark the pass as having done work.
 # returns via stdout: the destroy target, the creation-date display text and
 #   the divergence example lines only.
 #
@@ -706,14 +706,11 @@ zxfer_delete_snaps() {
 		return "$?"
 
 	# The destroy changes this dataset's snapshots: the marker makes the
-	# pre-send recheck re-plan it from a live listing and allows the -F
-	# rollback.
+	# pre-send recheck re-plan it from a live listing, allows the -F rollback
+	# and tells replication that the pass did work (-Y).
 	g_did_delete_dest_snapshots=1
 	zxfer_run_destination_zfs_cmd destroy "$l_destroy_target" ||
 		zxfer_throw_error "Error when executing command." "$?"
-
-	# A destroy changed replication state; -Y decides on this marker.
-	g_is_performed_send_destroy=1
 
 	zxfer_echoV "End zxfer_delete_snaps()"
 }

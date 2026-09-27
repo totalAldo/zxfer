@@ -42,8 +42,8 @@
 #   g_zxfer_post_seed_property_sources, g_zxfer_replication_iteration_list_result,
 #   the run's -s/-m snapshot name g_zxfer_new_snapshot_name (stamped once by
 #   zxfer_stamp_new_snapshot_name), and the per-pass mutation marker
-#   g_is_performed_send_destroy (set by send/receive and snapshot destroy, read
-#   by the -Y loop).
+#   g_is_performed_send_destroy (set here after a dataset's -d destroy and by
+#   the send/receive scheduler, read by the -Y loop).
 # reads globals: g_option_*, g_destination, discovery's recursive dataset
 #   lists, and the snapshot plan: g_last_common_snap,
 #   g_src_snapshot_transfer_list, g_dest_has_snapshots, the delete markers and
@@ -320,6 +320,8 @@ zxfer_process_source_dataset() {
 	# destination the cache calls missing before a full receive.
 	zxfer_inspect_delete_snap "$g_option_d_delete_destination_snapshots" \
 		"$l_process_source"
+	# The plan's -d destroy changed the destination; -Y repeats such a pass.
+	[ "${g_did_delete_dest_snapshots:-0}" -eq 0 ] || g_is_performed_send_destroy=1
 
 	if [ "$l_process_property_pass" -eq 1 ]; then
 		zxfer_transfer_properties "$l_process_source"
@@ -529,9 +531,6 @@ zxfer_refresh_dataset_iteration_state() {
 	# -m unmounts or any send.
 	zxfer_get_zfs_list ||
 		zxfer_throw_error "Failed to retrieve the snapshot lists for [$g_initial_source] and [$g_destination]." "$?"
-	# Without -R the only dataset to iterate is the initial source itself.
-	[ "$g_option_R_recursive" != "" ] ||
-		g_recursive_source_list=$g_initial_source
 	zxfer_refresh_property_tree_prefetch_context
 }
 
@@ -554,10 +553,7 @@ zxfer_maybe_capture_preflight_snapshot() {
 # Usage: zxfer_preview_zfs_mode_dry_run, instead of the live pass under -n;
 # previews only the requested source dataset.
 zxfer_preview_zfs_mode_dry_run() {
-	zxfer_reset_snapshot_discovery_state
-	zxfer_reset_destination_existence_cache
-	g_recursive_source_list=$g_initial_source
-	g_recursive_source_dataset_list=$g_initial_source
+	zxfer_publish_dry_run_snapshot_discovery
 	if [ "$g_option_R_recursive" != "" ]; then
 		zxfer_echoV "Dry run: recursive descendant discovery is skipped; previewing only the explicitly requested source dataset."
 	fi

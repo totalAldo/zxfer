@@ -1800,3 +1800,31 @@ test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
 	assertContains "Very-verbose snapshot discovery should accumulate diff/sort timings." \
 		"$output" "diff_ms=550"
 }
+
+# Without -R the work list is the initial source alone. It is set after full
+# discovery published the recursive delta (the -v report and the inventory
+# decision describe the listing itself); with -R the delta list stands.
+test_get_zfs_list_publishes_only_the_initial_source_without_recursion() {
+	for l_recursive_flag in "" "tank/src"; do
+		output=$(
+			g_option_R_recursive=$l_recursive_flag
+			zxfer_try_fast_recursive_noop_discovery() { return 1; }
+			zxfer_start_full_source_snapshot_discovery() { :; }
+			zxfer_collect_full_destination_snapshot_discovery() { :; }
+			zxfer_wait_for_full_source_snapshot_discovery() { :; }
+			zxfer_publish_full_snapshot_discovery_results() {
+				g_recursive_source_list="tank/src/child"
+				printf 'published=%s\n' "$g_recursive_source_list"
+			}
+			zxfer_get_zfs_list
+			printf 'work=%s\n' "$g_recursive_source_list"
+		)
+		case $l_recursive_flag in
+		"") l_expected_work=tank/src ;;
+		*) l_expected_work=tank/src/child ;;
+		esac
+		assertEquals "The work list after discovery [-R '$l_recursive_flag']." \
+			"published=tank/src/child
+work=$l_expected_work" "$output"
+	done
+}

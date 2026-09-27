@@ -156,9 +156,8 @@ backup/fs@snap4"
 
 	assertEquals "The planned snapshots should be destroyed in one comma-joined target." \
 		"destroy=destroy backup/fs@snap4,snap3" "$(cat "$log_file")"
-	assertEquals "A destroy should set the destination-delete marker, which makes the pre-send recheck list the dataset live." \
+	assertEquals "A destroy should set the destination-delete marker, which makes the pre-send recheck list the dataset live and marks the pass for -Y." \
 		1 "$g_did_delete_dest_snapshots"
-	assertEquals "A destroy should set the -Y mutation marker." 1 "${g_is_performed_send_destroy:-0}"
 }
 
 test_delete_snaps_throws_when_destroy_fails() {

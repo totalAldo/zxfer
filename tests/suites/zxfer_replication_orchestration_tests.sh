@@ -52,14 +52,12 @@ test_initialize_replication_context_runs_restore_and_unsupported_scan() {
 		g_option_e_restore_property_mode=1
 		g_option_U_skip_unsupported_properties=1
 		zxfer_initialize_replication_context
-		printf 'recursive=%s\n' "$g_recursive_source_list" >>"$CTX_LOG"
 	)
 
 	assertEquals "Initialization should load backup properties, refresh dataset state, and derive unsupported properties." \
 		"backup
 list
-unsupported
-recursive=tank/src" "$(cat "$log")"
+unsupported" "$(cat "$log")"
 }
 
 test_initialize_replication_context_skips_unsupported_scan_for_recursive_noop_without_property_work() {

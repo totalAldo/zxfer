@@ -118,8 +118,6 @@ zxfer_reset_snapshot_producer_state() {
 	g_zxfer_source_snapshot_list_cmd_result=""
 	g_source_snapshot_list_pid=""
 	g_source_snapshot_list_uses_parallel=0
-	g_source_snapshot_list_uses_metadata_compression=0
-	g_source_snapshot_list_sorted_file=""
 	g_zxfer_snapshot_discovery_file_read_result=""
 	g_zxfer_snapshot_discovery_status_file_result=""
 	g_zxfer_parallel_source_job_check_result=""
@@ -245,19 +243,20 @@ zxfer_render_discovery_sentinel_filter_cmd() {
 # g_zxfer_source_snapshot_list_cmd_result.
 zxfer_render_origin_listing_command() {
 	l_origin_listing=$1
+	l_origin_listing_compressed=0
 	if [ "${g_option_z_compress:-0}" -eq 1 ]; then
 		if [ -z "${g_origin_cmd_compress_safe:-}" ]; then
 			g_zxfer_source_snapshot_list_cmd_result="The origin host compression command is not resolved."
 			return 1
 		fi
-		g_source_snapshot_list_uses_metadata_compression=1
+		l_origin_listing_compressed=1
 		l_origin_listing="$l_origin_listing | $g_origin_cmd_compress_safe"
 	fi
 	zxfer_build_remote_sh_c_command "$l_origin_listing" >/dev/null
 	zxfer_ssh_shell_command_for_host render "$g_option_O_origin_host" \
 		"$g_zxfer_remote_sh_c_command_result" || return
 	l_origin_listing=$g_zxfer_shell_command_result
-	[ "$g_source_snapshot_list_uses_metadata_compression" -eq 0 ] ||
+	[ "$l_origin_listing_compressed" -eq 0 ] ||
 		l_origin_listing="$l_origin_listing | $g_cmd_decompress_safe"
 	if [ "$2" -eq 1 ]; then
 		zxfer_render_discovery_sentinel_filter_cmd
@@ -275,7 +274,6 @@ zxfer_render_origin_listing_command() {
 # GUIDs keep an exact-name divergence from passing as a no-op.
 zxfer_build_source_snapshot_name_list_cmd() {
 	g_source_snapshot_list_uses_parallel=0
-	g_source_snapshot_list_uses_metadata_compression=0
 	g_zxfer_source_snapshot_list_cmd_result=""
 
 	if [ -z "$g_option_O_origin_host" ]; then
@@ -390,7 +388,6 @@ zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
 # that a local filter checks and strips.
 zxfer_build_source_snapshot_list_cmd() {
 	g_source_snapshot_list_uses_parallel=0
-	g_source_snapshot_list_uses_metadata_compression=0
 	g_zxfer_source_snapshot_list_cmd_result=""
 
 	if [ "$g_option_j_jobs" -le 1 ]; then
@@ -474,7 +471,7 @@ zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 # Purpose: Start the creation-ordered source snapshot listing in the background.
 # Usage: zxfer_write_source_snapshot_list_to_file OUTFILE [ERRFILE]; publishes
 # g_source_snapshot_list_pid and the byte-sorted copy of the listing in
-# g_source_snapshot_list_sorted_file. With -j the listing fans out over
+# g_zxfer_full_source_snapshot_sorted_file. With -j the listing fans out over
 # datasets through parallel.
 zxfer_write_source_snapshot_list_to_file() {
 	l_outfile=$1
@@ -502,13 +499,13 @@ zxfer_write_source_snapshot_list_to_file() {
 	zxfer_record_last_command_string "$l_source_snapshot_command"
 	zxfer_get_temp_file || return "$?"
 	l_sorted_outfile=$g_zxfer_temp_file_result
-	g_source_snapshot_list_sorted_file=$l_sorted_outfile
+	g_zxfer_full_source_snapshot_sorted_file=$l_sorted_outfile
 	zxfer_execute_source_snapshot_list_background_cmd_with_sort \
 		"$l_source_snapshot_command" "$l_outfile" \
 		"$l_errfile" "$l_sorted_outfile" || {
 		l_source_list_status=$?
 		zxfer_cleanup_runtime_artifact_path "$l_sorted_outfile"
-		g_source_snapshot_list_sorted_file=""
+		g_zxfer_full_source_snapshot_sorted_file=""
 		return "$l_source_list_status"
 	}
 	g_source_snapshot_list_pid=$g_last_background_pid
@@ -555,12 +552,12 @@ zxfer_read_snapshot_discovery_status_file() {
 	zxfer_is_uint "$g_zxfer_snapshot_discovery_status_file_result"
 }
 
-# Purpose: Publish a staged destination dataset inventory as g_recursive_dest_list
-# and seed the existence cache from it.
+# Purpose: Publish a staged destination dataset inventory through the
+# destination-state seed.
 # Usage: zxfer_publish_destination_dataset_inventory_from_stage LIST_FILE
 # ERR_FILE STATUS; STATUS is the listing's exit status. A missing destination
-# whose pool the live probe can list publishes an empty list; other failures
-# throw.
+# whose pool the live probe can list publishes an empty inventory; other
+# failures throw.
 zxfer_publish_destination_dataset_inventory_from_stage() {
 	l_destination_inventory_tmp_file=$1
 	l_destination_inventory_err_file=$2
@@ -570,11 +567,11 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 		zxfer_read_snapshot_discovery_capture_file \
 			"$l_destination_inventory_tmp_file" ||
 			zxfer_throw_error "Failed to read staged destination dataset inventory." "$?"
-		g_recursive_dest_list=$g_zxfer_snapshot_discovery_file_read_result
-		[ -n "$g_recursive_dest_list" ] || {
+		[ -n "$g_zxfer_snapshot_discovery_file_read_result" ] || {
 			zxfer_throw_error "Staged destination dataset inventory was empty."
 		}
-		zxfer_seed_destination_existence_cache_from_recursive_list "$g_destination" "$g_recursive_dest_list"
+		zxfer_seed_destination_existence_cache_from_recursive_list "$g_destination" \
+			"$g_zxfer_snapshot_discovery_file_read_result"
 		return
 	fi
 
@@ -592,7 +589,6 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 			list -H -o name "$l_destination_inventory_pool" 2>&1 >/dev/null) ||
 			l_destination_inventory_pool_status=$?
 		if [ "$l_destination_inventory_pool_status" -eq 0 ]; then
-			g_recursive_dest_list=""
 			zxfer_mark_destination_root_missing_in_cache "$g_destination"
 			zxfer_echoV "Destination dataset missing; treating as empty list for bootstrap."
 		else
@@ -801,7 +797,8 @@ zxfer_cleanup_fast_recursive_noop_discovery_operation_state() {
 	zxfer_reset_fast_recursive_noop_discovery_operation_state
 }
 
-# Purpose: Remove the staged snapshot record files and forget them.
+# Purpose: Remove the staged snapshot record files, and full discovery's sorted
+# source listing, and forget them.
 # Usage: zxfer_cleanup_snapshot_record_cache_files, before a discovery pass and
 # on its failure paths.
 zxfer_cleanup_snapshot_record_cache_files() {
@@ -811,27 +808,40 @@ zxfer_cleanup_snapshot_record_cache_files() {
 	if [ -n "${g_zxfer_destination_snapshot_record_cache_file:-}" ]; then
 		zxfer_cleanup_runtime_artifact_path "$g_zxfer_destination_snapshot_record_cache_file"
 	fi
-	if [ -n "${g_source_snapshot_list_sorted_file:-}" ]; then
-		zxfer_cleanup_runtime_artifact_path "$g_source_snapshot_list_sorted_file"
+	if [ -n "${g_zxfer_full_source_snapshot_sorted_file:-}" ]; then
+		zxfer_cleanup_runtime_artifact_path "$g_zxfer_full_source_snapshot_sorted_file"
 	fi
 
 	g_zxfer_source_snapshot_record_cache_file=""
 	g_zxfer_destination_snapshot_record_cache_file=""
-	g_source_snapshot_list_sorted_file=""
+	g_zxfer_full_source_snapshot_sorted_file=""
 }
 
 # Purpose: Reset the snapshot discovery state so the next pass starts clean.
 # Usage: zxfer_reset_snapshot_discovery_state; called at the start of each
-# discovery pass and by session and dry-run resets.
+# discovery pass and by session and dry-run resets. The destination existence
+# cache and inventory have their own reset in the destination-state module.
 zxfer_reset_snapshot_discovery_state() {
 	zxfer_cleanup_snapshot_record_cache_files
 	zxfer_reset_full_snapshot_discovery_operation_state
 	zxfer_reset_fast_recursive_noop_discovery_operation_state
 	zxfer_reset_snapshot_producer_state
-	zxfer_reset_recursive_dataset_lists
+	g_recursive_source_list=""
+	g_recursive_source_dataset_list=""
 	g_recursive_destination_extra_dataset_list=""
 	g_zxfer_recursive_dataset_list_result=""
 	g_zxfer_snapshot_discovery_destination_listing_file=""
+}
+
+# Purpose: Publish the -n preview's work lists: the initial source alone.
+# Usage: zxfer_publish_dry_run_snapshot_discovery, instead of
+# zxfer_get_zfs_list under -n. It runs no zfs command and first drops the
+# discovery and destination state of an earlier pass.
+zxfer_publish_dry_run_snapshot_discovery() {
+	zxfer_reset_snapshot_discovery_state
+	zxfer_reset_destination_existence_cache
+	g_recursive_source_list=$g_initial_source
+	g_recursive_source_dataset_list=$g_initial_source
 }
 
 # Purpose: List the destination's datasets, on the -T host when one is given,
@@ -1509,7 +1519,8 @@ zxfer_validate_fast_recursive_noop_discovery() {
 # Usage: zxfer_publish_fast_recursive_noop_discovery; called only after all
 # validation succeeds.
 zxfer_publish_fast_recursive_noop_discovery() {
-	zxfer_reset_recursive_dataset_lists
+	g_recursive_source_list=""
+	g_recursive_source_dataset_list=""
 	g_recursive_destination_extra_dataset_list=""
 	g_zxfer_snapshot_discovery_destination_listing_file=""
 	# The proven no-op ends this pass. Trap exit removes the private root
@@ -1566,10 +1577,9 @@ zxfer_start_full_source_snapshot_discovery() {
 		"$g_zxfer_full_source_snapshot_file" \
 		"$g_zxfer_full_source_snapshot_error_file" ||
 		l_full_source_start_status=$?
-	g_zxfer_full_source_snapshot_sorted_file=${g_source_snapshot_list_sorted_file:-}
 	if [ "$l_full_source_start_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$g_zxfer_full_source_snapshot_sorted_file"
-		g_source_snapshot_list_sorted_file=""
+		g_zxfer_full_source_snapshot_sorted_file=""
 		zxfer_cleanup_runtime_artifact_path_list_and_return \
 			"$l_full_source_start_status" \
 			"$g_zxfer_full_source_snapshot_stage_files"
@@ -1741,7 +1751,7 @@ zxfer_publish_full_snapshot_discovery_results() {
 		l_full_publish_transient_files=$l_full_publish_transient_files$ZXFER_LF$g_zxfer_full_destination_snapshot_file
 	fi
 	zxfer_cleanup_runtime_artifact_path_list "$l_full_publish_transient_files"
-	g_source_snapshot_list_sorted_file=""
+	g_zxfer_full_source_snapshot_sorted_file=""
 	if [ "$l_full_publish_status" -ne 0 ]; then
 		zxfer_cleanup_snapshot_record_cache_files
 		return "$l_full_publish_status"
@@ -1810,6 +1820,10 @@ zxfer_get_zfs_list() {
 			"$l_get_zfs_list_status"
 		return "$l_get_zfs_list_status"
 	fi
+	# Without -R the only dataset to replicate is the initial source, whatever
+	# the recursive listing found below it. This comes after the delta report
+	# and the inventory decision, which describe the listing itself.
+	[ -n "${g_option_R_recursive:-}" ] || g_recursive_source_list=$g_initial_source
 
 	zxfer_echoV "End zxfer_get_zfs_list()"
 }

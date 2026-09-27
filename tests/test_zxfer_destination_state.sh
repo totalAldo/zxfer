@@ -124,6 +124,7 @@ test_zxfer_reset_destination_existence_cache_clears_root_and_completion_state() 
 	g_destination_existence_cache="1	backup/dst"
 	g_destination_existence_cache_root="backup/dst"
 	g_destination_existence_cache_root_complete=1
+	g_recursive_dest_list="backup/dst"
 
 	zxfer_reset_destination_existence_cache
 
@@ -133,6 +134,8 @@ test_zxfer_reset_destination_existence_cache_clears_root_and_completion_state() 
 		"" "$g_destination_existence_cache_root"
 	assertEquals "Resetting the destination existence cache should clear the root-complete marker." \
 		0 "${g_destination_existence_cache_root_complete:-0}"
+	assertEquals "Resetting the destination existence cache should clear the dataset inventory it was seeded from." \
+		"" "$g_recursive_dest_list"
 }
 
 test_zxfer_note_destination_receive_completed_clears_missing_subtree_assumption() {
@@ -172,8 +175,12 @@ test_zxfer_destination_hierarchy_helpers_cover_current_shell_paths() {
 }
 
 test_zxfer_seed_destination_existence_cache_from_recursive_list_marks_root_and_children_present() {
+	g_recursive_dest_list="stale/dst"
 	zxfer_seed_destination_existence_cache_from_recursive_list "backup/dst" "$(printf '%s\n%s' "backup/dst" "backup/dst/child")"
 
+	assertEquals "Seeding should publish the listing as the destination dataset inventory." \
+		"backup/dst
+backup/dst/child" "$g_recursive_dest_list"
 	assertEquals "Seeding the destination existence cache should remember the cache root." \
 		"backup/dst" "$g_destination_existence_cache_root"
 	assertEquals "Seeding the destination existence cache should mark the root dataset as present." \
@@ -185,7 +192,11 @@ test_zxfer_seed_destination_existence_cache_from_recursive_list_marks_root_and_c
 }
 
 test_zxfer_mark_destination_root_missing_in_cache_marks_descendants_missing() {
+	g_recursive_dest_list="stale/dst"
 	zxfer_mark_destination_root_missing_in_cache "backup/dst"
+
+	assertEquals "A missing root leaves the destination dataset inventory empty." \
+		"" "$g_recursive_dest_list"
 
 	assertEquals "Marking a destination root missing should remember the root dataset." \
 		"backup/dst" "$g_destination_existence_cache_root"

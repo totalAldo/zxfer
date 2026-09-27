@@ -180,6 +180,8 @@
 #       test_yield_passes_plan_from_their_own_discovery
 #       → each -Y pass plans from its own discovery: a second pass that finds
 #         one dataset still behind sends that dataset alone.
+#       test_yield_repeats_a_pass_whose_only_change_is_a_destroy
+#       → a pass whose only change is a -d destroy counts as work for -Y.
 #       test_grandfather_option_refuses_to_destroy_old_snapshot
 #       → -d -g refuses to destroy a snapshot older than the limit: non-zero
 #         exit and zero MUTATE lines.
@@ -1699,6 +1701,35 @@ test_yield_passes_plan_from_their_own_discovery() {
 	done
 	assertEquals "each pass lists the destination once, and pass 3 ends the loop" \
 		3 "$(grep -cFx "list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZFS_LOG")"
+}
+
+# Invariant (-Y, -d): a pass whose only change is a -d destroy did work, so -Y
+# repeats it. The canned destination never records the destroy, so every pass
+# destroys the same extra snapshot: once without -Y, eight times (the limit)
+# with it, and nothing is ever sent.
+test_yield_repeats_a_pass_whose_only_change_is_a_destroy() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" yield_destroy_only
+	planning_add_extra_destination_snapshot
+	l_yield_destroy="MUTATE destroy $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap9"
+
+	planning_run_zxfer "$STATE_DIR" -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-d run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	assertEquals "without -Y the pass destroys once" \
+		1 "$(grep -cFx "$l_yield_destroy" "$ZFS_LOG")"
+
+	: >"$ZFS_LOG"
+	planning_run_zxfer "$STATE_DIR" -Y -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-Y -d run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	assertEquals "-Y repeats a destroy-only pass up to its limit of 8" \
+		8 "$(grep -cFx "$l_yield_destroy" "$ZFS_LOG")"
+	assertEquals "the destroy is the only mutation" \
+		8 "$(grep -c '^MUTATE ' "$ZFS_LOG")"
+	planning_assert_no_send_receive
 }
 
 # Invariant (-g): with -d, a destination-only snapshot older than the -g
