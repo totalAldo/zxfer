@@ -187,8 +187,10 @@ EOF
 
 	assertEquals "Excluded datasets should be removed from the transfer list." "tank/src" "$g_recursive_source_list"
 	assertEquals "Excluded datasets should also be removed from the dataset cache." "tank/src" "$g_recursive_source_dataset_list"
-	assertEquals "Successful recursive source-list discovery should not leave stale runtime-artifact cleanup registrations behind." \
-		"" "${g_zxfer_runtime_artifact_cleanup_paths:-}"
+	assertNotEquals "Recursive source-list discovery should stage its work under a run root." \
+		"" "${g_zxfer_run_tmp_root:-}"
+	assertEquals "Successful recursive source-list discovery should remove every stage file it allocated." \
+		"" "$(ls -A "$g_zxfer_run_tmp_root" 2>&1)"
 	assertContains "Very-verbose mode should print the missing-source snapshot heading." \
 		"$output" "Snapshots present in source but missing in destination"
 	assertContains "Very-verbose mode should print the extra-destination snapshot heading." \

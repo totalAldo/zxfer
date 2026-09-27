@@ -26,8 +26,10 @@ module or a chain of setters.
   line-control constants, `zxfer_split_begin`/`zxfer_split_end`, and the
   `*_into_result` helpers run in the current shell without command
   substitutions
-- [../src/zxfer_profile.sh](../src/zxfer_profile.sh): profiling counters,
-  elapsed timings, and end-of-run summary rendering
+- [../src/zxfer_profile.sh](../src/zxfer_profile.sh): the `-V` counters
+  (plain globals that each producer bumps inline and the session reset
+  zeroes first), the attribution rules for zfs and ssh calls, stage timers
+  that read the clock in the current shell, and the end-of-run summary
 - [../src/zxfer_exec.sh](../src/zxfer_exec.sh): shell-safe token handling,
   generic command rendering, foreground execution, and cleanup-aware short-
   lived background helpers; it has no remote-capability or snapshot-state

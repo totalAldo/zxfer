@@ -527,7 +527,6 @@ test_get_zfs_list_restores_source_last_command_when_background_snapshot_listing_
 				printf '%s\n' "missing command" >"$2"
 				sh -c 'exit 37' &
 				g_source_snapshot_list_pid=$!
-				g_source_snapshot_list_job_id=""
 				g_source_snapshot_list_cmd="sh -c 'printf \"%s\\n\" \"missing command\" >&2; exit 37'"
 			}
 			zxfer_write_destination_snapshot_list_to_files() {
@@ -594,7 +593,6 @@ test_get_zfs_list_reports_generic_source_failure_when_background_snapshot_listin
 				: >"$2"
 				sh -c 'exit 1' &
 				g_source_snapshot_list_pid=$!
-				g_source_snapshot_list_job_id=""
 				g_source_snapshot_list_cmd="sh -c 'exit 1'"
 			}
 			zxfer_write_destination_snapshot_list_to_files() {
@@ -640,7 +638,6 @@ test_get_zfs_list_reports_source_stderr_readback_failures_after_background_failu
 				printf '%s\n' "missing stderr capture" >"$2"
 				sh -c 'exit 1' &
 				g_source_snapshot_list_pid=$!
-				g_source_snapshot_list_job_id=""
 				g_source_snapshot_list_cmd="sh -c 'exit 1'"
 			}
 			zxfer_write_destination_snapshot_list_to_files() {
