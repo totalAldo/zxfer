@@ -335,9 +335,7 @@ test_zxfer_mark_destination_hierarchy_exists_does_not_grow_cache_for_known_datas
 
 test_zxfer_probe_destination_existence_publishes_results_and_cache_in_current_shell() {
 	probe_log="$TEST_TMPDIR/probe_existence.log"
-	counter_log="$TEST_TMPDIR/probe_existence_counter.log"
 	: >"$probe_log"
-	: >"$counter_log"
 
 	output=$(
 		(
@@ -353,9 +351,7 @@ test_zxfer_probe_destination_existence_publishes_results_and_cache_in_current_sh
 					return 1
 				fi
 			}
-			zxfer_profile_increment_counter() {
-				printf '%s\n' "$1" >>"$counter_log"
-			}
+			g_zxfer_profile_exists_destination_calls=0
 			zxfer_probe_destination_existence "backup/present"
 			printf 'present=%s\n' "$g_zxfer_destination_exists_result"
 			zxfer_probe_destination_existence "backup/present"
@@ -369,6 +365,7 @@ test_zxfer_probe_destination_existence_publishes_results_and_cache_in_current_sh
 			printf 'broken_status=%s\n' "$broken_status"
 			printf 'broken_result=<%s>\n' "$g_zxfer_destination_exists_result"
 			printf 'broken_error=%s\n' "$g_zxfer_destination_exists_error"
+			printf 'exists_calls=%s\n' "$g_zxfer_profile_exists_destination_calls"
 		)
 	)
 
@@ -379,11 +376,8 @@ test_zxfer_probe_destination_existence_publishes_results_and_cache_in_current_sh
 list -H backup/present
 list -H backup/missing
 list -H backup/broken" "$(cat "$probe_log")"
-	assertEquals "Every real probe, and no cache hit, should bump the exists counter in the caller's shell." \
-		"g_zxfer_profile_exists_destination_calls
-g_zxfer_profile_exists_destination_calls
-g_zxfer_profile_exists_destination_calls
-g_zxfer_profile_exists_destination_calls" "$(cat "$counter_log")"
+	assertContains "Every real probe, and no cache hit, should bump the exists counter in the caller's shell." \
+		"$output" "exists_calls=4"
 	assertContains "A missing dataset should publish 0." "$output" "missing=0"
 	assertContains "Probe results should persist in the caller's existence cache." \
 		"$output" "missing_cached=0"

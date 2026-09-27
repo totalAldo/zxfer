@@ -476,8 +476,8 @@ zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 zxfer_write_source_snapshot_list_to_file() {
 	l_outfile=$1
 	l_errfile=${2:-}
-	zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_commands
-	zxfer_profile_increment_counter g_zxfer_profile_bucket_source_inspection
+	g_zxfer_profile_source_snapshot_list_commands=$((g_zxfer_profile_source_snapshot_list_commands + 1))
+	g_zxfer_profile_bucket_source_inspection=$((g_zxfer_profile_bucket_source_inspection + 1))
 
 	#
 	# it is important to get this in ascending order because when getting
@@ -489,11 +489,11 @@ zxfer_write_source_snapshot_list_to_file() {
 	l_source_snapshot_command=$g_zxfer_source_snapshot_list_cmd_result
 	g_source_snapshot_list_cmd=$l_source_snapshot_command
 	if [ "$g_option_O_origin_host" != "" ]; then
-		zxfer_profile_record_ssh_invocation "$g_option_O_origin_host" source
+		g_zxfer_profile_source_ssh_shell_invocations=$((g_zxfer_profile_source_ssh_shell_invocations + 1))
 	fi
 
 	if [ "${g_source_snapshot_list_uses_parallel:-0}" -eq 1 ]; then
-		zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_parallel_commands
+		g_zxfer_profile_source_snapshot_list_parallel_commands=$((g_zxfer_profile_source_snapshot_list_parallel_commands + 1))
 	fi
 	zxfer_echoV "Running command in the background: $l_source_snapshot_command"
 	zxfer_record_last_command_string "$l_source_snapshot_command"
@@ -1229,10 +1229,8 @@ zxfer_allocate_fast_recursive_noop_discovery_stages() {
 # allocation. Publishes the producer PID and keeps the rendered command in
 # g_source_snapshot_list_cmd for failure reports.
 zxfer_start_fast_recursive_noop_source_discovery() {
-	g_zxfer_snapshot_discovery_fast_noop_source_stage_start_ms=""
-	if zxfer_profile_metrics_enabled; then
-		g_zxfer_snapshot_discovery_fast_noop_source_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	fi
+	zxfer_profile_start_timer
+	g_zxfer_snapshot_discovery_fast_noop_source_stage_start_ms=$g_zxfer_profile_clock_ms
 
 	zxfer_build_source_snapshot_name_list_cmd || {
 		l_fast_noop_source_start_status=$?
@@ -1246,12 +1244,12 @@ zxfer_start_fast_recursive_noop_source_discovery() {
 		l_fast_noop_source_start_uses_parallel=1
 	fi
 	g_source_snapshot_list_cmd=$l_fast_noop_source_start_command
-	zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_commands
+	g_zxfer_profile_source_snapshot_list_commands=$((g_zxfer_profile_source_snapshot_list_commands + 1))
 	if [ "$l_fast_noop_source_start_uses_parallel" -eq 1 ]; then
-		zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_parallel_commands
+		g_zxfer_profile_source_snapshot_list_parallel_commands=$((g_zxfer_profile_source_snapshot_list_parallel_commands + 1))
 	fi
 	if [ "$g_option_O_origin_host" != "" ]; then
-		zxfer_profile_record_ssh_invocation "$g_option_O_origin_host" source
+		g_zxfer_profile_source_ssh_shell_invocations=$((g_zxfer_profile_source_ssh_shell_invocations + 1))
 	fi
 
 	# Stage into regular temp files. FIFO comparisons can strand a producer
@@ -1274,10 +1272,8 @@ zxfer_start_fast_recursive_noop_source_discovery() {
 # the source producer so both listings overlap. If this start fails, it stops
 # and reaps the source producer and returns the start status.
 zxfer_start_fast_recursive_noop_destination_discovery() {
-	g_zxfer_snapshot_discovery_fast_noop_destination_stage_start_ms=""
-	if zxfer_profile_metrics_enabled; then
-		g_zxfer_snapshot_discovery_fast_noop_destination_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	fi
+	zxfer_profile_start_timer
+	g_zxfer_snapshot_discovery_fast_noop_destination_stage_start_ms=$g_zxfer_profile_clock_ms
 
 	zxfer_start_destination_snapshot_name_sorted_fifo_producer \
 		"$g_zxfer_snapshot_discovery_fast_noop_destination_stream_file" \
@@ -1329,18 +1325,16 @@ zxfer_wait_for_fast_recursive_noop_discovery() {
 	[ "$g_zxfer_snapshot_discovery_fast_noop_source_wait_status" -eq 0 ] ||
 		zxfer_kill_reaped_producer_group "$g_zxfer_snapshot_discovery_fast_noop_source_pid"
 	zxfer_unregister_cleanup_pid "$g_zxfer_snapshot_discovery_fast_noop_source_pid"
-	zxfer_profile_add_elapsed_ms \
-		g_zxfer_profile_source_snapshot_listing_ms \
-		"$g_zxfer_snapshot_discovery_fast_noop_source_stage_start_ms"
+	zxfer_profile_stop_timer "$g_zxfer_snapshot_discovery_fast_noop_source_stage_start_ms"
+	g_zxfer_profile_source_snapshot_listing_ms=$((g_zxfer_profile_source_snapshot_listing_ms + g_zxfer_profile_elapsed_ms))
 
 	g_zxfer_snapshot_discovery_fast_noop_destination_wait_status=0
 	wait "$g_zxfer_snapshot_discovery_fast_noop_destination_pid" ||
 		g_zxfer_snapshot_discovery_fast_noop_destination_wait_status=$?
 	zxfer_unregister_cleanup_pid "$g_zxfer_snapshot_discovery_fast_noop_destination_pid"
 	g_last_background_pid=""
-	zxfer_profile_add_elapsed_ms \
-		g_zxfer_profile_destination_snapshot_listing_ms \
-		"$g_zxfer_snapshot_discovery_fast_noop_destination_stage_start_ms"
+	zxfer_profile_stop_timer "$g_zxfer_snapshot_discovery_fast_noop_destination_stage_start_ms"
+	g_zxfer_profile_destination_snapshot_listing_ms=$((g_zxfer_profile_destination_snapshot_listing_ms + g_zxfer_profile_elapsed_ms))
 	return 0
 }
 
@@ -1367,10 +1361,8 @@ zxfer_read_fast_recursive_noop_destination_statuses() {
 # Usage: zxfer_compare_fast_recursive_noop_discovery_streams; called before
 # sidecar validation, so a real delta declines the proof (returns 1) at once.
 zxfer_compare_fast_recursive_noop_discovery_streams() {
-	l_fast_noop_compare_stage_start_ms=""
-	if zxfer_profile_metrics_enabled; then
-		l_fast_noop_compare_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	fi
+	zxfer_profile_start_timer
+	l_fast_noop_compare_stage_start_ms=$g_zxfer_profile_clock_ms
 	# Any line comm prints is a snapshot that differs.
 	l_fast_noop_compare_status=0
 	if LC_ALL=C comm -3 \
@@ -1383,9 +1375,8 @@ zxfer_compare_fast_recursive_noop_discovery_streams() {
 	else
 		l_fast_noop_compare_status=$?
 	fi
-	zxfer_profile_add_elapsed_ms \
-		g_zxfer_profile_snapshot_diff_sort_ms \
-		"$l_fast_noop_compare_stage_start_ms"
+	zxfer_profile_stop_timer "$l_fast_noop_compare_stage_start_ms"
+	g_zxfer_profile_snapshot_diff_sort_ms=$((g_zxfer_profile_snapshot_diff_sort_ms + g_zxfer_profile_elapsed_ms))
 
 	if [ "$l_fast_noop_compare_status" -ne 0 ]; then
 		zxfer_cleanup_fast_recursive_noop_discovery_operation_state
@@ -1567,10 +1558,8 @@ zxfer_start_full_source_snapshot_discovery() {
 
 	g_source_snapshot_list_pid=""
 	g_zxfer_full_source_snapshot_sorted_file=""
-	g_zxfer_full_source_snapshot_stage_start_ms=""
-	if zxfer_profile_metrics_enabled; then
-		g_zxfer_full_source_snapshot_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	fi
+	zxfer_profile_start_timer
+	g_zxfer_full_source_snapshot_stage_start_ms=$g_zxfer_profile_clock_ms
 
 	l_full_source_start_status=0
 	zxfer_write_source_snapshot_list_to_file \
@@ -1595,10 +1584,8 @@ zxfer_start_full_source_snapshot_discovery() {
 # fast proof is normalized instead of listed again.
 # Returns: Zero with owned destination stage paths published, otherwise non-zero.
 zxfer_collect_full_destination_snapshot_discovery() {
-	l_full_destination_stage_start_ms=""
-	if zxfer_profile_metrics_enabled; then
-		l_full_destination_stage_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	fi
+	zxfer_profile_start_timer
+	l_full_destination_stage_start_ms=$g_zxfer_profile_clock_ms
 	g_zxfer_full_destination_inventory_attempted=0
 	zxfer_map_destination_dataset
 	l_full_destination_dataset=$g_zxfer_destination_dataset_result
@@ -1652,9 +1639,8 @@ zxfer_collect_full_destination_snapshot_discovery() {
 		return "$l_full_destination_status"
 	fi
 
-	zxfer_profile_add_elapsed_ms \
-		g_zxfer_profile_destination_snapshot_listing_ms \
-		"$l_full_destination_stage_start_ms"
+	zxfer_profile_stop_timer "$l_full_destination_stage_start_ms"
+	g_zxfer_profile_destination_snapshot_listing_ms=$((g_zxfer_profile_destination_snapshot_listing_ms + g_zxfer_profile_elapsed_ms))
 	return 0
 }
 
@@ -1672,8 +1658,8 @@ zxfer_wait_for_full_source_snapshot_discovery() {
 		zxfer_unregister_cleanup_pid "$g_source_snapshot_list_pid"
 		g_source_snapshot_list_pid=""
 	fi
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_source_snapshot_listing_ms \
-		"$g_zxfer_full_source_snapshot_stage_start_ms"
+	zxfer_profile_stop_timer "$g_zxfer_full_source_snapshot_stage_start_ms"
+	g_zxfer_profile_source_snapshot_listing_ms=$((g_zxfer_profile_source_snapshot_listing_ms + g_zxfer_profile_elapsed_ms))
 
 	if [ "$l_full_source_wait_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_paths \
@@ -1725,18 +1711,16 @@ zxfer_wait_for_full_source_snapshot_discovery() {
 # transient listings; the record caches stay for planning.
 # Returns: Zero after publication, otherwise the original helper status.
 zxfer_publish_full_snapshot_discovery_results() {
-	l_full_publish_diff_start_ms=""
-	if zxfer_profile_metrics_enabled; then
-		l_full_publish_diff_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	fi
+	zxfer_profile_start_timer
+	l_full_publish_diff_start_ms=$g_zxfer_profile_clock_ms
 	l_full_publish_status=0
 	zxfer_set_g_recursive_source_list \
 		"$g_zxfer_full_source_snapshot_file" \
 		"$g_zxfer_full_destination_snapshot_sorted_file" \
 		"$g_zxfer_full_source_snapshot_sorted_file" ||
 		l_full_publish_status=$?
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_snapshot_diff_sort_ms \
-		"$l_full_publish_diff_start_ms"
+	zxfer_profile_stop_timer "$l_full_publish_diff_start_ms"
+	g_zxfer_profile_snapshot_diff_sort_ms=$((g_zxfer_profile_snapshot_diff_sort_ms + g_zxfer_profile_elapsed_ms))
 
 	if [ "$l_full_publish_status" -eq 0 ] &&
 		zxfer_snapshot_discovery_needs_destination_dataset_inventory; then

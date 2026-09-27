@@ -491,7 +491,7 @@ zxfer_ensure_remote_host_capabilities() {
 	# same scope, the union of both roles'), that host is probed once.
 	if zxfer_load_remote_capability_slot "$l_caps_role" "$l_caps_host" "$l_caps_tools" ||
 		zxfer_load_remote_capability_slot "$l_caps_other_role" "$l_caps_host" "$l_caps_tools"; then
-		zxfer_profile_increment_counter g_zxfer_profile_remote_capability_bootstrap_memory
+		g_zxfer_profile_remote_capability_bootstrap_memory=$((g_zxfer_profile_remote_capability_bootstrap_memory + 1))
 		printf '%s\n' "$g_zxfer_remote_capability_response_result"
 		return 0
 	fi
@@ -513,7 +513,7 @@ zxfer_ensure_remote_host_capabilities() {
 		g_target_remote_capabilities_zfs_status=$g_zxfer_remote_capability_zfs_status
 		g_target_remote_capabilities_tool_records=$g_zxfer_remote_capability_tool_records
 	fi
-	zxfer_profile_increment_counter g_zxfer_profile_remote_capability_bootstrap_live
+	g_zxfer_profile_remote_capability_bootstrap_live=$((g_zxfer_profile_remote_capability_bootstrap_live + 1))
 	printf '%s\n' "$g_zxfer_remote_capability_response_result"
 }
 
@@ -571,7 +571,7 @@ zxfer_resolve_remote_required_tool() {
 		zxfer_get_parsed_remote_capability_tool_record "$l_tool_name"; then
 		l_tool_status=$g_zxfer_remote_capability_tool_status_result
 	else
-		zxfer_profile_increment_counter g_zxfer_profile_remote_cli_tool_direct_probes
+		g_zxfer_profile_remote_cli_tool_direct_probes=$((g_zxfer_profile_remote_cli_tool_direct_probes + 1))
 		zxfer_escape_single_quotes_into_result "$l_tool_name"
 		zxfer_run_remote_probe_script "$l_tool_host" "$l_tool_side" \
 			"l_path=\$(command -v '$g_zxfer_escaped_single_quotes_result' 2>/dev/null); l_status=\$?; if [ \"\$l_status\" -eq 0 ]; then printf '%s\n' \"\$l_path\"; elif [ \"\$l_status\" -eq 1 ]; then exit 10; else exit \"\$l_status\"; fi"

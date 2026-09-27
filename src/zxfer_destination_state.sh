@@ -119,7 +119,7 @@ zxfer_get_live_destination_record_file() {
 	g_zxfer_live_destination_record_file_result=""
 	g_zxfer_live_destination_record_file_error=""
 
-	zxfer_profile_increment_counter g_zxfer_profile_live_destination_snapshot_rechecks
+	g_zxfer_profile_live_destination_snapshot_rechecks=$((g_zxfer_profile_live_destination_snapshot_rechecks + 1))
 	zxfer_ensure_snapshot_scratch_file "${g_zxfer_live_destination_listing_file:-}" \
 		zxfer-live-dest-listing || return
 	g_zxfer_live_destination_listing_file=$g_zxfer_snapshot_scratch_file_result
@@ -468,7 +468,7 @@ zxfer_probe_destination_existence() {
 		return 0
 	fi
 
-	zxfer_profile_increment_counter g_zxfer_profile_exists_destination_calls
+	g_zxfer_profile_exists_destination_calls=$((g_zxfer_profile_exists_destination_calls + 1))
 
 	if zxfer_command_trace_enabled; then
 		zxfer_trace_rendered_command "Checking if destination exists" \

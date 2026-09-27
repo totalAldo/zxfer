@@ -254,11 +254,9 @@ test_zfs_send_receive_tracks_remote_ssh_profile_counters_when_very_verbose() {
 				g_option_V_very_verbose=1
 				g_option_O_origin_host=${ssh_hosts% *}
 				g_option_T_target_host=${ssh_hosts#* }
-				g_zxfer_profile_ssh_shell_invocations=0
 				g_zxfer_profile_source_ssh_shell_invocations=0
 				g_zxfer_profile_destination_ssh_shell_invocations=0
 				zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" "0"
-				printf 'ssh=%s\n' "${g_zxfer_profile_ssh_shell_invocations:-0}"
 				printf 'source_ssh=%s\n' "${g_zxfer_profile_source_ssh_shell_invocations:-0}"
 				printf 'destination_ssh=%s\n' "${g_zxfer_profile_destination_ssh_shell_invocations:-0}"
 			)
@@ -266,7 +264,6 @@ test_zfs_send_receive_tracks_remote_ssh_profile_counters_when_very_verbose() {
 
 		assertEquals "Remote send/receive profiling counts one ssh hop per side for [$ssh_hosts]." \
 			"<send via ${ssh_hosts% *}> | <receive via ${ssh_hosts#* }>
-ssh=2
 source_ssh=1
 destination_ssh=1" "$output"
 	done

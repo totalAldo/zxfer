@@ -779,7 +779,10 @@ zxfer_prefetch_recursive_normalized_properties() {
 	# The dataset lists hold one dataset per line.
 	printf '%s\n' "$l_prefetch_datasets" >"$g_zxfer_property_wanted_file" || return 1
 
-	zxfer_profile_increment_counter "g_zxfer_profile_normalized_property_reads_$l_prefetch_side"
+	case $l_prefetch_side in
+	source) g_zxfer_profile_normalized_property_reads_source=$((g_zxfer_profile_normalized_property_reads_source + 1)) ;;
+	destination) g_zxfer_profile_normalized_property_reads_destination=$((g_zxfer_profile_normalized_property_reads_destination + 1)) ;;
+	esac
 	# -t keeps snapshots, whose rows the filter would drop anyway, out of the
 	# recursive listing. The skeleton comes last, so a dataset destroyed
 	# before it is not listed and no value can pass for its records.
@@ -930,7 +933,10 @@ zxfer_load_normalized_dataset_properties() {
 		g_zxfer_normalized_dataset_properties_cache_hit=1
 		return 0
 	fi
-	zxfer_profile_increment_counter "g_zxfer_profile_normalized_property_reads_$l_load_side"
+	case $l_load_side in
+	source) g_zxfer_profile_normalized_property_reads_source=$((g_zxfer_profile_normalized_property_reads_source + 1)) ;;
+	destination) g_zxfer_profile_normalized_property_reads_destination=$((g_zxfer_profile_normalized_property_reads_destination + 1)) ;;
+	esac
 	zxfer_read_live_dataset_properties "$l_load_dataset" "$l_load_side" || return "$?"
 
 	[ -n "$g_zxfer_normalized_dataset_properties" ] || return 0
@@ -963,7 +969,7 @@ zxfer_probe_required_property() {
 	l_probe_property=$2
 
 	g_zxfer_required_property_probe_result=""
-	zxfer_profile_increment_counter g_zxfer_profile_required_property_backfill_gets
+	g_zxfer_profile_required_property_backfill_gets=$((g_zxfer_profile_required_property_backfill_gets + 1))
 	l_probe_status=0
 	zxfer_read_one_property "$3" "$l_probe_dataset" "$l_probe_property" -Hpo ||
 		l_probe_status=$?
@@ -1016,7 +1022,7 @@ zxfer_backfill_required_properties() {
 
 	case $l_backfill_missing in
 	*,*)
-		zxfer_profile_increment_counter g_zxfer_profile_required_property_backfill_gets
+		g_zxfer_profile_required_property_backfill_gets=$((g_zxfer_profile_required_property_backfill_gets + 1))
 		if l_backfill_batch=$(zxfer_run_zfs_cmd_for_role "$l_backfill_side" get -Hpo property,value,source \
 			"$l_backfill_missing" "$l_backfill_dataset" 2>/dev/null </dev/null) &&
 			zxfer_append_required_properties_from_capture "$l_backfill_missing" "$l_backfill_batch"; then

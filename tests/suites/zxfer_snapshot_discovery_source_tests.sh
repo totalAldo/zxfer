@@ -1180,12 +1180,10 @@ test_write_source_snapshot_list_to_file_tracks_remote_ssh_profile_counter_when_v
 		g_option_V_very_verbose=1
 		g_option_j_jobs=1
 		g_option_O_origin_host="origin.example"
-		g_zxfer_profile_ssh_shell_invocations=0
 		g_zxfer_profile_source_ssh_shell_invocations=0
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 		{
 			printf 'pid=%s\n' "$g_source_snapshot_list_pid"
-			printf 'ssh=%s\n' "${g_zxfer_profile_ssh_shell_invocations:-0}"
 			printf 'source_ssh=%s\n' "${g_zxfer_profile_source_ssh_shell_invocations:-0}"
 		} >>"$log"
 	)
@@ -1193,7 +1191,6 @@ test_write_source_snapshot_list_to_file_tracks_remote_ssh_profile_counter_when_v
 	assertEquals "Very-verbose profiling should count the remote ssh hop used for source snapshot discovery." \
 		"printf 'remote-snap-profile'|$outfile|$errfile
 pid=3131
-ssh=1
 source_ssh=1" "$(cat "$log")"
 }
 

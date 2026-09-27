@@ -149,10 +149,8 @@ zxfer_trap_exit() {
 		zxfer_set_failure_context_if_empty runtime "signal" \
 			"zxfer was interrupted by a signal (exit status $1)."
 	fi
-	l_cleanup_start_ms=""
-	if zxfer_profile_metrics_enabled; then
-		l_cleanup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	fi
+	zxfer_profile_start_timer
+	l_cleanup_start_ms=$g_zxfer_profile_clock_ms
 
 	# Only terminate zxfer-owned background processes. Killing every direct child
 	# of the shell is too broad and can clobber coverage helpers or command
@@ -183,7 +181,8 @@ zxfer_trap_exit() {
 		zxfer_note_trap_cleanup_failure "$?" \
 			"$g_zxfer_migration_service_restore_failure_message"
 
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_cleanup_ms "$l_cleanup_start_ms"
+	zxfer_profile_stop_timer "$l_cleanup_start_ms"
+	g_zxfer_profile_cleanup_ms=$((g_zxfer_profile_cleanup_ms + g_zxfer_profile_elapsed_ms))
 	zxfer_echoV "zxfer exiting with status $g_zxfer_trap_exit_status"
 	zxfer_profile_emit_summary
 	zxfer_emit_failure_report "$g_zxfer_trap_exit_status"
@@ -299,10 +298,8 @@ zxfer_prepare_remote_host_connections() {
 		zxfer_refresh_remote_zfs_commands
 		return
 	fi
-	l_ssh_setup_start_ms=""
-	if zxfer_profile_metrics_enabled; then
-		l_ssh_setup_start_ms=$(zxfer_profile_now_ms 2>/dev/null || :)
-	fi
+	zxfer_profile_start_timer
+	l_ssh_setup_start_ms=$g_zxfer_profile_clock_ms
 
 	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
 		if [ -n "$g_option_O_origin_host" ]; then
@@ -324,7 +321,8 @@ zxfer_prepare_remote_host_connections() {
 		fi
 	fi
 	zxfer_refresh_remote_zfs_commands
-	zxfer_profile_add_elapsed_ms g_zxfer_profile_ssh_setup_ms "$l_ssh_setup_start_ms"
+	zxfer_profile_stop_timer "$l_ssh_setup_start_ms"
+	g_zxfer_profile_ssh_setup_ms=$((g_zxfer_profile_ssh_setup_ms + g_zxfer_profile_elapsed_ms))
 }
 
 # Purpose: Resolve both endpoints' execution context after CLI validation.

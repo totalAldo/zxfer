@@ -840,7 +840,7 @@ zxfer_enforce_destination_divergence_contract() {
 		return 0
 	fi
 
-	zxfer_profile_increment_counter g_zxfer_profile_diverged_snapshot_warnings
+	g_zxfer_profile_diverged_snapshot_warnings=$((g_zxfer_profile_diverged_snapshot_warnings + 1))
 	l_diverged_example_lines=$(zxfer_render_diverged_snapshot_example_lines "$g_actual_dest")
 
 	if [ "${g_option_d_delete_destination_snapshots:-0}" -eq 1 ] &&

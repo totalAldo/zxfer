@@ -175,9 +175,7 @@ EOF
 
 test_prepare_remote_host_connections_opens_masters_before_preloading_capabilities() {
 	log="$TEST_TMPDIR/prepare_remote_hosts.log"
-	now_counter_file="$TEST_TMPDIR/prepare_remote_hosts.now.counter"
 	: >"$log"
-	printf '%s\n' 0 >"$now_counter_file"
 
 	result=$(
 		(
@@ -190,15 +188,11 @@ test_prepare_remote_host_connections_opens_masters_before_preloading_capabilitie
 			zxfer_preload_remote_host_capabilities() {
 				printf 'preload %s %s\n' "$1" "$2" >>"$log"
 			}
-			zxfer_profile_now_ms() {
-				idx=$(cat "$now_counter_file")
-				idx=$((idx + 1))
-				printf '%s\n' "$idx" >"$now_counter_file"
-				if [ "$idx" = "1" ]; then
-					printf '%s\n' 1000
-				elif [ "$idx" = "2" ]; then
-					printf '%s\n' 1250
-				fi
+			# One reading per clock read, in this shell.
+			clock_readings="1000 1250"
+			zxfer_profile_read_clock_ms() {
+				g_zxfer_profile_clock_ms=${clock_readings%% *}
+				clock_readings=${clock_readings#* }
 			}
 			g_option_O_origin_host="origin.example pfexec"
 			g_option_T_target_host="target.example doas"

@@ -271,4 +271,9 @@ zxfer_test_snapshot_discovery_fixture_setup() {
 	zxfer_reset_background_shell_spawn_mode
 	zxfer_reset_destination_existence_cache
 	zxfer_reset_failure_context "unit"
+	# Producers count with or without -V, so each case starts at 0; a 0
+	# prescan skips the start-clock read.
+	g_zxfer_profile_prescan=0
+	zxfer_reset_profile_state
+	unset g_zxfer_profile_prescan
 }

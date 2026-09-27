@@ -401,8 +401,7 @@ zxfer_schedule_send_receive_pipeline() {
 				break
 			fi
 		done
-		zxfer_profile_increment_counter \
-			g_zxfer_profile_send_receive_background_pipeline_commands
+		g_zxfer_profile_send_receive_background_pipeline_commands=$((g_zxfer_profile_send_receive_background_pipeline_commands + 1))
 		zxfer_record_last_command_string "$l_schedule_pipeline_cmd"
 		zxfer_echov "$l_schedule_pipeline_cmd"
 		zxfer_spawn_send_job "$l_schedule_pipeline_cmd" \

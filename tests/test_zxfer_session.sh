@@ -176,8 +176,7 @@ test_zxfer_session_initialize_discards_inherited_cleanup_handles_before_early_fa
 				return 0
 			}
 			zxfer_relaunch() { printf '%s\n' migration-action; }
-			zxfer_profile_metrics_enabled() { return 1; }
-			zxfer_profile_add_elapsed_ms() { :; }
+			g_option_V_very_verbose=0
 			zxfer_echoV() { :; }
 			zxfer_profile_emit_summary() { :; }
 			zxfer_emit_failure_report() {
@@ -220,8 +219,7 @@ EOF
 		zxfer_close_all_ssh_control_sockets() { return 0; }
 		zxfer_remove_ssh_control_socket_dir() { return 0; }
 		zxfer_remove_run_tmp_root() { return 0; }
-		zxfer_profile_metrics_enabled() { return 1; }
-		zxfer_profile_add_elapsed_ms() { :; }
+		g_option_V_very_verbose=0
 		zxfer_echoV() { :; }
 		zxfer_profile_emit_summary() { :; }
 		zxfer_emit_failure_report() {
@@ -340,7 +338,7 @@ test_zxfer_trap_exit_promotes_migration_restore_failure_and_finishes_reporting()
 			trap - EXIT INT TERM HUP QUIT
 			g_services_need_relaunch=1
 			g_services_relaunch_in_progress=0
-			zxfer_profile_metrics_enabled() { return 1; }
+			g_option_V_very_verbose=0
 			zxfer_abort_all_send_jobs() { return 0; }
 			zxfer_kill_registered_cleanup_pids() { return 0; }
 			zxfer_close_all_ssh_control_sockets() { return 0; }
@@ -364,7 +362,7 @@ test_zxfer_trap_exit_promotes_migration_restore_failure_and_finishes_reporting()
 			zxfer_set_failure_context_if_empty() {
 				printf 'failure-context=%s|%s|%s\n' "$1" "$2" "$3"
 			}
-			zxfer_profile_add_elapsed_ms() { printf '%s\n' profile-finalized; }
+			zxfer_profile_stop_timer() { printf '%s\n' profile-finalized; }
 			zxfer_echoV() { printf 'verbose=%s\n' "$*"; }
 			zxfer_profile_emit_summary() { printf '%s\n' profile-summary; }
 			zxfer_emit_failure_report() { printf 'failure-report=%s\n' "$1"; }
@@ -402,7 +400,7 @@ test_zxfer_trap_exit_warns_when_migration_restore_fails_after_primary_failure() 
 			g_zxfer_failure_class=runtime
 			g_zxfer_failure_stage=replication
 			g_zxfer_failure_message="primary replication failure"
-			zxfer_profile_metrics_enabled() { return 1; }
+			g_option_V_very_verbose=0
 			zxfer_abort_all_send_jobs() { return 0; }
 			zxfer_kill_registered_cleanup_pids() { return 0; }
 			zxfer_close_all_ssh_control_sockets() { return 0; }
@@ -413,7 +411,6 @@ test_zxfer_trap_exit_warns_when_migration_restore_fails_after_primary_failure() 
 				return 37
 			}
 			zxfer_warn_stderr() { printf 'warning=%s\n' "$*" >&2; }
-			zxfer_profile_add_elapsed_ms() { :; }
 			zxfer_echoV() { :; }
 			zxfer_profile_emit_summary() { :; }
 			zxfer_emit_failure_report() {
@@ -466,7 +463,7 @@ test_zxfer_trap_exit_keeps_a_failed_ssh_close_out_of_an_earlier_failures_report(
 		(
 			trap - EXIT INT TERM HUP QUIT
 			zxfer_reset_failure_context "unit"
-			zxfer_profile_metrics_enabled() { return 1; }
+			g_option_V_very_verbose=0
 			zxfer_abort_all_send_jobs() { return 0; }
 			zxfer_kill_registered_cleanup_pids() { return 0; }
 			zxfer_close_all_ssh_control_sockets() { return 19; }
