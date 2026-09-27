@@ -44,7 +44,7 @@
 #   the path-adjacent artifact registry (g_zxfer_runtime_artifact_cleanup_paths);
 #   the allocation and readback results (g_zxfer_temp_file_result,
 #   g_zxfer_temp_file_group_result, g_zxfer_staging_dir_result,
-#   g_zxfer_runtime_artifact_*_result, g_zxfer_secure_staging_dir_result).
+#   g_zxfer_runtime_artifact_*_result).
 # reads globals: TMPDIR, g_option_V_very_verbose, ZXFER_SOURCE_MODULES_ROOT
 #   (the cleanup wrapper path), and ZXFER_TAB/ZXFER_LF from zxfer_quoting.sh.
 # mutates caches: the cleanup-PID rows and the adjacent-artifact registry.
@@ -428,7 +428,6 @@ zxfer_discard_runtime_cleanup_state() {
 	g_zxfer_runtime_artifact_path_result=""
 	g_zxfer_runtime_artifact_read_result=""
 	g_zxfer_runtime_artifact_directory_identity_result=""
-	g_zxfer_secure_staging_dir_result=""
 	g_zxfer_staging_dir_result=""
 	g_zxfer_default_tmpdir_result=""
 	g_zxfer_effective_tmpdir=""
@@ -675,28 +674,6 @@ zxfer_register_runtime_artifact_path() {
 # random name closes that window and umask 077 keeps the directory private.
 zxfer_create_unpredictable_staging_dir() {
 	g_zxfer_staging_dir_result=$(umask 077 && exec mktemp -d "$1" 2>/dev/null)
-}
-
-# Purpose: Create a private staging directory next to PATH and register it for
-# trap cleanup.
-# Usage: zxfer_create_secure_staging_dir_for_path PATH [PREFIX]; publishes
-# g_zxfer_secure_staging_dir_result. PATH's parent must pass
-# zxfer_validate_temp_root_candidate.
-zxfer_create_secure_staging_dir_for_path() {
-	l_path=$1
-	l_prefix=${2:-zxfer.stage}
-
-	g_zxfer_secure_staging_dir_result=""
-	l_parent=$(zxfer_get_path_parent_dir "$l_path") || return 1
-	l_parent=$(zxfer_validate_temp_root_candidate "$l_parent") || return 1
-
-	zxfer_create_unpredictable_staging_dir "$l_parent/.$l_prefix.XXXXXX" || return 1
-	l_stage_dir=$g_zxfer_staging_dir_result
-	if ! zxfer_register_runtime_artifact_path "$l_stage_dir"; then
-		rmdir "$l_stage_dir" 2>/dev/null || :
-		return 1
-	fi
-	g_zxfer_secure_staging_dir_result=$l_stage_dir
 }
 
 ################################################################################

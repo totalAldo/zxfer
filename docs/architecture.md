@@ -39,8 +39,8 @@ module or a chain of setters.
   ownership/mode checks and symlink-aware trusted-path validation
 - [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh): validated per-run temp
   root, runtime artifact allocation/readback, short-lived cleanup-PID rows,
-  and randomized path-adjacent staging entries with their single
-  identity/path cleanup registry
+  and the identity/path cleanup registry of the one path-adjacent entry left,
+  the ssh transport's short fallback socket directory
 - [../src/zxfer_ssh_transport.sh](../src/zxfer_ssh_transport.sh): validated
   host/wrapper parsing (`-O`/`-T` host specs parsed once per value), managed
   SSH options, ssh argv assembled per call with the role's control socket,
