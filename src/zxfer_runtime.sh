@@ -44,12 +44,17 @@
 #   the allocation and readback results (g_zxfer_temp_file_result,
 #   g_zxfer_temp_file_group_result, g_zxfer_runtime_artifact_*_result).
 # reads globals: TMPDIR, g_option_V_very_verbose, ZXFER_SOURCE_MODULES_ROOT
-#   (the cleanup wrapper path), and ZXFER_TAB/ZXFER_LF from zxfer_quoting.sh.
+#   (once, when the module is sourced, for ZXFER_CLEANUP_CHILD_WRAPPER), and
+#   ZXFER_TAB/ZXFER_LF from zxfer_quoting.sh.
 # mutates caches: the cleanup-PID rows.
-# returns via stdout: the cleanup wrapper path and the default temp-directory
-#   candidates only; every temp and staging path is a result global.
+# returns via stdout: the default temp-directory candidates only; every temp
+#   path is a result global.
 
 ZXFER_MAX_YIELD_ITERATIONS=8
+# The fallback child wrapper ships beside the modules. The launcher sets
+# ZXFER_SOURCE_MODULES_ROOT before it sources them, so the path is fixed for
+# the run and spawning never forks to find it; users check it is readable.
+ZXFER_CLEANUP_CHILD_WRAPPER="${ZXFER_SOURCE_MODULES_ROOT:-.}/src/zxfer_cleanup_child_wrapper.sh"
 
 ################################################################################
 # CLEANUP-PID ROWS
@@ -67,14 +72,6 @@ zxfer_reset_cleanup_pid_tracking() {
 	g_zxfer_cleanup_pid_record_scope=""
 	g_zxfer_cleanup_pid_abort_failure_message=""
 	g_zxfer_cleanup_pid_abort_grace_seconds=2
-}
-
-# Purpose: Locate the fallback child wrapper shipped beside the modules.
-# Usage: Background spawning and cold descendant teardown only.
-zxfer_get_cleanup_child_wrapper_script_path() {
-	l_cleanup_child_wrapper_script="${ZXFER_SOURCE_MODULES_ROOT:-.}/src/zxfer_cleanup_child_wrapper.sh"
-	[ -r "$l_cleanup_child_wrapper_script" ] || return 1
-	printf '%s\n' "$l_cleanup_child_wrapper_script"
 }
 
 # Purpose: Find one tracked cleanup-helper row by PID.
