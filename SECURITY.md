@@ -112,8 +112,10 @@ effective user and not writable by others unless it is sticky, and the log is
 a regular 0600 file with a single link, owned by root or the effective user.
 The single-link rule refuses a root-owned 0600 file that another user
 hard-linked into a shared parent. A missing log is created under umask 077
-with noclobber, so zxfer never truncates or replaces an existing file, and each
-report is then appended with one `O_APPEND` write, without a lock. Two guards
+with noclobber, so zxfer never truncates or replaces an existing file, and is
+set to mode 0600 only after it passes the other checks, so that chmod never
+reaches what another user put at the name. Each report is then appended with
+one `O_APPEND` write, without a lock. Two guards
 of earlier versions are given up. First, zxfer no longer pins the validated
 file while it writes, so root or the effective user can swap the path between
 the checks and the write and send the report elsewhere; other users cannot,
@@ -122,8 +124,10 @@ Second, reports from concurrent runs can interleave on NFS, whose appends are
 not atomic, and when one report needs more than one write (larger than the
 file system block size, often 4 KiB; a default report is a few hundred bytes).
 In a shared sticky directory such as `/tmp`, another user can still create the
-log's name first; zxfer then refuses the log rather than write to it, so keep
-it in a directory only root or the zxfer user can write.
+log's name first. zxfer then refuses the log rather than write to it, but a
+FIFO created there just as zxfer creates the log holds the failing run's exit
+until someone opens the FIFO (zxfer still writes nothing to it). Keep the log
+in a directory only root or the zxfer user can write.
 
 Current open security concerns are tracked in [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 
