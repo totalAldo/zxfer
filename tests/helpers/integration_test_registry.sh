@@ -74,9 +74,11 @@ zxfer_validate_integration_registry_file() {
 }
 
 # Purpose: Print the integration fragments, integration/NAME_tests.sh, in C
-# sort order. Each must have a lower-case name, be a regular readable file
-# and not a symbolic link, in an integration directory that is not a
-# symbolic link; the first violation stops the harness before any pool work.
+# sort order. In any locale, NAME must be a lower-case ASCII letter followed
+# by lower-case ASCII letters, digits or _. Each fragment must be a regular
+# readable file and not a symbolic link, in an integration directory that is
+# not a symbolic link; the first violation stops the harness before any pool
+# work.
 # Usage: zxfer_integration_fragment_paths; paths are relative to
 # INTEGRATION_TESTS_DIR. It runs in a subshell, so the glob works whatever the
 # caller's noglob setting and leaves that setting alone.
@@ -97,8 +99,11 @@ zxfer_integration_fragment_paths() (
 	for l_fragment_file in "$l_fragment_dir"/*_tests.sh; do
 		[ -e "$l_fragment_file" ] || [ -L "$l_fragment_file" ] || continue
 		l_fragment_name=${l_fragment_file##*/}
+		# The characters are spelled out because bash 3.2 (macOS /bin/sh)
+		# matches a range such as [a-z] by locale collation: in a UTF-8
+		# locale it also takes upper-case and accented letters.
 		case "${l_fragment_name%_tests.sh}" in
-		'' | [!a-z]* | *[!a-z0-9_]*)
+		'' | [!abcdefghijklmnopqrstuvwxyz]* | *[!abcdefghijklmnopqrstuvwxyz0123456789_]*)
 			printf 'Invalid integration fragments [%s]: fragment [%s] must be named like name_tests.sh in lower case.\n' \
 				"$l_fragment_dir" "$l_fragment_name" >&2
 			return 1
