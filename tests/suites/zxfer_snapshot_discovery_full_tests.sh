@@ -5,6 +5,14 @@
 # Run by tests/test_zxfer_snapshot_discovery.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
+# Print one dataset's rows of a staged snapshot record file: the rows whose
+# part before the first "@" is exactly DATASET.
+# Usage: zxfer_test_snapshot_records_for_dataset FILE DATASET
+zxfer_test_snapshot_records_for_dataset() {
+	# shellcheck disable=SC2016  # awk program should see literal $1.
+	awk -F@ -v ds="$2" '$1 == ds' "$1"
+}
+
 test_get_zfs_list_bootstraps_missing_destination_dataset_when_pool_exists() {
 	output=$(
 		(
@@ -44,7 +52,7 @@ EOF
 			}
 			zxfer_get_zfs_list
 			printf 'dest=%s\n' "$g_recursive_dest_list"
-			printf 'source=%s\n' "$(zxfer_filter_snapshot_record_file_for_dataset "$g_zxfer_source_snapshot_record_cache_file" "tank/src")"
+			printf 'source=%s\n' "$(zxfer_test_snapshot_records_for_dataset "$g_zxfer_source_snapshot_record_cache_file" "tank/src")"
 		)
 	)
 
@@ -93,7 +101,7 @@ EOF
 			}
 			zxfer_get_zfs_list
 			printf 'dest=%s\n' "$g_recursive_dest_list"
-			printf 'source=%s\n' "$(zxfer_filter_snapshot_record_file_for_dataset "$g_zxfer_source_snapshot_record_cache_file" "tank/src")"
+			printf 'source=%s\n' "$(zxfer_test_snapshot_records_for_dataset "$g_zxfer_source_snapshot_record_cache_file" "tank/src")"
 		)
 	)
 
@@ -1581,10 +1589,10 @@ EOF
 			zxfer_get_zfs_list
 			printf 'source_file_staged=%s\n' "$([ -n "${g_zxfer_source_snapshot_record_cache_file:-}" ] && [ -r "$g_zxfer_source_snapshot_record_cache_file" ] && printf '%s' yes || printf '%s' no)"
 			printf 'dest_file_staged=%s\n' "$([ -n "${g_zxfer_destination_snapshot_record_cache_file:-}" ] && [ -r "$g_zxfer_destination_snapshot_record_cache_file" ] && printf '%s' yes || printf '%s' no)"
-			zxfer_filter_snapshot_record_file_for_dataset "$g_zxfer_source_snapshot_record_cache_file" "tank/src" >"$source_root_file"
-			zxfer_filter_snapshot_record_file_for_dataset "$g_zxfer_source_snapshot_record_cache_file" "tank/src/child" >"$source_child_file"
-			zxfer_filter_snapshot_record_file_for_dataset "$g_zxfer_destination_snapshot_record_cache_file" "backup/dst" >"$dest_root_file"
-			zxfer_filter_snapshot_record_file_for_dataset "$g_zxfer_destination_snapshot_record_cache_file" "backup/dst/child" >"$dest_child_file"
+			zxfer_test_snapshot_records_for_dataset "$g_zxfer_source_snapshot_record_cache_file" "tank/src" >"$source_root_file"
+			zxfer_test_snapshot_records_for_dataset "$g_zxfer_source_snapshot_record_cache_file" "tank/src/child" >"$source_child_file"
+			zxfer_test_snapshot_records_for_dataset "$g_zxfer_destination_snapshot_record_cache_file" "backup/dst" >"$dest_root_file"
+			zxfer_test_snapshot_records_for_dataset "$g_zxfer_destination_snapshot_record_cache_file" "backup/dst/child" >"$dest_child_file"
 			printf 'source_root=%s\n' "$(cat "$source_root_file")"
 			printf 'source_child=%s\n' "$(cat "$source_child_file")"
 			printf 'dest_root=%s\n' "$(cat "$dest_root_file")"
