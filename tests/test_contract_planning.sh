@@ -44,13 +44,13 @@
 #       test_destination_snapshot_listing_failure_fails_closed
 #       → fail closed with the zfs exit status preserved.
 #
-#   dst missing newest guid, live
-#       test_live_recheck_batched_view_is_captured_once_per_pass
-#       → live rechecks are served from ONE batched recursive destination
-#         listing per replication pass: the batched listing lands after
-#         discovery and before the first receive, no recursive listing
-#         follows any receive (a receive marks only its own dataset dirty),
-#         and no per-dataset depth-1 listing runs.
+#   dst unchanged by this run, or changed by its -d destroy
+#       test_only_datasets_changed_by_this_run_are_listed_again
+#       → a dataset this run did not change keeps the plan made from
+#         discovery: after the one recursive destination listing no
+#         destination snapshot listing runs. A dataset whose snapshots the
+#         run destroyed is listed at depth 1 after its destroy and before
+#         its rollback, and once more by the post-receive check.
 #
 #   same snapshot NAME on dst, different guid (divergence contract, 2026-06)
 #       test_same_name_divergent_guid_fails_closed_without_d_and_f
@@ -351,16 +351,17 @@ test_destination_snapshot_listing_failure_fails_closed() {
 		"Failed to retrieve snapshot list from the destination."
 }
 
-# Invariant: the batched live destination view is captured at most once per
-# replication pass. Planning is served from ONE batched recursive destination
-# snapshot listing (same argv shape as discovery, so occurrences are counted)
-# captured lazily after discovery and before the first receive. A completed
-# receive marks only its own dataset dirty, so no recursive listing follows
-# any receive; and because no dataset in this fixture is mutated before its
-# own recheck, the per-dataset depth-1 listing never runs. Discovery log
-# order is nondeterministic (background jobs), so ordering is asserted per
-# line number, never positionally against the whole file.
-test_live_recheck_batched_view_is_captured_once_per_pass() {
+# Invariant (2026-09): only a dataset this run changed is listed again before
+# its send; every other dataset keeps the plan made from discovery, and zfs
+# receive still refuses an incremental whose base is gone. The incremental
+# fixture changes nothing before its sends, so after the one recursive
+# destination listing (the fast no-op proof's, which discovery reuses) no
+# destination snapshot listing runs. In the -d -F convergence the root is
+# listed at depth 1 after its destroy and before its rollback, then once more
+# by the post-receive check. Discovery log order is nondeterministic
+# (background jobs), so ordering is asserted per line number, never
+# positionally against the whole file.
+test_only_datasets_changed_by_this_run_are_listed_again() {
 	planning_setup_env
 
 	planning_run_zxfer "$FIXTURE_DIR/incremental" -R \
@@ -370,38 +371,49 @@ test_live_recheck_batched_view_is_captured_once_per_pass() {
 		0 "$l_run_status"
 	planning_assert_no_mutations
 
-	l_view_key="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	assertFalse "a successful destination listing needs no separate existence check" \
+		"grep -qFx 'list -H $ZXFER_MOCKBIN_DEST_MAPPED_ROOT' '$ZFS_LOG'"
+	assertFalse "no dataset is changed before its send here, so no depth-1 listing may run" \
+		"grep -q '^list -H -d 1 ' '$ZFS_LOG'"
+	assertEquals "the fast no-op proof's destination listing, reused by discovery, must be the only one" \
+		1 "$(grep -cFx "list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZFS_LOG")"
 	l_src_discovery=$(planning_log_line_number \
 		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT")
 	assertNotNull "source discovery missing from log" "$l_src_discovery"
 	l_src_discovery=${l_src_discovery:-99999}
-
-	assertFalse "a successful destination listing needs no separate existence check" \
-		"grep -qFx 'list -H $ZXFER_MOCKBIN_DEST_MAPPED_ROOT' '$ZFS_LOG'"
-	assertFalse "no dataset is mutated before its own recheck here, so the per-dataset depth-1 listing must never run" \
-		"grep -q '^list -H -d 1 ' '$ZFS_LOG'"
-	# Occurrence 1 is the fast no-op proof's destination identity listing,
-	# which mismatches and which discovery then reuses; occurrence 2 is the
-	# pass's one batched view.
-	assertEquals "one proof listing reused by discovery plus exactly one batched view for the whole pass" \
-		2 "$(grep -cFx "$l_view_key" "$ZFS_LOG")"
-
-	l_view=$(planning_log_nth_line_number "$l_view_key" 2)
-	assertNotNull "batched view listing missing" "$l_view"
-	l_view=${l_view:-0}
-	assertTrue "the batched view must follow source discovery" \
-		"[ $l_view -gt $l_src_discovery ]"
-
-	# Every receive follows the one batched view: with exactly two
-	# occurrences, this also proves no recursive listing follows any receive.
 	for l_dataset_suffix in "" /child1 /child2; do
 		l_receive=$(planning_log_line_number \
 			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_dataset_suffix")
 		assertNotNull "receive missing for [$l_dataset_suffix]" "$l_receive"
 		l_receive=${l_receive:-0}
-		assertTrue "the batched view must precede the receive for [$l_dataset_suffix]: a receive marks only its own dataset dirty and never re-lists the tree" \
-			"[ $l_view -lt $l_receive ]"
+		assertTrue "the receive for [$l_dataset_suffix] must follow source discovery" \
+			"[ $l_src_discovery -lt $l_receive ]"
 	done
+
+	: >"$ZFS_LOG"
+	planning_clone_state "$FIXTURE_DIR/noop" changed_relist
+	planning_make_destination_diverged_until_receive
+	planning_run_zxfer "$STATE_DIR" -d -F -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "diverged -d -F run should converge and exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+
+	l_relist_key="list -H -d 1 -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	assertEquals "the changed root is listed at depth 1 twice: the pre-send re-plan and the post-receive check" \
+		2 "$(grep -cFx "$l_relist_key" "$ZFS_LOG")"
+	assertEquals "only the changed root may be listed at depth 1" \
+		2 "$(grep -c '^list -H -d 1 ' "$ZFS_LOG")"
+	l_destroy=$(planning_log_line_number "MUTATE destroy $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap3")
+	l_relist=$(planning_log_line_number "$l_relist_key")
+	l_rollback=$(planning_log_line_number "MUTATE rollback -r $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap2")
+	assertNotNull "destroy missing from log" "$l_destroy"
+	assertNotNull "depth-1 re-list missing from log" "$l_relist"
+	assertNotNull "rollback missing from log" "$l_rollback"
+	assertTrue "the re-list must follow the destroy that changed the root" \
+		"[ ${l_destroy:-99999} -lt ${l_relist:-0} ]"
+	assertTrue "the re-list must precede the rollback and send it re-plans" \
+		"[ ${l_relist:-99999} -lt ${l_rollback:-0} ]"
 }
 
 # Divergence contract (2026-06): a destination snapshot that shares the source

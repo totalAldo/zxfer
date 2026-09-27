@@ -48,8 +48,8 @@
 # reads globals: g_actual_dest, g_cmd_awk,
 #   g_option_d_delete_destination_snapshots, g_option_F_force_rollback,
 #   g_option_g_grandfather_protection, and the staged snapshot record files.
-# mutates caches: the live view dirty list and replication's
-#   g_is_performed_send_destroy marker (after a destroy).
+# mutates caches: replication's g_is_performed_send_destroy marker (after a
+#   destroy).
 # returns via stdout: the destroy target, the creation-date display text and
 #   the divergence example lines only.
 
@@ -166,9 +166,7 @@ END {
 # g_zxfer_plan_diverged_records, g_zxfer_plan_delete_snapshots (paths),
 # g_zxfer_plan_source_count, and g_zxfer_plan_destination_records. Callers
 # publish the plan themselves, so a post-receive check never clobbers the
-# current dataset's plan; replication's live recheck reuses inspect's results
-# while the live rows equal g_zxfer_plan_destination_records. Aborts on
-# unreadable input or a guid-less record.
+# current dataset's plan. Aborts on unreadable input or a guid-less record.
 zxfer_plan_dataset_snapshots() {
 	l_plan_source=$1
 	l_plan_dest=$2
@@ -509,12 +507,12 @@ zxfer_delete_snaps() {
 	l_destroy_target=$(zxfer_get_snapshot_destroy_target "$l_delete_snapshots") ||
 		return "$?"
 
+	# The destroy changes this dataset's snapshots: the marker makes the
+	# pre-send recheck re-plan it from a live listing and allows the -F
+	# rollback.
 	g_did_delete_dest_snapshots=1
 	zxfer_run_destination_zfs_cmd destroy "$l_destroy_target" ||
 		zxfer_throw_error "Error when executing command." "$?"
-	# Only this dataset's snapshots changed: its later rechecks (and any
-	# post-receive verification) list it live instead of from the batched view.
-	zxfer_mark_live_destination_dataset_dirty "${l_destroy_target%%@*}"
 
 	# A destroy changed replication state; -Y decides on this marker.
 	g_is_performed_send_destroy=1
@@ -579,9 +577,8 @@ zxfer_find_diverged_converged_marker() {
 
 # Purpose: Drop one destination dataset from the "diverged and converged this
 # run" marker list.
-# Usage: Called by the post-receive verification after the live destination
-# view confirms the dataset no longer carries name-match/guid-mismatch
-# snapshots.
+# Usage: Called by the post-receive verification after a live listing
+# confirms the dataset no longer carries name-match/guid-mismatch snapshots.
 zxfer_unmark_diverged_converged_dataset() {
 	l_unmark_dest=$1
 	l_remaining_markers=""
@@ -676,9 +673,9 @@ No deletes or sends were planned for this dataset. Re-run with BOTH -d and -F to
 # name-match/guid-mismatch snapshots after its receive.
 # Usage: zxfer_verify_converged_destination_after_receive DEST, from the
 # receive finalize choke points (foreground and -j reap time). No-op unless
-# DEST carries a convergence marker. Plans DEST against its live rows (the
-# receive marked it dirty, so a depth-1 listing) without touching the current
-# dataset's published plan, and fails when divergence remains.
+# DEST carries a convergence marker. Plans DEST against a live depth-1 listing
+# without touching the current dataset's published plan, and fails when
+# divergence remains.
 zxfer_verify_converged_destination_after_receive() {
 	l_verify_dest=$1
 

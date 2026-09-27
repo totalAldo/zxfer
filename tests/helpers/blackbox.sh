@@ -192,14 +192,6 @@ planning_log_line_number() {
 	awk -v needle="$1" '$0 == needle { print NR; exit }' "$ZFS_LOG"
 }
 
-# Purpose: Print the 1-based line number of the Nth exact match of an argv
-# line, or nothing; discovery and the batched live view share one argv shape.
-# Usage: planning_log_nth_line_number <argv-line> <n>
-planning_log_nth_line_number() {
-	awk -v needle="$1" -v n="$2" \
-		'$0 == needle { c++; if (c == n) { print NR; exit } }' "$ZFS_LOG"
-}
-
 # Purpose: Count ssh invocations in SSH_LOG whose rendered remote script
 # contains a marker. Long scripts cross csh/tcsh as single-quoted `d` data
 # chunks; only the fixed boundary between adjacent chunks is removed, so a
@@ -294,14 +286,13 @@ planning_make_destination_diverged() {
 # hold at that moment.
 # Usage: planning_make_destination_diverged_until_receive
 #
-# The diverged recursive listing is served by two consumable 'once' rules for
-# the two lookups before convergence (the fast no-op proof, then discovery);
-# the pass's batched live view is first captured at a later dataset's recheck,
-# after the root converged, so it falls through to the aligned fixture. The
-# root is dirty from its destroy onward, so its pre-send recheck (between the
-# destroy and the rollback) answers the post-destroy snap1+snap2 rows through
-# one 'once' rule, and the post-receive verification falls through to the
-# aligned depth-1 fixture the convergence receive would have produced.
+# Two consumable 'once' rules serve the diverged recursive listing before
+# convergence (today one lookup: the fast no-op proof's listing, which
+# discovery reuses); no recursive listing runs after it. The root's destroy
+# changes it, so its pre-send re-plan (between the destroy and the rollback)
+# reads the post-destroy snap1+snap2 rows through one 'once' rule, and the
+# post-receive verification falls through to the aligned depth-1 fixture the
+# convergence receive would have produced.
 planning_make_destination_diverged_until_receive() {
 	planning_make_destination_diverged
 	mv "$STATE_DIR/dst_snapshots.list" "$STATE_DIR/dst_snapshots_diverged.list" ||

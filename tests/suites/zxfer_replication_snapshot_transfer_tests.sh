@@ -1,6 +1,7 @@
 #!/bin/sh
 # Live destination reconciliation and snapshot-transfer behavior tests for
-# src/zxfer_replication.sh.
+# src/zxfer_replication.sh. The live re-plan runs only for a dataset whose -d
+# destroy ran, so its cases set g_did_delete_dest_snapshots=1.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_copy_snapshots_skips_when_no_pending_snapshots() {
@@ -113,6 +114,7 @@ test_copy_snapshots_stops_after_seeding_single_snapshot_into_missing_destination
 }
 
 test_copy_snapshots_rechecks_live_destination_snapshots_before_reseeding() {
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=0
 	g_last_common_snap=""
@@ -251,7 +253,7 @@ test_copy_snapshots_uses_existing_empty_initial_root_when_cached_missing_state_i
 
 # Inspect's plan of a dataset with two pending snapshots: the published plan
 # and the planner results it came from.
-zxfer_test_prepare_unchanged_live_plan() {
+zxfer_test_prepare_inspected_plan() {
 	g_actual_dest="backup/target/src"
 	g_zxfer_plan_common_snapshot="tank/src@base	111"
 	g_zxfer_plan_transfer_list="tank/src@next	222
@@ -262,63 +264,55 @@ tank/src@final	333"
 		"$g_zxfer_plan_transfer_list" 1
 }
 
-test_reconcile_live_destination_snapshot_state_reuses_unchanged_inspection_after_live_read() {
-	view_log="$TEST_TMPDIR/unchanged_plan_live_read.log"
-	: >"$view_log"
+test_reconcile_live_destination_snapshot_state_keeps_the_discovery_plan_of_unchanged_datasets() {
+	call_log="$TEST_TMPDIR/unchanged_plan_calls.log"
+	: >"$call_log"
 	output=$(
-		zxfer_test_prepare_unchanged_live_plan
-		zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=1; }
-		zxfer_run_destination_zfs_cmd() {
-			printf 'live\n' >>"$view_log"
-			printf '%s\n' "$g_zxfer_plan_destination_records"
-		}
+		zxfer_test_prepare_inspected_plan
+		g_did_delete_dest_snapshots=0
+		zxfer_probe_destination_existence() { printf 'probe %s\n' "$*" >>"$call_log"; }
+		zxfer_run_destination_zfs_cmd() { printf 'zfs %s\n' "$*" >>"$call_log"; }
 		zxfer_plan_dataset_snapshots() { exit 23; }
 		zxfer_reconcile_live_destination_snapshot_state "tank/src"
 		printf 'common=%s\npending=%s\nhas=%s\n' "$g_last_common_snap" \
 			"$g_src_snapshot_transfer_list" "$g_dest_has_snapshots"
 	)
 	status=$?
-	assertEquals "An unchanged inspected plan should not be planned again." 0 "$status"
-	assertEquals "Reusing classification still requires a successful fresh destination read." "live" "$(cat "$view_log")"
-	assertEquals "The entire verified common snapshot and pending range should remain intact." \
+	assertEquals "A dataset this run did not change should keep inspect's plan." 0 "$status"
+	assertEquals "A dataset this run did not change must be neither probed nor listed again." \
+		"" "$(cat "$call_log")"
+	assertEquals "The discovery plan's common snapshot and pending range should stay intact." \
 		"common=tank/src@base	111
 pending=tank/src@next	222
 tank/src@final	333
 has=1" "$output"
 }
 
-test_reconcile_live_destination_snapshot_state_replans_when_live_rows_changed() {
-	for changed in none guid extra empty; do
-		status=0
-		(
-			zxfer_test_prepare_unchanged_live_plan
-			case $changed in
-			none) LIVE_ROWS=$g_zxfer_plan_destination_records ;;
-			guid) LIVE_ROWS="backup/target/src@base	999" ;;
-			extra) LIVE_ROWS="$g_zxfer_plan_destination_records
-backup/target/src@extra	555" ;;
-			empty) LIVE_ROWS="" ;;
-			esac
-			zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=1; }
-			zxfer_run_destination_zfs_cmd() {
-				[ -z "$LIVE_ROWS" ] || printf '%s\n' "$LIVE_ROWS"
-			}
-			zxfer_plan_dataset_snapshots() { exit 23; }
-			zxfer_reconcile_live_destination_snapshot_state "tank/src"
-		) || status=$?
-		if [ "$changed" = none ]; then
-			assertEquals "Unchanged live rows may reuse the inspected plan." 0 "$status"
-		else
-			assertEquals "A $changed change to the live rows must be planned again." 23 "$status"
-		fi
-	done
+test_reconcile_live_destination_snapshot_state_replans_changed_datasets_from_live_rows() {
+	listing_log="$TEST_TMPDIR/changed_plan_listing.log"
+	: >"$listing_log"
+	status=0
+	(
+		zxfer_test_prepare_inspected_plan
+		g_did_delete_dest_snapshots=1
+		zxfer_run_destination_zfs_cmd() {
+			printf '%s\n' "$*" >>"$listing_log"
+			printf '%s\n' "$g_zxfer_plan_destination_records"
+		}
+		zxfer_plan_dataset_snapshots() { exit 23; }
+		zxfer_reconcile_live_destination_snapshot_state "tank/src"
+	) || status=$?
+	assertEquals "A dataset whose snapshots this run destroyed must be planned again, even when its live rows look unchanged." \
+		23 "$status"
+	assertEquals "The re-plan should read one depth-1 listing of the dataset." \
+		"list -H -d 1 -o name,guid -t snapshot backup/target/src" "$(cat "$listing_log")"
 }
 
-test_reconcile_live_destination_snapshot_state_does_not_reuse_inspection_after_failed_read() {
+test_reconcile_live_destination_snapshot_state_aborts_when_the_live_listing_fails() {
 	status=0
 	output=$(
-		zxfer_test_prepare_unchanged_live_plan
-		zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=1; }
+		zxfer_test_prepare_inspected_plan
+		g_did_delete_dest_snapshots=1
 		zxfer_run_destination_zfs_cmd() { return 29; }
 		zxfer_throw_error() {
 			printf '%s\n' "$1"
@@ -326,12 +320,13 @@ test_reconcile_live_destination_snapshot_state_does_not_reuse_inspection_after_f
 		}
 		zxfer_reconcile_live_destination_snapshot_state "tank/src"
 	) || status=$?
-	assertEquals "A live read failure must abort even when the retained inspection matches the plan." 1 "$status"
+	assertEquals "A live listing failure must abort instead of keeping the stale plan." 1 "$status"
 	assertContains "The failure should identify the live destination lookup." \
 		"$output" "Failed to retrieve live destination snapshots for [backup/target/src]"
 }
 
 test_reconcile_live_destination_snapshot_state_keeps_newest_matching_snapshot() {
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=0
 	g_last_common_snap=""
@@ -350,9 +345,6 @@ tank/src@snap1	111"
 
 	output=$(
 		(
-			zxfer_probe_destination_existence() {
-				g_zxfer_destination_exists_result=1
-			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
 					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
@@ -382,6 +374,7 @@ EOF
 }
 
 test_reconcile_live_destination_snapshot_state_never_anchors_on_guid_less_pending_records() {
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=0
 	g_last_common_snap=""
@@ -400,9 +393,6 @@ tank/src@snap1	111"
 
 	output=$(
 		(
-			zxfer_probe_destination_existence() {
-				g_zxfer_destination_exists_result=1
-			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
 					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
@@ -435,6 +425,7 @@ tank/src@snap4>"
 }
 
 test_reconcile_live_destination_snapshot_state_refreshes_stale_common_snapshot_when_destination_already_has_snapshots() {
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=1
 	g_last_common_snap="tank/src@snap1	111"
@@ -452,9 +443,6 @@ tank/src@snap1	111"
 
 	output=$(
 		(
-			zxfer_probe_destination_existence() {
-				g_zxfer_destination_exists_result=1
-			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
 					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
@@ -481,6 +469,7 @@ tank/src@snap1	111"
 }
 
 test_reconcile_live_destination_snapshot_state_clears_stale_common_snapshot_when_no_live_match_remains() {
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=1
 	g_last_common_snap="tank/src@snap1	111"
@@ -496,9 +485,6 @@ tank/src@snap1	111"
 
 	output=$(
 		(
-			zxfer_probe_destination_existence() {
-				g_zxfer_destination_exists_result=1
-			}
 			zxfer_run_destination_zfs_cmd() {
 				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
 					[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
@@ -526,66 +512,48 @@ tank/src@snap3	333>"
 		"$output" "dest_has=1"
 }
 
-test_reconcile_live_destination_snapshot_state_live_rechecks_cached_missing_children() {
+test_copy_snapshots_live_probes_cached_missing_child_before_bootstrapping() {
 	g_initial_source="tank/src"
 	g_destination="backup/target"
 	g_initial_source_had_trailing_slash=0
 	g_option_R_recursive="tank/src"
-	g_actual_dest="backup/target/src/child"
+	zxfer_set_actual_dest "tank/src/child"
 	g_dest_has_snapshots=0
 	g_last_common_snap=""
-	g_src_snapshot_transfer_list=$(
-		cat <<'EOF'
-tank/src/child@base	111
-EOF
-	)
-	zxfer_test_stage_source_records "tank/src/child@base	111"
-	probe_log="$TEST_TMPDIR/reconcile_live_child_probe.log"
+	g_src_snapshot_transfer_list="tank/src/child@base	111"
+	probe_log="$TEST_TMPDIR/copy_child_missing_probe.log"
+	send_log="$TEST_TMPDIR/copy_child_missing_send.log"
 	: >"$probe_log"
+	: >"$send_log"
 	zxfer_mark_destination_root_missing_in_cache "$g_destination"
 
-	output=$(
-		(
-			PROBE_LOG="$probe_log"
-			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "backup/target/src/child" ]; then
-					printf '%s\n' "$*" >>"$PROBE_LOG"
-					return 0
-				fi
-				if [ "$1" = "list" ] && [ "$2" = "-Hr" ] && [ "$3" = "-o" ] && [ "$4" = "name,guid" ] &&
-					[ "$5" = "-t" ] && [ "$6" = "snapshot" ] && [ "$7" = "backup/target/src" ]; then
-					printf '%s\n' "backup/target/src/child@base	111"
-					return 0
-				fi
+	(
+		PROBE_LOG="$probe_log"
+		SEND_LOG="$send_log"
+		zxfer_run_destination_zfs_cmd() {
+			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "backup/target/src/child" ]; then
+				printf 'probe %s\n' "$*" >>"$PROBE_LOG"
+				printf '%s\n' "cannot open 'backup/target/src/child': dataset does not exist" >&2
 				return 1
-			}
-
-			zxfer_reconcile_live_destination_snapshot_state "tank/src/child"
-			printf 'last=%s\n' "$g_last_common_snap"
-			printf 'remaining=<%s>\n' "$g_src_snapshot_transfer_list"
-			printf 'dest_has=%s\n' "$g_dest_has_snapshots"
-		)
+			fi
+			printf 'unexpected %s\n' "$*" >>"$PROBE_LOG"
+			return 1
+		}
+		zxfer_zfs_send_receive() {
+			printf 'prev=%s curr=%s dest=%s bg=%s\n' "$1" "$2" "$3" "$4" >>"$SEND_LOG"
+		}
+		zxfer_copy_snapshots "tank/src/child"
 	)
 
-	assertEquals "Cached-missing child datasets should still perform a live existence probe because a recursive parent receive may have created them earlier in the iteration." \
-		"list -H backup/target/src/child" "$(cat "$probe_log")"
-	assertContains "A successful live child recheck served from the batched view should still promote the matching snapshot to the last common anchor." \
-		"$output" "last=tank/src/child@base	111"
-	assertContains "A successful live child recheck should clear the remaining transfer list once the destination already has the seed snapshot." \
-		"$output" "remaining=<>"
-	assertContains "A successful live child recheck should still mark the destination as snapshotted." \
-		"$output" "dest_has=1"
+	assertEquals "A cached-missing child should be live-probed once, and never listed, before its full receive: discovery may be minutes old." \
+		"probe list -H backup/target/src/child" "$(cat "$probe_log")"
+	assertEquals "A child the live probe confirms missing should get the full receive." \
+		"prev= curr=tank/src/child@base dest=backup/target/src/child bg=0" "$(cat "$send_log")"
 }
-
-# The next five tests pin the per-dataset dirty live destination view: one
-# batched listing of the run's destination root, captured at most once per
-# pass, serves every covered dataset's recheck; a self-mutation marks only
-# the mutated dataset dirty so its later rechecks are depth-1 live listings
-# while unmarked datasets keep the batched view; a failed batched listing
-# aborts; and a -Y pass boundary always forces a fresh listing.
 
 test_copy_snapshots_live_recheck_requires_matching_guid() {
 	zxfer_test_stage_source_records "tank/src@base	111"
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=0
 	g_last_common_snap=""
@@ -634,8 +602,10 @@ test_copy_snapshots_live_recheck_requires_matching_guid() {
 }
 
 # Inspect's plan while the destination held snap1..snap3: anchor snap3 with
-# snap4 pending. LIVE_ROWS is what the live recheck lists.
+# snap4 pending, after a -d destroy on the dataset. LIVE_ROWS is what the live
+# recheck lists.
 zxfer_test_prepare_anchor_drift_plan() {
+	g_did_delete_dest_snapshots=1
 	zxfer_test_stage_source_records "tank/src@snap4	444
 tank/src@snap3	333
 tank/src@snap2	222
@@ -710,6 +680,7 @@ test_copy_snapshots_skips_send_when_live_destination_already_has_final_snapshot(
 tank/src@snap3	333
 tank/src@snap2	222
 tank/src@snap1	111"
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=1
 	g_last_common_snap="tank/src@snap1	111"
@@ -762,6 +733,7 @@ EOF
 
 test_copy_snapshots_live_rechecks_empty_cached_transfer_list_before_skipping() {
 	zxfer_test_stage_source_records "tank/src@base	111"
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=1
 	g_last_common_snap="tank/src@base	111"
@@ -801,6 +773,7 @@ prev= curr=tank/src@base dest=backup/target/src bg=0 force=-F" "$(cat "$log")"
 
 test_copy_snapshots_live_rechecks_already_final_state_before_skipping() {
 	zxfer_test_stage_source_records "tank/src@base	111"
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=1
 	g_last_common_snap="tank/src@base	111"
@@ -839,6 +812,8 @@ prev= curr=tank/src@base dest=backup/target/src bg=0 force=-F" "$(cat "$log")"
 }
 
 test_copy_snapshots_seeds_existing_destination_when_live_probe_confirms_no_snapshots() {
+	zxfer_test_stage_source_records "tank/src@base	111"
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=1
 	g_last_common_snap=""
@@ -879,6 +854,8 @@ test_copy_snapshots_seeds_existing_destination_when_live_probe_confirms_no_snaps
 }
 
 test_copy_snapshots_reports_existing_empty_destination_seed_message_to_stdout() {
+	zxfer_test_stage_source_records "tank/src@base	111"
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=1
 	g_last_common_snap=""
@@ -917,6 +894,8 @@ test_copy_snapshots_reports_existing_empty_destination_seed_message_to_stdout() 
 }
 
 test_copy_snapshots_ignores_descendant_snapshots_when_rechecking_parent_dataset() {
+	zxfer_test_stage_source_records "tank/src@base	111"
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=1
 	g_last_common_snap=""
@@ -989,16 +968,23 @@ tank/src@snap2"
 }
 
 test_copy_snapshots_reports_live_snapshot_recheck_failures() {
+	g_did_delete_dest_snapshots=1
 	g_actual_dest="backup/target/src"
 	g_dest_has_snapshots=0
 	g_last_common_snap=""
 	g_src_snapshot_transfer_list="tank/src@base"
+	send_log="$TEST_TMPDIR/copy_recheck_failure_send.log"
+	: >"$send_log"
 
 	set +e
 	output=$(
 		(
+			SEND_LOG="$send_log"
 			zxfer_rollback_destination_to_last_common_snapshot() {
 				:
+			}
+			zxfer_zfs_send_receive() {
+				printf 'send\n' >>"$SEND_LOG"
 			}
 			zxfer_probe_destination_existence() {
 				g_zxfer_destination_exists_result=1
@@ -1019,6 +1005,7 @@ test_copy_snapshots_reports_live_snapshot_recheck_failures() {
 	assertEquals "Live destination snapshot recheck failures should abort instead of reseeding." 1 "$status"
 	assertContains "Live destination snapshot recheck failures should preserve the destination context." \
 		"$output" "Failed to retrieve live destination snapshots for [backup/target/src]: ssh timeout"
+	assertEquals "No send may be planned after a failed live listing." "" "$(cat "$send_log")"
 }
 
 test_copy_snapshots_skips_when_last_common_matches_final_snapshot() {

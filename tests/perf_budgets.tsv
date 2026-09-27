@@ -115,6 +115,13 @@
 # normalized_property_reads_{source,destination}, which jump if the
 # recursive property read falls back to per-dataset reads. Every other row
 # is unchanged.
+# Re-ratcheted 2026-09-26 (next phase W7a) after the batched live
+# destination view was dropped: a dataset this run did not change keeps its
+# discovery plan, so neither the pass's recursive view listing nor the
+# per-dataset recheck awk runs. -V measurements: incr=102 (awk 34, cat 33,
+# zfs_list_calls 1, live_destination_snapshot_rechecks 0) full / 68 (awk 17)
+# small, remote_incr=101 / 67, props=176 (awk 114) / 91. ssh_connections and
+# ssh_master_opens are unchanged; no ceiling was increased.
 noop	TOTAL	25
 noop	sed	0
 noop	awk	2
@@ -189,9 +196,9 @@ dryrun_incr	profile:zfs_receive_calls	0
 dryrun_incr	profile:send_receive_pipeline_commands	0
 dryrun_incr	profile:live_destination_snapshot_rechecks	0
 dryrun_incr	profile:exists_destination_calls	0
-incr	TOTAL	149
+incr	TOTAL	118
 incr	sed	2
-incr	awk	69
+incr	awk	40
 incr	sort	6
 incr	comm	3
 incr	cut	0
@@ -202,7 +209,7 @@ incr	date	19
 incr	ps	0
 incr	mktemp	0
 incr	expr	0
-incr	cat	40
+incr	cat	38
 incr	rm	9
 incr	mv	0
 incr	ls	0
@@ -216,15 +223,15 @@ incr	ssh_connections	0
 incr	ssh_invocations	0
 incr	ssh_master_opens	0
 incr	profile:command_render_calls	61
-incr	profile:runtime_artifact_files_created	32
+incr	profile:runtime_artifact_files_created	30
 incr	profile:runtime_artifact_dirs_created	0
 incr	profile:runtime_cache_object_writes	0
 incr	profile:runtime_cache_object_readbacks	0
-incr	profile:zfs_list_calls	3
+incr	profile:zfs_list_calls	2
 incr	profile:zfs_send_calls	30
 incr	profile:zfs_receive_calls	30
 incr	profile:send_receive_pipeline_commands	30
-incr	profile:live_destination_snapshot_rechecks	2
+incr	profile:live_destination_snapshot_rechecks	0
 incr	profile:exists_destination_calls	0
 remote_noop	TOTAL	43
 remote_noop	sed	5
@@ -263,9 +270,9 @@ remote_noop	profile:zfs_receive_calls	0
 remote_noop	profile:send_receive_pipeline_commands	0
 remote_noop	profile:live_destination_snapshot_rechecks	0
 remote_noop	profile:exists_destination_calls	0
-remote_incr	TOTAL	149
+remote_incr	TOTAL	117
 remote_incr	sed	6
-remote_incr	awk	71
+remote_incr	awk	41
 remote_incr	sort	4
 remote_incr	comm	2
 remote_incr	cut	0
@@ -276,7 +283,7 @@ remote_incr	date	14
 remote_incr	ps	0
 remote_incr	mktemp	0
 remote_incr	expr	0
-remote_incr	cat	41
+remote_incr	cat	40
 remote_incr	rm	6
 remote_incr	mv	0
 remote_incr	ls	0
@@ -290,19 +297,19 @@ remote_incr	ssh_connections	1
 remote_incr	ssh_invocations	69
 remote_incr	ssh_master_opens	1
 remote_incr	profile:command_render_calls	129
-remote_incr	profile:runtime_artifact_files_created	25
+remote_incr	profile:runtime_artifact_files_created	23
 remote_incr	profile:runtime_artifact_dirs_created	0
 remote_incr	profile:runtime_cache_object_writes	0
 remote_incr	profile:runtime_cache_object_readbacks	0
-remote_incr	profile:zfs_list_calls	4
+remote_incr	profile:zfs_list_calls	3
 remote_incr	profile:zfs_send_calls	30
 remote_incr	profile:zfs_receive_calls	30
 remote_incr	profile:send_receive_pipeline_commands	30
-remote_incr	profile:live_destination_snapshot_rechecks	2
+remote_incr	profile:live_destination_snapshot_rechecks	0
 remote_incr	profile:exists_destination_calls	0
-props	TOTAL	234
+props	TOTAL	203
 props	sed	2
-props	awk	161
+props	awk	132
 props	sort	5
 props	comm	2
 props	cut	0
@@ -313,7 +320,7 @@ props	date	12
 props	ps	0
 props	mktemp	0
 props	expr	0
-props	cat	44
+props	cat	43
 props	rm	6
 props	mv	0
 props	ls	0
@@ -327,15 +334,15 @@ props	ssh_connections	0
 props	ssh_invocations	0
 props	ssh_master_opens	0
 props	profile:command_render_calls	61
-props	profile:runtime_artifact_files_created	28
+props	profile:runtime_artifact_files_created	27
 props	profile:runtime_artifact_dirs_created	0
 props	profile:runtime_cache_object_writes	0
 props	profile:runtime_cache_object_readbacks	0
-props	profile:zfs_list_calls	4
+props	profile:zfs_list_calls	3
 props	profile:zfs_send_calls	30
 props	profile:zfs_receive_calls	30
 props	profile:send_receive_pipeline_commands	30
-props	profile:live_destination_snapshot_rechecks	2
+props	profile:live_destination_snapshot_rechecks	0
 props	profile:exists_destination_calls	0
 props	profile:zfs_get_calls	7
 props	profile:normalized_property_reads_source	2
@@ -414,9 +421,9 @@ dryrun_incr_small	profile:zfs_receive_calls	0
 dryrun_incr_small	profile:send_receive_pipeline_commands	0
 dryrun_incr_small	profile:live_destination_snapshot_rechecks	0
 dryrun_incr_small	profile:exists_destination_calls	0
-incr_small	TOTAL	90
+incr_small	TOTAL	79
 incr_small	sed	2
-incr_small	awk	30
+incr_small	awk	20
 incr_small	sort	6
 incr_small	comm	3
 incr_small	cut	0
@@ -427,7 +434,7 @@ incr_small	date	19
 incr_small	ps	0
 incr_small	mktemp	0
 incr_small	expr	0
-incr_small	cat	20
+incr_small	cat	19
 incr_small	rm	9
 incr_small	mv	0
 incr_small	ls	0
@@ -441,15 +448,15 @@ incr_small	ssh_connections	0
 incr_small	ssh_invocations	0
 incr_small	ssh_master_opens	0
 incr_small	profile:command_render_calls	22
-incr_small	profile:runtime_artifact_files_created	32
+incr_small	profile:runtime_artifact_files_created	30
 incr_small	profile:runtime_artifact_dirs_created	0
 incr_small	profile:runtime_cache_object_writes	0
 incr_small	profile:runtime_cache_object_readbacks	0
-incr_small	profile:zfs_list_calls	3
+incr_small	profile:zfs_list_calls	2
 incr_small	profile:zfs_send_calls	11
 incr_small	profile:zfs_receive_calls	11
 incr_small	profile:send_receive_pipeline_commands	11
-incr_small	profile:live_destination_snapshot_rechecks	2
+incr_small	profile:live_destination_snapshot_rechecks	0
 incr_small	profile:exists_destination_calls	0
 remote_noop_small	TOTAL	43
 remote_noop_small	sed	5
@@ -488,9 +495,9 @@ remote_noop_small	profile:zfs_receive_calls	0
 remote_noop_small	profile:send_receive_pipeline_commands	0
 remote_noop_small	profile:live_destination_snapshot_rechecks	0
 remote_noop_small	profile:exists_destination_calls	0
-remote_incr_small	TOTAL	90
+remote_incr_small	TOTAL	78
 remote_incr_small	sed	6
-remote_incr_small	awk	32
+remote_incr_small	awk	21
 remote_incr_small	sort	4
 remote_incr_small	comm	2
 remote_incr_small	cut	0
@@ -501,7 +508,7 @@ remote_incr_small	date	14
 remote_incr_small	ps	0
 remote_incr_small	mktemp	0
 remote_incr_small	expr	0
-remote_incr_small	cat	21
+remote_incr_small	cat	20
 remote_incr_small	rm	6
 remote_incr_small	mv	0
 remote_incr_small	ls	0
@@ -515,19 +522,19 @@ remote_incr_small	ssh_connections	1
 remote_incr_small	ssh_invocations	30
 remote_incr_small	ssh_master_opens	1
 remote_incr_small	profile:command_render_calls	51
-remote_incr_small	profile:runtime_artifact_files_created	25
+remote_incr_small	profile:runtime_artifact_files_created	23
 remote_incr_small	profile:runtime_artifact_dirs_created	0
 remote_incr_small	profile:runtime_cache_object_writes	0
 remote_incr_small	profile:runtime_cache_object_readbacks	0
-remote_incr_small	profile:zfs_list_calls	4
+remote_incr_small	profile:zfs_list_calls	3
 remote_incr_small	profile:zfs_send_calls	11
 remote_incr_small	profile:zfs_receive_calls	11
 remote_incr_small	profile:send_receive_pipeline_commands	11
-remote_incr_small	profile:live_destination_snapshot_rechecks	2
+remote_incr_small	profile:live_destination_snapshot_rechecks	0
 remote_incr_small	profile:exists_destination_calls	0
-props_small	TOTAL	117
+props_small	TOTAL	105
 props_small	sed	2
-props_small	awk	64
+props_small	awk	53
 props_small	sort	5
 props_small	comm	2
 props_small	cut	0
@@ -538,7 +545,7 @@ props_small	date	12
 props_small	ps	0
 props_small	mktemp	0
 props_small	expr	0
-props_small	cat	25
+props_small	cat	23
 props_small	rm	6
 props_small	mv	0
 props_small	ls	0
@@ -552,15 +559,15 @@ props_small	ssh_connections	0
 props_small	ssh_invocations	0
 props_small	ssh_master_opens	0
 props_small	profile:command_render_calls	22
-props_small	profile:runtime_artifact_files_created	28
+props_small	profile:runtime_artifact_files_created	27
 props_small	profile:runtime_artifact_dirs_created	0
 props_small	profile:runtime_cache_object_writes	0
 props_small	profile:runtime_cache_object_readbacks	0
-props_small	profile:zfs_list_calls	4
+props_small	profile:zfs_list_calls	3
 props_small	profile:zfs_send_calls	11
 props_small	profile:zfs_receive_calls	11
 props_small	profile:send_receive_pipeline_commands	11
-props_small	profile:live_destination_snapshot_rechecks	2
+props_small	profile:live_destination_snapshot_rechecks	0
 props_small	profile:exists_destination_calls	0
 props_small	profile:zfs_get_calls	7
 props_small	profile:normalized_property_reads_source	2

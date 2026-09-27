@@ -520,15 +520,12 @@ test_rollback_destination_to_last_common_snapshot_rolls_back_and_clears_flag() {
 			}
 			zxfer_rollback_destination_to_last_common_snapshot
 			printf 'flag=%s\n' "$g_did_delete_dest_snapshots"
-			printf 'dirty=<%s>\n' "${g_zxfer_live_destination_dirty_datasets:-}"
 		)
 	)
 
 	assertEquals "Rollback should target the destination snapshot matching the last common snapshot." \
 		"rollback -r backup/target/src@snap1" "$(cat "$log")"
 	assertContains "Successful rollback should clear the delete marker." "$output" "flag=0"
-	assertContains "Successful rollback should mark exactly the rolled-back dataset dirty so its later live rechecks bypass the batched view." \
-		"$output" "dirty=<backup/target/src>"
 }
 
 test_rollback_destination_to_last_common_snapshot_skips_when_not_needed() {
@@ -617,13 +614,14 @@ test_zxfer_reconcile_live_destination_snapshot_state_shortcuts_empty_source_and_
 tank/src@snap1	111"
 	output=$(
 		(
+			# The -d destroy ran on this dataset, so the recheck re-plans it.
+			g_did_delete_dest_snapshots=1
 			g_actual_dest="backup/target/src"
 			g_last_common_snap=""
 			g_src_snapshot_transfer_list=""
 			g_dest_has_snapshots=1
-			zxfer_probe_destination_existence() {
-				printf 'unexpected probe\n'
-				g_zxfer_destination_exists_result=1
+			zxfer_run_destination_zfs_cmd() {
+				printf 'unexpected listing\n'
 			}
 
 			zxfer_reconcile_live_destination_snapshot_state "tank/src"
@@ -632,9 +630,6 @@ tank/src@snap1	111"
 			g_last_common_snap="tank/src@snap1	111"
 			g_src_snapshot_transfer_list="tank/src@snap2	222"
 			g_dest_has_snapshots=1
-			zxfer_probe_destination_existence() {
-				g_zxfer_destination_exists_result=1
-			}
 			zxfer_run_destination_zfs_cmd() {
 				return 0
 			}
@@ -648,8 +643,8 @@ tank/src@snap1	111"
 
 	assertContains "Live destination-state reconciliation should return success when there are no source records to reconcile." \
 		"$output" "no_source_status=0"
-	assertNotContains "Nothing to reconcile must not probe the destination." \
-		"$output" "unexpected probe"
+	assertNotContains "Nothing to re-plan must not list the destination." \
+		"$output" "unexpected listing"
 	assertContains "Live destination-state reconciliation should return success when the destination has no live snapshots." \
 		"$output" "empty_live_status=0"
 	assertContains "Live destination-state reconciliation should clear the destination snapshot marker when no live snapshots remain." \
@@ -707,7 +702,6 @@ test_rollback_destination_to_last_common_snapshot_reports_rollback_failures() {
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				printf 'dirty=<%s>\n' "${g_zxfer_live_destination_dirty_datasets:-}"
 				exit 1
 			}
 			zxfer_rollback_destination_to_last_common_snapshot
@@ -718,6 +712,4 @@ test_rollback_destination_to_last_common_snapshot_reports_rollback_failures() {
 	assertEquals "Rollback failures should abort instead of silently continuing." 1 "$status"
 	assertContains "Rollback failures should identify the destination snapshot that could not be rolled back." \
 		"$output" "Failed to roll back destination [backup/target/src] to backup/target/src@snap1 after deleting snapshots."
-	assertContains "Rollback failures should not mark the dataset dirty as if the mutation succeeded." \
-		"$output" "dirty=<>"
 }

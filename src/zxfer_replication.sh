@@ -45,12 +45,12 @@
 #   g_is_performed_send_destroy (set by send/receive and snapshot destroy, read
 #   by the -Y loop).
 # writes globals: the published plan (g_last_common_snap,
-#   g_src_snapshot_transfer_list, g_dest_has_snapshots) in the live recheck.
-# reads globals: g_option_*, g_destination, the recursive dataset lists, and
-#   the g_zxfer_plan_* results of the last zxfer_plan_dataset_snapshots call.
-# mutates caches: destination existence and the live view through the
-#   snapshot-state helpers; the destination property iteration cache before
-#   the post-seed pass.
+#   g_src_snapshot_transfer_list, g_dest_has_snapshots) in the live re-plan.
+# reads globals: g_option_*, g_destination, the recursive dataset lists,
+#   g_did_delete_dest_snapshots, and the g_zxfer_plan_* results of the last
+#   zxfer_plan_dataset_snapshots call.
+# mutates caches: destination existence through the snapshot-state helpers;
+#   the destination property iteration cache before the post-seed pass.
 # returns via stdout: none.
 
 # Purpose: Reset the replication state for a new session.
@@ -101,18 +101,13 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 	if ! zxfer_run_destination_zfs_cmd rollback -r "$l_rollback_snapshot"; then
 		zxfer_throw_error "Failed to roll back destination [$g_actual_dest] to $l_rollback_snapshot after deleting snapshots."
 	fi
-	# Only this dataset's snapshots changed: its later rechecks (seed and
-	# post-receive verification) are listed live instead of from the batched
-	# view. The staged record caches stay, because later datasets' -d plans
-	# still read them.
-	zxfer_mark_live_destination_dataset_dirty "$g_actual_dest"
 	g_did_delete_dest_snapshots=0
 }
 
 # Purpose: Seed a missing or snapshot-less destination with the first pending
 # snapshot.
 # Usage: zxfer_seed_destination_for_snapshot_transfer FIRST_RECORD FIRST_PATH;
-# refuses a full receive into a destination whose live snapshots share no
+# refuses a full receive into a destination whose planned snapshots share no
 # guid with the source.
 zxfer_seed_destination_for_snapshot_transfer() {
 	l_seed_record=$1
@@ -121,17 +116,15 @@ zxfer_seed_destination_for_snapshot_transfer() {
 	zxfer_probe_destination_existence "$g_actual_dest" ||
 		zxfer_throw_error "$g_zxfer_destination_exists_error"
 	if [ "$g_zxfer_destination_exists_result" -eq 0 ]; then
-		# Live-probe a cached-missing initial root once more before choosing
-		# the missing-dataset receive path.
-		zxfer_map_destination_dataset
-		if [ "$g_actual_dest" = "$g_zxfer_destination_dataset_result" ]; then
-			zxfer_probe_destination_existence "$g_actual_dest" live ||
-				zxfer_throw_error "$g_zxfer_destination_exists_error"
-		fi
+		# Live-probe a cached-missing dataset once more before choosing the
+		# missing-dataset receive path: discovery may be minutes old.
+		zxfer_probe_destination_existence "$g_actual_dest" live ||
+			zxfer_throw_error "$g_zxfer_destination_exists_error"
 	fi
 	l_seed_dest_exists=$g_zxfer_destination_exists_result
 
-	# The live recheck published g_dest_has_snapshots from the live rows.
+	# The plan published g_dest_has_snapshots from discovery, or from the live
+	# rows when this run destroyed some of the dataset's snapshots.
 	if [ "$l_seed_dest_exists" -eq 1 ] &&
 		[ "${g_last_common_snap:-}" = "" ] &&
 		[ "$g_dest_has_snapshots" -eq 1 ]; then
@@ -160,8 +153,8 @@ zxfer_seed_destination_for_snapshot_transfer() {
 zxfer_copy_snapshots() {
 	g_dest_seed_requires_property_reconcile=0
 
-	# Long-running transfers can drift from the plan: recheck the live
-	# destination first, and use -Y to repeat until convergence.
+	# A dataset whose snapshots -d just destroyed is re-planned from a live
+	# listing; -Y repeats whole passes to converge under outside drift.
 	zxfer_reconcile_live_destination_snapshot_state "$1"
 
 	# One record per line, oldest first; drop stray blank edge lines once.
@@ -205,40 +198,25 @@ zxfer_copy_snapshots() {
 }
 
 # Purpose: Re-plan the current dataset from its live destination snapshots
-# right before the send.
+# when this run destroyed some of them.
 # Usage: zxfer_reconcile_live_destination_snapshot_state SOURCE, right after
-# zxfer_inspect_delete_snap planned SOURCE; republishes the plan from the live
-# rows, keeping the anchor unless the anchor or a pending snapshot is common.
+# zxfer_inspect_delete_snap planned SOURCE. Only a dataset whose -d destroy
+# ran (g_did_delete_dest_snapshots) is listed again; every other dataset keeps
+# the plan made from discovery, and zfs receive refuses an incremental whose
+# base is gone. Republishes the plan from the live rows, keeping the anchor
+# unless the anchor or a pending snapshot is common.
 zxfer_reconcile_live_destination_snapshot_state() {
-	# Without an anchor or pending snapshots there is nothing to recheck.
+	[ "${g_did_delete_dest_snapshots:-0}" -eq 1 ] || return 0
+	# Without an anchor or pending snapshots there is nothing to re-plan.
 	[ -n "${g_last_common_snap:-}${g_src_snapshot_transfer_list:-}" ] || return 0
 
-	zxfer_probe_destination_existence "$g_actual_dest" ||
-		zxfer_throw_error "$g_zxfer_destination_exists_error"
-	if [ "$g_zxfer_destination_exists_result" -eq 0 ]; then
-		# A cached-missing initial root is live-probed by the seed; a child
-		# may have been created by a recursive parent receive since discovery.
-		zxfer_map_destination_dataset
-		[ "$g_actual_dest" != "$g_zxfer_destination_dataset_result" ] || return 0
-		zxfer_probe_destination_existence "$g_actual_dest" live ||
-			zxfer_throw_error "$g_zxfer_destination_exists_error"
-		[ "$g_zxfer_destination_exists_result" -eq 1 ] || return 0
-	fi
-
+	# The planner fails closed on guid-less rows and finds the newest
+	# snapshot whose name and guid both exist on the destination.
 	zxfer_get_live_destination_record_file "$g_actual_dest" ||
 		zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: ${g_zxfer_live_destination_record_file_error:-}"
-	l_recheck_rows=$(zxfer_filter_snapshot_record_file_for_dataset \
-		"$g_zxfer_live_destination_record_file_result" "$g_actual_dest") ||
-		zxfer_throw_error "Failed to read live destination snapshots for [$g_actual_dest]." "$?"
-	# The planner's last result (inspect's plan of this dataset) still holds
-	# when the destination rows it was made from are unchanged. Otherwise
-	# plan again: the planner fails closed on guid-less rows and finds the
-	# newest snapshot whose name and guid both exist on the destination.
-	if [ "$l_recheck_rows" != "${g_zxfer_plan_destination_records:-}" ]; then
-		zxfer_plan_dataset_snapshots "$1" "$g_actual_dest" \
-			"$g_zxfer_live_destination_record_file_result"
-		zxfer_echoV "Refreshed destination snapshot cache for $g_actual_dest using live snapshot state."
-	fi
+	zxfer_plan_dataset_snapshots "$1" "$g_actual_dest" \
+		"$g_zxfer_live_destination_record_file_result"
+	zxfer_echoV "Refreshed destination snapshot cache for $g_actual_dest using live snapshot state."
 
 	# Only the anchor or a pending snapshot may become the new anchor.
 	# Otherwise publish the same records with no anchor: the seed then
@@ -371,8 +349,8 @@ zxfer_process_source_dataset() {
 	# In-flight background receives cannot affect this dataset's cached
 	# destination state: the ready-queue ancestry gate defers any dataset
 	# whose destination conflicts with an active job, zxfer_reap_send_job
-	# invalidates a completed job's own subtree, and the live recheck
-	# re-probes before any send.
+	# invalidates a completed job's own subtree, and the seed live-probes a
+	# destination the cache calls missing before a full receive.
 	zxfer_inspect_delete_snap "$g_option_d_delete_destination_snapshots" \
 		"$l_process_source"
 
@@ -698,11 +676,6 @@ zxfer_run_zfs_mode_loop() {
 		g_is_performed_send_destroy=0
 
 		zxfer_reset_property_iteration_caches
-		# -Y passes exist to converge under concurrent drift, so a batched
-		# live destination view and its per-dataset dirty list are never
-		# valid across a pass boundary: every pass captures its own fresh
-		# listing and starts with no dataset marked dirty.
-		zxfer_invalidate_live_destination_view
 
 		l_num_iterations=$((l_num_iterations + 1))
 		if [ "$g_option_Y_yield_iterations" -gt 1 ]; then

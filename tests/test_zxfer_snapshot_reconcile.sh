@@ -39,7 +39,6 @@ reset_snapshot_reconcile_test_state() {
 	g_zxfer_snapshot_plan_file=""
 	g_zxfer_snapshot_creation_file=""
 	zxfer_reset_snapshot_reconcile_state
-	g_zxfer_live_destination_dirty_datasets=""
 }
 
 # Stage the flat record files discovery publishes: source rows newest first,
@@ -140,7 +139,7 @@ test_delete_snaps_returns_when_nothing_needs_deletion() {
 	assertEquals "An empty delete list should run no command." "" "$(cat "$log_file")"
 }
 
-test_delete_snaps_destroys_the_planned_snapshots_and_marks_the_dataset_dirty() {
+test_delete_snaps_destroys_the_planned_snapshots_and_marks_the_dataset_changed() {
 	log_file="$TEST_TMPDIR/delete_planned.log"
 	: >"$log_file"
 	g_zxfer_plan_source_count=2
@@ -155,9 +154,8 @@ backup/fs@snap4"
 
 	assertEquals "The planned snapshots should be destroyed in one comma-joined target." \
 		"destroy=destroy backup/fs@snap4,snap3" "$(cat "$log_file")"
-	assertEquals "A destroy should mark exactly the destroyed dataset dirty for later live rechecks." \
-		"backup/fs" "${g_zxfer_live_destination_dirty_datasets:-}"
-	assertEquals "A destroy should set the destination-delete marker." 1 "$g_did_delete_dest_snapshots"
+	assertEquals "A destroy should set the destination-delete marker, which makes the pre-send recheck list the dataset live." \
+		1 "$g_did_delete_dest_snapshots"
 	assertEquals "A destroy should set the -Y mutation marker." 1 "${g_is_performed_send_destroy:-0}"
 }
 
@@ -172,7 +170,6 @@ test_delete_snaps_throws_when_destroy_fails() {
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				printf 'dirty=<%s>\n' "${g_zxfer_live_destination_dirty_datasets:-}"
 				exit "${2:-1}"
 			}
 			zxfer_delete_snaps "tank/fs" "tank/fs@snap3"
@@ -182,8 +179,6 @@ test_delete_snaps_throws_when_destroy_fails() {
 	assertEquals "Failed destination destroys should preserve the destroy status." 37 "$status"
 	assertContains "Failed destination destroys should use the generic execution error." \
 		"$output" "Error when executing command."
-	assertContains "Failed destination destroys should not mark the dataset dirty as if the mutation succeeded." \
-		"$output" "dirty=<>"
 }
 
 test_delete_snaps_skips_full_wipe_when_live_source_recheck_shows_snapshots() {
