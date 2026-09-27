@@ -176,7 +176,11 @@
 #       → -Y repeats a pass that did work up to the documented 8 passes.
 #       test_guidless_source_row_fails_its_dataset_plan_closed
 #       → a source row without a guid stops the run with exit 3 and a report
-#         naming the dataset; nothing is received into it.
+#         naming the dataset and failure_stage: replication, even after an
+#         earlier dataset's send; nothing is received into it.
+#       test_replan_failure_after_a_property_pass_reports_the_replication_stage
+#       → a snapshot step after a dataset's -P pass (here its re-plan after a
+#         -d destroy) reports failure_stage: replication.
 #       test_yield_passes_plan_from_their_own_discovery
 #       → each -Y pass plans from its own discovery: a second pass that finds
 #         one dataset still behind sends that dataset alone.
@@ -1431,8 +1435,8 @@ test_property_read_failure_fails_closed_without_mutations() {
 # Invariant: a snapshot row without a guid fails its dataset's plan closed
 # (the planner's exit 3) with a structured report naming the dataset, and
 # nothing is received into that dataset. The row reaches the planner through
-# the dataset's slice of the source record file. The stage is not pinned: it
-# still names the root's earlier send.
+# the dataset's slice of the source record file. The report names the
+# replication stage, not the root's earlier send (fixed 2026-09).
 test_guidless_source_row_fails_its_dataset_plan_closed() {
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/incremental" guidless_row
@@ -1450,9 +1454,34 @@ test_guidless_source_row_fails_its_dataset_plan_closed() {
 		"grep -Fq 'message: Failed to determine the last common snapshot for [$ZXFER_MOCKBIN_SOURCE_ROOT/child1] and [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1].' '$CASE_DIR/zxfer.stderr'"
 	assertTrue "the failure must be a structured runtime report" \
 		"grep -Fq 'failure_class: runtime' '$CASE_DIR/zxfer.stderr'"
+	assertTrue "the report must name the planning stage, not the root's earlier send; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		"grep -Fqx 'failure_stage: replication' '$CASE_DIR/zxfer.stderr'"
 	assertFalse "nothing may be received into the dataset with the guid-less row" \
 		"grep -q '^receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1\$' '$ZFS_LOG'"
 	planning_assert_no_mutations
+}
+
+# Invariant (failure stage, 2026-09): the snapshot steps that follow a
+# dataset's property pass (its pre-send re-plan, the rollback and the seed
+# decision) report failure_stage: replication, not the property transfer that
+# just finished. The root's -d destroy makes it re-plan from a depth-1
+# listing before its send, and that listing fails here.
+test_replan_failure_after_a_property_pass_reports_the_replication_stage() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" stage_after_properties
+	planning_make_destination_diverged
+	planning_add_property_transfer_fixtures
+	planning_force_manifest_failure \
+		"list -H -d 1 -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" 2
+
+	planning_run_zxfer "$STATE_DIR" -d -F -P -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "a failed re-plan listing must stop the run" 1 $?
+	planning_assert_log_has_line \
+		"MUTATE destroy $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap3"
+	planning_assert_failure_report replication \
+		"Failed to retrieve live destination snapshots for [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT]"
+	planning_assert_no_send_receive
 }
 
 # Invariant: snapshot names are matched exactly, never as prefixes. With ten

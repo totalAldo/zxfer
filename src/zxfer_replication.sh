@@ -307,10 +307,15 @@ EOF
 # Usage: zxfer_process_source_dataset SOURCE PROPERTY_PASS(0|1) [POSITION];
 # POSITION, SOURCE's iteration-list position, selects its snapshot slices.
 # Appends a seeded SOURCE to g_zxfer_post_seed_property_sources.
+# Side effects: Sets failure_stage replication for the dataset's planning,
+# deletes, re-plan, rollback and seed decision, so a failure there never
+# reports the stage an earlier step or dataset left (property transfer,
+# send/receive); the property pass and each send name their own stage.
 zxfer_process_source_dataset() {
 	l_process_source=$1
 	l_process_property_pass=$2
 
+	zxfer_set_failure_stage "replication"
 	zxfer_set_actual_dest "$l_process_source"
 	zxfer_select_snapshot_slice "${3:-}" "$l_process_source"
 	# In-flight background receives cannot affect this dataset's cached
@@ -325,6 +330,7 @@ zxfer_process_source_dataset() {
 
 	if [ "$l_process_property_pass" -eq 1 ]; then
 		zxfer_transfer_properties "$l_process_source"
+		zxfer_set_failure_stage "replication"
 	fi
 
 	zxfer_copy_snapshots "$l_process_source"
