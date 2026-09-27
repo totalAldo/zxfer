@@ -82,7 +82,7 @@ EOF
 	assertEquals "a props run that changes a property should fail. Output: $output" \
 		1 "$status"
 	assertContains "the failure should say the fixture needs no change" \
-		"$output" "scenario props changed 1 properties; its fixture must need none"
+		"$output" "scenario props ran 1 mutating zfs command(s) besides its receives; its fixture must need none"
 	assertNotContains "no counts should be reported for the failed run" \
 		"$output" "props	TOTAL"
 

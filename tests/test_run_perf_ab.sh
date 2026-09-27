@@ -184,7 +184,7 @@ test_bad_candidate_runs_are_harness_errors() {
 	# A props run whose properties no longer match the fixture changes them.
 	perf_ab_assert_candidate_error \
 		"for d in a b; do echo s | zfs receive \"\$d\"; done; zfs set atime=on a; exit 0" \
-		"candidate props at size 1: 1 property changes, expected none" \
+		"candidate props at size 1: 1 mutating zfs command(s) besides the receives, expected none" \
 		--scenarios props
 }
 

@@ -316,12 +316,13 @@ zxfer_microbench_run_scenario() {
 		cat "$l_stderr" >&2
 		return "$l_status"
 	fi
-	# The props fixture's properties already match, so a set or inherit means
+	# The props fixture already matches, so any mutating zfs command besides
+	# the receives (a set or inherit, or a destroy, rollback or snapshot) means
 	# the fixture and the launcher disagree and the counts measure other work.
 	if [ "$l_scenario" = props ]; then
 		l_mutations=$(grep -c '^MUTATE ' "$l_zfs_log" || :)
 		if [ "${l_mutations:-0}" -ne 0 ]; then
-			printf 'run_microbench.sh: scenario props changed %s properties; its fixture must need none\n' \
+			printf 'run_microbench.sh: scenario props ran %s mutating zfs command(s) besides its receives; its fixture must need none\n' \
 				"$l_mutations" >&2
 			return 1
 		fi

@@ -1047,8 +1047,8 @@ canned zfs and a mock ssh, with no pools and no root:
   `--latency-ms` (default 80) per new connection or master open and a
   sixteenth of it per multiplexed call. `--scenarios LIST` picks and orders
   them and adds the opt-in `props`: the incremental with `-P` and 68
-  properties per dataset that already match, where a set or inherit is a
-  harness error. `props` is opt-in because `upstream-compat-final` reads
+  properties per dataset that already match, where any mutating zfs command
+  besides the receives is a harness error. `props` is opt-in because `upstream-compat-final` reads
   properties in per-property shell loops (about 15 s for three children on
   macOS).
 - `--shell PATH` runs both launchers with that interpreter (default
@@ -1066,7 +1066,7 @@ canned zfs and a mock ssh, with no pools and no root:
 - Exit status: 0 for a completed run whatever the ratios; 1 for a harness
   error (an unknown ref, a failed run, a run that never reached the canned
   zfs, a wrong receive count, a remote run without ssh, or a `props` run that
-  changed a property); 2 for a usage error, including a repeated `--sizes` or
+  ran a mutating zfs command besides its receives); 2 for a usage error, including a repeated `--sizes` or
   `--scenarios` value; 130 on INT and 143 on TERM.
 - The work directory sits directly under `/tmp` whatever `TMPDIR` is, so the
   candidate's control-socket paths stay below the socket path limit. A nested

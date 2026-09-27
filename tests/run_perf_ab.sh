@@ -15,7 +15,8 @@
 #   remote_noop  noop with -O localhost -T localhost through the mock ssh
 #   remote_incr  incr with -O localhost -T localhost through the mock ssh
 #   props        incr with -P, 68 properties per dataset that already match
-#                on both sides (no set or inherit may run); opt-in, because
+#                on both sides (no zfs command but the receives may change
+#                anything); opt-in, because
 #                upstream-compat-final reads properties in per-property shell
 #                loops (about 15 s for 3 children on macOS)
 # In the remote scenarios the mock ssh sleeps --latency-ms for each new
@@ -401,7 +402,8 @@ zxfer_perf_ab_build_fixture() {
 # Purpose: Time one run of one tree and record it unless it is the warm-up.
 # Usage: zxfer_perf_ab_run_once SIZE SCENARIO candidate|baseline REP; exits
 # 1 when zxfer fails, never calls zfs, receives the wrong count, in a remote
-# run skips ssh, or in a props run sets or inherits a property.
+# run skips ssh, or in a props run runs a mutating zfs command (set,
+# inherit, destroy, ...) besides its receives.
 zxfer_perf_ab_run_once() {
 	l_run_size=$1
 	l_run_scenario=$2
@@ -486,7 +488,7 @@ zxfer_perf_ab_run_once() {
 	props)
 		l_run_mutations=$(grep -c '^MUTATE ' "$l_run_zfs_log")
 		[ "$l_run_mutations" -eq 0 ] ||
-			zxfer_perf_ab_die "$l_run_label: $l_run_mutations property changes, expected none"
+			zxfer_perf_ab_die "$l_run_label: $l_run_mutations mutating zfs command(s) besides the receives, expected none"
 		;;
 	esac
 	[ "$l_run_rep" -eq 0 ] ||
