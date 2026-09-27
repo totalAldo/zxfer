@@ -164,10 +164,13 @@ EOF
 # Purpose: Signal one zxfer-owned direct child helper before its caller waits.
 # Usage: zxfer_abort_direct_child_pid PID [SIGNAL] [PURPOSE] [SCOPE]; called
 # by callers that spawned a helper but could not register it (or registered
-# it elsewhere) and must stop it before failing. A pgid scope (from
-# zxfer_spawn_background_shell) signals the helper's whole process group.
-# A PURPOSE holding a tab or line break is replaced by "cleanup helper", so
-# the signal is always tried.
+# it elsewhere) and must stop it before failing, and by
+# zxfer_abort_cleanup_pid for registered helpers. A registered helper keeps
+# its row's scope. A pgid scope (from zxfer_spawn_background_shell) signals
+# the helper's whole process group. A PURPOSE holding a tab or line break is
+# replaced by "cleanup helper", so the signal is always tried. On failure it
+# returns 1 with g_zxfer_cleanup_pid_abort_failure_message and tracks an
+# unregistered child for the trap's retry.
 zxfer_abort_direct_child_pid() {
 	l_cleanup_direct_abort_pid=$1
 	l_cleanup_direct_abort_signal=${2:-TERM}
@@ -205,28 +208,16 @@ zxfer_abort_direct_child_pid() {
 
 # Purpose: Signal one registered cleanup helper before its owner waits.
 # Usage: zxfer_abort_cleanup_pid PID [SIGNAL]; an untracked PID returns 0, and
-# the row stays until the owner waits and unregisters it.
+# the row stays until the owner waits and unregisters it. The signal goes
+# through zxfer_abort_direct_child_pid with the row's purpose.
 # SAFETY: direct-child records retain the baseline `$!`/registered/no-user-wait
 # invariant and receive a liveness check immediately before signalling,
 # without a normal-path process-table spawn.
 zxfer_abort_cleanup_pid() {
-	l_cleanup_abort_pid=$1
-	l_cleanup_abort_signal=${2:-TERM}
-
 	g_zxfer_cleanup_pid_abort_failure_message=""
-	zxfer_find_cleanup_pid_record "$l_cleanup_abort_pid" || return 0
-
-	l_cleanup_abort_purpose=$g_zxfer_cleanup_pid_record_purpose
-	if [ "$g_zxfer_cleanup_pid_record_scope" != pgid ] &&
-		! kill -s 0 "$l_cleanup_abort_pid" 2>/dev/null; then
-		return 0
-	fi
-	if zxfer_signal_background_shell "$l_cleanup_abort_pid" \
-		"$g_zxfer_cleanup_pid_record_scope" "$l_cleanup_abort_signal"; then
-		return 0
-	fi
-	g_zxfer_cleanup_pid_abort_failure_message="Failed to signal cleanup helper [$l_cleanup_abort_purpose] (PID $l_cleanup_abort_pid)."
-	return 1
+	zxfer_find_cleanup_pid_record "$1" || return 0
+	zxfer_abort_direct_child_pid "$1" "${2:-TERM}" \
+		"$g_zxfer_cleanup_pid_record_purpose"
 }
 
 # Purpose: Give registered cleanup helpers one bounded opportunity to finish
