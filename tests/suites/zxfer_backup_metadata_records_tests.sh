@@ -464,7 +464,7 @@ $row" \
 #format_version:2
 $roots
 $row" \
-		"3|$header
+		"4|$header
 #format_version:2
 $roots
 $row
@@ -479,7 +479,7 @@ broken-row
 $roots
 broken-row
 $header" \
-		"3|$header
+		"4|$header
 #format_version:2
 $row"; do
 		expected=${case_spec%%|*}
@@ -506,13 +506,13 @@ test_backup_metadata_extract_properties_for_dataset_pair_resolves_relative_rows(
 	assertEquals "atime=off=local" \
 		"$(zxfer_backup_metadata_extract_properties_for_dataset_pair "$contents" tank/src/child backup/dst/src/child)"
 	zxfer_backup_metadata_extract_properties_for_dataset_pair "$contents" tank/src backup/other >/dev/null
-	assertEquals "A destination outside the recorded root does not match." 1 "$?"
+	assertEquals "A destination outside the recorded root does not match." 3 "$?"
 	zxfer_backup_metadata_extract_properties_for_dataset_pair "$contents" tank/src/missing backup/dst/src/missing >/dev/null
 	assertEquals "A resolving pair without a row is told apart from an unresolved one." 8 "$?"
 	zxfer_backup_metadata_extract_properties_for_dataset_pair "$ambiguous" tank/src backup/dst/src >/dev/null
-	assertEquals "Duplicate rows are ambiguous." 2 "$?"
+	assertEquals "Duplicate rows are ambiguous." 9 "$?"
 	zxfer_backup_metadata_extract_properties_for_dataset_pair "$malformed" tank/src backup/dst/src >/dev/null
-	assertEquals "Legacy comma rows make the file malformed." 3 "$?"
+	assertEquals "Legacy comma rows make the file malformed." 4 "$?"
 }
 
 test_write_backup_properties_skips_without_rows_and_publishes_both_files_once() {

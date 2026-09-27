@@ -448,10 +448,8 @@ test_transfer_properties_skip_backup_capture_flag_suppresses_capture() {
 test_transfer_properties_uses_restored_backup_properties_in_restore_mode() {
 	zxfer_property_test_default_rows
 	g_option_e_restore_property_mode=1
-	ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
-	ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
-	g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
-		"$(zxfer_test_backup_metadata_row "." "compression=gzip=local,casesensitivity=sensitive=-,normalization=none=-,utf8only=off=-")")
+	zxfer_test_load_backup_restore_rows tank/src backup/dst \
+		"$(zxfer_test_backup_metadata_row "." "compression=gzip=local,casesensitivity=sensitive=-,normalization=none=-,utf8only=off=-")"
 	zxfer_property_test_run_transfer "tank/src"
 	assertEquals 0 "$?"
 	assertEquals "The restored view replaces the live effective view; the live raw view still has the same creation-time properties." \

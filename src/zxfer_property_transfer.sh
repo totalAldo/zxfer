@@ -342,7 +342,8 @@ EOF
 # g_zxfer_source_pvs_raw and g_zxfer_source_pvs_effective, or returns the zfs
 # status with its diagnostic in g_zxfer_property_error_result. The source is
 # read through the source zfs role, so it reaches the -O host. Startup has
-# already validated the -e metadata header.
+# already validated the whole -e file and stored its rows, so each dataset
+# only looks its row up.
 zxfer_collect_source_props() {
 	l_collect_source=$1
 	l_collect_destination=$2
@@ -354,19 +355,15 @@ zxfer_collect_source_props() {
 	g_zxfer_source_pvs_effective=$g_zxfer_source_pvs_raw
 	[ "$g_option_e_restore_property_mode" -eq 1 ] || return 0
 
-	if [ -z "$g_restored_backup_file_contents" ]; then
-		zxfer_throw_usage_error "Can't find the properties for the filesystem $l_collect_source and destination $l_collect_destination"
-	fi
 	l_restore_status=0
-	g_zxfer_source_pvs_effective=$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
-		"$g_restored_backup_file_contents" "$l_collect_source" "$l_collect_destination") ||
+	zxfer_find_restored_backup_properties "$l_collect_source" "$l_collect_destination" ||
 		l_restore_status=$?
 	case $l_restore_status in
-	0) ;;
-	1 | 8)
+	0) g_zxfer_source_pvs_effective=$g_zxfer_backup_restore_properties_result ;;
+	3 | 8)
 		zxfer_throw_usage_error "Can't find the properties for the filesystem $l_collect_source and destination $l_collect_destination"
 		;;
-	2)
+	9)
 		zxfer_throw_usage_error "Multiple restored property entries matched filesystem $l_collect_source and destination $l_collect_destination"
 		;;
 	*)

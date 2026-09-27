@@ -43,39 +43,51 @@ test_collect_source_props_uses_backup_restore() {
 			g_zxfer_normalized_dataset_properties="compression=lz4=local,readonly=on=local"
 		}
 		g_option_e_restore_property_mode=1
-		ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
-		ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
-		g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
-			"$(zxfer_test_backup_metadata_row "." "readonly=on=local,compression=lz4=local")")
+		zxfer_test_load_backup_restore_rows tank/src backup/dst \
+			"$(zxfer_test_backup_metadata_row "." "readonly=on=local,compression=lz4=local")" \
+			"$(zxfer_test_backup_metadata_row "a/b" "atime=off=local")"
+		# Each dataset looks its row up; nothing re-reads the file.
+		g_cmd_awk=false
 		zxfer_collect_source_props "tank/src" "backup/dst"
 		printf 'raw=%s\neffective=%s\n' "$g_zxfer_source_pvs_raw" "$g_zxfer_source_pvs_effective"
+		zxfer_collect_source_props "tank/src/a/b" "backup/dst/a/b"
+		printf 'child=%s\n' "$g_zxfer_source_pvs_effective"
 	) >"$TEST_TMPDIR/collect_restore.out"
 	assertEquals "raw=compression=lz4=local,readonly=on=local
-effective=readonly=on=local,compression=lz4=local" "$(cat "$TEST_TMPDIR/collect_restore.out")"
+effective=readonly=on=local,compression=lz4=local
+child=atime=off=local" "$(cat "$TEST_TMPDIR/collect_restore.out")"
 }
 
 test_collect_source_props_fails_when_backup_entry_missing() {
 	set +e
-	output=$(
-		(
-			zxfer_load_normalized_dataset_properties() {
-				g_zxfer_normalized_dataset_properties="compression=lz4=local"
-			}
-			zxfer_throw_usage_error() {
-				printf '%s\n' "$1"
-				exit 2
-			}
-			g_option_e_restore_property_mode=1
-			ZXFER_TEST_BACKUP_SOURCE_ROOT="tank/src"
-			ZXFER_TEST_BACKUP_DESTINATION_ROOT="backup/dst"
-			g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents \
-				"$(zxfer_test_backup_metadata_row "other" "compression=lz4=local")")
-			zxfer_collect_source_props "tank/src" "backup/dst"
+	for case_spec in \
+		"tank/src|backup/dst|Can't find the properties for the filesystem tank/src and destination backup/dst" \
+		"tank/src/other|backup/dst/elsewhere|Can't find the properties for the filesystem tank/src/other and destination backup/dst/elsewhere" \
+		"tank/src/dup|backup/dst/dup|Multiple restored property entries matched filesystem tank/src/dup and destination backup/dst/dup"; do
+		l_source=${case_spec%%|*}
+		l_rest=${case_spec#*|}
+		l_destination=${l_rest%%|*}
+		output=$(
+			(
+				zxfer_load_normalized_dataset_properties() {
+					g_zxfer_normalized_dataset_properties="compression=lz4=local"
+				}
+				zxfer_throw_usage_error() {
+					printf '%s\n' "$1"
+					exit 2
+				}
+				g_option_e_restore_property_mode=1
+				zxfer_test_load_backup_restore_rows tank/src backup/dst \
+					"$(zxfer_test_backup_metadata_row "other" "compression=lz4=local")" \
+					"$(zxfer_test_backup_metadata_row "dup" "compression=lz4=local")" \
+					"$(zxfer_test_backup_metadata_row "dup" "compression=off=local")"
+				zxfer_collect_source_props "$l_source" "$l_destination"
+			)
 		)
-	)
-	status=$?
-	assertEquals 2 "$status"
-	assertEquals "Can't find the properties for the filesystem tank/src and destination backup/dst" "$output"
+		status=$?
+		assertEquals "$l_source -> $l_destination is a usage error." 2 "$status"
+		assertEquals "${l_rest#*|}" "$output"
+	done
 }
 
 test_collect_source_props_restore_mode_requires_restored_contents() {
