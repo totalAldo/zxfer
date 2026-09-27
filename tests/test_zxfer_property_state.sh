@@ -1110,6 +1110,36 @@ test_prefetch_recursive_normalized_properties_fails_closed_on_a_malformed_skelet
 	assertEquals "status=1 state=2 table=<>" "$(cat "$TEST_TMPDIR/prefetch_malformed.out")"
 }
 
+test_prefetch_recursive_normalized_properties_fails_closed_when_rows_cannot_be_stored() {
+	ROLE_LOG="$TEST_TMPDIR/prefetch_unstored.log"
+	: >"$ROLE_LOG"
+	(
+		zxfer_property_test_model_trees
+		g_zxfer_source_property_tree_prefetch_root="tank/src"
+		g_recursive_source_list="tank/src
+tank/src/child"
+		zxfer_run_zfs_cmd_for_role() { zxfer_property_test_model_zfs "$@"; }
+		zxfer_prepare_property_read_files
+		g_zxfer_property_row_dir="$TEST_TMPDIR/no-such-row-dir"
+		l_status=ok
+		zxfer_prefetch_recursive_normalized_properties source 2>/dev/null || l_status=failed
+		printf 'prefetch=%s state=%s table=<%s>\n' "$l_status" \
+			"$g_zxfer_source_property_tree_prefetch_state" "${g_zxfer_source_property_table:-}"
+		zxfer_load_normalized_dataset_properties tank/src/child source
+		printf 'child=%s hit=%s\n' "$g_zxfer_normalized_dataset_properties" \
+			"$g_zxfer_normalized_dataset_properties_cache_hit"
+		zxfer_load_normalized_dataset_properties tank/src/child source
+		printf 'again hit=%s table=<%s>\n' "$g_zxfer_normalized_dataset_properties_cache_hit" \
+			"${g_zxfer_source_property_table:-}"
+	) >"$TEST_TMPDIR/prefetch_unstored.out"
+	assertEquals "A store that cannot be written publishes nothing; every lookup reads live." \
+		"prefetch=failed state=2 table=<>
+child=compression=gzip=inherited from tank/src hit=0
+again hit=0 table=<>" "$(cat "$TEST_TMPDIR/prefetch_unstored.out")"
+	assertEquals "One tree read, then two live reads of three calls each." \
+		9 "$(wc -l <"$ROLE_LOG" | tr -d ' ')"
+}
+
 test_prefetch_recursive_normalized_properties_prepends_fresh_rows_ahead_of_live_rows() {
 	(
 		ZXFER_TEST_PROPERTY_ROWS=$(printf 'tank/src\tcompression\tlz4\tlocal')
