@@ -54,12 +54,10 @@ module or a chain of setters.
   but does not own transport state
 - [../src/zxfer_cli.sh](../src/zxfer_cli.sh): CLI parsing, option validation,
   and compression command interpretation
-- [../src/zxfer_snapshot_state.sh](../src/zxfer_snapshot_state.sh): the one
-  per-dataset record filter over the flat per-run snapshot record files, the
-  in-shell destination
-  existence probe and its linear existence cache, fork-free source-to-
-  destination dataset mapping, and the once-per-pass batched live destination
-  view with its per-dataset dirty list and depth-1 live record file
+- [../src/zxfer_snapshot_state.sh](../src/zxfer_snapshot_state.sh): the
+  in-shell destination existence probe and its linear existence cache,
+  fork-free source-to-destination dataset mapping, and the depth-1 live
+  listing of a dataset this run changed
 - [../src/zxfer_backup_metadata.sh](../src/zxfer_backup_metadata.sh): the
   `-k`/`-e` property backup metadata module: exact-keyed storage layout, the
   local and rendered-remote directory/write/read/storage-listing protections,
@@ -104,14 +102,17 @@ module or a chain of setters.
   text so a `-j` job shell needs no zxfer function
 - [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh):
   one-awk-pass snapshot planning (common snapshot, transfer list, divergence,
-  and the `-d` delete list), one batched creation-time query per delete plan
+  and the `-d` delete list) from each dataset's own slice of the record files,
+  cut by one keyed sort per iteration list, one batched creation-time query
+  per delete plan
   that decides rollback eligibility and `-g`, deletion with its safety
   rechecks, the divergence contract, and reusable run-scoped plan and
   creation-time scratch files
-- [../src/zxfer_replication.sh](../src/zxfer_replication.sh): dataset iteration,
-  per-dataset planning state, the `-g` pre-pass, the live destination
-  recheck, the per-pass send/destroy marker used by `-Y`, and orchestration
-  across discovery, reconciliation, and transfer
+- [../src/zxfer_replication.sh](../src/zxfer_replication.sh): the numbered
+  dataset iteration list, per-dataset planning state, the `-g` pre-pass, the
+  live re-plan of a
+  dataset this run changed, the per-pass send/destroy marker used by `-Y`,
+  and orchestration across discovery, reconciliation, and transfer
 - [../src/zxfer_session.sh](../src/zxfer_session.sh): final composition root for
   owner resets, CLI-to-execution-context startup, remote connection
   preparation, trap registration, ordered shutdown, and top-level execution
@@ -206,26 +207,40 @@ discovery and the fast recursive no-op proof each allocate one complete ordered
 file group, retain its handles in operation-specific state, and clean the group
 from one terminal path. Discovery owns the flat source/destination record files
 that survive for later lookups. Snapshot reconciliation owns a reusable plan
-file and a reusable creation-time file, and snapshot state owns the reusable
-live destination view and depth-1 listing files; all four are reused across
-datasets for one run, are
-not cleared by a per-dataset state reset, and are reused only when they lie
-under the run's private temp root. The
+file, a reusable creation-time file and a reusable slice file, and snapshot
+state owns the reusable depth-1 listing file; all four are reused across
+datasets for one run, are not cleared by a per-dataset state reset, and are
+reused only when they lie under the run's private temp root. The
 runtime layer allocates and verifies these contained files but does not adopt
 their domain lifecycle.
 
-Before each send, the live recheck lists the dataset's destination rows
-through `zxfer_get_live_destination_record_file`. That listing is served from
-the pass's batched destination view until zxfer itself receives into, rolls
-back, or destroys snapshots of the dataset; after that it is a depth-1 live
-listing. The recheck keeps inspect's plan when those rows equal the rows it
-was planned from, and otherwise re-plans through
-`zxfer_plan_dataset_snapshots`. A common snapshot older than the inspected
-anchor is never adopted: the anchor and pending records are republished
-without an anchor, so the seed refuses a snapshotted destination, or re-seeds
-an emptied one from the anchor with `-F`. A snapshot that another tool prunes
-on the destination after the view was captured is not seen until the next
-pass; the incremental receive then fails without changing the destination.
+Planning reads each dataset's own rows. Every time
+`zxfer_build_replication_iteration_list` builds the pass's list (the `-g`
+pre-pass and the main pass each build one, and every `-Y` pass builds its
+own), it numbers the list's rows and `zxfer_split_snapshot_records` cuts both
+record files by that position: one awk keys every row of a listed dataset
+(destination names mapped back to source names, exact names only), `sort`
+groups the keyed rows in bounded memory, and one awk writes `BASE.N.d` and
+`BASE.N.s` beside the reusable slice file `BASE`, one file open at a time.
+The queue and the `-g` pre-pass select each dataset's slice before planning
+it; the planner uses a slice only while its source, destination and record
+files match, and otherwise reads the whole record files, as the reap-time
+check of another dataset does. Planning cost therefore grows with the
+snapshots of one dataset instead of the whole pass.
+
+Before each send, only a dataset whose snapshots this run's `-d` destroy
+changed is listed again: `zxfer_get_live_destination_record_file` lists it at
+depth 1 and `zxfer_plan_dataset_snapshots` re-plans it. Every other dataset
+keeps the plan made from discovery. A common snapshot older than the
+inspected anchor is never adopted: the anchor and pending records are
+republished without an anchor, so the seed refuses a snapshotted destination,
+or re-seeds an emptied one from the anchor with `-F`. Before a full receive
+into a dataset the existence cache calls missing, the seed probes it live once
+more. A change another tool makes to the destination after discovery is not
+seen until the next pass: an incremental receive whose base was pruned fails
+without changing the destination, and a full receive refuses a dataset that
+has gained snapshots. The post-receive divergence check also lists its
+dataset at depth 1.
 
 Parallel send/receive scheduling lives in
 [../src/zxfer_send_jobs.sh](../src/zxfer_send_jobs.sh). Each running job has
@@ -384,9 +399,9 @@ one item per argument, so no byte in a property value can become an extra
    also check each planned destination delete against `-g`. Then inspect
    source versus destination state per dataset.
 6. Optionally delete destination-only snapshots.
-7. Transfer snapshots in `zxfer_copy_snapshots()`: recheck the destination
-   (re-planning when its rows changed), seed when needed, then send the
-   remaining range. Seed-only
+7. Transfer snapshots in `zxfer_copy_snapshots()`: re-plan a dataset whose
+   snapshots step 6 destroyed from a live listing, seed when needed, then
+   send the remaining range. Seed-only
    receive `-F` is passed as an internal execution flag without mutating the
    parsed `g_option_*` state.
 8. For parallel sends, `zxfer_send_jobs.sh` starts the pipelines, polls their
@@ -535,7 +550,7 @@ Each dataset in the iteration list flows through one orchestration pass in
 ```mermaid
 flowchart TD
     A["Start zxfer_process_source_dataset(source)"] --> B["Map source to actual destination dataset"]
-    B --> C["Inspect source and destination snapshots"]
+    B --> C["Inspect the dataset's slices of the source and destination record files"]
     C --> D["Find last common snapshot and build transfer list"]
     D --> E{"-d enabled?"}
     E -- "yes" --> F["Read creation times in one batched query (rollback eligibility and -g), then delete destination-only snapshots"]
@@ -543,9 +558,9 @@ flowchart TD
     F --> G
     G -- "yes" --> H["Run zxfer_transfer_properties(): collect source properties, check -o against the initial source, create a missing destination or plan and apply property changes, and buffer -k metadata when enabled"]
     G -- "no" --> I["Skip property phase"]
-    H --> J["Recheck live destination; re-plan when rows changed; never adopt an anchor older than the inspected one"]
+    H --> J["After a -d destroy, re-plan from a live depth-1 listing and never adopt an anchor older than the inspected one; otherwise keep the discovery plan"]
     I --> J
-    J --> K{"Any snapshots remain after the live recheck?"}
+    J --> K{"Any snapshots remain to send?"}
     K -- "no" --> X["Dataset pass complete"]
     K -- "yes" --> L{"Need bootstrap seed?"}
     L -- "yes" --> M["Seed first snapshot into missing or empty destination"]
@@ -712,7 +727,7 @@ flowchart TD
     D --> E{"Were newer destination snapshots deleted?"}
     E -->|yes| F["Mark rollback eligibility for the last common snapshot"]
     E -->|no| G["No rollback needed"]
-    F --> H["Refresh live destination snapshot state"]
+    F --> H["Re-plan from a live listing when snapshots were deleted"]
     G --> H
     H --> I{"Any source snapshots still need transfer?"}
     I -->|no| O{"Did this pass perform send or destroy work?"}

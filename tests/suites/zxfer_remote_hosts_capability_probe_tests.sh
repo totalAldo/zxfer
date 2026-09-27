@@ -91,7 +91,7 @@ test_remote_host_direct_load_includes_transport_but_not_snapshot_state() {
 		zxfer_load_modules zxfer_remote_hosts.sh || exit 1
 		command -v zxfer_ensure_remote_host_capabilities >/dev/null 2>&1 || exit 2
 		command -v zxfer_invoke_ssh_shell_command_for_host >/dev/null 2>&1 || exit 3
-		command -v zxfer_reset_live_destination_view_state >/dev/null 2>&1 && exit 4
+		command -v zxfer_reset_live_destination_listing_state >/dev/null 2>&1 && exit 4
 		exit 0
 	' zxfer-remote-direct-load "$ZXFER_ROOT"
 

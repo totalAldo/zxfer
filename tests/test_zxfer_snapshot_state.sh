@@ -1,10 +1,10 @@
 #!/bin/sh
 #
 # shunit2 tests for src/zxfer_snapshot_state.sh: the destination existence
-# cache and probes, destination dataset mapping, snapshot record files, and
-# the live destination view. The existence-probe fragment keeps the exec
-# fixture, the destination-map fragment the snapshot-discovery fixture and the
-# live-view fragment the replication fixture they were written for.
+# cache and probes, destination dataset mapping, and the live depth-1
+# listing. The existence-probe fragment keeps the exec fixture and the
+# destination-map fragment the snapshot-discovery fixture they were written
+# for.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -17,8 +17,6 @@ TEST_ORIGINAL_PATH=$PATH
 . "$TESTS_DIR/helpers/exec_fixtures.sh"
 # shellcheck source=tests/helpers/snapshot_discovery_fixtures.sh
 . "$TESTS_DIR/helpers/snapshot_discovery_fixtures.sh"
-# shellcheck source=tests/helpers/replication_fixtures.sh
-. "$TESTS_DIR/helpers/replication_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_snapshot_state.sh"
 
@@ -42,10 +40,6 @@ setUp() {
 		zxfer_test_exec_fixture_setup
 		return
 	fi
-	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_snapshot_state_live_view_tests.sh"; then
-		zxfer_test_replication_fixture_setup
-		return
-	fi
 	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_snapshot_state_destination_map_tests.sh"; then
 		# The exec fixture empties TEST_TMPDIR and writes its own ssh stand-in.
 		zxfer_test_snapshot_discovery_fixture_write_tools
@@ -67,9 +61,6 @@ setUp() {
 	g_option_R_recursive=""
 	g_option_V_very_verbose=0
 	g_destination_operating_system=""
-	g_zxfer_live_destination_view_file=""
-	g_zxfer_live_destination_view_root=""
-	g_zxfer_live_destination_dirty_datasets=""
 	g_zxfer_live_destination_listing_file=""
 	zxfer_reset_failure_context "unit"
 }
@@ -111,9 +102,9 @@ test_destination_probe_helpers_load_with_snapshot_state_not_generic_exec() {
 				printf "%s\n" "snapshot_has_destination_state=no"
 			fi
 			if command -v zxfer_get_live_destination_record_file >/dev/null 2>&1; then
-				printf "%s\n" "snapshot_has_live_view=yes"
+				printf "%s\n" "snapshot_has_live_listing=yes"
 			else
-				printf "%s\n" "snapshot_has_live_view=no"
+				printf "%s\n" "snapshot_has_live_listing=no"
 			fi
 		'
 	)
@@ -125,8 +116,8 @@ test_destination_probe_helpers_load_with_snapshot_state_not_generic_exec() {
 		"$ownership_output" "exec_has_destination_state=no"
 	assertContains "Snapshot state should own destination existence probes." \
 		"$ownership_output" "snapshot_has_destination_state=yes"
-	assertContains "Snapshot state should own the complete live destination view." \
-		"$ownership_output" "snapshot_has_live_view=yes"
+	assertContains "Snapshot state should own the live destination listing." \
+		"$ownership_output" "snapshot_has_live_listing=yes"
 }
 
 test_zxfer_reset_destination_existence_cache_clears_root_and_completion_state() {
@@ -152,28 +143,6 @@ test_zxfer_note_destination_receive_completed_clears_missing_subtree_assumption(
 		1 "$(cached_state "backup/dst")"
 	assertEquals "Receive completion should clear stale missing-subtree defaults so descendants are live-probed." \
 		miss "$(cached_state "backup/dst/child")"
-}
-
-test_zxfer_filter_snapshot_record_file_for_dataset_matches_exact_dataset_prefixes_only() {
-	cache_file="$TEST_TMPDIR/filter_snapshot_record_cache.raw"
-	cat >"$cache_file" <<'EOF'
-tank/a/b@snap1	111
-tank/a/bc@snap1	222
-tank/a/b@snap2	333
-tank/a/b/child@snap1	444
-EOF
-	filtered_output=$(zxfer_filter_snapshot_record_file_for_dataset "$cache_file" "tank/a/b")
-
-	set +e
-	zxfer_filter_snapshot_record_file_for_dataset "$TEST_TMPDIR/missing_snapshot_record_cache.raw" "tank/src" >/dev/null 2>&1
-	missing_status=$?
-	set -e
-
-	assertEquals "Snapshot-record file filtering should match exact dataset@ prefixes so sibling prefix datasets never collide." \
-		"tank/a/b@snap1	111
-tank/a/b@snap2	333" "$filtered_output"
-	assertEquals "Snapshot-record file filtering should fail when the staged cache file is missing." \
-		1 "$missing_status"
 }
 
 test_zxfer_destination_hierarchy_helpers_cover_current_shell_paths() {
@@ -449,7 +418,7 @@ test_zxfer_probe_destination_existence_resolves_ambiguous_sunos_probes_in_curren
 		"gone_error=Failed to determine whether destination dataset [backup/gone/new] exists: parent recursive listing for [backup/gone] did not contain the parent dataset."
 }
 
-test_zxfer_get_live_destination_record_file_serves_view_or_depth_one_listing() {
+test_zxfer_get_live_destination_record_file_lists_the_dataset_at_depth_one() {
 	zfs_log="$TEST_TMPDIR/live_record_file_zfs.log"
 	listing_copy="$TEST_TMPDIR/live_record_file_listing.copy"
 	: >"$zfs_log"
@@ -465,20 +434,13 @@ test_zxfer_get_live_destination_record_file_serves_view_or_depth_one_listing() {
 			g_option_R_recursive="tank/src"
 			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' "$*" >>"$zfs_log"
-				if [ "$*" = "list -Hr -o name,guid -t snapshot backup/src" ]; then
-					printf 'backup/src@s1\t1\nbackup/src/my child@s1\t2\n'
-				elif [ "$*" = "list -H -d 1 -o name,guid -t snapshot backup/src/my child" ]; then
+				if [ "$*" = "list -H -d 1 -o name,guid -t snapshot backup/src/my child" ]; then
 					printf 'backup/src/my child@s1\t2\nbackup/src/my child@s2\t3\n'
 				else
 					printf '%s\n' "ssh: broken pipe" >&2
 					return 42
 				fi
 			}
-			zxfer_get_live_destination_record_file "backup/src/my child"
-			if [ "$g_zxfer_live_destination_record_file_result" = "$g_zxfer_live_destination_view_file" ]; then
-				printf 'clean=view\n'
-			fi
-			zxfer_mark_live_destination_dataset_dirty "backup/src/my child"
 			zxfer_get_live_destination_record_file "backup/src/my child"
 			if [ "${g_zxfer_live_destination_record_file_result#"$g_zxfer_run_tmp_root"/}" != "$g_zxfer_live_destination_record_file_result" ]; then
 				printf 'listing_under_root=yes\n'
@@ -487,26 +449,26 @@ test_zxfer_get_live_destination_record_file_serves_view_or_depth_one_listing() {
 			failure_status=0
 			zxfer_get_live_destination_record_file "other/dataset" || failure_status=$?
 			printf 'failure_status=%s\n' "$failure_status"
+			printf 'failure_result=<%s>\n' "$g_zxfer_live_destination_record_file_result"
 			printf 'failure_error=%s\n' "$g_zxfer_live_destination_record_file_error"
 		)
 	)
 
-	assertContains "A clean dataset under the root should be served by the batched view." \
-		"$output" "clean=view"
 	assertContains "The depth-1 listing file should live under the run root." \
 		"$output" "listing_under_root=yes"
 	assertEquals "An inherited listing path must never be written through." \
 		"operator data" "$(cat "$sentinel")"
-	assertEquals "A dirty dataset should be served by a fresh depth-1 listing." \
+	assertEquals "The listing file should hold the dataset's live depth-1 rows." \
 		"backup/src/my child@s1	2
 backup/src/my child@s2	3" "$(cat "$listing_copy")"
 	assertContains "A failed depth-1 listing should return its status." \
 		"$output" "failure_status=42"
+	assertContains "A failed depth-1 listing should publish no record file." \
+		"$output" "failure_result=<>"
 	assertContains "A failed depth-1 listing should publish its output for the error report." \
 		"$output" "failure_error=ssh: broken pipe"
-	assertEquals "The view should be captured once, then each depth-1 listing runs live." \
-		"list -Hr -o name,guid -t snapshot backup/src
-list -H -d 1 -o name,guid -t snapshot backup/src/my child
+	assertEquals "Every call should be one depth-1 listing of the named dataset; nothing lists the tree." \
+		"list -H -d 1 -o name,guid -t snapshot backup/src/my child
 list -H -d 1 -o name,guid -t snapshot other/dataset" "$(cat "$zfs_log")"
 }
 
@@ -536,56 +498,18 @@ tank/my data|0|back|tank/my data/child|back/my data/child
 EOF
 }
 
-test_zxfer_refresh_live_destination_view_ignores_an_inherited_view_file() {
-	sentinel="$TEST_TMPDIR/operator_file"
-	printf '%s\n' "operator data" >"$sentinel"
-	ln -s "$sentinel" "$TEST_TMPDIR/inherited_view_link"
-
-	output=$(
-		(
-			g_zxfer_live_destination_view_file="$TEST_TMPDIR/inherited_view_link"
-			export g_zxfer_live_destination_view_file
-			g_initial_source="srcpool/data"
-			g_destination="dstpool/back"
-			g_option_R_recursive="srcpool/data"
-			zxfer_run_destination_zfs_cmd() {
-				printf 'dstpool/back/data@snap1\t111\ndstpool/back/data/c@snap1\t222\n'
-			}
-			zxfer_get_live_destination_record_file "dstpool/back/data/c"
-			if [ "${g_zxfer_live_destination_view_file#"$g_zxfer_run_tmp_root"/}" != "$g_zxfer_live_destination_view_file" ]; then
-				printf 'under_run_root=yes\n'
-			fi
-			printf 'serves=%s\n' "$g_zxfer_live_destination_view_serves_current_dataset"
-			printf 'rows=%s\n' "$(zxfer_filter_snapshot_record_file_for_dataset \
-				"$g_zxfer_live_destination_record_file_result" "dstpool/back/data/c")"
-		)
-	)
-
-	assertEquals "An inherited view path must never be written through." \
-		"operator data" "$(cat "$sentinel")"
-	assertContains "The view should be reallocated under the run root." \
-		"$output" "under_run_root=yes"
-	assertContains "The fresh view should serve the dataset." "$output" "serves=1"
-	assertContains "The fresh view should hold the captured listing." \
-		"$output" "rows=dstpool/back/data/c@snap1	222"
-}
-
 # zxfer-test-fragment: suites/zxfer_snapshot_state_existence_probe_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_state_existence_probe_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh"
 # zxfer-test-fragment: suites/zxfer_snapshot_state_destination_map_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_state_destination_map_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_state_destination_map_tests.sh"
-# zxfer-test-fragment: suites/zxfer_snapshot_state_live_view_tests.sh
-# shellcheck source=tests/suites/zxfer_snapshot_state_live_view_tests.sh
-. "$TESTS_DIR/suites/zxfer_snapshot_state_live_view_tests.sh"
 
 suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_snapshot_state.sh" \
 		"$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_state_destination_map_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_state_live_view_tests.sh"
+		"$TESTS_DIR/suites/zxfer_snapshot_state_destination_map_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

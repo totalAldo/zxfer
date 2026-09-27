@@ -43,9 +43,6 @@ bgjob_test_stub_finalize_hooks() {
 	zxfer_invalidate_destination_property_mutation_cache() {
 		printf 'invalidate %s\n' "$*" >>"${BGJOB_HOOK_LOG:?}"
 	}
-	zxfer_mark_live_destination_dataset_dirty() {
-		printf 'dirty %s\n' "$1" >>"${BGJOB_HOOK_LOG:?}"
-	}
 	zxfer_verify_converged_destination_after_receive() {
 		printf 'verify %s\n' "$1" >>"${BGJOB_HOOK_LOG:?}"
 	}
@@ -125,10 +122,9 @@ test_spawn_send_job_records_status_and_finalizes_on_success() {
 	assertEquals "A spawned job counts while active and the list is empty after reaping." \
 		"count=1
 count=0 jobs=<>" "$output"
-	assertEquals "A successful receive should run the four post-receive hooks for its destination." \
+	assertEquals "A successful receive should run the three post-receive hooks for its destination." \
 		"completed backup/a
 invalidate backup/a exact
-dirty backup/a
 verify backup/a" "$(cat "$hook_log")"
 }
 
@@ -248,7 +244,6 @@ after_abort=0" "$output"
 	assertEquals "Only the finished job runs its post-receive hooks." \
 		"completed backup/fast
 invalidate backup/fast exact
-dirty backup/fast
 verify backup/fast" "$(cat "$hook_log")"
 }
 
@@ -277,12 +272,10 @@ test_schedule_send_receive_pipeline_runs_and_finishes_foreground_receives() {
 		"exec send | recv
 completed backup/a
 invalidate backup/a exact
-dirty backup/a
 verify backup/a
 exec send | recv
 completed backup/b
 invalidate backup/b exact
-dirty backup/b
 verify backup/b" "$(cat "$hook_log")"
 }
 
@@ -594,7 +587,6 @@ test_wait_for_zfs_send_jobs_clears_job_list_on_success() {
 			zxfer_reset_send_receive_state
 			zxfer_note_destination_receive_completed() { :; }
 			zxfer_invalidate_destination_property_mutation_cache() { :; }
-			zxfer_mark_live_destination_dataset_dirty() { :; }
 			zxfer_verify_converged_destination_after_receive() { :; }
 			zxfer_spawn_send_job "sleep 1" "tank/a@snap" "backup/a"
 			zxfer_spawn_send_job "sleep 1" "tank/b@snap" "backup/b"
@@ -613,7 +605,6 @@ test_wait_for_zfs_send_jobs_reports_failure() {
 		g_zxfer_send_job_abort_grace_seconds=0
 		zxfer_note_destination_receive_completed() { :; }
 		zxfer_invalidate_destination_property_mutation_cache() { :; }
-		zxfer_mark_live_destination_dataset_dirty() { :; }
 		zxfer_verify_converged_destination_after_receive() { :; }
 		zxfer_throw_error() {
 			echo "send failure"

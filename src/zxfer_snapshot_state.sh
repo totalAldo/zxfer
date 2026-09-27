@@ -32,37 +32,31 @@
 # shellcheck shell=sh disable=SC2034,SC2154
 
 ################################################################################
-# SNAPSHOT RECORD STATE / LIVE VIEW / DESTINATION EXISTENCE
+# SNAPSHOT RECORD STATE / LIVE LISTINGS / DESTINATION EXISTENCE
 ################################################################################
 
 # Module contract:
 # owns globals: the destination existence cache (g_destination_existence_cache,
 #   _root, _root_complete), the recursive dataset lists (reset here, filled by
-#   discovery; g_recursive_dest_list also grows here), the batched live
-#   destination view (g_zxfer_live_destination_view_*,
-#   g_zxfer_live_destination_dirty_datasets), the reusable depth-1 listing
-#   file g_zxfer_live_destination_listing_file, and these in-shell results:
-#   g_zxfer_destination_exists_result and _error,
+#   discovery; g_recursive_dest_list also grows here), the reusable depth-1
+#   listing file g_zxfer_live_destination_listing_file, and these in-shell
+#   results: g_zxfer_destination_exists_result and _error,
 #   g_zxfer_destination_existence_cache_entry_result,
 #   g_zxfer_destination_dataset_result,
 #   g_zxfer_live_destination_record_file_result and _error, and
 #   g_zxfer_snapshot_scratch_file_result.
-# reads globals: g_cmd_awk, g_option_R_recursive, g_initial_source,
-#   g_initial_source_had_trailing_slash, g_destination, g_actual_dest,
-#   g_destination_operating_system, g_zxfer_run_tmp_root, and the flat
-#   snapshot record files staged by discovery.
-# mutates caches: destination existence and the live view file, stamp, and
-#   dirty list.
-# returns via stdout: per-dataset record lookups
-#   (zxfer_filter_snapshot_record_file_for_dataset).
+# reads globals: g_initial_source, g_initial_source_had_trailing_slash,
+#   g_destination, g_destination_operating_system and g_zxfer_run_tmp_root.
+# mutates caches: destination existence and the reusable live listing file.
+# returns via stdout: none.
 
 # Snapshot discovery stages at most one flat snapshot record file per side
 # ("dataset@snapshot<TAB>guid" rows) inside the 0700 run-private temp root:
 # g_zxfer_source_snapshot_record_cache_file (newest first) and
 # g_zxfer_destination_snapshot_record_cache_file. Those files are the
-# snapshot-record index; a per-dataset lookup is one awk pass over them. They
-# are never legitimately mutated afterwards, so a staged file that cannot be
-# read is corrupted run-private state and aborts the run.
+# snapshot-record index that per-dataset planning reads. They are never
+# legitimately mutated afterwards, so a staged file that cannot be read is
+# corrupted run-private state and aborts the run.
 
 # Purpose: Reset the destination existence cache.
 # Usage: Called at startup and before each discovery pass.
@@ -72,12 +66,10 @@ zxfer_reset_destination_existence_cache() {
 	g_destination_existence_cache_root_complete=0
 }
 
-# Purpose: Forget the live destination view and its two scratch files.
-# Usage: zxfer_reset_live_destination_view_state; called by the session reset.
-zxfer_reset_live_destination_view_state() {
-	zxfer_invalidate_live_destination_view
-	g_zxfer_live_destination_view_file=""
-	g_zxfer_live_destination_view_serves_current_dataset=0
+# Purpose: Forget the reusable live listing file.
+# Usage: zxfer_reset_live_destination_listing_state; called by the session
+# reset, so the next live listing allocates a file under the new run root.
+zxfer_reset_live_destination_listing_state() {
 	g_zxfer_live_destination_listing_file=""
 }
 
@@ -106,60 +98,6 @@ zxfer_map_destination_dataset() {
 	esac
 }
 
-# Live destination view: live rechecks are served from ONE batched snapshot
-# listing of the run's destination root, captured lazily into
-# g_zxfer_live_destination_view_file at most once per replication pass and
-# dropped at every -Y pass boundary. Each snapshot mutation this run performs
-# (receive completion including -j reap time, snapshot destroy, rollback)
-# records the mutated dataset in g_zxfer_live_destination_dirty_datasets; a
-# dirty dataset, or one outside the view root, is served by a fresh depth-1
-# listing of itself instead. A failed or partial capture never stamps the
-# view, so it is never served as fresh.
-
-# Purpose: Record that this run mutated one destination dataset.
-# Usage: Called in the main shell from the destination mutation choke points
-# with the exact dataset; an empty name invalidates the whole view instead.
-zxfer_mark_live_destination_dataset_dirty() {
-	l_dirty_dataset=${1:-}
-
-	if [ -z "$l_dirty_dataset" ]; then
-		zxfer_invalidate_live_destination_view
-		return 0
-	fi
-	if zxfer_live_destination_dataset_is_dirty "$l_dirty_dataset"; then
-		return 0
-	fi
-	if [ -n "${g_zxfer_live_destination_dirty_datasets:-}" ]; then
-		g_zxfer_live_destination_dirty_datasets="$g_zxfer_live_destination_dirty_datasets
-$l_dirty_dataset"
-	else
-		g_zxfer_live_destination_dirty_datasets=$l_dirty_dataset
-	fi
-	return 0
-}
-
-# Purpose: Check whether this pass already mutated the given destination
-# dataset.
-# Usage: zxfer_live_destination_dataset_is_dirty DATASET; matches whole lines
-# only, so "a/b" never matches "a/bc" or "a/b/c".
-zxfer_live_destination_dataset_is_dirty() {
-	case "$ZXFER_LF${g_zxfer_live_destination_dirty_datasets:-}$ZXFER_LF" in
-	*"$ZXFER_LF$1$ZXFER_LF"*)
-		return 0
-		;;
-	esac
-	return 1
-}
-
-# Purpose: Drop the batched live view stamp and the dirty list.
-# Usage: Called at the top of every -Y pass and when a mutation's scope is
-# unknown, so the next recheck captures a fresh listing.
-zxfer_invalidate_live_destination_view() {
-	g_zxfer_live_destination_view_root=""
-	g_zxfer_live_destination_dirty_datasets=""
-	return 0
-}
-
 # Purpose: Reuse a run-root scratch file or allocate a fresh one.
 # Usage: zxfer_ensure_snapshot_scratch_file CURRENT_PATH NAME_PREFIX; publishes
 # the path in g_zxfer_snapshot_scratch_file_result. CURRENT_PATH is reused
@@ -179,89 +117,19 @@ zxfer_ensure_snapshot_scratch_file() {
 	g_zxfer_snapshot_scratch_file_result=$g_zxfer_runtime_artifact_path_result
 }
 
-# Purpose: Capture the pass's batched live destination snapshot listing and
-# stamp it with its root.
-# Usage: zxfer_refresh_live_destination_view ROOT; returns non-zero without
-# stamping when the listing fails, so callers fail closed.
-zxfer_refresh_live_destination_view() {
-	l_view_refresh_root=$1
-
-	# Counts batched captures plus depth-1 listings, not per-dataset rechecks.
-	zxfer_profile_increment_counter g_zxfer_profile_live_destination_snapshot_rechecks
-
-	# Drop the stamp first so a failed capture is never mistaken for fresh.
-	g_zxfer_live_destination_view_root=""
-	zxfer_ensure_snapshot_scratch_file "${g_zxfer_live_destination_view_file:-}" \
-		zxfer-live-dest-view || return 1
-	g_zxfer_live_destination_view_file=$g_zxfer_snapshot_scratch_file_result
-
-	# A non-recursive run replicates one dataset, so a depth-1 listing is the
-	# whole view.
-	if [ "${g_option_R_recursive:-}" != "" ]; then
-		set -- -Hr
-	else
-		set -- -H -d 1
-	fi
-	if ! zxfer_run_destination_zfs_cmd list "$@" -o name,guid -t snapshot "$l_view_refresh_root" \
-		>"$g_zxfer_live_destination_view_file"; then
-		return 1
-	fi
-
-	g_zxfer_live_destination_view_root=$l_view_refresh_root
-	return 0
-}
-
-# Purpose: Decide whether the batched live view serves one destination
-# dataset, capturing the view first when this pass has none.
-# Usage: zxfer_ensure_live_destination_snapshot_view [DEST], in the main shell
-# so the view stamp survives. Publishes
-# g_zxfer_live_destination_view_serves_current_dataset (0 for dirty datasets
-# and datasets outside the view root). Aborts when a capture fails.
-zxfer_ensure_live_destination_snapshot_view() {
-	l_live_view_destination=${1:-$g_actual_dest}
-	g_zxfer_live_destination_view_serves_current_dataset=0
-
-	[ -n "${g_initial_source:-}" ] || return 0
-	zxfer_map_destination_dataset "$g_initial_source"
-	l_live_view_root=$g_zxfer_destination_dataset_result
-	[ -n "$l_live_view_root" ] || return 0
-	case "$l_live_view_destination" in
-	"$l_live_view_root" | "$l_live_view_root"/*) ;;
-	*)
-		return 0
-		;;
-	esac
-	# The view predates this pass's mutation of the dataset.
-	if zxfer_live_destination_dataset_is_dirty "$l_live_view_destination"; then
-		return 0
-	fi
-
-	if [ "${g_zxfer_live_destination_view_root:-}" != "$l_live_view_root" ]; then
-		if ! zxfer_refresh_live_destination_view "$l_live_view_root"; then
-			zxfer_throw_error "Failed to refresh the batched live destination snapshot view for [$l_live_view_destination] from [$l_live_view_root]."
-		fi
-	fi
-	g_zxfer_live_destination_view_serves_current_dataset=1
-	return 0
-}
-
-# Purpose: Name a file holding one destination dataset's live snapshot rows.
-# Usage: zxfer_get_live_destination_record_file DEST, in the main shell;
-# publishes g_zxfer_live_destination_record_file_result: the batched view when
-# it serves DEST, otherwise a reusable run-root file refreshed with a depth-1
-# listing (stdout and stderr; zxfer_plan_dataset_snapshots keeps only DEST
+# Purpose: List one destination dataset's live snapshots into a reusable
+# run-root file.
+# Usage: zxfer_get_live_destination_record_file DEST, in the main shell, for a
+# dataset this run changed (the pre-send re-plan after -d destroys, and the
+# post-receive divergence check). Publishes
+# g_zxfer_live_destination_record_file_result, the file holding the depth-1
+# listing's stdout and stderr (zxfer_plan_dataset_snapshots keeps only DEST
 # rows). A failed listing returns its status and publishes the listing output
 # in g_zxfer_live_destination_record_file_error.
 zxfer_get_live_destination_record_file() {
 	l_live_record_dest=$1
 	g_zxfer_live_destination_record_file_result=""
 	g_zxfer_live_destination_record_file_error=""
-
-	zxfer_ensure_live_destination_snapshot_view "$l_live_record_dest"
-	if [ "$g_zxfer_live_destination_view_serves_current_dataset" -eq 1 ]; then
-		g_zxfer_live_destination_record_file_result=$g_zxfer_live_destination_view_file
-		return 0
-	fi
 
 	zxfer_profile_increment_counter g_zxfer_profile_live_destination_snapshot_rechecks
 	zxfer_ensure_snapshot_scratch_file "${g_zxfer_live_destination_listing_file:-}" \
@@ -277,19 +145,6 @@ zxfer_get_live_destination_record_file() {
 		return "$l_live_record_status"
 	fi
 	g_zxfer_live_destination_record_file_result=$g_zxfer_live_destination_listing_file
-}
-
-# Purpose: Print the records of one dataset from a snapshot record file.
-# Usage: zxfer_filter_snapshot_record_file_for_dataset FILE DATASET; returns 1
-# when FILE is unreadable. Every per-dataset record filter goes through here.
-zxfer_filter_snapshot_record_file_for_dataset() {
-	[ -r "$1" ] || return 1
-
-	# Splitting on the first "@" matches exactly "dataset@" record prefixes,
-	# so sibling datasets that share a name prefix ("a/b" vs "a/bc") can
-	# never collide.
-	# shellcheck disable=SC2016  # awk program should see literal $1/$0.
-	"${g_cmd_awk:-awk}" -F@ -v ds="$2" '$1 == ds' "$1"
 }
 
 # The destination existence cache is a prepend-only newline list of

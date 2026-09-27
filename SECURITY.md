@@ -78,10 +78,10 @@ Key protections already present in the project include:
 - pre-trap rejection of inherited internal cleanup handles, so exported `g_*`
   state cannot authorize process signals, SSH actions, path removal, or SMF
   service changes
-- inherited snapshot scratch-file paths (the live destination view and
-  depth-1 listing files) are reused only when they lie under the run's private
-  temp root, and an inherited `g_cmd_awk` is cleared before the launcher
-  records the invocation
+- inherited snapshot scratch-file paths (the plan, creation-time and depth-1
+  listing files) are reused only when they lie under the run's private temp
+  root, and an inherited `g_cmd_awk` is cleared before the launcher records
+  the invocation
 - background-job teardown restricted to registered zxfer jobs, using verified
   process groups or a wrapper with start-token checks for descendant cleanup;
   a job that has recorded its exit status is signalled only through its

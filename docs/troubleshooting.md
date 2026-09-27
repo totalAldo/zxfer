@@ -164,10 +164,11 @@ with `failure_stage: send/receive` in the report.
 What it usually means:
 
 - another tool destroyed the destination's newest common snapshot while zxfer
-  was running. zxfer lists the destination once per pass and serves each
-  dataset's pre-send recheck from that listing until zxfer itself changes the
-  dataset, so a snapshot pruned after the listing is not seen, and the
-  incremental stream names a base the destination no longer has
+  was running. zxfer plans each dataset from the destination listing it takes
+  at the start of the pass and lists a dataset again only after its own `-d`
+  destroyed some of that dataset's snapshots, so a snapshot pruned after the
+  listing is not seen, and the incremental stream names a base the
+  destination no longer has
 
 What to do:
 

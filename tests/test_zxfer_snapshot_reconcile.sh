@@ -39,7 +39,6 @@ reset_snapshot_reconcile_test_state() {
 	g_zxfer_snapshot_plan_file=""
 	g_zxfer_snapshot_creation_file=""
 	zxfer_reset_snapshot_reconcile_state
-	g_zxfer_live_destination_dirty_datasets=""
 }
 
 # Stage the flat record files discovery publishes: source rows newest first,
@@ -140,7 +139,7 @@ test_delete_snaps_returns_when_nothing_needs_deletion() {
 	assertEquals "An empty delete list should run no command." "" "$(cat "$log_file")"
 }
 
-test_delete_snaps_destroys_the_planned_snapshots_and_marks_the_dataset_dirty() {
+test_delete_snaps_destroys_the_planned_snapshots_and_marks_the_dataset_changed() {
 	log_file="$TEST_TMPDIR/delete_planned.log"
 	: >"$log_file"
 	g_zxfer_plan_source_count=2
@@ -155,9 +154,8 @@ backup/fs@snap4"
 
 	assertEquals "The planned snapshots should be destroyed in one comma-joined target." \
 		"destroy=destroy backup/fs@snap4,snap3" "$(cat "$log_file")"
-	assertEquals "A destroy should mark exactly the destroyed dataset dirty for later live rechecks." \
-		"backup/fs" "${g_zxfer_live_destination_dirty_datasets:-}"
-	assertEquals "A destroy should set the destination-delete marker." 1 "$g_did_delete_dest_snapshots"
+	assertEquals "A destroy should set the destination-delete marker, which makes the pre-send recheck list the dataset live." \
+		1 "$g_did_delete_dest_snapshots"
 	assertEquals "A destroy should set the -Y mutation marker." 1 "${g_is_performed_send_destroy:-0}"
 }
 
@@ -172,7 +170,6 @@ test_delete_snaps_throws_when_destroy_fails() {
 			}
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
-				printf 'dirty=<%s>\n' "${g_zxfer_live_destination_dirty_datasets:-}"
 				exit "${2:-1}"
 			}
 			zxfer_delete_snaps "tank/fs" "tank/fs@snap3"
@@ -182,8 +179,6 @@ test_delete_snaps_throws_when_destroy_fails() {
 	assertEquals "Failed destination destroys should preserve the destroy status." 37 "$status"
 	assertContains "Failed destination destroys should use the generic execution error." \
 		"$output" "Error when executing command."
-	assertContains "Failed destination destroys should not mark the dataset dirty as if the mutation succeeded." \
-		"$output" "dirty=<>"
 }
 
 test_delete_snaps_skips_full_wipe_when_live_source_recheck_shows_snapshots() {
@@ -1174,6 +1169,189 @@ test_plan_dataset_snapshots_leaves_the_published_plan_alone() {
 		"tank/current@next	2" "$g_src_snapshot_transfer_list"
 	assertEquals "Planning must not overwrite the current destination presence." \
 		1 "$g_dest_has_snapshots"
+}
+
+# Stage record files for a split: source rows newest first and interleaved
+# across datasets (a guid-less row and an unlisted dataset included),
+# destination rows under backup/src with a sibling root, backup/src2, and a
+# line that is no record.
+stage_split_record_files() {
+	stage_reconcile_record_files "tank/src/a/bc@s2	62
+tank/src/a/b@s2	52
+tank/src@s2	22
+tank/other@s2	92
+tank/src/a/b@s1	51
+tank/src/a/bc@s1	61
+tank/src@guidless
+tank/src@s1	21" "backup/src@s1	21
+backup/src2@s1	71
+backup/src/a/b@s1	51
+backup/src/a/bc@s1	61
+backup/src/a/b@s0	50
+no record here"
+	g_initial_source="tank/src"
+	g_initial_source_had_trailing_slash=0
+	g_destination="backup"
+}
+
+test_split_snapshot_records_writes_each_listed_dataset_rows_in_order() {
+	stage_split_record_files
+
+	zxfer_split_snapshot_records "1	tank/src
+2	tank/src/a/b
+3	tank/src/a/bc
+4	tank/src/empty"
+	split_status=$?
+	base=$g_zxfer_snapshot_slice_base
+
+	assertEquals "A complete split should succeed." 0 "$split_status"
+	assertEquals "The split should record the record files it was cut from." \
+		"$g_zxfer_source_snapshot_record_cache_file
+$g_zxfer_destination_snapshot_record_cache_file" "$g_zxfer_snapshot_slice_records"
+	assertEquals "The root's source slice should keep its rows newest first, the guid-less row included." \
+		"tank/src@s2	22
+tank/src@guidless
+tank/src@s1	21" "$(cat "$base.1.s")"
+	assertEquals "The root's destination slice should hold only the root's rows." \
+		"backup/src@s1	21" "$(cat "$base.1.d")"
+	assertEquals "A dataset must never take the rows of a sibling whose name it prefixes." \
+		"tank/src/a/b@s2	52
+tank/src/a/b@s1	51" "$(cat "$base.2.s")"
+	assertEquals "Destination rows should keep their listing order." \
+		"backup/src/a/b@s1	51
+backup/src/a/b@s0	50" "$(cat "$base.2.d")"
+	assertEquals "The prefixed sibling should get its own source rows." \
+		"tank/src/a/bc@s2	62
+tank/src/a/bc@s1	61" "$(cat "$base.3.s")"
+	assertEquals "The prefixed sibling should get its own destination rows." \
+		"backup/src/a/bc@s1	61" "$(cat "$base.3.d")"
+	assertTrue "A listed dataset without rows should get empty slices." \
+		"[ -f '$base.4.s' ] && [ ! -s '$base.4.s' ] && [ -f '$base.4.d' ] && [ ! -s '$base.4.d' ]"
+	assertFalse "No slice should exist past the last listed position." "[ -e '$base.5.s' ]"
+	assertTrue "The spent keyed copy should be emptied." "[ -f '$base' ] && [ ! -s '$base' ]"
+	assertEquals "Slices should be private like every run-root file." \
+		"$base.2.s" "$(find "$base.2.s" -perm 0600 2>/dev/null)"
+
+	# An unlisted sibling whose name a listed dataset prefixes keeps its rows
+	# out of every slice.
+	zxfer_split_snapshot_records "1	tank/src/a/b"
+	assertEquals "An unlisted prefixed sibling's source rows must be dropped." \
+		"tank/src/a/b@s2	52
+tank/src/a/b@s1	51" "$(cat "$base.1.s")"
+	assertEquals "An unlisted prefixed sibling's destination rows must be dropped." \
+		"backup/src/a/b@s1	51
+backup/src/a/b@s0	50" "$(cat "$base.1.d")"
+}
+
+test_split_snapshot_records_maps_a_trailing_slash_destination_root() {
+	stage_reconcile_record_files "tank/src/c@s1	31
+tank/src@s1	21" "backup@s1	21
+backup/c@s1	31
+backup2/c@s1	41"
+	g_initial_source="tank/src"
+	g_initial_source_had_trailing_slash=1
+	g_destination="backup"
+
+	zxfer_split_snapshot_records "1	tank/src
+2	tank/src/c"
+
+	assertEquals "The destination root itself should map to the source root." \
+		"backup@s1	21" "$(cat "$g_zxfer_snapshot_slice_base.1.d")"
+	assertEquals "Children should map below the destination root, never from a sibling root." \
+		"backup/c@s1	31" "$(cat "$g_zxfer_snapshot_slice_base.2.d")"
+}
+
+test_split_snapshot_records_publishes_nothing_when_a_stage_fails() {
+	stage_split_record_files
+	real_awk=$g_cmd_awk
+	failing_key_awk="$TEST_TMPDIR/failing_key_awk.sh"
+	failing_write_awk="$TEST_TMPDIR/failing_write_awk.sh"
+	printf '#!/bin/sh\nexit 44\n' >"$failing_key_awk"
+	# shellcheck disable=SC2016  # the wrapper script expands these itself.
+	printf '#!/bin/sh\n[ -z "${ZXFER_AWK_SLICE_BASE:-}" ] || exit 46\nexec "%s" "$@"\n' \
+		"$real_awk" >"$failing_write_awk"
+	chmod +x "$failing_key_awk" "$failing_write_awk"
+
+	for split_stage in key sort write; do
+		output=$(
+			g_zxfer_snapshot_slice_records="stale"
+			g_zxfer_snapshot_slice_key=9
+			if [ "$split_stage" = key ]; then
+				g_cmd_awk=$failing_key_awk
+			elif [ "$split_stage" = sort ]; then
+				sort() { return 45; }
+			else
+				g_cmd_awk=$failing_write_awk
+			fi
+			split_status=0
+			zxfer_split_snapshot_records "1	tank/src" || split_status=$?
+			printf 'status=%s records=<%s> key=<%s>\n' "$split_status" \
+				"$g_zxfer_snapshot_slice_records" "$g_zxfer_snapshot_slice_key"
+		)
+		case $split_stage in
+		key) expected_status=44 ;;
+		sort) expected_status=45 ;;
+		write) expected_status=46 ;;
+		esac
+		assertEquals "A failed $split_stage stage should return its status and publish no slices or selection." \
+			"status=$expected_status records=<> key=<>" "$output"
+	done
+}
+
+test_split_snapshot_records_skips_without_record_files_or_datasets() {
+	g_zxfer_snapshot_slice_records="stale"
+	zxfer_split_snapshot_records "1	tank/src"
+	assertEquals "Without record files the split should succeed quietly." 0 "$?"
+	assertEquals "Without record files no slices should be published." \
+		"" "$g_zxfer_snapshot_slice_records"
+
+	stage_split_record_files
+	zxfer_split_snapshot_records ""
+	assertEquals "An empty list should publish no slices." "" "$g_zxfer_snapshot_slice_records"
+}
+
+test_select_snapshot_slice_selects_only_numbered_positions_of_published_slices() {
+	g_initial_source="tank/src"
+	g_initial_source_had_trailing_slash=0
+	g_destination="backup"
+
+	g_zxfer_snapshot_slice_records=""
+	zxfer_select_snapshot_slice 2 "tank/src/a"
+	assertEquals "Without published slices nothing should be selected." "" "$g_zxfer_snapshot_slice_key"
+
+	g_zxfer_snapshot_slice_records="published"
+	zxfer_select_snapshot_slice "tank/src/a" "tank/src/a"
+	assertEquals "A position that is not a number should select nothing." "" "$g_zxfer_snapshot_slice_key"
+
+	zxfer_select_snapshot_slice 2 "tank/src/a"
+	assertEquals "A position should select that dataset and its mapped destination." \
+		"2|tank/src/a|backup/src/a" \
+		"$g_zxfer_snapshot_slice_key|$g_zxfer_snapshot_slice_source|$g_zxfer_snapshot_slice_destination"
+}
+
+test_plan_dataset_snapshots_reads_only_the_selected_dataset_slices() {
+	stage_split_record_files
+	zxfer_split_snapshot_records "1	tank/src
+2	tank/src/a/b"
+	# The whole files change after the split: a slice-served plan never
+	# reads them.
+	printf '%s\n' "tank/src/a/b@s9	59" >"$g_zxfer_source_snapshot_record_cache_file"
+
+	zxfer_select_snapshot_slice 2 "tank/src/a/b"
+	zxfer_plan_dataset_snapshots "tank/src/a/b" "backup/src/a/b"
+	assertEquals "The selected dataset should plan from its slices." \
+		"tank/src/a/b@s1	51|tank/src/a/b@s2	52|backup/src/a/b@s0|2" \
+		"$g_zxfer_plan_common_snapshot|$g_zxfer_plan_transfer_list|$g_zxfer_plan_delete_snapshots|$g_zxfer_plan_source_count"
+
+	zxfer_plan_dataset_snapshots "tank/src" "backup/src"
+	assertEquals "Another dataset should read the whole record files." \
+		0 "$g_zxfer_plan_source_count"
+
+	g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/rediscovered_source.records"
+	printf '%s\n' "tank/src/a/b@s9	59" >"$g_zxfer_source_snapshot_record_cache_file"
+	zxfer_plan_dataset_snapshots "tank/src/a/b" "backup/src/a/b"
+	assertEquals "Slices cut from earlier record files must never be used." \
+		"tank/src/a/b@s9	59" "$g_zxfer_plan_transfer_list"
 }
 
 test_inspect_delete_snap_publishes_the_plan_for_the_current_dataset() {

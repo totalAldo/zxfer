@@ -76,7 +76,7 @@ zxfer_reset_session_state() {
 	zxfer_reset_replication_runtime_state
 	zxfer_reset_send_receive_state
 	zxfer_reset_destination_existence_cache
-	zxfer_reset_live_destination_view_state
+	zxfer_reset_live_destination_listing_state
 	zxfer_reset_snapshot_producer_session_state
 	zxfer_reset_snapshot_discovery_state
 	zxfer_reset_snapshot_reconcile_state
