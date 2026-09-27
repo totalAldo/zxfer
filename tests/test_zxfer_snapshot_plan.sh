@@ -1,6 +1,8 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_snapshot_reconcile.sh helpers.
+# shunit2 tests for src/zxfer_snapshot_plan.sh: the per-dataset plan, the
+# record slices, deletes and -g, the divergence contract, and the live
+# re-plan of a dataset this run changed (fragment below).
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -9,17 +11,17 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-zxfer_source_runtime_modules_through "zxfer_snapshot_reconcile.sh"
+zxfer_source_runtime_modules_through "zxfer_snapshot_plan.sh"
 
 oneTimeSetUp() {
-	zxfer_test_create_tmpdir "zxfer_inspect_delete"
+	zxfer_test_create_tmpdir "zxfer_snapshot_plan"
 }
 
 oneTimeTearDown() {
 	zxfer_test_cleanup_tmpdir
 }
 
-reset_snapshot_reconcile_test_options() {
+reset_snapshot_plan_test_options() {
 	g_option_n_dryrun=0
 	g_option_v_verbose=0
 	g_option_V_very_verbose=0
@@ -32,7 +34,7 @@ reset_snapshot_reconcile_test_options() {
 	g_cmd_zfs="/sbin/zfs"
 }
 
-reset_snapshot_reconcile_test_state() {
+reset_snapshot_plan_test_state() {
 	g_zxfer_source_snapshot_record_cache_file=""
 	g_zxfer_destination_snapshot_record_cache_file=""
 	g_actual_dest=""
@@ -43,7 +45,7 @@ reset_snapshot_reconcile_test_state() {
 
 # Stage the flat record files discovery publishes: source rows newest first,
 # destination rows with real destination names.
-stage_reconcile_record_files() {
+stage_plan_record_files() {
 	g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/staged_source.records"
 	g_zxfer_destination_snapshot_record_cache_file="$TEST_TMPDIR/staged_destination.records"
 	printf '%s\n' "$1" >"$g_zxfer_source_snapshot_record_cache_file"
@@ -51,15 +53,15 @@ stage_reconcile_record_files() {
 }
 
 setUp() {
-	zxfer_source_runtime_modules_through "zxfer_snapshot_reconcile.sh"
+	zxfer_source_runtime_modules_through "zxfer_snapshot_plan.sh"
 	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" || return "$?"
-	reset_snapshot_reconcile_test_options
-	reset_snapshot_reconcile_test_state
+	reset_snapshot_plan_test_options
+	reset_snapshot_plan_test_state
 	zxfer_reset_failure_context "unit"
 }
 
 test_zxfer_snapshot_plan_file_reset_is_separate_from_dataset_state() {
-	stage_reconcile_record_files "tank/src@s1	1" "backup/dst@s1	1"
+	stage_plan_record_files "tank/src@s1	1" "backup/dst@s1	1"
 	zxfer_plan_dataset_snapshots "tank/src" "backup/dst"
 	plan_file=$g_zxfer_snapshot_plan_file
 
@@ -104,7 +106,7 @@ test_zxfer_reset_snapshot_reconcile_state_clears_plan_and_markers() {
 	assertEquals "The convergence markers should be cleared." "" "$g_zxfer_diverged_converged_datasets"
 }
 
-test_snapshot_reconcile_owner_operations_publish_and_validate_state() {
+test_snapshot_plan_owner_operations_publish_and_validate_state() {
 	zxfer_publish_snapshot_transfer_plan \
 		"tank/src@snap1" "tank/src@snap2" 1
 
@@ -938,7 +940,7 @@ test_verify_converged_destination_skips_unmarked_datasets() {
 }
 
 test_plan_dataset_snapshots_requires_a_guid_match_for_the_common_snapshot() {
-	stage_reconcile_record_files "tank/doET/tank@zxfer_2	222
+	stage_plan_record_files "tank/doET/tank@zxfer_2	222
 tank/doET/tank@zxfer_1	111" "backup/nuc/tank/doET/tank@zxfer_2	999
 backup/nuc/tank/doET/tank@zxfer_1	111"
 
@@ -957,7 +959,7 @@ backup/nuc/tank/doET/tank@zxfer_1	111"
 }
 
 test_plan_dataset_snapshots_sends_everything_when_nothing_matches() {
-	stage_reconcile_record_files "tank/doET/tank@zxfer_2	222
+	stage_plan_record_files "tank/doET/tank@zxfer_2	222
 tank/doET/tank@zxfer_1	111" "backup/doET/tank@zxfer_3	333"
 
 	zxfer_plan_dataset_snapshots "tank/doET/tank" "backup/doET/tank"
@@ -971,14 +973,14 @@ tank/doET/tank@zxfer_2	222" "$g_zxfer_plan_transfer_list"
 		"backup/doET/tank@zxfer_3" "$g_zxfer_plan_delete_snapshots"
 	assertEquals "The destination still has snapshots." 1 "$g_zxfer_plan_dest_has_snapshots"
 
-	stage_reconcile_record_files "tank/doET/tank@zxfer_1	111" "backup/other@zxfer_1	111"
+	stage_plan_record_files "tank/doET/tank@zxfer_1	111" "backup/other@zxfer_1	111"
 	zxfer_plan_dataset_snapshots "tank/doET/tank" "backup/doET/tank"
 	assertEquals "A destination without rows has no snapshots." 0 "$g_zxfer_plan_dest_has_snapshots"
 	assertEquals "A destination without rows publishes no records." "" "$g_zxfer_plan_destination_records"
 }
 
 test_plan_dataset_snapshots_matches_exact_dataset_names_only() {
-	stage_reconcile_record_files "tank/src1@s2	21
+	stage_plan_record_files "tank/src1@s2	21
 tank/src/c1@s2	31
 tank/src@s2	2
 tank/src@s1	1
@@ -1000,7 +1002,7 @@ backup/dst/c1@s9	39"
 }
 
 test_plan_dataset_snapshots_deletes_destination_only_and_guid_mismatched_rows_in_destination_order() {
-	stage_reconcile_record_files "tank/fs@daily-10	10
+	stage_plan_record_files "tank/fs@daily-10	10
 tank/fs@snap3	333
 tank/fs@snap1	111" "backup/fs@snap1	999
 backup/fs@alpha	222
@@ -1020,7 +1022,7 @@ backup/fs@zeta" "$g_zxfer_plan_delete_snapshots"
 }
 
 test_plan_dataset_snapshots_lists_newer_source_snapshots_oldest_first() {
-	stage_reconcile_record_files "tank/fs@snap4	4
+	stage_plan_record_files "tank/fs@snap4	4
 tank/fs@snap3	3
 tank/fs@snap2	2
 tank/fs@snap1	1" "backup/fs@snap1	1
@@ -1036,7 +1038,7 @@ tank/fs@snap4	4" "$g_zxfer_plan_transfer_list"
 }
 
 test_plan_dataset_snapshots_reports_each_name_match_guid_mismatch() {
-	stage_reconcile_record_files "tank/a/nested.b@autosnap_2026-06-12_06:00:02_frequently	2222000000000000001
+	stage_plan_record_files "tank/a/nested.b@autosnap_2026-06-12_06:00:02_frequently	2222000000000000001
 tank/a/nested.b@zxfer_81150_20260612000001	1111000000000000001
 tank/a/nested.b@hostile:colon-snap_%	3333000000000000001" "backup/a/nested.b@autosnap_2026-06-12_06:00:02_frequently	9999000000000000001
 backup/a/nested.b@zxfer_81150_20260612000001	1111000000000000001
@@ -1049,7 +1051,7 @@ backup/a/nested.b@hostile:colon-snap_%	9999000000000000002"
 hostile:colon-snap_%	3333000000000000001	9999000000000000002" \
 		"$g_zxfer_plan_diverged_records"
 
-	stage_reconcile_record_files "tank/src@only_on_source	111" "backup/dst@only_on_dest	222"
+	stage_plan_record_files "tank/src@only_on_source	111" "backup/dst@only_on_dest	222"
 	zxfer_plan_dataset_snapshots "tank/src" "backup/dst"
 	assertEquals "Disjoint snapshot names should report no divergence." "" "$g_zxfer_plan_diverged_records"
 }
@@ -1057,10 +1059,10 @@ hostile:colon-snap_%	3333000000000000001	9999000000000000002" \
 test_plan_dataset_snapshots_fails_closed_on_records_without_guids() {
 	for plan_case in "source" "destination"; do
 		if [ "$plan_case" = source ]; then
-			stage_reconcile_record_files "tank/src@snap2	222
+			stage_plan_record_files "tank/src@snap2	222
 tank/src@snap1" "backup/dst@snap1	111"
 		else
-			stage_reconcile_record_files "tank/src@snap1	111" "backup/dst@snap1"
+			stage_plan_record_files "tank/src@snap1	111" "backup/dst@snap1"
 		fi
 		status=0
 		output=$(
@@ -1080,7 +1082,7 @@ tank/src@snap1" "backup/dst@snap1	111"
 		assertNotContains "No plan may be used after a guid-less $plan_case record." "$output" "planned"
 	done
 
-	stage_reconcile_record_files "tank/other@guidless
+	stage_plan_record_files "tank/other@guidless
 tank/src@snap1	111" "backup/other@guidless
 backup/dst@snap1	111"
 	zxfer_plan_dataset_snapshots "tank/src" "backup/dst"
@@ -1090,7 +1092,7 @@ backup/dst@snap1	111"
 
 test_plan_dataset_snapshots_fails_closed_on_unreadable_record_files() {
 	for plan_side in source destination; do
-		stage_reconcile_record_files "tank/src@snap1	111" "backup/dst@snap1	111"
+		stage_plan_record_files "tank/src@snap1	111" "backup/dst@snap1	111"
 		if [ "$plan_side" = source ]; then
 			g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/vanished_source.records"
 		else
@@ -1116,7 +1118,7 @@ test_plan_dataset_snapshots_preserves_awk_failures() {
 	failing_awk="$TEST_TMPDIR/failing_plan_awk.sh"
 	printf '#!/bin/sh\nexit 61\n' >"$failing_awk"
 	chmod +x "$failing_awk"
-	stage_reconcile_record_files "tank/src@snap1	111" "backup/dst@snap1	111"
+	stage_plan_record_files "tank/src@snap1	111" "backup/dst@snap1	111"
 
 	status=0
 	output=$(
@@ -1138,7 +1140,7 @@ test_plan_dataset_snapshots_preserves_awk_failures() {
 }
 
 test_plan_dataset_snapshots_reads_an_explicit_destination_record_file() {
-	stage_reconcile_record_files "tank/src@snap2	222
+	stage_plan_record_files "tank/src@snap2	222
 tank/src@snap1	111" "backup/dst@snap1	111"
 	live_file="$TEST_TMPDIR/live_destination.records"
 	printf '%s\n' "Warning: Permanently added 'dst' to the list of known hosts." \
@@ -1159,7 +1161,7 @@ test_plan_dataset_snapshots_leaves_the_published_plan_alone() {
 	g_last_common_snap="tank/current@anchor	1"
 	g_src_snapshot_transfer_list="tank/current@next	2"
 	g_dest_has_snapshots=1
-	stage_reconcile_record_files "tank/src@snap1	111" "backup/other@snap1	111"
+	stage_plan_record_files "tank/src@snap1	111" "backup/other@snap1	111"
 
 	zxfer_plan_dataset_snapshots "tank/src" "backup/dst"
 
@@ -1176,7 +1178,7 @@ test_plan_dataset_snapshots_leaves_the_published_plan_alone() {
 # destination rows under backup/src with a sibling root, backup/src2, and a
 # line that is no record.
 stage_split_record_files() {
-	stage_reconcile_record_files "tank/src/a/bc@s2	62
+	stage_plan_record_files "tank/src/a/bc@s2	62
 tank/src/a/b@s2	52
 tank/src@s2	22
 tank/other@s2	92
@@ -1244,7 +1246,7 @@ backup/src/a/b@s0	50" "$(cat "$base.1.d")"
 }
 
 test_split_snapshot_records_maps_a_trailing_slash_destination_root() {
-	stage_reconcile_record_files "tank/src/c@s1	31
+	stage_plan_record_files "tank/src/c@s1	31
 tank/src@s1	21" "backup@s1	21
 backup/c@s1	31
 backup2/c@s1	41"
@@ -1356,7 +1358,7 @@ test_plan_dataset_snapshots_reads_only_the_selected_dataset_slices() {
 
 test_inspect_delete_snap_publishes_the_plan_for_the_current_dataset() {
 	g_actual_dest="backup/dst"
-	stage_reconcile_record_files "tank/src@zxfer_3	333
+	stage_plan_record_files "tank/src@zxfer_3	333
 tank/src@zxfer_2	222
 tank/src@zxfer_1	111" "backup/dst@zxfer_1	111
 backup/dst@zxfer_2	222"
@@ -1375,7 +1377,7 @@ backup/dst@zxfer_2	222" "$g_zxfer_plan_destination_records"
 
 test_inspect_delete_snap_marks_destination_empty_when_no_matching_destination_dataset_exists() {
 	g_actual_dest="backup/dst"
-	stage_reconcile_record_files "tank/src@zxfer_3	3
+	stage_plan_record_files "tank/src@zxfer_3	3
 tank/src@zxfer_2	2" "backup/other@zxfer_1	1"
 
 	zxfer_inspect_delete_snap 0 "tank/src"
@@ -1392,7 +1394,7 @@ tank/src@zxfer_3	3" "$g_src_snapshot_transfer_list"
 # mismatched.
 test_inspect_delete_snap_matches_exact_names_without_prefix_collisions() {
 	g_actual_dest="backup/fs"
-	stage_reconcile_record_files "tank/fs@daily-10	10
+	stage_plan_record_files "tank/fs@daily-10	10
 tank/fs@daily-1	1" "backup/fs@daily-1	1
 backup/fs@daily-11	11"
 
@@ -1407,7 +1409,7 @@ backup/fs@daily-11	11"
 test_inspect_delete_snap_reports_the_common_snapshot_in_very_verbose_mode() {
 	g_option_V_very_verbose=1
 	g_actual_dest="backup/dst"
-	stage_reconcile_record_files "tank/src@zxfer_1	111" "backup/dst@zxfer_1	111"
+	stage_plan_record_files "tank/src@zxfer_1	111" "backup/dst@zxfer_1	111"
 
 	output=$(zxfer_inspect_delete_snap 0 "tank/src" 2>&1)
 
@@ -1425,7 +1427,7 @@ test_inspect_delete_snap_requires_matching_guid_for_common_snapshot_detection() 
 	g_option_d_delete_destination_snapshots=1
 	g_option_F_force_rollback="-F"
 	g_actual_dest="backup/dst"
-	stage_reconcile_record_files "tank/src@zxfer_3	333
+	stage_plan_record_files "tank/src@zxfer_3	333
 tank/src@zxfer_2	222
 tank/src@zxfer_1	111" "backup/dst@zxfer_2	999
 backup/dst@zxfer_1	111"
@@ -1456,7 +1458,7 @@ tank/src@zxfer_3	333" "$g_src_snapshot_transfer_list"
 # closed via the structured error path before any delete or send is planned.
 test_inspect_delete_snap_fails_closed_on_divergence_without_both_d_and_f() {
 	g_actual_dest="backup/dst"
-	stage_reconcile_record_files "tank/src@zxfer_3	333
+	stage_plan_record_files "tank/src@zxfer_3	333
 tank/src@zxfer_2	222
 tank/src@zxfer_1	111" "backup/dst@zxfer_2	999
 backup/dst@zxfer_1	111"
@@ -1480,7 +1482,7 @@ backup/dst@zxfer_1	111"
 test_inspect_delete_snap_passes_the_planned_delete_list_to_delete_snaps() {
 	log_file="$TEST_TMPDIR/inspect_delete.log"
 	g_actual_dest="backup/dst"
-	stage_reconcile_record_files "tank/src@zxfer_3	333
+	stage_plan_record_files "tank/src@zxfer_3	333
 tank/src@zxfer_2	222
 tank/src@zxfer_1	111" "backup/dst@zxfer_2	222
 backup/dst@zxfer_1	111
@@ -1502,7 +1504,7 @@ delete=backup/dst@old_only" "$(cat "$log_file")"
 test_inspect_delete_snap_destroys_planned_snapshots_with_spaces_in_the_name() {
 	log_file="$TEST_TMPDIR/inspect_delete_spaces.log"
 	g_actual_dest="back/my data"
-	stage_reconcile_record_files "tank/my data@s2	2
+	stage_plan_record_files "tank/my data@s2	2
 tank/my data@s1	1" "back/my data@s1	1
 back/my data@s9	9"
 
@@ -1526,7 +1528,7 @@ transfer=tank/my data@s2	2" "$(cat "$log_file")"
 test_inspect_delete_snap_stops_in_main_shell_on_grandfather_violation() {
 	action_log="$TEST_TMPDIR/inspect_grandfather_stop.log"
 	g_actual_dest="tank/fs"
-	stage_reconcile_record_files "tank/src@snap1	1" "tank/fs@snap1	1
+	stage_plan_record_files "tank/src@snap1	1" "tank/fs@snap1	1
 tank/fs@protected	2"
 
 	status=0
@@ -1560,7 +1562,7 @@ tank/fs@protected	2"
 
 test_verify_converged_destination_clears_marker_on_aligned_live_view() {
 	g_zxfer_diverged_converged_datasets="backup/dst	tank/src"
-	stage_reconcile_record_files "tank/src@zxfer_2	222
+	stage_plan_record_files "tank/src@zxfer_2	222
 tank/src@zxfer_1	111" "backup/dst@zxfer_2	999"
 	live_file="$TEST_TMPDIR/verify_aligned.records"
 	printf '%s\n' "backup/dst@zxfer_2	222" "backup/dst@zxfer_1	111" >"$live_file"
@@ -1581,7 +1583,7 @@ tank/src@zxfer_1	111" "backup/dst@zxfer_2	999"
 
 test_verify_converged_destination_fails_on_remaining_divergence() {
 	g_zxfer_diverged_converged_datasets="backup/dst	tank/src"
-	stage_reconcile_record_files "tank/src@zxfer_2	222
+	stage_plan_record_files "tank/src@zxfer_2	222
 tank/src@zxfer_1	111" "backup/dst@zxfer_1	111"
 	live_file="$TEST_TMPDIR/verify_diverged.records"
 	printf '%s\n' "backup/dst@zxfer_2	999" "backup/dst@zxfer_1	111" >"$live_file"
@@ -1632,7 +1634,7 @@ test_verify_converged_destination_reports_live_listing_failures() {
 
 test_verify_converged_destination_fails_closed_on_guidless_live_rows() {
 	g_zxfer_diverged_converged_datasets="backup/dst	tank/src"
-	stage_reconcile_record_files "tank/src@zxfer_1	111" "backup/dst@zxfer_1	111"
+	stage_plan_record_files "tank/src@zxfer_1	111" "backup/dst@zxfer_1	111"
 	live_file="$TEST_TMPDIR/verify_guidless.records"
 	printf '%s\n' "backup/dst@zxfer_1" >"$live_file"
 
@@ -1659,7 +1661,7 @@ test_verify_converged_destination_keeps_the_current_dataset_plan() {
 	g_zxfer_diverged_converged_datasets="backup/done	tank/done"
 	g_last_common_snap="tank/current@anchor	1"
 	g_src_snapshot_transfer_list="tank/current@next	2"
-	stage_reconcile_record_files "tank/done@s1	1" "backup/done@s1	1"
+	stage_plan_record_files "tank/done@s1	1" "backup/done@s1	1"
 	live_file="$TEST_TMPDIR/verify_keeps_plan.records"
 	printf '%s\n' "backup/done@s1	1" >"$live_file"
 
@@ -1673,6 +1675,16 @@ test_verify_converged_destination_keeps_the_current_dataset_plan() {
 	assertEquals "A reap-time verification must not change the current dataset's transfer list." \
 		"tank/current@next	2" "$g_src_snapshot_transfer_list"
 	assertEquals "The verified dataset should be unmarked." "" "$g_zxfer_diverged_converged_datasets"
+}
+
+# zxfer-test-fragment: suites/zxfer_snapshot_plan_live_replan_tests.sh
+# shellcheck source=tests/suites/zxfer_snapshot_plan_live_replan_tests.sh
+. "$TESTS_DIR/suites/zxfer_snapshot_plan_live_replan_tests.sh"
+
+suite() {
+	zxfer_test_register_fragment_tests \
+		"$TESTS_DIR/test_zxfer_snapshot_plan.sh" \
+		"$TESTS_DIR/suites/zxfer_snapshot_plan_live_replan_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

@@ -58,7 +58,7 @@ zxfer_snapshot_discovery.sh
 zxfer_migration_services.sh
 zxfer_send_jobs.sh
 zxfer_send_receive.sh
-zxfer_snapshot_reconcile.sh
+zxfer_snapshot_plan.sh
 zxfer_replication.sh
 zxfer_session.sh'
 

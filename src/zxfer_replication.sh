@@ -44,13 +44,15 @@
 #   zxfer_stamp_new_snapshot_name), and the per-pass mutation marker
 #   g_is_performed_send_destroy (set by send/receive and snapshot destroy, read
 #   by the -Y loop).
-# writes globals: the published plan (g_last_common_snap,
-#   g_src_snapshot_transfer_list, g_dest_has_snapshots) in the live re-plan.
-# reads globals: g_option_*, g_destination, the recursive dataset lists,
-#   g_did_delete_dest_snapshots, and the g_zxfer_plan_* results of the last
-#   zxfer_plan_dataset_snapshots call.
-# mutates caches: destination existence through the snapshot-state helpers;
-#   the destination property iteration cache before the post-seed pass.
+# reads globals: g_option_*, g_destination, discovery's recursive dataset
+#   lists, and the snapshot plan: g_last_common_snap,
+#   g_src_snapshot_transfer_list, g_dest_has_snapshots, the delete markers and
+#   the -g pre-pass's g_zxfer_plan_delete_snapshots. The plan changes only
+#   through zxfer_snapshot_plan.sh; a seed receive publishes its snapshot as
+#   the new anchor with zxfer_publish_snapshot_transfer_plan.
+# mutates caches: destination existence through the destination-state
+#   helpers; the destination property iteration cache before the post-seed
+#   pass.
 # returns via stdout: none.
 
 # Purpose: Reset the replication state for a new session.
@@ -101,7 +103,6 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 	if ! zxfer_run_destination_zfs_cmd rollback -r "$l_rollback_snapshot"; then
 		zxfer_throw_error "Failed to roll back destination [$g_actual_dest] to $l_rollback_snapshot after deleting snapshots."
 	fi
-	g_did_delete_dest_snapshots=0
 }
 
 # Purpose: Seed a missing or snapshot-less destination with the first pending
@@ -142,8 +143,8 @@ zxfer_seed_destination_for_snapshot_transfer() {
 	fi
 	# The received seed is the new common snapshot.
 	g_dest_seed_requires_property_reconcile=1
-	g_last_common_snap=$l_seed_record
-	g_dest_has_snapshots=1
+	zxfer_publish_snapshot_transfer_plan "$l_seed_record" \
+		"${g_src_snapshot_transfer_list:-}" 1
 }
 
 # Purpose: Send the current dataset's pending snapshots, seeding the
@@ -195,45 +196,6 @@ zxfer_copy_snapshots() {
 	zxfer_echoV "Final snapshot: $l_copy_final_path"
 	# The rollback and seed steps can move g_last_common_snap, so read it here.
 	zxfer_zfs_send_receive "${g_last_common_snap%%	*}" "$l_copy_final_path" "$g_actual_dest" "1"
-}
-
-# Purpose: Re-plan the current dataset from its live destination snapshots
-# when this run destroyed some of them.
-# Usage: zxfer_reconcile_live_destination_snapshot_state SOURCE, right after
-# zxfer_inspect_delete_snap planned SOURCE. Only a dataset whose -d destroy
-# ran (g_did_delete_dest_snapshots) is listed again; every other dataset keeps
-# the plan made from discovery, and zfs receive refuses an incremental whose
-# base is gone. Republishes the plan from the live rows, keeping the anchor
-# unless the anchor or a pending snapshot is common.
-zxfer_reconcile_live_destination_snapshot_state() {
-	[ "${g_did_delete_dest_snapshots:-0}" -eq 1 ] || return 0
-	# Without an anchor or pending snapshots there is nothing to re-plan.
-	[ -n "${g_last_common_snap:-}${g_src_snapshot_transfer_list:-}" ] || return 0
-
-	# The planner fails closed on guid-less rows and finds the newest
-	# snapshot whose name and guid both exist on the destination.
-	zxfer_get_live_destination_record_file "$g_actual_dest" ||
-		zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: ${g_zxfer_live_destination_record_file_error:-}"
-	zxfer_plan_dataset_snapshots "$1" "$g_actual_dest" \
-		"$g_zxfer_live_destination_record_file_result"
-	zxfer_echoV "Refreshed destination snapshot cache for $g_actual_dest using live snapshot state."
-
-	# Only the anchor or a pending snapshot may become the new anchor.
-	# Otherwise publish the same records with no anchor: the seed then
-	# refuses a destination whose snapshots share no guid with them, or
-	# re-seeds an emptied destination from the old anchor.
-	l_recheck_records=${g_last_common_snap:+$g_last_common_snap$ZXFER_LF}${g_src_snapshot_transfer_list:-}
-	if [ -n "${g_zxfer_plan_common_snapshot:-}" ]; then
-		case $ZXFER_LF$l_recheck_records$ZXFER_LF in
-		*"$ZXFER_LF$g_zxfer_plan_common_snapshot$ZXFER_LF"*)
-			zxfer_publish_snapshot_transfer_plan "$g_zxfer_plan_common_snapshot" \
-				"${g_zxfer_plan_transfer_list:-}" 1
-			return
-			;;
-		esac
-	fi
-	zxfer_publish_snapshot_transfer_plan "" "$l_recheck_records" \
-		"${g_zxfer_plan_dest_has_snapshots:-0}"
 }
 
 # Purpose: Name the run's -s/-m snapshot zxfer_<pid>_<YYYYmmddHHMMSS> once.

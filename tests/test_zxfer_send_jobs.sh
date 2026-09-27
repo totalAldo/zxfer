@@ -20,7 +20,7 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/helpers/send_job_fixtures.sh
 . "$TESTS_DIR/helpers/send_job_fixtures.sh"
 
-zxfer_source_runtime_modules_through "zxfer_snapshot_reconcile.sh"
+zxfer_source_runtime_modules_through "zxfer_snapshot_plan.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_send_jobs"
