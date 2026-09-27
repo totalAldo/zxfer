@@ -850,13 +850,18 @@ live_pids_in() {
 	printf '%s\n' "${l_live_left# }"
 }
 
-# A finished suite is reported through the event FIFO at once; the runner no
-# longer polls, which cost up to a second per suite.
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+# A finished suite is reported through the event FIFO at once. The old runner
+# checked a running suite once a second, so each of these 0.3 s suites took
+# about 1.1 s through it (6.5 s for six); now they take about 2 s together.
+# Where sleep takes whole seconds only, the suites finish at once and the
+# bound still holds.
+# shellcheck disable=SC2016,SC2317,SC2329  # Literal fixture source; invoked indirectly by shunit2.
 test_run_shunit_tests_reports_each_finished_suite_at_once() {
 	set --
-	for l_quick_index in 1 2 3 4 5 6 7 8; do
-		write_fake_suite "$TEST_TMPDIR/quick-suite-$l_quick_index.sh" "quick-$l_quick_index"
+	for l_quick_index in 1 2 3 4 5 6; do
+		printf '%s\n' '#!/bin/sh' 'sleep 0.3 2>/dev/null || :' \
+			"printf '%s\\n' quick-$l_quick_index >>\"\${FAKE_SUITE_LOG:?}\"" \
+			>"$TEST_TMPDIR/quick-suite-$l_quick_index.sh"
 		chmod +x "$TEST_TMPDIR/quick-suite-$l_quick_index.sh"
 		set -- "$@" "$TEST_TMPDIR/quick-suite-$l_quick_index.sh"
 	done
@@ -866,11 +871,11 @@ test_run_shunit_tests_reports_each_finished_suite_at_once() {
 	l_elapsed=$(($(date +%s) - l_start))
 
 	assertContains "Every quick suite should pass." \
-		"$output" "==> shunit2 summary: 8 passed, 0 failed"
+		"$output" "==> shunit2 summary: 6 passed, 0 failed"
 	assertEquals "The quick suites should run once each, in order." \
-		"quick-1 quick-2 quick-3 quick-4 quick-5 quick-6 quick-7 quick-8" \
+		"quick-1 quick-2 quick-3 quick-4 quick-5 quick-6" \
 		"$(tr '\n' ' ' <"$FAKE_SUITE_LOG" | sed 's/ $//')"
-	assertTrue "Eight quick suites took ${l_elapsed}s; a runner that polls once a second needs at least 8s." \
+	assertTrue "Six 0.3 s suites took ${l_elapsed}s; a runner that checks once a second needs about 6s." \
 		"[ $l_elapsed -le 4 ]"
 }
 
