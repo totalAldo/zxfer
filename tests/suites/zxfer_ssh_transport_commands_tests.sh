@@ -1006,12 +1006,19 @@ value'
 			zxfer_prepare_ssh_transport
 			printf 'after_reset=%s load_calls=%s ready=<%s>\n' "$?" "$load_calls" \
 				"$g_zxfer_ssh_transport_ready"
+			zxfer_load_ssh_transport_policy() { return 0; }
+			g_cmd_ssh=""
+			g_zxfer_secure_path="$TEST_TMPDIR/no-ssh-here"
+			zxfer_prepare_ssh_transport
+			printf 'no_ssh=%s ready=<%s> error=%s\n' "$?" \
+				"$g_zxfer_ssh_transport_ready" "$g_zxfer_ssh_transport_error"
 		)
 	)
 
-	assertEquals "A failed policy is checked again; the first success holds until the session reset." \
+	assertEquals "A failed policy or ssh lookup is checked again; the first success holds until the session reset." \
 		"invalid=1 ready=<> error=ZXFER_SSH_BATCH_MODE must be a single-line non-empty value.
 valid=0 ready=<1>
 again=0 load_calls=0
-after_reset=1 load_calls=1 ready=<>" "$output"
+after_reset=1 load_calls=1 ready=<>
+no_ssh=1 ready=<> error=Required dependency \"ssh\" not found in secure PATH ($TEST_TMPDIR/no-ssh-here). Set ZXFER_SECURE_PATH or install the binary." "$output"
 }

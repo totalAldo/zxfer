@@ -127,7 +127,9 @@ The startup path is intentionally explicit:
    commands first (`zxfer_reset_dependency_state()`), because the ssh and
    remote-host resets read `g_cmd_ssh` and `g_cmd_zfs`. Inherited process,
    SSH, path, and migration-service handles are dropped without acting on
-   them, so an exported `g_*` value can never grant cleanup ownership.
+   them, so an exported `g_*` value can never grant cleanup ownership, and
+   the effective-UID and ssh-policy memos start empty, so an exported value
+   can never stand in for `id -u` or a validated policy.
 3. `zxfer_session_initialize()` points `g_cmd_awk` at the awk on the built-in
    secure PATH, installs the EXIT and HUP/INT/QUIT/TERM traps, then runs
    `zxfer_init_session_environment()`: secure PATH, `ZXFER_BACKUP_DIR`,
