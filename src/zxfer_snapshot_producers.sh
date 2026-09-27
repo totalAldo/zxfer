@@ -45,7 +45,8 @@
 # reads globals: source/destination ZFS commands, remote-origin settings,
 #   compression helpers, parallel settings, and snapshot exclude options.
 # mutates caches: producer-owned scratch, and the destination existence entry
-#   of the destination root after a local listing.
+#   of the listed destination dataset after its snapshot listing, local or on
+#   the -T host.
 # returns via stdout: bounded staged results and normalized snapshot streams;
 #   may launch registered producer processes.
 
@@ -408,21 +409,13 @@ zxfer_build_source_snapshot_list_cmd() {
 # Purpose: Run the full source listing command in the background, keeping its
 # creation-ordered output and a byte-sorted copy.
 # Usage: zxfer_execute_source_snapshot_list_background_cmd_with_sort CMD
-# OUTPUT_FILE ERROR_FILE SORTED_FILE; an empty SORTED_FILE runs CMD alone.
+# OUTPUT_FILE ERROR_FILE SORTED_FILE
 # Side effects: Publishes the registered producer PID in g_last_background_pid.
 zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 	l_source_background_command=$1
 	l_source_background_output_file=$2
 	l_source_background_error_file=${3:-}
 	l_sorted_output_file=$4
-
-	if [ -z "$l_sorted_output_file" ]; then
-		zxfer_execute_rendered_background_shell_command \
-			"$l_source_background_command" \
-			"$l_source_background_output_file" \
-			"$l_source_background_error_file"
-		return "$?"
-	fi
 
 	zxfer_create_temp_file_group 2 || return "$?"
 	{
@@ -450,14 +443,12 @@ zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 
 # Purpose: Start the creation-ordered source snapshot listing in the background.
 # Usage: zxfer_write_source_snapshot_list_to_file OUTFILE [ERRFILE]; publishes
-# g_source_snapshot_list_pid, and the byte-sorted copy in
-# g_source_snapshot_list_sorted_file when
-# g_source_snapshot_list_background_sort_requested is 1. With -j the listing
-# fans out over datasets through parallel.
+# g_source_snapshot_list_pid and the byte-sorted copy of the listing in
+# g_source_snapshot_list_sorted_file. With -j the listing fans out over
+# datasets through parallel.
 zxfer_write_source_snapshot_list_to_file() {
 	l_outfile=$1
 	l_errfile=${2:-}
-	l_sorted_outfile=""
 	zxfer_profile_increment_counter g_zxfer_profile_source_snapshot_list_commands
 	zxfer_profile_increment_counter g_zxfer_profile_bucket_source_inspection
 
@@ -479,23 +470,17 @@ zxfer_write_source_snapshot_list_to_file() {
 	fi
 	zxfer_echoV "Running command in the background: $l_source_snapshot_command"
 	zxfer_record_last_command_string "$l_source_snapshot_command"
-	if [ "${g_source_snapshot_list_background_sort_requested:-0}" -eq 1 ]; then
-		zxfer_get_temp_file || return "$?"
-		l_sorted_outfile=$g_zxfer_temp_file_result
-		g_source_snapshot_list_sorted_file=$l_sorted_outfile
-		zxfer_execute_source_snapshot_list_background_cmd_with_sort \
-			"$l_source_snapshot_command" "$l_outfile" \
-			"$l_errfile" "$l_sorted_outfile" || {
-			l_source_list_status=$?
-			zxfer_cleanup_runtime_artifact_path "$l_sorted_outfile"
-			g_source_snapshot_list_sorted_file=""
-			return "$l_source_list_status"
-		}
-	else
-		zxfer_execute_rendered_background_shell_command \
-			"$l_source_snapshot_command" "$l_outfile" "$l_errfile" ||
-			return "$?"
-	fi
+	zxfer_get_temp_file || return "$?"
+	l_sorted_outfile=$g_zxfer_temp_file_result
+	g_source_snapshot_list_sorted_file=$l_sorted_outfile
+	zxfer_execute_source_snapshot_list_background_cmd_with_sort \
+		"$l_source_snapshot_command" "$l_outfile" \
+		"$l_errfile" "$l_sorted_outfile" || {
+		l_source_list_status=$?
+		zxfer_cleanup_runtime_artifact_path "$l_sorted_outfile"
+		g_source_snapshot_list_sorted_file=""
+		return "$l_source_list_status"
+	}
 	g_source_snapshot_list_pid=$g_last_background_pid
 }
 
@@ -543,14 +528,13 @@ zxfer_read_snapshot_discovery_status_file() {
 # Purpose: Publish a staged destination dataset inventory as g_recursive_dest_list
 # and seed the existence cache from it.
 # Usage: zxfer_publish_destination_dataset_inventory_from_stage LIST_FILE
-# ERR_FILE STATUS [POOL_STATUS]; shared by local and remote discovery. A
-# missing destination whose pool exists publishes an empty list; other
-# failures throw.
+# ERR_FILE STATUS; STATUS is the listing's exit status. A missing destination
+# whose pool the live probe can list publishes an empty list; other failures
+# throw.
 zxfer_publish_destination_dataset_inventory_from_stage() {
 	l_destination_inventory_tmp_file=$1
 	l_destination_inventory_err_file=$2
 	l_destination_inventory_status=$3
-	l_destination_inventory_pool_status=${4:-}
 
 	if [ "$l_destination_inventory_status" -eq 0 ]; then
 		zxfer_read_snapshot_discovery_capture_file \
@@ -570,16 +554,13 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 	l_destination_inventory_error=$g_zxfer_snapshot_discovery_file_read_result
 	if zxfer_destination_probe_reports_missing \
 		"$l_destination_inventory_error"; then
-		if [ -z "$l_destination_inventory_pool_status" ]; then
-			l_destination_inventory_pool=${g_destination%%/*}
-			l_destination_inventory_pool_status=0
-			l_destination_inventory_pool_error=$(zxfer_run_destination_zfs_cmd \
-				list -H -o name "$l_destination_inventory_pool" 2>&1 >/dev/null) ||
-				l_destination_inventory_pool_status=$?
-		else
-			l_destination_inventory_pool=${g_destination%%/*}
-			l_destination_inventory_pool_error=""
-		fi
+		# The root is missing; the run can bootstrap it only when its pool
+		# is really there.
+		l_destination_inventory_pool=${g_destination%%/*}
+		l_destination_inventory_pool_status=0
+		l_destination_inventory_pool_error=$(zxfer_run_destination_zfs_cmd \
+			list -H -o name "$l_destination_inventory_pool" 2>&1 >/dev/null) ||
+			l_destination_inventory_pool_status=$?
 		if [ "$l_destination_inventory_pool_status" -eq 0 ]; then
 			g_recursive_dest_list=""
 			zxfer_mark_destination_root_missing_in_cache "$g_destination"
@@ -606,7 +587,8 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 # sorted form.
 # Usage: zxfer_write_destination_snapshot_list_to_files RAW SORTED; a missing
 # destination root leaves both files empty. The listing is serial and has no
-# creation order, since the destination side needs neither.
+# creation order, since the destination side needs neither. A -T listing that
+# ssh could not deliver (status 255) stops the run with that status.
 zxfer_write_destination_snapshot_list_to_files() {
 	l_dest_list_raw_file=$1
 	l_dest_list_sorted_file=$2
@@ -632,12 +614,20 @@ zxfer_write_destination_snapshot_list_to_files() {
 		fi
 	else
 		l_dest_list_status=$?
-		# Its stderr does not reliably say which dataset is missing, so an
-		# exact probe (with the SunOS fallback) decides whether the root is
-		# absent, the bootstrap case, or the listing itself failed.
-		zxfer_probe_destination_existence "$l_dest_list_dataset" live ||
-			zxfer_throw_error "$g_zxfer_destination_exists_error" "$?"
-		if [ "$g_zxfer_destination_exists_result" -ne 0 ]; then
+		# ssh exits 255 for its own failures and zfs never does, so a -T
+		# listing that ssh could not deliver says nothing about the dataset:
+		# the run stops with ssh's status instead of probing over the same
+		# connection. Otherwise the listing's stderr does not reliably say
+		# which dataset is missing, so an exact probe (with the SunOS
+		# fallback) decides whether the root is absent, the bootstrap case,
+		# or the listing itself failed.
+		l_dest_list_exists=1
+		if [ "$l_dest_list_status" -ne 255 ] || [ -z "${g_option_T_target_host:-}" ]; then
+			zxfer_probe_destination_existence "$l_dest_list_dataset" live ||
+				zxfer_throw_error "$g_zxfer_destination_exists_error" "$?"
+			l_dest_list_exists=$g_zxfer_destination_exists_result
+		fi
+		if [ "$l_dest_list_exists" -ne 0 ]; then
 			if zxfer_read_snapshot_discovery_capture_file "$g_zxfer_destination_listing_error_file" &&
 				[ -n "$g_zxfer_snapshot_discovery_file_read_result" ]; then
 				zxfer_warn_stderr "$g_zxfer_snapshot_discovery_file_read_result"

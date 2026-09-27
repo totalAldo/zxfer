@@ -254,7 +254,6 @@ zxfer_test_reset_snapshot_discovery_result_fixture() {
 	g_ssh_target_control_socket=""
 	g_last_background_pid=""
 	g_source_snapshot_list_pid=""
-	g_source_snapshot_list_background_sort_requested=0
 	g_source_snapshot_list_sorted_file=""
 	g_zxfer_temp_file_result=""
 }

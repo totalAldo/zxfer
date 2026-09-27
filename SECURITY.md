@@ -61,11 +61,13 @@ Key protections already present in the project include:
 - a private per-run 0700 artifact root whose exact path, validated parent, and
   stored device/inode identity, owner and 0700 mode record must match
   runtime-owned provenance before recursive cleanup
-- remote destination discovery streams the single ssh response through one
-  ordered parser into the caller's four files and publishes its batch statuses
-  only after transport, protocol order, numeric statuses, and sentinel all
-  pass; any failure empties all four files rather than exposing partial
-  discovery state
+- remote (`-T`) destination discovery runs no target-side script: each
+  destination `zfs list` is one argv-quoted command over the role's control
+  master, and its own exit status (255 when ssh loses the connection) decides
+  whether its output file is used, exactly as for a local listing; a failed
+  listing falls back only to the exact existence probe, never to partial
+  discovery state, and a listing ssh could not deliver stops the run without
+  even that probe
 - remote capability responses are framed, coverage-checked, and parsed once per
   role, host and requested tool set; only a fully validated response is
   stored, and later OS/tool lookups reuse its validated fields instead of

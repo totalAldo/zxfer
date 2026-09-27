@@ -87,13 +87,10 @@ module or a chain of setters.
 - [../src/zxfer_snapshot_producers.sh](../src/zxfer_snapshot_producers.sh):
   source/destination command production, staged execution, and snapshot-stream
   normalization
-- [../src/zxfer_remote_snapshot_discovery.sh](../src/zxfer_remote_snapshot_discovery.sh):
-  target-side discovery batch rendering, an ordered `awk` parser that also
-  validates the statuses, and streaming of the four outputs into the caller's
-  files (emptied on any failure)
 - [../src/zxfer_snapshot_discovery.sh](../src/zxfer_snapshot_discovery.sh):
-  discovery orchestration, source/destination diffing, cache publication,
-  recursive discovery state, and complete full/fast-no-op artifact groups
+  discovery orchestration (a `-T` destination is listed like a local one),
+  source/destination diffing, cache publication, recursive discovery state,
+  and complete full/fast-no-op artifact groups
 - [../src/zxfer_migration_services.sh](../src/zxfer_migration_services.sh):
   `-m`/`-c` preparation (stopping `-c` services, the mounted checks, the source
   unmounts, and the `-m` snapshot plus rediscovery) and Solaris/illumos SMF
@@ -386,9 +383,8 @@ one item per argument, so no byte in a property value can become an extra
    destination execution context.
 4. Build identity-aware dataset and snapshot lists. Eligible recursive no-op
    runs (local sources and `-O` pulls alike) first try the fast `name,guid`
-   proof, and remote-target `-T` destination discovery batches inventory,
-   missing-root pool probing, and snapshot listing into one target-side ssh
-   shell invocation.
+   proof. A `-T` destination is listed like a local one: each destination
+   `zfs list` runs over the target's ssh control master.
 5. With `-g`, plan every dataset of the pass and refuse divergence before
    anything is sent, received, or destroyed on the destination; with `-d`,
    also check each planned destination delete against `-g`. Then inspect
@@ -422,7 +418,6 @@ function boundaries so operators and contributors can line the diagrams up with
 [`../src/zxfer_ssh_transport.sh`](../src/zxfer_ssh_transport.sh),
 [`../src/zxfer_remote_hosts.sh`](../src/zxfer_remote_hosts.sh),
 [`../src/zxfer_snapshot_producers.sh`](../src/zxfer_snapshot_producers.sh),
-[`../src/zxfer_remote_snapshot_discovery.sh`](../src/zxfer_remote_snapshot_discovery.sh),
 [`../src/zxfer_snapshot_discovery.sh`](../src/zxfer_snapshot_discovery.sh),
 [`../src/zxfer_snapshot_reconcile.sh`](../src/zxfer_snapshot_reconcile.sh),
 [`../src/zxfer_property_state.sh`](../src/zxfer_property_state.sh),
@@ -500,28 +495,25 @@ uncertainty, or stream failure falls back to full discovery or fails through the
 same staged stderr paths used by the normal discovery flow. A proven clean no-op
 never runs the creation-order source listing. When the proof declines after a
 successful destination listing, full discovery normalizes that raw listing
-instead of listing again. A local full-discovery listing checks destination
+instead of listing again. A full-discovery listing checks destination
 existence only when the listing itself fails. The destination producer writes
 one status line for its list, normalize, and sort stages.
 
-Remote target discovery has a separate `-T` optimization in
-`zxfer_run_remote_destination_discovery_batch_to_files()`. The target-side
-script uses the resolved target `zfs` path and validated dependency `PATH`,
-starts recursive dataset inventory in the background, streams the large
-destination snapshot stdout section directly back over ssh as `name,guid`
-records, captures stderr and compact statuses in target-side temp files, and
-runs the pool-exists fallback only when the destination root appears missing.
-The local side streams the single SSH response through one AWK parser straight
-into the caller's four files, truncated first. The parser accepts statuses,
-sections, and the final sentinel only in the target renderer's exact order,
-and checks that every status is numeric (the pool status may be empty). The
-ssh status crosses the pipe in one run-root temp file and ssh stderr in
-another; both are removed after the batch. The batch statuses are published
-only after a clean transport and parse. Any transport, parser, or status
-failure leaves them empty and empties all four files, so the missing-root path
-still re-probes the destination pool live. Validated SSH stderr uses a separate failure-only diagnostic stage,
-while snapshot-list stderr still precedes the existing `Failed to retrieve
-snapshot list from the destination.` context.
+A `-T` destination takes the same full-discovery path as a local one. Every
+destination `zfs list` goes through `zxfer_run_destination_zfs_cmd`, which
+runs it on the target over the role's ssh control master, and each listing's
+own exit status gates its output file (ssh exits 255 when the connection
+drops), so there is no target-side script or framing protocol to validate.
+The destination snapshot listing overlaps the source listing; when it fails,
+the exact existence probe decides between a missing dataset (bootstrap) and
+a failed run. A `-T` listing that ssh could not deliver (status 255, which
+zfs never returns) says nothing about the dataset, so the run stops with
+that status without probing over the same connection. After the diff, the
+recursive dataset inventory is listed only when later work reads it
+(transfers, `-d` deletes, property work), so a clean `-T` no-op lists no
+inventory; a missing destination root is bootstrapped only after the live
+pool probe lists its pool. Snapshot-list stderr precedes the `Failed to
+retrieve snapshot list from the destination.` report, locally and over `-T`.
 
 ```mermaid
 flowchart TD
@@ -532,15 +524,13 @@ flowchart TD
     E --> F{"comm -3 finds no identity diff?"}
     F -- "yes" --> G["Return clean no-op before full discovery"]
     F -- "no or uncertain" --> H["Fall back to full snapshot discovery"]
-    B -- "no" --> H
-    H --> I{"Remote target -T?"}
-    I -- "yes" --> J["Run one target-side destination discovery batch"]
-    J --> K["Validate the streamed response in one awk parser"]
-    I -- "no" --> L["Reuse the proof's raw destination listing, or list the destination (exact existence probe only on failure)"]
-    K --> P["Stream the four outputs into their files; empty them and publish no statuses on failure"]
-    P --> M["Normalize destination snapshot prefixes and diff identity records"]
-    L --> M
-    M --> N["Publish source/destination lists, caches, and record caches"]
+    B -- "no (-T, -P, -k, ...)" --> H
+    H --> L["Reuse the proof's raw destination listing, or list the destination through zxfer_run_destination_zfs_cmd, locally or over the -T master (exact existence probe only on failure)"]
+    L --> M["Normalize destination snapshot prefixes and diff identity records"]
+    M --> I{"Transfers, -d deletes, or property work pending?"}
+    I -- "yes" --> J["List the destination dataset inventory the same way (live pool probe when the root is missing)"]
+    I -- "no" --> N["Publish source/destination lists, caches, and record caches"]
+    J --> N
 ```
 
 ### Per-Dataset Replication Lifecycle
@@ -690,10 +680,10 @@ sequenceDiagram
     Launcher->>Target: open the per-run ssh control master before any other remote command
     Launcher->>Target: probe target helper capabilities once over that master
     Launcher->>Local: list source datasets and name,guid snapshots
-    Launcher->>Target: run one destination discovery batch through sh -c (one private mktemp -d workspace on the target)
-    Target-->>Launcher: stream snapshot_stdout and return inventory/status/stderr sections
-    Launcher->>Launcher: validate the streamed batch and stream all four outputs into their files
+    Launcher->>Target: zfs list the destination name,guid snapshots over that master
+    Target-->>Launcher: the listing and its exit status
     Launcher->>Launcher: normalize destination prefixes and build identity diffs
+    Launcher->>Target: zfs list the destination datasets over that master when later work needs them
     loop choose non-conflicting ready datasets before waiting
         Launcher->>Local: zfs send ... | local compression helper
         Local-->>Launcher: compressed replication stream

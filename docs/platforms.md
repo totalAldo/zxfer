@@ -173,17 +173,14 @@ POSIX `sh` bootstrap reassembles the original bytes before an explicit
 preserving the program, standard input, exit status, and protocol fields on
 remote accounts whose login shell is csh or tcsh.
 
-Remote target (`-T`) destination discovery also runs under that validated
-target-side `PATH`. Current discovery batches the recursive destination dataset
-inventory, the missing-root pool probe, and `name,guid` destination snapshot
-listing into one target-side POSIX `sh -c` payload. The large snapshot section
-is streamed back over ssh, compact statuses and stderr are staged in one
-private `mktemp -d` workspace on the target that is removed on every exit,
-and malformed or truncated section payloads fail closed. The local side
-validates the ordered protocol and its statuses in one `awk` parser while
-streaming the inventory, inventory-stderr, snapshot, and snapshot-stderr files;
-any failure empties all four. Local destination discovery deliberately remains
-on the direct local `zfs` path.
+Remote target (`-T`) destination discovery runs no target-side script. Like
+every other destination `zfs` command, each discovery listing (the
+`name,guid` snapshot listing, the recursive dataset inventory when later work
+needs it, the exact existence probe after a failed listing, and the
+missing-root pool probe) is one command running the capability probe's
+resolved target `zfs` over the target's control master, so discovery needs
+only `zfs` on the target: no `mktemp`, `grep`, `rm` or `cat`. Local and
+`-T` destination discovery share one code path.
 
 Recursive property prefetch (`-P` and related options) uses
 `zfs get -r -t filesystem,volume`. OpenZFS on Linux, FreeBSD, and macOS, and
@@ -218,7 +215,7 @@ flowchart TD
     B --> F["Remote cat when -e reads backup metadata, and find when -k lists an existing storage directory on the origin"]
 
     G["Target role via -T"] --> H["Remote destination-side helpers"]
-    H --> I["Batched destination discovery: datasets, pool fallback, and name,guid snapshots"]
+    H --> I["Destination discovery: name,guid snapshot listing, then the dataset inventory and pool probe when needed"]
     H --> J["zfs receive and destination-side property work"]
     H --> K["Remote decompression helper when -z or -Z is active"]
     H --> L["Remote backup-directory and backup-write helpers for -k, including cat-based metadata writes"]
