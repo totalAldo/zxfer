@@ -360,24 +360,18 @@ zxfer_capture_remote_probe_output() {
 	g_zxfer_remote_probe_stdout=""
 	g_zxfer_remote_probe_stderr=""
 	g_zxfer_remote_probe_capture_failed=0
-	# Throw here, not in the subshell below with stderr redirected, so the
-	# report reaches the operator and ends the run.
-	if ! zxfer_prepare_ssh_transport; then
-		zxfer_profile_record_ssh_invocation "$1" "${3:-}"
-		zxfer_throw_error "$g_zxfer_ssh_transport_error"
-	fi
-	zxfer_resolve_ssh_host_spec "$1" ||
-		zxfer_throw_error "$g_zxfer_ssh_shell_context_error_result"
+	# ssh runs in the substitution's subshell below, so count it here. Record
+	# mode prepares the transport and renders the argv in this shell: a bad
+	# policy or host spec throws here, where the report reaches the operator,
+	# not in the subshell with stderr redirected, and the argv becomes the
+	# report's last command.
+	zxfer_profile_record_ssh_invocation "$1" "${3:-}"
+	zxfer_ssh_shell_command_for_host record "$1" "$2" "${3:-}" || return
 	zxfer_get_temp_file
 	l_probe_stderr_file=$g_zxfer_temp_file_result
 	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
 		zxfer_echoV "Running remote probe [$(zxfer_get_remote_command_context_label "$1" "${3:-}")]: $2"
 	fi
-
-	# ssh runs in the substitution's subshell, so count it and record it as
-	# the report's last command here.
-	zxfer_profile_record_ssh_invocation "$1" "${3:-}"
-	zxfer_ssh_shell_command_for_host record "$1" "$2" "${3:-}" || return
 	l_probe_status=0
 	g_zxfer_remote_probe_stdout=$(zxfer_invoke_ssh_shell_command_for_host \
 		"$1" "$2" "${3:-}" 2>|"$l_probe_stderr_file") || l_probe_status=$?

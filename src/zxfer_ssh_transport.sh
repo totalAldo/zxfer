@@ -36,7 +36,8 @@
 ################################################################################
 
 # Module contract:
-# owns globals: the ssh policy (g_zxfer_ssh_policy_*), the -O/-T host specs
+# owns globals: the ssh policy (g_zxfer_ssh_policy_*) and its once-per-run
+#   readiness flag g_zxfer_ssh_transport_ready, the -O/-T host specs
 #   parsed once per value (g_zxfer_ssh_{origin,target}_{spec,host,wrapper}),
 #   the per-role control sockets and their directory (with
 #   g_zxfer_ssh_control_socket_short_dir, the short directory this module
@@ -84,6 +85,9 @@ zxfer_refresh_ssh_control_socket_support_state() {
 zxfer_reset_ssh_transport_state() {
 	g_zxfer_resolved_local_ssh_command_result=""
 	g_zxfer_ssh_transport_error=""
+	g_zxfer_ssh_transport_ready=""
+	g_zxfer_ssh_policy_options=""
+	g_zxfer_ssh_policy_error=""
 	g_zxfer_ssh_shell_host_result=""
 	g_zxfer_ssh_shell_full_remote_command_result=""
 	g_zxfer_ssh_shell_context_error_result=""
@@ -131,8 +135,8 @@ zxfer_ensure_local_ssh_command() {
 # Purpose: Validate the ZXFER_SSH_* policy and publish the ssh options it adds.
 # Usage: zxfer_load_ssh_transport_policy; publishes g_zxfer_ssh_policy_options
 # (ssh -o tokens, one per line, empty under ZXFER_SSH_USE_AMBIENT_CONFIG), or
-# returns 1 with g_zxfer_ssh_policy_error. It forks nothing, so it revalidates
-# on every call rather than keep a memo.
+# returns 1 with g_zxfer_ssh_policy_error. zxfer_prepare_ssh_transport calls
+# it until it succeeds once.
 zxfer_load_ssh_transport_policy() {
 	g_zxfer_ssh_policy_options=""
 	g_zxfer_ssh_policy_error=""
@@ -174,16 +178,21 @@ zxfer_load_ssh_transport_policy() {
 # Purpose: Validate the ssh policy and resolve local ssh before ssh argv is
 # built.
 # Usage: zxfer_prepare_ssh_transport; returns 1 with the diagnostic in
-# g_zxfer_ssh_transport_error.
+# g_zxfer_ssh_transport_error. The policy comes from the environment, which a
+# run never changes, so the first success holds for the rest of the run
+# (g_zxfer_ssh_transport_ready, cleared by the session reset).
 zxfer_prepare_ssh_transport() {
+	[ "${g_zxfer_ssh_transport_ready:-}" != 1 ] || return 0
 	g_zxfer_ssh_transport_error=""
 	if ! zxfer_load_ssh_transport_policy; then
 		g_zxfer_ssh_transport_error=$g_zxfer_ssh_policy_error
 		return 1
 	fi
-	zxfer_ensure_local_ssh_command && return 0
-	g_zxfer_ssh_transport_error=$g_zxfer_resolved_local_ssh_command_result
-	return 1
+	if ! zxfer_ensure_local_ssh_command; then
+		g_zxfer_ssh_transport_error=$g_zxfer_resolved_local_ssh_command_result
+		return 1
+	fi
+	g_zxfer_ssh_transport_ready=1
 }
 
 ################################################################################

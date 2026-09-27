@@ -982,3 +982,36 @@ UserKnownHostsFile=/etc/zxfer/known_hosts" "$managed"
 	done
 	unset ZXFER_SSH_BATCH_MODE ZXFER_SSH_STRICT_HOST_KEY_CHECKING ZXFER_SSH_USER_KNOWN_HOSTS_FILE
 }
+
+test_zxfer_prepare_ssh_transport_validates_the_policy_once_per_run() {
+	output=$(
+		(
+			g_cmd_ssh=/usr/bin/ssh
+			ZXFER_SSH_BATCH_MODE='bad
+value'
+			zxfer_prepare_ssh_transport
+			printf 'invalid=%s ready=<%s> error=%s\n' "$?" \
+				"$g_zxfer_ssh_transport_ready" "$g_zxfer_ssh_transport_error"
+			ZXFER_SSH_BATCH_MODE=no
+			zxfer_prepare_ssh_transport
+			printf 'valid=%s ready=<%s>\n' "$?" "$g_zxfer_ssh_transport_ready"
+			load_calls=0
+			zxfer_load_ssh_transport_policy() {
+				load_calls=$((load_calls + 1))
+				return 1
+			}
+			zxfer_prepare_ssh_transport
+			printf 'again=%s load_calls=%s\n' "$?" "$load_calls"
+			zxfer_reset_ssh_transport_state
+			zxfer_prepare_ssh_transport
+			printf 'after_reset=%s load_calls=%s ready=<%s>\n' "$?" "$load_calls" \
+				"$g_zxfer_ssh_transport_ready"
+		)
+	)
+
+	assertEquals "A failed policy is checked again; the first success holds until the session reset." \
+		"invalid=1 ready=<> error=ZXFER_SSH_BATCH_MODE must be a single-line non-empty value.
+valid=0 ready=<1>
+again=0 load_calls=0
+after_reset=1 load_calls=1 ready=<>" "$output"
+}
