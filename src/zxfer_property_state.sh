@@ -571,12 +571,9 @@ zxfer_find_property_row() {
 # cut short: every row file ends in a LF, which a failed write never leaves.
 zxfer_read_property_row() {
 	g_zxfer_property_row_payload_result=""
+	# A row name is one letter and a number.
 	case $1 in
-	[a-z][0-9]*) ;;
-	*) return 1 ;;
-	esac
-	case ${1#?} in
-	*[!0-9]*) return 1 ;;
+	'' | ? | [!a-z]* | ?*[!0-9]*) return 1 ;;
 	esac
 	[ -n "${g_zxfer_property_row_dir:-}" ] || return 1
 	# dash's read takes the file one byte at a time, but only this row.
@@ -808,12 +805,8 @@ zxfer_prefetch_recursive_normalized_properties() {
 	if [ -n "$l_prefetch_index" ]; then
 		l_prefetch_last=${l_prefetch_index##*"$ZXFER_LF"}
 		l_prefetch_last=${l_prefetch_last%%"$ZXFER_TAB"*}
-		case $l_prefetch_last in
-		p[0-9]*) ;;
-		*) return 1 ;;
-		esac
 		case ${l_prefetch_last#p} in
-		*[!0-9]*) return 1 ;;
+		'' | *[!0-9]*) return 1 ;;
 		esac
 		g_zxfer_property_row_count=${l_prefetch_last#p}
 		l_prefetch_index=$ZXFER_LF$l_prefetch_index

@@ -90,7 +90,7 @@ test_collect_source_props_fails_when_backup_entry_missing() {
 	done
 }
 
-test_collect_source_props_restore_mode_requires_restored_contents() {
+test_collect_source_props_restore_mode_requires_loaded_rows() {
 	set +e
 	output=$(
 		(
@@ -101,8 +101,8 @@ test_collect_source_props_restore_mode_requires_restored_contents() {
 				printf '%s\n' "$1"
 				exit 2
 			}
+			# No backup file was loaded: no roots, no rows.
 			g_option_e_restore_property_mode=1
-			g_restored_backup_file_contents=""
 			zxfer_collect_source_props "tank/src" "backup/dst"
 		)
 	)
