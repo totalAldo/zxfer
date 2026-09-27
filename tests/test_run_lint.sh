@@ -12,7 +12,6 @@ TESTS_DIR=$(dirname "$0")
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_run_lint"
 	RUN_LINT_BIN="$ZXFER_ROOT/tests/run_lint.sh"
-	TEST_HELPER_EVAL_CHECK_BIN="$ZXFER_ROOT/tests/check_test_helper_eval.sh"
 }
 
 oneTimeTearDown() {
@@ -62,11 +61,6 @@ initialize_fake_lint_repository() {
 	l_fake_root=$1
 	mkdir -p "$l_fake_root/tests"
 	ln -s "$RUN_LINT_BIN" "$l_fake_root/tests/run_lint.sh"
-	cat >"$l_fake_root/tests/check_test_helper_eval.sh" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	chmod +x "$l_fake_root/tests/check_test_helper_eval.sh"
 	(
 		cd "$l_fake_root"
 		git init -q
@@ -133,8 +127,7 @@ test_run_lint_shell_targets_include_nonignored_untracked_sources_once() {
 	printf '%s\n' 'ignored.sh' >"$l_fake_root/.gitignore"
 	(
 		cd "$l_fake_root"
-		git add .gitignore zxfer src/tracked.sh tests/run_lint.sh \
-			tests/check_test_helper_eval.sh
+		git add .gitignore zxfer src/tracked.sh tests/run_lint.sh
 		git commit -qm baseline
 	)
 
@@ -190,56 +183,62 @@ test_codespell_skips_generated_coverage_trees() {
 		",$l_codespell_skip," ",./coverage-codex,"
 }
 
+# Purpose: Run the shellcheck target, and so the test-helper eval policy, in
+# a fake repository whose shared helpers hold the files given on stdin.
+# Usage: run_eval_policy_fixture NAME <<EOF ... EOF, one "path<TAB>line" per
+# helper line; the target's output lands in EVAL_POLICY_OUTPUT and its status
+# in EVAL_POLICY_STATUS.
 # shellcheck disable=SC2329  # Invoked by shunit2 test functions.
-write_test_helper_eval_policy_fixture() {
-	l_fixture_root=$1
-	mkdir -p "$l_fixture_root/tests/helpers"
-	cat >"$l_fixture_root/tests/test_helper_eval_policy.tsv" <<'EOF'
-# helper_path	function_name	rationale
-tests/helpers/process_capture.sh	legacy_capture	Compatibility fixture.
-EOF
-	cat >"$l_fixture_root/tests/helpers/process_capture.sh" <<'EOF'
-#!/bin/sh
-legacy_capture() {
-	eval "$1"
-}
-EOF
-}
-
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_test_helper_eval_policy_accepts_the_inventoried_legacy_capture() {
-	l_fixture_root="$TEST_TMPDIR/eval-policy-accept"
-	write_test_helper_eval_policy_fixture "$l_fixture_root"
-
-	set +e
-	output=$("$TEST_HELPER_EVAL_CHECK_BIN" "$l_fixture_root" 2>&1)
-	status=$?
-	set -e
-
-	assertEquals "The explicitly inventoried compatibility helper should remain available during migration." \
-		0 "$status"
-	assertEquals "A passing static helper policy should stay quiet." "" "$output"
+run_eval_policy_fixture() {
+	l_fake_root="$TEST_TMPDIR/$1-root"
+	l_tool_root="$TEST_TMPDIR/$1-tools"
+	l_fake_bin="$TEST_TMPDIR/$1-bin"
+	initialize_fake_lint_repository "$l_fake_root"
+	write_fake_lint_toolchain "$l_tool_root"
+	write_fake_lint_host_uname "$l_fake_bin"
+	mkdir -p "$l_fake_root/tests/helpers"
+	while IFS="$(printf '\t')" read -r l_helper_path l_helper_line; do
+		printf '%s\n' "$l_helper_line" >>"$l_fake_root/$l_helper_path"
+	done
+	EVAL_POLICY_STATUS=0
+	EVAL_POLICY_OUTPUT=$(PATH="$l_fake_bin:${PATH:-/usr/bin:/bin}" \
+		LINT_CAPTURE_LOG="$TEST_TMPDIR/$1.log" \
+		ZXFER_LINT_TOOL_DIR="$l_tool_root" \
+		"$l_fake_root/tests/run_lint.sh" shellcheck 2>&1) || EVAL_POLICY_STATUS=$?
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_test_helper_eval_policy_rejects_a_new_eval_based_capture_helper() {
-	l_fixture_root="$TEST_TMPDIR/eval-policy-reject"
-	write_test_helper_eval_policy_fixture "$l_fixture_root"
-	cat >"$l_fixture_root/tests/helpers/new_capture.sh" <<'EOF'
-#!/bin/sh
-new_capture() {
-	eval "$1"
-}
+test_test_helper_eval_policy_accepts_the_two_legacy_captures() {
+	tab=$(printf '\t')
+	run_eval_policy_fixture eval-accept <<EOF
+tests/helpers/process_capture.sh${tab}legacy_capture() { eval "\$1"; }
+tests/helpers/process_capture.sh${tab}legacy_capture_split() { eval "\$3"; }
+tests/helpers/process_capture.sh${tab}# a comment may say eval
 EOF
 
-	set +e
-	output=$("$TEST_HELPER_EVAL_CHECK_BIN" "$l_fixture_root" 2>&1)
-	status=$?
-	set -e
+	assertEquals "The two legacy capture helpers should pass. Output: $EVAL_POLICY_OUTPUT" \
+		0 "$EVAL_POLICY_STATUS"
+	assertNotContains "A passing policy should report nothing." \
+		"$EVAL_POLICY_OUTPUT" "eval in a shared test helper"
+}
 
-	assertNotEquals "A new eval-based shared capture helper must fail static lint." 0 "$status"
-	assertContains "The failure should identify the uninventoried helper and source line." \
-		"$output" "tests/helpers/new_capture.sh:3 has an uninventoried eval command in new_capture"
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_test_helper_eval_policy_rejects_a_new_eval_in_a_shared_helper() {
+	tab=$(printf '\t')
+	run_eval_policy_fixture eval-reject <<EOF
+tests/helpers/process_capture.sh${tab}legacy_capture() { eval "\$1"; }
+tests/helpers/process_capture.sh${tab}legacy_capture_split() { eval "\$3"; }
+tests/helpers/process_capture.sh${tab}third_capture() { eval "\$1"; }
+tests/helpers/new_capture.sh${tab}#!/bin/sh
+tests/helpers/new_capture.sh${tab}new_capture() { eval "\$1"; }
+EOF
+
+	assertNotEquals "A new eval in a shared helper must fail the shellcheck target." \
+		0 "$EVAL_POLICY_STATUS"
+	assertContains "A third eval in the legacy file should be named." \
+		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:3: eval in a shared test helper"
+	assertContains "An eval in another helper should be named." \
+		"$EVAL_POLICY_OUTPUT" "tests/helpers/new_capture.sh:2: eval in a shared test helper"
 }
 
 # shellcheck source=tests/shunit2/shunit2

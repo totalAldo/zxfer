@@ -1087,14 +1087,16 @@ test_vm_render_guest_test_script_uses_perf_compare_runner_when_requested() {
 
 	script_body=$(zxfer_vm_render_guest_test_script ubuntu /root/zxfer /var/tmp/zxfer-vm-matrix)
 
-	assertContains "Performance comparison guest runs should invoke the comparator." \
-		"$script_body" "./tests/run_perf_compare.sh --yes --profile 'standard'"
+	assertContains "Performance comparison guest runs should invoke the perf runner in its two-binary mode." \
+		"$script_body" "./tests/run_perf_tests.sh --yes --profile 'standard'"
 	assertContains "Performance comparison guest runs should use the archived baseline checkout beside the candidate." \
 		"$script_body" "--baseline-bin '/root/zxfer-baseline/zxfer'"
 	assertContains "Performance comparison guest runs should label the baseline ref." \
 		"$script_body" "--baseline-label 'upstream-compat-final'"
 	assertContains "Performance comparison guest runs should measure the current checkout as candidate." \
-		"$script_body" "--candidate-bin '/root/zxfer/zxfer'"
+		"$script_body" "ZXFER_BIN='/root/zxfer/zxfer'"
+	assertContains "Performance comparison guest runs should label the current checkout as candidate." \
+		"$script_body" "--label 'candidate'"
 	assertNotContains "Performance comparison guest runs should not rely on git inside the guest." \
 		"$script_body" "git "
 }
@@ -1132,8 +1134,8 @@ test_vm_render_guest_test_script_shell_quotes_all_interpolated_paths() {
 		"$script_body" "env TMPDIR=$quoted_tmp"
 	assertContains "The rendered guest script should quote its baseline binary path as one argument." \
 		"$script_body" "--baseline-bin $quoted_baseline"
-	assertContains "The rendered guest script should quote its candidate binary path as one argument." \
-		"$script_body" "--candidate-bin $quoted_candidate"
+	assertContains "The rendered guest script should quote its candidate binary path as one environment value." \
+		"$script_body" "ZXFER_BIN=$quoted_candidate"
 	assertContains "The rendered guest script should quote its output directory as one argument." \
 		"$script_body" "--output-dir $quoted_output"
 	if ! printf '%s\n' "$script_body" | /bin/sh -n; then

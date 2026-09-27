@@ -86,19 +86,6 @@ explicit justification in the PR that edits it. Use
 `./tests/run_budget_check.sh --list` to print current measured values in
 policy format when ratcheting budgets down.
 
-For optional, non-gating evidence about the changed-code loop, record warmed
-named-test and representative quick-validation timings without applying a
-threshold:
-
-```sh
-./tests/run_dx_benchmark.sh \
-  --case named,quick --samples 5 \
-  --output-dir /tmp/zxfer-dx-candidate
-```
-
-The complete `shunit` and `validate` timing cases are available for wider
-measurements; see [docs/testing.md](./docs/testing.md).
-
 The shell lint targets include tracked and non-ignored untracked `*.sh` files
 and the `zxfer` launcher, so a newly extracted module is checked before it is
 staged. Ignored files remain outside the lint source set.
@@ -133,6 +120,15 @@ List suites or the named tests in one suite, then run only the needed tests:
 Named tests are validated as a batch before any selected suite starts. A
 repeated suite is merged into its first position and executes once with all of
 its selected tests.
+
+A suite that runs longer than 15 minutes is stopped and reported as timed out;
+raise the limit with `--suite-timeout SECONDS` (or `ZXFER_TEST_SUITE_TIMEOUT`,
+0 disables it) on a slow emulated guest. `--skip-tool-suites` leaves out the
+self-tests of the tooling (`tests/test_run_*.sh`, `tests/test_validate.sh`,
+`tests/test_ci_*.sh`, `tests/test_generate_solaris_manpage.sh`) when you only
+changed `src/`. A suite that takes more than about 10 s alone belongs in
+`RUNNER_SLOW_SUITES` at the top of the runner, which parallel runs start
+first. See [docs/testing.md](./docs/testing.md) for the runner's reference.
 
 Run coverage when useful:
 
@@ -187,14 +183,30 @@ Run the integration harness interactively when you want per-command approval:
 ./tests/run_integration_zxfer.sh
 ```
 
-Integration test bodies live in concern-focused files under
-`tests/integration/`. `tests/integration_fragment_manifest.tsv` is the fixed,
-non-evaluated source order, while `tests/integration_test_registry.tsv` is the
-exact execution order and pre-pool classification. Add a case to the matching
-fragment and registry row; change the fragment manifest only when adding or
-removing a whole concern fragment. The stable runner keeps ownership of
-argument parsing, confirmation, pool lifecycle, filtering, supervision, and
-cleanup.
+Integration test bodies live in concern-focused `tests/integration/NAME_tests.sh`
+fragments, which the harness loads in sorted order, while
+`tests/integration_test_registry.tsv` is the exact execution order and
+pre-pool classification. Add a case to the matching fragment and a registry
+row. A fragment holds only function definitions in the shfmt layout (a new
+concern is a new `NAME_tests.sh` file); the harness rejects anything else
+before it touches a pool. The stable runner keeps ownership of argument
+parsing, confirmation, pool lifecycle, filtering, supervision, and cleanup.
+
+For a performance-sensitive change, compare the helper-spawn counts and the
+wall clock against `main` on the canned zfs; neither needs ZFS or root:
+
+```sh
+./tests/run_microbench.sh
+./tests/run_perf_ab.sh --baseline-ref main --sizes 25,100 --reps 5
+```
+
+The spawn budgets in `tests/perf_budgets.tsv` only go down: when a change
+lowers a count, lower its row in the same change. For real pools, use the VM
+matrix `perf` layer, or `perf-compare` to time another ref in the same guest:
+
+```sh
+ZXFER_VM_PERF_BASELINE_REF=main ./tests/run_vm_matrix.sh --profile smoke --test-layer perf-compare
+```
 
 ## Documentation Expectations
 
@@ -240,6 +252,7 @@ Good pull requests explain:
 GitHub Actions also runs an Ubuntu portable-shell matrix for `dash`,
 `bash --posix`, and `busybox ash` on every push, plus a non-blocking `posh`
 lane on pushes to `main`, and a separate non-blocking Docker-backed `kcov`
-coverage artifact job. Local development does not require `kcov`, but shell-
+coverage artifact job. The tool self-tests run only on the ubuntu-26.04 and
+macos-26 lanes. Local development does not require `kcov`, but shell-
 portability-sensitive changes should mention whether those CI lanes were
 considered.

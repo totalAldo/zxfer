@@ -1,567 +1,70 @@
-# tests/perf_budgets.tsv — helper-spawn, ssh-connection and profile-counter
-# budgets for the micro-bench inner-loop signal (tests/run_microbench.sh),
-# enforced by tests/test_zxfer_microbench_budgets.sh.
+# tests/perf_budgets.tsv - helper-spawn, ssh-connection and zfs-call budgets
+# for the small micro-bench fixture (tests/run_microbench.sh -V -d 8 -s 2,
+# 8 datasets x 2 snapshots), enforced by tests/test_zxfer_microbench_budgets.sh
+# on every unit run.
 #
-# Format: <scenario><TAB><metric><TAB><max>  (observed must be <= max, and
-# equal to it for the EXACT ROWS below)
+# Format: <scenario>_small<TAB><metric><TAB><max>; observed must be <= max,
+# and equal to it for the exact rows below.
 #
-# Scenario keys:
-#   noop / dryrun_incr / incr        default CLI fixture, 25 datasets x 4
-#                                    snapshots (local iteration:
-#                                    tests/run_microbench.sh -V)
-#   remote_noop / remote_incr        noop / incr with -O localhost -T
-#                                    localhost through the mock ssh
-#   props                            incr with -P and 68 properties per
-#                                    dataset that already match
-#   *_small                          CI fixture, 8 datasets x 2 snapshots
-#                                    (what the shunit suite runs)
+# Scenarios: noop, dryrun_incr and incr (the default CLI fixture),
+# remote_noop and remote_incr (noop and incr with -O localhost -T localhost
+# through the socket-aware mock ssh), and props (incr with -P and 68
+# properties per dataset that already match).
 #
-# RATCHET-DOWN-ONLY RULE: these budgets may only ever DECREASE. When an
-# optimization lands and the observed counts drop, lower max to
-# ceil(new-observed * 1.15) in the same change. Never raise a budget to make
-# a regression pass; a budget failure means the change reintroduced
-# per-run process spawns or structural work that was pinned away.
+# Metrics: TOTAL (every counted helper spawn), ssh_connections and
+# ssh_master_opens, and the zfs call counters from -V (profile:zfs_*_calls).
+# The per-helper and other profile rows that tests/run_microbench.sh prints
+# are for diagnosis and are not budgeted.
 #
-# EXACT ROWS: ssh_connections and ssh_master_opens are pinned at exactly
-# the observed count, with no headroom, and checked in both directions:
-# every new ssh connection costs a full handshake, so one extra connection
-# is a regression, and a lower count means a scenario stopped reaching ssh
-# the way it should. Lower them only when a change really opens fewer
-# connections.
+# RATCHET-DOWN-ONLY: a budget may only decrease. When a change lowers an
+# observed count, lower max to ceil(observed * 1.15) in the same change.
+# Never raise a budget to make a regression pass: a failure means the change
+# reintroduced per-run spawns or zfs calls that were pinned away.
 #
-# Never budget advisory:* rows (wall time is timing noise, not a contract).
+# EXACT ROWS: ssh_connections and ssh_master_opens hold exactly the observed
+# count, checked in both directions. One extra connection is a full
+# handshake; a lower count means a scenario stopped reaching ssh the way it
+# should. Lower them only when a change really opens fewer connections.
 #
-# History: seeded 2026-06-10 (noop TOTAL=176, dryrun_incr TOTAL=38 with the
-# original 12-tool list), re-ratcheted 2026-06-11 after the per-run temp root
-# (noop 43 / dryrun 9), 2026-06-12 after the fast no-op proof (noop 30), and
-# 2026-06-13 after the proof moved to regular files (dirs_created 0).
+# Never budget advisory:* rows: wall time is noise, not a contract.
 #
-# Re-seeded 2026-09-01 with two deliberate metric changes, both justified by
-# measurement rather than regression:
-#   1. The counted tool list widened from 12 to 22 helpers (adds cat rm mv ls
-#      mkdir cmp wc id stat uname). The old list never saw the hot path: a
-#      26-dataset live incremental run spawned 860 stat + 430 id (run-root
-#      revalidation on every temp file) and 300 cat + 214 rm (stage-file
-#      readback/cleanup) while every budgeted tool stayed flat. TOTAL rows
-#      therefore rise (noop 30->51 observed, dryrun_incr 8->15) purely from
-#      the newly counted tools; every pre-existing per-tool row kept its old
-#      ceiling or ratcheted down (mktemp 2->0, tr stays 0).
-#   2. A third scenario, incr (live incremental, one receive per dataset),
-#      pins the per-dataset hot path that noop/dryrun never exercised. Seeded
-#      after the run-root revalidation fix and the once-per-pass destination
-#      view (recursive destination listings 28->3): observed incr TOTAL=1129
-#      full / 483 small, dominated by tr 338 cat 277 rm 214 awk 209 per-dataset
-#      spawns that the discovery/reconcile collapse is expected to remove.
-#      incr profile rows scale with dataset count, so full and small differ.
-# Re-ratcheted 2026-09-04 after simplification: native -V measurements were
-# noop=39, dryrun_incr=12, incr=247 (full) / 162 (small) helper spawns.
-# Decreases retain 15% headroom; no metric ceiling was increased.
-# Re-ratcheted 2026-09-23 after wave 1 (one-awk snapshot planner, fork-free
-# report quoting): -V measurements noop=33 (sed 0, awk 1), incr=167 (sed 1,
-# awk 64) full / 116 (sed 1, awk 30) small; plain incr=129. Only TOTAL, sed
-# and awk rows moved; no metric ceiling was increased.
-# Re-ratcheted 2026-09-23 after wave 2 (fork-free startup, file-backed
-# discovery, in-shell send and ssh rendering): -V measurements noop=31,
-# dryrun_incr=10, incr=147 (awk 60, cat 36, rm 7, uname 1) full / 96 small;
-# plain noop=14, incr=112. One ceiling rose because its counter became
-# accurate, not because work was added: profile:command_render_calls
-# (incr 2 -> 61, incr_small 2 -> 22; observed 53 / 19). Renders used to run
-# inside $() subshells whose counter increments were lost; they now run in
-# the current shell, and the render count itself did not change.
-# Re-ratcheted 2026-09-23 after wave 3 (id-free run-root lifecycle, one date
-# per -V clock reading, batched delete-plan creation times): -V measurements
-# noop=22 (date 9, id 0), dryrun_incr=7 (date 3), incr=131 (date 16, id 0)
-# full / 80 small; plain noop=13, dryrun_incr=4, incr=111. Only TOTAL, date
-# and id rows moved; no ceiling was increased.
-# Re-ratcheted 2026-09-24 after wave 4 (dead-helper sweep, result-global
-# temp and listing helpers): -V measurements noop=21 (cat 3), dryrun_incr=7,
-# incr=129 (cat 34, runtime_artifact_files_created 27) full / 78 small;
-# plain noop=12, dryrun_incr=4, incr=109. Only TOTAL, cat and
-# runtime_artifact_files_created rows moved; no ceiling was increased.
-# Re-ratcheted 2026-09-26 after -T destination discovery moved to the
-# ordinary listing path (no target-side batch script): -V measurements
-# remote_noop=37 (awk 5, cat 5, rm 4, grep 0, mktemp 0, zfs_list_calls 1),
-# remote_incr=129 full / 78 small (awk 61 / 27, rm 5, grep 0, mktemp 0).
-# ssh_connections and ssh_master_opens are unchanged; no ceiling was
-# increased.
-# Extended 2026-09-25 in wave 6 with ssh rows for every scenario (0 for the
-# local ones) and the remote_noop / remote_incr blocks. -V measurements on
-# macOS: remote_noop=47 (1 connection, 1 master, 7 ssh calls, stat 2,
-# command_render_calls 7), remote_incr=135 (60 ssh calls, 112 renders)
-# full / 84 (26 ssh calls, 44 renders) small; the -O and -T specs are
-# equal, so both roles share one master. The bench work directory sits
-# under /tmp whatever the caller's TMPDIR, so the remote counts no longer
-# depend on it (a long TMPDIR used to add the socket-directory fallback's
-# mktemp 1, rm 1, ls 1 and stat 4, and longer remote scripts that render
-# twice). GNU stat needs no BSD retry, so Linux may observe fewer stat
-# spawns. No existing ceiling changed. Re-measured after the whole wave-6
-# merge (including the background-job teardown fixes): -V and plain counts
-# are identical, so no row moved.
-# Re-measured 2026-09-25 after wave 7 (property-parse fix, CI wiring): -V and
-# plain counts on both fixtures are identical to wave 6, so no row moved (the
-# bench fixtures run without -P).
-# Re-measured 2026-09-26 after wave 8 (property names after -- in lone zfs
-# get reads): -V and plain counts on both fixtures are identical to wave 7,
-# so no row moved.
-# Re-measured 2026-09-26 after wave 9 (removed-during-read property fix,
-# escaped -v/-V property output): -V and plain counts are identical to wave 8
-# (noop 21 / 12, dryrun_incr 7 / 4, incr 129 / 109, remote_noop 47 / 25,
-# remote_incr 135 / 110), so no row moved.
-# Extended 2026-09-26 (next phase W1) with the props / props_small blocks,
-# seeded at ceil(observed * 1.15) with the ssh rows exact (0). -V
-# measurements on macOS: props=203 (awk 140, cat 38, zfs_get_calls 6, one
-# normalized property read per side) full / 101 (awk 55) small; plain
-# props=189. Besides the usual profile rows they budget zfs_get_calls and
-# normalized_property_reads_{source,destination}, which jump if the
-# recursive property read falls back to per-dataset reads. Every other row
-# is unchanged.
-noop	TOTAL	25
-noop	sed	0
-noop	awk	2
-noop	sort	3
-noop	comm	2
-noop	cut	0
-noop	grep	0
-noop	tr	0
-noop	od	0
-noop	date	11
-noop	ps	0
-noop	mktemp	0
-noop	expr	0
-noop	cat	4
-noop	rm	3
-noop	mv	0
-noop	ls	0
-noop	mkdir	0
-noop	cmp	0
-noop	wc	0
-noop	id	0
-noop	stat	3
-noop	uname	2
-noop	ssh_connections	0
-noop	ssh_invocations	0
-noop	ssh_master_opens	0
-noop	profile:command_render_calls	1
-noop	profile:runtime_artifact_files_created	11
-noop	profile:runtime_artifact_dirs_created	0
-noop	profile:runtime_cache_object_writes	0
-noop	profile:runtime_cache_object_readbacks	0
-noop	profile:zfs_list_calls	0
-noop	profile:zfs_send_calls	0
-noop	profile:zfs_receive_calls	0
-noop	profile:send_receive_pipeline_commands	0
-noop	profile:live_destination_snapshot_rechecks	0
-noop	profile:exists_destination_calls	0
-dryrun_incr	TOTAL	9
-dryrun_incr	sed	0
-dryrun_incr	awk	0
-dryrun_incr	sort	0
-dryrun_incr	comm	0
-dryrun_incr	cut	0
-dryrun_incr	grep	0
-dryrun_incr	tr	0
-dryrun_incr	od	0
-dryrun_incr	date	4
-dryrun_incr	ps	0
-dryrun_incr	mktemp	0
-dryrun_incr	expr	0
-dryrun_incr	cat	0
-dryrun_incr	rm	2
-dryrun_incr	mv	0
-dryrun_incr	ls	0
-dryrun_incr	mkdir	0
-dryrun_incr	cmp	0
-dryrun_incr	wc	0
-dryrun_incr	id	0
-dryrun_incr	stat	3
-dryrun_incr	uname	2
-dryrun_incr	ssh_connections	0
-dryrun_incr	ssh_invocations	0
-dryrun_incr	ssh_master_opens	0
-dryrun_incr	profile:command_render_calls	0
-dryrun_incr	profile:runtime_artifact_files_created	0
-dryrun_incr	profile:runtime_artifact_dirs_created	0
-dryrun_incr	profile:runtime_cache_object_writes	0
-dryrun_incr	profile:runtime_cache_object_readbacks	0
-dryrun_incr	profile:zfs_list_calls	0
-dryrun_incr	profile:zfs_send_calls	0
-dryrun_incr	profile:zfs_receive_calls	0
-dryrun_incr	profile:send_receive_pipeline_commands	0
-dryrun_incr	profile:live_destination_snapshot_rechecks	0
-dryrun_incr	profile:exists_destination_calls	0
-incr	TOTAL	149
-incr	sed	2
-incr	awk	69
-incr	sort	6
-incr	comm	3
-incr	cut	0
-incr	grep	0
-incr	tr	0
-incr	od	0
-incr	date	19
-incr	ps	0
-incr	mktemp	0
-incr	expr	0
-incr	cat	40
-incr	rm	9
-incr	mv	0
-incr	ls	0
-incr	mkdir	0
-incr	cmp	2
-incr	wc	0
-incr	id	0
-incr	stat	3
-incr	uname	2
-incr	ssh_connections	0
-incr	ssh_invocations	0
-incr	ssh_master_opens	0
-incr	profile:command_render_calls	61
-incr	profile:runtime_artifact_files_created	32
-incr	profile:runtime_artifact_dirs_created	0
-incr	profile:runtime_cache_object_writes	0
-incr	profile:runtime_cache_object_readbacks	0
-incr	profile:zfs_list_calls	3
-incr	profile:zfs_send_calls	30
-incr	profile:zfs_receive_calls	30
-incr	profile:send_receive_pipeline_commands	30
-incr	profile:live_destination_snapshot_rechecks	2
-incr	profile:exists_destination_calls	0
-remote_noop	TOTAL	43
-remote_noop	sed	5
-remote_noop	awk	6
-remote_noop	sort	3
-remote_noop	comm	0
-remote_noop	cut	0
-remote_noop	grep	0
-remote_noop	tr	0
-remote_noop	od	0
-remote_noop	date	13
-remote_noop	ps	0
-remote_noop	mktemp	0
-remote_noop	expr	0
-remote_noop	cat	6
-remote_noop	rm	5
-remote_noop	mv	0
-remote_noop	ls	0
-remote_noop	mkdir	0
-remote_noop	cmp	2
-remote_noop	wc	0
-remote_noop	id	0
-remote_noop	stat	3
-remote_noop	uname	4
-remote_noop	ssh_connections	1
-remote_noop	ssh_invocations	9
-remote_noop	ssh_master_opens	1
-remote_noop	profile:command_render_calls	9
-remote_noop	profile:runtime_artifact_files_created	19
-remote_noop	profile:runtime_artifact_dirs_created	0
-remote_noop	profile:runtime_cache_object_writes	0
-remote_noop	profile:runtime_cache_object_readbacks	0
-remote_noop	profile:zfs_list_calls	2
-remote_noop	profile:zfs_send_calls	0
-remote_noop	profile:zfs_receive_calls	0
-remote_noop	profile:send_receive_pipeline_commands	0
-remote_noop	profile:live_destination_snapshot_rechecks	0
-remote_noop	profile:exists_destination_calls	0
-remote_incr	TOTAL	149
-remote_incr	sed	6
-remote_incr	awk	71
-remote_incr	sort	4
-remote_incr	comm	2
-remote_incr	cut	0
-remote_incr	grep	0
-remote_incr	tr	0
-remote_incr	od	0
-remote_incr	date	14
-remote_incr	ps	0
-remote_incr	mktemp	0
-remote_incr	expr	0
-remote_incr	cat	41
-remote_incr	rm	6
-remote_incr	mv	0
-remote_incr	ls	0
-remote_incr	mkdir	0
-remote_incr	cmp	2
-remote_incr	wc	0
-remote_incr	id	0
-remote_incr	stat	3
-remote_incr	uname	4
-remote_incr	ssh_connections	1
-remote_incr	ssh_invocations	69
-remote_incr	ssh_master_opens	1
-remote_incr	profile:command_render_calls	129
-remote_incr	profile:runtime_artifact_files_created	25
-remote_incr	profile:runtime_artifact_dirs_created	0
-remote_incr	profile:runtime_cache_object_writes	0
-remote_incr	profile:runtime_cache_object_readbacks	0
-remote_incr	profile:zfs_list_calls	4
-remote_incr	profile:zfs_send_calls	30
-remote_incr	profile:zfs_receive_calls	30
-remote_incr	profile:send_receive_pipeline_commands	30
-remote_incr	profile:live_destination_snapshot_rechecks	2
-remote_incr	profile:exists_destination_calls	0
-props	TOTAL	204
-props	sed	2
-props	awk	132
-props	sort	5
-props	comm	2
-props	cut	0
-props	grep	0
-props	tr	0
-props	od	0
-props	date	12
-props	ps	0
-props	mktemp	0
-props	expr	0
-props	cat	44
-props	rm	6
-props	mv	0
-props	ls	0
-props	mkdir	0
-props	cmp	2
-props	wc	0
-props	id	0
-props	stat	3
-props	uname	2
-props	ssh_connections	0
-props	ssh_invocations	0
-props	ssh_master_opens	0
-props	profile:command_render_calls	61
-props	profile:runtime_artifact_files_created	28
-props	profile:runtime_artifact_dirs_created	0
-props	profile:runtime_cache_object_writes	0
-props	profile:runtime_cache_object_readbacks	0
-props	profile:zfs_list_calls	4
-props	profile:zfs_send_calls	30
-props	profile:zfs_receive_calls	30
-props	profile:send_receive_pipeline_commands	30
-props	profile:live_destination_snapshot_rechecks	2
-props	profile:exists_destination_calls	0
-props	profile:zfs_get_calls	7
-props	profile:normalized_property_reads_source	2
-props	profile:normalized_property_reads_destination	2
+# The history of every ratchet is in CHANGELOG.txt. On 2026-09-26 (W10) the
+# file kept only these rows of the 450 it had: the full-fixture rows were
+# never enforced, and the per-helper rows duplicated TOTAL.
 noop_small	TOTAL	25
-noop_small	sed	0
-noop_small	awk	2
-noop_small	sort	3
-noop_small	comm	2
-noop_small	cut	0
-noop_small	grep	0
-noop_small	tr	0
-noop_small	od	0
-noop_small	date	11
-noop_small	ps	0
-noop_small	mktemp	0
-noop_small	expr	0
-noop_small	cat	4
-noop_small	rm	3
-noop_small	mv	0
-noop_small	ls	0
-noop_small	mkdir	0
-noop_small	cmp	0
-noop_small	wc	0
-noop_small	id	0
-noop_small	stat	3
-noop_small	uname	2
 noop_small	ssh_connections	0
-noop_small	ssh_invocations	0
 noop_small	ssh_master_opens	0
-noop_small	profile:command_render_calls	1
-noop_small	profile:runtime_artifact_files_created	11
-noop_small	profile:runtime_artifact_dirs_created	0
-noop_small	profile:runtime_cache_object_writes	0
-noop_small	profile:runtime_cache_object_readbacks	0
 noop_small	profile:zfs_list_calls	0
 noop_small	profile:zfs_send_calls	0
 noop_small	profile:zfs_receive_calls	0
-noop_small	profile:send_receive_pipeline_commands	0
-noop_small	profile:live_destination_snapshot_rechecks	0
-noop_small	profile:exists_destination_calls	0
 dryrun_incr_small	TOTAL	9
-dryrun_incr_small	sed	0
-dryrun_incr_small	awk	0
-dryrun_incr_small	sort	0
-dryrun_incr_small	comm	0
-dryrun_incr_small	cut	0
-dryrun_incr_small	grep	0
-dryrun_incr_small	tr	0
-dryrun_incr_small	od	0
-dryrun_incr_small	date	4
-dryrun_incr_small	ps	0
-dryrun_incr_small	mktemp	0
-dryrun_incr_small	expr	0
-dryrun_incr_small	cat	0
-dryrun_incr_small	rm	2
-dryrun_incr_small	mv	0
-dryrun_incr_small	ls	0
-dryrun_incr_small	mkdir	0
-dryrun_incr_small	cmp	0
-dryrun_incr_small	wc	0
-dryrun_incr_small	id	0
-dryrun_incr_small	stat	3
-dryrun_incr_small	uname	2
 dryrun_incr_small	ssh_connections	0
-dryrun_incr_small	ssh_invocations	0
 dryrun_incr_small	ssh_master_opens	0
-dryrun_incr_small	profile:command_render_calls	0
-dryrun_incr_small	profile:runtime_artifact_files_created	0
-dryrun_incr_small	profile:runtime_artifact_dirs_created	0
-dryrun_incr_small	profile:runtime_cache_object_writes	0
-dryrun_incr_small	profile:runtime_cache_object_readbacks	0
 dryrun_incr_small	profile:zfs_list_calls	0
 dryrun_incr_small	profile:zfs_send_calls	0
 dryrun_incr_small	profile:zfs_receive_calls	0
-dryrun_incr_small	profile:send_receive_pipeline_commands	0
-dryrun_incr_small	profile:live_destination_snapshot_rechecks	0
-dryrun_incr_small	profile:exists_destination_calls	0
 incr_small	TOTAL	90
-incr_small	sed	2
-incr_small	awk	30
-incr_small	sort	6
-incr_small	comm	3
-incr_small	cut	0
-incr_small	grep	0
-incr_small	tr	0
-incr_small	od	0
-incr_small	date	19
-incr_small	ps	0
-incr_small	mktemp	0
-incr_small	expr	0
-incr_small	cat	20
-incr_small	rm	9
-incr_small	mv	0
-incr_small	ls	0
-incr_small	mkdir	0
-incr_small	cmp	2
-incr_small	wc	0
-incr_small	id	0
-incr_small	stat	3
-incr_small	uname	2
 incr_small	ssh_connections	0
-incr_small	ssh_invocations	0
 incr_small	ssh_master_opens	0
-incr_small	profile:command_render_calls	22
-incr_small	profile:runtime_artifact_files_created	32
-incr_small	profile:runtime_artifact_dirs_created	0
-incr_small	profile:runtime_cache_object_writes	0
-incr_small	profile:runtime_cache_object_readbacks	0
 incr_small	profile:zfs_list_calls	3
 incr_small	profile:zfs_send_calls	11
 incr_small	profile:zfs_receive_calls	11
-incr_small	profile:send_receive_pipeline_commands	11
-incr_small	profile:live_destination_snapshot_rechecks	2
-incr_small	profile:exists_destination_calls	0
 remote_noop_small	TOTAL	43
-remote_noop_small	sed	5
-remote_noop_small	awk	6
-remote_noop_small	sort	3
-remote_noop_small	comm	0
-remote_noop_small	cut	0
-remote_noop_small	grep	0
-remote_noop_small	tr	0
-remote_noop_small	od	0
-remote_noop_small	date	13
-remote_noop_small	ps	0
-remote_noop_small	mktemp	0
-remote_noop_small	expr	0
-remote_noop_small	cat	6
-remote_noop_small	rm	5
-remote_noop_small	mv	0
-remote_noop_small	ls	0
-remote_noop_small	mkdir	0
-remote_noop_small	cmp	2
-remote_noop_small	wc	0
-remote_noop_small	id	0
-remote_noop_small	stat	3
-remote_noop_small	uname	4
 remote_noop_small	ssh_connections	1
-remote_noop_small	ssh_invocations	9
 remote_noop_small	ssh_master_opens	1
-remote_noop_small	profile:command_render_calls	9
-remote_noop_small	profile:runtime_artifact_files_created	19
-remote_noop_small	profile:runtime_artifact_dirs_created	0
-remote_noop_small	profile:runtime_cache_object_writes	0
-remote_noop_small	profile:runtime_cache_object_readbacks	0
 remote_noop_small	profile:zfs_list_calls	2
 remote_noop_small	profile:zfs_send_calls	0
 remote_noop_small	profile:zfs_receive_calls	0
-remote_noop_small	profile:send_receive_pipeline_commands	0
-remote_noop_small	profile:live_destination_snapshot_rechecks	0
-remote_noop_small	profile:exists_destination_calls	0
 remote_incr_small	TOTAL	90
-remote_incr_small	sed	6
-remote_incr_small	awk	32
-remote_incr_small	sort	4
-remote_incr_small	comm	2
-remote_incr_small	cut	0
-remote_incr_small	grep	0
-remote_incr_small	tr	0
-remote_incr_small	od	0
-remote_incr_small	date	14
-remote_incr_small	ps	0
-remote_incr_small	mktemp	0
-remote_incr_small	expr	0
-remote_incr_small	cat	21
-remote_incr_small	rm	6
-remote_incr_small	mv	0
-remote_incr_small	ls	0
-remote_incr_small	mkdir	0
-remote_incr_small	cmp	2
-remote_incr_small	wc	0
-remote_incr_small	id	0
-remote_incr_small	stat	3
-remote_incr_small	uname	4
 remote_incr_small	ssh_connections	1
-remote_incr_small	ssh_invocations	30
 remote_incr_small	ssh_master_opens	1
-remote_incr_small	profile:command_render_calls	51
-remote_incr_small	profile:runtime_artifact_files_created	25
-remote_incr_small	profile:runtime_artifact_dirs_created	0
-remote_incr_small	profile:runtime_cache_object_writes	0
-remote_incr_small	profile:runtime_cache_object_readbacks	0
 remote_incr_small	profile:zfs_list_calls	4
 remote_incr_small	profile:zfs_send_calls	11
 remote_incr_small	profile:zfs_receive_calls	11
-remote_incr_small	profile:send_receive_pipeline_commands	11
-remote_incr_small	profile:live_destination_snapshot_rechecks	2
-remote_incr_small	profile:exists_destination_calls	0
 props_small	TOTAL	106
-props_small	sed	2
-props_small	awk	53
-props_small	sort	5
-props_small	comm	2
-props_small	cut	0
-props_small	grep	0
-props_small	tr	0
-props_small	od	0
-props_small	date	12
-props_small	ps	0
-props_small	mktemp	0
-props_small	expr	0
-props_small	cat	25
-props_small	rm	6
-props_small	mv	0
-props_small	ls	0
-props_small	mkdir	0
-props_small	cmp	2
-props_small	wc	0
-props_small	id	0
-props_small	stat	3
-props_small	uname	2
 props_small	ssh_connections	0
-props_small	ssh_invocations	0
 props_small	ssh_master_opens	0
-props_small	profile:command_render_calls	22
-props_small	profile:runtime_artifact_files_created	28
-props_small	profile:runtime_artifact_dirs_created	0
-props_small	profile:runtime_cache_object_writes	0
-props_small	profile:runtime_cache_object_readbacks	0
 props_small	profile:zfs_list_calls	4
 props_small	profile:zfs_send_calls	11
 props_small	profile:zfs_receive_calls	11
-props_small	profile:send_receive_pipeline_commands	11
-props_small	profile:live_destination_snapshot_rechecks	2
-props_small	profile:exists_destination_calls	0
 props_small	profile:zfs_get_calls	7
-props_small	profile:normalized_property_reads_source	2
-props_small	profile:normalized_property_reads_destination	2

@@ -11,7 +11,7 @@ If this change touches CI or coverage tooling, explain that here.
 - [ ] `ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh` when shell logic, tests, or coverage tooling changed
 - [ ] targeted suites for edited modules
 - [ ] integration tests, if safe and relevant
-- [ ] `./tests/run_perf_tests.sh`, `./tests/run_perf_compare.sh`, or `./tests/run_vm_matrix.sh --test-layer perf` / `perf-compare` when performance-sensitive behavior changed
+- [ ] `./tests/run_microbench.sh` and `./tests/run_perf_ab.sh --baseline-ref main` (host-safe) when performance-sensitive behavior changed; `./tests/run_vm_matrix.sh --test-layer perf` / `perf-compare` for real pools
 - [ ] GitHub Actions test matrix passes (including FreeBSD and OmniOS/illumos VMs)
 - [ ] docs and workflow metadata updated as needed
 
@@ -29,8 +29,9 @@ Call out any intentional changes to:
 - pinned lint tooling or workflow behavior
 - report-only bash-xtrace coverage output or the coverage workflow
 - portable-shell expectations (`dash`, `bash --posix`, `busybox ash`, `posh`)
-- manual performance baselines, two-binary comparison artifacts, or VM-backed
-  perf artifacts; perf is informative and not a required GitHub Actions gate
+- spawn budgets in `tests/perf_budgets.tsv` (they only go down), the advisory
+  wall-clock A/B, or VM-backed perf artifacts; wall-clock perf is informative
+  and not a required GitHub Actions gate
 
 ## Safety / Security Notes
 

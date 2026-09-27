@@ -2,7 +2,10 @@
 # validation bound. macOS runs serially because several suites intentionally
 # exercise process groups, signals, FIFOs, and nested runners, and nesting them
 # under a parallel worker can strand shell-level waits. VM-backed platform jobs
-# use two workers to match their smaller guest CPU allocation.
+# use two workers to match their smaller guest CPU allocation. The tool
+# self-tests (tests/test_run_*.sh, test_validate.sh, test_ci_*.sh and
+# test_generate_solaris_manpage.sh) run on ubuntu-26.04 and macos-26 only;
+# every other lane passes --skip-tool-suites.
 name: Unit Tests
 
 on:
@@ -26,12 +29,15 @@ jobs:
         include:
           - os: ubuntu-26.04
             unit_jobs: 4
+            unit_flags: ""
           - os: macos-26
             unit_jobs: 1
+            unit_flags: ""
           # GitHub has no macos-27 label yet; the xcode-27 preview image is
           # the hosted macOS 27 runner (macOS 27.0 base, bash 3.2 /bin/sh).
           - os: xcode-27
             unit_jobs: 1
+            unit_flags: --skip-tool-suites
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run shunit2 tests
@@ -41,7 +47,7 @@ jobs:
           # This unit matrix intentionally does not install ZFS on macOS.
           # The shunit2 suites are used here as a /bin/sh and BSD-userland
           # portability gate without requiring a live ZFS stack.
-          ./tests/run_shunit_tests.sh --jobs "${{ matrix.unit_jobs }}"
+          ./tests/run_shunit_tests.sh --jobs "${{ matrix.unit_jobs }}" ${{ matrix.unit_flags }}
 
   portable-shells:
     name: shunit2 (${{ matrix.shell_name }})
@@ -108,7 +114,7 @@ jobs:
           ZXFER_TEST_SHELL: ${{ steps.shell_under_test.outputs.shell_under_test }}
         run: |
           set -euo pipefail
-          ./tests/run_shunit_tests.sh --jobs 4
+          ./tests/run_shunit_tests.sh --jobs 4 --skip-tool-suites
 
   portable-shell-posh:
     name: shunit2 (posh)
@@ -132,7 +138,7 @@ jobs:
           ZXFER_TEST_SHELL: /usr/bin/posh
         run: |
           set -euo pipefail
-          ./tests/run_shunit_tests.sh --jobs 4
+          ./tests/run_shunit_tests.sh --jobs 4 --skip-tool-suites
 
   shunit2-freebsd:
     name: shunit2 (FreeBSD)
@@ -150,7 +156,7 @@ jobs:
           prepare: |
             pkg install -y bash git
           run: |
-            ./tests/run_shunit_tests.sh --jobs 2
+            ./tests/run_shunit_tests.sh --jobs 2 --skip-tool-suites
 
   shunit2-omnios:
     name: shunit2 (OmniOS)
@@ -179,7 +185,7 @@ jobs:
             # job, but run the unit suites through a POSIX bash wrapper here so
             # the tests exercise zxfer logic rather than shell-specific stubbing
             # behavior.
-            "$bash_bin" ./tests/run_shunit_tests.sh --jobs 2
+            "$bash_bin" ./tests/run_shunit_tests.sh --jobs 2 --skip-tool-suites
 
   argv-fuzz:
     name: argv fuzz (seeded)

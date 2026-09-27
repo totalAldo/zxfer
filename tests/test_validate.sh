@@ -167,14 +167,25 @@ EOF
 shunit:--jobs 4 $expected_suites" "$(cat "$VALIDATION_LOG")"
 }
 
+# Purpose: Print integration/NAME_tests.sh for each integration fragment, the
+# set tests/run_integration_zxfer.sh loads.
+# Usage: integration_fragment_paths
+# shellcheck disable=SC2329  # Invoked by shunit2 test functions.
+integration_fragment_paths() {
+	for l_fragment_file in "$ZXFER_ROOT"/tests/integration/*_tests.sh; do
+		[ ! -f "$l_fragment_file" ] ||
+			printf 'integration/%s\n' "${l_fragment_file##*/}"
+	done
+}
+
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_validate_quick_maps_every_manifest_integration_fragment_to_exact_loader_contracts() {
+test_validate_quick_maps_every_integration_fragment_to_exact_loader_contracts() {
 	set --
 	while IFS= read -r l_fragment_path; do
 		[ -n "$l_fragment_path" ] || continue
 		set -- "$@" "tests/$l_fragment_path"
 	done <<EOF
-$(awk 'NR > 1 { print }' "$ZXFER_ROOT/tests/integration_fragment_manifest.tsv")
+$(integration_fragment_paths)
 EOF
 
 	output=$(
@@ -184,32 +195,14 @@ EOF
 
 	for l_fragment_path in "$@"; do
 		l_mapping_block=$(validation_mapping_block "$output" "$l_fragment_path")
-		assertContains "Each manifest fragment should select its exact row before the wildcard fallback." \
+		assertContains "Each fragment should select its exact row before the wildcard fallback." \
 			"$l_mapping_block" "matched:     $l_fragment_path"
-		assertContains "Each manifest fragment should select the stable loader and safety-contract suite." \
+		assertContains "Each fragment should select the stable loader and safety-contract suite." \
 			"$l_mapping_block" "tests/test_run_integration_zxfer.sh"
 	done
-	assertEquals "Manifest fragments should deduplicate to one host-safe loader-contract suite." \
+	assertEquals "The fragments should deduplicate to one host-safe loader-contract suite." \
 		"lint:budget
 shunit:--jobs 4 tests/test_run_integration_zxfer.sh" "$(cat "$VALIDATION_LOG")"
-}
-
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_validate_quick_maps_fragment_manifest_to_loader_and_map_contracts() {
-	output=$(
-		VALIDATION_LOG="$VALIDATION_LOG" \
-			"$FAKE_ROOT/tests/validate.sh" quick tests/integration_fragment_manifest.tsv
-	)
-	l_mapping_block=$(validation_mapping_block "$output" tests/integration_fragment_manifest.tsv)
-
-	assertContains "The fragment manifest should use its exact validation-map row." \
-		"$l_mapping_block" "matched:     tests/integration_fragment_manifest.tsv"
-	assertContains "Manifest changes should validate integration loading and quick-map completeness together." \
-		"$l_mapping_block" "tests/test_run_integration_zxfer.sh,tests/test_validate.sh"
-	assertEquals "Manifest changes should execute both host-safe contract suites." \
-		"lint:budget
-shunit:--jobs 4 tests/test_run_integration_zxfer.sh tests/test_validate.sh" \
-		"$(cat "$VALIDATION_LOG")"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
@@ -455,8 +448,7 @@ $(validation_map_field_values 2)
 EOF
 
 	missing_integration=
-	integration_fragment_paths=$(awk 'NR > 1 { print }' \
-		"$ZXFER_ROOT/tests/integration_fragment_manifest.tsv")
+	integration_fragment_paths=$(integration_fragment_paths)
 	while IFS= read -r l_test; do
 		[ -n "$l_test" ] || continue
 		l_integration_definition_found=0
@@ -585,10 +577,10 @@ test_validation_map_has_an_exact_row_for_every_integration_fragment() {
 }$l_fragment_path"
 		fi
 	done <<EOF
-$(awk 'NR > 1 { print }' "$ZXFER_ROOT/tests/integration_fragment_manifest.tsv")
+$(integration_fragment_paths)
 EOF
 
-	assertEquals "Every manifest-listed integration fragment should have one owning-suite row before the safe wildcard fallback." \
+	assertEquals "Every integration fragment should have one owning-suite row before the safe wildcard fallback." \
 		"" "$invalid_fragments"
 }
 
