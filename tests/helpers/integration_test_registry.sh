@@ -14,7 +14,7 @@ zxfer_validate_integration_registry_file() {
 		return 1
 	fi
 
-	awk -F "$l_tab" -v registry="$l_registry" '
+	LC_ALL=C awk -F "$l_tab" -v registry="$l_registry" '
 		function fail(message) {
 			if (!failed) {
 				printf "Invalid integration test registry [%s]: %s\n", registry, message
@@ -139,8 +139,10 @@ zxfer_integration_fragment_paths() (
 # a function body (a nested definition) and for an unterminated function. A
 # function ends at the first lone "}" in column 0; shfmt, which lint runs on
 # every fragment, puts each function's closing brace there and nothing else.
+# awk runs in the C locale, as the registry check does, so a range such as
+# [A-Za-z_] means ASCII in every awk.
 zxfer_scan_integration_fragment() {
-	awk -v headers_only="$([ "$1" = headers ] && echo 1 || echo 0)" '
+	LC_ALL=C awk -v headers_only="$([ "$1" = headers ] && echo 1 || echo 0)" '
 		function report(message, line) {
 			if (headers_only)
 				return
