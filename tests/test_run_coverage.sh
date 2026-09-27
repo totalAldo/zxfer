@@ -67,8 +67,8 @@ test_run_coverage_default_suite_resolution_includes_coverage_overlays() {
 		"$output" "tests/test_zxfer_remote_hosts.sh"
 	assertContains "The default coverage run should include the property transfer suite that exercises the in-memory property tables." \
 		"$output" "tests/test_zxfer_property_transfer.sh"
-	assertContains "The default coverage run should include the snapshot state suite that protects transform readback coverage." \
-		"$output" "tests/test_zxfer_snapshot_state.sh"
+	assertContains "The default coverage run should include the destination state suite." \
+		"$output" "tests/test_zxfer_destination_state.sh"
 	assertNotContains "The default coverage run should not execute shared test scaffolding as a suite." \
 		"$output" "tests/test_helper.sh"
 }

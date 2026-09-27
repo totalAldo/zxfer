@@ -32,7 +32,7 @@
 # shellcheck shell=sh disable=SC2034,SC2154
 
 ################################################################################
-# SNAPSHOT RECORD STATE / LIVE LISTINGS / DESTINATION EXISTENCE
+# DESTINATION STATE: EXISTENCE CACHE / DATASET INVENTORY / LIVE LISTING
 ################################################################################
 
 # Module contract:

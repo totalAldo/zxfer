@@ -1,9 +1,9 @@
 #!/bin/sh
 #
-# shunit2 tests for src/zxfer_snapshot_state.sh: the destination existence
+# shunit2 tests for src/zxfer_destination_state.sh: the destination existence
 # cache and probes, destination dataset mapping, and the live depth-1
 # listing. The existence-probe fragment keeps the exec fixture and the
-# destination-map fragment the snapshot-discovery fixture they were written
+# mapping fragment the snapshot-discovery fixture they were written
 # for.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
@@ -18,10 +18,10 @@ TEST_ORIGINAL_PATH=$PATH
 # shellcheck source=tests/helpers/snapshot_discovery_fixtures.sh
 . "$TESTS_DIR/helpers/snapshot_discovery_fixtures.sh"
 
-zxfer_source_runtime_modules_through "zxfer_snapshot_state.sh"
+zxfer_source_runtime_modules_through "zxfer_destination_state.sh"
 
 oneTimeSetUp() {
-	zxfer_test_create_tmpdir "zxfer_snapshot_state"
+	zxfer_test_create_tmpdir "zxfer_destination_state"
 	zxfer_test_exec_fixture_one_time_setup
 	zxfer_test_snapshot_discovery_fixture_write_tools
 }
@@ -36,11 +36,11 @@ tearDown() {
 }
 
 setUp() {
-	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh"; then
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_destination_state_existence_probe_tests.sh"; then
 		zxfer_test_exec_fixture_setup
 		return
 	fi
-	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_snapshot_state_destination_map_tests.sh"; then
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_destination_state_mapping_tests.sh"; then
 		# The exec fixture empties TEST_TMPDIR and writes its own ssh stand-in.
 		zxfer_test_snapshot_discovery_fixture_write_tools
 		zxfer_test_snapshot_discovery_fixture_setup
@@ -83,7 +83,7 @@ cached_state() {
 	fi
 }
 
-test_destination_probe_helpers_load_with_snapshot_state_not_generic_exec() {
+test_destination_probe_helpers_load_with_destination_state_not_generic_exec() {
 	# shellcheck disable=SC2016  # Module-root variables expand inside the clean child shell.
 	ownership_output=$(
 		ZXFER_SOURCE_MODULES_ROOT="$ZXFER_ROOT" /bin/sh -c '
@@ -95,29 +95,29 @@ test_destination_probe_helpers_load_with_snapshot_state_not_generic_exec() {
 				printf "%s\n" "exec_has_destination_state=no"
 			fi
 
-			zxfer_load_modules zxfer_snapshot_state.sh || exit 1
+			zxfer_load_modules zxfer_destination_state.sh || exit 1
 			if command -v zxfer_probe_destination_existence >/dev/null 2>&1; then
-				printf "%s\n" "snapshot_has_destination_state=yes"
+				printf "%s\n" "state_has_destination_probe=yes"
 			else
-				printf "%s\n" "snapshot_has_destination_state=no"
+				printf "%s\n" "state_has_destination_probe=no"
 			fi
 			if command -v zxfer_get_live_destination_record_file >/dev/null 2>&1; then
-				printf "%s\n" "snapshot_has_live_listing=yes"
+				printf "%s\n" "state_has_live_listing=yes"
 			else
-				printf "%s\n" "snapshot_has_live_listing=no"
+				printf "%s\n" "state_has_live_listing=no"
 			fi
 		'
 	)
 	ownership_status=$?
 
-	assertEquals "Canonical partial loading should succeed across the exec and snapshot-state boundaries." \
+	assertEquals "Canonical partial loading should succeed across the exec and destination-state boundaries." \
 		0 "$ownership_status"
-	assertContains "Generic execution should not own destination snapshot-state probes." \
+	assertContains "Generic execution should not own destination-state probes." \
 		"$ownership_output" "exec_has_destination_state=no"
-	assertContains "Snapshot state should own destination existence probes." \
-		"$ownership_output" "snapshot_has_destination_state=yes"
-	assertContains "Snapshot state should own the live destination listing." \
-		"$ownership_output" "snapshot_has_live_listing=yes"
+	assertContains "Destination state should own destination existence probes." \
+		"$ownership_output" "state_has_destination_probe=yes"
+	assertContains "Destination state should own the live destination listing." \
+		"$ownership_output" "state_has_live_listing=yes"
 }
 
 test_zxfer_reset_destination_existence_cache_clears_root_and_completion_state() {
@@ -498,18 +498,18 @@ tank/my data|0|back|tank/my data/child|back/my data/child
 EOF
 }
 
-# zxfer-test-fragment: suites/zxfer_snapshot_state_existence_probe_tests.sh
-# shellcheck source=tests/suites/zxfer_snapshot_state_existence_probe_tests.sh
-. "$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh"
-# zxfer-test-fragment: suites/zxfer_snapshot_state_destination_map_tests.sh
-# shellcheck source=tests/suites/zxfer_snapshot_state_destination_map_tests.sh
-. "$TESTS_DIR/suites/zxfer_snapshot_state_destination_map_tests.sh"
+# zxfer-test-fragment: suites/zxfer_destination_state_existence_probe_tests.sh
+# shellcheck source=tests/suites/zxfer_destination_state_existence_probe_tests.sh
+. "$TESTS_DIR/suites/zxfer_destination_state_existence_probe_tests.sh"
+# zxfer-test-fragment: suites/zxfer_destination_state_mapping_tests.sh
+# shellcheck source=tests/suites/zxfer_destination_state_mapping_tests.sh
+. "$TESTS_DIR/suites/zxfer_destination_state_mapping_tests.sh"
 
 suite() {
 	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_snapshot_state.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_state_existence_probe_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_state_destination_map_tests.sh"
+		"$TESTS_DIR/test_zxfer_destination_state.sh" \
+		"$TESTS_DIR/suites/zxfer_destination_state_existence_probe_tests.sh" \
+		"$TESTS_DIR/suites/zxfer_destination_state_mapping_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

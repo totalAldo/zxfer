@@ -3,7 +3,7 @@
 #
 # The unit fixture of tests/test_zxfer_snapshot_discovery.sh, shared with
 # tests/test_zxfer_snapshot_producers.sh and the destination-mapping fragment
-# of tests/test_zxfer_snapshot_state.sh: fake parallel, ssh, zfs and awk
+# of tests/test_zxfer_destination_state.sh: fake parallel, ssh, zfs and awk
 # executables, and reset helpers for discovery options, remote capabilities,
 # helper commands and discovery results.
 #

@@ -1,7 +1,7 @@
 #!/bin/sh
-# Destination dataset mapping cases for src/zxfer_snapshot_state.sh, written
+# Destination dataset mapping cases for src/zxfer_destination_state.sh, written
 # for the snapshot-discovery fixture (tank/src replicated to backup/dst). Run by
-# tests/test_zxfer_snapshot_state.sh under that fixture.
+# tests/test_zxfer_destination_state.sh under that fixture.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_destination_snapshot_dataset_helpers_map_root_and_child_datasets() {
