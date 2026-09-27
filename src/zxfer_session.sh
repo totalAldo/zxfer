@@ -81,12 +81,12 @@ zxfer_reset_session_state() {
 	zxfer_reset_live_destination_listing_state
 	zxfer_reset_snapshot_producer_session_state
 	zxfer_reset_snapshot_discovery_state
-	zxfer_reset_snapshot_reconcile_state
+	zxfer_reset_snapshot_plan_state
 	zxfer_reset_snapshot_delete_artifact_state
 	zxfer_reset_backup_metadata_state
 	zxfer_reset_property_runtime_state
 	zxfer_reset_property_iteration_caches
-	zxfer_reset_property_reconcile_state
+	zxfer_reset_property_read_state
 	zxfer_reset_remote_host_state
 
 	g_zxfer_version="2.0.0-20260623"

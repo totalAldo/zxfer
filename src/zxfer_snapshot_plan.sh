@@ -86,7 +86,7 @@ zxfer_forget_snapshot_slices() {
 
 # Purpose: Reset the per-dataset plan, delete, and divergence state.
 # Usage: Called by session initialization.
-zxfer_reset_snapshot_reconcile_state() {
+zxfer_reset_snapshot_plan_state() {
 	zxfer_publish_snapshot_transfer_plan "" "" 0
 	g_did_delete_dest_snapshots=0
 	g_deleted_dest_newer_snapshots=0

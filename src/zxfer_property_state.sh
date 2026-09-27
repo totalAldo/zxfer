@@ -82,7 +82,7 @@
 # result globals need no reset here: each is cleared by the function that
 # publishes it.
 # Usage: Called once at session initialization.
-zxfer_reset_property_reconcile_state() {
+zxfer_reset_property_read_state() {
 	g_zxfer_property_error_result=""
 	g_zxfer_property_skeleton_file=""
 	g_zxfer_property_machine_file=""
@@ -633,8 +633,8 @@ zxfer_reset_destination_property_iteration_cache() {
 # only encryption settings, which are on the readonly list). DATASET alone
 # gets a tombstone, which needs no process; descendants are stripped by one
 # awk over the index. A failed strip empties the table, which only forces
-# live reads. Snapshot-view dirtiness is tracked separately by
-# zxfer_mark_live_destination_dataset_dirty.
+# live reads. Destination snapshots have no cached view to drop: planning
+# lists a dataset this run changed again (zxfer_get_live_destination_record_file).
 zxfer_invalidate_destination_property_mutation_cache() {
 	if [ -z "${1:-}" ]; then
 		zxfer_reset_destination_property_iteration_cache

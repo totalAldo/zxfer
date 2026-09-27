@@ -2,7 +2,9 @@
 # The unit fixture of tests/test_zxfer_replication.sh, shared with
 # tests/test_zxfer_migration_services.sh: reset owner state, command stubs
 # that log to the STUB_* files, a mock zfs, and fixed destination, backup-root,
-# snapshot-name, readonly-property and yield settings.
+# snapshot-name, readonly-property and yield settings. The source-record
+# staging helper also serves the live re-plan cases of
+# tests/test_zxfer_snapshot_plan.sh.
 # shellcheck disable=SC2034,SC2317,SC2329
 
 # Purpose: Define the command stubs every replication case starts from. Some
@@ -58,4 +60,13 @@ zxfer_test_replication_fixture_setup() {
 	g_zxfer_new_snapshot_name="zxfer_test_snapshot"
 	ZXFER_BASE_READONLY_PROPERTIES="type,mountpoint,creation"
 	ZXFER_MAX_YIELD_ITERATIONS=8
+}
+
+# Purpose: Stage the source record file the snapshot planner reads.
+# Usage: zxfer_test_stage_source_records ROWS; ROWS are "dataset@snap<TAB>guid"
+# lines, newest first. Points g_zxfer_source_snapshot_record_cache_file at
+# $TEST_TMPDIR/source_snapshot.records.
+zxfer_test_stage_source_records() {
+	g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/source_snapshot.records"
+	printf '%s\n' "$1" >"$g_zxfer_source_snapshot_record_cache_file"
 }

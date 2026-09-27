@@ -206,9 +206,8 @@ removes it after the sockets close, without recursion: it unlinks the two
 role sockets and ssh's temporary listener names, then removes the empty
 directory, and it refuses a symlink or a name it did not create.
 
-Not every staging flow belongs in that layer. Modules that intentionally stage
-files beside the final target to preserve same-directory atomic rename
-continue to own that path-adjacent staging locally. In particular, backup
+Staging that must sit beside its target, for a same-directory atomic rename,
+stays outside that layer with the module that owns the target: backup
 metadata publication (0600 stage files beside the targets, atomic renames,
 and a recovery copy for detected pair-publication failures) lives in
 [`../src/zxfer_backup_metadata.sh`](../src/zxfer_backup_metadata.sh).
@@ -496,7 +495,7 @@ flowchart TD
     V -- "yes: -Y and send/destroy work occurred" --> J
     V -- "no" --> Z["Invoke the final -k backup metadata write (a dry run buffers no rows and only notes the skip)"]
     Z --> AA["Normal exit path"]
-    AA --> AB["zxfer_trap_exit(): abort owned jobs/helpers, close SSH sockets, remove registered staging and the proven run root, restore migration services, then emit profiling and structured failure output"]
+    AA --> AB["zxfer_trap_exit(): abort owned jobs/helpers, close SSH sockets, remove the ssh socket directory and the proven run root, restore migration services, then emit profiling and structured failure output"]
 ```
 
 ### Snapshot Discovery And No-Op Proof

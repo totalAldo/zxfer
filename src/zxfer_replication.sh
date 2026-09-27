@@ -42,8 +42,10 @@
 #   g_zxfer_post_seed_property_sources, g_zxfer_replication_iteration_list_result,
 #   the run's -s/-m snapshot name g_zxfer_new_snapshot_name (stamped once by
 #   zxfer_stamp_new_snapshot_name), and the per-pass mutation marker
-#   g_is_performed_send_destroy (set here after a dataset's -d destroy and by
-#   the send/receive scheduler, read by the -Y loop).
+#   g_is_performed_send_destroy, which the -Y loop reads. The marker has two
+#   writers on purpose: this module sets it after a dataset's -d destroy, and
+#   the send/receive scheduler in zxfer_send_jobs.sh after each send, the one
+#   place that knows a send happened.
 # reads globals: g_option_*, g_destination, discovery's recursive dataset
 #   lists, and the snapshot plan: g_last_common_snap,
 #   g_src_snapshot_transfer_list, g_dest_has_snapshots, the delete markers and

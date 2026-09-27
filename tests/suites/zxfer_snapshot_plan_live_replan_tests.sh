@@ -5,13 +5,6 @@
 # listed again, so most cases set g_did_delete_dest_snapshots=1.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
-# Stage the source record file the planner reads: "dataset@snap<TAB>guid"
-# rows, newest first.
-zxfer_test_stage_source_records() {
-	g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/source_snapshot.records"
-	printf '%s\n' "$1" >"$g_zxfer_source_snapshot_record_cache_file"
-}
-
 test_zxfer_reconcile_live_destination_snapshot_state_shortcuts_empty_source_and_requeues_when_live_empty() {
 	zxfer_test_stage_source_records "tank/src@snap2	222
 tank/src@snap1	111"

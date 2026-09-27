@@ -56,7 +56,7 @@ dependencies_test_make_tools() {
 	done
 }
 
-test_zxfer_compute_secure_path_defaults_to_allowlist() {
+test_zxfer_refresh_secure_path_state_defaults_to_allowlist() {
 	zxfer_refresh_secure_path_state
 
 	assertEquals "The default secure PATH should use the built-in allowlist." \
@@ -64,7 +64,7 @@ test_zxfer_compute_secure_path_defaults_to_allowlist() {
 		"$g_zxfer_secure_path"
 }
 
-test_zxfer_compute_secure_path_preserves_custom_ifs_and_enabled_globbing() {
+test_zxfer_refresh_secure_path_state_preserves_custom_ifs_and_enabled_globbing() {
 	secure_fixture_root="$TEST_TMPDIR/secure-glob"
 	mkdir -p "$secure_fixture_root/secure-one" "$secure_fixture_root/secure-two"
 
@@ -90,7 +90,7 @@ test_zxfer_compute_secure_path_preserves_custom_ifs_and_enabled_globbing() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "globbing=enabled"
 }
 
-test_zxfer_compute_secure_path_preserves_unset_ifs_and_disabled_globbing() {
+test_zxfer_refresh_secure_path_state_preserves_unset_ifs_and_disabled_globbing() {
 	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
 	zxfer_test_capture_subshell '
 		unset IFS
@@ -114,7 +114,7 @@ test_zxfer_compute_secure_path_preserves_unset_ifs_and_disabled_globbing() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "globbing=disabled"
 }
 
-test_zxfer_compute_secure_path_rejects_control_whitespace_without_mutating_shell_state() {
+test_zxfer_refresh_secure_path_state_rejects_control_whitespace_without_mutating_shell_state() {
 	control_rejection_result=$(
 		IFS="|"
 		set -f
@@ -506,7 +506,7 @@ test_zxfer_init_dependency_tool_defaults_reports_a_missing_zfs() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "class=dependency message=Required dependency \"zfs\" not found in secure PATH ($tools). Set ZXFER_SECURE_PATH or install the binary."
 }
 
-test_zxfer_compute_secure_path_filters_relative_entries() {
+test_zxfer_refresh_secure_path_state_filters_relative_entries() {
 	result=$(
 		ZXFER_SECURE_PATH="./bin:/tmp/bin:relative:/usr/sbin"
 		ZXFER_SECURE_PATH_APPEND=""
@@ -517,7 +517,7 @@ test_zxfer_compute_secure_path_filters_relative_entries() {
 	assertEquals "Relative path segments must be dropped from the secure PATH." "/tmp/bin:/usr/sbin" "$result"
 }
 
-test_zxfer_compute_secure_path_appends_extra_entries() {
+test_zxfer_refresh_secure_path_state_appends_extra_entries() {
 	result=$(
 		ZXFER_SECURE_PATH="/sbin:/bin"
 		ZXFER_SECURE_PATH_APPEND=":/opt/zfs/bin:./malicious"
@@ -528,7 +528,7 @@ test_zxfer_compute_secure_path_appends_extra_entries() {
 	assertEquals "ZXFER_SECURE_PATH_APPEND should only add absolute directories to the allowlist." "/sbin:/bin:/opt/zfs/bin" "$result"
 }
 
-test_zxfer_compute_secure_path_uses_append_when_default_is_empty() {
+test_zxfer_refresh_secure_path_state_uses_append_when_default_is_empty() {
 	result=$(
 		ZXFER_DEFAULT_SECURE_PATH=""
 		ZXFER_SECURE_PATH=""
@@ -541,7 +541,7 @@ test_zxfer_compute_secure_path_uses_append_when_default_is_empty() {
 		"/opt/trusted/bin" "$result"
 }
 
-test_zxfer_compute_secure_path_falls_back_to_default_when_all_entries_are_filtered() {
+test_zxfer_refresh_secure_path_state_falls_back_to_default_when_all_entries_are_filtered() {
 	result=$(
 		ZXFER_SECURE_PATH="relative:.:./bin"
 		ZXFER_SECURE_PATH_APPEND="also-relative:./still-bad"
