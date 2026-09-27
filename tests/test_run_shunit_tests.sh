@@ -1090,10 +1090,10 @@ test_run_shunit_tests_checks_names_and_numbers_as_ascii_in_a_utf8_locale() {
 	l_fragment_suite_path="$TEST_TMPDIR/utf8-fragment-suite.sh"
 	{
 		printf '%s\n' '#!/bin/sh'
-		printf '# zxfer-test-fragment: caf%s.sh\n' "$l_e_acute"
+		printf '# zxfer-test-fragment: name%s.sh\n' "$l_e_acute"
 	} >"$l_fragment_suite_path"
 	chmod +x "$l_fragment_suite_path"
-	printf '%s\n' 'test_fragment_case() {' ':' '}' >"$TEST_TMPDIR/caf$l_e_acute.sh"
+	printf '%s\n' 'test_fragment_case() {' ':' '}' >"$TEST_TMPDIR/name$l_e_acute.sh"
 
 	jobs_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
 		"$RUN_SHUNIT_TESTS_BIN" --jobs "$l_roman_six" "$l_suite_path" 2>&1)
@@ -1102,7 +1102,7 @@ test_run_shunit_tests_checks_names_and_numbers_as_ascii_in_a_utf8_locale() {
 		"$RUN_SHUNIT_TESTS_BIN" --suite-timeout "$l_roman_six" "$l_suite_path" 2>&1)
 	timeout_status=$?
 	name_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
-		"$RUN_SHUNIT_TESTS_BIN" --test "test_caf$l_e_acute" "$l_suite_path" 2>&1)
+		"$RUN_SHUNIT_TESTS_BIN" --test "test_name$l_e_acute" "$l_suite_path" 2>&1)
 	name_status=$?
 	fragment_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
 		"$RUN_SHUNIT_TESTS_BIN" --list-tests "$l_fragment_suite_path" 2>&1)

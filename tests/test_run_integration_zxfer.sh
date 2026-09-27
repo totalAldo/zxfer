@@ -423,7 +423,7 @@ test_integration_fragments_reject_bad_names_symlinks_and_an_empty_directory() {
 		"$bad_name_output" "fragment [Upper_tests.sh] must be named like name_tests.sh in lower case"
 	# In a UTF-8 locale, bash 3.2 (macOS /bin/sh) matches a range such as
 	# [a-z] by collation, which also takes upper-case and accented letters.
-	for utf8_bad_name in Upper mixedCase "caf$(printf '\303\251')"; do
+	for utf8_bad_name in Upper mixedCase "name$(printf '\303\251')"; do
 		make_integration_fixture_dir "$fixture_dir"
 		printf '%s\n' 'bad_test() {' ':' '}' >"$fixture_dir/integration/${utf8_bad_name}_tests.sh"
 		utf8_status=0
