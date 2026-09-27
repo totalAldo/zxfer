@@ -133,8 +133,10 @@ environment with-traps' "$output"
 
 test_zxfer_session_initialize_discards_inherited_cleanup_handles_before_early_failure_trap() {
 	external_root="$TEST_TMPDIR/session-inherited-root"
-	mkdir -p "$external_root"
+	external_socket_dir="$TEST_TMPDIR/zxfer.ssh.inherited"
+	mkdir -p "$external_root" "$external_socket_dir"
 	printf '%s\n' sentinel >"$external_root/sentinel"
+	printf '%s\n' sentinel >"$external_socket_dir/ssh-origin.sock"
 
 	set +e
 	output=$(
@@ -150,8 +152,7 @@ test_zxfer_session_initialize_discards_inherited_cleanup_handles_before_early_fa
 			g_zxfer_run_tmp_root=$external_root
 			g_zxfer_owned_run_tmp_root=$external_root
 			g_zxfer_owned_run_tmp_root_parent=$TEST_TMPDIR
-			g_zxfer_runtime_artifact_cleanup_paths="-
-$TEST_TMPDIR/.zxfer-inherited-stage"
+			g_zxfer_ssh_control_socket_short_dir=$external_socket_dir
 			g_zxfer_failure_report_emitted=1
 			g_option_V_very_verbose=1
 
@@ -168,10 +169,6 @@ $TEST_TMPDIR/.zxfer-inherited-stage"
 				if [ -n "${g_ssh_origin_control_socket:-}${g_ssh_target_control_socket:-}" ]; then
 					printf '%s\n' ssh-action
 				fi
-				return 0
-			}
-			zxfer_cleanup_registered_runtime_artifacts() {
-				[ -z "${g_zxfer_runtime_artifact_cleanup_paths:-}" ] || printf '%s\n' artifact-action
 				return 0
 			}
 			zxfer_remove_run_tmp_root() {
@@ -198,6 +195,8 @@ $TEST_TMPDIR/.zxfer-inherited-stage"
 		"" "$output"
 	assertTrue "Early-failure cleanup must leave an inherited external run-root sentinel untouched." \
 		"[ -f '$external_root/sentinel' ]"
+	assertTrue "Early-failure cleanup must not remove anything from an inherited socket-directory handle." \
+		"[ -f '$external_socket_dir/ssh-origin.sock' ]"
 }
 
 test_zxfer_session_initialize_replaces_inherited_awk_before_early_failure_reporting() {
@@ -219,7 +218,7 @@ EOF
 		zxfer_abort_all_send_jobs() { return 0; }
 		zxfer_kill_registered_cleanup_pids() { return 0; }
 		zxfer_close_all_ssh_control_sockets() { return 0; }
-		zxfer_cleanup_registered_runtime_artifacts() { return 0; }
+		zxfer_remove_ssh_control_socket_dir() { return 0; }
 		zxfer_remove_run_tmp_root() { return 0; }
 		zxfer_profile_metrics_enabled() { return 1; }
 		zxfer_profile_add_elapsed_ms() { :; }
@@ -345,8 +344,8 @@ test_zxfer_trap_exit_promotes_migration_restore_failure_and_finishes_reporting()
 			zxfer_abort_all_send_jobs() { return 0; }
 			zxfer_kill_registered_cleanup_pids() { return 0; }
 			zxfer_close_all_ssh_control_sockets() { return 0; }
-			zxfer_cleanup_registered_runtime_artifacts() {
-				printf '%s\n' artifact-sweep >>"$shutdown_log"
+			zxfer_remove_ssh_control_socket_dir() {
+				printf '%s\n' socket-dir-sweep >>"$shutdown_log"
 				return 0
 			}
 			zxfer_remove_run_tmp_root() {
@@ -388,8 +387,8 @@ test_zxfer_trap_exit_promotes_migration_restore_failure_and_finishes_reporting()
 		"$output" "failure-report=37"
 	assertNotContains "Trap cleanup must not call the exiting ordinary relaunch API." \
 		"$output" "exiting-relaunch-called"
-	assertEquals "Trap cleanup should run both the pre-report and final artifact sweeps." \
-		2 "$(grep -c '^artifact-sweep$' "$shutdown_log")"
+	assertEquals "Trap cleanup should remove the ssh socket directory once, before the report." \
+		1 "$(grep -c '^socket-dir-sweep$' "$shutdown_log")"
 	assertEquals "Trap cleanup should run both the pre-report and final run-root sweeps." \
 		2 "$(grep -c '^root-sweep$' "$shutdown_log")"
 }
@@ -407,7 +406,7 @@ test_zxfer_trap_exit_warns_when_migration_restore_fails_after_primary_failure() 
 			zxfer_abort_all_send_jobs() { return 0; }
 			zxfer_kill_registered_cleanup_pids() { return 0; }
 			zxfer_close_all_ssh_control_sockets() { return 0; }
-			zxfer_cleanup_registered_runtime_artifacts() { return 0; }
+			zxfer_remove_ssh_control_socket_dir() { return 0; }
 			zxfer_remove_run_tmp_root() { return 0; }
 			zxfer_restore_migration_services_status_only() {
 				g_zxfer_migration_service_restore_failure_message="Couldn't re-enable service svc:/broken:default."

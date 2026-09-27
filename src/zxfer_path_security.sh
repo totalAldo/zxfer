@@ -173,15 +173,6 @@ zxfer_get_path_mode_octal() {
 	printf '%s\n' "$g_zxfer_path_mode_result"
 }
 
-# Purpose: Print the identity of one existing, non-symlink path.
-# Usage: zxfer_get_path_device_inode PATH; prints inode:INO. The adjacent
-# artifact registry compares it before recursive cleanup.
-zxfer_get_path_device_inode() {
-	[ -e "$1" ] && [ ! -L "$1" ] || return 1
-	zxfer_read_path_metadata "$1" || return 1
-	printf 'inode:%s\n' "$g_zxfer_path_inode_result"
-}
-
 # Purpose: Record one real directory's inode, owner UID and mode from a single
 # metadata read.
 # Usage: zxfer_get_private_directory_security_record DIR; publishes

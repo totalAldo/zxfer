@@ -170,11 +170,11 @@ zxfer_trap_exit() {
 		zxfer_set_failure_context_if_empty runtime "trap cleanup" \
 			"Failed to close one or more ssh control sockets during exit."
 	fi
-	# Every per-run transient lives under the one private temp root; one
-	# rm -rf replaces per-artifact bookkeeping. Registered path-adjacent
-	# staging debris is reaped first because it lives outside the root.
+	# Every per-run transient lives under the one private temp root, which
+	# one rm -rf removes; only ssh's short socket directory, made when the
+	# root's socket path would be too long, lives outside it.
 	l_artifact_cleanup_failed=0
-	zxfer_cleanup_registered_runtime_artifacts || l_artifact_cleanup_failed=1
+	zxfer_remove_ssh_control_socket_dir || l_artifact_cleanup_failed=1
 	zxfer_remove_run_tmp_root || l_artifact_cleanup_failed=1
 	if [ "$l_artifact_cleanup_failed" -ne 0 ]; then
 		[ "$l_trap_exit_status" -eq 0 ] && l_trap_exit_status=1
@@ -213,7 +213,6 @@ zxfer_trap_exit() {
 
 	# Failure reporting may lazily recreate the run temp root; sweep again so
 	# nothing survives exit.
-	zxfer_cleanup_registered_runtime_artifacts >/dev/null 2>&1 || :
 	zxfer_remove_run_tmp_root >/dev/null 2>&1 || :
 
 	# exit this script

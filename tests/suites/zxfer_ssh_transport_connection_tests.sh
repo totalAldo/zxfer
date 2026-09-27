@@ -63,7 +63,14 @@ test_zxfer_ensure_ssh_control_socket_dir_falls_back_to_short_root_for_long_tmpdi
 			if [ -d "$socket_dir" ]; then
 				printf 'socket_dir_mode=%s\n' "$(zxfer_get_path_mode_octal "$socket_dir")"
 			fi
+			[ "$g_zxfer_ssh_control_socket_short_dir" = "$socket_dir" ] &&
+				printf '%s\n' 'short_dir_owned=yes'
 			printf 'note=%s\n' "$(cat "$TEST_TMPDIR/socket-dir-fallback.note")"
+			: >"$socket_dir/ssh-target.sock"
+			zxfer_remove_ssh_control_socket_dir
+			printf 'remove_status=%s handle=<%s>\n' "$?" \
+				"$g_zxfer_ssh_control_socket_short_dir"
+			[ -e "$socket_dir" ] || printf '%s\n' 'socket_dir=removed'
 		)
 	)
 
@@ -75,6 +82,60 @@ test_zxfer_ensure_ssh_control_socket_dir_falls_back_to_short_root_for_long_tmpdi
 		"$output" "socket_dir_mode=700"
 	assertContains "Long-TMPDIR fallback should explain the shorter socket root under -V." \
 		"$output" "for ssh control sockets; using shorter socket root"
+	assertContains "The ssh transport should own the short directory it created." \
+		"$output" "short_dir_owned=yes"
+	assertContains "Removing the short directory should succeed and forget it." \
+		"$output" "remove_status=0 handle=<>"
+	assertContains "The short directory and its socket should be gone." \
+		"$output" "socket_dir=removed"
+}
+
+test_zxfer_remove_ssh_control_socket_dir_removes_only_ssh_names_and_fails_closed() {
+	branch_root="$TEST_TMPDIR/ssh_socket_dir_removal"
+	mkdir -p "$branch_root/zxfer.ssh.full" "$branch_root/zxfer.ssh.busy" \
+		"$branch_root/link-target" "$branch_root/operator-dir"
+	: >"$branch_root/zxfer.ssh.full/ssh-origin.sock"
+	: >"$branch_root/zxfer.ssh.full/ssh-target.sock"
+	: >"$branch_root/zxfer.ssh.full/ssh-target.sock.Mvij6x1tYLn6woxm"
+	: >"$branch_root/zxfer.ssh.busy/ssh-origin.sock"
+	: >"$branch_root/zxfer.ssh.busy/operator-file"
+	: >"$branch_root/link-target/ssh-origin.sock"
+	: >"$branch_root/operator-dir/ssh-origin.sock"
+	ln -s "$branch_root/link-target" "$branch_root/zxfer.ssh.link"
+
+	output=$(
+		# No case statement: bash 3.2 as /bin/sh misparses unparenthesized
+		# case patterns inside $( ).
+		for l_case in none full busy link operator-dir missing; do
+			g_zxfer_ssh_control_socket_short_dir="$branch_root/zxfer.ssh.$l_case"
+			if [ "$l_case" = none ]; then
+				g_zxfer_ssh_control_socket_short_dir=""
+			elif [ "$l_case" = missing ]; then
+				g_zxfer_ssh_control_socket_short_dir="$branch_root/zxfer.ssh.gone"
+			elif [ "$l_case" = operator-dir ]; then
+				g_zxfer_ssh_control_socket_short_dir="$branch_root/operator-dir"
+			fi
+			zxfer_remove_ssh_control_socket_dir
+			printf '%s=%s handle=<%s>\n' "$l_case" "$?" \
+				"${g_zxfer_ssh_control_socket_short_dir##*/}"
+		done
+	)
+
+	assertEquals "Removal should succeed for no directory, a socket directory and one already gone, and keep the handle when it fails." \
+		"none=0 handle=<>
+full=0 handle=<>
+busy=1 handle=<zxfer.ssh.busy>
+link=1 handle=<zxfer.ssh.link>
+operator-dir=1 handle=<operator-dir>
+missing=0 handle=<>" "$output"
+	assertFalse "The socket directory, sockets and ssh's leftover listener name should be gone." \
+		"[ -e '$branch_root/zxfer.ssh.full' ]"
+	assertTrue "Removal is not recursive: a file ssh did not create stays." \
+		"[ -f '$branch_root/zxfer.ssh.busy/operator-file' ]"
+	assertTrue "A symlink in place of the directory must not be followed." \
+		"[ -f '$branch_root/link-target/ssh-origin.sock' ]"
+	assertTrue "A directory this module did not name must not be touched." \
+		"[ -f '$branch_root/operator-dir/ssh-origin.sock' ]"
 }
 
 test_zxfer_ensure_ssh_control_socket_dir_fails_closed_when_no_short_root_exists() {
@@ -941,45 +1002,31 @@ test_zxfer_ssh_transport_directory_and_quoting_failure_branches_fail_closed() {
 				return 1
 			}
 			zxfer_find_default_tmpdir() {
-				g_zxfer_default_tmpdir_result=$branch_root
-			}
-			zxfer_create_unpredictable_staging_dir() {
-				return 71
+				g_zxfer_default_tmpdir_result=$branch_root/missing-parent
 			}
 			zxfer_ensure_ssh_control_socket_dir
-			printf 'create_status=%s\n' "$?"
+			printf 'create_status=%s handle=<%s>\n' "$?" \
+				"$g_zxfer_ssh_control_socket_short_dir"
 		)
 		(
 			set +e
 			g_zxfer_ssh_control_socket_dir_result=""
 			g_zxfer_run_tmp_root="$branch_root/long-run-root"
-			unregistered_dir="$branch_root/unregistered"
+			long_parent="$branch_root/long-parent"
+			mkdir -p "$long_parent"
 			zxfer_ensure_run_tmp_root() {
 				return 0
 			}
 			zxfer_is_ssh_control_socket_path_short_enough() {
-				if [ "${1#"$g_zxfer_run_tmp_root"/}" != "$1" ]; then
-					return 1
-				fi
-				return 0
+				return 1
 			}
 			zxfer_find_default_tmpdir() {
-				g_zxfer_default_tmpdir_result=$branch_root
-			}
-			zxfer_create_unpredictable_staging_dir() {
-				mkdir "$unregistered_dir" || return "$?"
-				g_zxfer_staging_dir_result=$unregistered_dir
-			}
-			zxfer_register_runtime_artifact_path() {
-				return 72
+				g_zxfer_default_tmpdir_result=$long_parent
 			}
 			zxfer_ensure_ssh_control_socket_dir
-			printf 'register_status=%s\n' "$?"
-			if [ -e "$unregistered_dir" ]; then
-				printf '%s\n' 'register_cleanup=kept'
-			else
-				printf '%s\n' 'register_cleanup=removed'
-			fi
+			printf 'too_long_status=%s handle=<%s>\n' "$?" \
+				"$g_zxfer_ssh_control_socket_short_dir"
+			printf 'too_long_leftovers=<%s>\n' "$(ls -A "$long_parent")"
 		)
 	)
 
@@ -987,12 +1034,12 @@ test_zxfer_ssh_transport_directory_and_quoting_failure_branches_fail_closed() {
 		"$output" "quote_status=1"
 	assertContains "Host-spec quoting should keep the literal-token diagnostic." \
 		"$output" "quote_output=Host spec (-O/-T) must use literal whitespace-delimited tokens only"
-	assertContains "Short socket-directory staging failures should fail closed." \
-		"$output" "create_status=1"
-	assertContains "Runtime artifact registration failures should fail closed." \
-		"$output" "register_status=1"
-	assertContains "Unregistered socket directories should be removed immediately." \
-		"$output" "register_cleanup=removed"
+	assertContains "A short socket directory mktemp cannot create should fail closed without a handle." \
+		"$output" "create_status=1 handle=<>"
+	assertContains "A short socket directory still too long should fail closed without a handle." \
+		"$output" "too_long_status=1 handle=<>"
+	assertContains "A short socket directory still too long should be removed at once." \
+		"$output" "too_long_leftovers=<>"
 }
 
 test_zxfer_ssh_transport_owner_guards_fail_closed() {

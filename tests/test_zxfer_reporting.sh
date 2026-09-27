@@ -44,7 +44,6 @@ setUp() {
 	g_option_Y_yield_iterations=3
 	g_zxfer_version="test-version"
 	g_zxfer_original_invocation="'./zxfer' 'backup/dst'"
-	g_zxfer_runtime_artifact_cleanup_paths=""
 	unset ZXFER_ERROR_LOG ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
 	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" ||
 		fail "Unable to allocate the reporting test run root."

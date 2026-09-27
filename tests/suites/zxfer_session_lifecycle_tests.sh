@@ -165,17 +165,25 @@ test_runtime_execution_context_init_helpers_cover_local_and_dry_run_remote_paths
 		"$output" "remote_cat=cat"
 }
 
-test_zxfer_trap_exit_cleans_registered_runtime_artifacts() {
-	registered_file="$TEST_TMPDIR/zxfer.registered-runtime-file"
-	registered_dir="$TEST_TMPDIR/zxfer.registered-runtime-dir"
-	: >"$registered_file"
-	mkdir -p "$registered_dir/subdir"
-	: >"$registered_dir/subdir/payload"
+# Purpose: Make a short ssh socket directory holding both role sockets and
+# a temporary listener name an interrupted master open left behind.
+# Usage: zxfer_session_test_make_short_socket_dir NAME; prints its path.
+zxfer_session_test_make_short_socket_dir() {
+	l_short_socket_dir="$TEST_TMPDIR/zxfer.ssh.$1"
+	mkdir -m 700 "$l_short_socket_dir" || return 1
+	: >"$l_short_socket_dir/ssh-origin.sock"
+	: >"$l_short_socket_dir/ssh-target.sock"
+	: >"$l_short_socket_dir/ssh-origin.sock.Mvij6x1tYLn6woxm"
+	printf '%s\n' "$l_short_socket_dir"
+}
+
+test_zxfer_trap_exit_removes_the_short_ssh_socket_directory() {
+	short_dir=$(zxfer_session_test_make_short_socket_dir trap) ||
+		fail "Unable to create the short socket directory fixture."
 
 	output=$(
 		(
-			zxfer_register_runtime_artifact_path "$registered_file"
-			zxfer_register_runtime_artifact_path "$registered_dir"
+			g_zxfer_ssh_control_socket_short_dir=$short_dir
 			zxfer_close_all_ssh_control_sockets() {
 				:
 			}
@@ -188,14 +196,12 @@ test_zxfer_trap_exit_cleans_registered_runtime_artifacts() {
 	)
 	status=$?
 
-	assertEquals "zxfer_trap_exit should preserve success after removing registered runtime artifacts." \
+	assertEquals "zxfer_trap_exit should preserve success after removing the short socket directory." \
 		0 "$status"
-	assertEquals "zxfer_trap_exit should keep stdout clean while removing registered runtime artifacts." \
+	assertEquals "zxfer_trap_exit should keep stdout clean while removing the short socket directory." \
 		"" "$output"
-	assertFalse "zxfer_trap_exit should remove registered runtime files." \
-		"[ -e \"$registered_file\" ]"
-	assertFalse "zxfer_trap_exit should remove registered runtime directories." \
-		"[ -e \"$registered_dir\" ]"
+	assertFalse "zxfer_trap_exit should remove the short socket directory, its sockets and ssh's leftover listener name." \
+		"[ -e \"$short_dir\" ]"
 }
 
 test_zxfer_trap_exit_restores_shell_modes_before_mirroring_the_report() {
@@ -521,8 +527,8 @@ test_zxfer_trap_exit_fails_closed_when_validated_cleanup_helper_abort_fails() {
 }
 
 test_zxfer_trap_exit_fails_closed_when_ssh_socket_cleanup_fails_after_success() {
-	registered_file="$TEST_TMPDIR/zxfer.trap-close-failure-artifact"
-	: >"$registered_file"
+	short_dir=$(zxfer_session_test_make_short_socket_dir close-failure) ||
+		fail "Unable to create the short socket directory fixture."
 
 	l_restore_errexit=0
 	case $- in
@@ -533,7 +539,7 @@ test_zxfer_trap_exit_fails_closed_when_ssh_socket_cleanup_fails_after_success() 
 	set +e
 	output=$(
 		(
-			zxfer_register_runtime_artifact_path "$registered_file"
+			g_zxfer_ssh_control_socket_short_dir=$short_dir
 			zxfer_close_all_ssh_control_sockets() {
 				printf '%s\n' "close failed" >&2
 				return 19
@@ -569,8 +575,8 @@ test_zxfer_trap_exit_fails_closed_when_ssh_socket_cleanup_fails_after_success() 
 		"$output" "stage=trap cleanup"
 	assertContains "ssh socket cleanup failures should preserve the cleanup-specific failure message." \
 		"$output" "message=Failed to close one or more ssh control sockets during exit."
-	assertFalse "zxfer_trap_exit should continue removing registered runtime artifacts after ssh socket cleanup failures." \
-		"[ -e \"$registered_file\" ]"
+	assertFalse "zxfer_trap_exit should still remove the short socket directory after a failed close." \
+		"[ -e \"$short_dir\" ]"
 }
 
 test_session_init_initializes_dependency_state_and_temp_files() {

@@ -38,9 +38,8 @@ module or a chain of setters.
 - [../src/zxfer_path_security.sh](../src/zxfer_path_security.sh): filesystem
   ownership/mode checks and symlink-aware trusted-path validation
 - [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh): validated per-run temp
-  root, runtime artifact allocation/readback, short-lived cleanup-PID rows,
-  and the identity/path cleanup registry of the one path-adjacent entry left,
-  the ssh transport's short fallback socket directory
+  root, runtime artifact allocation/readback, and short-lived cleanup-PID
+  rows
 - [../src/zxfer_ssh_transport.sh](../src/zxfer_ssh_transport.sh): validated
   host/wrapper parsing (`-O`/`-T` host specs parsed once per value), managed
   SSH options, ssh argv assembled per call with the role's control socket,
@@ -186,17 +185,17 @@ TMPDIR candidate in one subshell (`cd -P`, `pwd`, then `exec ls`), and asks
 `id -u` at most once per run.
 `zxfer_trap_exit()` in
 [../src/zxfer_session.sh](../src/zxfer_session.sh) removes the whole root only
-after supervised jobs, short-lived cleanup helpers, SSH control sockets, and
-registered path-adjacent staging entries have been handled. Staged contents
-reload through the shared readback helper, which keeps partial payloads out of
-shared `g_*`
-scratch state and preserves exact nonzero readback failures for the caller.
-Registered path-adjacent directories also retain their allocation-time
-device/inode identity. Recursive cleanup requires that identity to remain
-unchanged. The short fallback SSH socket directory, made only when the run
-root's socket path would be too long, is created once per run and registered
-with its device/inode identity like other path-adjacent entries. A same-path
-replacement is never adopted as zxfer-owned state.
+after supervised jobs, short-lived cleanup helpers and SSH control sockets
+have been handled. Staged contents reload through the shared readback helper,
+which keeps partial payloads out of shared `g_*` scratch state and preserves
+exact nonzero readback failures for the caller. The one run-private entry
+outside the root is the SSH transport's short socket directory, made (with a
+random `mktemp -d` name under the default temp root) only when the run root's
+socket path would pass the `sun_path` limit.
+[../src/zxfer_ssh_transport.sh](../src/zxfer_ssh_transport.sh) owns it and
+removes it after the sockets close, without recursion: it unlinks the two
+role sockets and ssh's temporary listener names, then removes the empty
+directory, and it refuses a symlink or a name it did not create.
 
 Not every staging flow belongs in that layer. Modules that intentionally stage
 files beside the final target to preserve same-directory atomic rename

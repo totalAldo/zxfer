@@ -38,9 +38,12 @@
 # Module contract:
 # owns globals: the ssh policy (g_zxfer_ssh_policy_*), the -O/-T host specs
 #   parsed once per value (g_zxfer_ssh_{origin,target}_{spec,host,wrapper}),
-#   the per-role control sockets and their directory, the control-socket
-#   action results, the per-role zfs render (g_zxfer_zfs_role_*), and the
-#   host/command/prepared-command result globals.
+#   the per-role control sockets and their directory (with
+#   g_zxfer_ssh_control_socket_short_dir, the short directory this module
+#   creates and removes when the run root's socket path is too long), the
+#   control-socket action results, the per-role zfs render
+#   (g_zxfer_zfs_role_*), and the host/command/prepared-command result
+#   globals.
 # reads globals: g_option_O_origin_host, g_option_T_target_host, g_cmd_zfs,
 #   g_origin_cmd_zfs, g_target_cmd_zfs, ZXFER_SSH_*, and runtime state.
 # mutates caches: sets g_cmd_ssh on first remote use; opens the per-run ssh
@@ -100,6 +103,7 @@ zxfer_reset_ssh_transport_state() {
 	g_ssh_origin_control_socket=""
 	g_ssh_target_control_socket=""
 	g_zxfer_ssh_control_socket_dir_result=""
+	g_zxfer_ssh_control_socket_short_dir=""
 	zxfer_refresh_ssh_control_socket_support_state
 }
 
@@ -622,7 +626,10 @@ zxfer_is_ssh_control_socket_path_short_enough() {
 # or a short private directory when sockets under the run root would pass the
 # sun_path limit.
 # Usage: zxfer_ensure_ssh_control_socket_dir, once per run; publishes
-# g_zxfer_ssh_control_socket_dir_result, or returns 1.
+# g_zxfer_ssh_control_socket_dir_result, or returns 1. A short directory
+# lies outside the run root, so this module records it in
+# g_zxfer_ssh_control_socket_short_dir and zxfer_trap_exit removes it with
+# zxfer_remove_ssh_control_socket_dir once the masters are closed.
 zxfer_ensure_ssh_control_socket_dir() {
 	g_zxfer_ssh_control_socket_dir_result=""
 	zxfer_ensure_run_tmp_root || return 1
@@ -634,20 +641,49 @@ zxfer_ensure_ssh_control_socket_dir() {
 
 	# A long TMPDIR pushes the run root past the ~104-byte sun_path limit, so
 	# the sockets get one private 0700 directory under the default temp root
-	# instead. It sits outside the run root, so it registers for trap
-	# cleanup, which runs after the sockets are closed.
+	# instead. That root may be a shared sticky /tmp, where another local
+	# user could create a predictable name first, so mktemp picks a random
+	# one.
 	zxfer_find_default_tmpdir || return 1
-	zxfer_create_unpredictable_staging_dir \
-		"$g_zxfer_default_tmpdir_result/zxfer.ssh.XXXXXX" || return 1
-	l_socket_short_dir=$g_zxfer_staging_dir_result
+	l_socket_short_dir=$(umask 077 && exec mktemp -d \
+		"$g_zxfer_default_tmpdir_result/zxfer.ssh.XXXXXX" 2>/dev/null) ||
+		return 1
 	if ! zxfer_is_ssh_control_socket_path_short_enough \
-		"$l_socket_short_dir/ssh-target.sock" ||
-		! zxfer_register_runtime_artifact_path "$l_socket_short_dir"; then
+		"$l_socket_short_dir/ssh-target.sock"; then
 		rmdir "$l_socket_short_dir" 2>/dev/null || :
 		return 1
 	fi
+	g_zxfer_ssh_control_socket_short_dir=$l_socket_short_dir
 	zxfer_echoV "Ignoring TMPDIR ${TMPDIR:-} for ssh control sockets; using shorter socket root $l_socket_short_dir."
 	g_zxfer_ssh_control_socket_dir_result=$l_socket_short_dir
+}
+
+# Purpose: Remove the short control-socket directory once the masters are
+# closed.
+# Usage: zxfer_remove_ssh_control_socket_dir; called by zxfer_trap_exit after
+# zxfer_close_all_ssh_control_sockets. Sockets under the run root need nothing
+# here. The removal is not recursive: it unlinks the two role sockets and
+# ssh's temporary listener names, then removes the empty directory. Returns 1,
+# keeping the handle, when that fails or the path is no longer a real
+# directory that this module named.
+zxfer_remove_ssh_control_socket_dir() {
+	l_socket_remove_dir=${g_zxfer_ssh_control_socket_short_dir:-}
+	[ -n "$l_socket_remove_dir" ] || return 0
+	case ${l_socket_remove_dir##*/} in
+	zxfer.ssh.?*) ;;
+	*) return 1 ;;
+	esac
+	if [ -e "$l_socket_remove_dir" ] || [ -L "$l_socket_remove_dir" ]; then
+		[ -d "$l_socket_remove_dir" ] && [ ! -L "$l_socket_remove_dir" ] ||
+			return 1
+		# ssh binds each master at SOCKET.<random>, links SOCKET to it and
+		# unlinks the temporary name; an interrupted open can leave it.
+		rm -f "$l_socket_remove_dir/ssh-origin.sock" \
+			"$l_socket_remove_dir/ssh-target.sock" \
+			"$l_socket_remove_dir"/ssh-*.sock.* 2>/dev/null
+		rmdir "$l_socket_remove_dir" 2>/dev/null || return 1
+	fi
+	g_zxfer_ssh_control_socket_short_dir=""
 }
 
 # Purpose: Clear the result of the last control-socket action.
@@ -852,7 +888,8 @@ zxfer_open_ssh_control_sockets() {
 # Usage: zxfer_close_ssh_control_socket_for_role origin|target; returns 0 when
 # nothing is open or the master is already gone. A failed close keeps the role
 # state so trap cleanup reports it instead of claiming a clean run. The socket
-# path goes with its directory, which trap cleanup removes next.
+# path goes with its directory, which trap cleanup removes next (the run root,
+# or zxfer_remove_ssh_control_socket_dir).
 zxfer_close_ssh_control_socket_for_role() {
 	case $1 in
 	origin)

@@ -74,9 +74,12 @@ Key protections already present in the project include:
   role, host and requested tool set; only a fully validated response is
   stored, and later OS/tool lookups reuse its validated fields instead of
   trusting or reparsing raw handshake text
-- exact registration and shape checks for the small number of path-adjacent
-  staging entries that cannot live below the run root, plus stored
-  device/inode identity checks for registered directories
+- one run-private directory outside the run root, the ssh short socket
+  directory made only when a long TMPDIR would push the control-socket path
+  past the `sun_path` limit: a random `mktemp -d` name under the validated
+  default temp root, removed at exit without recursion (the two role sockets
+  and ssh's temporary listener names, then the empty directory), never
+  through a symlink
 - pre-trap rejection of inherited internal cleanup handles, so exported `g_*`
   state cannot authorize process signals, SSH actions, path removal, or SMF
   service changes
@@ -162,6 +165,6 @@ Changes in these areas should receive extra scrutiny:
 - secure-PATH resolution
 - property backup / restore lookup
 - ssh control-socket management
-- runtime-root and path-adjacent staging cleanup
+- runtime-root and ssh socket-directory cleanup
 - background-process registration, signalling, and status protocols
 - snapshot deletion and rollback behavior

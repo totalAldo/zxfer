@@ -39,15 +39,13 @@
 # owns globals: temp-root selection (the g_zxfer_effective_tmpdir memo and
 #   g_zxfer_default_tmpdir_result); the per-run temp root, its validated
 #   parent and its creation record (g_zxfer_owned_run_tmp_root_identity:
-#   identity, owner and mode); the caller umask recorded with the root
+#   inode, owner and mode); the caller umask recorded with the root
 #   (g_zxfer_run_umask); the cleanup-PID rows (g_zxfer_cleanup_pid_records);
-#   the path-adjacent artifact registry (g_zxfer_runtime_artifact_cleanup_paths);
 #   the allocation and readback results (g_zxfer_temp_file_result,
-#   g_zxfer_temp_file_group_result, g_zxfer_staging_dir_result,
-#   g_zxfer_runtime_artifact_*_result).
+#   g_zxfer_temp_file_group_result, g_zxfer_runtime_artifact_*_result).
 # reads globals: TMPDIR, g_option_V_very_verbose, ZXFER_SOURCE_MODULES_ROOT
 #   (the cleanup wrapper path), and ZXFER_TAB/ZXFER_LF from zxfer_quoting.sh.
-# mutates caches: the cleanup-PID rows and the adjacent-artifact registry.
+# mutates caches: the cleanup-PID rows.
 # returns via stdout: the cleanup wrapper path and the default temp-directory
 #   candidates only; every temp and staging path is a result global.
 
@@ -427,11 +425,8 @@ zxfer_discard_runtime_cleanup_state() {
 	g_zxfer_owned_run_tmp_root_identity=""
 	g_zxfer_run_umask=""
 	g_zxfer_run_tmp_counter=0
-	g_zxfer_runtime_artifact_cleanup_paths=""
 	g_zxfer_runtime_artifact_path_result=""
 	g_zxfer_runtime_artifact_read_result=""
-	g_zxfer_runtime_artifact_directory_identity_result=""
-	g_zxfer_staging_dir_result=""
 	g_zxfer_default_tmpdir_result=""
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
@@ -592,95 +587,6 @@ zxfer_remove_run_tmp_root() {
 }
 
 ################################################################################
-# PATH-ADJACENT ARTIFACT REGISTRY
-################################################################################
-
-# A few staging entries must live next to their target instead of under the
-# run root. g_zxfer_runtime_artifact_cleanup_paths holds one pair of lines per
-# entry: its identity (device-inode:..., inode:..., or - for a file), then its
-# absolute path. Paths are absolute and never hold LF, and identities never
-# start with /, so a whole-line match on a path finds only that path line.
-
-# Purpose: Check the reserved lexical shape of an adjacent staging path.
-# Usage: zxfer_runtime_artifact_registration_path_has_safe_shape PATH;
-# registration and trap cleanup share it, so a corrupted registry cannot
-# widen recursive deletion to an arbitrary path.
-zxfer_runtime_artifact_registration_path_has_safe_shape() {
-	l_registration_shape_path=$1
-
-	case "$l_registration_shape_path" in
-	/*) ;;
-	*) return 1 ;;
-	esac
-	case "$l_registration_shape_path" in
-	*"$ZXFER_LF"*) return 1 ;;
-	esac
-	l_registration_shape_name=${l_registration_shape_path##*/}
-	case "$l_registration_shape_name" in
-	zxfer.* | .zxfer-* | .zxfer.*) ;;
-	*) return 1 ;;
-	esac
-	return 0
-}
-
-# Purpose: Look up PATH in the adjacent-artifact registry, optionally
-# dropping it.
-# Usage: zxfer_runtime_artifact_path_is_registered PATH [drop]; returns 0 when
-# PATH is registered and leaves its identity (- for a file) in
-# g_zxfer_runtime_artifact_directory_identity_result; with drop it also
-# removes the pair.
-zxfer_runtime_artifact_path_is_registered() {
-	g_zxfer_runtime_artifact_directory_identity_result=""
-	# Only a reserved single-line absolute path can be a registered path line.
-	zxfer_runtime_artifact_registration_path_has_safe_shape "$1" || return 1
-	l_registry="$ZXFER_LF${g_zxfer_runtime_artifact_cleanup_paths:-}$ZXFER_LF"
-	case $l_registry in
-	*"$ZXFER_LF$1$ZXFER_LF"*) ;;
-	*) return 1 ;;
-	esac
-	l_registry_before=${l_registry%%"$ZXFER_LF$1$ZXFER_LF"*}
-	g_zxfer_runtime_artifact_directory_identity_result=${l_registry_before##*"$ZXFER_LF"}
-	[ "${2:-}" = drop ] || return 0
-	# Keep the pairs before the identity line and after the path line.
-	l_registry=${l_registry_before%"$ZXFER_LF"*}$ZXFER_LF${l_registry#*"$ZXFER_LF$1$ZXFER_LF"}
-	l_registry=${l_registry#"$ZXFER_LF"}
-	g_zxfer_runtime_artifact_cleanup_paths=${l_registry%"$ZXFER_LF"}
-}
-
-# Purpose: Register one just-created adjacent staging file or directory for
-# trap cleanup.
-# Usage: zxfer_register_runtime_artifact_path PATH; PATH must have the
-# reserved shape and be a regular file or a directory, never a symlink. A
-# directory is registered with its current identity.
-zxfer_register_runtime_artifact_path() {
-	l_register_path=$1
-
-	[ -n "$l_register_path" ] || return 0
-	zxfer_runtime_artifact_registration_path_has_safe_shape "$l_register_path" ||
-		return 1
-	[ ! -L "$l_register_path" ] || return 1
-	[ -f "$l_register_path" ] || [ -d "$l_register_path" ] || return 1
-	zxfer_runtime_artifact_path_is_registered "$l_register_path" && return 0
-	l_register_identity=-
-	if [ -d "$l_register_path" ]; then
-		l_register_identity=$(zxfer_get_path_device_inode "$l_register_path") ||
-			return 1
-	fi
-	g_zxfer_runtime_artifact_cleanup_paths=${g_zxfer_runtime_artifact_cleanup_paths:+$g_zxfer_runtime_artifact_cleanup_paths$ZXFER_LF}$l_register_identity$ZXFER_LF$l_register_path
-}
-
-# Purpose: Create one unpredictably named 0700 staging directory from a mktemp
-# template under a caller-validated parent.
-# Usage: zxfer_create_unpredictable_staging_dir TEMPLATE; publishes the path
-# in g_zxfer_staging_dir_result. Staging parents may be shared sticky
-# directories (a /tmp-style ZXFER_ERROR_LOG parent), where predictable
-# pid+attempt names could be pre-created by a local process-table reader; the
-# random name closes that window and umask 077 keeps the directory private.
-zxfer_create_unpredictable_staging_dir() {
-	g_zxfer_staging_dir_result=$(umask 077 && exec mktemp -d "$1" 2>/dev/null)
-}
-
-################################################################################
 # ARTIFACT CLEANUP
 ################################################################################
 
@@ -705,46 +611,26 @@ zxfer_runtime_artifact_path_is_run_root_child() {
 	return 1
 }
 
-# Purpose: Remove one run-root child or registered adjacent artifact.
+# Purpose: Remove one direct child of the run root.
 # Usage: zxfer_cleanup_runtime_artifact_path PATH; returns 1 for any other
-# path, for a registered directory whose identity changed, or when rm fails.
-# A registered path leaves the registry only once it is gone.
+# path or when rm fails.
 zxfer_cleanup_runtime_artifact_path() {
 	l_cleanup_path=$1
-	l_cleanup_registered=0
 
 	[ -n "$l_cleanup_path" ] || return 0
-	if zxfer_runtime_artifact_path_is_run_root_child "$l_cleanup_path"; then
-		:
-	elif zxfer_runtime_artifact_path_is_registered "$l_cleanup_path"; then
-		l_cleanup_registered=1
-		l_cleanup_registered_identity=$g_zxfer_runtime_artifact_directory_identity_result
-	else
-		return 1
-	fi
+	zxfer_runtime_artifact_path_is_run_root_child "$l_cleanup_path" || return 1
 	if [ -L "$l_cleanup_path" ]; then
 		rm -f "$l_cleanup_path" 2>/dev/null || return 1
 	elif [ -d "$l_cleanup_path" ]; then
-		# Recurse into a registered directory only while it is still the
-		# object that was registered.
-		if [ "$l_cleanup_registered" -eq 1 ]; then
-			[ "$l_cleanup_registered_identity" != - ] || return 1
-			l_cleanup_current_identity=$(zxfer_get_path_device_inode "$l_cleanup_path") ||
-				return 1
-			[ "$l_cleanup_current_identity" = "$l_cleanup_registered_identity" ] ||
-				return 1
-		fi
 		rm -rf "$l_cleanup_path" 2>/dev/null || return 1
 	elif [ -e "$l_cleanup_path" ]; then
 		rm -f "$l_cleanup_path" 2>/dev/null || return 1
 	fi
-	[ "$l_cleanup_registered" -eq 0 ] ||
-		zxfer_runtime_artifact_path_is_registered "$l_cleanup_path" drop || :
 	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_paths_cleaned
 	return 0
 }
 
-# Purpose: Remove several run-root children or registered artifacts.
+# Purpose: Remove several run-root children.
 # Usage: zxfer_cleanup_runtime_artifact_paths PATH...; empty arguments are
 # skipped, and it returns 1 when any path stays.
 zxfer_cleanup_runtime_artifact_paths() {
@@ -807,36 +693,6 @@ zxfer_cleanup_runtime_artifact_path_list_and_return() {
 	return "$l_return_status"
 }
 
-# Purpose: Remove every registered adjacent artifact.
-# Usage: zxfer_cleanup_registered_runtime_artifacts; called by zxfer_trap_exit
-# before whole-root removal. Returns 1 when any entry stays or has an unsafe
-# shape.
-zxfer_cleanup_registered_runtime_artifacts() {
-	l_registered_status=0
-	l_registered_identity=""
-
-	# Walk a copy: each successful cleanup drops its pair from the registry.
-	while IFS= read -r l_registered_line; do
-		if [ -z "$l_registered_identity" ]; then
-			l_registered_identity=$l_registered_line
-			continue
-		fi
-		l_registered_identity=""
-		if zxfer_runtime_artifact_registration_path_has_safe_shape "$l_registered_line"; then
-			zxfer_cleanup_runtime_artifact_path "$l_registered_line" ||
-				l_registered_status=1
-		else
-			l_registered_status=1
-		fi
-	done <<EOF
-${g_zxfer_runtime_artifact_cleanup_paths:-}
-EOF
-	# An identity line without its path line means the registry is damaged.
-	[ -z "$l_registered_identity" ] || l_registered_status=1
-
-	return "$l_registered_status"
-}
-
 ################################################################################
 # ARTIFACT ALLOCATION AND READBACK
 ################################################################################
@@ -844,8 +700,7 @@ EOF
 # Purpose: Create a private 0700 scratch directory under the per-run temp
 # root.
 # Usage: zxfer_create_private_temp_dir [PREFIX]; publishes
-# g_zxfer_runtime_artifact_path_result. Never registered for cleanup; the
-# run-root removal covers it.
+# g_zxfer_runtime_artifact_path_result. The run-root removal covers it.
 zxfer_create_private_temp_dir() {
 	l_prefix=${1:-zxfer-temp-dir}
 
@@ -874,9 +729,9 @@ zxfer_create_private_temp_dir() {
 
 # Purpose: Create an empty 0600 scratch file under the per-run temp root.
 # Usage: zxfer_create_runtime_artifact_file [PREFIX]; publishes
-# g_zxfer_runtime_artifact_path_result. Never registered for cleanup;
-# the run-root removal covers it. It restores g_zxfer_run_umask afterwards, so
-# callers must not hold a temporary umask across the call.
+# g_zxfer_runtime_artifact_path_result. The run-root removal covers it. It
+# restores g_zxfer_run_umask afterwards, so callers must not hold a temporary
+# umask across the call.
 zxfer_create_runtime_artifact_file() {
 	l_prefix=${1:-zxfer-temp}
 
