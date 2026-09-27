@@ -1228,6 +1228,7 @@ tank/src/a/bc@s1	61" "$(cat "$base.3.s")"
 	assertTrue "A listed dataset without rows should get empty slices." \
 		"[ -f '$base.4.s' ] && [ ! -s '$base.4.s' ] && [ -f '$base.4.d' ] && [ ! -s '$base.4.d' ]"
 	assertFalse "No slice should exist past the last listed position." "[ -e '$base.5.s' ]"
+	assertTrue "The spent keyed copy should be emptied." "[ -f '$base' ] && [ ! -s '$base' ]"
 	assertEquals "Slices should be private like every run-root file." \
 		"$base.2.s" "$(find "$base.2.s" -perm 0600 2>/dev/null)"
 

@@ -249,6 +249,8 @@ EOF
 		umask "$g_zxfer_run_umask"
 	fi
 	[ "$l_split_status" -eq 0 ] || return "$l_split_status"
+	# The keyed copy is spent; a memory-backed temp root need not hold it.
+	zxfer_write_runtime_artifact_file "$g_zxfer_snapshot_slice_base" "" || :
 	g_zxfer_snapshot_slice_records=$l_split_source_file$ZXFER_LF$l_split_destination_file
 }
 

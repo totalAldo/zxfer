@@ -101,12 +101,15 @@ module or a chain of setters.
   text so a `-j` job shell needs no zxfer function
 - [../src/zxfer_snapshot_reconcile.sh](../src/zxfer_snapshot_reconcile.sh):
   one-awk-pass snapshot planning (common snapshot, transfer list, divergence,
-  and the `-d` delete list), one batched creation-time query per delete plan
+  and the `-d` delete list) from each dataset's own slice of the record files,
+  cut by one keyed sort per iteration list, one batched creation-time query
+  per delete plan
   that decides rollback eligibility and `-g`, deletion with its safety
   rechecks, the divergence contract, and reusable run-scoped plan and
   creation-time scratch files
-- [../src/zxfer_replication.sh](../src/zxfer_replication.sh): dataset iteration,
-  per-dataset planning state, the `-g` pre-pass, the live re-plan of a
+- [../src/zxfer_replication.sh](../src/zxfer_replication.sh): the numbered
+  dataset iteration list, per-dataset planning state, the `-g` pre-pass, the
+  live re-plan of a
   dataset this run changed, the per-pass send/destroy marker used by `-Y`,
   and orchestration across discovery, reconciliation, and transfer
 - [../src/zxfer_session.sh](../src/zxfer_session.sh): final composition root for
@@ -203,12 +206,26 @@ discovery and the fast recursive no-op proof each allocate one complete ordered
 file group, retain its handles in operation-specific state, and clean the group
 from one terminal path. Discovery owns the flat source/destination record files
 that survive for later lookups. Snapshot reconciliation owns a reusable plan
-file and a reusable creation-time file, and snapshot state owns the reusable
-depth-1 listing file; all three are reused across datasets for one run, are
-not cleared by a per-dataset state reset, and are reused only when they lie
-under the run's private temp root. The
+file, a reusable creation-time file and a reusable slice file, and snapshot
+state owns the reusable depth-1 listing file; all four are reused across
+datasets for one run, are not cleared by a per-dataset state reset, and are
+reused only when they lie under the run's private temp root. The
 runtime layer allocates and verifies these contained files but does not adopt
 their domain lifecycle.
+
+Planning reads each dataset's own rows. Every time
+`zxfer_build_replication_iteration_list` builds the pass's list (the `-g`
+pre-pass and the main pass each build one, and every `-Y` pass builds its
+own), it numbers the list's rows and `zxfer_split_snapshot_records` cuts both
+record files by that position: one awk keys every row of a listed dataset
+(destination names mapped back to source names, exact names only), `sort`
+groups the keyed rows in bounded memory, and one awk writes `BASE.N.d` and
+`BASE.N.s` beside the reusable slice file `BASE`, one file open at a time.
+The queue and the `-g` pre-pass select each dataset's slice before planning
+it; the planner uses a slice only while its source, destination and record
+files match, and otherwise reads the whole record files, as the reap-time
+check of another dataset does. Planning cost therefore grows with the
+snapshots of one dataset instead of the whole pass.
 
 Before each send, only a dataset whose snapshots this run's `-d` destroy
 changed is listed again: `zxfer_get_live_destination_record_file` lists it at
@@ -533,7 +550,7 @@ Each dataset in the iteration list flows through one orchestration pass in
 ```mermaid
 flowchart TD
     A["Start zxfer_process_source_dataset(source)"] --> B["Map source to actual destination dataset"]
-    B --> C["Inspect source and destination snapshots"]
+    B --> C["Inspect the dataset's slices of the source and destination record files"]
     C --> D["Find last common snapshot and build transfer list"]
     D --> E{"-d enabled?"}
     E -- "yes" --> F["Read creation times in one batched query (rollback eligibility and -g), then delete destination-only snapshots"]

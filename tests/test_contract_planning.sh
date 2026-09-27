@@ -174,6 +174,9 @@
 #       → -F adds -F to every receive.
 #       test_yield_option_repeats_passes_until_limit
 #       → -Y repeats a pass that did work up to the documented 8 passes.
+#       test_guidless_source_row_fails_its_dataset_plan_closed
+#       → a source row without a guid stops the run with exit 3 and a report
+#         naming the dataset; nothing is received into it.
 #       test_yield_passes_plan_from_their_own_discovery
 #       → each -Y pass plans from its own discovery: a second pass that finds
 #         one dataset still behind sends that dataset alone.
@@ -1421,6 +1424,33 @@ test_property_read_failure_fails_closed_without_mutations() {
 		"Failed to retrieve source properties for [$ZXFER_MOCKBIN_SOURCE_ROOT]."
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
+}
+
+# Invariant: a snapshot row without a guid fails its dataset's plan closed
+# (the planner's exit 3) with a structured report naming the dataset, and
+# nothing is received into that dataset. The row reaches the planner through
+# the dataset's slice of the source record file. The stage is not pinned: it
+# still names the root's earlier send.
+test_guidless_source_row_fails_its_dataset_plan_closed() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" guidless_row
+	awk -F'\t' -v row="$ZXFER_MOCKBIN_SOURCE_ROOT/child1@snap3" \
+		'$1 == row { print $1; next } { print }' \
+		"$FIXTURE_DIR/incremental/src_snapshots.list" >"$STATE_DIR/src_snapshots.list" ||
+		fail "Unable to strip the guid from one source row."
+
+	planning_run_zxfer "$STATE_DIR" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "a guid-less source row must stop the run with the planner's status" \
+		3 "$l_run_status"
+	assertTrue "the report must name the dataset whose plan failed" \
+		"grep -Fq 'message: Failed to determine the last common snapshot for [$ZXFER_MOCKBIN_SOURCE_ROOT/child1] and [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1].' '$CASE_DIR/zxfer.stderr'"
+	assertTrue "the failure must be a structured runtime report" \
+		"grep -Fq 'failure_class: runtime' '$CASE_DIR/zxfer.stderr'"
+	assertFalse "nothing may be received into the dataset with the guid-less row" \
+		"grep -q '^receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1\$' '$ZFS_LOG'"
+	planning_assert_no_mutations
 }
 
 # Invariant: snapshot names are matched exactly, never as prefixes. With ten

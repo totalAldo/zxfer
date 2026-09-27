@@ -1034,7 +1034,7 @@ test_seed_destination_for_snapshot_transfer_refuses_snapshotted_destination_with
 		1 "$status"
 	assertContains "The refusal should explain that no snapshot shares a guid with the source." \
 		"$output" "Destination dataset [backup/target/src] has snapshots but none share a common guid with the source."
-	assertEquals "The seed trusts the presence the live recheck published: no listing, no send." \
+	assertEquals "The seed trusts the snapshot presence the plan published: no listing, no send." \
 		"" "$(cat "$log")"
 }
 
