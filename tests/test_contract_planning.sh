@@ -892,7 +892,8 @@ test_remote_target_push_noop_opens_master_first_and_probes_once() {
 # Invariant: with distinct -O and -T host specs each role opens its own master
 # before any remote command and sends every command over its own socket; each
 # master closes once at exit. A -T spec equal to the -O spec shares the origin
-# master, since commands for that spec already use the origin socket.
+# master, since commands for that spec already use the origin socket, and one
+# capability probe, since both roles ask that host the same questions.
 test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 	planning_setup_env
 	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
@@ -930,6 +931,8 @@ test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 	planning_assert_ssh_commands_multiplexed 1
 	assertFalse "one host spec must not open a second master" \
 		"grep -q -- 'ssh-target.sock' '$SSH_LOG'"
+	assertEquals "one host spec must cost exactly one capability probe round trip" \
+		1 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
 }
