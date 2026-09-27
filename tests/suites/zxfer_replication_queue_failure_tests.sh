@@ -21,10 +21,10 @@ tank/src/extra"
 
 	zxfer_build_replication_iteration_list 1
 
-	assertEquals "Recursive property and delete planning should build the merged iteration list in current-shell scratch." \
-		"tank/src
-tank/src/child
-tank/src/extra" "$g_zxfer_replication_iteration_list_result"
+	assertEquals "Recursive property and delete planning should build the merged iteration list, one position per dataset, in current-shell scratch." \
+		"1	tank/src
+2	tank/src/child
+3	tank/src/extra" "$g_zxfer_replication_iteration_list_result"
 }
 
 test_build_replication_iteration_list_orders_siblings_before_descendants() {
@@ -42,12 +42,12 @@ tank/src/jails/proxy/root"
 	zxfer_build_replication_iteration_list 0
 
 	assertEquals "Recursive replication should schedule same-depth siblings before descendants so -j can keep unrelated receives running while parent/child ancestry remains serialized." \
-		"tank/src/jails/amp
-tank/src/jails/mail
-tank/src/jails/proxy
-tank/src/jails/amp/root
-tank/src/jails/mail/root
-tank/src/jails/proxy/root" "$g_zxfer_replication_iteration_list_result"
+		"1	tank/src/jails/amp
+2	tank/src/jails/mail
+3	tank/src/jails/proxy
+4	tank/src/jails/amp/root
+5	tank/src/jails/mail/root
+6	tank/src/jails/proxy/root" "$g_zxfer_replication_iteration_list_result"
 }
 
 test_copy_filesystems_ready_queue_skips_blocked_descendant_for_independent_work() {
@@ -74,7 +74,7 @@ tank/src/db/root"
 			l_ready_source=$1
 			zxfer_map_destination_dataset "$l_ready_source"
 			l_ready_dest=$g_zxfer_destination_dataset_result
-			printf 'process:%s dest=%s\n' "$l_ready_source" "$l_ready_dest" >>"$READY_LOG"
+			printf 'process:%s dest=%s position=%s\n' "$l_ready_source" "$l_ready_dest" "$3" >>"$READY_LOG"
 			if [ "$l_ready_source" = "tank/src/db/root" ]; then
 				zxfer_test_add_pending_send "job-db-root" 202 "$l_ready_source@snap" "$l_ready_dest" ""
 			fi
@@ -93,11 +93,11 @@ tank/src/db/root"
 		zxfer_copy_filesystems
 	)
 
-	assertEquals "The ready queue should skip a blocked descendant, start later independent work, then wait only when no pending source is ready." \
+	assertEquals "The ready queue should skip a blocked descendant, start later independent work, then wait only when no pending source is ready; a deferred dataset keeps its list position." \
 		"refresh
-process:tank/src/db/root dest=backup/src/db/root
+process:tank/src/db/root dest=backup/src/db/root position=2
 wait_next:destination ancestry
-process:tank/src/app/root dest=backup/src/app/root
+process:tank/src/app/root dest=backup/src/app/root position=1
 wait_all:final sync" "$(cat "$log")"
 }
 
@@ -130,7 +130,7 @@ tank/iocage/jails/sftp/root"
 			zxfer_map_destination_dataset "$l_ready_source"
 			l_ready_dest=$g_zxfer_destination_dataset_result
 			JOB_SEQ=$((JOB_SEQ + 1))
-			printf 'process:%s dest=%s\n' "$l_ready_source" "$l_ready_dest" >>"$READY_LOG"
+			printf 'process:%s dest=%s position=%s\n' "$l_ready_source" "$l_ready_dest" "$3" >>"$READY_LOG"
 			zxfer_test_add_pending_send \
 				"job-$JOB_SEQ" \
 				"$((200 + JOB_SEQ))" \
@@ -154,14 +154,69 @@ tank/iocage/jails/sftp/root"
 
 	assertEquals "Deferred descendants should be retried and processed before zxfer ends the same copy-filesystems pass." \
 		"refresh
-process:tank/iocage/jails/git dest=backup/tank/iocage/jails/git
-process:tank/iocage/jails/sftp dest=backup/tank/iocage/jails/sftp
+process:tank/iocage/jails/git dest=backup/tank/iocage/jails/git position=1
+process:tank/iocage/jails/sftp dest=backup/tank/iocage/jails/sftp position=2
 wait_next:job limit
-process:tank/iocage/jails/git/root dest=backup/tank/iocage/jails/git/root
+process:tank/iocage/jails/git/root dest=backup/tank/iocage/jails/git/root position=3
 wait_next:job limit
-process:tank/iocage/jails/sftp/root dest=backup/tank/iocage/jails/sftp/root
+process:tank/iocage/jails/sftp/root dest=backup/tank/iocage/jails/sftp/root position=4
 Replication ready queue summary: queued_datasets=4 processed_datasets=4 waits=2 active_jobs=2
 wait_all:final sync" "$(cat "$log")"
+}
+
+# Stage record files for tank/src and tank/src/child under backup/src, as
+# discovery does, so an iteration list comes with slices.
+zxfer_test_stage_sliced_records() {
+	g_option_R_recursive="tank/src"
+	g_initial_source="tank/src"
+	g_initial_source_had_trailing_slash=0
+	g_destination="backup"
+	g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/sliced_source.records"
+	g_zxfer_destination_snapshot_record_cache_file="$TEST_TMPDIR/sliced_destination.records"
+	printf '%s\n' "tank/src/child@s2	22" "tank/src@s2	12" "tank/src/child@s1	21" \
+		"tank/src@s1	11" >"$g_zxfer_source_snapshot_record_cache_file"
+	printf '%s\n' "backup/src@s1	11" "backup/src/child@s1	21" \
+		>"$g_zxfer_destination_snapshot_record_cache_file"
+}
+
+test_process_source_dataset_plans_each_dataset_from_its_own_slice() {
+	zxfer_test_stage_sliced_records
+	g_recursive_source_list="tank/src
+tank/src/child"
+	g_option_j_jobs=1
+	output=$(
+		zxfer_transfer_properties() { :; }
+		zxfer_copy_snapshots() {
+			printf '%s plan=%s|%s key=%s\n' "$1" "$g_last_common_snap" \
+				"$g_src_snapshot_transfer_list" "$g_zxfer_snapshot_slice_key"
+		}
+		zxfer_build_replication_iteration_list 0 || exit
+		zxfer_process_replication_ready_queue "$g_zxfer_replication_iteration_list_result" 0
+	)
+
+	assertEquals "Every queued dataset should select its own slice and plan from it." \
+		"tank/src plan=tank/src@s1	11|tank/src@s2	12 key=1
+tank/src/child plan=tank/src/child@s1	21|tank/src/child@s2	22 key=2" "$output"
+}
+
+test_perform_grandfather_protection_checks_plans_each_dataset_from_its_own_slice() {
+	zxfer_test_stage_sliced_records
+	g_recursive_source_list="tank/src/child
+tank/src"
+	g_option_g_grandfather_protection=30
+	g_option_d_delete_destination_snapshots=0
+	output=$(
+		zxfer_enforce_destination_divergence_contract() {
+			printf '%s common=%s key=%s\n' "$1" "$g_last_common_snap" \
+				"$g_zxfer_snapshot_slice_key"
+		}
+		zxfer_perform_grandfather_protection_checks
+	)
+
+	assertContains "The -g pre-pass should plan the root from its slice." \
+		"$output" "tank/src common=tank/src@s1	11 key=1"
+	assertContains "The -g pre-pass should plan the child from its slice." \
+		"$output" "tank/src/child common=tank/src/child@s1	21 key=2"
 }
 
 test_replication_ready_queue_preserves_pending_list_when_processing_reads_stdin() {
@@ -1005,6 +1060,26 @@ test_iteration_list_orders_destination_delta_parent_before_source_child() {
 	zxfer_build_replication_iteration_list 0
 
 	assertEquals "A destination-only snapshot may belong to a source ancestor; visit that parent first." \
-		"tank/src
-tank/src/child" "$g_zxfer_replication_iteration_list_result"
+		"1	tank/src
+2	tank/src/child" "$g_zxfer_replication_iteration_list_result"
+}
+
+test_iteration_list_split_failure_clears_previous_result() {
+	g_recursive_source_list="tank/src"
+	g_zxfer_replication_iteration_list_result="stale"
+	g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/split_failure_source.records"
+	g_zxfer_destination_snapshot_record_cache_file="$TEST_TMPDIR/split_failure_destination.records"
+	printf '%s\n' "tank/src@snap1	111" >"$g_zxfer_source_snapshot_record_cache_file"
+	: >"$g_zxfer_destination_snapshot_record_cache_file"
+
+	output=$(
+		sort() { return 7; }
+		build_status=0
+		zxfer_build_replication_iteration_list 0 || build_status=$?
+		printf 'status=%s published=<%s> slices=<%s>\n' "$build_status" \
+			"$g_zxfer_replication_iteration_list_result" "$g_zxfer_snapshot_slice_records"
+	)
+
+	assertEquals "A failed record split must propagate its status and publish neither the list nor slices." \
+		"status=7 published=<> slices=<>" "$output"
 }

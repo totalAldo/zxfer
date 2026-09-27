@@ -174,6 +174,9 @@
 #       → -F adds -F to every receive.
 #       test_yield_option_repeats_passes_until_limit
 #       → -Y repeats a pass that did work up to the documented 8 passes.
+#       test_yield_passes_plan_from_their_own_discovery
+#       → each -Y pass plans from its own discovery: a second pass that finds
+#         one dataset still behind sends that dataset alone.
 #       test_grandfather_option_refuses_to_destroy_old_snapshot
 #       → -d -g refuses to destroy a snapshot older than the limit: non-zero
 #         exit and zero MUTATE lines.
@@ -1620,6 +1623,52 @@ test_yield_option_repeats_passes_until_limit() {
 	assertEquals "-Y -N run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
 	assertEquals "-Y repeats the pass up to its limit of 8" \
 		8 "$(grep -c '^send ' "$ZFS_LOG")"
+}
+
+# Invariant (-Y, 2026-09): every pass plans from its own discovery and
+# slices. Pass 1 sees every dataset miss @snap3; pass 2's discovery sees only
+# child2 miss it, so pass 2 sends child2 alone; pass 3 is in sync and ends
+# the loop. Two consumable rules answer the destination listing (one per pass,
+# the fast no-op proof's, which discovery reuses) before the in-sync fixture.
+test_yield_passes_plan_from_their_own_discovery() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" yield_rediscovery
+	cp "$FIXTURE_DIR/incremental/dst_snapshots.list" "$STATE_DIR/dst_pass1.list" ||
+		fail "Unable to stage the first pass's destination listing."
+	grep -v "/child2@snap3" "$FIXTURE_DIR/noop/dst_snapshots.list" \
+		>"$STATE_DIR/dst_pass2.list" ||
+		fail "Unable to stage the second pass's destination listing."
+	awk -F'\t' \
+		-v key="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" '
+		BEGIN { OFS = "\t" }
+		$1 == key {
+			print key, "dst_pass1.list", 0, "once"
+			print key, "dst_pass2.list", 0, "once"
+		}
+		{ print }
+	' "$STATE_DIR/manifest" >"$STATE_DIR/manifest.new" ||
+		fail "Unable to stage the per-pass listing rules."
+	mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
+		fail "Unable to install the per-pass listing rules."
+
+	planning_run_zxfer "$STATE_DIR" -Y -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-Y -R run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	planning_assert_no_mutations
+
+	assertEquals "pass 1 sends every dataset and pass 2 only child2" \
+		4 "$(grep -c '^send ' "$ZFS_LOG")"
+	assertEquals "child2 is sent in both passes" 2 "$(grep -cFx \
+		"send -I $ZXFER_MOCKBIN_SOURCE_ROOT/child2@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT/child2@snap3" \
+		"$ZFS_LOG")"
+	for l_yield_suffix in "" /child1; do
+		assertEquals "[$l_yield_suffix] is sent in pass 1 only" 1 "$(grep -cFx \
+			"send -I $ZXFER_MOCKBIN_SOURCE_ROOT$l_yield_suffix@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT$l_yield_suffix@snap3" \
+			"$ZFS_LOG")"
+	done
+	assertEquals "each pass lists the destination once, and pass 3 ends the loop" \
+		3 "$(grep -cFx "list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZFS_LOG")"
 }
 
 # Invariant (-g): with -d, a destination-only snapshot older than the -g

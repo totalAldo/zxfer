@@ -41,24 +41,40 @@
 #   delete/rollback markers (g_did_delete_dest_snapshots,
 #   g_deleted_dest_newer_snapshots), the g_zxfer_plan_* results of
 #   zxfer_plan_dataset_snapshots, the run-scoped scratch files
-#   g_zxfer_snapshot_plan_file and g_zxfer_snapshot_creation_file, and the
-#   divergence contract (g_zxfer_diverged_snapshot_count,
-#   g_zxfer_diverged_snapshot_examples, g_zxfer_diverged_converged_datasets,
+#   g_zxfer_snapshot_plan_file, g_zxfer_snapshot_creation_file and
+#   g_zxfer_snapshot_slice_base, the per-list slices and the current
+#   dataset's slice selection (g_zxfer_snapshot_slice_records, _key, _source,
+#   _destination), and the divergence contract
+#   (g_zxfer_diverged_snapshot_count, g_zxfer_diverged_snapshot_examples,
+#   g_zxfer_diverged_converged_datasets,
 #   g_zxfer_diverged_converged_marker_source).
-# reads globals: g_actual_dest, g_cmd_awk,
-#   g_option_d_delete_destination_snapshots, g_option_F_force_rollback,
-#   g_option_g_grandfather_protection, and the staged snapshot record files.
+# reads globals: g_actual_dest, g_cmd_awk, g_initial_source,
+#   g_zxfer_run_umask, g_option_d_delete_destination_snapshots,
+#   g_option_F_force_rollback, g_option_g_grandfather_protection, and the
+#   staged snapshot record files.
 # mutates caches: replication's g_is_performed_send_destroy marker (after a
 #   destroy).
 # returns via stdout: the destroy target, the creation-date display text and
 #   the divergence example lines only.
 
-# Purpose: Forget the run-scoped snapshot plan and creation-time files.
+# Purpose: Forget the run-scoped snapshot plan, creation-time and slice files.
 # Usage: Called by session initialization; the next use allocates a fresh
 # file under the run root.
 zxfer_reset_snapshot_delete_artifact_state() {
 	g_zxfer_snapshot_plan_file=""
 	g_zxfer_snapshot_creation_file=""
+	g_zxfer_snapshot_slice_base=""
+	zxfer_forget_snapshot_slices
+}
+
+# Purpose: Forget the published slices and the current dataset's selection.
+# Usage: zxfer_forget_snapshot_slices; the planner then reads the whole
+# record files until the next split.
+zxfer_forget_snapshot_slices() {
+	g_zxfer_snapshot_slice_records=""
+	g_zxfer_snapshot_slice_key=""
+	g_zxfer_snapshot_slice_source=""
+	g_zxfer_snapshot_slice_destination=""
 }
 
 # Purpose: Reset the per-dataset plan, delete, and divergence state.
@@ -94,6 +110,163 @@ zxfer_publish_snapshot_transfer_plan() {
 	0 | 1) g_dest_has_snapshots=$3 ;;
 	*) return 2 ;;
 	esac
+}
+
+# Per-dataset slices: each dataset's plan reads only its own rows, so the
+# planner's cost stops growing with the number of datasets times snapshots.
+# One split per iteration list keys every record row of a listed dataset by
+# the dataset's list position, sorts the keyed rows (bounded memory for any
+# tree size), and writes BASE.POSITION.d and BASE.POSITION.s. The key program
+# reads operands "side=list - side=destination DEST_FILE side=source
+# SOURCE_FILE", with the "POSITION<TAB>SOURCE" list on stdin, and prints
+# "POSITION<TAB>SIDE<TAB>LINE<TAB>row" (SIDE 1 destination, 2 source). A
+# destination row is keyed by its source name: ENVIRON
+# ["ZXFER_AWK_DESTINATION_ROOT"] replaced by ["ZXFER_AWK_INITIAL_SOURCE"],
+# the mapping discovery uses. A row's dataset is everything before its first
+# "@" and must equal a listed name exactly, so "a/b" never takes "a/bc" rows.
+# Rows without a guid are kept, so the planner still fails closed on them.
+# LINE 0 marks the start of each dataset's side, so every listed dataset gets
+# both files, empty when it has no rows.
+# shellcheck disable=SC2016  # awk program should see literal $0.
+ZXFER_SNAPSHOT_SLICE_KEY_AWK='
+BEGIN {
+	initial_source = ENVIRON["ZXFER_AWK_INITIAL_SOURCE"]
+	destination_root = ENVIRON["ZXFER_AWK_DESTINATION_ROOT"]
+	root_length = length(destination_root)
+}
+side == "list" {
+	tab = index($0, "\t")
+	if (tab < 2)
+		next
+	position = substr($0, 1, tab - 1)
+	key[substr($0, tab + 1)] = position
+	print position "\t1\t0\t"
+	print position "\t2\t0\t"
+	next
+}
+{
+	at = index($0, "@")
+	if (at < 2)
+		next
+	dataset = substr($0, 1, at - 1)
+}
+side == "destination" {
+	if (dataset == destination_root)
+		dataset = initial_source
+	else if (substr(dataset, 1, root_length + 1) == destination_root "/")
+		dataset = initial_source substr(dataset, root_length + 1)
+	else
+		next
+	if (dataset in key)
+		print key[dataset] "\t1\t" FNR "\t" $0
+	next
+}
+dataset in key {
+	print key[dataset] "\t2\t" FNR "\t" $0
+}'
+
+# The write program reads the sorted keyed rows and writes each row, without
+# its three key fields, to ENVIRON["ZXFER_AWK_SLICE_BASE"].POSITION.d or .s;
+# a LINE 0 marker starts (and truncates) the next file. It keeps one file
+# open at a time and exits 2 when a file cannot be closed cleanly.
+# shellcheck disable=SC2016  # awk program should see literal $0.
+ZXFER_SNAPSHOT_SLICE_WRITE_AWK='
+BEGIN { base = ENVIRON["ZXFER_AWK_SLICE_BASE"] }
+{
+	tab = index($0, "\t")
+	position = substr($0, 1, tab - 1)
+	rest = substr($0, tab + 1)
+	tab = index(rest, "\t")
+	side = substr(rest, 1, tab - 1)
+	rest = substr(rest, tab + 1)
+	tab = index(rest, "\t")
+	if (substr(rest, 1, tab - 1) == "0") {
+		if (file != "" && close(file) != 0)
+			exit 2
+		file = base "." position (side == "1" ? ".d" : ".s")
+		printf "" >file
+		next
+	}
+	if (file == "")
+		exit 2
+	print substr(rest, tab + 1) >file
+}
+END {
+	if (file != "" && close(file) != 0)
+		exit 2
+}'
+
+# Purpose: Split the staged snapshot record files by dataset once per
+# iteration list, so each dataset's plan reads only its own rows.
+# Usage: zxfer_split_snapshot_records LIST, in the main shell, with the
+# "POSITION<TAB>SOURCE" rows of zxfer_build_replication_iteration_list.
+# Writes BASE.POSITION.d (destination rows in listing order) and
+# BASE.POSITION.s (source rows, newest first) for every row, where BASE is a
+# reusable run-root file that holds the keyed rows while they sort; the
+# slices are 0600 like every run-root file. Without readable record files it
+# publishes no slices, so the planner reads, and reports on, the record files
+# as before.
+# Returns: the failing stage's status, with no slices published.
+zxfer_split_snapshot_records() {
+	l_split_list=$1
+	l_split_source_file=${g_zxfer_source_snapshot_record_cache_file:-}
+	l_split_destination_file=${g_zxfer_destination_snapshot_record_cache_file:-}
+
+	zxfer_forget_snapshot_slices
+	[ -n "$l_split_list" ] || return 0
+	[ -r "$l_split_source_file" ] && [ -r "$l_split_destination_file" ] ||
+		return 0
+	zxfer_ensure_snapshot_scratch_file "${g_zxfer_snapshot_slice_base:-}" \
+		zxfer-snapshot-slices || return
+	g_zxfer_snapshot_slice_base=$g_zxfer_snapshot_scratch_file_result
+
+	# Names travel through the environment: awk -v would reinterpret
+	# backslash escapes.
+	zxfer_map_destination_dataset
+	l_split_status=0
+	ZXFER_AWK_INITIAL_SOURCE=$g_initial_source \
+		ZXFER_AWK_DESTINATION_ROOT=$g_zxfer_destination_dataset_result \
+		"${g_cmd_awk:-awk}" "$ZXFER_SNAPSHOT_SLICE_KEY_AWK" side=list - \
+		side=destination "$l_split_destination_file" \
+		side=source "$l_split_source_file" \
+		>|"$g_zxfer_snapshot_slice_base" <<EOF || l_split_status=$?
+$l_split_list
+EOF
+	# POSIX lets sort -o name its own input file.
+	[ "$l_split_status" -ne 0 ] ||
+		LC_ALL=C sort -t "$ZXFER_TAB" -k1,1n -k2,2n -k3,3n \
+			-o "$g_zxfer_snapshot_slice_base" "$g_zxfer_snapshot_slice_base" ||
+		l_split_status=$?
+	if [ "$l_split_status" -eq 0 ]; then
+		# Never restore an empty umask: ksh reads it as 0777.
+		case ${g_zxfer_run_umask:-} in
+		'' | *[!0-7]*) g_zxfer_run_umask=$(umask) ;;
+		esac
+		umask 077
+		ZXFER_AWK_SLICE_BASE=$g_zxfer_snapshot_slice_base \
+			"${g_cmd_awk:-awk}" "$ZXFER_SNAPSHOT_SLICE_WRITE_AWK" \
+			"$g_zxfer_snapshot_slice_base" || l_split_status=$?
+		umask "$g_zxfer_run_umask"
+	fi
+	[ "$l_split_status" -eq 0 ] || return "$l_split_status"
+	g_zxfer_snapshot_slice_records=$l_split_source_file$ZXFER_LF$l_split_destination_file
+}
+
+# Purpose: Point the planner at one listed dataset's slices.
+# Usage: zxfer_select_snapshot_slice POSITION SOURCE, right before SOURCE is
+# planned, with POSITION from SOURCE's iteration-list row. Selects nothing
+# when POSITION is not a number or no slices are published, so the planner
+# reads the whole record files.
+zxfer_select_snapshot_slice() {
+	g_zxfer_snapshot_slice_key=""
+	g_zxfer_snapshot_slice_source=""
+	g_zxfer_snapshot_slice_destination=""
+	[ -n "${g_zxfer_snapshot_slice_records:-}" ] || return 0
+	zxfer_is_uint "${1:-}" || return 0
+	zxfer_map_destination_dataset "$2"
+	g_zxfer_snapshot_slice_key=$1
+	g_zxfer_snapshot_slice_source=$2
+	g_zxfer_snapshot_slice_destination=$g_zxfer_destination_dataset_result
 }
 
 # One awk pass plans a dataset. Operands are "side=destination DEST_FILE
@@ -161,17 +334,28 @@ END {
 # [DEST_RECORD_FILE], in the main shell. Source rows come from the staged
 # source record file; destination rows from DEST_RECORD_FILE (real destination
 # names, e.g. zxfer_get_live_destination_record_file) or by default the staged
-# destination record file. Publishes g_zxfer_plan_common_snapshot,
-# g_zxfer_plan_transfer_list (oldest first), g_zxfer_plan_dest_has_snapshots,
-# g_zxfer_plan_diverged_records, g_zxfer_plan_delete_snapshots (paths),
-# g_zxfer_plan_source_count, and g_zxfer_plan_destination_records. Callers
-# publish the plan themselves, so a post-receive check never clobbers the
-# current dataset's plan. Aborts on unreadable input or a guid-less record.
+# destination record file. The dataset selected by
+# zxfer_select_snapshot_slice reads its slices of those files instead, while
+# they were cut from the current record files. Publishes
+# g_zxfer_plan_common_snapshot, g_zxfer_plan_transfer_list (oldest first),
+# g_zxfer_plan_dest_has_snapshots, g_zxfer_plan_diverged_records,
+# g_zxfer_plan_delete_snapshots (paths), g_zxfer_plan_source_count, and
+# g_zxfer_plan_destination_records. Callers publish the plan themselves, so a
+# post-receive check never clobbers the current dataset's plan. Aborts on
+# unreadable input or a guid-less record.
 zxfer_plan_dataset_snapshots() {
 	l_plan_source=$1
 	l_plan_dest=$2
-	l_plan_dest_file=${3:-${g_zxfer_destination_snapshot_record_cache_file:-}}
 	l_plan_source_file=${g_zxfer_source_snapshot_record_cache_file:-}
+	l_plan_dest_file=${g_zxfer_destination_snapshot_record_cache_file:-}
+	if [ -n "${g_zxfer_snapshot_slice_key:-}" ] &&
+		[ "$l_plan_source" = "$g_zxfer_snapshot_slice_source" ] &&
+		[ "$l_plan_dest" = "$g_zxfer_snapshot_slice_destination" ] &&
+		[ "$g_zxfer_snapshot_slice_records" = "$l_plan_source_file$ZXFER_LF$l_plan_dest_file" ]; then
+		l_plan_source_file=$g_zxfer_snapshot_slice_base.$g_zxfer_snapshot_slice_key.s
+		l_plan_dest_file=$g_zxfer_snapshot_slice_base.$g_zxfer_snapshot_slice_key.d
+	fi
+	[ -z "${3:-}" ] || l_plan_dest_file=$3
 
 	[ -r "$l_plan_source_file" ] ||
 		zxfer_throw_error "Failed to read staged source snapshot record cache."

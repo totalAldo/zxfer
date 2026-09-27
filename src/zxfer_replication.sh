@@ -303,7 +303,9 @@ zxfer_unsupported_property_scan_is_required() {
 # independent siblings ready for -j. Source and destination delta lists may
 # overlap; a destination-only snapshot can belong to an existing source parent.
 # Usage: zxfer_build_replication_iteration_list PROPERTY_PASS_REQUIRED;
-# publishes $g_zxfer_replication_iteration_list_result only on success.
+# publishes $g_zxfer_replication_iteration_list_result, one
+# "POSITION<TAB>SOURCE" row per dataset, only after the snapshot record files
+# are split by position, so every list comes with its own slices.
 zxfer_build_replication_iteration_list() {
 	l_iteration_sources=${g_recursive_source_list:-}
 	if [ "$g_option_R_recursive" != "" ] && [ "$1" -eq 1 ]; then
@@ -328,24 +330,27 @@ ${g_recursive_destination_extra_dataset_list:-}"
 		END {
 			for (depth = 0; depth <= max_depth; depth++)
 				for (row = 1; row <= count[depth]; row++)
-					print rows[depth, row]
+					print ++position "\t" rows[depth, row]
 		}
 	' <<EOF
 $l_iteration_sources
 EOF
 	) || return "$?"
+	zxfer_split_snapshot_records "$l_iteration_result" || return "$?"
 	g_zxfer_replication_iteration_list_result=$l_iteration_result
 }
 
 # Purpose: Replicate one dataset: plan and -d delete, reconcile properties,
 # then send.
-# Usage: zxfer_process_source_dataset SOURCE PROPERTY_PASS(0|1); appends a
-# seeded SOURCE to g_zxfer_post_seed_property_sources.
+# Usage: zxfer_process_source_dataset SOURCE PROPERTY_PASS(0|1) [POSITION];
+# POSITION, SOURCE's iteration-list position, selects its snapshot slices.
+# Appends a seeded SOURCE to g_zxfer_post_seed_property_sources.
 zxfer_process_source_dataset() {
 	l_process_source=$1
 	l_process_property_pass=$2
 
 	zxfer_set_actual_dest "$l_process_source"
+	zxfer_select_snapshot_slice "${3:-}" "$l_process_source"
 	# In-flight background receives cannot affect this dataset's cached
 	# destination state: the ready-queue ancestry gate defers any dataset
 	# whose destination conflicts with an active job, zxfer_reap_send_job
@@ -372,8 +377,9 @@ zxfer_process_source_dataset() {
 # Purpose: Process replication datasets in order; with -j above 1 this is a
 # dependency-aware ready queue so destination descendants blocked by active
 # parent receives do not stop later independent datasets from starting.
-# Usage: zxfer_process_replication_ready_queue PENDING_SOURCES
-# PROPERTY_PASS_REQUIRED
+# Usage: zxfer_process_replication_ready_queue PENDING_ROWS
+# PROPERTY_PASS_REQUIRED, with the "POSITION<TAB>SOURCE" rows of
+# zxfer_build_replication_iteration_list; a deferred row keeps its position.
 zxfer_process_replication_ready_queue() {
 	l_queue_pending=$1
 	l_queue_property_pass=$2
@@ -384,19 +390,21 @@ zxfer_process_replication_ready_queue() {
 	while [ -n "$l_queue_pending" ]; do
 		l_queue_next=""
 		l_queue_progress=0
-		while IFS= read -r l_queue_source; do
-			[ -n "$l_queue_source" ] || continue
+		while IFS= read -r l_queue_row; do
+			[ -n "$l_queue_row" ] || continue
+			l_queue_source=${l_queue_row#*"$ZXFER_TAB"}
 			if [ "$l_queue_job_limit" -gt 1 ] && [ -n "${g_zxfer_send_jobs:-}" ]; then
 				zxfer_map_destination_dataset "$l_queue_source"
 				if [ "${g_count_zfs_send_jobs:-0}" -ge "$l_queue_job_limit" ] ||
 					zxfer_send_job_conflicts_with_destination \
 						"$g_zxfer_destination_dataset_result"; then
-					l_queue_next=${l_queue_next:+$l_queue_next$ZXFER_LF}$l_queue_source
+					l_queue_next=${l_queue_next:+$l_queue_next$ZXFER_LF}$l_queue_row
 					continue
 				fi
 			fi
 			# ssh inside the dataset's work must not read the queue.
-			zxfer_process_source_dataset "$l_queue_source" "$l_queue_property_pass" </dev/null
+			zxfer_process_source_dataset "$l_queue_source" "$l_queue_property_pass" \
+				"${l_queue_row%%"$ZXFER_TAB"*}" </dev/null
 			l_queue_progress=1
 			l_queue_processed=$((l_queue_processed + 1))
 		done <<EOF
@@ -621,9 +629,12 @@ zxfer_perform_grandfather_protection_checks() {
 	zxfer_echov "Checking grandfather status of all snapshots marked for deletion..."
 	zxfer_build_replication_iteration_list 0 ||
 		zxfer_throw_error "Failed to prepare replication dataset iteration list." "$?"
-	while IFS= read -r l_grandfather_source; do
-		[ -n "$l_grandfather_source" ] || continue
+	while IFS= read -r l_grandfather_row; do
+		[ -n "$l_grandfather_row" ] || continue
+		l_grandfather_source=${l_grandfather_row#*"$ZXFER_TAB"}
 		zxfer_set_actual_dest "$l_grandfather_source"
+		zxfer_select_snapshot_slice "${l_grandfather_row%%"$ZXFER_TAB"*}" \
+			"$l_grandfather_source"
 		# DELETE=0 plans and enforces divergence only; ssh must not read the
 		# list.
 		zxfer_inspect_delete_snap 0 "$l_grandfather_source" </dev/null
