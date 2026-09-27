@@ -54,7 +54,6 @@ test_zxfer_error_log.sh
 test_zxfer_snapshot_discovery.sh
 test_run_shunit_tests.sh
 test_zxfer_ssh_transport.sh
-test_zxfer_snapshot_producers.sh
 test_contract_properties.sh
 "
 

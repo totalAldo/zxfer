@@ -50,14 +50,6 @@
 # mutates caches: destination existence and the reusable live listing file.
 # returns via stdout: none.
 
-# Snapshot discovery stages at most one flat snapshot record file per side
-# ("dataset@snapshot<TAB>guid" rows) inside the 0700 run-private temp root:
-# g_zxfer_source_snapshot_record_cache_file (newest first) and
-# g_zxfer_destination_snapshot_record_cache_file. Those files are the
-# snapshot-record index that per-dataset planning reads. They are never
-# legitimately mutated afterwards, so a staged file that cannot be read is
-# corrupted run-private state and aborts the run.
-
 # Purpose: Reset the destination existence cache.
 # Usage: Called at startup and before each discovery pass.
 zxfer_reset_destination_existence_cache() {

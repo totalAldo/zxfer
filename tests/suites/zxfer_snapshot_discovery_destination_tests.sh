@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
 # Destination snapshot listing, normalization and no-op-proof stream cases for
-# src/zxfer_snapshot_producers.sh. Run by tests/test_zxfer_snapshot_producers.sh.
+# src/zxfer_snapshot_discovery.sh. Run by tests/test_zxfer_snapshot_discovery.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 # Destination listing stand-in for the writer tests: the recursive snapshot
