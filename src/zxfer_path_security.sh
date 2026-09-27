@@ -36,209 +36,165 @@
 ################################################################################
 
 # Module contract:
-# owns globals: none.
-# reads globals: none.
-# mutates caches: none.
-# returns via stdout: owner/mode/identity probes, symlink paths and validated
-#   temp roots. The backup-metadata symlink refusal goes to stderr.
+# owns globals: the effective-UID memo g_zxfer_effective_uid; the results of
+#   one metadata read (g_zxfer_path_inode_result,
+#   g_zxfer_path_owner_uid_result, g_zxfer_path_mode_result and
+#   g_zxfer_path_permissions_result); the private-directory record
+#   g_zxfer_private_directory_record_result; and the validated temp root
+#   g_zxfer_temp_root_candidate_result.
+# reads globals: ZXFER_TAB/ZXFER_LF from zxfer_quoting.sh.
+# mutates caches: g_zxfer_effective_uid, filled once per process.
+# returns via stdout: the owner and mode probes and symlink paths. The
+#   backup-metadata symlink refusal goes to stderr.
 #
-# Temp roots validate once per run via the single-pass physical resolution in
-# zxfer_validate_temp_root_candidate; the component-walk symlink scanner only
-# serves the cold backup-metadata and ZXFER_ERROR_LOG checks whose
-# "path component ... is a symlink" errors are pinned public output.
+# Every owner, mode and inode read is one `ls -ldin` line, parsed by
+# zxfer_parse_path_metadata_line. Temp roots validate once per run through
+# the single-subshell check in zxfer_validate_temp_root_candidate; the
+# component-walk symlink scanner only serves the cold backup-metadata and
+# ZXFER_ERROR_LOG checks whose "path component ... is a symlink" errors are
+# pinned public output.
+
+# Purpose: Forget the effective-UID memo and every path-security result.
+# Usage: Called by zxfer_reset_session_state, so an exported value can never
+# stand in for the real effective UID.
+zxfer_reset_path_security_state() {
+	g_zxfer_effective_uid=""
+	g_zxfer_path_inode_result=""
+	g_zxfer_path_owner_uid_result=""
+	g_zxfer_path_mode_result=""
+	g_zxfer_path_permissions_result=""
+	g_zxfer_private_directory_record_result=""
+	g_zxfer_temp_root_candidate_result=""
+}
+
+# Purpose: Parse one `ls -ldin` line into the path metadata results.
+# Usage: zxfer_parse_path_metadata_line LINE; publishes
+# g_zxfer_path_inode_result, g_zxfer_path_owner_uid_result,
+# g_zxfer_path_permissions_result (the mode string) and
+# g_zxfer_path_mode_result (octal, as GNU `stat -c %a` prints it: 600, or
+# 2700 when the set-group-ID bit is set), or returns 1 with all four empty.
+# The line holds the fields POSIX gives `ls -l`, and GNU coreutils, FreeBSD,
+# macOS, illumos and BusyBox print them alike. Only the first four are read:
+# 1 the inode (-i; BusyBox and illumos pad it with blanks), 2 the mode string,
+# 3 the link count and 4 the numeric owner (-n). The name comes last, so
+# blanks, a leading - or a line feed in it cannot move them.
+zxfer_parse_path_metadata_line() {
+	g_zxfer_path_inode_result=""
+	g_zxfer_path_owner_uid_result=""
+	g_zxfer_path_mode_result=""
+	g_zxfer_path_permissions_result=""
+	IFS=' 	' read -r l_metadata_inode l_metadata_permissions l_metadata_links \
+		l_metadata_owner l_metadata_rest <<EOF
+$1
+EOF
+	for l_metadata_number in "$l_metadata_inode" "$l_metadata_links" \
+		"$l_metadata_owner"; do
+		case $l_metadata_number in
+		'' | *[!0-9]*) return 1 ;;
+		esac
+	done
+	# A type character and nine permission characters, then at most one
+	# alternate-access marker (+ for an ACL, @ for macOS extended attributes,
+	# . for an SELinux context). illumos writes l instead of S for
+	# set-group-ID without group execute (mandatory locking).
+	case $l_metadata_permissions in
+	?[-r][-w][-xsS][-r][-w][-xsSl][-r][-w][-xtT] | \
+		?[-r][-w][-xsS][-r][-w][-xsSl][-r][-w][-xtT]?) ;;
+	*) return 1 ;;
+	esac
+
+	# Walk the owner, group and other triplets; the special bit of each is
+	# set-user-ID (4), set-group-ID (2) and sticky (1).
+	l_metadata_rest=${l_metadata_permissions#?}
+	l_metadata_special=0
+	l_metadata_mode=""
+	for l_metadata_special_bit in 4 2 1; do
+		l_metadata_digit=0
+		case $l_metadata_rest in r*) l_metadata_digit=4 ;; esac
+		l_metadata_rest=${l_metadata_rest#?}
+		case $l_metadata_rest in w*) l_metadata_digit=$((l_metadata_digit + 2)) ;; esac
+		l_metadata_rest=${l_metadata_rest#?}
+		case $l_metadata_rest in
+		[xst]*) l_metadata_digit=$((l_metadata_digit + 1)) ;;
+		esac
+		case $l_metadata_rest in
+		[sStTl]*) l_metadata_special=$((l_metadata_special + l_metadata_special_bit)) ;;
+		esac
+		l_metadata_rest=${l_metadata_rest#?}
+		l_metadata_mode=$l_metadata_mode$l_metadata_digit
+	done
+	# Drop leading zeros as `stat -c %a` does: 0700 is 700, 0 stays 0.
+	l_metadata_mode=$l_metadata_special$l_metadata_mode
+	while :; do
+		case $l_metadata_mode in
+		0?*) l_metadata_mode=${l_metadata_mode#0} ;;
+		*) break ;;
+		esac
+	done
+
+	g_zxfer_path_inode_result=$l_metadata_inode
+	g_zxfer_path_owner_uid_result=$l_metadata_owner
+	g_zxfer_path_mode_result=$l_metadata_mode
+	g_zxfer_path_permissions_result=$l_metadata_permissions
+}
+
+# Purpose: Read one path's inode, owner and mode with a single `ls -ldin`.
+# Usage: zxfer_read_path_metadata PATH; publishes the results of
+# zxfer_parse_path_metadata_line, or returns 1 with them empty when ls fails
+# or prints a line that does not parse. A symlink is described, not
+# followed. ls replaces the substitution's subshell, so bash 3.2 forks once.
+zxfer_read_path_metadata() {
+	# A leading - would read as an ls option.
+	case $1 in
+	-*) l_metadata_path=./$1 ;;
+	*) l_metadata_path=$1 ;;
+	esac
+	l_metadata_line=$(exec ls -ldin "$l_metadata_path" 2>/dev/null) ||
+		l_metadata_line=""
+	zxfer_parse_path_metadata_line "$l_metadata_line"
+}
 
 # Purpose: Print the numeric owner UID of an existing path.
-# Usage: zxfer_get_path_owner_uid PATH; tries GNU stat, BSD stat, then
-# ls -ldn, and returns 1 when none of them yields a number.
+# Usage: zxfer_get_path_owner_uid PATH; returns 1 when PATH does not exist or
+# its metadata cannot be read.
 zxfer_get_path_owner_uid() {
-	l_path=$1
-
-	if [ ! -e "$l_path" ]; then
-		return 1
-	fi
-
-	if command -v stat >/dev/null 2>&1; then
-		if l_uid=$(stat -c '%u' "$l_path" 2>/dev/null); then
-			case "$l_uid" in
-			'' | *[!0-9]*) ;;
-			*)
-				printf '%s\n' "$l_uid"
-				return 0
-				;;
-			esac
-		fi
-		if l_uid=$(stat -f '%u' "$l_path" 2>/dev/null); then
-			case "$l_uid" in
-			'' | *[!0-9]*) ;;
-			*)
-				printf '%s\n' "$l_uid"
-				return 0
-				;;
-			esac
-		fi
-	fi
-
-	l_ls_path=$l_path
-	case "$l_ls_path" in
-	-*)
-		l_ls_path=./$l_ls_path
-		;;
-	esac
-	l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null) || return 1
-	# Field 3 of ls -ldn is the numeric owner.
-	IFS=' 	' read -r l_ls_perm l_ls_links l_uid l_ls_rest <<EOF
-$l_ls_output
-EOF
-	case "$l_uid" in
-	'' | *[!0-9]*) return 1 ;;
-	esac
-	printf '%s\n' "$l_uid"
+	[ -e "$1" ] || return 1
+	zxfer_read_path_metadata "$1" || return 1
+	printf '%s\n' "$g_zxfer_path_owner_uid_result"
 }
 
 # Purpose: Print the octal permission bits of an existing path.
-# Usage: zxfer_get_path_mode_octal PATH; tries GNU stat, BSD stat, then
-# ls -ldn (which knows only 600 and 700), and returns 1 when none answers.
+# Usage: zxfer_get_path_mode_octal PATH; prints the `stat -c %a` form (600,
+# or 2700 with the set-group-ID bit) and returns 1 when PATH does not exist or
+# its metadata cannot be read.
 zxfer_get_path_mode_octal() {
-	l_path=$1
-
-	if [ ! -e "$l_path" ]; then
-		return 1
-	fi
-
-	if command -v stat >/dev/null 2>&1; then
-		if l_mode=$(stat -c '%a' "$l_path" 2>/dev/null); then
-			case "$l_mode" in
-			'' | *[!0-9]*) ;;
-			*)
-				printf '%s\n' "$l_mode"
-				return 0
-				;;
-			esac
-		fi
-		if l_mode=$(stat -f '%OLp' "$l_path" 2>/dev/null); then
-			case "$l_mode" in
-			'' | *[!0-9]*) ;;
-			*)
-				printf '%s\n' "$l_mode"
-				return 0
-				;;
-			esac
-		fi
-	fi
-
-	l_ls_path=$l_path
-	case "$l_ls_path" in
-	-*)
-		l_ls_path=./$l_ls_path
-		;;
-	esac
-	if l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null); then
-		l_perm_str=${l_ls_output%% *}
-		if [ "$l_perm_str" = "-rw-------" ]; then
-			printf '600\n'
-			return 0
-		fi
-		if [ "$l_perm_str" = "drwx------" ]; then
-			printf '700\n'
-			return 0
-		fi
-	fi
-
-	return 1
+	[ -e "$1" ] || return 1
+	zxfer_read_path_metadata "$1" || return 1
+	printf '%s\n' "$g_zxfer_path_mode_result"
 }
 
-# Purpose: Print the filesystem identity of one existing, non-symlink path.
-# Usage: zxfer_get_path_device_inode PATH; prints device-inode:DEV:INO from
-# stat, or inode:INO from ls -din on systems without stat. Runtime compares
-# it before recursive cleanup so a replaced pathname is never adopted; the
-# inode-only form suffices because the registered path's parent is fixed.
+# Purpose: Print the identity of one existing, non-symlink path.
+# Usage: zxfer_get_path_device_inode PATH; prints inode:INO. The adjacent
+# artifact registry compares it before recursive cleanup.
 zxfer_get_path_device_inode() {
-	l_identity_path=$1
-
-	[ -e "$l_identity_path" ] || return 1
-	[ ! -L "$l_identity_path" ] || return 1
-	if command -v stat >/dev/null 2>&1; then
-		if l_identity_value=$(stat -c '%d:%i' "$l_identity_path" 2>/dev/null); then
-			case "$l_identity_value" in
-			'' | *[!0-9:]*) ;;
-			*)
-				printf 'device-inode:%s\n' "$l_identity_value"
-				return 0
-				;;
-			esac
-		fi
-		if l_identity_value=$(stat -f '%d:%i' "$l_identity_path" 2>/dev/null); then
-			case "$l_identity_value" in
-			'' | *[!0-9:]*) ;;
-			*)
-				printf 'device-inode:%s\n' "$l_identity_value"
-				return 0
-				;;
-			esac
-		fi
-	fi
-
-	l_identity_ls_path=$l_identity_path
-	case "$l_identity_ls_path" in
-	-*) l_identity_ls_path=./$l_identity_ls_path ;;
-	esac
-	l_identity_output=$(ls -din "$l_identity_ls_path" 2>/dev/null) || return 1
-	# Field 1 of ls -din is the inode number.
-	IFS=' 	' read -r l_identity_value l_identity_rest <<EOF
-$l_identity_output
-EOF
-	case "$l_identity_value" in
-	'' | *[!0-9]*) return 1 ;;
-	esac
-	printf 'inode:%s\n' "$l_identity_value"
+	[ -e "$1" ] && [ ! -L "$1" ] || return 1
+	zxfer_read_path_metadata "$1" || return 1
+	printf 'inode:%s\n' "$g_zxfer_path_inode_result"
 }
 
-# Purpose: Print one directory's identity, owner UID and mode from a single
-# stat snapshot.
-# Usage: zxfer_get_private_directory_security_record DIR; prints
-# IDENTITY<TAB>UID<TAB>MODE. Runtime records it when it creates the run root
-# and compares a fresh one right before removing the root.
+# Purpose: Record one real directory's inode, owner UID and mode from a single
+# metadata read.
+# Usage: zxfer_get_private_directory_security_record DIR; publishes
+# INODE<TAB>UID<TAB>MODE in g_zxfer_private_directory_record_result, or
+# returns 1 with it empty. Runtime records it when it creates the run root
+# and compares a fresh one right before removing the root. The inode alone
+# identifies the directory because its parent is fixed: a directory put in
+# its place gets a new inode unless a file system is mounted there.
 zxfer_get_private_directory_security_record() {
-	l_private_record_path=$1
-	l_private_record_raw=""
-
-	[ -d "$l_private_record_path" ] || return 1
-	[ ! -L "$l_private_record_path" ] || return 1
-	if command -v stat >/dev/null 2>&1; then
-		l_private_record_raw=$(stat -c '%d:%i:%u:%a' \
-			"$l_private_record_path" 2>/dev/null) || l_private_record_raw=""
-		if [ -z "$l_private_record_raw" ]; then
-			l_private_record_raw=$(stat -f '%d:%i:%u:%OLp' \
-				"$l_private_record_path" 2>/dev/null) || l_private_record_raw=""
-		fi
-	fi
-	if [ -n "$l_private_record_raw" ]; then
-		IFS=: read -r l_private_record_device l_private_record_inode \
-			l_private_record_uid l_private_record_mode \
-			l_private_record_extra <<-EOF
-				$l_private_record_raw
-			EOF
-		case "$l_private_record_device$l_private_record_inode$l_private_record_uid$l_private_record_mode" in
-		'' | *[!0-9]*) return 1 ;;
-		esac
-		[ -z "$l_private_record_extra" ] || return 1
-		printf 'device-inode:%s:%s\t%s\t%s\n' \
-			"$l_private_record_device" "$l_private_record_inode" \
-			"$l_private_record_uid" "$l_private_record_mode"
-		return 0
-	fi
-
-	# Legacy systems without formatted stat retain the established fail-closed
-	# probes. This path is cold and preserves the inode-only compatibility
-	# fallback used before the consolidated record was introduced.
-	l_private_record_identity=$(zxfer_get_path_device_inode \
-		"$l_private_record_path") || return 1
-	l_private_record_uid=$(zxfer_get_path_owner_uid \
-		"$l_private_record_path") || return 1
-	l_private_record_mode=$(zxfer_get_path_mode_octal \
-		"$l_private_record_path") || return 1
-	printf '%s\t%s\t%s\n' "$l_private_record_identity" \
-		"$l_private_record_uid" "$l_private_record_mode"
+	g_zxfer_private_directory_record_result=""
+	[ -d "$1" ] && [ ! -L "$1" ] || return 1
+	zxfer_read_path_metadata "$1" || return 1
+	g_zxfer_private_directory_record_result=$g_zxfer_path_inode_result$ZXFER_TAB$g_zxfer_path_owner_uid_result$ZXFER_TAB$g_zxfer_path_mode_result
 }
 
 # Purpose: Check that one ls -l permission string describes a directory that is
@@ -277,49 +233,36 @@ zxfer_validate_shared_dir_permission_string() {
 	return 0
 }
 
-# Purpose: Print the effective user UID.
-# Usage: zxfer_get_effective_user_uid; returns 1 when id is missing or fails.
+# Purpose: Look up the effective user UID once per process.
+# Usage: zxfer_get_effective_user_uid; publishes g_zxfer_effective_uid, or
+# returns 1 when id is missing or prints anything but a number. Call it
+# outside $(...) so later checks reuse the memo.
 zxfer_get_effective_user_uid() {
-	if command -v id >/dev/null 2>&1; then
-		if l_uid=$(id -u 2>/dev/null); then
-			printf '%s\n' "$l_uid"
-			return 0
-		fi
-	fi
-	return 1
+	[ -z "${g_zxfer_effective_uid:-}" ] || return 0
+	l_effective_uid_output=$(exec id -u 2>/dev/null) || return 1
+	case $l_effective_uid_output in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	g_zxfer_effective_uid=$l_effective_uid_output
 }
 
 # Purpose: Check that a backup path owner is root or the effective user.
 # Usage: zxfer_backup_owner_uid_is_allowed UID; returns 1 otherwise.
 zxfer_backup_owner_uid_is_allowed() {
-	l_backup_owner_uid=$1
-
-	if [ "$l_backup_owner_uid" = "0" ]; then
-		return 0
-	fi
-
-	if l_backup_effective_uid=$(zxfer_get_effective_user_uid); then
-		if [ "$l_backup_owner_uid" = "$l_backup_effective_uid" ]; then
-			return 0
-		fi
-	fi
-
-	return 1
+	[ "$1" != 0 ] || return 0
+	zxfer_get_effective_user_uid || return 1
+	[ "$1" = "$g_zxfer_effective_uid" ]
 }
 
 # Purpose: Print the allowed backup owners for an operator message.
 # Usage: zxfer_describe_expected_backup_owner; prints "root (UID 0)" plus
 # " or UID N" when the effective user is not root.
 zxfer_describe_expected_backup_owner() {
-	l_desc="root (UID 0)"
-
-	if l_effective_uid=$(zxfer_get_effective_user_uid); then
-		if [ "$l_effective_uid" != "0" ]; then
-			l_desc="$l_desc or UID $l_effective_uid"
-		fi
+	if zxfer_get_effective_user_uid && [ "$g_zxfer_effective_uid" != 0 ]; then
+		printf '%s\n' "root (UID 0) or UID $g_zxfer_effective_uid"
+	else
+		printf '%s\n' "root (UID 0)"
 	fi
-
-	printf '%s\n' "$l_desc"
 }
 
 # Purpose: Refuse a backup metadata path that is, or passes through, an
@@ -397,82 +340,57 @@ zxfer_find_symlink_path_component() {
 # Usage: zxfer_is_trusted_symlink_path_component PATH; returns 0 only for such
 # a top-level system symlink (for example /tmp -> private/tmp on macOS).
 zxfer_is_trusted_symlink_path_component() {
-	l_path=$1
-
-	case "$l_path" in
+	case $1 in
+	/*/* | /) return 1 ;;
 	/*) ;;
-	*)
-		return 1
-		;;
+	*) return 1 ;;
 	esac
-	[ -L "$l_path" ] || return 1
+	[ -L "$1" ] || return 1
 
-	l_owner_uid=$(zxfer_get_path_owner_uid "$l_path" 2>/dev/null) || return 1
-	[ "$l_owner_uid" = "0" ] || return 1
-
-	case "$l_path" in
-	*/*)
-		l_parent=${l_path%/*}
-		[ -n "$l_parent" ] || l_parent="/"
-		;;
-	*)
-		return 1
-		;;
-	esac
-	l_parent_owner_uid=$(zxfer_get_path_owner_uid "$l_parent" 2>/dev/null) || return 1
-	[ "$l_parent_owner_uid" = "0" ] || return 1
-	[ "$l_parent" = "/" ] || return 1
-
-	l_ls_path=$l_parent
-	case "$l_ls_path" in
-	-*)
-		l_ls_path=./$l_ls_path
-		;;
-	esac
-	l_ls_output=$(ls -ldn "$l_ls_path" 2>/dev/null) || return 1
-	zxfer_validate_shared_dir_permission_string "${l_ls_output%% *}"
+	zxfer_read_path_metadata "$1" || return 1
+	[ "$g_zxfer_path_owner_uid_result" = 0 ] || return 1
+	zxfer_read_path_metadata / || return 1
+	[ "$g_zxfer_path_owner_uid_result" = 0 ] || return 1
+	zxfer_validate_shared_dir_permission_string "$g_zxfer_path_permissions_result"
 }
 
 # Purpose: Check that a directory is a safe parent for zxfer temp files and
-# print its physical path.
+# publish its physical path.
 # Usage: zxfer_validate_temp_root_candidate DIR; DIR must be absolute. The
 # directory it resolves to (cd -P) must be owned by root or the effective
-# user and must not be group- or world-writable unless it is sticky. Returns
-# 1 when any check fails. zxfer_try_get_effective_tmpdir memoizes the result.
+# user and must not be group- or world-writable unless it is sticky.
+# Publishes the physical path in g_zxfer_temp_root_candidate_result, or
+# returns 1 with it empty. zxfer_try_get_effective_tmpdir memoizes the
+# result.
 zxfer_validate_temp_root_candidate() {
-	l_candidate=$1
-
-	case "$l_candidate" in
+	g_zxfer_temp_root_candidate_result=""
+	case $1 in
 	/*) ;;
-	*)
-		return 1
-		;;
+	*) return 1 ;;
 	esac
 
-	l_physical_dir=$(CDPATH='' cd -P "$l_candidate" 2>/dev/null && pwd) || return 1
-	case "$l_physical_dir" in
+	# One subshell: cd -P and pwd print the physical path, then ls replaces
+	# the subshell and lists that directory as ".". The ls line is the last
+	# line, and everything before it is the path, line feeds included.
+	l_candidate_output=$(CDPATH='' cd -P "$1" 2>/dev/null && pwd &&
+		exec ls -ldin . 2>/dev/null) || return 1
+	l_candidate_physical=${l_candidate_output%"$ZXFER_LF"*}
+	case $l_candidate_physical in
 	/*) ;;
-	*)
+	*) return 1 ;;
+	esac
+	[ -d "$l_candidate_physical" ] || return 1
+	zxfer_parse_path_metadata_line "${l_candidate_output##*"$ZXFER_LF"}" ||
 		return 1
-		;;
-	esac
-	[ -d "$l_physical_dir" ] || return 1
-
-	# One ls -ldn gives both the permission string and the numeric owner.
-	l_ls_output=$(ls -ldn "$l_physical_dir" 2>/dev/null) || return 1
-	IFS=' 	' read -r l_ls_perm l_ls_links l_owner_uid l_ls_rest <<EOF
-$l_ls_output
-EOF
-	case "$l_owner_uid" in
-	'' | *[!0-9]*) return 1 ;;
-	esac
-	if [ "$l_owner_uid" != "0" ]; then
-		l_effective_uid=$(zxfer_get_effective_user_uid) || return 1
-		[ "$l_owner_uid" = "$l_effective_uid" ] || return 1
+	if [ "$g_zxfer_path_owner_uid_result" != 0 ]; then
+		zxfer_get_effective_user_uid || return 1
+		[ "$g_zxfer_path_owner_uid_result" = "$g_zxfer_effective_uid" ] ||
+			return 1
 	fi
-	zxfer_validate_shared_dir_permission_string "$l_ls_perm" || return 1
+	zxfer_validate_shared_dir_permission_string \
+		"$g_zxfer_path_permissions_result" || return 1
 
-	printf '%s\n' "$l_physical_dir"
+	g_zxfer_temp_root_candidate_result=$l_candidate_physical
 }
 
 # Purpose: Print the parent directory of a path.

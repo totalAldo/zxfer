@@ -2,9 +2,9 @@
 # The unit fixture of tests/test_zxfer_runtime.sh, shared with the fragments
 # that were written for it and now live in their own module's home: the
 # caller's PATH, TMPDIR at the suite directory, and cleared runtime-artifact,
-# send-job, cleanup-pid, failure and effective-TMPDIR state. An entry whose own
-# cases need another fixture applies this one to those fragments only,
-# through zxfer_test_running_test_is_in in its setUp.
+# send-job, cleanup-pid, failure, path-security and effective-TMPDIR state.
+# An entry whose own cases need another fixture applies this one to those
+# fragments only, through zxfer_test_running_test_is_in in its setUp.
 # shellcheck disable=SC2034,SC2317,SC2329
 
 # Purpose: Clear the runtime-owned state a case may have left behind.
@@ -20,6 +20,7 @@ zxfer_test_runtime_fixture_setup() {
 	zxfer_reset_send_job_state
 	zxfer_reset_cleanup_pid_tracking
 	zxfer_reset_failure_context "unit"
+	zxfer_reset_path_security_state
 	g_option_Y_yield_iterations=1
 	g_option_z_compress=0
 	g_zxfer_effective_tmpdir=""

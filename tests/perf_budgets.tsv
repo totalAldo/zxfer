@@ -115,6 +115,15 @@
 # normalized_property_reads_{source,destination}, which jump if the
 # recursive property read falls back to per-dataset reads. Every other row
 # is unchanged.
+# Re-ratcheted 2026-09-26 (next phase W6) after the path-security metadata
+# read moved from the GNU/BSD stat fallbacks to one portable `ls -ldin`:
+# whole-root removal reads the run root's inode, owner and mode with one ls
+# instead of two stat calls on BSD (the failing `stat -c`, then `stat -f`),
+# so every scenario swaps stat 2 for ls 1 and its TOTAL drops by one (-V:
+# noop 21 -> 20, remote_noop 37 -> 36, incr 129 -> 128 full / 78 -> 77
+# small). The ls ceilings rise from 0 to 1 and the stat ceilings fall from 3
+# to 0: a tool swap, not added work (GNU stat needed one spawn, so Linux
+# trades stat 1 for ls 1).
 noop	TOTAL	25
 noop	sed	0
 noop	awk	2
@@ -131,12 +140,12 @@ noop	expr	0
 noop	cat	4
 noop	rm	3
 noop	mv	0
-noop	ls	0
+noop	ls	1
 noop	mkdir	0
 noop	cmp	0
 noop	wc	0
 noop	id	0
-noop	stat	3
+noop	stat	0
 noop	uname	2
 noop	ssh_connections	0
 noop	ssh_invocations	0
@@ -168,12 +177,12 @@ dryrun_incr	expr	0
 dryrun_incr	cat	0
 dryrun_incr	rm	2
 dryrun_incr	mv	0
-dryrun_incr	ls	0
+dryrun_incr	ls	1
 dryrun_incr	mkdir	0
 dryrun_incr	cmp	0
 dryrun_incr	wc	0
 dryrun_incr	id	0
-dryrun_incr	stat	3
+dryrun_incr	stat	0
 dryrun_incr	uname	2
 dryrun_incr	ssh_connections	0
 dryrun_incr	ssh_invocations	0
@@ -205,12 +214,12 @@ incr	expr	0
 incr	cat	40
 incr	rm	9
 incr	mv	0
-incr	ls	0
+incr	ls	1
 incr	mkdir	0
 incr	cmp	2
 incr	wc	0
 incr	id	0
-incr	stat	3
+incr	stat	0
 incr	uname	2
 incr	ssh_connections	0
 incr	ssh_invocations	0
@@ -242,12 +251,12 @@ remote_noop	expr	0
 remote_noop	cat	6
 remote_noop	rm	5
 remote_noop	mv	0
-remote_noop	ls	0
+remote_noop	ls	1
 remote_noop	mkdir	0
 remote_noop	cmp	2
 remote_noop	wc	0
 remote_noop	id	0
-remote_noop	stat	3
+remote_noop	stat	0
 remote_noop	uname	4
 remote_noop	ssh_connections	1
 remote_noop	ssh_invocations	9
@@ -279,12 +288,12 @@ remote_incr	expr	0
 remote_incr	cat	41
 remote_incr	rm	6
 remote_incr	mv	0
-remote_incr	ls	0
+remote_incr	ls	1
 remote_incr	mkdir	0
 remote_incr	cmp	2
 remote_incr	wc	0
 remote_incr	id	0
-remote_incr	stat	3
+remote_incr	stat	0
 remote_incr	uname	4
 remote_incr	ssh_connections	1
 remote_incr	ssh_invocations	69
@@ -316,12 +325,12 @@ props	expr	0
 props	cat	44
 props	rm	6
 props	mv	0
-props	ls	0
+props	ls	1
 props	mkdir	0
 props	cmp	2
 props	wc	0
 props	id	0
-props	stat	3
+props	stat	0
 props	uname	2
 props	ssh_connections	0
 props	ssh_invocations	0
@@ -356,12 +365,12 @@ noop_small	expr	0
 noop_small	cat	4
 noop_small	rm	3
 noop_small	mv	0
-noop_small	ls	0
+noop_small	ls	1
 noop_small	mkdir	0
 noop_small	cmp	0
 noop_small	wc	0
 noop_small	id	0
-noop_small	stat	3
+noop_small	stat	0
 noop_small	uname	2
 noop_small	ssh_connections	0
 noop_small	ssh_invocations	0
@@ -393,12 +402,12 @@ dryrun_incr_small	expr	0
 dryrun_incr_small	cat	0
 dryrun_incr_small	rm	2
 dryrun_incr_small	mv	0
-dryrun_incr_small	ls	0
+dryrun_incr_small	ls	1
 dryrun_incr_small	mkdir	0
 dryrun_incr_small	cmp	0
 dryrun_incr_small	wc	0
 dryrun_incr_small	id	0
-dryrun_incr_small	stat	3
+dryrun_incr_small	stat	0
 dryrun_incr_small	uname	2
 dryrun_incr_small	ssh_connections	0
 dryrun_incr_small	ssh_invocations	0
@@ -430,12 +439,12 @@ incr_small	expr	0
 incr_small	cat	20
 incr_small	rm	9
 incr_small	mv	0
-incr_small	ls	0
+incr_small	ls	1
 incr_small	mkdir	0
 incr_small	cmp	2
 incr_small	wc	0
 incr_small	id	0
-incr_small	stat	3
+incr_small	stat	0
 incr_small	uname	2
 incr_small	ssh_connections	0
 incr_small	ssh_invocations	0
@@ -467,12 +476,12 @@ remote_noop_small	expr	0
 remote_noop_small	cat	6
 remote_noop_small	rm	5
 remote_noop_small	mv	0
-remote_noop_small	ls	0
+remote_noop_small	ls	1
 remote_noop_small	mkdir	0
 remote_noop_small	cmp	2
 remote_noop_small	wc	0
 remote_noop_small	id	0
-remote_noop_small	stat	3
+remote_noop_small	stat	0
 remote_noop_small	uname	4
 remote_noop_small	ssh_connections	1
 remote_noop_small	ssh_invocations	9
@@ -504,12 +513,12 @@ remote_incr_small	expr	0
 remote_incr_small	cat	21
 remote_incr_small	rm	6
 remote_incr_small	mv	0
-remote_incr_small	ls	0
+remote_incr_small	ls	1
 remote_incr_small	mkdir	0
 remote_incr_small	cmp	2
 remote_incr_small	wc	0
 remote_incr_small	id	0
-remote_incr_small	stat	3
+remote_incr_small	stat	0
 remote_incr_small	uname	4
 remote_incr_small	ssh_connections	1
 remote_incr_small	ssh_invocations	30
@@ -541,12 +550,12 @@ props_small	expr	0
 props_small	cat	25
 props_small	rm	6
 props_small	mv	0
-props_small	ls	0
+props_small	ls	1
 props_small	mkdir	0
 props_small	cmp	2
 props_small	wc	0
 props_small	id	0
-props_small	stat	3
+props_small	stat	0
 props_small	uname	2
 props_small	ssh_connections	0
 props_small	ssh_invocations	0

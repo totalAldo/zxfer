@@ -65,6 +65,7 @@ zxfer_reset_session_state() {
 	# the launcher-captured original invocation.
 	zxfer_init_cli_option_defaults
 	zxfer_reset_failure_context "startup"
+	zxfer_reset_path_security_state
 	# Dropping the run-root handles first leaves the snapshot-discovery reset
 	# no owned cache path to remove.
 	zxfer_discard_runtime_cleanup_state

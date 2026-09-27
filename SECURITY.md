@@ -59,8 +59,10 @@ Key protections already present in the project include:
   then a fixed POSIX `sh` bootstrap reassembles the exact bytes before the
   explicit `sh -c` while preserving stdin and status
 - a private per-run 0700 artifact root whose exact path, validated parent, and
-  stored device/inode identity, owner and 0700 mode record must match
-  runtime-owned provenance before recursive cleanup
+  stored inode, owner and 0700 mode record must match runtime-owned
+  provenance before recursive cleanup; owner, mode and inode come from one
+  `ls -ldin` line, whose fields GNU coreutils, the BSDs, macOS, illumos and
+  BusyBox print alike, so every platform applies the same checks
 - remote (`-T`) destination discovery runs no target-side script: each
   destination `zfs list` is one argv-quoted command over the role's control
   master, and its own exit status (255 when ssh loses the connection) decides

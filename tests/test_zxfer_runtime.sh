@@ -865,7 +865,7 @@ test_zxfer_run_tmp_root_provenance_handles_a_root_temp_parent_without_double_sla
 				printf '/zxfer.%s.ABC123\n' "$$"
 			}
 			zxfer_get_private_directory_security_record() {
-				printf 'device-inode:1:2\t%s\t700\n' 501
+				g_zxfer_private_directory_record_result="2${ZXFER_TAB}501${ZXFER_TAB}700"
 			}
 
 			zxfer_ensure_run_tmp_root
@@ -893,7 +893,7 @@ test_zxfer_ensure_run_tmp_root_validates_a_fresh_parent_once() {
 	(
 		zxfer_validate_temp_root_candidate() {
 			printf '%s\n' "$1" >>"$validation_log"
-			printf '%s\n' "$1"
+			g_zxfer_temp_root_candidate_result=$1
 		}
 		g_zxfer_effective_tmpdir=""
 		g_zxfer_effective_tmpdir_requested=""
@@ -994,7 +994,7 @@ test_zxfer_ensure_run_tmp_root_removes_an_allocation_whose_identity_cannot_be_re
 			g_zxfer_effective_tmpdir="'"$TEST_TMPDIR"'"
 		}
 		zxfer_validate_temp_root_candidate() {
-			printf "%s\n" "'"$TEST_TMPDIR"'"
+			g_zxfer_temp_root_candidate_result="'"$TEST_TMPDIR"'"
 		}
 		mktemp() {
 			mkdir "'"$candidate_root"'" || return 1
@@ -1227,16 +1227,20 @@ test_zxfer_remove_run_tmp_root_rejects_same_mode_owner_directory_replacement() {
 
 test_zxfer_run_tmp_root_lifecycle_compares_the_creation_record_without_id() {
 	id_log="$TEST_TMPDIR/run-root-id.log"
+	fake_id_dir="$TEST_TMPDIR/run-root-fake-id"
 	rm -f "$id_log"
+	mkdir -p "$fake_id_dir"
+	# The effective-UID lookup runs `exec id`, so only a command on PATH can
+	# stand in for it.
+	printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexit 1\n' "$id_log" >"$fake_id_dir/id"
+	chmod 755 "$fake_id_dir/id"
 	output=$(
 		(
 			zxfer_discard_runtime_cleanup_state
 			zxfer_ensure_run_tmp_root || exit 90
 			run_root=$g_zxfer_run_tmp_root
-			id() {
-				printf '%s\n' "$*" >>"$id_log"
-				command id "$@"
-			}
+			g_zxfer_effective_uid=""
+			PATH="$fake_id_dir:$PATH"
 			printf 'record_mode=%s\n' "${g_zxfer_owned_run_tmp_root_identity##*"$ZXFER_TAB"}"
 			chmod 755 "$run_root"
 			zxfer_remove_run_tmp_root
@@ -1292,7 +1296,7 @@ test_zxfer_ensure_run_tmp_root_accepts_special_bits_in_front_of_mode_0700() {
 			printf "%s\n" "'"$candidate_root"'"
 		}
 		zxfer_get_private_directory_security_record() {
-			printf "device-inode:1:2\t0\t2700\n"
+			g_zxfer_private_directory_record_result="2${ZXFER_TAB}0${ZXFER_TAB}2700"
 		}
 		zxfer_ensure_run_tmp_root
 		printf "status=%s root=<%s>\n" "$?" "$g_zxfer_run_tmp_root"

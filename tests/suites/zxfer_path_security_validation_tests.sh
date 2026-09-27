@@ -1,8 +1,9 @@
 #!/bin/sh
 # Path validation tests for src/zxfer_path_security.sh: backup-file owner and
 # mode checks, symlink path components, trusted root symlinks, and temp-root
-# candidates. Run by tests/test_zxfer_path_security.sh.
-# shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
+# candidates. Run by tests/test_zxfer_path_security.sh, whose fake ls and id
+# (zxfer_path_security_test_write_fake_tools) they use.
+# shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 find_trusted_root_symlink_for_tests() {
 	for l_candidate in /tmp /bin /sbin /lib /lib64 /home /var/run /var/lock /*; do
@@ -26,25 +27,39 @@ require_trusted_root_symlink_for_tests() {
 }
 
 test_backup_owner_uid_is_allowed_accepts_root_and_effective_uid() {
-	result_root=$(
-		zxfer_get_effective_user_uid() { printf '%s\n' 1000; }
-		if zxfer_backup_owner_uid_is_allowed 0; then echo ok; else echo fail; fi
+	result=$(
+		zxfer_get_effective_user_uid() { g_zxfer_effective_uid=4242; }
+		for l_owner in 0 4242 4343; do
+			if zxfer_backup_owner_uid_is_allowed "$l_owner"; then
+				printf '%s=ok\n' "$l_owner"
+			else
+				printf '%s=refused\n' "$l_owner"
+			fi
+		done
+		zxfer_get_effective_user_uid() { return 1; }
+		zxfer_backup_owner_uid_is_allowed 4242 && echo unknown=ok || echo unknown=refused
+		zxfer_backup_owner_uid_is_allowed 0 && echo unknown_root=ok || echo unknown_root=refused
 	)
-	assertEquals "Root must always be allowed." "ok" "$result_root"
-
-	result_user=$(
-		zxfer_get_effective_user_uid() { printf '%s\n' 4242; }
-		if zxfer_backup_owner_uid_is_allowed 4242; then echo ok; else echo fail; fi
-	)
-	assertEquals "Effective UID should be permitted when matching the owner." "ok" "$result_user"
+	assertEquals "Root and the effective UID are allowed, another owner is not, and an unknown effective UID allows only root." \
+		"0=ok
+4242=ok
+4343=refused
+unknown=refused
+unknown_root=ok" "$result"
 }
 
 test_describe_expected_backup_owner_includes_effective_uid_when_non_root() {
 	result=$(
-		zxfer_get_effective_user_uid() { printf '%s\n' 9999; }
+		zxfer_get_effective_user_uid() { g_zxfer_effective_uid=9999; }
+		zxfer_describe_expected_backup_owner
+		zxfer_get_effective_user_uid() { g_zxfer_effective_uid=0; }
+		zxfer_describe_expected_backup_owner
+		zxfer_get_effective_user_uid() { return 1; }
 		zxfer_describe_expected_backup_owner
 	)
-	assertEquals "root (UID 0) or UID 9999" "$result"
+	assertEquals "root (UID 0) or UID 9999
+root (UID 0)
+root (UID 0)" "$result"
 }
 
 test_check_secure_backup_file_rejects_non_0600_permissions() {
@@ -136,149 +151,69 @@ test_zxfer_is_trusted_symlink_path_component_accepts_known_root_symlink() {
 	assertEquals "Trusted root-symlink checks should stay silent on success." "" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
-test_zxfer_is_trusted_symlink_path_component_rejects_owner_lookup_failures() {
+test_zxfer_is_trusted_symlink_path_component_fails_closed_on_each_metadata_check() {
 	if ! require_trusted_root_symlink_for_tests; then
 		return 0
 	fi
 
-	zxfer_test_capture_subshell "
-		zxfer_get_path_owner_uid() {
-			return 1
-		}
-		zxfer_is_trusted_symlink_path_component \"$trusted_root_symlink\"
-	"
+	good_link="7 lrwxrwxrwx 1 0 0 11 Jan  1 00:00 $trusted_root_symlink -> target"
+	good_root="2 drwxr-xr-x 23 0 0 736 Jan  1 00:00 /"
+	zxfer_test_capture_subshell '
+		PATH="$TEST_TMPDIR/fake-bin:$PATH"
+		export FAKE_LS_ANSWERS
+		while IFS="|" read -r l_case l_link l_root; do
+			FAKE_LS_ANSWERS="'"$trusted_root_symlink"'|$l_link
+/|$l_root"
+			zxfer_is_trusted_symlink_path_component "'"$trusted_root_symlink"'"
+			printf "%s=%s\n" "$l_case" "$?"
+		done <<EOF
+trusted|'"$good_link"'|'"$good_root"'
+link_unreadable|FAIL|'"$good_root"'
+link_not_root|7 lrwxrwxrwx 1 501 0 11 Jan  1 00:00 x -> y|'"$good_root"'
+root_unreadable|'"$good_link"'|FAIL
+root_not_root|'"$good_link"'|2 drwxr-xr-x 23 501 0 736 Jan  1 00:00 /
+root_unparseable|'"$good_link"'|bad-perms
+root_world_writable|'"$good_link"'|2 drwxrwxrwx 23 0 0 736 Jan  1 00:00 /
+root_sticky|'"$good_link"'|2 drwxrwxrwt 23 0 0 736 Jan  1 00:00 /
+EOF
+	'
 
-	assertEquals "Trusted-root symlink checks should fail closed when the symlink owner lookup fails." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Owner-lookup failures should not emit a trusted result payload." "" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "A top-level symlink is trusted only when it and / are root-owned and / is not writable by others unless sticky." \
+		"trusted=0
+link_unreadable=1
+link_not_root=1
+root_unreadable=1
+root_not_root=1
+root_unparseable=1
+root_world_writable=1
+root_sticky=0" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
-test_zxfer_is_trusted_symlink_path_component_rejects_owner_lookup_failures_for_absolute_nonroot_symlinks() {
-	symlink_parent="$TEST_TMPDIR/trusted_symlink_owner_lookup_failure"
-	symlink_target="$symlink_parent/target"
-	symlink_path="$symlink_parent/link"
-	mkdir -p "$symlink_target"
-	ln -sf "$symlink_target" "$symlink_path"
+test_zxfer_is_trusted_symlink_path_component_rejects_nested_symlinks_without_reading_metadata() {
+	symlink_parent="$TEST_TMPDIR/trusted_symlink_nested"
+	tool_log="$TEST_TMPDIR/trusted_symlink_nested.log"
+	mkdir -p "$symlink_parent/target"
+	ln -sf "$symlink_parent/target" "$symlink_parent/link"
+	rm -f "$tool_log"
 
-	zxfer_test_capture_subshell "
-		zxfer_get_path_owner_uid() {
-			case \"\$1\" in
-			\"$symlink_path\") return 1 ;;
-			*) printf '%s\n' '0' ;;
-			esac
-		}
-		zxfer_is_trusted_symlink_path_component \"$symlink_path\"
-	"
+	zxfer_test_capture_subshell '
+		PATH="$TEST_TMPDIR/fake-bin:$PATH"
+		FAKE_TOOL_LOG="'"$tool_log"'"
+		FAKE_LS_ANSWERS="*|7 lrwxrwxrwx 1 0 0 11 Jan  1 00:00 x -> y"
+		export FAKE_TOOL_LOG FAKE_LS_ANSWERS
+		zxfer_is_trusted_symlink_path_component "'"$symlink_parent/link"'"
+		printf "nested=%s\n" "$?"
+		zxfer_is_trusted_symlink_path_component relative-link
+		printf "relative=%s\n" "$?"
+		zxfer_is_trusted_symlink_path_component /
+		printf "root=%s\n" "$?"
+	'
 
-	assertEquals "Trusted-symlink checks should fail closed when the symlink owner lookup fails for absolute non-root symlinks." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Absolute non-root symlink owner-lookup failures should not emit a trusted result payload." \
-		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
-}
-
-test_zxfer_is_trusted_symlink_path_component_rejects_parent_owner_lookup_failures() {
-	if ! require_trusted_root_symlink_for_tests; then
-		return 0
-	fi
-
-	zxfer_test_capture_subshell "
-		zxfer_get_path_owner_uid() {
-			case \"\$1\" in
-			\"$trusted_root_symlink\") printf '%s\n' '0' ;;
-			/) return 1 ;;
-			*) printf '%s\n' '0' ;;
-			esac
-		}
-		zxfer_is_trusted_symlink_path_component \"$trusted_root_symlink\"
-	"
-
-	assertEquals "Trusted-root symlink checks should fail closed when the root-parent owner lookup fails." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Parent-owner lookup failures should not emit a trusted result payload." "" "$ZXFER_TEST_CAPTURE_OUTPUT"
-}
-
-test_zxfer_is_trusted_symlink_path_component_rejects_parent_owner_lookup_failures_for_absolute_nonroot_symlinks() {
-	symlink_parent="$TEST_TMPDIR/trusted_symlink_parent_lookup_failure"
-	symlink_target="$symlink_parent/target"
-	symlink_path="$symlink_parent/link"
-	mkdir -p "$symlink_target"
-	ln -sf "$symlink_target" "$symlink_path"
-
-	zxfer_test_capture_subshell "
-		zxfer_get_path_owner_uid() {
-			case \"\$1\" in
-			\"$symlink_path\") printf '%s\n' '0' ;;
-			\"$symlink_parent\") return 1 ;;
-			*) printf '%s\n' '0' ;;
-			esac
-		}
-		zxfer_is_trusted_symlink_path_component \"$symlink_path\"
-	"
-
-	assertEquals "Trusted-symlink checks should fail closed when the parent owner lookup fails for absolute non-root symlinks." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Absolute non-root parent-owner lookup failures should not emit a trusted result payload." \
-		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
-}
-
-test_zxfer_is_trusted_symlink_path_component_rejects_ls_lookup_failures() {
-	if ! require_trusted_root_symlink_for_tests; then
-		return 0
-	fi
-
-	zxfer_test_capture_subshell "
-		zxfer_get_path_owner_uid() {
-			printf '%s\n' '0'
-		}
-		ls() {
-			return 1
-		}
-		zxfer_is_trusted_symlink_path_component \"$trusted_root_symlink\"
-	"
-
-	assertEquals "Trusted-root symlink checks should fail closed when the root permission lookup fails." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Failed root-permission lookups should not emit a trusted result payload." "" "$ZXFER_TEST_CAPTURE_OUTPUT"
-}
-
-test_zxfer_is_trusted_symlink_path_component_rejects_unparseable_root_permissions() {
-	if ! require_trusted_root_symlink_for_tests; then
-		return 0
-	fi
-
-	zxfer_test_capture_subshell "
-		zxfer_get_path_owner_uid() {
-			printf '%s\n' '0'
-		}
-		ls() {
-			printf '%s\n' 'bad-perms'
-		}
-		zxfer_is_trusted_symlink_path_component \"$trusted_root_symlink\"
-	"
-
-	assertEquals "Trusted-root symlink checks should reject malformed root permission strings." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Malformed root-permission strings should not emit a trusted result payload." "" "$ZXFER_TEST_CAPTURE_OUTPUT"
-}
-
-test_zxfer_is_trusted_symlink_path_component_rejects_world_writable_root_without_sticky_bit() {
-	if ! require_trusted_root_symlink_for_tests; then
-		return 0
-	fi
-
-	zxfer_test_capture_subshell "
-		zxfer_get_path_owner_uid() {
-			printf '%s\n' '0'
-		}
-		ls() {
-			printf '%s\n' 'drwxrwxrwx 1 0 0 0 Jan 1 00:00 /'
-		}
-		zxfer_is_trusted_symlink_path_component \"$trusted_root_symlink\"
-	"
-
-	assertEquals "Trusted-root symlink checks should reject world-writable root parents without a sticky bit." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Untrusted root-permission layouts should not emit a trusted result payload." "" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "Only a top-level absolute symlink can be trusted." \
+		"nested=1
+relative=1
+root=1" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertFalse "Rejecting by position must not read any metadata." "[ -s '$tool_log' ]"
 }
 
 test_zxfer_find_symlink_path_component_returns_empty_for_relative_non_symlink_path() {
@@ -315,122 +250,66 @@ test_zxfer_require_backup_metadata_path_without_symlinks_rejects_symlink_target(
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "because path component"
 }
 
-test_zxfer_get_path_mode_octal_returns_failure_when_ls_fallback_cannot_map_permissions() {
-	zxfer_test_capture_subshell "
-		cd \"$TEST_TMPDIR\" || exit 1
-		: >\"mode_unknown\"
-		stat() {
-			return 1
-		}
-		ls() {
-			printf '%s\n' '-rw-r----- 1 0 0 0 Jan 1 00:00 ./mode_unknown'
-		}
-		zxfer_get_path_mode_octal \"mode_unknown\"
-	"
-
-	assertEquals "Mode lookups should fail when the ls fallback cannot map permissions to an octal value." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Failed ls-mode fallbacks should not emit a value." "" "$ZXFER_TEST_CAPTURE_OUTPUT"
-}
-
-test_zxfer_validate_temp_root_candidate_returns_failure_when_ls_lookup_fails() {
-	candidate="$TEST_TMPDIR/validate_tmp_root_ls_failure"
+test_zxfer_validate_temp_root_candidate_fails_closed_on_ls_owner_and_mode() {
+	candidate="$TEST_TMPDIR/validate_tmp_root_checks"
 	mkdir -p "$candidate"
 
-	zxfer_test_capture_subshell "
-		ls() {
-			return 1
-		}
-		zxfer_validate_temp_root_candidate \"$candidate\"
-	"
+	zxfer_test_capture_subshell '
+		PATH="$TEST_TMPDIR/fake-bin:$PATH"
+		export FAKE_LS_ANSWERS FAKE_ID_UID
+		g_zxfer_temp_root_candidate_result=stale
+		while IFS="|" read -r l_case l_uid l_line; do
+			FAKE_ID_UID=$l_uid
+			FAKE_LS_ANSWERS=".|$l_line"
+			g_zxfer_effective_uid=""
+			zxfer_validate_temp_root_candidate "'"$candidate"'"
+			printf "%s=%s <%s>\n" "$l_case" "$?" "$g_zxfer_temp_root_candidate_result"
+		done <<EOF
+ls_fails|1234|FAIL
+unknown_effective_uid||2 drwx------ 2 1234 0 64 Jan  1 00:00 .
+other_owner|1234|2 drwx------ 2 4321 0 64 Jan  1 00:00 .
+world_writable|1234|2 drwxrwxrwx 2 0 0 64 Jan  1 00:00 .
+group_writable|1234|2 drwxrwx--- 2 1234 0 64 Jan  1 00:00 .
+EOF
+	'
 
-	assertEquals "Validated temp-root selection should fail closed when directory permission lookup fails." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Failed temp-root validation should not emit a physical directory path." "" "$ZXFER_TEST_CAPTURE_OUTPUT"
-}
-
-test_zxfer_validate_temp_root_candidate_rejects_nonroot_owned_dir_when_effective_uid_lookup_fails() {
-	candidate="$TEST_TMPDIR/validate_tmp_root_effective_uid_failure"
-	mkdir -p "$candidate"
-
-	zxfer_test_capture_subshell "
-		ls() {
-			printf '%s\n' 'drwx------ 2 1234 0 0 Jan 1 00:00 $candidate'
-		}
-		zxfer_get_effective_user_uid() {
-			return 1
-		}
-		zxfer_validate_temp_root_candidate \"$candidate\"
-	"
-
-	assertEquals "Validated temp-root selection should fail closed when a non-root directory cannot be matched to the effective uid." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Failed effective-uid validation should not emit a physical directory path." \
-		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
-}
-
-test_zxfer_validate_temp_root_candidate_rejects_non_sticky_world_writable_dir_directly() {
-	candidate="$TEST_TMPDIR/validate_tmp_root_insecure_mode"
-	mkdir -p "$candidate"
-
-	zxfer_test_capture_subshell "
-		ls() {
-			printf '%s\n' 'drwxrwxrwx 1 0 0 0 Jan 1 00:00 $candidate'
-		}
-		zxfer_validate_temp_root_candidate \"$candidate\"
-	"
-
-	assertEquals "Validated temp-root selection should reject world-writable directories without a sticky bit." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Rejected insecure temp-root candidates should not emit a physical directory path." \
-		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "Temp-root validation must fail closed, publishing nothing, when ls fails, the effective UID is unknown for a non-root owner, another user owns it, or others can write it without the sticky bit." \
+		"ls_fails=1 <>
+unknown_effective_uid=1 <>
+other_owner=1 <>
+world_writable=1 <>
+group_writable=1 <>" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
 test_zxfer_validate_temp_root_candidate_reads_owner_and_mode_from_one_ls() {
 	candidate="$TEST_TMPDIR/validate_tmp_root_one_ls"
-	probe_log="$TEST_TMPDIR/validate_tmp_root_one_ls.log"
+	tool_log="$TEST_TMPDIR/validate_tmp_root_one_ls.log"
 	mkdir -p "$candidate"
-	rm -f "$probe_log"
+	rm -f "$tool_log"
 
-	zxfer_test_capture_subshell "
-		ls() {
-			printf 'ls\\n' >>\"$probe_log\"
-			printf '%s\\n' \"drwxrwxrwt 9 \$l_test_owner 0 0 Jan 1 00:00 $candidate\"
-		}
-		stat() {
-			printf 'stat\\n' >>\"$probe_log\"
-			return 1
-		}
-		zxfer_get_effective_user_uid() {
-			printf 'id\\n' >>\"$probe_log\"
-			printf '%s\\n' 4242
-		}
-		l_test_owner=0
-		zxfer_validate_temp_root_candidate \"$candidate\" >/dev/null
-		printf 'root_status=%s\\n' \"\$?\"
-		l_test_owner=4242
-		zxfer_validate_temp_root_candidate \"$candidate\" >/dev/null
-		printf 'user_status=%s\\n' \"\$?\"
-		l_test_owner=4343
-		zxfer_validate_temp_root_candidate \"$candidate\" >/dev/null
-		printf 'other_status=%s\\n' \"\$?\"
-		l_test_owner=owner
-		zxfer_validate_temp_root_candidate \"$candidate\" >/dev/null
-		printf 'named_status=%s\\n' \"\$?\"
-	"
+	zxfer_test_capture_subshell '
+		PATH="$TEST_TMPDIR/fake-bin:$PATH"
+		FAKE_TOOL_LOG="'"$tool_log"'"
+		FAKE_ID_UID=4242
+		export FAKE_TOOL_LOG FAKE_ID_UID FAKE_LS_ANSWERS
+		for l_test_owner in 0 4242 4343 owner; do
+			FAKE_LS_ANSWERS=".|9 drwxrwxrwt 9 $l_test_owner 0 0 Jan  1 00:00 ."
+			zxfer_validate_temp_root_candidate "'"$candidate"'"
+			printf "%s=%s\n" "$l_test_owner" "$?"
+		done
+	'
 
-	assertEquals "A root-owned sticky candidate should pass, an effective-user candidate should pass, another owner and a non-numeric owner should fail." \
-		"root_status=0
-user_status=0
-other_status=1
-named_status=1" "$ZXFER_TEST_CAPTURE_OUTPUT"
-	assertEquals "Each validation should run one ls and never stat; id runs only for numeric non-root owners." \
-		"ls
-ls
-id
-ls
-id
-ls" "$(cat "$probe_log")"
+	assertEquals "A root-owned sticky candidate and an effective-user candidate pass; another owner and a non-numeric owner fail." \
+		"0=0
+4242=0
+4343=1
+owner=1" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "Each validation should run one ls; id runs once, for the first non-root owner, and is memoized." \
+		"ls -ldin .
+ls -ldin .
+id -u
+ls -ldin .
+ls -ldin ." "$(cat "$tool_log")"
 }
 
 test_zxfer_validate_temp_root_candidate_rejects_relative_physical_pwd_output() {
@@ -442,10 +321,25 @@ test_zxfer_validate_temp_root_candidate_rejects_relative_physical_pwd_output() {
 			printf '%s\n' 'relative-path'
 		}
 		zxfer_validate_temp_root_candidate \"$candidate\"
+		printf 'status=%s <%s>\n' \"\$?\" \"\$g_zxfer_temp_root_candidate_result\"
 	"
 
-	assertEquals "Validated temp-root selection should reject non-absolute physical-directory results." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Rejected relative physical-directory results should not emit a temp-root path." \
-		"" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "Validated temp-root selection should reject a non-absolute physical-directory result and publish nothing." \
+		"status=1 <>" "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
+test_zxfer_validate_temp_root_candidate_keeps_line_feeds_in_the_physical_path() {
+	nl_dir="$TEST_TMPDIR/$(printf 'tmp\nroot')"
+	mkdir -p "$nl_dir" || fail "Unable to create the line-feed fixture."
+	chmod 700 "$nl_dir"
+	expected=$(CDPATH='' cd -P "$nl_dir" && pwd && printf x)
+	expected=${expected%?}
+	expected=${expected%"$ZXFER_LF"}
+
+	zxfer_validate_temp_root_candidate "$nl_dir"
+	status=$?
+
+	assertEquals "A private directory whose name holds a line feed should validate." 0 "$status"
+	assertEquals "The physical path should keep its line feed; only the ls line is split off." \
+		"$expected" "$g_zxfer_temp_root_candidate_result"
 }

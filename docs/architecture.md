@@ -176,9 +176,14 @@ physical resolution plus owner/mode checks). Allocators in
 `<prefix>.<counter>` children by redirection or `mkdir`; there is no per-file
 registration or unregistration ceremony for contained children. Runtime
 records the exact root, validated physical parent, and a security record
-(device/inode identity, owner uid, mode 0700) taken right after its own
-`mktemp -d`; whole-root removal requires that provenance, one fresh record
-equal to it (no `id` fork), and the reserved `zxfer.<pid>.*` shape.
+(inode, owner uid, mode 0700) taken right after its own `mktemp -d`;
+whole-root removal requires that provenance, one fresh record equal to it
+(one `ls -ldin`, no `id` fork), and the reserved `zxfer.<pid>.*` shape.
+[../src/zxfer_path_security.sh](../src/zxfer_path_security.sh) reads every
+owner, mode and inode from one `ls -ldin` line (inode, mode string, link
+count, numeric owner: the POSIX fields every supported `ls` prints), checks a
+TMPDIR candidate in one subshell (`cd -P`, `pwd`, then `exec ls`), and asks
+`id -u` at most once per run.
 `zxfer_trap_exit()` in
 [../src/zxfer_session.sh](../src/zxfer_session.sh) removes the whole root only
 after supervised jobs, short-lived cleanup helpers, SSH control sockets, and

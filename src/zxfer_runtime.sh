@@ -334,8 +334,10 @@ zxfer_find_default_tmpdir() {
 	while IFS= read -r l_default_candidate; do
 		# A missing candidate (/dev/shm on macOS) costs no fork.
 		[ -d "$l_default_candidate" ] || continue
-		g_zxfer_default_tmpdir_result=$(zxfer_validate_temp_root_candidate \
-			"$l_default_candidate") && return 0
+		if zxfer_validate_temp_root_candidate "$l_default_candidate"; then
+			g_zxfer_default_tmpdir_result=$g_zxfer_temp_root_candidate_result
+			return 0
+		fi
 	done <<EOF
 $l_default_candidates
 EOF
@@ -360,17 +362,18 @@ zxfer_try_get_effective_tmpdir() {
 	if [ -n "${g_zxfer_effective_tmpdir:-}" ] &&
 		[ "${g_zxfer_effective_tmpdir_requested:-}" = "$l_request_key" ]; then
 		if [ "${1:-0}" = 1 ]; then
-			l_effective_tmpdir=$(zxfer_validate_temp_root_candidate \
-				"$g_zxfer_effective_tmpdir") || return 1
-			[ "$l_effective_tmpdir" = "$g_zxfer_effective_tmpdir" ] || return 1
+			zxfer_validate_temp_root_candidate "$g_zxfer_effective_tmpdir" ||
+				return 1
+			[ "$g_zxfer_temp_root_candidate_result" = "$g_zxfer_effective_tmpdir" ] ||
+				return 1
 		fi
 		return 0
 	fi
 
 	l_effective_tmpdir=""
-	if [ -n "$l_requested_tmpdir" ]; then
-		l_effective_tmpdir=$(zxfer_validate_temp_root_candidate "$l_requested_tmpdir") ||
-			l_effective_tmpdir=""
+	if [ -n "$l_requested_tmpdir" ] &&
+		zxfer_validate_temp_root_candidate "$l_requested_tmpdir"; then
+		l_effective_tmpdir=$g_zxfer_temp_root_candidate_result
 	fi
 	if [ -z "$l_effective_tmpdir" ]; then
 		if ! zxfer_find_default_tmpdir; then
@@ -486,13 +489,12 @@ zxfer_run_tmp_root_is_usable_dir() {
 # Purpose: Check that the run root is still the exact private directory this
 # process created.
 # Usage: zxfer_run_tmp_root_is_current_private_dir PATH; called right before
-# whole-root removal. One fresh security record (identity, owner, mode) must
+# whole-root removal. One fresh security record (inode, owner, mode) must
 # equal the private record taken when mktemp created the root.
 zxfer_run_tmp_root_is_current_private_dir() {
 	zxfer_run_tmp_root_is_usable_dir "$1" || return 1
-	l_private_root_record=$(zxfer_get_private_directory_security_record "$1") ||
-		return 1
-	[ "$l_private_root_record" = "${g_zxfer_owned_run_tmp_root_identity:-}" ]
+	zxfer_get_private_directory_security_record "$1" || return 1
+	[ "$g_zxfer_private_directory_record_result" = "${g_zxfer_owned_run_tmp_root_identity:-}" ]
 }
 
 # Purpose: Create the one per-run private temp root on first need and reuse it
@@ -538,11 +540,13 @@ zxfer_ensure_run_tmp_root() {
 	l_run_umask=${l_run_tmp_root%%"$ZXFER_LF"*}
 	l_run_tmp_root=${l_run_tmp_root#"$l_run_umask"}
 	l_run_tmp_root=${l_run_tmp_root#"$ZXFER_LF"}
-	# Record identity, owner and mode now; whole-root removal compares one
-	# fresh record against this one instead of asking id and stat again.
-	l_run_tmp_root_record=$(zxfer_get_private_directory_security_record \
-		"$l_run_tmp_root") || l_run_tmp_root_record=""
-	# GNU stat prints special bits too: a root under a setgid TMPDIR is 2700.
+	# Record inode, owner and mode now; whole-root removal compares one fresh
+	# record against this one instead of asking id again.
+	l_run_tmp_root_record=""
+	if zxfer_get_private_directory_security_record "$l_run_tmp_root"; then
+		l_run_tmp_root_record=$g_zxfer_private_directory_record_result
+	fi
+	# The mode keeps special bits: a root under a setgid TMPDIR is 2700.
 	case $l_run_tmp_root_record in
 	*"$ZXFER_TAB"700 | *"$ZXFER_TAB"[1-7]700) ;;
 	*)
