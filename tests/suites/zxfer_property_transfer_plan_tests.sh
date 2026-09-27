@@ -260,6 +260,32 @@ test_plan_property_changes_reports_awk_failures_with_its_results_cleared() {
 	assertEquals "Failed to plan dataset properties.|override=<>" "$output"
 }
 
+test_plan_property_changes_publishes_nothing_when_the_plan_output_is_cut_short() {
+	l_cut_short_awk="$TEST_TMPDIR/cut-short-awk"
+	cat >"$l_cut_short_awk" <<'EOF'
+#!/bin/sh
+printf '%s\n' "compression=lz4=local"
+EOF
+	chmod 755 "$l_cut_short_awk"
+	set +e
+	output=$(
+		(
+			g_cmd_awk=$l_cut_short_awk
+			zxfer_throw_error() {
+				printf '%s|override=<%s>|inherit=<%s>\n' "$1" \
+					"$g_zxfer_plan_override_pvs_result" "$g_zxfer_plan_inherit_result"
+				exit 1
+			}
+			zxfer_plan_property_changes "compression=lz4=local" "" 1 filesystem "" "" "" \
+				"compression=off=local"
+		)
+	)
+	status=$?
+	assertEquals 1 "$status"
+	assertEquals "An awk that exits 0 without the end marker must not publish a partial plan." \
+		"Failed to plan dataset properties.|override=<>|inherit=<>" "$output"
+}
+
 ################################################################################
 # PLAN: DIFF
 ################################################################################

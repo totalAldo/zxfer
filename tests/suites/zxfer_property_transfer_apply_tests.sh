@@ -268,6 +268,36 @@ test_create_destination_dataset_reports_parent_property_read_and_create_failures
 	assertEquals "Error when creating destination filesystem.|5" "$output"
 }
 
+test_create_destination_dataset_stops_before_any_create_when_the_child_override_filter_fails() {
+	l_failing_awk="$TEST_TMPDIR/failing-awk"
+	cat >"$l_failing_awk" <<'EOF'
+#!/bin/sh
+exit 6
+EOF
+	chmod 755 "$l_failing_awk"
+	set +e
+	output=$(
+		(
+			g_cmd_awk=$l_failing_awk
+			zxfer_probe_destination_existence() { zxfer_property_test_parent_exists "$@"; }
+			zxfer_load_normalized_dataset_properties() {
+				g_zxfer_normalized_dataset_properties="compression=lz4=local"
+			}
+			zxfer_run_destination_zfs_cmd() { printf 'unexpected zfs %s\n' "$*"; }
+			zxfer_throw_error() {
+				printf '%s|%s\n' "$1" "$2"
+				exit "$2"
+			}
+			zxfer_create_destination_dataset 0 "" "compression=lz4=override" filesystem "" \
+				"backup/dst/child" "readonly"
+		)
+	)
+	status=$?
+	assertEquals 6 "$status"
+	assertEquals "A failed child override filter must stop the run before any create." \
+		"Failed to filter child creation override properties.|6" "$output"
+}
+
 test_create_destination_dataset_reports_parent_probe_failures() {
 	set +e
 	output=$(
