@@ -77,6 +77,12 @@
 #       test_delete_option_live_destroys_only_extra_destination_snapshot
 #       → exactly one "MUTATE destroy" of the extra snapshot and no sends.
 #
+#   dst-only snapshot newer than the anchor, -d live with sends pending
+#       test_delete_without_force_never_rolls_back_before_a_send
+#       → the destroy is the only mutation and every dataset is sent from
+#         its anchor; the same run with -F also rolls the root back to its
+#         anchor before the root's send.
+#
 #   -T destination discovery (ordinary listings over the target master)
 #       test_remote_target_destination_listing_failure_fails_closed
 #       → a failed snapshot listing on the -T host keeps the zfs exit status
@@ -603,6 +609,51 @@ test_delete_option_live_destroys_only_extra_destination_snapshot() {
 		"grep -q '^send ' '$ZFS_LOG'"
 	assertTrue "deletion planning should query candidate creation times" \
 		"grep -q '^get -H -o name,value -p creation $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@' '$ZFS_LOG'"
+}
+
+# Invariant (-d without -F): destroying a destination-only snapshot newer than
+# the anchor never rolls the destination back; every dataset is still sent
+# incrementally from its anchor. The same run with -F rolls the root back to
+# its anchor (@snap2) before the root's send, which shows that the fixture
+# qualifies for a rollback and only -F is missing.
+test_delete_without_force_never_rolls_back_before_a_send() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" delete_newer
+	planning_add_extra_destination_snapshot
+	# The destination-only @snap9 is newer than the root's anchor @snap2.
+	printf '%s@snap2\t1700000002\n%s@snap9\t1700000009\n' \
+		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
+		>"$STATE_DIR/dst_creation.list" ||
+		fail "Unable to write the creation-time fixture."
+	l_newer_destroy="MUTATE destroy $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap9"
+	l_newer_rollback="MUTATE rollback -r $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap2"
+	l_newer_root_send="send -I $ZXFER_MOCKBIN_SOURCE_ROOT@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT@snap3"
+
+	planning_run_zxfer "$STATE_DIR" -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-d run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	planning_assert_log_has_line "$l_newer_destroy"
+	assertEquals "without -F the destroy is the only mutation" \
+		1 "$(grep -c '^MUTATE ' "$ZFS_LOG")"
+	for l_newer_suffix in "" /child1 /child2; do
+		planning_assert_log_has_line \
+			"send -I $ZXFER_MOCKBIN_SOURCE_ROOT$l_newer_suffix@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT$l_newer_suffix@snap3"
+	done
+
+	: >"$ZFS_LOG"
+	planning_run_zxfer "$STATE_DIR" -d -F -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-d -F run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	planning_assert_log_has_line "$l_newer_destroy"
+	planning_assert_log_has_line "$l_newer_rollback"
+	assertEquals "with -F the destroy and one rollback are the only mutations" \
+		2 "$(grep -c '^MUTATE ' "$ZFS_LOG")"
+	l_newer_rollback_line=$(planning_log_line_number "$l_newer_rollback")
+	l_newer_send_line=$(planning_log_line_number "$l_newer_root_send")
+	assertTrue "the rollback must precede the root's send (rollback line ${l_newer_rollback_line:-none}, send line ${l_newer_send_line:-none})" \
+		"[ '${l_newer_send_line:-0}' -gt '${l_newer_rollback_line:-0}' ] && [ '${l_newer_rollback_line:-0}' -gt 0 ]"
 }
 
 # Invariant: a -j 2 incremental run through the supervision-lite background
