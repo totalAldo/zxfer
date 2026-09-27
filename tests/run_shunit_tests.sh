@@ -18,6 +18,10 @@
 # a PID that exits and is reused between the snapshot and the signal could be
 # hit; the window is milliseconds and only open on a timeout or a signal.
 #
+# Case patterns list their characters ([!0123456789], not [!0-9]): bash 3.2,
+# which is macOS /bin/sh, matches a range by locale collation, and in a UTF-8
+# locale [a-z] also takes A-Y and accented letters and [0-9] takes U+2185.
+#
 
 set -eu
 
@@ -121,7 +125,8 @@ EOF
 
 valid_test_name_p() {
 	case "${1:-}" in
-	'' | [!A-Za-z_]* | *[!A-Za-z0-9_]*)
+	'' | [!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_]* | \
+		*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*)
 		return 1
 		;;
 	esac
@@ -226,7 +231,7 @@ EOF
 
 positive_integer_p() {
 	case "${1:-}" in
-	'' | *[!0-9]* | 0)
+	'' | *[!0123456789]* | 0)
 		return 1
 		;;
 	esac
@@ -411,7 +416,8 @@ list_selected_test_names() {
 		' "$l_suite_path")
 		for l_fragment_path in $l_fragment_paths; do
 			case "$l_fragment_path" in
-			'' | /* | ../* | */../* | */.. | *[!A-Za-z0-9_./-]*)
+			'' | /* | ../* | */../* | */.. | \
+				*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-]*)
 				echo "Invalid suite test fragment path: $l_fragment_path" >&2
 				l_list_status=1
 				continue
@@ -760,7 +766,7 @@ runner_signal_worker() {
 		IFS= read -r l_signal_suite_pid <"$RUNNER_STATE_DIR/$2.pid" || :
 	fi
 	case "$l_signal_suite_pid" in
-	'' | *[!0-9]*) l_signal_suite_pid= ;;
+	'' | *[!0123456789]*) l_signal_suite_pid= ;;
 	esac
 	[ -n "$l_signal_pids$l_signal_suite_pid" ] || return 0
 	# shellcheck disable=SC2086  # One PID per word.
@@ -799,7 +805,7 @@ runner_finish_worker() {
 	RUNNER_INFLIGHT=$((RUNNER_INFLIGHT - 1))
 	wait "$RUNNER_W_PID" 2>/dev/null || :
 	case "$l_finish_status" in
-	'' | *[!0-9]*) l_finish_status=1 ;;
+	'' | *[!0123456789]*) l_finish_status=1 ;;
 	esac
 	[ "$RUNNER_W_PHASE" = run ] || l_finish_status=timeout
 	printf '%s\n' "$l_finish_status" >"$RUNNER_STATE_DIR/$l_finish_id.status"
@@ -1050,7 +1056,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$RUNNER_SUITE_TIMEOUT" in
-'' | *[!0-9]*)
+'' | *[!0123456789]*)
 	echo "--suite-timeout (or ZXFER_TEST_SUITE_TIMEOUT) must be a whole number of seconds" >&2
 	exit 1
 	;;
