@@ -37,7 +37,8 @@
 ################################################################################
 
 # Module contract:
-# owns globals: g_zxfer_version, g_zxfer_local_os and g_backup_file_extension.
+# owns globals: g_zxfer_version, g_zxfer_local_os, g_backup_file_extension and
+#   the exit status zxfer_trap_exit builds, g_zxfer_trap_exit_status.
 # reads globals: parsed option state and replication context after
 #   initialization; zxfer_trap_exit also reads g_zxfer_run_umask and the
 #   quoting line constants.
@@ -110,6 +111,17 @@ zxfer_init_session_environment() {
 	zxfer_apply_secure_path
 }
 
+# Purpose: Fold one failed trap cleanup step into the exit status and the
+# failure report.
+# Usage: zxfer_note_trap_cleanup_failure STATUS MESSAGE, from zxfer_trap_exit;
+# a zero STATUS does nothing. An otherwise clean exit takes STATUS, and
+# MESSAGE becomes the report's message unless one is already recorded.
+zxfer_note_trap_cleanup_failure() {
+	[ "$1" -ne 0 ] || return 0
+	[ "$g_zxfer_trap_exit_status" -ne 0 ] || g_zxfer_trap_exit_status=$1
+	zxfer_set_failure_context_if_empty runtime "trap cleanup" "$2"
+}
+
 # Purpose: Run the centralized shutdown path that cleans up runtime artifacts,
 # transports, and end-of-run reporting state.
 # Usage: zxfer_trap_exit [SIGNAL_STATUS]; the EXIT trap passes nothing and
@@ -120,7 +132,7 @@ zxfer_init_session_environment() {
 # emitted-report guard keeps the second pass from printing a second report.
 zxfer_trap_exit() {
 	# get the exit status of the last command
-	l_trap_exit_status=$?
+	g_zxfer_trap_exit_status=$?
 	# A signal can land while zxfer_create_runtime_artifact_file holds umask
 	# 077 and noclobber, or between zxfer_split_begin and zxfer_split_end.
 	# Put the run's shell modes back before any cleanup or report write.
@@ -133,7 +145,7 @@ zxfer_trap_exit() {
 	# After a signal, $? is the status of the command it interrupted (0 after
 	# a -j poll sleep), so each signal trap passes its own status instead.
 	if [ -n "${1:-}" ]; then
-		l_trap_exit_status=$1
+		g_zxfer_trap_exit_status=$1
 		zxfer_set_failure_context_if_empty runtime "signal" \
 			"zxfer was interrupted by a signal (exit status $1)."
 	fi
@@ -146,77 +158,42 @@ zxfer_trap_exit() {
 	# of the shell is too broad and can clobber coverage helpers or command
 	# substitution plumbing in the caller. Long-lived send/receive jobs stop
 	# first, then the short-lived registered helpers.
-	l_cleanup_send_status=0
-	zxfer_abort_all_send_jobs || l_cleanup_send_status=$?
-	if [ "$l_cleanup_send_status" -ne 0 ]; then
-		[ "$l_trap_exit_status" -eq 0 ] &&
-			l_trap_exit_status=$l_cleanup_send_status
-		zxfer_set_failure_context_if_empty runtime "trap cleanup" \
+	zxfer_abort_all_send_jobs ||
+		zxfer_note_trap_cleanup_failure "$?" \
 			"${g_zxfer_send_job_abort_failure_message:-Failed to tear down one or more send/receive jobs during exit.}"
-	fi
-	l_cleanup_pid_status=0
-	zxfer_kill_registered_cleanup_pids || l_cleanup_pid_status=$?
-	if [ "$l_cleanup_pid_status" -ne 0 ]; then
-		[ "$l_trap_exit_status" -eq 0 ] &&
-			l_trap_exit_status=$l_cleanup_pid_status
-		zxfer_set_failure_context_if_empty runtime "trap cleanup" \
+	zxfer_kill_registered_cleanup_pids ||
+		zxfer_note_trap_cleanup_failure "$?" \
 			"${g_zxfer_cleanup_pid_abort_failure_message:-Failed to tear down one or more validated cleanup helpers during exit.}"
-	fi
-
+	# A failed close counts only as the run's first failure: after another
+	# one, its own diagnostic on stderr is all it adds.
 	l_trap_close_status=0
 	zxfer_close_all_ssh_control_sockets || l_trap_close_status=$?
-	if [ "$l_trap_close_status" -ne 0 ] && [ "$l_trap_exit_status" -eq 0 ]; then
-		l_trap_exit_status=$l_trap_close_status
-		zxfer_set_failure_context_if_empty runtime "trap cleanup" \
+	[ "$g_zxfer_trap_exit_status" -ne 0 ] ||
+		zxfer_note_trap_cleanup_failure "$l_trap_close_status" \
 			"Failed to close one or more ssh control sockets during exit."
-	fi
 	# Every per-run transient lives under the one private temp root, which
 	# one rm -rf removes; only ssh's short socket directory, made when the
 	# root's socket path would be too long, lives outside it.
-	l_artifact_cleanup_failed=0
-	zxfer_remove_ssh_control_socket_dir || l_artifact_cleanup_failed=1
-	zxfer_remove_run_tmp_root || l_artifact_cleanup_failed=1
-	if [ "$l_artifact_cleanup_failed" -ne 0 ]; then
-		[ "$l_trap_exit_status" -eq 0 ] && l_trap_exit_status=1
-		zxfer_set_failure_context_if_empty runtime "trap cleanup" \
-			"Failed to remove one or more runtime temp artifacts during exit."
-	fi
-	if [ "${g_services_need_relaunch:-0}" -eq 1 ]; then
-		if [ "${g_services_relaunch_in_progress:-0}" -eq 1 ]; then
-			zxfer_echoV "zxfer exiting with services still stopped after a failed zxfer_relaunch attempt."
-		else
-			zxfer_echoV "zxfer exiting early; restarting stopped services."
-			l_migration_service_cleanup_status=0
-			zxfer_restore_migration_services_status_only ||
-				l_migration_service_cleanup_status=$?
-			if [ "$l_migration_service_cleanup_status" -ne 0 ]; then
-				l_migration_service_cleanup_message=${g_zxfer_migration_service_restore_failure_message:-Failed to restore stopped migration services during exit.}
-				[ "$l_trap_exit_status" -eq 0 ] &&
-					l_trap_exit_status=$l_migration_service_cleanup_status
-				if [ -n "${g_zxfer_failure_message:-}" ]; then
-					# The primary structured failure keeps ownership, but a failed
-					# service restart must never disappear: the operator may need to
-					# restore the still-stopped SMF service manually.
-					zxfer_warn_stderr "$l_migration_service_cleanup_message"
-				else
-					zxfer_set_failure_context_if_empty runtime "trap cleanup" \
-						"$l_migration_service_cleanup_message"
-				fi
-			fi
-		fi
-	fi
+	l_trap_artifact_status=0
+	zxfer_remove_ssh_control_socket_dir || l_trap_artifact_status=1
+	zxfer_remove_run_tmp_root || l_trap_artifact_status=1
+	zxfer_note_trap_cleanup_failure "$l_trap_artifact_status" \
+		"Failed to remove one or more runtime temp artifacts during exit."
+	zxfer_restore_migration_services_on_exit ||
+		zxfer_note_trap_cleanup_failure "$?" \
+			"$g_zxfer_migration_service_restore_failure_message"
 
 	zxfer_profile_add_elapsed_ms g_zxfer_profile_cleanup_ms "$l_cleanup_start_ms"
-	zxfer_echoV "zxfer exiting with status $l_trap_exit_status"
+	zxfer_echoV "zxfer exiting with status $g_zxfer_trap_exit_status"
 	zxfer_profile_emit_summary
-	zxfer_emit_failure_report "$l_trap_exit_status"
+	zxfer_emit_failure_report "$g_zxfer_trap_exit_status"
 
 	# Failure reporting may lazily recreate the run temp root; sweep again so
 	# nothing survives exit.
 	zxfer_remove_run_tmp_root >/dev/null 2>&1 || :
 
 	# exit this script
-	exit "$l_trap_exit_status"
+	exit "$g_zxfer_trap_exit_status"
 }
 
 # Purpose: Resolve one endpoint's operating system, zfs command and, under -z,

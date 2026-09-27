@@ -412,9 +412,6 @@ test_zxfer_trap_exit_warns_when_migration_restore_fails_after_primary_failure() 
 				g_zxfer_migration_service_restore_failure_message="Couldn't re-enable service svc:/broken:default."
 				return 37
 			}
-			zxfer_set_failure_context_if_empty() {
-				printf '%s\n' secondary-context-replaced-primary
-			}
 			zxfer_warn_stderr() { printf 'warning=%s\n' "$*" >&2; }
 			zxfer_profile_add_elapsed_ms() { :; }
 			zxfer_echoV() { :; }
@@ -437,8 +434,59 @@ test_zxfer_trap_exit_warns_when_migration_restore_fails_after_primary_failure() 
 		"$output" "warning=Couldn't re-enable service svc:/broken:default."
 	assertContains "The primary structured failure context must remain unchanged." \
 		"$output" "report=23|runtime|replication|primary replication failure"
-	assertNotContains "The secondary cleanup failure must not replace the primary structured context." \
-		"$output" "secondary-context-replaced-primary"
+	assertEquals "The failed service restart should be warned about exactly once." \
+		1 "$(printf '%s\n' "$output" | grep -c '^warning=')"
+}
+
+test_zxfer_note_trap_cleanup_failure_promotes_only_a_clean_exit_and_keeps_the_first_message() {
+	output=$(
+		(
+			zxfer_reset_failure_context "unit"
+			g_zxfer_trap_exit_status=0
+			zxfer_note_trap_cleanup_failure 0 "ignored"
+			printf 'zero=%s <%s>\n' "$g_zxfer_trap_exit_status" "$g_zxfer_failure_message"
+			zxfer_note_trap_cleanup_failure 17 "first cleanup failure"
+			printf 'first=%s <%s|%s|%s>\n' "$g_zxfer_trap_exit_status" \
+				"$g_zxfer_failure_class" "$g_zxfer_failure_stage" "$g_zxfer_failure_message"
+			zxfer_note_trap_cleanup_failure 23 "second cleanup failure"
+			printf 'second=%s <%s>\n' "$g_zxfer_trap_exit_status" "$g_zxfer_failure_message"
+		)
+	)
+
+	assertEquals "A zero status changes nothing; the first failure sets the status and message; a later one keeps both." \
+		"zero=0 <>
+first=17 <runtime|trap cleanup|first cleanup failure>
+second=17 <first cleanup failure>" "$output"
+}
+
+# A failed ssh close fills an empty report message only when it is the run's
+# first failure; every other cleanup step fills it whenever it is empty.
+test_zxfer_trap_exit_keeps_a_failed_ssh_close_out_of_an_earlier_failures_report() {
+	output=$(
+		(
+			trap - EXIT INT TERM HUP QUIT
+			zxfer_reset_failure_context "unit"
+			zxfer_profile_metrics_enabled() { return 1; }
+			zxfer_abort_all_send_jobs() { return 0; }
+			zxfer_kill_registered_cleanup_pids() { return 0; }
+			zxfer_close_all_ssh_control_sockets() { return 19; }
+			zxfer_remove_ssh_control_socket_dir() { return 0; }
+			zxfer_remove_run_tmp_root() { return 0; }
+			zxfer_echoV() { :; }
+			zxfer_profile_emit_summary() { :; }
+			zxfer_emit_failure_report() {
+				printf 'report=%s|%s|<%s>\n' "$1" "${g_zxfer_failure_stage:-}" \
+					"${g_zxfer_failure_message:-}"
+			}
+			(exit 5)
+			zxfer_trap_exit
+		) 2>&1
+	)
+	status=$?
+
+	assertEquals "An earlier failure keeps its exit status." 5 "$status"
+	assertEquals "A failed ssh close must not fill the report of an earlier failure." \
+		"report=5|unit|<>" "$output"
 }
 
 # Purpose: Send one signal to a background subshell that installed the

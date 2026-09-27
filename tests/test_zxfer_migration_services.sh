@@ -741,5 +741,60 @@ test_migration_service_status_only_restore_returns_failure_without_throwing() {
 		"$output" "throw-called"
 }
 
+test_restore_migration_services_on_exit_restarts_pending_services_and_reports_failures() {
+	output=$(
+		(
+			zxfer_echoV() { printf 'verbose=%s\n' "$1"; }
+			zxfer_warn_stderr() { printf 'warning=%s\n' "$1"; }
+			zxfer_restore_migration_services_status_only() {
+				printf '%s\n' restore-attempt
+				g_zxfer_migration_service_restore_failure_message=$l_test_restore_message
+				return "$l_test_restore_status"
+			}
+
+			g_services_need_relaunch=0
+			zxfer_restore_migration_services_on_exit
+			printf 'none=%s\n' "$?"
+
+			g_services_need_relaunch=1
+			g_services_relaunch_in_progress=1
+			zxfer_restore_migration_services_on_exit
+			printf 'in_progress=%s\n' "$?"
+
+			g_services_relaunch_in_progress=0
+			l_test_restore_status=0
+			l_test_restore_message=""
+			zxfer_restore_migration_services_on_exit
+			printf 'restored=%s\n' "$?"
+
+			l_test_restore_status=37
+			g_zxfer_failure_message=""
+			zxfer_restore_migration_services_on_exit
+			printf 'failed=%s message=<%s>\n' "$?" \
+				"$g_zxfer_migration_service_restore_failure_message"
+
+			l_test_restore_message="Couldn't re-enable service svc:/broken:default."
+			g_zxfer_failure_message="primary replication failure"
+			zxfer_restore_migration_services_on_exit
+			printf 'after_primary=%s\n' "$?"
+		)
+	)
+
+	assertEquals "Exit-time restore should skip when nothing waits or a relaunch already failed, restart pending services, and warn about a failed restart only beside an earlier failure." \
+		"none=0
+verbose=zxfer exiting with services still stopped after a failed zxfer_relaunch attempt.
+in_progress=0
+verbose=zxfer exiting early; restarting stopped services.
+restore-attempt
+restored=0
+verbose=zxfer exiting early; restarting stopped services.
+restore-attempt
+failed=37 message=<Failed to restore stopped migration services during exit.>
+verbose=zxfer exiting early; restarting stopped services.
+restore-attempt
+warning=Couldn't re-enable service svc:/broken:default.
+after_primary=37" "$output"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"
