@@ -70,7 +70,8 @@ and 303 -> 88 ms under dash; W5 (one property plan program) `props` 0.92-0.93
 under `/bin/sh` and dash; W7b (property rows looked up by index, `-e` rows
 looked up instead of re-checking the file) `props` 0.73 at 100 and 200
 children under `/bin/sh` and 0.50 and 0.40 under dash (30.8 s -> 12.2 s at
-200), and `-e` at 400 children no slower than `-P` (it was 23-25 s slower).
+200), and `-e` at 400 children about as fast as `-P` (it was 23-25 s slower
+under `/bin/sh` and 17 s slower under dash).
 The `props` fixture's canned zfs scans a manifest of about five lines per
 dataset on every call, which both trees pay: without it the `-P` work at 200
 children is about 2.2 s in either shell, from 16.6 s under dash and 5.5 s
