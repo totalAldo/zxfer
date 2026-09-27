@@ -1140,6 +1140,44 @@ again hit=0 table=<>" "$(cat "$TEST_TMPDIR/prefetch_unstored.out")"
 		9 "$(wc -l <"$ROLE_LOG" | tr -d ' ')"
 }
 
+test_property_row_store_guards_fail_closed() {
+	(
+		zxfer_property_test_table_add destination "backup/dst" "compression=lz4=local"
+		l_index=$g_zxfer_destination_property_table
+		# A name holding a TAB or LF is never in an index: nothing to drop.
+		zxfer_invalidate_destination_property_mutation_cache "$(printf 'backup/dst\tx')" exact
+		zxfer_invalidate_destination_property_mutation_cache "$(printf 'x\nbackup/dst')"
+		[ "$g_zxfer_destination_property_table" = "$l_index" ] && printf 'odd names: unchanged\n'
+		# A live read of such a name is used but never cached.
+		zxfer_run_zfs_cmd_for_role() {
+			case "$*" in
+			*" property,value,source all "*) printf 'compression\tlz4\tlocal\n' ;;
+			*) printf 'compression\n' ;;
+			esac
+		}
+		zxfer_load_normalized_dataset_properties "$(printf 'tank/a\tb')" source
+		printf 'odd live read: %s table=<%s>\n' "$g_zxfer_normalized_dataset_properties" \
+			"${g_zxfer_source_property_table:-}"
+		# A parse whose last line names no stored row publishes nothing.
+		zxfer_parse_property_views() { printf 'x\ttank/src\n'; }
+		g_zxfer_source_property_tree_prefetch_root="tank/src"
+		g_recursive_source_list="tank/src"
+		l_status=0
+		zxfer_prefetch_recursive_normalized_properties source || l_status=$?
+		printf 'bad parse: status=%s state=%s table=<%s>\n' "$l_status" \
+			"$g_zxfer_source_property_tree_prefetch_state" "${g_zxfer_source_property_table:-}"
+		# No row directory stops the run.
+		zxfer_test_stub_throw_error_to_stdout
+		zxfer_create_private_temp_dir() { return 1; }
+		g_zxfer_property_row_dir=""
+		zxfer_prepare_property_read_files
+	) >"$TEST_TMPDIR/row_store_guards.out" 2>&1
+	assertEquals "odd names: unchanged
+odd live read: compression=lz4=local table=<>
+bad parse: status=1 state=2 table=<>
+Error creating temporary directory." "$(cat "$TEST_TMPDIR/row_store_guards.out")"
+}
+
 test_prefetch_recursive_normalized_properties_prepends_fresh_rows_ahead_of_live_rows() {
 	(
 		ZXFER_TEST_PROPERTY_ROWS=$(printf 'tank/src\tcompression\tlz4\tlocal')
