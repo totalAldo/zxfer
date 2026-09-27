@@ -118,10 +118,14 @@
 # Re-ratcheted 2026-09-26 (next phase W7a) after the batched live
 # destination view was dropped: a dataset this run did not change keeps its
 # discovery plan, so neither the pass's recursive view listing nor the
-# per-dataset recheck awk runs. -V measurements: incr=102 (awk 34, cat 33,
-# zfs_list_calls 1, live_destination_snapshot_rechecks 0) full / 68 (awk 17)
-# small, remote_incr=101 / 67, props=176 (awk 114) / 91. ssh_connections and
-# ssh_master_opens are unchanged; no ceiling was increased.
+# per-dataset recheck awk runs. -V measurements then: incr=102 (awk 34,
+# cat 33, zfs_list_calls 1, live_destination_snapshot_rechecks 0) full / 68
+# (awk 17) small, remote_incr=101 / 67, props=176 (awk 114) / 91. The same
+# item then cut the record files into per-dataset slices once per iteration
+# list (awk 2, sort 1 and one run-root file per list build): final
+# incr=105 (awk 36, sort 6) / 71, remote_incr=104 / 70, props=179 / 94, all
+# within the rows above. ssh_connections and ssh_master_opens are unchanged;
+# no ceiling was increased.
 noop	TOTAL	25
 noop	sed	0
 noop	awk	2

@@ -49,9 +49,9 @@
 #   g_zxfer_diverged_converged_datasets,
 #   g_zxfer_diverged_converged_marker_source).
 # reads globals: g_actual_dest, g_cmd_awk, g_initial_source,
-#   g_zxfer_run_umask, g_option_d_delete_destination_snapshots,
-#   g_option_F_force_rollback, g_option_g_grandfather_protection, and the
-#   staged snapshot record files.
+#   g_zxfer_run_umask (restored after the slices are written),
+#   g_option_d_delete_destination_snapshots, g_option_F_force_rollback,
+#   g_option_g_grandfather_protection, and the staged snapshot record files.
 # mutates caches: replication's g_is_performed_send_destroy marker (after a
 #   destroy).
 # returns via stdout: the destroy target, the creation-date display text and
@@ -239,14 +239,15 @@ EOF
 		l_split_status=$?
 	if [ "$l_split_status" -eq 0 ]; then
 		# Never restore an empty umask: ksh reads it as 0777.
-		case ${g_zxfer_run_umask:-} in
-		'' | *[!0-7]*) g_zxfer_run_umask=$(umask) ;;
+		l_split_umask=${g_zxfer_run_umask:-}
+		case $l_split_umask in
+		'' | *[!0-7]*) l_split_umask=$(umask) ;;
 		esac
 		umask 077
 		ZXFER_AWK_SLICE_BASE=$g_zxfer_snapshot_slice_base \
 			"${g_cmd_awk:-awk}" "$ZXFER_SNAPSHOT_SLICE_WRITE_AWK" \
 			"$g_zxfer_snapshot_slice_base" || l_split_status=$?
-		umask "$g_zxfer_run_umask"
+		umask "$l_split_umask"
 	fi
 	[ "$l_split_status" -eq 0 ] || return "$l_split_status"
 	# The keyed copy is spent; a memory-backed temp root need not hold it.
