@@ -1012,6 +1012,29 @@ test_zxfer_ssh_transport_directory_and_quoting_failure_branches_fail_closed() {
 			set +e
 			g_zxfer_ssh_control_socket_dir_result=""
 			g_zxfer_run_tmp_root="$branch_root/long-run-root"
+			fake_mktemp_dir="$branch_root/fake-mktemp"
+			mkdir -p "$fake_mktemp_dir"
+			printf '#!/bin/sh\nexit 0\n' >"$fake_mktemp_dir/mktemp"
+			chmod 755 "$fake_mktemp_dir/mktemp"
+			PATH="$fake_mktemp_dir:$PATH"
+			zxfer_ensure_run_tmp_root() {
+				return 0
+			}
+			zxfer_is_ssh_control_socket_path_short_enough() {
+				[ "${1#"$g_zxfer_run_tmp_root"/}" = "$1" ]
+			}
+			zxfer_find_default_tmpdir() {
+				g_zxfer_default_tmpdir_result=$branch_root
+			}
+			zxfer_ensure_ssh_control_socket_dir
+			printf 'foreign_status=%s handle=<%s> dir=<%s>\n' "$?" \
+				"$g_zxfer_ssh_control_socket_short_dir" \
+				"$g_zxfer_ssh_control_socket_dir_result"
+		)
+		(
+			set +e
+			g_zxfer_ssh_control_socket_dir_result=""
+			g_zxfer_run_tmp_root="$branch_root/long-run-root"
 			long_parent="$branch_root/long-parent"
 			mkdir -p "$long_parent"
 			zxfer_ensure_run_tmp_root() {
@@ -1036,6 +1059,8 @@ test_zxfer_ssh_transport_directory_and_quoting_failure_branches_fail_closed() {
 		"$output" "quote_output=Host spec (-O/-T) must use literal whitespace-delimited tokens only"
 	assertContains "A short socket directory mktemp cannot create should fail closed without a handle." \
 		"$output" "create_status=1 handle=<>"
+	assertContains "An empty or foreign mktemp answer should fail closed without a handle." \
+		"$output" "foreign_status=1 handle=<> dir=<>"
 	assertContains "A short socket directory still too long should fail closed without a handle." \
 		"$output" "too_long_status=1 handle=<>"
 	assertContains "A short socket directory still too long should be removed at once." \

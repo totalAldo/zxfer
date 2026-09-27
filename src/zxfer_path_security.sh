@@ -178,9 +178,10 @@ zxfer_get_path_mode_octal() {
 # Usage: zxfer_get_private_directory_security_record DIR; publishes
 # INODE<TAB>UID<TAB>MODE in g_zxfer_private_directory_record_result, or
 # returns 1 with it empty. Runtime records it when it creates the run root
-# and compares a fresh one right before removing the root. The inode alone
-# identifies the directory because its parent is fixed: a directory put in
-# its place gets a new inode unless a file system is mounted there.
+# and compares a fresh one right before removing the root. The parent is
+# fixed, so a device number would add nothing short of a mount at that exact
+# path: a directory swapped in while the original still exists has another
+# inode on the same file system.
 zxfer_get_private_directory_security_record() {
 	g_zxfer_private_directory_record_result=""
 	[ -d "$1" ] && [ ! -L "$1" ] || return 1

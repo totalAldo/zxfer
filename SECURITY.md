@@ -71,9 +71,9 @@ Key protections already present in the project include:
   discovery state, and a listing ssh could not deliver stops the run without
   even that probe
 - remote capability responses are framed, coverage-checked, and parsed once per
-  role, host and requested tool set; only a fully validated response is
-  stored, and later OS/tool lookups reuse its validated fields instead of
-  trusting or reparsing raw handshake text
+  host and requested tool set (equal `-O` and `-T` specs share one probe);
+  only a fully validated response is stored, and later OS/tool lookups reuse
+  its validated fields instead of trusting or reparsing raw handshake text
 - one run-private directory outside the run root, the ssh short socket
   directory made only when a long TMPDIR would push the control-socket path
   past the `sun_path` limit: a random `mktemp -d` name under the validated

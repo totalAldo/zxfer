@@ -90,7 +90,8 @@ Use remote compression:
   optional `ZXFER_ERROR_LOG` mirroring, and an explicit
   `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1` local-debug override
 - Per-run ssh control sockets and one in-memory remote capability probe per
-  role, host and requested tool set per run; all run-private temp state lives under one 0700
+  host and requested tool set per run (equal `-O` and `-T` specs share it);
+  all run-private temp state lives under one 0700
   per-run temp root removed in one pass at exit, and zxfer takes no
   cross-process locks (each `ZXFER_ERROR_LOG` report is one validated
   append-mode write)
@@ -180,9 +181,10 @@ invocation opens at most one control master per remote role under its private
 per-run temp directory, opens it before its first remote command (a `-T` host
 spec equal to the `-O` spec shares the origin master), multiplexes every
 remote command of the run over it, and closes it on exit. Remote
-helper discovery costs one capability probe round trip per role, host and
-requested tool set per run, held in memory and keyed by the host spec and
-requested helper set (the secure PATH and ssh policy are fixed for the run).
+helper discovery costs one capability probe round trip per host and
+requested tool set per run (a `-T` spec equal to the `-O` spec shares the
+origin's probe), held in memory and keyed by the host spec and requested
+helper set (the secure PATH and ssh policy are fixed for the run).
 A recursive `-O -j` pull that the fast no-op proof finds work for probes the
 origin a second time, for `parallel`. Nothing is shared between
 concurrent or consecutive zxfer invocations, matching upstream zxfer behavior.

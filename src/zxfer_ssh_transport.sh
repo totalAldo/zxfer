@@ -657,6 +657,11 @@ zxfer_ensure_ssh_control_socket_dir() {
 	l_socket_short_dir=$(umask 077 && exec mktemp -d \
 		"$g_zxfer_default_tmpdir_result/zxfer.ssh.XXXXXX" 2>/dev/null) ||
 		return 1
+	# Only a name from the template is ours; anything else is left alone.
+	case $l_socket_short_dir in
+	"$g_zxfer_default_tmpdir_result"/zxfer.ssh.?*) ;;
+	*) return 1 ;;
+	esac
 	if ! zxfer_is_ssh_control_socket_path_short_enough \
 		"$l_socket_short_dir/ssh-target.sock"; then
 		rmdir "$l_socket_short_dir" 2>/dev/null || :

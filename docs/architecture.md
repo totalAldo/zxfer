@@ -47,10 +47,11 @@ module or a chain of setters.
   argv-preserving zfs role runner and renderer, active remote ZFS routing, and
   per-run control-socket lifecycle
 - [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh): remote helper
-  resolution, one fail-closed capability probe per role, host and requested
-  tool set, kept for the run in one in-memory slot per role (origin, target),
-  and resolved remote OS/tool selections; it consumes the SSH transport API
-  but does not own transport state
+  resolution, one fail-closed capability probe per host and requested tool
+  set, kept for the run in one in-memory slot per role (origin, target), either
+  of which answers a lookup for the same host and tools, and resolved remote
+  OS/tool selections; it consumes the SSH transport API but does not own
+  transport state
 - [../src/zxfer_cli.sh](../src/zxfer_cli.sh): CLI parsing, option validation,
   and compression command interpretation
 - [../src/zxfer_snapshot_state.sh](../src/zxfer_snapshot_state.sh): the one
@@ -317,8 +318,10 @@ One accepted capability response is parsed once and checked for framing,
 requested-tool coverage, duplicate records, statuses, and helper-path shape.
 Only then are the OS, zfs status and validated tool records stored in that
 role's slot, keyed by host and requested tool set. Later OS and tool lookups
-for the same role, host and scope load those fields without another probe or
-parse. A failed lookup leaves no parsed fields behind. A tool outside the
+for the same host and scope load those fields from either role's slot
+without another probe or parse: a probe depends only on the host spec and
+the scope, and equal `-O` and `-T` specs ask the same scope (the union of
+both roles'), so that host is probed once. A failed lookup leaves no parsed fields behind. A tool outside the
 host's scope is probed as "zfs TOOL", and a tool without a record gets one
 direct probe. Secure PATH and ssh policy cannot change within a run, so they
 are not part of the key.
@@ -440,7 +443,7 @@ flowchart TD
     D2 --> D3["Run zxfer_init_session_environment()"]
     D3 --> E["Parse flags with zxfer_read_command_line_switches()"]
     E --> F["Validate combinations with zxfer_consistency_check()"]
-    F --> G["When -O or -T is configured: open each role's ssh control master, then probe remote capabilities once per role over it into in-memory state"]
+    F --> G["When -O or -T is configured: open each role's ssh control master, then probe each remote host's capabilities once over it into in-memory state"]
     G --> H["Resolve local and needed remote helper paths with zxfer_init_variables()"]
     H --> I["Enter zxfer_run_zfs_mode_loop()"]
     I --> J["Start one pass in zxfer_run_zfs_mode()"]
@@ -696,8 +699,8 @@ separate owners. `zxfer_ssh_transport.sh` owns the short
 `ssh-<role>.sock` paths under the private temp root (including the fallback for
 long TMPDIR paths), managed options, host-wrapper parsing, and socket cleanup.
 `zxfer_remote_hosts.sh` owns only in-memory capability responses and resolved
-remote helpers, including the per-role slot (host, requested tools, validated
-fields) reused by later lookups. Masters open during startup, before the first remote command; a `-T` spec
+remote helpers, including the per-role slots (host, requested tools, validated
+fields) reused by later lookups of either role. Masters open during startup, before the first remote command; a `-T` spec
 equal to the `-O` spec reuses the origin master. Nothing is shared between
 concurrent zxfer processes, so no socket locks, leases, or capability cache
 files exist to coordinate; session trap cleanup closes each opened master once
