@@ -421,6 +421,24 @@ test_integration_fragments_reject_bad_names_symlinks_and_an_empty_directory() {
 	assertEquals "A fragment name outside lower-case name_tests.sh should fail closed." 1 "$bad_name_status"
 	assertContains "The name failure should name the fragment." \
 		"$bad_name_output" "fragment [Upper_tests.sh] must be named like name_tests.sh in lower case"
+	# In a UTF-8 locale, bash 3.2 (macOS /bin/sh) matches a range such as
+	# [a-z] by collation, which also takes upper-case and accented letters.
+	for utf8_bad_name in Upper mixedCase "name$(printf '\303\251')"; do
+		make_integration_fixture_dir "$fixture_dir"
+		printf '%s\n' 'bad_test() {' ':' '}' >"$fixture_dir/integration/${utf8_bad_name}_tests.sh"
+		utf8_status=0
+		utf8_output=$(
+			{
+				LC_ALL=en_US.UTF-8
+				export LC_ALL
+				INTEGRATION_TESTS_DIR=$fixture_dir zxfer_integration_fragment_paths
+			} 2>&1
+		) || utf8_status=$?
+		assertEquals "Fragment name [$utf8_bad_name] should fail closed in a UTF-8 locale." \
+			1 "$utf8_status"
+		assertContains "The UTF-8 locale failure should be the name check for [$utf8_bad_name]." \
+			"$utf8_output" "must be named like name_tests.sh in lower case"
+	done
 	assertEquals "Symbolic-link fragments should fail closed." 1 "$symlink_status"
 	assertContains "Symlink failures should retain the no-indirection contract." \
 		"$symlink_output" "fragment [symlink_tests.sh] must not be a symbolic link"

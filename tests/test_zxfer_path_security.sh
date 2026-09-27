@@ -150,7 +150,9 @@ test_zxfer_read_path_metadata_reads_real_paths_with_odd_names() {
 		: >"with space"
 		: >"-leading-dash"
 		: >"tab	name"
-		mkdir "$nl_name" "-dash-dir"
+		# ./ keeps GNU and BusyBox mkdir, which permute arguments, from
+		# reading -dash-dir as options.
+		mkdir ./"$nl_name" ./-dash-dir
 		chmod 640 "with space"
 		chmod 600 ./-leading-dash
 		chmod 604 "tab	name"
@@ -169,7 +171,8 @@ test_zxfer_read_path_metadata_reads_real_paths_with_odd_names() {
 			# shellcheck disable=SC2012
 			expected_inode=$(ls -di ./"${name#"$odd_dir"/}" | awk '{ print $1; exit }')
 			inode_check="inode differs"
-			[ "$g_zxfer_path_inode_result" != "$expected_inode" ] ||
+			[ -z "$expected_inode" ] ||
+				[ "$g_zxfer_path_inode_result" != "$expected_inode" ] ||
 				inode_check="inode-ok"
 			printf '%s|%s|%s|%s\n' "$read_status" \
 				"$g_zxfer_path_owner_uid_result" "$g_zxfer_path_mode_result" \
