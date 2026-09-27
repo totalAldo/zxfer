@@ -72,7 +72,10 @@ that. No profile runs `tests/run_integration_zxfer.sh` on the host.
 - `--jobs N` bounds concurrent suites (default: the CPU count, at most 4,
   never more than the runnable suites; a larger explicit value is announced
   and clamped). With more than one job each suite's output is buffered and
-  replayed in suite order; `--jobs 1` streams it live.
+  replayed in suite order, and the known-slow suites (`RUNNER_SLOW_SUITES`
+  in the runner, longest first) start before the rest, so a long suite never
+  starts last and stretches the run; `--jobs 1` runs and streams in suite
+  order.
 - `--suite-timeout SECONDS` (or `ZXFER_TEST_SUITE_TIMEOUT`; default 900,
   0 disables) stops a suite that runs longer: the runner prints the suite
   and its processes, sends TERM, then KILL, replays the partial output and

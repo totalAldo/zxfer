@@ -6,10 +6,11 @@
 # Each suite runs under a worker subshell that writes "done ID STATUS" to a
 # FIFO the runner reads, so a finished suite is noticed at once. Parallel
 # output is buffered per suite and replayed in suite order; --jobs 1 streams
-# it live. A ticker writes "tick" to the same FIFO once a second: the watchdog
-# counts ticks to stop a suite that runs longer than --suite-timeout, and
-# signal teardown counts them to bound its grace period. Signal traps only
-# record the signal; the main loop tears down after the next event.
+# it live. With more than one job the known-slow suites (RUNNER_SLOW_SUITES)
+# start first. A ticker writes "tick" to the same FIFO once a second: the
+# watchdog counts ticks to stop a suite that runs longer than --suite-timeout,
+# and signal teardown counts them to bound its grace period. Signal traps
+# only record the signal; the main loop tears down after the next event.
 #
 # Stopping a suite is best effort: TERM, then KILL, to the suite and every
 # descendant of its worker found in one process-table snapshot. A process that
@@ -35,15 +36,39 @@ RUNNER_NAMED_TEST_SELECTIONS=
 RUNNER_POSITIONAL_TEST_NAMES=
 RUNNER_HAS_NAMED_TESTS=0
 
+# The suites that take far longer than the rest, longest first (each took 10
+# to 80 s alone under macOS /bin/sh in 2026-09; the other suites take 8 s or
+# less). With more than one job these start before the others, so that no
+# long suite starts last and sets the length of the whole run
+# (longest-processing-time-first scheduling); output is still replayed in
+# suite order. A name that is not selected is ignored. Refresh the list when
+# suite times shift: time each suite alone with
+# ./tests/run_shunit_tests.sh SUITE.
+RUNNER_SLOW_SUITES="
+test_contract_failures.sh
+test_contract_planning.sh
+test_run_argv_fuzz.sh
+test_zxfer_backup_metadata.sh
+test_zxfer_runtime.sh
+test_zxfer_error_log.sh
+test_zxfer_snapshot_discovery.sh
+test_run_shunit_tests.sh
+test_zxfer_ssh_transport.sh
+test_zxfer_snapshot_producers.sh
+test_contract_properties.sh
+"
+
 # Run state. RUNNER_WORKERS holds one ID:PID:START_TICK:PHASE:PHASE_TICK word
-# per running worker; PHASE is run, term (watchdog sent TERM) or kill.
+# per running worker; PHASE is run, term (watchdog sent TERM) or kill. A
+# suite's ID is its position among the selected suites, so replay follows
+# suite order whatever order the suites start in.
 RUNNER_STATE_DIR=
 RUNNER_TICKER_PID=
 RUNNER_TICKS=0
 RUNNER_GRACE_TICKS=3
 RUNNER_WORKERS=
 RUNNER_INFLIGHT=0
-RUNNER_LAUNCHED=0
+RUNNER_TOTAL=0
 RUNNER_NEXT_REPLAY=1
 RUNNER_PENDING_SIGNAL=
 RUNNER_STOPPING=0
@@ -614,14 +639,44 @@ runner_worker() {
 	printf 'done %s %s\n' "$l_worker_id" "$?" >&3
 }
 
+# Purpose: Print the IDs of the given suites (their positions, 1 to N) in the
+# order to start them: with more than one job, the RUNNER_SLOW_SUITES entries
+# first, in that list's order, then the rest in suite order.
+# Usage: runner_launch_order SUITE...
+runner_launch_order() {
+	l_order_first=" "
+	if [ "$RUNNER_PARALLEL_JOBS" -gt 1 ]; then
+		for l_order_slow in $RUNNER_SLOW_SUITES; do
+			l_order_id=0
+			for l_order_suite in "$@"; do
+				l_order_id=$((l_order_id + 1))
+				if [ "${l_order_suite##*/}" = "$l_order_slow" ]; then
+					case "$l_order_first" in
+					*" $l_order_id "*) ;;
+					*) l_order_first="$l_order_first$l_order_id " ;;
+					esac
+				fi
+			done
+		done
+	fi
+	l_order_id=0
+	for l_order_suite in "$@"; do
+		l_order_id=$((l_order_id + 1))
+		case "$l_order_first" in
+		*" $l_order_id "*) ;;
+		*) l_order_first="$l_order_first$l_order_id " ;;
+		esac
+	done
+	printf '%s\n' "$l_order_first"
+}
+
 # Purpose: Start one suite, or record a missing suite or the helper library
 # for in-order replay.
-# Usage: runner_launch_suite SUITE_PATH TEST_NAMES (one name per line).
+# Usage: runner_launch_suite ID SUITE_PATH TEST_NAMES (one name per line).
 runner_launch_suite() {
-	l_launch_path=$1
-	l_launch_tests=$2
-	RUNNER_LAUNCHED=$((RUNNER_LAUNCHED + 1))
-	l_launch_id=$RUNNER_LAUNCHED
+	l_launch_id=$1
+	l_launch_path=$2
+	l_launch_tests=$3
 	printf '%s\n' "$l_launch_path" >"$RUNNER_STATE_DIR/$l_launch_id.suite"
 
 	if [ ! -f "$l_launch_path" ]; then
@@ -847,7 +902,7 @@ runner_record_result() {
 # replayed, in suite order.
 # Usage: runner_replay_ready
 runner_replay_ready() {
-	while [ "$RUNNER_NEXT_REPLAY" -le "$RUNNER_LAUNCHED" ] &&
+	while [ "$RUNNER_NEXT_REPLAY" -le "$RUNNER_TOTAL" ] &&
 		[ -f "$RUNNER_STATE_DIR/$RUNNER_NEXT_REPLAY.status" ]; do
 		l_replay_id=$RUNNER_NEXT_REPLAY
 		l_replay_status=1
@@ -1097,15 +1152,19 @@ trap 'runner_note_signal TERM' TERM
 trap 'runner_stop' EXIT
 runner_start || exit 1
 
-for suite in "$@"; do
-	suite_path=$(resolve_suite_path "$suite")
+RUNNER_TOTAL=$#
+for suite_id in $(runner_launch_order "$@"); do
+	suite_path=$(
+		shift "$((suite_id - 1))"
+		resolve_suite_path "$1"
+	)
 	suite_test_names=$(selected_test_names_for_suite "$suite_path")
 	while [ "$RUNNER_INFLIGHT" -ge "$RUNNER_PARALLEL_JOBS" ]; do
 		runner_wait_event
 		runner_check_signal
 		runner_replay_ready
 	done
-	runner_launch_suite "$suite_path" "$suite_test_names"
+	runner_launch_suite "$suite_id" "$suite_path" "$suite_test_names"
 	runner_check_signal
 	runner_replay_ready
 done

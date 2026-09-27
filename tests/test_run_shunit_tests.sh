@@ -874,6 +874,59 @@ test_run_shunit_tests_reports_each_finished_suite_at_once() {
 		"[ $l_elapsed -le 4 ]"
 }
 
+# With more than one job a suite named in RUNNER_SLOW_SUITES starts before
+# the others, although it comes last in suite order; the replay keeps suite
+# order, and --jobs 1 keeps suite order for both.
+# shellcheck disable=SC2016,SC2317,SC2329  # Literal fixture source; invoked indirectly by shunit2.
+test_run_shunit_tests_starts_known_slow_suites_first_with_more_than_one_job() {
+	l_slow_name=$(awk '
+		/^RUNNER_SLOW_SUITES="$/ { listed = 1; next }
+		listed { print; exit }
+	' "$RUN_SHUNIT_TESTS_BIN")
+	case "$l_slow_name" in
+	test_*.sh) ;;
+	*)
+		fail "The runner should list its known-slow suites one per line: <$l_slow_name>"
+		return 0
+		;;
+	esac
+	l_order_dir="$TEST_TMPDIR/slow-first"
+	rm -rf "$l_order_dir"
+	mkdir -p "$l_order_dir"
+	# aaa holds its slot for a second, so bbb can start only after the
+	# slow suite has recorded its start.
+	printf '%s\n' '#!/bin/sh' 'printf "%s\n" aaa >>"${FAKE_SUITE_LOG:?}"' \
+		'sleep 1' >"$l_order_dir/test_aaa_fast.sh"
+	printf '%s\n' '#!/bin/sh' 'printf "%s\n" bbb >>"${FAKE_SUITE_LOG:?}"' \
+		>"$l_order_dir/test_bbb_fast.sh"
+	printf '%s\n' '#!/bin/sh' 'printf "%s\n" slow >>"${FAKE_SUITE_LOG:?}"' \
+		>"$l_order_dir/$l_slow_name"
+	chmod +x "$l_order_dir"/*.sh
+	set -- "$l_order_dir/test_aaa_fast.sh" "$l_order_dir/test_bbb_fast.sh" \
+		"$l_order_dir/$l_slow_name"
+
+	output=$(FAKE_SUITE_LOG="$FAKE_SUITE_LOG" "$RUN_SHUNIT_TESTS_BIN" --jobs 2 "$@")
+	parallel_starts=$(tr '\n' ' ' <"$FAKE_SUITE_LOG")
+	: >"$FAKE_SUITE_LOG"
+	FAKE_SUITE_LOG="$FAKE_SUITE_LOG" "$RUN_SHUNIT_TESTS_BIN" --jobs 1 "$@" >/dev/null
+	serial_starts=$(tr '\n' ' ' <"$FAKE_SUITE_LOG")
+
+	assertContains "Every suite should pass." "$output" "==> shunit2 summary: 3 passed, 0 failed"
+	case "$parallel_starts" in
+	*slow*bbb*) l_slow_first=0 ;;
+	*) l_slow_first=1 ;;
+	esac
+	assertEquals "With two jobs the known-slow suite should start before bbb (starts: $parallel_starts)." \
+		0 "$l_slow_first"
+	case "$output" in
+	*"suite: $1"*"suite: $2"*"suite: $3"*) l_replay_in_order=0 ;;
+	*) l_replay_in_order=1 ;;
+	esac
+	assertEquals "The replay should keep suite order. Output: $output" 0 "$l_replay_in_order"
+	assertEquals "With one job the suites should start in suite order." \
+		"aaa bbb slow " "$serial_starts"
+}
+
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_watchdog_stops_a_stalled_suite_and_continues() {
 	l_stalled_suite="$TEST_TMPDIR/stalled-suite.sh"
