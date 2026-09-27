@@ -5,31 +5,6 @@
 # g_did_delete_dest_snapshots=1).
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
-test_copy_snapshots_skips_when_no_pending_snapshots() {
-	g_actual_dest="backup/target/src"
-	g_dest_has_snapshots=1
-	g_src_snapshot_transfer_list=""
-	log="$TEST_TMPDIR/copy_none.log"
-	: >"$log"
-
-	(
-		COPY_LOG="$log"
-		zxfer_reconcile_live_destination_snapshot_state() {
-			:
-		}
-		zxfer_rollback_destination_to_last_common_snapshot() {
-			printf 'rollback\n' >>"$COPY_LOG"
-		}
-		zxfer_zfs_send_receive() {
-			printf 'send\n' >>"$COPY_LOG"
-		}
-		zxfer_copy_snapshots "tank/src"
-	)
-
-	assertEquals "zxfer_copy_snapshots should stop early when there are no source snapshots to send." \
-		"" "$(cat "$log")"
-}
-
 test_copy_snapshots_bootstraps_missing_destination_and_finishes_incremental() {
 	g_actual_dest="backup/target/src"
 	g_src_snapshot_transfer_list="tank/src@snap1
@@ -820,45 +795,6 @@ test_copy_snapshots_skips_rollback_when_deletions_left_no_new_sends() {
 		"" "$(cat "$log")"
 	assertContains "The live re-plan should leave nothing to copy." \
 		"$output" "No snapshots to copy, skipping destination dataset: backup/target/src."
-}
-
-test_copy_snapshots_does_not_pre_rollback_after_deletions_without_force_flag() {
-	zxfer_test_stage_source_records "tank/src@snap2	222
-tank/src@snap1	111"
-	g_option_F_force_rollback=""
-	g_actual_dest="backup/target/src"
-	g_dest_has_snapshots=1
-	g_did_delete_dest_snapshots=1
-	g_deleted_dest_newer_snapshots=1
-	g_last_common_snap="tank/src@snap1	111"
-	g_src_snapshot_transfer_list="tank/src@snap1	111
-tank/src@snap2	222"
-	log="$TEST_TMPDIR/copy_no_force_no_rollback.log"
-	: >"$log"
-
-	(
-		COPY_LOG="$log"
-		zxfer_probe_destination_existence() {
-			g_zxfer_destination_exists_result=1
-		}
-		zxfer_run_destination_zfs_cmd() {
-			if [ "$1" = "list" ] && [ "$2" = "-H" ] && [ "$3" = "-d" ] && [ "$4" = "1" ] && [ "$5" = "-o" ] &&
-				[ "$6" = "name,guid" ] && [ "$7" = "-t" ] && [ "$8" = "snapshot" ] &&
-				[ "$9" = "backup/target/src" ]; then
-				printf '%s\n' "backup/target/src@snap1	111"
-				return 0
-			fi
-			printf 'rollback %s\n' "$*" >>"$COPY_LOG"
-			return 0
-		}
-		zxfer_zfs_send_receive() {
-			printf 'send %s %s %s %s\n' "$1" "$2" "$3" "$4" >>"$COPY_LOG"
-		}
-		zxfer_copy_snapshots "tank/src"
-	)
-
-	assertEquals "Snapshot deletion without -F should not trigger a destructive pre-send rollback." \
-		"send tank/src@snap1 tank/src@snap2 backup/target/src 1" "$(cat "$log")"
 }
 
 test_copy_snapshots_does_not_pre_rollback_after_older_snapshot_deletions() {

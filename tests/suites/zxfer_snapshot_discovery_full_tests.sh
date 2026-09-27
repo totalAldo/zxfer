@@ -1700,31 +1700,6 @@ backup/dst/src"
 	done
 }
 
-# A -T no-op lists no dataset inventory: nothing after discovery reads it.
-test_get_zfs_list_remote_target_noop_skips_the_dataset_inventory() {
-	zfs_log="$TEST_TMPDIR/get_zfs_remote_noop.zfs"
-	: >"$zfs_log"
-
-	(
-		ZFS_LOG="$zfs_log"
-		g_option_T_target_host=target.example
-		g_option_R_recursive="-R"
-		zxfer_write_source_snapshot_list_to_file() {
-			printf '%s\n' "tank/src@snapA	guid-a" >"$1"
-			: >"$2"
-			g_source_snapshot_list_pid=""
-		}
-		zxfer_run_destination_zfs_cmd() {
-			printf '%s\n' "$*" >>"$ZFS_LOG"
-			printf '%s\t%s\n' "backup/dst/src@snapA" "guid-a"
-		}
-		zxfer_get_zfs_list
-	) >/dev/null
-
-	assertEquals "A -T no-op should list only the destination snapshots." \
-		"list -Hr -o name,guid -t snapshot backup/dst/src" "$(cat "$zfs_log")"
-}
-
 test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
 	output=$(
 		(

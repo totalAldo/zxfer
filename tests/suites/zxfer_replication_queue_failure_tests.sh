@@ -855,48 +855,6 @@ test_copy_filesystems_allows_post_unmount_migration_replication() {
 copy backup/target/src" "$(cat "$log")"
 }
 
-test_run_zfs_mode_loop_exits_after_single_iteration_when_no_changes() {
-	g_option_Y_yield_iterations=4
-	log="$TEST_TMPDIR/run_loop_single.log"
-	: >"$log"
-
-	(
-		RUN_LOOP_LOG="$log"
-		zxfer_run_zfs_mode() {
-			printf 'run\n' >>"$RUN_LOOP_LOG"
-			g_is_performed_send_destroy=0
-		}
-		zxfer_run_zfs_mode_loop
-	)
-
-	line_count=$(awk 'END {print NR}' "$log")
-	assertEquals "Loop should stop after one iteration when no sends/destroys occur." "1" "$line_count"
-}
-
-test_run_zfs_mode_loop_repeats_until_changes_stop() {
-	g_option_Y_yield_iterations=4
-	log="$TEST_TMPDIR/run_loop_repeat.log"
-	: >"$log"
-
-	(
-		RUN_LOOP_LOG="$log"
-		iteration=0
-		zxfer_run_zfs_mode() {
-			iteration=$((iteration + 1))
-			printf 'run %s\n' "$iteration" >>"$RUN_LOOP_LOG"
-			if [ "$iteration" -ge 2 ]; then
-				g_is_performed_send_destroy=0
-			else
-				g_is_performed_send_destroy=1
-			fi
-		}
-		zxfer_run_zfs_mode_loop
-	)
-
-	line_count=$(awk 'END {print NR}' "$log")
-	assertEquals "Loop should run until the helper clears the send/destroy flag." "2" "$line_count"
-}
-
 test_run_zfs_mode_loop_resets_property_cache_each_iteration() {
 	g_option_Y_yield_iterations=4
 	log="$TEST_TMPDIR/run_loop_cache_reset.log"

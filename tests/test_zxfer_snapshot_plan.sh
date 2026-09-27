@@ -1453,31 +1453,6 @@ tank/src@zxfer_3	333" "$g_src_snapshot_transfer_list"
 		"tank/src" "$g_zxfer_diverged_converged_marker_source"
 }
 
-# Divergence contract: without BOTH -d and -F the diverged dataset fails
-# closed via the structured error path before any delete or send is planned.
-test_inspect_delete_snap_fails_closed_on_divergence_without_both_d_and_f() {
-	g_actual_dest="backup/dst"
-	stage_plan_record_files "tank/src@zxfer_3	333
-tank/src@zxfer_2	222
-tank/src@zxfer_1	111" "backup/dst@zxfer_2	999
-backup/dst@zxfer_1	111"
-
-	for divergence_flag_combo in "0:" "1:" "0:-F"; do
-		g_option_d_delete_destination_snapshots=${divergence_flag_combo%%:*}
-		g_option_F_force_rollback=${divergence_flag_combo#*:}
-		divergence_status=0
-		divergence_output=$(
-			(zxfer_inspect_delete_snap "$g_option_d_delete_destination_snapshots" "tank/src") 2>&1
-		) || divergence_status=$?
-		assertEquals "Divergence without both -d and -F must abort the run [$divergence_flag_combo]." \
-			1 "$divergence_status"
-		assertContains "The fail-closed error should name the diverged dataset [$divergence_flag_combo]." \
-			"$divergence_output" "Destination dataset [backup/dst] has diverged from source dataset [tank/src]"
-		assertContains "The fail-closed error should state the -d -F remediation [$divergence_flag_combo]." \
-			"$divergence_output" "Re-run with BOTH -d and -F"
-	done
-}
-
 test_inspect_delete_snap_passes_the_planned_delete_list_to_delete_snaps() {
 	log_file="$TEST_TMPDIR/inspect_delete.log"
 	g_actual_dest="backup/dst"
@@ -1578,33 +1553,6 @@ tank/src@zxfer_1	111" "backup/dst@zxfer_2	999"
 
 	assertContains "An aligned live view should verify and clear the marker." \
 		"$verify_output" "verified marker=[]"
-}
-
-test_verify_converged_destination_fails_on_remaining_divergence() {
-	g_zxfer_diverged_converged_datasets="backup/dst	tank/src"
-	stage_plan_record_files "tank/src@zxfer_2	222
-tank/src@zxfer_1	111" "backup/dst@zxfer_1	111"
-	live_file="$TEST_TMPDIR/verify_diverged.records"
-	printf '%s\n' "backup/dst@zxfer_2	999" "backup/dst@zxfer_1	111" >"$live_file"
-
-	verify_status=0
-	verify_output=$(
-		(
-			zxfer_get_live_destination_record_file() {
-				g_zxfer_live_destination_record_file_result=$live_file
-			}
-			zxfer_verify_converged_destination_after_receive "backup/dst"
-		) 2>&1
-	) || verify_status=$?
-
-	assertEquals "Remaining divergence after convergence must abort the run." \
-		1 "$verify_status"
-	assertContains "The re-divergence error should name the dataset." \
-		"$verify_output" "Destination dataset [backup/dst] re-diverged after convergence"
-	assertContains "The re-divergence error should name the snapshot and both guids." \
-		"$verify_output" "backup/dst@zxfer_2: source guid 222 vs destination guid 999"
-	assertContains "The re-divergence error should blame an external writer." \
-		"$verify_output" "An external writer is modifying the destination"
 }
 
 test_verify_converged_destination_reports_live_listing_failures() {

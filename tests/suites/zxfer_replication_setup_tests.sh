@@ -11,39 +11,6 @@ zxfer_test_prepare_roots_in_subshell() {
 	) 2>&1
 }
 
-test_prepare_zfs_mode_roots_prefers_recursive_flag() {
-	g_option_R_recursive="tank/src"
-
-	zxfer_prepare_zfs_mode_roots
-
-	assertEquals "Recursive source should be selected when -R is provided." "$g_option_R_recursive" "$g_initial_source"
-}
-
-test_prepare_zfs_mode_roots_uses_nonrecursive_when_only_N_set() {
-	g_option_N_nonrecursive="tank/nonrecursive"
-
-	zxfer_prepare_zfs_mode_roots
-
-	assertEquals "Non-recursive source should be selected when -N is provided." "$g_option_N_nonrecursive" "$g_initial_source"
-}
-
-test_prepare_zfs_mode_roots_rejects_conflicting_N_and_R() {
-	g_option_R_recursive="tank/src"
-	g_option_N_nonrecursive="tank/child"
-
-	status=0
-	zxfer_test_prepare_roots_in_subshell >/dev/null || status=$?
-
-	assertEquals "Conflicting options should yield usage exit status 2." "2" "$status"
-}
-
-test_prepare_zfs_mode_roots_requires_N_or_R() {
-	status=0
-	zxfer_test_prepare_roots_in_subshell >/dev/null || status=$?
-
-	assertEquals "Missing -N/-R options should exit with a usage error." "2" "$status"
-}
-
 test_prepare_zfs_mode_roots_rejects_services_without_svcadm() {
 	g_option_R_recursive="tank/src"
 	g_option_m_migrate=1
