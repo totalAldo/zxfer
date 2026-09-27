@@ -39,19 +39,22 @@
 # Module contract:
 # owns globals: ZXFER_PROPERTY_AWK_LIB and ZXFER_PROPERTY_NORMALIZE_AWK, the
 #   per-iteration property tables and recursive prefetch state, the per-run
-#   read scratch files (g_zxfer_property_*_file), and the result globals
-#   g_zxfer_normalized_dataset_properties(_cache_hit),
+#   read scratch files (g_zxfer_property_*_file), the row store
+#   (g_zxfer_property_row_dir and g_zxfer_property_row_count), and the result
+#   globals g_zxfer_normalized_dataset_properties(_cache_hit),
 #   g_zxfer_required_properties_result, g_zxfer_property_record_value/source,
 #   g_zxfer_encoded_property_value, g_zxfer_decoded_property_value (with the
 #   helper results g_zxfer_property_replace_result and
 #   g_zxfer_property_code_byte), g_zxfer_property_list_value_result,
-#   g_zxfer_property_display_list_result
+#   g_zxfer_property_display_list_result, g_zxfer_property_row_result and
+#   g_zxfer_property_row_payload_result
 #   and the shared failure text g_zxfer_property_error_result (the transfer
 #   module's source collection and create-metadata helpers write it too).
 # reads globals: the -R/-P/-o options, g_initial_source, g_destination, the
 #   recursive dataset lists, and g_cmd_awk.
-# mutates caches: the property tables, through prefetch, live-read appends,
-#   and destination invalidation.
+# mutates caches: the property tables, through prefetch, live reads, and
+#   destination invalidation; the row files of the row store, which the -e
+#   restore rows of the backup metadata module share (prefix r).
 # returns via stdout: zxfer_parse_property_views prints the parser output;
 #   every other helper publishes result globals.
 #
@@ -62,14 +65,23 @@
 
 # A property list is comma-separated "property=value=source" items whose
 # values are percent-encoded (%25 %2C %3D %3B %09 %0D %0A for % , = ; tab CR
-# LF), so a value never holds a list delimiter. Each side's table holds
-# newline-separated "dataset<TAB>list" rows in that encoding: lookups read it
-# row by row, and a destination mutation strips the mutated dataset's row, plus
-# its descendants' rows when their inherited values may have changed.
+# LF), so a value never holds a list delimiter, a TAB or a LF.
+#
+# Each side's table is an index into the row store: every list lives in its
+# own row file, and the index, "<LF>ROW<TAB>DATASET" lines ending in a LF,
+# names the rows newest first. A lookup finds the dataset's first line with
+# one pattern match over the index, which is about 30 bytes a dataset, and
+# reads that row alone, so its cost no longer grows with the lists of every
+# other dataset (dash reads a here-document one byte at a time). ROW "-" is a
+# tombstone: the dataset has no usable row, whatever older lines say. A
+# destination receive puts a tombstone ahead of the dataset's rows; a create,
+# set or inherit also strips its descendants' lines, whose inherited values
+# may have changed.
 
 # Purpose: Clear the shared property failure text and forget the property
-# read scratch files. The transfer module's result globals need no reset
-# here: each is cleared by the function that publishes it.
+# read scratch files and the row store directory. The transfer module's
+# result globals need no reset here: each is cleared by the function that
+# publishes it.
 # Usage: Called once at session initialization.
 zxfer_reset_property_reconcile_state() {
 	g_zxfer_property_error_result=""
@@ -78,10 +90,13 @@ zxfer_reset_property_reconcile_state() {
 	g_zxfer_property_human_file=""
 	g_zxfer_property_error_file=""
 	g_zxfer_property_wanted_file=""
+	g_zxfer_property_row_dir=""
 }
 
 # Purpose: Reset the per-iteration property tables, prefetch state, and lookup
-# results so the next property pass starts clean.
+# results so the next property pass starts clean. With both tables empty no
+# index names a table row, so the row numbers start again and later rows
+# overwrite the old files.
 # Usage: zxfer_reset_property_iteration_caches, at session start and at the
 # top of every replication iteration.
 zxfer_reset_property_iteration_caches() {
@@ -90,6 +105,9 @@ zxfer_reset_property_iteration_caches() {
 	g_zxfer_required_properties_result=""
 	g_zxfer_required_property_probe_result=""
 	g_zxfer_property_table_lookup_result=""
+	g_zxfer_property_row_result=""
+	g_zxfer_property_row_payload_result=""
+	g_zxfer_property_row_count=0
 	g_zxfer_source_property_table=""
 	g_zxfer_destination_property_table=""
 	g_zxfer_source_property_tree_prefetch_root=""
@@ -128,6 +146,13 @@ zxfer_refresh_property_tree_prefetch_context() {
 #   csv_to_set(csv, set)               set[item] = 1 for each non-empty item
 #   first_values(list, value, source)  the first value and source of each
 #                                      property in a serialized list
+#   store_row(payload)                 write payload and a LF to the next row
+#                                      file of the row store and return the
+#                                      row name; the caller sets
+#                                      ZXFER_AWK_ROW_DIR, ZXFER_AWK_ROW_PREFIX
+#                                      and ZXFER_AWK_ROW_BASE (the last row
+#                                      number used). A missing directory or a
+#                                      failed write exits 1.
 # shellcheck disable=SC2016  # AWK field references must remain literal.
 ZXFER_PROPERTY_AWK_LIB='
 function append_csv(list, item) {
@@ -173,6 +198,16 @@ function first_values(list, value, source, count, items, i, fields) {
 		}
 	}
 }
+function store_row(payload,    row, file) {
+	if (ENVIRON["ZXFER_AWK_ROW_DIR"] == "")
+		exit 1
+	row = ENVIRON["ZXFER_AWK_ROW_PREFIX"] (ENVIRON["ZXFER_AWK_ROW_BASE"] + (++stored_rows))
+	file = ENVIRON["ZXFER_AWK_ROW_DIR"] "/" row
+	printf "%s\n", payload > file
+	if (close(file) != 0)
+		exit 1
+	return row
+}
 '
 
 # One POSIX AWK program parses the `zfs get -H` captures of one property read.
@@ -210,6 +245,8 @@ function first_values(list, value, source, count, items, i, fields) {
 #                  every row led by the dataset name. Prints one
 #                  "dataset<TAB>payload" row per wanted dataset whose records
 #                  are all known in both views.
+#   mode=store     prefetch, but each payload goes to a row file (store_row)
+#                  and the line printed is the index line "ROW<TAB>dataset".
 # An unreadable file, a malformed or repeated skeleton row, or an empty
 # skeleton beside a non-empty view exits 1. Runs behind ZXFER_PROPERTY_AWK_LIB.
 # shellcheck disable=SC2016  # AWK field references must remain literal.
@@ -283,7 +320,7 @@ function merged_item(i,    item_value) {
 	return key_property[i] "=" encode_value(item_value) "=" source["machine", i]
 }
 BEGIN {
-	has_name = (mode == "prefetch")
+	has_name = (mode == "prefetch" || mode == "store")
 	read_skeleton(ARGV[1 + has_name])
 	read_view("machine", ARGV[2 + has_name])
 	read_view("human", ARGV[3 + has_name])
@@ -319,8 +356,14 @@ BEGIN {
 	}
 	for (i = 1; i <= dataset_count; i++) {
 		dataset = order[i]
-		if ((dataset in wanted) && !(dataset in incomplete) && dataset_payload[dataset] != "")
+		if (!(dataset in wanted) || (dataset in incomplete) || dataset_payload[dataset] == "")
+			continue
+		if (mode == "store") {
+			row = store_row(dataset_payload[dataset])
+			printf "%s\t%s\n", row, dataset
+		} else {
 			printf "%s\t%s\n", dataset, dataset_payload[dataset]
+		}
 	}
 	exit 0
 }'
@@ -328,12 +371,18 @@ BEGIN {
 # Purpose: Run ZXFER_PROPERTY_NORMALIZE_AWK over staged captures, byte for
 # byte (C locale).
 # Usage: zxfer_parse_property_views merge SKELETON MACHINE HUMAN, or
-# zxfer_parse_property_views prefetch WANTED SKELETON MACHINE HUMAN; prints the
-# program's output and returns its status.
+# zxfer_parse_property_views prefetch|store WANTED SKELETON MACHINE HUMAN;
+# prints the program's output and returns its status. store numbers its row
+# files on from g_zxfer_property_row_count and leaves that count to the
+# caller.
 zxfer_parse_property_views() {
 	l_parse_mode=$1
 	shift
-	LC_ALL=C "${g_cmd_awk:-awk}" -v mode="$l_parse_mode" \
+	l_parse_row_dir=""
+	[ "$l_parse_mode" != store ] || l_parse_row_dir=${g_zxfer_property_row_dir:-}
+	LC_ALL=C ZXFER_AWK_ROW_DIR=$l_parse_row_dir ZXFER_AWK_ROW_PREFIX=p \
+		ZXFER_AWK_ROW_BASE=${g_zxfer_property_row_count:-0} \
+		"${g_cmd_awk:-awk}" -v mode="$l_parse_mode" \
 		"$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_NORMALIZE_AWK" "$@"
 }
 
@@ -481,36 +530,81 @@ zxfer_property_list_value() {
 }
 
 ################################################################################
-# IN-MEMORY PROPERTY TABLES
+# ROW STORE AND PROPERTY TABLES
 ################################################################################
 
-# Purpose: Find one dataset's row in one side's table.
-# Usage: zxfer_property_table_find_dataset source|destination DATASET;
-# publishes the list in g_zxfer_property_table_lookup_result and returns
-# non-zero on a miss. The first matching row wins, so fresh prefetch rows
-# prepended ahead of older live rows stay authoritative.
-zxfer_property_table_find_dataset() {
-	l_find_dataset=$2
-
-	g_zxfer_property_table_lookup_result=""
+# Purpose: Find the first line an index has for KEY.
+# Usage: zxfer_find_property_row INDEX KEY; publishes the line's row name
+# ("-" for a tombstone) in g_zxfer_property_row_result, or returns 1 when no
+# line names KEY. A key never holds a TAB or LF, so TAB KEY LF matches only a
+# whole key, and the row name is the text from the LF before it.
+zxfer_find_property_row() {
+	g_zxfer_property_row_result=""
+	case $2 in
+	"" | *"$ZXFER_TAB"* | *"$ZXFER_LF"*) return 1 ;;
+	esac
+	# The case test and the longest-suffix cut are each one linear match;
+	# a cut of the text before the key would be quadratic under dash.
 	case $1 in
-	source) l_find_table=${g_zxfer_source_property_table:-} ;;
-	destination) l_find_table=${g_zxfer_destination_property_table:-} ;;
+	*"$ZXFER_TAB$2$ZXFER_LF"*) ;;
 	*) return 1 ;;
 	esac
-	[ -n "$l_find_table" ] || return 1
+	l_find_row_head=${1%%"$ZXFER_TAB$2$ZXFER_LF"*}
+	g_zxfer_property_row_result=${l_find_row_head##*"$ZXFER_LF"}
+}
 
-	# Read one row at a time: matching a glob against the whole table becomes
-	# expensive on larger trees.
-	while IFS=$ZXFER_TAB read -r l_find_name l_find_payload; do
-		[ "$l_find_name" = "$l_find_dataset" ] || continue
-		[ -n "$l_find_payload" ] || return 1
-		g_zxfer_property_table_lookup_result=$l_find_payload
-		return 0
-	done <<EOF
-$l_find_table
-EOF
-	return 1
+# Purpose: Read one row file of the row store.
+# Usage: zxfer_read_property_row ROW; publishes the payload in
+# g_zxfer_property_row_payload_result, or returns 1 for a tombstone, a name
+# the store never makes, and a row file that is missing, unreadable, empty or
+# cut short: every row file ends in a LF, which a failed write never leaves.
+zxfer_read_property_row() {
+	g_zxfer_property_row_payload_result=""
+	case $1 in
+	[a-z][0-9]*) ;;
+	*) return 1 ;;
+	esac
+	case ${1#?} in
+	*[!0-9]*) return 1 ;;
+	esac
+	[ -n "${g_zxfer_property_row_dir:-}" ] || return 1
+	# dash's read takes the file one byte at a time, but only this row.
+	{ IFS= read -r g_zxfer_property_row_payload_result <"$g_zxfer_property_row_dir/$1"; } 2>/dev/null || {
+		g_zxfer_property_row_payload_result=""
+		return 1
+	}
+	[ -n "$g_zxfer_property_row_payload_result" ]
+}
+
+# Purpose: Store one property list as the next table row file.
+# Usage: zxfer_store_property_row LIST; publishes the row name in
+# g_zxfer_property_row_result, or returns 1 when the file cannot be written,
+# which leaves the dataset uncached.
+zxfer_store_property_row() {
+	g_zxfer_property_row_result=""
+	[ -n "${g_zxfer_property_row_dir:-}" ] || return 1
+	l_store_row=p$((${g_zxfer_property_row_count:-0} + 1))
+	zxfer_write_runtime_artifact_file "$g_zxfer_property_row_dir/$l_store_row" "$1$ZXFER_LF" ||
+		return 1
+	g_zxfer_property_row_count=${l_store_row#p}
+	g_zxfer_property_row_result=$l_store_row
+}
+
+# Purpose: Find one dataset's list in one side's table.
+# Usage: zxfer_property_table_find_dataset source|destination DATASET;
+# publishes the list in g_zxfer_property_table_lookup_result and returns
+# non-zero on a miss. The newest line for the dataset wins, and a tombstone
+# or an empty or unreadable row is a miss that hides every older line.
+zxfer_property_table_find_dataset() {
+	g_zxfer_property_table_lookup_result=""
+	case $1 in
+	source) l_find_index=${g_zxfer_source_property_table:-} ;;
+	destination) l_find_index=${g_zxfer_destination_property_table:-} ;;
+	*) return 1 ;;
+	esac
+	zxfer_find_property_row "$l_find_index" "$2" || return 1
+	zxfer_read_property_row "$g_zxfer_property_row_result" || return 1
+	g_zxfer_property_table_lookup_result=$g_zxfer_property_row_payload_result
 }
 
 # Purpose: Reset the destination table and re-arm its prefetch so freshly
@@ -524,62 +618,85 @@ zxfer_reset_destination_property_iteration_cache() {
 # Purpose: Drop the destination table rows that one mutation may have changed.
 # Usage: zxfer_invalidate_destination_property_mutation_cache [DATASET
 # [subtree|exact]]; without DATASET the whole destination table is reset.
-# subtree (the default, for create, set and inherit) strips DATASET and its
+# subtree (the default, for create, set and inherit) drops DATASET and its
 # descendants, whose inherited values may have changed. exact (for receive)
-# strips DATASET only: zxfer's receive never carries properties, because its
+# drops DATASET only: zxfer's receive never carries properties, because its
 # send has no -p or -R and its receive no -o or -x (a -w raw stream carries
-# only encryption settings, which are on the readonly list). A failed strip
-# empties the table, which only forces live reads. Snapshot-view dirtiness is
-# tracked separately by zxfer_mark_live_destination_dataset_dirty.
+# only encryption settings, which are on the readonly list). DATASET alone
+# gets a tombstone, which needs no process; descendants are stripped by one
+# awk over the index. A failed strip empties the table, which only forces
+# live reads. Snapshot-view dirtiness is tracked separately by
+# zxfer_mark_live_destination_dataset_dirty.
 zxfer_invalidate_destination_property_mutation_cache() {
 	if [ -z "${1:-}" ]; then
 		zxfer_reset_destination_property_iteration_cache
 		return 0
 	fi
-	[ -n "${g_zxfer_destination_property_table:-}" ] || return 0
-	l_invalidate_subtree=1
-	[ "${2:-subtree}" != exact ] || l_invalidate_subtree=0
+	l_invalidate_index=${g_zxfer_destination_property_table:-}
+	[ -n "$l_invalidate_index" ] || return 0
+	# The index never names a dataset holding a TAB or LF.
+	case $1 in
+	*"$ZXFER_TAB"* | *"$ZXFER_LF"*) return 0 ;;
+	esac
 
-	# The dataset travels through the environment: awk -v would reinterpret
-	# backslash escapes in hostile dataset names.
-	# shellcheck disable=SC2016
-	g_zxfer_destination_property_table=$(
-		ZXFER_AWK_STRIP_DATASET=$1 "${g_cmd_awk:-awk}" -F "$ZXFER_TAB" \
-			-v subtree="$l_invalidate_subtree" '
+	if [ "${2:-subtree}" != exact ]; then
+		case $l_invalidate_index in
+		*"$ZXFER_TAB$1/"*)
+			# The dataset travels through the environment: awk -v would
+			# reinterpret backslash escapes in hostile dataset names.
+			# shellcheck disable=SC2016
+			g_zxfer_destination_property_table=$(
+				ZXFER_AWK_STRIP_DATASET=$1 "${g_cmd_awk:-awk}" -F "$ZXFER_TAB" '
 BEGIN {
 	dataset = ENVIRON["ZXFER_AWK_STRIP_DATASET"]
 	prefix = dataset "/"
 }
-$0 == "" || $1 == dataset { next }
-subtree == 1 && substr($1, 1, length(prefix)) == prefix { next }
+$0 == "" || $2 == dataset || substr($2, 1, length(prefix)) == prefix { next }
 { print }
 ' <<EOF
-$g_zxfer_destination_property_table
+$l_invalidate_index
 EOF
-	) || g_zxfer_destination_property_table=""
+			) || g_zxfer_destination_property_table=""
+			[ -z "$g_zxfer_destination_property_table" ] ||
+				g_zxfer_destination_property_table=$ZXFER_LF$g_zxfer_destination_property_table$ZXFER_LF
+			return 0
+			;;
+		esac
+	fi
+	case $l_invalidate_index in
+	*"$ZXFER_TAB$1$ZXFER_LF"*)
+		g_zxfer_destination_property_table=${ZXFER_LF}-$ZXFER_TAB$1$l_invalidate_index
+		;;
+	esac
 }
 
 ################################################################################
 # LIVE READS / RECURSIVE PREFETCH / NORMALIZED LOOKUP
 ################################################################################
 
-# Purpose: Allocate the scratch files property reads reuse: the skeleton, the
-# machine and human views, zfs stderr, and the prefetch dataset filter.
+# Purpose: Allocate the scratch files property reads reuse (the skeleton, the
+# machine and human views, zfs stderr, and the prefetch dataset filter) and
+# the private directory of the row store.
 # Usage: zxfer_prepare_property_read_files; allocates them once per run (every
-# read overwrites them) and throws when a file cannot be created. The run-root
-# removal deletes them.
+# read overwrites the files) and throws when one cannot be created. The
+# run-root removal deletes them.
 zxfer_prepare_property_read_files() {
-	[ -z "${g_zxfer_property_skeleton_file:-}" ] || return 0
-	zxfer_create_temp_file_group 5 || return "$?"
-	{
-		IFS= read -r g_zxfer_property_skeleton_file
-		IFS= read -r g_zxfer_property_machine_file
-		IFS= read -r g_zxfer_property_human_file
-		IFS= read -r g_zxfer_property_error_file
-		IFS= read -r g_zxfer_property_wanted_file
-	} <<EOF
+	if [ -z "${g_zxfer_property_skeleton_file:-}" ]; then
+		zxfer_create_temp_file_group 5 || return "$?"
+		{
+			IFS= read -r g_zxfer_property_skeleton_file
+			IFS= read -r g_zxfer_property_machine_file
+			IFS= read -r g_zxfer_property_human_file
+			IFS= read -r g_zxfer_property_error_file
+			IFS= read -r g_zxfer_property_wanted_file
+		} <<EOF
 $g_zxfer_temp_file_group_result
 EOF
+	fi
+	[ -z "${g_zxfer_property_row_dir:-}" ] || return 0
+	zxfer_create_private_temp_dir zxfer-property-rows ||
+		zxfer_throw_error "Error creating temporary directory." "$?"
+	g_zxfer_property_row_dir=$g_zxfer_runtime_artifact_path_result
 }
 
 # Purpose: Read one property of one dataset alone: a single record is
@@ -609,7 +726,8 @@ zxfer_read_one_property() {
 
 # Purpose: Read one side's whole recursive property tree with three
 # `zfs get -r` calls (machine and human views, then the skeleton) and load
-# each wanted dataset whose records are all known into that side's table.
+# each wanted dataset whose records are all known into that side's table:
+# the parse stores each list as a row file and prints the index lines.
 # Usage: zxfer_prefetch_recursive_normalized_properties source|destination;
 # runs at most once per side per iteration (state 0 armed, 1 done, 2 failed)
 # and returns non-zero when nothing could be published. A dataset left out,
@@ -667,21 +785,37 @@ zxfer_prefetch_recursive_normalized_properties() {
 		zxfer_run_zfs_cmd_for_role "$l_prefetch_side" get -r -t filesystem,volume \
 			-Ho name,property all "$l_prefetch_root" \
 			>"$g_zxfer_property_skeleton_file" 2>/dev/null </dev/null &&
-		l_prefetch_table=$(zxfer_parse_property_views prefetch "$g_zxfer_property_wanted_file" \
+		l_prefetch_index=$(zxfer_parse_property_views store "$g_zxfer_property_wanted_file" \
 			"$g_zxfer_property_skeleton_file" "$g_zxfer_property_machine_file" \
 			"$g_zxfer_property_human_file") ||
 		l_prefetch_status=$?
 	[ "$l_prefetch_status" -eq 0 ] || return "$l_prefetch_status"
 
-	# Fresh prefetch rows precede earlier live rows so first-match lookup keeps
-	# the new tree authoritative.
+	# The parse numbered its rows on from the row count, so its last line
+	# names the new count. The fresh lines go ahead of every older line, so
+	# the new tree wins lookups.
+	if [ -n "$l_prefetch_index" ]; then
+		l_prefetch_last=${l_prefetch_index##*"$ZXFER_LF"}
+		l_prefetch_last=${l_prefetch_last%%"$ZXFER_TAB"*}
+		case $l_prefetch_last in
+		p[0-9]*) ;;
+		*) return 1 ;;
+		esac
+		case ${l_prefetch_last#p} in
+		*[!0-9]*) return 1 ;;
+		esac
+		g_zxfer_property_row_count=${l_prefetch_last#p}
+		l_prefetch_index=$ZXFER_LF$l_prefetch_index
+	fi
 	case $l_prefetch_side in
 	source)
-		g_zxfer_source_property_table=$l_prefetch_table${g_zxfer_source_property_table:+$ZXFER_LF$g_zxfer_source_property_table}
+		[ -z "$l_prefetch_index" ] ||
+			g_zxfer_source_property_table=$l_prefetch_index${g_zxfer_source_property_table:-$ZXFER_LF}
 		g_zxfer_source_property_tree_prefetch_state=1
 		;;
 	destination)
-		g_zxfer_destination_property_table=$l_prefetch_table${g_zxfer_destination_property_table:+$ZXFER_LF$g_zxfer_destination_property_table}
+		[ -z "$l_prefetch_index" ] ||
+			g_zxfer_destination_property_table=$l_prefetch_index${g_zxfer_destination_property_table:-$ZXFER_LF}
 		g_zxfer_destination_property_tree_prefetch_state=1
 		;;
 	esac
@@ -770,7 +904,7 @@ zxfer_read_live_dataset_properties() {
 }
 
 # Purpose: Load one dataset's normalized property list from the side's table,
-# the recursive prefetch, or a live read.
+# the recursive prefetch, or a live read, whose list becomes the newest row.
 # Usage: zxfer_load_normalized_dataset_properties DATASET source|destination;
 # the side selects the table, the profiling counter, and the zfs command role
 # (so reads reach the -O or -T host). Publishes the list in
@@ -796,10 +930,16 @@ zxfer_load_normalized_dataset_properties() {
 	zxfer_read_live_dataset_properties "$l_load_dataset" "$l_load_side" || return "$?"
 
 	[ -n "$g_zxfer_normalized_dataset_properties" ] || return 0
-	l_load_row=$l_load_dataset$ZXFER_TAB$g_zxfer_normalized_dataset_properties
+	# A dataset read live had no usable row, so its new line goes first;
+	# caching is best effort, and a name no index line can hold stays out.
+	case $l_load_dataset in
+	"" | *"$ZXFER_TAB"* | *"$ZXFER_LF"*) return 0 ;;
+	esac
+	zxfer_store_property_row "$g_zxfer_normalized_dataset_properties" || return 0
+	l_load_line=$ZXFER_LF$g_zxfer_property_row_result$ZXFER_TAB$l_load_dataset
 	case $l_load_side in
-	source) g_zxfer_source_property_table=${g_zxfer_source_property_table:+$g_zxfer_source_property_table$ZXFER_LF}$l_load_row ;;
-	destination) g_zxfer_destination_property_table=${g_zxfer_destination_property_table:+$g_zxfer_destination_property_table$ZXFER_LF}$l_load_row ;;
+	source) g_zxfer_source_property_table=$l_load_line${g_zxfer_source_property_table:-$ZXFER_LF} ;;
+	destination) g_zxfer_destination_property_table=$l_load_line${g_zxfer_destination_property_table:-$ZXFER_LF} ;;
 	esac
 }
 
