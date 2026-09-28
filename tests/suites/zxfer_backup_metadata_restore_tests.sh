@@ -29,9 +29,79 @@ test_get_backup_properties_reads_exact_pair_file_and_serves_relative_rows() {
 	output=$(zxfer_backup_test_run_restore)
 	assertEquals "The exact-pair file is accepted." 0 "$?"
 	assertContains "$output" "restored=$contents"
+	output=$(
+		(
+			zxfer_get_backup_properties
+			# The file was validated once; the lookups need no awk.
+			g_cmd_awk=false
+			for l_pair in "tank/src backup/dst/src" "tank/src/child backup/dst/src/child"; do
+				zxfer_find_restored_backup_properties "${l_pair% *}" "${l_pair#* }"
+				printf '%s %s\n' "$?" "$g_zxfer_backup_restore_properties_result"
+			done
+		) 2>&1
+	)
 	assertEquals "Child datasets restore through relative rows of the one file." \
-		"atime=off=local" "$(zxfer_backup_metadata_extract_properties_for_dataset_pair \
-			"$contents" tank/src/child backup/dst/src/child)"
+		"0 compression=lz4=local
+0 atime=off=local" "$output"
+}
+
+test_find_restored_backup_properties_returns_lookup_statuses() {
+	output=$(
+		(
+			printf 'none=%s\n' "$(
+				zxfer_find_restored_backup_properties tank/src backup/dst/src
+				printf '%s' "$?"
+			)"
+			zxfer_test_load_backup_restore_rows tank/src backup/dst/src \
+				"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")" \
+				"$(zxfer_test_backup_metadata_row "a b/[c]*" "atime=off=local")" \
+				"$(zxfer_test_backup_metadata_row "dup" "a=1=local")" \
+				"$(zxfer_test_backup_metadata_row "dup" "a=2=local")" \
+				"$(zxfer_test_backup_metadata_row "lost" "a=1=local")"
+			printf 'load=%s\n' "$?"
+			# The row file of "lost" disappears after the load.
+			zxfer_find_property_row "$g_zxfer_backup_restore_index" lost
+			rm -f "$g_zxfer_property_row_dir/$g_zxfer_property_row_result"
+			for l_pair in \
+				"tank/src|backup/dst/src" \
+				"tank/src/a b/[c]*|backup/dst/src/a b/[c]*" \
+				"tank/src/a b/xc|backup/dst/src/a b/xc" \
+				"tank/src/dup|backup/dst/src/dup" \
+				"tank/src/lost|backup/dst/src/lost" \
+				"tank/src/child|backup/dst/src/other" \
+				"tank/other|backup/dst/src" \
+				"tank/src|backup/dst" \
+				"tank/src/|backup/dst/src/"; do
+				zxfer_find_restored_backup_properties "${l_pair%|*}" "${l_pair#*|}"
+				printf '%s %s <%s>\n' "$l_pair" "$?" "$g_zxfer_backup_restore_properties_result"
+			done
+		) 2>&1
+	)
+	assertEquals "none=3
+load=0
+tank/src|backup/dst/src 0 <compression=lz4=local>
+tank/src/a b/[c]*|backup/dst/src/a b/[c]* 0 <atime=off=local>
+tank/src/a b/xc|backup/dst/src/a b/xc 8 <>
+tank/src/dup|backup/dst/src/dup 9 <>
+tank/src/lost|backup/dst/src/lost 5 <>
+tank/src/child|backup/dst/src/other 3 <>
+tank/other|backup/dst/src 3 <>
+tank/src|backup/dst 3 <>
+tank/src/|backup/dst/src/ 3 <>" "$output"
+}
+
+test_get_backup_properties_reports_a_failed_row_load_as_a_read_failure() {
+	zxfer_backup_test_use_private_root restore_load_failure
+	zxfer_backup_test_write_file "$BACKUP_TEST_PRIMARY_FILE" "$(zxfer_backup_test_exact_pair_contents \
+		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")")"
+	output=$(
+		(
+			zxfer_load_backup_restore_rows() { return 1; }
+			zxfer_get_backup_properties
+		) 2>&1
+	)
+	assertEquals 1 "$?"
+	assertContains "$output" "Failed to read backup property file $BACKUP_TEST_PRIMARY_FILE."
 }
 
 test_get_backup_properties_reads_retired_cksum_filename_read_only_when_current_file_is_absent() {
@@ -269,7 +339,7 @@ test_try_backup_restore_candidate_maps_read_format_and_row_statuses() {
 test_throw_backup_candidate_failure_routes_usage_and_plain_errors() {
 	for case_spec in \
 		"1|usage|1|Cannot find backup property file." \
-		"2|usage|1|Backup property file /p contains multiple relative rows for source dataset tank/src." \
+		"9|usage|1|Backup property file /p contains multiple relative rows for source dataset tank/src." \
 		"3|usage|1|Backup property file /p does not contain a current-format relative row for source dataset tank/src." \
 		"8|usage|1|Backup property file /p does not contain a current-format relative row for source dataset tank/src." \
 		"4|usage|1|Backup property file /p is malformed." \

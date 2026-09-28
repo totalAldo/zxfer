@@ -63,14 +63,16 @@ module or a chain of setters.
   local and rendered-remote directory/write/read/storage-listing protections,
   rows buffered in memory and published at completed property checkpoints and
   run end, per-dataset forwarded provenance (each alias read at most once per
-  run), and restore lookup
+  run), and the `-e` restore lookup: the file is validated once at startup,
+  its rows go to the property row store, and each dataset looks its row up
 - [../src/zxfer_property_state.sh](../src/zxfer_property_state.sh): the
   name-list property parser (`ZXFER_PROPERTY_NORMALIZE_AWK`: per-dataset merge
   and recursive prefetch, trusting only a unique-headed run of one-line
   records from the first line), lone re-reads of every other property, the
-  per-iteration in-memory property tables with
-  targeted destination invalidation, live normalized lookups, argv decoding,
-  and required creation-time property backfill
+  row store (one file per property list in a private directory under the run
+  root) and the per-iteration property tables that index it, with targeted
+  destination invalidation, live normalized lookups, argv decoding, and
+  required creation-time property backfill
 - [../src/zxfer_property_transfer.sh](../src/zxfer_property_transfer.sh):
   the property pass: readonly and noninheritable defaults, the `-o` reader
   (CLI validation runs it before any zfs command; a malformed item or a
@@ -362,11 +364,10 @@ The parser (`ZXFER_PROPERTY_NORMALIZE_AWK`, run behind the shared
 record i only in an unbroken run from line 1: lines i and i+1 start with keys
 i and i+1, and no other line starts with either key. The value runs from the
 key's TAB to the line's last TAB, since a source holds none. A malformed or
-repeated list row fails the read closed. The prefetch emits merged
-`dataset<TAB>payload` rows directly into the side's in-memory table only for
-wanted datasets (one name per filter line) whose every record is in the run
-in both views; the rest take the per-dataset path, which re-reads every
-property after the run alone
+repeated list row fails the read closed. The prefetch stores merged
+payloads only for wanted datasets (one name per filter line) whose every
+record is in the run in both views; the rest take the per-dataset path,
+which re-reads every property after the run alone
 (`zfs get -H[p]o property,value,source -- PROP DS`, where `--` keeps a user
 property name that starts with `-` from being parsed as an option, split at
 its last TAB). A multi-line value therefore costs two extra `zfs get` calls
@@ -383,10 +384,17 @@ list takes its value and source from the user property value printed just
 before it, which is published cut at its first line feed.
 Property reads reuse five per-run scratch files (name list, machine view,
 human view, zfs stderr, prefetch dataset filter); no intermediate grouped file
-is read back. A destination create, set, inherit, or receive
-strips the mutated dataset's row and its descendants' rows. Property lists
-reach `awk` only through `ENVIRON`, never `awk -v`, and every call sets each
-`ZXFER_AWK_*` variable it reads. Serialized values are decoded in the shell
+is read back. Each property list goes to its own row file in one private
+directory under the run root (the row store): the prefetch parse writes its
+rows in the same `awk`, and a live read stores its list as the newest row.
+Each side's table is an index of `ROW<TAB>DATASET` lines, newest first, so a
+lookup is one pattern match over dataset names plus one small read, whatever
+the size of every other list; a row file that is missing or lacks its final
+line feed is a miss, which only forces a live read. A destination receive
+puts a tombstone line ahead of the dataset's rows, and a create, set or
+inherit also strips its descendants' lines. Property lists reach `awk` only
+through `ENVIRON`, never `awk -v`, and every call sets each `ZXFER_AWK_*`
+variable it reads. Serialized values are decoded in the shell
 one item per argument, so no byte in a property value can become an extra
 `zfs create` or `zfs set` argument, locally or over `-T`.
 
@@ -768,7 +776,7 @@ an empty destination.
 flowchart LR
     A["Enter zxfer_transfer_properties()"] --> B["Collect raw live source properties and validate source create metadata"]
     B --> C{"-e restore mode?"}
-    C -- "yes" --> D["Replace the effective source property view with the exact v2 relative backup row"]
+    C -- "yes" --> D["Replace the effective source property view with the exact v2 relative backup row, looked up in the rows stored when startup validated the file"]
     C -- "no" --> E["Keep the live effective source property view"]
     D --> F["Backfill required creation-time properties"]
     E --> F

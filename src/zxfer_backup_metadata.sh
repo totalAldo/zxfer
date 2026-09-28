@@ -39,11 +39,13 @@
 # Module contract:
 # owns globals: g_backup_storage_root (validated once per session), the
 #   buffered -k rows in g_backup_file_contents ("<source-relative path>TAB
-#   <properties>" lines), g_restored_backup_file_contents (-e), the forwarded
-#   provenance memo g_zxfer_backup_forwarded_*, and the read, candidate and
-#   dry-run result channels.
+#   <properties>" lines), the -e file g_restored_backup_file_contents with
+#   its roots and row index (g_zxfer_backup_restore_*), the forwarded
+#   provenance memo g_zxfer_backup_forwarded_*, and the read, candidate,
+#   restore and dry-run result channels.
 # reads globals: backup options, source and destination roots, -O/-T host
-#   specs, g_zxfer_secure_path, path-security helpers, and the ssh transport.
+#   specs, g_zxfer_secure_path, path-security helpers, the ssh transport, and
+#   the property state module's row store (the -e rows are its r files).
 # returns via stdout: metadata filenames, validated rows, extracted
 #   properties, file contents, and rendered remote sh programs.
 #
@@ -72,6 +74,16 @@
 
 ZXFER_BACKUP_METADATA_HEADER_LINE="#zxfer property backup file"
 ZXFER_BACKUP_METADATA_FORMAT_VERSION="2"
+# Lookup statuses, one vocabulary for the file check, the candidate lookup,
+# the forwarded rows and the -e row lookup (the messages are in
+# zxfer_throw_backup_candidate_failure and zxfer_collect_source_props):
+#   0  one row for the dataset pair      6  header missing or not first
+#   1  no metadata file                  7  unsupported #format_version
+#   3  the pair does not resolve         8  valid file, no row for the pair
+#   4  malformed row or root marker      9  more than one row for the pair
+#   5  read or parse failure             11 no filename can be derived
+# awk itself exits 2 on a fatal error, so no lookup outcome uses 2.
+
 # Shared awk predicate: a row's property payload is "name=value=source" items
 # joined by commas, none empty.
 ZXFER_BACKUP_METADATA_PROPERTIES_AWK='
@@ -110,6 +122,10 @@ zxfer_init_backup_storage_root() {
 zxfer_reset_backup_metadata_state() {
 	g_backup_file_contents=""
 	g_restored_backup_file_contents=""
+	g_zxfer_backup_restore_index=""
+	g_zxfer_backup_restore_source_root=""
+	g_zxfer_backup_restore_destination_root=""
+	g_zxfer_backup_restore_properties_result=""
 	g_zxfer_backup_file_read_result=""
 	g_zxfer_backup_restore_candidate_path_result=""
 	g_zxfer_backup_restore_candidate_contents_result=""
@@ -277,11 +293,11 @@ index($0, ENVIRON["ZXFER_AWK_FORWARDED_KEY"]) == 1 {
 	exit
 }'); then
 		[ -z "$g_zxfer_backup_forwarded_properties" ] || return 0
-		l_forwarded_status=2
+		l_forwarded_status=9
 	else
 		l_forwarded_status=5
 	fi
-	# Status 2: an empty row marks a dataset with more than one row.
+	# Status 9: an empty row marks a dataset with more than one row.
 	l_forwarded_path=$ZXFER_LF$g_zxfer_backup_forwarded_roots
 	l_forwarded_path=${l_forwarded_path#*"$ZXFER_LF$l_forwarded_root$ZXFER_TAB"}
 	zxfer_throw_backup_candidate_failure "$l_forwarded_status" "${l_forwarded_path%%"$ZXFER_LF"*}" \
@@ -391,13 +407,13 @@ zxfer_list_remote_backup_storage_dirs() {
 # source/destination pair and validate what is found.
 # Usage: zxfer_try_backup_restore_candidate DIR FILENAME_SOURCE
 # FILENAME_DESTINATION EXPECTED_SOURCE EXPECTED_DESTINATION [HOST]
-# [PROFILE_SIDE]. Returns 0 with the contents in
-# g_zxfer_backup_restore_candidate_contents_result, 8 with the contents when
-# the file is valid but has no row for the pair, 1 when neither file exists,
-# 2 (ambiguous rows), 3 (the pair does not resolve), 4 (malformed rows), 5
-# (read failure), 6 (missing header), 7 (unsupported version), or 11 when no
-# filename can be derived. The path examined last is published in
-# g_zxfer_backup_restore_candidate_path_result for error messages.
+# [PROFILE_SIDE]. Returns a lookup status: 0, or 8 for a valid file without
+# a row for the pair, with the contents in
+# g_zxfer_backup_restore_candidate_contents_result; 1 when neither file
+# exists; the file check's 3, 4, 6, 7 or 9; 5 for a read failure or any
+# other check status; 11 when no filename can be derived. The path examined
+# last is published in g_zxfer_backup_restore_candidate_path_result for error
+# messages.
 zxfer_try_backup_restore_candidate() {
 	l_candidate_dir=$1
 	l_candidate_filename_source=$2
@@ -441,10 +457,7 @@ zxfer_try_backup_restore_candidate() {
 			g_zxfer_backup_restore_candidate_contents_result=$l_candidate_contents
 			return "$l_candidate_match_status"
 			;;
-		1) return 3 ;;
-		2) return 2 ;;
-		3) return 4 ;;
-		6 | 7) return "$l_candidate_match_status" ;;
+		3 | 4 | 6 | 7 | 9) return "$l_candidate_match_status" ;;
 		*) return 5 ;;
 		esac
 	done
@@ -453,8 +466,9 @@ zxfer_try_backup_restore_candidate() {
 
 # Purpose: Raise the structured error for a failed candidate lookup.
 # Usage: zxfer_throw_backup_candidate_failure STATUS PATH DATASET LABEL
-# [USAGE]; LABEL names the file kind in messages and a non-empty USAGE routes
-# the operator-facing lookup failures through the usage error.
+# [USAGE]; STATUS is a lookup status, LABEL names the file kind in messages
+# and a non-empty USAGE routes the operator-facing lookup failures through
+# the usage error.
 zxfer_throw_backup_candidate_failure() {
 	l_candidate_failure_status=$1
 	l_candidate_failure_path=$2
@@ -465,7 +479,7 @@ zxfer_throw_backup_candidate_failure() {
 	case $l_candidate_failure_status in
 	1) zxfer_throw_error_with_usage "Cannot find backup property file. Ensure that it
 exists under the source-dataset-relative tree inside ZXFER_BACKUP_DIR." ;;
-	2) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path contains multiple relative rows for source dataset $l_candidate_failure_dataset. Remove the ambiguous rows or restore from a specific exact backup path." ;;
+	9) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path contains multiple relative rows for source dataset $l_candidate_failure_dataset. Remove the ambiguous rows or restore from a specific exact backup path." ;;
 	3 | 8) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path does not contain a current-format relative row for source dataset $l_candidate_failure_dataset." ;;
 	4) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path is malformed. Expected current-format relative-path and properties rows." ;;
 	6) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path does not start with the required zxfer backup metadata header." ;;
@@ -479,8 +493,9 @@ exists under the source-dataset-relative tree inside ZXFER_BACKUP_DIR." ;;
 	zxfer_throw_error "$l_candidate_failure_message"
 }
 
-# Purpose: Load the exact-pair restore metadata for -e into
-# g_restored_backup_file_contents, failing closed before any dataset work.
+# Purpose: Load the exact-pair restore metadata for -e, failing closed before
+# any dataset work: validate the whole file once, then store its rows so each
+# dataset looks its row up (zxfer_find_restored_backup_properties).
 # Usage: zxfer_get_backup_properties, from replication startup. The file is
 # keyed by the source root and CLI destination under ZXFER_BACKUP_DIR on the
 # source side; child datasets restore from relative rows of that one file.
@@ -489,28 +504,124 @@ zxfer_get_backup_properties() {
 
 	zxfer_map_destination_dataset "$g_initial_source"
 	l_restore_destination_root=$g_zxfer_destination_dataset_result
-	if zxfer_try_backup_restore_candidate "$g_backup_storage_root/$g_initial_source" \
+	l_restore_status=0
+	zxfer_try_backup_restore_candidate "$g_backup_storage_root/$g_initial_source" \
 		"$g_initial_source" "$g_destination" \
-		"$g_initial_source" "$l_restore_destination_root" "$g_option_O_origin_host" source; then
-		g_restored_backup_file_contents=$g_zxfer_backup_restore_candidate_contents_result
-		return 0
-	else
+		"$g_initial_source" "$l_restore_destination_root" "$g_option_O_origin_host" source ||
 		l_restore_status=$?
+	if [ "$l_restore_status" -eq 0 ]; then
+		g_restored_backup_file_contents=$g_zxfer_backup_restore_candidate_contents_result
+		zxfer_load_backup_restore_rows || l_restore_status=5
 	fi
-	zxfer_throw_backup_candidate_failure "$l_restore_status" \
-		"$g_zxfer_backup_restore_candidate_path_result" "$g_initial_source" \
-		"Backup property file" usage
+	[ "$l_restore_status" -eq 0 ] ||
+		zxfer_throw_backup_candidate_failure "$l_restore_status" \
+			"$g_zxfer_backup_restore_candidate_path_result" "$g_initial_source" \
+			"Backup property file" usage
+}
+
+# Purpose: Store the rows of the validated -e file in the row store, as r
+# files, with one index line per relative key; a key with more than one row
+# gets the tombstone "-" instead.
+# Usage: zxfer_load_backup_restore_rows, right after the candidate lookup
+# validated g_restored_backup_file_contents. Publishes
+# g_zxfer_backup_restore_source_root, g_zxfer_backup_restore_destination_root
+# and g_zxfer_backup_restore_index, or clears them and returns non-zero.
+zxfer_load_backup_restore_rows() {
+	g_zxfer_backup_restore_index=""
+	g_zxfer_backup_restore_source_root=""
+	g_zxfer_backup_restore_destination_root=""
+	zxfer_prepare_property_read_files || return "$?"
+
+	# Prints the two roots, then the index lines. The rows restart at r1:
+	# the index they replace is the only one that names r files.
+	# shellcheck disable=SC2016  # awk program should see literal field references.
+	l_load_output=$(printf '%s\n' "$g_restored_backup_file_contents" |
+		ZXFER_AWK_ROW_DIR=$g_zxfer_property_row_dir ZXFER_AWK_ROW_PREFIX=r \
+			ZXFER_AWK_ROW_BASE=0 "${g_cmd_awk:-awk}" "$ZXFER_PROPERTY_AWK_LIB"'
+index($0, "#source_root:") == 1 {
+	source_root = substr($0, length("#source_root:") + 1)
+	next
+}
+index($0, "#destination_root:") == 1 {
+	destination_root = substr($0, length("#destination_root:") + 1)
+	next
+}
+$0 == "" || substr($0, 1, 1) == "#" { next }
+{
+	tab = index($0, "\t")
+	key = substr($0, 1, tab - 1)
+	if (key in row_payload) {
+		row_payload[key] = ""
+		next
+	}
+	keys[++key_count] = key
+	row_payload[key] = substr($0, tab + 1)
+}
+END {
+	if (source_root == "" || destination_root == "" || key_count == 0)
+		exit 1
+	print source_root
+	print destination_root
+	for (i = 1; i <= key_count; i++) {
+		row = (row_payload[keys[i]] == "") ? "-" : store_row(row_payload[keys[i]])
+		print row "\t" keys[i]
+	}
+}') || return "$?"
+
+	l_load_source_root=${l_load_output%%"$ZXFER_LF"*}
+	l_load_output=${l_load_output#*"$ZXFER_LF"}
+	l_load_destination_root=${l_load_output%%"$ZXFER_LF"*}
+	case $l_load_output in
+	*"$ZXFER_LF"*) l_load_output=${l_load_output#*"$ZXFER_LF"} ;;
+	*) return 1 ;;
+	esac
+	g_zxfer_backup_restore_source_root=$l_load_source_root
+	g_zxfer_backup_restore_destination_root=$l_load_destination_root
+	g_zxfer_backup_restore_index=$ZXFER_LF$l_load_output$ZXFER_LF
+}
+
+# Purpose: Find the -e row of one source/destination pair; both datasets
+# must map to the same path relative to the file's #source_root and
+# #destination_root.
+# Usage: zxfer_find_restored_backup_properties SOURCE DESTINATION; publishes
+# the properties in g_zxfer_backup_restore_properties_result and returns 0,
+# or the lookup status 3 (the pair does not resolve, or no file was loaded),
+# 8 (no row), 9 (more than one row) or 5 (the row cannot be read).
+zxfer_find_restored_backup_properties() {
+	g_zxfer_backup_restore_properties_result=""
+	[ -n "$g_zxfer_backup_restore_source_root" ] &&
+		[ -n "$g_zxfer_backup_restore_destination_root" ] || return 3
+	case $1 in
+	"$g_zxfer_backup_restore_source_root") l_restore_key=. ;;
+	"$g_zxfer_backup_restore_source_root"/?*)
+		l_restore_key=${1#"$g_zxfer_backup_restore_source_root"/}
+		;;
+	*) return 3 ;;
+	esac
+	case $2 in
+	"$g_zxfer_backup_restore_destination_root") l_restore_destination_key=. ;;
+	"$g_zxfer_backup_restore_destination_root"/?*)
+		l_restore_destination_key=${2#"$g_zxfer_backup_restore_destination_root"/}
+		;;
+	*) return 3 ;;
+	esac
+	[ "$l_restore_key" = "$l_restore_destination_key" ] || return 3
+
+	zxfer_find_property_row "$g_zxfer_backup_restore_index" "$l_restore_key" || return 8
+	[ "$g_zxfer_property_row_result" != - ] || return 9
+	zxfer_read_property_row "$g_zxfer_property_row_result" || return 5
+	g_zxfer_backup_restore_properties_result=$g_zxfer_property_row_payload_result
 }
 
 # Purpose: Check one metadata file's contents and print the properties it
 # records for a source/destination pair.
 # Usage: zxfer_backup_metadata_extract_properties_for_dataset_pair CONTENTS
 # SOURCE DESTINATION; both datasets must map to the same path relative to
-# #source_root and #destination_root. Returns 0 with the properties, 1 when
-# the pair does not resolve, 8 when it resolves but has no row, 2 for
-# duplicate rows, 3 when a root marker is missing or any row is malformed, 6
-# unless the header is the first line and appears once, 7 unless
-# #format_version:2 appears once before any row.
+# #source_root and #destination_root. Returns a lookup status: 0 with the
+# properties, 3 when the pair does not resolve, 8 when it resolves but has
+# no row, 9 for duplicate rows, 4 when a root marker is missing or any row is
+# malformed, 6 unless the header is the first line and appears once, 7
+# unless #format_version:2 appears once before any row.
 zxfer_backup_metadata_extract_properties_for_dataset_pair() {
 	# shellcheck disable=SC2016
 	printf '%s\n' "$1" | "${g_cmd_awk:-awk}" \
@@ -589,23 +700,23 @@ END {
 	if (!format_seen)
 		exit 7
 	if (source_root_count != 1 || destination_root_count != 1 || source_root == "" || destination_root == "")
-		exit 3
+		exit 4
 	expected_source_key = relative_path(source_root, expected_source)
 	expected_destination_key = relative_path(destination_root, expected_destination)
 	if (expected_source_key == "" || expected_destination_key == "" ||
 		expected_source_key == "__ZXFER_NO_MATCH__" ||
 		expected_destination_key == "__ZXFER_NO_MATCH__" ||
 		expected_source_key != expected_destination_key)
-		exit 1
-	if (malformed_count > 0)
 		exit 3
+	if (malformed_count > 0)
+		exit 4
 	if (row_count[expected_source_key] == 1) {
 		print row_properties[expected_source_key]
 		exit 0
 	}
 	if (row_count[expected_source_key] == 0)
 		exit 8
-	exit 2
+	exit 9
 }'
 }
 
