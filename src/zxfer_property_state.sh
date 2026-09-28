@@ -46,10 +46,8 @@
 #   helper results g_zxfer_property_replace_result and
 #   g_zxfer_property_code_byte), g_zxfer_property_list_value_result,
 #   g_zxfer_property_display_list_result
-#   and the shared failure text g_zxfer_property_error_result (the policy
-#   module's create-metadata helper writes it too). The policy and reconcile
-#   modules own their own results; zxfer_reset_property_reconcile_state only
-#   clears them at session start.
+#   and the shared failure text g_zxfer_property_error_result (the transfer
+#   module's source collection and create-metadata helpers write it too).
 # reads globals: the -R/-P/-o options, g_initial_source, g_destination, the
 #   recursive dataset lists, and g_cmd_awk.
 # mutates caches: the property tables, through prefetch, live-read appends,
@@ -69,23 +67,11 @@
 # row by row, and a destination mutation strips the mutated dataset's row, plus
 # its descendants' rows when their inherited values may have changed.
 
-# Purpose: Reset the per-transfer property result globals and forget the
-# property read scratch files.
+# Purpose: Clear the shared property failure text and forget the property
+# read scratch files. The transfer module's result globals need no reset
+# here: each is cleared by the function that publishes it.
 # Usage: Called once at session initialization.
 zxfer_reset_property_reconcile_state() {
-	g_zxfer_source_pvs_raw=""
-	g_zxfer_source_pvs_effective=""
-	g_zxfer_override_pvs_result=""
-	g_zxfer_creation_pvs_result=""
-	g_zxfer_sanitized_property_list_result=""
-	g_zxfer_source_dataset_type_result=""
-	g_zxfer_source_volume_size_result=""
-	g_zxfer_diff_dest_pvs_result=""
-	g_zxfer_diff_initial_set_result=""
-	g_zxfer_diff_child_set_result=""
-	g_zxfer_diff_inherit_result=""
-	g_zxfer_adjusted_set_list=""
-	g_zxfer_adjusted_inherit_list=""
 	g_zxfer_property_error_result=""
 	g_zxfer_property_skeleton_file=""
 	g_zxfer_property_machine_file=""
@@ -142,8 +128,6 @@ zxfer_refresh_property_tree_prefetch_context() {
 #   csv_to_set(csv, set)               set[item] = 1 for each non-empty item
 #   first_values(list, value, source)  the first value and source of each
 #                                      property in a serialized list
-#   split_override_csv(input, output)  split -o text on commas; "\," stays a
-#                                      literal comma
 # shellcheck disable=SC2016  # AWK field references must remain literal.
 ZXFER_PROPERTY_AWK_LIB='
 function append_csv(list, item) {
@@ -188,25 +172,6 @@ function first_values(list, value, source, count, items, i, fields) {
 			source[fields[1]] = fields[3]
 		}
 	}
-}
-function split_override_csv(input, output, count, i, character, field) {
-	count = 0
-	field = ""
-	for (i = 1; i <= length(input); i++) {
-		character = substr(input, i, 1)
-		if (character == "\\" && substr(input, i + 1, 1) == ",") {
-			field = field ","
-			i++
-		} else if (character == ",") {
-			output[++count] = field
-			field = ""
-		} else {
-			field = field character
-		}
-	}
-	if (input != "")
-		output[++count] = field
-	return count
 }
 '
 

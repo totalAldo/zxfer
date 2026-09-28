@@ -1,33 +1,8 @@
 #!/bin/sh
-#
-# shunit2 tests for src/zxfer_property_policy.sh: the readonly list, -o
-# override validation and derivation, list sanitizing, create metadata, the
-# -U unsupported-property scan and create-time policy.
-#
+# Property transfer fragment: the readonly list, source create metadata, the
+# -U unsupported-property scan, and the child create-time override filter.
+# Run by tests/test_zxfer_property_transfer.sh.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
-
-TESTS_DIR=$(dirname "$0")
-
-# shellcheck source=tests/test_helper.sh
-. "$TESTS_DIR/test_helper.sh"
-# Cases that render backup metadata opt in to that fixture.
-# shellcheck source=tests/helpers/backup_fixtures.sh
-. "$TESTS_DIR/helpers/backup_fixtures.sh"
-# shellcheck source=tests/helpers/property_fixtures.sh
-. "$TESTS_DIR/helpers/property_fixtures.sh"
-
-oneTimeSetUp() {
-	zxfer_test_create_tmpdir "zxfer_property_policy"
-	zxfer_test_property_fixture_one_time_setup
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
-setUp() {
-	zxfer_test_property_fixture_setup
-}
 
 ################################################################################
 # READONLY LIST
@@ -53,220 +28,6 @@ test_resolve_readonly_properties_removes_mountpoint_during_migration() {
 	zxfer_resolve_readonly_properties
 	g_option_m_migrate=0
 	assertEquals "readonly" "$g_zxfer_readonly_properties_result"
-}
-
-################################################################################
-# OVERRIDE VALIDATION / DERIVATION
-################################################################################
-
-# Purpose: Derive the override lists with -o validation on and print the
-# status, then the usage error or the override list.
-# Usage: zxfer_property_test_validate_override SOURCE_PVS OVERRIDE_OPTIONS
-zxfer_property_test_validate_override() {
-	(
-		zxfer_throw_usage_error() {
-			printf 'usage: %s\n' "$1"
-			exit 2
-		}
-		zxfer_derive_override_lists "$1" "$2" 0 filesystem "" "" "" 1
-		printf 'override: <%s>\n' "$g_zxfer_override_pvs_result"
-	)
-	printf 'status: %s\n' "$?"
-}
-
-test_derive_override_lists_validates_override_names_against_the_source() {
-	assertEquals "An empty -o list always validates." "override: <>
-status: 0" "$(zxfer_property_test_validate_override "compression=lz4=local" "")"
-	assertEquals "override: <compression=gzip=override>
-status: 0" "$(zxfer_property_test_validate_override "compression=lz4=local" "compression=gzip")"
-	assertEquals "usage: Missing source property for -o override: copies.
-status: 2" "$(zxfer_property_test_validate_override "compression=lz4=local" "compression=gzip,copies=2")"
-}
-
-test_derive_override_lists_skips_validation_unless_requested() {
-	zxfer_derive_override_lists "compression=lz4=local" "copies=2" 0 filesystem
-	assertEquals "Child datasets derive without validating -o names." \
-		"copies=2=override" "$g_zxfer_override_pvs_result"
-}
-
-test_derive_override_lists_validates_escaped_commas_and_reports_syntax_first() {
-	assertEquals "override: <user:note=a%2Cb=override,compression=lz4=override>
-status: 0" "$(zxfer_property_test_validate_override \
-		"user:note=x=local,compression=lz4=local" 'user:note=a\,b,compression=lz4')"
-	assertEquals "usage: Invalid option property - check -o list for syntax errors.
-status: 2" "$(zxfer_property_test_validate_override "compression=lz4=local" "compression")"
-}
-
-test_derive_override_lists_validates_source_lists_with_backslashes_literally() {
-	assertEquals "A backslash-zero value earlier in the source list must not hide later properties." \
-		"override: <compression=zstd=override>
-status: 0" "$(zxfer_property_test_validate_override \
-			'com.x:path=C:\0data=local,compression=lz4=local' "compression=zstd")"
-	assertEquals "An octal comma escape in a source value must not invent a property." \
-		"usage: Missing source property for -o override: bogusprop.
-status: 2" "$(zxfer_property_test_validate_override \
-			'com.x:path=x\054bogusprop=local' "bogusprop=1")"
-}
-
-zxfer_property_test_derive() {
-	zxfer_derive_override_lists "$@"
-	printf '%s\n%s\n' "$g_zxfer_override_pvs_result" "$g_zxfer_creation_pvs_result"
-}
-
-test_derive_override_lists_preserves_override_only_mode_order() {
-	assertEquals "compression=lz4=override,quota=1G=override
-compression=lz4=override,quota=1G=override" \
-		"$(zxfer_property_test_derive "" "compression=lz4,quota=1G" 0 filesystem)"
-}
-
-test_derive_override_lists_preserves_required_create_props_when_transfer_all_disabled() {
-	assertEquals "compression=lz4=override,casesensitivity=sensitive=local,normalization=formD=local,utf8only=on=local
-compression=lz4=override,casesensitivity=sensitive=local,normalization=formD=local,utf8only=on=local" \
-		"$(zxfer_property_test_derive \
-			"compression=off=local,casesensitivity=sensitive=local,normalization=formD=local,utf8only=on=local,quota=1G=local" \
-			"compression=lz4" 0 filesystem)"
-}
-
-test_derive_override_lists_uses_required_create_override_for_creation() {
-	assertEquals "casesensitivity=insensitive=override
-casesensitivity=insensitive=override" \
-		"$(zxfer_property_test_derive "casesensitivity=sensitive=local,compression=off=local" \
-			"casesensitivity=insensitive" 0 filesystem)"
-}
-
-test_derive_override_lists_uses_explicit_override_for_inherited_creation() {
-	assertEquals "An override of an inherited source property is applied but is not a creation-time property." \
-		"compression=off=local,atime=off=override
-compression=off=local" \
-		"$(zxfer_property_test_derive "compression=off=local,atime=on=inherited" "atime=off" 1 filesystem)"
-}
-
-test_derive_override_lists_prefers_first_matching_override_when_transferring_all_properties() {
-	assertEquals "compression=lz4=override
-compression=lz4=override" \
-		"$(zxfer_property_test_derive "compression=off=local" "compression=lz4,compression=gzip" 1 filesystem)"
-}
-
-test_derive_override_lists_transfer_all_keeps_sources_and_volume_refreservation() {
-	assertEquals "compression=lz4=local,quota=8G=override,refreservation=4G=received
-compression=lz4=local,quota=8G=override,refreservation=4G=received" \
-		"$(zxfer_property_test_derive "compression=lz4=local,quota=1G=local,refreservation=4G=received" \
-			"quota=8G" 1 volume)"
-}
-
-test_derive_override_lists_escapes_override_values_and_literal_commas() {
-	assertEquals "user:note=a%3Db%2Cc%3B%25=override
-user:note=a%3Db%2Cc%3B%25=override" \
-		"$(zxfer_property_test_derive "" 'user:note=a=b\,c;%' 0 filesystem)"
-}
-
-test_derive_override_lists_preserves_literal_backslashes_in_overrides_and_source_values() {
-	assertEquals 'user:path=C:\new=override,user:other=D:\temp=local
-user:path=C:\new=override,user:other=D:\temp=local' \
-		"$(zxfer_property_test_derive 'user:path=x=local,user:other=D:\temp=local' 'user:path=C:\new' 1 filesystem)"
-}
-
-test_derive_override_lists_skips_volume_only_properties_for_filesystems() {
-	assertEquals "compression=lz4=local
-compression=lz4=local" \
-		"$(zxfer_property_test_derive "compression=lz4=local,volblocksize=8192=-,volthreading=on=default" "" 1 filesystem)"
-	assertEquals "volblocksize=8192=-" \
-		"$(zxfer_property_test_derive "volblocksize=8192=-" "" 1 volume)"
-}
-
-test_derive_override_lists_filters_readonly_ignored_and_unsupported_entries_with_warnings() {
-	(
-		g_option_v_verbose=1
-		zxfer_derive_override_lists \
-			"mountpoint=/mnt=local,compression=lz4=local,atime=off=local,user:note=a%2Cb=local,checksum=sha256=local" \
-			"mountpoint=/other" 1 filesystem "mountpoint,readonly" "atime" "user:note,checksum" \
-			2>"$TEST_TMPDIR/derive_filter.err"
-		printf '%s\n%s\n' "$g_zxfer_override_pvs_result" "$g_zxfer_creation_pvs_result"
-	) >"$TEST_TMPDIR/derive_filter.out"
-	assertEquals "An explicit override survives the readonly filter; -I and -U entries are dropped from both lists." \
-		"mountpoint=/other=override,compression=lz4=local
-mountpoint=/other=override,compression=lz4=local" "$(cat "$TEST_TMPDIR/derive_filter.out")"
-	assertEquals "Unsupported entries warn once per list, apply list first." \
-		"Destination does not support property user:note=a,b
-Destination does not support property checksum=sha256
-Destination does not support property user:note=a,b
-Destination does not support property checksum=sha256" "$(cat "$TEST_TMPDIR/derive_filter.err")"
-}
-
-test_derive_override_lists_rejects_missing_assignment_separator() {
-	set +e
-	output=$(
-		(
-			zxfer_throw_usage_error() {
-				printf '%s\n' "$1"
-				exit 2
-			}
-			zxfer_derive_override_lists "compression=lz4=local" "compression" 1 filesystem
-		)
-	)
-	status=$?
-	assertEquals 2 "$status"
-	assertEquals "Invalid option property - check -o list for syntax errors." "$output"
-}
-
-test_derive_override_lists_reports_awk_failures() {
-	set +e
-	output=$(
-		(
-			g_cmd_awk="$TEST_TMPDIR/missing-awk"
-			zxfer_test_stub_throw_error_to_stdout
-			zxfer_derive_override_lists "compression=lz4=local" "" 1 filesystem 2>/dev/null
-		)
-	)
-	status=$?
-	assertEquals 1 "$status"
-	assertEquals "Failed to derive override property lists." "$output"
-}
-
-################################################################################
-# SANITIZE
-################################################################################
-
-test_sanitize_property_list_returns_input_when_nothing_filters() {
-	zxfer_sanitize_property_list "" "readonly" "atime"
-	assertEquals "" "$g_zxfer_sanitized_property_list_result"
-	(
-		g_cmd_awk="$TEST_TMPDIR/missing-awk"
-		zxfer_sanitize_property_list "compression=lz4=local" "" ""
-		printf '%s\n' "$g_zxfer_sanitized_property_list_result"
-	) >"$TEST_TMPDIR/sanitize_passthrough.out"
-	assertEquals "An empty filter set must not spawn awk." \
-		"compression=lz4=local" "$(cat "$TEST_TMPDIR/sanitize_passthrough.out")"
-}
-
-test_sanitize_property_list_removes_readonly_and_ignored_but_keeps_overrides() {
-	zxfer_sanitize_property_list \
-		"mountpoint=/mnt=local,readonly=on=override,compression=lz4=local,atime=off=local,quota=1G=override" \
-		"readonly,mountpoint" "atime,quota"
-	assertEquals "readonly=on=override,compression=lz4=local,quota=1G=override" \
-		"$g_zxfer_sanitized_property_list_result"
-}
-
-test_sanitize_property_list_reports_awk_failures() {
-	set +e
-	output=$(
-		(
-			g_cmd_awk="$TEST_TMPDIR/missing-awk"
-			zxfer_test_stub_throw_error_to_stdout
-			zxfer_sanitize_property_list "compression=lz4=local" "readonly" "" 2>/dev/null
-		)
-	)
-	status=$?
-	assertEquals 1 "$status"
-	assertEquals "Failed to filter unsupported destination properties." "$output"
-}
-
-test_sanitize_property_list_drops_requested_entries() {
-	l_oldifs=$IFS
-	IFS=","
-	zxfer_sanitize_property_list "compression=lz4=local,atime=off=local" "" "atime"
-	IFS=$l_oldifs
-	assertEquals "compression=lz4=local" "$g_zxfer_sanitized_property_list_result"
 }
 
 ################################################################################
@@ -748,8 +509,25 @@ test_filter_child_creation_overrides_for_parent_drops_inheritable_overrides_the_
 	assertEquals "quota=1G=override,compression=lz4=local,atime=on=override" \
 		"$(zxfer_filter_child_creation_overrides_for_parent \
 			"checksum=sha256=override,quota=1G=override,compression=lz4=local,atime=on=override" \
-			"checksum=sha256=local,quota=1G=local,atime=off=local")"
+			"checksum=sha256=local,quota=1G=local,atime=off=local" "")"
 }
 
-# shellcheck source=tests/shunit2/shunit2
-. "$SHUNIT2_BIN"
+test_filter_child_creation_overrides_for_parent_ignores_readonly_and_ignored_parent_entries() {
+	assertEquals "A parent value on the readonly or -I list does not supply an override." \
+		"checksum=sha256=override,copies=2=override" \
+		"$(
+			g_option_I_ignore_properties="copies"
+			zxfer_filter_child_creation_overrides_for_parent \
+				"checksum=sha256=override,copies=2=override,atime=off=override" \
+				"checksum=sha256=local,copies=2=local,atime=off=local" "checksum"
+		)"
+}
+
+test_filter_child_creation_overrides_for_parent_reports_awk_failures() {
+	(
+		g_cmd_awk="$TEST_TMPDIR/missing-awk"
+		zxfer_filter_child_creation_overrides_for_parent "atime=off=override" \
+			"atime=off=local" "" 2>/dev/null
+	)
+	assertNotEquals "A missing awk fails the filter." 0 "$?"
+}

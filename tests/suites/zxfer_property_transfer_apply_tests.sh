@@ -1,7 +1,8 @@
 #!/bin/sh
-# Property reconcile fragment: source collection and -e restore, destination
-# creation, destination command rendering/execution, the diff and
-# child-inheritance awks, and apply. Run by tests/test_zxfer_property_reconcile.sh.
+# Property transfer fragment: source collection and -e restore, the
+# destination existence decision and creation, destination command
+# rendering/execution, the child-inheritance awk, and apply. Run by
+# tests/test_zxfer_property_transfer.sh.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 ################################################################################
@@ -102,7 +103,7 @@ test_collect_source_props_restore_mode_requires_restored_contents() {
 # DESTINATION CREATE
 ################################################################################
 
-test_ensure_destination_exists_returns_one_for_listed_destinations_without_probing() {
+test_property_destination_exists_answers_listed_destinations_without_probing() {
 	set +e
 	(
 		g_recursive_dest_list="backup/dst
@@ -111,29 +112,35 @@ backup/dst/child"
 			printf 'unexpected probe\n' >&2
 			exit 99
 		}
-		zxfer_ensure_destination_exists 0 "" "" filesystem "" "backup/dst/child" "readonly"
+		zxfer_property_destination_exists "backup/dst/child"
 	)
-	assertEquals "Listed destinations exist and need diffing." 1 "$?"
+	assertEquals "Listed destinations exist and need diffing." 0 "$?"
 }
 
-test_ensure_destination_exists_live_probes_unlisted_destinations_and_notes_existing_ones() {
+test_property_destination_exists_live_probes_unlisted_destinations_and_notes_existing_ones() {
 	set +e
 	(
 		g_recursive_dest_list="backup/dst"
 		zxfer_probe_destination_existence() {
-			printf '%s %s\n' "$1" "${2:-cache}" >>"$TEST_TMPDIR/ensure_probe.log"
+			printf '%s %s\n' "$1" "${2:-cache}" >>"$TEST_TMPDIR/exists_probe.log"
 			g_zxfer_destination_exists_result=1
 		}
-		zxfer_ensure_destination_exists 0 "" "" filesystem "" "backup/dst/child" "readonly"
-		printf 'status=%s\n' "$?" >>"$TEST_TMPDIR/ensure_probe.log"
-		printf 'list=%s\n' "$(printf '%s' "$g_recursive_dest_list" | tr '\n' ' ')" >>"$TEST_TMPDIR/ensure_probe.log"
+		zxfer_property_destination_exists "backup/dst/child"
+		printf 'status=%s\n' "$?" >>"$TEST_TMPDIR/exists_probe.log"
+		printf 'list=%s\n' "$(printf '%s' "$g_recursive_dest_list" | tr '\n' ' ')" >>"$TEST_TMPDIR/exists_probe.log"
+		zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=0; }
+		zxfer_property_destination_exists "backup/dst/other"
+		printf 'missing_status=%s\n' "$?" >>"$TEST_TMPDIR/exists_probe.log"
+		printf 'list=%s\n' "$(printf '%s' "$g_recursive_dest_list" | tr '\n' ' ')" >>"$TEST_TMPDIR/exists_probe.log"
 	)
 	assertEquals "backup/dst/child live
-status=1
-list=backup/dst backup/dst/child" "$(cat "$TEST_TMPDIR/ensure_probe.log")"
+status=0
+list=backup/dst backup/dst/child
+missing_status=1
+list=backup/dst backup/dst/child" "$(cat "$TEST_TMPDIR/exists_probe.log")"
 }
 
-test_ensure_destination_exists_rethrows_live_probe_failures() {
+test_property_destination_exists_rethrows_live_probe_failures() {
 	set +e
 	output=$(
 		(
@@ -145,7 +152,7 @@ test_ensure_destination_exists_rethrows_live_probe_failures() {
 				printf '%s|%s\n' "$1" "$2"
 				exit "$2"
 			}
-			zxfer_ensure_destination_exists 0 "" "" filesystem "" "backup/dst/child" "readonly"
+			zxfer_property_destination_exists "backup/dst/child"
 		)
 	)
 	status=$?
@@ -159,7 +166,7 @@ zxfer_property_test_log_destination_zfs() {
 
 # Existence fakes, defined at top level because a case statement inside
 # "$(...)" is not portable across shells: only the parent backup/dst exists;
-# or the child is missing live but the parent probe fails operationally.
+# or the parent probe fails operationally.
 zxfer_property_test_parent_exists() {
 	case "$1" in
 	backup/dst) g_zxfer_destination_exists_result=1 ;;
@@ -168,22 +175,17 @@ zxfer_property_test_parent_exists() {
 }
 
 zxfer_property_test_parent_probe_fails() {
-	case "${2:-cache}" in
-	live) g_zxfer_destination_exists_result=0 ;;
-	*)
-		g_zxfer_destination_exists_error="Failed to determine whether destination dataset [backup/dst] exists: permission denied"
-		return 1
-		;;
-	esac
+	g_zxfer_destination_exists_error="Failed to determine whether destination dataset [backup/dst] exists: permission denied"
+	return 1
 }
 
-test_ensure_destination_exists_initial_source_precreates_missing_parent_then_applies_override_list() {
-	CREATE_LOG="$TEST_TMPDIR/ensure_initial.log"
+test_create_destination_dataset_initial_source_precreates_missing_parent_then_applies_override_list() {
+	CREATE_LOG="$TEST_TMPDIR/create_initial.log"
 	: >"$CREATE_LOG"
 	(
 		zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=0; }
 		zxfer_run_destination_zfs_cmd() { zxfer_property_test_log_destination_zfs "$@"; }
-		zxfer_ensure_destination_exists 1 "compression=lz4=local,atime=off=override" "ignored=1=local" \
+		zxfer_create_destination_dataset 1 "compression=lz4=local,atime=off=override" "ignored=1=local" \
 			filesystem "" "backup/dst/child" "readonly"
 		printf 'status=%s\n' "$?" >>"$CREATE_LOG"
 	)
@@ -192,31 +194,31 @@ create -o compression=lz4 -o atime=off backup/dst/child
 status=0" "$(cat "$CREATE_LOG")"
 }
 
-test_ensure_destination_exists_uses_parent_create_when_no_properties_apply() {
-	CREATE_LOG="$TEST_TMPDIR/ensure_parents.log"
+test_create_destination_dataset_uses_parent_create_when_no_properties_apply() {
+	CREATE_LOG="$TEST_TMPDIR/create_parents.log"
 	: >"$CREATE_LOG"
 	(
 		zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=0; }
 		zxfer_run_destination_zfs_cmd() { zxfer_property_test_log_destination_zfs "$@"; }
-		zxfer_ensure_destination_exists 1 "" "" filesystem "" "backup/dst/child" "readonly"
+		zxfer_create_destination_dataset 1 "" "" filesystem "" "backup/dst/child" "readonly"
 	)
 	assertEquals "create -p backup/dst/child" "$(cat "$CREATE_LOG")"
 }
 
-test_ensure_destination_exists_child_uses_creation_properties_and_volume_size() {
-	CREATE_LOG="$TEST_TMPDIR/ensure_child.log"
+test_create_destination_dataset_child_uses_creation_properties_and_volume_size() {
+	CREATE_LOG="$TEST_TMPDIR/create_child.log"
 	: >"$CREATE_LOG"
 	(
 		zxfer_probe_destination_existence() { zxfer_property_test_parent_exists "$@"; }
 		zxfer_run_destination_zfs_cmd() { zxfer_property_test_log_destination_zfs "$@"; }
-		zxfer_ensure_destination_exists 0 "compression=lz4=local" "compression=lz4=local,volblocksize=8192=-" \
+		zxfer_create_destination_dataset 0 "compression=lz4=local" "compression=lz4=local,volblocksize=8192=-" \
 			volume 1073741824 "backup/dst/vol" "readonly"
 	)
 	assertEquals "create -V 1073741824 -o compression=lz4 -o volblocksize=8192 backup/dst/vol" "$(cat "$CREATE_LOG")"
 }
 
-test_ensure_destination_exists_child_omits_parent_matching_override_creation_properties() {
-	CREATE_LOG="$TEST_TMPDIR/ensure_child_override.log"
+test_create_destination_dataset_child_omits_parent_matching_override_creation_properties() {
+	CREATE_LOG="$TEST_TMPDIR/create_child_override.log"
 	: >"$CREATE_LOG"
 	(
 		g_option_I_ignore_properties="atime"
@@ -226,7 +228,7 @@ test_ensure_destination_exists_child_omits_parent_matching_override_creation_pro
 			printf 'parent=%s %s\n' "$1" "$2" >>"$CREATE_LOG"
 			g_zxfer_normalized_dataset_properties="compression=lz4=local,mountpoint=/mnt=local,atime=off=local,quota=1G=local"
 		}
-		zxfer_ensure_destination_exists 0 "" \
+		zxfer_create_destination_dataset 0 "" \
 			"compression=lz4=override,mountpoint=/mnt=override,quota=1G=override,atime=off=override,checksum=sha256=local" \
 			filesystem "" "backup/dst/child" "readonly,mountpoint"
 	)
@@ -235,7 +237,7 @@ test_ensure_destination_exists_child_omits_parent_matching_override_creation_pro
 create -o mountpoint=/mnt -o quota=1G -o atime=off -o checksum=sha256 backup/dst/child" "$(cat "$CREATE_LOG")"
 }
 
-test_ensure_destination_exists_reports_parent_property_read_and_create_failures() {
+test_create_destination_dataset_reports_parent_property_read_and_create_failures() {
 	set +e
 	output=$(
 		(
@@ -245,7 +247,7 @@ test_ensure_destination_exists_reports_parent_property_read_and_create_failures(
 				printf '%s|%s\n' "$1" "$2"
 				exit "$2"
 			}
-			zxfer_ensure_destination_exists 0 "" "compression=lz4=override" filesystem "" "backup/dst/child" "readonly"
+			zxfer_create_destination_dataset 0 "" "compression=lz4=override" filesystem "" "backup/dst/child" "readonly"
 		)
 	)
 	assertEquals "Failed to retrieve parent destination properties for [backup/dst].|3" "$output"
@@ -258,7 +260,7 @@ test_ensure_destination_exists_reports_parent_property_read_and_create_failures(
 				printf '%s|%s\n' "$1" "$2"
 				exit "$2"
 			}
-			zxfer_ensure_destination_exists 0 "" "compression=lz4=local" filesystem "" "backup/dst/child" "readonly"
+			zxfer_create_destination_dataset 0 "" "compression=lz4=local" filesystem "" "backup/dst/child" "readonly"
 		)
 	)
 	status=$?
@@ -266,13 +268,43 @@ test_ensure_destination_exists_reports_parent_property_read_and_create_failures(
 	assertEquals "Error when creating destination filesystem.|5" "$output"
 }
 
-test_ensure_destination_exists_reports_parent_probe_failures() {
+test_create_destination_dataset_stops_before_any_create_when_the_child_override_filter_fails() {
+	l_failing_awk="$TEST_TMPDIR/failing-awk"
+	cat >"$l_failing_awk" <<'EOF'
+#!/bin/sh
+exit 6
+EOF
+	chmod 755 "$l_failing_awk"
+	set +e
+	output=$(
+		(
+			g_cmd_awk=$l_failing_awk
+			zxfer_probe_destination_existence() { zxfer_property_test_parent_exists "$@"; }
+			zxfer_load_normalized_dataset_properties() {
+				g_zxfer_normalized_dataset_properties="compression=lz4=local"
+			}
+			zxfer_run_destination_zfs_cmd() { printf 'unexpected zfs %s\n' "$*"; }
+			zxfer_throw_error() {
+				printf '%s|%s\n' "$1" "$2"
+				exit "$2"
+			}
+			zxfer_create_destination_dataset 0 "" "compression=lz4=override" filesystem "" \
+				"backup/dst/child" "readonly"
+		)
+	)
+	status=$?
+	assertEquals 6 "$status"
+	assertEquals "A failed child override filter must stop the run before any create." \
+		"Failed to filter child creation override properties.|6" "$output"
+}
+
+test_create_destination_dataset_reports_parent_probe_failures() {
 	set +e
 	output=$(
 		(
 			zxfer_probe_destination_existence() { zxfer_property_test_parent_probe_fails "$@"; }
 			zxfer_test_stub_throw_error_to_stdout
-			zxfer_ensure_destination_exists 1 "compression=lz4=local" "" filesystem "" "backup/dst/child" "readonly"
+			zxfer_create_destination_dataset 1 "compression=lz4=local" "" filesystem "" "backup/dst/child" "readonly"
 		)
 	)
 	status=$?
@@ -280,23 +312,23 @@ test_ensure_destination_exists_reports_parent_probe_failures() {
 	assertEquals "Failed to determine whether destination dataset [backup/dst] exists: permission denied" "$output"
 }
 
-test_ensure_destination_exists_marks_created_hierarchy_and_invalidates_destination_table_when_live() {
+test_create_destination_dataset_marks_created_hierarchy_and_invalidates_destination_table_when_live() {
 	(
 		zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=0; }
 		zxfer_run_destination_zfs_cmd() { :; }
 		zxfer_property_test_table_add destination "backup/dst" "compression=stale=local"
 		zxfer_property_test_table_add destination "backup/other" "compression=lz4=local"
-		zxfer_ensure_destination_exists 1 "compression=lz4=local" "" filesystem "" "backup/dst/child" "readonly"
+		zxfer_create_destination_dataset 1 "compression=lz4=local" "" filesystem "" "backup/dst/child" "readonly"
 		printf 'list=%s\n' "$(printf '%s' "$g_recursive_dest_list" | tr '\n' ' ')"
 		printf 'parent_row=%s\n' "$(zxfer_property_table_find_dataset destination backup/dst && echo warm || echo cold)"
 		printf 'other_row=%s\n' "$(zxfer_property_table_find_dataset destination backup/other && echo warm || echo cold)"
-	) >"$TEST_TMPDIR/ensure_cache.out"
+	) >"$TEST_TMPDIR/create_cache.out"
 	assertEquals "list=backup/dst backup/dst/child
 parent_row=cold
-other_row=warm" "$(cat "$TEST_TMPDIR/ensure_cache.out")"
+other_row=warm" "$(cat "$TEST_TMPDIR/create_cache.out")"
 }
 
-test_ensure_destination_exists_dry_run_renders_creates_without_touching_caches() {
+test_create_destination_dataset_dry_run_renders_creates_without_touching_caches() {
 	(
 		g_option_n_dryrun=1
 		g_option_T_target_host=""
@@ -306,12 +338,12 @@ test_ensure_destination_exists_dry_run_renders_creates_without_touching_caches()
 			printf 'unexpected live create\n' >&2
 			exit 99
 		}
-		zxfer_ensure_destination_exists 1 "compression=lz4=local" "" filesystem "" "backup/dst/child" "readonly"
+		zxfer_create_destination_dataset 1 "compression=lz4=local" "" filesystem "" "backup/dst/child" "readonly"
 		printf 'list=<%s>\n' "$g_recursive_dest_list"
-	) >"$TEST_TMPDIR/ensure_dryrun.out"
+	) >"$TEST_TMPDIR/create_dryrun.out"
 	assertEquals "'/sbin/zfs' 'create' '-p' 'backup/dst'
 '/sbin/zfs' 'create' '-o' 'compression=lz4' 'backup/dst/child'
-list=<>" "$(cat "$TEST_TMPDIR/ensure_dryrun.out")"
+list=<>" "$(cat "$TEST_TMPDIR/create_dryrun.out")"
 }
 
 test_run_zfs_create_with_properties_rejects_unsafe_shapes() {
@@ -429,7 +461,14 @@ zxfer_property_test_inherit() {
 		"Error when inheriting properties on destination filesystem." "$2" "$1"
 }
 
-test_zxfer_run_zfs_set_properties_and_inherit_render_display_lines_when_verbose() {
+# Purpose: Run one `zfs set` through the shared property verb runner.
+# Usage: zxfer_property_test_set ASSIGNMENT DESTINATION
+zxfer_property_test_set() {
+	zxfer_run_destination_property_verb set \
+		"Error when setting properties on destination filesystem." "$2" "$1"
+}
+
+test_zxfer_run_destination_property_verb_renders_display_lines_when_verbose() {
 	output=$(
 		(
 			g_option_n_dryrun=0
@@ -437,7 +476,7 @@ test_zxfer_run_zfs_set_properties_and_inherit_render_display_lines_when_verbose(
 			g_option_T_target_host=""
 			g_cmd_zfs="/sbin/zfs"
 			zxfer_run_destination_zfs_cmd() { :; }
-			zxfer_run_zfs_set_properties quota=1G backup/dst
+			zxfer_property_test_set quota=1G backup/dst
 			zxfer_property_test_inherit quota backup/dst
 		)
 	)
@@ -445,13 +484,13 @@ test_zxfer_run_zfs_set_properties_and_inherit_render_display_lines_when_verbose(
 '/sbin/zfs' 'inherit' 'quota' 'backup/dst'" "$output"
 }
 
-test_zxfer_run_zfs_set_and_inherit_dry_run_emit_newline_terminated_remote_lines() {
+test_zxfer_run_destination_property_verb_dry_run_emits_newline_terminated_remote_lines() {
 	output=$(
 		(
 			g_option_n_dryrun=1
 			g_option_T_target_host="backup@example.com"
 			g_target_cmd_zfs="/remote/bin/zfs"
-			zxfer_run_zfs_set_properties quota=1G backup/dst
+			zxfer_property_test_set quota=1G backup/dst
 			zxfer_property_test_inherit quota backup/dst
 		)
 	)
@@ -460,11 +499,11 @@ test_zxfer_run_zfs_set_and_inherit_dry_run_emit_newline_terminated_remote_lines(
 	assertContains "$(printf '%s\n' "$output" | sed -n 2p)" "inherit"
 }
 
-test_zxfer_run_zfs_set_properties_handles_dry_run_and_failures() {
+test_zxfer_run_destination_property_verb_set_handles_dry_run_and_failures() {
 	g_option_n_dryrun=1
 	g_option_T_target_host=""
 	g_cmd_zfs="/remote/zfs"
-	assertEquals "'/remote/zfs' 'set' 'quota=1G' 'backup/dst'" "$(zxfer_run_zfs_set_properties quota=1G backup/dst)"
+	assertEquals "'/remote/zfs' 'set' 'quota=1G' 'backup/dst'" "$(zxfer_property_test_set quota=1G backup/dst)"
 
 	set +e
 	output=$(
@@ -472,7 +511,7 @@ test_zxfer_run_zfs_set_properties_handles_dry_run_and_failures() {
 			zxfer_run_destination_zfs_cmd() { return 1; }
 			zxfer_test_stub_throw_error_to_stdout
 			g_option_n_dryrun=0
-			zxfer_run_zfs_set_properties quota=1G backup/dst
+			zxfer_property_test_set quota=1G backup/dst
 		)
 	)
 	status=$?
@@ -486,17 +525,17 @@ test_zxfer_run_destination_property_verb_invalidates_only_after_live_success() {
 	(
 		zxfer_invalidate_destination_property_mutation_cache() { printf 'invalidated=%s\n' "$*" >>"$log"; }
 		g_option_n_dryrun=1
-		zxfer_run_zfs_set_properties quota=1G backup/dst >/dev/null
+		zxfer_property_test_set quota=1G backup/dst >/dev/null
 		g_option_n_dryrun=0
 		zxfer_run_destination_zfs_cmd() { return 1; }
 		zxfer_throw_error() { exit 1; }
-		zxfer_run_zfs_set_properties quota=1G backup/dst
+		zxfer_property_test_set quota=1G backup/dst
 	)
 	assertEquals "Dry runs and failed sets must not invalidate destination rows." "" "$(cat "$log")"
 	(
 		zxfer_invalidate_destination_property_mutation_cache() { printf 'invalidated=%s\n' "$*" >>"$log"; }
 		zxfer_run_destination_zfs_cmd() { :; }
-		zxfer_run_zfs_set_properties quota=1G backup/dst
+		zxfer_property_test_set quota=1G backup/dst
 		zxfer_property_test_inherit quota backup/dst
 	)
 	assertEquals "Sets and inherits drop the whole destination subtree (the default scope)." \
@@ -504,44 +543,46 @@ test_zxfer_run_destination_property_verb_invalidates_only_after_live_success() {
 invalidated=backup/dst" "$(cat "$log")"
 }
 
-test_zxfer_run_zfs_set_properties_batches_decoded_assignments_for_local_exec() {
+test_apply_property_changes_batches_decoded_set_assignments_for_local_exec() {
 	result=$(
 		(
 			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' "$#"
 				printf '%s\n' "$@"
 			}
-			zxfer_run_zfs_set_properties "quota=1G,user:note=a%2Cb%3Dc,user:multi=line1%0Aline2,,atime=off=local" "backup/dst"
+			zxfer_apply_property_changes "backup/dst" 1 \
+				"quota=1G,user:note=a%2Cb%3Dc,user:multi=line1%0Aline2,,atime=off=local" "" ""
 		)
 	)
 	assertEquals "$(printf '6\nset\nquota=1G\nuser:note=a,b=c\nuser:multi=line1\nline2\natime=off\nbackup/dst')" "$result"
 }
 
-test_zxfer_run_zfs_set_properties_keeps_soh_values_in_one_argument() {
+test_apply_property_changes_keeps_soh_set_values_in_one_argument() {
 	result=$(
 		(
 			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' "$#"
 				printf '[%s]\n' "$@"
 			}
-			zxfer_run_zfs_set_properties "$(printf 'com.x:note=a\001sharenfs%%3Drw=local')" "backup/dst"
+			zxfer_apply_property_changes "backup/dst" 1 \
+				"$(printf 'com.x:note=a\001sharenfs%%3Drw=local')" "" ""
 		)
 	)
 	assertEquals "$(printf '3\n[set]\n[com.x:note=a\001sharenfs=rw]\n[backup/dst]')" "$result"
 }
 
-test_zxfer_run_zfs_set_properties_skips_empty_lists() {
+test_apply_property_changes_runs_no_set_for_a_list_of_empty_items() {
 	(
 		zxfer_run_destination_zfs_cmd() {
 			printf 'unexpected set\n' >&2
 			exit 99
 		}
-		zxfer_run_zfs_set_properties "" "backup/dst"
+		zxfer_apply_property_changes "backup/dst" 1 ",," "" ""
 	)
 	assertEquals 0 "$?"
 }
 
-test_zxfer_run_zfs_set_properties_preserves_literal_assignment_for_remote_exec() {
+test_apply_property_changes_preserves_literal_set_assignment_for_remote_exec() {
 	fake_ssh="$TEST_TMPDIR/fake_ssh_join_exec_set"
 	remote_zfs="$TEST_TMPDIR/fake_remote_zfs_set"
 	ssh_log="$TEST_TMPDIR/fake_ssh_join_exec_set.log"
@@ -611,7 +652,7 @@ EOF
 	g_target_cmd_zfs="$remote_zfs"
 
 	# The value is already serialized: none of its characters needs encoding.
-	zxfer_run_zfs_set_properties "$l_property=$l_value" "backup/dst"
+	zxfer_apply_property_changes "backup/dst" 1 "$l_property=$l_value" "" ""
 
 	unset FAKE_SSH_LOG ZXFER_REMOTE_ZFS_LOG
 	g_cmd_ssh=$old_g_cmd_ssh
@@ -643,130 +684,23 @@ test_zxfer_run_destination_property_verb_inherit_handles_dry_run_and_failures() 
 	assertEquals "Error when inheriting properties on destination filesystem." "$output"
 }
 
-################################################################################
-# DIFF
-################################################################################
-
-zxfer_property_test_diff() {
-	zxfer_diff_properties "$@"
-	printf '%s\n%s\n%s\n' "$g_zxfer_diff_initial_set_result" "$g_zxfer_diff_child_set_result" "$g_zxfer_diff_inherit_result"
-}
-
-test_diff_properties_rejects_must_create_mismatches() {
+test_zxfer_run_destination_property_verb_fails_closed_when_a_dry_run_line_cannot_be_rendered() {
 	set +e
 	output=$(
 		(
-			zxfer_throw_error_with_usage() {
-				printf '%s\n' "$1"
-				exit 1
+			g_option_n_dryrun=1
+			zxfer_build_destination_zfs_command() { return 4; }
+			zxfer_throw_error() {
+				printf '%s|%s\n' "$1" "$2"
+				exit "$2"
 			}
-			zxfer_diff_properties "casesensitivity=mixed=local" "casesensitivity=sensitive=local" "casesensitivity"
+			zxfer_property_test_set quota=1G backup/dst
+			printf 'continued\n'
 		)
 	)
 	status=$?
-	assertEquals 1 "$status"
-	assertContains "$output" "The property \"casesensitivity\" may only be set"
-}
-
-test_diff_properties_sets_local_value_when_destination_source_is_inherited() {
-	assertEquals "compression=lz4
-compression=lz4" "$(zxfer_property_test_diff "compression=lz4=local" "compression=lz4=inherited" "")"
-}
-
-test_diff_properties_inherits_value_when_destination_is_local_but_source_is_not() {
-	assertEquals "
-
-compression=lz4" "$(zxfer_property_test_diff "compression=lz4=inherited" "compression=lz4=local" "")"
-}
-
-test_diff_properties_treats_overrides_as_parent_sets() {
-	assertEquals "
-
-checksum=sha256" "$(zxfer_property_test_diff "checksum=sha256=override" "checksum=sha256=local" "")"
-	assertEquals "checksum=sha256
-
-checksum=sha256" "$(zxfer_property_test_diff "checksum=sha256=override" "checksum=fletcher4=local" "")"
-}
-
-test_diff_properties_does_not_stamp_matching_default_noninheritable_values() {
-	assertEquals "" "$(zxfer_property_test_diff "quota=none=default" "quota=none=default" "")"
-}
-
-test_diff_properties_sets_changed_noninheritable_values_locally() {
-	assertEquals "quota=1G
-quota=1G" "$(zxfer_property_test_diff "quota=1G=received" "quota=none=default" "")"
-}
-
-test_diff_properties_inherits_missing_inheritable_override_properties() {
-	assertEquals "compression=lz4
-
-compression=lz4" "$(zxfer_property_test_diff "compression=lz4=override" "" "")"
-}
-
-test_diff_properties_skips_must_create_properties_and_multiple_entries() {
-	assertEquals "compression=lz4,atime=off
-compression=lz4
-atime=off" "$(zxfer_property_test_diff \
-		"casesensitivity=sensitive=-,compression=lz4=local,atime=off=received" \
-		"casesensitivity=sensitive=-,compression=off=local,atime=on=local" "casesensitivity")"
-}
-
-test_diff_properties_preserves_literal_backslashes() {
-	assertEquals 'user:path=C:\new
-user:path=C:\new' "$(zxfer_property_test_diff 'user:path=C:\new=local' 'user:path=C:\old=local' "")"
-}
-
-test_diff_properties_filters_the_destination_list_before_diffing() {
-	zxfer_diff_properties "compression=lz4=local,readonly=on=override" \
-		"compression=off=local,mountpoint=/x=local,atime=on=local,readonly=off=local" "" \
-		"readonly,mountpoint" "atime"
-	assertEquals "Readonly and -I entries leave the destination list." \
-		"compression=off=local" "$g_zxfer_diff_dest_pvs_result"
-	assertEquals "A filtered destination entry reads as absent." \
-		"compression=lz4,readonly=on" "$g_zxfer_diff_initial_set_result"
-}
-
-test_property_filters_ignore_an_exported_unsupported_list() {
-	set +e
-	output=$(
-		(
-			ZXFER_AWK_UNSUPPORTED_LIST=casesensitivity,compression
-			export ZXFER_AWK_UNSUPPORTED_LIST
-			zxfer_throw_error_with_usage() {
-				printf 'usage=%s\n' "$1"
-				exit 1
-			}
-			zxfer_derive_override_lists "compression=lz4=local" "" 1 filesystem
-			printf 'derive=%s\n' "$g_zxfer_override_pvs_result"
-			zxfer_sanitize_property_list "compression=lz4=local,atime=off=local" "readonly" "atime"
-			printf 'sanitize=%s\n' "$g_zxfer_sanitized_property_list_result"
-			zxfer_diff_properties "compression=lz4=local" "compression=off=local,readonly=off=local" "" "readonly" ""
-			printf 'dest=%s\n' "$g_zxfer_diff_dest_pvs_result"
-			zxfer_diff_properties "casesensitivity=insensitive=override" "casesensitivity=sensitive=-" "casesensitivity"
-			printf 'must-create check skipped\n'
-		)
-	)
-	status=$?
-	assertEquals "The must-create mismatch must still fail." 1 "$status"
-	assertContains "$output" "derive=compression=lz4=local"
-	assertContains "$output" "sanitize=compression=lz4=local"
-	assertContains "$output" "dest=compression=off=local"
-	assertContains "$output" "usage=The property \"casesensitivity\" may only be set"
-	assertNotContains "$output" "must-create check skipped"
-}
-
-test_diff_properties_reports_awk_failures() {
-	set +e
-	output=$(
-		(
-			g_cmd_awk="$TEST_TMPDIR/missing-awk"
-			zxfer_test_stub_throw_error_to_stdout
-			zxfer_diff_properties "compression=lz4=local" "" "" 2>/dev/null
-		)
-	)
-	status=$?
-	assertEquals 1 "$status"
-	assertEquals "Failed to diff dataset properties." "$output"
+	assertEquals 4 "$status"
+	assertEquals "Error when setting properties on destination filesystem.|4" "$output"
 }
 
 ################################################################################
@@ -812,20 +746,22 @@ checksum=sha256,atime=off" "$(zxfer_property_test_adjust_with_parent "checksum=s
 		"checksum=sha256,quota=1G" "atime=off")"
 }
 
-test_adjust_child_inherit_to_match_parent_sanitizes_parent_properties_with_the_supplied_readonly_list() {
+test_adjust_child_inherit_to_match_parent_filters_parent_properties_with_the_readonly_and_ignore_lists() {
 	result=$(
 		(
+			g_option_I_ignore_properties="copies"
 			zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=1; }
 			zxfer_load_normalized_dataset_properties() {
-				g_zxfer_normalized_dataset_properties="readonly=on=local,atime=off=local"
+				g_zxfer_normalized_dataset_properties="readonly=on=local,copies=2=local,atime=off=local"
 			}
 			zxfer_adjust_child_inherit_to_match_parent "backup/dst/child" \
-				"readonly=on=inherited,atime=off=inherited" "" "readonly=on,atime=off" "readonly"
+				"readonly=on=inherited,copies=2=inherited,atime=off=inherited" "" \
+				"readonly=on,copies=2,atime=off" "readonly"
 			printf '%s\n%s\n' "$g_zxfer_adjusted_set_list" "$g_zxfer_adjusted_inherit_list"
 		)
 	)
-	assertEquals "A read-only parent entry is not visible, so the child must set it locally." \
-		"readonly=on
+	assertEquals "Read-only and -I parent entries are not visible, so the child must set them locally." \
+		"readonly=on,copies=2
 atime=off" "$result"
 }
 
@@ -898,7 +834,6 @@ test_adjust_child_inherit_to_match_parent_reports_awk_failures() {
 			zxfer_load_normalized_dataset_properties() {
 				g_zxfer_normalized_dataset_properties="compression=lz4=local"
 			}
-			zxfer_sanitize_property_list() { g_zxfer_sanitized_property_list_result=$1; }
 			g_cmd_awk="$TEST_TMPDIR/missing-awk"
 			zxfer_test_stub_throw_error_to_stdout
 			zxfer_adjust_child_inherit_to_match_parent "backup/dst/child" "compression=lz4=inherited" "" "compression=lz4" "readonly" 2>/dev/null
@@ -940,11 +875,11 @@ test_apply_property_changes_uses_initial_set_list_and_ignores_inherits_for_the_i
 	assertEquals "" "$(zxfer_property_test_apply "backup/dst" 1 "" "compression=lz4" "checksum=sha256")"
 }
 
-test_apply_property_changes_fails_closed_when_the_set_runner_fails() {
+test_apply_property_changes_fails_closed_when_the_set_fails() {
 	set +e
 	output=$(
 		(
-			zxfer_run_zfs_set_properties() { return 3; }
+			zxfer_run_destination_zfs_cmd() { return 3; }
 			zxfer_throw_error() {
 				printf '%s|%s\n' "$1" "$2"
 				exit "$2"
@@ -1016,19 +951,20 @@ Property inherit list: com.x:tag=a\\x1Bb
 [backup/dst/child]" "$(cat "$l_argv_log")"
 }
 
-test_property_reconcile_helpers_preserve_caller_ifs_and_globbing() {
+test_property_transfer_helpers_preserve_caller_ifs_and_globbing() {
 	l_saved_ifs=$IFS
 	IFS=","
 	set -f
 	result=$(zxfer_property_test_apply "backup/dst/child" 0 "" "compression=lz4,atime=off" "checksum=sha256")
-	zxfer_diff_properties "compression=lz4=local,atime=off=local" "compression=off=local" ""
+	zxfer_plan_property_changes "compression=lz4=local,atime=off=local" "" 1 filesystem "" "" "" \
+		"compression=off=local"
 	l_globbing=$(zxfer_property_test_report_globbing_state after)
 	l_ifs_after=$IFS
 	set +f
 	IFS=$l_saved_ifs
 	assertEquals "set compression=lz4 atime=off backup/dst/child
 inherit checksum backup/dst/child" "$result"
-	assertEquals "compression=lz4,atime=off" "$g_zxfer_diff_initial_set_result"
+	assertEquals "compression=lz4,atime=off" "$g_zxfer_plan_initial_set_result"
 	assertEquals "after_globbing=disabled" "$l_globbing"
 	assertEquals "," "$l_ifs_after"
 }
