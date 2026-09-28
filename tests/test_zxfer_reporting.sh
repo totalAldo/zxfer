@@ -446,8 +446,6 @@ test_zxfer_set_original_invocation_redacts_unless_unsafe_mode() {
 test_zxfer_report_quoting_skips_awk_and_sed_for_plain_tokens() {
 	helper_log="$TEST_TMPDIR/report-quoting-helpers.log"
 	rm -f "$helper_log"
-	# posh cannot parse a single quote inside a nested "$(...)", so pass it
-	# through a variable.
 	quote_input="it's"
 	output=$(
 		(

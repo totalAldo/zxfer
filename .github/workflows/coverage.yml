@@ -78,6 +78,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$COVERAGE_DIR"
+          # The kcov image is Debian slim without ps or ssh: zxfer requires
+          # ps at startup, and the remote backup cases resolve ssh.
+          docker build --tag zxfer-kcov - <<'EOF'
+          FROM kcov/kcov@sha256:481289ae32e55e5b733019515acd10948a4f76dfed381765577db909664fc603
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends openssh-client procps \
+            && rm -rf /var/lib/apt/lists/*
+          EOF
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -e COVERAGE_DIR=/tmp/zxfer-coverage \
@@ -85,7 +93,7 @@ jobs:
             -v "$PWD:$PWD" \
             -v "$COVERAGE_DIR:/tmp/zxfer-coverage" \
             -w "$PWD" \
-            kcov/kcov@sha256:481289ae32e55e5b733019515acd10948a4f76dfed381765577db909664fc603 \
+            zxfer-kcov \
             sh -lc './tests/run_coverage.sh tests/test_contract_*.sh tests/test_zxfer_*.sh'
       - name: Upload kcov artifact
         if: always()

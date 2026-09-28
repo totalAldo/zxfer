@@ -28,7 +28,7 @@ Call out any intentional changes to:
 
 - pinned lint tooling or workflow behavior
 - report-only bash-xtrace coverage output or the coverage workflow
-- portable-shell expectations (`dash`, `bash --posix`, `busybox ash`, `posh`)
+- portable-shell expectations (`dash`, `bash --posix`, `busybox ash`)
 - spawn budgets in `tests/perf_budgets.tsv` (they only go down), the advisory
   wall-clock A/B, or VM-backed perf artifacts; wall-clock perf is informative
   and not a required GitHub Actions gate

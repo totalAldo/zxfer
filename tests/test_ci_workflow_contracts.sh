@@ -177,7 +177,7 @@ xcode-27 --skip-tool-suites' "$matrix_flags"
 	assertContains "The hosted matrix should pass each lane's runner flags." \
 		"$(workflow_job_body "$UNIT_WORKFLOW_FILE" shunit2)" \
 		'./tests/run_shunit_tests.sh --jobs "${{ matrix.unit_jobs }}" ${{ matrix.unit_flags }}'
-	for l_skip_job in portable-shells portable-shell-posh shunit2-freebsd shunit2-omnios; do
+	for l_skip_job in portable-shells shunit2-freebsd shunit2-omnios; do
 		assertContains "The $l_skip_job lane should skip the tool self-tests." \
 			"$(workflow_job_body "$UNIT_WORKFLOW_FILE" "$l_skip_job")" \
 			"./tests/run_shunit_tests.sh --jobs "

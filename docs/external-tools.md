@@ -233,7 +233,6 @@ VS Code container use. That image is based on Ubuntu 24.04 and preinstalls:
 - `dash`
 - `bash-posix`
 - `busybox-ash`
-- `posh`
 - Ubuntu `zfsutils-linux` userland (`zfs`, `zpool`)
 - the pinned lint-tool cache used by `tests/run_lint.sh`
 - upstream `kcov`, built from a pinned release because Ubuntu 24.04 does not

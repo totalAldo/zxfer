@@ -84,7 +84,7 @@ that. No profile runs `tests/run_integration_zxfer.sh` on the host.
   and its processes, sends TERM, then KILL, replays the partial output and
   reports `timed out after Ns`. A timeout makes the run exit 124.
 - `--skip-tool-suites` leaves out the tool self-tests. The portable-shell,
-  posh, FreeBSD, OmniOS and xcode-27 CI lanes use it; the tool suites run on
+  FreeBSD, OmniOS and xcode-27 CI lanes use it; the tool suites run on
   ubuntu-26.04 and macos-26.
 - `--list-suites` (alias `--list`) and `--list-tests SUITE` print without
   running anything; `--list-tests` also reads the fragments an entry names.
@@ -254,8 +254,8 @@ sensitive-caller ratchets in `tests/budget_policy.tsv`, checked by
 (`man/zxfer.1m` must be the generated rendering of `man/zxfer.8`). Shell
 targets lint every tracked or non-ignored untracked `*.sh` file and
 `zxfer`. The devcontainer (Ubuntu 24.04) carries the same toolchain plus
-dash, bash, busybox ash, posh, kcov and `zfsutils-linux` userland; it is not
-a ZFS host.
+dash, bash, busybox ash, kcov and `zfsutils-linux` userland; it is not a ZFS
+host.
 
 ## VM Matrix
 
@@ -388,9 +388,9 @@ need root.
 
 | Workflow | Jobs |
 | --- | --- |
-| `tests.yml` | shunit2 on ubuntu-26.04 (`--jobs 4`), macos-26 and xcode-27 (macOS 27 preview, `--jobs 1`); dash, `bash --posix` and busybox ash (`--jobs 4`); a non-blocking posh lane on `main` only; FreeBSD 15.1 and OmniOS r151058 `vmactions` guests (`--jobs 2`, OmniOS through `bash --posix`); and the gating `argv-fuzz` job. Only ubuntu-26.04 and macos-26 run the tool self-tests. |
+| `tests.yml` | shunit2 on ubuntu-26.04 (`--jobs 4`), macos-26 and xcode-27 (macOS 27 preview, `--jobs 1`); dash, `bash --posix` and busybox ash (`--jobs 4`); FreeBSD 15.1 and OmniOS r151058 `vmactions` guests (`--jobs 2`, OmniOS through `bash --posix`); and the gating `argv-fuzz` job. Only ubuntu-26.04 and macos-26 run the tool self-tests. |
 | `lint.yml` | Every `tests/run_lint.sh` target as a matrix; `tests/test_ci_workflow_contracts.sh` keeps the matrix equal to `run_lint.sh --list`. |
-| `coverage.yml` | Report-only bash-xtrace coverage (summary in the job summary, report as an artifact) and a non-blocking kcov pass in a digest-pinned `kcov/kcov` container over the contract and module suites. |
+| `coverage.yml` | Report-only bash-xtrace coverage (summary in the job summary, report as an artifact) and a non-blocking kcov pass over the contract and module suites in the digest-pinned `kcov/kcov` image with `procps` and `openssh-client` added (zxfer requires `ps`; the remote backup cases resolve `ssh`). |
 | `perf.yml` | The advisory `perf-advisory` job: `run_perf_ab.sh` against `origin/upstream-compat-final`, then against the code the push replaces (the merge base with `origin/main`, or `HEAD~1` on `main`) with `props`, plus the micro-bench TOTAL and ssh rows; never gates. |
 | `integration.yml` | The direct-host harness on ubuntu-26.04 (`sudo`, preserved workdir), and FreeBSD and OmniOS `vmactions` guests that run the harness in-guest (OmniOS under `/usr/xpg4/bin/sh`), copy failure artifacts back and restore the guest status in a host-side step. |
 
@@ -400,8 +400,5 @@ OmniOS unit job uses `bash --posix` because `/usr/xpg4/bin/sh` follows
 ksh-style subshell function binding and ignores the suites' subshell stubs;
 the integration job keeps `/usr/xpg4/bin/sh` for live illumos coverage.
 
-The posh lane currently runs no tests: under posh no suite gets the helper
-functions its sourced files define (the log shows
-`zxfer_source_runtime_modules_through: not found`), so each suite ends
-without running a test, and `posh -n` rejects eight test files. Whether to
-fix or drop the lane is pending a decision.
+There is no posh lane: posh is not a supported shell (see
+[platforms](./platforms.md)).

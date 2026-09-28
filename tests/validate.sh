@@ -152,7 +152,6 @@ run_doctor() {
 	report_command_availability "POSIX sh" sh
 	report_command_availability dash dash
 	report_command_availability bash bash
-	report_command_availability posh posh
 	report_command_availability "busybox ash" busybox
 
 	printf '%s\n' "QEMU commands (optional):"

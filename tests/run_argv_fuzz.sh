@@ -114,7 +114,6 @@ argv_fuzz_report_failure() {
 		LC_ALL=C tr '\001-\010\013-\037\177' '[?*]' | sed 's/^/      /'
 }
 
-# The loop calls no function before it exits: posh loses $# after one.
 while [ $# -gt 0 ]; do
 	case $1 in
 	--seed | --iterations | --case)

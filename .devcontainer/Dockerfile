@@ -51,7 +51,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	libcurl4 \
 	libdw1 \
 	perl \
-	posh \
 	python-is-python3 \
 	python3 \
 	python3-venv \

@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y busybox posh
+          sudo apt-get install -y busybox
       - name: Resolve shell under test
         id: shell_under_test
         shell: bash
@@ -98,9 +98,6 @@ jobs:
                 "exec \"$busybox_bin\" ash \"\$@\"" >"$shell_under_test"
               chmod 755 "$shell_under_test"
               ;;
-            posh)
-              shell_under_test="$(command -v posh)"
-              ;;
             *)
               echo "Unknown shell kind: ${{ matrix.shell_kind }}" >&2
               exit 1
@@ -112,30 +109,6 @@ jobs:
         shell: bash
         env:
           ZXFER_TEST_SHELL: ${{ steps.shell_under_test.outputs.shell_under_test }}
-        run: |
-          set -euo pipefail
-          ./tests/run_shunit_tests.sh --jobs 4 --skip-tool-suites
-
-  portable-shell-posh:
-    name: shunit2 (posh)
-    if: ${{ github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install posh
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y posh
-      - name: Run shunit2 tests under posh
-        shell: bash
-        env:
-          ZXFER_TEST_SHELL: /usr/bin/posh
         run: |
           set -euo pipefail
           ./tests/run_shunit_tests.sh --jobs 4 --skip-tool-suites

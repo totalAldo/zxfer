@@ -38,6 +38,15 @@ Pre-OpenZFS 2.0 behavior, Solaris Express-era property profiles, and older
 backup metadata layouts are intentionally outside the supported platform
 surface.
 
+`posh`, Debian's policy-checking shell, is not supported and has no CI lane.
+Its `case` patterns have no POSIX character classes such as `[[:space:]]` and
+`[[:cntrl:]]`, which zxfer's checks use. It has no `printf` or `kill` builtin,
+and procps-ng 4.0.4's `/usr/bin/kill` (Ubuntu 26.04) inverts the exit status
+of zxfer's `kill -SIG -PGID` group probe, so under `posh` zxfer would misread
+whether a process group is alive. It also cannot parse a quote in a comment,
+or a `case` pattern without a leading `(`, inside `$(...)`, which eight test
+files contain.
+
 ## Integration Test Hosts
 
 The VM-backed guest runner [../tests/run_vm_matrix.sh](../tests/run_vm_matrix.sh)

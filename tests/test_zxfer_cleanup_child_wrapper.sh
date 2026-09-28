@@ -220,10 +220,9 @@ test_cleanup_child_wrapper_validated_roots_retain_matches_and_fail_closed_on_liv
 
 	assertEquals "A live descendant with an unreadable identity should make root refresh fail closed." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "A matching retained identity should remain an eligible refresh root." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "$$ 701"
-	assertNotContains "A live descendant with an unreadable identity must not become a refresh root." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "702"
+	# Compare the whole line: the shell's own PID leads it and may contain 702.
+	assertEquals "Only the wrapper and the matching identity may be refresh roots; the unreadable one must not." \
+		"$$ 701" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
 test_cleanup_child_wrapper_signal_treats_exited_signal_race_as_success() {

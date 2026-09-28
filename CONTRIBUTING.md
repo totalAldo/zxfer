@@ -257,9 +257,7 @@ Good pull requests explain:
 - whether CI or coverage tooling changed intentionally
 
 GitHub Actions also runs an Ubuntu portable-shell matrix for `dash`,
-`bash --posix`, and `busybox ash` on every push, plus a non-blocking `posh`
-lane on pushes to `main` (it currently runs no tests; see
-[docs/testing.md](./docs/testing.md)), and a separate non-blocking
+`bash --posix`, and `busybox ash` on every push, and a separate non-blocking
 Docker-backed `kcov` coverage artifact job. The tool self-tests run only on
 the ubuntu-26.04 and macos-26 lanes. Local development does not require
 `kcov`, but shell-portability-sensitive changes should mention whether those

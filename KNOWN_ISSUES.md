@@ -171,17 +171,7 @@ leader reused the PID. In both modes, the `kill -0` liveness check in
 `zxfer_wait_for_any_send_job` for a job with no status can be fooled by a
 recycled PID, so the wait keeps polling until the PID exits.
 
-### Low: process-group statuses are wrong under `posh`, and a BusyBox userland is unvalidated
-
-`zxfer_signal_process_group` in `src/zxfer_exec.sh` sends every group probe
-and signal as `kill -SIG -PGID`, the one form dash, bash, ksh93, zsh, FreeBSD
-sh and BusyBox ash all read. `posh` has no `kill` builtin, so it runs
-procps-ng's `/usr/bin/kill`, and procps-ng 4.0.4 (Ubuntu 26.04) inverts the
-exit status of that form: 0 for a group that is gone and 1 for a live one.
-The signals are still delivered, but under `posh` zxfer misreads whether a
-group is alive, so cleanup registration can drop a live group and group
-signal results are wrong. The main-only `posh` CI lane is non-blocking and
-fails the process-group suites for this reason.
+### Low: a BusyBox userland is unvalidated
 
 BusyBox ash itself is supported, but a host whose whole userland is BusyBox
 (Alpine-like) is unvalidated: BusyBox `ps` rejects `-p`, which wrapper-mode
