@@ -24,6 +24,34 @@ removed on 2026-09-01 because they forced module and function splitting.
 
 ## Measured Results
 
+### Next phase W1: fail-closed sweep and measurement knobs (2026-09-26)
+
+W1 changed tests and tooling only; `src/` is unchanged, so the micro-bench
+counts of the existing scenarios are identical (the new `props` scenario
+spawns 203 / 101 helpers with `-V` at 25x4 / 8x2). The fail-closed sweep
+(`tests/test_contract_failures.sh`) found no fail-open.
+
+`tests/run_perf_ab.sh --baseline-ref upstream-compat-final --sizes 25
+--latency-ms 0 --reps 7` on macOS (`/bin/sh` is bash 3.2), two runs, median
+seconds, ratio to upstream:
+
+| Children | Scenario | Current | Upstream | Ratio |
+| ---: | --- | ---: | ---: | ---: |
+| 25 | No-op | 0.092, 0.091 | 0.151, 0.151 | 0.61, 0.60 |
+| 25 | Incremental | 0.672, 0.656 | 1.491, 1.416 | 0.45, 0.46 |
+| 25 | Remote no-op | 0.222, 0.204 | 0.222, 0.209 | 1.00, 0.97 |
+| 25 | Remote incremental | 0.916, 0.939 | 1.985, 1.991 | 0.46, 0.47 |
+
+The zero-latency remote no-op is at parity with upstream; the wave 4
+comparison measured 1.25.
+
+First readings from the new knobs against `main` (same host, median of 3,
+ratios 0.96-1.02 because `src/` is unchanged): 100 children x 50 snapshots
+(`--snapshots 50`) no-op 0.10 s, incremental 3.79 s; 200 x 100 incremental
+16.2 s (one run); `props` (`-P`, 68 matching properties per dataset)
+1.34 s / 6.25 s at 25 / 100 children under `/bin/sh` and 1.29 s / 8.22 s
+under `--shell /bin/dash`.
+
 ### Wave 9 property-read and verbose-escaping fixes (2026-09-26)
 
 Wave 9 changed no path that runs without `-v`, `-V` or `-P`. A user property
@@ -180,8 +208,8 @@ upstream:
 | 0 | `-z` | Incremental | 1.112, 0.58 | 1.067, 0.56 | 1.910 |
 
 With an 80 ms handshake every remote row is faster than upstream. With no
-handshake cost the remote no-op is still slower than upstream (see Remaining
-Candidates).
+handshake cost the remote no-op was still slower than upstream in this
+comparison; it measured at parity on 2026-09-26 (see the W1 section above).
 
 ### Wave 3r remote connection lifecycle (2026-09-23)
 
@@ -647,11 +675,12 @@ Other remaining items:
   compression/remote-ZFS command rendering (items 26, 27): resolve optional
   helpers and render remote command state only after consistency checks
   prove the mode needs them.
-- Remote no-op at zero latency: the endpoint context, `-z` codec lookups
-  and remote listing renders now run in the current shell, but a
-  zero-latency remote no-op is still slower than upstream. The wave 4 sweep's
-  profiling puts most of the rest in the size of the remote capability-probe
-  and discovery-batch programs; the probe's stdout capture (one command
+- Remote no-op at zero latency: at parity with upstream since 2026-09-26
+  (ratio 1.00 and 0.97 in two runs of `tests/run_perf_ab.sh --baseline-ref
+  upstream-compat-final --sizes 25 --latency-ms 0 --reps 7`; 1.25 in the
+  wave 4 comparison). To get ahead of it: the wave 4 sweep's profiling puts
+  most of the rest in the size of the remote capability-probe and
+  discovery-batch programs; the probe's stdout capture (one command
   substitution per probe) and the cleanup wrapper path lookup still fork.
 - Minimal help/early-usage paths (item 28): keep `zxfer -h` on the smallest
   path that preserves documented output.
@@ -665,9 +694,10 @@ Other remaining items:
 
 ## Measurement
 
-- `tests/run_microbench.sh [-V] [--forks] [-d N -s S] [noop|dryrun_incr|incr|remote_noop|remote_incr ...]` —
+- `tests/run_microbench.sh [-V] [--forks] [-d N -s S] [noop|dryrun_incr|incr|remote_noop|remote_incr|props ...]` —
   helper-spawn counts (22 counted tools) and `-V` profile counters against
-  the canned zfs; `incr` is the live per-dataset hot path. The remote
+  the canned zfs; `incr` is the live per-dataset hot path and `props` the
+  same with `-P` and 68 matching properties per dataset. The remote
   scenarios run `-O localhost -T localhost` through a socket-aware mock ssh.
   Every scenario adds `ssh_connections`, `ssh_invocations` and
   `ssh_master_opens` rows; the connection and master rows are pinned
@@ -678,13 +708,21 @@ Other remaining items:
   `--forks` (bash 4.1 or later, or set `ZXFER_MICROBENCH_BASH`) reruns each
   scenario under xtrace and adds advisory `forks_{startup,run,exit,total}`
   subshell counts; they are advisory only and never budgeted.
-- `tests/run_perf_ab.sh --baseline-ref REF [--candidate-root DIR] [--sizes 25,100] [--reps N] [--summary FILE] [--latency-ms 80]` —
-  an advisory wall-clock A/B on the canned zfs, with no ZFS and no root. For
-  each size it runs noop, incr, remote_noop and remote_incr: one warm-up,
-  then alternating runs. It prints median/min/max and the
-  candidate/baseline ratio as TSV, plus an optional appended Markdown table,
-  and exits non-zero only on harness or usage errors. It replaces the scratch
-  `ab.py` and `abot_lat.py` harnesses used in earlier waves.
+- `tests/run_perf_ab.sh --baseline-ref REF [--candidate-root DIR] [--sizes 25,100] [--snapshots 4] [--scenarios LIST] [--shell PATH] [--reps N] [--summary FILE] [--latency-ms 80]` —
+  an advisory wall-clock A/B on the canned zfs, with no ZFS and no root. REF
+  is any commit-ish, a SHA included. For each size it runs noop, incr,
+  remote_noop and remote_incr (or the `--scenarios` list, which may add the
+  opt-in `props`: incr with `-P` and 68 matching properties per dataset):
+  one warm-up, then alternating runs. `--snapshots` sets the fixture depth
+  and `--shell` the interpreter of both launchers (for example
+  `/bin/dash`). It prints median/min/max and the candidate/baseline ratio as
+  TSV, plus an optional appended Markdown table, and exits non-zero only on
+  harness or usage errors. It replaces the scratch `ab.py` and `abot_lat.py`
+  harnesses used in earlier waves.
+- `tests/test_contract_failures.sh` fails every zfs and ssh call of nine
+  small scenarios in turn and requires zxfer to fail closed (see
+  `docs/testing.md`). An optimization that changes call order or error
+  handling must keep it green.
 - `tests/run_perf_compare.sh` and the VM `perf-compare` layer compare this
   branch against a baseline ref inside the same disposable guest:
 

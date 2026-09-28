@@ -14,7 +14,7 @@
 # subdirectory as TMPDIR, so the caller's TMPDIR cannot change the counts
 # (see zxfer_mockbin_make_bench_workdir).
 #
-# Scenarios (operands; default is all five):
+# Scenarios (operands; default is all six):
 #   noop         recursive replication where the destination already matches
 #   dryrun_incr  -n dry run where every destination misses the last snapshot
 #   incr         live incremental replication of that same fixture (every
@@ -22,6 +22,9 @@
 #                send/receive pipeline), the per-dataset hot path
 #   remote_noop  noop with -O localhost -T localhost through the mock ssh
 #   remote_incr  incr with -O localhost -T localhost through the mock ssh
+#   props        incr with -P and 68 properties per dataset that already
+#                match on both sides (zxfer_mockbin_add_property_fixtures),
+#                the property pass's per-dataset path
 #
 # Output: stable TSV on stdout, one metric per row:
 #   <scenario><TAB><tool><TAB><count>             spawns per counted tool
@@ -92,12 +95,13 @@ Counts helper-process spawns and ssh connections of the real ./zxfer driven
 black-box against a canned zfs and a mock ssh (no real zfs, zpool or ssh is
 ever executed).
 
-Scenarios (default: all five):
+Scenarios (default: all six):
   noop          recursive no-op replication (destination already in sync)
   dryrun_incr   incremental replication under -n (dry run; zero zfs argv)
   incr          live incremental replication (one receive per dataset)
   remote_noop   noop with -O localhost -T localhost
   remote_incr   incr with -O localhost -T localhost
+  props         incr with -P and 68 matching properties per dataset
 
 Options:
   -d num-datasets       child datasets in the fixture tree (default 25)
@@ -270,6 +274,10 @@ zxfer_microbench_run_scenario() {
 		l_state_dir="$g_microbench_workdir/fixtures/incremental"
 		set -- -O localhost -T localhost
 		;;
+	props)
+		l_state_dir="$g_microbench_workdir/fixtures/props"
+		set -- -P
+		;;
 	*)
 		printf 'run_microbench.sh: unknown scenario: %s\n' "$l_scenario" >&2
 		return 2
@@ -307,6 +315,17 @@ zxfer_microbench_run_scenario() {
 			"$l_status" "$l_scenario" >&2
 		cat "$l_stderr" >&2
 		return "$l_status"
+	fi
+	# The props fixture already matches, so any mutating zfs command besides
+	# the receives (a set or inherit, or a destroy, rollback or snapshot) means
+	# the fixture and the launcher disagree and the counts measure other work.
+	if [ "$l_scenario" = props ]; then
+		l_mutations=$(grep -c '^MUTATE ' "$l_zfs_log" || :)
+		if [ "${l_mutations:-0}" -ne 0 ]; then
+			printf 'run_microbench.sh: scenario props ran %s mutating zfs command(s) besides its receives; its fixture must need none\n' \
+				"$l_mutations" >&2
+			return 1
+		fi
 	fi
 
 	for l_tool in $g_microbench_tools; do
@@ -381,11 +400,11 @@ done
 shift $((OPTIND - 1))
 
 if [ $# -eq 0 ]; then
-	g_microbench_scenarios="noop dryrun_incr incr remote_noop remote_incr"
+	g_microbench_scenarios="noop dryrun_incr incr remote_noop remote_incr props"
 else
 	for l_scenario in "$@"; do
 		case "$l_scenario" in
-		noop | dryrun_incr | incr | remote_noop | remote_incr) ;;
+		noop | dryrun_incr | incr | remote_noop | remote_incr | props) ;;
 		*)
 			printf 'run_microbench.sh: unknown scenario: %s\n' "$l_scenario" >&2
 			zxfer_microbench_usage >&2
@@ -417,6 +436,16 @@ export TMPDIR
 zxfer_microbench_build_toolchain || exit 1
 zxfer_mockbin_build_fixture_tree "$g_microbench_workdir/fixtures" \
 	"$g_microbench_datasets" "$g_microbench_snaps" || exit 1
+# The props state is its own copy, so the other scenarios' manifests keep
+# their length and their counts.
+case " $g_microbench_scenarios " in
+*" props "*)
+	cp -R "$g_microbench_workdir/fixtures/incremental" \
+		"$g_microbench_workdir/fixtures/props" &&
+		zxfer_mockbin_add_property_fixtures "$g_microbench_workdir/fixtures/props" \
+			"$g_microbench_datasets" || exit 1
+	;;
+esac
 
 for l_scenario in $g_microbench_scenarios; do
 	zxfer_microbench_run_scenario "$l_scenario" || exit "$?"
