@@ -143,32 +143,6 @@ file-backed `zfs`/`zpool` fixture lifecycle described above.
 Perf dependencies are local QA dependencies only. They should not become
 installed-command runtime dependencies.
 
-## Developer Workflow Timing Dependencies
-
-These tools are used by
-[run_dx_benchmark.sh](../tests/run_dx_benchmark.sh), not by the installed
-`zxfer` command. The runner measures existing validation entry points and does
-not add a timing gate.
-
-| Tool | Why it is needed |
-| --- | --- |
-| `/usr/bin/time -p` | record portable wall time separately from command stderr |
-| POSIX `awk` | validate timer output and calculate median and nearest-rank P95 summaries |
-| `ps`, `kill`, `sleep` | verify private process-group leadership, coordinate readiness, and retire the active validation group |
-| `setsid` | fallback private-group launcher when non-interactive shell job control is unavailable (normally provided by util-linux on Linux) |
-
-The selected validation case retains its own dependencies and host-risk
-contract. A resident supervisor verifies `PID == PGID` and publishes readiness
-before the selected runner receives permission to start. The launcher uses
-non-interactive shell job control where it produces a verified private group,
-with `setsid` as a fail-closed fallback. Once ready, cleanup needs no ancestry
-snapshot: group-wide `STOP` pins and freezes the supervisor plus every
-inherited-group descendant before one `KILL` and `wait`. The timing runner
-itself does not invoke ZFS or access the network; the complete `validate` case
-may populate the pinned lint cache through the normal `validate.sh full` path.
-Measurements execute under `LC_ALL=C` so portable `time -p` decimals and TSV
-summaries remain machine-readable.
-
 ## VM Matrix Host Dependencies
 
 These tools are used by [run_vm_matrix.sh](../tests/run_vm_matrix.sh) on the
@@ -197,7 +171,9 @@ These tools are used for development, CI, or local QA.
 ### Unit Test Runner
 
 - `tests/shunit2/shunit2` is vendored in the repository
-- `/bin/sh` is sufficient for the normal shunit2 runner
+- `/bin/sh` is sufficient for the normal shunit2 runner, which also uses
+  `mktemp`, `mkfifo`, `sleep` (its once-a-second ticker) and, only to stop a
+  timed-out or interrupted suite, `ps -A -o pid= -o ppid= -o args=`
 - alternate shells such as `dash`, `bash --posix`, `busybox ash`, and
   `/usr/xpg4/bin/sh` are CI/test-matrix tools, not runtime dependencies
 - FreeBSD VM-backed shunit2 runs install `bash` for coverage-helper tests and

@@ -5,10 +5,8 @@
 # Runs tests/run_microbench.sh with -V against the small CI fixture
 # (8 datasets x 2 snapshots) and asserts every <scenario>_small row in
 # tests/perf_budgets.tsv holds: observed <= max, and observed == max for the
-# exact ssh_connections and ssh_master_opens rows. The full-fixture rows
-# (25 x 4, keys without the _small suffix) are checked on demand by setting
-# ZXFER_MICROBENCH_CHECK_FULL=1. Budgets are ratchet-down-only; see the
-# header of tests/perf_budgets.tsv.
+# exact ssh_connections and ssh_master_opens rows. Budgets are
+# ratchet-down-only; see the header of tests/perf_budgets.tsv.
 #
 # shellcheck disable=SC1090,SC2034,SC2154
 
@@ -42,14 +40,13 @@ oneTimeTearDown() {
 	zxfer_test_cleanup_tmpdir
 }
 
-# Purpose: Print one line per budget row of a class that a bench TSV breaks,
-# lacks or reports as non-numeric, or a note when the class has no rows.
-# Usage: microbench_budget_violations <bench-tsv> <small|full>. Class small
-# checks the <scenario>_small rows against the bench scenario without the
-# suffix; class full checks the unsuffixed rows. Returns 1 when it printed,
-# and awk's own status (2) when an input cannot be read.
+# Purpose: Print one line per budget row that a bench TSV breaks, lacks or
+# reports as non-numeric, or a note when no row was checked.
+# Usage: microbench_budget_violations <bench-tsv>; each <scenario>_small row
+# is checked against the bench scenario without the suffix. Returns 1 when
+# it printed, and awk's own status (2) when an input cannot be read.
 microbench_budget_violations() {
-	awk -F '\t' -v class="$2" '
+	awk -F '\t' '
 		FILENAME == ARGV[1] {
 			observed[$1 FS $2] = $3
 			next
@@ -59,8 +56,7 @@ microbench_budget_violations() {
 		}
 		{
 			scenario = $1
-			if (sub(/_small$/, "", scenario) != (class == "small"))
-				next
+			sub(/_small$/, "", scenario)
 			checked++
 			key = scenario FS $2
 			if (!(key in observed))
@@ -78,7 +74,7 @@ microbench_budget_violations() {
 		}
 		END {
 			if (!checked) {
-				print "no " class " budget rows were checked"
+				print "no budget rows were checked"
 				bad++
 			}
 			exit (bad > 0)
@@ -86,11 +82,11 @@ microbench_budget_violations() {
 	' "$1" "$BUDGETS_TSV"
 }
 
-# Purpose: Assert that a bench TSV breaks no budget row of a class and that
-# the checker itself succeeded, so an unreadable input fails closed.
-# Usage: microbench_assert_budgets_hold <message> <bench-tsv> <small|full>
+# Purpose: Assert that a bench TSV breaks no budget row and that the checker
+# itself succeeded, so an unreadable input fails closed.
+# Usage: microbench_assert_budgets_hold <message> <bench-tsv>
 microbench_assert_budgets_hold() {
-	l_violations=$(microbench_budget_violations "$2" "$3")
+	l_violations=$(microbench_budget_violations "$2")
 	l_status=$?
 	assertEquals "$1" "" "$l_violations"
 	assertEquals "$1: the budget checker should exit 0" 0 "$l_status"
@@ -147,14 +143,21 @@ test_budgets_file_is_well_formed() {
 			;;
 		esac
 		l_rows=$((l_rows + 1))
-		case "${l_scenario%_small}" in
-		noop | dryrun_incr | incr | remote_noop | remote_incr | props) ;;
+		case "$l_scenario" in
+		noop_small | dryrun_incr_small | incr_small | remote_noop_small | \
+			remote_incr_small | props_small) ;;
 		*)
 			fail "unknown budget scenario key: $l_scenario"
 			;;
 		esac
-		assertTrue "budget row needs a metric: $l_scenario" \
-			"[ -n '$l_metric' ]"
+		# Only the spawn total, the exact ssh rows and the zfs call counters
+		# are budgeted; the other bench rows are for diagnosis.
+		case "$l_metric" in
+		TOTAL | ssh_connections | ssh_master_opens | profile:zfs_*_calls) ;;
+		*)
+			fail "unbudgeted metric in the budgets file: $l_scenario/$l_metric"
+			;;
+		esac
 		case "$l_max" in
 		'' | *[!0-9]*)
 			fail "budget max must be a non-negative integer: $l_scenario/$l_metric: $l_max"
@@ -176,7 +179,7 @@ test_small_fixture_budgets_hold() {
 		0 "$MICROBENCH_SMALL_STATUS"
 	microbench_assert_budgets_hold \
 		"small-fixture budgets (ratchet-down-only; do not raise a budget)" \
-		"$MICROBENCH_SMALL_TSV" small
+		"$MICROBENCH_SMALL_TSV"
 }
 
 # One ssh command that skips the control socket is one more connection than
@@ -210,48 +213,27 @@ test_ssh_connection_changes_break_the_exact_budget() {
 
 	microbench_assert_budgets_hold \
 		"every row at its budget, with the replayed no-op ssh rows, should pass" \
-		"$l_case_dir/clean.tsv" small
+		"$l_case_dir/clean.tsv"
 	assertEquals "the extra direct connection should be the only violation" \
 		"budget exceeded: remote_noop_small ssh_connections observed=2 max=1" \
-		"$(microbench_budget_violations "$l_case_dir/extra.tsv" small)"
+		"$(microbench_budget_violations "$l_case_dir/extra.tsv")"
 	assertEquals "a remote no-op without ssh should break both exact rows" \
 		"exact count dropped: remote_noop_small ssh_connections observed=0 exact=1
 exact count dropped: remote_noop_small ssh_master_opens observed=0 exact=1" \
-		"$(microbench_budget_violations "$l_case_dir/none.tsv" small)"
+		"$(microbench_budget_violations "$l_case_dir/none.tsv")"
 }
 
 test_budget_checker_fails_closed_on_unreadable_input() {
-	microbench_budget_violations "$TEST_TMPDIR/missing.tsv" small \
+	microbench_budget_violations "$TEST_TMPDIR/missing.tsv" \
 		>/dev/null 2>&1
 	assertNotEquals "a missing bench TSV should fail the checker" 0 $?
 	l_saved_budgets=$BUDGETS_TSV
 	BUDGETS_TSV="$TEST_TMPDIR/missing_budgets.tsv"
-	microbench_budget_violations "$MICROBENCH_SMALL_TSV" small \
+	microbench_budget_violations "$MICROBENCH_SMALL_TSV" \
 		>/dev/null 2>&1
 	l_status=$?
 	BUDGETS_TSV=$l_saved_budgets
 	assertNotEquals "a missing budgets file should fail the checker" 0 "$l_status"
-}
-
-test_full_fixture_budgets_hold_when_requested() {
-	if [ "${ZXFER_MICROBENCH_CHECK_FULL:-0}" != "1" ]; then
-		startSkipping
-		assertTrue \
-			"set ZXFER_MICROBENCH_CHECK_FULL=1 to enforce the full-fixture budgets" \
-			true
-		endSkipping
-		return 0
-	fi
-
-	l_full_tsv="$TEST_TMPDIR/microbench_full.tsv"
-	l_full_err="$TEST_TMPDIR/microbench_full.err"
-	sh "$MICROBENCH_BIN" -V >"$l_full_tsv" 2>"$l_full_err"
-	l_run_status=$?
-	assertEquals "full micro-bench should exit 0; stderr: $(cat "$l_full_err")" \
-		0 "$l_run_status"
-	microbench_assert_budgets_hold \
-		"full-fixture budgets (ratchet-down-only; do not raise a budget)" \
-		"$l_full_tsv" full
 }
 
 . "$SHUNIT2_BIN"

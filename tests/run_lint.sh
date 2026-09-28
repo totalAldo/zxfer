@@ -398,10 +398,43 @@ run_codespell() {
 	)
 }
 
+# Purpose: Keep eval out of the shared test helpers (tests/*_helper.sh and
+# tests/helpers/*.sh) except the two legacy string-capture helpers in
+# tests/helpers/process_capture.sh, zxfer_test_capture_subshell and
+# zxfer_test_capture_subshell_split, which about 200 test call sites use.
+# Usage: run_test_helper_eval_policy; prints each other eval line and fails.
 run_test_helper_eval_policy() {
 	require_command awk
 	printf '==> test-helper eval policy\n'
-	"$ZXFER_ROOT/tests/check_test_helper_eval.sh" "$ZXFER_ROOT"
+	set --
+	for l_eval_helper in "$ZXFER_ROOT"/tests/*_helper.sh \
+		"$ZXFER_ROOT"/tests/helpers/*.sh; do
+		[ ! -f "$l_eval_helper" ] || set -- "$@" "$l_eval_helper"
+	done
+	[ "$#" -gt 0 ] || return 0
+	# The allowance follows the enclosing function, not the position in the
+	# file, so an eval added above the legacy helpers cannot take their place.
+	# A function starts at a NAME() header in column 0 and ends at a "}" in
+	# column 0; a one-line definition keeps its name until the next header.
+	LC_ALL=C awk -v root="$ZXFER_ROOT/" '
+		FNR == 1 { fn = "" }
+		/^[[:alpha:]_][[:alnum:]_]*[[:space:]]*\(\)/ {
+			fn = $0
+			sub(/[[:space:]]*\(.*/, "", fn)
+		}
+		$0 !~ /^[[:space:]]*#/ && $0 ~ /(^|[^[:alnum:]_])eval([^[:alnum:]_]|$)/ {
+			if (!(FILENAME == root "tests/helpers/process_capture.sh" &&
+				(fn == "zxfer_test_capture_subshell" ||
+					fn == "zxfer_test_capture_subshell_split") &&
+				++allowed[fn] == 1)) {
+				printf "%s:%d: eval in a shared test helper; only zxfer_test_capture_subshell and zxfer_test_capture_subshell_split in tests/helpers/process_capture.sh may use it, once each\n",
+					substr(FILENAME, length(root) + 1), FNR
+				bad = 1
+			}
+		}
+		/^}/ { fn = "" }
+		END { exit bad }
+	' "$@"
 }
 
 run_shellcheck() {

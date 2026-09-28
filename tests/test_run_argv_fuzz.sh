@@ -2,8 +2,9 @@
 #
 # shunit2 tests for the seeded argv-boundary fuzz: tests/run_argv_fuzz.sh
 # and its helpers tests/helpers/argv_fuzz.sh and tests/helpers/argv_fuzz.awk.
-# A few fixed seeds run the real ./zxfer against the fake zfs in every mode;
-# the self-tests prove that an injected quoting bug is reported.
+# One fixed seed runs the real ./zxfer against the fake zfs in every mode (the
+# argv-fuzz CI job runs a fresh seed on every push); the self-tests prove that
+# an injected quoting bug is reported.
 #
 
 TESTS_DIR=$(dirname "$0")
@@ -37,14 +38,12 @@ fuzz_assert_output_has() {
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_fixed_seeds_pass_in_every_mode() {
-	for l_seed in 1 2 3; do
-		fuzz_run --seed "$l_seed" --iterations 2
-		assertEquals "seed $l_seed should pass: $(cat "$FUZZ_OUT")" 0 "$FUZZ_STATUS"
-		assertEquals "the seed line comes first" "seed=$l_seed" "$(sed -n '1p' "$FUZZ_OUT")"
-		fuzz_assert_output_has "every mode ran for both cases" \
-			"seed=$l_seed cases=2 runs=14 failed_cases=0"
-	done
+test_a_fixed_seed_passes_in_every_mode() {
+	fuzz_run --seed 1 --iterations 2
+	assertEquals "seed 1 should pass: $(cat "$FUZZ_OUT")" 0 "$FUZZ_STATUS"
+	assertEquals "the seed line comes first" "seed=1" "$(sed -n '1p' "$FUZZ_OUT")"
+	fuzz_assert_output_has "every mode ran for both cases" \
+		"seed=1 cases=2 runs=14 failed_cases=0"
 	assertEquals "the work directory is removed" "" "$(ls "$CASE_DIR")"
 }
 
