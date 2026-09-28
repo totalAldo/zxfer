@@ -19,7 +19,8 @@ module or a chain of setters.
 - [../src/zxfer_modules.sh](../src/zxfer_modules.sh): canonical loader and
   source-order entry point for the runtime modules
 - [../src/zxfer_reporting.sh](../src/zxfer_reporting.sh): structured failure
-  reporting, verbose output helpers, usage errors, and operator-facing status
+  reporting and its validated `ZXFER_ERROR_LOG` mirror, verbose output
+  helpers, usage errors, and operator-facing status
 - [../src/zxfer_quoting.sh](../src/zxfer_quoting.sh): literal token splitting,
   single-quote escaping, and argv-to-shell rendering primitives; the
   line-control constants, `zxfer_split_begin`/`zxfer_split_end`, and the
@@ -40,10 +41,6 @@ module or a chain of setters.
   root, runtime artifact allocation/readback, short-lived cleanup-PID rows,
   and randomized path-adjacent staging entries with their single
   identity/path cleanup registry
-- [../src/zxfer_error_log.sh](../src/zxfer_error_log.sh): secure structured
-  failure-log mirroring, serialized append coordination, and the
-  pid/start-token owned-lock protocol (metadata, stale-owner
-  validation/reaping, checked release)
 - [../src/zxfer_ssh_transport.sh](../src/zxfer_ssh_transport.sh): validated
   host/wrapper parsing (`-O`/`-T` host specs parsed once per value), managed
   SSH options, ssh argv assembled per call with the role's control socket,
@@ -275,25 +272,21 @@ protection against PID reuse. Cleanup failures propagate through the session's
 structured failure path, including managed SSH control-socket close failures.
 Short-lived helpers use the same spawn scopes and the runtime cleanup registry.
 
-## Owned Lock Layer
+## Error Log Append
 
-Cross-process coordination is now a single concern: the `ZXFER_ERROR_LOG`
-append lock. The owned-lock helpers live in
-[../src/zxfer_error_log.sh](../src/zxfer_error_log.sh) next to the append
-path. Lock identity is deliberately slim: a
-mode-0700 lock directory whose metadata file records only the owner pid and
-one memoized `ps` process-start token. The token comes from the cleanup
-wrapper's `zxfer_cleanup_child_wrapper_get_process_start_token`, the same
-parser the wrapper uses for descendant identities, sourced in a subshell.
-Helpers validate that metadata before
-trusting an existing owner, treat missing or corrupt metadata as busy on
-first sighting (corrupt-reaping only after a sleep-and-recheck round so a
-concurrent winner inside its mkdir-to-publish window is never reaped), and
-treat release as a checked owner-match operation. The older lease entries,
-hostname/purpose/created-at metadata fields, ssh socket locks, and
-capability-cache locks were deleted with the machinery they coordinated:
-ssh control sockets and remote capability state are per-run now and need no
-cross-process locking.
+zxfer takes no cross-process locks. The only file that concurrent runs share
+is the operator's `ZXFER_ERROR_LOG`, and
+[../src/zxfer_reporting.sh](../src/zxfer_reporting.sh) appends each failure
+report to it with one `O_APPEND` write, which the kernel places at the end of
+the file as a unit. Before every append it checks the path (no symlinked
+component, a trusted parent, a regular 0600 file with a single link, owned by
+root or the effective user) and creates a missing log under umask 077 with
+noclobber. The write goes through awk rather than the shell's `printf`: bash
+line-buffers its builtins' output, so a report printed by the shell would go
+out one line per write and could interleave with another run's report. The
+lock directories, lease entries, ssh socket locks, and capability-cache locks
+of earlier versions are gone; ssh control sockets and remote capability state
+are per-run and need no cross-process coordination.
 
 ## Remote Protocol Rendering And Capability State
 
