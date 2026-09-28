@@ -69,8 +69,15 @@ zxfer_profile_read_clock_ms() {
 	l_profile_clock_s=${l_profile_clock%% *}
 	l_profile_clock_ms=${l_profile_clock#* }
 	zxfer_is_uint "$l_profile_clock_s" || return 1
-	zxfer_is_uint "$l_profile_clock_ms" ||
-		l_profile_clock_ms=$((l_profile_clock_s * 1000))
+	# The millisecond field counts only as the seconds field followed by
+	# exactly three digits, as GNU date prints %3N. BSD and illumos date
+	# print %3N literally, and BusyBox date prints the nanoseconds without
+	# zero padding, so two of its readings can differ in length; both fall
+	# back to whole seconds.
+	case $l_profile_clock_ms in
+	"$l_profile_clock_s"[0123456789][0123456789][0123456789]) ;;
+	*) l_profile_clock_ms=$((l_profile_clock_s * 1000)) ;;
+	esac
 	g_zxfer_profile_clock_ms=$l_profile_clock_ms
 }
 
@@ -283,6 +290,8 @@ zxfer_profile_emit_summary() {
 	l_profile_elapsed=unknown
 	if zxfer_is_uint "${g_zxfer_profile_start_ms:-}" && zxfer_profile_read_clock_ms; then
 		l_profile_elapsed=$((g_zxfer_profile_clock_ms / 1000 - g_zxfer_profile_start_ms / 1000))
+		# A clock that went backwards reports 0, never a negative count.
+		[ "$l_profile_elapsed" -ge 0 ] || l_profile_elapsed=0
 	fi
 	printf 'zxfer profile: %s\n' "elapsed_seconds=$l_profile_elapsed" "$@" >&2
 }

@@ -326,6 +326,29 @@ test_zxfer_profile_emit_summary_prints_every_key_once_in_order() {
 		"printf '%s\n' \"\$output\" | grep -q '^zxfer profile: elapsed_seconds=[0-9][0-9]*\$'"
 }
 
+# The summary line is whole seconds between two clock readings; a clock that
+# moved backwards (or readings of different lengths) must not print a
+# negative count, which a -V consumer parsing plain counts would reject.
+test_zxfer_profile_emit_summary_never_prints_a_negative_elapsed_time() {
+	output=$(
+		(
+			zxfer_profile_read_clock_ms() {
+				g_zxfer_profile_clock_ms=2000
+			}
+			g_option_V_very_verbose=1
+			g_zxfer_profile_summary_emitted=0
+			g_zxfer_profile_has_data=1
+			g_zxfer_profile_start_ms=9000
+			zxfer_profile_emit_summary
+		) 2>&1
+	)
+
+	assertContains "A clock that went backwards should report 0 elapsed seconds." \
+		"$output" "zxfer profile: elapsed_seconds=0"
+	assertNotContains "No summary line may carry a negative count." \
+		"$output" "=-"
+}
+
 test_zxfer_profile_emit_summary_prints_every_counter_from_its_own_global() {
 	output=$(
 		(
@@ -361,6 +384,21 @@ test_zxfer_profile_read_clock_ms_parses_one_date_reading() {
 			zxfer_profile_read_clock_ms
 			printf 'bsd=%s:%s\n' "$?" "$g_zxfer_profile_clock_ms"
 			date() {
+				printf '%s\n' "42 4248996"
+			}
+			zxfer_profile_read_clock_ms
+			printf 'busybox_short=%s:%s\n' "$?" "$g_zxfer_profile_clock_ms"
+			date() {
+				printf '%s\n' "42 42123456789"
+			}
+			zxfer_profile_read_clock_ms
+			printf 'nanoseconds=%s:%s\n' "$?" "$g_zxfer_profile_clock_ms"
+			date() {
+				printf '%s\n' "42 43123"
+			}
+			zxfer_profile_read_clock_ms
+			printf 'other_seconds=%s:%s\n' "$?" "$g_zxfer_profile_clock_ms"
+			date() {
 				printf '%s\n' "42123"
 			}
 			zxfer_profile_read_clock_ms
@@ -375,6 +413,12 @@ test_zxfer_profile_read_clock_ms_parses_one_date_reading() {
 
 	assertContains "GNU date should yield the millisecond field." "$output" "gnu=0:42123"
 	assertContains "A literal %3N should fall back to seconds * 1000." "$output" "bsd=0:42000"
+	assertContains "BusyBox's unpadded nanoseconds should fall back to seconds * 1000." \
+		"$output" "busybox_short=0:42000"
+	assertContains "A nanosecond field should fall back to seconds * 1000." \
+		"$output" "nanoseconds=0:42000"
+	assertContains "A field that does not extend the seconds should fall back." \
+		"$output" "other_seconds=0:42000"
 	assertContains "Output without both fields should fail and clear the result." "$output" "one_field=1:<>"
 	assertContains "A failing date should fail and clear the result." "$output" "missing=1:<>"
 }
