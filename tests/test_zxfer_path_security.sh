@@ -189,5 +189,149 @@ test_symlink_component_detection_and_temp_root_validation() {
 		"zxfer_validate_temp_root_candidate \"$insecure_root\" >/dev/null 2>&1"
 }
 
+test_get_path_owner_uid_and_mode_use_numeric_stat_output() {
+	result_uid=$(
+		(
+			stat() {
+				if [ "$1" = "-c" ] && [ "$2" = "%u" ]; then
+					printf '%s\n' "1234"
+					return 0
+				fi
+				return 1
+			}
+			ls() {
+				return 1
+			}
+			: >"$TEST_TMPDIR/stat-owner-file"
+			zxfer_get_path_owner_uid "$TEST_TMPDIR/stat-owner-file"
+		)
+	)
+	result_mode=$(
+		(
+			stat() {
+				if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
+					printf '%s\n' "640"
+					return 0
+				fi
+				return 1
+			}
+			ls() {
+				return 1
+			}
+			: >"$TEST_TMPDIR/stat-mode-file"
+			zxfer_get_path_mode_octal "$TEST_TMPDIR/stat-mode-file"
+		)
+	)
+
+	assertEquals "Numeric GNU stat output should be accepted directly for owner lookups." "1234" "$result_uid"
+	assertEquals "Numeric GNU stat output should be accepted directly for mode lookups." "640" "$result_mode"
+}
+
+test_get_path_owner_uid_and_mode_return_failure_for_missing_paths() {
+	missing_path="$TEST_TMPDIR/does_not_exist"
+
+	zxfer_get_path_owner_uid "$missing_path" >/dev/null 2>&1
+	owner_status=$?
+	zxfer_get_path_mode_octal "$missing_path" >/dev/null 2>&1
+	mode_status=$?
+
+	assertEquals "Owner lookups should fail cleanly for missing paths." 1 "$owner_status"
+	assertEquals "Mode lookups should fail cleanly for missing paths." 1 "$mode_status"
+}
+
+test_get_effective_user_uid_returns_failure_when_id_is_unavailable() {
+	empty_path="$TEST_TMPDIR/no_id_path"
+	mkdir -p "$empty_path"
+	old_path=$PATH
+	PATH="$empty_path"
+	outfile="$TEST_TMPDIR/effective_uid.out"
+
+	zxfer_get_effective_user_uid >"$outfile"
+	status=$?
+	PATH=$old_path
+
+	assertEquals "Missing id binaries should make effective-UID detection fail cleanly." 1 "$status"
+	assertEquals "Failed effective-UID detection should not emit output." "" "$(cat "$outfile")"
+}
+
+test_get_path_owner_uid_and_mode_use_stat_when_available() {
+	owned_file="$TEST_TMPDIR/stat_owned_file"
+	: >"$owned_file"
+
+	owner_result=$(
+		(
+			stat() {
+				if [ "$1" = "-f" ] && [ "$2" = "%u" ]; then
+					printf '%s\n' "4242"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_get_path_owner_uid "$owned_file"
+		)
+	)
+
+	mode_result=$(
+		(
+			stat() {
+				if [ "$1" = "-f" ] && [ "$2" = "%OLp" ]; then
+					printf '%s\n' "600"
+					return 0
+				fi
+				return 1
+			}
+			zxfer_get_path_mode_octal "$owned_file"
+		)
+	)
+
+	assertEquals "Owner lookup should use stat when available." "4242" "$owner_result"
+	assertEquals "Mode lookup should use stat when available." "600" "$mode_result"
+}
+
+test_get_path_owner_uid_falls_back_to_ls_for_dash_prefixed_paths() {
+	result=$(
+		(
+			cd "$TEST_TMPDIR" || exit 1
+			: >"-owner_file"
+			chmod 600 "./-owner_file"
+			stat() {
+				return 1
+			}
+			zxfer_get_path_owner_uid "-owner_file"
+		)
+	)
+
+	assertEquals "LS fallback should recover the owner for dash-prefixed paths." "$(id -u)" "$result"
+}
+
+test_get_path_mode_octal_falls_back_to_ls_for_dash_prefixed_paths() {
+	result=$(
+		(
+			cd "$TEST_TMPDIR" || exit 1
+			: >"-mode_file"
+			chmod 600 "./-mode_file"
+			stat() {
+				return 1
+			}
+			ls() {
+				printf '%s\n' "-rw------- 1 0 0 0 Jan 1 00:00 ./-mode_file"
+			}
+			zxfer_get_path_mode_octal "-mode_file"
+		)
+	)
+
+	assertEquals "LS fallback should recover 0600 permissions for dash-prefixed paths." "600" "$result"
+}
+
+# zxfer-test-fragment: suites/zxfer_path_security_validation_tests.sh
+# shellcheck source=tests/suites/zxfer_path_security_validation_tests.sh
+. "$TESTS_DIR/suites/zxfer_path_security_validation_tests.sh"
+
+suite() {
+	zxfer_test_register_fragment_tests \
+		"$TESTS_DIR/test_zxfer_path_security.sh" \
+		"$TESTS_DIR/suites/zxfer_path_security_validation_tests.sh"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

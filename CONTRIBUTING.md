@@ -44,11 +44,13 @@ validation entrypoints:
 ```
 
 `full` runs the complete host-safe lint, unit, and report-only bash-xtrace
-coverage stack. Profile composition lives in `tests/validation_profiles.tsv`;
-`tests/validation_map.tsv` maps changed path patterns to unit suites plus
-recommended integration groups, performance cases, and documentation
-surfaces. Neither file is evaluated as shell code. `quick` executes only the
-offline budget and mapped unit checks; `vm` accepts only `smoke` or `local`.
+coverage stack. Profile composition lives in `tests/validation_profiles.tsv`.
+For a changed `src/zxfer_NAME.sh`, `quick` runs `tests/test_zxfer_NAME.sh` and
+every black-box `tests/test_contract_*.sh` suite, selected by name;
+`tests/validation_map.tsv` adds the exceptions plus recommended integration
+groups, performance cases, and documentation surfaces. Neither file is
+evaluated as shell code. `quick` executes only the offline budget and unit
+checks; `vm` accepts only `smoke` or `local`.
 No profile invokes the direct host integration harness.
 `quick` and `full` run independent suites with four workers by default; set
 `ZXFER_VALIDATE_JOBS` to another positive integer for a constrained host.
@@ -108,7 +110,10 @@ shunit2, and coverage work on its Ubuntu 24.04 base, but it does not replace
 a ZFS-capable host, disposable VM, or QEMU-capable host for the integration
 runners.
 
-Run targeted suites when editing a specific area:
+Run targeted suites when editing a specific area. The tests of
+`src/zxfer_NAME.sh` live in `tests/test_zxfer_NAME.sh` and the
+`tests/suites/zxfer_NAME_*_tests.sh` fragments it runs; the black-box contract
+suites that drive the real launcher are `tests/test_contract_*.sh`:
 
 ```sh
 ./tests/run_shunit_tests.sh tests/test_zxfer_replication.sh

@@ -1,10 +1,16 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_backup_metadata.sh restore/write helpers.
+# shunit2 entry point for src/zxfer_backup_metadata.sh: -k metadata records,
+# -e restore, local and remote storage, backup directories and paths.
+#
+# The paths fragment keeps the remote-host fixture and the file fragment the
+# exec fixture they were written for; the other fragments use the fixture
+# below.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
+TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
@@ -14,6 +20,10 @@ TESTS_DIR=$(dirname "$0")
 . "$TESTS_DIR/helpers/backup_fixtures.sh"
 # shellcheck source=tests/helpers/fake_tool_fixtures.sh
 . "$TESTS_DIR/helpers/fake_tool_fixtures.sh"
+# shellcheck source=tests/helpers/exec_fixtures.sh
+. "$TESTS_DIR/helpers/exec_fixtures.sh"
+# shellcheck source=tests/helpers/remote_host_fixtures.sh
+. "$TESTS_DIR/helpers/remote_host_fixtures.sh"
 
 zxfer_test_ensure_parent_dir() {
 	l_path=$1
@@ -26,16 +36,28 @@ zxfer_test_ensure_parent_dir() {
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_backup_metadata"
+	zxfer_test_exec_fixture_one_time_setup
+	zxfer_test_remote_host_fixture_one_time_setup
 	TEST_TMPDIR_PHYSICAL=$(cd -P "$TEST_TMPDIR" && pwd)
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
 	zxfer_test_write_env_fake_ssh "$FAKE_SSH_BIN"
 }
 
 oneTimeTearDown() {
+	zxfer_test_remote_host_fixture_one_time_teardown
+	relax_test_tmpdir_permissions
 	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh"; then
+		zxfer_test_remote_host_fixture_setup
+		return
+	fi
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_backup_metadata_file_tests.sh"; then
+		zxfer_test_exec_fixture_setup
+		return
+	fi
 	set +e
 	zxfer_test_reset_all_owner_state || return
 	OPTIND=1
@@ -55,6 +77,14 @@ setUp() {
 	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" || return
 }
 
+tearDown() {
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh"; then
+		zxfer_test_remote_host_fixture_teardown
+	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_backup_metadata_file_tests.sh"; then
+		relax_test_tmpdir_permissions
+	fi
+}
+
 # Behavior-focused fragments keep this stable suite entry point while
 # bounding the amount of test code a contributor must load at once.
 # zxfer-test-fragment: suites/zxfer_backup_metadata_records_tests.sh
@@ -63,16 +93,24 @@ setUp() {
 # zxfer-test-fragment: suites/zxfer_backup_metadata_restore_tests.sh
 # shellcheck source=tests/suites/zxfer_backup_metadata_restore_tests.sh
 . "$TESTS_DIR/suites/zxfer_backup_metadata_restore_tests.sh"
-# zxfer-test-fragment: suites/zxfer_backup_storage_io_tests.sh
-# shellcheck source=tests/suites/zxfer_backup_storage_io_tests.sh
-. "$TESTS_DIR/suites/zxfer_backup_storage_io_tests.sh"
+# zxfer-test-fragment: suites/zxfer_backup_metadata_storage_io_tests.sh
+# shellcheck source=tests/suites/zxfer_backup_metadata_storage_io_tests.sh
+. "$TESTS_DIR/suites/zxfer_backup_metadata_storage_io_tests.sh"
+# zxfer-test-fragment: suites/zxfer_backup_metadata_paths_tests.sh
+# shellcheck source=tests/suites/zxfer_backup_metadata_paths_tests.sh
+. "$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh"
+# zxfer-test-fragment: suites/zxfer_backup_metadata_file_tests.sh
+# shellcheck source=tests/suites/zxfer_backup_metadata_file_tests.sh
+. "$TESTS_DIR/suites/zxfer_backup_metadata_file_tests.sh"
 
 suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_backup_metadata.sh" \
 		"$TESTS_DIR/suites/zxfer_backup_metadata_records_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_backup_metadata_restore_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_backup_storage_io_tests.sh"
+		"$TESTS_DIR/suites/zxfer_backup_metadata_storage_io_tests.sh" \
+		"$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh" \
+		"$TESTS_DIR/suites/zxfer_backup_metadata_file_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

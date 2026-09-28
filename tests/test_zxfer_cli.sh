@@ -1,13 +1,20 @@
 #!/bin/sh
 #
-# shunit2 tests for zxfer_cli.sh helpers.
+# shunit2 tests for src/zxfer_cli.sh: option defaults, switch parsing, the
+# consistency check, and the -z/-Z compression refresh it runs.
 #
-# shellcheck disable=SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
+# The cases in this file run with the resolver and remote zfs refresh stubbed.
+# The remote fragment keeps the remote-host fixture and the real functions.
+#
+# shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
+TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# shellcheck source=tests/helpers/remote_host_fixtures.sh
+. "$TESTS_DIR/helpers/remote_host_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_cli.sh"
 
@@ -15,7 +22,23 @@ zxfer_usage() {
 	printf '%s\n' "usage output"
 }
 
+oneTimeSetUp() {
+	zxfer_test_create_tmpdir "zxfer_cli"
+	zxfer_test_remote_host_fixture_one_time_setup
+}
+
+oneTimeTearDown() {
+	zxfer_test_remote_host_fixture_one_time_teardown
+	zxfer_test_cleanup_tmpdir
+}
+
 setUp() {
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_cli_remote_tests.sh"; then
+		# Drop the stubs the cases in this file install below.
+		zxfer_source_modules_for_tests "$ZXFER_ROOT"
+		zxfer_test_remote_host_fixture_setup
+		return
+	fi
 	OPTIND=1
 	zxfer_init_cli_option_defaults
 	g_cmd_compress="zstd -3"
@@ -26,6 +49,10 @@ setUp() {
 	zxfer_refresh_remote_zfs_commands() {
 		:
 	}
+}
+
+tearDown() {
+	zxfer_test_remote_host_fixture_teardown
 }
 
 # Purpose: Parse one switch set from the option defaults and print every
@@ -258,6 +285,16 @@ test_refresh_compression_commands_rejects_shell_quoted_decompression_command() {
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Quoted decompression command failures should explain the literal-token requirement." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Decompression command must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+}
+
+# zxfer-test-fragment: suites/zxfer_cli_remote_tests.sh
+# shellcheck source=tests/suites/zxfer_cli_remote_tests.sh
+. "$TESTS_DIR/suites/zxfer_cli_remote_tests.sh"
+
+suite() {
+	zxfer_test_register_fragment_tests \
+		"$TESTS_DIR/test_zxfer_cli.sh" \
+		"$TESTS_DIR/suites/zxfer_cli_remote_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

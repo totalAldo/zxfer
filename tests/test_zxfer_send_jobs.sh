@@ -1,7 +1,8 @@
 #!/bin/sh
 #
-# shunit2 tests for the send/receive job supervision in src/zxfer_send_jobs.sh
-# and the background shell spawn helpers in src/zxfer_exec.sh.
+# shunit2 tests for the send/receive job supervision in src/zxfer_send_jobs.sh.
+# The background-shell helpers it runs jobs in (src/zxfer_exec.sh) are tested
+# in tests/suites/zxfer_exec_background_shell_tests.sh.
 #
 # Pins: per-job status propagation (success, failure, a job shell that dies
 # before recording its status), the -j job limit, destination-ancestry
@@ -16,6 +17,8 @@ TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# shellcheck source=tests/helpers/send_job_fixtures.sh
+. "$TESTS_DIR/helpers/send_job_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_snapshot_reconcile.sh"
 
@@ -28,18 +31,7 @@ oneTimeTearDown() {
 }
 
 setUp() {
-	TMPDIR="$TEST_TMPDIR"
-	g_option_n_dryrun=0
-	g_option_v_verbose=0
-	g_option_V_very_verbose=0
-	g_option_j_jobs=2
-	g_option_T_target_host=""
-	zxfer_reset_runtime_artifact_state
-	zxfer_ensure_run_tmp_root || fail "Unable to create the send-job test run root."
-	zxfer_reset_send_job_state
-	zxfer_reset_background_shell_spawn_mode
-	g_zxfer_send_job_abort_grace_seconds=0
-	zxfer_reset_failure_context "unit"
+	zxfer_test_send_job_fixture_setup
 }
 
 # Stub the post-receive hooks so reap-time bookkeeping is observable without
@@ -57,100 +49,6 @@ bgjob_test_stub_finalize_hooks() {
 	zxfer_verify_converged_destination_after_receive() {
 		printf 'verify %s\n' "$1" >>"${BGJOB_HOOK_LOG:?}"
 	}
-}
-
-# Poll until a pid is gone so signal races stay bounded.
-bgjob_test_wait_for_pid_exit() {
-	l_wait_pid=$1
-	l_wait_tries=0
-	while kill -s 0 "$l_wait_pid" 2>/dev/null && [ "$l_wait_tries" -lt 100 ]; do
-		sleep 0.1 2>/dev/null || sleep 1
-		l_wait_tries=$((l_wait_tries + 1))
-	done
-	! kill -s 0 "$l_wait_pid" 2>/dev/null
-}
-
-test_spawn_mode_rejects_setsid_that_does_not_run_the_probe_child() {
-	probe_bin="$TEST_TMPDIR/empty-setsid-bin"
-	mkdir -p "$probe_bin"
-	printf '#!/bin/sh\nexit 0\n' >"$probe_bin/setsid"
-	chmod +x "$probe_bin/setsid"
-	mode=$(
-		PATH="$probe_bin:$PATH"
-		zxfer_reset_background_shell_spawn_mode
-		zxfer_init_background_shell_spawn_mode
-		printf '%s\n' "$g_zxfer_background_shell_spawn_mode"
-	)
-	assertNotEquals "A successful launcher status alone does not prove PID/group ownership." setsid "$mode"
-}
-
-# The mode is probed once per process but also used from subshells, where
-# FreeBSD sh, dash and ksh93 ignore set -m. A pgid scope must name a real
-# process group there too.
-test_spawn_mode_isolation_holds_inside_subshells() {
-	zxfer_init_background_shell_spawn_mode
-	started="$TEST_TMPDIR/spawn-isolation-started"
-	rm -f "$started"
-	isolation=$(
-		zxfer_spawn_background_shell ': >"$1"; sleep 30' /dev/null /dev/null "$started"
-		pid=$g_last_background_pid
-		scope=$g_zxfer_background_shell_scope
-		# setsid(1) creates the group just before it execs the job shell, so
-		# check for the group only once the job shell has run.
-		tries=0
-		while [ ! -e "$started" ] && [ "$tries" -lt 20 ]; do
-			sleep 1
-			tries=$((tries + 1))
-		done
-		if [ "$scope" = wrapper ]; then
-			printf 'wrapper\n'
-		elif zxfer_signal_process_group 0 "$pid"; then
-			printf 'group\n'
-		else
-			printf 'none\n'
-		fi
-		zxfer_signal_background_shell "$pid" "$scope" KILL ||
-			kill -s KILL "$pid" 2>/dev/null
-		wait "$pid" 2>/dev/null
-	)
-
-	assertNotEquals "A subshell spawn must get the isolation its recorded scope claims." \
-		none "$isolation"
-}
-
-# A process group outlives its leader, and the pgid probes must see that
-# under every test shell. BusyBox ash's kill took the `--` of
-# `kill -s 0 -- -PGID` for a PID and exited 1 even for a live group, so a
-# group whose leader was already reaped was never registered for teardown.
-test_group_outliving_its_reaped_leader_is_registered_and_stopped() {
-	zxfer_init_background_shell_spawn_mode
-	if [ "$g_zxfer_background_shell_spawn_mode" = wrapper ]; then
-		startSkipping
-		return
-	fi
-	member_file="$TEST_TMPDIR/orphaned-group-member.pid"
-	rm -f "$member_file"
-	# The job shell leaves a member in its group and exits at once.
-	zxfer_spawn_background_shell 'sleep 30 & printf "%s\n" "$!" >"$1"' \
-		/dev/null /dev/null "$member_file"
-	group_pid=$g_last_background_pid
-	wait "$group_pid"
-	member_pid=$(cat "$member_file" 2>/dev/null)
-	zxfer_register_cleanup_pid "$group_pid" "orphaned group fixture" pgid
-	registered=0
-	zxfer_find_cleanup_pid_record "$group_pid" && registered=1
-	zxfer_signal_background_shell "$group_pid" pgid KILL
-	signal_status=$?
-	bgjob_test_wait_for_pid_exit "$member_pid"
-	member_status=$?
-	zxfer_unregister_cleanup_pid "$group_pid"
-
-	assertNotNull "The job shell recorded the member it left in its group." \
-		"$member_pid"
-	assertEquals "A live group stays registered after its leader was reaped." \
-		1 "$registered"
-	assertEquals "The leaderless group is signalled." 0 "$signal_status"
-	assertEquals "The member left in the group is stopped." 0 "$member_status"
 }
 
 # Every group probe and signal uses `kill -SIG -PGID`: dash rejects
@@ -187,42 +85,6 @@ test_process_group_kills_use_the_signal_first_form() {
 		"$output" "kill <-KILL> <-4245>"
 	assertNotContains "No group kill passes -- after a signal option." \
 		"$output" "<-->"
-}
-
-# Job shells are /bin/sh, so a secure PATH without sh (as the integration
-# harness narrows ZXFER_SECURE_PATH) still starts them in every spawn mode.
-test_spawn_background_shell_runs_bin_sh_without_sh_on_path() {
-	no_sh_path="$TEST_TMPDIR/path-without-sh"
-	mkdir -p "$no_sh_path"
-	# setsid mode still runs setsid from PATH.
-	case $(command -v setsid 2>/dev/null) in
-	/*) ln -sf "$(command -v setsid)" "$no_sh_path/setsid" ;;
-	esac
-	zxfer_init_background_shell_spawn_mode
-	full_path_mode=$g_zxfer_background_shell_spawn_mode
-	# Production probes lazily, after PATH is already the secure PATH.
-	probed_mode=$(
-		PATH=$no_sh_path
-		zxfer_reset_background_shell_spawn_mode
-		zxfer_init_background_shell_spawn_mode
-		printf '%s\n' "$g_zxfer_background_shell_spawn_mode"
-	)
-	assertEquals "The spawn-mode probe does not need sh on PATH." \
-		"$full_path_mode" "$probed_mode"
-	for spawn_mode in "$probed_mode" wrapper; do
-		out_file="$TEST_TMPDIR/spawn-without-sh.$spawn_mode.out"
-		rm -f "$out_file"
-		status=$(
-			g_zxfer_background_shell_spawn_mode=$spawn_mode
-			PATH=$no_sh_path
-			# The ARG becomes the job shell's $1.
-			zxfer_spawn_background_shell 'printf "%s\n" "$1"' "$out_file" "" ok
-			wait "$g_last_background_pid"
-			printf '%s\n' "$?"
-		)
-		assertEquals "A $spawn_mode job shell starts without sh on PATH." 0 "$status"
-		assertEquals "A $spawn_mode job shell gets its arguments." ok "$(cat "$out_file" 2>/dev/null)"
-	done
 }
 
 test_send_job_conflicts_with_destination_matches_equal_and_nested_paths() {
@@ -575,19 +437,6 @@ second	402	backup/b	/status/b	tank/b@snap	pgid"
 	assertNotContains "Abort never waits on an unkillable survivor." "$output" "wait=401"
 }
 
-test_signal_background_shell_reports_success_for_exited_children() {
-	sh -c 'exit 0' &
-	exited_pid=$!
-	wait "$exited_pid"
-
-	assertTrue "Signalling an exited pid scope is not a failure." \
-		"zxfer_signal_background_shell '$exited_pid' pid TERM"
-	assertTrue "Signalling an exited pgid scope is not a failure." \
-		"zxfer_signal_background_shell '$exited_pid' pgid TERM"
-	assertTrue "Non-numeric pids are ignored." \
-		"zxfer_signal_background_shell 'not-a-pid' pid TERM"
-}
-
 test_wait_for_any_send_job_reaps_every_finished_job_in_one_scan() {
 	hook_log="$TEST_TMPDIR/bgjob_scan.hooks"
 	: >"$hook_log"
@@ -736,6 +585,45 @@ test_abort_all_send_jobs_never_evaluates_a_non_numeric_grace_knob() {
 	) 2>/dev/null
 
 	assertFalse "The grace knob never reaches arithmetic as an expression." "[ -e '$marker' ]"
+}
+
+test_wait_for_zfs_send_jobs_clears_job_list_on_success() {
+	output=$(
+		(
+			zxfer_reset_send_job_state
+			zxfer_reset_send_receive_state
+			zxfer_note_destination_receive_completed() { :; }
+			zxfer_invalidate_destination_property_mutation_cache() { :; }
+			zxfer_mark_live_destination_dataset_dirty() { :; }
+			zxfer_verify_converged_destination_after_receive() { :; }
+			zxfer_spawn_send_job "sleep 1" "tank/a@snap" "backup/a"
+			zxfer_spawn_send_job "sleep 1" "tank/b@snap" "backup/b"
+			zxfer_wait_for_zfs_send_jobs "unit"
+			printf 'jobs=<%s> count=%s\n' "$g_zxfer_send_jobs" "$g_count_zfs_send_jobs"
+		)
+	)
+	assertEquals "Waiting for every send job should leave the job list empty." \
+		"jobs=<> count=0" "$output"
+}
+
+test_wait_for_zfs_send_jobs_reports_failure() {
+	(
+		zxfer_reset_send_job_state
+		zxfer_reset_send_receive_state
+		g_zxfer_send_job_abort_grace_seconds=0
+		zxfer_note_destination_receive_completed() { :; }
+		zxfer_invalidate_destination_property_mutation_cache() { :; }
+		zxfer_mark_live_destination_dataset_dirty() { :; }
+		zxfer_verify_converged_destination_after_receive() { :; }
+		zxfer_throw_error() {
+			echo "send failure"
+			exit 1
+		}
+		zxfer_spawn_send_job "exit 0" "tank/a@snap" "backup/a"
+		zxfer_spawn_send_job "exit 3" "tank/b@snap" "backup/b"
+		zxfer_wait_for_zfs_send_jobs "failure"
+	) >/dev/null 2>&1
+	assertEquals "Job failures should surface via zxfer_throw_error." 1 "$?"
 }
 
 # shellcheck source=tests/shunit2/shunit2

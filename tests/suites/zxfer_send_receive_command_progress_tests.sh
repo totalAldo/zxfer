@@ -705,3 +705,54 @@ test_zfs_send_receive_renders_verbose_raw_full_send() {
 	assertEquals "Full sends render -v and -w when enabled and each argument single-quoted." \
 		"'/sbin/zfs' 'send' '-v' '-w' 'tank/src@snap9' | '/sbin/zfs' 'receive' 'backup/dst'" "$output"
 }
+
+test_calculate_size_estimate_uses_incremental_send_probe() {
+	result=$(
+		zxfer_run_source_zfs_cmd() { printf 'size\t2048\n'; }
+		zxfer_calculate_size_estimate "tank/fs@snap2" "tank/fs@snap1"
+		printf '%s' "$g_zxfer_progress_size_estimate_result"
+	)
+	assertEquals "2048" "$result"
+}
+
+test_calculate_size_estimate_handles_full_send_estimate() {
+	result=$(
+		zxfer_run_source_zfs_cmd() { printf 'size\t1024\n'; }
+		zxfer_calculate_size_estimate "tank/fs@snap1" ""
+		printf '%s' "$g_zxfer_progress_size_estimate_result"
+	)
+	assertEquals "1024" "$result"
+}
+
+test_wrap_command_with_ssh_without_compression_quotes_command() {
+	result=$(
+		g_cmd_ssh="/usr/bin/ssh"
+		zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "backup@example.com" 0 send
+		printf '%s' "$g_zxfer_wrapped_command_result"
+	)
+	assertEquals "'/usr/bin/ssh' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' 'backup@example.com' 'zfs send tank/src@snap'" "$result"
+}
+
+test_wrap_command_with_ssh_streams_compression_on_send() {
+	result=$(
+		g_cmd_ssh="/usr/bin/ssh"
+		g_cmd_compress_safe="gzip"
+		g_cmd_decompress_safe="gunzip"
+		zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "backup" 1 send
+		printf '%s' "$g_zxfer_wrapped_command_result"
+	)
+	assertEquals "'/usr/bin/ssh' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' 'backup' 'zfs send tank/src@snap | gzip' | gunzip" "$result"
+}
+
+test_zfs_send_receive_renders_incremental_raw_verbose_send_and_forced_receive() {
+	result=$(
+		g_cmd_zfs="/sbin/zfs"
+		g_option_V_very_verbose=1
+		g_option_w_raw_send=1
+		g_option_F_force_rollback="-F"
+		zxfer_echoV() { :; }
+		zxfer_schedule_send_receive_pipeline() { printf '%s' "$1"; }
+		zxfer_zfs_send_receive "tank/fs@snap1" "tank/fs@snap2" "tank/dst" 0
+	)
+	assertEquals "'/sbin/zfs' 'send' '-v' '-w' '-I' 'tank/fs@snap1' 'tank/fs@snap2' | '/sbin/zfs' 'receive' '-F' 'tank/dst'" "$result"
+}

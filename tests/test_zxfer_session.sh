@@ -1,20 +1,56 @@
 #!/bin/sh
 #
-# shunit2 tests for the session composition root in src/zxfer_session.sh.
+# shunit2 tests for the session composition root in src/zxfer_session.sh:
+# startup order, zxfer_main, remote connection preparation and trap exit.
 #
-# shellcheck disable=SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
+# The fragments keep the fixture they were written for: the exec fixture for
+# the main-path cases, the remote-host fixture for the remote cases and the
+# runtime fixture for the lifecycle cases. The cases in this file use none.
+#
+# shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
+TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# shellcheck source=tests/helpers/exec_fixtures.sh
+. "$TESTS_DIR/helpers/exec_fixtures.sh"
+# shellcheck source=tests/helpers/remote_host_fixtures.sh
+. "$TESTS_DIR/helpers/remote_host_fixtures.sh"
+# shellcheck source=tests/helpers/runtime_fixtures.sh
+. "$TESTS_DIR/helpers/runtime_fixtures.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_session"
+	zxfer_test_exec_fixture_one_time_setup
+	zxfer_test_remote_host_fixture_one_time_setup
 }
 
 oneTimeTearDown() {
+	zxfer_test_remote_host_fixture_one_time_teardown
+	relax_test_tmpdir_permissions
 	zxfer_test_cleanup_tmpdir
+}
+
+setUp() {
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_main_tests.sh"; then
+		zxfer_test_exec_fixture_setup
+	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"; then
+		zxfer_test_remote_host_fixture_setup
+	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"; then
+		zxfer_test_runtime_fixture_setup
+	fi
+}
+
+tearDown() {
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_main_tests.sh"; then
+		relax_test_tmpdir_permissions
+	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"; then
+		zxfer_test_remote_host_fixture_teardown
+	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"; then
+		zxfer_test_runtime_fixture_teardown
+	fi
 }
 
 # Startup must settle the secure PATH before it creates anything, and create
@@ -297,43 +333,6 @@ test_zxfer_session_run_requires_local_parallel_for_jobs_before_any_helper_starts
 connect origin=operator@origin" "$(cat "$log")"
 }
 
-test_migration_service_status_only_restore_returns_failure_without_throwing() {
-	output=$(
-		(
-			g_option_n_dryrun=0
-			g_zxfer_services_to_restart="svc:/broken:default"
-			g_services_need_relaunch=1
-			g_services_relaunch_in_progress=0
-			zxfer_echov() { :; }
-			svcadm() { return 1; }
-			zxfer_throw_error() {
-				printf '%s\n' throw-called
-				exit 91
-			}
-
-			l_restore_status=0
-			zxfer_restore_migration_services_status_only ||
-				l_restore_status=$?
-			printf 'status=%s\n' "$l_restore_status"
-			printf 'message=%s\n' "$g_zxfer_migration_service_restore_failure_message"
-			printf 'pending=%s\n' "$g_zxfer_services_to_restart"
-			printf 'need=%s guard=%s\n' \
-				"$g_services_need_relaunch" "$g_services_relaunch_in_progress"
-		)
-	)
-
-	assertContains "Status-only migration restore should report a service enable failure without exiting its caller." \
-		"$output" "status=1"
-	assertContains "Status-only migration restore should publish the established operator-facing failure message." \
-		"$output" "message=Couldn't re-enable service svc:/broken:default."
-	assertContains "Status-only migration restore should retain failed services for recovery." \
-		"$output" "pending=svc:/broken:default"
-	assertContains "Status-only migration restore should retain the failure guards after an incomplete restore." \
-		"$output" "need=1 guard=1"
-	assertNotContains "Status-only migration restore must not invoke the exiting error API." \
-		"$output" "throw-called"
-}
-
 test_zxfer_trap_exit_promotes_migration_restore_failure_and_finishes_reporting() {
 	shutdown_log="$TEST_TMPDIR/session-migration-shutdown.log"
 	: >"$shutdown_log"
@@ -502,6 +501,24 @@ test_zxfer_trap_exit_int_status_exits_130_with_one_signal_report() {
 		zxfer_trap_exit 130
 	) >/dev/null 2>"$TEST_TMPDIR/signal.stderr"
 	zxfer_session_test_assert_signal_exit "$?" 130
+}
+
+# zxfer-test-fragment: suites/zxfer_session_main_tests.sh
+# shellcheck source=tests/suites/zxfer_session_main_tests.sh
+. "$TESTS_DIR/suites/zxfer_session_main_tests.sh"
+# zxfer-test-fragment: suites/zxfer_session_remote_tests.sh
+# shellcheck source=tests/suites/zxfer_session_remote_tests.sh
+. "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"
+# zxfer-test-fragment: suites/zxfer_session_lifecycle_tests.sh
+# shellcheck source=tests/suites/zxfer_session_lifecycle_tests.sh
+. "$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"
+
+suite() {
+	zxfer_test_register_fragment_tests \
+		"$TESTS_DIR/test_zxfer_session.sh" \
+		"$TESTS_DIR/suites/zxfer_session_main_tests.sh" \
+		"$TESTS_DIR/suites/zxfer_session_remote_tests.sh" \
+		"$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

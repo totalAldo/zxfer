@@ -8,7 +8,7 @@ description: Choose and explain safe validation commands for zxfer changes based
 ## Workflow
 
 1. Inspect the diff and touched files before choosing commands.
-2. Match source modules to peer suites under `tests/test_*.sh`; use targeted suites first for iteration.
+2. Match `src/zxfer_NAME.sh` to its entry suite `tests/test_zxfer_NAME.sh` (fragments in `tests/suites/zxfer_NAME_*_tests.sh`) and the black-box `tests/test_contract_*.sh` suites, as `./tests/validate.sh quick` does; use targeted suites first for iteration.
 3. Escalate to the required full commands when shell logic changes:
    - `./tests/run_shunit_tests.sh`
    - `./tests/run_lint.sh`

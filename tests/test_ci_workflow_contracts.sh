@@ -120,7 +120,7 @@ test_coverage_workflow_bounds_advisory_kcov_to_production_suites() {
 	workflow=$(cat "$COVERAGE_WORKFLOW_FILE")
 
 	assertContains "The advisory kcov artifact should cover production-focused suites without recursively instrumenting validation tooling." \
-		"$workflow" "./tests/run_coverage.sh tests/test_zxfer_*.sh"
+		"$workflow" "./tests/run_coverage.sh tests/test_contract_*.sh tests/test_zxfer_*.sh"
 	assertContains "The advisory kcov step should remain explicitly non-blocking." \
 		"$workflow" "continue-on-error: true"
 }
