@@ -211,8 +211,10 @@ run_eval_policy_fixture() {
 test_test_helper_eval_policy_accepts_the_two_legacy_captures() {
 	tab=$(printf '\t')
 	run_eval_policy_fixture eval-accept <<EOF
-tests/helpers/process_capture.sh${tab}legacy_capture() { eval "\$1"; }
-tests/helpers/process_capture.sh${tab}legacy_capture_split() { eval "\$3"; }
+tests/helpers/process_capture.sh${tab}zxfer_test_capture_subshell() {
+tests/helpers/process_capture.sh${tab}	eval "\$1"
+tests/helpers/process_capture.sh${tab}}
+tests/helpers/process_capture.sh${tab}zxfer_test_capture_subshell_split() { eval "\$3"; }
 tests/helpers/process_capture.sh${tab}# a comment may say eval
 EOF
 
@@ -226,8 +228,12 @@ EOF
 test_test_helper_eval_policy_rejects_a_new_eval_in_a_shared_helper() {
 	tab=$(printf '\t')
 	run_eval_policy_fixture eval-reject <<EOF
-tests/helpers/process_capture.sh${tab}legacy_capture() { eval "\$1"; }
-tests/helpers/process_capture.sh${tab}legacy_capture_split() { eval "\$3"; }
+tests/helpers/process_capture.sh${tab}early_capture() { eval "\$1"; }
+tests/helpers/process_capture.sh${tab}zxfer_test_capture_subshell() { eval "\$1"; }
+tests/helpers/process_capture.sh${tab}zxfer_test_capture_subshell_split() {
+tests/helpers/process_capture.sh${tab}	eval "\$3"
+tests/helpers/process_capture.sh${tab}	eval "\$4"
+tests/helpers/process_capture.sh${tab}}
 tests/helpers/process_capture.sh${tab}third_capture() { eval "\$1"; }
 tests/helpers/new_capture.sh${tab}#!/bin/sh
 tests/helpers/new_capture.sh${tab}new_capture() { eval "\$1"; }
@@ -235,8 +241,16 @@ EOF
 
 	assertNotEquals "A new eval in a shared helper must fail the shellcheck target." \
 		0 "$EVAL_POLICY_STATUS"
-	assertContains "A third eval in the legacy file should be named." \
-		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:3: eval in a shared test helper"
+	assertContains "An eval above the legacy helpers must be named, not counted as one of them." \
+		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:1: eval in a shared test helper"
+	assertNotContains "The legacy capture helper keeps its one eval." \
+		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:2: eval in a shared test helper"
+	assertNotContains "The legacy split helper keeps its first eval." \
+		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:4: eval in a shared test helper"
+	assertContains "A second eval in a legacy helper should be named." \
+		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:5: eval in a shared test helper"
+	assertContains "An eval in another function of the legacy file should be named." \
+		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:7: eval in a shared test helper"
 	assertContains "An eval in another helper should be named." \
 		"$EVAL_POLICY_OUTPUT" "tests/helpers/new_capture.sh:2: eval in a shared test helper"
 }
