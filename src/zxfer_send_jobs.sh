@@ -179,10 +179,8 @@ zxfer_finish_destination_receive() {
 
 	zxfer_note_destination_receive_completed "$l_finish_dest"
 	zxfer_invalidate_destination_property_mutation_cache "$l_finish_dest" exact
-	# Only DEST's rows in the batched live view are stale, so mark just DEST
-	# dirty; the convergence check below is its first live recheck. The
-	# whole-tree snapshot record cache stays: later -d planning needs it.
-	zxfer_mark_live_destination_dataset_dirty "$l_finish_dest"
+	# The convergence check lists DEST live. The whole-tree snapshot record
+	# cache stays: later -d planning needs it.
 	zxfer_verify_converged_destination_after_receive "$l_finish_dest"
 }
 
