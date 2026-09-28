@@ -56,7 +56,6 @@ zxfer_property_state.sh
 zxfer_property_policy.sh
 zxfer_property_reconcile.sh
 zxfer_snapshot_producers.sh
-zxfer_remote_snapshot_discovery.sh
 zxfer_snapshot_discovery.sh
 zxfer_migration_services.sh
 zxfer_send_jobs.sh

@@ -78,6 +78,12 @@
 # incr=129 (cat 34, runtime_artifact_files_created 27) full / 78 small;
 # plain noop=12, dryrun_incr=4, incr=109. Only TOTAL, cat and
 # runtime_artifact_files_created rows moved; no ceiling was increased.
+# Re-ratcheted 2026-09-26 after -T destination discovery moved to the
+# ordinary listing path (no target-side batch script): -V measurements
+# remote_noop=37 (awk 5, cat 5, rm 4, grep 0, mktemp 0, zfs_list_calls 1),
+# remote_incr=129 full / 78 small (awk 61 / 27, rm 5, grep 0, mktemp 0).
+# ssh_connections and ssh_master_opens are unchanged; no ceiling was
+# increased.
 # Extended 2026-09-25 in wave 6 with ssh rows for every scenario (0 for the
 # local ones) and the remote_noop / remote_incr blocks. -V measurements on
 # macOS: remote_noop=47 (1 connection, 1 master, 7 ssh calls, stat 2,
@@ -220,21 +226,21 @@ incr	profile:zfs_receive_calls	30
 incr	profile:send_receive_pipeline_commands	30
 incr	profile:live_destination_snapshot_rechecks	2
 incr	profile:exists_destination_calls	0
-remote_noop	TOTAL	55
+remote_noop	TOTAL	43
 remote_noop	sed	5
-remote_noop	awk	9
+remote_noop	awk	6
 remote_noop	sort	3
 remote_noop	comm	0
 remote_noop	cut	0
-remote_noop	grep	2
+remote_noop	grep	0
 remote_noop	tr	0
 remote_noop	od	0
 remote_noop	date	13
 remote_noop	ps	0
-remote_noop	mktemp	2
+remote_noop	mktemp	0
 remote_noop	expr	0
-remote_noop	cat	9
-remote_noop	rm	10
+remote_noop	cat	6
+remote_noop	rm	5
 remote_noop	mv	0
 remote_noop	ls	0
 remote_noop	mkdir	0
@@ -247,31 +253,31 @@ remote_noop	ssh_connections	1
 remote_noop	ssh_invocations	9
 remote_noop	ssh_master_opens	1
 remote_noop	profile:command_render_calls	9
-remote_noop	profile:runtime_artifact_files_created	23
+remote_noop	profile:runtime_artifact_files_created	19
 remote_noop	profile:runtime_artifact_dirs_created	0
 remote_noop	profile:runtime_cache_object_writes	0
 remote_noop	profile:runtime_cache_object_readbacks	0
-remote_noop	profile:zfs_list_calls	3
+remote_noop	profile:zfs_list_calls	2
 remote_noop	profile:zfs_send_calls	0
 remote_noop	profile:zfs_receive_calls	0
 remote_noop	profile:send_receive_pipeline_commands	0
 remote_noop	profile:live_destination_snapshot_rechecks	0
 remote_noop	profile:exists_destination_calls	0
-remote_incr	TOTAL	156
+remote_incr	TOTAL	149
 remote_incr	sed	6
-remote_incr	awk	73
+remote_incr	awk	71
 remote_incr	sort	4
 remote_incr	comm	2
 remote_incr	cut	0
-remote_incr	grep	2
+remote_incr	grep	0
 remote_incr	tr	0
 remote_incr	od	0
 remote_incr	date	14
 remote_incr	ps	0
-remote_incr	mktemp	2
+remote_incr	mktemp	0
 remote_incr	expr	0
 remote_incr	cat	41
-remote_incr	rm	10
+remote_incr	rm	6
 remote_incr	mv	0
 remote_incr	ls	0
 remote_incr	mkdir	0
@@ -284,7 +290,7 @@ remote_incr	ssh_connections	1
 remote_incr	ssh_invocations	69
 remote_incr	ssh_master_opens	1
 remote_incr	profile:command_render_calls	129
-remote_incr	profile:runtime_artifact_files_created	27
+remote_incr	profile:runtime_artifact_files_created	25
 remote_incr	profile:runtime_artifact_dirs_created	0
 remote_incr	profile:runtime_cache_object_writes	0
 remote_incr	profile:runtime_cache_object_readbacks	0
@@ -445,21 +451,21 @@ incr_small	profile:zfs_receive_calls	11
 incr_small	profile:send_receive_pipeline_commands	11
 incr_small	profile:live_destination_snapshot_rechecks	2
 incr_small	profile:exists_destination_calls	0
-remote_noop_small	TOTAL	55
+remote_noop_small	TOTAL	43
 remote_noop_small	sed	5
-remote_noop_small	awk	9
+remote_noop_small	awk	6
 remote_noop_small	sort	3
 remote_noop_small	comm	0
 remote_noop_small	cut	0
-remote_noop_small	grep	2
+remote_noop_small	grep	0
 remote_noop_small	tr	0
 remote_noop_small	od	0
 remote_noop_small	date	13
 remote_noop_small	ps	0
-remote_noop_small	mktemp	2
+remote_noop_small	mktemp	0
 remote_noop_small	expr	0
-remote_noop_small	cat	9
-remote_noop_small	rm	10
+remote_noop_small	cat	6
+remote_noop_small	rm	5
 remote_noop_small	mv	0
 remote_noop_small	ls	0
 remote_noop_small	mkdir	0
@@ -472,31 +478,31 @@ remote_noop_small	ssh_connections	1
 remote_noop_small	ssh_invocations	9
 remote_noop_small	ssh_master_opens	1
 remote_noop_small	profile:command_render_calls	9
-remote_noop_small	profile:runtime_artifact_files_created	23
+remote_noop_small	profile:runtime_artifact_files_created	19
 remote_noop_small	profile:runtime_artifact_dirs_created	0
 remote_noop_small	profile:runtime_cache_object_writes	0
 remote_noop_small	profile:runtime_cache_object_readbacks	0
-remote_noop_small	profile:zfs_list_calls	3
+remote_noop_small	profile:zfs_list_calls	2
 remote_noop_small	profile:zfs_send_calls	0
 remote_noop_small	profile:zfs_receive_calls	0
 remote_noop_small	profile:send_receive_pipeline_commands	0
 remote_noop_small	profile:live_destination_snapshot_rechecks	0
 remote_noop_small	profile:exists_destination_calls	0
-remote_incr_small	TOTAL	97
+remote_incr_small	TOTAL	90
 remote_incr_small	sed	6
-remote_incr_small	awk	34
+remote_incr_small	awk	32
 remote_incr_small	sort	4
 remote_incr_small	comm	2
 remote_incr_small	cut	0
-remote_incr_small	grep	2
+remote_incr_small	grep	0
 remote_incr_small	tr	0
 remote_incr_small	od	0
 remote_incr_small	date	14
 remote_incr_small	ps	0
-remote_incr_small	mktemp	2
+remote_incr_small	mktemp	0
 remote_incr_small	expr	0
 remote_incr_small	cat	21
-remote_incr_small	rm	10
+remote_incr_small	rm	6
 remote_incr_small	mv	0
 remote_incr_small	ls	0
 remote_incr_small	mkdir	0
@@ -509,7 +515,7 @@ remote_incr_small	ssh_connections	1
 remote_incr_small	ssh_invocations	30
 remote_incr_small	ssh_master_opens	1
 remote_incr_small	profile:command_render_calls	51
-remote_incr_small	profile:runtime_artifact_files_created	27
+remote_incr_small	profile:runtime_artifact_files_created	25
 remote_incr_small	profile:runtime_artifact_dirs_created	0
 remote_incr_small	profile:runtime_cache_object_writes	0
 remote_incr_small	profile:runtime_cache_object_readbacks	0

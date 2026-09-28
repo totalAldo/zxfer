@@ -17,7 +17,6 @@ test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_state() {
 	source_cache_file=$g_zxfer_source_snapshot_record_cache_file
 	destination_cache_file=$g_zxfer_destination_snapshot_record_cache_file
 	sorted_source_file=$g_source_snapshot_list_sorted_file
-	g_source_snapshot_list_background_sort_requested=1
 	printf '%s\n' "tank/src@snap1" >"$g_zxfer_source_snapshot_record_cache_file"
 	printf '%s\n' "backup/dst/src@snap1" >"$g_zxfer_destination_snapshot_record_cache_file"
 	printf '%s\n' "tank/src@snap1" >"$g_source_snapshot_list_sorted_file"
@@ -37,8 +36,6 @@ test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_state() {
 		"" "${g_zxfer_destination_snapshot_record_cache_file:-}"
 	assertEquals "Resetting snapshot discovery state should clear the staged sorted source snapshot file path." \
 		"" "${g_source_snapshot_list_sorted_file:-}"
-	assertEquals "Resetting snapshot discovery state should clear the background source sort request flag." \
-		"0" "${g_source_snapshot_list_background_sort_requested:-0}"
 	assertFalse "Resetting snapshot discovery state should remove the staged source snapshot-record cache file." \
 		"[ -e '$source_cache_file' ]"
 	assertFalse "Resetting snapshot discovery state should remove the staged destination snapshot-record cache file." \
@@ -1107,7 +1104,7 @@ test_build_source_snapshot_list_cmd_preserves_local_parallel_dataset_input_rende
 		"$output" "zxfer_discovery_datasets=\$('/sbin/zfs' 'list' '-Hr' '-t' 'filesystem,volume' '-o' 'name' '$g_initial_source') || exit 70;"
 }
 
-test_write_source_snapshot_list_to_file_uses_direct_background_runner_when_serial() {
+test_write_source_snapshot_list_to_file_starts_the_sorting_background_runner() {
 	log="$TEST_TMPDIR/source_serial.log"
 	outfile="$TEST_TMPDIR/source_serial.out"
 	errfile="$TEST_TMPDIR/source_serial.err"
@@ -1118,18 +1115,24 @@ test_write_source_snapshot_list_to_file_uses_direct_background_runner_when_seria
 		zxfer_build_source_snapshot_list_cmd() {
 			g_zxfer_source_snapshot_list_cmd_result="printf 'snap-serial'"
 		}
-		zxfer_execute_rendered_background_shell_command() {
+		zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 			printf '%s|%s|%s\n' "$1" "$2" "$3" >>"$SOURCE_LOG"
+			printf 'sorted_arg=%s\n' "$4" >>"$SOURCE_LOG"
 			g_last_background_pid=4242
 		}
 		g_option_j_jobs=1
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 		printf '%s\n' "$g_source_snapshot_list_pid" >>"$SOURCE_LOG"
+		printf 'sorted_published=%s\n' "$g_source_snapshot_list_sorted_file" >>"$SOURCE_LOG"
 	)
 
-	assertEquals "Serial snapshot listing should delegate to the direct background execution helper." \
+	sorted_arg=$(sed -n 's/^sorted_arg=//p' "$log")
+	assertNotNull "Every source listing should get a byte-sorted sidecar." "$sorted_arg"
+	assertEquals "Source snapshot listing should start the sorting background runner and publish its PID and sidecar." \
 		"printf 'snap-serial'|$outfile|$errfile
-4242" "$(cat "$log")"
+sorted_arg=$sorted_arg
+4242
+sorted_published=$sorted_arg" "$(cat "$log")"
 }
 
 test_write_source_snapshot_list_to_file_tracks_profile_counters_when_very_verbose() {
@@ -1178,7 +1181,7 @@ test_write_source_snapshot_list_to_file_tracks_remote_ssh_profile_counter_when_v
 		zxfer_build_source_snapshot_list_cmd() {
 			g_zxfer_source_snapshot_list_cmd_result="printf 'remote-snap-profile'"
 		}
-		zxfer_execute_rendered_background_shell_command() {
+		zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 			printf '%s|%s|%s\n' "$1" "$2" "$3" >"$log"
 			g_last_background_pid=3131
 		}
@@ -1212,7 +1215,7 @@ test_write_source_snapshot_list_to_file_backgrounds_parallel_command() {
 			g_zxfer_source_snapshot_list_cmd_result="printf 'snap-parallel'"
 		}
 		zxfer_record_last_command_string() {
-			printf '%s\n' "$1" >"$lastcmd_file"
+			printf '%s\n' "$1" >>"$lastcmd_file"
 		}
 		zxfer_write_source_snapshot_list_to_file "$outfile"
 		wait
@@ -1220,8 +1223,8 @@ test_write_source_snapshot_list_to_file_backgrounds_parallel_command() {
 
 	assertEquals "Parallel snapshot listing should execute the built command in the background." \
 		"snap-parallel" "$(cat "$outfile")"
-	assertEquals "Parallel snapshot listing should record the last attempted command." \
-		"printf 'snap-parallel'" "$(cat "$lastcmd_file")"
+	assertEquals "Parallel snapshot listing should first record the built command for failure reports." \
+		"printf 'snap-parallel'" "$(sed -n 1p "$lastcmd_file")"
 }
 
 test_write_source_snapshot_list_to_file_uses_current_shell_temp_file_result() {
@@ -1233,22 +1236,22 @@ test_write_source_snapshot_list_to_file_uses_current_shell_temp_file_result() {
 	(
 		LOG_FILE="$log"
 		zxfer_get_temp_file() {
-			g_zxfer_temp_file_result="$TEST_TMPDIR/source_current_shell.cmd"
+			g_zxfer_temp_file_result="$TEST_TMPDIR/source_current_shell.sorted"
 			: >"$g_zxfer_temp_file_result"
 		}
 		zxfer_build_source_snapshot_list_cmd() {
 			g_zxfer_source_snapshot_list_cmd_result="printf 'snap-current-shell'"
 		}
-		zxfer_execute_rendered_background_shell_command() {
-			printf '%s|%s|%s\n' "$1" "$2" "$3" >>"$LOG_FILE"
+		zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
+			printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >>"$LOG_FILE"
 			g_last_background_pid=5151
 		}
 		g_option_j_jobs=1
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 	)
 
-	assertEquals "Source snapshot discovery should stage the built command through the current-shell temp-file result instead of stdout." \
-		"printf 'snap-current-shell'|$outfile|$errfile" "$(cat "$log")"
+	assertEquals "Source snapshot discovery should take the sorted sidecar from the current-shell temp-file result instead of stdout." \
+		"printf 'snap-current-shell'|$outfile|$errfile|$TEST_TMPDIR/source_current_shell.sorted" "$(cat "$log")"
 }
 
 test_write_source_snapshot_list_to_file_starts_published_command() {
@@ -1262,7 +1265,7 @@ test_write_source_snapshot_list_to_file_starts_published_command() {
 		zxfer_build_source_snapshot_list_cmd() {
 			g_zxfer_source_snapshot_list_cmd_result="printf 'snap-read-scratch'"
 		}
-		zxfer_execute_rendered_background_shell_command() {
+		zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 			printf '%s|%s|%s\n' "$1" "$2" "$3" >>"$LOG_FILE"
 			g_last_background_pid=6161
 		}
@@ -1331,7 +1334,7 @@ test_write_source_snapshot_list_to_file_starts_built_command_without_readback() 
 				printf '%s\n' "unexpected readback"
 				return 1
 			}
-			zxfer_execute_rendered_background_shell_command() {
+			zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 				printf 'run=%s\n' "$1"
 				g_last_background_pid=7171
 			}
@@ -1352,7 +1355,6 @@ test_write_source_snapshot_list_to_file_preserves_background_sort_setup_failures
 
 	output=$(
 		(
-			g_source_snapshot_list_background_sort_requested=1
 			zxfer_build_source_snapshot_list_cmd() {
 				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' snap"
 			}
@@ -1379,11 +1381,10 @@ test_write_source_snapshot_list_to_file_preserves_background_sort_temp_failures(
 	output=$(
 		(
 			temp_calls=0
-			g_source_snapshot_list_background_sort_requested=1
 			zxfer_get_temp_file() {
 				temp_calls=$((temp_calls + 1))
 				if [ "$temp_calls" -eq 1 ]; then
-					g_zxfer_temp_file_result="$TEST_TMPDIR/source_background_sort_temp_failure.cmd"
+					g_zxfer_temp_file_result="$TEST_TMPDIR/source_background_sort_temp_failure.sorted"
 					: >"$g_zxfer_temp_file_result"
 					return 0
 				fi
@@ -1399,32 +1400,10 @@ test_write_source_snapshot_list_to_file_preserves_background_sort_temp_failures(
 		)
 	)
 
-	assertContains "Source discovery should preserve sorted-sidecar tempfile failures before launching the background job." \
+	assertContains "Source discovery should preserve status-file tempfile failures before launching the background job." \
 		"$output" "status=33"
-	assertContains "Source discovery should attempt command and sorted-sidecar tempfile allocation." \
+	assertContains "Source discovery should allocate the sorted sidecar, then fail on the first status file." \
 		"$output" "calls=2"
-}
-
-test_write_source_snapshot_list_to_file_preserves_direct_background_execution_failures() {
-	outfile="$TEST_TMPDIR/source_background_direct_failure.out"
-	errfile="$TEST_TMPDIR/source_background_direct_failure.err"
-
-	output=$(
-		(
-			zxfer_build_source_snapshot_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' snap"
-			}
-			zxfer_execute_rendered_background_shell_command() {
-				return 34
-			}
-			set +e
-			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
-			printf 'status=%s\n' "$?"
-		)
-	)
-
-	assertContains "Source discovery should preserve direct background execution failures." \
-		"$output" "status=34"
 }
 
 test_write_source_snapshot_list_to_file_runs_builder_output_under_a_waitable_pid() {
@@ -1457,7 +1436,6 @@ test_write_source_snapshot_list_to_file_can_sort_inside_background_job() {
 	sorted_path_file="$TEST_TMPDIR/source_background_sort.path"
 
 	(
-		g_source_snapshot_list_background_sort_requested=1
 		zxfer_build_source_snapshot_list_cmd() {
 			g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' tank/src@b tank/src@a"
 		}
@@ -1487,7 +1465,6 @@ test_write_source_snapshot_list_to_file_preserves_source_failure_when_streaming_
 	sorted_path_file="$TEST_TMPDIR/source_background_sort_failure.path"
 
 	(
-		g_source_snapshot_list_background_sort_requested=1
 		zxfer_build_source_snapshot_list_cmd() {
 			g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' tank/src@partial; exit 37"
 		}
@@ -1504,32 +1481,6 @@ test_write_source_snapshot_list_to_file_preserves_source_failure_when_streaming_
 	assertEquals "Streaming background sort should preserve partial raw output for diagnostics." \
 		"tank/src@partial" "$(cat "$outfile")"
 	zxfer_cleanup_runtime_artifact_path "$sorted_file"
-}
-
-test_execute_source_snapshot_list_background_cmd_with_sort_delegates_when_no_sorted_file_requested() {
-	log="$TEST_TMPDIR/source_background_sort_delegate.log"
-	outfile="$TEST_TMPDIR/source_background_sort_delegate.out"
-	errfile="$TEST_TMPDIR/source_background_sort_delegate.err"
-	: >"$log"
-
-	(
-		LOG_FILE="$log"
-		zxfer_execute_rendered_background_shell_command() {
-			printf '%s|%s|%s\n' "$1" "$2" "$3" >"$LOG_FILE"
-			g_last_background_pid=7171
-			return 0
-		}
-		zxfer_execute_source_snapshot_list_background_cmd_with_sort \
-			"printf '%s\n' delegated" "$outfile" "$errfile" ""
-		printf 'pid=%s\n' "$g_last_background_pid" >>"$LOG_FILE"
-	)
-	status=$?
-
-	assertEquals "Background sort execution should delegate to the direct background helper when no sorted sidecar is requested." \
-		0 "$status"
-	assertEquals "Delegated background execution should preserve command and file arguments." \
-		"printf '%s\n' delegated|$outfile|$errfile
-pid=7171" "$(cat "$log")"
 }
 
 test_execute_source_snapshot_list_background_cmd_with_sort_preserves_setup_failures() {
@@ -1904,29 +1855,6 @@ test_build_source_snapshot_list_cmd_preserves_remote_parallel_resolution_from_cu
 		"$output" "'/remote/bin/zfs' 'list' '-Hr' '-t' 'filesystem,volume' '-o' 'name' 'tank/src'"
 	assertContains "Remote source snapshot planning should preserve the resolved origin-host parallel helper after command rendering." \
 		"$output" "resolved=/opt/bin/parallel"
-}
-
-test_write_source_snapshot_list_to_file_reports_tempfile_failures() {
-	outfile="$TEST_TMPDIR/source_tempfile_failure.out"
-	errfile="$TEST_TMPDIR/source_tempfile_failure.err"
-
-	output=$(
-		(
-			zxfer_create_runtime_artifact_file() {
-				printf '%s\n' "unexpected staging file"
-				return 17
-			}
-			zxfer_build_source_snapshot_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\\n' staged-free"
-			}
-			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
-			wait "$g_source_snapshot_list_pid"
-			printf 'status=%s payload=%s\n' "$?" "$(cat "$outfile")"
-		)
-	)
-
-	assertEquals "A serial source listing should start without allocating a staging file for its command." \
-		"status=0 payload=staged-free" "$output"
 }
 
 test_write_source_snapshot_list_to_file_runs_each_pass_own_command() {

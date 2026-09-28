@@ -97,9 +97,9 @@ Use remote compression:
 - Identity-aware recursive snapshot discovery with `name,guid` records, plus a
   fast clean-no-op proof for eligible recursive runs — local sources and
   remote-origin pulls alike
-- Batched remote-target destination discovery for `-T`, so destination dataset
-  inventory, missing-root pool probing, and destination snapshot listing share
-  one target-side ssh shell invocation
+- One destination discovery path for local and `-T` destinations: plain
+  `zfs list` calls, multiplexed over the target's ssh control master under
+  `-T`
 
 ## Useful Options
 
@@ -242,13 +242,13 @@ a silent destroy-and-resend loop. With `-V`, planning prints one
 `Last common snapshot: ...; diverged destination snapshots: N.` line per
 planned dataset and the profile summary reports `diverged_snapshot_warnings`.
 
-When `-T` is used, destination discovery runs a structured target-side batch:
-recursive destination dataset inventory, the missing-root pool fallback probe,
-and destination snapshot listing are issued inside one remote `sh -c` payload.
-Large snapshot stdout is streamed back as `name,guid` records, while status and
-stderr sections are staged and parsed locally; any transport or parse failure
-empties all four discovery outputs. The local destination path keeps the
-direct `zfs` command flow.
+When `-T` is used, destination discovery issues the same `zfs list` commands
+as a local run, each over the target's ssh control master: the `name,guid`
+snapshot listing, the recursive dataset inventory only when later work needs
+it, the exact existence probe only after a failed listing (never after an ssh
+failure, which stops the run with ssh's status 255), and the pool probe only
+for a missing destination root. Each listing's own exit status decides
+whether its output is used.
 
 A `-D` progress dialog runs under the cleanup child wrapper as part of the
 send pipeline: zxfer tees the stream into a private FIFO that the dialog

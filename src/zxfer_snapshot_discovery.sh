@@ -39,11 +39,13 @@
 # owns globals: recursive snapshot-discovery state, full-discovery and fast
 #   no-op operation state, the destination listing a declined fast proof hands
 #   to full discovery, staged record-cache paths, and recursive dataset results.
-# reads globals: discovery options, source/destination context, producer and
-#   remote-batch result channels, and profiling state.
+# reads globals: discovery options, source/destination context, producer
+#   result channels, and profiling state.
 # mutates caches: the destination-existence cache through shared helpers.
 # returns via stdout: reversed record files and the -v/-V delta report; drives
-#   the fast no-op and full source/destination discovery protocols.
+#   the fast no-op and full source/destination discovery protocols. Every
+#   destination listing runs through zxfer_run_destination_zfs_cmd, so a -T
+#   target is listed like a local destination, over its ssh control master.
 
 # Purpose: Reset the file-backed state for one full snapshot-discovery operation.
 # Usage: zxfer_reset_full_snapshot_discovery_operation_state, before full
@@ -56,12 +58,7 @@ zxfer_reset_full_snapshot_discovery_operation_state() {
 	g_zxfer_full_source_snapshot_stage_start_ms=""
 	g_zxfer_full_destination_snapshot_file=""
 	g_zxfer_full_destination_snapshot_sorted_file=""
-	g_zxfer_full_destination_snapshot_error_file=""
 	g_zxfer_full_destination_inventory_attempted=0
-	g_zxfer_full_remote_destination_inventory_stage_files=""
-	g_zxfer_full_remote_destination_list_file=""
-	g_zxfer_full_remote_destination_list_error_file=""
-	g_zxfer_full_remote_destination_failure_error_file=""
 }
 
 # Purpose: Reset the owned scratch for one fast recursive no-op proof attempt.
@@ -133,19 +130,17 @@ zxfer_reset_snapshot_discovery_state() {
 	zxfer_reset_full_snapshot_discovery_operation_state
 	zxfer_reset_fast_recursive_noop_discovery_operation_state
 	zxfer_reset_snapshot_producer_state
-	g_source_snapshot_list_background_sort_requested=0
 	zxfer_reset_recursive_dataset_lists
 	g_recursive_destination_extra_dataset_list=""
 	g_zxfer_recursive_dataset_list_result=""
 	g_zxfer_snapshot_discovery_destination_listing_file=""
-	zxfer_reset_destination_discovery_batch_state
 }
 
-# Purpose: List the local destination's datasets and publish them as the
-# recursive destination inventory.
-# Usage: zxfer_collect_local_destination_dataset_inventory; called after the
+# Purpose: List the destination's datasets, on the -T host when one is given,
+# and publish them as the recursive destination inventory.
+# Usage: zxfer_collect_destination_dataset_inventory; called after the
 # snapshot diff when later work reads the destination existence cache.
-zxfer_collect_local_destination_dataset_inventory() {
+zxfer_collect_destination_dataset_inventory() {
 	zxfer_create_temp_file_group 2 || return "$?"
 	l_destination_inventory_stage_files=$g_zxfer_temp_file_group_result
 	{
@@ -475,14 +470,12 @@ zxfer_snapshot_discovery_needs_record_caches() {
 	return 1
 }
 
-# Purpose: Decide whether local recursive destination dataset inventory should
+# Purpose: Decide whether the recursive destination dataset inventory should
 # be collected after snapshot diffing.
 # Usage: Called after recursive snapshot deltas are known so no-op runs avoid
-# building a destination existence cache that no later stage can consume.
+# building a destination existence cache that no later stage can consume; the
+# conditions mirror the work zxfer_copy_filesystems skips.
 zxfer_snapshot_discovery_needs_destination_dataset_inventory() {
-	if [ -n "${g_option_T_target_host:-}" ]; then
-		return 1
-	fi
 	if [ -n "${g_recursive_source_list:-}" ]; then
 		return 0
 	fi
@@ -871,12 +864,10 @@ zxfer_start_full_source_snapshot_discovery() {
 	fi
 
 	l_full_source_start_status=0
-	g_source_snapshot_list_background_sort_requested=1
 	zxfer_write_source_snapshot_list_to_file \
 		"$g_zxfer_full_source_snapshot_file" \
 		"$g_zxfer_full_source_snapshot_error_file" ||
 		l_full_source_start_status=$?
-	g_source_snapshot_list_background_sort_requested=0
 	g_zxfer_full_source_snapshot_sorted_file=${g_source_snapshot_list_sorted_file:-}
 	if [ "$l_full_source_start_status" -ne 0 ]; then
 		zxfer_cleanup_runtime_artifact_path "$g_zxfer_full_source_snapshot_sorted_file"
@@ -930,10 +921,7 @@ zxfer_collect_full_destination_snapshot_discovery() {
 	g_zxfer_full_destination_snapshot_sorted_file=$g_zxfer_temp_file_result
 
 	l_full_destination_status=0
-	if [ -n "${g_option_T_target_host:-}" ]; then
-		zxfer_collect_full_remote_destination_snapshot_discovery \
-			"$l_full_destination_dataset" || return "$?"
-	elif [ -n "$l_full_destination_listing" ]; then
+	if [ -n "$l_full_destination_listing" ]; then
 		# The fast proof's listing succeeded, so the root exists.
 		zxfer_set_destination_existence_cache_entry "$l_full_destination_dataset" 1
 		zxfer_normalize_destination_snapshot_list "$l_full_destination_dataset" \
@@ -960,202 +948,6 @@ zxfer_collect_full_destination_snapshot_discovery() {
 		g_zxfer_profile_destination_snapshot_listing_ms \
 		"$l_full_destination_stage_start_ms"
 	return 0
-}
-
-# Purpose: Clear the caller-owned inventory staging for one remote batch.
-# Usage: Normal completion and every post-allocation failure share this owner
-# operation so the contained transport workspace remains separately owned.
-zxfer_cleanup_full_remote_destination_inventory_stages() {
-	l_full_remote_inventory_cleanup_paths=${g_zxfer_full_remote_destination_inventory_stage_files:-}
-	if [ -n "$l_full_remote_inventory_cleanup_paths" ]; then
-		zxfer_cleanup_runtime_artifact_path_list \
-			"$l_full_remote_inventory_cleanup_paths" >/dev/null 2>&1 || :
-	fi
-	g_zxfer_full_remote_destination_inventory_stage_files=""
-	g_zxfer_full_remote_destination_list_file=""
-	g_zxfer_full_remote_destination_list_error_file=""
-}
-
-# Purpose: Clean all full-discovery state after a remote destination failure.
-# Usage: zxfer_cleanup_failed_full_remote_destination_snapshot_discovery
-# [STATUS]; returns STATUS (default 0), so `step || cleanup "$?" || return`
-# keeps the step's status. Call it only after saving any staged stderr text
-# the failure report needs.
-zxfer_cleanup_failed_full_remote_destination_snapshot_discovery() {
-	zxfer_cleanup_full_remote_destination_inventory_stages
-	zxfer_cleanup_runtime_artifact_paths \
-		"$g_zxfer_full_source_snapshot_file" \
-		"$g_zxfer_full_source_snapshot_error_file" \
-		"$g_zxfer_full_destination_snapshot_file" \
-		"$g_zxfer_full_destination_snapshot_sorted_file" \
-		"${g_zxfer_full_destination_snapshot_error_file:-}" \
-		"${g_zxfer_full_remote_destination_failure_error_file:-}" \
-		>/dev/null 2>&1 || :
-	g_zxfer_full_destination_snapshot_error_file=""
-	g_zxfer_full_remote_destination_failure_error_file=""
-	zxfer_cleanup_snapshot_record_cache_files
-	return "${1:-0}"
-}
-
-# Purpose: Allocate the dataset-list and error files of one remote
-# destination inventory.
-# Usage: zxfer_allocate_full_remote_destination_inventory_stages; publishes
-# g_zxfer_full_remote_destination_list_file and _list_error_file.
-zxfer_allocate_full_remote_destination_inventory_stages() {
-	zxfer_create_temp_file_group 2 || return "$?"
-	g_zxfer_full_remote_destination_inventory_stage_files=$g_zxfer_temp_file_group_result
-	{
-		IFS= read -r g_zxfer_full_remote_destination_list_file
-		IFS= read -r g_zxfer_full_remote_destination_list_error_file
-	} <<-EOF
-		$g_zxfer_full_remote_destination_inventory_stage_files
-	EOF
-
-	return 0
-}
-
-# Purpose: Stage a remote-batch failure diagnostic without modifying outputs.
-# Usage: The extra file exists only on failure; a validated SSH diagnostic is
-# copied exactly, while malformed protocol failures use an empty stage.
-zxfer_stage_full_remote_destination_failure_error() {
-	g_zxfer_full_remote_destination_failure_error_file=""
-	zxfer_get_temp_file || return "$?"
-	g_zxfer_full_remote_destination_failure_error_file=$g_zxfer_temp_file_result
-	if zxfer_remote_destination_discovery_failure_is_transport; then
-		zxfer_get_remote_destination_discovery_transport_stderr \
-			>"$g_zxfer_full_remote_destination_failure_error_file" || return "$?"
-	fi
-}
-
-# Purpose: Report a remote-batch failure when its diagnostic cannot be staged.
-# Usage: Called only after preserving the meaningful transport or protocol
-# status. Cleanup precedes reporting because the production reporter exits.
-zxfer_report_unstaged_full_remote_destination_failure() {
-	l_full_remote_unstaged_status=$1
-	l_full_remote_unstaged_error=""
-
-	if zxfer_remote_destination_discovery_failure_is_transport; then
-		l_full_remote_unstaged_error=$(zxfer_get_remote_destination_discovery_transport_stderr)
-		l_full_remote_unstaged_error=$(zxfer_limit_snapshot_discovery_capture_lines \
-			"$l_full_remote_unstaged_error" 5)
-	fi
-	zxfer_cleanup_failed_full_remote_destination_snapshot_discovery
-	if [ -n "$l_full_remote_unstaged_error" ]; then
-		zxfer_throw_error "Failed to retrieve list of datasets from the destination: $l_full_remote_unstaged_error" \
-			"$l_full_remote_unstaged_status"
-	else
-		zxfer_throw_error "Failed to retrieve list of datasets from the destination" \
-			"$l_full_remote_unstaged_status"
-	fi
-	return "$l_full_remote_unstaged_status"
-}
-
-# Purpose: Run one remote batch and publish its dataset-inventory result.
-# Usage: A failed batch gets a separate diagnostic stage so all four transaction
-# outputs remain either the old generation or the complete new generation.
-zxfer_run_and_publish_full_remote_destination_discovery_batch() {
-	l_full_remote_batch_dataset=$1
-	l_full_remote_batch_status=0
-	l_full_remote_batch_error_file=$g_zxfer_full_remote_destination_list_error_file
-
-	zxfer_run_remote_destination_discovery_batch_to_files \
-		"$l_full_remote_batch_dataset" \
-		"$g_zxfer_full_remote_destination_list_file" \
-		"$g_zxfer_full_remote_destination_list_error_file" \
-		"$g_zxfer_full_destination_snapshot_file" \
-		"$g_zxfer_full_destination_snapshot_error_file" ||
-		l_full_remote_batch_status=$?
-	if [ "$l_full_remote_batch_status" -eq 0 ]; then
-		l_full_remote_batch_status=$g_zxfer_destination_discovery_batch_inventory_status
-	else
-		zxfer_stage_full_remote_destination_failure_error
-		l_full_remote_failure_stage_status=$?
-		if [ "$l_full_remote_failure_stage_status" -ne 0 ]; then
-			zxfer_report_unstaged_full_remote_destination_failure \
-				"$l_full_remote_batch_status"
-			return "$l_full_remote_batch_status"
-		fi
-		l_full_remote_batch_error_file=$g_zxfer_full_remote_destination_failure_error_file
-	fi
-
-	zxfer_publish_destination_dataset_inventory_from_stage \
-		"$g_zxfer_full_remote_destination_list_file" \
-		"$l_full_remote_batch_error_file" \
-		"$l_full_remote_batch_status" \
-		"${g_zxfer_destination_discovery_batch_pool_status:-}"
-	g_zxfer_full_destination_inventory_attempted=1
-}
-
-# Purpose: Report a target-side snapshot-list failure after checked readback.
-# Usage: Called after inventory publication; cleanup precedes either exact legacy
-# error so the full run-root trap is only the failure fallback.
-zxfer_report_full_remote_destination_snapshot_failure() {
-	[ "${g_zxfer_destination_discovery_batch_snapshot_status:-0}" -ne 0 ] || return 0
-
-	l_full_remote_snapshot_failure_read_status=0
-	zxfer_read_snapshot_discovery_capture_file \
-		"$g_zxfer_full_destination_snapshot_error_file" ||
-		l_full_remote_snapshot_failure_read_status=$?
-	l_full_remote_snapshot_failure_stderr=$g_zxfer_snapshot_discovery_file_read_result
-	l_full_remote_snapshot_failure_status=$g_zxfer_destination_discovery_batch_snapshot_status
-	zxfer_cleanup_failed_full_remote_destination_snapshot_discovery
-	if [ "$l_full_remote_snapshot_failure_read_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to read staged destination snapshot stderr." \
-			"$l_full_remote_snapshot_failure_read_status"
-		return "$l_full_remote_snapshot_failure_read_status"
-	fi
-	if [ -n "$l_full_remote_snapshot_failure_stderr" ]; then
-		zxfer_warn_stderr "$l_full_remote_snapshot_failure_stderr"
-	fi
-	zxfer_throw_error "Failed to retrieve snapshot list from the destination." \
-		"$l_full_remote_snapshot_failure_status"
-	return "$l_full_remote_snapshot_failure_status"
-}
-
-# Purpose: Normalize and release successful full remote destination stages.
-# Usage: Inventory staging is no longer needed once publication succeeds; the
-# raw snapshot stream remains owned by full-discovery result publication.
-zxfer_normalize_full_remote_destination_snapshot_discovery() {
-	l_full_remote_normalize_dataset=$1
-	zxfer_cleanup_full_remote_destination_inventory_stages
-	zxfer_normalize_destination_snapshot_list \
-		"$l_full_remote_normalize_dataset" \
-		"$g_zxfer_full_destination_snapshot_file" \
-		"$g_zxfer_full_destination_snapshot_sorted_file" ||
-		zxfer_cleanup_failed_full_remote_destination_snapshot_discovery "$?" || return
-	zxfer_cleanup_runtime_artifact_paths \
-		"$g_zxfer_full_destination_snapshot_error_file" \
-		"${g_zxfer_full_remote_destination_failure_error_file:-}" \
-		>/dev/null 2>&1 || :
-	g_zxfer_full_destination_snapshot_error_file=""
-	g_zxfer_full_remote_destination_failure_error_file=""
-}
-
-# Purpose: Collect the remote destination inventory and snapshot stream.
-# Usage: zxfer_collect_full_remote_destination_snapshot_discovery DATASET;
-# called by full destination discovery under -T. Returns 0 with the
-# normalized destination files, else the first failing status after cleanup.
-zxfer_collect_full_remote_destination_snapshot_discovery() {
-	l_full_remote_collect_dataset=$1
-	zxfer_allocate_full_remote_destination_inventory_stages ||
-		zxfer_cleanup_failed_full_remote_destination_snapshot_discovery "$?" || return
-	if zxfer_command_trace_enabled; then
-		zxfer_trace_rendered_command "Running command" \
-			"$(zxfer_render_destination_zfs_command list -t filesystem,volume -Hr -o name "$g_destination")"
-	else
-		zxfer_record_last_command_opaque
-	fi
-	# The snapshot stderr stage follows the trace, so -V output keeps its order.
-	g_zxfer_full_destination_snapshot_error_file=""
-	zxfer_get_temp_file ||
-		zxfer_cleanup_failed_full_remote_destination_snapshot_discovery "$?" || return
-	g_zxfer_full_destination_snapshot_error_file=$g_zxfer_temp_file_result
-	zxfer_run_and_publish_full_remote_destination_discovery_batch \
-		"$l_full_remote_collect_dataset" ||
-		zxfer_cleanup_failed_full_remote_destination_snapshot_discovery "$?" || return
-	zxfer_report_full_remote_destination_snapshot_failure || return
-	zxfer_normalize_full_remote_destination_snapshot_discovery \
-		"$l_full_remote_collect_dataset"
 }
 
 # Purpose: Wait for and validate the full source snapshot producer.
@@ -1218,8 +1010,8 @@ zxfer_wait_for_full_source_snapshot_discovery() {
 	return 0
 }
 
-# Purpose: Publish the full discovery deltas, the local destination inventory
-# and the record caches that later planning needs.
+# Purpose: Publish the full discovery deltas, the destination dataset
+# inventory and the record caches that later planning needs.
 # Usage: zxfer_publish_full_snapshot_discovery_results; the last full-discovery
 # stage, after both producers finish. One cleanup removes the pass's
 # transient listings; the record caches stay for planning.
@@ -1240,7 +1032,7 @@ zxfer_publish_full_snapshot_discovery_results() {
 
 	if [ "$l_full_publish_status" -eq 0 ] &&
 		zxfer_snapshot_discovery_needs_destination_dataset_inventory; then
-		zxfer_collect_local_destination_dataset_inventory || l_full_publish_status=$?
+		zxfer_collect_destination_dataset_inventory || l_full_publish_status=$?
 		g_zxfer_full_destination_inventory_attempted=1
 	fi
 

@@ -101,9 +101,10 @@ On FreeBSD, these are expected from base and usually do not belong in
 `RUN_DEPENDS`.
 
 Remote helper scripts assume the same kind of base userland on the executing
-remote host. For example, the `-T` destination discovery batch uses target-side
-POSIX `sh`, `mktemp -d`, `grep`, `cat`, and `rm` around the resolved target
-`zfs` command, all under the validated remote dependency `PATH`.
+remote host. For example, the `-k` backup-metadata write on a `-T` host uses
+target-side POSIX `sh`, `mktemp`, `mv`, `rm`, and the resolved `cat`, all under
+the validated remote dependency `PATH`. `-T` destination discovery runs no
+script: it needs only the resolved target `zfs`.
 
 ## Direct Integration Harness Dependencies
 
