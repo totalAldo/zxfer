@@ -462,8 +462,9 @@ zxfer_load_remote_capability_slot() {
 # [TOOL]; without a side the host's -O/-T role picks the slot, and the scope
 # comes from zxfer_get_remote_capability_requested_tools_for_host. Prints the
 # response and publishes it in g_zxfer_remote_capability_response_result, or
-# returns non-zero with the channel empty when the probe or its validation
-# fails, so callers probe directly.
+# returns non-zero when the probe or its validation fails, so callers probe
+# directly; the channel may then hold part of the failed response, which no
+# caller reads.
 zxfer_ensure_remote_host_capabilities() {
 	l_caps_host=$1
 	l_caps_side=${2:-}

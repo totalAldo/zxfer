@@ -16,7 +16,7 @@ with operator and contributor reference material.
 - [platforms.md](./platforms.md): supported platforms, caveats, and path layouts
 - [external-tools.md](./external-tools.md): runtime, optional, and test tool inventory for packaging and ports work
 - [cli-examples.md](./cli-examples.md): one-page CLI example reference covering every current option
-- [testing.md](./testing.md): shunit2, coverage, integration harness, and CI
+- [testing.md](./testing.md): validation profiles, unit and contract suites, fuzz, performance tools, coverage, VM matrix, integration harness, and CI
 - [coding-style.md](./coding-style.md): project-specific shell and module style guide
 - [troubleshooting.md](./troubleshooting.md): common failures and debugging hints
 - [architecture.md](./architecture.md): module layout, high-level execution flow, and Mermaid lifecycle diagrams
@@ -28,4 +28,5 @@ with operator and contributor reference material.
 
 - [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md): open issues
 - [../SECURITY.md](../SECURITY.md): security model and vulnerability reporting
+- [../OPTIMIZATION.md](../OPTIMIZATION.md): current performance results, remaining candidates, and how to measure
 - [../CHANGELOG.txt](../CHANGELOG.txt): release history

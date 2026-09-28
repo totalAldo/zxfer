@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-06-23
+Last reviewed: 2026-09-28
 
 This document tracks the main feature additions, refactors, and compatibility
 decisions that remain after the current reliability and maintainability work.
@@ -70,29 +70,38 @@ supported-platform set or upstream OpenZFS support policy changes.
 
 ## Performance Validation
 
-- Keep the new `tests/run_perf_tests.sh` harness informative first: baseline
-  comparisons should warn on throughput, startup, or cleanup regressions
-  without becoming a hard CI gate.
+- Keep wall-clock measurement informative first: `tests/run_perf_tests.sh`
+  (with `--baseline-bin` for comparisons) and the `tests/run_perf_ab.sh` A/B,
+  which `.github/workflows/perf.yml` runs as an advisory job, should warn on
+  throughput, startup, or cleanup regressions without becoming a hard CI
+  gate.
+- Keep the count-based micro-bench budgets in `tests/perf_budgets.tsv`
+  (helper spawns, exact ssh connections and zfs calls on a small fixture) as
+  the automated performance gate, and ratchet them down whenever a change
+  lowers a count.
 - Expand fixtures deliberately when a change needs them, such as `mbuffer`
   experiments, send-option variants, larger compression cases, or additional
-  concurrency/property-logic profiles.
+  concurrency and property profiles beyond the `props` scenario.
 - Preserve VM-backed optional execution through
   `tests/run_vm_matrix.sh --test-layer perf` and
   `tests/run_vm_matrix.sh --test-layer perf-compare` so agents and contributors
   can collect comparable measurements inside disposable guests.
-- Promote a subset to automation only after the fixtures are stable enough to
-  avoid noisy host-specific failures.
+- Promote a wall-clock check to a gate only after its fixtures are stable
+  enough to avoid noisy host-specific failures.
 
 ## Known-Issue Burn-Down
 
 - Keep [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) reserved for concrete open
   failures that still affect current releases, and move resolved remediation
   themes back into changelog, architecture, or testing documentation.
-- The earlier architectural backlog around lock and lease lifecycle handling,
-  PID ownership validation, exact-status propagation, and literal token
-  parsing has largely been retired on the current branch; prefer follow-on
-  work that removes newly confirmed platform-specific gaps and behavior
-  exceptions instead of reopening those resolved classes.
+- The earlier architectural backlog around lock and lease lifecycle handling
+  (zxfer takes no lock), PID ownership validation, exact-status propagation,
+  and literal token parsing has been retired, and
+  `tests/test_contract_failures.sh` checks that every failed zfs or ssh call
+  either leaves the clean run's changes or stops the run before any later
+  change; prefer follow-on work that removes newly confirmed
+  platform-specific gaps and behavior exceptions instead of reopening those
+  resolved classes.
 - Prefer centralized fixes that retire classes of issues over one-off patches
   at individual call sites.
 

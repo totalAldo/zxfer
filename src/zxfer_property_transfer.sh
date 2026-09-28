@@ -1126,9 +1126,11 @@ zxfer_apply_property_changes() {
 # when it is missing, otherwise diff against the destination in the same plan
 # and apply the resulting sets and inherits, then buffer -k metadata.
 # Usage: zxfer_transfer_properties SOURCE [SKIP_BACKUP_CAPTURE]; called from
-# the replication loop for every dataset that needs property work and again,
-# with the flag set, for the post-seed reconcile pass. Reads g_initial_source,
-# g_actual_dest and g_recursive_dest_list.
+# the replication loop for every dataset that needs property work and again
+# for the post-seed reconcile pass, which re-captures the dataset's -k row
+# (the write keeps the newest row). No caller sets SKIP_BACKUP_CAPTURE; 1
+# would leave the -k row alone. Reads g_initial_source, g_actual_dest and
+# g_recursive_dest_list.
 zxfer_transfer_properties() {
 	zxfer_set_failure_stage "property transfer"
 	zxfer_echoV "zxfer_transfer_properties: $1"

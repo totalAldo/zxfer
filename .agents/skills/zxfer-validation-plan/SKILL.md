@@ -21,6 +21,7 @@ description: Choose and explain safe validation commands for zxfer changes based
 - Automatic VM-backed runs must stay on host-friendly profiles such as `--profile smoke` or `--profile local`.
 - Treat `--profile full`, `--profile ci`, and slow emulated guests as manual-only unless the user explicitly asks.
 - When narrowing integration during iteration, prefer `tests/run_vm_matrix.sh --profile local --guest ... --only-test ...`.
+- For changes to process groups, `ls` parsing or userland flags, also run the FreeBSD guest's unit layer: `tests/run_vm_matrix.sh --profile local --guest freebsd --test-layer shunit2`.
 
 ## Output
 

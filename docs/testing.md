@@ -15,13 +15,15 @@ belong here.
   `tests/test_ci_*.sh`, `tests/test_generate_solaris_manpage.sh`) test the
   runners, `validate.sh`, the CI workflow contracts and the man-page
   generator.
-- The seeded argv fuzz (`tests/run_argv_fuzz.sh`) and the micro-bench spawn
-  budgets (`tests/run_microbench.sh`) run host-safe on the canned zfs.
+- The seeded argv fuzz (`tests/run_argv_fuzz.sh`) runs host-safe against its
+  own model-backed fake zfs.
 - Coverage is a report-only bash-xtrace or kcov run of the unit suites.
 - Integration runs real file-backed pools, inside a disposable VM
   (`tests/run_vm_matrix.sh`) or, manually, on a disposable ZFS host.
-- Performance runs are advisory: `tests/run_perf_ab.sh` on the canned zfs,
-  `tests/run_perf_tests.sh` on real pools.
+- Performance has three tools: `tests/run_microbench.sh` counts helper
+  spawns on the canned zfs (its budgets gate every unit run), and the
+  advisory timers `tests/run_perf_ab.sh` (canned zfs) and
+  `tests/run_perf_tests.sh` (real pools).
 
 ```mermaid
 flowchart TD
@@ -47,10 +49,11 @@ neither it nor `tests/validation_map.tsv` is evaluated as shell.
   never runs integration, performance and documentation follow-ups. A change
   to `src/zxfer_NAME.sh` selects `tests/test_zxfer_NAME.sh` and every
   contract suite by name; a `tests/suites/*` fragment selects the entry suite
-  whose `# zxfer-test-fragment:` marker names it. `tests/validation_map.tsv`
-  maps other paths (first match wins) to exception suites (`@contract` means
-  every contract suite, `@self` the changed suite), integration groups, perf
-  cases and doc surfaces.
+  whose `# zxfer-test-fragment:` marker names it. Every path must also match
+  a row of `tests/validation_map.tsv` (first match wins; an unmatched path
+  stops `quick`), which adds exception suites (`@contract` means every
+  contract suite, `@self` the changed suite), integration groups, perf cases
+  and doc surfaces.
 - `full` runs the pinned lint stack, every unit suite and report-only
   bash-xtrace coverage.
 - `portable` runs the static POSIX portability lint targets.
@@ -119,9 +122,9 @@ Contract suites come first:
 | `test_contract_cli_golden.sh` | Help, usage-error and failure-report output byte for byte (`tests/golden/cli_*.golden`; rewrite with `ZXFER_UPDATE_GOLDEN=1` and review the diff). |
 | `test_contract_failures.sh` | Fail-closed behavior when any zfs or ssh call fails (see Fail-Closed Sweep). |
 | `test_contract_planning.sh` | The zfs argv of whole runs: GUID-aware planning, fail-closed listings and the failure stage they report, `-d` deletes, the `-F` rollback and divergence, `-g`, `-Y` passes, `-j` order and cleanup, `-O`/`-T`, the property pass and `-k`/`-e`. |
-| `test_contract_properties.sh` | `-P` property argument boundaries, the recursive prefetch, and the `-o` rules: a repeated or malformed item is a usage error before any zfs call, and a property the source lacks stops the run before the destination is touched. |
+| `test_contract_properties.sh` | `-P` property argument boundaries, the recursive prefetch and its read races, and the `-o` rules: a repeated item is a usage error before any zfs call (the CLI goldens also pin a malformed one), and a property the source lacks stops the run before the destination is touched. |
 | `test_contract_send_receive.sh` | `-D` progress streams under `-j 1` and `-j 3`, and `-n`. |
-| `test_contract_verbose.sh` | `-v`/`-V` output for hostile property values. |
+| `test_contract_verbose.sh` | `-v`/`-V` output for hostile property values, and `-V` counters that start at zero whatever the environment holds. |
 
 Every `src/zxfer_NAME.sh` has one home: `tests/test_zxfer_NAME.sh` and the
 fragments it runs from `tests/suites/zxfer_NAME_TOPIC_tests.sh`.
@@ -140,9 +143,10 @@ written for: the entry's `setUp` asks `zxfer_test_running_test_is_in FILE`
 
 `tests/test_helper.sh` loads every module in `src/zxfer_modules.sh` order, so
 every suite sees the whole function set, and provides the lifecycle and
-capture helpers. Entry suites start `setUp` with
-`zxfer_test_reset_all_owner_state` (`tests/helpers/lifecycle.sh`), which runs
-the production owner resets without creating a run root or narrowing PATH.
+capture helpers. A suite that needs clean module state calls
+`zxfer_test_reset_all_owner_state` (`tests/helpers/lifecycle.sh`) from
+`setUp`, directly or through its domain fixture; it runs the production
+owner resets without creating a run root or narrowing PATH.
 Stub `src/` functions inside a subshell. Domain fixtures are opt-in files in
 `tests/helpers/*_fixtures.sh` (`exec`, `remote_host`, `runtime`, `send_job`,
 `property`, `replication`, `snapshot_discovery`, `fake_tool`, `backup`);
@@ -160,7 +164,12 @@ updating shunit2.
 
 The FreeBSD and OmniOS unit guests run the suites as root, so owner and
 permission tests must fake the other identity rather than assume a non-root
-uid.
+uid. FreeBSD `sh` (unless the name is already exported) and ksh93, the
+illumos `/bin/sh`, do not export a `VAR=value` prefix on a shell-function
+call, so a case that must hand `TMPDIR` or a mock variable to the launcher
+through a helper function exports it in a subshell instead; the
+[coding style](./coding-style.md) lists this and the other portability
+traps.
 
 ## Fail-Closed Sweep
 
@@ -215,12 +224,13 @@ counters and ssh use on the canned zfs for `noop`, `dryrun_incr`, `incr`,
 `remote_noop`, `remote_incr` (`-O localhost -T localhost` through the
 socket-aware mock ssh, which logs each call as `version`, `master`,
 `control`, `mux` or `direct`) and `props` (`-P` with 68 matching
-properties per dataset; a set or inherit fails it). The work directory sits
+properties per dataset; any mutating zfs command besides the receives fails
+it). The work directory sits
 under `/tmp` whatever `TMPDIR` is. `tests/test_zxfer_microbench_budgets.sh`
-runs the 8 x 2 fixture and enforces `tests/perf_budgets.tsv`: the helper
-TOTAL, `ssh_connections` and `ssh_master_opens` (exact, both directions) and
-the zfs call counters of each scenario. Budgets only go down; the file
-header gives the rule.
+runs the 8 x 2 fixture and enforces the 37 rows of `tests/perf_budgets.tsv`:
+the helper TOTAL, `ssh_connections` and `ssh_master_opens` (exact, both
+directions) and the zfs call counters of each scenario. Budgets only go
+down; the file header gives the rule.
 
 ## Coverage
 
@@ -389,3 +399,9 @@ not install ZFS: they are `/bin/sh` and BSD-userland portability gates. The
 OmniOS unit job uses `bash --posix` because `/usr/xpg4/bin/sh` follows
 ksh-style subshell function binding and ignores the suites' subshell stubs;
 the integration job keeps `/usr/xpg4/bin/sh` for live illumos coverage.
+
+The posh lane currently runs no tests: under posh no suite gets the helper
+functions its sourced files define (the log shows
+`zxfer_source_runtime_modules_through: not found`), so each suite ends
+without running a test, and `posh -n` rejects eight test files. Whether to
+fix or drop the lane is pending a decision.

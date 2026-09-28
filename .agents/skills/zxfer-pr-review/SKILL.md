@@ -8,7 +8,7 @@ description: Review zxfer changes and pull requests for safety, security, ZFS re
 ## Workflow
 
 1. Load `AGENTS.md`, `docs/coding-style.md`, and the changed diff before judging the change.
-2. Inspect scope with repo-local evidence: changed files, nearby source, matching `tests/test_*.sh`, relevant docs, and public interfaces touched by the diff.
+2. Inspect scope with repo-local evidence: changed files, nearby source, each changed module's `tests/test_zxfer_NAME.sh` entry and fragments, the `tests/test_contract_*.sh` suites, relevant docs, and public interfaces touched by the diff.
 3. Read `references/review-checklist.md` when the change touches replication, remote execution, path security, runtime cleanup, reporting, platform behavior, tests, or docs.
 4. Review as a blocker-finding pass, not a style pass. Do not implement fixes unless the user asks for implementation.
 5. If the diff is too large to review completely, state the reviewed scope and the unreviewed residual risk.

@@ -37,52 +37,47 @@ Each remote run opens one ssh master, shared by both roles. On the small
 fixture (8 x 2) the incremental spawns 70 helpers with `-V` and `props` 76.
 
 Wall clock against `upstream-compat-final` on the canned zfs, macOS
-(`/bin/sh` is bash 3.2), four snapshots per dataset, median seconds of
-alternating warmed runs (`tests/run_perf_ab.sh`; the 25-child rows use
-`--latency-ms 0 --reps 7`, the 100-child rows `--reps 5`):
+(`/bin/sh` is bash 3.2), four snapshots per dataset, median seconds of five
+alternating warmed runs (`tests/run_perf_ab.sh --baseline-ref
+upstream-compat-final --reps 5 --latency-ms 0`, 2026-09-28):
 
 | Children | Scenario | Current | Upstream | Ratio |
 | ---: | --- | ---: | ---: | ---: |
-| 25 | No-op | 0.092 | 0.151 | 0.61 |
-| 25 | Incremental | 0.672 | 1.491 | 0.45 |
-| 25 | Remote no-op | 0.222 | 0.222 | 1.00 |
-| 25 | Remote incremental | 0.916 | 1.985 | 0.46 |
-| 100 | No-op | 0.091 | 0.150 | 0.61 |
-| 100 | Incremental | 2.690 | 5.760 | 0.47 |
+| 25 | No-op | 0.071 | 0.144 | 0.49 |
+| 25 | Incremental | 0.508 | 1.360 | 0.37 |
+| 25 | Remote no-op | 0.116 | 0.197 | 0.59 |
+| 25 | Remote incremental | 0.726 | 1.889 | 0.38 |
+| 100 | No-op | 0.076 | 0.157 | 0.48 |
+| 100 | Incremental | 1.803 | 5.139 | 0.35 |
+| 100 | Remote no-op | 0.115 | 0.196 | 0.59 |
+| 100 | Remote incremental | 2.433 | 6.776 | 0.36 |
 
-With the default 80 ms mock handshake every remote row is faster than
-upstream (remote no-op 0.75). With `-P` and properties that already match,
-current code reads each side once through the recursive
-`zfs get -r -t filesystem,volume` prefetch and takes 1.15 s at 25 children
-against upstream's 75.6 s of per-dataset loops.
+With the default 80 ms mock ssh handshake, 25 children: remote no-op 0.259 s
+against 0.485 s (0.53), remote incremental 1.095 s against 2.563 s (0.43).
+With `-P` and 68 properties per dataset that already match, the current code
+reads each side once through the recursive `zfs get -r -t filesystem,volume`
+prefetch and takes 0.86 s at 25 children; upstream's per-dataset loops took
+more than a minute on the same fixture in earlier runs (75.6 s), so `props`
+is not part of the upstream comparison.
 
-Scale readings from the `--snapshots`, `--shell` and `props` knobs, against
-`main` (ratios 0.96-1.02, `src/` unchanged): 100 children x 50 snapshots
-no-op 0.10 s and incremental 3.79 s; 200 x 100 incremental 16.2 s; `props`
-1.34 s and 6.25 s at 25 and 100 children under `/bin/sh`, 1.29 s and 8.22 s
-under `--shell /bin/dash`. The next-phase items W7a and W7b targeted these.
+Against the `main` this phase started from (`f13aed9`), same method with
+`--latency-ms 80` (the default) and `--scenarios
+noop,incr,remote_noop,remote_incr,props`, 2026-09-27:
 
-Next-phase results against `main` so far: W3 (`-T` destination discovery
-through the ordinary listings) remote no-op 0.74-0.75 at zero latency and
-0.83-0.85 at 80 ms, remote incremental 0.97-0.99; W4 (error log without a
-lock) a failing run with `ZXFER_ERROR_LOG` set 386 -> 130 ms under bash 3.2
-and 303 -> 88 ms under dash; W5 (one property plan program) `props` 0.92-0.93
-under `/bin/sh` and dash; W7b (property rows looked up by index, `-e` rows
-looked up instead of re-checking the file) `props` 0.73 at 100 and 200
-children under `/bin/sh` and 0.50 and 0.40 under dash (30.8 s -> 12.2 s at
-200), and `-e` at 400 children about as fast as `-P` (it was 23-25 s slower
-under `/bin/sh` and 17 s slower under dash).
-The `props` fixture's canned zfs scans a manifest of about five lines per
-dataset on every call, which both trees pay: without it the `-P` work at 200
-children is about 2.2 s in either shell, from 16.6 s under dash and 5.5 s
-under bash 3.2.
-W8b (profile counters bumped inline, stage clocks read in the current shell)
-changes no count and no wall clock without `-V` (0.98-1.03 of its base under
-`/bin/sh` and dash); a `-V` run forks 2-15 fewer subshells (bash 5 `--forks`:
-no-op 37 -> 29, incremental 151 -> 136). The whole phase against `main`,
-25 and 100 children under `/bin/sh` with the 80 ms mock handshake: no-op
-0.83, incremental 0.82-0.83, remote no-op 0.69-0.71, remote incremental
-0.87-0.88, `props` 0.68-0.70.
+| Children | No-op | Incremental | Remote no-op | Remote incremental | `props` |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 25 | 0.82 | 0.83 | 0.71 | 0.86 | 0.70 |
+| 100 | 0.83 | 0.82 | 0.73 | 0.88 | 0.67 |
+
+At scale: 200 children x 100 snapshots, incremental, 4.96 s against 15.06 s
+(0.33, `--snapshots 100`); `props` at 100 children under `--shell /bin/dash`,
+3.57 s against 7.27 s (0.49); `-e` at 400 children now costs about the same
+as `-P` (it added 23-25 s under `/bin/sh`); a failing run with
+`ZXFER_ERROR_LOG` set takes 130 ms instead of 386 ms under bash 3.2. The
+`props` fixture's canned zfs scans a manifest of about five lines per dataset
+on every call, which both trees pay: without it the `-P` work at 200 children
+is about 2.2 s in either shell. Which change produced which gain is recorded
+per item in `CHANGELOG.txt`.
 
 ## Remaining Candidates
 
@@ -111,12 +106,20 @@ quoting, structured error reporting, secure `PATH` or cleanup. Measure first.
   options instead of `zfs get ... all` where completeness can be proven.
 - Remote backup preflight caching per host and path; lazy optional-helper
   resolution and deferred remote command rendering until a mode needs them.
-- Remote no-op: about 0.75 of `main` at zero latency since W3, when `main`
-  was at parity with upstream; the capability probe is the largest remaining
-  remote cost.
+- `-T` no-op: `-T` disables the fast no-op proof
+  (`zxfer_fast_recursive_noop_options_are_eligible`), so a clean `-T` no-op
+  runs full discovery. Lifting the gate would list the destination over the
+  target's master inside the proof; measure it (remote no-op, with and
+  without mock latency) before relying on it. The capability probe is the
+  largest remaining remote cost.
 - Serial versus GNU `parallel` source discovery for the changed-source
   fallback: fanout can lose on small remote trees. The clean no-op proof
   stays one serial recursive stream even with `-j`.
+- Harness: the canned zfs (`tests/mock_toolchain_helper.sh`) scans its
+  manifest line by line on every call, and the `props` fixture adds about
+  five rules per dataset, a cost both trees pay, so A/B ratios understate
+  `-P` gains in zxfer itself. An indexed manifest would let
+  `tests/run_perf_ab.sh` show them.
 
 ## Measurement
 

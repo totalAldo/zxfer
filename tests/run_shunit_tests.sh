@@ -54,7 +54,6 @@ test_contract_planning.sh
 test_run_argv_fuzz.sh
 test_zxfer_backup_metadata.sh
 test_zxfer_runtime.sh
-test_zxfer_error_log.sh
 test_zxfer_snapshot_discovery.sh
 test_run_shunit_tests.sh
 test_zxfer_ssh_transport.sh

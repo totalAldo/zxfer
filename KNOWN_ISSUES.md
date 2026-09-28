@@ -9,9 +9,10 @@ Generic architecture notes are intentionally omitted unless they currently
 describe a concrete failure mode or exploit path.
 
 File references below use the current flat `src/` layout and the shared
-`src/zxfer_modules.sh` loader. Some support modules are still covered inside
-adjacent shunit suites, so a referenced test file may not always be
-peer-named to the implementation module it exercises.
+`src/zxfer_modules.sh` loader. The unit tests of `src/zxfer_NAME.sh` live in
+`tests/test_zxfer_NAME.sh` and the `tests/suites/zxfer_NAME_*_tests.sh`
+fragments it runs; black-box pins live in the `tests/test_contract_*.sh`
+suites.
 
 ## Correctness And Portability
 
@@ -187,6 +188,32 @@ BusyBox ash itself is supported, but a host whose whole userland is BusyBox
 teardown and the setsid launcher check in `zxfer_signal_background_shell`
 use. Those checks fail closed rather than signal the wrong process.
 
+### Low: under a UTF-8 locale, bash 3.2 and ksh93 digit checks accept some non-ASCII characters
+
+bash 3.2, which is `/bin/sh` on macOS, matches a bracket range in a `case`
+pattern by the locale's collation order, and so does ksh93u+ on macOS
+(illumos `/bin/sh` is ksh93; not checked there). zxfer does not set
+`LC_ALL` or `LC_COLLATE` for its own shell, so under a UTF-8 locale such as
+`en_US.UTF-8`, `[0-9]` also matches characters that collate between `0` and
+`9`, such as U+2185. `zxfer_is_uint` in `src/zxfer_quoting.sh`, which
+rejects `*[!0-9]*`, then accepts a value made of them, and so do the other
+range patterns in `src`, such as the `ls -ldin` field checks in
+`src/zxfer_path_security.sh`. The only operator input among them is `-j`
+and `-g`. `-j` with such a value passes CLI validation; every numeric test
+on it then fails with a shell error (`integer expression expected` under
+bash), which zxfer reads as false, and the run goes on as if the value were
+above 1 with no job limit: it needs `parallel` (GNU parallel accepts the
+value), and every ready send/receive job starts at once (a destination still
+waits for its parent's receive). `-g` with such a value also passes; `awk`
+reads it as 0, so a `-d` run that plans a delete stops with the
+grandfather-protection error.
+No byte but an ASCII digit matches, so no shell metacharacter gets through,
+and the other checks see values that zxfer, a local tool or the remote
+capability probe produces. dash, bash 5 and zsh compare code points and are
+not affected. A fix lists the characters in every such pattern
+(`[!0123456789]`), as the test tooling now does, with a test that runs under
+`LC_ALL=en_US.UTF-8`.
+
 ### Low: an internal error in the startup capability probe can exit without a message
 
 Outside `-v`/`-V`, `zxfer_preload_remote_host_capabilities` in
@@ -199,6 +226,28 @@ discarded, and under bash (macOS `/bin/sh`) so is the structured failure
 report. Rerun with `-v` to see the diagnostic. Found by review; it is the same
 pattern as the `-O -j` parallel lookup fixed on 2026-09-24, not reproduced
 separately.
+
+### Low: a failed `zfs send` is seen only through its receive
+
+`zxfer_zfs_send_receive` in `src/zxfer_send_receive.sh` runs each transfer as
+one `zfs send | zfs receive` pipeline (with any ssh, compression and `-D`
+stages between them), and zxfer judges it by the pipeline's status, which is
+the receive's. A send that fails, locally or on the `-O` host, stops the run
+only because its receive then fails. Real `zfs receive` refuses an empty or
+truncated stream, so this does not fail open, and
+`tests/test_contract_failures.sh` fails every send of its scenarios against
+receives that refuse an empty stream as zfs does. The report does not say
+that the send failed, though. A pipeline run in the foreground (every
+transfer without `-j`, and the full send that seeds a new destination) ends
+with the generic `Error when executing command.` from
+`zxfer_execute_rendered_shell_command` in `src/zxfer_exec.sh`, with exit
+status 1, and only the report's `current_source` and `current_destination`
+fields name the dataset; a `-j` job reports
+`zfs send/receive job failed for [SNAPSHOT -> DEST] (PID N, exit S).` with
+the receive's status. The send's own stderr, printed before the report, is
+the only sign of which side failed. A fix would record the send side's
+status in the run root, as a `-j` job shell records the pipeline's, and name
+the failing side and the dataset in the message.
 
 ### Low: SJIS/Big5/GBK trail bytes can hide a backslash in report quoting
 

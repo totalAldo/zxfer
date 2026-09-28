@@ -60,6 +60,10 @@ Current behavior:
 - current metadata writes use the versioned root markers
   `#format_version:2`, `#source_root`, and `#destination_root`
 - older or unversioned restore metadata layouts are no longer supported
+- `-e` restores only what a `-k` run recorded for the same source and
+  destination; the `v1.1.7` restore that ran `-e` from the backup copy back
+  to the original pool finds no metadata and stops with
+  `Cannot find backup property file`
 
 This is one of the biggest upgrade breaks for long-lived installs.
 
@@ -69,6 +73,8 @@ What to do:
   backups with the current zxfer before depending on `-e`.
 - Do not assume old `.zxfer_backup_info.*` files from `v1.1.7` will restore
   cleanly on the current fork.
+- Restore a pool from its backup copy without `-e` (see the man page's Ex3),
+  and run `-e` with the source and destination of the `-k` run.
 
 ### 3. Backup metadata no longer lives in dataset mountpoints
 
@@ -194,12 +200,19 @@ These are the biggest user-visible additions since the 2019 release.
 - remote helper resolution is per-host instead of assuming the local helper
   path exists remotely
 - ssh control sockets are reused within one run through short per-role socket
-  paths under that invocation's private temp root; concurrent zxfer processes
-  do not share sockets
-- remote capability discovery is one fail-closed probe per role, host and
-  requested tool set per run (a recursive `-O -j` pull that the fast no-op
-  proof finds work for probes the origin a second time, for `parallel`), held in memory instead of persisted in
-  cache files; zxfer takes no cross-process locks
+  paths under that invocation's private temp root (or a private short
+  directory of their own when a long `TMPDIR` would exceed the socket path
+  limit); concurrent zxfer processes do not share sockets
+- remote capability discovery is one fail-closed probe per host and requested
+  tool set per run (equal `-O` and `-T` specs share it; a recursive `-O -j`
+  pull that the fast no-op proof finds work for probes the origin a second
+  time, for `parallel`), held in memory instead of persisted in cache files;
+  zxfer takes no cross-process locks
+- a `-T` destination is listed with the same plain `zfs list` commands as a
+  local one, over the target's ssh control master, so the target needs only
+  `zfs` for discovery (earlier branch builds also ran `mktemp`, `grep`, `rm`
+  and `cat` there); an ssh failure during the destination snapshot listing
+  exits 255
 
 ### Better property handling
 
@@ -216,8 +229,9 @@ These are the biggest user-visible additions since the 2019 release.
   an explicit unsafe local-debug override through
   `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1`
 - each `ZXFER_ERROR_LOG` report is one append-mode write to a validated 0600
-  log, so concurrent failures need no lock; a log problem only warns and keeps
-  the original zxfer exit status
+  log, so concurrent failures need no lock; a new log is created 0600, a
+  hard-linked log is refused, and a log problem only warns and keeps the
+  original zxfer exit status
 
 ## Behavior Changes That May Surprise Old Automation
 
@@ -226,7 +240,17 @@ These are not removals, but they are common upgrade surprises.
 ### Error output is richer and more structured
 
 If you parse stderr, expect different output than `v1.1.7`. Current zxfer
-surfaces more context on non-zero exits.
+surfaces more context on non-zero exits. Each structured report names a
+`failure_stage`; a failure while planning a dataset, or in the re-plan,
+rollback or seed decision before its send, reports `replication` (a diverged
+destination that zxfer refuses reports `divergence reconciliation`).
+
+### `-o` is checked before any zfs command runs
+
+A property named twice in `-o` (even with the same value) or an item without
+`NAME=` is a usage error (exit 2) found during CLI validation, so it also
+stops a `-n` run. A `-o` property the source root lacks stops the run before
+the destination is read or changed.
 
 ### Runtime shared state under TMPDIR is narrower
 
@@ -235,7 +259,9 @@ directly, re-test it. Current zxfer no longer shares ssh sockets, ssh leases,
 or remote capability caches between processes:
 
 - ssh control sockets are short per-role files under the private per-run temp
-  root and are removed with that root at exit
+  root and are removed with that root at exit; when a long `TMPDIR` would
+  exceed the socket path limit, they sit in a private `zxfer.ssh.XXXXXX`
+  directory under `/dev/shm`, `/run/shm` or `/tmp`, also removed at exit
 - remote capability results are held in memory for the current invocation
 - `ZXFER_ERROR_LOG` appends take no lock and leave no lock directories
 
@@ -289,6 +315,15 @@ whether you still need it.
 - better remote capability probing and diagnostics
 - per-run ssh control sockets, in-memory remote capability state, and
   lock-free validated `ZXFER_ERROR_LOG` appends
+- faster large runs: each dataset is planned from its own slice of the
+  snapshot listings, `-P` no longer grows with the square of the dataset
+  count, and `-e` checks its backup file once
+- a destination that another tool changes after discovery is seen by the
+  next pass; only a dataset whose snapshots zxfer's own `-d` destroyed is
+  listed again before its send
+- `-T` discovery through plain `zfs list` calls over the control master,
+  and `-o` validated before any `zfs` command, with a repeated property
+  refused
 - repository reorganization into `docs/`, `examples/`, `man/`, and
   `packaging/`, plus a much broader documentation set
 - stronger VM-backed validation and expanded CI coverage

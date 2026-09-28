@@ -27,7 +27,7 @@ These tools are required by the installed `zxfer` command itself.
 | `/bin/sh` | interpreter for `zxfer` and `src/*.sh`, and the fixed shell for background jobs | script shebang; background job shells run `/bin/sh` by path | base system |
 | `zfs` | all replication, property, snapshot, and existence operations | resolved through the secure-PATH model locally; resolved per host remotely | base system on supported FreeBSD/OpenZFS installs |
 | `awk` | parsing, normalization, sorting helpers, report rendering, `ZXFER_ERROR_LOG` appends, and cache/index helpers | resolved through the secure-PATH model locally | base system |
-| `ps` | abort-only descendant discovery and process-start-token revalidation and, during abnormal teardown, a zombie check (`ps -o stat=`, or `-o s=` on illumos) | resolved through the secure-PATH model locally | base system |
+| `ps` | abort-only descendant discovery and process-start-token revalidation, the process-group check before a `setsid` launcher is signalled directly (`ps -o pgid=`) and, during abnormal teardown, a zombie check (`ps -o stat=`, or `-o s=` on illumos) | resolved through the secure-PATH model locally | base system |
 
 Notes:
 
@@ -48,7 +48,7 @@ These tools are only required when the corresponding feature is used.
 | `find` | listing the origin's backup storage directories for forwarded `-k` provenance | `-k` with `-O`, on the origin host, once per run, only when the source dataset already has a storage directory there | base system; do not add a package dependency |
 | `parallel` | explicit per-dataset source snapshot discovery for `-j > 1` | required on the executing origin host whenever `-j > 1` is requested (without `-O`, the local `parallel` is checked at startup, before any other work); zxfer intentionally validates only that a helper named `parallel` resolves through the secure-PATH model, then assumes the operator/package supplied a compatible implementation; the rendered pipeline uses GNU Parallel-style options and does not silently fall back to the serial recursive listing once `-j > 1` is requested | consider a package dependency if the port should guarantee `-j > 1` support out of the box |
 | `setsid` | background-job process-group isolation | optional; a working local `setsid` isolates background pipelines; verified shell job control is also supported without a controlling terminal (bash only: FreeBSD sh, dash and ksh93 cannot give a job its own group from a subshell, so without `setsid` they use the cleanup wrapper); a descendant-tracking cleanup wrapper is the fallback | usually a base or util-linux userland tool; do not make it a hard dependency unless packaging wants to require process-group isolation everywhere |
-| `zstd` | compressed send/receive streams and remote snapshot-discovery metadata compression | `-z` or default/custom `-Z` compression paths, including remote `-O ... -j ...` metadata discovery when ssh compression is active | consider a package dependency only if the port should guarantee compression support out of the box |
+| `zstd` | compressed send/receive streams and remote snapshot-discovery metadata compression | `-z` or default/custom `-Z` compression paths, including the `-O` source snapshot listings of the recursive no-op proof and of `-j` discovery when `-z` is active | consider a package dependency only if the port should guarantee compression support out of the box |
 | `svcadm` | migration/service handling | `-c` and `-m` on OmniOS/illumos systems | not a FreeBSD package dependency |
 | `kldstat`, `kldload`, `/dev/speaker` | audible status beeps | FreeBSD-only `-b` / `-B` path | base system and device availability; not a package dependency |
 
@@ -74,6 +74,7 @@ Current runtime inventory:
 - `cat`
 - `chmod`
 - `cksum`
+- `cmp`
 - `comm`
 - `cut`
 - `date`
@@ -89,21 +90,28 @@ Current runtime inventory:
 - `printf`
 - `ps`
 - `rm`
+- `rmdir`
 - `sed`
+- `sleep`
 - `sort`
-- `stat`
-- `tail`
+- `tee`
 - `tr`
 - `uname`
 
 On FreeBSD, these are expected from base and usually do not belong in
-`RUN_DEPENDS`.
+`RUN_DEPENDS`. zxfer reads owner, mode and inode with `ls -ldin` and does
+not run `stat`; [platforms.md](./platforms.md) lists the `ls` output it
+accepts.
 
 Remote helper scripts assume the same kind of base userland on the executing
-remote host. For example, the `-k` backup-metadata write on a `-T` host uses
-target-side POSIX `sh`, `mktemp`, `mv`, `rm`, and the resolved `cat`, all under
-the validated remote dependency `PATH`. `-T` destination discovery runs no
-script: it needs only the resolved target `zfs`.
+remote host, all under the validated remote dependency `PATH`. The capability
+probe runs `uname` on every `-O`/`-T` host. The `-k` backup-metadata write on
+a `-T` host uses target-side POSIX `sh`, `mkdir`, `chmod`, `id`, `ls`, `awk`,
+`mktemp`, `mv`, `rm`, and the resolved `cat`; an `-e` read on the `-O` host
+uses `id`, `ls`, `awk` and the resolved `cat`; and `-k` with `-O` lists the
+origin's storage directories with `find` when one already exists. `-T`
+destination discovery runs no script: it needs only the resolved target
+`zfs`.
 
 ## Direct Integration Harness Dependencies
 
@@ -196,6 +204,7 @@ These tools are used for development, CI, or local QA.
 
 The lint bootstrap script [run_lint.sh](../tests/run_lint.sh) requires:
 
+- `awk`
 - `curl`
 - `git`
 - `tar`
@@ -203,6 +212,7 @@ The lint bootstrap script [run_lint.sh](../tests/run_lint.sh) requires:
 - `perl`
 - `python3`
 - `sha256sum` or `shasum`
+- `xargs`
 
 It then bootstraps and runs these pinned tools:
 

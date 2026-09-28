@@ -25,8 +25,10 @@ should prioritize:
 
 - `zxfer`: entry point
 - `src/`: functional shell modules
-- `tests/`: shunit2 suites, coverage runner, the stable integration entry
-  point plus concern fragments, and the VM-backed integration matrix
+- `tests/`: shunit2 module and contract suites, the `validate.sh` front
+  door, the coverage runner, the argv fuzz and performance tools, the stable
+  integration entry point plus concern fragments, and the VM-backed
+  integration matrix
 - `docs/`: operator and contributor guides
 - `examples/`: runnable command templates for common workflows
 - `man/`: primary CLI reference (`zxfer.8`, `zxfer.1m`)
@@ -69,9 +71,10 @@ Run the pinned local lint stack:
 
 The lint stack includes the anti-rebloat budget gate
 (`./tests/run_lint.sh budget`), which checks only the sensitive-caller
-ratchets in `tests/budget_policy.tsv` (production `eval`, `$(date`,
-`mktemp`, and `zxfer_profile_now_ms` call sites); any other record kind
-fails the gate. There are no module, function, or test-file size ceilings and
+ratchets in `tests/budget_policy.tsv` (production `eval`, `$(date` and
+`mktemp` call sites, plus a `zxfer_profile_now_ms` row held at 0 so the
+removed forking clock helper cannot return); any other record kind fails
+the gate. There are no module, function, or test-file size ceilings and
 no machine-checked layering or ownership policy; collapsing modules and
 inlining single-caller wrappers is welcome.
 It also checks that `man/zxfer.1m` is the exact generated Solaris/illumos
@@ -163,6 +166,10 @@ end-to-end shell validation under the guest OS rather than only on the host:
 ./tests/run_vm_matrix.sh --profile local --test-layer shunit2
 ```
 
+A change to process groups, `ls` parsing or userland flags should pass the
+FreeBSD guest's unit layer before it is pushed
+(`--guest freebsd --test-layer shunit2`).
+
 For tighter development loops, prefer a single guest plus a named in-guest
 test selection before widening back out to the full local profile:
 
@@ -251,8 +258,9 @@ Good pull requests explain:
 
 GitHub Actions also runs an Ubuntu portable-shell matrix for `dash`,
 `bash --posix`, and `busybox ash` on every push, plus a non-blocking `posh`
-lane on pushes to `main`, and a separate non-blocking Docker-backed `kcov`
-coverage artifact job. The tool self-tests run only on the ubuntu-26.04 and
-macos-26 lanes. Local development does not require `kcov`, but shell-
-portability-sensitive changes should mention whether those CI lanes were
-considered.
+lane on pushes to `main` (it currently runs no tests; see
+[docs/testing.md](./docs/testing.md)), and a separate non-blocking
+Docker-backed `kcov` coverage artifact job. The tool self-tests run only on
+the ubuntu-26.04 and macos-26 lanes. Local development does not require
+`kcov`, but shell-portability-sensitive changes should mention whether those
+CI lanes were considered.

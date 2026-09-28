@@ -92,7 +92,9 @@ Use remote compression:
 - Per-run ssh control sockets and one in-memory remote capability probe per
   host and requested tool set per run (equal `-O` and `-T` specs share it);
   all run-private temp state lives under one 0700
-  per-run temp root removed in one pass at exit, and zxfer takes no
+  per-run temp root removed in one pass at exit (only the control sockets
+  move to a short private directory of their own when a long `TMPDIR` would
+  push their path past the socket path limit), and zxfer takes no
   cross-process locks (each `ZXFER_ERROR_LOG` report is one validated
   append-mode write)
 - Identity-aware recursive snapshot discovery with `name,guid` records, plus a
@@ -127,7 +129,9 @@ Use remote compression:
   machinery read 0)
 - `-x pattern`: exclude datasets from recursive replication
 - `-Y`: repeat replication until no sends or destroys are performed, or until
-  the built-in iteration cap is reached
+  the built-in iteration cap is reached; each pass lists the destination
+  afresh, so a destination that another tool changed after one pass's
+  discovery is seen by the next pass
 - `-z`: compress ssh send/receive streams with `zstd`
 - `-Z "command"`: replace the default `zstd` compressor command with a custom
   variant such as `zstd -T0 -3`
@@ -165,9 +169,11 @@ Platform caveats, host layouts, and compatibility notes live in
 ## Operational Notes
 
 zxfer rebuilds `PATH` from a trusted allowlist and resolves required helpers to
-absolute paths. Remote `zfs`, `cat`, `parallel` for `-j > 1`, and compression
-helpers are resolved per host instead of assuming the same binary path exists
-everywhere.
+absolute paths. Remote helpers are resolved per host instead of assuming the
+same binary path exists everywhere: `zfs` on every remote host, `parallel` on
+the origin for `-j > 1`, `cat` on the origin for `-e` and on the target for
+`-k`, and the compression helpers for `-z`. Destination discovery on a `-T`
+target needs nothing but `zfs`.
 Local-only runs do not resolve `ssh`; it is required when `-O` or `-T` needs a
 remote transport.
 
@@ -180,7 +186,11 @@ SSH control sockets and remote capability state are per-run only. Each
 invocation opens at most one control master per remote role under its private
 per-run temp directory, opens it before its first remote command (a `-T` host
 spec equal to the `-O` spec shares the origin master), multiplexes every
-remote command of the run over it, and closes it on exit. Remote
+remote command of the run over it, and closes it on exit. When a long
+`TMPDIR` would push a socket path past the `sun_path` limit (about 104
+bytes), the sockets go to a private `zxfer.ssh.XXXXXX` directory under the
+first safe default temp directory (`/dev/shm`, `/run/shm`, then `/tmp`)
+instead, which zxfer removes at exit. Remote
 helper discovery costs one capability probe round trip per host and
 requested tool set per run (a `-T` spec equal to the `-O` spec shares the
 origin's probe), held in memory and keyed by the host spec and requested

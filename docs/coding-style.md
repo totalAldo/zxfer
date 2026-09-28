@@ -27,6 +27,14 @@ The project priority order still applies:
 - Use `case` for multi-branch string dispatch instead of long `if` ladders when
   it improves readability.
 - Avoid subshells when state must persist in the current shell.
+- List characters explicitly in `case` patterns and globs (`[!0123456789]`,
+  not `[!0-9]`): bash 3.2, the macOS `/bin/sh`, matches a bracket range by
+  locale collation, so under a UTF-8 locale `[0-9]` also matches characters
+  such as U+2185.
+- A `VAR=value` prefix on a shell-function call does not reach the commands
+  the function runs on FreeBSD `sh` (unless `VAR` is already exported) or
+  ksh93. To hand a variable to them, export it in a subshell:
+  `( VAR=value; export VAR; some_function )`.
 
 ## File And Module Layout
 
@@ -49,10 +57,10 @@ The project priority order still applies:
   reused across the tree.
 - Reserve `*_state` for modules that own mutable caches or shared session
   state.
-- Reserve `*_runtime` for process lifecycle, temp resources, traps, and
-  cleanup.
-- Keep tests aligned with module ownership where practical:
-  `tests/test_<peer>.sh`.
+- Reserve `*_runtime` for temp resources and process cleanup.
+- Give each `src/zxfer_NAME.sh` one test entry, `tests/test_zxfer_NAME.sh`,
+  whose fragments live in `tests/suites/zxfer_NAME_TOPIC_tests.sh`; behavior
+  an operator sees belongs in the `tests/test_contract_*.sh` suites.
 
 ## Naming
 
@@ -95,9 +103,12 @@ The project priority order still applies:
 - Do not rely on implicit glob expansion.
 - When building commands, preserve argument boundaries rather than stitching
   together shell strings.
-- Reuse the centralized command-rendering and execution helpers in
-  [../src/zxfer_exec.sh](../src/zxfer_exec.sh) instead of adding new ad hoc
-  `eval` paths.
+- Reuse the argv renderers in
+  [../src/zxfer_quoting.sh](../src/zxfer_quoting.sh), the remote renderers
+  and runners in
+  [../src/zxfer_ssh_transport.sh](../src/zxfer_ssh_transport.sh), and the
+  execution helpers in [../src/zxfer_exec.sh](../src/zxfer_exec.sh) instead of
+  adding new ad hoc `eval` paths.
 - The only remaining production `eval` is the single hardened pipeline
   execution site in `zxfer_execute_rendered_shell_command()`. The
   `callers eval` ratchet in `tests/budget_policy.tsv` caps production `eval`
@@ -105,11 +116,13 @@ The project priority order still applies:
 - Treat `-O` / `-T` host specs and remote wrapper tokens as structured command
   inputs, not as plain hostnames.
 - Build substantial remote helper protocols as readable multiline POSIX `sh`
-  programs with explicit command terminators and focused golden coverage. For
-  the capability and backup directory/write protocol paths, collapse nonblank
-  renderer lines to one physical command line only at the SSH or dry-run
-  transport boundary, immediately before the explicit `sh -c` handoff
-  required to survive csh/tcsh login shells. Do not make transport collapse a
+  programs with explicit command terminators and focused golden coverage.
+  Hand them to the transport through `zxfer_build_remote_sh_c_command`, which
+  keeps a short one-line command plain and sends a longer or multi-line
+  program as quoted chunks that a fixed `sh` bootstrap reassembles, so a
+  csh/tcsh login shell never sees a raw newline or an overlong word. Only the
+  capability probe and the backup dry-run display join nonblank lines into
+  one line, and only at that transport boundary. Do not make line joining a
   general renderer API or apply it before configuration bytes have passed
   control-character checks.
 
@@ -195,8 +208,10 @@ The project priority order still applies:
   atomic rename is the security requirement. The runtime artifact layer is for
   artifacts owned by the validated runtime temp root and runtime-owned cache
   files, not for every atomic publish flow in the tree.
-- Register background PIDs and cleanup artifacts with the existing runtime
-  helpers.
+- Register short-lived background PIDs with `zxfer_register_cleanup_pid`
+  (send/receive jobs use the job registry in
+  [../src/zxfer_send_jobs.sh](../src/zxfer_send_jobs.sh)); files under the
+  run root need no registration.
 - Remove temporary files, FIFOs, queues, and cache directories on both success
   and failure paths unless they live under the per-run temp root, which the
   exit trap removes as a whole, or are intentionally preserved for debugging.
@@ -224,7 +239,7 @@ zxfer_get_temp_file() {
   strings are not source-level API helpers; document the enclosing builder
   function instead.
 - Add `Returns:` or `Side effects:` only when stdout contracts, exit-status
-  meaning, global mutation, locking, staging, or cleanup behavior would not be
+  meaning, global mutation, staging, or cleanup behavior would not be
   obvious from the function body and name alone.
 - Keep the block immediately above the function it documents.
 - Explain why the helper exists and where it fits in zxfer's flow, not just a
@@ -258,14 +273,18 @@ zxfer_get_temp_file() {
   `tests/helpers/*_fixtures.sh` files and must be sourced explicitly only by
   the suites that own those cases.
 - Keep fixtures explicit and local to the suite unless they are broadly useful.
-- Start an entry suite's `setUp` with `zxfer_test_reset_all_owner_state`, then
-  override only suite-specific values; move domain-specific preparation into
-  named fixture helpers.
+- Start an entry suite's `setUp` with `zxfer_test_reset_all_owner_state`
+  (directly or through a domain fixture's setup helper), then override only
+  suite-specific values; move domain-specific preparation into named fixture
+  helpers.
 - Stub `src/` functions inside a subshell so the stub cannot leak into later
   cases.
 - Capture a command's status (`l_run_status=$?`) on the line after it before
   asserting on it. In `assertEquals "... $(cat ERR)" 0 $?`, bash, ksh and zsh
   expand `$?` to the substitution's status, so the check always passes.
+- Put `./` before a test operand that starts with `-` (`mkdir ./-dash-dir`):
+  GNU and uutils utilities permute arguments, so they read `-dash-dir` as
+  options even after another operand.
 - Update integration expectations when behavior changes. Automated runs use
   the disposable VM matrix with a `smoke` or `local` profile; leave direct-host
   integration-harness execution to a human operator.
@@ -275,13 +294,17 @@ zxfer_get_temp_file() {
 When changing shell logic, run:
 
 ```sh
-./tests/run_shunit_tests.sh
-./tests/run_lint.sh
-ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh
+./tests/validate.sh quick [PATH...]
+./tests/validate.sh full
 ```
 
-When changing one area heavily, run the focused suite for that module first,
-then the full unit set before finishing.
+`quick` runs the budget check, the changed modules' entry suites and the
+contract suites; `full` runs the pinned lint stack (`./tests/run_lint.sh`),
+every unit suite (`./tests/run_shunit_tests.sh`) and report-only bash-xtrace
+coverage (`ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh`). When
+changing one area heavily, run its entry suite first
+(`./tests/run_shunit_tests.sh tests/test_zxfer_NAME.sh`), then the full unit
+set before finishing.
 
 ## Documentation Expectations
 

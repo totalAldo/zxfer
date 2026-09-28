@@ -22,6 +22,6 @@ Use this checklist as a focused review aid. Do not force every item into the fin
 
 ## Tests and Documentation
 
-- Require focused shunit2 coverage for changed helpers or public behavior.
-- Require lint and coverage policy consideration when shell logic or coverage tooling changes.
+- Require focused shunit2 coverage for changed helpers, and a `tests/test_contract_*.sh` case for operator-visible behavior; `tests/test_contract_failures.sh` must stay green when call order or error handling changes.
+- Require the lint stack, and a look at the report-only coverage output, when shell logic or coverage tooling changes.
 - Require docs, examples, man pages, packaging, workflow, or diagram updates when behavior, commands, defaults, or release expectations move.

@@ -66,9 +66,10 @@ This end-of-run profile now includes startup latency before the first live
 send/receive pipeline, trap-cleanup timing, stage timings, ssh/zfs invocation
 counts by role, runtime temp-file churn, command rendering, live destination
 snapshot rechecks, and any remaining direct remote helper probes. Counter
-keys are stable across releases: counters for deleted machinery (capability
-cache waits, cache-object writes, socket lock waits) still emit and always
-read 0. While the run is
+keys and their order are stable across releases: counters for deleted
+machinery (socket lock waits, capability cache waits and cache bootstraps,
+cache-object writes and readbacks, other-side property reads) still print and
+always read 0. While the run is
 active, `-V` also prints
 prefixed remote ssh commands, remote probe commands, and ssh control-socket
 check/open commands so a slow remote bootstrap shows the exact in-flight
@@ -86,9 +87,11 @@ measurement inside a disposable guest.
 ```
 
 Use this to preview rendered commands and preflight checks. Dry runs now stay
-strictly no-exec: they skip live helper resolution, snapshot discovery,
-backup-restore validation, unsupported-property detection, and `%%size%%`
-progress probes. Because strict dry-run no longer inspects live snapshot
+strictly no-exec: they skip ssh setup and remote helper validation (local
+helpers are still resolved at startup), snapshot discovery, backup-restore
+validation, unsupported-property detection, and `%%size%%` progress probes.
+The `-o` checks still run, so a malformed or repeated `-o` property stops a dry
+run too. Because strict dry-run no longer inspects live snapshot
 state, it does not render the eventual send/receive or property-reconcile
 commands. With `-k`, dry-run still previews secure backup-directory
 preparation without touching the live backup store; there is no metadata write
@@ -122,6 +125,9 @@ Replicates only `tank/apps/api`.
 ```sh
 ./zxfer -v -Y -R tank/data backup/data
 ```
+
+Each pass lists the source and destination afresh, so a destination that
+another tool changed after one pass's discovery is seen by the next pass.
 
 ### `-j jobs` Run concurrent send/receive jobs
 
@@ -219,6 +225,12 @@ that comma as `\,`:
 ./zxfer -v -o 'user:note=value\,with\,commas' -N tank/data/app backup/data/app
 ```
 
+Name each property once. A property named twice, as in
+`-o compression=lz4,compression=gzip`, or an item without `NAME=` is a usage
+error (exit 2) found before any `zfs` command runs, so it also stops a `-n`
+run. Every `-o` property must also exist on the source root; one that does not
+stops the run, with exit 2, before the destination is read or changed.
+
 ### `-I properties,to,ignore` Skip selected properties
 
 ```sh
@@ -251,7 +263,7 @@ before v2 source-root-relative property rows.
 
 ```sh
 ZXFER_BACKUP_DIR=/var/db/zxfer \
-./zxfer -v -e -R tank/data backup/restore-data
+./zxfer -v -e -R tank/data backup/data
 ```
 
 This looks up the current chunked lossless-keyed backup metadata path beneath
@@ -259,6 +271,12 @@ the source-dataset-relative tree under `ZXFER_BACKUP_DIR`, falls back read-only
 to the retired checksum-keyed v2 filename when the current path is absent,
 validates `#format_version:2`, then restores the matching source-root-relative
 row. `-e` also flows through the property-transfer path during the restore.
+The metadata is keyed by the source and destination of the `-k` run, so `-e`
+must name the same pair, as above; any other pair, including the reverse
+direction from the backup copy back to the original, stops with
+`Cannot find backup property file`. `-e` reads the metadata on the source
+side (the `-O` host with `-O`), while `-k` writes it on the destination side
+(the `-T` host with `-T`).
 Older mountpoint-local `.zxfer_backup_info.*` files and other legacy metadata
 layouts are intentionally unsupported.
 `ZXFER_BACKUP_DIR` must be a single-line absolute path without tabs or
@@ -288,15 +306,21 @@ escapes inside the value are rejected.
 ./zxfer -v -T backup-dst@example.com -R tank/data backup/data
 ```
 
+Destination discovery runs plain `zfs list` commands on the target, over the
+target's ssh control master when the local ssh supports one, so the target
+needs only `zfs` for it. If ssh itself fails during the destination snapshot
+listing, zxfer stops with ssh's exit status 255.
+
 ### `-z` Compress the ssh stream with the default `zstd -3`
 
 ```sh
 ./zxfer -v -z -T backup-dst@example.com -R tank/data backup/data
 ```
 
-`-z` requires either `-O` or `-T`. On remote-origin runs that also use
-`-j` source discovery, the same validated compression/decompression pipeline is
-reused for the source snapshot-list metadata stream.
+`-z` requires either `-O` or `-T`. On remote-origin runs, the source snapshot
+listings that run as one remote pipeline (the fast no-op proof's recursive
+listing and the `-j` per-dataset listing) are compressed with the same
+validated compression/decompression commands.
 
 ### `-Z command` Use a custom `zstd` compressor command
 
@@ -399,15 +423,18 @@ ZXFER_BACKUP_DIR=/var/db/zxfer \
 	-R tank/home backup/home
 ```
 
-### Property backup before an override, then restore to a new destination
+### Property backup before an override, then restore the original properties
 
 ```sh
 ZXFER_BACKUP_DIR=/var/db/zxfer \
-./zxfer -v -k -o 'mountpoint=/srv/restore,atime=off' -R tank/app backup/app
+./zxfer -v -k -o 'compression=gzip,atime=off' -R tank/app backup/app
 
 ZXFER_BACKUP_DIR=/var/db/zxfer \
-./zxfer -v -e -R tank/app backup/app-restored
+./zxfer -v -e -R tank/app backup/app
 ```
+
+The second run sets the source properties that the first one recorded on
+`backup/app/app` and its descendants, undoing the overrides.
 
 ### Local cutover migration with service disable, fresh snapshot, and property sync
 
@@ -431,11 +458,16 @@ ZXFER_BACKUP_DIR=/var/db/zxfer \
 - `-Z` also enables `-z`.
 - `-k` and `-e` cannot be combined.
 - `-k`, `-e`, and `-m` all imply `-P`.
+- Name each `-o` property once; a repeated property or an item without
+  `NAME=` is a usage error (exit 2).
 - `-b` and `-B` cannot be combined.
 - Avoid using `-O` and `-T` together unless you intentionally want the local
   host to relay traffic between two remote systems.
-- Options that take arguments should not be glued to later flags. Use
-  `-vFd -R tank/src backup/dst`, not `-vFdR tank/src backup/dst`.
+- An option that takes an argument must end its cluster:
+  `-vFdR tank/src backup/dst` works, but in `-Rv tank/src backup/dst`
+  getopts takes `v` as the `-R` source and `tank/src` becomes the
+  destination. Giving such options separately, as in
+  `-vFd -R tank/src backup/dst`, avoids the mistake.
 
 ## Related References
 

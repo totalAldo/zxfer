@@ -109,8 +109,7 @@ user having to make a note of what those original properties were.
 .PP
 \fBzxfer\fR
 requires privileges sufficient for the requested
-zfs(8),
-zpool(8),
+zfs(8)
 and
 ssh(1)
 operations. In practice this often means root, delegated ZFS privileges, or a
@@ -120,10 +119,13 @@ or
 \(lqdoas\(rq,
 depending on platform and workflow.
 .PP
-Note that at present, the usage of spaces in
+Dataset names that contain spaces are supported where
 zfs(8)
-filesystem names is NOT supported. There is no plan to support it without
-someone else doing the coding or a good funding proposal coming my way.
+accepts them:
+\fBzxfer\fR
+passes each name to
+zfs(8)
+as one argument, locally and over ssh.
 .SH "DISCLAIMER/WARNING"
 You MUST read, understand and agree to the disclaimer in the BSD license
 before applying any of these examples or using
@@ -156,19 +158,22 @@ replication workflow managed by
 \fBzxfer\fR.
 Unless noted otherwise the semantics apply uniformly across all invocations.
 .PP
-Please note that options with arguments (e.g. -R, -N
-and the like) can not be concatenated after other options.
+Please note that an option with an argument (e.g. -R, -N
+and the like) must come last when options are concatenated.
 (e.g. -vFdR
 \fIsource\fR
 \fIdestination\fR
-will fail. You should use instead:
+works, but in -Rv
+\fIsource\fR
+\fIdestination\fR
+getopts takes v as the argument of -R, and
+\fIsource\fR
+becomes the destination.
+Giving such options separately avoids the mistake:
 -vFd -R
 \fIsource\fR
 \fIdestination\fR
 )
-Otherwise this will confuse getopts and
-zfs(8)
-will complain that "dataset already exists".
 .PP
 The options are as follows:
 .TP 8n
@@ -176,12 +181,13 @@ The options are as follows:
 Small (b)eep mode. Play a failure tune before exit with failure
 so that you don't have to monitor
 the terminal to know when a lengthy backup or restore finishes.
-(This is not as yet supported in (Open) Solaris.)
-To save insult being added to injury, the failure beep will not play
-during errors that
+(This needs the FreeBSD
+speaker(4)
+device; on other systems
 \fBzxfer\fR
-discovers in the initialization phase, beeps will only occur if an error
-has the possibility of occurring after significant time has elapsed.
+skips the beep.)
+The failure beep also plays for usage errors found after the options are
+parsed.
 .TP 8n
 \fB\-B\fR
 Large (B)eep mode. Similar to (b) but suitable for use at the end of a script.
@@ -192,7 +198,33 @@ should use -B.
 .TP 8n
 \fB\-e\fR
 R(e)store property mode. This restores all filesystem properties from the
-backup file mentioned in the previous option.
+backup file that
+[\fB\-k\fR]
+wrote for the same source and destination: after
+\fBzxfer\fR \fB\-k\fR \fB\-R\fR \fItank/src backup/dst\fR,
+\fBzxfer\fR \fB\-e\fR \fB\-R\fR \fItank/src backup/dst\fR
+sets the source properties that run recorded on
+\fIbackup/dst/src\fR
+and its descendants as
+[\fB\-P\fR]
+would, undoing
+[\fB\-o\fR]
+overrides of the properties
+[\fB\-P\fR]
+transfers. A run with another source or destination does not find that file
+and stops with
+\(lqCannot find backup property file\(rq.
+\fB\-e\fR
+reads the file on the source side (the
+[\fB\-O\fR]
+host with
+[\fB\-O\fR]),
+while
+[\fB\-k\fR]
+writes it on the destination side (the
+[\fB\-T\fR]
+host with
+[\fB\-T\fR]).
 .sp
 A word of warning:
 In order to allow the restoration of filesystems within the hierarchy,
@@ -452,20 +484,48 @@ judged that it would not make sense to try and transfer them. They are:
 \fIusedbydataset\fR,
 \fIusedbychildren\fR,
 \fIusedbyrefreservation\fR,
-\fIversion\fR,
 \fIvolsize\fR,
-\fImountpoint\fR.
-There are several properties that may be unsupported on some platforms and hence will
+\fImountpoint\fR
+(transferred with
+[\fB\-m\fR]),
+\fImlslabel\fR,
+\fIkeysource\fR,
+\fIkeystatus\fR,
+\fIrekeydate\fR,
+\fIencryption\fR,
+\fIencryptionroot\fR,
+\fIkeylocation\fR,
+\fIkeyformat\fR,
+\fIpbkdf2iters\fR,
+\fIsnapshots_changed\fR,
+\fIspecial_small_blocks\fR,
+\fIrefcompressratio\fR,
+\fIwritten\fR,
+\fIlogicalused\fR,
+\fIlogicalreferenced\fR,
+\fIcreatetxg\fR,
+\fIguid\fR,
+\fIorigin\fR,
+\fIfilesystem_count\fR,
+\fIsnapshot_count\fR,
+\fIclones\fR,
+\fIdefer_destroy\fR,
+\fIreceive_resume_token\fR,
+\fIuserrefs\fR,
+\fIobjsetid\fR.
+There are several properties that may be unsupported on FreeBSD and hence will
 not be transferred via
-\fBzxfer\fR,
+\fBzxfer\fR
+to a FreeBSD destination,
 they are:
-\fIidevices\fR,
 \fIaclmode\fR,
 \fIaclinherit\fR,
+\fIdevices\fR,
 \fInbmand\fR,
 \fIshareiscsi\fR,
 \fIvscan\fR,
-\fIxattr\fR.
+\fIxattr\fR,
+\fIdnodesize\fR.
 .TP 8n
 \fB\-v\fR
 (v)erbose mode.
@@ -479,22 +539,27 @@ of the destination. Requires -m.
 \fB\-d\fR
 (d)elete snapshots on the destination that are absent on the source. This may
 be necessary to function properly anyway, in a similar fashion to
+[\fB\-F\fR].
+This will occur if you are using
+\fBzxfer\fR
+for routine backups and in the interim, culling snapshots on the source.
+The snapshot corresponding to the most recent snapshot on the destination
+often gets deleted on the source. Any snapshots on the destination more
+recent than the most recent common snapshot must be deleted for
+\fBzfs send\fR
+to work.
 .sp
 \fBzxfer\fR
-batches those snapshot deletions into background
+deletes a dataset's stale snapshots with one
 zfs(8)
 \fBdestroy\fR
-commands so replication can continue while snapshots are removed. The background
-jobs are tied to the lifetime of
-\fBzxfer\fR:
-its EXIT trap kills any remaining destroy processes when the main script
-terminates so snapshot deletes never run unattended. If
+command and waits for it to finish before it transfers that dataset's
+properties and snapshots. A dataset whose snapshots it deleted is listed again
+before its send, and with
+[\fB\-F\fR],
+when the deleted snapshots were newer than the last common snapshot,
 \fBzxfer\fR
-exits before the kernel finishes destroying the targeted snapshots, rerun
-\fBzxfer\fR
-with
-\fB\-d\fR
-to resume cleanup and finish removing the stale datasets.
+rolls the destination back to that snapshot before the send.
 .TP 8n
 \fB\-D\fR
 \fBzxfer\fR
@@ -536,14 +601,6 @@ Example:
 .sp
 \fBzxfer\fR
 \fB\-O\fR \fIuser@host\fR \fB\-D\fR \fI'bar -s %%size%%'\fR \fB\-R\fR \fIsource destination\fR
-This will occur if you are using
-\fBzxfer\fR
-for routine backups and in the interim, culling snapshots on the source.
-The snapshot corresponding to the most recent snapshot on the destination
-often gets deleted on the source. Any snapshots on the destination more
-recent than the most recent common snapshot must be deleted for
-\fBzfs send\fR
-to work.
 .RE
 .TP 8n
 \fB\-F\fR
@@ -666,8 +723,12 @@ receive concurrently, and its ready queue skips blocked descendants to start
 later independent datasets while job slots remain.
 .TP 8n
 \fB\-m\fR
-After sending all snapshots, (m)igrate the source to the destination filesystem by
-unmounting the source filesystem and changing the new filesystem's
+(M)igrate the source to the destination filesystem:
+\fBzxfer\fR
+unmounts the source filesystems (every one must be mounted), takes the
+snapshot of
+[\fB\-s\fR],
+sends all snapshots, and changes the new filesystem's
 mountpoint to that of the source. This option includes -s. It also includes
 -P. Note that
 \fBzxfer\fR
@@ -686,7 +747,7 @@ With
 these migration preflight steps are previewed only.
 .TP 8n
 \fB\-N\fR
-Replicate the listed filesystem. Note the provisos listed above in
+Replicate the listed filesystem. Note the provisos listed under
 [\fB\-R\fR].
 It works similarly but is (N)ot recursive.
 e.g.  specifying -N
@@ -698,7 +759,10 @@ will transfer only
 Exclude any datasets whose names match the supplied regular expression from
 the recursive replication list. The pattern is passed to
 grep(1)
-\fB\-v\fR,
+\fB\-v\fR
+for dataset lists and matched by
+awk(1)
+against the dataset part of each snapshot record,
 so be sure to escape shell metacharacters or provide quotes where appropriate.
 Useful when a recursive send should omit scratch datasets or other prefixes.
 To exclude only
@@ -720,9 +784,13 @@ a command is sent over ssh). You must have
 \fBzxfer\fR
 on your local machine. The remote host must support
 zfs(1),
-and so does your local machine if
+and
+\fBzxfer\fR
+also requires
+zfs(8)
+on your local machine at startup, even when
 [\fB\-T\fR]
-is not also used.
+is also used.
 .sp
 This fork is exercised across current OpenZFS 2.0+ environments on maintained
 FreeBSD branches, Linux with OpenZFS, supported OmniOS/illumos trains, and
@@ -831,8 +899,19 @@ quotes and spacing exactly:
 .sp
 e.g. -T "user1@192.168.0.1 pfexec"
 .sp
-Like
-[\fB\-O\fR],
+Destination discovery on the target runs the same
+\fBzfs list\fR
+commands as for a local destination, each over the target's ssh control
+master when the local ssh supports control sockets, so it needs no helper on
+the target but
+zfs(8).
+If ssh itself fails while the destination's snapshots are listed (exit status
+255, a lost connection included),
+\fBzxfer\fR
+prints ssh's message, reports
+\(lqFailed to retrieve snapshot list from the destination.\(rq
+and exits with status 255, without probing the dataset over the failed
+connection.
 .TP 8n
 \fB\-U\fR
 Skip replicating any properties that are not supported by the destination.
@@ -852,9 +931,11 @@ profiling counters plus startup latency, trap-cleanup timing, and accumulated
 stage timings for ssh setup, snapshot listing, and diff/sort hot paths, along
 with runtime temp-file counts, command-rendering counts, live destination
 snapshot recheck counts, ssh/zfs invocation counts by role, and direct remote
-helper-probe counters. Counter keys are stable across releases; counters for
-machinery that no longer exists (capability cache waits, cache-object writes,
-socket lock waits) still emit and always read 0. While the run is active it also prints prefixed live
+helper-probe counters. Counter keys and their order are stable across
+releases; counters for machinery that no longer exists (socket lock waits,
+capability cache waits and cache bootstraps, cache-object writes and
+readbacks, other-side property reads) still print and always read 0. While
+the run is active it also prints prefixed live
 remote ssh commands, remote probe commands, and any ssh control-socket
 check/open commands before each execution so slow startup or remote-probe phases are
 visible in real time.
@@ -864,11 +945,13 @@ uses zfs ra(w) send mode
 .TP 8n
 \fB\-Y\fR
 (Y)ield after no zfs send or zfs destroy commands are executed or 8 iterations
-have been performed, whichever comes first.
+have been performed, whichever comes first. Each iteration lists the source
+and destination afresh, so a destination that another tool changed after one
+iteration's discovery is seen by the next.
 .TP 8n
 \fB\-z\fR
-Pipe the send stream through zstd -3 compression and then decode it at the
-remote side using zstd -d. This option requires either
+Pipe the send stream through zstd -3 compression and then decode it on the
+receiving side using zstd -d. This option requires either
 [\fB\-O\fR]
 or
 [\fB\-T\fR]
@@ -886,11 +969,15 @@ to
 zfs send dataset@snap1 | zstd -3 | ssh user@host zstd -d | /sbin/zfs receive destination
 .RE
 .sp
-Remote source snapshot-list metadata discovery
-(\fB\-O\fR with \fB\-j\fR and \fB\-z\fR)
-uses the selected compression/decompression pipeline when ssh is active,
-including the remote parallel source-discovery path before zxfer decides
-whether any snapshots actually need transfer.
+With
+\fB\-O\fR,
+the source snapshot listings that run as one remote pipeline, the fast
+no-op proof's recursive listing and the
+\fB\-j\fR
+per-dataset listing, are also compressed on the origin and decoded locally;
+the serial listing of a run without
+\fB\-j\fR
+is not.
 .RE
 .TP 8n
 \fB\-Z\fR
@@ -968,8 +1055,10 @@ copying across the properties of each filesystem
 .TP 4n
 \fB\(bu\fR
 [\fB\-k\fR]
-storing the original filesystem properties in the file
-\fIbackup01/pools/.zxfer_backup_info.storage\fR
+storing the original filesystem properties in backup metadata under
+\fBZXFER_BACKUP_DIR\fR
+(see
+[\fB\-k\fR])
 .TP 4n
 \fB\(bu\fR
 [\fB\-F\fR]
@@ -1048,7 +1137,7 @@ make sure that there is a new pool named
 to copy the backup to. Then we would issue the following command:
 .PP
 \fBzxfer\fR
-\fB-deFPv -R backup01/pools/storage/ storage\fR
+\fB-dFPv -R backup01/pools/storage/ storage\fR
 .PP
 Note that the trailing slash enables us to copy the backed-up root filesystem
 directly to the pool level, and then the child filesystems below that, which
@@ -1056,7 +1145,19 @@ is where we want them. If the pool name is to be changed,
 the command becomes:
 .PP
 \fBzxfer\fR
-\fB-deFPv -R backup01/pools/storage/ newpoolname\fR
+\fB-dFPv -R backup01/pools/storage/ newpoolname\fR
+.PP
+This copies the properties of the backup, including overrides such as the
+\fIcopies\fR
+and
+\fIcompression\fR
+of Ex2.
+[\fB\-e\fR]
+cannot bring back the original properties that Ex1 recorded here: it reads
+only the file that
+[\fB\-k\fR]
+wrote for the same source and destination (see
+[\fB\-e\fR]).
 .SS "Ex4 - Backup a filesystem"
 We might want to just backup a filesystem within a pool. That is easily done:
 .PP
@@ -1075,10 +1176,11 @@ to an
 [\fB\-R\fR].
 .SS "Ex5 - Restore a filesystem"
 To restore the filesystem backed up in Ex4, we would do so using the
-following command:
+following command (see Ex3 about
+[\fB\-e\fR]):
 .PP
 \fBzxfer\fR
-\fB-deFPv -N backup01/filesystems/home storage\fR
+\fB-dFPv -N backup01/filesystems/home storage\fR
 .SS "Ex6 - Migrate a filesystem"
 We might want to migrate a filesystem (including properties).
 Note that this is only allowable when the original mountpoint is
@@ -1162,11 +1264,13 @@ Here is the command:
 \fB-dFkPv -o copies=2,compression=lzjb -T root@192.168.123.1 -R storage backup01/pools\fR
 .SS "Ex10 - Restore a pool from a remote host"
 Use the following command, assuming that you are restoring from a situation as
-in Ex9. Again, if using Solaris refer to
+in Ex9 (see Ex3 about
+[\fB\-e\fR]).
+Again, if using Solaris refer to
 [\fB\-O\fR].
 .PP
 \fBzxfer\fR
-\fB-deFPv -O root@192.168.123.1 -R backup01/pools/storage/ storage\fR
+\fB-dFPv -O root@192.168.123.1 -R backup01/pools/storage/ storage\fR
 .SH "ENVIRONMENT"
 .TP 37n
 \fBZXFER_BACKUP_DIR\fR
@@ -1311,7 +1415,19 @@ when available and falls back to the system temporary directory.
 .sp
 Current releases keep ssh control sockets and remote capability state per run:
 each invocation opens at most one control master per remote role, before its
-first remote command, under its private per-run temp directory, probes each remote host's capabilities once
+first remote command, under its private per-run temp directory (or, when a
+long
+\fBTMPDIR\fR
+would push a socket path past the
+\fIsun_path\fR
+limit, in a private
+\fIzxfer.ssh.XXXXXX\fR
+directory under the first safe of
+\fI/dev/shm\fR,
+\fI/run/shm\fR
+and
+\fI/tmp\fR),
+probes each remote host's capabilities once
 per host spec and requested tool set (equal
 \fB\-O\fR
 and
@@ -1373,10 +1489,22 @@ only when you deliberately want those last two fields emitted verbatim for
 local debugging.
 .SH "EXIT VALUES"
 \fBzxfer\fR
-exits 0 on success and 2 if a command line option is incorrect. Runtime
-failures exit with the original non-zero status reported by the failing helper
-or command; zxfer-created validation failures that have no lower-level status
-exit 1.
+exits 0 on success and 2 on a usage error, such as an incorrect command line
+option, an
+\fB\-o\fR
+property the source lacks, or a snapshot that
+\fB\-g\fR
+protects. Runtime failures exit non-zero: with the failing command's own
+status where
+\fBzxfer\fR
+passes it on (for example a failed discovery listing or
+\fBzfs destroy\fR,
+a failed
+\fB\-j\fR
+send/receive job, or 255 when ssh fails during a discovery listing), and
+with 1 otherwise, as for a failed send/receive pipeline without
+\fB\-j\fR
+and for zxfer-created validation failures that have no lower-level status.
 If
 \fBzxfer\fR
 receives HUP, INT, QUIT, or TERM, it runs its normal cleanup, prints one

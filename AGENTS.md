@@ -76,8 +76,9 @@ A change is complete only when it:
 
 - Start with `rg`, the focused diff, and the smallest set of relevant source,
   test, and documentation files. Read `README.md`, `CHANGELOG.txt`, the relevant
-  man page or example, the changed modules, and peer `tests/test_*.sh` coverage
-  before changing shipped behavior.
+  man page or example, the changed modules, their `tests/test_zxfer_<module>.sh`
+  entry suites, and the `tests/test_contract_*.sh` suites before changing
+  shipped behavior.
 - Read `docs/testing.md` for validation changes, `docs/platforms.md` for
   compatibility work, `docs/architecture.md` for module/state ownership,
   `SECURITY.md` for trust-boundary changes, and `KNOWN_ISSUES.md` when resolving
@@ -112,9 +113,10 @@ A change is complete only when it:
   authority for the launcher, partial-load validation, and direct-sourcing
   tests.
 - Before reimplementing a guardrail, inspect the concern-specific modules in
-  `src/`, especially reporting, execution, dependency resolution, path
-  security, locking, runtime lifecycle, secure staging, error logging, remote
-  hosts, snapshot state, property policy/state, and backup storage/metadata.
+  `src/`, especially reporting (which owns the `ZXFER_ERROR_LOG` append),
+  quoting, execution, dependency resolution, path security, runtime
+  lifecycle, ssh transport, remote hosts, destination state, property
+  state/transfer, and backup metadata.
 - Major source modules need a short `Module contract` header covering owned and
   read globals, cache mutation, and stdout returns. Top-level functions use the
   structured `Purpose:` and `Usage:` comments plus `Returns:` or `Side effects:`
@@ -152,9 +154,9 @@ A change is complete only when it:
   `ZXFER_SECURE_PATH_APPEND` behavior locally and over `-O` / `-T`. Feature-test
   optional dependencies and platform-varying tool flags.
 - Allocate temporary files, FIFOs, and private directories through the per-run
-  0700 temp-root and secure-staging helpers. Do not add redundant per-file
-  cleanup when trap-exit owns the root, and do not weaken ownership, symlink,
-  hard-link, permission, or atomic-publication checks.
+  0700 temp-root helpers. Do not add redundant per-file cleanup when trap-exit
+  owns the root, and do not weaken ownership, symlink, hard-link, permission,
+  or atomic-publication checks.
 - Never add telemetry, network endpoints, raw-device integration paths, or new
   `sudo`/privilege requirements without an explicit design and user approval.
 
@@ -182,11 +184,12 @@ A change is complete only when it:
 - Use `./tests/validate.sh quick [PATH...]` for the first host-safe feedback
   loop. It runs only offline budget and mapped unit checks while printing wider
   integration, performance, and documentation recommendations.
-- During shell iteration, run the closest peer suites with
-  `./tests/run_shunit_tests.sh tests/test_<area>.sh`. Before handoff for shell
-  logic, tests, or validation tooling, run `./tests/validate.sh full`; it is the
-  discoverable front door for the pinned lint stack, full shunit2 suite, and
-  report-only bash-xtrace coverage.
+- During shell iteration, run the changed module's entry suite and the
+  contract suites with
+  `./tests/run_shunit_tests.sh tests/test_zxfer_<module>.sh tests/test_contract_*.sh`.
+  Before handoff for shell logic, tests, or validation tooling, run
+  `./tests/validate.sh full`; it is the discoverable front door for the pinned
+  lint stack, full shunit2 suite, and report-only bash-xtrace coverage.
 - For documentation-only changes, prefer `git diff --check`, link/command
   inspection, and rendered-structure review. Use `./tests/validate.sh docs` when
   spelling, workflow, or budget checks are relevant; it may populate the pinned

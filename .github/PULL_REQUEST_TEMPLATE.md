@@ -9,7 +9,7 @@ If this change touches CI or coverage tooling, explain that here.
 - [ ] `./tests/run_lint.sh`
 - [ ] `./tests/run_shunit_tests.sh`
 - [ ] `ZXFER_COVERAGE_MODE=bash-xtrace ./tests/run_coverage.sh` when shell logic, tests, or coverage tooling changed
-- [ ] targeted suites for edited modules
+- [ ] `./tests/validate.sh quick` for the edited paths (their entry suites plus the contract suites)
 - [ ] integration tests, if safe and relevant
 - [ ] `./tests/run_microbench.sh` and `./tests/run_perf_ab.sh --baseline-ref main` (host-safe) when performance-sensitive behavior changed; `./tests/run_vm_matrix.sh --test-layer perf` / `perf-compare` for real pools
 - [ ] GitHub Actions test matrix passes (including FreeBSD and OmniOS/illumos VMs)

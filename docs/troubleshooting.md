@@ -23,7 +23,35 @@ What to check:
 - `ZXFER_SECURE_PATH_APPEND`
 - every trusted directory needed for later bare helper invocations
 - whether either secure-PATH value contains a tab, carriage return, or newline
-- remote `zfs`, `ssh`, `cat`, `parallel`, or `zstd` availability
+- local `ssh` and remote `zfs`, `cat`, `parallel`, or `zstd` availability
+
+## Property Override (`-o`) Errors
+
+Examples:
+
+```text
+Error: Duplicate property for -o override: compression.
+Error: Invalid option property - check -o list for syntax errors.
+Error: Missing source property for -o override: user:note.
+```
+
+What it usually means:
+
+- a property is named twice in `-o`, even with the same value, as in
+  `-o compression=lz4,compression=gzip`; `zfs` refuses a property given twice
+  too, so name each property once
+- an item has no `NAME=` part, as in `-o compression`, or a value holds a
+  comma that is not escaped as `\,`, which splits it into a second item
+- the source root does not have the named property (a typo, or a user
+  property set only below the root)
+
+All three are usage errors: zxfer prints the usage text and exits 2 with
+`failure_class: usage`. The first two are found during CLI validation
+(`failure_stage: cli validation`), before any `zfs` command runs, so they also
+stop a `-n` run; the third is reported once the source properties are read,
+before the destination is read or changed (`failure_stage: property
+transfer`). `Failed to plan dataset properties.` is different: the property
+plan program itself failed, so check the stderr lines before it.
 
 ## Remote Dependency Probe Failures
 
@@ -83,15 +111,48 @@ What to inspect:
 - source-side snapshot listing path
 - whether `-V` shows the exact `Running remote probe [...]` or `Running remote
   command [...]` line for the failing discovery step
-- whether `-V` shows source-discovery startup staying on cached capability
-  data, waiting on an in-run cache fill, or falling back to a direct remote
-  helper probe path
+- whether `-V` shows source-discovery startup reusing the in-memory
+  capability answer or falling back to a direct remote helper probe
 - any shell quoting problems on the remote host
 - whether the source snapshot output file was empty or unreadable, and whether
   the paired staged stderr file contains the original `zfs list`, `parallel`,
   remote helper, or compression error
 - temp-root permissions if the failure points at launching the background
   helper or registering the cleanup PID rather than the `zfs list` itself
+
+## Destination Discovery Failures
+
+Examples:
+
+```text
+Failed to retrieve snapshot list from the destination.
+Failed to determine whether destination dataset [backup/dst] exists: ...
+Failed to retrieve list of datasets from the destination: ...
+Destination dataset [backup/dst] is missing and destination pool [backup] could not be listed: ...
+```
+
+What it usually means:
+
+- a destination `zfs list` failed: zxfer prints its stderr before
+  `Failed to retrieve snapshot list from the destination.`, and the other
+  messages carry the stderr of the listing or probe that failed. After a
+  failed snapshot listing, an exact `zfs list -H` probe decides whether the
+  destination is merely missing (a first run creates it)
+- with `-T`, ssh itself failed (exit status 255, a lost connection
+  included): the destination is listed with plain `zfs list` commands over
+  the target's ssh control master, and a listing that ssh could not deliver
+  stops the run with status 255, without probing the dataset over that
+  connection
+- the destination root does not exist and its pool cannot be listed either,
+  for example a mistyped pool name
+
+What to inspect:
+
+- the stderr lines before the message, the failure report's `exit_status`,
+  and `last_command`
+- direct `ssh` connectivity to the target and whether its `zfs` resolves
+  under the secure PATH; discovery needs no other helper on the target
+- whether the destination pool exists
 
 ## Destination Divergence Warnings And Failures
 
@@ -206,11 +267,16 @@ What to inspect:
 - whether the job reported an actual pipeline failure or lacked valid
   completion data
 
+Without `-j`, each send/receive pipeline runs in the foreground: a failure
+prints the `zfs` messages, then `Error when executing command.`, and zxfer
+exits 1 with `failure_stage: send/receive`.
+
 ## Performance Harness Results
 
 `tests/run_perf_tests.sh` is informative first. Baseline regressions write
-warnings and `compare.tsv`, but they do not fail the run. A non-zero harness
-exit means setup, zxfer execution, cleanup, or replication correctness failed.
+a warning, `compare.tsv` and `compare.md`, but they do not fail the run. A
+non-zero harness exit means setup, zxfer execution, cleanup, or replication
+correctness failed.
 
 What to inspect:
 
@@ -247,13 +313,19 @@ Cannot find backup property file
 Or:
 
 ```text
-... backup metadata file is not owned by root or the effective UID ...
+Refusing to use backup metadata PATH because it is owned by UID 1001 instead of root (UID 0) or UID 1000.
 ```
 
 What it usually means:
 
 - `ZXFER_BACKUP_DIR` does not contain the expected current chunked
   lossless-keyed metadata path or the retired checksum-keyed v2 fallback file
+- `-e` names another source or destination than the `-k` run did: the file is
+  keyed by that pair, so a restore from the backup copy back to the original
+  (the reverse direction) finds nothing
+- the file is on the other host: `-e` reads it on the source side (the `-O`
+  host with `-O`), while `-k` writes it on the destination side (the `-T` host
+  with `-T`)
 - the keyed file exists but does not contain a current-format v2 relative row
   for the requested source under `#source_root` / `#destination_root`
 - secure file ownership / mode checks rejected the metadata
@@ -316,7 +388,7 @@ failure_class: runtime
 failure_stage: send/receive
 source_root: tank/src
 destination_root: backup/dst
-last_command: '/sbin/zfs' 'send' ...
+last_command: [redacted]
 zxfer: failure report end
 ```
 
@@ -344,10 +416,13 @@ use them, and any left behind can be removed once no older zxfer is running.
 Current ssh control sockets and remote capability state are per-run instead of
 shared. If you inspect a live run's temp root while debugging startup or
 cleanup, expect at most short `ssh-<role>.sock` control sockets owned by that
-invocation; remote helper capabilities are held in memory and have no cache or
-lock files. Older shared ssh lease directories, pid-only socket locks, and
-remote capability-cache lock roots from pre-per-run branch builds are stale
-artifacts rather than current zxfer state. When the local ssh supports
+invocation (with a `TMPDIR` long enough to push a socket path past the
+`sun_path` limit, they sit in a private `zxfer.ssh.XXXXXX` directory under
+`/dev/shm`, `/run/shm` or `/tmp` instead, removed at exit); remote helper
+capabilities are held in memory and have no cache or lock files. Older shared
+ssh lease directories, pid-only socket locks, and remote capability-cache lock
+roots from pre-per-run branch builds are stale artifacts rather than current
+zxfer state. When the local ssh supports
 control sockets, an unreachable or refusing `-O`/`-T` host fails at startup,
 after ssh's own diagnostic, with "Error creating ssh control socket for origin
 host." (or target host).

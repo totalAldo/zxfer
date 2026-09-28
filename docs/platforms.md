@@ -12,7 +12,7 @@ zxfer is intended to work with current OpenZFS 2.0+ environments:
 For releases published after 2026-05-01, zxfer follows maintained FreeBSD
 branches. The current FreeBSD baseline is 14.4+ on the stable/14 line and
 15.0+ on the stable/15 line. FreeBSD 13.5 and the stable/13 branch reached
-end of life on 2026-04-30, and FreeBSD 14.3 reaches upstream end of life on
+end of life on 2026-04-30, and FreeBSD 14.3 reached upstream end of life on
 2026-06-30. This codebase does not guarantee support for FreeBSD 14.3,
 FreeBSD 13.x, or other end-of-life FreeBSD releases. Reports from EOL systems
 can still be useful historical context, but fixes are prioritized only when
@@ -29,6 +29,11 @@ Failure-report and `-v` command quoting prints plain printable tokens without
 spawning `awk` or `sed` only when the shell's `case` patterns support
 `[[:print:]]`; zxfer checks this once at load, and shells without that support
 (such as `posh`) keep the `awk`/`sed` escaping path for every token.
+bash 3.2, macOS's `/bin/sh`, and ksh93 on macOS match a bracket range such
+as `[0-9]` in a `case` pattern by locale collation, so under a UTF-8 locale
+zxfer's digit checks accept some non-ASCII characters (see
+[../KNOWN_ISSUES.md](../KNOWN_ISSUES.md)); dash, bash 5 and zsh compare code
+points. The test tooling spells out its character lists instead.
 Pre-OpenZFS 2.0 behavior, Solaris Express-era property profiles, and older
 backup metadata layouts are intentionally outside the supported platform
 surface.
@@ -111,6 +116,25 @@ derivation if it contains one of those three bytes. This validation happens
 before readable remote programs are converted to their one-line transport
 form, so login-shell compatibility cannot translate configured path bytes.
 
+## Path Checks
+
+Local path checks (the run root and `TMPDIR`, backup metadata, and
+`ZXFER_ERROR_LOG`) read owner, mode and inode from `ls -ldin`, not `stat`.
+zxfer reads only the first four fields, which POSIX gives `ls -l` and which
+GNU coreutils, uutils (Ubuntu 26.04), FreeBSD, macOS, illumos and BusyBox
+print alike: the inode (BusyBox and illumos pad it with blanks), the mode
+string, the link count and the numeric owner. The mode string may end in one
+alternate-access character (`+` for an ACL, `@` for macOS extended
+attributes, `.` for an SELinux context), and illumos writes `l` for
+set-group-ID without group execute; a line without those four fields is
+refused. The octal mode keeps the set-user-ID, set-group-ID and sticky bits
+on every platform, so a backup metadata file or `ZXFER_ERROR_LOG` that is
+0600 plus one of them is refused on FreeBSD and macOS as on Linux, and a run
+root under a set-group-ID `TMPDIR` (mode 2700) is accepted. The
+`ZXFER_ERROR_LOG` link-count check reads field 2 of `ls -ldn`, and the
+remote backup programs read the owner from field 3 of `ls -ldn` on the
+remote host.
+
 ## Remote Hosts
 
 Remote helper resolution is platform-aware for the hardened paths below and no
@@ -151,17 +175,20 @@ matters especially when:
 
 Current releases keep ssh control sockets and remote capability state
 strictly per-run. Each invocation creates its own short `ssh-<role>.sock`
-path under the private 0700 temp root and opens the master before its first
-remote command, reuses that socket only for its own remote commands, and
-closes it before removing the temp root. There are no
+path under the private 0700 temp root (or, when a long `TMPDIR` would push
+that path past the `sun_path` limit, in a private `zxfer.ssh.XXXXXX`
+directory under the default temp root) and opens the master before its
+first remote command, reuses that socket only for its own remote commands
+(a `-T` spec equal to the `-O` spec shares the origin master), and closes it
+before removing the temp root and that directory. There are no
 shared ssh lease directories, remote capability-cache locks, or
 `ZXFER_ERROR_LOG` lock directories to inspect or clear for current runs.
 
 The same validated secure `PATH` is also exported before remote capability
 handshakes, helper-discovery probes, backup-directory prep, and remote
-backup-metadata guard/staging scripts run, so their auxiliary
-`stat`/`ls`/`id`/`awk` lookups do not fall back to the remote login shell's
-ambient `PATH`.
+backup-metadata guard/staging scripts run, so their auxiliary lookups
+(`uname`, `ls`, `id`, `awk`, `mkdir`, `chmod`, `mktemp`, `mv`, `rm` and
+`find`) do not fall back to the remote login shell's ambient `PATH`.
 
 Capability probes and secure remote-backup directory/write/read and
 storage-listing protocols are maintained as readable multiline POSIX `sh`
