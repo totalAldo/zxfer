@@ -572,7 +572,7 @@ zxfer_remove_run_tmp_root() {
 		rm -rf "$l_run_tmp_root" 2>/dev/null ||
 			{ [ ! -e "$l_run_tmp_root" ] && [ ! -L "$l_run_tmp_root" ]; } ||
 			return 1
-		zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_paths_cleaned
+		g_zxfer_profile_runtime_artifact_paths_cleaned=$((g_zxfer_profile_runtime_artifact_paths_cleaned + 1))
 	fi
 	g_zxfer_run_tmp_root=""
 	g_zxfer_owned_run_tmp_root=""
@@ -620,7 +620,7 @@ zxfer_cleanup_runtime_artifact_path() {
 	elif [ -e "$l_cleanup_path" ]; then
 		rm -f "$l_cleanup_path" 2>/dev/null || return 1
 	fi
-	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_paths_cleaned
+	g_zxfer_profile_runtime_artifact_paths_cleaned=$((g_zxfer_profile_runtime_artifact_paths_cleaned + 1))
 	return 0
 }
 
@@ -668,7 +668,7 @@ zxfer_cleanup_runtime_artifact_path_list() {
 				[ -L "$l_cleanup_runtime_artifact_path_list_artifact_path" ]; then
 				l_cleanup_status=1
 			else
-				zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_paths_cleaned
+				g_zxfer_profile_runtime_artifact_paths_cleaned=$((g_zxfer_profile_runtime_artifact_paths_cleaned + 1))
 			fi
 		done
 	fi
@@ -717,7 +717,7 @@ zxfer_create_private_temp_dir() {
 		fi
 		return 1
 	done
-	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_dirs_created
+	g_zxfer_profile_runtime_artifact_dirs_created=$((g_zxfer_profile_runtime_artifact_dirs_created + 1))
 	g_zxfer_runtime_artifact_path_result=$l_artifact_dir
 }
 
@@ -764,7 +764,7 @@ zxfer_create_runtime_artifact_file() {
 	[ "$l_artifact_noclobber_was_set" -eq 1 ] || set +C
 	umask "$g_zxfer_run_umask"
 	[ "$l_artifact_status" -eq 0 ] || return 1
-	zxfer_profile_increment_counter g_zxfer_profile_runtime_artifact_files_created
+	g_zxfer_profile_runtime_artifact_files_created=$((g_zxfer_profile_runtime_artifact_files_created + 1))
 	g_zxfer_runtime_artifact_path_result=$l_artifact_file
 }
 

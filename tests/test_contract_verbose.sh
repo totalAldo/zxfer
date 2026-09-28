@@ -10,6 +10,11 @@
 #     by dash when it is installed: stdout and stderr hold no control byte but
 #     LF and TAB, the property lines show the value escaped, its LF forges no
 #     line, and zfs set still gets the raw value as one argument.
+#   test_very_verbose_profile_zeroes_hostile_inherited_counters
+#   → a -V run whose environment holds an arithmetic payload in every
+#     profile counter the reset zeroes succeeds, evaluates none of them, and
+#     prints a summary of plain numbers: the launcher zeroes the counters
+#     before any producer bumps one.
 #
 # shellcheck disable=SC1090,SC2034,SC2154,SC2317,SC2329
 
@@ -118,6 +123,36 @@ test_verbose_output_escapes_hostile_property_values() {
 		done
 	done
 	unset ZXFER_MOCKBIN_ZXFER_BIN
+}
+
+test_very_verbose_profile_zeroes_hostile_inherited_counters() {
+	# Producers bump counters with plain shell arithmetic, which bash and ksh
+	# evaluate as an expression and dash rejects: an inherited value must be
+	# gone before the first producer runs.
+	l_marker="$CASE_DIR/profile-value-evaluated"
+	l_keys=$(sed -n 's/^	g_zxfer_profile_\([a-z_]*\)=0$/\1/p' "$ZXFER_ROOT/src/zxfer_profile.sh")
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" hostile_profile
+	(
+		for l_key in $l_keys; do
+			export "g_zxfer_profile_$l_key=x[\$(: >$l_marker)]"
+		done
+		planning_run_zxfer "$STATE_DIR" -V -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	)
+	l_status=$?
+
+	assertNotEquals "The profile reset should name the counters to poison." "" "$l_keys"
+	assertEquals "A -V run should succeed whatever the profile globals inherit." \
+		0 "$l_status"
+	assertFalse "No inherited profile value may be evaluated." "[ -e '$l_marker' ]"
+	assertEquals "The -V summary should print every key." \
+		48 "$(grep -c '^zxfer profile: ' "$CASE_DIR/zxfer.stderr")"
+	assertEquals "Every summary value should be a plain count." \
+		"" "$(grep '^zxfer profile: ' "$CASE_DIR/zxfer.stderr" |
+			grep -v '^zxfer profile: [a-z_]*=[0-9][0-9]*$')"
+	assertEquals "The summary should count the run's sends from 0." \
+		1 "$(grep -c '^zxfer profile: zfs_send_calls=[1-9][0-9]*$' "$CASE_DIR/zxfer.stderr")"
 }
 
 # shellcheck source=tests/shunit2/shunit2

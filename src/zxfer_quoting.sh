@@ -42,8 +42,8 @@
 #   g_zxfer_split_tokens_result, g_zxfer_escaped_single_quotes_result,
 #   g_zxfer_literal_token_error_result, g_zxfer_shell_command_result and
 #   g_zxfer_stripped_path_result.
-# reads globals: none. Each render counts itself through
-#   zxfer_profile_increment_counter (zxfer_profile.sh).
+# reads globals: none. Each render bumps the -V counter
+#   g_zxfer_profile_command_render_calls, which zxfer_profile.sh owns.
 # mutates caches: none. zxfer_split_begin changes IFS and noglob until
 #   zxfer_split_end restores them.
 # returns via stdout: none.
@@ -167,7 +167,7 @@ zxfer_check_literal_token_string() {
 # g_zxfer_shell_command_result. For rendered-shell APIs and operator display,
 # never as a substitute for direct-argv execution.
 zxfer_render_shell_command_from_argv() {
-	zxfer_profile_increment_counter g_zxfer_profile_command_render_calls
+	g_zxfer_profile_command_render_calls=$((g_zxfer_profile_command_render_calls + 1))
 	g_zxfer_shell_command_result=""
 	l_render_separator=""
 	for l_render_arg in "$@"; do

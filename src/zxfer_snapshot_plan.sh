@@ -86,7 +86,7 @@ zxfer_forget_snapshot_slices() {
 
 # Purpose: Reset the per-dataset plan, delete, and divergence state.
 # Usage: Called by session initialization.
-zxfer_reset_snapshot_reconcile_state() {
+zxfer_reset_snapshot_plan_state() {
 	zxfer_publish_snapshot_transfer_plan "" "" 0
 	g_did_delete_dest_snapshots=0
 	g_deleted_dest_newer_snapshots=0
@@ -840,7 +840,7 @@ zxfer_enforce_destination_divergence_contract() {
 		return 0
 	fi
 
-	zxfer_profile_increment_counter g_zxfer_profile_diverged_snapshot_warnings
+	g_zxfer_profile_diverged_snapshot_warnings=$((g_zxfer_profile_diverged_snapshot_warnings + 1))
 	l_diverged_example_lines=$(zxfer_render_diverged_snapshot_example_lines "$g_actual_dest")
 
 	if [ "${g_option_d_delete_destination_snapshots:-0}" -eq 1 ] &&

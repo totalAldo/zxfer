@@ -1031,7 +1031,7 @@ zxfer_adjust_child_inherit_to_match_parent() {
 
 	zxfer_load_normalized_dataset_properties "$l_adjust_parent_dataset" destination || return "$?"
 	if [ "$g_zxfer_normalized_dataset_properties_cache_hit" -eq 0 ]; then
-		zxfer_profile_increment_counter g_zxfer_profile_parent_destination_property_reads
+		g_zxfer_profile_parent_destination_property_reads=$((g_zxfer_profile_parent_destination_property_reads + 1))
 	fi
 
 	l_adjust_status=0

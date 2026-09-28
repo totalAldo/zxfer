@@ -27,13 +27,6 @@ oneTimeTearDown() {
 	zxfer_test_cleanup_tmpdir
 }
 
-# Stage the source record cache the planner reads: "dataset@snap<TAB>guid"
-# rows, newest first.
-zxfer_test_stage_source_records() {
-	g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/source_snapshot.records"
-	printf '%s\n' "$1" >"$g_zxfer_source_snapshot_record_cache_file"
-}
-
 setUp() {
 	zxfer_test_replication_fixture_setup
 }

@@ -292,23 +292,26 @@ zxfer_zfs_send_receive() {
 		l_send_cmd="$l_send_cmd $g_zxfer_progress_bar_command_result"
 	fi
 
-	if zxfer_profile_metrics_enabled; then
+	# -V counts the pipeline as one zfs send on the source and one receive on
+	# the destination, each over ssh when its side is remote. Without -V the
+	# one test skips all eight counts.
+	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
 		# Startup latency is the time to the first live transfer.
 		if [ "${g_zxfer_profile_startup_latency_recorded:-0}" -eq 0 ]; then
-			zxfer_profile_add_elapsed_ms g_zxfer_profile_startup_latency_ms \
-				"${g_zxfer_profile_start_ms:-}"
+			zxfer_profile_stop_timer "${g_zxfer_profile_start_ms:-}"
+			g_zxfer_profile_startup_latency_ms=$((g_zxfer_profile_startup_latency_ms + g_zxfer_profile_elapsed_ms))
 			g_zxfer_profile_startup_latency_recorded=1
 		fi
-		zxfer_profile_increment_counter g_zxfer_profile_send_receive_pipeline_commands
-		zxfer_profile_increment_counter g_zxfer_profile_bucket_send_receive_setup
-		zxfer_profile_increment_counter g_zxfer_profile_source_zfs_calls
-		zxfer_profile_increment_counter g_zxfer_profile_destination_zfs_calls
-		zxfer_profile_increment_counter g_zxfer_profile_zfs_send_calls
-		zxfer_profile_increment_counter g_zxfer_profile_zfs_receive_calls
+		g_zxfer_profile_send_receive_pipeline_commands=$((g_zxfer_profile_send_receive_pipeline_commands + 1))
+		g_zxfer_profile_bucket_send_receive_setup=$((g_zxfer_profile_bucket_send_receive_setup + 1))
+		g_zxfer_profile_source_zfs_calls=$((g_zxfer_profile_source_zfs_calls + 1))
+		g_zxfer_profile_destination_zfs_calls=$((g_zxfer_profile_destination_zfs_calls + 1))
+		g_zxfer_profile_zfs_send_calls=$((g_zxfer_profile_zfs_send_calls + 1))
+		g_zxfer_profile_zfs_receive_calls=$((g_zxfer_profile_zfs_receive_calls + 1))
 		[ -z "$g_option_O_origin_host" ] ||
-			zxfer_profile_record_ssh_invocation "$g_option_O_origin_host" source
+			g_zxfer_profile_source_ssh_shell_invocations=$((g_zxfer_profile_source_ssh_shell_invocations + 1))
 		[ -z "$g_option_T_target_host" ] ||
-			zxfer_profile_record_ssh_invocation "$g_option_T_target_host" destination
+			g_zxfer_profile_destination_ssh_shell_invocations=$((g_zxfer_profile_destination_ssh_shell_invocations + 1))
 	fi
 
 	zxfer_schedule_send_receive_pipeline "$l_send_cmd | $l_recv_cmd" \

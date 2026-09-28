@@ -1704,9 +1704,7 @@ test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
 	output=$(
 		(
 			counter_file="$TEST_TMPDIR/get_zfs_profile.counter"
-			now_counter_file="$TEST_TMPDIR/get_zfs_profile.now.counter"
 			printf '%s\n' 0 >"$counter_file"
-			printf '%s\n' 0 >"$now_counter_file"
 			zxfer_get_temp_file() {
 				idx=$(cat "$counter_file")
 				idx=$((idx + 1))
@@ -1714,23 +1712,12 @@ test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
 				g_zxfer_temp_file_result="$TEST_TMPDIR/get_zfs_profile.$idx"
 				: >"$g_zxfer_temp_file_result"
 			}
-			zxfer_profile_now_ms() {
-				idx=$(cat "$now_counter_file")
-				idx=$((idx + 1))
-				printf '%s\n' "$idx" >"$now_counter_file"
-				if [ "$idx" = "1" ]; then
-					printf '%s\n' 1000
-				elif [ "$idx" = "2" ]; then
-					printf '%s\n' 1500
-				elif [ "$idx" = "3" ]; then
-					printf '%s\n' 1900
-				elif [ "$idx" = "4" ]; then
-					printf '%s\n' 2600
-				elif [ "$idx" = "5" ]; then
-					printf '%s\n' 3000
-				elif [ "$idx" = "6" ]; then
-					printf '%s\n' 3550
-				fi
+			# One reading per clock read, in this shell: source start,
+			# destination start and end, source end, diff start and end.
+			clock_readings="1000 1500 1900 2600 3000 3550"
+			zxfer_profile_read_clock_ms() {
+				g_zxfer_profile_clock_ms=${clock_readings%% *}
+				clock_readings=${clock_readings#* }
 			}
 			zxfer_echoV() {
 				:

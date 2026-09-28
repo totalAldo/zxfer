@@ -964,7 +964,6 @@ test_zxfer_capture_remote_probe_output_throws_transport_setup_failures_before_st
 	output=$(
 		(
 			g_option_V_very_verbose=1
-			g_zxfer_profile_ssh_shell_invocations=0
 			g_zxfer_profile_source_ssh_shell_invocations=0
 			zxfer_prepare_ssh_transport() {
 				g_zxfer_ssh_transport_error="Managed ssh policy invalid."
@@ -975,7 +974,6 @@ test_zxfer_capture_remote_probe_output_throws_transport_setup_failures_before_st
 			}
 			zxfer_throw_error() {
 				printf 'message=%s\n' "$1"
-				printf 'ssh=%s\n' "${g_zxfer_profile_ssh_shell_invocations:-0}"
 				printf 'source=%s\n' "${g_zxfer_profile_source_ssh_shell_invocations:-0}"
 				exit 7
 			}
@@ -987,9 +985,7 @@ test_zxfer_capture_remote_probe_output_throws_transport_setup_failures_before_st
 	assertEquals "Transport setup failures should throw." 7 "$status"
 	assertContains "The throw should carry the transport diagnostic." \
 		"$output" "message=Managed ssh policy invalid."
-	assertContains "A transport setup failure should still count one ssh invocation." \
-		"$output" "ssh=1"
-	assertContains "The failed invocation should be attributed to the requested side." \
+	assertContains "A transport setup failure should still count one ssh invocation, on the requested side." \
 		"$output" "source=1"
 	assertFalse "No staging file should exist once transport setup has failed." \
 		"[ -e '$l_probe_marker' ]"
@@ -1044,7 +1040,6 @@ test_zxfer_capture_remote_probe_output_captures_stdout_stderr_and_status_in_this
 		(
 			set +e
 			g_option_V_very_verbose=1
-			g_zxfer_profile_ssh_shell_invocations=0
 			g_zxfer_profile_destination_ssh_shell_invocations=0
 			zxfer_invoke_ssh_shell_command_for_host() {
 				printf 'probe line\n\n'
@@ -1056,8 +1051,7 @@ test_zxfer_capture_remote_probe_output_captures_stdout_stderr_and_status_in_this
 			printf 'stdout=<%s>\n' "$g_zxfer_remote_probe_stdout"
 			printf 'stderr=<%s>\n' "$g_zxfer_remote_probe_stderr"
 			printf 'capture_failed=%s\n' "$g_zxfer_remote_probe_capture_failed"
-			printf 'ssh=%s destination=%s\n' "$g_zxfer_profile_ssh_shell_invocations" \
-				"$g_zxfer_profile_destination_ssh_shell_invocations"
+			printf 'destination=%s\n' "$g_zxfer_profile_destination_ssh_shell_invocations"
 		)
 	)
 
@@ -1067,7 +1061,7 @@ test_zxfer_capture_remote_probe_output_captures_stdout_stderr_and_status_in_this
 >"
 	assertContains "A readable capture is not a capture failure." "$output" "capture_failed=0"
 	assertContains "The ssh run inside the substitution should be counted once in this shell." \
-		"$output" "ssh=1 destination=1"
+		"$output" "destination=1"
 }
 
 test_zxfer_capture_remote_probe_output_reports_stderr_capture_failures() {

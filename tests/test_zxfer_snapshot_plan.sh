@@ -10,6 +10,9 @@ TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# The live re-plan cases stage source records with its helper.
+# shellcheck source=tests/helpers/replication_fixtures.sh
+. "$TESTS_DIR/helpers/replication_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_snapshot_plan.sh"
 
@@ -40,7 +43,7 @@ reset_snapshot_plan_test_state() {
 	g_actual_dest=""
 	g_zxfer_snapshot_plan_file=""
 	g_zxfer_snapshot_creation_file=""
-	zxfer_reset_snapshot_reconcile_state
+	zxfer_reset_snapshot_plan_state
 }
 
 # Stage the flat record files discovery publishes: source rows newest first,
@@ -65,7 +68,7 @@ test_zxfer_snapshot_plan_file_reset_is_separate_from_dataset_state() {
 	zxfer_plan_dataset_snapshots "tank/src" "backup/dst"
 	plan_file=$g_zxfer_snapshot_plan_file
 
-	zxfer_reset_snapshot_reconcile_state
+	zxfer_reset_snapshot_plan_state
 	assertEquals "Per-dataset resets should keep the reusable plan file." \
 		"$plan_file" "$g_zxfer_snapshot_plan_file"
 	case "$plan_file" in
@@ -86,7 +89,7 @@ test_zxfer_snapshot_plan_file_reset_is_separate_from_dataset_state() {
 		"" "$g_zxfer_snapshot_creation_file"
 }
 
-test_zxfer_reset_snapshot_reconcile_state_clears_plan_and_markers() {
+test_zxfer_reset_snapshot_plan_state_clears_plan_and_markers() {
 	g_last_common_snap="tank/src@snap1"
 	g_dest_has_snapshots=1
 	g_did_delete_dest_snapshots=1
@@ -95,7 +98,7 @@ test_zxfer_reset_snapshot_reconcile_state_clears_plan_and_markers() {
 	g_zxfer_plan_delete_snapshots="backup/dst@old"
 	g_zxfer_diverged_converged_datasets="backup/dst	tank/src"
 
-	zxfer_reset_snapshot_reconcile_state
+	zxfer_reset_snapshot_plan_state
 
 	assertEquals "The last common snapshot should be cleared." "" "$g_last_common_snap"
 	assertEquals "The destination-has-snapshots marker should be cleared." 0 "$g_dest_has_snapshots"

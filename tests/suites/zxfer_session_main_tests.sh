@@ -230,7 +230,7 @@ test_trap_exit_emits_profile_summary_once_in_very_verbose_mode() {
 			g_zxfer_profile_snapshot_diff_sort_ms=444
 			g_zxfer_profile_source_zfs_calls=3
 			g_zxfer_profile_destination_zfs_calls=4
-			g_zxfer_profile_ssh_shell_invocations=2
+			g_zxfer_profile_source_ssh_shell_invocations=2
 			g_zxfer_profile_source_snapshot_list_commands=1
 			g_zxfer_profile_send_receive_pipeline_commands=2
 			g_zxfer_profile_exists_destination_calls=5
@@ -270,6 +270,8 @@ test_trap_exit_emits_profile_summary_once_in_very_verbose_mode() {
 		"$output" "zxfer profile: normalized_property_reads_destination=7"
 	assertContains "Very-verbose exits should emit the send/receive bucket counter." \
 		"$output" "zxfer profile: bucket_send_receive_setup=11"
+	assertContains "Very-verbose exits should emit the ssh total summed from the sides." \
+		"$output" "zxfer profile: ssh_shell_invocations=2"
 	count=$(printf '%s\n' "$output" | grep -c "^zxfer profile: source_zfs_calls=3$")
 	assertEquals "zxfer_trap_exit should emit the profile summary only once." 1 "$count"
 }

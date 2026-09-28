@@ -20,7 +20,11 @@
 # Any other record kind fails closed.
 #
 # Refresh measured values with: tests/run_budget_check.sh --list
-callers	zxfer_profile_now_ms	10
+#
+# zxfer_profile_now_ms printed the clock for a command substitution; -V stage
+# timers now read it in the current shell (zxfer_profile_start_timer), so the
+# row stays at 0 to keep a forking clock helper of that name from returning.
+callers	zxfer_profile_now_ms	0
 callers	eval 	1
 callers	$(date	8
 callers	mktemp	6

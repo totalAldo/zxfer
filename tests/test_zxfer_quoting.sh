@@ -212,7 +212,6 @@ test_render_shell_command_matches_reference_bytes() {
 }
 
 test_render_shell_command_counts_one_render_for_the_profile() {
-	g_option_V_very_verbose=1
 	g_zxfer_profile_command_render_calls=0
 
 	zxfer_render_shell_command_from_argv "zfs" "list"
@@ -221,10 +220,12 @@ test_render_shell_command_counts_one_render_for_the_profile() {
 	assertEquals "Each render should count exactly one render in the current shell." \
 		2 "$g_zxfer_profile_command_render_calls"
 
-	g_option_V_very_verbose=0
+	# The count costs one arithmetic step, so it runs with or without -V;
+	# only -V prints it.
+	g_option_V_very_verbose=1
 	zxfer_render_shell_command_from_argv "zfs"
-	assertEquals "Renders should not be counted without -V." \
-		2 "$g_zxfer_profile_command_render_calls"
+	assertEquals "Renders should count the same way under -V." \
+		3 "$g_zxfer_profile_command_render_calls"
 }
 
 test_escape_single_quotes_into_result_escapes_apostrophes() {

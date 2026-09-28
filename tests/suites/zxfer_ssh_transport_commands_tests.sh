@@ -158,7 +158,6 @@ test_invoke_ssh_shell_command_for_host_tracks_profile_counters_when_very_verbose
 	g_option_V_very_verbose=1
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_option_O_origin_host="origin.example"
-	g_zxfer_profile_ssh_shell_invocations=0
 	g_zxfer_profile_source_ssh_shell_invocations=0
 
 	zxfer_invoke_ssh_shell_command_for_host "origin.example" "'/bin/true'" >/dev/null \
@@ -166,9 +165,7 @@ test_invoke_ssh_shell_command_for_host_tracks_profile_counters_when_very_verbose
 
 	unset FAKE_SSH_LOG
 
-	assertEquals "Very-verbose profiling should count ssh shell invocations." \
-		1 "$g_zxfer_profile_ssh_shell_invocations"
-	assertEquals "Very-verbose profiling should attribute origin-host ssh invocations to the source side." \
+	assertEquals "Very-verbose profiling should count origin-host ssh invocations on the source side." \
 		1 "$g_zxfer_profile_source_ssh_shell_invocations"
 }
 
@@ -179,7 +176,6 @@ test_invoke_ssh_shell_command_for_host_tracks_explicit_profile_side_when_origin_
 	g_cmd_ssh="$FAKE_SSH_BIN"
 	g_option_O_origin_host="shared.example"
 	g_option_T_target_host="shared.example"
-	g_zxfer_profile_ssh_shell_invocations=0
 	g_zxfer_profile_source_ssh_shell_invocations=0
 	g_zxfer_profile_destination_ssh_shell_invocations=0
 
@@ -190,8 +186,6 @@ test_invoke_ssh_shell_command_for_host_tracks_explicit_profile_side_when_origin_
 
 	unset FAKE_SSH_LOG
 
-	assertEquals "Explicit profile sides should still count total ssh invocations." \
-		2 "$g_zxfer_profile_ssh_shell_invocations"
 	assertEquals "Explicit source-side attribution should remain correct when origin and target share the same host spec." \
 		1 "$g_zxfer_profile_source_ssh_shell_invocations"
 	assertEquals "Explicit destination-side attribution should remain correct when origin and target share the same host spec." \
@@ -564,12 +558,12 @@ test_ssh_shell_command_for_host_record_mode_stores_the_argv_without_running_ssh(
 			export FAKE_SSH_LOG
 			g_cmd_ssh="$FAKE_SSH_BIN"
 			g_option_V_very_verbose=1
-			g_zxfer_profile_ssh_shell_invocations=0
+			g_zxfer_profile_source_ssh_shell_invocations=0
 			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 			zxfer_ssh_shell_command_for_host record "backup@example.com doas" "zfs list" source
 			printf 'status=%s\n' "$?"
 			printf 'last=<%s>\n' "$g_zxfer_failure_last_command"
-			printf 'ssh_count=%s\n' "$g_zxfer_profile_ssh_shell_invocations"
+			printf 'ssh_count=%s\n' "$g_zxfer_profile_source_ssh_shell_invocations"
 			printf 'ssh_log=<%s>\n' "$(cat "$ssh_log")"
 		) 2>&1
 	)

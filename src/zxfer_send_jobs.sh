@@ -44,8 +44,11 @@
 # reads globals: g_option_j_jobs, g_option_T_target_host, and the background
 # shell spawn helpers.
 # mutates caches: destination snapshot and property state after each
-# successful receive (zxfer_finish_destination_receive), and the replication
-# pass marker g_is_performed_send_destroy after each send.
+# successful receive (zxfer_finish_destination_receive), and replication's
+# per-pass marker g_is_performed_send_destroy after each scheduled send. The
+# scheduler is the one place that knows a send happened, foreground or job,
+# so that marker keeps this second writer; zxfer_replication.sh owns it and
+# sets it after a -d destroy.
 # returns via stdout: none.
 #
 # Model: a job is `/bin/sh -c 'PIPELINE & wait; echo status >$1'` started
@@ -401,8 +404,7 @@ zxfer_schedule_send_receive_pipeline() {
 				break
 			fi
 		done
-		zxfer_profile_increment_counter \
-			g_zxfer_profile_send_receive_background_pipeline_commands
+		g_zxfer_profile_send_receive_background_pipeline_commands=$((g_zxfer_profile_send_receive_background_pipeline_commands + 1))
 		zxfer_record_last_command_string "$l_schedule_pipeline_cmd"
 		zxfer_echov "$l_schedule_pipeline_cmd"
 		zxfer_spawn_send_job "$l_schedule_pipeline_cmd" \

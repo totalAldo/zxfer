@@ -242,12 +242,12 @@ test_zfs_send_receive_records_startup_latency_once() {
 			g_zxfer_profile_zfs_send_calls=0
 			zxfer_echoV() { :; }
 			zxfer_schedule_send_receive_pipeline() { :; }
-			zxfer_profile_now_ms() {
-				printf '%s\n' 1250
+			zxfer_profile_read_clock_ms() {
+				g_zxfer_profile_clock_ms=1250
 			}
 			zxfer_zfs_send_receive "tank/src@snap1" "tank/src@snap2" "backup/dst" 0
-			zxfer_profile_now_ms() {
-				printf '%s\n' 2000
+			zxfer_profile_read_clock_ms() {
+				g_zxfer_profile_clock_ms=2000
 			}
 			zxfer_zfs_send_receive "tank/src@snap2" "tank/src@snap3" "backup/dst" 0
 			printf 'latency=%s\n' "$g_zxfer_profile_startup_latency_ms"
