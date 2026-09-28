@@ -1,9 +1,9 @@
 #!/bin/sh
 # shellcheck shell=sh
 # Source command production, parallel discovery, staged capture and status
-# files, and producer execution cases for src/zxfer_snapshot_producers.sh. The
+# files, and producer execution cases for src/zxfer_snapshot_discovery.sh. The
 # two discovery-state reset cases stay first: later cases read the producer
-# state their reset leaves. Run by tests/test_zxfer_snapshot_producers.sh.
+# state their reset leaves. Run by tests/test_zxfer_snapshot_discovery.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_state() {
@@ -13,13 +13,13 @@ test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_state() {
 	g_zxfer_recursive_dataset_list_result="tank/src"
 	g_zxfer_source_snapshot_record_cache_file="$g_zxfer_run_tmp_root/source_cache.raw"
 	g_zxfer_destination_snapshot_record_cache_file="$g_zxfer_run_tmp_root/destination_cache.raw"
-	g_source_snapshot_list_sorted_file="$g_zxfer_run_tmp_root/source_sorted.raw"
+	g_zxfer_full_source_snapshot_sorted_file="$g_zxfer_run_tmp_root/source_sorted.raw"
 	source_cache_file=$g_zxfer_source_snapshot_record_cache_file
 	destination_cache_file=$g_zxfer_destination_snapshot_record_cache_file
-	sorted_source_file=$g_source_snapshot_list_sorted_file
+	sorted_source_file=$g_zxfer_full_source_snapshot_sorted_file
 	printf '%s\n' "tank/src@snap1" >"$g_zxfer_source_snapshot_record_cache_file"
 	printf '%s\n' "backup/dst/src@snap1" >"$g_zxfer_destination_snapshot_record_cache_file"
-	printf '%s\n' "tank/src@snap1" >"$g_source_snapshot_list_sorted_file"
+	printf '%s\n' "tank/src@snap1" >"$g_zxfer_full_source_snapshot_sorted_file"
 	zxfer_reset_snapshot_discovery_state
 
 	assertEquals "Resetting snapshot discovery state should preserve the cached remote parallel helper path for later discovery passes in the same run." \
@@ -35,7 +35,7 @@ test_zxfer_reset_snapshot_discovery_state_preserves_remote_parallel_state() {
 	assertEquals "Resetting snapshot discovery state should clear the staged destination snapshot-record cache file path." \
 		"" "${g_zxfer_destination_snapshot_record_cache_file:-}"
 	assertEquals "Resetting snapshot discovery state should clear the staged sorted source snapshot file path." \
-		"" "${g_source_snapshot_list_sorted_file:-}"
+		"" "${g_zxfer_full_source_snapshot_sorted_file:-}"
 	assertFalse "Resetting snapshot discovery state should remove the staged source snapshot-record cache file." \
 		"[ -e '$source_cache_file' ]"
 	assertFalse "Resetting snapshot discovery state should remove the staged destination snapshot-record cache file." \
@@ -669,7 +669,6 @@ test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_metadata
 	result=$(
 		(
 			zxfer_test_print_source_listing zxfer_build_source_snapshot_list_cmd
-			printf 'meta=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-0}"
 		)
 	)
 
@@ -683,8 +682,6 @@ test_build_source_snapshot_list_cmd_uses_parallel_remote_discovery_with_metadata
 		"$result" "/local/bin/zstd"
 	assertContains "Remote -j discovery should preserve the per-dataset remote snapshot runner." \
 		"$result" "/remote/bin/zfs"
-	assertContains "Remote -j discovery should record that metadata compression was used." \
-		"$result" "meta=1"
 }
 
 test_build_source_snapshot_name_list_cmd_uses_the_resolved_origin_compressor() {
@@ -711,7 +708,7 @@ test_build_source_snapshot_name_list_cmd_fails_closed_without_a_resolved_origin_
 			g_origin_cmd_compress_safe="'/remote/bin/zstd' '-3'"
 			g_option_z_compress=0
 			zxfer_test_print_source_listing zxfer_build_source_snapshot_name_list_cmd
-			printf 'disabled=%s meta=%s\n' "$?" "$g_source_snapshot_list_uses_metadata_compression"
+			printf 'disabled=%s\n' "$?"
 
 			g_option_z_compress=1
 			g_origin_cmd_compress_safe=""
@@ -720,8 +717,8 @@ test_build_source_snapshot_name_list_cmd_fails_closed_without_a_resolved_origin_
 		)
 	)
 
-	assertContains "Without -z the listing should not use the origin compressor." \
-		"$output" "disabled=0 meta=0"
+	assertContains "Without -z the listing should render." \
+		"$output" "disabled=0"
 	assertNotContains "Without -z the listing should not name the compressor." \
 		"$output" "/remote/bin/zstd"
 	assertContains "An unresolved origin compressor should fail closed." \
@@ -737,7 +734,6 @@ test_build_source_snapshot_name_list_cmd_covers_local_and_remote_rendering() {
 			g_option_j_jobs=4
 			zxfer_test_print_source_listing zxfer_build_source_snapshot_name_list_cmd
 			printf 'parallel=%s\n' "${g_source_snapshot_list_uses_parallel:-unset}"
-			printf 'compressed=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-unset}"
 		)
 	)
 	remote_result=$(
@@ -750,7 +746,6 @@ test_build_source_snapshot_name_list_cmd_covers_local_and_remote_rendering() {
 			g_option_z_compress=0
 			zxfer_test_print_source_listing zxfer_build_source_snapshot_name_list_cmd
 			printf 'parallel=%s\n' "${g_source_snapshot_list_uses_parallel:-unset}"
-			printf 'compressed=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-unset}"
 		)
 	)
 	compressed_result=$(
@@ -765,7 +760,6 @@ test_build_source_snapshot_name_list_cmd_covers_local_and_remote_rendering() {
 			g_origin_cmd_compress_safe="'/remote/bin/zstd' '-3'"
 			g_cmd_decompress_safe="'/local/bin/zstd' '-d'"
 			zxfer_test_print_source_listing zxfer_build_source_snapshot_name_list_cmd
-			printf 'compressed=%s\n' "${g_source_snapshot_list_uses_metadata_compression:-unset}"
 		)
 	)
 
@@ -775,8 +769,8 @@ test_build_source_snapshot_name_list_cmd_covers_local_and_remote_rendering() {
 		"$local_result" "$PARALLEL_BIN"
 	assertContains "Local identity-aware no-op proof discovery should record that source fanout was not used." \
 		"$local_result" "parallel=0"
-	assertContains "Local identity-aware discovery should leave the metadata compression marker cleared." \
-		"$local_result" "compressed=0"
+	assertNotContains "Local identity-aware discovery should not decompress the listing." \
+		"$local_result" "zstd"
 	assertContains "Remote identity-aware no-op proof discovery should render the resolved remote zfs path." \
 		"$remote_result" "/remote/bin/zfs"
 	assertContains "Remote identity-aware discovery should use ssh for the origin host." \
@@ -795,8 +789,8 @@ test_build_source_snapshot_name_list_cmd_covers_local_and_remote_rendering() {
 		"$remote_result" "creation"
 	assertContains "Remote identity-aware no-op proof discovery should record that source fanout was not used." \
 		"$remote_result" "parallel=0"
-	assertContains "Uncompressed remote identity-aware discovery should leave the compression marker cleared." \
-		"$remote_result" "compressed=0"
+	assertNotContains "Uncompressed remote identity-aware discovery should not decompress the listing." \
+		"${remote_result#*"'origin.example'"}" "zstd"
 	assertContains "Compressed remote identity-aware discovery should use the resolved metadata compressor." \
 		"$compressed_result" "/remote/bin/zstd"
 	assertContains "Compressed remote identity-aware discovery should preserve the configured metadata compression level." \
@@ -805,8 +799,6 @@ test_build_source_snapshot_name_list_cmd_covers_local_and_remote_rendering() {
 		"$compressed_result" "/local/bin/zstd"
 	assertNotContains "Compressed remote identity-aware discovery should still defer parallel fanout." \
 		"$compressed_result" "/opt/bin/parallel"
-	assertContains "Compressed remote identity-aware discovery should record the metadata compression marker." \
-		"$compressed_result" "compressed=1"
 }
 
 test_build_source_snapshot_name_list_cmd_covers_current_shell_success_paths() {
@@ -1123,7 +1115,7 @@ test_write_source_snapshot_list_to_file_starts_the_sorting_background_runner() {
 		g_option_j_jobs=1
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 		printf '%s\n' "$g_source_snapshot_list_pid" >>"$SOURCE_LOG"
-		printf 'sorted_published=%s\n' "$g_source_snapshot_list_sorted_file" >>"$SOURCE_LOG"
+		printf 'sorted_published=%s\n' "$g_zxfer_full_source_snapshot_sorted_file" >>"$SOURCE_LOG"
 	)
 
 	sorted_arg=$(sed -n 's/^sorted_arg=//p' "$log")
@@ -1364,7 +1356,7 @@ test_write_source_snapshot_list_to_file_preserves_background_sort_setup_failures
 			set +e
 			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 			printf 'status=%s\n' "$?"
-			printf 'sorted=%s\n' "${g_source_snapshot_list_sorted_file:-}"
+			printf 'sorted=%s\n' "${g_zxfer_full_source_snapshot_sorted_file:-}"
 		)
 	)
 
@@ -1441,7 +1433,7 @@ test_write_source_snapshot_list_to_file_can_sort_inside_background_job() {
 		}
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 		wait "$g_source_snapshot_list_pid"
-		printf '%s\n' "$g_source_snapshot_list_sorted_file" >"$sorted_path_file"
+		printf '%s\n' "$g_zxfer_full_source_snapshot_sorted_file" >"$sorted_path_file"
 	)
 	status=$?
 	sorted_file=$(cat "$sorted_path_file")
@@ -1471,7 +1463,7 @@ test_write_source_snapshot_list_to_file_preserves_source_failure_when_streaming_
 		zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
 		wait "$g_source_snapshot_list_pid"
 		printf 'status=%s\n' "$?" >"$sorted_path_file"
-		printf 'sorted=%s\n' "$g_source_snapshot_list_sorted_file" >>"$sorted_path_file"
+		printf 'sorted=%s\n' "$g_zxfer_full_source_snapshot_sorted_file" >>"$sorted_path_file"
 	)
 	result=$(cat "$sorted_path_file")
 	sorted_file=$(printf '%s\n' "$result" | sed -n 's/^sorted=//p')

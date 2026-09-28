@@ -1,8 +1,8 @@
 #!/bin/sh
-# Listing-command tests for src/zxfer_snapshot_producers.sh: serial, parallel
+# Listing-command tests for src/zxfer_snapshot_discovery.sh: serial, parallel
 # and remote source listings, the remote parallel lookup, listing pipelines
 # (csh remote shells included), and destination-list normalization. Run by
-# tests/test_zxfer_snapshot_producers.sh under the exec fixture.
+# tests/test_zxfer_snapshot_discovery.sh under the exec fixture.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 create_passthrough_zstd() {

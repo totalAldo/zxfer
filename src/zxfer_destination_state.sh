@@ -32,15 +32,16 @@
 # shellcheck shell=sh disable=SC2034,SC2154
 
 ################################################################################
-# SNAPSHOT RECORD STATE / LIVE LISTINGS / DESTINATION EXISTENCE
+# DESTINATION STATE: EXISTENCE CACHE / DATASET INVENTORY / LIVE LISTING
 ################################################################################
 
 # Module contract:
 # owns globals: the destination existence cache (g_destination_existence_cache,
-#   _root, _root_complete), the recursive dataset lists (reset here, filled by
-#   discovery; g_recursive_dest_list also grows here), the reusable depth-1
-#   listing file g_zxfer_live_destination_listing_file, and these in-shell
-#   results: g_zxfer_destination_exists_result and _error,
+#   _root, _root_complete), the destination dataset inventory
+#   g_recursive_dest_list (seeded from discovery's recursive listing, grown as
+#   datasets are created or received), the reusable depth-1 listing file
+#   g_zxfer_live_destination_listing_file, and these in-shell results:
+#   g_zxfer_destination_exists_result and _error,
 #   g_zxfer_destination_existence_cache_entry_result,
 #   g_zxfer_destination_dataset_result,
 #   g_zxfer_live_destination_record_file_result and _error, and
@@ -50,20 +51,15 @@
 # mutates caches: destination existence and the reusable live listing file.
 # returns via stdout: none.
 
-# Snapshot discovery stages at most one flat snapshot record file per side
-# ("dataset@snapshot<TAB>guid" rows) inside the 0700 run-private temp root:
-# g_zxfer_source_snapshot_record_cache_file (newest first) and
-# g_zxfer_destination_snapshot_record_cache_file. Those files are the
-# snapshot-record index that per-dataset planning reads. They are never
-# legitimately mutated afterwards, so a staged file that cannot be read is
-# corrupted run-private state and aborts the run.
-
-# Purpose: Reset the destination existence cache.
-# Usage: Called at startup and before each discovery pass.
+# Purpose: Reset the destination existence cache and the destination dataset
+# inventory it is seeded from.
+# Usage: Called at startup, before each discovery pass, by the -n preview and
+# whenever the fast no-op proof declines.
 zxfer_reset_destination_existence_cache() {
 	g_destination_existence_cache=""
 	g_destination_existence_cache_root=""
 	g_destination_existence_cache_root_complete=0
+	g_recursive_dest_list=""
 }
 
 # Purpose: Forget the reusable live listing file.
@@ -71,14 +67,6 @@ zxfer_reset_destination_existence_cache() {
 # reset, so the next live listing allocates a file under the new run root.
 zxfer_reset_live_destination_listing_state() {
 	g_zxfer_live_destination_listing_file=""
-}
-
-# Purpose: Clear the recursive source, source inventory and destination lists.
-# Usage: zxfer_reset_recursive_dataset_lists, before discovery fills them.
-zxfer_reset_recursive_dataset_lists() {
-	g_recursive_source_list=""
-	g_recursive_source_dataset_list=""
-	g_recursive_dest_list=""
 }
 
 # Purpose: Map a source dataset to its destination dataset without forking.
@@ -216,15 +204,17 @@ zxfer_lookup_destination_existence_cache() {
 	return 1
 }
 
-# Purpose: Seed the existence cache from a complete recursive destination
-# listing.
+# Purpose: Publish a complete recursive destination listing as the destination
+# dataset inventory and seed the existence cache from it.
 # Usage: zxfer_seed_destination_existence_cache_from_recursive_list ROOT LIST;
-# every listed dataset exists and every other dataset under ROOT is missing.
+# LIST becomes g_recursive_dest_list, every listed dataset exists and every
+# other dataset under ROOT is missing.
 zxfer_seed_destination_existence_cache_from_recursive_list() {
 	l_root_dataset=$1
 	l_recursive_dest_list=$2
 
 	zxfer_reset_destination_existence_cache
+	g_recursive_dest_list=$l_recursive_dest_list
 	g_destination_existence_cache_root=$l_root_dataset
 	g_destination_existence_cache_root_complete=1
 
@@ -238,7 +228,7 @@ zxfer_seed_destination_existence_cache_from_recursive_list() {
 
 # Purpose: Mark the destination root and its whole subtree missing.
 # Usage: zxfer_mark_destination_root_missing_in_cache ROOT, after discovery
-# proved the root absent.
+# proved the root absent; the destination dataset inventory is left empty.
 zxfer_mark_destination_root_missing_in_cache() {
 	l_root_dataset=$1
 

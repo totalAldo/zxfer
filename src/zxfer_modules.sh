@@ -49,16 +49,15 @@ zxfer_runtime.sh
 zxfer_ssh_transport.sh
 zxfer_remote_hosts.sh
 zxfer_cli.sh
-zxfer_snapshot_state.sh
+zxfer_destination_state.sh
 zxfer_backup_metadata.sh
 zxfer_property_state.sh
 zxfer_property_transfer.sh
-zxfer_snapshot_producers.sh
 zxfer_snapshot_discovery.sh
 zxfer_migration_services.sh
 zxfer_send_jobs.sh
 zxfer_send_receive.sh
-zxfer_snapshot_reconcile.sh
+zxfer_snapshot_plan.sh
 zxfer_replication.sh
 zxfer_session.sh'
 

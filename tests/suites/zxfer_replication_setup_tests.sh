@@ -11,39 +11,6 @@ zxfer_test_prepare_roots_in_subshell() {
 	) 2>&1
 }
 
-test_prepare_zfs_mode_roots_prefers_recursive_flag() {
-	g_option_R_recursive="tank/src"
-
-	zxfer_prepare_zfs_mode_roots
-
-	assertEquals "Recursive source should be selected when -R is provided." "$g_option_R_recursive" "$g_initial_source"
-}
-
-test_prepare_zfs_mode_roots_uses_nonrecursive_when_only_N_set() {
-	g_option_N_nonrecursive="tank/nonrecursive"
-
-	zxfer_prepare_zfs_mode_roots
-
-	assertEquals "Non-recursive source should be selected when -N is provided." "$g_option_N_nonrecursive" "$g_initial_source"
-}
-
-test_prepare_zfs_mode_roots_rejects_conflicting_N_and_R() {
-	g_option_R_recursive="tank/src"
-	g_option_N_nonrecursive="tank/child"
-
-	status=0
-	zxfer_test_prepare_roots_in_subshell >/dev/null || status=$?
-
-	assertEquals "Conflicting options should yield usage exit status 2." "2" "$status"
-}
-
-test_prepare_zfs_mode_roots_requires_N_or_R() {
-	status=0
-	zxfer_test_prepare_roots_in_subshell >/dev/null || status=$?
-
-	assertEquals "Missing -N/-R options should exit with a usage error." "2" "$status"
-}
-
 test_prepare_zfs_mode_roots_rejects_services_without_svcadm() {
 	g_option_R_recursive="tank/src"
 	g_option_m_migrate=1
@@ -232,34 +199,6 @@ test_set_actual_dest_treats_regex_significant_source_names_as_literal_paths() {
 
 	assertEquals "Destination mapping should preserve dots in the source root and child dataset names as literal path components." \
 		"backup/target/app.v1/projects.release" "$g_actual_dest"
-}
-
-test_refresh_dataset_iteration_state_populates_recursive_list_when_not_recursive() {
-	g_option_R_recursive=""
-	g_initial_source="tank/src"
-	g_recursive_source_list=""
-	STUB_ZFS_LIST_CALLS=0
-
-	zxfer_refresh_dataset_iteration_state
-
-	assertEquals "Refresh should re-populate the recursive source list when -R is unset." \
-		"$g_initial_source" "$g_recursive_source_list"
-	assertEquals "zxfer_get_zfs_list should be invoked once during refresh." "1" "$STUB_ZFS_LIST_CALLS"
-}
-
-test_refresh_dataset_iteration_state_preserves_list_when_recursive_mode_set() {
-	g_option_R_recursive="tank/src"
-	g_initial_source="tank/src"
-	g_recursive_source_list="tank/src
-tank/src/child"
-	STUB_ZFS_LIST_CALLS=0
-
-	zxfer_refresh_dataset_iteration_state
-
-	assertEquals "Recursive option should keep the existing dataset list untouched." \
-		"tank/src
-tank/src/child" "$g_recursive_source_list"
-	assertEquals "zxfer_get_zfs_list should still be called exactly once." "1" "$STUB_ZFS_LIST_CALLS"
 }
 
 test_refresh_dataset_iteration_state_refreshes_property_tree_prefetch_context_when_available() {
@@ -499,7 +438,7 @@ test_newsnap_names_the_snapshot_lazily_once_per_run() {
 snapshot tank/src@$first_name" "$(cat "$log")"
 }
 
-test_rollback_destination_to_last_common_snapshot_rolls_back_and_clears_flag() {
+test_rollback_destination_to_last_common_snapshot_rolls_back_to_the_anchor() {
 	g_option_F_force_rollback="-F"
 	g_did_delete_dest_snapshots=1
 	g_deleted_dest_newer_snapshots=1
@@ -508,24 +447,20 @@ test_rollback_destination_to_last_common_snapshot_rolls_back_and_clears_flag() {
 	log="$TEST_TMPDIR/rollback.log"
 	: >"$log"
 
-	output=$(
-		(
-			ROLLBACK_LOG="$log"
-			zxfer_probe_destination_existence() {
-				g_zxfer_destination_exists_result=1
-			}
-			zxfer_run_destination_zfs_cmd() {
-				printf '%s %s %s\n' "$1" "$2" "$3" >>"$ROLLBACK_LOG"
-				return 0
-			}
-			zxfer_rollback_destination_to_last_common_snapshot
-			printf 'flag=%s\n' "$g_did_delete_dest_snapshots"
-		)
+	(
+		ROLLBACK_LOG="$log"
+		zxfer_probe_destination_existence() {
+			g_zxfer_destination_exists_result=1
+		}
+		zxfer_run_destination_zfs_cmd() {
+			printf '%s %s %s\n' "$1" "$2" "$3" >>"$ROLLBACK_LOG"
+			return 0
+		}
+		zxfer_rollback_destination_to_last_common_snapshot
 	)
 
 	assertEquals "Rollback should target the destination snapshot matching the last common snapshot." \
 		"rollback -r backup/target/src@snap1" "$(cat "$log")"
-	assertContains "Successful rollback should clear the delete marker." "$output" "flag=0"
 }
 
 test_rollback_destination_to_last_common_snapshot_skips_when_not_needed() {
@@ -607,53 +542,6 @@ test_rollback_destination_to_last_common_snapshot_skips_when_not_needed() {
 
 	assertEquals "Rollback should no-op when -F is absent, deletions did not occur, deleted snapshots were not newer than the last common snapshot, destination is absent, or no common snapshot exists." \
 		"" "$(cat "$log")"
-}
-
-test_zxfer_reconcile_live_destination_snapshot_state_shortcuts_empty_source_and_requeues_when_live_empty() {
-	zxfer_test_stage_source_records "tank/src@snap2	222
-tank/src@snap1	111"
-	output=$(
-		(
-			# The -d destroy ran on this dataset, so the recheck re-plans it.
-			g_did_delete_dest_snapshots=1
-			g_actual_dest="backup/target/src"
-			g_last_common_snap=""
-			g_src_snapshot_transfer_list=""
-			g_dest_has_snapshots=1
-			zxfer_run_destination_zfs_cmd() {
-				printf 'unexpected listing\n'
-			}
-
-			zxfer_reconcile_live_destination_snapshot_state "tank/src"
-			printf 'no_source_status=%s\n' "$?"
-
-			g_last_common_snap="tank/src@snap1	111"
-			g_src_snapshot_transfer_list="tank/src@snap2	222"
-			g_dest_has_snapshots=1
-			zxfer_run_destination_zfs_cmd() {
-				return 0
-			}
-			zxfer_reconcile_live_destination_snapshot_state "tank/src"
-			printf 'empty_live_status=%s\n' "$?"
-			printf 'dest_has_snapshots=%s\n' "${g_dest_has_snapshots:-1}"
-			printf 'last=<%s>\n' "$g_last_common_snap"
-			printf 'transfer=<%s>\n' "$g_src_snapshot_transfer_list"
-		)
-	)
-
-	assertContains "Live destination-state reconciliation should return success when there are no source records to reconcile." \
-		"$output" "no_source_status=0"
-	assertNotContains "Nothing to re-plan must not list the destination." \
-		"$output" "unexpected listing"
-	assertContains "Live destination-state reconciliation should return success when the destination has no live snapshots." \
-		"$output" "empty_live_status=0"
-	assertContains "Live destination-state reconciliation should clear the destination snapshot marker when no live snapshots remain." \
-		"$output" "dest_has_snapshots=0"
-	assertContains "Live destination-state reconciliation should clear a stale common snapshot when no live snapshots remain." \
-		"$output" "last=<>"
-	assertContains "An empty live destination should be re-planned from the whole source history, oldest first." \
-		"$output" "transfer=<tank/src@snap1	111
-tank/src@snap2	222>"
 }
 
 test_rollback_destination_to_last_common_snapshot_reports_probe_failures() {

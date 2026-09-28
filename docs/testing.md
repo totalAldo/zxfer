@@ -118,16 +118,14 @@ Contract suites come first:
 | --- | --- |
 | `test_contract_cli_golden.sh` | Help, usage-error and failure-report output byte for byte (`tests/golden/cli_*.golden`; rewrite with `ZXFER_UPDATE_GOLDEN=1` and review the diff). |
 | `test_contract_failures.sh` | Fail-closed behavior when any zfs or ssh call fails (see Fail-Closed Sweep). |
-| `test_contract_planning.sh` | The zfs argv of whole runs: GUID-aware planning, fail-closed listings, `-d`/`-F` divergence, `-g`, `-j` order and cleanup, `-O`/`-T`, the property pass and `-k`/`-e`. |
-| `test_contract_properties.sh` | `-P` property argument boundaries and the recursive prefetch. |
+| `test_contract_planning.sh` | The zfs argv of whole runs: GUID-aware planning, fail-closed listings and the failure stage they report, `-d` deletes, the `-F` rollback and divergence, `-g`, `-Y` passes, `-j` order and cleanup, `-O`/`-T`, the property pass and `-k`/`-e`. |
+| `test_contract_properties.sh` | `-P` property argument boundaries, the recursive prefetch, and the `-o` rules: a repeated or malformed item is a usage error before any zfs call, and a property the source lacks stops the run before the destination is touched. |
 | `test_contract_send_receive.sh` | `-D` progress streams under `-j 1` and `-j 3`, and `-n`. |
 | `test_contract_verbose.sh` | `-v`/`-V` output for hostile property values. |
 
 Every `src/zxfer_NAME.sh` has one home: `tests/test_zxfer_NAME.sh` and the
 fragments it runs from `tests/suites/zxfer_NAME_TOPIC_tests.sh`.
-`test_zxfer_launcher.sh` also covers the `src/zxfer_modules.sh` loader,
-`test_zxfer_snapshot_discovery.sh` also covers
-`src/zxfer_remote_snapshot_discovery.sh`, and
+`test_zxfer_launcher.sh` also covers the `src/zxfer_modules.sh` loader, and
 `test_zxfer_cleanup_child_wrapper.sh` covers the standalone wrapper.
 `test_zxfer_mock_toolchain.sh` tests the canned zfs and
 `test_zxfer_microbench_budgets.sh` the spawn budgets.

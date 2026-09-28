@@ -32,30 +32,37 @@
 # shellcheck shell=sh disable=SC2034,SC2154
 
 ################################################################################
-# SNAPSHOT PLAN / DELETE / DIVERGENCE HELPERS
+# SNAPSHOT PLAN: PER-DATASET PLAN / DELETES / DIVERGENCE / LIVE RE-PLAN
 ################################################################################
 
 # Module contract:
 # owns globals: the per-dataset plan published for replication
 #   (g_last_common_snap, g_src_snapshot_transfer_list, g_dest_has_snapshots),
-#   delete/rollback markers (g_did_delete_dest_snapshots,
-#   g_deleted_dest_newer_snapshots), the g_zxfer_plan_* results of
-#   zxfer_plan_dataset_snapshots, the run-scoped scratch files
-#   g_zxfer_snapshot_plan_file, g_zxfer_snapshot_creation_file and
-#   g_zxfer_snapshot_slice_base, the per-list slices and the current
+#   written only by zxfer_publish_snapshot_transfer_plan, the delete/rollback
+#   markers (g_did_delete_dest_snapshots, g_deleted_dest_newer_snapshots), the
+#   g_zxfer_plan_* results of zxfer_plan_dataset_snapshots, the run-scoped
+#   scratch files g_zxfer_snapshot_plan_file, g_zxfer_snapshot_creation_file
+#   and g_zxfer_snapshot_slice_base, the per-list slices and the current
 #   dataset's slice selection (g_zxfer_snapshot_slice_records, _key, _source,
 #   _destination), and the divergence contract
 #   (g_zxfer_diverged_snapshot_count, g_zxfer_diverged_snapshot_examples,
 #   g_zxfer_diverged_converged_datasets,
 #   g_zxfer_diverged_converged_marker_source).
-# reads globals: g_actual_dest, g_cmd_awk, g_initial_source,
-#   g_zxfer_run_umask (restored after the slices are written),
-#   g_option_d_delete_destination_snapshots, g_option_F_force_rollback,
-#   g_option_g_grandfather_protection, and the staged snapshot record files.
-# mutates caches: replication's g_is_performed_send_destroy marker (after a
-#   destroy).
+# reads globals: g_actual_dest (the dataset being planned), g_cmd_awk,
+#   g_initial_source, g_zxfer_run_umask (restored after the slices are
+#   written), g_option_d_delete_destination_snapshots,
+#   g_option_F_force_rollback, g_option_g_grandfather_protection, and
+#   discovery's snapshot record files.
+# mutates caches: none; after a destroy g_did_delete_dest_snapshots tells
+#   replication to mark the pass as having done work.
 # returns via stdout: the destroy target, the creation-date display text and
 #   the divergence example lines only.
+#
+# Replication plans each dataset with zxfer_inspect_delete_snap, re-plans a
+# dataset whose -d destroy ran with
+# zxfer_reconcile_live_destination_snapshot_state before its send, and
+# records a seed receive as the new anchor through
+# zxfer_publish_snapshot_transfer_plan.
 
 # Purpose: Forget the run-scoped snapshot plan, creation-time and slice files.
 # Usage: Called by session initialization; the next use allocates a fresh
@@ -80,11 +87,9 @@ zxfer_forget_snapshot_slices() {
 # Purpose: Reset the per-dataset plan, delete, and divergence state.
 # Usage: Called by session initialization.
 zxfer_reset_snapshot_reconcile_state() {
-	g_last_common_snap=""
-	g_dest_has_snapshots=0
+	zxfer_publish_snapshot_transfer_plan "" "" 0
 	g_did_delete_dest_snapshots=0
 	g_deleted_dest_newer_snapshots=0
-	g_src_snapshot_transfer_list=""
 	g_zxfer_plan_common_snapshot=""
 	g_zxfer_plan_transfer_list=""
 	g_zxfer_plan_dest_has_snapshots=0
@@ -100,9 +105,14 @@ zxfer_reset_snapshot_reconcile_state() {
 	g_zxfer_diverged_converged_marker_source=""
 }
 
-# Purpose: Publish the current snapshot transfer plan through its owner.
-# Usage: Live reconciliation supplies the last common snapshot, remaining
-# source records, and validated destination-snapshot presence as one update.
+# Purpose: Publish the current dataset's snapshot transfer plan.
+# Usage: zxfer_publish_snapshot_transfer_plan COMMON RECORDS 0|1, with the
+# last common snapshot record, the pending source records (oldest first) and
+# whether the destination has snapshots. It is the only writer of
+# g_last_common_snap, g_src_snapshot_transfer_list and g_dest_has_snapshots:
+# the session reset, the per-dataset plan, the live re-plan and a seed receive
+# in replication all publish through it. Returns 2 for a presence value other
+# than 0 or 1.
 zxfer_publish_snapshot_transfer_plan() {
 	g_last_common_snap=${1:-}
 	g_src_snapshot_transfer_list=${2:-}
@@ -695,14 +705,11 @@ zxfer_delete_snaps() {
 		return "$?"
 
 	# The destroy changes this dataset's snapshots: the marker makes the
-	# pre-send recheck re-plan it from a live listing and allows the -F
-	# rollback.
+	# pre-send recheck re-plan it from a live listing, allows the -F rollback
+	# and tells replication that the pass did work (-Y).
 	g_did_delete_dest_snapshots=1
 	zxfer_run_destination_zfs_cmd destroy "$l_destroy_target" ||
 		zxfer_throw_error "Error when executing command." "$?"
-
-	# A destroy changed replication state; -Y decides on this marker.
-	g_is_performed_send_destroy=1
 
 	zxfer_echoV "End zxfer_delete_snaps()"
 }
@@ -922,4 +929,44 @@ zxfer_inspect_delete_snap() {
 		zxfer_delete_snaps "$l_inspect_source" "$g_zxfer_plan_delete_snapshots" ||
 			return "$?"
 	fi
+}
+
+# Purpose: Re-plan the current dataset from its live destination snapshots
+# when this run destroyed some of them.
+# Usage: zxfer_reconcile_live_destination_snapshot_state SOURCE, from
+# zxfer_copy_snapshots before SOURCE is sent, with the plan that
+# zxfer_inspect_delete_snap published for SOURCE. Only a dataset whose -d
+# destroy ran (g_did_delete_dest_snapshots) is listed again; every other
+# dataset keeps the plan made from discovery, and zfs receive refuses an
+# incremental whose base is gone. Republishes the plan from the live rows,
+# keeping the anchor unless the anchor or a pending snapshot is common.
+zxfer_reconcile_live_destination_snapshot_state() {
+	[ "${g_did_delete_dest_snapshots:-0}" -eq 1 ] || return 0
+	# Without an anchor or pending snapshots there is nothing to re-plan.
+	[ -n "${g_last_common_snap:-}${g_src_snapshot_transfer_list:-}" ] || return 0
+
+	# The planner fails closed on guid-less rows and finds the newest
+	# snapshot whose name and guid both exist on the destination.
+	zxfer_get_live_destination_record_file "$g_actual_dest" ||
+		zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: ${g_zxfer_live_destination_record_file_error:-}"
+	zxfer_plan_dataset_snapshots "$1" "$g_actual_dest" \
+		"$g_zxfer_live_destination_record_file_result"
+	zxfer_echoV "Refreshed destination snapshot cache for $g_actual_dest using live snapshot state."
+
+	# Only the anchor or a pending snapshot may become the new anchor.
+	# Otherwise publish the same records with no anchor: the seed then
+	# refuses a destination whose snapshots share no guid with them, or
+	# re-seeds an emptied destination from the old anchor.
+	l_recheck_records=${g_last_common_snap:+$g_last_common_snap$ZXFER_LF}${g_src_snapshot_transfer_list:-}
+	if [ -n "${g_zxfer_plan_common_snapshot:-}" ]; then
+		case $ZXFER_LF$l_recheck_records$ZXFER_LF in
+		*"$ZXFER_LF$g_zxfer_plan_common_snapshot$ZXFER_LF"*)
+			zxfer_publish_snapshot_transfer_plan "$g_zxfer_plan_common_snapshot" \
+				"${g_zxfer_plan_transfer_list:-}" 1
+			return
+			;;
+		esac
+	fi
+	zxfer_publish_snapshot_transfer_plan "" "$l_recheck_records" \
+		"${g_zxfer_plan_dest_has_snapshots:-0}"
 }

@@ -77,6 +77,12 @@
 #       test_delete_option_live_destroys_only_extra_destination_snapshot
 #       → exactly one "MUTATE destroy" of the extra snapshot and no sends.
 #
+#   dst-only snapshot newer than the anchor, -d live with sends pending
+#       test_delete_without_force_never_rolls_back_before_a_send
+#       → the destroy is the only mutation and every dataset is sent from
+#         its anchor; the same run with -F also rolls the root back to its
+#         anchor before the root's send.
+#
 #   -T destination discovery (ordinary listings over the target master)
 #       test_remote_target_destination_listing_failure_fails_closed
 #       → a failed snapshot listing on the -T host keeps the zfs exit status
@@ -176,10 +182,16 @@
 #       → -Y repeats a pass that did work up to the documented 8 passes.
 #       test_guidless_source_row_fails_its_dataset_plan_closed
 #       → a source row without a guid stops the run with exit 3 and a report
-#         naming the dataset; nothing is received into it.
+#         naming the dataset and failure_stage: replication, even after an
+#         earlier dataset's send; nothing is received into it.
+#       test_replan_failure_after_a_property_pass_reports_the_replication_stage
+#       → a snapshot step after a dataset's -P pass (here its re-plan after a
+#         -d destroy) reports failure_stage: replication.
 #       test_yield_passes_plan_from_their_own_discovery
 #       → each -Y pass plans from its own discovery: a second pass that finds
 #         one dataset still behind sends that dataset alone.
+#       test_yield_repeats_a_pass_whose_only_change_is_a_destroy
+#       → a pass whose only change is a -d destroy counts as work for -Y.
 #       test_grandfather_option_refuses_to_destroy_old_snapshot
 #       → -d -g refuses to destroy a snapshot older than the limit: non-zero
 #         exit and zero MUTATE lines.
@@ -597,6 +609,51 @@ test_delete_option_live_destroys_only_extra_destination_snapshot() {
 		"grep -q '^send ' '$ZFS_LOG'"
 	assertTrue "deletion planning should query candidate creation times" \
 		"grep -q '^get -H -o name,value -p creation $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@' '$ZFS_LOG'"
+}
+
+# Invariant (-d without -F): destroying a destination-only snapshot newer than
+# the anchor never rolls the destination back; every dataset is still sent
+# incrementally from its anchor. The same run with -F rolls the root back to
+# its anchor (@snap2) before the root's send, which shows that the fixture
+# qualifies for a rollback and only -F is missing.
+test_delete_without_force_never_rolls_back_before_a_send() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" delete_newer
+	planning_add_extra_destination_snapshot
+	# The destination-only @snap9 is newer than the root's anchor @snap2.
+	printf '%s@snap2\t1700000002\n%s@snap9\t1700000009\n' \
+		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
+		>"$STATE_DIR/dst_creation.list" ||
+		fail "Unable to write the creation-time fixture."
+	l_newer_destroy="MUTATE destroy $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap9"
+	l_newer_rollback="MUTATE rollback -r $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap2"
+	l_newer_root_send="send -I $ZXFER_MOCKBIN_SOURCE_ROOT@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT@snap3"
+
+	planning_run_zxfer "$STATE_DIR" -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-d run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	planning_assert_log_has_line "$l_newer_destroy"
+	assertEquals "without -F the destroy is the only mutation" \
+		1 "$(grep -c '^MUTATE ' "$ZFS_LOG")"
+	for l_newer_suffix in "" /child1 /child2; do
+		planning_assert_log_has_line \
+			"send -I $ZXFER_MOCKBIN_SOURCE_ROOT$l_newer_suffix@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT$l_newer_suffix@snap3"
+	done
+
+	: >"$ZFS_LOG"
+	planning_run_zxfer "$STATE_DIR" -d -F -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-d -F run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	planning_assert_log_has_line "$l_newer_destroy"
+	planning_assert_log_has_line "$l_newer_rollback"
+	assertEquals "with -F the destroy and one rollback are the only mutations" \
+		2 "$(grep -c '^MUTATE ' "$ZFS_LOG")"
+	l_newer_rollback_line=$(planning_log_line_number "$l_newer_rollback")
+	l_newer_send_line=$(planning_log_line_number "$l_newer_root_send")
+	assertTrue "the rollback must precede the root's send (rollback line ${l_newer_rollback_line:-none}, send line ${l_newer_send_line:-none})" \
+		"[ '${l_newer_send_line:-0}' -gt '${l_newer_rollback_line:-0}' ] && [ '${l_newer_rollback_line:-0}' -gt 0 ]"
 }
 
 # Invariant: a -j 2 incremental run through the supervision-lite background
@@ -1497,8 +1554,8 @@ test_property_read_failure_fails_closed_without_mutations() {
 # Invariant: a snapshot row without a guid fails its dataset's plan closed
 # (the planner's exit 3) with a structured report naming the dataset, and
 # nothing is received into that dataset. The row reaches the planner through
-# the dataset's slice of the source record file. The stage is not pinned: it
-# still names the root's earlier send.
+# the dataset's slice of the source record file. The report names the
+# replication stage, not the root's earlier send (fixed 2026-09).
 test_guidless_source_row_fails_its_dataset_plan_closed() {
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/incremental" guidless_row
@@ -1516,9 +1573,34 @@ test_guidless_source_row_fails_its_dataset_plan_closed() {
 		"grep -Fq 'message: Failed to determine the last common snapshot for [$ZXFER_MOCKBIN_SOURCE_ROOT/child1] and [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1].' '$CASE_DIR/zxfer.stderr'"
 	assertTrue "the failure must be a structured runtime report" \
 		"grep -Fq 'failure_class: runtime' '$CASE_DIR/zxfer.stderr'"
+	assertTrue "the report must name the planning stage, not the root's earlier send; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		"grep -Fqx 'failure_stage: replication' '$CASE_DIR/zxfer.stderr'"
 	assertFalse "nothing may be received into the dataset with the guid-less row" \
 		"grep -q '^receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1\$' '$ZFS_LOG'"
 	planning_assert_no_mutations
+}
+
+# Invariant (failure stage, 2026-09): the snapshot steps that follow a
+# dataset's property pass (its pre-send re-plan, the rollback and the seed
+# decision) report failure_stage: replication, not the property transfer that
+# just finished. The root's -d destroy makes it re-plan from a depth-1
+# listing before its send, and that listing fails here.
+test_replan_failure_after_a_property_pass_reports_the_replication_stage() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" stage_after_properties
+	planning_make_destination_diverged
+	planning_add_property_transfer_fixtures
+	planning_force_manifest_failure \
+		"list -H -d 1 -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" 2
+
+	planning_run_zxfer "$STATE_DIR" -d -F -P -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "a failed re-plan listing must stop the run" 1 $?
+	planning_assert_log_has_line \
+		"MUTATE destroy $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap3"
+	planning_assert_failure_report replication \
+		"Failed to retrieve live destination snapshots for [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT]"
+	planning_assert_no_send_receive
 }
 
 # Invariant: snapshot names are matched exactly, never as prefixes. With ten
@@ -1767,6 +1849,35 @@ test_yield_passes_plan_from_their_own_discovery() {
 	done
 	assertEquals "each pass lists the destination once, and pass 3 ends the loop" \
 		3 "$(grep -cFx "list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZFS_LOG")"
+}
+
+# Invariant (-Y, -d): a pass whose only change is a -d destroy did work, so -Y
+# repeats it. The canned destination never records the destroy, so every pass
+# destroys the same extra snapshot: once without -Y, eight times (the limit)
+# with it, and nothing is ever sent.
+test_yield_repeats_a_pass_whose_only_change_is_a_destroy() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" yield_destroy_only
+	planning_add_extra_destination_snapshot
+	l_yield_destroy="MUTATE destroy $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap9"
+
+	planning_run_zxfer "$STATE_DIR" -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-d run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	assertEquals "without -Y the pass destroys once" \
+		1 "$(grep -cFx "$l_yield_destroy" "$ZFS_LOG")"
+
+	: >"$ZFS_LOG"
+	planning_run_zxfer "$STATE_DIR" -Y -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-Y -d run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	assertEquals "-Y repeats a destroy-only pass up to its limit of 8" \
+		8 "$(grep -cFx "$l_yield_destroy" "$ZFS_LOG")"
+	assertEquals "the destroy is the only mutation" \
+		8 "$(grep -c '^MUTATE ' "$ZFS_LOG")"
+	planning_assert_no_send_receive
 }
 
 # Invariant (-g): with -d, a destination-only snapshot older than the -g

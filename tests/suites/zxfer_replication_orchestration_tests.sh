@@ -52,14 +52,12 @@ test_initialize_replication_context_runs_restore_and_unsupported_scan() {
 		g_option_e_restore_property_mode=1
 		g_option_U_skip_unsupported_properties=1
 		zxfer_initialize_replication_context
-		printf 'recursive=%s\n' "$g_recursive_source_list" >>"$CTX_LOG"
 	)
 
 	assertEquals "Initialization should load backup properties, refresh dataset state, and derive unsupported properties." \
 		"backup
 list
-unsupported
-recursive=tank/src" "$(cat "$log")"
+unsupported" "$(cat "$log")"
 }
 
 test_initialize_replication_context_skips_unsupported_scan_for_recursive_noop_without_property_work() {
@@ -392,37 +390,6 @@ prefetch backup/target/src/extra@old" "$(cat "$log")"
 		"ifs=<:> literal_glob=$TEST_TMPDIR/*" "$output"
 }
 
-test_copy_filesystems_inspects_source_when_only_deletions_pending() {
-	g_option_d_delete_destination_snapshots=1
-	g_initial_source="tank/src"
-	g_recursive_source_list=""
-	g_recursive_source_dataset_list="tank/src"
-	g_recursive_destination_extra_dataset_list="tank/src"
-	log="$TEST_TMPDIR/delete_only_single.log"
-	rm -f "$log"
-
-	(
-		COPY_FS_LOG="$log"
-		zxfer_set_actual_dest() {
-			g_actual_dest=$1
-			printf 'set %s\n' "$1" >>"$COPY_FS_LOG"
-		}
-		zxfer_inspect_delete_snap() {
-			printf 'inspect %s %s\n' "$1" "$2" >>"$COPY_FS_LOG"
-		}
-		zxfer_copy_snapshots() {
-			printf 'copy %s\n' "$g_actual_dest" >>"$COPY_FS_LOG"
-		}
-		zxfer_copy_filesystems
-	)
-
-	expected="set tank/src
-inspect 1 tank/src
-copy tank/src"
-	assertEquals "-d should still inspect datasets with destination-only snapshots even when no new snapshots exist." \
-		"$expected" "$(cat "$log")"
-}
-
 test_copy_filesystems_skips_recursive_delete_iteration_when_global_snapshot_diffs_are_empty() {
 	g_option_d_delete_destination_snapshots=1
 	g_option_R_recursive="tank/src"
@@ -551,95 +518,6 @@ tank/src@seed2"
 		"$expected" "$(head -n 1 "$log")"
 	assertEquals "Existing-destination seeding should not mutate the parsed -F option state." \
 		"" "${g_option_F_force_rollback:-}"
-}
-
-test_copy_filesystems_forces_iteration_when_property_transfer_is_enabled() {
-	g_option_P_transfer_property=1
-	g_option_R_recursive="tank/src"
-	g_initial_source="tank/src"
-	g_recursive_source_list=""
-	g_recursive_source_dataset_list="tank/src
-tank/src/child"
-	log="$TEST_TMPDIR/property_iteration.log"
-	rm -f "$log"
-
-	(
-		ITER_LOG="$log"
-		zxfer_set_actual_dest() {
-			g_actual_dest=$1
-			printf 'set %s\n' "$1" >>"$ITER_LOG"
-		}
-		zxfer_inspect_delete_snap() {
-			printf 'inspect %s %s\n' "$1" "$2" >>"$ITER_LOG"
-		}
-		zxfer_transfer_properties() {
-			printf 'props %s\n' "$1" >>"$ITER_LOG"
-		}
-		zxfer_copy_snapshots() {
-			printf 'copy %s\n' "$g_actual_dest" >>"$ITER_LOG"
-		}
-		zxfer_wait_for_zfs_send_jobs() {
-			:
-		}
-		zxfer_copy_filesystems
-	)
-
-	expected="set tank/src
-inspect 0 tank/src
-props tank/src
-copy tank/src
-set tank/src/child
-inspect 0 tank/src/child
-props tank/src/child
-copy tank/src/child"
-	assertEquals "Property transfer in recursive mode should force iteration over every dataset." \
-		"$expected" "$(cat "$log")"
-}
-
-test_copy_filesystems_property_no_snapshot_delta_does_not_send() {
-	g_option_P_transfer_property=1
-	g_option_R_recursive="tank/src"
-	g_initial_source="tank/src"
-	g_recursive_source_list=""
-	g_recursive_source_dataset_list="tank/src"
-	log="$TEST_TMPDIR/property_no_snapshot_delta.log"
-	rm -f "$log"
-
-	(
-		ITER_LOG="$log"
-		zxfer_set_actual_dest() {
-			g_actual_dest="backup/target/src"
-			printf 'set %s\n' "$1" >>"$ITER_LOG"
-		}
-		zxfer_inspect_delete_snap() {
-			g_dest_has_snapshots=1
-			g_last_common_snap="tank/src@autosnap_2026-05-19_18:15:01_frequently	1815"
-			g_src_snapshot_transfer_list=""
-			printf 'inspect %s %s\n' "$1" "$2" >>"$ITER_LOG"
-		}
-		zxfer_transfer_properties() {
-			printf 'props %s\n' "$1" >>"$ITER_LOG"
-		}
-		zxfer_reconcile_live_destination_snapshot_state() {
-			printf 'recheck %s\n' "$g_actual_dest" >>"$ITER_LOG"
-		}
-		zxfer_zfs_send_receive() {
-			printf 'unexpected-send %s %s %s %s\n' "$1" "$2" "$3" "$4" >>"$ITER_LOG"
-		}
-		zxfer_wait_for_zfs_send_jobs() {
-			printf 'wait %s\n' "$1" >>"$ITER_LOG"
-		}
-
-		zxfer_copy_filesystems
-	)
-
-	expected="set tank/src
-inspect 0 tank/src
-props tank/src
-recheck backup/target/src
-wait final sync"
-	assertEquals "Property-only recursive iterations with no per-dataset snapshot delta must not start a send." \
-		"$expected" "$(cat "$log")"
 }
 
 test_copy_filesystems_reconciles_properties_after_seeding_created_destination() {

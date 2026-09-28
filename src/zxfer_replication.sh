@@ -42,15 +42,17 @@
 #   g_zxfer_post_seed_property_sources, g_zxfer_replication_iteration_list_result,
 #   the run's -s/-m snapshot name g_zxfer_new_snapshot_name (stamped once by
 #   zxfer_stamp_new_snapshot_name), and the per-pass mutation marker
-#   g_is_performed_send_destroy (set by send/receive and snapshot destroy, read
-#   by the -Y loop).
-# writes globals: the published plan (g_last_common_snap,
-#   g_src_snapshot_transfer_list, g_dest_has_snapshots) in the live re-plan.
-# reads globals: g_option_*, g_destination, the recursive dataset lists,
-#   g_did_delete_dest_snapshots, and the g_zxfer_plan_* results of the last
-#   zxfer_plan_dataset_snapshots call.
-# mutates caches: destination existence through the snapshot-state helpers;
-#   the destination property iteration cache before the post-seed pass.
+#   g_is_performed_send_destroy (set here after a dataset's -d destroy and by
+#   the send/receive scheduler, read by the -Y loop).
+# reads globals: g_option_*, g_destination, discovery's recursive dataset
+#   lists, and the snapshot plan: g_last_common_snap,
+#   g_src_snapshot_transfer_list, g_dest_has_snapshots, the delete markers and
+#   the -g pre-pass's g_zxfer_plan_delete_snapshots. The plan changes only
+#   through zxfer_snapshot_plan.sh; a seed receive publishes its snapshot as
+#   the new anchor with zxfer_publish_snapshot_transfer_plan.
+# mutates caches: destination existence through the destination-state
+#   helpers; the destination property iteration cache before the post-seed
+#   pass.
 # returns via stdout: none.
 
 # Purpose: Reset the replication state for a new session.
@@ -101,7 +103,6 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 	if ! zxfer_run_destination_zfs_cmd rollback -r "$l_rollback_snapshot"; then
 		zxfer_throw_error "Failed to roll back destination [$g_actual_dest] to $l_rollback_snapshot after deleting snapshots."
 	fi
-	g_did_delete_dest_snapshots=0
 }
 
 # Purpose: Seed a missing or snapshot-less destination with the first pending
@@ -142,8 +143,8 @@ zxfer_seed_destination_for_snapshot_transfer() {
 	fi
 	# The received seed is the new common snapshot.
 	g_dest_seed_requires_property_reconcile=1
-	g_last_common_snap=$l_seed_record
-	g_dest_has_snapshots=1
+	zxfer_publish_snapshot_transfer_plan "$l_seed_record" \
+		"${g_src_snapshot_transfer_list:-}" 1
 }
 
 # Purpose: Send the current dataset's pending snapshots, seeding the
@@ -195,45 +196,6 @@ zxfer_copy_snapshots() {
 	zxfer_echoV "Final snapshot: $l_copy_final_path"
 	# The rollback and seed steps can move g_last_common_snap, so read it here.
 	zxfer_zfs_send_receive "${g_last_common_snap%%	*}" "$l_copy_final_path" "$g_actual_dest" "1"
-}
-
-# Purpose: Re-plan the current dataset from its live destination snapshots
-# when this run destroyed some of them.
-# Usage: zxfer_reconcile_live_destination_snapshot_state SOURCE, right after
-# zxfer_inspect_delete_snap planned SOURCE. Only a dataset whose -d destroy
-# ran (g_did_delete_dest_snapshots) is listed again; every other dataset keeps
-# the plan made from discovery, and zfs receive refuses an incremental whose
-# base is gone. Republishes the plan from the live rows, keeping the anchor
-# unless the anchor or a pending snapshot is common.
-zxfer_reconcile_live_destination_snapshot_state() {
-	[ "${g_did_delete_dest_snapshots:-0}" -eq 1 ] || return 0
-	# Without an anchor or pending snapshots there is nothing to re-plan.
-	[ -n "${g_last_common_snap:-}${g_src_snapshot_transfer_list:-}" ] || return 0
-
-	# The planner fails closed on guid-less rows and finds the newest
-	# snapshot whose name and guid both exist on the destination.
-	zxfer_get_live_destination_record_file "$g_actual_dest" ||
-		zxfer_throw_error "Failed to retrieve live destination snapshots for [$g_actual_dest]: ${g_zxfer_live_destination_record_file_error:-}"
-	zxfer_plan_dataset_snapshots "$1" "$g_actual_dest" \
-		"$g_zxfer_live_destination_record_file_result"
-	zxfer_echoV "Refreshed destination snapshot cache for $g_actual_dest using live snapshot state."
-
-	# Only the anchor or a pending snapshot may become the new anchor.
-	# Otherwise publish the same records with no anchor: the seed then
-	# refuses a destination whose snapshots share no guid with them, or
-	# re-seeds an emptied destination from the old anchor.
-	l_recheck_records=${g_last_common_snap:+$g_last_common_snap$ZXFER_LF}${g_src_snapshot_transfer_list:-}
-	if [ -n "${g_zxfer_plan_common_snapshot:-}" ]; then
-		case $ZXFER_LF$l_recheck_records$ZXFER_LF in
-		*"$ZXFER_LF$g_zxfer_plan_common_snapshot$ZXFER_LF"*)
-			zxfer_publish_snapshot_transfer_plan "$g_zxfer_plan_common_snapshot" \
-				"${g_zxfer_plan_transfer_list:-}" 1
-			return
-			;;
-		esac
-	fi
-	zxfer_publish_snapshot_transfer_plan "" "$l_recheck_records" \
-		"${g_zxfer_plan_dest_has_snapshots:-0}"
 }
 
 # Purpose: Name the run's -s/-m snapshot zxfer_<pid>_<YYYYmmddHHMMSS> once.
@@ -345,10 +307,15 @@ EOF
 # Usage: zxfer_process_source_dataset SOURCE PROPERTY_PASS(0|1) [POSITION];
 # POSITION, SOURCE's iteration-list position, selects its snapshot slices.
 # Appends a seeded SOURCE to g_zxfer_post_seed_property_sources.
+# Side effects: Sets failure_stage replication for the dataset's planning,
+# deletes, re-plan, rollback and seed decision, so a failure there never
+# reports the stage an earlier step or dataset left (property transfer,
+# send/receive); the property pass and each send name their own stage.
 zxfer_process_source_dataset() {
 	l_process_source=$1
 	l_process_property_pass=$2
 
+	zxfer_set_failure_stage "replication"
 	zxfer_set_actual_dest "$l_process_source"
 	zxfer_select_snapshot_slice "${3:-}" "$l_process_source"
 	# In-flight background receives cannot affect this dataset's cached
@@ -358,9 +325,12 @@ zxfer_process_source_dataset() {
 	# destination the cache calls missing before a full receive.
 	zxfer_inspect_delete_snap "$g_option_d_delete_destination_snapshots" \
 		"$l_process_source"
+	# The plan's -d destroy changed the destination; -Y repeats such a pass.
+	[ "${g_did_delete_dest_snapshots:-0}" -eq 0 ] || g_is_performed_send_destroy=1
 
 	if [ "$l_process_property_pass" -eq 1 ]; then
 		zxfer_transfer_properties "$l_process_source"
+		zxfer_set_failure_stage "replication"
 	fi
 
 	zxfer_copy_snapshots "$l_process_source"
@@ -567,9 +537,6 @@ zxfer_refresh_dataset_iteration_state() {
 	# -m unmounts or any send.
 	zxfer_get_zfs_list ||
 		zxfer_throw_error "Failed to retrieve the snapshot lists for [$g_initial_source] and [$g_destination]." "$?"
-	# Without -R the only dataset to iterate is the initial source itself.
-	[ "$g_option_R_recursive" != "" ] ||
-		g_recursive_source_list=$g_initial_source
 	zxfer_refresh_property_tree_prefetch_context
 }
 
@@ -592,10 +559,7 @@ zxfer_maybe_capture_preflight_snapshot() {
 # Usage: zxfer_preview_zfs_mode_dry_run, instead of the live pass under -n;
 # previews only the requested source dataset.
 zxfer_preview_zfs_mode_dry_run() {
-	zxfer_reset_snapshot_discovery_state
-	zxfer_reset_destination_existence_cache
-	g_recursive_source_list=$g_initial_source
-	g_recursive_source_dataset_list=$g_initial_source
+	zxfer_publish_dry_run_snapshot_discovery
 	if [ "$g_option_R_recursive" != "" ]; then
 		zxfer_echoV "Dry run: recursive descendant discovery is skipped; previewing only the explicitly requested source dataset."
 	fi

@@ -248,5 +248,5 @@ zero actions for the diverged dataset); and a post-receive verification of the
 live destination listing turns any re-divergence into a structured error
 naming the snapshot. Regression coverage:
 `tests/test_contract_planning.sh` (divergence contract pins) and
-`tests/test_zxfer_snapshot_reconcile.sh` (classifier, gate, and verification
+`tests/test_zxfer_snapshot_plan.sh` (classifier, gate, and verification
 units).
