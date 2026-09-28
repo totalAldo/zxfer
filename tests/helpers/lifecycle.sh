@@ -17,14 +17,13 @@ zxfer_test_cleanup_tmpdir() {
 	fi
 }
 
-# Purpose: Remove the registered adjacent artifacts and the run root between
-# test cases, then clear the allocation results.
-# Usage: zxfer_reset_runtime_artifact_state; returns 1 when any cleanup fails
-# and keeps what it could not remove registered. Production code relies on
-# zxfer_trap_exit instead.
+# Purpose: Remove the run root between test cases, then clear the allocation
+# results.
+# Usage: zxfer_reset_runtime_artifact_state; returns 1 when the root cannot be
+# removed and keeps its handles. Production code relies on zxfer_trap_exit
+# instead.
 zxfer_reset_runtime_artifact_state() {
 	l_cleanup_status=0
-	zxfer_cleanup_registered_runtime_artifacts || l_cleanup_status=$?
 	zxfer_remove_run_tmp_root || l_cleanup_status=1
 	g_zxfer_run_tmp_counter=0
 	g_zxfer_runtime_artifact_path_result=""

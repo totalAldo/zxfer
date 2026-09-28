@@ -151,8 +151,8 @@ zxfer_spawn_background_shell() {
 		set -m
 		;;
 	*)
-		l_spawn_shell_wrapper=$(zxfer_get_cleanup_child_wrapper_script_path) || return 1
-		set -- /bin/sh "$l_spawn_shell_wrapper" "$l_spawn_shell_cmd" "$@"
+		[ -r "$ZXFER_CLEANUP_CHILD_WRAPPER" ] || return 1
+		set -- /bin/sh "$ZXFER_CLEANUP_CHILD_WRAPPER" "$l_spawn_shell_cmd" "$@"
 		g_zxfer_background_shell_scope=wrapper
 		;;
 	esac
@@ -176,9 +176,9 @@ zxfer_spawn_background_shell() {
 zxfer_kill_background_wrapper() (
 	l_kill_wrapper_pid=$1
 	ZXFER_CLEANUP_CHILD_WRAPPER_SOURCE_ONLY=1
-	l_kill_wrapper_script=$(zxfer_get_cleanup_child_wrapper_script_path) || return 1
+	[ -r "$ZXFER_CLEANUP_CHILD_WRAPPER" ] || return 1
 	# shellcheck source=src/zxfer_cleanup_child_wrapper.sh
-	. "$l_kill_wrapper_script"
+	. "$ZXFER_CLEANUP_CHILD_WRAPPER"
 	kill -s STOP "$l_kill_wrapper_pid" 2>/dev/null || {
 		! kill -s 0 "$l_kill_wrapper_pid" 2>/dev/null
 		return "$?"

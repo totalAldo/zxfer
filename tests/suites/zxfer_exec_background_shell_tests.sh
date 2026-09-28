@@ -135,3 +135,27 @@ test_signal_background_shell_reports_success_for_exited_children() {
 	assertTrue "Non-numeric pids are ignored." \
 		"zxfer_signal_background_shell 'not-a-pid' pid TERM"
 }
+
+test_spawn_background_shell_uses_the_fixed_wrapper_path_and_fails_closed_without_it() {
+	# An exited child: were the wrapper check skipped, teardown would find
+	# nothing to stop and return 0.
+	sh -c 'exit 0' &
+	exited_pid=$!
+	wait "$exited_pid"
+	output=$(
+		(
+			g_zxfer_background_shell_spawn_mode=wrapper
+			printf 'wrapper=%s\n' "${ZXFER_CLEANUP_CHILD_WRAPPER#"$ZXFER_ROOT"/}"
+			ZXFER_CLEANUP_CHILD_WRAPPER="$TEST_TMPDIR/no-such-wrapper.sh"
+			zxfer_spawn_background_shell 'exit 0'
+			printf 'missing=%s pid=<%s>\n' "$?" "$g_last_background_pid"
+			zxfer_kill_background_wrapper "$exited_pid"
+			printf 'kill_missing=%s\n' "$?"
+		)
+	)
+
+	assertEquals "The wrapper path is fixed beside the modules; without a readable wrapper neither spawning nor wrapper teardown runs." \
+		"wrapper=src/zxfer_cleanup_child_wrapper.sh
+missing=1 pid=<>
+kill_missing=1" "$output"
+}

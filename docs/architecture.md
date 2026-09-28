@@ -38,9 +38,8 @@ module or a chain of setters.
 - [../src/zxfer_path_security.sh](../src/zxfer_path_security.sh): filesystem
   ownership/mode checks and symlink-aware trusted-path validation
 - [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh): validated per-run temp
-  root, runtime artifact allocation/readback, short-lived cleanup-PID rows,
-  and randomized path-adjacent staging entries with their single
-  identity/path cleanup registry
+  root, runtime artifact allocation/readback, and short-lived cleanup-PID
+  rows
 - [../src/zxfer_ssh_transport.sh](../src/zxfer_ssh_transport.sh): validated
   host/wrapper parsing (`-O`/`-T` host specs parsed once per value), managed
   SSH options, ssh argv assembled per call with the role's control socket,
@@ -48,10 +47,11 @@ module or a chain of setters.
   argv-preserving zfs role runner and renderer, active remote ZFS routing, and
   per-run control-socket lifecycle
 - [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh): remote helper
-  resolution, one fail-closed capability probe per role, host and requested
-  tool set, kept for the run in one in-memory slot per role (origin, target),
-  and resolved remote OS/tool selections; it consumes the SSH transport API
-  but does not own transport state
+  resolution, one fail-closed capability probe per host and requested tool
+  set, kept for the run in one in-memory slot per role (origin, target), either
+  of which answers a lookup for the same host and tools, and resolved remote
+  OS/tool selections; it consumes the SSH transport API but does not own
+  transport state
 - [../src/zxfer_cli.sh](../src/zxfer_cli.sh): CLI parsing, option validation,
   and compression command interpretation
 - [../src/zxfer_snapshot_state.sh](../src/zxfer_snapshot_state.sh): the
@@ -129,7 +129,9 @@ The startup path is intentionally explicit:
    commands first (`zxfer_reset_dependency_state()`), because the ssh and
    remote-host resets read `g_cmd_ssh` and `g_cmd_zfs`. Inherited process,
    SSH, path, and migration-service handles are dropped without acting on
-   them, so an exported `g_*` value can never grant cleanup ownership.
+   them, so an exported `g_*` value can never grant cleanup ownership, and
+   the effective-UID and ssh-policy memos start empty, so an exported value
+   can never stand in for `id -u` or a validated policy.
 3. `zxfer_session_initialize()` points `g_cmd_awk` at the awk on the built-in
    secure PATH, installs the EXIT and HUP/INT/QUIT/TERM traps, then runs
    `zxfer_init_session_environment()`: secure PATH, `ZXFER_BACKUP_DIR`,
@@ -178,22 +180,27 @@ physical resolution plus owner/mode checks). Allocators in
 `<prefix>.<counter>` children by redirection or `mkdir`; there is no per-file
 registration or unregistration ceremony for contained children. Runtime
 records the exact root, validated physical parent, and a security record
-(device/inode identity, owner uid, mode 0700) taken right after its own
-`mktemp -d`; whole-root removal requires that provenance, one fresh record
-equal to it (no `id` fork), and the reserved `zxfer.<pid>.*` shape.
+(inode, owner uid, mode 0700) taken right after its own `mktemp -d`;
+whole-root removal requires that provenance, one fresh record equal to it
+(one `ls -ldin`, no `id` fork), and the reserved `zxfer.<pid>.*` shape.
+[../src/zxfer_path_security.sh](../src/zxfer_path_security.sh) reads every
+owner, mode and inode from one `ls -ldin` line (inode, mode string, link
+count, numeric owner: the POSIX fields every supported `ls` prints), checks a
+TMPDIR candidate in one subshell (`cd -P`, `pwd`, then `exec ls`), and asks
+`id -u` at most once per run.
 `zxfer_trap_exit()` in
 [../src/zxfer_session.sh](../src/zxfer_session.sh) removes the whole root only
-after supervised jobs, short-lived cleanup helpers, SSH control sockets, and
-registered path-adjacent staging entries have been handled. Staged contents
-reload through the shared readback helper, which keeps partial payloads out of
-shared `g_*`
-scratch state and preserves exact nonzero readback failures for the caller.
-Registered path-adjacent directories also retain their allocation-time
-device/inode identity. Recursive cleanup requires that identity to remain
-unchanged. The short fallback SSH socket directory, made only when the run
-root's socket path would be too long, is created once per run and registered
-with its device/inode identity like other path-adjacent entries. A same-path
-replacement is never adopted as zxfer-owned state.
+after supervised jobs, short-lived cleanup helpers and SSH control sockets
+have been handled. Staged contents reload through the shared readback helper,
+which keeps partial payloads out of shared `g_*` scratch state and preserves
+exact nonzero readback failures for the caller. The one run-private entry
+outside the root is the SSH transport's short socket directory, made (with a
+random `mktemp -d` name under the default temp root) only when the run root's
+socket path would pass the `sun_path` limit.
+[../src/zxfer_ssh_transport.sh](../src/zxfer_ssh_transport.sh) owns it and
+removes it after the sockets close, without recursion: it unlinks the two
+role sockets and ssh's temporary listener names, then removes the empty
+directory, and it refuses a symlink or a name it did not create.
 
 Not every staging flow belongs in that layer. Modules that intentionally stage
 files beside the final target to preserve same-directory atomic rename
@@ -329,8 +336,10 @@ One accepted capability response is parsed once and checked for framing,
 requested-tool coverage, duplicate records, statuses, and helper-path shape.
 Only then are the OS, zfs status and validated tool records stored in that
 role's slot, keyed by host and requested tool set. Later OS and tool lookups
-for the same role, host and scope load those fields without another probe or
-parse. A failed lookup leaves no parsed fields behind. A tool outside the
+for the same host and scope load those fields from either role's slot
+without another probe or parse: a probe depends only on the host spec and
+the scope, and equal `-O` and `-T` specs ask the same scope (the union of
+both roles'), so that host is probed once. A failed lookup leaves no parsed fields behind. A tool outside the
 host's scope is probed as "zfs TOOL", and a tool without a record gets one
 direct probe. Secure PATH and ssh policy cannot change within a run, so they
 are not part of the key.
@@ -451,7 +460,7 @@ flowchart TD
     D2 --> D3["Run zxfer_init_session_environment()"]
     D3 --> E["Parse flags with zxfer_read_command_line_switches()"]
     E --> F["Validate combinations with zxfer_consistency_check()"]
-    F --> G["When -O or -T is configured: open each role's ssh control master, then probe remote capabilities once per role over it into in-memory state"]
+    F --> G["When -O or -T is configured: open each role's ssh control master, then probe each remote host's capabilities once over it into in-memory state"]
     G --> H["Resolve local and needed remote helper paths with zxfer_init_variables()"]
     H --> I["Enter zxfer_run_zfs_mode_loop()"]
     I --> J["Start one pass in zxfer_run_zfs_mode()"]
@@ -707,8 +716,8 @@ separate owners. `zxfer_ssh_transport.sh` owns the short
 `ssh-<role>.sock` paths under the private temp root (including the fallback for
 long TMPDIR paths), managed options, host-wrapper parsing, and socket cleanup.
 `zxfer_remote_hosts.sh` owns only in-memory capability responses and resolved
-remote helpers, including the per-role slot (host, requested tools, validated
-fields) reused by later lookups. Masters open during startup, before the first remote command; a `-T` spec
+remote helpers, including the per-role slots (host, requested tools, validated
+fields) reused by later lookups of either role. Masters open during startup, before the first remote command; a `-T` spec
 equal to the `-O` spec reuses the origin master. Nothing is shared between
 concurrent zxfer processes, so no socket locks, leases, or capability cache
 files exist to coordinate; session trap cleanup closes each opened master once

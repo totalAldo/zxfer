@@ -141,8 +141,9 @@ matters especially when:
   remain
 - custom `-Z` compression commands or default `zstd` helpers must be resolved
   per host instead of assuming one shared absolute path
-- remote helper capability discovery runs once per origin/target role, host
-  spec and requested optional tool set per invocation (the secure PATH and ssh
+- remote helper capability discovery runs once per host spec and requested
+  optional tool set per invocation, so equal `-O` and `-T` specs share one
+  probe (the secure PATH and ssh
   policy are fixed for the run), held only in memory; no capability-cache
   files are reused across concurrent or later zxfer invocations. Each accepted
   response is parsed once; later OS and helper lookups load the validated

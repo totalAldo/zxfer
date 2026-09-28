@@ -1,7 +1,6 @@
 #!/bin/sh
-# Effective TMPDIR, temp-file, staging-directory and cleanup-PID tests for
-# src/zxfer_runtime.sh. Run by tests/test_zxfer_runtime.sh under the exec
-# fixture.
+# Effective TMPDIR, temp-file and cleanup-PID tests for src/zxfer_runtime.sh.
+# Run by tests/test_zxfer_runtime.sh under the exec fixture.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_get_temp_file_creates_unique_file() {
@@ -191,8 +190,11 @@ test_zxfer_kill_registered_cleanup_pids_only_terminates_registered_pids() {
 }
 
 test_zxfer_cleanup_pid_helpers_ignore_invalid_inputs_in_current_shell() {
-	sleep 30 &
-	tracked_pid=$!
+	# The entry file's helper returns once the child runs its own program, so
+	# the TERM below cannot reach a copy of this shell and its traps.
+	zxfer_runtime_spawn_live_child tracked ||
+		fail "Unable to start the live child."
+	tracked_pid=$g_zxfer_runtime_live_child_pid
 	zxfer_register_cleanup_pid "$tracked_pid" "tracked cleanup helper"
 
 	zxfer_register_cleanup_pid ""
@@ -424,93 +426,6 @@ test_zxfer_try_get_effective_tmpdir_rejects_non_sticky_world_writable_tmpdir() {
 
 	chmod 0700 "$insecure_tmp"
 	TMPDIR="$TEST_TMPDIR"
-}
-
-test_zxfer_create_secure_staging_dir_for_path_returns_failure_when_parent_lookup_fails() {
-	stage_path="$TEST_TMPDIR/create_secure_staging_parent_lookup/backup.meta"
-
-	zxfer_test_capture_subshell "
-		zxfer_get_path_parent_dir() {
-			return 1
-		}
-		zxfer_create_secure_staging_dir_for_path \"$stage_path\" >/dev/null
-	"
-
-	assertEquals "Secure same-directory staging should fail closed when the parent-path lookup fails." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-}
-
-test_zxfer_create_secure_staging_dir_for_path_returns_failure_when_parent_validation_fails() {
-	stage_root="$TEST_TMPDIR/create_secure_staging_parent_validation"
-	stage_path="$stage_root/backup.meta"
-	mkdir -p "$stage_root"
-
-	zxfer_test_capture_subshell "
-		zxfer_validate_temp_root_candidate() {
-			return 1
-		}
-		zxfer_create_secure_staging_dir_for_path \"$stage_path\" >/dev/null
-	"
-
-	assertEquals "Secure same-directory staging should fail closed when the parent directory is not a trusted temp-root candidate." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-}
-
-test_zxfer_create_secure_staging_dir_for_path_uses_unpredictable_mktemp_names() {
-	# Staging parents may be shared sticky directories, so the staged name
-	# must be mktemp-randomized: predictable pid+attempt slots are squat-able
-	# by a local process-table reader.
-	stage_root=$(cd -P "$TEST_TMPDIR" && pwd)/create_secure_staging_random
-	stage_path="$stage_root/backup.meta"
-	mkdir -p "$stage_root"
-
-	zxfer_create_secure_staging_dir_for_path "$stage_path" >/dev/null
-	stage_status=$?
-	stage_dir=$g_zxfer_secure_staging_dir_result
-	zxfer_create_secure_staging_dir_for_path "$stage_path" >/dev/null
-	second_stage_dir=$g_zxfer_secure_staging_dir_result
-
-	case "${stage_dir##*/}" in
-	".zxfer.stage.$$."*)
-		stage_name_randomized=no
-		;;
-	.zxfer.stage.??????)
-		stage_name_randomized=yes
-		;;
-	*)
-		stage_name_randomized=no
-		;;
-	esac
-
-	assertEquals "Secure same-directory staging should succeed under a validated parent." \
-		0 "$stage_status"
-	assertEquals "Secure same-directory staging should use the randomized mktemp template, not pid+attempt slots." \
-		yes "$stage_name_randomized"
-	assertTrue "Secure same-directory staging should create the staged directory." \
-		"[ -d \"$stage_dir\" ]"
-	assertNotEquals "Consecutive staging directories should never reuse a name." \
-		"$stage_dir" "$second_stage_dir"
-}
-
-test_zxfer_create_secure_staging_dir_for_path_registers_and_cleanup_unregisters_error_log_stage_dirs() {
-	log_path="$TEST_TMPDIR/runtime-cleanup.log"
-	zxfer_reset_runtime_artifact_state
-	zxfer_create_secure_staging_dir_for_path "$log_path" "zxfer-error-log" >/dev/null
-	status=$?
-	stage_dir=$g_zxfer_secure_staging_dir_result
-
-	assertEquals "Secure error-log staging should succeed for writable parents." 0 "$status"
-	assertTrue "Secure error-log staging should create the stage directory." \
-		"[ -d \"$stage_dir\" ]"
-	assertContains "Secure error-log staging should register its stage directory for abort cleanup." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$stage_dir"
-
-	zxfer_cleanup_runtime_artifact_path "$stage_dir"
-
-	assertFalse "Runtime artifact cleanup should remove the error-log stage directory." \
-		"[ -e \"$stage_dir\" ]"
-	assertNotContains "Runtime artifact cleanup should unregister the error-log stage directory." \
-		"$g_zxfer_runtime_artifact_cleanup_paths" "$stage_dir"
 }
 
 test_zxfer_try_get_effective_tmpdir_reuses_cached_value_in_current_shell() {

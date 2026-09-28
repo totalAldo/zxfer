@@ -910,7 +910,8 @@ test_remote_target_push_noop_opens_master_first_and_probes_once() {
 # Invariant: with distinct -O and -T host specs each role opens its own master
 # before any remote command and sends every command over its own socket; each
 # master closes once at exit. A -T spec equal to the -O spec shares the origin
-# master, since commands for that spec already use the origin socket.
+# master, since commands for that spec already use the origin socket, and one
+# capability probe, since both roles ask that host the same questions.
 test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 	planning_setup_env
 	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
@@ -948,8 +949,75 @@ test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 	planning_assert_ssh_commands_multiplexed 1
 	assertFalse "one host spec must not open a second master" \
 		"grep -q -- 'ssh-target.sock' '$SSH_LOG'"
+	assertEquals "one host spec must cost exactly one capability probe round trip" \
+		1 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
+}
+
+# Invariant: when a long TMPDIR would push the control-socket path past the
+# sun_path limit, the master's socket lives in a short private directory
+# under the default temp root instead: the socket path, with the suffix ssh
+# adds to its temporary listener, stays under 104 bytes, and the run leaves
+# neither that directory nor its run root behind. Root and other users alike
+# accept the 0700 TMPDIR they made and a root-owned sticky default root.
+test_remote_noop_under_a_long_tmpdir_removes_its_short_socket_directory() {
+	planning_setup_env
+	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write socket-aware mock ssh."
+	SSH_LOG="$CASE_DIR/ssh_long_tmpdir.log"
+	: >"$SSH_LOG"
+	l_long_component="zxfer-long-tmpdir-component-00000000000000000000000000000"
+	l_long_tmpdir="$CASE_DIR/$l_long_component/$l_long_component"
+	mkdir -p "$l_long_tmpdir" || fail "Unable to create the long TMPDIR."
+	chmod 700 "$l_long_tmpdir"
+
+	# Export in a subshell: FreeBSD sh exports a prefix assignment on a
+	# function call only when the name was already exported, and ksh93 not
+	# even then, so zxfer would miss this TMPDIR and keep its sockets in a
+	# short run root under the default temp root.
+	(
+		TMPDIR=$l_long_tmpdir
+		PATH=$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")
+		MOCK_SSH_LOG=$SSH_LOG
+		export TMPDIR PATH MOCK_SSH_LOG
+		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	)
+	l_long_tmpdir_status=$?
+	l_long_socket=$(awk '$1 == "-M" || index($0, " -M -S ") {
+		for (i = 1; i < NF; i++) if ($i == "-S") { print $(i + 1); exit }
+	}' "$SSH_LOG")
+	l_long_socket_dir=${l_long_socket%/*}
+	# ssh binds SOCKET plus a dot and 16 random characters, then renames it.
+	l_long_socket_listener="$l_long_socket.0123456789abcdef"
+	# The default temp roots zxfer may pick, by physical path (/tmp is
+	# /private/tmp on macOS).
+	l_long_socket_parent_is_default=no
+	for l_long_default_root in /dev/shm /run/shm /tmp; do
+		[ -d "$l_long_default_root" ] || continue
+		[ "$(cd -P "$l_long_default_root" && pwd)" != "${l_long_socket_dir%/*}" ] ||
+			l_long_socket_parent_is_default=yes
+	done
+
+	assertEquals "-O no-op under a long TMPDIR must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_long_tmpdir_status"
+	planning_assert_ssh_commands_multiplexed 1
+	assertNotNull "the origin master must name its control socket" \
+		"$l_long_socket"
+	assertTrue "the socket's temporary listener path must fit sun_path: $l_long_socket_listener" \
+		"[ ${#l_long_socket_listener} -lt 104 ]"
+	assertNotContains "the origin socket must not sit under the long TMPDIR" \
+		"$l_long_socket_dir" "$l_long_component"
+	assertContains "the origin socket should sit in a short zxfer.ssh directory" \
+		"${l_long_socket_dir##*/}" "zxfer.ssh."
+	assertEquals "the short socket directory must sit directly under a default temp root: $l_long_socket_dir" \
+		yes "$l_long_socket_parent_is_default"
+	assertFalse "the short socket directory must be gone after the run" \
+		"[ -e '$l_long_socket_dir' ]"
+	assertEquals "the run root under the long TMPDIR must be gone too" \
+		"" "$(ls -A "$l_long_tmpdir")"
+	planning_assert_no_mutations
 }
 
 # Purpose: Run a -T localhost push of STATE_DIR through the fault-injecting
